@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
-import { fireEvent, render } from '@testing-library/react'
-import { BytesOverTime, gapStretches, placeMarkers, splitAtGaps, TimeSeries } from '../src/TimeSeries'
+import { act, fireEvent, render } from '@testing-library/react'
+import { BytesOverTime, gapStretches, placeMarkers, plotExtent, splitAtGaps, TimeSeries } from '../src/TimeSeries'
+import type { Series } from '../src/TimeSeries'
 
 // jsdom has no `PointerEvent`: without one, `fireEvent.pointer*` builds a bare
 // `Event` that drops `clientX`/`button`/`isPrimary`.
@@ -290,13 +291,13 @@ describe('<TimeSeries>', () => {
     const svg = container.querySelector('svg') as SVGSVGElement
     const grip = () => container.querySelector('.dt-ts-grip')
     expect([grip()?.getAttribute('x'), grip()?.getAttribute('width'), grip()?.getAttribute('height')]).toEqual(['56', '164', '12'])
-    // Hovering inside the window below the grip: crosshair (a press there brushes); on the grip: grab.
-    fireEvent.pointerMove(svg, { clientX: 60, clientY: 100 })
+    // Hovering inside the window below the grip, clear of its edges: crosshair (a press there brushes); on the grip: grab.
+    fireEvent.pointerMove(svg, { clientX: 100, clientY: 100 })
     expect(svg.style.cursor).toBe('crosshair')
-    fireEvent.pointerMove(svg, { clientX: 60, clientY: 18 })
+    fireEvent.pointerMove(svg, { clientX: 100, clientY: 18 })
     expect(svg.style.cursor).toBe('grab')
-    // Inside the window, below the grip: a fresh brush from t=0 to t=2.
-    fireEvent.pointerDown(svg, { clientX: 56, clientY: 100, button: 0, isPrimary: true, pointerId: 1 })
+    // Inside the window, below the grip: a fresh brush from t=0 (the nearest point) to t=2.
+    fireEvent.pointerDown(svg, { clientX: 100, clientY: 100, button: 0, isPrimary: true, pointerId: 1 })
     fireEvent.pointerMove(svg, { clientX: 384, clientY: 100 })
     expect(svg.style.cursor).toBe('col-resize')
     expect(grip()).toBeNull()
@@ -313,6 +314,75 @@ describe('<TimeSeries>', () => {
     })
     fireEvent.pointerUp(window, { clientX: 220, pointerId: 2 })
     expect(onBrush.mock.calls).toEqual([[0, 2], [1, 2]])
+  })
+
+  it('onBrush: a press on a window edge moves that edge alone (a finger reaches 22px, a mouse 6px)', () => {
+    const onBrush = vi.fn()
+    const { container } = withSize(() =>
+      render(<TimeSeries series={brushSeries} getX={p => p.t} getY={p => p.y} formatX={x => `t${x}`} window={[0, 1]} onBrush={onBrush} />),
+    )
+    const svg = container.querySelector('svg') as SVGSVGElement
+    const label = () => container.querySelector('.dt-ts-drag-label')?.textContent ?? null
+    expect([...container.querySelectorAll('.dt-ts-handle')].map(h => h.getAttribute('x'))).toEqual(['53', '217'])
+    fireEvent.pointerMove(svg, { clientX: 224, clientY: 100 })
+    expect(svg.style.cursor).toBe('ew-resize')
+    // The end edge (t=1, x=220) dragged to t=2: the start stays at t=0; the label names the snapped end.
+    fireEvent.pointerDown(svg, { clientX: 224, clientY: 100, button: 0, isPrimary: true, pointerId: 1 })
+    fireEvent.pointerMove(svg, { clientX: 384, clientY: 100 })
+    expect(label()).toBe('t2 · 2 steps')
+    fireEvent.pointerUp(window, { clientX: 384, pointerId: 1 })
+    expect(label()).toBeNull()
+    // 20px from the edge: a finger drags the edge (t=1 → t=2); a mouse there brushes fresh from t=1.
+    fireEvent.pointerDown(svg, { clientX: 240, clientY: 100, button: 0, isPrimary: true, pointerId: 2, pointerType: 'touch' })
+    fireEvent.pointerMove(svg, { clientX: 384, clientY: 100, pointerId: 2, pointerType: 'touch' })
+    fireEvent.pointerUp(window, { clientX: 384, pointerId: 2 })
+    fireEvent.pointerDown(svg, { clientX: 240, clientY: 100, button: 0, isPrimary: true, pointerId: 3 })
+    fireEvent.pointerMove(svg, { clientX: 384, clientY: 100 })
+    fireEvent.pointerUp(window, { clientX: 384, pointerId: 3 })
+    expect(onBrush.mock.calls).toEqual([[0, 2], [0, 2], [1, 2]])
+  })
+
+  it('onBrush: with both edges in reach (a narrow window), the first step picks the edge: leftward the start, rightward the end', () => {
+    // x = 0, 1, 2, 100 over 328px: 0 → 56, 1 → 59.3, 2 → 62.6, 100 → 384
+    const dense = [{ key: 'a', points: [0, 1, 2, 100].map(t => ({ t, y: 10 })) }]
+    const onBrush = vi.fn()
+    const { container } = withSize(() =>
+      render(<TimeSeries series={dense} getX={p => p.t} getY={p => p.y} window={[1, 2]} onBrush={onBrush} />),
+    )
+    const svg = container.querySelector('svg') as SVGSVGElement
+    const drag = (id: number, to: number) => {
+      fireEvent.pointerDown(svg, { clientX: 62, clientY: 100, button: 0, isPrimary: true, pointerId: id, pointerType: 'touch' })
+      fireEvent.pointerMove(svg, { clientX: to, clientY: 100, pointerId: id, pointerType: 'touch' })
+      fireEvent.pointerUp(window, { clientX: to, pointerId: id })
+    }
+    drag(1, 56)
+    drag(2, 384)
+    expect(onBrush.mock.calls).toEqual([[0, 2], [1, 100]])
+  })
+
+  it('onBrush: holding a dragged edge still enters fine mode: one point per 28px of travel, a loupe in the label', () => {
+    vi.useFakeTimers()
+    try {
+      const onBrush = vi.fn()
+      const { container } = withSize(() =>
+        render(<TimeSeries series={brushSeries} getX={p => p.t} getY={p => p.y} formatX={x => `t${x}`} window={[0, 1]} onBrush={onBrush} />),
+      )
+      const svg = container.querySelector('svg') as SVGSVGElement
+      const loupe = () => container.querySelector('.dt-ts-loupe')
+      fireEvent.pointerDown(svg, { clientX: 220, clientY: 100, button: 0, isPrimary: true, pointerId: 1 })
+      act(() => { vi.advanceTimersByTime(349) })
+      expect(loupe()).toBeNull()
+      act(() => { vi.advanceTimersByTime(1) })
+      expect(loupe()?.children.length).toBe(7)
+      // 30px right: a coarse drag would stay on t=1 (nearest point to x=250); fine mode steps one point.
+      fireEvent.pointerMove(svg, { clientX: 250, clientY: 100 })
+      expect(container.querySelector('.dt-ts-drag-label')?.firstChild?.textContent).toBe('t2')
+      // The release commits the edge as drawn, not the point under the finger.
+      fireEvent.pointerUp(window, { clientX: 250, pointerId: 1 })
+      expect([onBrush.mock.calls, loupe()]).toEqual([[[0, 2]], null])
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('the tooltip keeps clear of the trace (far side of the crosshair, the half the points miss) and hides while dragging', () => {
@@ -354,6 +424,15 @@ describe('<TimeSeries>', () => {
     fireEvent.pointerDown(svg, { clientX: 390, button: 0, isPrimary: true, pointerId: 1 })
     fireEvent.pointerMove(svg, { clientX: 225 })
     expect(bandOf(container)!.edges).toEqual([[56, '2 3'], [220, '2 3']])
+  })
+
+  it('a window reaching past the plotted span (a zoomed chart) is clipped to it; one wholly outside draws no band', () => {
+    const band = (w: [number, number]) => bandOf(withSize(() => render(<TimeSeries series={brushSeries} getX={p => p.t} getY={p => p.y} window={w} />)).container)
+    expect([band([-5, 1]), band([1, 9]), band([5, 9])]).toEqual([
+      { x: 56, width: 164, fill: 'var(--dt-ts-window, rgba(255,255,255,0.07))', edges: [[56, '2 3'], [220, '2 3']] },
+      { x: 220, width: 164, fill: 'var(--dt-ts-window, rgba(255,255,255,0.07))', edges: [[220, '2 3'], [384, '2 3']] },
+      null,
+    ])
   })
 
   // Mirror the component's own pixel math so expected path `d`s are exact
@@ -650,5 +729,45 @@ describe('markers (vertical notes at an x)', () => {
     expect([lines(inView), labels(inView), yAxis(inView)]).toEqual([[['220', '2', '176']], [['n1', 'scope change']], ['28', '176']])
     const none = draw([{ key: 'late', x: 11, label: 'after' }])
     expect([lines(none), labels(none), yAxis(none)]).toEqual([[], [], ['12', '176']])
+  })
+})
+
+describe('plotExtent', () => {
+  type P = { x: number; y: number }
+  const X = (p: P) => p.x
+  const Y = (p: P) => p.y
+  const pts = (ys: number[]): P[] => ys.map((y, i) => ({ x: i, y }))
+  // Per-root lines with the total beside them, tooltip-only (`plot: false`): the total is ~3.6× the biggest line.
+  const lines: Series<P>[] = [
+    { key: 'a', points: pts([100, 150, 200, 180]) },
+    { key: 'b', points: pts([300, 320, 400, 350]) },
+    { key: 'total', plot: false, points: pts([1400, 1470, 1600, 1530]) },
+  ]
+
+  it('lines, from 0: the drawn lines set the top, never the tooltip-only total', () => {
+    expect(plotExtent(lines, X, Y, 'linear', 'zero')).toEqual({ xMin: 0, xMax: 3, yMin: 0, yMax: 420 })
+  })
+
+  it('lines, fit: the drawn lines’ min..max, padded 5% of their span each side', () => {
+    expect(plotExtent(lines, X, Y, 'linear', 'data')).toEqual({ xMin: 0, xMax: 3, yMin: 85, yMax: 415 })
+  })
+
+  it('lines over a zoomed x-window: only the window’s points (as the chart is handed them) set the range', () => {
+    const win = lines.map(s => ({ ...s, points: s.points.filter(p => p.x >= 2) }))
+    expect(plotExtent(win, X, Y, 'linear', 'zero')).toEqual({ xMin: 2, xMax: 3, yMin: 0, yMax: 420 })
+    expect(plotExtent(win, X, Y, 'linear', 'data')).toEqual({ xMin: 2, xMax: 3, yMin: 169, yMax: 411 })
+  })
+
+  it('stacked, fit: the `fit`-marked total sets the range, the bands below are clipped', () => {
+    const stacked: Series<P>[] = [
+      { key: 'a', points: pts([100, 150]) },
+      { key: 'total', fit: true, points: pts([1000, 1200]) },
+    ]
+    expect(plotExtent(stacked, X, Y, 'linear', 'data')).toEqual({ xMin: 0, xMax: 1, yMin: 990, yMax: 1210 })
+    expect(plotExtent(stacked, X, Y, 'linear', 'zero')).toEqual({ xMin: 0, xMax: 1, yMin: 0, yMax: 1260 })
+  })
+
+  it('a negative (Δ) line reaches below 0 when zero-anchored', () => {
+    expect(plotExtent([{ key: 'd', points: pts([-100, 0, 200]) }], X, Y, 'linear', 'zero')).toEqual({ xMin: 0, xMax: 2, yMin: -105, yMax: 210 })
   })
 })

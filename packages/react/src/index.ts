@@ -5,5 +5,7 @@ export * from '@open-athena/treemap'
 
 // disk-flavored widgets built on the core.
 export { pow10 } from './stats'
-export { BytesOverTime, gapStretches, MARKER_LANE, placeMarkers, splitAtGaps, TimeSeries } from './TimeSeries'
+export { BytesOverTime, gapStretches, MARKER_LANE, placeMarkers, plotExtent, splitAtGaps, TimeSeries, TS_PAD } from './TimeSeries'
+export { XOverview } from './XOverview'
+export type { XOverviewProps } from './XOverview'
 export type { Annotation, Marker, PlacedMarker, Series, TimeSeriesProps } from './TimeSeries'

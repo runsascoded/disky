@@ -13,8 +13,8 @@ export function NonLive({ store, scan }: { store: Store; scan: string | null | u
     enabled: !!scan,
     staleTime: Infinity,
     queryFn: async () => {
-      const r = await fetch(storeUrl(`${store.base}/${scan}/non-live.json`, store))
-      return r.ok ? (await r.json() as { rows: NonLiveRow[] }).rows : null
+      const r = await fetch(storeUrl(`${store.base}/${scan}/non-live.json?optional=1`, store))
+      return r.ok && r.status !== 204 ? (await r.json() as { rows: NonLiveRow[] }).rows : null
     },
   })
   const totals = classTotals(q.data ?? [])

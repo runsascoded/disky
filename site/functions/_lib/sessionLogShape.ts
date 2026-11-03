@@ -34,7 +34,7 @@ export const LIMITS = {
   sessionEvents: 20_000,
   /** Server: one event's serialized size. */
   eventBytes: 4096,
-  /** The switch's latest end: through the UTC day this many days ahead. */
+  /** The switch's latest dated end: through the UTC day this many days ahead (`FOREVER_MS` is the undated one). */
   maxDays: 31,
   /** The switch's end when turned on with no date. */
   defaultDays: 7,
@@ -43,9 +43,22 @@ export const LIMITS = {
 /** Client-side truncation, per field family. */
 export const TRUNC = { label: 60, filter: 200, url: 300, msg: 300, stack: 1500 } as const
 
-/** Kinds (and api statuses) that count as errors in the session summary. */
-export const isErrorEvent = (e: Pick<SlogEvent, 'k'> & { s?: unknown }): boolean =>
-  e.k === 'error' || e.k === 'reject' || e.k === 'console' || (e.k === 'api' && typeof e.s === 'number' && (e.s === 0 || e.s >= 500))
+/** Browser reports that aren't faults: `ResizeObserver loop …` is Chrome saying a resize callback deferred a frame. */
+const BENIGN_ERRORS = [/^ResizeObserver loop /]
+
+/** Whether an error message is one of `BENIGN_ERRORS` (neither logged by the client nor counted by the feed). */
+export const benignError = (msg: unknown): boolean => typeof msg === 'string' && BENIGN_ERRORS.some(r => r.test(msg))
+
+/** A request the page cancelled itself (`err: 'abort'`: its `AbortSignal` fired, e.g. a newer selection superseded it). */
+export const isCancelled = (e: { k?: unknown, s?: unknown, err?: unknown }): boolean => e.k === 'api' && e.s === 0 && e.err === 'abort'
+
+/** A request that failed: no response (other than the page's own cancel) or a 5xx. */
+export const isFailedApi = (e: { k?: unknown, s?: unknown, err?: unknown }): boolean =>
+  e.k === 'api' && typeof e.s === 'number' && (e.s >= 500 || (e.s === 0 && !isCancelled(e)))
+
+/** Kinds (and api statuses) that count as errors in the session summary; a cancelled request is not one. */
+export const isErrorEvent = (e: Pick<SlogEvent, 'k'> & { s?: unknown, err?: unknown }): boolean =>
+  e.k === 'error' || e.k === 'reject' || e.k === 'console' || isFailedApi(e)
 
 const ID = /^[A-Za-z0-9_-]{6,40}$/
 
@@ -59,6 +72,13 @@ export const endOfUtcDay = (now: number, days: number): number => {
 export const defaultUntil = (now: number): number => endOfUtcDay(now, LIMITS.defaultDays)
 /** The latest an admin may set: through the UTC day `LIMITS.maxDays` from now. */
 export const maxUntil = (now: number): number => endOfUtcDay(now, LIMITS.maxDays)
+
+/** The switch's "no end date": stored as this `until_ms` (2100-01-01T00:00Z), not NULL (NULL is off) and not a new
+ *  column, so every reader that only compares `until_ms` with its clock (the endpoint, the client logger, the
+ *  session monitor) needs no change: it never passes. Any stored value at or past it reads as indefinite (a
+ *  hand-written far-future end included). Dated ends stay within `LIMITS.maxDays`, so they never reach it. */
+export const FOREVER_MS = Date.UTC(2100, 0, 1)
+export const isForever = (until: number | null): boolean => until !== null && until >= FOREVER_MS
 
 /** The UTC date (`YYYY-MM-DD`) an exclusive end instant runs through. */
 export const lastDay = (until: number): string => new Date(until - 1).toISOString().slice(0, 10)
@@ -85,10 +105,12 @@ export function switchState(untilMs: number | null, now: number): { until: numbe
 }
 
 /** `GET` / `PUT /api/session-log/switch` (admin): the switch now, who last set it (epoch s), and the bounds a new
- *  `until` must sit in. `/admin` renders it. */
+ *  `until` must sit in. `/admin` renders it. `indefinite`: on with no end date (`until` is then `FOREVER_MS`, or the
+ *  far-future value stored). */
 export interface SwitchState {
   enabled: boolean
   until: number | null
+  indefinite: boolean
   reason: string | null
   who: string | null
   ts: number | null
@@ -141,5 +163,73 @@ export interface SessionRow {
   received_ts: number
 }
 
+/** A position in the session list's order (`last_ms` desc, then `sid`): a row's `last_ms` and `sid`. */
+export interface Cursor { lastMs: number; sid: string }
+
+/** A cursor on the wire and in the page URL: `<last_ms>.<sid>` (sids never hold a `.`). */
+export const fmtCursor = (r: Pick<SessionRow, 'last_ms' | 'sid'>): string => `${r.last_ms}.${r.sid}`
+export function parseCursor(s: string): Cursor | null {
+  const m = /^(\d{1,16})\.([A-Za-z0-9_-]{6,40})$/.exec(s)
+  return m ? { lastMs: Number(m[1]), sid: m[2] } : null
+}
+
+/** Sessions per page of `/admin/sessions` (the API's default `limit`; at most `SESSIONS_MAX_LIMIT`). */
+export const SESSIONS_PAGE = 50
+export const SESSIONS_MAX_LIMIT = 500
+
+/** `GET /api/session-log/sessions`: one page, most recently active first. `total` = rows matching the filters,
+ *  `offset` = how many of them precede this page; `prev` / `next` are the cursors (`before=` / `after=`) of the
+ *  adjacent pages, null at either end. */
+export interface SessionPage {
+  sessions: SessionRow[]
+  total: number
+  offset: number
+  prev: string | null
+  next: string | null
+}
+
 /** A stored event with where it came from (the page load and batch), as the session view gets it. */
 export type StoredEvent = SlogEvent & { pid: string; seq: number }
+
+const cut = (s: string, n: number): string => s.length > n ? `${s.slice(0, n - 1)}…` : s
+
+const KIND_KEYS = new Set(['kind', 'op', 'action', 'mode'])
+
+/** A JSON request body as counts and kinds only: per top-level key, an array's length, a short `kind`-like
+ *  string, else the value's type. Not JSON (or not an object) → its type and length. */
+export function bodySummary(body: unknown): Record<string, string | number> | null {
+  if (body == null) return null
+  if (typeof body !== 'string') return { type: Object.prototype.toString.call(body).slice(8, -1) }
+  let j: unknown
+  try { j = JSON.parse(body) } catch { return { type: 'text', len: body.length } }
+  if (!j || typeof j !== 'object' || Array.isArray(j)) return Array.isArray(j) ? { type: 'array', len: j.length } : { type: typeof j }
+  const out: Record<string, string | number> = {}
+  for (const [k, v] of Object.entries(j as Record<string, unknown>).slice(0, 12)) {
+    out[cut(k, 30)] = Array.isArray(v) ? v.length : KIND_KEYS.has(k) && typeof v === 'string' ? cut(v, 30) : v === null ? 'null' : typeof v
+  }
+  return out
+}
+
+const str = (v: unknown): string => (v === undefined || v === null ? '' : String(v))
+
+/** One event as a line of text. */
+export function summarize(e: SlogEvent): string {
+  switch (e.k) {
+    case 'start': return `page load ${str(e.u)}${e.ref ? ` (from ${str(e.ref)})` : ''}`
+    case 'nav': return str(e.u)
+    case 'click': return [e.n && `[${str(e.n)}]`, str(e.l), e.x !== undefined && (e.x ? '☑' : '☐')].filter(Boolean).join(' ')
+    case 'filter': return `${str(e.n)} = “${str(e.q)}”`
+    case 'pick': return `${str(e.n)} → ${str(e.v)}`
+    case 'prefetch': return `${str(e.w)} ${str(e.p) || '(root)'}${e.d ? ` @ ${str(e.d)}` : ''}`
+    case 'api': {
+      const b = e.b && typeof e.b === 'object' ? ` {${Object.entries(e.b).map(([k, v]) => `${k}: ${v}`).join(', ')}}` : ''
+      return `${str(e.m) || 'GET'} ${str(e.u)}${b} → ${isCancelled(e) ? 'cancelled' : e.s === 0 ? 'failed' : str(e.s)} · ${str(e.ms)}ms${e.c ? ` · ${str(e.c)}` : ''}${e.qe ? ` · ${str(e.qe)}` : ''}${e.err && !isCancelled(e) ? ` · ${str(e.err)}` : ''}`
+    }
+    case 'error': return `${str(e.msg)}${e.src ? ` @ ${str(e.src)}` : ''}`
+    case 'reject': return `unhandled rejection: ${str(e.msg)}`
+    case 'console': return `console.error: ${str(e.msg)}`
+    case 'viewport': return `${str(e.w)}×${str(e.h)} @${str(e.dpr)}x`
+    case 'vis': return `tab ${str(e.s)}`
+    case 'dropped': return `${str(e.n)} events dropped (cap)`
+  }
+}

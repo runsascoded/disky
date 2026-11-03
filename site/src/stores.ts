@@ -143,7 +143,7 @@ export interface Store {
 
 /** The registry: one module per store under `stores/`, each `export default`ing
  * a `Store`. `cloud` carries r2's; a deployment branch adds its own, so the
- * shared base carries no deployment's entry (specs/oa-decoupling.md step 6). */
+ * shared base carries no deployment's entry (specs/done/oa-decoupling.md step 6). */
 const MODULES = Object.values(import.meta.glob<{ default: Store }>('./stores/*.{ts,tsx}', { eager: true })).map(m => m.default)
 
 const REGISTRY: Store[] = MODULES
@@ -286,8 +286,11 @@ export function storeUrl(url: string, store: Store, primary: Store = DEFAULT_STO
 
 /** A `fetch` bound to `store`: the global one for the primary (byte-identical
  * requests), else one that rewrites each URL with `storeUrl`. Also what a
- * file-tree `HttpStore` takes as its `fetch` option. */
-export function storeFetch(store: Store, primary: Store = DEFAULT_STORE, impl: typeof fetch = fetch): typeof fetch {
+ * file-tree `HttpStore` takes as its `fetch` option. Without `impl`, the global
+ * is looked up on each call, not when this is built: a wrapper installed later
+ * (the session logger, loaded after the first render) sees every request. */
+export function storeFetch(store: Store, primary: Store = DEFAULT_STORE, impl?: typeof fetch): typeof fetch {
+  impl ??= (input, init) => globalThis.fetch(input, init)
   if (!storeQuery(store, primary)) return impl
   return (input, init) => impl(
     typeof input === 'string' ? storeUrl(input, store, primary)

@@ -10,12 +10,15 @@
   or its whole history under a full header (`kind` 0) when an existing child enters or leaves the kept set, or the
   directory just became heavy. A reader walks the tiers newest first and stops after a full header.
 - **Heavy**: `S(c, dir)`, the stored root rows under `dir` summed over the tiers, above R; sticky.
+- **Fresh**: per class canonical (and short literal), the run's roots new to the stack (`<kind>-fresh.parquet`): the fleet
+  root's root rows are the base's plus these, never the runs' stored rows (their close records restate earlier roots).
 """
 from __future__ import annotations
 
 import json
 import shutil
 from collections import Counter, OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from time import monotonic
 
@@ -24,10 +27,11 @@ import pyarrow.parquet as pq
 from pyarrow.compute import and_, greater_equal, less
 from click import Choice, group, option
 
+from . import heartbeat
 from . import static_names as sn
 from . import static_roots as sr
 from .checkpoint import Checkpoint, code_version, Parts
-from .static_names import CODEC, OPEN, PREFIX, _batches, err, q
+from .static_names import CODEC, OPEN, PREFIX, U64, Progress, _batches, err, q
 from .static_profile import data_bucket
 from .resource_monitor import monitor_resources, resource_stage
 
@@ -37,12 +41,19 @@ KINDS = ("long", "short")
 FILE_ROWS = 50_000_000
 #: A run's row groups: smaller than the base's, since the reader's dispatch bound sums 2·`rg` over the tiers.
 RUN_RG = 2048
+#: Match PyArrow's former whole-table writer while bounding its Arrow work to fixed batches and row groups.
+STATE_RG = 1 << 20
+#: DuckDB's whole-table conversion used decimal 1M batches; preserve their boundaries for identical Parquet pages.
+STATE_BATCH_ROWS = 1_000_000
 #: Decoded row groups kept per group file by the builder's reads.
 GROUP_CACHE = 2048
 #: Index spans (`CachedGroupFile._span`: a run of index row groups' entries and key tuples) kept per group file.
 SPAN_CACHE = 512
 #: `dr` rows (at depth ≥ 2) per part of the aggregations over their ancestors (`_by_parts`).
 EXPLODE_PART_ROWS = 1 << 23
+#: Touched directories per part of the newly-heavy sums' join to a prior tier's `dcount` (by `hash(dir)`): the join's
+#: hash table holds a part of each side (cw's 10-24T1202, 203M touched pairs: ~70 GiB of temp per tier in one pass).
+NH_PART_ROWS = 1 << 24
 #: Newly heavy directories' estimated root rows (summed over a chunk's directories, so nested ones count each time) built
 #: at once (`newly_heavy_rollups`): their prior roots read under one prefetch plan, combined and rolled up in one statement each.
 NEWLY_HEAVY_CHUNK_ROWS = 1 << 23
@@ -51,6 +62,31 @@ SETTLE_CHUNK_ROWS = 1 << 22
 #: Concurrent ranged reads when the builder prefetches the groups its loops will read (`build -j`); ≤ 1: no prefetch, the
 #: loops fetch each miss in turn.
 FETCH_THREADS = 64
+#: Files `write_kind` writes at once from sorted chunks, each in a process of its own (each a pure function of its `q`
+#: range; the same bytes at any count): the carry was write-bound after its reads were (gcs's 10-22 L3 carry: long 41–53
+#: min, short 18), and a writer is Python per 8,192-row group (~6.7 M groups for a compaction's 55 B roots), so threads
+#: share one GIL. None: every core (`write_jobs`).
+WRITE_JOBS: int | None = None
+#: Files `write_kind` sorts and writes at once from tables (each its own cursor's `ORDER BY` over its `q` range).
+SORT_WRITERS = 4
+#: Sorted-chunk files `_sorted_chunks` counts at a time (each its own cursor; DuckDB releases the GIL).
+COUNT_THREADS = 16
+
+
+def write_jobs() -> int:
+    """`WRITE_JOBS`, or every core this process may run on."""
+    import os
+
+    if WRITE_JOBS is not None:
+        return WRITE_JOBS
+    try:
+        return len(os.sched_getaffinity(0))
+    except AttributeError:
+        return os.cpu_count() or 1
+
+
+def _writer_init() -> None:
+    pa.set_cpu_count(1)
 #: Prefetched raw bytes held at most, as a fraction of the machine's RAM (`build -C` overrides): beyond it, the loops run in
 #: windows (each prefetched in turn) and the byte cache evicts least recently used.
 CACHE_RAM_FRACTION = 1 / 8
@@ -58,10 +94,36 @@ MAX_CACHE_BYTES = 2 << 30
 #: Prefetch coalescing: needed groups of one file at most this far apart are one request, of at most `COALESCE_SPAN` bytes.
 COALESCE_GAP = 64 << 10
 COALESCE_SPAN = 8 << 20
+#: A drill tier's `meta.json` `dcount` when its `dcount` and newly-heavy sums count only the roots new to the stack (an
+#: existing member's opens, every root of a new member: `day_rollups`' `fresh`); a merged tier's only when every input's
+#: did. A tier without it (built before) counts the closes too: conservative for its readers, but not what a compaction's
+#: incremental measurement sums (`static_measure`).
+DCOUNT_FRESH = "fresh"
+#: A drill's long members' root-set digests (specs/static-incremental-compaction.md, step 3: a compaction's classes from
+#: them, `static_compact`), `drill/digests-long.parquet`. A generation's (`static_local.finish_drill`): each member's
+#: absolute `(q, n, h1, h2)` (`DIGEST_SCHEMA`: its roots' count and two hash sums mod 2⁶⁴, `static_roots.ROW_HASH`, as the
+#: build's digest pass sums them). A run's (`day_digests`; `merge_tiers` sums its inputs'): per class canonical at the run,
+#: the change its roots make to that class's digest (`DIGEST_DELTA_SCHEMA`, the sums mod 2⁶⁴), with `meta.json` `digests:
+#: delta` (`DIGESTS_DELTA`); a merged tier's only when every input's has it.
+DIGESTS = "digests-long.parquet"
+DIGESTS_DELTA = "delta"
+#: A run's roots new to the stack per class canonical at the run (long) or literal (short), `<kind>-fresh.parquet`
+#: (`fresh_file`, `FRESH_SCHEMA`, `n > 0` only; `write_fresh`, summed by `merge_fresh`): an existing member's opens, every
+#: root of a new member (`day_rollups`' `fresh`, over the whole member). The fleet root's root rows over base ⊕ runs are
+#: the base's plus these (`TieredDrill.root_rows`, `staticDrill.ts` `Drill.bounded`): a run's stored rows count its close
+#: records too, each a root an earlier tier holds. `meta.json` `fresh: rows` (`FRESH_ROWS`) marks a tier that has them; a
+#: merged tier's only when every input's did.
+FRESH_ROWS = "rows"
+DIGEST_SCHEMA = pa.schema([pa.field("q", pa.string(), nullable=False), pa.field("n", pa.int64(), nullable=False),
+                           pa.field("h1", pa.uint64(), nullable=False), pa.field("h2", pa.uint64(), nullable=False)])
+DIGEST_DELTA_SCHEMA = pa.schema([pa.field("q", pa.string(), nullable=False), pa.field("dn", pa.int64(), nullable=False),
+                                 pa.field("d1", pa.uint64(), nullable=False), pa.field("d2", pa.uint64(), nullable=False)])
+FRESH_SCHEMA = pa.schema([pa.field("q", pa.string(), nullable=False), pa.field("n", pa.int64(), nullable=False)])
 DCOUNT_SCHEMA = pa.schema([pa.field("q", pa.string(), nullable=False), pa.field("dir", pa.string(), nullable=False),
                            pa.field("rows", pa.int64(), nullable=False)])
 ALIAS_SCHEMA = pa.schema([pa.field("q", pa.string(), nullable=False), pa.field("canonical", pa.string(), nullable=False)])
 ROLLUP_COLS = "q VARCHAR, dir VARCHAR, kind TINYINT, child VARCHAR, vf BIGINT, b BIGINT, o BIGINT"
+ROLLUP_COLS_NAMES = [c.split()[0] for c in ROLLUP_COLS.split(", ")]
 #: `ROLLUP_COLS` as Arrow: a checkpoint's parts of rollup rows (settling's, the newly heavy directories').
 ROLLUP_ARROW = pa.schema([("q", pa.string()), ("dir", pa.string()), ("kind", pa.int8()), ("child", pa.string()), ("vf", pa.int64()),
                           ("b", pa.int64()), ("o", pa.int64())])
@@ -330,6 +392,7 @@ class Tier:
         self._aliases: dict[str, str] | None = None
         self._gf: dict[tuple[str, str], CachedGroupFile | None] = {}
         self._sizes: dict[str, int] = {}
+        self._fresh: dict[str, dict[str, int]] = {}
 
     # storage
     def read(self, rel: str) -> bytes:
@@ -402,6 +465,15 @@ class Tier:
     def dcount(self, kind: str) -> str | None:
         rel = f"state/dcount-{kind}.parquet"
         return self.local(rel) if self.exists(rel) else None
+
+    def fresh(self, kind: str) -> dict[str, int] | None:
+        """`kind`'s roots new to the stack per `q` (`fresh_file`), or None: a tier without them (`meta.json` `fresh`)."""
+        if self.meta.get("fresh") != FRESH_ROWS:
+            return None
+        if kind not in self._fresh:
+            t = self.table(fresh_file(kind))
+            self._fresh[kind] = dict(zip(t.column("q").to_pylist(), t.column("n").to_pylist()))
+        return self._fresh[kind]
 
 
 class GcsTier(Tier):
@@ -760,6 +832,23 @@ class TieredDrill:
         out.update(source="rollup", io=dict(io), rows=n, **sr.rollup_view(header, cells, dates))
         return out
 
+    def root_rows(self, term: str) -> int:
+        """`term`'s root rows at the fleet root, every date (`staticDrill.ts` `Drill.bounded`'s `rows` there, the heavy
+        literal's `matchCount.n` with no drilldown): the base's rows under its canonical, plus each run's roots new to the
+        stack (`Tier.fresh`), so exactly the compacted generation's count. A run without them (built before) adds its stored
+        rows, its close records too: an upper bound."""
+        t = term.lower()
+        n = 0
+        for i, tier in enumerate(self.tiers):
+            c = tier.canon(t, self.kind)
+            fresh = tier.fresh(self.kind) if i else None
+            if fresh is not None:
+                n += fresh.get(c, 0)
+                continue
+            gf = tier.group_file(self.kind, "roots")
+            n += len(gf.rows_in((c, ""), (c, "\U0010ffff"))) if gf is not None else 0
+        return n
+
 
 # ── Series: events ↔ running cells ─────────────────────────────────────────
 
@@ -1013,6 +1102,13 @@ def day_rollups(con, prior: list[Tier], kind: str, D: int, *, R: int, K: int, fl
     parts = _explode_parts(con)
     _by_parts(con, "tdir", parts, lambda w: f"""SELECT q, dir, any_value(k) AS k, count(*)::BIGINT AS rows,
             count(*) FILTER (WHERE vf = {D})::BIGINT AS opens FROM ({_explode(w)}) GROUP BY q, dir""")
+    # the roots new to the stack under each directory: an existing member's opens (a close record restates a root an
+    # earlier tier holds), every root of a new member (its whole history is new). What heaviness (`S`) and `dcount`
+    # sum, so S is the exact root count, not one inflated by the closes (specs/static-incremental-compaction.md)
+    con.execute("""CREATE OR REPLACE TABLE tdir AS SELECT *, CASE WHEN q IN (SELECT q FROM newq) THEN rows ELSE opens END AS fresh
+        FROM tdir""")
+    tdir_rows = con.execute("SELECT count(*) FROM tdir").fetchone()[0]
+    log(f"drill {kind}: {tdir_rows:,} touched directories in {monotonic() - t0:.0f}s")
     # the prior state of the touched directories: each tier's rows for the member's canonical there, from the newest full header on
     con.execute(f"CREATE OR REPLACE TABLE ru (tier INTEGER, {ROLLUP_COLS})")
     for i, t in enumerate(prior):
@@ -1099,17 +1195,51 @@ def day_rollups(con, prior: list[Tier], kind: str, D: int, *, R: int, K: int, fl
     release_heap()
     if doc["affected"]:
         log(f"drill {kind}: {doc['affected']:,} directories settled one by one, {doc['restated']:,} restated in {monotonic() - t1:.0f}s")
-    # directories that become heavy: S = base rows (measured, else counted) + the prior runs' + today's
-    con.execute("CREATE OR REPLACE TABLE dc (tier INTEGER, q VARCHAR, dir VARCHAR, rows BIGINT)")
+    # directories that become heavy: S = base rows (measured, else counted) + the prior runs' + today's. The prior runs'
+    # counts of only the touched (class, dir)s, tier by tier: each tier's `dcount` file read in place, joined to the
+    # touched pairs through that tier's canonical (`cmap`), only matches kept. Loading every tier's `dcount` first (a
+    # table of all of them: 17 tiers on cw), joining through `cmap` before the touched pairs (a class split multiplies
+    # the rows) or a (tier × touched pair) table each ran cw's 10-24T1202 out of 663 GiB of temp.
+    heartbeat.set_stage(f"drill/rollups/{kind}: newly heavy")
+    t2 = monotonic()
+    con.execute("CREATE OR REPLACE TABLE nh_t AS SELECT t.q, t.dir, t.k, t.fresh FROM tdir AS t ANTI JOIN hdr USING (q, dir)")
+    touched = con.execute("SELECT count(*) FROM nh_t").fetchone()[0]
+    log(f"drill {kind}: newly heavy: {tdir_rows:,} touched directories, {touched:,} without a header ({monotonic() - t2:.0f}s)")
+    con.execute("CREATE OR REPLACE TABLE nh_m (q VARCHAR, dir VARCHAR, rows BIGINT)")
+    parts = max(1, -(-touched // NH_PART_ROWS))
+    from .static_anchors import _scratch
+
     for i, t in enumerate(prior):
-        f = t.dcount(kind)
-        if f:
-            con.execute(f"INSERT INTO dc SELECT {i}, q, dir, rows FROM read_parquet({q(f)})")
-    con.execute("""CREATE OR REPLACE TABLE nh AS SELECT t.q, t.dir, t.k, t.rows AS today,
+        if not (f := t.dcount(kind)):
+            continue
+        t3, n = monotonic(), 0
+        # the tier's `dcount` (often on a bucket mount) read once, cut into the parts on the work disk
+        split = _scratch(con, "nh-dcount-") if parts > 1 else None
+        if split is not None:
+            heartbeat.set_stage(f"drill/rollups/{kind}: newly heavy, tier {i + 1}/{len(prior)}'s counts, split")
+            con.execute(f"""COPY (SELECT q, dir, rows, hash(dir) % {parts} AS part FROM read_parquet({q(f)}))
+                TO {q(str(split))} (FORMAT parquet, PARTITION_BY (part))""")
+        for p in range(parts):
+            heartbeat.set_stage(f"drill/rollups/{kind}: newly heavy, tier {i + 1}/{len(prior)}'s counts, part {p + 1}/{parts}")
+            t_sql = f"SELECT q, dir FROM nh_t WHERE hash(dir) % {parts} = {p}" if split is not None else "SELECT q, dir FROM nh_t"
+            if split is None:
+                d_sql = f"SELECT q, dir, rows FROM read_parquet({q(f)})"
+            elif (split / f"part={p}").is_dir():
+                d_sql = f"SELECT q, dir, rows FROM read_parquet({q(str(split / f'part={p}' / '*.parquet'))}, hive_partitioning = false)"
+            else:
+                continue
+            n += con.execute(f"""INSERT INTO nh_m SELECT t.q, t.dir, d.rows FROM ({t_sql}) AS t
+                JOIN cmap AS m ON m.tier = {i} AND m.c = t.q JOIN ({d_sql}) AS d ON d.q = m.ci AND d.dir = t.dir""").fetchone()[0]
+        if split is not None:
+            shutil.rmtree(split)
+        log(f"drill {kind}: newly heavy: tier {i + 1}/{len(prior)}: {n:,} prior-run counts ({parts} parts) in {monotonic() - t3:.0f}s")
+    con.execute("""CREATE OR REPLACE TABLE nh AS SELECT t.q, t.dir, t.k, t.fresh AS today,
             CASE WHEN t.q IN (SELECT q FROM newq) THEN 0 ELSE m.rows END AS base, coalesce(r.rows, 0) AS runs
-        FROM tdir AS t ANTI JOIN hdr USING (q, dir) LEFT JOIN meas AS m USING (q, dir)
-        LEFT JOIN (SELECT m.c AS q, d.dir, sum(d.rows)::BIGINT AS rows FROM dc AS d JOIN cmap AS m ON d.tier = m.tier AND d.q = m.ci GROUP BY ALL) AS r
-            USING (q, dir)""")
+        FROM nh_t AS t LEFT JOIN meas AS m USING (q, dir)
+        LEFT JOIN (SELECT q, dir, sum(rows)::BIGINT AS rows FROM nh_m GROUP BY ALL) AS r USING (q, dir)""")
+    for tb in ("nh_t", "nh_m"):
+        con.execute(f"DROP TABLE {tb}")
+    log(f"drill {kind}: newly heavy: the sums in {monotonic() - t2:.0f}s")
     unknown = con.execute(f"SELECT q, dir FROM nh WHERE base IS NULL AND {floor - 1} + runs + today > {R} ORDER BY q, dir").fetchall()
     if ck and ck.done("counts"):
         ck.load(con, "counts")
@@ -1130,8 +1260,8 @@ def day_rollups(con, prior: list[Tier], kind: str, D: int, *, R: int, K: int, fl
         count = newly_heavy_rollups(con, reads, kind, K, log=log, ck=ck)
         log(f"drill {kind}: {doc['heavy_new']:,} newly heavy, {count:,} earlier tier roots inserted in {monotonic() - t0:.0f}s ({reads.io()})")
     step(f"drill/newly-heavy/{kind}", t2, directories=doc["heavy_new"], prior_roots=count)
-    con.execute("CREATE OR REPLACE TABLE dcnt AS SELECT q, dir, rows FROM tdir ANTI JOIN hdr USING (q, dir) ANTI JOIN newh USING (q, dir)")
-    for t in ("tdir", "stf", "hdr", "kc", "rc", "tch", "nk", "nkc", "pr", "kt", "cand", "aff", "joins", "dc", "nh", "bx", "newh", "cmap"):
+    con.execute("CREATE OR REPLACE TABLE dcnt AS SELECT q, dir, fresh AS rows FROM tdir ANTI JOIN hdr USING (q, dir) ANTI JOIN newh USING (q, dir) WHERE fresh > 0")
+    for t in ("tdir", "stf", "hdr", "kc", "rc", "tch", "nk", "nkc", "pr", "kt", "cand", "aff", "joins", "nh", "bx", "newh", "cmap"):
         con.execute(f"DROP TABLE IF EXISTS {t}")
     doc["rollup_rows"] = con.execute("SELECT count(*) FROM rup").fetchone()[0]
     doc["dcount_rows"] = con.execute("SELECT count(*) FROM dcnt").fetchone()[0]
@@ -1638,8 +1768,13 @@ def _restate(ctx, c, d, D, keep, ks, ot, leaving, b_rows, o_new, reads) -> list[
 
 def _cut(con, table: str, file_rows: int) -> list[tuple[str | None, str | None]]:
     """`table`'s `q` ranges `[lo, hi)` of about `file_rows` rows each, cut at `q` boundaries."""
+    return _cut_counts(con.execute(f"SELECT q, count(*) FROM {table} GROUP BY q ORDER BY q").fetchall(), file_rows)
+
+
+def _cut_counts(counts, file_rows: int) -> list[tuple[str | None, str | None]]:
+    """`_cut` over `counts` `(q, rows)` in `q` order."""
     bounds, n = [None], 0
-    for qq, c in con.execute(f"SELECT q, count(*) FROM {table} GROUP BY q ORDER BY q").fetchall():
+    for qq, c in counts:
         if n >= file_rows:
             bounds.append(qq)
             n = 0
@@ -1649,21 +1784,142 @@ def _cut(con, table: str, file_rows: int) -> list[tuple[str | None, str | None]]
     return list(zip(bounds, [*bounds[1:], None]))
 
 
-def write_kind(con, out: Path, kind: str, roots: str = "dr", rollups: str = "rup", file_rows: int = FILE_ROWS, rg: int | None = None) -> dict:
+def _sorted_chunks(con, files: list[Path], threads: int = COUNT_THREADS) -> tuple[list[tuple[str, int]], list[tuple[Path, str, str]]]:
+    """Files each sorted, `q`-disjoint and in `q` order (`merge_tiers`' folded ranges): their `(q, rows)` in `q` order, and
+    each file with its first and last `q`. Counted `threads` files at a time (a compaction's are ~13 K measured ranges)."""
+    def one(f: Path) -> list:
+        cur = con.cursor()
+        try:
+            return cur.execute(f"SELECT q, count(*) FROM read_parquet({q(str(f))}) GROUP BY q ORDER BY q").fetchall()
+        finally:
+            cur.close()
+
+    if threads > 1 and len(files) > 1:
+        with ThreadPoolExecutor(min(threads, len(files))) as ex:
+            got_all = list(ex.map(one, files))
+    else:
+        got_all = [con.execute(f"SELECT q, count(*) FROM read_parquet({q(str(f))}) GROUP BY q ORDER BY q").fetchall() for f in files]
+    counts, spans = [], []
+    for f, got in zip(files, got_all):
+        if got:
+            counts += got
+            spans.append((f, got[0][0], got[-1][0]))
+    return counts, spans
+
+
+def _chunk_batches(spans: list[tuple[Path, str, str]], names: list[str], lo: str | None, hi: str | None, size: int = 1 << 17):
+    """The rows in `q` range `[lo, hi)` of `spans` (`_sorted_chunks`'), in file order: already in order, so read, not sorted."""
+    for f, first, last in spans:
+        if (hi is not None and first >= hi) or (lo is not None and last < lo):
+            continue
+        whole = (lo is None or first >= lo) and (hi is None or last < hi)
+        for b in pq.ParquetFile(f).iter_batches(batch_size=size, columns=names):
+            b = pa.RecordBatch.from_arrays([b.column(c) for c in names], names=names)
+            if not whole:
+                qc = b.column("q")
+                mask = (and_(greater_equal(qc, lo), less(qc, hi)) if lo is not None and hi is not None
+                        else greater_equal(qc, lo) if lo is not None else less(qc, hi))
+                b = b.filter(mask)
+            if b.num_rows:
+                yield b
+
+
+def _overlapping(spans: list[tuple[Path, str, str]], lo: str | None, hi: str | None) -> list[tuple[Path, str, str]]:
+    """The `spans` holding rows in `q` range `[lo, hi)` (what `_chunk_batches` reads; the rest it skips)."""
+    return [s for s in spans if not ((hi is not None and s[1] >= hi) or (lo is not None and s[2] < lo))]
+
+
+def _write_chunk_file(spans, schema: pa.Schema, lo: str | None, hi: str | None, out: Path, name: str, key: str, dic: list[str],
+                      rg: int | None) -> tuple[int, pa.Table, int]:
+    """One `write_kind` file from sorted chunks: rows, its group index, bytes."""
+    n, t = sr.write_indexed(_chunk_batches(spans, schema.names, lo, hi), out / name, schema, key, name, dic, rg)
+    return n, t, (out / name).stat().st_size
+
+
+def _cut_rows(counts, cuts: list[tuple[str | None, str | None]]) -> list[int]:
+    """Each cut's rows, from `counts` `(q, rows)` in `q` order (`_cut_counts`' cuts of them)."""
+    rows = [0] * len(cuts)
+    i = 0
+    for qq, c in counts:
+        while cuts[i][1] is not None and qq >= cuts[i][1]:
+            i += 1
+        rows[i] += c
+    return rows
+
+
+def write_kind(con, out: Path, kind: str, roots: str = "dr", rollups: str = "rup", file_rows: int | None = None, rg: int | None = None,
+               chunks: dict[str, list[Path]] | None = None, jobs: int | None = None, fanout=None) -> dict:
     """Tables `roots` (`ROOT_COLS`) and `rollups` (`ROLLUP_COLS`) → `out/<kind>/{roots,rollups}/r####.parquet` (sorted, `ROOT_RG`-row
-    groups, files cut at `q` boundaries) and the two-level indexes `out/<kind>-{roots,rollups}-index{,.top}.parquet`."""
+    groups, files cut at `q` boundaries) and the two-level indexes `out/<kind>-{roots,rollups}-index{,.top}.parquet`.
+    `chunks` `{sub: files}`: a sub's rows as files already in its order, `q`-disjoint and in `q` order (`merge_tiers`' folded
+    ranges), streamed in turn instead of sorted again (gcs's 10-22 L3 carry: 69 of its drill's 185 min in this sort), `jobs`
+    files at a time (default `write_jobs()`), each in a spawned process reading only its own `q` range of the chunks; the
+    same bytes (the row-group size is resolved here: a process sees the modules' defaults). `fanout`
+    (`static_fanout.WriteFanout`): the roots' files dealt by rows, those dealt away written by its helpers from the
+    chunks' checkpoint copies and collected here; the same bytes."""
+    from concurrent.futures import ProcessPoolExecutor
+    from multiprocessing import get_context
+
+    from .static_append import _Inline
+
     doc = {}
+    rg = rg or sr.ROOT_RG
+    file_rows = file_rows or FILE_ROWS
+    jobs = write_jobs() if jobs is None else jobs
     for sub, table, order, schema, key, dic in (("roots", roots, "q, path, usr, vf", sr.ROOT_SCHEMA, "path", ["q", "usr"]),
                                                ("rollups", rollups, "q, dir, kind, child, vf", sr.ROLLUP_SCHEMA, "dir", ["q", "dir", "child"])):
         cols = ", ".join(schema.names)
         idx, rows, nbytes = [], 0, 0
-        for i, (lo, hi) in enumerate(_cut(con, table, file_rows)):
-            where = " AND ".join(x for x in (f"q >= {q(lo)}" if lo is not None else "", f"q < {q(hi)}" if hi is not None else "") if x) or "true"
-            name = f"{kind}/{sub}/r{i:04d}.parquet"
-            n, t = sr.write_indexed(_batches(con, f"SELECT {cols} FROM {table} WHERE {where} ORDER BY {order}"), out / name, schema, key, name, dic, rg)
-            rows += n
-            nbytes += (out / name).stat().st_size
-            idx.append(t)
+        heartbeat.set_stage(f"drill/write/{kind}/{sub}: cut")
+        if chunks is not None and sub in chunks:
+            counts, spans = _sorted_chunks(con, chunks[sub])
+            cuts = _cut_counts(counts, file_rows)
+        else:
+            cuts = _cut(con, table, file_rows)
+        prog = heartbeat.Progress(f"drill/write/{kind}/{sub}", len(cuts), unit="files")
+        names = [f"{kind}/{sub}/r{i:04d}.parquet" for i in range(len(cuts))]
+        if chunks is not None and sub in chunks:
+            away: set[int] = set()
+            if fanout is not None and sub == "roots" and cuts:
+                per = _cut_rows(counts, cuts)
+                away = fanout.start(kind, [(name, lo, hi, _overlapping(spans, lo, hi), n) for (lo, hi), name, n in zip(cuts, names, per)], rg=rg)
+                # the plan's stage would otherwise name this VM's files' writing
+                heartbeat.set_stage(prog.label)
+            here = [i for i in range(len(cuts)) if i not in away]
+            got: dict[int, tuple] = {}
+            procs = max(1, min(jobs, len(here)))
+            pool = _Inline() if procs == 1 else ProcessPoolExecutor(procs, mp_context=get_context("spawn"), initializer=_writer_init)
+            with pool:
+                futs = {i: pool.submit(_write_chunk_file, _overlapping(spans, *cuts[i]), schema, *cuts[i], out, names[i], key, dic, rg) for i in here}
+                for i, f in futs.items():
+                    got[i] = f.result()
+                    prog.tick(rows=got[i][0], nbytes=got[i][2])
+            if away:
+                theirs = fanout.collect(kind, {i: out / names[i] for i in sorted(away)})
+                got.update(theirs)
+                prog.tick(len(theirs), rows=sum(v[0] for v in theirs.values()), nbytes=sum(v[2] for v in theirs.values()))
+            for i in range(len(cuts)):
+                n, t, size = got[i]
+                rows, nbytes = rows + n, nbytes + size
+                idx.append(t)
+        else:
+            def one(lo, hi, name):
+                where = " AND ".join(x for x in (f"q >= {q(lo)}" if lo is not None else "", f"q < {q(hi)}" if hi is not None else "") if x) or "true"
+                cur = con.cursor()
+                try:
+                    batches = _batches(cur, f"SELECT {cols} FROM {table} WHERE {where} ORDER BY {order}")
+                    n, t = sr.write_indexed(prog.batches(batches), out / name, schema, key, name, dic, rg)
+                finally:
+                    cur.close()
+                prog.tick(nbytes=(out / name).stat().st_size)
+                return n, t, (out / name).stat().st_size
+
+            # each file a sort of its own `q` range on a cursor (one DuckDB pool), its writer in a thread: the same bytes
+            with ThreadPoolExecutor(max(1, min(SORT_WRITERS, len(cuts)))) as ex:
+                for n, t, size in ex.map(lambda c: one(*c[0], c[1]), zip(cuts, names)):
+                    rows, nbytes = rows + n, nbytes + size
+                    idx.append(t)
+        prog.done()
         t = pa.concat_tables(idx) if idx else sr.GROUP_INDEX_SCHEMA.empty_table()
         top = sr.write_index_levels(t, out / f"{kind}-{sub}-index.parquet")
         pq.write_table(top, out / f"{kind}-{sub}-index.top.parquet", compression=CODEC)
@@ -1673,10 +1929,107 @@ def write_kind(con, out: Path, kind: str, roots: str = "dr", rollups: str = "rup
     return doc
 
 
-def write_state(con, out: Path, kind: str, table: str = "dcnt") -> None:
+def write_state(con, out: Path, kind: str, table: str = "dcnt", queries: list[str] | None = None) -> None:
+    """Table `table` (`q, dir, rows`) → `out/state/dcount-<kind>.parquet` sorted, in `STATE_RG`-row groups; `queries`: the
+    sorted rows as consecutive queries instead (`merge_tiers`' `q` ranges, in order), one stream."""
     (out / "state").mkdir(parents=True, exist_ok=True)
-    pq.write_table(con.execute(f"SELECT q, dir, rows FROM {table} ORDER BY q, dir").to_arrow_table().cast(DCOUNT_SCHEMA),
-                   out / "state" / f"dcount-{kind}.parquet", compression=CODEC)
+    with pq.ParquetWriter(out / "state" / f"dcount-{kind}.parquet", DCOUNT_SCHEMA, compression=CODEC) as writer:
+        pending = []
+        rows = 0
+        wrote = False
+        sqls = queries if queries is not None else [f"SELECT q, dir, rows FROM {table} ORDER BY q, dir"]
+        for batch in (b for sql in sqls for b in _batches(con, sql, STATE_BATCH_ROWS)):
+            offset = 0
+            while offset < batch.num_rows:
+                take = min(STATE_RG - rows, batch.num_rows - offset)
+                pending.append(batch.slice(offset, take))
+                offset += take
+                rows += take
+                if rows == STATE_RG:
+                    writer.write_table(pa.Table.from_batches(pending).cast(DCOUNT_SCHEMA), row_group_size=STATE_RG)
+                    pending, rows, wrote = [], 0, True
+        if pending:
+            writer.write_table(pa.Table.from_batches(pending).cast(DCOUNT_SCHEMA), row_group_size=STATE_RG)
+            wrote = True
+        if not wrote:
+            writer.write_table(DCOUNT_SCHEMA.empty_table())
+
+
+def _mod(x: str) -> str:
+    """`x` (HUGEINT, possibly negative) as its residue mod 2⁶⁴ (`UBIGINT`): what `% 2⁶⁴` gives a sum of hashes."""
+    return f"((({x}) % {U64} + {U64}) % {U64})::UBIGINT"
+
+
+def day_digests(con, out: Path, D: int) -> str | None:
+    """The run's change to each long class's root-set digest → `out/DIGESTS` (`DIGEST_DELTA_SCHEMA`, per class canonical at
+    scan `D`), from tables `dr` (the delta roots per class canonical; a new member's whole history) and `newq`. The rows are
+    combined first as the stack combines them (the smallest `vt` per `(q, path, usr, vf)`); then per row `r`:
+
+    - a new member's (every root of it is new to the stack, closed history included): `+h(r)`, one more root;
+    - an existing member's open (`vf = D`): `+h(r)`, one more root;
+    - an existing member's close record (`vf < D`, `vt` set): it restates a root the stack holds open, whose combined `vt`
+      becomes this one: `−h(r with vt = OPEN) + h(r)`, the count unchanged.
+
+    `h` is the build's digest pair (`static_roots.ROW_HASH` and its `hash(·, 'x')`), summed mod 2⁶⁴. Returns None, or
+    (nothing written) why the change can't be exact: an existing member's delta root that is neither (an open version
+    not opened at `D`), which no rule above places. A close of a root the stack doesn't hold open can't be seen here;
+    the compaction's fold checks each class's count against the roots it reads (`static_compact._long_roots`)."""
+    rh, was = sr.ROW_HASH, f"hash(path, usr, vf, {OPEN}::BIGINT, size, n_files)"
+    con.execute("""CREATE OR REPLACE TEMP TABLE dd_r AS SELECT r.*, r.q IN (SELECT q FROM newq) AS new FROM (
+            SELECT q, path, usr, vf, min(vt) AS vt, any_value(size) AS size, any_value(n_files) AS n_files FROM dr GROUP BY q, path, usr, vf) AS r""")
+    odd = con.execute(f"SELECT count(*) FROM dd_r WHERE NOT new AND vf <> {D} AND (vt = {OPEN} OR vf > {D})").fetchone()[0]
+    if odd:
+        con.execute("DROP TABLE dd_r")
+        return f"{odd:,} delta roots of existing members neither opened at the scan nor closed"
+    close = f"NOT new AND vf <> {D}"
+    tab = con.execute(f"""SELECT q, (count(*) FILTER (WHERE NOT ({close})))::BIGINT AS dn,
+            {_mod(f"sum({rh})::HUGEINT - coalesce(sum({was}) FILTER (WHERE {close}), 0)::HUGEINT")} AS d1,
+            {_mod(f"sum(hash({rh}, 'x'))::HUGEINT - coalesce(sum(hash({was}, 'x')) FILTER (WHERE {close}), 0)::HUGEINT")} AS d2
+        FROM dd_r GROUP BY q ORDER BY q""").to_arrow_table()
+    con.execute("DROP TABLE dd_r")
+    pq.write_table(tab.cast(DIGEST_DELTA_SCHEMA), out / DIGESTS, compression=CODEC)
+    return None
+
+
+def merge_digests(con, tiers: list[Tier], out: Path) -> None:
+    """Merged runs' digest changes → `out/DIGESTS`: each input's (`DIGESTS`) re-keyed to the merged canonicals through
+    table `cmap (c, tier, ci)` (`merge_tiers`' long kind) and summed (mod 2⁶⁴). A merged class's members share one class
+    at each input, so its change is the inputs' changes to those classes, summed."""
+    parts = " UNION ALL ".join(f"""SELECT m.c AS q, x.dn, x.d1, x.d2 FROM read_parquet({q(t.local(DIGESTS))}) AS x
+        JOIN cmap AS m ON m.tier = {i} AND m.ci = x.q""" for i, t in enumerate(tiers))
+    tab = con.execute(f"""SELECT q, sum(dn)::BIGINT AS dn, (sum(d1) % {U64})::UBIGINT AS d1, (sum(d2) % {U64})::UBIGINT AS d2
+        FROM ({parts}) GROUP BY q ORDER BY q""").to_arrow_table()
+    pq.write_table(tab.cast(DIGEST_DELTA_SCHEMA), out / DIGESTS, compression=CODEC)
+
+
+def fresh_file(kind: str) -> str:
+    """A tier's roots new to the stack, per `q` (`FRESH_ROWS`)."""
+    return f"{kind}-fresh.parquet"
+
+
+def write_fresh(con, out: Path, kind: str, D: int) -> None:
+    """Tables `dr` (the scan's delta roots per class canonical; a new member's whole history) and `newq` → `out/<kind>-fresh.parquet`
+    (`FRESH_SCHEMA`): per `q`, its rows combined as the stack combines them (one per `(path, usr, vf)`), counting an existing
+    member's opens (`vf = D`; a close record restates a root an earlier tier holds) and every root of a new member."""
+    tab = con.execute(f"""SELECT q, n FROM (SELECT r.q, (count(*) FILTER (WHERE r.vf = {D} OR r.new))::BIGINT AS n FROM (
+            SELECT DISTINCT q, path, usr, vf, q IN (SELECT q FROM newq) AS new FROM dr) AS r GROUP BY r.q) WHERE n > 0 ORDER BY q""").to_arrow_table()
+    pq.write_table(tab.cast(FRESH_SCHEMA), out / fresh_file(kind), compression=CODEC)
+
+
+def merge_fresh(con, tiers: list[Tier], out: Path, kind: str) -> None:
+    """Merged runs' fresh roots → `out/<kind>-fresh.parquet`: each input's re-keyed to the merged `q`s through table `cmap (c,
+    tier, ci)` (`merge_tiers`') and summed. A root is new to the stack in exactly one input (the one that opened it, or whose
+    new member's history holds it), so the sum is the merged tier's."""
+    parts = " UNION ALL ".join(f"""SELECT m.c AS q, x.n FROM read_parquet({q(t.local(fresh_file(kind)))}) AS x
+        JOIN cmap AS m ON m.tier = {i} AND m.ci = x.q""" for i, t in enumerate(tiers))
+    tab = con.execute(f"SELECT q, sum(n)::BIGINT AS n FROM ({parts}) GROUP BY q ORDER BY q").to_arrow_table()
+    pq.write_table(tab.cast(FRESH_SCHEMA), out / fresh_file(kind), compression=CODEC)
+
+
+def write_digests(con, out: Path, table: str = "dgq") -> None:
+    """Table `table` `(q, n, h1, h2)` (each long member's absolute root-set digest) → `out/DIGESTS` (`DIGEST_SCHEMA`)."""
+    out.mkdir(parents=True, exist_ok=True)
+    pq.write_table(con.execute(f"SELECT q, n, h1, h2 FROM {table} ORDER BY q").to_arrow_table().cast(DIGEST_SCHEMA), out / DIGESTS, compression=CODEC)
 
 
 def write_aliases(con, out: Path, table: str = "cls") -> None:
@@ -1691,8 +2044,11 @@ def tier_files(meta: dict) -> list[str]:
 
 
 def kind_files(meta: dict, kind: str) -> list[str]:
-    """One kind's files of a run's `drill/` (the long kind's with the alias map)."""
-    out = ["aliases.parquet"] if kind == "long" else []
+    """One kind's files of a run's `drill/` (the long kind's with the alias map, and its digest changes when marked; its
+    fresh roots when marked)."""
+    out = ["aliases.parquet", *([DIGESTS] if meta.get("digests") == DIGESTS_DELTA else [])] if kind == "long" else []
+    if meta.get("fresh") == FRESH_ROWS:
+        out.append(fresh_file(kind))
     for sub in ("roots", "rollups"):
         out += [f"{kind}/{sub}/r{i:04d}.parquet" for i in range(meta[f"{kind}_{sub}"]["files"])]
         out += [f"{kind}-{sub}-index.parquet", f"{kind}-{sub}-index.top.parquet"]
@@ -1711,7 +2067,8 @@ def build_day(con, prior: list[Tier], out: Path, *, D: int, R: int, K: int, floo
               new_members: list[str], history: pa.Table | None, meas: dict[str, str], tier: dict, chunk_rows: int = 1 << 24,
               file_rows: int = FILE_ROWS, rg: int | None = None, kinds: tuple[str, ...] = KINDS, log=err, rule=None,
               threads: int = FETCH_THREADS, cache_bytes: int | None = None, checkpoint: Checkpoint | None = None, step=_nop_step) -> dict:
-    """A scan's `drill/` in `out`: each kind's delta roots, rollups, indexes and `dcount` (long: and the run's alias map), and
+    """A scan's `drill/` in `out`: each kind's delta roots, rollups, indexes and `dcount` (long: and the run's alias map and
+    its classes' digest changes, `day_digests`, marked `digests: delta` in the meta when exact), and
     with both kinds `meta.json` last (one kind: its part, `meta.<kind>.json`; `join_meta` makes `meta.json` of the two). Needs
     table `pnew (depth, path)`; `meas[kind]` is a query of the base's `(q, dir, rows)` at ≥ `floor` rows. `threads`,
     `cache_bytes`: the prior tiers' reads' prefetch (`TierReads`); the output is the same without it. `checkpoint`: each
@@ -1722,7 +2079,7 @@ def build_day(con, prior: list[Tier], out: Path, *, D: int, R: int, K: int, floo
     (`drill/roots/<kind>`, `day_rollups`', `drill/write/<kind>`)."""
     t0 = monotonic()
     out.mkdir(parents=True, exist_ok=True)
-    meta: dict = {**tier, **base_meta(R, K, rg), "D": D, "floor": floor}
+    meta: dict = {**tier, **base_meta(R, K, rg), "D": D, "floor": floor, "dcount": DCOUNT_FRESH}
     for i, kind in enumerate(kinds):
         t1 = monotonic()
         ck = checkpoint.sub(kind) if checkpoint else None
@@ -1743,6 +2100,13 @@ def build_day(con, prior: list[Tier], out: Path, *, D: int, R: int, K: int, floo
                 ck.save(con, "roots", ("dr", "newq", "cls") if kind == "long" else ("dr", "newq"), km)
         if kind == "long":
             write_aliases(con, out)
+            why = day_digests(con, out, D)
+            if why is None:
+                km["digests"] = DIGESTS_DELTA
+            else:
+                log(f"drill long: no digest changes ({why}); a compaction over this run finds its classes from every root")
+        write_fresh(con, out, kind, D)
+        km["fresh"] = FRESH_ROWS
         t = step(f"drill/roots/{kind}", t1, roots=con.execute("SELECT count(*) FROM dr").fetchone()[0])
         con.execute(f"CREATE OR REPLACE TABLE meas AS {meas[kind]}")
         reads = TierReads(prior, kind, threads, cache_bytes)
@@ -1813,25 +2177,72 @@ def meas_sql(kind: str, files: list[str], top_files: list[str] = ()) -> str:
 # ── Merging tiers (the binary counter) ─────────────────────────────────────
 
 
-def merge_tiers(con, tiers: list[Tier], out: Path, tier: dict, file_rows: int = FILE_ROWS) -> dict:
+#: A drill merge's chunks: about this many roots and rollup rows per merged-`q` range (`merge_tiers`).
+MERGE_CHUNK_ROWS = 1 << 24
+
+
+def _bounds(counts: list[tuple[str, int]], chunk_rows: int) -> list[str]:
+    """Each `q` range's first literal (the first's is `''`) over `counts` `(q, rows)` in `q` order: ranges of at most
+    `chunk_rows` rows, a literal with more a range of its own."""
+    bounds, n = [""], 0
+    for qq, c in counts:
+        if n and n + c > chunk_rows:
+            bounds.append(qq)
+            n = 0
+        n += c
+    return bounds
+
+
+def _spilled(files: list[Path], cols: str) -> str:
+    return (f"SELECT {cols} FROM read_parquet([{', '.join(q(str(f)) for f in files)}], hive_partitioning = false)" if files
+            else None)
+
+
+def merge_tiers(con, tiers: list[Tier], out: Path, tier: dict, file_rows: int = FILE_ROWS, *, work: Path | None = None,
+                chunk_rows: int = MERGE_CHUNK_ROWS, spill_parts: int | None = None, log=err) -> dict:
     """Runs' drills (oldest first) merged into one tier in `out`: the newest alias map; each input's rows re-keyed to the
     merged canonicals (a class only splits, so its canonical at an input holds the merged canonical's rows there); roots
     combined (smallest `vt`), rollups by the newest-full-header rule (the merged header full if an included input's was),
-    `dcount` summed (heavy directories dropped)."""
+    `dcount` summed (heavy directories dropped), the digest changes and the fresh roots summed when every input has them
+    (`merge_digests`, `merge_fresh`).
+
+    Chunked by merged `q` range, so the working set is `chunk_rows` rows, not the inputs' (gcs's 10-22 L3 carry, 8 runs
+    / 78.5 GiB, spilled 1.2 TiB and filled its SSD folding them in one table): every fold is per `q` (roots per
+    `(q, path, usr, vf)`, rollups per `(q, dir)`, `dcount` per `(q, dir)` against that `q`'s rollups), so each input's
+    re-keyed rows are spilled once by range (zstd parquet under `work`, in at most `spill_parts` partitions of
+    consecutive ranges: `static_roots.ChunkSpill`), each range folded on its own, and the writers read the folded ranges
+    (`write_kind` per file range, `write_state` range by range, in `q` order). The ranges are planned from the inputs'
+    roots and rollups indexes (`static_roots.index_estimates`), not by counting their rows. Byte-identical at any
+    `chunk_rows` and `spill_parts`. `log`: a progress line per range at most every 30 s."""
     out.mkdir(parents=True, exist_ok=True)
     if len({t.rg for t in tiers}) != 1:
         raise ValueError(f"inputs' row groups differ: {[t.rg for t in tiers]}")
+    if len({(t.meta["R"], t.meta["K"]) for t in tiers}) != 1:
+        raise ValueError(f"inputs' R, K differ: {[(t.name, t.meta['R'], t.meta['K']) for t in tiers]}")
+    own = work is None
+    work = Path(work if work is not None else out.parent / f".{out.name}.merge")
+    shutil.rmtree(work, ignore_errors=True)
+    work.mkdir(parents=True)
     meta: dict = {**tier, **{k: tiers[-1].meta[k] for k in ("R", "K", "rg", "idx_rg", "dispatch_rows")}}
+    if all(t.meta.get("dcount") == DCOUNT_FRESH for t in tiers):
+        meta["dcount"] = DCOUNT_FRESH
+    if all(t.meta.get("digests") == DIGESTS_DELTA for t in tiers):
+        meta["digests"] = DIGESTS_DELTA
+    if all(t.meta.get("fresh") == FRESH_ROWS for t in tiers):
+        meta["fresh"] = FRESH_ROWS
+    resource_stage("merge/aliases")
     con.register("al_last", tiers[-1].alias_table())
     con.execute("CREATE OR REPLACE TABLE cls AS SELECT q, canonical FROM al_last")
     con.unregister("al_last")
     write_aliases(con, out)
     for kind in KINDS:
+        resource_stage(f"merge/{kind}/classes", inputs=len(tiers))
         con.execute("CREATE OR REPLACE TABLE cmap (c VARCHAR, tier INTEGER, ci VARCHAR)")
-        lits = [f"SELECT DISTINCT q FROM read_parquet([{', '.join(q(f) for f in t.files(kind, s))}])" for t in tiers for s in ("roots", "rollups")
-                if t.files(kind, s)]
-        lits += [f"SELECT DISTINCT q FROM read_parquet({q(t.dcount(kind))})" for t in tiers if t.dcount(kind)]
-        con.execute(f"CREATE OR REPLACE TABLE lit AS {' UNION '.join(lits) if lits else 'SELECT NULL::VARCHAR AS q WHERE false'}")
+        if kind != "long":  # the short literals (the long kind's classes come from the alias maps)
+            lits = [f"SELECT DISTINCT q FROM read_parquet([{', '.join(q(f) for f in t.files(kind, s))}])" for t in tiers for s in ("roots", "rollups")
+                    if t.files(kind, s)]
+            lits += [f"SELECT DISTINCT q FROM read_parquet({q(t.dcount(kind))})" for t in tiers if t.dcount(kind)]
+            con.execute(f"CREATE OR REPLACE TABLE lit AS {' UNION '.join(lits) if lits else 'SELECT NULL::VARCHAR AS q WHERE false'}")
         for i, t in enumerate(tiers):
             if kind == "long":
                 con.register("al_in", t.alias_table())
@@ -1841,37 +2252,90 @@ def merge_tiers(con, tiers: list[Tier], out: Path, tier: dict, file_rows: int = 
                 con.unregister("al_in")
             else:
                 con.execute(f"INSERT INTO cmap SELECT q, {i}, q FROM lit")
-        con.execute(f"DROP TABLE IF EXISTS dr; CREATE TABLE dr ({sr.ROOT_COLS})")
-        con.execute(f"CREATE OR REPLACE TABLE ru (tier INTEGER, {ROLLUP_COLS})")
-        con.execute("CREATE OR REPLACE TABLE dc (q VARCHAR, dir VARCHAR, rows BIGINT)")
+        if kind == "long" and meta.get("digests") == DIGESTS_DELTA:
+            merge_digests(con, tiers, out)
+        if meta.get("fresh") == FRESH_ROWS:
+            merge_fresh(con, tiers, out, kind)
+        # each input's rows re-keyed (`cmap`): roots and rollups per merged `q`, then the ranges planned over their counts
+        sources = []
         for i, t in enumerate(tiers):
             for sub in ("roots", "rollups"):
-                files = t.files(kind, sub)
-                if not files:
-                    continue
-                lst = "[" + ", ".join(q(f) for f in files) + "]"
-                cols = "m.c, 0::UTINYINT, r.path, r.usr, r.vf, r.vt, r.size, r.n_files" if sub == "roots" else f"{i}, m.c, r.dir, r.kind, r.child, r.vf, r.b, r.o"
-                con.execute(f"""INSERT INTO {'dr' if sub == 'roots' else 'ru'} SELECT {cols} FROM read_parquet({lst}) AS r
-                    JOIN cmap AS m ON m.tier = {i} AND m.ci = r.q""")
+                if files := t.files(kind, sub):
+                    lst = "[" + ", ".join(q(f) for f in files) + "]"
+                    cols = ("m.c AS q, 0::UTINYINT AS depth, r.path, r.usr, r.vf, r.vt, r.size, r.n_files" if sub == "roots"
+                            else f"{i} AS tier, m.c AS q, r.dir, r.kind, r.child, r.vf, r.b, r.o")
+                    sources.append((sub, i, f"SELECT {cols} FROM read_parquet({lst}) AS r JOIN cmap AS m ON m.tier = {i} AND m.ci = r.q"))
             if t.dcount(kind):
-                con.execute(f"""INSERT INTO dc SELECT m.c, r.dir, r.rows FROM read_parquet({q(t.dcount(kind))}) AS r
-                    JOIN cmap AS m ON m.tier = {i} AND m.ci = r.q""")
-        con.execute("""CREATE OR REPLACE TABLE dr AS SELECT q, any_value(depth) AS depth, path, usr, vf, min(vt) AS vt, any_value(size) AS size,
-            any_value(n_files) AS n_files FROM dr GROUP BY q, path, usr, vf""")
-        con.execute(f"""CREATE OR REPLACE TABLE rup AS
-            WITH f AS (SELECT q, dir, coalesce(max(tier) FILTER (WHERE kind = {KIND_FULL}), -1) AS ft FROM ru GROUP BY q, dir),
-                 inc AS (SELECT ru.* FROM ru JOIN f USING (q, dir) WHERE ru.tier >= f.ft),
-                 h AS (SELECT q, dir, bool_or(kind = {KIND_FULL}) AS is_full, arg_max(vf, tier) AS vf, arg_max(b, tier) AS b, arg_max(o, tier) AS o
-                       FROM inc WHERE kind IN ({KIND_FULL}, {KIND_DELTA}) GROUP BY q, dir)
-            SELECT q, dir, (CASE WHEN is_full THEN {KIND_FULL} ELSE {KIND_DELTA} END)::TINYINT AS kind, '' AS child, vf, b, o FROM h
-            UNION ALL SELECT q, dir, kind, child, vf, b, o FROM inc WHERE kind IN ({KIND_KEPT}, {KIND_REST})""")
-        con.execute("""CREATE OR REPLACE TABLE dcnt AS SELECT q, dir, sum(rows)::BIGINT AS rows FROM dc
-            ANTI JOIN (SELECT DISTINCT q, dir FROM rup) AS h USING (q, dir) GROUP BY q, dir""")
-        meta.update(write_kind(con, out, kind, file_rows=file_rows, rg=meta["rg"]))
-        write_state(con, out, kind)
-        for t in ("dr", "ru", "dc", "rup", "dcnt", "cmap", "lit"):
+                sources.append(("dcount", i, f"""SELECT m.c AS q, r.dir, r.rows FROM read_parquet({q(t.dcount(kind))}) AS r
+                    JOIN cmap AS m ON m.tier = {i} AND m.ci = r.q"""))
+        resource_stage(f"merge/{kind}/plan", inputs=len(tiers))
+        # each input's rows per class estimated from its indexes, then per merged `q` (`cmap`, as the sources re-key them)
+        con.execute("CREATE OR REPLACE TABLE mest (tier INTEGER, q VARCHAR, n BIGINT)")
+        for i, t in enumerate(tiers):
+            sr.index_estimates(con, [t.local(f"{kind}-{sub}-index.parquet") for sub in ("roots", "rollups") if t.files(kind, sub)],
+                               f"SELECT ci AS q FROM cmap WHERE tier = {i}", "mest_i")
+            con.execute(f"INSERT INTO mest SELECT {i}, q, n FROM mest_i")
+        counts = con.execute("""SELECT m.c, sum(e.n)::BIGINT FROM mest AS e JOIN cmap AS m ON m.tier = e.tier AND m.ci = e.q
+            GROUP BY m.c ORDER BY m.c""").fetchall()
+        con.execute("DROP TABLE mest; DROP TABLE IF EXISTS mest_i")
+        bounds = _bounds(counts, chunk_rows)
+        con.execute("CREATE OR REPLACE TABLE qb (lo VARCHAR, ch INTEGER)")
+        con.executemany("INSERT INTO qb VALUES (?, ?)", [(lo, k) for k, lo in enumerate(bounds)])
+        kw = work / kind
+        spills = {sub: sr.ChunkSpill(con, kw / sub, len(bounds), spill_parts) for sub in ("roots", "rollups", "dcount")}
+        # every source row's `q` is a merged canonical (`cmap.c`): their ranges, assigned once
+        con.execute("CREATE OR REPLACE TABLE qk AS SELECT DISTINCT c AS q FROM cmap")
+        for sub, i, sql in sources:
+            resource_stage(f"merge/{kind}/read/{sub}", tier=i, inputs=len(tiers))
+            spills[sub].write(sr.ranged(f"({sql})", "qb", "ch", keys="SELECT q FROM qk"), f"t{i:03d}")
+        folded = kw / "folded"
+        for d in ("roots", "rollups", "dcount"):
+            (folded / d).mkdir(parents=True)
+        prog = Progress(f"merge {tier['key']}: drill/{kind}/fold", len(bounds), log)
+        n_rows = 0
+        for k in range(len(bounds)):
+            resource_stage(f"merge/{kind}/fold", chunk=k, chunks=len(bounds))
+            got = {sub: sp.files(k) for sub, sp in spills.items()}
+            dr = _spilled(got["roots"], f"q, depth, path, usr, vf, vt, size, n_files")
+            con.execute(f"""CREATE OR REPLACE TABLE dr AS SELECT q, any_value(depth) AS depth, path, usr, vf, min(vt) AS vt, any_value(size) AS size,
+                any_value(n_files) AS n_files FROM ({dr or f'SELECT * FROM (SELECT NULL::VARCHAR AS q, 0::UTINYINT AS depth, NULL::VARCHAR AS path, NULL::VARCHAR AS usr, NULL::BIGINT AS vf, NULL::BIGINT AS vt, NULL::BIGINT AS size, NULL::BIGINT AS n_files) WHERE false'}) GROUP BY q, path, usr, vf""")
+            ru = _spilled(got["rollups"], f"tier, {', '.join(ROLLUP_COLS_NAMES)}")
+            con.execute(f"CREATE OR REPLACE TABLE ru (tier INTEGER, {ROLLUP_COLS})")
+            if ru:
+                con.execute(f"INSERT INTO ru {ru}")
+            con.execute(f"""CREATE OR REPLACE TABLE rup AS
+                WITH f AS (SELECT q, dir, coalesce(max(tier) FILTER (WHERE kind = {KIND_FULL}), -1) AS ft FROM ru GROUP BY q, dir),
+                     inc AS (SELECT ru.* FROM ru JOIN f USING (q, dir) WHERE ru.tier >= f.ft),
+                     h AS (SELECT q, dir, bool_or(kind = {KIND_FULL}) AS is_full, arg_max(vf, tier) AS vf, arg_max(b, tier) AS b, arg_max(o, tier) AS o
+                           FROM inc WHERE kind IN ({KIND_FULL}, {KIND_DELTA}) GROUP BY q, dir)
+                SELECT q, dir, (CASE WHEN is_full THEN {KIND_FULL} ELSE {KIND_DELTA} END)::TINYINT AS kind, '' AS child, vf, b, o FROM h
+                UNION ALL SELECT q, dir, kind, child, vf, b, o FROM inc WHERE kind IN ({KIND_KEPT}, {KIND_REST})""")
+            dc = _spilled(got["dcount"], "q, dir, rows")
+            con.execute(f"""CREATE OR REPLACE TABLE dcnt AS SELECT q, dir, sum(rows)::BIGINT AS rows FROM ({dc or 'SELECT NULL::VARCHAR AS q, NULL::VARCHAR AS dir, 0::BIGINT AS rows WHERE false'}) AS dc
+                ANTI JOIN (SELECT DISTINCT q, dir FROM rup) AS h USING (q, dir) GROUP BY q, dir""")
+            rows = 0
+            for table, d, order in (("dr", "roots", "q, path, usr, vf"), ("rup", "rollups", "q, dir, kind, child, vf"), ("dcnt", "dcount", "q, dir")):
+                c = con.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
+                if c:
+                    con.execute(f"COPY (SELECT * FROM {table} ORDER BY {order}) TO {q(str(folded / d / f'c{k:06d}.parquet'))} (FORMAT parquet, COMPRESSION zstd)")
+                rows += c
+            n_rows += rows
+            prog.tick(k, rows)
+        for sp in spills.values():
+            sp.close()
+        resource_stage(f"merge/{kind}/write")
+        # each range's folded files are sorted and the ranges in `q` order (`c{k:06d}`): streamed in turn, not sorted again
+        meta.update(write_kind(con, out, kind, file_rows=file_rows, rg=meta["rg"],
+                               chunks={d: sorted((folded / d).glob("*.parquet")) for d in ("roots", "rollups")}))
+        resource_stage(f"merge/{kind}/state")
+        write_state(con, out, kind, queries=[f"SELECT q, dir, rows FROM read_parquet({q(str(f))}) ORDER BY q, dir"
+                                             for f in sorted((folded / "dcount").glob("*.parquet"))])
+        for t in ("dr", "ru", "rup", "dcnt", "cmap", "lit", "qb", "qk"):
             con.execute(f"DROP TABLE IF EXISTS {t}")
+        shutil.rmtree(kw)
     con.execute("DROP TABLE IF EXISTS cls")
+    if own:
+        shutil.rmtree(work, ignore_errors=True)
     (out / "meta.json").write_text(json.dumps(meta, indent=1) + "\n")
     return meta
 
@@ -1883,13 +2347,16 @@ def _count(con, table: str) -> int:
     return con.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
 
 
-def build_drill(con, out: Path, *, long_roots: str, short_roots: str, aliases: pa.Table, R: int, K: int, meta: dict | None = None,
-                rollups: dict[str, str] | None = None, step=None) -> dict:
+def build_drill(con, out: Path, *, long_roots: str | None, short_roots: str | None, aliases: pa.Table, R: int, K: int, meta: dict | None = None,
+                rollups: dict[str, str] | None = None, sorted_roots: dict[str, list[Path]] | None = None, step=None, write_fanout=None) -> dict:
     """A tier holding every root: tables `long_roots` (canonical members only) and `short_roots` (`ROOT_COLS`) → `out`
     (`static_roots.build_roots` per kind, its rows written as `write_kind` writes them), with `aliases` and `meta.json`.
     `rollups` `{kind: table}` (`ROLLUP_COLS`): a kind's rollup cells already cut (by `q` range, as `static_local`'s
-    chunked build does), written as they are. `step(name, t, **counts)` (optional) reports each kind's rollup and write
-    (`drill/rollup/<kind>`, `drill/write/<kind>`)."""
+    chunked build does), written as they are. `sorted_roots` `{kind: files}` (with that kind's `rollups`): its roots as
+    files each sorted, `q`-disjoint and in `q` order (`static_local.measure_ranges`'), streamed (`write_kind`'s `chunks`)
+    instead of sorting a roots table again; the same bytes. `step(name, t, **counts)` (optional) reports each kind's
+    rollup and write (`drill/rollup/<kind>`, `drill/write/<kind>`). `write_fanout` (`static_fanout.WriteFanout`, with
+    `sorted_roots`): their files written in part by helper tasks (`write_kind`'s `fanout`)."""
     out.mkdir(parents=True, exist_ok=True)
     doc = {**base_meta(R, K), **(meta or {})}
     con.register("al_in", aliases)
@@ -1899,7 +2366,8 @@ def build_drill(con, out: Path, *, long_roots: str, short_roots: str, aliases: p
     t = monotonic()
     for kind, table in (("long", long_roots), ("short", short_roots)):
         if rollups and kind in rollups:
-            doc.update(write_kind(con, out, kind, roots=table, rollups=rollups[kind]))
+            chunks = {"roots": sorted_roots[kind]} if sorted_roots and kind in sorted_roots else None
+            doc.update(write_kind(con, out, kind, roots=table, rollups=rollups[kind], chunks=chunks, fanout=write_fanout if chunks else None))
             if step:
                 t = step(f"drill/write/{kind}", t)
             continue
@@ -1962,19 +2430,19 @@ def _new_members(mount: str, prefix: str, run: str, prev: pa.Table) -> list[str]
 @option("-c", "--chunk-rows", default=1 << 24, type=int, help="Suffix rows per member-loop chunk")
 @option("-C", "--cache-gb", type=float, help=f"Prefetched group bytes held at most (default: min(2 GiB, {CACHE_RAM_FRACTION:g} of the RAM))")
 @option("-d", "--scan", "date", required=True, help="The run's scan id")
-@option("-f", "--floor", "floor_rows", default=10_000, type=int, help="The base measurement's floor (`roots measure -f`)")
+@option("-f", "--floor", "floor_rows", type=int, help="The base measurement's floor (`roots measure -f`; default and only allowed value: the base's)")
 @option("-F", "--fuse-reads", is_flag=True, help="Read the prior tiers' groups through the mount, not by ranged GCS reads")
 @option("-g", "--gen", required=True, help="Base generation")
 @option("-j", "--fetch-threads", default=FETCH_THREADS, type=int, help="Concurrent group reads of the prior tiers (≤ 1: no prefetch)")
 @option("-k", "--kind", default="both", type=Choice(["both", "long", "short", "task"]),
         help="Build one kind (`task`: long for Batch task 0, short for task 1): the two run as parallel tasks, the second to finish writes `meta.json`")
-@option("-K", "--keep", "K", default=256, type=int, help="Children kept by name per heavy directory")
+@option("-K", "--keep", "K", type=int, help="Children kept by name per heavy directory (default and only allowed value: the base's)")
 @option("-m", "--mount", required=True, help="Local mount of the bucket")
 @option("-M", "--mem", default="100GB", help="DuckDB memory limit")
 @option("-n", "--dry-run", is_flag=True, help="Build locally; upload nothing")
 @option("-o", "--out", default="/stage/out", help="Local output dir")
 @option("-p", "--threads", default=16, type=int, help="DuckDB threads")
-@option("-R", "--read-rows", "R", default=100_000, type=int, help="Heavy: more stored root rows under the directory")
+@option("-R", "--read-rows", "R", type=int, help="Heavy: more stored root rows under the directory (default and only allowed value: the base's)")
 @option("-S", "--checkpoint", "ckpt_url", envvar="STATIC_NAMES_DRILL_CHECKPOINT",
         help="Save each step under this store root (a dir or `gs://` / `r2://` / `s3://` URL; $STATIC_NAMES_DRILL_CHECKPOINT), so a "
              "rerun (a reclaimed spot task's retry) resumes after the last one saved; cleared once the drill is uploaded")
@@ -2017,6 +2485,8 @@ def build_cmd(bucket, chunk_rows, cache_gb, date, floor_rows, fuse_reads, gen, f
     for t in prior[1:]:
         if t.meta.get("last") != t.name.split("/")[-1].split("_")[-1]:
             raise SystemExit(f"{t.name}: its drill is for {t.meta.get('last')}")
+    R, K, floor_rows = sn.base_params(prior[0].meta, f"{prefix}/drill", R=R, K=K, floor=floor_rows)
+    floor_rows = 10_000 if floor_rows is None else floor_rows  # a base measured before its floor was recorded
     sx = [str(p) for p in sorted((base / run / "sx").glob("*.parquet"))]
     cdelta = [str(p) for p in sorted((base / run / "cdelta").glob("*.parquet"))]
     ranges = read_json(f"gs://{bucket}/{prefix}/ranges.json")

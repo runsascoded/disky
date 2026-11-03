@@ -55,6 +55,7 @@ from urllib.parse import urlparse
 
 from disk_tree.env import name as env_name
 
+from .heartbeat import Tail, run_teed, set_stage
 from .index_parts import PART_JSON, Part, part_ids, split_parts
 from .scan_profile import ScanProfile
 
@@ -139,6 +140,12 @@ class _Printer:
         err(phase_line(name, self._clock(), note))
         return 0 if warn else rc
 
+    def alert(self, level: str, message: str) -> None:
+        err(f"alert ({level}, no run recorded): {message}")
+
+    def phases(self) -> list[dict]:
+        return []
+
 
 def cpu_quota(cgroup: Path) -> int | None:
     """The CPUs a cgroup's quota allows, rounded up (v2 `cpu.max`, else v1 `cpu.cfs_quota_us` / `cpu.cfs_period_us`);
@@ -156,6 +163,25 @@ def cpu_quota(cgroup: Path) -> int | None:
     return -(-q // p) if q > 0 else None
 
 
+#: The share of the task's memory `{mem}` names: room for a DuckDB process's RSS above its `memory_limit` (some tens of
+#: percent) and whatever else the task runs beside it.
+MEM_SHARE = 0.6
+
+
+def mem_budget(cgroup: Path, share: float = MEM_SHARE) -> str:
+    """`share` of the task's memory as a DuckDB size (`"38GB"`): the machine's RAM, or the cgroup's limit when lower
+    (v2 `memory.max`, v1 `memory.limit_in_bytes`; v1's unlimited is ≥ 2^60)."""
+    total = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+    for f in ("memory.max", "memory/memory.limit_in_bytes"):
+        try:
+            limit = int((cgroup / f).read_text())
+        except (OSError, ValueError):  # absent, or v2's "max"
+            continue
+        if limit < 2**60:
+            total = min(total, limit)
+    return f"{max(1, int(total * share / 2**30))}GB"
+
+
 @dataclass
 class Ctx:
     """One step's view: the profile, the scan's identity, its environment (also every command's), a local scratch dir,
@@ -166,9 +192,19 @@ class Ctx:
     env: dict[str, str]
     work: Path
     run: object
-    sh_impl: Callable[..., subprocess.CompletedProcess] = subprocess.run
-    #: The open phase's first `fails_phase` failure (exit code, warning): the phase ends failed with a warn alert
+    #: How `sh` runs a command (`subprocess.run`'s shape; tests pass a fake). The default, `run_teed`, also feeds the
+    #: open phase's heartbeat `tail` its output.
+    sh_impl: Callable[..., subprocess.CompletedProcess] = run_teed
+    #: The open phase's first nonfatal command failure (exit code, warning): the phase ends failed with a warn alert
     failure: tuple[int, str] | None = None
+    #: The open phase's heartbeat line source (`beating`); None outside a phase or without a recorded run
+    tail: Tail | None = None
+    #: The last command `sh` ran (its exit code; its stdout when captured, a failed one's too)
+    last: subprocess.CompletedProcess | None = None
+    #: The open phase's explicit skip (`skip`): its end's note says `skipped (<kind>): <reason>`
+    skipped: str | None = None
+    #: The open phase's end note, set by its body (e.g. the probe's verdict); None: `phase`'s own `note`
+    note: str | None = None
 
     # layout
 
@@ -254,6 +290,10 @@ class Ctx:
         quota = cpu_quota(Path(self.env.get("DT_CGROUP") or "/sys/fs/cgroup"))
         return min(cpus, quota) if quota else cpus
 
+    @property
+    def mem(self) -> str:
+        return mem_budget(Path(self.env.get("DT_CGROUP") or "/sys/fs/cgroup"))
+
     def fill_env(self, template: str) -> str:
         """`template` with each `{env:NAME}` filled from the task's env (a step fails on an unset one)."""
         def var(m: re.Match[str]) -> str:
@@ -264,9 +304,12 @@ class Ctx:
         return re.sub(r"\{env:([A-Za-z_][A-Za-z0-9_]*)\}", var, template)
 
     def expand(self, args: Sequence[str], **extra: object) -> list[str]:
-        """`args` with `{nproc}`, `{scan}`, `{date}`, `{gen}`, `{work}`, `{data}` (the data store's local root,
-        `data_root`) (+ `extra`) filled; an arg that is exactly `{<key>}` of a list value expands to its items."""
+        """`args` with `{nproc}`, `{mem}` (`mem_budget`: a DuckDB `memory_limit` sized to the task's machine), `{scan}`,
+        `{date}`, `{gen}`, `{work}`, `{data}` (the data store's local root, `data_root`) (+ `extra`) filled; an arg that
+        is exactly `{<key>}` of a list value expands to its items."""
         vals: dict[str, object] = dict(nproc=self.nproc, scan=self.scan, date=self.date, gen=self.gen, work=self.work, **extra)
+        if any("{mem}" in a for a in args):
+            vals["mem"] = self.mem
         if any("{data}" in a for a in args):
             vals["data"] = self.data_root
         out: list[str] = []
@@ -281,19 +324,21 @@ class Ctx:
     # running
 
     def sh(self, argv: Sequence[str], *, fatal: bool = True, warn: str | None = None, env: Mapping[str, str] | None = None,
-           capture: bool = False, fails_phase: bool = False) -> str | None:
+           capture: bool = False, allowed_codes: tuple[int, ...] = ()) -> str | None:
         """Run `argv` (logged as `+ …`; secrets only ever in the env). A failure raises `StepFailed` when `fatal`, else
-        prints `WARN: <warn>` and returns None; returns stdout when `capture`, else "". `fails_phase`: a non-fatal failure
-        still ends the open phase failed (warn-alerted, never failing the run), so /scans doesn't show it done."""
+        prints `WARN: <warn>` and returns None; returns stdout when `capture`, else "". A nonfatal failure still ends
+        the open phase failed (warn-alerted, never failing the run), so /scans doesn't show it done. `allowed_codes`
+        accepts only documented expected nonzero results, such as exit 1 for attribution-rule findings."""
         argv = [str(a) for a in argv]
         err("+ " + " ".join(argv))
-        r = self.sh_impl(argv, env={**self.env, **(env or {})}, stdout=subprocess.PIPE if capture else None, text=True)
-        if r.returncode:
+        teed = {"tail": self.tail} if self.tail is not None and self.sh_impl is run_teed else {}
+        r = self.last = self.sh_impl(argv, env={**self.env, **(env or {})}, stdout=subprocess.PIPE if capture else None, text=True, **teed)
+        if r.returncode and r.returncode not in allowed_codes:
             if fatal:
                 raise StepFailed(r.returncode, f"exit {r.returncode}: {' '.join(argv[:3])}")
             what = warn or " ".join(argv[:3]) + " failed"
             err(f"WARN: {what} (exit {r.returncode})")
-            if fails_phase and self.failure is None:
+            if self.failure is None:
                 self.failure = (r.returncode, what)
             return None
         return r.stdout if capture else ""
@@ -301,11 +346,13 @@ class Ctx:
     @contextmanager
     def phase(self, name: str, note: str | None = None) -> Iterator[None]:
         """A `scan_runs` phase: begun, then ended (failed, with the exit code, when the body raises; failed with a warn
-        alert after a `fails_phase` command's failure)."""
+        alert after a nonfatal command's failure; done, with its reason in the note and a warn alert, after `skip`)."""
         self.run.begin(name)
-        self.failure = None
+        set_stage(name)
+        self.failure = self.skipped = self.note = None
         try:
-            yield
+            with self.beating(name):
+                yield
         except StepFailed as e:
             self.run.end(name, e.rc or 1)
             raise
@@ -313,11 +360,48 @@ class Ctx:
             self.run.end(name, 1)
             raise
         finally:
-            failure, self.failure = self.failure, None
+            failure, skipped, set_note = self.failure, self.skipped, self.note
+            self.failure = self.skipped = self.note = None
+        note = set_note or note
         if failure:
             self.run.end(name, failure[0], warn=True, msg=failure[1], note=note)
+        elif skipped:
+            self.run.end(name, 0, note=f"{note}, {skipped}" if note else skipped)
+            self.run.alert("warn", f"{name} {skipped}")
         else:
             self.run.end(name, 0, note=note)
+
+    def skip(self, kind: str, reason: str) -> None:
+        """The open phase's work was skipped, for `reason`: it ends done, its note's `skipped (<kind>): <reason>`
+        (`scan_runs.phase_skip`) making the run `partial` on /scans with that reason, and a warn alert names it."""
+        self.skipped = f"skipped ({kind}): {reason}"
+
+    def recorded_skip(self, phase: str) -> str | None:
+        """`<phase> skipped (<kind>): <reason>` when this run's record says `phase`'s latest closed attempt was skipped
+        (`scan_runs.phase_skip`), else None: never guessed, only read from the record (a running phase's note is a
+        heartbeat's output line, not its verdict)."""
+        from .scan_runs import phase_skip
+
+        read = getattr(self.run, "phases", None)  # a recorder that can't read the record: nothing recorded
+        rows = [p for p in (read() if read else []) if p["phase"] == phase and p.get("status") != "running"]
+        clause = phase_skip(max(rows, key=lambda p: p["seq"])["note"]) if rows else None
+        return f"{phase} {clause}" if clause else None
+
+    @contextmanager
+    def beating(self, name: str) -> Iterator[Tail | None]:
+        """Phase `name`'s heartbeat around the body (`JobRun.heartbeat`): every command `sh` runs meanwhile feeds its
+        note. Stopped when the body exits, before the phase's end is written. A recorder without a heartbeat
+        (`_Printer`: no run recorded) runs the body as is."""
+        heartbeat = getattr(self.run, "heartbeat", None)
+        if heartbeat is None:
+            yield None
+            return
+        with heartbeat(name) as tail:
+            prev, self.tail = self.tail, tail
+            try:
+                yield tail
+            finally:
+                self.tail = prev
 
     def done(self, path: Path, what: str | None = None) -> bool:
         """Whether `path` exists; logs the skip when it does."""
@@ -395,11 +479,17 @@ def bucket_check(ctx: Ctx, arg: str | None) -> None:
     with ctx.phase("bucket-check"):
         for endpoint, scanned in by_endpoint.items():
             found += unscanned(s3_client(endpoint), scanned)
-    if found:
-        text = " ".join(found)
-        err(f"WARN: unscanned-bucket check: {text}")
-        ctx.sh(["disk-tree", "notify", "-t", f"⚠️ {ctx.profile.deployment} {ctx.scan}",
-                f"non-empty bucket(s) not in the profile's sources: `{text}`"], fatal=False, warn="unscanned-bucket alert not sent")
+        if found:
+            from .scan_runs import scan_alert_links
+
+            text = " ".join(found)
+            message = f"unscanned-bucket check: {text}"
+            err(f"WARN: {message}")
+            ctx.failure = (1, message)
+            links = scan_alert_links(ctx.env.get("SITE_URL"), getattr(ctx.run, "run_id", None), ctx.profile.store)
+            link_args = [arg for label, url in links for arg in ("-L", label, url)]
+            ctx.sh(["disk-tree", "notify", "-t", f"⚠️ {ctx.profile.deployment} {ctx.scan}", *link_args,
+                    f"non-empty bucket(s) not in the profile's sources: `{text}`"], fatal=False, warn="unscanned-bucket alert not sent")
 
 
 @step("access-ingest", core=False, stage="pre", soft=True, options={"args": list, "poller": bool})
@@ -679,7 +769,7 @@ def _publish(ctx: Ctx, web: Path) -> None:
                     "-o", dest / "lifecycle.json"], fatal=False, warn="lifecycle pull failed")
         if ctx.opt("index", "rules", False):
             rules = ctx.work / "rules.json"
-            ctx.sh(["dt-cloud", "rules", "-o", rules], fatal=False, warn="attribution rules have findings")
+            ctx.sh(["dt-cloud", "rules", "-o", rules], fatal=False, allowed_codes=(1,), warn="attribution rules failed")
             if rules.exists():
                 copy_atomic(rules, ctx.data_root / ctx.snapshots / "rules.json")
 
@@ -898,24 +988,31 @@ def path_index_part(ctx: Ctx, pid: str) -> None:
 def _static_check(p: ScanProfile) -> list[str]:
     o = p.opts("static-names")
     if o.get("gen"):
-        return [f"options.static-names.{k}: not with gen (the one-machine path)" for k in ("profile",) if k in o]
-    problems = [f"options.static-names.{k}: only with gen (the one-machine path)" for k in ("store", "mem", "build_args") if k in o]
+        return [f"options.static-names.{k}: not with gen (the one-machine path)" for k in ("profile", "merge", "compact_cmd") if k in o]
+    problems = [f"options.static-names.{k}: only with gen (the one-machine path)" for k in ("store", "mem", "build_args", "current_key") if k in o]
+    if o.get("compact_cmd") and o.get("merge") is False:
+        problems.append("options.static-names.compact_cmd: only with the merge stage on (`merge: false` defers the compaction to nothing)")
     if not o.get("profile") and not p.env.get("STATIC_NAMES_PROFILE"):
         problems.append("options.static-names.profile: required (the deployment's static-names profile; or env STATIC_NAMES_PROFILE, "
                         "or gen: the one-machine path, or skip: [static-names])")
     return problems
 
 
-@step("static-names", stage="serve", soft=True, options={"profile": str, "gen": str, "store": str, "mem": str, "build_args": list},
+@step("static-names", stage="serve", soft=True, options={"profile": str, "gen": str, "store": str, "mem": str, "build_args": list, "current_key": str,
+                                                          "merge": bool, "compact_cmd": list},
       requires=_static_check)
 def static_names(ctx: Ctx, arg: str | None) -> None:
     """Append this scan (and any earlier one still pending, in scan-id order) to the static name index as a run
     (`static-names runs add -c`: its stages are Batch jobs of their own; idempotent). Runs beside publish-r2 →
-    interval-store (an `overlapped` phase); a failure still lists the scan, a later run's `-c` catches it up.
+    interval-store (an `overlapped` phase). Due merges and their R2 publication are waited on: a failure records the phase
+    failed, alerts, and fails the pipeline. Published data stays valid; a resume retries the missing work.
 
     `options.static-names.gen`: the one-machine path instead, for a small deployment (`static-names add` in this task:
     every scan in the data store after the generation's newest, read at the layer-2 layout's `path` sorts, appended to
-    the generation in `store`, default `$R2_ARCHIVE`); `build` (+ `build_args`) when the store has no such generation."""
+    the generation in `store`, default `$R2_ARCHIVE`); `build` (+ `build_args`) when the store has no such generation.
+
+    `options.static-names.compact_cmd` (argv): a due compaction is deferred (`runs add -D`) to this command, run here only
+    when one was (a coordinator job of its own: the fold takes hours); `merge: false` instead skips the merge stage."""
     if ctx.reproc:
         err("static-names off under REPROC")
         return
@@ -929,16 +1026,70 @@ def static_names(ctx: Ctx, arg: str | None) -> None:
         # a local data dir holds only this scan, so the store (where publish-r2 put it, before this step) is the source
         source = ctx.data_uri if urlparse(ctx.profile.data).scheme else store
         args = ["-g", gen, "-L", layout, "-s", source, "-o", store, "-w", ctx.work / "static-names", "-p", ctx.nproc,
+                *(["-u", ctx.opt("static-names", "current_key")] if ctx.opt("static-names", "current_key") else []),
                 *(["-M", ctx.opt("static-names", "mem")] if ctx.opt("static-names", "mem") else [])]
         with ctx.phase("static-names", note="overlapped"):
-            sub = (["add", *args] if ctx.store_has(store, f"static-names/{gen}/scans.json")
+            sub = (["add", *args] if ctx.store_has(store, f"static-names/{gen}/scans.json") or ctx.store_has(store, f"static-names/{gen}/successor.json")
                    else ["build", *args, *ctx.opt("static-names", "build_args", [])])
             ctx.sh(["dt-cloud", "static-names", *sub], fatal=False, warn=f"static-names {sub[0]} failed for {ctx.scan}")
         return
+    from .append_runner import BUSY
+
     prof = ctx.opt("static-names", "profile") or ctx.env["STATIC_NAMES_PROFILE"]
+    # exit 4: another coordinator (a catch-up, or an earlier scan's run) or a compaction holds the store's lease; it
+    # appends this scan too, else the next run does. Until then search refuses the scan: an explicit skip (the probe
+    # reads it from the record and skips those refusals; /scans shows the run `partial`, with this reason)
     with ctx.phase("static-names", note="overlapped"):
-        ctx.sh(["dt-cloud", "static-names", "runs", "add", "-c", ctx.scan], env={"STATIC_NAMES_PROFILE": str(prof)},
-               fatal=False, warn=f"static-names runs add failed for {ctx.scan}")
+        # `merge: false`: the due carries (and a compaction) wait for `runs merge` on its own schedule, never a scan's task.
+        # `compact_cmd`: the carries are submitted here (not waited on), and a due compaction, an hours-long fold, is
+        # deferred (`-D`) to this command, which runs `runs merge` apart (cw: its own coordinator job)
+        merge = ctx.opt("static-names", "merge", True)
+        compact_cmd = ctx.opt("static-names", "compact_cmd") if merge else None
+        out = ctx.sh(["dt-cloud", "static-names", "runs", "add", "-c", *([] if merge else ["-M"]), *(["-D"] if compact_cmd else []), ctx.scan],
+                     env={"STATIC_NAMES_PROFILE": str(prof)}, fatal=False, warn=f"static-names runs add failed for {ctx.scan}",
+                     allowed_codes=(BUSY,), capture=bool(compact_cmd))
+        if ctx.last is not None and ctx.last.returncode == BUSY:
+            ctx.skip("busy", STATIC_NAMES_BUSY)
+        elif out and (deferred := json.loads(out.strip().splitlines()[-1]).get("deferred")):
+            err(f"static-names: compaction due ({deferred}): run apart")
+            ctx.sh(compact_cmd, fatal=False, warn=f"static-names compaction submit failed for {ctx.scan}")
+    static_lag(ctx)
+
+
+def static_lag(ctx: Ctx, probe: bool = False) -> dict | None:
+    """One alert per lag episode of the static name index (`static-names runs lag`): more than a scan (or one for 12 h)
+    behind the newest published scan, search refusing those. Run after `runs add` and again by `probe`, which a
+    deployment skipping its static-names step (cw since 10-22: the outage this is for) or a step dying first still runs;
+    the episode's marker keeps it to one alert. Not on the one-machine path (`options.static-names.gen`) nor without a
+    static-names profile. Returns `runs lag`'s record (None without one).
+
+    Its exit `UNMERGED` (more unmerged runs than the binary counter leaves: the carries aren't running, cw's search
+    outage 10-24 → 10-29) is a warn alert on every scan until merged, from the static-names step, or from the probe's
+    call (`probe`) only when the deployment skips that step."""
+    from .append_runner import UNMERGED
+
+    prof = ctx.opt("static-names", "profile") or ctx.env.get("STATIC_NAMES_PROFILE")
+    if ctx.reproc or ctx.opt("static-names", "gen") or not prof:
+        return None
+    out = ctx.sh(["dt-cloud", "static-names", "runs", "lag", ctx.scan], env={"STATIC_NAMES_PROFILE": str(prof)}, fatal=False,
+                 warn=f"static-names runs lag failed for {ctx.scan}", capture=True, allowed_codes=(UNMERGED,))
+    lag = json.loads(out) if out else None
+    if lag and ctx.last is not None and ctx.last.returncode == UNMERGED and (not probe or "static-names" in ctx.profile.skip):
+        ctx.run.alert("warn", f"static name index: {lag['runs']} unmerged runs above its base (levels {' '.join(map(str, lag['levels']))}), "
+                              "more than the binary counter leaves: its carries aren't running, and search declines most literals over "
+                              "that many tiers; run `dt-cloud static-names runs merge`")
+    if lag and lag["episode"] == "start":
+        why = " (this deployment skips its static-names step)" if "static-names" in ctx.profile.skip else (
+            f" (static-names skipped: {r})" if (r := ctx.recorded_skip("static-names")) else "")
+        ctx.run.alert("warn", f"static name index lags: its newest scan is {lag['newest']}, {len(lag['behind'])} published scans behind "
+                              f"({lag['behind'][0]} … {lag['behind'][-1]}, {lag['s'] / 3600:.1f} h){why}; search refuses them until the "
+                              "catch-up appends them")
+    return lag
+
+
+#: Why a scan's static-names step was skipped (`runs add` exit `BUSY`): its phase note's reason, and the probe's.
+STATIC_NAMES_BUSY = ("another coordinator or a compaction holds the static-names store's lease; search for this scan "
+                     "comes with its append or the next run")
 
 
 @step("publish-r2", stage="serve", soft=True, options={"args": list, "require": list, "keys": list, "barrier": bool})
@@ -967,27 +1118,26 @@ def publish_r2(ctx: Ctx, arg: str | None) -> None:
                                     "remains visible; repair the R2 copy, then resume", hard=True)
 
 
-_iv_primary = primary_only("interval-store", "the site serves another store's scans per scan, and the interval store's "
-                                            "`interval-store/CURRENT.json` is the primary's")
-
-
 def _iv_check(p: ScanProfile) -> list[str]:
     o = p.opts("interval-store")
     bad = [f"options.interval-store.source: {o['source']!r} (one of store, data)"] if o.get("source", "store") not in ("store", "data") else []
     if o.get("source") and o.get("profile"):
         bad.append("options.interval-store.source: only on the one-machine path (the staged one reads its profile's layouts)")
-    return _iv_primary(p) + bad
+    if not p.primary and not o.get("store"):
+        bad.append("options.interval-store.store: required for a secondary store (an independent namespace)")
+    return bad
 
 
 @step("interval-store", stage="serve", soft=True, options={"store": str, "timeout": str, "mem": str, "profile": str, "merge_wait": int,
-                                                             "source": str},
+                                                             "source": str, "compact": str},
       requires=_iv_check)
 def interval_store(ctx: Ctx, arg: str | None) -> None:
     """Append this scan (and any pending) to the change-interval path store beside its current generation, then the
     due carries / compaction (`interval-store add`). Never fatal (`-W`): a failure or the timeout warns, the next run
     catches up. Reads the scans' `path` sorts at `<layer2>/index/<gen>/path-index.parquet` from the store, or with
     `options.interval-store.source: data` from the data store, as `static-names` does (so `publish-r2 -S` needn't copy
-    the sorts to the store: specs/lean-scans.md §1.1).
+    the sorts to the store: specs/lean-scans.md §1.1). `options.interval-store.compact`: the compaction policy (`-C`, e.g.
+    `none` to hold a due compaction while carries continue; default `add`'s).
     `options.interval-store.profile`: the staged path instead (`interval-store append -c`, its per-range stages Batch
     jobs of their own, in this task's image; `merge_wait` seconds on the merge job), for a store too big for one task."""
     if ctx.reproc:
@@ -997,13 +1147,19 @@ def interval_store(ctx: Ctx, arg: str | None) -> None:
 
     timeout = ctx.opt("interval-store", "timeout")
     if ctx.opt("interval-store", "profile"):
+        from .append_runner import BUSY
+
         cmd = ["dt-cloud", "interval-store", "append", "-c", "-w", str(ctx.opt("interval-store", "merge_wait", 0)), ctx.scan]
         env = {"INTERVAL_STORE_PROFILE": str(ctx.opt("interval-store", "profile"))}
         if ctx.env.get("JOB_IMAGE"):
             env["INTERVAL_STORE_IMAGE"] = ctx.env["JOB_IMAGE"]
         ctx.run.begin("interval-store")
         err("+ " + " ".join(cmd))
-        ran = run_grouped(cmd, duration(timeout) if timeout else None, 30.0, env={**ctx.env, **env})
+        with ctx.beating("interval-store") as tail:
+            ran = run_grouped(cmd, duration(timeout) if timeout else None, 30.0, env={**ctx.env, **env}, tail=tail)
+        if ran.rc == BUSY:
+            ctx.run.end("interval-store", 0, note="another coordinator holds the store's lease; it appends this scan")
+            return
         ctx.run.end("interval-store", ran.rc, warn=True, msg="the scan reads per-scan until a later run appends it",
                     timed_out=timeout if ran.timed_out else None, terminated=ran.signal if ran.rc else None)
         return
@@ -1011,38 +1167,48 @@ def interval_store(ctx: Ctx, arg: str | None) -> None:
     if not store:
         err(f"interval-store: not appending {ctx.scan} (no store: options.interval-store.store or R2)")
         return
+    ctx.run.begin("interval-store")
     cur = ctx.sh(["dt-cloud", "interval-store", "current", "-o", store], fatal=False, capture=True)
     if cur is None:
-        err(f"WARN: interval-store current failed: not appending {ctx.scan}")
+        ctx.run.end("interval-store", (ctx.failure or (1, ""))[0], warn=True,
+                    msg=f"interval-store current failed: not appending {ctx.scan}")
         return
     if not cur.strip():
         err(f"no interval store at {store} yet: not appending {ctx.scan}")
+        ctx.run.end("interval-store", 0, note="skipped: no current generation")
         return
     layout = ctx.profile.layout.layer2.replace("{scan}", "{id}") + "index/{gen}/path-index.parquet"
     source = ctx.data_uri if ctx.opt("interval-store", "source", "store") == "data" else store
     cmd = ["dt-cloud", "interval-store", "add", "-L", layout, "-s", source, "-o", store, "-w", str(ctx.work / "interval-store"),
-           *(["-M", ctx.opt("interval-store", "mem")] if ctx.opt("interval-store", "mem") else []), "-p", str(ctx.nproc)]
-    ctx.run.begin("interval-store")
+           *(["-M", ctx.opt("interval-store", "mem")] if ctx.opt("interval-store", "mem") else []), "-p", str(ctx.nproc),
+           *(["-C", str(ctx.opt("interval-store", "compact"))] if ctx.opt("interval-store", "compact") else [])]
     err("+ " + " ".join(cmd))
-    ran = run_grouped(cmd, duration(timeout) if timeout else None, 30.0, env=ctx.env)
+    with ctx.beating("interval-store") as tail:
+        ran = run_grouped(cmd, duration(timeout) if timeout else None, 30.0, env=ctx.env, tail=tail)
     ctx.run.end("interval-store", ran.rc, warn=True, msg="the scan reads per-scan until a later run appends it",
                 timed_out=timeout if ran.timed_out else None, terminated=ran.signal if ran.rc else None)
 
 
 def _sync_args(ctx: Ctx) -> list[str]:
-    """Both halves' arguments: the generation, the store, and `options.index-sync.variants` (`-v` each; default every
-    variant the generation holds). A local `data:` dir (the local executor's) is not what the site reads: `-b` names
+    """Both halves' arguments: the generation, the store, `options.index-sync.variants` (`-v` each; default every
+    variant the generation holds) and `options.index-sync.d1_rows: false` (`-R`: the cold footer files and the pointers,
+    no row group in D1; specs/lean-scans.md §1.4). A local `data:` dir (the local executor's) is not what the site reads: `-b` names
     the R2 bucket (`publish-r2` filled it first), where the pointer flip checks the generation is uploaded."""
     site = ["-b", f"r2://{ctx.env['R2_BUCKET']}"] if ctx.profile.data_bucket is None and ctx.has(*R2) else []
     return [*store_args(ctx), *site, "-d", str(ctx.data_root / ctx.index_key), "-g", ctx.gen, "-k", ctx.index_key,
-            *[a for v in ctx.opt("index-sync", "variants", []) for a in ("-v", v)]]
+            *[a for v in ctx.opt("index-sync", "variants", []) for a in ("-v", v)],
+            *([] if ctx.opt("index-sync", "d1_rows", True) else ["-R"])]
 
 
 def _sync_check(p: ScanProfile) -> list[str]:
     from .index_footer import INDEX_VARIANTS
 
+    o = p.opts("index-sync")
     return [f"options.index-sync.variants: {v!r} is not an index variant (one of {', '.join(INDEX_VARIANTS)})"
-            for v in p.opts("index-sync").get("variants", []) if v not in INDEX_VARIANTS]
+            for v in o.get("variants", []) if v not in INDEX_VARIANTS] + (
+        [] if o.get("d1_rows", True) or p.primary else
+        [f"store {p.store}: options.index-sync.d1_rows: false is for the primary store (a secondary store never reads the "
+         "interval store: every read of it would plan from cold footers)"])
 
 
 @step("index-rows", skippable=False, stage="serve", soft=True)
@@ -1056,13 +1222,16 @@ def index_rows(ctx: Ctx, arg: str | None) -> None:
         ctx.sh(["dt-cloud", "index-sync", "-r", *_sync_args(ctx), ctx.scan], fatal=False, warn="index-sync -r failed (the pointer flip will refuse)")
 
 
-@step("index-sync", skippable=False, stage="sync", soft=True, options={"retain": int, "variants": list}, requires=_sync_check)
+@step("index-sync", skippable=False, stage="sync", soft=True, options={"retain": int, "variants": list, "d1_rows": bool},
+      requires=_sync_check)
 def index_sync(ctx: Ctx, arg: str | None) -> None:
     """List the scan: flip its pointers (`index-sync -p`, which checks the rows `index-rows` uploaded), last of the
     serving steps, so a listed scan is whole (searchable, on R2, in the interval store); then drop superseded
     generations' D1 rows (`index-gc <scan>`; `options.index-sync.retain` N: also retire the row groups of every scan
     older than the newest N, read from their cold footer files after, D1's size cap). `options.index-sync.variants`:
-    only those variants, in both halves (`index-rows` reads them here too)."""
+    only those variants, in both halves (`index-rows` reads them here too). `options.index-sync.d1_rows: false`: no
+    row group in D1, in both halves (`-R`), for a primary store whose site reads the interval store
+    (specs/lean-scans.md §1.4)."""
     with ctx.phase("index-sync"):
         if not ctx.has(*CF):
             err("WARN: no CLOUDFLARE_API_TOKEN/ACCOUNT_ID: tiers published but not synced (scan unlisted)")
@@ -1086,7 +1255,7 @@ def over_time(ctx: Ctx, arg: str | None) -> None:
         out = ctx.sh(["dt-cloud", "over-time-groups", *store_args(ctx), "-g", ctx.gen, "-o", ctx.work / "over-time", "-p", root,
                       *(["-m", ctx.opt("over-time", "mem")] if ctx.opt("over-time", "mem") else []),
                       *(["-t", ctx.opt("over-time", "threads")] if ctx.opt("over-time", "threads") else [])],
-                     capture=True, fatal=False, warn="over-time groups failed (the series keeps its per-scan reads)")
+                     capture=True, fatal=False, warn="over-time groups failed (the series uses its configured path store)")
         if out is None or archive:
             return
         for gid in json.loads(out or "{}").get("groups", []):
@@ -1109,13 +1278,14 @@ def index_gc(ctx: Ctx, arg: str | None) -> None:
 
 
 @step("dups", core=False, soft=True, options={"floor": int, "check": int, "check_objects": int, "suspect_copies": int,
-                                               "mem": str, "threads": int})
+                                               "mem": str, "threads": int, "listing": bool})
 def dups(ctx: Ctx, arg: str | None) -> None:
     """The scan's duplicate-candidate groups (`dt-cloud dups`, specs/dups.md §1) beside its index:
     `<layer2>index/<gen>/dups.{parquet,json}` (`dups.json` last, the skip-if-done mark), read from the scan's `bysize`
     sort (its `tot` prunes the read to the paths over the floor), else its `path` sort. Options: `floor` (bytes),
-    `suspect_copies`, `check` (spot-check the top N groups' copies on GCS), `check_objects`, `mem`, `threads`. Off
-    unless the profile lists it in `steps`; never fatal."""
+    `suspect_copies`, `check` (spot-check the top N groups' copies on GCS), `check_objects`, `mem`, `threads`,
+    `listing` (`-l` each source's raw listing shards in the data store: copies proven `exact` by their objects'
+    crc32c, which the listing carries with `options.list.bulk_args: [-c]`). Off unless the profile lists it in `steps`; never fatal."""
     key_dir = ctx.data_root / ctx.index_key
     if ctx.done(key_dir / "dups.json", "dups"):
         return
@@ -1124,13 +1294,44 @@ def dups(ctx: Ctx, arg: str | None) -> None:
     out = ctx.work / "dups"
     flags = {"floor": "-f", "check": "-g", "check_objects": "-n", "suspect_copies": "-s", "mem": "-m", "threads": "-t"}
     args = [a for k, f in flags.items() if ctx.opt("dups", k) is not None for a in (f, ctx.opt("dups", k))]
+    if ctx.opt("dups", "listing", False):
+        if ctx.profile.layout.listing is None:  # an importing profile's listings stay in its list tasks' scratch
+            err("dups: options.dups.listing without layout.listing: no exact verdicts")
+        else:
+            args += [a for src in ctx.profile.sources
+                     for a in ("-l", f"{ctx.data_root / ctx.listing_key(src.bucket)}/shard-*.parquet")]
     with ctx.phase("dups"):
         r = ctx.sh(["dt-cloud", "dups", "-d", ctx.scan, *args, "-T", ctx.work / "dups-tmp", "-o", out, src], fatal=False,
-                   fails_phase=True, warn="dups failed (the scan's other outputs stand)")
+                   warn="dups failed (the scan's other outputs stand)")
         if r is None:
             return
         copy_atomic(out / "dups.parquet", key_dir / "dups.parquet")
         copy_atomic(out / "dups.json", key_dir / "dups.json")
+
+
+def _age_check(p: ScanProfile) -> list[str]:
+    o = p.opts("age-store")
+    return [f"options.age-store.{key}: required" for key in ("store", "gen") if not o.get(key)]
+
+
+@step("age-store", core=False, soft=True, options={"store": str, "gen": str, "keep": int, "execute": bool, "copies": list, "threads": int, "mem": str},
+      requires=_age_check)
+def age_store(ctx: Ctx, arg: str | None) -> None:
+    """Append verified histogram cells, then retire covered old pyramids on each copy. Runs before path retirement."""
+    if ctx.reproc:
+        err("age-store off under REPROC")
+        return
+    o = ctx.profile.opts("age-store")
+    layout = ctx.profile.layout.layer2.replace("{scan}", "{id}") + "index/{gen}/age-pyramid-1h.parquet"
+    roots = list(dict.fromkeys([ctx.data_uri, *o.get("copies", [])]))
+    argv = ["dt-cloud", "age-store", "-g", o["gen"], "-L", layout, "-o", o["store"], "-s", ctx.data_uri,
+            "-T", ctx.profile.store, "-t", ctx.scan, "-w", ctx.work / "age-store", "-k", o.get("keep", 2),
+            *(a for root in roots for a in ("-r", root)), *(["-x"] if o.get("execute") else []),
+            *(["-p", o["threads"]] if o.get("threads") else []), *(["-M", o["mem"]] if o.get("mem") else [])]
+    with ctx.phase("age-store"), cleanup(ctx.work / "age-store"):
+        if ctx.sh(argv, fatal=False, warn="age-store failed (uncovered histogram inputs stay)") is not None and o.get("execute"):
+            ctx.sh(["dt-cloud", "store-gc", "-t", "interval-store", "-l", "-x", "-o", o["store"]], fatal=False,
+                   warn="age-store generation cleanup failed (the next run retries)")
 
 
 def _retire_check(p: ScanProfile) -> list[str]:
@@ -1141,18 +1342,29 @@ def _retire_check(p: ScanProfile) -> list[str]:
     return problems
 
 
+@contextmanager
+def cleanup(path: Path) -> Iterator[None]:
+    """`path` removed on the way out, whether the block finished or raised."""
+    try:
+        yield
+    finally:
+        shutil.rmtree(path, ignore_errors=True)
+
+
 @step("retire", core=False, soft=True, options={"keep": int, "execute": bool, "static_gen": str, "static_store": str, "store": str,
-                                                "layer2": bool, "layer1": bool, "copies": list, "backup": str, "markers_only": bool},
+                                                "layer2": bool, "layer1": bool, "cache": bool, "copies": list, "backup": str, "markers_only": bool,
+                                                "verify_jobs": int},
       requires=_retire_check)
 def retire(ctx: Ctx, arg: str | None) -> None:
     """Retire the per-scan sorts, footers, search sidecars (and, `layer2: true`, layer-2 listings; `layer1: true`, the raw
-    listing shards under `layout.listing`) of every scan but the
+    listing shards under `layout.listing`; `cache: true`, its `dir-cache/`) of every scan but the
     newest `keep` that both stores hold and a parity marker vouches for (`dt-cloud scan retire`; specs/lean-scans.md §2).
     Off unless the profile lists it in `steps`; a dry run (the plan in the log) unless `execute: true`. The data store
     first (`$R2_ARCHIVE` when the data store is a local dir), then each of `copies` (a root, or `r2` for `$R2_ARCHIVE`; D1 left
     to the first). `store` / `static_store`: the
     stores (default the interval-store / static-names steps', else `$R2_ARCHIVE`); `static_gen` (default
-    `options.static-names.gen`); `backup`: copy what goes there first; `markers_only`: never verify in the task. Never
+    `options.static-names.gen`); `backup`: copy what goes there first; `markers_only`: never verify in the task;
+    `verify_jobs`: verify that many shares of the scans at once (`-J`; a backlog's retire then costs its slowest share). Never
     fatal: a failure warns, the files stay, the next run retries."""
     if ctx.reproc:
         err("retire off under REPROC")
@@ -1172,28 +1384,39 @@ def retire(ctx: Ctx, arg: str | None) -> None:
             err("retire: options.retire.layer1 without layout.listing: raw listings kept")
         else:
             l1 = ["-1", ctx.profile.layout.listing.replace("{scan}", "{id}") + "*/shard-*.parquet"]
-    common = ["-G", static_gen, "-k", o["keep"], "-L", l2 + "index/{gen}/path-index.parquet", *(["-l", l2 + "*.parquet"] if o.get("layer2") else []), *l1,
-              *(["-m"] if o.get("markers_only") else []), "-o", store, "-S", static_store, *store_args_t(ctx), "-w", ctx.work / "retire",
+    cache = []
+    if o.get("cache"):
+        if ctx.profile.layout.listing is None:
+            err("retire: options.retire.cache without layout.listing: rollup caches kept")
+        else:
+            # `path-index -c`'s cache (`listing_key("dir-cache")`), one dir per index part under a sharded index
+            dc = ctx.profile.layout.listing.replace("{scan}", "{id}") + "dir-cache/"
+            cache = ["-c", dc + "*.parquet", "-c", dc + "*/*.parquet"]
+    common = ["-G", static_gen, "-k", o["keep"], "-L", l2 + "index/{gen}/path-index.parquet", *(["-l", l2 + "*.parquet"] if o.get("layer2") else []), *l1, *cache,
+              *(["-m"] if o.get("markers_only") else []), *(["-J", o["verify_jobs"]] if o.get("verify_jobs") else []), "-o", store, "-S", static_store, *store_args_t(ctx), "-w", ctx.work / "retire",
               *(["-x"] if o.get("execute") else [])]
     # A local data store is the task's scratch (only this scan's files): the scans' files and D1 rows are the archive's.
     first = archive if ctx.profile.data_bucket is None and archive else ctx.data_uri
     roots = [r for r in dict.fromkeys([first, *(archive if c == "r2" else c for c in o.get("copies", []))]) if r]
-    with ctx.phase("retire", note=None if o.get("execute") else "dry run"):
+    # The work dir holds the served store the verify downloads: removed whatever happens, so a failed retire never
+    # leaves the steps after it (soft steps on the same disk) without space
+    with ctx.phase("retire", note=None if o.get("execute") else "dry run"), cleanup(ctx.work / "retire"):
         for i, root in enumerate(roots):
             # a copy after the D1 pass: its rows are that pass's (`-D`: no "-R leaves D1 rows" warning in a dry run)
             d1 = [] if i == 0 and ctx.has(*CF) else ["-R", *(["-D"] if ctx.has(*CF) else [])]
             backup = ["-b", o["backup"]] if i == 0 and o.get("backup") else []
-            ctx.sh(["dt-cloud", "scan", "retire", *backup, *common, *d1, "-s", root], fatal=False, fails_phase=True,
+            ctx.sh(["dt-cloud", "scan", "retire", *backup, *common, *d1, "-s", root], fatal=False,
                    warn=f"retire failed on {root} (its per-scan files stay; the next run retries)")
 
 
-@step("store-gc", core=False, soft=True, options={"execute": bool, "grace": int, "store": str})
+@step("store-gc", core=False, soft=True, options={"execute": bool, "grace": int, "store": str, "copies": list, "static_gens": list})
 def store_gc(ctx: Ctx, arg: str | None) -> None:
     """Superseded interval-store generations (`dt-cloud store-gc -l`): what the current generation was compacted or
     backfilled from, past the grace (`grace` seconds, default 3 days), its parity markers moved first; on the interval
     store (`store`, default the interval-store step's, else `$R2_ARCHIVE`) and on `$R2_ARCHIVE` when that's another
-    copy. Off unless the profile lists it in `steps`; a dry run unless `execute: true`. Static-names generations aren't
-    in it: which one each site reads isn't the job's to know (`store-gc -t static-names -k …` by hand)."""
+    copy. Off unless the profile lists it in `steps`; a dry run unless `execute: true`. Explicit `copies` overrides the
+    archive copy. Optional `static_gens` names every live static lineage root: cleanup protects each root and its
+    newest successor, plus the native current pointer, before collecting older generations past the grace."""
     if ctx.reproc:
         err("store-gc off under REPROC")
         return
@@ -1205,8 +1428,13 @@ def store_gc(ctx: Ctx, arg: str | None) -> None:
     args = ["-t", "interval-store", "-l", *(["-G", ctx.opt("store-gc", "grace")] if ctx.opt("store-gc", "grace") is not None else []),
             *(["-x"] if ctx.opt("store-gc", "execute") else [])]
     with ctx.phase("store-gc", note=None if ctx.opt("store-gc", "execute") else "dry run"):
-        for root in dict.fromkeys(r for r in (store, archive) if r):
+        for root in dict.fromkeys(r for r in [store, *ctx.opt("store-gc", "copies", [archive])] if r):
             ctx.sh(["dt-cloud", "store-gc", *args, "-o", root], fatal=False, warn=f"store-gc failed on {root} (the generations stay)")
+        if ctx.opt("store-gc", "static_gens") and archive:
+            static = ["-t", "static-names", *(a for g in ctx.opt("store-gc", "static_gens") for a in ("-k", g)),
+                      *(["-x"] if ctx.opt("store-gc", "execute") else [])]
+            ctx.sh(["dt-cloud", "store-gc", *static, "-o", archive], fatal=False,
+                   warn="static generation cleanup failed (the generations stay)")
 
 
 def store_args_t(ctx: Ctx) -> list[str]:
@@ -1218,15 +1446,16 @@ def _snap_root(ctx: Ctx) -> str:
     return f"{ctx.env.get('R2_ARCHIVE') or ctx.data_uri}/{ctx.snapshots}"
 
 
-@step("non-live", core=False, stage="pre", soft=True, options={"classes": list})
+@step("non-live", core=False, stage="side", soft=True, options={"classes": list})
 def non_live(ctx: Ctx, arg: str | None) -> None:
     """Each source's non-live bytes (`dt-cloud non-live`, specs/non-live-bytes.md phase 1): per class of
     `options.non-live.classes` (each one the sources' provider has: `soft-deleted` on GCS, `noncurrent` /
     `delete-marker` on S3, `mpu`), the bytes the listing of current objects misses, totaled per bucket into
     `<layer2>non-live/<bucket>.parquet` (a few rows: kept per scan, the totals' history) and the scan's snapshot
-    `non-live.json` (every bucket's rows: what the site reads beside `meta.json`). A `pre` step, beside `list`: the
-    snapshot dir reaches R2 with the scan's others (`publish-r2`). Read-only; off unless the profile lists it in
-    `steps`. Never fatal: a failure warns, the scan's other outputs stand."""
+    `non-live.json` (every bucket's rows: what the site reads beside `meta.json`). A `side` step: its own task from the
+    scan's start, beside `list` and `index`, which never wait on it (gcs's soft-deleted listings take ~18 min); only
+    `publish-r2` (its snapshot dir reaches R2 with the scan's others) and the post steps do. Read-only; off unless the
+    profile lists it in `steps`. Never fatal: a failure warns, the scan's other outputs stand."""
     classes = ctx.opt("non-live", "classes", [])
     if not classes:
         err("non-live: no options.non-live.classes: nothing measured")
@@ -1234,17 +1463,21 @@ def non_live(ctx: Ctx, arg: str | None) -> None:
     from .non_live import PROVIDER_CLASSES, split_uri
 
     with ctx.phase("non-live"):
+        # each source measures the classes its provider has (an hf:// source none: the Hub's held bytes are in its
+        # listing, `@history`); a deployment of mixed providers lists the union. Sources sharing classes and endpoint
+        # go in one call, measured `-P` at once (gcs's buckets one after another took ~45 min of `pre`).
+        groups: dict[tuple[tuple[str, ...], str | None], list[str]] = {}
         for src in ctx.profile.sources:
-            # each source measures the classes its provider has (an hf:// source none: the Hub's held bytes are in
-            # its listing, `@history`); a deployment of mixed providers lists the union
             has = [] if src.kind == "hf" else [c for c in classes if c in PROVIDER_CLASSES[split_uri(src.uri)[0]]]
             if not has:
                 continue
             endpoint = src.endpoint or (ctx.env.get("R2_ENDPOINT") if src.kind == "r2" else None)
+            groups.setdefault((tuple(has), endpoint), []).append(src.uri)
+        for (has, endpoint), uris in groups.items():
             ctx.sh(["dt-cloud", "non-live", "-c", ",".join(has), *(["-E", endpoint] if endpoint else []),
                     "-j", ctx.data_root / ctx.snapshots / ctx.scan / "non-live.json",
-                    "-o", ctx.data_root / ctx.layer2 / "non-live" / f"{src.bucket}.parquet", src.uri],
-                   fatal=False, warn=f"non-live failed on {src.uri} (the scan's other outputs stand)")
+                    "-o", ctx.data_root / ctx.layer2 / "non-live" / "{bucket}.parquet", *uris],
+                   fatal=False, warn=f"non-live failed on {', '.join(uris)} (the scan's other outputs stand)")
 
 
 @step("healthcheck", core=False, soft=True)
@@ -1271,13 +1504,51 @@ def warm_cache(ctx: Ctx, arg: str | None) -> None:
 
 @step("probe", soft=True, requires=primary_only("probe", "its requests carry no `store=`: it would probe the primary's views"))
 def probe(ctx: Ctx, arg: str | None) -> None:
-    """Replay the site's page loads uncached (`probe -c`): one cold-latency record per scan under `probes/<subdir>/`."""
-    with ctx.phase("probe"):
-        if ctx.reproc or not ctx.has("SITE_TOKEN", "SITE_URL"):
-            return
-        sub = ctx.profile.layout.snapshots
-        ctx.sh(["dt-cloud", "probe", "-c", "-u", ctx.env["SITE_URL"], "-o", f"{ctx.data_uri}/probes/{sub + '/' if sub else ''}"],
-               fatal=False, warn=f"serving probe failed for {ctx.scan} (a 5xx or a dropped request; data is fine)")
+    """Replay the site's page loads uncached (`probe -c`): one cold-latency record per scan under `probes/<subdir>/`.
+    When this run's record says its static-names step was skipped (`Ctx.recorded_skip`), the probe gets that reason
+    (`-i`) and skips the search's `scan-not-indexed` refusals for it; otherwise they fail it. The phase's note is the
+    probe's verdict (`n passed, n skipped (reason), n failed`), on a failure too. When every failure was that refusal
+    (the static name index lags the scan: its data is published), the phase is done, its note `search behind: …` in
+    plain words (/scans: "search behind", not "partial"); `static_lag` alerts once per lag episode."""
+    lagged = False
+    try:
+        with ctx.phase("probe"):
+            if ctx.reproc or not ctx.has("SITE_TOKEN", "SITE_URL"):
+                return
+            sub = ctx.profile.layout.snapshots
+            unindexed = ctx.recorded_skip("static-names")
+            ctx.sh(["dt-cloud", "probe", "-c", "-u", ctx.env["SITE_URL"], "-o", f"{ctx.data_uri}/probes/{sub + '/' if sub else ''}",
+                    "-j", *(["-i", unindexed] if unindexed else [])], fatal=False, capture=True,
+                   warn=f"serving probe failed for {ctx.scan} (an HTTP or transport error; data is fine)")
+            summary = _probe_summary(ctx.last.stdout if ctx.last is not None else None)
+            verdict = ctx.note = summary["line"] if summary else None
+            if ctx.failure and summary and summary.get("failed") and summary.get("lag") == summary["failed"]:
+                lagged = True
+                ctx.failure, ctx.note = None, behind_note(static_lag(ctx, probe=True), summary)
+            elif ctx.failure and verdict:
+                ctx.failure = (ctx.failure[0], f"serving probe failed for {ctx.scan}: {verdict}")
+    finally:
+        # whatever the probe did, or without a site to probe
+        if not lagged:
+            static_lag(ctx, probe=True)
+
+
+def _probe_summary(stdout: str | None) -> dict | None:
+    """`probe -j`'s record's summary (`passed`, `skipped`, `failed`, `lag`, the verdict `line`); None when it printed
+    no record (it crashed first)."""
+    try:
+        return dict(json.loads(stdout or "")["summary"])
+    except (ValueError, KeyError, TypeError):
+        return None
+
+
+def behind_note(lag: dict | None, summary: dict) -> str:
+    """The probe phase's note when search lags the scan: `search behind: <the index's newest scan, how far behind>; <n>
+    of <m> search requests refused (not indexed yet)`."""
+    n = summary["passed"] + summary["skipped"] + summary["failed"]
+    where = (f"the static name index covers scans through {lag['newest']}, {len(lag['behind'])} published "
+             f"scan{'s' * (len(lag['behind']) != 1)} behind ({lag['s'] / 3600:.1f} h)") if lag and lag.get("behind") else "the static name index doesn't cover this scan yet"
+    return f"search behind: {where}; {summary['lag']} of {n} probe requests refused as not indexed yet"
 
 
 #: A digest platform → the env its transport needs (`dt-cloud digest -P`).
@@ -1309,7 +1580,7 @@ def digest(ctx: Ctx, arg: str | None) -> None:
                 continue
             ctx.sh(["dt-cloud", "digest", "-T", ctx.opt("digest", "template"), "-C", ctx.opt("digest", "config"), "-P", platform,
                     *ctx.opt("digest", "args", []), "-r", _digest_root(ctx)], fatal=False,
-                   warn=f"{platform} usage-digest step failed", fails_phase=True,
+                   warn=f"{platform} usage-digest step failed",
                    env={"CLOUDFLARE_API_TOKEN": ctx.env["CF_PAGES_TOKEN"]} if ctx.has("CF_PAGES_TOKEN") else None)
 
 
@@ -1317,6 +1588,88 @@ def _digest_root(ctx: Ctx) -> str:
     """The digest's snapshots root: `options.digest.root` (`{snapshots}` filled), else the data store's."""
     root = ctx.opt("digest", "root", None)
     return root.format(snapshots=ctx.snapshots) if root else f"{ctx.data_uri}/{ctx.snapshots}"
+
+
+#: Where the daily usage snapshots go, under the data store (and the R2 archive): one key space per deployment, beside
+#: the scans' `snapshots/<subdir>/` (`usage` is never a scan id).
+USAGE_PREFIX = "snapshots/usage"
+
+
+@step("cf-usage", core=False, soft=True, options={"config": str, "days": int},
+      requires=primary_only("cf-usage", "the usage snapshots are the deployment's, written once by its primary"))
+def cf_usage(ctx: Ctx, arg: str | None) -> None:
+    """The deployment's Cloudflare usage per day (`dt-cloud cf-usage -o`, specs/usage-metrics.md): `<data>/snapshots/
+    usage/<date>.json` (+ the R2 archive's copy, which the site's `/admin/usage` reads under `SERVED_R2`) for each of
+    the `options.cf-usage.days` (7) whole UTC days before today that a copy lacks: a missed day is backfilled the next
+    run. `options.cf-usage.config`: the deployment's Pages wrangler config in the image (`site/wrangler.toml`). Skipped
+    without `CF_ANALYTICS_TOKEN` (Account Analytics: Read; the profile's `secrets`) or on REPROC; never fatal. Not core:
+    a deployment lists it in `steps` once its token is a secret (a core step would need every store profile to skip it)."""
+    if ctx.reproc or not ctx.has("CF_ANALYTICS_TOKEN"):
+        err("no CF_ANALYTICS_TOKEN, or REPROC: skipping the Cloudflare usage snapshots")
+        return
+    with ctx.phase("cf-usage"):
+        outs = [f"{ctx.data_uri}/{USAGE_PREFIX}"]
+        if ctx.env.get("R2_ARCHIVE"):
+            outs.append(f"{ctx.env['R2_ARCHIVE']}/{USAGE_PREFIX}")
+        ctx.sh(["dt-cloud", "cf-usage", "-c", ctx.opt("cf-usage", "config", "site/wrangler.toml"),
+                "-d", str(ctx.opt("cf-usage", "days", 7)), *(a for o in outs for a in ("-o", o))],
+               fatal=False, warn="cf-usage snapshots failed (the scan's outputs stand; the next run backfills)")
+
+
+#: Where the daily GCP cost snapshots go, beside the usage ones: one key space per cloud, `snapshots/cost/<cloud>/`
+#: (`cost` is never a scan id).
+GCP_COST_PREFIX = "snapshots/cost/gcp"
+
+
+def deployment_selector(env: Mapping[str, str]) -> str | None:
+    """`$DISKY_LABELS`' `app` and `deployment` as a Batch job selector (every job the deployment submits carries
+    them, `cost_labels`); None when it doesn't name both."""
+    from .cost_labels import REQUIRED, env_labels
+
+    labels = env_labels(dict(env))
+    return ",".join(f"{k}={labels[k]}" for k in REQUIRED) if all(labels.get(k) for k in REQUIRED) else None
+
+
+@step("gcp-cost", core=False, soft=True,
+      options={"buckets": list, "bucket-labels": str, "job-labels": str, "locations": list, "project": str,
+               "window": str, "horizons": str, "prices": str},
+      requires=primary_only("gcp-cost", "the cost snapshots are the deployment's, written once by its primary"))
+def gcp_cost(ctx: Ctx, arg: str | None) -> None:
+    """The deployment's GCP storage and Batch compute cost, now and projected (`dt-cloud cost -o`): today's
+    `<data>/snapshots/cost/gcp/<date>.json` (+ the R2 archive's copy, which the site's `/admin/cost/gcp` reads under
+    `SERVED_R2`); a second run the same day replaces it. Storage: `options.gcp-cost.buckets` (`-b`) and / or
+    `bucket-labels` (`-l`); compute: `job-labels` (`-J`), else `$DISKY_LABELS`' `app` + `deployment`. `locations`
+    (`-L`), `project` (`-p`; default `$GCP_PROJECT`, else ADC's), `window` (30d), `horizons` (1y,2y), `prices` (a
+    YAML in the image, `-P`). Skipped with nothing to measure (no GCP: e.g. the r2 demo) or on REPROC; never fatal.
+    Not core, as `cf-usage`."""
+    if ctx.reproc:
+        err("REPROC: skipping the GCP cost snapshot")
+        return
+    buckets = ctx.opt("gcp-cost", "buckets", [])
+    bucket_labels = ctx.opt("gcp-cost", "bucket-labels", None)
+    job_labels = ctx.opt("gcp-cost", "job-labels", None) or deployment_selector(ctx.env)
+    if not (buckets or bucket_labels or job_labels):
+        err("gcp-cost: nothing to measure (options.gcp-cost.buckets / bucket-labels / job-labels, or $DISKY_LABELS): "
+            "skipping the GCP cost snapshot")
+        return
+    with ctx.phase("gcp-cost"):
+        outs = [f"{ctx.data_uri}/{GCP_COST_PREFIX}"]
+        if ctx.env.get("R2_ARCHIVE"):
+            outs.append(f"{ctx.env['R2_ARCHIVE']}/{GCP_COST_PREFIX}")
+        argv = ["dt-cloud", "cost", "-n", ctx.profile.deployment,
+                "-w", ctx.opt("gcp-cost", "window", "30d"), "-H", ctx.opt("gcp-cost", "horizons", "1y,2y")]
+        if project := ctx.opt("gcp-cost", "project", None):
+            argv += ["-p", project]
+        argv += [a for b in buckets for a in ("-b", b)]
+        if bucket_labels:
+            argv += ["-l", bucket_labels]
+        if job_labels:
+            argv += ["-J", job_labels]
+        argv += [a for loc in ctx.opt("gcp-cost", "locations", []) for a in ("-L", loc)]
+        if prices := ctx.opt("gcp-cost", "prices", None):
+            argv += ["-P", prices]
+        ctx.sh([*argv, *(a for o in outs for a in ("-o", o))],
+               fatal=False, warn="gcp-cost snapshot failed (the scan's outputs stand; the next run writes its day)")
 
 
 #: Core steps a profile may `skip`.
@@ -1436,6 +1789,10 @@ def run_step(name: str, arg: str | None, env: dict[str, str] | None = None, prof
     try:
         profile = load_profile_env(env, profile_path)
         ctx = make_ctx(profile, env)
+    except StepFailed as e:
+        err(f"scan step {name}: {e}")
+        return e.rc or 1
+    try:
         s.fn(ctx, arg)
         return 0
     except StepFailed as e:

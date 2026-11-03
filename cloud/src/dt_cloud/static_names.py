@@ -35,12 +35,13 @@ import sys
 from functools import partial
 from pathlib import Path
 from time import monotonic
-from typing import Iterable, Iterator
+from typing import Callable, Iterable, Iterator
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 from click import IntRange, argument, group, option
 
+from . import heartbeat as hb
 from .hex_runs import HexRule, first_occurrence, kept_sql, occurs, rule_from_json
 from .scan_id import SCAN_ID, check_order, scan_epoch, scan_label  # noqa: F401 (re-exported: the stages' scan-id helpers)
 from .static_profile import data_bucket, layouts as profile_layouts, profile, scratch_bucket
@@ -286,6 +287,43 @@ def intervals_sql(con, sources: list[tuple[str, int, int | None]], preds: list[s
     return stamped_sql(runs, KEY_COLS, state_cols, [e for _, e, _ in sources], OPEN)
 
 
+def rss_peak_gb() -> float:
+    """This process's peak RSS so far, GiB (`ru_maxrss`: bytes on macOS, KiB on Linux)."""
+    import resource
+
+    m = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return round(m / ((1 << 30) if sys.platform == "darwin" else (1 << 20)), 2)
+
+
+class Progress:
+    """A loop's progress lines: `label k/n`, rows so far, seconds, and the rest's estimate, at most one per `every_s`
+    (and the last), so a stalled fold shows within minutes instead of at the end of its sub-step. The process's stage
+    (`heartbeat.set_stage`: its liveness line) is `label`, its detail `k/n`."""
+
+    def __init__(self, label: str, n: int, log: Callable[[str], None], every_s: float = hb.PROGRESS_S):
+        self.label, self.n, self.log, self.every_s = label, n, log, every_s
+        self.t0 = self.last = monotonic()
+        self.rows = self.done = 0
+        hb.set_stage(label)
+        hb.set_detail(f"0/{n}")
+
+    def finish(self, rows: int) -> None:
+        """One more item done, however many loops (`static_compact._pool` calls) share this progress: `tick` its count."""
+        self.done += 1
+        self.tick(self.done - 1, rows)
+
+    def tick(self, k: int, rows: int) -> None:
+        self.rows += rows
+        hb.set_detail(f"{k + 1}/{self.n}")
+        now = monotonic()
+        if now - self.last < self.every_s and k + 1 < self.n:
+            return
+        self.last = now
+        s = now - self.t0
+        eta = s / (k + 1) * (self.n - k - 1)
+        self.log(f"{self.label} {k + 1}/{self.n}: {self.rows:,} rows in {s:.0f}s (≈{eta:.0f}s left; RSS peak {rss_peak_gb()} GiB)")
+
+
 def connect(threads: int, mem: str, tmp: str | Path | None):
     import duckdb
 
@@ -325,42 +363,137 @@ def each(con, fn, items: list, jobs: int = 1) -> list:
         return [f.result() for f in futures]
 
 
+_UNITS = {"b": 1, "bytes": 1, "kb": 10**3, "mb": 10**6, "gb": 10**9, "tb": 10**12, "kib": 1 << 10, "mib": 1 << 20, "gib": 1 << 30,
+          "tib": 1 << 40}
+
+
+def mem_bytes(text: str) -> int:
+    """A DuckDB memory size (`'4GB'`, `current_setting('memory_limit')`'s `'3.7 GiB'`) in bytes."""
+    m = re.fullmatch(r"\s*([0-9.]+)\s*([A-Za-z]*)\s*", text)
+    if not m or m.group(2).lower() not in _UNITS:
+        raise ValueError(f"a memory size: {text!r}")
+    return int(float(m.group(1)) * _UNITS[m.group(2).lower()])
+
+
+def pool_jobs(con, tasks: int, per: int) -> int:
+    """Processes for `tasks` independent tasks over `con`'s threads, `per` DuckDB threads each (at least 1, at most
+    `tasks`)."""
+    threads = int(con.execute("SELECT current_setting('threads')").fetchone()[0])
+    return max(1, min(tasks, threads // max(1, per)))
+
+
+class ConPool:
+    """`jobs` spawned processes, each task on a DuckDB database of its own (`connect(threads, mem, tmp)`: `con`'s threads
+    and memory limit split `jobs` + 1 ways), `con`'s own limit lowered to the remaining share meanwhile (restored on
+    exit; a database holding more than the share keeps its limit, logged). `jobs` 1: an inline pool, `con` untouched (the
+    tasks then run in this process on databases of their own, as in the pool)."""
+
+    def __init__(self, con, jobs: int, label: str):
+        self.con, self.jobs, self.label = con, jobs, label
+        self.threads = int(con.execute("SELECT current_setting('threads')").fetchone()[0])
+        self.was = con.execute("SELECT current_setting('memory_limit')").fetchone()[0]
+        share = max(mem_bytes(self.was) // (jobs + 1), 1 << 30) if jobs > 1 else mem_bytes(self.was)
+        self.mem = f"{share // (1 << 20)}MiB"
+        self.task_threads = max(1, self.threads // jobs)
+        self.lowered = False
+
+    def __enter__(self):
+        from concurrent.futures import ProcessPoolExecutor
+        from multiprocessing import get_context
+
+        if self.jobs == 1:
+            from .static_append import _Inline
+
+            self.ex = _Inline()
+            return self
+        try:
+            self.con.execute(f"SET memory_limit='{self.mem}'")
+            self.lowered = True
+        except Exception as e:  # noqa: BLE001 — legitimate: a database holding more than its share can't shrink; it keeps its limit
+            err(f"{self.label}: memory limit {self.was} kept ({type(e).__name__}: {e})")
+        self.ex = ProcessPoolExecutor(self.jobs, mp_context=get_context("spawn"), initializer=_pool_init)
+        return self
+
+    def submit(self, fn, *args):
+        return self.ex.submit(fn, *args)
+
+    def __exit__(self, *exc) -> None:
+        try:
+            if self.jobs > 1:
+                self.ex.shutdown(wait=True, cancel_futures=exc[0] is not None)
+        finally:
+            if self.lowered:
+                self.con.execute(f"SET memory_limit='{mem_bytes(self.was) // (1 << 20)}MiB'")
+
+
+def _pool_init() -> None:
+    pa.set_cpu_count(1)
+
+
+class SortedWriter:
+    """`write_sorted` fed incrementally: already-ordered batches through any number of `write` calls (e.g. one per key
+    sub-range, in key order), then `close`, writing exact `rg_rows`-row groups (the last may be short), so the file's
+    bytes depend only on its rows — not on how they were split across calls or batches. `on_group(table)` sees each
+    row group as written. `rows`: the rows written."""
+
+    def __init__(self, out: Path, schema: pa.Schema, rg_rows: int, on_group=None, dictionary: list[str] | bool = False):
+        out.parent.mkdir(parents=True, exist_ok=True)
+        self.schema, self.rg_rows, self.on_group = schema, rg_rows, on_group
+        self.pending: list[pa.RecordBatch] = []
+        self.n_pending = 0
+        self.rows = 0
+        self.w = pq.ParquetWriter(out, schema, compression=CODEC, use_dictionary=dictionary, write_statistics=True,
+                                  coerce_timestamps="ms", allow_truncated_timestamps=False)
+
+    def _flush(self, final: bool) -> None:
+        if not self.pending:
+            return
+        t = pa.Table.from_batches(self.pending, schema=self.schema).combine_chunks()
+        off = 0
+        while t.num_rows - off >= self.rg_rows or (final and off < t.num_rows):
+            g = t.slice(off, min(self.rg_rows, t.num_rows - off))
+            self.w.write_table(g, row_group_size=self.rg_rows)
+            if self.on_group:
+                self.on_group(g)
+            off += g.num_rows
+        rest = t.slice(off)
+        self.pending, self.n_pending = ([rest.combine_chunks().to_batches()[0]] if rest.num_rows else []), rest.num_rows
+
+    def write(self, batches: Iterable[pa.RecordBatch]) -> None:
+        for b in batches:
+            if b.num_rows == 0:
+                continue
+            b = b.cast(self.schema) if b.schema != self.schema else b
+            self.pending.append(b)
+            self.n_pending += b.num_rows
+            self.rows += b.num_rows
+            if self.n_pending >= self.rg_rows:
+                self._flush(False)
+
+    def close(self) -> int:
+        try:
+            self._flush(True)
+        finally:
+            self.w.close()
+        return self.rows
+
+    def __enter__(self) -> SortedWriter:
+        return self
+
+    def __exit__(self, *exc) -> None:
+        if exc[0] is None:
+            self.close()
+        else:
+            self.w.close()
+
+
 def write_sorted(batches: Iterable[pa.RecordBatch], out: Path, schema: pa.Schema, rg_rows: int,
                  on_group=None, dictionary: list[str] | bool = False) -> int:
     """Write already-ordered batches as exact `rg_rows`-row groups (the last may be short), so the file's
     bytes depend only on its rows. `on_group(table)` sees each row group as written. Returns rows."""
-    out.parent.mkdir(parents=True, exist_ok=True)
-    pending: list[pa.RecordBatch] = []
-    n_pending = 0
-    total = 0
-    with pq.ParquetWriter(out, schema, compression=CODEC, use_dictionary=dictionary, write_statistics=True,
-                          coerce_timestamps="ms", allow_truncated_timestamps=False) as w:
-        def flush(final: bool) -> None:
-            nonlocal pending, n_pending
-            if not pending:
-                return
-            t = pa.Table.from_batches(pending, schema=schema).combine_chunks()
-            off = 0
-            while t.num_rows - off >= rg_rows or (final and off < t.num_rows):
-                g = t.slice(off, min(rg_rows, t.num_rows - off))
-                w.write_table(g, row_group_size=rg_rows)
-                if on_group:
-                    on_group(g)
-                off += g.num_rows
-            rest = t.slice(off)
-            pending, n_pending = ([rest.combine_chunks().to_batches()[0]] if rest.num_rows else []), rest.num_rows
-
-        for b in batches:
-            if b.num_rows == 0:
-                continue
-            b = b.cast(schema) if b.schema != schema else b
-            pending.append(b)
-            n_pending += b.num_rows
-            total += b.num_rows
-            if n_pending >= rg_rows:
-                flush(False)
-        flush(True)
-    return total
+    with SortedWriter(out, schema, rg_rows, on_group, dictionary) as w:
+        w.write(batches)
+    return w.rows
 
 
 def _batches(con, sql: str, size: int = 1 << 17) -> Iterator[pa.RecordBatch]:
@@ -929,6 +1062,15 @@ def upload_tree(local: Path, bucket: str, prefix: str, *, workers: int = 8, last
     return out + [one(p) for p in tail]
 
 
+def base_params(meta: dict, where: str, **given: int | None) -> list[int | None]:
+    """A run's build parameters (`R`, `K`, `floor`, …) from its generation's base (``meta``: its `meta.json`, at
+    ``where``): each given value (a CLI flag) must equal the base's; None takes the base's (None where it has none). A
+    run kept at another `K` than its base would carry, and compact, the wrong rollups."""
+    if bad := [f"{k} {v} (the base's: {meta[k]})" for k, v in given.items() if v is not None and k in meta and v != meta[k]]:
+        raise SystemExit(f"{where}: {', '.join(bad)}: a run is built as its generation's base")
+    return [meta.get(k) if v is None else v for k, v in given.items()]
+
+
 def read_json(uri: str) -> dict:
     if uri.startswith("gs://"):
         from google.cloud import storage
@@ -1462,8 +1604,10 @@ def manifest_cmd(bucket, gen, subdirs) -> None:
 #: (not its census or per-shard cells).
 R2_SERVED = ("sx/", "sidecar/", "sidecar.parquet", "shards.json", "scans.json", "catalog/cells.parquet", "catalog/index.parquet",
              "catalog/meta.json", "catalog/members.json",
-             # the drilldown (static_roots): roots, rollups, their two-level indexes, aliases, meta
-             "drill/meta.json", "drill/aliases.parquet", "drill/long/roots/", "drill/long/rollups/", "drill/short/roots/",
+             # the drilldown (static_roots): roots, rollups, their two-level indexes, aliases, meta; a run's roots new to
+             # the stack (the fleet root's rows) and digest changes (a compaction reading R2: its classes)
+             "drill/meta.json", "drill/aliases.parquet", "drill/long-fresh.parquet", "drill/short-fresh.parquet",
+             "drill/digests-long.parquet", "drill/long/roots/", "drill/long/rollups/", "drill/short/roots/",
              "drill/short/rollups/", "drill/long-roots-index", "drill/long-rollups-index", "drill/short-roots-index",
              "drill/short-rollups-index",
              # anchored search (static_anchors): the name index, the `q$` / `^q$` rollups, their indexes, meta (not `anchors/keys*`, GCS only)

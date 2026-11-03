@@ -32,7 +32,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from urllib.parse import urlparse
 
-from .cost_labels import check_label
+from .cost_labels import ENV as LABELS_ENV, check_label, deployment_labels
 from .scan_profile import PRIMARY_STORE, Disk, Machine, ScanProfile
 from .scan_steps import DATA_MOUNT_ENV, PROFILE_JSON_ENV, STEPS, index_parts, profile_env_value
 
@@ -68,14 +68,10 @@ def history_line(now: dt.datetime, scan: str, session: str) -> str:
 
 
 def labels(profile: ScanProfile, env: Mapping[str, str], scan: str) -> dict[str, str]:
-    """The tasks' Batch labels: the profile's, the stack's (`$DISKY_LABELS`, `k=v,…`), `component: scan`, `scan_id`
-    (lowercased, as `cost_labels` writes it); scan.nf adds `nf-session` and each task's `step`, so a billing export
-    groups a scan's spend by scan and step."""
-    out = dict(profile.labels)
-    for i in (env.get("DISKY_LABELS") or "").split(","):
-        if i.strip():
-            k, _, v = i.strip().partition("=")
-            out[k] = v
+    """The tasks' Batch labels: the profile's, the stack's (`$DISKY_LABELS`, `k=v,…`, refused without `app` and
+    `deployment`: `cost_labels.deployment_labels`), `component: scan`, `scan_id` (lowercased, as `cost_labels` writes
+    it); scan.nf adds `nf-session` and each task's `step`, so a billing export groups a scan's spend by scan and step."""
+    out = {**profile.labels, **deployment_labels(dict(env))}
     out["component"] = "scan"
     out["scan_id"] = scan.lower()
     check_label("scan_id", out["scan_id"])
@@ -99,9 +95,12 @@ def step_secrets(profile: ScanProfile) -> dict[str, list[str]]:
 def params(profile: ScanProfile, profile_json: str, scan: str, gen: str, job_start: str, run_id: str, session: str,
            env: Mapping[str, str], *, reproc: bool = False, fresh: bool = False) -> dict:
     """`scan.nf`'s params file."""
+    task_labels = labels(profile, env, scan)
     enabled = profile.enabled()
     step_env = dict(profile.env)
     step_env.update({k: env[k] for k in profile.passthrough if k in env})
+    # every step's Batch helpers (static names, the interval store, …) label themselves from it (`label_batch_spec`)
+    step_env[LABELS_ENV] = env[LABELS_ENV]
     if reproc:
         step_env["REPROC"] = "1"
     if profile.executor.kind == "google-batch":
@@ -112,13 +111,21 @@ def params(profile: ScanProfile, profile_json: str, scan: str, gen: str, job_sta
         # a source's `secrets`: its list call's whole binding list (else the list step's), when it has its own
         # REPROC runs from `index`, but an adopted listing (`sources[].listing`) is still fetched: its shards have no
         # other copy on a local data dir
+        # a source's `fallback` (spec §7): its list task's machine by submit attempt (`machines`) and queue timeout (a duration)
         "sources": [{"uri": s.uri, "machine": s.machine, "disk": _disk(s.disk),
+                     **({"machines": list(s.types), "queue_timeout": f"{s.queue_timeout}m"} if s.fallback else {}),
                      **({"secrets": _bindings(profile.secrets_for("list", s.uri))} if s.secrets else {})}
                     for s in profile.sources if not reproc or s.listing],
+        # bounds the list tasks' submit retries: only a fallback source's queue timeouts are retried (`list_source`)
+        "list_retries": max((len(s.fallback) for s in profile.sources), default=0),
         "list_default": {"machine": lst.type if lst else None, "disk": _disk(lst.disk) if lst else None},
         "steps": list(enabled),
         "pre": [n for n in enabled if STEPS[n].stage == "pre" and n != "bucket-check"],
         "pre_label": "pre" if "pre" in profile.machines else "small",
+        "static_label": "static" if "static" in profile.machines else "small",
+        # `side` steps (`non-live`): their own task from the start, which only publish-r2 and the post steps wait on
+        "side": [n for n in enabled if STEPS[n].stage == "side"],
+        "side_label": "side" if "side" in profile.machines else "small",
         "interval_label": "interval" if "interval" in profile.machines else "big",
         # the sharded index's parts (`options.index.parts`): one `index_part` task each, before the merging `index`
         "index_parts": [pid for pid, _ in index_parts(profile)],
@@ -133,7 +140,7 @@ def params(profile: ScanProfile, profile_json: str, scan: str, gen: str, job_sta
         "secrets_project": profile.executor.project or "",
         "env": step_env,
         "profile_json": profile_json,
-        "labels": labels(profile, env, scan),
+        "labels": task_labels,
         "cache": not fresh,
         "static_after_publish": not urlparse(profile.data).scheme and "publish-r2" in enabled,
         "queue_size": profile.queue_size,
@@ -272,6 +279,30 @@ def echo_task_logs(trace: Path, work: Path, out=err) -> int:
             out(log.read_text(errors="replace").rstrip("\n"))
             n += 1
     return n
+
+
+def head_beat(env: Mapping[str, str], run_id: str, clock=time.monotonic):
+    """The head's run heartbeat, for its poll loop: `JobRun.beat` (the run row's `updated_ts`) at most every
+    `$DT_HEARTBEAT_S` (default 60 s; first at once), so `/scans` reads a run whose steps wait on Batch VMs as alive. None
+    when `scan-run supervise -H` already beats it (`$DT_SUPERVISE`: its entrypoint) or the heartbeat is off; a gcs-style
+    submit that runs `scan head` as the container's entrypoint has no supervisor, and this is its beat."""
+    from .heartbeat import interval_of
+    from .scan_runs import SUPERVISE_ENV, JobRun
+
+    interval = interval_of(env)
+    if interval is None or (env.get(SUPERVISE_ENV) or "").strip():
+        return None
+    run = JobRun(None, None, False, run_id, None, env=env)
+    last: list[float] = []
+
+    def beat() -> None:
+        now = clock()
+        if last and now - last[0] < interval:
+            return
+        last[:] = [now]
+        run.beat()
+
+    return beat
 
 
 def _record(cmd, args: list[str]) -> None:
@@ -420,9 +451,11 @@ def head(profile_path: Path, nf_dir: Path, launch: Path | None, *, reproc: bool 
     trigger = trigger_of(env)
     run_id = env.get("DT_RUN_ID") or env.get("BATCH_JOB_UID") or ""
     env.update(SNAP_ID=scan, SCAN_ID=scan, GEN=gen, DT_JOB_START=job_start, DT_RUN_ID=run_id)
-    for k in (PROFILE_ENV, "D1_DB_ID", "D1_DB_NAME", "SLACK_ALERT_CHANNEL", "DT_ALERTS"):
+    for k in (PROFILE_ENV, "D1_DB_ID", "D1_DB_NAME", "SLACK_ALERT_CHANNEL", "DT_ALERTS", LABELS_ENV):
         if k in profile.env:
             env.setdefault(k, profile.env[k])
+    # no unlabelled scan: refuse before anything starts or records (specs/done/cost-labels-required.md)
+    deployment_labels(dict(env))
     if reproc:
         env.update(REPROC="1", DT_RECORD="off")
     batch = bool(env.get("BATCH_JOB_UID"))
@@ -476,7 +509,27 @@ def head(profile_path: Path, nf_dir: Path, launch: Path | None, *, reproc: bool 
 
     prev = {s: signal.signal(s, stop) for s in (signal.SIGTERM, signal.SIGINT)}
     try:
-        rc = proc.wait()
+        from .run_dag import cached_tasks
+        from .scan_runs import dag_cmd
+
+        seen_cached: tuple[str, ...] = ()
+        beat = head_beat(env, run_id) if recording and run_id else None
+        while True:
+            if beat is not None:
+                beat()
+            if recording and trace.exists():
+                cached = cached_tasks(trace.read_text())
+                dag = launch / 'dag.mmd'
+                if not dag.exists():
+                    dag = launch / PREVIEW_DAG
+                if cached != seen_cached and dag.exists():
+                    _record(dag_cmd, [run_id, str(dag)])
+                    seen_cached = cached
+            try:
+                rc = proc.wait(timeout=10)
+                break
+            except subprocess.TimeoutExpired:
+                pass
     finally:
         for s, h in prev.items():
             signal.signal(s, h)

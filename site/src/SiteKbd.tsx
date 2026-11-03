@@ -1,10 +1,12 @@
 import { FaGithub } from 'react-icons/fa'
 import { MdBrightnessAuto, MdDarkMode, MdHelpOutline, MdLightMode, MdLink } from 'react-icons/md'
+import { useSyncExternalStore } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
+import { queryStrategy } from 'use-prms'
 import { Omnibar, ShortcutsModal, SpeedDial, useActions, type SpeedDialAction } from 'use-kbd'
 import { SpeedDialTip } from './Tooltip'
 import { useRegistry } from './identities'
-import { hostPair, otherHostUrl, peerUrl, type Peer } from './hosts'
+import { hostPair, otherHostUrl, peerUrl, urlLabel, type Peer } from './hosts'
 import { useHelpPref, useScrollSpyPref } from './prefs'
 import { useStore } from './store'
 import { DEFAULT_STORE, DUPS, STORES } from './stores'
@@ -23,6 +25,12 @@ const HOSTS = hostPair(import.meta.env.VITE_PROD_HOST, import.meta.env.VITE_DEV_
 export const PEERS: Peer[] = (STORES[0]?.peers ?? []).filter(p => p.prod !== import.meta.env.VITE_PROD_HOST)
 /** This page on a peer, from the current location. */
 export const peerHref = (p: Peer, href: string) => peerUrl(href, p, new URL(href).hostname === HOSTS?.dev)
+/** The characters an omnibar row shows before clipping its label's end. */
+const LABEL_MAX = 54
+/** An omnibar label ending in a URL, the URL elided from the middle so the whole fits the row. */
+const toUrl = (prefix: string, href: string) => prefix + urlLabel(href, LABEL_MAX - prefix.length)
+/** The address bar's URL, live: use-prms writes params with `history.replaceState`, which the router never sees. */
+const useHref = () => useSyncExternalStore(cb => queryStrategy.subscribe(cb), () => location.href)
 
 
 /**
@@ -39,6 +47,7 @@ export function SiteKbd({ extra = [], placeholder }: {
 }) {
   const navigate = useNavigate()
   const { pathname } = useLocation()
+  const href = useHref()
   const [theme, cycleTheme] = useTheme()
   const { units, suffixB, toggleUnits, toggleSuffixB } = useUnits()
   const [help, setHelp] = useHelpPref()
@@ -67,7 +76,7 @@ export function SiteKbd({ extra = [], placeholder }: {
     ...(DUPS && store === DEFAULT_STORE ? [['/dups', 'Duplicates — copies across buckets']] as [string, string][] : []),
     ['/scans', 'Scans — job runs'],
     ['/health', 'Health — the stores\' state'],
-    ...(isAdmin ? [['/admin', 'Admin'], ['/admin/db', 'Database'], ['/admin/sessions', 'Session logs']] as [string, string][] : []),
+    ...(isAdmin ? [['/admin', 'Admin'], ['/admin/db', 'Database'], ['/admin/sessions', 'Session logs'], ['/admin/latency', 'Latency — request times from the session log'], ['/admin/activity', 'Activity — who did what'], ['/admin/usage', 'Cloudflare usage — cost and callers'], ['/admin/cost/gcp', 'GCP cost — storage and compute']] as [string, string][] : []),
     ['/privacy', 'Privacy policy'],
     ...(!ident && AUTH_MODE !== 'public' ? [['/signin', 'Sign in']] as [string, string][] : []),
   ]
@@ -115,7 +124,7 @@ export function SiteKbd({ extra = [], placeholder }: {
     ...Object.fromEntries(
       PEERS.map(p => [
         `peer:${p.prod}`,
-        { label: `This page on ${p.label} (${new URL(peerHref(p, location.href)).host})`, group: 'Pages', keywords: [p.prod.split('.')[0]], handler: () => location.assign(peerHref(p, location.href)) },
+        { label: toUrl('This page on ', peerHref(p, href)), group: 'Pages', keywords: [p.label, p.prod.split('.')[0]], handler: () => location.assign(peerHref(p, location.href)) },
       ]),
     ),
     'page:github': { label: 'Source on GitHub ↗', group: 'Pages', handler: () => window.open(REPO_URL, '_blank', 'noreferrer') },
@@ -127,13 +136,13 @@ export function SiteKbd({ extra = [], placeholder }: {
     ),
     ...(HOSTS ? {
       'host:toggle': {
-        label: location.hostname === HOSTS.dev ? `This page on prod (${HOSTS.prod})` : `This page on dev (${HOSTS.dev})`,
+        label: toUrl(`This page on ${location.hostname === HOSTS.dev ? 'prod' : 'dev'}: `, otherHostUrl(href, HOSTS)),
         group: 'Pages',
         defaultBindings: ['g d'],
         handler: () => location.assign(otherHostUrl(location.href, HOSTS)),
       },
       'host:toggle-tab': {
-        label: location.hostname === HOSTS.dev ? `This page on prod (${HOSTS.prod}), in a new tab` : `This page on dev (${HOSTS.dev}), in a new tab`,
+        label: toUrl(`This page on ${location.hostname === HOSTS.dev ? 'prod' : 'dev'} ↗: `, otherHostUrl(href, HOSTS)),
         group: 'Pages',
         defaultBindings: ['g shift+d'],
         handler: () => { window.open(otherHostUrl(location.href, HOSTS), '_blank', 'noopener') },

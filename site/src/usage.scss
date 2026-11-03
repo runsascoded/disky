@@ -1,0 +1,37 @@
+// /admin/usage (UsagePage.tsx): plan tiles, the units table, the daily stacked bars and the attribution table.
+.usage-page {
+  section { margin: 18px 0 8px; }
+  h2 { font-size: 16px; margin: 0 0 6px; }
+  .usage-filters { display: flex; flex-wrap: wrap; gap: 8px 16px; margin: 8px 0; font-size: 13px;
+    select { font: inherit; margin-left: 4px; } }
+  .usage-tiles { display: flex; flex-wrap: wrap; gap: 10px; margin: 8px 0 10px; }
+  .usage-tile { flex: 1 1 160px; padding: 8px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel);
+    .k { font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--ink-2); }
+    .v { font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; }
+    .dim { font-size: 12px; } }
+  .usage-tile-d1w { border-color: var(--s8); border-width: 2px; }
+  .usage-table { border-collapse: collapse; font-size: 13px; width: 100%;
+    th { font-weight: 500; color: var(--ink-2); text-align: left; padding: 3px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+    td { padding: 3px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+    td.num { text-align: right; font-variant-numeric: tabular-nums; }
+    td.ranked { font-weight: 600; }
+    tr.hot td:first-child { box-shadow: inset 3px 0 0 var(--s8); font-weight: 600; }
+    td.name { position: relative; min-width: 9em;
+      .share { position: absolute; left: 0; top: 3px; bottom: 3px; background: color-mix(in srgb, var(--s1) 16%, transparent); border-radius: 0 3px 3px 0; }
+      code { position: relative; background: none; padding: 0; } } }
+  .usage-legend { list-style: none; padding: 0; margin: 4px 0 8px; display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12.5px; color: var(--ink-2); }
+  .usage-bars { position: relative; display: flex; align-items: stretch; gap: 2px; height: 180px; padding: 14px 0 18px;
+    border-bottom: 1px solid var(--line);
+    .axis-label { position: absolute; top: 0; left: 0; font-size: 11px; }
+    .tt-ref { flex: 1 1 0; min-width: 0; display: flex; }
+    .bar { position: relative; flex: 1; display: flex; flex-direction: column; justify-content: flex-end; cursor: default;
+      &:hover .stack { filter: brightness(1.08); } }
+    .stack { display: flex; flex-direction: column-reverse; gap: 1px; min-height: 1px; border-radius: 3px 3px 0 0; overflow: hidden; }
+    .seg { display: block; min-height: 1px; flex-basis: 0; }
+    .day { position: absolute; bottom: -17px; left: 50%; transform: translateX(-50%); font-size: 10px; white-space: nowrap; } }
+  .usage-notes { font-size: 12px; }
+}
+
+// swatches in the legend and in the bars' tips (portaled outside the page)
+.usage-page .sw, .usage-tip .sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+.usage-tip { font-size: 12.5px; div { margin: 1px 0; } }

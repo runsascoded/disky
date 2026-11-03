@@ -25,7 +25,7 @@ from urllib.parse import urlparse
 
 import pyarrow as pa
 import pyarrow.parquet as pq
-from click import argument, command, option
+from click import IntRange, argument, command, option
 
 from .static_names import err
 
@@ -80,15 +80,27 @@ def split_uri(uri: str) -> tuple[str, str, str]:
     return scheme, u.netloc, f"{p}/" if p else ""
 
 
+#: GCS's answer to a soft-deleted listing of a bucket whose soft delete is off (retention 0).
+NO_SOFT_DELETE = "Soft delete policy is required"
+
+
 def gcs_soft_deleted(bucket: str, prefix: str, client=None) -> Total:
-    """GCS soft-deleted objects under `prefix`: sizes, soft-delete times, hard-delete (expiry) times."""
+    """GCS soft-deleted objects under `prefix`: sizes, soft-delete times, hard-delete (expiry) times. A bucket with
+    soft delete off holds none (its deletes are final): a row of zeros, not an error."""
+    from google.api_core.exceptions import BadRequest
     from google.cloud import storage
 
     client = client or storage.Client()
     t = Total(bucket, "soft-deleted")
-    for b in client.list_blobs(bucket, prefix=prefix or None, soft_deleted=True,
-                               fields="items(name,size,softDeleteTime,hardDeleteTime),nextPageToken"):
-        t.add(b.size, b.soft_delete_time, b.hard_delete_time)
+    try:
+        for b in client.list_blobs(bucket, prefix=prefix or None, soft_deleted=True,
+                                   fields="items(name,size,softDeleteTime,hardDeleteTime),nextPageToken"):
+            t.add(b.size, b.soft_delete_time, b.hard_delete_time)
+    except BadRequest as e:
+        if NO_SOFT_DELETE not in str(e):
+            raise
+        err(f"non-live gs://{bucket}: soft delete is off; nothing soft-deleted")
+        return Total(bucket, "soft-deleted")
     return t
 
 
@@ -173,19 +185,32 @@ def table(totals: list[Total]) -> pa.Table:
     return pa.Table.from_pylist([t.row() for t in totals], schema=SCHEMA)
 
 
+#: Buckets measured at once (`non-live -P`): each a provider listing, I/O-bound (gcs's soft-deleted listing of ~11M
+#: objects took ~45 min of a scan's `pre` stage bucket by bucket).
+PROCS = 8
+
+
 @command("non-live")
 @option("-c", "--classes", required=True, help=f"Comma-separated classes to measure ({', '.join(CLASSES)}); each must be one the source's provider has")
 @option("-E", "--endpoint", help="S3 API endpoint (CAIOS, R2; GCS's XML API by default for its multipart uploads)")
-@option("-j", "--json", "json_out", help="Merge the totals into this JSON file (a scan's `non-live.json`: every bucket's rows, this one's replaced)")
-@option("-o", "--out", help="Write the totals here as parquet (a local path); else (and no -j) print them as JSON lines")
-@argument("uri")
-def non_live_cmd(classes, endpoint, json_out, out, uri) -> None:
-    """Total the non-live bytes of one bucket (URI: `gs://`, `s3://`, `r2://`, optionally with a prefix): per class, its
-    bytes, objects, oldest/newest and expiry where known (specs/non-live-bytes.md, phase 1). Read-only."""
+@option("-j", "--json", "json_out", help="Merge the totals into this JSON file (a scan's `non-live.json`: every bucket's rows, these buckets' replaced)")
+@option("-o", "--out", help="Write each bucket's totals here as parquet (a local path; `{bucket}` in it with several URIs); else (and no -j) print them as JSON lines")
+@option("-P", "--procs", default=PROCS, type=IntRange(min=1), help="Buckets measured at once")
+@argument("uris", nargs=-1, required=True)
+def non_live_cmd(classes, endpoint, json_out, out, procs, uris) -> None:
+    """Total the non-live bytes of each bucket (URIS: `gs://`, `s3://`, `r2://`, optionally with a prefix): per class, its
+    bytes, objects, oldest/newest and expiry where known (specs/non-live-bytes.md, phase 1), `-P` buckets at once.
+    Read-only. The JSON is merged once, after every bucket."""
+    from concurrent.futures import ThreadPoolExecutor
+
     want = [c.strip() for c in classes.split(",") if c.strip()]
     if bad := [c for c in want if c not in CLASSES]:
         raise SystemExit(f"-c: unknown class(es) {', '.join(bad)} (classes: {', '.join(CLASSES)})")
-    totals = measure(uri, want, endpoint)
+    if out and len(uris) > 1 and "{bucket}" not in out:
+        raise SystemExit("-o: several URIs need `{bucket}` in the path")
+    with ThreadPoolExecutor(min(procs, len(uris))) as ex:
+        per = list(ex.map(lambda u: measure(u, want, endpoint), uris))
+    totals = [t for ts in per for t in ts]
     for t in totals:
         err(f"non-live {t.bucket} {t.cls}: {t.bytes:,} B in {t.objects:,}" + (f", expiring by {t.expires_max:%Y-%m-%d}" if t.expires_max else ""))
     if json_out:
@@ -195,5 +220,7 @@ def non_live_cmd(classes, endpoint, json_out, out, uri) -> None:
             for t in totals:
                 print(json.dumps(t.row(), default=str))
         return
-    Path(out).parent.mkdir(parents=True, exist_ok=True)
-    pq.write_table(table(totals), out)
+    for uri, ts in zip(uris, per):
+        path = Path(out.format(bucket=split_uri(uri)[1]))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        pq.write_table(table(ts), path)

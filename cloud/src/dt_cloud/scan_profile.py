@@ -31,7 +31,9 @@ Every problem is reported at once (`ProfileError`, one line each).
         region: <region>          #   reserved: nf-google 1.29.1 has no per-task location (refused unless = executor's)
         args: [-L, …]             #   extra lister args
         secrets: {ENV: <secret>}  #   this source's list task only, over `secrets` and `options.list.secrets`
-    machines: {<label>: <type> | {type, disk, cpus, memory, time, fallback, queue_timeout}}   # labels: small medium big list post pre interval over_time index_part (+ any)
+        fallback: [<type>, …]     #   + `queue_timeout: <minutes>`: as a label's (below), with `machine` the primary
+        queue_timeout: 10
+    machines: {<label>: <type> | {type, disk, cpus, memory, time, fallback, queue_timeout}}   # labels: small medium big list post pre side static interval over_time index_part (+ any)
                                   # `fallback: [<type>, …]` + `queue_timeout: <minutes>` (google-batch, together): a task of
                                   # the label not RUNNING `queue_timeout` min after submit (a GCE stockout leaves it QUEUED /
                                   # SCHEDULED, never failing) is deleted by Nextflow and resubmitted on the next type; the
@@ -76,7 +78,8 @@ _EXECUTOR_KEYS = {
 _TOP = {"deployment", "store", "executor", "work", "data", "layout", "sources", "machines", "steps", "skip", "fold", "secrets",
         "env", "pass", "labels", "queue_size", "options"}
 _LAYOUT = {"layer2", "snapshots", "listing"}
-_SOURCE = {"uri", "machine", "disk", "procs", "threads", "endpoint", "region", "args", "secrets", "listing"}
+_SOURCE = {"uri", "machine", "disk", "procs", "threads", "endpoint", "region", "args", "secrets", "listing", "fallback",
+           "queue_timeout"}
 _MACHINE = {"type", "disk", "cpus", "memory", "time", "fallback", "queue_timeout"}
 _DISK = {"request", "type"}
 _DISK_TYPES = ("local-ssd", "pd-balanced", "pd-ssd", "pd-standard")
@@ -133,6 +136,15 @@ class Source:
     #: An existing listing this source adopts instead of listing the bucket (`list` fetches its shards): a URL or dir
     #: template, `{env:NAME}` filled from the task's env (e.g. a laptop capture's `r2://…/captures/<host>/<root>/<stamp>`).
     listing: str | None = None
+    #: Machine types to resubmit this source's list task on, in turn, when it is still queued `queue_timeout` minutes
+    #: after submit (as a label's `Machine.fallback`, with `machine` the primary).
+    fallback: tuple[str, ...] = ()
+    queue_timeout: int | None = None
+
+    @property
+    def types(self) -> tuple[str, ...]:
+        """Every type this source's list task may run on, by submit attempt: `machine`, then each fallback."""
+        return (self.machine, *self.fallback) if self.machine else ()
 
     @property
     def kind(self) -> str:
@@ -296,10 +308,11 @@ def _disk(v: object, path: str, problems: list[str]) -> Disk | None:
     return Disk(req, typ)
 
 
-def _fallback(m: Mapping, label: str, executor: str, p: str, problems: list[str]) -> tuple[str, ...]:
-    """A label's `fallback` types, checked with its `queue_timeout`: both or neither (a resubmit of the same type waits
-    in the same pool, and fallbacks with no timeout are never reached), on google-batch only (the only executor whose
-    tasks take a machine type), never on `list` (each source names its own machine), each type once."""
+def _fallback(m: Mapping, label: str | None, executor: str, p: str, problems: list[str], primary: str = "type") -> tuple[str, ...]:
+    """A label's (or, `label` None, a source's) `fallback` types, checked with its `queue_timeout`: both or neither (a
+    resubmit of the same type waits in the same pool, and fallbacks with no timeout are never reached), on google-batch
+    only (the only executor whose tasks take a machine type), never on the `list` label (each source names its own
+    machine, and its own fallbacks), each type once. `primary`: the key naming the first type (a source's `machine`)."""
     fb, qt = m.get("fallback"), m.get("queue_timeout")
     if fb is None and qt is None:
         return ()
@@ -312,10 +325,10 @@ def _fallback(m: Mapping, label: str, executor: str, p: str, problems: list[str]
         problems.append(f"{p}.queue_timeout: only with `fallback` (a resubmit of the same type waits in the same pool)")
     elif qt is None:
         problems.append(f"{p}.fallback: needs `queue_timeout` (a queued task never fails, so nothing else moves it on)")
-    if not m.get("type"):
-        problems.append(f"{p}.fallback: needs the primary `type`")
-    elif m["type"] in types or len(set(types)) < len(types):
-        problems.append(f"{p}.fallback: each machine type once (with `type`)")
+    if not m.get(primary):
+        problems.append(f"{p}.fallback: needs the primary `{primary}`")
+    elif m[primary] in types or len(set(types)) < len(types):
+        problems.append(f"{p}.fallback: each machine type once (with `{primary}`)")
     if label == "list":
         problems.append(f"{p}.fallback: not on `list` (each source's machine is its own)")
     if executor != "google-batch":
@@ -422,9 +435,11 @@ def parse(d: object, where: str = "profile") -> ScanProfile:
         if listing is not None and (not isinstance(listing, str) or not listing):
             problems.append(f"{p}.listing: a URL or dir template")
             listing = None
+        fallback = _fallback(s, None, executor.kind, p, problems, primary="machine")
         sources.append(Source(uri, s.get("machine"), _disk(s.get("disk"), f"{p}.disk", problems), s.get("procs"),
                               s.get("threads"), s.get("endpoint"), region, _str_list(s.get("args"), f"{p}.args", problems),
-                              _str_map(s.get("secrets"), f"{p}.secrets", problems, _ENV_NAME), listing))
+                              _str_map(s.get("secrets"), f"{p}.secrets", problems, _ENV_NAME), listing, fallback,
+                              s["queue_timeout"] if _int(s.get("queue_timeout")) else None))
 
     machines: dict[str, Machine] = {}
     ms = d.get("machines") or {}

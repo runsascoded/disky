@@ -126,7 +126,7 @@ export function NoteForm({ at, path, note, onClose }: { at: string; path: string
           at path
           <input value={where} onChange={e => setWhere(e.target.value)} placeholder="(every chart)" size={28} aria-label="note path" />
         </label>
-        <label title="A short tag; the chart's options toggle each kind">
+        <label title="A short tag, shown in the note's tooltip (e.g. what kind of event it marks)">
           kind
           <input value={kind} onChange={e => setKind(e.target.value)} placeholder="e.g. cleanup ask" size={14} maxLength={32} aria-label="note kind" />
         </label>

@@ -153,7 +153,9 @@ export function actController(deps: () => ActDeps, set: (s: ActState) => void, g
       } else {
         const r = await stageMany(t.items, req.memo, d.asOf?.(), d.call, progress)
         const files = r.staged_objects?.length ?? 0
-        const text = r.staged.length ? `staged ${targetsText({ folders: r.staged.length - files, files })}` : 'already staged'
+        const gone = r.gone?.length ?? 0
+        const goneText = gone ? `${gone} gone at the newest scan, not staged` : ''
+        const text = r.staged.length ? [`staged ${targetsText({ folders: r.staged.length - files, files })}`, goneText].filter(Boolean).join(' · ') : goneText || 'already staged'
         set({ s: 'done', req, text, ...(r.staged.length && !r.absorbed.length && r.plan_id != null ? { undo: { plan_id: r.plan_id, keys: r.staged } } : {}) })
       }
       d.landed?.(req.kind)

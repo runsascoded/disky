@@ -24,7 +24,7 @@
   `Key`, 6000 filler objects so the `path` sort spans several 2048-row groups)
   in two buckets, written with the search sidecars
   (`path-index.{rows,trigrams,rows-search}.parquet`, layout v2,
-  specs/path-store-search.md) at `SEARCH_ROWS_RG`-row rows groups, 2048-row
+  specs/done/path-store-search.md) at `SEARCH_ROWS_RG`-row rows groups, 2048-row
   postings groups and `SEARCH_DIR_ROWS` rows per directory group — beside
   layout v1's `path-index.{names,search}.parquet`, kept as committed (the
   writer no longer emits them; their postings are v2's).

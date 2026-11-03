@@ -11,7 +11,9 @@ ones, and deletes the rest whose newest write is older than the grace (a reader 
   `-k` any the site pins (`INTERVAL_STORE_GEN`). A lineage generation's parity markers move to the current one first
   (`carry_markers`), and it keeps its `successor.json` (the forwarding record), as a prune does.
 - `-t static-names`: kept are the `-k` generations, required: the job can't see which one each site reads
-  (`STATIC_GEN`, per store and per env: a dev stack may read a newer one than prod), so the caller names them all.
+  (`STATIC_GEN`, per store and per env: a dev stack may read a newer one than prod), so the caller names them all; and
+  `static-names/CURRENT.json`'s generation (a compaction's pointer) with its successors. A compacted generation keeps
+  its `successor.json` (the forwarding record) in both stores.
 
 A dry run (the default) prints what would go; `-x` deletes. Each line: the generation, objects, bytes, newest write, and
 `delete` / `kept (…)`."""
@@ -22,6 +24,7 @@ from datetime import datetime, timezone
 
 from click import Choice, IntRange, command, option
 
+from . import append_runner as ar
 from . import interval_compact as ic
 from . import interval_store as ist
 from .blobstore import Store, store_url
@@ -49,8 +52,12 @@ def plan(store: Store, kind: str, keep: list[str], *, lineage_only: bool, grace_
     if kind == "static-names":
         if not keep:
             raise SystemExit("-t static-names: name every live generation with -k (the job can't see which each site reads)")
-        prefix, protected, line = STATIC_PREFIX, set(keep), set()
-        cur = None
+        prefix, line = STATIC_PREFIX, set()
+        # a compaction's pointer (`static-names/CURRENT.json`) and its successors are live too
+        cur = ar.current(store, prefix)
+        protected = {*keep, *(ar.chain(store, prefix, cur) if cur else [])}
+        # Several independent lineages can share one bucket. `add -g` follows each root's forwarding records.
+        protected.update(ar.chain(store, prefix, g)[-1] for g in keep)
     else:
         prefix = ist.PREFIX
         cur, how = ic.resolve(store)
@@ -62,8 +69,8 @@ def plan(store: Store, kind: str, keep: list[str], *, lineage_only: bool, grace_
         cur = newest
     out = []
     for g, files in sorted(gen_dirs(store, prefix).items()):
-        if kind == "interval-store":
-            files = {k: n for k, n in files.items() if k != f"{prefix}/{g}/{ic.SUCCESSOR}"}
+        # a compacted generation keeps its forwarding record (`add -g <it>` follows it), in both stores
+        files = {k: n for k, n in files.items() if k != f"{prefix}/{g}/{ar.SUCCESSOR}"}
         if not files:
             continue
         mt = max(store.mtimes(f"{prefix}/{g}").values())

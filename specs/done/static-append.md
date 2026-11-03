@@ -297,6 +297,7 @@ The base generation's `drill/` (spec `static-name-search.md`, "Drilldown for hea
 | `long/rollups/r####.parquet`, `short/rollups/r####.parquet` | rollups, `ROLLUP_SCHEMA`; `kind` 0 full header, **−1 delta header** (`vf` kept count, `b` root rows under `dir`, `o` children ever), 1 kept child's cells, 2 remainder's cells; the header is a `(q, dir)`'s first row either way |
 | `{long,short}-{roots,rollups}-index.parquet`, `….top.parquet` | the two-level indexes, as the base's |
 | `state/dcount-{long,short}.parquet` | GCS only: `(q, dir, rows)` per non-heavy `(q, dir)` with rows in the run |
+| `{long,short}-fresh.parquet` | `(q, n)`: per class canonical (short: literal) its roots new to the stack — an existing member's opens, every root of a new member; `meta.json` `fresh: rows` marks it (a merged tier sums its inputs') |
 
 ### Reader (base ⊕ runs)
 
@@ -305,6 +306,8 @@ Tiers are the base and the manifest's runs, oldest first, up to the first withou
 1. Long term `t`: per tier, `c_i = aliases_i[t] ?? t` (each tier's own map). Short: `c_i = t`.
 2. **Dispatch.** Sum each tier's roots bound for `[(c_i, P/), (c_i, P0))` (the base's two-level `select`). At most `R + 2 · Σ_i rg_i` (each tier's `rg` from its meta: 116,384 for the base alone, 120,480 with one run, 136,864 with five): read the roots of every tier, combine on `(path, usr, vf)` with the smallest `vt`, and answer as the base. Otherwise `(t, P)` is heavy: since each tier's bound is at most its rows + 2·`rg`, the stored rows exceed R, and the builder has given it a rollup.
 3. **Rollups.** Each tier's rows for `[(c_i, P), (c_i, P\0))`; walk the tiers newest first, taking each tier's cells (its rows' first is the header: `kind` 0 or −1), and stop after the first tier whose header is `kind` 0 (it holds the whole history). The header is the newest tier's; the cells are the union; per date each `(kind, child)`'s newest cell with `vf ≤ D`, as the base.
+
+4. **The fleet root's root rows** (a heavy literal's `matchCount.n` with no drilldown): the base's rows of `c_0`, plus each run's `n` for `c_i` from `<kind>-fresh.parquet` — never its stored rows, whose close records restate roots an earlier tier holds (gcs 10-24: `.parquet` 103,345,534 over `2026-10-08c` + runs vs 94,487,544 over its compaction). So base ⊕ runs counts exactly what the compaction does. A run built before the file adds its stored rows: an upper bound, until a compaction folds it.
 
 The combine is commutative over roots, and rollup tiers only ever add later cells or restate, so runs merge in any grouping.
 

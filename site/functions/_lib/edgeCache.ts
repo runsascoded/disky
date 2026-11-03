@@ -20,6 +20,7 @@
 
 import { PRIMARY_STORE } from './stores.js'
 import { SEARCH_LIMITS, type SearchLimits } from './search.js'
+import { currentMeter } from './usage.js'
 
 const TTL = 86400
 const KV_TTL = 30 * 86400
@@ -45,8 +46,15 @@ export interface CacheEnv { CACHE_KV?: KVNamespace; CACHE_NS?: string; PROD_HOST
 // answers with unconserved object counts into KV). 4: pool and user-lens
 // object counts exact from the manifest's per-user objects (`uo`). 5 (2026-10-14): a
 // node's `d` is its newest write, not the byte-weighted mean. 6 (2026-10-16): an mtime of 0
-// (a listing's unknown) gives no `d` (it read as 1970-01-01).
-export const CACHE_V = '6'
+// (a listing's unknown) gives no `d` (it read as 1970-01-01). 7 (2026-10-21): a node with a `d` carries `t`, that
+// newest write's instant (epoch seconds). 8 (2026-11-01): a diff cut to `top` keeps every expanded row's (and the root's)
+// `(other)` (`capDiffRows`: its totals less its drawn children); entries cached before it dropped cut leaves (hf: a cut
+// root child missing from `open-athena/models`'s answer, served from KV after the fix deployed).
+// 9 (2026-11-01): a union root's `(other)` is each changed member's totals less its drawn depth-1 rows (r2: a member
+// that drew nothing at the union's threshold was missing from the root, its Δ in no row).
+// 10 (2026-11-02): a view whose children are all under its threshold is one `(other)` (a flat folder of many small
+// objects answered an empty tree, and the map drew nothing).
+export const CACHE_V = '10'
 
 /** The deployment environment a response-cache key belongs to: `''` is prod's (keys exactly as before the
  * tag existed — no one-time flush), anything else a separate keyspace. A Pages preview (the dev stack)
@@ -83,16 +91,22 @@ const publicRes = (body: string) => new Response(body, { headers: { ...JSON_HDR,
 const clientRes = (body: string, tier: string) => new Response(body, { headers: { ...JSON_HDR, 'cache-control': PRIVATE, 'x-cache': tier } })
 
 export async function cacheMatch(env: CacheEnv, key: Request): Promise<Response | null> {
+  // The request's usage point says which tier answered (`_lib/usage.ts`).
+  const m = currentMeter()
   const hit = await colo().match(key)
   if (hit) {
+    m?.cached('edge-hit')
     const res = new Response(hit.body, hit)
     res.headers.set('cache-control', isPartial(hit) ? PARTIAL_CLIENT : PRIVATE)
     res.headers.set('x-cache', 'hit')
     return res
   }
-  if (!env.CACHE_KV) return null
-  const body = await env.CACHE_KV.get(await kvKey(key), 'text')
-  if (body == null) return null
+  const body = env.CACHE_KV ? await env.CACHE_KV.get(await kvKey(key), 'text') : null
+  if (body == null) {
+    m?.cached('miss')
+    return null
+  }
+  m?.cached('kv-hit')
   await colo().put(key, publicRes(body))
   return clientRes(body, 'kv')
 }
@@ -110,7 +124,7 @@ export type Keep = boolean | { partialTtl: number }
 /** What a filter view or diff keeps: one cut by a time budget — phase 2's (`interiors.late`), the search's
  *  (`searchLate`) or a filtered diff's lookups (`lookups_late`: unanswered names folded into `(other)`) — briefly,
  *  else all. A read budget's cut is deterministic, so kept like a whole answer. */
-export const keepFor = (a: { interiors?: { late?: number }; searchLate?: true; lookups_late?: true }): Keep => a.interiors?.late || a.searchLate || a.lookups_late ? { partialTtl: PARTIAL_TTL } : true
+export const keepFor = (a: { interiors?: { late?: number }; searchLate?: true; detailsLate?: true; lookups_late?: true }): Keep => a.interiors?.late || a.searchLate || a.detailsLate || a.lookups_late ? { partialTtl: PARTIAL_TTL } : true
 
 /** Store `body` (already-serialized JSON) per `keep` and return the client response. With ``waitUntil``
  * (the Pages `EventContext`'s) the writes run after the response is sent — a KV put is hundreds of ms the
@@ -154,6 +168,11 @@ export async function cacheStore(env: CacheEnv, key: Request, body: string, head
 export const UPGRADE_PHASE2_MS = 10_000
 /** …and its search's time budget (`SearchLimits.wallMs`), in place of the viewer-facing one. */
 export const UPGRADE_SEARCH_LIMITS: SearchLimits = { ...SEARCH_LIMITS, wallMs: 10_000 }
+/** …and its match roots' detail lookups (`ViewOpts.detailsWait`), in place of `FILTER_DETAILS_MS`. */
+export const UPGRADE_DETAILS_MS = 10_000
+/** …and the most row groups those lookups read (`ViewOpts.detailGroups`), in place of the viewer-facing 16, which
+ *  shares the request's connections with phase 2: the rollup path's budget. */
+export const UPGRADE_DETAIL_GROUPS = 60
 /** …and a filtered diff's lookup walk (`DiffOpts.walkMs`), in place of `FILTER_WALK_MS`. */
 export const UPGRADE_WALK_MS = 5_000
 

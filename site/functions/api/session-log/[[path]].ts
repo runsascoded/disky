@@ -3,20 +3,26 @@
 //   GET  /api/session-log                 { enabled, until, reason }   anyone (enabled only for a viewer)
 //   POST /api/session-log                 a client batch → 204          viewer, while on
 //   GET  /api/session-log/switch          SwitchState                   admin
-//   PUT  /api/session-log/switch          { enabled, until? } → SwitchState   admin
-//   GET  /api/session-log/sessions        { sessions: SessionRow[] }    admin (?email= &since= &errors=1 &limit=)
+//   PUT  /api/session-log/switch          { enabled, until?, indefinite? } → SwitchState   admin
+//   GET  /api/session-log/sessions        SessionPage                   admin (?email= &since= &errors=1 &limit= &after= | &before=)
 //   GET  /api/session-log/sessions/:sid   { session, events }           admin
+//   GET  /api/session-log/latency         LatencySummary                admin (?days= (default 7, ≤ 31) &email= &sid=)
 //
 // Off unless an admin turns the switch on at `/admin` (`session_log_switch`,
-// D1); on, it ends by itself at its `until` (default 7 days, at most 31). The
+// D1); on, it ends by itself at its `until` (default 7 days, at most 31), or
+// never (`indefinite`: `until_ms = FOREVER_MS`) until an admin turns it off. The
 // switch is read at most once per `SWITCH_TTL_MS` per isolate, so a change
 // reaches every tab within a minute. The identity is the request's (never the
 // client's say). The retention purge (`SESSION_LOG_RETAIN_DAYS`, default 30)
 // rides the config GET and each page load's first batch, at most hourly per
 // isolate, whether logging is on or off.
 import { type Ctx, type Env as AuthEnv, json, requireAdmin, requireViewer } from '../../_lib/auth.js'
-import { cachedSwitch, ingest, listSessions, maybePurge, sessionDetail, type SwitchCache, writeSwitch } from '../../_lib/sessionLog.js'
-import { defaultUntil, isOn, LIMITS, maxUntil, parseUntil, type SwitchState, switchState, validateBatch } from '../../_lib/sessionLogShape.js'
+import { cachedSwitch, ingest, listSessions, maybePurge, retainDays, sessionDetail, type SwitchCache, writeSwitch } from '../../_lib/sessionLog.js'
+import { defaultUntil, FOREVER_MS, isForever, isOn, lastDay, LIMITS, maxUntil, parseCursor, parseUntil, type SwitchState, switchState, validateBatch } from '../../_lib/sessionLogShape.js'
+import { feedClient, readKinds } from '../../_lib/activity.js'
+import { latency } from '../../_lib/sessionLatency.js'
+import { keptEvents } from '../../_lib/activityShape.js'
+import { noteActivity } from '../../_lib/activityHook.js'
 
 type Env = AuthEnv & { SESSION_LOG_RETAIN_DAYS?: string }
 type C = Ctx & { env: Env; params?: { path?: string | string[] }; waitUntil?: (p: Promise<unknown>) => void }
@@ -51,14 +57,17 @@ async function current(ctx: C, now: number): Promise<{ until: number | null; rea
   return switchState(row?.until_ms ?? null, now)
 }
 
+/** `enabled`: this viewer's tab logs now. `on`: the switch is on for everyone signed in (what `/privacy` tells a
+ *  visitor, signed in or not); `retainDays`: how long the log is kept. */
 async function config(ctx: C): Promise<Response> {
   const now = Date.now()
   purgeLater(ctx, now)
   const u = await current(ctx, now)
-  if (!isOn(u)) return json({ enabled: false, until: u.until, reason: u.reason }, 200, NO_STORE)
+  const shared = { on: isOn(u), retainDays: retainDays(ctx.env.SESSION_LOG_RETAIN_DAYS) }
+  if (!isOn(u)) return json({ enabled: false, until: u.until, reason: u.reason, ...shared }, 200, NO_STORE)
   const id = await requireViewer(ctx)
-  if (id instanceof Response) return json({ enabled: false, until: u.until, reason: 'no viewer identity' }, 200, NO_STORE)
-  return json({ enabled: true, until: u.until, reason: null }, 200, NO_STORE)
+  if (id instanceof Response) return json({ enabled: false, until: u.until, reason: 'no viewer identity', ...shared }, 200, NO_STORE)
+  return json({ enabled: true, until: u.until, reason: null, ...shared }, 200, NO_STORE)
 }
 
 async function post(ctx: C): Promise<Response> {
@@ -74,20 +83,29 @@ async function post(ctx: C): Promise<Response> {
   try { raw = JSON.parse(text) } catch { return json({ error: 'body is not JSON' }, 400) }
   const v = validateBatch(raw)
   if ('error' in v) return json({ error: v.error }, v.status)
+  // The kinds an admin turned off at `/admin` (specs/done/activity-feed.md) are dropped before storage.
+  const batch = { ...v.batch, events: keptEvents(v.batch.events, await readKinds(db, now)) }
+  if (!batch.events.length) return new Response(null, { status: 204 })
   let r
   try {
-    r = await ingest(db, { email: id.email, via: id.via }, ctx.request.headers.get('user-agent'), v.batch, Math.floor(now / 1000))
+    r = await ingest(db, { email: id.email, via: id.via }, ctx.request.headers.get('user-agent'), batch, Math.floor(now / 1000))
   } catch (e) {
     if (notSetUp(e)) return json({ error: NOT_SET_UP }, 503)
     throw e
   }
-  if (v.batch.seq === 0) purgeLater(ctx, now)
+  if (batch.seq === 0) purgeLater(ctx, now)
   if (r === 'capped') return json({ error: `session over ${LIMITS.sessionEvents} events` }, 429)
+  if (r === 'stored' && ctx.waitUntil) {
+    const wait = ctx.waitUntil.bind(ctx)
+    const actor = id.email ?? (id.via === 'grant' && id.name ? `grant:${id.name}` : `sid:${batch.sid}`)
+    wait(feedClient(ctx.env, { actor, via: id.via, origin: new URL(ctx.request.url).origin }, batch, wait, now))
+  }
   return new Response(null, { status: 204 })
 }
 
 /** `GET` / `PUT /api/session-log/switch` (admin). `PUT {enabled: true, until?}` turns it on through `until` (a UTC
- *  date or an ISO instant; empty = 7 days); `{enabled: false}` turns it off. Each change lands in `admin_edits`. */
+ *  date or an ISO instant; empty = 7 days); `{enabled: true, indefinite: true}` turns it on with no end date
+ *  (`FOREVER_MS`; no `until` with it); `{enabled: false}` turns it off. Each change lands in `admin_edits`. */
 async function switchRoute(ctx: C): Promise<Response> {
   const id = await requireAdmin(ctx)
   if (id instanceof Response) return id
@@ -96,16 +114,26 @@ async function switchRoute(ctx: C): Promise<Response> {
   const now = Date.now()
   const bounds = { defaultUntil: defaultUntil(now), maxUntil: maxUntil(now) }
   if (ctx.request.method === 'PUT') {
-    let body: { enabled?: unknown; until?: unknown }
+    let body: { enabled?: unknown; until?: unknown; indefinite?: unknown }
     try { body = await ctx.request.json() } catch { return json({ error: 'body is not JSON' }, 400) }
     if (typeof body?.enabled !== 'boolean') return json({ error: 'enabled must be true or false' }, 400)
     if (body.until !== undefined && body.until !== null && typeof body.until !== 'string') return json({ error: 'until must be a date string' }, 400)
+    if (body.indefinite !== undefined && typeof body.indefinite !== 'boolean') return json({ error: 'indefinite must be true or false' }, 400)
+    const indefinite = body.indefinite === true
+    if (indefinite && !body.enabled) return json({ error: 'indefinite needs enabled: true' }, 400)
+    if (indefinite && typeof body.until === 'string' && body.until.trim()) return json({ error: 'until and indefinite are exclusive' }, 400)
     let untilMs: number | null = null
-    if (body.enabled) {
+    if (indefinite) untilMs = FOREVER_MS
+    else if (body.enabled) {
       const u = parseUntil(body.until as string | null | undefined, now)
       if ('error' in u) return json({ error: u.error }, 400)
       untilMs = u.until
     }
+    noteActivity(ctx, {
+      line: untilMs === null ? 'turned session logging off'
+        : isForever(untilMs) ? 'turned session logging on, no end date'
+        : `turned session logging on through ${lastDay(untilMs)}`,
+    })
     try {
       await writeSwitch(db, untilMs, id.email ?? id.name ?? 'unknown', Math.floor(now / 1000))
     } catch (e) {
@@ -118,9 +146,11 @@ async function switchRoute(ctx: C): Promise<Response> {
   const cache = cacheFor(db)
   cache.at = null
   const row = await cachedSwitch(db, now, cache)
-  if (row === 'missing') return json({ enabled: false, until: null, reason: 'not set up', who: null, ts: null, ...bounds } satisfies SwitchState, 200, NO_STORE)
+  if (row === 'missing') return json({ enabled: false, until: null, indefinite: false, reason: 'not set up', who: null, ts: null, ...bounds } satisfies SwitchState, 200, NO_STORE)
   const u = switchState(row?.until_ms ?? null, now)
-  return json({ enabled: isOn(u), until: u.until, reason: u.reason, who: row?.who ?? null, ts: row?.ts ?? null, ...bounds } satisfies SwitchState, 200, NO_STORE)
+  return json({
+    enabled: isOn(u), until: u.until, indefinite: isOn(u) && isForever(u.until), reason: u.reason, who: row?.who ?? null, ts: row?.ts ?? null, ...bounds,
+  } satisfies SwitchState, 200, NO_STORE)
 }
 
 async function admin(ctx: C, rest: string): Promise<Response> {
@@ -130,17 +160,27 @@ async function admin(ctx: C, rest: string): Promise<Response> {
   if (!db) return json({ error: 'no D1 bound' }, 503)
   const q = new URL(ctx.request.url).searchParams
   try {
+    if (rest === 'latency') {
+      const days = Math.min(Math.max(Number(q.get('days')) || 7, 1 / 24), 31)
+      return json(await latency(db, { since: Date.now() - days * 86_400_000, email: q.get('email') || undefined, sid: q.get('sid') || undefined }), 200, NO_STORE)
+    }
     if (rest === 'sessions') {
       const since = q.get('since')
       const sinceMs = since ? Date.parse(since) : NaN
       const limit = Number(q.get('limit'))
-      const sessions = await listSessions(db, {
+      const after = q.get('after'), before = q.get('before')
+      if (after && before) return json({ error: 'after and before are exclusive' }, 400)
+      const raw = after ?? before
+      const cursor = raw ? parseCursor(raw) : null
+      if (raw && !cursor) return json({ error: `bad cursor: ${raw.slice(0, 60)}` }, 400)
+      const page = await listSessions(db, {
         email: q.get('email') || undefined,
         since: Number.isFinite(sinceMs) ? sinceMs : undefined,
         errors: q.get('errors') === '1',
         limit: Number.isFinite(limit) && limit > 0 ? limit : undefined,
+        ...(cursor ? after ? { after: cursor } : { before: cursor } : {}),
       })
-      return json({ sessions }, 200, NO_STORE)
+      return json(page, 200, NO_STORE)
     }
     const sid = rest.slice('sessions/'.length)
     const d = await sessionDetail(db, sid)
@@ -163,7 +203,7 @@ export const onRequest = async (ctx: C): Promise<Response> => {
   if (rest === 'switch') {
     return m === 'GET' || m === 'PUT' ? switchRoute(ctx) : json({ error: 'method not allowed' }, 405)
   }
-  if (rest === 'sessions' || /^sessions\/[A-Za-z0-9_-]+$/.test(rest)) {
+  if (rest === 'sessions' || rest === 'latency' || /^sessions\/[A-Za-z0-9_-]+$/.test(rest)) {
     return m === 'GET' ? admin(ctx, rest) : json({ error: 'method not allowed' }, 405)
   }
   return json({ error: 'not found' }, 404)

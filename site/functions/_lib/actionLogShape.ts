@@ -12,7 +12,7 @@ export interface ActionLogRow {
   /** The actor's email. */
   who: string
   prefix: string
-  /** What `prefix` names: a folder, or one exact object key (specs/file-assign.md). */
+  /** What `prefix` names: a folder, or one exact object key (specs/done/file-assign.md). */
   kind: 'prefix' | 'object'
   /** The owner it set; null = cleared. */
   owner: string | null

@@ -30,3 +30,19 @@ One table per widget, one row per request key (path @ scan | canvas width | scop
 ## Baselines
 
 `baselines/` holds committed runs against the public demo: `r2-<date>.json`. Diff a candidate against the latest before calling a change a regression, and add a new baseline when the deploy or the index format moves.
+
+# View memory (`view-mem.ts`)
+
+The memory of `/api/subtree` renders in Node against a deployment's live stores: what an isolate holds while a view renders and while its `waitUntil` work (the edge's background upgrade) runs, what it keeps afterwards, and, with `--snap`, a heap snapshot of who holds it. Workers allow an isolate 128 MB, and a render past that fails as a 1102 with no stack, so this is where to look first. Run it on a dev node, never a laptop: one heavy view peaks at several hundred MB.
+
+```bash
+# bundle (light), then ship the one file to the node
+esbuild bench/view-mem.ts --bundle --platform=node --format=esm --outfile=view-mem.mjs
+python3 -c "import tomllib, json; json.dump(tomllib.load(open('wrangler.toml', 'rb'))['vars'], open('vars.json', 'w'))"
+# on the node, with R2_* / CLOUDFLARE_* / D1_DB_ID in the environment (read-only)
+node --expose-gc [--max-old-space-size=MB] view-mem.mjs --vars vars.json [--var K=V]… [--snap MB] [--snap-end] --out RUN URL…
+```
+
+`tsc -p bench/tsconfig.view-mem.json` typechecks it. It is an esbuild entry, not run by type stripping like `bench.ts`.
+
+Each URL prints one JSON line: status, the body's md5, ms, the peak RSS, heap, external and ArrayBuffer memory during the response and during its `waitUntil` work, and the heap kept after a collection. The colo cache, KV and analytics are empty stand-ins, so every render is cold apart from the isolate's own caches, which carry from URL to URL as on the edge. Heap peaks include uncollected garbage. To tell whether a view fits, find the smallest `--max-old-space-size` it completes under. Node's heap runs larger than workerd's, which compresses pointers.

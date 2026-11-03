@@ -1,0 +1,93 @@
+{
+  "data": {
+    "viewer": {
+      "accounts": [
+        {
+          "pagesFunctionsInvocationsAdaptiveGroups": [
+            {
+              "sum": {
+                "requests": 60000,
+                "wallTime": 60000000000
+              },
+              "quantiles": {
+                "cpuTimeP25": 1000,
+                "cpuTimeP50": 2000,
+                "cpuTimeP75": 4000,
+                "cpuTimeP90": 8000,
+                "cpuTimeP95": 10000,
+                "cpuTimeP99": 20000,
+                "cpuTimeP999": 40000
+              },
+              "dimensions": {
+                "date": "2026-10-19",
+                "datetimeHour": "2026-10-19T00:00:00Z",
+                "scriptName": "pages-worker--42-production"
+              }
+            },
+            {
+              "sum": {
+                "requests": 40000,
+                "wallTime": 10000000
+              },
+              "quantiles": {
+                "cpuTimeP25": 1000,
+                "cpuTimeP50": 1000,
+                "cpuTimeP75": 1000,
+                "cpuTimeP90": 1000,
+                "cpuTimeP95": 1000,
+                "cpuTimeP99": 1000,
+                "cpuTimeP999": 1000
+              },
+              "dimensions": {
+                "date": "2026-10-19",
+                "datetimeHour": "2026-10-19T01:00:00Z",
+                "scriptName": "pages-worker--42-preview"
+              }
+            },
+            {
+              "sum": {
+                "requests": 200000,
+                "wallTime": 1000000000000
+              },
+              "quantiles": {
+                "cpuTimeP25": 1500,
+                "cpuTimeP50": 1500,
+                "cpuTimeP75": 1500,
+                "cpuTimeP90": 1500,
+                "cpuTimeP95": 1500,
+                "cpuTimeP99": 1500,
+                "cpuTimeP999": 1500
+              },
+              "dimensions": {
+                "date": "2026-10-20",
+                "datetimeHour": "2026-10-20T13:00:00Z",
+                "scriptName": "pages-worker--42-production"
+              }
+            },
+            {
+              "sum": {
+                "requests": 999,
+                "wallTime": 999000000
+              },
+              "quantiles": {
+                "cpuTimeP25": 900,
+                "cpuTimeP50": 900,
+                "cpuTimeP75": 900,
+                "cpuTimeP90": 900,
+                "cpuTimeP95": 900,
+                "cpuTimeP99": 900,
+                "cpuTimeP999": 900
+              },
+              "dimensions": {
+                "date": "2026-10-20",
+                "datetimeHour": "2026-10-20T13:00:00Z",
+                "scriptName": "pages-worker--7-production"
+              }
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "errors": null
+}

@@ -324,7 +324,7 @@ def write_path_index(
     fleet's top rows (gcs 9/30: 413) — so gcs keeps ``("bysize",)``: one
     copy instead of two. ``row_group_rows`` overrides the 8K default.
     ``search`` writes the search sidecars beside the `path` sort
-    (specs/path-store-search.md). ``generation`` (`path-index -G`, gcs) adds
+    (specs/done/path-store-search.md). ``generation`` (`path-index -G`, gcs) adds
     each object's `generation` from the listing as the store's last column
     (NULL on dirs); off, the sorts have no such column. ``path_only``
     (`path-index -O`, specs/lean-scans.md §1.1 step 2) cuts the `path` sort

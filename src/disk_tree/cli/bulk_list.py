@@ -35,6 +35,7 @@ def _bucket(host: str | None, uri: str) -> str:
 
 @cli.command('bulk-list')
 @option('-a', '--adaptive', is_flag=True, help='Adaptive range-splitting: workers bisect their remaining key range whenever peers are idle — no weights or fanout discovery needed (spec: specs/done/adaptive-listing.md)')
+@option('-c', '--crc32c', is_flag=True, help="gcs:// only: keep each object's CRC32C, a `crc32c` column (int64: the unsigned 32-bit checksum), which proves copies' contents equal (`dt-cloud dups -l`); S3/R2 list no checksum")
 @option('-D', '--no-commit-dates', is_flag=True, help="hf:// only: date repo files by the repo's `lastModified` instead of each file's last commit (tree pages of 1000 entries instead of 50)")
 @option('-E', '--endpoint-url', default=None, help='S3-compatible endpoint URL (required for r2://; also usable for MinIO / non-AWS S3)')
 @option('-f', '--profile', default=None, help='AWS credential profile to authenticate with (for a cross-account source/target); default: ambient credentials')
@@ -50,6 +51,7 @@ def _bucket(host: str | None, uri: str) -> str:
 @argument('uri')
 def bulk_list_cmd(
     adaptive: bool,
+    crc32c: bool,
     no_commit_dates: bool,
     endpoint_url: str | None,
     profile: str | None,
@@ -77,6 +79,8 @@ def bulk_list_cmd(
         return
     if lfs_files or no_commit_dates:
         raise ValueError("-L/--lfs-files and -D/--no-commit-dates apply to hf:// only")
+    if crc32c and not uri.startswith('gcs://'):
+        raise ValueError("-c/--crc32c applies to gcs:// only (S3/R2 list no checksum)")
     if adaptive:
         if weights_from:
             raise ValueError("--weights-from is the planned-mode input; adaptive mode warm-starts via --warm-from")
@@ -84,7 +88,7 @@ def bulk_list_cmd(
             uri, out_dir=out_dir,
             prefix=prefix, procs=procs, threads=threads,
             exists=exists, warm_from=warm_from,
-            endpoint_url=endpoint_url, region=region, profile=profile,
+            endpoint_url=endpoint_url, region=region, profile=profile, crc32c=crc32c,
         )
     else:
         if warm_from:
@@ -93,7 +97,7 @@ def bulk_list_cmd(
             uri, out_dir=out_dir,
             prefix=prefix, procs=procs, threads=threads,
             exists=exists, weights_from=weights_from,
-            endpoint_url=endpoint_url, region=region, profile=profile,
+            endpoint_url=endpoint_url, region=region, profile=profile, crc32c=crc32c,
         )
     err(f"listed {total:,} objects to {out_dir}")
 
@@ -109,6 +113,7 @@ def bulk_list_adaptive_uri(
     endpoint_url: str | None = None,
     region: str | None = None,
     profile: str | None = None,
+    crc32c: bool = False,
 ) -> int:
     """Scheme-dispatched adaptive listing (see `find/bulk_adaptive.py`)."""
     from disk_tree.backends.url import parse_url
@@ -121,7 +126,7 @@ def bulk_list_adaptive_uri(
     lister: PagedLister
     if parsed.scheme == 'gcs':
         from disk_tree.find.bulk_gcs import GcsBulkLister
-        lister = GcsBulkLister()
+        lister = GcsBulkLister(crc32c=crc32c)
     elif parsed.scheme in ('s3', 'r2'):
         if parsed.scheme == 'r2' and not endpoint_url:
             raise ValueError("r2:// requires --endpoint-url (Cloudflare R2's S3-compatible endpoint)")
@@ -147,6 +152,7 @@ def bulk_list_uri(
     endpoint_url: str | None = None,
     region: str | None = None,
     profile: str | None = None,
+    crc32c: bool = False,
 ) -> int:
     """Scheme-dispatched bulk listing; shared by `bulk-list` and `fetch`/`pull`/`sync`."""
     from disk_tree.backends.url import parse_url
@@ -161,7 +167,7 @@ def bulk_list_uri(
             out_dir=out_dir,
             procs=n_procs, threads=threads,
             prefix=eff_prefix,
-            exists=exists, weights_from=weights_from,
+            exists=exists, weights_from=weights_from, crc32c=crc32c,
         )
     if parsed.scheme in ('s3', 'r2'):
         if parsed.scheme == 'r2' and not endpoint_url:

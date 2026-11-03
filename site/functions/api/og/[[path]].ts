@@ -13,6 +13,7 @@ import { type Ctx, json, requireAdmin, requireStager } from '../../_lib/auth.js'
 import { deploymentKey, pageOf, type OgEnv } from '../../_lib/og/serve.js'
 import { listTokens, mint, revoke, tokenDays } from '../../_lib/og/tokens.js'
 import { shareSection } from '../../../src/shareSection.js'
+import { noteActivity } from '../../_lib/activityHook.js'
 
 const now = () => Math.floor(Date.now() / 1000)
 
@@ -41,6 +42,7 @@ export const onRequest = async (ctx: Ctx & { env: OgEnv }): Promise<Response> =>
     try {
       const m = await mint(env.DB, u => pageOf(env, u)?.pv ?? null, page, id.email ?? id.name ?? 'unknown', now(), tokenDays(body?.days))
       if (!m) return json({ error: 'this page has no card' }, 400)
+      noteActivity(ctx, { line: `made a link with detailed preview: ${page.pathname}${page.search}`.slice(0, 200) })
       return json({ url: m.url, token: m.token, exp_day: m.expDay }, 201)
     } catch (e) {
       if (/no such table/i.test(String((e as Error).message))) return json({ error: 'share cards not set up here (no og_tokens table)' }, 501)
@@ -54,6 +56,7 @@ export const onRequest = async (ctx: Ctx & { env: OgEnv }): Promise<Response> =>
     if (id instanceof Response) return id
     const who = id.email ?? id.name ?? 'unknown'
     const n = await revoke(env.DB, segs[1], who, now(), id.admin ? undefined : who)
+    if (n) noteActivity(ctx, { line: 'revoked a preview link' })
     return n ? json({ revoked: n }) : json({ error: id.admin ? 'no live token' : 'no live token of yours' }, 404)
   }
   if (segs[0] === 'tokens' && segs.length === 1 && request.method === 'GET') {

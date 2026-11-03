@@ -24,6 +24,7 @@
    }
   }
  ],
+ "list_retries": 0,
  "list_default": {
   "machine": "e2-standard-4",
   "disk": {
@@ -48,6 +49,8 @@
  ],
  "pre": [],
  "pre_label": "small",
+ "side": [],
+ "side_label": "small",
  "interval_label": "big",
  "index_parts": [],
  "index_part_label": "big",
@@ -78,11 +81,13 @@
   "SITE_URL": "https://site.example.org",
   "R2_BUCKET": "example-r2",
   "DT_RECORD": "off",
+  "DISKY_LABELS": "app=disky,deployment=cw-s3,stack=prod,team=x",
   "DT_DATA_MOUNT": "/mnt/disks"
  },
  "profile_json": "<profile>",
  "labels": {
   "deployment": "cw-s3",
+  "app": "disky",
   "stack": "prod",
   "team": "x",
   "component": "scan",
@@ -91,5 +96,6 @@
  "cache": true,
  "static_after_publish": false,
  "queue_size": 20,
- "work_bucket": "example-data"
+ "work_bucket": "example-data",
+ "static_label": "small"
 }

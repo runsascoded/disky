@@ -14,7 +14,7 @@ const depthOf = (p: string) => (p === '' ? 0 : p.split('/').length)
 export const rowItems = (items: readonly CoverItem[], row: string): CoverItem[] => items.filter(i => under(i.path, row))
 
 /** What an action sends for the kept items, and what it leaves out and why. A folder every object of which
- *  matches goes as a prefix (`…/`); a lone matching file goes as an exact object item (specs/file-assign.md:
+ *  matches goes as a prefix (`…/`); a lone matching file goes as an exact object item (specs/done/file-assign.md:
  *  it owns / deletes that one key, never `key.bak`). Staging never takes a whole bucket (a plan item can't
  *  name one). An item whose kind the server couldn't look up is never sent: file or folder decides what it
  *  names. `folders` / `files`: how many of each `items` holds. */

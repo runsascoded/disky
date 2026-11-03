@@ -96,7 +96,7 @@ def fx(world, local, tmp_path) -> dict:  # noqa: F811
     (sgen / "scans.json").write_text(json.dumps({"scans": [{"id": d} for d in DATES[:4] if d != "2026-07-31"]}))
     (sgen / "manifests" / f"{DATES[-1]}.json").write_text(json.dumps({"scans": [d for d in DATES if d != "2026-07-31"]}))
     verify = store / "interval-store" / "g" / "verify"
-    verify.mkdir(parents=True)
+    verify.mkdir(parents=True, exist_ok=True)
     for d, ok in (("2026-07-30", True), ("2026-08-02", False), ("2026-08-04", True), ("2026-08-04T1236", True)):
         (verify / f"{d}.json").write_text(json.dumps({"scan": d, "gen": "g", "pass": ok, "views": 9, "view_eq": 9 if ok else 7, "diffs": 0, "diff_eq": 0}))
     return {"store": store, "root": root, "path_sizes": {d: (root / "idx" / d / "index" / "g1" / "path-index.parquet").stat().st_size for d in DATES}}
@@ -107,6 +107,19 @@ def _run(fx, *extra: str) -> dict:
     res = CliRunner().invoke(main, args, catch_exceptions=False)
     assert res.exit_code == 0, res.output
     return json.loads(res.stdout)
+
+
+def test_retirement_follows_a_compacted_static_generation(fx, d1):
+    before = _run(fx)
+    old = fx["store"] / "static-names" / STATIC_GEN
+    target = old.with_name(STATIC_GEN + ".c001")
+    old.rename(target)
+    old.mkdir()
+    (old / "successor.json").write_text(json.dumps({"gen": target.name, "published_at": 0}) + "\n")
+    after = _run(fx)
+    expected = [{**row, "reason": f"not in the static index's {target.name}"}
+                if row["reason"] == f"not in the static index's {STATIC_GEN}" else row for row in before["scans"]]
+    assert after == {**before, "static_gen": target.name, "scans": expected}
 
 
 def _files(root: Path) -> dict[str, int]:
@@ -131,7 +144,19 @@ def _deleted(fx, d: str) -> dict[str, list[int]]:
     return {k: v for k, v in sorted(out.items()) if v}
 
 
-KEPT = {"age": [2, 10], "extras": [1, 5], "snapshot": [1, 2]}
+KEPT = {"age": [2, 10], "attribution": [1, 5], "snapshot": [1, 2]}
+
+
+def test_static_coverage_follows_a_compacted_generation(fx, d1):
+    before = _run(fx, "-m")
+    root = fx["store"] / "static-names"
+    (root / STATIC_GEN).rename(root / f"{STATIC_GEN}.c001")
+    (root / STATIC_GEN).mkdir()
+    (root / STATIC_GEN / "successor.json").write_text(json.dumps({"gen": f"{STATIC_GEN}.c001"}) + "\n")
+    after = _run(fx, "-m")
+    assert after["static_gen"] == f"{STATIC_GEN}.c001"
+    assert [(s["id"], s["status"]) for s in after["scans"]] == [(s["id"], s["status"]) for s in before["scans"]]
+    assert after["totals"] == before["totals"]
 
 
 def test_the_keep_window_counts_the_deployments_scans_not_one_copys(fx, d1):
@@ -204,7 +229,9 @@ def test_execute_backs_up_verifies_and_deletes(fx, d1, tmp_path, monkeypatch, ro
         ("2026-07-30", "retire", "pass"), ("2026-08-03", "retire", "verified"), ("2026-08-04", "retire", "pass"), ("2026-08-04T1236", "retire", "pass")]
     marker = json.loads((fx["store"] / "interval-store" / "g" / "verify" / "2026-08-03.json").read_text())
     assert (marker["scan"], marker["gen"], marker["pass"], marker["views"] == marker["view_eq"] > 0) == ("2026-08-03", "g", True, True)
-    gone = {k: n for k, n in before.items() if any(k.startswith(f"idx/{d}/") for d in retired) and sr.classify(k.rsplit("/", 1)[-1]) in sr.DELETE
+    # (`attr.tsv` stays: the store has no attribution table to answer for it)
+    gone = {k: n for k, n in before.items() if any(k.startswith(f"idx/{d}/") for d in retired)
+            and sr.classify(k.rsplit("/", 1)[-1]) in sr.DELETE and sr.classify(k.rsplit("/", 1)[-1]) != "attribution"
             or k in ("idx/2026-07-30/b1.parquet", "idx/2026-08-04T1236/b1.parquet")}
     assert _files(fx["root"]) == {k: n for k, n in before.items() if k not in gone}
     assert _files(backup) == gone
@@ -219,6 +246,48 @@ def test_execute_backs_up_verifies_and_deletes(fx, d1, tmp_path, monkeypatch, ro
         *(("footer_cache", d, "path", "g1") for d in DATES if d not in retired),
     ]
     assert rep["d1_deleted"] == sum(r["rows"] for r in rep["d1"])
+
+
+def test_a_corrupted_store_file_fails_the_append_check_and_blocks_deletion(world, local, fx, d1, tmp_path, monkeypatch):  # noqa: F811
+    """End to end, markers only: `add` appends the scans with one run's served `path` sort cut a row short (a corrupted
+    store file); that scan's append marker fails, so `retire -m -x` keeps every file of it, while the scan before it,
+    whose marker passed, retires."""
+    from test_interval_local import _add
+
+    from dt_cloud import interval_store as ist
+
+    bad = "2026-08-04T1236"
+    real = ist.write_served
+
+    def short(con, src, sort, out, *a, **k):
+        if sort == "path" and f"/deltas/{bad}/" in str(out):
+            src = f"(SELECT * FROM {src} QUALIFY row_number() OVER () > 1)"
+        return real(con, src, sort, out, *a, **k)
+    monkeypatch.setattr(ist, "write_served", short)
+    store = tmp_path / "bad-store"
+    shutil.copytree(local["base_only"], store)
+    _add(world, store, tmp_path / "work")
+    monkeypatch.setattr(ist, "write_served", real)
+    shutil.copytree(fx["store"] / "static-names", store / "static-names")
+    marker = json.loads((store / "interval-store" / "g" / "verify" / f"{bad}.json").read_text())
+    assert (marker["pass"], marker["cut"]["path"]["missing"], marker["cut"]["path"]["extra"]) == (False, 1, 0)
+    before = _files(fx["root"])
+    rep = _run({**fx, "store": store}, "-m", "-x")
+    assert _statuses(rep) == [
+        ("2026-07-30", "skip", "no verify marker", "missing"),
+        ("2026-07-31", "skip", "not in the static index's s1", None),
+        ("2026-08-02", "skip", "no verify marker", "missing"),
+        ("2026-08-03", "skip", "no verify marker", "missing"),
+        ("2026-08-04", "retire", None, "pass"),
+        (bad, "skip", "verify failed (cut path 1 missing, 0 extra)", "fail"),
+        ("2026-08-05", "keep", "one of the newest 2", None),
+        ("2026-08-07", "keep", "one of the newest 2", None),
+    ]
+    after = _files(fx["root"])
+    assert {k: n for k, n in before.items() if k.startswith(f"idx/{bad}/")} == {k: n for k, n in after.items() if k.startswith(f"idx/{bad}/")}
+    # (its `attr.tsv` stays: the store has no attribution table)
+    assert sorted(k for k in before if k not in after) == sorted(
+        k for k in before if k.startswith("idx/2026-08-04/") and sr.classify(k.rsplit("/", 1)[-1]) in sr.DELETE and not k.endswith("attr.tsv"))
 
 
 def test_drop_path_pointer(fx, d1):
@@ -255,16 +324,60 @@ def test_layer1_goes_unless_it_carries_generation_no_marker_vouches_for(fx, d1):
     m = verify / "2026-08-04T1236.json"
     m.write_text(json.dumps({**json.loads(m.read_text()), "generation": {"objects": 2, "equal": 2}}))
     rep = _run(fx, "-m", "-1", LAYER1)
-    held = "layer1: its listing has `generation`, which its marker didn't compare equal"
+    # every scan's `attr.tsv` stays too: the store has no attribution table
+    at = "attribution: the interval store's attribution table doesn't cover the scan"
+    held = f"layer1: its listing has `generation`, which its marker didn't compare equal; {at}"
     assert {r["id"]: (r["delete"].get("layer1"), r["keep"].get("layer1"), r.get("held")) for r in rep["scans"] if r["status"] == "retire"} == {
-        "2026-07-30": ([1, sizes["2026-07-30"]], None, None),
+        "2026-07-30": ([1, sizes["2026-07-30"]], None, at),
         "2026-08-04": (None, [1, sizes["2026-08-04"]], held),
-        "2026-08-04T1236": ([1, sizes["2026-08-04T1236"]], None, None),
+        "2026-08-04T1236": ([1, sizes["2026-08-04T1236"]], None, at),
     }
     before = _files(root)
     _run(fx, "-x", "-m", "-1", LAYER1)
     assert sorted(k for k in before if k.startswith("listing/") and k not in _files(root)) == [
         "listing/2026-07-30/b/shard-000.parquet", "listing/2026-08-04T1236/b/shard-000.parquet"]
+
+
+def test_the_attribution_map_goes_only_covered_and_vouched_for(fx, d1, monkeypatch):
+    """A scan's `attr.tsv` (and `attribution.parquet`) retire only when the interval store's attribution table covers the
+    scan and its marker compared the table with the scan's map, equal; else they stay (`held`) while the rest retires."""
+    root, verify = fx["root"], fx["store"] / "interval-store" / "g" / "verify"
+    monkeypatch.setattr(sr, "attribution_covered", lambda store, gen: {"2026-07-30", "2026-08-04"})
+    m = verify / "2026-07-30.json"
+    m.write_text(json.dumps({**json.loads(m.read_text()), "attribution": {"rows": 1, "store": 1, "missing": 0, "extra": 0}}))
+    rep = _run(fx, "-m")
+    assert {r["id"]: (r["delete"].get("attribution"), r["keep"].get("attribution"), r.get("held")) for r in rep["scans"] if r["status"] == "retire"} == {
+        "2026-07-30": ([1, 5], None, None),
+        "2026-08-04": (None, [1, 5], "attribution: its marker didn't compare the attribution table equal"),
+        "2026-08-04T1236": (None, [1, 5], "attribution: the interval store's attribution table doesn't cover the scan"),
+    }
+    before = _files(root)
+    _run(fx, "-x", "-m")
+    assert sorted(k for k in before if k.endswith("attr.tsv") and k not in _files(root)) == ["idx/2026-07-30/index/g1/attr.tsv"]
+
+
+def test_cache_goes_with_its_scan(fx, d1):
+    """A scan's rollup cache (`-c`; `path-index -c`'s `dir-cache/`, a sharded index's one dir per part) retires with the
+    scan, and its bytes alone make an otherwise clean scan worth retiring; a scan kept keeps its cache."""
+    root = fx["root"]
+    caches = [
+        "listing/2026-07-30/dir-cache/dir-stats.parquet", "listing/2026-07-30/dir-cache/age-days.parquet",
+        "listing/2026-08-04/dir-cache/p0/dir-stats.parquet",
+    ]
+    for k in caches:
+        _shard(root / k, [1])
+    newest = sorted(DATES)[-1]
+    kept = f"listing/{newest}/dir-cache/dir-stats.parquet"
+    _shard(root / kept, [1])
+    tmpl = ["-c", "listing/{id}/dir-cache/*.parquet", "-c", "listing/{id}/dir-cache/*/*.parquet"]
+    rep = _run(fx, "-m", *tmpl)
+    assert {r["id"]: r["delete"]["cache"][0] for r in rep["scans"] if r["status"] == "retire" and "cache" in r["delete"]} == {
+        "2026-07-30": 2, "2026-08-04": 1}
+    before = _files(root)
+    _run(fx, "-x", "-m", *tmpl)
+    after = _files(root)
+    assert sorted(k for k in before if "dir-cache" in k and k not in after) == sorted(caches)
+    assert kept in after
 
 
 def test_backup_within_one_store_copies_server_side(monkeypatch, tmp_path):
@@ -295,8 +408,43 @@ def test_backup_within_one_store_copies_server_side(monkeypatch, tmp_path):
     ("path-index-coarse20.parquet", "coarse"), ("path-index-coarse20.groups.json", "coarse"),
     ("path-index.rows-search.parquet", "search"), ("path-index.rows.groups.parquet", "search"),
     ("age-pyramid-8d.parquet", "age"), ("age-pyramid-8d.groups.json", "age"), ("age-index.parquet", "age"),
-    ("attr.tsv", "extras"), ("attr.tsv.gz", "extras"), ("ck.txt", "extras"), ("meta.json", "snapshot"),
+    ("attr.tsv", "attribution"), ("attr.tsv.gz", "attribution"), ("attribution.parquet", "attribution"), ("ck.txt", "extras"), ("meta.json", "snapshot"),
     ("verification.json", "snapshot"), ("over-time.parquet", "over-time"), ("shard-000.parquet", "other"), ("path-index.txt", "other"),
 ])
 def test_classify(name, cls):
     assert sr.classify(name) == cls
+
+
+def test_an_earlier_generations_failed_marker_is_verified_again(fx, d1, tmp_path):
+    """08-03's marker failed in `g0`, the generation `g` was backfilled from; `g` has none. The fail doesn't hold for
+    `g`: the scan is verified against it (a pass), where a fail in the current generation keeps it (08-02's)."""
+    iv = fx["store"] / "interval-store"
+    (iv / "g0" / "verify").mkdir(parents=True)
+    failed = {"scan": "2026-08-03", "gen": "g0", "pass": False, "views": 9, "view_eq": 7, "diffs": 0, "diff_eq": 0}
+    (iv / "g0" / "verify" / "2026-08-03.json").write_text(json.dumps(failed))
+    (iv / "g" / "backfill.json").write_text(json.dumps({"from": "g0"}) + "\n")
+    assert [r for r in _statuses(_run(fx)) if r[0] in ("2026-08-02", "2026-08-03")] == [
+        ("2026-08-02", "skip", "verify failed (7/9 views, 0/0 diffs equal)", "fail"),
+        ("2026-08-03", "needs-verify", "verify failed in g0, none in g", "stale-fail")]
+    assert [r for r in _statuses(_run(fx, "-m")) if r[0] == "2026-08-03"] == [
+        ("2026-08-03", "skip", "verify failed in g0, none in g", "stale-fail")]
+    rep = _run(fx, "-x", "-b", str(tmp_path / "backup"), "-w", str(tmp_path / "work"))
+    assert [r for r in _statuses(rep) if r[0] == "2026-08-03"] == [("2026-08-03", "retire", None, "verified")]
+    marker = json.loads((iv / "g" / "verify" / "2026-08-03.json").read_text())
+    assert (marker["scan"], marker["gen"], marker["pass"]) == ("2026-08-03", "g", True)
+
+
+def test_scans_needing_verify_are_verified_in_parallel_shares(fx, d1, tmp_path):
+    """Markers of 07-30, 08-04 and 08-04T1236 removed (and their footers' unparseable stand-ins, as 08-03 has none): with
+    08-03's, four scans need verify; `-J 2` verifies them in two processes (contiguous shares), each writing its scans'
+    markers, and every one retires as `verified`, as at `-J 1`."""
+    verify = fx["store"] / "interval-store" / "g" / "verify"
+    for d in ("2026-07-30", "2026-08-04", "2026-08-04T1236"):
+        (verify / f"{d}.json").unlink()
+        for name in FOOTERS:
+            (fx["root"] / "idx" / d / "index" / "g1" / name).unlink()
+    rep = _run(fx, "-x", "-J", "2", "-w", str(tmp_path / "work"))
+    assert [(r["id"], r["status"], r["marker"]) for r in rep["scans"] if r["status"] == "retire"] == [
+        ("2026-07-30", "retire", "verified"), ("2026-08-03", "retire", "verified"), ("2026-08-04", "retire", "verified"),
+        ("2026-08-04T1236", "retire", "verified")]
+    assert [json.loads((verify / f"{d}.json").read_text())["pass"] for d in ("2026-07-30", "2026-08-03", "2026-08-04", "2026-08-04T1236")] == [True] * 4

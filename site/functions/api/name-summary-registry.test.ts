@@ -39,4 +39,18 @@ describe('private scan registry', () => {
     const response = await scans()
     expect([response.status, await response.text(), vi.mocked(staticRegistry).mock.calls.length]).toEqual([200, '{"schema":"static-name-registry-v1"}', 1])
   })
+  it('unpinned, reads the generation `static-names/CURRENT.json` names; a pin wins', async () => {
+    vi.spyOn(Date, 'now').mockImplementation(() => Date.UTC(2030, 0, 1))
+    vi.stubGlobal('caches', { default: { match: async () => undefined, put: async () => undefined } })
+    try {
+      const keys: string[] = []
+      const INDEX_R2 = { get: async (key: string) => { keys.push(key); return key === 'static-names/CURRENT.json' ? { json: async () => ({ gen: 'g1' }) } : null } } as unknown as R2Bucket
+      await scans({ ...env, INDEX_R2 })
+      await scans({ ...env, INDEX_R2, STATIC_GEN: 'pinned' })
+      expect([vi.mocked(staticRegistry).mock.calls.map(([e]) => (e as NameSummaryEnv & { STATIC_GEN?: string }).STATIC_GEN), keys]).toEqual([['g1', 'pinned'], ['static-names/CURRENT.json']])
+    } finally {
+      vi.unstubAllGlobals()
+      vi.restoreAllMocks()
+    }
+  })
 })

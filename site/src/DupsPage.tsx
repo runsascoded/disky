@@ -264,7 +264,7 @@ export function DupsPage() {
                     <tr className={'dp-group' + (isOpen ? ' open' : '')} onClick={flip}>
                       <td><button type="button" className="dp-caret" aria-expanded={isOpen} aria-label={isOpen ? 'collapse' : 'expand'} onClick={e => { e.stopPropagation(); flip() }}>{isOpen ? '▾' : '▸'}</button></td>
                       <td className="dp-path">{g.tier === 'moved' && keep ? keep.rel : g.rel}{g.kind === 'dir' ? '/' : ''} {g.tier === 'moved' && <span className="dim">+{names - 1} other name{names === 2 ? '' : 's'}</span>}</td>
-                      <td><Tooltip content={TIER_TIPS[g.tier]}><span className={`dp-tier ${g.tier}`}>{g.tier}</span></Tooltip>{g.suspect && <span className="dp-tag warn">suspect</span>}</td>
+                      <td><Tooltip content={TIER_TIPS[g.tier]}><span className={`dp-tier ${g.tier}`}>{g.tier}</span></Tooltip>{g.exact && <Tooltip content="Proven: every copy's objects match by relative name, size and crc32c (from the scan's listing)"><span className="dp-tag keep">exact</span></Tooltip>}{g.suspect && <span className="dp-tag warn">suspect</span>}</td>
                       <td className="num">{fmtBytes(g.size)}</td>
                       <td className="num"><Tooltip content={[...new Set(g.items.map(c => c.bucket))].join(', ')}><span>{g.copies}</span></Tooltip></td>
                       <td className="num">{fmtBytes(g.reclaimable)}</td>

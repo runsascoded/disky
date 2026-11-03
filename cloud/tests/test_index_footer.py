@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+from pathlib import Path
 import urllib.error
 import urllib.request
 
@@ -222,10 +223,13 @@ def test_gc_d1_deletes_only_generations_no_pointer_names(monkeypatch, d1_db):
     assert [re.sub(r"\s+", " ", s) for s in sent] == [
         "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'footer_cache';",
         "DELETE FROM footer_cache WHERE date = '2026-09-01' AND gen <> COALESCE("
-        "(SELECT s.gen FROM index_schema s WHERE s.date = footer_cache.date AND s.variant = footer_cache.variant), '');",
+        "(SELECT s.gen FROM index_schema s WHERE s.store = CASE WHEN instr(footer_cache.variant, ':') > 0 "
+        "THEN substr(footer_cache.variant, 1, instr(footer_cache.variant, ':') - 1) ELSE 'primary' END "
+        "AND s.date = footer_cache.date AND s.variant = footer_cache.variant), '');",
         # `d1_delete`: bounded statements until one deletes nothing
         *["DELETE FROM index_row_groups WHERE rowid IN (SELECT rowid FROM index_row_groups WHERE date = '2026-09-01' AND gen <> COALESCE("
-          "(SELECT s.gen FROM index_schema s WHERE s.date = index_row_groups.date AND s.variant = index_row_groups.variant), '') "
+          "(SELECT s.gen FROM index_schema s WHERE s.store = index_row_groups.store AND s.date = index_row_groups.date "
+          "AND s.variant = index_row_groups.variant), '') "
           "LIMIT 5000) RETURNING 1 AS n;"] * 2,
     ]
     assert con.execute("SELECT date, variant, gen, rg FROM index_row_groups ORDER BY 1, 2, 3, 4").fetchall() == [
@@ -394,6 +398,42 @@ def test_groups_parquet_is_the_synced_rows_typed_in_small_stat_groups(tmp_path):
     assert {c for c, v in stats(0).items() if v is not None} == set(FOOTER_STAT_COLS)
 
 
+def test_engine_and_index_sync_write_the_same_cold_footers(tmp_path):
+    """The engine's footers (`tiers -g`, the `index` step) and `index-sync -r`'s rewrite of them are byte-identical,
+    so a copy racing the rewrite (`publish-r2`, 2026-10-29: a 404 on the replaced generation) reads what it listed, and
+    R2 never keeps a footer saying `version` 1 (the dir-only index) for a store sort."""
+    from disk_tree.find.groups import write_groups
+
+    from dt_cloud.index_footer import groups_blob_path, groups_parquet_path, write_groups_blob, write_groups_parquet
+
+    t = pa.table({"path": pa.array([f"b/d{i:02d}" for i in range(6)]), "depth": pa.array([2] * 6, pa.int64()),
+                  "size": pa.array(range(100, 106), pa.int64())})
+    got = {}
+    for who in ("engine", "cloud"):
+        (tmp_path / who).mkdir()
+        tier = str(tmp_path / who / "path-index-bysize.parquet")
+        pq.write_table(t.replace_schema_metadata({b"tier": b"bysize"}), tier, row_group_size=2, compression="zstd")
+        if who == "engine":
+            write_groups(tier, footer_parquet=True)
+        else:
+            schema, rows = index_footer.extract(tier)
+            write_groups_parquet(tier, schema, rows)
+            write_groups_blob(tier, schema, rows)
+        got[who] = (Path(groups_parquet_path(tier)).read_bytes(), Path(groups_blob_path(tier)).read_bytes())
+    assert got["engine"] == got["cloud"]
+    assert pq.read_metadata(groups_parquet_path(tier)).metadata[b"version"] == b"2"
+
+    # The rewrite of the same bytes doesn't touch the file (a new GCS generation would 404 a copy pinned to the old);
+    # different bytes still replace it.
+    footer = Path(groups_parquet_path(str(tmp_path / "engine" / "path-index-bysize.parquet")))
+    before = footer.stat().st_mtime_ns, footer.stat().st_ino
+    schema, rows = index_footer.extract(str(tmp_path / "engine" / "path-index-bysize.parquet"))
+    write_groups_parquet(str(tmp_path / "engine" / "path-index-bysize.parquet"), schema, rows)
+    assert (footer.stat().st_mtime_ns, footer.stat().st_ino) == before
+    write_groups_parquet(str(tmp_path / "engine" / "path-index-bysize.parquet"), schema, rows[:1])
+    assert (footer.read_bytes() == got["engine"][0], len(pq.read_table(footer))) == (False, 1)
+
+
 def test_index_blob_backfills_the_cold_footer_from_json(tmp_path, monkeypatch):
     """`index-blob -J`: the `.groups.parquet` from the `.groups.json` already
     beside a tier, never reading the tier's footer — byte-identical to the
@@ -465,3 +505,36 @@ def test_d1_queries_read_the_database_id_when_they_run(monkeypatch):
     monkeypatch.setenv("D1_DB_ID", "late-db")
     assert F._d1_query("SELECT 1;", "acct", "tok") == []
     assert urls == ["https://api.cloudflare.com/client/v4/accounts/acct/d1/database/late-db/query"]
+
+
+def test_d1_delete_halves_a_statement_d1_resets_for_cpu_time(monkeypatch, d1_db):
+    """D1 resets a 5,000- and a 2,500-row delete for its CPU time (7429): `d1_delete` retries at half the rows until
+    one passes, keeps that size, and stops at the first statement deleting none."""
+    import re
+
+    con = d1_db
+    row = "(?, 'path', 'old', ?, 1, 1, 'a', 'b', 1, NULL, NULL, 0, 1, '[]')"
+    con.executemany(f"INSERT INTO index_row_groups (date, variant, gen, rg, d_min, d_max, p_min, p_max, b_max, u_min, u_max, row_start, row_end, rg_json) VALUES {row}",
+                    [("2026-09-01", i) for i in range(3000)])
+    limits: list[int] = []
+
+    def fake_query(sql, acct, tok, db_id):
+        limits.append(int(re.search(r"LIMIT (\d+)", sql).group(1)))
+        if limits[-1] > 1250:
+            raise index_footer.D1CpuLimit("D1 query failed (429): 7429 D1 DB exceeded its CPU time limit and was reset")
+        cur = con.execute(sql)
+        return cur.fetchall()
+
+    monkeypatch.setattr(index_footer, "_d1_query", fake_query)
+    assert index_footer.d1_delete("index_row_groups", "gen = 'old'", "acct", "tok") == 3000
+    assert limits == [5000, 2500, 1250, 1250, 1250, 1250]
+    assert con.execute("SELECT count(*) FROM index_row_groups").fetchone() == (0,)
+
+
+def test_d1_delete_gives_up_at_its_smallest_statement(monkeypatch):
+    def fake_query(sql, acct, tok, db_id):
+        raise index_footer.D1CpuLimit("7429")
+
+    monkeypatch.setattr(index_footer, "_d1_query", fake_query)
+    with pytest.raises(index_footer.D1CpuLimit, match="^7429$"):
+        index_footer.d1_delete("index_row_groups", "true", "acct", "tok")

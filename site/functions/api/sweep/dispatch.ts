@@ -1,12 +1,12 @@
 // POST /api/sweep/dispatch — launch a deletion run on GCP Batch from /staged
 // (specs/done/staged-delete.md; the "web dispatch bridge" of
-// specs/sweep-executor.md).
+// specs/done/sweep-executor.md).
 //
 // Body: { plan_id: number, mode: 'dry' | 'real', date: 'YYYY-MM-DD', items?: string[], buckets?: string[], machine?: keyof SWEEP_MACHINES }.
 // Admin scope only. The work is the `sweep` executor (`_lib/sweepDispatch.ts`)
 // behind `_lib/executor.ts` (shared with `/slack/actions`): the run acts on
 // `items` (the rows checked on /staged; the whole plan when absent), never more
-// (specs/delete-what-you-see.md). A dispatch is announced in the plan's Slack thread (specs/done/staged-slack.md).
+// (specs/done/delete-what-you-see.md). A dispatch is announced in the plan's Slack thread (specs/done/staged-slack.md).
 import { ADMIN_SCOPE, type Env as AuthEnv, json, requireScope } from '../../_lib/auth.js'
 import { dispatchBody, dispatchPlan, type ExecEnv, notifyDispatched } from '../../_lib/executor.js'
 import { SWEEP_MACHINES, type SweepMachine } from '../../_lib/sweepMachines.js'

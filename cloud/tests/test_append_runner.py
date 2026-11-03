@@ -1,6 +1,7 @@
 """`dt_cloud.append_runner`, the machinery both run stores share, where the stores' own tests don't reach: the R2 copy of
 one manifest (its runs, each run's liveness markers after the rest of it, a check, the manifest last; nothing of the
-manifest when the check fails), the Batch poll's cap, `exit_on`'s exit codes, and the merge status record's R2 sink."""
+manifest when the check fails), the Batch poll's cap, `exit_on`'s exit codes, the merge status record's R2 sink, and the
+coordinator lease."""
 from __future__ import annotations
 
 import json
@@ -72,6 +73,48 @@ def test_r2_publish_never_copies_the_manifest_when_a_run_is_missing_there(monkey
     assert [k for k in r2.r2 if "/manifests/" in k] == []
 
 
+THROTTLED = "Failed to upload a/b to r2b/a/b: An error occurred (ServiceUnavailable) when calling the UploadPart operation: Reduce your concurrent request rate for the same object."
+
+
+def test_r2_copy_copies_a_throttled_object_again_after_a_backoff(monkeypatch):
+    """R2 throttling one object past botocore's retries (cw's level-5 compaction, 10-29) costs that object a backoff and
+    a whole new copy, not the generation's copy."""
+    r2 = R2(["a/b", "a/c"])
+    r2.patch(monkeypatch, {"runs": []})
+    fails = {"a/b": 2}
+
+    def copy(bucket, s3, dst, o):
+        if fails.get(o.key):
+            fails[o.key] -= 1
+            raise RuntimeError(THROTTLED)
+        r2.r2.append(o.key)
+
+    monkeypatch.setattr(pub, "copy_one", copy)
+    sleeps: list[float] = []
+    monkeypatch.setattr(ar.time, "sleep", sleeps.append)
+    logs: list[str] = []
+    doc = ar.r2_copy("data", list(r2.gcs.values()), workers=1, log=logs.append)
+    assert (r2.r2, sleeps, doc["copied"]) == (["a/b", "a/c"], [ar.R2_RETRY_S, 2 * ar.R2_RETRY_S], 2)
+    assert [m for m in logs if "↻" in m] == [f"  ↻ a/b: R2 throttled ({THROTTLED}); again in {s:.0f}s" for s in sleeps]
+
+
+@pytest.mark.parametrize("msg, attempts", [(THROTTLED, ar.R2_ATTEMPTS), ("An error occurred (AccessDenied) when calling the PutObject operation", 1)])
+def test_r2_copy_raises_past_its_attempts_or_on_any_other_error(monkeypatch, msg, attempts):
+    r2 = R2(["a/b"])
+    r2.patch(monkeypatch, {"runs": []})
+    tries: list[str] = []
+
+    def copy(bucket, s3, dst, o):
+        tries.append(o.key)
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr(pub, "copy_one", copy)
+    monkeypatch.setattr(ar.time, "sleep", lambda s: None)
+    with pytest.raises(RuntimeError) as e:
+        ar.r2_copy("data", list(r2.gcs.values()), workers=1, log=lambda m: None)
+    assert (str(e.value), len(tries)) == (msg, attempts)
+
+
 def test_batch_runner_polls_at_most_every_30s(monkeypatch):
     from dt_cloud import batch, gcp
 
@@ -87,6 +130,8 @@ def test_batch_runner_polls_at_most_every_30s(monkeypatch):
 @pytest.mark.parametrize("raise_, code, logged", [
     (ar.NotNext("not yet"), ar.NOT_NEXT, ["x: not yet"]),
     (RuntimeError("Batch job j: FAILED"), 1, ["x: Batch job j: FAILED"]),
+    (ar.Busy("the coordinator lease is held by j"), ar.BUSY, ["x: the coordinator lease is held by j"]),
+    (ar.LeaseLost("lost the coordinator lease: it was deleted"), 1, ["x: lost the coordinator lease: it was deleted"]),
 ])
 def test_exit_on(raise_, code, logged):
     logs = []
@@ -341,3 +386,75 @@ def test_r2_publish_refuses_a_run_without_served_files(monkeypatch):
         ar.r2_publish("data", ROOT, "c", served=("served/",), workers=1, log=lambda m: None)
     assert str(e.value) == "r2 c: deltas/c has no served files on GCS (folded and pruned?): manifest not copied"
     assert r2.r2 == []
+
+
+# ── The coordinator lease ──────────────────────────────────────────────────
+
+T0 = datetime(2026, 10, 22, 12, 0, tzinfo=timezone.utc)
+
+
+class Clock:
+    def __init__(self, t: datetime = T0):
+        self.t = t
+
+    def __call__(self) -> datetime:
+        return self.t
+
+    def tick(self, s: float) -> None:
+        from datetime import timedelta
+
+        self.t += timedelta(seconds=s)
+
+
+def _lease(path, clock: Clock, holder: str) -> ar.CoordinatorLease:
+    return ar.CoordinatorLease(ar.LocalLeaseFile(path), holder=holder, now=clock)
+
+
+def test_a_held_lease_refuses_another_coordinator(tmp_path):
+    clock = Clock()
+    a, b = _lease(tmp_path / "l.json", clock, "job-a"), _lease(tmp_path / "l.json", clock, "job-b")
+    a.take()
+    with pytest.raises(ar.Busy) as e:
+        b.take()
+    assert str(e.value) == "the coordinator lease is held by job-a (since 2026-10-22T12:00:00+00:00)"
+
+
+def test_a_renewed_lease_stays_held_and_a_stale_one_is_taken_over(tmp_path):
+    clock = Clock()
+    a, b = _lease(tmp_path / "l.json", clock, "job-a"), _lease(tmp_path / "l.json", clock, "job-b")
+    a.take()
+    clock.tick(ar.COORD_TTL_S - 1)
+    a.renew()
+    clock.tick(ar.COORD_TTL_S - 1)
+    with pytest.raises(ar.Busy):
+        b.take()
+    clock.tick(2)
+    b.take()
+    assert json.loads((tmp_path / "l.json").read_text()) == {
+        "owner": b.owner, "holder": "job-b", "at": "2026-10-22T12:30:00+00:00", "ttl_s": ar.COORD_TTL_S}
+    # `a`'s next beat finds it taken: lost, and `a` neither renews nor releases b's lease
+    a.renew()
+    with pytest.raises(ar.LeaseLost) as e:
+        a.check()
+    assert str(e.value) == "lost the coordinator lease: it is now job-b's"
+    a.release()
+    assert json.loads((tmp_path / "l.json").read_text())["owner"] == b.owner
+
+
+def test_release_removes_only_its_own_lease(tmp_path):
+    clock = Clock()
+    a = _lease(tmp_path / "l.json", clock, "job-a")
+    a.take()
+    a.release()
+    assert not (tmp_path / "l.json").exists()
+    _lease(tmp_path / "l.json", clock, "job-b").take()
+
+
+def test_coordinator_lease_releases_on_a_raise(tmp_path):
+    with pytest.raises(RuntimeError, match="stage failed"):
+        with ar.coordinator_lease(ar.LocalLeaseFile(tmp_path / "l.json"), holder="job-a", now=Clock()) as check:
+            check()
+            assert json.loads((tmp_path / "l.json").read_text())["holder"] == "job-a"
+            raise RuntimeError("stage failed")
+    assert not (tmp_path / "l.json").exists()
+

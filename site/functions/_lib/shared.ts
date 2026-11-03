@@ -232,6 +232,53 @@ export async function inFlight<T>(map: Map<string, Promise<T>>, key: string, mak
   }
 }
 
+/** The static name sources' answers held per isolate (`SuffixHits`, `AnchoredSource`, `DrillSource`), under one bound
+ *  between them in estimated decoded bytes, the least recently used dropped first. Each source had held up to 400K
+ *  hits of its own, ~340 B apiece decoded (a ~90-character path, two bigints, two epoch-ms doubles): the three could
+ *  hold several times a Worker's 128 MB, and gcs's fleet-root `q=tokenizer` view (171K roots, ~56 MB of them, and
+ *  their forest) ran out of memory (1102) on any isolate already holding other answers. */
+export class HeldAnswers {
+  private held = new Map<string, { bytes: number; drop: () => void }>()
+  private total = 0
+  constructor(readonly cap: number) {}
+
+  /** `key` used now: held as the most recently used, at `bytes()` (estimated once); the least recently used are
+   *  dropped (their `drop`) while the total is over the cap, and an answer over it alone is not held. */
+  keep(key: string, bytes: () => number, drop: () => void): void {
+    const e = this.held.get(key)
+    if (e) { this.held.delete(key); this.held.set(key, e); return }
+    const n = bytes()
+    if (n > this.cap) { drop(); return }
+    this.held.set(key, { bytes: n, drop })
+    this.total += n
+    for (const [k, x] of this.held) {
+      if (this.total <= this.cap) break
+      this.held.delete(k); this.total -= x.bytes; x.drop()
+    }
+  }
+
+  /** `key` dropped by its owner. */
+  forget(key: string): void {
+    const e = this.held.get(key)
+    if (e) { this.held.delete(key); this.total -= e.bytes }
+  }
+
+  /** The estimated bytes held. */
+  get bytes(): number { return this.total }
+}
+
+/** What the static name sources hold between them, estimated (`hitsBytes`, `cellsBytes`): a quarter of an isolate. */
+export const HELD_BYTES = 32 << 20
+export const heldAnswers = new HeldAnswers(HELD_BYTES)
+let heldIds = 0
+/** A held-answer key prefix unique to one source instance (`HeldAnswers` keys span every source). */
+export const heldId = (name: string): string => `${name}#${heldIds++}\0`
+
+/** Decoded hits' estimated bytes: ~250 apiece beyond the path (V8: the object, two bigints, two doubles). */
+export const hitsBytes = (hits: readonly { path: string }[]): number => hits.reduce((n, h) => n + 256 + h.path.length, 0)
+/** A rollup's cells' estimated bytes: ~160 apiece beyond the child's name. */
+export const cellsBytes = (cells: readonly { child: string }[]): number => cells.reduce((n, c) => n + 160 + c.child.length, 0)
+
 /** An isolate's memo of settled values whose pending computations are shared across requests only as owned, tracked
  *  entries (`inFlight`): a caller finding `key` settled takes the value; finding it pending in another request, joins
  *  it (`join`: bounded, and once it is evicted — its owner cancelled or convicted — computes it in its own context). A

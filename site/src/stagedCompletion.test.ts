@@ -1,8 +1,8 @@
 import { expect, it } from 'vitest'
 import type { PrefixExecution } from './prefixExecution'
-import { batchCompletion, batchIsCollapsed, isCurrentlyStaged, stagedMapTree, stagedState } from './stagedCompletion'
+import { batchCompletion, batchIsCollapsed, isCurrentlyStaged, liveStagedItems, stagedMapTree, stagedState } from './stagedCompletion'
 
-const deleted: PrefixExecution = { kind: 'recorded', runId: 'run', objects: 5, bytes: 50, undone: 0, deadline: 700, expired: false }
+const deleted: PrefixExecution = { kind: 'recorded', runId: 'run', objects: 5, bytes: 50, preserved: 0, undone: 0, deadline: 700, expired: false }
 
 it('distinguishes recorded deletions, empty scans, and files still present at the selected scan', () => {
   expect([
@@ -46,4 +46,10 @@ it('skips absent and zero-byte treemaps but preserves populated maps', () => {
   expect(stagedMapTree(['gs://b/a/'], {}, 'staged')).toBeNull()
   expect(stagedMapTree(['gs://b/a/'], { 'gs://b/a/': { b: 0, o: 5 } }, 'staged')).toBeNull()
   expect(stagedMapTree(['gs://b/a/'], { 'gs://b/a/': { b: 50, o: 5 } }, 'staged')).toEqual({ n: 'staged', k: 'dir', b: 50, o: 5, c: [{ n: 'b', k: 'dir', b: 50, o: 5, c: [{ n: 'a', k: 'dir', b: 50, o: 5 }] }] })
+})
+
+it('keeps the plan items the newest scan still holds, and every item until sizes are known', () => {
+  const items = [{ prefix: 'gs://b/gone/' }, { prefix: 'gs://b/zero/' }, { prefix: 'gs://b/here/' }]
+  expect(liveStagedItems(items, { 'gs://b/zero/': { b: 0, o: 0 }, 'gs://b/here/': { b: 50, o: 5 } })).toEqual([{ prefix: 'gs://b/here/' }])
+  expect(liveStagedItems(items, undefined)).toEqual(items)
 })

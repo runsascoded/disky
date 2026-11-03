@@ -148,3 +148,41 @@ def test_write_labels_one_table_per_bucket_prefixes_relative(tmp_path: Path, ide
     ]
     assert read("b2") == [{"prefix": "datasets", "usr": "data-team"}]
     assert read("c9") == []
+
+
+def test_user_prefix_rows_derive_from_the_scanned_listing(tmp_path: Path, identities, attribution: str):
+    """A `users/<seg>/` first written after the attribution parquet was built
+    still gets its `user-prefix` owner: the rows come from the listing being
+    attributed, not only from the (frozen) parquet. An aliased segment
+    resolves to its canonical user, an unaliased one to itself. Both listing
+    shapes callers pass resolve alike: objects (`report`/`gaps`) and dir paths
+    without a trailing slash (`path-index`'s `listing_dirs`)."""
+    objects = tmp_path / "objects.parquet"
+    pd.DataFrame(
+        {
+            "bucket": ["b1", "b1", "b2", "b2"],
+            "name": ["users/rw/a.bin", "users/newbie/ckpt/step-1/x.bin", "users/rw/b.bin", "usersx/q/c.bin"],
+            "size_bytes": [1, 1, 1, 1],
+        }
+    ).to_parquet(objects)
+    expected = {
+        "gs://b1/users/rw/": ("ryan-williams", "user-prefix"),
+        "gs://b1/users/newbie/": ("newbie", "user-prefix"),
+        "gs://b2/users/rw/": ("ryan-williams", "user-prefix"),
+        "gs://b1/datasets/finelog/": (None, "manual"),
+        "gs://b1/datasets/": ("data-team", "manual"),
+        "gs://b2/datasets/": ("data-team", "manual"),
+        "gs://b1/scratch/rw/": ("ryan-williams", "manual"),
+    }
+    con = duckdb.connect()
+    assert load_prefix_map(con, (attribution,), identities, prepare_listing(con, (str(objects),))) == expected
+
+    dirs = tmp_path / "dirs.parquet"
+    pd.DataFrame(
+        {
+            "bucket": ["b1", "b1", "b2", "b2"],
+            "name": ["users/rw", "users/newbie/ckpt/step-1", "users/rw", "usersx/q"],
+        }
+    ).to_parquet(dirs)
+    con.execute(f"CREATE TEMP VIEW listing_dirs AS SELECT * FROM read_parquet('{dirs}')")
+    assert load_prefix_map(con, (attribution,), identities, "listing_dirs") == expected

@@ -1,13 +1,15 @@
 import { autoUpdate, flip, FloatingPortal, offset, shift, useFloating } from '@floating-ui/react'
-import { useQuery } from '@tanstack/react-query'
+import { keepPreviousData, useQuery } from '@tanstack/react-query'
 import { memo, useCallback, useMemo, useRef, useState } from 'react'
+import { Loading } from './Busy'
 import { Link, useParams, useSearchParams } from 'react-router-dom'
-import type { SessionRow, StoredEvent } from '../functions/_lib/sessionLogShape'
+import type { SessionPage, SessionRow, StoredEvent } from '../functions/_lib/sessionLogShape'
 import { useRegistry } from './identities'
 import { NO_AUTOFILL } from './noAutofill'
 import { useUserEmails } from './owners'
 import { relAgo } from './prefixes'
-import { fmtClock, fmtDuration, fmtOffset, LANES, type Line, ticks, timeline, uaLabel, viewerOf } from './sessionsModel'
+import { AT_LABEL, AT_MODES, type AtMode, fmtAt, fmtClock, fmtDuration, fmtOffset, LANES, type Line, pagerLabel, sessionsQuery, ticks, timeline, uaLabel, viewerOf } from './sessionsModel'
+import { useSessionAt } from './prefs'
 import { SiteNav } from './SiteNav'
 import { Tooltip } from './Tooltip'
 import { UserChip } from './UserChip'
@@ -45,12 +47,27 @@ function SessionList() {
   const email = sp.get('u') ?? ''
   const since = sp.get('since') ?? ''
   const errors = sp.get('err') === '1'
-  const set = (k: string, v: string | null) => setSp(p => { const n = new URLSearchParams(p); if (v) n.set(k, v); else n.delete(k); return n }, { replace: true })
-  const qs = new URLSearchParams({ ...(email ? { email } : {}), ...(since ? { since } : {}), ...(errors ? { errors: '1' } : {}) }).toString()
+  // The page: a cursor in the URL (`after=` / `before=`, as the API takes them); none = the first page.
+  const after = sp.get('after'), before = sp.get('before')
+  /** A filter change returns to the first page. */
+  const set = (k: string, v: string | null) => setSp(p => {
+    const n = new URLSearchParams(p)
+    if (v) n.set(k, v); else n.delete(k)
+    n.delete('after'); n.delete('before')
+    return n
+  }, { replace: true })
+  const go = (k: 'after' | 'before', c: string) => setSp(p => {
+    const n = new URLSearchParams(p)
+    n.delete('after'); n.delete('before'); n.set(k, c)
+    return n
+  })
+  const qs = sessionsQuery({ email, since, errors, after, before })
   const q = useQuery({
     queryKey: ['session-log', 'sessions', qs],
-    queryFn: () => getJson<{ sessions: SessionRow[] }>(`/api/session-log/sessions${qs ? `?${qs}` : ''}`),
+    queryFn: () => getJson<SessionPage>(`/api/session-log/sessions${qs ? `?${qs}` : ''}`),
+    placeholderData: keepPreviousData,
   })
+  const pager = q.data && <Pager page={q.data} onGo={go} />
   return (
     <>
       <h1>Sessions</h1>
@@ -62,6 +79,7 @@ function SessionList() {
         <label><input type="checkbox" checked={errors} onChange={e => set('err', e.target.checked ? '1' : null)} /> with errors</label>
       </div>
       {q.error && <p className="err">{q.error.message}</p>}
+      {pager}
       <div className="table-scroll">
         <table className="sessions">
           <thead>
@@ -81,11 +99,24 @@ function SessionList() {
               </tr>
             ))}
             {q.data && !q.data.sessions.length && <tr><td colSpan={8}><em>no sessions match</em></td></tr>}
-            {q.isPending && <tr><td colSpan={8}><em>loading…</em></td></tr>}
+            {q.isPending && <tr><td colSpan={8}><Loading label="Loading sessions…" /></td></tr>}
           </tbody>
         </table>
       </div>
+      {q.data && q.data.sessions.length > 10 && pager}
     </>
+  )
+}
+
+/** "51–100 of 312" with prev / next: the page's cursors (`prev` / `next`), disabled at either end. */
+function Pager({ page, onGo }: { page: SessionPage; onGo: (k: 'after' | 'before', c: string) => void }) {
+  const { prev, next } = page
+  return (
+    <nav className="sessions-pager" aria-label="Pages">
+      <button type="button" disabled={!prev} onClick={() => prev && onGo('before', prev)}>← newer</button>
+      <span>{pagerLabel(page)}</span>
+      <button type="button" disabled={!next} onClick={() => next && onGo('after', next)}>older →</button>
+    </nav>
   )
 }
 
@@ -126,6 +157,7 @@ const KIND_FILTERS = [
   { id: 'api', label: 'requests' },
 ] as const
 type KindFilter = typeof KIND_FILTERS[number]['id']
+const isFilter = (s: string | null): s is KindFilter => KIND_FILTERS.some(f => f.id === s)
 const shown = (l: Line, f: KindFilter): boolean =>
   f === 'all' || (f === 'errors' ? l.error : f === 'actions' ? l.lane === 'input' || l.lane === 'nav' : l.k === 'api')
 
@@ -135,7 +167,17 @@ function SessionView({ sid }: { sid: string }) {
     queryFn: () => getJson<{ session: SessionRow; events: StoredEvent[] }>(`/api/session-log/sessions/${encodeURIComponent(sid)}`),
   })
   const lines = useMemo(() => timeline(q.data?.events ?? []), [q.data])
-  const [filter, setFilter] = useState<KindFilter>('all')
+  // `?show=errors` etc.: the filter is in the URL, so a link (the activity feed's error lines) can open on it.
+  const [sp, setSp] = useSearchParams()
+  const show = sp.get('show')
+  const filter: KindFilter = isFilter(show) ? show : 'all'
+  const setFilter = useCallback((f: KindFilter) => setSp(p => {
+    const n = new URLSearchParams(p)
+    if (f === 'all') n.delete('show'); else n.set('show', f)
+    return n
+  }, { replace: true }), [setSp])
+  const [at, setAt] = useSessionAt()
+  const now = useMemo(() => Date.now(), [q.data])
   const [focus, setFocus] = useState<number | null>(null)
   /** The event under the pointer, in the strip or the table: both highlight it. */
   const [hot, setHot] = useState<number | null>(null)
@@ -153,7 +195,7 @@ function SessionView({ sid }: { sid: string }) {
     if (r.top < bb.top + head || r.bottom > bb.bottom) b.scrollTop += r.top - bb.top - (bb.height - r.height) / 2
   }, [])
   if (q.error) return <p className="err">{q.error.message}</p>
-  if (!q.data) return <p className="dim">loading…</p>
+  if (!q.data) return <Loading label="Loading session…" />
   const s = q.data.session
   const jump = (i: number) => {
     setFilter('all')
@@ -165,7 +207,7 @@ function SessionView({ sid }: { sid: string }) {
       <h1><Who s={s} size={28} /></h1>
       <p className="session-meta">
         {fmtTime(s.started_ms)} · {fmtDuration(s.last_ms - s.started_ms)} · {s.n_events.toLocaleString()} events ·{' '}
-        {s.n_errors ? <b className="err">{s.n_errors} errors</b> : '0 errors'} · {uaLabel(s.ua)} · build <code>{s.build ?? '—'}</code> · <code className="dim">{s.sid}</code>
+        {s.n_errors ? <b className="err">{s.n_errors} errors</b> : '0 errors'} · {uaLabel(s.ua)} · build <code>{s.build ?? '—'}</code> · <code className="dim">{s.sid}</code> · <Link to={`/admin/latency?days=30&sid=${s.sid}`}>latency</Link>
       </p>
       <Strip lines={lines} hot={hot} onHover={stripHover} onPick={jump} />
       <div className="sessions-filters" role="radiogroup" aria-label="Show">
@@ -175,10 +217,10 @@ function SessionView({ sid }: { sid: string }) {
       </div>
       <div className="table-scroll" ref={box}>
         <table className="sessions timeline">
-          <thead><tr><th className="num">at</th><th className="num">time</th><th>kind</th><th>event</th><th></th></tr></thead>
+          <thead><tr><th className="num"><AtHeader at={at} onAt={setAt} /></th><th className="num">time</th><th>kind</th><th>event</th><th></th></tr></thead>
           <tbody onMouseLeave={() => setHot(null)}>
-            {lines.filter(l => shown(l, filter)).map(l => (
-              <EventRow key={l.i} l={l} t0={lines[0].t} hot={hot === l.i} focused={focus === l.i} rowRef={rowRef} onHover={setHot} />
+            {lines.filter(l => shown(l, filter)).map((l, j, rows) => (
+              <EventRow key={l.i} l={l} at={fmtAt(at, l, j ? rows[j - 1] : null, now)} t0={lines[0].t} hot={hot === l.i} focused={focus === l.i} rowRef={rowRef} onHover={setHot} />
             ))}
           </tbody>
         </table>
@@ -187,9 +229,26 @@ function SessionView({ sid }: { sid: string }) {
   )
 }
 
+const AT_TIP: Record<AtMode, string> = {
+  start: 'Time since the session’s first event, and (in parentheses) since the row above, as filtered.',
+  ago: 'How long ago, from when this page loaded.',
+}
+
+/** The first column's header: click to cycle what it shows (`AT_MODES`); remembered per browser. */
+function AtHeader({ at, onAt }: { at: AtMode; onAt: (m: AtMode) => void }) {
+  const next = AT_MODES[(AT_MODES.indexOf(at) + 1) % AT_MODES.length]
+  return (
+    <Tooltip content={<>{AT_TIP[at]} Click for “{AT_LABEL[next]}”: {AT_TIP[next].toLowerCase()}</>}>
+      <button type="button" className="th-toggle" onClick={() => onAt(next)}>{AT_LABEL[at]} ⇄</button>
+    </Tooltip>
+  )
+}
+
 /** One timeline row; memoized, so a hover re-renders two rows, not the whole (up to 20K-row) table. */
-const EventRow = memo(function EventRow({ l, t0, hot, focused, rowRef, onHover }: {
+const EventRow = memo(function EventRow({ l, at, t0, hot, focused, rowRef, onHover }: {
   l: Line
+  /** The first column's text (`fmtAt`). */
+  at: string
   t0: number
   hot: boolean
   focused: boolean
@@ -199,7 +258,7 @@ const EventRow = memo(function EventRow({ l, t0, hot, focused, rowRef, onHover }
   return (
     <tr ref={el => rowRef(l.i, el)} onMouseEnter={() => onHover(l.i)}
       className={`${l.error ? 'has-err' : ''}${focused ? ' focused' : ''}${hot ? ' hot' : ''}${l.k === 'start' ? ' load' : ''}`}>
-      <td className="num"><code>{fmtOffset(l.off)}</code></td>
+      <td className="num"><code>{at}</code></td>
       <td className="num"><code className="dim">{fmtClock(l.t, t0)}</code></td>
       <td><span className={`lane-dot lane-${l.lane}`} aria-hidden /> {l.k}</td>
       <td className="ev">{l.text}</td>

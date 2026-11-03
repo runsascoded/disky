@@ -14,7 +14,7 @@
  * assignee is split by the scan's per-user slices. Bands partition the
  * estate, so a user's total is exact.
  *
- * An exact-object assignment (`kind: 'object'`, specs/file-assign.md) is a leaf
+ * An exact-object assignment (`kind: 'object'`, specs/done/file-assign.md) is a leaf
  * of the trie: every `/`-cut of its key is a strict ancestor, its band is the
  * object itself, and it is nobody's ancestor (not `key.bak`'s, not `key/…`'s).
  * Recency decides between it and the folders above, as between folders. It is

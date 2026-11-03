@@ -41,9 +41,15 @@ export const RUN_DIR: string = await (async () => {
   return hits[0]
 })()
 
+/** D1's cap on a statement's bound parameters (SQLite's own is far higher, so the shim enforces it). */
+export const D1_MAX_PARAMS = 100
+
 function d1Of(raw: Sqlite): D1Database {
   const prepare = (sql: string, params: unknown[] = []) => ({
-    bind: (...args: unknown[]) => prepare(sql, args),
+    bind: (...args: unknown[]) => {
+      if (args.length > D1_MAX_PARAMS) throw new Error(`D1_ERROR: too many SQL variables (${args.length} > ${D1_MAX_PARAMS}): SQLITE_ERROR`)
+      return prepare(sql, args)
+    },
     async first<T>(col?: string): Promise<T | null> {
       const row = raw.prepare(sql).all(...params)[0]
       if (!row) return null
@@ -85,7 +91,7 @@ export async function sqliteD1(): Promise<{ db: D1Database; raw: Sqlite }> {
   return { db: d1Of(raw), raw }
 }
 
-/** The ownership ledger's tables (specs/file-assign.md), exactly as gcs's schema has them. */
+/** The ownership ledger's tables (specs/done/file-assign.md), exactly as gcs's schema has them. */
 const LEDGER_TABLES = ['actions', 'owner_prefixes', 'owner_totals', 'claims'] as const
 const LEDGER_DDL = `
   CREATE TABLE actions (id INTEGER PRIMARY KEY, actor TEXT NOT NULL, ts INTEGER NOT NULL, scan TEXT NOT NULL, pattern TEXT NOT NULL, set_owner INTEGER NOT NULL DEFAULT 0, owner TEXT, set_keep INTEGER NOT NULL DEFAULT 0, keep TEXT, memo TEXT, kind TEXT CHECK (kind IS NULL OR kind = 'object'), CHECK (set_owner OR set_keep));

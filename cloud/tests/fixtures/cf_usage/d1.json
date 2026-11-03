@@ -1,0 +1,37 @@
+{
+  "data": {
+    "viewer": {
+      "accounts": [
+        {
+          "d1AnalyticsAdaptiveGroups": [
+            {
+              "sum": {
+                "readQueries": 400000,
+                "writeQueries": 9000,
+                "rowsRead": 3000000000,
+                "rowsWritten": 1000000
+              },
+              "dimensions": {
+                "date": "2026-10-19",
+                "databaseId": "11111111-2222-4333-8444-555555555555"
+              }
+            },
+            {
+              "sum": {
+                "readQueries": 600000,
+                "writeQueries": 12000,
+                "rowsRead": 5000000000,
+                "rowsWritten": 2000000
+              },
+              "dimensions": {
+                "date": "2026-10-20",
+                "databaseId": "11111111-2222-4333-8444-555555555555"
+              }
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "errors": null
+}

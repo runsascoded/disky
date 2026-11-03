@@ -6,7 +6,7 @@ import { type CoverItem, type RowMatches, rowMatchesOf } from './filterCover'
 
 // The table's own logic under a filter, with its surroundings stubbed: the selection is preset (`selected`),
 // and the assign / trash controls render what they would send.
-const { selected, staged, acts, planItems } = vi.hoisted(() => ({ selected: new Set<string>(), staged: [] as string[][], acts: [] as { resolve: () => Promise<unknown> }[], planItems: [] as { prefix: string; kind?: 'prefix' | 'object' }[] }))
+const { selected, staged, acts, planItems, planStats } = vi.hoisted(() => ({ selected: new Set<string>(), staged: [] as string[][], acts: [] as { resolve: () => Promise<unknown> }[], planItems: [] as { prefix: string; kind?: 'prefix' | 'object' }[], planStats: { current: undefined as Record<string, { b: number; o: number }> | undefined } }))
 vi.mock('./auth', () => ({ useCanAssign: () => true, useCanStage: () => true }))
 vi.mock('./store', () => ({ useStore: () => ({ staging: true, owners: true }) }))
 vi.mock('./plans', () => ({
@@ -14,6 +14,9 @@ vi.mock('./plans', () => ({
   // The open plan (`useStagedIndex`): `planItems`, preset per test.
   useStagedPlan: () => ({ data: { items: planItems } }),
 }))
+// The items' sizes at the newest scan (`planStats`; unset: unknown, every item counts).
+vi.mock('./scan', () => ({ useScans: () => ({ data: ['2026-10-19T0701'], isPending: false }) }))
+vi.mock('./prefixes', () => ({ usePrefixes: () => ({ data: planStats.current, isLoading: false }) }))
 vi.mock('./perf', () => ({ usePerfCommit: () => {} }))
 vi.mock('./units', () => ({ useUnits: () => ({ fmtBytes: (b: number) => `${b} B` }) }))
 vi.mock('use-prms', () => ({ intParam: () => ({}), codeParam: () => ({}), enumParam: () => ({}), useUrlState: () => [20, () => {}] }))
@@ -72,7 +75,7 @@ const assigns = (html: string) => [...html.matchAll(/data-assign="([^"]*)" data-
 const checkboxes = (html: string) => rows(html).map(r => /<td class="col-sel">(.*?)<\/td>/.exec(r)?.[1] === '' ? 'no box' : 'box')
 const actionsCell = (row: string) => /<td class="actions">(.*)<\/td>$/.exec(row)?.[1] ?? ''
 
-beforeEach(() => { selected.clear(); staged.length = 0; acts.length = 0; asked.length = 0; planItems.length = 0 })
+beforeEach(() => { selected.clear(); staged.length = 0; acts.length = 0; asked.length = 0; planItems.length = 0; planStats.current = undefined })
 
 describe('the children table under a filter', () => {
   it('a row holding exactly one match shows the path to it (as its tile); several: its name and how many; none: its name', () => {
@@ -170,5 +173,18 @@ describe('the children table under a filter', () => {
       ['x1.mp3', 'staged'], ['x2.mp3', 'trash'], ['x3.mp3', 'trash'], ['sub', 'staged'], ['keep · 1 staged', 'trash'],
     ])
     expect([...html.matchAll(/<tr([^>]*)>/g)].map(([, a]) => /class="([^"]*)"/.exec(a)?.[1] ?? '')).toEqual(['', 'staged', '', '', 'staged', '', 'total-row'])
+  })
+
+  it('an item the newest scan holds nothing under (deleted, as `/staged` settles it) is not marked or counted', () => {
+    const show = (node.c![1].c![0])
+    planItems.push({ prefix: 'gs://marin-us-central1/show/x1.mp3', kind: 'object' }, { prefix: 'gs://marin-us-central1/show/keep/deep/' })
+    planStats.current = { 'gs://marin-us-central1/show/x1.mp3': { b: 5, o: 1 } }
+    const html = renderToStaticMarkup(createElement(ChildrenTable, {
+      node: { ...show, c: [...show.c!, { n: 'keep', k: 'dir', b: 1, o: 1 }] }, segs: ['marin-us-central1', 'show'], scheme: 'gs://',
+      ownerIdx: { assignmentOf: () => null } as never, onOpen: () => {}, onOpenObject: () => {},
+    }))
+    expect(rows(html).map(r => [name(r), /<a class="staged-chip"[^>]*>([^<]*)<\/a>/.exec(actionsCell(r))?.[1] ?? (/aria-label="trash"/.test(actionsCell(r)) ? 'trash' : '?')])).toEqual([
+      ['x1.mp3', 'staged'], ['x2.mp3', 'trash'], ['x3.mp3', 'trash'], ['keep', 'trash'],
+    ])
   })
 })

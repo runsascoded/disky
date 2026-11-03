@@ -213,4 +213,4 @@ def end_dropped_sql(l: str, k: str, rule: HexRule | None) -> str:
     occurrence starting at a non-hex character is never dropped, so that is checked first."""
     if rule is None:
         return "false"
-    return f"(contains({_HEXS}, left({k}, 1)) AND {dropped_sql(l, f'length({l}) - length({k}) + 1', f'length({k})', rule)})"
+    return f"(CASE WHEN contains({_HEXS}, left({k}, 1)) THEN {dropped_sql(l, f'length({l}) - length({k}) + 1', f'length({k})', rule)} ELSE false END)"

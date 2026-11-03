@@ -9,7 +9,7 @@ export type { ActionLogRow, ActionStatus } from './actionLogShape.js'
 export const LOG_MAX = 500
 
 // `substr(…) = prefix`, never LIKE: `_` (common in these paths) is a LIKE wildcard.
-// `kind` (NULL = prefix, 'object' = an exact key; specs/file-assign.md): a row
+// `kind` (NULL = prefix, 'object' = an exact key; specs/done/file-assign.md): a row
 // is superseded only by a newer row of the same kind on the same pattern, and
 // overridden only by a newer *prefix* row above it — an object row covers
 // nothing but its own key (not `key.bak`, though that string starts with it).

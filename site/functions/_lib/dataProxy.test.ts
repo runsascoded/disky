@@ -41,3 +41,12 @@ describe('snapshot store scope', () => {
     expect(servedStore.mock.calls.map(([, prefixes]) => prefixes)).toEqual([['snapshots/r2/'], ['snapshots/rules.json']])
   })
 })
+
+describe('optional files', () => {
+  it('answers a missing optional file 204 and a missing required one 404', async () => {
+    get.mockRejectedValueOnce(new Error('NoSuchKey')).mockRejectedValueOnce(new Error('NoSuchKey'))
+    expect(await request('r2/2026-10-13T1935/non-live.json?optional=1')).toEqual([204, ''])
+    expect(await request('r2/2026-10-13T1935/non-live.json')).toEqual([404, 'not found'])
+    expect(await request('r2/2026-10-13T1935/non-live.json?optional=1')).toEqual([200, '{"key":"snapshots/r2/2026-10-13T1935/non-live.json"}'])
+  })
+})

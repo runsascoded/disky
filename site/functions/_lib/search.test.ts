@@ -13,7 +13,7 @@ import { APPROX_EXCL_NO_INDEX, APPROX_NO_INDEX, APPROX_UNINDEXED, buildDiff, bui
 
 vi.mock('@rdub/file-tree/stores/s3', async () => ({ S3Store: (await import('./testStore')).S3Store }))
 
-// The search index reader (specs/path-store-search.md §4) over
+// The search index reader (specs/done/path-store-search.md §4) over
 // `fixtures/v2-search/` (`gen.py` `write_v2_search`): buckets `bk` (6000
 // filler objects `fill/f*` + `ttl` dirs nested in `ttl` dirs, case variants,
 // `.safetensors` objects, `ckpt…final` paths, a Kelvin-sign `Key`) and `zz`,

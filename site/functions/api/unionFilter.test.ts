@@ -147,7 +147,60 @@ describe('D1', () => {
     }
   })
 
+  type DiffBody = Body & { rows: { p: string; d: number }[]; total_a: number; total_b: number; objects_a: number; objects_b: number; expansions: number; lookups: number; threshold: number; matched: { path: string; b: number; o: number }[]; matchCount: { n: number; b: number; o: number } }
+  /** A member's filtered diff's filter fields that the union root carries as they are (a partial reason is named). */
+  const filterFieldsOf = (b: DiffBody) => Object.fromEntries(Object.entries(b).filter(([k]) => ['interiors', 'dirsOnly', 'matchesCapped', 'hexRuns'].includes(k)))
+  const tagged = (b: DiffBody, src: string) => b.rows.map(r => (r.d === 1 && r.p !== '(other)' ? { ...r, src } : r))
+
+  it('the root’s filtered diff: each member diffs its own scans with `q=`; an unchanged one adds its matches to both sides, no rows', async () => {
+    // A→B: the primary didn't rescan (A at both cutoffs: unchanged), meta did (A→B).
+    const env = envOf(META_OWN)
+    const m = await body(diff, env, `from=${A}&to=${B}&path=&q=both&store=meta`) as DiffBody
+    const u = await body(diff, env, `from=${A}&to=${B}&path=&q=both`) as DiffBody
+    // The unchanged member's self-diff walks its matches (its `expansions` / `lookups`) but draws nothing.
+    expect({ ...u, expansions: u.expansions >= m.expansions, lookups: u.lookups >= m.lookups }).toEqual({
+      prev: A, curr: B, path: '', q: 'both',
+      rows: tagged(m, 'meta'),
+      total_a: m.total_a + 6000, total_b: m.total_b + 6000, objects_a: m.objects_a + 1, objects_b: m.objects_b + 1,
+      expansions: true, lookups: true,
+      truncated: false,
+      threshold: Math.round(filterThreshold(Math.max(m.total_a, m.total_b) + 6000, 1280, 768, 12)),
+      tier: u.tier,
+      lookups_capped: false,
+      ...filterFieldsOf(m),
+      matches: [],
+      matched: [{ path: 'bk/ckpt', b: 6000, o: 1 }, ...m.matched].sort((x, y) => y.b - x.b),
+      matchCount: { n: m.matchCount.n + 1, b: m.matchCount.b + 6000, o: m.matchCount.o + 1 },
+      union: { view: 'all', sources: [{ store: 'primary', from: A, to: A, change: 'unchanged' }, { store: 'meta', from: A, to: B, change: 'changed' }] },
+    })
+  })
+
+  it('the root’s filtered diff: a refusing member is named, partial; every member refusing is that refusal', async () => {
+    // A→C: the primary's C is outside its index (refuses); meta (A→B) answers with its own index, refuses without.
+    const own = envOf(META_OWN)
+    const m = await body(diff, own, `from=${A}&to=${B}&path=&q=both&store=meta`) as DiffBody
+    const u = await body(diff, own, `from=${A}&to=${C}&path=&q=both`) as DiffBody
+    expect(u).toEqual({
+      prev: A, curr: C, path: '', q: 'both',
+      rows: tagged(m, 'meta'),
+      total_a: m.total_a, total_b: m.total_b, objects_a: m.objects_a, objects_b: m.objects_b,
+      expansions: m.expansions, lookups: m.lookups,
+      truncated: false,
+      threshold: Math.round(filterThreshold(Math.max(m.total_a, m.total_b), 1280, 768, 12)),
+      tier: m.tier,
+      lookups_capped: false,
+      ...filterFieldsOf(m),
+      matches: [],
+      matched: m.matched,
+      matchCount: m.matchCount,
+      partial: true, partialReason: `primary: ${REJECT_MESSAGES['scan-not-indexed']}`,
+      union: { view: 'all', sources: [{ store: 'primary', from: A, to: C, change: 'changed', refused: NOT_INDEXED }, { store: 'meta', from: A, to: B, change: 'changed' }] },
+    })
+    expect(await get(diff, envOf(), `from=${A}&to=${C}&path=&q=both`)).toEqual([400, NOT_INDEXED])
+  })
+
   it('the root still refuses one store’s scope axes, with or without a filter', async () => {
+    expect(await get(diff, envOf(), `from=${A}&to=${B}&path=&q=ckpt&o=owned`)).toEqual([400, 'a union view\'s root is unscoped (o: drill into one store)'])
     expect(await get(subtree, envOf(), `date=${A}&path=&q=ckpt&o=owned`)).toEqual([400, 'a union view\'s root is unscoped (o: drill into one store)'])
   })
 

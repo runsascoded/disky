@@ -1,0 +1,73 @@
+{
+  "data": {
+    "viewer": {
+      "accounts": [
+        {
+          "r2OperationsAdaptiveGroups": [
+            {
+              "sum": {
+                "requests": 4000000
+              },
+              "dimensions": {
+                "date": "2026-10-19",
+                "bucketName": "my-index",
+                "actionType": "GetObject"
+              }
+            },
+            {
+              "sum": {
+                "requests": 1000000
+              },
+              "dimensions": {
+                "date": "2026-10-19",
+                "bucketName": "my-index",
+                "actionType": "HeadObject"
+              }
+            },
+            {
+              "sum": {
+                "requests": 20000
+              },
+              "dimensions": {
+                "date": "2026-10-19",
+                "bucketName": "my-index",
+                "actionType": "PutObject"
+              }
+            },
+            {
+              "sum": {
+                "requests": 500
+              },
+              "dimensions": {
+                "date": "2026-10-19",
+                "bucketName": "my-index",
+                "actionType": "DeleteObject"
+              }
+            },
+            {
+              "sum": {
+                "requests": 6000000
+              },
+              "dimensions": {
+                "date": "2026-10-20",
+                "bucketName": "my-index",
+                "actionType": "GetObject"
+              }
+            },
+            {
+              "sum": {
+                "requests": 1000
+              },
+              "dimensions": {
+                "date": "2026-10-20",
+                "bucketName": "my-index",
+                "actionType": "ListObjects"
+              }
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "errors": null
+}

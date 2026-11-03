@@ -950,6 +950,12 @@ def alias_plan_cmd(bucket, gen) -> None:
         out = Path(d) / "aliases.parquet"
         con.execute(f"COPY (SELECT * FROM a ORDER BY q) TO {q(str(out))} (FORMAT parquet, COMPRESSION zstd)")
         client.bucket(bucket).blob(f"{prefix}/{DRILL}/aliases.parquet").upload_from_filename(str(out))
+        # every member's digest, as the one-machine build writes it (`static_drill.write_digests`: a compaction's classes)
+        from .static_drill import DIGESTS, write_digests
+
+        con.execute(f"CREATE TABLE dgq AS SELECT g.q, g.n, g.h1, g.h2 FROM read_parquet({q(d + '/s*.parquet')}) AS g SEMI JOIN a USING (q)")
+        write_digests(con, Path(d) / "dg")
+        client.bucket(bucket).blob(f"{prefix}/{DRILL}/{DIGESTS}").upload_from_filename(str(Path(d) / "dg" / DIGESTS))
         summary = dict(zip(("members", "canonical", "rows", "canonical_rows"), con.execute(
             "SELECT count(*), count(*) FILTER (WHERE q = canonical), sum(n), sum(n) FILTER (WHERE q = canonical) FROM a").fetchone()))
     summary = {"gen": gen, **{k: int(v) for k, v in summary.items()}}
@@ -1067,6 +1073,112 @@ def _group_table(con, plan: dict) -> None:
     con.executemany("INSERT INTO qg VALUES (?, ?)", [(g["lo"], k) for k, g in enumerate(plan["groups"])])
 
 
+def ranged(rows: str, bounds: str, col: str, keys: str | None = None) -> str:
+    """Query `rows`' rows (a table or a parenthesized query with a `q` column) with `col`: the `q` range of table `bounds`
+    (`lo`, `col`) each falls in (the last `lo <= q`), as `rows ASOF JOIN bounds ON q >= lo` assigns it. The ASOF join runs
+    over the distinct `q`s only (`keys`: a query of them, default `rows`' own), and the rows take theirs by a hash join:
+    an ASOF join with no equality key sorts its whole left side in one partition, so over every row it was a global sort
+    of each spill's input (gcs's 10-22 L3 carry: 60 min reading 2 B long rows). A row whose `q` has no range (not in
+    `keys`, or below every `lo`) fails the query, never drops."""
+    keys = keys if keys is not None else f"SELECT DISTINCT q FROM {rows}"
+    return f"""SELECT r.*, CASE WHEN g.q IS NULL THEN error('ranged: q ' || coalesce('''' || r.q || '''', 'NULL') || ' has no range')
+            ELSE g.{col} END AS {col}
+        FROM {rows} AS r LEFT JOIN (SELECT k.q, b.{col} FROM ({keys}) AS k ASOF JOIN {bounds} AS b ON k.q >= b.lo) AS g ON r.q = g.q"""
+
+
+def index_estimates(con, index_files: list[str], keys: str, into: str) -> None:
+    """Table `into (q, n)`: each `q` of query `keys`' rows in the `q`-sorted files indexed by `index_files`
+    (`GROUP_INDEX_SCHEMA`: per row group its first and last `q` and rows), estimated from the indexes alone: a group's
+    rows are spread evenly over the keys in its `[q_min, q_max]` (the remainder to the first of them); a group holding
+    no key is dropped. Exact for a group of one `q`, so off by at most two groups' rows for a `q` spanning several. What
+    chunk planning reads instead of counting every row (gcs's 10-08c compaction: 60 min counting the base's 40 B long
+    roots from the bucket mount): chunk sizes never change a drill's bytes. Every `q` with an estimate is listed (rows
+    `n` ≥ 0), in no order."""
+    if not index_files:
+        con.execute(f"CREATE OR REPLACE TABLE {into} (q VARCHAR, n BIGINT)")
+        return
+    files = ", ".join(q(f) for f in index_files)
+    con.execute(f"""CREATE OR REPLACE TABLE {into} AS
+        WITH k AS (SELECT q, (row_number() OVER (ORDER BY q) - 1)::BIGINT AS pos FROM (SELECT DISTINCT q FROM ({keys}) WHERE q IS NOT NULL)),
+             g AS (SELECT q_min, q_max, rows::BIGINT AS rows FROM read_parquet([{files}])),
+             ga AS (SELECT g.q_max, g.rows, coalesce(k.pos + 1, 0)::BIGINT AS a FROM g ASOF LEFT JOIN k ON g.q_min > k.q),
+             gb AS (SELECT ga.rows, ga.a, coalesce(k.pos + 1, 0)::BIGINT AS b FROM ga ASOF LEFT JOIN k ON ga.q_max >= k.q),
+             e AS (SELECT unnest(range(a, b)) AS pos, a, b - a AS w, rows FROM gb WHERE b > a)
+        SELECT k.q, sum(e.rows // e.w + CASE WHEN e.pos = e.a THEN e.rows % e.w ELSE 0 END)::BIGINT AS n FROM e JOIN k USING (pos) GROUP BY k.q""")
+
+
+#: A chunked spill's partitions at most (`ChunkSpill`): DuckDB's partitioned write keeps buffers per partition (and per
+#: thread) outside its memory limit and reopens files past `partitioned_write_max_open_files` (100); gcs's 10-08c
+#: compaction spilled its runs into 4,858 chunk partitions and its RSS went from 174 to 272 GiB there, past `-M`.
+SPILL_PARTS = 64
+#: Chunks up to this many are spilled one partition each (no split pass), as `PARTITION_BY (ch)` was: gcs's 10-22 L3
+#: carry (251 ranges) read 28 → 47 min with 64 partitions split on reading; its partitioned write held well under `-M`.
+SPILL_DIRECT = 512
+
+
+class ChunkSpill:
+    """Rows spilled by chunk (column `ch`, 0 … `n` − 1) into at most `parts` (default: one per chunk up to `SPILL_DIRECT`
+    chunks, else `SPILL_PARTS`) partitions of consecutive chunks (`root/in/<name>/sp=<p>/`), and read back chunk by chunk in order (`files`): a partition holding
+    several chunks is split by chunk (`root/by-chunk/sp=<p>/ch=<k>/`: one more pass over its rows, a fan-out of at most
+    ⌈n / parts⌉) when the reader first reaches it, and removed when the reader moves on. Each chunk's files hold exactly
+    its rows, whatever `parts` (the files keep `ch`, which readers don't select). A reader running chunks concurrently
+    takes whole partitions instead (`prepare`, then `release`)."""
+
+    def __init__(self, con, root: Path, n: int, parts: int | None = None):
+        self.con, self.root, self.n = con, root, n
+        self.p = max(1, min(parts or (n if n <= SPILL_DIRECT else SPILL_PARTS), n))
+        self.cur: int | None = None
+        self.held: dict[int, list[Path]] = {}
+        for d in ("in", "by-chunk"):
+            (root / d).mkdir(parents=True, exist_ok=True)
+
+    def part(self, k: int) -> int:
+        """Chunk `k`'s partition."""
+        return k * self.p // self.n
+
+    def chunks(self, part: int) -> range:
+        """Partition `part`'s chunks."""
+        return range(-(-part * self.n // self.p), -(-(part + 1) * self.n // self.p))
+
+    def write(self, sql: str, name: str, con=None) -> None:
+        """Query `sql`'s rows (with `ch`) → `root/in/<name>/` by partition (on `con`, default the spill's: writes to distinct
+        names may run concurrently, each on its own cursor)."""
+        (con or self.con).execute(f"""COPY (SELECT *, (ch * {self.p} // {self.n})::INTEGER AS sp FROM ({sql})) TO {q(str(self.root / 'in' / name))}
+            (FORMAT parquet, PARTITION_BY (sp), COMPRESSION zstd)""")
+
+    def files(self, k: int) -> list[Path]:
+        """Chunk `k`'s files (chunks are read in order: the previous partition's files are removed on reaching the next)."""
+        part = self.part(k)
+        if part != self.cur:
+            if self.cur is not None:
+                self.release(self.cur)
+            self.cur = part
+            self.held = self.prepare(part)
+        return self.held[k]
+
+    def prepare(self, part: int) -> dict[int, list[Path]]:
+        """Partition `part`'s files per chunk (split by chunk when it holds several, its inputs then removed): readable
+        in any order, from any thread, until `release(part)`."""
+        src = sorted(self.root.glob(f"in/*/sp={part}/*.parquet"))
+        ks = self.chunks(part)
+        if len(ks) <= 1 or not src:
+            return {k: src for k in ks}
+        out = self.root / "by-chunk" / f"sp={part}"
+        self.con.execute(f"""COPY (SELECT * FROM read_parquet([{', '.join(q(str(f)) for f in src)}], hive_partitioning = false))
+            TO {q(str(out))} (FORMAT parquet, PARTITION_BY (ch), COMPRESSION zstd)""")
+        for d in sorted({f.parent for f in src}):
+            shutil.rmtree(d, ignore_errors=True)
+        return {k: sorted((out / f"ch={k}").glob("*.parquet")) for k in ks}
+
+    def release(self, part: int) -> None:
+        """Partition `part`'s files removed (its chunks read)."""
+        for d in [*self.root.glob(f"in/*/sp={part}"), self.root / "by-chunk" / f"sp={part}"]:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def close(self) -> None:
+        shutil.rmtree(self.root, ignore_errors=True)
+
+
 @cli.command("short-map")
 @option("-b", "--bucket", default=data_bucket, help="Bucket")
 @option("-g", "--gen", required=True, help="Generation (its `cintervals/`, `drill/short-plan.json`)")
@@ -1104,7 +1216,7 @@ def short_map_cmd(bucket, gen, index, mount, mem, parts, threads, pieces, scratc
         short_roots(con, f"SELECT * FROM ({versions}) WHERE hash(path) % {pieces} = {k}", "rt", rule=gen_rule_at(bucket, gen))
         part = Path(tmp) / "smap"
         shutil.rmtree(part, ignore_errors=True)
-        con.execute(f"COPY (SELECT rt.*, qg.grp FROM rt ASOF JOIN qg ON rt.q >= qg.lo) TO {q(str(part))} (FORMAT parquet, PARTITION_BY (grp), COMPRESSION zstd)")
+        con.execute(f"COPY ({ranged('rt', 'qg', 'grp')}) TO {q(str(part))} (FORMAT parquet, PARTITION_BY (grp), COMPRESSION zstd)")
         n += con.execute("SELECT count(*) FROM rt").fetchone()[0]
         for d in sorted(part.glob("grp=*")):
             g = int(d.name.split("=")[1])

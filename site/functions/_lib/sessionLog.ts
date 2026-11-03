@@ -6,7 +6,8 @@
  * `site/schema.sql`.
  */
 import type { D1Database } from '@cloudflare/workers-types'
-import { isErrorEvent, LIMITS, type SessionRow, type SlogBatch, type SlogEvent, type StoredEvent } from './sessionLogShape.js'
+import { type Cursor, fmtCursor, isErrorEvent, LIMITS, type SessionPage, type SessionRow, SESSIONS_MAX_LIMIT, SESSIONS_PAGE, type SlogBatch, type SlogEvent, type StoredEvent } from './sessionLogShape.js'
+import { purgeActivity } from './activity.js'
 
 export interface Who {
   email: string | null
@@ -67,7 +68,9 @@ export const PURGE_EVERY_MS = 3_600_000
 export async function maybePurge(db: D1Database, retainRaw: string | undefined, now: number, state: { last: number }): Promise<boolean> {
   if (now - state.last < PURGE_EVERY_MS) return false
   state.last = now
-  await purge(db, Math.floor(now / 1000) - retainDays(retainRaw) * 86_400)
+  const cutoff = Math.floor(now / 1000) - retainDays(retainRaw) * 86_400
+  await purge(db, cutoff)
+  await purgeActivity(db, cutoff)
   return true
 }
 
@@ -127,20 +130,61 @@ export interface SessionFilter {
   /** epoch ms: sessions active since then. */
   since?: number
   errors?: boolean
+  /** Rows per page (default `SESSIONS_PAGE`, at most `SESSIONS_MAX_LIMIT`). */
   limit?: number
+  /** The page after this row (the "next" link), or */
+  after?: Cursor
+  /** the page before it ("prev"). Neither = the first page. */
+  before?: Cursor
 }
 
-/** Sessions, most recently active first. `email` matches a substring, case-insensitively. */
-export async function listSessions(db: D1Database, f: SessionFilter): Promise<SessionRow[]> {
+/** The filters' WHERE terms and their bindings. `email` matches a substring, case-insensitively. */
+function filterSql(f: SessionFilter): { where: string[]; args: unknown[] } {
   const where: string[] = []
   const args: unknown[] = []
   if (f.email) { where.push("LOWER(COALESCE(email, '')) LIKE ?"); args.push(`%${f.email.toLowerCase()}%`) }
   if (f.since !== undefined) { where.push('last_ms >= ?'); args.push(f.since) }
   if (f.errors) where.push('n_errors > 0')
-  const limit = Math.min(Math.max(f.limit ?? 200, 1), 500)
-  const sql = `SELECT * FROM session_log${where.length ? ` WHERE ${where.join(' AND ')}` : ''} ORDER BY last_ms DESC, sid LIMIT ${limit}`
-  const r = await db.prepare(sql).bind(...args).all<SessionRow>()
-  return r.results
+  return { where, args }
+}
+
+/** Rows strictly ahead of `c` in the list's order (`last_ms` desc, `sid` asc). */
+const AHEAD = '(last_ms > ? OR (last_ms = ? AND sid < ?))'
+/** Rows strictly behind it. */
+const BEHIND = '(last_ms < ? OR (last_ms = ? AND sid > ?))'
+const keyArgs = (c: Cursor): unknown[] => [c.lastMs, c.lastMs, c.sid]
+const whereSql = (w: string[]): string => (w.length ? ` WHERE ${w.join(' AND ')}` : '')
+
+/** One page of sessions, most recently active first (ties by `sid`), by keyset on `(last_ms, sid)`: `after` reads
+ *  the rows behind the cursor, `before` the nearest rows ahead of it (read in reverse, then flipped). A `before` page
+ *  that comes up short is at the head, so it is answered as the first page (full, not a stub). `total` and `offset`
+ *  are counts over the same filters, which also decide `prev` / `next` exactly. */
+export async function listSessions(db: D1Database, f: SessionFilter): Promise<SessionPage> {
+  const limit = Math.min(Math.max(Math.floor(f.limit ?? SESSIONS_PAGE), 1), SESSIONS_MAX_LIMIT)
+  const { where, args } = filterSql(f)
+  const page = async (c: Cursor | undefined, dir: 'after' | 'before'): Promise<SessionRow[]> => {
+    const w = c ? [...where, dir === 'after' ? BEHIND : AHEAD] : where
+    const order = dir === 'after' ? 'last_ms DESC, sid ASC' : 'last_ms ASC, sid DESC'
+    const r = await db.prepare(`SELECT * FROM session_log${whereSql(w)} ORDER BY ${order} LIMIT ${limit}`)
+      .bind(...args, ...(c ? keyArgs(c) : [])).all<SessionRow>()
+    return dir === 'after' ? r.results : r.results.reverse()
+  }
+  let rows = f.before ? await page(f.before, 'before') : await page(f.after, 'after')
+  if (f.before && rows.length < limit) rows = await page(undefined, 'after')
+  const total = (await db.prepare(`SELECT COUNT(*) AS n FROM session_log${whereSql(where)}`).bind(...args).first<{ n: number }>())?.n ?? 0
+  // Rows ahead of the page's first row; an empty page (an `after` past the end) sits at the end.
+  const first = rows[0]
+  const offset = first
+    ? (await db.prepare(`SELECT COUNT(*) AS n FROM session_log${whereSql([...where, AHEAD])}`)
+      .bind(...args, ...keyArgs({ lastMs: first.last_ms, sid: first.sid })).first<{ n: number }>())?.n ?? 0
+    : f.after ? total : 0
+  return {
+    sessions: rows,
+    total,
+    offset,
+    prev: first && offset > 0 ? fmtCursor(first) : null,
+    next: rows.length && offset + rows.length < total ? fmtCursor(rows[rows.length - 1]) : null,
+  }
 }
 
 /** A session's row and its events, flattened across batches: by `t`, ties by page load, batch and position. */

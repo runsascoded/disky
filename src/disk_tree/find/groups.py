@@ -71,6 +71,10 @@ GROUPS_SUFFIX = '.groups.json'
 GROUPS_VERSION = 1
 GROUPS_PARQUET_SUFFIX = '.groups.parquet'
 GROUPS_PARQUET_VERSION = 1
+#: ``index_schema.version``: 1 = the legacy dir-only index, 2 = a store sort (``tier`` in its key-value metadata);
+#: ``site/functions/_lib/index.ts`` picks a generation's row columns by it.
+INDEX_VERSION_LEGACY = 1
+INDEX_VERSION_STORE = 2
 #: Rows per row group of a `.groups.parquet` — the reader's decode unit: 512
 #: footer rows ≈ 4M (8K-row tier groups) to 16M (32K) tier rows of key range
 #: per decode; a 95K-group gcs sort has ~186 footer groups.
@@ -134,8 +138,8 @@ def schema_json(md: "pq.FileMetaData") -> dict:
             el['converted_type'] = ct
         leaves.append(el)
     root = {'repetition_type': 'REQUIRED', 'name': 'schema', 'num_children': md.num_columns}
-    out: dict = {'version': 1, 'schema': [root, *leaves]}
     kv = md.metadata or {}
+    out: dict = {'version': INDEX_VERSION_STORE if b'tier' in kv else INDEX_VERSION_LEGACY, 'schema': [root, *leaves]}
     for k in FLOOR_KEYS:
         if k in kv:
             out['floor_bytes'] = int(kv[k])

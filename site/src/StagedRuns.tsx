@@ -24,8 +24,10 @@ import { conservativeDeadline } from './prefixExecution'
 import { percentOf } from './runChart'
 import { selectRuns } from './runTable'
 import { fmtN } from './types'
+import { Loading } from './Busy'
 import { DEFAULT_STORE } from './stores'
-import { CAPS, type RunAction, useRunDetail, useRunFiles } from './plans'
+import { CAPS, type RunAction, useRunAnalytics, useRunDetail, useRunFiles } from './plans'
+import { ReviewPreservation } from './RunPreservation'
 import {
   type Check, commonBucketPrefix, type DeletionRun, elapsed, elapsedDetails, type ExecJob, fmtDur, type LogSummaryFile, loggedOf, logSubdir,
   type PlanSummaryFile, plannedOf, progressEstimate, type ProgressFile, runControls, runFileHref, runFilesRel, runLabel, type RunView, sumProgress, type Tally,
@@ -130,7 +132,7 @@ export function RunsSection({ runs, jobs, configured, jobsError, admin, busy, ac
   if (!views.length) return null
   return (
     <section id="runs">
-      <h3>Runs ({views.length}){refreshing && <span className="dim refreshing"> · refreshing…</span>}</h3>
+      <h3>Runs ({views.length}){refreshing && <Loading label="Refreshing runs…" />}</h3>
       {!configured && <p className="dim">Dispatch isn't configured on this deployment (no executor credentials): only recorded runs are listed, without live state.</p>}
       {jobsError && <p className="err">Batch jobs: {jobsError.message}</p>}
       <div className="run-filters">
@@ -153,7 +155,7 @@ export function RunsSection({ runs, jobs, configured, jobsError, admin, busy, ac
               <th>{sortButton('state', 'state')}</th><th><Tooltip content="Sparkline: interval rate over the last hour. Text: average over the run's entire elapsed time, including startup and pauses.">{sortButton('rate', 'rate / history')}</Tooltip></th><th className="num">{sortButton('elapsed', 'elapsed')}</th>
               <th className="num"><Tooltip content="Planned keys already gone when the run re-listed.">{sortButton('gone', 'gone')}</Tooltip></th>
               <th className="num"><Tooltip content="Planned keys rewritten since the scan (a new generation): left alone.">{sortButton('overwritten', 'overwritten')}</Tooltip></th>
-              <th className="num"><Tooltip content="Directories that gained keys since the scan.">{sortButton('drift', 'drift')}</Tooltip></th>
+              <th className="num"><Tooltip content="Preserved objects outside the reviewed manifest. Older directory executors report directory counts.">{sortButton('drift', 'outside review')}</Tooltip></th>
               <th>{sortButton('started', 'started')}</th>
               <th><Tooltip content="Recorded run-level undo deadline. GCS retention starts separately at each object's deletion; this is not an object-level recovery guarantee.">{sortButton('undo', 'undo by')}</Tooltip></th>
               <th>links</th><th>{sortButton('buckets', 'buckets')}</th><th />
@@ -305,6 +307,7 @@ export function RunDetail({ run, live, progress, dir, planned, fmtBytes, now }: 
   now: number
 }) {
   const detail = useRunDetail(run.run_id, true, live)
+  const analytics = useRunAnalytics(run.run_id, live)
   const logRel = dir && run.finished_ts ? [`${dir}${logSubdir(run.mode)}-summary.json`] : []
   const [logQ] = useRunFiles<LogSummaryFile>(logRel, false)
   const log = logQ?.data ?? null
@@ -313,6 +316,8 @@ export function RunDetail({ run, live, progress, dir, planned, fmtBytes, now }: 
   const checks: Check[] = run.finished_ts ? verifyRun(detail.data?.run ?? run, plan, logged) : []
   const r = detail.data?.run ?? run
   const bands = detail.data?.bands ?? []
+  const review = analytics.data?.review
+  const breakdown = analytics.data?.result?.preserved_breakdown
   const decisionKeys = logged ? [...DECISION_ORDER.filter(k => k in logged.decisions), ...Object.keys(logged.decisions).filter(k => !DECISION_ORDER.includes(k)).sort()] : []
 
   return (
@@ -320,21 +325,43 @@ export function RunDetail({ run, live, progress, dir, planned, fmtBytes, now }: 
       {CAPS.runFiles && <RunProgress id={run.run_id} live={live} fmtBytes={fmtBytes} planned={planned} />}
       <dl className="rd-totals">
         {live ? <div><dt>live progress</dt><dd>{progress ? <>{fmtBytes(progress.bytes)} · {fmtN(progress.deletes)} {r.mode === 'real' ? 'deleted' : 'would delete'} · {fmtN(progress.gone)} gone</> : 'waiting for progress'}<span className="dim"> · final totals recorded when the run ends</span></dd></div>
-          : <div><dt>final totals</dt><dd>{fmtBytes(r.deleted_bytes)} · {fmtN(r.deleted_objects)} {r.mode === 'real' ? 'deleted' : 'would delete'} · {fmtN(r.skipped_gone)} gone · {fmtN(r.skipped_overwritten ?? 0)} overwritten · {fmtN((r.drift_dirs ?? 0) + (r.ledger_drift_dirs ?? 0))} drifted dirs</dd></div>}
+          : <div><dt>final totals</dt><dd>{fmtBytes(r.deleted_bytes)} · {fmtN(r.deleted_objects)} {r.mode === 'real' ? 'deleted' : 'would delete'} · {fmtN(r.skipped_gone)} already gone · {fmtN(r.skipped_overwritten ?? 0)} replaced objects preserved</dd></div>}
+        <div><dt>elapsed</dt><dd>{fmtDur((r.finished_ts ?? now) - r.started_ts)}</dd></div>
+        {review && <div><dt>reviewed manifest</dt><dd>{fmtN(review.objects)} objects · {fmtBytes(review.bytes)}</dd></div>}
+        {review && Object.keys(review.as_of ?? {}).length > 0 && <div><dt>review cutoffs</dt><dd>{[...new Set(Object.values(review.as_of))].sort().join(' · ')}</dd></div>}
+        {analytics.data?.result && <div><dt>failed deletions</dt><dd>{analytics.data.result.delete_failed == null ? 'not recorded' : fmtN(analytics.data.result.delete_failed)}</dd></div>}
         <div><dt>scan</dt><dd>{r.scan ?? '—'}{r.plan_digest ? <> · items <code>{r.plan_digest}</code></> : null}</dd></div>
-        {r.mode === 'real' && <div><dt>undo</dt><dd>
+        {r.mode === 'real' && !CAPS.undoUnwindowed && <div><dt>undo</dt><dd>
           {r.undo_deadline ? <>recorded run deadline {utc(r.undo_deadline)} UTC {now < r.undo_deadline ? <span className="dim">(in {fmtDur(r.undo_deadline - now)})</span> : <span className="dim">(closed)</span>}</> : live ? 'recovery after stop and drain; final deadline not recorded yet' : 'no window recorded'}
           {' · '}state <b>{r.undo_state}</b>{r.purge_state && r.purge_state !== 'none' && <> · purge <b>{r.purge_state}</b></>}
         </dd></div>}
         {r.log_dir && <div><dt>run dir</dt><dd><code>{r.log_dir}</code></dd></div>}
       </dl>
+      {analytics.isFetching && <Loading label="Loading review and execution analytics…" />}
+      {analytics.error && <p className="err">Run artifacts unavailable: {analytics.error.message}</p>}
+      <section className="rd-preserved">
+        <h4>Preserved objects</h4>
+        {detail.isLoading ? <Loading label="Loading preserved-object counts…" /> : detail.error ? <p className="err">{detail.error.message}</p> : <>
+          {bands.length > 0 ? <p><b>{fmtN(bands.reduce((n, b) => n + b.drift_new_objects, 0))}</b> outside the reviewed manifest · <b>{fmtN(bands.reduce((n, b) => n + b.overwritten, 0))}</b> replaced objects.</p> : <p>No per-prefix preservation counts recorded.</p>}
+          {breakdown ? <dl className="rd-totals">
+            <div><dt>new since review</dt><dd>{fmtN(breakdown.new_since_review)}</dd></div>
+            <div><dt>changed since review</dt><dd>{fmtN(breakdown.changed_since_review)}</dd></div>
+            <div><dt>new since manifest scan</dt><dd>{fmtN(breakdown.new_since_scan)}</dd></div>
+            <div><dt>unclassified</dt><dd>{fmtN(breakdown.unclassified)}</dd></div>
+          </dl> : bands.some(b => b.drift_new_objects > 0) && <p className="dim">{analytics.data?.analysis ? 'This older run recorded a combined execution count; the snapshot breakdown below was reconstructed later.' : 'This older run combines new paths and changed objects; that distinction was not recorded.'}</p>}
+          <ReviewPreservation analytics={analytics.data} />
+          <p className="dim">Objects outside the reviewed manifest were left alone. A successful run completes the original staging. Including newer data requires a new review and staging gesture.</p>
+        </>}
+      </section>
       {plan && <p className="run-completion"><b>{percentOf(live ? progress?.deletes ?? 0 : r.deleted_objects, plan.objects)} objects</b> · <b>{percentOf(live ? progress?.bytes ?? 0 : r.deleted_bytes, plan.bytes)} bytes</b> {r.mode === 'dry' ? 'would delete' : 'acknowledged deleted'} of {fmtN(plan.objects)} objects / {fmtBytes(plan.bytes)} planned.</p>}
       {planned && dir && <RunBucketProgress planned={planned} dir={dir} live={live} log={log} fmtBytes={fmtBytes} dry={r.mode === 'dry'} bands={bands} />}
       {r.mode === 'real' && <section id="recovery" className="rd-recovery">
         <h4>Recovery</h4>
+        {CAPS.undoUnwindowed ? <p>Recovery depends on the bucket’s versioning and retention settings. This deletion may be permanent; a recorded run deadline does not guarantee recovery.</p> : <>
         <p>{live ? 'Stop and drain this run before restoring. Its committed decision logs retain exact generations; a restore during deletion could be deleted again.' : 'The web undo control restores the entire run. The CLI can restrict recovery to a selected prefix.'}</p>
         <p className="dim">Retention starts separately when each object is deleted, not at run completion. Empty at a scan does not establish that this run deleted it.{conservativeDeadline(r) != null && <> Conservative cutoff for this run: {utc(conservativeDeadline(r)!)} UTC. Later deletions may remain recoverable longer; the stored run deadline is not an object-level guarantee.</>}</p>
         <code>dt-cloud sweep undo -p gs://BUCKET/PREFIX/ {r.run_id}</code>
+        </>}
       </section>}
 
       {CAPS.runFiles && (
@@ -378,9 +405,9 @@ export function RunDetail({ run, live, progress, dir, planned, fmtBytes, now }: 
 
       {CAPS.runFiles && <RunChecks checks={checks} live={live} />}
 
-      <h4>Bands ({bands.length})</h4>
-      {detail.isLoading ? <p className="dim">loading…</p> : detail.error ? <p className="err">{detail.error.message}</p> : !bands.length ? <p className="dim">{run.finished_ts ? 'no band rows' : 'recorded when the run ends'}</p> : (
-        <RunBands bands={bands} id={r.run_id} fmtBytes={fmtBytes} />
+      <h4>Prefixes ({bands.length})</h4>
+      {detail.isLoading ? <Loading label="Loading prefix outcomes…" /> : detail.error ? <p className="err">{detail.error.message}</p> : !bands.length ? <p className="dim">{run.finished_ts ? 'No per-prefix outcomes recorded.' : 'Recorded when the run ends.'}</p> : (
+        <RunBands bands={bands} id={r.run_id} fmtBytes={fmtBytes} analysis={analytics.data?.analysis} />
       )}
     </div>
   )

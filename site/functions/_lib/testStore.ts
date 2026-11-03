@@ -20,6 +20,18 @@ export const FILES = new Map<string, string>()
 /** Every `get` the store served, in order — what a test asserts a read's I/O by. */
 export const GETS: { key: string; offset?: number; length?: number }[] = []
 
+type Als = { run<T>(keys: string[], f: () => T): T; getStore(): string[] | undefined }
+let als: Als | undefined
+
+/** `f`'s value and the store keys `f` itself fetched (`AsyncLocalStorage`): never a get of a read still in flight from
+ *  before it (a diff that threw on one side leaves the other side's reads running into the next call). */
+export async function getsOf<T>(f: () => Promise<T>): Promise<[T, string[]]> {
+  als ??= new (await load<{ AsyncLocalStorage: new () => Als }>('node:async_hooks')).AsyncLocalStorage()
+  const keys: string[] = []
+  const v = await als.run(keys, f)
+  return [v, [...new Set(keys)]]
+}
+
 /** What the real store throws for an absent key (`@rdub/file-tree`'s `NotFoundError`). */
 class NotFoundError extends Error {
   constructor(key: string) {
@@ -54,6 +66,7 @@ export function S3Store(_opts: unknown): {
       const path = FILES.get(key)
       if (!path) throw new NotFoundError(key)
       GETS.push({ key, ...range })
+      als?.getStore()?.push(key)
       const fs = await load<NodeFs>('node:fs')
       const all = fs.readFileSync(path)
       const totalSize = all.byteLength

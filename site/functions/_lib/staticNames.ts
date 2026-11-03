@@ -5,7 +5,8 @@
  *  row per (lowercase name suffix of ≥ 3 characters, version) — `s, depth, path, usr, vf, vt, size,
  *  n_files` — sorted by `s`, 8K-row groups, zstd; `shards.json`, the shard plan: shard `i` holds the
  *  suffixes whose first three characters are in `[lo, hi)` (a 3-character prefix is never split, so a
- *  literal's rows are one contiguous run of one file).
+ *  literal of three or more characters has its rows in one contiguous run of one file; a shorter one's prefixes
+ *  can span several shards, each read in turn: `shardsFor`).
  *
  *  A query: `shards.json` (isolate-cached) names the shard → that shard's group index (per row group:
  *  `s` min/max and each column chunk's offsets, cut from the shard's footer once and kept in the isolate
@@ -29,7 +30,8 @@ import { Memo, type Req } from './shared.js'
 
 /** A generation's key prefix in the deployment's `INDEX_R2` bucket. */
 export const staticPrefix = (gen: string): string => `static-names/${gen}`
-/** The deployment's generation, its `STATIC_GEN` var (e.g. gcs's `2026-10-08c`, cw's `2026-10-09cw`): required with the
+/** The deployment's generation, its `STATIC_GEN` var (e.g. gcs's `2026-10-08c`, cw's `2026-10-09cw`) — a pin, or the
+ *  primary's `static-names/CURRENT.json` as the request resolved it (`index.ts` `withStaticGen`): required with the
  *  static index on, one path segment. */
 export function staticGen(env: { STATIC_GEN?: string }): string {
   const gen = env.STATIC_GEN?.trim()
@@ -69,6 +71,23 @@ export function shardFor(shards: Shard[], key: string): Shard | null {
   const s = shards[k]
   return s.hi == null || cmp(p3, s.hi) < 0 ? s : null
 }
+/** The shards `key`'s rows can lie in, in order: the one `shardFor` names when the rows are `s == key` (`exact`) or
+ *  the key has three or more characters (its prefix is never split); else every shard whose `[lo, hi)` meets the
+ *  three-character prefixes starting with the key, `[key, key + U+10FFFF)` — a one-character `^q` (`/q`) can span
+ *  many. */
+export function shardsFor(shards: Shard[], key: string, exact = false): Shard[] {
+  if (exact || [...key].length >= 3) { const s = shardFor(shards, key); return s ? [s] : [] }
+  const top = key + '\u{10FFFF}', out: Shard[] = []
+  for (let k = Math.max(0, bisect(shards.length, i => cmp(shards[i].lo, key) > 0) - 1); k < shards.length && cmp(shards[k].lo, top) < 0; k++) {
+    const s = shards[k]
+    if (s.hi == null || cmp(s.hi, key) > 0) out.push(s)
+  }
+  return out
+}
+/** The most shards one key's read selects in: past it (a short key over a fine plan) the key's rows are bounded by
+ *  the shards' planned rows (`shards.json`), unread, so a caller's row bound refuses it rather than fetching many
+ *  shard indexes; a read that still asks (its bound above them) selects them all. */
+export const MAX_SHARDS = 8
 export const shardFile = (i: number): string => `sx/s${String(i).padStart(4, '0')}.parquet`
 
 // --- footer → group index -----------------------------------------------------------------------
@@ -397,12 +416,22 @@ export interface IndexCache<T = GroupIndex> { get(file: string): Promise<T | nul
  *  (`reqOf(env)`: what it joins of other requests' reads, and owns of its own, `shared.ts`). */
 export interface ReadOpts { exact?: boolean; under?: string; fold?: (key: string) => FirstHits; rule?: HexRule | null; req?: Req }
 
+/** One shard's part of a key's selection: its group index and the groups read. */
+export interface Part { shard: Shard; idx: GroupIndex; groups: number[] }
+/** A key's selection over its shards (`shardsFor`): the parts in shard order and the rows their groups hold. `wide`:
+ *  more than `maxShards` shards, left unselected (`parts` empty) — `rows` is then their planned rows, an upper bound. */
+export interface Selection { parts: Part[]; rows: number; wide?: boolean }
+/** One shard's part of a key's extent: groups `[a, b)` of its index. */
+export interface ExtentPart { shard: Shard; idx: GroupIndex; a: number; b: number }
+
 export class StaticNames {
   /** `shards.json`, the shards' group indexes and path keys, held once read (the indexes and keys: the newest
    *  `maxIndexes`); a read pending in another request is joined, never awaited as is (`shared.ts`). */
   private shards = new Memo<Shard[]>('static-shards')
   private indexes: Memo<GroupIndex>
   private pathKeyMap: Memo<PathKeys>
+  /** The most shards one key selects in before it is bounded by their planned rows instead (`MAX_SHARDS`). */
+  maxShards = MAX_SHARDS
   constructor(readonly blobs: Blobs, readonly cache?: IndexCache, readonly clock: () => Promise<number> = async () => Date.now(), readonly maxIndexes = 8,
     readonly keysCache?: IndexCache<PathKeys>) {
     this.indexes = new Memo('static-shard-index', maxIndexes)
@@ -455,33 +484,42 @@ export class StaticNames {
     }, req)
   }
 
-  /** The groups a read of `key` touches (`ReadOpts`: `exact`, `under`) and the rows they hold — an upper bound on the
-   *  matching rows, before any data is read. */
-  async select(key: string, io: Io, opts: ReadOpts = {}): Promise<{ shard: Shard; idx: GroupIndex; groups: number[]; rows: number } | null> {
-    const shard = shardFor(await this.plan(opts.req), key)
-    io.shard = shard?.i ?? null
-    if (!shard) return null
-    const idx = await this.index(shard, io, opts.req)
-    const [a, b] = selectGroups(idx, key, opts.exact)
-    let groups: number[]
-    if (opts.under == null || opts.under === '' || a === b) groups = Array.from({ length: b - a }, (_, k) => a + k)
-    else groups = groupsUnder(await this.keys(shard, io, opts.req), a, b, ...underRange(opts.under))
+  /** The groups a read of `key` touches (`ReadOpts`: `exact`, `under`) in each shard its rows can lie in, and the rows
+   *  they hold — an upper bound on the matching rows, before any data is read. Past `maxShards` shards (`all` unset)
+   *  nothing is selected and the bound is the shards' planned rows (`Selection.wide`). */
+  async select(key: string, io: Io, opts: ReadOpts = {}, all = false): Promise<Selection | null> {
+    const shards = shardsFor(await this.plan(opts.req), key, opts.exact)
+    io.shard = shards[0]?.i ?? null
+    if (!shards.length) return null
+    if (!all && shards.length > this.maxShards) return { parts: [], rows: shards.reduce((n, s) => n + (s.rows ?? Infinity), 0), wide: true }
+    const parts = await Promise.all(shards.map(async (shard): Promise<Part> => {
+      const idx = await this.index(shard, io, opts.req)
+      const [a, b] = selectGroups(idx, key, opts.exact)
+      let groups: number[]
+      if (opts.under == null || opts.under === '' || a === b) groups = Array.from({ length: b - a }, (_, k) => a + k)
+      else groups = groupsUnder(await this.keys(shard, io, opts.req), a, b, ...underRange(opts.under))
+      return { shard, idx, groups }
+    }))
     let rows = 0
-    for (const g of groups) rows += idx.rows[g]
-    return { shard, idx, groups, rows }
+    for (const p of parts) for (const g of p.groups) rows += p.idx.rows[g]
+    return { parts, rows }
   }
 
-  /** How many suffix rows (row-group granular, an upper bound on the matching rows) `key`'s range holds:
-   *  the dispatch's bound, before any data is read. */
-  async extent(key: string, io: Io, req?: Req): Promise<{ shard: Shard; idx: GroupIndex; a: number; b: number; rows: number } | null> {
-    const shard = shardFor(await this.plan(req), key)
-    io.shard = shard?.i ?? null
-    if (!shard) return null
-    const idx = await this.index(shard, io, req)
-    const [a, b] = selectGroups(idx, key)
+  /** How many suffix rows (row-group granular, an upper bound on the matching rows) `key`'s range holds over its
+   *  shards: the dispatch's bound, before any data is read. Past `maxShards` shards: their planned rows, no parts. */
+  async extent(key: string, io: Io, req?: Req): Promise<{ parts: ExtentPart[]; rows: number } | null> {
+    const shards = shardsFor(await this.plan(req), key)
+    io.shard = shards[0]?.i ?? null
+    if (!shards.length) return null
+    if (shards.length > this.maxShards) return { parts: [], rows: shards.reduce((n, s) => n + (s.rows ?? Infinity), 0) }
+    const parts = await Promise.all(shards.map(async (shard): Promise<ExtentPart> => {
+      const idx = await this.index(shard, io, req)
+      const [a, b] = selectGroups(idx, key)
+      return { shard, idx, a, b }
+    }))
     let rows = 0
-    for (let g = a; g < b; g++) rows += idx.rows[g]
-    return { shard, idx, a, b, rows }
+    for (const p of parts) for (let g = p.a; g < p.b; g++) rows += p.idx.rows[g]
+    return { parts, rows }
   }
 
   /** `key`'s first hits (lowercased, ≥ 3 characters): its range read once and folded; `maxRows` refuses
@@ -491,26 +529,32 @@ export class StaticNames {
     const io: Io = { shard: null, groups: 0, bytes: 0, rows_read: 0, rows_matching: 0, index: 'none', ms: {} }
     let t = await this.clock()
     const lap = async (name: string) => { const now = await this.clock(); io.ms[name] = now - t; t = now }
-    const sel = await this.select(key, io, opts)
+    let sel = await this.select(key, io, opts)
     await lap('index')
     const fold = opts.fold ? opts.fold(key) : new FirstHits(key, opts.rule ?? null)
-    if (!sel || !sel.groups.length) return { io, fold }
-    io.groups = sel.groups.length
-    if (sel.rows > maxRows) { io.rows_read = sel.rows; return { io, fold: null } }
-    // Contiguous runs of the selected groups, one ranged GET each (a contains range is one run).
-    const runs: [number, number][] = []
-    for (const g of sel.groups) { const last = runs[runs.length - 1]; if (last && last[1] === g) last[1] = g + 1; else runs.push([g, g + 1]) }
-    const bufs = await Promise.all(runs.map(async ([a, b]) => {
-      const [start, end] = groupSpan(sel.idx, a, b)
-      return { a, b, start, buf: await this.blobs.range(shardFile(sel.shard.i), start, end - start) }
+    if (!sel) return { io, fold }
+    if (sel.rows > maxRows) { io.groups = sel.parts.reduce((n, p) => n + p.groups.length, 0); io.rows_read = sel.rows; return { io, fold: null } }
+    // Under its bound a wide key is read whole: every shard's groups.
+    if (sel.wide) sel = (await this.select(key, io, opts, true))!
+    io.groups = sel.parts.reduce((n, p) => n + p.groups.length, 0)
+    if (!io.groups) return { io, fold }
+    // Per shard, contiguous runs of the selected groups, one ranged GET each (a contains range is one run).
+    const runs: { p: Part; a: number; b: number }[] = []
+    for (const p of sel.parts) for (const g of p.groups) {
+      const last = runs[runs.length - 1]
+      if (last && last.p === p && last.b === g) last.b = g + 1; else runs.push({ p, a: g, b: g + 1 })
+    }
+    const bufs = await Promise.all(runs.map(async ({ p, a, b }) => {
+      const [start, end] = groupSpan(p.idx, a, b)
+      return { idx: p.idx, a, b, start, buf: await this.blobs.range(shardFile(p.shard.i), start, end - start) }
     }))
     io.bytes = bufs.reduce((n, x) => n + x.buf.byteLength, 0)
     await lap('fetch')
-    // One group at a time: peak memory is one group's columns plus the first hits, not the whole range.
+    // One group at a time, in shard then group order: peak memory is one group's columns plus the first hits.
     let decode = 0
-    for (const { a, b, start, buf } of bufs) for (let g = a; g < b; g++) {
+    for (const { idx, a, b, start, buf } of bufs) for (let g = a; g < b; g++) {
       const t1 = await this.clock()
-      const cols = await decodeGroup(sel.idx, g, buf, start)
+      const cols = await decodeGroup(idx, g, buf, start)
       const t2 = await this.clock()
       decode += t2 - t1
       fold.add(cols)

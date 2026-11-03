@@ -19,11 +19,14 @@ import { primaryOnly } from '../_lib/stores.js'
 import { hasLedger } from '../_lib/ledger.js'
 import { canonId, loadRegistry } from '../_lib/identity.js'
 import { ownerTotals } from '../_lib/ownerTotals.js'
-import { ivRefusal, storeReady } from '../_lib/index.js'
+import { ivRefusal, storeReady, withPathStore } from '../_lib/index.js'
 import { ME_UNRESOLVED, resolveUser } from '../_lib/me.js'
 import { scanArg } from '../_lib/scanArg.js'
 
-export const onRequestGet = async (ctx: Ctx): Promise<Response> => {
+export const onRequestGet = async (ctx0: Ctx): Promise<Response> => {
+  // The interval store for the dates it holds (`withPathStore`), as the map's own reads: never per-scan rows an
+  // unpinned deployment's job no longer writes (`index-sync -R`).
+  const ctx = await withPathStore(ctx0)
   // The ownership ledger is the primary store's: `store=<other>` is a 404.
   const notHere = primaryOnly(ctx)
   if (notHere) return notHere

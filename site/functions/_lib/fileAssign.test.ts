@@ -1,4 +1,4 @@
-/** Single files assignable and stageable (specs/file-assign.md), as a spec: an
+/** Single files assignable and stageable (specs/done/file-assign.md), as a spec: an
  * exact-object item names its one key — never `key.bak`, never `key/…` — in the
  * ledger's folds, the audit log, the `/api/actions` and `/api/plans/stage`
  * handlers (over a local D1), the dispatch snapshots and the digest; folder

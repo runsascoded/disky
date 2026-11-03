@@ -477,3 +477,12 @@ def test_scan_labels_round_trip():
     with pytest.raises(ValueError) as e:
         sn.scan_epoch("2026-10-08T06")
     assert str(e.value) == "not a scan id: '2026-10-08T06' (want YYYY-MM-DD or YYYY-MM-DDTHHMM)"
+
+
+def test_a_runs_parameters_are_its_bases():
+    meta = {"R": 100_000, "K": 1024, "floor": 10_000}
+    assert sn.base_params(meta, "g/drill", R=None, K=None, floor=None) == [100_000, 1024, 10_000]
+    assert sn.base_params({"R": 3, "K": 2}, "g/drill", R=3, K=None, floor=None) == [3, 2, None]
+    with pytest.raises(SystemExit) as e:
+        sn.base_params(meta, "g/drill", R=100_000, K=256, floor=5)
+    assert str(e.value) == "g/drill: K 256 (the base's: 1024), floor 5 (the base's: 10000): a run is built as its generation's base"

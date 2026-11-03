@@ -66,16 +66,21 @@ def _normalized_select(con: "duckdb.DuckDBPyConnection", glob: str | list[str]) 
     cols = {r[0] for r in con.execute(f"DESCRIBE SELECT * FROM read_parquet({src}) LIMIT 0").fetchall()}
     updated = "updated" if "updated" in cols else "NULL::TIMESTAMPTZ AS updated"
     generation = "generation::BIGINT AS generation" if "generation" in cols else "NULL::BIGINT AS generation"
+    from disk_tree.object_version import version_sql
+
+    version = f"{version_sql(cols)} AS version"
+    if "ETag" in cols:
+        version = "ETag::VARCHAR AS version"
     if "size_bytes" in cols:
         created = "created" if "created" in cols else "NULL::TIMESTAMPTZ AS created"
         cls = "storage_class_id" if "storage_class_id" in cols else "0 AS storage_class_id"
-        return f"SELECT bucket, name, size_bytes, {created}, {cls}, {updated}, {generation} FROM read_parquet({src})"
+        return f"SELECT bucket, name, size_bytes, {created}, {cls}, {updated}, {generation}, {version} FROM read_parquet({src})"
     if {"size", "timeCreated", "storageClass"} <= cols:
         case = " ".join(f"WHEN '{k}' THEN {v}" for k, v in SII_CLASS_IDS.items())
         drop = " WHERE timeDeleted IS NULL" if "timeDeleted" in cols else ""
         return (
             "SELECT bucket, name, size::BIGINT AS size_bytes, timeCreated AS created,"
-            f" CASE storageClass {case} ELSE 0 END AS storage_class_id, {updated}, {generation}"
+            f" CASE storageClass {case} ELSE 0 END AS storage_class_id, {updated}, {generation}, {version}"
             f" FROM read_parquet({src}){drop}"
         )
     if {"Bucket", "Key", "Size"} <= cols:
@@ -95,7 +100,7 @@ def _normalized_select(con: "duckdb.DuckDBPyConnection", glob: str | list[str]) 
             filters.append("(IsLatest IS NULL OR IsLatest = TRUE)")
         where = f" WHERE {' AND '.join(filters)}" if filters else ""
         return (
-            f"SELECT Bucket AS bucket, Key AS name, Size::BIGINT AS size_bytes, {last_mod}, {cls}, NULL::TIMESTAMPTZ AS updated, NULL::BIGINT AS generation"
+            f"SELECT Bucket AS bucket, Key AS name, Size::BIGINT AS size_bytes, {last_mod}, {cls}, NULL::TIMESTAMPTZ AS updated, NULL::BIGINT AS generation, {version}"
             f" FROM read_parquet({src}){where}"
         )
     raise ValueError(f"unrecognized listing schema for {glob}: {sorted(cols)}")

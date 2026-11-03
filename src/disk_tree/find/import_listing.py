@@ -124,8 +124,15 @@ def import_listing(
         **({MT_WSUM: 0} if mean_mtime else {}),
     })
     rows = pd.concat([files, dirs], ignore_index=True)
+    out = aggregate(rows, scan_root=scan_root, sum_cols=tuple(sum_cols), mean_mtime=mean_mtime)
+    from disk_tree.object_version import source_versions
+
+    versions = source_versions(con, src, bucket)
+    if versions is not None:
+        identities = con.execute(versions).df().set_index("name")["version"]
+        out["version"] = out["path"].map(identities).where(out["kind"] == "file", None).astype("string")
     return IndexResult(
-        df=aggregate(rows, scan_root=scan_root, sum_cols=tuple(sum_cols), mean_mtime=mean_mtime),
+        df=out,
         error_count=0,
         error_paths=[],
     )

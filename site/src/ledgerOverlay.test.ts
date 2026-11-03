@@ -120,4 +120,62 @@ describe('applyLedger', () => {
     expect(out2.c![0].us).toEqual([['will', 450]])
     expect(out2.c![0].c![0].c![1].us).toEqual([['will', 150]])
   })
+
+  describe('with the rows’ sizes (`sizes`): every node exact over its whole subtree, drawn or not', () => {
+    const sized = (...xs: [string, number, Record<string, number>][]) => new Map(xs.map(([k, b, us]) => [k, { b, us }]))
+
+    it('a prefix inside an undrawn tile repaints it, and a fold takes its share of the rest', () => {
+      const t: TreeNode = {
+        n: 'gs://', b: 1000, o: 10, us: [['will', 1000]], c: [
+          { n: 'b', b: 1000, o: 10, us: [['will', 1000]], c: [
+            { n: 'big', b: 500, o: 5, us: [['will', 500]] },
+            { n: '(other)', b: 300, o: 3, f: 7, us: [['will', 300]] },
+          ] },
+        ],
+      }
+      const out = applyLedger(t, idx(
+        row('gs://b/', 'ryan', 1),
+        row('gs://b/big/deep/', 'will', 2),
+      ), 'gs://', u => u, sized(['gs://b/', 1000, { will: 1000 }], ['gs://b/big/deep/', 100, { will: 100 }]))
+      expect(out).toEqual({
+        n: 'gs://', b: 1000, o: 10, us: [['ryan', 900], ['will', 100]], c: [
+          { n: 'b', b: 1000, o: 10, us: [['ryan', 900], ['will', 100]], c: [
+            { n: 'big', b: 500, o: 5, us: [['ryan', 400], ['will', 100]] },
+            { n: '(other)', b: 300, o: 3, f: 7, us: [['ryan', 300]] },
+          ] },
+        ],
+      })
+    })
+
+    it('a release inside an assigned, childless tile restores the scan’s split of its subtree', () => {
+      const t: TreeNode = {
+        n: 'gs://', b: 1000, o: 10, us: [['will', 1000]], c: [
+          { n: 'b', b: 1000, o: 10, us: [['will', 1000]] },
+        ],
+      }
+      const out = applyLedger(t, idx(
+        row('gs://b/', 'ryan', 1),
+        row('gs://b/keep/', null, 2),
+      ), 'gs://', u => u, sized(['gs://b/', 1000, { will: 1000 }], ['gs://b/keep/', 200, { will: 150 }]))
+      expect(out).toEqual({
+        n: 'gs://', b: 1000, o: 10, us: [['ryan', 800], ['will', 150]], c: [
+          { n: 'b', b: 1000, o: 10, us: [['ryan', 800], ['will', 150]] },
+        ],
+      })
+    })
+
+    it('where the view draws every assigned prefix, the same tree as the drawn-nodes overlay', () => {
+      const rows = [
+        row('gs://marin-us-central2/', 'ryan', 1),
+        row('gs://marin-us-central2/tomat/x/', null, 2),
+        row('gs://marin-eu-west4/tomat/', 'will', 1),
+      ]
+      const sizes = sized(
+        ['gs://marin-us-central2/', 600, { will: 300 }],
+        ['gs://marin-us-central2/tomat/x/', 250, { will: 100 }],
+        ['gs://marin-eu-west4/tomat/', 400, { ryan: 400 }],
+      )
+      expect(applyLedger(scan(), idx(...rows), 'gs://', u => u, sizes)).toEqual(applyLedger(scan(), idx(...rows), 'gs://'))
+    })
+  })
 })

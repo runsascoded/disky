@@ -156,6 +156,13 @@ def exists(parquet_path: str) -> bool:
     return blobfs.exists(parquet_path)
 
 
+def blobfs_row_groups(path: str) -> list[int]:
+    """Rows per row group of the parquet at ``path`` (its footer only)."""
+    from disk_tree import blobfs
+
+    return blobfs.row_group_sizes(path)
+
+
 def not_uploaded(remote: str, names: list[str]) -> list[str]:
     """Of `names`, the files `remote` (the generation's dir where the site reads it) doesn't hold."""
     return [n for n in names if not exists(f"{remote}/{n}")]
@@ -223,9 +230,15 @@ def groups_blob(schema: dict, rows: list[dict]) -> str:
 
 
 def _write(out: str, data: bytes) -> None:
-    """Bytes to a local/mounted path or a URL (`blobfs`: `gs://`, `r2://`, `s3://`)."""
+    """Bytes to a local/mounted path or a URL (`blobfs`: `gs://`, `r2://`, `s3://`), unless it already holds exactly them:
+    `index-rows` re-derives the footers the `index` step wrote, while `publish-r2` copies them by the generation it
+    listed, and a rewrite of the same bytes still replaces that generation (a 404 mid-copy, 2026-10-29)."""
     from disk_tree import blobfs
 
+    if blobfs.exists(out):
+        with blobfs.open_read(out) if blobfs.is_url(out) else open(out, "rb") as f:
+            if f.read() == data:
+                return
     blobfs.write_bytes(out, data)
 
 
@@ -329,17 +342,35 @@ INSERT_BYTES = 64_000
 D1_DELETE_ROWS = 5000
 
 
+#: The smallest statement `d1_delete` halves down to after D1 resets one for its CPU time (7429).
+D1_DELETE_MIN_ROWS = 250
+
+
+class D1CpuLimit(RuntimeError):
+    """D1 reset a statement for exceeding its CPU time limit (error 7429), after `_d1_query`'s retries."""
+
+
 def d1_delete(table: str, where: str, acct: str, tok: str, db_id: str = "", *, batch: int | None = None) -> int:
     """Delete `table`'s rows matching `where` (a SQL predicate, no `WHERE`; it may refer to `table` by name) in
     statements of at most `batch` rows (default `D1_DELETE_ROWS`), until one deletes none; returns rows deleted.
     **Every D1 delete that can match more than a few thousand rows goes through this**, never one `DELETE … WHERE`.
-    A failure part way leaves the rest, and a rerun deletes them."""
+    A statement D1 resets for its CPU time (7429; cw's 2026-10-23T1801 `gc_d1` on `index_row_groups`, where the same
+    delete had always passed) is retried at half the rows, down to `D1_DELETE_MIN_ROWS`. A failure part way leaves
+    the rest, and a rerun deletes them."""
     batch = batch or D1_DELETE_ROWS
     n = 0
-    while k := len(_d1_query(f"DELETE FROM {table} WHERE rowid IN (SELECT rowid FROM {table} WHERE {where} LIMIT {batch}) RETURNING 1 AS n;",
-                             acct, tok, db_id)):
+    while True:
+        try:
+            k = len(_d1_query(f"DELETE FROM {table} WHERE rowid IN (SELECT rowid FROM {table} WHERE {where} LIMIT {batch}) RETURNING 1 AS n;",
+                              acct, tok, db_id))
+        except D1CpuLimit:
+            if batch <= D1_DELETE_MIN_ROWS:
+                raise
+            batch = max(batch // 2, D1_DELETE_MIN_ROWS)
+            continue
+        if not k:
+            return n
         n += k
-    return n
 
 
 def _d1_query(sql: str, acct: str, tok: str, db_id: str = "") -> list[dict]:
@@ -369,14 +400,16 @@ def _d1_query(sql: str, acct: str, tok: str, db_id: str = "") -> list[dict]:
                 time.sleep(D1_RETRY_SLEEP * 2**attempt)
                 continue
             # Surface D1's error body (scope/SQL) without echoing the token.
-            raise RuntimeError(f"D1 query failed ({e.code}): {e.read().decode()[:300]}") from None
+            body = e.read().decode()
+            raise (D1CpuLimit if "7429" in body else RuntimeError)(f"D1 query failed ({e.code}): {body[:300]}") from None
         except (urllib.error.URLError, TimeoutError) as e:  # no answer / no route
             if attempt < D1_RETRIES:
                 time.sleep(D1_RETRY_SLEEP * 2**attempt)
                 continue
             raise RuntimeError(f"D1 query gave no answer after {D1_RETRIES + 1} tries: {e}") from None
         if not resp.get("success"):
-            raise RuntimeError(f"D1 query error: {resp.get('errors')}")
+            errors = resp.get("errors") or []
+            raise (D1CpuLimit if any(e.get("code") == 7429 for e in errors if isinstance(e, dict)) else RuntimeError)(f"D1 query error: {errors}")
         return [row for r in resp.get("result", []) for row in r.get("results", [])]
     raise AssertionError("unreachable")
 
@@ -502,6 +535,7 @@ def sync_d1(
     store: str = PRIMARY_STORE,
     rows_only: bool = False,
     started: str | None = None,
+    d1_rows: bool = True,
 ) -> int:
     """Extract the footer of ``parquet_path`` (one tier/sort ``variant`` of
     scan ``date``, generation ``gen``, living under the bucket-relative dir
@@ -534,7 +568,16 @@ def sync_d1(
     column set (which needs the store migration).
 
     ``started`` (ISO 8601) records the scan's start on the pointer row
-    (`_pointer_sql`); None keeps whatever start the row already holds."""
+    (`_pointer_sql`); None keeps whatever start the row already holds.
+
+    ``d1_rows=False`` (specs/lean-scans.md §1.4) writes the cold footer files
+    and no row group to D1: no INSERT, no footer LRU entry. The site then plans
+    this generation from `.groups.parquet` (`pq` mode), which is what a
+    deployment wants when its reads of the store are the interval store's and
+    a per-scan read is only a fallback. Only the rows half: the CLI flips the
+    pointer through `check_flip(d1_rows=False)`."""
+    if not d1_rows and not (rows_only and blob):
+        raise ValueError("d1_rows=False writes the cold footer only: pass rows_only=True and blob=True (flip with check_flip)")
     st, sc, sv = _scope(store)
     d1v = d1_variant(variant, store)
     schema, rows = extract(parquet_path)
@@ -542,11 +585,12 @@ def sync_d1(
         write_groups_parquet(parquet_path, schema, rows)
         write_groups_blob(parquet_path, schema, rows)
     # Leftovers from earlier flips (any gen that is neither the current pointer's
-    # nor this one) go first — they are unreachable by construction.
-    gc_sql = (
-        f"DELETE FROM index_row_groups WHERE {st}date='{date}' AND variant='{d1v}' AND gen <> '{_sql_escape(gen)}' "
-        f"AND gen <> COALESCE((SELECT gen FROM index_schema WHERE {st}date='{date}' AND variant='{d1v}'), '');"
-    )
+    # nor this one) go first — they are unreachable by construction. Without D1
+    # rows, this gen's own unpointed rows go too: a partial set left by an earlier
+    # rows phase would otherwise be trusted once the pointer names it.
+    this = f"AND gen <> '{_sql_escape(gen)}' " if d1_rows else ""
+    unpointed = f"{this}AND gen <> COALESCE((SELECT gen FROM index_schema WHERE {st}date='{date}' AND variant='{d1v}'), '')"
+    gc_sql = f"DELETE FROM index_row_groups WHERE {st}date='{date}' AND variant='{d1v}' {unpointed};"
     pointer_sql = [] if rows_only else _pointer_sql(date, variant, gen, key, schema, store, started)
 
     def group_values(r: dict) -> str:
@@ -562,7 +606,7 @@ def sync_d1(
     # re-sending it must be a no-op, not a PK collision (date, variant, gen, rg).
     head = f"INSERT OR REPLACE INTO index_row_groups {cols} VALUES "
     if not remote:  # dev: local wrangler D1
-        stmts = [gc_sql] + [f"{head}{group_values(r)};" for r in rows] + pointer_sql
+        stmts = [gc_sql] + [f"{head}{group_values(r)};" for r in (rows if d1_rows else [])] + pointer_sql
         site = _site_dir()
         for i in range(0, len(stmts), 300):
             with tempfile.NamedTemporaryFile("w", suffix=".sql", delete=False) as tf:
@@ -579,12 +623,10 @@ def sync_d1(
     track = cache and blob and variant in SORT_VARIANTS
     if cache:
         # The swept generations' entries go first: a fill guarded on its entry then lands nothing more.
-        _d1_query(
-            f"DELETE FROM footer_cache WHERE date='{date}' AND variant='{d1v}' AND gen <> '{_sql_escape(gen)}' "
-            f"AND gen <> COALESCE((SELECT gen FROM index_schema WHERE {st}date='{date}' AND variant='{d1v}'), '');",
-            acct, tok, db_id,
-        )
+        _d1_query(f"DELETE FROM footer_cache WHERE date='{date}' AND variant='{d1v}' {unpointed};", acct, tok, db_id)
     _d1_query(gc_sql, acct, tok, db_id)
+    if not d1_rows:
+        return len(rows)
     if track:
         _d1_query(_claim_sql(date, d1v, gen, now=_now()), acct, tok, db_id)
     for chunk in _pack(head, [group_values(r) for r in rows], insert_bytes):
@@ -607,6 +649,7 @@ def check_flip(
     db_id: str = "",
     store: str = PRIMARY_STORE,
     started: str | None = None,
+    d1_rows: bool = True,
 ) -> Flip:
     """The pointer phase's gate: read ``parquet_path``'s footer and check D1
     holds exactly its row groups under ``gen`` — ``rg`` 0..n-1, one row each
@@ -614,7 +657,14 @@ def check_flip(
     `IncompleteGeneration` otherwise. A pointer already naming (``gen``,
     ``key``) passes unchecked (``pointed``; retention may since have retired
     its rows to the cold tier) — and, given ``started``, is ``pointed`` only
-    once it records that start too (else the flip re-writes the row)."""
+    once it records that start too (else the flip re-writes the row).
+
+    ``d1_rows=False``: the generation is served from its cold footer
+    (`sync_d1(d1_rows=False)`), so D1 must hold **none** of its rows (or all
+    of them: a complete set is trusted as before), and the cold
+    `.groups.parquet` beside ``parquet_path`` must hold exactly the footer's
+    row groups. A partial set is refused: a reader trusts any rows of an
+    untracked generation (`footerCache.trusted`)."""
     st, _, _ = _scope(store)
     d1v = d1_variant(variant, store)
     schema, rows = extract(parquet_path)
@@ -632,6 +682,15 @@ def check_flip(
     )
     n, lo, hi = int(got["n"]), got["lo"], got["hi"]
     want_hi = len(rows) - 1 if rows else None
+    if not d1_rows and n == 0:
+        cold = groups_parquet_path(parquet_path)
+        have = sum(blobfs_row_groups(cold)) if exists(cold) else None
+        if have != len(rows):
+            raise IncompleteGeneration(
+                f"{date} [{d1v}] gen {gen}: the cold footer {cold} holds {'nothing' if have is None else f'{have} row groups'}, "
+                f"the footer {len(rows)} — not flipping; re-run the rows phase (`index-sync -r -R`)"
+            )
+        return flip
     if n != len(rows) or (rows and (lo != 0 or hi != want_hi)):
         raise IncompleteGeneration(
             f"{date} [{d1v}] gen {gen}: D1 holds {n} row groups (rg {lo}..{hi}), the footer {len(rows)} — "
@@ -652,6 +711,15 @@ def flip_d1(flip: Flip, db_id: str = "") -> bool:
     return True
 
 
+#: A `footer_cache` row's store, from its variant (`d1_variant`: `<store>:<variant>` or the primary's bare name),
+#: so `gc_d1`'s pointer lookup is a primary-key probe of `index_schema`.
+FOOTER_CACHE_STORE = (
+    "CASE WHEN instr(footer_cache.variant, ':') > 0 "
+    "THEN substr(footer_cache.variant, 1, instr(footer_cache.variant, ':') - 1) "
+    f"ELSE '{PRIMARY_STORE}' END"
+)
+
+
 def gc_d1(date: str, db_id: str = "", store: str = PRIMARY_STORE, dry_run: bool = False) -> int:
     """Delete every row group of ``date`` whose generation is not the one its
     variant's schema row points at (leftovers of a flip, or of a sync that
@@ -664,9 +732,13 @@ def gc_d1(date: str, db_id: str = "", store: str = PRIMARY_STORE, dry_run: bool 
     # own (date, variant), so a secondary store's namespaced rows are judged by
     # their own pointer too; `store=` restricts the sweep to that store.
     sw = "" if check_store(store) == PRIMARY_STORE else f"store = '{_sql_escape(store)}' AND "
+    # The pointer lookup names `store` too, so it is a primary-key probe (`index_schema` is keyed
+    # `(store, date, variant)`): on `(date, variant)` alone D1 scans every schema row per row group,
+    # and a ~26K-group scan × ~2.3K schema rows ran out of CPU (7429; cw, 2026-10-26).
     where = (
         "WHERE {sw}date = '{d}' AND gen <> COALESCE("
-        "(SELECT s.gen FROM index_schema s WHERE s.date = index_row_groups.date AND s.variant = index_row_groups.variant), '')"
+        "(SELECT s.gen FROM index_schema s WHERE s.store = index_row_groups.store AND s.date = index_row_groups.date "
+        "AND s.variant = index_row_groups.variant), '')"
     ).format(sw=sw, d=_sql_escape(date))
     if dry_run:
         rows = _d1_query(f"SELECT COUNT(*) AS n FROM index_row_groups {where};", acct, tok, db_id)
@@ -677,7 +749,8 @@ def gc_d1(date: str, db_id: str = "", store: str = PRIMARY_STORE, dry_run: bool 
         vw = "" if store == PRIMARY_STORE else f"variant LIKE '{_sql_escape(store)}:%' AND "
         _d1_query(
             f"DELETE FROM footer_cache WHERE {vw}date = '{_sql_escape(date)}' AND gen <> COALESCE("
-            "(SELECT s.gen FROM index_schema s WHERE s.date = footer_cache.date AND s.variant = footer_cache.variant), '');",
+            f"(SELECT s.gen FROM index_schema s WHERE s.store = {FOOTER_CACHE_STORE} AND s.date = footer_cache.date "
+            "AND s.variant = footer_cache.variant), '');",
             acct, tok, db_id,
         )
     return d1_delete("index_row_groups", where.removeprefix("WHERE "), acct, tok, db_id)

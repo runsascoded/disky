@@ -139,7 +139,8 @@ def test_write_index(tmp_path: Path):
     # (the 12-field engine layout; D1's row shape is the first 11).
     for f in (path, bysize):
         doc = json.loads(f.with_suffix(".json").with_name(f.stem + ".groups.json").read_text())
-        assert (doc["v"], doc["version"], doc["floor_bytes"]) == (1, 1, None)
+        # A store sort: version 2, as `index-sync` records it (the reader picks its row columns by it).
+        assert (doc["v"], doc["version"], doc["floor_bytes"]) == (1, 2, None)
         assert [e["name"] for e in doc["schema"][1:]] == STORE_COLS
         (g,) = doc["groups"]
         assert (g[0], g[1], g[2], g[5], g[8], g[9], g[11]) == (0, 1, 4, 40 * GIB, 0, 10, 0)
@@ -288,7 +289,7 @@ def test_write_index_row_group_rows(tmp_path: Path):
 
 def test_write_index_search(tmp_path: Path):
     """`search=True` writes the search sidecars beside the `path` sort
-    (specs/path-store-search.md) and names them in the summary; the sorts are
+    (specs/done/path-store-search.md) and names them in the summary; the sorts are
     unchanged."""
     l2 = tmp_path / "l2.parquet"
     _write_l2(l2, L2)

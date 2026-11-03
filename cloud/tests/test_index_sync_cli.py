@@ -158,3 +158,24 @@ def test_index_sync_refuses_a_local_generation_not_uploaded(tmp_path: Path, sync
     r = CliRunner().invoke(main, ["index-sync", "-b", str(bucket), "-d", str(local), "-g", "G1", "-k", KEY, "2026-09-30"])
     assert (r.exit_code, synced, logged) == (1, [], [f"index-sync: refusing to list 2026-09-30 gen G1: not uploaded under {bucket}/{KEY}: path-index-bysize.parquet"])
     assert CliRunner().invoke(main, ["index-sync", "-L", "-d", str(local), "-g", "G1", "-k", KEY, "2026-09-30"]).exit_code == 0
+
+
+def test_index_sync_without_d1_rows_refuses_cold_footers_not_uploaded(tmp_path: Path, synced, logged, monkeypatch):
+    """`-R` lists a generation the site plans from its cold footers: with a local `-d`, the bucket must hold them too
+    (the rows half writes them beside the local tiers), else nothing flips."""
+    local = tmp_path / "work"
+    local.mkdir()
+    bucket = tmp_path / "bucket"
+    (bucket / KEY).mkdir(parents=True)
+    for name in ("path-index.parquet", "path-index.groups.parquet"):
+        (local / name).write_bytes(b"")
+    (bucket / KEY / "path-index.parquet").write_bytes(b"")
+    flipped: list[str] = []
+    monkeypatch.setattr(F, "check_flip", lambda *a, **kw: flipped.append(kw["variant"]))
+    r = CliRunner().invoke(main, ["index-sync", "-R", "-b", str(bucket), "-d", str(local), "-g", "G1", "-k", KEY, "2026-09-30"])
+    assert (r.exit_code, synced, flipped, logged) == (
+        1,
+        [("2026-09-30", f"{local}/path-index.parquet", "path", "G1", KEY, True)],
+        [],
+        [f"index-sync: refusing to list 2026-09-30 gen G1: not uploaded under {bucket}/{KEY}: path-index.groups.parquet"],
+    )

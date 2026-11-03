@@ -10,6 +10,7 @@ import { DEFAULT_STORE } from './stores'
 import { Treemap as UserTreemap } from './Treemap'
 import { ScanPicker } from './ScanPicker'
 import { SiteNav } from './SiteNav'
+import { useScanPreference } from './filterCaps'
 import { useScan, useScans } from './scan'
 import { hrefWithScan, NoScanMatch } from './NoScanMatch'
 import { selOf } from './scanSlug'
@@ -257,7 +258,7 @@ export function UsersOgPage() {
 export function UsersPage() {
   const { fmtBytes } = useUnits()
   useDocTitle('Users')
-  const scan = useScan(store)
+  const scan = useScan(store, useScanPreference(false).prefer)
   const asof = scan.asof
   const location = useLocation()
   const metaQ = useScanFile<Meta>('meta', asof)
@@ -437,7 +438,7 @@ export function UserPage() {
   const { fmtBytes } = useUnits()
   const { id = '' } = useParams()
   useDocTitle(shortName(id))
-  const scan = useScan(store)
+  const scan = useScan(store, useScanPreference(false).prefer)
   const asof = scan.asof
   const location = useLocation()
   const metaQ = useScanFile<Meta>('meta', asof)

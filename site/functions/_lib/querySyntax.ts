@@ -1,5 +1,5 @@
 /**
- * The filter box's syntaxes and their registry (specs/path-store-search.md
+ * The filter box's syntaxes and their registry (specs/done/path-store-search.md
  * §1, "Syntaxes"). A syntax is chosen by `qs=<id>` on the page and the API;
  * absent, the deployment's default (`QUERY_SYNTAX` on the Functions, the
  * store's `querySyntax` on the client), else `simple`.

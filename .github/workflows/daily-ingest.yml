@@ -4,8 +4,9 @@
 # last-read days from the R2 access collector's public files when present;
 # specs/done/path-store.md §4.4) + snapshot → upload to
 # disk-tree-demo → append the scan to the static name index (`dt-cloud
-# static-names add`: exact `?f=` literals; the generation is the site's
-# `STATIC_GEN`, built once by `static-names build` when it doesn't exist yet) →
+# static-names add`: exact `?f=` literals; the lineage's base generation is `gen` below, built once by
+# `static-names build` when it doesn't exist yet, followed to a compaction's successor; `-u` moves the pointer the
+# site follows, `static-names/primary-CURRENT.json`) →
 # append it to the interval store (`dt-cloud interval-store add`: every scan's
 # tree as versioned intervals, the Map's path store under `PATH_STORE`; the
 # generation is the store's current one, `interval-store/CURRENT.json`, built once
@@ -15,8 +16,8 @@
 # order). Then the "data behind this site" store (`STORES_JSON` `meta`, the site's
 # `/meta`): the demo's own bucket, disk-tree-demo, listed after the primary's
 # outputs landed → its path store under `meta-l2/` + snapshot under
-# `snapshots/meta/` → its own static name index (the generation is meta's
-# `STATIC_GEN` in `STORES_JSON`, built once when it doesn't exist yet; no
+# `snapshots/meta/` → its own static name index (its own lineage and pointer,
+# `static-names/meta-CURRENT.json`, built once when it doesn't exist yet; no
 # interval store: a secondary store is served per scan) → D1 under store `meta`.
 # Idempotent per date: a date already scanned is
 # not scanned again (the scan id is the date; the indexes append by it), and a
@@ -141,17 +142,18 @@ jobs:
           DISK_TREE_R2_ENDPOINT_URL: ${{ vars.R2_ENDPOINT_URL }}
         run: |
           set -euo pipefail
-          # One source of truth: the generation the site reads (`site/wrangler.r2.toml`).
-          gen=$(sed -nE 's/^STATIC_GEN *= *"([^"]+)".*/\1/p' site/wrangler.r2.toml)
-          if [ -z "$gen" ]; then echo "no STATIC_GEN in site/wrangler.r2.toml: no static name index"; exit 0; fi
+          # The lineage's base generation: `add` follows a compaction's `successor.json` from it, and `-u` publishes the
+          # pointer the site follows (`STATIC_CURRENT_KEY`, site/wrangler.r2.toml)
+          gen=2026-10-15
           L='listing/{id}/index/{gen}/path-index.parquet'
           cmd=add
           if ! aws s3 ls "s3://$BUCKET/static-names/$gen/scans.json" --endpoint-url "$RAC_ENDPOINT" > /dev/null; then
             cmd=build  # the first run: the base generation over every scan so far
           fi
           echo "static-names $cmd -g $gen"
+          # `-u`: the lineage's pointer (`static-names/primary-CURRENT.json`), moved by a compaction, which the site follows
           cd cloud && uv run dt-cloud static-names "$cmd" -g "$gen" -L "$L" -s "r2://$BUCKET" -o "r2://$BUCKET" \
-            -w "$RUNNER_TEMP/static-names" -p 4 -M 10GB $([ "$cmd" = build ] && echo "-x off")
+            -w "$RUNNER_TEMP/static-names" -p 4 -M 10GB -u static-names/primary-CURRENT.json $([ "$cmd" = build ] && echo "-x off")
       - name: Interval store — append the scan (or build the generation)
         id: intervals
         continue-on-error: true
@@ -239,9 +241,8 @@ jobs:
           DISK_TREE_R2_ENDPOINT_URL: ${{ vars.R2_ENDPOINT_URL }}
         run: |
           set -euo pipefail
-          # One source of truth: the generation the site reads, meta's `STATIC_GEN` in `STORES_JSON` (site/wrangler.r2.toml).
-          gen=$(uv run python -c 'import json, tomllib; v = tomllib.load(open("site/wrangler.r2.toml", "rb"))["vars"]; print(json.loads(v.get("STORES_JSON", "{}")).get("meta", {}).get("vars", {}).get("STATIC_GEN", ""))')
-          if [ -z "$gen" ]; then echo "no meta STATIC_GEN in site/wrangler.r2.toml: no meta static name index"; exit 0; fi
+          # Meta's lineage: its base generation, followed as the primary's; its pointer is meta's `STATIC_CURRENT_KEY`
+          gen=2026-10-19meta
           L='meta-l2/{id}/index/{gen}/path-index.parquet'
           cmd=add
           if ! aws s3 ls "s3://$BUCKET/static-names/$gen/scans.json" --endpoint-url "$RAC_ENDPOINT" > /dev/null; then
@@ -250,7 +251,7 @@ jobs:
           echo "static-names $cmd -g $gen (meta)"
           # Build with r2.oa.dev's meta rule (`-x 16,8`: the store's keys carry hex runs — generation stamps, shard ids).
           cd cloud && uv run dt-cloud static-names "$cmd" -g "$gen" -L "$L" -s "r2://$BUCKET" -o "r2://$BUCKET" \
-            -w "$RUNNER_TEMP/static-names-meta" -p 4 -M 10GB $([ "$cmd" = build ] && echo "-x 16,8")
+            -w "$RUNNER_TEMP/static-names-meta" -p 4 -M 10GB -u static-names/meta-CURRENT.json $([ "$cmd" = build ] && echo "-x 16,8")
       - name: Meta store — publish footers → D1
         id: meta_sync
         if: ${{ !cancelled() && steps.meta.outcome == 'success' }}

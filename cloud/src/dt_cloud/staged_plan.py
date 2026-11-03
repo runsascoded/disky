@@ -25,7 +25,7 @@ scan and the dispatch scan with the same identity (``sweep_manifest.AsOfHold``);
 an item without one (staged before ``as_of`` existed) is as of the dispatch
 scan.
 
-``objects`` are exact items (specs/file-assign.md): each names one key and
+``objects`` are exact items (specs/done/file-assign.md): each names one key and
 matches only ``name == key`` — never ``key.bak`` or ``key/…``. The kind comes
 from which list an item is in, never from its trailing slash; an exact key that
 ends in ``/`` is refused (so the two kinds' strings never collide either).

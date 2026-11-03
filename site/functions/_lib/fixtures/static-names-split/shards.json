@@ -1,0 +1,53 @@
+{
+ "shards": [
+  {
+   "i": 0,
+   "lo": "   ",
+   "hi": "f",
+   "rows": 69,
+   "prefixes": 38
+  },
+  {
+   "i": 1,
+   "lo": "f",
+   "hi": "fo",
+   "rows": 2,
+   "prefixes": 1
+  },
+  {
+   "i": 2,
+   "lo": "fo",
+   "hi": "g",
+   "rows": 11,
+   "prefixes": 1
+  },
+  {
+   "i": 3,
+   "lo": "g",
+   "hi": "oo",
+   "rows": 33,
+   "prefixes": 23
+  },
+  {
+   "i": 4,
+   "lo": "oo",
+   "hi": "oof",
+   "rows": 5,
+   "prefixes": 2
+  },
+  {
+   "i": 5,
+   "lo": "oof",
+   "hi": "p",
+   "rows": 4,
+   "prefixes": 3
+  },
+  {
+   "i": 6,
+   "lo": "p",
+   "hi": null,
+   "rows": 57,
+   "prefixes": 27
+  }
+ ]
+}

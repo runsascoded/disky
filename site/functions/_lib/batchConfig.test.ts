@@ -1,4 +1,4 @@
-// The executors' Batch settings come from `[vars]` (specs/oa-decoupling.md
+// The executors' Batch settings come from `[vars]` (specs/done/oa-decoupling.md
 // step 5): a route answers 503 naming the first key it needs that is unset,
 // before it touches GCP.
 import { describe, expect, it } from 'vitest'

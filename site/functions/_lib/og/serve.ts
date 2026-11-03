@@ -149,8 +149,8 @@ export async function stampPage(env0: OgEnv, url: URL, html: Response, warm?: (p
   // The image's view: the page's, plus `/staged`'s plan version and, for a
   // full card, the credential it re-checks.
   const v = pv.kind === 'staged' ? await stagedVersion(env) : null
-  const pair = pv.kind === 'diff' ? await resolveDiffScans(env, pv.params.d) : null
-  const scan = pv.kind === 'diff' ? pair?.to : pv.kind === 'staged' ? null : await resolveScan(env, pv.params.d)
+  const pair = pv.kind === 'diff' ? await resolveDiffScans(env, pv.params.d, !!pv.params.f) : null
+  const scan = pv.kind === 'diff' ? pair?.to : pv.kind === 'staged' ? null : await resolveScan(env, pv.params.d, !!pv.params.f)
   const params = { ...imageParams(pv.params, v, cred), ...(scan ? { s: scan } : {}), ...(pair?.from ? { b: pair.from } : {}), policy: anonymousPolicy(env), r: RENDER_VERSION }
   const image = url.origin + await imagePath(key, pv.kind, params, tier, day)
   // A full card's image rendered while the unfurler reads the page: it fetches the image next, from the same colo, and a
@@ -220,7 +220,7 @@ async function cardData(env: OgEnv, kind: string, params: Record<string, string>
  * resolves its store, as the page's own would), `sEnv` the card's store's. */
 async function warmView(env: OgEnv, sEnv: OgEnv, origin: string, kind: string, params: Record<string, string>, waitUntil?: (p: Promise<unknown>) => void): Promise<void> {
   try {
-    const date = await resolveScan(sEnv, params.d)
+    const date = await resolveScan(sEnv, params.d, !!params.f)
     if (!date) return
     const reg = await loadRegistry(env).catch(() => ({}) as Awaited<ReturnType<typeof loadRegistry>>)
     for (const u of warmUrls(kind, params, date, x => canonId(x, reg))) await warmSubtree(env, origin + u, waitUntil).catch(() => null)
@@ -273,8 +273,8 @@ export async function serveCard(ctx: { request: Request; env: OgEnv; waitUntil?:
   let scan: string | null
   let before = pinnedBefore
   try {
-    const pair = r.kind === 'diff' && !pinnedScan ? await resolveDiffScans(sEnv, view.d) : null
-    scan = r.kind === 'diff' ? pinnedScan ?? pair?.to ?? null : r.kind === 'staged' ? null : pinnedScan ?? await resolveScan(sEnv, view.d)
+    const pair = r.kind === 'diff' && !pinnedScan ? await resolveDiffScans(sEnv, view.d, !!view.f) : null
+    scan = r.kind === 'diff' ? pinnedScan ?? pair?.to ?? null : r.kind === 'staged' ? null : pinnedScan ?? await resolveScan(sEnv, view.d, !!view.f)
     before ??= pair?.from ?? undefined
   } catch (e) {
     if (e instanceof NoScanMatch) return json({ error: e.message }, 404)

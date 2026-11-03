@@ -68,6 +68,25 @@ export function edgeEmphFactor(depth: number, emphasis: number): number {
   return 1 + emphasis * Math.max(0, 2 - depth)
 }
 
+/**
+ * A shared-mode cell's stroke width: the consumer's `borderWidth` times the
+ * shallow-edge emphasis, a hairline at most for dust. With `borderStep` it is a
+ * whole number of pixels, at least 1 and at most `parentBw − 1`, so a parent's
+ * seam is always ≥1px wider than its children's (until the parent is itself a
+ * hairline). `parentBw` is `Infinity` for top-level cells and under gaps parents.
+ */
+export function cellStroke(
+  cfg: Pick<LayoutConfig<unknown>, 'borderWidth' | 'edgeEmphasis' | 'borderStep'>,
+  depth: number,
+  w: number,
+  h: number,
+  dust: boolean,
+  parentBw: number,
+): number {
+  const bw = Math.min(cfg.borderWidth(depth, { w, h }) * edgeEmphFactor(depth, cfg.edgeEmphasis), dust ? 1 : Infinity)
+  return cfg.borderStep ? Math.max(1, Math.min(Math.round(bw), parentBw - 1)) : bw
+}
+
 /** Everything `layoutCells` needs from the host component, threaded as one bundle. */
 export interface LayoutConfig<T> {
   getSize: (n: T) => number
@@ -79,6 +98,8 @@ export interface LayoutConfig<T> {
   borderWidth: (depth: number, ctx: { w: number; h: number }) => number
   /** Shallow-edge emphasis (see {@link edgeEmphFactor}); 0 = uniform. */
   edgeEmphasis: number
+  /** Whole-pixel strokes, each ≥1px narrower than its parent's (see {@link cellStroke}). */
+  borderStep?: boolean
   /** Measured title content width. Absent keeps a full-width title strip. */
   getTitleWidth?: (n: T, chainLabels: string[] | null, w: number, boxW: number) => number
   /** Fold small/thin items before layout (the component's `fold`). */
@@ -180,8 +201,9 @@ function place<T>(
   depth: number,
   mode: Tiling,
   cfg: LayoutConfig<T>,
+  parentBw: number,
 ): PlacedCell<T> {
-  const { getLabel, childrenOf, showLabels, collapseChains, borderWidth, edgeEmphasis } = cfg
+  const { getLabel, childrenOf, showLabels, collapseChains } = cfg
   const folded = isFolded(node0)
 
   // Single-child wrapper chains collapse into one cell labeled `a/…/z`: the
@@ -211,9 +233,7 @@ function place<T>(
   const dust = Math.min(r.w, r.h) < 14
   const shared = mode === 'shared'
   const showLbl = showLabels && r.w > 36 && r.h > 13
-  const bw = shared
-    ? Math.min(borderWidth(depth, { w: r.w, h: r.h }) * edgeEmphFactor(depth, edgeEmphasis), dust ? 1 : Infinity)
-    : 0
+  const bw = shared ? cellStroke(cfg, depth, r.w, r.h, dust, parentBw) : 0
   const edge = bw / 2
   const boxW = shared ? r.w : r.w - (dust ? 1 : 2)
   const boxH = shared ? r.h : r.h - (dust ? 1 : 2)
@@ -237,6 +257,7 @@ function place<T>(
         depth + 1,
         kidsMode,
         cfg,
+        shared ? bw : Infinity,
       ),
     )
 
@@ -285,6 +306,7 @@ export function layoutCells<T>(
         0,
         rootMode,
         cfg,
+        Infinity,
       ),
     )
 }

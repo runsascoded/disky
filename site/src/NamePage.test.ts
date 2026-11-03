@@ -17,6 +17,7 @@ vi.mock('@open-athena/treemap', async original => ({ ...await original<typeof im
 /** The store's scan list (`useScans`, newest first): by default the registry's own scans — a name index
  *  that has caught up with the store. */
 const SCANS_KEY = ['scans', DEFAULT_STORE.key]
+const loadingLabels = (html: string) => [...html.matchAll(/class="inline-loading" role="status" aria-live="polite"><span class="spin" aria-hidden="true"><\/span>([^<]*)<\/span>/g)].map(m => m[1])
 function render(client: QueryClient, path = '/names?date=2026-10-05&name=datakit', seedRegistry = true) {
   if (seedRegistry && !client.getQueryState(['name-summary-registry'])) client.setQueryData(['name-summary-registry'], parseNameRegistry(legacyNameRegistry()))
   const reg = client.getQueryData<{ dates: { date: string }[] }>(['name-summary-registry'])
@@ -37,14 +38,14 @@ it('defaults the existing controlled form to datakit and no baseline', () => {
     const html = render(client, '/names')
     expect(html.match(/<input[^>]+>/)?.[0]).toBe('<input required="" aria-describedby="hot-availability" autoComplete="off" data-1p-ignore="true" data-lpignore="true" data-form-type="other" name="name" value="datakit"/>')
     expect(html.match(/<select name="from">(.*?)<\/select>/)?.[1]).toBe('<option value="" selected="">No baseline</option><option value="2026-10-04">2026-10-04</option>')
-    expect([...html.matchAll(/<p role="status">(.*?)<\/p>/g)].map(([, text]) => text)).toEqual(['Loading exact name summary…'])
+    expect(loadingLabels(html)).toEqual(['Loading exact name summary…'])
   } finally { client.clear() }
 })
 it('waits for availability without inventing scan controls or fetching a summary', () => {
   const client = new QueryClient()
   try {
     const html = render(client, '/names?date=2026-10-06&name=datakit', false)
-    expect([...html.matchAll(/<p role="status">(.*?)<\/p>/g)].map(([, text]) => text)).toEqual(['Loading available name-summary scans…'])
+    expect(loadingLabels(html)).toEqual(['Loading available name-summary scans…'])
     expect([...html.matchAll(/<select\b/g)]).toEqual([])
     expect([...html.matchAll(/<table\b/g)]).toEqual([])
     expect(roots).toEqual([])

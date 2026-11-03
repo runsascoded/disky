@@ -22,6 +22,7 @@ import json
 import shutil
 import tempfile
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from time import monotonic
 
@@ -139,22 +140,34 @@ class Checkpoint:
 
     # ── Files ──
 
-    def save_files(self, step: str, local: Path, rels: list[str], doc: dict | None = None) -> None:
-        """Files `local/<rel>` (a sub-job's finished output) and `doc`; the marker last."""
+    def save_files(self, step: str, local: Path, rels: list[str], doc: dict | None = None, workers: int | None = None) -> None:
+        """Files `local/<rel>` (a sub-job's finished output; `blobstore.upload_files`: processes to `gs://`, `workers`
+        at a time, default its own) and `doc`; the marker last."""
+        from .blobstore import STAGE_WORKERS, upload_files
+
         t0 = monotonic()
-        for r in rels:
-            self.store.put(local / r, self.key(f"{step}/files/{r}"))
+        upload_files(self.store.uri(""), {self.key(f"{step}/files/{r}"): local / r for r in rels}, workers=workers or STAGE_WORKERS,
+                     label=f"checkpoint {self.key(step)}", log=self.log)
         self.store.write_text(self.key(f"{step}/done.json"), json.dumps({"tables": {}, "files": rels, "doc": doc}) + "\n")
-        self.log(f"checkpoint {self.key(step)}: saved {len(rels)} files")
+        self.log(f"checkpoint {self.key(step)}: saved {len(rels)} files ({sum((local / r).stat().st_size for r in rels):,} B) in {monotonic() - t0:.0f}s")
         self._count("save", t0)
         self._saved(step)
 
-    def load_files(self, step: str, local: Path) -> dict | None:
+    def mark_files(self, step: str, rels: list[str], doc: dict | None = None) -> None:
+        """Step `step`'s marker over files already under `step/files/` (written there by others: a fan-out's helpers),
+        as `save_files` writes it: `rels` (sorted) and `doc`."""
+        self.store.write_text(self.key(f"{step}/done.json"), json.dumps({"tables": {}, "files": sorted(rels), "doc": doc}) + "\n")
+        self.log(f"checkpoint {self.key(step)}: marked {len(rels)} files")
+        self._saved(step)
+
+    def load_files(self, step: str, local: Path, workers: int = 16, missing_only: bool = False) -> dict | None:
+        """Step `step`'s files into `local` (`missing_only`: those not there already) and its doc."""
         t0 = monotonic()
         m = self.store.read_json(self.key(f"{step}/done.json"))
-        for r in m["files"]:
-            self.store.get(self.key(f"{step}/files/{r}"), local / r)
-        self.log(f"checkpoint {self.key(step)}: resumed {len(m['files'])} files")
+        rels = [r for r in m["files"] if not (missing_only and (local / r).is_file())]
+        with ThreadPoolExecutor(workers) as ex:
+            list(ex.map(lambda r: self.store.get(self.key(f"{step}/files/{r}"), local / r), rels))
+        self.log(f"checkpoint {self.key(step)}: resumed {len(rels)} files in {monotonic() - t0:.0f}s")
         self._count("resume", t0)
         return m["doc"]
 
@@ -188,6 +201,11 @@ class Checkpoint:
         self._count("save", t0)
         self._saved(f"{step}#{n_parts}")
         return n_parts + 1
+
+    def drop(self, step: str) -> int:
+        """Delete step `step` (superseded by a later step that holds what it did); returns the files deleted."""
+        under = self.key(step) + "/"
+        return self.store.delete(sorted(k for k in self.store.listing(self.key(step)) if k.startswith(under)))
 
     def clear(self) -> int:
         """Delete every saved step (the job's output is published); returns the files deleted."""

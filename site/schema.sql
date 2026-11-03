@@ -43,6 +43,50 @@ CREATE TABLE access_requests (
   ip_hash    TEXT
 , subject_json TEXT);
 
+CREATE TABLE activity_bursts (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  actor       TEXT NOT NULL,
+  via         TEXT NOT NULL,
+  origin      TEXT NOT NULL,
+  first_ts    INTEGER NOT NULL,
+  last_ts     INTEGER NOT NULL,
+  counts      TEXT NOT NULL,
+  pages       TEXT NOT NULL,
+  sids        TEXT NOT NULL,
+  rendered_ms INTEGER,
+  dirty       INTEGER NOT NULL DEFAULT 0
+, trail TEXT NOT NULL DEFAULT '{"n":0,"last":[]}');
+
+CREATE TABLE activity_events (
+  id       INTEGER PRIMARY KEY AUTOINCREMENT,
+  burst_id INTEGER NOT NULL,
+  ts       INTEGER NOT NULL,
+  kind     TEXT NOT NULL,
+  actor    TEXT NOT NULL,
+  via      TEXT NOT NULL,
+  method   TEXT NOT NULL,
+  route    TEXT NOT NULL,
+  line     TEXT NOT NULL,
+  detail   TEXT
+);
+
+CREATE TABLE activity_kinds (
+  kind   TEXT PRIMARY KEY,
+  log    INTEGER NOT NULL,
+  notify TEXT NOT NULL CHECK (notify IN ('off', 'count', 'line')),
+  who    TEXT NOT NULL,
+  ts     INTEGER NOT NULL
+);
+
+CREATE TABLE activity_posts (
+  burst_id   INTEGER NOT NULL,
+  sink       TEXT NOT NULL,
+  part       TEXT NOT NULL,
+  msg_id     TEXT NOT NULL,
+  claimed_ms INTEGER NOT NULL,
+  PRIMARY KEY (burst_id, sink, part)
+);
+
 CREATE TABLE admin_edits (
   id       INTEGER PRIMARY KEY AUTOINCREMENT,
   tbl      TEXT NOT NULL,
@@ -362,7 +406,7 @@ CREATE TABLE session_log_batches (
   first_ms    INTEGER NOT NULL,
   last_ms     INTEGER NOT NULL,
   n           INTEGER NOT NULL,
-  events      TEXT NOT NULL,
+  events      TEXT NOT NULL, burst_id INTEGER,
   PRIMARY KEY (sid, pid, seq)
 );
 
@@ -420,6 +464,14 @@ CREATE UNIQUE INDEX access_requests_one_pending ON access_requests (email) WHERE
 
 CREATE INDEX access_requests_status ON access_requests (status, created_at DESC);
 
+CREATE INDEX idx_activity_bursts_actor ON activity_bursts (actor, last_ts);
+
+CREATE INDEX idx_activity_bursts_last ON activity_bursts (last_ts);
+
+CREATE INDEX idx_activity_events_burst ON activity_events (burst_id, ts);
+
+CREATE INDEX idx_activity_events_ts ON activity_events (ts);
+
 CREATE INDEX admin_edits_tbl ON admin_edits (tbl, ts);
 
 CREATE INDEX chart_annotations_store ON chart_annotations (store, at);
@@ -455,6 +507,8 @@ CREATE INDEX idx_scan_runs_started ON scan_runs (store, started_ts);
 CREATE INDEX idx_session_log_email ON session_log (email, last_ms);
 
 CREATE INDEX idx_session_log_received ON session_log (received_ts);
+
+CREATE INDEX idx_session_log_batches_burst ON session_log_batches (burst_id);
 
 CREATE INDEX idx_session_log_batches_received ON session_log_batches (received_ts);
 

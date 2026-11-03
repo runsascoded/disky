@@ -637,6 +637,7 @@ def _random_listing(tmp_path: Path, seed: int, n: int = 60) -> tuple[str, str, s
 
 
 @pytest.mark.parametrize('seed', [1, 2])
+@pytest.mark.slow
 def test_random_listings_are_byte_identical_across_partition_configs(tmp_path: Path, seed: int):
     """The one-cascade output is the reference; every `(k, partition_files)`
     config — including one cascade per key and budgets that pack a few keys

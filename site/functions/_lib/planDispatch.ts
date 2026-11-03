@@ -20,12 +20,30 @@ import { NO_SHAPE, PlanSpansBuckets, planItemLines, prefixShape, snapshotPlan } 
 import { listBatchJobs, reflectRuns } from './runReflect.js'
 import { SCAN_ID_RE } from '../../src/scanSlug.js'
 
+export function reviewConfig(env: ExecEnv, cfg: Parameters<typeof secretRef>[0]): { vars: Record<string, string>; secrets: Record<string, string> } {
+  const store = env.SWEEP_REVIEW_STORE?.trim()
+  if (!store) return { vars: {}, secrets: {} }
+  const bindings = JSON.parse(env.SWEEP_REVIEW_SECRETS || '{}') as Record<string, unknown>
+  const secrets: Record<string, string> = {}
+  for (const [key, name] of Object.entries(bindings)) {
+    if (!/^[A-Z][A-Z0-9_]*$/.test(key) || typeof name !== 'string' || !/^[\w-]+$/.test(name)) throw new Error('invalid sweep review secret binding')
+    secrets[key] = secretRef(cfg, name)
+  }
+  const vars: Record<string, string> = { SWEEP_INTERVAL_STORE: store }
+  if (store.startsWith('r2://')) {
+    vars.R2_BUCKET = new URL(store).hostname
+    if (!['R2_ENDPOINT', 'R2_ACCESS_KEY_ID', 'R2_SECRET_ACCESS_KEY'].every(key => secrets[key])) throw new Error('R2 sweep review requires endpoint and credential secret bindings')
+  }
+  return { vars, secrets }
+}
+
 async function prepare(env: ExecEnv, db: D1Database, req: DispatchReq): Promise<Prepared | ReturnType<typeof refuse>> {
   if (!env.GCP_SA_KEY) return refuse(503, 'dispatch not configured (GCP_SA_KEY secret missing)')
   if (!env.JOB_SA) return refuse(503, 'dispatch not configured (JOB_SA var missing)')
   const jobSa = env.JOB_SA
   const cfg = batchConfig(env, ['GCP_PROJECT', 'DATA_BUCKET', 'SWEEP_IMAGE', 'SWEEP_S3_ENDPOINT'])
   if ('missing' in cfg) return refuse(503, notConfigured('dispatch', cfg.missing))
+  const review = reviewConfig(env, cfg)
   const shape = prefixShape(env)
   if (!shape) return refuse(503, `dispatch ${NO_SHAPE}`)
   let snapshot: Awaited<ReturnType<typeof snapshotPlan>>
@@ -58,8 +76,8 @@ async function prepare(env: ExecEnv, db: D1Database, req: DispatchReq): Promise<
     const script = planSweepScript(runMnt, req.mode === 'real')
 
     // the executor deletes from the plan's bucket (`SWEEP_BUCKET` in the job env)
-    const spec = sweepBatchSpec(cfg, jobSa, script, plan.bucket, { JOB_ID: jobId, SWEEP_DATE: date, SITE_URL: req.siteUrl },
-      { SITE_TOKEN: secretRef(cfg, 'cw-s3-job-grant') })
+    const spec = sweepBatchSpec(cfg, jobSa, script, plan.bucket, { JOB_ID: jobId, SWEEP_DATE: date, SITE_URL: req.siteUrl, ...review.vars },
+      { SITE_TOKEN: secretRef(cfg, 'cw-s3-job-grant'), ...review.secrets })
     const { ok, status, text } = await submitBatch(cfg, token, jobId, spec)
     if (!ok) {
       console.error('batch submit failed', status, text.slice(0, 2000))
@@ -90,7 +108,7 @@ export const planSweepScript = (runMnt: string, forReal: boolean): string => [
   'set -euo pipefail',
   `trap 'curl -fsS -m 60 -o /dev/null -H "Authorization: Bearer $SITE_TOKEN" "$SITE_URL/api/plan-sweep/jobs" || true' EXIT`,
   `RUN="${runMnt}"`,
-  'dt-cloud plan-sweep manifest "$RUN/plan.json" -d "$SWEEP_DATE" -o "$RUN"',
+  `python -c 'from os import environ; from dt_cloud.scan_steps import r2_profile; env = dict(environ); r2_profile(env); environ.update(env); from dt_cloud.cli import main; main()' plan-sweep manifest "$RUN/plan.json" -d "$SWEEP_DATE" -o "$RUN"`,
   `dt-cloud plan-sweep execute ${forReal ? '--for-real ' : ''}"$RUN"`,
 ].join('\n')
 

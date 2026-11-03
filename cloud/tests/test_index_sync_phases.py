@@ -387,3 +387,128 @@ def test_snapshots_dir_with_rows_only_or_local_is_a_usage_error(tmp_path, d1):
         r = CliRunner().invoke(main, ["index-sync", flag, "-M", str(tmp_path), "-d", str(tmp_path), "-g", NEW, "-k", NEW_KEY, DATE])
         assert r.exit_code == 2, (flag, r.output)
     assert d1.sent == []
+
+
+# ── `-R`: no row group in D1 (specs/lean-scans.md §1.4) ──
+
+COLD = [
+    "path-index-bysize.groups.json", "path-index-bysize.groups.parquet", "path-index-bysize.parquet",
+    "path-index.groups.json", "path-index.groups.parquet", "path-index.parquet",
+]
+
+
+def kinds(sent: list[str]) -> list[str]:
+    return [s.split(" (")[0].split(" WHERE")[0] for s in sent]
+
+
+def test_no_d1_rows_lists_the_generation_from_its_cold_footer(gens, d1, logged):
+    """`-R`: per variant the cold footer files and the swept generations, no row INSERT and no LRU entry; then every
+    variant checked (none of its rows in D1, all of them in the cold footer) before any pointer flips."""
+    _, new = gens
+    r = sync(new, "-R")
+    assert r.exit_code == 0, r.output
+    assert logged == [
+        f"index-sync: {DATE} [path] gen {NEW} @ {NEW_KEY} — pointer flipped (3 row groups, cold footer only)",
+        f"index-sync: {DATE} [bysize] gen {NEW} @ {NEW_KEY} — pointer flipped (2 row groups, cold footer only)",
+        SKIPPED,
+    ]
+    rows_phase = ["SELECT name FROM sqlite_master", "DELETE FROM footer_cache", "DELETE FROM index_row_groups"]
+    assert kinds(d1.sent) == [
+        *rows_phase, *rows_phase,
+        "SELECT gen, dir FROM index_schema", "SELECT COUNT(*) AS n, MIN(rg) AS lo, MAX(rg) AS hi FROM index_row_groups",
+        "SELECT gen, dir FROM index_schema", "SELECT COUNT(*) AS n, MIN(rg) AS lo, MAX(rg) AS hi FROM index_row_groups",
+        "INSERT INTO index_schema", *["DELETE FROM index_row_groups"] * 2, *["DELETE FROM index_schema"] * 2,
+        "INSERT INTO index_schema",
+    ]
+    assert d1.pointers() == BOTH_POINTED_NEW
+    # G2 has no row in D1 (a reader plans it from `.groups.parquet`); G1's stay until retention retires them.
+    assert d1.groups() == [("bysize", OLD, 1), ("path", OLD, 2)]
+    assert d1.visible() == []
+    assert d1.con.execute("SELECT variant, gen, state FROM footer_cache ORDER BY variant").fetchall() == [
+        ("bysize", OLD, "hot"), ("path", OLD, "hot"),
+    ]
+    assert sorted(p.name for p in new.iterdir()) == COLD
+    # Retention still retires the old generation's rows (`index-gc`: unpointed rows, through `d1_delete`).
+    assert F.gc_d1(DATE) == 3
+    assert d1.groups() == []
+    # Again: already pointed, no row written.
+    d1.sent.clear()
+    logged.clear()
+    assert sync(new, "-R").exit_code == 0
+    assert logged[:2] == [
+        f"index-sync: {DATE} [path] gen {NEW} @ {NEW_KEY} — already pointed (3 row groups, cold footer only)",
+        f"index-sync: {DATE} [bysize] gen {NEW} @ {NEW_KEY} — already pointed (2 row groups, cold footer only)",
+    ]
+    assert [s for s in d1.writes() if not s.startswith(("DELETE FROM footer_cache", "DELETE FROM index_row_groups"))] == []
+    assert d1.groups() == []
+
+
+def test_no_d1_rows_split_halves(gens, d1, logged):
+    """`-r -R` writes the cold footer and nothing to D1 but the sweeps; `-p -R` flips: the default `-R`'s end state."""
+    _, new = gens
+    assert sync(new, "-r", "-R").exit_code == 0
+    assert logged == [
+        f"index-sync: {DATE} [path] gen {NEW} @ {NEW_KEY} — 3 row groups in the cold footer only, pointer not flipped",
+        f"index-sync: {DATE} [bysize] gen {NEW} @ {NEW_KEY} — 2 row groups in the cold footer only, pointer not flipped",
+        SKIPPED,
+    ]
+    assert [s for s in d1.writes() if not s.startswith(("DELETE FROM footer_cache", "DELETE FROM index_row_groups"))] == []
+    assert d1.pointers() == BOTH_POINTED_OLD
+    assert sorted(p.name for p in new.iterdir()) == COLD
+    logged.clear()
+    assert sync(new, "-p", "-R").exit_code == 0
+    assert logged == [
+        f"index-sync: {DATE} [path] gen {NEW} @ {NEW_KEY} — pointer flipped (3 row groups, cold footer only)",
+        f"index-sync: {DATE} [bysize] gen {NEW} @ {NEW_KEY} — pointer flipped (2 row groups, cold footer only)",
+        SKIPPED,
+    ]
+    assert d1.pointers() == BOTH_POINTED_NEW
+    assert d1.groups() == [("bysize", OLD, 1), ("path", OLD, 2)]
+
+
+def test_no_d1_rows_refuses_a_missing_cold_footer(gens, d1, logged):
+    _, new = gens
+    assert sync(new, "-r", "-R").exit_code == 0
+    (new / "path-index-bysize.groups.parquet").unlink()
+    logged.clear()
+    d1.sent.clear()
+    assert sync(new, "-p", "-R").exit_code == 1
+    assert logged == [
+        f"index-sync: refusing to flip any pointer — {DATE} [bysize] gen {NEW}: the cold footer "
+        f"{new}/path-index-bysize.groups.parquet holds nothing, the footer 2 — not flipping; re-run the rows phase (`index-sync -r -R`)",
+    ]
+    assert d1.writes() == []
+    assert d1.pointers() == BOTH_POINTED_OLD
+
+
+def test_no_d1_rows_sweeps_a_partial_set_its_flip_would_trust(gens, d1, logged):
+    """An earlier rows phase with D1 rows that died part-way leaves a partial set, which a reader would trust once
+    pointed (an untracked generation with rows): `-p -R` refuses it, `-r -R` sweeps it (unpointed), and a complete
+    set flips as before."""
+    _, new = gens
+    assert sync(new, "-r").exit_code == 0
+    d1.con.execute(f"DELETE FROM index_row_groups WHERE variant='bysize' AND gen='{NEW}' AND rg = 1")
+    logged.clear()
+    assert sync(new, "-p", "-R").exit_code == 1
+    assert logged == [
+        f"index-sync: refusing to flip any pointer — {DATE} [bysize] gen {NEW}: D1 holds 1 row groups (rg 0..0), the footer 2 — "
+        "not flipping; re-run the rows phase (`index-sync -r`)",
+    ]
+    assert d1.pointers() == BOTH_POINTED_OLD
+    assert sync(new, "-r", "-R").exit_code == 0
+    assert d1.groups() == [("bysize", OLD, 1), ("path", OLD, 2)]
+    assert d1.con.execute("SELECT variant, gen FROM footer_cache ORDER BY variant").fetchall() == [("bysize", OLD), ("path", OLD)]
+    assert sync(new, "-p", "-R").exit_code == 0
+    assert d1.pointers() == BOTH_POINTED_NEW
+    # A complete set (a plain `-r`) is trusted as before.
+    assert sync(new, "-r").exit_code == 0
+    assert sync(new, "-r").exit_code == 0
+    d1.con.execute(f"UPDATE index_schema SET gen='{OLD}', dir='{OLD_KEY}'")
+    assert sync(new, "-p", "-R").exit_code == 0
+    assert d1.visible() == [("bysize", NEW, 2), ("path", NEW, 3)]
+
+
+def test_no_d1_rows_with_local_is_a_usage_error(tmp_path, d1):
+    r = CliRunner().invoke(main, ["index-sync", "-R", "-L", "-d", str(tmp_path), "-g", NEW, "-k", NEW_KEY, DATE])
+    assert r.exit_code == 2
+    assert d1.sent == []

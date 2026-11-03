@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from functools import partial
 from typing import TYPE_CHECKING, Iterable, Optional
 
-from disk_tree.find.bulk import BlobRow, generic_discover
+from disk_tree.find.bulk import BlobRow, crc32c_int, generic_discover
 
 if TYPE_CHECKING:
     import fsspec  # noqa: F401
@@ -23,6 +23,8 @@ if TYPE_CHECKING:
 err = partial(print, file=sys.stderr)
 
 BLOB_FIELDS = "items(name,size,timeCreated,storageClass,generation),nextPageToken"
+#: `crc32c` too: `GcsBulkLister(crc32c=True)` (`bulk-list -c`).
+BLOB_FIELDS_CRC = "items(name,size,timeCreated,storageClass,generation,crc32c),nextPageToken"
 
 
 @dataclass(frozen=True)
@@ -34,6 +36,25 @@ class GcsBulkLister:
     """
 
     scheme: str = "gcs"
+    #: Keep each object's CRC32C (the shards' `crc32c` column).
+    crc32c: bool = False
+
+    @property
+    def fields(self) -> str:
+        return BLOB_FIELDS_CRC if self.crc32c else BLOB_FIELDS
+
+    def row(self, blob) -> BlobRow:
+        created = None
+        if blob.time_created is not None:
+            created = blob.time_created.isoformat().replace("+00:00", "Z")
+        return BlobRow(
+            name=blob.name,
+            size=int(blob.size or 0),
+            created=created,
+            storage_class=blob.storage_class,
+            generation=int(blob.generation) if blob.generation is not None else None,
+            crc32c=crc32c_int(blob.crc32c) if self.crc32c else None,
+        )
 
     def stream_prefix(
         self,
@@ -55,19 +76,10 @@ class GcsBulkLister:
         if client is None:
             client = local.client = storage.Client()
         for blob in client.list_blobs(
-            bucket, prefix=prefix, fields=BLOB_FIELDS,
+            bucket, prefix=prefix, fields=self.fields,
             start_offset=start, end_offset=end,
         ):
-            created = None
-            if blob.time_created is not None:
-                created = blob.time_created.isoformat().replace("+00:00", "Z")
-            yield BlobRow(
-                name=blob.name,
-                size=int(blob.size or 0),
-                created=created,
-                storage_class=blob.storage_class,
-                generation=int(blob.generation) if blob.generation is not None else None,
-            )
+            yield self.row(blob)
 
     def stream_pages(
         self,
@@ -93,23 +105,11 @@ class GcsBulkLister:
         if client is None:
             client = local.client = storage.Client()
         it = client.list_blobs(
-            bucket, prefix=prefix or None, fields=BLOB_FIELDS,
+            bucket, prefix=prefix or None, fields=self.fields,
             start_offset=start, end_offset=end_hint,
         )
         for page in it.pages:
-            rows = []
-            for blob in page:
-                created = None
-                if blob.time_created is not None:
-                    created = blob.time_created.isoformat().replace("+00:00", "Z")
-                rows.append(BlobRow(
-                    name=blob.name,
-                    size=int(blob.size or 0),
-                    created=created,
-                    storage_class=blob.storage_class,
-                    generation=int(blob.generation) if blob.generation is not None else None,
-                ))
-            yield rows
+            yield [self.row(blob) for blob in page]
 
     def discover_prefixes(self, fs: "fsspec.AbstractFileSystem", root: str):
         # GCS uses fsspec (gcsfs) semantics; the generic walk already handles
@@ -138,16 +138,8 @@ class GcsBulkLister:
             if blob is None:
                 err(f"WARN: no placeholder object behind self entry {d!r} in {bucket}")
                 continue
-            created = None
-            if blob.time_created is not None:
-                created = blob.time_created.isoformat().replace("+00:00", "Z")
-            rows.append((
-                blob.name,
-                int(blob.size or 0),
-                created,
-                blob.storage_class,
-                int(blob.generation) if blob.generation is not None else None,
-            ))
+            r = self.row(blob)
+            rows.append((r.name, r.size, r.created, r.storage_class, r.generation, r.crc32c))
         return rows
 
 
@@ -159,6 +151,7 @@ def list_gcs_bucket_to_parquet(
     prefix: Optional[str] = None,
     exists: str = "error",
     weights_from: Optional[str] = None,
+    crc32c: bool = False,
 ) -> int:
     """Convenience wrapper mirroring marin's `list_bucket_to_parquet`.
 
@@ -170,7 +163,7 @@ def list_gcs_bucket_to_parquet(
 
     from disk_tree.find.bulk import list_bucket_to_parquet
 
-    lister = GcsBulkLister()
+    lister = GcsBulkLister(crc32c=crc32c)
     fs = gcsfs.GCSFileSystem(use_listings_cache=False)
     return list_bucket_to_parquet(
         lister=lister,

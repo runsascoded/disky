@@ -64,6 +64,7 @@
 import type { Env } from './auth.js'
 import { cachedHosts, hostStoreConfig } from './hosts.js'
 import { withReq } from './shared.js'
+import { meterOf } from './usage.js'
 
 /** `index_schema.store` of the primary store's rows (a fixed sentinel: one
  * migration lineage serves several deploys, each with its own `STORE`). */
@@ -71,9 +72,9 @@ export const PRIMARY_STORE = 'primary'
 
 /** The deployment's policy a secondary store inherits unless its config sets its own: whether the map's filter is the
  * static name index's (`FILTER_STATIC`), whether it is indexed-only (`FILTER_INDEXED_ONLY`), whether it answers path
- * terms (`SEARCH_PATH_TERMS`), and its link cards' anonymous tier (`OG_ANONYMOUS`: the store's pages unfurl as the
+ * terms (`SEARCH_PATH_TERMS`), the scan a view with no `?d=` opens on (`DEFAULT_SCAN`), and its link cards' anonymous tier (`OG_ANONYMOUS`: the store's pages unfurl as the
  * deployment's do, its own `scope` gating the pages, not the previews; a store sets `generic` to keep its own). */
-export const INHERITED_VARS = ['FILTER_STATIC', 'FILTER_INDEXED_ONLY', 'SEARCH_PATH_TERMS', 'OG_ANONYMOUS'] as const
+export const INHERITED_VARS = ['FILTER_STATIC', 'FILTER_INDEXED_ONLY', 'SEARCH_PATH_TERMS', 'DEFAULT_SCAN', 'OG_ANONYMOUS'] as const
 
 /** The vars a store config may set; all but `INHERITED_VARS` are cleared for a secondary store. The static name
  * index's are per store (`STATIC_GEN`, `FILTER_STATIC_HEAVY`, `FILTER_STATIC_ANCHORS`): a store reads a static
@@ -97,6 +98,12 @@ export const STORE_VARS = [
   'OBJECT_BUCKETS',
   'SERVED_R2',
   'STATIC_GEN',
+  'STATIC_CURRENT_KEY',
+  'PATH_STORE',
+  'INTERVAL_STORE_GEN',
+  'INTERVAL_STORE_PREFIX',
+  'INTERVAL_STORE_REV',
+  'AGE_STORE_PREFIX',
   'FILTER_STATIC_HEAVY',
   'FILTER_STATIC_ANCHORS',
   ...INHERITED_VARS,
@@ -296,6 +303,9 @@ export function withStore<C extends { request: Request; env: Env }>(ctx: C): C |
   }
   const cfg = Object.hasOwn(stores, key) ? stores[key] : undefined
   if (!cfg) return jsonErr(`unknown store '${key}'`, 404)
+  // The request's usage point names the store it read (`_lib/usage.ts`).
+  const m = meterOf(ctx)
+  if (m) m.store = key
   return as(storeEnv(ctx.env, key, cfg))
 }
 

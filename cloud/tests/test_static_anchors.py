@@ -222,6 +222,7 @@ def _start_rows(tiers: list[Path]) -> dict[str, int]:
 
 
 @pytest.mark.parametrize("stack", ["base", "run1", "run2", "merged"])
+@pytest.mark.slow
 def test_start_catalog_root_equals_brute_force(world, stack):
     """The fleet root of every `^q` prefix of every name, from the starts-with catalog alone (bounds 0): its members are
     exactly the prefixes with more than R rows over the tiers, and each member's per-bucket answer on every scan equals
@@ -249,11 +250,11 @@ def test_start_scoped_reads_and_the_decline_boundary(world):
     probe = _reader(tiers)
     seen = 0
     for key in ["/tr", "/train", "/conf", "/b1", "/tomat", "/da", "/c", "/f", "/g"]:
-        whole = sum(t.names.select(key, False)[2] for t in probe.anch)
+        whole = sum(t.names.select(key, False)[1] for t in probe.anch)
         for P in _dirs(world["paths"]):
             if P == "" or an.term_in_path(key, P):
                 continue
-            upper = sum(t.names.select(key, False, P)[2] for t in probe.anch)
+            upper = sum(t.names.select(key, False, P)[1] for t in probe.anch)
             if not 0 < upper < whole:
                 continue
             v = _reader(tiers, start_max_rows=upper).view(key, P, IDS)
@@ -262,6 +263,104 @@ def test_start_scoped_reads_and_the_decline_boundary(world):
             assert _reader(tiers, start_max_rows=upper - 1).view(key, P, IDS) == {"key": key, "P": P, "source": "declined", "upper": upper}
             seen += 1
     assert seen > 20
+
+
+def _resplit(src: Path, dst: Path) -> list[str]:
+    """`src`'s tier copied to `dst` with its name index re-cut at a plan (`write_run_shards(plan=…)`) that starts a
+    shard at the second three-character prefix of every two-character prefix holding more than one: each such
+    one-character `^q` key (`/q`) then has rows in two shards. Returns those keys."""
+    import shutil
+
+    shutil.copytree(src, dst)
+    names = dst / an.NAMES
+    t = pa.concat_tables([pq.read_table(f) for f in sorted((names / "sx").glob("*.parquet"))])
+    t = t.sort_by([("s", "ascending"), ("path", "ascending"), ("usr", "ascending"), ("vf", "ascending")])
+    p3s = sorted({s[:3] for s in t.column("s").to_pylist()})
+    by2: dict[str, list[str]] = {}
+    for p in p3s:
+        by2.setdefault(p[:2], []).append(p)
+    split = sorted(k for k, ps in by2.items() if len(ps) > 1)
+    los = [""] + sorted(by2[k][1] for k in split)
+    p3 = [s[:3] for s in t.column("s").to_pylist()]
+    shards = []
+    for i, lo in enumerate(los):
+        hi = los[i + 1] if i + 1 < len(los) else None
+        mine = [x for x in p3 if lo <= x and (hi is None or x < hi)]
+        shards.append({"i": i, "lo": lo, "hi": hi, "rows": len(mine), "prefixes": len(set(mine))})
+    shutil.rmtree(names)
+    sa.write_run_shards(iter(t.to_batches(max_chunksize=5)), names, plan={"shards": shards})
+    return split
+
+
+@pytest.mark.parametrize("stack", ["base", "run2"])
+def test_one_character_start_keys_read_every_shard(world, stack, tmp_path):
+    """A `^q` of one character (key `/q`, shorter than the shards' three-character prefixes) whose rows lie in several
+    name shards: its whole, scoped and declined views equal brute force — no shard's rows are missed — at any
+    `max_shards` (past it a key is bounded by the shards' planned rows, then read whole when they fit)."""
+    src = {"base": [world["base"]], "run2": [world["base"], *world["runs"]]}[stack]
+    dates = IDS[:BASE + {"base": 0}.get(stack, 2)]
+    tiers = [tmp_path / f"t{i}" for i in range(len(src))]
+    split = _resplit(src[0], tiers[0])
+    for s, d in zip(src[1:], tiers[1:]):
+        _resplit(s, d)
+    assert len(split) >= 3
+    keys = sorted({an.term_key(p.rsplit("/", 1)[-1].lower()[0], "start") for p in world["paths"]})
+    assert set(split) <= set(keys)
+    for kw in ({}, {"start_max_rows": 8}, {"max_rows": 0, "start_max_rows": 0}):
+        got, want, sources = _views(world, tiers, dates, keys=keys, **kw)
+        assert got == want
+    # at the default bounds every view of the split keys is read whole (light) across their shards, or plain
+    plain = sum(an.term_in_path(k, P) for k in split for P in _dirs(world["paths"]))
+    want = {"light": len(split) * len(_dirs(world["paths"])) - plain, "plain": plain}
+    assert _views(world, tiers, dates, keys=split)[2] == {s: n for s, n in want.items() if n}
+
+
+def test_wide_keys_are_bounded_by_planned_rows(world, tmp_path):
+    """Past `max_shards` a key's selection is its shards' planned rows, unselected; a view under that bound reads them
+    all (brute force), one over it declines below the root — never a partial answer."""
+    split = _resplit(world["base"], tmp_path / "t")
+    fs = fsspec.filesystem("file")
+    names = an.ShardSet(fs, str(tmp_path / "t" / an.NAMES), max_shards=1)
+    plan = json.loads((tmp_path / "t" / an.NAMES / "shards.json").read_text())["shards"]
+    for k in split:
+        shards = an.shards_for(plan, k)
+        assert len(shards) == 2
+        assert names.select(k, False) == (None, sum(sh["rows"] for sh in shards))
+        parts, _ = names.select(k, False, all=True)
+        assert sorted(r["s"] for r in names.fetch((None, 0), k, False)) == sorted(r["s"] for r in names.read(parts))
+    D = sn.scan_epoch(IDS[BASE - 1]) * 1000
+    for k in split:
+        for P in _dirs(world["paths"]):
+            if P == "" or an.term_in_path(k, P):
+                continue
+            rd = _reader([tmp_path / "t"])
+            for t in rd.anch:
+                t.names.max_shards = 1
+            whole = names.select(k, False)[1]
+            v = rd.view(k, P, IDS[:BASE])
+            assert (v["source"], v["answers"][IDS[BASE - 1]]) == ("light", an.brute_view(world["versions"], k, P, D))
+            rd.start_max_rows = whole - 1
+            assert rd.view(k, P, IDS[:BASE]) == {"key": k, "P": P, "source": "declined", "upper": whole}
+
+
+def test_shards_for_short_keys():
+    """A key of three or more characters (or an exact one) maps to the one shard holding its prefix; a shorter one to
+    every shard meeting `[key, key + U+10FFFF)`, in order."""
+    plan = [{"i": 0, "lo": "", "hi": "/cb"}, {"i": 1, "lo": "/cb", "hi": "/d"}, {"i": 2, "lo": "/d", "hi": "cb"},
+            {"i": 3, "lo": "cb", "hi": None}]
+    got = {(k, exact): [sh["i"] for sh in an.shards_for(plan, k, exact)]
+           for k in ["/c", "/ca", "/cb", "/d", "c", "cz", "ca", "/", "z"] for exact in (False, True)}
+    assert got == {
+        ("/c", False): [0, 1], ("/c", True): [0],
+        ("/ca", False): [0], ("/ca", True): [0],
+        ("/cb", False): [1], ("/cb", True): [1],
+        ("/d", False): [2], ("/d", True): [2],
+        ("c", False): [2, 3], ("c", True): [2],
+        ("cz", False): [3], ("cz", True): [3],
+        ("ca", False): [2], ("ca", True): [2],
+        ("/", False): [0, 1, 2], ("/", True): [0],
+        ("z", False): [3], ("z", True): [3],
+    }
 
 
 def test_start_hit_cap(world):
@@ -283,6 +382,7 @@ def test_start_bound_is_raised():
     assert (an.AnchoredReader([]).start_max_rows, an.AnchoredReader([]).start_max_hits) == (an.START_MAX_ROWS, an.START_MAX_HITS)
 
 
+@pytest.mark.slow
 def test_start_catalog_mutations_fail(world, monkeypatch, tmp_path):
     """The catalog's root fails brute force when the reader ignores the runs' cells, and when the builder's first-hit
     test is the contains literal's (the lowercase parent holds the prefix anywhere, not at a segment's start)."""
@@ -336,6 +436,7 @@ def test_brute_sql_equals_brute_force(world):
         assert {c: v for c, v in got.items() if not an.term_in_path(c[0], c[1])} == {c: v for c, v in want.items() if not an.term_in_path(c[0], c[1])}
 
 
+@pytest.mark.slow
 def test_a_mutated_reader_fails(world, monkeypatch):
     """Mutation checks: a contains-style parent test, a stack that ignores the runs' cells and a largest-`vt` combine
     each make some view differ from brute force."""

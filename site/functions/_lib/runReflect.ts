@@ -3,9 +3,9 @@
  * so `/slack/actions` shares it; specs/done/staged-slack.md). The Batch job writes
  * only gs:// artifacts; a run's `<mode>-summary.json` fills in its
  * `deletion_runs` totals + `deletion_bands` (idempotent — only while
- * finished_ts IS NULL). A run is reflected as soon as its summary exists, even
- * while Batch still reports it RUNNING: the job's exit trap pings the site
- * then, so results land (and post to Slack) without anyone polling.
+ * finished_ts IS NULL). Final reflection requires a terminal provider outcome
+ * and checks deletion failures. A task's early exit-hook poll may precede that
+ * outcome; the next job poll completes reflection.
  */
 import type { D1Database } from "@cloudflare/workers-types"
 import type { BatchConfig } from "./batchConfig.js"
@@ -24,7 +24,7 @@ export interface BatchJob {
   taskGroups?: { taskSpec?: { environment?: { variables?: Record<string, string> } } }[]
 }
 
-interface RunSummary {
+export interface RunSummary {
   mode: string
   bucket?: string // the run's bucket (specs/done/cw-multi-bucket.md §4); older summaries: the primary
   deleted_objects: number
@@ -33,18 +33,24 @@ interface RunSummary {
   skipped_overwritten: number
   drift_new: number
   delete_failed: number
+  preserved_breakdown?: { new_since_review: number; changed_since_review: number; new_since_scan: number; unclassified: number }
   finished_ts: number
   bands: { prefix: string; bytes: number; objects: number; gone: number; overwritten: number; drift_new: number }[]
 }
 
-async function readSummary(cfg: BatchConfig, token: string, jobId: string, mode: string): Promise<RunSummary | null> {
-  const dir = mode === "real" ? "deleted" : "would-delete"
-  const obj = encodeURIComponent(`sweep/cw/runs/${jobId}/${dir}-summary.json`)
+export async function readRunJson<T>(cfg: BatchConfig, token: string, jobId: string, filename: string): Promise<T | null> {
+  const obj = encodeURIComponent(`sweep/cw/runs/${jobId}/${filename}`)
   const r = await fetch(`https://storage.googleapis.com/storage/v1/b/${cfg.dataBucket}/o/${obj}?alt=media`, {
     headers: { authorization: `Bearer ${token}` },
   })
-  if (!r.ok) return null
-  return (await r.json().catch(() => null)) as RunSummary | null
+  if (r.status === 404) return null
+  if (!r.ok) throw new Error(`Run artifact ${filename}: HTTP ${r.status}`)
+  return r.json() as Promise<T>
+}
+
+async function readSummary(cfg: BatchConfig, token: string, jobId: string, mode: string): Promise<RunSummary | null> {
+  const dir = mode === "real" ? "deleted" : "would-delete"
+  return readRunJson<RunSummary>(cfg, token, jobId, `${dir}-summary.json`)
 }
 
 async function reflect(db: D1Database, jobId: string, mode: string, s: RunSummary, primary: string): Promise<void> {
@@ -99,9 +105,11 @@ export async function reflectRuns(cfg: BatchConfig, db: D1Database, token: strin
     const mode = jobId.startsWith("cw-sweep-real-") ? "real" : "dry"
     const terminal = TERMINAL.has(j.status?.state ?? "")
     const summary = await readSummary(cfg, token, jobId, mode)
-    if (summary) {
+    if (summary && terminal) {
       await reflect(db, jobId, mode, summary, primary)
-      done.push({ run_id: jobId, ok: true })
+      const ok = j.status?.state === 'SUCCEEDED' && summary.delete_failed === 0
+      if (!ok) await db.prepare("UPDATE deletion_runs SET plan_digest = '' WHERE run_id = ?").bind(jobId).run()
+      done.push({ run_id: jobId, ok })
     } else if (terminal) {
       const r = await db.prepare("UPDATE deletion_runs SET finished_ts = ?, plan_digest = '' WHERE run_id = ? AND finished_ts IS NULL")
         .bind(Math.floor(Date.now() / 1000), jobId).run()

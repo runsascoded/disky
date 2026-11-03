@@ -7,7 +7,7 @@ const copy = (path: string, o: Partial<DupCopy> = {}): DupCopy => ({
 })
 const group = (tier: 'tree' | 'moved', items: DupCopy[], o: Partial<DupGroup> = {}): DupGroup => ({
   group: 'g', tier, rel: 'x', kind: 'dir', size: 10, n_files: 1, copies: items.length, reclaimable: 10 * (items.length - 1),
-  n_buckets: 2, suspect: false, items, ...o,
+  n_buckets: 2, suspect: false, exact: false, items, ...o,
 })
 const DAY = 20_000
 

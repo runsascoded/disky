@@ -11,7 +11,7 @@ snapshot root, state layout, plot host, bucket labels and quotas, prices.
 What differs in the posts lives in two TEMPLATES — opinionated styles,
 neither intrinsic to one store:
 
-- ``gcs`` (`digest_gcs`): a reply per scan, the headline as the sender name,
+- ``gcs`` (`digest_gcs`): a reply per day (its first scheduled scan), the headline as the sender name,
   $/mo by storage class in the body, the site's storage-class image.
 - ``cw`` (`digest_cw`): a reply per UTC day in two variants (``sender``: the
   headline as the sender name, posted once from the morning scan — optionally
@@ -34,6 +34,7 @@ import json
 import re
 import secrets
 import sys
+from collections.abc import Iterable
 from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
 from typing import Any, Protocol
@@ -129,7 +130,21 @@ class DigestConfig:
     ``units`` (cw template): `TiB` (default) or `TB`, every size the digest
     renders (text and plot). ``provisional`` (cw ``sender``): post a day's early scans as one
     provisional reply, edited in place, replaced by the final reply when the
-    day's reply scan lands (see `digest_cw`)."""
+    day's reply scan lands (see `digest_cw`). ``alert_pct`` (cw): a quota at
+    or over this percent gets a `:warning:` in the daily replies, and the
+    month's thread one alert reply also sent to the channel (Slack
+    `reply_broadcast`), edited as its numbers move and deleted once every quota
+    is back under; None: neither. ``quota_marks`` (cw replies): `warning` (the default) keeps the
+    clauses in config order, `:warning:` on those at or over ``alert_pct``; `circles` sorts them fullest first and
+    marks each `:red_circle:` at or over ``mark_pct`` (``alert_pct``, else 90), `:large_orange_circle:` within 10
+    points below, `:large_yellow_circle:` within 40, `:large_green_circle:` under that (specs/digest-quota-pressure.md);
+    `runway` keeps config order and marks each by how soon it fills at its fastest recent growth (`digest_cw._runway_mark`,
+    specs/digest-runway-marks.md). ``renderer``: who renders the OP's text and plot request,
+    `local` (this package's `op_body` / `image_body`) or `site` (`POST /api/digest-op`, the renderer `/admin/slack`
+    previews with; specs/slack-preview-page.md phase 2) under ``params`` (the site's `src/digest/codec` string,
+    `''`: the defaults, which render `local`'s bytes). ``preview``: where each Slack converge writes the month's preview bundle
+    (`preview_bundle`, for the site's `/admin/slack-preview`), a dir or URL template (``{channel}``,
+    ``{variant}``) in the deployment's served store; None: none written."""
 
     template: str
     title: str
@@ -151,10 +166,20 @@ class DigestConfig:
     buckets: dict[str, Bucket] = field(default_factory=dict)
     prices: dict[str, float] = field(default_factory=dict)
     units: str = "TiB"
+    alert_pct: float | None = None
+    quota_marks: str = "warning"
+    renderer: str = "local"
+    params: str = ""
+    preview: str | None = None
 
     @property
     def unit(self) -> Units:
         return UNITS[self.units]
+
+    @property
+    def mark_pct(self) -> float:
+        """The share `quota_marks: circles` marks red (orange within 10 points below): ``alert_pct``, else 90."""
+        return 90.0 if self.alert_pct is None else self.alert_pct
 
     def need(self, key: str) -> str:
         """A deployment-resource field (``icons_base``, ``plot_base``,
@@ -234,13 +259,16 @@ def parse_bytes(v: int | str) -> int:
 
 
 TEMPLATES = ("gcs", "cw")
+QUOTA_MARKS = ("warning", "circles", "runway")
+RENDERERS = ("local", "site")
 # the scalar fields' accepted YAML types (`buckets` / `prices` are parsed below)
 _SCALAR_TYPES: dict[str, tuple[type, ...]] = {
     "template": (str,), "title": (str,), "site_url": (str,), "root": (str,), "state": (str,),
     "discord_state": (str,), "discord_webhook_env": (str, type(None)), "icons_base": (str,),
     "icons_dir": (str,), "op_icon": (str,), "plot_project": (str,), "plot_branch": (str,), "plot_base": (str,),
     "variant": (str,), "reply_hour": (int,), "provisional": (bool,), "primary": (str, type(None)),
-    "units": (str,),
+    "units": (str,), "alert_pct": (int, float, type(None)), "quota_marks": (str,), "renderer": (str,), "params": (str,),
+    "preview": (str, type(None)),
 }
 
 
@@ -313,6 +341,12 @@ def config_from_dict(d: dict, base: DigestConfig | None = None) -> DigestConfig:
         raise ValueError(f"digest config template: {d['template']!r} is not one of {TEMPLATES}")
     if "units" in d and d["units"] not in UNITS:
         raise ValueError(f"digest config units: {d['units']!r} is not one of {tuple(UNITS)}")
+    if d.get("alert_pct") is not None and not 0 < d["alert_pct"] <= 100:
+        raise ValueError(f"digest config alert_pct: {d['alert_pct']} is not a percent (0–100]")
+    if "quota_marks" in d and d["quota_marks"] not in QUOTA_MARKS:
+        raise ValueError(f"digest config quota_marks: {d['quota_marks']!r} is not one of {QUOTA_MARKS}")
+    if "renderer" in d and d["renderer"] not in RENDERERS:
+        raise ValueError(f"digest config renderer: {d['renderer']!r} is not one of {RENDERERS}")
     if not 0 <= d.get("reply_hour", 0) <= 23:
         raise ValueError(f"digest config reply_hour: {d['reply_hour']} is not a UTC hour (0–23)")
     base = base or PRESETS[d["template"]]
@@ -324,7 +358,10 @@ def config_from_dict(d: dict, base: DigestConfig | None = None) -> DigestConfig:
         if bad := {k: v for k, v in prices.items() if not isinstance(v, (int, float)) or isinstance(v, bool)}:
             raise ValueError(f"digest config prices: expected numbers, got {bad}")
         d["prices"] = {str(k): float(v) for k, v in prices.items()}
-    return replace(base, **d)
+    cfg = replace(base, **d)
+    if cfg.params and cfg.renderer != "site":
+        raise ValueError(f"digest config params: {cfg.params!r} needs `renderer: site` (the local renderer has no params)")
+    return cfg
 
 
 def load_config(template: str, path: str | Path | None = None) -> DigestConfig:
@@ -403,6 +440,42 @@ def _span(a: dt.datetime, b: dt.datetime) -> str:
     return (f"{days}d" if days else "") + (f"{hours}h" if hours else "") or "0h"
 
 
+#: The OP's window reaches back this many days before the latest scan (specs/digest-rolling-window.md).
+WINDOW_DAYS = 30
+
+
+def window_start(month: dt.date, today: dt.date) -> dt.date:
+    """The first day of ``month``'s OP window: the longer of the last ``WINDOW_DAYS`` days to ``today`` (the latest
+    scan's date), inclusive, and the month to date. On 11/1 it's 10/3; from the month's ``WINDOW_DAYS``-th day on,
+    the month's 1st."""
+    return min(month.replace(day=1), today - dt.timedelta(days=WINDOW_DAYS - 1))
+
+
+def week_of(d: dt.date) -> dt.date:
+    """``d``'s ISO week's Monday (a weekly summary's key)."""
+    return d - dt.timedelta(days=d.weekday())
+
+
+def prior_month(month: dt.date) -> dt.date:
+    """The 1st of the month before ``month``'s."""
+    return (month.replace(day=1) - dt.timedelta(days=1)).replace(day=1)
+
+
+def window_label(start: dt.date, since: str) -> str:
+    """The OP's look-back figure's label: `last 30d` from the last scan before ``start`` (the window's first day),
+    else `since M/D` (``since``: the scan it starts from; a store with less history than the window)."""
+    return f"last {WINDOW_DAYS}d" if since[:10] < start.isoformat() else f"since {_md(since)}"
+
+
+def prev_month_link(month: dt.date, url: str | None) -> list[str]:
+    """The OP's link to the previous month's thread (`[← October](url)`), as lines; none without one."""
+    return [f"[← {prior_month(month):%B}]({url})"] if url else []
+
+
+#: The quota alert reply's sender icon (`converge_slack`).
+ALERT_ICON = ":warning:"
+
+
 @dataclass(frozen=True)
 class Reply:
     """A reply's post parameters: ``username``/``icon_url``/``icon_emoji`` are
@@ -471,9 +544,12 @@ class Template(Protocol):
 
     def load(self, root: str, month: dt.date) -> Any | None: ...
     def n_scans(self, data: Any) -> int: ...
-    def op_body(self, data: Any, month: dt.date, plot_url: str | None) -> str: ...
+    def op_body(self, data: Any, month: dt.date, plot_url: str | None, prev_url: str | None = None) -> str: ...
+    def image_request(self, data: Any, month: dt.date) -> dict: ...
+    def rows_json(self, data: Any) -> dict: ...
     def units(self, data: Any, variant: str, platform: str = "slack") -> list[Unit]: ...
     def provisional(self, data: Any, variant: str) -> Unit | None: ...
+    def alert(self, data: Any) -> str | None: ...
     def render_plot(self, data: Any, month: dt.date, out: Path, root: str | None = None) -> None: ...
 
 
@@ -518,8 +594,6 @@ def load_window(root: str, month: dt.date, scans: list[str] | None = None) -> tu
     month's scans, and ``lead`` = every scan of the last calendar day before it
     (the first delta's baseline; empty for the first month ever). None if the
     month has no scans. ``scans``: ``list_scans(root)``, if already listed."""
-    from disk_tree import blobfs
-
     scans = list_scans(root) if scans is None else scans
     pfx = f"{month:%Y-%m}-"
     in_month = [s for s in scans if s.startswith(pfx)]
@@ -528,10 +602,86 @@ def load_window(root: str, month: dt.date, scans: list[str] | None = None) -> tu
     before = [s for s in scans if s < in_month[0]]
     lead = [s for s in before if s[:10] == before[-1][:10]] if before else []
 
-    def read(s: str) -> tuple[str, dict]:
-        return s, json.loads(blobfs.read_text(f"{root.rstrip('/')}/{s}/meta.json"))
+    return read_metas(root, lead), read_metas(root, in_month)
 
-    return [read(s) for s in lead], [read(s) for s in in_month]
+
+def read_metas(root: str, scans: Iterable[str]) -> list[tuple[str, dict]]:
+    """``(scan id, meta.json)`` for each of ``scans``, under ``root``."""
+    from disk_tree import blobfs
+
+    return [(s, json.loads(blobfs.read_text(f"{root.rstrip('/')}/{s}/meta.json"))) for s in scans]
+
+
+def window_scans(scans: list[str], month: dt.date, before: str) -> list[str]:
+    """The scans (sorted ids) before ``before`` (the month's lead-in) that ``month``'s OP window draws: every scan
+    from the Monday of `window_start`'s week (its first weekly summary) on, after the last day's scans before that
+    (the first summary's baseline), whole days; the window ends at the month's latest scan."""
+    in_month = [s for s in scans if s.startswith(f"{month:%Y-%m}-")]
+    if not in_month:
+        return []
+    mon = week_of(window_start(month, dt.date.fromisoformat(in_month[-1][:10]))).isoformat()
+    older = [s for s in scans if s[:10] < mon]
+    first = older[-1][:10] if older else mon
+    return [s for s in scans if first <= s[:10] and s < before]
+
+
+#: The preview bundle's format (`preview_bundle`; the site's `src/digest` reads it).
+PREVIEW_VERSION = 1
+
+
+def cfg_json(cfg: DigestConfig) -> dict:
+    """The config fields the OP renders from (the site's `DigestCfg`): title, site, units, the primary and each
+    bucket's label, path and quotas, prices."""
+    u = cfg.unit
+    return {
+        "template": cfg.template, "title": cfg.title, "site_url": cfg.site_url, "host": cfg.host,
+        "unit": {"name": u.name, "bytes": u.bytes, "short": u.short}, "primary": cfg.primary,
+        "buckets": {
+            name: {"label": b.label, "path": b.path, "zone": b.zone,
+                   "quotas": [{"bytes": q.bytes, "name": q.name, "short": q.short, "classes": list(q.classes)} for q in b.quotas]}
+            for name, b in cfg.buckets.items()
+        },
+        "prices": dict(cfg.prices), "icons_base": cfg.icons_base,
+    }
+
+
+def site_render(cfg: DigestConfig, rows: dict, month: dt.date, plot_url: str | None = None, prev_url: str | None = None) -> dict:
+    """`POST /api/digest-op` (``cfg.renderer == "site"``): the month's OP ``text`` and plot ``image`` request, rendered
+    by the site from ``rows`` (`Template.rows_json`) under ``cfg.params``, as the job (`$SITE_TOKEN`; required: the
+    OP has no other renderer then)."""
+    from .deploy import site_token
+    from .site import post_json
+
+    token = site_token()
+    if not token:
+        raise SystemExit("digest: `renderer: site` needs the site token ($SITE_TOKEN)")
+    body = {"month": f"{month:%Y-%m}", "rows": rows, "cfg": cfg_json(cfg), "params": cfg.params,
+            "plot_url": plot_url, "prev_url": prev_url}
+    return json.loads(post_json(cfg.site_url, token, "/api/digest-op", body))
+
+
+def preview_bundle(tpl: Template, data: Any, month: dt.date, *, op: str, plot_url: str | None, prev_url: str | None,
+                   channel: str, variant: str, op_ts: str | None = None, permalink: str | None = None) -> dict:
+    """The month's OP as posted, with what it was rendered from (specs/slack-preview-page.md): the config's display
+    fields, the window's rows (`Template.rows_json`), the OP text and the plot's `/api/digest-image` request, the
+    replies (`replies_json`), and the thread. The site re-renders the rows under other params beside it."""
+    return {
+        "version": PREVIEW_VERSION, "month": f"{month:%Y-%m}", "channel": channel, "variant": variant,
+        "posted_at": dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "op_ts": op_ts, "permalink": permalink, "plot_url": plot_url, "prev_url": prev_url,
+        "cfg": cfg_json(tpl.cfg), "rows": tpl.rows_json(data), "params": tpl.cfg.params, "op": op,
+        "image": tpl.image_request(data, month), "replies": replies_json(tpl, data, variant),
+    }
+
+
+def replies_json(tpl: Template, data: Any, variant: str) -> list[dict]:
+    """The month's replies as the converge posts them (each day's, then the open day's provisional one when the config
+    posts one), newest first:
+    `{key, scan, username, body, icon_url, icon_emoji}`, for the preview page."""
+    open_ = tpl.provisional(data, variant) if tpl.cfg.provisional else None
+    units = [*tpl.units(data, variant), *([open_] if open_ else [])]
+    return [{"key": u.key, "scan": u.scan, "username": u.reply.username, "body": u.reply.body, "icon_url": u.reply.icon_url,
+             "icon_emoji": u.reply.icon_emoji} for u in reversed(units)]
 
 
 def state_path(root: str, month: dt.date, state_dir: str) -> str:
@@ -660,7 +810,10 @@ def converge_slack(tpl: Template, root: str, month: dt.date, client, channel: st
     if icons_dir is not None and deploy_plot is not None:
         _wait_reachable(plot_url)
 
-    body = tpl.op_body(data, month, plot_url)
+    # the previous month's thread, linked from the OP (its converge state, same channel and variant)
+    prev_op = load_state(state_path(root, prior_month(month), cfg.state.format(channel=channel, variant=variant))).get("op_ts")
+    prev_url = client.permalink(prev_op) if prev_op else None
+    body = tpl.op_body(data, month, plot_url, prev_url)
     op_ts = state.get("op_ts")
     if op_ts:
         client.edit(op_ts, body)
@@ -669,6 +822,16 @@ def converge_slack(tpl: Template, root: str, month: dt.date, client, channel: st
         op_ts = client.post(body, username=f"{cfg.title} — {month:%B %Y}", **cfg.op_sender()).id
         state["op_ts"] = op_ts
         _err(f"digest: posted OP {op_ts}")
+    if cfg.preview:
+        from disk_tree import blobfs
+
+        out = f"{cfg.preview.format(channel=channel, variant=variant).rstrip('/')}/{month:%Y-%m}.json"
+        bundle = preview_bundle(tpl, data, month, op=body, plot_url=plot_url, prev_url=prev_url, channel=channel,
+                                variant=variant, op_ts=op_ts, permalink=client.permalink(op_ts))
+        if not blobfs.is_url(out):
+            Path(out).parent.mkdir(parents=True, exist_ok=True)
+        blobfs.write_text(out, json.dumps(bundle, indent=1))
+        _err(f"digest: preview bundle → {out}")
 
     posted = state.setdefault("posted", {})
     new = 0
@@ -717,6 +880,29 @@ def converge_slack(tpl: Template, root: str, month: dt.date, client, channel: st
     if not provs:
         state.pop("provisional")
 
+    # The quota alert: one reply, also in the channel, while any quota is at or over `alert_pct`; Slack can't take a
+    # reply back out of the channel, so a resolved alert is deleted (its days' replies keep their `:warning:`s)
+    text, have = tpl.alert(data), state.get("alert")
+    if text is None and have is not None:
+        try:
+            client.delete(have["ts"], orphans_ok=True)
+        except Exception as e:  # noqa: BLE001 — the next run retries; a lingering alert names its scan
+            _err(f"digest: WARN could not delete the quota alert: {e}")
+        else:
+            del state["alert"]
+            save_state(path, state)
+            _err("digest: deleted the quota alert (every quota back under, or its month closed)")
+    elif text is not None and have is None:
+        rm = client.post(text, thread_id=op_ts, broadcast=True, username=f"{cfg.title}: quota alert", icon_emoji=ALERT_ICON)
+        state["alert"] = {"ts": rm.id, "body": text}
+        save_state(path, state)
+        _err(f"digest: posted the quota alert -> {rm.id}")
+    elif text is not None and have["body"] != text:
+        client.edit(have["ts"], text)
+        have["body"] = text
+        save_state(path, state)
+        _err("digest: edited the quota alert")
+
     save_state(path, state)
     return state
 
@@ -730,21 +916,30 @@ def converge_slack_now(tpl: Template, root: str, month: dt.date, client, channel
     provisional go. Idempotent like `converge_slack`; ``kw`` passes through."""
     variant = variant or tpl.variants[0]
     prev = (month - dt.timedelta(days=1)).replace(day=1)
-    if load_state(state_path(root, prev, tpl.cfg.state.format(channel=channel, variant=variant))).get("provisional"):
-        _err(f"digest: {prev:%Y-%m} still has a provisional reply — closing it first")
+    prev_state = load_state(state_path(root, prev, tpl.cfg.state.format(channel=channel, variant=variant)))
+    if prev_state.get("provisional") or prev_state.get("alert"):
+        _err(f"digest: {prev:%Y-%m} still has a {'provisional reply' if prev_state.get('provisional') else 'quota alert'} — closing it first")
         converge_slack(tpl, root, prev, client, channel, variant, **kw)
     return converge_slack(tpl, root, month, client, channel, variant, **kw)
 
 
-def redo_replies(tpl: Template, root: str, month: dt.date, client, channel: str, variant: str | None = None, *, icons_dir=None, deploy_plot=None, reply_delay: float = 0.0, for_real: bool = False) -> dict:
+def redo_replies(tpl: Template, root: str, month: dt.date, client, channel: str, variant: str | None = None, *, since: dt.date | None = None, icons_dir=None, deploy_plot=None, reply_delay: float = 0.0, for_real: bool = False) -> dict:
     """Re-post the month's replies under the CURRENT unit rule and retire the
     old ones (a rule change, e.g. evening→morning scan). Post-new-then-delete-
     old on purpose: no empty-thread window, and the old block vanishes at
     once. No strike/edit step — the headline lives in the sender name, which
     `chat.update` can't touch, so a strike would look broken.
 
-    Dry-run (default) returns the plan — ``old`` replies (key, record) and
-    ``new`` (key, scan, headline) — and posts nothing. ``for_real``: the old
+    ``since`` redoes only the days from it on. An earlier day keeps its posted
+    reply, re-keyed to the current unit's key (the record under that exact key,
+    else under the unit's scan, else the day's earliest key); the day's other replies (an old rule's extras)
+    stay in the thread and move to the state's ``extra`` (never edited; a later redo over their days deletes
+    them, as an unrestricted one does all). A unit with no reply that day is
+    posted by the converge, after the redone days.
+
+    Dry-run (default) returns the plan — ``old`` replies (key, record), ``new``
+    (key, scan, headline), ``rekey`` (current key, old key) and ``left`` (old
+    keys kept in the thread, as ``extra``) — and posts nothing. ``for_real``: the old
     ts list is stashed in the state as ``stale`` first, ``posted`` is
     cleared, the normal converge appends the new replies to the same thread,
     and only if every post succeeded are the stale ts deleted (a failed
@@ -757,28 +952,72 @@ def redo_replies(tpl: Template, root: str, month: dt.date, client, channel: str,
         return {}
     path = state_path(root, month, tpl.cfg.state.format(channel=channel, variant=variant))
     state = load_state(path)
-    old = list(state.get("posted", {}).items())
-    new = [(u.key, u.scan, u.reply.username if variant == "sender" else u.reply.body) for u in tpl.units(data, variant)]
+    plan, kept = _redo_plan(tpl.units(data, variant), _replies(state), since, lambda r: r.username if variant == "sender" else r.body)
     if not for_real:
-        return {"old": old, "new": new}
+        return plan
     if not state.get("op_ts"):
         raise SystemExit(f"digest: no OP for {month:%Y-%m} in {channel} — nothing to re-thread under")
-    state["stale"] = [_ts(e) for _, e in old] + state.get("stale", [])
-    state["posted"] = {}
+    _stash(state, plan, kept)
     save_state(path, state)
     state = converge_slack(tpl, root, month, client, channel, variant, icons_dir=icons_dir, deploy_plot=deploy_plot, reply_delay=reply_delay)
+    _delete_stale(state, lambda ts: client.delete(ts, orphans_ok=True))
+    save_state(path, state)
+    return state
+
+
+def _redo_plan(units: Iterable[Any], posted: dict[str, Any], since: dt.date | None, headline) -> tuple[dict, dict[str, Any]]:
+    """A redo's plan over a thread's ``posted`` replies and the current ``units``
+    (see `redo_replies`): ``old`` (key, record) to delete, ``new`` (key, scan,
+    ``headline(reply)``) to post, ``rekey`` (current key, old key) and ``left``
+    (old keys the state keeps as ``extra``) for the days before ``since``; and the
+    re-keyed records the state keeps."""
+    cut = since.isoformat() if since else ""
+    units = list(units)
+    old = [(k, e) for k, e in posted.items() if k[:10] >= cut]
+    new = [(u.key, u.scan, headline(u.reply)) for u in units if u.key[:10] >= cut]
+    kept: dict[str, Any] = {}
+    rekey = []
+    for u in units:
+        if u.key[:10] >= cut:
+            continue
+        day = sorted((k for k in posted if k[:10] == u.key[:10]), key=lambda k: (k != u.key, k != u.scan, k))
+        if day:
+            kept[u.key] = posted[day[0]]
+            rekey.append((u.key, day[0]))
+    used = {k for _, k in rekey}
+    left = [k for k in posted if k[:10] < cut and k not in used]
+    return {"old": old, "new": new, "rekey": rekey, "left": left}, kept
+
+
+def _replies(state: dict) -> dict[str, Any]:
+    """Every reply a thread's state tracks: ``posted`` and an earlier ``since`` redo's ``extra``."""
+    return {**state.get("extra", {}), **state.get("posted", {})}
+
+
+def _stash(state: dict, plan: dict, kept: dict[str, Any]) -> None:
+    """A redo's first write: the old replies' ids queued as ``stale``, ``posted`` = the kept ones, ``extra`` = the
+    left ones (still in the thread)."""
+    replies = _replies(state)
+    state["stale"] = [_ts(e) for _, e in plan["old"]] + state.get("stale", [])
+    state["posted"] = kept
+    state.pop("extra", None)
+    if plan["left"]:
+        state["extra"] = {k: replies[k] for k in plan["left"]}
+
+
+def _delete_stale(state: dict, delete) -> None:
+    """A redo's last step, once every new reply posted: delete the ``stale`` ids; a failed delete is logged and kept
+    for a re-run (an old reply lingering is harmless)."""
     failed = []
     for ts in state.pop("stale", []):
         try:
-            client.delete(ts, orphans_ok=True)
+            delete(ts)
             _err(f"digest: deleted old reply {ts}")
         except Exception as e:  # noqa: BLE001 — leave it for a re-run; an old reply lingering is harmless
             _err(f"digest: WARN could not delete old reply {ts}: {e}")
             failed.append(ts)
     if failed:
         state["stale"] = failed
-    save_state(path, state)
-    return state
 
 
 def converge_discord(tpl: Template, data: Any, month: dt.date, state: dict, *, hook, bot, emoji: dict[str, str], plot, save=None, edit_replies: bool = False, reply_hook=None) -> dict:
@@ -799,15 +1038,17 @@ def converge_discord(tpl: Template, data: Any, month: dt.date, state: dict, *, h
     (a backfill after a format change) through ``reply_hook``, a webhook client
     bound to the thread — a webhook edit inside a thread must carry the thread
     id, which the OP-level ``hook`` doesn't."""
+    from thrds import Image
+
     save = save or (lambda s: None)
     title = f"{tpl.cfg.title} — {month:%B %Y}"
     body = discordify(tpl.op_body(data, month, None), emoji)
     op_id = state.get("op_id")
     if op_id:
-        hook.edit(op_id, body, files=[plot])
+        hook.edit(op_id, body, images=[Image(path=plot)])
         _err(f"digest: edited OP {op_id} ({tpl.n_scans(data)} scans)")
     else:
-        op_id = hook.post(body, username=title, icon_url=tpl.cfg.op_sender().get("icon_url") or f"{tpl.cfg.need('icons_base')}/calendar.png?v=2", files=[plot]).id
+        op_id = hook.post(body, username=title, icon_url=tpl.cfg.op_sender().get("icon_url") or f"{tpl.cfg.need('icons_base')}/calendar.png?v=2", images=[Image(path=plot)]).id
         state["op_id"] = op_id
         state["thread_id"] = bot.create_thread(op_id, title)
         save(state)
@@ -828,8 +1069,27 @@ def converge_discord(tpl: Template, data: Any, month: dt.date, state: dict, *, h
     return state
 
 
-def post_digest_discord(tpl: Template, root: str, month: dt.date, webhook: str, bot_token: str, plot_dir=None, edit_replies: bool = False) -> dict:
-    """`converge_discord` against real Discord: resolve the webhook's channel,
+def redo_discord(tpl: Template, data: Any, month: dt.date, state: dict, *, since: dt.date | None = None, for_real: bool = False, hook, reply_hook, bot, emoji: dict[str, str], plot, save=None) -> dict:
+    """`redo_replies` on the Discord thread: the same plan (dry-run returns it),
+    then the kept replies re-keyed, the new ones posted by `converge_discord`
+    and, only once all posted, the old ones deleted through ``reply_hook`` (the
+    thread-bound webhook client; a webhook deletes only its own messages)."""
+    save = save or (lambda s: None)
+    plan, kept = _redo_plan(tpl.units(data, tpl.variants[0], "discord"), _replies(state), since, lambda r: r.username)
+    if not for_real:
+        return plan
+    if not state.get("thread_id"):
+        raise SystemExit(f"digest: no Discord thread for {month:%Y-%m} — nothing to re-thread under")
+    _stash(state, plan, kept)
+    save(state)
+    state = converge_discord(tpl, data, month, state, hook=hook, bot=bot, emoji=emoji, plot=plot, save=save)
+    _delete_stale(state, reply_hook.delete)
+    save(state)
+    return state
+
+
+def post_digest_discord(tpl: Template, root: str, month: dt.date, webhook: str, bot_token: str, plot_dir=None, edit_replies: bool = False, redo: bool = False, since: dt.date | None = None, for_real: bool = False) -> dict:
+    """`converge_discord` (``redo``: `redo_discord`) against real Discord: resolve the webhook's channel,
     load that webhook's month state, render the plot, converge, persist. There
     is no plot-hosting step — the PNG is an attachment."""
     import tempfile
@@ -849,21 +1109,22 @@ def post_digest_discord(tpl: Template, root: str, month: dt.date, webhook: str, 
     plot = Path(plot_dir or tempfile.gettempdir()) / f"{tpl.cfg.slug}-{month:%Y-%m}.png"
     tpl.render_plot(data, month, plot, root)
     thread_id = state.get("thread_id")
-    return converge_discord(
-        tpl, data, month, state,
+    clients = dict(
         hook=DiscordWebhookClient(webhook, suppress_embeds=True, allowed_mentions=NO_MENTIONS),
         reply_hook=DiscordWebhookClient(webhook, thread_id, suppress_embeds=True, allowed_mentions=NO_MENTIONS) if thread_id else None,
-        edit_replies=edit_replies,
         bot=DiscordClient(bot_token, channel),
         emoji=discord_api.app_emojis(bot_token),
         plot=plot,
         save=lambda s: save_state(path, s),
     )
+    if redo:
+        return redo_discord(tpl, data, month, state, since=since, for_real=for_real, **clients)
+    return converge_discord(tpl, data, month, state, edit_replies=edit_replies, **clients)
 
 
 def dry_run(tpl: Template, root: str, month: dt.date, variant: str | None = None, plot_dir=None) -> str:
     """Render the plot (into ``plot_dir``, default the temp dir; skipped with a note when the template can't draw it
-    here, `PlotUnavailable`) and return the OP + every reply (+ the open day's provisional reply, last) as text;
+    here, `PlotUnavailable`) and return the OP (the previous month's thread linked as `<prev-thread>`) + every reply (+ the open day's provisional reply, last) as text;
     posts and hosts nothing."""
     import tempfile
 
@@ -877,9 +1138,11 @@ def dry_run(tpl: Template, root: str, month: dt.date, variant: str | None = None
         _err(f"rendered plot → {out}")
     except PlotUnavailable as e:
         _err(f"plot not rendered: {e}")
-    lines = [tpl.op_body(data, month, "<plot-url>"), "", f"--- replies ({variant}: username | body | icon) ---"]
+    lines = [tpl.op_body(data, month, "<plot-url>", "<prev-thread>"), "", f"--- replies ({variant}: username | body | icon) ---"]
     open_ = tpl.provisional(data, variant) if tpl.cfg.provisional else None
     for u in tpl.units(data, variant) + ([open_] if open_ else []):
         r = u.reply
         lines.append(f"{r.username} | {r.body} | {(r.icon_url or r.icon_emoji or '').split('/')[-1]}")
+    if (alert := tpl.alert(data)) is not None:
+        lines.append(f"{tpl.cfg.title}: quota alert | {alert} | {ALERT_ICON} (also sent to the channel)")
     return "\n".join(lines)

@@ -19,6 +19,65 @@ def page(ids: list[str], count: int | None = None, abr_level: int = 1, status: s
 BODY = query_body("jc-taxes", "2026-10-11T00:00:00Z", "2026-10-12T00:00:00Z", limit=1)
 
 
+def test_collector_status_reads_only_state_and_manifest():
+    from dt_cloud.r2_access import collector_status
+
+    account = "a" * 32
+    state = {
+        "schema_version": 2, "account": account, "scheduled_time": END, "run_id": "run-1",
+        "buckets": {"source": {"collected_through": START, "hours": {"h": {}}, "frozen": {}, "gaps": [[START, END]]}},
+    }
+    manifest = {
+        "account": account, "scheduled_time": END, "run_id": "run-1", "budget": {"pages": 400, "pages_used": 318},
+        "buckets": [{"bucket": "source", "waiting": 3, "error": "hour_over_cap", "hours": [{
+            "hour": "2026-10-11T00:00:00Z", "phase": "new", "events": 700_000, "capture": "sampled", "changed": True,
+            "pages": ["private-page.json"],
+        }]}],
+    }
+    documents = {"state.json": state, f"runs/{END}/run-1/_SUCCESS.json": manifest}
+    calls = []
+
+    def fetch(key: str) -> dict:
+        calls.append(key)
+        return documents[key]
+
+    assert collector_status(account, "test-token", "archive", fetch=fetch) == {
+        "account": account, "archive": "archive", "scheduled_time": "2026-10-12T00:00:00Z", "run_id": "run-1",
+        "budget": {"pages": 400, "pages_used": 318},
+        "buckets": [{"bucket": "source", "collected_through": "2026-10-11T00:00:00Z", "active_windows": 1, "frozen_windows": 0,
+                     "gaps": [["2026-10-11T00:00:00Z", "2026-10-12T00:00:00Z"]], "waiting": 3, "error": "hour_over_cap",
+                     "drained": [{"hour": "2026-10-11T00:00:00Z", "phase": "new", "events": 700_000, "capture": "sampled", "changed": True, "pages": 1}]}],
+    }
+    assert calls == ["state.json", f"runs/{END}/run-1/_SUCCESS.json"]
+
+
+def test_collector_status_rejects_cross_account_state():
+    from dt_cloud.r2_access import collector_status
+
+    with pytest.raises(ValueError, match="^collector state must match the account and schema version 2$"):
+        collector_status("a" * 32, "test-token", "archive", fetch=lambda key: {"account": "b" * 32, "schema_version": 2})
+
+
+def test_collector_status_cli(monkeypatch):
+    import json
+    from click.testing import CliRunner
+    from dt_cloud.cli import main
+    from dt_cloud import r2_access
+
+    monkeypatch.setenv("CLOUDFLARE_API_TOKEN", "archive-token")
+    calls = []
+
+    def status(account: str, token: str, bucket: str) -> dict:
+        calls.append((account, token, bucket))
+        return {"run_id": "run-1", "buckets": []}
+
+    monkeypatch.setattr(r2_access, "collector_status", status)
+    result = CliRunner().invoke(main, ["access", "r2-status", "-a", "a" * 32, "-b", "archive"])
+    assert result.exit_code == 0
+    assert json.loads(result.output) == {"run_id": "run-1", "buckets": []}
+    assert calls == [("a" * 32, "archive-token", "archive")]
+
+
 def calculation(aggregates: list[tuple[int, float]], abr_level: int = 1, status: str = "COMPLETED") -> dict:
     return {"success": True, "result": {
         "run": {"status": status},

@@ -8,6 +8,7 @@ export interface TreeNode {
   o: number
   d?: number                   // newest listing date at or under the node, epoch days (GCS: created; S3/R2/local: modified)
   ag?: number[]                // bytes by age at the scan date: <1d, <1w, <1mo, <3mo, <1y, <3y, older (specs/row-age-strata.md)
+  t?: number                   // …that newest listing time's instant, epoch seconds (absent from older cached responses)
   a?: number                   // last-read epoch day (access logs; MAX over the whole subtree)
   us?: [string, number][]      // top users -> bytes
   cb?: Record<string, number>  // non-STANDARD class -> bytes ("2" NL, "3" CL, "4" AR); STANDARD = b - sum

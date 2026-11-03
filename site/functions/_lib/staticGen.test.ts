@@ -3,7 +3,8 @@ import { staticRegistry, staticSummary } from './nameSummaryStatic.js'
 import { rollupAt, staticFilterStore, staticTag } from './staticFilter.js'
 import { staticGen, staticPrefix } from './staticNames.js'
 import { fixture } from './testStore.js'
-import { storeEnv } from './stores.js'
+import { storeEnv, withStore } from './stores.js'
+import { IV_STATE_TTL, withPathStore } from './index.js'
 import type { Env } from './auth.js'
 
 // The generation is required deployment config (`STATIC_GEN`): every read of a deployment's static name index is under its own
@@ -90,7 +91,7 @@ describe('STATIC_GEN', () => {
     const s = staticFilterStore(env)!
     const term = (text: string) => ({ ast: { neg: [], alts: [[{ kind: 'sub', text }]] } as never })
     expect([s.gen, await s.scans(), staticTag(env, term('qqq')), staticTag(env, term('a/bc')), staticTag({ ...env, SEARCH_PATH_TERMS: '1' }, term('a/bc')), staticTag({ ...env, SEARCH_PATH_TERMS: '1' }, term('qqq'))])
-      .toEqual([GEN, ['2026-08-01', '2026-09-01', ...RUNS], `${GEN}.27`, `${GEN}.27`, `${GEN}.27.p`, `${GEN}.27`])
+      .toEqual([GEN, ['2026-08-01', '2026-09-01', ...RUNS], `${GEN}.31`, `${GEN}.31`, `${GEN}.31.p`, `${GEN}.31`])
     expect(log.filter(k => !k.includes(`static-names/${GEN}/`))).toEqual([])
   })
 
@@ -119,5 +120,94 @@ describe('STATIC_GEN', () => {
     }
     expect(got).toEqual(want)
     expect([s.source.heavy, await s.source.hits('su', 'bkt-a')]).toEqual([false, null])
+  })
+})
+
+// The compactor (`compact_store`, specs/static-compaction.md) moves `static-names/CURRENT.json` (`{"gen": …}`) once a
+// compacted generation is whole on R2. Unpinned, the primary's generation is the pointer's, resolved once per request
+// where the interval store's is (`withPathStore`) and held `IV_STATE_TTL` per isolate; a pin wins, and a secondary
+// store keeps its own `STATIC_GEN` (none: `UNINDEXED`), never the primary's pointer.
+describe('static-names/CURRENT.json', () => {
+  const CURRENT = 'static-names/CURRENT.json'
+  /** `r2(log)` with the pointer: `ptr.gen` what it holds (null: absent), `ptr.fail` a read that fails. */
+  function pointed(log: string[], ptr: { gen: string | null; fail?: boolean }): R2Bucket {
+    const base = r2(log)
+    return {
+      ...base,
+      get: async (key: string, o?: unknown) => {
+        if (key !== CURRENT) return (base.get as (k: string, o?: unknown) => Promise<unknown>)(key, o)
+        log.push(key)
+        if (ptr.fail) throw new Error('R2 down')
+        return ptr.gen === null ? null : { key, json: async () => ({ gen: ptr.gen }) }
+      },
+    } as unknown as R2Bucket
+  }
+  const STORES_JSON = JSON.stringify({ meta: { vars: { STATIC_GEN: '2026-10-14-meta' } }, bare: { vars: {} } })
+  /** The env a request's readers see: its store (`withStore`), then the path store's rule (`withPathStore`). */
+  async function seen(env: object, q = ''): Promise<Env> {
+    const c = withStore({ request: new Request(`https://x/api/subtree?date=2026-10-02${q}`), env: env as Env })
+    if (c instanceof Response) throw new Error(`withStore: ${c.status}`)
+    return (await withPathStore(c)).env
+  }
+  const reads = (log: string[]) => log.filter(k => k === CURRENT).length
+
+  it('an explicit secondary pointer is independent of the primary pointer and cleared on another store', async () => {
+    vi.spyOn(Date, 'now').mockImplementation(() => Date.UTC(2032, 0, 1))
+    const log: string[] = []
+    const bucket = { get: async (key: string) => {
+      log.push(key)
+      return { json: async () => ({ gen: key === 'static-names/test-primary-CURRENT.json' ? 'primary' : 'meta.c001' }) }
+    } } as unknown as R2Bucket
+    const env = { FILTER_STATIC: '1', INDEX_R2: bucket, STATIC_CURRENT_KEY: 'static-names/test-primary-CURRENT.json', STORES_JSON: JSON.stringify({ meta: { vars: { STATIC_CURRENT_KEY: 'static-names/test-meta-CURRENT.json' } }, bare: {} }) }
+    expect([(await seen(env, '&store=meta')).STATIC_GEN, (await seen(env)).STATIC_GEN, (await seen(env, '&store=bare')).STATIC_GEN]).toEqual(['meta.c001', 'primary', undefined])
+    expect(log).toEqual(['static-names/test-meta-CURRENT.json', 'static-names/test-primary-CURRENT.json'])
+  })
+
+  it('unpinned: the pointer\'s generation, held `IV_STATE_TTL`, a move followed after it; a pin wins; a failed read keeps the last; none = unset', async () => {
+    let t = Date.now() + 10 * IV_STATE_TTL
+    vi.spyOn(Date, 'now').mockImplementation(() => t)
+    const expire = () => { t += IV_STATE_TTL }
+    const log: string[] = []
+    const ptr: { gen: string | null; fail?: boolean } = { gen: GEN }
+    const env = { NAME_SUMMARY_STATIC: '1', FILTER_STATIC: '1', INDEX_R2: pointed(log, ptr), STORE_BUCKETS: BUCKETS, STORE: 'cw', STORES_JSON }
+    const e1 = await seen(env)
+    const reg = await (await staticRegistry(e1)).json() as { generation: string }
+    expect([e1.STATIC_GEN, reg.generation, staticFilterStore(e1)!.gen, reads(log)]).toEqual([GEN, GEN, GEN, 1])
+    // a pin wins, without reading the pointer
+    expect([(await seen({ ...env, STATIC_GEN: 'pinned' })).STATIC_GEN, reads(log)]).toEqual(['pinned', 1])
+    // a compaction moves the pointer: served once the held one is `IV_STATE_TTL` old
+    ptr.gen = '2026-10-09cw.c001'
+    expect([(await seen(env)).STATIC_GEN, reads(log)]).toEqual([GEN, 1])
+    expire()
+    expect([(await seen(env)).STATIC_GEN, reads(log)]).toEqual(['2026-10-09cw.c001', 2])
+    // a failed read keeps serving the last pointer
+    ptr.fail = true
+    expire()
+    expect([(await seen(env)).STATIC_GEN, reads(log)]).toEqual(['2026-10-09cw.c001', 3])
+    // no pointer: exactly an unset `STATIC_GEN`
+    ptr.fail = false
+    ptr.gen = null
+    expire()
+    const off = await seen(env)
+    expect([off.STATIC_GEN, reads(log)]).toEqual([undefined, 4])
+    expect(() => staticFilterStore(off)).toThrow('static names: STATIC_GEN is unset (the static name index generation in INDEX_R2)')
+  })
+
+  it('a deployment not reading the static index (no `FILTER_STATIC` / `NAME_SUMMARY_STATIC`) never reads the pointer', async () => {
+    vi.spyOn(Date, 'now').mockImplementation(() => Date.UTC(2031, 0, 1))
+    const log: string[] = []
+    const e = await seen({ INDEX_R2: pointed(log, { gen: GEN }) })
+    expect([e.STATIC_GEN, reads(log)]).toEqual([undefined, 0])
+  })
+
+  it('a secondary store keeps its own pin, or none (`UNINDEXED`): never the primary\'s pointer', async () => {
+    vi.spyOn(Date, 'now').mockImplementation(() => Date.UTC(2030, 0, 1))
+    const log: string[] = []
+    const env = { FILTER_STATIC: '1', INDEX_R2: pointed(log, { gen: GEN }), STORES_JSON }
+    const meta = await seen(env, '&store=meta')
+    const bare = await seen(env, '&store=bare')
+    expect([meta.STATIC_GEN, bare.STATIC_GEN, staticFilterStore(bare)!.gen, reads(log)]).toEqual(['2026-10-14-meta', undefined, 'none', 0])
+    // …and the primary, in the same isolate, follows it
+    expect([(await seen(env)).STATIC_GEN, reads(log)]).toEqual([GEN, 1])
   })
 })

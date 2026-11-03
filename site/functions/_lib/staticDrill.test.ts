@@ -261,7 +261,7 @@ describe('D1', () => {
    *  ancestor of roots under the pixel budget (`bin` at the root: 12 roots, 4 drawn) has bytes, objects and
    *  owners, not those (the search view knows every root's row). Match roots and their insides keep them. */
   const sansFoldDetail = (n: ViewNode, inRoot = false): ViewNode => {
-    const { d: _d, a: _a, cb: _cb, ...rest } = n
+    const { d: _d, t: _t, a: _a, cb: _cb, ...rest } = n
     const keep = inRoot || !!n.m
     return { ...(keep ? n : rest), ...(n.c ? { c: n.c.map(c => sansFoldDetail(c, keep && c.n !== '(other)')) } : {}) } as ViewNode
   }

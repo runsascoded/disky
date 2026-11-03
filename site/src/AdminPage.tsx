@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Fragment, useEffect, useState } from 'react'
 import { AvatarField } from '@open-athena/auth/react'
+import { Loading } from './Busy'
 import { Link, useSearchParams } from 'react-router-dom'
 import { SiteNav } from './SiteNav'
 import { DEFAULT_STORE, STORES } from './stores'
@@ -8,6 +9,7 @@ import { hideScopes } from './hideScopes'
 import { useDocTitle } from './title'
 import { PreviewLinks } from './PreviewLinks'
 import { SessionLogSwitch } from './SessionLogSwitch'
+import { ActivityKinds } from './ActivityKinds'
 import { NO_AUTOFILL } from './noAutofill'
 
 // Share-link console (staff-only; the backend enforces the `admin` scope on
@@ -174,7 +176,7 @@ function GrantLog({ id }: { id: string }) {
     },
   })
   if (q.error) return <p className="err">{q.error.message}</p>
-  if (!q.data) return <p className="dim">loading…</p>
+  if (!q.data) return <Loading label="Loading admin data…" />
   const events = q.data.events
   if (!events.length) return <p className="dim">no events logged</p>
   const hasNetwork = events.some(e => e.asOrg != null)
@@ -482,7 +484,7 @@ export function AdminPage() {
         Revocable view links for people outside the SSO/whitelist set. The raw link is shown{' '}
         <strong>once</strong>, when it's created; revoking a link signs out everyone using it, on their next request.{' '}
         A link with an email is a person's: it also creates their account, listed under <Link to="/admin/db/allowed_emails">users</Link> (all tables:{' '}
-        <Link to="/admin/db">/admin/db</Link>).
+        <Link to="/admin/db">/admin/db</Link>). Cloudflare cost and who drives it: <Link to="/admin/usage">/admin/usage</Link>; GCP storage and compute cost: <Link to="/admin/cost/gcp">/admin/cost/gcp</Link>. The Slack digest's OP and its parameters: <Link to="/admin/slack">/admin/slack</Link>.
       </p>
       <form
         className="mint"
@@ -624,6 +626,7 @@ export function AdminPage() {
       </table>
       </div>
       <PreviewLinks />
+      <ActivityKinds />
       <SessionLogSwitch />
     </main>
   )

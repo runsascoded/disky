@@ -52,6 +52,9 @@ export interface DupGroup {
   reclaimable: number
   n_buckets: number
   suspect: boolean
+  /** Every copy's objects match the keep copy's by relative name, size and crc32c (`dt-cloud dups -l`; absent in
+   *  reports cut without the scan's checksummed listing: false). */
+  exact: boolean
   items: DupCopy[]
 }
 
@@ -125,6 +128,7 @@ function groupOf(r: Record<string, unknown>): DupGroup {
     reclaimable: n(r.reclaimable),
     n_buckets: n(r.n_buckets),
     suspect: !!r.suspect,
+    exact: !!r.exact,
     items: [],
   }
 }

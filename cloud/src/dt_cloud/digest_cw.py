@@ -5,12 +5,15 @@ headline, deltas and quota line are the PRIMARY bucket's (``cfg.primary``,
 read from `meta.buckets[<primary>]` when the scan has it, else the flat
 totals, which were the primary's), the others ride along. The OP: month-to-
 date headline (`· NN% of <quota>` when the primary has one, ` · <bucket> <N>
-TiB (Δ)` per other bucket; sizes in ``cfg.units``, TiB or decimal TB), per-ISO-week bullets, and a quota sparkline + diff
-treemap (drawn by the site: `POST /api/digest-image`). ONE REPLY PER UTC DAY, Δ over the prior
+TiB (Δ)` per other bucket; sizes in ``cfg.units``, TiB or decimal TB) beside the last 30 days' change, per-ISO-week
+bullets over the OP's window (the longer of the last 30 days and the month to date, specs/digest-rolling-window.md),
+the previous month's thread, and a quota sparkline + diff treemap over the window (drawn by the site:
+`POST /api/digest-image`). ONE REPLY PER UTC DAY, Δ over the prior
 day's reply scan, the arrow normalised to the real interval; its tail is a
 linked `[<label>](<over-time>): NN.N% of <quota> (<free> Ti free)` clause per
 bucket (`cfg.buckets`; a bucket without a quota shows raw TiB; buckets sharing
-a `zone` collapse into one clause against the zone's quota).
+a `zone` collapse into one clause against the zone's quota). `quota_marks: circles`
+sorts the clauses fullest first and leads each with a 🔴 / 🟠 / 🟡 / 🟢 by its share (`_mark`).
 
 Two reply VARIANTS because Slack fixes a message's username + icon at post
 time (`chat.update` can't change them):
@@ -39,6 +42,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import math
 from collections import OrderedDict
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
@@ -46,7 +50,8 @@ from pathlib import Path
 
 from .digest import (
     AVATAR_REV, HOURS_PER_WEEK, LINK_ARROW, TIB, UNITS, DigestConfig, PlotUnavailable, Quota, Reply, Unit, Units,
-    _dlink, _err, _md, _pct, _pct_val, _span, _tb, deg, list_scans, load_window, scan_slugs, scan_ts,
+    _dlink, _err, _md, _pct, _pct_val, _span, _tb, deg, list_scans, load_window, prev_month_link, read_metas, site_render,
+    scan_slugs, scan_ts, week_of, window_label, window_scans, window_start,
 )
 
 VARIANTS = ("sender", "body")
@@ -106,9 +111,21 @@ def _bucket_link(bucket: str, scan: str, since: dt.datetime | None, cfg: DigestC
     return f"[{(b.label if b else None) or bucket}]({_diff_url(scan, since, cfg.site_url, path, slug)})"
 
 
-def _quota_clause(tb: float, q: Quota, u: Units = UNITS["TiB"]) -> str:
+#: `quota_marks: circles` / `runway`: a pool under this share renders as a bare `NN%` (no quota, no headroom).
+QUIET_PCT = 25
+#: The `quota_marks` whose clauses are brief (`QUIET_PCT`) and marked by a circle.
+BRIEF_MARKS = ("circles", "runway")
+
+
+def _quota_clause(tb: float, q: Quota, u: Units = UNITS["TiB"], brief: bool = False) -> str:
+    """`NN.N% of <quota> (<n> Ti free)` (`over` past the quota); ``brief`` (`quota_marks: circles`): under
+    `QUIET_PCT`, just `NN%`."""
     qt = q.bytes / u.bytes
-    return f"{tb / qt * 100:.1f}% of {q.short or _qlabel(q.bytes)} ({qt - tb:,.1f} {u.short} free)"
+    pct = tb / qt * 100
+    if brief and pct < QUIET_PCT:
+        return f"{pct:.0f}%"
+    room = f"{qt - tb:,.1f} {u.short} free" if tb <= qt else f"{tb - qt:,.1f} {u.short} over"
+    return f"{pct:.1f}% of {q.short or _qlabel(q.bytes)} ({room})"
 
 
 def _bucket_clause(bucket: str, tb: float, scan: str, since: dt.datetime | None, cfg: DigestConfig, slug: str | None = None,
@@ -121,7 +138,7 @@ def _bucket_clause(bucket: str, tb: float, scan: str, since: dt.datetime | None,
     link = _bucket_link(bucket, scan, since, cfg, slug)
     if not qs:
         return f"{link}: {tb:,.0f} {cfg.unit.short}"
-    return f"{link}: " + ", ".join(_quota_clause(_scoped(tb, classes, q), q, cfg.unit) for q in qs)
+    return f"{link}: " + ", ".join(_quota_clause(_scoped(tb, classes, q), q, cfg.unit, cfg.quota_marks in BRIEF_MARKS) for q in qs)
 
 
 def _zone_clause(members: list[tuple[str, float]], scan: str, since: dt.datetime | None, cfg: DigestConfig, slug: str | None = None) -> str:
@@ -130,7 +147,7 @@ def _zone_clause(members: list[tuple[str, float]], scan: str, since: dt.datetime
     q = cfg.buckets[members[0][0]].quota
     parts = " + ".join(f"{_bucket_link(b, scan, since, cfg, slug)} {tb:,.0f}" for b, tb in members)
     total = sum(tb for _, tb in members)
-    return f"{parts} {cfg.unit.short}" + (f": {_quota_clause(total, q, cfg.unit)}" if q else "")
+    return f"{parts} {cfg.unit.short}" + (f": {_quota_clause(total, q, cfg.unit, cfg.quota_marks in BRIEF_MARKS)}" if q else "")
 
 
 def _tail(day: DayRow, cfg: DigestConfig) -> str:
@@ -145,15 +162,162 @@ def _tail(day: DayRow, cfg: DigestConfig) -> str:
         link = _diff_url(day.scan, day.since, cfg.site_url, cfg.primary if b is None or b.path is None else b.path, day.slug)
         body = ", ".join(_quota_clause(_scoped(day.tb, day.classes, q), q, cfg.unit) for q in qs) if qs else f"{day.tb:,.0f} {cfg.unit.short}"
         return f"{body} [{LINK_ARROW}]({link})"
+    cs = _clauses(day, cfg)
+    if cfg.quota_marks == "runway":
+        # config order: a reply series reads by position, the marks draw the eye (specs/digest-runway-marks.md)
+        return " · ".join(f"{_runway_mark(r, fill)} {c}{_runway_text(r, cfg)}" if fill is not None else c for c, fill, _, r in cs)
+    if cfg.quota_marks == "circles":
+        cs = sorted(cs, key=lambda c: -1.0 if c[1] is None else -c[1])
+    return " · ".join(f"{m} {c}" if (m := _mark(fill, over, cfg)) else c for c, fill, over, _ in cs)
+
+
+#: Marks a quota clause at or over `alert_pct` (the daily replies' tail and the alert reply).
+ALERT_MARK = ":warning:"
+#: `quota_marks: circles`, every pool one: red at or over `mark_pct`, orange within `ORANGE_PTS` below it, yellow
+#: within `YELLOW_PTS`, green under that (the site's `digest/pools.ts` `mark`).
+RED_MARK, ORANGE_MARK, YELLOW_MARK, GREEN_MARK = ":red_circle:", ":large_orange_circle:", ":large_yellow_circle:", ":large_green_circle:"
+ORANGE_PTS, YELLOW_PTS = 10, 40
+
+
+def _mark(fill: float | None, over: bool, cfg: DigestConfig) -> str | None:
+    """A clause's mark: `:warning:` when over ``alert_pct`` (`quota_marks: warning`), or a circle by its fill
+    (`circles`); None unmarked or without a quota."""
+    if cfg.quota_marks != "circles":
+        return ALERT_MARK if over else None
+    if fill is None:
+        return None
+    red = min(cfg.mark_pct, 100)
+    return (RED_MARK if fill >= red else ORANGE_MARK if fill >= cfg.mark_pct - ORANGE_PTS
+            else YELLOW_MARK if fill >= cfg.mark_pct - YELLOW_PTS else GREEN_MARK)
+
+
+#: `quota_marks: runway` (specs/digest-runway-marks.md §2; the site's `digest/pools.ts` mirrors these names and rules):
+#: growth is the fastest net fill over these look-backs (days), each from the latest scan at or before it.
+RUNWAY_WINDOWS_D = (1, 3, 7)
+#: 🔴 under `RUNWAY_RED_D` days to full (or over quota), 🟠 under `RUNWAY_ORANGE_D` (or at least `RUNWAY_FULL_PCT` full),
+#: 🟡 under `RUNWAY_YELLOW_D`, 🟢 otherwise; a clause under `RUNWAY_TEXT_D` days also shows its rate and runway.
+RUNWAY_RED_D, RUNWAY_ORANGE_D, RUNWAY_YELLOW_D, RUNWAY_TEXT_D = 3, 14, 30, 60
+RUNWAY_FULL_PCT = 95
+
+
+@dataclass(frozen=True)
+class Runway:
+    """A quota group's runway at a scan: ``days`` to full at ``growth`` (its unit per day; None: no earlier scan in
+    reach), ``math.inf`` when not growing, 0 when at or over quota."""
+    days: float
+    growth: float | None
+
+
+def _growth(hist: list[tuple[dt.datetime, float]], t: dt.datetime, v: float) -> float | None:
+    """The fastest net fill per day reaching ``v`` at ``t`` over `RUNWAY_WINDOWS_D`: each window from the latest
+    ``hist`` point at or before ``t`` minus it; None when no window has one."""
+    rates = []
+    for w in RUNWAY_WINDOWS_D:
+        then = [(ts, x) for ts, x in hist if ts <= t - dt.timedelta(days=w)]
+        if then:
+            ts0, v0 = then[-1]
+            rates.append((v - v0) / ((t - ts0).total_seconds() / 86400))
+    return max(rates) if rates else None
+
+
+def _runway(free: float, growth: float | None) -> Runway:
+    if free <= 0:
+        return Runway(0.0, growth)
+    return Runway(free / growth if growth is not None and growth > 0 else math.inf, growth)
+
+
+def _runway_mark(r: Runway, fill: float) -> str:
+    """A pool's circle by its runway (`RUNWAY_*`)."""
+    if r.days < RUNWAY_RED_D:
+        return RED_MARK
+    if r.days < RUNWAY_ORANGE_D or fill >= RUNWAY_FULL_PCT:
+        return ORANGE_MARK
+    return YELLOW_MARK if r.days < RUNWAY_YELLOW_D else GREEN_MARK
+
+
+def _runway_text(r: Runway, cfg: DigestConfig) -> str:
+    """`, +4.1 Ti/d, ≈8d to full` for a pool filling within `RUNWAY_TEXT_D` days (commas: ` · ` separates the pools);
+    `''` otherwise (flat, shrinking, far off, or already over: its clause says so)."""
+    if not 0 < r.days < RUNWAY_TEXT_D or r.growth is None:
+        return ""
+    days = "<1d" if r.days < 1 else f"{r.days:.0f}d"
+    return f", +{r.growth:.1f} {cfg.unit.short}/d, ≈{days} to full"
+
+
+def _group_used(g: list[str], s: Scan | DayRow, q: Quota, cfg: DigestConfig) -> float:
+    """What quota ``q`` counts of group ``g`` (bucket names) at scan / day ``s``: a zone's buckets summed (raw sizes,
+    as `_zone_clause`), a lone bucket over ``q``'s classes (the primary's; the others' raw)."""
+    def size(b: str) -> float:
+        return s.tb if b == cfg.primary else s.extra.get(b, 0.0)
+    if len(g) > 1:
+        return sum(size(b) for b in g)
+    return _scoped(s.tb, s.classes, q) if g[0] == cfg.primary else size(g[0])
+
+
+def _group_runway(g: list[str], day: DayRow, cfg: DigestConfig) -> Runway | None:
+    """The group's shortest runway over its quotas (a zone: the zone's), from ``day.hist``; None without a quota."""
+    qs = (cfg.buckets[g[0]].quota,) if len(g) > 1 else (cfg.buckets[g[0]].quotas if g[0] in cfg.buckets else ())
+    qs = tuple(q for q in qs if q is not None)
+    if not qs:
+        return None
+    t = scan_ts(day.scan)
+    out = []
+    for q in qs:
+        v = _group_used(g, day, q, cfg)
+        hist = [(scan_ts(x.scan), _group_used(g, x, q, cfg)) for x in day.hist if x.scan < day.scan]
+        out.append(_runway(q.bytes / cfg.unit.bytes - v, _growth(hist, t, v)))
+    return min(out, key=lambda r: r.days)
+
+
+def _groups(day: DayRow, cfg: DigestConfig) -> list[list[tuple[str, float]]]:
+    """The day's buckets (the primary first, then the extras in meta order) grouped by quota: buckets sharing a
+    ``zone`` are one group, at the first one's position; every other bucket is its own."""
     groups: dict[str, list[tuple[str, float]]] = {}
     for b, tb in [(cfg.primary, day.tb), *day.extra.items()]:
         z = cfg.buckets[b].zone if b in cfg.buckets else None
         groups.setdefault(f"zone:{z}" if z else f"bucket:{b}", []).append((b, tb))
-    return " · ".join(
-        _bucket_clause(*g[0], day.scan, day.since, cfg, day.slug, day.classes if g[0][0] == cfg.primary else None)
-        if len(g) == 1 else _zone_clause(g, day.scan, day.since, cfg, day.slug)
-        for g in groups.values()
-    )
+    return list(groups.values())
+
+
+def _fill(g: list[tuple[str, float]], day: DayRow, cfg: DigestConfig) -> float | None:
+    """A group's fullest quota, in percent (each quota over its own classes; a zone's over its buckets' sum); None
+    without a quota."""
+    if len(g) > 1:
+        q = cfg.buckets[g[0][0]].quota
+        return sum(tb for _, tb in g) / (q.bytes / cfg.unit.bytes) * 100 if q else None
+    name, tb = g[0]
+    b = cfg.buckets.get(name)
+    classes = day.classes if name == cfg.primary else None
+    return max((_scoped(tb, classes, q) / (q.bytes / cfg.unit.bytes) * 100 for q in b.quotas), default=None) if b else None
+
+
+def _clauses(day: DayRow, cfg: DigestConfig) -> list[tuple[str, float | None, bool, Runway | None]]:
+    """Each group's clause (`_bucket_clause` / `_zone_clause`), its fill (`_fill`), whether that is at or over
+    ``cfg.alert_pct``, and its runway (`quota_marks: runway`; else None)."""
+    out = []
+    for g in _groups(day, cfg):
+        clause = (_bucket_clause(*g[0], day.scan, day.since, cfg, day.slug, day.classes if g[0][0] == cfg.primary else None)
+                  if len(g) == 1 else _zone_clause(g, day.scan, day.since, cfg, day.slug))
+        fill = _fill(g, day, cfg)
+        r = _group_runway([b for b, _ in g], day, cfg) if cfg.quota_marks == "runway" else None
+        out.append((clause, fill, cfg.alert_pct is not None and fill is not None and fill >= cfg.alert_pct, r))
+    return out
+
+
+def alert_body(month: Month, cfg: DigestConfig) -> str | None:
+    """The quota alert reply's body: every group at or over ``cfg.alert_pct`` as of the month's latest scan, else
+    None (no threshold, none over, or a closed month: the next month's thread carries it)."""
+    if cfg.alert_pct is None or month.closed:
+        return None
+    last = month.rows[-1]
+    over = [(c, f) for c, f, o, _ in _clauses(_row(last.date, last, None), cfg) if o]
+    if cfg.quota_marks == "circles":
+        over.sort(key=lambda c: -c[1])
+    over = [c for c, _ in over]
+    if not over:
+        return None
+    return (f"{ALERT_MARK} **Quota alert**: {' · '.join(over)} · _as of {_md(last.date)} {scan_ts(last.scan):%H:%M}Z_ "
+            f"(≥ {cfg.alert_pct:g}% of a quota; removed once every quota is back under)")
 
 
 @dataclass(frozen=True)
@@ -251,6 +415,19 @@ class Month:
     # a scan exists AFTER the month: its last day is over, so `sender`'s
     # stand-in rule applies to it too (a month converged once it has ended)
     closed: bool = False
+    # the OP window's scans before ``lead`` (`window_scans`): its earlier weekly summaries, look-back figure and plot
+    pre: list[Scan] = field(default_factory=list)
+
+    def window(self, m: dt.date) -> tuple[dt.date, list[Scan]]:
+        """The OP window's first day (`window_start`, to the latest scan) and every scan this holds, in order."""
+        return window_start(m, dt.date.fromisoformat(self.rows[-1].date)), self.pre + self.lead + self.rows
+
+    def back(self, m: dt.date) -> Scan:
+        """The window's baseline (its look-back figure's, its plot's first point, its diff map's start): the last scan
+        before its first day, else the earliest this holds (a store younger than the window)."""
+        start, seen = self.window(m)
+        before = [r for r in seen if r.date < start.isoformat()]
+        return before[-1] if before else seen[0]
 
     @property
     def base(self) -> Scan:
@@ -276,6 +453,8 @@ class DayRow:
     provisional: bool = False  # `sender`: the day's latest scan before its reply scan has landed
     slug: str | None = field(default=None, compare=False)  # `scan`'s canonical `?d=` slug; None: its minute
     classes: dict[int, float] | None = field(default=None, compare=False)  # `scan`'s primary per class (`Scan.classes`)
+    # the scans up to and including `scan` within the runway look-back (`RUNWAY_WINDOWS_D`; `quota_marks: runway`)
+    hist: tuple[Scan, ...] = field(default=(), compare=False)
 
 
 def day_rows(month: Month, variant: str, reply_hour: int, provisional: bool = False) -> list[DayRow]:
@@ -291,6 +470,7 @@ def day_rows(month: Month, variant: str, reply_hour: int, provisional: bool = Fa
     reply is re-edited as the day's scans land)."""
     if variant not in VARIANTS:
         raise ValueError(f"variant must be one of {VARIANTS}, not {variant!r}")
+    seen = month.pre + month.lead + month.rows
     days: OrderedDict[str, list[Scan]] = OrderedDict()
     for r in month.lead + month.rows:
         days.setdefault(r.date, []).append(r)
@@ -305,17 +485,20 @@ def day_rows(month: Month, variant: str, reply_hour: int, provisional: bool = Fa
             if s is None:
                 if provisional and date >= month.rows[0].date:
                     # the day's morning scan is still to come: its numbers so far
-                    out.append(_row(date, rs[-1], prev, provisional=True))
+                    out.append(_row(date, rs[-1], prev, provisional=True, seen=seen))
                 continue
         if date >= month.rows[0].date:
-            out.append(_row(date, s, prev))
+            out.append(_row(date, s, prev, seen=seen))
         prev = s
     return out
 
 
-def _row(date: str, s: Scan, prev: Scan | None, provisional: bool = False) -> DayRow:
-    """``date``'s reply over scan ``s``, Δ vs ``prev`` (the prior day's reply scan)."""
+def _row(date: str, s: Scan, prev: Scan | None, provisional: bool = False, seen: list[Scan] | tuple[Scan, ...] = ()) -> DayRow:
+    """``date``'s reply over scan ``s``, Δ vs ``prev`` (the prior day's reply scan); ``seen`` (chronological) gives
+    its runway history."""
+    reach = scan_ts(s.scan) - dt.timedelta(days=max(RUNWAY_WINDOWS_D) + 1)
     return DayRow(
+        hist=tuple(x for x in seen if x.scan <= s.scan and scan_ts(x.scan) >= reach),
         date=date,
         scan=s.scan,
         tb=s.tb,
@@ -330,9 +513,10 @@ def _row(date: str, s: Scan, prev: Scan | None, provisional: bool = False) -> Da
     )
 
 
-def op_body(month: Month, m: dt.date, plot_url: str | None, cfg: DigestConfig) -> str:
-    """OP markdown: month-to-date headline, the latest scan's "as of" line,
-    per-ISO-week bullets, trailing sparkline. The month/year title is NOT in
+def op_body(month: Month, m: dt.date, plot_url: str | None, cfg: DigestConfig, prev_url: str | None = None) -> str:
+    """OP markdown: month-to-date headline beside the window's look-back figure, the latest scan's "as of" line,
+    per-ISO-week bullets over the window (weeks ending before the month marked with its predecessor's name), the
+    previous month's thread (``prev_url``; none: no link), trailing sparkline. The month/year title is NOT in
     the body -- it's folded into the OP's sender name by the poster.
     ``plot_url=None`` omits the image line."""
     site_url, qs, u = cfg.site_url, cfg.primary_quotas, cfg.unit
@@ -347,31 +531,48 @@ def op_body(month: Month, m: dt.date, plot_url: str | None, cfg: DigestConfig) -
     mtd_url = _diff_url(last.scan, mtd_since, site_url, slug=last.slug)
     # with extra buckets alongside, the headline total is visibly the primary's
     primary = f"{_bucket_link(cfg.primary, last.scan, mtd_since, cfg, last.slug)} " if cfg.primary and last.extra else ""
+    start, seen = month.window(m)
+    # the look-back figure, over the window
+    b30 = month.back(m)
+    b30_url = _diff_url(last.scan, scan_ts(b30.scan) if b30 is not last else None, site_url, slug=last.slug)
+    # (none when it starts where month-to-date does: a store whose first scan is this month's)
+    look = f"**{_tb(last.tb - b30.tb)} {u.name}** [{window_label(start, b30.scan)}]({b30_url}) · " if b30 is not base else ""
     lines = [
-        f":arrow_deg{deg(mweekly)}: **{_tb(mdtb)} {u.name}** [month-to-date]({mtd_url}) · {primary}{last.tb:,.0f} {u.name}{_quotas(last.tb, last.classes, qs, u)}{_extras(last.extra, _dextra(last, base if base is not last else None), last.scan, mtd_since, cfg, last.slug)} · [dashboard]({site_url}/)",
+        f":arrow_deg{deg(mweekly)}: **{_tb(mdtb)} {u.name}** [month-to-date]({mtd_url}) · {look}{primary}{last.tb:,.0f} {u.name}{_quotas(last.tb, last.classes, qs, u)}{_extras(last.extra, _dextra(last, base if base is not last else None), last.scan, mtd_since, cfg, last.slug)} · [dashboard]({site_url}/)",
         # the OP is re-edited every scan, so it is the thread's live view; say which scan it reflects
         f"_as of {_md(last.date)} {scan_ts(last.scan):%H:%M}Z_",
         "",
         "*Weekly summaries*",
     ]
+    # every week overlapping the window, each over the previous one's last scan (the first: the last scan before it)
+    mon0 = week_of(start).isoformat()
+    older = [r for r in seen if r.date < mon0]
     weeks: OrderedDict[dt.date, list[Scan]] = OrderedDict()
-    for r in rows:
-        d = dt.date.fromisoformat(r.date)
-        weeks.setdefault(d - dt.timedelta(days=d.weekday()), []).append(r)
+    for r in seen:
+        if r.date >= mon0:
+            weeks.setdefault(week_of(dt.date.fromisoformat(r.date)), []).append(r)
     last_mon = list(weeks)[-1]
-    prev_end = base
+    prev_end = older[-1] if older else seen[0]
     for mon, ws in weeks.items():
         end = ws[-1]
+        if end is prev_end:
+            # a week holding only the store's first scan: nothing before it to measure from
+            continue
         wdtb = end.tb - prev_end.tb
         wpct = wdtb / prev_end.tb * 100 if prev_end.tb else 0
         # partial while the week's Sunday has no scan yet
         partial = " _(partial)_" if mon == last_mon and dt.date.fromisoformat(end.date) < mon + dt.timedelta(days=6) else ""
+        # a week over before the month began, named for the month its last scan fell in (the previous one's, but
+        # for a week straddling the month before that)
+        earlier = f" ({dt.date.fromisoformat(end.date):%b})" if mon + dt.timedelta(days=6) < m.replace(day=1) else ""
         # the link opens the Diff section over exactly this bullet's span
         lines.append(
-            f":arrow_deg{deg(wpct)}: [wk of {mon.month}/{mon.day}]({_diff_url(end.scan, scan_ts(prev_end.scan) if prev_end is not end else None, site_url, slug=end.slug)}){partial}: "
+            f":arrow_deg{deg(wpct)}: [wk of {mon.month}/{mon.day}]({_diff_url(end.scan, scan_ts(prev_end.scan) if prev_end is not end else None, site_url, slug=end.slug)}){earlier}{partial}: "
             f"**{_tb(wdtb)} {u.name}** → {end.tb:,.0f} {u.name}{_quotas(end.tb, end.classes, qs, u)}"
         )
         prev_end = end
+    if prev_url:
+        lines += ["", *prev_month_link(m, prev_url)]
     if plot_url is not None:
         lines += ["", f"![{cfg.title} — {m:%B %Y}]({plot_url})"]
     return "\n".join(lines)
@@ -429,15 +630,17 @@ def site_triggers(cfg: DigestConfig) -> dict[str, str]:
 
 def load_month(root: str, month: dt.date, primary: str, unit: int = TIB, triggers: Mapping[str, str] | None = None) -> Month | None:
     """The month's scans from ``root`` (``gs://<bucket>/snapshots/cw``), sizes in ``unit`` bytes, each with its trigger
-    (``triggers``), with ``lead`` = every scan of the last calendar day before it, ``closed`` once
-    a later month's scan exists. None if the month has no scans."""
+    (``triggers``), with ``lead`` = every scan of the last calendar day before it, ``pre`` = the OP window's scans
+    before that (`window_scans`), ``closed`` once a later month's scan exists. None if the month has no scans."""
     scans = list_scans(root)
     w = load_window(root, month, scans)
     if w is None:
         return None
     lead, in_month = w
-    rows = rows_from_meta(lead + in_month, primary, unit=unit, triggers=triggers)
-    return Month(lead=rows[: len(lead)], rows=rows[len(lead) :], closed=scans[-1] > in_month[-1][0])
+    pre = read_metas(root, window_scans(scans, month, (lead or in_month)[0][0]))
+    rows = rows_from_meta(pre + lead + in_month, primary, unit=unit, triggers=triggers)
+    n, k = len(pre), len(pre) + len(lead)
+    return Month(lead=rows[n:k], rows=rows[k:], closed=scans[-1] > in_month[-1][0], pre=rows[:n])
 
 
 def primary_node(tree: dict, primary: str) -> dict:
@@ -455,16 +658,20 @@ def load_tree(root: str, scan: str, primary: str) -> dict:
 
 
 def image_body(month: Month, m: dt.date, cfg: DigestConfig) -> dict:
-    """`POST /api/digest-image`'s request for ``month``: every scan from the lead-in on (bytes of the primary, under
-    its quota's classes), the primary's quota, and the headline interval's diff (none until the month spans two scans)."""
-    base, last = month.base, month.rows[-1]
-    scans = ([base] if base is not month.rows[0] else []) + month.rows
+    """`POST /api/digest-image`'s request for ``month``: every scan in the OP's window, from its baseline (`back`) on
+    (bytes of the primary, under its quota's classes), the window's first day (`from`: the site shades the month
+    after it), the primary's quota, and the window's diff (its baseline → the latest; none over a lone scan)."""
+    last = month.rows[-1]
+    start, seen = month.window(m)
+    base = month.back(m)
+    scans = [base] + [r for r in seen if r.date >= start.isoformat() and r is not base]
     q, u = cfg.primary_quota, cfg.unit
     body: dict = {
         "title": f"{cfg.title} — {m:%B %Y}",
         # the line is the primary's; say so once there are other buckets
         "note": " · ".join([cfg.host, *([cfg.primary] if cfg.primary and last.extra else []), u.name]),
         "month": f"{m:%Y-%m}",
+        "from": start.isoformat(),
         # under the plotted quota's classes, so the line and the quota line measure the same bytes
         "points": [{"scan": r.scan, "bytes": round((_scoped(r.tb, r.classes, q) if q else r.tb) * u.bytes)} for r in scans],
         # the card's axis + labels
@@ -495,11 +702,29 @@ class Cw:
     def n_scans(self, month: Month) -> int:
         return len(month.rows)
 
-    def op_body(self, month: Month, m: dt.date, plot_url: str | None) -> str:
-        return op_body(month, m, plot_url, self.cfg)
+    def op_body(self, month: Month, m: dt.date, plot_url: str | None, prev_url: str | None = None) -> str:
+        if self.cfg.renderer == "site":
+            return site_render(self.cfg, self.rows_json(month), m, plot_url, prev_url)["text"]
+        return op_body(month, m, plot_url, self.cfg, prev_url)
+
+    def image_request(self, month: Month, m: dt.date) -> dict:
+        if self.cfg.renderer == "site":
+            return site_render(self.cfg, self.rows_json(month), m)["image"]
+        return image_body(month, m, self.cfg)
+
+    def rows_json(self, month: Month) -> dict:
+        """The month's scans as the site's renderer reads them (`src/digest/cw.ts` `CwRows`)."""
+        def scan(r: Scan) -> dict:
+            return {"scan": r.scan, "slug": r.slug, "tb": r.tb, "extra": r.extra, "classes": None if r.classes is None else {str(c): v for c, v in r.classes.items()}}
+
+        return {"template": "cw", "closed": month.closed, "pre": [scan(r) for r in month.pre],
+                "lead": [scan(r) for r in month.lead], "rows": [scan(r) for r in month.rows]}
 
     def units(self, month: Month, variant: str, platform: str = "slack") -> list[Unit]:
         return [Unit(day.date, day.scan, reply(day, variant, self.cfg)) for day in day_rows(month, variant, self.cfg.reply_hour)]
+
+    def alert(self, month: Month) -> str | None:
+        return alert_body(month, self.cfg)
 
     def provisional(self, month: Month, variant: str) -> Unit | None:
         """The still-open day's provisional reply (``sender`` only), else None."""
@@ -519,4 +744,4 @@ class Cw:
         token = site_token()
         if not token:
             raise PlotUnavailable("digest image: no site token ($SITE_TOKEN)")
-        Path(out).write_bytes(post_json(self.cfg.site_url, token, "/api/digest-image", image_body(month, m, self.cfg)))
+        Path(out).write_bytes(post_json(self.cfg.site_url, token, "/api/digest-image", self.image_request(month, m)))

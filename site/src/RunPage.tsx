@@ -8,11 +8,12 @@ import { joinRuns, runFilesRel, runLabel, sumProgress, viewBuckets, viewLive, vi
 import { useUnits } from './units'
 import { fmtBytesPrecise } from './types'
 import { RunTaskLogs } from './RunTaskLogs'
+import { Skeleton } from './Busy'
 
 export function RunPage() {
   const id = useParams()['*'] ?? ''
   const detail = useRunDetail(id, !!id, true)
-  const jobs = useExecJobs(true)
+  const jobs = useExecJobs(!detail.data?.run.finished_ts)
   const run = detail.data?.run
   const view = run ? joinRuns([run], jobs.data?.jobs ?? []).find(v => v.run?.run_id === run.run_id) : null
   const live = !!run && !run.finished_ts && (!view?.job || viewLive(view))
@@ -31,9 +32,9 @@ export function RunPage() {
     <SiteNav />
     <p><Link to="/staged#runs">Staged deletions / runs</Link></p>
     <h1>{runLabel(id)}</h1>
-    {detail.isLoading ? <p>Loading run…</p> : detail.error ? <p className="err">{detail.error.message}</p> : run && <>
+    {detail.isLoading ? <Skeleton height={220} label="Loading deletion run…" /> : detail.error ? <p className="err">{detail.error.message}</p> : run && <>
       <p className="sub">{run.mode === 'real' ? 'Real deletion' : 'Dry run — nothing deleted'} · {view ? viewState(view).toLowerCase() : 'unknown'}{view?.job?.logs && <> · <a href={view.job.logs} target="_blank" rel="noreferrer">Batch task logs ↗</a></>}</p>
-      {CAPS.runFiles && <RunDetail run={run} live={live} progress={progress.length ? sumProgress(progress) : null} dir={dir} planned={planQ?.data ?? null} fmtBytes={fmtBytes} now={Date.now() / 1000} />}
+      <RunDetail run={run} live={live} progress={progress.length ? sumProgress(progress) : null} dir={dir} planned={planQ?.data ?? null} fmtBytes={fmtBytes} now={Date.now() / 1000} />
       {CAPS.runFiles && view?.job?.region && view.job.logs && <RunTaskLogs job={view.job.job_id} region={view.job.region} live={live} explorer={view.job.logs} />}
     </>}
     <SiteKbd />

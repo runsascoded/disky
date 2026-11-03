@@ -54,7 +54,7 @@ import { combineFolds, subBlobs, type Tiers, type TierState } from './staticRuns
 import { type FilterRejectCode, pathTail, pathTailOk } from './indexedOnly.js'
 import { dropped, type HexRule, occurs, ruleOf, sameRule, segmentOccurs } from './hexRuns.js'
 import { matcherTest } from './pathQuery.js'
-import { Memo, type Req } from './shared.js'
+import { cellsBytes, heldAnswers, heldId, hitsBytes, Memo, type Req } from './shared.js'
 
 export const NAMES_DIR = 'names'
 export const ANCHORS_DIR = 'anchors'
@@ -260,16 +260,13 @@ export interface AnchorCaches {
  *  carrying the starts-with catalog (`anchors/start/meta.json`) and its scans. */
 interface AnchorState { version: string; scans: string[]; tiers: AnchorTier[]; light: TierState; start: { tiers: AnchorTier[]; scans: string[] } }
 
-/** Answers held per isolate, across (key, path) views: the oldest dropped past this many hits + cells. */
-const HELD = 400_000
-
 /** The anchored terms' `HitSource` (keys from `termKey`; plain literals are not its business). */
 export class AnchoredSource implements HitSource {
   private tiers = new Map<string, AnchorTier>()
   private live = new Set<string>()
   /** Scoped answers held per isolate, their sizes; one pending in another request is joined (`shared.ts`). */
   private held = new Memo<Found | null>('static-anchors-scoped')
-  private sizes = new Map<string, number>()
+  private id = heldId('static-anchors-scoped')
   private whyNot = new Map<string, FilterRejectCode>()
   readonly heavy = true
   /** `light`: the light index's tiers (their sx: `q$`'s rows; their manifest: the runs); `blobs` the generation's
@@ -364,7 +361,7 @@ export class AnchoredSource implements HitSource {
     // Keyed by the starts-with catalog's tiers too: a run's catalog can go live after its `anchors/meta.json`.
     const k = `${key}\0${under}@${st.version}#${st.start.tiers.length}`
     const f = await this.held.get(k, () => mode === 'start' ? this.startScoped(key, under, st, req) : mode === 'path' ? this.pathScoped(key, under, st, req) : this.scoped(key, mode, under, st, req), req)
-    if (!this.sizes.has(k) && this.held.has(k)) this.trim(k, f)
+    if (this.held.has(k)) heldAnswers.keep(this.id + k, () => f?.hits ? hitsBytes(f.hits) : f?.rollup ? cellsBytes(f.rollup.cells) : 0, () => this.held.delete(k))
     if (!f && (mode === 'start' || mode === 'path')) this.whyNot.set(key, 'term-too-common')
     return f && { ...f, io: { ...f.io, ms: Date.now() - t0 } }
   }
@@ -411,16 +408,6 @@ export class AnchoredSource implements HitSource {
     const hits = cappedHits(key, got.map(g => g.fold as PathTermHits), this.startMaxHits)
     if (!hits) return null
     return { hits, io: { from: 'anchors', source: 'path', upper, rows_read: got.reduce((n, g) => n + g.io.rows_read, 0), bytes: got.reduce((n, g) => n + g.io.bytes, 0), tiers: readers.length }, scans: st.scans }
-  }
-
-  private trim(k: string, f: Found | null): void {
-    this.sizes.set(k, f?.hits?.length ?? f?.rollup?.cells.length ?? 0)
-    let n = [...this.sizes.values()].reduce((s, x) => s + x, 0)
-    for (const old of [...this.held.keys()]) {
-      if (n <= HELD || old === k) break
-      n -= this.sizes.get(old) ?? 0
-      this.held.delete(old); this.sizes.delete(old)
-    }
   }
 
   /** Whole-range reads held per isolate (the newest 64); one pending in another request is joined (`shared.ts`). */

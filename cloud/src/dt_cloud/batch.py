@@ -13,7 +13,7 @@ import json
 import time
 from typing import Mapping, Sequence
 
-from .cost_labels import label_batch_spec
+from .cost_labels import check_spec, label_batch_spec
 from .deploy import data_bucket as env_data_bucket, env, require, words
 from .gcp import REGION, batch_job, gcp_project, session
 
@@ -133,9 +133,13 @@ disk-tree bulk-list "gcs://$b" -o "gs://{listing_dir(data_bucket, date, "$b")}" 
     }, "listing", scan_id=date)
 
 
-def submit_job(spec: dict, job_id: str | None = None, region: str = REGION) -> str:
-    """POST a Batch job; returns its short name (server-generated if no id)."""
-    url = f"https://batch.googleapis.com/v1/projects/{gcp_project()}/locations/{region}/jobs"
+def submit_job(spec: dict, job_id: str | None = None, region: str = REGION, project: str | None = None) -> str:
+    """POST a Batch job (in `project`, default `gcp_project()`); returns its short name (server-generated if no id).
+
+    The one place dt-cloud creates a Batch job (`tests/test_cost_labels.py` greps for others): a spec missing a required
+    cost label on the job or its allocation policy is refused here (`cost_labels.check_spec`), before the network."""
+    check_spec(spec, f"Batch job {job_id or '(unnamed)'}")
+    url = f"https://batch.googleapis.com/v1/projects/{project or gcp_project()}/locations/{region}/jobs"
     params = {"job_id": job_id} if job_id else None
     r = session().post(url, json=spec, params=params)
     r.raise_for_status()

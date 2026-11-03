@@ -1402,6 +1402,9 @@ def _aggregate_listing_to_parquet(
     _stage("COPY done")
     rows = scalar(con, f"SELECT COUNT(*) FROM read_parquet('{tmp_out}')")
     os.replace(tmp_out, out_parquet)
+    from disk_tree.object_version import attach_parquet
+
+    attach_parquet(out_parquet, listing_sql, bucket, con)
 
     # Root stats: with labels the root is one row per slice — sum them.
     root = con.execute(f"""

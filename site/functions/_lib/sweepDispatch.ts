@@ -67,7 +67,7 @@ export const sweepScript = ({ cfg, mode, jobId, buckets, plan, reviewed, pacing 
     EXIT_TRAP,
     // A real run with a dry run of exactly its items at its scan deletes that dry run's reviewed generations (no
     // relist); without one it lists afresh, as a dry run does, and deletes from its own manifest
-    // (specs/delete-what-you-see.md). `plan` names only the run's items, either way.
+    // (specs/done/delete-what-you-see.md). `plan` names only the run's items, either way.
     ...(mode === 'real' && reviewed ? [
       `dt-cloud sweep execute-reviewed -e xml -j 64 -B ${Math.max(1, Math.min(6, buckets.length))} -c ${pacing} -r 8000 ${bflags} -p "${plan}" -o "${run}" -w /work/reviewed --for-real "${reviewed}"`,
     ] : [
@@ -134,7 +134,7 @@ export const sweepJobSpec = ({ cfg, jobSa, region, script, actor, siteUrl, env, 
             USER: actor,
             CLOUDFLARE_ACCOUNT_ID: cfg.cfAccountId,
             // `sweep manifest`'s listing root (`gs://$DATA_BUCKET`): dt-cloud
-            // has no default bucket (specs/oa-decoupling.md steps 9–10)
+            // has no default bucket (specs/done/oa-decoupling.md steps 9–10)
             DATA_BUCKET: cfg.dataBucket,
             // where `sweep execute` / `sweep undo` record the run (no default D1)
             D1_DB_ID: cfg.d1DbId,

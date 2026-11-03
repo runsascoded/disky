@@ -12,7 +12,7 @@
    }
   ]
  },
- "/api/buckets/open-athena/biotasks/tree?recursive=true": {
+ "/api/buckets/open-athena/biotasks/tree?recursive=true&limit=5000": {
   "status": 200,
   "headers": {
    "link": "<https://huggingface.co/api/buckets/open-athena/biotasks/tree?limit=2&recursive=true&cursor=p2>; rel=\"next\""
@@ -88,7 +88,7 @@
    "usedStorage": 25169920
   }
  },
- "/api/models/open-athena/marinfold-exp75/tree/4c9e7779635b585730180823e0ab4b3319b82f67?recursive=true&expand=true": {
+ "/api/models/open-athena/marinfold-exp75/tree/4c9e7779635b585730180823e0ab4b3319b82f67?recursive=true&expand=true&limit=100": {
   "status": 200,
   "headers": {},
   "body": [
@@ -138,7 +138,7 @@
    "usedStorage": 86939762
   }
  },
- "/api/datasets/open-athena/BFCL-RL-Campaign-Artifacts-2026.10.11/tree/b5c35eae7ca3c1f6c1ea9f8d3e52b2ee45fe67c4?recursive=true&expand=true": {
+ "/api/datasets/open-athena/BFCL-RL-Campaign-Artifacts-2026.10.11/tree/b5c35eae7ca3c1f6c1ea9f8d3e52b2ee45fe67c4?recursive=true&expand=true&limit=100": {
   "status": 200,
   "headers": {},
   "body": [
@@ -188,7 +188,7 @@
    "usedStorage": 0
   }
  },
- "/api/spaces/open-athena/README/tree/c61e315cb93fc0031ca0e9df4ef83b17663035ec?recursive=true&expand=true": {
+ "/api/spaces/open-athena/README/tree/c61e315cb93fc0031ca0e9df4ef83b17663035ec?recursive=true&expand=true&limit=100": {
   "status": 200,
   "headers": {},
   "body": [

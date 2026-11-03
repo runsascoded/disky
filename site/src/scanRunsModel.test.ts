@@ -2,7 +2,8 @@
 import { describe, expect, it } from 'vitest'
 import {
   batchHref, failedAt, logsHref, mapHref, metaHref, outputIndex, phaseIssues, phaseOutcome, phaseOrder, phaseSpans, runTime, type ScanRun, type ScanRunOutput,
-  type ScanRunPhase, manualScans, scanRunOf, structureOf, summarize, withDeltas, runOutcome, overlappingFailures, runTasks, taskLogsHref,
+  type ScanRunPhase, manualScans, scanRunOf, structureOf, summarize, withDeltas, runOutcome, runOutcomeLine, phaseSkip, overlappingFailures, runTasks, taskLogsHref,
+  isMaintenance, liveness, LOST_S, maintStore, phaseStatus, QUIET_S,
 } from './scanRunsModel'
 
 export const run = (o: Partial<ScanRun> & Pick<ScanRun, 'run_id' | 'scan'>): ScanRun => ({
@@ -20,7 +21,7 @@ const RUNS = [
   run({ run_id: 'b-fail', scan: '2026-10-07', status: 'failed', started_ts: 1000, finished_ts: 1100 }),
   run({ run_id: 'b', scan: '2026-10-07', started_ts: 2000, finished_ts: 2600, cost_usd: 2 }),
   run({ run_id: 'b-list', scan: '2026-10-07', kind: 'listing', parent: 'b', started_ts: 2010, finished_ts: 2300, cost_usd: 0.5 }),
-  run({ run_id: 'c', scan: '2026-10-08', status: 'running', started_ts: 3000, finished_ts: null }),
+  run({ run_id: 'c', scan: '2026-10-08', status: 'running', started_ts: 3000, finished_ts: null, updated_ts: 3460 }),
 ]
 const OUTS = [
   out('a', 'listing', 100, 10), out('a', 'listing/b1', 100, 10), out('a', 'static', 5), out('a', 'static/deltas/2026-10-06', 5),
@@ -148,6 +149,54 @@ describe('phase spans', () => {
     expect(phaseIssues(RUNS[2], [RUNS[2], ...candidates], ps)).toEqual([{ phase: 'names', outcome: 'timed out', recovery: good }])
     expect(phaseIssues(RUNS[2], candidates.slice(1), ps)).toEqual([{ phase: 'names', outcome: 'timed out', recovery: null }])
   })
+  it('a skipped static-names step makes the run partial, with its recorded reason; the probe\'s skips that follow do not', () => {
+    const skip = 'skipped (busy): another coordinator or a compaction holds the static-names store\'s lease; search for this scan comes with its append or the next run'
+    const ps: ScanRunPhase[] = [
+      phase('b', 'listing', 0, 2000, 2300),
+      { ...phase('b', 'static-names', 1, 2300, 2310), note: `overlapped, ${skip}` },
+      { ...phase('b', 'probe', 2, 2400, 2500), note: `4 passed, 2 skipped (static-names ${skip}), 0 failed` },
+    ]
+    const issues = phaseIssues(RUNS[2], [RUNS[2]], ps)
+    expect(issues).toEqual([{ phase: 'static-names', outcome: 'skipped', recovery: null, reason: skip }])
+    expect([runOutcome(RUNS[2], issues), runOutcomeLine(RUNS[2], issues)]).toEqual(['partial', `partial: static-names ${skip}`])
+    expect(phaseSpans(RUNS[2], ps).map(s => s.status)).toEqual(['done', 'done', 'done'])
+  })
+  it('a skip clause only at a closed note\'s start or after a comma', () => {
+    expect([
+      phaseSkip({ status: 'done', note: 'overlapped, skipped (busy): held' }),
+      phaseSkip({ status: 'done', note: 'skipped: no current generation' }),
+      phaseSkip({ status: 'done', note: 'overlapped' }),
+      phaseSkip({ status: 'done', note: '4 passed, 2 skipped (static-names skipped (busy): held), 0 failed' }),
+      phaseSkip({ status: 'running', note: 'skipped: a heartbeat line' }),
+      phaseSkip({ status: 'done', note: null }),
+    ]).toEqual(['skipped (busy): held', 'skipped: no current generation', null, null, null, null])
+  })
+  it('a failed probe stays a failure beside nothing skipped', () => {
+    const ps: ScanRunPhase[] = [
+      { ...phase('b', 'static-names', 0, 2300, 2310), note: 'overlapped' },
+      { ...phase('b', 'probe', 1, 2400, 2500), note: 'failed (exit 1), 4 passed, 0 skipped, 2 failed' },
+    ]
+    const issues = phaseIssues(RUNS[2], [RUNS[2]], ps)
+    expect(issues).toEqual([{ phase: 'probe', outcome: 'failed', recovery: null, detail: '4 passed, 0 skipped, 2 failed' }])
+    expect(runOutcomeLine(RUNS[2], issues)).toEqual('partial: probe failed')
+  })
+  it('a phase failed twice is one issue, its attempts counted, the last one\'s verdict its detail', () => {
+    const ps: ScanRunPhase[] = [
+      { ...phase('b', 'probe', 0, 2400, 2500), note: 'failed (exit 1), 4 passed, 0 skipped, 2 failed' },
+      { ...phase('b', 'probe', 1, 2600, 2700), note: 'failed (exit 1), 5 passed, 0 skipped, 1 failed' },
+    ]
+    expect(phaseIssues(RUNS[2], [RUNS[2]], ps)).toEqual([{ phase: 'probe', outcome: 'failed', recovery: null, attempts: 2, detail: '5 passed, 0 skipped, 1 failed' }])
+  })
+  it('a probe whose only failures are the index\'s lag leaves the run "search behind", not partial', () => {
+    const lag = 'the static name index covers scans through 2026-10-23T0702, 2 published scans behind (20.1 h); 3 of 9 search requests refused'
+    const ps: ScanRunPhase[] = [{ ...phase('b', 'probe', 0, 2400, 2500), note: `search behind: ${lag}` }]
+    const issues = phaseIssues(RUNS[2], [RUNS[2]], ps)
+    expect(issues).toEqual([{ phase: 'probe', outcome: 'search behind', recovery: null, reason: lag }])
+    expect([runOutcome(RUNS[2], issues), runOutcomeLine(RUNS[2], issues), phaseSpans(RUNS[2], ps).map(s => s.status)])
+      .toEqual(['search behind', `search behind: probe ${lag}`, ['done']])
+    const failed = { phase: 'iv', outcome: 'failed', recovery: null }
+    expect(runOutcome(RUNS[2], [...issues, failed])).toEqual('partial')
+  })
   it('puts an overlapped phase on its own lane, on the run clock', () => {
     expect(phaseSpans(RUNS[2], PHASES.filter(p => p.run_id === 'b')).map(s => [s.phase, s.start, s.end, s.lane])).toEqual([
       ['listing', 0, 300, 0], ['ingest', 0, 310, 1], ['index', 310, 500, 0],
@@ -231,5 +280,74 @@ describe('taskLogsHref', () => {
     expect(taskLogsHref('p', 'nf-e8646fb0-1792179471443', 1_800_000_000)).toBe(
       `https://console.cloud.google.com/logs/query;query=${encodeURIComponent(q).replace(/\(/g, '%28').replace(/\)/g, '%29')}?project=p`,
     )
+  })
+})
+
+describe('maintenance runs (compactions, merges: `dt_cloud.maint_runs`)', () => {
+  const scanRun = run({ run_id: 'scan-1', scan: '2026-10-20T0700', kind: 'scan', started_ts: 1000, finished_ts: 2000 })
+  const compact = run({
+    run_id: 'iv-1', scan: '2026-10-20T0700', kind: 'compact', status: 'running', started_ts: 3000, finished_ts: null,
+    gen: 'interval-store/2026-10-09b.g2', source: 'job', updated_ts: 9500, machine: 'n2-highmem-32',
+  })
+  const merged = run({ run_id: 'sn-1', scan: '2026-10-20T0700', kind: 'merge', status: 'nop', started_ts: 2500, finished_ts: 2600, gen: 'static-names/2026-10-08c' })
+  const phases: ScanRunPhase[] = [
+    { ...phase('iv-1', 'read', 0, 3000, 3010), note: '57 files, 12.00 GiB from oa-gcs-usage-dvx (mount) (in place)' },
+    { ...phase('iv-1', 'due', 1, 3010, 3011), note: 'level 5: two L4 runs (2 runs: L4 L4)' },
+    { ...phase('iv-1', 'fold', 2, 3011, 7000), note: '64 ranges, 1,234 rows' },
+    { ...phase('iv-1', 'sorts', 3, 7000, 9400), status: 'running', finished_ts: null as unknown as number, note: '12/64 ranges' },
+  ]
+
+  it('rows of their own beside the scan (never folded into it), with their kinds in the filter', () => {
+    const rows = summarize([scanRun, compact, merged], phases, [], 10_000)
+    expect(rows.map(r => [r.run.run_id, r.run.kind, r.secs, r.spans.map(s => [s.phase, s.status, s.end - s.start])])).toEqual([
+      ['iv-1', 'compact', 7000, [['read', 'done', 10], ['due', 'done', 1], ['fold', 'done', 3989], ['sorts', 'running', 3000]]],
+      ['sn-1', 'merge', 100, []],
+      ['scan-1', 'scan', 1000, []],
+    ])
+    expect([...new Set(rows.map(r => r.run.kind))].sort()).toEqual(['compact', 'merge', 'scan'])
+  })
+
+  it('a store per run (its `gen`\'s first segment); none for a scan', () => {
+    expect([compact, merged, scanRun].map(r => [isMaintenance(r.kind), maintStore(r)])).toEqual([
+      [true, 'interval-store'], [true, 'static-names'], [false, null],
+    ])
+  })
+
+  it('a running one shows its running phase, elapsed time and live note, and goes quiet without a heartbeat', () => {
+    const spans = phaseSpans(compact, phases, 10_000)
+    expect(liveness(compact, spans, 9560)).toEqual({ phase: 'sorts', elapsed: 3000, note: '12/64 ranges', quiet: null, lost: false })
+    expect(liveness(compact, spans, 9500 + QUIET_S)).toEqual({ phase: 'sorts', elapsed: 3000, note: '12/64 ranges', quiet: null, lost: false })
+    expect(liveness(compact, spans, 9500 + QUIET_S + 1)).toEqual({ phase: 'sorts', elapsed: 3000, note: '12/64 ranges', quiet: QUIET_S + 1, lost: false })
+    expect(liveness(merged, [], 10_000)).toBeNull()
+  })
+
+  it('quiet after five missed 60 s heartbeats, lost after thirty', () => {
+    expect([QUIET_S, LOST_S]).toEqual([300, 1800])
+  })
+
+  it('a running phase whose live note mentions a failure is still running; a closed one is failed by it', () => {
+    const note = '41m · merge: drill/a · 3 shards, failed to stat x (2m ago)'
+    expect([phaseStatus({ status: 'running', note }), phaseStatus({ status: 'done', note }), phaseStatus({ status: 'done', note: 'failed (exit 1)' })])
+      .toEqual(['running', 'failed', 'failed'])
+  })
+
+  it('lost past `LOST_S` without a write: its clock stops at its last write, so it never stretches the duration chart', () => {
+    const live = 9500 + LOST_S, lost = live + 1, days = 9500 + 4 * 86400
+    expect([live, lost, days].map(now => {
+      const [row] = summarize([compact], phases, [], now)
+      return [row.secs, row.spans.map(s => [s.phase, s.end - s.start]).at(-1), liveness(compact, row.spans, now)]
+    })).toEqual([
+      [live - 3000, ['sorts', live - 7000], { phase: 'sorts', elapsed: live - 7000, note: '12/64 ranges', quiet: LOST_S, lost: false }],
+      [9500 - 3000, ['sorts', 9500 - 7000], { phase: 'sorts', elapsed: 9500 - 7000, note: '12/64 ranges', quiet: LOST_S + 1, lost: true }],
+      [9500 - 3000, ['sorts', 9500 - 7000], { phase: 'sorts', elapsed: 9500 - 7000, note: '12/64 ranges', quiet: days - 9500, lost: true }],
+    ])
+    // a finished run keeps its own end, however old its last write
+    expect(summarize([{ ...compact, status: 'failed', finished_ts: 9600 }], phases, [], days).map(r => r.secs)).toEqual([6600])
+  })
+
+  it('is never the run behind a scan (the map\'s "scanned … ago" link)', () => {
+    const rows = summarize([scanRun, compact, merged], phases, [], 10_000)
+    expect(scanRunOf(rows, '2026-10-20T0700')?.run_id).toBe('scan-1')
+    expect(scanRunOf(summarize([compact], phases, [], 10_000), '2026-10-20T0700')).toBeUndefined()
   })
 })

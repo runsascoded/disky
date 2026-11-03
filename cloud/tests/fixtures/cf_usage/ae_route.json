@@ -1,0 +1,71 @@
+{
+  "meta": [
+    {
+      "name": "day",
+      "type": "Date"
+    },
+    {
+      "name": "route",
+      "type": "String"
+    },
+    {
+      "name": "requests",
+      "type": "Float64"
+    },
+    {
+      "name": "wall_ms",
+      "type": "Float64"
+    },
+    {
+      "name": "r2_reads",
+      "type": "Float64"
+    },
+    {
+      "name": "r2_bytes",
+      "type": "Float64"
+    },
+    {
+      "name": "d1_queries",
+      "type": "Float64"
+    },
+    {
+      "name": "d1_rows_read",
+      "type": "Float64"
+    },
+    {
+      "name": "kv_reads",
+      "type": "Float64"
+    },
+    {
+      "name": "d1_rows_written",
+      "type": "Float64"
+    }
+  ],
+  "data": [
+    {
+      "day": "2026-10-19",
+      "route": "/api/subtree",
+      "requests": 900,
+      "wall_ms": 450000,
+      "r2_reads": 4800,
+      "r2_bytes": 96000000,
+      "d1_queries": 1800,
+      "d1_rows_read": 100000,
+      "kv_reads": 300,
+      "d1_rows_written": 10
+    },
+    {
+      "day": "2026-10-20",
+      "route": "page",
+      "requests": 400,
+      "wall_ms": 8000,
+      "r2_reads": 0,
+      "r2_bytes": 0,
+      "d1_queries": 400,
+      "d1_rows_read": 400,
+      "kv_reads": 0
+    }
+  ],
+  "rows": 2,
+  "rows_before_limit_at_least": 2
+}

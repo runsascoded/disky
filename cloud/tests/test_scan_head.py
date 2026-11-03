@@ -16,6 +16,8 @@ from dt_cloud.scan_profile import load
 
 FIX = Path(__file__).parent / "fixtures" / "scan_profiles"
 NOW = dt.datetime(2026, 10, 16, 12, 0, 1, tzinfo=dt.timezone.utc)
+#: A head's required cost labels (`$DISKY_LABELS`: `app`, `deployment`), as `conftest` sets them for every test.
+LABELS = {"DISKY_LABELS": "app=disky,deployment=test"}
 
 
 def test_identity_stamped_once():
@@ -100,7 +102,7 @@ def test_params_golden_per_call_secrets():
     the profile's overlaid; a step with none of its own reads `secrets`."""
     p = load(FIX / "meta-store.yml")
     got = H.params(p, "<profile>", "2026-10-16T1200", "20261016T120001Z", "1792152001", "run-1",
-                   H.session_id("example", "2026-10-16T1200", "meta"), {})
+                   H.session_id("example", "2026-10-16T1200", "meta"), {"DISKY_LABELS": "app=disky,deployment=example"})
     assert got == json.loads((FIX / "meta-store.params.json").read_text())
 
 
@@ -115,8 +117,22 @@ def test_executor_config_golden():
 def test_params_golden():
     p = load(FIX / "cw-s3.yml")
     got = H.params(p, "<profile>", "2026-10-16T1200", "20261016T120001Z", "1792152001", "run-1",
-                   H.session_id("cw-s3", "2026-10-16T1200"), {"DT_RECORD": "off", "DISKY_LABELS": "stack=prod,team=x", "OTHER": "1"})
+                   H.session_id("cw-s3", "2026-10-16T1200"), {"DT_RECORD": "off", "DISKY_LABELS": "app=disky,deployment=cw-s3,stack=prod,team=x", "OTHER": "1"})
     assert got == json.loads((FIX / "cw-s3.params.json").read_text())
+
+
+def test_static_names_can_have_its_own_machine():
+    from dataclasses import replace
+
+    from dt_cloud.scan_profile import Machine
+
+    default = load(FIX / "cw-s3.yml")
+    sized = replace(default, machines={**default.machines, "static": Machine(type="e2-standard-4", cpus=4, memory="14 GB")})
+    args = ("{}", "2026-10-20T0716", "G", "1", "run-1", "session", LABELS)
+    assert [H.params(p, *args).get("static_label") for p in (default, sized)] == ["small", "static"]
+    assert [line for line in H.executor_config(sized).splitlines() if line.startswith("    withLabel: static ")] == [
+        "    withLabel: static { machineType = 'e2-standard-4'; cpus = 4; memory = '14 GB' }",
+    ]
 
 
 def test_params_reproc_fresh_and_extras():
@@ -126,7 +142,7 @@ def test_params_reproc_fresh_and_extras():
                "layout": {"layer2": "l2/{scan}/", "snapshots": ""}, "sources": ["gs://a"],
                "steps": ["access-ingest", "healthcheck"], "skip": ["digest", "static-names"],
                "options": {"list": {"import": True}}})
-    got = H.params(p, "{}", "2026-10-16", "G", "1", "", "S", {}, reproc=True, fresh=True)
+    got = H.params(p, "{}", "2026-10-16", "G", "1", "", "S", LABELS, reproc=True, fresh=True)
     assert {k: got[k] for k in ("steps", "pre", "pre_label", "post", "over_time", "over_time_label", "skip_list", "cache", "env",
                                 "work_bucket", "secrets_project")} == {
         "steps": ["bucket-check", "access-ingest", "list", "index", "publish-r2", "interval-store", "index-rows", "index-sync",
@@ -138,10 +154,25 @@ def test_params_reproc_fresh_and_extras():
         "over_time_label": "post",
         "skip_list": True,
         "cache": False,
-        "env": {"REPROC": "1"},
+        "env": {"REPROC": "1", **LABELS},
         "work_bucket": "",
         "secrets_project": "",
     }
+
+
+def test_params_put_side_steps_in_their_own_task():
+    """`non-live` (stage `side`) runs as its own task beside `list` and `index` (`params.side`), never in `pre`, which
+    `index` waits on; `machines.side` sizes it."""
+    from dt_cloud.scan_profile import parse
+
+    base = {"deployment": "fix", "executor": {"kind": "local"}, "work": "/w", "data": "/d",
+            "layout": {"layer2": "l2/{scan}/", "snapshots": ""}, "sources": ["gs://a"],
+            "steps": ["access-ingest", "non-live"], "skip": ["digest", "static-names"],
+            "options": {"list": {"import": True}, "non-live": {"classes": ["soft-deleted"]}}}
+    got = H.params(parse(base), "{}", "2026-10-16", "G", "1", "", "S", LABELS)
+    assert {k: got[k] for k in ("pre", "side", "side_label")} == {"pre": ["access-ingest"], "side": ["non-live"], "side_label": "small"}
+    sized = H.params(parse({**base, "machines": {"side": {"type": "e2-standard-4"}}}), "{}", "2026-10-16", "G", "1", "", "S", LABELS)
+    assert sized["side_label"] == "side"
 
 
 @pytest.mark.parametrize("poller, steps, pre", [
@@ -160,7 +191,7 @@ def test_access_ingest_poller_leaves_the_scan(poller: bool, steps: list[str], pr
                "skip": ["static-names", "publish-r2", "interval-store", "over-time", "index-gc", "warm-cache", "probe", "digest"],
                "options": {"access-ingest": {"args": ["-P", "4"], "poller": poller},
                            "index": {"mode": "path-index", "access": "access/agg/*/*.parquet"}}})
-    got = H.params(p, "{}", "2026-10-18T0700", "G", "1", "", "S", {})
+    got = H.params(p, "{}", "2026-10-18T0700", "G", "1", "", "S", LABELS)
     assert (got["steps"], got["pre"], p.opts("index")["access"]) == (steps, pre, "access/agg/*/*.parquet")
 
 
@@ -247,6 +278,27 @@ def test_fallback_executor_config():
     ]
 
 
+def test_params_source_fallback():
+    """A source with fallbacks: its list task's machines by submit attempt and its queue timeout (a Nextflow duration), and the most
+    fallbacks any source has as the list tasks' retry bound."""
+    from dt_cloud.scan_profile import parse
+
+    p = parse({"deployment": "fix", "executor": {"kind": "google-batch", "project": "p", "region": "r", "image": "img"},
+               "work": "gs://w/nf", "data": "gs://w", "layout": {"layer2": "l2/{scan}/", "snapshots": ""},
+               "sources": [{"uri": "s3://a", "machine": "n2-standard-16", "fallback": ["n2d-standard-16", "c2d-standard-16"],
+                            "queue_timeout": 10}, "s3://b"],
+               "skip": ["digest", "static-names"], "options": {"list": {"import": True}}})
+    got = H.params(p, "{}", "2026-10-16", "G", "1", "", "S", {"DISKY_LABELS": "app=disky,deployment=fix"})
+    assert {k: got[k] for k in ("sources", "list_retries")} == {
+        "sources": [
+            {"uri": "s3://a", "machine": "n2-standard-16", "disk": None,
+             "machines": ["n2-standard-16", "n2d-standard-16", "c2d-standard-16"], "queue_timeout": "10m"},
+            {"uri": "s3://b", "machine": None, "disk": None},
+        ],
+        "list_retries": 2,
+    }
+
+
 def test_dry_run_writes_the_launch_files(tmp_path, monkeypatch):
     for k in ("SNAP_ID", "GEN", "DT_JOB_START", "DT_RUN_ID", "BATCH_JOB_UID", "SCAN_RUNS_PROFILE"):
         monkeypatch.delenv(k, raising=False)
@@ -272,6 +324,35 @@ def test_dry_run_writes_the_launch_files(tmp_path, monkeypatch):
     )
 
 
+@pytest.mark.parametrize("labels, missing", [(None, ["app", "deployment"]), ("app=disky", ["deployment"]), ("deployment=cw-s3,team=x", ["app"])])
+def test_head_refuses_without_cost_labels(tmp_path, labels, missing):
+    """No unlabelled scan (specs/done/cost-labels-required.md): `head` refuses before it writes or records anything when
+    `$DISKY_LABELS` lacks `app` or `deployment` (the profile's own `labels` don't count)."""
+    from dt_cloud.cost_labels import MissingCostLabels
+
+    env = {"SNAP_ID": "2026-10-16T1200", "GEN": "G1", "DT_JOB_START": "100", **({"DISKY_LABELS": labels} if labels else {})}
+    launch = tmp_path / "launch"
+    with pytest.raises(MissingCostLabels) as e:
+        H.head(FIX / "cw-s3.yml", tmp_path / "nf", launch, dry_run=True, env=env)
+    assert (e.value.missing, launch.exists()) == (missing, False)
+
+
+def test_head_takes_cost_labels_from_the_profiles_env(tmp_path):
+    """`$DISKY_LABELS` unset in the head's env but in the profile's `env`: the head takes it (as `D1_DB_ID` & co.), so
+    every task's labels carry it and every step's env forwards it to the Batch jobs it submits."""
+    prof = tmp_path / "p.yml"
+    prof.write_text(f"deployment: fix\nexecutor: {{kind: local}}\nwork: {tmp_path}/nf\ndata: {tmp_path}/data\n"
+                    "layout: {layer2: 'l2/{scan}/', snapshots: ''}\nsources: [s3://a]\n"
+                    "skip: [static-names, digest, interval-store, warm-cache, probe]\n"
+                    "options: {list: {import: true}}\nenv: {DISKY_LABELS: 'app=disky,deployment=fix'}\n")
+    launch = tmp_path / "launch"
+    env = {"SNAP_ID": "2026-10-16T1200", "GEN": "G1", "DT_JOB_START": "100", "DT_RECORD": "off"}
+    assert H.head(prof, tmp_path / "nf", launch, dry_run=True, env=env) == 0
+    params = json.loads((launch / "params.json").read_text())
+    assert (params["labels"], params["env"]["DISKY_LABELS"]) == (
+        {"app": "disky", "deployment": "fix", "component": "scan", "scan_id": "2026-10-16t1200"}, "app=disky,deployment=fix")
+
+
 def test_head_records_into_the_profiles_database_and_store(tmp_path, monkeypatch):
     """`head()` with `D1_DB_ID` (and `SCAN_RUNS_PROFILE`) only in the profile's `env` (cw's first prod run on the generic
     head: its own start / finish found no database), and a non-primary `store`: both writes go to the profile's D1, the
@@ -279,7 +360,7 @@ def test_head_records_into_the_profiles_database_and_store(tmp_path, monkeypatch
     from dt_cloud import index_footer, scan_runs
 
     for k in ("D1_DB_ID", "SCAN_RUNS_PROFILE", "DT_RECORD", "BATCH_JOB_UID", "DT_RUN_ID", "SNAP_ID", "GEN", "DT_JOB_START",
-              "REPROC", "DISKY_LABELS", "DT_TRIGGER"):
+              "REPROC", "DT_TRIGGER"):
         monkeypatch.delenv(k, raising=False)
     monkeypatch.setenv("TMPDIR", str(tmp_path / "t"))
     monkeypatch.setenv("DT_TRIGGER", "schedule")
@@ -307,7 +388,7 @@ def test_head_records_into_the_profiles_database_and_store(tmp_path, monkeypatch
         return record_sql(rec, now)
 
     monkeypatch.setattr(scan_runs, "record_sql", spy)
-    monkeypatch.setattr(H.subprocess, "Popen", lambda argv, **kw: SimpleNamespace(pid=0, wait=lambda: 0))
+    monkeypatch.setattr(H.subprocess, "Popen", lambda argv, **kw: SimpleNamespace(pid=0, wait=lambda timeout=None: 0))
     assert H.head(prof, tmp_path / "nf-dir", tmp_path / "launch") == 0
     assert (runs_written[0], runs_written[-1][:2], set(dbs)) == (
         ("2026-10-16T1200", "meta", "running", "schedule"), ("2026-10-16T1200", "meta"), {"db-from-profile"})
@@ -332,7 +413,7 @@ def test_head_stores_the_dag_before_the_run(tmp_path, monkeypatch):
     from dt_cloud import index_footer, scan_runs
 
     for k in ("D1_DB_ID", "SCAN_RUNS_PROFILE", "DT_RECORD", "BATCH_JOB_UID", "DT_RUN_ID", "SNAP_ID", "GEN", "DT_JOB_START",
-              "REPROC", "DISKY_LABELS", "DT_TRIGGER"):
+              "REPROC", "DT_TRIGGER"):
         monkeypatch.delenv(k, raising=False)
     monkeypatch.setenv("SNAP_ID", "2026-10-16T1200")
     monkeypatch.setenv("GEN", "G1")
@@ -360,7 +441,7 @@ def test_head_stores_the_dag_before_the_run(tmp_path, monkeypatch):
         return SimpleNamespace(returncode=0)
 
     monkeypatch.setattr(H.subprocess, "run", preview)
-    monkeypatch.setattr(H.subprocess, "Popen", lambda argv, **kw: events.append("nextflow run") or SimpleNamespace(pid=0, wait=lambda: 0))
+    monkeypatch.setattr(H.subprocess, "Popen", lambda argv, **kw: events.append("nextflow run") or SimpleNamespace(pid=0, wait=lambda timeout=None: 0))
     assert H.head(prof, nf_dir, launch) == 0
     assert previews == [H.preview_argv(nf_dir, launch)]
     assert previews[0][-3:] == ["-preview", "-with-dag", str(launch / "dag-preview.mmd")]
@@ -375,6 +456,47 @@ def test_head_stores_the_dag_before_the_run(tmp_path, monkeypatch):
     events.clear()
     assert H.head(prof, nf_dir, launch) == 0
     assert ("INSERT INTO scan_run_dags" in events, "nextflow run" in events) == (False, True)
+
+
+def test_head_publishes_cache_hits_while_nextflow_is_running(tmp_path, monkeypatch):
+    from dt_cloud import run_dag
+
+    launch = tmp_path / 'launch'
+    profile = tmp_path / 'p.yml'
+    profile.write_text(f'deployment: fix\nexecutor: {{kind: local}}\nwork: {tmp_path}/nf\ndata: {tmp_path}/data\n'
+                       "layout: {layer2: 'l2/{scan}/', snapshots: ''}\nsources: [s3://a]\n"
+                       'skip: [static-names, digest, interval-store, warm-cache, probe]\n'
+                       'options: {list: {import: true}}\nenv: {SCAN_RUNS_PROFILE: unused}\n')
+    monkeypatch.setenv('DT_RUN_ID', 'run-cache')
+    monkeypatch.delenv('REPROC', raising=False)
+    monkeypatch.delenv('BATCH_JOB_UID', raising=False)
+    monkeypatch.setattr(H, 'store_preview_dag', lambda *args: (launch / H.PREVIEW_DAG).write_text('flowchart TB\n    v2(["index"])\n'))
+    writes = []
+
+    def record(cmd, args):
+        if cmd.name == 'dag':
+            writes.append((args[0], run_dag.read_file('nextflow', Path(args[1])).cached_tasks))
+
+    def popen(argv, **kwargs):
+        trace = launch / 'trace.tsv'
+        trace.write_text('name\tstatus\nindex\tCACHED\n')
+        calls = []
+
+        def wait(timeout):
+            assert timeout == 10
+            calls.append(timeout)
+            if len(calls) < 3:
+                raise H.subprocess.TimeoutExpired(argv, timeout)
+            return 0
+
+        return SimpleNamespace(pid=0, wait=wait)
+
+    monkeypatch.setattr(H, '_record', record)
+    monkeypatch.setattr(H, 'publish_reports', lambda *args: [])
+    monkeypatch.setattr(H, 'echo_task_logs', lambda *args: 0)
+    monkeypatch.setattr(H.subprocess, 'Popen', popen)
+    assert H.head(profile, tmp_path / 'nf-dir', launch) == 0
+    assert writes == [('run-cache', ('index',))]
 
 
 def test_publish_reports(tmp_path):
@@ -467,7 +589,7 @@ def test_reproc_still_fetches_an_adopted_listing():
 
     adopted = prof([{"uri": "r2://disk-tree", "listing": "{env:DT_CAPTURE}"}, "r2://other"])
     listed = prof(["r2://disk-tree"])
-    got = [{k: H.params(p, "{}", "2026-10-16", "G", "1", "", "S", {}, reproc=r)[k] for k in ("sources", "skip_list")}
+    got = [{k: H.params(p, "{}", "2026-10-16", "G", "1", "", "S", LABELS, reproc=r)[k] for k in ("sources", "skip_list")}
            for p, r in ((adopted, True), (adopted, False), (listed, True))]
     assert got == [
         {"sources": [{"uri": "r2://disk-tree", "machine": None, "disk": None}], "skip_list": False},
@@ -486,6 +608,6 @@ def test_a_local_data_dir_orders_static_names_after_publish():
         return parse({"deployment": "fix", "executor": {"kind": "local"}, "work": "/w", "data": data,
                       "layout": {"layer2": "l2/{scan}/", "snapshots": "", "listing": "cap/{scan}/"}, "sources": ["r2://b"],
                       "skip": ["digest", *skip], "options": {"static-names": {"gen": "g"}}})
-    got = [H.params(prof(d, skip), "{}", "2026-10-16", "G", "1", "", "S", {})["static_after_publish"]
+    got = [H.params(prof(d, skip), "{}", "2026-10-16", "G", "1", "", "S", LABELS)["static_after_publish"]
            for d, skip in (("/d", []), ("gs://dvx", []), ("/d", ["publish-r2"]))]
     assert got == [True, False, False]

@@ -8,9 +8,11 @@ import { Avatar } from './Avatar'
 import { CopyName, copyText } from './CopyName'
 import { FaRegCopy } from 'react-icons/fa6'
 import { pathCopy, pathCrumbs, pathDisplay, pathText } from './pathCrumbs'
-import { useStagedIndex } from './StageAction'
+import { PrefixStageAction, tableCoverItem, useStagedIndex } from './StageAction'
+import { useCanStage } from './auth'
 import { cellAction } from './objects'
 import { canonId, UserChip, ghHandle, shortName } from './UserChip'
+import { newestLabel, shareOfTotal } from './viewNums'
 import { dateColor, dateGradientCss, epochDaysToDate, epochDaysToMonth, inkFor, slotColor, userColor } from './colors'
 import type { UserIndexEntry } from './colors'
 import { OwnerControls } from './OwnerControls'
@@ -18,7 +20,7 @@ import type { OwnerIndex } from './owners'
 import { ClassMixTip, Tooltip } from './Tooltip'
 import type { ColorMode, Pricing, TreeNode } from './types'
 import { CLASS_NAMES, classMix, fmtN, fmtUsd, ratePerByte, unownedBytes } from './types'
-import { SettingsMenu, useRenderer, useTiling, useTitleSpace } from './prefs'
+import { SettingsMenu, useBorderStep, useRenderer, useTiling, useTitleSpace } from './prefs'
 import { useStore } from './store'
 import { useUnits } from './units'
 import { usePerfCommit } from './perf'
@@ -184,7 +186,10 @@ const scaleMix = (mix: Record<string, number>, b: number): Record<string, number
   return tot ? Object.fromEntries(Object.entries(mix).map(([c, x]) => [c, (x * b) / tot])) : mix
 }
 
-export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRange, readThrough, readLogged = allLogged, readUnlogged = [], hl, onPickUser, onPickUnowned, onClearHl, pricing, lens, ownerLensed, scheme = 'gs://', home, redact, ownerIdx, initialPath, path, onPathChange, objects = false, onOpen, brush, onBrush, band, onBand }: {
+export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRange, readThrough, readLogged = allLogged, readUnlogged = [], hl, onPickUser, onPickUnowned, onClearHl, pricing, lens, ownerLensed, scheme = 'gs://', home, redact, ownerIdx, initialPath, path, onPathChange, objects = false, onOpen, brush, onBrush, band, onBand, stageHere = false }: {
+  /** Offer the drilled folder's own trash in the owner panel: an unfiltered view (under a filter the bulk bar
+   *  stages the matches; a folder's whole prefix never stands in for them). */
+  stageHere?: boolean
   root: TreeNode
   mode: ColorMode
   /** Secondary color axis — see `ShadeMode`. Default `none`. */
@@ -245,6 +250,8 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
 }) {
   usePerfCommit('treemap')
   const time = listingTime(scheme)
+  // ` · 12.34% of total`, or nothing for the whole total (`shareOfTotal`).
+  const share = (n: TreeNode) => { const s = shareOfTotal(n.b, root.b); return s ? ` · ${s}` : '' }
   const { fmtBytes, fmtBytesLike } = useUnits()
   const [liP, setLiP] = useUrlState('li', stringParam('s'))
   const liMetrics = useMemo(() => new Set([...(liP ?? 's')].filter((m): m is LiMetric => m === 's' || m === 'p' || m === 'c')), [liP])
@@ -259,6 +266,7 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
   const fileTunnel = !!useProxyInfo().data?.fileTunnel
   const [renderer] = useRenderer()
   const [titleSpace] = useTitleSpace()
+  const [borderStep] = useBorderStep()
   // Macro/micro hue for a cell, relative to the drilled root (see childRanks).
   // Every cell path starts with the drilled path, so the view root sits at a
   // fixed index — NOT `len - 2 - depth`: a collapsed chain (`run/…/checkpoints`
@@ -282,6 +290,7 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
   )
 
   const staged = useStagedIndex()
+  const canStage = useCanStage()
   const schemeOf = (path: TreeNode[]) => store.bucketSchemes?.[path[1]?.n] ?? scheme
   const uriOf = (path: TreeNode[]) => schemeOf(path) + path.slice(1).map(n => n.n).join('/')
   // a mixed-provider store's buckets title with their scheme (`r2://…`), so the map says which cloud each is on
@@ -297,14 +306,17 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
     const o = tiny.reduce((s, it) => s + it.o, 0)
     const us: Record<string, number> = {}
     let md = -1
+    let mt = -1
     let ma = -1
     for (const it of tiny) {
       for (const [u, ub] of it.us ?? []) us[u] = (us[u] ?? 0) + ub
       if (it.d != null && it.d > md) md = it.d
+      if (it.t != null && it.t > mt) mt = it.t
       if (it.a != null && it.a > ma) ma = it.a
     }
     const folded: TreeNode = { n: `(+${tiny.length})`, b, o }
     if (md >= 0) folded.d = md
+    if (mt >= 0) folded.t = mt
     if (ma >= 0) folded.a = ma
     const topUs = Object.entries(us).sort((a, c) => c[1] - a[1]).slice(0, 5)
     if (topUs.length) folded.us = topUs as [string, number][]
@@ -508,7 +520,11 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
             there) — no panel for an empty box. */}
         {hasPanel && (
           <div className="root-owner">
-            <OwnerControls uri={uriOf(path)} idx={ownerIdx!} node={node} lensed={ownerLensed} userIdx={userIdx} onPickUser={onPickUser} />
+            {/* The folder itself, beside its owner: the same trash as its row one level up (never a whole bucket). */}
+            <OwnerControls uri={uriOf(path)} idx={ownerIdx!} node={node} lensed={ownerLensed} userIdx={userIdx} onPickUser={onPickUser}
+              stage={stageHere && store.staging && canStage
+                ? <PrefixStageAction item={tableCoverItem(node, path.slice(1).map(n => n.n).join('/'))} scheme={schemeOf(path)} fmtBytes={fmtBytes} mark={staged?.markOf(uriOf(path), true) ?? null} />
+                : null} />
             {keys}
           </div>
         )}
@@ -708,8 +724,8 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
         {/* Under a union root: the root's store and that store's scan. */}
         <RootSourceLine node={path[1]} />
         <div className="nums">
-          {fmtBytes(n.b)} · {fmtN(n.o)} objects · {((100 * n.b) / root.b).toFixed(2)}% of total
-          {n.d != null && <> · last {time.label} {epochDaysToDate(n.d)}</>}
+          {fmtBytes(n.b)} · {fmtN(n.o)} objects{share(n)}
+          {newestLabel(n) && <> · last {time.label} {newestLabel(n)}</>}
           {n.a != null
             ? <> · last read {epochDaysToDate(n.a)}</>
             : readRange && !n.n.startsWith('(') && (readLogged(path[1]?.n)
@@ -761,6 +777,7 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
       formatSize={fmtBytes}
       collapseChains
       reclaimTitleSpace={titleSpace === 'reclaim'}
+      borderStep={borderStep === 'on'}
       branchOutline="color-mix(in oklab, var(--ink) 30%, transparent)"
       mergeSmall={mergeSmall}
       colorForCell={colorForCell}
@@ -783,7 +800,9 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
         // Width alone is a blunt cue: the top seam gets 3px and one step down
         // 2px, the rest hairlines — nesting reads from the edge color (page
         // background at the top, fill-tinted deeper) and the header bars.
-        const base = below >= 2 ? 3 : below === 1 ? 2 : 1
+        // Stepped (`borderStep`): one more pixel per level below, rounded and
+        // clamped under each parent's by the core, so every level's seam differs.
+        const base = borderStep === 'on' ? below + 1 : below >= 2 ? 3 : below === 1 ? 2 : 1
         return Math.min(base, Math.max(1, Math.min(w, h) / 16))
       }}
       tiling={tiling}
@@ -799,8 +818,8 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
         <div className="tip-viewcard">
           <div className="vc-scope">{p.length > 1 ? pathText(schemeOf(p), p.slice(1).map(x => x.n), home) : n.n}</div>
           <div className="nums">
-            {fmtBytes(n.b)} · {fmtN(n.o)} objects · {root.b ? ((100 * n.b) / root.b).toFixed(2) : 0}% of total
-            {n.d != null && <> · last {time.label} {epochDaysToDate(n.d)}</>}
+            {fmtBytes(n.b)} · {fmtN(n.o)} objects{share(n)}
+            {newestLabel(n) && <> · last {time.label} {newestLabel(n)}</>}
           </div>
           <div className="vc-hint">Hover a cell for its details · click one to open it.</div>
           {fileTunnel && p.length > 1 && <AppActions path={p.slice(1).map(x => x.n).join('/')} dir />}

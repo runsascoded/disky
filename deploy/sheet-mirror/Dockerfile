@@ -8,7 +8,7 @@
 # (`UV_PROJECT_ENVIRONMENT=/usr/local`): the image runs exactly the pins the
 # tests ran, not whatever `pip install .` would resolve on build day (a fresh
 # resolve pulled gcsfs 2026.8.1 into the cw job image and hung every `gs://`
-# read at exit — specs/listing-slim.md phase 2).
+# read at exit — specs/done/listing-slim.md phase 2).
 FROM python:3.12-slim
 COPY --from=ghcr.io/astral-sh/uv:0.12 /uv /bin/uv
 WORKDIR /app

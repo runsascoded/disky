@@ -18,7 +18,7 @@ Two methods, which must agree (`--check`):
 Either way the rows found (summed over owner slices) are **candidates**:
 paths with their full-path `pos` / `neg` flags. `view_truth` turns them into
 one view's answer with the Worker's semantics (`site/functions/_lib/view.ts`,
-specs/path-store-search.md §1): the match roots strictly under the view root
+specs/done/path-store-search.md §1): the match roots strictly under the view root
 (or the root alone, when the query matches it), the outermost excluded paths
 under them, and each root's total net of its excluded paths.
 """

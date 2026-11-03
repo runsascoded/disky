@@ -1,0 +1,35 @@
+// /admin/slack (SlackPage.tsx): the live OP and its candidates, side by side, as Slack shows them.
+.admin-page.slack-page {
+  // side-by-side OPs want the width: up to 3 candidates beside the live one
+  max-width: 1680px;
+  .slack-cols { display: flex; gap: 14px; align-items: flex-start; overflow-x: auto; margin: 10px 0; }
+  .slack-col { flex: 1 1 0; min-width: min(360px, 100%); padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel);
+    h2 { font-size: 15px; margin: 0 0 6px; display: flex; gap: 6px; align-items: center;
+      button { font-size: 11.5px; } }
+    &.live { border-color: var(--s1); } }
+  .slack-controls { display: flex; flex-wrap: wrap; gap: 6px 12px; font-size: 12.5px; margin-bottom: 8px;
+    input { width: 4.2em; font: inherit; } select { font: inherit; } }
+  .slack-op { font-size: 13.5px; line-height: 1.5; overflow-wrap: anywhere;
+    .line { padding: 0 4px; border-left: 3px solid transparent; }
+    .line.blank { min-height: 0.7em; }
+    .line.changed { border-left-color: var(--s8); background: color-mix(in srgb, var(--s8) 10%, transparent); }
+    .arrow { display: inline-block; font-weight: 700; margin-right: 2px;
+      &.up { color: #2fa84f; } &.down { color: #e5534b; } &.flat { color: var(--ink-2); } }
+    .plot { display: block; margin-top: 6px;
+      img { width: 100%; border-radius: 6px; }
+      img.zoomable { cursor: zoom-in; } } }
+  .slack-replies { margin-top: 14px; border-top: 1px solid var(--line); padding-top: 8px;
+    h3 { font-size: 13.5px; margin: 0 0 6px; }
+    > button { font-size: 12px; margin-top: 4px; } }
+  .slack-reply { display: flex; gap: 8px; font-size: 13px; line-height: 1.45; padding: 5px 0; overflow-wrap: anywhere;
+    .avi { flex: none; width: 28px; height: 28px; border-radius: 5px; overflow: hidden; display: grid; place-items: center;
+      img { width: 100%; height: 100%; object-fit: cover; } .emoji-icon { font-size: 20px; } }
+    .sender { font-weight: 700; }
+    .arrow { display: inline-block; font-weight: 700; margin-right: 2px;
+      &.up { color: #2fa84f; } &.down { color: #e5534b; } &.flat { color: var(--ink-2); } } }
+  .slack-lightbox { position: fixed; inset: 0; z-index: 1000; background: rgba(0, 0, 0, 0.85); display: grid; place-items: center;
+    cursor: zoom-out; padding: 16px;
+    img { max-width: 100%; max-height: 100%; border-radius: 6px; } }
+  .slack-add { align-self: center; flex: none; }
+  .slack-rows pre { font-size: 11.5px; max-height: 360px; overflow: auto; }
+}

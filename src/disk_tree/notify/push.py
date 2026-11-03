@@ -44,6 +44,7 @@ class Notice:
     url: Optional[str] = None
     url_title: Optional[str] = None
     priority: int = 0  # Pushover's: -2 (silent) … 1 (high); 2 (emergency) needs retry/expire
+    links: tuple[tuple[str, str], ...] = ()  # additional (label, url) pairs
 
 
 # `post(url, body, headers) -> (status, response body)`; the seam tests replace.
@@ -84,7 +85,8 @@ def configured(env: Mapping[str, str] = os.environ) -> list[str]:
 
 
 def pushover(n: Notice, env: Mapping[str, str], post: Post) -> None:
-    form = {'token': secret(env, 'PUSHOVER_TOKEN'), 'user': secret(env, 'PUSHOVER_USER'), 'title': n.title, 'message': n.message, 'priority': str(n.priority)}
+    message = n.message + ''.join(f'\n{label}: {url}' for label, url in n.links)
+    form = {'token': secret(env, 'PUSHOVER_TOKEN'), 'user': secret(env, 'PUSHOVER_USER'), 'title': n.title, 'message': message, 'priority': str(n.priority)}
     if n.url:
         form['url'] = n.url
         if n.url_title:
@@ -96,7 +98,8 @@ def pushover(n: Notice, env: Mapping[str, str], post: Post) -> None:
 
 
 def discord(n: Notice, env: Mapping[str, str], post: Post) -> None:
-    link = f'\n{f"[{n.url_title}](<{n.url}>)" if n.url_title else f"<{n.url}>"}' if n.url else ''
+    links = ([(n.url_title, n.url)] if n.url else []) + list(n.links)
+    link = '\n' + ' · '.join(f'[{label}](<{url}>)' if label else f'<{url}>' for label, url in links) if links else ''
     payload = {
         'content': f'**{n.title}**\n{n.message}{link}',
         'username': 'disky',
@@ -111,7 +114,8 @@ def discord(n: Notice, env: Mapping[str, str], post: Post) -> None:
 def slack(n: Notice, env: Mapping[str, str], post: Post) -> None:
     """``chat.postMessage``, top-level in ``SLACK_ALERT_CHANNEL``. Slack answers HTTP 200 with ``ok: false`` on
     most failures (``channel_not_found``, ``invalid_auth``), so the body decides."""
-    link = f'\n<{n.url}|{n.url_title}>' if n.url and n.url_title else f'\n<{n.url}>' if n.url else ''
+    links = ([(n.url_title, n.url)] if n.url else []) + list(n.links)
+    link = '\n' + ' · '.join(f'<{url}|{label}>' if label else f'<{url}>' for label, url in links) if links else ''
     payload = {
         'channel': secret(env, 'SLACK_ALERT_CHANNEL'),
         'text': f'*{n.title}*\n{n.message}{link}',

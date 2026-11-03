@@ -229,9 +229,9 @@ describe('D1', () => {
           ins(5, [y]),
         ],
       )).toEqual([
-        { ...batch(1, 10), staged: 2, covered: 0, absorbed: [{ into: 3, n: 2 }], unstaged: 0, deleted: 0 },
-        { ...batch(2, 20), staged: 1, covered: 0, absorbed: [], unstaged: 1, deleted: 0 },
-        { ...batch(4, 40), staged: 0, covered: 1, absorbed: [], unstaged: 0, deleted: 0 },
+        { ...batch(1, 10), prefixes: [a, b], staged: 2, covered: 0, absorbed: [{ into: 3, n: 2 }], unstaged: 0, deleted: 0 },
+        { ...batch(2, 20), prefixes: [c], staged: 1, covered: 0, absorbed: [], unstaged: 1, deleted: 0 },
+        { ...batch(4, 40), prefixes: [], staged: 0, covered: 1, absorbed: [], unstaged: 0, deleted: 0 },
       ])
     })
 
@@ -290,7 +290,7 @@ describe('D1', () => {
   })
 
   describe('unstageDeleted — a finished real run takes what it deleted out of the queue', () => {
-    it('removes items fully deleted since staged; keeps drifted / overwritten / unrun / later-staged ones; audits per run; idempotent', async () => {
+    it('consumes successful reviewed staging despite new/changed objects; keeps unrun and later-staged items; audits idempotently', async () => {
       const { db, raw } = await gcsDb()
       const done = `gs://${B1}/ckpt/b/`, drift = `gs://${B2}/tmp/a/`, ovw = `gs://${B1}/ow/`, unrun = `gs://${B1}/other/`, late = `gs://${B1}/late/`
       raw.exec(`INSERT INTO deletion_bands (run_id, prefix, bytes, objects, gone, overwritten, drift_new_objects, undone_objects) VALUES ('${RUN}', '${ovw}', 5, 1, 0, 1, 0, 0), ('${RUN}', '${late}', 5, 1, 0, 0, 0, 0)`)
@@ -298,16 +298,36 @@ describe('D1', () => {
       for (const [p, ts] of [[done, 50], [drift, 50], [ovw, 50], [unrun, 50], [late, 150]] as const) {
         raw.exec(`INSERT INTO plan_items (plan_id, prefix, batch_id, added_by, added_ts) VALUES (1, '${p}', NULL, 'ann', ${ts})`)
       }
-      const first = await unstageDeleted(db, 1)
-      const second = await unstageDeleted(db, 1)
+      expect(await unstageDeleted(db, 1, [])).toEqual([])
+      const first = await unstageDeleted(db, 1, [RUN])
+      const second = await unstageDeleted(db, 1, [RUN])
       const items = raw.prepare('SELECT prefix FROM plan_items WHERE plan_id = 1 ORDER BY prefix').all().map(r => (r as { prefix: string }).prefix)
       const edits = raw.prepare("SELECT action, who, old_json, new_json FROM admin_edits WHERE tbl = 'plan_items' ORDER BY id").all()
       expect([first, second, items, edits]).toEqual([
-        [done],
+        [done, ovw, drift],
         [],
-        [late, ovw, unrun, drift].sort(),
-        [{ action: 'delete', who: `run:${RUN}`, old_json: JSON.stringify({ prefixes: [done], deleted_by: RUN }), new_json: null }],
+        [late, unrun].sort(),
+        [{ action: 'delete', who: `run:${RUN}`, old_json: JSON.stringify({ prefixes: [done, ovw, drift], deleted_by: RUN }), new_json: null }],
       ])
+    })
+
+    it('any number of succeeded runs (an executor poll passes every one; D1 binds ≤ 100 parameters a statement)', async () => {
+      const { db, raw } = await gcsDb()
+      const done = `gs://${B1}/ckpt/b/`
+      raw.exec(`INSERT INTO plan_items (plan_id, prefix, batch_id, added_by, added_ts) VALUES (1, '${done}', NULL, 'ann', 50)`)
+      const runs = [...Array.from({ length: 149 }, (_, i) => `r-${String(i).padStart(3, '0')}`), RUN]
+      expect(await unstageDeleted(db, 1, runs)).toEqual([done])
+    })
+
+    it('does not consume dry or failed-summary staging', async () => {
+      const { db, raw } = await gcsDb()
+      const prefix = `gs://${B1}/ckpt/b/`
+      raw.exec(`INSERT INTO plan_items (plan_id,prefix,added_by,added_ts) VALUES (1,'${prefix}','actor',1)`)
+      raw.exec(`UPDATE deletion_runs SET mode='dry' WHERE run_id='${RUN}'`)
+      expect(await unstageDeleted(db, 1, [RUN])).toEqual([])
+      raw.exec(`UPDATE deletion_runs SET mode='real', plan_digest='' WHERE run_id='${RUN}'`)
+      expect(await unstageDeleted(db, 1, [RUN])).toEqual([])
+      expect(raw.prepare('SELECT prefix FROM plan_items').all()).toEqual([{ prefix }])
     })
 
     it('a deleted item counts as `deleted` (not `unstaged`) in its emptied batch', () => {
@@ -316,7 +336,7 @@ describe('D1', () => {
         { action: 'insert', old_json: null, new_json: JSON.stringify({ staged: ['gs://b/a/', 'gs://b/c/'], covered: [], batch_id: 1, note: null }) },
         { action: 'delete', old_json: JSON.stringify({ prefixes: ['gs://b/a/'], deleted_by: 'r1' }), new_json: null },
         { action: 'delete', old_json: JSON.stringify({ prefixes: ['gs://b/c/'], own: true }), new_json: null },
-      ])).toEqual([{ ...b, staged: 2, covered: 0, absorbed: [], unstaged: 1, deleted: 1 }])
+      ])).toEqual([{ ...b, prefixes: ['gs://b/a/', 'gs://b/c/'], staged: 2, covered: 0, absorbed: [], unstaged: 1, deleted: 1 }])
     })
   })
 })

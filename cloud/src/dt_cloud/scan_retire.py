@@ -12,8 +12,10 @@ listing shards are copies of what the stores serve: a deployment's storage then 
 | `search` | `path-index.{rows,trigrams,rows-search}.parquet` (+ footers)                            | delete |
 | `layer2` | the layer-2 listing (`-l` templates), where the deployment keeps one                    | delete |
 | `layer1` | the raw listing shards (`-1` templates), held while they carry a `generation` no marker vouches for | delete |
+| `cache`  | derived rollups (`-c` templates; `path-index -c`'s dir cache): a re-run's shortcut, rebuilt from the listing | delete |
+| `attribution` | `attr.tsv*`, `attribution.parquet`: the roster attribution map, held unless the IS's attribution table covers the scan and its marker compared it equal | delete |
 | `age`    | `age-pyramid-*`, `age-index*` (still read per scan)                                     | keep   |
-| `extras` | `attr.tsv*`, `ck.txt` (provenance that can't be derived later)                          | keep   |
+| `extras` | `ck.txt` (provenance that can't be derived later)                                       | keep   |
 | `snapshot` | other `*.json` (`meta.json`, `verification.json`, …)                                  | keep   |
 | `over-time` | `over-time*`                                                                         | keep   |
 | `other`  | anything else under a scan's index dir (raw listing shards, unknown files)               | keep   |
@@ -25,13 +27,21 @@ second: its D1 rows are gone). Deletion is a whitelist: a file no class names st
 **Selection**, oldest first, every scan found but the newest `-k` (so an append or a catch-up always has its inputs):
 1. listed by the IS's newest manifest (the generation `-g`, default `interval-store/CURRENT.json`, followed to its
    newest successor; the base's `scans.json` when no manifest) **and** by the static index's (`-G`), else skipped;
-2. a passing parity marker `interval-store/<gen>/verify/<id>.json` (`interval_verify.marker`), in the generation or one
-   it was compacted or backfilled from; else, executing without `-m`, `interval-store verify` runs for it now (against its newest
-   per-scan `path` sort) and writes one. A dry run never verifies: such a scan is `needs-verify`.
+2. a passing parity marker `interval-store/<gen>/verify/<id>.json`, in the generation or one it was compacted or
+   backfilled from. The append writes it (`interval_append.append_marker`): every key range's answer at the scan over the
+   published store (base range files + the manifest's runs + the scan's deltas) equal to the scan's rows, row for row,
+   for the path versions and both owner-slice tables; every served sort of the scan's run equal to the deltas it was cut
+   from; and every object's `generation` equal. That is constant work here. A scan without one (appended before the
+   check, or `interval-store verify`'s sampled marker): executing without `-m`, `interval-store verify` runs for it now
+   (against its newest per-scan `path` sort, downloading the served generation) and writes one. A dry run never
+   verifies: such a scan is `needs-verify`.
 
 A scan's raw listing shards carrying a (non-null) `generation` go only when its marker compared the objects' generations
 and every one was equal (`interval_verify.generation_parity`): else they hold information the IS doesn't (yet), and stay
-(`held`) while the rest of the scan retires.
+(`held`) while the rest of the scan retires. Likewise its attribution map (`attribution`, specs/attr-interval-table.md):
+it goes only when the IS's attribution table covers the scan (`interval_append.covered_scans`) and its marker compared
+the table with the scan's `attribution.parquet` and found it equal (the append's `attribution` table check, or `verify`'s
+`attribution_parity`).
 
 **Order**, executing (`-x`): every to-be-deleted object is copied to `-b` first (server side when both are the same
 store's buckets, GCS rewrite / S3 CopyObject; sizes checked; any mismatch stops the
@@ -65,7 +75,7 @@ from .static_names import err
 
 PREFIX = ist.PREFIX
 STATIC_PREFIX = "static-names"
-DELETE = ("sort", "footer", "coarse", "search", "layer2", "layer1")
+DELETE = ("sort", "footer", "coarse", "search", "layer2", "layer1", "cache", "attribution")
 KEEP = ("age", "extras", "snapshot", "over-time", "other")
 SEARCH_SUFFIXES = (".rows", ".trigrams", ".rows-search")
 #: The per-scan sorts' D1 variants (`index_footer.SORT_VARIANTS`), plus the v1 `coarse*` tiers (a LIKE).
@@ -82,7 +92,9 @@ def classify(name: str) -> str:
         return "age"
     if stem.startswith("over-time"):
         return "over-time"
-    if name.startswith("attr.tsv") or name == "ck.txt":
+    if name.startswith("attr.tsv") or name == "attribution.parquet":
+        return "attribution"
+    if name == "ck.txt":
         return "extras"
     if stem.startswith("path-index") and (footer or name.endswith(".parquet")):
         if stem.startswith("path-index-coarse"):
@@ -131,9 +143,9 @@ class Scan:
         return dict(sorted(out.items()))
 
 
-def find_scans(store: Store, layouts: list[str], layer2s: list[str], layer1s: list[str] = ()) -> dict[str, Scan]:
+def find_scans(store: Store, layouts: list[str], layer2s: list[str], layer1s: list[str] = (), caches: list[str] = ()) -> dict[str, Scan]:
     """Every scan with per-scan objects under `store`: its index dirs (`layouts`) and their files, its layer-2 files
-    (`layer2s`) and raw listing shards (`layer1s`). Ids that are not scan ids are skipped."""
+    (`layer2s`), raw listing shards (`layer1s`) and rollup caches (`caches`). Ids that are not scan ids are skipped."""
     listings: dict[str, dict[str, int]] = {}
 
     def listing(prefix: str) -> dict[str, int]:
@@ -158,7 +170,7 @@ def find_scans(store: Store, layouts: list[str], layer2s: list[str], layer1s: li
             for key, n in keys.items():
                 if key.startswith(d):
                     s.objects[key] = (n, classify(key.rsplit("/", 1)[-1]))
-    for cls, ts in (("layer2", layer2s), ("layer1", layer1s)):
+    for cls, ts in (("layer2", layer2s), ("layer1", layer1s), ("cache", caches)):
         for t in ts:
             prefix, rx = template_rx(t)
             for key, n in listing(prefix).items():
@@ -177,14 +189,24 @@ def listed(store: Store, prefix: str) -> list[str]:
     return [s["id"] for s in store.read_json(f"{prefix}/scans.json")["scans"]]
 
 
+def attribution_covered(store: Store, gen: str) -> set[str]:
+    """The scans generation `gen`'s attribution table covers (`interval_append.covered_scans`; none without the table)."""
+    from .interval_append import covered_scans
+
+    prefix = f"{PREFIX}/{gen}"
+    newest = latest_key([k.removeprefix(f"{prefix}/") for k in store.keys(f"{prefix}/manifests/")])
+    return covered_scans(store.read_json(f"{prefix}/scans.json"), store.read_json(f"{prefix}/{newest}") if newest else None)
+
+
 def lineage(store: Store, gen: str) -> list[str]:
-    """`gen`, then each generation it was compacted or backfilled from (`compaction.json` / `backfill.json` `from`: the
-    same versions, so their parity markers hold), newest first."""
+    """`gen`, then each generation it was compacted or backfilled from (`compaction.json` / `backfill.json` /
+    `attribution-backfill.json` `from`: the same versions, so their parity markers hold), newest first."""
+    from .interval_attribution import RECORD
     from .interval_backfill import BACKFILL
 
     out = [gen]
     while True:
-        key = next((k for k in (f"{PREFIX}/{out[-1]}/{ic.COMPACTION}", f"{PREFIX}/{out[-1]}/{BACKFILL}") if store.exists(k)), None)
+        key = next((k for k in (f"{PREFIX}/{out[-1]}/{x}" for x in (ic.COMPACTION, BACKFILL, RECORD)) if store.exists(k)), None)
         if key is None or (frm := store.read_json(key)["from"]) in out:
             return out
         out.append(frm)
@@ -220,12 +242,25 @@ def generation_vouched(marker: dict) -> bool:
     return bool(marker["pass"] and g and g["objects"] > 0 and g["equal"] == g["objects"])
 
 
+def attribution_vouched(marker: dict) -> bool:
+    """Whether a passing marker compared the scan's attribution map with the IS's attribution table and found them equal:
+    an append's `attribution` table check, or `verify`'s whole-map comparison."""
+    a = marker.get("attribution") or marker.get("tables", {}).get(ist.ATTRIBUTION)
+    return bool(marker["pass"] and a and a["rows"] >= 0 and a["missing"] == a["extra"] == 0)
+
+
 def find_marker(store: Store, gens: list[str], scan: str) -> dict | None:
+    found = find_marker_in(store, gens, scan)
+    return found[1] if found else None
+
+
+def find_marker_in(store: Store, gens: list[str], scan: str) -> tuple[str, dict] | None:
+    """The newest generation of `gens` holding `scan`'s verify marker, and the marker."""
     from .interval_verify import marker_key
 
     for g in gens:
         if store.exists(key := marker_key(f"{PREFIX}/{g}", scan)):
-            return store.read_json(key)
+            return g, store.read_json(key)
     return None
 
 
@@ -341,9 +376,11 @@ def _totals(entries: Iterable[dict[str, list[int]]]) -> dict[str, list[int]]:
 
 
 def retire(scans_root: str, layouts: list[str], *, iv_root: str, static_gen: str, iv_gen: str | None = None,
-           static_root: str | None = None, layer2s: list[str] = (), layer1s: list[str] = (), keep: int = 2, only: list[str] = (),
+           static_root: str | None = None, layer2s: list[str] = (), layer1s: list[str] = (), caches: list[str] = (), keep: int = 2,
+           only: list[str] = (),
            execute: bool = False, markers_only: bool = False, backup_root: str | None = None, d1: bool = True,
-           d1_store: str = F.PRIMARY_STORE, drop_path: bool = False, work: Path | None = None, d1_elsewhere: bool = False) -> dict:
+           d1_store: str = F.PRIMARY_STORE, drop_path: bool = False, work: Path | None = None, d1_elsewhere: bool = False,
+           verify_jobs: int = 1) -> dict:
     """Plan (and with `execute`, carry out) the retirement; returns the report (`scans`, `totals`, `d1`, …)."""
     scans_root, iv_root = store_url(scans_root), store_url(iv_root)  # a bare bucket name is a GCS bucket (a profile's)
     src = Store(scans_root)
@@ -354,10 +391,18 @@ def retire(scans_root: str, layouts: list[str], *, iv_root: str, static_gen: str
         if iv_gen is None:
             raise SystemExit(f"{iv.root}/{PREFIX}: no current generation ({how}): name one with -g")
     iv_gen = ic.chain(iv, iv_gen)[-1]
+    from .append_runner import chain
+
+    static_gen = chain(st, STATIC_PREFIX, static_gen)[-1]
     in_iv = set(listed(iv, f"{PREFIX}/{iv_gen}"))
     in_static = set(listed(st, f"{STATIC_PREFIX}/{static_gen}"))
+    covered = attribution_covered(iv, iv_gen)
     gens = lineage(iv, iv_gen)
-    scans = find_scans(src, list(layouts), list(layer2s), list(layer1s))
+    scans = find_scans(src, list(layouts), list(layer2s), list(layer1s), list(caches))
+    # A scan the attribution table doesn't cover keeps its map whatever its marker says (nor counts it as pending).
+    for sid, s in scans.items():
+        if sid not in covered:
+            s.held.add("attribution")
     # The newest `keep` of the deployment's scans (this root's and every one the interval store holds), not of this
     # root's alone: a copy that stopped receiving per-scan files (lean scans write none to R2) would otherwise keep its
     # own last `keep` forever.
@@ -376,17 +421,24 @@ def retire(scans_root: str, layouts: list[str], *, iv_root: str, static_gen: str
             r.update(status="skip", reason=f"not in the static index's {static_gen}")
         elif not s.deletable():
             r.update(status="clean", reason="nothing to delete")
-        elif (m := find_marker(iv, gens, sid)) is not None:
-            markers[sid] = m
+        # A pass in any generation of the lineage holds (the same versions); a fail only in the current one: an earlier
+        # generation's (gcs's depth-3 gap under c001, fixed by g3) is re-verified against the current, which writes its marker.
+        elif (found := find_marker_in(iv, gens, sid)) is not None and (found[1]["pass"] or found[0] == iv_gen):
+            m = markers[sid] = found[1]
             r["marker"] = "pass" if m["pass"] else "fail"
             if not m["pass"]:
-                r.update(status="skip", reason=f"verify failed ({m['view_eq']}/{m['views']} views, {m['diff_eq']}/{m['diffs']} diffs equal)")
-        elif markers_only:
-            r.update(status="skip", reason="no verify marker", marker="missing")
-        elif s.src is None:
-            r.update(status="skip", reason="no verify marker, and no per-scan `path` sort to verify against", marker="missing")
+                from .interval_verify import failure
+
+                r.update(status="skip", reason=f"verify failed ({failure(m)})")
         else:
-            r.update(status="needs-verify", marker="missing")
+            none = "no verify marker" if found is None else f"verify failed in {found[0]}, none in {iv_gen}"
+            marker = "missing" if found is None else "stale-fail"
+            if markers_only:
+                r.update(status="skip", reason=none, marker=marker)
+            elif s.src is None:
+                r.update(status="skip", reason=f"{none}, and no per-scan `path` sort to verify against", marker=marker)
+            else:
+                r.update(status="needs-verify", reason=None if found is None else none, marker=marker)
         rows.append(r)
 
     own = work is None
@@ -399,12 +451,12 @@ def retire(scans_root: str, layouts: list[str], *, iv_root: str, static_gen: str
 
             entries = [{"id": r["id"], "src": scans[r["id"]].src, "ts": scan_entry(iv, f"{PREFIX}/{iv_gen}", r["id"])[0]["ts"],
                         "version": scan_version(src, scans[r["id"]].src)} for r in todo]
-            verified = verify_scans(iv, iv_gen, scans_root, entries, work / "verify")
+            verified = verify_scans(iv, iv_gen, scans_root, entries, work / "verify", jobs=verify_jobs)
             markers |= verified
             for r in todo:
                 m = verified.get(r["id"])
                 if m and m["pass"]:
-                    r.update(status="retire", marker="verified")
+                    r.update(status="retire", reason=None, marker="verified")
                 else:
                     r.update(status="skip", marker="fail", reason="verify failed" if m else "verify gave no result")
         for r in rows:
@@ -413,6 +465,15 @@ def retire(scans_root: str, layouts: list[str], *, iv_root: str, static_gen: str
             if r["status"] == "retire" and raw and not generation_vouched(markers[r["id"]]) and has_generation(src, raw):
                 s.held.add("layer1")
                 r["held"] = "layer1: its listing has `generation`, which its marker didn't compare equal"
+            if r["status"] == "retire" and any(c == "attribution" for _, c in s.objects.values()):
+                why = None
+                if r["id"] not in covered:
+                    why = "attribution: the interval store's attribution table doesn't cover the scan"
+                elif not attribution_vouched(markers[r["id"]]):
+                    s.held.add("attribution")
+                    why = "attribution: its marker didn't compare the attribution table equal"
+                if why:
+                    r["held"] = f"{r['held']}; {why}" if r.get("held") else why
             go = r["status"] == "retire"
             r["delete"] = s.by_class(DELETE) if go else {}
             r["keep"] = s.by_class(KEEP + tuple(s.held), held=True) if go else s.by_class((*DELETE, *KEEP), held=True)
@@ -484,10 +545,12 @@ def render(report: dict) -> list[str]:
 @command("retire")
 @option("-1", "--layer1", "layer1s", multiple=True, help="Key template of a scan's raw listing shards under -s (`{id}`, `*` within a segment), e.g. `listing/{id}/*/shard-*.parquet`; repeat")
 @option("-b", "--backup", "backup_root", help="Copy every object to be deleted here first (a dir or URL; same keys; server side within one store), sizes checked")
+@option("-c", "--cache", "caches", multiple=True, help="Key template of a scan's rollup cache under -s (`{id}`, `*` within a segment), e.g. `listing/{id}/dir-cache/*.parquet`; repeat")
 @option("-D", "--d1-by-another-pass", "d1_elsewhere", is_flag=True, help="With -R: another pass over the same scans deletes their D1 rows (the scan step's first root), so `d1_left` isn't reported")
 @option("-g", "--gen", help="The interval store's generation (default: its current, `interval-store/CURRENT.json`), followed to its newest successor")
 @option("-G", "--static-gen", required=True, help="The static name index's generation (`static-names/GEN/` under -S)")
 @option("-j", "--json", "as_json", is_flag=True, help="Print the report as JSON")
+@option("-J", "--verify-jobs", default=1, type=IntRange(min=1), help="Verify the scans needing it in this many processes at once, each with that share of the machine (a backlog's scans verify one after another otherwise)")
 @option("-k", "--keep", default=2, type=IntRange(min=1), help="Never retire the newest N scans (appends and catch-ups read them)")
 @option("-l", "--layer2", "layer2s", multiple=True, help="Key template of a scan's layer-2 listing under -s (`{id}`, `*` within a segment), e.g. `cw-l2/{id}/*.parquet`; repeat")
 @option("-L", "--layout", "layouts", multiple=True, required=True, help="Key template of a scan's per-scan `path` sort under -s (`{id}`, `{gen}`): every file in its dir is classified; repeat")
@@ -502,18 +565,18 @@ def render(report: dict) -> list[str]:
 @option("-w", "--work", help="Local work dir (verify's copies, backups' staging; default: a temporary one)")
 @option("-x", "--execute", is_flag=True, help="Back up (-b), delete the D1 rows, then the files")
 @argument("ids", nargs=-1)
-def retire_cmd(layer1s, backup_root, d1_elsewhere, gen, static_gen, as_json, keep, layer2s, layouts, markers_only, dry_run, iv_root, drop_path_pointer, no_d1,
-               scans_root, static_root, d1_store, work, execute, ids) -> None:
-    """Retire the per-scan sorts, footers, search sidecars and layer-2 and raw listings of the scans the interval store and the
+def retire_cmd(layer1s, backup_root, caches, d1_elsewhere, gen, static_gen, as_json, verify_jobs, keep, layer2s, layouts, markers_only, dry_run, iv_root,
+               drop_path_pointer, no_d1, scans_root, static_root, d1_store, work, execute, ids) -> None:
+    """Retire the per-scan sorts, footers, search sidecars, layer-2 and raw listings and rollup caches of the scans the interval store and the
     static name index both hold and a parity marker vouches for (all but the newest -k; IDS: only these). A dry run by
     default: per scan the objects and bytes per class it would delete and keep, the totals, and the D1 rows that would
     go. `-x` backs up (-b), deletes the D1 rows, then the files."""
     if dry_run and execute:
         raise UsageError("-n and -x: pick one (a dry run is the default)")
     report = retire(scans_root, list(layouts), iv_root=iv_root, static_gen=static_gen, iv_gen=gen, static_root=static_root,
-                    layer2s=list(layer2s), layer1s=list(layer1s), keep=keep, only=list(ids), execute=execute, markers_only=markers_only,
+                    layer2s=list(layer2s), layer1s=list(layer1s), caches=list(caches), keep=keep, only=list(ids), execute=execute, markers_only=markers_only,
                     backup_root=backup_root, d1=not no_d1, d1_elsewhere=d1_elsewhere, d1_store=d1_store, drop_path=drop_path_pointer,
-                    work=Path(work) if work else None)
+                    work=Path(work) if work else None, verify_jobs=verify_jobs)
     if as_json:
         print(json.dumps(report))
         return

@@ -6,7 +6,7 @@ import { type D1Variant, FILES, GETS, seedGeneration } from './testStore'
 import { buildView } from './view'
 
 // An opt-in latency model of a filtered view over a real store generation
-// (specs/path-store-search.md §3.2): `SEARCH_BENCH_DIR` names a local copy of
+// (specs/done/path-store-search.md §3.2): `SEARCH_BENCH_DIR` names a local copy of
 // one generation dir (the `path` + `bysize` sorts with their `.groups.json`,
 // `d1.json` as `index_footer.extract` writes it, and the search sidecars).
 // Every store GET and colo-cache call takes one of 6 connection slots (a

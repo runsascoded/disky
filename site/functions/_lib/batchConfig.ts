@@ -1,5 +1,5 @@
 // The deployment's GCP Batch settings for the sweep executors
-// (specs/oa-decoupling.md step 5): which project the jobs run in, where, from
+// (specs/done/oa-decoupling.md step 5): which project the jobs run in, where, from
 // which image, against which data bucket. All from `[vars]`; nothing here
 // names a deployment. A route asks for the keys it needs and answers 503
 // naming the first one unset.
@@ -25,6 +25,9 @@ export interface BatchEnv {
   D1_DB_NAME?: string
   /** The executor's container image. */
   SWEEP_IMAGE?: string
+  /** Historical review source after per-scan files retire, and its Secret Manager ENV-to-name bindings. */
+  SWEEP_REVIEW_STORE?: string
+  SWEEP_REVIEW_SECRETS?: string
   /** Guided cold-ramp envelope by default; adaptive probes faster after validation. */
   SWEEP_PACING?: string
   /** The Cloudflare account the executor records runs to (its D1). */

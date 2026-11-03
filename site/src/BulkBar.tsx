@@ -1,11 +1,12 @@
 // Bulk actions over the filter's matches (`gcs:specs/done/selection-actions.md`): assign an owner to, or
 // stage for deletion, every match under the view — as the fewest exact items (`/api/filter-cover`: a
 // folder every object of which matches stands for its matches; a lone matching file is sent as that one
-// object, specs/file-assign.md), listed by parent folder so false positives can be dropped (a whole folder's
+// object, specs/done/file-assign.md), listed by parent folder so false positives can be dropped (a whole folder's
 // worth, or one by one) before anything is sent. Offered at once: hovering or focusing the bar starts the
 // listing, a click awaits it (`useMatchAct`), then asks (with the review list), sends in batches with a
 // progress bar, and says what landed — or, over the cap, says so muted in the button's place.
 import { useEffect, useMemo, useState } from 'react'
+import { Loading } from './Busy'
 import { allUsers } from './UserChip'
 import { useUnits } from './units'
 import { type CoverItem, type FilterCover, groupItems } from './filterCover'
@@ -88,7 +89,7 @@ export function BulkBar({ cover, loading, onIntent, resolve, resetKey, scheme, q
     void act.start({ kind: 'assign', owner, who: v || 'you', memo: `bulk filter:'${query}'${memo ? ` — ${memo}` : ''}` })
   }
   const startStage = () => void act.start({ kind: 'stage', memo })
-  const summary = !cover ? (loading ? <span className="bb-scope">listing the matches…</span> : null)
+  const summary = !cover ? (loading ? <Loading label="Listing the matches…" /> : null)
     : !cover.roots.n ? <span className="bb-scope">no matches to act on</span>
     : !cover.complete ? <span className="bb-scope">{plural(cover.roots.n, 'match', 'matches')} · {fmtBytes(cover.roots.b)}</span>
     : <>

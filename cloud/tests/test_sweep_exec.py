@@ -1,4 +1,4 @@
-"""Executor semantics against a stub GCS client (specs/sweep-executor.md §3)."""
+"""Executor semantics against a stub GCS client (specs/done/sweep-executor.md §3)."""
 
 from __future__ import annotations
 

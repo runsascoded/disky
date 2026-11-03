@@ -358,7 +358,7 @@ describe('the cold footer tier (`.groups.parquet`)', () => {
 
 describe('buildView on a store generation', () => {
   const base = { w: 1280, h: 800, minArea: 12, atten: 1 }
-  const node = (n: string, k: 'file' | 'dir', b: number, o: number, rest: Partial<ViewNode> = {}): ViewNode => ({ n, k, b, o, d: DAY, ...rest })
+  const node = (n: string, k: 'file' | 'dir', b: number, o: number, rest: Partial<ViewNode> = {}): ViewNode => ({ n, k, b, o, d: DAY, t: DAY * 86400, ...rest })
   const flatKids = (): ViewNode[] => [...flatAt(15).map(p => node(p.split('/').pop()!, 'file', 32 * KiB, 1)), node('(other)', 'dir', 32767500 - 500 * 32 * KiB, 7500, { f: 7500 })]
   const nestTree = (): ViewNode => node('nest', 'dir', 4456448, 5, { c: [
     node('a', 'dir', 4456448, 5, { c: [
@@ -569,6 +569,8 @@ describe('buildDiff', () => {
         row('bk/small', 2, 'dir', 'added', 0, 6000, 0, 3),
         row('bk/b', 2, 'dir', 'removed', 400, 0, 1, 0),
         row('bk/a', 2, 'dir', 'removed', 300, 0, 2, 0),
+        // `bk`'s one object no drawn child holds (a zero-byte one): its children and `(other)` sum to it.
+        row('bk/(other)', 2, 'dir', 'added', 0, 0, 0, 1),
       ],
       total_a: 700, total_b: 37229948, objects_a: 3, objects_b: 8009, threshold: 1, tier: 'path',
       expansions: 4, truncated: false, lookups: 7, lookups_capped: false,

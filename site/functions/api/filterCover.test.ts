@@ -5,6 +5,7 @@ import { type D1Variant, FILES, fixture, readJson, seedGeneration } from '../_li
 import { SEARCH_FILES, searchKey } from '../_lib/search'
 import { overCapReason } from '../_lib/cover'
 import { onRequestGet as filterCover } from './filter-cover'
+import { onRequestGet as nameMatches } from './name-matches'
 
 vi.mock('@rdub/file-tree/stores/s3', async () => ({ S3Store: (await import('../_lib/testStore')).S3Store }))
 
@@ -33,6 +34,53 @@ describe('D1', () => {
     const r = await filterCover({ request: new Request(`http://localhost/api/filter-cover?${qs}`), env: base })
     return [r.status, r.headers.get('content-type')?.startsWith('application/json') ? await r.json() : await r.text()]
   }
+
+  const matches = async (qs: string) => {
+    const r = await nameMatches({ request: new Request(`http://localhost/api/name-matches?${qs}`), env: base })
+    return [r.status, r.headers.get('content-type')?.startsWith('application/json') ? await r.json() : await r.text()]
+  }
+
+  describe('/api/name-matches', () => {
+    it('the whole map: every match root, largest first, each with its kind', async () => {
+      expect(await matches(`date=${A}&q=ttl`)).toEqual([200, {
+        date: A, path: '', q: 'ttl', total: 6, complete: true,
+        items: [
+          { path: 'bk/tmp/ttl=14d', kind: 'dir', b: 5242880, o: 2 },
+          { path: 'bk/tmp/ttl=7d', kind: 'dir', b: 2097152, o: 1 },
+          { path: 'bk/fill/zz-TTL-b', kind: 'file', b: 7000, o: 1 },
+          { path: 'bk/fill/zz-ttl-a', kind: 'dir', b: 5000, o: 1 },
+          { path: 'bk/iris/TTL-misc', kind: 'dir', b: 500, o: 2 },
+          { path: 'zz/Checkpoints/ttl', kind: 'dir', b: 10, o: 1 },
+        ],
+      }])
+    })
+    it('`limit` keeps the largest; `total` still counts every match', async () => {
+      expect(await matches(`date=${A}&q=ttl&limit=2`)).toEqual([200, {
+        date: A, path: '', q: 'ttl', total: 6, complete: true,
+        items: [
+          { path: 'bk/tmp/ttl=14d', kind: 'dir', b: 5242880, o: 2 },
+          { path: 'bk/tmp/ttl=7d', kind: 'dir', b: 2097152, o: 1 },
+        ],
+      }])
+    })
+    it('under a path: only its matches', async () => {
+      expect(await matches(`date=${A}&path=bk/fill&q=ttl`)).toEqual([200, {
+        date: A, path: 'bk/fill', q: 'ttl', total: 2, complete: true,
+        items: [
+          { path: 'bk/fill/zz-TTL-b', kind: 'file', b: 7000, o: 1 },
+          { path: 'bk/fill/zz-ttl-a', kind: 'dir', b: 5000, o: 1 },
+        ],
+      }])
+    })
+    it('no match: no items', async () => {
+      expect(await matches(`date=${A}&q=nowhere-at-all`)).toEqual([200, { date: A, path: '', q: 'nowhere-at-all', total: 0, complete: true, items: [] }])
+    })
+    it('refuses a missing filter, a bad date and a bad path, as filter-cover does', async () => {
+      expect(await matches(`date=${A}`)).toEqual([400, { error: 'q= (a filter) is required' }])
+      expect(await matches(`date=nope&q=ttl`)).toEqual([400, 'bad date'])
+      expect(await matches(`date=${A}&path=../x&q=ttl`)).toEqual([400, 'bad path'])
+    })
+  })
 
   describe('/api/filter-cover', () => {
     it('the fleet root: folders whose every object matches collapse, the rest stay one per match root', async () => {
@@ -63,6 +111,13 @@ describe('D1', () => {
           { path: 'bk/tmp/ttl=14d', kind: 'dir', b: 5242880, o: 2, roots: 1 },
           { path: 'bk/tmp/ttl=7d', kind: 'dir', b: 2097152, o: 1, roots: 1 },
         ],
+      }])
+    })
+    it('a view whose own path matches: the folder whole (every descendant of a match root matches)', async () => {
+      expect(await cover(`date=${A}&path=bk/tmp/ttl=14d&q=ttl`)).toEqual([200, {
+        date: A, path: 'bk/tmp/ttl=14d', q: 'ttl', complete: true, looked: 1, unchecked: 0,
+        roots: { n: 1, b: 5242880, o: 2 },
+        items: [{ path: 'bk/tmp/ttl=14d', kind: 'dir', b: 5242880, o: 2, roots: 1 }],
       }])
     })
     it('refuses what isn\'t a set of exact prefixes, and a scan the store doesn\'t have', async () => {

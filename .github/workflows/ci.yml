@@ -49,7 +49,8 @@ jobs:
 
       - name: Run tests
         if: steps.passed.outputs.cache-hit != 'true'
-        run: uv run pytest tests/ -v
+        # GHA runners have 4 cores: one xdist worker each, the tests handed out one by one (`slow` included)
+        run: uv run pytest tests/ -v -n auto --dist loadgroup --durations=30
 
       - name: Record pass
         if: steps.passed.outputs.cache-hit != 'true'
@@ -130,11 +131,27 @@ jobs:
         run: cd packages/react && pnpm test
 
   dt-cloud-test:
-    name: dt-cloud tests
+    name: dt-cloud tests (${{ matrix.python-version }}, ${{ matrix.shard.name }})
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         python-version: ["3.12", "3.13"]
+        # Shards by fixture: `test_static_drill.py`'s `world` (a minute to build, per config) splits by config, so
+        # each shard builds its own a few times; `rest` is everything the others don't name (new files land there).
+        shard:
+          - name: drill-R3
+            args: tests/test_static_drill.py -k R3-K2
+          - name: drill-R5
+            args: tests/test_static_drill.py -k R5-K1
+          - name: oracles
+            args: >-
+              tests/test_static_drill.py tests/test_static_hex.py tests/test_static_anchors.py
+              tests/test_static_anchors_hex.py -k "not R3-K2 and not R5-K1"
+          - name: rest
+            args: >-
+              tests --ignore=tests/test_static_drill.py --ignore=tests/test_static_hex.py
+              --ignore=tests/test_static_anchors.py --ignore=tests/test_static_anchors_hex.py
     steps:
       # Full history: a pending D1 recipe (`site/migrations/*.sql`) is checked
       # against `site/schema.sql` as it was before the recipe landed
@@ -149,7 +166,7 @@ jobs:
       # and Functions too, so the whole tree counts).
       - name: Test inputs key
         id: key
-        run: echo "key=dt-cloud-${{ matrix.python-version }}-$(git ls-tree -r HEAD | grep -vE '[[:space:]](specs/|.*\.md$)' | sha256sum | cut -c1-32)" >> "$GITHUB_OUTPUT"
+        run: echo "key=dt-cloud-${{ matrix.python-version }}-${{ matrix.shard.name }}-$(git ls-tree -r HEAD | grep -vE '[[:space:]](specs/|.*\.md$)' | sha256sum | cut -c1-32)" >> "$GITHUB_OUTPUT"
 
       - name: Already passed?
         id: passed
@@ -175,7 +192,9 @@ jobs:
 
       - name: Run dt-cloud tests
         if: steps.passed.outputs.cache-hit != 'true'
-        run: cd cloud && uv run --no-sync pytest tests -v
+        # one xdist worker per core, `slow` included; `loadgroup`: the conftest keeps the tests sharing a
+        # module-scoped fixture together in chunks (one build per chunk), the rest go out one by one
+        run: cd cloud && uv run --no-sync pytest ${{ matrix.shard.args }} -v -n auto --dist loadgroup --durations=30
 
       - name: Record pass
         if: steps.passed.outputs.cache-hit != 'true'

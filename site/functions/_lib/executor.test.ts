@@ -121,7 +121,7 @@ describe('dispatchPlan — executor selection', () => {
   })
 })
 
-describe('dispatchPlan — a real run (specs/delete-what-you-see.md)', () => {
+describe('dispatchPlan — a real run (specs/done/delete-what-you-see.md)', () => {
   it('needs no prior dry run: a scan, or a finished dry run of exactly its set to take one (and its manifest) from; never while a run is in flight', async () => {
     const s = await setup()
     const ex = s.executors['plan-sweep']

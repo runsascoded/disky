@@ -29,6 +29,7 @@ import os
 import re
 import shlex
 import subprocess
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -156,6 +157,76 @@ class JobAccount(ComponentResource):
                 opts=adopt.opts(existing, f"{sa_path} {act} serviceAccount:{actor}", parent=self, depends_on=list(actor_deps)),
             )
         self.register_outputs({"email": self.email})
+
+
+#: An image repo's cleanup (`DeploymentImages`): the deployment's tag kept, the newest builds kept, the rest deleted past
+#: this age (probe and test tags `<purpose>-<sha>` included).
+IMAGE_KEEP_TAGS = ("latest",)
+IMAGE_KEEP_RECENT = 10
+IMAGE_DELETE_AFTER_S = 14 * 86400
+
+
+class DeploymentImages(ComponentResource):
+    """A deployment's image repository, `<deployment>-usage` (Artifact Registry, Docker): one image (`scan`), the
+    deployment's tag `:latest`, probe / test tags beside it, cleaned up (`IMAGE_KEEP_TAGS` and the newest
+    `IMAGE_KEEP_RECENT` builds kept, the rest deleted after `IMAGE_DELETE_AFTER_S`). `readers` (the job account's
+    member) pull, `writers` (a build account's) push. `repository_id` defaults to `<deployment>-usage`; a live repo is
+    adopted under its own id (`existing`; a repo can't be renamed: a new name is a new repo, the old one deleted once
+    nothing points at it). `logical`: the repo's resource name, so a stack moving it into this component keeps it
+    (pass the name it had, and `aliases` its old parent, e.g. `[Alias(parent=ROOT_STACK_RESOURCE)]`)."""
+
+    def __init__(
+        self,
+        deployment: str,
+        *,
+        project: str,
+        region: str,
+        readers: list[pulumi.Input[str]] = (),
+        writers: list[pulumi.Input[str]] = (),
+        repository_id: str | None = None,
+        logical: str | None = None,
+        description: str | None = None,
+        adopt: Adopt,
+        existing: bool = False,
+        aliases: Sequence[pulumi.Alias] = (),
+        opts: ResourceOptions | None = None,
+    ):
+        name = logical or f"{deployment}-usage-images"
+        super().__init__("disky:gcp:DeploymentImages", name, None, opts)
+        repo_id = repository_id or f"{deployment}-usage"
+        A = gcp.artifactregistry
+        self.repository = A.Repository(
+            name,
+            project=project,
+            location=region,
+            repository_id=repo_id,
+            format="DOCKER",
+            description=description or f"{deployment} deployment images (`scan`; `:latest` is the deployment's)",
+            labels={"component": "images", "deployment": deployment},
+            cleanup_policy_dry_run=False,
+            cleanup_policies=[
+                A.RepositoryCleanupPolicyArgs(id="keep-deployment-tags", action="KEEP",
+                                              condition=A.RepositoryCleanupPolicyConditionArgs(tag_state="TAGGED", tag_prefixes=list(IMAGE_KEEP_TAGS))),
+                A.RepositoryCleanupPolicyArgs(id="keep-recent", action="KEEP",
+                                              most_recent_versions=A.RepositoryCleanupPolicyMostRecentVersionsArgs(keep_count=IMAGE_KEEP_RECENT)),
+                A.RepositoryCleanupPolicyArgs(id="delete-old", action="DELETE",
+                                              condition=A.RepositoryCleanupPolicyConditionArgs(tag_state="ANY", older_than=f"{IMAGE_DELETE_AFTER_S}s")),
+            ],
+            opts=adopt.opts(existing, f"projects/{project}/locations/{region}/repositories/{repo_id}", parent=self, protect=True, aliases=list(aliases)),
+        )
+        for role, members in (("reader", readers), ("writer", writers)):
+            for i, member in enumerate(members):
+                A.RepositoryIamMember(
+                    f"{name}-{role}-{i}",
+                    project=project,
+                    location=self.repository.location,
+                    repository=self.repository.repository_id,
+                    role=f"roles/artifactregistry.{role}",
+                    member=member,
+                    opts=ResourceOptions(parent=self),
+                )
+        self.image = pulumi.Output.concat(region, "-docker.pkg.dev/", project, "/", self.repository.repository_id, "/scan")
+        self.register_outputs({"image": self.image})
 
 
 class Secrets(ComponentResource):

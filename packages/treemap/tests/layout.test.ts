@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { edgeEmphFactor, flattenPlaced, hitTest, layoutCells, reclaimTitleColumns, type LayoutConfig, type PlacedCell } from '../src/layout'
+import { cellStroke, edgeEmphFactor, flattenPlaced, hitTest, layoutCells, reclaimTitleColumns, type LayoutConfig, type PlacedCell } from '../src/layout'
 import { squarify } from '../src/squarify'
 
 interface N {
@@ -218,6 +218,52 @@ describe('edgeEmphFactor', () => {
     // 1 + emphasis · max(0, 2 − depth)
     expect([0, 1, 2, 3].map(d => edgeEmphFactor(d, 1))).toEqual([3, 2, 1, 1])
     expect([0, 1, 2].map(d => edgeEmphFactor(d, 0.5))).toEqual([2, 1.5, 1])
+  })
+})
+
+describe('cellStroke', () => {
+  const at = (bw: number, borderStep: boolean) => ({ borderWidth: () => bw, edgeEmphasis: 0, borderStep })
+  it('passes fractional widths through when off', () => {
+    expect(cellStroke(at(1.4, false), 0, 100, 100, false, 2)).toBe(1.4)
+  })
+  it('rounds to whole pixels, ≥1px under the parent, floored at 1', () => {
+    expect([2.6, 1.4, 0.3].map(bw => cellStroke(at(bw, true), 0, 100, 100, false, Infinity))).toEqual([3, 1, 1])
+    expect([3, 2, 1].map(parent => cellStroke(at(3, true), 1, 100, 100, false, parent))).toEqual([2, 1, 1])
+  })
+  it('caps dust at a hairline either way', () => {
+    expect([false, true].map(step => cellStroke(at(3, step), 0, 10, 100, true, Infinity))).toEqual([1, 1])
+  })
+})
+
+describe('borderStep placement', () => {
+  const deep: N = {
+    n: 'root',
+    size: 400,
+    children: [
+      {
+        n: 'A',
+        size: 300,
+        children: [
+          { n: 'B1', size: 200, children: [{ n: 'c1', size: 120 }, { n: 'c2', size: 80 }] },
+          { n: 'B2', size: 100 },
+        ],
+      },
+      { n: 'X', size: 100 },
+    ],
+  }
+  // Fractional, shallow-to-deep: 2.6 / 2.3 / 2.0 — a 0.3px step that renders as no step.
+  const strokes = (borderStep: boolean) => {
+    const top = squarify(deep.children!, 0, 0, 800, 600, getSize)
+    const cells = layoutCells(top, [deep], 'shared', {
+      ...cfg, borderWidth: d => 2.6 - 0.3 * d, borderStep, tilingFor: () => 'shared',
+    })
+    return Object.fromEntries(flattenPlaced(cells).map(c => [label(c), round(c.edge * 2)]))
+  }
+  it('keeps the consumer widths when off', () => {
+    expect(strokes(false)).toEqual({ A: 2.6, B1: 2.3, B2: 2.3, c1: 2, c2: 2, X: 2.6 })
+  })
+  it('steps whole pixels down each level when on', () => {
+    expect(strokes(true)).toEqual({ A: 3, B1: 2, B2: 2, c1: 1, c2: 1, X: 3 })
   })
 })
 

@@ -1,6 +1,7 @@
 import { Explain } from './Help'
 import { keepPreviousData, useQueries, useQuery, useQueryClient } from '@tanstack/react-query'
 import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import type { ReactNode } from 'react'
 import { Link, useLocation, useNavigate, useNavigationType } from 'react-router-dom'
 import { MdLayers } from 'react-icons/md'
 import { useActions } from 'use-kbd'
@@ -9,7 +10,7 @@ import { bareEmpty, legacyOwner, ownerParam } from './ownerParam'
 import { AGE_MODES, AgeChart } from './AgeChart'
 import { canonId, shortName, shortUserKey } from './UserChip'
 import { signInUrl, useCanAssign, useCanStage, useIdent as useIdentity, useIsAdmin } from './auth'
-import { AttributionRules } from './AttributionRules'
+import { OwnershipHelp, PageFacts } from './PageFacts'
 import { DiffTreemap, DiffHeader, useDiffModel } from './DiffTreemap'
 import { DiffTable } from './DiffTable'
 import { Allowances } from './Allowances'
@@ -25,7 +26,8 @@ import { FitSelect } from './FitSelect'
 import { PathPopover } from './PathPopover'
 import { fromUrlPath, mountedSegs, pathCopy, pathDisplay, pathText } from './pathCrumbs'
 import { listsObjects, openHref, treeHref } from './objects'
-import { Busy, Skeleton } from './Busy'
+import { useFolderSearch } from './folderSearch'
+import { Busy, Loading, Skeleton } from './Busy'
 import { useRules } from './rules'
 import { useSectionSpy, withoutSection, type SectionMode } from 'use-prms/sections'
 import { LEGACY_ANCHORS, SECTION_IDS, SECTION_KEY } from './homeSections'
@@ -35,6 +37,8 @@ import { barControls } from './pageBar'
 import { LifecycleFold } from './LifecycleFold'
 import { ClassMixTip, Tooltip } from './Tooltip'
 import { LaptopIndicator } from './laptop'
+import { indexingScans, searchOff } from './defaultScan'
+import { SearchOffNote, SearchOffTip } from './SearchCatchUp'
 import { scansHref, useScanRunOf } from './scanRunsUi'
 import { ReadThroughBanner } from './ReadThroughLi'
 import { readDay, readLogged, readThrough, readThroughText, unloggedOf } from './readLens'
@@ -50,7 +54,7 @@ import { budgetCutRefetch } from './budgetCut'
 import type { RowSource } from './MatchActions'
 import { type MatchFields, seriesMatches } from './filterMatches'
 import { QueryHelpTip } from './QueryHelp'
-import { apiError, indexedSyntax, refusalOf, useFilterCaps, useIndexedScans } from './filterCaps'
+import { apiError, indexedSyntax, refusalOf, useFilterCaps, useScanPreference } from './filterCaps'
 import { RootCrumb } from './RootCrumb'
 import { actBlock, noMatches } from './matchAct'
 import { type BlindPanel, blindNote, blindShown } from './filterBlind'
@@ -140,7 +144,7 @@ const SPANS: [string, number][] = [['1d', 1], ['3d', 3], ['7d', 7], ['14d', 14],
 // HTTP copy of a pre-deploy answer (they were kept a day until 2026-09-17,
 // five minutes since) is never replayed after a reader rule changes. Bump
 // with `CACHE_V` in functions/_lib/edgeCache.ts.
-const API_CV = '2'
+const API_CV = '3'
 // The section in view lives in the query (`?section=diff`), where a link preview's unfurler sees it; an incoming
 // `#diff` (or a retired `#changes`) is adopted into it. A module constant: `useSectionSpy` re-resolves its mode,
 // and re-binds its scroll listener, whenever this object's identity changes.
@@ -196,12 +200,21 @@ function AppContent() {
   // Scan selection (`?d=YYMMDD`) + the polling scan list, shared with /users
   // and /user/:id via useScan (specs/done/scan-param-all-pages.md). Absent `?d` is
   // a first-class "latest", so a parked tab follows new scans.
-  // A filtered view with no `?d=` on an indexed-only deployment opens on the newest scan the static
-  // index covers (a just-published scan isn't searchable until the index appends it), and says so.
+  // The default scan (`defaultScan.ts`, the deployment's `DEFAULT_SCAN`): a view with no `?d=` that prefers the
+  // static index's covered scans (a filtered one, or any on a `searchable` deployment) opens on the newest of them
+  // (a just-published scan isn't searchable until the index appends it), and says so. Until the caps say which
+  // mode, nothing is picked (no fetch of a scan the mode may rule out).
   const { indexedOnly: indexedOnly0 } = useFilterCaps()
   const [fFloat] = useUrlState('f', stringParam())
-  const indexedScans = useIndexedScans(indexedOnly0 && !!fFloat)
-  const { asof, miss, pending, scans, times, label: fmtS, dMatches, dP, setDP, span, setSpan, from, setFrom, setEndPin, setRange, at, setAt, atFrom, setFromAt, scansQ } = useScan(store, indexedOnly0 && fFloat ? indexedScans : undefined)
+  const { prefer, covered } = useScanPreference(!!fFloat)
+  const { asof, miss, pending, scans, times, label: fmtS, dMatches, dP, setDP, span, setSpan, from, setFrom, setEndPin, setRange, at, setAt, atFrom, setFromAt, scansQ } = useScan(store, prefer)
+  // The page's scan isn't in the static name index yet (published, not yet appended): the search box is shown
+  // disabled, its tip linking the scan's indexing run and the newest searchable scan in this view.
+  const searchIsOff = searchOff(asof, covered)
+  const newestSearchable = Array.isArray(covered) ? scans.find(s => covered.includes(s)) ?? null : null
+  const newestHref = newestSearchable ? hrefWithScan(pathname, search, selOf(new URLSearchParams(search)), newestSearchable, true, times, scans) : null
+  const indexing = useMemo(() => new Set(indexingScans(scans, covered)), [scans, covered])
+  const pickLabel = useCallback((id: string) => (indexing.has(id) ? `${fmtS(id)} · indexing` : fmtS(id)), [indexing, fmtS])
   const rulesQ = useRules()
   const rules: Rules | null = rulesQ.data ?? null
   // Ledger actions record which scan the actor was viewing.
@@ -364,6 +377,10 @@ function AppContent() {
   const cutQs = endAt ? `at=${endAt}` : `date=${asof}`
   const cutKey = endAt ?? asof
   const diffQs = `${startAt ? `from_at=${startAt}` : `from=${diffPrev}`}&${endAt ? `to_at=${endAt}` : `to=${asof}`}`
+  // The diff map's area mode (`DiffTreemap`'s `dm`; absent = Δ): the rows a Δ map needs are only what changed
+  // (specs/diff-from-changes.md), so the server is told which one it draws for.
+  const [dmP] = useUrlState('dm', stringParam())
+  const dmMode = dmP === 'max' ? 'max' : 'delta'
   const diffKey = `${startAt ?? diffPrev}→${endAt ?? asof}`
   // A store whose scans carry physical disk readings (`meta.disk_space`) compares them across the diff;
   // any other store never fetches the earlier scan's meta (`diskDiffScan`).
@@ -389,6 +406,30 @@ function AppContent() {
     setRange(toScan, spanTo(toScan, fromScan), fromScan)
   }
   const diffWindow: [string, string] | undefined = diffPrev && asof ? [diffPrev, asof] : undefined
+  /** One diff edge's neighbouring scan (`scans` runs newest first): `older` steps back in time; null past the
+   *  history or onto/over the other edge. Brushed like a drag on the chart, so the window ends up pinned. */
+  const nudgeTarget = (edge: 'from' | 'to', older: boolean): string | null => {
+    if (!diffPrev || !asof) return null
+    const i = scans.indexOf(edge === 'from' ? diffPrev : asof)
+    const s = i < 0 ? undefined : scans[i + (older ? 1 : -1)]
+    if (!s) return null
+    return (edge === 'from' ? scanCmp(s, asof, times) < 0 : scanCmp(s, diffPrev, times) > 0) ? s : null
+  }
+  const nudge = (edge: 'from' | 'to', older: boolean) => {
+    const s = nudgeTarget(edge, older)
+    if (s && diffPrev && asof) brushRange(edge === 'from' ? s : diffPrev, edge === 'to' ? s : asof)
+  }
+  const nudges = (edge: 'from' | 'to', children: ReactNode) => {
+    const btn = (older: boolean) => {
+      const s = nudgeTarget(edge, older)
+      return (
+        <Explain text={s ? <>{edge === 'from' ? 'Start' : 'End'} one scan {older ? 'earlier' : 'later'}: {fmtS(s)}</> : <>No {older ? 'earlier' : 'later'} scan for the {edge === 'from' ? 'start' : 'end'}</>}>
+          <button type="button" className="nudge" disabled={!s} aria-label={`${edge === 'from' ? 'Start' : 'End'} one scan ${older ? 'earlier' : 'later'}`} onClick={() => nudge(edge, older)}>{older ? '‹' : '›'}</button>
+        </Explain>
+      )
+    }
+    return <span className="nudges">{btn(true)}{children}{btn(false)}</span>
+  }
   // Two orthogonal, low-key toggles for the diff window (see scan.ts grammar):
   // the start is either a pinned scan (`from`) or a look-back span; the end
   // either follows the latest scan (floating) or is pinned. The end toggle only
@@ -524,7 +565,10 @@ function AppContent() {
   const deepRefused = !rootErr && fq && refusalOf(deepErr) ? deepErr : undefined
   const viewErr = rootErr ?? deepRefused
   // The box's error: the client's own parse, else the server's 400.
-  const fErr = fParse.error ?? fScopeRefused ?? /^400: bad query: (.*)/s.exec(viewErr?.message ?? '')?.[1]
+  // On a scan the index doesn't cover yet, its `scan-not-indexed` refusal is the box's disabled state and the map
+  // slot's catch-up note (with its links), not an error.
+  const notIndexed = searchIsOff && refusalOf(viewErr)?.code === 'scan-not-indexed'
+  const fErr = fParse.error ?? fScopeRefused ?? (notIndexed ? undefined : /^400: bad query: (.*)/s.exec(viewErr?.message ?? '')?.[1])
   // useQueries returns a fresh array each render; stamp the data so the graft
   // memo re-runs exactly when a response lands.
   // Both tiers stamp the graft: a depth-1 tree landing must re-run it just
@@ -785,6 +829,8 @@ function AppContent() {
   const [openP, setOpenP] = useUrlState('open', stringParam(), true)
   // Without the router's section: the spy names the one in view on the reader's next scroll.
   const openObject = (segs: string[]) => navigate(openHref(store, segs, withoutSection(search)))
+  // ⌘K: the folders and files named for the query, largest first, at this scan; a pick drills there (`folderSearch.ts`).
+  useFolderSearch({ fetcher: sfetch, date: asof ?? null, indexed: indexedOnly0 ? covered : null, at: endAt, qs: syntax.id, drill: drillTo, open: openObject, filter: q => setFq(q), size: fmtBytes })
   // Read-recency lens domain: the access-log observation window (meta), not
   // the tree's own min/max — "no reads" is only meaningful vs when logging began.
   // Where the scan's read data ends (`access.through`, spec `access-log-freshness.md`): the lens is then
@@ -845,14 +891,14 @@ function AppContent() {
   // (`depth` only caps what's drawn), so without a search index the "first"
   // paint costs as much as the full walk (gcs 2026-10-02: 9.3 s vs 4.5 s).
   const diffQ1 = useQuery<DiffData, Error>({
-    queryKey: ['diff', store.key, diffKey, diffPath, canW, scopeKey, 'l1'],
+    queryKey: ['diff', store.key, diffKey, diffPath, canW, scopeKey, dmMode, 'l1'],
     enabled: !!asof && !!diffPrev && scopeReady && diffPathOf !== undefined && !fq,
     staleTime: Infinity,
     retry: false,
     queryFn: async ({ signal }: { signal?: AbortSignal }) => {
       const pf = perf.start('dtm', viewKey(graftPath, `${diffPrev}→${asof}`, '|d1'), ['dtable'])
       const r = await pf.track(sfetch(
-        `/api/diff?cv=${API_CV}&${diffQs}&path=${encodeURIComponent(diffPath)}&w=${canW}&h=${Math.round(canW * 0.6)}${scopeQs}&depth=1`,
+        `/api/diff?cv=${API_CV}&${diffQs}&path=${encodeURIComponent(diffPath)}&w=${canW}&h=${Math.round(canW * 0.6)}${scopeQs}&dm=${dmMode}&depth=1`,
         { credentials: 'include', signal },
       ))
       if (!r.ok) { pf.fail(); throw apiError(r.status, await r.text()) }
@@ -868,7 +914,7 @@ function AppContent() {
   const diffSlotRef = useRef<HTMLDivElement>(null)
   const diffSlotH = useRef(0)
   const diffQ = useQuery<DiffData, Error>({
-    queryKey: ['diff', store.key, diffKey, diffPath, canW, scopeKey],
+    queryKey: ['diff', store.key, diffKey, diffPath, canW, scopeKey, dmMode],
     enabled: !!asof && !!diffPrev && scopeReady && diffPathOf !== undefined,
     // While the full walk aligns: the bucket-level diff of the SAME pair once
     // it lands, else the last pair's diff — drawn dimmed either way, so the
@@ -881,7 +927,7 @@ function AppContent() {
     queryFn: async ({ signal }: { signal?: AbortSignal }) => {
       const pf = perf.start('dtm', viewKey(graftPath, `${diffPrev}→${asof}`), ['dtable'])
       const r = await pf.track(sfetch(
-        `/api/diff?cv=${API_CV}&${diffQs}&path=${encodeURIComponent(diffPath)}&w=${canW}&h=${Math.round(canW * 0.6)}${scopeQs}`,
+        `/api/diff?cv=${API_CV}&${diffQs}&path=${encodeURIComponent(diffPath)}&w=${canW}&h=${Math.round(canW * 0.6)}${scopeQs}&dm=${dmMode}`,
         { credentials: 'include', signal },
       ))
       if (!r.ok) { pf.fail(); throw apiError(r.status, await r.text()) }
@@ -1267,8 +1313,8 @@ function AppContent() {
           <span className="tb-scan">
             {union
               ? <UnionScanPicker sources={union.sources} value={asof} at={at} scans={scans} onChange={setDP} onAt={setAt} label="Scan date" compact
-                  fallback={<ScanCombobox value={asof} scans={scans} onChange={setDP} label="Scan date" fmt={fmtS} />} />
-              : <ScanCombobox value={asof} scans={scans} onChange={setDP} label="Scan date" fmt={fmtS} />}
+                  fallback={<ScanCombobox value={asof} scans={scans} onChange={setDP} label="Scan date" fmt={pickLabel} />} />
+              : <ScanCombobox value={asof} scans={scans} onChange={setDP} label="Scan date" fmt={pickLabel} />}
           </span>
         )}
         {/* How fresh the page's scan is, at a glance (the picker shows only
@@ -1332,23 +1378,35 @@ function AppContent() {
         )}
         {bar.ownerFilter && (
           <span className="tb-axis">
-            <span className="lbl">owner</span>
+            <Explain text={<OwnershipHelp />} label="owner"><span className="lbl">owner</span></Explain>
             {ownerSelect}
           </span>
         )}
         {bar.pathFilter && (
           <span className={fq ? 'filterbox active' : 'filterbox'}>
-            <Explain text={`Filter paths (${boxSyntax.describe().label}): ${boxSyntax.describe().summary} — the ? lists the forms.`}>
-              <input
-                value={fqDraft ?? fqRaw ?? ''}
-                onChange={e => setFqDraft(e.target.value)}
-                placeholder={boxSyntax.describe().placeholder}
-                aria-label="Filter tree by path"
-                data-log-input="filter"
-                aria-invalid={!!fErr}
-                size={30}
-              />
-            </Explain>
+            {searchIsOff && asof ? (
+              <Tooltip pinnable content={<SearchOffTip store={store} scan={asof} newest={newestSearchable} newestHref={newestHref} fmt={fmtS} />}>
+                <input
+                  value={fqDraft ?? fqRaw ?? ''}
+                  placeholder="search catches up after indexing"
+                  aria-label="Filter tree by path (not yet available for this scan)"
+                  disabled
+                  size={30}
+                />
+              </Tooltip>
+            ) : (
+              <Explain text={`Filter paths (${boxSyntax.describe().label}): ${boxSyntax.describe().summary} — the ? lists the forms.`}>
+                <input
+                  value={fqDraft ?? fqRaw ?? ''}
+                  onChange={e => setFqDraft(e.target.value)}
+                  placeholder={boxSyntax.describe().placeholder}
+                  aria-label="Filter tree by path"
+                  data-log-input="filter"
+                  aria-invalid={!!fErr}
+                  size={30}
+                />
+              </Explain>
+            )}
             {indexedOnly
               ? <QueryHelpTip syntaxes={[syntax]} active={syntax} />
               : <QueryHelpTip syntaxes={SYNTAXES} active={syntax} onPick={id => setQsP(id === storeSyntax.id ? undefined : id)} />}
@@ -1366,7 +1424,7 @@ function AppContent() {
 
       {/* Ambiguous `?d`: render the newest match (a best guess beats a dead
           end) with a strip listing every candidate to pin one. */}
-      {asof && pending.length > 0 && <p className="tab-note pending-index" role="status">{pendingNote(asof, pending)}</p>}
+      {asof && pending.length > 0 && <p className="tab-note pending-index" role="status">{pendingNote(asof, pending, undefined, !!fq)}</p>}
       {union && <UnionMissingNote union={(subtreeQs[0]?.data ?? coarseQs[0]?.data)?.union} />}
       {dMatches.length > 1 && (
         <p className="disambig">
@@ -1442,6 +1500,7 @@ function AppContent() {
             onBrush={setBrush}
             band={band}
             onBand={setBand}
+            stageHere={!fq}
           />{mapStale ? <Busy label={mapRetrying ?? 'loading view…'} /> : mapBusy ? <Busy corner label="filling in…" /> : null}</div>
           {/* A drilled directory with nothing drawable under it: the scope came
               up empty, or (a v1 scan) it holds only objects or directories
@@ -1470,7 +1529,7 @@ function AppContent() {
           )}
           {/* The opened object (`?open=`), under the map it was picked from. */}
           {openP && mapPath && (
-            <Suspense fallback={<p className="loading">loading the viewer…</p>}>
+            <Suspense fallback={<Loading label="Loading the viewer…" />}>
               <ObjectPanel
                 segs={[...segs, openP]}
                 node={mapPath.length - 1 === segs.length ? mapPath[mapPath.length - 1].c?.find(c => c.n === openP) : undefined}
@@ -1502,6 +1561,15 @@ function AppContent() {
               access={meta?.access}
             /></div>
           )}
+          {/* The drilled node's storage-class mix and the ownership share, one compact row under the map's own
+              listing (it follows the drill); the per-class table opens from its disclosure (`?cx`). */}
+          {blindShown(!!fq) && (
+            <PageFacts
+              mix={meta && store.prices && mapPath ? classMix(mapPath[mapPath.length - 1]) : undefined}
+              scope={mapPath && mapPath.length > 1 ? mapPath.slice(1).map(n => n.n).join('/') : store.rootLabel}
+              tree={hasAttr ? mapTree ?? undefined : undefined}
+            />
+          )}
         </>
       ) : miss ? (
         <NoScanMatch miss={miss} fmt={fmtS} hrefFor={scan => hrefWithScan(pathname, search, selOf(new URLSearchParams(search)), scan, true, times, scans)} />
@@ -1510,6 +1578,9 @@ function AppContent() {
           {rootErr.message.startsWith('409') ? 'no per-user index for this scan — pick a newer scan, or clear the user'
             : 'this view is too wide for the index — drill in, or narrow the scope'}
         </p>
+      ) : viewErr && notIndexed && asof ? (
+        // A scan the static name index doesn't cover yet: why, and the ways on (its indexing run, the newest searchable scan).
+        <SearchOffNote store={store} scan={asof} newest={newestSearchable} newestHref={newestHref} fmt={fmtS} />
       ) : viewErr ? (
         // The filter's refusal as its reason, inline; any other failure as its message, a 5xx with a retry.
         <LoadFailure err={viewErr} what="view" onRetry={retryMap} />
@@ -1526,7 +1597,7 @@ function AppContent() {
         // First paint only — before even the depth-1 tree has landed (later
         // loads hold the previous tree instead): reserve the map's slot at its
         // fetch aspect (w : 0.6w), so nothing below it jumps when it arrives.
-        <div id="tree-map" className="tm-skel" aria-busy="true" aria-label="loading tree" />
+        <div id="tree-map" className="tm-skel busy-host" aria-busy="true"><Busy label="Loading storage map…" /></div>
       )}
 
       {/* Bytes per scan under the drilled prefix, scoped like the map (a user
@@ -1578,17 +1649,21 @@ function AppContent() {
           <DiffHeader model={diffModel} controls={<span className="sub">
             {/* Both endpoints: the window's start, and the page's scan again
                 (the bar's picker — one scan, stated where the diff reads). */}
-            <Explain text={<>The diff window's start — the size chart's shaded band reads from here to the scan. Drag on the size chart to set both ends.</>}>
-              {union && diffPrev
-                ? <UnionScanPicker sources={union.sources} value={diffPrev} at={atFrom} scans={earlier} onChange={setFrom} onAt={setFromAt} label="Diff from scan" before={at ?? (asof ? cutoffOfScan(union.sources, asof) : null)} compact
-                    fallback={<ScanCombobox value={diffPrev} scans={earlier} onChange={setFrom} label="Diff from scan" fmt={fmtS} />} />
-                : <ScanCombobox value={diffPrev} scans={earlier} onChange={setFrom} label="Diff from scan" fmt={fmtS} />}
-            </Explain>
+            {nudges('from', <>
+              <Explain text={<>The diff window's start — the size chart's shaded band reads from here to the scan. Drag on the size chart to set both ends, or an edge's handle to move that end.</>}>
+                {union && diffPrev
+                  ? <UnionScanPicker sources={union.sources} value={diffPrev} at={atFrom} scans={earlier} onChange={setFrom} onAt={setFromAt} label="Diff from scan" before={at ?? (asof ? cutoffOfScan(union.sources, asof) : null)} compact
+                      fallback={<ScanCombobox value={diffPrev} scans={earlier} onChange={setFrom} label="Diff from scan" fmt={fmtS} />} />
+                  : <ScanCombobox value={diffPrev} scans={earlier} onChange={setFrom} label="Diff from scan" fmt={fmtS} />}
+              </Explain>
+            </>)}
             <span className="arrow"> → </span>
-            {union && asof
-              ? <UnionScanPicker sources={union.sources} value={asof} at={at} scans={scans} onChange={setDP} onAt={setAt} label="Diff to scan (the page's scan)" compact
-                  fallback={<ScanCombobox value={asof} scans={scans} onChange={setDP} label="Diff to scan (the page's scan)" fmt={fmtS} />} />
-              : <ScanCombobox value={asof} scans={scans} onChange={setDP} label="Diff to scan (the page's scan)" fmt={fmtS} />}
+            {nudges('to', <>
+              {union && asof
+                ? <UnionScanPicker sources={union.sources} value={asof} at={at} scans={scans} onChange={setDP} onAt={setAt} label="Diff to scan (the page's scan)" compact
+                    fallback={<ScanCombobox value={asof} scans={scans} onChange={setDP} label="Diff to scan (the page's scan)" fmt={fmtS} />} />
+                : <ScanCombobox value={asof} scans={scans} onChange={setDP} label="Diff to scan (the page's scan)" fmt={fmtS} />}
+            </>)}
             <span className="d-modes">
               <span className="gran d-mode" role="radiogroup" aria-label="Diff start">
                 <span className="d-mode-lbl">start</span>
@@ -1629,7 +1704,7 @@ function AppContent() {
             </span>
             {diffHead ? (
               <>
-                {diffStale && <span className="loading"> · aligning the rows…</span>}
+                {diffStale && <Loading label="Aligning the rows…" />}
               </>
             ) : diffErr && !diffStale && /^(404|409)/.test(diffErr.message) ? (
               <span className="tab-note">
@@ -1641,7 +1716,7 @@ function AppContent() {
               // The filter's refusal as its reason; any other failure as its message, a 5xx with a retry.
               <>{' · '}<LoadFailure as="span" className="tab-note" err={diffErr} what={`diff ${fmtS(diffPrev)} → ${fmtS(asof)}`} onRetry={() => void diffQ.refetch()} /></>
             ) : (
-              <span className="loading"> · aligning {fmtS(diffPrev)} → {fmtS(asof)}…</span>
+              <Loading label={`Aligning ${fmtS(diffPrev)} → ${fmtS(asof)}…`} />
             )}
           </span>} />
           <DiskSpaceDiff before={beforeMetaQ.data?.disk_space} after={meta?.disk_space} />
@@ -1659,7 +1734,7 @@ function AppContent() {
               {/* The map's tabular twin: the same cells as rows, sortable; a
                   row's name drills like its cell (and scrolls the maps up). */}
               <DiffTable model={diffModel} scheme={store.scheme} home={store.home} segs={diffSegs} onDrill={rel => openPath([...diffSegs, ...rel])} onOpen={rel => openObject([...diffSegs, ...rel])} />
-              {diffStaleOther
+              {diffStaleOther || diffStale
                 ? <Busy label={`aligning ${fmtS(diffPrev)} → ${fmtS(asof)}…`} />
                 : diffRefining
                   ? <Busy label="aligning rows…" corner />
@@ -1716,48 +1791,6 @@ function AppContent() {
           note={<>Intended state is tracked in <code>{store.lifecycle.tracked}</code> (<code>dt-cloud lifecycle diff|push</code>).</>}
         />
       )}
-
-      {blindShown(!!fq) && meta && store.prices && (() => {
-        // Class mix of the *drilled* node (each node carries descendant-inclusive
-        // `cb`), so this tracks the treemap instead of always showing fleet totals.
-        const node = mapPath ? mapPath[mapPath.length - 1] : tree
-        if (!node) return null
-        const mix = classMix(node)
-        const total = node.b || 1
-        const scope = mapPath && mapPath.length > 1 ? mapPath.slice(1).map(n => n.n).join('/') : store.rootLabel
-        return (
-          <section id="storage-classes">
-            <h2>Storage classes</h2>
-            <p className="sub">
-              Class mix + list-price estimate for <code>{scope}</code> — updates as you drill the treemap.
-            </p>
-            <table className="classes">
-              <thead>
-                <tr><th>class</th><th>bytes</th><th>est. $/mo (list, US)</th></tr>
-              </thead>
-              <tbody>
-                {Object.entries(mix)
-                  .sort((a, b) => b[1] - a[1])
-                  .map(([c, b]) => (
-                    <tr key={c}>
-                      <td>
-                        <Tooltip cell content={<>${CLASS_PRICE_US[c] ?? 0.02}/GiB·mo · {((100 * b) / total).toFixed(1)}% of these bytes</>}>
-                          <span className="dotted">{CLASS_NAMES[c] ?? c}</span>
-                        </Tooltip>
-                      </td>
-                      <td>{fmtBytes(b)}</td>
-                      <td>${Math.round((b / 1024 ** 3) * (CLASS_PRICE_US[c] ?? 0.02)).toLocaleString()}</td>
-                    </tr>
-                  ))}
-              </tbody>
-            </table>
-          </section>
-        )
-      })()}
-
-      {/* Static attribution reference — how ownership is inferred + the rule tables.
-          Reference material, so it sits last rather than sandwiched mid-page. */}
-      {blindShown(!!fq) && hasAttr && mapTree && <AttributionRules tree={mapTree} />}
 
       <SiteKbd
         placeholder={store.owners ? 'Users, color modes, scans, pages…' : 'Color modes, scans, pages, actions…'}

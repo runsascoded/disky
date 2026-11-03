@@ -2,6 +2,9 @@ import { useMemo } from 'react'
 import { FaRegTrashCan } from 'react-icons/fa6'
 import { useCanStage } from './auth'
 import { useStagedPlan } from './plans'
+import { usePrefixes } from './prefixes'
+import { useScans } from './scan'
+import { liveStagedItems } from './stagedCompletion'
 import { stagedIndex, type StagedIndex, type StagedMark } from './stagedIndex'
 import { useStore } from './store'
 import { ActStatus, useActDeps, useKeepFocus, useMatchAct } from './MatchActions'
@@ -33,13 +36,21 @@ export function PrefixStageAction({ item, scheme, fmtBytes, mark }: {
 }
 
 /** The open plan's index, for a viewer who can stage on a staging store (null otherwise, or while
- *  loading): what the map and table mark as already staged. */
+ *  loading): what the map and table mark as already staged. Only the items `/staged` lists: one the
+ *  newest scan holds nothing under (deleted, or gone before it was staged) isn't marked. */
 export function useStagedIndex(): StagedIndex | null {
   const store = useStore()
   const canStage = useCanStage()
   const on = !!store.staging && canStage
   const q = useStagedPlan(false, null, on)
-  return useMemo(() => (on && q.data ? stagedIndex(q.data.items) : null), [on, q.data])
+  const scans = useScans(store)
+  const prefixes = useMemo(() => q.data?.items.map(it => it.prefix) ?? [], [q.data])
+  const sized = usePrefixes(on ? scans.data?.[0] ?? '' : '', prefixes)
+  const pending = scans.isPending || sized.isLoading
+  return useMemo(
+    () => (on && q.data && !pending ? stagedIndex(liveStagedItems(q.data.items, sized.data)) : null),
+    [on, q.data, pending, sized.data],
+  )
 }
 
 /** A row's standing in the open plan, in place of its trash button: staged itself, or under a staged

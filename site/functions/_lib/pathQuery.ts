@@ -1,5 +1,5 @@
 /**
- * The path filter's predicate (specs/path-store-search.md §1): a `QueryAst`
+ * The path filter's predicate (specs/done/path-store-search.md §1): a `QueryAst`
  * (`queryAst.ts`, from any syntax in `querySyntax.ts`) → the test on a node's
  * full index path (`bucket/dir/sub`), shared by the server (`scope.ts`, the
  * filter view, the search) and the client (`src/filterTree.ts`).

@@ -48,6 +48,7 @@ import { batchLeads, coalesceBatches, idRanges } from '../functions/_lib/batchGr
 import { useLocation, useNavigationType } from 'react-router-dom'
 import { useSectionSpy, type SectionMode } from 'use-prms/sections'
 import { machineFor } from '../functions/_lib/sweepMachines'
+import { Loading, Skeleton } from './Busy'
 
 const iso = (ts: number): string => new Date(ts * 1000).toISOString()
 const store = DEFAULT_STORE
@@ -123,7 +124,7 @@ function EmptiedLine({ e, batches }: { e: EmptiedBatch; batches: Map<number, { c
       </span>
     )
   })
-  if (e.deleted) parts.push(<span key="d">{n(e.deleted)} deleted</span>)
+  if (e.deleted) parts.push(<Tooltip key="d" content="The reviewed snapshot was processed successfully. Newer objects were left alone and require a separate staging review."><span>{n(e.deleted)} completed</span></Tooltip>)
   if (e.unstaged) parts.push(<span key="u">{n(e.unstaged)} unstaged</span>)
   if (e.covered) parts.push(<span key="c">{n(e.covered)} already covered by a staged ancestor</span>)
   if (!parts.length) parts.push(<span key="none">nothing new (already staged)</span>)
@@ -245,10 +246,10 @@ export function StagedPage() {
     for (const e of emptied) {
       const k = lead(e.id)
       if (byBatch.has(k)) continue
-      const g = gone.get(k) ?? { ...(batchById.get(k) ?? e), id: k, staged: 0, covered: 0, absorbed: [], unstaged: 0, deleted: 0 }
+      const g = gone.get(k) ?? { ...(batchById.get(k) ?? e), id: k, prefixes: [], staged: 0, covered: 0, absorbed: [], unstaged: 0, deleted: 0 }
       const absorbed = new Map(g.absorbed.map(a => [a.into, a.n]))
       for (const a of e.absorbed) if (lead(a.into) !== k) absorbed.set(lead(a.into), (absorbed.get(lead(a.into)) ?? 0) + a.n)
-      gone.set(k, { ...g, staged: g.staged + e.staged, covered: g.covered + e.covered, unstaged: g.unstaged + e.unstaged, deleted: g.deleted + e.deleted, absorbed: [...absorbed].map(([into, n]) => ({ into, n })) })
+      gone.set(k, { ...g, prefixes: [...new Set([...g.prefixes, ...(e.prefixes ?? [])])].sort(), staged: g.staged + e.staged, covered: g.covered + e.covered, unstaged: g.unstaged + e.unstaged, deleted: g.deleted + e.deleted, absorbed: [...absorbed].map(([into, n]) => ({ into, n })) })
     }
     const ids = (id: number | null) => id == null ? [] : membersOf.get(id) ?? [id]
     return [...[...byBatch.entries()]
@@ -281,14 +282,14 @@ export function StagedPage() {
   const gkey = (g: Group) => String(g.id ?? 'none')
   const defaultFoldKey = groups.map(g => `${gkey(g)}:${completion.get(gkey(g))!.settled}`).join(',')
   const linked = (g: Group) => g.ids.some(id => hash === `#${batchAnchor(id)}`) || hash === `#${batchAnchor(g.id)}`
-  const collapsed = useMemo(() => new Set(groups.filter(g => batchIsCollapsed(completion.get(gkey(g))!.settled, folds[gkey(g)], linked(g), flat)).map(gkey)), [groups, defaultFoldKey, folds, hash, flat]) // eslint-disable-line react-hooks/exhaustive-deps
+  const collapsed = useMemo(() => new Set(groups.filter(g => batchIsCollapsed(!!g.emptied || completion.get(gkey(g))!.settled, folds[gkey(g)], linked(g), flat)).map(gkey)), [groups, defaultFoldKey, folds, hash, flat]) // eslint-disable-line react-hooks/exhaustive-deps
   // Batches with nothing left staged (all deleted, empty at scan, or absorbed
   // by a later batch) fold into one <details> below the live ones.
   const settled = flat ? [] : groups.filter(g => g.emptied || !g.rows.some(r => activePrefixes.has(r.prefix)))
   const liveGroups = groups.filter(g => !settled.includes(g))
   const [settledOpen, setSettledOpen] = useState(false)
   useEffect(() => { if (settled.some(linked)) setSettledOpen(true) }, [hash, settled.length]) // eslint-disable-line react-hooks/exhaustive-deps
-  const foldable = liveGroups
+  const foldable = groups
   const pageSize = flat ? FLAT_PAGE : PAGE
   const pageOf = (g: Group) => Math.min(pages[gkey(g)] ?? 0, Math.max(0, Math.ceil(g.rows.length / pageSize) - 1))
   // What's on screen, in order: the rows selection and j/k walk.
@@ -326,7 +327,7 @@ export function StagedPage() {
   const planBuckets = [...perBucket.keys()].sort()
   const onBuckets = planBuckets.filter(b => !bucketsOff.has(b))
   const cut = CAPS.bucketCut && onBuckets.length < planBuckets.length ? onBuckets : undefined
-  // What a dispatch acts on: the checked rows (in the checked buckets), nothing else (specs/delete-what-you-see.md:
+  // What a dispatch acts on: the checked rows (in the checked buckets), nothing else (specs/done/delete-what-you-see.md:
   // a real run once deleted a prefix the person had unchecked). An object item goes as `=<key>`.
   const runRows = activeRows.filter(r => sel.selected.has(r.prefix) && onBuckets.includes(prefixToPath(r.prefix).split('/')[0]))
   const runItems = runRows.map(r => (r.kind === 'object' ? `=${r.prefix}` : r.prefix))
@@ -377,13 +378,18 @@ export function StagedPage() {
     // Every page of the batch, open or folded.
     const batchKeys = g.rows.filter(r => activePrefixes.has(r.prefix)).map(r => r.prefix)
     if (g.emptied) return (
-      <section key={k} id={batchAnchor(g.id)} className="stage-batch folded emptied">
+      <section key={k} id={batchAnchor(g.id)} className={`stage-batch emptied${open ? '' : ' folded'}`}>
         <div className="batch-head">
-          <span className="fold dim" aria-hidden>·</span>
+          <button type="button" className="fold" aria-expanded={open} aria-label={open ? 'collapse completed batch' : 'expand completed batch'}
+            onClick={() => setFolds(f => ({ ...f, [k]: open }))}><Tri open={open} /></button>
           <UserChip who={g.emptied.created_by} size={18} /> staged <Tooltip content={iso(g.emptied.created_ts)}><span>{relAgo(g.emptied.created_ts)}</span></Tooltip>
           <span className="dim">· <EmptiedLine e={g.emptied} batches={batchById} /></span>
+          <SessionLink g={g} />
           {g.emptied.note && <i className="memo">{g.emptied.note}</i>}
         </div>
+        {open && (g.emptied.prefixes.length ? <ul className="batch-prefix-history" aria-label="Originally staged prefixes">
+          {g.emptied.prefixes.map(prefix => <li key={prefix}><a href={`/${prefixToPath(prefix)}`}><code>{prefix}</code></a></li>)}
+        </ul> : <p className="dim">Original prefix list unavailable in this batch’s audit history.</p>)}
       </section>
     )
     return (
@@ -409,7 +415,7 @@ export function StagedPage() {
               shareOf={all.b}
               userIdx={userIdx}
               ownerIdx={ownerIdx}
-              loading={!stats}
+              loading={statsQ.isLoading}
               extra={[...(thru ? [{
                 key: 'idle', label: 'idle', className: 'nb idle', sort: (r: Row) => idleSortKey(idleOf(r)),
                 cell: (r: Row) => (i => i == null ? <span className="dim">—</span>
@@ -458,26 +464,26 @@ export function StagedPage() {
       <p className="sub">
         Files are not deleted until an admin dispatches a deletion job. Stage prefixes
         from a directory’s table (the trash icon); a memo travels with each gesture.
-        {admin ? ' Dry-run first to see what a real run would delete; a real run deletes recoverably.' : ' An admin reviews and dispatches from here.'}
+        {admin ? ` A dry run previews what would be deleted and is optional.${DEFAULT_STORE.executor === 'plan-sweep' ? ' A real deletion may be permanent; recovery is not guaranteed.' : ' A real run deletes recoverably.'}` : ' An admin reviews and dispatches from here.'}
       </p>
       {error && <p className="staged-err" role="alert">{error.message}</p>}
       {plan?.note && <p className="plan-note">{plan.note}</p>}
 
-      {staged.isLoading || loadingContents ? <>
-        <p className="loading" role="status">Loading staged paths…</p>
+      {staged.isLoading ? <>
+        <Skeleton height={140} label="Loading staged paths…" />
       </> : !plan || (!items.length && !groups.length) ? (
         <p className="staged-empty">Nothing is staged.</p>
       ) : (
         <>
           <div className="pp-head">
             <h2>
-              {activeShownRows.length !== activeRows.length && <>{activeShownRows.length} of </>}{activeRows.length} staged {activeRows.length === 1 ? 'path' : 'paths'}
+              {activeRows.length === 0 ? 'Nothing is staged.' : <>{activeShownRows.length !== activeRows.length && <>{activeShownRows.length} of </>}{activeRows.length} staged {activeRows.length === 1 ? 'path' : 'paths'}</>}
               {stats && <> · {fmtBytes(everything.b)} · {fmtN(everything.o)} objects</>}
             </h2>
-            <label className="scan-pick">sized at scan <select value={date} onChange={e => setDate(e.target.value)} aria-label="scan">{scans.map(s => <option key={s}>{s}</option>)}</select>
-              {sizesNote && <span className="dim"> {sizesNote}</span>}
+            {activeRows.length > 0 && <label className="scan-pick">sized at scan <select value={date} onChange={e => setDate(e.target.value)} aria-label="scan">{scans.map(s => <option key={s}>{s}</option>)}</select>
+              {statsQ.isLoading ? <Loading label="Sizing prefixes…" /> : sizesNote && <span className="dim"> {sizesNote}</span>}
               {all.gone > 0 && <Tooltip content="Staged prefixes with nothing under them at this scan (already deleted, or never there)."><span className="dim"> · {all.gone} empty</span></Tooltip>}
-            </label>
+            </label>}
           </div>
 
           {tree && <p className="dim staged-sizing-note">Map and size columns are snapshots at the selected scan, not live remaining totals. Execution / recovery updates while a run is active; older jobs report bucket progress only, with exact prefix totals recorded when the run ends.</p>}
@@ -500,7 +506,7 @@ export function StagedPage() {
           </div> : stats ? <section className="staged-no-map" aria-live="polite">
             <h3>{activeShownRows.length ? 'No sized rectangles to draw' : 'Nothing is staged.'}</h3>
             {activeShownRows.length > 0 && <p>{fmtN(all.o)} zero-byte objects at scan {date}.</p>}
-          </section> : <p className="dim">{sizesNote ?? 'Sizing staged prefixes…'}</p>}
+          </section> : statsQ.isLoading ? <Skeleton height={180} label="Sizing staged prefixes…" /> : activeRows.length > 0 ? <p className="dim">{sizesNote ?? 'No size data available.'}</p> : null}
 
           <div className="staged-filter">
             <input type="search" value={q} onChange={e => setQ(e.target.value || undefined)} placeholder={activeRows.length ? 'filter: hedy|grace, isoflop -nemotron, owner:will, staged-by:david' : 'filter batch history…'}
@@ -519,7 +525,7 @@ export function StagedPage() {
                 <button type="button" disabled={busy} onClick={() => unstage.mutate(removable, { onSuccess: () => sel.clear() })}>unstage {removable.length}</button>
               )}
               {!flat && <span className="fold-all">
-                <button type="button" disabled={foldable.every(g => !collapsed.has(gkey(g)))} onClick={() => setFolds(Object.fromEntries(groups.map(g => [gkey(g), false])))} aria-label="expand all batches"><Tri open /> all</button>
+                <button type="button" disabled={foldable.every(g => !collapsed.has(gkey(g)))} onClick={() => { setSettledOpen(true); setFolds(Object.fromEntries(groups.map(g => [gkey(g), false]))) }} aria-label="expand all batches"><Tri open /> all</button>
                 <button type="button" disabled={foldable.every(g => collapsed.has(gkey(g)))} onClick={() => setFolds(Object.fromEntries(groups.map(g => [gkey(g), true])))} aria-label="collapse all batches"><Tri /> all</button>
               </span>}
             </div>
@@ -527,7 +533,7 @@ export function StagedPage() {
             {liveGroups.map(renderGroup)}
             {settled.length > 0 && (
               <details className="staged-settled" open={settledOpen} onToggle={e => setSettledOpen((e.target as HTMLDetailsElement).open)}>
-                <summary className="dim">{settled.length} {settled.length === 1 ? 'batch' : 'batches'} with nothing left staged (deleted, empty at scan, or absorbed into a later batch)</summary>
+                <summary className="dim">{settled.length} completed or no longer staged {settled.length === 1 ? 'batch' : 'batches'}</summary>
                 {settled.map(renderGroup)}
               </details>
             )}

@@ -13,6 +13,7 @@ import { batchLogsUrl, gcpToken } from "../../_lib/gcp.js"
 import { NO_SHAPE, prefixShape, settleOpenPlan } from "../../_lib/plans.js"
 import { jobIdOf, listBatchJobs, reflectRuns, sweepJobs } from "../../_lib/runReflect.js"
 import { announceFinished, type NotifyEnv } from "../../_lib/stagedSlack.js"
+import { withPathStore } from "../../_lib/index.js"
 
 type Env = AuthEnv & NotifyEnv & BatchEnv & { DB?: D1Database; STORE_SCHEME?: string; STORE_BUCKETS?: string }
 
@@ -34,9 +35,10 @@ export const onRequestGet = async (ctx: Ctx & { env: Env; waitUntil?: (p: Promis
   const db = ctx.env.DB
   if (db) {
     const finished = await reflectRuns(cfg, db, token, jobs, shape.buckets[0])
-    await settleOpenPlan(db)
+    await settleOpenPlan(db, sweepJobs(jobs).filter(j => j.status?.state === 'SUCCEEDED').map(jobIdOf))
     if (finished.length) {
-      const p = announceFinished(ctx.env, db, finished, new URL(ctx.request.url).origin)
+      // Sized from the interval store for the dates it holds (`withPathStore`), as the plans routes size them.
+      const p = withPathStore(ctx).then(c => announceFinished(c.env, db, finished, new URL(ctx.request.url).origin))
       if (ctx.waitUntil) ctx.waitUntil(p)
       else await p
     }

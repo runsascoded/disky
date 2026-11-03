@@ -1,0 +1,12 @@
+{
+ "bucket": "b",
+ "scans": [
+  {
+   "id": "2026-08-04",
+   "src": "listing/2026-08-04/path-index.parquet",
+   "size": 4401,
+   "ts": 1785801600,
+   "version": 2
+  }
+ ]
+}

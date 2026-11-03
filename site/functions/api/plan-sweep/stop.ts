@@ -3,9 +3,9 @@
 // This cancels the Batch job outright (`jobs:cancel`). A cleaner drain — drop a
 // `STOP` file the executor polls so roots already listing finish and log — is a
 // follow-up once the executor watches for it (specs/cw-sweep.md, Slice 2
-// follow-ups). Cancelling mid-run is safe: partial deletes are recorded in the
-// run's log part-files and are recoverable (delete markers), and a re-dispatch
-// re-lists and skips already-deleted keys.
+// follow-ups). Deletes already made may be permanent, and cancellation before
+// finalization can leave incomplete logs. A re-dispatch re-lists and skips
+// already-deleted keys.
 import type { D1Database } from "@cloudflare/workers-types"
 import { type Ctx, type Env as AuthEnv, json, requireAdmin } from "../../_lib/auth.js"
 import { batchConfig, type BatchEnv, notConfigured } from "../../_lib/batchConfig.js"

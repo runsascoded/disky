@@ -6,6 +6,7 @@ resuming, the lease, and a publish landing mid-merge (rebased)."""
 from __future__ import annotations
 
 import json
+import re
 import shutil
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -136,15 +137,18 @@ def test_rebase():
 
 
 def test_tier_resources_sum_to_three_quarters_of_memory():
-    """At once, the DuckDB tiers split 75% of the machine less 4 GiB per streaming tier, and its CPUs; one at a time, each
-    gets all of it. n2-highmem-16: 128 GiB, 16 vCPUs."""
+    """At once, the shards merge takes an even share of the CPUs with the DuckDB tiers, and the DuckDB tiers split 75%
+    of the machine less 4 GiB per streaming tier (the shards tier's 1.5 GiB per worker when more), and its CPUs; one at
+    a time, each gets all of it. n2-highmem-16: 128 GiB, 16 vCPUs."""
     ram = 128 << 30
     assert sm.tier_resources(["shards", "catalog", "drill", "anchors"], ram, 16, concurrent=True) == {
-        "drill": {"mem": "44GB", "threads": 8}, "anchors": {"mem": "44GB", "threads": 8}}
-    assert sm.tier_resources(["shards", "catalog", "drill"], ram, 16, concurrent=True) == {"drill": {"mem": "88GB", "threads": 16}}
+        "shards": {"threads": 5}, "drill": {"mem": "42GB", "threads": 8}, "anchors": {"mem": "42GB", "threads": 8}}
+    assert sm.tier_resources(["shards", "catalog", "drill"], ram, 16, concurrent=True) == {
+        "shards": {"threads": 8}, "drill": {"mem": "80GB", "threads": 16}}
     assert sm.tier_resources(["shards", "catalog", "drill", "anchors"], ram, 16, concurrent=False) == {
-        "drill": {"mem": "96GB", "threads": 16}, "anchors": {"mem": "96GB", "threads": 16}}
-    assert sm.tier_resources(["shards", "catalog"], ram, 16, concurrent=True) == {}
+        "shards": {"threads": 16}, "drill": {"mem": "96GB", "threads": 16}, "anchors": {"mem": "96GB", "threads": 16}}
+    assert sm.tier_resources(["shards", "catalog"], ram, 16, concurrent=True) == {"shards": {"threads": 16}}
+    assert sm.tier_resources(["shards", "catalog"], 8 << 30, 16, concurrent=False) == {"shards": {"threads": 4}}
 
 
 def test_run_tiers(tmp_path):
@@ -155,6 +159,36 @@ def test_run_tiers(tmp_path):
     assert sm.run_tiers(dirs, drilled=True) == ["shards", "catalog", "drill"]
     (dirs[1] / "anchors" / "meta.json").write_text("{}")
     assert sm.run_tiers(dirs, drilled=False) == ["shards", "catalog", "anchors"]
+
+
+def test_probe_builds_frozen_inputs_without_writing_the_source(tmp_path, monkeypatch):
+    from click.testing import CliRunner
+
+    base = tmp_path / "mount/static-names/g"
+    (base / "manifests").mkdir(parents=True)
+    (base / "scans.json").write_text("{}\n")
+    runs = [_run("2026-10-18"), _run("2026-10-19")]
+    (base / "manifests/2026-10-19.json").write_text(json.dumps({"runs": runs}))
+    before = {p.relative_to(base).as_posix(): p.read_bytes() for p in base.rglob("*") if p.is_file()}
+    calls = []
+
+    def build(dirs, run, out, **kw):
+        calls.append(([p.relative_to(base).as_posix() for p in dirs], run, out, kw))
+        out.mkdir(parents=True)
+        return {"rows": 12, "bytes": 34}
+
+    monkeypatch.setattr(sm, "build_merged_run", build)
+    result = CliRunner().invoke(sm.cli, ["probe", "-g", "g", "-d", "2026-10-19", "-j", "2", "-m", str(tmp_path / "mount"),
+                                       "-o", str(tmp_path / "out"), "-T", str(tmp_path / "scratch")])
+    assert result.exit_code == 0, result.output
+    merged = _merged("2026-10-18", "2026-10-19", 1, ["2026-10-18", "2026-10-19"])
+    assert calls == [([r["key"] for r in runs], merged, tmp_path / "out",
+                      {"drilled": False, "rule": None, "tmp": tmp_path / "scratch", "jobs": 2})]
+    assert json.loads(result.stdout) == {"gen": "g", "manifest": "2026-10-19", "inputs": [r["key"] for r in runs],
+                                       "output": merged["key"], "result": {"rows": 12, "bytes": 34}}
+    assert {p.relative_to(base).as_posix(): p.read_bytes() for p in base.rglob("*") if p.is_file()} == before
+    refused = CliRunner().invoke(sm.cli, ["probe", "-g", "g", "-d", "2026-10-19", "-m", str(tmp_path / "mount"), "-o", str(base / "out")])
+    assert (refused.exit_code, refused.stderr.splitlines()[-1]) == (2, f"Error: probe output/scratch must be outside the source mount: {base / 'out'}")
 
 
 # ── Real runs ──────────────────────────────────────────────────────────────
@@ -217,7 +251,7 @@ def _stack(store, key: str) -> list[tuple[str, int]]:
 
 
 def _summary(doc: dict) -> list[dict]:
-    return [{k: v for k, v in m.items() if k not in ("tiers_s", "s")} for m in doc["merged"]]
+    return [{k: v for k, v in m.items() if k not in ("tiers_s", "reads", "s")} for m in doc["merged"]]
 
 
 def _rows(store, keys: list[str]) -> int:
@@ -327,6 +361,131 @@ def test_parallel_tier_merges_write_the_same_bytes(chain, tmp_path):
     one, two = tmp_path / "one", tmp_path / "two"
     sm.build_merged_run(dirs, run, one, drilled=False, rule=None, tmp=tmp_path / "t1", jobs=1, log=lambda m: None)
     sm.build_merged_run(dirs, run, two, drilled=False, rule=None, tmp=tmp_path / "t2", jobs=2, log=lambda m: None)
+    files = sorted(p.relative_to(one).as_posix() for p in one.rglob("*") if p.is_file())
+    assert files == sorted(p.relative_to(two).as_posix() for p in two.rglob("*") if p.is_file())
+    assert [(f, (one / f).read_bytes() == (two / f).read_bytes()) for f in files] == [(f, True) for f in files]
+
+
+class Rec:
+    """A `maint_runs.Recorder` that keeps its phase events: `(begin|note|end, phase, note)`."""
+
+    def __init__(self):
+        self.events: list[tuple[str, str, str | None]] = []
+
+    def start(self, scan, gen):
+        pass
+
+    def begin(self, phase):
+        self.events.append(("begin", phase, None))
+
+    def note(self, phase, note):
+        self.events.append(("note", phase, note))
+
+    def end(self, phase, note=None, failed=False):
+        self.events.append(("end" if not failed else "failed", phase, note))
+
+    def finish(self, status, error=None, gen=None):
+        pass
+
+
+def test_merge_tiers_are_phases_and_a_quiet_tier_logs_progress(chain, tmp_path, monkeypatch):
+    """One process: each tier is begun and ended in turn (its seconds the note); while one runs, a line every `TICK_S`."""
+    import time
+
+    a, b = chain["runs"][:2]
+    run = _merged(a, b, 1, [a, b])
+    dirs = [chain["gen"] / f"deltas/{s}" for s in (a, b)]
+    real = sm.merge_tier
+
+    def slow(*args):
+        if args[0] == "catalog":
+            time.sleep(0.35)
+        return real(*args)
+
+    monkeypatch.setattr(sm, "merge_tier", slow)
+    monkeypatch.setattr(sm, "TICK_S", 0.1)
+    logs: list[str] = []
+    rec = Rec()
+    sm.build_merged_run(dirs, run, tmp_path / "out", drilled=False, rule=None, tmp=tmp_path / "t", jobs=1, log=logs.append, rec=rec)
+    assert [(e[0], e[1]) for e in rec.events] == [("begin", "shards"), ("end", "shards"), ("begin", "catalog"), ("end", "catalog")]
+    ticks = [re.sub(r"\d+s", "<s>", m) for m in logs if ": running " in m]
+    # the slept 0.35 s of catalog ticks at least twice; shards (fast, timing-dependent) may tick too
+    line = f"merge {run['key']}: running {{}} <s>"
+    assert set(ticks) <= {line.format("shards"), line.format("catalog")}
+    assert ticks.count(line.format("catalog")) >= 2
+
+
+def test_a_failed_tier_fails_its_phase(chain, tmp_path, monkeypatch):
+    a, b = chain["runs"][:2]
+    run = _merged(a, b, 1, [a, b])
+    dirs = [chain["gen"] / f"deltas/{s}" for s in (a, b)]
+    real = sm.merge_tier
+
+    def boom(*args):
+        if args[0] == "catalog":
+            raise Boom("no catalog")
+        return real(*args)
+
+    monkeypatch.setattr(sm, "merge_tier", boom)
+    rec = Rec()
+    with pytest.raises(Boom):
+        sm.build_merged_run(dirs, run, tmp_path / "out", drilled=False, rule=None, tmp=tmp_path / "t", jobs=1, log=lambda m: None, rec=rec)
+    assert [(e[0], e[1]) for e in rec.events] == [("begin", "shards"), ("end", "shards"), ("begin", "catalog"), ("failed", "catalog")]
+    assert rec.events[-1][2] == "failed: Boom: no catalog"
+
+
+def test_a_tier_killed_in_the_pool_reruns_alone(chain, tmp_path, monkeypatch):
+    """A tier whose process dies (`BrokenProcessPool`: OOM) is rerun in-process with the whole machine's resources, and
+    the run is the same bytes as one process's; the tiers that finished in the pool aren't rerun."""
+    import concurrent.futures as cf
+    from concurrent.futures.process import BrokenProcessPool
+
+    a, b = chain["runs"][:2]
+    run = _merged(a, b, 1, [a, b])
+    dirs = [chain["gen"] / f"deltas/{s}" for s in (a, b)]
+    one, two = tmp_path / "one", tmp_path / "two"
+    sm.build_merged_run(dirs, run, one, drilled=False, rule=None, tmp=tmp_path / "t1", jobs=1, log=lambda m: None)
+    calls: list[tuple[str, bool]] = []
+    real = sm.merge_tier
+
+    class Pool:
+        def __init__(self, *a, **kw):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def submit(self, fn, *args):
+            f: cf.Future = cf.Future()
+            if args[0] == "catalog":
+                f.set_exception(BrokenProcessPool("killed"))
+            else:
+                calls.append((args[0], True))
+                f.set_result(real(*args))
+            return f
+
+    def alone(*args):
+        calls.append((args[0], False))
+        return real(*args)
+
+    monkeypatch.setattr(cf, "ProcessPoolExecutor", Pool)
+    monkeypatch.setattr(sm, "merge_tier", alone)
+    logs: list[str] = []
+    rec = Rec()
+    sm.build_merged_run(dirs, run, two, drilled=False, rule=None, tmp=tmp_path / "t2", jobs=2, log=logs.append, rec=rec)
+    assert calls == [("shards", True), ("catalog", False)]
+    # each tier a phase: begun at submit, the killed one noted and ended by its rerun
+    assert [(e[0], e[1], re.sub(r"\d+s", "<s>", e[2]) if e[2] else e[2]) for e in rec.events] == [
+        ("begin", "shards", None), ("begin", "catalog", None), ("end", "shards", "<s>"),
+        ("note", "catalog", "killed in the pool (out of memory?): rerunning alone"), ("end", "catalog", "<s> (alone)")]
+    assert [re.sub(r"\d+s", "<s>", m) for m in logs] == [
+        f"merge {run['key']}: shards in <s>",
+        f"merge {run['key']}: catalog killed in the pool (out of memory?): rerunning one at a time with the whole machine",
+        f"merge {run['key']}: catalog in <s> (alone)",
+    ]
     files = sorted(p.relative_to(one).as_posix() for p in one.rglob("*") if p.is_file())
     assert files == sorted(p.relative_to(two).as_posix() for p in two.rglob("*") if p.is_file())
     assert [(f, (one / f).read_bytes() == (two / f).read_bytes()) for f in files] == [(f, True) for f in files]

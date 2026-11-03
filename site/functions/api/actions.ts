@@ -8,14 +8,17 @@
  *                                provenance; the client folds them
  *                                (most-recent-wins) over the tree.
  *   POST /api/actions          → append one action (or an array of them):
- *                                { pattern, owner, kind?, set_owner?, memo?, scan? }.
+ *                                { pattern, owner, kind?, set_owner?, memo?, scan?, allow_missing? }.
  *                                `owner: null` clears; `'@me'` resolves to the
  *                                actor's canonical user id. `kind` says what
- *                                `pattern` names (specs/file-assign.md):
+ *                                `pattern` names (specs/done/file-assign.md):
  *                                `'prefix'` (default) a folder `…/`, `'object'`
  *                                one exact key (no trailing slash) — owning
  *                                that key and nothing else. No regex patterns
- *                                yet. The assign scope (every signed-in
+ *                                yet. An assignment (not a clear) of a pattern
+ *                                the newest scan holds nothing under is a 400
+ *                                listing `missing`, nothing written, unless
+ *                                `allow_missing: true`. The assign scope (every signed-in
  *                                viewer, and their agent token) or admin;
  *                                share links are read-only here.
  *
@@ -29,6 +32,9 @@ import { actionLog } from '../_lib/actionLog.js'
 import { hasLedger } from '../_lib/ledger.js'
 import { canonicalObject, type ItemKind, NO_SHAPE, type PrefixShape, prefixShape } from '../_lib/plans.js'
 import { isScanId } from '../../src/scanSlug.js'
+import { noteActivity } from '../_lib/activityHook.js'
+import { pathScans, storeReady, withPathStore } from '../_lib/index.js'
+import { MAX_PREFIXES, prefixesAt } from '../_lib/prefixes.js'
 
 const reEscape = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 /** `<scheme><bucket>/<path>/` over the scanned buckets (`STORE_SCHEME` /
@@ -43,6 +49,8 @@ interface ActionBody {
   owner?: string | null
   memo?: string
   scan?: string
+  /** Assign a pattern the newest scan holds nothing under (data not landed yet). */
+  allow_missing?: boolean
 }
 
 const bad = (error: string) => ({ error })
@@ -60,6 +68,7 @@ function validate(b: ActionBody, shape: PrefixShape): { error: string } | {
   owner: string | null
   memo: string | null
   scan: string
+  allowMissing: boolean
 } {
   const pattern = b.pattern ?? ''
   const kind = b.kind ?? 'prefix'
@@ -78,7 +87,7 @@ function validate(b: ActionBody, shape: PrefixShape): { error: string } | {
   if (owner !== null && (typeof owner !== 'string' || owner.length > 128)) return bad('owner must be a user id')
   const memo = b.memo?.slice(0, 1024) ?? null
   const scan = isScanId(b.scan) ? b.scan : 'unknown'
-  return { pattern, kind, owner, memo, scan }
+  return { pattern, kind, owner, memo, scan, allowMissing: b.allow_missing === true }
 }
 
 export const onRequest = async (ctx: Ctx): Promise<Response> => {
@@ -127,6 +136,24 @@ export const onRequest = async (ctx: Ctx): Promise<Response> => {
       const me = await ownerIdFor(env, id.email)
       for (const p of ok) if (p.owner === '@me') p.owner = me
     }
+    // An assignment must name something the newest scan holds (a typo'd or example path is refused, not
+    // ledgered), unless `allow_missing`; a clear never is (a stale assignment's path may be gone).
+    const check = ok.filter(p => p.owner !== null && !p.allowMissing)
+    // The interval store for the dates it holds (`withPathStore`), as the map's own reads.
+    const penv = check.length ? (await withPathStore(ctx)).env : env
+    const newest = check.length && storeReady(penv) ? (await pathScans(penv, true)).results.at(-1)?.date : undefined
+    if (newest) {
+      const held = new Set<string>()
+      const keys = [...new Set(check.map(p => p.pattern))]
+      for (let i = 0; i < keys.length; i += MAX_PREFIXES) {
+        const { stats } = await prefixesAt(penv, newest, keys.slice(i, i + MAX_PREFIXES))
+        for (const [k, st] of Object.entries(stats)) if (st.b > 0 || st.o > 0) held.add(k)
+      }
+      const missing = keys.filter(k => !held.has(k))
+      if (missing.length) {
+        return json({ error: `nothing under ${missing.length === 1 ? 'this pattern' : `${missing.length} patterns`} in the newest scan (${newest}); check the path, or pass \`allow_missing: true\` to assign it before its data lands`, missing, scan: newest }, 400)
+      }
+    }
     const stmts = []
     for (const p of ok) {
       // `kind`: NULL = prefix (every pre-`kind` row), 'object' = the exact key.
@@ -145,6 +172,12 @@ export const onRequest = async (ctx: Ctx): Promise<Response> => {
       )
     }
     await env.DB.batch(stmts)
+    noteActivity(ctx, ...ok.map(p => ({
+      line: `\`${p.pattern}\` → ${p.owner ?? 'nobody'}${p.memo ? ` ("${p.memo.slice(0, 80)}")` : ''}`,
+      pattern: p.pattern,
+      owner: p.owner,
+      ...(p.kind === 'object' ? { object: true } : {}),
+    })))
     return json({ ok: true, count: parsed.length, ts })
   }
 

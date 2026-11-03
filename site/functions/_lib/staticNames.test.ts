@@ -1,7 +1,8 @@
-import { parquetMetadata } from 'hyparquet'
+import { parquetMetadata, parquetReadObjects } from 'hyparquet'
 import { beforeAll, describe, expect, it } from 'vitest'
-import { type Blobs, cmp, type GroupIndex, groupIndex, type IndexCache, selectGroups, shardFor, StaticNames } from './staticNames.js'
+import { type Blobs, cmp, FirstHits, type GroupIndex, groupIndex, type IndexCache, type Io, selectGroups, shardFor, shardsFor, StaticNames, type SxColumns } from './staticNames.js'
 import { fixture } from './testStore.js'
+import { compressors } from './zstd.js'
 
 /** `gen.py`'s `TERMS`. */
 const TERMS = ['foo', 'foo.', 'foo-2', 'oof', 'fooz', 'qux', 'mmm', 'andú', 'abcdefghijklmnopqrstuvwxyz-0001', 'bkt', 'zzz',
@@ -103,5 +104,74 @@ describe('static names reader', () => {
     expect(io.index).toBe('cache')
     expect(log.length).toBe(2)
     expect(num(answer!.answers)).toEqual({ '2026-09-01': expected.foo['2026-09-01'] })
+  })
+})
+
+describe('a key shorter than the shards\' three-character prefixes (`static-names-split`)', () => {
+  /** `static-names-split/gen.py`'s shard files: the same suffix rows, cut inside the prefixes of `f`, `o` and `oo`. */
+  const SPLIT = ['shards.json', ...Array.from({ length: 7 }, (_, i) => `sx/s${String(i).padStart(4, '0')}.parquet`)]
+  const split = new Map<string, ArrayBuffer>()
+  const row = (s: string, path: string, usr: string, vf: unknown) => `${s}|${path}|${usr}|${vf}`
+  /** Every suffix row of every shard file, read whole with hyparquet (not through the reader), as `s|path|usr|vf`. */
+  let all: string[]
+  beforeAll(async () => {
+    const fs = await import(/* @vite-ignore */ 'node:fs' as string) as { readFileSync(path: string): Uint8Array }
+    for (const k of SPLIT) { const b = fs.readFileSync(fixture(`static-names-split/${k}`)); split.set(k, b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength) as ArrayBuffer) }
+    all = []
+    for (const k of SPLIT.slice(1)) {
+      const rows = await parquetReadObjects({ file: split.get(k)!, columns: ['s', 'path', 'usr', 'vf'], compressors }) as { s: string; path: string; usr: string; vf: unknown }[]
+      all.push(...rows.map(r => row(r.s, r.path, r.usr, r.vf instanceof Date ? BigInt(r.vf.getTime()) : r.vf)))
+    }
+  })
+  function splitFiles(log: string[] = []): Blobs {
+    return {
+      async range(key, offset, length) { const b = split.get(key)!; const end = length == null ? b.byteLength : offset + length; log.push(`${key}@${offset}+${end - offset}`); return b.slice(offset, end) },
+      async suffix(key, n) { const b = split.get(key)!, size = b.byteLength; log.push(`${key}@-${n}`); return { buf: b.slice(Math.max(0, size - n)), size } },
+      async json(key) { log.push(key); return JSON.parse(new TextDecoder().decode(split.get(key)!)) },
+    }
+  }
+  /** Every row the reader decodes whose `s` starts with the key. */
+  class Collect extends FirstHits {
+    readonly got: string[] = []
+    add(cols: SxColumns): void {
+      for (let i = 0; i < cols.s.length; i++) if (cols.s[i].startsWith(this.key)) this.got.push(row(cols.s[i], cols.path[i], cols.usr[i], cols.vf[i]))
+    }
+  }
+  const collect = (k: string) => new Collect(k)
+  const noIo = (): Io => ({ shard: null, groups: 0, bytes: 0, rows_read: 0, rows_matching: 0, index: 'none', ms: {} })
+
+  it('maps a short key to every shard meeting its prefixes, in order; a long or exact one to its prefix\'s shard', async () => {
+    const shards = await new StaticNames(splitFiles()).plan()
+    const keys = ['f', 'fo', 'foo', 'o', 'oo', 'oof', 'ox', 'p', 'z']
+    expect(keys.map(k => [k, shardsFor(shards, k).map(s => s.i), shardsFor(shards, k, true).map(s => s.i)])).toEqual([
+      ['f', [1, 2], [1]], ['fo', [2], [2]], ['foo', [2], [2]], ['o', [3, 4, 5], [3]], ['oo', [4, 5], [4]], ['oof', [5], [5]],
+      ['ox', [5], [5]], ['p', [6], [6]], ['z', [6], [6]],
+    ])
+  })
+
+  it.each(['f', 'fo', 'o', 'oo', 'oof', 'fgh', 'p', 'zq'])('%s reads every shard its rows lie in: exactly its rows', async key => {
+    const { fold } = await new StaticNames(splitFiles()).read(key, Infinity, { fold: collect })
+    expect((fold as Collect).got.sort()).toEqual(all.filter(r => r.startsWith(key)).sort())
+  })
+
+  it('bounds a split key by its shards\' selected groups: refused one row under, exact at the bound', async () => {
+    const r = new StaticNames(splitFiles())
+    const sel = await r.select('oo', noIo())
+    expect([sel!.parts.map(p => p.shard.i), sel!.wide]).toEqual([[4, 5], undefined])
+    const refused = await r.read('oo', sel!.rows - 1, { fold: collect })
+    expect([refused.fold, refused.io.rows_read, refused.io.bytes]).toEqual([null, sel!.rows, 0])
+    const { fold } = await r.read('oo', sel!.rows, { fold: collect })
+    expect((fold as Collect).got.sort()).toEqual(all.filter(x => x.startsWith('oo')).sort())
+  })
+
+  it('past `maxShards` bounds a key by its shards\' planned rows: refused over them, read whole under them', async () => {
+    const r = new StaticNames(splitFiles())
+    r.maxShards = 2
+    expect(await r.select('o', noIo())).toEqual({ parts: [], rows: 33 + 5 + 4, wide: true })
+    expect(await r.extent('o', noIo())).toEqual({ parts: [], rows: 42 })
+    const refused = await r.read('o', 41, { fold: collect })
+    expect([refused.fold, refused.io.rows_read, refused.io.bytes]).toEqual([null, 42, 0])
+    const { fold } = await r.read('o', 42, { fold: collect })
+    expect((fold as Collect).got.sort()).toEqual(all.filter(x => x.startsWith('o')).sort())
   })
 })

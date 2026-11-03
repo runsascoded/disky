@@ -61,7 +61,7 @@ describe('/api/dups', () => {
     ])
     const ds = body.groups[0]
     expect({ ...ds, items: ds.items.map(c => [c.bucket, c.size, c.n_files, c.created, c.last_read, c.cb]) }).toEqual({
-      group: 'b7a8285fb072', tier: 'tree', rel: 'ds/web', kind: 'dir', size: 4 * G, n_files: 2, copies: 3, reclaimable: 8 * G, n_buckets: 3, suspect: false,
+      group: 'b7a8285fb072', tier: 'tree', rel: 'ds/web', kind: 'dir', size: 4 * G, n_files: 2, copies: 3, reclaimable: 8 * G, n_buckets: 3, suspect: false, exact: false,
       items: [['east', 4 * G, 2, 1_760_000_000, 20_300, { 3: G }], ['eu', 4 * G, 2, 1_759_913_600, null, {}], ['west', 4 * G, 2, 1_760_086_400, 20_370, {}]],
     })
   })

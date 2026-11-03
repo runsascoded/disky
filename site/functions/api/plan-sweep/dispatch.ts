@@ -3,7 +3,7 @@
 // mode: 'dry' | 'real', date: <scan id>, items?: string[] }. The work is the
 // `plan-sweep` executor behind `_lib/executor.ts` (shared with `/slack/actions`):
 // the run acts on `items` (the rows checked on /staged; the whole plan when
-// absent), never more (specs/delete-what-you-see.md).
+// absent), never more (specs/done/delete-what-you-see.md).
 // A dispatch is announced in the plan's Slack thread (specs/done/staged-slack.md).
 import { type Ctx, type Env as AuthEnv, json, requireAdmin } from "../../_lib/auth.js"
 import { dispatchBody, dispatchPlan, type ExecEnv, notifyDispatched, planFirstKind } from "../../_lib/executor.js"

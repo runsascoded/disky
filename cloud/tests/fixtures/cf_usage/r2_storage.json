@@ -1,0 +1,35 @@
+{
+  "data": {
+    "viewer": {
+      "accounts": [
+        {
+          "r2StorageAdaptiveGroups": [
+            {
+              "max": {
+                "payloadSize": 400000000000,
+                "metadataSize": 1000000000,
+                "objectCount": 52000
+              },
+              "dimensions": {
+                "date": "2026-10-19",
+                "bucketName": "my-index"
+              }
+            },
+            {
+              "max": {
+                "payloadSize": 402000000000,
+                "metadataSize": 1000000000,
+                "objectCount": 53000
+              },
+              "dimensions": {
+                "date": "2026-10-20",
+                "bucketName": "my-index"
+              }
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "errors": null
+}

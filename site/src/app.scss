@@ -638,6 +638,14 @@ h2 { font-size: 17px; font-weight: 650; margin: 0 0 4px; }
   // (latest | pinned), each a labeled two-way toggle.
   .d-modes { display: inline-flex; flex-wrap: wrap; gap: 6px 12px; align-items: center; margin-left: 10px; vertical-align: middle; }
   .d-modes .gran { margin-left: 0; }
+  // One-scan steps either side of each diff picker: a finger-sized target, quiet until hovered.
+  .nudges { display: inline-flex; align-items: center; gap: 2px; vertical-align: middle; }
+  .nudge {
+    min-width: 28px; min-height: 28px; padding: 0 4px; font-size: 16px; line-height: 1;
+    background: none; border: 1px solid transparent; border-radius: 5px; color: var(--ink-2); cursor: pointer;
+    &:hover:not(:disabled) { border-color: var(--line, rgba(127,127,127,0.35)); color: var(--ink); }
+    &:disabled { opacity: 0.3; cursor: default; }
+  }
   .d-mode { gap: 0; button { border-radius: 0; } button:nth-of-type(1) { border-radius: 5px 0 0 5px; } button:nth-of-type(2) { border-radius: 0 5px 5px 0; margin-left: -1px; } }
   .d-mode-lbl { color: var(--ink-3); font-size: 11.5px; margin-right: 5px; }
 }
@@ -1262,16 +1270,21 @@ body:has(.og) :is(.help-chip, .help-card) { display: none; }
 .busy-overlay {
   position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
   pointer-events: none; z-index: var(--z-raised);
-  &.corner { align-items: flex-start; justify-content: flex-end; padding: 8px; }
+  background: color-mix(in srgb, var(--panel) 45%, transparent);
+  backdrop-filter: blur(2px); border-radius: inherit;
+  &.corner { align-items: flex-start; justify-content: flex-end; padding: 8px; background: transparent; backdrop-filter: none; }
   .pill {
     display: inline-flex; align-items: center; gap: 8px; padding: 5px 11px; border-radius: 999px;
-    background: var(--panel); color: var(--ink-2); font-size: 12.5px; box-shadow: 0 1px 6px rgba(0, 0, 0, 0.25);
+    background: var(--panel); color: var(--ink); font-size: 14px; font-weight: 600; box-shadow: 0 1px 6px rgba(0, 0, 0, 0.25);
   }
   .spin {
     width: 11px; height: 11px; border-radius: 50%; flex: none;
     border: 2px solid var(--ink-3); border-top-color: transparent; animation: busy-spin 0.8s linear infinite;
   }
 }
+.inline-loading { display: inline-flex; align-items: center; gap: 7px; margin-inline: 6px; font-size: 13px; font-weight: 400; color: var(--ink-2); }
+.inline-loading .spin { width: 12px; height: 12px; border: 2px solid var(--ink-3); border-top-color: transparent; border-radius: 50%; animation: busy-spin 0.8s linear infinite; }
+@media (prefers-reduced-motion: reduce) { .busy-overlay .spin, .inline-loading .spin { animation-duration: 2s; } .skel { animation: none; } }
 @keyframes busy-spin { to { transform: rotate(360deg); } }
 .skel { width: 100%; border-radius: 6px; background: var(--panel); animation: tm-pulse 1.4s ease-in-out infinite; }
 // Parquet cells that keep their tail (the leaf viewer): an RTL block clips at
@@ -1282,6 +1295,8 @@ body:has(.og) :is(.help-chip, .help-card) { display: none; }
 .tooltip-content .bb-tip { color: var(--ink-2); }
 .tooltip-content .pin-hint { color: var(--ink-3); font-size: 10.5px; margin-top: 5px; }
 .tooltip-content.pinned { border-color: var(--ink-3); }
+.tooltip-content .search-off-tip p { margin: 0 0 4px; }
+.tooltip-content .search-off-tip p:last-child { margin-bottom: 0; }
 .tt-ref.pinnable { cursor: pointer; }
 .tooltip-content .copy-hint { display: block; color: var(--ink-3); font-size: 11px; margin-top: 3px; }
 .tooltip-content code.elide-full {
@@ -1493,51 +1508,58 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); opacity: 1; }
 // A wide table scrolls inside its own box, never the page (`LifecycleFold`'s rules table is ~714 px).
 .tbl-scroll { overflow-x: auto; max-width: 100%; }
 
-.classes {
-  border-collapse: collapse;
-  font-variant-numeric: tabular-nums;
-  th, td { text-align: left; padding: 4px 18px 4px 0; border-bottom: 1px solid var(--line); }
-  th { color: var(--ink-2); font-weight: 600; font-size: 13px; }
-}
-
-.attrib {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  h2 { margin-bottom: 0; }
-  .feedback { margin-top: 8px; }
-  details {
-    summary {
-      cursor: pointer;
-      color: var(--ink-2);
-      font-size: 14px;
-      font-weight: 600;
-      &:hover { color: var(--ink); }
-    }
-    &[open] summary { margin-bottom: 6px; }
+// The compact facts row under the map's listing (`PageFacts.tsx`): the class mix as one stacked bar + legend (its
+// caret opens the per-class table under the row), and the ownership share with its ⓘ.
+.page-facts {
+  margin: 12px 0 8px;
+  font-size: 13px;
+  color: var(--ink-2);
+  .facts-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 28px; }
+  .disclose {
+    display: inline-flex; align-items: center; gap: 4px; padding: 1px 2px; font: inherit; background: none; border: 0;
+    color: var(--ink-3); cursor: pointer; border-radius: 4px;
+    &:hover, &:hover .lbl { color: var(--ink); }
+    .caret { font-size: 10px; width: 9px; }
   }
-  .rulestable {
-    font-size: 13px;
-    td, th { padding-right: 14px; }
-    code { font-size: 12px; }
-    .aliases { color: var(--ink-2); }
+  .classes-table {
+    overflow-x: auto; max-width: 100%; margin-top: 8px;
+    table { border-collapse: collapse; font-variant-numeric: tabular-nums; }
+    .cap { margin: 0 0 4px; color: var(--ink-3); font-size: 12px; }
+    th, td { text-align: left; padding: 3px 18px 3px 0; border-bottom: 1px solid var(--line); white-space: nowrap; }
+    th:last-child, td:last-child { padding-right: 0; }
+    th { color: var(--ink-2); font-weight: 600; font-size: 12px; }
+    .num { text-align: right; }
+    td { color: var(--ink); }
+    tfoot td { font-weight: 600; border-bottom: none; }
+    .sw { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 6px; vertical-align: -1px; }
+    // A phone keeps class, bytes, share and $/mo; the list price per GiB is in the bar's tooltip.
+    @media (max-width: 640px) { th, td { padding-right: 12px; } .rate { display: none; } }
   }
-  .teamchip {
+  .fact { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; min-width: 0; }
+  .lbl { color: var(--ink-3); font-size: 11.5px; text-transform: uppercase; letter-spacing: 0.04em; }
+  .classbar {
     display: inline-flex;
-    align-items: center;
-    gap: 5px;
-    .sw { width: 9px; height: 9px; border-radius: 2px; }
+    width: 160px;
+    height: 10px;
+    border-radius: 3px;
+    overflow: hidden;
+    cursor: help;
+    outline-offset: 2px;
+    i { display: block; min-width: 2px; height: 100%; }
   }
-  .note { color: var(--ink-2); font-size: 12.5px; }
-  .todo {
-    background: var(--s4);
-    color: #1a1a19;
-    border-radius: 4px;
-    font-size: 11px;
-    font-weight: 600;
-    padding: 1px 6px;
-    margin-right: 6px;
-  }
+  .classes-legend { display: inline-flex; flex-wrap: wrap; gap: 2px 10px; }
+  .classes-legend .li { white-space: nowrap; }
+  .classes-legend .sw { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 4px; vertical-align: -1px; }
+  .pct { color: var(--ink-3); font-variant-numeric: tabular-nums; }
+  .usd { color: var(--ink); font-variant-numeric: tabular-nums; }
+  .info { color: var(--ink-3); font-size: 15px; cursor: help; }
+  b { color: var(--ink); }
+}
+.classes-scope { margin-bottom: 4px; }
+.ownership-help {
+  max-width: 380px;
+  p { margin: 0 0 6px; }
+  p:last-child { margin-bottom: 0; }
 }
 
 @media (prefers-reduced-motion: no-preference) {
@@ -1584,6 +1606,7 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); opacity: 1; }
     margin-top: 24px;
     .status { font-weight: 600; }
     form { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+    .ends { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
   }
 
   .mint {
@@ -2020,10 +2043,22 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); opacity: 1; }
 // with a divider above each new bucket so the (many) per-TTL rules read as a set.
 // A fleet store (`lifecycle.grouped`) folds a rule shared across buckets into
 // one row with a buckets column instead.
+// The fold takes the section's full width (not `.prose`'s 68ch measure), and the table fills it: its short columns
+// (bucket, rule, buckets, status) never wrap; the prefix and the action text wrap only when the row can't fit, the
+// action not below a phrase's width. Headers sit left over their columns, as the cells do.
+.prose.lifecycle { max-width: none; }
 .lifecycle-tbl {
-  td.bucket { color: var(--ink-2); white-space: nowrap; }
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+  th, td { text-align: left; vertical-align: top; padding: 4px 14px 4px 0; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  th:last-child, td:last-child { padding-right: 0; }
+  th { color: var(--ink-2); font-weight: 600; }
+  td.prefix { white-space: normal; overflow-wrap: anywhere; }
+  td.action { white-space: normal; min-width: 22ch; }
+  td.bucket { color: var(--ink-2); }
   tr.bucket-start > td { border-top: 1px solid var(--rule, rgba(128, 128, 128, 0.28)); }
-  td.buckets { color: var(--ink-2); white-space: nowrap; }
+  td.buckets { color: var(--ink-2); }
   code.clip { display: inline-block; max-width: 36ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
 }
 
@@ -2147,6 +2182,13 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); opacity: 1; }
     border: 1px solid var(--line);
     border-radius: 6px;
     font-size: 12.5px;
+  }
+  // A scan the static name index hasn't appended yet (`SearchCatchUp.tsx`): the box is off, its tip says why. A
+  // disabled input swallows pointer events, so the hover/pin lands on the tip's wrapper instead.
+  input:disabled {
+    opacity: 0.55;
+    cursor: help;
+    pointer-events: none;
   }
   // An applied filter scopes every section below: the box says so at a glance.
   &.active input {
@@ -2523,6 +2565,21 @@ a.staged-chip {
     &:hover:not(:disabled) { color: var(--ink); border-color: var(--ink-2); }
     &:disabled { opacity: 0.5; cursor: not-allowed; }
   }
+  // The "notes" toggle: solid while the notes show, dashed (like `+ note`) while hidden.
+  .note-toggle {
+    font: inherit; font-size: 12px; font-weight: 400; padding: 1px 7px; border-radius: 4px; cursor: pointer;
+    background: transparent; color: var(--ink-3); border: 1px dashed var(--ink-3);
+    &.on { color: var(--dt-ts-marker-ink); border: 1px solid var(--dt-ts-marker); }
+    &:hover { color: var(--ink); }
+  }
+  // The x-range's fit / reset icons sit in the presets' strip.
+  .x-range button.icon { display: inline-flex; align-items: center; padding: 1px 4px; font-size: 14px; }
+  // The overview strip under the chart (drag to zoom, double-click for every scan).
+  .over-time-overview { margin-top: 4px; }
+  // Its help wrapper is a block: `.has-help`'s dotted "hover me" underline would run the section's full width,
+  // past the strip (inset by the plot's padding) and the legend. The strip is a control, not bare text.
+  .overview-help, .overview-help > .help-tgt { display: block; }
+  .overview-help { border-bottom: none; cursor: default; }
   .note-form {
     display: flex; flex-wrap: wrap; align-items: flex-start; gap: 6px 10px; margin: 0 0 8px; padding: 8px 10px;
     border: 1px solid var(--line); border-radius: 6px; background: var(--panel); font-size: 12px;
@@ -2898,6 +2955,7 @@ kbd { font: inherit; font-size: 11px; padding: 0 4px; border: 1px solid var(--li
   }
   // A gesture whose prefixes all went elsewhere: one folded line.
   .stage-batch.emptied .batch-head { opacity: 0.8; }
+  .batch-prefix-history { margin: 8px 0 12px 28px; padding-left: 16px; li { margin: 5px 0; overflow-wrap: anywhere; } }
   .runs-pg { flex-wrap: wrap; }
   table.runs {
     th.num, td.num { text-align: right; font-variant-numeric: tabular-nums; }
@@ -2953,6 +3011,9 @@ kbd { font: inherit; font-size: 11px; padding: 0 4px; border: 1px solid var(--li
   .run-bucket-map { height: 420px; margin: 10px 0 20px; }
   .run-buckets select { background: var(--panel); color: var(--ink); border: 1px solid var(--line); border-radius: 4px; padding: 3px; }
   .run-band-table { overflow-x: auto; td { white-space: nowrap; } }
+  .skipped-counts { display: inline-flex; gap: .65em; font-variant-numeric: tabular-nums; }
+  .skipped-added { color: light-dark(#067783, #77d7df); }
+  .skipped-changed { color: light-dark(#935400, #edbf75); }
   .progress-chart .chart-target { line { stroke: #4a9eff; stroke-dasharray: 6 4; opacity: .7; } text { fill: #4a9eff; paint-order: stroke; stroke: var(--bg); stroke-width: 3px; } &.secondary-target { line { stroke: #ecb14f; } text { fill: #ecb14f; } } }
   .run-plan { max-height: 260px; overflow: auto; code { white-space: nowrap; } }
   .run-page h1 { margin-top: 20px; }
@@ -3107,6 +3168,14 @@ kbd { font: inherit; font-size: 11px; padding: 0 4px; border: 1px solid var(--li
   max-width: 1200px;
   .err { color: var(--danger); }
   .dim { color: var(--ink-3); }
+  .sessions-pager {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin: 8px 0;
+    font-size: 13px;
+    font-variant-numeric: tabular-nums;
+  }
   .sessions-filters {
     display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; margin: 12px 0; font-size: 13px;
     input:not([type]), input[type="search"], input[type="date"] { font: inherit; padding: 3px 6px; color: inherit; background: transparent; border: 1px solid var(--line); border-radius: 4px; }
@@ -3119,6 +3188,7 @@ kbd { font: inherit; font-size: 11px; padding: 0 4px; border: 1px solid var(--li
     width: 100%; border-collapse: collapse; font-size: 13px;
     th, td { padding: 4px 8px; text-align: left; border-bottom: 1px solid var(--line); vertical-align: top; }
     .num { text-align: right; white-space: nowrap; }
+    .th-toggle { font: inherit; font-weight: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: pointer; border-bottom: 1px dotted var(--ink-3); }
     tr.has-err td { background: color-mix(in srgb, var(--danger) 9%, transparent); }
     tr.load td { border-top: 2px solid var(--ink-3); }
     tr.focused td { outline: 2px solid var(--s1); outline-offset: -2px; }
@@ -3141,7 +3211,14 @@ kbd { font: inherit; font-size: 11px; padding: 0 4px; border: 1px solid var(--li
     .lanes { display: inline-flex; gap: 12px; flex-wrap: wrap; }
   }
 }
-// The privacy notice while the session log is on (About, /privacy).
+// `/admin`'s activity table (specs/done/activity-feed.md).
+.activity-kinds-table {
+  border-collapse: collapse; font-size: 13px;
+  th, td { padding: 4px 8px; text-align: left; border-bottom: 1px solid var(--line); vertical-align: middle; }
+  tr.off td:not(:nth-child(3)) { color: var(--ink-3); }
+  select { font: inherit; }
+}
+.activity-page .burst-detail { padding: 4px 0 8px; }
 
 // The disky app's actions on a path (specs/laptop-app-links.md): the object panel's header,
 // the view card's directory.

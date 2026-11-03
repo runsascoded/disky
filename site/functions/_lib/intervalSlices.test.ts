@@ -4,7 +4,7 @@ import { IV_JOIN, openIndex, readRootHistoryRows, slices } from './index'
 import { type Req, reqOf, withReq } from './shared'
 import type { OwnerScope } from './scope'
 import { sqliteD1, withLedger } from './testD1'
-import { type D1Variant, fixture, GETS, readJson, seedGeneration } from './testStore'
+import { type D1Variant, fixture, getsOf, readJson, seedGeneration } from './testStore'
 import { buildDiff, buildView, readRootAgg, readRootHistory } from './view'
 
 vi.mock('@rdub/file-tree/stores/s3', async () => ({ S3Store: (await import('./testStore')).S3Store }))
@@ -282,11 +282,7 @@ describe('owner prefix history', () => {
 })
 
 /** What a read did per-scan: the store's `listing/` keys it fetched. */
-async function perScanGets<T>(f: () => Promise<T>): Promise<[T, string[]]> {
-  const n = GETS.length
-  const v = await f()
-  return [v, [...new Set(GETS.slice(n).map(g => g.key))]]
-}
+const perScanGets = getsOf
 
 const PATHS = ['', 'bk', 'bk/m', 'bk/m/deep', 'bk/nest', 'bk/flat']
 

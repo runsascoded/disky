@@ -1,0 +1,117 @@
+{
+  "meta": [
+    {
+      "name": "day",
+      "type": "Date"
+    },
+    {
+      "name": "caller",
+      "type": "String"
+    },
+    {
+      "name": "via",
+      "type": "String"
+    },
+    {
+      "name": "requests",
+      "type": "Float64"
+    },
+    {
+      "name": "wall_ms",
+      "type": "Float64"
+    },
+    {
+      "name": "r2_reads",
+      "type": "Float64"
+    },
+    {
+      "name": "r2_bytes",
+      "type": "Float64"
+    },
+    {
+      "name": "d1_queries",
+      "type": "Float64"
+    },
+    {
+      "name": "d1_rows_read",
+      "type": "Float64"
+    },
+    {
+      "name": "kv_reads",
+      "type": "Float64"
+    },
+    {
+      "name": "d1_rows_written",
+      "type": "Float64"
+    }
+  ],
+  "data": [
+    {
+      "day": "2026-10-19",
+      "caller": "session",
+      "via": "session",
+      "requests": "1200",
+      "wall_ms": 360000,
+      "r2_reads": 4800,
+      "r2_bytes": "96000000",
+      "d1_queries": 2400,
+      "d1_rows_read": 120000,
+      "kv_reads": 300,
+      "d1_rows_written": 400
+    },
+    {
+      "day": "2026-10-20",
+      "caller": "session",
+      "via": "session",
+      "requests": 800,
+      "wall_ms": 200000,
+      "r2_reads": 3000,
+      "r2_bytes": 60000000,
+      "d1_queries": 1600,
+      "d1_rows_read": 80000,
+      "kv_reads": 200,
+      "d1_rows_written": 0
+    },
+    {
+      "day": "2026-10-20",
+      "caller": "sheet sync",
+      "via": "token",
+      "requests": 300,
+      "wall_ms": 150000,
+      "r2_reads": 9000,
+      "r2_bytes": 180000000,
+      "d1_queries": 600,
+      "d1_rows_read": 900000,
+      "kv_reads": 0,
+      "d1_rows_written": 2000
+    },
+    {
+      "day": "2026-10-20",
+      "caller": "bot",
+      "via": "bot",
+      "requests": 50,
+      "wall_ms": 5000,
+      "r2_reads": 0,
+      "r2_bytes": 0,
+      "d1_queries": 0,
+      "d1_rows_read": 0,
+      "kv_reads": 0,
+      "d1_rows_written": 0
+    },
+    {
+      "day": "2026-10-19",
+      "caller": "public",
+      "via": "public",
+      "requests": 20,
+      "wall_ms": 400,
+      "r2_reads": 0,
+      "r2_bytes": 0,
+      "d1_queries": 20,
+      "d1_rows_read": 20,
+      "kv_reads": 0,
+      "d1_rows_written": 0
+    }
+  ],
+  "rows": 5,
+  "rows_before_limit_at_least": 5
+}

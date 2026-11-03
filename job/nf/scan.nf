@@ -7,7 +7,11 @@
 //   bucket-check, pre ─┐
 //   list ×source ──────┴→ [index ×part →] index ─┬→ static-names ─────────────────┐
 //                                ├→ publish-r2 → interval-store ──┼→ index-sync → post (over-time, index-gc, …)
+//   side ────────────────────────┘ (publish-r2's, and serving's)  │
 //                                └→ index-rows ───────────────────┘
+//
+// `params.side` (steps of stage `side`: `non-live`): their own task from the start, beside `list` and `index`, which
+// never wait on it; `publish-r2` does (its outputs reach R2 with the scan's), and so does everything after serving.
 //
 // `params.index_parts` (`options.index.parts`): the index sharded, one `index_part` task per part (`scan step index
 // <part>`: a bucket, or a key range of one), then `index` merges them into the one pass's outputs (`index_parts`).
@@ -23,11 +27,16 @@ params.scan = null
 params.gen = null
 params.job_start = null
 params.run_id = ''
-params.sources = []        // [[uri:, machine:, disk: [request:, type:], secrets: [ENV=SECRET, …] (only a source's own)]]
+params.sources = []        // [[uri:, machine:, disk: [request:, type:], secrets: [ENV=SECRET, …] (only a source's own),
+                           //   machines: [primary, fallback…], queue_timeout: '<N>m' (with `fallback`)]]
+params.list_retries = 0    // the most fallback types any source has (`list_source`'s `maxRetries`)
 params.list_default = [:]  // the profile's `machines.list`: [machine:, disk:]
 params.steps = []          // every enabled step (core minus `skip`, plus the profile's `steps`)
 params.pre = []            // enabled extra steps beside `list`, before `index` (soft: index runs without them)
 params.pre_label = 'small'
+params.static_label = 'small'
+params.side = []           // enabled `side` steps: their own task, waited on by publish-r2 and serving, never by index
+params.side_label = 'small'
 params.interval_label = 'big'
 params.index_parts = []    // the sharded index's part ids (`options.index.parts`), each its own task before `index`
 params.index_part_label = 'big'
@@ -101,11 +110,27 @@ process pre {
     script: stepScript(task, params.pre)
 }
 
+process side {
+    label params.side_label  // `side` when the profile sizes it (`machines.side`), else `small`
+    output: path 'done'
+    script: stepScript(task, params.side)
+}
+
+// A source with `fallback` types (spec §7) runs submit attempt k on `src.machines[k-1]`, each but the last with a queue
+// timeout; only Nextflow's submit timeout is retried (as `scan_head.fallback_block`'s labels), any real failure finishes.
 process list_source {
     tag "${src.uri}"
     label 'list'
-    machineType { src.machine ?: params.list_default.machine }
+    machineType { src.machines ? src.machines[task.submitAttempt - 1] : (src.machine ?: params.list_default.machine) }
     disk { diskOf(src.disk ?: params.list_default.disk) }
+    maxSubmitAwait { src.machines && task.submitAttempt < src.machines.size() ? src.queue_timeout : null }
+    maxRetries params.list_retries
+    errorStrategy {
+        if( !(task.previousException?.cause instanceof nextflow.exception.ProcessSubmitTimeoutException) ) return 'finish'
+        log.warn "scan head: ${task.process} queued ${src.queue_timeout} on ${task.machineType}; retrying on " +
+                 "${src.machines[task.submitAttempt]}${task.submitAttempt + 1 < src.machines.size() ? '' : ' (the last: no queue timeout)'}"
+        return 'retry'
+    }
     input: val src
     output: path 'done'
     script:
@@ -129,7 +154,7 @@ process index {
 }
 
 process static_names {
-    label 'small'
+    label params.static_label
     time '6h'
     input: val indexed
     output: path 'done'
@@ -191,12 +216,16 @@ workflow {
     def listed = gathered(ready)
     def indexed = index(params.index_parts ? gathered(index_part(Channel.fromList(params.index_parts), listed)) : listed)
     def none = Channel.value('skipped')
-    def pub = on('publish-r2') ? publish_r2(indexed) : indexed
+    def sided = params.side ? side() : none
+    def rows = index_rows(indexed)
+    // publish-r2 copies the generation as it stands, so after index-rows: the footers it writes (`.groups.json`, the age
+    // pyramids' `.groups.*`) never reached R2 when the two ran side by side, and a `.groups.parquet` it rewrote mid-copy
+    // left R2 the older bytes (cw, 2026-10-30)
+    def pub = on('publish-r2') ? publish_r2(params.side ? gathered(rows.mix(sided)) : rows) : indexed
     // On a local data dir the static index reads earlier scans from the serving store, so it waits for this one's publish
     def st = on('static-names') ? static_names(params.static_after_publish ? pub : indexed) : none
     def iv = on('interval-store') ? interval_store(pub) : pub
-    def rows = index_rows(indexed)
-    def serving = gathered(rows.mix(st, iv))
+    def serving = gathered(rows.mix(st, iv, sided))
     def synced = folded('index-sync') ? serving : gathered(index_sync(serving))
     if (params.post || folded('index-sync')) post(synced)
     if (params.over_time) over_time(synced)

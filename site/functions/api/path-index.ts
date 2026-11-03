@@ -61,7 +61,7 @@ export const onRequest = async (ctx0: { request: Request; env: Env }): Promise<R
   // A scan the deployment's interval store holds: its per-scan sorts are retired (`dt-cloud scan retire`), so its
   // rows are the store's, exported as a `path` sort by `dt-cloud interval-store export` — never served from here
   // (nor a per-scan file a retire hasn't reached yet: the answer must not depend on retirement timing).
-  if (!url.searchParams.get('store')) {
+  {
     let gen: string | null
     try {
       gen = await ivHolder(env, date)

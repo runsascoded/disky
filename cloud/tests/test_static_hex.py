@@ -186,6 +186,7 @@ def test_reader_equals_brute_force(built, hexfx):
     assert differs == (["cafe", "1234", "0123", "bcdef", "2b3c", "7c1d", "e8f9", "6789", "89abcdef0y", "c3d4"] if rule else [])
 
 
+@pytest.mark.slow
 def test_catalog_equals_brute_force(built, hexfx):
     rule, g = built
     versions, dates = _versions(hexfx[2]), [s["id"] for s in hexfx[1]]
@@ -209,6 +210,7 @@ def test_catalog_equals_brute_force(built, hexfx):
         assert cat.answer(t, dates)["answers"] == want, t
 
 
+@pytest.mark.slow
 def test_roots_equal_brute_force(built, hexfx):
     rule, g = built
     versions = _versions(hexfx[2])
@@ -236,6 +238,7 @@ def test_roots_equal_brute_force(built, hexfx):
     assert got_short == sorted((t, *v) for v in versions if v[0] >= 1 for t in shorts if _is_root(t, v[1], rule))
 
 
+@pytest.mark.slow
 def test_base_plus_runs_equal_rebuild(hexfx, tmp_path):
     """Two scans appended to a base under the rule: base ⊕ runs hold the rebuild's suffix rows, the tiered reader its
     answers, and the catalog merges to the rebuild's byte for byte; every run's catalog records the rule."""

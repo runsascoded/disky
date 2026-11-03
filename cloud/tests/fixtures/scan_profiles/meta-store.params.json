@@ -23,6 +23,7 @@
    ]
   }
  ],
+ "list_retries": 0,
  "list_default": {
   "machine": "e2-standard-4",
   "disk": null
@@ -38,6 +39,8 @@
  ],
  "pre": [],
  "pre_label": "small",
+ "side": [],
+ "side_label": "small",
  "interval_label": "big",
  "index_parts": [],
  "index_part_label": "big",
@@ -69,16 +72,19 @@
  "env": {
   "R2_ENDPOINT": "https://example-account.r2.example.org",
   "R2_BUCKET": "example-serving",
+  "DISKY_LABELS": "app=disky,deployment=example",
   "DT_DATA_MOUNT": "/mnt/disks"
  },
  "profile_json": "<profile>",
  "labels": {
   "deployment": "example",
+  "app": "disky",
   "component": "scan",
   "scan_id": "2026-10-16t1200"
  },
  "cache": true,
  "static_after_publish": false,
  "queue_size": 20,
- "work_bucket": "example-data"
+ "work_bucket": "example-data",
+ "static_label": "small"
 }

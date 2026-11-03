@@ -6,6 +6,7 @@
 // Loaded lazily (App.tsx): the viewers pull hyparquet and friends.
 import { cloneElement, isValidElement, useEffect, useMemo, useRef, type ReactElement } from 'react'
 import { useQuery } from '@tanstack/react-query'
+import { Loading } from './Busy'
 import { MediaViewer, PdfViewer, TextViewer, parsePath } from '@rdub/file-tree/react'
 import { HttpStore } from '@rdub/file-tree/stores/http'
 import { makeParquetViewer, type ParquetCellRenderer } from '@rdub/file-tree/renderers/parquet'
@@ -207,7 +208,7 @@ export default function ObjectPanel({ segs, node, onClose }: {
         <button type="button" className="obj-close" aria-label="Close the object (Esc)" title="Close (Esc)" onClick={onClose}>×</button>
       </header>
       <div className="obj-uri"><code>{shown}</code></div>
-      {!src ? <p className="loading">resolving where this object is read from…</p>
+      {!src ? <Loading label="Resolving this object’s data source…" />
         : src.kind === 'none' ? <p className="hint">No preview: <code>{src.bucket}</code> isn’t readable from this site — it has no public URL the browser may read here, and the site’s file proxy reads {proxyQ.data ? <code>{proxyQ.data.uri}</code> : 'another bucket'}. Its size and date are above.</p>
         : src.kind === 'tunnel' && !reach.data ? <p className="loading">reaching the laptop…</p>
         : src.kind === 'tunnel' && 'message' in reach.data! ? <p className="hint">{reach.data.message}</p>

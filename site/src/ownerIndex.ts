@@ -3,7 +3,7 @@
 // the effective owner is the most recent live row on an ancestor-or-equal
 // prefix (recency beats specificity). `owners.ts` re-exports it.
 
-// An exact-object row (`kind: 'object'`, specs/file-assign.md) owns its one
+// An exact-object row (`kind: 'object'`, specs/done/file-assign.md) owns its one
 // key: on that key's chain it sits at the leaf — newer than every folder above
 // it, it wins; older, a folder repaints it — and it is on no other path's
 // chain (not `key.bak`'s, not `key/…`'s).

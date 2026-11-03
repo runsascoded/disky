@@ -125,7 +125,9 @@ def _groups(store: Store, key: str, spans: list[tuple[str, str]], ts: int) -> li
     whose versions may be live at `ts`."""
     g = pq.read_table(store.open(key.removesuffix(".parquet") + ".groups.parquet"),
                       columns=["rg", "p_min", "p_max", "vf_min", "vt_max"]).to_pylist()
-    return [r["rg"] for r in g if r["vf_min"] <= ts < r["vt_max"] and any(r["p_max"] >= lo and r["p_min"] <= hi for lo, hi in spans)]
+    # A run's closed rows cancel versions still open in the base. Dropping a group because all its vt <= ts
+    # would resurrect those base rows, possibly returning both a replacement and its stale identity.
+    return [r["rg"] for r in g if r["vf_min"] <= ts and any(r["p_max"] >= lo and r["p_min"] <= hi for lo, hi in spans)]
 
 
 def object_identities(store_root: str, scan: str, bucket: str, bands: list[str] | tuple[str, ...], exact: list[str] | tuple[str, ...] = (),
@@ -145,21 +147,22 @@ def object_identities(store_root: str, scan: str, bucket: str, bands: list[str] 
     entry, runs = scan_entry(store, prefix, scan)
     base = store.read_json(f"{prefix}/scans.json")
     has_gen = ist.has_generation(base)
+    identity = ist.identity_column(has_gen)
     ts = int(entry["ts"])
     spans = [(f"{bucket}/{b}", f"{bucket}/{b}\U0010ffff") for b in bands] + [(f"{bucket}/{k}", f"{bucket}/{k}") for k in exact]
-    cols = [*IDENTITY_COLS, *([ist.GENERATION] if has_gen else [])]
+    cols = [*IDENTITY_COLS, *([identity] if has_gen else [])]
     parts = []
     for key in [f"{prefix}/served/{ist.GENERATION_SORT}.parquet", *(f"{prefix}/{r['key']}/served/{ist.GENERATION_SORT}.parquet" for r in runs)]:
         if rgs := _groups(store, key, spans, ts):
             parts.append(pq.ParquetFile(store.open(key)).read_row_groups(rgs, columns=cols))
-    out_schema = pa.schema([("name", pa.string()), ("generation", pa.int64()), ("created", pa.timestamp("us", tz="UTC"))])
+    out_schema = pa.schema([("name", pa.string()), (identity, pa.string() if isinstance(has_gen, pa.Field) else pa.int64()), ("created", pa.timestamp("us", tz="UTC"))])
     if not parts:
         return out_schema.empty_table()
     con = duckdb.connect()
     con.register("rows", pa.concat_tables(parts))
-    gcol = ist.GENERATION if has_gen else "NULL::BIGINT"
+    gcol = identity if has_gen else "NULL::BIGINT"
     under = " OR ".join([*(f"starts_with(path, {q(lo)})" for lo, _ in spans[:len(bands)]), *(f"path = {q(lo)}" for lo, _ in spans[len(bands):])])
-    t = con.execute(f"""SELECT substr(path, {len(bucket) + 2}) AS name, {gcol} AS generation,
+    t = con.execute(f"""SELECT substr(path, {len(bucket) + 2}) AS name, {gcol} AS {identity},
             make_timestamp((CASE WHEN wb > 0 THEN round(wts / wb, 0) ELSE mtime END)::BIGINT * 1000000) AS created
         FROM (SELECT * FROM rows QUALIFY row_number() OVER (PARTITION BY depth, path, vf ORDER BY vt) = 1)
         WHERE vf <= {ts} AND {ts} < vt AND kind = 'file' AND ({under or 'false'})
@@ -186,7 +189,8 @@ def export_scan(store_root: str, scan: str, dest: str, *, gen: str | None = None
     base = store.read_json(f"{prefix}/scans.json")
     sliced = ist.sliced(base)
     # The objects' native version (a v2 scan of a generation that carries it): from the path sort's live versions.
-    generation = ist.has_generation(base) and entry["version"] == 2
+    generation = ist.has_generation(base) if entry["version"] == 2 else False
+    identity = ist.identity_column(generation)
     sort = "slices" if sliced else "path"
     own = work is None
     work = Path(tempfile.mkdtemp(prefix="iv-export-")) if own else work
@@ -198,8 +202,8 @@ def export_scan(store_root: str, scan: str, dest: str, *, gen: str | None = None
         con = connect(threads, mem, work / "duckdb")
         con.execute(f"CREATE TABLE live AS {live_sql(served(sort), sliced, entry['ts'])}")
         if generation and sliced:
-            gen_of = f"SELECT depth, path, {ist.GENERATION} FROM ({live_sql(served(ist.GENERATION_SORT), False, entry['ts'])})"
-            con.execute(f"CREATE OR REPLACE TABLE live AS SELECT l.*, g.{ist.GENERATION} FROM live l LEFT JOIN ({gen_of}) g USING (depth, path)")
+            gen_of = f"SELECT depth, path, {identity} FROM ({live_sql(served(ist.GENERATION_SORT), False, entry['ts'])})"
+            con.execute(f"CREATE OR REPLACE TABLE live AS SELECT l.*, g.{identity} FROM live l LEFT JOIN ({gen_of}) g USING (depth, path)")
         usr = ["nullif(usr, '') AS usr"] if sliced else []
         out = work / "out"
         out.mkdir(parents=True, exist_ok=True)
@@ -207,7 +211,7 @@ def export_scan(store_root: str, scan: str, dest: str, *, gen: str | None = None
             bad = con.execute("SELECT count(*) FROM live WHERE wb <> 0 AND wb <> size").fetchone()[0]
             if bad:
                 raise SystemExit(f"export {scan}: {bad} versions weigh their mean stamp over part of their size; not a v2 scan's rows")
-            sel = ", ".join(["path", *usr, *(f"{e} AS {c}" for c, e in V2_COLS), *([ist.GENERATION] if generation else [])])
+            sel = ", ".join(["path", *usr, *(f"{e} AS {c}" for c, e in V2_COLS), *([identity] if generation else [])])
             raw = work / "raw.parquet"
             con.execute(f"COPY (SELECT {sel} FROM live ORDER BY depth, path{', usr' if sliced else ''}) TO {q(str(raw))} (FORMAT PARQUET)")
             wanted = tuple(t for t in TIERS if t in tiers)

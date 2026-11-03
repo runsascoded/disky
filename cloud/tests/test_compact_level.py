@@ -75,7 +75,7 @@ def test_unbounded_carries_past_any_level():
 # ── `merge_pending`: every replanned carry stops below the level ───────────
 
 
-def _stub_build(dirs: list[Path], run: dict, outp: Path, *, drilled: bool, tmp: Path, log) -> dict:
+def _stub_build(dirs: list[Path], run: dict, outp: Path, *, drilled: bool, tmp: Path, log, rec=None) -> dict:
     outp.mkdir(parents=True)
     (outp / "meta.json").write_text(json.dumps({"scans": run["scans"]}) + "\n")
     return {"rows": None, "bytes": None, "s": {}}
@@ -109,7 +109,7 @@ def test_carry_clis_parse_the_level(monkeypatch, args, level):
     assert (r.exit_code, seen) == (0, [level])
     monkeypatch.setattr(ar, "merge_pending", lambda *a, **kw: seen.append(kw["max_level"]) or {})
     monkeypatch.setattr(ia, "run_store", lambda *a, **kw: None)
-    monkeypatch.setattr(ia, "Store", lambda root: type("S", (), {"read_json": lambda self, key: {"k": 4}})())
+    monkeypatch.setattr(ia, "Store", lambda root: type("S", (), {"root": root, "read_json": lambda self, key: {"k": 4}, "exists": lambda self, key: True})())
     r = CliRunner().invoke(ia.cli, ["carry", "-b", "b", "-g", "g", "-R", "g", "-S", "s", "-m", "/m", *args])
     assert (r.exit_code, seen) == (0, [level, level])
 
@@ -129,12 +129,14 @@ def _two(level: int) -> list[dict]:
 
 
 def test_interval_level_3_is_left_to_a_compaction():
-    """Two L2s at level 3: the merge stage submits nothing and says a level-3 compaction is due."""
+    """Two L2s at level 3: the merge stage submits no carry, says a level-3 compaction is due, and the compaction stage
+    submits it (`compact -C level:3`, with the R2 copy: the stages' account is the R2 account)."""
     f = IvFake(["2026-08-03"], compact_level=3)
     f.keys[f"{G1}/manifests/2026-08-07.json"] = {"date": "2026-08-07", "runs": _two(2)}
     f.runner(merge_wait=None).carries()
-    assert (f.jobs, [m for m in f.log if m.startswith("merge")]) == (
-        [], ["merge: level 3 is due: compact into a new base generation (carries stop below it)"])
+    assert (f.calls(), [m for m in f.log if m.startswith("merge")]) == (
+        [("compact", "compact -C level:3 -r -j 1 -M 90GB -p 16 -b data -g g1 -R g0 -S scr -m /gcs/data")],
+        ["merge: level 3 is due: compact into a new base generation (carries stop below it)"])
 
 
 def test_interval_nothing_due_is_logged():
@@ -172,6 +174,51 @@ def test_merge_jobs_pass_the_level(level, arg):
     assert spec["taskGroups"][0]["taskSpec"]["runnables"][0]["container"]["commands"][1] == (
         f"set -euo pipefail; mkdir -p /stage/tmp /stage/out && cd /stage && python3 -u -m dt_cloud.interval_append carry -L {arg} -M 90GB -p 16 "
         "-b data -g g1 -R g0 -S scr -m /gcs/data")
+
+
+def _level_run(level: int, first: str, last: str) -> dict:
+    return {"key": ar.run_key(first, last), "first": first, "last": last, "level": level, "scans": [first]}
+
+
+def test_merges_reaching_the_long_level_run_long():
+    l4 = [_level_run(4, "2026-10-01", "2026-10-16"), _level_run(4, "2026-10-17", "2026-11-01")]
+    l3 = [_level_run(3, "2026-10-01", "2026-10-08"), _level_run(3, "2026-10-09", "2026-10-16")]
+    assert [(ar.merge_is_long(ar.plan_carries(runs, max_level=6)[1]), ar.merge_ttl(ar.plan_carries(runs, max_level=6)[1])) for runs in (l4, l3)] == [
+        (True, ar.LONG_RUN_S), (False, ar.LEASE_S)]
+
+    # gcs's 10-22 level-3 carry: 2.03 B rows from runs at levels 2, 1, 0, 0, a 3 h job on spot
+    l3_rows = [{**_level_run(2, "2026-10-17", "2026-10-19"), "rows": 1_327_236_295}, {**_level_run(1, "2026-10-20", "2026-10-21"), "rows": 545_854_432},
+               {**_level_run(0, "2026-10-21T1439", "2026-10-21T1439"), "rows": 47_390_347}, {**_level_run(0, "2026-10-22", "2026-10-22"), "rows": 109_655_551}]
+    small = [{**r, "rows": 1000} for r in l3_rows]
+    plan = lambda runs: ar.plan_carries(runs, max_level=6)[1]  # noqa: E731
+    assert [len(plan(runs)) for runs in (l3_rows, small)] == [1, 1]
+    assert [(ar.merge_is_long(plan(runs), long_rows), ar.merge_ttl(plan(runs), long_rows))
+            for runs in (l3_rows, small) for long_rows in (None, sm.LONG_ROWS)] == [
+        (False, ar.LEASE_S), (True, ar.LONG_RUN_S), (False, ar.LEASE_S), (False, ar.LEASE_S)]
+    assert (sd.Runner.long_merge_rows, sm.carry().long_rows, ar.Runner.long_merge_rows) == (sm.LONG_ROWS, sm.LONG_ROWS, None)
+
+    def shape(spec: dict) -> tuple:
+        ts = spec["taskGroups"][0]["taskSpec"]
+        return ts["maxRunDuration"], ts["maxRetryCount"], spec["allocationPolicy"]["instances"][0]["policy"]["provisioningModel"]
+
+    spot = _static_runner(6)
+    spot.cfg = Profile(**{**spot.cfg.__dict__, "spot": True})
+    assert [shape(spot.merge_job("2026-11-01")[1]), shape(spot.merge_job("2026-11-01", long=True)[1])] == [
+        (f"{ar.MAX_RUN_S}s", 3, "SPOT"), (f"{ar.LONG_RUN_S}s", 0, "STANDARD")]
+    iv = IvFake(["2026-08-03"], compact_level=6).runner()
+    assert shape(iv.merge_job("2026-08-04", long=True)[1])[0] == f"{ar.LONG_RUN_S}s"
+
+
+def test_a_long_lease_outlives_the_default(tmp_path):
+    from datetime import datetime, timedelta, timezone
+
+    store = ar.LocalRunStore(tmp_path / "gen", tmp_path / "scratch", gen="g")
+    t0 = datetime(2026, 10, 30, tzinfo=timezone.utc)
+    assert store.lease("long", t0, ar.LONG_RUN_S) is None
+    # past the default lifetime, a short merger still sees the long holder's own lifetime
+    later = t0 + timedelta(seconds=ar.LEASE_S + 60)
+    assert store.lease("short", later, ar.LEASE_S) == {"owner": "long", "at": t0.isoformat(), "ttl_s": ar.LONG_RUN_S}
+    assert store.lease("short", t0 + timedelta(seconds=ar.LONG_RUN_S + 60), ar.LEASE_S) is None
 
 
 # ── Profiles: explicit in the examples, env overrides, validation ──────────
@@ -224,3 +271,16 @@ def test_interval_env_overrides_and_validates_the_level(tmp_path):
     with pytest.raises(SystemExit) as e:
         ia.load_config(str(p), {})
     assert str(e.value) == "compact_level must be an integer ≥ 1 or none, not 0"
+
+
+def test_anchors_run_as_a_long_stage():
+    """A static anchors job: STANDARD, `LONG_RUN_S`, no retries; drill (a short stage) keeps the defaults."""
+    spot = _static_runner(5)
+    spot.cfg = Profile(**{**spot.cfg.__dict__, "spot": True})
+
+    def shape(stage: str) -> tuple:
+        spec = sd.job_spec(spot.cfg, f"sn-{stage}-x", 1, ["true"], stage=stage)
+        ts = spec["taskGroups"][0]["taskSpec"]
+        return ts["maxRunDuration"], ts["maxRetryCount"], spec["allocationPolicy"]["instances"][0]["policy"]["provisioningModel"]
+
+    assert [shape("anchors"), shape("drill")] == [(f"{ar.LONG_RUN_S}s", 0, "STANDARD"), (f"{ar.MAX_RUN_S}s", 3, "SPOT")]

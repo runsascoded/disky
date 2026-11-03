@@ -57,6 +57,52 @@ describe('D1', () => {
     expect((await get(`from=${A}&to=${C}&path=`, { all: { union: ['primary', 'meta'] } })).text).toBe((await get(`from=${A}&to=${C}&path=`, {})).text)
   })
 
+  it('Server-Timing leads with the union\'s own time (`union`) and its parts, then its members\' (root) or the drilled member\'s', async () => {
+    const names = async (qs: string) => {
+      const r = await diff({ request: new Request(`http://localhost/api/diff?w=1280&h=768&${qs}`), env: deployment() })
+      expect(r.status).toBe(200)
+      return (r.headers.get('server-timing') ?? '').split(', ').map(x => x.split(';')[0])
+    }
+    const root = await names(`from=${A}&to=${C}&path=`)
+    expect(root).toEqual(['union', 'union-ctxs', 'union-gate', 'union-obs', 'union-cutoff', 'union-roots', 'members'])
+    const drill = await names(`from=${A}&to=${C}&path=${(await body(`from=${A}&to=${C}&path=`)).rows.find(r => r.d === 1 && r.src === 'primary')!.p}`)
+    expect([drill.slice(0, 6), drill.length > 6]).toEqual([['union', 'union-ctxs', 'union-gate', 'union-obs', 'union-cutoff', 'union-member'], true])
+  })
+
+  it('a member\'s observations are read once per isolate within `OBSERVATIONS_TTL`, not on every request', async () => {
+    const env = deployment()
+    const sql: string[] = []
+    const db = new Proxy(env.DB as object, { get: (t, k) => k === 'prepare' ? (q: string) => { sql.push(q); return (t as { prepare: (q: string) => unknown }).prepare(q) } : (t as Record<string | symbol, unknown>)[k] })
+    const counted = { ...env, DB: db } as unknown as Env
+    const scansRead = () => sql.filter(q => q.includes('SELECT DISTINCT date FROM index_schema')).length
+    const ask = async () => expect((await diff({ request: new Request(`http://localhost/api/diff?w=1280&h=768&from=${A}&to=${C}&path=`), env: counted })).status).toBe(200)
+    await ask()
+    const first = scansRead()
+    await ask()
+    expect([first, scansRead()]).toEqual([2, 2])
+  })
+
+  it('another isolate in the colo reads the observations from the colo\'s copy, not D1', async () => {
+    const g = globalThis as unknown as { caches: unknown }
+    const before = g.caches
+    const store = new Map<string, Response>()
+    g.caches = { default: { match: async (r: Request) => store.get(r.url)?.clone(), put: async (r: Request, res: Response) => { store.set(r.url, res) } } }
+    try {
+      const env = deployment()
+      const sql: string[] = []
+      // Each env is its own D1 binding object (a fresh isolate's view of the same database).
+      const counted = () => ({ ...env, DB: new Proxy(env.DB as object, { get: (t, k) => k === 'prepare' ? (q: string) => { sql.push(q); return (t as { prepare: (q: string) => unknown }).prepare(q) } : (t as Record<string | symbol, unknown>)[k] }) }) as unknown as Env
+      const scansRead = () => sql.filter(q => q.includes('SELECT DISTINCT date FROM index_schema')).length
+      const ask = async (e: Env) => expect((await diff({ request: new Request(`http://localhost/api/diff?w=1280&h=768&from=${A}&to=${C}&path=`), env: e })).status).toBe(200)
+      await ask(counted())
+      const first = scansRead()
+      await ask(counted())
+      expect([first, scansRead()]).toEqual([2, 2])
+    } finally {
+      g.caches = before
+    }
+  })
+
   it('both stores rescanned: each diffs its own scans; rows tagged, totals summed, one threshold', async () => {
     const [u, p, m] = await Promise.all([body(`from=${A}&to=${C}&path=`), body(`from=${A}&to=${C}&path=&store=primary`), body(`from=${A}&to=${B}&path=&store=meta`)])
     expect([u.prev, u.curr, u.union, roots(u), pick(u), u.threshold]).toEqual([
@@ -137,6 +183,19 @@ describe('unionDiffRows', () => {
       { ...row('m', 1, 4, 4), src: 'meta' },
       { ...row('(other)', 1, 5, 5), oa: 2, ob: 2, s: 'unchanged' },
     ])
+  })
+  it('with members\' totals, `(other)` is each one\'s totals less its drawn depth-1 rows: a member that drew nothing still adds up', () => {
+    const got = unionDiffRows(view, [
+      { store: 'primary', rows: [row('a', 1, 5, 9), row('a/x', 2, 5, 9), row('(other)', 1, 2, 1)], total: { a: 7, b: 10, oa: 2, ob: 2 } },
+      { store: 'meta', rows: [], total: { a: 40, b: 65, oa: 3, ob: 5 } },
+    ])
+    expect(got).toEqual([
+      { ...row('a', 1, 5, 9), src: 'primary' },
+      row('a/x', 2, 5, 9),
+      { p: '(other)', d: 1, k: 'dir', s: 'changed', a: 2 + 40, b: 1 + 65, oa: 1 + 3, ob: 1 + 5 },
+    ])
+    const d1 = got.filter(r => r.d === 1)
+    expect([d1.reduce((n, r) => n + r.b - r.a, 0), d1.reduce((n, r) => n + r.ob - r.oa, 0)]).toEqual([(10 + 65) - (7 + 40), (2 + 5) - (2 + 3)])
   })
   it('refuses a depth-1 name two stores draw', () => {
     expect(() => unionDiffRows(view, [{ store: 'primary', rows: [row('a', 1, 1, 1)] }, { store: 'meta', rows: [row('a', 1, 1, 1)] }])).toThrow("union view 'all': root 'a' is in stores primary, meta")

@@ -27,7 +27,7 @@ export interface DispatchReq {
    *  a dry run of exactly `items` exists: its scan. */
   date?: string
   /** The items the run acts on (`digestLines`: a prefix, or `=<key>` for an object): the rows checked on /staged.
-   *  Absent: the whole plan (the Slack thread's buttons). Never more than named (specs/delete-what-you-see.md). */
+   *  Absent: the whole plan (the Slack thread's buttons). Never more than named (specs/done/delete-what-you-see.md). */
   items?: string[]
   actor: string
   siteUrl: string

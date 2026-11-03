@@ -5,7 +5,7 @@ import { Link } from 'react-router-dom'
 import { ago } from './colors'
 import { Tooltip } from './Tooltip'
 import { fmtDur as fmtDurM } from './runs'
-import { overlappingFailures, phaseFill, phaseOutcome, runOutcome, scanRunOf, type PhaseIssue, type PhaseSpan, type RunSummary, type ScanRun } from './scanRunsModel'
+import { BEHIND, overlappingFailures, phaseFill, phaseOutcome, runOutcome, scanRunOf, type PhaseIssue, type PhaseSpan, type RunSummary, type ScanRun } from './scanRunsModel'
 import { fmtTimestamp } from './scan'
 import { DEFAULT_STORE, STORES, type Store, storeQuery, storeUrl } from './stores'
 
@@ -82,12 +82,25 @@ const PALETTE = ['--s1', '--s2', '--s4', '--s7', '--s5', '--s6', '--s3', '--s8']
 /** A stable color per phase name: its position in the usual phase order. */
 export const colorer = (order: string[]) => (phase: string) => `var(${PALETTE[Math.max(0, order.indexOf(phase)) % PALETTE.length]})`
 
-/** `cell`: rendered as a table cell's content (`Tooltip`'s `cell`: the cell is the hover target, the tip to its right). */
-export function Status({ run, failedAt, issues = [], cell }: { run: ScanRun; failedAt?: string | null; issues?: PhaseIssue[]; cell?: boolean }) {
+/** The tip on a quiet run's warning (and a lost run's status). */
+export const QUIET_TIP = "The run hasn't written its record (phases, its once-a-minute heartbeat) for this long: its job may have stalled or died. Check its Batch job."
+
+/** `cell`: rendered as a table cell's content (`Tooltip`'s `cell`: the cell is the hover target, the tip to its right).
+ * `lost`: a running run quiet past `LOST_S` (`liveness`), shown `lost?` until `scan-run reconcile` settles it. */
+export function Status({ run, failedAt, issues = [], cell, lost }: { run: ScanRun; failedAt?: string | null; issues?: PhaseIssue[]; cell?: boolean; lost?: boolean }) {
+  if (run.status === 'running' && lost) {
+    return <Tooltip cell={cell} content={<><div>{QUIET_TIP}</div><div className="dim">Its duration stops at its last write; a later run's start marks it failed once Batch confirms its job ended.</div></>}>
+      <span className="sr-status lost">lost?</span>
+    </Tooltip>
+  }
   if (run.status === 'succeeded' && issues.length) {
     const outcome = runOutcome(run, issues)
-    return <Tooltip cell={cell} content={<><div>Batch job succeeded, but {issues.length} phase attempt{issues.length === 1 ? '' : 's'} failed.</div>{issues.map(i => <div key={i.phase}>{i.phase}: {i.outcome}{i.recovery ? ' · recovered by a subsequent attempt' : ' · no successful recovery recorded'}</div>)}</>}>
-      <span className={`sr-status ${outcome === 'recovered' ? 'succeeded' : 'warn'}`}>{outcome}</span>
+    const head = outcome === BEHIND ? "Data published. Search doesn't cover this scan yet." : outcome === 'recovered' ? 'Data published; a later attempt redid what failed.' : 'Data published, but:'
+    return <Tooltip cell={cell} content={<><div>{head}</div>{issues.map(i => <div key={i.phase}>
+      <div>{i.phase}: {i.outcome === BEHIND ? 'search behind' : i.reason ? `skipped: ${i.reason.replace(/^skipped(?: \([^)]*\))?: /, '')}` : `${i.outcome} ${i.attempts ?? 1}x`}{i.recovery ? ' · done by a later attempt' : ''}</div>
+      {(i.outcome === BEHIND ? i.reason : i.detail) && <div className="dim">{i.outcome === BEHIND ? i.reason : i.detail}</div>}
+    </div>)}</>}>
+      <span className={`sr-status ${outcome === 'recovered' ? 'succeeded' : outcome === BEHIND ? 'behind' : 'warn'}`}>{outcome}</span>
     </Tooltip>
   }
   const tag = <span className={`sr-status ${run.status}`}>{run.status === 'nop' ? 'no-op' : run.status}</span>

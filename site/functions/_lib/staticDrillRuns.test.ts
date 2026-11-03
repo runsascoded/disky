@@ -28,6 +28,8 @@ type Expected = {
   members1: string[]
   R: number
   K: number
+  /** Brute force: each member's root rows over every scan (its distinct `(path, usr, vf)` first hits). */
+  rows: Record<string, number>
   /** Non-empty brute-force views only: `views[t][P][d]`. */
   views: Record<string, Record<string, Record<string, Sums>>>
   py: Record<'run1' | 'run2', Record<string, Record<string, PyView>>>
@@ -136,6 +138,18 @@ describe('Drill over base ⊕ runs: every view = brute force', () => {
     expect(got).toEqual(want)
     // 409 terms × 20 paths: the fleet root's heavy members read the tiers' catalog; `nomatch` is no member.
     expect(sources).toEqual({ roots: 7826, rollup: 77, catalog: 77, plain: 180, none: 20 })
+  })
+
+  it('the fleet root\'s root rows (a heavy literal\'s `matchCount.n` with no drilldown) = brute force: a run\'s close records restate roots an earlier tier holds, never counted again', async () => {
+    const drill = wired()
+    const got: [string, number | null][] = [], want: [string, number][] = []
+    for (const t of [...E.long, ...E.short]) {
+      const a = await drill.view(t, '')
+      if (a.source !== 'catalog') continue
+      got.push([t, a.rollup.rows])
+      want.push([t, E.rows[t]])
+    }
+    expect([got.length, got]).toEqual([77, want])
   })
 
   it('the dispatch and every rollup header = the Python `TieredDrill`', async () => {

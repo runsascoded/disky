@@ -1,4 +1,4 @@
-"""Sweep executor — dry-run by default (specs/sweep-executor.md phase 3).
+"""Sweep executor — dry-run by default (specs/done/sweep-executor.md phase 3).
 
 Consumes a `sweep manifest` plan dir. Per eligible directory: fresh re-list,
 intersect with the manifest, verify the scan generation matches (falling back
@@ -146,7 +146,7 @@ def delete_batch(client, bkt, blobs: list) -> list[tuple[object, str]]:
 
 def exact_only_dirs(approved: tuple[str, ...], approved_objects: tuple[str, ...], bucket: str) -> set[str]:
     """The dirs (``a/b``, ``''`` = bucket root) of the bucket's exact items
-    (specs/file-assign.md) that no prefix band covers: there only the exact
+    (specs/done/file-assign.md) that no prefix band covers: there only the exact
     keys are eligible, so a new sibling is not drift and the dir is its own
     listing root."""
     pre = f"gs://{bucket}/"
@@ -398,7 +398,7 @@ def execute_plan(
         # under `dn/`, nested dirs form a stack), and only then deleted — drift
         # discovered late still gates the whole directory.
         # An exact-only dir holds no prefix band: only its exact keys are
-        # eligible, so a live sibling there is not drift (specs/file-assign.md).
+        # eligible, so a live sibling there is not drift (specs/done/file-assign.md).
         exact_dirs = exact_only_dirs(approved, approved_objects, bucket)
         drift_scope = dirs_all - exact_dirs
         roots = list_roots(dirs_all, approved, bucket, exact_dirs)
