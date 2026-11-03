@@ -323,6 +323,47 @@ def test_sub_ranges_fold_the_whole_ranges_bytes(run, tmp_path):
     assert {k: c001.get(k) for k in whole} == whole
 
 
+def test_the_cut_in_path_sub_ranges_writes_the_one_sorts_bytes(run, tmp_path):
+    """Every served sort of a compacted generation cut in path sub-ranges (a 1-byte budget over its range files rewritten
+    in 3-row groups: a sub-range at every group start; `cut_batches`' spill and group-by-group merge) is the one sort's
+    cut, byte for byte: its sorts, group indexes and records (but their seconds), `stats.json`, and what `add` published.
+    The spill is gone after."""
+    src = run["store"] / ist.PREFIX / "g.c002"
+    scans = json.loads((src / "scans.json").read_text())
+    subs = sorted({ist.SORTS[t][0] for t in ist.served_sorts(scans["slices"], ist.attributed(scans))})
+    cuts = {}
+    for name, budget in (("one", None), ("split", 1)):
+        gen = tmp_path / name
+        shutil.copytree(src, gen)
+        shutil.rmtree(gen / "served")
+        for f in sorted(p for t in subs for p in (gen / t).glob("r*.parquet")):
+            pq.write_table(pq.read_table(f), f, row_group_size=3)
+        ist.cut_gen(sn.connect(2, "1GB", tmp_path / f"duckdb-{name}"), gen, scans, rg_rows=RG, budget=budget, spill=tmp_path / f"spill-{name}")
+        cuts[name] = {k: v for k, v in _timeless(gen).items() if k.startswith("served/")}
+    plans = {t: len(ic.sub_ranges(sorted(str(p) for p in (tmp_path / "split" / t).glob("r*.parquet")), 1, ic.path_spans)) for t in subs}
+    assert subs == ["pvl", "rd", *(["sv", "svt"] if run["owned"] else [])]
+    assert all(n > 1 for t, n in plans.items() if t != "rd"), plans
+    assert sorted(cuts["split"]) == sorted(cuts["one"])
+    assert cuts["split"] == cuts["one"]
+    published = {k: v for k, v in _timeless(src).items() if k.startswith("served/")}
+    assert cuts["split"] == published
+    assert [sorted((tmp_path / f"spill-{n}").rglob("*")) if (tmp_path / f"spill-{n}").exists() else [] for n in ("one", "split")] == [[], []]
+
+
+def test_order_terms():
+    """Each served order's terms, `(expression, direction)`: `__seg` aside, a group prefix, then `path, …`."""
+    b = ist.BUCKET
+    assert {s: ist.order_terms(o) for s, (_, o, _) in ist.SORTS.items()} == {
+        "path": [("depth", ""), ("path", ""), ("vf", "")],
+        "bysize": [(f"({b})", " DESC NULLS LAST"), ("path", ""), ("vf", "")],
+        "reads": [("depth", ""), ("path", ""), ("vf", "")],
+        "slices": [("depth", ""), ("path", ""), ("usr", " NULLS FIRST"), ("vf", "")],
+        "slices-bytotal": [(f"({b.replace('size', 'tot')})", " DESC NULLS LAST"), ("path", ""), ("usr", " NULLS FIRST"), ("vf", "")],
+        "slices-bysize-user": [("usr", " NULLS FIRST"), (f"({b})", " DESC NULLS LAST"), ("path", ""), ("vf", "")],
+        ist.ATTRIBUTION: [("path", ""), ("vf", "")],
+    }
+
+
 def test_sub_budget():
     """`mem × (1 − RESERVE) / (jobs × COPIES)`: 12 GB over 4 jobs → 12e9 · ¾ / 16."""
     assert [ic.sub_budget("12GB", 4), ic.sub_budget(1 << 30, 1), ic.sub_budget("1GB", 0)] == [562_500_000, 201_326_592, 187_500_000]

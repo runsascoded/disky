@@ -19,8 +19,10 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import sys
+from collections.abc import Iterator
 from functools import partial
 from pathlib import Path
 from time import monotonic
@@ -751,8 +753,129 @@ def _bounds(t: pa.Table, seg: int, size_col: str | None) -> dict:
             "u_min": u[0], "u_max": u[1], "vf_min": vf[0], "vf_max": vf[1], "vt_min": vt[0], "vt_max": vt[1], "rows": t.num_rows}
 
 
+#: A sub-range's spilled batches hold at most this many rows (fewer when many sub-ranges share the merge's budget).
+SPILL_ROWS = 1 << 16
+#: An `ORDER BY` term: its expression, then its direction (`[ASC|DESC][ NULLS FIRST|LAST]`, or '').
+_TERM = re.compile(r"^(.*?)((?:\s+(?:ASC|DESC))?(?:\s+NULLS\s+(?:FIRST|LAST))?)$", re.IGNORECASE)
+
+
+def order_terms(order: str) -> list[tuple[str, str]]:
+    """A served sort's order (`SORTS`) as `(expression, direction)` terms."""
+    return [(m.group(1), m.group(2)) for m in (_TERM.match(t) for t in order.split(", "))]
+
+
+def cut_batches(con, src: str, files: list[str], sort: str, cols: str, stamps: list[int] | None, budget: int,
+                spill: Path) -> Iterator[pa.RecordBatch]:
+    """`SELECT cols, __seg FROM src ORDER BY __seg, <sort's order>` (`write_served`'s rows) without one sort of every row:
+    DuckDB holds about `budget` (`interval_compact.sub_budget`), whatever the generation's size.
+
+    Every served order is `__seg`, then a group prefix (`depth`, a size bucket, an owner), then `path, …` (the rest of
+    the key: `usr`, `vf`). So a group's rows are its rows of each `path` sub-range in turn, and the sort is: the groups
+    numbered once (`__gid`, a `DISTINCT` of the prefix: one row per group), then each path sub-range of `files` with at
+    most `budget` estimated bytes (`interval_compact.sub_ranges` over `path_spans`) sorted alone by `(__gid, path, …)`
+    and spilled (Arrow IPC, zstd), then the spills read back group by group, each in sub-range order — one batch of each
+    open at a time, `SPILL_ROWS` rows or fewer, so the sub-ranges' batches together fit `budget`. The order is total
+    (`interval_append.IDENT` leads every sort's key), so these are its rows exactly. All of it within `budget`: the one
+    sort. `spill` is removed after."""
+    import numpy as np
+
+    from .interval_compact import path_spans, sub_ranges
+
+    _, order, _ = SORTS[sort]
+    seg = seg_sql(stamps)
+    plan = sub_ranges(files, budget, path_spans)
+    if len(plan) == 1:
+        yield from sn._batches(con, f"SELECT {cols}, {seg} AS __seg FROM {src} ORDER BY __seg, {order}")
+        return
+    terms = order_terms(order)
+    i = [e for e, _ in terms].index("path")
+    head, tail = terms[:i], terms[i:]
+    gs = [f"__g{j}" for j in range(len(head))]
+    by = "".join(f", {g}{d}" for g, (_, d) in zip(gs, head))
+    con.execute(f"""CREATE OR REPLACE TEMP TABLE __groups AS SELECT *, row_number() OVER (ORDER BY __seg{by}) - 1 AS __gid
+        FROM (SELECT DISTINCT {seg} AS __seg{''.join(f', {e} AS {g}' for (e, _), g in zip(head, gs))} FROM {src})""")
+    n_groups = con.execute("SELECT count(*) FROM __groups").fetchone()[0]
+    rows = sum(pq.read_metadata(f).num_rows for f in files)
+    per_row = max(1, sum(e for *_, e in plan) // max(1, rows))
+    batch = max(1024, min(SPILL_ROWS, budget // (len(plan) * per_row)))
+    on = " AND ".join(["s.__seg = g.__seg", *(f"s.{g} IS NOT DISTINCT FROM g.{g}" for g in gs)])
+    if spill.exists():
+        shutil.rmtree(spill)
+    spill.mkdir(parents=True)
+    names = [c.strip('"') for c in cols.split(", ")]
+    opts = pa.ipc.IpcWriteOptions(compression="zstd")
+    t0 = monotonic()
+    try:
+        paths = []
+        for j, (lo, hi, _) in enumerate(plan):
+            # Literals, not parameters: they prune the files' row groups by their statistics.
+            preds = [*([f"path >= {q(lo[1])}"] if lo is not None else []), *([f"path < {q(hi[1])}"] if hi is not None else [])]
+            sql = f"""SELECT {', '.join(f's.{c}' for c in cols.split(', '))}, s.__seg, g.__gid
+                FROM (SELECT {cols}, {seg} AS __seg{''.join(f', {e} AS {g}' for (e, _), g in zip(head, gs))} FROM {src} WHERE {' AND '.join(preds)}) s
+                JOIN __groups g ON {on} ORDER BY g.__gid, {', '.join(f's.{e}{d}' for e, d in tail)}"""
+            reader = con.execute(sql).to_arrow_reader(batch)
+            paths.append(spill / f"{j:05d}.arrow")
+            with pa.ipc.new_file(paths[-1], reader.schema, options=opts) as w:
+                for b in reader:
+                    if b.num_rows:
+                        w.write_batch(b)
+        con.execute("DROP TABLE __groups")
+        spilled = sum(p.stat().st_size for p in paths)
+        err(f"cut {sort}: {len(plan)} path sub-ranges (largest ≈{max(e for *_, e in plan) >> 20:,} of {budget >> 20:,} MiB), {n_groups:,} groups, "
+            f"spilled {spilled / (1 << 30):.2f} GiB in {monotonic() - t0:.0f}s; merging {batch:,}-row batches")
+
+        class Run:
+            """One sub-range's spill, read a batch at a time; `take(gid)` its rows of group `gid` (groups in order)."""
+
+            def __init__(self, path: Path):
+                self.f = pa.OSFile(str(path))
+                self.r = pa.ipc.open_file(self.f)
+                self.i, self.b = -1, None
+                self.next()
+
+            def next(self) -> None:
+                self.i += 1
+                if self.i < self.r.num_record_batches:
+                    self.b = self.r.get_batch(self.i)
+                    self.gid, self.off = self.b.column("__gid").to_numpy(), 0
+                else:
+                    self.b = None
+                    self.f.close()
+
+            def take(self, gid: int) -> Iterator[pa.RecordBatch]:
+                if self.b is not None and self.gid[self.off] < gid:
+                    raise RuntimeError(f"cut {sort}: a spill's group {self.gid[self.off]} was passed over")
+                while self.b is not None and self.gid[self.off] == gid:
+                    end = int(np.searchsorted(self.gid, gid, side="right"))
+                    yield self.b.slice(self.off, end - self.off)
+                    if end < len(self.gid):
+                        self.off = end
+                        return
+                    self.next()
+
+        runs = [Run(p) for p in paths]
+        keep = [*names, "__seg"]
+        out: list[pa.RecordBatch] = []
+        n = 0
+        for gid in range(n_groups):
+            for r in runs:
+                for b in r.take(gid):
+                    out.append(b.select(keep))
+                    n += b.num_rows
+                    if n >= batch:
+                        yield pa.Table.from_batches(out).combine_chunks().to_batches()[0]
+                        out, n = [], 0
+        if out:
+            yield pa.Table.from_batches(out).combine_chunks().to_batches()[0]
+        if left := [j for j, r in enumerate(runs) if r.b is not None]:
+            raise RuntimeError(f"cut {sort}: sub-ranges {left} hold rows past the last group")
+    finally:
+        shutil.rmtree(spill, ignore_errors=True)
+
+
 def write_served(con, src: str, sort: str, out: Path, schema: pa.Schema, *, rg_rows: int = SERVED_RG,
-                 stamps: list[int] | None = None, est_rows: int | None = None, page_rows: int | None = None) -> dict:
+                 stamps: list[int] | None = None, est_rows: int | None = None, page_rows: int | None = None,
+                 files: list[str] | None = None, budget: int | None = None, spill: Path | None = None) -> dict:
     """One served sort of `src` (a relation of `schema` rows) to `out`: its segments in order (`seg_sql`:
     the open versions, then the closed ones — one segment, or with `stamps` one per dyadic block of
     scans), each in the sort's order and cut in `rg_rows`-row groups (a segment's last may be short, so
@@ -762,7 +885,9 @@ def write_served(con, src: str, sort: str, out: Path, schema: pa.Schema, *, rg_r
     columns: pyarrow caps a page by bytes, not rows, so a 1-byte target closes one after every `write_batch_size`
     values (an all-null column, encoding no bytes, stays one page a group). The page index carries `path`'s bounds too (its statistics on), and `path` has no dictionary (it's almost
     all distinct: its dictionary page would be about the whole chunk, fetched by every page read). Logs the rows
-    written (of `est_rows`, when known) at most once a minute."""
+    written (of `est_rows`, when known) at most once a minute. `files` (the parquets `src` reads, `(depth, path)`-sorted)
+    and `budget`: sorted in path sub-ranges of at most `budget` estimated bytes, spilled under `spill` (`cut_batches`):
+    the same rows in the same order, so the same bytes."""
     import pyarrow.compute as pc
 
     _, order, size_col = SORTS[sort]
@@ -792,9 +917,12 @@ def write_served(con, src: str, sort: str, out: Path, schema: pa.Schema, *, rg_r
             rest = t.slice(off)
             pending, n = ([rest] if rest.num_rows else []), rest.num_rows
 
-        sql = f"SELECT {cols}, {seg_sql(stamps)} AS __seg FROM {src} ORDER BY __seg, {order}"
+        if files is not None and budget is not None:
+            rows = cut_batches(con, src, files, sort, cols, stamps, budget, spill or out.parent / f".{out.stem}.spill")
+        else:
+            rows = sn._batches(con, f"SELECT {cols}, {seg_sql(stamps)} AS __seg FROM {src} ORDER BY __seg, {order}")
         prog = hb.Progress(f"cut {sort}", total_rows=est_rows)
-        for b in prog.batches(sn._batches(con, sql)):
+        for b in prog.batches(rows):
             if not b.num_rows:
                 continue
             segs = b.column("__seg")
@@ -860,13 +988,17 @@ def write_groups(out: Path, bounds: list[dict], sort: str, summary) -> dict:
     return {"sort": sort, "rows": start, "groups": len(rows), "bytes": out.stat().st_size, "groups_bytes": gp.stat().st_size, "segments": segs}
 
 
-def cut_gen(con, gen_dir: Path, scans: dict, *, rg_rows: int = SERVED_RG, jobs: int = 1, paths: dict | None = None) -> tuple[dict, dict]:
+def cut_gen(con, gen_dir: Path, scans: dict, *, rg_rows: int = SERVED_RG, jobs: int = 1, paths: dict | None = None,
+            budget: int | None = None, spill: Path | None = None) -> tuple[dict, dict]:
     """A generation's served sorts from its range files under `gen_dir` (every `served_sorts` entry of its owner axis and
     attribution table,
     dyadic segments over `scans`' stamps): `served/<sort>.parquet` + `.groups.parquet` + `<sort>.json`, then its churn
     (`served/stats.json`). What a base build (`interval_local.build_gen`) and a compaction (`interval_compact`) cut.
     `jobs` sorts at a time (`static_names.each`, the largest sources first): each is a parallel DuckDB sort, then a
-    serial pyarrow writer, which the other sorts overlap. Returns `({sort: {rows, groups, bytes}}, stats)`."""
+    serial pyarrow writer, which the other sorts overlap. `budget`: each sort is cut in path sub-ranges of at most that
+    many estimated bytes (`cut_batches`, spilled under `spill`, default `<gen_dir>/.spill`, removed after; the caller's
+    `interval_compact.sub_budget` over its memory limit and `jobs`), so DuckDB's working set is bounded by it, not by the
+    generation; None: one sort each. The bytes don't depend on it. Returns `({sort: {rows, groups, bytes}}, stats)`."""
     stamps = [s["ts"] for s in scans["scans"]]
     served = gen_dir / "served"
     gen, churn = has_generation(scans), has_churn(scans)
@@ -876,15 +1008,19 @@ def cut_gen(con, gen_dir: Path, scans: dict, *, rg_rows: int = SERVED_RG, jobs: 
     def one(cur, sort: str) -> dict:
         sub, _, _ = SORTS[sort]
         t1 = monotonic()
-        est = sum(pq.read_metadata(p).num_rows for p in (gen_dir / sub).glob("r*.parquet"))
+        files = sorted(str(p) for p in (gen_dir / sub).glob("r*.parquet"))
+        est = sum(pq.read_metadata(p).num_rows for p in files)
         sd = write_served(cur, f"read_parquet({q(str(gen_dir / sub / 'r*.parquet'))})", sort, served / f"{sort}.parquet", served_schema(sort, gen, churn),
-                          rg_rows=rg_rows, stamps=stamps, est_rows=est)
+                          rg_rows=rg_rows, stamps=stamps, est_rows=est, files=files if files else None, budget=budget,
+                          spill=(spill or gen_dir / ".spill") / sort)
         sd["s"] = round(monotonic() - t1, 1)
         (served / f"{sort}.json").write_text(json.dumps(sd, sort_keys=True) + "\n")
         return sd
 
     order = sorted(todo, key=lambda s: -size[SORTS[s][0]])
     got = dict(zip(order, sn.each(con, one, order, jobs)))
+    if spill is None:
+        shutil.rmtree(gen_dir / ".spill", ignore_errors=True)
     sorts = {sort: {"rows": got[sort]["rows"], "groups": got[sort]["groups"], "bytes": got[sort]["bytes"]} for sort in todo}
     stats = {**churn_stats(con, str(gen_dir), scans, paths), "slices": scans["slices"]}
     (served / "stats.json").write_text(json.dumps(stats, indent=1) + "\n")

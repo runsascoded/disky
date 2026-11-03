@@ -161,7 +161,7 @@ def build_gen(scans: dict, mount: str, gen_dir: Path, work: Path, *, gen: str, k
         t = done(ist.ATTRIBUTION, t)
     if bad:
         raise RuntimeError(f"build {gen}: the versions don't reconstruct every scan: (range, scan) {bad}")
-    sorts, stats = ist.cut_gen(con, gen_dir, doc, rg_rows=rg_rows, jobs=jobs)
+    sorts, stats = ist.cut_gen(con, gen_dir, doc, rg_rows=rg_rows, jobs=jobs, budget=ic.sub_budget(mem, jobs), spill=work / "cut-spill")
     done("cut", t)
     (gen_dir / "scans.json").write_text(json.dumps(doc, indent=1) + "\n")
     disk.close()

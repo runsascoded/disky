@@ -185,6 +185,17 @@ def group_spans(path: str) -> list[tuple[Key, Key, int]]:
     `(min depth, min path)` and `(max depth, max path)` bound every key in it lexicographically, also where its depth
     varies; `LOW`, `HIGH` without statistics) and its estimated in-memory bytes: uncompressed bytes + `STRING_T` per
     string value."""
+    return _spans(path, by_depth=True)
+
+
+def path_spans(path: str) -> list[tuple[Key, Key, int]]:
+    """`group_spans` keyed on `path` alone, as `(0, path)` (between `LOW` and `HIGH`): the sub-ranges of a sort ordered
+    by `path` within its groups (`interval_store.cut_batches`). A `(depth, path)`-sorted file's groups are path-sorted
+    within a depth, so only a group whose depth varies spans many paths (and counts in every sub-range's estimate)."""
+    return _spans(path, by_depth=False)
+
+
+def _spans(path: str, by_depth: bool) -> list[tuple[Key, Key, int]]:
     md = pq.read_metadata(path)
     schema = md.schema.to_arrow_schema()
     di, pi = schema.names.index("depth"), schema.names.index("path")
@@ -193,21 +204,22 @@ def group_spans(path: str) -> list[tuple[Key, Key, int]]:
     for g in range(md.num_row_groups):
         rg = md.row_group(g)
         d, p = rg.column(di).statistics, rg.column(pi).statistics
-        ok = all(st is not None and st.has_min_max for st in (d, p))
-        lo, hi = ((d.min, p.min), (d.max, p.max)) if ok else (LOW, HIGH)
+        ok = all(st is not None and st.has_min_max for st in ((d, p) if by_depth else (p,)))
+        lo, hi = (((d.min, p.min), (d.max, p.max)) if by_depth else ((0, p.min), (0, p.max))) if ok else (LOW, HIGH)
         out.append((lo, hi, rg.total_byte_size + rg.num_rows * STRING_T * strings))
     return out
 
 
-def sub_ranges(files: list[str], budget: int | None) -> list[tuple[Key | None, Key | None, int]]:
+def sub_ranges(files: list[str], budget: int | None, spans: Callable[[str], list[tuple[Key, Key, int]]] = group_spans) \
+        -> list[tuple[Key | None, Key | None, int]]:
     """`[lo, hi)` key sub-ranges (None: unbounded) covering every key of `files` (key-sorted parquets; missing ones
-    skipped), each with its estimate: the bytes of every row group whose keys it may hold (group `lo < hi`, group
+    skipped; keys as `spans` reads them: `group_spans`' `(depth, path)`, or `path_spans`' `(0, path)`), each with its estimate: the bytes of every row group whose keys it may hold (group `lo < hi`, group
     `hi ≥ lo`). Cut at row-group starts only, greedily as far as the estimate stays ≤ `budget`, but at least one start
     on: a path's versions are never split, so the floor is the groups overlapping one start (about one per input file,
     plus groups holding one path's versions alone). `budget` None, or all of it within `budget`: one sub-range, the whole
     range (read unfiltered). With `P(c)` the bytes of groups starting before `c` and `H(s)` of those ending before `s`,
     `[s, c)`'s estimate is `P(c) − H(s)`."""
-    groups = [g for f in files if Path(f).exists() for g in group_spans(f)]
+    groups = [g for f in files if Path(f).exists() for g in spans(f)]
     if budget is None or sum(b for *_, b in groups) <= budget:
         return [(None, None, sum(b for *_, b in groups))]
     by_lo, by_hi = sorted((lo, b) for lo, _, b in groups), sorted((hi, b) for _, hi, b in groups)
@@ -364,7 +376,8 @@ def fold_gen(gen_dir: Path, out: Path, work: Path, *, gen: str, runs: list[dict]
     `sorts` as the served sorts' cut begins. `before_cut(con, out, doc)`: a hook over the folded range files before the
     cut (`interval_churn.backfill` sets `churn_cum` there, and records it in `doc`). Each range folds in key sub-ranges of
     at most `budget` estimated input bytes (default `sub_budget(mem, jobs)`: what the `jobs` ranges at once hold stays
-    within `mem`, at any store size; the bytes don't depend on it). Returns `(scans.json, rows per table, sorts, stats)`."""
+    within `mem`, at any store size; the bytes don't depend on it), and each served sort is cut in path sub-ranges of the
+    same budget (`interval_store.cut_batches`, spilled under `work`). Returns `(scans.json, rows per table, sorts, stats)`."""
     base = json.loads((gen_dir / "scans.json").read_text())
     sliced = ist.sliced(base)
     generation = (ist.has_generation(base) or fill is not None) if identity is None else identity
@@ -415,7 +428,7 @@ def fold_gen(gen_dir: Path, out: Path, work: Path, *, gen: str, runs: list[dict]
     err(f"fold {gen}: {k} ranges, {sum(rows.values()):,} rows in {monotonic() - t_all:.0f}s; cutting the served sorts")
     if progress is not None:
         progress(f"{k} ranges, {sum(rows.values()):,} rows in {monotonic() - t_all:.0f}s", "sorts")
-    sorts, stats = ist.cut_gen(con, out, doc, rg_rows=rg_rows, jobs=jobs, paths=paths)
+    sorts, stats = ist.cut_gen(con, out, doc, rg_rows=rg_rows, jobs=jobs, paths=paths, budget=budget, spill=work / "cut-spill")
     err(f"fold {gen}: served sorts cut in {monotonic() - t0:.0f}s")
     (out / "scans.json").write_text(json.dumps(doc, indent=1) + "\n")
     return doc, rows, sorts, stats
