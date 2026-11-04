@@ -12,10 +12,14 @@ from contextlib import contextmanager
 from pathlib import Path
 from threading import Event
 
+import pyarrow.parquet as pq
 import pytest
 from click.testing import CliRunner
-from test_interval_local import BASE, DATES, LAYOUT, RG, world  # noqa: F401 (the fixture)
+from test_interval_local import BASE, DATES, LAYOUT, RG, _parquets, world  # noqa: F401 (the fixture)
 
+from dt_cloud import interval_append as ia
+from dt_cloud import interval_churn as ich
+from dt_cloud import interval_compact as ic
 from dt_cloud import interval_identity as iid
 from dt_cloud import interval_local as il
 from dt_cloud import interval_store as ist
@@ -296,3 +300,112 @@ def test_add_names_its_stages(world, built, pss, tmp_path):  # noqa: F811
         sorted(f"sort {s}" for s in ("path", "bysize", "slices", "slices-bytotal", "slices-bysize-user", "reads")),
         ["churn_stats", "(untagged)"],
     )
+
+
+# ── The staged per-range task, run ─────────────────────────────────────────
+
+
+def _no_seconds(doc):
+    """A range's doc without its timings (`s`, here and in its `check`)."""
+    if isinstance(doc, dict):
+        return {k: _no_seconds(v) for k, v in doc.items() if k != "s"}
+    return doc
+
+
+def _range_docs(d: Path) -> dict[str, dict]:
+    return {p.name: _no_seconds(json.loads(p.read_text())) for p in sorted(d.glob("*.json"))}
+
+
+def _rows(path: Path) -> list[tuple]:
+    t = pq.read_table(path)
+    return sorted(zip(*(c.to_pylist() for c in t.columns)), key=repr)
+
+
+def test_ranges_task_opens_at_its_budget_under_the_watch(world, built, spy, pss, monkeypatch, tmp_path):  # noqa: F811
+    """The staged `ranges` task (`ranges_cmd`), both of a scan's 2 tasks over the 3 ranges: each task's one DuckDB opens
+    at what `-M` leaves past this process and the writer's Arrow side, rows as wide as that task's own range files
+    (`append_mem`); it and every `append_range` run under `-M`'s `TreeWatch`, whose peak is logged; and the deltas, open
+    state and range docs are `add`'s, as `add` holds them before the run's churn (`apply_run`, which the staged chain
+    leaves to `publish`): byte for byte, but for the scan's churn and prior, which are the same rows."""
+    d = DATES[BASE]
+    rk = ia.run_key(d, d)
+    prefix = f"{ist.PREFIX}/g"
+
+    # The existing append, stopped short of the churn by a copy of the run as it stands there.
+    (tmp_path / "add").mkdir()
+    added = _copy(built, tmp_path / "add")
+    snap = tmp_path / "add" / "before-churn"
+    real_apply = ich.apply_run
+
+    def apply_run(con, run, *a, **kw):
+        shutil.copytree(run, snap)
+        return real_apply(con, run, *a, **kw)
+
+    monkeypatch.setattr(ich, "apply_run", apply_run)
+    _invoke(il.add_cmd, ["-g", "g", "-L", LAYOUT, "-s", str(world["root"]), "-o", str(added), "-w", str(tmp_path / "add" / "w"),
+                         "-r", str(RG), "-p", "2", "-M", MEM, "-t", d])
+    for got in spy.values():
+        got.clear()
+
+    # The staged chain: `prepare` pins the scan, then the tasks run over the store's mount.
+    (tmp_path / "staged").mkdir()
+    store = _copy(built, tmp_path / "staged")
+    shutil.copytree(world["root"] / LAYOUT.replace("{id}", d).rsplit("/", 1)[0], store / LAYOUT.replace("{id}", d).rsplit("/", 1)[0])
+    scratch = tmp_path / "staged" / "scratch"
+    scratch.mkdir()
+    ia.prepare_scan(str(store), "g", d, (LAYOUT,))
+
+    opened, appended, said = [], [], []
+    real_connect, real_range = sn.connect, ia.append_range
+
+    def watches() -> list[tuple[str, int]]:
+        return [(w.what, w.total) for w in tm._WATCHES]
+
+    def connect(threads, mem, tmp):
+        con = real_connect(threads, mem, tmp)
+        opened.append({"mem": mem, "duckdb": con.execute("SELECT current_setting('memory_limit')").fetchone()[0], "watches": watches()})
+        return con
+
+    def append_range(con, prev, scan, r, name, out, **kw):
+        appended.append((name, watches()))
+        return real_range(con, prev, scan, r, name, out, **kw)
+
+    monkeypatch.setattr(sn, "connect", connect)
+    monkeypatch.setattr(ia, "append_range", append_range)
+    monkeypatch.setattr(ia, "err", said.append)
+    watch = [(f"ranges {d}", TOTAL)]
+    tasks = [(0, ["r0000", "r0002"]), (1, ["r0001"])]
+    docs = []
+    for t, names in tasks:
+        opened.clear()
+        appended.clear()
+        said.clear()
+        for got in spy.values():
+            got.clear()
+        res = CliRunner().invoke(ia.ranges_cmd, ["-b", str(store), "-g", "g", "-R", "g", "-S", str(scratch), "-d", d, "-i", str(t), "-m", str(store), "-M", MEM,
+                                                 "-n", "2", "-o", str(tmp_path / "staged" / "out"), "-p", "2", "-T", str(tmp_path / "staged" / "tmp")], catch_exceptions=False)
+        assert res.exit_code == 0, res.output
+        rb = ic.row_bytes([str(store / prefix / tb / f"{n}.parquet") for tb in ia.tables() for n in names])
+        arrow = tm.APPEND_GROUPS * ist.RANGE_RG * rb
+        limit = (TOTAL - BASE_B - arrow) // MIB
+        assert spy["appends"] == [(arrow, TOTAL - BASE_B - arrow)]
+        assert opened == [{"mem": f"{limit}MiB", "duckdb": f"{limit}.0 MiB", "watches": watch}]
+        assert appended == [(n, watch) for n in names]
+        assert [line for line in said if line.startswith(f"ranges {d}: ")] == [
+            f"ranges {d}: memory {TOTAL / MIB:,.0f} MiB = this process {BASE_B / MIB:,.0f} + Arrow {arrow / MIB:,.0f} ({rb} B a row) + DuckDB {(TOTAL - BASE_B - arrow) / MIB:,.0f}",
+        ]
+        assert re.sub(r"\d+ samples", "<n> samples", "\n".join(_normal(res.stderr))).splitlines() == [
+            f"ranges {d}: peak tree PSS 1 MiB of budget {TOTAL / MIB:,.0f} MiB (0%; <n> samples over <s>)",
+        ]
+        docs += [json.loads(line) for line in res.stdout.splitlines()]
+    assert tm._WATCHES == []
+
+    run = store / prefix / rk
+    state = scratch / prefix / "state" / d
+    staged, local = {**_parquets(run), **{f"state/{k}": v for k, v in _parquets(state).items()}}, _parquets(snap)
+    # The scan's churn and prior: unordered `COPY`s of an aggregate, which `apply_run` aggregates again: the same rows.
+    unordered = {k for k in local if k.startswith((f"state/{ich.SCAN_CHURN}/", f"state/{ich.PRIOR}/"))}
+    assert (sorted(staged), len(unordered)) == (sorted(local), 6)
+    assert {k: v for k, v in staged.items() if k not in unordered} == {k: v for k, v in local.items() if k not in unordered}
+    assert {k: _rows(state / k.removeprefix("state/")) for k in unordered} == {k: _rows(snap / k) for k in unordered}
+    assert _range_docs(run / "ranges") == _range_docs(snap / "ranges") == {f"r{i:04d}.json": _no_seconds(doc) for i, doc in zip((0, 2, 1), docs)}
