@@ -11,6 +11,10 @@ wave: each kept group's chunks whole (`chunkSpan`), one wave, at today's `planRu
 wave's time: its runs, in file order, list-scheduled on
 `RUN_READS` slots, each `ttfb + bytes / throughput`. A request's: its two waves in series (the plan's footer reads and
 any CPU are not modelled, and don't depend on the config).
+
+`-s`/`--small` prices held page indexes and the sort cut in small row groups with no page index, nothing re-cut: its
+table's rows are the modes of `modes`, read back from the same file (see `SmallGroup` for the approximation). A level's
+batches run together, a batch's chain rounds in series (a request's `case`, `level`, `batch`, `round`).
 """
 from __future__ import annotations
 
@@ -22,16 +26,20 @@ import struct
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
+from collections import defaultdict
+from collections.abc import Iterable
 from dataclasses import dataclass
 from functools import partial
 from math import ceil
 from pathlib import Path
 
 import numpy as np
+import pyarrow as pa
 import pyarrow.parquet as pq
 from click import IntRange, argument, command, option
 
 from .image_sha import expect_sha_options
+from .interval_store import GROUPS_SCHEMA, GROUPS_STAT_COLS
 from .layout_sim import RUN_BYTES, RUN_GAP, RUN_READS, pct
 from .parquet_pages import _Reader
 
@@ -46,6 +54,8 @@ ROW_BYTES = 400
 TTFB_MS = 195.0
 THROUGHPUT_MIB_S = 28.6
 SIDECAR_COLS = ["rg", "d_min", "d_max", "p_min", "p_max", "vf_min", "vf_max", "vt_max", "rg_json"]
+#: One colo-cache lookup, an assumption (not measured on the level read): they run `RUN_READS` at a time.
+COLO_MS = 5.0
 MIB = 1 << 20
 #: `fit` always closes a gap under this: a get's first byte costs far more than its transfer.
 FIT_FLOOR = 64 << 10
@@ -166,6 +176,37 @@ class Tier:
         self.vf_min, self.vf_max, self.vt_max = t["vf_min"].to_numpy(), t["vf_max"].to_numpy(), t["vt_max"].to_numpy()
         self.p_min, self.p_max = t["p_min"].to_pylist(), t["p_max"].to_pylist()
         self.rg_json = t["rg_json"]
+        self.sidecar_path = sidecar_path
+        md = pq.read_metadata(sidecar_path)
+        self.sidecar_footer = md.serialized_size
+        # The sidecar's own row groups (the reader's footer groups): their rows, bytes and bounds (`FooterGroup.bounds`).
+        self.fg_rows = [md.row_group(g).num_rows for g in range(md.num_row_groups)]
+        self.fg_bytes = [sum(md.row_group(g).column(c).total_compressed_size for c in range(md.num_columns)) for g in range(md.num_row_groups)]
+        self.fg_start = np.concatenate([[0], np.cumsum(self.fg_rows)]).astype(np.int64)
+        self._rows: np.ndarray | None = None
+
+    def footer_groups(self, keys: list[tuple[int, str]], d1: int, d2: int) -> list[int]:
+        """The footer groups a read of `keys` over `(d1, d2]` decodes (`pqGroups`' `pass`; a run's closes keep any `vt`)."""
+        out = []
+        for n in range(len(self.fg_rows)):
+            a, b = int(self.fg_start[n]), int(self.fg_start[n + 1])
+            if self.vf_min[a:b].min() > d2 or (self.label == "base" and self.vt_max[a:b].max() <= d1):
+                continue
+            d0, d9, p0, p9 = self.d_min[a:b].min(), self.d_max[a:b].max(), min(self.p_min[a:b]), max(self.p_max[a:b])
+            if any(d0 <= d <= d9 and p0 <= p <= p9 for d, p in keys):
+                out.append(n)
+        return out
+
+    @property
+    def rows(self) -> np.ndarray:
+        """Each group's rows."""
+        if self._rows is None:
+            self._rows = np.array([json.loads(j)[0] for j in self.rg_json.to_pylist()], dtype=np.int64)
+        return self._rows
+
+    def small_base(self, rows: int) -> np.ndarray:
+        """Per group, the ordinal of its first small group were the file cut in `rows`-row groups (and the total, last)."""
+        return np.concatenate([[0], np.cumsum(np.ceil(self.rows / rows))]).astype(np.int64)
 
     def in_range(self, d1: int, d2: int) -> np.ndarray:
         """Positions of the groups that can hold a transition in `(d1, d2]`."""
@@ -281,6 +322,54 @@ def wave(per_file: list[list[Span]], cfg: Config, ttfb: float, mib_s: float, bud
     return {"gets": len(sizes), "rounds": ceil(len(sizes) / RUN_READS), "bytes": sum(sizes), "max_get": max(sizes, default=0), "ms": round(wave_ms(sizes, ttfb, mib_s), 1)}
 
 
+@dataclass(frozen=True)
+class SmallGroup:
+    """One group of the sort cut in small groups with no page index, from a real group's page index. **The
+    approximation:** a `R`-row group is the real pages holding its rows, whatever `R` (all columns' pages align at `R`'s
+    divisors on gcs), its bytes those pages' compressed sizes, stored contiguously from the real group's first byte, plus
+    each dictionary page once. A page of a real column chunk compresses as the same page of a small group's would (parquet
+    compresses by page); at `R` > a page, one page over those rows would compress better than the sum, and a dictionary
+    of the group's values alone is smaller than the chunk's: both make this an upper bound on the bytes, by little. Its
+    bounds are those pages' page-index bounds, which the sidecar would carry."""
+    rows: int
+    start: int
+    end: int
+    d0: int
+    d9: int
+    p0: str
+    p9: str
+    t0: int
+    t9: int
+    cols: tuple[int, ...]
+
+    def meets(self, keys: list[tuple[int, str]], d1: int, d2: int) -> bool:
+        return self.t9 > d1 and self.t0 <= d2 and any(self.d0 <= d <= self.d9 and self.p0 <= p <= self.p9 for d, p in keys)
+
+
+def small_groups(ix: PageIx, chunks: dict[str, list[int]], n: int, rows: int) -> list[SmallGroup]:
+    """Real group `ix` as `rows`-row groups (`SmallGroup`)."""
+    pages = ix.locs["depth"]
+    for c in LEVEL_COLS:
+        if [p[2] for p in ix.locs[c]] != [p[2] for p in pages]:
+            raise ValueError(f"column {c}'s pages don't align with depth's")
+    by: dict[int, list[int]] = defaultdict(list)
+    for i, p in enumerate(pages):
+        by[p[2] // rows].append(i)
+    out = []
+    at = chunk_span(chunks)[0]
+    for b in sorted(by):
+        ps = by[b]
+        if len({pages[i][2] // rows for i in ps}) != 1 or pages[ps[0]][2] != b * rows or (ps[-1] + 1 < len(pages) and pages[ps[-1] + 1][2] != (b + 1) * rows):
+            raise ValueError(f"pages at rows {[pages[i][2] for i in ps]} don't divide {rows}-row groups")
+        end_row = pages[ps[-1] + 1][2] if ps[-1] + 1 < len(pages) else n
+        cols = tuple(ix.locs[c][0][0] - (chunks[c][2] or chunks[c][0]) + sum(ix.locs[c][i][1] for i in ps) for c in LEVEL_COLS)
+        size = sum(cols)
+        out.append(SmallGroup(end_row - pages[ps[0]][2], at, at + size, min(ix.depth[i][0] for i in ps), max(ix.depth[i][1] for i in ps),
+                              min(ix.path[i][0] for i in ps), max(ix.path[i][1] for i in ps), min(ix.ts[i][0] for i in ps), max(ix.ts[i][1] for i in ps), cols))
+        at += size
+    return out
+
+
 class Sim:
     """A generation's level sort, the page indexes fetched so far (cached on disk), and the configs to price."""
 
@@ -385,6 +474,214 @@ class Sim:
         return out
 
 
+class FirstTouch:
+    """What's held so far, from empty, in a case's read order: a thing read at a `(level, round)` is held from the next;
+    a concurrent batch of the same `(level, round)` that wants it joins the read (waits for it, reads nothing)."""
+
+    def __init__(self):
+        self.held: set = set()
+        self.reading: dict = {}
+        self.at = None
+
+    def split(self, at: tuple[int, int], ids: Iterable) -> tuple[list, list]:
+        """Of `ids`, those to read here and those another batch's read holds; (the rest are held)."""
+        if at != self.at:
+            self.held |= set(self.reading)
+            self.reading, self.at = {}, at
+        mine, joined = [], []
+        for i in ids:
+            if i in self.held:
+                continue
+            (joined if i in self.reading else mine).append(i)
+        return mine, joined
+
+    def read(self, ids: list, ms: float) -> None:
+        for i in ids:
+            self.reading[i] = ms
+
+    def wait(self, joined: list) -> float:
+        return max((self.reading[i] for i in joined), default=0.0)
+
+
+def small_sidecar(sim: "Sim", rows: int, tmp: Path) -> tuple[float, int]:
+    """A `rows`-row cut's sidecar: bytes per row and rows measured by cutting one with the sort's real writer (`write_groups`'
+    schema, codec and stats, 512-row groups, no page-index offsets in `rg_json`) over the page indexes held (the kept
+    groups', in file order: shorter paths than the file's mean, so low if anything), and its groups' rows: the rows the
+    file would have."""
+    out = []
+    ordinal = 0
+    held = [(t, int(f.stem)) for t in sim.tiers for f in sorted(sim._cache_file(t, 0).parent.glob("*.bin"), key=lambda f: int(f.stem))]
+    for t, i in held:
+        n, chunks = t.chunks(i)
+        ix = sim.ix(t, i, chunks)
+        row = 0
+        for g in small_groups(ix, chunks, n, rows):
+            at = g.start
+            cols = []
+            for size in g.cols:
+                cols.append([at, size, 0])
+                at += size
+            out.append({"rg": ordinal, "seg": 0, "d_min": g.d0, "d_max": g.d9, "p_min": g.p0, "p_max": g.p9, "b_min": 0, "b_max": 0, "u_min": None, "u_max": None,
+                        "vf_min": g.t0, "vf_max": g.t9, "vt_min": g.t0, "vt_max": g.t9, "row_start": row, "row_end": row + g.rows, "rg_json": json.dumps([g.rows, "ZSTD", cols], separators=(",", ":"))})
+            ordinal += 1
+            row += g.rows
+    tmp.mkdir(parents=True, exist_ok=True)
+    f = tmp / f"small-{rows}.groups.parquet"
+    tbl = pa.table({c: [r[c] for r in out] for c in GROUPS_SCHEMA.names}, schema=GROUPS_SCHEMA)
+    with pq.ParquetWriter(f, GROUPS_SCHEMA, compression="zstd", write_statistics=GROUPS_STAT_COLS, store_schema=False) as w:
+        w.write_table(tbl, row_group_size=512)
+    md = pq.read_metadata(f)
+    per_row = (f.stat().st_size - md.serialized_size) / len(out)
+    return per_row, int(sum(t.small_base(rows)[-1] for t in sim.tiers))
+
+
+def modes(sim: "Sim", reqs: list[dict], smalls: list[int], fg_rows: list[int], per_row: dict[int, float]) -> dict[str, dict[int, dict]]:
+    """Per mode, per request (its index in `reqs`), its priced cost. The modes:
+
+    - `8K pages, today`: every read its page indexes and pages; footer groups from first touch (one case, from empty).
+    - `8K pages, held, cold`: indexes and footer groups held from first touch, one case, from empty: what a first paint
+      and its expansion cost in a cold colo.
+    - `8K pages, held, colo warm`: a new isolate over a warm colo: indexes and footer groups from the colo's, once each.
+    - `8K pages, held, warm`: every index and footer group held: pages only.
+    - `<R> rows/F<F>, cold`: small groups, footer groups of `F` rows from first touch, then the kept groups; `, colo warm`:
+      those footer groups from the colo's; `, warm`: every footer group held: the kept groups only.
+
+    A footer group or index read from the store is looked for in the colo first; a joined one isn't. An `<R>`'s footer groups
+    are those holding a kept group (a lower bound: `pqGroups`' bounds also pass neighbours that hold none, as today's do).
+    """
+    today, cold, colo_warm, warm = {}, {}, {}, {}
+    small_cold: dict[tuple[int, int], dict] = {(r, f): {} for r in smalls for f in fg_rows}
+    small_warm: dict[int, dict] = {r: {} for r in smalls}
+    small_colo: dict[int, dict] = {r: {} for r in smalls}
+    by_case: dict[object, list[int]] = defaultdict(list)
+    for i, q in enumerate(reqs):
+        by_case[q.get("case", i)].append(i)
+    cfg = Config("today")
+    groups_memo: dict[tuple[str, int, int], list[SmallGroup]] = {}
+
+    def smalls_of(t: Tier, i: int, n: int, chunks: dict[str, list[int]], r: int) -> list[SmallGroup]:
+        k = (t.key, i, r)
+        if k not in groups_memo:
+            groups_memo[k] = small_groups(sim.ix(t, i, chunks), chunks, n, r)
+        return groups_memo[k]
+
+    def sizes(per_file: list[list[Span]]) -> list[int]:
+        return [e - s for sp in per_file for s, e in merged(sp, cfg.gap, cfg.cap)]
+
+    for case, idx in by_case.items():
+        ix_cold, ix_colo, fg_cold, fg_colo = FirstTouch(), FirstTouch(), FirstTouch(), FirstTouch()
+        small_fg = {(r, f): FirstTouch() for r in smalls for f in fg_rows}
+        small_fg_colo = {r: FirstTouch() for r in smalls}
+        ordered = sorted(idx, key=lambda j: (reqs[j].get("level", 0), reqs[j].get("round", 0), reqs[j].get("batch", 0)))
+        for j in ordered:
+            q = reqs[j]
+            at = (q.get("level", 0), q.get("round", 0))
+            d1, d2 = sim.stamps[q["from"]], sim.stamps[q["to"]]
+            keys = [(0 if p == "" else p.count("/") + 1, p) for p in q["dirs"]]
+            ix_by: dict[tuple[str, int], list[Span]] = {}
+            data: list[list[Span]] = []
+            rows = 0
+            fgs: list[tuple[str, int, int]] = []
+            small_kept = {r: [] for r in smalls}
+            small_rows = dict.fromkeys(smalls, 0)
+            small_ids = {(r, f): set() for r in smalls for f in fg_rows}
+            for t, kept in sim.groups(q):
+                dd: list[Span] = []
+                fgs += [(t.key, n, t.fg_bytes[n]) for n in t.footer_groups(keys, d1, d2)]
+                for i in kept:
+                    n, chunks = t.chunks(i)
+                    ix = sim.ix(t, i, chunks)
+                    ix_by[(t.key, i)] = index_spans(chunks)
+                    ranges, _ = plan_group(ix, n, keys, d1, d2)
+                    rows += sum(b - a for a, b in ranges)
+                    if ranges:
+                        dd += data_spans(ix, chunks, ranges, n)
+                    for r in smalls:
+                        base = t.small_base(r)
+                        for g_i, g in enumerate(smalls_of(t, i, n, chunks, r)):
+                            if g.meets(keys, d1, d2):
+                                small_rows[r] += g.rows
+                                small_kept[r].append((t.key, g))
+                                for f in fg_rows:
+                                    small_ids[(r, f)].add((t.key, int(base[i] + g_i) // f))
+                data.append(dd)
+            dsizes = sizes(data)
+
+            def ix_sizes(ids: list) -> list[int]:
+                return sizes([[s for k in ids for s in ix_by[k] if k[0] == key] for key in sorted({k[0] for k in ids})])
+
+            def touch(state: FirstTouch, ids: list, price) -> dict:
+                """`ids` read from first touch: `gets`, `looked` (colo lookups ahead of them), and what joining others' waits past them."""
+                mine, joined = state.split(at, ids)
+                wv = price(mine)
+                ms = wave_ms(wv, sim.ttfb, sim.mib_s)
+                state.read(mine, ms)
+                return {"gets": wv, "looked": len(mine), "wait": max(0.0, state.wait(joined) - ms)}
+
+            def colo_touch(state: FirstTouch, ids: list) -> int:
+                """`ids` from a warm colo from first touch: its lookups."""
+                mine, _ = state.split(at, ids)
+                state.read(mine, 0.0)
+                return len(mine)
+
+            fg_bytes = {(key, n): b for key, n, b in fgs}
+            fg = touch(fg_cold, list(fg_bytes), lambda ids: [fg_bytes[k] for k in ids])
+            ix = touch(ix_cold, list(ix_by), ix_sizes)
+            today[j] = dict(waves=[fg["gets"], sizes(_by_tier(ix_by)), dsizes], rows=rows, lookups=fg["looked"], extra=fg["wait"], fgs=len(fg_bytes), groups=len(ix_by))
+            cold[j] = dict(waves=[fg["gets"], ix["gets"], dsizes], rows=rows, lookups=fg["looked"] + ix["looked"], extra=fg["wait"] + ix["wait"], fgs=len(fg_bytes), groups=len(ix_by))
+            colo_warm[j] = dict(waves=[dsizes], rows=rows, lookups=colo_touch(ix_colo, list(ix_by)) + colo_touch(fg_colo, list(fg_bytes)), fgs=len(fg_bytes), groups=len(ix_by))
+            warm[j] = dict(waves=[dsizes], rows=rows, fgs=len(fg_bytes), groups=len(ix_by))
+            for r in smalls:
+                by_file: dict[str, list[Span]] = defaultdict(list)
+                for key, g in small_kept[r]:
+                    by_file[key].append((g.start, g.end))
+                sw = sizes(list(by_file.values()))
+                kept_n = len(small_kept[r])
+                small_warm[r][j] = dict(waves=[sw], rows=small_rows[r], groups=kept_n)
+                small_colo[r][j] = dict(waves=[sw], rows=small_rows[r], groups=kept_n, lookups=colo_touch(small_fg_colo[r], sorted(small_ids[(r, fg_rows[0])])), fgs=len(small_ids[(r, fg_rows[0])]))
+                for f in fg_rows:
+                    each = round(per_row[r] * f)
+                    w = touch(small_fg[(r, f)], sorted(small_ids[(r, f)]), lambda ids: [each] * len(ids))
+                    small_cold[(r, f)][j] = dict(waves=[w["gets"], sw], rows=small_rows[r], lookups=w["looked"], extra=w["wait"], fgs=len(small_ids[(r, f)]), groups=kept_n)
+    out = {"8K pages, today": today, "8K pages, held, cold": cold, "8K pages, held, colo warm": colo_warm, "8K pages, held, warm": warm}
+    for r in smalls:
+        for f in fg_rows:
+            out[f"{r} rows/F{f}, cold"] = small_cold[(r, f)]
+        out[f"{r} rows/F{fg_rows[0]}, colo warm"] = small_colo[r]
+        out[f"{r} rows, warm"] = small_warm[r]
+    return out
+
+
+def _by_tier(ix_by: dict[tuple[str, int], list[Span]]) -> list[list[Span]]:
+    tiers: dict[str, list[Span]] = defaultdict(list)
+    for (key, _), spans in ix_by.items():
+        tiers[key] += spans
+    return list(tiers.values())
+
+
+def mode_ms(m: dict, ttfb: float, mib_s: float, colo_ms: float) -> float:
+    """A request's predicted time in a mode: its colo lookups, its waves in series, and past them what it waits on others."""
+    return ceil(m.get("lookups", 0) / RUN_READS) * colo_ms + sum(wave_ms(w, ttfb, mib_s) for w in m["waves"]) + m.get("extra", 0.0)
+
+
+def mode_table(reqs: list[dict], ms: dict[str, dict[int, dict]], ttfb: float, mib_s: float, colo_ms: float) -> list[dict]:
+    """Per mode: `gets`, `rounds` at `RUN_READS` (each wave's, summed), `bytes`, decoded `rows`, and predicted ms: the first
+    level's (`first_*`) and the full expansion's (`full_*`), a level's batches together, a batch's rounds in series."""
+    rows = []
+    for name, per in ms.items():
+        by: dict = defaultdict(lambda: defaultdict(lambda: defaultdict(float)))
+        for j, m in per.items():
+            q = reqs[j]
+            by[q.get("case", j)][q.get("level", 0)][q.get("batch", 0)] += mode_ms(m, ttfb, mib_s, colo_ms)
+        first = [max(lv[min(lv)].values()) for lv in by.values()]
+        full = [sum(max(b.values()) for b in lv.values()) for lv in by.values()]
+        rows.append({"mode": name, "gets": sum(len(w) for m in per.values() for w in m["waves"]), "rounds": sum(ceil(len(w) / RUN_READS) for m in per.values() for w in m["waves"]),
+                     "bytes": sum(b for m in per.values() for w in m["waves"] for b in w), "rows": sum(m["rows"] for m in per.values()), "lookups": sum(m.get("lookups", 0) for m in per.values()),
+                     "fgs_max": max(m.get("fgs", 0) for m in per.values()), "groups_max": max(m.get("groups", 0) for m in per.values()),
+                     "first_p50": float(np.median(first)), "first_max": max(first), "full_p50": float(np.median(full)), "full_max": max(full), "full_sum": sum(full)})
+    return rows
+
+
 def summarize(results: list[dict], labels: list[str]) -> list[str]:
     """Per config, over requests: p50 / p90 / p99 / max of gets, rounds, fetched MiB and predicted ms."""
     lines = [f"{len(results)} requests: rows {pct([r['rows'] for r in results])}, groups {pct([r['groups'] for r in results])} (p50 / p90 / p99 / max)"]
@@ -405,12 +702,16 @@ def summarize(results: list[dict], labels: list[str]) -> list[str]:
 @option("-C", "--caps", default="2M,none", help="`RUN_BYTES` values (`none`: no ceiling), crossed with the gaps")
 @option("-g", "--gaps", default="512K,1M,2M,4M,8M,16M,32M", help="`RUN_GAP` values")
 @option("-o", "--out", help="Output JSONL (default stdout)")
+@option("-F", "--footer-rows", default="512", help="With `-s`: the sidecar's row-group sizes to price")
+@option("-K", "--colo-ms", default=COLO_MS, type=float, help="With `-s`: one colo lookup's time, ms")
+@option("-O", "--table", help="With `-s`: the mode table as JSONL")
 @option("-R", "--throughput", default=THROUGHPUT_MIB_S, type=float, help="One get's throughput, MiB/s")
+@option("-s", "--small", default="", help="Price held page indexes and row-group sizes with no page index (`256,512,1024`): the mode table to stderr")
 @option("-t", "--threads", default=32, type=IntRange(min=1), help="Page-index fetches in flight")
 @option("-T", "--ttfb", default=TTFB_MS, type=float, help="One get's time to first byte, ms")
 @argument("gen")
 @argument("requests")
-def level_sim_cmd(budgets, cache, caps, gaps, out, throughput, threads, ttfb, gen, requests) -> None:
+def level_sim_cmd(budgets, cache, caps, colo_ms, footer_rows, gaps, out, small, table, throughput, threads, ttfb, gen, requests) -> None:
     """Price `readLevel`'s two waves over generation GEN's `level` sort (a dir or URL) under a sweep of coalescing configs.
     REQUESTS: JSONL of `{"from", "to", "dirs": [...]}`, one per read (a chain's round is its own); other keys are copied to
     the output. A summary goes to stderr."""
@@ -452,3 +753,24 @@ def level_sim_cmd(budgets, cache, caps, gaps, out, throughput, threads, ttfb, ge
         sys.stdout.write(lines)
     for line in summarize(results, [c.label for c in cfgs]):
         err(line)
+    smalls = [int(x) for x in small.split(",") if x]
+    if smalls:
+        fg_rows = [int(x) for x in footer_rows.split(",") if x]
+        sized = {r: small_sidecar(sim, r, root / "small") for r in smalls}
+        tbl = mode_table(reqs, modes(sim, reqs, smalls, fg_rows, {r: v[0] for r, v in sized.items()}), ttfb, throughput, colo_ms)
+        if table:
+            Path(table).write_text("".join(json.dumps(r) + "\n" for r in tbl))
+        err(f"{'mode':<30}{'gets':>7}{'rounds':>8}{'MiB':>8}{'rows':>10}{'looked':>8}{'fgs/rq':>7}{'grps/rq':>8}{'first p50':>11}{'first max':>11}{'full p50':>10}{'full max':>10}{'full sum':>10}")
+        for r in tbl:
+            err(f"{r['mode']:<30}{r['gets']:>7}{r['rounds']:>8}{r['bytes'] / MIB:>8.1f}{r['rows']:>10}{r['lookups']:>8}{r['fgs_max']:>7}{r['groups_max']:>8}{r['first_p50']:>11.0f}{r['first_max']:>11.0f}{r['full_p50']:>10.0f}{r['full_max']:>10.0f}{r['full_sum']:>10.0f}")
+        t = tiers[0]
+        for r, (per_row, n) in sized.items():
+            for f in fg_rows:
+                fgs = ceil(n / f)
+                err(f"{r}-row cut, F{f}: {n} groups, sidecar {per_row:.0f} B/row = {per_row * n / MIB:.0f} MiB, {fgs} footer groups of {per_row * f / 1024:.0f} KiB, "
+                    f"sidecar footer {t.sidecar_footer / len(t.fg_rows) * fgs / MIB:.1f} MiB of thrift")
+        real = store.size(t.key)
+        tail = struct.unpack("<i", store.read_range(t.key, real - 8, real - 4))[0]
+        data_end = min(c[3] for c in t.chunks(0)[1].values() if c[3])
+        err(f"today: file {real / MIB:.0f} MiB = data {data_end / MIB:.0f} + page indexes {(real - 8 - tail - data_end) / MIB:.0f} + footer {tail / MIB:.0f} ({tail / len(t.rows):.0f} B/group); "
+            f"sidecar {t.sidecar_path.stat().st_size / MIB:.1f} MiB, {len(t.fg_rows)} footer groups")
