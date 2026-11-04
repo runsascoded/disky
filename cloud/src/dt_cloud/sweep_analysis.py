@@ -15,6 +15,10 @@ from .sweep import load_plan
 from .sweep_source import review_source
 
 
+# `execute-manifest` / `execute-reviewed` runs (`sweep_reviewed.py`): no top-level manifest, no whole-dir drift skip.
+GENERATION_CONTRACTS = ('manifest-delete-generations', 'reviewed-delete-generations')
+
+
 def digest(path: Path) -> str:
     with path.open('rb') as stream:
         return file_digest(stream, 'sha256').hexdigest()
@@ -68,8 +72,11 @@ def analyze_preserved(
     inputs.mkdir(parents=True, exist_ok=True)
     for name in ('plan.json', 'plan-summary.json', 'deleted-summary.json'):
         run.get(name, inputs / name)
-    plan = load_plan(inputs / 'plan.json')
     summary = json.loads((inputs / 'plan-summary.json').read_text())
+    contract = summary.get('contract')
+    if contract in GENERATION_CONTRACTS:
+        raise ValueError(f'{run_root}: a {contract} run deletes named generations with no drift skip, so it preserved no objects to reconstruct; analyze-preserved covers listing runs only')
+    plan = load_plan(inputs / 'plan.json')
     result = json.loads((inputs / 'deleted-summary.json').read_text())
     if result['mode'] != 'real' or result['delete_failed']:
         raise ValueError('backfill requires a completed real run with zero failed deletions')

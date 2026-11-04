@@ -42,7 +42,7 @@ def subtract_settled(
         pinned = pin_path(fs, f"{path}/deleted-summary.json")
         with fs.open(pinned) as fh:
             summary = json.load(fh)
-        if summary.get("for_real") is not True or summary.get("plan") != run or summary.get("reviewed_source") != source:
+        if summary.get("for_real") is not True or summary.get("plan") != run or source not in (summary.get("reviewed_source"), summary.get("manifest_source")):
             raise ValueError("resume requires a drained real run against this exact reviewed source")
         # An earlier resume chain must be supplied in full, not silently lost.
         if any(parent not in runs for parent in summary.get("resume_runs", [])):
@@ -114,7 +114,8 @@ def subtract_settled(
                     raise ValueError(f"{bucket}: remainder totals failed reconciliation")
                 before["decisions"] = {"delete": count}
                 before["delete_bytes"] = size
-            if before["decisions"].get("delete", 0):
+            # A bucket's skips are this run's to report too, whether or not it has deletes left.
+            if before["decisions"].get("delete", 0) or "skipped_no_generation" in before:
                 remaining[bucket] = parts
             provenance["buckets"][bucket] = {"parts": pins, "excluded_objects": excluded, "excluded_bytes": excluded_bytes}
             err(f"resume: {bucket}: {excluded:,} settled identities excluded; {before['decisions'].get('delete', 0):,} remain", flush=True)

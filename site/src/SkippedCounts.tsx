@@ -1,4 +1,5 @@
 import type { RunAnalytics, RunBand } from './plans'
+import { NOT_OBSERVABLE } from './runs'
 import { fmtN } from './types'
 import { Tooltip } from './Tooltip'
 
@@ -14,9 +15,9 @@ export function skippedCounts(band: RunBand, analysis?: RunAnalytics['analysis']
   }
 }
 
-export function SkippedCounts({ band, analysis }: { band: RunBand; analysis?: RunAnalytics['analysis'] }) {
+export function SkippedCounts({ band, analysis, attempted }: { band: RunBand; analysis?: RunAnalytics['analysis']; attempted?: boolean }) {
   const counts = skippedCounts(band, analysis)
-  if (!band.drift_new_objects && !band.overwritten) return <span className="dim">0</span>
+  if (!band.drift_new_objects && !band.overwritten) return attempted ? <Tooltip content={NOT_OBSERVABLE}><span className="dim">—</span></Tooltip> : <span className="dim">0</span>
   const explanation = counts.reconstructed
     ? 'Added/changed split reconstructed at the manifest scan. The execution recorded the combined skipped count, without key names.'
     : 'Changed: reviewed keys replaced before deletion. Unclassified: outside the reviewed manifest; an added/changed split was not recorded.'

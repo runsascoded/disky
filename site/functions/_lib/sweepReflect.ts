@@ -9,6 +9,11 @@
 //   - a job Batch reports terminal while its row is still open (the executor
 //     died before recording the end) is closed, with the empty digest: it
 //     reviewed nothing, so it never opens the real gate.
+//   - a job that ended unsuccessfully with no row at all (it failed or was
+//     refused before the executor recorded its start: a real run deletes nothing
+//     until that row is in, and refuses if it can't be written) gets a closed
+//     row, with the empty digest, so the failure reaches the runs table and the
+//     plan's Slack thread like any other.
 //
 // Only jobs dispatched through the seam (with `PLAN_DIGEST`) are touched.
 import type { D1Database } from '@cloudflare/workers-types'
@@ -16,6 +21,11 @@ import type { BatchConfig } from './batchConfig.js'
 import { batchJobsUrl, batchRegions } from './gcp.js'
 import type { FinishedRun } from './plans.js'
 import { runDir } from './sweepDispatch.js'
+import type { FailureReader } from './sweepFailure.js'
+import type { OutcomeReader } from './sweepOutcome.js'
+
+/** A job older than this with no row stays as it is: the first read after this shipped mustn't announce old failures. */
+const NO_ROW_WINDOW_SECS = 2 * 86400
 
 export const TERMINAL = new Set(['SUCCEEDED', 'FAILED', 'CANCELLED'])
 
@@ -50,9 +60,24 @@ export async function listSweepJobs(cfg: BatchConfig, token: string): Promise<Sw
 }
 
 /** Reflect the seam-dispatched sweep jobs into D1 (see the header); returns
- * the runs this call finished, for the caller to announce. Idempotent. */
-export async function reflectSweepRuns(cfg: Pick<BatchConfig, 'dataBucket'>, db: D1Database, jobs: readonly SweepBatchJob[], now: number = Math.floor(Date.now() / 1000)): Promise<FinishedRun[]> {
+ * the runs this call finished, for the caller to announce. Idempotent. `reason`
+ * reads why a job failed, `outcome` what a finished job's totals don't say; `runDirColumn` is `deletion_runs`'s run-dir column, `plan`
+ * in the gcs schema this executor runs on (`manifest` in `cloud`'s, for its tests). */
+export async function reflectSweepRuns(
+  cfg: Pick<BatchConfig, 'dataBucket'>,
+  db: D1Database,
+  jobs: readonly SweepBatchJob[],
+  now: number = Math.floor(Date.now() / 1000),
+  reason?: FailureReader,
+  runDirColumn: string = 'plan',
+  outcome?: OutcomeReader,
+): Promise<FinishedRun[]> {
   const done: FinishedRun[] = []
+  const finish = async (run_id: string, job: SweepBatchJob, ok: boolean) => {
+    const why = ok ? null : await reason?.(jobIdOf(job)) ?? null
+    const result = ok ? await outcome?.(jobIdOf(job)) ?? null : null
+    done.push({ run_id, ok, ...(why ? { reason: why } : {}), ...(result ? { outcome: result } : {}) })
+  }
   for (const j of jobs) {
     if (!isSweepJob(j)) continue
     if (!TERMINAL.has(j.status?.state ?? '')) continue
@@ -62,12 +87,26 @@ export async function reflectSweepRuns(cfg: Pick<BatchConfig, 'dataBucket'>, db:
     const finished = await db.prepare(
       'UPDATE deletion_runs SET plan_digest = ? WHERE log_dir = ? AND finished_ts IS NOT NULL AND plan_digest IS NULL RETURNING run_id',
     ).bind(j.status?.state === 'SUCCEEDED' ? digest : '', logDir).all<{ run_id: string }>()
-    for (const { run_id } of finished.results) done.push({ run_id, ok: j.status?.state === 'SUCCEEDED' })
-    if (!TERMINAL.has(j.status?.state ?? '')) continue
+    for (const { run_id } of finished.results) await finish(run_id, j, j.status?.state === 'SUCCEEDED')
     const died = await db.prepare(
       "UPDATE deletion_runs SET finished_ts = ?, plan_digest = '' WHERE log_dir = ? AND finished_ts IS NULL RETURNING run_id",
     ).bind(now, logDir).all<{ run_id: string }>()
-    for (const { run_id } of died.results) done.push({ run_id, ok: false })
+    for (const { run_id } of died.results) await finish(run_id, j, false)
+    const vars = j.taskGroups?.[0]?.taskSpec?.environment?.variables ?? {}
+    const created = Date.parse(j.createTime) / 1000
+    if (j.status?.state === 'SUCCEEDED' || !vars.PLAN_ID || !vars.SWEEP_DATE || now - created > NO_ROW_WINDOW_SECS) continue
+    // `plans` first: D1 enforces the foreign key, and a plan since removed has no thread to tell.
+    const orphan = await db.prepare(`
+      INSERT INTO deletion_runs (run_id, ${runDirColumn}, scan, head, exec_head, actor, mode, started_ts, finished_ts, plan_digest, log_dir, plan_id)
+      SELECT ?, ?, ?, 0, 0, ?, ?, ?, ?, '', ?, ?
+      WHERE EXISTS (SELECT 1 FROM plans WHERE id = ?) AND NOT EXISTS (SELECT 1 FROM deletion_runs WHERE log_dir = ?)
+      ON CONFLICT (run_id) DO NOTHING
+      RETURNING run_id
+    `).bind(
+      jobIdOf(j), logDir, vars.SWEEP_DATE, vars.USER ?? 'unknown', jobIdOf(j).startsWith('gcs-sweep-real-') ? 'real' : 'dry', Math.floor(created), now, logDir,
+      Number(vars.PLAN_ID), Number(vars.PLAN_ID), logDir,
+    ).all<{ run_id: string }>()
+    for (const { run_id } of orphan.results) await finish(run_id, j, false)
   }
   return done
 }

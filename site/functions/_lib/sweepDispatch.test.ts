@@ -63,13 +63,24 @@ describe('sweepScript — the Batch container\'s bash', () => {
       `dt-cloud sweep execute-reviewed -e xml -j 64 -B 1 -c adaptive -r 8000 -b ${E1} -p "gs://my-data/plan.json" -o "gs://my-data/sweep/runs/${jobId}" -w /work/reviewed --for-real "${reviewed}"`,
     ])
   })
-  it('real without a dry run of exactly its items: lists afresh as a dry run does, then deletes from its own manifest', () => {
-    expect(sweepScript({ cfg: CFG, mode: 'real', jobId, buckets: [E1], plan: planJsonPath(CFG, jobId), store: 'gs://my-data' })).toBe([
+  it('real without a dry run of exactly its items: its own manifest, then the reviewed run\'s executor over that manifest\'s generations, with no relist', () => {
+    const run = `gs://my-data/sweep/runs/${jobId}`
+    expect(sweepScript({ cfg: CFG, mode: 'real', jobId, buckets: [W4, E1], plan: planJsonPath(CFG, jobId), store: 'gs://my-data' })).toBe([
       'set -euo pipefail',
       trap,
-      `dt-cloud sweep manifest -d "$SWEEP_DATE" --plan "gs://my-data/sweep/runs/${jobId}/plan.json" -b ${E1} -i "gs://my-data" -o "gs://my-data/sweep/runs/${jobId}"`,
-      `dt-cloud sweep execute -b ${E1} --for-real "gs://my-data/sweep/runs/${jobId}"`,
+      `dt-cloud sweep manifest -d "$SWEEP_DATE" --plan "${run}/plan.json" -b ${W4} -b ${E1} -i "gs://my-data" -o "${run}/source"`,
+      `dt-cloud sweep execute-manifest -e xml -j 64 -B 2 -c guided -r 8000 -b ${W4} -b ${E1} -p "${run}/plan.json" -o "${run}" -w /work/manifest --for-real "${run}/source"`,
     ].join('\n'))
+  })
+  it('real without a dry run, explicit adaptive pacing, an R2 hold store: only the manifest reads through `r2_profile`', () => {
+    const run = `gs://my-data/sweep/runs/${jobId}`
+    const R2_MAIN = `python -c 'from os import environ; from dt_cloud.scan_steps import r2_profile; env = dict(environ); r2_profile(env); environ.update(env); from dt_cloud.cli import main; main()'`
+    expect(sweepScript({ cfg: CFG, mode: 'real', jobId, buckets: [E1], plan: planJsonPath(CFG, jobId), store: 'r2://my-index', pacing: 'adaptive' }).split('\n')).toEqual([
+      'set -euo pipefail',
+      trap,
+      `${R2_MAIN} sweep manifest -d "$SWEEP_DATE" --plan "${run}/plan.json" -b ${E1} -i "r2://my-index" -o "${run}/source"`,
+      `dt-cloud sweep execute-manifest -e xml -j 64 -B 1 -c adaptive -r 8000 -b ${E1} -p "${run}/plan.json" -o "${run}" -w /work/manifest --for-real "${run}/source"`,
+    ])
   })
   it('undo: `sweep undo` of the job\'s TARGET_RUN, behind the same exit trap', () => {
     expect(undoScript()).toBe([

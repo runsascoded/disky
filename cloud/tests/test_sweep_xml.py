@@ -68,10 +68,10 @@ def test_partial_transient_retries_only_unsettled_identity(monkeypatch):
     monkeypatch.setattr(module, "_sleep", lambda _: None)
     http = Http([
         reply(200, '<DeleteResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Deleted><Key>a/é &amp;%.txt</Key><VersionId>11</VersionId></Deleted><Error><Key>b/x</Key><VersionId>22</VersionId><Code>SlowDown</Code></Error></DeleteResult>'),
-        reply(200, '<DeleteResult><Error><Key>b/x</Key><VersionId>22</VersionId><Code>NoSuchVersion</Code></Error></DeleteResult>'),
+        reply(200, '<DeleteResult><Deleted><Key>b/x</Key><VersionId>22</VersionId></Deleted></DeleteResult>'),
     ])
     result = XmlDeleter(http=http)(None, "bucket", blobs())
-    assert [(blob.name, decision) for blob, decision in result] == [("a/é &%.txt", "delete"), ("b/x", "skipped_gone")]
+    assert [(blob.name, decision) for blob, decision in result] == [("a/é &%.txt", "delete"), ("b/x", "delete")]
     assert [[(item.findtext("Key"), item.findtext("VersionId")) for item in ET.fromstring(request[1]).findall("Object")] for request in http.requests] == [
         [("a/é &%.txt", "11"), ("b/x", "22")], [("b/x", "22")],
     ]

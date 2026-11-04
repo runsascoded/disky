@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import type { RunOutcome } from '../../src/runs.js'
 import { closedParent, countedItems, PLAN_SENDER, queueWasEmpty, queuedOf, fmtBytes, personSender, renderParent, runEvent, runUrl, sendParent, shortPath, sizeOf, stageReply, stagedCardUrl, topFolders, type RunRow } from './stagedSlack.js'
 import { sqliteD1 } from './testD1.js'
 
@@ -133,9 +134,36 @@ describe('run events', () => {
       .toBe(`:test_tube: Dry-run dispatched by Ann Example via www on scan 2026-09-28T1201 (${link})`)
     expect(runEvent(run({ skipped_gone: 2 }), 'finished', { siteUrl: site })).toBe(`:test_tube: Dry-run ${link} finished: would delete *2.0 TiB* / 1,234 objects (gone since scan: 2, overwritten: 0).`)
     expect(runEvent(run({ mode: 'real', run_id: 'cw-sweep-real-1', undo_deadline: 1_790_604_800 }), 'finished')).toBe(':white_check_mark: Real deletion `cw-sweep-real-1` finished: deleted *2.0 TiB* / 1,234 objects; undoable until 2026-09-28 14:13Z (www).')
+    expect(runEvent(run({ plan_digest: '' }), 'failed', { reason: 'b1: `x` <y> & z' })).toBe(":x: Dry-run `cw-sweep-dry-1` ended without a result: `b1: 'x' &lt;y&gt; &amp; z`")
     expect(runEvent(run({ plan_digest: '' }), 'failed', { siteUrl: site })).toBe(`:x: Dry-run ${link} ended without a result (its Batch job stopped before the run summary); check its logs in www.`)
     expect(runUrl(site, '2026-09-28-p1/20260928T120000Z')).toBe('https://cw-s3.oa.dev/staged?run=2026-09-28-p1%2F20260928T120000Z')
     expect([fmtBytes(0), fmtBytes(1536), fmtBytes(3 * 1024 ** 3)]).toEqual(['0 B', '1.5 KiB', '3.0 GiB'])
+  })
+
+  describe('a finished run, by what its `plan-summary.json` says', () => {
+    const real = run({ mode: 'real', run_id: 'r1', undo_deadline: 1_790_604_800 })
+    const finished = (outcome?: RunOutcome, r: RunRow = real) => runEvent(r, 'finished', { outcome })
+    const SKIPPED = { bytes: 3 * 1024 ** 3, objects: 5678 }
+    it('a generation run attempted; no outcome (an older run, cw\'s, a failed read) keeps "deleted"', () => {
+      expect(finished({ attempted: true, skipped: null, notSwept: [] })).toBe(':white_check_mark: Real deletion `r1` finished: attempted *2.0 TiB* / 1,234 objects; undoable until 2026-09-28 14:13Z (www).')
+      expect(finished(undefined)).toBe(':white_check_mark: Real deletion `r1` finished: deleted *2.0 TiB* / 1,234 objects; undoable until 2026-09-28 14:13Z (www).')
+      expect(finished({ attempted: false, skipped: null, notSwept: [], unread: true })).toBe(':warning: Real deletion `r1` finished, totals unread: recorded *2.0 TiB* / 1,234 objects; undoable until 2026-09-28 14:13Z (www).')
+    })
+    it('skips are said, and it no longer reads as a clean success', () => {
+      expect(finished({ attempted: true, skipped: SKIPPED, notSwept: [] })).toBe(':warning: Real deletion `r1` finished: attempted *2.0 TiB* / 1,234 objects; undoable until 2026-09-28 14:13Z (www). Skipped, no generation: *3.0 GiB* / 5,678 objects left in place.')
+    })
+    it('names the buckets not swept', () => {
+      expect(finished({ attempted: true, skipped: SKIPPED, notSwept: ['b1', 'b2'] })).toBe(':warning: Real deletion `r1` finished: attempted *2.0 TiB* / 1,234 objects; undoable until 2026-09-28 14:13Z (www). Skipped, no generation: *3.0 GiB* / 5,678 objects left in place. *Not swept:* `b1`, `b2` (no object in them had a generation; their prefixes stay staged).')
+    })
+    it('a run with no undo deadline ends its totals with the same stop', () => {
+      expect(finished({ attempted: true, skipped: SKIPPED, notSwept: [] }, { ...real, undo_deadline: null })).toBe(':warning: Real deletion `r1` finished: attempted *2.0 TiB* / 1,234 objects. Skipped, no generation: *3.0 GiB* / 5,678 objects left in place.')
+    })
+    it('a dry run keeps its wording, with its skips', () => {
+      expect(finished({ attempted: true, skipped: SKIPPED, notSwept: [] }, run({}))).toBe(':test_tube: Dry-run `cw-sweep-dry-1` finished: would delete *2.0 TiB* / 1,234 objects (gone since scan: 0, overwritten: 0). Skipped, no generation: *3.0 GiB* / 5,678 objects left in place.')
+    })
+    it('a failed run says nothing of an outcome', () => {
+      expect(runEvent({ ...real, plan_digest: '' }, 'failed', { outcome: { attempted: true, skipped: SKIPPED, notSwept: ['b1'] } })).toBe(':x: *Real deletion* `r1` ended without a result (its Batch job stopped before the run summary); check its logs in www.')
+    })
   })
 })
 

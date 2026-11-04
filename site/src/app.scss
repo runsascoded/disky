@@ -2900,6 +2900,7 @@ kbd { font: inherit; font-size: 11px; padding: 0 4px; border: 1px solid var(--li
     h3 { margin: 0 0 4px; }
   }
   .dispatch-note { margin: 0; font-size: 12.5px; }
+  .dispatch-path { margin: 0; font-size: 13px; color: var(--danger); }
   .dispatch-btns { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
   .dispatch button, .staged-actions button, table.runs button {
     font: inherit; font-size: 13px; padding: 3px 12px; cursor: pointer;
@@ -2937,6 +2938,7 @@ kbd { font: inherit; font-size: 11px; padding: 0 4px; border: 1px solid var(--li
     td.nb, td.num { white-space: nowrap; }
     .tag.real { margin-left: 0; color: #d6b65a; border-color: #d6b65a; font-weight: 650; }
     .tag.dry { margin-left: 0; color: var(--ink-3); border-color: var(--line); }
+    .tag.not-swept { color: var(--danger); border-color: var(--danger); font-weight: 650; }
     tr.cancelled > td { background: color-mix(in srgb, var(--ink-3) 6%, transparent); }
     .run-sort { color: inherit; font: inherit; font-weight: inherit; padding: 0; border: 0; background: none; cursor: pointer; }
     .run-outcome .prediction-label { display: block; color: var(--ink-2); font-size: .9em; font-weight: 600; }
