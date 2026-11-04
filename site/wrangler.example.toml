@@ -114,7 +114,7 @@ ROOT_LABEL = "my buckets"                   # the store root's crumb label
 # BUCKET_REGIONS = '{"my-bucket": "us-east1"}'  # a one-region bucket cut runs its job there, beside the data; unset = BATCH_REGION
 # DATA_BUCKET = "my-data"                      # the bucket a run's plan.json, manifest and logs land in (dispatch requires it)
 # SWEEP_IMAGE = "<region>-docker.pkg.dev/<project>/<repo>/<image>:<tag>"  # the executor's image (dispatch requires it)
-# SWEEP_REVIEW_STORE = "r2://<index-bucket>"  # historical review inputs after per-scan retirement
+# SWEEP_REVIEW_STORE = "r2://<index-bucket>"  # historical review inputs after per-scan retirement (`sweep`: the `as_of` hold store; unset = gs://$DATA_BUCKET)
 # SWEEP_REVIEW_SECRETS = '{"R2_ENDPOINT":"<endpoint-secret>","R2_ACCESS_KEY_ID":"<key-secret>","R2_SECRET_ACCESS_KEY":"<secret-secret>"}'
 # SWEEP_PACING = "guided"                    # per-bucket feedback; adaptive is a faster probe, enable after a controlled benchmark
 # CF_ACCOUNT_ID = "<cf-account-id>"            # `sweep`: the Cloudflare account its runs are recorded to (D1)

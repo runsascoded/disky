@@ -1,6 +1,8 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { planBuckets } from './plans'
-import { bucketCut, jobStampOf, planJsonObject, planJsonPath, RUN_ID_RE, runDir, sweepJobSpec, sweepScript, undoScript } from './sweepDispatch'
+import type { ExecEnv } from './dispatch'
+import { bucketCut, jobStampOf, planJsonObject, planJsonPath, RUN_ID_RE, runDir, sweep, sweepJobSpec, sweepScript, undoScript } from './sweepDispatch'
+import { sqliteD1 } from './testD1'
 
 const GCS = ['gcs-a', 'gcs-b', 'gcs-c']
 const E1 = 'gcs-b'
@@ -39,16 +41,16 @@ describe('sweepScript — the Batch container\'s bash', () => {
   // on exit, ping the site so the finished run is reflected (and posted to Slack) at once
   const trap = `trap 'curl -fsS -m 60 -o /dev/null -H "Authorization: Bearer $SITE_TOKEN" "$SITE_URL/api/sweep/jobs" || true' EXIT`
   it('dry, one bucket: `manifest --plan <run>/plan.json` then execute', () => {
-    expect(sweepScript({ cfg: CFG, mode: 'dry', jobId, buckets: [E1], plan: planJsonPath(CFG, jobId) })).toBe([
+    expect(sweepScript({ cfg: CFG, mode: 'dry', jobId, buckets: [E1], plan: planJsonPath(CFG, jobId), store: 'gs://my-data' })).toBe([
       'set -euo pipefail',
       trap,
-      `dt-cloud sweep manifest -d "$SWEEP_DATE" --plan "gs://my-data/sweep/runs/${jobId}/plan.json" -b ${E1} -o "gs://my-data/sweep/runs/${jobId}"`,
+      `dt-cloud sweep manifest -d "$SWEEP_DATE" --plan "gs://my-data/sweep/runs/${jobId}/plan.json" -b ${E1} -i "gs://my-data" -o "gs://my-data/sweep/runs/${jobId}"`,
       `dt-cloud sweep execute -b ${E1} "gs://my-data/sweep/runs/${jobId}"`,
     ].join('\n'))
   })
   it('real, the cut is the plan\'s buckets', () => {
     const reviewed = 'gs://my-data/sweep/runs/gcs-sweep-dry-20261004-020914z'
-    expect(sweepScript({ cfg: CFG, mode: 'real', jobId, buckets: [W4, E1], plan: planJsonPath(CFG, jobId), reviewed })).toBe([
+    expect(sweepScript({ cfg: CFG, mode: 'real', jobId, buckets: [W4, E1], plan: planJsonPath(CFG, jobId), store: 'gs://my-data', reviewed })).toBe([
       'set -euo pipefail',
       trap,
       `dt-cloud sweep execute-reviewed -e xml -j 64 -B 2 -c guided -r 8000 -b ${W4} -b ${E1} -p "gs://my-data/sweep/runs/${jobId}/plan.json" -o "gs://my-data/sweep/runs/${jobId}" -w /work/reviewed --for-real "${reviewed}"`,
@@ -56,16 +58,16 @@ describe('sweepScript — the Batch container\'s bash', () => {
   })
   it('uses one controller per selected bucket and supports an explicit adaptive deployment', () => {
     const reviewed = 'gs://my-data/sweep/runs/gcs-sweep-dry-20261004-020914z'
-    expect(sweepScript({ cfg: CFG, mode: 'real', jobId, buckets: [E1], plan: 'gs://my-data/plan.json', reviewed, pacing: 'adaptive' }).split('\n')).toEqual([
+    expect(sweepScript({ cfg: CFG, mode: 'real', jobId, buckets: [E1], plan: 'gs://my-data/plan.json', store: 'gs://my-data', reviewed, pacing: 'adaptive' }).split('\n')).toEqual([
       'set -euo pipefail', trap,
       `dt-cloud sweep execute-reviewed -e xml -j 64 -B 1 -c adaptive -r 8000 -b ${E1} -p "gs://my-data/plan.json" -o "gs://my-data/sweep/runs/${jobId}" -w /work/reviewed --for-real "${reviewed}"`,
     ])
   })
   it('real without a dry run of exactly its items: lists afresh as a dry run does, then deletes from its own manifest', () => {
-    expect(sweepScript({ cfg: CFG, mode: 'real', jobId, buckets: [E1], plan: planJsonPath(CFG, jobId) })).toBe([
+    expect(sweepScript({ cfg: CFG, mode: 'real', jobId, buckets: [E1], plan: planJsonPath(CFG, jobId), store: 'gs://my-data' })).toBe([
       'set -euo pipefail',
       trap,
-      `dt-cloud sweep manifest -d "$SWEEP_DATE" --plan "gs://my-data/sweep/runs/${jobId}/plan.json" -b ${E1} -o "gs://my-data/sweep/runs/${jobId}"`,
+      `dt-cloud sweep manifest -d "$SWEEP_DATE" --plan "gs://my-data/sweep/runs/${jobId}/plan.json" -b ${E1} -i "gs://my-data" -o "gs://my-data/sweep/runs/${jobId}"`,
       `dt-cloud sweep execute -b ${E1} --for-real "gs://my-data/sweep/runs/${jobId}"`,
     ].join('\n'))
   })
@@ -126,5 +128,86 @@ describe('sweepJobSpec — the Batch spec every gcs executor job shares (a run, 
     expect(jobStampOf(new Date('2026-10-03T20:44:48.123Z'))).toBe('20261003-204448')
     expect(['2026-09-28-p1/20260928T120000Z', '2026-09-28-p12/20260928T120000Z', 'gcs-sweep-real-20260928-120000z', '2026-09-28-p1', '2026-09-28-p1/x'].map(r => RUN_ID_RE.test(r)))
       .toEqual([true, true, false, false, false])
+  })
+})
+
+describe('a dispatched run\'s hold store (`sweep manifest -i`)', () => {
+  const B1 = 'my-bucket'
+  const R2_MAIN = `python -c 'from os import environ; from dt_cloud.scan_steps import r2_profile; env = dict(environ); r2_profile(env); environ.update(env); from dt_cloud.cli import main; main()'`
+  const SHARED_VARS = {
+    USER: 'ann', CLOUDFLARE_ACCOUNT_ID: 'acct', DATA_BUCKET: 'my-data', D1_DB_ID: 'd1-id', D1_DB_NAME: 'my-db', SITE_URL: 'https://site.test',
+  }
+  const SHARED_SECRETS = {
+    SITE_TOKEN: 'projects/my-project/secrets/gcs-sheet-sync-token/versions/latest',
+    CLOUDFLARE_API_TOKEN: 'projects/my-project/secrets/cf-pages-token/versions/latest',
+  }
+  const saKey = async (): Promise<string> => {
+    const { privateKey } = await crypto.subtle.generateKey(
+      { name: 'RSASSA-PKCS1-v1_5', modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: 'SHA-256' }, true, ['sign', 'verify'],
+    ) as CryptoKeyPair
+    const der = new Uint8Array(await crypto.subtle.exportKey('pkcs8', privateKey) as ArrayBuffer)
+    let s = ''
+    for (const b of der) s += String.fromCharCode(b)
+    return JSON.stringify({ client_email: 'dispatch@my-project.iam.gserviceaccount.com', private_key: `-----BEGIN PRIVATE KEY-----\n${btoa(s)}\n-----END PRIVATE KEY-----\n` })
+  }
+  afterEach(() => { vi.unstubAllGlobals() })
+
+  /** The job `sweep.prepare` + `launch` submit under `extra`: its script's manifest line, its env. */
+  const dispatched = async (extra: Partial<ExecEnv>) => {
+    const { db } = await sqliteD1()
+    await db.prepare("INSERT INTO plans (id, name, state, created_by, created_ts) VALUES (1, 'Staged', 'open', 'a', 1)").run()
+    await db.prepare("INSERT INTO plan_items (plan_id, prefix, added_by, added_ts) VALUES (1, ?, 'a', 1)").bind(`gs://${B1}/a/`).run()
+    const submitted: { commands: string[]; environment: { variables: Record<string, string>; secretVariables: Record<string, string> } }[] = []
+    vi.stubGlobal('fetch', async (url: string, init?: RequestInit) => {
+      if (url.includes('oauth2')) return new Response(JSON.stringify({ access_token: 't', expires_in: 3600 }))
+      if (url.includes('batch.googleapis.com')) {
+        const { taskSpec } = JSON.parse(String(init?.body)).taskGroups[0]
+        submitted.push({ commands: taskSpec.runnables[0].container.commands, environment: taskSpec.environment })
+      }
+      return new Response('{}')
+    })
+    const env = {
+      DB: db, GCP_SA_KEY: await saKey(), JOB_SA: 'job@my-project.iam.gserviceaccount.com', GCP_PROJECT: 'my-project', DATA_BUCKET: 'my-data', SWEEP_IMAGE: 'img:1',
+      CF_ACCOUNT_ID: 'acct', D1_DB_ID: 'd1-id', D1_DB_NAME: 'my-db', STORE_SCHEME: 'gs', STORE_BUCKETS: B1, ...extra,
+    } as ExecEnv
+    const prepared = await sweep.prepare(env, db, { planId: 1, mode: 'dry', actor: 'ann', siteUrl: 'https://site.test' })
+    if (!('launch' in prepared)) throw new Error(JSON.stringify(prepared))
+    const launched = await prepared.launch('2026-11-03T1622', 'digest', undefined)
+    if (!('job_id' in launched)) throw new Error(JSON.stringify(launched))
+    const { commands, environment } = submitted[0]
+    const run = `gs://my-data/sweep/runs/${launched.job_id}`
+    return {
+      manifest: commands[1].split('\n').filter(l => l.includes('sweep manifest')).map(l => l.replaceAll(run, '<run>')),
+      variables: environment.variables,
+      secretVariables: environment.secretVariables,
+    }
+  }
+
+  it('no review store: the data bucket, no credentials', async () => {
+    expect(await dispatched({})).toEqual({
+      manifest: [`dt-cloud sweep manifest -d "$SWEEP_DATE" --plan "<run>/plan.json" -b ${B1} -i "gs://my-data" -o "<run>"`],
+      variables: { SWEEP_DATE: '2026-11-03T1622', PLAN_ID: '1', PLAN_DIGEST: 'digest', ...SHARED_VARS },
+      secretVariables: SHARED_SECRETS,
+    })
+  })
+
+  it('an R2 review store: read through `r2_profile`, with its bucket and credential references', async () => {
+    expect(await dispatched({
+      SWEEP_REVIEW_STORE: 'r2://my-index',
+      SWEEP_REVIEW_SECRETS: JSON.stringify({ R2_ENDPOINT: 'endpoint', R2_ACCESS_KEY_ID: 'reader-key', R2_SECRET_ACCESS_KEY: 'reader-secret' }),
+    })).toEqual({
+      manifest: [`${R2_MAIN} sweep manifest -d "$SWEEP_DATE" --plan "<run>/plan.json" -b ${B1} -i "r2://my-index" -o "<run>"`],
+      variables: { SWEEP_DATE: '2026-11-03T1622', PLAN_ID: '1', PLAN_DIGEST: 'digest', SWEEP_INTERVAL_STORE: 'r2://my-index', R2_BUCKET: 'my-index', ...SHARED_VARS },
+      secretVariables: {
+        R2_ENDPOINT: 'projects/my-project/secrets/endpoint/versions/latest',
+        R2_ACCESS_KEY_ID: 'projects/my-project/secrets/reader-key/versions/latest',
+        R2_SECRET_ACCESS_KEY: 'projects/my-project/secrets/reader-secret/versions/latest',
+        ...SHARED_SECRETS,
+      },
+    })
+  })
+
+  it('an R2 review store without its credential references is refused', async () => {
+    await expect(dispatched({ SWEEP_REVIEW_STORE: 'r2://my-index' })).rejects.toThrow('R2 sweep review requires endpoint and credential secret bindings')
   })
 })
