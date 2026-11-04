@@ -43,6 +43,8 @@ quota_marks: runway
 # circled by runway as the replies) under the headline + the plot as % of each pool's quota
 params: qr,pp
 primary: marin-us-east-02a
+# a reply's headline (the sender name + arrow): the primary's size, or every bucket's when true
+total_headline: false
 # quotas from CoreWeave's `cwobject_quota_info` metric, which is per ZONE: 02a =
 # exactly 910 TiB ("1 PB"); US-EAST-08A = 500 TiB (100 until 2026-10-16) shared by
 # hero-checkpoints, rhoarnet-us-east-08a and marin-us-east-08a (`zone: 08a`, one
