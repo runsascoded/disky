@@ -30,6 +30,8 @@ import { batchJobsUrl, batchRegionFor, gcpToken } from './gcp.js'
 import { bucketOf, digestLines, NO_SHAPE, type PlanBucketsSnapshot, prefixShape, snapshotPlanBuckets } from './plans.js'
 import { reviewConfig } from './planDispatch.js'
 import { failureReader } from './sweepFailure.js'
+import { outcomeReader } from './sweepOutcome.js'
+import { totalsReader } from './sweepTotals.js'
 import { listSweepJobs, reflectSweepRuns } from './sweepReflect.js'
 import { DEFAULT_SWEEP_MACHINE, SWEEP_MACHINES, type SweepMachine } from './sweepMachines.js'
 import { RUN_ID_RE, SCAN_ID_RE } from '../../src/scanSlug.js'
@@ -263,6 +265,6 @@ export const sweep: Executor = {
     if (!env.GCP_SA_KEY) return []
     const cfg = batchConfig(env, ['GCP_PROJECT', 'DATA_BUCKET'])
     if ('missing' in cfg) return []
-    return reflectSweepRuns(cfg, db, await listSweepJobs(cfg, await gcpToken(env.GCP_SA_KEY)), undefined, failureReader(env))
+    return reflectSweepRuns(cfg, db, await listSweepJobs(cfg, await gcpToken(env.GCP_SA_KEY)), undefined, failureReader(env), undefined, outcomeReader(env), totalsReader(env))
   },
 }

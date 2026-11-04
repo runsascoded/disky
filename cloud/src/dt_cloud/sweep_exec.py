@@ -842,7 +842,8 @@ def undo_run(
     globs_per_op: int = BULK_GLOBS_PER_OP,
 ) -> dict:
     """Restore what a real run deleted: every `decision == 'delete'` row of its
-    `deleted/<bucket>.parquet` logs (optionally only under `prefixes`,
+    `deleted/` logs (no final summary needed: a killed run's parts are enough,
+    `log_partial` in the summary; optionally only under `prefixes`,
     `gs://bucket/dir/` or bare `bucket/dir/`), via the GCS soft-delete
     restore of exactly the logged generation. `if_generation_match=0` makes it
     safe to re-run and safe against rewrites: a name that is live again is
@@ -905,19 +906,33 @@ def undo_run(
             f"(soft-delete retention elapsed) — nothing can be restored"
         )
     fs, ppath = fsspec.core.url_to_fs(log_dir)
-    with fs.open(f"{ppath}/deleted-summary.json") as fh:
-        dsum = json.load(fh)
-    if not dsum.get("for_real"):
-        raise SystemExit(f"{log_dir} is a dry run — it deleted nothing")
     with fs.open(f"{ppath}/plan-summary.json") as fh:
         plan = json.load(fh)
+    # A killed run, or one whose executor died before its summary, leaves none: its log may be missing parts.
+    log_partial = not fs.exists(f"{ppath}/deleted-summary.json")
+    if log_partial:
+        if plan.get("diagnostic"):
+            raise SystemExit(f"{log_dir} is a dry run — it deleted nothing")
+        if not fs.glob(f"{ppath}/deleted/**"):
+            raise SystemExit(f"{log_dir} has no deleted-summary.json and no deleted/ log: nothing names what it deleted")
+        err(
+            f"{log_dir}: no deleted-summary.json, so its log may be partial: this restores only the generations it names. One in a part "
+            "that never uploaded stays deleted (-B won't reach it): restore it by hand, or, while this scan is still the newest, undo a re-dispatch of the same items, whose log names it. After a newer scan no manifest names it, and by hand is the only way."
+        )
+        logged_buckets = list(plan["buckets"])
+    else:
+        with fs.open(f"{ppath}/deleted-summary.json") as fh:
+            dsum = json.load(fh)
+        if not dsum.get("for_real"):
+            raise SystemExit(f"{log_dir} is a dry run — it deleted nothing")
+        logged_buckets = list(dsum["buckets"])
     approved = tuple(plan.get("approved") or ())
     if client is None:
         from google.cloud import storage
         client = storage.Client()
     from google.api_core.exceptions import NotFound, PreconditionFailed
 
-    buckets = [b for b in dsum["buckets"] if not only_buckets or b in only_buckets]
+    buckets = [b for b in logged_buckets if not only_buckets or b in only_buckets]
     windows: dict[str, tuple[int, int]] = {}
     if bulk:
         for bucket in buckets:
@@ -952,7 +967,7 @@ def undo_run(
         ("name", pa.string()), ("size_bytes", pa.int64()), ("generation", pa.int64()),
         ("new_generation", pa.int64()), ("decision", pa.string()), ("error", pa.string()), ("dir", pa.string()),
     ])
-    summary: dict = {"log_dir": log_dir, "stamp": stamp, "dry_run": dry_run, "prefixes": list(prefixes), "bulk": bulk, "buckets": {}}
+    summary: dict = {"log_dir": log_dir, "stamp": stamp, "dry_run": dry_run, "prefixes": list(prefixes), "bulk": bulk, "buckets": {}, **({"log_partial": True} if log_partial else {})}
     for bucket in buckets:
         log = read_log(fs, ppath, "deleted", bucket)
         if log is None:
@@ -1146,7 +1161,8 @@ def record_undo(run_id: str, summary: dict, deleted_objects: int) -> str:
         sum(b["decisions"].get(k, 0) for k in ("restored", "bulk_restored", "already_live"))
         for b in summary["buckets"].values()
     )
-    state = "full" if deleted_objects and live >= deleted_objects else "partial"
+    # A partial log can't say everything is back, however many of its rows are.
+    state = "full" if deleted_objects and live >= deleted_objects and not summary.get("log_partial") else "partial"
     stmts = [f"UPDATE deletion_runs SET undo_state = {_q(state)} WHERE run_id = {_q(run_id)}"]
     for b in summary["buckets"].values():
         for prefix, c in b["bands"].items():

@@ -29,7 +29,7 @@ import { DEFAULT_STORE } from './stores'
 import { CAPS, type RunAction, useRunAnalytics, useRunDetail, useRunFiles } from './plans'
 import { ReviewPreservation } from './RunPreservation'
 import {
-  ATTEMPTED, attemptOnly, NOT_OBSERVABLE, UNDO_CAVEAT,
+  ATTEMPTED, attemptOnly, LOWER_BOUND, NOT_OBSERVABLE, totalsLowerBound, UNDO_CAVEAT, UNDO_LOG_ONLY,
   type Check, commonBucketPrefix, type DeletionRun, elapsed, elapsedDetails, type ExecJob, fmtDur, type LogSummaryFile, loggedOf, logSubdir,
   type PlanSummaryFile, plannedOf, progressEstimate, type ProgressFile, runControls, runFileHref, runFilesRel, runLabel, type RunView, sumProgress, type Tally,
   verifyRun, viewBuckets, viewLive, viewState, joinRuns,
@@ -83,6 +83,10 @@ export function RunsSection({ runs, jobs, configured, jobsError, admin, busy, ac
   const planned = new Map<string, { file: PlanSummaryFile; tally: Tally }>()
   planRels.forEach((rel, i) => { const f = planQs[i]?.data; if (f) planned.set(rel, { file: f, tally: plannedOf(f) }) })
   const planOf = (v: RunView) => { const d = dirOf(v); return d ? planned.get(`${d}plan-summary.json`) : undefined }
+  // A real run that ended unsuccessfully: does its run dir hold a final summary, or are its totals a lower bound?
+  const closedRels = views.flatMap(v => { const d = dirOf(v); return d && v.run?.mode === 'real' && v.run.finished_ts && v.run.plan_digest === '' ? [{ view: v, rel: `${d}deleted-summary.json` }] : [] })
+  const closedQs = useRunFiles<LogSummaryFile>(closedRels.map(c => c.rel), false)
+  const lowerBound = new Set(closedRels.flatMap(({ view }, i) => view.run && totalsLowerBound(view.run, closedQs[i]?.data) ? [view.key] : []))
   const progTargets = views.filter(viewLive).flatMap(v => {
     const d = dirOf(v)
     if (!d) return []
@@ -195,8 +199,8 @@ export function RunsSection({ runs, jobs, configured, jobsError, admin, busy, ac
                     <td className="num nb">{plan ? <>{fmtBytes(plan.bytes)} <span className="dim">· {fmtN(plan.objects)}</span></> : <span className="dim">—</span>}</td>
                     <td className="num nb">
                       {r?.finished_ts ? (
-                        <Tooltip content={mode === 'dry' ? 'Dry run only: no objects were deleted.' : attempted ? ATTEMPTED : 'Objects deleted by this real run.'}>
-                          <RunOutcome mode={mode}>{fmtBytes(r.deleted_bytes)} <span className="dim">· {fmtN(r.deleted_objects)}</span></RunOutcome>
+                        <Tooltip content={mode === 'dry' ? 'Dry run only: no objects were deleted.' : `${attempted ? ATTEMPTED : 'Objects deleted by this real run.'}${lowerBound.has(v.key) ? ` ${LOWER_BOUND}` : ''}`}>
+                          <RunOutcome mode={mode}>{lowerBound.has(v.key) && '≥ '}{fmtBytes(r.deleted_bytes)} <span className="dim">· {fmtN(r.deleted_objects)}</span></RunOutcome>
                         </Tooltip>
                       ) : live && p ? (
                         <Tooltip content={<>
@@ -258,7 +262,7 @@ export function RunsSection({ runs, jobs, configured, jobsError, admin, busy, ac
                         </Tooltip>
                       )}
                       {ctl.undo && r && (
-                        <Tooltip content={`Restore what this run deleted (a Batch job; until ${r.undo_deadline ? `${utc(r.undo_deadline)} UTC` : 'its window closes'}).${attempted ? ` ${UNDO_CAVEAT}` : ''}`}>
+                        <Tooltip content={`Restore what this run deleted (a Batch job; until ${r.undo_deadline ? `${utc(r.undo_deadline)} UTC` : 'its window closes'}).${attempted ? ` ${UNDO_CAVEAT}` : ''}${lowerBound.has(v.key) ? ` ${UNDO_LOG_ONLY}` : ''}`}>
                           <button type="button" disabled={busy} onClick={() => act({ action: 'undo', run_id: r.run_id })}>undo</button>
                         </Tooltip>
                       )}
@@ -309,6 +313,7 @@ export function RunDetail({ run, live, progress, dir, planned, fmtBytes, now }: 
   const logRel = dir && run.finished_ts ? [`${dir}${logSubdir(run.mode)}-summary.json`] : []
   const [logQ] = useRunFiles<LogSummaryFile>(logRel, false)
   const log = logQ?.data ?? null
+  const lower = totalsLowerBound(run, logQ?.data)
   const logged = log ? loggedOf(log) : null
   const plan = planned ? plannedOf(planned) : null
   const attempted = attemptOnly(planned)
@@ -325,7 +330,7 @@ export function RunDetail({ run, live, progress, dir, planned, fmtBytes, now }: 
       {CAPS.runFiles && <RunProgress id={run.run_id} live={live} fmtBytes={fmtBytes} planned={planned} />}
       <dl className="rd-totals">
         {live ? <div><dt>live progress</dt><dd>{progress ? <>{fmtBytes(progress.bytes)} · {fmtN(progress.deletes)} {r.mode === 'dry' ? 'would delete' : attempted ? 'acknowledged' : 'deleted'}{!attempted && <> · {fmtN(progress.gone)} gone</>}</> : 'waiting for progress'}<span className="dim"> · final totals recorded when the run ends</span></dd></div>
-          : <div><dt>final totals</dt><dd>{fmtBytes(r.deleted_bytes)} · {fmtN(r.deleted_objects)} {r.mode === 'dry' ? 'would delete' : attempted ? 'attempted and acknowledged' : 'deleted'}{attempted ? <span className="dim"> · {NOT_OBSERVABLE}</span> : <> · {fmtN(r.skipped_gone)} already gone · {fmtN(r.skipped_overwritten ?? 0)} replaced objects preserved</>}</dd></div>}
+          : <div><dt>{lower ? 'totals so far' : 'final totals'}</dt><dd>{lower && 'at least '}{fmtBytes(r.deleted_bytes)} · {fmtN(r.deleted_objects)} {r.mode === 'dry' ? 'would delete' : attempted ? 'attempted and acknowledged' : 'deleted'}{attempted ? <span className="dim"> · {NOT_OBSERVABLE}</span> : <> · {fmtN(r.skipped_gone)} already gone · {fmtN(r.skipped_overwritten ?? 0)} replaced objects preserved</>}{lower && <span className="dim"> · {LOWER_BOUND}</span>}</dd></div>}
         {skips && <div><dt>skipped: no generation</dt><dd>{fmtBytes(skips.bytes)} · {fmtN(skips.objects)} objects left in place, logged per object{skips.whole_buckets.length > 0 && <> · <b className="err">not swept: {skips.whole_buckets.join(', ')}</b> (none of its objects had a generation; its prefixes stay staged)</>}</dd></div>}
         <div><dt>elapsed</dt><dd>{fmtDur((r.finished_ts ?? now) - r.started_ts)}</dd></div>
         {review && <div><dt>reviewed manifest</dt><dd>{fmtN(review.objects)} objects · {fmtBytes(review.bytes)}</dd></div>}
@@ -334,7 +339,7 @@ export function RunDetail({ run, live, progress, dir, planned, fmtBytes, now }: 
         <div><dt>scan</dt><dd>{r.scan ?? '—'}{r.plan_digest ? <> · items <code>{r.plan_digest}</code></> : null}</dd></div>
         {r.mode === 'real' && !CAPS.undoUnwindowed && <div><dt>undo</dt><dd>
           {r.undo_deadline ? <>recorded run deadline {utc(r.undo_deadline)} UTC {now < r.undo_deadline ? <span className="dim">(in {fmtDur(r.undo_deadline - now)})</span> : <span className="dim">(closed)</span>}</> : live ? 'recovery after stop and drain; final deadline not recorded yet' : 'no window recorded'}
-          {' · '}state <b>{r.undo_state}</b>{r.purge_state && r.purge_state !== 'none' && <> · purge <b>{r.purge_state}</b></>}
+          {' · '}state <b>{r.undo_state}</b>{r.purge_state && r.purge_state !== 'none' && <> · purge <b>{r.purge_state}</b></>}{lower && <span className="dim"> · {UNDO_LOG_ONLY}</span>}
         </dd></div>}
         {r.log_dir && <div><dt>run dir</dt><dd><code>{r.log_dir}</code></dd></div>}
       </dl>

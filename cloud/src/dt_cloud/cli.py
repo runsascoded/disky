@@ -2390,7 +2390,9 @@ def sweep_undo(only_buckets: tuple[str, ...], bulk: bool, dry_run: bool, bulk_op
     run's recorded `undo_deadline`. Actual retention starts per object at
     deletion, so that record is not an object-level guarantee. RUN is the D1
     run id (`<scan>-p<plan_id>/<utc stamp>`, as /staged lists it) or the run's
-    gs:// log dir. Re-runnable: names already live again are left alone.
+    gs:// log dir. Re-runnable: names already live again are left alone. A run
+    with no `deleted-summary.json` (killed) restores what its uploaded parts
+    name, and says its log may be partial; `undo_state` then stays `partial`.
 
     `-B` restores per directory with GCS bulk restore, filtered to the run's
     deletion window (the D1 row's started/finished times, else the log dir's

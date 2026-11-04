@@ -740,3 +740,70 @@ def test_cover_dirs_and_failed_bulk_op():
     assert se.run_bulk_op(client, "b1", body) == {
         "operation": None, "globs": 1, "succeeded": 0, "skipped": 0, "failed": 0, "error": "RuntimeError: 403 bulkRestore denied",
     }
+
+
+def _killed_run_dir(tmp_path, plan_summary=None, log=True):
+    """What a killed real run leaves: `plan-summary.json` and the parts that uploaded; no `deleted-summary.json`."""
+    d = tmp_path / "run"
+    d.mkdir()
+    (d / "plan-summary.json").write_text(json.dumps(plan_summary or {"date": "2026-09-01", "plan_id": 12, "approved": ["gs://b1/a/", "gs://b2/c/"], "buckets": {"b1": {}, "b2": {}}, "diagnostic": False}))
+    if log:
+        (d / "deleted" / "b1").mkdir(parents=True)
+        pd.DataFrame([
+            {"name": "a/x", "size_bytes": 10, "generation": 11, "decision": "delete", "dir": "a"},
+            {"name": "a/y", "size_bytes": 20, "generation": 12, "decision": "delete", "dir": "a"},
+        ]).to_parquet(d / "deleted" / "b1" / "part-00000.parquet")
+    return d
+
+
+def test_undo_of_a_killed_run_restores_what_its_log_names_and_says_the_log_may_be_partial(tmp_path, monkeypatch):
+    from dt_cloud import sweep_exec
+    from dt_cloud.sweep_exec import undo_run
+    d = _killed_run_dir(tmp_path)
+    h = _UndoHandle()
+    said = []
+    monkeypatch.setattr(sweep_exec, "err", lambda text, **_: said.append(text))
+    s = undo_run(str(d), client=_UndoClient(h), workers=1, deadline=None, now=1_800_000_000)
+    assert h.calls == [("a/x", 11, 0), ("a/y", 12, 0)]
+    assert s["log_partial"] is True
+    assert s["buckets"] == {"b1": {
+        "decisions": {"restored": 2},
+        "restored_bytes": 30,
+        "bands": {"gs://b1/a/": {"restored": 2, "bytes": 30}},
+    }}
+    assert said == [
+        f"{d}: no deleted-summary.json, so its log may be partial: this restores only the generations it names. One in a part that never uploaded stays deleted (-B won't reach it): restore it by hand, or, while this scan is still the newest, undo a re-dispatch of the same items, whose log names it. After a newer scan no manifest names it, and by hand is the only way.",
+        "b1: 2 deleted object(s) to restore",
+        "  b1: 2 restored (0.00 TB restored)",
+    ]
+
+
+def test_undo_of_a_finished_run_doesnt_call_its_log_partial(tmp_path):
+    from dt_cloud.sweep_exec import undo_run
+    assert "log_partial" not in undo_run(str(_real_run_dir(tmp_path)), client=_UndoClient(_UndoHandle()), workers=1, now=1_800_000_000)
+
+
+def test_undo_with_no_summary_refuses_a_dry_run_and_a_run_that_logged_nothing(tmp_path):
+    import pytest
+    from dt_cloud.sweep_exec import undo_run
+    (tmp_path / "dry").mkdir()
+    d = _killed_run_dir(tmp_path / "dry", {"approved": [], "buckets": {"b1": {}}, "diagnostic": True})
+    with pytest.raises(SystemExit) as dry:
+        undo_run(str(d), client=_UndoClient(_UndoHandle()), now=1_800_000_000)
+    assert dry.value.code == f"{d} is a dry run — it deleted nothing"
+    (tmp_path / "none").mkdir()
+    d = _killed_run_dir(tmp_path / "none", log=False)
+    with pytest.raises(SystemExit) as nothing:
+        undo_run(str(d), client=_UndoClient(_UndoHandle()), now=1_800_000_000)
+    assert nothing.value.code == f"{d} has no deleted-summary.json and no deleted/ log: nothing names what it deleted"
+
+
+def test_record_undo_never_calls_a_partial_log_fully_undone(monkeypatch):
+    import dt_cloud.index_footer as footer
+    from dt_cloud.sweep_exec import record_undo
+    sent = []
+    monkeypatch.setattr(footer, "_creds", lambda: ("tok", "acct"))
+    monkeypatch.setattr(footer, "_d1_query", lambda sql, acct, tok: sent.append(sql))
+    summary = {"buckets": {"b1": {"decisions": {"restored": 2}, "bands": {}}}}
+    assert [record_undo("r", summary, 2), record_undo("r", {**summary, "log_partial": True}, 2)] == ["full", "partial"]
+    assert sent == ["UPDATE deletion_runs SET undo_state = 'full' WHERE run_id = 'r'", "UPDATE deletion_runs SET undo_state = 'partial' WHERE run_id = 'r'"]

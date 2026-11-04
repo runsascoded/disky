@@ -1,7 +1,7 @@
-import { expect, it, vi } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { NotFoundError } from '@rdub/file-tree'
 import { announceFinished } from './stagedSlack'
-import { outcomeReaderOf, runOutcomeOf, UNREAD } from './sweepOutcome'
+import { lastRunOutcomeOf, outcomeReaderOf, runOutcomeOf, UNREAD } from './sweepOutcome'
 import { reflectSweepRuns, type SweepBatchJob } from './sweepReflect'
 import { runDir } from './sweepDispatch'
 import { RUN_DIR, sqliteD1 } from './testD1'
@@ -80,4 +80,43 @@ it('end to end: a finished generation run\'s thread message, and a failed read\'
     `:warning: Real deletion ${link} finished, totals unread: recorded *1.0 KiB* / 2 objects.`,
   ])
   log.mockRestore()
+})
+
+describe('lastRunOutcomeOf: the plan card\'s read of its last real run', () => {
+  const JOB = 'gcs-sweep-real-20261104-120000z'
+  const DIR = `sweep/runs/${JOB}`
+  const XML = { contract: 'manifest-delete-generations', backend: 'xml', buckets: {} }
+  const row = (o: { plan_digest?: string | null; log_dir?: string | null } = {}) => ({ plan_digest: 'D', log_dir: `gs://data/${DIR}`, run_id: 'r', ...o })
+  const store = (files: Record<string, unknown>) => {
+    const asked: string[] = []
+    return { asked, get: async (key: string) => {
+      asked.push(key)
+      if (!(key in files)) throw new NotFoundError(key)
+      return { bytes: new TextEncoder().encode(JSON.stringify(files[key])) }
+    } }
+  }
+  it('a run that finished: its contract, and no look for a summary', async () => {
+    const { asked, get } = store({ [`${DIR}/plan-summary.json`]: XML })
+    expect(await lastRunOutcomeOf(row(), get)).toEqual({ attempted: true, skipped: null, notSwept: [] })
+    expect(asked).toEqual([`${DIR}/plan-summary.json`])
+  })
+  it('a run that failed with no final summary: a lower bound', async () => {
+    const { get } = store({ [`${DIR}/plan-summary.json`]: XML })
+    expect(await lastRunOutcomeOf(row({ plan_digest: '' }), get)).toEqual({ attempted: true, skipped: null, notSwept: [], totals: 'lower-bound' })
+  })
+  it('a run that failed with its summary: exact, so nothing to add', async () => {
+    const { get } = store({ [`${DIR}/plan-summary.json`]: XML, [`${DIR}/deleted-summary.json`]: {} })
+    expect(await lastRunOutcomeOf(row({ plan_digest: '' }), get)).toEqual({ attempted: true, skipped: null, notSwept: [] })
+  })
+  it('a run dir that isn\'t a sweep job\'s (cw, a CLI run) isn\'t read', async () => {
+    const { asked, get } = store({})
+    expect(await lastRunOutcomeOf(row({ log_dir: 'gs://data/sweep/cw/runs/cw-sweep-real-1' }), get)).toBeNull()
+    expect(await lastRunOutcomeOf(row({ log_dir: null }), get)).toBeNull()
+    expect(asked).toEqual([])
+  })
+  it('a store that fails is unread, not a throw', async () => {
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+    expect(await lastRunOutcomeOf(row(), async () => { throw new Error('store down') })).toEqual(UNREAD)
+    log.mockRestore()
+  })
 })

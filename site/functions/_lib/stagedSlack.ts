@@ -24,6 +24,8 @@ import { serverToken } from './og/tokens.js'
 import { canonId, loadRegistry } from './identity.js'
 import type { Registry } from '../../src/identityRegistry.js'
 import { BATCH_GAP_S } from './batchGroups.js'
+import { Memo, reqOf } from './shared.js'
+import { lastRunOutcome } from './sweepOutcome.js'
 
 export type { RunRow }
 
@@ -65,6 +67,8 @@ export interface ParentView {
   queued?: { items: number; batches: number; stagers: string[] }
   /** Unix seconds: whether a real run is still undoable (default: now). */
   now?: number
+  /** What the last real run's run dir says of its totals (`lastRunOutcome`); absent or null: nothing to add. */
+  lastOutcome?: RunOutcome | null
 }
 
 /** A staged set at one scan: totals and its largest owners (by display name). */
@@ -101,6 +105,9 @@ export function sizeNotes(z: Sized): string[] {
   ]
 }
 
+/** The plan's newest real run. */
+const lastRealRun = (runs: readonly RunRow[]): RunRow | undefined => [...runs].filter(r => r.mode === 'real').sort((a, b) => b.started_ts - a.started_ts)[0]
+
 /** The thread's parent message: `{ text, blocks }` for chat.postMessage / chat.update. */
 export function renderParent(v: ParentView): { text: string; blocks: unknown[] } {
   const q = v.queued ?? { items: v.items, batches: v.batches, stagers: v.stagers }
@@ -116,10 +123,10 @@ export function renderParent(v: ParentView): { text: string; blocks: unknown[] }
     : latestDry.plan_digest === '' ? `Latest dry-run (\`${latestDry.run_id}\`) ended without a result.`
     : latestDry.plan_digest === v.digest ? `Latest dry-run would delete *${fmtBytes(latestDry.deleted_bytes)}* / ${fmtN(latestDry.deleted_objects)} objects (scan ${latestDry.scan}) — matches the current plan.`
     : null
-  const lastReal = [...v.runs].filter(r => r.mode === 'real').sort((a, b) => b.started_ts - a.started_ts)[0]
+  const lastReal = lastRealRun(v.runs)
   const realLine = !lastReal ? null
     : lastReal.finished_ts == null ? `Real run in progress (${who(lastReal.actor, v.names)}).`
-    : lastReal.undo_deadline != null && lastReal.undo_deadline > now ? `Last real run deleted ${fmtBytes(lastReal.deleted_bytes)} / ${fmtN(lastReal.deleted_objects)} objects, undoable until ${utc(lastReal.undo_deadline)}.`
+    : lastReal.undo_deadline != null && lastReal.undo_deadline > now ? `Last real run ${v.lastOutcome?.unread ? 'recorded' : v.lastOutcome?.attempted ? 'attempted' : 'deleted'} ${v.lastOutcome?.totals === 'lower-bound' ? 'at least ' : ''}${fmtBytes(lastReal.deleted_bytes)} / ${fmtN(lastReal.deleted_objects)} objects, undoable until ${utc(lastReal.undo_deadline)}.${skipsLine(v.lastOutcome ?? undefined)}`
     : null
   const buttons: unknown[] = [
     { type: 'button', action_id: 'staged_open', text: { type: 'plain_text', text: 'Open in www' }, url: `${v.siteUrl}/staged` },
@@ -340,6 +347,17 @@ export function runEvent(r: RunRow, phase: 'dispatched' | 'finished' | 'failed',
   const kind = r.mode === 'dry' ? 'Dry-run' : '*Real deletion*'
   const id = o.siteUrl ? `<${runUrl(o.siteUrl, r.run_id)}|${r.run_id}>` : `\`${r.run_id}\``
   if (phase === 'dispatched') return `${r.mode === 'dry' ? ':test_tube:' : ':rotating_light:'} ${kind} dispatched by ${who(r.actor, o.names)}${o.via ? ` via ${o.via}` : ''} on scan ${r.scan} (${id})`
+  if (phase === 'failed' && o.outcome?.totals) {
+    const verb = o.outcome.attempted ? 'attempted' : 'deleted'
+    const size = `*${fmtBytes(r.deleted_bytes)}* / ${fmtN(r.deleted_objects)} objects`
+    const until = r.undo_deadline ? `; undoable until ${utc(r.undo_deadline)} (www)` : ''
+    const why = o.reason ? ` (\`${o.reason.replace(/`/g, "'").replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')}\`)` : ''
+    if (o.outcome.totals === 'exact') return `:warning: ${kind} ${id} ended unsuccessfully${why}: ${verb} ${size}${until}.${skipsLine(o.outcome)}`
+    const said = o.outcome.totals === 'lower-bound'
+      ? `: ${verb} at least ${size}, from its progress files, which can lag what it did`
+      : `, and what it wrote couldn't be read, so it may have deleted more than its recorded ${size}`
+    return `:warning: ${kind} ${id} ended before recording its end${why}${said}${until}. Undo restores only what its log names.`
+  }
   if (phase === 'failed' && o.reason) return `:x: ${kind} ${id} ended without a result: \`${o.reason.replace(/`/g, "'").replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')}\``
   if (phase === 'failed') return `:x: ${kind} ${id} ended without a result (its Batch job stopped before the run summary); check its logs in www.`
   const skips = skipsLine(o.outcome)
@@ -347,6 +365,9 @@ export function runEvent(r: RunRow, phase: 'dispatched' | 'finished' | 'failed',
   if (o.outcome?.unread) return `:warning: Real deletion ${id} finished, totals unread: recorded *${fmtBytes(r.deleted_bytes)}* / ${fmtN(r.deleted_objects)} objects${r.undo_deadline ? `; undoable until ${utc(r.undo_deadline)} (www)` : ''}.`
   return `${skips ? ':warning:' : ':white_check_mark:'} Real deletion ${id} finished: ${o.outcome?.attempted ? 'attempted' : 'deleted'} *${fmtBytes(r.deleted_bytes)}* / ${fmtN(r.deleted_objects)} objects${r.undo_deadline ? `; undoable until ${utc(r.undo_deadline)} (www)` : ''}.${skips}`
 }
+
+/** No claim that anything is deleted: an XML reply can't prove it, and a run with skips left objects under its prefixes. */
+export const QUEUE_EMPTIED = ':checkered_flag: Queue emptied: nothing staged here is left to delete (each prefix had a real run recorded, or was empty at the scan).'
 
 /** Was the queue empty before this stage? Every item other than the ones just
  *  staged (`fresh`) is either deleted by a real run (`deleted`) or holds no
@@ -675,7 +696,9 @@ export async function notifyPlan(env: NotifyEnv, db: D1Database, planId: number,
     const names: Names = Object.fromEntries(Object.entries(people).flatMap(([e, p]) => p.name ? [[e, p.name]] : []))
     const size = at ? sizeOf(at, queued, u => reg[u]?.name ?? u) : undefined
     // Sized, prefixes empty at the scan leave the title's counts (the size line names them apart).
-    const parent = renderParent({ ...v, queued: queuedOf(countedItems(v.live, v.deleted, at?.stats ?? null)), names, size, image: await stagedCardUrl(env, db, siteUrl, v.digest) ?? undefined })
+    const last = lastRealRun(v.runs)
+    const lastOutcome = last?.finished_ts ? await lastRunOutcome(full)?.(last) : null
+    const parent = renderParent({ ...v, lastOutcome, queued: queuedOf(countedItems(v.live, v.deleted, at?.stats ?? null)), names, size, image: await stagedCardUrl(env, db, siteUrl, v.digest) ?? undefined })
     const event: Event | undefined = runEv
       ? { text: runEvent(runEv.run, runEv.phase, { via: runEv.via, names, siteUrl, reason: runEv.reason, outcome: runEv.outcome }), ...(by ? { sender: personSender(by, people[by.toLowerCase()], 'dispatched') } : {}) }
       : said ? { ...said, text: typeof said.text === 'function' ? said.text(who(said.by?.email ?? '', names)) : said.text, ...(said.by ? { sender: personSender(said.by.email, people[said.by.email.toLowerCase()], said.by.verb) } : {}) }
@@ -691,7 +714,7 @@ export async function notifyPlan(env: NotifyEnv, db: D1Database, planId: number,
     let ended = ''
     if (ts && ev) {
       const stats = at ? Object.fromEntries(Object.entries(at.stats).map(([p, s]) => [p, s.b])) : null
-      if (stage && queueWasEmpty(v.prefixes, new Set(stage.prefixes), v.deleted, stats)) ended = ':checkered_flag: Queue emptied: everything staged here is deleted (or was already empty).'
+      if (stage && queueWasEmpty(v.prefixes, new Set(stage.prefixes), v.deleted, stats)) ended = QUEUE_EMPTIED
       else if (await parentDone(env, channel, ts)) ended = ':white_check_mark: Marked done.'
       if (ended) {
         const d = await detach(db, planId, ts)
