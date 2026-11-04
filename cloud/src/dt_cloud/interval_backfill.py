@@ -35,6 +35,7 @@ from . import heartbeat as hb
 from . import interval_compact as ic
 from . import interval_store as ist
 from . import static_names as sn
+from . import tree_mem as tm
 from .append_runner import LocalRunStore, latest_key
 from .blobstore import Store, mirror, upload_new
 from .interval_level import LEVEL_DOC
@@ -271,8 +272,9 @@ def backfill(store: Store, gen: str, new_gen: str, listing_root: str, template: 
     newest = latest_key(lstore.keys("manifests/"))
     runs = lstore.read_json(newest)["runs"] if newest else []
     scans = [*base["scans"], *ic.run_scans(gen_dir, gen, runs)]
-    con = sn.connect(threads, mem, work / "duckdb")
+    con = sn.connect(threads, tm.stage_mem(tm.Budget.measure(sn.mem_bytes(mem)), f"backfill {gen}"), work / "duckdb")
     idx = gen_index(con, Store(listing_root), template, scans, work, since=since, stall_s=stall_s)
+    con.close()  # the fold opens its own, its budget measured with what this process then holds
     if not idx["scans"]:
         raise SystemExit(f"no listing under {listing_root} matching {template!r} has a `{ist.GENERATION}` column")
     ranges = json.loads((gen_dir / "ranges.json").read_text())
@@ -325,7 +327,7 @@ def backfill_cmd(gen, jobs, template, mem, nulls, store_root, to_gen, threads, r
         if gen is None:
             raise SystemExit(f"{store.root}/{PREFIX}: no current generation ({how}): name one with -g")
     gen = ic.chain(store, gen)[-1]
-    with workdir(work) as w:
+    with tm.watch(mem, f"backfill-generation {gen}"), workdir(work) as w:
         print(json.dumps(backfill(store, gen, to_gen, listing_root, template, w, ranges_gen=ranges_gen, since=since, nulls=nulls, stall_s=stall_s, rg_rows=rg_rows,
                                     threads=threads, mem=mem, jobs=jobs), indent=1))
 

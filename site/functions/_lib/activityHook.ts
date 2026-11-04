@@ -25,11 +25,12 @@ export function readBody(req: Request): Promise<string | null> {
   return req.clone().text().catch(() => null)
 }
 
-/** Who made a request, as a burst's actor: signed-in email, else the grant's name; null for signed-out viewers. */
+/** Who made a request, as a burst's actor: signed-in email, else `grant:<name>` (an unnamed grant: `grant:<id>`);
+ *  null for signed-out viewers. */
 export async function actorOf(ctx: Ctx): Promise<{ actor: string; via: string } | null> {
   const id = await identify(ctx)
   if (!id || id.via === 'public') return null
-  return { actor: id.email ?? (id.name ? `grant:${id.name}` : 'grant'), via: id.via }
+  return { actor: id.email ?? (id.name ? `grant:${id.name}` : id.grantId ? `grant:${id.grantId}` : 'grant'), via: id.via }
 }
 
 /** Adds what a route couldn't cheaply (an assignment's size), before the events are stored. */

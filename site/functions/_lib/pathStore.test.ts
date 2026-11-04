@@ -449,7 +449,14 @@ describe('buildView on a store generation', () => {
       }
     }
     // No ledger tables (cw's D1): the scan's attribution.
-    expect(await pools(await envWith(null))).toEqual({ unowned: [6000, 3], kids: [['s2', 3000], ['s1', 2000], ['s0', 1000]], agg: [[6000, 3], [0, 0]] })
+    const none = await envWith(null)
+    expect(await pools(none)).toEqual({ unowned: [6000, 3], kids: [['s2', 3000], ['s1', 2000], ['s0', 1000]], agg: [[6000, 3], [0, 0]] })
+    // …and a user lens is the scan's attribution too, the same rows the sort holds for them, not a missing-table error.
+    const alice = { key: 'alice' }
+    const rows = await readRects(await openIndex(none, V2_LENS, 'path'), [{ dLo: 1, dHi: 1e9, pLo: 'bk/nest', pHi: 'bk/nest\uffff' }], undefined, alice)
+    const own = rows.find(r => r.path === 'bk/nest')!
+    const agg = (await readRootAgg(none, { date: V2_LENS, path: 'bk/nest', lens: alice }))!
+    expect([agg.b, agg.o]).toEqual([own.size, own.n_files])
     // A ledger assigning `small/s2` (3000 B, unowned in the scan) to carol.
     const assigned = [{ prefix: 'gs://bk/small/s2', owner: 'carol', ts: 1, action_id: 1, bytes: 3000, objects: 1, us: {} }]
     const env = await envWith(`

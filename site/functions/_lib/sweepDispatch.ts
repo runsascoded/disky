@@ -27,6 +27,7 @@ import { labelBatchSpec } from './costLabels.js'
 import { type DispatchErr, type DispatchReq, type ExecEnv, type Executor, type Prepared, refuse } from './dispatch.js'
 import { batchJobsUrl, batchRegionFor, gcpToken } from './gcp.js'
 import { bucketOf, digestLines, NO_SHAPE, type PlanBucketsSnapshot, prefixShape, snapshotPlanBuckets } from './plans.js'
+import { reviewConfig } from './planDispatch.js'
 import { listSweepJobs, reflectSweepRuns } from './sweepReflect.js'
 import { DEFAULT_SWEEP_MACHINE, SWEEP_MACHINES, type SweepMachine } from './sweepMachines.js'
 import { RUN_ID_RE, SCAN_ID_RE } from '../../src/scanSlug.js'
@@ -42,6 +43,10 @@ export const planJsonObject = (jobId: string): string => `sweep/runs/${jobId}/pl
 export const bucketCut = (planBuckets: readonly string[], requested: readonly string[]): string[] =>
   requested.length ? planBuckets.filter(b => requested.includes(b)) : [...planBuckets]
 
+/** The store `sweep manifest -i` reads a retired scan from: the deployment's review store, else its data bucket. */
+export const holdStore = (env: Pick<ExecEnv, 'SWEEP_REVIEW_STORE'>, cfg: Pick<BatchConfig, 'dataBucket'>): string =>
+  env.SWEEP_REVIEW_STORE?.trim() || `gs://${cfg.dataBucket}`
+
 export interface SweepScript {
   cfg: Pick<BatchConfig, 'dataBucket'>
   mode: 'dry' | 'real'
@@ -49,6 +54,8 @@ export interface SweepScript {
   buckets: readonly string[]
   /** The run's plan.json — the staged set the manifest reads. */
   plan: string
+  /** The interval store (`holdStore`) that answers for an item's `as_of` scan whose raw listing is retired. */
+  store: string
   /** A finished, matching DR selected by the dispatch gate. */
   reviewed?: string
   pacing?: 'guided' | 'adaptive'
@@ -58,7 +65,7 @@ export interface SweepScript {
  * On exit (success or failure) it pings the site's `/api/sweep/jobs`
  * with the job's read grant, so the finished run is reflected — and its
  * result posted to the plan's Slack thread — without anyone polling. */
-export const sweepScript = ({ cfg, mode, jobId, buckets, plan, reviewed, pacing = 'guided' }: SweepScript): string => {
+export const sweepScript = ({ cfg, mode, jobId, buckets, plan, store, reviewed, pacing = 'guided' }: SweepScript): string => {
   if (pacing !== 'guided' && pacing !== 'adaptive') throw new Error('invalid sweep pacing mode')
   const run = runDir(cfg, jobId)
   const bflags = buckets.map(b => `-b ${b}`).join(' ')
@@ -71,12 +78,15 @@ export const sweepScript = ({ cfg, mode, jobId, buckets, plan, reviewed, pacing 
     ...(mode === 'real' && reviewed ? [
       `dt-cloud sweep execute-reviewed -e xml -j 64 -B ${Math.max(1, Math.min(6, buckets.length))} -c ${pacing} -r 8000 ${bflags} -p "${plan}" -o "${run}" -w /work/reviewed --for-real "${reviewed}"`,
     ] : [
-      // `-i`: a scan whose raw listing is retired (an item's `as_of`) answers from the interval store in the data bucket.
-      `dt-cloud sweep manifest -d "$SWEEP_DATE" --plan "${plan}" ${bflags} -i "gs://${cfg.dataBucket}" -o "${run}"`,
+      `${store.startsWith('r2://') ? R2_DT_CLOUD : 'dt-cloud'} sweep manifest -d "$SWEEP_DATE" --plan "${plan}" ${bflags} -i "${store}" -o "${run}"`,
       `dt-cloud sweep execute ${bflags}${mode === 'real' ? ' --for-real' : ''} "${run}"`,
     ]),
   ].join('\n')
 }
+
+/** `dt-cloud`, reading an `r2://` store: `r2_profile` turns the job's `R2_*` env into the credentials and endpoint a store
+ * read takes. */
+const R2_DT_CLOUD = `python -c 'from os import environ; from dt_cloud.scan_steps import r2_profile; env = dict(environ); r2_profile(env); environ.update(env); from dt_cloud.cli import main; main()'`
 
 /** The trap every gcs executor job sets: on exit (success or failure) ping
  * the site's `/api/sweep/jobs` with the job's read grant. */
@@ -108,6 +118,8 @@ export interface SweepJobSpec {
   siteUrl: string
   /** Per-job variables, ahead of the shared ones. */
   env: Record<string, string>
+  /** Per-job secret variables, ahead of the shared ones. */
+  secrets?: Record<string, string>
   machine?: SweepMachine
   /** The jobs' cost-attribution `component` label (with `cfg.labels`). */
   component?: string
@@ -116,7 +128,7 @@ export interface SweepJobSpec {
 /** The Batch job spec every gcs executor job shares (a sweep run, an undo):
  * the executor image running `bash -c <script>` as the job account, in the
  * region of its buckets, with the D1 + site credentials from Secret Manager. */
-export const sweepJobSpec = ({ cfg, jobSa, region, script, actor, siteUrl, env, machine = DEFAULT_SWEEP_MACHINE, component = 'sweep' }: SweepJobSpec): unknown => {
+export const sweepJobSpec = ({ cfg, jobSa, region, script, actor, siteUrl, env, secrets = {}, machine = DEFAULT_SWEEP_MACHINE, component = 'sweep' }: SweepJobSpec): unknown => {
   const SECRET = (name: string) => `projects/${cfg.project}/secrets/${name}/versions/latest`
   return labelBatchSpec({
     taskGroups: [{
@@ -143,6 +155,7 @@ export const sweepJobSpec = ({ cfg, jobSa, region, script, actor, siteUrl, env, 
             SITE_URL: siteUrl,
           },
           secretVariables: {
+            ...secrets,
             SITE_TOKEN: SECRET('gcs-sheet-sync-token'),
             CLOUDFLARE_API_TOKEN: SECRET('cf-pages-token'),
           },
@@ -185,6 +198,7 @@ async function prepare(env: ExecEnv, db: D1Database, req: DispatchReq): Promise<
   if (pacing !== 'guided' && pacing !== 'adaptive') return refuse(503, 'dispatch not configured (SWEEP_PACING must be guided or adaptive)')
   const cfg = batchConfig(env, ['GCP_PROJECT', 'DATA_BUCKET', 'SWEEP_IMAGE', 'CF_ACCOUNT_ID', 'D1_DB_ID'])
   if ('missing' in cfg) return refuse(503, notConfigured('dispatch', cfg.missing))
+  const review = reviewConfig(env, cfg)
   const shape = prefixShape(env)
   if (!shape) return refuse(503, `dispatch ${NO_SHAPE}`)
   const requested = req.buckets ?? []
@@ -210,7 +224,7 @@ async function prepare(env: ExecEnv, db: D1Database, req: DispatchReq): Promise<
     const region = batchRegionFor(cfg, buckets)
     const jobId = `gcs-sweep-${req.mode}-${jobStampOf(new Date())}z`
     const plan = runDir(cfg, jobId)
-    const script = sweepScript({ cfg, mode: req.mode, jobId, buckets, plan: planJsonPath(cfg, jobId), reviewed: reuse, pacing })
+    const script = sweepScript({ cfg, mode: req.mode, jobId, buckets, plan: planJsonPath(cfg, jobId), store: holdStore(env, cfg), reviewed: reuse, pacing })
     const spec = sweepJobSpec({
       cfg, jobSa, region, script, actor: req.actor, siteUrl: req.siteUrl, machine: req.machine,
       env: {
@@ -220,7 +234,9 @@ async function prepare(env: ExecEnv, db: D1Database, req: DispatchReq): Promise<
         PLAN_ID: String(req.planId),
         // the run's item digest, for `sweepReflect` (the executor ignores it)
         PLAN_DIGEST: digest,
+        ...review.vars,
       },
+      secrets: review.secrets,
     })
 
     const token = await gcpToken(env.GCP_SA_KEY!)

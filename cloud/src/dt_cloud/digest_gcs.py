@@ -24,8 +24,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .digest import (
-    AVATAR_REV, GIB, LINK_ARROW, MINUS, TIB, DigestConfig, PlotUnavailable, Reply, Unit, _dlink, _pct, _pct_val, _span, _tb, deg,
-    list_scans, load_window, prev_month_link, read_metas, scan_slugs, scan_ts, site_render, week_of, window_label, window_scans,
+    AVATAR_REV, GIB, LINK_ARROW, MINUS, TIB, DigestConfig, PlotUnavailable, Reply, Unit, _dlink, _pct, _pct_val, _tb, deg,
+    list_scans, load_window, read_metas, scan_slugs, scan_ts, site_render, window_scans,
     window_start,
 )
 
@@ -117,101 +117,6 @@ def rows_from_meta(dated_meta: list[tuple[str, dict]], prices: dict[str, float],
     return out
 
 
-def op_body(data: Month, month: dt.date, plot_url: str | None, cfg: DigestConfig, prev_url: str | None = None) -> str:
-    """OP markdown: month-to-date headline beside the window's look-back figure, per-week bullets over the window
-    (weeks ending before the month marked with its predecessor's name), the previous month's thread (``prev_url``;
-    none: no link), trailing plot image.
-
-    The month/year title is NOT in the body -- it's folded into the OP's sender
-    name by the poster. ``plot_url=None`` omits the image line (Discord attaches
-    the plot as a file instead of hosting it)."""
-    site_url, rows = cfg.site_url, data.rows
-    base_tb = rows[0].tb - (rows[0].dtb or 0)
-    base_cost = rows[0].cost - (rows[0].dcost or 0)
-    mdtb = rows[-1].tb - base_tb
-    mweekly = (mdtb / base_tb * 100 * 7 / len(rows)) if base_tb else 0
-    start, seen = data.window(month)
-    # the look-back figure, over the window
-    b30_tb, b30_at = data.back(month)
-    last = rows[-1]
-    b30_url = f"{site_url}/?d={_dlink(last.date, last.slug)}-{_span(scan_ts(b30_at), scan_ts(last.date))}#over-time"
-    # (none when it starts where month-to-date does: a store whose first scan is this month's)
-    look = f"**{_tb(last.tb - b30_tb)} TiB** [{window_label(start, b30_at)}]({b30_url}) · " if b30_at != (rows[0].prev or rows[0].date) else ""
-    lines = [
-        f":arrow_deg{deg(mweekly)}: **{_tb(mdtb)} TiB** month-to-date · {look}[dashboard]({site_url}/)",
-        "",
-        "*Weekly summaries*",
-    ]
-    weeks: OrderedDict[dt.date, list[Scan]] = OrderedDict()
-    for r in seen:
-        if r.day >= week_of(start):
-            weeks.setdefault(week_of(r.day), []).append(r)
-    prev_end: Scan | None = None
-    last_mon = list(weeks)[-1]
-    first = next(iter(weeks.values()))[0]
-    # the first week's baseline: its first row's delta baseline (`prev`; its values: the row's less its deltas);
-    # absent one, a day before that row
-    base = scan_ts(first.prev) if first.prev else scan_ts(first.date) - dt.timedelta(days=1)
-    w_tb, w_cost = first.tb - (first.dtb or 0), first.cost - (first.dcost or 0)
-    for mon, ws in weeks.items():
-        end = ws[-1]
-        if end is first and first.dtb is None:
-            # a week holding only the store's first scan: nothing before it to measure from
-            continue
-        b_tb, b_cost = (prev_end.tb, prev_end.cost) if prev_end is not None else (w_tb, w_cost)
-        b_at = scan_ts(prev_end.date) if prev_end is not None else base
-        wdtb = end.tb - b_tb
-        wpct = wdtb / b_tb * 100 if b_tb else 0
-        partial = " _(partial)_" if len({w.day for w in ws}) < 7 and mon == last_mon else ""
-        # a week over before the month began, named for the month its last scan fell in (the previous one's, but
-        # for a week straddling the month before that)
-        earlier = f" ({end.day:%b})" if mon + dt.timedelta(days=6) < month.replace(day=1) else ""
-        # the link selects exactly this bullet's span on the site (`?d=<end>-<N>d`:
-        # the end scan, N days back to the baseline) and lands on the
-        # size-over-time chart, where the week shows as the highlighted window
-        # with the Diff section right below it
-        lines.append(
-            f":arrow_deg{deg(wpct)}: [wk of {mon.month}/{mon.day}]({site_url}/?d={_dlink(end.date, end.slug)}-{_span(b_at, scan_ts(end.date))}#over-time){earlier}{partial} — "
-            f"**{end.tb:,.0f} TiB** ({_tb(wdtb)}, {_pct(wdtb, end.tb)}%) · ${end.cost:,}/mo ({_usd(end.cost - b_cost)})"
-        )
-        prev_end = end
-    if prev_url:
-        lines += ["", *prev_month_link(month, prev_url)]
-    if plot_url is not None:
-        lines += ["", f"![{cfg.title} — {month:%B %Y}]({plot_url})"]
-    return "\n".join(lines)
-
-
-# the image's tiers, bottom → top (cold → hot), as `Scan` fields
-TIERS = (("arch", "Archive"), ("cold", "Coldline"), ("near", "Nearline"), ("std", "Standard"))
-
-
-def image_body(data: Month, month: dt.date, cfg: DigestConfig) -> dict:
-    """`POST /api/digest-image`'s request for ``month`` (`kind: tiers`): each day's sender's bytes per storage
-    class, bottom → top (cold → hot), over the OP's window from the last day before it (`from`: its first day, the
-    site shades the month after it), drawn as the total line over the stacked classes, over the window's diff map
-    (its baseline, `Month.back` → the latest; none until there are two scans)."""
-    rows = data.rows
-    start, seen = data.window(month)
-    before = [r for r in seen if r.day < start]
-    by_day: dict[str, Scan] = {}
-    for r in before[-1:] + [r for r in seen if r.day >= start]:
-        by_day[r.date[:10]] = r
-    body = {
-        "kind": "tiers",
-        "title": f"{cfg.title} — {month:%B %Y}",
-        "note": f"{cfg.host} · TiB",
-        "month": f"{month:%Y-%m}",
-        "from": start.isoformat(),
-        "units": "TiB",
-        "tiers": [name for _, name in TIERS],
-        "points": [{"scan": r.date, "bytes": [round(getattr(r, k) * TIB) for k, _ in TIERS]} for r in by_day.values()],
-    }
-    base, last = data.back(month)[1], rows[-1].date
-    if base < last:
-        a, z = scan_ts(base), scan_ts(last)
-        body["diff"] = {"from": base, "to": last, "path": "", "title": f"What changed — {a.month}/{a.day} → {z.month}/{z.day}"}
-    return body
 
 
 def senders(scans: list[str], triggers: Mapping[str, str], closed: bool = False) -> list[str]:
@@ -292,14 +197,10 @@ class Gcs:
         return len(data.rows)
 
     def op_body(self, data: Month, month: dt.date, plot_url: str | None, prev_url: str | None = None) -> str:
-        if self.cfg.renderer == "site":
-            return site_render(self.cfg, self.rows_json(data), month, plot_url, prev_url)["text"]
-        return op_body(data, month, plot_url, self.cfg, prev_url)
+        return site_render(self.cfg, self.rows_json(data), month, plot_url, prev_url)["text"]
 
     def image_request(self, data: Month, month: dt.date) -> dict:
-        if self.cfg.renderer == "site":
-            return site_render(self.cfg, self.rows_json(data), month)["image"]
-        return image_body(data, month, self.cfg)
+        return site_render(self.cfg, self.rows_json(data), month)["image"]
 
     def rows_json(self, data: Month) -> dict:
         """The month's rows as the site's renderer reads them (`src/digest/gcs.ts` `GcsRows`)."""

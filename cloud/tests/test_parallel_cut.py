@@ -1,8 +1,9 @@
 """The bounded, parallel served-sort cut (`interval_store.write_served`, specs/diff-progressive.md §3b): runs sorted
-alone, concatenated or cut in key-range pieces sorted alone, and parts written by processes and joined (`parquet_pages.concat`) are the bytes one
+alone, concatenated or merged, and parts written by processes and joined (`parquet_pages.concat`) are the bytes one
 `ORDER BY` streamed into one serial writer leaves, sidecar included."""
 from __future__ import annotations
 
+import json
 import random
 from pathlib import Path
 
@@ -233,9 +234,9 @@ def test_merge_keys_are_the_orders():
 
 def test_the_level_cut_is_the_same_bytes_at_any_parallelism(gen, tmp_path):
     """The level sort (`interval_level`), segmented by the generation's key ranges over its parent key, cut as runs (each
-    range whole, or in key sub-ranges), each segment of several runs cut in key-range pieces (one, or many under a tiny
-    piece share, spans cut inside spool groups), and written by 1 or several processes:
-    the same bytes every time, and its rows the transitions of every path version, in key order."""
+    range whole, or in key sub-ranges), per segment in key-range pieces (one, or many under a tiny piece share), and
+    written by 1 or several processes: the same bytes every time, and its rows the transitions of every path version, in
+    key order."""
     con = duckdb.connect()
     files = []
     (tmp_path / "pvl").mkdir()
@@ -249,10 +250,10 @@ def test_the_level_cut_is_the_same_bytes_at_any_parallelism(gen, tmp_path):
     third = max(ic.sub_ranges([f], None)[0][2] for f in files) // 3
     ref = None
     for procs, budget, piece, spool in ((1, None, None, None), (4, None, None, None), (1, 1, None, None), (4, third, None, None),
-                                        (4, 1, 7, 8), (1, third, 50, 8), (4, 1, 50, None)):
+                                        (4, None, 7, 8), (1, third, 50, 8), (4, 1, 50, None)):
         out = tmp_path / f"p{procs}-b{budget}-r{piece}-s{spool}" / "level.parquet"
-        doc = ist.write_served(con, files, ist.LEVEL, out, schema, rg_rows=RG, page_rows=PAGE, procs=procs, part_rows=0, budget=budget,
-                               piece_rows=piece, key_bounds=bounds, **({"spool_rows": spool} if spool else {}))
+        doc = ist.write_served(con, files, ist.LEVEL, out, schema, rg_rows=RG, page_rows=PAGE, procs=procs, part_rows=0, budget=budget, key_bounds=bounds,
+                               piece_rows=piece, **({"spool_rows": spool} if spool else {}))
         got = (doc, out.read_bytes(), out.with_name("level.groups.parquet").read_bytes())
         ref = ref or got
         assert got == ref
@@ -322,3 +323,27 @@ def test_concat_is_one_writer(tmp_path):
     assert concat(parts, tmp_path / "cat.parquet", drop=True) == {"rows": 1037, "groups": 11, "bytes": one.stat().st_size}
     assert (tmp_path / "cat.parquet").read_bytes() == one.read_bytes()
     assert [p.exists() for p in parts] == [False] * 5
+
+
+def test_empty_sort_sidecar_bytes(tmp_path) -> None:
+    """A sort with no rows: `write_groups` writes one empty row group, the sidecar a fresh build has always had. The
+    reference is that writer's whole sequence over the same empty sort, so a change to the empty case changes bytes."""
+    from disk_tree.find.groups import schema_json
+
+    schema = ist.PVL_SCHEMA
+    out = tmp_path / "reads.parquet"
+    with ist._served_writer(out, schema, None) as w:
+        w.add_key_value_metadata({"store": "interval", "version": str(ist.STORE_VERSION), "sort": "reads"})
+    doc = ist.write_groups(out, [], "reads", lambda rows: ist._seg_summary(rows, True))
+    got = tmp_path / "reads.groups.parquet"
+    assert (doc["rows"], doc["groups"], pq.read_metadata(got).num_row_groups, pq.read_metadata(got).num_rows) == (0, 0, 1, 0)
+
+    md = pq.read_metadata(out)
+    ref = tmp_path / "ref.groups.parquet"
+    kv = {"groups_v": "1", "version": str(ist.STORE_VERSION), "schema": json.dumps(schema_json(md)["schema"], separators=(",", ":")), "sort": "reads",
+          "rows": "0", "segments": json.dumps({k: v["groups"] for k, v in ist._seg_summary([], True).items()})}
+    t = pa.table({c: [] for c in ist.GROUPS_SCHEMA.names}, schema=ist.GROUPS_SCHEMA)
+    with pq.ParquetWriter(ref, ist.GROUPS_SCHEMA, compression="zstd", write_statistics=ist.GROUPS_STAT_COLS, store_schema=False) as w:
+        w.write_table(t, row_group_size=512)
+        w.add_key_value_metadata(kv)
+    assert got.read_bytes() == ref.read_bytes()

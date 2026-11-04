@@ -58,10 +58,18 @@ LEVEL_SCHEMA = pa.schema([
     pa.field("churn_cum", pa.int64(), nullable=False),
     pa.field("churn_prev", pa.int64(), nullable=False),
 ])
+#: The most `level` rows a folded path version makes: its opening and its closing, each also under the path itself.
+ROWS_PER_VERSION = 4
 #: The `pvl` columns the transitions are computed from (a run's deltas add `op`).
 SOURCE_COLS = ["depth", "path", "vf", "vt", "kind", "size", "n_files", "churn_cum", "churn_end"]
 #: A run's deltas: the versions it opened (`op` 1); its close records (`op` −1) end versions opened earlier.
 RUN_OPENED = "op = 1"
+
+
+def extra_rows(rows: int) -> int:
+    """The most `level` rows `rows` folded path versions make past their own count: the level sort's rows aren't its
+    source files', what `tree_mem`'s bounds charge (`interval_store.plan_cut`)."""
+    return (ROWS_PER_VERSION - 1) * rows
 
 
 def leveled(scans: dict, gen_dir: str | Path | None = None) -> bool:
@@ -166,15 +174,15 @@ def backfill(store, gen: str, work: Path, *, rg_rows: int | None = None, threads
     out = work / "out"
     out.mkdir(parents=True, exist_ok=True)
     tree = tm.Budget.measure(sn.mem_bytes(mem))
-    con = sn.connect(threads, mem, work / "duckdb")
+    con = sn.connect(threads, tm.stage_mem(tree, f"backfill-level {gen}"), work / "duckdb")
     rg = rg_rows or ist.SERVED_RG
     docs: dict[str, dict] = {}
     if not runs_only:
         sorts, _ = ist.cut_gen(con, src, {**scans, LEVEL_FLAG: True}, rg_rows=rg, tree=tree, sorts=[LEVEL], served=out / "served")
         docs[""] = sorts[LEVEL]
-    con = sn.connect(threads, mem, work / "duckdb")
+    con = sn.connect(threads, tm.stage_mem(tree, f"backfill-level {gen}"), work / "duckdb")
     for r in todo_runs:
-        d = ia.cut_level(con, str(src / r), out / r / "served", rg_rows=rg)
+        d = ia.cut_level(con, str(src / r), out / r / "served", rg_rows=rg, tree=tree)
         docs[r] = {k: d[k] for k in ("rows", "groups", "bytes")}
     # Each dir's data, then its record (`level.json`: what marks the dir as having the sort).
     for d in [*(f"{r}/" for r in todo_runs), *(() if runs_only else ("",))]:
@@ -198,9 +206,10 @@ def backfill_cmd(gen, mem, store_root, threads, rg_rows, runs_only, work) -> Non
     """Add the level sort (`served/level.*`, specs/diff-progressive.md §3b) to an existing generation that carries churn,
     and to each run its newest manifest lists: cut from the base's folded path versions and the runs' deltas. Never moves
     `CURRENT.json` and never rewrites a file; later appends and compactions carry the sort. Prints a JSON summary."""
+    from . import tree_mem as tm
     from .blobstore import Store
     from .static_local import _check_gen, workdir
 
     _check_gen(gen)
-    with workdir(work) as w:
+    with tm.watch(mem, f"backfill-level {gen}"), workdir(work) as w:
         print(json.dumps(backfill(Store(store_root), gen, w, rg_rows=rg_rows, threads=threads, mem=mem, runs_only=runs_only), indent=1))

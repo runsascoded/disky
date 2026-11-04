@@ -1,7 +1,7 @@
 import { beforeAll, describe, expect, it, vi } from 'vitest'
 import type { Env } from './auth'
 import { parquetMetadata, parquetReadObjects } from 'hyparquet'
-import { asOfScans, type Ask, groupDoc, groupMatchesSize, groupRows, intervalsOn, IV_BROKEN_TTL, IV_CURRENT, IV_STATE_TTL, ivGen, ivRefusal, ivRetry, IvGroup, type IvUnavailable, openIndex, pathGens, pathNeighbours, planRects, planSizeRects, pathScans, readAsks, readRows, readSizeRects, type Rect, type Row, sizeBucket, sizeNeighbours, type Span, usMap, withPathStore } from './index'
+import { asOfScans, type Ask, ivLastRead, groupDoc, groupMatchesSize, groupRows, intervalsOn, IV_BROKEN_TTL, IV_CURRENT, IV_STATE_TTL, ivGen, ivRefusal, ivRetry, IvGroup, type IvUnavailable, openIndex, pathGens, pathNeighbours, planRects, planSizeRects, pathScans, readAsks, readRows, readSizeRects, type Rect, type Row, sizeBucket, sizeNeighbours, type Span, usMap, withPathStore } from './index'
 import { indexedScan } from './scanArg'
 import { storeEnv } from './stores'
 import { sqliteD1 } from './testD1'
@@ -26,13 +26,13 @@ type Case = { date: string; path: string; w: number; h: number; depth: number | 
 
 /** `INDEX_R2` over the fixture dir, counting what is read; `hide(key)`: an object that isn't there (a run's file not
  *  copied yet), to `get` and `list`, and with `head: false` the binding has no `head` (so only a read finds it). */
-function r2(reads: string[], hide: (key: string) => boolean = () => false, { head = true }: { head?: boolean } = {}): R2Bucket {
+function r2(reads: string[], hide: (key: string) => boolean = () => false, { head = true, at = (key: string) => `iv/${key}` }: { head?: boolean; at?: (key: string) => string } = {}): R2Bucket {
   type Fs = { existsSync(p: string): boolean; readFileSync(p: string): Uint8Array; readdirSync(p: string, o: { recursive: true }): string[]; statSync(p: string): { isFile(): boolean } }
   const nodeFs = async () => {
     const mod = 'node:fs' // a variable: the Workers typecheck has no Node types
     return (await import(/* @vite-ignore */ mod)) as Fs
   }
-  const there = async (key: string) => !hide(key) && (await nodeFs()).existsSync(fixture(`iv/${key}`))
+  const there = async (key: string) => !hide(key) && (await nodeFs()).existsSync(fixture(at(key)))
   const list = async ({ prefix, cursor }: { prefix: string; cursor?: string }) => {
     const fs = await nodeFs()
     const dir = prefix.slice(0, prefix.lastIndexOf('/') + 1)
@@ -42,7 +42,7 @@ function r2(reads: string[], hide: (key: string) => boolean = () => false, { hea
   }
   const get = async (key: string, o?: { range?: { offset: number; length: number } }) => {
     const fs = await nodeFs()
-    const file = fixture(`iv/${key}`)
+    const file = fixture(at(key))
     if (!await there(key)) return null
     const buf = fs.readFileSync(file)
     const { offset = 0, length = buf.byteLength - offset } = o?.range ?? {}
@@ -107,6 +107,12 @@ beforeAll(async () => {
 })
 
 describe('interval store', () => {
+  it('a `reads` sort with no rows (one empty row group in its sidecar): nothing last read, nothing refused', async () => {
+    const empty = (key: string) => (/\/served\/reads(\.groups)?\.parquet$/.test(key) ? `iv-empty-reads/${key.split('/').pop()}` : `iv/${key}`)
+    const at = { ...env, INTERVAL_STORE_REV: 'empty-reads', INDEX_R2: r2([], undefined, { at: empty }) } as Env
+    expect(await ivLastRead(at, '2026-07-30', ['', 'a', 'a/b'])).toEqual(new Map())
+  })
+
   it('prunes depth-boundary groups by the interval writer\'s exact path bounds', async () => {
     const h = await openIndex(env, '2026-08-03', 'path')
     expect(await planRects(h, [{ dLo: 2, dHi: 1e9, pLo: 'zzzz/', pHi: 'zzzz0' }])).toEqual([])

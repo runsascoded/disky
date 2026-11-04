@@ -12,7 +12,7 @@ from dt_cloud import interval_compact as ic
 from dt_cloud import interval_local as il
 from dt_cloud import interval_store as ist
 from dt_cloud import static_names as sn
-from test_interval_generation import _newest_runs
+from test_interval_generation import _newest_runs, _oracle_identities
 
 
 def test_etag_only_changes_survive_build_append_merge_and_compaction(tmp_path: Path) -> None:
@@ -77,6 +77,11 @@ def test_adopting_shared_versions_preserves_unknowns_and_opens_at_first_observat
     expected = None if legacy is None else str(legacy)
     identities = [ie.object_identities(str(store), date, "b", [""], gen="converted").select(["name", "version"]).to_pylist() for date in dates]
     assert identities == [[{"name": "f", "version": expected}], [{"name": "f", "version": '"first-seen"'}]]
+    # String versions: the bounded read still equals the unbounded one, schema included.
+    for date in dates:
+        got, want = (f(str(store), date, "b", [""], gen="converted") for f in (ie.object_identities, _oracle_identities))
+        assert got.schema == want.schema and got.schema.field("version").type == pa.string()
+        assert got.to_pylist() == want.to_pylist()
     exported = tmp_path / "exported"
     ie.export_scan(str(store), dates[0], str(exported), gen="converted", tiers=("path",), threads=1, mem="2GB")
     assert pq.read_table(exported / "path-index.parquet").select(["path", "version"]).to_pylist() == [

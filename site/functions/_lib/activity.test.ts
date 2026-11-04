@@ -37,6 +37,9 @@ describe('kinds', () => {
       ['PATCH /api/db/allowed_emails', 'admin'],
       ['PUT /api/session-log/switch', 'admin'],
       ['PUT /api/activity/kinds/view', 'admin'],
+      ['PUT /api/digest-settings', 'admin'],
+      ['POST /api/digest-op', 'digest'],
+      ['POST /api/digest-image', '-'],
       ['POST /api/owner-prices', 'write'],
       ['GET /api/actions', '-'],
       ['POST /api/session-log', '-'],
@@ -155,9 +158,19 @@ describe('rendering', () => {
   it("Slack's post is one line (sent as the user when signed in, else naming who and how); the rest is its first reply", () => {
     const o = { fmt: SLACK, conf, highlights: highlights(events) }
     const act = `<${ORIGIN}/admin/activity?burst=7|activity>`
-    expect([renderHeadline(burst, o, true), renderHeadline({ ...burst, via: 'grant' }, o, false)]).toEqual([
+    const job = { ...burst, actor: 'grant:cw-scan-job', via: 'grant' }
+    expect([
+      renderHeadline(burst, o, true),
+      renderHeadline({ ...burst, via: 'grant' }, o, false),
+      renderHeadline(job, o, true),
+      renderHeadline(job, o, false),
+      renderHeadline({ ...job, actor: 'grant:2EjUTg692KMP' }, { ...o, name: 'grant 2EjU' }, false),
+    ]).toEqual([
       `3 assignments · 4 page loads · 9 URL changes · 2026-10-21 14:20–15:00Z · ${act}`,
       `*ann* (agent token / share link) · 3 assignments · 4 page loads · 9 URL changes · 2026-10-21 14:20–15:00Z · ${act}`,
+      `agent token / share link · 3 assignments · 4 page loads · 9 URL changes · 2026-10-21 14:20–15:00Z · ${act}`,
+      `*cw-scan-job* (agent token / share link) · 3 assignments · 4 page loads · 9 URL changes · 2026-10-21 14:20–15:00Z · ${act}`,
+      `*grant 2EjU* (agent token / share link) · 3 assignments · 4 page loads · 9 URL changes · 2026-10-21 14:20–15:00Z · ${act}`,
     ])
     expect(renderDetails(burst, o).split('\n')).toEqual([
       'Largest assignment: `gs://b/y/` (2.0 PiB) → bob',

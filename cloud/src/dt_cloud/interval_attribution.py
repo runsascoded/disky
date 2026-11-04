@@ -29,6 +29,7 @@ from . import interval_append as ia
 from . import interval_compact as ic
 from . import interval_store as ist
 from . import static_names as sn
+from . import tree_mem as tm
 from .append_runner import LocalRunStore, latest_key
 from .blobstore import Store, upload_new
 from .static_local import _check_gen, workdir
@@ -126,7 +127,9 @@ def backfill_attribution(store: Store, gen: str, new_gen: str, scans_root: str, 
     ranges = json.loads((out / "ranges.json").read_text())
     built = work / "attribution"
     shutil.rmtree(built, ignore_errors=True)
-    con = sn.connect(threads, mem, work / "duckdb-attribution")
+    # The fold's database is gone: the budget is measured again with what this process now holds.
+    tree = tm.Budget.measure(sn.mem_bytes(mem))
+    con = sn.connect(threads, tm.stage_mem(tree, f"backfill-attribution {gen}"), work / "duckdb-attribution")
     stamps = [s["ts"] for s in doc["scans"]]
     idx = {s["id"]: j for j, s in enumerate(doc["scans"])}
     bad, unequal = [], []
@@ -147,8 +150,10 @@ def backfill_attribution(store: Store, gen: str, new_gen: str, scans_root: str, 
     shutil.copytree(built / AT, out / AT)
     for x in ("parquet", "groups.parquet", "json"):
         (out / "served" / f"{AT}.{x}").unlink(missing_ok=True)
-    sd = ist.write_served(con, [str(p) for p in sorted((out / AT).glob("r*.parquet"))], AT, out / "served" / f"{AT}.parquet", ist.served_schema(AT),
-                         rg_rows=rg_rows, stamps=stamps)
+    files = [str(p) for p in sorted((out / AT).glob("r*.parquet"))]
+    with ist.plan_cut(con, tree, files, rg_rows=rg_rows, what=f"cut {AT}") as (procs, budget):
+        sd = ist.write_served(con, files, AT, out / "served" / f"{AT}.parquet", ist.served_schema(AT), rg_rows=rg_rows, stamps=stamps,
+                              procs=procs, budget=budget)
     (out / "served" / f"{AT}.json").write_text(json.dumps(sd, sort_keys=True) + "\n")
     (out / "scans.json").write_text(json.dumps(doc, indent=1) + "\n")
     rec = {"from": gen, "manifest": newest, "runs": [r["key"] for r in runs], "scans": len(doc["scans"]), "covered": covered,
@@ -227,6 +232,6 @@ def backfill_attribution_cmd(gen, jobs, mem, store_root, to_gen, threads, ranges
     _check_gen(to_gen)
     store = Store(store_root)
     gen = _gen(store, gen)
-    with workdir(work) as w:
+    with tm.watch(mem, f"backfill-attribution {gen}"), workdir(work) as w:
         print(json.dumps(backfill_attribution(store, gen, to_gen, scans_root or store_root, w, ranges_gen=ranges_gen, rg_rows=rg_rows, threads=threads,
                                               mem=mem, jobs=jobs), indent=1))

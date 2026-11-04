@@ -84,6 +84,7 @@ function r2(dir: string, gets = { n: 0 }): R2Bucket {
   }
   const get = async (key: string, o?: { range?: { offset: number; length: number } }) => {
     gets.n++
+    timeline.push(`r2 ${key}`)
     await sleep(r2Lag.ms)
     timeline.push(`r2 ${key}`)
     const fs = await nodeFs()

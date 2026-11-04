@@ -291,6 +291,8 @@ export interface Identity {
   via: 'session' | 'grant' | 'public'
   /** The gate's subject (profile name + inlined avatar), for the header chip. */
   subject: Subject | null
+  /** The grant's id, for grant sessions (an activity actor names an unnamed grant by it). */
+  grantId?: string
 }
 const withAdmin = (id: Omit<Identity, 'admin'>): Identity => ({ ...id, admin: id.scopes.includes(ADMIN_SCOPE) || id.scopes.includes('*') })
 
@@ -303,7 +305,7 @@ export async function isAdmin(env: Env, email: string): Promise<boolean> {
 
 function authIdentity(auth: Auth): Identity {
   if (auth.kind === 'sso') return withAdmin({ email: auth.email, name: null, scopes: auth.scopes, via: 'session', subject: auth.subject })
-  return withAdmin({ email: auth.grant.email ?? null, name: auth.grant.name ?? null, scopes: auth.scopes, via: 'grant', subject: auth.grant.subject })
+  return withAdmin({ email: auth.grant.email ?? null, name: auth.grant.name ?? null, scopes: auth.scopes, via: 'grant', subject: auth.grant.subject, grantId: auth.grant.id })
 }
 
 /** All app scopes (staff, and the local-dev identity so `/data` etc. work

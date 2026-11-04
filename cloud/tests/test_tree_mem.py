@@ -4,7 +4,6 @@ and a compaction under a small one stays within it, measured over the tree."""
 from __future__ import annotations
 
 import json
-import os
 import subprocess
 import sys
 import tracemalloc
@@ -40,17 +39,18 @@ def test_fold_split():
 
 def test_cut_plan_most_workers():
     """8 cores, 4 GiB, rows of 128 B: half of what this process leaves (1,948 MiB) holds 8 workers (80 MiB each, + a
-    writer's 2 spool groups and 3 served groups: 19 MiB) and 8 runs' or pieces' sort batches (2 × 8 × 64Ki rows: 128
-    MiB). DuckDB gets 4,096 − 200 − 8 × 80 − 280."""
+    writer's 4 spool groups' and 3 served groups' worth of rows: 35 MiB) and 8 runs' or pieces' sort batches (2 × 8 ×
+    64Ki rows: 128 MiB). DuckDB gets 4,096 − 200 − 8 × 80 − 408."""
     b = tm.Budget(total=4096 * MIB, base=200 * MIB, proc_base=80 * MIB)
-    assert b.cut(1, 8, 8192, 128, 65536) == tm.CutPlan(at_once=1, procs=8, spool_rows=65536, arrow=280 * MIB, duck=2976 * MIB)
+    assert tm.part_bytes(65536, 8192, 128) == 35 * MIB
+    assert b.cut(1, 8, 8192, 128, 65536) == tm.CutPlan(at_once=1, procs=8, spool_rows=65536, arrow=408 * MIB, duck=2848 * MIB)
     # Two sorts at once split the cores: 4 workers each.
-    assert b.cut(2, 8, 8192, 128, 65536) == tm.CutPlan(at_once=2, procs=4, spool_rows=65536, arrow=2 * (4 * 19 + 64) * MIB,
-                                                     duck=(4096 - 200 - 8 * 80 - 280) * MIB)
-    # A small budget (412 MiB for the workers): fewer of them (115 MiB each with its sort batches); none fitting, one.
+    assert b.cut(2, 8, 8192, 128, 65536) == tm.CutPlan(at_once=2, procs=4, spool_rows=65536, arrow=2 * (4 * 35 + 64) * MIB,
+                                                     duck=(4096 - 200 - 8 * 80 - 408) * MIB)
+    # A small budget (412 MiB for the workers): fewer of them (131 MiB each with its sort batches); none fitting, one.
     small = tm.Budget(total=1024 * MIB, base=200 * MIB, proc_base=80 * MIB)
-    assert small.cut(1, 8, 8192, 128, 65536) == tm.CutPlan(at_once=1, procs=3, spool_rows=65536, arrow=(3 * 19 + 48) * MIB,
-                                                         duck=(1024 - 200 - 3 * 80 - 105) * MIB)
+    assert small.cut(1, 8, 8192, 128, 65536) == tm.CutPlan(at_once=1, procs=3, spool_rows=65536, arrow=(3 * 35 + 48) * MIB,
+                                                         duck=(1024 - 200 - 3 * 80 - 153) * MIB)
     tiny = tm.Budget(total=600 * MIB, base=200 * MIB, proc_base=80 * MIB)
     assert tiny.cut(1, 8, 8192, 128, 65536).procs == 1
     # Sorts of 10,000 rows: each count charged at most that (2 × 10,000 rows sorting; a worker's largest task the join's
@@ -58,6 +58,32 @@ def test_cut_plan_most_workers():
     assert small.cut(1, 8, 8192, 128, 65536, rows=10_000) == tm.CutPlan(
         at_once=1, procs=4, spool_rows=65536, arrow=4 * tm.CONCAT_BUF + 2 * 10_000 * 128,
         duck=(1024 - 200 - 4 * 80) * MIB - 4 * tm.CONCAT_BUF - 2 * 10_000 * 128)
+
+
+def test_cut_plan_charges_the_writers_metadata():
+    """Each writer keeps its part's groups' metadata until it closes (`group_meta`: 20 columns of 2,304 B, 32 pages of
+    20 × 48 B + a 100-byte path's min and max): 1 MiB of it a group, a sort of 1,000 groups holds 1,000 MiB of it
+    whatever its workers, and DuckDB is left that much less; past `WORKER_SHARE`, fewer workers don't help (each holds
+    more groups), so it's still all charged."""
+    meta = tm.group_meta(20, 32, 100)
+    assert meta == 20 * 2304 + 32 * (20 * 48 + 200) == 83_200
+    b = tm.Budget(total=8192 * MIB, base=200 * MIB, proc_base=80 * MIB)
+    rows = 1000 * 8192
+    plan = b.cut(1, 8, 8192, 128, 65536, rows, meta=MIB)
+    assert plan == tm.CutPlan(at_once=1, procs=8, spool_rows=65536, arrow=(408 + 1000) * MIB, duck=(8192 - 200 - 8 * 80 - 408 - 1000) * MIB)
+    # Two sorts at once of up to that many rows each: both their metadata.
+    two = b.cut(2, 8, 8192, 128, 65536, 2 * rows, meta=MIB, sort_rows=rows)
+    assert two == tm.CutPlan(at_once=2, procs=4, spool_rows=65536, arrow=(2 * (4 * 35 + 64) + 2 * 1000) * MIB,
+                             duck=(8192 - 200 - 8 * 80 - 408 - 2000) * MIB)
+    # More metadata than half the budget: one worker, and DuckDB what's left.
+    big = b.cut(1, 8, 8192, 128, 65536, 5 * rows, meta=MIB)
+    assert (big.procs, big.arrow) == (1, (35 + 16 + 5000) * MIB)
+
+
+def test_append_split():
+    """A scan's append: its one writer's 6 range-file groups of the ranges' rows, DuckDB the rest past this process."""
+    b = tm.Budget(total=1 << 30, base=200 * MIB, proc_base=50 * MIB)
+    assert b.append(65536, 100) == (39_321_600, (1 << 30) - 200 * MIB - 39_321_600)
 
 
 def test_too_small_names_the_least_budget():
@@ -152,24 +178,95 @@ def test_footers_stream_a_row_group_at_a_time(tmp_path):
     assert pp.chunk_indexes(parts[0]) == list(pp.iter_chunk_indexes(parts[0]))
 
 
+# ── A cut worker, measured against its estimate ────────────────────────────
+
+#: How far a cut worker's estimate (`tree_mem.worker_bytes`) may sit above what it is measured to hold: past it, the
+#: estimate starves DuckDB of memory the workers never use.
+WORKER_SLACK = 2
+
+
+def _spool(path: Path, n: int) -> None:
+    """A path sort's spool (`write_served`'s pass 1: its served columns and `__seg`), `n` rows in `CUT_SPOOL_RG`-row
+    lz4 groups, ~70-byte paths."""
+    schema = ist.served_schema("path", False, True)
+    rng = np.random.default_rng(7)
+    with pq.ParquetWriter(path, pa.schema([*schema, pa.field("__seg", pa.int32(), False)]), compression="lz4") as w:
+        for a in range(0, n, ist.CUT_SPOOL_RG):
+            idx = np.arange(a, min(n, a + ist.CUT_SPOOL_RG))
+            cols = {}
+            for f in schema:
+                if f.name == "path":
+                    col = [f"bucket-{i % 7}/some/longer/directory/name/{i:012d}/file-{i * 7919 % 100_000}.parquet" for i in idx]
+                elif f.name == "kind":
+                    col = np.where(idx % 3 == 0, "dir", "file").tolist()
+                elif f.name == "us":
+                    col = [f"user{i % 50}" for i in idx]
+                elif f.name == "depth":
+                    col = (idx % 20).astype(np.uint8)
+                elif pa.types.is_floating(f.type):
+                    col = rng.random(len(idx))
+                else:
+                    col = rng.integers(0, 1 << 30, len(idx))
+                cols[f.name] = pa.array(col, f.type)
+            cols["__seg"] = pa.array(np.zeros(len(idx), np.int32))
+            w.write_table(pa.table(cols, schema=w.schema), row_group_size=ist.CUT_SPOOL_RG)
+
+
+def _held() -> int:
+    """This process's bytes for `_measured_part`: its proportional resident bytes (`tree_pss`, Linux), else its resident
+    bytes (an upper bound there)."""
+    return tm.tree_pss() if tm.has_procfs() else tm.own_bytes()
+
+
+def _measured_part(spool: str, n: int, rg: int, page: int, out: str) -> tuple[int, int]:
+    """In a spawned cut worker: what it holds once imported, and its peak while writing a part of `n` rows of `spool`
+    (`cut_part`) in `rg`-row groups of `page`-row pages, sampled every 2 ms (and its `ru_maxrss` without procfs)."""
+    import resource
+
+    schema = ist.served_schema("path", False, True)
+    base = _held()
+    peak = [base]
+    stop = Event()
+
+    def sample():
+        while not stop.wait(0.002):
+            peak[0] = max(peak[0], _held())
+
+    th = Thread(target=sample, daemon=True)
+    th.start()
+    try:
+        ist.cut_part([(spool, 0, n)], [(0, o, min(rg, n - o)) for o in range(0, n, rg)], out, schema, "size", {"k": "v"}, page, rg)
+    finally:
+        stop.set()
+        th.join()
+    if not tm.has_procfs():
+        peak[0] = max(peak[0], tm.peak_bytes())
+    return base, max(peak[0], _held())
+
+
+@pytest.mark.parametrize("rg, page", [(256, 8), (1024, 1024)])
+def test_a_cut_worker_holds_its_estimate(tmp_path, rg, page):
+    """A real cut worker (spawned, `worker_init`'d, as `write_served`'s pool runs `cut_part`) writing a part of 400K rows
+    from 64Ki-row spool groups: what it holds past its imports (PSS, sampled) is within `tree_mem.worker_bytes` of the
+    plan's inputs — `rb` and the writer's metadata a group (`interval_store.writer_meta`) from the spool's footer — and
+    that estimate is within `WORKER_SLACK` × it. Many small groups (32 pages each) make the writer's metadata the most
+    of it; one-page groups, the spool's batches."""
+    from concurrent.futures import ProcessPoolExecutor
+    from multiprocessing import get_context
+
+    n = 400_000
+    spool = tmp_path / "spool.parquet"
+    _spool(spool, n)
+    with ProcessPoolExecutor(1, mp_context=get_context("spawn"), initializer=tm.worker_init) as ex:
+        base, peak = ex.submit(_measured_part, str(spool), n, rg, page, str(tmp_path / "part.parquet")).result()
+    measured = peak - base
+    rb = ic.row_bytes([str(spool)]) + ist.SPOOL_EXTRA
+    est = tm.worker_bytes(ist.CUT_SPOOL_RG, rg, rb, -(-n // rg), ist.writer_meta([str(spool)], rg, page))
+    assert pq.read_metadata(tmp_path / "part.parquet").num_rows == n
+    assert measured <= est <= WORKER_SLACK * measured, f"measured {measured / MIB:,.1f} MiB, estimated {est / MIB:,.1f} MiB"
+
+
 # ── A compaction under a small budget, measured over its process tree ──────
-
-
-def _tree_pss(root: int) -> int:
-    """The proportional resident bytes (`smaps_rollup` `Pss`) of `root` and every descendant: the tree's share of
-    physical memory, shared pages counted once across it."""
-    todo, total = [root], 0
-    while todo:
-        pid = todo.pop()
-        try:
-            with open(f"/proc/{pid}/smaps_rollup") as f:
-                total += next(int(line.split()[1]) << 10 for line in f if line.startswith("Pss:"))
-            for task in os.listdir(f"/proc/{pid}/task"):
-                with open(f"/proc/{pid}/task/{task}/children") as f:
-                    todo += [int(c) for c in f.read().split()]
-        except (FileNotFoundError, ProcessLookupError, StopIteration):  # legitimate: the process exited between reads
-            continue
-    return total
 
 
 #: Paths in each scan, scans in the base, scans appended as runs.
@@ -245,7 +342,7 @@ def test_compaction_stays_within_its_budget(generation, tmp_path):
 
     def sample():
         while not stop.is_set():
-            peak[0] = max(peak[0], _tree_pss(proc.pid))
+            peak[0] = max(peak[0], tm.tree_pss(proc.pid))
             stop.wait(0.01)
 
     th = Thread(target=sample, daemon=True)

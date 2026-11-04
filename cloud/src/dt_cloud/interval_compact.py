@@ -455,7 +455,9 @@ def fold_gen(gen_dir: Path, out: Path, work: Path, *, gen: str, runs: list[dict]
 
     rows: dict[str, int] = {}
     paths: dict = {"all": 0, "kinds": {}}
-    for got in sn.each(con, one, list(range(k)), jobs):
+    with tm.phase("fold ranges"):
+        folded = sn.each(con, one, list(range(k)), jobs)
+    for got in folded:
         for t, n in got["rows"].items():
             rows[t] = rows.get(t, 0) + n
         paths["all"] += got["paths"]["all"]

@@ -80,11 +80,12 @@ STORE_BUCKET = "disk-tree-demo"
 STORE_REGION = "auto"
 # The "data behind this site" store (`_lib/stores.ts`, the frontend's `src/stores/meta.ts`), mounted at `/meta`: the
 # demo's own bucket, disk-tree-demo, scanned by the daily ingest after the primary (`meta-l2/` tiers,
-# `snapshots/meta/`), with its own static name index (its own lineage, followed by its `STATIC_CURRENT_KEY`).
+# `snapshots/meta/`), with its own static name index (its own lineage, followed by its `STATIC_CURRENT_KEY`) and its
+# own interval store as its Map's path store (`meta/interval-store/`, following its own `CURRENT.json`).
 # Public as the primary is (no `scope`; `OG_ANONYMOUS` and the filter policy inherited); read with the primary's RO
 # keypair (the same Pages secrets). No `all` union view: the home page stays the three public buckets.
 STORES_EXTRA = "meta"
-STORES_JSON = '{"meta":{"path":"/meta","vars":{"ROOT_LABEL":"Public R2 Treemap Demo disky metadata","ROOT_TITLE":"Data behind this site: the daily scans’ indexes, snapshots and name index in disk-tree-demo (R2)","SNAPSHOTS_SUBDIR":"meta","STORE_SCHEME":"r2://","STORE_BUCKETS":"disk-tree-demo","STORE_PREFIXES":"meta-l2/,snapshots/meta/","STORE_BUCKET":"disk-tree-demo","STORE_REGION":"auto","STATIC_CURRENT_KEY":"static-names/meta-CURRENT.json","FILTER_STATIC_HEAVY":"1"},"secrets":{"STORE_ENDPOINT":"STORE_ENDPOINT","STORE_ACCESS_KEY_ID":"STORE_ACCESS_KEY_ID","STORE_SECRET_ACCESS_KEY":"STORE_SECRET_ACCESS_KEY"}}}'
+STORES_JSON = '{"meta":{"path":"/meta","vars":{"ROOT_LABEL":"Public R2 Treemap Demo disky metadata","ROOT_TITLE":"Data behind this site: the daily scans’ indexes, snapshots and name index in disk-tree-demo (R2)","SNAPSHOTS_SUBDIR":"meta","STORE_SCHEME":"r2://","STORE_BUCKETS":"disk-tree-demo","STORE_PREFIXES":"meta-l2/,snapshots/meta/","STORE_BUCKET":"disk-tree-demo","STORE_REGION":"auto","STATIC_CURRENT_KEY":"static-names/meta-CURRENT.json","FILTER_STATIC_HEAVY":"1","PATH_STORE":"intervals","INTERVAL_STORE_PREFIX":"meta/interval-store"},"secrets":{"STORE_ENDPOINT":"STORE_ENDPOINT","STORE_ACCESS_KEY_ID":"STORE_ACCESS_KEY_ID","STORE_SECRET_ACCESS_KEY":"STORE_SECRET_ACCESS_KEY"}}}'
 
 # Set as Pages env vars/secrets at deploy — NOT committed (disk-tree is a public
 # repo; the account id in the R2 endpoint stays out of git):

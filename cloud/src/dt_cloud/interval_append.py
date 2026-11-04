@@ -68,6 +68,7 @@ from . import interval_churn as ich
 from . import interval_level as ilv
 from . import interval_store as ist
 from . import static_names as sn
+from . import tree_mem as tm
 from .append_runner import (  # noqa: F401 — NOT_NEXT, StateIncomplete: as this module has always offered them
     NOT_NEXT,
     Carry,
@@ -245,6 +246,15 @@ def _reconstructs(con, table: str, new: str, kind: str) -> tuple[list[int], list
 def append_range(con, prev: dict[str, str], scan: dict, r: dict, name: str, out: Path, *, bucket: str, mount: str | None,
                  sliced: bool = True, generation: ist.Identity = False, check: list[str] | None = None, attributed: bool = False,
                  churn: bool = False, count: bool = True) -> dict:
+    """`_append_range`, its peaks under a running `tree_mem.TreeWatch` labelled with the range, DuckDB's and Arrow's own
+    totals read with each sample."""
+    with tm.at(name), tm.gauges(DuckDB=tm.duck_bytes(con), Arrow=pa.total_allocated_bytes):
+        return _append_range(con, prev, scan, r, name, out, bucket=bucket, mount=mount, sliced=sliced, generation=generation, check=check,
+                             attributed=attributed, churn=churn, count=count)
+
+
+def _append_range(con, prev: dict[str, str], scan: dict, r: dict, name: str, out: Path, *, bucket: str, mount: str | None,
+                  sliced: bool, generation: ist.Identity, check: list[str] | None, attributed: bool, churn: bool, count: bool) -> dict:
     """Append `scan` to one key range's open versions (`prev`: `state_schema` relations per table, `tables(sliced,
     attributed)`; `attributed`: the lineage carries the attribution table, `append_attribution`).
     Writes under `out` each table's delta `<t>/<name>.parquet` (`delta_schema`, sorted by identity then `op`) and next
@@ -268,18 +278,19 @@ def append_range(con, prev: dict[str, str], scan: dict, r: dict, name: str, out:
     src = sn._src(bucket, scan["src"], mount)
     preds = sn.range_preds(r)
     v = scan.get("version")
-    con.execute(f"CREATE OR REPLACE TABLE np AS {ist.path_rows_sql(con, src, preds, v, generation)}")
-    if not sliced and con.execute("SELECT count(*) FROM np WHERE us <> ''").fetchone()[0]:
-        raise SystemExit(ist.owners_refused(scan["id"]))
     todo = tables(sliced)
-    if sliced:
-        con.execute(f"CREATE OR REPLACE TABLE ns AS {ist.slice_rows_sql(con, src, preds, v)}")
-    for t in todo:
-        con.execute(f"CREATE OR REPLACE TABLE p_{t} AS SELECT *, {DR} AS dr FROM ({prev[t]})")
-    # Each path's version start after D: its open one's while the change columns hold, else D.
-    same = " AND ".join(f"o.{c} IS NOT DISTINCT FROM n.{c}" for c in ist.change_cols(generation))
-    con.execute(f"""CREATE OR REPLACE TABLE npf AS SELECT n.*, CASE WHEN o.path IS NOT NULL AND {same} THEN o.pvf ELSE {D} END::BIGINT AS pvf
-        FROM np n LEFT JOIN p_pvl o ON o.depth = n.depth AND o.path = n.path""")
+    with tm.phase("range load"):
+        con.execute(f"CREATE OR REPLACE TABLE np AS {ist.path_rows_sql(con, src, preds, v, generation)}")
+        if not sliced and con.execute("SELECT count(*) FROM np WHERE us <> ''").fetchone()[0]:
+            raise SystemExit(ist.owners_refused(scan["id"]))
+        if sliced:
+            con.execute(f"CREATE OR REPLACE TABLE ns AS {ist.slice_rows_sql(con, src, preds, v)}")
+        for t in todo:
+            con.execute(f"CREATE OR REPLACE TABLE p_{t} AS SELECT *, {DR} AS dr FROM ({prev[t]})")
+        # Each path's version start after D: its open one's while the change columns hold, else D.
+        same = " AND ".join(f"o.{c} IS NOT DISTINCT FROM n.{c}" for c in ist.change_cols(generation))
+        con.execute(f"""CREATE OR REPLACE TABLE npf AS SELECT n.*, CASE WHEN o.path IS NOT NULL AND {same} THEN o.pvf ELSE {D} END::BIGINT AS pvf
+            FROM np n LEFT JOIN p_pvl o ON o.depth = n.depth AND o.path = n.path""")
     doc: dict = {"range": name, "scan": scan["id"]}
     key2 = ["depth", "path"]
     key3 = ["depth", "path", "usr"]
@@ -296,46 +307,64 @@ def append_range(con, prev: dict[str, str], scan: dict, r: dict, name: str, out:
         "svt": (svt_new, key3, SVT_STATE, ist.CARRIED),
     }
     for t, (new, key, state, carried) in ((t, plan[t]) for t in todo):
-        n_open, n_close = append_intervals(con, f"SELECT * FROM p_{t}", new, key, state, D, OPEN, carried=carried, out=f"o_{t}")
-        on = " AND ".join(f"o_{t}.{c} = c.{c}" for c in key)
-        if t == "pvl":
-            # A version opened by its read day alone continues its path version: `fold` gives it that version's `wts`
-            # (and `GENERATION`).
-            sets = ", ".join(f"{c} = c.{c}" for c in ["wts", *gcol])
-            con.execute(f"""UPDATE o_pvl SET {sets} FROM (SELECT depth, path, {', '.join(['wts', *gcol])} FROM o_pvl WHERE vt = {D}) c
-                WHERE o_pvl.vf = {D} AND o_pvl.pvf < {D} AND {on}""")
-        elif t == "svt":
-            # A piece opened by its path's change alone continues its slice version: `fold -S` gives it that one's `wts`.
-            eq = " AND ".join(f"o_svt.{c} IS NOT DISTINCT FROM c.{c}" for c in ist.SV_CHANGE)
-            con.execute(f"""UPDATE o_svt SET wts = c.wts FROM (SELECT * FROM o_svt WHERE vt = {D}) c
-                WHERE o_svt.vf = {D} AND {on} AND {eq}""")
+        with tm.phase(f"range intervals {t}"):
+            n_open, n_close = append_intervals(con, f"SELECT * FROM p_{t}", new, key, state, D, OPEN, carried=carried, out=f"o_{t}")
+            on = " AND ".join(f"o_{t}.{c} = c.{c}" for c in key)
+            if t == "pvl":
+                # A version opened by its read day alone continues its path version: `fold` gives it that version's `wts`
+                # (and `GENERATION`).
+                sets = ", ".join(f"{c} = c.{c}" for c in ["wts", *gcol])
+                con.execute(f"""UPDATE o_pvl SET {sets} FROM (SELECT depth, path, {', '.join(['wts', *gcol])} FROM o_pvl WHERE vt = {D}) c
+                    WHERE o_pvl.vf = {D} AND o_pvl.pvf < {D} AND {on}""")
+            elif t == "svt":
+                # A piece opened by its path's change alone continues its slice version: `fold -S` gives it that one's `wts`.
+                eq = " AND ".join(f"o_svt.{c} IS NOT DISTINCT FROM c.{c}" for c in ist.SV_CHANGE)
+                con.execute(f"""UPDATE o_svt SET wts = c.wts FROM (SELECT * FROM o_svt WHERE vt = {D}) c
+                    WHERE o_svt.vf = {D} AND {on} AND {eq}""")
         schema = delta_schema(t, generation, churn and t == "pvl")
         cols = ", ".join(schema.names[:-1])
         order = ", ".join([*IDENT[t], "op"])
         dict_cols = [c for c in ("kind", "us", "usr") if c in schema.names]
-        n_delta = write_sorted(sn._batches(con, f"""SELECT {cols}, 1::TINYINT AS op FROM o_{t} WHERE vf = {D}
-                UNION ALL SELECT {cols}, -1::TINYINT AS op FROM o_{t} WHERE vt = {D} ORDER BY {order}"""),
-                               out / t / f"{name}.parquet", schema, ist.RANGE_RG, dictionary=dict_cols)
-        n_state = write_sorted(sn._batches(con, f"SELECT {cols} FROM o_{t} WHERE vt = {OPEN} ORDER BY {', '.join(IDENT[t])}"),
-                               out / "state" / t / f"{name}.parquet", state_schema(t, generation, churn and t == "pvl"), ist.RANGE_RG, dictionary=dict_cols)
-        got, want = _reconstructs(con, f"o_{t}", SCAN_ROWS[t], t)
+        with tm.phase(f"range delta {t}"):
+            n_delta = write_sorted(sn._batches(con, f"""SELECT {cols}, 1::TINYINT AS op FROM o_{t} WHERE vf = {D}
+                    UNION ALL SELECT {cols}, -1::TINYINT AS op FROM o_{t} WHERE vt = {D} ORDER BY {order}"""),
+                                   out / t / f"{name}.parquet", schema, ist.RANGE_RG, dictionary=dict_cols)
+        with tm.phase(f"range state {t}"):
+            n_state = write_sorted(sn._batches(con, f"SELECT {cols} FROM o_{t} WHERE vt = {OPEN} ORDER BY {', '.join(IDENT[t])}"),
+                                   out / "state" / t / f"{name}.parquet", state_schema(t, generation, churn and t == "pvl"), ist.RANGE_RG, dictionary=dict_cols)
+        with tm.phase(f"range reconstructs {t}"):
+            got, want = _reconstructs(con, f"o_{t}", SCAN_ROWS[t], t)
         if got != want:
             raise RuntimeError(f"append {name} {scan['id']} {t}: the open versions ({got[0]:,} rows) are not the scan's ({want[0]:,})")
         doc[t] = {"opened": n_open, "closed": n_close, "delta": n_delta, "open": n_state}
         if t == "pvl" and churn:
-            doc["churn"] = ich.scan_churn(con, "o_pvl", D, check or [], name, out / "state", count)
+            with tm.phase("range churn"):
+                doc["churn"] = ich.scan_churn(con, "o_pvl", D, check or [], name, out / "state", count)
         con.execute(f"DROP TABLE o_{t}; DROP TABLE p_{t}")
     if attributed:
-        doc[AT] = append_attribution(con, prev[AT], scan, preds, name, out, D, bucket=bucket, mount=mount)
+        with tm.phase("range attribution"):
+            doc[AT] = append_attribution(con, prev[AT], scan, preds, name, out, D, bucket=bucket, mount=mount)
     if check is not None:
         t1 = monotonic()
-        doc["check"] = {**check_tables(con, [*check, str(out)], name, D, sliced=sliced, generation=generation,
-                                       attribution=attributed and doc[AT]["covered"]), "s": round(monotonic() - t1, 1)}
+        with tm.phase("range check"):
+            doc["check"] = {**check_tables(con, [*check, str(out)], name, D, sliced=sliced, generation=generation,
+                                           attribution=attributed and doc[AT]["covered"]), "s": round(monotonic() - t1, 1)}
     con.execute("DROP TABLE np; DROP TABLE IF EXISTS ns; DROP TABLE npf; DROP TABLE IF EXISTS na")
     doc["s"] = round(monotonic() - t0, 1)
     err(f"append {name} {scan['id']}: " + ", ".join(f"{t} +{doc[t]['opened']:,} −{doc[t]['closed']:,}" for t in todo)
         + (f", {AT} " + (f"+{doc[AT]['opened']:,} −{doc[AT]['closed']:,}" if doc[AT]["covered"] else "uncovered") if attributed else "") + f" in {doc['s']}s")
     return doc
+
+
+def append_mem(tree: tm.Budget, files: list[str], what: str) -> str:
+    """DuckDB's limit for a scan's append under the process tree's budget: what this process and the writer's Arrow side
+    (`Budget.append`, rows as `files`', the ranges' open versions, are wide) leave."""
+    from .interval_compact import row_bytes
+
+    rb = row_bytes(files)
+    arrow, duck = tree.append(ist.RANGE_RG, rb)
+    err(f"{what}: memory {tree.total / tm.MIB:,.0f} MiB = this process {tree.base / tm.MIB:,.0f} + Arrow {arrow / tm.MIB:,.0f} ({rb} B a row) + DuckDB {duck / tm.MIB:,.0f}")
+    return f"{duck // tm.MIB}MiB"
 
 
 def append_attribution(con, prev: str, scan: dict, preds: list[str], name: str, out: Path, D: int, *, bucket: str, mount: str | None) -> dict:
@@ -393,12 +422,21 @@ def level_source(root: str) -> str:
     return delta_relation(root, "pvl", cols=[*ilv.SOURCE_COLS, "op"])
 
 
-def cut_level(con, root: str, out: Path, *, rg_rows: int = ist.SERVED_RG) -> dict:
+def cut_level(con, root: str, out: Path, *, rg_rows: int = ist.SERVED_RG, tree: tm.Budget | None = None) -> dict:
     """A run's level sort (`interval_level`) from its `pvl` deltas under `root`: the transitions at its scans (the versions
     it opened, and its close records) → `out/level.parquet` + `.groups.parquet` + `level.json`. One segment (a run is
-    small)."""
+    small). `tree`: the process tree's budget its workers and DuckDB limit are planned under (`interval_store.plan_cut`,
+    over the deltas, its rows up to `interval_level.ROWS_PER_VERSION` theirs); None: every core, DuckDB's limit as set."""
     t0 = monotonic()
-    doc = ist.write_served(con, level_source(root), ilv.LEVEL, out / f"{ilv.LEVEL}.parquet", ilv.LEVEL_SCHEMA, rg_rows=rg_rows, opened=ilv.RUN_OPENED)
+    files = sorted(str(p) for p in Path(root, "pvl").glob("r*.parquet"))
+    extra = 0
+    if tree is not None:
+        from .interval_compact import input_rows
+
+        extra = ilv.extra_rows(input_rows(files))
+    with ist.plan_cut(con, tree, files, rg_rows=rg_rows, what=f"cut {ilv.LEVEL}", extra_rows=extra) as (procs, budget):
+        doc = ist.write_served(con, level_source(root), ilv.LEVEL, out / f"{ilv.LEVEL}.parquet", ilv.LEVEL_SCHEMA, rg_rows=rg_rows, opened=ilv.RUN_OPENED,
+                               procs=procs, budget=budget)
     doc["s"] = round(monotonic() - t0, 1)
     out.mkdir(parents=True, exist_ok=True)
     (out / f"{ilv.LEVEL}.json").write_text(json.dumps(doc, sort_keys=True) + "\n")
@@ -406,20 +444,24 @@ def cut_level(con, root: str, out: Path, *, rg_rows: int = ist.SERVED_RG) -> dic
 
 
 def cut_run(con, root: str, out: Path, *, rg_rows: int = ist.SERVED_RG, sliced: bool = True, generation: ist.Identity = False,
-            churn: bool = False, level: bool = False) -> dict:
+            churn: bool = False, tree: tm.Budget | None = None, level: bool = False) -> dict:
     """A run's served sorts (`run_sorts(sliced)`, the attribution sort when the run holds its table, the level sort with
     `level`: `cut_level`) from its delta files under `root` → `out/<sort>.parquet` + `.groups.parquet` + `<sort>.json`.
     Open versions then close records (`seg_sql` without stamps: segment 0, then 1). `GENERATION` in
-    `interval_store.GENERATION_SORT` with `generation`."""
+    `interval_store.GENERATION_SORT` with `generation`. `tree`: the process tree's budget each sort's workers and DuckDB
+    limit are planned under (`interval_store.plan_cut`, over its delta files); None: every core, DuckDB's limit as set."""
     docs = {}
     for sort in run_sorts(sliced, has_table(root, AT), level):
         if sort == ilv.LEVEL:
-            docs[sort] = cut_level(con, root, out, rg_rows=rg_rows)
+            docs[sort] = cut_level(con, root, out, rg_rows=rg_rows, tree=tree)
             continue
         sub, _, _ = ist.SORTS[sort]
         t0 = monotonic()
         schema = ist.served_schema(sort, generation, churn)
-        doc = ist.write_served(con, delta_relation(root, sub, cols=schema.names), sort, out / f"{sort}.parquet", schema, rg_rows=rg_rows)
+        files = sorted(str(p) for p in Path(root, sub).glob("r*.parquet"))
+        with ist.plan_cut(con, tree, files, rg_rows=rg_rows, what=f"cut {sort}") as (procs, budget):
+            doc = ist.write_served(con, delta_relation(root, sub, cols=schema.names), sort, out / f"{sort}.parquet", schema, rg_rows=rg_rows,
+                                   procs=procs, budget=budget)
         doc["s"] = round(monotonic() - t0, 1)
         (out / f"{sort}.json").write_text(json.dumps(doc, sort_keys=True) + "\n")
         docs[sort] = doc
@@ -634,16 +676,18 @@ def build_merged_run(dirs: list[Path], run: dict, outp: Path, *, gen: str, k: in
                      churn: bool = False, level: bool = False) -> dict:
     """The merged run `run` (`plan_carries`' output) of input run dirs `dirs` (oldest first) into `outp`: each key range's
     deltas merged per table (`merge_range`, the `k` ranges), its served sorts cut from them (`cut_run`, `outp/served/`;
-    the level sort with `level`, whether or not the inputs had it), then `meta.json` (`run_meta`, the inputs' stamps).
-    Returns `{rows, bytes, s}`."""
+    the level sort with `level`, whether or not the inputs had it), then `meta.json` (`run_meta`, the inputs' stamps). `mem`
+    is the whole process tree's budget (`tree_mem`), measured once the deltas are merged: the cut's workers and DuckDB's
+    limit planned under it. Returns `{rows, bytes, s}`."""
     shutil.rmtree(outp, ignore_errors=True)
     t0 = monotonic()
     for i in range(k):
         merge_range([str(d) for d in dirs], f"r{i:04d}", outp, sliced, generation, churn)
     merge_s = round(monotonic() - t0, 1)
     t1 = monotonic()
-    docs = cut_run(sn.connect(threads, mem, tmp), str(outp), outp / "served", rg_rows=rg_rows, sliced=sliced, generation=generation, churn=churn,
-                   level=level)
+    tree = tm.Budget.measure(sn.mem_bytes(mem))
+    docs = cut_run(sn.connect(threads, tm.stage_mem(tree, f"merge {run['key']}"), tmp), str(outp), outp / "served", rg_rows=rg_rows, sliced=sliced,
+                   generation=generation, churn=churn, tree=tree, level=level)
     cut_s = round(monotonic() - t1, 1)
     metas = [json.loads((d / "meta.json").read_text()) for d in dirs]
     stamps = {sid: ts for m in metas for sid, ts in m["stamps"].items()}
@@ -1093,7 +1137,7 @@ def stage_options(f):
 @option("-f", "--force", is_flag=True, help="Redo ranges already done")
 @option("-i", "--index", type=int, help="Task index (default: $BATCH_TASK_INDEX)")
 @option("-m", "--mount", required=True, help="Local mount of the data bucket (the scratch bucket beside it)")
-@option("-M", "--mem", default="100GB", help="DuckDB memory limit")
+@option("-M", "--mem", default="100GB", help="Memory budget of the whole process tree (`tree_mem`): DuckDB gets what this process and the append's Arrow buffers leave; the peak is logged (exit 1 past it with $DT_TREE_MEM_ASSERT)")
 @option("-n", "--per-task", default=1, type=IntRange(min=1), help="Ranges per task")
 @option("-o", "--out", default="/stage/out", help="Local output dir")
 @option("-p", "--threads", default=16, type=int, help="DuckDB threads")
@@ -1104,6 +1148,11 @@ def ranges_cmd(bucket, gen, ranges_gen, scratch, scan, force, index, mount, mem,
     previous scan's state, else (the first run) the base's range files. Each range's answer at D over the published
     store (the base's range files, the newest earlier manifest's runs, D's deltas) is checked against D's rows, row for
     row (`append_range`'s `check`), in its `ranges/r####.json`."""
+    with tm.watch(mem, f"ranges {scan}"):
+        _ranges(bucket, gen, ranges_gen, scratch, scan, force, index, mount, mem, per_task, out, threads, tmp)
+
+
+def _ranges(bucket, gen, ranges_gen, scratch, scan, force, index, mount, mem, per_task, out, threads, tmp) -> None:
     prefix = f"{PREFIX}/{gen}"
     run = f"{prefix}/{run_key(scan, scan)}"
     store, sstore = Store(store_url(bucket)), Store(store_url(scratch))
@@ -1125,7 +1174,8 @@ def ranges_cmd(bucket, gen, ranges_gen, scratch, scan, force, index, mount, mem,
     todo = plan[t] if t < len(plan) else []
     err(f"ranges task {t}: {len(todo)} ranges" + (f", {sum(counts[i] for i in todo):,} open rows at {prev} (max task "
                                                   f"{max(sum(counts[i] for i in p) for p in plan):,})" if counts else ", interleaved"))
-    con = sn.connect(threads, mem, tmp)
+    inputs = [f"{mount}/{PREFIX}/{ranges_gen}/{tb}/r{i:04d}.parquet" for tb in tables(sl, False) for i in todo]
+    con = sn.connect(threads, append_mem(tm.Budget.measure(sn.mem_bytes(mem)), inputs, f"ranges {scan}"), tmp)
     # What the store answers each range from once D's run is published beside them: the base's range files and the runs
     # the newest earlier manifest lists (`append_range`'s check).
     check = [f"{mount}/{PREFIX}/{ranges_gen}", *(f"{mount}/{prefix}/{r['key']}" for r in runs)]
@@ -1165,7 +1215,7 @@ def ranges_cmd(bucket, gen, ranges_gen, scratch, scan, force, index, mount, mem,
 @option("-d", "--scan", required=True, help="The scan")
 @option("-L", "--compact-level", type=ar.Level(), default=ar.COMPACT_LEVEL, help=ar.LEVEL_HELP)
 @option("-m", "--mount", required=True, help="Local mount of the data bucket")
-@option("-M", "--mem", default="100GB", help="DuckDB memory limit")
+@option("-M", "--mem", default="100GB", help="Memory budget of the whole process tree (`tree_mem`): the churn's DuckDB gets what this process leaves, the run's cut what its workers and Arrow buffers leave too; the peak is logged (exit 1 past it with $DT_TREE_MEM_ASSERT)")
 @option("-n", "--dry-run", is_flag=True, help="Print the manifest (and the carries it makes due); cut and write nothing")
 @option("-p", "--threads", default=16, type=int, help="DuckDB threads")
 @option("-s", "--skip-published", is_flag=True, help="Exit 0 when `manifests/<D>.json` exists (a retried publish+r2 task goes on to the copy)")
@@ -1199,30 +1249,8 @@ def publish_cmd(bucket, gen, ranges_gen, scratch, scan, compact_level, mount, me
     if store.exists(f"{rk}/meta.json"):
         err(f"{rk}: cut")
     else:
-        pinned = store.read_json(f"{rk}/scans.json")
-        s = pinned["scans"][0]
-        outp = Path(tmp) / "served"
-        shutil.rmtree(outp, ignore_errors=True)
-        t0 = monotonic()
-        base = Store(store_url(bucket)).read_json(f"{prefix}/scans.json")
-        sl = ist.sliced(base)
-        churn = ich.has_churn(base)
-        con = sn.connect(threads, mem, tmp)
-        root = f"{mount}/{prefix}/{rk}"
-        if churn:
-            root = str(publish_churn(con, st, Store(store_url(scratch)), prefix, rk, scan, int(s["ts"]), Path(mount) / prefix / rk,
-                                     st.read_json(f"{PREFIX}/{ranges_gen}/ranges.json"), Path(tmp), sl))
-        lv = store_leveled(st, prefix, base)
-        docs = cut_run(con, root, outp, sliced=sl, generation=ist.has_generation(base), churn=churn, level=lv)
-        cut_s = round(monotonic() - t0, 1)
-        cut = check_cut(con, root, outp, sliced=sl, generation=ist.has_generation(base), churn=churn, level=lv)
-        Store(store_url(bucket)).put_tree(outp, f"{prefix}/{rk}/served")
-        shutil.rmtree(outp)
-        new = {"key": rk, "first": scan, "last": scan, "level": 0, "scans": [scan]}
-        meta = {**run_meta(gen, new, {scan: s["ts"]}, docs, run_attribution(pinned)), "cut_s": cut_s, "check": cut,
-                "check_s": round(monotonic() - t0 - cut_s, 1)}
-        store.create(f"{rk}/meta.json", json.dumps(meta, indent=1) + "\n")
-        err(f"{rk}: cut in {meta['cut_s']}s ({meta['bytes']:,} B)")
+        with tm.watch(mem, f"publish {scan}"):
+            _cut_published(store, st, bucket, scratch, gen, ranges_gen, prefix, rk, scan, mount, mem, threads, tmp)
     print(json.dumps(publish_run(store, scan), indent=1))
     write_marker(st, gen, ranges_gen, scan)
 
@@ -1231,6 +1259,36 @@ def store_leveled(st: Store, prefix: str, base: dict) -> bool:
     """Whether the generation `prefix` of store `st` carries the level sort (`interval_level.leveled`: its `scans.json`
     `base` says so, or `backfill-level` wrote its `served/level.json`): its runs then carry it too."""
     return ilv.leveled(base) or st.exists(f"{prefix}/{ilv.LEVEL_DOC}")
+
+
+def _cut_published(store, st: Store, bucket: str, scratch: str, gen: str, ranges_gen: str, prefix: str, rk: str, scan: str, mount: str, mem: str,
+                   threads: int, tmp: str) -> None:
+    """`publish`'s cut: the run's churn (when the generation carries it), its served sorts, their check, `meta.json`."""
+    pinned = store.read_json(f"{rk}/scans.json")
+    s = pinned["scans"][0]
+    outp = Path(tmp) / "served"
+    shutil.rmtree(outp, ignore_errors=True)
+    t0 = monotonic()
+    base = Store(store_url(bucket)).read_json(f"{prefix}/scans.json")
+    sl = ist.sliced(base)
+    churn = ich.has_churn(base)
+    tree = tm.Budget.measure(sn.mem_bytes(mem))
+    con = sn.connect(threads, tm.stage_mem(tree, f"publish {scan}"), tmp)
+    root = f"{mount}/{prefix}/{rk}"
+    if churn:
+        root = str(publish_churn(con, st, Store(store_url(scratch)), prefix, rk, scan, int(s["ts"]), Path(mount) / prefix / rk,
+                                 st.read_json(f"{PREFIX}/{ranges_gen}/ranges.json"), Path(tmp), sl))
+    lv = store_leveled(st, prefix, base)
+    docs = cut_run(con, root, outp, sliced=sl, generation=ist.has_generation(base), churn=churn, tree=tree, level=lv)
+    cut_s = round(monotonic() - t0, 1)
+    cut = check_cut(con, root, outp, sliced=sl, generation=ist.has_generation(base), churn=churn, level=lv)
+    Store(store_url(bucket)).put_tree(outp, f"{prefix}/{rk}/served")
+    shutil.rmtree(outp)
+    new = {"key": rk, "first": scan, "last": scan, "level": 0, "scans": [scan]}
+    meta = {**run_meta(gen, new, {scan: s["ts"]}, docs, run_attribution(pinned)), "cut_s": cut_s, "check": cut,
+            "check_s": round(monotonic() - t0 - cut_s, 1)}
+    store.create(f"{rk}/meta.json", json.dumps(meta, indent=1) + "\n")
+    err(f"{rk}: cut in {meta['cut_s']}s ({meta['bytes']:,} B)")
 
 
 def publish_churn(con, st: Store, sstore: Store, prefix: str, rk: str, scan: str, D: int, run: Path, ranges: dict, tmp: Path,
@@ -1285,7 +1343,7 @@ def write_marker(st: Store, gen: str, ranges_gen: str, scan: str, *, workers: in
 @option("-F", "--read-from", type=Choice(ar.READ_FROM), default="gcs", help="Read the input runs from the data bucket's mount (gcs) or the R2 copy (r2, mirrored locally; the job's R2 env)")
 @option("-L", "--compact-level", type=ar.Level(), default=ar.COMPACT_LEVEL, help=ar.LEVEL_HELP)
 @option("-m", "--mount", required=True, help="Local mount of the data bucket (the merges read the runs)")
-@option("-M", "--mem", default="100GB", help="DuckDB memory limit (the merged runs' cut)")
+@option("-M", "--mem", default="100GB", help="Memory budget of the whole process tree (`tree_mem`) of each merged run's cut: its workers and DuckDB's limit planned under it; the peak is logged (exit 1 past it with $DT_TREE_MEM_ASSERT)")
 @option("-N", "--max-merges", type=IntRange(min=1), help="Stop after this many merged runs")
 @option("-n", "--dry-run", is_flag=True, help="Print the plan; merge and write nothing")
 @option("-p", "--threads", default=16, type=int, help="DuckDB threads")
@@ -1303,10 +1361,10 @@ def carry_cmd(bucket, gen, ranges_gen, scratch, read_from, compact_level, mount,
     status = None if dry_run else ar.r2_merge_status(f"{PREFIX}/{gen}")
     rec = NULL if dry_run else from_env("merge")
     lv = store_leveled(Store(store_url(bucket)), f"{PREFIX}/{gen}", base)
-    doc = ar.merge_pending(store, carry(gen, k, threads=threads, mem=mem, sliced=sl, generation=ist.has_generation(base), churn=ich.has_churn(base), level=lv),
-                           Path(mount) / PREFIX / gen, tmp=Path(tmp), dry_run=dry_run,
-                           max_merges=max_merges, max_level=compact_level, status=status,
-                           source=(ar.R2Source(), f"{PREFIX}/{gen}") if read_from == "r2" else None, rec=rec)
+    with tm.watch(mem, f"carry {gen}"):
+        doc = ar.merge_pending(store, carry(gen, k, threads=threads, mem=mem, sliced=sl, generation=ist.has_generation(base), churn=ich.has_churn(base), level=lv),
+                               Path(mount) / PREFIX / gen, tmp=Path(tmp), dry_run=dry_run, max_merges=max_merges, max_level=compact_level, status=status,
+                               source=(ar.R2Source(), f"{PREFIX}/{gen}") if read_from == "r2" else None, rec=rec)
     doc["prune"] = _summary(ar.finish_merge(rec, doc, lambda: ar.prune_folded(store, retain=FOLDED_RETAIN, dry_run=dry_run, where=" gcs")))
     print(json.dumps(doc, indent=1))
 
@@ -1331,10 +1389,11 @@ def compact_cmd(bucket, gen, ranges_gen, scratch, policy, read_from, grace_s, jo
     if (b := gs_bucket(bucket)) is None:
         raise SystemExit(f"interval store: the staged compaction reads a mounted GCS bucket; {bucket!r} is not one")
     try:
-        doc = ar.run_compaction(Store(f"gs://{b}"), ic.compactor(rg_rows), gen, Path(mount), Path(tmp),
-                                lease=ar.gcs_compaction_lease_file(gs_bucket(scratch), PREFIX) if promote else None, policy=policy, force=force,
-                                r2_bucket=b if to_r2 else None, grace_s=grace_s, threads=threads, mem=mem, jobs=jobs, read_from=read_from,
-                                promote=promote, rec=from_env("compact"))
+        with tm.watch(mem, f"compact {gen}"):
+            doc = ar.run_compaction(Store(f"gs://{b}"), ic.compactor(rg_rows), gen, Path(mount), Path(tmp),
+                                    lease=ar.gcs_compaction_lease_file(gs_bucket(scratch), PREFIX) if promote else None, policy=policy, force=force,
+                                    r2_bucket=b if to_r2 else None, grace_s=grace_s, threads=threads, mem=mem, jobs=jobs, read_from=read_from,
+                                    promote=promote, rec=from_env("compact"))
     except ar.Busy as e:
         err(f"compact: {e}")
         raise SystemExit(ar.BUSY)

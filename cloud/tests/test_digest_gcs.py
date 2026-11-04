@@ -81,26 +81,6 @@ def test_reply_discord_link_text():
     assert D.reply(ROWS[0], CFG, platform="discord").body == "$19,784/mo (+$615) \u00b7 [view \u2192](https://site.example.org/?d=260803#diff)"
 
 
-def test_op_body():
-    assert D.op_body(D.Month(ROWS), date(2026, 8, 1), "https://x/p.png", CFG).split("\n") == [
-        # a store younger than the window, whose look-back figure would start where month-to-date does: none
-        ":arrow_deg20: **+10.0 TiB** month-to-date · [dashboard](https://site.example.org/)",
-        "",
-        "*Weekly summaries*",
-        ":arrow_deg0: [wk of 8/3](https://site.example.org/?d=260804-2d#over-time) _(partial)_ — **3,010 TiB** (+10.0, 0.3%) · $19,374/mo (+$205)",
-        "",
-        "![GCS usage — August 2026](https://x/p.png)",
-    ]
-
-
-def test_op_body_full_week_not_partial():
-    # a 7-scan week (Mon 8/3 .. Sun 8/9) is not flagged partial
-    dm = [("2026-08-02", _meta(3000, 300, 600, 1500, 600))]
-    for i, d in enumerate(range(3, 10)):
-        dm.append((f"2026-08-0{d}", _meta(3000 + i, 300 + i, 600, 1500, 600)))
-    rows = D.rows_from_meta(dm, CFG.prices)[1:]
-    bullet = D.op_body(D.Month(rows), date(2026, 8, 1), "https://x/p.png", CFG).split("\n")[3]
-    assert bullet.startswith(":arrow_deg0: [wk of 8/3](https://site.example.org/?d=260809-7d#over-time) — ")
 
 
 # ---- a reply per day: the day's first scheduled scan; a manual one only stands in ------------------------------------
@@ -168,30 +148,6 @@ def test_a_manual_scan_replies_for_its_day_once_a_later_scan_lands(sub_root):
     assert [(r.date, r.prev) for r in D.load_month(sub_root, AUG, CFG.prices, SUB_TRIGGERS).rows][-1] == ("2026-08-05T0300", "2026-08-04T0700")
 
 
-def test_image_body():
-    # `POST /api/digest-image`'s tiers card: each scan's bytes per class, bottom → top (Archive … Standard)
-    assert D.image_body(D.Month(ROWS), AUG, CFG) == {
-        "kind": "tiers",
-        "title": "GCS usage — August 2026",
-        "note": "site.example.org · TiB",
-        "month": "2026-08",
-        # the window: 30 days to the latest scan (8/4), inclusive
-        "from": "2026-07-06",
-        "units": "TiB",
-        "tiers": ["Archive", "Coldline", "Nearline", "Standard"],
-        "points": [
-            {"scan": "2026-08-03", "bytes": [600 * TIB, 1500 * TIB, 600 * TIB, 330 * TIB]},
-            {"scan": "2026-08-04", "bytes": [600 * TIB, 1500 * TIB, 600 * TIB, 310 * TIB]},
-        ],
-        # the window's: its baseline (a store younger than it: the first scan's lead-in, 8/2) → the latest
-        "diff": {"from": "2026-08-02", "to": "2026-08-04", "path": "", "title": "What changed — 8/2 → 8/4"},
-    }
-
-
-def test_image_body_no_diff_without_two_scans():
-    # a month's lone scan with no lead-in: nothing to diff
-    lone = D.rows_from_meta([("2026-08-03", _meta(3030, 330, 600, 1500, 600))], CFG.prices)
-    assert "diff" not in D.image_body(D.Month(lone), AUG, CFG)
 
 
 def test_render_plot_posts_to_site(monkeypatch, tmp_path):
@@ -201,7 +157,8 @@ def test_render_plot_posts_to_site(monkeypatch, tmp_path):
     monkeypatch.setenv("SITE_TOKEN", "tok")
     monkeypatch.setattr(site, "post_json", lambda url, token, path, body, timeout=120: calls.append((url, token, path, body)) or b"\x89PNG")
     TPL.render_plot(D.Month(ROWS), AUG, tmp_path / "op.png")
-    assert calls == [("https://site.example.org", "tok", "/api/digest-image", D.image_body(D.Month(ROWS), AUG, CFG))]
+    # the request is the site's (`POST /api/digest-op`'s `image`; conftest's stand-in here)
+    assert calls == [("https://site.example.org", "tok", "/api/digest-image", {"site_image": "gcs", "month": "2026-08", "to": "2026-08-04"})]
     assert (tmp_path / "op.png").read_bytes() == b"\x89PNG"
 
 
@@ -216,16 +173,6 @@ def test_render_plot_without_site_token(monkeypatch, tmp_path):
 
 # ---- Discord twin ---------------------------------------------------------
 
-
-def test_op_body_without_plot():
-    # `plot_url=None` (Discord attaches the PNG) drops the trailing image lines only
-    assert D.op_body(D.Month(ROWS), date(2026, 8, 1), None, CFG).split("\n") == [
-        # a store younger than the window, whose look-back figure would start where month-to-date does: none
-        ":arrow_deg20: **+10.0 TiB** month-to-date · [dashboard](https://site.example.org/)",
-        "",
-        "*Weekly summaries*",
-        ":arrow_deg0: [wk of 8/3](https://site.example.org/?d=260804-2d#over-time) _(partial)_ — **3,010 TiB** (+10.0, 0.3%) · $19,374/mo (+$205)",
-    ]
 
 
 def test_state_path():
@@ -294,20 +241,9 @@ class _FakeBot:
         return "t1"
 
 
-# One scan in (8/3: +30 on 3000, 1 day → 7%/wk-equivalent → deg50; the week's
-# bullet is +1.0% → deg20), then both scans (+10 net → deg20; week +0.3% → deg0).
-OP_ONE_SCAN = "\n".join([
-    "<:arrow_deg50:5> **+30.0 TiB** month-to-date · [dashboard](https://site.example.org/)",
-    "",
-    "*Weekly summaries*",
-    "<:arrow_deg20:2> [wk of 8/3](https://site.example.org/?d=260803-1d#over-time) _(partial)_ — **3,030 TiB** (+30.0, 1.0%) · $19,784/mo (+$615)",
-])
-OP_TWO_SCANS = "\n".join([
-    "<:arrow_deg20:2> **+10.0 TiB** month-to-date · [dashboard](https://site.example.org/)",
-    "",
-    "*Weekly summaries*",
-    "<:arrow_deg0:1> [wk of 8/3](https://site.example.org/?d=260804-2d#over-time) _(partial)_ — **3,010 TiB** (+10.0, 0.3%) · $19,374/mo (+$205)",
-])
+# The OP after one scan in (8/3), then both (8/4): the site's render (conftest's stand-in), posted as Discordified
+OP_ONE_SCAN = "<site OP: gcs 2026-08, 1 scans to 2026-08-03, params ->"
+OP_TWO_SCANS = "<site OP: gcs 2026-08, 2 scans to 2026-08-04, params ->"
 CAL = "https://icons.example.org/calendar.png?v=2"
 AV = "https://icons.example.org/arrows/av_deg"
 
@@ -409,9 +345,9 @@ def test_links_use_each_scans_canonical_slug():
     assert urls(at(16))[1:] == ["https://site.example.org/?d=2610090000#diff)", "https://site.example.org/?d=2610091236#diff)"]
 
 
-def test_op_body_on_the_first(tmp_path: Path):
-    # 11/1: the window reaches back to 10/2, its weeks from 9/28's (baselined on 9/27's row), the four that ended in
-    # October marked so; the last 30 days beside the one-day month-to-date; October's thread linked
+def test_load_month_on_the_first(tmp_path: Path):
+    # 11/1: the window's rows reach back into October (the site's OP reads them: the `gcs-first` parity fixture), the
+    # month's own are November's only
     import json
 
     root = tmp_path / "snapshots"
@@ -420,16 +356,7 @@ def test_op_body_on_the_first(tmp_path: Path):
         (root / f"{d}").mkdir(parents=True)
         (root / f"{d}" / "meta.json").write_text(json.dumps(_meta(t, t - 2700, 600, 1500, 600)))
     month = D.load_month(str(root), date(2026, 11, 1), CFG.prices, {})
-    lines = D.op_body(month, date(2026, 11, 1), None, CFG, "https://slack.example.org/archives/C1/p1").split("\n")
-    assert lines[0].split(" · ")[:2] == [":arrow_deg10: **+2.0 TiB** month-to-date", "**+60.0 TiB** [last 30d](https://site.example.org/?d=" + month.rows[-1].slug + "-30d#over-time)"]
-    assert [l.split(" — ")[0] for l in lines[3:8]] == [
-        ":arrow_deg10: [wk of 9/28](https://site.example.org/?d=261004-7d#over-time) (Oct)",
-        ":arrow_deg10: [wk of 10/5](https://site.example.org/?d=261011-7d#over-time) (Oct)",
-        ":arrow_deg10: [wk of 10/12](https://site.example.org/?d=261018-7d#over-time) (Oct)",
-        ":arrow_deg10: [wk of 10/19](https://site.example.org/?d=261025-7d#over-time) (Oct)",
-        f":arrow_deg10: [wk of 10/26](https://site.example.org/?d={month.rows[-1].slug}-7d#over-time)",
-    ]
-    assert lines[3].split(" — ")[1] == "**3,018 TiB** (+14.0, 0.5%) · $19,538/mo (+$287)"
-    assert lines[8:] == ["", "[← October](https://slack.example.org/archives/C1/p1)"]
+    # from 9/28, the window's first week's Monday (9/27, its baseline, only seeds 9/28's delta)
+    assert (month.pre[0].date, month.pre[-1].date, len(month.pre)) == ("2026-09-28", "2026-10-31", 34)
     # one reply a day, November's only
     assert [r.date for r in month.rows] == ["2026-11-01"]

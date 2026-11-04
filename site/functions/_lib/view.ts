@@ -600,7 +600,8 @@ export async function readPathHistory(env: Env, dates: string[], path: string, s
 }
 
 /** The owner lens for a scan: the live assignments folded against it (cached per
- * (scan, ledger head) by the totals machinery) — null when nothing is assigned. */
+ * (scan, ledger head) by the totals machinery) — null when nothing is assigned, or the deployment keeps no ledger
+ * (a lens is then the scan's attribution, as `poolLensFor`'s pools are). */
 const assignerMemo = new IsoMap<string, Promise<Map<string, string>>>('assignerMemo')
 /** email → canonical user id (`user_emails`), memoized per isolate — to match
  * an assignment's assigner (`actions.actor`, an email) against a `by=` (canonical). */
@@ -613,6 +614,7 @@ async function assignerMap(env: Env): Promise<Map<string, string>> {
   }, 10_000, joinOf(env, 'assigners'))
 }
 async function ownerLensFor(env: Env, date: string, lens: Lens, by?: string): Promise<FoldedLens | null> {
+  if (!(await hasLedger(env))) return null
   let assignments = await ownerAssignments(env, date)
   if (by) {
     const emap = await assignerMap(env)

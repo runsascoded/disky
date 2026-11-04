@@ -8,10 +8,11 @@
 import type { D1Database } from '@cloudflare/workers-types'
 import { BATCH_GAP_S } from './batchGroups.js'
 import { slackApi, type SlackEnv, slackPeople, slackScopes } from './slack.js'
+import { dataUriImage, identiconPng, identiconSeed, publishAvatar } from './publicAvatar.js'
 import type { SlogBatch, SlogEvent } from './sessionLogShape.js'
 import {
   addPages, addTrail, type Burst, DISCORD, emptyTrail, type Fmt, fmtGap, highlights, joins, KIND_DEFS, type KindConf,
-  type KindRow, type KindsConf, mergeKinds, renderDetails, renderDiscord, renderHeadline, renderLines, renderSummary, reported, senderName,
+  type KindRow, type KindsConf, actorName, mergeKinds, renderDetails, renderDiscord, renderHeadline, renderLines, renderSummary, reported, senderName,
   type ServerEvent, sessionUrl,
   SLACK, tallyClient,
 } from './activityShape.js'
@@ -20,6 +21,8 @@ export interface ActivityEnv extends SlackEnv {
   DB?: D1Database
   /** A Discord channel webhook URL (a secret). Unset = no Discord. */
   DISCORD_ADMIN_WEBHOOK?: string
+  /** Seeds the generated faces (`identiconSeed`); unset = posts without a face of their own. */
+  SESSION_SECRET?: string
 }
 
 export type Wait = (p: Promise<unknown>) => void
@@ -294,6 +297,45 @@ export async function rerender(env: ActivityEnv, ids: readonly number[], now: nu
   return done
 }
 
+export interface Sender { name: string; icon: string | null }
+
+/** Who a burst's posts are sent as: a signed-in actor's profile name and face, a grant's holder name (else its label,
+ *  else `grant <id prefix>`) and face; without a face, a generated identicon (seeded by `SESSION_SECRET`), never the
+ *  bot's own icon. Faces go through `public_avatars` so the sinks can fetch them; a missing table or secret just
+ *  leaves the post without one. */
+export async function senderOf(env: ActivityEnv, b: Pick<Burst, 'actor' | 'via' | 'origin'>, now: number): Promise<Sender> {
+  const db = env.DB!
+  let name = actorName(b.actor)
+  let face: string | null = null
+  if (b.via === 'grant' && b.actor.startsWith('grant:')) {
+    const key = b.actor.slice('grant:'.length)
+    const g = await db.prepare(
+      'SELECT id, name, subject_json FROM grants WHERE id = ?1 OR name = ?1 ORDER BY (id = ?1) DESC, (revoked_at IS NULL) DESC, created_at DESC LIMIT 1',
+    ).bind(key).first<{ id: string; name: string | null; subject_json: string | null }>()
+    if (g) {
+      let subject: { name?: string; avatar?: string } = {}
+      try { subject = g.subject_json ? JSON.parse(g.subject_json) : {} } catch { /* a malformed subject reads as none */ }
+      name = subject.name?.trim() || g.name?.trim() || `grant ${g.id.slice(0, 4)}`
+      face = subject.avatar ?? null
+    }
+  } else if (b.via === 'session') {
+    const p = await db.prepare('SELECT name, avatar FROM profiles WHERE email = ?').bind(b.actor).first<{ name: string | null; avatar: string | null }>()
+    name = senderName(b.actor, p?.name)
+    face = p?.avatar ?? null
+  }
+  const nowS = Math.floor(now / 1000)
+  try {
+    const img = dataUriImage(face)
+    if (img) return { name, icon: await publishAvatar(db, b.origin, img, nowS) }
+    if (!env.SESSION_SECRET) return { name, icon: null }
+    const gen = { type: 'image/png', bytes: identiconPng(await identiconSeed(env.SESSION_SECRET, b.actor)) }
+    return { name, icon: await publishAvatar(db, b.origin, gen, nowS) }
+  } catch (e) {
+    if (!missingTable(e)) throw e
+    return { name, icon: null }
+  }
+}
+
 async function render(env: ActivityEnv, b: StoredBurst, conf: KindsConf, now: number): Promise<void> {
   const db = env.DB!
   await db.prepare('UPDATE activity_bursts SET rendered_ms = ?, dirty = 0 WHERE id = ?').bind(now, b.id).run()
@@ -308,20 +350,17 @@ async function render(env: ActivityEnv, b: StoredBurst, conf: KindsConf, now: nu
     return { ...e, line: `${fmt.esc(e.line)}${e.route ? ` on ${fmt.code(e.route)}` : ''}`, href: sessionUrl(b.origin, sid, e.kind === 'error' ? 'errors' : undefined) }
   })
   const s = sinks(env)
+  const who = s.slack || s.discord ? await senderOf(env, b, now) : { name: '', icon: null }
   if (s.slack) {
     const channel = env.SLACK_ADMIN_CHANNEL!
-    // A signed-in burst posts as its user (`username` / `icon_url` overrides on the bot's own post), when the installed
-    // app may override the sender; otherwise the line itself says who. The face is the user's Slack profile image (the
-    // site's profile faces are stored inline, never at a URL Slack could fetch); someone the workspace doesn't know
-    // keeps the app's icon. The post is one line, everything else in the thread.
-    const asUser = b.via === 'session' && (await slackScopes(env)).has('chat:write.customize')
-    const person = asUser
-      ? (await slackPeople(env, [b.actor]))[b.actor.toLowerCase()]
-      : undefined
-    const sender = asUser
-      ? { username: senderName(b.actor, (await db.prepare('SELECT name FROM profiles WHERE email = ?').bind(b.actor).first<{ name: string | null }>())?.name), ...(person?.image ? { icon_url: person.image } : {}) }
-      : {}
-    const text = renderHeadline(b, { fmt: SLACK, conf }, asUser)
+    // A burst posts as its user (`username` / `icon_url` overrides on the bot's own post), when the installed app may
+    // override the sender; otherwise the line itself says who. The face is the user's Slack profile image, else their
+    // published one (`senderOf`). The post is one line, everything else in the thread.
+    const asUser = (await slackScopes(env)).has('chat:write.customize')
+    const person = asUser ? (await slackPeople(env, [b.actor]))[b.actor.toLowerCase()] : undefined
+    const icon = person?.image ?? who.icon
+    const sender = asUser ? { username: who.name, ...(icon ? { icon_url: icon } : {}) } : {}
+    const text = renderHeadline(b, { fmt: SLACK, conf, name: who.name }, asUser)
     const parent = await ensurePost(db, b.id, 'slack', 'parent', now,
       async () => (await slackApi(env, 'chat.postMessage', { channel, text, ...sender, unfurl_links: false, unfurl_media: false })).ts ?? null,
       ts => slackApi(env, 'chat.update', { channel, ts, text }))
@@ -343,15 +382,16 @@ async function render(env: ActivityEnv, b: StoredBurst, conf: KindsConf, now: nu
   if (s.discord) {
     const url = env.DISCORD_ADMIN_WEBHOOK!
     const content = renderDiscord(
-      renderSummary(b, { fmt: DISCORD, conf, highlights: h }),
+      renderSummary(b, { fmt: DISCORD, conf, highlights: h, name: who.name }),
       lineKinds.map(([kind, es]) => renderLines(kind, lineEvents(es, DISCORD), DISCORD)),
       `${b.origin}/admin/activity?burst=${b.id}`,
     )
     const body = JSON.stringify({ content, allowed_mentions: { parse: [] } })
+    const created = JSON.stringify({ content, allowed_mentions: { parse: [] }, username: who.name.slice(0, 80), ...(who.icon ? { avatar_url: who.icon } : {}) })
     const headers = { 'content-type': 'application/json' }
     await ensurePost(db, b.id, 'discord', 'parent', now,
       async () => {
-        const r = await fetch(`${url}?wait=true`, { method: 'POST', headers, body })
+        const r = await fetch(`${url}?wait=true`, { method: 'POST', headers, body: created })
         if (!r.ok) { console.log(`activity: discord post ${r.status}`); return null }
         return ((await r.json()) as { id?: string }).id ?? null
       },

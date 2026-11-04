@@ -351,6 +351,13 @@ CREATE TABLE profiles (
   updated_at  INTEGER NOT NULL
 , name TEXT);
 
+CREATE TABLE public_avatars (
+  sha256      TEXT PRIMARY KEY,
+  type        TEXT NOT NULL,
+  data        TEXT NOT NULL,
+  created_at  INTEGER NOT NULL
+);
+
 CREATE TABLE scan_runs (
   run_id       TEXT PRIMARY KEY,
   store        TEXT NOT NULL DEFAULT 'primary',

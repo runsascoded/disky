@@ -53,6 +53,7 @@ from . import interval_churn as ich
 from . import interval_level as ilv
 from . import interval_store as ist
 from . import static_names as sn
+from . import tree_mem as tm
 from .append_runner import LocalRunStore, latest_key, run_key, scans_of
 from .blobstore import Store, mirror, upload_new
 from . import static_local as sl
@@ -121,8 +122,9 @@ def build_gen(scans: dict, mount: str, gen_dir: Path, work: Path, *, gen: str, k
     (`build_slices_range`, checked) → slices with their path's total (`slice_totals_range`) → with `attribution`, the
     attribution table over the covered scans (`build_attribution_range`, checked; `"attribution": true`) → the served
     sorts (`cut`, dyadic segments over the scans' stamps; with `level`, the level sort too, `"level": true`) and their churn
-    (`stats.json`). Returns a summary (rows, and per
-    stage its seconds, peak work-disk GiB and peak RSS GiB so far)."""
+    (`stats.json`). Returns a summary (rows, and per stage its seconds, peak work-disk GiB and peak RSS GiB so far). `mem`
+    is the whole process tree's budget (`tree_mem`): the stages' DuckDB limit is what this process leaves (`stage_mem`),
+    the cut's is planned under it (`cut_gen`'s `tree`)."""
     t0, times, peaks = monotonic(), {}, {}
     gen_dir.mkdir(parents=True, exist_ok=True)
     work.mkdir(parents=True, exist_ok=True)
@@ -135,7 +137,8 @@ def build_gen(scans: dict, mount: str, gen_dir: Path, work: Path, *, gen: str, k
         hb.after(stage)
         return monotonic()
 
-    con = sn.connect(threads, mem, work / "duckdb")
+    tree = tm.Budget.measure(sn.mem_bytes(mem))
+    con = sn.connect(threads, tm.stage_mem(tree, f"build {gen}"), work / "duckdb")
     doc = {k_: v for k_, v in scans.items() if k_ != "mount"}
     # The objects' native version, when the scans' sorts carry it (`path-index -G`): recorded only then.
     doc = ist.record_generation(doc, ist.generation_of(con, doc, mount))
@@ -171,7 +174,7 @@ def build_gen(scans: dict, mount: str, gen_dir: Path, work: Path, *, gen: str, k
         t = done(ist.ATTRIBUTION, t)
     if bad:
         raise RuntimeError(f"build {gen}: the versions don't reconstruct every scan: (range, scan) {bad}")
-    sorts, stats = ist.cut_gen(con, gen_dir, doc, rg_rows=rg_rows, jobs=jobs)
+    sorts, stats = ist.cut_gen(con, gen_dir, doc, rg_rows=rg_rows, jobs=jobs, tree=tree)
     done("cut", t)
     (gen_dir / "scans.json").write_text(json.dumps(doc, indent=1) + "\n")
     disk.close()
@@ -207,11 +210,12 @@ def open_state_sql(root: str, runs: list[str], name: str, sliced: bool = True, g
 
 
 def append_scan(con, gen_dir: Path, scan: dict, mount: str, work: Path, *, gen: str, rg_rows: int = ist.SERVED_RG,
-                attributed: bool = False) -> dict:
+                attributed: bool = False, tree: tm.Budget | None = None) -> dict:
     """Scan `scan` appended to the generation in `gen_dir` (the base, its runs and manifests) as the run `deltas/<id>/`, and
     published (`manifests/<id>.json`): per key range `append_range` over the refolded open versions (`open_state_sql`),
     the run's served sorts (`cut_run`) and `meta.json`, then `publish_run`. `attributed`: the run carries the attribution
-    table (`scan` covered when its entry names an `attribution.parquet`), as the staged chain's `prepare` pins it."""
+    table (`scan` covered when its entry names an `attribution.parquet`), as the staged chain's `prepare` pins it. `tree`:
+    the process tree's budget the cut is planned under (`cut_run`)."""
     t0 = monotonic()
     disk = DiskPeak(work)
     d = scan["id"]
@@ -238,23 +242,26 @@ def append_scan(con, gen_dir: Path, scan: dict, mount: str, work: Path, *, gen: 
     ranges = store.read_json("ranges.json")
     roots = [str(gen_dir / r["key"]) for r in runs]
     count = ich.counts_at(ia.scan_entry(store.read_json, base, have[-1]), scan)
-    for r in ranges["ranges"]:
-        name = f"r{r['i']:04d}"
-        doc = ia.append_range(con, open_state_sql(str(gen_dir), roots, name, sliced, gen_col, attributed, churn), scan, r, name, run,
-                              bucket=base["bucket"], mount=mount, sliced=sliced, generation=gen_col, check=[str(gen_dir), *roots],
-                              attributed=attributed, churn=churn, count=count)
-        doc["prev"] = have[-1]
-        doc["check"]["runs"] = [x["key"] for x in runs]
-        (run / "ranges").mkdir(exist_ok=True)
-        (run / "ranges" / f"{name}.json").write_text(json.dumps(doc) + "\n")
+    with tm.phase("append ranges"):
+        for r in ranges["ranges"]:
+            name = f"r{r['i']:04d}"
+            doc = ia.append_range(con, open_state_sql(str(gen_dir), roots, name, sliced, gen_col, attributed, churn), scan, r, name, run,
+                                  bucket=base["bucket"], mount=mount, sliced=sliced, generation=gen_col, check=[str(gen_dir), *roots],
+                                  attributed=attributed, churn=churn, count=count)
+            doc["prev"] = have[-1]
+            doc["check"]["runs"] = [x["key"] for x in runs]
+            (run / "ranges").mkdir(exist_ok=True)
+            (run / "ranges" / f"{name}.json").write_text(json.dumps(doc) + "\n")
     if churn:
         st = run / "state"
-        ich.apply_run(con, run, st, ranges, int(scan["ts"]), run, open_rows=lambda name: f"SELECT * FROM read_parquet({q(str(st / 'pvl' / f'{name}.parquet'))})")
+        with tm.phase("append churn"):
+            ich.apply_run(con, run, st, ranges, int(scan["ts"]), run, open_rows=lambda name: f"SELECT * FROM read_parquet({q(str(st / 'pvl' / f'{name}.parquet'))})")
     shutil.rmtree(run / "state")
     t1 = monotonic()
-    docs = ia.cut_run(con, str(run), run / "served", rg_rows=rg_rows, sliced=sliced, generation=gen_col, churn=churn, level=level)
+    docs = ia.cut_run(con, str(run), run / "served", rg_rows=rg_rows, sliced=sliced, generation=gen_col, churn=churn, tree=tree, level=level)
     cut_s = round(monotonic() - t1, 1)
-    cut = ia.check_cut(con, str(run), run / "served", sliced=sliced, generation=gen_col, churn=churn, level=level)
+    with tm.phase("append check"):
+        cut = ia.check_cut(con, str(run), run / "served", sliced=sliced, generation=gen_col, churn=churn, level=level)
     new = {"key": rk, "first": d, "last": d, "level": 0, "scans": [d]}
     meta = {**ia.run_meta(gen, new, {d: scan["ts"]}, docs, ia.run_attribution(pinned)), "cut_s": cut_s, "check": cut,
             "check_s": round(monotonic() - t1 - cut_s, 1)}
@@ -292,7 +299,7 @@ def merge_due(gen_dir: Path, work: Path, *, gen: str, k: int, compact_level: int
 @option("-k", "--ranges", "k", default=RANGES, type=IntRange(min=1), help="Key ranges (each one DuckDB pass over every scan)")
 @option("-l", "--level", is_flag=True, help="Cut the level sort too (`interval_level`, what `/api/diff/level` reads; `\"level\": true` in `scans.json`): the generation's appends and compactions carry it")
 @option("-L", "--layout", "layouts", multiple=True, required=True, help="Key template of the scans' `path` sorts under -s (`{id}` the scan id, `{gen}` the store generation); repeat")
-@option("-M", "--mem", default="4GB", help="DuckDB memory limit")
+@option("-M", "--mem", default="4GB", help="Memory budget of the whole process tree (`tree_mem`): the stages' DuckDB gets what this process leaves, the cut's what its workers and Arrow buffers leave too; the peak is logged (exit 1 past it with $DT_TREE_MEM_ASSERT)")
 @option("-o", "--out", "store_root", required=True, help="The store: a dir or URL (`r2://bucket[/prefix]`, `s3://…`, `gs://…`), the readers' INDEX_R2 root")
 @option("-p", "--threads", default=4, type=IntRange(min=1), help="DuckDB threads")
 @option("-r", "--rg-rows", default=ist.SERVED_RG, type=IntRange(min=1), help="Rows per served row group")
@@ -308,7 +315,7 @@ def build_cmd(attribution, gen, jobs, k, level, layouts, mem, store_root, thread
     prefix = f"{PREFIX}/{gen}"
     if store.listing(prefix):
         raise SystemExit(f"{store.root}/{prefix}/ exists: a generation is never rewritten")
-    with workdir(work) as w:
+    with tm.watch(mem, f"build {gen}"), workdir(work) as w:
         scans = find_scans(scans_root, list(layouts), w / "scans", through=through)
         if not scans["scans"]:
             raise SystemExit(f"no scans under {scans_root} matching {list(layouts)}")
@@ -336,7 +343,7 @@ def build_cmd(attribution, gen, jobs, k, level, layouts, mem, store_root, thread
 @option("-K", "--compact-now", is_flag=True, help="Compact into a new generation now (when the generation has runs), whatever the policy says")
 @option("-j", "--jobs", default=1, type=IntRange(min=1), help="A due compaction's key ranges, then served sorts, folded this many at a time, on cursors of one DuckDB database (-p threads and -M memory shared): each ends in a serial parquet writer. The output's bytes don't depend on it")
 @option("-L", "--layout", "layouts", multiple=True, required=True, help="Key template of the scans' `path` sorts under -s; repeat")
-@option("-M", "--mem", default="4GB", help="DuckDB memory limit of the append; a due compaction's whole process tree (`tree_mem`: DuckDB gets what this process, the cut's workers and the Arrow buffers leave)")
+@option("-M", "--mem", default="4GB", help="Memory budget of the whole process tree (`tree_mem`), every phase: the append's DuckDB gets what this process and its Arrow buffers leave, each cut (a run's, a carry's, a compaction's) and fold what its workers and Arrow buffers leave too; the peak is logged (exit 1 past it with $DT_TREE_MEM_ASSERT)")
 @option("-n", "--prune-dry-run", is_flag=True, help="Report the folded runs and compacted generations the prune would delete from the store; delete nothing")
 @option("-N", "--no-merge", is_flag=True, help="Skip the due carries and compaction (a later `add` makes them)")
 @option("-o", "--out", "store_root", required=True, help="The store: a dir or URL, the readers' INDEX_R2 root")
@@ -359,9 +366,10 @@ def add_cmd(attribution, compact, read_from, gen, grace_s, compact_now, jobs, la
         _check_gen(gen)
     gen = ic.resolve_gen(store, gen)
     prefix = f"{PREFIX}/{gen}"
-    with workdir(work) as w:
+    with tm.watch(mem, f"add {gen}"), workdir(work) as w:
         gen_dir = w / "store" / prefix
-        got, before = sl.read_gen(store, read_from, prefix, gen_dir, reads, label=f"add {gen}: read")
+        with tm.phase("read"):
+            got, before = sl.read_gen(store, read_from, prefix, gen_dir, reads, label=f"add {gen}: read")
         if f"{prefix}/scans.json" not in before:
             raise SystemExit(f"{store.root}/{prefix}/scans.json: no such generation")
         base = json.loads((gen_dir / "scans.json").read_text())
@@ -377,7 +385,9 @@ def add_cmd(attribution, compact, read_from, gen, grace_s, compact_now, jobs, la
         redo = tuple(f"{prefix}/{run_key(s['id'], s['id'])}/" for s in pending)
         stale = sorted(key for key in before if key.startswith(redo)) if redo else []
         before = {key: n for key, n in before.items() if not (redo and key.startswith(redo))}
-        con = sn.connect(threads, mem, w / "duckdb")
+        tree = tm.Budget.measure(sn.mem_bytes(mem))
+        inputs = [str(f) for t in ia.tables(ist.sliced(base), False) for f in sorted((gen_dir / t).glob("r*.parquet"))]
+        con = sn.connect(threads, ia.append_mem(tree, inputs, f"add {gen}"), w / "duckdb")
         if not ist.sliced(base):
             # No owner axis in the generation: a pending scan naming owners is refused before anything is appended.
             for s in pending:
@@ -388,13 +398,19 @@ def add_cmd(attribution, compact, read_from, gen, grace_s, compact_now, jobs, la
             if late := [s["id"] for s in pending if s.get("version") == 2 and ist.source_has_generation(con, sn._src(base["bucket"], s["src"], scans["mount"]))]:
                 err(f"{', '.join(late)}: the sorts carry `{ist.GENERATION}`, generation {gen} doesn't; appended without it "
                     "(`interval-store backfill-generation` folds it into a new generation that does)")
-        added = [append_scan(con, gen_dir, s, scans["mount"], w, gen=gen, rg_rows=rg_rows, attributed=attributed) for s in pending]
+        with tm.phase("append"):
+            added = [append_scan(con, gen_dir, s, scans["mount"], w, gen=gen, rg_rows=rg_rows, attributed=attributed, tree=tree) for s in pending]
+        # The append's database idle from here (the carries and the compaction open their own, each budget measured
+        # with what this process then holds): its pages back first.
+        con.close()
         k = lstore.read_json("ranges.json")["k"]
-        merged = None if no_merge or not pending else merge_due(gen_dir, w, gen=gen, k=k, compact_level=compact.carry_level, rg_rows=rg_rows,
-                                                                threads=threads, mem=mem)
+        with tm.phase("merge"):
+            merged = None if no_merge or not pending else merge_due(gen_dir, w, gen=gen, k=k, compact_level=compact.carry_level, rg_rows=rg_rows,
+                                                                    threads=threads, mem=mem)
         ours = {f"{prefix}/{p.relative_to(gen_dir).as_posix()}" for p in gen_dir.rglob("*") if p.is_file()}
         store.delete([key for key in stale if key not in ours])
-        uploaded = upload_new(store, gen_dir, prefix, before, publish_order, tier=publish_tier)
+        with tm.phase("upload"):
+            uploaded = upload_new(store, gen_dir, prefix, before, publish_order, tier=publish_tier)
         prune = ar.prune_folded(GenStore(store, prefix), now=sl.now(), grace_s=grace_s, retain=ia.FOLDED_RETAIN, dry_run=prune_dry_run, log=err)
         if not prune_dry_run:
             ar.rm_local(gen_dir, prune["keys"])  # the mirror too: a later `add` over this work dir must not upload them again
@@ -402,8 +418,9 @@ def add_cmd(attribution, compact, read_from, gen, grace_s, compact_now, jobs, la
         compacted = None
         why = None if no_merge else ar.forced(gen_dir) if compact_now else ar.due_in(gen_dir, compact)
         if why is not None:
-            compacted = ar.compact_store(store, ic.compactor(rg_rows), gen, gen_dir, w, policy=compact, why=why, threads=threads, mem=mem, jobs=jobs,
-                                         reads=got)
+            with tm.phase("compact"):
+                compacted = ar.compact_store(store, ic.compactor(rg_rows), gen, gen_dir, w, policy=compact, why=why, threads=threads, mem=mem, jobs=jobs,
+                                             reads=got)
         preds = ic.prune_predecessors(store, gen, now=sl.now(), grace_s=grace_s, dry_run=prune_dry_run)
     print(json.dumps({"gen": gen, "after": have[-1], "added": added, "merge": merged, "files": len(uploaded),
                       "prune": {k_: v for k_, v in prune.items() if k_ != "keys"}, "compact": compacted, "predecessors": preds}, indent=1))

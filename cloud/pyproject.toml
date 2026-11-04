@@ -68,5 +68,6 @@ packages = ["src/dt_cloud"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = [
+    "real_site_render: the digest's real `site_render` (`POST /api/digest-op`), not conftest's stand-in",
     "slow: the long tail (byte-identity sweeps, brute-force oracles); CI runs them, `scripts/remote-test` skips them unless `-a`",
 ]
