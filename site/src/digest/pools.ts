@@ -132,10 +132,12 @@ function ordered(r: CwScan, cfg: DigestCfg): Pool[] {
   return out
 }
 
-/** The OP's quota line at scan `r`: every pool the scan has, each marked and with its headroom. `circles`: most full
- *  first, marked by share; `runway`: the replies' order, marked by runway over `seen` (every scan, in order);
- *  `runway-hue`: the same, as `:runway-N:` steps in each pool's shape. */
-export function quotaLine(r: CwScan, cfg: DigestCfg, alertAt: number, mode: 'circles' | 'runway' | 'runway-hue' = 'circles', seen: CwScan[] = []): string {
+export interface PoolRow { p: Pool; v: number; pct: number; mark: string; tail: string; text: string }
+
+/** Every pool the scan `r` has, marked and with its headroom. `circles`: most full first, marked by share; `runway`:
+ *  the replies' order, marked by runway over `seen` (every scan, in order); `runway-hue`: the same, as `:runway-N:`
+ *  steps in each pool's shape. `text`: its share (below `QUIET_PCT`, whole percent alone) and runway. */
+export function poolRows(r: CwScan, cfg: DigestCfg, alertAt: number, mode: 'circles' | 'runway' | 'runway-hue' = 'circles', seen: CwScan[] = []): PoolRow[] {
   const u = cfg.unit
   const rows = (mode === 'circles' ? pools(cfg) : ordered(r, cfg)).flatMap(p => {
     const v = used(p, r, cfg)
@@ -144,7 +146,7 @@ export function quotaLine(r: CwScan, cfg: DigestCfg, alertAt: number, mode: 'cir
   if (mode === 'circles') rows.sort((a, b) => b.pct - a.pct)
   const t = scanTime(r.scan)
   const reach = t - (Math.max(...RUNWAY_WINDOWS_D) + 1) * 86400_000
-  const clauses = rows.map(({ p, v, pct }) => {
+  return rows.map(({ p, v, pct }) => {
     let m = mark(pct, alertAt)
     let tail = ''
     if (mode !== 'circles') {
@@ -154,10 +156,15 @@ export function quotaLine(r: CwScan, cfg: DigestCfg, alertAt: number, mode: 'cir
       m = mode === 'runway-hue' ? runwayHue(rw, pct, p.shape) : runwayMark(rw, pct)
       tail = runwayText(rw, cfg)
     }
-    if (pct < QUIET_PCT) return `${m}${p.name} ${fixed(pct, 0)}%${tail}`
+    if (pct < QUIET_PCT) return { p, v, pct, mark: m, tail, text: `${fixed(pct, 0)}%${tail}` }
     const free = p.quota.bytes / u.bytes - v
     const room = free >= 0 ? `${fixed(free, 1)} ${u.short} free` : `${fixed(-free, 1)} ${u.short} over`
-    return `${m}${p.name} ${fixed(pct, 1)}% of ${p.quota.short ?? p.quota.name} (${room})${tail}`
+    return { p, v, pct, mark: m, tail, text: `${fixed(pct, 1)}% of ${p.quota.short ?? p.quota.name} (${room})${tail}` }
   })
+}
+
+/** The OP's quota line at scan `r`: `poolRows`, one clause each. */
+export function quotaLine(r: CwScan, cfg: DigestCfg, alertAt: number, mode: 'circles' | 'runway' | 'runway-hue' = 'circles', seen: CwScan[] = []): string {
+  const clauses = poolRows(r, cfg, alertAt, mode, seen).map(({ p, mark: m, text }) => `${m}${p.name} ${text}`)
   return clauses.length ? `*Quotas:* ${clauses.join(' · ')}` : ''
 }

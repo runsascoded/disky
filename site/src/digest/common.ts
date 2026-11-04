@@ -43,10 +43,13 @@ export interface DigestParams {
   plot: 'usage' | 'pools'
   /** The share (%) a pool is marked red at; orange from 10 points below. */
   alertAt: number
+  /** cw: the primary's figures with the others alongside, or every bucket's: the headline and weeks over all of them, a
+   *  line per pool. */
+  layout: 'primary' | 'pools'
 }
 
 export const DEFAULT_PARAMS: DigestParams = {
-  windowDays: 30, todayAt: [0.7, 1], diff: 'window', headline: ['mtd', 'window'], weeks: 'window', quotas: 'off', plot: 'usage', alertAt: 90,
+  windowDays: 30, todayAt: [0.7, 1], diff: 'window', headline: ['mtd', 'window'], weeks: 'window', quotas: 'off', plot: 'usage', alertAt: 90, layout: 'primary',
 }
 
 /** What the OP renders around its rows: the hosted plot's URL (null: no image line) and the previous thread's. */

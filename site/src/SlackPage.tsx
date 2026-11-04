@@ -134,6 +134,10 @@ function Controls({ p, set }: { p: DigestParams; set: (p: DigestParams) => void 
         {HEADLINES.map(([l, h]) => <option key={l} value={h.join()}>{l}</option>)}</select></label>
       <label>weeks <select value={p.weeks} onChange={e => set({ ...p, weeks: e.target.value as DigestParams['weeks'] })}>
         <option value="window">window's</option><option value="month">month's</option></select></label>
+      <label>layout <select value={p.layout} onChange={e => set({ ...p, layout: e.target.value as DigestParams['layout'] })}>
+        <option value="primary">primary + others</option>
+        <option value="pools">a line per pool</option>
+      </select></label>
       <label>quotas <select value={p.quotas} onChange={e => set({ ...p, quotas: e.target.value as DigestParams['quotas'] })}>
         <option value="off">off</option><option value="circles">line, 🔴🟠🟡🟢 by fill</option><option value="runway">line, 🔴🟠🟡🟢 by runway</option><option value="runway-hue">line, :runway-1…8: by runway</option></select></label>
       <label>plot <select value={p.plot} onChange={e => set({ ...p, plot: e.target.value as DigestParams['plot'] })}>

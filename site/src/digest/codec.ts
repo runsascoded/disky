@@ -1,7 +1,7 @@
 /** `DigestParams` in a URL (`/admin/slack`'s candidate columns, `?dc=w30,t0.7-1,dw,hmw,kw;w45,…`): `w<days>`,
  * `t<p0>-<p1>`, `d<w|m>` (diff: window | month-to-date), `h<m|w…>` (headline figures, in order; `h` alone: none),
  * `k<w|m>` (weeks: window | month), `q<o|c|r|h>` (the quota line: off | circles | runway | runway-hue), `p<u|p>` (the plot: usage | pools),
- * `a<pct>` (the red mark's share). A field left out is the default's; an unreadable one is dropped. */
+ * `a<pct>` (the red mark's share), `l<r|p>` (layout: primary | pools). A field left out is the default's; an unreadable one is dropped. */
 import { DEFAULT_PARAMS, type DigestParams } from './common'
 
 export function encodeParams(p: DigestParams): string {
@@ -15,6 +15,7 @@ export function encodeParams(p: DigestParams): string {
   if (p.quotas !== d.quotas) out.push(`q${p.quotas === 'runway-hue' ? 'h' : p.quotas[0]}`)
   if (p.plot !== d.plot) out.push(`p${p.plot[0]}`)
   if (p.alertAt !== d.alertAt) out.push(`a${p.alertAt}`)
+  if (p.layout !== d.layout) out.push(`l${p.layout === 'pools' ? 'p' : 'r'}`)
   return out.join(',')
 }
 
@@ -32,6 +33,7 @@ function readField(p: DigestParams, f: string): boolean {
   else if (k === 'q' && Object.hasOwn(QUOTAS, v)) p.quotas = QUOTAS[v]
   else if (k === 'p' && (v === 'u' || v === 'p')) p.plot = v === 'u' ? 'usage' : 'pools'
   else if (k === 'a' && /^\d+$/.test(v) && Number(v) >= 1 && Number(v) <= 100) p.alertAt = Number(v)
+  else if (k === 'l' && (v === 'r' || v === 'p')) p.layout = v === 'p' ? 'pools' : 'primary'
   else return false
   return true
 }

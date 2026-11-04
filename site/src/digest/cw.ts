@@ -2,7 +2,7 @@
  * (the job sends them: `Cw.rows_json`; goldens: `./parity.test.ts`). The replies stay the job's. Pure; DOM-free. */
 import { encodeScan, scanTime } from '../scanSlug'
 import { type BucketCfg, deg, type DigestCfg, type DigestParams, type OpLinks, prevMonthLink, type Quota, span, tb, weekOf, windowLabel, windowStart } from './common'
-import { pools, quotaLine, used } from './pools'
+import { type Pool, poolRows, pools, quotaLine, used } from './pools'
 import { addDays, dayOf, fixed, grouped, hhmm, iso, md, mon3, monthYear, pyRound } from './pyfmt'
 
 export interface CwScan {
@@ -66,8 +66,92 @@ function window(m: CwRows, month: number, p: DigestParams): { start: number; see
 const base = (m: CwRows): CwScan => (m.lead.length ? m.lead[m.lead.length - 1] : m.rows[0])
 const primaryQuotas = (cfg: DigestCfg): Quota[] => (cfg.primary ? cfg.buckets[cfg.primary]?.quotas ?? [] : [])
 
+/** A bucket's size at a scan; undefined when the scan doesn't have it. */
+const sizeOf = (b: string, r: CwScan, cfg: DigestCfg): number | undefined => (b === cfg.primary ? r.tb : r.extra[b])
+
+/** The change in `buckets` from `a` to `b`, over those both scans have: a bucket's first scan isn't growth. */
+function moved(buckets: string[], a: CwScan, b: CwScan, cfg: DigestCfg): number {
+  let d = 0
+  for (const x of buckets) {
+    const [v0, v1] = [sizeOf(x, a, cfg), sizeOf(x, b, cfg)]
+    if (v0 !== undefined && v1 !== undefined) d += v1 - v0
+  }
+  return d
+}
+
+const allBuckets = (r: CwScan, cfg: DigestCfg): string[] => [...(cfg.primary ? [cfg.primary] : []), ...Object.keys(r.extra)]
+const sum = (buckets: string[], r: CwScan, cfg: DigestCfg): number => buckets.reduce((t, b) => t + (sizeOf(b, r, cfg) ?? 0), 0)
+
+/** `layout: 'pools'`'s OP: the headline and weeks over every bucket, and a line per pool, its mark leading. */
+function poolsText(m: CwRows, month: number, cfg: DigestCfg, p: DigestParams, links: OpLinks): string {
+  const site = cfg.site_url
+  const u = cfg.unit
+  const last = m.rows[m.rows.length - 1]
+  const b0 = base(m)
+  const all = allBuckets(last, cfg)
+  const mtdSince = b0 !== last ? ts(b0) : null
+  const { start, seen, back } = window(m, month, p)
+  const mdtb = moved(all, b0, last, cfg)
+  const days = (ts(last) - ts(b0)) / 86400_000 || 1
+  const held = sum(all, b0, cfg)
+  const figures: Record<'mtd' | 'window', string> = {
+    mtd: `**${tb(mdtb)} ${u.name}** [month-to-date](${diffUrl(last.scan, dlink(last), mtdSince, site)}) · `,
+    window: back !== b0 ? `**${tb(moved(all, back, last, cfg))} ${u.name}** [${windowLabel(start, back.scan, p.windowDays)}](${diffUrl(last.scan, dlink(last), back !== last ? ts(back) : null, site)}) · ` : '',
+  }
+  const members = (pl: Pool): string =>
+    pl.buckets.length > 1 ? `: ${pl.buckets.filter(b => sizeOf(b, last, cfg) !== undefined).map(b => `${bucketLink(b, last, mtdSince, cfg)} ${grouped(sizeOf(b, last, cfg)!, 0)}`).join(', ')}` : ''
+  const name = (pl: Pool): string => (pl.buckets.length > 1 ? pl.name : bucketLink(pl.buckets[0], last, mtdSince, cfg))
+  const rows = p.quotas === 'off'
+    ? poolRows(last, cfg, p.alertAt, 'runway', seen).map(r => ({ ...r, mark: '' }))
+    : poolRows(last, cfg, p.alertAt, p.quotas, seen)
+  const inPool = new Set(pools(cfg).flatMap(pl => pl.buckets))
+  const change = (buckets: string[]): string => {
+    const d = moved(buckets, b0, last, cfg)
+    return Math.abs(d) < 0.05 ? '' : ` (${tb(d)})`
+  }
+  const lines = [
+    `:arrow_deg${deg(held ? (((mdtb / held) * 100) * 7) / days : 0)}: ${p.headline.map(f => figures[f]).join('')}${grouped(sum(all, last, cfg), 0)} ${u.name} total · [dashboard](${site}/)`,
+    `_as of ${md(dayOf(date(last)))} ${hhmm(ts(last))}Z_`,
+    '',
+    '*Buckets* (Δ month-to-date)',
+    ...rows.map(({ p: pl, v, mark, text }) => `${mark}${name(pl)} ${grouped(v, 0)} ${u.name}${change(pl.buckets)}${members(pl)} · ${text}`),
+    ...Object.keys(last.extra).filter(b => !inPool.has(b)).map(b => `${bucketLink(b, last, mtdSince, cfg)} ${grouped(last.extra[b], 0)} ${u.name}${change([b])}`),
+    '',
+    '*Weekly changes*',
+  ]
+  const mon0 = iso(weekOf(p.weeks === 'month' ? month : start))
+  const older = seen.filter(r => date(r) < mon0)
+  const weeks = new Map<number, CwScan>()
+  for (const r of seen) if (date(r) >= mon0) weeks.set(weekOf(dayOf(date(r))), r)
+  const lastMon = [...weeks.keys()].pop()
+  let prevEnd = older.length ? older[older.length - 1] : seen[0]
+  for (const [mon, end] of weeks) {
+    if (end === prevEnd) continue
+    const wdtb = moved(all, prevEnd, end, cfg)
+    const wheld = sum(all, prevEnd, cfg)
+    const partial = mon === lastMon && dayOf(date(end)) < addDays(mon, 6) ? ' _(partial)_' : ''
+    const earlier = addDays(mon, 6) < month ? ` (${mon3(dayOf(date(end)))})` : ''
+    const link = diffUrl(end.scan, dlink(end), ts(prevEnd), site)
+    const movers = rows.flatMap(({ p: pl }) => {
+      const d = moved(pl.buckets, prevEnd, end, cfg)
+      return Math.abs(d) >= WEEK_MOVER ? [`${pl.name} ${tb(d)}`] : []
+    })
+    const first = all.filter(b => (sizeOf(b, end, cfg) ?? 0) >= WEEK_MOVER && sizeOf(b, prevEnd, cfg) === undefined)
+      .map(b => `new: ${cfg.buckets[b]?.label || b} ${grouped(sizeOf(b, end, cfg)!, 0)}`)
+    lines.push(`:arrow_deg${deg(wheld ? (wdtb / wheld) * 100 : 0)}: [wk of ${md(mon)}](${link})${earlier}${partial}: ${[`**${tb(wdtb)} ${u.name}**`, ...movers, ...first].join(' · ')}`)
+    prevEnd = end
+  }
+  if (links.prevUrl) lines.push('', ...prevMonthLink(month, links.prevUrl))
+  if (links.plotUrl !== null) lines.push('', `![${cfg.title} — ${monthYear(month)}](${links.plotUrl})`)
+  return lines.join('\n')
+}
+
+/** A week's line names the pools that moved at least this much, in the config's unit. */
+export const WEEK_MOVER = 1
+
 /** The OP's markdown (`digest_cw.op_body`). */
 export function opText(m: CwRows, month: number, cfg: DigestCfg, p: DigestParams, links: OpLinks): string {
+  if (p.layout === 'pools') return poolsText(m, month, cfg, p, links)
   const site = cfg.site_url
   const u = cfg.unit
   const qs = primaryQuotas(cfg)
