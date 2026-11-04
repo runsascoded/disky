@@ -255,7 +255,8 @@ class AsOfHold:
     everything under them stays eligible. ``held``: the other bands; an object
     under one (and under no ``current`` band) stays only if ``ref`` — the
     ``(name, generation, created)`` rows under each held band from its own
-    ``as_of`` listing, sorted by name, one chunk — has it with the same
+    ``as_of`` listing, sorted by name, one chunk (``name`` a ``large_string``, as
+    a bucket's names can pass a ``string`` chunk's 2 GiB) — has it with the same
     identity. Nested items with different scans are a union: an object either
     vouches for stays."""
 
@@ -305,10 +306,12 @@ def apply_hold(table: pa.Table, hold: AsOfHold) -> tuple[pa.Table, int, int]:
     if not len(idx):
         return table, 0, 0
     sub = table.take(idx)
-    names = hold.ref.column("name").chunk(0) if hold.ref.num_rows else pa.array([], pa.string())
+    names = hold.ref.column("name").chunk(0) if hold.ref.num_rows else pa.array([], pa.large_string())
     lo = _bisect(names, pc.min(sub["name"]).as_py(), right=False)
     hi = _bisect(names, pc.max(sub["name"]).as_py(), right=True)
+    # Names bounding a shard's can bound gigabytes of the ref: only the shard's own reach the join, whose keys are `string`.
     ref = hold.ref.slice(lo, hi - lo)
+    ref = ref.filter(pc.is_in(ref["name"], value_set=sub["name"].cast(pa.large_string()).combine_chunks()))
     left = pa.table({
         "name": sub["name"],
         "generation": sub["generation"],
@@ -316,7 +319,7 @@ def apply_hold(table: pa.Table, hold: AsOfHold) -> tuple[pa.Table, int, int]:
         "i": idx,
     })
     right = pa.table({
-        "name": ref["name"],
+        "name": ref["name"].cast(sub["name"].type),
         "ref_generation": ref["generation"],
         "ref_created": ref["created"].cast(pa.int64()),
     })
@@ -533,6 +536,14 @@ def _shards(fs: pafs.FileSystem, rootpath: str, root: str, date: str, bucket: st
     return shards
 
 
+def hold_ref(tables: list[pa.Table]) -> pa.Table:
+    """``AsOfHold.ref`` from ``(name, generation, created)`` tables."""
+    if not tables:
+        return pa.table({"name": pa.array([], pa.large_string()), "generation": pa.array([], pa.int64()), "created": pa.array([], MANIFEST_SCHEMA.field("created").type)})
+    ref = pa.concat_tables(tables)
+    return ref.set_column(0, "name", ref["name"].cast(pa.large_string())).sort_by("name").combine_chunks()
+
+
 def load_holds(
     fs: pafs.FileSystem,
     rootpath: str,
@@ -580,11 +591,7 @@ def load_holds(
                     identities = identities.append_column("generation", pc.cast(identities["version"], pa.int64())).select(["name", "generation", "created"])
                 tables.append(identities)
             tables += [t.select(["name", "generation", "created"]) for f in futures if (t := f.result().table) is not None]
-            ref = (
-                pa.concat_tables(tables).sort_by("name").combine_chunks()
-                if tables
-                else pa.table({"name": pa.array([], pa.string()), "generation": pa.array([], pa.int64()), "created": pa.array([], MANIFEST_SCHEMA.field("created").type)})
-            )
+            ref = hold_ref(tables)
             held = tuple(minimal_bands([b for bs, _ in by_scan.values() for b in bs]))
             held_exact = tuple(sorted({k for _, ks in by_scan.values() for k in ks}))
             current = tuple(minimal_bands([b for b in bands if scans.get(b) in (None, date)]))
