@@ -28,6 +28,9 @@ def subtract_settled(
     Failed decisions remain eligible. Cached DR parts are atomically replaced
     by their remainder after validating every exclusion's name/generation,
     size and directory. Original pinned artifacts stay untouched remotely.
+
+    A killed run has no summary to reconcile its parts to, and is refused. Its resume is a re-dispatch: generation deletes are
+    idempotent, so the fresh run repeats the killed run's requests harmlessly (specs/done/sweep-killed-run-totals.md).
     """
     from .sweep_reviewed import pin_path
     from .sweep_exec import err
@@ -39,6 +42,8 @@ def subtract_settled(
     for index, run in enumerate(runs):
         progress.set_phase("resume-summary", run)
         fs, path = fsspec.core.url_to_fs(run, version_aware=True)
+        if not fs.exists(f"{path}/deleted-summary.json"):
+            raise ValueError(f"resume requires a drained run; {run} has no deleted-summary.json, so its log can't be reconciled: re-dispatch the same items from a fresh output dir instead")
         pinned = pin_path(fs, f"{path}/deleted-summary.json")
         with fs.open(pinned) as fh:
             summary = json.load(fh)
