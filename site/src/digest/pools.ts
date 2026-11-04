@@ -2,7 +2,7 @@
  * share per scan, buckets sharing a `zone` summed against the zone's quota (as `digest_cw._groups`), sorted by
  * pressure; and the OP's quota line. Pure; DOM-free. */
 import type { CwScan } from './cw'
-import type { DigestCfg, Quota, Shape } from './common'
+import { deg, type DigestCfg, type Quota, type Shape } from './common'
 import { scanTime } from '../scanSlug'
 import { fixed } from './pyfmt'
 
@@ -110,9 +110,33 @@ export function runwayMark(r: Runway, pct: number): string {
 export const RUNWAY_HUE_D = [1.8, 3, 6, 10, 19, 33, 60]
 export const RUNWAY_HUE_FULL_N = 3
 
-export function runwayHue(r: Runway, pct: number, shape: Shape = 'circle'): string {
+function hueStep(r: Runway, pct: number): number {
   const n = 1 + RUNWAY_HUE_D.filter(c => r.days >= c).length
-  return `:runway-${shape === 'circle' ? '' : `${shape}-`}${pct >= RUNWAY_FULL_PCT ? Math.min(n, RUNWAY_HUE_FULL_N) : n}: `
+  return pct >= RUNWAY_FULL_PCT ? Math.min(n, RUNWAY_HUE_FULL_N) : n
+}
+
+export function runwayHue(r: Runway, pct: number, shape: Shape = 'circle'): string {
+  return `:runway-${shape === 'circle' ? '' : `${shape}-`}${hueStep(r, pct)}: `
+}
+
+/** Candidate marks, previewed on `/admin/slack` only (no emoji uploaded, and the job's params refuse them): the angle
+ *  is the weekly-normalized rate driving the runway, as the trend arrows' scale reads a percent; the color its
+ *  `runway-hue` step. `arrow`: a bare arrow in that color; `arrow-disc` / `arrow-chip`: white on a colored disc / rounded
+ *  square; `arrow-circle`: today's trend arrow beside a `:runway-N:` circle. */
+export type ArrowMark = 'arrow' | 'arrow-disc' | 'arrow-chip' | 'arrow-circle'
+export const ARROW_MARKS: ArrowMark[] = ['arrow', 'arrow-disc', 'arrow-chip', 'arrow-circle']
+/** Every mark over a pool's runway. */
+export type PoolMark = 'runway' | 'runway-hue' | ArrowMark
+
+const weeklyDeg = (r: Runway, v: number): number => deg(r.growth != null && v > 0 ? (r.growth / v) * 100 : 0, 7)
+
+/** A pool's mark, with its trailing space; `v`: what its quota counts now. */
+export function poolMark(mode: PoolMark, r: Runway, pct: number, v: number, shape: Shape = 'circle'): string {
+  if (mode === 'runway') return runwayMark(r, pct)
+  if (mode === 'runway-hue') return runwayHue(r, pct, shape)
+  const [d, n] = [weeklyDeg(r, v), hueStep(r, pct)]
+  if (mode === 'arrow-circle') return `:arrow_deg${d}: :runway-${n}: `
+  return `:pool-${mode === 'arrow' ? 'bare' : mode === 'arrow-disc' ? 'disc' : 'chip'}-${n}-${d}: `
 }
 
 export function runwayText(r: Runway, cfg: DigestCfg): string {
@@ -137,7 +161,7 @@ export interface PoolRow { p: Pool; v: number; pct: number; mark: string; tail: 
 /** Every pool the scan `r` has, marked and with its headroom. `circles`: most full first, marked by share; `runway`:
  *  the replies' order, marked by runway over `seen` (every scan, in order); `runway-hue`: the same, as `:runway-N:`
  *  steps in each pool's shape. `text`: its share (below `QUIET_PCT`, whole percent alone) and runway. */
-export function poolRows(r: CwScan, cfg: DigestCfg, alertAt: number, mode: 'circles' | 'runway' | 'runway-hue' = 'circles', seen: CwScan[] = []): PoolRow[] {
+export function poolRows(r: CwScan, cfg: DigestCfg, alertAt: number, mode: 'circles' | PoolMark = 'circles', seen: CwScan[] = []): PoolRow[] {
   const u = cfg.unit
   const rows = (mode === 'circles' ? pools(cfg) : ordered(r, cfg)).flatMap(p => {
     const v = used(p, r, cfg)
@@ -153,7 +177,7 @@ export function poolRows(r: CwScan, cfg: DigestCfg, alertAt: number, mode: 'circ
       const hist = seen.filter(x => x.scan < r.scan && scanTime(x.scan) >= reach)
         .flatMap(x => { const y = used(p, x, cfg); return y == null ? [] : [[scanTime(x.scan), y] as [number, number]] })
       const rw = runway(p.quota.bytes / u.bytes - v, growth(hist, t, v))
-      m = mode === 'runway-hue' ? runwayHue(rw, pct, p.shape) : runwayMark(rw, pct)
+      m = poolMark(mode, rw, pct, v, p.shape)
       tail = runwayText(rw, cfg)
     }
     if (pct < QUIET_PCT) return { p, v, pct, mark: m, tail, text: `${fixed(pct, 0)}%${tail}` }
@@ -164,7 +188,7 @@ export function poolRows(r: CwScan, cfg: DigestCfg, alertAt: number, mode: 'circ
 }
 
 /** The OP's quota line at scan `r`: `poolRows`, one clause each. */
-export function quotaLine(r: CwScan, cfg: DigestCfg, alertAt: number, mode: 'circles' | 'runway' | 'runway-hue' = 'circles', seen: CwScan[] = []): string {
+export function quotaLine(r: CwScan, cfg: DigestCfg, alertAt: number, mode: 'circles' | PoolMark = 'circles', seen: CwScan[] = []): string {
   const clauses = poolRows(r, cfg, alertAt, mode, seen).map(({ p, mark: m, text }) => `${m}${p.name} ${text}`)
   return clauses.length ? `*Quotas:* ${clauses.join(' · ')}` : ''
 }

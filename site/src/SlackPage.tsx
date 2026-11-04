@@ -4,8 +4,8 @@ import { Link } from 'react-router-dom'
 import { stringParam, useUrlState } from 'use-prms'
 import { SiteNav } from './SiteNav'
 import { useDocTitle } from './title'
-import { DEFAULT_PARAMS, type DigestParams, imageRequest, opText, type PreviewBundle, type PreviewReply } from './digest'
-import { decodeParams, encodeParams } from './digest/codec'
+import { DEFAULT_PARAMS, type DigestParams, imageRequest, opText, type CwRows, type PreviewBundle, type PreviewReply, type RenderedReply, replies as renderReplies } from './digest'
+import { decodeParams, encodeParams, jobParams, previewMarks } from './digest/codec'
 import { type Tok, tokenize } from './digest/mrkdwn'
 import './slack.scss'
 
@@ -51,6 +51,20 @@ const PLOT = '<plot>'
 /** A line, its image's URL normalized (the posted OP names the hosted plot, a candidate the placeholder). */
 const norm = (l: string) => l.replace(/^(!\[[^\]]*\])\(.*\)$/, `$1(${PLOT})`)
 
+const ARROW_POINTS = '10,39 58,39 58,23 90,50 58,77 58,61 10,61'
+
+/** A candidate `ArrowMark`: the trend avatars' arrow at `deg`, bare in `color` or white on a `color` disc / chip. */
+function PoolMarkSvg({ form, deg, color }: { form: 'bare' | 'disc' | 'chip'; deg: number; color: string }) {
+  const arrow = form === 'bare' ? 1 : form === 'disc' ? 0.72 : 0.8
+  return (
+    <svg className="pool-mark" viewBox="0 0 100 100" aria-label={`${form} ${deg}°`}>
+      {form === 'disc' && <circle cx="50" cy="50" r="50" fill={color} />}
+      {form === 'chip' && <rect width="100" height="100" rx="20" fill={color} />}
+      <polygon points={ARROW_POINTS} fill={form === 'bare' ? color : '#fff'} transform={`rotate(${-deg} 50 50) translate(50 50) scale(${arrow}) translate(-50 -50)`} />
+    </svg>
+  )
+}
+
 function Toks({ toks, plot }: { toks: Tok[]; plot: ReactNode }) {
   return <>{toks.map((k, i) => {
     switch (k.t) {
@@ -61,6 +75,7 @@ function Toks({ toks, plot }: { toks: Tok[]; plot: ReactNode }) {
       case 'arrow': return <span key={i} className={`arrow ${k.deg > 0 ? 'up' : k.deg < 0 ? 'down' : 'flat'}`} style={{ transform: `rotate(${-k.deg}deg)` }} title={`arrow_deg${k.deg}`}>➜</span>
       case 'emoji': return <span key={i} title={`:${k.name}:`}>{k.char}</span>
       case 'hue': return <span key={i} className={`hue ${k.shape}`} title={`:${k.name}:`} style={{ background: k.color }} />
+      case 'pool': return <PoolMarkSvg key={i} form={k.form} deg={k.deg} color={k.color} />
       case 'image': return <span key={i} className="plot">{plot}</span>
     }
   })}</>
@@ -94,10 +109,10 @@ function Op({ text, plotReq, live }: { text: string; plotReq: Record<string, unk
 }
 
 /** A reply as Slack shows it: its sender (name + avatar, or emoji icon) over its body. */
-function Reply({ r }: { r: PreviewReply }) {
+function Reply({ r, changed }: { r: PreviewReply | RenderedReply; changed?: boolean }) {
   const icon = r.icon_url ? <img src={r.icon_url} alt="" /> : <span className="emoji-icon"><Toks toks={tokenize(r.icon_emoji ?? '')} plot={null} /></span>
   return (
-    <div className="slack-reply">
+    <div className={`slack-reply${changed ? ' changed' : ''}`}>
       <div className="avi">{icon}</div>
       <div><div className="sender"><Toks toks={tokenize(r.username)} plot={null} /></div>
         <div className="body"><Toks toks={tokenize(r.body)} plot={null} /></div></div>
@@ -106,13 +121,16 @@ function Reply({ r }: { r: PreviewReply }) {
 }
 
 /** The month's replies, newest first: the latest few, the rest behind a toggle. */
-function Replies({ replies }: { replies: PreviewReply[] }) {
+function Replies({ replies, live }: { replies: (PreviewReply | RenderedReply)[]; live?: PreviewReply[] }) {
   const [all, setAll] = useState(false)
   const shown = all ? replies : replies.slice(0, REPLIES_SHOWN)
   return (
     <div className="slack-replies">
       <h3>Replies <span className="dim">({replies.length}, newest first)</span></h3>
-      {shown.map(r => <Reply key={r.key} r={r} />)}
+      {shown.map(r => {
+        const l = live?.find(x => x.key === r.key)
+        return <Reply key={r.key} r={r} changed={!!live && (l?.username !== r.username || l?.body !== r.body || l?.icon_url !== r.icon_url)} />
+      })}
       {replies.length > REPLIES_SHOWN && <button onClick={() => setAll(!all)}>{all ? 'fewer' : `all ${replies.length}`}</button>}
     </div>
   )
@@ -120,6 +138,16 @@ function Replies({ replies }: { replies: PreviewReply[] }) {
 const REPLIES_SHOWN = 4
 
 const HEADLINES: [string, DigestParams['headline']][] = [['mtd · window', ['mtd', 'window']], ['window · mtd', ['window', 'mtd']], ['mtd only', ['mtd']], ['window only', ['window']], ['none', []]]
+
+const ARROW_MARK_OPTIONS = <>
+  <option value="arrow">A: arrow, runway color (preview)</option>
+  <option value="arrow-disc">B: white arrow on runway disc (preview)</option>
+  <option value="arrow-chip">C: white arrow on runway square (preview)</option>
+  <option value="arrow-circle">D: trend arrow + runway circle (preview)</option>
+</>
+const POOL_MARK_OPTIONS = <>
+  <option value="runway">🔴🟠🟡🟢 by runway</option><option value="runway-hue">:runway-1…8: by runway</option>{ARROW_MARK_OPTIONS}
+</>
 
 function Controls({ p, set }: { p: DigestParams; set: (p: DigestParams) => void }) {
   const num = (v: string, lo: number, hi: number) => Math.min(hi, Math.max(lo, Number(v) || lo))
@@ -139,10 +167,15 @@ function Controls({ p, set }: { p: DigestParams; set: (p: DigestParams) => void 
         <option value="pools">a line per pool</option>
       </select></label>
       <label>quotas <select value={p.quotas} onChange={e => set({ ...p, quotas: e.target.value as DigestParams['quotas'] })}>
-        <option value="off">off</option><option value="circles">line, 🔴🟠🟡🟢 by fill</option><option value="runway">line, 🔴🟠🟡🟢 by runway</option><option value="runway-hue">line, :runway-1…8: by runway</option></select></label>
+        <option value="off">off</option><option value="circles">line, 🔴🟠🟡🟢 by fill</option><option value="runway">line, 🔴🟠🟡🟢 by runway</option><option value="runway-hue">line, :runway-1…8: by runway</option>{ARROW_MARK_OPTIONS}</select></label>
       <label>plot <select value={p.plot} onChange={e => set({ ...p, plot: e.target.value as DigestParams['plot'] })}>
         <option value="usage">usage vs quota</option><option value="pools">% of each quota</option></select></label>
       <label>red at <input type="number" min={1} max={100} value={p.alertAt} onChange={e => set({ ...p, alertAt: num(e.target.value, 1, 100) })} />%</label>
+      <label>reply marks <select value={p.replyMarks ?? ''} onChange={e => set({ ...p, replyMarks: (e.target.value || undefined) as DigestParams['replyMarks'] })}>
+        <option value="">as rendered</option>
+        <option value="warning">⚠️ over the alert share</option><option value="circles">🔴🟠🟡🟢 by fill</option>{POOL_MARK_OPTIONS}</select></label>
+      <label>reply headline <select value={p.replyTotal === undefined ? '' : p.replyTotal ? 'total' : 'primary'} onChange={e => set({ ...p, replyTotal: e.target.value === '' ? undefined : e.target.value === 'total' })}>
+        <option value="">as rendered</option><option value="primary">primary</option><option value="total">every bucket</option></select></label>
     </div>
   )
 }
@@ -197,7 +230,12 @@ function LiveSettings({ b, cands, form, setForm }: { b: PreviewBundle; cands: st
       {s.error && <p className="err">{s.error.message}</p>}
       <div className="slack-controls">
         <label>OP params <input className="wide" value={form.params} onChange={e => setForm({ ...form, params: e.target.value })} placeholder="(defaults)" /></label>
-        {cands.map((c, i) => <button key={i} onClick={() => setForm({ ...form, params: c })} disabled={form.params === c}>candidate {i + 1}'s</button>)}
+        {cands.map((c, i) => {
+          const op = jobParams(c)
+          const p = decodeParams(c)
+          return previewMarks(p) ? <span key={i} className="dim">candidate {i + 1}: preview marks, no emoji yet</span>
+            : <button key={i} onClick={() => setForm({ ...form, params: op })} disabled={form.params === op}>candidate {i + 1}'s</button>
+        })}
         <label>reply marks <select value={form.quota_marks} onChange={e => setForm({ ...form, quota_marks: e.target.value })}>
           {MARKS.map(m => <option key={m} value={m}>{m}</option>)}</select></label>
         <Confirm label="save" confirm={`save as live (${template})?`} disabled={save.isPending || (cur?.params === form.params && cur?.quota_marks === form.quota_marks)} onClick={() => save.mutate()} />
@@ -273,11 +311,16 @@ function Bundle({ b, cands, setCands }: { b: PreviewBundle; cands: string[]; set
   const matches = rerender.split('\n').map(norm).join('\n') === b.op.split('\n').map(norm).join('\n')
   const live = b.op.split('\n').map(norm)
   const [form, setForm] = useState({ params: posted, quota_marks: 'runway' })
+  const replyCfg = b.rows.template === 'cw' ? b.reply : null
+  const candReplies = (p: DigestParams) => replyCfg ? renderReplies(b.rows as CwRows, b.cfg, replyCfg, b.variant, { marks: p.replyMarks, total: p.replyTotal }) : null
+  const rendered = candReplies(DEFAULT_PARAMS)
+  const repliesMatch = !!rendered && JSON.stringify(rendered) === JSON.stringify(b.replies)
   return <>
     <p className="dim">
       {b.op_ts ? 'Posted' : 'Never posted: preview only, written'} {b.posted_at} {b.op_ts ? 'to' : 'as'} <code>{b.channel}</code> ({b.variant}){b.permalink && <> · <a href={b.permalink} target="_blank" rel="noreferrer">the thread</a></>}.
       {posted && <> Rendered under params <code>{posted}</code>.</>}
       {' '}{matches ? 'The site\'s renderer reproduces it exactly.' : <span className="err">The site's renderer no longer reproduces it (the job or the renderer changed since).</span>}
+      {rendered && (repliesMatch ? ' Its replies too.' : <span className="err"> The site's renderer no longer reproduces its replies.</span>)}
     </p>
     <div className="slack-cols">
       <section className="slack-col live">
@@ -294,6 +337,8 @@ function Bundle({ b, cands, setCands }: { b: PreviewBundle; cands: string[]; set
               <button onClick={() => setCands(cands.filter((_, j) => j !== i))}>remove</button></h2>
             <Controls p={p} set={set} />
             <Op text={opText(b.rows, b.month, b.cfg, links, p)} plotReq={imageRequest(b.rows, b.month, b.cfg, p)} live={live} />
+            {replyCfg ? <Replies replies={candReplies(p)!} live={b.replies} />
+              : b.rows.template === 'cw' && <p className="dim">This bundle predates re-rendered replies; the next scan's will have them.</p>}
           </section>
         )
       })}

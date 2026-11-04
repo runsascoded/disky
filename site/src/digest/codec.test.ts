@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { DEFAULT_PARAMS, type DigestParams } from './common'
-import { decodeParams, encodeParams, parseParams } from './codec'
+import { decodeParams, encodeParams, jobParams, parseParams } from './codec'
 
 describe('digest params in a URL', () => {
   it('round-trips, defaults left out', () => {
@@ -37,5 +37,21 @@ describe('digest params in a URL', () => {
       'digest params: unreadable field "" in ",w30"',
       'digest params: repeated field "w" in "w30,w45"',
     ])
+  })
+})
+
+describe('the page\'s reply fields', () => {
+  it('round-trip, and never reach the job', () => {
+    const p: DigestParams = { ...DEFAULT_PARAMS, quotas: 'arrow-disc', replyMarks: 'arrow-chip', replyTotal: true }
+    expect([encodeParams(p), decodeParams('qb,ms,rt'), jobParams('qr,pp,ms,rt')]).toEqual(['qb,ms,rt', p, 'qr,pp'])
+    const errs = ['qb', 'ms', 'rt'].map(s => {
+      try {
+        parseParams(s)
+        return null
+      } catch (e) {
+        return (e as Error).message
+      }
+    })
+    expect(errs).toEqual(['qb', 'ms', 'rt'].map(s => `digest params: "${s}" is for the preview page only`))
   })
 })

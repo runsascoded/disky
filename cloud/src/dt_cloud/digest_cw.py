@@ -640,6 +640,13 @@ class Cw:
         return {"template": "cw", "closed": month.closed, "pre": [scan(r) for r in month.pre],
                 "lead": [scan(r) for r in month.lead], "rows": [scan(r) for r in month.rows]}
 
+    def reply_json(self, month: Month) -> dict:
+        """What the replies render under, beyond `cfg_json` and `rows_json` (`src/digest/cwReply.ts` `ReplyCfg`)."""
+        c = self.cfg
+        triggers = {r.scan: r.trigger for r in month.pre + month.lead + month.rows if r.trigger}
+        return {"quota_marks": c.quota_marks, "total_headline": c.total_headline, "reply_hour": c.reply_hour, "provisional": c.provisional,
+                "alert_pct": c.alert_pct, "op_sender": c.op_sender(), "avatar_rev": AVATAR_REV, "triggers": triggers}
+
     def units(self, month: Month, variant: str, platform: str = "slack") -> list[Unit]:
         return [Unit(day.date, day.scan, reply(day, variant, self.cfg)) for day in day_rows(month, variant, self.cfg.reply_hour)]
 

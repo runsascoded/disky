@@ -1,5 +1,5 @@
 /** The `cw` digest template's OP: its text and its plot's `/api/digest-image` request, from the month's scans
- * (the job sends them: `Cw.rows_json`; goldens: `./parity.test.ts`). The replies stay the job's. Pure; DOM-free. */
+ * (the job sends them: `Cw.rows_json`; goldens: `./parity.test.ts`). The replies: `./cwReply.ts`. Pure; DOM-free. */
 import { encodeScan, scanTime } from '../scanSlug'
 import { type BucketCfg, deg, type DigestCfg, type DigestParams, type OpLinks, prevMonthLink, type Quota, span, tb, weekOf, windowLabel, windowStart } from './common'
 import { type Pool, poolRows, pools, quotaLine, used } from './pools'
@@ -22,10 +22,10 @@ export interface CwRows { template: 'cw'; closed: boolean; pre: CwScan[]; lead: 
 
 const date = (r: CwScan): string => r.scan.slice(0, 10)
 const ts = (r: CwScan): number => scanTime(r.scan)
-const dlink = (r: CwScan): string => r.slug ?? encodeScan(r.scan)!
+export const dlink = (r: CwScan): string => r.slug ?? encodeScan(r.scan)!
 
 /** What quota `q` counts of a scan (`_scoped`): its classes' sum, or the total for a quota over every class. */
-function scoped(total: number, classes: Record<string, number> | null, q: Quota): number {
+export function scoped(total: number, classes: Record<string, number> | null, q: Quota): number {
   if (!q.classes.length) return total
   if (!classes) throw new Error(`quota ${q.name} counts storage classes ${q.classes}, but the scan's meta has no class_bytes`)
   let s = 0
@@ -36,18 +36,18 @@ function scoped(total: number, classes: Record<string, number> | null, q: Quota)
 const quotas = (total: number, classes: Record<string, number> | null, qs: Quota[], cfg: DigestCfg): string =>
   qs.map(q => ` · ${fixed((scoped(total, classes, q) / (q.bytes / cfg.unit.bytes)) * 100, 1)}% of ${q.name}`).join('')
 
-function diffUrl(scan: string, slug: string, since: number | null, site: string, bucket = ''): string {
+export function diffUrl(scan: string, slug: string, since: number | null, site: string, bucket = ''): string {
   const s = since !== null ? `-${span(since, scanTime(scan))}` : ''
   return `${site}/${bucket}?d=${slug}${s}#over-time`
 }
 
-function bucketLink(bucket: string, r: CwScan, since: number | null, cfg: DigestCfg): string {
+export function bucketLink(bucket: string, r: CwScan, since: number | null, cfg: DigestCfg): string {
   const b: BucketCfg | undefined = cfg.buckets[bucket]
   const path = b === undefined || b.path === null ? bucket : b.path
   return `[${b?.label || bucket}](${diffUrl(r.scan, dlink(r), since, cfg.site_url, path)})`
 }
 
-function dextra(cur: CwScan, prev: CwScan | null): Record<string, number | null> {
+export function dextra(cur: CwScan, prev: CwScan | null): Record<string, number | null> {
   return Object.fromEntries(Object.entries(cur.extra).map(([b, t]) => [b, prev && b in prev.extra ? pyRound(t - prev.extra[b], 1) : null]))
 }
 

@@ -577,6 +577,7 @@ class Template(Protocol):
     def op_body(self, data: Any, month: dt.date, plot_url: str | None, prev_url: str | None = None) -> str: ...
     def image_request(self, data: Any, month: dt.date) -> dict: ...
     def rows_json(self, data: Any) -> dict: ...
+    def reply_json(self, data: Any) -> dict | None: ...
     def units(self, data: Any, variant: str, platform: str = "slack") -> list[Unit]: ...
     def provisional(self, data: Any, variant: str) -> Unit | None: ...
     def alert(self, data: Any) -> str | None: ...
@@ -695,13 +696,13 @@ def preview_bundle(tpl: Template, data: Any, month: dt.date, *, op: str, plot_ur
                    channel: str, variant: str, op_ts: str | None = None, permalink: str | None = None) -> dict:
     """The month's OP as posted, with what it was rendered from (specs/slack-preview-page.md): the config's display
     fields, the window's rows (`Template.rows_json`), the OP text and the plot's `/api/digest-image` request, the
-    replies (`replies_json`), and the thread. The site re-renders the rows under other params beside it."""
+    replies (`replies_json`) and what they were rendered under (`Template.reply_json`), and the thread. The site re-renders the rows under other params beside it."""
     return {
         "version": PREVIEW_VERSION, "month": f"{month:%Y-%m}", "channel": channel, "variant": variant,
         "posted_at": dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "op_ts": op_ts, "permalink": permalink, "plot_url": plot_url, "prev_url": prev_url,
         "cfg": cfg_json(tpl.cfg), "rows": tpl.rows_json(data), "params": tpl.cfg.params, "op": op,
-        "image": tpl.image_request(data, month), "replies": replies_json(tpl, data, variant),
+        "image": tpl.image_request(data, month), "replies": replies_json(tpl, data, variant), "reply": tpl.reply_json(data),
     }
 
 

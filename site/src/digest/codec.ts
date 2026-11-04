@@ -1,8 +1,11 @@
 /** `DigestParams` in a URL (`/admin/slack`'s candidate columns, `?dc=w30,t0.7-1,dw,hmw,kw;w45,…`): `w<days>`,
  * `t<p0>-<p1>`, `d<w|m>` (diff: window | month-to-date), `h<m|w…>` (headline figures, in order; `h` alone: none),
  * `k<w|m>` (weeks: window | month), `q<o|c|r|h>` (the quota line: off | circles | runway | runway-hue), `p<u|p>` (the plot: usage | pools),
- * `a<pct>` (the red mark's share), `l<r|p>` (layout: primary | pools). A field left out is the default's; an unreadable one is dropped. */
+ * `a<pct>` (the red mark's share), `l<r|p>` (layout: primary | pools); the page's alone, which `parseParams` refuses: `q<a|b|s|d>`
+ * (the `ArrowMark`s), `m<w|c|r|h|a|b|s|d>` (reply marks), `r<t|p>` (reply headline: total | primary). A field left out is the default's; an unreadable one is dropped. */
 import { DEFAULT_PARAMS, type DigestParams } from './common'
+import type { ReplyMarks } from './cwReply'
+import { ARROW_MARKS } from './pools'
 
 export function encodeParams(p: DigestParams): string {
   const d = DEFAULT_PARAMS
@@ -12,10 +15,12 @@ export function encodeParams(p: DigestParams): string {
   if (p.diff !== d.diff) out.push(`d${p.diff[0]}`)
   if (p.headline.join() !== d.headline.join()) out.push(`h${p.headline.map(f => (f === 'mtd' ? 'm' : 'w')).join('')}`)
   if (p.weeks !== d.weeks) out.push(`k${p.weeks[0]}`)
-  if (p.quotas !== d.quotas) out.push(`q${p.quotas === 'runway-hue' ? 'h' : p.quotas[0]}`)
+  if (p.quotas !== d.quotas) out.push(`q${letter(QUOTAS, p.quotas)}`)
   if (p.plot !== d.plot) out.push(`p${p.plot[0]}`)
   if (p.alertAt !== d.alertAt) out.push(`a${p.alertAt}`)
   if (p.layout !== d.layout) out.push(`l${p.layout === 'pools' ? 'p' : 'r'}`)
+  if (p.replyMarks) out.push(`m${letter(MARKS, p.replyMarks)}`)
+  if (p.replyTotal !== undefined) out.push(`r${p.replyTotal ? 't' : 'p'}`)
   return out.join(',')
 }
 
@@ -34,11 +39,24 @@ function readField(p: DigestParams, f: string): boolean {
   else if (k === 'p' && (v === 'u' || v === 'p')) p.plot = v === 'u' ? 'usage' : 'pools'
   else if (k === 'a' && /^\d+$/.test(v) && Number(v) >= 1 && Number(v) <= 100) p.alertAt = Number(v)
   else if (k === 'l' && (v === 'r' || v === 'p')) p.layout = v === 'p' ? 'pools' : 'primary'
+  else if (k === 'm' && Object.hasOwn(MARKS, v)) p.replyMarks = MARKS[v]
+  else if (k === 'r' && (v === 't' || v === 'p')) p.replyTotal = v === 't'
   else return false
   return true
 }
 
-const QUOTAS: Record<string, DigestParams['quotas']> = { o: 'off', c: 'circles', r: 'runway', h: 'runway-hue' }
+const ARROWS = { a: 'arrow', b: 'arrow-disc', s: 'arrow-chip', d: 'arrow-circle' } as const
+const QUOTAS: Record<string, DigestParams['quotas']> = { o: 'off', c: 'circles', r: 'runway', h: 'runway-hue', ...ARROWS }
+const MARKS: Record<string, ReplyMarks> = { w: 'warning', c: 'circles', r: 'runway', h: 'runway-hue', ...ARROWS }
+const letter = <T>(m: Record<string, T>, v: T): string => Object.keys(m).find(k => m[k] === v)!
+
+/** What of a candidate the job can render under: its OP fields, without the page's reply fields. */
+export function jobParams(s: string): string {
+  return s.split(',').filter(f => f && f[0] !== 'm' && f[0] !== 'r').join(',')
+}
+
+/** A candidate's OP marks have no emoji in Slack, so the job can't post them. */
+export const previewMarks = (p: DigestParams): boolean => (ARROW_MARKS as string[]).includes(p.quotas)
 
 function defaults(): DigestParams {
   return { ...DEFAULT_PARAMS, todayAt: [...DEFAULT_PARAMS.todayAt], headline: [...DEFAULT_PARAMS.headline] }
@@ -57,6 +75,7 @@ export function parseParams(s: string): DigestParams {
   const seen = new Set<string>()
   for (const f of s === '' ? [] : s.split(',')) {
     if (!f || !readField(p, f)) throw new Error(`digest params: unreadable field ${JSON.stringify(f)} in ${JSON.stringify(s)}`)
+    if (f[0] === 'm' || f[0] === 'r' || previewMarks(p)) throw new Error(`digest params: ${JSON.stringify(f)} is for the preview page only`)
     if (seen.has(f[0])) throw new Error(`digest params: repeated field ${JSON.stringify(f[0])} in ${JSON.stringify(s)}`)
     seen.add(f[0])
   }

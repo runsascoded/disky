@@ -129,7 +129,7 @@ def test_preview_bundle_is_the_parity_shape():
     b = E.preview_bundle(tpl, data, date(2026, 9, 1), op="op", plot_url=PLOT, prev_url=None, channel="C1", variant="sender",
                          op_ts="m1", permalink="https://slack.example.org/p1")
     assert sorted(b) == ["cfg", "channel", "image", "month", "op", "op_ts", "params", "permalink", "plot_url", "posted_at",
-                         "prev_url", "replies", "rows", "variant", "version"]
+                         "prev_url", "replies", "reply", "rows", "variant", "version"]
     assert (b["version"], b["month"], b["rows"]["template"], b["image"]["month"], b["params"]) == (1, "2026-09", "cw", "2026-09", "")
 
 

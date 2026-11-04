@@ -3,10 +3,13 @@
  * `/api/digest-op`; goldens: `./parity.test.ts`). Pure; DOM-free. */
 import { DEFAULT_PARAMS, type DigestCfg, type DigestParams, monthOf, type OpLinks } from './common'
 import * as cw from './cw'
+import type { ReplyCfg } from './cwReply'
 import * as gcs from './gcs'
 
 export * from './common'
 export type { CwRows, CwScan } from './cw'
+export { replies } from './cwReply'
+export type { RenderedReply, ReplyCfg, ReplyMarks } from './cwReply'
 export type { GcsRow, GcsRows } from './gcs'
 
 export type DigestRows = cw.CwRows | gcs.GcsRows
@@ -43,6 +46,8 @@ export interface PreviewBundle {
   params?: string
   /** The month's replies as posted, newest first (absent in bundles before 2026-11-02). */
   replies?: PreviewReply[]
+  /** cw: what the replies were rendered under; absent: a bundle the page can't re-render replies from. */
+  reply?: ReplyCfg | null
 }
 
 export interface PreviewReply { key: string; scan: string; username: string; body: string; icon_url: string | null; icon_emoji: string | null }
