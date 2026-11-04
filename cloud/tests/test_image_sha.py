@@ -7,6 +7,7 @@ import pytest
 from click.testing import CliRunner
 
 from dt_cloud import image_sha
+from dt_cloud import interval_store as ist
 from dt_cloud.cli import main
 from dt_cloud.image_sha import Stamp, mismatch, stamp
 
@@ -88,3 +89,24 @@ def test_mismatch():
 
 def log_line(label: str, sha: str) -> str:
     return f"{label}: image {sha} (dt_cloud: {image_sha.code_dir()})"
+
+
+def test_cut_refuses_another_build(tmp_path):
+    """`interval-store cut -E`: the group logs the stamp (a stamped image), the harness refuses before any work."""
+    args = ["cut", "-b", str(tmp_path), "-g", "g", "-U", "-s", "path", "-E", SHA[:7]]
+    assert run(args, env(OTHER), ist.cli) == (1, [log_line("interval-store", OTHER), f"interval-store cut: refusing to start: image is {OTHER}, expected {SHA[:7]}"])
+
+
+def test_layout_sim_refuses_a_dirty_build(tmp_path):
+    args = ["interval-store", "layout-sim", "-E", SHA, str(tmp_path), str(tmp_path / "reqs.jsonl")]
+    assert run(args, env(SHA, "1")) == (1, [
+        log_line("interval-store", f"{SHA} dirty"),
+        f"interval-store layout-sim: refusing to start: image {SHA} is dirty: built from uncommitted changes, not exactly {SHA} (--allow-dirty to accept)",
+    ])
+
+
+def test_harness_logs_without_expect(tmp_path):
+    """Outside a job image (no stamp env, no Batch task) the group stays quiet; the harness logs its stamp anyway."""
+    args = ["interval-store", "layout-sim", "-s", "nope", str(tmp_path), str(tmp_path / "reqs.jsonl")]
+    code, out = run(args, env(None))
+    assert (code, out[0]) == (1, log_line("interval-store layout-sim", "unstamped"))

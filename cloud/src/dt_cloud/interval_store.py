@@ -35,7 +35,7 @@ from . import heartbeat as hb
 from . import static_names as sn
 from . import tree_mem as tm
 from .blobstore import Store, store_url
-from .image_sha import log_job_stamp
+from .image_sha import expect_sha_options, log_job_stamp
 from .interval_churn import has_churn, with_churn
 from . import interval_level as ilv
 from .interval_level import LEVEL, LEVEL_SCHEMA, leveled
@@ -1685,6 +1685,7 @@ def _refuse_overwrite(store: Store, keys: list[str]) -> None:
 
 
 @cli.command("cut")
+@expect_sha_options("interval-store cut")
 @option("-a", "--all-sorts", is_flag=True, help="Every served sort of the generation, -j at a time, then its churn (`stats.json`), as a build or compaction cuts them (`cut_gen`, one -M over all of them): the whole generation's cut, e.g. its real-scale memory check (needs -m)")
 @option("-b", "--bucket", help="The store: a bucket name (gs://) or URL, or a dir (default: the profile's)")
 @option("-D", "--no-dyadic", is_flag=True, help="One closed segment, not one per dyadic block of scans (`seg_sql`)")
