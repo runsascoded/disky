@@ -11,6 +11,7 @@ from concurrent.futures import ThreadPoolExecutor as Pool
 from contextlib import contextmanager
 from pathlib import Path
 from threading import Event
+from time import monotonic, sleep
 
 import duckdb
 import pyarrow.parquet as pq
@@ -309,6 +310,40 @@ def test_tree_watch_says_where_each_peak_was_and_what_held_it(pss, capsys):
     with tm.at("r"), tm.gauges(a=lambda: 1 / 0):
         pass
     assert (tm._WATCHES, capsys.readouterr().err) == ([], "")
+
+
+def _boom() -> int:
+    raise RuntimeError("no gauge")
+
+
+def test_a_failing_gauge_is_said_and_leaves_a_phases_block_alone(pss, capsys):
+    """On the thread doing the work: the block completes, and the peak's line says the read failed, beside the gauge that read."""
+    pss["mib"] = 100
+    with tm.TreeWatch(1000 * MIB, "x", every=3600, check=False):
+        with tm.gauges(DuckDB=_boom, Arrow=lambda: 5 * MIB), tm.phase("a"):
+            pass
+    assert _normal(capsys.readouterr().err) == [
+        "x: phase a: peak tree PSS 100 MiB (10%; 2 samples; DuckDB unread (2 failed); Arrow 5 MiB)",
+        "x: phase (untagged): peak tree PSS 100 MiB (10%; 2 samples)",
+        "x: peak tree PSS 100 MiB of budget 1,000 MiB (10%; 4 samples over <s>)",
+    ]
+
+
+def test_a_failing_gauge_leaves_the_sampler_running(pss, capsys):
+    """On the watch's own thread: it keeps sampling, so the peak still sees what the tree does after the failures."""
+    w = tm.TreeWatch(1000 * MIB, "x", every=0.001, check=False)
+    with w, tm.gauges(DuckDB=_boom):
+        deadline = monotonic() + 30
+        while w.gauge_fails["DuckDB"] < 3 and monotonic() < deadline:
+            sleep(0.001)
+        assert w.gauge_fails["DuckDB"] >= 3
+        pss["mib"] = 700
+        seen = w.samples
+        while w.samples == seen and monotonic() < deadline:
+            sleep(0.001)
+        assert w._thread.is_alive()
+        assert w.peak == 700 * MIB
+    capsys.readouterr()
 
 
 def test_duck_bytes_reads_the_buffer_manager_from_another_thread():
