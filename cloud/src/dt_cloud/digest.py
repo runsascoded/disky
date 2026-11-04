@@ -166,6 +166,8 @@ class DigestConfig:
     reply_hour: int = 12
     provisional: bool = False
     primary: str | None = None
+    # cw: a reply's headline totals every bucket the scan has, not the primary's alone
+    total_headline: bool = False
     buckets: dict[str, Bucket] = field(default_factory=dict)
     prices: dict[str, float] = field(default_factory=dict)
     units: str = "TiB"

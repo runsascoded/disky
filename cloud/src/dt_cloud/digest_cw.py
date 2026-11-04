@@ -521,6 +521,15 @@ def _row(date: str, s: Scan, prev: Scan | None, provisional: bool = False, seen:
 
 
 
+def _headline(day: DayRow, cfg: DigestConfig) -> tuple[float, float]:
+    """A reply's headline size and change: the primary's, or (`total_headline`) every bucket's, a bucket with no
+    earlier scan adding to the size but not the change, as the OP's `layout: pools` totals."""
+    if not cfg.total_headline:
+        return day.tb, day.dtb or 0
+    moved = (day.dtb or 0) + sum(v for v in day.dextra.values() if v is not None)
+    return round(day.tb + sum(day.extra.values()), 1), round(moved, 1)
+
+
 def reply(day: DayRow, variant: str, cfg: DigestConfig) -> Reply:
     """One day's reply. ``sender``: headline as the sender name (plain text --
     Slack renders no links/emoji/markdown there), trend-arrow avatar, the
@@ -530,10 +539,10 @@ def reply(day: DayRow, variant: str, cfg: DigestConfig) -> Reply:
     A ``provisional`` day (``sender``) keeps a fixed sender + neutral icon —
     both outlive every edit — and carries the numbers so far, as of its
     latest scan, in the body."""
-    dtb = day.dtb or 0
+    tb, dtb = _headline(day, cfg)
     mult = HOURS_PER_WEEK / day.hours if day.hours else 7.0
-    d = deg(_pct_val(dtb, day.tb), mult)
-    size = f"{day.tb:,.0f} {cfg.unit.name} ({_tb(dtb)}, {_pct(dtb, day.tb)}%)"
+    d = deg(_pct_val(dtb, tb), mult)
+    size = f"{tb:,.0f} {cfg.unit.name} ({_tb(dtb)}, {_pct(dtb, tb)}%)"
     # Each bucket as a linked `% of quota (free)` clause (the bucket names are
     # the over-time links; one bucket alone gets a trailing ↗ instead).
     tail = _tail(day, cfg)

@@ -198,6 +198,17 @@ def test_tail_zone_shared_quota():
     )
 
 
+def test_total_headline_sums_every_bucket():
+    """`total_headline`: the sender name's size and change are every bucket's; a bucket with no earlier scan adds to
+    the size, not the change. The default stays the primary's."""
+    day = D.DayRow(
+        date="2026-09-23", scan="2026-09-23T1201", tb=800.0, dtb=-10.0, hours=24.0, since=None,
+        extra={"hot-data": 100.0, "side-data": 50.0}, dextra={"hot-data": 30.0, "side-data": None},
+    )
+    names = [D.reply(day, "sender", replace(CFG, total_headline=t)).username for t in (False, True)]
+    assert names == ["9/23 — 800 TiB (−10.0, 1.2%)", "9/23 — 950 TiB (+20.0, 2.2%)"]
+
+
 def test_tail_circles_fullest_first():
     """`quota_marks: circles`: the clauses fullest first (a bucket without a quota last, unmarked), red at or over
     `mark_pct` (`alert_pct`, else 90), orange within 10 points below, yellow within 40, green under; the zone's fill is
