@@ -108,7 +108,7 @@ def test_manual_static_launcher_uses_cw_only(args: list[str], tmp_path: Path) ->
     assert {"image": task["runnables"][0]["container"]["imageUri"], "account": spec["allocationPolicy"]["serviceAccount"],
             "buckets": [volume["gcs"]["remotePath"] for volume in task["volumes"] if "gcs" in volume],
             "secrets": task["environment"].get("secretVariables", {})} == {
-        "image": IMAGE.rsplit(":", 1)[0] + "@sha256:4e53f34a042122498d9c9762c6ccf4b85fd2887f215575a3cf1bde922ed9c413",
+        "image": IMAGE,
         "account": {"email": f"cw-s3-job@{PROJECT}.iam.gserviceaccount.com"},
         "buckets": [DATA, "oa-cw-s3-usage-scratch"] if args[0] == "run" else [DATA],
         "secrets": {} if args[0] == "run" else {key: f"projects/{PROJECT}/secrets/{value}/versions/latest" for key, value in R2_SECRETS.items()},
