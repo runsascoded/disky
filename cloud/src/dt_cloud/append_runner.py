@@ -1583,25 +1583,10 @@ def r2_missing(objs: list, *, workers: int = 16) -> list[str]:
         return [o.key for o, do in ex.map(lambda o: (o, pub.should_copy(o, pub.head_dest(s3, r2, o.key))), objs) if do]
 
 
-#: Attempts at one object's copy (`r2_copy`) R2 throttled past botocore's own retries, backing off `R2_RETRY_S · 2^n`
-#: (cw's level-5 compaction's copy died on one throttled multipart part, 2026-10-29).
-R2_ATTEMPTS = 5
-R2_RETRY_S = 15.0
-#: The error codes R2 throttles with (`ServiceUnavailable: Reduce your concurrent request rate for the same object`).
-R2_THROTTLED = ("ServiceUnavailable", "SlowDown", "TooManyRequests")
-_R2_THROTTLED_RE = re.compile(r"\((?:" + "|".join(R2_THROTTLED) + r")\)")
-
-
-def r2_throttled(e: BaseException) -> bool:
-    """R2 throttled the request: botocore's `ClientError` (`(<code>)` in its message) or boto3's `S3UploadFailedError`
-    wrapping one (a multipart upload's failed part)."""
-    return bool(_R2_THROTTLED_RE.search(str(e)))
-
-
 def r2_copy(bucket: str, objs: list, *, workers: int = 8, dry_run: bool = False, log: Callable[[str], None] = err) -> dict:
     """Copy `objs` GCS → R2 under the same keys (`publish.copy_one`'s streaming copy, the GCS md5 stamped as metadata),
-    skipping objects already there with the same size and md5. An object R2 throttles is copied again, whole (at most
-    `R2_ATTEMPTS` times); any other failure raises. Returns `{objects, copied, bytes, s}` (`keys` too on a dry run: what
+    skipping objects already there with the same size and md5. An object R2 throttles is copied again, whole
+    (`publish.copy_retrying`); any other failure raises. Returns `{objects, copied, bytes, s}` (`keys` too on a dry run: what
     would be copied)."""
     from . import publish as pub
 
@@ -1614,16 +1599,8 @@ def r2_copy(bucket: str, objs: list, *, workers: int = 8, dry_run: bool = False,
     t0, done = monotonic(), 0
 
     def one(o):
-        for n in range(R2_ATTEMPTS):
-            try:
-                pub.copy_one(bucket, s3, r2, o)
-                return o
-            except Exception as e:
-                if not r2_throttled(e) or n == R2_ATTEMPTS - 1:
-                    raise
-                log(f"  ↻ {o.key}: R2 throttled ({e}); again in {R2_RETRY_S * 2 ** n:.0f}s")
-                time.sleep(R2_RETRY_S * 2 ** n)
-        raise AssertionError("unreachable")
+        pub.copy_retrying(bucket, s3, r2, o, log=log)
+        return o
 
     with ThreadPoolExecutor(workers) as ex:
         for o in ex.map(one, todo):
