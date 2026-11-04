@@ -31,8 +31,14 @@
     cursor: zoom-out; padding: 16px;
     img { max-width: 100%; max-height: 100%; border-radius: 6px; } }
   .slack-add { align-self: center; flex: none; }
-  // `:runway-N:` (`runway-hue` marks): the workspace emoji's circle, drawn
-  .hue { display: inline-block; width: 1em; height: 1em; border-radius: 50%; vertical-align: -0.15em; }
+  // `:runway-N:` / `:runway-<shape>-N:` (`runway-hue` marks): the workspace emoji, drawn. A mark's area is near the
+  // circle's (0.79 em²): the pointed shapes scale past their box (no layout effect), the square inside it.
+  .hue { display: inline-block; width: 1em; height: 1em; border-radius: 50%; vertical-align: -0.15em;
+    &.square { border-radius: 16%; transform: scale(0.88); }
+    &.diamond { border-radius: 0; clip-path: polygon(50% 0, 100% 50%, 50% 100%, 0 50%); transform: scale(1.22); }
+    &.triangle { border-radius: 0; clip-path: polygon(50% 0, 100% 100%, 0 100%); transform: translateY(-0.08em) scale(1.25); }
+    &.star { border-radius: 0; transform: scale(1.35);
+      clip-path: polygon(50% 0, 64.7% 29.8%, 97.6% 34.5%, 73.8% 57.7%, 79.4% 90.5%, 50% 75%, 20.6% 90.5%, 26.2% 57.7%, 2.4% 34.5%, 35.3% 29.8%); } }
   .slack-act { margin: 14px 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel);
     h2 { font-size: 15px; margin: 0 0 6px; }
     input.wide { width: 11em; }

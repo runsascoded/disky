@@ -60,7 +60,7 @@ function Toks({ toks, plot }: { toks: Tok[]; plot: ReactNode }) {
       case 'link': return <a key={i} href={k.href} target="_blank" rel="noreferrer">{k.s}</a>
       case 'arrow': return <span key={i} className={`arrow ${k.deg > 0 ? 'up' : k.deg < 0 ? 'down' : 'flat'}`} style={{ transform: `rotate(${-k.deg}deg)` }} title={`arrow_deg${k.deg}`}>➜</span>
       case 'emoji': return <span key={i} title={`:${k.name}:`}>{k.char}</span>
-      case 'hue': return <span key={i} className="hue" title={`:runway-${k.n}:`} style={{ background: k.color }} />
+      case 'hue': return <span key={i} className={`hue ${k.shape}`} title={`:${k.name}:`} style={{ background: k.color }} />
       case 'image': return <span key={i} className="plot">{plot}</span>
     }
   })}</>

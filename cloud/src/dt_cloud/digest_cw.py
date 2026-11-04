@@ -152,11 +152,12 @@ def _tail(day: DayRow, cfg: DigestConfig) -> str:
     cs = _clauses(day, cfg)
     if cfg.quota_marks in RUNWAY_MARKS:
         # config order: a reply series reads by position, the marks draw the eye (specs/digest-runway-marks.md)
-        mark = _runway_hue if cfg.quota_marks == "runway-hue" else _runway_mark
-        return " · ".join(f"{mark(r, fill)} {c}{_runway_text(r, cfg)}" if fill is not None else c for c, fill, _, r in cs)
+        hue = cfg.quota_marks == "runway-hue"
+        return " · ".join(f"{_runway_hue(r, fill, shape) if hue else _runway_mark(r, fill)} {c}{_runway_text(r, cfg)}" if fill is not None else c
+                          for c, fill, _, r, shape in cs)
     if cfg.quota_marks == "circles":
         cs = sorted(cs, key=lambda c: -1.0 if c[1] is None else -c[1])
-    return " · ".join(f"{m} {c}" if (m := _mark(fill, over, cfg)) else c for c, fill, over, _ in cs)
+    return " · ".join(f"{m} {c}" if (m := _mark(fill, over, cfg)) else c for c, fill, over, _, _ in cs)
 
 
 #: Marks a quota clause at or over `alert_pct` (the daily replies' tail and the alert reply).
@@ -227,15 +228,16 @@ def _runway_mark(r: Runway, fill: float) -> str:
 #: (green), the step one more than the number of these cut points (days to full) the runway reaches: under 1.8 days
 #: (or over quota) 1, 60 days or more (or not filling) 8; log-spaced, 60^(k/7). The names carry no thresholds, so
 #: these can move without re-uploading the emoji. A pool ≥ `RUNWAY_FULL_PCT` full is never calmer than
-#: `RUNWAY_HUE_FULL_N` (the site's `digest/pools.ts` mirrors all three).
+#: `RUNWAY_HUE_FULL_N` (the site's `digest/pools.ts` mirrors all three). A pool with a shape (`Bucket.shape`) gets
+#: `:runway-<shape>-N:`, the same step in the same color; a circle keeps the plain `:runway-N:`.
 RUNWAY_HUE_D = (1.8, 3, 6, 10, 19, 33, 60)
 RUNWAY_HUE_FULL_N = 3
 
 
-def _runway_hue(r: Runway, fill: float) -> str:
-    """A pool's `:runway-N:` by its runway (`RUNWAY_HUE_*`)."""
+def _runway_hue(r: Runway, fill: float, shape: str = "circle") -> str:
+    """A pool's `:runway-N:` / `:runway-<shape>-N:` by its runway (`RUNWAY_HUE_*`) and shape."""
     n = 1 + sum(r.days >= c for c in RUNWAY_HUE_D)
-    return f":runway-{min(n, RUNWAY_HUE_FULL_N) if fill >= RUNWAY_FULL_PCT else n}:"
+    return f":runway-{'' if shape == 'circle' else f'{shape}-'}{min(n, RUNWAY_HUE_FULL_N) if fill >= RUNWAY_FULL_PCT else n}:"
 
 
 def _runway_text(r: Runway, cfg: DigestConfig) -> str:
@@ -294,16 +296,18 @@ def _fill(g: list[tuple[str, float]], day: DayRow, cfg: DigestConfig) -> float |
     return max((_scoped(tb, classes, q) / (q.bytes / cfg.unit.bytes) * 100 for q in b.quotas), default=None) if b else None
 
 
-def _clauses(day: DayRow, cfg: DigestConfig) -> list[tuple[str, float | None, bool, Runway | None]]:
+def _clauses(day: DayRow, cfg: DigestConfig) -> list[tuple[str, float | None, bool, Runway | None, str]]:
     """Each group's clause (`_bucket_clause` / `_zone_clause`), its fill (`_fill`), whether that is at or over
-    ``cfg.alert_pct``, and its runway (`quota_marks: runway`; else None)."""
+    ``cfg.alert_pct``, its runway (`quota_marks: runway`; else None), and its shape (`Bucket.shape`: a zone's members
+    all state the same one; a bucket the config doesn't name has no quota, so no mark, and reads as a circle)."""
     out = []
     for g in _groups(day, cfg):
         clause = (_bucket_clause(*g[0], day.scan, day.since, cfg, day.slug, day.classes if g[0][0] == cfg.primary else None)
                   if len(g) == 1 else _zone_clause(g, day.scan, day.since, cfg, day.slug))
         fill = _fill(g, day, cfg)
         r = _group_runway([b for b, _ in g], day, cfg) if cfg.quota_marks in RUNWAY_MARKS else None
-        out.append((clause, fill, cfg.alert_pct is not None and fill is not None and fill >= cfg.alert_pct, r))
+        b = cfg.buckets.get(g[0][0])
+        out.append((clause, fill, cfg.alert_pct is not None and fill is not None and fill >= cfg.alert_pct, r, b.shape if b else "circle"))
     return out
 
 
@@ -313,7 +317,7 @@ def alert_body(month: Month, cfg: DigestConfig) -> str | None:
     if cfg.alert_pct is None or month.closed:
         return None
     last = month.rows[-1]
-    over = [(c, f) for c, f, o, _ in _clauses(_row(last.date, last, None), cfg) if o]
+    over = [(c, f) for c, f, o, _, _ in _clauses(_row(last.date, last, None), cfg) if o]
     if cfg.quota_marks == "circles":
         over.sort(key=lambda c: -c[1])
     over = [c for c, _ in over]

@@ -263,6 +263,58 @@ def test_runway_hue_steps():
         ":runway-8:", ":runway-3:", ":runway-2:", ":runway-1:"]
 
 
+@pytest.mark.parametrize("shape", ["square", "diamond", "triangle", "star"])
+def test_runway_hue_shape_marks_each_step(shape: str):
+    """A shape names its own emoji at the same step as the circle: `:runway-<shape>-N:`, thresholds unchanged."""
+    days = [0.0, 1.8, 3.0, 6.0, 10.0, 19.0, 33.0, 60.0]
+    assert [D._runway_hue(D.Runway(d, 1.0), 50.0, shape) for d in days] == [f":runway-{shape}-{n}:" for n in range(1, 9)]
+    assert D._runway_hue(D.Runway(D.math.inf, 0.0), 95.0, shape) == f":runway-{shape}-3:"
+
+
+def test_runway_hue_circle_is_the_plain_mark():
+    r = D.Runway(3.0, 1.0)
+    assert (D._runway_hue(r, 50.0), D._runway_hue(r, 50.0, "circle")) == (":runway-3:", ":runway-3:")
+
+
+def test_tail_runway_hue_shapes():
+    """Each pool's mark in its own shape: a zone's one mark, a bucket with none a circle; `runway` ignores shapes."""
+    z8 = E.Quota(100 * TIB, "100 TiB", "100Ti")
+    cfg = replace(CFG, quota_marks="runway-hue", buckets={
+        **CFG.buckets,
+        "hot-data": E.Bucket("hot", z8, "z8", shape="square"),
+        "side-data": E.Bucket("side", z8, "z8", shape="square"),
+        "cold-data": E.Bucket("cold", z8, shape="triangle"),
+    })
+    now = {"hot-data": 82.0, "more-data": 1.9, "side-data": 3.0, "cold-data": 12.4}
+    day = D.DayRow(date="2026-09-23", scan="2026-09-23T1201", tb=825.9, dtb=1.0, hours=24.0, since=None, extra=now,
+                   hist=(_hist_scan("2026-09-23T1201", 825.9, now),))
+    marks = lambda c: [x.split(" ")[0] for x in D._tail(day, c).split(" · ")]  # noqa: E731
+    more = f"[more-data]({SITE}/more-data?d=2609231201#over-time):"
+    assert marks(cfg) == [":runway-8:", ":runway-square-8:", more, ":runway-triangle-8:"]
+    assert marks(replace(cfg, quota_marks="runway")) == [D.GREEN_MARK, D.GREEN_MARK, more, D.GREEN_MARK]
+
+
+def test_shape_config():
+    b = E.config_from_dict({"template": "cw", "buckets": {
+        "a": {"label": "a"},
+        "b": {"shape": "circle"},
+        "c": {"shape": "star", "quota": {"bytes": "1 PB", "name": "1 PB"}},
+        "d": {"shape": "square", "zone": "z"},
+        "e": {"shape": "square", "zone": "z"},
+    }}).buckets
+    assert {k: v.shape for k, v in b.items()} == {"a": "circle", "b": "circle", "c": "star", "d": "square", "e": "square"}
+
+
+def test_cfg_json_carries_only_a_shape_that_isnt_the_circle():
+    # absent for a circle: a config without shapes sends the site exactly what it always has
+    cfg = replace(CFG, buckets={"a": E.Bucket("a"), "b": E.Bucket("b", shape="circle"), "c": E.Bucket("c", shape="star")})
+    assert E.cfg_json(cfg)["buckets"] == {
+        "a": {"label": "a", "path": None, "zone": None, "quotas": []},
+        "b": {"label": "b", "path": None, "zone": None, "quotas": []},
+        "c": {"label": "c", "path": None, "zone": None, "quotas": [], "shape": "star"},
+    }
+
+
 def _hist_scan(scan: str, tb: float, extra: dict[str, float]) -> "D.Scan":
     return D.Scan(scan=scan, tb=tb, objs=0, dtb=None, dobjs=None, hours=None, extra=extra)
 
@@ -550,6 +602,11 @@ buckets:
         {"buckets": {"a": {"zone": "z", "quota": {"bytes": "1 PB", "name": "1 PB"}}, "b": {"zone": "z"}}},
         "digest config buckets.b: zone 'z' quota differs from buckets.a's",
     ),
+    (
+        {"buckets": {"a": {"zone": "z", "shape": "square"}, "b": {"zone": "z"}}},
+        "digest config buckets.b: zone 'z' shape differs from buckets.a's",
+    ),
+    ({"buckets": {"b": {"shape": "hexagon"}}}, "digest config buckets.b.shape: 'hexagon' is not one of ('circle', 'square', 'diamond', 'triangle', 'star')"),
     ({"buckets": ["b"]}, "digest config buckets: expected a mapping, got list"),
     ({"buckets": {"b": {"quota": {"bytes": "lots", "name": "x"}}}}, "not a size: 'lots'"),
     ({"buckets": {"b": {"quota": []}}}, "digest config buckets.b.quota: an empty list"),

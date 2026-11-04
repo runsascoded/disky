@@ -28,6 +28,15 @@ Runway → one of 8 custom workspace emoji, `:runway-1:` (red, least runway) …
 - The names are a plain 1–8 scale and carry no thresholds, so the cut points can move without re-uploading.
 - Order and rate text as `runway`. Knobs: `quota_marks: runway-hue` (`digest_cw._runway_hue`); the OP's params `q=h` (`pools.ts` `runwayHue`); the admin page's quota select.
 
+**Per-pool shapes (built; emoji not uploaded):** color is the runway, shape names the pool, so a reply series reads by shape as well as position. An optional per-bucket `shape` in the digest config: `circle` (default), `square`, `diamond`, `triangle`, `star`. A non-circle pool's mark is `:runway-<shape>-N:`, a circle's stays `:runway-N:`; steps and colors are unchanged, and `runway` / `circles` ignore shapes.
+
+- A zone is one pool with one mark: its buckets must state the same shape, as they do its quota (`digest._check_zones` raises otherwise), so no rule about which member wins can differ between the replies' order (scan meta) and the OP's (config).
+- `cfg_json` sends `shape` only when it isn't the circle: a config without shapes sends exactly what it did, and bundles written before it read as circles.
+- The admin page draws each by `.hue.<shape>` (`slack.scss`), the triangle, diamond and star scaled past their box so their area is near the circle's.
+- cw assigns 02a circle, the 08a zone square, 06a diamond, 04a triangle, the rno2a zone star (`job/digest.yml`), with `quota_marks` still `runway`. Flipping it needs the 32 `:runway-<shape>-N:` emoji uploaded first: Slack shows an unknown name as text.
+
+**Seeing a config or renderer change before posting:** `dt-cloud digest -W/--preview-only <key>` (a lowercase slug, so never a channel id) writes only the month's bundle under `digest/preview/<key>/…`, listed in `/admin/slack`'s thread selector: no Slack client, no plot hosted, no converge state; `op_ts` is null and the page says "never posted" and hides Re-apply. Its OP is rendered by `site_url`'s `/api/digest-op`, so a renderer not yet in prod needs `-u <dev host>`: `job/cw-digest-local -m 2026-11 -W shapes-preview -q runway-hue -p qh,pp -u https://dev.cw.oa.dev`. The bundle has no plot URL, so its Live column draws no plot; a candidate column does.
+
 ## 4. Admin page knobs and push (phase 3)
 
 `/admin/slack` already previews the OP under any params (`codec.ts`). It gains:

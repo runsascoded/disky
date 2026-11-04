@@ -5,7 +5,10 @@ import { addDays, dayOf, fixed, grouped, md, MONTHS, pyRound } from './pyfmt'
 export const MINUS = '−'
 
 export interface Quota { bytes: number; name: string; short: string | null; classes: number[] }
-export interface BucketCfg { label: string | null; path: string | null; zone: string | null; quotas: Quota[] }
+/** A pool's `runway-hue` mark (`digest.QUOTA_SHAPES`). */
+export type Shape = 'circle' | 'square' | 'diamond' | 'triangle' | 'star'
+/** `shape` absent: a circle (the job omits the default; bundles before it have none). */
+export interface BucketCfg { label: string | null; path: string | null; zone: string | null; quotas: Quota[]; shape?: Shape }
 
 /** The digest config's display fields, as the job writes them (`digest.cfg_json`). */
 export interface DigestCfg {

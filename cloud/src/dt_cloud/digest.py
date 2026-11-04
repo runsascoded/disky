@@ -97,13 +97,16 @@ class Bucket:
     site's; ``""``: the site root, a single-bucket store served there).
     ``more``: further quotas, each beside ``quota`` wherever it renders (YAML:
     ``quota`` as a list), e.g. a private allowance beside a public one; the
-    plot draws ``quota`` only."""
+    plot draws ``quota`` only. ``shape`` (`QUOTA_SHAPES`): the bucket's mark under
+    `quota_marks: runway-hue`, its color still the runway. A zone is one pool with
+    one mark, so its buckets must state the same shape, as they do its quota."""
 
     label: str | None = None
     quota: Quota | None = None
     zone: str | None = None
     path: str | None = None
     more: tuple[Quota, ...] = ()
+    shape: str = "circle"
 
     @property
     def quotas(self) -> tuple[Quota, ...]:
@@ -140,7 +143,7 @@ class DigestConfig:
     points below, `:large_yellow_circle:` within 40, `:large_green_circle:` under that (specs/digest-quota-pressure.md);
     `runway` keeps config order and marks each by how soon it fills at its fastest recent growth (`digest_cw._runway_mark`,
     specs/digest-runway-marks.md); `runway-hue` the same with `:runway-1:` (red) … `:runway-8:` (green)
-    workspace emoji (`digest_cw._runway_hue`). The OP's text and plot request are the site's (`POST /api/digest-op`,
+    workspace emoji, `:runway-<shape>-N:` for a bucket with a ``shape`` (`digest_cw._runway_hue`). The OP's text and plot request are the site's (`POST /api/digest-op`,
     the renderer `/admin/slack` previews with; specs/slack-preview-page.md), under ``params`` (the site's
     `src/digest/codec` string, `''`: the defaults). ``preview``: where each Slack converge writes the month's preview bundle
     (`preview_bundle`, for the site's `/admin/slack-preview`), a dir or URL template (``{channel}``,
@@ -259,6 +262,8 @@ def parse_bytes(v: int | str) -> int:
 
 TEMPLATES = ("gcs", "cw")
 QUOTA_MARKS = ("warning", "circles", "runway", "runway-hue")
+#: A bucket's `runway-hue` mark (`Bucket.shape`); the site's `digest/mrkdwn.ts` draws each.
+QUOTA_SHAPES = ("circle", "square", "diamond", "triangle", "star")
 # the scalar fields' accepted YAML types (`buckets` / `prices` are parsed below)
 _SCALAR_TYPES: dict[str, tuple[type, ...]] = {
     "template": (str,), "title": (str,), "site_url": (str,), "root": (str,), "state": (str,),
@@ -286,19 +291,22 @@ def _keys(where: str, d: Any, allowed: set[str], required: set[str] = frozenset(
 
 
 def _bucket(name: str, b: dict | None) -> Bucket:
-    b = _keys(f"buckets.{name}", b or {}, {"label", "quota", "zone", "path"})
+    b = _keys(f"buckets.{name}", b or {}, {"label", "quota", "zone", "path", "shape"})
     for k in ("label", "zone", "path"):
         if b.get(k) is not None and not isinstance(b[k], str):
             raise ValueError(f"digest config buckets.{name}.{k}: expected a string, got {b[k]!r}")
+    shape = b.get("shape", "circle")
+    if shape not in QUOTA_SHAPES:
+        raise ValueError(f"digest config buckets.{name}.shape: {shape!r} is not one of {QUOTA_SHAPES}")
     q = b.get("quota")
     if q is None:
-        return Bucket(b.get("label"), zone=b.get("zone"), path=b.get("path"))
+        return Bucket(b.get("label"), zone=b.get("zone"), path=b.get("path"), shape=shape)
     qs = [_quota(f"buckets.{name}.quota[{i}]", x) for i, x in enumerate(q)] if isinstance(q, list) else [_quota(f"buckets.{name}.quota", q)]
     if not qs:
         raise ValueError(f"digest config buckets.{name}.quota: an empty list")
     if b.get("zone") is not None and (len(qs) > 1 or qs[0].classes):
         raise ValueError(f"digest config buckets.{name}: a zone's quota is one quota over every class")
-    return Bucket(b.get("label"), qs[0], b.get("zone"), b.get("path"), tuple(qs[1:]))
+    return Bucket(b.get("label"), qs[0], b.get("zone"), b.get("path"), tuple(qs[1:]), shape)
 
 
 def _quota(where: str, q: Any) -> Quota:
@@ -310,20 +318,22 @@ def _quota(where: str, q: Any) -> Quota:
 
 
 def _check_zones(buckets: dict[str, Bucket]) -> None:
-    """Buckets sharing a ``zone`` share its quota, so they must state the same one."""
-    seen: dict[str, tuple[str, Quota | None]] = {}
+    """Buckets sharing a ``zone`` share its quota and its mark, so they must state the same ones."""
+    seen: dict[str, tuple[str, Quota | None, str]] = {}
     for name, b in buckets.items():
         if b.zone is None:
             continue
-        first, q = seen.setdefault(b.zone, (name, b.quota))
+        first, q, shape = seen.setdefault(b.zone, (name, b.quota, b.shape))
         if q != b.quota:
             raise ValueError(f"digest config buckets.{name}: zone {b.zone!r} quota differs from buckets.{first}'s")
+        if shape != b.shape:
+            raise ValueError(f"digest config buckets.{name}: zone {b.zone!r} shape differs from buckets.{first}'s")
 
 
 def config_from_dict(d: dict, base: DigestConfig | None = None) -> DigestConfig:
     """A config from a parsed YAML/JSON mapping, overlaid on ``base`` (default:
     the preset its ``template`` names). ``buckets`` map names to ``{label,
-    quota: {bytes, name, short, classes}, zone, path}`` (``quota`` may be a list) (``bytes`` may be `910 TiB`), ``prices``
+    quota: {bytes, name, short, classes}, zone, path, shape}`` (``quota`` may be a list) (``bytes`` may be `910 TiB`), ``prices``
     storage-class ids to $/GiB-month. Validated: unknown keys (at any level),
     a wrong-typed value, an unknown template or ``units``, or an out-of-range
     ``reply_hour`` raise ``ValueError``."""
@@ -649,14 +659,15 @@ PREVIEW_VERSION = 1
 
 def cfg_json(cfg: DigestConfig) -> dict:
     """The config fields the OP renders from (the site's `DigestCfg`): title, site, units, the primary and each
-    bucket's label, path and quotas, prices."""
+    bucket's label, path, quotas and shape (absent: a circle), prices."""
     u = cfg.unit
     return {
         "template": cfg.template, "title": cfg.title, "site_url": cfg.site_url, "host": cfg.host,
         "unit": {"name": u.name, "bytes": u.bytes, "short": u.short}, "primary": cfg.primary,
         "buckets": {
             name: {"label": b.label, "path": b.path, "zone": b.zone,
-                   "quotas": [{"bytes": q.bytes, "name": q.name, "short": q.short, "classes": list(q.classes)} for q in b.quotas]}
+                   "quotas": [{"bytes": q.bytes, "name": q.name, "short": q.short, "classes": list(q.classes)} for q in b.quotas],
+                   **({} if b.shape == "circle" else {"shape": b.shape})}
             for name, b in cfg.buckets.items()
         },
         "prices": dict(cfg.prices), "icons_base": cfg.icons_base,

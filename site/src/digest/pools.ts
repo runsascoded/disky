@@ -2,7 +2,7 @@
  * share per scan, buckets sharing a `zone` summed against the zone's quota (as `digest_cw._groups`), sorted by
  * pressure; and the OP's quota line. Pure; DOM-free. */
 import type { CwScan } from './cw'
-import type { DigestCfg, Quota } from './common'
+import type { DigestCfg, Quota, Shape } from './common'
 import { scanTime } from '../scanSlug'
 import { fixed } from './pyfmt'
 
@@ -12,18 +12,20 @@ export interface Pool {
   /** The member buckets (config order). */
   buckets: string[]
   quota: Quota
+  /** Its `runway-hue` mark; a zone's members all state the same one (`digest._check_zones`). */
+  shape: Shape
 }
 
-/** The config's pools: one per quota of each bucket without a zone, one per zone (its first member's quotas). */
+/** The config's pools: one per quota of each bucket without a zone, one per zone (its first member's quotas and shape). */
 export function pools(cfg: DigestCfg): Pool[] {
   const out: Pool[] = []
   const zones = new Map<string, string[]>()
   for (const [b, c] of Object.entries(cfg.buckets)) {
     if (!c.quotas.length) continue
     if (c.zone) zones.set(c.zone, [...(zones.get(c.zone) ?? []), b])
-    else for (const q of c.quotas) out.push({ name: c.quotas.length > 1 ? `${c.label || b} (${q.short ?? q.name})` : c.label || b, buckets: [b], quota: q })
+    else for (const q of c.quotas) out.push({ name: c.quotas.length > 1 ? `${c.label || b} (${q.short ?? q.name})` : c.label || b, buckets: [b], quota: q, shape: c.shape ?? 'circle' })
   }
-  for (const [z, bs] of zones) for (const q of cfg.buckets[bs[0]].quotas) out.push({ name: bs.length > 1 ? `${z} zone` : cfg.buckets[bs[0]].label || bs[0], buckets: bs, quota: q })
+  for (const [z, bs] of zones) for (const q of cfg.buckets[bs[0]].quotas) out.push({ name: bs.length > 1 ? `${z} zone` : cfg.buckets[bs[0]].label || bs[0], buckets: bs, quota: q, shape: cfg.buckets[bs[0]].shape ?? 'circle' })
   return out
 }
 
@@ -103,13 +105,14 @@ export function runwayMark(r: Runway, pct: number): string {
 
 /** `quotas: 'runway-hue'` (specs/digest-runway-marks.md §3; `digest_cw.RUNWAY_HUE_*` / `_runway_hue`): the workspace
  *  emoji `:runway-1:` (red) … `:runway-8:` (green), one more than the cut points (days to full) the runway reaches;
- *  a pool ≥ `RUNWAY_FULL_PCT` full is never calmer than `RUNWAY_HUE_FULL_N`. */
+ *  a pool ≥ `RUNWAY_FULL_PCT` full is never calmer than `RUNWAY_HUE_FULL_N`. A pool with a shape gets
+ *  `:runway-<shape>-N:`, the same step in the same color; a circle keeps the plain `:runway-N:`. */
 export const RUNWAY_HUE_D = [1.8, 3, 6, 10, 19, 33, 60]
 export const RUNWAY_HUE_FULL_N = 3
 
-export function runwayHue(r: Runway, pct: number): string {
+export function runwayHue(r: Runway, pct: number, shape: Shape = 'circle'): string {
   const n = 1 + RUNWAY_HUE_D.filter(c => r.days >= c).length
-  return `:runway-${pct >= RUNWAY_FULL_PCT ? Math.min(n, RUNWAY_HUE_FULL_N) : n}: `
+  return `:runway-${shape === 'circle' ? '' : `${shape}-`}${pct >= RUNWAY_FULL_PCT ? Math.min(n, RUNWAY_HUE_FULL_N) : n}: `
 }
 
 export function runwayText(r: Runway, cfg: DigestCfg): string {
@@ -131,7 +134,7 @@ function ordered(r: CwScan, cfg: DigestCfg): Pool[] {
 
 /** The OP's quota line at scan `r`: every pool the scan has, each marked and with its headroom. `circles`: most full
  *  first, marked by share; `runway`: the replies' order, marked by runway over `seen` (every scan, in order);
- *  `runway-hue`: the same, as `:runway-N:` steps. */
+ *  `runway-hue`: the same, as `:runway-N:` steps in each pool's shape. */
 export function quotaLine(r: CwScan, cfg: DigestCfg, alertAt: number, mode: 'circles' | 'runway' | 'runway-hue' = 'circles', seen: CwScan[] = []): string {
   const u = cfg.unit
   const rows = (mode === 'circles' ? pools(cfg) : ordered(r, cfg)).flatMap(p => {
@@ -148,7 +151,7 @@ export function quotaLine(r: CwScan, cfg: DigestCfg, alertAt: number, mode: 'cir
       const hist = seen.filter(x => x.scan < r.scan && scanTime(x.scan) >= reach)
         .flatMap(x => { const y = used(p, x, cfg); return y == null ? [] : [[scanTime(x.scan), y] as [number, number]] })
       const rw = runway(p.quota.bytes / u.bytes - v, growth(hist, t, v))
-      m = mode === 'runway-hue' ? runwayHue(rw, pct) : runwayMark(rw, pct)
+      m = mode === 'runway-hue' ? runwayHue(rw, pct, p.shape) : runwayMark(rw, pct)
       tail = runwayText(rw, cfg)
     }
     if (pct < QUIET_PCT) return `${m}${p.name} ${fixed(pct, 0)}%${tail}`
