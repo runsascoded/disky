@@ -1,7 +1,7 @@
-import { beforeAll, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import type { Env } from './auth'
 import { buildLevels, type Level, levelK, levelOf, type LevelRow, mergeLevels } from './diffLevel'
-import { asOfScans, coloPutsSettled, GetRounds, openIndex, planChanged, planRects, type Rect, withChurn } from './index'
+import { asOfScans, coloPutsSettled, GetRounds, LEVEL_BUDGET, openIndex, planChanged, planRects, type Rect, withChurn } from './index'
 import { ahead, clearIsolate, loadScopes } from './shared'
 import { sqliteD1 } from './testD1'
 import { fixtureR2 as r2 } from './testR2'
@@ -427,6 +427,48 @@ describe('level diffs', () => {
       const c = cases.find(c => c.path === '')!
       await buildLevels(lv, { from: c.from, to: c.to, dirs: [''], k: 512, m: 'churn', chain: false, lap: n => { laps.push(n) } })
       expect(laps).toEqual(['churn', 'plan', 'index', 'pages', 'data', 'decode', 'rollup', 'own'])
+    })
+
+    describe('its budget', () => {
+      const whole = LEVEL_BUDGET.bytes
+      afterEach(() => { LEVEL_BUDGET.bytes = whole })
+      const span = () => cases.find(x => x.from === '2026-08-02' && x.to === '2026-08-06' && x.path === '')!
+      const read = async (lv: Env, dirs: string[]) => {
+        const c = span()
+        const o = { from: c.from, to: c.to, dirs, k: 512, m: 'churn' as const, chain: false, more: [] as string[], wide: [] as string[] }
+        const got = await buildLevels(lv, o)
+        return { levels: new Map([...got].map(([p, l]) => [p, shape(l)])), more: o.more, wide: o.wide }
+      }
+      /** Two directories this store has, with their rows' charge in bytes as read alone. */
+      const dirsOf = () => [...new Set(cases.filter(x => x.from === span().from && x.to === span().to && x.path !== '').map(x => x.path))].slice(0, 2)
+
+      it('a request past it answers what fits and names the rest: asking for those finishes it, as a whole read answers', async () => {
+        const lv = await levelEnv([])
+        const dirs = dirsOf()
+        expect(dirs.length).toBe(2)
+        const all = await read(lv, dirs)
+        expect([[...all.levels.keys()].sort(), all.more, all.wide]).toEqual([[...dirs].sort(), [], []])
+        const { t, trace } = traced()
+        const c = span()
+        await buildLevels(lv, { from: c.from, to: c.to, dirs: [dirs[0]], k: 512, m: 'churn', chain: false, trace })
+        expect(t['lv-charge']).toBeGreaterThan(0)
+        // Room for the first directory's rows, exactly: the second is left for another request.
+        LEVEL_BUDGET.bytes = t['lv-charge']
+        const first = await read(lv, dirs)
+        expect([[...first.levels.keys()], first.more, first.wide]).toEqual([[dirs[0]], [dirs[1]], []])
+        LEVEL_BUDGET.bytes = whole
+        const rest = await read(lv, first.more)
+        expect(new Map([...first.levels, ...rest.levels])).toEqual(all.levels)
+      })
+
+      it('a directory that fits nowhere: a request of it alone is too wide, beside others it is named `wide`, and nothing is cached for it', async () => {
+        const lv = await levelEnv([])
+        const dirs = dirsOf()
+        LEVEL_BUDGET.bytes = 1
+        await expect(read(lv, [dirs[0]])).rejects.toThrow(/^query too wide/)
+        const got = await read(lv, dirs)
+        expect([[...got.levels.keys()], got.more, [...got.wide].sort()]).toEqual([[], [], [...dirs].sort()])
+      })
     })
 
     it('reads the path sort where a touched file lacks the level index', async () => {

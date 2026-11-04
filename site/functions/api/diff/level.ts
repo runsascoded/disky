@@ -137,6 +137,8 @@ async function levelsOf(ctx0: Ctx, member?: MemberLevel): Promise<Response> {
       // Cached answers, and the chains they lead into, a link at a time.
       let hits = asked ? await asked() : await lookup(g, dirs)
       const todo: string[] = []
+      const more: string[] = []
+      const wide: string[] = []
       while (hits.length) {
         const next: string[] = []
         for (const [p, hit] of hits) {
@@ -157,7 +159,8 @@ async function levelsOf(ctx0: Ctx, member?: MemberLevel): Promise<Response> {
           const given = first ? { level: await lvl(), prep: await prep(), plan: sameSet(todo, dirs) ? await plan() : undefined } : undefined
           first = false
           st.lap('open')
-          return buildLevels(ctx.env, { from, to, dirs: todo, k, m, trace: st.trace, onRead: () => st.mark('fixed'), lap: n => { st.lap(n); if (n === 'plan') st.mark('fixed') } }, given)
+          more.length = wide.length = 0
+          return buildLevels(ctx.env, { from, to, dirs: todo, k, m, more, wide, trace: st.trace, onRead: () => st.mark('fixed'), lap: n => { st.lap(n); if (n === 'plan') st.mark('fixed') } }, given)
         })
         st.lap('read')
         for (const [p, l] of built) {
@@ -169,7 +172,7 @@ async function levelsOf(ctx0: Ctx, member?: MemberLevel): Promise<Response> {
       }
       const levels = [...out.values()].map(l => (l.next && shut(l.next) ? { ...l, next: undefined } : l))
       st.mark('fixed')
-      const body = JSON.stringify({ from, to, k, m, levels })
+      const body = JSON.stringify({ from, to, k, m, levels, ...(more.length ? { more } : {}), ...(wide.length ? { wide } : {}) })
       await syncClock()
       st.lap('encode')
       return new Response(body, {
@@ -193,7 +196,7 @@ async function levelsOf(ctx0: Ctx, member?: MemberLevel): Promise<Response> {
 /** Whether `a` and `b` hold the same directories. */
 const sameSet = (a: string[], b: string[]): boolean => a.length === b.length && a.every(x => b.includes(x))
 
-type LevelBody = { from: string; to: string; k: number; m: Measure; levels: Level[] }
+type LevelBody = { from: string; to: string; k: number; m: Measure; levels: Level[]; more?: string[]; wide?: string[] }
 
 /** `/api/diff/level` on a union view (see the module doc). */
 async function unionLevels(ctx0: Ctx, view: UnionView): Promise<Response> {
@@ -239,7 +242,13 @@ async function unionLevels(ctx0: Ctx, view: UnionView): Promise<Response> {
     const asked = await Promise.all([...byStore].map(([store, ps]) => ask(pairs.find(p => p.store === store)!, ps)))
     const refused = asked.find(a => a instanceof Response)
     if (refused) return refused as Response
-    for (const b of asked as LevelBody[]) for (const l of b.levels) out.set(l.path, l)
+    const more: string[] = []
+    const wide: string[] = []
+    for (const b of asked as LevelBody[]) {
+      for (const l of b.levels) out.set(l.path, l)
+      more.push(...b.more ?? [])
+      wide.push(...b.wide ?? [])
+    }
     if (dirs.includes('')) {
       const comparable = pairs.filter(p => p.change !== 'unknown')
       const roots = await Promise.all(comparable.map(async (p): Promise<LevelBody | Response | Level> => {
@@ -263,7 +272,7 @@ async function unionLevels(ctx0: Ctx, view: UnionView): Promise<Response> {
       const chained = new Map(ok.flatMap(r => ('levels' in r ? r.levels.filter(l => l.path !== '').map(l => [l.path, l] as const) : [])))
       for (let n = root.next; n && !out.has(n) && chained.has(n); n = chained.get(n)!.next) out.set(n, chained.get(n)!)
     }
-    return new Response(JSON.stringify({ from: cf.date, to: ct.date, k, m, levels: [...out.values()], union: { view: view.key, sources } }), {
+    return new Response(JSON.stringify({ from: cf.date, to: ct.date, k, m, levels: [...out.values()], ...(more.length ? { more } : {}), ...(wide.length ? { wide } : {}), union: { view: view.key, sources } }), {
       headers: { 'content-type': 'application/json', 'cache-control': 'private, max-age=300' },
     })
   } catch (e) {

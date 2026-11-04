@@ -20,7 +20,7 @@
  *  `openIvLevel`), a round reads it instead (`levelRound`): each asked directory's transitions in `(D1, D2]`, one key
  *  range per file, every directory and file planned together and read in two waves (`readLevel`). Same answers. */
 import type { Env } from './auth.js'
-import { asOfScans, type ChangedPlan, DiffUnavailable, FooterBudget, type IndexHandle, intervalsOn, ivChurnFrom, ivRefuseHeld, type LevelHandle, type LevelRec, openInterval, openIvLevel, planChanged, readChanged, readFits, readLevel, type Rect, type Row, syncClock, type Trace, withChurn, withTrace } from './index.js'
+import { asOfScans, type ChangedPlan, DiffUnavailable, FooterBudget, type IndexHandle, intervalsOn, ivChurnFrom, ivRefuseHeld, LEVEL_BUDGET, type LevelHandle, type LevelRec, type LevelSpend, openInterval, openIvLevel, planChanged, readChanged, readFits, readLevel, type Rect, type Row, syncClock, type Trace, withChurn, withTrace } from './index.js'
 import { readRootAgg } from './view.js'
 
 /** The answer's version, in its edge-cache key: bumped with every change to what a level answers. */
@@ -150,6 +150,9 @@ export interface LevelOpts {
   m: Measure
   /** Follow single-changed-directory chains (`next`) in the same request (default on). */
   chain?: boolean
+  /** Filled by the read: directories it left for a later request (`LEVEL_BUDGET` spent), and ones too wide even alone. */
+  more?: string[]
+  wide?: string[]
   trace?: Trace
   /** Called as the first data read (`readChanged`) starts: the end of the request's fixed phase (`Server-Timing` `fixed`). */
   onRead?: () => void
@@ -225,7 +228,8 @@ export async function buildLevels(env0: Env, o: LevelOpts, given?: { level?: Lev
     if (base == null) throw new DiffUnavailable('churn', 'the interval store generation carries no churn')
     if (lh.d1 < base) throw new DiffUnavailable('churn', `churn is counted from scan stamp ${base}; ${o.from} is before it`)
     o.lap?.('churn')
-    const got = await chained(o, dirs => levelRound(env, lh, dirs, o))
+    const spend = { left: LEVEL_BUDGET.bytes }
+    const got = await chained(o, dirs => levelRound(env, lh, dirs, o, spend))
     if (got) {
       o.trace?.('level-index', 1)
       return got
@@ -271,16 +275,27 @@ export function transitionsChange(ts: LevelRec[]): (Sides & { k: 'file' | 'dir';
 /** One round from the level index: `dirs`' transitions (`readLevel`), split while too wide as `round` splits. Null when a
  *  directory's own transitions show it a file on some side in the range (its own rows are written for directories and
  *  closings only, so a file's changes have none): that round is read from the `path` sort instead. */
-async function levelRound(env: Env, lh: LevelHandle, dirs: string[], o: LevelOpts): Promise<Level[] | null> {
+async function levelRound(env: Env, lh: LevelHandle, dirs: string[], o: LevelOpts, spend: LevelSpend): Promise<Level[] | null> {
   let recs: LevelRec[]
   try {
-    recs = await readLevel(lh, dirs, o.trace, o.lap)
+    recs = await readLevel(lh, dirs, spend, o.trace, o.lap)
   } catch (e) {
-    if (!String((e as Error).message).startsWith('query too wide') || dirs.length === 1) throw e
+    if (!String((e as Error).message).startsWith('query too wide')) throw e
+    if (dirs.length === 1) {
+      // Asked alone it is the request's answer (a 413); beside others, they still get theirs.
+      if (o.dirs.length === 1 && spend.left === LEVEL_BUDGET.bytes) throw e
+      ;(spend.left === LEVEL_BUDGET.bytes ? (o.wide ??= []) : (o.more ??= [])).push(dirs[0])
+      return []
+    }
     const m = dirs.length >> 1
-    const x = await levelRound(env, lh, dirs.slice(0, m), o)
-    const y = x && await levelRound(env, lh, dirs.slice(m), o)
-    return x && y ? [...x, ...y] : null
+    const x = await levelRound(env, lh, dirs.slice(0, m), o, spend)
+    if (!x) return null
+    if (spend.left < LEVEL_BUDGET.bytes) {
+      (o.more ??= []).push(...dirs.slice(m))
+      return x
+    }
+    const y = await levelRound(env, lh, dirs.slice(m), o, spend)
+    return y && [...x, ...y]
   }
   const by = new Map<string, LevelRec[]>()
   for (const r of recs) {
