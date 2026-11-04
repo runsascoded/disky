@@ -430,7 +430,7 @@ def cut_level(con, root: str, out: Path, *, rg_rows: int = ist.SERVED_RG, tree: 
     t0 = monotonic()
     files = sorted(str(p) for p in Path(root, "pvl").glob("r*.parquet"))
     extra = ilv.extra_rows(con, files) if tree is not None else 0
-    with ist.plan_cut(con, tree, files, rg_rows=rg_rows, what=f"cut {ilv.LEVEL}", extra_rows=extra) as (procs, budget):
+    with ist.plan_cut(con, tree, files, rg_rows=rg_rows, what=f"cut {ilv.LEVEL}", extra_rows=extra, sort_cols=len(ilv.LEVEL_SCHEMA)) as (procs, budget):
         doc = ist.write_served(con, level_source(root), ilv.LEVEL, out / f"{ilv.LEVEL}.parquet", ilv.LEVEL_SCHEMA, rg_rows=rg_rows, opened=ilv.RUN_OPENED,
                                procs=procs, budget=budget)
     doc["s"] = round(monotonic() - t0, 1)
@@ -455,7 +455,7 @@ def cut_run(con, root: str, out: Path, *, rg_rows: int = ist.SERVED_RG, sliced: 
         t0 = monotonic()
         schema = ist.served_schema(sort, generation, churn)
         files = sorted(str(p) for p in Path(root, sub).glob("r*.parquet"))
-        with ist.plan_cut(con, tree, files, rg_rows=rg_rows, what=f"cut {sort}") as (procs, budget):
+        with ist.plan_cut(con, tree, files, rg_rows=rg_rows, what=f"cut {sort}", sort_cols=len(schema)) as (procs, budget):
             doc = ist.write_served(con, delta_relation(root, sub, cols=schema.names), sort, out / f"{sort}.parquet", schema, rg_rows=rg_rows,
                                    procs=procs, budget=budget)
         doc["s"] = round(monotonic() - t0, 1)

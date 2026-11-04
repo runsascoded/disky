@@ -135,3 +135,35 @@ def test_a_runs_cut_charges_the_bound(tmp_path, charged):
     _write(root / "pvl", t)
     doc = ia.cut_level(duckdb.connect(), str(root), tmp_path / "out", rg_rows=8, tree=TREE)
     assert (charged, doc["rows"]) == ([BOUND], ROWS)
+
+
+def _paths(f: Path, n: int, width: int) -> str:
+    """`n` rows whose `path` is `width` bytes (plain, uncompressed), in a file of `SCHEMA`'s columns."""
+    pq.write_table(pa.Table.from_pylist([{**ROOT, "path": "p" * width}] * n, schema=SCHEMA), f, use_dictionary=False, compression="none")
+    return str(f)
+
+
+def test_writer_meta_is_the_sorts_columns_and_the_files_mean_width(tmp_path):
+    """What a sort's writers keep over all its groups: its own columns, not its sources', and the string statistics' bytes a
+    value over every source row: a small file of long paths is a few of its groups, not all of them."""
+    long = _paths(tmp_path / "long.parquet", 100, 1000)
+    short = _paths(tmp_path / "short.parquet", 9900, 10)
+    size = sum(pq.read_metadata(f).row_group(0).column(1).total_uncompressed_size for f in (long, short))
+    stat = -(-size // 10_000)
+    assert ist.writer_meta([long, short], 8192, 256, cols=13) == tm.group_meta(13, 32, stat)
+    assert ist.writer_meta([long, short], 8192, 256) == tm.group_meta(len(SCHEMA), 32, stat)
+
+
+def test_the_level_plan_charges_the_level_sorts_columns(tmp_path, monkeypatch):
+    got: list[int] = []
+    real = tm.Budget.cut
+
+    def cut(self, *a, **kw):
+        got.append(kw["meta"])
+        return real(self, *a, **kw)
+
+    monkeypatch.setattr(tm.Budget, "cut", cut)
+    root = tmp_path / "run"
+    f = _write(root / "pvl", _table(_shapes()).append_column("op", pa.array([1] * len(_shapes()), pa.int8())))
+    ia.cut_level(duckdb.connect(), str(root), tmp_path / "out", rg_rows=8192, tree=TREE)
+    assert got == [ist.writer_meta([f], 8192, cols=len(ilv.LEVEL_SCHEMA))]
