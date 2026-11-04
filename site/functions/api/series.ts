@@ -1,7 +1,10 @@
 /** Bytes under a path per scan — the size-over-time chart, scoped like the
  * map (specs/done/view-serving.md §1 "series.json" → this).
  *
- *   GET /api/series?path=<P>[&lens=user:<id>|user:me][&o=owned|unowned]
+ *   GET /api/series?path=<P>[&lens=user:<id>|user:me][&o=owned|unowned][&chunk=<i>]
+ *
+ * With `OWNER_HISTORY_BATCH=1`, a lens / owner / class scoped series is read `SERIES_CHUNK` scans a request (its cost
+ * model is there): no `chunk` answers the newest window and `chunks: n`; `chunk=i` (0 ≤ i < n, oldest first) the rest.
  *
  * One point per scan the index knows: P's own row in that scan's coarsest
  * tier that holds it (or the floor-free tier), scoped per row like a view's
@@ -22,12 +25,12 @@ import { classKey, ownerKey, ownerOk, type OwnerScope, parseClasses, parseOwner,
 import { hexNote, hexQuery, liveTotal, rollupTotal, staticCompound, staticFilterStore, staticLiteral, staticTag } from '../_lib/staticFilter.js'
 import { type BoolAnswer, boolPlan, compound } from '../_lib/staticBool.js'
 import { indexedOnly, pathTerms, reject, rejectBody, rejectQuery, rejectScope } from '../_lib/indexedOnly.js'
-import { poolLensFor, readRootAgg, readRootHistory, readRootRows } from '../_lib/view.js'
+import { poolLensFor, readPathHistory, readRootAgg, readRootRows } from '../_lib/view.js'
 import type { FoldedLens } from '../_lib/owners.js'
 import { type Hit, scanAt } from '../_lib/staticNames.js'
 import { type OverTime, overTimePoint, readOverTime } from '../_lib/overTime.js'
 import { parsePaths } from '../_lib/filter.js'
-import { SERIES_MAX_PATHS } from '../_lib/seriesLimits.js'
+import { SERIES_CHUNK, SERIES_MAX_PATHS } from '../_lib/seriesLimits.js'
 import { metaRoots, rootPoints, type RootRow, type RootTrace } from '../_lib/series.js'
 import { cutoffOf, latestCutoff, memberOf, memberRequest, membersAt, namesCutoff, openUnion, unionFor } from '../_lib/union.js'
 import type { UnionView } from '../_lib/stores.js'
@@ -237,7 +240,14 @@ export async function seriesRead(ctx: SeriesCtx, gate: (ctx: SeriesCtx) => Promi
 
   // Every scan with a synced floor-free index, oldest first.
   const rows = await st.time('scans', pathScans(env, true))
-  const dates = rows.results.map(r => r.date)
+  const scans = rows.results.map(r => r.date)
+  // A scoped series a request at a time. Windows are aligned from the oldest scan, so a new scan changes only the newest.
+  const chunked = env.OWNER_HISTORY_BATCH === '1' && !!(lens || owner || classes) && !split && !paths.length && !keyed
+  const nChunks = Math.max(1, Math.ceil(scans.length / SERIES_CHUNK))
+  const chunkRaw = chunked ? url.searchParams.get('chunk') : null
+  const chunk = chunkRaw == null ? nChunks - 1 : /^\d+$/.test(chunkRaw) ? Number(chunkRaw) : -1
+  if (chunk < 0 || chunk >= nChunks) return json({ error: `bad chunk (want 0..${nChunks - 1})` }, 400)
+  const dates = chunked ? scans.slice(chunk * SERIES_CHUNK, (chunk + 1) * SERIES_CHUNK) : scans
   // A user lens or an owner pool applies the live assignments, so its key carries the ledger head.
   const head = (lens || owner) && await hasLedger(env) ? await ledgerHead(env) : 0
   // Unscoped whole-bucket series only: scans without tiers still have a total in meta.json.
@@ -249,7 +259,7 @@ export async function seriesRead(ctx: SeriesCtx, gate: (ctx: SeriesCtx) => Promi
   // chart load re-read one point per scan (≈8 rounds of D1 + range reads for
   // a 94-scan history, 5–20 s) while the diff beside it was a cache hit.
   const g = await st.time('gens', pathGens(env, dates))
-  const cacheKey = cacheKeyFor('series', cacheEnvTag(env, request), `${encodeURIComponent(path)}?P=${encodeURIComponent(paths.join(','))}&l=${lensTag}&o=${owner ? ownerKey(owner) : ''}&cl=${classKey(classes)}&s=${split ?? ''}&qs=${keyed ? qp.syntax : ''}&q=${encodeURIComponent(keyed ? url.searchParams.get('q') ?? '' : '')}&st=${staticTag(env, keyed)}&d=${dates.join(',')}&x=${extra.join(',')}&head=${head}&g=${g}&oh=${env.OWNER_HISTORY_BATCH === '1' ? 4 : 0}`, storeKey(env))
+  const cacheKey = cacheKeyFor('series', cacheEnvTag(env, request), `${encodeURIComponent(path)}?P=${encodeURIComponent(paths.join(','))}&l=${lensTag}&o=${owner ? ownerKey(owner) : ''}&cl=${classKey(classes)}&s=${split ?? ''}&qs=${keyed ? qp.syntax : ''}&q=${encodeURIComponent(keyed ? url.searchParams.get('q') ?? '' : '')}&st=${staticTag(env, keyed)}&d=${dates.join(',')}&x=${extra.join(',')}&head=${head}&g=${g}&ch=${!chunked ? '' : chunkRaw ?? `n${nChunks}`}`, storeKey(env))
   const hit = await st.time('cache', cacheMatch(env, cacheKey))
   if (hit) return hit
 
@@ -284,10 +294,10 @@ export async function seriesRead(ctx: SeriesCtx, gate: (ctx: SeriesCtx) => Promi
   const indexable = !split && !lens && !owner && !classes && !shits && !(sbool && !sbool.whole)
   const lines = indexable ? await st.time('overtime', Promise.all((paths.length ? paths : [path]).map(p => readOverTime(env, p)))) : []
   const ot: OverTime[] | null = lines.length && lines.every(Boolean) ? lines as OverTime[] : null
-  let ownerHistory: Awaited<ReturnType<typeof readRootHistory>> = null
-  if (env.OWNER_HISTORY_BATCH === '1' && !path && !paths.length && !query && !split && !classes && lens && !owner) {
+  let ownerHistory: Awaited<ReturnType<typeof readPathHistory>> = null
+  if (chunked && !classes && (owner && !lens || lens && !path)) {
     try {
-      ownerHistory = await st.time('owner-history', ivRetry(() => readRootHistory(env, dates, { lens, owner })))
+      ownerHistory = await st.time('owner-history', ivRetry(() => readPathHistory(env, dates, path, { lens, owner })))
       st.trace('owner-history-points', ownerHistory?.size ?? 0, 'count')
     } catch (e) {
       const why = (e as Error).message
@@ -384,7 +394,7 @@ export async function seriesRead(ctx: SeriesCtx, gate: (ctx: SeriesCtx) => Promi
     for (const g of got) if (g) points.push(g)
   }
   points.sort((a, b) => a.date.localeCompare(b.date))
-  const body = JSON.stringify({ path, ...(qp.query ? hexNote(hx.hexRuns, qp.query.ast) : {}), ...(unindexed.length ? { unindexed: unindexed.sort() } : {}), ...(paths.length ? { paths } : {}), ...(lens ? { lens: lensTag } : {}), ...(owner ? { owner } : {}), points, ...(split ? { roots: rootPoints(rootsByDate) } : {}), ...(failed.length ? { failed: failed.sort() } : {}) })
+  const body = JSON.stringify({ path, ...(chunked && chunkRaw == null ? { chunks: nChunks } : {}), ...(qp.query ? hexNote(hx.hexRuns, qp.query.ast) : {}), ...(unindexed.length ? { unindexed: unindexed.sort() } : {}), ...(paths.length ? { paths } : {}), ...(lens ? { lens: lensTag } : {}), ...(owner ? { owner } : {}), points, ...(split ? { roots: rootPoints(rootsByDate) } : {}), ...(failed.length ? { failed: failed.sort() } : {}) })
   // A series missing points to errors is served (gaps beat no chart) but never cached: the next request retries them.
   if (failed.length) return new Response(body, { headers: { 'content-type': 'application/json', 'cache-control': 'no-store', 'server-timing': st.header() } })
   return cacheStore(env, cacheKey, body, { 'server-timing': st.header() }, ctx.waitUntil?.bind(ctx))

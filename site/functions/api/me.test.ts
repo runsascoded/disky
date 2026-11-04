@@ -136,7 +136,7 @@ describe('D1', () => {
       const alan = await envAs('alan@example.test')
       await series(at(alan, `${T}&lens=user:me`))
       await series(at(alan, `${T}&lens=user:alan-turing`))
-      const key = `https://series.cache/v${CACHE_V}/marin-a?P=&l=user:alan-turing&o=&cl=&s=&qs=&q=&st=&d=2026-10-01&x=&head=7&g=g1&oh=0`
+      const key = `https://series.cache/v${CACHE_V}/marin-a?P=&l=user:alan-turing&o=&cl=&s=&qs=&q=&st=&d=2026-10-01&x=&head=7&g=g1&ch=`
       expect(keys).toEqual([key, key])
     })
     it('`me` with nobody to resolve (an identity-less cache warm) is a 400, never a cache read', async () => {

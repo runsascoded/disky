@@ -136,8 +136,8 @@ export interface Env {
   /** `1`: Δ-mode diffs (`dm=delta`, unscoped) by lazy descent over the interval store (`_lib/diffDescent.ts`; its
    *  planner hands busy, broad paths to the as-of walk). Needs no index beyond the store's. */
   DIFF_DESCENT?: string
-  /** `1`: the fleet-root owner series reads one bounded interval-store version range (`readRootHistory`),
-   *  the canonical reader as fallback. A prototype, off (specs/root-owner-history.md). */
+  /** `1`: a lens, owner or class scoped series reads `SERIES_CHUNK` scans a request, the client filling the rest
+   *  (`/api/series`' `chunks`, `readPathHistory`). Off until measured on dev (specs/root-owner-history.md). */
   OWNER_HISTORY_BATCH?: string
   /** The interval store generation (`interval-store/<gen>/` on `INDEX_R2`), a pin; unset: the store's current one,
    *  `interval-store/CURRENT.json` (`index.ts` `ivGen`), which a compaction moves. */
