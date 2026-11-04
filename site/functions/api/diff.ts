@@ -171,7 +171,7 @@ async function diffGated(
     // The static index's hex-run rule: substrings match where they `occur` under it, static or not (`hexRuns.ts`).
     const hx = await hexQuery(ctx.env, query)
     query = hx.query
-    const [head, g] = await st.time('pre', Promise.all([lens && ctx.env.DB || owner && await hasLedger(ctx.env) ? ledgerHead(ctx.env) : Promise.resolve(0), gens()]))
+    const [head, g] = await st.time('pre', Promise.all([(lens || owner) && await hasLedger(ctx.env) ? ledgerHead(ctx.env) : Promise.resolve(0), gens()]))
     // Δ mode from the transitions (specs/diff-from-changes.md): asked for explicitly (`dm=delta`: a client that doesn't
     // say draws max(old, new) areas from these rows too), unscoped, on a deployment whose store has them.
     // `atten ≥ 1`: a parent's floor is then at most its children's, so a changed child's parent (as big) is read too.

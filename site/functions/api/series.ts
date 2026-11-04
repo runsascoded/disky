@@ -235,7 +235,7 @@ export async function seriesRead(ctx: SeriesCtx, gate: (ctx: SeriesCtx) => Promi
   const rows = await st.time('scans', pathScans(env, true))
   const dates = rows.results.map(r => r.date)
   // A user lens or an owner pool applies the live assignments, so its key carries the ledger head.
-  const head = lens || owner && await hasLedger(env) ? await ledgerHead(env) : 0
+  const head = (lens || owner) && await hasLedger(env) ? await ledgerHead(env) : 0
   // Unscoped whole-bucket series only: scans without tiers still have a total in meta.json.
   const extra = path === '' && !paths.length && !query && !lens && !owner && !classes ? await st.time('unindexed', unindexedScans(env, new Set(dates))) : []
   // Two-tier cache (colo + KV, `_lib/edgeCache.ts`), keyed by every input

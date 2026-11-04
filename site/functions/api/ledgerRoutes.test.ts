@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest'
 import { onRequestGet as assignments } from './assignments'
 import { onRequestGet as estate } from './estate'
 import { onRequestGet as owners } from './owners'
+import { seriesRead } from './series'
 import { sqliteD1, withoutLedger } from '../_lib/testD1'
 
 describe('ownership reads without a ledger', () => {
@@ -19,5 +20,15 @@ describe('ownership reads without a ledger', () => {
       estate(at('/api/estate?date=2026-10-07&user=ann')).then(answer),
       owners(at('/api/owners?date=2026-10-07')).then(answer),
     ])).toEqual(Array(3).fill([404, { error: 'no ownership ledger on this deployment' }]))
+  })
+
+  it('/api/series with a user lens answers from the scans, not a 500 from the ledger head', async () => {
+    ;(globalThis as unknown as { caches: unknown }).caches = { default: { match: async () => undefined, put: async () => {} } }
+    const { db, raw } = await sqliteD1()
+    withoutLedger(raw)
+    const env = { DB: db, STORE_BUCKET: 'b', STORE_SCHEME: 'gs://', GCS_HMAC_KEY_ID: 'k', GCS_HMAC_SECRET: 's' }
+    const r = await seriesRead({ request: new Request('http://localhost/api/series?path=&lens=user:nobody'), env } as never, async () => null)
+    const body = await r.json() as { points: unknown[] }
+    expect([r.status, body.points]).toEqual([200, []])
   })
 })
