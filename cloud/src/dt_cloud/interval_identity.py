@@ -9,6 +9,7 @@ from click import IntRange, command, option
 
 from . import interval_compact as ic
 from . import interval_store as ist
+from . import tree_mem as tm
 from .append_runner import latest_key
 from .blobstore import Store, mirror, upload_new
 from .interval_local import publish_order, publish_tier
@@ -62,6 +63,6 @@ def migrate_cmd(gen, mem, store_root, to_gen, threads, ranges_gen, rg_rows, work
     """Adopt the shared opaque version field; preserve unknowns and leave CURRENT for a verified cutover."""
     _check_gen(gen)
     _check_gen(to_gen)
-    with workdir(work) as w:
+    with tm.watch(mem, f"migrate-object-version {gen}"), workdir(work) as w:
         print(json.dumps(migrate(Store(store_root), gen, to_gen, w, ranges_gen=ranges_gen,
                                   threads=threads, mem=mem, rg_rows=rg_rows), indent=1))

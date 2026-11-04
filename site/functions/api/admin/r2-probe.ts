@@ -1,8 +1,8 @@
 /** R2 read latency, as this colo's Worker sees it through the `INDEX_R2` binding. Admin only; never cached.
  *
- *   GET /api/admin/r2-probe?key=<R2 key>[&n=<count>][&len=<bytes>]
+ *   GET /api/admin/r2-probe?object=<R2 key>[&n=<count>][&len=<bytes>]
  *
- *  `key`: an object under the interval store (`ivPrefix`) or the static name index (`static-names/`); anything else
+ *  `object` (not `key`, which the gate reads as a share link): an object under the interval store (`ivPrefix`) or the static name index (`static-names/`); anything else
  *  is a 400. The object is `head`ed for its size, then `n` ranged gets of `len` bytes at random offsets within it are
  *  timed, first one after another (each a cold-ish round), then `n` more at once (fresh offsets). Per get: `ttfb_ms`,
  *  until the get resolves (its headers), and `total_ms`, until its body is read (`arrayBuffer`). Both marks are taken
@@ -95,7 +95,7 @@ export const onRequestGet = async (ctx: Ctx): Promise<Response> => {
   const bucket = ctx.env.INDEX_R2
   if (!bucket) return json({ error: 'no INDEX_R2 binding' }, 503, NO_STORE)
   const sp = new URL(ctx.request.url).searchParams
-  const key = sp.get('key') ?? ''
+  const key = sp.get('object') ?? ''
   if (!probeable(ctx.env, key)) return json({ error: `key must be under ${ivPrefix(ctx.env)}/ or static-names/` }, 400, NO_STORE)
   const n = count(sp, 'n', DEFAULT_N, PROBE_MAX_N)
   if (n == null) return json({ error: `n: an integer in [1, ${PROBE_MAX_N}]` }, 400, NO_STORE)

@@ -67,6 +67,7 @@ from . import append_runner as ar
 from . import interval_churn as ich
 from . import interval_store as ist
 from . import static_names as sn
+from . import tree_mem as tm
 from .append_runner import (  # noqa: F401 — NOT_NEXT, StateIncomplete: as this module has always offered them
     NOT_NEXT,
     Carry,
@@ -337,6 +338,17 @@ def append_range(con, prev: dict[str, str], scan: dict, r: dict, name: str, out:
     return doc
 
 
+def append_mem(tree: tm.Budget, files: list[str], what: str) -> str:
+    """DuckDB's limit for a scan's append under the process tree's budget: what this process and the writer's Arrow side
+    (`Budget.append`, rows as `files`', the ranges' open versions, are wide) leave."""
+    from .interval_compact import row_bytes
+
+    rb = row_bytes(files)
+    arrow, duck = tree.append(ist.RANGE_RG, rb)
+    err(f"{what}: memory {tree.total / tm.MIB:,.0f} MiB = this process {tree.base / tm.MIB:,.0f} + Arrow {arrow / tm.MIB:,.0f} ({rb} B a row) + DuckDB {duck / tm.MIB:,.0f}")
+    return f"{duck // tm.MIB}MiB"
+
+
 def append_attribution(con, prev: str, scan: dict, preds: list[str], name: str, out: Path, D: int, *, bucket: str, mount: str | None) -> dict:
     """The attribution table's append for one key range: `prev` its open versions. A covered scan (its entry names an
     `attribution.parquet`, `interval_store.ATTRIBUTION_SRC`) is appended as the path versions are (`append_intervals`,
@@ -388,16 +400,21 @@ def delta_relation(root: str, t: str, served: bool = True, cols: list[str] | Non
 
 
 def cut_run(con, root: str, out: Path, *, rg_rows: int = ist.SERVED_RG, sliced: bool = True, generation: ist.Identity = False,
-            churn: bool = False) -> dict:
+            churn: bool = False, tree: tm.Budget | None = None) -> dict:
     """A run's served sorts (`run_sorts(sliced)`, the attribution sort when the run holds its table) from its delta files
     under `root` → `out/<sort>.parquet` + `.groups.parquet` + `<sort>.json`. Open versions then close records (`seg_sql`
-    without stamps: segment 0, then 1). `GENERATION` in `interval_store.GENERATION_SORT` with `generation`."""
+    without stamps: segment 0, then 1). `GENERATION` in `interval_store.GENERATION_SORT` with `generation`. `tree`: the
+    process tree's budget each sort's workers and DuckDB limit are planned under (`interval_store.plan_cut`, over its
+    delta files); None: every core, DuckDB's limit as set."""
     docs = {}
     for sort in run_sorts(sliced, has_table(root, AT)):
         sub, _, _ = ist.SORTS[sort]
         t0 = monotonic()
         schema = ist.served_schema(sort, generation, churn)
-        doc = ist.write_served(con, delta_relation(root, sub, cols=schema.names), sort, out / f"{sort}.parquet", schema, rg_rows=rg_rows)
+        files = sorted(str(p) for p in Path(root, sub).glob("r*.parquet"))
+        with ist.plan_cut(con, tree, files, rg_rows=rg_rows, what=f"cut {sort}") as (procs, budget):
+            doc = ist.write_served(con, delta_relation(root, sub, cols=schema.names), sort, out / f"{sort}.parquet", schema, rg_rows=rg_rows,
+                                   procs=procs, budget=budget)
         doc["s"] = round(monotonic() - t0, 1)
         (out / f"{sort}.json").write_text(json.dumps(doc, sort_keys=True) + "\n")
         docs[sort] = doc
@@ -608,14 +625,17 @@ def build_merged_run(dirs: list[Path], run: dict, outp: Path, *, gen: str, k: in
                      churn: bool = False) -> dict:
     """The merged run `run` (`plan_carries`' output) of input run dirs `dirs` (oldest first) into `outp`: each key range's
     deltas merged per table (`merge_range`, the `k` ranges), its served sorts cut from them (`cut_run`, `outp/served/`),
-    then `meta.json` (`run_meta`, the inputs' stamps). Returns `{rows, bytes, s}`."""
+    then `meta.json` (`run_meta`, the inputs' stamps). `mem` is the whole process tree's budget (`tree_mem`), measured
+    once the deltas are merged: the cut's workers and DuckDB's limit planned under it. Returns `{rows, bytes, s}`."""
     shutil.rmtree(outp, ignore_errors=True)
     t0 = monotonic()
     for i in range(k):
         merge_range([str(d) for d in dirs], f"r{i:04d}", outp, sliced, generation, churn)
     merge_s = round(monotonic() - t0, 1)
     t1 = monotonic()
-    docs = cut_run(sn.connect(threads, mem, tmp), str(outp), outp / "served", rg_rows=rg_rows, sliced=sliced, generation=generation, churn=churn)
+    tree = tm.Budget.measure(sn.mem_bytes(mem))
+    docs = cut_run(sn.connect(threads, tm.stage_mem(tree, f"merge {run['key']}"), tmp), str(outp), outp / "served", rg_rows=rg_rows, sliced=sliced,
+                   generation=generation, churn=churn, tree=tree)
     cut_s = round(monotonic() - t1, 1)
     metas = [json.loads((d / "meta.json").read_text()) for d in dirs]
     stamps = {sid: ts for m in metas for sid, ts in m["stamps"].items()}
@@ -1064,7 +1084,7 @@ def stage_options(f):
 @option("-f", "--force", is_flag=True, help="Redo ranges already done")
 @option("-i", "--index", type=int, help="Task index (default: $BATCH_TASK_INDEX)")
 @option("-m", "--mount", required=True, help="Local mount of the data bucket (the scratch bucket beside it)")
-@option("-M", "--mem", default="100GB", help="DuckDB memory limit")
+@option("-M", "--mem", default="100GB", help="Memory budget of the whole process tree (`tree_mem`): DuckDB gets what this process and the append's Arrow buffers leave; the peak is logged (exit 1 past it with $DT_TREE_MEM_ASSERT)")
 @option("-n", "--per-task", default=1, type=IntRange(min=1), help="Ranges per task")
 @option("-o", "--out", default="/stage/out", help="Local output dir")
 @option("-p", "--threads", default=16, type=int, help="DuckDB threads")
@@ -1075,6 +1095,11 @@ def ranges_cmd(bucket, gen, ranges_gen, scratch, scan, force, index, mount, mem,
     previous scan's state, else (the first run) the base's range files. Each range's answer at D over the published
     store (the base's range files, the newest earlier manifest's runs, D's deltas) is checked against D's rows, row for
     row (`append_range`'s `check`), in its `ranges/r####.json`."""
+    with tm.watch(mem, f"ranges {scan}"):
+        _ranges(bucket, gen, ranges_gen, scratch, scan, force, index, mount, mem, per_task, out, threads, tmp)
+
+
+def _ranges(bucket, gen, ranges_gen, scratch, scan, force, index, mount, mem, per_task, out, threads, tmp) -> None:
     prefix = f"{PREFIX}/{gen}"
     run = f"{prefix}/{run_key(scan, scan)}"
     store, sstore = Store(store_url(bucket)), Store(store_url(scratch))
@@ -1096,7 +1121,8 @@ def ranges_cmd(bucket, gen, ranges_gen, scratch, scan, force, index, mount, mem,
     todo = plan[t] if t < len(plan) else []
     err(f"ranges task {t}: {len(todo)} ranges" + (f", {sum(counts[i] for i in todo):,} open rows at {prev} (max task "
                                                   f"{max(sum(counts[i] for i in p) for p in plan):,})" if counts else ", interleaved"))
-    con = sn.connect(threads, mem, tmp)
+    inputs = [f"{mount}/{PREFIX}/{ranges_gen}/{tb}/r{i:04d}.parquet" for tb in tables(sl, False) for i in todo]
+    con = sn.connect(threads, append_mem(tm.Budget.measure(sn.mem_bytes(mem)), inputs, f"ranges {scan}"), tmp)
     # What the store answers each range from once D's run is published beside them: the base's range files and the runs
     # the newest earlier manifest lists (`append_range`'s check).
     check = [f"{mount}/{PREFIX}/{ranges_gen}", *(f"{mount}/{prefix}/{r['key']}" for r in runs)]
@@ -1136,7 +1162,7 @@ def ranges_cmd(bucket, gen, ranges_gen, scratch, scan, force, index, mount, mem,
 @option("-d", "--scan", required=True, help="The scan")
 @option("-L", "--compact-level", type=ar.Level(), default=ar.COMPACT_LEVEL, help=ar.LEVEL_HELP)
 @option("-m", "--mount", required=True, help="Local mount of the data bucket")
-@option("-M", "--mem", default="100GB", help="DuckDB memory limit")
+@option("-M", "--mem", default="100GB", help="Memory budget of the whole process tree (`tree_mem`): the churn's DuckDB gets what this process leaves, the run's cut what its workers and Arrow buffers leave too; the peak is logged (exit 1 past it with $DT_TREE_MEM_ASSERT)")
 @option("-n", "--dry-run", is_flag=True, help="Print the manifest (and the carries it makes due); cut and write nothing")
 @option("-p", "--threads", default=16, type=int, help="DuckDB threads")
 @option("-s", "--skip-published", is_flag=True, help="Exit 0 when `manifests/<D>.json` exists (a retried publish+r2 task goes on to the copy)")
@@ -1170,31 +1196,39 @@ def publish_cmd(bucket, gen, ranges_gen, scratch, scan, compact_level, mount, me
     if store.exists(f"{rk}/meta.json"):
         err(f"{rk}: cut")
     else:
-        pinned = store.read_json(f"{rk}/scans.json")
-        s = pinned["scans"][0]
-        outp = Path(tmp) / "served"
-        shutil.rmtree(outp, ignore_errors=True)
-        t0 = monotonic()
-        base = Store(store_url(bucket)).read_json(f"{prefix}/scans.json")
-        sl = ist.sliced(base)
-        churn = ich.has_churn(base)
-        con = sn.connect(threads, mem, tmp)
-        root = f"{mount}/{prefix}/{rk}"
-        if churn:
-            root = str(publish_churn(con, st, Store(store_url(scratch)), prefix, rk, scan, int(s["ts"]), Path(mount) / prefix / rk,
-                                     st.read_json(f"{PREFIX}/{ranges_gen}/ranges.json"), Path(tmp), sl))
-        docs = cut_run(con, root, outp, sliced=sl, generation=ist.has_generation(base), churn=churn)
-        cut_s = round(monotonic() - t0, 1)
-        cut = check_cut(con, root, outp, sliced=sl, generation=ist.has_generation(base), churn=churn)
-        Store(store_url(bucket)).put_tree(outp, f"{prefix}/{rk}/served")
-        shutil.rmtree(outp)
-        new = {"key": rk, "first": scan, "last": scan, "level": 0, "scans": [scan]}
-        meta = {**run_meta(gen, new, {scan: s["ts"]}, docs, run_attribution(pinned)), "cut_s": cut_s, "check": cut,
-                "check_s": round(monotonic() - t0 - cut_s, 1)}
-        store.create(f"{rk}/meta.json", json.dumps(meta, indent=1) + "\n")
-        err(f"{rk}: cut in {meta['cut_s']}s ({meta['bytes']:,} B)")
+        with tm.watch(mem, f"publish {scan}"):
+            _cut_published(store, st, bucket, scratch, gen, ranges_gen, prefix, rk, scan, mount, mem, threads, tmp)
     print(json.dumps(publish_run(store, scan), indent=1))
     write_marker(st, gen, ranges_gen, scan)
+
+
+def _cut_published(store, st: Store, bucket: str, scratch: str, gen: str, ranges_gen: str, prefix: str, rk: str, scan: str, mount: str, mem: str,
+                   threads: int, tmp: str) -> None:
+    """`publish`'s cut: the run's churn (when the generation carries it), its served sorts, their check, `meta.json`."""
+    pinned = store.read_json(f"{rk}/scans.json")
+    s = pinned["scans"][0]
+    outp = Path(tmp) / "served"
+    shutil.rmtree(outp, ignore_errors=True)
+    t0 = monotonic()
+    base = Store(store_url(bucket)).read_json(f"{prefix}/scans.json")
+    sl = ist.sliced(base)
+    churn = ich.has_churn(base)
+    tree = tm.Budget.measure(sn.mem_bytes(mem))
+    con = sn.connect(threads, tm.stage_mem(tree, f"publish {scan}"), tmp)
+    root = f"{mount}/{prefix}/{rk}"
+    if churn:
+        root = str(publish_churn(con, st, Store(store_url(scratch)), prefix, rk, scan, int(s["ts"]), Path(mount) / prefix / rk,
+                                 st.read_json(f"{PREFIX}/{ranges_gen}/ranges.json"), Path(tmp), sl))
+    docs = cut_run(con, root, outp, sliced=sl, generation=ist.has_generation(base), churn=churn, tree=tree)
+    cut_s = round(monotonic() - t0, 1)
+    cut = check_cut(con, root, outp, sliced=sl, generation=ist.has_generation(base), churn=churn)
+    Store(store_url(bucket)).put_tree(outp, f"{prefix}/{rk}/served")
+    shutil.rmtree(outp)
+    new = {"key": rk, "first": scan, "last": scan, "level": 0, "scans": [scan]}
+    meta = {**run_meta(gen, new, {scan: s["ts"]}, docs, run_attribution(pinned)), "cut_s": cut_s, "check": cut,
+            "check_s": round(monotonic() - t0 - cut_s, 1)}
+    store.create(f"{rk}/meta.json", json.dumps(meta, indent=1) + "\n")
+    err(f"{rk}: cut in {meta['cut_s']}s ({meta['bytes']:,} B)")
 
 
 def publish_churn(con, st: Store, sstore: Store, prefix: str, rk: str, scan: str, D: int, run: Path, ranges: dict, tmp: Path,
@@ -1249,7 +1283,7 @@ def write_marker(st: Store, gen: str, ranges_gen: str, scan: str, *, workers: in
 @option("-F", "--read-from", type=Choice(ar.READ_FROM), default="gcs", help="Read the input runs from the data bucket's mount (gcs) or the R2 copy (r2, mirrored locally; the job's R2 env)")
 @option("-L", "--compact-level", type=ar.Level(), default=ar.COMPACT_LEVEL, help=ar.LEVEL_HELP)
 @option("-m", "--mount", required=True, help="Local mount of the data bucket (the merges read the runs)")
-@option("-M", "--mem", default="100GB", help="DuckDB memory limit (the merged runs' cut)")
+@option("-M", "--mem", default="100GB", help="Memory budget of the whole process tree (`tree_mem`) of each merged run's cut: its workers and DuckDB's limit planned under it; the peak is logged (exit 1 past it with $DT_TREE_MEM_ASSERT)")
 @option("-N", "--max-merges", type=IntRange(min=1), help="Stop after this many merged runs")
 @option("-n", "--dry-run", is_flag=True, help="Print the plan; merge and write nothing")
 @option("-p", "--threads", default=16, type=int, help="DuckDB threads")
@@ -1266,9 +1300,10 @@ def carry_cmd(bucket, gen, ranges_gen, scratch, read_from, compact_level, mount,
     sl = ist.sliced(base)
     status = None if dry_run else ar.r2_merge_status(f"{PREFIX}/{gen}")
     rec = NULL if dry_run else from_env("merge")
-    doc = ar.merge_pending(store, carry(gen, k, threads=threads, mem=mem, sliced=sl, generation=ist.has_generation(base), churn=ich.has_churn(base)), Path(mount) / PREFIX / gen, tmp=Path(tmp), dry_run=dry_run,
-                           max_merges=max_merges, max_level=compact_level, status=status,
-                           source=(ar.R2Source(), f"{PREFIX}/{gen}") if read_from == "r2" else None, rec=rec)
+    with tm.watch(mem, f"carry {gen}"):
+        doc = ar.merge_pending(store, carry(gen, k, threads=threads, mem=mem, sliced=sl, generation=ist.has_generation(base), churn=ich.has_churn(base)),
+                               Path(mount) / PREFIX / gen, tmp=Path(tmp), dry_run=dry_run, max_merges=max_merges, max_level=compact_level, status=status,
+                               source=(ar.R2Source(), f"{PREFIX}/{gen}") if read_from == "r2" else None, rec=rec)
     doc["prune"] = _summary(ar.finish_merge(rec, doc, lambda: ar.prune_folded(store, retain=FOLDED_RETAIN, dry_run=dry_run, where=" gcs")))
     print(json.dumps(doc, indent=1))
 
@@ -1293,10 +1328,11 @@ def compact_cmd(bucket, gen, ranges_gen, scratch, policy, read_from, grace_s, jo
     if (b := gs_bucket(bucket)) is None:
         raise SystemExit(f"interval store: the staged compaction reads a mounted GCS bucket; {bucket!r} is not one")
     try:
-        doc = ar.run_compaction(Store(f"gs://{b}"), ic.compactor(rg_rows), gen, Path(mount), Path(tmp),
-                                lease=ar.gcs_compaction_lease_file(gs_bucket(scratch), PREFIX) if promote else None, policy=policy, force=force,
-                                r2_bucket=b if to_r2 else None, grace_s=grace_s, threads=threads, mem=mem, jobs=jobs, read_from=read_from,
-                                promote=promote, rec=from_env("compact"))
+        with tm.watch(mem, f"compact {gen}"):
+            doc = ar.run_compaction(Store(f"gs://{b}"), ic.compactor(rg_rows), gen, Path(mount), Path(tmp),
+                                    lease=ar.gcs_compaction_lease_file(gs_bucket(scratch), PREFIX) if promote else None, policy=policy, force=force,
+                                    r2_bucket=b if to_r2 else None, grace_s=grace_s, threads=threads, mem=mem, jobs=jobs, read_from=read_from,
+                                    promote=promote, rec=from_env("compact"))
     except ar.Busy as e:
         err(f"compact: {e}")
         raise SystemExit(ar.BUSY)

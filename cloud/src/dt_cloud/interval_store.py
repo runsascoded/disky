@@ -22,6 +22,7 @@ import os
 import shutil
 import sys
 from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 from functools import partial
 from pathlib import Path
 from time import monotonic
@@ -821,11 +822,37 @@ def cut_plan(segs: list[tuple[int, int]], rg_rows: int, k: int) -> list[list[tup
     return [p for p in parts if p] or [[]]
 
 
+#: The served sorts' columns with statistics (`_served_writer`): their pages' bounds are the page index's.
+STAT_COLS = ("depth", "path", "vf", "vt")
+
+
+def writer_meta(files: list[str], rg_rows: int, page_rows: int = SERVED_PAGE_ROWS) -> int:
+    """What a served sort's writer keeps per row group it has written (`tree_mem.group_meta`), from `files`' footers
+    (the range or delta files it's cut from): their widest column count, `rg_rows / page_rows` pages, and the string
+    statistics columns' bytes a value (the widest file's uncompressed bytes a row of each)."""
+    cols, stat = 1, 0
+    for f in files:
+        if not Path(f).exists():
+            continue
+        md = pq.read_metadata(f)
+        cols = max(cols, md.num_columns)
+        sch = md.schema.to_arrow_schema()
+        strs = {i for i, c in enumerate(sch) if c.name in STAT_COLS and (pa.types.is_string(c.type) or pa.types.is_large_string(c.type))}
+        size, rows = 0, 0
+        for g in range(md.num_row_groups):
+            rg = md.row_group(g)
+            size += sum(rg.column(i).total_uncompressed_size for i in strs)
+            rows += rg.num_rows
+        if rows:
+            stat = max(stat, -(-size // rows))
+    return tm.group_meta(cols, -(-rg_rows // page_rows), stat)
+
+
 def _served_writer(out: Path, schema: pa.Schema, page: int) -> pq.ParquetWriter:
     """A served sort's writer (`write_served`): zstd, `page`-row pages with a page index, statistics on the planning
     columns, a dictionary on the low-cardinality strings only."""
     return pq.ParquetWriter(out, schema, compression=sn.CODEC, use_dictionary=[c for c in ("kind", "us", "usr", "user", "source") if c in schema.names],
-                            write_statistics=[c for c in ("depth", "path", "vf", "vt") if c in schema.names],
+                            write_statistics=[c for c in STAT_COLS if c in schema.names],
                             write_page_index=True, write_batch_size=page, data_page_size=1)
 
 
@@ -1352,48 +1379,79 @@ def write_groups(out: Path, bounds: Iterable[dict], sort: str, summary) -> dict:
     return {"sort": sort, "rows": start, "groups": md.num_row_groups, "bytes": out.stat().st_size, "groups_bytes": gp.stat().st_size, "segments": segs}
 
 
+@contextmanager
+def plan_cut(con, tree: tm.Budget | None, files: list[str], *, at_once: int = 1, rg_rows: int = SERVED_RG,
+             what: str = "cut", sort_rows: int | None = None) -> Iterator[tuple[int, int]]:
+    """The cut's `(procs, run budget)` for `at_once` sorts at once over `files` (local range or delta files: their
+    footers size a row and count the rows), as every entry that cuts plans it. `tree`: the process tree's budget
+    (`tree_mem.Budget`): the workers planned under it (`Budget.cut`, rows of the files' widest + `SPOOL_EXTRA`, no holder
+    charged more rows than the files have, each sort's writers' metadata `writer_meta` a group over `sort_rows` rows —
+    the most one sort has, default all of `files`'), DuckDB's limit set to the rest for the block, then the previous
+    limit back; None: the machine's cores over `at_once`, DuckDB's limit as set. Each run and piece is a share of
+    DuckDB's limit (`run_budget` over `at_once × procs`). The block is `TreeWatch`'s phase `what`."""
+    with tm.phase(what):
+        cores = os.cpu_count() or 1
+        if tree is None:
+            procs = max(1, cores // at_once)
+            yield procs, run_budget(con, at_once * procs)
+            return
+        from .interval_compact import input_rows, row_bytes
+
+        if remote := [f for f in files if not Path(f).is_file()]:
+            raise SystemExit(f"{what}: the cut's plan reads its inputs' footers, which aren't local files ({remote[0]}…): mount the store")
+        rb, n = row_bytes(files) + SPOOL_EXTRA, max(1, input_rows(files))
+        sort_rows = min(n, sort_rows or n)
+        meta = writer_meta(files, rg_rows)
+        plan = tree.cut(at_once, cores, rg_rows, rb, CUT_SPOOL_RG, n, meta=meta, sort_rows=sort_rows)
+        groups = -(-sort_rows // rg_rows)
+        kept = at_once * plan.procs * -(-groups // plan.procs) * meta
+        prev = con.execute("SELECT current_setting('memory_limit')").fetchone()[0]
+        con.execute(tm.duck_sql(plan.duck))
+        err(f"{what}: memory {tree.total / tm.MIB:,.0f} MiB = this process {tree.base / tm.MIB:,.0f} + {at_once} sorts × {plan.procs} workers × "
+            f"{tree.proc_base / tm.MIB:,.0f} + Arrow {(plan.arrow - kept) / tm.MIB:,.0f} ({rb} B a row) + writers' metadata "
+            f"{kept / tm.MIB:,.0f} ({at_once} × {groups:,} groups × {meta:,} B) + DuckDB {plan.duck / tm.MIB:,.0f}")
+        try:
+            yield plan.procs, run_budget(con, at_once * plan.procs)
+        finally:
+            con.execute(f"SET memory_limit='{prev}'")
+
+
 def cut_gen(con, gen_dir: Path, scans: dict, *, rg_rows: int = SERVED_RG, jobs: int = 1, paths: dict | None = None,
-            tree: tm.Budget | None = None) -> tuple[dict, dict]:
+            tree: tm.Budget | None = None, served: Path | None = None) -> tuple[dict, dict]:
     """A generation's served sorts from its range files under `gen_dir` (every `served_sorts` entry of its owner axis and
-    attribution table,
-    dyadic segments over `scans`' stamps): `served/<sort>.parquet` + `.groups.parquet` + `<sort>.json`, then its churn
-    (`served/stats.json`). What a base build (`interval_local.build_gen`) and a compaction (`interval_compact`) cut.
-    `jobs` sorts at a time (`static_names.each`, the largest sources first), the cores split between the sorts: each its
-    range files' runs sorted, cut in pieces and written in parallel (`write_served`), every run and piece sized so the
-    ones sorting at once, across the sorts, fit DuckDB's memory limit (`run_budget`). `tree`: the process tree's budget
-    (`tree_mem.Budget`): the workers and DuckDB's limit (set here) planned under it (`Budget.cut`, rows of the range
-    files' widest + `SPOOL_EXTRA`); None: every core, DuckDB's limit as set. Returns `({sort: {rows, groups, bytes}}, stats)`."""
+    attribution table, dyadic segments over `scans`' stamps): `<served>/<sort>.parquet` + `.groups.parquet` +
+    `<sort>.json` (`served`: default `gen_dir/served`), then its churn (`stats.json`). What a base build
+    (`interval_local.build_gen`), a compaction (`interval_compact`) and `interval-store cut -a` cut. `jobs` sorts at a
+    time (`static_names.each`, the largest sources first), the cores split between the sorts: each its range files' runs
+    sorted, cut in pieces and written in parallel (`write_served`), every run and piece sized so the ones sorting at
+    once, across the sorts, fit DuckDB's memory limit (`run_budget`). `tree`: the process tree's budget, the workers and
+    DuckDB's limit planned under it (`plan_cut`); None: every core, DuckDB's limit as set. Returns `({sort: {rows,
+    groups, bytes}}, stats)`."""
     stamps = [s["ts"] for s in scans["scans"]]
-    served = gen_dir / "served"
+    served = gen_dir / "served" if served is None else served
     gen, churn = has_generation(scans), has_churn(scans)
     todo = served_sorts(scans["slices"], attributed(scans))
     size = {sub: sum(p.stat().st_size for p in (gen_dir / sub).glob("r*.parquet")) for sub in {SORTS[s][0] for s in todo}}
     at_once = max(1, min(jobs, len(todo)))
-    procs = max(1, (os.cpu_count() or 1) // at_once)
+    ins = [str(p) for sub in sorted(size) for p in sorted((gen_dir / sub).glob("r*.parquet"))]
+    most = None
     if tree is not None:
-        from .interval_compact import input_rows, row_bytes
+        from .interval_compact import input_rows
 
-        ins = [str(p) for sub in sorted(size) for p in sorted((gen_dir / sub).glob("r*.parquet"))]
-        rb, n = row_bytes(ins) + SPOOL_EXTRA, max(1, input_rows(ins))
-        # No batch or group holds more rows than the sorts have.
-        plan = tree.cut(at_once, os.cpu_count() or 1, rg_rows, rb, CUT_SPOOL_RG, n)
-        procs = plan.procs
-        con.execute(tm.duck_sql(plan.duck))
-        err(f"cut: memory {tree.total / tm.MIB:,.0f} MiB = this process {tree.base / tm.MIB:,.0f} + {at_once} sorts × {procs} workers × "
-            f"{tree.proc_base / tm.MIB:,.0f} + Arrow {plan.arrow / tm.MIB:,.0f} ({rb} B a row) + DuckDB {plan.duck / tm.MIB:,.0f}")
-    budget = run_budget(con, at_once * procs)
+        most = max(input_rows([str(p) for p in (gen_dir / sub).glob("r*.parquet")]) for sub in size)
+    with plan_cut(con, tree, ins, at_once=at_once, rg_rows=rg_rows, sort_rows=most) as (procs, budget):
+        def one(cur, sort: str) -> dict:
+            sub, _, _ = SORTS[sort]
+            t1 = monotonic()
+            with tm.phase(f"sort {sort}"):
+                sd = write_served(cur, [str(p) for p in sorted((gen_dir / sub).glob("r*.parquet"))], sort, served / f"{sort}.parquet",
+                                  served_schema(sort, gen, churn), rg_rows=rg_rows, stamps=stamps, procs=procs, budget=budget)
+            sd["s"] = round(monotonic() - t1, 1)
+            (served / f"{sort}.json").write_text(json.dumps(sd, sort_keys=True) + "\n")
+            return sd
 
-    def one(cur, sort: str) -> dict:
-        sub, _, _ = SORTS[sort]
-        t1 = monotonic()
-        sd = write_served(cur, [str(p) for p in sorted((gen_dir / sub).glob("r*.parquet"))], sort, served / f"{sort}.parquet",
-                          served_schema(sort, gen, churn), rg_rows=rg_rows, stamps=stamps, procs=procs, budget=budget)
-        sd["s"] = round(monotonic() - t1, 1)
-        (served / f"{sort}.json").write_text(json.dumps(sd, sort_keys=True) + "\n")
-        return sd
-
-    order = sorted(todo, key=lambda s: -size[SORTS[s][0]])
-    got = dict(zip(order, sn.each(con, one, order, jobs)))
+        order = sorted(todo, key=lambda s: -size[SORTS[s][0]])
+        got = dict(zip(order, sn.each(con, one, order, jobs)))
     sorts = {sort: {"rows": got[sort]["rows"], "groups": got[sort]["groups"], "bytes": got[sort]["bytes"]} for sort in todo}
     stats = {**churn_stats(con, str(gen_dir), scans, paths), "slices": scans["slices"]}
     (served / "stats.json").write_text(json.dumps(stats, indent=1) + "\n")
@@ -1485,24 +1543,42 @@ def build_ranges_cmd(bucket, profile, force, gen, index, mount, mem, per_task, o
         print(json.dumps({k: v for k, v in doc.items() if k != "scans"}), flush=True)
 
 
+def path_counts(con, files: list[str]) -> dict:
+    """The distinct paths of a generation's `pv/` range files (`{"all": n, "kinds": {kind: n}}`): each file counted alone,
+    one at a time, and summed, so a statement holds one range's paths however many the generation has. The sum is exact:
+    a range file holds the rows whose own `(depth, path)` is in its key range (`static_names.range_preds`: `[lo, hi)` over
+    that key, not over the objects under a directory), so no `(depth, path)` is in two files; and a path has one depth,
+    its segments', so neither is a `path`."""
+    out: dict = {"all": 0, "kinds": {}}
+    for f in files:
+        for kind, of_kind, of_all in con.execute(f"""SELECT kind, count(DISTINCT path), count(DISTINCT (depth, path)) FROM read_parquet({q(f)})
+                GROUP BY GROUPING SETS ((kind), ())""").fetchall():
+            if kind is None:  # the grand total's row (`kind` is never NULL)
+                out["all"] += of_all
+            else:
+                out["kinds"][kind] = out["kinds"].get(kind, 0) + of_kind
+    return out
+
+
 def churn_stats(con, root: str, scans: dict, paths: dict | None = None) -> dict:
     """Per scan: path versions opened and closed there, read versions likewise, and live rows — the
     delta a per-scan append writes — plus totals by kind. `paths`: the distinct paths, already counted by whoever wrote
     the range files (`{"all": n, "kinds": {kind: n}}`, `interval_compact.compact_range`'s, summed over key-disjoint
-    sub-ranges), so no `count(DISTINCT …)` holds every path of the generation at once."""
-    kind_paths, all_paths = ("0", "0") if paths is not None else ("count(DISTINCT path)", "count(DISTINCT (depth, path))")
-    ids = {s["ts"]: s["id"] for s in scans["scans"]}
-    pv, rd = f"read_parquet({q(root + '/pv/r*.parquet')})", f"read_parquet({q(root + '/rd/r*.parquet')})"
-    per = {i: {"id": i, "opened": 0, "closed": 0, "reads_opened": 0, "reads_closed": 0} for i in ids.values()}
-    for col, key, src in (("vf", "opened", pv), ("vt", "closed", pv), ("vf", "reads_opened", rd), ("vt", "reads_closed", rd)):
-        for t, n in con.execute(f"SELECT {col}, count(*) FROM {src} WHERE {col} <> {OPEN} GROUP BY {col}").fetchall():
-            per[ids[t]][key] = n
-    kinds = {k: {"versions": n, "open": o, "paths": paths["kinds"][k] if paths is not None else p} for k, n, o, p in con.execute(
-        f"SELECT kind, count(*), count(*) FILTER (WHERE vt = {OPEN}), {kind_paths} FROM {pv} GROUP BY kind ORDER BY kind").fetchall()}
-    tot = con.execute(f"SELECT count(*), count(*) FILTER (WHERE vt = {OPEN}), {all_paths} FROM {pv}").fetchone()
-    tot = (tot[0], tot[1], paths["all"]) if paths is not None else tot
-    rtot = con.execute(f"SELECT count(*), count(*) FILTER (WHERE vt = {OPEN}) FROM {rd}").fetchone()
-    return {"versions": tot[0], "open": tot[1], "paths": tot[2], "reads": rtot[0], "reads_open": rtot[1], "kinds": kinds,
+    sub-ranges); None: counted here, a range file at a time (`path_counts`). No statement holds every path of the
+    generation at once."""
+    with tm.phase("churn_stats"):
+        ids = {s["ts"]: s["id"] for s in scans["scans"]}
+        pv, rd = f"read_parquet({q(root + '/pv/r*.parquet')})", f"read_parquet({q(root + '/rd/r*.parquet')})"
+        per = {i: {"id": i, "opened": 0, "closed": 0, "reads_opened": 0, "reads_closed": 0} for i in ids.values()}
+        for col, key, src in (("vf", "opened", pv), ("vt", "closed", pv), ("vf", "reads_opened", rd), ("vt", "reads_closed", rd)):
+            for t, n in con.execute(f"SELECT {col}, count(*) FROM {src} WHERE {col} <> {OPEN} GROUP BY {col}").fetchall():
+                per[ids[t]][key] = n
+        paths = path_counts(con, range_files(con, root + "/pv/r*.parquet")) if paths is None else paths
+        kinds = {k: {"versions": n, "open": o, "paths": paths["kinds"][k]} for k, n, o in con.execute(
+            f"SELECT kind, count(*), count(*) FILTER (WHERE vt = {OPEN}) FROM {pv} GROUP BY kind ORDER BY kind").fetchall()}
+        versions, live = con.execute(f"SELECT count(*), count(*) FILTER (WHERE vt = {OPEN}) FROM {pv}").fetchone()
+        rtot = con.execute(f"SELECT count(*), count(*) FILTER (WHERE vt = {OPEN}) FROM {rd}").fetchone()
+    return {"versions": versions, "open": live, "paths": paths["all"], "reads": rtot[0], "reads_open": rtot[1], "kinds": kinds,
             "scans": [per[s["id"]] for s in scans["scans"]]}
 
 
@@ -1579,13 +1655,15 @@ def _refuse_overwrite(store: Store, keys: list[str]) -> None:
 
 
 @cli.command("cut")
+@option("-a", "--all-sorts", is_flag=True, help="Every served sort of the generation, -j at a time, then its churn (`stats.json`), as a build or compaction cuts them (`cut_gen`, one -M over all of them): the whole generation's cut, e.g. its real-scale memory check (needs -m)")
 @option("-b", "--bucket", help="The store: a bucket name (gs://) or URL, or a dir (default: the profile's)")
 @option("-D", "--no-dyadic", is_flag=True, help="One closed segment, not one per dyadic block of scans (`seg_sql`)")
 @option("-g", "--gen", required=True, help="Generation (its pv/, rd/ range files)")
 @option("-i", "--index", type=int, help="Task index → sort (path, bysize, reads, then `stats`: per-scan churn; default: $BATCH_TASK_INDEX)")
+@option("-j", "--jobs", default=1, type=IntRange(min=1), help="With -a: sorts cut at once, the cores split between them (`cut_gen`'s `jobs`)")
 @option("-J", "--as-jobs", default=1, type=IntRange(min=1), help="Size workers and runs as `cut_gen(jobs=N)` does for each of N sorts at once (a benchmark of one sort under a whole cut's split; default 1)")
 @option("-m", "--mount", help="Local mount of the data bucket")
-@option("-M", "--mem", default="80GB", help="DuckDB memory limit")
+@option("-M", "--mem", default="100GB", help="Memory budget of the whole process tree (`tree_mem`): the cut's workers and DuckDB's limit planned under it (`plan_cut`); its peak is logged (`TreeWatch`; exit 1 past it with $DT_TREE_MEM_ASSERT)")
 @option("-o", "--out", default="/stage/out", help="Local output dir (uploaded, then removed)")
 @option("-O", "--to-gen", help="Write the served files (and a copy of scans.json) under this generation instead of GEN")
 @option("-p", "--threads", default=16, type=int, help="DuckDB threads")
@@ -1593,23 +1671,50 @@ def _refuse_overwrite(store: Store, keys: list[str]) -> None:
 @option("-s", "--sort", "sorts", multiple=True, type=Choice(list(SORTS)), help="Sort(s) to cut (default: the task's)")
 @option("-T", "--tmp", default="/stage/tmp", help="DuckDB spill dir")
 @option("-U", "--no-upload", is_flag=True, help="Keep the outputs local")
-@option("-w", "--workers", type=IntRange(min=1), help="Workers a sort's runs, pieces and parts use (default: the cores over -J)")
+@option("-w", "--workers", type=IntRange(min=1), help="At most this many workers a sort's runs, pieces and parts use (default: as many as -M holds, ≤ the cores over -J)")
 @option("-P", "--profile", help="Deployment profile JSON (default $INTERVAL_STORE_PROFILE)")
-def cut_cmd(bucket, no_dyadic, profile, gen, index, as_jobs, mount, mem, out, to_gen, threads, rg_rows, sorts, tmp, no_upload, workers) -> None:
+def cut_cmd(all_sorts, bucket, no_dyadic, profile, gen, index, jobs, as_jobs, mount, mem, out, to_gen, threads, rg_rows, sorts, tmp, no_upload, workers) -> None:
     """Cut the served sorts from the range files: `served/<sort>.parquet` + `.groups.parquet`. With `-U -s SORT` (and
     `-J`/`-w`), a benchmark of that one sort: each pass's seconds, and a merged sort's per-piece read / sort / write
-    summaries (per segment and in total), on stderr."""
+    summaries (per segment and in total), on stderr. With `-a`, the whole generation's cut (`cut_gen`, `-j` sorts at
+    once). Either way the process tree's peak against `-M` is logged at the end (`tree_mem.TreeWatch`)."""
+    with tm.watch(mem, f"cut {gen}"):
+        _cut(all_sorts, bucket, no_dyadic, profile, gen, index, jobs, as_jobs, mount, mem, out, to_gen, threads, rg_rows, sorts, tmp, no_upload, workers)
+
+
+def _cut(all_sorts, bucket, no_dyadic, profile, gen, index, jobs, as_jobs, mount, mem, out, to_gen, threads, rg_rows, sorts, tmp, no_upload, workers) -> None:
+    if all_sorts and (sorts or index is not None or as_jobs != 1 or workers or no_dyadic):
+        raise SystemExit("cut -a: every sort as `cut_gen` cuts them; -s, -i, -J, -w and -D don't apply")
+    if all_sorts and not mount:
+        raise SystemExit("cut -a: the generation's range files are read from its mount (-m)")
     store = Store(_bucket(bucket, profile))
     prefix = f"{PREFIX}/{gen}"
     dst_prefix = f"{PREFIX}/{to_gen or gen}"
-    todo = list(sorts) or [CUT_TASKS[sn._task(index)]]
-    con = connect(threads, mem, tmp)
+    todo = list(sorts) or ([] if all_sorts else [CUT_TASKS[sn._task(index)]])
+    tree = tm.Budget.measure(sn.mem_bytes(mem))
+    con = connect(threads, tm.stage_mem(tree, "the cut"), tmp)
     root = _root(store, prefix, mount)
     scans = store.read_json(f"{prefix}/scans.json")
     has_slices = gen_sliced(store, prefix)
     # The objects' native version: recorded, else whether the folded path versions carry it.
     has_gen = has_generation(scans) or source_has_generation(con, root + '/pvl/r*.parquet')
     out_dir = Path(out) / "served"
+    if all_sorts:
+        doc = record_generation({**scans, "slices": has_slices}, has_gen)
+        cut = served_sorts(has_slices, attributed(doc))
+        if not no_upload:
+            _refuse_overwrite(store, [f"{dst_prefix}/served/{s}{x}" for s in cut for x in (".parquet", ".groups.parquet", ".json")])
+        t0 = monotonic()
+        got, stats = cut_gen(con, Path(root), doc, rg_rows=rg_rows, jobs=jobs, tree=tree, served=out_dir)
+        err(f"cut {gen}: {len(got)} sorts, {sum(v['rows'] for v in got.values()):,} rows in {monotonic() - t0:.0f}s ({jobs} at a time)")
+        if not no_upload:
+            if to_gen and to_gen != gen:
+                copy_base(store, prefix, dst_prefix)
+            store.put_tree(out_dir, f"{dst_prefix}/served")
+            shutil.rmtree(out_dir)
+            record_slices(store, dst_prefix, scans, has_slices, has_gen)
+        print(json.dumps({"sorts": got, "s": round(monotonic() - t0, 1)}), flush=True)
+        return
     if todo == ["stats"]:
         doc = {**churn_stats(con, root, scans), "slices": has_slices}
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -1623,10 +1728,6 @@ def cut_cmd(bucket, no_dyadic, profile, gen, index, as_jobs, mount, mem, out, to
         print(json.dumps({k: v for k, v in doc.items() if k != "scans"}), flush=True)
         return
     stamps = None if no_dyadic else [s["ts"] for s in scans["scans"]]
-    # As `cut_gen` sizes each of `as_jobs` sorts at once: the cores split between them, each run and piece one share.
-    procs = workers or max(1, (os.cpu_count() or 1) // as_jobs)
-    budget = run_budget(con, as_jobs * procs)
-    err(f"cut: {procs} workers a sort, runs of ≤ {budget:,} B (as {as_jobs} sorts at once)")
     for sort in todo:
         sub, _, _ = SORTS[sort]
         if sub in ATTRIBUTION_SUBS and not attributed(scans):
@@ -1640,8 +1741,12 @@ def cut_cmd(bucket, no_dyadic, profile, gen, index, as_jobs, mount, mem, out, to
             _refuse_overwrite(store, [f"{dst_prefix}/served/{sort}{x}" for x in (".parquet", ".groups.parquet", ".json")])
         t0 = monotonic()
         dst = out_dir / f"{sort}.parquet"
-        doc = write_served(con, range_files(con, f"{root}/{sub}/r*.parquet"), sort, dst, schema, rg_rows=rg_rows, stamps=stamps,
-                           procs=procs, budget=budget)
+        files = range_files(con, f"{root}/{sub}/r*.parquet")
+        # As `cut_gen` sizes each of `as_jobs` sorts at once: the cores and the budget split between them.
+        with plan_cut(con, tree, files, at_once=as_jobs, rg_rows=rg_rows, what=f"cut {sort}") as (procs, budget):
+            procs = min(procs, workers or procs)
+            err(f"cut {sort}: {procs} workers, runs of ≤ {budget:,} B (as {as_jobs} sorts at once)")
+            doc = write_served(con, files, sort, dst, schema, rg_rows=rg_rows, stamps=stamps, procs=procs, budget=budget)
         doc["s"] = round(monotonic() - t0, 1)
         err(f"cut {sort}: {doc['rows']:,} rows, {doc['groups']:,} groups, {doc['bytes']:,} B in {doc['s']}s")
         (out_dir / f"{sort}.json").write_text(json.dumps(doc, sort_keys=True) + "\n")
