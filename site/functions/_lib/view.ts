@@ -29,7 +29,7 @@
  * `f = n_children(P) − kept` — objects and dirs alike.
  */
 import type { Env } from './auth.js'
-import { asOfScans, folded, type IndexHandle, isStore, ivHeldDates, ivLastRead, type Lens, openIndex, pathStoreKey, perScan, planRects, slices, planSizeRects, readAsks, readFits, readRects, readRows, readRootHistoryRows, readSizeRects, type Rect, type Row, sizeVariant, type Span, TooWide, type Trace, withTrace } from './index.js'
+import { asOfScans, folded, type IndexHandle, isStore, ivHeldDates, ivLastRead, type Lens, openIndex, pathStoreKey, perScan, planRects, slices, planSizeRects, readAsks, readFits, readRects, readRows, readPathHistoryRows, readSizeRects, type Rect, type Row, sizeVariant, type Span, TooWide, type Trace, withTrace } from './index.js'
 import { type FoldedLens, ownerLens, poolLens } from './owners.js'
 import { type ClassScope, classRow, nameFilter, type NamePred, ownerKey, ownerOk, type OwnerScope } from './scope.js'
 import { filterThreshold, looseThreshold, matchRoots, pickTier, rebasedThreshold, rootRects } from './filter.js'
@@ -534,7 +534,6 @@ export async function readRootRows(env: Env, date: string): Promise<{ path: stri
 }
 
 export async function readRootAgg(env0: Env, o: { date: string; path: string; lens?: Lens; owner?: OwnerScope; by?: string; classes?: ClassScope }, historyRows?: Row[]): Promise<{ b: number; o: number } | null> {
-  if (historyRows && o.path) throw new Error('history rows are for the fleet root only')
   const env = sliced(env0, o)
   const { date, path, lens, owner, classes } = o
   const dP = path === '' ? 0 : path.split('/').length
@@ -584,15 +583,17 @@ export async function readRootAgg(env0: Env, o: { date: string; path: string; le
   return { b: agg.b, o: agg.o }
 }
 
-/** Held dates' root totals from one version read, with the canonical per-date
- * ledger fold. No new index, inferred object counts, or snapshot-only owners. */
-export async function readRootHistory(env: Env, dates: string[], scope: { lens?: Lens; owner?: OwnerScope }): Promise<Map<string, { b: number; o: number } | null> | null> {
-  const rows = await readRootHistoryRows(env, dates, scope.lens)
+/** Held dates' totals of a path from one version read, with the canonical per-date ledger fold. No new index, inferred
+ * object counts, or snapshot-only owners. A pool's rows hold every owner, so its fold's total is theirs; a lens's hold
+ * only its user's, whose total a covering assignment below the root wants too: root only. */
+export async function readPathHistory(env: Env, dates: string[], path: string, scope: { lens?: Lens; owner?: OwnerScope }): Promise<Map<string, { b: number; o: number } | null> | null> {
+  if (scope.lens && path) throw new Error('a lens history is for the fleet root only')
+  const rows = await readPathHistoryRows(env, dates, path, scope.lens)
   if (!rows) return null
   const out = new Map<string, { b: number; o: number } | null>()
   const held = [...rows.keys()]
   for (let i = 0; i < held.length; i += 12) {
-    const points = await Promise.all(held.slice(i, i + 12).map(async date => [date, await readRootAgg(env, { date, path: '', ...scope }, rows.get(date)!)] as const))
+    const points = await Promise.all(held.slice(i, i + 12).map(async date => [date, await readRootAgg(env, { date, path, ...scope }, rows.get(date)!)] as const))
     for (const [date, point] of points) out.set(date, point)
   }
   return out

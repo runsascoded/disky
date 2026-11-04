@@ -3745,15 +3745,24 @@ export async function readAsks(
   return { rows: perGroup.flat(), groups: spans.length }
 }
 
-/** Fleet-root owner slices across held scans, with close records combined before
- * testing each date. One bounded plan/decode, not a separate root read per scan.
- * Missing slice sorts or uncovered dates are left to the canonical reader. */
-export async function readRootHistoryRows(env: Env, dates: string[], lens?: Lens): Promise<Map<string, Row[]> | null> {
-  const got = await readAsksHistory(slices(env), dates, lens ? 'bysize-user' : 'path', [{ depth: 1, under: '' }], r => r.depth === 1 && (!lens || r.usr === lens.key), { maxGroups: 60, pre: depth => depth === 1, lens })
+/** Owner slices of one path (`''`: the fleet's depth-1 rows) across held scans, with close records combined before
+ *  testing each date. One bounded plan and one decode of each group, only the columns a total needs, not a separate
+ *  read per scan. Missing slice sorts or uncovered dates are left to the canonical reader. */
+export async function readPathHistoryRows(env: Env, dates: string[], path: string, lens?: Lens): Promise<Map<string, Row[]> | null> {
+  const depth = path === '' ? 1 : path.split('/').length
+  const ask: Ask = path === '' ? { depth, under: '' } : { depth, path }
+  const at = (d: number, p: string) => d === depth && (path === '' || p === path)
+  const got = await readAsksHistory(slices(env), dates, lens ? 'bysize-user' : 'path', [ask], r => at(r.depth, r.path) && (!lens || r.usr === lens.key), {
+    fields: ['path', 'depth', 'usr', 'size', 'n_files', 'kind'], maxGroups: historyGroups(dates.length), pre: at, lens,
+  })
   if (!got) return null
-  if (got.versions > 100_000) throw new Error('root history too wide: more than 100000 versions')
+  if (got.versions > 100_000) throw new Error('path history too wide: more than 100000 versions')
   return got.byDate
 }
+
+/** The groups a read of `n` scans can select: `SERIES_CHUNK`'s cost model, with room for a large store's levels and
+ *  tiers (2^20 scans, 8 tiers). Past it the store isn't laid out as that model says: refused, not decoded. */
+const historyGroups = (n: number): number => 2 * (2 * n + 20 + 1 + 2 * 8)
 
 /** The scans the interval store holds (none when it is off). */
 export const ivHeldDates = async (env: Env): Promise<string[]> => (intervalsOn(env) ? [...(await ivScans(env)).keys()] : [])
