@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { pageView, storeOfPath } from './routes'
+import { pageView, shellPage, storeOfPath, urlName } from './routes'
 
 const pv = (p: string) => pageView(new URL(`https://site.example.org${p}`), 'marin GCS')
 
@@ -104,6 +104,19 @@ describe('every page route of the app has its own card or none, never a folder c
     expect(kinds['/staged']).toBe('staged')
     expect([kinds['/scans'], kinds['/scans/*'], kinds['/meta/*'], kinds['/names'], kinds['/dups']]).toEqual([null, null, null, null, null])
   })
+  it('every route with no card kind is a named page, or says why not', async () => {
+    const routes = (await rootRoutes()).filter(r => pv(r.replace(/:\w+/g, 'x').replace(/\*$/, 'x')) === null)
+    const pages = Object.fromEntries(routes.map(r => [r, shellPage(r.replace(/:\w+/g, 'x').replace(/\*$/, 'x'))?.page ?? null]))
+    expect(pages).toEqual({
+      '/signin': 'signin', '/privacy': 'privacy',
+      '/admin': 'admin', '/admin/db': 'admin', '/admin/db/:table': 'admin', '/admin/sessions': 'admin', '/admin/latency': 'admin', '/admin/activity': 'admin',
+      '/admin/usage': 'admin', '/admin/slack': 'admin', '/admin/cost/:cloud': 'admin', '/admin/sessions/:sid': 'admin',
+      '/files/*': 'files', '/scans': 'scans', '/scans/*': 'scan', '/health': 'health', '/names': 'names', '/dups': 'dups',
+      '/sweep': 'staged', '/hot': 'names', '/marks': 'map', '/mark': 'map',
+      // the dev previews, the OG render pages, a redirect to a map, a redirect to the root, and `functions/runs`' own stamp
+      '/dev/federated-scans': null, '/dev/children-table': null, '/users/og': null, '/user/:id/og': null, '/meta/*': null, '/users/*': null, '/runs/*': null,
+    })
+  })
 })
 
 describe('the card view keys the scan by the canonical ?d= (legacy and ISO spellings fold in)', () => {
@@ -186,3 +199,20 @@ describe('pageView: a secondary store\'s page (below its path)', () => {
   })
 })
 
+describe('shellPage: below a secondary store\'s path, only its object opener and scan runs', () => {
+  it('its other paths are its map; a bad escape has no id', () => {
+    expect([shellPage('/scans', true), shellPage('/scans/a/b', true), shellPage('/files/x', true), shellPage('/admin', true), shellPage('/dups', true), shellPage('/scans/%E0%A4%A')]).toEqual([
+      { page: 'scans' }, { page: 'scan', id: 'a/b' }, { page: 'files' }, null, null, { page: 'scan' },
+    ])
+  })
+})
+
+describe('urlName: what the URL itself calls a page', () => {
+  it('a map page\'s path and section, a user\'s id, or nothing', () => {
+    expect(['/', '/x/b?f=x&o=y', '/x?section=diff', '/?section=over-time', '/user/alan', '/users', '/staged'].map(p => urlName(pv(p)!))).toEqual([
+      null, 'x/b', 'x · changes', 'size over time', 'alan', null, null,
+    ])
+    const mounted = (p: string) => pageView(new URL(`https://site.example.org${p}`), 'hf', ['oa'])!
+    expect(['/', '/models/m'].map(p => urlName(mounted(p), ['oa']))).toEqual([null, 'models/m'])
+  })
+})
