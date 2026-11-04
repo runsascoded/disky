@@ -853,6 +853,11 @@ def undo_run(
     `undo_deadline`) refuses a late undo up front — GCS would just answer 404
     per object, slowly.
 
+    On an XML run a logged `delete` means the generation was attempted, not that
+    this run removed it (GCS replies `Deleted` either way), so undo can also bring
+    back an object someone else deleted after the scan; with no later write at that
+    name, `if_generation_match=0` doesn't stop it.
+
     `bulk=True` restores whole directories with `objects.bulkRestore` instead,
     provably touching only logged objects:
 
@@ -890,6 +895,7 @@ def undo_run(
     import fsspec
     import pandas as pd
     import pyarrow as pa
+    import pyarrow.compute as pc
     import pyarrow.parquet as pq
 
     now = now or int(dt.datetime.now(dt.timezone.utc).timestamp())
@@ -951,8 +957,8 @@ def undo_run(
         log = read_log(fs, ppath, "deleted", bucket)
         if log is None:
             continue
-        t = log.select(["name", "size_bytes", "generation", "decision", "dir"]).to_pandas()
-        t = t[t["decision"] == "delete"]
+        # Filtered before pandas: a skipped row's null would turn every generation into a float.
+        t = log.select(["name", "size_bytes", "generation", "decision", "dir"]).filter(pc.equal(log["decision"], "delete")).to_pandas()
         t = t[[wanted(bucket, n) for n in t["name"]]]
         todo = list(t[["name", "size_bytes", "generation", "dir"]].itertuples(index=False, name=None))
         err(f"{bucket}: {len(todo):,} deleted object(s) to restore{' (dry run)' if dry_run else ''}{' (bulk)' if bulk else ''}")
@@ -1237,7 +1243,9 @@ BAND_ROWS_PER_STATEMENT = 200
 def record_bands(run_id: str, summary: dict) -> int:
     """Write the summary's per-prefix bands for `run_id` to D1, in statements
     of `BAND_ROWS_PER_STATEMENT` rows. Idempotent: a band already recorded is
-    left as it is (keeping its `undone_objects`). Returns the bands sent."""
+    left as it is (keeping its `undone_objects`). A band of only null-generation
+    skips is left out: the item would read as swept (`unstageDeleted` unstages any
+    item with a band on a succeeded run), and it stays staged. Returns the bands sent."""
     from .index_footer import _creds, _d1_query, _q
 
     rows = [
@@ -1245,6 +1253,7 @@ def record_bands(run_id: str, summary: dict) -> int:
         f"{c.get('gone', 0)}, {c.get('overwritten', 0)}, {c.get('drift_new_objects', 0)}, 0)"
         for b in summary["buckets"].values()
         for prefix, c in (b.get("bands") or {}).items()
+        if c.get("objects") or not c.get("no_generation")
     ]
     if not rows:
         return 0

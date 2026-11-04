@@ -117,20 +117,18 @@ def xml_reply(*entries: tuple[str, str, int, str | None]) -> Response:
     return response
 
 
-def test_gone_and_overwritten_are_recorded_per_object(source, tmp_path):
+def test_real_xml_replies_acknowledge_every_generation(source, tmp_path):
+    """Measured on GCS: a multi-delete replied `Deleted` (HTTP 200) for the live current generation, one already deleted,
+    an overwritten old one, a wrong one on a live key, a key that never existed and a repeat. So `delete` means attempted."""
     directory, plan = source
-    rows = ROWS[:3]
+    rows = ROWS[:6]
     rewrite(directory, rows)
     posted = []
 
     class Http:
         def post(self, url, data, headers, timeout):
             posted.append(data)
-            return xml_reply(
-                ("Deleted", rows[0]["name"], 1, None),
-                ("Error", rows[1]["name"], 2, "NoSuchVersion"),
-                ("Error", rows[2]["name"], 3, "PreconditionFailed"),
-            )
+            return xml_reply(*(("Deleted", row["name"], row["generation"], None) for row in rows))
 
     xml = XmlDeleter(http=Http())
     out = tmp_path / "out"
@@ -139,16 +137,31 @@ def test_gone_and_overwritten_are_recorded_per_object(source, tmp_path):
     assert re.findall(r"<Key>([^<]+)</Key><VersionId>(\d+)</VersionId>", posted[0].decode()) == [(row["name"], str(row["generation"])) for row in rows]
     bucket = result["buckets"]["b1"]
     assert {key: bucket[key] for key in ("decisions", "delete_bytes", "bands", "failed_dirs")} == {
-        "decisions": {"delete": 1, "skipped_gone": 1, "skipped_overwritten": 1},
-        "delete_bytes": 2,
-        "bands": {"gs://b1/a/": {"bytes": 2, "objects": 1, "gone": 1, "overwritten": 1}},
+        "decisions": {"delete": 6},
+        "delete_bytes": 12,
+        "bands": {"gs://b1/a/": {"bytes": 12, "objects": 6}},
         "failed_dirs": [],
     }
-    assert _decisions(out, "deleted") == [
-        (rows[0]["name"], "delete", 1),
-        (rows[1]["name"], "skipped_gone", 2),
-        (rows[2]["name"], "skipped_overwritten", 3),
-    ]
+    assert _decisions(out, "deleted") == [(row["name"], "delete", row["generation"]) for row in rows]
+
+
+def test_a_coded_per_object_error_is_still_attributed(source, tmp_path):
+    """Not what GCS was measured to send: S3-style codes the parser keeps so a reply that does carry one isn't called deleted."""
+    directory, plan = source
+    rows = ROWS[:3]
+    rewrite(directory, rows)
+
+    class Http:
+        def post(self, url, data, headers, timeout):
+            return xml_reply(
+                ("Deleted", rows[0]["name"], 1, None),
+                ("Error", rows[1]["name"], 2, "NoSuchVersion"),
+                ("Error", rows[2]["name"], 3, "PreconditionFailed"),
+            )
+
+    xml = XmlDeleter(http=Http())
+    result = execute_manifest(str(directory), str(plan), str(tmp_path / "out"), str(tmp_path / "work"), for_real=True, client=FakeClient(blobs={}), deleter=lambda client, bucket, batch: xml(client, "b1", batch))
+    assert result["buckets"]["b1"]["decisions"] == {"delete": 1, "skipped_gone": 1, "skipped_overwritten": 1}
 
 
 def test_validates_only_without_for_real(source, tmp_path):
@@ -161,7 +174,6 @@ def test_validates_only_without_for_real(source, tmp_path):
 
 
 @pytest.mark.parametrize("mutation,message", [
-    ({"generation": None}, "b1: manifest row lacks a positive generation"),
     ({"generation": 0}, "b1: manifest row lacks a positive generation"),
     ({"generation": -1}, "b1: manifest row lacks a positive generation"),
     ({"name": "other/x"}, "b1: manifest row is outside staged prefixes"),
@@ -177,6 +189,241 @@ def test_one_bad_row_refuses_the_run_before_any_delete(source, tmp_path, mutatio
         execute_manifest(str(directory), str(plan), str(tmp_path / "out"), str(tmp_path / "work"), for_real=True, client=FakeClient(blobs={}), deleter=refuse)
     assert str(error.value) == message
     assert (tmp_path / "out").exists() is False
+
+
+NULLS = [dict(name=f"a/null/o{i}", size_bytes=7, generation=None, dir="a/null") for i in range(3)]
+LIVE = ROWS[:4]
+
+
+def log_rows(out: Path, bucket: str = "b1") -> list[tuple]:
+    """The decision log, exact: pyarrow, so a null generation stays `None`."""
+    table = pq.read_table(out / "deleted" / bucket)
+    return sorted(zip(*(table[column].to_pylist() for column in ("name", "size_bytes", "generation", "decision", "dir"))), key=lambda row: row[0])
+
+
+def bucket_of(result: dict, bucket: str = "b1") -> dict:
+    return {key: value for key, value in result["buckets"][bucket].items() if key != "performance"}
+
+
+def test_a_null_generation_is_skipped_not_deleted(source, tmp_path):
+    directory, plan = source
+    rewrite(directory, [*LIVE, *NULLS])
+    calls = []
+    out = tmp_path / "out"
+    result = execute_manifest(str(directory), str(plan), str(out), str(tmp_path / "work"), for_real=True, client=FakeClient(blobs={}), deleter=acknowledge(calls))
+    assert calls == [[(row["name"], row["generation"]) for row in LIVE]]
+    assert bucket_of(result) == {
+        "missing_perms": [], "soft_delete_days": 7,
+        "decisions": {"skipped_no_generation": 3, "delete": 4},
+        "delete_bytes": 8,
+        "drift_dirs": [], "failed_dirs": [],
+        "bands": {"gs://b1/a/": {"bytes": 8, "objects": 4, "no_generation": 3, "no_generation_bytes": 21}},
+        "skipped_no_generation": {"objects": 3, "bytes": 21, "whole_bucket": False},
+    }
+    assert result["skipped_no_generation"] == {"objects": 3, "bytes": 21, "whole_buckets": []}
+    assert log_rows(out) == sorted([
+        *((row["name"], 2, row["generation"], "delete", row["dir"]) for row in LIVE),
+        *((row["name"], 7, None, "skipped_no_generation", "a/null") for row in NULLS),
+    ], key=lambda row: row[0])
+    final = json.loads((out / "deleted-summary.json").read_text())
+    assert {key: value for key, value in final["buckets"]["b1"].items() if key != "performance"} == bucket_of(result)
+    assert final["skipped_no_generation"] == {"objects": 3, "bytes": 21, "whole_buckets": []}
+    written = json.loads((out / "plan-summary.json").read_text())
+    # What the run planned stays the summary's `eligible`; the skips are named beside it, before any delete lands.
+    assert written["total"] == {"eligible": eligible([*LIVE, *NULLS])}
+    assert written["buckets"]["b1"]["eligible"] == eligible([*LIVE, *NULLS])
+    assert written["buckets"]["b1"]["skipped_no_generation"] == {"objects": 3, "bytes": 21, "whole_bucket": False}
+    assert written["skipped_no_generation"] == {"objects": 3, "bytes": 21, "whole_buckets": []}
+    progress = json.loads((out / "progress/b1.json").read_text())
+    assert {key: progress[key] for key in ("roots", "roots_done", "decisions", "done")} == {"roots": 1, "roots_done": 1, "decisions": {"skipped_no_generation": 3, "delete": 4}, "done": True}
+
+
+def test_totals_count_deletes_and_skips_exactly(source, tmp_path):
+    directory, plan = source
+    # A summary describing only the rows with generations: not this manifest.
+    write_manifest(directory, [*LIVE, *NULLS])
+    (directory / "plan-summary.json").write_text(json.dumps(summary_of(LIVE)))
+    with pytest.raises(ValueError, match="^b1: manifest totals do not match its plan summary$"):
+        prepare_manifest(str(directory), str(plan), str(tmp_path / "work"))
+    # Objects right, bytes wrong.
+    summary = summary_of([*LIVE, *NULLS])
+    summary["buckets"]["b1"]["eligible"]["bytes"] += 1
+    (directory / "plan-summary.json").write_text(json.dumps(summary))
+    with pytest.raises(ValueError, match="^b1: manifest totals do not match its plan summary$"):
+        prepare_manifest(str(directory), str(plan), str(tmp_path / "work2"))
+    (directory / "plan-summary.json").write_text(json.dumps(summary_of([*LIVE, *NULLS])))
+    assert prepare_manifest(str(directory), str(plan), str(tmp_path / "work3"))[1] == {"buckets": {"b1": {
+        "decisions": {"delete": 4}, "delete_bytes": 8, "skipped_no_generation": {"objects": 3, "bytes": 21, "whole_bucket": False},
+    }}}
+
+
+def test_a_manifest_with_no_generation_at_all_refuses_before_any_delete(source, tmp_path):
+    directory, plan = source
+    rewrite(directory, NULLS)
+    with pytest.raises(ValueError) as error:
+        execute_manifest(str(directory), str(plan), str(tmp_path / "out"), str(tmp_path / "work"), for_real=True, client=FakeClient(blobs={}), deleter=refuse)
+    assert str(error.value) == "manifest has no generations: none of its 3 rows can be deleted; its scan's listing lacks them"
+    assert (tmp_path / "out").exists() is False
+
+
+def two_buckets(directory: Path, plan: Path, nulls: list[dict] = NULLS) -> None:
+    """b1 with generations, b2 with none."""
+    others = [dict(row, name=row["name"].replace("a/", "x/", 1), dir=row["dir"].replace("a/", "x/", 1)) for row in nulls]
+    write_manifest(directory, LIVE)
+    write_manifest(directory, others, bucket="b2")
+    summary = summary_of(LIVE, approved=["gs://b1/a/", "gs://b2/x/"])
+    summary["buckets"]["b2"] = {"objects": len(others), "dirs": 1, "eligible": eligible(others)}
+    (directory / "plan-summary.json").write_text(json.dumps(summary))
+    plan.write_text(json.dumps({"plan_id": 1, "sweep": ["gs://b1/a/", "gs://b2/x/"]}))
+
+
+def test_a_whole_bucket_of_nulls_is_flagged_and_the_others_proceed(source, tmp_path):
+    directory, plan = source
+    two_buckets(directory, plan)
+    calls = []
+    out = tmp_path / "out"
+    result = execute_manifest(str(directory), str(plan), str(out), str(tmp_path / "work"), for_real=True, client=FakeClient(blobs={}), deleter=acknowledge(calls))
+    assert calls == [[(row["name"], row["generation"]) for row in LIVE]]
+    assert bucket_of(result, "b2") == {
+        "missing_perms": [], "soft_delete_days": 7,
+        "decisions": {"skipped_no_generation": 3},
+        "delete_bytes": 0,
+        "drift_dirs": [], "failed_dirs": [],
+        "bands": {"gs://b2/x/": {"no_generation": 3, "no_generation_bytes": 21}},
+        "skipped_no_generation": {"objects": 3, "bytes": 21, "whole_bucket": True},
+    }
+    assert (bucket_of(result, "b1")["decisions"], bucket_of(result, "b1")["delete_bytes"]) == ({"delete": 4}, 8)
+    assert result["skipped_no_generation"] == {"objects": 3, "bytes": 21, "whole_buckets": ["b2"]}
+    assert json.loads((out / "deleted-summary.json").read_text())["skipped_no_generation"] == {"objects": 3, "bytes": 21, "whole_buckets": ["b2"]}
+    written = json.loads((out / "plan-summary.json").read_text())
+    assert written["skipped_no_generation"] == {"objects": 3, "bytes": 21, "whole_buckets": ["b2"]}
+    assert written["buckets"]["b2"]["eligible"] == {"objects": 3, "bytes": 21}
+    assert log_rows(out, "b2") == [(f"x/null/o{i}", 7, None, "skipped_no_generation", "x/null") for i in range(3)]
+
+
+def test_a_bucket_of_nulls_is_not_held_to_the_delete_guards(source, tmp_path):
+    # Nothing is deleted there, so a short retention on it doesn't stop the buckets that do have generations.
+    directory, plan = source
+    two_buckets(directory, plan)
+    client = FakeClient(blobs={})
+    real = client.get_bucket
+
+    def get_bucket(name):
+        handle = real(name)
+        if name == "b2":
+            class Short:
+                soft_delete_policy = None
+            return Short()
+        return handle
+
+    client.get_bucket = get_bucket
+    result = execute_manifest(str(directory), str(plan), str(tmp_path / "out"), str(tmp_path / "work"), for_real=True, client=client, deleter=acknowledge())
+    assert (result["buckets"]["b1"]["decisions"], result["buckets"]["b2"]["decisions"]) == ({"delete": 4}, {"skipped_no_generation": 3})
+
+
+def test_a_cut_to_only_a_bucket_of_nulls_refuses(source, tmp_path):
+    directory, plan = source
+    two_buckets(directory, plan)
+    with pytest.raises(ValueError) as error:
+        prepare_manifest(str(directory), str(plan), str(tmp_path / "work"), ("b2",))
+    assert str(error.value) == "manifest has no generations: none of its 3 rows can be deleted; its scan's listing lacks them"
+
+
+def test_a_skipped_row_is_still_checked(source, tmp_path):
+    directory, plan = source
+    rows = [*LIVE, dict(name="other/x", size_bytes=1, generation=None, dir="other")]
+    rewrite(directory, rows)
+    with pytest.raises(ValueError, match="^b1: manifest row is outside staged prefixes$"):
+        prepare_manifest(str(directory), str(plan), str(tmp_path / "work"))
+    rewrite(directory, [*LIVE, dict(name="a/x", size_bytes=1, generation=None, dir=None)])
+    with pytest.raises(ValueError, match="^b1: manifest row lacks directory metadata$"):
+        prepare_manifest(str(directory), str(plan), str(tmp_path / "work2"))
+
+
+def test_a_repeated_name_with_no_generation_refuses(source, tmp_path):
+    directory, plan = source
+    rewrite(directory, [*LIVE, NULLS[0], NULLS[0]])
+    with pytest.raises(ValueError) as error:
+        prepare_manifest(str(directory), str(plan), str(tmp_path / "work"))
+    assert str(error.value) == f"b1: manifest repeats {NULLS[0]['name']}@None"
+
+
+def test_undo_ignores_skipped_rows_and_keeps_exact_generations(source, tmp_path):
+    # A null in the log must not turn the column into floats on the way to pandas.
+    directory, plan = source
+    big = 2 ** 53 + 1
+    rows = [dict(LIVE[0], generation=big), *NULLS]
+    rewrite(directory, rows)
+    out = tmp_path / "out"
+    execute_manifest(str(directory), str(plan), str(out), str(tmp_path / "work"), for_real=True, client=FakeClient(blobs={}), deleter=acknowledge())
+    handle = _UndoHandle()
+    result = undo_run(str(out), client=_UndoClient(handle), workers=1, now=1_800_000_000)
+    assert handle.calls == [(LIVE[0]["name"], big, 0)]
+    assert result["buckets"]["b1"]["decisions"] == {"restored": 1}
+
+
+def test_a_resume_repeats_the_skips_and_deletes_the_remainder(source, tmp_path):
+    directory, plan = source
+    rewrite(directory, [*ROWS, *NULLS])
+    stop = threading.Event()
+
+    def stopping(client, bucket, batch):
+        stop.set()
+        return [(blob, "delete") for blob in batch]
+
+    first = tmp_path / "first"
+    result = execute_manifest(str(directory), str(plan), str(first), str(tmp_path / "work1"), for_real=True, client=FakeClient(blobs={}), deleter=stopping, stop=stop)
+    assert result["buckets"]["b1"]["interrupted"] == {"roots_skipped": 1, "roots": 2}
+    calls = []
+    second = tmp_path / "second"
+    result = execute_manifest(str(directory), str(plan), str(second), str(tmp_path / "work2"), for_real=True, client=FakeClient(blobs={}), deleter=acknowledge(calls), exclude_runs=(str(first),))
+    assert [sorted(batch) for batch in calls] == [[(row["name"], row["generation"]) for row in ROWS[1000:]]]
+    assert bucket_of(result)["decisions"] == {"skipped_no_generation": 3, "delete": 5}
+    assert bucket_of(result)["skipped_no_generation"] == {"objects": 3, "bytes": 21, "whole_bucket": False}
+    assert bucket_of(result).get("interrupted") is None
+
+
+def test_a_resume_keeps_a_whole_bucket_of_nulls_flagged(source, tmp_path):
+    directory, plan = source
+    two_buckets(directory, plan)
+    first = tmp_path / "first"
+    execute_manifest(str(directory), str(plan), str(first), str(tmp_path / "work1"), for_real=True, client=FakeClient(blobs={}), deleter=acknowledge())
+    result = execute_manifest(str(directory), str(plan), str(tmp_path / "second"), str(tmp_path / "work2"), for_real=True, client=FakeClient(blobs={}), deleter=refuse, exclude_runs=(str(first),))
+    # (b1 had nothing left, so it leaves the resume; b2 has nothing it could ever delete, and stays flagged)
+    assert sorted(result["buckets"]) == ["b2"]
+    assert result["skipped_no_generation"] == {"objects": 3, "bytes": 21, "whole_buckets": ["b2"]}
+
+
+def test_a_refused_run_leaves_its_reason_in_the_run_dir(source, tmp_path, monkeypatch):
+    """No `deletion_runs` row yet: `/api/sweep/jobs` reads this for the row and the Slack thread."""
+    from dt_cloud import cli
+
+    directory, plan = source
+    rewrite(directory, NULLS)
+    client = FakeClient(blobs={})
+    monkeypatch.setattr("google.cloud.storage.Client", lambda: client)
+    run = tmp_path / "run"
+    executed = CliRunner().invoke(cli.main, [
+        "sweep", "execute-manifest", "-e", "xml", "-p", str(plan), "-o", str(run), "-w", str(tmp_path / "work"), "--for-real", str(directory),
+    ])
+    assert executed.exit_code == 1
+    failure = json.loads((run / "failure.json").read_text())
+    assert {key: failure[key] for key in ("step", "reason")} == {
+        "step": "execute-manifest", "reason": "manifest has no generations: none of its 3 rows can be deleted; its scan's listing lacks them",
+    }
+    assert sorted(failure) == ["reason", "step", "ts"]
+
+
+def test_a_refused_manifest_step_leaves_its_reason_in_its_output_dir(tmp_path):
+    from dt_cloud import cli
+
+    out = tmp_path / "run" / "source"
+    plan = tmp_path / "plan.json"
+    plan.write_text(json.dumps({"plan_id": 1, "sweep": ["gs://b1/a/"]}))
+    built = CliRunner().invoke(cli.main, ["sweep", "manifest", "-d", DATE, "--plan", str(plan), "-b", "elsewhere", "-r", str(tmp_path), "-o", str(out)])
+    assert built.exit_code == 1
+    failure = json.loads((out / "failure.json").read_text())
+    assert {key: failure[key] for key in ("step", "reason")} == {"step": "manifest", "reason": "no plan bucket among -b elsewhere (plan 1 names b1)"}
 
 
 def test_refuses_a_repeated_identity(source, tmp_path):
@@ -397,6 +644,17 @@ def d1(monkeypatch):
     monkeypatch.setattr(index_footer, "_d1_query", query)
     monkeypatch.setattr(index_footer, "_creds", lambda: ("token", "account"))
     return db
+
+
+def test_a_prefix_with_only_nulls_records_no_band_so_it_stays_staged(source, tmp_path, d1):
+    # `unstageDeleted` unstages any item with a band on a succeeded run: a band here would read as swept.
+    from dt_cloud.sweep_exec import record_bands
+
+    directory, plan = source
+    two_buckets(directory, plan)
+    result = execute_manifest(str(directory), str(plan), str(tmp_path / "out"), str(tmp_path / "work"), for_real=True, client=FakeClient(blobs={}), deleter=acknowledge())
+    assert record_bands("run", result) == 1
+    assert [tuple(band) for band in d1.execute("SELECT prefix, bytes, objects FROM deletion_bands")] == [("gs://b1/a/", 8, 4)]
 
 
 def test_manifest_then_execute_closes_the_run_with_its_totals(tmp_path, monkeypatch, d1):

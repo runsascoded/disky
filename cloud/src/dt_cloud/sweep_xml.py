@@ -1,4 +1,9 @@
-"""GCS XML multi-object deletion of explicit, generation-pinned objects."""
+"""GCS XML multi-object deletion of explicit, generation-pinned objects.
+
+Measured on GCS: an item naming `VersionId` is replied `Deleted` (HTTP 200) for the live current generation, one already deleted,
+an overwritten old one (the current survives), a wrong one on a live key (the object survives), a key that never existed, and a
+repeat, with soft delete on or off. So a reply says what was attempted; gone and overwritten aren't observable here.
+"""
 
 from __future__ import annotations
 
@@ -60,7 +65,11 @@ def delete_payload(blobs: list[Any]) -> bytes:
 
 
 def delete_results(payload: bytes, blobs: list[Any]) -> dict[tuple[str, int], str | None]:
-    """Reject replies we cannot attribute to the exact requested identities."""
+    """Reject replies we cannot attribute to the exact requested identities.
+
+    The not-found and precondition codes aren't what GCS was measured to send (see the module doc); a reply that does carry one
+    still isn't called deleted.
+    """
     root = ET.fromstring(payload)
     for element in root.iter():
         element.tag = element.tag.rsplit("}", 1)[-1]
@@ -97,8 +106,8 @@ class XmlDeleter:
     """One authenticated HTTP connection pool per worker; reusable across batches.
 
     VersionId addresses the reviewed generation, including a noncurrent one.
-    Missing objects can be acknowledged as Deleted by the service: this is an
-    acknowledged-delete count, not proof of which actor removed the object.
+    Every item is acknowledged as Deleted, whatever it named: this is an
+    acknowledged-delete count, not proof that the object existed or who removed it.
     """
 
     def __init__(

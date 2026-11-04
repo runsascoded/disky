@@ -16,7 +16,7 @@ import sys
 from collections import Counter
 from collections.abc import Callable
 from dataclasses import asdict
-from functools import partial
+from functools import partial, wraps
 from pathlib import Path
 from typing import Any
 
@@ -1818,6 +1818,41 @@ def sweep_sync_progress(interval: int, sql_output: str | None, job_name: str) ->
     sync_progress(job_name, interval, sql_output)
 
 
+def _failure_recorded(step: str, out_param: str = "out") -> Callable:
+    """A failed step's reason in `<out>/failure.json`, then the failure as it was. A run refused before `record_run_start` has
+    no `deletion_runs` row, and Batch's own event only says "exit code 1": `/api/sweep/jobs` reads this for the row's "why" and
+    the Slack thread (`sweepFailure.ts`). A step killed from outside (out of memory, a pre-emption) leaves none."""
+    def decorate(fn: Callable) -> Callable:
+        @wraps(fn)
+        def run(**kwargs: Any) -> None:
+            try:
+                fn(**kwargs)
+            except Exception as error:
+                _write_failure(kwargs[out_param], step, error)
+                raise
+            except SystemExit as error:
+                if error.code not in (None, 0):
+                    _write_failure(kwargs[out_param], step, error.code)
+                raise
+        return run
+    return decorate
+
+
+def _write_failure(out: str | None, step: str, reason: object) -> None:
+    """Best effort: never masks the failure being reported."""
+    import fsspec
+
+    if out is None:
+        return
+    try:
+        fs, path = fsspec.core.url_to_fs(out)
+        fs.makedirs(path, exist_ok=True)
+        with fs.open(f"{path}/failure.json", "w") as fh:
+            json.dump({"step": step, "reason": str(reason)[:2000], "ts": int(dt.datetime.now(dt.timezone.utc).timestamp())}, fh)
+    except Exception as error:
+        err(f"WARN: couldn't write {out}/failure.json: {error}")
+
+
 @sweep.command("manifest")
 @option("-b", "--bucket", "only_buckets", multiple=True, help="Only these buckets (default: every bucket the plan names)")
 @option("-d", "--date", required=True, help="Scan date whose listing to plan from (pinned)")
@@ -1828,6 +1863,7 @@ def sweep_sync_progress(interval: int, sql_output: str | None, job_name: str) ->
 @option("-o", "--out", default=None, help="Output dir (default gs://$DATA_BUCKET/sweep/<date>-p<plan_id>)")
 @option("-p", "--plan", "plan_path", required=True, help="The dispatched plan.json (path or gs:// URL): its items are the delete set, and the buckets are the plan's (∩ -b)")
 @option("-r", "--root", default=None, help="Listing root (gs:// or local mount; default gs://$DATA_BUCKET)")
+@_failure_recorded("manifest")
 def sweep_manifest(only_buckets: tuple[str, ...], date: str, iv_gen: str | None, holds: str, interval_store: str | None, workers: int, out: str | None,
                    plan_path: str, root: str | None) -> None:
     """Object-level manifest of a staged plan (specs/done/staged-delete.md): scan
@@ -1930,6 +1966,7 @@ def sweep_reuse_manifest(
 @option("--for-real", is_flag=True, help="Actually delete (default: dry-run writes would-delete/)")
 @option("--no-record", is_flag=True, help="Skip the D1 deletion_runs/bands record (recorded by default)")
 @argument("plan_dir")
+@_failure_recorded("execute", "plan_dir")
 def sweep_execute(only_buckets: tuple[str, ...], drift: str, max_root_objects: int, delete_workers: int, workers: int, for_real: bool, no_record: bool, plan_dir: str) -> None:
     """Execute (default: DRY-RUN) a `sweep manifest` plan: fresh re-list per
     eligible dir, generation-matched deletes of manifest∩live keys whose
@@ -2219,6 +2256,7 @@ def _generation_options(source: str) -> Callable:
 
 @sweep.command("execute-reviewed")
 @_generation_options("reviewed DR")
+@_failure_recorded("execute-reviewed")
 def sweep_execute_reviewed(**kwargs: Any) -> None:
     """Stream a completed DR's exact generations; no fresh relist/drift audit.
 
@@ -2233,17 +2271,20 @@ def sweep_execute_reviewed(**kwargs: Any) -> None:
 
 @sweep.command("execute-manifest")
 @_generation_options("manifest")
+@_failure_recorded("execute-manifest")
 def sweep_execute_manifest(**kwargs: Any) -> None:
     """Stream SOURCE's (a `sweep manifest` output dir) exact generations; no dry run, relist or drift audit.
 
     `execute-reviewed`'s executor, over the generations the manifest read from
     its scan's listing: every row is checked first (pinned artifact, a positive
     generation, under a staged item, totals, no identity twice), then the
-    buckets' permissions and soft-delete retention. A null or non-positive
-    generation refuses the whole run. Only named generations are deleted, so a
-    key written beside a manifest key survives, and its directory is still
-    swept (no whole-dir drift skip). This is the web dispatch of a real run
-    with no dry run of exactly its items.
+    buckets' permissions and soft-delete retention. A zero or negative
+    generation refuses the whole run. A null one is logged per object as
+    `skipped_no_generation`, not deleted, and counted in the summary (a manifest
+    of only those refuses). Only named generations are deleted, so a key written
+    beside a manifest key survives, and its directory is still swept (no
+    whole-dir drift skip). This is the web dispatch of a real run with no dry
+    run of exactly its items.
     """
     from .sweep_reviewed import execute_manifest
 

@@ -69,3 +69,23 @@ def test_backfill_is_supplemental_and_keeps_execution_unknown(monkeypatch, tmp_p
     assert json.loads((out / 'preservation-analysis.json').read_text()) == doc
     with pytest.raises(FileExistsError):
         analyze_preserved(str(run), 'now', 'historical-store', out)
+
+
+@pytest.mark.parametrize('contract', ['manifest-delete-generations', 'reviewed-delete-generations'])
+def test_a_generation_run_refuses_backfill_with_its_reason(tmp_path: Path, contract: str) -> None:
+    # What `execute-manifest` / `execute-reviewed` leave: no top-level `manifest/`, a multi-bucket plan, no `mode`.
+    run = tmp_path / 'run'
+    run.mkdir()
+    docs = {
+        'plan.json': {'plan_id': 1, 'sweep': ['gs://b/p/']},
+        'plan-summary.json': {'contract': contract, 'buckets': {'b': {}}},
+        'deleted-summary.json': {'for_real': True, 'buckets': {'b': {}}},
+    }
+    for name, doc in docs.items():
+        (run / name).write_text(json.dumps(doc) + '\n')
+    with pytest.raises(ValueError) as error:
+        analyze_preserved(str(run), 'now', 'historical-store', tmp_path / 'analysis')
+    assert str(error.value) == (
+        f'{run}: a {contract} run deletes named generations with no drift skip, so it preserved no objects to reconstruct; '
+        'analyze-preserved covers listing runs only'
+    )

@@ -114,7 +114,8 @@ def subtract_settled(
                     raise ValueError(f"{bucket}: remainder totals failed reconciliation")
                 before["decisions"] = {"delete": count}
                 before["delete_bytes"] = size
-            if before["decisions"].get("delete", 0):
+            # A bucket's skips are this run's to report too, whether or not it has deletes left.
+            if before["decisions"].get("delete", 0) or "skipped_no_generation" in before:
                 remaining[bucket] = parts
             provenance["buckets"][bucket] = {"parts": pins, "excluded_objects": excluded, "excluded_bytes": excluded_bytes}
             err(f"resume: {bucket}: {excluded:,} settled identities excluded; {before['decisions'].get('delete', 0):,} remain", flush=True)
