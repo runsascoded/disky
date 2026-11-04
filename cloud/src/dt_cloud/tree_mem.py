@@ -317,9 +317,9 @@ class PhasePeak:
     peak: int = 0
     samples: int = 0
     at: str | None = None
-    gauges: dict[str, int] = field(default_factory=dict)
+    gauges: dict[str, int | None] = field(default_factory=dict)
 
-    def add(self, pss: int, at: str | None = None, gauges: dict[str, int] | None = None) -> None:
+    def add(self, pss: int, at: str | None = None, gauges: dict[str, int | None] | None = None) -> None:
         if pss > self.peak:
             self.peak, self.at, self.gauges = pss, at, gauges or {}
         self.samples += 1
@@ -363,7 +363,7 @@ def at(label: str) -> Iterator[None]:
 @contextmanager
 def gauges(**fns: Callable[[], int]) -> Iterator[None]:
     """The innermost running `TreeWatch` also reads these (name → bytes) with each sample in the block (none running:
-    nothing): each phase's line gives their values at its peak."""
+    nothing): each phase's line gives their values at its peak, or says a read failed (`TreeWatch._read_gauges`)."""
     w = _WATCHES[-1] if _WATCHES else None
     if w is None:
         yield
@@ -403,17 +403,31 @@ class TreeWatch:
         self.at_label: str | None = None
         self.gauge_fns: dict[str, Callable[[], int]] = {}
         self.at_peaks: dict[str, int] = {}
+        self.gauge_fails: Counter[str] = Counter()
         self._gauge_lock = Lock()
         self._running: Counter[str] = Counter()
         self._lock = Lock()
         self._stop = Event()
         self._thread: Thread | None = None
 
+    def _read_gauges(self, fns: dict[str, Callable[[], int]]) -> dict[str, int | None]:
+        """Each gauge's bytes, None where its read failed (counted, and said on the phase's line). A gauge is a diagnostic,
+        so its failure doesn't raise: on a phase's thread that would fail the work being measured, and on the watch's it
+        would end the sampling, leaving a peak that understates the tree and still logs as normal."""
+        read: dict[str, int | None] = {}
+        with self._gauge_lock:  # a sample is on the watch's thread or a phase's: one cursor between them
+            for name, fn in fns.items():
+                try:
+                    read[name] = fn()
+                except Exception:
+                    read[name] = None
+                    self.gauge_fails[name] += 1
+        return read
+
     def _sample(self) -> None:
         pss = tree_pss()
-        at_, fns = self.at_label, self.gauge_fns
-        with self._gauge_lock:  # a sample is on the watch's thread or a phase's: one cursor between them
-            read = {name: fn() for name, fn in fns.items()}
+        at_ = self.at_label
+        read = self._read_gauges(self.gauge_fns)
         with self._lock:
             self.peak = max(self.peak, pss)
             self.samples += 1
@@ -436,9 +450,12 @@ class TreeWatch:
         with self._lock:
             self._running[name] -= 1
 
+    def _gauge(self, name: str, value: int | None) -> str:
+        return f"{name} unread ({self.gauge_fails[name]} failed)" if value is None else f"{name} {value / MIB:,.0f} MiB"
+
     def _line(self, p: PhasePeak) -> str:
         return (f"peak tree PSS {p.peak / MIB:,.0f} MiB ({100 * p.peak / self.total:.0f}%; {p.samples} samples"
-                f"{f'; at {p.at}' if p.at else ''}{''.join(f'; {k} {v / MIB:,.0f} MiB' for k, v in p.gauges.items())})"
+                f"{f'; at {p.at}' if p.at else ''}{''.join(f'; {self._gauge(k, v)}' for k, v in p.gauges.items())})"
                 f"{' — OVER BUDGET' if p.peak > self.total else ''}")
 
     def _run(self) -> None:
