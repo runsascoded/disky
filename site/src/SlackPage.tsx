@@ -295,8 +295,11 @@ function Bundle({ b, cands, setCands }: { b: PreviewBundle; cands: string[]; set
       })}
       {cands.length < 3 && <button className="slack-add" onClick={() => setCands([...cands, cands[cands.length - 1] ?? ''])}>+ compare</button>}
     </div>
-    <LiveSettings b={b} cands={cands} form={form} setForm={setForm} />
-    {b.op_ts && <Reapply b={b} form={form} />}
+    {/* a never-posted bundle's params are a try-out's: not seeded into the panels that change the live thread */}
+    {b.op_ts && <>
+      <LiveSettings b={b} cands={cands} form={form} setForm={setForm} />
+      <Reapply b={b} form={form} />
+    </>}
     <details className="slack-rows">
       <summary>Rows ({b.rows.template})</summary>
       <pre>{JSON.stringify(b.rows, null, 1)}</pre>
