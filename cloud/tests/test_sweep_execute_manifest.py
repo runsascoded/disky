@@ -657,6 +657,36 @@ def test_a_prefix_with_only_nulls_records_no_band_so_it_stays_staged(source, tmp
     assert [tuple(band) for band in d1.execute("SELECT prefix, bytes, objects FROM deletion_bands")] == [("gs://b1/a/", 8, 4)]
 
 
+def test_a_partly_null_prefix_records_no_band_beside_a_clean_one(monkeypatch):
+    # With no band it stays staged; the run's totals and `deleted/` log still hold its deletes.
+    from dt_cloud import index_footer, sweep_exec
+
+    sent: list[str] = []
+    monkeypatch.setattr(index_footer, "_creds", lambda: ("tok", "acct"))
+    monkeypatch.setattr(index_footer, "_d1_query", lambda sql, acct, tok: sent.append(sql))
+    partly = {"bytes": 8, "objects": 4, "no_generation": 2, "no_generation_bytes": 3}
+    only = {"bytes": 0, "objects": 0, "no_generation": 5, "no_generation_bytes": 9}
+    clean = {"bytes": 1, "objects": 1}
+    assert sweep_exec.record_bands("r", {"buckets": {"b": {"bands": {"gs://b/p/": partly, "gs://b/q/": only, "gs://b/c/": clean}}}}) == 1
+    assert sent == [
+        "INSERT INTO deletion_bands (run_id, prefix, bytes, objects, gone, overwritten, drift_new_objects, undone_objects) VALUES "
+        "('r', 'gs://b/c/', 1, 1, 0, 0, 0, 0) ON CONFLICT (run_id, prefix) DO NOTHING",
+    ]
+
+
+def test_a_run_with_no_cut_records_every_bucket_undo_must_read(tmp_path, d1):
+    # `runBuckets` falls back to the bands' buckets only for a NULL `buckets`, and a bucket can have no band.
+    from dt_cloud.sweep_exec import record_run_start
+
+    plan = {"date": "2026-01-01", "plan_id": 1, "head": 0, "buckets": {"b2": {}, "b1": {}}}
+    record_run_start(plan, "gs://x/nocut", "ann", 1000, True)
+    record_run_start(plan, "gs://x/cut", "ann", 2000, True, ("b2",))
+    assert [tuple(row) for row in d1.execute("SELECT log_dir, buckets FROM deletion_runs ORDER BY started_ts")] == [
+        ("gs://x/nocut", "b1,b2"),
+        ("gs://x/cut", "b2"),
+    ]
+
+
 def test_manifest_then_execute_closes_the_run_with_its_totals(tmp_path, monkeypatch, d1):
     """The dispatched script's two commands, end to end: `sweep manifest` into the run's `source/`, `execute-manifest` into
     the run, as_of holds honored, and the D1 row `sweepReflect` closes keyed by the run dir."""

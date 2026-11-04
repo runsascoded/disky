@@ -1174,10 +1174,11 @@ def record_run_start(plan: dict, plan_dir: str, actor: str, started_ts: int, for
     """Insert the run's D1 row as soon as it starts (`finished_ts` NULL, zero
     totals) so the console lists it while it runs; `record_run` fills it in. A
     real run doesn't start without it (`cli._start_recorded`).
-    `buckets` = the `-b` cut (empty = every bucket in the plan → NULL)."""
+    `buckets` = the `-b` cut, else every bucket in the plan: what undo reads, since a run's bands can leave a bucket out."""
     from .index_footer import _creds, _d1_query, _q
 
     run_id = run_id_for(plan, started_ts)
+    touched = tuple(buckets) or tuple(plan.get("buckets") or ())
     tok, acct = _creds()
     _d1_query(
         "INSERT INTO deletion_runs (run_id, plan, scan, head, exec_head, actor, mode, started_ts, finished_ts, "
@@ -1185,7 +1186,7 @@ def record_run_start(plan: dict, plan_dir: str, actor: str, started_ts: int, for
         "undo_deadline, log_dir, buckets, plan_id) VALUES ("
         f"{_q(run_id)}, {_q(plan_dir)}, {_q(plan['date'])}, 0, 0, {_q(actor)}, "
         f"{_q('real' if for_real else 'dry')}, {started_ts}, NULL, 0, 0, 0, 0, 0, 0, NULL, {_q(plan_dir)}, "
-        f"{_q(','.join(sorted(buckets))) if buckets else 'NULL'}, {int(plan['plan_id'])})",
+        f"{_q(','.join(sorted(touched))) if touched else 'NULL'}, {int(plan['plan_id'])})",
         acct, tok,
     )
     return run_id
@@ -1244,9 +1245,10 @@ BAND_ROWS_PER_STATEMENT = 200
 def record_bands(run_id: str, summary: dict) -> int:
     """Write the summary's per-prefix bands for `run_id` to D1, in statements
     of `BAND_ROWS_PER_STATEMENT` rows. Idempotent: a band already recorded is
-    left as it is (keeping its `undone_objects`). A band of only null-generation
-    skips is left out: the item would read as swept (`unstageDeleted` unstages any
-    item with a band on a succeeded run), and it stays staged. Returns the bands sent."""
+    left as it is (keeping its `undone_objects`). A band with any null-generation skip is left out, whatever else of it
+    was deleted: `unstageDeleted` unstages any item with a band on a succeeded run, and this one isn't swept, so it stays
+    staged until a clean run writes its band. So bands undercount a run with skips: its totals and `deleted/` log are what
+    to trust. Returns the bands sent."""
     from .index_footer import _creds, _d1_query, _q
 
     rows = [
@@ -1254,7 +1256,7 @@ def record_bands(run_id: str, summary: dict) -> int:
         f"{c.get('gone', 0)}, {c.get('overwritten', 0)}, {c.get('drift_new_objects', 0)}, 0)"
         for b in summary["buckets"].values()
         for prefix, c in (b.get("bands") or {}).items()
-        if c.get("objects") or not c.get("no_generation")
+        if not c.get("no_generation")
     ]
     if not rows:
         return 0

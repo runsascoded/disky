@@ -16,6 +16,8 @@ Point (3)'s "lists afresh" (`sweep manifest` + `sweep execute --for-real`) is re
 
 ## Update (2026-11-04): on both XML paths, `deleted` means attempted
 
+A prefix with any object skipped for want of a generation stays staged (Ryan, 2026-11-04): the run writes no band for it, so its deletes are in the run's totals and `deleted/` log but not in its bands or prefix history, until a clean run writes its band. No such prefix is expected: the 36M-row manifest of 2026-11-04 has no null generation. The same run has no whole-dir drift skip (Ryan, 2026-11-04).
+
 Measured on real GCS, with and without soft delete: a multi-delete item naming `VersionId` is replied `<Deleted>` with HTTP 200 for the live current generation, one already deleted, an overwritten old generation (the current survives), a wrong generation on a live key (the object survives), a key that never existed, and a repeat. So `execute-reviewed` and `execute-manifest` can't observe gone or overwritten: their `deleted` counts deletes attempted and acknowledged, and `/staged` shows those columns as "—" on these runs (older JSON and listing runs keep their numbers). Undo restores logged generations with `if_generation_match=0`; since the log can't tell ours from an object someone else deleted after the scan, undo can bring those back too (`/staged`'s recovery section says so).
 
 ## Update (2026-11-04): a job that failed before recording a run

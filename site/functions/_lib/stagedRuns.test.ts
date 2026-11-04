@@ -290,6 +290,17 @@ describe('D1', () => {
   })
 
   describe('unstageDeleted — a finished real run takes what it deleted out of the queue', () => {
+    it('a prefix a run left no band for (it had skips) stays staged beside a clean one; a later clean run takes it out', async () => {
+      const { db, raw } = await gcsDb()
+      const partly = `gs://${B1}/partly/`, clean = `gs://${B1}/clean/`
+      raw.exec(`INSERT INTO deletion_bands (run_id, prefix, bytes, objects) VALUES ('${RUN}', '${clean}', 5, 1)`)
+      for (const p of [partly, clean]) raw.exec(`INSERT INTO plan_items (plan_id, prefix, batch_id, added_by, added_ts) VALUES (1, '${p}', NULL, 'ann', 50)`)
+      const removed = (await unstageDeleted(db, 1, [RUN])).filter(p => p === partly || p === clean)
+      const items = () => raw.prepare(`SELECT prefix FROM plan_items WHERE plan_id = 1 AND prefix IN ('${partly}', '${clean}')`).all().map(r => (r as { prefix: string }).prefix)
+      expect([removed, items()]).toEqual([[clean], [partly]])
+      raw.exec(`INSERT INTO deletion_bands (run_id, prefix, bytes, objects) VALUES ('${RUN}', '${partly}', 8, 4)`)
+      expect([await unstageDeleted(db, 1, [RUN]), items()]).toEqual([[partly], []])
+    })
     it('consumes successful reviewed staging despite new/changed objects; keeps unrun and later-staged items; audits idempotently', async () => {
       const { db, raw } = await gcsDb()
       const done = `gs://${B1}/ckpt/b/`, drift = `gs://${B2}/tmp/a/`, ovw = `gs://${B1}/ow/`, unrun = `gs://${B1}/other/`, late = `gs://${B1}/late/`
