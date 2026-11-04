@@ -1,4 +1,9 @@
-"""Stream a completed DR's exact generation set without a fresh prefix relist."""
+"""Stream an exact generation set without a fresh prefix relist.
+
+What to delete comes from either source: a completed DR's decision log
+(`execute_reviewed`) or a manifest (`execute_manifest`: what `sweep manifest`
+read from the scan's listing). How to delete is the same for both.
+"""
 
 from __future__ import annotations
 
@@ -16,12 +21,13 @@ from functools import lru_cache, partial
 from pathlib import Path
 from typing import Any, Iterator
 
+import duckdb
 import fsspec
 import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
-from .staged_plan import load_plan
+from .staged_plan import StagedPlan, load_plan
 from .sweep_batch import _parts
 from .sweep_exec import PROGRESS_EVERY, _missing_perms, _soft_delete_days, delete_batch
 from .sweep_manifest import ManifestProgress
@@ -31,9 +37,13 @@ from .sweep_pacing import BucketPacer, DeleteAttempt
 
 err = partial(print, file=sys.stderr)
 COLUMNS = ["name", "size_bytes", "generation", "decision", "dir"]
+MANIFEST_COLUMNS = ["name", "size_bytes", "generation", "dir"]
 LOG_SCHEMA = pa.schema([(name, pa.string() if name in ("name", "decision", "dir") else pa.int64()) for name in COLUMNS])
 LOG_ROWS = 65_536
 CACHE_WORKERS = 8
+# Finding a repeated identity is an external aggregation over every name: it spills beside the cached manifest.
+IDENTITY_MEMORY = "4GB"
+IDENTITY_THREADS = 4
 
 
 @dataclass(frozen=True)
@@ -58,6 +68,50 @@ def reviewed_tables(path: Path) -> Iterator[pa.Table]:
     for batch in pq.ParquetFile(path).iter_batches(batch_size=65_536, columns=COLUMNS):
         table = pa.Table.from_batches([batch])
         yield table.filter(pc.equal(table["decision"], "delete"))
+
+
+def check_plan_match(plan: StagedPlan, original: dict, only_buckets: tuple[str, ...], kind: str, remedy: str) -> None:
+    """The source artifact names exactly this plan's items (or its bucket cut), each held to the same `as_of` scan."""
+    # Prefix bands and exact items (`approved_objects`, specs/done/file-assign.md)
+    # both name the set; the kind is which list an item is in.
+    approved = sorted(item for bucket in plan.buckets for item in (*plan.bands(bucket), *(f"={o}" for o in plan.exact(bucket))))
+    if any(bucket not in plan.buckets for bucket in only_buckets):
+        raise ValueError("requested bucket is outside the staged plan")
+    cut_approved = sorted(item for bucket in plan.buckets if not only_buckets or bucket in only_buckets for item in (*plan.bands(bucket), *(f"={o}" for o in plan.exact(bucket))))
+    source_approved = sorted([*original.get("approved", []), *(f"={o}" for o in original.get("approved_objects", []))])
+    source_items = {*original.get("approved", []), *original.get("approved_objects", [])}
+    if original.get("plan_id") != plan.plan_id or source_approved not in (approved, cut_approved):
+        raise ValueError(f"{kind} does not match the current staged plan")
+    # The source's manifest honored the items' `as_of` scans as they were then;
+    # one from before an item carried one (or with another) never held back
+    # what changed after it.
+    held = {
+        f"gs://{bucket}/{rel}": scan
+        for bucket, scans in plan.as_of.items()
+        for rel, scan in scans.items()
+        if scan != original.get("date") and f"gs://{bucket}/{rel}" in source_items
+    }
+    if original.get("as_of", {}) != held:
+        raise ValueError(f"{kind} predates the staged items' as_of scans; {remedy}")
+
+
+def item_pattern(plan: StagedPlan, bucket: str) -> str:
+    """A staged prefix covers what starts with it; an exact item only its own key."""
+    alternatives = [re.escape(prefix) for prefix in plan.sweep.get(bucket, ())] + [re.escape(key) + "$" for key in plan.objects.get(bucket, ())]
+    return "^(?:" + "|".join(alternatives) + ")"
+
+
+def check_delete_rows(table: pa.Table, bucket: str, pattern: str, kind: str) -> tuple[int, int]:
+    """Every row a positive generation, under an item, with a size and a directory; returns their count and bytes."""
+    if table["generation"].null_count or pc.any(pc.less_equal(table["generation"], 0)).as_py():
+        raise ValueError(f"{bucket}: {kind} row lacks a positive generation")
+    if table["name"].null_count or not pc.all(pc.match_substring_regex(table["name"], pattern)).as_py():
+        raise ValueError(f"{bucket}: {kind} row is outside staged prefixes")
+    if table["size_bytes"].null_count or pc.any(pc.less(table["size_bytes"], 0)).as_py():
+        raise ValueError(f"{bucket}: {kind} row has invalid size")
+    if table["dir"].null_count:
+        raise ValueError(f"{bucket}: {kind} row lacks directory metadata")
+    return len(table), int(pc.sum(table["size_bytes"]).as_py() or 0)
 
 
 def prepare_reviewed(
@@ -88,27 +142,7 @@ def _prepare_reviewed(
 
     original = read_json("plan-summary.json")
     dry = read_json("would-delete-summary.json")
-    # Prefix bands and exact items (`approved_objects`, specs/done/file-assign.md)
-    # both name the reviewed set; the kind is which list an item is in.
-    approved = sorted(item for bucket in plan.buckets for item in (*plan.bands(bucket), *(f"={o}" for o in plan.exact(bucket))))
-    if any(bucket not in plan.buckets for bucket in only_buckets):
-        raise ValueError("requested bucket is outside the staged plan")
-    cut_approved = sorted(item for bucket in plan.buckets if not only_buckets or bucket in only_buckets for item in (*plan.bands(bucket), *(f"={o}" for o in plan.exact(bucket))))
-    reviewed_approved = sorted([*original.get("approved", []), *(f"={o}" for o in original.get("approved_objects", []))])
-    reviewed_items = {*original.get("approved", []), *original.get("approved_objects", [])}
-    if original.get("plan_id") != plan.plan_id or reviewed_approved not in (approved, cut_approved):
-        raise ValueError("reviewed DR does not match the current staged plan")
-    # The DR's manifest honored the items' `as_of` scans as they were then; a
-    # DR from before an item carried one (or with another) never held back
-    # what changed after it.
-    held = {
-        f"gs://{bucket}/{rel}": scan
-        for bucket, scans in plan.as_of.items()
-        for rel, scan in scans.items()
-        if scan != original.get("date") and f"gs://{bucket}/{rel}" in reviewed_items
-    }
-    if original.get("as_of", {}) != held:
-        raise ValueError("reviewed DR predates the staged items' as_of scans; dry-run the plan again")
+    check_plan_match(plan, original, only_buckets, "reviewed DR", "dry-run the plan again")
     expected_buckets = sorted(bucket for bucket, entry in original["buckets"].items() if entry.get("eligible", {}).get("objects", 0))
     if original.get("diagnostic") or dry.get("diagnostic") or dry.get("for_real") is not False or sorted(dry.get("buckets", {})) != expected_buckets:
         raise ValueError("reviewed execution requires a completed, non-diagnostic DR")
@@ -131,9 +165,7 @@ def _prepare_reviewed(
         files[bucket] = []
         artifacts[bucket] = []
         count = size = all_rows = 0
-        # a staged prefix covers what starts with it; an exact item only its own key
-        alternatives = [re.escape(prefix) for prefix in plan.sweep.get(bucket, ())] + [re.escape(key) + "$" for key in plan.objects.get(bucket, ())]
-        pattern = "^(?:" + "|".join(alternatives) + ")"
+        pattern = item_pattern(plan, bucket)
         with progress.lock:
             progress.total += len(parts)
 
@@ -151,16 +183,9 @@ def _prepare_reviewed(
             for table in reviewed_tables(local):
                 if not len(table):
                     continue
-                if table["generation"].null_count or pc.any(pc.less_equal(table["generation"], 0)).as_py():
-                    raise ValueError(f"{bucket}: reviewed delete row lacks a positive generation")
-                if table["name"].null_count or not pc.all(pc.match_substring_regex(table["name"], pattern)).as_py():
-                    raise ValueError(f"{bucket}: reviewed delete row is outside staged prefixes")
-                if table["size_bytes"].null_count or pc.any(pc.less(table["size_bytes"], 0)).as_py():
-                    raise ValueError(f"{bucket}: reviewed delete row has invalid size")
-                if table["dir"].null_count:
-                    raise ValueError(f"{bucket}: reviewed delete row lacks directory metadata")
-                part_count += len(table)
-                part_size += int(pc.sum(table["size_bytes"]).as_py() or 0)
+                rows, size_bytes = check_delete_rows(table, bucket, pattern, "reviewed delete")
+                part_count += rows
+                part_size += size_bytes
             with progress.lock:
                 progress.scanned += 1
                 progress.objects += parquet.metadata.num_rows
@@ -191,6 +216,119 @@ def _prepare_reviewed(
     return original, dry, files, artifacts
 
 
+def repeated_identity(path: Path, spill: Path) -> tuple[str, int] | None:
+    """A `(name, generation)` two of the file's rows share, if any. A listing's shards shouldn't repeat one, and a fresh
+    relist used to hide it; `delete_payload` refuses a batch that does, mid-run."""
+    with duckdb.connect() as db:
+        db.execute(f"SET memory_limit='{IDENTITY_MEMORY}'")
+        db.execute(f"SET threads={IDENTITY_THREADS}")
+        db.execute("SET temp_directory = ?", [str(spill)])
+        return db.execute("SELECT name, generation FROM read_parquet(?) GROUP BY name, generation HAVING count(*) > 1 LIMIT 1", [str(path)]).fetchone()
+
+
+def prepare_manifest(
+    source: str,
+    plan_path: str,
+    work_dir: str,
+    only_buckets: tuple[str, ...] = (),
+) -> tuple[dict, dict, dict[str, list[Path]], dict]:
+    """Pin, cache and preflight a `sweep manifest` run's every row before the first target mutation.
+
+    Each bucket's manifest is cached in the decision log's shape (every row `decision=delete`), so what follows is the same
+    for a manifest as for a DR's log, the summary's `eligible` totals standing in for the DR's. Returns `prepare_reviewed`'s
+    `(plan summary, totals, cached parts, source artifacts)`. A null or non-positive generation is refused: there is no
+    falling back to a listing or to `created`.
+    """
+    with ManifestProgress(workers=CACHE_WORKERS, window=CACHE_WORKERS) as progress:
+        progress.set_phase("manifest-preflight", source)
+        return _prepare_manifest(source, plan_path, work_dir, only_buckets, progress)
+
+
+def _prepare_manifest(
+    source: str,
+    plan_path: str,
+    work_dir: str,
+    only_buckets: tuple[str, ...],
+    progress: ManifestProgress,
+) -> tuple[dict, dict, dict[str, list[Path]], dict]:
+    plan = load_plan(plan_path)
+    fs, path = fsspec.core.url_to_fs(source, version_aware=True)
+    with fs.open(pin_path(fs, f"{path}/plan-summary.json")) as fh:
+        original = json.load(fh)
+    check_plan_match(plan, original, only_buckets, "manifest", "rebuild it")
+    if original.get("diagnostic"):
+        raise ValueError("diagnostic manifests cannot be used for deletion")
+    selected = {
+        bucket: entry["eligible"]
+        for bucket, entry in original["buckets"].items()
+        if entry.get("eligible", {}).get("objects", 0) and (not only_buckets or bucket in only_buckets)
+    }
+    outside = sorted(set(selected) - set(plan.buckets))
+    if outside:
+        raise ValueError(f"{outside[0]}: manifest bucket is outside the staged plan")
+    work = Path(work_dir)
+    work.mkdir(parents=True, exist_ok=True)
+    if any(work.iterdir()):
+        raise ValueError("manifest execution work directory must be empty")
+    with progress.lock:
+        progress.total = len(selected)
+
+    def cache_manifest(bucket: str) -> tuple[Path, str, int]:
+        remote = f"{path}/manifest/{bucket}.parquet"
+        if not fs.exists(remote):
+            raise ValueError(f"{bucket}: plan summary names eligible objects but the manifest is missing")
+        started = time.monotonic()
+        with progress.lock:
+            progress.active[remote] = started
+        try:
+            pinned = pin_path(fs, remote)
+            cached = work / f"{bucket}.manifest.parquet"
+            local = work / f"{bucket}-00000.parquet"
+            err(f"manifest preflight: caching {bucket}", flush=True)
+            progress.set_phase("manifest-cache", remote)
+            fs.get_file(pinned, str(cached))
+            progress.set_phase("manifest-validate", remote)
+            parquet = pq.ParquetFile(cached)
+            if "generation" not in parquet.schema_arrow.names:
+                raise ValueError(f"{bucket}: manifest has no generation column")
+            pattern = item_pattern(plan, bucket)
+            count = size = 0
+            with pq.ParquetWriter(local, LOG_SCHEMA) as writer:
+                for batch in parquet.iter_batches(batch_size=LOG_ROWS, columns=MANIFEST_COLUMNS):
+                    table = pa.Table.from_batches([batch])
+                    rows, size_bytes = check_delete_rows(table, bucket, pattern, "manifest")
+                    count += rows
+                    size += size_bytes
+                    decisions = pa.array(["delete"] * len(table), pa.string())
+                    writer.write_table(table.append_column("decision", decisions).select(COLUMNS).cast(LOG_SCHEMA))
+            if count != selected[bucket].get("objects", 0) or size != selected[bucket].get("bytes", 0):
+                raise ValueError(f"{bucket}: manifest totals do not match its plan summary")
+            progress.set_phase("manifest-identities", remote)
+            repeated = repeated_identity(local, work / f"{bucket}-identities")
+            if repeated:
+                raise ValueError(f"{bucket}: manifest repeats {repeated[0]}@{repeated[1]}")
+            cached.unlink()
+            with progress.lock:
+                progress.scanned += 1
+                progress.objects += count
+                progress.eligible += count
+                progress.scan_seconds += time.monotonic() - started
+            err(f"manifest preflight: {bucket} verified {count:,} exact-generation deletes", flush=True)
+            return local, pinned, count
+        finally:
+            with progress.lock:
+                del progress.active[remote]
+
+    files = {}
+    artifacts = {}
+    with ThreadPoolExecutor(max_workers=CACHE_WORKERS, thread_name_prefix="manifest-cache") as pool:
+        for bucket, (local, pinned, count) in zip(selected, pool.map(cache_manifest, selected)):
+            files[bucket] = [local]
+            artifacts[bucket] = [{"path": pinned, "rows": count}]
+    totals = {"buckets": {bucket: {"decisions": {"delete": entry["objects"]}, "delete_bytes": entry["bytes"]} for bucket, entry in selected.items()}}
+    return original, totals, files, artifacts
+
+
 def execute_reviewed(
     source: str,
     plan_path: str,
@@ -211,8 +349,11 @@ def execute_reviewed(
     exclude_runs: tuple[str, ...] = (),
     on_progress: Any = None,
     pacing: str = "guided",
+    from_manifest: bool = False,
 ) -> dict:
-    """No re-list/drift audit: delete only generations observed by the DR.
+    """No re-list/drift audit: delete only generations the source names: those
+    observed by the DR, or, `from_manifest` (`execute_manifest`), those the
+    manifest read from its scan's listing.
 
     Full preflight precedes deletion. Buckets share a bounded HTTP worker pool;
     complete local journal parts upload independently under backpressure.
@@ -228,7 +369,9 @@ def execute_reviewed(
     fs, path = fsspec.core.url_to_fs(out)
     if fs.exists(f"{path}/plan-summary.json") or fs.glob(f"{path}/deleted/**") or fs.glob(f"{path}/would-delete/**"):
         raise ValueError("reviewed execution output directory must be new")
-    plan, dry, files, artifacts = prepare_reviewed(source, plan_path, work_dir, only_buckets)
+    prepare = prepare_manifest if from_manifest else prepare_reviewed
+    kind = "manifest" if from_manifest else "reviewed"
+    plan, dry, files, artifacts = prepare(source, plan_path, work_dir, only_buckets)
     resume = None
     if exclude_runs:
         from .sweep_resume import subtract_settled
@@ -270,13 +413,13 @@ def execute_reviewed(
             raise ValueError(f"{bucket}: permissions/soft-delete guard refused reviewed deletion")
         guards[bucket] = {"missing_perms": missing, "soft_delete_days": days}
     mode = "deleted" if for_real else "would-delete"
-    summary = {"plan": out, "for_real": for_real, "diagnostic": not for_real, "drift": "reviewed-generations-no-relist", "backend": backend, "pacing": pacing, "bucket_workers": bucket_workers, "reviewed_source": source, "delete_count_semantics": "acknowledged-generation-deletes", "buckets": {}}
+    summary = {"plan": out, "for_real": for_real, "diagnostic": not for_real, "drift": f"{kind}-generations-no-relist", "backend": backend, "pacing": pacing, "bucket_workers": bucket_workers, f"{kind}_source": source, "delete_count_semantics": "acknowledged-generation-deletes", "buckets": {}}
     if resume is not None:
         summary["resume_runs"] = list(exclude_runs)
     fs.makedirs(path, exist_ok=True)
     with fs.open(f"{path}/plan-summary.json", "w") as fh:
-        json.dump({**plan, "diagnostic": not for_real, "reviewed_source": source, "contract": "reviewed-delete-generations"}, fh)
-    with fs.open(f"{path}/reviewed-source.json", "w") as fh:
+        json.dump({**plan, "diagnostic": not for_real, f"{kind}_source": source, "contract": f"{kind}-delete-generations"}, fh)
+    with fs.open(f"{path}/{kind}-source.json", "w") as fh:
         json.dump(artifacts, fh)
     if resume is not None:
         with fs.open(f"{path}/resume-source.json", "w") as fh:
@@ -501,3 +644,7 @@ def execute_reviewed(
         json.dump(summary, fh)
     summary["_plan"] = plan
     return summary
+
+
+#: `execute_reviewed` over a `sweep manifest` run's own generations, with no dry run: a real run needs one only to review.
+execute_manifest = partial(execute_reviewed, from_manifest=True)

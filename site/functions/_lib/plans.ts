@@ -684,8 +684,9 @@ export type RealRun =
 /** How a real run of the item set `digest` (`items` of them) at scan `date` goes (specs/done/delete-what-you-see.md): never
  * while a run of the plan is in flight; no prior dry run required — the run's own manifest (each item held to its
  * staging scan, generation-pinned deletes) is the safety. `reviewed`: the newest finished dry run of exactly this set
- * at that scan, whose manifest the run may reuse (none: the run lists afresh). `date` absent: that dry run's scan,
- * and one is then required. */
+ * at that scan, whose decisions the run may reuse (none: the run builds its own manifest and, on gcs, deletes that
+ * manifest's generations with no relist, so it has no whole-dir drift skip; a key written beside a manifest key survives
+ * because only named generations are deleted). `date` absent: that dry run's scan, and one is then required. */
 export function realRun(runs: readonly RunRow[], digest: string, items: number, date?: string): RealRun {
   if (!items) return { ok: false, reason: "nothing selected" }
   const live = runs.find(r => r.finished_ts == null)

@@ -153,7 +153,7 @@ export function RunsSection({ runs, jobs, configured, jobsError, admin, busy, ac
               <th className="num"><Tooltip content="What the manifest found. Click to sort by planned object count; byte sorting is available in the sort menu.">{sortButton('planned', 'planned')}</Tooltip></th>
               <th className="num"><Tooltip content="Real runs: actual deletions. Dry runs: predictions only; nothing is deleted. Click to sort by object count.">{sortButton('deleted', 'deleted / would delete')}</Tooltip></th>
               <th>{sortButton('state', 'state')}</th><th><Tooltip content="Sparkline: interval rate over the last hour. Text: average over the run's entire elapsed time, including startup and pauses.">{sortButton('rate', 'rate / history')}</Tooltip></th><th className="num">{sortButton('elapsed', 'elapsed')}</th>
-              <th className="num"><Tooltip content="Planned keys already gone when the run re-listed.">{sortButton('gone', 'gone')}</Tooltip></th>
+              <th className="num"><Tooltip content="Planned keys already gone when the run reached them.">{sortButton('gone', 'gone')}</Tooltip></th>
               <th className="num"><Tooltip content="Planned keys rewritten since the scan (a new generation): left alone.">{sortButton('overwritten', 'overwritten')}</Tooltip></th>
               <th className="num"><Tooltip content="Preserved objects outside the reviewed manifest. Older directory executors report directory counts.">{sortButton('drift', 'outside review')}</Tooltip></th>
               <th>{sortButton('started', 'started')}</th>

@@ -14,9 +14,11 @@ import os
 import re
 import sys
 from collections import Counter
+from collections.abc import Callable
 from dataclasses import asdict
 from functools import partial
 from pathlib import Path
+from typing import Any
 
 import duckdb
 import pandas as pd
@@ -2133,21 +2135,8 @@ def sweep_benchmark_delete(workers: int, methods: tuple[str, ...], objects: int,
     _hard_exit()
 
 
-@sweep.command("execute-reviewed")
-@option("-B", "--bucket-workers", default=6, type=int, help="Concurrent buckets (1..6), sharing the delete-worker pool")
-@option("-b", "--bucket", "only_buckets", multiple=True, help="Subset of reviewed DR buckets")
-@option("-c", "--pacing", type=Choice(["guided", "adaptive"]), default="guided", help="Per-bucket feedback pacing; guided retains the GCS 2x/20m envelope, adaptive probes 25%/healthy minute")
-@option("-e", "--backend", type=Choice(["xml", "json"]), default="xml", help="Generation-addressed delete backend")
-@option("-j", "--workers", default=16, type=int, help="Concurrent full batches (1..64)")
-@option("-o", "--out", required=True, help="New output run directory for progress and undo records")
-@option("-p", "--plan", "plan_path", required=True, help="Current staged plan.json; must exactly match DR intent")
-@option("-r", "--max-rate", default=8000, type=int, help="Per-bucket attempted-object/s ceiling, including retries; starts at ≤1000")
-@option("-w", "--work-dir", required=True, help="Empty local directory for pinned decision-log cache")
-@option("-x", "--exclude-run", "exclude_runs", multiple=True, help="Subtract this drained run's reconciled settled identities; include its full resume chain")
-@option("--for-real", is_flag=True, help="Delete reviewed generations; default validates and writes a dry log")
-@option("--no-record", is_flag=True, help="Skip D1 run/band records (scratch only)")
-@argument("source")
-def sweep_execute_reviewed(
+def _execute_generations(
+    execute: Callable[..., dict],
     bucket_workers: int,
     only_buckets: tuple[str, ...],
     pacing: str,
@@ -2162,15 +2151,10 @@ def sweep_execute_reviewed(
     no_record: bool,
     source: str,
 ) -> None:
-    """Stream a completed DR's exact generations; no fresh relist/drift audit.
-
-    Full pinned-log preflight, recoverable deletes, bounded batches, progress,
-    and per-object undo records. This is the normal real web-dispatch path.
-    """
+    """`execute-reviewed` / `execute-manifest`: run `execute` over SOURCE, recording the run in D1."""
     import signal
     import threading
     from .sweep_exec import record_run, record_run_start, stop_file_watch
-    from .sweep_reviewed import execute_reviewed
 
     stop = threading.Event()
     signal.signal(signal.SIGTERM, lambda *_: stop.set())
@@ -2194,7 +2178,7 @@ def sweep_execute_reviewed(
         if progress_run_id is not None:
             write_samples(progress_run_id, [sample(snapshot)])
 
-    summary = execute_reviewed(source, plan_path, out, work_dir, for_real, only_buckets, backend, workers, max_rate, stop, on_prepared=prepared, bucket_workers=bucket_workers, exclude_runs=exclude_runs, on_progress=progress if not no_record else None, pacing=pacing)
+    summary = execute(source, plan_path, out, work_dir, for_real, only_buckets, backend, workers, max_rate, stop, on_prepared=prepared, bucket_workers=bucket_workers, exclude_runs=exclude_runs, on_progress=progress if not no_record else None, pacing=pacing)
     if for_real and not no_record:
         windows = [int(entry["soft_delete_days"]) for entry in summary["buckets"].values()]
         try:
@@ -2208,6 +2192,62 @@ def sweep_execute_reviewed(
         sys.stderr.flush()
         os._exit(130 if stop.is_set() else 2)
     _hard_exit()
+
+
+def _generation_options(source: str) -> Callable:
+    """The options `execute-reviewed` and `execute-manifest` share: how to delete, whichever SOURCE says what."""
+    def decorate(fn: Callable) -> Callable:
+        for decorator in reversed((
+            option("-B", "--bucket-workers", default=6, type=int, help="Concurrent buckets (1..6), sharing the delete-worker pool"),
+            option("-b", "--bucket", "only_buckets", multiple=True, help=f"Subset of the {source}'s buckets"),
+            option("-c", "--pacing", type=Choice(["guided", "adaptive"]), default="guided", help="Per-bucket feedback pacing; guided retains the GCS 2x/20m envelope, adaptive probes 25%/healthy minute"),
+            option("-e", "--backend", type=Choice(["xml", "json"]), default="xml", help="Generation-addressed delete backend"),
+            option("-j", "--workers", default=16, type=int, help="Concurrent full batches (1..64)"),
+            option("-o", "--out", required=True, help="New output run directory for progress and undo records"),
+            option("-p", "--plan", "plan_path", required=True, help=f"Current staged plan.json; must exactly match the {source}'s items"),
+            option("-r", "--max-rate", default=8000, type=int, help="Per-bucket attempted-object/s ceiling, including retries; starts at ≤1000"),
+            option("-w", "--work-dir", required=True, help=f"Empty local directory for the pinned {source} cache"),
+            option("-x", "--exclude-run", "exclude_runs", multiple=True, help="Subtract this drained run's reconciled settled identities; include its full resume chain"),
+            option("--for-real", is_flag=True, help=f"Delete the {source}'s generations; default validates and writes a dry log"),
+            option("--no-record", is_flag=True, help="Skip D1 run/band records (scratch only)"),
+            argument("source"),
+        )):
+            fn = decorator(fn)
+        return fn
+    return decorate
+
+
+@sweep.command("execute-reviewed")
+@_generation_options("reviewed DR")
+def sweep_execute_reviewed(**kwargs: Any) -> None:
+    """Stream a completed DR's exact generations; no fresh relist/drift audit.
+
+    Full pinned-log preflight, recoverable deletes, bounded batches, progress,
+    and per-object undo records. This is the web dispatch of a real run with a
+    dry run of exactly its items.
+    """
+    from .sweep_reviewed import execute_reviewed
+
+    _execute_generations(execute_reviewed, **kwargs)
+
+
+@sweep.command("execute-manifest")
+@_generation_options("manifest")
+def sweep_execute_manifest(**kwargs: Any) -> None:
+    """Stream SOURCE's (a `sweep manifest` output dir) exact generations; no dry run, relist or drift audit.
+
+    `execute-reviewed`'s executor, over the generations the manifest read from
+    its scan's listing: every row is checked first (pinned artifact, a positive
+    generation, under a staged item, totals, no identity twice), then the
+    buckets' permissions and soft-delete retention. A null or non-positive
+    generation refuses the whole run. Only named generations are deleted, so a
+    key written beside a manifest key survives, and its directory is still
+    swept (no whole-dir drift skip). This is the web dispatch of a real run
+    with no dry run of exactly its items.
+    """
+    from .sweep_reviewed import execute_manifest
+
+    _execute_generations(execute_manifest, **kwargs)
 
 
 @sweep.command("batch-submit")

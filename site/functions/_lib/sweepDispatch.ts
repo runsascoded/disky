@@ -6,9 +6,10 @@
 // The plan's items are the delete set: they are snapshotted into `plan.json`
 // in the run dir (a gcs plan MAY span buckets), and the submitted job runs the
 // executor image with its entrypoint overridden. Dry runs use `manifest`
-// then `execute`; real runs use parallel XML `execute-reviewed`, deleting
-// only the matching DR's exact generations after complete log preflight and
-// ≥7d soft-delete/permission checks. Both record D1 runs and bands; `plan_id`
+// then `execute`; real runs use parallel XML: `execute-reviewed` deleting only
+// the matching DR's exact generations, or, with no such DR, `manifest` then
+// `execute-manifest` deleting only that manifest's, either way after complete
+// preflight and ≥7d soft-delete/permission checks. All record D1 runs and bands; `plan_id`
 // comes from plan.json, with no row inserted here. The `-b` cut is the plan's
 // buckets (∩ `buckets`, when given). The run's item digest rides in the job
 // env (`PLAN_DIGEST`); `_lib/sweepReflect.ts` copies it onto the run's row once
@@ -61,7 +62,7 @@ export interface SweepScript {
   pacing?: 'guided' | 'adaptive'
 }
 
-/** The Batch container's bash: DR manifest/execute or parallel reviewed XML.
+/** The Batch container's bash: DR manifest/execute, or parallel XML over a DR's or a fresh manifest's generations.
  * On exit (success or failure) it pings the site's `/api/sweep/jobs`
  * with the job's read grant, so the finished run is reflected — and its
  * result posted to the plan's Slack thread — without anyone polling. */
@@ -69,19 +70,16 @@ export const sweepScript = ({ cfg, mode, jobId, buckets, plan, store, reviewed, 
   if (pacing !== 'guided' && pacing !== 'adaptive') throw new Error('invalid sweep pacing mode')
   const run = runDir(cfg, jobId)
   const bflags = buckets.map(b => `-b ${b}`).join(' ')
-  return [
-    'set -euo pipefail',
-    EXIT_TRAP,
-    // A real run with a dry run of exactly its items at its scan deletes that dry run's reviewed generations (no
-    // relist); without one it lists afresh, as a dry run does, and deletes from its own manifest
-    // (specs/done/delete-what-you-see.md). `plan` names only the run's items, either way.
-    ...(mode === 'real' && reviewed ? [
-      `dt-cloud sweep execute-reviewed -e xml -j 64 -B ${Math.max(1, Math.min(6, buckets.length))} -c ${pacing} -r 8000 ${bflags} -p "${plan}" -o "${run}" -w /work/reviewed --for-real "${reviewed}"`,
-    ] : [
-      `${store.startsWith('r2://') ? R2_DT_CLOUD : 'dt-cloud'} sweep manifest -d "$SWEEP_DATE" --plan "${plan}" ${bflags} -i "${store}" -o "${run}"`,
-      `dt-cloud sweep execute ${bflags}${mode === 'real' ? ' --for-real' : ''} "${run}"`,
-    ]),
-  ].join('\n')
+  const manifest = (out: string) => `${store.startsWith('r2://') ? R2_DT_CLOUD : 'dt-cloud'} sweep manifest -d "$SWEEP_DATE" --plan "${plan}" ${bflags} -i "${store}" -o "${out}"`
+  const pipeline = (command: string, work: string, source: string) =>
+    `dt-cloud sweep ${command} -e xml -j 64 -B ${Math.max(1, Math.min(6, buckets.length))} -c ${pacing} -r 8000 ${bflags} -p "${plan}" -o "${run}" -w ${work} --for-real "${source}"`
+  // A dry run re-lists each manifest dir to predict decisions. A real run deletes exact generations with no relist: a dry
+  // run's reviewed ones, given a dry run of exactly its items at its scan; else its own manifest's, built under `source/`
+  // since the executor's output must be new (specs/done/delete-what-you-see.md). `plan` names only the run's items, either way.
+  const steps = mode === 'dry' ? [manifest(run), `dt-cloud sweep execute ${bflags} "${run}"`]
+    : reviewed ? [pipeline('execute-reviewed', '/work/reviewed', reviewed)]
+    : [manifest(`${run}/source`), pipeline('execute-manifest', '/work/manifest', `${run}/source`)]
+  return ['set -euo pipefail', EXIT_TRAP, ...steps].join('\n')
 }
 
 /** `dt-cloud`, reading an `r2://` store: `r2_profile` turns the job's `R2_*` env into the credentials and endpoint a store
@@ -218,7 +216,7 @@ async function prepare(env: ExecEnv, db: D1Database, req: DispatchReq): Promise<
 
   const launch: Prepared['launch'] = async (date, digest, reviewed) => {
     const reviewedPrefix = `gs://${cfg.dataBucket}/sweep/runs/`
-    // a matching dry run's manifest is reused only from its own run dir; one without a reusable dir means a fresh listing
+    // a matching dry run's decisions are reused only from its own run dir; one without a reusable dir means the run's own manifest
     const reuse = req.mode === 'real' && reviewed?.log_dir && reviewed.log_dir.startsWith(reviewedPrefix)
       && /^gcs-sweep-dry-[0-9]{8}-[0-9]{6}z$/.test(reviewed.log_dir.slice(reviewedPrefix.length)) ? reviewed.log_dir : undefined
     const region = batchRegionFor(cfg, buckets)

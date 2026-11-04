@@ -310,7 +310,7 @@ export function StagedPage() {
 
   // A dispatch may be cut to some of the plan's buckets (`CAPS.bucketCut`):
   // unchecked buckets stay out of the run. The cut's prefixes are what its
-  // digest names, so a real run needs a dry run of the same cut.
+  // digest names, so a real run reuses only a dry run of the same cut.
   const [bucketsOff, setBucketsOff] = useState<ReadonlySet<string>>(new Set())
   const perBucket = useMemo(() => {
     const m = new Map<string, { n: number; b: number; o: number }>()
@@ -554,7 +554,7 @@ export function StagedPage() {
                       </label>
                     )
                   })}
-                  {cut && <p className="dim">Only the checked buckets are listed and swept; a real run needs a dry run of the same cut.</p>}
+                  {cut && <p className="dim">Only the checked buckets are read and swept.</p>}
                 </details>
               )}
               <div className="dispatch-btns">

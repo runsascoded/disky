@@ -10,6 +10,10 @@ Why: dispatch ignores the row selection. A real run acts on the plan's whole sta
 
 Ryan: "definitely shouldn't delete things that were DR'd then specifically excluded from deletion", and an exact prior dry run isn't important enough to gate on.
 
+## Update (2026-11-04): a real run with no dry run deletes from its manifest, with no relist
+
+Point (3)'s "lists afresh" (`sweep manifest` + `sweep execute --for-real`) is replaced on gcs: such a run is now `sweep manifest -o <run>/source` + `sweep execute-manifest -e xml -j 64 … --for-real <run>/source`, the reviewed run's parallel XML executor over the manifest's own generations. "What to delete" (a DR's log, or a manifest) is separate from "how to delete". The preflight is pin, positive generation, under an item, totals, no repeated identity, permissions, soft delete; a null generation refuses the run. Differences from the listing path it replaces: no whole-dir drift skip (a directory that gained a key since the scan is still swept), and a key written beside a manifest key survives because only named generations are deleted. A dry run still re-lists, and predicts decisions the real run no longer makes the same way: it can skip a drifted dir the real run sweeps. cw's `plan-sweep` is unchanged.
+
 ## Status (2026-10-19, controller)
 
 Built on `cloud`, all four points. Not yet seen in a browser (gcs: CIC on dev, without a real delete).
