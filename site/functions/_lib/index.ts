@@ -3001,8 +3001,41 @@ export const LEVEL_BUDGET = { bytes: WORKER_MEMORY * 3 / 4 }
 /** V8 heap bytes a decoded level row costs (13 fields, boxed numbers, a 31-character name), measured by heap delta over
  *  300K rows of the reader's shape. Its consequences match the isolate's limit: 352K rows passed live, ~550K died. */
 const LEVEL_ROW_HEAP = 264
-/** A request's remaining `LEVEL_BUDGET`, charged by each `readLevel` before it fetches. */
+/** A request's remaining `LEVEL_BUDGET`, charged by each read before it fetches. */
 export type LevelSpend = { left: number }
+/** The isolate's level charges, by request: requests in one isolate share its memory. A cancelled request (its client
+ *  gone) may never reach its `releaseLevel`, so a charge expires; by then its rows are garbage, and a Worker's CPU
+ *  limit has long ended anything still decoding them. */
+const levelHeld = new Map<LevelSpend, { bytes: number; at: number }>()
+const LEVEL_CHARGE_TTL = 120_000
+/** Bytes the isolate's requests hold now. */
+export function levelHeldBytes(): number {
+  let held = 0
+  const now = Date.now()
+  for (const [k, c] of levelHeld) {
+    if (now - c.at > LEVEL_CHARGE_TTL) levelHeld.delete(k)
+    else held += c.bytes
+  }
+  return held
+}
+/** This request would fit, but other requests in the isolate hold the room: ask again shortly. */
+export class LevelBusy extends Error {}
+/** Charge `bytes` to `spend` and the isolate, or refuse: "query too wide" past the request's own budget, `LevelBusy` past
+ *  the isolate's. Synchronous, so two requests can't both take the last of it. */
+export function chargeLevel(spend: LevelSpend, bytes: number): void {
+  const mib = (n: number) => Math.round(n / 2 ** 20)
+  if (bytes > spend.left) throw new Error(`query too wide: its level rows would cost ${mib(bytes)} MiB, ${mib(spend.left)} left`)
+  if (bytes > LEVEL_BUDGET.bytes - levelHeldBytes()) throw new LevelBusy(`level reads busy: ${mib(bytes)} MiB wanted`)
+  spend.left -= bytes
+  const held = levelHeld.get(spend)
+  levelHeld.set(spend, { bytes: (held?.bytes ?? 0) + bytes, at: Date.now() })
+}
+/** A request's charges back, when it has its answers. */
+export function releaseLevel(spend: LevelSpend): void {
+  levelHeld.delete(spend)
+}
+/** A row a level read of the `path` sort decodes costs at least this (`readChanged`'s rows are wider). */
+export const LEVEL_PATH_ROW_HEAP = 264
 
 /** What decoding a group's kept rows costs: each row's heap, and its share of the group's compressed bytes (what's
  *  fetched for it; the footer sidecar's chunk `size`), so wider rows charge more. */
@@ -3018,7 +3051,7 @@ function levelCharge(p: { rg: { num_rows: bigint; columns: IndexedChunk[] }; ran
  *  index held (`levelPageIxs`) leaves the first wave. Server-Timing: `lv-index` / `lv-data` (ms, `-gets`, `-rounds`,
  *  `-bytes`), `lv-index-{held,colo,joined,miss}`, `lv-groups`, `lv-pages`, `lv-rows`. Throws
  *  "query too wide" past `LEVEL_MAX_GROUPS` groups, or when the rows its pages hold and their bytes would cost more
- *  than `spend` has left (`lv-charge`): before any data is fetched or decoded, so a read that doesn't fit never takes the isolate down. `lap`: the request's phases
+ *  than `spend` or the isolate has left (`chargeLevel`, `lv-charge`): before any data is fetched or decoded, so a read that doesn't fit never takes the isolate down. `lap`: the request's phases
  *  (`serverTiming`'s), with a clock sync (`syncClock`) after the read's CPU-only stretches so they're counted as theirs;
  *  also `lv-plan-bounds` / `lv-plan-json` (tier-ms, overlapping), `fgroups`, `footer`, `fdoc-r2`. */
 export async function readLevel(lh: LevelHandle, dirs: string[], spend: LevelSpend, trace?: Trace, lap?: (name: string) => void): Promise<LevelRec[]> {
@@ -3123,10 +3156,13 @@ export async function readLevel(lh: LevelHandle, dirs: string[], spend: LevelSpe
   }
   const charge = planned.reduce((m, p) => m + levelCharge(p), 0)
   trace?.('lv-charge', Math.round(charge))
-  const over = charge > spend.left
-  if (over || !planned.length) puts.splice(0).forEach(put => put())
-  if (over) throw new Error(`query too wide: its level rows would cost ${Math.round(charge / 2 ** 20)} MiB, ${Math.round(spend.left / 2 ** 20)} left`)
-  spend.left -= charge
+  if (!planned.length) puts.splice(0).forEach(put => put())
+  try {
+    chargeLevel(spend, charge)
+  } catch (e) {
+    puts.splice(0).forEach(put => put())
+    throw e
+  }
   if (!planned.length) return []
   const dataFiles = await wave('lv-data', byTier(planned as Cand[], c => {
     const p = c as Planned

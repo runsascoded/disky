@@ -1,7 +1,7 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import type { Env } from './auth'
 import { buildLevels, type Level, levelK, levelOf, type LevelRow, mergeLevels } from './diffLevel'
-import { asOfScans, coloPutsSettled, GetRounds, LEVEL_BUDGET, openIndex, planChanged, planRects, type Rect, withChurn } from './index'
+import { asOfScans, chargeLevel, coloPutsSettled, GetRounds, LEVEL_BUDGET, levelHeldBytes, openIndex, planChanged, planRects, type Rect, withChurn } from './index'
 import { ahead, clearIsolate, loadScopes } from './shared'
 import { sqliteD1 } from './testD1'
 import { fixtureR2 as r2 } from './testR2'
@@ -440,6 +440,17 @@ describe('level diffs', () => {
         return { levels: new Map([...got].map(([p, l]) => [p, shape(l)])), more: o.more, wide: o.wide }
       }
       /** Two directories this store has, with their rows' charge in bytes as read alone. */
+      /** A file with a closing transition in some range: asked as a directory, the level read returns null for its round. */
+      const closingFile = async (lv: Env) => {
+        for (const x of cases) {
+          for (const r of x.rows.filter(r => r.k === 'file' && r.ob === 0 && r.oa > 0)) {
+            const { t, trace } = traced()
+            await buildLevels(lv, { from: x.from, to: x.to, dirs: [r.p], k: 512, m: 'churn', chain: false, trace })
+            if (t['level-index'] === undefined) return { from: x.from, to: x.to, path: r.p }
+          }
+        }
+        throw new Error('the fixture has no file closing in a range')
+      }
       const dirsOf = () => [...new Set(cases.filter(x => x.from === span().from && x.to === span().to && x.path !== '').map(x => x.path))].slice(0, 2)
 
       it('a request past it answers what fits and names the rest: asking for those finishes it, as a whole read answers', async () => {
@@ -459,6 +470,63 @@ describe('level diffs', () => {
         LEVEL_BUDGET.bytes = whole
         const rest = await read(lv, first.more)
         expect(new Map([...first.levels, ...rest.levels])).toEqual(all.levels)
+      })
+
+      it('requests in one isolate share it: concurrent reads past it leave the later one `more`, and the charges come back', async () => {
+        const lv = await levelEnv([])
+        const dirs = dirsOf()
+        const { t, trace } = traced()
+        const c = span()
+        await buildLevels(lv, { from: c.from, to: c.to, dirs: [dirs[0]], k: 512, m: 'churn', chain: false, trace })
+        expect(levelHeldBytes()).toBe(0)
+        LEVEL_BUDGET.bytes = t['lv-charge']
+        const [a, b] = await Promise.all([read(lv, [dirs[0]]), read(lv, [dirs[0]])])
+        const got = [a, b].map(r => [[...r.levels.keys()], r.more, r.wide])
+        expect(got.sort((x, y) => x[0].length - y[0].length)).toEqual([[[], [dirs[0]], []], [[dirs[0]], [], []]])
+        expect(levelHeldBytes()).toBe(0)
+        const again = await read(lv, [dirs[0]])
+        expect([[...again.levels.keys()], again.more, again.wide]).toEqual([[dirs[0]], [], []])
+      })
+
+      it('a charge a cancelled request never released expires', async () => {
+        const lv = await levelEnv([])
+        const dirs = dirsOf()
+        const { t, trace } = traced()
+        const c = span()
+        await buildLevels(lv, { from: c.from, to: c.to, dirs: [dirs[0]], k: 512, m: 'churn', chain: false, trace })
+        LEVEL_BUDGET.bytes = t['lv-charge']
+        chargeLevel({ left: LEVEL_BUDGET.bytes }, LEVEL_BUDGET.bytes)
+        const busy = await read(lv, [dirs[0]])
+        expect([[...busy.levels.keys()], busy.more]).toEqual([[], [dirs[0]]])
+        const now = Date.now
+        Date.now = () => now() + 121_000
+        try {
+          expect(levelHeldBytes()).toBe(0)
+        } finally {
+          Date.now = now
+        }
+      })
+
+      it('a round the level index can\'t answer: the `path` sort answers afresh, and nothing the rounds set aside still stands', async () => {
+        const lv = await levelEnv([])
+        // A file asked as a directory: its own closing shows it a file, so its round falls back (`level-index` unset).
+        const file = await closingFile(lv)
+        const big = 'b1/x'
+        const { t, trace } = traced()
+        await buildLevels(lv, { from: file.from, to: file.to, dirs: [file.path], k: 512, m: 'churn', chain: false, trace })
+        expect(t['level-index']).toBeUndefined()
+        const charge = t['lv-charge']
+        const seen = traced()
+        await buildLevels(lv, { from: file.from, to: file.to, dirs: [big], k: 512, m: 'churn', chain: false, trace: seen.trace })
+        expect(seen.t['lv-charge']).toBeGreaterThan(charge)
+        // `big` is too wide alone, set aside as `wide`; then the file's round is null. The path sort reads both.
+        LEVEL_BUDGET.bytes = charge + (seen.t['lv-charge'] - charge) / 2
+        const o = { from: file.from, to: file.to, dirs: [big, file.path], k: 512, m: 'churn' as const, chain: false, more: [] as string[], wide: [] as string[] }
+        const got = await buildLevels(lv, o)
+        const answered = [...got.keys()]
+        expect([...answered, ...o.more, ...o.wide].sort()).toEqual([big, file.path].sort())
+        expect(answered.filter(p => o.more.includes(p) || o.wide.includes(p))).toEqual([])
+        expect(levelHeldBytes()).toBe(0)
       })
 
       it('a directory that fits nowhere: a request of it alone is too wide, beside others it is named `wide`, and nothing is cached for it', async () => {
