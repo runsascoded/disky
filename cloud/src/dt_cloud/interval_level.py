@@ -43,6 +43,12 @@ LEVEL_FLAG = "level"
 LEVEL_DOC = f"served/{LEVEL}.json"
 #: The sort's order: the parent's key, the transition's stamp, the child's name.
 LEVEL_KEY = ["depth", "path", "ts", "name"]
+#: What orders rows sharing a `LEVEL_KEY`, the rest of the row (`name, SQL` where it's computed, never NULL): an object named
+#: `a/` is a child of `a` named '', as `a`'s own row is, at the same stamp. Without it their order is the sort's whim, and a
+#: cut's bytes depend on how it was split.
+LEVEL_TIES = ["op", "kind", ("__kp", "coalesce(kind_prev, '')"), "size", "n_files", "size_prev", "n_files_prev", "churn_cum", "churn_prev"]
+#: The sort's whole order, as SQL.
+LEVEL_ORDER = ", ".join([*LEVEL_KEY, *(c if isinstance(c, str) else c[1] for c in LEVEL_TIES)])
 LEVEL_SCHEMA = pa.schema([
     pa.field("depth", pa.uint8(), nullable=False),  # the parent's
     pa.field("path", pa.string(), nullable=False),  # the parent's ('' the root)

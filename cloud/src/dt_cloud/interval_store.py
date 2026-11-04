@@ -620,7 +620,7 @@ SORTS = {
     ATTRIBUTION: (ATTRIBUTION, "path, vf", None),
     # The level index (`interval_level`): each child version transition under its parent, `(depth, path)` the parent's,
     # computed from the folded path versions (`interval_level.rows_sql`). Only in a generation that carries it (`leveled`).
-    LEVEL: ("pvl", "depth, path, ts, name", None),
+    LEVEL: ("pvl", ilv.LEVEL_ORDER, None),
 }
 #: Each range-file dir's schema.
 SUB_SCHEMA = {"pv": PV_SCHEMA, "pvl": PVL_SCHEMA, "rd": RD_SCHEMA, "sv": SV_SCHEMA, "svt": SVT_SCHEMA, ATTRIBUTION: AT_SCHEMA}
@@ -796,7 +796,8 @@ SORT_COPIES = 2
 #: order as ascending, never-NULL key columns (strings in code-point order: DuckDB's, Python's and pyarrow's), each
 #: `(name, SQL)` computed into the run spools or a column by name. A `DESC NULLS LAST` size bucket (≥ 0, `BUCKET`) is its
 #: negation with NULL as −1 (so after every bucket); `usr NULLS FIRST` is `(usr IS NOT NULL, coalesce(usr, ''))`. The
-#: key is the whole order, unique a row (a version is one `(path, vf)`, a slice's one `(path, usr, vf)`), so a key
+#: key is the whole order, unique a row (a version is one `(path, vf)`, a slice's one `(path, usr, vf)`; a level row is
+#: its whole row, `interval_level.LEVEL_TIES`: rows equal in all of it are interchangeable), so a key
 #: range's rows sorted alone are its rows of the one `ORDER BY`. Every other sort is led by `(depth, path)`: disjoint key
 #: ranges in key order concatenate.
 _NEG_BUCKET = f"-coalesce({BUCKET}, -1)"
@@ -806,7 +807,7 @@ MERGE_KEYS: dict[str, list] = {
     "slices-bytotal": [("__b", _NEG_BUCKET.replace("size", "tot")), "path", *_USR, "vf"],
     "slices-bysize-user": [*_USR, ("__b", _NEG_BUCKET), "path", "vf"],
     ATTRIBUTION: ["path", "vf"],
-    LEVEL: ilv.LEVEL_KEY,
+    LEVEL: [*ilv.LEVEL_KEY, *ilv.LEVEL_TIES],
 }
 RANGE_LED = "depth, path"
 if bad := [s for s, (_, o, _) in SORTS.items() if s not in MERGE_KEYS and not o.startswith(RANGE_LED)]:

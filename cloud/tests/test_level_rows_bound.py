@@ -167,3 +167,27 @@ def test_the_level_plan_charges_the_level_sorts_columns(tmp_path, monkeypatch):
     f = _write(root / "pvl", _table(_shapes()).append_column("op", pa.array([1] * len(_shapes()), pa.int8())))
     ia.cut_level(duckdb.connect(), str(root), tmp_path / "out", rg_rows=8192, tree=TREE)
     assert got == [ist.writer_meta([f], 8192, cols=len(ilv.LEVEL_SCHEMA))]
+
+
+@pytest.mark.parametrize("split", [False, True])
+def test_a_key_shared_by_two_rows_has_one_order(tmp_path, split):
+    """An object named `a/` is a child of `a` named '', as `a`'s own row is, at the same stamp: the same `LEVEL_KEY` twice.
+    Their order is the rest of the row's, so the bytes don't depend on how the cut was split (one run, or pieces)."""
+    v = lambda d, p, k, z: {"depth": d, "path": p, "vf": 10, "vt": OPEN, "kind": k, "size": z, "n_files": 1, "churn_cum": z, "churn_end": z}  # noqa: E731
+    low, high = [v(1, "a", "dir", 5)], [v(2, "a/", "file", 3)]
+    gen = tmp_path / "g"
+    (gen / "pvl").mkdir(parents=True)
+    if split:
+        pq.write_table(_table(low), gen / "pvl" / "r0000.parquet")
+        pq.write_table(_table(high), gen / "pvl" / "r0001.parquet")
+    else:
+        pq.write_table(_table([*low, *high]), gen / "pvl" / "r0000.parquet")
+    (gen / "ranges.json").write_text(json.dumps({"ranges": [{"lo": [0, ""]}, *([{"lo": [2, ""]}] if split else [])]}))
+    scans = {"scans": [{"ts": 10}], "slices": False, "churn": True, ilv.LEVEL_FLAG: True}
+    ist.cut_gen(duckdb.connect(), gen, scans, rg_rows=8, sorts=[ilv.LEVEL], served=tmp_path / "out")
+    got = pq.read_table(tmp_path / "out" / f"{ilv.LEVEL}.parquet").to_pylist()
+    assert [(r["depth"], r["path"], r["ts"], r["name"], r["kind"], r["size"]) for r in got] == [
+        (0, "", 10, "a", "dir", 5),
+        (1, "a", 10, "", "dir", 5),
+        (1, "a", 10, "", "file", 3),
+    ]
