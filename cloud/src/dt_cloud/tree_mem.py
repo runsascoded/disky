@@ -29,17 +29,19 @@ Every entry that ends in a served-sort cut takes `-M` this way (`interval-store 
 process leaves), each cut under its `Budget.cut` plan (`interval_store.plan_cut`). The check is measured, not modelled:
 each such entry runs under `TreeWatch`, which samples the tree's proportional resident bytes (`tree_pss`) every
 `WATCH_S` and logs `<entry>: peak tree PSS X MiB of budget M MiB` at its end; with `$DT_TREE_MEM_ASSERT` set, a peak past
-`-M` exits non-zero. Named blocks (`phase`: each sort, the cut's plan, the churn's counts, `add`'s stages) get their own peak,
-logged before the overall line: what a stage's real tree held, next to the plan that sized it."""
+`-M` exits non-zero. Named blocks (`phase`: each sort, the cut's plan, the churn's counts, `add`'s stages, an append's steps) get their own peak,
+logged before the overall line: what a stage's real tree held, next to the plan that sized it. `at` names what the tree is
+working on (an append's key range) and `gauges` what else to read with each sample (DuckDB's and Arrow's own totals), so a
+peak's line says where it happened and how much of it each side accounts for."""
 from __future__ import annotations
 
 import os
 import resource
 import sys
 from collections import Counter
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import cache
 from threading import Event, Lock, Thread
 from time import monotonic
@@ -309,13 +311,17 @@ def tree_pss(root: int | None = None) -> int:
 
 @dataclass
 class PhasePeak:
-    """A `phase`'s peak tree PSS, over the `samples` taken while it ran."""
+    """A `phase`'s peak tree PSS, over the `samples` taken while it ran; `at` and `gauges`: what `at` named and what `gauges`
+    read at that peak's sample."""
 
     peak: int = 0
     samples: int = 0
+    at: str | None = None
+    gauges: dict[str, int | None] = field(default_factory=dict)
 
-    def add(self, pss: int) -> None:
-        self.peak = max(self.peak, pss)
+    def add(self, pss: int, at: str | None = None, gauges: dict[str, int | None] | None = None) -> None:
+        if pss > self.peak:
+            self.peak, self.at, self.gauges = pss, at, gauges or {}
         self.samples += 1
 
 
@@ -339,6 +345,47 @@ def phase(name: str) -> Iterator[None]:
         w._end(name)
 
 
+@contextmanager
+def at(label: str) -> Iterator[None]:
+    """The innermost running `TreeWatch`'s samples in the block are at `label` (none running: nothing): each phase's line
+    names the label of its peak, and the watch's end the labels with the largest peaks (`AT_TOP`)."""
+    w = _WATCHES[-1] if _WATCHES else None
+    if w is None:
+        yield
+        return
+    prev, w.at_label = w.at_label, label
+    try:
+        yield
+    finally:
+        w.at_label = prev
+
+
+@contextmanager
+def gauges(**fns: Callable[[], int]) -> Iterator[None]:
+    """The innermost running `TreeWatch` also reads these (name → bytes) with each sample in the block (none running:
+    nothing): each phase's line gives their values at its peak, or says a read failed (`TreeWatch._read_gauges`)."""
+    w = _WATCHES[-1] if _WATCHES else None
+    if w is None:
+        yield
+        return
+    prev, w.gauge_fns = w.gauge_fns, {**w.gauge_fns, **fns}
+    try:
+        yield
+    finally:
+        w.gauge_fns = prev
+
+
+def duck_bytes(con) -> Callable[[], int]:
+    """A gauge of the bytes DuckDB's buffer manager holds (`duckdb_memory()`: what `memory_limit` limits), read on its own
+    cursor, so from the watch's thread while `con` runs a query."""
+    cur = con.cursor()
+    return lambda: int(cur.execute("SELECT coalesce(sum(memory_usage_bytes), 0) FROM duckdb_memory()").fetchone()[0])
+
+
+#: Labels `TreeWatch` logs at its end, largest peak first.
+AT_TOP = 5
+
+
 class TreeWatch:
     """The process tree's peak memory over a block, against `total` (`-M`): `tree_pss` sampled every `every` seconds on
     a daemon thread (and once at the end). On exit it logs `<what>: peak tree PSS X MiB of budget M MiB`, after a
@@ -353,21 +400,44 @@ class TreeWatch:
         self.peak, self.samples = 0, 0
         self.phases: dict[str, PhasePeak] = {}
         self.untagged = PhasePeak()
+        self.at_label: str | None = None
+        self.gauge_fns: dict[str, Callable[[], int]] = {}
+        self.at_peaks: dict[str, int] = {}
+        self.gauge_fails: Counter[str] = Counter()
+        self._gauge_lock = Lock()
         self._running: Counter[str] = Counter()
         self._lock = Lock()
         self._stop = Event()
         self._thread: Thread | None = None
 
+    def _read_gauges(self, fns: dict[str, Callable[[], int]]) -> dict[str, int | None]:
+        """Each gauge's bytes, None where its read failed (counted, and said on the phase's line). A gauge is a diagnostic,
+        so its failure doesn't raise: on a phase's thread that would fail the work being measured, and on the watch's it
+        would end the sampling, leaving a peak that understates the tree and still logs as normal."""
+        read: dict[str, int | None] = {}
+        with self._gauge_lock:  # a sample is on the watch's thread or a phase's: one cursor between them
+            for name, fn in fns.items():
+                try:
+                    read[name] = fn()
+                except Exception:
+                    read[name] = None
+                    self.gauge_fails[name] += 1
+        return read
+
     def _sample(self) -> None:
         pss = tree_pss()
+        at_ = self.at_label
+        read = self._read_gauges(self.gauge_fns)
         with self._lock:
             self.peak = max(self.peak, pss)
             self.samples += 1
+            if at_ is not None:
+                self.at_peaks[at_] = max(self.at_peaks.get(at_, 0), pss)
             running = [name for name, n in self._running.items() if n]
             for name in running:
-                self.phases[name].add(pss)
+                self.phases[name].add(pss, at_, read)
             if not running:
-                self.untagged.add(pss)
+                self.untagged.add(pss, at_, read)
 
     def _begin(self, name: str) -> None:
         with self._lock:
@@ -380,8 +450,12 @@ class TreeWatch:
         with self._lock:
             self._running[name] -= 1
 
+    def _gauge(self, name: str, value: int | None) -> str:
+        return f"{name} unread ({self.gauge_fails[name]} failed)" if value is None else f"{name} {value / MIB:,.0f} MiB"
+
     def _line(self, p: PhasePeak) -> str:
-        return (f"peak tree PSS {p.peak / MIB:,.0f} MiB ({100 * p.peak / self.total:.0f}%; {p.samples} samples)"
+        return (f"peak tree PSS {p.peak / MIB:,.0f} MiB ({100 * p.peak / self.total:.0f}%; {p.samples} samples"
+                f"{f'; at {p.at}' if p.at else ''}{''.join(f'; {self._gauge(k, v)}' for k, v in p.gauges.items())})"
                 f"{' — OVER BUDGET' if p.peak > self.total else ''}")
 
     def _run(self) -> None:
@@ -412,6 +486,9 @@ class TreeWatch:
         if self.phases:
             for name, p in [*self.phases.items(), ("(untagged)", self.untagged)]:
                 print(f"{self.what}: phase {name}: {self._line(p)}", file=sys.stderr, flush=True)
+        if self.at_peaks:
+            top = sorted(self.at_peaks.items(), key=lambda kv: (-kv[1], kv[0]))[:AT_TOP]
+            print(f"{self.what}: largest of {len(self.at_peaks)}: " + ", ".join(f"{k} {v / MIB:,.0f} MiB" for k, v in top), file=sys.stderr, flush=True)
         print(f"{self.what}: peak tree PSS {self.peak / MIB:,.0f} MiB of budget {self.total / MIB:,.0f} MiB "
               f"({100 * self.peak / self.total:.0f}%; {self.samples} samples over {monotonic() - self._t0:.0f}s)"
               f"{' — OVER BUDGET' if over else ''}", file=sys.stderr, flush=True)

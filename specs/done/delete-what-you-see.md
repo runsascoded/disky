@@ -10,6 +10,20 @@ Why: dispatch ignores the row selection. A real run acts on the plan's whole sta
 
 Ryan: "definitely shouldn't delete things that were DR'd then specifically excluded from deletion", and an exact prior dry run isn't important enough to gate on.
 
+## Update (2026-11-04): a real run with no dry run deletes from its manifest, with no relist
+
+Point (3)'s "lists afresh" (`sweep manifest` + `sweep execute --for-real`) is replaced on gcs: such a run is now `sweep manifest -o <run>/source` + `sweep execute-manifest -e xml -j 64 … --for-real <run>/source`, the reviewed run's parallel XML executor over the manifest's own generations. "What to delete" (a DR's log, or a manifest) is separate from "how to delete". The preflight is pin, no zero or negative generation, under an item, totals (deletes + skips == the summary's `eligible`), no repeated identity, permissions, soft delete. A null generation doesn't refuse the run (Ryan's call): that object is not deleted, there's no fallback to `created`, and it's logged per object as `skipped_no_generation`, with its objects and bytes in `deleted-summary.json`, `plan-summary.json` and the run's row on `/staged` (D1 has no column for it). A manifest with no generation at all refuses, and so does no `generation` column; a whole bucket of nulls while others have generations goes on, flagged `whole_bucket` and "not swept" on the run, and writes no `deletion_bands` row so its items stay staged. A prefix only partly skipped does write a band, so it leaves the queue as a prefix with preserved objects does. `execute-reviewed` still refuses a null. Differences from the listing path it replaces: no whole-dir drift skip (a directory that gained a key since the scan is still swept), and a key written beside a manifest key survives because only named generations are deleted. A dry run still re-lists, and predicts decisions the real run no longer makes the same way: it can skip a drifted dir the real run sweeps. cw's `plan-sweep` is unchanged.
+
+## Update (2026-11-04): on both XML paths, `deleted` means attempted
+
+A prefix with any object skipped for want of a generation stays staged (Ryan, 2026-11-04): the run writes no band for it, so its deletes are in the run's totals and `deleted/` log but not in its bands or prefix history, until a clean run writes its band. No such prefix is expected: the 36M-row manifest of 2026-11-04 has no null generation. The same run has no whole-dir drift skip (Ryan, 2026-11-04).
+
+Measured on real GCS, with and without soft delete: a multi-delete item naming `VersionId` is replied `<Deleted>` with HTTP 200 for the live current generation, one already deleted, an overwritten old generation (the current survives), a wrong generation on a live key (the object survives), a key that never existed, and a repeat. So `execute-reviewed` and `execute-manifest` can't observe gone or overwritten: their `deleted` counts deletes attempted and acknowledged, and `/staged` shows those columns as "—" on these runs (older JSON and listing runs keep their numbers). Undo restores logged generations with `if_generation_match=0`; since the log can't tell ours from an object someone else deleted after the scan, undo can bring those back too (`/staged`'s recovery section says so).
+
+## Update (2026-11-04): a job that failed before recording a run
+
+`sweep manifest`, `execute`, `execute-reviewed` and `execute-manifest` write `failure.json` (`step`, `reason`, `ts`) to their output dir when they raise. `/api/sweep/jobs` shows it as the row's "why", and `sweepReflect` gives a job that ended unsuccessfully with no `deletion_runs` row a closed one (empty digest), so the Slack thread hears of it, with the reason. A step killed from outside leaves no file, and shows Batch's event.
+
 ## Status (2026-10-19, controller)
 
 Built on `cloud`, all four points. Not yet seen in a browser (gcs: CIC on dev, without a real delete).

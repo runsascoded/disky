@@ -47,6 +47,8 @@ export interface ExecJob {
   bucket_region?: string | null
   logs?: string
   last_event?: string | null
+  /** Why the step failed, from its own `failure.json` (gcs): what Batch's "exit code 1" event can't say. */
+  failure?: string | null
   stop_requested?: boolean
   /** The job's run dir (gcs: `plan`; cw: `run`), `gs://<bucket>/…`. */
   plan?: string
@@ -210,9 +212,56 @@ export interface Tally { bytes: number; objects: number }
 export interface PlanSummaryFile {
   date?: string
   plan_id?: number
-  buckets: Record<string, { objects?: number; dirs?: number; eligible?: Tally; outside_bands?: Tally }>
+  /** What a generation-pinned executor (`execute-reviewed`, `execute-manifest`) writes; a listing run has none. */
+  contract?: string
+  backend?: 'xml' | 'json'
+  buckets: Record<string, { objects?: number; dirs?: number; eligible?: Tally; outside_bands?: Tally; skipped_no_generation?: BucketSkips }>
   total?: { eligible?: Tally; outside_bands?: Tally }
+  skipped_no_generation?: Tally & { whole_buckets: string[] }
 }
+
+/** A bucket's rows with no generation: logged, not deleted. `whole_bucket`: every row of it, so it wasn't swept at all. */
+export interface BucketSkips extends Tally { whole_bucket: boolean }
+
+/** Did this run's deletes go through the XML multi-delete? GCS replies `Deleted` there whatever an item names (the live
+ * generation, one already gone, an overwritten one, a wrong one, a key that never existed), so its `deleted` count means
+ * attempted and acknowledged, and gone / overwritten aren't observable. Listing runs, and older JSON ones, did observe them. */
+export const attemptOnly = (s: Pick<PlanSummaryFile, 'contract' | 'backend'> | null | undefined): boolean =>
+  !!s?.contract?.endsWith('-delete-generations') && s.backend !== 'json'
+
+/** What a run's finished message says beyond its D1 totals. */
+export interface RunOutcome {
+  /** `attemptOnly`: its `deleted` count is what was attempted and acknowledged. */
+  attempted: boolean
+  /** Objects left in place for want of a generation (null: none). */
+  skipped: Tally | null
+  /** Buckets none of whose objects had one, so not swept at all. */
+  notSwept: string[]
+  /** Its `plan-summary.json` couldn't be read, so the other fields say nothing. */
+  unread?: boolean
+  /** A real run closed from what it wrote, with no end record (`sweepTotals.ts`): how far its D1 totals go. */
+  totals?: 'lower-bound' | 'exact' | 'unread'
+}
+
+/** Null: nothing to say, the run reads as it always did. */
+export function runOutcome(s: PlanSummaryFile): RunOutcome | null {
+  const attempted = attemptOnly(s)
+  const skips = s.skipped_no_generation
+  const skipped = skips && skips.objects > 0 ? { bytes: skips.bytes, objects: skips.objects } : null
+  return attempted || skipped ? { attempted, skipped, notSwept: skipped ? skips!.whole_buckets : [] } : null
+}
+
+export const NOT_OBSERVABLE = 'Not observable on this run: an XML multi-delete acknowledges every generation it is sent, so a key already gone or overwritten reads the same as one it deleted.'
+export const ATTEMPTED = 'Generation deletes attempted and acknowledged. An XML multi-delete acknowledges every generation it is sent, so this is what was requested, not proof each object was there to delete.'
+export const UNDO_CAVEAT = 'Its log can\'t tell an object this run deleted from one someone else deleted after the scan, so undo can bring those back too.'
+
+export const LOWER_BOUND = 'A lower bound: the run ended before recording its end, so these totals are its progress files\', which can lag what it did.'
+export const UNDO_LOG_ONLY = 'Undo restores only what its log names. A generation in a log part that never uploaded stays deleted unless restored by hand; `sweep undo -B` won\'t reach it either.'
+
+/** A real run closed with no final summary (`sweepTotals.ts`): `deleted-summary.json` is known absent (null, not `undefined`:
+ * still loading, or a run dir this deployment can't read). A failed job whose summary exists has exact totals. */
+export const totalsLowerBound = (r: Pick<DeletionRun, 'mode' | 'finished_ts' | 'plan_digest'>, summary: LogSummaryFile | null | undefined): boolean =>
+  r.mode === 'real' && !!r.finished_ts && r.plan_digest === '' && summary === null
 
 /** What the manifest planned to delete: its total eligible, else the sum of
  * the buckets'. */
@@ -282,6 +331,7 @@ export interface LogSummaryFile {
     soft_delete_days?: number
     missing_perms?: string[]
     interrupted?: { roots_skipped: number; roots: number }
+    skipped_no_generation?: BucketSkips
   }>
 }
 
@@ -334,4 +384,21 @@ export function runControls(v: RunView, caps: ExecCaps, admin: boolean, now: num
   const undo = caps.undo && r.undo_state !== 'full' && inWindow && !undoing
   const purge = caps.purge && r.purge_state === 'pending' && r.undo_state !== 'full' && (r.undo_deadline == null || now >= r.undo_deadline) && !purging && !undoing
   return { stop, undo, purge, undoing }
+}
+
+/** A run's item set as `functions/_lib/plans.ts`'s `planDigest` names it: sha-256 of the sorted lines, first 16 hex. */
+export async function itemsDigest(lines: readonly string[]): Promise<string> {
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode([...lines].sort().join('\n')))
+  return [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, '0')).join('').slice(0, 16)
+}
+
+const REUSABLE_DIR = /^gs:\/\/[^/]+\/sweep\/runs\/gcs-sweep-dry-[0-9]{8}-[0-9]{6}z$/
+
+/** The dry run a real run of these items at `scan` would reuse, or null: it deletes from a fresh manifest. What dispatch decides
+ * (`functions/_lib/plans.ts`'s `realRun`, then `sweepDispatch`'s check of its run dir), from the runs the page already has. */
+export function reusableDryRun(runs: readonly DeletionRun[], planId: number, digest: string, scan: string): DeletionRun | null {
+  const newest = runs
+    .filter(r => r.plan_id === planId && r.mode === 'dry' && !!r.plan_digest && r.plan_digest === digest && r.scan === scan)
+    .sort((a, b) => b.started_ts - a.started_ts)[0]
+  return newest?.log_dir && REUSABLE_DIR.test(newest.log_dir) ? newest : null
 }

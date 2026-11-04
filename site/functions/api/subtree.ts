@@ -201,7 +201,7 @@ async function subtreeGated(
     const hx = await hexQuery(ctx.env, query)
     query = hx.query
     const facts1 = (): Promise<[boolean, string, string | null]> => facts().then(f => f ?? Promise.all([hasExtras(ctx.env, date), pathGens(ctx.env, [date]), indexedScan(ctx.env, date, true)]))
-    const [head, [xtra, g, indexed]] = await st.time('pre', Promise.all([lens && ctx.env.DB || owner && await hasLedger(ctx.env) ? ledgerHead(ctx.env) : Promise.resolve(0), facts1()]))
+    const [head, [xtra, g, indexed]] = await st.time('pre', Promise.all([(lens || owner) && await hasLedger(ctx.env) ? ledgerHead(ctx.env) : Promise.resolve(0), facts1()]))
     if (!indexed) return noScan('date', date)
     const cacheKey = keyOf(date, head, xtra, g, lensTag)
     // …and a scan the static index covers for this literal (else `scan-not-indexed`, not a path-store scan).

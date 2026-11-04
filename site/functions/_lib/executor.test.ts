@@ -147,7 +147,7 @@ describe('dispatchPlan — a real run (specs/done/delete-what-you-see.md)', () =
     ], [null, 'plan-sweep-dry-1', null]])
   })
 
-  it('acts on exactly the selected rows: a dry run of every item, one unchecked, real → the other two only, listed afresh', async () => {
+  it('acts on exactly the selected rows: a dry run of every item, one unchecked, real → the other two only, from their own manifest', async () => {
     const s = await setup()
     await s.db.prepare("INSERT INTO plan_items (plan_id, prefix, added_by, added_ts) VALUES (1, ?, 'cy@openathena.ai', 2)").bind(C).run()
     const ex = s.executors.sweep

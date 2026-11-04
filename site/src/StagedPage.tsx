@@ -35,10 +35,10 @@ import { useOwnerIndex, useOwners } from './owners'
 import { useRowSelection, useRowSelectionKeys } from './rowSelection'
 import { CAPS, useDispatch, useExecJobs, usePrefixHistory, useRunAction, useRunFiles, useStagedPlan, useUnstage } from './plans'
 import type { EmptiedBatch, StagedItem } from './plans'
-import { joinRuns, LIVE_STATES, runFilesRel, viewBuckets, viewLive, type ProgressFile } from './runs'
+import { itemsDigest, joinRuns, LIVE_STATES, reusableDryRun, runFilesRel, viewBuckets, viewLive, type ProgressFile } from './runs'
 import { PrefixRecovery } from './PrefixRecovery'
-import { prefixExecution } from './prefixExecution'
-import type { PrefixExecution } from './prefixExecution'
+import { liveTargetOf, prefixExecution } from './prefixExecution'
+import type { PrefixExecution, RunItems } from './prefixExecution'
 import { RunsSection } from './StagedRuns'
 import { idleLabel, idleness, idleSortKey, prefixBucket, readLogged, readThrough } from './readLens'
 import { type PrefixSortKey, type PrefixStat, relAgo, sortPrefixRows, usePrefixes } from './prefixes'
@@ -169,12 +169,13 @@ export function StagedPage() {
     || views.some(v => viewLive(v) || v.ops.some(o => LIVE_STATES.has(o.state)) || (v.run && !v.run.finished_ts && !v.job))
   useEffect(() => setLive(anyLive), [anyLive])
   const history = usePrefixHistory(plan?.id ?? null, anyLive)
-  const progressTargets = views.filter(v => v.run?.mode === 'real' && v.run.plan_id === plan?.id && !v.run.finished_ts && (!v.job || viewLive(v)) && v.run.log_dir)
-    .flatMap(v => viewBuckets(v).map(bucket => ({ bucket, run: v.run!, rel: `${runFilesRel(v.run!.log_dir!)}progress/${bucket}.json` })))
+  const liveRuns = views.filter(v => v.run?.mode === 'real' && v.run.plan_id === plan?.id && !v.run.finished_ts && (!v.job || viewLive(v)) && v.run.log_dir)
+  // Each live run's pinned item set: a row is in a run by this, not by sharing its bucket.
+  const liveItemsQs = useRunFiles<RunItems>(liveRuns.map(v => `${runFilesRel(v.run!.log_dir!)}plan.json`), false)
+  const progressTargets = liveRuns.flatMap((v, i) => viewBuckets(v).map(bucket => ({ bucket, run: v.run!, items: liveItemsQs[i]?.data, rel: `${runFilesRel(v.run!.log_dir!)}progress/${bucket}.json` })))
   const progressQs = useRunFiles<ProgressFile>(progressTargets.map(t => t.rel), anyLive)
   const rowExecution = (r: Row) => {
-    const bucket = prefixToPath(r.prefix).split('/')[0]
-    const ix = progressTargets.findIndex(t => t.bucket === bucket && t.run.started_ts >= r.added_ts)
+    const ix = liveTargetOf(r.prefix, r.added_ts, progressTargets)
     const progress = ix >= 0 ? progressQs[ix]?.data : null
     return prefixExecution(r.prefix, history.data?.bands ?? [], progress ? { runId: progressTargets[ix].run.run_id, progress } : undefined, Date.now() / 1000)
   }
@@ -312,7 +313,7 @@ export function StagedPage() {
 
   // A dispatch may be cut to some of the plan's buckets (`CAPS.bucketCut`):
   // unchecked buckets stay out of the run. The cut's prefixes are what its
-  // digest names, so a real run needs a dry run of the same cut.
+  // digest names, so a real run reuses only a dry run of the same cut.
   const [bucketsOff, setBucketsOff] = useState<ReadonlySet<string>>(new Set())
   const perBucket = useMemo(() => {
     const m = new Map<string, { n: number; b: number; o: number }>()
@@ -337,6 +338,15 @@ export function StagedPage() {
   // the newest scan: each item is held to the one it was staged at (`as_of`), so the run lists from the newest and
   // deletes only what that staging scan saw
   const runScan = scans[0] ?? ''
+  // Which path a real run takes (gcs): reuse a dry run of exactly these items at this scan, or a fresh manifest.
+  const digestQ = useQuery({
+    queryKey: ['items-digest', runItems],
+    queryFn: () => itemsDigest(runItems),
+    enabled: armed && DEFAULT_STORE.executor === 'sweep' && runItems.length > 0,
+    staleTime: Infinity,
+    retry: false,
+  })
+  const reused = digestQ.data && plan ? reusableDryRun(runs, plan.id, digestQ.data, runScan) : null
   // The executor holds a bucket's manifest in memory: a bucket with tens of
   // millions of planned objects needs the big machine (gcs only).
   const machine = CAPS.bucketCut ? machineFor(Math.max(0, ...onBuckets.map(b => perBucket.get(b)!.o))) : undefined
@@ -556,7 +566,7 @@ export function StagedPage() {
                       </label>
                     )
                   })}
-                  {cut && <p className="dim">Only the checked buckets are listed and swept; a real run needs a dry run of the same cut.</p>}
+                  {cut && <p className="dim">Only the checked buckets are read and swept.</p>}
                 </details>
               )}
               <div className="dispatch-btns">
@@ -572,6 +582,15 @@ export function StagedPage() {
                       <button type="button" onClick={() => setArmed(false)}>cancel</button>
                     </>}
               </div>
+              {armed && DEFAULT_STORE.executor === 'sweep' && (
+                <p className="dispatch-path" role="note">
+                  {!digestQ.data
+                    ? digestQ.isError ? 'Could not work out whether a dry run will be reused (this page needs a secure context).' : 'Checking for a dry run of exactly this selection…'
+                    : reused
+                      ? <>Reuses dry run <code>{reused.run_id}</code> (this selection, scan <code>{runScan}</code>): deletes the generations it reviewed, and skips any directory it reported as drift.</>
+                      : <>No dry run of exactly this selection at scan <code>{runScan}</code>: deletes from a fresh manifest, with no dry run. A directory that gained new writes since the scan still has its older staged files deleted, and the new files survive; a dry run would report that directory as drift instead.</>}
+                </p>
+              )}
               {armed && (
                 <ul className="dispatch-confirm-list" aria-label="To be deleted">
                   {runRows.map(r => <li key={r.prefix}><code>{r.prefix}</code>{r.stat && <span className="dim"> · {fmtBytes(r.stat.b)}</span>}</li>)}

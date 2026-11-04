@@ -197,7 +197,8 @@ def scan_churn(con, pvl: str, D: int, roots: list[str], name: str, out: Path, co
     (`out/churn/<name>.parquet`: `depth, path, t, c`); and its paths opened at D that weren't open before (`out/prior/
     <name>.parquet`: `depth, path, prior`) with their cumulative churn when they went away — the last earlier piece's
     `churn_end`, over the store's `roots` (the base's range files, the runs' deltas: one row per piece, the
-    smallest `vt`). `count` false (the scan where objects are first listed, `counts_at`): no events. Returns counts."""
+    smallest `vt`). Both sorted by their whole key, so a range's files are the same bytes however its rows were computed.
+    `count` false (the scan where objects are first listed, `counts_at`): no events. Returns counts."""
     events = f"""SELECT coalesce(n.depth, o.depth) AS depth, coalesce(n.path, o.path) AS path, {D}::BIGINT AS t,
             abs(coalesce(n.size, 0) - coalesce(o.size, 0))::BIGINT AS c
         FROM (SELECT depth, path, size FROM {pvl} WHERE vt = {D} AND kind = 'file') o
@@ -206,14 +207,14 @@ def scan_churn(con, pvl: str, D: int, roots: list[str], name: str, out: Path, co
     for sub in (SCAN_CHURN, PRIOR):
         (out / sub).mkdir(parents=True, exist_ok=True)
     churn_f, prior_f = out / SCAN_CHURN / f"{name}.parquet", out / PRIOR / f"{name}.parquet"
-    con.execute(f"COPY (SELECT * FROM ({ev}) UNION ALL {ancestors_sql(ev)}) TO {q(str(churn_f))} (FORMAT parquet)")
+    con.execute(f"COPY (SELECT * FROM ({ev}) UNION ALL {ancestors_sql(ev)} ORDER BY depth, path, t, c) TO {q(str(churn_f))} (FORMAT parquet)")
     con.execute(f"""CREATE OR REPLACE TEMP TABLE __back AS SELECT depth, path FROM (SELECT depth, path FROM {pvl} WHERE vf = {D}) n
         ANTI JOIN (SELECT depth, path FROM {pvl} WHERE vt = {D}) c USING (depth, path)""")
     files = [f"{r}/pvl/{name}.parquet" for r in roots if Path(f"{r}/pvl/{name}.parquet").exists()]
     hist = " UNION ALL ".join(f"SELECT depth, path, vf, vt, {CHURN_END} FROM read_parquet({q(f)}) SEMI JOIN __back USING (depth, path)" for f in files)
     prior = (f"""SELECT depth, path, arg_max({CHURN_END}, vf)::BIGINT AS prior FROM (
             SELECT * FROM ({hist}) QUALIFY row_number() OVER (PARTITION BY depth, path, vf ORDER BY vt) = 1)
-        WHERE vt <= {D} GROUP BY depth, path""" if files else "SELECT NULL::UTINYINT AS depth, NULL::VARCHAR AS path, NULL::BIGINT AS prior LIMIT 0")
+        WHERE vt <= {D} GROUP BY depth, path ORDER BY depth, path""" if files else "SELECT NULL::UTINYINT AS depth, NULL::VARCHAR AS path, NULL::BIGINT AS prior LIMIT 0")
     con.execute(f"COPY ({prior}) TO {q(str(prior_f))} (FORMAT parquet)")
     n_back = con.execute("SELECT count(*) FROM __back").fetchone()[0]
     con.execute("DROP TABLE __back")

@@ -145,6 +145,11 @@ dt-cloud interval-store backfill-churn -O NEW -o STORE [-g GEN]  # GEN (base + r
                           # file's |Δsize| rolled up to its ancestors, counted after the last v1 → v2 scan) and `churn_end` (at
                           # `vt`, closed pieces), `"churn": true` in `scans.json`; a fresh `build`'s bytes. New builds (`churn`
                           # after `fold`), appends and compactions carry it; source and `CURRENT.json` untouched
+dt-cloud interval-store backfill-level -g GEN -o STORE  # The level index (specs/diff-progressive.md §3b, what
+                          # `/api/diff/level` reads): one row per child version transition keyed `(parent depth, parent
+                          # path, ts, name)`, cut into GEN's `served/level.*` and each listed run's, nothing else written
+                          # (not `scans.json`, not `CURRENT.json`); needs churn. Appends, carries and compactions then carry
+                          # it. New builds opt in with `build -l` (`"level": true`); without either, no served byte changes
 dt-cloud interval-store backfill-generation -O NEW -o STORE -s ROOT -l TEMPLATE  # A generation folded into NEW (a dir or
                           # URL store; never over one) whose object versions carry their GCS `generation`, read once from
                           # the raw listings (`{id}` templates under ROOT): each version the first listed within it, earlier
@@ -154,6 +159,24 @@ dt-cloud interval-store backfill-generation -O NEW -o STORE -s ROOT -l TEMPLATE 
                           # from the scans whose listings have them all: gcs's depth-2/3 objects had none before 2026-10-22)
                           # `-j N` (also `add`'s compaction; `build`'s cut): N key ranges, then N served sorts, at a time on
                           # cursors of one DuckDB database (`-p`/`-M` shared; each ends in a serial pyarrow writer), same bytes
+dt-cloud interval-store layout-sim GEN REQUESTS  # `/api/diff/level` reads of a generation's served sort (`-s`, default
+                          # `path`; GEN a dir or `gs://`/`s3://`/`r2://` URL through `blobstore.Store`) simulated offline
+                          # (specs/diff-progressive.md §3b): per `{path, from, to}` request, rows decoded and GET runs for
+                          # today's kept groups, `-p` page sizes within them, `-b` band counts (`(band, depth, path, vf)`),
+                          # and `-l` a dedicated level sort: one row per child version transition, keyed `(parent depth,
+                          # parent path, b, child)`, one file per base / newest-manifest run (`-f N`: N even files), one
+                          # run a file touched; `-C` its size over the whole generation (transitions, estimated bytes).
+                          # Runs merge as the site's `planRuns` (`RUN_GAP`/`RUN_BYTES`/`RUN_READS`
+                          # mirror `site/functions/_lib/index.ts`) at the sort's bytes/row; row groups cached under `-c`
+                          # (`depth, path, vf, vt`), `-t` fetches over one footer, `-j` processes. JSONL out, p50/p90/p99/max
+                          # summary (rows, runs, GET rounds at 2 and 3 waves) to stderr
+dt-cloud interval-store level-sim GEN REQUESTS  # `readLevel`'s two waves priced over GEN's real `level` sort: per `{from, to, dirs}`
+                          # read (one line per chain round) the groups, pages and page-index spans as the reader plans them, each wave's
+                          # gets, rounds, bytes and predicted time (`-T` first byte, `-R` throughput, 6 slots) under `-g` gaps × `-C` caps,
+                          # `-b` `fit:B` (closes gaps while a round is saved within B fetched bytes), and `whole` (no index wave). Fetches
+                          # only sidecars and the kept groups' page indexes (cached under `-c`); gets and bytes match live `lv-*` spans exactly
+                          # `-s 256,512,1024` (+ `-F` sidecar row-group sizes): a table per mode, today / held page indexes (cold,
+                          # colo warm, warm) / the sort cut in small groups with no page index, from the real file's page indexes
 dt-cloud image-sha [-e SHA [-a]] [-j]  # The running image's source revision (`image_sha.py`): `$DISKY_GIT_SHA` /
                           # `$DISKY_GIT_DIRTY`, which a deployment's image build stamps (gcs: `job/build.sh` → Dockerfile
                           # `ARG`/`ENV` + OCI labels `org.opencontainers.image.revision`, `disky.dirty`). Prints `<sha>`,

@@ -150,3 +150,13 @@ def test_stop_during_delete_drains_submitted_batch_and_leaves_rest(source, tmp_p
     assert result["buckets"]["b1"]["decisions"] == {"delete": 1000}
     assert result["buckets"]["b1"]["interrupted"] == {"roots_skipped": 1, "roots": 2}
     assert _decisions(out, "deleted") == sorted((row["name"], "delete", row["generation"]) for row in rows[:1000])
+
+
+def test_a_null_generation_in_a_reviewed_log_still_refuses(source, tmp_path):
+    # Only a manifest's nulls are skipped: a DR's `delete` decision names a generation it saw.
+    directory, plan, rows, _, _ = source
+    rows = [{**row} for row in rows]
+    rows[3]["generation"] = None
+    pq.write_table(pa.Table.from_pylist(rows), directory / "would-delete/b1.parquet")
+    with pytest.raises(ValueError, match="^b1: reviewed delete row lacks a positive generation$"):
+        prepare_reviewed(str(directory), str(plan), str(tmp_path / "work"))

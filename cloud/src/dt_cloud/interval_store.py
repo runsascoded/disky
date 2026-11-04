@@ -35,8 +35,10 @@ from . import heartbeat as hb
 from . import static_names as sn
 from . import tree_mem as tm
 from .blobstore import Store, store_url
-from .image_sha import log_job_stamp
+from .image_sha import expect_sha_options, log_job_stamp
 from .interval_churn import has_churn, with_churn
+from . import interval_level as ilv
+from .interval_level import LEVEL, LEVEL_SCHEMA, leveled
 from .static_names import OPEN, U64, connect, q, range_preds, write_sorted
 
 err = partial(print, file=sys.stderr, flush=True)
@@ -616,14 +618,17 @@ SORTS = {
     "slices-bysize-user": ("sv", f"usr NULLS FIRST, ({BUCKET}) DESC NULLS LAST, path, vf", "size"),
     # Roster attribution (`ATTRIBUTION`), path first: a subtree's prefixes are one span per segment, an ancestor a point.
     ATTRIBUTION: (ATTRIBUTION, "path, vf", None),
+    # The level index (`interval_level`): each child version transition under its parent, `(depth, path)` the parent's,
+    # computed from the folded path versions (`interval_level.rows_sql`). Only in a generation that carries it (`leveled`).
+    LEVEL: ("pvl", "depth, path, ts, name", None),
 }
 #: Each range-file dir's schema.
 SUB_SCHEMA = {"pv": PV_SCHEMA, "pvl": PVL_SCHEMA, "rd": RD_SCHEMA, "sv": SV_SCHEMA, "svt": SVT_SCHEMA, ATTRIBUTION: AT_SCHEMA}
 #: The attribution range files, and the sort cut from them: only in a generation with the table (`attributed`).
 ATTRIBUTION_SUBS = (ATTRIBUTION,)
-#: The staged `cut`'s tasks by index (`-i`): every sort, then `stats`, then the attribution sort (after `stats`, so the
-#: indices a staged build has always used hold).
-CUT_TASKS = [*(s for s in SORTS if s != ATTRIBUTION), "stats", ATTRIBUTION]
+#: The staged `cut`'s tasks by index (`-i`): every sort, then `stats`, then the attribution and level sorts (after `stats`,
+#: so the indices a staged build has always used hold).
+CUT_TASKS = [*(s for s in SORTS if s not in (ATTRIBUTION, LEVEL)), "stats", ATTRIBUTION, LEVEL]
 #: The owner-slice range files (`build -S`, `fold -S`), and the sorts cut from them. A generation whose scans name no
 #: owner (`usr` NULL or '' on every row: cw-s3, r2.rbw.sh) has no owner axis and builds none of them: its slices would
 #: be its path rows again, each slice sort about the size of `path`.
@@ -635,7 +640,10 @@ GENERATION_SORT = "path"
 
 def served_schema(sort: str, generation: Identity = False, churn: bool = False) -> pa.Schema:
     """A served sort's columns: its range files' (`SUB_SCHEMA`), `churn_cum` in the folded path versions' sorts when the
-    generation carries it (`interval_churn`), and `GENERATION` last in `GENERATION_SORT` when it carries that."""
+    generation carries it (`interval_churn`), and `GENERATION` last in `GENERATION_SORT` when it carries that. The level
+    sort's are its own (`interval_level.LEVEL_SCHEMA`)."""
+    if sort == LEVEL:
+        return LEVEL_SCHEMA
     sub = SORTS[sort][0]
     return with_generation(with_churn(SUB_SCHEMA[sub], churn and sub == "pvl"), generation if sort == GENERATION_SORT else False)
 
@@ -652,10 +660,11 @@ def sliced(scans: dict) -> bool:
     return bool(scans.get("slices", True))
 
 
-def served_sorts(has_slices: bool, has_attribution: bool = False) -> list[str]:
+def served_sorts(has_slices: bool, has_attribution: bool = False, has_level: bool = False) -> list[str]:
     """The sorts a generation serves: every `SORTS` entry, the slice sorts only with the owner axis, the attribution sort
-    only with its table."""
-    return [s for s, (sub, _, _) in SORTS.items() if (has_slices or sub not in SLICE_SUBS) and (has_attribution or sub not in ATTRIBUTION_SUBS)]
+    only with its table, the level sort only where the generation carries it (`interval_level.leveled`)."""
+    return [s for s, (sub, _, _) in SORTS.items() if (has_slices or sub not in SLICE_SUBS) and (has_attribution or sub not in ATTRIBUTION_SUBS)
+            and (has_level or s != LEVEL)]
 
 
 def owners_refused(scan: str) -> str:
@@ -747,7 +756,9 @@ def _bounds(t: pa.Table, seg: int, size_col: str | None) -> dict:
         r = pc.min_max(t.column(c))
         return r["min"].as_py(), r["max"].as_py()
 
-    d, p, vf, vt = mm("depth"), mm("path"), mm("vf"), mm("vt")
+    d, p = mm("depth"), mm("path")
+    # The level sort's transitions have one stamp (`ts`): its bounds are the group's `vf_*` and `vt_*` both.
+    vf, vt = (mm("vf"), mm("vt")) if "vf" in t.column_names else (mm("ts"),) * 2
     b = mm(size_col) if size_col else (0, 0)
     # A slice sort's owner range (NULL owners ignored, as the per-scan footers' `u_min`/`u_max`).
     u = mm("usr") if "usr" in t.column_names else (None, None)
@@ -795,6 +806,7 @@ MERGE_KEYS: dict[str, list] = {
     "slices-bytotal": [("__b", _NEG_BUCKET.replace("size", "tot")), "path", *_USR, "vf"],
     "slices-bysize-user": [*_USR, ("__b", _NEG_BUCKET), "path", "vf"],
     ATTRIBUTION: ["path", "vf"],
+    LEVEL: ilv.LEVEL_KEY,
 }
 RANGE_LED = "depth, path"
 if bad := [s for s, (_, o, _) in SORTS.items() if s not in MERGE_KEYS and not o.startswith(RANGE_LED)]:
@@ -823,7 +835,7 @@ def cut_plan(segs: list[tuple[int, int]], rg_rows: int, k: int) -> list[list[tup
 
 
 #: The served sorts' columns with statistics (`_served_writer`): their pages' bounds are the page index's.
-STAT_COLS = ("depth", "path", "vf", "vt")
+STAT_COLS = ("depth", "path", "vf", "vt", "ts")
 
 
 def writer_meta(files: list[str], rg_rows: int, page_rows: int = SERVED_PAGE_ROWS) -> int:
@@ -851,7 +863,7 @@ def writer_meta(files: list[str], rg_rows: int, page_rows: int = SERVED_PAGE_ROW
 def _served_writer(out: Path, schema: pa.Schema, page: int) -> pq.ParquetWriter:
     """A served sort's writer (`write_served`): zstd, `page`-row pages with a page index, statistics on the planning
     columns, a dictionary on the low-cardinality strings only."""
-    return pq.ParquetWriter(out, schema, compression=sn.CODEC, use_dictionary=[c for c in ("kind", "us", "usr", "user", "source") if c in schema.names],
+    return pq.ParquetWriter(out, schema, compression=sn.CODEC, use_dictionary=[c for c in ("kind", "kind_prev", "us", "usr", "user", "source") if c in schema.names],
                             write_statistics=[c for c in STAT_COLS if c in schema.names],
                             write_page_index=True, write_batch_size=page, data_page_size=1)
 
@@ -1142,7 +1154,7 @@ def read_bounds(files: list[Path]) -> Iterator[dict]:
 def write_served(con, src: str | list[str], sort: str, out: Path, schema: pa.Schema, *, rg_rows: int = SERVED_RG,
                  stamps: list[int] | None = None, page_rows: int | None = None, procs: int | None = None,
                  part_rows: int = CUT_PART_ROWS, budget: int | None = None, piece_rows: int | None = None,
-                 spool_rows: int = CUT_SPOOL_RG) -> dict:
+                 spool_rows: int = CUT_SPOOL_RG, opened: str = "true", key_bounds: list[list] | None = None) -> dict:
     """One served sort to `out`: its segments in order (`seg_sql`: the open versions, then the closed ones — one
     segment, or with `stamps` one per dyadic block of scans), each in the sort's order and cut in `rg_rows`-row groups (a
     segment's last may be short, so no group mixes segments), zstd. `src` is a relation of `schema` rows, or a
@@ -1153,6 +1165,11 @@ def write_served(con, src: str | list[str], sort: str, out: Path, schema: pa.Sch
     after every `write_batch_size` values (an all-null column, encoding no bytes, stays one page a group). The page index
     carries `path`'s bounds too (its statistics on), and `path` has no dictionary (it's almost all distinct: its
     dictionary page would be about the whole chunk, fetched by every page read).
+
+    The level sort (`LEVEL`) is cut from the folded path versions' transitions (`interval_level.rows_sql` over each run, a
+    path's versions never split across runs; `opened`: which versions opened in the source, a run's deltas'
+    `interval_level.RUN_OPENED`), in segments of its parent key: one per key range whose `lo` is in `key_bounds` (a
+    generation's `ranges.json`; `interval_level.seg_sql`), each cut in pieces; without, one segment.
 
     Bounded by construction, on every core (specs/diff-progressive.md §3b), in three passes over spools in a work dir
     beside `out`:
@@ -1194,8 +1211,9 @@ def write_served(con, src: str | list[str], sort: str, out: Path, schema: pa.Sch
     _, order, size_col = SORTS[sort]
     out.parent.mkdir(parents=True, exist_ok=True)
     page = page_rows or SERVED_PAGE_ROWS
+    level = sort == LEVEL
     kv = {"store": "interval", "version": str(STORE_VERSION), "sort": sort, "order": order,
-          "segments": "open,dyadic" if stamps else "open,hist", "open": str(OPEN)}
+          "segments": "keys" if level else "open,dyadic" if stamps else "open,hist", "open": str(OPEN)}
     k = procs or os.cpu_count() or 1
     work = out.with_name(f".{out.name}.cut")
     shutil.rmtree(work, ignore_errors=True)
@@ -1204,9 +1222,12 @@ def write_served(con, src: str | list[str], sort: str, out: Path, schema: pa.Sch
         t0 = monotonic()
         hb.set_stage(f"cut {sort}: sort")
         budget = run_budget(con, k) if budget is None else budget
-        runs = cut_runs(src, budget)
+        # A level run's rows are up to `ROWS_PER_VERSION` its source's: its sort holds them within the same budget.
+        runs = cut_runs(src, max(1, budget // ilv.ROWS_PER_VERSION) if level else budget)
         pieced = sort in MERGE_KEYS and len(runs) > 1
         key = merge_key(sort) if sort in MERGE_KEYS else None
+        if level:
+            runs = [f"({ilv.rows_sql(r, opened)})" for r in runs]
         computed = [x for x in MERGE_KEYS.get(sort, []) if not isinstance(x, str)]
         share = stride = 0
         rg = spool_rows
@@ -1218,7 +1239,8 @@ def write_served(con, src: str | list[str], sort: str, out: Path, schema: pa.Sch
             stride = max(1, share // (FENCE_SLACK * (len(runs) + 1)))
             rg = min(spool_rows, max(stride, PIECE_MIN_RG))
         run_files = [str(work / f"run-{i:05d}.parquet") for i in range(len(runs))]
-        sel = f"{qcols(schema.names)}, {seg_sql(stamps)} AS __seg" + "".join(f", {e} AS {n}" for n, e in computed)
+        seg = ilv.seg_sql(key_bounds) if level else seg_sql(stamps)
+        sel = f"{qcols(schema.names)}, {seg} AS __seg" + "".join(f", {e} AS {n}" for n, e in computed)
         by = qcols(key) if key else order
 
         def sort_run(cur, i: int) -> tuple[dict[int, int], dict]:
@@ -1325,7 +1347,7 @@ def write_served(con, src: str | list[str], sort: str, out: Path, schema: pa.Sch
             f"{t1 - t0:.1f}s, {len(tasks)} pieces (≤ {share:,} rows) sorted in {t2 - t1:.1f}s, {len(parts)} parts written in "
             f"{t3 - t2:.1f}s, joined in {monotonic() - t3:.1f}s")
         return write_groups(out, read_bounds([work / f"part-{i:04d}.parquet.bounds" for i in range(len(parts))]), sort,
-                            lambda rows: _seg_summary(rows, bool(stamps)))
+                            lambda rows: _seg_summary(rows, bool(stamps) and not level))
     finally:
         shutil.rmtree(work, ignore_errors=True)
 
@@ -1381,14 +1403,15 @@ def write_groups(out: Path, bounds: Iterable[dict], sort: str, summary) -> dict:
 
 @contextmanager
 def plan_cut(con, tree: tm.Budget | None, files: list[str], *, at_once: int = 1, rg_rows: int = SERVED_RG,
-             what: str = "cut", sort_rows: int | None = None) -> Iterator[tuple[int, int]]:
+             what: str = "cut", sort_rows: int | None = None, extra_rows: int = 0) -> Iterator[tuple[int, int]]:
     """The cut's `(procs, run budget)` for `at_once` sorts at once over `files` (local range or delta files: their
     footers size a row and count the rows), as every entry that cuts plans it. `tree`: the process tree's budget
     (`tree_mem.Budget`): the workers planned under it (`Budget.cut`, rows of the files' widest + `SPOOL_EXTRA`, no holder
     charged more rows than the files have, each sort's writers' metadata `writer_meta` a group over `sort_rows` rows —
-    the most one sort has, default all of `files`'), DuckDB's limit set to the rest for the block, then the previous
-    limit back; None: the machine's cores over `at_once`, DuckDB's limit as set. Each run and piece is a share of
-    DuckDB's limit (`run_budget` over `at_once × procs`). The block is `TreeWatch`'s phase `what`."""
+    the most one sort has, default all of `files`' and `extra_rows`: what a sort holds past its files', the level sort's,
+    `interval_level.extra_rows`), DuckDB's limit set to the rest for the block, then the previous limit back; None: the
+    machine's cores over `at_once`, DuckDB's limit as set. Each run and piece is a share of DuckDB's limit (`run_budget`
+    over `at_once × procs`). The block is `TreeWatch`'s phase `what`."""
     with tm.phase(what):
         cores = os.cpu_count() or 1
         if tree is None:
@@ -1399,7 +1422,7 @@ def plan_cut(con, tree: tm.Budget | None, files: list[str], *, at_once: int = 1,
 
         if remote := [f for f in files if not Path(f).is_file()]:
             raise SystemExit(f"{what}: the cut's plan reads its inputs' footers, which aren't local files ({remote[0]}…): mount the store")
-        rb, n = row_bytes(files) + SPOOL_EXTRA, max(1, input_rows(files))
+        rb, n = row_bytes(files) + SPOOL_EXTRA, max(1, input_rows(files) + extra_rows)
         sort_rows = min(n, sort_rows or n)
         meta = writer_meta(files, rg_rows)
         plan = tree.cut(at_once, cores, rg_rows, rb, CUT_SPOOL_RG, n, meta=meta, sort_rows=sort_rows)
@@ -1417,45 +1440,52 @@ def plan_cut(con, tree: tm.Budget | None, files: list[str], *, at_once: int = 1,
 
 
 def cut_gen(con, gen_dir: Path, scans: dict, *, rg_rows: int = SERVED_RG, jobs: int = 1, paths: dict | None = None,
-            tree: tm.Budget | None = None, served: Path | None = None) -> tuple[dict, dict]:
-    """A generation's served sorts from its range files under `gen_dir` (every `served_sorts` entry of its owner axis and
-    attribution table, dyadic segments over `scans`' stamps): `<served>/<sort>.parquet` + `.groups.parquet` +
-    `<sort>.json` (`served`: default `gen_dir/served`), then its churn (`stats.json`). What a base build
-    (`interval_local.build_gen`), a compaction (`interval_compact`) and `interval-store cut -a` cut. `jobs` sorts at a
-    time (`static_names.each`, the largest sources first), the cores split between the sorts: each its range files' runs
-    sorted, cut in pieces and written in parallel (`write_served`), every run and piece sized so the ones sorting at
-    once, across the sorts, fit DuckDB's memory limit (`run_budget`). `tree`: the process tree's budget, the workers and
-    DuckDB's limit planned under it (`plan_cut`); None: every core, DuckDB's limit as set. Returns `({sort: {rows,
-    groups, bytes}}, stats)`."""
+            tree: tm.Budget | None = None, sorts: list[str] | None = None, served: Path | None = None) -> tuple[dict, dict | None]:
+    """A generation's served sorts from its range files under `gen_dir` (every `served_sorts` entry of its owner axis,
+    attribution table and level sort (`interval_level.leveled`, its segments the generation's key ranges), dyadic segments
+    over `scans`' stamps): `<served>/<sort>.parquet` + `.groups.parquet` + `<sort>.json` (`served`: default
+    `gen_dir/served`), then its churn (`stats.json`). What a base build (`interval_local.build_gen`), a compaction
+    (`interval_compact`) and `interval-store cut -a` cut. `jobs` sorts at a time (`static_names.each`, the largest sources
+    first), the cores split between the sorts: each its range files' runs sorted, cut in pieces and written in parallel
+    (`write_served`), every run and piece sized so the ones sorting at once, across the sorts, fit DuckDB's memory limit
+    (`run_budget`). `tree`: the process tree's budget, the workers and DuckDB's limit planned under it (`plan_cut`); None:
+    every core, DuckDB's limit as set. `sorts`: only those (no `stats.json`; stats None). Returns `({sort: {rows, groups,
+    bytes}}, stats)`."""
     stamps = [s["ts"] for s in scans["scans"]]
     served = gen_dir / "served" if served is None else served
     gen, churn = has_generation(scans), has_churn(scans)
-    todo = served_sorts(scans["slices"], attributed(scans))
+    todo = sorts or served_sorts(scans["slices"], attributed(scans), leveled(scans))
+    bounds = ilv.range_bounds(json.loads((gen_dir / "ranges.json").read_text())) if LEVEL in todo else None
     size = {sub: sum(p.stat().st_size for p in (gen_dir / sub).glob("r*.parquet")) for sub in {SORTS[s][0] for s in todo}}
     at_once = max(1, min(jobs, len(todo)))
     ins = [str(p) for sub in sorted(size) for p in sorted((gen_dir / sub).glob("r*.parquet"))]
     most = None
+    extra = 0
     if tree is not None:
         from .interval_compact import input_rows
 
-        most = max(input_rows([str(p) for p in (gen_dir / sub).glob("r*.parquet")]) for sub in size)
-    with plan_cut(con, tree, ins, at_once=at_once, rg_rows=rg_rows, sort_rows=most) as (procs, budget):
+        rows = {sub: input_rows([str(p) for p in (gen_dir / sub).glob("r*.parquet")]) for sub in size}
+        most = max(rows[SORTS[s][0]] + (ilv.extra_rows(rows[SORTS[s][0]]) if s == LEVEL else 0) for s in todo)
+        extra = ilv.extra_rows(rows[SORTS[LEVEL][0]]) if LEVEL in todo else 0
+    with plan_cut(con, tree, ins, at_once=at_once, rg_rows=rg_rows, sort_rows=most, extra_rows=extra) as (procs, budget):
         def one(cur, sort: str) -> dict:
             sub, _, _ = SORTS[sort]
             t1 = monotonic()
             with tm.phase(f"sort {sort}"):
                 sd = write_served(cur, [str(p) for p in sorted((gen_dir / sub).glob("r*.parquet"))], sort, served / f"{sort}.parquet",
-                                  served_schema(sort, gen, churn), rg_rows=rg_rows, stamps=stamps, procs=procs, budget=budget)
+                                  served_schema(sort, gen, churn), rg_rows=rg_rows, stamps=stamps, procs=procs, budget=budget, key_bounds=bounds)
             sd["s"] = round(monotonic() - t1, 1)
             (served / f"{sort}.json").write_text(json.dumps(sd, sort_keys=True) + "\n")
             return sd
 
         order = sorted(todo, key=lambda s: -size[SORTS[s][0]])
         got = dict(zip(order, sn.each(con, one, order, jobs)))
-    sorts = {sort: {"rows": got[sort]["rows"], "groups": got[sort]["groups"], "bytes": got[sort]["bytes"]} for sort in todo}
+    cut = {sort: {"rows": got[sort]["rows"], "groups": got[sort]["groups"], "bytes": got[sort]["bytes"]} for sort in todo}
+    if sorts:
+        return cut, None
     stats = {**churn_stats(con, str(gen_dir), scans, paths), "slices": scans["slices"]}
     (served / "stats.json").write_text(json.dumps(stats, indent=1) + "\n")
-    return sorts, stats
+    return cut, stats
 
 
 def _seg_summary(rows: list[dict], dyadic: bool) -> dict:
@@ -1655,6 +1685,7 @@ def _refuse_overwrite(store: Store, keys: list[str]) -> None:
 
 
 @cli.command("cut")
+@expect_sha_options("interval-store cut")
 @option("-a", "--all-sorts", is_flag=True, help="Every served sort of the generation, -j at a time, then its churn (`stats.json`), as a build or compaction cuts them (`cut_gen`, one -M over all of them): the whole generation's cut, e.g. its real-scale memory check (needs -m)")
 @option("-b", "--bucket", help="The store: a bucket name (gs://) or URL, or a dir (default: the profile's)")
 @option("-D", "--no-dyadic", is_flag=True, help="One closed segment, not one per dyadic block of scans (`seg_sql`)")
@@ -1733,6 +1764,9 @@ def _cut(all_sorts, bucket, no_dyadic, profile, gen, index, jobs, as_jobs, mount
         if sub in ATTRIBUTION_SUBS and not attributed(scans):
             err(f"cut {sort}: {prefix} has no attribution table")
             continue
+        if sort == LEVEL and not leveled(scans):
+            err(f"cut {sort}: {prefix} doesn't carry the level sort (`scans.json` `\"{ilv.LEVEL_FLAG}\": true`)")
+            continue
         if sort not in served_sorts(has_slices, True):
             err(f"cut {sort}: {prefix} names no owner; no slice sorts")
             continue
@@ -1742,11 +1776,17 @@ def _cut(all_sorts, bucket, no_dyadic, profile, gen, index, jobs, as_jobs, mount
         t0 = monotonic()
         dst = out_dir / f"{sort}.parquet"
         files = range_files(con, f"{root}/{sub}/r*.parquet")
+        bounds = ilv.range_bounds(store.read_json(f"{prefix}/ranges.json")) if sort == LEVEL else None
+        extra = 0
+        if sort == LEVEL and tree is not None:
+            from .interval_compact import input_rows
+
+            extra = ilv.extra_rows(input_rows(files))
         # As `cut_gen` sizes each of `as_jobs` sorts at once: the cores and the budget split between them.
-        with plan_cut(con, tree, files, at_once=as_jobs, rg_rows=rg_rows, what=f"cut {sort}") as (procs, budget):
+        with plan_cut(con, tree, files, at_once=as_jobs, rg_rows=rg_rows, what=f"cut {sort}", extra_rows=extra) as (procs, budget):
             procs = min(procs, workers or procs)
             err(f"cut {sort}: {procs} workers, runs of ≤ {budget:,} B (as {as_jobs} sorts at once)")
-            doc = write_served(con, files, sort, dst, schema, rg_rows=rg_rows, stamps=stamps, procs=procs, budget=budget)
+            doc = write_served(con, files, sort, dst, schema, rg_rows=rg_rows, stamps=stamps, procs=procs, budget=budget, key_bounds=bounds)
         doc["s"] = round(monotonic() - t0, 1)
         err(f"cut {sort}: {doc['rows']:,} rows, {doc['groups']:,} groups, {doc['bytes']:,} B in {doc['s']}s")
         (out_dir / f"{sort}.json").write_text(json.dumps(doc, sort_keys=True) + "\n")
@@ -1876,7 +1916,7 @@ def verify_cmd(bucket, changes, profile, gen, index, mount, tasks, out, scan_ids
 
 #: What the Worker reads: the scans and the served sorts with their group indexes.
 R2_SERVED = ("scans.json", "served/path.", "served/bysize.", "served/reads.", "served/slices.", "served/slices-bysize-user.", "served/slices-bytotal.",
-             f"served/{ATTRIBUTION}.")
+             f"served/{ATTRIBUTION}.", f"served/{LEVEL}.")
 
 
 @cli.command("r2-copy")

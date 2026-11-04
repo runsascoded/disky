@@ -11,8 +11,9 @@ from concurrent.futures import ThreadPoolExecutor as Pool
 from contextlib import contextmanager
 from pathlib import Path
 from threading import Event
+from time import monotonic, sleep
 
-import pyarrow.parquet as pq
+import duckdb
 import pytest
 from click.testing import CliRunner
 from test_interval_local import BASE, DATES, LAYOUT, RG, _parquets, world  # noqa: F401 (the fixture)
@@ -21,6 +22,7 @@ from dt_cloud import interval_append as ia
 from dt_cloud import interval_churn as ich
 from dt_cloud import interval_compact as ic
 from dt_cloud import interval_identity as iid
+from dt_cloud import interval_level as ilv
 from dt_cloud import interval_local as il
 from dt_cloud import interval_store as ist
 from dt_cloud import static_names as sn
@@ -171,6 +173,79 @@ def test_migrate_object_version(built, spy, tmp_path):
     within(spy)
 
 
+def test_level_sort_build_append_and_backfill(world, built, spy, tmp_path, monkeypatch):  # noqa: F811
+    """The level sort is cut under the entry's budget too, each plan charging its rows (up to `ROWS_PER_VERSION` per version
+    of `pvl`) rather than its source's: a `-l` build, an append carrying it, and `backfill-level` on a generation without."""
+    charged: list[int] = []
+    real_cut = tm.Budget.cut
+
+    def cut(self, *a, **kw):
+        charged.append(kw["sort_rows"])
+        return real_cut(self, *a, **kw)
+
+    monkeypatch.setattr(tm.Budget, "cut", cut)
+    leveled = tmp_path / "leveled"
+    _invoke(il.build_cmd, ["-g", "g", "-L", LAYOUT, "-s", str(world["root"]), "-o", str(leveled), "-w", str(tmp_path / "w"), "-k", "3", "-r", str(RG),
+                           "-p", "2", "-M", MEM, "-l", "-t", DATES[BASE - 1]])
+    within(spy)
+    gen = leveled / ist.PREFIX / "g"
+    pvl = ic.input_rows([str(p) for p in (gen / "pvl").glob("r*.parquet")])
+    assert ([w["sort"] for w in spy["writes"]].count(ilv.LEVEL), charged) == (1, [ilv.ROWS_PER_VERSION * pvl])
+    charged.clear()
+    _invoke(il.add_cmd, ["-g", "g", "-L", LAYOUT, "-s", str(world["root"]), "-o", str(leveled), "-w", str(tmp_path / "w2"), "-r", str(RG), "-p", "2",
+                         "-M", MEM, "-t", DATES[BASE]])
+    within(spy)
+    assert [w["sort"] for w in spy["writes"]].count(ilv.LEVEL) == 2
+    run_pvl = ic.input_rows([str(p) for p in (gen / f"deltas/{DATES[BASE]}/pvl").glob("r*.parquet")])
+    assert charged[-1] == ilv.ROWS_PER_VERSION * run_pvl
+    spy["writes"].clear()
+    store = _copy(built, tmp_path)
+    _invoke(ilv.backfill_cmd, ["-g", "g", "-o", str(store), "-w", str(tmp_path / "w3"), "-r", str(RG), "-p", "2", "-M", MEM])
+    within(spy)
+    assert [w["sort"] for w in spy["writes"]] == [ilv.LEVEL]
+
+
+def test_the_staged_path_carries_the_level_sort(world, tmp_path):  # noqa: F811
+    """A leveled generation through the entries gcs and cw run: `publish` (`_cut_published`) cuts each scan's level sort and
+    `carry` (`carry_cmd`) merges them, each byte for byte what `add` writes over the same scans."""
+    scans = DATES[BASE:BASE + 2]
+    prefix = f"{ist.PREFIX}/g"
+    leveled = tmp_path / "leveled"
+    _invoke(il.build_cmd, ["-g", "g", "-L", LAYOUT, "-s", str(world["root"]), "-o", str(leveled), "-w", str(tmp_path / "w"), "-k", "3", "-r", str(RG),
+                           "-p", "2", "-M", MEM, "-l", "-t", DATES[BASE - 1]])
+    (tmp_path / "a").mkdir()
+    (tmp_path / "s").mkdir()
+    added, store = _copy(leveled, tmp_path / "a"), _copy(leveled, tmp_path / "s")
+    add_args = ["-g", "g", "-L", LAYOUT, "-s", str(world["root"]), "-o", str(added), "-p", "2", "-M", MEM, "-t", scans[-1]]
+    _invoke(il.add_cmd, [*add_args, "-w", str(tmp_path / "wa"), "-N"])
+
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    for d in scans:
+        listing = LAYOUT.replace("{id}", d).rsplit("/", 1)[0]
+        shutil.copytree(world["root"] / listing, store / listing)
+        ia.prepare_scan(str(store), "g", d, (LAYOUT,))
+        common = ["-b", str(store), "-g", "g", "-R", "g", "-S", str(scratch), "-d", d, "-m", str(store), "-M", MEM, "-p", "2", "-T", str(tmp_path / "tmp")]
+        _invoke(ia.ranges_cmd, [*common, "-i", "0", "-n", "3", "-o", str(tmp_path / "out")])
+        _invoke(ia.publish_cmd, common)
+
+    def level_files(root: Path) -> dict[str, bytes]:
+        gen = root / prefix
+        return {p.relative_to(gen).as_posix(): p.read_bytes() for p in gen.rglob(f"served/{ilv.LEVEL}*.parquet")}
+
+    published = level_files(store)
+    assert sorted(k for k in published if k.startswith("deltas/")) == [f"deltas/{d}/served/{ilv.LEVEL}{x}" for d in scans for x in (".groups.parquet", ".parquet")]
+    assert published == level_files(added)
+
+    _invoke(ia.carry_cmd, ["-b", str(store), "-g", "g", "-R", "g", "-S", str(scratch), "-m", str(store), "-M", MEM, "-p", "2", "-T", str(tmp_path / "tc")])
+    (tmp_path / "b").mkdir()
+    both = _copy(leveled, tmp_path / "b")
+    _invoke(il.add_cmd, ["-g", "g", "-L", LAYOUT, "-s", str(world["root"]), "-o", str(both), "-p", "2", "-M", MEM, "-t", scans[-1], "-w", str(tmp_path / "wb")])
+    merged = f"deltas/{scans[0]}_{scans[-1]}/served/{ilv.LEVEL}"
+    carried, folded = level_files(store), level_files(both)
+    assert (carried[f"{merged}.parquet"], carried[f"{merged}.groups.parquet"]) == (folded[f"{merged}.parquet"], folded[f"{merged}.groups.parquet"])
+
+
 def test_tree_watch_logs_and_asserts(capsys):
     """The peak over the block against the budget, logged; past it, `SystemExit` when asked to assert (and logged only
     when not). Without procfs, asserting is refused up front."""
@@ -266,6 +341,100 @@ def test_tree_watch_phase_over_budget_and_the_assert_on_the_overall_peak(pss, ca
     ]
 
 
+#: `append_range`'s steps, in the order an owner-sliced, churn-carrying generation's range first runs them.
+RANGE_PHASES = [
+    "range load",
+    "range intervals pvl", "range delta pvl", "range state pvl", "range reconstructs pvl", "range churn",
+    "range intervals sv", "range delta sv", "range state sv", "range reconstructs sv",
+    "range intervals svt", "range delta svt", "range state svt", "range reconstructs svt",
+    "range check",
+]
+
+
+def test_tree_watch_says_where_each_peak_was_and_what_held_it(pss, capsys):
+    """Each phase's line names the label and the gauges of its peak's sample (not the phase's last), the watch's end the
+    labels' largest peaks; outside `at` and `gauges`, a line stays as it was."""
+    held = {"DuckDB": 0, "Arrow": 0}
+
+    def step(label: str, mib: int, duck: int, arrow: int) -> None:
+        pss["mib"], held["DuckDB"], held["Arrow"] = mib, duck * MIB, arrow * MIB
+        with tm.at(label), tm.phase("step"):
+            pass
+
+    w = tm.TreeWatch(1000 * MIB, "x", every=3600, check=False)
+    with w:
+        with tm.phase("outside"):
+            pass
+        with tm.gauges(DuckDB=lambda: held["DuckDB"], Arrow=lambda: held["Arrow"]):
+            for label, mib, duck, arrow in [("r0", 300, 200, 10), ("r1", 700, 500, 90), ("r2", 400, 300, 20)]:
+                step(label, mib, duck, arrow)
+            for i in range(3, 7):
+                step(f"r{i}", 100 + i, 1, 1)
+        assert (w.at_label, w.gauge_fns) == (None, {})
+        pss["mib"] = 50
+    assert _normal(capsys.readouterr().err) == [
+        "x: phase outside: peak tree PSS 1 MiB (0%; 2 samples)",
+        "x: phase step: peak tree PSS 700 MiB (70%; 14 samples; at r1; DuckDB 500 MiB; Arrow 90 MiB)",
+        "x: phase (untagged): peak tree PSS 50 MiB (5%; 2 samples)",
+        "x: largest of 7: r1 700 MiB, r2 400 MiB, r0 300 MiB, r6 106 MiB, r5 105 MiB",
+        "x: peak tree PSS 700 MiB of budget 1,000 MiB (70%; 18 samples over <s>)",
+    ]
+    # No watch running: both are nothing.
+    with tm.at("r"), tm.gauges(a=lambda: 1 / 0):
+        pass
+    assert (tm._WATCHES, capsys.readouterr().err) == ([], "")
+
+
+def _boom() -> int:
+    raise RuntimeError("no gauge")
+
+
+def test_a_failing_gauge_is_said_and_leaves_a_phases_block_alone(pss, capsys):
+    """On the thread doing the work: the block completes, and the peak's line says the read failed, beside the gauge that read."""
+    pss["mib"] = 100
+    with tm.TreeWatch(1000 * MIB, "x", every=3600, check=False):
+        with tm.gauges(DuckDB=_boom, Arrow=lambda: 5 * MIB), tm.phase("a"):
+            pass
+    assert _normal(capsys.readouterr().err) == [
+        "x: phase a: peak tree PSS 100 MiB (10%; 2 samples; DuckDB unread (2 failed); Arrow 5 MiB)",
+        "x: phase (untagged): peak tree PSS 100 MiB (10%; 2 samples)",
+        "x: peak tree PSS 100 MiB of budget 1,000 MiB (10%; 4 samples over <s>)",
+    ]
+
+
+def test_a_failing_gauge_leaves_the_sampler_running(pss, capsys):
+    """On the watch's own thread: it keeps sampling, so the peak still sees what the tree does after the failures."""
+    w = tm.TreeWatch(1000 * MIB, "x", every=0.001, check=False)
+    with w, tm.gauges(DuckDB=_boom):
+        deadline = monotonic() + 30
+        while w.gauge_fails["DuckDB"] < 3 and monotonic() < deadline:
+            sleep(0.001)
+        assert w.gauge_fails["DuckDB"] >= 3
+        pss["mib"] = 700
+        seen = w.samples
+        while w.samples == seen and monotonic() < deadline:
+            sleep(0.001)
+        assert w._thread.is_alive()
+        assert w.peak == 700 * MIB
+    capsys.readouterr()
+
+
+def test_duck_bytes_reads_the_buffer_manager_from_another_thread():
+    """The gauge is DuckDB's own total: it grows with a table `con` holds, read on its cursor while `con` itself is busy."""
+    con = duckdb.connect()
+    con.execute("SET threads=2")
+    gauge = tm.duck_bytes(con)
+    empty = gauge()
+    con.execute("CREATE TABLE t AS SELECT i, repeat('x', 100) || i AS s FROM range(2000000) r(i)")
+    held = gauge()
+    assert held > empty + 64 * MIB
+    with Pool(1) as ex:
+        busy = ex.submit(con.execute, "SELECT count(DISTINCT s) FROM t")
+        during = gauge()
+        assert busy.result().fetchone() == (2000000,)
+    assert during >= held
+
+
 def _phases(stderr: str, what: str) -> list[str]:
     return re.findall(rf"^{re.escape(what)}: phase (.+?): peak tree PSS", stderr, re.M)
 
@@ -286,7 +455,7 @@ def test_add_names_its_stages(world, built, pss, tmp_path):  # noqa: F811
                                           "-r", str(RG), "-p", "2", "-M", MEM, "-t", DATES[BASE]], catch_exceptions=False)
     assert res.exit_code == 0, res.output
     assert _phases(res.stderr, "add g") == [
-        "read", "append", "append ranges", "append churn",
+        "read", "append", "append ranges", *RANGE_PHASES, "append churn",
         "cut path", "cut bysize", "cut slices", "cut slices-bytotal", "cut slices-bysize-user",
         "append check", "merge", "upload", "(untagged)",
     ]
@@ -316,17 +485,12 @@ def _range_docs(d: Path) -> dict[str, dict]:
     return {p.name: _no_seconds(json.loads(p.read_text())) for p in sorted(d.glob("*.json"))}
 
 
-def _rows(path: Path) -> list[tuple]:
-    t = pq.read_table(path)
-    return sorted(zip(*(c.to_pylist() for c in t.columns)), key=repr)
-
-
 def test_ranges_task_opens_at_its_budget_under_the_watch(world, built, spy, pss, monkeypatch, tmp_path):  # noqa: F811
     """The staged `ranges` task (`ranges_cmd`), both of a scan's 2 tasks over the 3 ranges: each task's one DuckDB opens
     at what `-M` leaves past this process and the writer's Arrow side, rows as wide as that task's own range files
     (`append_mem`); it and every `append_range` run under `-M`'s `TreeWatch`, whose peak is logged; and the deltas, open
-    state and range docs are `add`'s, as `add` holds them before the run's churn (`apply_run`, which the staged chain
-    leaves to `publish`): byte for byte, but for the scan's churn and prior, which are the same rows."""
+    state and range docs are `add`'s, byte for byte, as `add` holds them before the run's churn (`apply_run`, which the
+    staged chain leaves to `publish`)."""
     d = DATES[BASE]
     rk = ia.run_key(d, d)
     prefix = f"{ist.PREFIX}/g"
@@ -394,18 +558,96 @@ def test_ranges_task_opens_at_its_budget_under_the_watch(world, built, spy, pss,
         assert [line for line in said if line.startswith(f"ranges {d}: ")] == [
             f"ranges {d}: memory {TOTAL / MIB:,.0f} MiB = this process {BASE_B / MIB:,.0f} + Arrow {arrow / MIB:,.0f} ({rb} B a row) + DuckDB {(TOTAL - BASE_B - arrow) / MIB:,.0f}",
         ]
-        assert re.sub(r"\d+ samples", "<n> samples", "\n".join(_normal(res.stderr))).splitlines() == [
+        assert _phases(res.stderr, f"ranges {d}") == [*RANGE_PHASES, "(untagged)"]
+        assert re.sub(r"\d+ samples", "<n> samples", "\n".join(_normal(res.stderr))).splitlines()[-2:] == [
+            f"ranges {d}: largest of {len(names)}: " + ", ".join(f"{n} 1 MiB" for n in sorted(names)),
             f"ranges {d}: peak tree PSS 1 MiB of budget {TOTAL / MIB:,.0f} MiB (0%; <n> samples over <s>)",
         ]
         docs += [json.loads(line) for line in res.stdout.splitlines()]
     assert tm._WATCHES == []
 
     run = store / prefix / rk
-    state = scratch / prefix / "state" / d
-    staged, local = {**_parquets(run), **{f"state/{k}": v for k, v in _parquets(state).items()}}, _parquets(snap)
-    # The scan's churn and prior: unordered `COPY`s of an aggregate, which `apply_run` aggregates again: the same rows.
-    unordered = {k for k in local if k.startswith((f"state/{ich.SCAN_CHURN}/", f"state/{ich.PRIOR}/"))}
-    assert (sorted(staged), len(unordered)) == (sorted(local), 6)
-    assert {k: v for k, v in staged.items() if k not in unordered} == {k: v for k, v in local.items() if k not in unordered}
-    assert {k: _rows(state / k.removeprefix("state/")) for k in unordered} == {k: _rows(snap / k) for k in unordered}
+    assert {**_parquets(run), **{f"state/{k}": v for k, v in _parquets(scratch / prefix / "state" / d).items()}} == _parquets(snap)
     assert _range_docs(run / "ranges") == _range_docs(snap / "ranges") == {f"r{i:04d}.json": _no_seconds(doc) for i, doc in zip((0, 2, 1), docs)}
+
+
+def _files(d: Path) -> dict[str, bytes]:
+    return {p.relative_to(d).as_posix(): p.read_bytes() for p in sorted(d.rglob("*")) if p.is_file()}
+
+
+#: Seconds in a generation's JSON docs: the only part of them a run's timing moves.
+SECONDS = {"s", "cut_s", "check_s"}
+
+
+def _no_timings(doc):
+    if isinstance(doc, dict):
+        return {k: _no_timings(v) for k, v in doc.items() if k not in SECONDS}
+    return [_no_timings(v) for v in doc] if isinstance(doc, list) else doc
+
+
+def _comparable(files: dict[str, bytes]) -> dict[str, object]:
+    """A tree's files with each JSON doc parsed and its timings dropped; everything else as its bytes."""
+    return {k: _no_timings(json.loads(v)) if k.endswith(".json") else v for k, v in files.items()}
+
+
+def test_staged_chain_over_two_scans_is_add(world, built, monkeypatch, tmp_path):  # noqa: F811
+    """`prepare`, `ranges` and `publish` over two consecutive scans on a local store, the second reading its open state
+    from the first's scratch: the whole generation (runs, served sorts, manifests, parity markers) and each scan's state
+    are `add`'s over the same base, byte for byte. Two things can't be: a JSON doc's seconds, and a run's `scans.json`
+    `bucket`, which names where the scans were read (`add`'s `-s`, the staged store)."""
+    scans = DATES[BASE:BASE + 2]
+    prefix = f"{ist.PREFIX}/g"
+
+    (tmp_path / "add").mkdir()
+    added = _copy(built, tmp_path / "add")
+    add_state = {}
+    real_apply = ich.apply_run
+
+    def apply_run(con, run, state, ranges, D, out, **kw):
+        got = real_apply(con, run, state, ranges, D, out, **kw)
+        add_state[Path(run).name] = _files(state)
+        return got
+
+    monkeypatch.setattr(ich, "apply_run", apply_run)
+    _invoke(il.add_cmd, ["-g", "g", "-L", LAYOUT, "-s", str(world["root"]), "-o", str(added), "-w", str(tmp_path / "add" / "w"), "-p", "2", "-M", MEM,
+                         "-N", "-t", scans[-1]])
+    monkeypatch.setattr(ich, "apply_run", real_apply)
+
+    (tmp_path / "staged").mkdir()
+    store = _copy(built, tmp_path / "staged")
+    scratch = tmp_path / "staged" / "scratch"
+    scratch.mkdir()
+    read: list[tuple[str, str, str]] = []
+    real_base, real_run = ia.base_state_sql, ia.run_state_sql
+
+    def base_state_sql(root, name, *a, **kw):
+        read.append(("base", root, name))
+        return real_base(root, name, *a, **kw)
+
+    def run_state_sql(root, name, *a, **kw):
+        read.append(("run", root, name))
+        return real_run(root, name, *a, **kw)
+
+    monkeypatch.setattr(ia, "base_state_sql", base_state_sql)
+    monkeypatch.setattr(ia, "run_state_sql", run_state_sql)
+    names = ["r0000", "r0001", "r0002"]
+    for d in scans:
+        listing = LAYOUT.replace("{id}", d).rsplit("/", 1)[0]
+        shutil.copytree(world["root"] / listing, store / listing)
+        ia.prepare_scan(str(store), "g", d, (LAYOUT,))
+        common = ["-b", str(store), "-g", "g", "-R", "g", "-S", str(scratch), "-d", d, "-m", str(store), "-M", MEM, "-p", "2", "-T", str(tmp_path / "staged" / "tmp")]
+        _invoke(ia.ranges_cmd, [*common, "-i", "0", "-n", "3", "-o", str(tmp_path / "staged" / "out")])
+        _invoke(ia.publish_cmd, common)
+    assert read == [
+        *(("base", f"{store}/{prefix}", n) for n in names),
+        *(("run", f"{scratch}/{prefix}/state/{scans[0]}", n) for n in names),
+    ]
+
+    a, b = _comparable(_files(added / prefix)), _comparable(_files(store / prefix))
+    for d in scans:
+        key = f"{ia.run_key(d, d)}/scans.json"
+        assert (a[key].pop("bucket"), b[key].pop("bucket")) == (str(world["root"]), str(store))
+    assert a == b
+    assert add_state.keys() == set(scans)
+    for d in scans:
+        assert add_state[d] == _files(scratch / prefix / "state" / d)

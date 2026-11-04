@@ -13,6 +13,8 @@ const lag = { auth: 0, scan: 0, gens: 0, match: 0, prep: 0 }
 const calls: string[] = []
 /** The wrapped lookups that settled, in order. */
 const settled: string[] = []
+/** The wrapped lookups' settles and `INDEX_R2`'s reads (`r2 <key>`), in order. */
+const timeline: string[] = []
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms))
 const slowed = <A extends unknown[], R>(name: keyof typeof lag, f: (...a: A) => Promise<R>) => async (...a: A): Promise<R> => {
   calls.push(name)
@@ -21,6 +23,7 @@ const slowed = <A extends unknown[], R>(name: keyof typeof lag, f: (...a: A) => 
     return await f(...a)
   } finally {
     settled.push(name)
+    timeline.push(name)
   }
 }
 
@@ -81,6 +84,7 @@ function r2(dir: string, gets = { n: 0 }): R2Bucket {
   }
   const get = async (key: string, o?: { range?: { offset: number; length: number } }) => {
     gets.n++
+    timeline.push(`r2 ${key}`)
     await sleep(r2Lag.ms)
     const fs = await nodeFs()
     if (!fs.existsSync(path(key))) return null
@@ -120,6 +124,7 @@ beforeEach(async () => {
   await cold()
   calls.length = 0
   settled.length = 0
+  timeline.length = 0
   Object.assign(lag, { auth: 0, scan: 0, gens: 0, match: 0, prep: 0 })
   r2Lag.ms = 0
   knobs.credentials = true
@@ -153,6 +158,17 @@ describe('a level request\'s fixed phase', () => {
       .toEqual([200, 'miss', want, 200, 'hit', want])
   })
 
+  it('its `ph-*` phases cover the request: they sum to `total`', async () => {
+    lag.gens = 12
+    const [from, to] = ['2026-08-03', '2026-08-06']
+    const t = timing(await ask(from, to))
+    const phases = Object.keys(t).filter(k => k.startsWith('ph-')).sort()
+    expect(phases).toEqual(['pointers', 'creds', 'gate', 'scans', 'gens', 'lookup', 'open', 'read', 'store', 'encode', 'rest'].map(k => `ph-${k}`).sort())
+    // Each is rounded: at most half a millisecond off apiece.
+    expect(Math.abs(phases.reduce((n, k) => n + t[k], 0) - t.total)).toBeLessThanOrEqual(Math.ceil((phases.length + 1) / 2))
+    expect(t['ph-gate'] + t['ph-scans'] + t['ph-gens']).toBeGreaterThanOrEqual(10)
+  })
+
   it('a refused gate answers its 401 and nothing else, though its lookups had started', async () => {
     lag.auth = 50
     const r = await ask('2026-08-03', '2026-08-05', { headers: { 'x-deny': '1' } })
@@ -178,6 +194,26 @@ describe('a level request\'s fixed phase', () => {
     expect(r.status).toBe(200)
     expect(t.fixed).toBeGreaterThanOrEqual(195)
     expect(t.fixed).toBeLessThan(330)
+  })
+
+  it('a generation with the level sort opens it beside the gate, and not the path sort', async () => {
+    // `interval-store-level/`: the same store, every tier carrying the level sort.
+    env = { ...env, INTERVAL_STORE_PREFIX: 'interval-store-level' } as Env
+    const [from, to] = ['2026-08-02', '2026-08-06']
+    const built = await buildLevels(env, { from, to, dirs: [''], k: 32, m: 'churn' })
+    const want = JSON.stringify({ from, to, k: 32, m: 'churn', levels: [...built.values()] })
+    await cold()
+    timeline.length = 0
+    calls.length = 0
+    lag.auth = 200
+    const r = await ask(from, to)
+    // Before the gate settled: the store's state and the level sort's footers of the three tiers the range touches;
+    // no `path` sort handle or plan (`prepareLevels` never runs).
+    const early = timeline.slice(0, timeline.indexOf('auth')).filter(e => e.startsWith('r2 ')).map(e => e.slice('r2 interval-store-level/g/'.length))
+    expect([r.status, await r.text(), timing(r)['level-index'], [...new Set(calls)].sort(), early]).toEqual([
+      200, want, 1, ['auth', 'gens', 'match', 'scan'],
+      ['scans.json', 'manifests/2026-08-06.m001.json', 'served/level.groups.parquet', 'deltas/2026-08-04_2026-08-05/served/level.groups.parquet', 'deltas/2026-08-06/served/level.groups.parquet'],
+    ])
   })
 
   it('a path-restricted identity asking a hidden dir is 404, though an unrestricted request left its level cached', async () => {

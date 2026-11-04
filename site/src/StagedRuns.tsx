@@ -29,6 +29,7 @@ import { DEFAULT_STORE } from './stores'
 import { CAPS, type RunAction, useRunAnalytics, useRunDetail, useRunFiles } from './plans'
 import { ReviewPreservation } from './RunPreservation'
 import {
+  ATTEMPTED, attemptOnly, LOWER_BOUND, NOT_OBSERVABLE, totalsLowerBound, UNDO_CAVEAT, UNDO_LOG_ONLY,
   type Check, commonBucketPrefix, type DeletionRun, elapsed, elapsedDetails, type ExecJob, fmtDur, type LogSummaryFile, loggedOf, logSubdir,
   type PlanSummaryFile, plannedOf, progressEstimate, type ProgressFile, runControls, runFileHref, runFilesRel, runLabel, type RunView, sumProgress, type Tally,
   verifyRun, viewBuckets, viewLive, viewState, joinRuns,
@@ -82,6 +83,10 @@ export function RunsSection({ runs, jobs, configured, jobsError, admin, busy, ac
   const planned = new Map<string, { file: PlanSummaryFile; tally: Tally }>()
   planRels.forEach((rel, i) => { const f = planQs[i]?.data; if (f) planned.set(rel, { file: f, tally: plannedOf(f) }) })
   const planOf = (v: RunView) => { const d = dirOf(v); return d ? planned.get(`${d}plan-summary.json`) : undefined }
+  // A real run that ended unsuccessfully: does its run dir hold a final summary, or are its totals a lower bound?
+  const closedRels = views.flatMap(v => { const d = dirOf(v); return d && v.run?.mode === 'real' && v.run.finished_ts && v.run.plan_digest === '' ? [{ view: v, rel: `${d}deleted-summary.json` }] : [] })
+  const closedQs = useRunFiles<LogSummaryFile>(closedRels.map(c => c.rel), false)
+  const lowerBound = new Set(closedRels.flatMap(({ view }, i) => view.run && totalsLowerBound(view.run, closedQs[i]?.data) ? [view.key] : []))
   const progTargets = views.filter(viewLive).flatMap(v => {
     const d = dirOf(v)
     if (!d) return []
@@ -151,10 +156,10 @@ export function RunsSection({ runs, jobs, configured, jobsError, admin, busy, ac
             <tr>
               <th /><th>{sortButton('started', 'run')}</th><th>{sortButton('by', 'by')}</th><th>{sortButton('mode', 'mode')}</th>
               <th className="num"><Tooltip content="What the manifest found. Click to sort by planned object count; byte sorting is available in the sort menu.">{sortButton('planned', 'planned')}</Tooltip></th>
-              <th className="num"><Tooltip content="Real runs: actual deletions. Dry runs: predictions only; nothing is deleted. Click to sort by object count.">{sortButton('deleted', 'deleted / would delete')}</Tooltip></th>
+              <th className="num"><Tooltip content="Real runs: deletes attempted and acknowledged on XML runs (GCS acknowledges every generation it is sent), actual deletions on older JSON and listing runs. Dry runs: predictions only; nothing is deleted. Click to sort by object count.">{sortButton('deleted', 'deleted / would delete')}</Tooltip></th>
               <th>{sortButton('state', 'state')}</th><th><Tooltip content="Sparkline: interval rate over the last hour. Text: average over the run's entire elapsed time, including startup and pauses.">{sortButton('rate', 'rate / history')}</Tooltip></th><th className="num">{sortButton('elapsed', 'elapsed')}</th>
-              <th className="num"><Tooltip content="Planned keys already gone when the run re-listed.">{sortButton('gone', 'gone')}</Tooltip></th>
-              <th className="num"><Tooltip content="Planned keys rewritten since the scan (a new generation): left alone.">{sortButton('overwritten', 'overwritten')}</Tooltip></th>
+              <th className="num"><Tooltip content="Planned keys already gone when the run reached them. Listing and older JSON runs only: an XML run can't observe this, and shows —.">{sortButton('gone', 'gone')}</Tooltip></th>
+              <th className="num"><Tooltip content="Planned keys rewritten since the scan (a new generation): left alone. Listing and older JSON runs only: an XML run can't observe this, and shows — (it deletes only named generations, so a new one survives either way).">{sortButton('overwritten', 'overwritten')}</Tooltip></th>
               <th className="num"><Tooltip content="Preserved objects outside the reviewed manifest. Older directory executors report directory counts.">{sortButton('drift', 'outside review')}</Tooltip></th>
               <th>{sortButton('started', 'started')}</th>
               <th><Tooltip content="Recorded run-level undo deadline. GCS retention starts separately at each object's deletion; this is not an object-level recovery guarantee.">{sortButton('undo', 'undo by')}</Tooltip></th>
@@ -170,6 +175,8 @@ export function RunsSection({ runs, jobs, configured, jobsError, admin, busy, ac
               const live = viewLive(v)
               const ctl = runControls(v, CAPS, admin, now)
               const plan = planOf(v)?.tally
+              const attempted = attemptOnly(planOf(v)?.file)
+              const skips = planOf(v)?.file.skipped_no_generation
               const prog = progress.get(v.key)
               const p = prog ? sumProgress(prog) : null
               const estimate = prog ? progressEstimate(prog, plan?.objects, now) : null
@@ -192,8 +199,8 @@ export function RunsSection({ runs, jobs, configured, jobsError, admin, busy, ac
                     <td className="num nb">{plan ? <>{fmtBytes(plan.bytes)} <span className="dim">· {fmtN(plan.objects)}</span></> : <span className="dim">—</span>}</td>
                     <td className="num nb">
                       {r?.finished_ts ? (
-                        <Tooltip content={mode === 'dry' ? 'Dry run only: no objects were deleted.' : 'Objects deleted by this real run.'}>
-                          <RunOutcome mode={mode}>{fmtBytes(r.deleted_bytes)} <span className="dim">· {fmtN(r.deleted_objects)}</span></RunOutcome>
+                        <Tooltip content={mode === 'dry' ? 'Dry run only: no objects were deleted.' : `${attempted ? ATTEMPTED : 'Objects deleted by this real run.'}${lowerBound.has(v.key) ? ` ${LOWER_BOUND}` : ''}`}>
+                          <RunOutcome mode={mode}>{lowerBound.has(v.key) && '≥ '}{fmtBytes(r.deleted_bytes)} <span className="dim">· {fmtN(r.deleted_objects)}</span></RunOutcome>
                         </Tooltip>
                       ) : live && p ? (
                         <Tooltip content={<>
@@ -215,7 +222,9 @@ export function RunsSection({ runs, jobs, configured, jobsError, admin, busy, ac
                     <td>
                       <span className="rstate">{state.toLowerCase()}</span>
                       {state === 'CANCELLED' && <Tooltip content="A STOP request was recorded. Batch may report this clean interruption as FAILED (exit 130); acknowledged deletions remain logged."><span className="dim"> · intentional stop</span></Tooltip>}
-                      {failed && job?.last_event && <details className="why"><summary>why</summary><div>{job.last_event}</div></details>}
+                      {failed && (job?.failure || job?.last_event) && <details className="why"><summary>why</summary>{job.failure && <div>{job.failure}</div>}{job.last_event && <div className={job.failure ? 'dim' : undefined}>{job.last_event}</div>}</details>}
+                      {skips && skips.whole_buckets.length > 0 && <Tooltip content={<>Nothing was deleted in {skips.whole_buckets.map(shortBucket).join(', ')}: none of its objects had a generation in the scan's listing. Its prefixes stay staged.</>}><span className="tag not-swept">{skips.whole_buckets.length} {skips.whole_buckets.length === 1 ? 'bucket' : 'buckets'} not swept</span></Tooltip>}
+                      {skips && skips.objects > 0 && <Tooltip content={`${fmtBytes(skips.bytes)} in objects the scan's listing has no generation for. Left in place, and logged per object as skipped_no_generation; not counted in deleted.`}><span className="tag">{fmtN(skips.objects)} skipped: no generation</span></Tooltip>}
                       {ctl.undoing && <span className="tag">undoing</span>}
                       {r?.undo_state === 'full' && <span className="tag">undone</span>}
                       {r?.undo_state === 'partial' && !ctl.undoing && <Tooltip content="An undo ran (or was dispatched) but not every deleted object is live again; undo again to retry the rest."><span className="tag">partly undone</span></Tooltip>}
@@ -223,8 +232,8 @@ export function RunsSection({ runs, jobs, configured, jobsError, admin, busy, ac
                     </td>
                     <td>{CAPS.runFiles && r && <RunProgress id={r.run_id} live={live} compact fmtBytes={fmtBytes} lifetime={secs != null ? { objects: r.finished_ts ? r.deleted_objects : p?.deletes ?? 0, seconds: secs } : undefined} />}</td>
                     <td className="num"><Tooltip cell content={<>{elapsedDetails(v).map(line => <div key={line}>{line}</div>)}</>}><span>{secs == null ? <span className="dim">—</span> : fmtDur(secs)}</span></Tooltip></td>
-                    <td className="num">{r?.finished_ts ? fmtN(r.skipped_gone) : p ? fmtN(p.gone) : <span className="dim">—</span>}</td>
-                    <td className="num">{r?.finished_ts ? fmtN(r.skipped_overwritten ?? 0) : <span className="dim">—</span>}</td>
+                    <td className="num">{attempted && !r?.skipped_gone ? <Tooltip content={NOT_OBSERVABLE}><span className="dim">—</span></Tooltip> : r?.finished_ts ? fmtN(r.skipped_gone) : p ? fmtN(p.gone) : <span className="dim">—</span>}</td>
+                    <td className="num">{attempted && !r?.skipped_overwritten ? <Tooltip content={NOT_OBSERVABLE}><span className="dim">—</span></Tooltip> : r?.finished_ts ? fmtN(r.skipped_overwritten ?? 0) : <span className="dim">—</span>}</td>
                     <td className="num">{r?.finished_ts ? fmtN((r.drift_dirs ?? 0) + (r.ledger_drift_dirs ?? 0)) : <span className="dim">—</span>}</td>
                     <td><TimeCell ts={startedTs ?? undefined} /></td>
                     <td className="nb">
@@ -253,7 +262,7 @@ export function RunsSection({ runs, jobs, configured, jobsError, admin, busy, ac
                         </Tooltip>
                       )}
                       {ctl.undo && r && (
-                        <Tooltip content={`Restore what this run deleted (a Batch job; until ${r.undo_deadline ? `${utc(r.undo_deadline)} UTC` : 'its window closes'}).`}>
+                        <Tooltip content={`Restore what this run deleted (a Batch job; until ${r.undo_deadline ? `${utc(r.undo_deadline)} UTC` : 'its window closes'}).${attempted ? ` ${UNDO_CAVEAT}` : ''}${lowerBound.has(v.key) ? ` ${UNDO_LOG_ONLY}` : ''}`}>
                           <button type="button" disabled={busy} onClick={() => act({ action: 'undo', run_id: r.run_id })}>undo</button>
                         </Tooltip>
                       )}
@@ -286,7 +295,7 @@ export function RunsSection({ runs, jobs, configured, jobsError, admin, busy, ac
   )
 }
 
-const DECISION_ORDER = ['delete', 'skipped_gone', 'skipped_overwritten', 'delete_failed']
+const DECISION_ORDER = ['delete', 'skipped_no_generation', 'skipped_gone', 'skipped_overwritten', 'delete_failed']
 
 /** A run's detail: D1 totals + undo window, what it planned, what it logged
  * (per bucket), the checks between them, and its bands. */
@@ -304,8 +313,11 @@ export function RunDetail({ run, live, progress, dir, planned, fmtBytes, now }: 
   const logRel = dir && run.finished_ts ? [`${dir}${logSubdir(run.mode)}-summary.json`] : []
   const [logQ] = useRunFiles<LogSummaryFile>(logRel, false)
   const log = logQ?.data ?? null
+  const lower = totalsLowerBound(run, logQ?.data)
   const logged = log ? loggedOf(log) : null
   const plan = planned ? plannedOf(planned) : null
+  const attempted = attemptOnly(planned)
+  const skips = planned?.skipped_no_generation
   const checks: Check[] = run.finished_ts ? verifyRun(detail.data?.run ?? run, plan, logged) : []
   const r = detail.data?.run ?? run
   const bands = detail.data?.bands ?? []
@@ -317,8 +329,9 @@ export function RunDetail({ run, live, progress, dir, planned, fmtBytes, now }: 
     <div className="run-detail">
       {CAPS.runFiles && <RunProgress id={run.run_id} live={live} fmtBytes={fmtBytes} planned={planned} />}
       <dl className="rd-totals">
-        {live ? <div><dt>live progress</dt><dd>{progress ? <>{fmtBytes(progress.bytes)} · {fmtN(progress.deletes)} {r.mode === 'real' ? 'deleted' : 'would delete'} · {fmtN(progress.gone)} gone</> : 'waiting for progress'}<span className="dim"> · final totals recorded when the run ends</span></dd></div>
-          : <div><dt>final totals</dt><dd>{fmtBytes(r.deleted_bytes)} · {fmtN(r.deleted_objects)} {r.mode === 'real' ? 'deleted' : 'would delete'} · {fmtN(r.skipped_gone)} already gone · {fmtN(r.skipped_overwritten ?? 0)} replaced objects preserved</dd></div>}
+        {live ? <div><dt>live progress</dt><dd>{progress ? <>{fmtBytes(progress.bytes)} · {fmtN(progress.deletes)} {r.mode === 'dry' ? 'would delete' : attempted ? 'acknowledged' : 'deleted'}{!attempted && <> · {fmtN(progress.gone)} gone</>}</> : 'waiting for progress'}<span className="dim"> · final totals recorded when the run ends</span></dd></div>
+          : <div><dt>{lower ? 'totals so far' : 'final totals'}</dt><dd>{lower && 'at least '}{fmtBytes(r.deleted_bytes)} · {fmtN(r.deleted_objects)} {r.mode === 'dry' ? 'would delete' : attempted ? 'attempted and acknowledged' : 'deleted'}{attempted ? <span className="dim"> · {NOT_OBSERVABLE}</span> : <> · {fmtN(r.skipped_gone)} already gone · {fmtN(r.skipped_overwritten ?? 0)} replaced objects preserved</>}{lower && <span className="dim"> · {LOWER_BOUND}</span>}</dd></div>}
+        {skips && <div><dt>skipped: no generation</dt><dd>{fmtBytes(skips.bytes)} · {fmtN(skips.objects)} objects left in place, logged per object{skips.whole_buckets.length > 0 && <> · <b className="err">not swept: {skips.whole_buckets.join(', ')}</b> (none of its objects had a generation; its prefixes stay staged)</>}</dd></div>}
         <div><dt>elapsed</dt><dd>{fmtDur((r.finished_ts ?? now) - r.started_ts)}</dd></div>
         {review && <div><dt>reviewed manifest</dt><dd>{fmtN(review.objects)} objects · {fmtBytes(review.bytes)}</dd></div>}
         {review && Object.keys(review.as_of ?? {}).length > 0 && <div><dt>review cutoffs</dt><dd>{[...new Set(Object.values(review.as_of))].sort().join(' · ')}</dd></div>}
@@ -326,7 +339,7 @@ export function RunDetail({ run, live, progress, dir, planned, fmtBytes, now }: 
         <div><dt>scan</dt><dd>{r.scan ?? '—'}{r.plan_digest ? <> · items <code>{r.plan_digest}</code></> : null}</dd></div>
         {r.mode === 'real' && !CAPS.undoUnwindowed && <div><dt>undo</dt><dd>
           {r.undo_deadline ? <>recorded run deadline {utc(r.undo_deadline)} UTC {now < r.undo_deadline ? <span className="dim">(in {fmtDur(r.undo_deadline - now)})</span> : <span className="dim">(closed)</span>}</> : live ? 'recovery after stop and drain; final deadline not recorded yet' : 'no window recorded'}
-          {' · '}state <b>{r.undo_state}</b>{r.purge_state && r.purge_state !== 'none' && <> · purge <b>{r.purge_state}</b></>}
+          {' · '}state <b>{r.undo_state}</b>{r.purge_state && r.purge_state !== 'none' && <> · purge <b>{r.purge_state}</b></>}{lower && <span className="dim"> · {UNDO_LOG_ONLY}</span>}
         </dd></div>}
         {r.log_dir && <div><dt>run dir</dt><dd><code>{r.log_dir}</code></dd></div>}
       </dl>
@@ -335,7 +348,7 @@ export function RunDetail({ run, live, progress, dir, planned, fmtBytes, now }: 
       <section className="rd-preserved">
         <h4>Preserved objects</h4>
         {detail.isLoading ? <Loading label="Loading preserved-object counts…" /> : detail.error ? <p className="err">{detail.error.message}</p> : <>
-          {bands.length > 0 ? <p><b>{fmtN(bands.reduce((n, b) => n + b.drift_new_objects, 0))}</b> outside the reviewed manifest · <b>{fmtN(bands.reduce((n, b) => n + b.overwritten, 0))}</b> replaced objects.</p> : <p>No per-prefix preservation counts recorded.</p>}
+          {attempted ? <p>Only named generations were sent, so a newer generation or a key written since the scan survives. This run can't count them: {NOT_OBSERVABLE}</p> : bands.length > 0 ? <p><b>{fmtN(bands.reduce((n, b) => n + b.drift_new_objects, 0))}</b> outside the reviewed manifest · <b>{fmtN(bands.reduce((n, b) => n + b.overwritten, 0))}</b> replaced objects.</p> : <p>No per-prefix preservation counts recorded.</p>}
           {breakdown ? <dl className="rd-totals">
             <div><dt>new since review</dt><dd>{fmtN(breakdown.new_since_review)}</dd></div>
             <div><dt>changed since review</dt><dd>{fmtN(breakdown.changed_since_review)}</dd></div>
@@ -352,7 +365,7 @@ export function RunDetail({ run, live, progress, dir, planned, fmtBytes, now }: 
         <h4>Recovery</h4>
         {CAPS.undoUnwindowed ? <p>Recovery depends on the bucket’s versioning and retention settings. This deletion may be permanent; a recorded run deadline does not guarantee recovery.</p> : <>
         <p>{live ? 'Stop and drain this run before restoring. Its committed decision logs retain exact generations; a restore during deletion could be deleted again.' : 'The web undo control restores the entire run. The CLI can restrict recovery to a selected prefix.'}</p>
-        <p className="dim">Retention starts separately when each object is deleted, not at run completion. Empty at a scan does not establish that this run deleted it.{conservativeDeadline(r) != null && <> Conservative cutoff for this run: {utc(conservativeDeadline(r)!)} UTC. Later deletions may remain recoverable longer; the stored run deadline is not an object-level guarantee.</>}</p>
+        <p className="dim">Retention starts separately when each object is deleted, not at run completion. Empty at a scan does not establish that this run deleted it.{conservativeDeadline(r) != null && <> Conservative cutoff for this run: {utc(conservativeDeadline(r)!)} UTC. Later deletions may remain recoverable longer; the stored run deadline is not an object-level guarantee.</>}{attempted && <> Undo restores every logged generation. {UNDO_CAVEAT}</>}</p>
         <code>dt-cloud sweep undo -p gs://BUCKET/PREFIX/ {r.run_id}</code>
         </>}
       </section>}
@@ -383,6 +396,7 @@ export function RunDetail({ run, live, progress, dir, planned, fmtBytes, now }: 
                         {s.soft_delete_days != null && <>soft delete {Math.round(s.soft_delete_days)}d</>}
                         {s.interrupted && <> · stopped with {fmtN(s.interrupted.roots_skipped)} of {fmtN(s.interrupted.roots)} roots not started</>}
                         {s.missing_perms?.length ? <> · missing {s.missing_perms.join(', ')}</> : null}
+                        {s.skipped_no_generation && <> · {fmtBytes(s.skipped_no_generation.bytes)} skipped: no generation{s.skipped_no_generation.whole_bucket && <> · <b className="err">not swept</b></>}</>}
                       </td>
                     </tr>
                   ))}
@@ -400,7 +414,7 @@ export function RunDetail({ run, live, progress, dir, planned, fmtBytes, now }: 
 
       <h4>Prefixes ({bands.length})</h4>
       {detail.isLoading ? <Loading label="Loading prefix outcomes…" /> : detail.error ? <p className="err">{detail.error.message}</p> : !bands.length ? <p className="dim">{run.finished_ts ? 'No per-prefix outcomes recorded.' : 'Recorded when the run ends.'}</p> : (
-        <RunBands bands={bands} id={r.run_id} fmtBytes={fmtBytes} analysis={analytics.data?.analysis} />
+        <RunBands bands={bands} id={r.run_id} fmtBytes={fmtBytes} analysis={analytics.data?.analysis} attempted={attempted} />
       )}
     </div>
   )

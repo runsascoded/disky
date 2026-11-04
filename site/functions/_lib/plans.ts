@@ -4,6 +4,7 @@
 // Batch executor consumes. D1 CRUD + snapshot + the admin-edit audit trail
 // live here; the HTTP surface is api/plans/[[path]].ts.
 import type { D1Database } from "@cloudflare/workers-types"
+import type { RunOutcome } from "../../src/runs.js"
 
 // A plan prefix stored as `<scheme><bucket>/<path>/` (the deployment's
 // `STORE_SCHEME`: `s3://`, `gs://`, `file:///`); normalized to a relative key
@@ -684,8 +685,9 @@ export type RealRun =
 /** How a real run of the item set `digest` (`items` of them) at scan `date` goes (specs/done/delete-what-you-see.md): never
  * while a run of the plan is in flight; no prior dry run required — the run's own manifest (each item held to its
  * staging scan, generation-pinned deletes) is the safety. `reviewed`: the newest finished dry run of exactly this set
- * at that scan, whose manifest the run may reuse (none: the run lists afresh). `date` absent: that dry run's scan,
- * and one is then required. */
+ * at that scan, whose decisions the run may reuse (none: the run builds its own manifest and, on gcs, deletes that
+ * manifest's generations with no relist, so it has no whole-dir drift skip; a key written beside a manifest key survives
+ * because only named generations are deleted). `date` absent: that dry run's scan, and one is then required. */
 export function realRun(runs: readonly RunRow[], digest: string, items: number, date?: string): RealRun {
   if (!items) return { ok: false, reason: "nothing selected" }
   const live = runs.find(r => r.finished_ts == null)
@@ -698,8 +700,10 @@ export function realRun(runs: readonly RunRow[], digest: string, items: number, 
 }
 
 /** A run an executor's reflection just closed: `ok` = with its result
- * (totals); not ok = it ended without one (its Batch job stopped first). */
-export interface FinishedRun { run_id: string; ok: boolean }
+ * (totals); not ok = it ended without one (its Batch job stopped first), and
+ * `reason` is why, when the failed step recorded it. `outcome`: what its
+ * totals don't say, when the run's files were read and have something to add. */
+export interface FinishedRun { run_id: string; ok: boolean; reason?: string; outcome?: RunOutcome }
 
 /** A plan's runs, as the gate reads them. */
 export async function planRuns(db: D1Database, planId: number): Promise<RunRow[]> {

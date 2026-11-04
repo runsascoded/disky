@@ -1490,6 +1490,7 @@ async function ivFooterDoc(h: PqHandle, fg: FooterGroup): Promise<{ groups: Blob
     let doc: FooterDoc
     if (hit) doc = await hit.json<FooterDoc>()
     else {
+      h.trace?.('fdoc-r2', 1)
       const full = h.footer.full ? await h.footer.full() : h.footer
       const ffg = full.groups[fg.n]
       const buf = toBuffer((await h.src!.get(h.footer.key, { offset: ffg.byteStart, length: ffg.byteEnd - ffg.byteStart })).bytes)
@@ -2565,21 +2566,19 @@ type PageIx = { locs: Record<string, PageLocation[]>; stats: Record<string, Colu
 
 const pageIxKey = (t: IndexHandle, rg: number): string => `${storeKey(t.env)}|${t.dataKey}|pi:${rg}`
 const pageIxColoKey = (t: IndexHandle, rg: number): Request => coloKey(t.env, t.dataKey!, `pi=${rg}&d=${PAGE_IX_DOC}`)
-const isPlanCol = (name: string): boolean => (PAGE_PLAN as readonly string[]).includes(name)
-
-/** A group's page-index byte spans (the planning columns' ColumnIndexes, every column's OffsetIndex), and the runs
- *  they merge into (`planRuns`; the colo copy holds those runs' bytes). */
-function pageIxSpans(chunks: IndexedChunk[], leaves: SchemaElement[]): { spans: { start: number; end: number }[]; runs: { start: number; end: number }[] } {
+/** A group's page-index byte spans (`plan`'s ColumnIndexes, every column's OffsetIndex), and the runs they merge into
+ *  (`planRuns`; the colo copy holds those runs' bytes). */
+function pageIxSpans(chunks: IndexedChunk[], leaves: SchemaElement[], plan: readonly string[] = PAGE_PLAN): { spans: { start: number; end: number }[]; runs: { start: number; end: number }[] } {
   const spans: { start: number; end: number }[] = []
   for (const [i, k] of chunks.entries()) {
-    if (isPlanCol(leaves[i].name) && k.column_index_length) spans.push({ start: Number(k.column_index_offset), end: Number(k.column_index_offset) + k.column_index_length })
+    if (plan.includes(leaves[i].name) && k.column_index_length) spans.push({ start: Number(k.column_index_offset), end: Number(k.column_index_offset) + k.column_index_length })
     if (k.offset_index_length) spans.push({ start: Number(k.offset_index_offset), end: Number(k.offset_index_offset) + k.offset_index_length })
   }
   return { spans, runs: planRuns(spans).map(r => ({ start: r.start, end: r.end })) }
 }
 
 /** A group's page index parsed from its index runs' bytes (`buf`: `runs`' bytes concatenated). */
-function parsePageIx(chunks: IndexedChunk[], leaves: SchemaElement[], runs: { start: number; end: number }[], buf: ArrayBuffer): PageIx {
+function parsePageIx(chunks: IndexedChunk[], leaves: SchemaElement[], runs: { start: number; end: number }[], buf: ArrayBuffer, plan: readonly string[] = PAGE_PLAN): PageIx {
   const at = (off: bigint | undefined, len: number) => {
     let base = 0
     for (const r of runs) {
@@ -2593,7 +2592,7 @@ function parsePageIx(chunks: IndexedChunk[], leaves: SchemaElement[], runs: { st
   for (const [i, k] of chunks.entries()) {
     const name = leaves[i].name
     if (k.offset_index_length) locs[name] = readOffsetIndex(at(k.offset_index_offset, k.offset_index_length)).page_locations
-    if (isPlanCol(name) && k.column_index_length) stats[name] = readColumnIndex(at(k.column_index_offset, k.column_index_length), leaves[i] as never)
+    if (plan.includes(name) && k.column_index_length) stats[name] = readColumnIndex(at(k.column_index_offset, k.column_index_length), leaves[i] as never)
   }
   return { locs, stats }
 }
@@ -2815,6 +2814,397 @@ async function readChangedPages(t: IndexHandle, spans: Span[], rects: Rect[], d1
   rest.push(...restLate.sort((a, b) => a[0] - b[0]).map(([, s]) => s))
   return { rows: out.flat(), rest }
 }
+
+// --- the level index (`interval_level.py`, specs/diff-progressive.md §3b): `/api/diff/level`'s own sort ---------------
+//
+// One row per child version transition, keyed `(depth, path, ts, name)` (the parent's key, the scan stamp, the child's
+// name). A directory's children's transitions in `(d1, d2]` are one key range of each file holding a scan of the range
+// (the base, each run), and no other file has any: a level read plans each such file's groups (sidecar bounds) and
+// pages (page index) for every asked directory at once, then reads the pages in two waves (page index, page data), each
+// wave's merged byte runs (`planRuns`, across directories and files) under one `RUN_READS` limiter: a batch costs its
+// footers plus 2 × ⌈Σ runs / RUN_READS⌉ round trips.
+
+export const IV_LEVEL = 'level'
+const IV_LEVEL_COLS = ['depth', 'path', 'ts', 'name', 'op', 'kind', 'kind_prev', 'size', 'n_files', 'size_prev', 'n_files_prev', 'churn_cum', 'churn_prev']
+/** The columns a level page is kept by (each with a ColumnIndex). */
+const LEVEL_PLAN = ['depth', 'path', 'ts'] as const
+
+/** One transition of a child (`name`; '' the directory itself) under directory `path` at stamp `ts`: `op` 0 appeared,
+ *  1 changed, 2 went away; its values after (`kind`, `size`, `n_files`; a closing's `kind` the version that ended) and
+ *  before (`kindPrev` null where absent), its cumulative churn after (`churnCum`) and at its previous transition
+ *  (`churnPrev`). */
+export interface LevelRec {
+  depth: number; path: string; ts: number; name: string; op: number
+  kind: string; kindPrev: string | null; size: number; nFiles: number; sizePrev: number; nFilesPrev: number; churnCum: number; churnPrev: number
+}
+
+/** A level read's files: the tiers holding a scan in `(d1, d2]`, each a handle on its `level` sort. */
+export interface LevelHandle { env: Env; d1: number; d2: number; tiers: PqHandle[] }
+
+/** Tiers found without the level sort (a generation or run cut before it), held a minute: their reads go the old way. */
+const ivNoLevel = new IsoMap<string, number>('ivNoLevel')
+
+/** The level sort of every tier of `env`'s interval store holding a scan in `(from, to]`, or null when the store doesn't
+ *  hold both scans or some such tier lacks the sort (the caller reads the `path` sort instead). A run that fails to open
+ *  otherwise is cut out (`IvTierBroken`), as any run read is. */
+export async function openIvLevel(env: Env, from: string, to: string, trace?: Trace): Promise<LevelHandle | null> {
+  if (!intervalsOn(env)) return null
+  const t0 = now()
+  const st = await ivState(env)
+  trace?.('lv-state', now() - t0)
+  for (const d of [from, to]) {
+    const cut = ivCutOut(env, st, d)
+    if (cut) throw cut
+  }
+  const d1 = st.scans.get(from)
+  const d2 = st.scans.get(to)
+  if (d1 == null || d2 == null || d1 >= d2) return null
+  const touched = (ids: string[]) => ids.some(id => { const t = st.scans.get(id); return t != null && t > d1 && t <= d2 })
+  const tiers: (string | null)[] = [...(touched([...st.base]) ? [null] : []), ...st.runs.filter(r => touched(r.scans)).map(r => r.key)]
+  const gen = env.INTERVAL_STORE_GEN!
+  const missing = (run: string | null) => { const at = ivNoLevel.get(`${ivGenKey(env)}|${run ?? ''}`); return at != null && Date.now() - at < 60_000 }
+  if (tiers.some(missing)) return null
+  const src = r2Bytes(env.INDEX_R2!)
+  let footerMax = 0
+  const open = async (run: string | null): Promise<PqHandle | null> => {
+    const t1 = now()
+    const dir = run ? `${ivPrefix(env)}/${gen}/${run}/served` : `${ivPrefix(env)}/${gen}/served`
+    const key = ivKey(env, `${dir}/${IV_LEVEL}.parquet`)
+    let footer: FooterIndex
+    try {
+      footer = run ? await ivRunFooter(env, run, IV_LEVEL) : await ivFooter(env, IV_LEVEL)
+    } catch (e) {
+      if ((e as Error).name === 'NotFoundError') {
+        ivNoLevel.set(`${ivGenKey(env)}|${run ?? ''}`, Date.now())
+        return null
+      }
+      throw run ? ivMarkBroken(env, run, e) : e
+    }
+    footerMax = Math.max(footerMax, now() - t1)
+    const kv = new Map((footer.metadata.key_value_metadata ?? []).map(e => [e.key, e.value]))
+    const file: FileSlice = { get byteLength() { return 0 }, slice: async (s0, e) => toBuffer((await src.get(key, { offset: s0, length: (e ?? s0) - s0 })).bytes) }
+    // `asOf` / `historyRange`: the sidecar is an interval store's (`ivFooterDoc`), its `vf`/`vt` bounds the groups' `ts`.
+    return { mode: 'pq', file, env, date: to, variant: IV_LEVEL, gen: `iv:${gen}${ivRev(env)}${run ? `/${run}` : ''}`, dir, schema: JSON.parse(kv.get('schema')!) as SchemaElement[],
+      version: Number(kv.get('version')), columns: IV_LEVEL_COLS, floor: null, footer, asOf: d2, historyRange: [d1, d2], src, dataKey: key, ...(run ? { run } : {}) }
+  }
+  const hs = await Promise.all(tiers.map(open))
+  trace?.('lv-tiers', tiers.length)
+  trace?.('lv-footer', footerMax)
+  if (hs.some(h => !h)) return null
+  return { env, d1, d2, tiers: hs as PqHandle[] }
+}
+
+/** The level page indexes an isolate holds, by the estimated bytes of `levelIxCache`. An LRU of its own, as the footers'
+ *  is: a level read touches up to `LEVEL_MAX_GROUPS` groups, and in `footerCache` its indexes would evict the footer
+ *  groups every plan reads. Holding the thrift, not `PageIx`: a parsed group's objects and bigints are 4.3× its thrift
+ *  (Node heap, gcs's `level`, 2026-11-03: ~14 KB of thrift, ~59 KB parsed, 32 pages of 13 columns), so a cap holding ~600
+ *  groups as bytes would hold ~130 parsed, about one wide read; parsing costs ~0.1 ms a group, as every read has always
+ *  paid. 8 MB beside the groups' 24, the footers' 12 and the static answers' 32 (`HELD_BYTES`) leaves the isolate's
+ *  128 MB its room for a request's decode. The least recently used group is evicted past the cap. */
+const LEVEL_IX_CAP = 8 << 20
+/** A held entry's bytes past its thrift (the key, the entry, the buffer's header). */
+const LEVEL_IX_ENTRY = 256
+const levelIxCache = new Lru('levelIxCache', LEVEL_IX_CAP)
+/** Level page indexes being read: concurrent reads of a level (a browser's batches) share a group's. */
+const levelIxInFlight = new IsoMap<string, Promise<ArrayBuffer>>('levelIxInFlight')
+
+/** `cands`' page indexes. A group's comes from the isolate (`levelIxCache`), else from a read in flight, else the colo
+ *  (immutable: the key is the file's, which names the generation and the tier), else the file: the groups left merged
+ *  into one wave's runs (`wave`), each held then. Colo copies are put by `later`, so they queue behind no GET of this
+ *  read. Server-Timing: `lv-index-held` / `-colo` / `-joined` / `-miss`, the groups each way; `lv-index-lookup` the colo
+ *  lookups' ms; `lv-index` and its `-gets`, `-rounds`, `-bytes` the wave's. */
+async function levelPageIxs<C extends { t: PqHandle; g: BlobGroup; rg: { columns: IndexedChunk[] } }>(
+  env: Env,
+  cands: C[],
+  lim: <T>(f: () => Promise<T>) => Promise<T>,
+  wave: (perTier: Map<PqHandle, { start: number; end: number }[]>) => Promise<Map<PqHandle, FileSlice>>,
+  later: (() => void)[],
+  trace?: Trace,
+): Promise<Map<C, PageIx>> {
+  const geom = new Map(cands.map(c => [c, pageIxSpans(c.rg.columns, c.t.schema.slice(1), LEVEL_PLAN)]))
+  const key = (c: C) => pageIxKey(c.t, c.g.rg)
+  const out = new Map<C, PageIx>()
+  const parsed = (c: C, buf: ArrayBuffer) => { out.set(c, parsePageIx(c.rg.columns, c.t.schema.slice(1), geom.get(c)!.runs, buf, LEVEL_PLAN)) }
+  const hold = (c: C, buf: ArrayBuffer) => levelIxCache.put(key(c), [buf], buf.byteLength + LEVEL_IX_ENTRY)
+  let held = 0
+  const inIsolate = (c: C): boolean => {
+    const buf = levelIxCache.get<ArrayBuffer>(key(c))?.[0]
+    if (buf) {
+      parsed(c, buf)
+      held++
+    }
+    return !!buf
+  }
+  const missing = cands.filter(c => !inIsolate(c))
+  const t0 = now()
+  let fromColo = 0
+  await Promise.all(missing.filter(c => !levelIxInFlight.has(key(c))).map(c => lim(async () => {
+    const hit = await colo().match(pageIxColoKey(c.t, c.g.rg))
+    const buf = hit ? await hit.arrayBuffer() : null
+    if (!buf || buf.byteLength !== geom.get(c)!.runs.reduce((m, r) => m + r.end - r.start, 0)) return
+    hold(c, buf)
+    parsed(c, buf)
+    fromColo++
+  })))
+  trace?.('lv-index-lookup', now() - t0)
+  // No await from here until every group left is in flight: two reads can't both miss a group's entry.
+  const left = missing.filter(c => !out.has(c) && !inIsolate(c))
+  const mine = left.filter(c => !levelIxInFlight.has(key(c)))
+  const spansOf = (cs: C[]) => {
+    const m = new Map<PqHandle, { start: number; end: number }[]>()
+    for (const c of cs) m.set(c.t, [...(m.get(c.t) ?? []), ...geom.get(c)!.spans])
+    return m
+  }
+  const read = async (c: C, wv: Promise<Map<PqHandle, FileSlice>>): Promise<ArrayBuffer> => {
+    const file = (await wv).get(c.t)!
+    const { runs } = geom.get(c)!
+    const parts = await Promise.all(runs.map(r => file.slice(r.start, r.end)))
+    // A copy: holding a slice mustn't hold its whole run.
+    const bytes = new Uint8Array(parts.reduce((m, p) => m + p.byteLength, 0))
+    let o = 0
+    for (const p of parts) {
+      bytes.set(new Uint8Array(p), o)
+      o += p.byteLength
+    }
+    hold(c, bytes.buffer)
+    later.push(() => putColoIx(c.t, c.g.rg, bytes.buffer))
+    return bytes.buffer
+  }
+  const ours = wave(spansOf(mine))
+  const own = new Set(mine)
+  // A group another read holds is joined; if that read dies, this one reads the group itself.
+  const got = left.map(async c => parsed(c, await inFlight(levelIxInFlight, key(c), () => read(c, own.has(c) ? ours : wave(spansOf([c]))), ivJoin(env, 'level-ix'))))
+  await Promise.all([ours, ...got])
+  trace?.('lv-index-held', held)
+  trace?.('lv-index-colo', fromColo)
+  trace?.('lv-index-joined', left.length - mine.length)
+  trace?.('lv-index-miss', mine.length)
+  return out
+}
+
+/** Put a group's page-index bytes in the colo, best effort and not waited for (`putColoGroup`). */
+function putColoIx(t: IndexHandle, rg: number, buf: ArrayBuffer): void {
+  const p: Promise<void> = colo().put(pageIxColoKey(t, rg), new Response(buf, { headers: { 'cache-control': `max-age=${BLOB_CACHE_TTL}` } }))
+    .catch(() => {})
+    .finally(() => { coloPuts.delete(p) })
+  coloPuts.add(p)
+}
+
+/** The groups a level read of `dirs` decodes at most (`readFits`' bound). */
+const LEVEL_MAX_GROUPS = 250
+/** Cloudflare's per-isolate memory limit: past it, a request dies as an uncatchable 1102. */
+const WORKER_MEMORY = 128 * 2 ** 20
+/** What one request's level reads may charge, summed over its rounds (`LevelSpend`): three quarters of the isolate, the
+ *  rest its code, caches and response. A sum, not a per-read cap, so it bounds the request's decoding CPU too. A knob
+ *  object: tests shrink it. */
+export const LEVEL_BUDGET = { bytes: WORKER_MEMORY * 3 / 4 }
+/** V8 heap bytes a decoded level row costs (13 fields, boxed numbers, a 31-character name), measured by heap delta over
+ *  300K rows of the reader's shape. Its consequences match the isolate's limit: 352K rows passed live, ~550K died. */
+const LEVEL_ROW_HEAP = 264
+/** A request's remaining `LEVEL_BUDGET`, charged by each read before it fetches. */
+export type LevelSpend = { left: number }
+/** The isolate's level charges, by request: requests in one isolate share its memory. A cancelled request (its client
+ *  gone) may never reach its `releaseLevel`, so a charge expires; by then its rows are garbage, and a Worker's CPU
+ *  limit has long ended anything still decoding them. */
+const levelHeld = new Map<LevelSpend, { bytes: number; at: number }>()
+const LEVEL_CHARGE_TTL = 120_000
+/** Bytes the isolate's requests hold now. */
+export function levelHeldBytes(): number {
+  let held = 0
+  const now = Date.now()
+  for (const [k, c] of levelHeld) {
+    if (now - c.at > LEVEL_CHARGE_TTL) levelHeld.delete(k)
+    else held += c.bytes
+  }
+  return held
+}
+/** This request would fit, but other requests in the isolate hold the room: ask again shortly. */
+export class LevelBusy extends Error {}
+/** Charge `bytes` to `spend` and the isolate, or refuse: "query too wide" past the request's own budget, `LevelBusy` past
+ *  the isolate's. Synchronous, so two requests can't both take the last of it. */
+export function chargeLevel(spend: LevelSpend, bytes: number): void {
+  const mib = (n: number) => Math.round(n / 2 ** 20)
+  if (bytes > spend.left) throw new Error(`query too wide: its level rows would cost ${mib(bytes)} MiB, ${mib(spend.left)} left`)
+  if (bytes > LEVEL_BUDGET.bytes - levelHeldBytes()) throw new LevelBusy(`level reads busy: ${mib(bytes)} MiB wanted`)
+  spend.left -= bytes
+  const held = levelHeld.get(spend)
+  levelHeld.set(spend, { bytes: (held?.bytes ?? 0) + bytes, at: Date.now() })
+}
+/** A request's charges back, when it has its answers. */
+export function releaseLevel(spend: LevelSpend): void {
+  levelHeld.delete(spend)
+}
+/** A row a level read of the `path` sort decodes costs at least this (`readChanged`'s rows are wider). */
+export const LEVEL_PATH_ROW_HEAP = 264
+
+/** What decoding a group's kept rows costs: each row's heap, and its share of the group's compressed bytes (what's
+ *  fetched for it; the footer sidecar's chunk `size`), so wider rows charge more. */
+function levelCharge(p: { rg: { num_rows: bigint; columns: IndexedChunk[] }; ranges: [number, number][] }): number {
+  const rows = p.ranges.reduce((x, [a, b]) => x + b - a, 0)
+  const fetched = p.rg.columns.reduce((x, c) => x + Number((c.meta_data as unknown as { total_compressed_size: bigint | number }).total_compressed_size), 0)
+  return rows * (LEVEL_ROW_HEAP + fetched / Number(p.rg.num_rows))
+}
+
+/** Every transition in `(d1, d2]` under each of `dirs` (their children's, and their own as `name` ''), from every tier:
+ *  each tier's groups whose bounds can hold one (sidecar), then two waves over all tiers at once — the kept groups' page
+ *  indexes, then the pages that can hold one — each wave's merged runs (`planRuns`) `RUN_READS` at a time on one limiter; an
+ *  index held (`levelPageIxs`) leaves the first wave. Server-Timing: `lv-index` / `lv-data` (ms, `-gets`, `-rounds`,
+ *  `-bytes`), `lv-index-{held,colo,joined,miss}`, `lv-groups`, `lv-pages`, `lv-rows`. Throws
+ *  "query too wide" past `LEVEL_MAX_GROUPS` groups, or when the rows its pages hold and their bytes would cost more
+ *  than `spend` or the isolate has left (`chargeLevel`, `lv-charge`): before any data is fetched or decoded, so a read that doesn't fit never takes the isolate down. `lap`: the request's phases
+ *  (`serverTiming`'s), with a clock sync (`syncClock`) after the read's CPU-only stretches so they're counted as theirs;
+ *  also `lv-plan-bounds` / `lv-plan-json` (tier-ms, overlapping), `fgroups`, `footer`, `fdoc-r2`. */
+export async function readLevel(lh: LevelHandle, dirs: string[], spend: LevelSpend, trace?: Trace, lap?: (name: string) => void): Promise<LevelRec[]> {
+  const { d1, d2 } = lh
+  const keys = dirs.map(p => ({ d: p === '' ? 0 : p.split('/').length, p }))
+  const want = new Set(keys.map(k => `${k.d}\0${k.p}`))
+  const meets = (dMin: number, dMax: number, pMin: string, pMax: string) => keys.some(k => dMin <= k.d && k.d <= dMax && pMin <= k.p && k.p <= pMax)
+  const t0 = now()
+  type Group = { num_rows: bigint; columns: IndexedChunk[] }
+  type Cand = { t: PqHandle; g: BlobGroup; rg: Group }
+  const cands: Cand[] = []
+  await Promise.all(lh.tiers.map(async t => {
+    try {
+      const t1 = now()
+      const gs = (await pqGroups(withTrace(t, trace), b => meets(b.dMin, b.dMax, b.pMin, b.pMax)))
+        .filter(g => meets(g.dMin, g.dMax, g.pMin, g.pMax) && g.vfMax! > d1 && g.vfMin! <= d2)
+      trace?.('lv-plan-bounds', now() - t1)
+      if (!gs.length) return
+      const t2 = now()
+      const jsons = await fetchGroupJson(t, gs.map(g => g.rg))
+      trace?.('lv-plan-json', now() - t2)
+      for (const g of gs) {
+        const rg = reviveRowGroup(jsons.get(g.rg)!, t.schema) as unknown as Group
+        if (rg.columns.some(c => !c.offset_index_length)) throw new Error(`${t.dataKey}: group ${g.rg} has no page index`)
+        cands.push({ t, g, rg })
+      }
+    } catch (e) {
+      throw t.run ? ivMarkBroken(lh.env, t.run, e) : e
+    }
+  }))
+  trace?.('lv-plan', now() - t0)
+  trace?.('lv-groups', cands.length)
+  lap?.('plan')
+  if (cands.length > LEVEL_MAX_GROUPS) throw new Error(`query too wide: ${cands.length} level groups`)
+  if (!cands.length) return []
+  const lim = limiter(RUN_READS)
+  const idxOf = (t: PqHandle) => new Map(t.schema.slice(1).map((e, i) => [e.name, i]))
+  const chunk = (c: Cand, name: string): IndexedChunk => c.rg.columns[idxOf(c.t).get(name)!]
+  /** One wave: each tier's spans merged into runs, every run on the shared limiter. */
+  const wave = async (name: string, perTier: Map<PqHandle, { start: number; end: number }[]>): Promise<Map<PqHandle, FileSlice>> => {
+    const t1 = now()
+    const plans = [...perTier].map(([t, spans]) => ({ t, runs: planRuns(spans) }))
+    const n = plans.reduce((m, p) => m + p.runs.length, 0)
+    const got = await Promise.all(plans.map(async ({ t, runs }) => {
+      try {
+        const bufs = await Promise.all(runs.map(r => lim(() => fetchRange(t, r.start, r.end))))
+        return [t, runsSlice(runs.map((r, i) => ({ start: r.start, buf: bufs[i] })))] as const
+      } catch (e) {
+        throw t.run ? ivMarkBroken(lh.env, t.run, e) : e
+      }
+    }))
+    trace?.(name, now() - t1)
+    trace?.(`${name}-gets`, n)
+    trace?.(`${name}-rounds`, Math.ceil(n / RUN_READS))
+    trace?.(`${name}-bytes`, plans.reduce((m, p) => m + p.runs.reduce((x, r) => x + r.end - r.start, 0), 0))
+    return new Map(got)
+  }
+  const byTier = <T>(xs: Cand[], f: (c: Cand) => T[]): Map<PqHandle, T[]> => {
+    const m = new Map<PqHandle, T[]>()
+    for (const c of xs) m.set(c.t, [...(m.get(c.t) ?? []), ...f(c)])
+    return m
+  }
+  const puts: (() => void)[] = []
+  const ixs = await levelPageIxs(lh.env, cands, lim, perTier => wave('lv-index', perTier), puts, trace)
+  lap?.('index')
+  const text = (v: unknown): string => (v instanceof Uint8Array ? new TextDecoder().decode(v) : String(v))
+  type Planned = Cand & { ranges: [number, number][]; locs: Record<string, PageLocation[]>; n: number; pages: number }
+  const planned: Planned[] = []
+  for (const c of cands) {
+    const { locs, stats } = ixs.get(c)!
+    const n = Number(c.rg.num_rows)
+    const pages = locs.depth
+    const ranges: [number, number][] = []
+    let kept = 0
+    for (let i = 0; i < pages.length; i++) {
+      const [dMin, dMax] = [num(stats.depth.min_values[i]), num(stats.depth.max_values[i])]
+      const [pMin, pMax] = [text(stats.path.min_values[i]), text(stats.path.max_values[i])]
+      const [tMin, tMax] = [num(stats.ts.min_values[i]), num(stats.ts.max_values[i])]
+      if (!meets(dMin, dMax, pMin, pMax) || !(tMax > d1 && tMin <= d2)) continue
+      kept++
+      const a = Number(pages[i].first_row_index)
+      const b = i + 1 < pages.length ? Number(pages[i + 1].first_row_index) : n
+      const last = ranges[ranges.length - 1]
+      if (last && last[1] === a) last[1] = b
+      else ranges.push([a, b])
+    }
+    // Two ranges sharing a page in any column read as one (as hyparquet merges them).
+    const merged: [number, number][] = []
+    for (const r of ranges) {
+      const last = merged[merged.length - 1]
+      if (last && IV_LEVEL_COLS.some(name => pagesOf(locs[name], r[0], r[1], n)[0] <= pagesOf(locs[name], last[0], last[1], n)[1])) last[1] = r[1]
+      else merged.push([r[0], r[1]])
+    }
+    if (merged.length) planned.push({ ...c, ranges: merged, locs, n, pages: kept })
+  }
+  const rows = planned.reduce((m, p) => m + p.ranges.reduce((x, [a, b]) => x + b - a, 0), 0)
+  trace?.('lv-pages', planned.reduce((m, p) => m + p.pages, 0))
+  trace?.('lv-page-rows', rows)
+  if (lap) {
+    await syncClock()
+    lap('pages')
+  }
+  const charge = planned.reduce((m, p) => m + levelCharge(p), 0)
+  trace?.('lv-charge', Math.round(charge))
+  if (!planned.length) puts.splice(0).forEach(put => put())
+  try {
+    chargeLevel(spend, charge)
+  } catch (e) {
+    puts.splice(0).forEach(put => put())
+    throw e
+  }
+  if (!planned.length) return []
+  const dataFiles = await wave('lv-data', byTier(planned as Cand[], c => {
+    const p = c as Planned
+    return p.ranges.flatMap(([a, b]) => IV_LEVEL_COLS.flatMap(name => {
+      const k = chunk(p, name)
+      const locs = p.locs[name]
+      const [f, l] = pagesOf(locs, a, b, p.n)
+      if (f < 0) return []
+      const chunkStart = Number(k.meta_data.dictionary_page_offset || k.meta_data.data_page_offset)
+      const hasDict = !!k.meta_data.dictionary_page_offset || Number(k.meta_data.data_page_offset) < Number(locs[0].offset)
+      return [
+        ...(hasDict ? [{ start: chunkStart, end: Number(locs[0].offset) }] : []),
+        { start: Number(locs[f].offset), end: Number(locs[l].offset) + locs[l].compressed_page_size },
+      ]
+    }))
+  }))
+  puts.splice(0).forEach(put => put())
+  lap?.('data')
+  const t2 = now()
+  const out: LevelRec[] = []
+  for (const p of planned) {
+    const metadata = { version: p.t.version, schema: p.t.schema, num_rows: p.rg.num_rows, row_groups: [p.rg], metadata_length: 0 } as unknown as FileMetaData
+    const opts = { file: dataFiles.get(p.t)!, metadata, columns: IV_LEVEL_COLS, compressors, pageRangesByGroup: [p.ranges], pageLocationsByGroup: [p.locs] }
+    for (const r of (await parquetReadObjects(opts as Parameters<typeof parquetReadObjects>[0])) as Record<string, unknown>[]) {
+      const ts = num(r.ts)
+      const depth = num(r.depth)
+      const path = str(r.path)
+      if (ts <= d1 || ts > d2 || !want.has(`${depth}\0${path}`)) continue
+      out.push({ depth, path, ts, name: str(r.name), op: num(r.op), kind: str(r.kind), kindPrev: r.kind_prev == null ? null : str(r.kind_prev), size: num(r.size), nFiles: num(r.n_files),
+        sizePrev: num(r.size_prev), nFilesPrev: num(r.n_files_prev), churnCum: num(r.churn_cum), churnPrev: num(r.churn_prev) })
+    }
+  }
+  if (lap) await syncClock()
+  trace?.('lv-decode', now() - t2)
+  trace?.('lv-rows', out.length)
+  lap?.('decode')
+  return out
+}
+
+/** A timer's turn of the event loop: a Worker's clock advances only across I/O (`Server-Timing` hides CPU), so a span
+ *  read after this counts the CPU before it. Costs one timer tick; for tracing only. */
+export const syncClock = (): Promise<void> => new Promise(r => setTimeout(r, 0))
 
 /** At most `n` of the calls it wraps running at once (the rest queue). */
 export function limiter(n: number): <T>(f: () => Promise<T>) => Promise<T> {

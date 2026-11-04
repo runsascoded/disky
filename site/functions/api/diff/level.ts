@@ -14,8 +14,18 @@
  *
  *  The fixed phase overlaps (`shared.ahead`): the gate (`requireViewer`) runs beside the path store's pointers, and,
  *  for a request presenting credentials (or a union member's, its gate passed), beside the scans' checks, the cache-key generations, the asked directories'
- *  cache lookups and the first round's handles and plan (its footer reads). Nothing is used before the gate passes;
+ *  cache lookups and the first round's handles: the level sort's where the generation has it, else the `path` sort's
+ *  and the plan (its footer reads). Nothing is used before the gate passes;
  *  a refused request's lookups are dropped. `Server-Timing` `fixed`: request start to the first data read.
+ *
+ *  `ph-*` (`serverTiming`'s `lap`): the request's critical path as consecutive phases summing to `total`, whatever
+ *  overlapped (a phase is what the request waited for there; a lookup started beside the gate counts in `ph-gate` until
+ *  the gate passes): `pointers` (the store's pointers), `creds`, `gate`, `scans`, `gens`, `lookup` (the cache lookups and
+ *  hits' parses, a chain's too), `open` (the level handles, or the prep and plan), `churn`; a level-index read's rounds
+ *  add up in `plan` (footer groups), `index`, `pages` (page-index parse, CPU), `data`, `decode` (CPU), `rollup` (CPU), `own`
+ *  (`readRootAgg` of `lv-own-dirs` directories: the root, or one with no transition); `read` (the `path` sort instead),
+ *  `store` (the cache puts started), `encode` (the body, CPU), `rest`. CPU phases hold what a timer tick's clock sync
+ *  (`syncClock`) shows, where the rest of a Worker's spans hide it; any CPU not before a sync falls in the next phase.
  *
  *  On a union view (`_lib/union.ts`) both cutoffs resolve as `/api/diff`'s do, and each member answers at its own
  *  scans (its own cache entries): a directory below the root by the member holding it (an unchanged member, its one
@@ -25,9 +35,9 @@
  *  the root a 409 naming it.
  */
 import { type Env, type Identity, json, presentsCredentials, requireViewer } from '../../_lib/auth.js'
-import { buildLevels, type Level, LEVEL_V, levelK, type Measure, mergeLevels, planLevel, prepareLevels } from '../../_lib/diffLevel.js'
+import { buildLevels, type Level, LEVEL_V, levelK, type Measure, mergeLevels, openLevelIndex, planLevel, prepareLevels } from '../../_lib/diffLevel.js'
 import { cacheEnvTag, cacheKeyFor, cacheMatch, cacheStore, serverTiming } from '../../_lib/edgeCache.js'
-import { DiffUnavailable, intervalsOn, ivRefusal, ivRetry, pathGens, storeReady, withPathStore } from '../../_lib/index.js'
+import { DiffUnavailable, intervalsOn, ivRefusal, ivRetry, pathGens, storeReady, syncClock, withPathStore } from '../../_lib/index.js'
 import { isHidden, isHideRoot, restrictionFor } from '../../_lib/restrict.js'
 import { scanArg } from '../../_lib/scanArg.js'
 import { ahead, loadScopes, traceJoins } from '../../_lib/shared.js'
@@ -80,9 +90,11 @@ async function levelsOf(ctx0: Ctx, member?: MemberLevel): Promise<Response> {
   const gate = member ? Promise.resolve(member.id) : st.time('auth', requireViewer(ctx1 as never))
   gate.catch(() => {})
   const ctx = await withPathStore(ctx1)
+  st.lap('pointers')
   traceJoins(ctx.env, st.trace)
   await loadScopes()
   const early = ahead(ctx.env, !!member || await presentsCredentials(ctx1 as never))
+  st.lap('creds')
   try {
     if (!intervalsOn(ctx.env)) return new Response('level diffs read the interval store', { status: 409 })
     // What the answer needs whoever asks: started now for a request that may pass the gate, used once it has.
@@ -96,13 +108,16 @@ async function levelsOf(ctx0: Ctx, member?: MemberLevel): Promise<Response> {
     const keyOf = (g: string, p: string) => cacheKeyFor('level', tag, `${from}/${to}/${encodeURIComponent(p)}?k=${k}&m=${m}&g=${g}&v=${LEVEL_V}${nonce ? `&nc=${encodeURIComponent(nonce)}` : ''}`, storeKey(ctx.env))
     const lookup = (g: string, ps: string[]) => st.time('match', Promise.all(ps.map(async p => [p, await cacheMatch(ctx.env, keyOf(g, p))] as const)))
     const asked = nc ? null : early.later(async () => lookup(await gens(), dirs))
-    // The first round's handles and plan (its footer reads), beside the lookups: a read of every asked directory
-    // takes them as they are; a read of fewer plans again over the footers they left held.
-    const prep = early.later(() => prepareLevels(ctx.env, { from, to, trace: st.trace }))
-    // A failed plan here is no answer: the read plans again and fails as it would have.
-    const plan = early.later(() => prep().then(p => planLevel(p, dirs)).catch(() => undefined))
+    // The first round's handles, beside the lookups: the level sort's (its tiers' footers) where the generation has
+    // it; only where it hasn't, the `path` sort's and the plan (its footer reads). A read of every asked directory
+    // takes them as they are; a read of fewer plans again over the footers they left held. A failed open or plan here
+    // is no answer: the read opens or plans again and fails as it would have.
+    const lvl = early.later(() => openLevelIndex(ctx.env, { from, to, trace: st.trace }).catch(() => undefined))
+    const prep = early.later(async () => ((await lvl()) === null ? prepareLevels(ctx.env, { from, to, trace: st.trace }) : undefined))
+    const plan = early.later(() => prep().then(p => p && planLevel(p, dirs)).catch(() => undefined))
 
     const gated = await gate
+    st.lap('gate')
     if (gated instanceof Response) return gated
     early.commit()
     if (gated?.admin) nonce = nc
@@ -113,13 +128,17 @@ async function levelsOf(ctx0: Ctx, member?: MemberLevel): Promise<Response> {
     if (dirs.some(shut)) return new Response('path not found', { status: 404 })
     const miss = (await scans()).find(r => r instanceof Response)
     if (miss) return miss
+    st.lap('scans')
 
     try {
       const g = await gens()
+      st.lap('gens')
       const out = new Map<string, Level>()
       // Cached answers, and the chains they lead into, a link at a time.
       let hits = asked ? await asked() : await lookup(g, dirs)
       const todo: string[] = []
+      const more: string[] = []
+      const wide: string[] = []
       while (hits.length) {
         const next: string[] = []
         for (const [p, hit] of hits) {
@@ -132,23 +151,31 @@ async function levelsOf(ctx0: Ctx, member?: MemberLevel): Promise<Response> {
       }
       const cached = out.size
       st.trace('level-hits', cached, `${cached} cached, ${todo.length} read`)
+      st.lap('lookup')
       if (todo.length) {
         // The handles and plan made beside the lookups serve the first attempt; a retry (a broken run cut out) opens afresh.
         let first = true
         const built = await ivRetry(async () => {
-          const given = first ? { prep: await prep(), plan: sameSet(todo, dirs) ? await plan() : undefined } : undefined
+          const given = first ? { level: await lvl(), prep: await prep(), plan: sameSet(todo, dirs) ? await plan() : undefined } : undefined
           first = false
-          return buildLevels(ctx.env, { from, to, dirs: todo, k, m, trace: st.trace, onRead: () => st.mark('fixed') }, given)
+          st.lap('open')
+          more.length = wide.length = 0
+          return buildLevels(ctx.env, { from, to, dirs: todo, k, m, more, wide, trace: st.trace, onRead: () => st.mark('fixed'), lap: n => { st.lap(n); if (n === 'plan') st.mark('fixed') } }, given)
         })
+        st.lap('read')
         for (const [p, l] of built) {
           if (shut(p)) continue
           out.set(p, l)
           await cacheStore(ctx.env, keyOf(g, p), JSON.stringify(l), {}, ctx.waitUntil?.bind(ctx))
         }
+        st.lap('store')
       }
       const levels = [...out.values()].map(l => (l.next && shut(l.next) ? { ...l, next: undefined } : l))
       st.mark('fixed')
-      return new Response(JSON.stringify({ from, to, k, m, levels }), {
+      const body = JSON.stringify({ from, to, k, m, levels, ...(more.length ? { more } : {}), ...(wide.length ? { wide } : {}) })
+      await syncClock()
+      st.lap('encode')
+      return new Response(body, {
         headers: { 'content-type': 'application/json', 'cache-control': 'private, max-age=300', 'server-timing': st.header(), 'x-cache': !todo.length ? 'hit' : cached ? 'partial' : 'miss' },
       })
     } catch (e) {
@@ -169,7 +196,7 @@ async function levelsOf(ctx0: Ctx, member?: MemberLevel): Promise<Response> {
 /** Whether `a` and `b` hold the same directories. */
 const sameSet = (a: string[], b: string[]): boolean => a.length === b.length && a.every(x => b.includes(x))
 
-type LevelBody = { from: string; to: string; k: number; m: Measure; levels: Level[] }
+type LevelBody = { from: string; to: string; k: number; m: Measure; levels: Level[]; more?: string[]; wide?: string[] }
 
 /** `/api/diff/level` on a union view (see the module doc). */
 async function unionLevels(ctx0: Ctx, view: UnionView): Promise<Response> {
@@ -215,7 +242,13 @@ async function unionLevels(ctx0: Ctx, view: UnionView): Promise<Response> {
     const asked = await Promise.all([...byStore].map(([store, ps]) => ask(pairs.find(p => p.store === store)!, ps)))
     const refused = asked.find(a => a instanceof Response)
     if (refused) return refused as Response
-    for (const b of asked as LevelBody[]) for (const l of b.levels) out.set(l.path, l)
+    const more: string[] = []
+    const wide: string[] = []
+    for (const b of asked as LevelBody[]) {
+      for (const l of b.levels) out.set(l.path, l)
+      more.push(...b.more ?? [])
+      wide.push(...b.wide ?? [])
+    }
     if (dirs.includes('')) {
       const comparable = pairs.filter(p => p.change !== 'unknown')
       const roots = await Promise.all(comparable.map(async (p): Promise<LevelBody | Response | Level> => {
@@ -239,7 +272,7 @@ async function unionLevels(ctx0: Ctx, view: UnionView): Promise<Response> {
       const chained = new Map(ok.flatMap(r => ('levels' in r ? r.levels.filter(l => l.path !== '').map(l => [l.path, l] as const) : [])))
       for (let n = root.next; n && !out.has(n) && chained.has(n); n = chained.get(n)!.next) out.set(n, chained.get(n)!)
     }
-    return new Response(JSON.stringify({ from: cf.date, to: ct.date, k, m, levels: [...out.values()], union: { view: view.key, sources } }), {
+    return new Response(JSON.stringify({ from: cf.date, to: ct.date, k, m, levels: [...out.values()], ...(more.length ? { more } : {}), ...(wide.length ? { wide } : {}), union: { view: view.key, sources } }), {
       headers: { 'content-type': 'application/json', 'cache-control': 'private, max-age=300' },
     })
   } catch (e) {

@@ -13,23 +13,25 @@
  *
  *  - **R2** (`INDEX_R2` gets, heads and lists, and the store's gets): the interval store's state (`scans.json`, the
  *    manifests' list, the newest manifest: 3); for level also both sorts' footer indexes of the base (2) and of each
- *    run (a head and a get each: 4), and the early plan's footer groups. A date the store doesn't hold opens no
- *    per-scan handle: `prepareLevels` refuses it first (a level reads the interval store).
+ *    run (a head and a get each: 4), the early plan's footer groups, and the level sort's footer index of the base (1)
+ *    and of each run (2), opened first (`openLevelIndex`). Its worst is a generation without the level sort: those
+ *    reads find none and the `path` sort's prep and plan run as before; with it, they don't run at all. A date the store
+ *    doesn't hold opens no per-scan handle: `prepareLevels` refuses it first (a level reads the interval store).
  *  - **D1** (statements): an exact scan id the interval store doesn't hold is one `index_schema` read (`indexedScan`),
  *    and the request's generations one more (`pathGens`); a subtree's `d=<slug>` reads its day's pointers and their
  *    starts (2) before the exact check of what it resolves to. Held dates: none.
  *  - **KV** reads: one per response-cache key looked up (a level's every asked directory; one for diff and subtree,
  *    unscoped and unfiltered only).
  *  - **colo** reads: those keys, plus the state's copy (1); for level the footer indexes' (2 per sort read: the base 4,
- *    each run 4) and the early plan's footer groups.
+ *    each run 4), the early plan's footer groups, and the level sort's footer indexes (the base 2, each run 2).
  *
  *  The gate's own reads are apart (`GATE_COST`): they are any refused request's, overlap or not. */
 export const AHEAD_COST = {
   level: ({ dirs, runs, footers }: { dirs: number; runs: number; footers: number }) => ({
-    r2: 3 + 2 + 4 * runs + footers,
+    r2: 3 + 2 + 4 * runs + footers + 1 + 2 * runs,
     d1: 2 + 1,
     kv: dirs,
-    colo: dirs + 1 + 4 + 4 * runs + footers,
+    colo: dirs + 1 + 4 + 4 * runs + footers + 2 + 2 * runs,
   }),
   diff: { r2: 3, d1: 2 + 1, kv: 1, colo: 1 + 1 },
   subtree: { r2: 3, d1: 2 + 1 + 1, kv: 1, colo: 1 + 1 },
