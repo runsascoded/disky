@@ -4,6 +4,7 @@
 // Batch executor consumes. D1 CRUD + snapshot + the admin-edit audit trail
 // live here; the HTTP surface is api/plans/[[path]].ts.
 import type { D1Database } from "@cloudflare/workers-types"
+import type { RunOutcome } from "../../src/runs.js"
 
 // A plan prefix stored as `<scheme><bucket>/<path>/` (the deployment's
 // `STORE_SCHEME`: `s3://`, `gs://`, `file:///`); normalized to a relative key
@@ -700,8 +701,9 @@ export function realRun(runs: readonly RunRow[], digest: string, items: number, 
 
 /** A run an executor's reflection just closed: `ok` = with its result
  * (totals); not ok = it ended without one (its Batch job stopped first), and
- * `reason` is why, when the failed step recorded it. */
-export interface FinishedRun { run_id: string; ok: boolean; reason?: string }
+ * `reason` is why, when the failed step recorded it. `outcome`: what its
+ * totals don't say, when the run's files were read and have something to add. */
+export interface FinishedRun { run_id: string; ok: boolean; reason?: string; outcome?: RunOutcome }
 
 /** A plan's runs, as the gate reads them. */
 export async function planRuns(db: D1Database, planId: number): Promise<RunRow[]> {

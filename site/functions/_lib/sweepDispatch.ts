@@ -36,6 +36,12 @@ import { RUN_ID_RE, SCAN_ID_RE } from '../../src/scanSlug.js'
 
 /** A run's dir in the data bucket (`DATA_BUCKET`). */
 export const runDir = (cfg: Pick<BatchConfig, 'dataBucket'>, jobId: string): string => `gs://${cfg.dataBucket}/sweep/runs/${jobId}`
+/** A matching dry run's decisions are reused only from its own run dir; one without a reusable dir means the run's own manifest.
+ * The real-delete confirm says the same from the page (`src/runs.ts`'s `reusableDryRun`, held to this in its test). */
+export const reusableRunDir = (cfg: Pick<BatchConfig, 'dataBucket'>, reviewed?: { log_dir?: string | null } | null): string | undefined => {
+  const prefix = `gs://${cfg.dataBucket}/sweep/runs/`
+  return reviewed?.log_dir && reviewed.log_dir.startsWith(prefix) && /^gcs-sweep-dry-[0-9]{8}-[0-9]{6}z$/.test(reviewed.log_dir.slice(prefix.length)) ? reviewed.log_dir : undefined
+}
 export const planJsonPath = (cfg: Pick<BatchConfig, 'dataBucket'>, jobId: string): string => `${runDir(cfg, jobId)}/plan.json`
 /** `plan.json`'s object name in the data bucket (the JSON upload API's `name`). */
 export const planJsonObject = (jobId: string): string => `sweep/runs/${jobId}/plan.json`
@@ -216,10 +222,7 @@ async function prepare(env: ExecEnv, db: D1Database, req: DispatchReq): Promise<
   ].filter(i => buckets.includes(bucketOf(i.key, shape.buckets))))
 
   const launch: Prepared['launch'] = async (date, digest, reviewed) => {
-    const reviewedPrefix = `gs://${cfg.dataBucket}/sweep/runs/`
-    // a matching dry run's decisions are reused only from its own run dir; one without a reusable dir means the run's own manifest
-    const reuse = req.mode === 'real' && reviewed?.log_dir && reviewed.log_dir.startsWith(reviewedPrefix)
-      && /^gcs-sweep-dry-[0-9]{8}-[0-9]{6}z$/.test(reviewed.log_dir.slice(reviewedPrefix.length)) ? reviewed.log_dir : undefined
+    const reuse = req.mode === 'real' ? reusableRunDir(cfg, reviewed) : undefined
     const region = batchRegionFor(cfg, buckets)
     const jobId = `gcs-sweep-${req.mode}-${jobStampOf(new Date())}z`
     const plan = runDir(cfg, jobId)

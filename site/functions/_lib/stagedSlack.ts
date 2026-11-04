@@ -12,6 +12,7 @@
  * best-effort — a Slack failure never fails the gesture that caused it.
  */
 import type { D1Database } from '@cloudflare/workers-types'
+import type { RunOutcome } from '../../src/runs.js'
 import { type FinishedRun, type Gate, planDigest, planItemLines, planRuns, realGate, type RunRow, unstageDeleted } from './plans.js'
 import { slackApi, slackReady, type SlackEnv } from './slack.js'
 import type { Env } from './auth.js'
@@ -297,16 +298,24 @@ export function stageReply(v: ReplyView): { text: string; blocks: unknown[] } {
  *  (the run id, or its Batch job's id before the executor records it). */
 export const runUrl = (siteUrl: string, runId: string): string => `${siteUrl}/staged?run=${encodeURIComponent(runId)}`
 
+/** What a run left alone, as its `/staged` row says it; empty when nothing was. */
+function skipsLine(o?: RunOutcome): string {
+  if (!o?.skipped) return ''
+  const notSwept = o.notSwept.length ? ` *Not swept:* ${o.notSwept.map(b => `\`${b}\``).join(', ')} (no object in them had a generation; their prefixes stay staged).` : ''
+  return ` Skipped, no generation: *${fmtBytes(o.skipped.bytes)}* / ${fmtN(o.skipped.objects)} objects left in place.${notSwept}`
+}
+
 /** A run's thread reply: the actor by name, the run id linking to its row on
  *  `/staged`. */
-export function runEvent(r: RunRow, phase: 'dispatched' | 'finished' | 'failed', o: { via?: string | null; names?: Names; siteUrl?: string; reason?: string } = {}): string {
+export function runEvent(r: RunRow, phase: 'dispatched' | 'finished' | 'failed', o: { via?: string | null; names?: Names; siteUrl?: string; reason?: string; outcome?: RunOutcome } = {}): string {
   const kind = r.mode === 'dry' ? 'Dry-run' : '*Real deletion*'
   const id = o.siteUrl ? `<${runUrl(o.siteUrl, r.run_id)}|${r.run_id}>` : `\`${r.run_id}\``
   if (phase === 'dispatched') return `${r.mode === 'dry' ? ':test_tube:' : ':rotating_light:'} ${kind} dispatched by ${who(r.actor, o.names)}${o.via ? ` via ${o.via}` : ''} on scan ${r.scan} (${id})`
   if (phase === 'failed' && o.reason) return `:x: ${kind} ${id} ended without a result: \`${o.reason.replace(/`/g, "'").replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')}\``
   if (phase === 'failed') return `:x: ${kind} ${id} ended without a result (its Batch job stopped before the run summary); check its logs in www.`
-  if (r.mode === 'dry') return `:test_tube: Dry-run ${id} finished: would delete *${fmtBytes(r.deleted_bytes)}* / ${fmtN(r.deleted_objects)} objects (gone since scan: ${fmtN(r.skipped_gone)}, overwritten: ${fmtN(r.skipped_overwritten)}).`
-  return `:white_check_mark: Real deletion ${id} finished: deleted *${fmtBytes(r.deleted_bytes)}* / ${fmtN(r.deleted_objects)} objects${r.undo_deadline ? `; undoable until ${utc(r.undo_deadline)} (www)` : ''}.`
+  const skips = skipsLine(o.outcome)
+  if (r.mode === 'dry') return `:test_tube: Dry-run ${id} finished: would delete *${fmtBytes(r.deleted_bytes)}* / ${fmtN(r.deleted_objects)} objects (gone since scan: ${fmtN(r.skipped_gone)}, overwritten: ${fmtN(r.skipped_overwritten)}).${skips}`
+  return `${skips ? ':warning:' : ':white_check_mark:'} Real deletion ${id} finished: ${o.outcome?.attempted ? 'attempted' : 'deleted'} *${fmtBytes(r.deleted_bytes)}* / ${fmtN(r.deleted_objects)} objects${r.undo_deadline ? `; undoable until ${utc(r.undo_deadline)} (www)` : ''}.${skips}`
 }
 
 /** Was the queue empty before this stage? Every item other than the ones just
@@ -363,7 +372,7 @@ export async function stagedImageVersion(env: Env, digest: string): Promise<stri
 export interface StageArgs { stage: { planId: number; batchId: number; by: string; prefixes: string[]; covered: number; note: string | null; siteUrl: string } }
 /** A run's reply, rendered here so it can carry its actor's name (and, for a
  *  dispatch, post as them). */
-export interface RunArgs { run: RunRow; phase: 'dispatched' | 'finished' | 'failed'; via?: string | null; reason?: string }
+export interface RunArgs { run: RunRow; phase: 'dispatched' | 'finished' | 'failed'; via?: string | null; reason?: string; outcome?: RunOutcome }
 
 /** A workspace member, as `users.lookupByEmail` returns them. */
 export interface SlackPerson { name: string | null; image: string | null }
@@ -659,7 +668,7 @@ export async function notifyPlan(env: NotifyEnv, db: D1Database, planId: number,
     // Sized, prefixes empty at the scan leave the title's counts (the size line names them apart).
     const parent = renderParent({ ...v, queued: queuedOf(countedItems(v.live, v.deleted, at?.stats ?? null)), names, size, image: await stagedCardUrl(env, db, siteUrl, v.digest) ?? undefined })
     const event: Event | undefined = runEv
-      ? { text: runEvent(runEv.run, runEv.phase, { via: runEv.via, names, siteUrl, reason: runEv.reason }), ...(by ? { sender: personSender(by, people[by.toLowerCase()], 'dispatched') } : {}) }
+      ? { text: runEvent(runEv.run, runEv.phase, { via: runEv.via, names, siteUrl, reason: runEv.reason, outcome: runEv.outcome }), ...(by ? { sender: personSender(by, people[by.toLowerCase()], 'dispatched') } : {}) }
       : said ? { ...said, text: typeof said.text === 'function' ? said.text(who(said.by?.email ?? '', names)) : said.text, ...(said.by ? { sender: personSender(said.by.email, people[said.by.email.toLowerCase()], said.by.verb) } : {}) }
       : undefined
     const channel = env.SLACK_ADMIN_CHANNEL!
@@ -776,12 +785,12 @@ export async function refreshThread(env: NotifyEnv, db: D1Database, planId: numb
 /** Announce runs that just finished (an executor's reflection) in their
  * plans' threads: the totals, or that the run ended without a result. */
 export async function announceFinished(env: NotifyEnv, db: D1Database, runs: readonly FinishedRun[], siteUrl: string): Promise<void> {
-  for (const { run_id, ok, reason } of runs) {
+  for (const { run_id, ok, reason, outcome } of runs) {
     const r = await db.prepare('SELECT * FROM deletion_runs WHERE run_id = ?').bind(run_id).first<RunRow & { plan_id: number | null }>()
     if (r?.plan_id == null) continue
     // What the run deleted leaves the queue before the thread re-renders.
     if (ok) await unstageDeleted(db, r.plan_id, [run_id])
-    await notifyPlan(env, db, r.plan_id, siteUrl, { run: r, phase: ok ? 'finished' : 'failed', reason })
+    await notifyPlan(env, db, r.plan_id, siteUrl, { run: r, phase: ok ? 'finished' : 'failed', reason, outcome })
   }
 }
 

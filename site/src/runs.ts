@@ -229,6 +229,24 @@ export interface BucketSkips extends Tally { whole_bucket: boolean }
 export const attemptOnly = (s: Pick<PlanSummaryFile, 'contract' | 'backend'> | null | undefined): boolean =>
   !!s?.contract?.endsWith('-delete-generations') && s.backend !== 'json'
 
+/** What a run's finished message says beyond its D1 totals. */
+export interface RunOutcome {
+  /** `attemptOnly`: its `deleted` count is what was attempted and acknowledged. */
+  attempted: boolean
+  /** Objects left in place for want of a generation (null: none). */
+  skipped: Tally | null
+  /** Buckets none of whose objects had one, so not swept at all. */
+  notSwept: string[]
+}
+
+/** Null: nothing to say, the run reads as it always did. */
+export function runOutcome(s: PlanSummaryFile): RunOutcome | null {
+  const attempted = attemptOnly(s)
+  const skips = s.skipped_no_generation
+  const skipped = skips && skips.objects > 0 ? { bytes: skips.bytes, objects: skips.objects } : null
+  return attempted || skipped ? { attempted, skipped, notSwept: skipped ? skips!.whole_buckets : [] } : null
+}
+
 export const NOT_OBSERVABLE = 'Not observable on this run: an XML multi-delete acknowledges every generation it is sent, so a key already gone or overwritten reads the same as one it deleted.'
 export const ATTEMPTED = 'Generation deletes attempted and acknowledged. An XML multi-delete acknowledges every generation it is sent, so this is what was requested, not proof each object was there to delete.'
 export const UNDO_CAVEAT = 'Its log can\'t tell an object this run deleted from one someone else deleted after the scan, so undo can bring those back too.'

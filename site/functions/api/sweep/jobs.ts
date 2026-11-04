@@ -25,6 +25,7 @@ import { S3Store } from '@rdub/file-tree/stores/s3'
 import { storeCreds, storeReady, storeTarget, withPathStore } from '../../_lib/index.js'
 import { intentionalStop } from '../../_lib/sweepStop.js'
 import { failureReader } from '../../_lib/sweepFailure.js'
+import { outcomeReader } from '../../_lib/sweepOutcome.js'
 
 type Env = AuthEnv & ExecEnv
 
@@ -104,7 +105,7 @@ export const onRequestGet = async (ctx: { request: Request; env: Env; waitUntil?
   const reason = failureReader(ctx.env)
   const db = ctx.env.DB
   if (db) {
-    const finished = await reflectSweepRuns(cfg, db, jobs, undefined, reason)
+    const finished = await reflectSweepRuns(cfg, db, jobs, undefined, reason, undefined, outcomeReader(ctx.env))
     await settleOpenPlan(db, jobs.filter(j => j.status?.state === 'SUCCEEDED').map(jobIdOf))
     if (finished.length) {
       // Sized from the interval store for the dates it holds (`withPathStore`), as the plans routes size them.

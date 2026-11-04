@@ -1,4 +1,5 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
+import { outcomeReaderOf } from './sweepOutcome'
 import { runDir } from './sweepDispatch'
 import { reflectSweepRuns, type SweepBatchJob } from './sweepReflect'
 import { RUN_DIR, sqliteD1 } from './testD1'
@@ -53,6 +54,41 @@ describe('D1', () => {
       ], SOON, undefined, RUN_DIR)).toEqual([])
       expect(await reflectSweepRuns(CFG, db, [job('gcs-sweep-real-old', 'FAILED', 'D', on('1'))], SOON + 3 * 86400, undefined, RUN_DIR)).toEqual([])
       expect(raw.prepare('SELECT run_id FROM deletion_runs').all()).toEqual([])
+    })
+    describe('a finished job\'s outcome, for its Slack message', () => {
+      const finishedRow = async (id: string) => {
+        const { db } = await sqliteD1()
+        await db.prepare("INSERT INTO plans (id, name, state, created_by, created_ts) VALUES (1, 'Staged', 'open', 'ann@openathena.ai', 1)").run()
+        await db.prepare(`INSERT INTO deletion_runs (run_id, ${RUN_DIR}, scan, head, exec_head, actor, mode, started_ts, finished_ts, log_dir, plan_id)
+          VALUES ('r', ?, '2026-09-28', 0, 0, 'ann@openathena.ai', 'real', 100, 500, ?, 1)`).bind(runDir(CFG, id), runDir(CFG, id)).run()
+        return db
+      }
+      const id = 'gcs-sweep-real-ok'
+      it('reads it from the job\'s own run dir', async () => {
+        const db = await finishedRow(id)
+        const read: string[] = []
+        const outcome = async (jobId: string) => { read.push(jobId); return { attempted: true, skipped: { bytes: 2, objects: 1 }, notSwept: ['b1'] } }
+        expect(await reflectSweepRuns(CFG, db, [job(id, 'SUCCEEDED', 'D')], SOON, undefined, RUN_DIR, outcome)).toEqual([
+          { run_id: 'r', ok: true, outcome: { attempted: true, skipped: { bytes: 2, objects: 1 }, notSwept: ['b1'] } },
+        ])
+        expect(read).toEqual([id])
+      })
+      it('none to read: the run announces as it did', async () => {
+        const db = await finishedRow(id)
+        expect(await reflectSweepRuns(CFG, db, [job(id, 'SUCCEEDED', 'D')], SOON, undefined, RUN_DIR, async () => null)).toEqual([{ run_id: 'r', ok: true }])
+      })
+      it('a failed job has no totals to qualify', async () => {
+        const db = await finishedRow(id)
+        const outcome = async () => { throw new Error('a failed job has no outcome to read') }
+        expect(await reflectSweepRuns(CFG, db, [job(id, 'FAILED', 'D')], SOON, undefined, RUN_DIR, outcome)).toEqual([{ run_id: 'r', ok: false }])
+      })
+      it('a store that fails loses the skip line, not the run\'s announcement', async () => {
+        const db = await finishedRow(id)
+        const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+        const get = async () => { throw new Error('store down') }
+        expect(await reflectSweepRuns(CFG, db, [job(id, 'SUCCEEDED', 'D')], SOON, undefined, RUN_DIR, outcomeReaderOf(get))).toEqual([{ run_id: 'r', ok: true }])
+        log.mockRestore()
+      })
     })
     it('a succeeded job has no reason to read', async () => {
       const { db } = await sqliteD1()
