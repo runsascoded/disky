@@ -43,12 +43,12 @@ LEVEL_FLAG = "level"
 LEVEL_DOC = f"served/{LEVEL}.json"
 #: The sort's order: the parent's key, the transition's stamp, the child's name.
 LEVEL_KEY = ["depth", "path", "ts", "name"]
-#: What orders rows sharing a `LEVEL_KEY`, the rest of the row (`name, SQL` where it's computed, never NULL): an object named
-#: `a/` is a child of `a` named '', as `a`'s own row is, at the same stamp. Without it their order is the sort's whim, and a
-#: cut's bytes depend on how it was split.
-LEVEL_TIES = ["op", "kind", ("__kp", "coalesce(kind_prev, '')"), "size", "n_files", "size_prev", "n_files_prev", "churn_cum", "churn_prev"]
-#: The sort's whole order, as SQL.
-LEVEL_ORDER = ", ".join([*LEVEL_KEY, *(c if isinstance(c, str) else c[1] for c in LEVEL_TIES)])
+#: What orders rows sharing a `LEVEL_KEY`, which is at most two: an object named `a/` is a child of `a` named '', as `a`'s own
+#: row is, at the same stamp. `a`'s own comes first (0), as the parent's `name ''` rows do; the child's is 1. Without it their
+#: order is the sort's whim, and a cut's bytes depend on how it was split. One byte of sort key: the rest of the row would do too,
+#: at a wider key on every row.
+LEVEL_ARM = "__arm"
+LEVEL_ORDER = ", ".join([*LEVEL_KEY, LEVEL_ARM])
 LEVEL_SCHEMA = pa.schema([
     pa.field("depth", pa.uint8(), nullable=False),  # the parent's
     pa.field("path", pa.string(), nullable=False),  # the parent's ('' the root)
@@ -114,10 +114,10 @@ def record_level(scans: dict) -> dict:
     return out
 
 
-def rows_sql(src: str, opened: str = "true") -> str:
+def rows_sql(src: str, opened: str = "true", arm: bool = False) -> str:
     """The `level` rows (`LEVEL_SCHEMA`, unordered) of the folded path versions in relation `src` (`SOURCE_COLS`, every
     version of each path it holds; `opened`: which of them opened in the file — a run's `RUN_OPENED`). Paths at depth ≥ 1
-    (the root has no row of its own)."""
+    (the root has no row of its own). `arm`: each row's `LEVEL_ARM` too, what the sort's order ends in."""
     same = "pvt = vf AND pkind = kind AND psize = size AND pn = n_files AND pc = churn_cum"
     t = f"""WITH p AS (SELECT depth, path, vf, vt, kind, size, n_files, churn_cum, churn_end, ({opened}) AS opened,
             lag(vt) OVER w AS pvt, lag(kind) OVER w AS pkind, lag(size) OVER w AS psize, lag(n_files) OVER w AS pn,
@@ -134,10 +134,11 @@ def rows_sql(src: str, opened: str = "true") -> str:
             FROM p WHERE vt <> {OPEN} AND nvf IS DISTINCT FROM vt)"""
     vals = "op, kind, kind_prev, size, n_files, size_prev, n_files_prev, churn_cum, churn_prev"
     parent = "array_to_string(list_slice(string_split(path, '/'), 1, depth - 1), '/')"
+    child, own = (f", 1::TINYINT AS {LEVEL_ARM}", f", 0::TINYINT AS {LEVEL_ARM}") if arm else ("", "")
     return f"""{t}
-        SELECT (depth - 1)::UTINYINT AS depth, {parent} AS path, ts, string_split(path, '/')[-1] AS name, {vals} FROM t
+        SELECT (depth - 1)::UTINYINT AS depth, {parent} AS path, ts, string_split(path, '/')[-1] AS name, {vals}{child} FROM t
         UNION ALL
-        SELECT depth, path, ts, '' AS name, {vals} FROM t WHERE kind = 'dir' OR kind_prev = 'dir' OR op = 2"""
+        SELECT depth, path, ts, '' AS name, {vals}{own} FROM t WHERE kind = 'dir' OR kind_prev = 'dir' OR op = 2"""
 
 
 def seg_sql(bounds: list[list] | None) -> str:

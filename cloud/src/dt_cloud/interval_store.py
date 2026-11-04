@@ -796,8 +796,8 @@ SORT_COPIES = 2
 #: order as ascending, never-NULL key columns (strings in code-point order: DuckDB's, Python's and pyarrow's), each
 #: `(name, SQL)` computed into the run spools or a column by name. A `DESC NULLS LAST` size bucket (≥ 0, `BUCKET`) is its
 #: negation with NULL as −1 (so after every bucket); `usr NULLS FIRST` is `(usr IS NOT NULL, coalesce(usr, ''))`. The
-#: key is the whole order, unique a row (a version is one `(path, vf)`, a slice's one `(path, usr, vf)`; a level row is
-#: its whole row, `interval_level.LEVEL_TIES`: rows equal in all of it are interchangeable), so a key
+#: key is the whole order, unique a row (a version is one `(path, vf)`, a slice's one `(path, usr, vf)`, a level row's
+#: `interval_level.LEVEL_KEY` and `LEVEL_ARM`), so a key
 #: range's rows sorted alone are its rows of the one `ORDER BY`. Every other sort is led by `(depth, path)`: disjoint key
 #: ranges in key order concatenate.
 _NEG_BUCKET = f"-coalesce({BUCKET}, -1)"
@@ -807,7 +807,7 @@ MERGE_KEYS: dict[str, list] = {
     "slices-bytotal": [("__b", _NEG_BUCKET.replace("size", "tot")), "path", *_USR, "vf"],
     "slices-bysize-user": [*_USR, ("__b", _NEG_BUCKET), "path", "vf"],
     ATTRIBUTION: ["path", "vf"],
-    LEVEL: [*ilv.LEVEL_KEY, *ilv.LEVEL_TIES],
+    LEVEL: [*ilv.LEVEL_KEY, (ilv.LEVEL_ARM, ilv.LEVEL_ARM)],
 }
 RANGE_LED = "depth, path"
 if bad := [s for s, (_, o, _) in SORTS.items() if s not in MERGE_KEYS and not o.startswith(RANGE_LED)]:
@@ -1229,7 +1229,7 @@ def write_served(con, src: str | list[str], sort: str, out: Path, schema: pa.Sch
         pieced = sort in MERGE_KEYS and len(runs) > 1
         key = merge_key(sort) if sort in MERGE_KEYS else None
         if level:
-            runs = [f"({ilv.rows_sql(r, opened)})" for r in runs]
+            runs = [f"({ilv.rows_sql(r, opened, arm=True)})" for r in runs]
         computed = [x for x in MERGE_KEYS.get(sort, []) if not isinstance(x, str)]
         share = stride = 0
         rg = spool_rows

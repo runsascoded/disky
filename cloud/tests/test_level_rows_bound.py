@@ -172,7 +172,7 @@ def test_the_level_plan_charges_the_level_sorts_columns(tmp_path, monkeypatch):
 @pytest.mark.parametrize("split", [False, True])
 def test_a_key_shared_by_two_rows_has_one_order(tmp_path, split):
     """An object named `a/` is a child of `a` named '', as `a`'s own row is, at the same stamp: the same `LEVEL_KEY` twice.
-    Their order is the rest of the row's, so the bytes don't depend on how the cut was split (one run, or pieces)."""
+    `a`'s own first, whichever the other's values, so the bytes don't depend on how the cut was split (one run, or pieces)."""
     v = lambda d, p, k, z: {"depth": d, "path": p, "vf": 10, "vt": OPEN, "kind": k, "size": z, "n_files": 1, "churn_cum": z, "churn_end": z}  # noqa: E731
     low, high = [v(1, "a", "dir", 5)], [v(2, "a/", "file", 3)]
     gen = tmp_path / "g"
@@ -191,3 +191,10 @@ def test_a_key_shared_by_two_rows_has_one_order(tmp_path, split):
         (1, "a", 10, "", "dir", 5),
         (1, "a", 10, "", "file", 3),
     ]
+
+
+def test_the_arm_is_only_the_sorts():
+    """`rows_sql`'s rows are `LEVEL_SCHEMA`'s, unless the sort asks for what orders them."""
+    src = "(SELECT 1::UTINYINT AS depth, 'a' AS path, 10::BIGINT AS vf, 20::BIGINT AS vt, 'dir' AS kind, 1::BIGINT AS size, 1::BIGINT AS n_files, 1::BIGINT AS churn_cum, 1::BIGINT AS churn_end)"
+    cols = lambda **kw: [d[0] for d in duckdb.connect().execute(f"SELECT * FROM ({ilv.rows_sql(src, **kw)})").description]  # noqa: E731
+    assert (cols(), cols(arm=True)) == (ilv.LEVEL_SCHEMA.names, [*ilv.LEVEL_SCHEMA.names, ilv.LEVEL_ARM])
