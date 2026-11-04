@@ -12,7 +12,6 @@ from contextlib import contextmanager
 from pathlib import Path
 from threading import Event
 
-import pyarrow.parquet as pq
 import pytest
 from click.testing import CliRunner
 from test_interval_local import BASE, DATES, LAYOUT, RG, _parquets, world  # noqa: F401 (the fixture)
@@ -316,17 +315,12 @@ def _range_docs(d: Path) -> dict[str, dict]:
     return {p.name: _no_seconds(json.loads(p.read_text())) for p in sorted(d.glob("*.json"))}
 
 
-def _rows(path: Path) -> list[tuple]:
-    t = pq.read_table(path)
-    return sorted(zip(*(c.to_pylist() for c in t.columns)), key=repr)
-
-
 def test_ranges_task_opens_at_its_budget_under_the_watch(world, built, spy, pss, monkeypatch, tmp_path):  # noqa: F811
     """The staged `ranges` task (`ranges_cmd`), both of a scan's 2 tasks over the 3 ranges: each task's one DuckDB opens
     at what `-M` leaves past this process and the writer's Arrow side, rows as wide as that task's own range files
     (`append_mem`); it and every `append_range` run under `-M`'s `TreeWatch`, whose peak is logged; and the deltas, open
-    state and range docs are `add`'s, as `add` holds them before the run's churn (`apply_run`, which the staged chain
-    leaves to `publish`): byte for byte, but for the scan's churn and prior, which are the same rows."""
+    state and range docs are `add`'s, byte for byte, as `add` holds them before the run's churn (`apply_run`, which the
+    staged chain leaves to `publish`)."""
     d = DATES[BASE]
     rk = ia.run_key(d, d)
     prefix = f"{ist.PREFIX}/g"
@@ -401,11 +395,5 @@ def test_ranges_task_opens_at_its_budget_under_the_watch(world, built, spy, pss,
     assert tm._WATCHES == []
 
     run = store / prefix / rk
-    state = scratch / prefix / "state" / d
-    staged, local = {**_parquets(run), **{f"state/{k}": v for k, v in _parquets(state).items()}}, _parquets(snap)
-    # The scan's churn and prior: unordered `COPY`s of an aggregate, which `apply_run` aggregates again: the same rows.
-    unordered = {k for k in local if k.startswith((f"state/{ich.SCAN_CHURN}/", f"state/{ich.PRIOR}/"))}
-    assert (sorted(staged), len(unordered)) == (sorted(local), 6)
-    assert {k: v for k, v in staged.items() if k not in unordered} == {k: v for k, v in local.items() if k not in unordered}
-    assert {k: _rows(state / k.removeprefix("state/")) for k in unordered} == {k: _rows(snap / k) for k in unordered}
+    assert {**_parquets(run), **{f"state/{k}": v for k, v in _parquets(scratch / prefix / "state" / d).items()}} == _parquets(snap)
     assert _range_docs(run / "ranges") == _range_docs(snap / "ranges") == {f"r{i:04d}.json": _no_seconds(doc) for i, doc in zip((0, 2, 1), docs)}
