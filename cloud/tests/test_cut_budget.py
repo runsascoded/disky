@@ -302,7 +302,7 @@ def test_tree_watch_says_where_each_peak_was_and_what_held_it(pss, capsys):
     assert _normal(capsys.readouterr().err) == [
         "x: phase outside: peak tree PSS 1 MiB (0%; 2 samples)",
         "x: phase step: peak tree PSS 700 MiB (70%; 14 samples; at r1; DuckDB 500 MiB; Arrow 90 MiB)",
-        "x: phase (untagged): peak tree PSS 106 MiB (11%; 2 samples)",
+        "x: phase (untagged): peak tree PSS 50 MiB (5%; 2 samples)",
         "x: largest of 7: r1 700 MiB, r2 400 MiB, r0 300 MiB, r6 106 MiB, r5 105 MiB",
         "x: peak tree PSS 700 MiB of budget 1,000 MiB (70%; 18 samples over <s>)",
     ]
