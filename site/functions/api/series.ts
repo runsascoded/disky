@@ -255,7 +255,7 @@ export async function seriesRead(ctx: SeriesCtx, gate: (ctx: SeriesCtx) => Promi
   // chart load re-read one point per scan (≈8 rounds of D1 + range reads for
   // a 94-scan history, 5–20 s) while the diff beside it was a cache hit.
   const g = await st.time('gens', pathGens(env, dates))
-  const cacheKey = cacheKeyFor('series', cacheEnvTag(env, request), `${encodeURIComponent(path)}?P=${encodeURIComponent(paths.join(','))}&l=${lensTag}&o=${owner ? ownerKey(owner) : ''}&cl=${classKey(classes)}&s=${split ?? ''}&qs=${keyed ? qp.syntax : ''}&q=${encodeURIComponent(keyed ? url.searchParams.get('q') ?? '' : '')}&st=${staticTag(env, keyed)}&d=${dates.join(',')}&x=${extra.join(',')}&head=${head}&g=${g}&ch=${!chunked ? '' : chunkRaw ?? `n${nChunks}`}`, storeKey(env))
+  const cacheKey = cacheKeyFor('series', cacheEnvTag(env, request), `${encodeURIComponent(path)}?P=${encodeURIComponent(paths.join(','))}&l=${lensTag}&o=${owner ? ownerKey(owner) : ''}&cl=${classKey(classes)}&s=${split ?? ''}&qs=${keyed ? qp.syntax : ''}&q=${encodeURIComponent(keyed ? url.searchParams.get('q') ?? '' : '')}&st=${staticTag(env, keyed)}&d=${dates.join(',')}&x=${extra.join(',')}&head=${head}&g=${g}&oh=${chunked ? `5&ch=${chunkRaw ?? `n${nChunks}`}` : 0}`, storeKey(env))
   const hit = await st.time('cache', cacheMatch(env, cacheKey))
   if (hit) return hit
 
