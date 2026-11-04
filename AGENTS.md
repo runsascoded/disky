@@ -175,6 +175,8 @@ dt-cloud interval-store level-sim GEN REQUESTS  # `readLevel`'s two waves priced
                           # gets, rounds, bytes and predicted time (`-T` first byte, `-R` throughput, 6 slots) under `-g` gaps × `-C` caps,
                           # `-b` `fit:B` (closes gaps while a round is saved within B fetched bytes), and `whole` (no index wave). Fetches
                           # only sidecars and the kept groups' page indexes (cached under `-c`); gets and bytes match live `lv-*` spans exactly
+                          # `-s 256,512,1024` (+ `-F` sidecar row-group sizes): a table per mode, today / held page indexes (cold,
+                          # colo warm, warm) / the sort cut in small groups with no page index, from the real file's page indexes
 dt-cloud image-sha [-e SHA [-a]] [-j]  # The running image's source revision (`image_sha.py`): `$DISKY_GIT_SHA` /
                           # `$DISKY_GIT_DIRTY`, which a deployment's image build stamps (gcs: `job/build.sh` → Dockerfile
                           # `ARG`/`ENV` + OCI labels `org.opencontainers.image.revision`, `disky.dirty`). Prints `<sha>`,
