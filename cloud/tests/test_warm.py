@@ -1,10 +1,10 @@
 """Specs for the cache warm-up plan (`dt_cloud.warm`): exact request lists."""
+import re
 from http.client import IncompleteRead, RemoteDisconnected
 
-from dt_cloud import warm as W
-import re
-
 import pytest
+
+from dt_cloud import warm as W
 
 DATES = [f"2026-08-{d:02d}" for d in range(10, 32)] + [f"2026-09-{d:02d}" for d in range(1, 16)]
 
