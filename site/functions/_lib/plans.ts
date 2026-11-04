@@ -699,8 +699,9 @@ export function realRun(runs: readonly RunRow[], digest: string, items: number, 
 }
 
 /** A run an executor's reflection just closed: `ok` = with its result
- * (totals); not ok = it ended without one (its Batch job stopped first). */
-export interface FinishedRun { run_id: string; ok: boolean }
+ * (totals); not ok = it ended without one (its Batch job stopped first), and
+ * `reason` is why, when the failed step recorded it. */
+export interface FinishedRun { run_id: string; ok: boolean; reason?: string }
 
 /** A plan's runs, as the gate reads them. */
 export async function planRuns(db: D1Database, planId: number): Promise<RunRow[]> {

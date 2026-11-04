@@ -35,7 +35,7 @@ import { useOwnerIndex, useOwners } from './owners'
 import { useRowSelection, useRowSelectionKeys } from './rowSelection'
 import { CAPS, useDispatch, useExecJobs, usePrefixHistory, useRunAction, useRunFiles, useStagedPlan, useUnstage } from './plans'
 import type { EmptiedBatch, StagedItem } from './plans'
-import { joinRuns, LIVE_STATES, runFilesRel, viewBuckets, viewLive, type ProgressFile } from './runs'
+import { itemsDigest, joinRuns, LIVE_STATES, reusableDryRun, runFilesRel, viewBuckets, viewLive, type ProgressFile } from './runs'
 import { PrefixRecovery } from './PrefixRecovery'
 import { prefixExecution } from './prefixExecution'
 import type { PrefixExecution } from './prefixExecution'
@@ -335,6 +335,15 @@ export function StagedPage() {
   // the newest scan: each item is held to the one it was staged at (`as_of`), so the run lists from the newest and
   // deletes only what that staging scan saw
   const runScan = scans[0] ?? ''
+  // Which path a real run takes (gcs): reuse a dry run of exactly these items at this scan, or a fresh manifest.
+  const digestQ = useQuery({
+    queryKey: ['items-digest', runItems],
+    queryFn: () => itemsDigest(runItems),
+    enabled: armed && DEFAULT_STORE.executor === 'sweep' && runItems.length > 0,
+    staleTime: Infinity,
+    retry: false,
+  })
+  const reused = digestQ.data && plan ? reusableDryRun(runs, plan.id, digestQ.data, runScan) : null
   // The executor holds a bucket's manifest in memory: a bucket with tens of
   // millions of planned objects needs the big machine (gcs only).
   const machine = CAPS.bucketCut ? machineFor(Math.max(0, ...onBuckets.map(b => perBucket.get(b)!.o))) : undefined
@@ -570,6 +579,15 @@ export function StagedPage() {
                       <button type="button" onClick={() => setArmed(false)}>cancel</button>
                     </>}
               </div>
+              {armed && DEFAULT_STORE.executor === 'sweep' && (
+                <p className="dispatch-path" role="note">
+                  {!digestQ.data
+                    ? digestQ.isError ? 'Could not work out whether a dry run will be reused (this page needs a secure context).' : 'Checking for a dry run of exactly this selection…'
+                    : reused
+                      ? <>Reuses dry run <code>{reused.run_id}</code> (this selection, scan <code>{runScan}</code>): deletes the generations it reviewed, and skips any directory it reported as drift.</>
+                      : <>No dry run of exactly this selection at scan <code>{runScan}</code>: deletes from a fresh manifest, with no dry run. A directory that gained new writes since the scan still has its older staged files deleted, and the new files survive; a dry run would report that directory as drift instead.</>}
+                </p>
+              )}
               {armed && (
                 <ul className="dispatch-confirm-list" aria-label="To be deleted">
                   {runRows.map(r => <li key={r.prefix}><code>{r.prefix}</code>{r.stat && <span className="dim"> · {fmtBytes(r.stat.b)}</span>}</li>)}
