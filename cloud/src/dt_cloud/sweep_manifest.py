@@ -309,15 +309,17 @@ def apply_hold(table: pa.Table, hold: AsOfHold) -> tuple[pa.Table, int, int]:
     names = hold.ref.column("name").chunk(0) if hold.ref.num_rows else pa.array([], pa.large_string())
     lo = _bisect(names, pc.min(sub["name"]).as_py(), right=False)
     hi = _bisect(names, pc.max(sub["name"]).as_py(), right=True)
+    # Names bounding a shard's can bound gigabytes of the ref: only the shard's own reach the join, whose keys are `string`.
     ref = hold.ref.slice(lo, hi - lo)
+    ref = ref.filter(pc.is_in(ref["name"], value_set=sub["name"].cast(pa.large_string()).combine_chunks()))
     left = pa.table({
-        "name": sub["name"].cast(pa.large_string()),
+        "name": sub["name"],
         "generation": sub["generation"],
         "created": sub["created"].cast(pa.int64()),
         "i": idx,
     })
     right = pa.table({
-        "name": ref["name"].cast(pa.large_string()),
+        "name": ref["name"].cast(sub["name"].type),
         "ref_generation": ref["generation"],
         "ref_created": ref["created"].cast(pa.int64()),
     })
