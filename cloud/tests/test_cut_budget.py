@@ -397,3 +397,85 @@ def test_ranges_task_opens_at_its_budget_under_the_watch(world, built, spy, pss,
     run = store / prefix / rk
     assert {**_parquets(run), **{f"state/{k}": v for k, v in _parquets(scratch / prefix / "state" / d).items()}} == _parquets(snap)
     assert _range_docs(run / "ranges") == _range_docs(snap / "ranges") == {f"r{i:04d}.json": _no_seconds(doc) for i, doc in zip((0, 2, 1), docs)}
+
+
+def _files(d: Path) -> dict[str, bytes]:
+    return {p.relative_to(d).as_posix(): p.read_bytes() for p in sorted(d.rglob("*")) if p.is_file()}
+
+
+#: Seconds in a generation's JSON docs: the only part of them a run's timing moves.
+SECONDS = {"s", "cut_s", "check_s"}
+
+
+def _no_timings(doc):
+    if isinstance(doc, dict):
+        return {k: _no_timings(v) for k, v in doc.items() if k not in SECONDS}
+    return [_no_timings(v) for v in doc] if isinstance(doc, list) else doc
+
+
+def _comparable(files: dict[str, bytes]) -> dict[str, object]:
+    """A tree's files with each JSON doc parsed and its timings dropped; everything else as its bytes."""
+    return {k: _no_timings(json.loads(v)) if k.endswith(".json") else v for k, v in files.items()}
+
+
+def test_staged_chain_over_two_scans_is_add(world, built, monkeypatch, tmp_path):  # noqa: F811
+    """`prepare`, `ranges` and `publish` over two consecutive scans on a local store, the second reading its open state
+    from the first's scratch: the whole generation (runs, served sorts, manifests, parity markers) and each scan's state
+    are `add`'s over the same base, byte for byte. Two things can't be: a JSON doc's seconds, and a run's `scans.json`
+    `bucket`, which names where the scans were read (`add`'s `-s`, the staged store)."""
+    scans = DATES[BASE:BASE + 2]
+    prefix = f"{ist.PREFIX}/g"
+
+    (tmp_path / "add").mkdir()
+    added = _copy(built, tmp_path / "add")
+    add_state = {}
+    real_apply = ich.apply_run
+
+    def apply_run(con, run, state, ranges, D, out, **kw):
+        got = real_apply(con, run, state, ranges, D, out, **kw)
+        add_state[Path(run).name] = _files(state)
+        return got
+
+    monkeypatch.setattr(ich, "apply_run", apply_run)
+    _invoke(il.add_cmd, ["-g", "g", "-L", LAYOUT, "-s", str(world["root"]), "-o", str(added), "-w", str(tmp_path / "add" / "w"), "-p", "2", "-M", MEM,
+                         "-N", "-t", scans[-1]])
+    monkeypatch.setattr(ich, "apply_run", real_apply)
+
+    (tmp_path / "staged").mkdir()
+    store = _copy(built, tmp_path / "staged")
+    scratch = tmp_path / "staged" / "scratch"
+    scratch.mkdir()
+    read: list[tuple[str, str, str]] = []
+    real_base, real_run = ia.base_state_sql, ia.run_state_sql
+
+    def base_state_sql(root, name, *a, **kw):
+        read.append(("base", root, name))
+        return real_base(root, name, *a, **kw)
+
+    def run_state_sql(root, name, *a, **kw):
+        read.append(("run", root, name))
+        return real_run(root, name, *a, **kw)
+
+    monkeypatch.setattr(ia, "base_state_sql", base_state_sql)
+    monkeypatch.setattr(ia, "run_state_sql", run_state_sql)
+    names = ["r0000", "r0001", "r0002"]
+    for d in scans:
+        listing = LAYOUT.replace("{id}", d).rsplit("/", 1)[0]
+        shutil.copytree(world["root"] / listing, store / listing)
+        ia.prepare_scan(str(store), "g", d, (LAYOUT,))
+        common = ["-b", str(store), "-g", "g", "-R", "g", "-S", str(scratch), "-d", d, "-m", str(store), "-M", MEM, "-p", "2", "-T", str(tmp_path / "staged" / "tmp")]
+        _invoke(ia.ranges_cmd, [*common, "-i", "0", "-n", "3", "-o", str(tmp_path / "staged" / "out")])
+        _invoke(ia.publish_cmd, common)
+    assert read == [
+        *(("base", f"{store}/{prefix}", n) for n in names),
+        *(("run", f"{scratch}/{prefix}/state/{scans[0]}", n) for n in names),
+    ]
+
+    a, b = _comparable(_files(added / prefix)), _comparable(_files(store / prefix))
+    for d in scans:
+        key = f"{ia.run_key(d, d)}/scans.json"
+        assert (a[key].pop("bucket"), b[key].pop("bucket")) == (str(world["root"]), str(store))
+    assert a == b
+    assert add_state.keys() == set(scans)
+    for d in scans:
+        assert add_state[d] == _files(scratch / prefix / "state" / d)
