@@ -245,6 +245,15 @@ def _reconstructs(con, table: str, new: str, kind: str) -> tuple[list[int], list
 def append_range(con, prev: dict[str, str], scan: dict, r: dict, name: str, out: Path, *, bucket: str, mount: str | None,
                  sliced: bool = True, generation: ist.Identity = False, check: list[str] | None = None, attributed: bool = False,
                  churn: bool = False, count: bool = True) -> dict:
+    """`_append_range`, its peaks under a running `tree_mem.TreeWatch` labelled with the range, DuckDB's and Arrow's own
+    totals read with each sample."""
+    with tm.at(name), tm.gauges(DuckDB=tm.duck_bytes(con), Arrow=pa.total_allocated_bytes):
+        return _append_range(con, prev, scan, r, name, out, bucket=bucket, mount=mount, sliced=sliced, generation=generation, check=check,
+                             attributed=attributed, churn=churn, count=count)
+
+
+def _append_range(con, prev: dict[str, str], scan: dict, r: dict, name: str, out: Path, *, bucket: str, mount: str | None,
+                  sliced: bool, generation: ist.Identity, check: list[str] | None, attributed: bool, churn: bool, count: bool) -> dict:
     """Append `scan` to one key range's open versions (`prev`: `state_schema` relations per table, `tables(sliced,
     attributed)`; `attributed`: the lineage carries the attribution table, `append_attribution`).
     Writes under `out` each table's delta `<t>/<name>.parquet` (`delta_schema`, sorted by identity then `op`) and next
@@ -268,18 +277,19 @@ def append_range(con, prev: dict[str, str], scan: dict, r: dict, name: str, out:
     src = sn._src(bucket, scan["src"], mount)
     preds = sn.range_preds(r)
     v = scan.get("version")
-    con.execute(f"CREATE OR REPLACE TABLE np AS {ist.path_rows_sql(con, src, preds, v, generation)}")
-    if not sliced and con.execute("SELECT count(*) FROM np WHERE us <> ''").fetchone()[0]:
-        raise SystemExit(ist.owners_refused(scan["id"]))
     todo = tables(sliced)
-    if sliced:
-        con.execute(f"CREATE OR REPLACE TABLE ns AS {ist.slice_rows_sql(con, src, preds, v)}")
-    for t in todo:
-        con.execute(f"CREATE OR REPLACE TABLE p_{t} AS SELECT *, {DR} AS dr FROM ({prev[t]})")
-    # Each path's version start after D: its open one's while the change columns hold, else D.
-    same = " AND ".join(f"o.{c} IS NOT DISTINCT FROM n.{c}" for c in ist.change_cols(generation))
-    con.execute(f"""CREATE OR REPLACE TABLE npf AS SELECT n.*, CASE WHEN o.path IS NOT NULL AND {same} THEN o.pvf ELSE {D} END::BIGINT AS pvf
-        FROM np n LEFT JOIN p_pvl o ON o.depth = n.depth AND o.path = n.path""")
+    with tm.phase("range load"):
+        con.execute(f"CREATE OR REPLACE TABLE np AS {ist.path_rows_sql(con, src, preds, v, generation)}")
+        if not sliced and con.execute("SELECT count(*) FROM np WHERE us <> ''").fetchone()[0]:
+            raise SystemExit(ist.owners_refused(scan["id"]))
+        if sliced:
+            con.execute(f"CREATE OR REPLACE TABLE ns AS {ist.slice_rows_sql(con, src, preds, v)}")
+        for t in todo:
+            con.execute(f"CREATE OR REPLACE TABLE p_{t} AS SELECT *, {DR} AS dr FROM ({prev[t]})")
+        # Each path's version start after D: its open one's while the change columns hold, else D.
+        same = " AND ".join(f"o.{c} IS NOT DISTINCT FROM n.{c}" for c in ist.change_cols(generation))
+        con.execute(f"""CREATE OR REPLACE TABLE npf AS SELECT n.*, CASE WHEN o.path IS NOT NULL AND {same} THEN o.pvf ELSE {D} END::BIGINT AS pvf
+            FROM np n LEFT JOIN p_pvl o ON o.depth = n.depth AND o.path = n.path""")
     doc: dict = {"range": name, "scan": scan["id"]}
     key2 = ["depth", "path"]
     key3 = ["depth", "path", "usr"]
@@ -296,41 +306,48 @@ def append_range(con, prev: dict[str, str], scan: dict, r: dict, name: str, out:
         "svt": (svt_new, key3, SVT_STATE, ist.CARRIED),
     }
     for t, (new, key, state, carried) in ((t, plan[t]) for t in todo):
-        n_open, n_close = append_intervals(con, f"SELECT * FROM p_{t}", new, key, state, D, OPEN, carried=carried, out=f"o_{t}")
-        on = " AND ".join(f"o_{t}.{c} = c.{c}" for c in key)
-        if t == "pvl":
-            # A version opened by its read day alone continues its path version: `fold` gives it that version's `wts`
-            # (and `GENERATION`).
-            sets = ", ".join(f"{c} = c.{c}" for c in ["wts", *gcol])
-            con.execute(f"""UPDATE o_pvl SET {sets} FROM (SELECT depth, path, {', '.join(['wts', *gcol])} FROM o_pvl WHERE vt = {D}) c
-                WHERE o_pvl.vf = {D} AND o_pvl.pvf < {D} AND {on}""")
-        elif t == "svt":
-            # A piece opened by its path's change alone continues its slice version: `fold -S` gives it that one's `wts`.
-            eq = " AND ".join(f"o_svt.{c} IS NOT DISTINCT FROM c.{c}" for c in ist.SV_CHANGE)
-            con.execute(f"""UPDATE o_svt SET wts = c.wts FROM (SELECT * FROM o_svt WHERE vt = {D}) c
-                WHERE o_svt.vf = {D} AND {on} AND {eq}""")
+        with tm.phase(f"range intervals {t}"):
+            n_open, n_close = append_intervals(con, f"SELECT * FROM p_{t}", new, key, state, D, OPEN, carried=carried, out=f"o_{t}")
+            on = " AND ".join(f"o_{t}.{c} = c.{c}" for c in key)
+            if t == "pvl":
+                # A version opened by its read day alone continues its path version: `fold` gives it that version's `wts`
+                # (and `GENERATION`).
+                sets = ", ".join(f"{c} = c.{c}" for c in ["wts", *gcol])
+                con.execute(f"""UPDATE o_pvl SET {sets} FROM (SELECT depth, path, {', '.join(['wts', *gcol])} FROM o_pvl WHERE vt = {D}) c
+                    WHERE o_pvl.vf = {D} AND o_pvl.pvf < {D} AND {on}""")
+            elif t == "svt":
+                # A piece opened by its path's change alone continues its slice version: `fold -S` gives it that one's `wts`.
+                eq = " AND ".join(f"o_svt.{c} IS NOT DISTINCT FROM c.{c}" for c in ist.SV_CHANGE)
+                con.execute(f"""UPDATE o_svt SET wts = c.wts FROM (SELECT * FROM o_svt WHERE vt = {D}) c
+                    WHERE o_svt.vf = {D} AND {on} AND {eq}""")
         schema = delta_schema(t, generation, churn and t == "pvl")
         cols = ", ".join(schema.names[:-1])
         order = ", ".join([*IDENT[t], "op"])
         dict_cols = [c for c in ("kind", "us", "usr") if c in schema.names]
-        n_delta = write_sorted(sn._batches(con, f"""SELECT {cols}, 1::TINYINT AS op FROM o_{t} WHERE vf = {D}
-                UNION ALL SELECT {cols}, -1::TINYINT AS op FROM o_{t} WHERE vt = {D} ORDER BY {order}"""),
-                               out / t / f"{name}.parquet", schema, ist.RANGE_RG, dictionary=dict_cols)
-        n_state = write_sorted(sn._batches(con, f"SELECT {cols} FROM o_{t} WHERE vt = {OPEN} ORDER BY {', '.join(IDENT[t])}"),
-                               out / "state" / t / f"{name}.parquet", state_schema(t, generation, churn and t == "pvl"), ist.RANGE_RG, dictionary=dict_cols)
-        got, want = _reconstructs(con, f"o_{t}", SCAN_ROWS[t], t)
+        with tm.phase(f"range delta {t}"):
+            n_delta = write_sorted(sn._batches(con, f"""SELECT {cols}, 1::TINYINT AS op FROM o_{t} WHERE vf = {D}
+                    UNION ALL SELECT {cols}, -1::TINYINT AS op FROM o_{t} WHERE vt = {D} ORDER BY {order}"""),
+                                   out / t / f"{name}.parquet", schema, ist.RANGE_RG, dictionary=dict_cols)
+        with tm.phase(f"range state {t}"):
+            n_state = write_sorted(sn._batches(con, f"SELECT {cols} FROM o_{t} WHERE vt = {OPEN} ORDER BY {', '.join(IDENT[t])}"),
+                                   out / "state" / t / f"{name}.parquet", state_schema(t, generation, churn and t == "pvl"), ist.RANGE_RG, dictionary=dict_cols)
+        with tm.phase(f"range reconstructs {t}"):
+            got, want = _reconstructs(con, f"o_{t}", SCAN_ROWS[t], t)
         if got != want:
             raise RuntimeError(f"append {name} {scan['id']} {t}: the open versions ({got[0]:,} rows) are not the scan's ({want[0]:,})")
         doc[t] = {"opened": n_open, "closed": n_close, "delta": n_delta, "open": n_state}
         if t == "pvl" and churn:
-            doc["churn"] = ich.scan_churn(con, "o_pvl", D, check or [], name, out / "state", count)
+            with tm.phase("range churn"):
+                doc["churn"] = ich.scan_churn(con, "o_pvl", D, check or [], name, out / "state", count)
         con.execute(f"DROP TABLE o_{t}; DROP TABLE p_{t}")
     if attributed:
-        doc[AT] = append_attribution(con, prev[AT], scan, preds, name, out, D, bucket=bucket, mount=mount)
+        with tm.phase("range attribution"):
+            doc[AT] = append_attribution(con, prev[AT], scan, preds, name, out, D, bucket=bucket, mount=mount)
     if check is not None:
         t1 = monotonic()
-        doc["check"] = {**check_tables(con, [*check, str(out)], name, D, sliced=sliced, generation=generation,
-                                       attribution=attributed and doc[AT]["covered"]), "s": round(monotonic() - t1, 1)}
+        with tm.phase("range check"):
+            doc["check"] = {**check_tables(con, [*check, str(out)], name, D, sliced=sliced, generation=generation,
+                                           attribution=attributed and doc[AT]["covered"]), "s": round(monotonic() - t1, 1)}
     con.execute("DROP TABLE np; DROP TABLE IF EXISTS ns; DROP TABLE npf; DROP TABLE IF EXISTS na")
     doc["s"] = round(monotonic() - t0, 1)
     err(f"append {name} {scan['id']}: " + ", ".join(f"{t} +{doc[t]['opened']:,} −{doc[t]['closed']:,}" for t in todo)
