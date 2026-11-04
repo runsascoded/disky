@@ -228,7 +228,7 @@ def test_merge_keys_are_the_orders():
         "slices-bytotal": ["__b", "path", "__un", "__u", "vf"],
         "slices-bysize-user": ["__un", "__u", "__b", "path", "vf"],
         ist.ATTRIBUTION: ["path", "vf"],
-        ist.LEVEL: ["depth", "path", "ts", "name"],
+        ist.LEVEL: ["depth", "path", "ts", "name", "op", "kind", "__kp", "size", "n_files", "size_prev", "n_files_prev", "churn_cum", "churn_prev"],
     }
 
 
