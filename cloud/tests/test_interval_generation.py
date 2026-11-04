@@ -31,7 +31,7 @@ from dt_cloud import static_names as sn
 from dt_cloud.append_runner import latest_key
 from dt_cloud.blobstore import Store
 from dt_cloud.staged_plan import parse_plan
-from dt_cloud.sweep_manifest import HoldSource, build_manifests, hold_ref
+from dt_cloud.sweep_manifest import MANIFEST_SCHEMA, AsOfHold, HoldSource, apply_hold, build_manifests, hold_ref
 from dt_cloud.viz import write_path_index
 
 B = "b"
@@ -857,3 +857,23 @@ def test_a_hold_past_a_string_chunk_stays_one_sorted_chunk():
     assert ref.num_rows == 2100 * 1024
     assert ref.column("name").chunk(0).type == pa.large_string()
     assert [ref["generation"][i].as_py() for i in (0, 2100, 1023 * 2100 - 1, 1024 * 2100 - 1)] == [0, 1, 1022, 1023]
+
+
+def test_apply_hold_vouches_from_a_ref_past_a_string_chunk():
+    """A shard's names can bound a stretch of the ref past 2 GiB. Joining all of it aborted the process (`std::length_error`
+    from Acero's `large_string` keys, on gcs's largest bucket); only the shard's own names reach the join now."""
+    t0 = _ts(0)
+    names = pa.array([f"d/{i:07d}{'x' * 1024}" for i in range(1024)], pa.string())
+    chunk = pa.table({"name": names, "generation": pa.array([0] * 1024, pa.int64()), "created": pa.array([t0] * 1024, pa.timestamp("us", tz="UTC"))})
+    ref = hold_ref([chunk] * 2100)
+    assert ref["name"].chunk(0).nbytes > 2**31
+    first, last = names[0].as_py(), names[1023].as_py()
+    replaced = first[:-1] + "y"
+    table = pa.Table.from_pylist([
+        {"name": first, "size_bytes": 1, "created": t0, "generation": 0},
+        {"name": replaced, "size_bytes": 2, "created": _ts(9999), "generation": 7},
+        {"name": last, "size_bytes": 4, "created": t0, "generation": 0},
+    ], schema=MANIFEST_SCHEMA)
+    kept, skip_bytes, skip_objects = apply_hold(table, AsOfHold(current=(), held=("d/",), ref=ref))
+    assert sorted(kept["name"].to_pylist()) == [first, last]
+    assert (skip_bytes, skip_objects) == (2, 1)
