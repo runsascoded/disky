@@ -22,8 +22,11 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
+from typing import TypeVar
 
 from .heartbeat import Progress
+
+T = TypeVar("T")
 
 #: A bare bucket name's scheme (the profiles predating URL stores name a GCS bucket).
 DEFAULT_SCHEME = "gs"
@@ -34,7 +37,7 @@ RETRIES = 5
 RETRY_BASE_S = 2.0
 
 
-def _retrying(op: Callable[[], None]) -> None:
+def _retrying(op: Callable[[], T]) -> T:
     """`op()`, retried on a transient error (a timeout, a dropped or truncated response, an I/O error); a missing key or a
     refused credential is not transient and raises at once, as does the last attempt's error."""
     from aiohttp import ClientPayloadError

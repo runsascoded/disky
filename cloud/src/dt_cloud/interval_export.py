@@ -26,10 +26,18 @@ a version that says otherwise can't be written as v2 and fails the export.
 """
 from __future__ import annotations
 
+import io
 import json
 import os
+import resource
 import shutil
+import sys
 import tempfile
+import time
+from bisect import bisect_left, bisect_right
+from collections.abc import Iterable
+from concurrent.futures import ThreadPoolExecutor
+from functools import lru_cache
 from pathlib import Path
 
 import pyarrow as pa
@@ -39,7 +47,7 @@ from click import IntRange, argument, command, option
 from . import interval_compact as ic
 from . import interval_store as ist
 from .append_runner import latest_key
-from .blobstore import Store
+from .blobstore import Store, _retrying
 from .static_names import connect, err, q
 
 PREFIX = ist.PREFIX
@@ -118,29 +126,148 @@ def store_gen(store: Store, gen: str | None) -> str:
 
 #: An object identity row (`object_identities`): what a sweep's hold compares (`sweep_manifest.AsOfHold.ref`).
 IDENTITY_COLS = ["depth", "path", "vf", "vt", "kind", "mtime", "wts", "wb"]
+#: Row groups `object_identities` reads at once: one ranged GET plus one group's decode and filter each, so at most this
+#: many unfiltered groups (8K rows) are in memory.
+IDENTITY_READERS = 32
+#: The fold's DuckDB limit, past which it spills to a temporary dir (the filtered rows themselves are Arrow, outside it).
+IDENTITY_MEM = "16GB"
 
 
-def _groups(store: Store, key: str, spans: list[tuple[str, str]], ts: int) -> list[int]:
-    """The row groups of the served sort `key` (from its `.groups.parquet`) whose paths may meet a `[lo, hi]` span and
-    whose versions may be live at `ts`."""
-    g = pq.read_table(store.open(key.removesuffix(".parquet") + ".groups.parquet"),
-                      columns=["rg", "p_min", "p_max", "vf_min", "vt_max"]).to_pylist()
+def _items(bucket: str, bands: Iterable[str], exact: Iterable[str]) -> tuple[list[str], frozenset[str]]:
+    """The full-path forms of `bands` (sorted, prefix-free: a band inside another is dropped) and of the `exact` keys no
+    band covers. A path's rows are wanted iff it is an exact key, or the largest band ≤ it is a prefix of it: any band
+    that is a prefix of a path sorts ≤ it, and any string between a prefix and a path it prefixes has that prefix too, so
+    with prefix-free bands no other band can sit between them. `str` order is code point order, which is UTF-8 byte
+    order (the order `starts_with` and the files' sort compare in)."""
+    out: list[str] = []
+    for band in sorted({f"{bucket}/{b}" for b in bands}):
+        if not (out and band.startswith(out[-1])):
+            out.append(band)
+    return out, frozenset(path for k in exact if not _band_of(path := f"{bucket}/{k}", out))
+
+
+def _band_of(path: str, bands: list[str]) -> bool:
+    """Whether `path` is under one of the sorted, prefix-free `bands`."""
+    i = bisect_right(bands, path) - 1
+    return i >= 0 and path.startswith(bands[i])
+
+
+def _wanted(paths: pa.ChunkedArray | pa.Array, bands: list[str], exact: frozenset[str]) -> pa.Array:
+    """A mask of `paths`: those under `bands` or in `exact` (`_items`). Row by row, never assuming `paths`' order."""
+    return pa.array([p in exact or _band_of(p, bands) for p in paths.to_numpy(zero_copy_only=False)], pa.bool_())
+
+
+def _spans(bands: list[str], exact: frozenset[str]) -> list[tuple[str, str]]:
+    """The `[lo, hi]` path spans of `_items`, sorted and merged: disjoint, so both `lo` and `hi` ascend."""
+    out: list[tuple[str, str]] = []
+    for lo, hi in sorted([*((b, f"{b}\U0010ffff") for b in bands), *((k, k) for k in exact)]):
+        if out and lo <= out[-1][1]:
+            out[-1] = (out[-1][0], max(out[-1][1], hi))
+        else:
+            out.append((lo, hi))
+    return out
+
+
+def _meets(p_min: str, p_max: str, spans: list[tuple[str, str]], his: list[str]) -> bool:
+    """Whether `[p_min, p_max]` meets a span of the merged `spans` (`his`: their `hi`s): of the spans with `hi ≥ p_min`,
+    the first has the smallest `lo`."""
+    i = bisect_left(his, p_min)
+    return i < len(spans) and spans[i][0] <= p_max
+
+
+@lru_cache(maxsize=32)
+def _group_bounds(root: str, key: str) -> list[tuple[int, str, str, int]]:
+    """The served sort `key`'s `.groups.parquet`: `(rg, p_min, p_max, vf_min)`. An immutable file, read by every bucket's
+    hold: 8K-row groups of a whole fleet are far more than one bucket's items."""
+    t = pq.read_table(Store(root).open(key.removesuffix(".parquet") + ".groups.parquet"), columns=["rg", "p_min", "p_max", "vf_min"])
+    return list(zip(*(t[c].to_pylist() for c in t.column_names)))
+
+
+def _groups(root: str, key: str, spans: list[tuple[str, str]], ts: int) -> list[int]:
+    """The row groups of the served sort `key` whose paths may meet a merged `[lo, hi]` span (`_spans`) and whose versions
+    may be live at `ts`."""
+    his = [hi for _, hi in spans]
     # A run's closed rows cancel versions still open in the base. Dropping a group because all its vt <= ts
     # would resurrect those base rows, possibly returning both a replacement and its stale identity.
-    return [r["rg"] for r in g if r["vf_min"] <= ts and any(r["p_max"] >= lo and r["p_min"] <= hi for lo, hi in spans)]
+    return [rg for rg, p_min, p_max, vf_min in _group_bounds(root, key) if vf_min <= ts and _meets(p_min, p_max, spans, his)]
+
+
+@lru_cache(maxsize=32)
+def _footer(root: str, key: str) -> tuple[pq.FileMetaData, int]:
+    """The served sort `key`'s footer and file size. An immutable file; parsing a whole store's footer once, not per read."""
+    store = Store(root)
+    with store.open(key) as f:
+        return pq.read_metadata(f), store.size(key)
+
+
+class _GroupFile(io.RawIOBase):
+    """A read-only view of the file `key`, `size` bytes long, holding one fetched span `[lo, lo + len(data))`: what one row
+    group's decode reads, without a request per column chunk. A read outside the span goes to the store."""
+
+    def __init__(self, store: Store, key: str, size: int, lo: int, data: bytes):
+        self.store, self.key, self.end, self.lo, self.data, self.pos = store, key, size, lo, data, 0
+
+    def readable(self) -> bool:
+        return True
+
+    def seekable(self) -> bool:
+        return True
+
+    def tell(self) -> int:
+        return self.pos
+
+    def seek(self, offset: int, whence: int = io.SEEK_SET) -> int:
+        self.pos = {io.SEEK_SET: 0, io.SEEK_CUR: self.pos, io.SEEK_END: self.end}[whence] + offset
+        return self.pos
+
+    def read(self, n: int = -1) -> bytes:
+        hi = self.end if n < 0 else min(self.pos + n, self.end)
+        a, b = self.pos - self.lo, hi - self.lo
+        out = self.data[a:b] if 0 <= a and b <= len(self.data) else self.store.read_range(self.key, self.pos, hi)
+        self.pos += len(out)
+        return out
+
+
+def _chunk_span(rg: pq.RowGroupMetaData, cols: list[str]) -> tuple[int, int]:
+    """The byte span `[lo, hi)` holding `cols`' column chunks in the row group `rg`."""
+    chunks = [c for c in map(rg.column, range(rg.num_columns)) if c.path_in_schema in cols]
+    starts = [c.dictionary_page_offset if c.has_dictionary_page and 0 < c.dictionary_page_offset < c.data_page_offset else c.data_page_offset for c in chunks]
+    return min(starts), max(s + c.total_compressed_size for s, c in zip(starts, chunks))
+
+
+def _group_rows(store: Store, key: str, rg: int, cols: list[str], bands: list[str], exact: frozenset[str]) -> tuple[pa.Table, int]:
+    """Row group `rg` of `key` by one ranged read, kept only under the items: `(rows, rows the group held)`. By path alone:
+    a run's close record has its base row's path, so both stay for the fold."""
+    meta, size = _footer(store.root, key)
+    lo, hi = _chunk_span(meta.row_group(rg), cols)
+    data = _retrying(lambda: store.read_range(key, lo, hi))
+    t = pq.ParquetFile(_GroupFile(store, key, size, lo, data), metadata=meta).read_row_group(rg, columns=cols, use_threads=False)
+    return t.filter(_wanted(t["path"], bands, exact)), t.num_rows
+
+
+def held_rows(store: Store, key: str, rgs: list[int], cols: list[str], bands: list[str], exact: frozenset[str], *,
+              readers: int = IDENTITY_READERS) -> tuple[list[pa.Table], int]:
+    """The rows under the items of `key`'s row groups `rgs`, in file order, `readers` groups at a time; each group is
+    filtered before it is kept, so what accumulates is the items' rows alone. Returns them and the rows the groups held.
+    A failed read raises: nothing is returned for part of a sort."""
+    _footer(store.root, key)  # Once, not by every reader racing to the cache.
+    with ThreadPoolExecutor(max_workers=readers) as pool:
+        got = list(pool.map(lambda rg: _group_rows(store, key, rg, cols, bands, exact), rgs))
+    return [t for t, _ in got], sum(n for _, n in got)
 
 
 def object_identities(store_root: str, scan: str, bucket: str, bands: list[str] | tuple[str, ...], exact: list[str] | tuple[str, ...] = (),
-                      *, gen: str | None = None) -> pa.Table:
+                      *, gen: str | None = None, readers: int = IDENTITY_READERS) -> pa.Table:
     """The objects of `bucket` under `bands` (name prefixes) or named by `exact` as scan `scan` saw them, from the
     interval store at `store_root` (generation `gen`, default the current): `(name, generation, created)` sorted by
     name — the versions live at the scan in the `path` sort (base and the newest manifest's runs, the smallest `vt`),
     objects only (a key that is also a folder's prefix is folded into the folder: never listed). `generation` is the
     version's (NULL without one, or where the generation doesn't carry it); `created` the object's created second (its
     mean stamp: one object, `wts / wb`), else its `mtime`. Reads only the row groups whose paths meet the items (each
-    sort's `.groups.parquet`): what a sweep's hold needs once the scan's raw listing is gone."""
-    import duckdb
-
+    sort's `.groups.parquet`), `readers` at a time, one ranged read each, keeping only the items' rows: memory goes with
+    those rows (plus the fold's, spilling past `IDENTITY_MEM`), not the sort's. What a sweep's hold needs once the scan's
+    raw listing is gone."""
+    start = time.monotonic()
     store = Store(store_root)
     gen = store_gen(store, gen)
     prefix = f"{PREFIX}/{gen}"
@@ -149,24 +276,36 @@ def object_identities(store_root: str, scan: str, bucket: str, bands: list[str] 
     has_gen = ist.has_generation(base)
     identity = ist.identity_column(has_gen)
     ts = int(entry["ts"])
-    spans = [(f"{bucket}/{b}", f"{bucket}/{b}\U0010ffff") for b in bands] + [(f"{bucket}/{k}", f"{bucket}/{k}") for k in exact]
+    full_bands, full_exact = _items(bucket, bands, exact)
+    spans = _spans(full_bands, full_exact)
     cols = [*IDENTITY_COLS, *([identity] if has_gen else [])]
-    parts = []
+    parts: list[pa.Table] = []
+    groups = decoded = 0
     for key in [f"{prefix}/served/{ist.GENERATION_SORT}.parquet", *(f"{prefix}/{r['key']}/served/{ist.GENERATION_SORT}.parquet" for r in runs)]:
-        if rgs := _groups(store, key, spans, ts):
-            parts.append(pq.ParquetFile(store.open(key)).read_row_groups(rgs, columns=cols))
+        if rgs := _groups(store.root, key, spans, ts):
+            got, n = held_rows(store, key, rgs, cols, full_bands, full_exact, readers=readers)
+            parts += got
+            groups += len(rgs)
+            decoded += n
     out_schema = pa.schema([("name", pa.string()), (identity, pa.string() if isinstance(has_gen, pa.Field) else pa.int64()), ("created", pa.timestamp("us", tz="UTC"))])
     if not parts:
         return out_schema.empty_table()
-    con = duckdb.connect()
-    con.register("rows", pa.concat_tables(parts))
+    rows = pa.concat_tables(parts)
+    del parts
+    read_s = time.monotonic() - start
     gcol = identity if has_gen else "NULL::BIGINT"
-    under = " OR ".join([*(f"starts_with(path, {q(lo)})" for lo, _ in spans[:len(bands)]), *(f"path = {q(lo)}" for lo, _ in spans[len(bands):])])
-    t = con.execute(f"""SELECT substr(path, {len(bucket) + 2}) AS name, {gcol} AS {identity},
-            make_timestamp((CASE WHEN wb > 0 THEN round(wts / wb, 0) ELSE mtime END)::BIGINT * 1000000) AS created
-        FROM (SELECT * FROM rows QUALIFY row_number() OVER (PARTITION BY depth, path, vf ORDER BY vt) = 1)
-        WHERE vf <= {ts} AND {ts} < vt AND kind = 'file' AND ({under or 'false'})
-        ORDER BY name""").to_arrow_table()
+    with tempfile.TemporaryDirectory(prefix="identities-") as tmp:
+        con = connect(os.cpu_count() or 1, IDENTITY_MEM, tmp)
+        con.register("rows", rows)
+        t = con.execute(f"""SELECT substr(path, {len(bucket) + 2}) AS name, {gcol} AS {identity},
+                make_timestamp((CASE WHEN wb > 0 THEN round(wts / wb, 0) ELSE mtime END)::BIGINT * 1000000) AS created
+            FROM (SELECT * FROM rows QUALIFY row_number() OVER (PARTITION BY depth, path, vf ORDER BY vt) = 1)
+            WHERE vf <= {ts} AND {ts} < vt AND kind = 'file'
+            ORDER BY name""").to_arrow_table()
+        con.close()
+    err(f"object_identities {bucket} @{scan}: {len(spans):,} spans, {groups:,} groups ({decoded:,} rows) → {rows.num_rows:,} rows kept "
+        f"({rows.nbytes / 2**30:.2f} GiB) → {t.num_rows:,} objects; read {read_s:.0f} s, total {time.monotonic() - start:.0f} s, "
+        f"peak RSS {resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / (2**30 if sys.platform == 'darwin' else 2**20):.1f} GiB")
     return t.cast(out_schema)
 
 
