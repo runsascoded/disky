@@ -703,6 +703,33 @@ def preview_bundle(tpl: Template, data: Any, month: dt.date, *, op: str, plot_ur
     }
 
 
+def _write_preview(cfg: DigestConfig, bundle: dict) -> str:
+    """``bundle`` at its key under ``cfg.preview``; returns where."""
+    from disk_tree import blobfs
+
+    out = f"{cfg.need('preview').format(channel=bundle['channel'], variant=bundle['variant']).rstrip('/')}/{bundle['month']}.json"
+    if not blobfs.is_url(out):
+        Path(out).parent.mkdir(parents=True, exist_ok=True)
+    blobfs.write_text(out, json.dumps(bundle, indent=1))
+    _err(f"digest: preview bundle → {out}")
+    return out
+
+
+def preview_only(tpl: Template, root: str, month: dt.date, key: str, variant: str | None = None) -> str:
+    """Only the month's preview bundle, under the channel key ``key``, for `/admin/slack`'s thread selector: a look at
+    a config or renderer change before anything is posted. No Slack client exists here and no plot is hosted (the OP has
+    no image line, `op_ts` and `permalink` are None: the page reads that as never posted). ``key`` is a lowercase slug,
+    which no Slack channel id is, so a run can't replace the bundle of a channel's real thread. Returns where."""
+    if not re.fullmatch(r"[a-z][a-z0-9-]*", key):
+        raise SystemExit(f"digest: preview key {key!r}: a lowercase slug, never a channel id")
+    variant = variant or tpl.variants[0]
+    data = tpl.load(root, month)
+    if not data:
+        raise SystemExit(f"digest: no scans for {month:%Y-%m}")
+    return _write_preview(tpl.cfg, preview_bundle(tpl, data, month, op=tpl.op_body(data, month, None), plot_url=None, prev_url=None,
+                                                  channel=key, variant=variant))
+
+
 def replies_json(tpl: Template, data: Any, variant: str) -> list[dict]:
     """The month's replies as the converge posts them (each day's, then the open day's provisional one when the config
     posts one), newest first:
@@ -860,15 +887,8 @@ def converge_slack(tpl: Template, root: str, month: dt.date, client, channel: st
         state["op_ts"] = op_ts
         _err(f"digest: posted OP {op_ts}")
     if cfg.preview:
-        from disk_tree import blobfs
-
-        out = f"{cfg.preview.format(channel=channel, variant=variant).rstrip('/')}/{month:%Y-%m}.json"
-        bundle = preview_bundle(tpl, data, month, op=body, plot_url=plot_url, prev_url=prev_url, channel=channel,
-                                variant=variant, op_ts=op_ts, permalink=client.permalink(op_ts))
-        if not blobfs.is_url(out):
-            Path(out).parent.mkdir(parents=True, exist_ok=True)
-        blobfs.write_text(out, json.dumps(bundle, indent=1))
-        _err(f"digest: preview bundle → {out}")
+        _write_preview(cfg, preview_bundle(tpl, data, month, op=body, plot_url=plot_url, prev_url=prev_url, channel=channel,
+                                           variant=variant, op_ts=op_ts, permalink=client.permalink(op_ts)))
 
     posted = state.setdefault("posted", {})
     new = 0

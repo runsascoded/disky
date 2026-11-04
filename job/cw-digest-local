@@ -7,6 +7,7 @@
 #   job/cw-digest-local -m 2026-11 -y 2026-11-01..2026-11-02 -c D0CE8QE83EH -n        # what re-applying 11/1–2 would edit
 #   job/cw-digest-local -m 2026-11 -y 2026-11-01..2026-11-02 -c D0CE8QE83EH           # …edit them (exactly those replies)
 #   job/cw-digest-local -m 2026-11 -o -c C0C1YR7D0KU                                  # re-render + edit only the OP
+#   job/cw-digest-local -m 2026-11 -W shapes-preview -q runway-hue -p qh,pp           # only a preview bundle (/admin/slack); no Slack
 set -euo pipefail
 cd "$(dirname "$0")/.."
 root=$PWD

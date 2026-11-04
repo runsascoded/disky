@@ -3124,6 +3124,7 @@ def _digest_options(template_default: str):
         option("-V", "--variant", type=Choice(["sender", "body"]), default=None, help="Reply style (cw template): headline as the sender name, posted once from the day's morning scan (sender, default) or bold in the body, edited as the day's scans land (body)"),
         option("-y", "--replies", "reply_range", help="Re-apply only the already-posted replies of this inclusive day range (`A..B`, YYYY-MM-DD) to their current rendering, as -d/--reply"),
         option("-w", "--webhook", help="Discord webhook URL in the digest channel (default $<config discord_webhook_env>: gcs $DISCORD_GCS_USAGE_WEBHOOK, cw none; with -P discord)"),
+        option("-W", "--preview-only", "preview_key", help="Write only the month's preview bundle under this channel key (a lowercase slug, listed in /admin/slack's thread selector): no Slack client, no plot hosted, nothing posted or edited"),
     ]
 
     def deco(f):
@@ -3158,6 +3159,7 @@ def _digest(
     site_url: str | None,
     variant: str | None,
     webhook: str | None,
+    preview_key: str | None,
     reply_range: str | None,
 ) -> None:
     from dataclasses import replace
@@ -3189,6 +3191,11 @@ def _digest(
     selected = op_only or bool(days)
     if selected and (edit_replies or redo_replies or platform != "slack"):
         raise UsageError("-o/--op, -d/--reply and -y/--replies re-apply Slack messages on their own (not with -E, -R or -P discord)")
+    if preview_key:
+        if selected or dry_run or edit_replies or redo_replies or platform != "slack":
+            raise UsageError("-W/--preview-only writes only the bundle (not with -n, -o, -d, -y, -E, -R or -P discord)")
+        dg.preview_only(tpl, root, m, preview_key, variant)
+        return
     if dry_run and not selected:
         print(dg.dry_run(tpl, root, m, variant))
         return

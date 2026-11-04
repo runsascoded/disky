@@ -271,7 +271,7 @@ function Bundle({ b, cands, setCands }: { b: PreviewBundle; cands: string[]; set
   const [form, setForm] = useState({ params: posted, quota_marks: 'runway' })
   return <>
     <p className="dim">
-      Posted {b.posted_at} to <code>{b.channel}</code> ({b.variant}){b.permalink && <> · <a href={b.permalink} target="_blank" rel="noreferrer">the thread</a></>}.
+      {b.op_ts ? 'Posted' : 'Never posted: preview only, written'} {b.posted_at} {b.op_ts ? 'to' : 'as'} <code>{b.channel}</code> ({b.variant}){b.permalink && <> · <a href={b.permalink} target="_blank" rel="noreferrer">the thread</a></>}.
       {posted && <> Rendered under params <code>{posted}</code>.</>}
       {' '}{matches ? 'The site\'s renderer reproduces it exactly.' : <span className="err">The site's renderer no longer reproduces it (the job or the renderer changed since).</span>}
     </p>
@@ -296,7 +296,7 @@ function Bundle({ b, cands, setCands }: { b: PreviewBundle; cands: string[]; set
       {cands.length < 3 && <button className="slack-add" onClick={() => setCands([...cands, cands[cands.length - 1] ?? ''])}>+ compare</button>}
     </div>
     <LiveSettings b={b} cands={cands} form={form} setForm={setForm} />
-    <Reapply b={b} form={form} />
+    {b.op_ts && <Reapply b={b} form={form} />}
     <details className="slack-rows">
       <summary>Rows ({b.rows.template})</summary>
       <pre>{JSON.stringify(b.rows, null, 1)}</pre>

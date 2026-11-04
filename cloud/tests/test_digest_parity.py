@@ -7,6 +7,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import os
+import re
 from dataclasses import replace
 from datetime import date
 from pathlib import Path
@@ -16,7 +17,7 @@ import pytest
 from dt_cloud import digest as E
 from dt_cloud import digest_cw as DC
 
-from digest_examples import CW_EXAMPLE, GCS_EXAMPLE
+from digest_examples import CW_EXAMPLE, GCS_EXAMPLE, config_file
 from test_digest_golden import CW6_SCANS, cw_root, gcs_root
 
 TIB = 1024**4
@@ -151,6 +152,51 @@ def test_converge_writes_the_preview_bundle(tmp_path: Path):
     assert [(r["username"], r["body"], r["icon_url"], r["icon_emoji"]) for r in reversed(b["replies"])] == posted
     E.converge_slack(E.template(CW_EXAMPLE), str(cw_root(tmp_path / "bare")), date(2026, 9, 1), FakeSlack([]), "C1", "sender")
     assert not (tmp_path / "bare" / "served").exists()
+
+
+def _no_slack(*a, **kw):
+    raise AssertionError("a preview-only run touched Slack")
+
+
+def test_preview_only_writes_the_bundle_and_nothing_else(tmp_path: Path, monkeypatch):
+    # the CLI: no Slack client is made (none could be: no token), the replies render under `-q`, the file's other marks
+    # untouched; the bundle says it was never posted; nothing else lands in the snapshots root (no converge state)
+    import yaml
+    from click.testing import CliRunner
+    from thrds import slack
+
+    from dt_cloud.cli import main
+
+    monkeypatch.setattr(slack, "SlackClient", _no_slack)
+    monkeypatch.delenv("SLACK_BOT_TOKEN", raising=False)
+    monkeypatch.delenv("SLACK_CHANNEL", raising=False)
+    root = cw_root(tmp_path)
+    before = sorted(p for p in root.parent.rglob("*"))
+    served = tmp_path / "served"
+    config = config_file(CW_EXAMPLE, tmp_path / "digest.yml")
+    d = yaml.safe_load(config.read_text())
+    d["preview"] = f"{served}/{{channel}}/{{variant}}"
+    d["buckets"]["hot-data"]["shape"] = "star"
+    config.write_text(yaml.safe_dump(d))
+    res = CliRunner().invoke(main, ["digest", "-T", "cw", "-C", str(config), "-L", "-r", str(root), "-m", "2026-09", "-W", "shapes-preview", "-q", "runway-hue"], catch_exceptions=False)
+    assert res.exit_code == 0
+    assert sorted(str(p.relative_to(served)) for p in served.rglob("*.json")) == ["shapes-preview/sender/2026-09.json"]
+    assert sorted(p for p in root.parent.rglob("*")) == before
+    b = json.loads((served / "shapes-preview" / "sender" / "2026-09.json").read_text())
+    assert (b["channel"], b["op_ts"], b["permalink"], b["plot_url"], b["prev_url"]) == ("shapes-preview", None, None, None, None)
+    assert {k: v.get("shape") for k, v in b["cfg"]["buckets"].items()} == {"main-data": None, "hot-data": "star"}
+    # each reply's marks, their steps dropped: the plain circle and the star
+    assert {re.sub(r"-[1-8]:", ":", m) for r in b["replies"] for m in re.findall(r":runway-[a-z0-9-]+:", r["body"])} == {":runway:", ":runway-star:"}
+
+
+@pytest.mark.parametrize("key", ["C0C1YR7D0KU", "D0CE8QE83EH", "a/b", ""])
+def test_preview_only_refuses_a_channel_id(key: str, tmp_path: Path):
+    # a real channel's bundle is the page's record of what its thread shows
+    cfg = replace(CW_EXAMPLE, preview=str(tmp_path / "served" / "{channel}" / "{variant}"))
+    with pytest.raises(SystemExit) as e:
+        E.preview_only(E.template(cfg), str(cw_root(tmp_path)), date(2026, 9, 1), key)
+    assert str(e.value) == f"digest: preview key {key!r}: a lowercase slug, never a channel id"
+    assert not (tmp_path / "served").exists()
 
 
 @pytest.mark.real_site_render
