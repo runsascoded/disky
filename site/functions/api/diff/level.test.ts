@@ -86,7 +86,6 @@ function r2(dir: string, gets = { n: 0 }): R2Bucket {
     gets.n++
     timeline.push(`r2 ${key}`)
     await sleep(r2Lag.ms)
-    timeline.push(`r2 ${key}`)
     const fs = await nodeFs()
     if (!fs.existsSync(path(key))) return null
     const buf = fs.readFileSync(path(key))
