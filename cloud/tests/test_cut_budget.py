@@ -174,8 +174,8 @@ def test_migrate_object_version(built, spy, tmp_path):
 
 
 def test_level_sort_build_append_and_backfill(world, built, spy, tmp_path, monkeypatch):  # noqa: F811
-    """The level sort is cut under the entry's budget too, each plan charging its rows (up to `ROWS_PER_VERSION` per version
-    of `pvl`) rather than its source's: a `-l` build, an append carrying it, and `backfill-level` on a generation without."""
+    """The level sort is cut under the entry's budget too, each plan charging its rows (`interval_level.rows_bound` over
+    `pvl`) rather than its source's: a `-l` build, an append carrying it, and `backfill-level` on a generation without."""
     charged: list[int] = []
     real_cut = tm.Budget.cut
 
@@ -189,15 +189,14 @@ def test_level_sort_build_append_and_backfill(world, built, spy, tmp_path, monke
                            "-p", "2", "-M", MEM, "-l", "-t", DATES[BASE - 1]])
     within(spy)
     gen = leveled / ist.PREFIX / "g"
-    pvl = ic.input_rows([str(p) for p in (gen / "pvl").glob("r*.parquet")])
-    assert ([w["sort"] for w in spy["writes"]].count(ilv.LEVEL), charged) == (1, [ilv.ROWS_PER_VERSION * pvl])
+    bound = ilv.rows_bound(duckdb.connect(), [str(p) for p in (gen / "pvl").glob("r*.parquet")])
+    assert ([w["sort"] for w in spy["writes"]].count(ilv.LEVEL), charged) == (1, [bound])
     charged.clear()
     _invoke(il.add_cmd, ["-g", "g", "-L", LAYOUT, "-s", str(world["root"]), "-o", str(leveled), "-w", str(tmp_path / "w2"), "-r", str(RG), "-p", "2",
                          "-M", MEM, "-t", DATES[BASE]])
     within(spy)
     assert [w["sort"] for w in spy["writes"]].count(ilv.LEVEL) == 2
-    run_pvl = ic.input_rows([str(p) for p in (gen / f"deltas/{DATES[BASE]}/pvl").glob("r*.parquet")])
-    assert charged[-1] == ilv.ROWS_PER_VERSION * run_pvl
+    assert charged[-1] == ilv.rows_bound(duckdb.connect(), [str(p) for p in (gen / f"deltas/{DATES[BASE]}/pvl").glob("r*.parquet")])
     spy["writes"].clear()
     store = _copy(built, tmp_path)
     _invoke(ilv.backfill_cmd, ["-g", "g", "-o", str(store), "-w", str(tmp_path / "w3"), "-r", str(RG), "-p", "2", "-M", MEM])

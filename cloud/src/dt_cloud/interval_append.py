@@ -426,14 +426,10 @@ def cut_level(con, root: str, out: Path, *, rg_rows: int = ist.SERVED_RG, tree: 
     """A run's level sort (`interval_level`) from its `pvl` deltas under `root`: the transitions at its scans (the versions
     it opened, and its close records) → `out/level.parquet` + `.groups.parquet` + `level.json`. One segment (a run is
     small). `tree`: the process tree's budget its workers and DuckDB limit are planned under (`interval_store.plan_cut`,
-    over the deltas, its rows up to `interval_level.ROWS_PER_VERSION` theirs); None: every core, DuckDB's limit as set."""
+    over the deltas, its rows `interval_level.rows_bound`); None: every core, DuckDB's limit as set."""
     t0 = monotonic()
     files = sorted(str(p) for p in Path(root, "pvl").glob("r*.parquet"))
-    extra = 0
-    if tree is not None:
-        from .interval_compact import input_rows
-
-        extra = ilv.extra_rows(input_rows(files))
+    extra = ilv.extra_rows(con, files) if tree is not None else 0
     with ist.plan_cut(con, tree, files, rg_rows=rg_rows, what=f"cut {ilv.LEVEL}", extra_rows=extra) as (procs, budget):
         doc = ist.write_served(con, level_source(root), ilv.LEVEL, out / f"{ilv.LEVEL}.parquet", ilv.LEVEL_SCHEMA, rg_rows=rg_rows, opened=ilv.RUN_OPENED,
                                procs=procs, budget=budget)

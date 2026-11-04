@@ -58,7 +58,8 @@ LEVEL_SCHEMA = pa.schema([
     pa.field("churn_cum", pa.int64(), nullable=False),
     pa.field("churn_prev", pa.int64(), nullable=False),
 ])
-#: The most `level` rows a folded path version makes: its opening and its closing, each also under the path itself.
+#: The most `level` rows a folded path version can make: its opening and its closing, each also under the path itself. What
+#: a run's sort sizes itself to: any one key range could be all directories that went away (`rows_bound` is the whole's).
 ROWS_PER_VERSION = 4
 #: The `pvl` columns the transitions are computed from (a run's deltas add `op`).
 SOURCE_COLS = ["depth", "path", "vf", "vt", "kind", "size", "n_files", "churn_cum", "churn_end"]
@@ -66,10 +67,26 @@ SOURCE_COLS = ["depth", "path", "vf", "vt", "kind", "size", "n_files", "churn_cu
 RUN_OPENED = "op = 1"
 
 
-def extra_rows(rows: int) -> int:
-    """The most `level` rows `rows` folded path versions make past their own count: the level sort's rows aren't its
-    source files', what `tree_mem`'s bounds charge (`interval_store.plan_cut`)."""
-    return (ROWS_PER_VERSION - 1) * rows
+def rows_bound(con, files: list[str]) -> int:
+    """The most `level` rows (`rows_sql`) the folded path versions in `files` (at depth ≥ 1) make: 1 for each version's
+    opening, 2 if it's a directory, and 2 for each that ended (`vt` not `OPEN`). A true upper bound, by what each row needs:
+    a closing is 2 rows, made only by a version that ended and no later version continues; an opening is 2 only if it's a
+    directory or replaces one, and the directory it replaces ended, was continued, so made no closing and has those 2 to
+    spare; `rows_sql`'s `same` and `nvf` only remove rows. One aggregate over three columns, for what `tree_mem`'s bounds
+    charge the sort (`interval_store.plan_cut`)."""
+    if not files:
+        return 0
+    src = ", ".join(q(f) for f in files)
+    return con.execute(f"""SELECT count(*) + count(*) FILTER (WHERE kind = 'dir') + 2 * count(*) FILTER (WHERE vt <> {OPEN})
+                           FROM read_parquet([{src}]) WHERE depth >= 1""").fetchone()[0]
+
+
+def extra_rows(con, files: list[str]) -> int:
+    """How many more `level` rows the versions in `files` can make than there are versions (`rows_bound`, less their count;
+    the root's version makes none): the level sort's rows aren't its source files', what `tree_mem`'s bounds charge."""
+    from .interval_compact import input_rows
+
+    return rows_bound(con, files) - input_rows(files)
 
 
 def leveled(scans: dict, gen_dir: str | Path | None = None) -> bool:

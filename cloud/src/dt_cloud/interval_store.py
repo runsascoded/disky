@@ -1222,7 +1222,8 @@ def write_served(con, src: str | list[str], sort: str, out: Path, schema: pa.Sch
         t0 = monotonic()
         hb.set_stage(f"cut {sort}: sort")
         budget = run_budget(con, k) if budget is None else budget
-        # A level run's rows are up to `ROWS_PER_VERSION` its source's: its sort holds them within the same budget.
+        # A level run's rows are up to `ROWS_PER_VERSION` its source's (any one key range; `rows_bound` is the whole's): its
+        # sort holds them within the same budget.
         runs = cut_runs(src, max(1, budget // ilv.ROWS_PER_VERSION) if level else budget)
         pieced = sort in MERGE_KEYS and len(runs) > 1
         key = merge_key(sort) if sort in MERGE_KEYS else None
@@ -1465,8 +1466,8 @@ def cut_gen(con, gen_dir: Path, scans: dict, *, rg_rows: int = SERVED_RG, jobs: 
         from .interval_compact import input_rows
 
         rows = {sub: input_rows([str(p) for p in (gen_dir / sub).glob("r*.parquet")]) for sub in size}
-        most = max(rows[SORTS[s][0]] + (ilv.extra_rows(rows[SORTS[s][0]]) if s == LEVEL else 0) for s in todo)
-        extra = ilv.extra_rows(rows[SORTS[LEVEL][0]]) if LEVEL in todo else 0
+        extra = ilv.extra_rows(con, [str(p) for p in sorted((gen_dir / SORTS[LEVEL][0]).glob("r*.parquet"))]) if LEVEL in todo else 0
+        most = max(rows[SORTS[s][0]] + (extra if s == LEVEL else 0) for s in todo)
     with plan_cut(con, tree, ins, at_once=at_once, rg_rows=rg_rows, sort_rows=most, extra_rows=extra) as (procs, budget):
         def one(cur, sort: str) -> dict:
             sub, _, _ = SORTS[sort]
@@ -1777,11 +1778,7 @@ def _cut(all_sorts, bucket, no_dyadic, profile, gen, index, jobs, as_jobs, mount
         dst = out_dir / f"{sort}.parquet"
         files = range_files(con, f"{root}/{sub}/r*.parquet")
         bounds = ilv.range_bounds(store.read_json(f"{prefix}/ranges.json")) if sort == LEVEL else None
-        extra = 0
-        if sort == LEVEL and tree is not None:
-            from .interval_compact import input_rows
-
-            extra = ilv.extra_rows(input_rows(files))
+        extra = ilv.extra_rows(con, files) if sort == LEVEL and tree is not None else 0
         # As `cut_gen` sizes each of `as_jobs` sorts at once: the cores and the budget split between them.
         with plan_cut(con, tree, files, at_once=as_jobs, rg_rows=rg_rows, what=f"cut {sort}", extra_rows=extra) as (procs, budget):
             procs = min(procs, workers or procs)
