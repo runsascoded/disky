@@ -1,7 +1,7 @@
 import { expect, it, vi } from 'vitest'
 import { NotFoundError } from '@rdub/file-tree'
 import { announceFinished } from './stagedSlack'
-import { outcomeReaderOf, runOutcomeOf } from './sweepOutcome'
+import { outcomeReaderOf, runOutcomeOf, UNREAD } from './sweepOutcome'
 import { reflectSweepRuns, type SweepBatchJob } from './sweepReflect'
 import { runDir } from './sweepDispatch'
 import { RUN_DIR, sqliteD1 } from './testD1'
@@ -33,7 +33,7 @@ it('an older run has nothing to add; zero skips are none', async () => {
   expect(await reading({ ...GENERATIONS, skipped_no_generation: { bytes: 0, objects: 0, whole_buckets: [] } })(JOB)).toEqual({ attempted: true, skipped: null, notSwept: [] })
 })
 
-it('never throws: a missing file, a failed read or a document it can\'t read is no outcome', async () => {
+it('never throws: a missing file is no outcome (an older run); a failed read or a document it can\'t read is unread', async () => {
   const log = vi.spyOn(console, 'log').mockImplementation(() => {})
   const missing = async (key: string) => { throw new NotFoundError(key) }
   const down = async () => { throw new Error('store down') }
@@ -45,7 +45,7 @@ it('never throws: a missing file, a failed read or a document it can\'t read is 
     reading(null)(JOB),
     reading({ ...GENERATIONS, skipped_no_generation: { objects: 'many', bytes: 1, whole_buckets: [] } })(JOB),
     reading({ ...GENERATIONS, skipped_no_generation: { objects: 1, bytes: 1, whole_buckets: 'b1' } })(JOB),
-  ])).toEqual([null, null, null, null, null, null])
+  ])).toEqual([null, UNREAD, UNREAD, UNREAD, UNREAD, UNREAD])
   expect(log.mock.calls.map(([line]) => (line as string).split(':')[0])).toEqual(Array(5).fill(`outcome of ${JOB}`))
   log.mockRestore()
 })
@@ -77,7 +77,7 @@ it('end to end: a finished generation run\'s thread message, and a failed read\'
   ])
   const log = vi.spyOn(console, 'log').mockImplementation(() => {})
   expect(await replies(outcomeReaderOf(async () => { throw new Error('store down') }))).toEqual([
-    `:white_check_mark: Real deletion ${link} finished: deleted *1.0 KiB* / 2 objects.`,
+    `:warning: Real deletion ${link} finished, totals unread: recorded *1.0 KiB* / 2 objects.`,
   ])
   log.mockRestore()
 })

@@ -26,10 +26,13 @@ export async function runOutcomeOf(jobId: string, get: Get): Promise<RunOutcome 
 
 export type OutcomeReader = (jobId: string) => Promise<RunOutcome | null>
 
-/** Never throws: the announcement goes out without it, and the D1 reflection it follows has already landed. */
+/** A failed read: nothing says whether this run's totals are deletions or attempts. */
+export const UNREAD: RunOutcome = { attempted: false, skipped: null, notSwept: [], unread: true }
+
+/** Never throws: the announcement goes out saying its totals are unread, and the D1 reflection it follows has already landed. */
 export const outcomeReaderOf = (get: Get): OutcomeReader => jobId => runOutcomeOf(jobId, get).catch(error => {
   console.log(`outcome of ${jobId}: ${(error as Error).message}`)
-  return null
+  return UNREAD
 })
 
 /** A reader over the deployment's store. */

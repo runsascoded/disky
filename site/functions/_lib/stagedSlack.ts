@@ -315,6 +315,7 @@ export function runEvent(r: RunRow, phase: 'dispatched' | 'finished' | 'failed',
   if (phase === 'failed') return `:x: ${kind} ${id} ended without a result (its Batch job stopped before the run summary); check its logs in www.`
   const skips = skipsLine(o.outcome)
   if (r.mode === 'dry') return `:test_tube: Dry-run ${id} finished: would delete *${fmtBytes(r.deleted_bytes)}* / ${fmtN(r.deleted_objects)} objects (gone since scan: ${fmtN(r.skipped_gone)}, overwritten: ${fmtN(r.skipped_overwritten)}).${skips}`
+  if (o.outcome?.unread) return `:warning: Real deletion ${id} finished, totals unread: recorded *${fmtBytes(r.deleted_bytes)}* / ${fmtN(r.deleted_objects)} objects${r.undo_deadline ? `; undoable until ${utc(r.undo_deadline)} (www)` : ''}.`
   return `${skips ? ':warning:' : ':white_check_mark:'} Real deletion ${id} finished: ${o.outcome?.attempted ? 'attempted' : 'deleted'} *${fmtBytes(r.deleted_bytes)}* / ${fmtN(r.deleted_objects)} objects${r.undo_deadline ? `; undoable until ${utc(r.undo_deadline)} (www)` : ''}.${skips}`
 }
 

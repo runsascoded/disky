@@ -237,6 +237,8 @@ export interface RunOutcome {
   skipped: Tally | null
   /** Buckets none of whose objects had one, so not swept at all. */
   notSwept: string[]
+  /** Its `plan-summary.json` couldn't be read, so the other fields say nothing. */
+  unread?: boolean
 }
 
 /** Null: nothing to say, the run reads as it always did. */

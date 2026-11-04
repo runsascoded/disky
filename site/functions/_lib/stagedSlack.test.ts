@@ -75,6 +75,7 @@ describe('run events', () => {
     it('a generation run attempted; no outcome (an older run, cw\'s, a failed read) keeps "deleted"', () => {
       expect(finished({ attempted: true, skipped: null, notSwept: [] })).toBe(':white_check_mark: Real deletion `r1` finished: attempted *2.0 TiB* / 1,234 objects; undoable until 2026-09-28 14:13Z (www).')
       expect(finished(undefined)).toBe(':white_check_mark: Real deletion `r1` finished: deleted *2.0 TiB* / 1,234 objects; undoable until 2026-09-28 14:13Z (www).')
+      expect(finished({ attempted: false, skipped: null, notSwept: [], unread: true })).toBe(':warning: Real deletion `r1` finished, totals unread: recorded *2.0 TiB* / 1,234 objects; undoable until 2026-09-28 14:13Z (www).')
     })
     it('skips are said, and it no longer reads as a clean success', () => {
       expect(finished({ attempted: true, skipped: SKIPPED, notSwept: [] })).toBe(':warning: Real deletion `r1` finished: attempted *2.0 TiB* / 1,234 objects; undoable until 2026-09-28 14:13Z (www). Skipped, no generation: *3.0 GiB* / 5,678 objects left in place.')
