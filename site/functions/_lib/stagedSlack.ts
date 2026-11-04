@@ -25,6 +25,7 @@ import { canonId, loadRegistry } from './identity.js'
 import type { Registry } from '../../src/identityRegistry.js'
 import { BATCH_GAP_S } from './batchGroups.js'
 import { Memo, reqOf } from './shared.js'
+import { lastRunOutcome } from './sweepOutcome.js'
 
 export type { RunRow }
 
@@ -62,6 +63,8 @@ export interface ParentView {
   /** What is still queued: the items no real run has deleted (the title and
    *  "staged by"; the gate and the confirm stay on the whole plan). */
   queued?: { items: number; batches: number; stagers: string[] }
+  /** What the last real run's run dir says of its totals (`lastRunOutcome`); absent or null: nothing to add. */
+  lastOutcome?: RunOutcome | null
 }
 
 /** A staged set at one scan: totals and its largest owners (by display name). */
@@ -89,6 +92,9 @@ export function sizeLine(z: Sized): string {
   return `*${fmtBytes(z.b)}* · ${fmtN(z.o)} objects at scan ${z.scan}${owners}${empty}`
 }
 
+/** The plan's newest real run. */
+const lastRealRun = (runs: readonly RunRow[]): RunRow | undefined => [...runs].filter(r => r.mode === 'real').sort((a, b) => b.started_ts - a.started_ts)[0]
+
 /** The thread's parent message: `{ text, blocks }` for chat.postMessage / chat.update. */
 export function renderParent(v: ParentView): { text: string; blocks: unknown[] } {
   const q = v.queued ?? { items: v.items, batches: v.batches, stagers: v.stagers }
@@ -109,11 +115,11 @@ export function renderParent(v: ParentView): { text: string; blocks: unknown[] }
       ? `Latest dry-run ${res} — matches the current plan.`
       : `Latest dry-run ${res} — *stale*: the plan changed since.`
   }
-  const lastReal = [...v.runs].filter(r => r.mode === 'real').sort((a, b) => b.started_ts - a.started_ts)[0]
+  const lastReal = lastRealRun(v.runs)
   const realLine = lastReal
     ? lastReal.finished_ts == null
       ? `\nReal run in progress (${who(lastReal.actor, v.names)}).`
-      : `\nLast real run deleted ${fmtBytes(lastReal.deleted_bytes)} / ${fmtN(lastReal.deleted_objects)} objects${lastReal.undo_deadline ? `, undoable until ${utc(lastReal.undo_deadline)}` : ''}.`
+      : `\nLast real run ${v.lastOutcome?.unread ? 'recorded' : v.lastOutcome?.attempted ? 'attempted' : 'deleted'} ${v.lastOutcome?.totals === 'lower-bound' ? 'at least ' : ''}${fmtBytes(lastReal.deleted_bytes)} / ${fmtN(lastReal.deleted_objects)} objects${lastReal.undo_deadline ? `, undoable until ${utc(lastReal.undo_deadline)}` : ''}.${skipsLine(v.lastOutcome ?? undefined)}`
     : ''
   const buttons: unknown[] = [
     { type: 'button', action_id: 'staged_open', text: { type: 'plain_text', text: 'Open in www' }, url: `${v.siteUrl}/staged` },
@@ -329,6 +335,9 @@ export function runEvent(r: RunRow, phase: 'dispatched' | 'finished' | 'failed',
   if (o.outcome?.unread) return `:warning: Real deletion ${id} finished, totals unread: recorded *${fmtBytes(r.deleted_bytes)}* / ${fmtN(r.deleted_objects)} objects${r.undo_deadline ? `; undoable until ${utc(r.undo_deadline)} (www)` : ''}.`
   return `${skips ? ':warning:' : ':white_check_mark:'} Real deletion ${id} finished: ${o.outcome?.attempted ? 'attempted' : 'deleted'} *${fmtBytes(r.deleted_bytes)}* / ${fmtN(r.deleted_objects)} objects${r.undo_deadline ? `; undoable until ${utc(r.undo_deadline)} (www)` : ''}.${skips}`
 }
+
+/** No claim that anything is deleted: an XML reply can't prove it, and a run with skips left objects under its prefixes. */
+export const QUEUE_EMPTIED = ':checkered_flag: Queue emptied: nothing staged here is left to delete (each prefix had a real run recorded, or was empty at the scan).'
 
 /** Was the queue empty before this stage? Every item other than the ones just
  *  staged (`fresh`) is either deleted by a real run (`deleted`) or holds no
@@ -678,7 +687,9 @@ export async function notifyPlan(env: NotifyEnv, db: D1Database, planId: number,
     const names: Names = Object.fromEntries(Object.entries(people).flatMap(([e, p]) => p.name ? [[e, p.name]] : []))
     const size = at ? sizeOf(at, queued, u => reg[u]?.name ?? u) : undefined
     // Sized, prefixes empty at the scan leave the title's counts (the size line names them apart).
-    const parent = renderParent({ ...v, queued: queuedOf(countedItems(v.live, v.deleted, at?.stats ?? null)), names, size, image: await stagedCardUrl(env, db, siteUrl, v.digest) ?? undefined })
+    const last = lastRealRun(v.runs)
+    const lastOutcome = last?.finished_ts ? await lastRunOutcome(full)?.(last) : null
+    const parent = renderParent({ ...v, lastOutcome, queued: queuedOf(countedItems(v.live, v.deleted, at?.stats ?? null)), names, size, image: await stagedCardUrl(env, db, siteUrl, v.digest) ?? undefined })
     const event: Event | undefined = runEv
       ? { text: runEvent(runEv.run, runEv.phase, { via: runEv.via, names, siteUrl, reason: runEv.reason, outcome: runEv.outcome }), ...(by ? { sender: personSender(by, people[by.toLowerCase()], 'dispatched') } : {}) }
       : said ? { ...said, text: typeof said.text === 'function' ? said.text(who(said.by?.email ?? '', names)) : said.text, ...(said.by ? { sender: personSender(said.by.email, people[said.by.email.toLowerCase()], said.by.verb) } : {}) }
@@ -694,7 +705,7 @@ export async function notifyPlan(env: NotifyEnv, db: D1Database, planId: number,
     let ended = ''
     if (ts && ev) {
       const stats = at ? Object.fromEntries(Object.entries(at.stats).map(([p, s]) => [p, s.b])) : null
-      if (stage && queueWasEmpty(v.prefixes, new Set(stage.prefixes), v.deleted, stats)) ended = ':checkered_flag: Queue emptied: everything staged here is deleted (or was already empty).'
+      if (stage && queueWasEmpty(v.prefixes, new Set(stage.prefixes), v.deleted, stats)) ended = QUEUE_EMPTIED
       else if (await parentDone(env, channel, ts)) ended = ':white_check_mark: Marked done.'
       if (ended) {
         const d = await detach(db, planId, ts)

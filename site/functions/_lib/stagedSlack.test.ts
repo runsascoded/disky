@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { RunOutcome } from '../../src/runs.js'
-import { closedParent, countedItems, PLAN_SENDER, queueWasEmpty, queuedOf, fmtBytes, personSender, renderParent, runEvent, runUrl, shortPath, sizeOf, stageReply, stagedCardUrl, topFolders, type RunRow } from './stagedSlack.js'
+import { closedParent, countedItems, PLAN_SENDER, QUEUE_EMPTIED, queueWasEmpty, queuedOf, fmtBytes, personSender, renderParent, runEvent, runUrl, shortPath, sizeOf, stageReply, stagedCardUrl, topFolders, type RunRow } from './stagedSlack.js'
 import { sqliteD1 } from './testD1.js'
 
 const run = (o: Partial<RunRow>): RunRow => ({
@@ -66,6 +66,32 @@ describe('run events', () => {
     expect(runEvent(run({ plan_digest: '' }), 'failed', { siteUrl: site })).toBe(`:x: Dry-run ${link} ended without a result (its Batch job stopped before the run summary); check its logs in www.`)
     expect(runUrl(site, '2026-09-28-p1/20260928T120000Z')).toBe('https://cw-s3.oa.dev/staged?run=2026-09-28-p1%2F20260928T120000Z')
     expect([fmtBytes(0), fmtBytes(1536), fmtBytes(3 * 1024 ** 3)]).toEqual(['0 B', '1.5 KiB', '3.0 GiB'])
+  })
+
+  describe('the plan card\'s last real run, by what its run dir says', () => {
+    const base = { planId: 7, siteUrl: 'https://s', items: 1, batches: 1, stagers: [], digest: 'D1', actions: false, closed: false }
+    const real = run({ mode: 'real', run_id: 'r1', undo_deadline: 1_790_604_800 })
+    const line = (lastOutcome?: RunOutcome | null, r: RunRow = real) => (renderParent({ ...base, runs: [r], lastOutcome }).blocks[1] as { text: { text: string } }).text.text.split('\n')[1]
+    const SKIPPED = { bytes: 3 * 1024 ** 3, objects: 5678 }
+    it('a listing run, or one with no file: deleted', () => {
+      expect(line()).toBe('Last real run deleted 2.0 TiB / 1,234 objects, undoable until 2026-09-28 14:13Z.')
+      expect(line(null)).toBe('Last real run deleted 2.0 TiB / 1,234 objects, undoable until 2026-09-28 14:13Z.')
+    })
+    it('a generation run: attempted', () => {
+      expect(line({ attempted: true, skipped: null, notSwept: [] })).toBe('Last real run attempted 2.0 TiB / 1,234 objects, undoable until 2026-09-28 14:13Z.')
+    })
+    it('its skips', () => {
+      expect(line({ attempted: true, skipped: SKIPPED, notSwept: ['b1'] })).toBe('Last real run attempted 2.0 TiB / 1,234 objects, undoable until 2026-09-28 14:13Z. Skipped, no generation: *3.0 GiB* / 5,678 objects left in place. *Not swept:* `b1` (no object in them had a generation; their prefixes stay staged).')
+    })
+    it('unread: only what D1 recorded', () => {
+      expect(line({ attempted: false, skipped: null, notSwept: [], unread: true })).toBe('Last real run recorded 2.0 TiB / 1,234 objects, undoable until 2026-09-28 14:13Z.')
+    })
+    it('closed with no final summary: at least', () => {
+      expect(line({ attempted: true, skipped: null, notSwept: [], totals: 'lower-bound' })).toBe('Last real run attempted at least 2.0 TiB / 1,234 objects, undoable until 2026-09-28 14:13Z.')
+    })
+    it('still running: no outcome to say', () => {
+      expect(line({ attempted: true, skipped: null, notSwept: [] }, { ...real, finished_ts: null })).toBe('Real run in progress (ann).')
+    })
   })
 
   describe('a finished run, by what its `plan-summary.json` says', () => {
@@ -248,6 +274,9 @@ describe('D1', () => {
     })
   })
 
+  it('an emptied queue claims no deletions: XML replies can\'t prove them, and neither can a run with skips', () => {
+    expect(QUEUE_EMPTIED).toBe(':checkered_flag: Queue emptied: nothing staged here is left to delete (each prefix had a real run recorded, or was empty at the scan).')
+  })
   describe('queueWasEmpty: a stage into an emptied queue starts a new thread', () => {
     const items = ['gs://b/a/', 'gs://b/c/', 'gs://b/new/']
     const fresh = new Set(['gs://b/new/'])
