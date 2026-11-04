@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import random
 import shutil
 from pathlib import Path
 
@@ -30,7 +31,7 @@ from dt_cloud import static_names as sn
 from dt_cloud.append_runner import latest_key
 from dt_cloud.blobstore import Store
 from dt_cloud.staged_plan import parse_plan
-from dt_cloud.sweep_manifest import HoldSource, build_manifests
+from dt_cloud.sweep_manifest import HoldSource, build_manifests, hold_ref
 from dt_cloud.viz import write_path_index
 
 B = "b"
@@ -632,3 +633,227 @@ def test_store_versions_base_and_runs_is_the_windowed_union(tmp_path):
     assert con.execute(f"SELECT * FROM {ib.VERSIONS} ORDER BY ALL").fetchall() == windowed == [
         (2, "b/a", 1, 7, "file", 3), (2, "b/a", 7, 9, "file", 8), (2, "b/c", 1, O, "file", 4), (2, "b/d", 1, 5, "file", 5),
         (2, "b/e", 9, O, "file", 9)]
+
+
+# `object_identities`' bounded read (selection by bisect, each group filtered as it is read) against the implementation it
+# replaced, kept here verbatim as the oracle: every group tested against every span, every selected group held whole, then
+# one `OR` of `starts_with`.
+def _oracle_groups(store: Store, key: str, spans: list[tuple[str, str]], ts: int) -> list[int]:
+    g = pq.read_table(store.open(key.removesuffix(".parquet") + ".groups.parquet"),
+                      columns=["rg", "p_min", "p_max", "vf_min", "vt_max"]).to_pylist()
+    return [r["rg"] for r in g if r["vf_min"] <= ts and any(r["p_max"] >= lo and r["p_min"] <= hi for lo, hi in spans)]
+
+
+def _oracle_identities(store_root: str, scan: str, bucket: str, bands: list[str], exact: list[str] = [], *, gen: str | None = None) -> pa.Table:
+    store = Store(store_root)
+    gen = ie.store_gen(store, gen)
+    prefix = f"{ist.PREFIX}/{gen}"
+    entry, runs = ie.scan_entry(store, prefix, scan)
+    base = store.read_json(f"{prefix}/scans.json")
+    has_gen = ist.has_generation(base)
+    identity = ist.identity_column(has_gen)
+    ts = int(entry["ts"])
+    spans = [(f"{bucket}/{b}", f"{bucket}/{b}\U0010ffff") for b in bands] + [(f"{bucket}/{k}", f"{bucket}/{k}") for k in exact]
+    cols = [*ie.IDENTITY_COLS, *([identity] if has_gen else [])]
+    parts = []
+    for key in [f"{prefix}/served/{ist.GENERATION_SORT}.parquet", *(f"{prefix}/{r['key']}/served/{ist.GENERATION_SORT}.parquet" for r in runs)]:
+        if rgs := _oracle_groups(store, key, spans, ts):
+            parts.append(pq.ParquetFile(store.open(key)).read_row_groups(rgs, columns=cols))
+    out_schema = pa.schema([("name", pa.string()), (identity, pa.string() if isinstance(has_gen, pa.Field) else pa.int64()), ("created", pa.timestamp("us", tz="UTC"))])
+    if not parts:
+        return out_schema.empty_table()
+    con = duckdb.connect()
+    con.register("rows", pa.concat_tables(parts))
+    gcol = identity if has_gen else "NULL::BIGINT"
+    under = " OR ".join([*(f"starts_with(path, {sn.q(lo)})" for lo, _ in spans[:len(bands)]), *(f"path = {sn.q(lo)}" for lo, _ in spans[len(bands):])])
+    t = con.execute(f"""SELECT substr(path, {len(bucket) + 2}) AS name, {gcol} AS {identity},
+            make_timestamp((CASE WHEN wb > 0 THEN round(wts / wb, 0) ELSE mtime END)::BIGINT * 1000000) AS created
+        FROM (SELECT * FROM rows QUALIFY row_number() OVER (PARTITION BY depth, path, vf ORDER BY vt) = 1)
+        WHERE vf <= {ts} AND {ts} < vt AND kind = 'file' AND ({under or 'false'})
+        ORDER BY name""").to_arrow_table()
+    return t.cast(out_schema)
+
+
+def _obj(*spans: tuple[int, tuple | None]) -> list[tuple | None]:
+    """An object's per-scan states from `(number of scans, state)` runs."""
+    return [state for n, state in spans for _ in range(n)]
+
+
+#: Many sibling bands (each beside non-members that share its letters), and each change a hold has to get right.
+OBJ_IDS = {
+    **{f"t/p{i:02d}/{f}.bin": _obj((7, (10, 100, 100, 1000 + i))) for i in range(24) for f in "abc"},
+    **{f"t/p{i:02d}x/out.bin": _obj((7, (10, 100, 100, 2000 + i))) for i in range(24)},
+    "t/p0/out.bin": _obj((7, (10, 100, 100, 3001))),
+    "t/loose.bin": _obj((7, (10, 110, 110, 3002))),
+    # A key that is also a folder's prefix: first a file alone, then both, then the folder alone; and both throughout.
+    "k/turn": _obj((2, (10, 100, 100, 3010)), (5, (10, 100, 100, 3010))),
+    "k/turn/child.bin": _obj((2, None), (5, (10, 300, 300, 3011))),
+    "k/both": _obj((7, (10, 100, 100, 3012))),
+    "k/both/child.bin": _obj((7, (10, 100, 100, 3013))),
+    # Deleted, then recreated with a new identity: while gone at scans in the base's span, and in the runs'.
+    "d/back.bin": _obj((1, (10, 100, 100, 3020)), (1, None), (5, (10, 200, 200, 3021))),
+    "d/late.bin": _obj((4, (10, 100, 100, 3022)), (1, None), (2, (10, 500, 500, 3023))),
+    # Open in the base, closed by a run: replaced, and deleted for good.
+    "d/rew.bin": _obj((3, (10, 100, 100, 3030)), (4, (20, 300, 300, 3031))),
+    "d/gone.bin": _obj((4, (10, 100, 100, 3032)), (3, None)),
+    "d/keep.bin": _obj((7, (10, 100, 100, 3033))),
+    # Non-ASCII, around where code point and UTF-16 order part (U+FFFF sorts before U+10000 in code points and UTF-8).
+    "é/ü.bin": _obj((7, (10, 100, 100, 3040))),
+    "é/ÿ.bin": _obj((3, (10, 100, 100, 3041)), (4, (20, 300, 300, 3042))),
+    "éa/out.bin": _obj((7, (10, 100, 100, 3043))),
+    "日本/語.bin": _obj((7, (10, 100, 100, 3044))),
+    "￿/x.bin": _obj((7, (10, 100, 100, 3045))),
+    "\U00010000/y.bin": _obj((7, (10, 100, 100, 3046))),
+    "z-last.bin": _obj((7, (10, 100, 100, 3047))),
+}
+BANDS_IDS = [f"t/p{i:02d}/" for i in range(0, 24, 2)]
+#: Item sets, by what each exercises (`(bands, exact)`).
+ITEMS_IDS = {
+    "many prefix-free bands": (BANDS_IDS, []),
+    "bands and exact keys": (BANDS_IDS, ["t/loose.bin", "t/p01/a.bin", "z-last.bin", "absent"]),
+    "a key that is also a folder's prefix, by key": ([], ["k/turn", "k/both"]),
+    "a key that is also a folder's prefix, by band": (["k/"], []),
+    "the key and the folder under it": (["k/turn/"], ["k/turn"]),
+    "a folder prefix without its slash": (["k/tu"], []),
+    "recreated, replaced and deleted": (["d/"], []),
+    "the same, by key": ([], ["d/back.bin", "d/late.bin", "d/rew.bin", "d/gone.bin"]),
+    "non-ASCII bands": (["é/", "日本/", "￿/", "\U00010000/"], []),
+    "non-ASCII keys": ([], ["é/ü.bin", "\U00010000/y.bin"]),
+    "not prefix-free, a key inside a band": (["d/", "d/ba", "t/p0"], ["d/rew.bin", "t/p01/a.bin"]),
+    "everything": ([""], []),
+    "nothing there": (["no/such/"], ["no-such-key"]),
+    "no items": ([], []),
+}
+
+
+@pytest.fixture(scope="module", params=[ON, OFF], ids=["generation", "no-generation"])
+def ids_store(request, tmp_path_factory) -> Path:
+    """A store over `OBJ_IDS`: a base of three scans, three more added, so a base's open rows are closed by runs."""
+    tmp = tmp_path_factory.mktemp("ivg-ids")
+    world = _write_world(tmp / "world", OBJ_IDS)
+    _build(world, tmp / "store", tmp / "w-build", request.param, 2)
+    _add(world, tmp / "store", tmp / "w-add", request.param, 5)
+    return tmp / "store"
+
+
+@pytest.mark.parametrize("items", list(ITEMS_IDS))
+def test_object_identities_equals_the_unbounded_read(ids_store, items):
+    bands, exact = ITEMS_IDS[items]
+    runs = _newest_runs(ids_store / ist.PREFIX / "g")
+    assert [r.name for r in runs] == [f"{SCANS[3]}_{SCANS[4]}", SCANS[5]]
+    for scan in SCANS[:6]:
+        got = ie.object_identities(str(ids_store), scan, B, bands, exact)
+        want = _oracle_identities(str(ids_store), scan, B, bands, exact)
+        assert got.schema == want.schema
+        assert got.to_pylist() == want.to_pylist()
+        assert got.combine_chunks().equals(want.combine_chunks())
+
+
+def test_object_identities_across_a_recreation_and_a_run_close(on_ids_names):
+    """The answers, spelled out: what a scan vouches for is what it saw. A generation is its version's, so an object's
+    version from before the lister recorded it has one only if it lived on until then (`back`'s first does not)."""
+    assert on_ids_names(SCANS[0], ["d/"]) == [("d/back.bin", None), ("d/gone.bin", 3032), ("d/keep.bin", 3033), ("d/late.bin", 3022), ("d/rew.bin", 3030)]
+    assert on_ids_names(SCANS[1], ["d/"]) == [("d/gone.bin", 3032), ("d/keep.bin", 3033), ("d/late.bin", 3022), ("d/rew.bin", 3030)]
+    assert on_ids_names(SCANS[2], ["d/"]) == [("d/back.bin", 3021), ("d/gone.bin", 3032), ("d/keep.bin", 3033), ("d/late.bin", 3022), ("d/rew.bin", 3030)]
+    # A run closes `rew`'s version, open in the base, and opens its replacement: one identity, the new one.
+    assert on_ids_names(SCANS[3], ["d/"]) == [("d/back.bin", 3021), ("d/gone.bin", 3032), ("d/keep.bin", 3033), ("d/late.bin", 3022), ("d/rew.bin", 3031)]
+    # Another closes `gone`'s and `late`'s; `late` comes back with a new identity.
+    assert on_ids_names(SCANS[4], ["d/"]) == [("d/back.bin", 3021), ("d/keep.bin", 3033), ("d/rew.bin", 3031)]
+    assert on_ids_names(SCANS[5], ["d/"]) == [("d/back.bin", 3021), ("d/keep.bin", 3033), ("d/late.bin", 3023), ("d/rew.bin", 3031)]
+    # A key that is also a folder's prefix is the folder, not an object, in every scan a child exists.
+    assert on_ids_names(SCANS[1], [], ["k/turn", "k/both"]) == [("k/turn", None)]
+    assert on_ids_names(SCANS[2], [], ["k/turn", "k/both"]) == []
+    assert on_ids_names(SCANS[2], ["k/"]) == [("k/both/child.bin", 3013), ("k/turn/child.bin", 3011)]
+    assert on_ids_names(SCANS[5], ["é/", "\uffff/", "\U00010000/"]) == [
+        ("é/ü.bin", 3040), ("é/ÿ.bin", 3042), ("\uffff/x.bin", 3045), ("\U00010000/y.bin", 3046)]
+
+
+@pytest.fixture(scope="module")
+def on_ids_names(tmp_path_factory):
+    tmp = tmp_path_factory.mktemp("ivg-ids-names")
+    world = _write_world(tmp / "world", OBJ_IDS)
+    _build(world, tmp / "store", tmp / "w-build", ON, 2)
+    _add(world, tmp / "store", tmp / "w-add", ON, 5)
+    def names(scan: str, bands: list[str], exact: list[str] = []) -> list[tuple]:
+        return [(r["name"], r["generation"]) for r in ie.object_identities(str(tmp / "store"), scan, B, bands, exact).to_pylist()]
+    return names
+
+
+def _rows(*paths: str) -> list[dict]:
+    """Served `path`-sort rows: a file row at each path but a `/`-ending one (a dir row), open from `vf` 1 to `vt` 9."""
+    return [{"depth": p.count("/"), "path": p.rstrip("/"), "vf": 1, "vt": 9, "kind": "dir" if p.endswith("/") else "file", "mtime": 1, "wts": 1, "wb": 1} for p in paths]
+
+
+def test_held_rows_keeps_only_the_items_rows_of_each_group(tmp_path, monkeypatch):
+    """Rows outside every span aren't accumulated, whatever else their group holds; rows under a span all are, of every
+    kind and any `vt` (the fold needs them); each group is one ranged read."""
+    close = {**_rows("b/d/x")[0], "vf": 1, "vt": 3}
+    rows = [*_rows("b/a/1", "b/c", "b/d/", "b/d/w"), close, *_rows("b/d/x", "b/d0/1", "b/e/1"), *_rows("b/f/1", "b/g/1", "b/h/1", "b/i/1")]
+    pq.write_table(pa.Table.from_pylist(rows), tmp_path / "s.parquet", row_group_size=4)
+    # The band `d/` is under the dir row `b/d`, which only a key could name.
+    bands, exact = ie._items("b", ["d/", "g/"], ["c", "i/1"])
+    assert (bands, sorted(exact)) == (["b/d/", "b/g/"], ["b/c", "b/i/1"])
+    ranges = []
+    read_range = Store.read_range
+    monkeypatch.setattr(Store, "read_range", lambda self, key, lo, hi: (ranges.append(key), read_range(self, key, lo, hi))[1])
+    ie._footer.cache_clear()
+    parts, decoded = ie.held_rows(Store(str(tmp_path)), "s.parquet", [0, 1, 2], ["depth", "path", "vf", "vt", "kind"], bands, exact, readers=2)
+    assert decoded == 12
+    assert [p.to_pylist() for p in parts] == [
+        [{"depth": 1, "path": "b/c", "vf": 1, "vt": 9, "kind": "file"}, {"depth": 2, "path": "b/d/w", "vf": 1, "vt": 9, "kind": "file"}],
+        [{"depth": 2, "path": "b/d/x", "vf": 1, "vt": 3, "kind": "file"}, {"depth": 2, "path": "b/d/x", "vf": 1, "vt": 9, "kind": "file"}],
+        [{"depth": 2, "path": "b/g/1", "vf": 1, "vt": 9, "kind": "file"}, {"depth": 2, "path": "b/i/1", "vf": 1, "vt": 9, "kind": "file"}],
+    ]
+    assert ranges == ["s.parquet"] * 3
+
+
+def test_a_failed_group_read_raises(tmp_path, monkeypatch):
+    """A hold never comes from part of a sort."""
+    pq.write_table(pa.Table.from_pylist(_rows("b/a", "b/b")), tmp_path / "s.parquet", row_group_size=1)
+    def refused(self, key, lo, hi):
+        raise PermissionError(key)
+    monkeypatch.setattr(Store, "read_range", refused)
+    ie._footer.cache_clear()
+    with pytest.raises(PermissionError):
+        ie.held_rows(Store(str(tmp_path)), "s.parquet", [0, 1], ["path"], ["b/"], frozenset())
+
+
+def test_group_selection_equals_any_over_every_span():
+    """Bisecting the merged spans selects exactly what testing every span selects (`[lo, hi]` closed, as the oracle's)."""
+    rng = random.Random(7)
+    alphabet = ["a", "b", "é", "\uffff", "\U00010000", "/"]
+    word = lambda n: "".join(rng.choice(alphabet) for _ in range(rng.randint(0, n)))
+    for _ in range(300):
+        bands, exact = ie._items("b", [word(3) for _ in range(rng.randint(0, 6))], [word(4) for _ in range(rng.randint(0, 6))])
+        every = [*((b, f"{b}\U0010ffff") for b in bands), *((k, k) for k in exact)]
+        spans = ie._spans(bands, exact)
+        his = [hi for _, hi in spans]
+        assert spans == sorted(spans) and his == sorted(his) and all(a[1] < b[0] for a, b in zip(spans, spans[1:]))
+        for _ in range(40):
+            p_min, p_max = sorted(f"b/{word(5)}" for _ in range(2))
+            assert ie._meets(p_min, p_max, spans, his) == any(p_max >= lo and p_min <= hi for lo, hi in every)
+
+
+def test_a_path_filter_agrees_with_duckdb_on_non_ascii():
+    """`str` order is UTF-8 byte order and DuckDB's, so the bisect sees bands in the order the files sort and `starts_with`
+    tests: around U+FFFF / U+10000, where UTF-16 order parts from them."""
+    words = ["b/a", "b/z", "b/é", "b/é/1", "b/éa", "b/\ud7ff", "b/\ue000/", "b/\uffff", "b/\uffff/x", "b/\U00010000", "b/\U00010000/y", "b/\U0010ffff", "b/日本/語"]
+    assert sorted(words) == sorted(words, key=lambda w: w.encode()) == [
+        r[0] for r in duckdb.sql("SELECT unnest($1) AS w ORDER BY w", params=[words]).fetchall()]
+    bands, exact = ie._items("b", ["é/", "\uffff/", "\U00010000", "日本/"], ["z"])
+    got = [w for w, keep in zip(words, ie._wanted(pa.array(words), bands, exact).to_pylist()) if keep]
+    tests = " OR ".join([*(f"starts_with(w, {sn.q(b)})" for b in bands), *(f"w = {sn.q(k)}" for k in exact)])
+    assert got == ["b/z", "b/é/1", "b/\uffff/x", "b/\U00010000", "b/\U00010000/y", "b/日本/語"]
+    assert got == [r[0] for r in duckdb.sql(f"SELECT w FROM (SELECT unnest($1) AS w, generate_subscripts($1, 1) AS i) WHERE {tests} ORDER BY i", params=[words]).fetchall()]
+
+
+def test_a_hold_past_a_string_chunk_stays_one_sorted_chunk():
+    """A bucket's names can pass 2 GiB, a `string` chunk's limit: sorted and combined, they would raise on the offset
+    overflow (or come back in several chunks, of which `apply_hold` bisects one)."""
+    name = pa.array([f"{i:07d}{'x' * 1024}" for i in range(1024)], pa.string())
+    chunk = pa.table({"name": name, "generation": pa.array(range(1024), pa.int64()), "created": pa.array([None] * 1024, pa.timestamp("us", tz="UTC"))})
+    ref = hold_ref([chunk] * 2100)
+    assert ref.column("name").num_chunks == 1
+    assert ref.num_rows == 2100 * 1024
+    assert ref.column("name").chunk(0).type == pa.large_string()
+    assert [ref["generation"][i].as_py() for i in (0, 2100, 1023 * 2100 - 1, 1024 * 2100 - 1)] == [0, 1, 1022, 1023]
