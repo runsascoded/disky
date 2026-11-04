@@ -154,6 +154,7 @@ database_name = "oa-gcs-usage-auth"   # the SAME ledger as prod (marks made on d
 database_id = "e52398b7-5538-4bc4-83db-3355a1b5ef9a"
 
 [env.preview.vars]
+OWNER_HISTORY_BATCH = "1"   # scoped series in bounded windows (`seriesRead`); dev only until measured
 SESSION_MONITOR = "0"           # shared D1: preview may dry-run, never send monitor alerts
 OA_LOGIN_ISSUER = "https://login.oa.dev"   # "Sign in with OA" (specs/oa-login-rp.md): OA's broker; dev first
 OA_LOGIN_CLIENT_ID = "disky-gcs-dev"       # registered at the broker with callback https://dev.gcs.oa.dev/auth/oa/callback; secret OA_LOGIN_CLIENT_SECRET (preview env)
