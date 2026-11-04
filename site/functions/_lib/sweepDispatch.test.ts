@@ -42,7 +42,7 @@ describe('sweepScript — the Batch container\'s bash', () => {
     expect(sweepScript({ cfg: CFG, mode: 'dry', jobId, buckets: [E1], plan: planJsonPath(CFG, jobId) })).toBe([
       'set -euo pipefail',
       trap,
-      `dt-cloud sweep manifest -d "$SWEEP_DATE" --plan "gs://my-data/sweep/runs/${jobId}/plan.json" -b ${E1} -o "gs://my-data/sweep/runs/${jobId}"`,
+      `dt-cloud sweep manifest -d "$SWEEP_DATE" --plan "gs://my-data/sweep/runs/${jobId}/plan.json" -b ${E1} -i "gs://my-data" -o "gs://my-data/sweep/runs/${jobId}"`,
       `dt-cloud sweep execute -b ${E1} "gs://my-data/sweep/runs/${jobId}"`,
     ].join('\n'))
   })
@@ -65,7 +65,7 @@ describe('sweepScript — the Batch container\'s bash', () => {
     expect(sweepScript({ cfg: CFG, mode: 'real', jobId, buckets: [E1], plan: planJsonPath(CFG, jobId) })).toBe([
       'set -euo pipefail',
       trap,
-      `dt-cloud sweep manifest -d "$SWEEP_DATE" --plan "gs://my-data/sweep/runs/${jobId}/plan.json" -b ${E1} -o "gs://my-data/sweep/runs/${jobId}"`,
+      `dt-cloud sweep manifest -d "$SWEEP_DATE" --plan "gs://my-data/sweep/runs/${jobId}/plan.json" -b ${E1} -i "gs://my-data" -o "gs://my-data/sweep/runs/${jobId}"`,
       `dt-cloud sweep execute -b ${E1} --for-real "gs://my-data/sweep/runs/${jobId}"`,
     ].join('\n'))
   })

@@ -71,7 +71,8 @@ export const sweepScript = ({ cfg, mode, jobId, buckets, plan, reviewed, pacing 
     ...(mode === 'real' && reviewed ? [
       `dt-cloud sweep execute-reviewed -e xml -j 64 -B ${Math.max(1, Math.min(6, buckets.length))} -c ${pacing} -r 8000 ${bflags} -p "${plan}" -o "${run}" -w /work/reviewed --for-real "${reviewed}"`,
     ] : [
-      `dt-cloud sweep manifest -d "$SWEEP_DATE" --plan "${plan}" ${bflags} -o "${run}"`,
+      // `-i`: a scan whose raw listing is retired (an item's `as_of`) answers from the interval store in the data bucket.
+      `dt-cloud sweep manifest -d "$SWEEP_DATE" --plan "${plan}" ${bflags} -i "gs://${cfg.dataBucket}" -o "${run}"`,
       `dt-cloud sweep execute ${bflags}${mode === 'real' ? ' --for-real' : ''} "${run}"`,
     ]),
   ].join('\n')
