@@ -20,7 +20,7 @@
  *  `openIvLevel`), a round reads it instead (`levelRound`): each asked directory's transitions in `(D1, D2]`, one key
  *  range per file, every directory and file planned together and read in two waves (`readLevel`). Same answers. */
 import type { Env } from './auth.js'
-import { asOfScans, type ChangedPlan, DiffUnavailable, FooterBudget, type IndexHandle, intervalsOn, ivChurnFrom, ivRefuseHeld, LEVEL_BUDGET, type LevelHandle, type LevelRec, type LevelSpend, openInterval, openIvLevel, planChanged, readChanged, readFits, readLevel, type Rect, type Row, syncClock, type Trace, withChurn, withTrace } from './index.js'
+import { asOfScans, type ChangedPlan, DiffUnavailable, FooterBudget, type IndexHandle, intervalsOn, ivChurnFrom, ivRefuseHeld, chargeLevel, LEVEL_BUDGET, LEVEL_PATH_ROW_HEAP, LevelBusy, type LevelHandle, type LevelRec, type LevelSpend, releaseLevel, openInterval, openIvLevel, planChanged, readChanged, readFits, readLevel, type Rect, type Row, syncClock, type Trace, withChurn, withTrace } from './index.js'
 import { readRootAgg } from './view.js'
 
 /** The answer's version, in its edge-cache key: bumped with every change to what a level answers. */
@@ -153,6 +153,9 @@ export interface LevelOpts {
   /** Filled by the read: directories it left for a later request (`LEVEL_BUDGET` spent), and ones too wide even alone. */
   more?: string[]
   wide?: string[]
+  /** The request's budget, where its reads are bounded: a generation with the level sort, and the `path` sort's read when
+   *  that falls back. A deployment without the sort reads as it did. */
+  spend?: LevelSpend
   trace?: Trace
   /** Called as the first data read (`readChanged`) starts: the end of the request's fixed phase (`Server-Timing` `fixed`). */
   onRead?: () => void
@@ -229,12 +232,25 @@ export async function buildLevels(env0: Env, o: LevelOpts, given?: { level?: Lev
     if (lh.d1 < base) throw new DiffUnavailable('churn', `churn is counted from scan stamp ${base}; ${o.from} is before it`)
     o.lap?.('churn')
     const spend = { left: LEVEL_BUDGET.bytes }
-    const got = await chained(o, dirs => levelRound(env, lh, dirs, o, spend))
-    if (got) {
-      o.trace?.('level-index', 1)
-      return got
+    o = { ...o, spend, more: o.more ?? [], wide: o.wide ?? [] }
+    try {
+      const got = await chained(o, dirs => levelRound(env, lh, dirs, o, spend))
+      if (got) {
+        o.trace?.('level-index', 1)
+        return got
+      }
+      // Answered afresh below: nothing the level rounds left for later stands.
+      o.more!.length = o.wide!.length = 0
+      return await pathLevels(env0, o, given)
+    } finally {
+      releaseLevel(spend)
     }
   }
+  return pathLevels(env0, o, given)
+}
+
+/** `o.dirs`' answers from the `path` sort, through `given`'s prep and first-round plan or fresh ones. */
+async function pathLevels(env0: Env, o: LevelOpts, given?: { prep?: LevelPrep; plan?: ChangedPlan }): Promise<Map<string, Level>> {
   const prep = given?.prep ?? await prepareLevels(env0, o)
   // A plan made beside the cache lookups answers the first round when it planned exactly that round's directories.
   let plan = given?.plan
@@ -272,6 +288,28 @@ export function transitionsChange(ts: LevelRec[]): (Sides & { k: 'file' | 'dir';
   }
 }
 
+/** A read of `dirs` that didn't fit (`e`): answer what does, name the rest in `o.more` (ask again) or `o.wide` (too wide
+ *  even alone); a request of one directory too wide alone is the refusal itself. Anything else rethrows. */
+async function overBudget(e: unknown, dirs: string[], o: LevelOpts, spend: LevelSpend, again: (dirs: string[]) => Promise<Level[] | null>): Promise<Level[] | null> {
+  const busy = e instanceof LevelBusy
+  if (!busy && !String((e as Error).message).startsWith('query too wide')) throw e
+  const untouched = spend.left === LEVEL_BUDGET.bytes
+  if (dirs.length === 1) {
+    if (!busy && untouched && o.dirs.length === 1) throw e
+    ;(!busy && untouched ? (o.wide ??= []) : (o.more ??= [])).push(dirs[0])
+    return []
+  }
+  const m = dirs.length >> 1
+  const x = await again(dirs.slice(0, m))
+  if (!x) return null
+  if (spend.left < LEVEL_BUDGET.bytes) {
+    (o.more ??= []).push(...dirs.slice(m))
+    return x
+  }
+  const y = await again(dirs.slice(m))
+  return y && [...x, ...y]
+}
+
 /** One round from the level index: `dirs`' transitions (`readLevel`), split while too wide as `round` splits. Null when a
  *  directory's own transitions show it a file on some side in the range (its own rows are written for directories and
  *  closings only, so a file's changes have none): that round is read from the `path` sort instead. */
@@ -280,22 +318,7 @@ async function levelRound(env: Env, lh: LevelHandle, dirs: string[], o: LevelOpt
   try {
     recs = await readLevel(lh, dirs, spend, o.trace, o.lap)
   } catch (e) {
-    if (!String((e as Error).message).startsWith('query too wide')) throw e
-    if (dirs.length === 1) {
-      // Asked alone it is the request's answer (a 413); beside others, they still get theirs.
-      if (o.dirs.length === 1 && spend.left === LEVEL_BUDGET.bytes) throw e
-      ;(spend.left === LEVEL_BUDGET.bytes ? (o.wide ??= []) : (o.more ??= [])).push(dirs[0])
-      return []
-    }
-    const m = dirs.length >> 1
-    const x = await levelRound(env, lh, dirs.slice(0, m), o, spend)
-    if (!x) return null
-    if (spend.left < LEVEL_BUDGET.bytes) {
-      (o.more ??= []).push(...dirs.slice(m))
-      return x
-    }
-    const y = await levelRound(env, lh, dirs.slice(m), o, spend)
-    return y && [...x, ...y]
+    return overBudget(e, dirs, o, spend, ds => levelRound(env, lh, ds, o, spend))
   }
   const by = new Map<string, LevelRec[]>()
   for (const r of recs) {
@@ -346,6 +369,13 @@ async function round(env: Env, h: IndexHandle, dirs: string[], d1: number, d2: n
     if (dirs.length === 1) throw new Error(`query too wide: ${dirs[0] || '(root)'}'s changed children span ${plan.spans.length} row groups (${plan.rows} rows)`)
     const m = dirs.length >> 1
     return [...await round(env, h, dirs.slice(0, m), d1, d2, o), ...await round(env, h, dirs.slice(m), d1, d2, o)]
+  }
+  if (o.spend) {
+    try {
+      chargeLevel(o.spend, plan.rows * LEVEL_PATH_ROW_HEAP)
+    } catch (e) {
+      return (await overBudget(e, dirs, o, o.spend, ds => round(env, h, ds, d1, d2, o)))!
+    }
   }
   o.onRead?.()
   const rows = await readChanged(h, rects, d1, d2, { plan })
