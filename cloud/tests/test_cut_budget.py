@@ -12,6 +12,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from threading import Event
 
+import duckdb
 import pyarrow.parquet as pq
 import pytest
 from click.testing import CliRunner
@@ -266,6 +267,66 @@ def test_tree_watch_phase_over_budget_and_the_assert_on_the_overall_peak(pss, ca
     ]
 
 
+#: `append_range`'s steps, in the order an owner-sliced, churn-carrying generation's range first runs them.
+RANGE_PHASES = [
+    "range load",
+    "range intervals pvl", "range delta pvl", "range state pvl", "range reconstructs pvl", "range churn",
+    "range intervals sv", "range delta sv", "range state sv", "range reconstructs sv",
+    "range intervals svt", "range delta svt", "range state svt", "range reconstructs svt",
+    "range check",
+]
+
+
+def test_tree_watch_says_where_each_peak_was_and_what_held_it(pss, capsys):
+    """Each phase's line names the label and the gauges of its peak's sample (not the phase's last), the watch's end the
+    labels' largest peaks; outside `at` and `gauges`, a line stays as it was."""
+    held = {"DuckDB": 0, "Arrow": 0}
+
+    def step(label: str, mib: int, duck: int, arrow: int) -> None:
+        pss["mib"], held["DuckDB"], held["Arrow"] = mib, duck * MIB, arrow * MIB
+        with tm.at(label), tm.phase("step"):
+            pass
+
+    w = tm.TreeWatch(1000 * MIB, "x", every=3600, check=False)
+    with w:
+        with tm.phase("outside"):
+            pass
+        with tm.gauges(DuckDB=lambda: held["DuckDB"], Arrow=lambda: held["Arrow"]):
+            for label, mib, duck, arrow in [("r0", 300, 200, 10), ("r1", 700, 500, 90), ("r2", 400, 300, 20)]:
+                step(label, mib, duck, arrow)
+            for i in range(3, 7):
+                step(f"r{i}", 100 + i, 1, 1)
+        assert (w.at_label, w.gauge_fns) == (None, {})
+        pss["mib"] = 50
+    assert _normal(capsys.readouterr().err) == [
+        "x: phase outside: peak tree PSS 1 MiB (0%; 2 samples)",
+        "x: phase step: peak tree PSS 700 MiB (70%; 14 samples; at r1; DuckDB 500 MiB; Arrow 90 MiB)",
+        "x: phase (untagged): peak tree PSS 106 MiB (11%; 2 samples)",
+        "x: largest of 7: r1 700 MiB, r2 400 MiB, r0 300 MiB, r6 106 MiB, r5 105 MiB",
+        "x: peak tree PSS 700 MiB of budget 1,000 MiB (70%; 18 samples over <s>)",
+    ]
+    # No watch running: both are nothing.
+    with tm.at("r"), tm.gauges(a=lambda: 1 / 0):
+        pass
+    assert (tm._WATCHES, capsys.readouterr().err) == ([], "")
+
+
+def test_duck_bytes_reads_the_buffer_manager_from_another_thread():
+    """The gauge is DuckDB's own total: it grows with a table `con` holds, read on its cursor while `con` itself is busy."""
+    con = duckdb.connect()
+    con.execute("SET threads=2")
+    gauge = tm.duck_bytes(con)
+    empty = gauge()
+    con.execute("CREATE TABLE t AS SELECT i, repeat('x', 100) || i AS s FROM range(2000000) r(i)")
+    held = gauge()
+    assert held > empty + 64 * MIB
+    with Pool(1) as ex:
+        busy = ex.submit(con.execute, "SELECT count(DISTINCT s) FROM t")
+        during = gauge()
+        assert busy.result().fetchone() == (2000000,)
+    assert during >= held
+
+
 def _phases(stderr: str, what: str) -> list[str]:
     return re.findall(rf"^{re.escape(what)}: phase (.+?): peak tree PSS", stderr, re.M)
 
@@ -286,7 +347,7 @@ def test_add_names_its_stages(world, built, pss, tmp_path):  # noqa: F811
                                           "-r", str(RG), "-p", "2", "-M", MEM, "-t", DATES[BASE]], catch_exceptions=False)
     assert res.exit_code == 0, res.output
     assert _phases(res.stderr, "add g") == [
-        "read", "append", "append ranges", "append churn",
+        "read", "append", "append ranges", *RANGE_PHASES, "append churn",
         "cut path", "cut bysize", "cut slices", "cut slices-bytotal", "cut slices-bysize-user",
         "append check", "merge", "upload", "(untagged)",
     ]
@@ -394,7 +455,9 @@ def test_ranges_task_opens_at_its_budget_under_the_watch(world, built, spy, pss,
         assert [line for line in said if line.startswith(f"ranges {d}: ")] == [
             f"ranges {d}: memory {TOTAL / MIB:,.0f} MiB = this process {BASE_B / MIB:,.0f} + Arrow {arrow / MIB:,.0f} ({rb} B a row) + DuckDB {(TOTAL - BASE_B - arrow) / MIB:,.0f}",
         ]
-        assert re.sub(r"\d+ samples", "<n> samples", "\n".join(_normal(res.stderr))).splitlines() == [
+        assert _phases(res.stderr, f"ranges {d}") == [*RANGE_PHASES, "(untagged)"]
+        assert re.sub(r"\d+ samples", "<n> samples", "\n".join(_normal(res.stderr))).splitlines()[-2:] == [
+            f"ranges {d}: largest of {len(names)}: " + ", ".join(f"{n} 1 MiB" for n in sorted(names)),
             f"ranges {d}: peak tree PSS 1 MiB of budget {TOTAL / MIB:,.0f} MiB (0%; <n> samples over <s>)",
         ]
         docs += [json.loads(line) for line in res.stdout.splitlines()]
