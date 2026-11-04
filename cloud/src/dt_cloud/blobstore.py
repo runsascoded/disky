@@ -598,6 +598,12 @@ class RunStore:
     def keys(self, prefix: str) -> list[str]:
         return sorted(self.listing(prefix))
 
+    def mtimes(self, prefix: str) -> dict[str, float]:
+        return {k.removeprefix(self.prefix + "/"): t for k, t in self.data.mtimes(f"{self.prefix}/{prefix}").items()}
+
+    def delete(self, keys: list[str]) -> None:
+        self.data.delete([f"{self.prefix}/{k}" for k in keys])
+
     def exists(self, key: str) -> bool:
         return self.data.exists(f"{self.prefix}/{key}")
 

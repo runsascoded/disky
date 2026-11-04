@@ -205,6 +205,47 @@ def test_level_sort_build_append_and_backfill(world, built, spy, tmp_path, monke
     assert [w["sort"] for w in spy["writes"]] == [ilv.LEVEL]
 
 
+def test_the_staged_path_carries_the_level_sort(world, tmp_path):  # noqa: F811
+    """A leveled generation through the entries gcs and cw run: `publish` (`_cut_published`) cuts each scan's level sort and
+    `carry` (`carry_cmd`) merges them, each byte for byte what `add` writes over the same scans."""
+    scans = DATES[BASE:BASE + 2]
+    prefix = f"{ist.PREFIX}/g"
+    leveled = tmp_path / "leveled"
+    _invoke(il.build_cmd, ["-g", "g", "-L", LAYOUT, "-s", str(world["root"]), "-o", str(leveled), "-w", str(tmp_path / "w"), "-k", "3", "-r", str(RG),
+                           "-p", "2", "-M", MEM, "-l", "-t", DATES[BASE - 1]])
+    (tmp_path / "a").mkdir()
+    (tmp_path / "s").mkdir()
+    added, store = _copy(leveled, tmp_path / "a"), _copy(leveled, tmp_path / "s")
+    add_args = ["-g", "g", "-L", LAYOUT, "-s", str(world["root"]), "-o", str(added), "-p", "2", "-M", MEM, "-t", scans[-1]]
+    _invoke(il.add_cmd, [*add_args, "-w", str(tmp_path / "wa"), "-N"])
+
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    for d in scans:
+        listing = LAYOUT.replace("{id}", d).rsplit("/", 1)[0]
+        shutil.copytree(world["root"] / listing, store / listing)
+        ia.prepare_scan(str(store), "g", d, (LAYOUT,))
+        common = ["-b", str(store), "-g", "g", "-R", "g", "-S", str(scratch), "-d", d, "-m", str(store), "-M", MEM, "-p", "2", "-T", str(tmp_path / "tmp")]
+        _invoke(ia.ranges_cmd, [*common, "-i", "0", "-n", "3", "-o", str(tmp_path / "out")])
+        _invoke(ia.publish_cmd, common)
+
+    def level_files(root: Path) -> dict[str, bytes]:
+        gen = root / prefix
+        return {p.relative_to(gen).as_posix(): p.read_bytes() for p in gen.rglob(f"served/{ilv.LEVEL}*.parquet")}
+
+    published = level_files(store)
+    assert sorted(k for k in published if k.startswith("deltas/")) == [f"deltas/{d}/served/{ilv.LEVEL}{x}" for d in scans for x in (".groups.parquet", ".parquet")]
+    assert published == level_files(added)
+
+    _invoke(ia.carry_cmd, ["-b", str(store), "-g", "g", "-R", "g", "-S", str(scratch), "-m", str(store), "-M", MEM, "-p", "2", "-T", str(tmp_path / "tc")])
+    (tmp_path / "b").mkdir()
+    both = _copy(leveled, tmp_path / "b")
+    _invoke(il.add_cmd, ["-g", "g", "-L", LAYOUT, "-s", str(world["root"]), "-o", str(both), "-p", "2", "-M", MEM, "-t", scans[-1], "-w", str(tmp_path / "wb")])
+    merged = f"deltas/{scans[0]}_{scans[-1]}/served/{ilv.LEVEL}"
+    carried, folded = level_files(store), level_files(both)
+    assert (carried[f"{merged}.parquet"], carried[f"{merged}.groups.parquet"]) == (folded[f"{merged}.parquet"], folded[f"{merged}.groups.parquet"])
+
+
 def test_tree_watch_logs_and_asserts(capsys):
     """The peak over the block against the budget, logged; past it, `SystemExit` when asked to assert (and logged only
     when not). Without procfs, asserting is refused up front."""
