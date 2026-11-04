@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { outcomeReaderOf } from './sweepOutcome'
+import { outcomeReaderOf, UNREAD } from './sweepOutcome'
 import { runDir } from './sweepDispatch'
 import { reflectSweepRuns, type SweepBatchJob } from './sweepReflect'
 import { RUN_DIR, sqliteD1 } from './testD1'
@@ -86,7 +86,7 @@ describe('D1', () => {
         const db = await finishedRow(id)
         const log = vi.spyOn(console, 'log').mockImplementation(() => {})
         const get = async () => { throw new Error('store down') }
-        expect(await reflectSweepRuns(CFG, db, [job(id, 'SUCCEEDED', 'D')], SOON, undefined, RUN_DIR, outcomeReaderOf(get))).toEqual([{ run_id: 'r', ok: true }])
+        expect(await reflectSweepRuns(CFG, db, [job(id, 'SUCCEEDED', 'D')], SOON, undefined, RUN_DIR, outcomeReaderOf(get))).toEqual([{ run_id: 'r', ok: true, outcome: UNREAD }])
         log.mockRestore()
       })
     })
