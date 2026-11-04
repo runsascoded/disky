@@ -8,7 +8,7 @@ from google_crc32c import value as crc32c
 import pytest
 from click.testing import CliRunner
 
-spec = spec_from_file_location("cw_credentials", Path(__file__).resolve().parents[1] / "job/cw-isolation-credentials.py")
+spec = spec_from_file_location("cw_credentials", Path(__file__).resolve().parents[2] / "job/cw-isolation-credentials.py")
 credentials = module_from_spec(spec)
 spec.loader.exec_module(credentials)
 

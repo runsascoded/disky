@@ -7,7 +7,7 @@ from types import SimpleNamespace
 from click.testing import CliRunner
 import pytest
 
-spec = spec_from_file_location("cw_migrate", Path(__file__).resolve().parents[1] / "job/cw-isolation-migrate.py")
+spec = spec_from_file_location("cw_migrate", Path(__file__).resolve().parents[2] / "job/cw-isolation-migrate.py")
 migrate = module_from_spec(spec)
 spec.loader.exec_module(migrate)
 

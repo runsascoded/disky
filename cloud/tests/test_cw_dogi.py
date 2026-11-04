@@ -6,7 +6,7 @@ from click import ClickException
 import pytest
 from requests import ConnectionError, Response, Session
 
-MODULE = run_path(str(Path(__file__).resolve().parents[1] / "job/cw-dogi.py"))
+MODULE = run_path(str(Path(__file__).resolve().parents[2] / "job/cw-dogi.py"))
 
 
 def test_metadata_has_exact_og_and_twitter_fields() -> None:

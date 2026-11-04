@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-spec = spec_from_file_location("cw_inventory", Path(__file__).resolve().parents[1] / "job/cw-isolation-inventory.py")
+spec = spec_from_file_location("cw_inventory", Path(__file__).resolve().parents[2] / "job/cw-isolation-inventory.py")
 inventory = module_from_spec(spec)
 spec.loader.exec_module(inventory)
 

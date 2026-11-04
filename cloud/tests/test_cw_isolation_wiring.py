@@ -6,7 +6,7 @@ import tomllib
 
 import pytest
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 PROJECT = "oa-internal-450019"
 IMAGE = f"us-central1-docker.pkg.dev/{PROJECT}/cw-s3-usage/scan:latest"
 DATA = "oa-cw-s3-usage-data"
