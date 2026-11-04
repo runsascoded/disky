@@ -32,7 +32,7 @@ A real run has a start row. If its job dies after deleting (out of memory, pre-e
 
 The original note that `sweep undo` "passes `deadline=None` and doesn't refuse" was true of the deadline only. `undo_run` read `deleted-summary.json` first and failed with no such file, so it couldn't undo a killed run at all. Now, with no summary, it takes the buckets from `plan-summary.json`, restores what the uploaded parts name, says its log may be partial, and sets `log_partial` in its summary. `record_undo` then leaves `undo_state` at `partial` whatever the counts: a partial log can't say everything is back. A dry run, or a run with no `deleted/` log, still refuses.
 
-**What the log can't cover.** A generation in a part that never uploaded stays deleted. `sweep undo -B` won't reach it, against this spec's first draft: its precheck sends any dir holding an unlogged soft-deleted object to the per-object path, which restores only logged rows. It needs a manual restore, or an undo of a re-dispatch of the same items at the same scan, whose log names it. `-B` also needs the deletion window: from a closed row's `started_ts` / `finished_ts`, since a killed run's progress files never reach `done`.
+**What the log can't cover (a re-dispatch's log names it only while its scan is the newest; after that, by hand).** A generation in a part that never uploaded stays deleted. `sweep undo -B` won't reach it, against this spec's first draft: its precheck sends any dir holding an unlogged soft-deleted object to the per-object path, which restores only logged rows. It needs a manual restore, or an undo of a re-dispatch of the same items at the same scan, whose log names it. `-B` also needs the deletion window: from a closed row's `started_ts` / `finished_ts`, since a killed run's progress files never reach `done`.
 
 **Checked on a bucket.** On a temporary bucket with a 7-day soft delete, a run dir with `plan-summary.json`, one uploaded part and no summary, and objects deleted by generation, some logged and some not:
 
@@ -65,3 +65,7 @@ Two things follow. A re-dispatch's repeats count as attempted, so its totals ove
 - Site deploy: totals, Slack, the row, the card, row scoping.
 - New `SWEEP_IMAGE`: undo on a run with no summary. On the current image, the undo job fails on the missing file, after the route has marked the row `partial`. The undo CLI from this branch works today.
 - No migration.
+
+## Open
+
+A real killed executor: the checks above use a hand-built run dir. Run one on a scratch bucket that's killed mid-delete, the first time one is safe, to exercise what's on disk when a job really dies, before relying on this.

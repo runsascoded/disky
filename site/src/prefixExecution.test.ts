@@ -29,6 +29,14 @@ it('explains preserved changed/new objects even when the run deleted none of a p
 
 describe('a row\'s live run: the run\'s own item set, not its bucket', () => {
   const items = { sweep: ['gs://b/a/', 'gs://b/c/d/'], objects: ['gs://b/e/key'] }
+  it('a real `plan.json`: `sweep` holds full URIs, so its items are in the run and a prefix staged after it is not', () => {
+    const plan = {
+      plan_id: 1, name: 'Staged', sweep: ['gs://b1/data/', 'gs://b2/ckpt/step-1/'], buckets: ['b1', 'b2'],
+      as_of: { 'gs://b1/data/': '2026-11-03T1622', 'gs://b2/ckpt/step-1/': '2026-11-02T0701' },
+    }
+    const targets = [{ bucket: 'b2', run: { started_ts: 100 }, items: plan }]
+    expect(['gs://b2/ckpt/step-1/', 'gs://b2/ckpt/step-1/x/', 'gs://b2/ckpt/later/', 'gs://b1/data/'].map(p => liveTargetOf(p, 50, targets))).toEqual([0, 0, -1, -1])
+  })
   it('inRunItems: an item, or under one; an unread plan says no', () => {
     expect([
       inRunItems('gs://b/a/', items),

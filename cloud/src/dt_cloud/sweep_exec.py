@@ -917,7 +917,7 @@ def undo_run(
             raise SystemExit(f"{log_dir} has no deleted-summary.json and no deleted/ log: nothing names what it deleted")
         err(
             f"{log_dir}: no deleted-summary.json, so its log may be partial: this restores only the generations it names. One in a part "
-            "that never uploaded stays deleted (-B won't reach it): restore it by hand, or undo a re-dispatch of the same items at the same scan, whose log names it."
+            "that never uploaded stays deleted (-B won't reach it): restore it by hand, or, while this scan is still the newest, undo a re-dispatch of the same items, whose log names it. After a newer scan no manifest names it, and by hand is the only way."
         )
         logged_buckets = list(plan["buckets"])
     else:

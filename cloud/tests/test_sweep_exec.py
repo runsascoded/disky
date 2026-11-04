@@ -772,7 +772,7 @@ def test_undo_of_a_killed_run_restores_what_its_log_names_and_says_the_log_may_b
         "bands": {"gs://b1/a/": {"restored": 2, "bytes": 30}},
     }}
     assert said == [
-        f"{d}: no deleted-summary.json, so its log may be partial: this restores only the generations it names. One in a part that never uploaded stays deleted (-B won't reach it): restore it by hand, or undo a re-dispatch of the same items at the same scan, whose log names it.",
+        f"{d}: no deleted-summary.json, so its log may be partial: this restores only the generations it names. One in a part that never uploaded stays deleted (-B won't reach it): restore it by hand, or, while this scan is still the newest, undo a re-dispatch of the same items, whose log names it. After a newer scan no manifest names it, and by hand is the only way.",
         "b1: 2 deleted object(s) to restore",
         "  b1: 2 restored (0.00 TB restored)",
     ]
