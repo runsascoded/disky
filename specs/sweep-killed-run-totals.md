@@ -22,6 +22,10 @@ A real run has a start row. If its job dies after deleting (out of memory, pre-e
 
 `renderParent`'s "Queue emptied: everything staged here is deleted" is the strongest claim and goes first: XML replies can't prove it, and neither can a skip-bearing run. "Last real run deleted …" follows. The card re-renders on every event without the run's summary, so it needs its own read of `plan-summary.json`, or a D1 column for the contract.
 
+## A row outside the run reads as running
+
+On `/staged`, while a real run is live, a staged prefix that isn't in the run but shares a bucket with it shows "Running · bucket running · recovery after stop" (seen on prod and dev, 2026-11-04, on 4 prefixes staged after the dry run; the job's pinned `plan.json` doesn't have them). That reads as being deleted. Scope a row's state to the run's own item set (its `plan.json`), not its bucket.
+
 ## Tests
 
 - A job killed mid-run, with parts in `deleted/`: the closed row's totals equal the parts' sums, its `undo_deadline` is set, and Slack's text says partial, as exact equality.
