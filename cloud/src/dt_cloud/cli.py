@@ -1853,6 +1853,18 @@ def _write_failure(out: str | None, step: str, reason: object) -> None:
         err(f"WARN: couldn't write {out}/failure.json: {error}")
 
 
+def _start_recorded(record: Callable[[], str], for_real: bool) -> str | None:
+    """The run's `deletion_runs` row, before its first delete. A real run refuses without one: `sweepReflect` closes a failed
+    job with no row as a run that deleted nothing, which must never be said of one that did. A dry run has nothing to misreport."""
+    try:
+        return record()
+    except Exception as error:
+        if for_real:
+            raise RuntimeError(f"real run refused before any delete: couldn't record its start in D1: {error}") from error
+        err(f"WARN: deletion-run start record failed: {error}")
+        return None
+
+
 @sweep.command("manifest")
 @option("-b", "--bucket", "only_buckets", multiple=True, help="Only these buckets (default: every bucket the plan names)")
 @option("-d", "--date", required=True, help="Scan date whose listing to plan from (pinned)")
@@ -1989,12 +2001,9 @@ def sweep_execute(only_buckets: tuple[str, ...], drift: str, max_root_objects: i
         # The run's D1 row goes in now (finished NULL) so /staged lists it while
         # the re-list runs — hours, on the big bands; completed at the end.
         from .sweep_exec import record_run_start
-        try:
-            run_id = record_run_start(plan_summary, plan_dir, actor=actor, started_ts=started, for_real=for_real, buckets=only_buckets)
-            progress_run_id = run_id
-            err(f"recorded deletion run {run_id} (in progress)")
-        except Exception as e:  # recording must never block the run
-            err(f"WARN: deletion-run start record failed: {e}")
+        progress_run_id = _start_recorded(lambda: record_run_start(plan_summary, plan_dir, actor=actor, started_ts=started, for_real=for_real, buckets=only_buckets), for_real)
+        if progress_run_id is not None:
+            err(f"recorded deletion run {progress_run_id} (in progress)")
     # A clean stop: `sweep stop PLAN` drops PLAN/STOP (polled every 10 s), or
     # SIGTERM — roots not yet started are left for a re-run, everything done
     # is logged and recorded, and the job ends red (exit 130).
@@ -2204,10 +2213,7 @@ def _execute_generations(
     def prepared(plan: dict) -> None:
         nonlocal progress_run_id
         if for_real and not no_record:
-            try:
-                progress_run_id = record_run_start(plan, out, actor, started, for_real, only_buckets)
-            except Exception as error:
-                err(f"WARN: deletion-run start record failed: {error}")
+            progress_run_id = _start_recorded(lambda: record_run_start(plan, out, actor, started, for_real, only_buckets), for_real)
 
     def progress(snapshot: dict) -> None:
         from .sweep_progress import sample, write_samples

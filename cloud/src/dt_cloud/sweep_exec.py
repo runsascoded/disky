@@ -1172,7 +1172,8 @@ def run_id_for(plan: dict, started_ts: int) -> str:
 # `ledger_drift_dirs`: nothing re-classifies the manifest.
 def record_run_start(plan: dict, plan_dir: str, actor: str, started_ts: int, for_real: bool, buckets: tuple[str, ...] = ()) -> str:
     """Insert the run's D1 row as soon as it starts (`finished_ts` NULL, zero
-    totals) so the console lists it while it runs; `record_run` fills it in.
+    totals) so the console lists it while it runs; `record_run` fills it in. A
+    real run doesn't start without it (`cli._start_recorded`).
     `buckets` = the `-b` cut (empty = every bucket in the plan → NULL)."""
     from .index_footer import _creds, _d1_query, _q
 

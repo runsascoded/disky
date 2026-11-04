@@ -701,3 +701,124 @@ def test_manifest_then_execute_closes_the_run_with_its_totals(tmp_path, monkeypa
     # What `sweepReflect` runs once Batch says the job finished: the finished row, found by its run dir.
     reflected = d1.execute("UPDATE deletion_runs SET plan_digest = ? WHERE log_dir = ? AND finished_ts IS NOT NULL AND plan_digest IS NULL RETURNING run_id", ("digest", str(run))).fetchall()
     assert [r["run_id"] for r in reflected] == [row["run_id"]]
+
+
+def fail_to_record(*args, **kwargs):
+    raise RuntimeError("D1 query failed (503): overloaded")
+
+
+REFUSED = "real run refused before any delete: couldn't record its start in D1: D1 query failed (503): overloaded"
+
+
+def failure_of(run: Path) -> dict:
+    failure = json.loads((run / "failure.json").read_text())
+    return {key: failure[key] for key in ("step", "reason")}
+
+
+def generation_run(command: str, directory: Path, plan: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[list, Path, list[str]]:
+    """The dispatched real run's command line, its real delete seam counted (no `deleter=`: this is what the CLI wires)."""
+    from dt_cloud import cli
+
+    calls = []
+    client = FakeClient(blobs={})
+    client._credentials = None
+    monkeypatch.setattr(cli, "_hard_exit", lambda: None)
+    monkeypatch.setattr(sweep_reviewed, "XmlDeleter", lambda **_: acknowledge(calls))
+    monkeypatch.setattr("google.cloud.storage.Client", lambda: client)
+    run = tmp_path / "gcs-sweep-real-20261104-120000z"
+    return calls, run, ["sweep", command, "-e", "xml", "-p", str(plan), "-o", str(run), "-w", str(tmp_path / "work"), "--for-real", str(directory)]
+
+
+@pytest.fixture
+def reviewed_source(tmp_path):
+    """A dry run's dir, as `execute-reviewed` reads it."""
+    directory = tmp_path / "dry"
+    (directory / "would-delete").mkdir(parents=True)
+    rows = [dict(name=f"a/o{i}", size_bytes=1, generation=i + 1, decision="delete", dir="a") for i in range(3)]
+    pq.write_table(pa.Table.from_pylist(rows), directory / "would-delete/b1.parquet")
+    (directory / "plan-summary.json").write_text(json.dumps({"plan_id": 1, "date": DATE, "approved": ["gs://b1/a/"], "buckets": {"b1": {"eligible": {"objects": 3, "bytes": 3}}}, "total": {"eligible": {"objects": 3, "bytes": 3}}}))
+    (directory / "would-delete-summary.json").write_text(json.dumps({"for_real": False, "buckets": {"b1": {"decisions": {"delete": 3}, "delete_bytes": 3}}}))
+    plan = tmp_path / "plan.json"
+    plan.write_text(json.dumps({"plan_id": 1, "sweep": ["gs://b1/a/"]}))
+    return directory, plan
+
+
+@pytest.fixture(params=["execute-manifest", "execute-reviewed"])
+def generation_source(request, source, reviewed_source):
+    directory, plan = source if request.param == "execute-manifest" else reviewed_source
+    return request.param, directory, plan
+
+
+def test_a_real_run_with_no_start_record_refuses_before_any_delete(generation_source, tmp_path, monkeypatch):
+    """With no row, a job that then failed would be closed by `sweepReflect` as a real run that deleted nothing."""
+    from dt_cloud import cli
+
+    command, directory, plan = generation_source
+    calls, run, args = generation_run(command, directory, plan, tmp_path, monkeypatch)
+    monkeypatch.setattr("dt_cloud.sweep_exec.record_run_start", fail_to_record)
+    monkeypatch.setattr("dt_cloud.sweep_exec.record_run", fail_to_record)
+    executed = CliRunner().invoke(cli.main, args)
+    assert executed.exit_code == 1
+    assert calls == []
+    assert failure_of(run) == {"step": command, "reason": REFUSED}
+    assert sorted(path.name for path in run.glob("deleted/**/*")) == []
+
+
+def test_a_real_run_with_its_start_record_goes_on_to_delete(generation_source, tmp_path, monkeypatch):
+    """The other side of the refusal: the same command line, the same seam, recorded first and then deleting."""
+    from dt_cloud import cli
+
+    command, directory, plan = generation_source
+    calls, run, args = generation_run(command, directory, plan, tmp_path, monkeypatch)
+    order = []
+    monkeypatch.setattr("dt_cloud.sweep_exec.record_run_start", lambda *_: order.append(len(calls)) or "run")
+    monkeypatch.setattr("dt_cloud.sweep_exec.record_run", lambda *_: "run")
+    monkeypatch.setattr("dt_cloud.sweep_progress.write_samples", lambda *_: None)
+    executed = CliRunner().invoke(cli.main, args)
+    assert (executed.exit_code, executed.exception) == (0, None)
+    assert order == [0]
+    assert len(calls) > 0
+    assert not (run / "failure.json").exists()
+
+
+def sweep_plan_dir(tmp_path: Path) -> Path:
+    plan_dir = tmp_path / "plan"
+    plan_dir.mkdir()
+    (plan_dir / "plan-summary.json").write_text(json.dumps({"plan_id": 1, "plan_name": "p", "date": DATE}))
+    return plan_dir
+
+
+def test_the_older_execute_refuses_a_real_run_with_no_start_record(tmp_path, monkeypatch):
+    from dt_cloud import cli
+
+    executed_plans = []
+    monkeypatch.setattr("dt_cloud.sweep_exec.record_run_start", fail_to_record)
+    monkeypatch.setattr("dt_cloud.sweep_exec.execute_plan", lambda *args, **kwargs: executed_plans.append(args))
+    plan_dir = sweep_plan_dir(tmp_path)
+    executed = CliRunner().invoke(cli.main, ["sweep", "execute", "--for-real", str(plan_dir)])
+    assert executed.exit_code == 1
+    assert executed_plans == []
+    assert failure_of(plan_dir) == {"step": "execute", "reason": REFUSED}
+
+
+def test_a_dry_run_goes_on_past_a_failed_start_record(tmp_path, monkeypatch):
+    from dt_cloud import cli
+
+    executed_plans = []
+
+    def execute_plan(*args, **kwargs):
+        executed_plans.append(kwargs["for_real"])
+        return {"buckets": {}, "_plan": {}}
+
+    logged = []
+    monkeypatch.setattr(cli, "err", logged.append)
+    monkeypatch.setattr(cli, "_hard_exit", lambda: None)
+    monkeypatch.setattr("dt_cloud.sweep_exec.record_run_start", fail_to_record)
+    monkeypatch.setattr("dt_cloud.sweep_exec.record_run", lambda *_, **__: "run")
+    monkeypatch.setattr("dt_cloud.sweep_exec.execute_plan", execute_plan)
+    plan_dir = sweep_plan_dir(tmp_path)
+    executed = CliRunner().invoke(cli.main, ["sweep", "execute", str(plan_dir)])
+    assert (executed.exit_code, executed.exception) == (0, None)
+    assert executed_plans == [False]
+    assert not (plan_dir / "failure.json").exists()
+    assert logged[:2] == ["execute (dry-run) plan 1 ('p')", "WARN: deletion-run start record failed: D1 query failed (503): overloaded"]
