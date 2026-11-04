@@ -1,7 +1,8 @@
 import { beforeAll, describe, expect, it, vi } from 'vitest'
 import type { Env } from './auth'
 import { buildLevels, type Level, levelK, levelOf, type LevelRow, mergeLevels } from './diffLevel'
-import { asOfScans, GetRounds, openIndex, planChanged, planRects, type Rect, withChurn } from './index'
+import { asOfScans, coloPutsSettled, GetRounds, openIndex, planChanged, planRects, type Rect, withChurn } from './index'
+import { ahead, clearIsolate, loadScopes } from './shared'
 import { sqliteD1 } from './testD1'
 import { fixtureR2 as r2 } from './testR2'
 import { readJson } from './testStore'
@@ -263,9 +264,8 @@ describe('level diffs', () => {
       const reads: string[] = []
       const lv = await levelEnv(reads)
       const from = '2026-08-02', to = '2026-08-06'
-      // Footers first (a warm isolate's): what's counted is the request's data reads.
-      await buildLevels(lv, { from, to, dirs, k: 512, m: 'churn', chain: false })
-      reads.length = 0
+      // No page index held; what's counted is the request's data reads.
+      clearIsolate()
       const { t, trace } = traced()
       const got = await buildLevels(lv, { from, to, dirs, k: 512, m: 'churn', chain: false, trace })
       expect(dirs.map(d => shape(got.get(d)!))).toEqual(dirs.map(d => wanted(cases.find(c => c.from === from && c.to === to && c.path === d)!)))
@@ -276,6 +276,149 @@ describe('level diffs', () => {
       expect([data.slice(0, files.length).sort(), data.slice(files.length).sort()]).toEqual([files, files])
       expect([t['lv-index-gets'], t['lv-data-gets'], t['lv-index-rounds'], t['lv-data-rounds']]).toEqual([files.length, files.length, 1, 1])
       expect(t['lv-groups']).toBeGreaterThan(files.length) // several groups per file, still one run each
+    })
+
+    describe('the page indexes it holds', () => {
+      const from = '2026-08-02', to = '2026-08-06', dirs = ['b1', 'b2', 'b1/x']
+      const IX = ['lv-index-held', 'lv-index-colo', 'lv-index-joined', 'lv-index-miss', 'lv-index-gets', 'lv-index-rounds', 'lv-data-gets'] as const
+      const answers = () => dirs.map(d => wanted(cases.find(c => c.from === from && c.to === to && c.path === d)!))
+      const dataReads = (log: string[]) => log.filter(k => k.endsWith('/served/level.parquet')).length
+      /** Run `f` with a colo kept across its reads (`match`es counted). */
+      const withColo = async <T>(f: (c: { puts: () => number; matches: () => number }) => Promise<T>): Promise<T> => {
+        const held = new Map<string, ArrayBuffer>()
+        let matches = 0
+        const g = globalThis as unknown as { caches: unknown }
+        const prev = g.caches
+        g.caches = { default: {
+          match: async (r: Request) => { matches++; return held.has(r.url) ? new Response(held.get(r.url)!.slice(0)) : undefined },
+          put: async (r: Request, res: Response) => { held.set(r.url, await res.arrayBuffer()) },
+        } }
+        try {
+          return await f({ puts: () => [...held.keys()].filter(u => u.includes('?pi=')).length, matches: () => matches })
+        } finally {
+          g.caches = prev
+        }
+      }
+      /** One read through `build` (a module graph's, an isolate's): its answers, its counters, its data file reads. */
+      const read = async (build: typeof buildLevels, lv: Env, log: string[]) => {
+        const { t, trace } = traced()
+        const at = log.length
+        const got = await build(lv, { from, to, dirs, k: 512, m: 'churn', chain: false, trace })
+        expect(dirs.map(d => shape(got.get(d)!))).toEqual(answers())
+        return { ...Object.fromEntries(IX.map(k => [k, t[k]])), files: dataReads(log.slice(at)), groups: t['lv-groups'] } as Record<string, number> & { files: number; groups: number }
+      }
+      /** Colo puts landed, those a scope's commit started (not awaited there) too. */
+      const settled = async () => {
+        await coloPutsSettled()
+        await new Promise(r => setTimeout(r, 5))
+      }
+      /** The fixture's read, cold and alone: every group a miss, one index GET per touched file, then one data GET each. */
+      const COLD = (groups: number) => ({ 'lv-index-held': 0, 'lv-index-colo': 0, 'lv-index-joined': 0, 'lv-index-miss': groups, 'lv-index-gets': 3, 'lv-index-rounds': 1, 'lv-data-gets': 3, files: 6, groups })
+      /** The same read with every index held: no index GET at all. */
+      const WARM = (groups: number, how: 'lv-index-held' | 'lv-index-colo') => ({ ...COLD(groups), 'lv-index-miss': 0, 'lv-index-gets': 0, 'lv-index-rounds': 0, files: 3, [how]: groups })
+
+      it('a second read of the same groups issues no index GET; a new isolate in the colo neither; answers unchanged', () => withColo(async c => {
+        const log: string[] = []
+        const lv = await levelEnv(log)
+        clearIsolate()
+        const first = await read(buildLevels, lv, log)
+        const n = first.groups
+        expect(n).toBeGreaterThan(3)
+        expect(first).toEqual(COLD(n))
+        await settled()
+        expect(c.puts()).toBe(n)
+        // The same isolate: not even a colo lookup.
+        const looked = c.matches()
+        expect(await read(buildLevels, lv, log)).toEqual(WARM(n, 'lv-index-held'))
+        expect(c.matches()).toBe(looked)
+        // A new isolate (a fresh module graph), the same colo.
+        vi.resetModules()
+        const other = (await import('./diffLevel')).buildLevels
+        expect(await read(other, lv, log)).toEqual(WARM(n, 'lv-index-colo'))
+        expect(await read(other, lv, log)).toEqual(WARM(n, 'lv-index-held'))
+        vi.resetModules()
+      }))
+
+      it('a colo copy of another length (another layout) is a miss, and is replaced', () => withColo(async c => {
+        const log: string[] = []
+        const lv = await levelEnv(log)
+        clearIsolate()
+        const g = globalThis as unknown as { caches: { default: { match: (r: Request) => Promise<Response | undefined> } } }
+        const real = g.caches.default.match
+        g.caches.default.match = async r => (r.url.includes('?pi=') ? new Response(new ArrayBuffer(3)) : real(r))
+        const { groups } = await read(buildLevels, lv, log).then(r => { expect(r).toEqual(COLD(r.groups)); return r })
+        await settled()
+        expect(c.puts()).toBe(groups)
+      }))
+
+      it('concurrent reads share one index wave: the second joins every group the first is reading', () => withColo(async () => {
+        const log: string[] = []
+        const lv = await levelEnv(log)
+        clearIsolate()
+        // Whichever gets there first.
+        const [a, b] = (await Promise.all([read(buildLevels, lv, log), read(buildLevels, lv, log)])).sort((x, y) => y['lv-index-miss'] - x['lv-index-miss'])
+        const n = a.groups
+        // The log is shared, so each read's `files` is whatever had landed by its end.
+        expect({ ...a, files: 0 }).toEqual({ ...COLD(n), files: 0 })
+        expect({ ...b, files: 0 }).toEqual({ ...COLD(n), 'lv-index-joined': n, 'lv-index-miss': 0, 'lv-index-gets': 0, 'lv-index-rounds': 0, files: 0 })
+        // Together: one index wave (3 GETs), each read's own data wave.
+        expect(dataReads(log)).toBe(3 + 3 + 3)
+      }))
+
+      it('no read joins a provisional read: beside it, a read reads every index itself', () => withColo(async () => {
+        await loadScopes()
+        const log: string[] = []
+        const lv = await levelEnv(log)
+        clearIsolate()
+        // The scope's index wave stops at its 3 GETs, its entries in flight, until the other read is done.
+        const real = lv.INDEX_R2!
+        let stopped = 0
+        let go = () => {}
+        const release = new Promise<void>(r => { go = r })
+        lv.INDEX_R2 = { ...real, get: async (k: string, o?: never) => {
+          if (k.endsWith('/served/level.parquet') && stopped < 3) {
+            stopped++
+            await release
+          }
+          return real.get(k, o)
+        } } as unknown as R2Bucket
+        const early = ahead({}, true)
+        const inScope = early.later(() => read(buildLevels, lv, log))()
+        await vi.waitFor(() => expect(stopped).toBe(3))
+        const plain = await read(buildLevels, lv, log)
+        go()
+        const scoped = await inScope
+        early.done()
+        expect(plain).toEqual(COLD(scoped.groups))
+      }))
+
+      it('a provisional read refused at its gate leaves nothing: no held bytes, no colo copy', () => withColo(async c => {
+        await loadScopes()
+        const log: string[] = []
+        const lv = await levelEnv(log)
+        clearIsolate()
+        const refused = ahead({}, true)
+        const { groups } = await refused.later(() => read(buildLevels, lv, log))()
+        refused.done()
+        await settled()
+        expect(c.puts()).toBe(0)
+        expect(await read(buildLevels, lv, log)).toEqual(COLD(groups))
+      }))
+
+      it('a provisional read whose gate passes lands what it read', () => withColo(async c => {
+        await loadScopes()
+        const log: string[] = []
+        const lv = await levelEnv(log)
+        clearIsolate()
+        const early = ahead({}, true)
+        const first = await early.later(() => read(buildLevels, lv, log))()
+        expect(first).toEqual(COLD(first.groups))
+        early.commit()
+        early.done()
+        await settled()
+        expect(c.puts()).toBe(first.groups)
+        expect(await read(buildLevels, lv, log)).toEqual(WARM(first.groups, 'lv-index-held'))
+      }))
     })
 
     it('its read laps every phase, each round in order, wherever a directory has no transition', async () => {

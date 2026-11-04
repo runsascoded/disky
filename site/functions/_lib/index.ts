@@ -2566,21 +2566,19 @@ type PageIx = { locs: Record<string, PageLocation[]>; stats: Record<string, Colu
 
 const pageIxKey = (t: IndexHandle, rg: number): string => `${storeKey(t.env)}|${t.dataKey}|pi:${rg}`
 const pageIxColoKey = (t: IndexHandle, rg: number): Request => coloKey(t.env, t.dataKey!, `pi=${rg}&d=${PAGE_IX_DOC}`)
-const isPlanCol = (name: string): boolean => (PAGE_PLAN as readonly string[]).includes(name)
-
-/** A group's page-index byte spans (the planning columns' ColumnIndexes, every column's OffsetIndex), and the runs
- *  they merge into (`planRuns`; the colo copy holds those runs' bytes). */
-function pageIxSpans(chunks: IndexedChunk[], leaves: SchemaElement[]): { spans: { start: number; end: number }[]; runs: { start: number; end: number }[] } {
+/** A group's page-index byte spans (`plan`'s ColumnIndexes, every column's OffsetIndex), and the runs they merge into
+ *  (`planRuns`; the colo copy holds those runs' bytes). */
+function pageIxSpans(chunks: IndexedChunk[], leaves: SchemaElement[], plan: readonly string[] = PAGE_PLAN): { spans: { start: number; end: number }[]; runs: { start: number; end: number }[] } {
   const spans: { start: number; end: number }[] = []
   for (const [i, k] of chunks.entries()) {
-    if (isPlanCol(leaves[i].name) && k.column_index_length) spans.push({ start: Number(k.column_index_offset), end: Number(k.column_index_offset) + k.column_index_length })
+    if (plan.includes(leaves[i].name) && k.column_index_length) spans.push({ start: Number(k.column_index_offset), end: Number(k.column_index_offset) + k.column_index_length })
     if (k.offset_index_length) spans.push({ start: Number(k.offset_index_offset), end: Number(k.offset_index_offset) + k.offset_index_length })
   }
   return { spans, runs: planRuns(spans).map(r => ({ start: r.start, end: r.end })) }
 }
 
 /** A group's page index parsed from its index runs' bytes (`buf`: `runs`' bytes concatenated). */
-function parsePageIx(chunks: IndexedChunk[], leaves: SchemaElement[], runs: { start: number; end: number }[], buf: ArrayBuffer): PageIx {
+function parsePageIx(chunks: IndexedChunk[], leaves: SchemaElement[], runs: { start: number; end: number }[], buf: ArrayBuffer, plan: readonly string[] = PAGE_PLAN): PageIx {
   const at = (off: bigint | undefined, len: number) => {
     let base = 0
     for (const r of runs) {
@@ -2594,7 +2592,7 @@ function parsePageIx(chunks: IndexedChunk[], leaves: SchemaElement[], runs: { st
   for (const [i, k] of chunks.entries()) {
     const name = leaves[i].name
     if (k.offset_index_length) locs[name] = readOffsetIndex(at(k.offset_index_offset, k.offset_index_length)).page_locations
-    if (isPlanCol(name) && k.column_index_length) stats[name] = readColumnIndex(at(k.column_index_offset, k.column_index_length), leaves[i] as never)
+    if (plan.includes(name) && k.column_index_length) stats[name] = readColumnIndex(at(k.column_index_offset, k.column_index_length), leaves[i] as never)
   }
   return { locs, stats }
 }
@@ -2896,14 +2894,111 @@ export async function openIvLevel(env: Env, from: string, to: string, trace?: Tr
   return { env, d1, d2, tiers: hs as PqHandle[] }
 }
 
+/** The level page indexes an isolate holds, by the estimated bytes of `levelIxCache`. An LRU of its own, as the footers'
+ *  is: a level read touches up to `LEVEL_MAX_GROUPS` groups, and in `footerCache` its indexes would evict the footer
+ *  groups every plan reads. Holding the thrift, not `PageIx`: a parsed group's objects and bigints are 4.3× its thrift
+ *  (Node heap, gcs's `level`, 2026-11-03: ~14 KB of thrift, ~59 KB parsed, 32 pages of 13 columns), so a cap holding ~600
+ *  groups as bytes would hold ~130 parsed, about one wide read; parsing costs ~0.1 ms a group, as every read has always
+ *  paid. 8 MB beside the groups' 24, the footers' 12 and the static answers' 32 (`HELD_BYTES`) leaves the isolate's
+ *  128 MB its room for a request's decode. The least recently used group is evicted past the cap. */
+const LEVEL_IX_CAP = 8 << 20
+/** A held entry's bytes past its thrift (the key, the entry, the buffer's header). */
+const LEVEL_IX_ENTRY = 256
+const levelIxCache = new Lru('levelIxCache', LEVEL_IX_CAP)
+/** Level page indexes being read: concurrent reads of a level (a browser's batches) share a group's. */
+const levelIxInFlight = new IsoMap<string, Promise<ArrayBuffer>>('levelIxInFlight')
+
+/** `cands`' page indexes. A group's comes from the isolate (`levelIxCache`), else from a read in flight, else the colo
+ *  (immutable: the key is the file's, which names the generation and the tier), else the file: the groups left merged
+ *  into one wave's runs (`wave`), each held then. Colo copies are put by `later`, so they queue behind no GET of this
+ *  read. Server-Timing: `lv-index-held` / `-colo` / `-joined` / `-miss`, the groups each way; `lv-index-lookup` the colo
+ *  lookups' ms; `lv-index` and its `-gets`, `-rounds`, `-bytes` the wave's. */
+async function levelPageIxs<C extends { t: PqHandle; g: BlobGroup; rg: { columns: IndexedChunk[] } }>(
+  env: Env,
+  cands: C[],
+  lim: <T>(f: () => Promise<T>) => Promise<T>,
+  wave: (perTier: Map<PqHandle, { start: number; end: number }[]>) => Promise<Map<PqHandle, FileSlice>>,
+  later: (() => void)[],
+  trace?: Trace,
+): Promise<Map<C, PageIx>> {
+  const geom = new Map(cands.map(c => [c, pageIxSpans(c.rg.columns, c.t.schema.slice(1), LEVEL_PLAN)]))
+  const key = (c: C) => pageIxKey(c.t, c.g.rg)
+  const out = new Map<C, PageIx>()
+  const parsed = (c: C, buf: ArrayBuffer) => { out.set(c, parsePageIx(c.rg.columns, c.t.schema.slice(1), geom.get(c)!.runs, buf, LEVEL_PLAN)) }
+  const hold = (c: C, buf: ArrayBuffer) => levelIxCache.put(key(c), [buf], buf.byteLength + LEVEL_IX_ENTRY)
+  let held = 0
+  const inIsolate = (c: C): boolean => {
+    const buf = levelIxCache.get<ArrayBuffer>(key(c))?.[0]
+    if (buf) {
+      parsed(c, buf)
+      held++
+    }
+    return !!buf
+  }
+  const missing = cands.filter(c => !inIsolate(c))
+  const t0 = now()
+  let fromColo = 0
+  await Promise.all(missing.filter(c => !levelIxInFlight.has(key(c))).map(c => lim(async () => {
+    const hit = await colo().match(pageIxColoKey(c.t, c.g.rg))
+    const buf = hit ? await hit.arrayBuffer() : null
+    if (!buf || buf.byteLength !== geom.get(c)!.runs.reduce((m, r) => m + r.end - r.start, 0)) return
+    hold(c, buf)
+    parsed(c, buf)
+    fromColo++
+  })))
+  trace?.('lv-index-lookup', now() - t0)
+  // No await from here until every group left is in flight: two reads can't both miss a group's entry.
+  const left = missing.filter(c => !out.has(c) && !inIsolate(c))
+  const mine = left.filter(c => !levelIxInFlight.has(key(c)))
+  const spansOf = (cs: C[]) => {
+    const m = new Map<PqHandle, { start: number; end: number }[]>()
+    for (const c of cs) m.set(c.t, [...(m.get(c.t) ?? []), ...geom.get(c)!.spans])
+    return m
+  }
+  const read = async (c: C, wv: Promise<Map<PqHandle, FileSlice>>): Promise<ArrayBuffer> => {
+    const file = (await wv).get(c.t)!
+    const { runs } = geom.get(c)!
+    const parts = await Promise.all(runs.map(r => file.slice(r.start, r.end)))
+    // A copy: holding a slice mustn't hold its whole run.
+    const bytes = new Uint8Array(parts.reduce((m, p) => m + p.byteLength, 0))
+    let o = 0
+    for (const p of parts) {
+      bytes.set(new Uint8Array(p), o)
+      o += p.byteLength
+    }
+    hold(c, bytes.buffer)
+    later.push(() => putColoIx(c.t, c.g.rg, bytes.buffer))
+    return bytes.buffer
+  }
+  const ours = wave(spansOf(mine))
+  const own = new Set(mine)
+  // A group another read holds is joined; if that read dies, this one reads the group itself.
+  const got = left.map(async c => parsed(c, await inFlight(levelIxInFlight, key(c), () => read(c, own.has(c) ? ours : wave(spansOf([c]))), ivJoin(env, 'level-ix'))))
+  await Promise.all([ours, ...got])
+  trace?.('lv-index-held', held)
+  trace?.('lv-index-colo', fromColo)
+  trace?.('lv-index-joined', left.length - mine.length)
+  trace?.('lv-index-miss', mine.length)
+  return out
+}
+
+/** Put a group's page-index bytes in the colo, best effort and not waited for (`putColoGroup`). */
+function putColoIx(t: IndexHandle, rg: number, buf: ArrayBuffer): void {
+  const p: Promise<void> = colo().put(pageIxColoKey(t, rg), new Response(buf, { headers: { 'cache-control': `max-age=${BLOB_CACHE_TTL}` } }))
+    .catch(() => {})
+    .finally(() => { coloPuts.delete(p) })
+  coloPuts.add(p)
+}
+
 /** The groups a level read of `dirs` decodes at most, and the rows its pages hold at most (`readFits`' bounds). */
 const LEVEL_MAX_GROUPS = 250
 const LEVEL_MAX_ROWS = 700_000
 
 /** Every transition in `(d1, d2]` under each of `dirs` (their children's, and their own as `name` ''), from every tier:
  *  each tier's groups whose bounds can hold one (sidecar), then two waves over all tiers at once — the kept groups' page
- *  indexes, then the pages that can hold one — each wave's merged runs (`planRuns`) `RUN_READS` at a time on one limiter.
- *  Server-Timing: `lv-index` / `lv-data` (ms, `-gets`, `-rounds`, `-bytes`), `lv-groups`, `lv-pages`, `lv-rows`. Throws
+ *  indexes, then the pages that can hold one — each wave's merged runs (`planRuns`) `RUN_READS` at a time on one limiter; an
+ *  index held (`levelPageIxs`) leaves the first wave. Server-Timing: `lv-index` / `lv-data` (ms, `-gets`, `-rounds`,
+ *  `-bytes`), `lv-index-{held,colo,joined,miss}`, `lv-groups`, `lv-pages`, `lv-rows`. Throws
  *  "query too wide" past `LEVEL_MAX_GROUPS` groups or `LEVEL_MAX_ROWS` page rows. `lap`: the request's phases
  *  (`serverTiming`'s), with a clock sync (`syncClock`) after the read's CPU-only stretches so they're counted as theirs;
  *  also `lv-plan-bounds` / `lv-plan-json` (tier-ms, overlapping), `fgroups`, `footer`, `fdoc-r2`. */
@@ -2967,28 +3062,15 @@ export async function readLevel(lh: LevelHandle, dirs: string[], trace?: Trace, 
     for (const c of xs) m.set(c.t, [...(m.get(c.t) ?? []), ...f(c)])
     return m
   }
-  const ixFiles = await wave('lv-index', byTier(cands, c => [
-    ...LEVEL_PLAN.map(n => { const k = chunk(c, n); return { start: Number(k.column_index_offset), end: Number(k.column_index_offset) + k.column_index_length! } }),
-    ...IV_LEVEL_COLS.map(n => { const k = chunk(c, n); return { start: Number(k.offset_index_offset), end: Number(k.offset_index_offset) + k.offset_index_length! } }),
-  ]))
+  const puts: (() => void)[] = []
+  const ixs = await levelPageIxs(lh.env, cands, lim, perTier => wave('lv-index', perTier), puts, trace)
   lap?.('index')
   const text = (v: unknown): string => (v instanceof Uint8Array ? new TextDecoder().decode(v) : String(v))
   type Planned = Cand & { ranges: [number, number][]; locs: Record<string, PageLocation[]>; n: number; pages: number }
   const planned: Planned[] = []
   for (const c of cands) {
-    const ix = ixFiles.get(c.t)!
-    const reader = async (start: bigint | undefined, len: number | undefined) => ({ view: new DataView(await ix.slice(Number(start), Number(start) + len!)), offset: 0 })
+    const { locs, stats } = ixs.get(c)!
     const n = Number(c.rg.num_rows)
-    const locs: Record<string, PageLocation[]> = {}
-    for (const name of IV_LEVEL_COLS) {
-      const k = chunk(c, name)
-      locs[name] = readOffsetIndex(await reader(k.offset_index_offset, k.offset_index_length)).page_locations
-    }
-    const leaves = c.t.schema.slice(1)
-    const stats = Object.fromEntries(await Promise.all(LEVEL_PLAN.map(async name => {
-      const k = chunk(c, name)
-      return [name, readColumnIndex(await reader(k.column_index_offset, k.column_index_length), leaves[idxOf(c.t).get(name)!] as never)] as const
-    })))
     const pages = locs.depth
     const ranges: [number, number][] = []
     let kept = 0
@@ -3020,6 +3102,7 @@ export async function readLevel(lh: LevelHandle, dirs: string[], trace?: Trace, 
     await syncClock()
     lap('pages')
   }
+  if (rows > LEVEL_MAX_ROWS || !planned.length) puts.splice(0).forEach(put => put())
   if (rows > LEVEL_MAX_ROWS) throw new Error(`query too wide: ${rows} level rows`)
   if (!planned.length) return []
   const dataFiles = await wave('lv-data', byTier(planned as Cand[], c => {
@@ -3037,6 +3120,7 @@ export async function readLevel(lh: LevelHandle, dirs: string[], trace?: Trace, 
       ]
     }))
   }))
+  puts.splice(0).forEach(put => put())
   lap?.('data')
   const t2 = now()
   const out: LevelRec[] = []

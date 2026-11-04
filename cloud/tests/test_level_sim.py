@@ -11,7 +11,7 @@ import pyarrow.parquet as pq
 from click.testing import CliRunner
 
 from dt_cloud.interval_level import LEVEL_SCHEMA
-from dt_cloud.level_sim import ROW_BYTES, Config, chunk_span, configs, fit, level_sim_cmd, merged, wave, wave_ms
+from dt_cloud.level_sim import ROW_BYTES, Config, FirstTouch, PageIx, SmallGroup, chunk_span, configs, fit, level_sim_cmd, merged, small_groups, wave, wave_ms
 from dt_cloud.parquet_pages import chunk_indexes, page_locations
 
 
@@ -115,3 +115,72 @@ def test_a_read_priced_over_a_real_file(tmp_path):
     assert got["whole"]["rows"] == 8
     s, e = chunk_span(dict(zip(range(13), cmeta[0])))
     assert (got["whole"]["data"]["gets"], got["whole"]["data"]["bytes"]) == (1, e - s)
+
+
+def test_small_groups_are_a_real_groups_pages_stored_contiguously():
+    # Two columns' worth of pages isn't a level file's 13: every column carries the same 4 pages of 2 rows, 10 bytes each; `name` has
+    # no dictionary, the rest a dictionary page of 3 bytes before their first page.
+    cols = ["depth", "path", "ts", "name", "op", "kind", "kind_prev", "size", "n_files", "size_prev", "n_files_prev", "churn_cum", "churn_prev"]
+    chunks = {c: [1000 * (k + 1) + 3, 43, 1000 * (k + 1), 0, 0, 0, 0] for k, c in enumerate(cols)}
+    locs = {c: [(1000 * (k + 1) + 3 + 10 * i, 10, 2 * i) for i in range(4)] for k, c in enumerate(cols)}
+    ix = PageIx(locs, [(1, 1)] * 4, [("a", "a"), ("a", "b"), ("b", "b"), ("c", "c")], [(10, 11), (12, 13), (14, 15), (16, 17)])
+    each = 3 + 10
+    assert small_groups(ix, chunks, 8, 2) == [
+        SmallGroup(2, 1000 + 13 * each * i, 1000 + 13 * each * (i + 1), 1, 1, *p, *t, (each,) * 13)
+        for i, (p, t) in enumerate(zip(ix.path, ix.ts))
+    ]
+    two = 3 + 20
+    assert small_groups(ix, chunks, 8, 4) == [
+        SmallGroup(4, 1000, 1000 + 13 * two, 1, 1, "a", "b", 10, 13, (two,) * 13),
+        SmallGroup(4, 1000 + 13 * two, 1000 + 26 * two, 1, 1, "b", "c", 14, 17, (two,) * 13),
+    ]
+    # A size the pages don't divide can't be read from them.
+    try:
+        small_groups(ix, chunks, 8, 3)
+    except ValueError as e:
+        assert str(e) == "pages at rows [0, 2] don't divide 3-row groups"
+    else:
+        raise AssertionError("3-row groups from 2-row pages")
+
+
+def test_first_touch_holds_from_the_next_round_and_joins_within_one():
+    s = FirstTouch()
+    assert s.split((0, 0), ["a", "b"]) == (["a", "b"], [])
+    s.read(["a", "b"], 200.0)
+    # Beside it: another batch joins, waiting for it.
+    assert s.split((0, 0), ["b", "c"]) == (["c"], ["b"])
+    assert s.wait(["b"]) == 200.0
+    s.read(["c"], 100.0)
+    # The next round: everything read is held.
+    assert s.split((0, 1), ["a", "b", "c", "d"]) == (["d"], [])
+    assert s.wait([]) == 0.0
+
+
+def test_the_mode_table_prices_a_read_of_a_real_file(tmp_path):
+    store = tmp_path / "gen"
+    out, _ = _level_file(store)
+    reqs = tmp_path / "reqs.jsonl"
+    reqs.write_text("".join(json.dumps({"case": 0, "level": lv, "batch": 0, "round": 0, "from": "s11", "to": "s13", "dirs": ["a"]}) + "\n" for lv in (0, 1)))
+    table = tmp_path / "modes.jsonl"
+    r = CliRunner().invoke(level_sim_cmd, ["-c", str(tmp_path / "c"), "-g", "512K", "-C", "2M", "-T", "100", "-R", "1000000", "-s", "2,4", "-F", "2", "-O", str(table), "-o", str(tmp_path / "o.jsonl"), str(store), str(reqs)], catch_exceptions=False)
+    assert r.exit_code == 0
+    got = {m["mode"]: {k: v for k, v in m.items() if k in ("gets", "rounds", "rows", "lookups", "first_p50", "full_p50")} for m in map(json.loads, table.read_text().splitlines())}
+    # Rounded up to the slots' ms: the throughput is effectively free here, a wave of one get is 100 ms.
+    got = {k: {**v, "first_p50": round(v["first_p50"]), "full_p50": round(v["full_p50"])} for k, v in got.items()}
+    # The fixture's sidecar is one footer group; the index and the data are one run each. Two levels, each the same read.
+    assert got == {
+        # Each level: index + data. The footer group, the first level's.
+        "8K pages, today": {"gets": 1 + 2 + 2, "rounds": 1 + 2 + 2, "rows": 4, "lookups": 1, "first_p50": 305, "full_p50": 505},
+        # Index and footer group once, a colo lookup each (5 ms) ahead of them.
+        "8K pages, held, cold": {"gets": 1 + 1 + 2, "rounds": 1 + 1 + 2, "rows": 4, "lookups": 2, "first_p50": 305, "full_p50": 405},
+        "8K pages, held, colo warm": {"gets": 2, "rounds": 2, "rows": 4, "lookups": 2, "first_p50": 105, "full_p50": 205},
+        "8K pages, held, warm": {"gets": 2, "rounds": 2, "rows": 4, "lookups": 0, "first_p50": 100, "full_p50": 200},
+        # 2 rows: page 1 alone; a footer group of 2 rows holds its ordinal.
+        "2 rows/F2, cold": {"gets": 1 + 2, "rounds": 1 + 2, "rows": 4, "lookups": 1, "first_p50": 205, "full_p50": 305},
+        "2 rows/F2, colo warm": {"gets": 2, "rounds": 2, "rows": 4, "lookups": 1, "first_p50": 105, "full_p50": 205},
+        "2 rows, warm": {"gets": 2, "rounds": 2, "rows": 4, "lookups": 0, "first_p50": 100, "full_p50": 200},
+        # 4 rows: pages 0 and 1 are one group: 4 rows a read.
+        "4 rows/F2, cold": {"gets": 1 + 2, "rounds": 1 + 2, "rows": 8, "lookups": 1, "first_p50": 205, "full_p50": 305},
+        "4 rows/F2, colo warm": {"gets": 2, "rounds": 2, "rows": 8, "lookups": 1, "first_p50": 105, "full_p50": 205},
+        "4 rows, warm": {"gets": 2, "rounds": 2, "rows": 8, "lookups": 0, "first_p50": 100, "full_p50": 200},
+    }
