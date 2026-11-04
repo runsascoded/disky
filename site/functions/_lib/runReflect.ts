@@ -12,7 +12,7 @@ import type { BatchConfig } from "./batchConfig.js"
 import { batchJobsUrl } from "./gcp.js"
 import type { FinishedRun } from "./plans.js"
 
-const HOLD_SECS = 7 * 24 * 3600 // undo window before purge (matches gcs's ≥7d soft-delete)
+export const HOLD_SECS = 7 * 24 * 3600 // undo window before purge (matches gcs's ≥7d soft-delete)
 export const TERMINAL = new Set(["SUCCEEDED", "FAILED", "CANCELLED"])
 
 export interface BatchJob {

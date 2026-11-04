@@ -20,6 +20,10 @@ const row = (o: Partial<UndoRunRow> = {}): UndoRunRow => ({
 })
 
 describe('undoGate — a finished real run, inside its window, not already undone', () => {
+  it('accepts a real run closed from what it wrote, once its window is set', () => {
+    expect(undoGate(row({ undo_deadline: null }), NOW)).toEqual({ ok: false, status: 409, error: 'the run recorded no undo window' })
+    expect(undoGate(row({ finished_ts: NOW - 100, undo_deadline: NOW - 100 + 7 * 86400 }), NOW)).toBeNull()
+  })
   it('refuses each other case with its reason, allows the rest', () => {
     const answer = (r: UndoRunRow | null) => { const g = undoGate(r, NOW); return g ? [g.status, g.error] : 'ok' }
     expect([

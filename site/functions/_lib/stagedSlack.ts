@@ -311,6 +311,17 @@ export function runEvent(r: RunRow, phase: 'dispatched' | 'finished' | 'failed',
   const kind = r.mode === 'dry' ? 'Dry-run' : '*Real deletion*'
   const id = o.siteUrl ? `<${runUrl(o.siteUrl, r.run_id)}|${r.run_id}>` : `\`${r.run_id}\``
   if (phase === 'dispatched') return `${r.mode === 'dry' ? ':test_tube:' : ':rotating_light:'} ${kind} dispatched by ${who(r.actor, o.names)}${o.via ? ` via ${o.via}` : ''} on scan ${r.scan} (${id})`
+  if (phase === 'failed' && o.outcome?.totals) {
+    const verb = o.outcome.attempted ? 'attempted' : 'deleted'
+    const size = `*${fmtBytes(r.deleted_bytes)}* / ${fmtN(r.deleted_objects)} objects`
+    const until = r.undo_deadline ? `; undoable until ${utc(r.undo_deadline)} (www)` : ''
+    const why = o.reason ? ` (\`${o.reason.replace(/`/g, "'").replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')}\`)` : ''
+    if (o.outcome.totals === 'exact') return `:warning: ${kind} ${id} ended unsuccessfully${why}: ${verb} ${size}${until}.${skipsLine(o.outcome)}`
+    const said = o.outcome.totals === 'lower-bound'
+      ? `: ${verb} at least ${size}, from its progress files, which can lag what it did`
+      : `, and what it wrote couldn't be read, so it may have deleted more than its recorded ${size}`
+    return `:warning: ${kind} ${id} ended before recording its end${why}${said}${until}. Undo restores only what its log names.`
+  }
   if (phase === 'failed' && o.reason) return `:x: ${kind} ${id} ended without a result: \`${o.reason.replace(/`/g, "'").replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')}\``
   if (phase === 'failed') return `:x: ${kind} ${id} ended without a result (its Batch job stopped before the run summary); check its logs in www.`
   const skips = skipsLine(o.outcome)

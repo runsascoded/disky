@@ -90,6 +90,75 @@ describe('D1', () => {
         log.mockRestore()
       })
     })
+    describe('a real run with a start row and no end record closes from what it wrote', () => {
+      const id = 'gcs-sweep-real-killed'
+      const opened = async () => {
+        const { db, raw } = await sqliteD1()
+        raw.exec("INSERT INTO plans (id,name,created_by,created_ts) VALUES (1,'review','actor',1)")
+        await db.prepare(`INSERT INTO deletion_runs (run_id,plan_id,${RUN_DIR},scan,head,exec_head,actor,mode,started_ts,log_dir,buckets)
+          VALUES ('r',1,'manifest','scan',0,0,'actor','real',100,?,'b1,b2')`).bind(runDir(CFG, id)).run()
+        const row = () => raw.prepare('SELECT finished_ts,deleted_objects,deleted_bytes,skipped_gone,skipped_overwritten,drift_dirs,undo_deadline,plan_digest FROM deletion_runs').all()
+        return { db, row }
+      }
+      const TOTALS = { deleted_objects: 7, deleted_bytes: 70, skipped_gone: 2, skipped_overwritten: 1, drift_dirs: 0 }
+      const ZEROS = { deleted_objects: 0, deleted_bytes: 0, skipped_gone: 0, skipped_overwritten: 0, drift_dirs: 0 }
+      const WEEK = 7 * 86400
+      const ATTEMPTED = async () => ({ attempted: true, skipped: null, notSwept: [] })
+      it('its progress sums: a lower bound, with an undo window from the job\'s end', async () => {
+        const { db, row } = await opened()
+        const asked: unknown[] = []
+        const totals = async (...args: unknown[]) => { asked.push(args); return { ...TOTALS, exact: false } }
+        const ended = SOON - 600
+        const killed = { ...job(id, 'FAILED', 'D'), updateTime: new Date(ended * 1000).toISOString() }
+        const reason = async () => 'exit 137'
+        expect(await reflectSweepRuns(CFG, db, [killed], SOON, reason, RUN_DIR, ATTEMPTED, totals)).toEqual([
+          { run_id: 'r', ok: false, reason: 'exit 137', outcome: { attempted: true, skipped: null, notSwept: [], totals: 'lower-bound' } },
+        ])
+        expect(asked).toEqual([[id, 'b1,b2']])
+        expect(row()).toEqual([{ finished_ts: ended, ...TOTALS, undo_deadline: ended + WEEK, plan_digest: '' }])
+        expect(await reflectSweepRuns(CFG, db, [killed], SOON + 1, reason, RUN_DIR, ATTEMPTED, totals)).toEqual([])
+        expect(asked).toEqual([[id, 'b1,b2']])
+      })
+      it('its `deleted-summary.json` (the final record failed on a job that succeeded): exact, and an ordinary finish', async () => {
+        const { db, row } = await opened()
+        expect(await reflectSweepRuns(CFG, db, [job(id, 'SUCCEEDED', 'D')], SOON, undefined, RUN_DIR, ATTEMPTED, async () => ({ ...TOTALS, exact: true }))).toEqual([
+          { run_id: 'r', ok: true, outcome: { attempted: true, skipped: null, notSwept: [], totals: 'exact' } },
+        ])
+        expect(row()).toEqual([{ finished_ts: SOON, ...TOTALS, undo_deadline: SOON + WEEK, plan_digest: 'D' }])
+      })
+      it('exact totals on a job that failed: still a failure, reviewed nothing', async () => {
+        const { db, row } = await opened()
+        expect(await reflectSweepRuns(CFG, db, [job(id, 'FAILED', 'D')], SOON, undefined, RUN_DIR, undefined, async () => ({ ...TOTALS, exact: true }))).toEqual([
+          { run_id: 'r', ok: false, outcome: { attempted: false, skipped: null, notSwept: [], totals: 'exact' } },
+        ])
+        expect(row()).toEqual([{ finished_ts: SOON, ...TOTALS, undo_deadline: SOON + WEEK, plan_digest: '' }])
+      })
+      it('a failed read leaves the row open for the next poll; past the retry window it closes, unread, undoable', async () => {
+        const { db, row } = await opened()
+        const killed = { ...job(id, 'FAILED', 'D'), updateTime: new Date(SOON * 1000).toISOString() }
+        const unread = async () => null
+        expect(await reflectSweepRuns(CFG, db, [killed], SOON + 3599, undefined, RUN_DIR, undefined, unread)).toEqual([])
+        expect(row()).toEqual([{ finished_ts: null, ...ZEROS, undo_deadline: null, plan_digest: null }])
+        expect(await reflectSweepRuns(CFG, db, [killed], SOON + 3600, undefined, RUN_DIR, undefined, unread)).toEqual([
+          { run_id: 'r', ok: false, outcome: { attempted: false, skipped: null, notSwept: [], totals: 'unread' } },
+        ])
+        expect(row()).toEqual([{ finished_ts: SOON, ...ZEROS, undo_deadline: SOON + WEEK, plan_digest: '' }])
+      })
+      it('no reader (the store isn\'t configured): closes unread at once, as no retry would help', async () => {
+        const { db, row } = await opened()
+        expect(await reflectSweepRuns(CFG, db, [job(id, 'FAILED', 'D')], SOON, undefined, RUN_DIR)).toEqual([
+          { run_id: 'r', ok: false, outcome: { attempted: false, skipped: null, notSwept: [], totals: 'unread' } },
+        ])
+        expect(row()).toEqual([{ finished_ts: SOON, ...ZEROS, undo_deadline: SOON + WEEK, plan_digest: '' }])
+      })
+      it('a run that recorded its end, or is still running, is never read', async () => {
+        const { db } = await opened()
+        const totals = async () => { throw new Error('nothing to read') }
+        expect(await reflectSweepRuns(CFG, db, [job(id, 'RUNNING', 'D')], SOON, undefined, RUN_DIR, undefined, totals)).toEqual([])
+        await db.prepare('UPDATE deletion_runs SET finished_ts = 500').run()
+        expect(await reflectSweepRuns(CFG, db, [job(id, 'SUCCEEDED', 'D')], SOON, undefined, RUN_DIR, undefined, totals)).toEqual([{ run_id: 'r', ok: true }])
+      })
+    })
     it('a succeeded job has no reason to read', async () => {
       const { db } = await sqliteD1()
       await db.prepare("INSERT INTO plans (id, name, state, created_by, created_ts) VALUES (1, 'Staged', 'open', 'ann@openathena.ai', 1)").run()

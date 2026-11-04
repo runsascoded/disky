@@ -239,6 +239,8 @@ export interface RunOutcome {
   notSwept: string[]
   /** Its `plan-summary.json` couldn't be read, so the other fields say nothing. */
   unread?: boolean
+  /** A real run closed from what it wrote, with no end record (`sweepTotals.ts`): how far its D1 totals go. */
+  totals?: 'lower-bound' | 'exact' | 'unread'
 }
 
 /** Null: nothing to say, the run reads as it always did. */
@@ -252,6 +254,14 @@ export function runOutcome(s: PlanSummaryFile): RunOutcome | null {
 export const NOT_OBSERVABLE = 'Not observable on this run: an XML multi-delete acknowledges every generation it is sent, so a key already gone or overwritten reads the same as one it deleted.'
 export const ATTEMPTED = 'Generation deletes attempted and acknowledged. An XML multi-delete acknowledges every generation it is sent, so this is what was requested, not proof each object was there to delete.'
 export const UNDO_CAVEAT = 'Its log can\'t tell an object this run deleted from one someone else deleted after the scan, so undo can bring those back too.'
+
+export const LOWER_BOUND = 'A lower bound: the run ended before recording its end, so these totals are its progress files\', which can lag what it did.'
+export const UNDO_LOG_ONLY = 'Undo restores only what its log names. A generation in a log part that never uploaded stays deleted unless restored by hand; `sweep undo -B` won\'t reach it either.'
+
+/** A real run closed with no final summary (`sweepTotals.ts`): `deleted-summary.json` is known absent (null, not `undefined`:
+ * still loading, or a run dir this deployment can't read). A failed job whose summary exists has exact totals. */
+export const totalsLowerBound = (r: Pick<DeletionRun, 'mode' | 'finished_ts' | 'plan_digest'>, summary: LogSummaryFile | null | undefined): boolean =>
+  r.mode === 'real' && !!r.finished_ts && r.plan_digest === '' && summary === null
 
 /** What the manifest planned to delete: its total eligible, else the sum of
  * the buckets'. */

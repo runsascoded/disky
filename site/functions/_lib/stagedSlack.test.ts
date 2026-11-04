@@ -89,6 +89,21 @@ describe('run events', () => {
     it('a dry run keeps its wording, with its skips', () => {
       expect(finished({ attempted: true, skipped: SKIPPED, notSwept: [] }, run({}))).toBe(':test_tube: Dry-run `cw-sweep-dry-1` finished: would delete *2.0 TiB* / 1,234 objects (gone since scan: 0, overwritten: 0). Skipped, no generation: *3.0 GiB* / 5,678 objects left in place.')
     })
+    describe('a real run closed from what it wrote', () => {
+      const killed = { ...real, plan_digest: '' }
+      const closed = (totals: RunOutcome['totals'], attempted = true, reason?: string) =>
+        runEvent(killed, 'failed', { reason, outcome: { attempted, skipped: null, notSwept: [], totals } })
+      it('its progress files: at least, and undo restores only what its log names', () => {
+        expect(closed('lower-bound')).toBe(':warning: *Real deletion* `r1` ended before recording its end: attempted at least *2.0 TiB* / 1,234 objects, from its progress files, which can lag what it did; undoable until 2026-09-28 14:13Z (www). Undo restores only what its log names.')
+        expect(closed('lower-bound', false, 'exit `137`')).toBe(":warning: *Real deletion* `r1` ended before recording its end (`exit '137'`): deleted at least *2.0 TiB* / 1,234 objects, from its progress files, which can lag what it did; undoable until 2026-09-28 14:13Z (www). Undo restores only what its log names.")
+      })
+      it('its summary: the totals as they are', () => {
+        expect(closed('exact')).toBe(':warning: *Real deletion* `r1` ended unsuccessfully: attempted *2.0 TiB* / 1,234 objects; undoable until 2026-09-28 14:13Z (www).')
+      })
+      it('nothing readable: says so, and doesn\'t say none', () => {
+        expect(closed('unread')).toBe(":warning: *Real deletion* `r1` ended before recording its end, and what it wrote couldn't be read, so it may have deleted more than its recorded *2.0 TiB* / 1,234 objects; undoable until 2026-09-28 14:13Z (www). Undo restores only what its log names.")
+      })
+    })
     it('a failed run says nothing of an outcome', () => {
       expect(runEvent({ ...real, plan_digest: '' }, 'failed', { outcome: { attempted: true, skipped: SKIPPED, notSwept: ['b1'] } })).toBe(':x: *Real deletion* `r1` ended without a result (its Batch job stopped before the run summary); check its logs in www.')
     })
