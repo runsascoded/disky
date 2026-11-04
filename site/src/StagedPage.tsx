@@ -37,8 +37,8 @@ import { CAPS, useDispatch, useExecJobs, usePrefixHistory, useRunAction, useRunF
 import type { EmptiedBatch, StagedItem } from './plans'
 import { itemsDigest, joinRuns, LIVE_STATES, reusableDryRun, runFilesRel, viewBuckets, viewLive, type ProgressFile } from './runs'
 import { PrefixRecovery } from './PrefixRecovery'
-import { prefixExecution } from './prefixExecution'
-import type { PrefixExecution } from './prefixExecution'
+import { liveTargetOf, prefixExecution } from './prefixExecution'
+import type { PrefixExecution, RunItems } from './prefixExecution'
 import { RunsSection } from './StagedRuns'
 import { idleLabel, idleness, idleSortKey, prefixBucket, readLogged, readThrough } from './readLens'
 import { type PrefixSortKey, type PrefixStat, relAgo, sortPrefixRows, usePrefixes } from './prefixes'
@@ -167,12 +167,13 @@ export function StagedPage() {
     || views.some(v => viewLive(v) || v.ops.some(o => LIVE_STATES.has(o.state)) || (v.run && !v.run.finished_ts && !v.job))
   useEffect(() => setLive(anyLive), [anyLive])
   const history = usePrefixHistory(plan?.id ?? null, anyLive)
-  const progressTargets = views.filter(v => v.run?.mode === 'real' && v.run.plan_id === plan?.id && !v.run.finished_ts && (!v.job || viewLive(v)) && v.run.log_dir)
-    .flatMap(v => viewBuckets(v).map(bucket => ({ bucket, run: v.run!, rel: `${runFilesRel(v.run!.log_dir!)}progress/${bucket}.json` })))
+  const liveRuns = views.filter(v => v.run?.mode === 'real' && v.run.plan_id === plan?.id && !v.run.finished_ts && (!v.job || viewLive(v)) && v.run.log_dir)
+  // Each live run's pinned item set: a row is in a run by this, not by sharing its bucket.
+  const liveItemsQs = useRunFiles<RunItems>(liveRuns.map(v => `${runFilesRel(v.run!.log_dir!)}plan.json`), false)
+  const progressTargets = liveRuns.flatMap((v, i) => viewBuckets(v).map(bucket => ({ bucket, run: v.run!, items: liveItemsQs[i]?.data, rel: `${runFilesRel(v.run!.log_dir!)}progress/${bucket}.json` })))
   const progressQs = useRunFiles<ProgressFile>(progressTargets.map(t => t.rel), anyLive)
   const rowExecution = (r: Row) => {
-    const bucket = prefixToPath(r.prefix).split('/')[0]
-    const ix = progressTargets.findIndex(t => t.bucket === bucket && t.run.started_ts >= r.added_ts)
+    const ix = liveTargetOf(r.prefix, r.added_ts, progressTargets)
     const progress = ix >= 0 ? progressQs[ix]?.data : null
     return prefixExecution(r.prefix, history.data?.bands ?? [], progress ? { runId: progressTargets[ix].run.run_id, progress } : undefined, Date.now() / 1000)
   }
