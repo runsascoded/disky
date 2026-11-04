@@ -8,13 +8,15 @@ import { cardSvg, type CardData } from './card.js'
 import { mapCard, type Site } from './data.js'
 import { stagedImageVersion } from '../stagedSlack.js'
 import { assignmentsCard, stagedCard, userCard, usersCard } from './pages.js'
+import { runCardSvg, runImagePath, runMaxAge } from './run.js'
+import { runAt, runShapeAt } from './runData.js'
 import { ensureWasm, FONT_FILES, svgToPng } from './render.js'
 import { KIND_SECTION, pageView, storeOfPath, type OgKind, type PageView } from './routes.js'
 import { imagePath, ogKey, resolveImage, type OgTier } from './sign.js'
 import { credLive, pageTier } from './tier.js'
 import { imageParams, splitImageParams } from './cred.js'
 import { warmUrls } from './warm.js'
-import { anonymousPolicy, cardTier, genericCard, genericImageOf, genericMeta, RENDER_VERSION, type PolicyEnv } from './policy.js'
+import { anonymousPolicy, cardTier, genericCard, genericImageOf, genericImagePath, genericMeta, RENDER_VERSION, type PolicyEnv } from './policy.js'
 import { BUILD } from '../build.js'
 
 import { canonId, loadRegistry } from '../identity.js'
@@ -316,10 +318,39 @@ export async function serveCard(ctx: { request: Request; env: OgEnv; waitUntil?:
 }
 
 async function renderCard(env: OgEnv, url: URL, data: CardData): Promise<Response> {
+  return renderSvg(env, url, cardSvg(data), 86400)
+}
+
+async function renderSvg(env: OgEnv, url: URL, svg: string, maxAge: number): Promise<Response> {
   await ensureWasm(RESVG)
-  return new Response(svgToPng(cardSvg(data), await fonts(env, url.origin)), {
-    headers: { 'content-type': 'image/png', 'cache-control': 'public, max-age=86400' },
+  return new Response(svgToPng(svg, await fonts(env, url.origin)), {
+    headers: { 'content-type': 'image/png', 'cache-control': `public, max-age=${maxAge}` },
   })
+}
+
+/** `GET /og/run.png?id=<run>&v=<version>`: a deletion run's card, counts only (`run.ts`), for any fetcher; an unknown id
+ * gets the deployment's generic image. `v` only makes a new URL for a re-unfurl: the card and its cache key follow
+ * the version the data says now, so a made-up `v` costs a D1 read, never a render. */
+export async function serveRunCard(ctx: { request: Request; env: OgEnv; waitUntil?: (p: Promise<unknown>) => void }): Promise<Response> {
+  const url = new URL(ctx.request.url)
+  const t = now()
+  const at = await runAt(ctx.env, url.searchParams.get('id') ?? '', t)
+  if (!at) return serveCard({ ...ctx, request: new Request(url.origin + genericImagePath, { signal: ctx.request.signal }) })
+  const cacheKey = new Request(`${url.origin}${runImagePath(at)}&bld=${BUILD.sha}`)
+  const hit = await caches.default.match(cacheKey)
+  if (hit) return hit
+  const { shape, complete } = await runShapeAt(ctx.env, url.origin, at, t)
+  const res = await renderSvg(ctx.env, url, runCardSvg(shape, siteOf(ctx.env).name), runMaxAge(at.run))
+  res.headers.set('x-og-tier', 'anon')
+  if (!complete) {
+    // A store read failed: drawn, but never cached, so the next fetch retries.
+    res.headers.set('cache-control', 'no-store')
+    return res
+  }
+  const put = caches.default.put(cacheKey, res.clone())
+  if (ctx.waitUntil) ctx.waitUntil(put)
+  else await put
+  return res
 }
 
 /** A rendered card as the colo cache holds it: a year. Its key names everything the image depends on (the view, the
