@@ -2990,19 +2990,38 @@ function putColoIx(t: IndexHandle, rg: number, buf: ArrayBuffer): void {
   coloPuts.add(p)
 }
 
-/** The groups a level read of `dirs` decodes at most, and the rows its pages hold at most (`readFits`' bounds). */
+/** The groups a level read of `dirs` decodes at most (`readFits`' bound). */
 const LEVEL_MAX_GROUPS = 250
-const LEVEL_MAX_ROWS = 700_000
+/** Cloudflare's per-isolate memory limit: past it, a request dies as an uncatchable 1102. */
+const WORKER_MEMORY = 128 * 2 ** 20
+/** What one request's level reads may charge, summed over its rounds (`LevelSpend`): three quarters of the isolate, the
+ *  rest its code, caches and response. A sum, not a per-read cap, so it bounds the request's decoding CPU too. A knob
+ *  object: tests shrink it. */
+export const LEVEL_BUDGET = { bytes: WORKER_MEMORY * 3 / 4 }
+/** V8 heap bytes a decoded level row costs (13 fields, boxed numbers, a 31-character name), measured by heap delta over
+ *  300K rows of the reader's shape. Its consequences match the isolate's limit: 352K rows passed live, ~550K died. */
+const LEVEL_ROW_HEAP = 264
+/** A request's remaining `LEVEL_BUDGET`, charged by each `readLevel` before it fetches. */
+export type LevelSpend = { left: number }
+
+/** What decoding a group's kept rows costs: each row's heap, and its share of the group's compressed bytes (what's
+ *  fetched for it; the footer sidecar's chunk `size`), so wider rows charge more. */
+function levelCharge(p: { rg: { num_rows: bigint; columns: IndexedChunk[] }; ranges: [number, number][] }): number {
+  const rows = p.ranges.reduce((x, [a, b]) => x + b - a, 0)
+  const fetched = p.rg.columns.reduce((x, c) => x + Number((c.meta_data as unknown as { total_compressed_size: bigint | number }).total_compressed_size), 0)
+  return rows * (LEVEL_ROW_HEAP + fetched / Number(p.rg.num_rows))
+}
 
 /** Every transition in `(d1, d2]` under each of `dirs` (their children's, and their own as `name` ''), from every tier:
  *  each tier's groups whose bounds can hold one (sidecar), then two waves over all tiers at once — the kept groups' page
  *  indexes, then the pages that can hold one — each wave's merged runs (`planRuns`) `RUN_READS` at a time on one limiter; an
  *  index held (`levelPageIxs`) leaves the first wave. Server-Timing: `lv-index` / `lv-data` (ms, `-gets`, `-rounds`,
  *  `-bytes`), `lv-index-{held,colo,joined,miss}`, `lv-groups`, `lv-pages`, `lv-rows`. Throws
- *  "query too wide" past `LEVEL_MAX_GROUPS` groups or `LEVEL_MAX_ROWS` page rows. `lap`: the request's phases
+ *  "query too wide" past `LEVEL_MAX_GROUPS` groups, or when the rows its pages hold and their bytes would cost more
+ *  than `spend` has left (`lv-charge`): before any data is fetched or decoded, so a read that doesn't fit never takes the isolate down. `lap`: the request's phases
  *  (`serverTiming`'s), with a clock sync (`syncClock`) after the read's CPU-only stretches so they're counted as theirs;
  *  also `lv-plan-bounds` / `lv-plan-json` (tier-ms, overlapping), `fgroups`, `footer`, `fdoc-r2`. */
-export async function readLevel(lh: LevelHandle, dirs: string[], trace?: Trace, lap?: (name: string) => void): Promise<LevelRec[]> {
+export async function readLevel(lh: LevelHandle, dirs: string[], spend: LevelSpend, trace?: Trace, lap?: (name: string) => void): Promise<LevelRec[]> {
   const { d1, d2 } = lh
   const keys = dirs.map(p => ({ d: p === '' ? 0 : p.split('/').length, p }))
   const want = new Set(keys.map(k => `${k.d}\0${k.p}`))
@@ -3102,8 +3121,12 @@ export async function readLevel(lh: LevelHandle, dirs: string[], trace?: Trace, 
     await syncClock()
     lap('pages')
   }
-  if (rows > LEVEL_MAX_ROWS || !planned.length) puts.splice(0).forEach(put => put())
-  if (rows > LEVEL_MAX_ROWS) throw new Error(`query too wide: ${rows} level rows`)
+  const charge = planned.reduce((m, p) => m + levelCharge(p), 0)
+  trace?.('lv-charge', Math.round(charge))
+  const over = charge > spend.left
+  if (over || !planned.length) puts.splice(0).forEach(put => put())
+  if (over) throw new Error(`query too wide: its level rows would cost ${Math.round(charge / 2 ** 20)} MiB, ${Math.round(spend.left / 2 ** 20)} left`)
+  spend.left -= charge
   if (!planned.length) return []
   const dataFiles = await wave('lv-data', byTier(planned as Cand[], c => {
     const p = c as Planned
