@@ -5,7 +5,7 @@ import { onRequest as plansRoute } from '../api/plans/[[path]]'
 import { sweepJobView } from '../api/sweep/jobs'
 import { onRequestPost as undoRoute } from '../api/sweep/undo'
 import { emptiedBatches, stageItems, prefixShape, snapshotPlanBuckets, unstageDeleted } from './plans'
-import type { SweepBatchJob } from './sweepReflect'
+import { reflectSweepRuns, type SweepBatchJob } from './sweepReflect'
 import { runBuckets, undoGate, type UndoRunRow } from './sweepUndo'
 import { RUN_DIR, sqliteD1 } from './testD1'
 import { fakeR2, softDeleteDoc } from './testR2'
@@ -164,11 +164,40 @@ describe('D1', () => {
         expect(await undoRoute({ request: post({ run_id: RUN }), env: { ...await env(db), ...snapshot(off) } } as never).then(answer)).toEqual([200, {
           bulk: false, job_id: 'gcs-undo-19700112-134640z', target: RUN, region: 'us-east1', by: 'dev@example.test',
         }])
-        expect(await state(db)).toEqual({ undo_state: 'partial', undo_deadline: NOW + 100 })
+        expect(await state(db)).toEqual({ undo_state: 'none', undo_deadline: NOW + 100 })
       })
     })
 
-    it('submits `gcs-undo-<stamp>z` on the dispatch\'s spec, in the run\'s bucket region, and marks the row partial', async () => {
+    describe('the row says nothing of an undo until its job has restored something', () => {
+      const submitted = async (before: string) => {
+        vi.useFakeTimers({ now: NOW * 1000, toFake: ['Date'] })
+        vi.stubGlobal('fetch', vi.fn(async (url: string) => new Response(url === 'https://oauth2.googleapis.com/token' ? JSON.stringify({ access_token: 'tok' }) : '{}')))
+        const { db } = await gcsDb()
+        await db.prepare('UPDATE deletion_runs SET undo_state = ? WHERE run_id = ?').bind(before, RUN).run()
+        const submit = await undoRoute({ request: post({ run_id: RUN }), env: await env(db) } as never)
+        const read = () => db.prepare(`SELECT r.undo_state, (SELECT SUM(undone_objects) FROM deletion_bands b WHERE b.run_id = r.run_id) AS undone, (SELECT COUNT(*) FROM admin_edits WHERE tbl = 'deletion_runs' AND pk = r.run_id) AS audited
+          FROM deletion_runs r WHERE r.run_id = ?`).bind(RUN).first()
+        return { db, status: submit.status, read }
+      }
+      // What Batch lists of an undo job that ended without recording: refused (soft delete off now, asked of GCS), killed, or an image that never ran.
+      const undoJob = (state: string): SweepBatchJob => ({
+        name: 'projects/my-project/locations/us-east1/jobs/gcs-undo-19700112-134640z', uid: 'uid-undo', createTime: '1970-01-12T13:46:40Z', region: 'us-east1',
+        status: { state }, taskGroups: [{ taskSpec: { environment: { variables: { OP: 'undo', TARGET_RUN: RUN } } } }],
+      })
+      it.each<[string, string, string]>([
+        ['a run not undone, its job refused or killed before restoring: still not undone', 'none', 'FAILED'],
+        ['…or cancelled', 'none', 'CANCELLED'],
+        ['…or still running', 'none', 'RUNNING'],
+        ['a run an earlier undo left partly undone: still that', 'partial', 'FAILED'],
+      ])('%s', async (_, before, jobState) => {
+        const { db, status, read } = await submitted(before)
+        expect([status, await read()]).toEqual([200, { undo_state: before, undone: 0, audited: 1 }])
+        expect(await reflectSweepRuns({ dataBucket: 'my-data' }, db, [undoJob(jobState)], NOW + 60, undefined, RUN_DIR)).toEqual([])
+        expect(await read()).toEqual({ undo_state: before, undone: 0, audited: 1 })
+      })
+    })
+
+    it('submits `gcs-undo-<stamp>z` on the dispatch\'s spec, in the run\'s bucket region, and leaves the row\'s undo state to the job', async () => {
       vi.useFakeTimers({ now: NOW * 1000, toFake: ['Date'] })
       const calls: { url: string; body: unknown }[] = []
       vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
@@ -213,7 +242,7 @@ describe('D1', () => {
           logsPolicy: { destination: 'CLOUD_LOGGING' },
         },
       }])
-      expect(await db.prepare('SELECT run_id, undo_state FROM deletion_runs').all().then(r => r.results)).toEqual([{ run_id: RUN, undo_state: 'partial' }])
+      expect(await db.prepare('SELECT run_id, undo_state FROM deletion_runs').all().then(r => r.results)).toEqual([{ run_id: RUN, undo_state: 'none' }])
     })
 
     it('a failed submit leaves the row as it was and says why', async () => {

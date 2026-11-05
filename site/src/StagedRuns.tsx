@@ -241,7 +241,7 @@ export function RunsSection({ runs, jobs, configured, jobsError, admin, busy, ac
                       {skips && skips.objects > 0 && <Tooltip content={`${fmtBytes(skips.bytes)} in objects the scan's listing has no generation for. Left in place, and logged per object as skipped_no_generation; not counted in deleted.`}><span className="tag">{fmtN(skips.objects)} skipped: no generation</span></Tooltip>}
                       {ctl.undoing && <span className="tag">undoing</span>}
                       {r?.undo_state === 'full' && <span className="tag">undone</span>}
-                      {r?.undo_state === 'partial' && !ctl.undoing && <Tooltip content="An undo ran (or was dispatched) but not every deleted object is live again; undo again to retry the rest."><span className="tag">partly undone</span></Tooltip>}
+                      {r?.undo_state === 'partial' && !ctl.undoing && <Tooltip content="Some of what this run deleted is live again, not all of it: an undo restored part, or found it live. Undo again to retry the rest."><span className="tag">partly undone</span></Tooltip>}
                       {r?.purge_state === 'done' && <span className="tag">purged</span>}
                     </td>
                     <td>{CAPS.runFiles && r && <RunProgress id={r.run_id} live={live} compact fmtBytes={fmtBytes} lifetime={secs != null ? { objects: r.finished_ts ? r.deleted_objects : p?.deletes ?? 0, seconds: secs } : undefined} />}</td>

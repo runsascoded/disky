@@ -2420,13 +2420,18 @@ def sweep_undo(only_buckets: tuple[str, ...], bulk: bool, dry_run: bool, bulk_op
     Refuses a bucket whose soft delete is off now (asked of GCS: it restores
     nothing from one), naming the run's buckets that still have it for `-b`.
 
+    The run's row is written as restores settle (`sweep_exec.UndoRecord`):
+    `undone_objects` per band, `undo_state` `partial` from the first name
+    live again, `full` once all are. An undo refused, or dead before it
+    restored anything, leaves the row as it was.
+
     `-B` restores per directory with GCS bulk restore, filtered to the run's
     deletion window (the D1 row's started/finished times, else the log dir's
     final `progress/<bucket>.json`); a dir goes bulk only when every object
     soft-deleted under it in that window is in the run's log (see
     `sweep_exec.undo_run`)."""
     from .index_footer import _creds, _d1_query, _q
-    from .sweep_exec import record_undo, undo_run
+    from .sweep_exec import UndoRecord, undo_run
 
     row = None
     try:
@@ -2461,13 +2466,16 @@ def sweep_undo(only_buckets: tuple[str, ...], bulk: bool, dry_run: bool, bulk_op
         err(f"undo {row['run_id']}: {row['deleted_objects']:,} deleted objects, undo_state={row['undo_state']}, "
             f"window until {dt.datetime.fromtimestamp(deadline, dt.timezone.utc):%Y-%m-%d %H:%MZ}" if deadline else f"undo {row['run_id']}")
     window = (int(row["started_ts"]), int(row["finished_ts"])) if row is not None and row.get("started_ts") and row.get("finished_ts") else None
+    # Written as restores settle, and only then: a refusal below, or a death before the first restore, leaves the row as it is.
+    record = UndoRecord(row["run_id"]) if row is not None and not no_record and not dry_run else None
     summary = undo_run(
         log_dir, only_buckets=only_buckets, prefixes=prefixes, dry_run=dry_run, workers=workers, deadline=deadline,
-        bulk=bulk, window=window, bulk_ops=bulk_ops,
+        bulk=bulk, window=window, bulk_ops=bulk_ops, progress=record,
     )
-    if row is not None and not no_record and not dry_run:
+    if record is not None:
         try:
-            err(f"recorded undo_state={record_undo(row['run_id'], summary, int(row['deleted_objects'] or 0))}")
+            state = record.finish(summary, int(row["deleted_objects"] or 0))
+            err(f"recorded undo_state={state}" if state else f"nothing this run deleted is live again: undo_state stays {row['undo_state']}")
         except Exception as e:  # recording must never mask a completed undo
             err(f"WARN: undo record failed: {e}")
     _hard_exit()

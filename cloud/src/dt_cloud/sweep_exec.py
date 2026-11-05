@@ -758,6 +758,11 @@ BULK_SAMPLE = 20  # fallback dirs named in the summary
 #: GCS glob metacharacters: a dir containing one can't be matched literally by
 #: `<dir>/**`, so it always takes the per-object path.
 GLOB_META = frozenset("*?[]{}\\,")
+#: Per-object restores between two reports to `undo_run`'s `progress`: the most a killed per-object undo can have restored
+#: and not said. (A bulk undo's bucket is reported once its operations are verified.)
+UNDO_PROGRESS_ROWS = 10_000
+#: The decisions that leave a deleted name live.
+LIVE_AGAIN = ("restored", "bulk_restored", "already_live")
 
 
 def _rfc3339(ts: int) -> str:
@@ -860,6 +865,7 @@ def undo_run(
     window: tuple[int, int] | None = None,
     bulk_ops: int = 4,
     globs_per_op: int = BULK_GLOBS_PER_OP,
+    progress: Callable[[dict[str, Counter]], None] | None = None,
 ) -> dict:
     """Restore what a real run deleted: every `decision == 'delete'` row of its
     `deleted/` logs (no final summary needed: a killed run's parts are enough,
@@ -873,6 +879,12 @@ def undo_run(
     beside the run's own logs; returns the summary. `deadline` (the run's
     `undo_deadline`) refuses a late undo up front — GCS would just answer 404
     per object, slowly.
+
+    `progress` is told what has settled as it settles (`{band: decisions}`: every
+    `UNDO_PROGRESS_ROWS` per-object restores, and a bucket's bulk rows once
+    verified), so a caller's record (`UndoRecord`) holds what was restored even
+    if this never returns. Nothing is reported before a restore has an answer,
+    or on a dry run.
 
     On an XML run a logged `delete` means the generation was attempted, not that
     this run removed it (GCS replies `Deleted` either way), so undo can also bring
@@ -1026,12 +1038,21 @@ def undo_run(
             except Exception as e:  # keep going: the log names every failure, the summary counts them
                 return {**base(row), "decision": "failed", "error": f"{type(e).__name__}: {e}"[:500]}
 
+        def settled(done: list[dict]) -> None:
+            if progress is None or dry_run or not done:
+                return
+            by_band: dict[str, Counter] = {}
+            for r in done:
+                by_band.setdefault(band_of(bucket, r["dir"], r["name"]), Counter())[r["decision"]] += 1
+            progress(by_band)
+
         rows: list[dict] = []
         bulk_info = None
         if bulk:
             per_object, rows, bulk_info = _undo_bulk(
                 client, bucket, todo, windows[bucket], dry_run, workers, bulk_ops, globs_per_op, base,
             )
+            settled(rows)
             if bulk_info["ops"]:
                 bpath = f"{ppath}/restored/{bucket}-{stamp}-bulk.json"
                 fs.makedirs(bpath.rsplit("/", 1)[0], exist_ok=True)
@@ -1039,7 +1060,10 @@ def undo_run(
                     json.dump(bulk_info["ops"], fh, indent=2)
             todo = per_object
         with ThreadPoolExecutor(max_workers=workers) as pool:
-            rows.extend(pool.map(one, todo))
+            for i in range(0, len(todo), UNDO_PROGRESS_ROWS):
+                part = list(pool.map(one, todo[i:i + UNDO_PROGRESS_ROWS]))
+                rows.extend(part)
+                settled(part)
         counts: Counter = Counter(r["decision"] for r in rows)
         bands: dict[str, Counter] = {}
         restored_b = 0
@@ -1178,31 +1202,61 @@ def _undo_bulk(
     return per_object, rows, info
 
 
-def record_undo(run_id: str, summary: dict, deleted_objects: int) -> str:
-    """Persist an undo to D1: `deletion_runs.undo_state` ('full' when every
-    object the run deleted is live again — restored now (per object or in
-    bulk) or already — else 'partial') and `deletion_bands.undone_objects`
-    per band."""
-    from .index_footer import _creds, _d1_query, _q
+class UndoRecord:
+    """An undo's record in D1, written as the undo goes (`undo_run`'s `progress`), so a run's row says only what an undo
+    has seen: `deletion_bands.undone_objects` per band as restores settle, and `deletion_runs.undo_state` `partial` from
+    the first deleted name found live again. `finish` settles the state: `full` when every object the run deleted is
+    live again (restored now, per object or in bulk, or already), `partial` when some are, and as it was when none is.
 
-    tok, acct = _creds()
-    live = sum(
-        sum(b["decisions"].get(k, 0) for k in ("restored", "bulk_restored", "already_live"))
-        for b in summary["buckets"].values()
-    )
-    # A partial log can't say everything is back, however many of its rows are.
-    state = "full" if deleted_objects and live >= deleted_objects and not summary.get("log_partial") else "partial"
-    stmts = [f"UPDATE deletion_runs SET undo_state = {_q(state)} WHERE run_id = {_q(run_id)}"]
-    for b in summary["buckets"].values():
-        for prefix, c in b["bands"].items():
-            undone = c.get("restored", 0) + c.get("bulk_restored", 0)
-            if undone:
-                stmts.append(
-                    f"UPDATE deletion_bands SET undone_objects = undone_objects + {int(undone)} "
-                    f"WHERE run_id = {_q(run_id)} AND prefix = {_q(prefix)}"
-                )
-    _d1_query("; ".join(stmts), acct, tok)
-    return state
+    Nothing is written before a restore has an answer, so an undo refused up front, or dead before its first restore,
+    leaves the row untouched; one that dies part way leaves `partial` and the counts it had reported. Those are a lower
+    bound: short by the per-object restores in flight (at most `UNDO_PROGRESS_ROWS`), and by a bucket's bulk operations
+    if it died before verifying them. The names are live either way, and the next undo finds them so (`already_live`,
+    which `undone_objects` doesn't count). `full` is never taken back to `partial`: an undo of some buckets or prefixes
+    covers less than the run. A write D1 refuses is kept, and goes with the next report."""
+
+    def __init__(self, run_id: str) -> None:
+        self.run_id = run_id
+        #: Deleted names found live again so far.
+        self.live = 0
+        #: Restores not yet written, by band.
+        self.pending: Counter = Counter()
+        #: Has `partial` been written?
+        self.marked = False
+
+    def __call__(self, bands: dict[str, Counter]) -> None:
+        for prefix, c in bands.items():
+            self.live += sum(c.get(k, 0) for k in LIVE_AGAIN)
+            self.pending[prefix] += c.get("restored", 0) + c.get("bulk_restored", 0)
+        try:
+            self._write("partial" if self.live and not self.marked else None)
+        except Exception as e:  # the restores stand; so does what is still to be said of them
+            err(f"WARN: undo progress not recorded ({e}); it goes with the next report")
+
+    def _write(self, state: str | None) -> None:
+        from .index_footer import _creds, _d1_query, _q
+
+        stmts = []
+        if state:
+            stmts.append(f"UPDATE deletion_runs SET undo_state = {_q(state)} WHERE run_id = {_q(self.run_id)}" + ("" if state == "full" else " AND undo_state != 'full'"))
+        stmts += [
+            f"UPDATE deletion_bands SET undone_objects = undone_objects + {int(n)} WHERE run_id = {_q(self.run_id)} AND prefix = {_q(prefix)}"
+            for prefix, n in self.pending.items() if n
+        ]
+        if not stmts:
+            return
+        tok, acct = _creds()
+        _d1_query("; ".join(stmts), acct, tok)
+        self.pending.clear()
+        self.marked = self.marked or state is not None
+
+    def finish(self, summary: dict, deleted_objects: int) -> str | None:
+        """Settle the state once the undo has run to its end; returns it (None: nothing is live again, and the row's
+        state stays as it was)."""
+        # A partial log can't say everything is back, however many of its rows are.
+        state = "full" if deleted_objects and self.live >= deleted_objects and not summary.get("log_partial") else "partial" if self.live else None
+        self._write(state)
+        return state
 
 
 def run_id_for(plan: dict, started_ts: int) -> str:
