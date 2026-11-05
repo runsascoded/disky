@@ -22,6 +22,7 @@ def reviewed_job_spec(
     bucket_workers: int = 6,
     exclude_runs: tuple[str, ...] = (),
     pacing: str = "guided",
+    min_soft_delete_days: int | None = None,
 ) -> dict:
     """Reuse deployment credentials/resources, not an old job's identity."""
     import re
@@ -40,6 +41,8 @@ def reviewed_job_spec(
         command.extend(["-x", run])
     for bucket in buckets:
         command.extend(["-b", bucket])
+    if min_soft_delete_days is not None:
+        command.extend(["-s", str(min_soft_delete_days)])
     if for_real:
         command.append("--for-real")
     command.append(source)

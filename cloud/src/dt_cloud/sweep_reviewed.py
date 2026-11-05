@@ -39,7 +39,7 @@ import pyarrow.parquet as pq
 
 from .staged_plan import StagedPlan, load_plan
 from .sweep_batch import _parts
-from .sweep_exec import PROGRESS_EVERY, _missing_perms, _soft_delete_days, delete_batch
+from .sweep_exec import MIN_SOFT_DELETE_DAYS, PROGRESS_EVERY, _missing_perms, _soft_delete_days, delete_batch
 from .sweep_manifest import ManifestProgress
 from .sweep_journal import DecisionJournal
 from .sweep_xml import XmlDeleter
@@ -416,6 +416,7 @@ def execute_reviewed(
     on_progress: Any = None,
     pacing: str = "guided",
     from_manifest: bool = False,
+    min_soft_delete_days: int = MIN_SOFT_DELETE_DAYS,
 ) -> dict:
     """No re-list/drift audit: delete only generations the source names: those
     observed by the DR, or, `from_manifest` (`execute_manifest`), those the
@@ -481,11 +482,11 @@ def execute_reviewed(
             days = verified_soft_delete_days
             missing = [permission for permission in missing if permission != "storage.buckets.get"]
         # A bucket of skips deletes nothing, so its guards don't hold back the buckets that delete.
-        if for_real and (missing or days < 7) and dry["buckets"][bucket]["decisions"].get("delete", 0):
+        if for_real and (missing or days < min_soft_delete_days) and dry["buckets"][bucket]["decisions"].get("delete", 0):
             raise ValueError(f"{bucket}: permissions/soft-delete guard refused reviewed deletion")
         guards[bucket] = {"missing_perms": missing, "soft_delete_days": days}
     mode = "deleted" if for_real else "would-delete"
-    summary = {"plan": out, "for_real": for_real, "diagnostic": not for_real, "drift": f"{kind}-generations-no-relist", "backend": backend, "pacing": pacing, "bucket_workers": bucket_workers, f"{kind}_source": source, "delete_count_semantics": "acknowledged-generation-deletes", "buckets": {}, **skipped_totals(selected)}
+    summary = {"plan": out, "for_real": for_real, "min_soft_delete_days": min_soft_delete_days, "diagnostic": not for_real, "drift": f"{kind}-generations-no-relist", "backend": backend, "pacing": pacing, "bucket_workers": bucket_workers, f"{kind}_source": source, "delete_count_semantics": "acknowledged-generation-deletes", "buckets": {}, **skipped_totals(selected)}
     if resume is not None:
         summary["resume_runs"] = list(exclude_runs)
     fs.makedirs(path, exist_ok=True)
@@ -497,7 +498,7 @@ def execute_reviewed(
         with fs.open(f"{path}/resume-source.json", "w") as fh:
             json.dump(resume, fh)
     if on_prepared is not None:
-        on_prepared(plan)
+        on_prepared(plan, min((int(guard["soft_delete_days"]) for guard in guards.values()), default=None))
     stop = stop or threading.Event()
     slots = threading.BoundedSemaphore(workers * 2)
     batch_size = 1000 if backend == "xml" else 100

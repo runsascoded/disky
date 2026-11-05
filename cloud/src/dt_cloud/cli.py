@@ -22,7 +22,7 @@ from typing import Any
 
 import duckdb
 import pandas as pd
-from click import Choice, Context, File, UsageError, argument, group, option, pass_context
+from click import Choice, Context, File, IntRange, UsageError, argument, group, option, pass_context
 
 from .identity import IDENTITIES_ENV, load_identities
 from .deploy import data_bucket, layer2_prefix as resolve_layer2, site_token, site_url as resolve_site_url
@@ -1973,18 +1973,19 @@ def sweep_reuse_manifest(
 @option("-b", "--bucket", "only_buckets", multiple=True, help="Only these buckets")
 @option("-D", "--drift", type=Choice(["skip", "proceed"]), default="skip", help="Dirs that gained new keys since the scan: skip (default) or proceed (manifest keys only — new keys always survive)")
 @option("-m", "--max-root-objects", default=250_000, type=int, help="Split listing roots above this many manifest objects when safe")
+@option("-s", "--min-soft-delete-days", default=7, type=IntRange(0, 90), help="Refuse --for-real on a bucket retaining soft deletes for less; 0 allows soft delete off, whose deletes are permanent")
 @option("-w", "--workers", default=0, type=int, help="Concurrent directory re-lists (default 2 × CPUs, ≤ 16)")
 @option("-W", "--delete-workers", default=32, type=int, help="Concurrent delete batches (100 objects each), shared by every re-list")
 @option("--for-real", is_flag=True, help="Actually delete (default: dry-run writes would-delete/)")
 @option("--no-record", is_flag=True, help="Skip the D1 deletion_runs/bands record (recorded by default)")
 @argument("plan_dir")
 @_failure_recorded("execute", "plan_dir")
-def sweep_execute(only_buckets: tuple[str, ...], drift: str, max_root_objects: int, delete_workers: int, workers: int, for_real: bool, no_record: bool, plan_dir: str) -> None:
+def sweep_execute(only_buckets: tuple[str, ...], drift: str, max_root_objects: int, min_soft_delete_days: int, delete_workers: int, workers: int, for_real: bool, no_record: bool, plan_dir: str) -> None:
     """Execute (default: DRY-RUN) a `sweep manifest` plan: fresh re-list per
     eligible dir, generation-matched deletes of manifest∩live keys whose
     timeCreated is unchanged. The plan is the whole intent: nothing is
-    re-classified. `--for-real` additionally requires ≥7d soft delete on every
-    bucket."""
+    re-classified. `--for-real` additionally requires `-s` days (default 7) of
+    soft delete on every bucket; the run records the minimum it ran under."""
     import fsspec
 
     from .sweep_exec import DELETE_ATTEMPTS, execute_plan
@@ -2001,7 +2002,7 @@ def sweep_execute(only_buckets: tuple[str, ...], drift: str, max_root_objects: i
         # The run's D1 row goes in now (finished NULL) so /staged lists it while
         # the re-list runs — hours, on the big bands; completed at the end.
         from .sweep_exec import record_run_start
-        progress_run_id = _start_recorded(lambda: record_run_start(plan_summary, plan_dir, actor=actor, started_ts=started, for_real=for_real, buckets=only_buckets), for_real)
+        progress_run_id = _start_recorded(lambda: record_run_start(plan_summary, plan_dir, actor=actor, started_ts=started, for_real=for_real, buckets=only_buckets, min_soft_delete_days=min_soft_delete_days), for_real)
         if progress_run_id is not None:
             err(f"recorded deletion run {progress_run_id} (in progress)")
     # A clean stop: `sweep stop PLAN` drops PLAN/STOP (polled every 10 s), or
@@ -2028,6 +2029,7 @@ def sweep_execute(only_buckets: tuple[str, ...], drift: str, max_root_objects: i
         workers=workers,
         delete_workers=delete_workers,
         max_root_objects=max_root_objects,
+        min_soft_delete_days=min_soft_delete_days,
         stop=stop,
         on_progress=progress if not no_record else None,
     )
@@ -2038,10 +2040,10 @@ def sweep_execute(only_buckets: tuple[str, ...], drift: str, max_root_objects: i
     if not no_record:
         from .sweep_exec import record_run
         # The undo deadline follows the narrowest window actually measured on
-        # the run's buckets (the guard already refused anything under 7 d).
+        # the run's buckets (the guard already refused anything under `-s`); none at 0.
         windows = [int(v["soft_delete_days"]) for v in summary["buckets"].values() if "soft_delete_days" in v]
         try:
-            run_id = record_run(summary, summary["_plan"], actor=actor, started_ts=started, finished_ts=finished, soft_delete_days=min(windows) if windows else 7)
+            run_id = record_run(summary, summary["_plan"], actor=actor, started_ts=started, finished_ts=finished, soft_delete_days=min(windows) if windows else min_soft_delete_days, min_soft_delete_days=min_soft_delete_days)
             err(f"recorded deletion run {run_id}")
         except Exception as e:  # recording must never mask a completed run
             err(f"WARN: deletion-run record failed: {e}")
@@ -2191,6 +2193,7 @@ def _execute_generations(
     out: str,
     plan_path: str,
     max_rate: int,
+    min_soft_delete_days: int,
     work_dir: str,
     exclude_runs: tuple[str, ...],
     for_real: bool,
@@ -2210,10 +2213,10 @@ def _execute_generations(
 
     progress_run_id = None
 
-    def prepared(plan: dict) -> None:
+    def prepared(plan: dict, soft_delete_days: int | None) -> None:
         nonlocal progress_run_id
         if for_real and not no_record:
-            progress_run_id = _start_recorded(lambda: record_run_start(plan, out, actor, started, for_real, only_buckets), for_real)
+            progress_run_id = _start_recorded(lambda: record_run_start(plan, out, actor, started, for_real, only_buckets, min_soft_delete_days, soft_delete_days), for_real)
 
     def progress(snapshot: dict) -> None:
         from .sweep_progress import sample, write_samples
@@ -2221,11 +2224,11 @@ def _execute_generations(
         if progress_run_id is not None:
             write_samples(progress_run_id, [sample(snapshot)])
 
-    summary = execute(source, plan_path, out, work_dir, for_real, only_buckets, backend, workers, max_rate, stop, on_prepared=prepared, bucket_workers=bucket_workers, exclude_runs=exclude_runs, on_progress=progress if not no_record else None, pacing=pacing)
+    summary = execute(source, plan_path, out, work_dir, for_real, only_buckets, backend, workers, max_rate, stop, on_prepared=prepared, bucket_workers=bucket_workers, exclude_runs=exclude_runs, on_progress=progress if not no_record else None, pacing=pacing, min_soft_delete_days=min_soft_delete_days)
     if for_real and not no_record:
         windows = [int(entry["soft_delete_days"]) for entry in summary["buckets"].values()]
         try:
-            record_run(summary, summary["_plan"], actor, started, int(dt.datetime.now(dt.timezone.utc).timestamp()), min(windows) if windows else 7)
+            record_run(summary, summary["_plan"], actor, started, int(dt.datetime.now(dt.timezone.utc).timestamp()), min(windows) if windows else min_soft_delete_days, min_soft_delete_days)
         except Exception as error:
             err(f"WARN: deletion-run final record failed: {error}")
     failed = any(entry.get("failed_dirs") or entry.get("error") for entry in summary["buckets"].values())
@@ -2249,6 +2252,7 @@ def _generation_options(source: str) -> Callable:
             option("-o", "--out", required=True, help="New output run directory for progress and undo records"),
             option("-p", "--plan", "plan_path", required=True, help=f"Current staged plan.json; must exactly match the {source}'s items"),
             option("-r", "--max-rate", default=8000, type=int, help="Per-bucket attempted-object/s ceiling, including retries; starts at ≤1000"),
+            option("-s", "--min-soft-delete-days", default=7, type=IntRange(0, 90), help="Refuse --for-real on a bucket retaining soft deletes for less; 0 allows soft delete off, whose deletes are permanent"),
             option("-w", "--work-dir", required=True, help=f"Empty local directory for the pinned {source} cache"),
             option("-x", "--exclude-run", "exclude_runs", multiple=True, help="Subtract this drained run's reconciled settled identities; include its full resume chain"),
             option("--for-real", is_flag=True, help=f"Delete the {source}'s generations; default validates and writes a dry log"),
@@ -2266,8 +2270,8 @@ def _generation_options(source: str) -> Callable:
 def sweep_execute_reviewed(**kwargs: Any) -> None:
     """Stream a completed DR's exact generations; no fresh relist/drift audit.
 
-    Full pinned-log preflight, recoverable deletes, bounded batches, progress,
-    and per-object undo records. This is the web dispatch of a real run with a
+    Full pinned-log preflight, deletes recoverable for each bucket's retention
+    (`-s`), bounded batches, progress, and per-object undo records. This is the web dispatch of a real run with a
     dry run of exactly its items.
     """
     from .sweep_reviewed import execute_reviewed
@@ -2387,7 +2391,8 @@ def sweep_recovery_check(limit: int, prefixes: tuple[str, ...]) -> None:
 def sweep_undo(only_buckets: tuple[str, ...], bulk: bool, dry_run: bool, bulk_ops: int, prefixes: tuple[str, ...], workers: int, no_record: bool, run: str) -> None:
     """Restore what a real run deleted, from its `deleted/` logs — the
     soft-delete restore of exactly the logged generations, valid until the
-    run's recorded `undo_deadline`. Actual retention starts per object at
+    run's recorded `undo_deadline`; none for a run that recorded soft delete off
+    on a bucket (`soft_delete_days` 0), but `-b` names the buckets that kept theirs. Actual retention starts per object at
     deletion, so that record is not an object-level guarantee. RUN is the D1
     run id (`<scan>-p<plan_id>/<utc stamp>`, as /staged lists it) or the run's
     gs:// log dir. Re-runnable: names already live again are left alone. A run
@@ -2406,7 +2411,7 @@ def sweep_undo(only_buckets: tuple[str, ...], bulk: bool, dry_run: bool, bulk_op
     try:
         tok, acct = _creds()
         rows = _d1_query(
-            "SELECT run_id, mode, started_ts, finished_ts, undo_deadline, undo_state, log_dir, deleted_objects FROM deletion_runs "
+            "SELECT * FROM deletion_runs "
             f"WHERE run_id = {_q(run)} OR log_dir = {_q(run)}", acct, tok,
         )
         row = rows[0] if rows else None
@@ -2418,6 +2423,11 @@ def sweep_undo(only_buckets: tuple[str, ...], bulk: bool, dry_run: bool, bulk_op
         raise SystemExit(f"no deletion run {run!r} in D1 (see /staged for run ids)")
     if row is not None and row["mode"] != "real":
         raise SystemExit(f"{row['run_id']} was a dry run — nothing to undo")
+    if row is not None and row.get("soft_delete_days") == 0 and not only_buckets:
+        raise SystemExit(
+            f"{row['run_id']}: no undo: a bucket in this run had soft delete off, so its deletes are permanent. "
+            "Name the buckets that retained theirs with -b (their retention: the run's `deleted-summary.json`)"
+        )
     log_dir = row["log_dir"] if row is not None else run
     deadline = row.get("undo_deadline") if row is not None else None
     if row is not None:
@@ -2881,6 +2891,7 @@ def job_submit_listing(
 @option("-o", "--out", required=True, help="New run output directory")
 @option("-p", "--plan", required=True, help="Snapshot of current staged plan")
 @option("-r", "--max-rate", default=8000, type=int, help="Per-bucket object/s ceiling")
+@option("-s", "--min-soft-delete-days", default=None, type=IntRange(0, 90), help="`sweep execute-reviewed -s` (unset: its default, 7, and no flag, for an image from before it)")
 @option("-t", "--template", required=True, type=Path, help="Described prior Batch job JSON; reuse deployment settings")
 @option("-x", "--exclude-run", "exclude_runs", multiple=True, help="Exclude reconciled settled identities from a drained run")
 @option("--for-real", is_flag=True, help="Actually delete reviewed generations (default validates only)")
@@ -2897,6 +2908,7 @@ def job_submit_reviewed(
     out: str,
     plan: str,
     max_rate: int,
+    min_soft_delete_days: int | None,
     template: Path,
     exclude_runs: tuple[str, ...],
     for_real: bool,
@@ -2907,7 +2919,7 @@ def job_submit_reviewed(
     from .batch import submit_job
     from .sweep_job import reviewed_job_spec
 
-    spec = reviewed_job_spec(json.loads(template.read_text()), source, plan, out, image, workers, max_rate, for_real, buckets, after_run, bucket_workers=bucket_workers, exclude_runs=exclude_runs, pacing=pacing)
+    spec = reviewed_job_spec(json.loads(template.read_text()), source, plan, out, image, workers, max_rate, for_real, buckets, after_run, bucket_workers=bucket_workers, exclude_runs=exclude_runs, pacing=pacing, min_soft_delete_days=min_soft_delete_days)
     if not re.fullmatch(r"gcs-sweep-(real|dry)-\d{8}-\d{6}z", name):
         raise UsageError("job name must use the site's gcs-sweep-(real|dry)-YYYYMMDD-HHMMSSz format")
     expected = f"gs://{spec['taskGroups'][0]['taskSpec']['environment']['variables']['DATA_BUCKET']}/sweep/runs/{name}"
