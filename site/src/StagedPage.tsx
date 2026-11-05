@@ -52,6 +52,7 @@ import { machineFor } from '../functions/_lib/sweepMachines'
 import { Loading, Skeleton } from './Busy'
 import { copyText } from './CopyName'
 import { Paginated, Pager, usePaged } from './Pager'
+import { sizedScan } from './stagedScan'
 
 const iso = (ts: number): string => new Date(ts * 1000).toISOString()
 const store = DEFAULT_STORE
@@ -153,6 +154,7 @@ function ConfirmList({ rows, fmtBytes }: { rows: Row[]; fmtBytes: (b: number) =>
 }
 
 const SETTLED_SIZES = [20]
+const SCANS_POLL_MS = 60_000
 
 export function StagedPage() {
   const { fmtBytes, units, suffixB } = useUnits()
@@ -205,11 +207,21 @@ export function StagedPage() {
   const busy = unstage.isPending || dispatch.isPending || runAction.isPending
 
   // The scan everything on the page is sized at — and the one a dispatch reads.
-  const [scans, setScans] = useState<string[]>([])
-  const [date, setDate] = useState('')
-  useEffect(() => {
-    void fetch(`${store.base}/scans.json`, { credentials: 'include' }).then(r => r.json()).then((s: string[]) => { setScans(s); setDate(s[0] ?? '') }).catch(() => {})
-  }, [])
+  // A tab stays open across scans, and a dispatch reads the newest: the list refetches, and `date` follows it unless a scan was picked.
+  const scansQ = useQuery<string[]>({
+    queryKey: ['staged-scans', store.key],
+    queryFn: async () => {
+      const r = await fetch(`${store.base}/scans.json`, { credentials: 'include' })
+      if (!r.ok) throw new Error(`scans: ${r.status}`)
+      return await r.json() as string[]
+    },
+    refetchInterval: SCANS_POLL_MS,
+    refetchOnWindowFocus: true,
+    staleTime: SCANS_POLL_MS / 2,
+  })
+  const scans = useMemo(() => scansQ.data ?? [], [scansQ.data])
+  const [picked, setPicked] = useState<string | null>(null)
+  const date = sizedScan(scans, picked)
   const prefixes = useMemo(() => items.map(it => it.prefix), [items])
   const statsQ = usePrefixes(date, prefixes)
   const stats = statsQ.data
@@ -369,6 +381,8 @@ export function StagedPage() {
   // the newest scan: each item is held to the one it was staged at (`as_of`), so the run lists from the newest and
   // deletes only what that staging scan saw
   const runScan = scans[0] ?? ''
+  // The confirm names a total at a scan, and the run reads the newest: either moving disarms it.
+  useEffect(() => setArmed(false), [runScan, date])
   // Which path a real run takes (gcs): reuse a dry run of exactly these items at this scan, or a fresh manifest.
   const digestQ = useQuery({
     queryKey: ['items-digest', runItems],
@@ -523,7 +537,7 @@ export function StagedPage() {
               {activeRows.length === 0 ? 'Nothing is staged.' : <>{activeShownRows.length !== activeRows.length && <>{activeShownRows.length} of </>}{activeRows.length} staged {activeRows.length === 1 ? 'path' : 'paths'}</>}
               {stats && <> · {fmtBytes(everything.b)} · {fmtN(everything.o)} objects</>}
             </h2>
-            {activeRows.length > 0 && <label className="scan-pick">sized at scan <select value={date} onChange={e => setDate(e.target.value)} aria-label="scan">{scans.map(s => <option key={s}>{s}</option>)}</select>
+            {activeRows.length > 0 && <label className="scan-pick">sized at scan <select value={date} onChange={e => setPicked(e.target.value === scans[0] ? null : e.target.value)} aria-label="scan">{scans.map(s => <option key={s}>{s}</option>)}</select>
               {statsQ.isLoading ? <Loading label="Sizing prefixes…" /> : sizesNote && <span className="dim"> {sizesNote}</span>}
               {all.gone > 0 && <Tooltip content="Staged prefixes with nothing under them at this scan (already deleted, or never there)."><span className="dim"> · {all.gone} empty</span></Tooltip>}
             </label>}
