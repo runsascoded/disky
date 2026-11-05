@@ -123,26 +123,41 @@ describe('D1', () => {
   })
 
   describe('re-staged after a run deleted it, sized at the scan the run read', () => {
-    async function deleted(raw: Awaited<ReturnType<typeof sqliteD1>>['raw'], prefix: string, scan: string) {
-      raw.exec(`INSERT INTO deletion_runs (run_id, ${RUN_DIR}, scan, head, exec_head, actor, mode, started_ts, finished_ts, log_dir, plan_id)
-        VALUES ('r1', 'p', '${scan}', 0, 0, 'ann', 'real', 10, 20, 'd', 1)`)
-      raw.exec(`INSERT INTO deletion_bands (run_id, prefix, bytes, objects) VALUES ('r1', '${prefix}', ${TiB}, 10)`)
+    /** A finished real run's row and its band on `prefix`: `digest` as its reflection left it (the job's, once it succeeded;
+     *  `''` on any other end; none for a run by hand), `objects` of the prefix's 10 recorded deleted. */
+    function deleted(raw: Awaited<ReturnType<typeof sqliteD1>>['raw'], prefix: string, scan: string, { digest = 'D' as string | null, objects = 10, undone = 0 } = {}) {
+      raw.prepare(`INSERT INTO deletion_runs (run_id, ${RUN_DIR}, scan, head, exec_head, actor, mode, started_ts, finished_ts, plan_digest, log_dir, plan_id)
+        VALUES ('r1', 'p', ?, 0, 0, 'ann', 'real', 10, 20, ?, 'd', 1)`).run(scan, digest)
+      raw.prepare("INSERT INTO deletion_bands (run_id, prefix, bytes, objects, undone_objects) VALUES ('r1', ?, ?, ?, ?)").run(prefix, objects * TiB / 10, objects, undone)
     }
-    it('is empty, not live, until a later scan', async () => {
+    /** The card after `gs://b/x/` is staged again, a run on `scan` having recorded it. */
+    async function card(scan: string, run: Parameters<typeof deleted>[3] = {}) {
       const calls = fakeSlack()
       const { db, raw } = await planDb()
-      await deleted(raw, 'gs://b/x/', SCAN)
+      deleted(raw, 'gs://b/x/', scan, run)
       await stage(db, 1, ['gs://b/x/'], { ts: 30 })
       await notifyPlan(env, db, 1, SITE, undefined, { now: 1000 })
-      expect(calls.map(show)).toEqual([`update ${PARENT}: *Staged for deletion* · plan #1: *1 prefix · 1.0 TiB · 10 objects* at scan ${SCAN}\nowners: Ann Bee 1.0 TiB\n+1 staged prefix empty at scan, not counted\nstaged by Ann Bee`])
+      return calls.map(show)
+    }
+    const EMPTY = `update ${PARENT}: *Staged for deletion* · plan #1: *1 prefix · 1.0 TiB · 10 objects* at scan ${SCAN}\nowners: Ann Bee 1.0 TiB\n+1 staged prefix empty at scan, not counted\nstaged by Ann Bee`
+    const LIVE = `update ${PARENT}: ${PARENT_TEXT(2, '2.0 TiB', '20')}`
+    it('is empty, not live, until a later scan', async () => {
+      expect(await card(SCAN)).toEqual([EMPTY])
     })
     it('written back since: a scan after the run holds it, and it is live', async () => {
-      const calls = fakeSlack()
-      const { db, raw } = await planDb()
-      await deleted(raw, 'gs://b/x/', '2026-10-07')
-      await stage(db, 1, ['gs://b/x/'], { ts: 30 })
-      await notifyPlan(env, db, 1, SITE, undefined, { now: 1000 })
-      expect(calls.map(show)).toEqual([`update ${PARENT}: ${PARENT_TEXT(2, '2.0 TiB', '20')}`])
+      expect(await card('2026-10-07')).toEqual([LIVE])
+    })
+    it('a killed run is not taken at its word: live', async () => {
+      expect(await card(SCAN, { digest: '' })).toEqual([LIVE])
+    })
+    it('a run that ended over a failed directory (9 of 10 answered): live and whole, not the 1 object left', async () => {
+      expect(await card(SCAN, { digest: '', objects: 9 })).toEqual([LIVE])
+    })
+    it('a run by hand, whose end nothing recorded: live', async () => {
+      expect(await card(SCAN, { digest: null })).toEqual([LIVE])
+    })
+    it('an undone run: live', async () => {
+      expect(await card(SCAN, { undone: 10 })).toEqual([LIVE])
     })
   })
 

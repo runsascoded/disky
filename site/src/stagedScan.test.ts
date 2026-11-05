@@ -32,7 +32,7 @@ describe('withoutDeleted: a scan\'s sizes less what a real run on that same scan
   it('a resumed run, whose band counts the first run\'s deletions as gone: nothing left', () => {
     expect(withoutDeleted({ [P]: stat }, [band({ bytes: 400, objects: 4 }), band({ bytes: 600, objects: 6, gone: 4 })])).toEqual({})
   })
-  it('part of it deleted (a stopped run, overwrites kept): the exact remainder, its owners no longer known', () => {
+  it('part of it deleted (overwrites kept, a drifted folder skipped): the exact remainder, its owners no longer known', () => {
     expect(withoutDeleted({ [P]: stat }, [band({ bytes: 700, objects: 7 })])).toEqual({ [P]: { b: 300, o: 3, d: 5 } })
   })
   it('part deleted with some gone: gone objects have no recorded bytes, so the remainder can\'t be stated: left whole', () => {
@@ -43,6 +43,18 @@ describe('withoutDeleted: a scan\'s sizes less what a real run on that same scan
   })
   it('a band that deleted nothing changes nothing', () => {
     expect(withoutDeleted({ [P]: stat }, [band({ bytes: 0, objects: 0 })])).toEqual({ [P]: stat })
+  })
+  describe('a run that did not end with a result arrives with no amounts (`scanDeletions`)', () => {
+    const unknown = band({ bytes: 0, objects: 0 })
+    it('alone (killed, a failed directory): the item stays, whole', () => {
+      expect(withoutDeleted({ [P]: stat }, [unknown])).toEqual({ [P]: stat })
+    })
+    it('beside a run that deleted part: what the first deleted is not known, so no remainder is stated', () => {
+      expect(withoutDeleted({ [P]: stat }, [unknown, band({ bytes: 700, objects: 7 })])).toEqual({ [P]: stat })
+    })
+    it('beside a run that deleted every object: nothing left', () => {
+      expect(withoutDeleted({ [P]: stat }, [unknown, band({})])).toEqual({})
+    })
   })
   it('a band with no row at this scan adds nothing', () => {
     expect(withoutDeleted({ [Q]: stat }, [band({})])).toEqual({ [Q]: stat })
