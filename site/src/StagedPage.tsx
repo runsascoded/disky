@@ -353,7 +353,7 @@ export function StagedPage() {
   const activeShownRows = shownRows.filter(r => activePrefixes.has(r.prefix))
   const all = total(activeShownRows)
   const everything = total(activeRows)
-  const selRows = rows.filter(r => sel.selected.has(r.prefix))
+  const selRows = activeRows.filter(r => sel.selected.has(r.prefix))
   const selTotal = total(selRows)
 
   const overlay = (t: TreeNode) => (ownerIdx.count ? applyLedger(t, ownerIdx, store.scheme) : t)
@@ -529,7 +529,7 @@ export function StagedPage() {
 
           <div className="staged-batches">
             <div className="staged-actions">
-              {activeShownRows.length > 0 && <label className="sel-all"><KeysCheckbox sel={sel} keys={shownPrefixes} label={q.trim() ? 'select all matching' : 'select all'} /> {sel.selected.size ? `${sel.selected.size} selected · ${fmtBytes(selTotal.b)}` : 'select'}</label>}
+              {activeShownRows.length > 0 && <label className="sel-all"><KeysCheckbox sel={sel} keys={shownPrefixes} label={q.trim() ? 'select all matching' : 'select all'} /> {selected.length ? `${selected.length} selected · ${fmtBytes(selTotal.b)}` : 'select'}</label>}
               {sel.selected.size > 0 && <button type="button" onClick={sel.clear}>deselect</button>}
               {removable.length > 0 && (
                 <button type="button" disabled={busy} onClick={() => unstage.mutate(removable, { onSuccess: () => sel.clear() })}>unstage {removable.length}</button>
