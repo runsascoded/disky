@@ -48,7 +48,7 @@ All under `$GCS_USAGE_URL`. Reads are open to any signed-in viewer; writes need 
 | `DELETE /api/plans/<id>/items` | Unstage: `{ prefixes: [...] }`. Stagers may remove their own items; admins any. |
 | `GET /api/plans`, `GET /api/plans/<id>` | Plans and one plan's items / batches / runs. |
 | `POST /api/plans`, `PATCH /api/plans/<id>`, `POST /api/plans/<id>/items` | Admin curation (create, close `{ state: 'closed' }`, add items). |
-| `POST /api/sweep/dispatch` | Admin: run the executor over a plan (`{ plan_id, mode: 'dry' \| 'real', date, buckets? }` → a GCP Batch job); `GET /api/sweep/jobs` lists runs, `POST /api/sweep/stop` stops one. |
+| `POST /api/sweep/dispatch` | Admin: run the executor over a plan (`{ plan_id, mode: 'dry' \| 'real', date, buckets?, shown_min_soft_delete_days? }` → a GCP Batch job; `shown_min_soft_delete_days` is the soft-delete minimum whoever confirmed read, omitted = 7, and a `real` run answers 409 if the current minimum is lower); `GET /api/sweep/jobs` lists runs, `POST /api/sweep/stop` stops one. |
 
 ### Deletion runs (what was deleted, and asking for an undo)
 
