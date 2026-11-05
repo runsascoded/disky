@@ -19,7 +19,11 @@ With `level`, the same store built with the level sort (`build -l`; its runs car
 `interval-store-level/` (`/api/diff/level`'s level index, specs/diff-progressive.md §3b); `expected.json` is checked, not
 rewritten.
 
-    cloud/.venv-or-root/bin/python site/functions/_lib/fixtures/iv-churn/gen.py [PAGES | ROOT | level]
+With `slash`, that store under `interval-store-slash/`, plus one key with a doubled slash from scan `SLASH_FROM` on,
+`SLASH_KEY`: as `path-index` lists it, a directory `b1/x/` under `b1/x` (name '', as `b1/x`'s own rows are). No
+`expected.json`: `diffLevel.test.ts` compares it with the store's own `path` sort.
+
+    cloud/.venv-or-root/bin/python site/functions/_lib/fixtures/iv-churn/gen.py [PAGES | ROOT | level | slash]
 """
 from __future__ import annotations
 
@@ -37,6 +41,8 @@ ROOT = HERE.parents[4]
 LAYOUT = "listing/{id}/path-index.parquet"
 BASE = 4
 PATHS = ["", "b1", "b1/x", "b1/x/y", "b2", "b2/z"]
+SLASH_KEY = "b1/x//k.bin"
+SLASH_FROM = 5
 
 
 def _load(name: str):
@@ -47,7 +53,7 @@ def _load(name: str):
     return m
 
 
-def main(pages: int | None = None, root: str | None = None, with_level: bool = False) -> None:
+def main(pages: int | None = None, root: str | None = None, with_level: bool = False, slash: bool = False) -> None:
     from dt_cloud import interval_local as il
     from dt_cloud import interval_store as ist
     from dt_cloud import static_names as sn
@@ -65,6 +71,8 @@ def main(pages: int | None = None, root: str | None = None, with_level: bool = F
         fs = t._files(rng, j)
         if root:
             fs = {f: b for f, b in fs.items() if f.startswith(f"{root}/")}
+        if slash and j >= SLASH_FROM:
+            fs[SLASH_KEY] = 7
         key = LAYOUT.replace("{id}", d)
         (work / "scans" / key).parent.mkdir(parents=True, exist_ok=True)
         t._write(t._rows(fs, v), work / "scans" / key, v)
@@ -75,14 +83,14 @@ def main(pages: int | None = None, root: str | None = None, with_level: bool = F
     for cmd, extra in [(il.build_cmd, build), (il.add_cmd, ["-w", str(work / "add")])]:
         res = CliRunner().invoke(cmd, [*common, *extra], catch_exceptions=False)
         assert res.exit_code == 0, res.output
-    out = HERE / ("interval-store-level" if with_level else f"interval-store-p{pages}" if pages else f"interval-store-{root}" if root else "interval-store")
+    out = HERE / ("interval-store-slash" if slash else "interval-store-level" if with_level else f"interval-store-p{pages}" if pages else f"interval-store-{root}" if root else "interval-store")
     shutil.rmtree(out, ignore_errors=True)
     # What the Worker reads: the served sorts, `scans.json`, the manifests and the runs' `meta.json` / `scans.json`.
     shutil.copytree(work / "store" / ist.PREFIX / "g", out / "g", ignore=shutil.ignore_patterns("verify", "state", "lease", "pv", "pvl", "rd", "ranges", "digest"))
     for f in [out / "g" / "scans.json", *(out / "g" / "deltas").glob("*/scans.json")]:
         doc = json.loads(f.read_text())
         f.write_text(json.dumps({**doc, "bucket": "b"}, indent=1) + "\n")
-    if root:
+    if root or slash:
         shutil.rmtree(work)
         return
     expected = []
@@ -150,5 +158,7 @@ if __name__ == "__main__":
     arg = sys.argv[1] if len(sys.argv) > 1 else None
     if arg == "level":
         main(2, with_level=True)
+    elif arg == "slash":
+        main(2, with_level=True, slash=True)
     else:
         main(int(arg) if arg and arg.isdigit() else None, arg if arg and not arg.isdigit() else None)

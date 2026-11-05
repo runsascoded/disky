@@ -312,7 +312,8 @@ async function overBudget(e: unknown, dirs: string[], o: LevelOpts, spend: Level
 
 /** One round from the level index: `dirs`' transitions (`readLevel`), split while too wide as `round` splits. Null when a
  *  directory's own transitions show it a file on some side in the range (its own rows are written for directories and
- *  closings only, so a file's changes have none): that round is read from the `path` sort instead. */
+ *  closings only, so a file's changes have none), or hold a child named '' with its own: that round is read from the
+ *  `path` sort instead. */
 async function levelRound(env: Env, lh: LevelHandle, dirs: string[], o: LevelOpts, spend: LevelSpend): Promise<Level[] | null> {
   let recs: LevelRec[]
   try {
@@ -333,7 +334,10 @@ async function levelRound(env: Env, lh: LevelHandle, dirs: string[], o: LevelOpt
     ts.sort((x, y) => x.ts - y.ts)
     const [dir, nm] = k.split('\0')
     if (nm === '') {
-      if (ts.some(r => r.kind !== 'dir' || (r.kindPrev != null && r.kindPrev !== 'dir'))) return null
+      // Beside the directory's own rows, a child named '' (`a/`, under `a`: a key ending in `/`, or `a//b`'s directory). A file
+      // shows by its kind. A directory shows only by its stamp: it changes `a` too, so both have a row there, and no other
+      // key has two (`LEVEL_ARM`).
+      if (ts.some((r, i) => r.kind !== 'dir' || (r.kindPrev != null && r.kindPrev !== 'dir') || (i > 0 && r.ts === ts[i - 1].ts))) return null
       const c = transitionsChange(ts)
       if (c && dir !== '') own.set(dir, c)
       continue

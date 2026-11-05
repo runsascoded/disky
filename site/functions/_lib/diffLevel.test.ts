@@ -539,6 +539,36 @@ describe('level diffs', () => {
       })
     })
 
+    describe('a directory `b1/x/` under `b1/x` (`interval-store-slash/`: a key `b1/x//k.bin` from 08-05 on), named \'\' as `b1/x`\'s own rows are', () => {
+      const slashEnv = async () => {
+        const { db } = await sqliteD1()
+        return { DB: db, ROOT_LABEL: 'all buckets', PATH_STORE: 'intervals', INTERVAL_STORE_GEN: 'g', INTERVAL_STORE_PREFIX: 'interval-store-slash', INDEX_R2: r2('iv-churn', []) } as Env
+      }
+      const answer = async (lv: Env, from: string, to: string, given?: { level: null }) => {
+        const { t, trace } = traced()
+        const l = (await buildLevels(lv, { from, to, dirs: ['b1/x'], k: 512, m: 'churn', chain: false, trace }, given)).get('b1/x')!
+        return { l: shape(l), index: t['level-index'] ?? 0 }
+      }
+
+      it('where it changes in the range, the `path` sort answers: its child is `b1/x/`, not `b1/x`\'s own', async () => {
+        const lv = await slashEnv()
+        const { l, index } = await answer(lv, '2026-08-04', '2026-08-05')
+        const path = await answer(lv, '2026-08-04', '2026-08-05', { level: null })
+        expect(l).toEqual(path.l)
+        expect(index).toBe(0)
+        expect([l.a, l.b, l.oa, l.ob, l.churn]).toEqual([100, 47, 4, 5, 67])
+        expect(l.rows.filter(r => r.p === '')).toEqual([{ p: '', k: 'dir', a: 0, b: 7, oa: 0, ob: 1, churn: 7, s: 'added' }])
+      })
+
+      it('where it doesn\'t, the level index still answers, as the `path` sort does', async () => {
+        const lv = await slashEnv()
+        const { l, index } = await answer(lv, '2026-08-05', '2026-08-06')
+        const path = await answer(lv, '2026-08-05', '2026-08-06', { level: null })
+        expect(index).toBe(1)
+        expect(l).toEqual(path.l)
+      })
+    })
+
     it('reads the path sort where a touched file lacks the level index', async () => {
       // `interval-store/` has no level sort: the same answers, by the old read.
       const { t, trace } = traced()

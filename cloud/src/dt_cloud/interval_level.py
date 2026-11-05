@@ -43,8 +43,9 @@ LEVEL_FLAG = "level"
 LEVEL_DOC = f"served/{LEVEL}.json"
 #: The sort's order: the parent's key, the transition's stamp, the child's name.
 LEVEL_KEY = ["depth", "path", "ts", "name"]
-#: What orders rows sharing a `LEVEL_KEY`, which is at most two: an object named `a/` is a child of `a` named '', as `a`'s own
-#: row is, at the same stamp. `a`'s own comes first (0), as the parent's `name ''` rows do; the child's is 1. Without it their
+#: What orders rows sharing a `LEVEL_KEY`, which is at most two: a path `a/` (an object so named, or the directory of a key
+#: `a//b`: `path-index` keeps both as listed) is a child of `a` named '', as `a`'s own row is, at the same stamp; the reader
+#: reads such a range from the `path` sort (`diffLevel.levelRound`). `a`'s own comes first (0), as the parent's `name ''` rows do; the child's is 1. Without it their
 #: order is the sort's whim, and a cut's bytes depend on how it was split. One byte of sort key: the rest of the row would do too,
 #: at a wider key on every row.
 LEVEL_ARM = "__arm"
