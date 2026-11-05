@@ -1,6 +1,8 @@
 # Progressive diffs: one directory level per request, bounded by construction
 
-**Status:** step 1 (`churn_cum` / `churn_end` on the folded path versions: build, append, carries, compaction, `backfill-churn`) built 2026-11-01, branch `churn-cum`; step 2 (`/api/diff/level`, `_lib/diffLevel.ts`) built 2026-11-02, branch `diff-level`; step 2b (bounded level reads, §3b): exact only; 2b.1 page-level reads built and measured live (slower than the walk: round trips, not decode), held page indexes + one limiter done; next the dedicated `level` index (batched per depth, opt-in) and the fixed-overhead cuts, against Ryan's bar (first paint ≤ ½ the walk cold, full expansion ≤ the walk cold, nothing unbounded); the dyadic churn index for wide directories (2b.2); banded layouts rejected; on dev only. Step 3 (the client) waits on 2b. Shared (`[cloud]`). Replaces the lazy descent's planner and budgets (`specs/diff-from-changes.md` revision 3: `DESCENT_MAX_EXPANDABLE`, `DESCENT_BUDGET_MS`, `DESCENT_BUDGET_ROWS`, `HandOff`), which were tuned per deployment rather than derived.
+**Paused 2026-11-05 (Ryan):** the level work is an optimization, and the basic full map has to serve at acceptable latency first. Next is churn on the as-of walk (`dm=churn`, branch `w/diff-churn-walk`). What's on `cloud` stays: `build -l` and `backfill-level` are opt-in. Measured so far: churn levels without the index are slower than the walk; with it, the first level beat ½ the walk in 12 of 12 multi-level cases and full expansion matched the walk in 1 of 12. The index Ryan expects, a churn-descending dyadic sort read in one request like `bysize`, is 2b.2's shape and hasn't been built.
+
+**Status:** step 1 (`churn_cum` / `churn_end` on the folded path versions: build, append, carries, compaction, `backfill-churn`) built 2026-11-01, branch `churn-cum`; step 2 (`/api/diff/level`, `_lib/diffLevel.ts`) built 2026-11-02, branch `diff-level`; step 2b (bounded level reads, §3b): exact only; 2b.1 page-level reads built and measured live (slower than the walk: round trips, not decode), held page indexes + one limiter done; next the dedicated `level` index (batched per depth, opt-in) and the fixed-overhead cuts, against the bar below (first paint ≤ ½ the walk cold, full expansion ≤ the walk cold, nothing unbounded); the dyadic churn index for wide directories (2b.2); banded layouts rejected; on dev only. Step 3 (the client) waits on 2b. Shared (`[cloud]`). Replaces the lazy descent's planner and budgets (`specs/diff-from-changes.md` revision 3: `DESCENT_MAX_EXPANDABLE`, `DESCENT_BUDGET_MS`, `DESCENT_BUDGET_ROWS`, `HandOff`), which were tuned per deployment rather than derived.
 
 ## Goal
 
@@ -132,7 +134,7 @@ So the cost is whole-group decode × the number of time segments the range overl
 
 **2b.1 measured live (cw, paged generation `c003h`, 2026-11-03): slower than the walk.** Cold level requests (median of 3) vs the walk: day 02a 853 vs 429 ms; day rno2a 648 vs 765; day 02a/marin/grug 2939 vs 497; week 02a 2013 vs 1117; week rno2a 2116 vs 926; week grug 2430 vs 575. Rows decoded were small (3K–23K, ~25× fewer than whole groups); the cost is round trips. Per-wave Server-Timing (`pjson` / `pindex` / `pdata`: ms, `-gets`, `-bytes`) on cw dev, cold grug: the page-index wave 59–62 GETs (~100 KB each) and the page-data wave 50–59 GETs (~230 KB), each ⌈gets / RUN_READS⌉ ≈ 9–11 rounds at ~100–250 ms a round; everything before the first data GET (auth, scan, generation, cache and footer lookups, plan) 150–280 ms. The GET count is set by the time segments a range overlaps (~50 a week), which page size doesn't change.
 
-**The bar (Ryan, 2026-11-03: first paint + robustness).** One batched level request per depth (all of that depth's dirs in one request), and, cold, on cw's and gcs's diff-check cases on dev, with the cost model predicting each case before it is measured: the first level ≤ ½ the walk's cold time for the same view; the full expansion ≤ the walk's cold time; no 413, no 1102, no case unbounded by construction. Cost model: a batch costs fixed (everything before the first data GET) + waves × ⌈Σ runs / RUN_READS⌉ round trips + rows · c_decode, runs = the separate byte regions its dirs' rows occupy; a full expansion is depth × that.
+**The bar (2026-11-03: first paint + robustness; root's proposal, which Ryan picked as an option. The ½ was in the option's wording, not a number he set).** One batched level request per depth (all of that depth's dirs in one request), and, cold, on cw's and gcs's diff-check cases on dev, with the cost model predicting each case before it is measured: the first level ≤ ½ the walk's cold time for the same view; the full expansion ≤ the walk's cold time; no 413, no 1102, no case unbounded by construction. Cost model: a batch costs fixed (everything before the first data GET) + waves × ⌈Σ runs / RUN_READS⌉ round trips + rows · c_decode, runs = the separate byte regions its dirs' rows occupy; a full expansion is depth × that.
 
 **Done: fewer waves, no barrier** (`[cloud] Paged range reads: page indexes held per isolate and colo, one GetRounds limiter, no barrier between waves`). The group metadata was already held by planning (0 GETs); page indexes are now held per isolate and in the colo cache beside it, so a request whose groups' indexes are held reads in 2 waves (plan → data, ⌈g / RUN_READS⌉ rounds for g groups); one `GetRounds` limiter caps every GET of a request; a group's pages are fetched as soon as its index arrives. Effect (cw's per-round cost): day cases (g ≈ 12–20) reach ~120–240 ms of rounds when held; week cases (g ≈ 50–77) stay ~540–780 ms, so under the seg-major layout weeks can't meet the bar.
 
@@ -165,6 +167,27 @@ So the cost is whole-group decode × the number of time segments the range overl
 **Tests.** (i) 2b.1: over `fixtures/iv-churn` cut with small pages, every level response is byte-identical to step 2's, and the decoder's page counters show only rect pages decoded; (ii) the parallel cut's file is byte-identical to the serial cut's at the same page size; (iii) 2b.2: the dyadic decomposition and per-block sums equal per-transition churn sums for every child and range; every child with oracle churn ≥ τ is a cell, with exact values, and Σ cells + other = C; (iv) a 1M-child synthetic directory, all children changed across many scans, reads ≤ m runs and ≤ |X| + m index rows plus |X| point reads, whatever the range length; (v) a batch with one failing directory answers the others.
 
 **Before any comparison with prod:** `.c` stops at its backfill's scans; later dailies append to g3 only. Append them to `.c` (`interval-store add -g 2026-10-09b.g3.c -C none`, so `CURRENT.json` doesn't move), or let the next compaction carry churn.
+
+### 3c. Parked: Arrow IPC run spools (2026-11-05)
+
+`cut -a` at 4 sorts × 4 workers went past its budget because of the run spools' parsed parquet footers (`RunSpool.md`), which `Budget.cut` doesn't charge, while it overcharges writers' metadata; the two nearly cancelled. Spooling in IPC (lz4, no dictionaries) removes that term. Not landed: it changes disk use on jobs not in question, and the priority is serving latency. The real cut that needs it is its test.
+
+One `bysize` cut per format, same VM and plan, harness `scripts/ipc_bench.py` (on branch `w/ipc-spools-parked`, not `cloud`) patching the spool seams at runtime:
+
+| IPC vs parquet | |
+|---|---|
+| Footer memory, all runs held | ÷462 (43 B a batch against ~19.8 KB) |
+| Tree peak, pieces stage | ÷3.6 |
+| Sort (runs + pieces), wall | −28% |
+| Read per piece, p50 | −38% |
+| Run spools on disk | +15.5% |
+| Piece spools on disk | +26% |
+| Peak disk for the sort | +15% |
+| Served `bysize.parquet` and `.groups.parquet` | md5-identical |
+
+**Caveats.** One run per format, one sort, no repeat. IPC ran first, on pinned vCPUs, so the time saved may be partly less contention. No whole `cut -a` has run on IPC; its memory and disk there are modelled. `slices-bytotal`, `slices-bysize-user` and `level` weren't run.
+
+**For the real change.** IPC's footer has no row counts and batches aren't uniform, so counts must be kept (a sidecar, or passed in `pieces`). mmap is out: it inflates the PSS `TreeWatch` measures, and was slower. The piece threads shared one reader, which held over this run's rows but which pyarrow's docs don't promise; opening per span costs ~42% on read-only replay. `Budget.cut` needs its footer term either way, batches × bytes a batch.
 
 ### 4. What goes away
 
