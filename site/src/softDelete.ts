@@ -88,13 +88,16 @@ export const undoUnseenText = ({ unseen }: UndoUnseen): string => unseen.length
 /** Who does know, beside `undoUnseenText`. */
 export const UNDO_UNSEEN_WHO = 'The undo job, and `dt-cloud sweep undo` by hand, ask GCS and refuse a bucket where it is off.'
 
-/** Only a real run inside its recorded window has an undo to lose: a closed window, or a run that recorded none, already says
- * so itself. */
-const undoOpen = (r: { mode: string; undo_deadline?: number | null }, now: number): boolean => r.mode === 'real' && r.undo_deadline != null && now < r.undo_deadline
+/** The run columns that say whether it still has an undo to qualify. */
+export interface RunUndoWindow { mode: string; undo_deadline?: number | null; undo_state?: string }
+
+/** Only a real run inside its recorded window, not already undone, has an undo to lose: a closed window, a run that recorded
+ * none, or one whose every deleted object is live again already says so itself. */
+const undoOpen = (r: RunUndoWindow, now: number): boolean => r.mode === 'real' && r.undo_deadline != null && now < r.undo_deadline && r.undo_state !== 'full'
 
 /** Is the undo `r` recorded unavailable at `now`, having deleted from `buckets`? */
 export const runUndoUnavailable = (
-  r: { mode: string; undo_deadline?: number | null },
+  r: RunUndoWindow,
   buckets: readonly string[],
   known: BucketSoftDelete | null | undefined,
   now: number,
@@ -103,7 +106,7 @@ export const runUndoUnavailable = (
 /** Is the undo `r` recorded one the site can't vouch for at `now` (and not one it knows unavailable)? `known` undefined: not
  * asked (an executor whose undo isn't a soft-delete restore, or a reading still loading), so nothing is qualified. */
 export const runUndoUnseen = (
-  r: { mode: string; undo_deadline?: number | null },
+  r: RunUndoWindow,
   buckets: readonly string[],
   known: BucketSoftDelete | null | undefined,
   now: number,

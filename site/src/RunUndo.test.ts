@@ -2,7 +2,8 @@ import { createElement, type ReactElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 import { RecoveryUnavailable, RecoveryUnseen, UndoBy, UndoControl, UndoLine, undoUnavailableTip, undoUnseenTip } from './RunUndo'
-import type { UndoStatus } from './runs'
+import { type DeletionRun, type UndoStatus, undoStatus } from './runs'
+import { runUndoUnavailable, runUndoUnseen } from './softDelete'
 
 const strip = (html: string): string => html.replace(/<[^>]*>/g, '').replace(/&#x27;/g, "'")
 const text = (el: ReactElement): string => strip(renderToStaticMarkup(el))
@@ -29,6 +30,23 @@ describe('the runs table\'s "undo by" cell', () => {
   })
   it('its tooltip names the buckets and the snapshot\'s date, and keeps the deadline as a record', () => {
     expect(undoUnavailableTip(off, 9000)).toBe('Undo unavailable: soft delete is off on b1 (as of 2026-11-05). GCS refuses to restore a soft-deleted object from a bucket whose soft delete is off. Recorded deadline: 1970-01-01 02:30 UTC.')
+  })
+})
+
+describe('an undone run\'s "undo by" cell, as the runs table composes it', () => {
+  const run = (undo_state: string): DeletionRun => ({
+    run_id: '2026-11-01-p1/20261101T120000Z', plan_id: 1, mode: 'real', scan: '2026-11-01', actor: 'ann', started_ts: 1000, finished_ts: 1500,
+    deleted_bytes: 600, deleted_objects: 6, skipped_gone: 0, undo_deadline: 9000, undo_state, purge_state: 'none', buckets: 'b1',
+  })
+  const cell = (r: DeletionRun, known: { asOf: string; off: Record<string, boolean> } | null) =>
+    text(createElement(UndoBy, { status: undoStatus(r, 2000, runUndoUnavailable(r, ['b1'], known, 2000), runUndoUnseen(r, ['b1'], known, 2000)), now: 2000 }))
+  const offNow = { asOf: '2026-11-05', off: { b1: true } }
+  it('says its recorded window and nothing of an undo it no longer needs; a run not undone, or partly, is still qualified', () => {
+    expect([
+      cell(run('full'), offNow), cell(run('full'), null),
+      cell(run('none'), offNow), cell(run('none'), null),
+      cell(run('partial'), offNow), cell(run('partial'), null),
+    ]).toEqual(['1h 56m', '1h 56m', 'unavailable', '1h 56m · unverified', 'unavailable', '1h 56m · unverified'])
   })
 })
 

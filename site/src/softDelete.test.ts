@@ -144,4 +144,16 @@ describe('undoUnavailable — a recorded undo GCS can no longer do', () => {
       runUndoUnavailable({ mode: 'real', undo_deadline: 900 }, ['off1'], null, 100),
     ]).toEqual([off, null, null, null, null, null])
   })
+  it('a run already undone has no undo left to lose, or to vouch for; one partly undone still has', () => {
+    const off = { buckets: ['off1'], asOf: '2026-11-05' }
+    const undone = { mode: 'real', undo_deadline: 900, undo_state: 'full' }
+    const partly = { mode: 'real', undo_deadline: 900, undo_state: 'partial' }
+    expect([
+      runUndoUnavailable(undone, ['off1'], known, 100),
+      runUndoUnseen(undone, ['other'], known, 100),
+      runUndoUnseen(undone, ['on1'], null, 100),
+      runUndoUnavailable(partly, ['off1'], known, 100),
+      runUndoUnseen(partly, ['other'], known, 100),
+    ]).toEqual([null, null, null, off, { unseen: ['other'] }])
+  })
 })
