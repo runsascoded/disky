@@ -34,7 +34,7 @@ vi.mock('./identity.js', async orig => ({
   loadRegistry: async () => ({ 'ann-bee': { name: 'Ann Bee' }, kai: { u: 'kai', name: 'Kai', github: 'kai-gh' } }),
 }))
 
-const { notifyPlan, refreshThread } = await import('./stagedSlack.js')
+const { notifyPlan, refreshStagedCard, refreshThread } = await import('./stagedSlack.js')
 const { onRequestPost: slackActions } = await import('../slack/actions.js')
 
 const SITE = 'https://site.example.org'
@@ -119,6 +119,37 @@ describe('D1', () => {
         [1000, 1000, 501],
         [['chat.update', PARENT, PARENT_TEXT(2500, '2.4 PiB', '25,000', '+1 staged prefix empty at scan, not counted\n')]],
       ])
+    })
+  })
+
+  describe('`refreshStagedCard`: the post-scan ping', () => {
+    it('edits the card in place and posts nothing, even for a batch no reply shows', async () => {
+      const calls = fakeSlack()
+      const { db } = await planDb()
+      await stage(db, 1, ['gs://b/x/', 'gs://b/empty/x/'], { ts: Math.floor(Date.now() / 1000) })
+      expect(await refreshStagedCard(env, db, SITE)).toBe(true)
+      expect(calls.map(show)).toEqual([`update ${PARENT}: ${PARENT_TEXT(2, '2.0 TiB', '20', '+1 staged prefix empty at scan, not counted\n')}`])
+    })
+    it('a plan with no thread is not given one', async () => {
+      const calls = fakeSlack()
+      const { db, raw } = await planDb()
+      raw.exec('UPDATE plans SET slack_ts = NULL')
+      expect(await refreshStagedCard(env, db, SITE)).toBe(false)
+      expect(calls).toEqual([])
+    })
+    it('a thread in another channel is left there', async () => {
+      const calls = fakeSlack()
+      const { db, raw } = await planDb()
+      raw.exec("UPDATE plans SET slack_channel = 'COTHER'")
+      expect(await refreshStagedCard(env, db, SITE)).toBe(false)
+      expect(calls).toEqual([])
+    })
+    it('no open plan: nothing', async () => {
+      const calls = fakeSlack()
+      const { db, raw } = await planDb()
+      raw.exec("UPDATE plans SET state = 'closed'")
+      expect(await refreshStagedCard(env, db, SITE)).toBe(false)
+      expect(calls).toEqual([])
     })
   })
 

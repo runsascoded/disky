@@ -1563,6 +1563,16 @@ def _digest_check(p: ScanProfile) -> list[str]:
                        for x in o.get("platforms", []) if x not in DIGEST_TRANSPORTS]
 
 
+@step("staged-card", core=False, soft=True, requires=primary_only("staged-card", "the card sizes at the primary's scans"))
+def staged_card(ctx: Ctx, arg: str | None) -> None:
+    """Re-render the staged plan's Slack card at this scan, in place (the job grant named by the site's `STAGED_CARD_GRANT`)."""
+    with ctx.phase("staged-card"):
+        if ctx.reproc or not ctx.has("SITE_TOKEN", "SITE_URL"):
+            err("no SITE_TOKEN/SITE_URL, or REPROC: skipping the staged card")
+            return
+        ctx.sh(["dt-cloud", "staged-card"], fatal=False, warn=f"staged card refresh failed for {ctx.scan} (it stays at the scan before)")
+
+
 @step("digest", soft=True, options={"template": str, "config": str, "args": list, "platforms": list, "root": str}, requires=_digest_check)
 def digest(ctx: Ctx, arg: str | None) -> None:
     """Converge the usage-digest thread on each platform (`dt-cloud digest -T <template> -C <config> -P <platform>`;

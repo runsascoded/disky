@@ -13,7 +13,7 @@
  */
 import type { D1Database } from '@cloudflare/workers-types'
 import type { RunOutcome } from '../../src/runs.js'
-import { type FinishedRun, type Gate, planDigest, planItemLines, planRuns, realGate, type RunRow, unstageDeleted } from './plans.js'
+import { type FinishedRun, type Gate, openPlanId, planDigest, planItemLines, planRuns, realGate, type RunRow, unstageDeleted } from './plans.js'
 import { slackApi, slackPeople, type SlackPerson, slackReady, type SlackEnv, type SlackResult } from './slack.js'
 import type { Env } from './auth.js'
 import { minSoftDeleteDays } from './sweepSettings.js'
@@ -696,7 +696,7 @@ const SETTLE_ROUNDS = 3
  * to a new thread: a new parent, a pointer in the old thread, and the old
  * parent marked done. A thread in another channel than `SLACK_ADMIN_CHANNEL`
  * is left alone and a new one starts there. Best-effort; never throws. */
-export async function notifyPlan(env: NotifyEnv, db: D1Database, planId: number, siteUrl: string, ev?: Event | StageArgs | RunArgs, opts: { now?: number } = {}): Promise<void> {
+export async function notifyPlan(env: NotifyEnv, db: D1Database, planId: number, siteUrl: string, ev?: Event | StageArgs | RunArgs, opts: { now?: number; quiet?: boolean } = {}): Promise<void> {
   if (!slackReady(env)) return
   const now = opts.now ?? Math.floor(Date.now() / 1000)
   try {
@@ -785,7 +785,7 @@ export async function notifyPlan(env: NotifyEnv, db: D1Database, planId: number,
     }
     // Batches no reply shows (their own notify died) are announced now, by
     // whichever notify runs next, each in its stager's reply.
-    for (const s of await unshownStagers(db, planId, now)) {
+    if (!opts.quiet) for (const s of await unshownStagers(db, planId, now)) {
       await announceStage(env, db, { channel, thread: ts, stager: s, now, ctx, sender: personSender(s, people[s.toLowerCase()], 'staged') })
     }
     // Stages landing together have notifies that interleave, and whichever sends last wins whatever it rendered. So each
@@ -856,6 +856,19 @@ export async function refreshThread(env: NotifyEnv, db: D1Database, planId: numb
   await notifyPlan(env, db, planId, siteUrl)
   out.parent = true
   return { ...out, ...await updateReplies(env, db, planId, siteUrl, { legacy: replies }) }
+}
+
+/** A new scan has landed, and only an event re-renders the card: the job's post-scan ping (`dt-cloud staged-card`) brings the
+ *  open plan's card up to it. An edit in place and nothing else: no card without a thread yet, none in another channel, no
+ *  reply for a batch a died notify left unshown. Says whether it edited. */
+export async function refreshStagedCard(env: NotifyEnv, db: D1Database, siteUrl: string): Promise<boolean> {
+  if (!slackReady(env)) return false
+  const id = await openPlanId(db)
+  if (id == null) return false
+  const plan = await db.prepare('SELECT slack_ts, slack_channel FROM plans WHERE id = ?').bind(id).first<{ slack_ts: string | null; slack_channel: string | null }>()
+  if (!plan?.slack_ts || plan.slack_channel !== env.SLACK_ADMIN_CHANNEL) return false
+  await notifyPlan(env, db, id, siteUrl, undefined, { quiet: true })
+  return true
 }
 
 /** Announce runs that just finished (an executor's reflection) in their
