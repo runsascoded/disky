@@ -1794,30 +1794,36 @@ def plan_sweep_execute(for_real: bool, run_dir: str) -> None:
 @option("-p", "--prefix", "prefixes", multiple=True, help="Restrict undo to keys under this prefix (repeatable)")
 @argument("run_dir")
 def plan_sweep_undo(dry_run: bool, prefixes: tuple[str, ...], run_dir: str) -> None:
-    """Undo a real run under RUN_DIR: remove its delete markers (recoverable
-    delete). Must run before `purge`."""
+    """Undo a real run under RUN_DIR: remove its delete markers. Must run before
+    `purge`. Exits 1 unless every logged key is live again (a key the bucket didn't
+    retain is `unrecoverable`)."""
     import json
 
     from .sweep import undo_run
 
     s = undo_run(run_dir, prefixes=list(prefixes) or None, dry_run=dry_run)
-    err(f"{'DRY ' if dry_run else ''}undo: restored {s['restored']} (failed {s['restore_failed']}, skipped {s['skipped']})")
+    err(f"{'DRY ' if dry_run else ''}undo: restored {s['restored']} (failed {s['restore_failed']}, already live {s['already_live']}, unrecoverable {s['unrecoverable']})")
     print(json.dumps(s))
+    if s["restore_failed"] or s["unrecoverable"]:
+        raise SystemExit(1)
 
 
 @plan_sweep.command("purge")
 @option("-n", "--dry-run", is_flag=True, help="Report what would be purged without touching anything")
 @argument("run_dir")
 def plan_sweep_purge(dry_run: bool, run_dir: str) -> None:
-    """Permanently drop every version of a real run's deleted keys under RUN_DIR
-    — the irreversible space-reclaim stage, after the undo hold."""
+    """Permanently drop the versions a real run's delete left behind under RUN_DIR
+    — the irreversible space-reclaim stage, after the undo hold. A logged key that
+    is live now is left whole. Exits 1 if any version couldn't be dropped."""
     import json
 
     from .sweep import purge_run
 
     s = purge_run(run_dir, dry_run=dry_run)
-    err(f"{'DRY ' if dry_run else ''}purge: {s['purged_versions']} versions / {s['purged_bytes']} bytes (failed {s['purge_failed']})")
+    err(f"{'DRY ' if dry_run else ''}purge: {s['purged_versions']} versions / {s['purged_bytes']} bytes (failed {s['purge_failed']}, live keys skipped {s['skipped_live']})")
     print(json.dumps(s))
+    if s["purge_failed"]:
+        raise SystemExit(1)
 
 
 @main.group()

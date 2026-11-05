@@ -427,6 +427,83 @@ def test_delete_undo_purge_lifecycle(tmp_path: Path) -> None:
     assert store.versions["marin/ckpt/a"] == []
 
 
+def _delete_a(tmp_path: Path) -> tuple[Path, _FakeVersionedStore]:
+    run = _run_with_manifest(tmp_path)
+    store = _FakeVersionedStore({"marin/ckpt/a": (100, 111)})
+    execute_plan(str(run), for_real=True, client=store)
+    return run, store
+
+
+def test_purge_leaves_a_key_written_since_the_run(tmp_path: Path) -> None:
+    run, store = _delete_a(tmp_path)
+    rewritten = store._ver(500, 777, False)
+    store.versions["marin/ckpt/a"].append(rewritten)
+
+    p = purge_run(str(run), client=store)
+
+    assert (p["purged_versions"], p["purged_bytes"], p["skipped_live"]) == (0, 0, 1)
+    assert store._live("marin/ckpt/a") == rewritten
+
+
+def test_purge_leaves_a_key_undo_restored(tmp_path: Path) -> None:
+    run, store = _delete_a(tmp_path)
+    undo_run(str(run), client=store)
+
+    p = purge_run(str(run), client=store)
+
+    assert (p["purged_versions"], p["skipped_live"]) == (0, 1)
+    assert store._live("marin/ckpt/a") is not None
+
+
+def test_undo_says_what_the_bucket_did_not_keep(tmp_path: Path) -> None:
+    run, store = _delete_a(tmp_path)
+    store.versions["marin/ckpt/a"] = []  # an unversioned bucket: the delete left nothing behind
+
+    u = undo_run(str(run), client=store)
+
+    assert (u["restored"], u["restore_failed"], u["already_live"], u["unrecoverable"]) == (0, 0, 0, 1)
+    assert json.loads((run / "undo-summary.json").read_text())["unrecoverable"] == 1
+
+
+def test_undo_summary_says_what_a_dying_job_restored(tmp_path: Path, monkeypatch) -> None:
+    run, store = _delete_a(tmp_path)
+    monkeypatch.setattr("dt_cloud.sweep.DELETE_BATCH", 1)
+    real, calls = store.delete_objects, []
+
+    def dies_on_the_second_batch(**kw: object) -> dict:
+        calls.append(kw)
+        if len(calls) == 2:
+            raise RuntimeError("the job died")
+        return real(**kw)
+
+    store.versions["marin/ckpt/b"] = list(store.versions["marin/ckpt/a"])
+    monkeypatch.setattr("dt_cloud.sweep._deleted_keys", lambda *_: ["marin/ckpt/a", "marin/ckpt/b"])
+    monkeypatch.setattr("dt_cloud.sweep.listing_roots", lambda *_: ["marin/ckpt/"])
+    monkeypatch.setattr(store, "delete_objects", dies_on_the_second_batch)
+
+    with pytest.raises(RuntimeError):
+        undo_run(str(run), client=store)
+
+    s = json.loads((run / "undo-summary.json").read_text())
+    assert (s["restored"], s["restore_failed"], s["unrecoverable"]) == (1, 0, 0)
+
+
+@pytest.mark.parametrize("command, summary, code", [
+    ("undo", {"restored": 3, "restore_failed": 0, "already_live": 0, "unrecoverable": 0, "skipped_live": 0}, 0),
+    ("undo", {"restored": 2, "restore_failed": 1, "already_live": 0, "unrecoverable": 0, "skipped_live": 0}, 1),
+    ("undo", {"restored": 0, "restore_failed": 0, "already_live": 0, "unrecoverable": 3, "skipped_live": 0}, 1),
+    ("purge", {"purged_versions": 2, "purged_bytes": 1, "purge_failed": 0, "skipped_live": 0}, 0),
+    ("purge", {"purged_versions": 1, "purged_bytes": 1, "purge_failed": 1, "skipped_live": 0}, 1),
+])
+def test_plan_sweep_undo_and_purge_exit_nonzero_short_of_done(command: str, summary: dict, code: int, monkeypatch) -> None:
+    from click.testing import CliRunner
+
+    from dt_cloud.cli import main
+
+    monkeypatch.setattr(f"dt_cloud.sweep.{command}_run", lambda *a, **k: summary)
+    assert CliRunner().invoke(main, ["plan-sweep", command, "run"]).exit_code == code
+
+
 def test_undo_dry_run_touches_nothing(tmp_path: Path) -> None:
     run = _run_with_manifest(tmp_path)
     store = _FakeVersionedStore({"marin/ckpt/a": (100, 111)})
