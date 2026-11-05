@@ -664,6 +664,9 @@ async function announceStage(env: SlackEnv, db: D1Database, o: { channel: string
   }
 }
 
+/** How many times a notify re-renders a thread its queue has moved past. Each stage has its own notify, so it needn't chase a stream. */
+const SETTLE_ROUNDS = 3
+
 /** Re-render the plan's parent message (posting it first if the plan has
  * none) and, with `event`, reply in its thread. Before replying, a thread
  * whose parent carries a ✅ (or a stage into an emptied queue) moves the plan
@@ -677,28 +680,32 @@ export async function notifyPlan(env: NotifyEnv, db: D1Database, planId: number,
     const v = await loadView(db, planId, siteUrl, !!env.GCP_SA_KEY)
     if (!v) return
     const full = env as NotifyEnv & Env
-    const queued = v.prefixes.filter(p => !v.deleted.has(p))
     const stage = ev && 'stage' in ev ? ev.stage : null
     const runEv = ev && 'run' in ev ? ev : null
     const said = ev && !('stage' in ev) && !('run' in ev) ? ev as Event : null
     const by = stage?.by ?? (runEv?.phase === 'dispatched' ? runEv.run.actor : said?.by?.email ?? null)
-    const [at, reg, people] = await Promise.all([
-      stagedStats(full, queued).catch(e => { console.log(`staged slack sizing failed for plan ${planId}: ${(e as Error).message}`); return null }),
-      loadRegistry(full).catch(() => ({}) as Awaited<ReturnType<typeof loadRegistry>>),
-      slackPeople(env, [...v.stagers, ...v.runs.map(r => r.actor), ...(by ? [by] : [])]),
-    ])
-    // The workspace's members first; anyone it doesn't know (a sign-in email outside it), as the site names them.
-    for (const e of [...v.stagers, ...v.runs.map(r => r.actor), ...(by ? [by] : [])]) {
-      const k = e.toLowerCase()
-      const r = people[k] ? undefined : registryPerson(reg, e)
-      if (r) people[k] = r
+    const render = async (v: NonNullable<Awaited<ReturnType<typeof loadView>>>) => {
+      const queued = v.prefixes.filter(p => !v.deleted.has(p))
+      const [at, reg, people] = await Promise.all([
+        stagedStats(full, queued).catch(e => { console.log(`staged slack sizing failed for plan ${planId}: ${(e as Error).message}`); return null }),
+        loadRegistry(full).catch(() => ({}) as Awaited<ReturnType<typeof loadRegistry>>),
+        slackPeople(env, [...v.stagers, ...v.runs.map(r => r.actor), ...(by ? [by] : [])]),
+      ])
+      // The workspace's members first; anyone it doesn't know (a sign-in email outside it), as the site names them.
+      for (const e of [...v.stagers, ...v.runs.map(r => r.actor), ...(by ? [by] : [])]) {
+        const k = e.toLowerCase()
+        const r = people[k] ? undefined : registryPerson(reg, e)
+        if (r) people[k] = r
     }
-    const names: Names = Object.fromEntries(Object.entries(people).flatMap(([e, p]) => p.name ? [[e, p.name]] : []))
-    const size = at ? sizeOf(at, queued, u => reg[u]?.name ?? u) : undefined
-    // Sized, prefixes empty at the scan leave the title's counts (the size line names them apart).
-    const last = lastRealRun(v.runs)
-    const lastOutcome = last?.finished_ts ? await lastRunOutcome(full)?.(last) : null
-    const parent = renderParent({ ...v, lastOutcome, queued: queuedOf(countedItems(v.live, v.deleted, at?.stats ?? null)), names, size, image: await stagedCardUrl(env, db, siteUrl, v.digest) ?? undefined })
+      const names: Names = Object.fromEntries(Object.entries(people).flatMap(([e, p]) => p.name ? [[e, p.name]] : []))
+      const size = at ? sizeOf(at, queued, u => reg[u]?.name ?? u) : undefined
+      // Sized, prefixes empty at the scan leave the title's counts (the size line names them apart).
+      const last = lastRealRun(v.runs)
+      const lastOutcome = last?.finished_ts ? await lastRunOutcome(full)?.(last) : null
+      const parent = renderParent({ ...v, lastOutcome, queued: queuedOf(countedItems(v.live, v.deleted, at?.stats ?? null)), names, size, image: await stagedCardUrl(env, db, siteUrl, v.digest) ?? undefined })
+      return { at, people, names, parent }
+    }
+    const { at, people, names, parent } = await render(v)
     const event: Event | undefined = runEv
       ? { text: runEvent(runEv.run, runEv.phase, { via: runEv.via, names, siteUrl, reason: runEv.reason, outcome: runEv.outcome }), ...(by ? { sender: personSender(by, people[by.toLowerCase()], 'dispatched') } : {}) }
       : said ? { ...said, text: typeof said.text === 'function' ? said.text(who(said.by?.email ?? '', names)) : said.text, ...(said.by ? { sender: personSender(said.by.email, people[said.by.email.toLowerCase()], said.by.verb) } : {}) }
@@ -757,6 +764,20 @@ export async function notifyPlan(env: NotifyEnv, db: D1Database, planId: number,
     // whichever notify runs next, each in its stager's reply.
     for (const s of await unshownStagers(db, planId, now)) {
       await announceStage(env, db, { channel, thread: ts, stager: s, now, ctx, sender: personSender(s, people[s.toLowerCase()], 'staged') })
+    }
+    // Stages landing together have notifies that interleave, and whichever sends last wins whatever it rendered. So each
+    // checks after sending: if the queue has moved on it renders again, and the last sender can't leave a stale thread.
+    let shown = v.digest
+    for (let i = 0; i < SETTLE_ROUNDS; i++) {
+      const now2 = await loadView(db, planId, siteUrl, !!env.GCP_SA_KEY)
+      if (!now2 || now2.digest === shown || now2.slack_ts !== ts) break
+      shown = now2.digest
+      const again = await render(now2)
+      await sendParent(env, channel, ts, again.parent)
+      if (stage) await announceStage(env, db, {
+        channel, thread: ts, stager: stage.by, now, ctx: { planId, siteUrl, names: again.names, stats: again.at?.stats ?? null },
+        sender: personSender(stage.by, again.people[stage.by.toLowerCase()], 'staged'),
+      })
     }
   } catch (e) {
     console.log(`staged slack notify failed for plan ${planId}: ${(e as Error).message}`)

@@ -47,7 +47,7 @@ interface Call { method: string; body: Record<string, unknown> }
 
 /** A fake Slack: posts get increasing ts (`200.000001`, …), the parent's
  *  reactions come from `reactions`, every call is recorded. */
-function fakeSlack({ reactions = {} as Record<string, string[]>, delayMs = 0 } = {}): Call[] {
+function fakeSlack({ reactions = {} as Record<string, string[]>, delayMs = 0, onCall = async (_c: Call): Promise<void> => {} } = {}): Call[] {
   const calls: Call[] = []
   let n = 0
   const json = (o: unknown) => new Response(JSON.stringify(o))
@@ -56,6 +56,7 @@ function fakeSlack({ reactions = {} as Record<string, string[]>, delayMs = 0 } =
     const method = url.pathname.replace('/api/', '')
     const body = (init?.body ? JSON.parse(String(init.body)) : Object.fromEntries(url.searchParams)) as Record<string, string>
     if (method !== 'users.lookupByEmail' && method !== 'users.info') calls.push({ method, body })
+    if (method !== 'users.lookupByEmail' && method !== 'users.info') await onCall({ method, body })
     if (delayMs) await new Promise(r => setTimeout(r, delayMs))
     switch (method) {
       case 'chat.postMessage': return json({ ok: true, channel: body.channel, ts: `200.${String(++n).padStart(6, '0')}` })
@@ -118,6 +119,30 @@ describe('D1', () => {
         [1000, 1000, 501],
         [['chat.update', PARENT, PARENT_TEXT(2500, '2.4 PiB', '25,000', '+1 staged prefix empty at scan, not counted\n')]],
       ])
+    })
+  })
+
+  describe('a stage landing while a notify is mid-flight', () => {
+    it('a notify that rendered too early re-renders the parent and the reply once it has sent, so neither stays stale', async () => {
+      let raced = false
+      const dbRef: { db?: D1Database } = {}
+      const calls = fakeSlack({
+        onCall: async c => {
+          if (c.method !== 'chat.update' || c.body.ts !== PARENT || raced) return
+          raced = true
+          await stage(dbRef.db!, 2, ['gs://b/late/'], { ts: 1000 })
+        },
+      })
+      const { db } = await planDb()
+      dbRef.db = db
+      await notifyPlan(env, db, 1, SITE, await stage(db, 1, ['gs://b/first/'], { ts: 1000 }), { now: 1000 })
+      const firstLine = (c: Call) => sectionText(c.body.blocks).split('\n')[0]
+      const prefixes = (c: Call) => Number(/(\d+) prefix/.exec(firstLine(c))![1])
+      const replies = calls.filter(c => c.body.thread_ts === PARENT || (c.method === 'chat.update' && c.body.ts !== PARENT))
+      expect({
+        parent: calls.filter(c => c.method === 'chat.update' && c.body.ts === PARENT).map(prefixes),
+        reply: firstLine(replies.at(-1)!),
+      }).toEqual({ parent: [2, 3], reply: ':wastebasket: *Ann Bee* staged 2 paths in 2 batches · *2.0 TiB* · 20 objects' })
     })
   })
 
