@@ -13,7 +13,8 @@
  */
 import type { D1Database } from '@cloudflare/workers-types'
 import type { RunOutcome } from '../../src/runs.js'
-import { type FinishedRun, type Gate, openPlanId, planDigest, planItemLines, planRuns, realGate, type RunRow, unstageDeleted } from './plans.js'
+import { type FinishedRun, type Gate, openPlanId, planDigest, planItemLines, planRuns, realGate, type RunRow, scanDeletions, unstageDeleted } from './plans.js'
+import { withoutDeleted } from '../../src/stagedScan.js'
 import { slackApi, slackPeople, type SlackPerson, slackReady, type SlackEnv, type SlackResult } from './slack.js'
 import type { Env } from './auth.js'
 import { minSoftDeleteDays } from './sweepSettings.js'
@@ -480,7 +481,7 @@ export interface ScanStats { scan: string; stats: Record<string, PrefixStat> }
  *  row groups) and looked up `MAX_PREFIXES` at a time, as `/staged` chunks its
  *  `POST /api/prefixes`. Null when the index isn't readable here; a failed
  *  lookup throws (an unsized prefix is never counted as empty). */
-export async function stagedStats(env: Env, prefixes: readonly string[]): Promise<ScanStats | null> {
+export async function stagedStats(env: Env, prefixes: readonly string[], db: D1Database | null = null): Promise<ScanStats | null> {
   if (!prefixes.length || !storeReady(env)) return null
   const scans = (await pathScans(env, true)).results
   const scan = scans[scans.length - 1]?.date
@@ -488,7 +489,8 @@ export async function stagedStats(env: Env, prefixes: readonly string[]): Promis
   const sorted = [...new Set(prefixes)].sort()
   const stats: Record<string, PrefixStat> = {}
   for (let i = 0; i < sorted.length; i += MAX_PREFIXES) Object.assign(stats, (await prefixesAt(env, scan, sorted.slice(i, i + MAX_PREFIXES))).stats)
-  return { scan, stats }
+  // Given the plan's D1: a queue's sizes, less what's been deleted since this scan (an activity row's are the scan's own).
+  return { scan, stats: db ? withoutDeleted(stats, await scanDeletions(db, scan)) : stats }
 }
 
 /** `prefixes`' totals and top owners (by attributed bytes) from `at`. */
@@ -710,7 +712,7 @@ export async function notifyPlan(env: NotifyEnv, db: D1Database, planId: number,
     const render = async (v: NonNullable<Awaited<ReturnType<typeof loadView>>>) => {
       const queued = v.prefixes.filter(p => !v.deleted.has(p))
       const [at, reg, people] = await Promise.all([
-        stagedStats(full, queued).catch(e => { console.log(`staged slack sizing failed for plan ${planId}: ${(e as Error).message}`); return null }),
+        stagedStats(full, queued, db).catch(e => { console.log(`staged slack sizing failed for plan ${planId}: ${(e as Error).message}`); return null }),
         loadRegistry(full).catch(() => ({}) as Awaited<ReturnType<typeof loadRegistry>>),
         slackPeople(env, [...v.stagers, ...v.runs.map(r => r.actor), ...(by ? [by] : [])]),
       ])
@@ -825,7 +827,7 @@ export async function updateReplies(env: NotifyEnv, db: D1Database, planId: numb
   const items = (await db.prepare('SELECT prefix, added_by FROM plan_items WHERE plan_id = ?').bind(planId).all<{ prefix: string; added_by: string }>()).results
   const batchBy = (await db.prepare('SELECT created_by FROM stage_batches WHERE plan_id = ?').bind(planId).all<{ created_by: string }>()).results.map(b => b.created_by)
   const [at, names] = await Promise.all([
-    stagedStats(env as NotifyEnv & Env, items.map(i => i.prefix)).catch(() => null),
+    stagedStats(env as NotifyEnv & Env, items.map(i => i.prefix), db).catch(() => null),
     slackNames(env, [...new Set(batchBy)]),
   ])
   const ctx: ReplyCtx = { planId, siteUrl, names, stats: at?.stats ?? null }

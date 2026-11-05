@@ -34,7 +34,7 @@ import { useCanStage, useIdent } from './auth'
 import { applyLedger } from './ledgerOverlay'
 import { useOwnerIndex, useOwners } from './owners'
 import { useRowSelection, useRowSelectionKeys } from './rowSelection'
-import { CAPS, useDispatch, useExecJobs, usePrefixHistory, useRunAction, useRunFiles, useStagedPlan, useUnstage } from './plans'
+import { CAPS, useDispatch, useExecJobs, usePrefixHistory, useRunAction, useRunFiles, useScanDeletions, useStagedPlan, useUnstage } from './plans'
 import type { EmptiedBatch, StagedItem } from './plans'
 import { itemsDigest, joinRuns, LIVE_STATES, reusableDryRun, runFilesRel, viewBuckets, viewLive, type ProgressFile } from './runs'
 import { PrefixRecovery } from './PrefixRecovery'
@@ -52,7 +52,7 @@ import { machineFor } from '../functions/_lib/sweepMachines'
 import { Loading, Skeleton } from './Busy'
 import { copyText } from './CopyName'
 import { Paginated, Pager, usePaged } from './Pager'
-import { sizedScan } from './stagedScan'
+import { sizedScan, withoutDeleted } from './stagedScan'
 
 const iso = (ts: number): string => new Date(ts * 1000).toISOString()
 const store = DEFAULT_STORE
@@ -224,7 +224,10 @@ export function StagedPage() {
   const date = sizedScan(scans, picked)
   const prefixes = useMemo(() => items.map(it => it.prefix), [items])
   const statsQ = usePrefixes(date, prefixes)
-  const stats = statsQ.data
+  // Less what a run on this scan has since deleted, as the Slack card counts it.
+  const deletionsQ = useScanDeletions(date, anyLive)
+  const stats = useMemo(() => statsQ.data && deletionsQ.data ? withoutDeleted(statsQ.data, deletionsQ.data.bands) : undefined, [statsQ.data, deletionsQ.data])
+  const sizing = statsQ.isLoading || deletionsQ.isLoading
   const metaQ = useQuery<Meta>({
     queryKey: ['meta', store.key, date],
     queryFn: () => fetch(`${store.base}/${date}/meta.json`).then(r => r.json() as Promise<Meta>),
@@ -242,7 +245,7 @@ export function StagedPage() {
     return (r: { prefix: string, stat?: PrefixStat }) => r.stat ? idleness(r.stat.a, r.stat.d, access, logged(prefixBucket(r.prefix))) : null
   }, [access])
   const ownerIdx = useOwnerIndex(useOwners(!!store.owners).data)
-  const error = unstage.error ?? runAction.error ?? staged.error ?? statsQ.error ?? history.error
+  const error = unstage.error ?? runAction.error ?? staged.error ?? statsQ.error ?? deletionsQ.error ?? history.error
 
   const rows: Row[] = useMemo(() => items.map(it => ({ ...it, name: it.prefix, to: `/${prefixToPath(it.prefix)}`, stat: stats?.[it.prefix] })), [items, stats])
   // The view lives in the URL, so a link carries it: `?q=hedy|grace&s=-b`
@@ -415,8 +418,8 @@ export function StagedPage() {
     return t ? overlay(t) : null
   }, [selKey, stats, ownerIdx]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  const sizesNote = !date ? null : statsQ.isLoading ? 'sizing…' : stats ? null : 'sizes unavailable'
-  const loadingContents = items.length > 0 && (!date || statsQ.isLoading || history.isLoading || progressQs.some(query => query.isLoading))
+  const sizesNote = !date ? null : sizing ? 'sizing…' : stats ? null : 'sizes unavailable'
+  const loadingContents = items.length > 0 && (!date || sizing || history.isLoading || progressQs.some(query => query.isLoading))
   // A batch permalink scrolls its session in, following it while the map and sizes land above it; scrolling
   // names the session in view in the hash. A member batch's link lands on its session.
   const sessionAnchors = useMemo(() => groups.filter(g => g.id != null && g.id > 0).map(g => batchAnchor(g.id)), [groups])
@@ -472,7 +475,7 @@ export function StagedPage() {
               shareOf={all.b}
               userIdx={userIdx}
               ownerIdx={ownerIdx}
-              loading={statsQ.isLoading}
+              loading={sizing}
               extra={[...(thru ? [{
                 key: 'idle', label: 'idle', className: 'nb idle', sort: (r: Row) => idleSortKey(idleOf(r)),
                 cell: (r: Row) => (i => i == null ? <span className="dim">—</span>
@@ -538,7 +541,7 @@ export function StagedPage() {
               {stats && <> · {fmtBytes(everything.b)} · {fmtN(everything.o)} objects</>}
             </h2>
             {activeRows.length > 0 && <label className="scan-pick">sized at scan <select value={date} onChange={e => setPicked(e.target.value === scans[0] ? null : e.target.value)} aria-label="scan">{scans.map(s => <option key={s}>{s}</option>)}</select>
-              {statsQ.isLoading ? <Loading label="Sizing prefixes…" /> : sizesNote && <span className="dim"> {sizesNote}</span>}
+              {sizing ? <Loading label="Sizing prefixes…" /> : sizesNote && <span className="dim"> {sizesNote}</span>}
               {all.gone > 0 && <Tooltip content="Staged prefixes with nothing under them at this scan (already deleted, or never there)."><span className="dim"> · {all.gone} empty</span></Tooltip>}
             </label>}
           </div>
@@ -563,7 +566,7 @@ export function StagedPage() {
           </div> : stats ? <section className="staged-no-map" aria-live="polite">
             <h3>{activeShownRows.length ? 'No sized rectangles to draw' : 'Nothing is staged.'}</h3>
             {activeShownRows.length > 0 && <p>{fmtN(all.o)} zero-byte objects at scan {date}.</p>}
-          </section> : statsQ.isLoading ? <Skeleton height={180} label="Sizing staged prefixes…" /> : activeRows.length > 0 ? <p className="dim">{sizesNote ?? 'No size data available.'}</p> : null}
+          </section> : sizing ? <Skeleton height={180} label="Sizing staged prefixes…" /> : activeRows.length > 0 ? <p className="dim">{sizesNote ?? 'No size data available.'}</p> : null}
 
           <div className="staged-filter">
             <input type="search" value={q} onChange={e => setQ(e.target.value || undefined)} placeholder={activeRows.length ? 'filter: hedy|grace, isoflop -nemotron, owner:will, staged-by:david' : 'filter batch history…'}

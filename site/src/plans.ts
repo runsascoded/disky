@@ -4,6 +4,7 @@ import { DEFAULT_STORE } from './stores'
 import { type DeletionRun, EXEC_CAPS, type ExecCaps, type ExecJob } from './runs'
 import { HttpError, type PlanItem, stageMany as stageManyVia } from './batches'
 import { SWEEP_SETTINGS_KEY } from './softDelete'
+import type { ScanDeletion } from './stagedScan'
 
 export type { DeletionRun, ExecJob } from './runs'
 export { LIVE_STATES } from './runs'
@@ -154,6 +155,17 @@ export function usePrefixHistory(planId: number | null, live: boolean) {
     queryKey: ['prefix-history', planId],
     queryFn: () => call(`/api/plans/prefix-history?id=${planId}`),
     enabled: planId != null,
+    refetchInterval: live ? 30_000 : false,
+    staleTime: 20_000,
+  })
+}
+
+/** What a scan's sizes are out of date by (`withoutDeleted`). */
+export function useScanDeletions(scan: string, live: boolean) {
+  return useQuery<{ bands: ScanDeletion[] }, Error>({
+    queryKey: ['scan-deletions', scan],
+    queryFn: () => call(`/api/plans/scan-deletions?scan=${encodeURIComponent(scan)}`),
+    enabled: !!scan,
     refetchInterval: live ? 30_000 : false,
     staleTime: 20_000,
   })

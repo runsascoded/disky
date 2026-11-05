@@ -5,6 +5,7 @@
 // live here; the HTTP surface is api/plans/[[path]].ts.
 import type { D1Database } from "@cloudflare/workers-types"
 import type { RunOutcome } from "../../src/runs.js"
+import type { ScanDeletion } from "../../src/stagedScan.js"
 
 // A plan prefix stored as `<scheme><bucket>/<path>/` (the deployment's
 // `STORE_SCHEME`: `s3://`, `gs://`, `file:///`); normalized to a relative key
@@ -435,6 +436,15 @@ export async function runDetail(db: D1Database, runId: string): Promise<{ run: R
 }
 
 /** The shared open plan trash gestures land in (the newest open one), or null. */
+/** What finished real runs on exactly `scan` recorded as deleted, not undone: what `scan`'s sizes are out of date by (`withoutDeleted`). */
+export async function scanDeletions(db: D1Database, scan: string): Promise<ScanDeletion[]> {
+  return (await db.prepare(`
+    SELECT b.prefix, b.bytes, b.objects, b.gone FROM deletion_bands b JOIN deletion_runs r ON r.run_id = b.run_id
+    WHERE r.scan = ? AND r.mode = 'real' AND r.finished_ts IS NOT NULL AND COALESCE(b.undone_objects, 0) = 0
+    ORDER BY b.prefix, r.run_id
+  `).bind(scan).all<ScanDeletion>()).results
+}
+
 export async function openPlanId(db: D1Database): Promise<number | null> {
   const row = await db.prepare("SELECT id FROM plans WHERE state = 'open' ORDER BY created_ts DESC LIMIT 1").first<{ id: number }>()
   return row?.id ?? null

@@ -122,6 +122,30 @@ describe('D1', () => {
     })
   })
 
+  describe('re-staged after a run deleted it, sized at the scan the run read', () => {
+    async function deleted(raw: Awaited<ReturnType<typeof sqliteD1>>['raw'], prefix: string, scan: string) {
+      raw.exec(`INSERT INTO deletion_runs (run_id, ${RUN_DIR}, scan, head, exec_head, actor, mode, started_ts, finished_ts, log_dir, plan_id)
+        VALUES ('r1', 'p', '${scan}', 0, 0, 'ann', 'real', 10, 20, 'd', 1)`)
+      raw.exec(`INSERT INTO deletion_bands (run_id, prefix, bytes, objects) VALUES ('r1', '${prefix}', ${TiB}, 10)`)
+    }
+    it('is empty, not live, until a later scan', async () => {
+      const calls = fakeSlack()
+      const { db, raw } = await planDb()
+      await deleted(raw, 'gs://b/x/', SCAN)
+      await stage(db, 1, ['gs://b/x/'], { ts: 30 })
+      await notifyPlan(env, db, 1, SITE, undefined, { now: 1000 })
+      expect(calls.map(show)).toEqual([`update ${PARENT}: *Staged for deletion* · plan #1: *1 prefix · 1.0 TiB · 10 objects* at scan ${SCAN}\nowners: Ann Bee 1.0 TiB\n+1 staged prefix empty at scan, not counted\nstaged by Ann Bee`])
+    })
+    it('written back since: a scan after the run holds it, and it is live', async () => {
+      const calls = fakeSlack()
+      const { db, raw } = await planDb()
+      await deleted(raw, 'gs://b/x/', '2026-10-07')
+      await stage(db, 1, ['gs://b/x/'], { ts: 30 })
+      await notifyPlan(env, db, 1, SITE, undefined, { now: 1000 })
+      expect(calls.map(show)).toEqual([`update ${PARENT}: ${PARENT_TEXT(2, '2.0 TiB', '20')}`])
+    })
+  })
+
   describe('`refreshStagedCard`: the post-scan ping', () => {
     it('edits the card in place and posts nothing, even for a batch no reply shows', async () => {
       const calls = fakeSlack()
