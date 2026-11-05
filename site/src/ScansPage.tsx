@@ -25,6 +25,7 @@ import {
 } from './scanRunsModel'
 import { colorer, fmtDur, fmtRunTime, getJson, type Links, PhaseBar, QUIET_TIP, runDay, RunWhen, scanRunsApi, scansHref, scansStore, Status, useScanRuns } from './scanRunsUi'
 import { brushRole, dagNodes, processOf, type DagNode, type Hl, type RunDagRow } from './runDag'
+import { Pager, usePaged } from './Pager'
 import './scans.scss'
 
 type DetailResponse = Links & {
@@ -286,6 +287,7 @@ export function ScansPage() {
   const kinds = [...new Set(runs.map(r => r.run.kind))].sort()
   const filtered = runs.filter(r => (!kind || r.run.kind === kind) && (!status || runOutcome(r.run, r.phase_issues) === status))
   const shown = filtered.filter(r => inSpan(span, r.run.started_ts))
+  const paged = usePaged(shown)
   return (
     <main className="staged-page scans-page">
       <SiteNav />
@@ -318,7 +320,7 @@ export function ScansPage() {
               <th className="hide-md">links</th>
             </tr></thead>
             <tbody>
-              {shown.map(s => {
+              {paged.rows.map(s => {
                 const r = s.run
                 const maint = isMaintenance(r.kind)
                 const map = r.status === 'succeeded' && !maint ? mapHref(r.scan, store.path, slug) : null
@@ -486,6 +488,7 @@ function RunDag({ nodes, edges, brush }: { nodes: DagNode[]; edges: [string, str
 /** The pinned step's drawer: each of its tasks (a fan-out's member by its tag), the machine it ran on, its phases,
  * timing and logs. */
 function StepDrawer({ node, run, project, onClose }: { node: DagNode; run: ScanRun; project: string | null; onClose: () => void }) {
+  const paged = usePaged(node.tasks)
   const t0 = run.started_ts
   const now = Math.floor(Date.now() / 1000)
   return (
@@ -499,7 +502,7 @@ function StepDrawer({ node, run, project, onClose }: { node: DagNode; run: ScanR
           <thead><tr>
             {node.tasks.some(t => t.tag) && <th>task</th>}<th>phases</th><th>machine</th><th className="num">start</th><th className="num">duration</th><th>logs</th>
           </tr></thead>
-          <tbody>{node.tasks.map(t => {
+          <tbody>{paged.rows.map(t => {
             const end = t.end ?? (t.status === 'running' ? now : null)
             return (
               <tr key={t.task}>
@@ -514,21 +517,23 @@ function StepDrawer({ node, run, project, onClose }: { node: DagNode; run: ScanR
           })}</tbody>
         </table>
       </div>
+      <Pager paged={paged} label="Step tasks" />
     </div>
   )
 }
 
 /** A Nextflow run's step tasks: each its own Batch job, with its machine, phases and logs. */
 function TasksTable({ tasks, run, project }: { tasks: RunTask[]; run: ScanRun; project: string | null }) {
+  const paged = usePaged(tasks)
   const t0 = run.started_ts
-  return (
+  return (<>
     <div className="runs-wrap">
       <table className="runs sr-tasks">
         <thead><tr>
           <th>phases</th><th>machine</th><th className="num">start</th><th className="num">duration</th>
           <th><Tooltip content="Nextflow deletes a task's Batch job when it finishes (its logs stay), so the job links only while it runs.">Batch job</Tooltip></th><th>logs</th>
         </tr></thead>
-        <tbody>{tasks.map(t => {
+        <tbody>{paged.rows.map(t => {
           const live = t.status === 'running' && project && run.region ? batchHref(project, run.region, t.job_name) : null
           const end = t.end ?? (t.status === 'running' ? Math.floor(Date.now() / 1000) : null)
           return (
@@ -544,7 +549,8 @@ function TasksTable({ tasks, run, project }: { tasks: RunTask[]; run: ScanRun; p
         })}</tbody>
       </table>
     </div>
-  )
+    <Pager paged={paged} label="Tasks" />
+  </>)
 }
 
 function OutputsTable({ outputs, meta }: { outputs: OutputDelta[]; meta: string | null }) {

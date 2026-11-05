@@ -7,6 +7,7 @@ import { NO_AUTOFILL } from './noAutofill'
 import { relAgo } from './prefixes'
 import { SiteNav } from './SiteNav'
 import { useDocTitle } from './title'
+import { Paginated } from './Pager'
 
 // /admin/activity — the activity feed (specs/done/activity-feed.md), admin only: each person's bursts of activity
 // (server actions and, while the session log is on, their page loads, URL changes and clicks), newest first; a
@@ -80,6 +81,8 @@ const withBurst = (sp: URLSearchParams, id: number | null): string => {
   return n.toString()
 }
 
+const BURST_SIZES = [200]
+
 function BurstDetail({ id }: { id: number }) {
   const q = useQuery({
     queryKey: ['activity', 'burst', id],
@@ -105,11 +108,11 @@ function BurstDetail({ id }: { id: number }) {
         : pages.length > 0 && <p className="session-meta">pages: {pages.slice(0, 8).map(([p, n]) => <Fragment key={p}><code>{p}</code>{n > 1 ? ` ×${n}` : ''} </Fragment>)}</p>}
       {events.length
         ? (
-          <table className="sessions timeline">
+          <Paginated rows={events} sizes={BURST_SIZES} label="Burst events">{(page, from) => <table className="sessions timeline">
             <thead><tr><th className="num">time</th><th>kind</th><th>what</th></tr></thead>
             <tbody>
-              {events.map((e, i) => (
-                <tr key={i} className={e.kind === 'error' ? 'has-err' : ''}>
+              {page.map((e, i) => (
+                <tr key={from + i} className={e.kind === 'error' ? 'has-err' : ''}>
                   <td className="num"><code className="dim">{fmtClock(e.ts)}</code></td><td>{e.kind}</td>
                   <td className="ev">
                     {e.kind === 'error' ? <>{e.line}{e.route && <> on <code>{e.route}</code></>}</> : <Line text={e.line} />}
@@ -118,7 +121,7 @@ function BurstDetail({ id }: { id: number }) {
                 </tr>
               ))}
             </tbody>
-          </table>
+          </table>}</Paginated>
         )
         : <p className="dim">No changes: only browsing.</p>}
     </div>

@@ -852,3 +852,39 @@ def test_a_dry_run_goes_on_past_a_failed_start_record(tmp_path, monkeypatch):
     assert executed_plans == [False]
     assert not (plan_dir / "failure.json").exists()
     assert logged[:2] == ["execute (dry-run) plan 1 ('p')", "WARN: deletion-run start record failed: D1 query failed (503): overloaded"]
+
+
+def test_an_unanswered_delete_ends_the_job_red_after_recording_bands_that_leave_it_out(source, tmp_path, monkeypatch, d1):
+    """What D1 holds of a run with a failed directory: a finished row and a band counting only the answered deletes, with no
+    column for the unanswered one. The nonzero exit is what says the run ended without a result (Batch: FAILED, so
+    `sweepReflect` writes the empty digest), and what keeps the site from discounting the run's bands (`scanDeletions`)."""
+    from dt_cloud import cli
+
+    monkeypatch.setattr("dt_cloud.sweep_progress.write_samples", lambda *_: None)
+    directory, plan = source
+    rows = ROWS[:6]
+    rewrite(directory, rows)
+    _, run, args = generation_run("execute-manifest", directory, plan, tmp_path, monkeypatch)
+
+    def unanswered(client, bucket, batch):
+        return [(blob, "delete_failed" if blob.name == rows[0]["name"] else "delete") for blob in batch]
+
+    def exit_code(code):
+        raise SystemExit(code)
+
+    monkeypatch.setattr(sweep_reviewed, "XmlDeleter", lambda **_: unanswered)
+    monkeypatch.setattr(cli.os, "_exit", exit_code)
+    executed = CliRunner().invoke(cli.main, args)
+    # 130: an unanswered delete stops new submissions through the run's own stop flag.
+    assert executed.exit_code == 130
+    summary = json.loads((run / "deleted-summary.json").read_text())["buckets"]["b1"]
+    assert {key: summary[key] for key in ("decisions", "failed_dirs", "bands", "error")} == {
+        "decisions": {"delete": 5, "delete_failed": 1},
+        "failed_dirs": [{"dir": "a/d0", "objects": 1}],
+        "bands": {"gs://b1/a/": {"bytes": 10, "objects": 5, "failed": 1}},
+        "error": "reviewed batch contains failed deletions; stopping new submissions",
+    }
+    assert [tuple(row) for row in d1.execute("SELECT mode, finished_ts IS NOT NULL, deleted_objects, plan_digest FROM deletion_runs")] == [("real", 1, 5, None)]
+    assert [tuple(band) for band in d1.execute("SELECT prefix, bytes, objects, gone, overwritten, drift_new_objects, undone_objects FROM deletion_bands")] == [
+        ("gs://b1/a/", 10, 5, 0, 0, 0, 0),
+    ]

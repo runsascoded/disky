@@ -13,7 +13,8 @@
  */
 import type { D1Database } from '@cloudflare/workers-types'
 import type { RunOutcome } from '../../src/runs.js'
-import { type FinishedRun, type Gate, planDigest, planItemLines, planRuns, realGate, type RunRow, unstageDeleted } from './plans.js'
+import { type FinishedRun, type Gate, openPlanId, planDigest, planItemLines, planRuns, realGate, type RunRow, scanDeletions, unstageDeleted } from './plans.js'
+import { withoutDeleted } from '../../src/stagedScan.js'
 import { slackApi, slackPeople, type SlackPerson, slackReady, type SlackEnv, type SlackResult } from './slack.js'
 import type { Env } from './auth.js'
 import { minSoftDeleteDays } from './sweepSettings.js'
@@ -366,10 +367,10 @@ function skipsLine(o?: RunOutcome): string {
 
 /** A run's thread reply: the actor by name, the run id linking to its row on
  *  `/staged`. */
-export function runEvent(r: RunRow, phase: 'dispatched' | 'finished' | 'failed', o: { via?: string | null; names?: Names; siteUrl?: string; reason?: string; outcome?: RunOutcome } = {}): string {
+export function runEvent(r: RunRow, phase: 'dispatched' | 'finished' | 'failed', o: { via?: string | null; names?: Names; siteUrl?: string; reason?: string; outcome?: RunOutcome; expected?: { bytes: number; objects: number } } = {}): string {
   const kind = r.mode === 'dry' ? 'Dry-run' : '*Real deletion*'
   const id = o.siteUrl ? `<${runUrl(o.siteUrl, r.run_id)}|${r.run_id}>` : `\`${r.run_id}\``
-  if (phase === 'dispatched') return `${r.mode === 'dry' ? ':test_tube:' : ':rotating_light:'} ${kind} dispatched by ${who(r.actor, o.names)}${o.via ? ` via ${o.via}` : ''} on scan ${r.scan} (${id})`
+  if (phase === 'dispatched') return `${r.mode === 'dry' ? ':test_tube:' : ':rotating_light:'} ${kind} dispatched by ${who(r.actor, o.names)}${o.via ? ` via ${o.via}` : ''} on scan ${r.scan} (${id})${o.expected ? `: expected ${fmtBytes(o.expected.bytes)} / ${fmtN(o.expected.objects)} objects` : ''}`
   if (phase === 'failed' && o.outcome?.totals) {
     const verb = o.outcome.attempted ? 'attempted' : 'deleted'
     const size = `*${fmtBytes(r.deleted_bytes)}* / ${fmtN(r.deleted_objects)} objects`
@@ -446,7 +447,7 @@ export async function stagedImageVersion(env: Env, digest: string): Promise<stri
 export interface StageArgs { stage: { planId: number; batchId: number; by: string; prefixes: string[]; covered: number; note: string | null; siteUrl: string } }
 /** A run's reply, rendered here so it can carry its actor's name (and, for a
  *  dispatch, post as them). */
-export interface RunArgs { run: RunRow; phase: 'dispatched' | 'finished' | 'failed'; via?: string | null; reason?: string; outcome?: RunOutcome }
+export interface RunArgs { run: RunRow; phase: 'dispatched' | 'finished' | 'failed'; via?: string | null; reason?: string; outcome?: RunOutcome; expected?: { bytes: number; objects: number } }
 
 /** How automatic posts name `emails`: their Slack names where the workspace
  *  knows them (callers fall back to the local part). */
@@ -480,7 +481,7 @@ export interface ScanStats { scan: string; stats: Record<string, PrefixStat> }
  *  row groups) and looked up `MAX_PREFIXES` at a time, as `/staged` chunks its
  *  `POST /api/prefixes`. Null when the index isn't readable here; a failed
  *  lookup throws (an unsized prefix is never counted as empty). */
-export async function stagedStats(env: Env, prefixes: readonly string[]): Promise<ScanStats | null> {
+export async function stagedStats(env: Env, prefixes: readonly string[], db: D1Database | null = null): Promise<ScanStats | null> {
   if (!prefixes.length || !storeReady(env)) return null
   const scans = (await pathScans(env, true)).results
   const scan = scans[scans.length - 1]?.date
@@ -488,7 +489,8 @@ export async function stagedStats(env: Env, prefixes: readonly string[]): Promis
   const sorted = [...new Set(prefixes)].sort()
   const stats: Record<string, PrefixStat> = {}
   for (let i = 0; i < sorted.length; i += MAX_PREFIXES) Object.assign(stats, (await prefixesAt(env, scan, sorted.slice(i, i + MAX_PREFIXES))).stats)
-  return { scan, stats }
+  // Given the plan's D1: a queue's sizes, less what's been deleted since this scan (an activity row's are the scan's own).
+  return { scan, stats: db ? withoutDeleted(stats, await scanDeletions(db, scan)) : stats }
 }
 
 /** `prefixes`' totals and top owners (by attributed bytes) from `at`. */
@@ -696,7 +698,7 @@ const SETTLE_ROUNDS = 3
  * to a new thread: a new parent, a pointer in the old thread, and the old
  * parent marked done. A thread in another channel than `SLACK_ADMIN_CHANNEL`
  * is left alone and a new one starts there. Best-effort; never throws. */
-export async function notifyPlan(env: NotifyEnv, db: D1Database, planId: number, siteUrl: string, ev?: Event | StageArgs | RunArgs, opts: { now?: number } = {}): Promise<void> {
+export async function notifyPlan(env: NotifyEnv, db: D1Database, planId: number, siteUrl: string, ev?: Event | StageArgs | RunArgs, opts: { now?: number; quiet?: boolean } = {}): Promise<void> {
   if (!slackReady(env)) return
   const now = opts.now ?? Math.floor(Date.now() / 1000)
   try {
@@ -710,7 +712,7 @@ export async function notifyPlan(env: NotifyEnv, db: D1Database, planId: number,
     const render = async (v: NonNullable<Awaited<ReturnType<typeof loadView>>>) => {
       const queued = v.prefixes.filter(p => !v.deleted.has(p))
       const [at, reg, people] = await Promise.all([
-        stagedStats(full, queued).catch(e => { console.log(`staged slack sizing failed for plan ${planId}: ${(e as Error).message}`); return null }),
+        stagedStats(full, queued, db).catch(e => { console.log(`staged slack sizing failed for plan ${planId}: ${(e as Error).message}`); return null }),
         loadRegistry(full).catch(() => ({}) as Awaited<ReturnType<typeof loadRegistry>>),
         slackPeople(env, [...v.stagers, ...v.runs.map(r => r.actor), ...(by ? [by] : [])]),
       ])
@@ -730,7 +732,7 @@ export async function notifyPlan(env: NotifyEnv, db: D1Database, planId: number,
     }
     const { at, people, names, parent } = await render(v)
     const event: Event | undefined = runEv
-      ? { text: runEvent(runEv.run, runEv.phase, { via: runEv.via, names, siteUrl, reason: runEv.reason, outcome: runEv.outcome }), ...(by ? { sender: personSender(by, people[by.toLowerCase()], 'dispatched') } : {}) }
+      ? { text: runEvent(runEv.run, runEv.phase, { via: runEv.via, names, siteUrl, reason: runEv.reason, outcome: runEv.outcome, expected: runEv.expected }), ...(by ? { sender: personSender(by, people[by.toLowerCase()], 'dispatched') } : {}) }
       : said ? { ...said, text: typeof said.text === 'function' ? said.text(who(said.by?.email ?? '', names)) : said.text, ...(said.by ? { sender: personSender(said.by.email, people[said.by.email.toLowerCase()], said.by.verb) } : {}) }
       : undefined
     const channel = env.SLACK_ADMIN_CHANNEL!
@@ -785,7 +787,7 @@ export async function notifyPlan(env: NotifyEnv, db: D1Database, planId: number,
     }
     // Batches no reply shows (their own notify died) are announced now, by
     // whichever notify runs next, each in its stager's reply.
-    for (const s of await unshownStagers(db, planId, now)) {
+    if (!opts.quiet) for (const s of await unshownStagers(db, planId, now)) {
       await announceStage(env, db, { channel, thread: ts, stager: s, now, ctx, sender: personSender(s, people[s.toLowerCase()], 'staged') })
     }
     // Stages landing together have notifies that interleave, and whichever sends last wins whatever it rendered. So each
@@ -825,7 +827,7 @@ export async function updateReplies(env: NotifyEnv, db: D1Database, planId: numb
   const items = (await db.prepare('SELECT prefix, added_by FROM plan_items WHERE plan_id = ?').bind(planId).all<{ prefix: string; added_by: string }>()).results
   const batchBy = (await db.prepare('SELECT created_by FROM stage_batches WHERE plan_id = ?').bind(planId).all<{ created_by: string }>()).results.map(b => b.created_by)
   const [at, names] = await Promise.all([
-    stagedStats(env as NotifyEnv & Env, items.map(i => i.prefix)).catch(() => null),
+    stagedStats(env as NotifyEnv & Env, items.map(i => i.prefix), db).catch(() => null),
     slackNames(env, [...new Set(batchBy)]),
   ])
   const ctx: ReplyCtx = { planId, siteUrl, names, stats: at?.stats ?? null }
@@ -856,6 +858,19 @@ export async function refreshThread(env: NotifyEnv, db: D1Database, planId: numb
   await notifyPlan(env, db, planId, siteUrl)
   out.parent = true
   return { ...out, ...await updateReplies(env, db, planId, siteUrl, { legacy: replies }) }
+}
+
+/** A new scan has landed, and only an event re-renders the card: the job's post-scan ping (`dt-cloud staged-card`) brings the
+ *  open plan's card up to it. An edit in place and nothing else: no card without a thread yet, none in another channel, no
+ *  reply for a batch a died notify left unshown. Says whether it edited. */
+export async function refreshStagedCard(env: NotifyEnv, db: D1Database, siteUrl: string): Promise<boolean> {
+  if (!slackReady(env)) return false
+  const id = await openPlanId(db)
+  if (id == null) return false
+  const plan = await db.prepare('SELECT slack_ts, slack_channel FROM plans WHERE id = ?').bind(id).first<{ slack_ts: string | null; slack_channel: string | null }>()
+  if (!plan?.slack_ts || plan.slack_channel !== env.SLACK_ADMIN_CHANNEL) return false
+  await notifyPlan(env, db, id, siteUrl, undefined, { quiet: true })
+  return true
 }
 
 /** Announce runs that just finished (an executor's reflection) in their

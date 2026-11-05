@@ -6,6 +6,13 @@ import { sqliteD1 } from '../../_lib/testD1'
 import { onRequestPost } from './dispatch'
 
 vi.mock('../../_lib/gcp.js', async original => ({ ...await original<typeof import('../../_lib/gcp.js')>(), gcpToken: async () => 'token' }))
+const { announced, pathStore } = vi.hoisted(() => ({ announced: vi.fn(async () => {}), pathStore: vi.fn() }))
+vi.mock('../../_lib/executor.js', async original => ({ ...await original<typeof import('../../_lib/executor.js')>(), notifyDispatched: announced }))
+vi.mock('../../_lib/index.js', async original => {
+  const real = await original<typeof import('../../_lib/index.js')>()
+  pathStore.mockImplementation(real.withPathStore)
+  return { ...real, withPathStore: pathStore }
+})
 
 const BUCKET = 'gcs-a'
 const PREFIX = `gs://${BUCKET}/a/`
@@ -48,6 +55,17 @@ const REFUSED = {
   min_soft_delete_days: 0,
   shown_min_soft_delete_days: 7,
 }
+
+describe('the announcement', () => {
+  // The job has launched by now: refusing to say so, or failing the response, would hide a run that's going.
+  it('falls back to the raw env when `withPathStore` rejects after the job launched', async () => {
+    announced.mockClear()
+    pathStore.mockRejectedValueOnce(new Error('pointer read failed'))
+    const { status, submitted: jobs } = await post({ shown_min_soft_delete_days: 0 })
+    expect([status, jobs]).toEqual([200, 1])
+    expect(announced.mock.calls.map(c => (c as unknown[])[0])).toEqual([env])
+  })
+})
 
 describe('shown_min_soft_delete_days', () => {
   it('a tab still showing 7 is refused at 0', async () => {

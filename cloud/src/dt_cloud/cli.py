@@ -543,6 +543,23 @@ def rules(identities_path: str, out: Path | None) -> None:
 # --- index tiers + their D1 footers (specs/done/view-serving.md, ported from gcs) ---
 
 
+@main.command("staged-card")
+@option("-t", "--token", default=None, help="Bearer token: the grant the site names as `STAGED_CARD_GRANT` (default: $SITE_TOKEN)")
+@option("-u", "--url", default=None, help="Site base URL (default: $SITE_URL)")
+def staged_card(token: str | None, url: str | None) -> None:
+    """Re-render the staged plan's Slack card at the newest scan, in place. Posts nothing new."""
+    from .site import SiteError, creds, post_json
+
+    base, tok = creds(token, url)
+    if not tok:
+        raise SystemExit("staged-card: no token (-t or $SITE_TOKEN)")
+    try:
+        result = json.loads(post_json(base, tok, "/api/plans/staged/card", {}))
+    except SiteError as e:
+        raise SystemExit(f"staged-card: {e}") from e
+    err(f"staged-card: {'edited' if result['refreshed'] else 'nothing to edit'}")
+
+
 @main.command()
 @option("-d", "--date", default=None, help="Scan slug: YYMMDD[HH[MM]] or YYYY-MM-DD[THH[MM]] — the latest scan it names; one naming none fails (default: latest from scans.json)")
 @option("-f", "--max-age-days", default=2, type=int, help="Freshness: latest scan must be within this many days")

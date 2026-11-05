@@ -18,6 +18,7 @@ import {
 import { phaseOrder } from './scanRunsModel'
 import { scanTime } from './scanSlug'
 import { colorer, fmtDur, fmtRunTime, getJson, PhaseBar, runDay, Status, useScanRuns } from './scanRunsUi'
+import { Pager, usePaged } from './Pager'
 import './scans.scss'
 import './health.scss'
 
@@ -205,6 +206,7 @@ export function HealthPage() {
   }, [doc, win, now])
   const cols = useMemo(() => (doc ? liveColumns(doc.coverage) : []), [doc])
   const gapRows = useMemo(() => (doc ? [...doc.coverage].reverse().filter(c => showAll || c.gaps.length) : []), [doc, showAll])
+  const paged = usePaged(gapRows)
   const totalGaps = doc ? doc.coverage.filter(c => c.gaps.length).length : 0
   return (
     <main className="staged-page scans-page health-page">
@@ -255,7 +257,7 @@ export function HealthPage() {
               <table className="runs hl-cov">
                 <thead><tr><th>scan</th>{cols.map(c => <th key={c} className="hl-c"><Tooltip content={COLUMN_TIPS[c]}><span>{COLUMN_LABELS[c]}</span></Tooltip></th>)}</tr></thead>
                 <tbody>
-                  {gapRows.map(r => (
+                  {paged.rows.map(r => (
                     <tr key={r.scan}>
                       <td className="nb"><code>{r.scan}</code></td>
                       {cols.map(c => <td key={c} className={`hl-c hl-${r.cells[c]}`} aria-label={`${COLUMN_LABELS[c]}: ${r.cells[c]}`}>{cellMark[r.cells[c]]}</td>)}
@@ -265,6 +267,7 @@ export function HealthPage() {
               </table>
             </div>
           )}
+          <Pager paged={paged} label="Scans" />
           <p className="sr-legend"><span><b className="hl-present">●</b> served</span><span><b className="hl-missing">✕</b> gap</span><span><b className="hl-pending">◐</b> pending (its job is running)</span><span><b className="hl-na">·</b> not expected</span></p>
         </section>
         <p className="dim hl-note">Computed {age(Math.max(0, Date.now() / 1000 - doc.now))} ago from <code>INDEX_R2</code> (each store's <code>scans.json</code>, newest manifest and run files) and D1 (<code>index_schema</code>, <code>scan_runs</code>). A merge in progress is its job's status record beside each store (<code>merging.json</code>, refreshed every 5 min); one not refreshed for 30 min, or held past its 4 h lease, is stuck.</p>

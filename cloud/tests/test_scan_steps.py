@@ -798,6 +798,7 @@ class Ends:
     ("warm_cache", "dt-cloud warm-cache -d", "cache warm-up failed for 2026-10-16T1200"),
     ("probe", "dt-cloud probe -c", "serving probe failed for 2026-10-16T1200 (an HTTP or transport error; data is fine)"),
     ("healthcheck", "dt-cloud healthcheck -d", "the live site's health check failed for 2026-10-16T1200 (data is fine; serving may be degraded)"),
+    ("staged_card", "dt-cloud staged-card", "staged card refresh failed for 2026-10-16T1200 (it stays at the scan before)"),
     ("index_gc", "dt-cloud index-gc -R", "index-gc -F failed (superseded generations stay until the next run)"),
     ("over_time", "dt-cloud over-time-groups -g", "over-time groups failed (the series uses its configured path store)"),
 ])
@@ -808,6 +809,15 @@ def test_optional_command_failure_records_a_failed_phase(tmp_path, env, name, pr
     getattr(S, name)(c, None)
     phase = name.replace("_", "-")
     assert c.run.calls == [("begin", phase), ("end", phase, 1, True, message)]
+
+
+def test_staged_card_pings_the_site_only_with_its_token(tmp_path, env):
+    c = ctx(tmp_path, env)
+    S.staged_card(c, None)
+    assert c.sh_impl.calls == []
+    c.env.update(SITE_TOKEN="t", SITE_URL="https://site.example.org")
+    S.staged_card(c, None)
+    assert c.sh_impl.calls == ["dt-cloud staged-card"]
 
 
 @pytest.mark.parametrize("name,prefix,warn", [

@@ -14,11 +14,14 @@ import { ActStatus, useActDeps, useKeepFocus, useMatchAct } from './MatchActions
 import { actBlockedLabel } from './matchAct'
 import { Tooltip } from './Tooltip'
 import { NO_AUTOFILL } from './noAutofill'
+import { Paginated, Pager, usePaged } from './Pager'
 
 export { caveats } from './matchAct'
 
 /** Items listed per folder in the review panel (the folder's checkbox still takes or drops all of them). */
 export const LIST_PER_GROUP = 100
+const PER_GROUP_SIZES = [LIST_PER_GROUP]
+const GROUP_SIZES = [25]
 
 const plural = (n: number, one: string, many = `${one}s`) => `${n.toLocaleString('en-US')} ${n === 1 ? one : many}`
 
@@ -104,9 +107,9 @@ export function BulkBar({ cover, loading, onIntent, resolve, resetKey, scheme, q
             <button type="button" className="act" onClick={() => toggle(items.map(i => i.path), false)}>all</button>
             <button type="button" className="act" onClick={() => toggle(items.map(i => i.path), true)}>none</button>
           </div>
-          <ul className="bb-groups">
-            {groups.map(g => <ReviewGroup key={g.parent} parent={g.parent} items={g.items} b={g.b} dropped={dropped} toggle={toggle} fmtBytes={fmtBytes} />)}
-          </ul>
+          <Paginated rows={groups} sizes={GROUP_SIZES} label="Folders">{page => <ul className="bb-groups">
+            {page.map(g => <ReviewGroup key={g.parent} parent={g.parent} items={g.items} b={g.b} dropped={dropped} toggle={toggle} fmtBytes={fmtBytes} />)}
+          </ul>}</Paginated>
         </div>
       </details>
     </>
@@ -141,7 +144,7 @@ function ReviewGroup({ parent, items, b, dropped, toggle, fmtBytes }: {
   const keptN = items.filter(i => !dropped.has(i.path)).length
   const all = keptN === items.length
   const paths = items.map(i => i.path)
-  const shown = items.slice(0, LIST_PER_GROUP)
+  const paged = usePaged(items, PER_GROUP_SIZES)
   return (
     <li className="bb-group">
       <label className="bb-row bb-parent">
@@ -150,7 +153,7 @@ function ReviewGroup({ parent, items, b, dropped, toggle, fmtBytes }: {
         <span className="bb-n">{items.length > 1 ? `${keptN.toLocaleString('en-US')}/${items.length.toLocaleString('en-US')} · ` : ''}{fmtBytes(b)}</span>
       </label>
       <ul>
-        {shown.map(i => (
+        {paged.rows.map(i => (
           <li key={i.path}>
             <label className="bb-row">
               <input type="checkbox" checked={!dropped.has(i.path)} onChange={() => toggle([i.path], !dropped.has(i.path))} />
@@ -159,8 +162,8 @@ function ReviewGroup({ parent, items, b, dropped, toggle, fmtBytes }: {
             </label>
           </li>
         ))}
-        {items.length > shown.length && <li className="bb-more">…and {(items.length - shown.length).toLocaleString('en-US')} more (the folder’s box takes or drops them all)</li>}
       </ul>
+      <Pager paged={paged} label={`Matches in ${parent || 'the root'}`} />
     </li>
   )
 }

@@ -1136,10 +1136,11 @@ def interval_store(ctx: Ctx, arg: str | None) -> None:
     due carries / compaction (`interval-store add`). Never fatal (`-W`): a failure or the timeout warns, the next run
     catches up. Reads the scans' `path` sorts at `<layer2>/index/<gen>/path-index.parquet` from the store, or with
     `options.interval-store.source: data` from the data store, as `static-names` does (so `publish-r2 -S` needn't copy
-    the sorts to the store: specs/lean-scans.md §1.1). `options.interval-store.compact`: the compaction policy (`-C`, e.g.
-    `none` to hold a due compaction while carries continue; default `add`'s).
+    the sorts to the store: specs/lean-scans.md §1.1). `options.interval-store.compact`: the one-machine path's compaction
+    policy (`-C`, e.g. `none` to hold a due compaction while carries continue; default `add`'s).
     `options.interval-store.profile`: the staged path instead (`interval-store append -c`, its per-range stages Batch
-    jobs of their own, in this task's image; `merge_wait` seconds on the merge job), for a store too big for one task."""
+    jobs of their own, in this task's image; `merge_wait` seconds on the merge job), for a store too big for one task. It
+    never reads `options.interval-store.compact`: its policy is the profile's `append.compact` / `append.compact_level`."""
     if ctx.reproc:
         err(f"interval-store: not appending {ctx.scan} (REPROC)")
         return
@@ -1560,6 +1561,16 @@ def _digest_check(p: ScanProfile) -> list[str]:
     problems = [f"options.digest.{k}: required (or skip: [digest])" for k in ("template", "config") if not o.get(k)]
     return problems + [f"options.digest.platforms: {x!r} is not one of {', '.join(DIGEST_TRANSPORTS)}"
                        for x in o.get("platforms", []) if x not in DIGEST_TRANSPORTS]
+
+
+@step("staged-card", core=False, soft=True, requires=primary_only("staged-card", "the card sizes at the primary's scans"))
+def staged_card(ctx: Ctx, arg: str | None) -> None:
+    """Re-render the staged plan's Slack card at this scan, in place (the job grant named by the site's `STAGED_CARD_GRANT`)."""
+    with ctx.phase("staged-card"):
+        if ctx.reproc or not ctx.has("SITE_TOKEN", "SITE_URL"):
+            err("no SITE_TOKEN/SITE_URL, or REPROC: skipping the staged card")
+            return
+        ctx.sh(["dt-cloud", "staged-card"], fatal=False, warn=f"staged card refresh failed for {ctx.scan} (it stays at the scan before)")
 
 
 @step("digest", soft=True, options={"template": str, "config": str, "args": list, "platforms": list, "root": str}, requires=_digest_check)

@@ -18,6 +18,8 @@ Nothing in the pipeline writes it. Its fill is `fillOwnerHist`, reached only fro
 
 Both tables key on `indexTag`, so a new generation has no pricing. Moving `CURRENT` sends every scoped series back to first-time pricing for all of its scans, for real users. **No `CURRENT` move on a deployment with owner assignments until pricing is carried or prebuilt.** Every deployment's schema has these tables; whether a gate bites depends on whether it has ledger rows, which each deployment's session has to check.
 
+**gcs hold (2026-11-05):** `job/interval-store.json` sets `"compact": "none"` (live on `:latest` since that day), so a due compaction can't move `CURRENT` until pricing is carried off the read path, or Ryan decides otherwise. Carries keep running, and runs accumulate meanwhile. This holds the gate, it doesn't make compaction safe.
+
 ## Options
 
 The rule either way: **no read path prices.** A read answers from pricing with one bounded read, or returns an explicit not-ready answer. `HIST_PRICE_MAX` and the per-scan branch of `compute` go away.

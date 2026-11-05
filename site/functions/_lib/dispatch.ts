@@ -20,6 +20,27 @@ export type ExecEnv = NotifyEnv & BatchEnv & {
   STORE_BUCKETS?: string
 }
 
+/** What a dispatch selected, by the sizes its page showed at the scan. Display only (a run's row until its manifest
+ *  says, Slack's dispatched line): client-sent, and nothing about what a run deletes reads it. */
+export interface Expected { bytes: number; objects: number }
+
+const count = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v) && v >= 0
+
+/** A request's `expected`, when it is one; anything else is dropped, never a refused dispatch. */
+export function parseExpected(raw: unknown): Expected | undefined {
+  const e = raw as Partial<Expected> | null | undefined
+  return e && count(e.bytes) && count(e.objects) ? { bytes: e.bytes, objects: e.objects } : undefined
+}
+
+/** The job env carrying it (the executor ignores these), read back by the jobs list (`expectedOfVars`). */
+export const expectedVars = (e: Expected | undefined): Record<string, string> =>
+  e ? { EXPECTED_BYTES: String(e.bytes), EXPECTED_OBJECTS: String(e.objects) } : {}
+
+export function expectedOfVars(vars: Record<string, string | undefined>): Expected | undefined {
+  const { EXPECTED_BYTES: b, EXPECTED_OBJECTS: o } = vars
+  return b === undefined || o === undefined ? undefined : parseExpected({ bytes: Number(b), objects: Number(o) })
+}
+
 export interface DispatchReq {
   planId: number
   mode: 'dry' | 'real'
@@ -38,6 +59,8 @@ export interface DispatchReq {
   shownMinSoftDeleteDays?: number
   /** gcs only: the executor's machine (`SWEEP_MACHINES`; absent = the default). */
   machine?: 'n2-highmem-8' | 'n2-highmem-32'
+  /** What the dispatcher selected, display only. */
+  expected?: Expected
 }
 
 export interface DispatchErr { ok: false; status: number; error: string; extra?: Record<string, unknown> }

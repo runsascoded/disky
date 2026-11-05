@@ -54,6 +54,15 @@ def test_reviewed_job_spec(template):
     }
 
 
+def test_a_prior_jobs_expected_size_stays_behind(template):
+    """The template's `EXPECTED_*` was its dispatch's selection; this run has its own, and the row would show the stale one."""
+    variables = template["taskGroups"][0]["taskSpec"]["environment"]["variables"]
+    before = dict(variables)
+    variables |= {"EXPECTED_BYTES": "137000", "EXPECTED_OBJECTS": "754"}
+    result = reviewed_job_spec(template, "gs://data/dry", "gs://data/plan.json", "gs://data/new", IMAGE)
+    assert result["taskGroups"][0]["taskSpec"]["environment"]["variables"] == {**before, "DISKY_LABELS": "app=disky,deployment=test"}
+
+
 def test_dry_dispatch_and_shell_quoting(template):
     result = reviewed_job_spec(template, "gs://data/dry space", "plan", "out", IMAGE)
     script = result["taskGroups"][0]["taskSpec"]["runnables"][0]["container"]["commands"][1]

@@ -6,6 +6,7 @@ import type { ColumnSpec, Row, TableMeta } from './db'
 import { useTable, useTableMutations } from './db'
 import { Skeleton } from './Busy'
 import { NO_AUTOFILL } from './noAutofill'
+import { Pager, usePaged } from './Pager'
 
 // Generic editable table over one /api/db table: TanStack Table for the
 // grid (sorting now; filtering/pagination are config away), TSQ mutations
@@ -97,6 +98,8 @@ export function DbTable({ name }: { name: string }) {
     getSortedRowModel: getSortedRowModel(),
   })
 
+  const paged = usePaged(table.getRowModel().rows)
+
   if (error) return <p className="err">{error.message}</p>
   if (isPending) return <Skeleton height={200} label="loading table…" />
   if (!spec) return null
@@ -146,7 +149,7 @@ export function DbTable({ name }: { name: string }) {
           ))}
         </thead>
         <tbody>
-          {table.getRowModel().rows.map(r => (
+          {paged.rows.map(r => (
             <tr key={r.id}>
               {r.getVisibleCells().map(c => (
                 <td key={c.id}>{flexRender(c.column.columnDef.cell, c.getContext())}</td>
@@ -158,6 +161,7 @@ export function DbTable({ name }: { name: string }) {
           )}
         </tbody>
       </table>
+      <Pager paged={paged} label="Table rows" />
       <p className="row-count">{data.rows.length} row{data.rows.length === 1 ? '' : 's'}{spec.canWrite ? '' : ' (read-only)'}</p>
     </div>
   )

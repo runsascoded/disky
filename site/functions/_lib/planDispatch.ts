@@ -14,7 +14,7 @@
 import type { D1Database } from '@cloudflare/workers-types'
 import { batchConfig, notConfigured } from './batchConfig.js'
 import { jobStamp, runGsPath, runMountPath, secretRef, submitBatch, sweepBatchSpec } from './cwBatch.js'
-import { type DispatchReq, type ExecEnv, type Executor, type Prepared, refuse } from './dispatch.js'
+import { type DispatchReq, type ExecEnv, type Executor, expectedVars, type Prepared, refuse } from './dispatch.js'
 import { gcpToken } from './gcp.js'
 import { NO_SHAPE, PlanSpansBuckets, planItemLines, prefixShape, snapshotPlan } from './plans.js'
 import { listBatchJobs, reflectRuns } from './runReflect.js'
@@ -76,7 +76,7 @@ async function prepare(env: ExecEnv, db: D1Database, req: DispatchReq): Promise<
     const script = planSweepScript(runMnt, req.mode === 'real')
 
     // the executor deletes from the plan's bucket (`SWEEP_BUCKET` in the job env)
-    const spec = sweepBatchSpec(cfg, jobSa, script, plan.bucket, { JOB_ID: jobId, SWEEP_DATE: date, SITE_URL: req.siteUrl, ...review.vars },
+    const spec = sweepBatchSpec(cfg, jobSa, script, plan.bucket, { JOB_ID: jobId, SWEEP_DATE: date, SITE_URL: req.siteUrl, ...expectedVars(req.expected), ...review.vars },
       { SITE_TOKEN: secretRef(cfg, 'cw-s3-job-grant'), ...review.secrets })
     const { ok, status, text } = await submitBatch(cfg, token, jobId, spec)
     if (!ok) {
