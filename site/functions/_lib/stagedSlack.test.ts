@@ -1,6 +1,6 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { RunOutcome } from '../../src/runs.js'
-import { closedParent, countedItems, PLAN_SENDER, QUEUE_EMPTIED, queueWasEmpty, queuedOf, fmtBytes, personSender, renderParent, runEvent, runUrl, shortPath, sizeOf, stageReply, stagedCardUrl, topFolders, type RunRow } from './stagedSlack.js'
+import { closedParent, countedItems, PLAN_SENDER, QUEUE_EMPTIED, queueWasEmpty, queuedOf, fmtBytes, personSender, renderParent, runEvent, runUrl, sendParent, shortPath, sizeOf, stageReply, stagedCardUrl, topFolders, type RunRow } from './stagedSlack.js'
 import { sqliteD1 } from './testD1.js'
 
 const run = (o: Partial<RunRow>): RunRow => ({
@@ -10,7 +10,7 @@ const run = (o: Partial<RunRow>): RunRow => ({
 })
 
 const ids = (blocks: unknown[]): string[] =>
-  ((blocks[2] as { elements: { action_id: string }[] }).elements).map(e => e.action_id)
+  ((blocks.find(b => (b as { type: string }).type === 'actions') as { elements: { action_id: string }[] }).elements).map(e => e.action_id)
 
 describe('renderParent', () => {
   const base = { planId: 7, siteUrl: 'https://cw-s3.oa.dev', items: 3, batches: 2, stagers: ['ann@openathena.ai', 'bo@coreweave.com'], digest: 'D1', actions: true, closed: false }
@@ -27,12 +27,35 @@ describe('renderParent', () => {
     expect(ids(renderParent({ ...base, runs: [], items: 0 }).blocks)).toEqual(['staged_open'])
   })
 
-  it('says whether the latest dry-run still matches', () => {
-    const txt = (runs: RunRow[]): string => (renderParent({ ...base, runs }).blocks[1] as { text: { text: string } }).text.text
-    expect(txt([])).toBe('No dry-run yet.\n_Delete for real_ appears after a finished dry-run of the current set (no dry-run of this plan yet).')
-    expect(txt([run({})])).toBe('Latest dry-run would delete *2.0 TiB* / 1,234 objects (scan 2026-09-28T1201) — matches the current plan.')
-    expect(txt([run({ plan_digest: 'OLD' })])).toBe('Latest dry-run would delete *2.0 TiB* / 1,234 objects (scan 2026-09-28T1201) — *stale*: the plan changed since.\n_Delete for real_ appears after a finished dry-run of the current set (the plan changed since the last dry-run; dry-run it again).')
-    expect(txt([run({ plan_digest: '', deleted_bytes: 0, deleted_objects: 0 })])).toBe('Latest dry-run (`cw-sweep-dry-1`) ended without a result.\n_Delete for real_ appears after a finished dry-run of the current set (the plan changed since the last dry-run; dry-run it again).')
+  it('says only what bears on the current set: no stale dry-run, no real run past its undo window', () => {
+    const txt = (runs: RunRow[], now = 1000): string => (renderParent({ ...base, runs, now }).blocks[1] as { text: { text: string } }).text.text
+    const hint = (why: string) => `_Delete for real_ appears after a finished dry-run of the current set (${why}).`
+    const real = run({ mode: 'real', run_id: 'r', plan_digest: 'OLD', undo_deadline: 2000, started_ts: 50 })
+    expect([
+      txt([]),
+      txt([run({})]),
+      txt([run({ plan_digest: 'OLD' })]),
+      txt([run({ plan_digest: '', deleted_bytes: 0, deleted_objects: 0 })]),
+      txt([run({ finished_ts: null })]),
+      txt([run({}), real]),
+      txt([run({}), real], 3000),
+      txt([run({}), { ...real, undo_deadline: null }]),
+      txt([run({}), { ...real, finished_ts: null }]),
+    ]).toEqual([
+      hint('no dry-run of this plan yet'),
+      'Latest dry-run would delete *2.0 TiB* / 1,234 objects (scan 2026-09-28T1201) — matches the current plan.',
+      hint('the plan changed since the last dry-run; dry-run it again'),
+      `Latest dry-run (\`cw-sweep-dry-1\`) ended without a result.\n${hint('the plan changed since the last dry-run; dry-run it again')}`,
+      `Dry-run running (ann, scan 2026-09-28T1201).\n${hint('a dry run is in progress (cw-sweep-dry-1)')}`,
+      'Latest dry-run would delete *2.0 TiB* / 1,234 objects (scan 2026-09-28T1201) — matches the current plan.\nLast real run deleted 2.0 TiB / 1,234 objects, undoable until 1970-01-01 00:33Z.',
+      'Latest dry-run would delete *2.0 TiB* / 1,234 objects (scan 2026-09-28T1201) — matches the current plan.',
+      'Latest dry-run would delete *2.0 TiB* / 1,234 objects (scan 2026-09-28T1201) — matches the current plan.',
+      `Latest dry-run would delete *2.0 TiB* / 1,234 objects (scan 2026-09-28T1201) — matches the current plan.\nReal run in progress (ann).\n${hint('a real run is in progress (r)')}`,
+    ])
+  })
+
+  it('leaves out the status section when there is nothing to say (Slack refuses an empty one)', () => {
+    expect(renderParent({ ...base, runs: [], actions: false }).blocks.map(b => (b as { type: string }).type)).toEqual(['section', 'actions'])
   })
 
   it('titles by what is still queued (deleted items drop out), the gate by the whole plan', () => {
@@ -41,15 +64,64 @@ describe('renderParent', () => {
       head({}),
       head({ queued: { items: 1, batches: 1, stagers: ['bo@coreweave.com'] } }),
     ]).toEqual([
-      '*Staged for deletion* · plan #7 · 3 prefixes in 2 batches\nstaged by ann, bo',
-      '*Staged for deletion* · plan #7 · 1 prefix in 1 batch\nstaged by bo',
+      '*Staged for deletion* · plan #7: *3 prefixes*\nstaged by ann, bo',
+      '*Staged for deletion* · plan #7: *1 prefix*\nstaged by bo',
     ])
   })
 
   it('puts the dry-run numbers and the recoverability in the real-delete confirm', () => {
-    const real = (renderParent({ ...base, runs: [run({})] }).blocks[2] as { elements: Record<string, unknown>[] }).elements[2]
+    const real = (renderParent({ ...base, runs: [run({})] }).blocks.find(b => (b as { type: string }).type === 'actions') as { elements: Record<string, unknown>[] }).elements[2]
     expect(real.value).toBe('7:D1')
     expect((real.confirm as { text: { text: string } }).text.text).toBe('Deletes the 3 staged prefixes: 2.0 TiB / 1,234 objects per the dry-run on scan 2026-09-28T1201. Recoverable for 7 days (undo in www).')
+  })
+})
+
+describe('sendParent', () => {
+  const IMG = 'https://site.example.org/og/staged.png?v=abc&sig=x'
+  const parent = renderParent({ planId: 7, siteUrl: 'https://site.example.org', items: 3, batches: 1, stagers: [], digest: 'D1', actions: true, closed: false, runs: [], image: IMG })
+  /** Slack refusing any message with an image block until the card has been fetched; every call in order. */
+  function slack({ cardOk = true } = {}): string[] {
+    const calls: string[] = []
+    let rendered = false
+    vi.stubGlobal('fetch', vi.fn(async (input: string, init?: RequestInit) => {
+      if (input === IMG) {
+        calls.push('fetch card')
+        rendered = cardOk
+        return new Response('png', { status: cardOk ? 200 : 503 })
+      }
+      const body = JSON.parse(String(init!.body)) as { ts?: string; blocks: { type: string }[] }
+      const image = body.blocks.some(b => b.type === 'image')
+      const refused = image && !rendered
+      calls.push(`${input.split('/').pop()} ${body.ts ?? 'new'} ${image ? 'card' : 'bare'} ${refused ? 'refused' : 'ok'}`)
+      return new Response(JSON.stringify(refused ? { ok: false, error: 'invalid_blocks', response_metadata: { messages: ['[ERROR] downloading image failed'] } } : { ok: true, ts: '200.000001' }))
+    }))
+    return calls
+  }
+  const env = { SLACK_BOT_TOKEN: 'xoxb' }
+  afterEach(() => { vi.unstubAllGlobals() })
+
+  it('a refused card: the text lands without it, then the card is rendered and put back', async () => {
+    const calls = slack()
+    const got = await sendParent(env, 'C', '1.000001', parent)
+    expect([got.ok, calls]).toEqual([true, ['chat.update 1.000001 card refused', 'chat.update 1.000001 bare ok', 'fetch card', 'chat.update 1.000001 card ok']])
+  })
+  it('a card that won\'t render: the text stays, no second try', async () => {
+    const calls = slack({ cardOk: false })
+    await sendParent(env, 'C', '1.000001', parent)
+    expect(calls).toEqual(['chat.update 1.000001 card refused', 'chat.update 1.000001 bare ok', 'fetch card'])
+  })
+  it('a first post, refused: posted bare, then updated with the card at the new ts', async () => {
+    const calls = slack()
+    const got = await sendParent(env, 'C', null, parent)
+    expect([got.ts, calls]).toEqual(['200.000001', ['chat.postMessage new card refused', 'chat.postMessage new bare ok', 'fetch card', 'chat.update 200.000001 card ok']])
+  })
+  it('any other failure is returned as it is: dropping the card wouldn\'t help', async () => {
+    const calls: string[] = []
+    vi.stubGlobal('fetch', vi.fn(async (input: string) => {
+      calls.push(input)
+      return new Response(JSON.stringify({ ok: false, error: 'message_not_found' }))
+    }))
+    expect([(await sendParent(env, 'C', '1.000001', parent)).error, calls]).toEqual(['message_not_found', ['https://slack.com/api/chat.update']])
   })
 })
 
@@ -71,7 +143,8 @@ describe('run events', () => {
   describe('the plan card\'s last real run, by what its run dir says', () => {
     const base = { planId: 7, siteUrl: 'https://s', items: 1, batches: 1, stagers: [], digest: 'D1', actions: false, closed: false }
     const real = run({ mode: 'real', run_id: 'r1', undo_deadline: 1_790_604_800 })
-    const line = (lastOutcome?: RunOutcome | null, r: RunRow = real) => (renderParent({ ...base, runs: [r], lastOutcome }).blocks[1] as { text: { text: string } }).text.text.split('\n')[1]
+    const line = (lastOutcome?: RunOutcome | null, r: RunRow = real) => (renderParent({ ...base, runs: [r], lastOutcome, now: 1_790_000_000 }).blocks as { text?: { text?: string } }[])
+      .flatMap(b => (b.text?.text ?? '').split('\n')).find(l => /^(Last real run|Real run)/.test(l))
     const SKIPPED = { bytes: 3 * 1024 ** 3, objects: 5678 }
     it('a listing run, or one with no file: deleted', () => {
       expect(line()).toBe('Last real run deleted 2.0 TiB / 1,234 objects, undoable until 2026-09-28 14:13Z.')
@@ -139,13 +212,20 @@ describe('run events', () => {
 describe('names and sizes (plain text, never a mention)', () => {
   const base = { planId: 7, siteUrl: 'https://cw-s3.oa.dev', items: 3, batches: 2, stagers: [] as string[], digest: 'D1', actions: true, closed: false, runs: [] as RunRow[] }
   const size = { scan: '2026-10-02', b: 51 * 2 ** 40, o: 179327698, empty: 5, owners: [{ label: 'Grace Hopper', b: 16 * 2 ** 40 }, { label: 'hedy-lamarr', b: 6 * 2 ** 40 }] }
-  it('the parent names stagers by Slack name (else the local part) and carries the size line', () => {
-    const v = { ...base, stagers: ['A.B@x.org', 'c.d@x.org'], names: { 'a.b@x.org': 'Ann Bee' }, size }
-    expect((renderParent(v).blocks[0] as { text: { text: string } }).text.text.split('\n')).toEqual([
-      `*Staged for deletion* · plan #${base.planId} · ${base.items} prefixes in ${base.batches} batches`,
-      'staged by Ann Bee, c.d',
-      '*51.0 TiB* · 179,327,698 objects at scan 2026-10-02 · owners: Grace Hopper 16.0 TiB, hedy-lamarr 6.0 TiB',
-      '+5 staged prefixes empty at scan, not counted',
+  it('the first line states the total; owners only when they hold most of it; stagers by Slack name (else the local part)', () => {
+    const v = { ...base, stagers: ['A.B@x.org', 'c.d@x.org'], names: { 'a.b@x.org': 'Ann Bee' } }
+    const lines = (z: typeof size) => (renderParent({ ...v, size: z }).blocks[0] as { text: { text: string } }).text.text.split('\n')
+    expect([lines(size), lines({ ...size, empty: 0, o: 999, b: 40 * 2 ** 40 })]).toEqual([
+      [
+        '*Staged for deletion* · plan #7: *3 prefixes · 51.0 TiB · 179.3M objects* at scan 2026-10-02',
+        '+5 staged prefixes empty at scan, not counted',
+        'staged by Ann Bee, c.d',
+      ],
+      [
+        '*Staged for deletion* · plan #7: *3 prefixes · 40.0 TiB · 999 objects* at scan 2026-10-02',
+        'owners: Grace Hopper 16.0 TiB, hedy-lamarr 6.0 TiB',
+        'staged by Ann Bee, c.d',
+      ],
     ])
   })
   it('sizeOf: totals over every prefix, absent or no bytes and no objects = empty (zero-byte objects are not), owners by attributed bytes', () => {
@@ -254,7 +334,7 @@ describe('D1', () => {
       expect([types(renderParent(v).blocks), renderParent(v).blocks[3], types(renderParent({ ...v, items: 0 }).blocks), types(renderParent(base).blocks)]).toEqual([
         ['section', 'section', 'actions', 'image'],
         { type: 'image', image_url: 'https://site.example.org/og/staged.png?v=abc&sig=x', alt_text: 'Plan #7: the staged prefixes as a treemap, coloured by owner' },
-        ['section', 'section', 'actions'],
+        ['section', 'actions'],
         ['section', 'section', 'actions'],
       ])
     })
