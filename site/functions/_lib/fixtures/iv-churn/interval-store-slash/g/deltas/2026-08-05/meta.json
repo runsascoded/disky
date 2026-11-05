@@ -11,7 +11,7 @@
   "2026-08-05": 1785888000
  },
  "rows": 24,
- "bytes": 72711,
+ "bytes": 72696,
  "sorts": {
   "path": {
    "sort": "path",
@@ -53,8 +53,8 @@
    "sort": "level",
    "rows": 22,
    "groups": 6,
-   "bytes": 14176,
-   "groups_bytes": 5008,
+   "bytes": 14170,
+   "groups_bytes": 4999,
    "segments": {
     "open": {
      "groups": 6,

@@ -169,12 +169,72 @@ def test_the_level_plan_charges_the_level_sorts_columns(tmp_path, monkeypatch):
     assert got == [ist.writer_meta([f], 8192, cols=len(ilv.LEVEL_SCHEMA))]
 
 
+def _version(depth: int, path: str, kind: str, size: int = 1, vf: int = 10, vt: int = OPEN) -> dict:
+    return {"depth": depth, "path": path, "vf": vf, "vt": vt, "kind": kind, "size": size, "n_files": 1, "churn_cum": size, "churn_end": size}
+
+
+def _child_path(depth: int, parent: str, name: str) -> str:
+    """The inverse of a child's key, as `diffLevel.levelChild` reads it (a parent '' is the root only at depth 0: at depth 1 it's
+    the directory a leading `/` makes, which the reader never asks for)."""
+    last = "" if name == "/" else name
+    return last if depth == 0 else f"{parent}/{last}"
+
+
+def test_a_path_with_an_empty_last_segment_is_named_slash(tmp_path):
+    """A name holds no `/`, so `/` names a child whose last segment is empty: `a/` under `a`, `a//` under `a/`, and `/` under the
+    `''` of depth 1, which is itself under the root. `''` is then only ever a path's own row, and every key is one path's."""
+    versions = [
+        _version(1, "", "dir"), _version(2, "/", "dir"), _version(3, "//", "file"), _version(2, "/x", "file"),
+        _version(1, "a", "dir"), _version(2, "a/", "dir"), _version(3, "a//", "dir"), _version(4, "a///", "file"),
+        _version(3, "a//b", "file"), _version(2, "a/b", "file"),
+    ]
+    src = f"read_parquet('{_write(tmp_path, _table(versions))}')"
+    got = duckdb.connect().execute(f"SELECT depth, path, ts, name FROM ({ilv.rows_sql(src)}) ORDER BY depth, path, ts, name").fetchall()
+    assert got == [
+        (0, "", 10, "/"),  # the path ''
+        (0, "", 10, "a"),
+        (1, "", 10, ""),
+        (1, "", 10, "/"),  # the path /
+        (1, "", 10, "x"),
+        (1, "a", 10, ""),
+        (1, "a", 10, "/"),  # the path a/
+        (1, "a", 10, "b"),
+        (2, "/", 10, ""),
+        (2, "/", 10, "/"),  # the path //
+        (2, "a/", 10, ""),
+        (2, "a/", 10, "/"),  # the path a//
+        (2, "a/", 10, "b"),
+        (3, "a//", 10, ""),
+        (3, "a//", 10, "/"),  # the path a///
+    ]
+
+
+@pytest.mark.parametrize("seed", range(5))
+def test_a_key_is_one_paths_transition(tmp_path, seed):
+    """Over any paths, empty segments and all, and any chain of versions: no key has two rows, and a child's key gives back
+    its path."""
+    rng = Random(seed)
+    paths = {"/".join(rng.choice(["", "", "a", "b", "-", ".", "a,b"]) for _ in range(rng.randint(1, 5))) for _ in range(60)}
+    versions = []
+    for path in sorted(paths):
+        at = 10
+        for _ in range(rng.randint(1, 3)):
+            end = at + rng.choice([10, 20])
+            versions.append(_version(path.count("/") + 1, path, rng.choice(["file", "dir"]), rng.randint(0, 3), at, end))
+            at = end + rng.choice([0, 0, 10])
+        if rng.random() < 0.5:
+            versions[-1]["vt"] = OPEN
+    src = f"read_parquet('{_write(tmp_path, _table(versions))}')"
+    rows = duckdb.connect().execute(f"SELECT depth, path, ts, name FROM ({ilv.rows_sql(src)})").fetchall()
+    assert len(rows) == len(set(rows))
+    assert {_child_path(d, p, n) for d, p, _, n in rows if n} == paths
+
+
 @pytest.mark.parametrize("split", [False, True])
-def test_a_key_shared_by_two_rows_has_one_order(tmp_path, split):
-    """An object named `a/` is a child of `a` named '', as `a`'s own row is, at the same stamp: the same `LEVEL_KEY` twice.
-    `a`'s own first, whichever the other's values, so the bytes don't depend on how the cut was split (one run, or pieces)."""
-    v = lambda d, p, k, z: {"depth": d, "path": p, "vf": 10, "vt": OPEN, "kind": k, "size": z, "n_files": 1, "churn_cum": z, "churn_end": z}  # noqa: E731
-    low, high = [v(1, "a", "dir", 5)], [v(2, "a/", "file", 3)]
+def test_a_directory_and_its_slash_child_keep_one_order(tmp_path, split):
+    """A directory `a`'s own row and its object `a/`, one stamp: two keys, `a`'s own first, so the bytes don't depend on how the
+    cut was split (one run, or pieces)."""
+    low, high = [_version(1, "a", "dir", 5)], [_version(2, "a/", "file", 3)]
     gen = tmp_path / "g"
     (gen / "pvl").mkdir(parents=True)
     if split:
@@ -189,12 +249,5 @@ def test_a_key_shared_by_two_rows_has_one_order(tmp_path, split):
     assert [(r["depth"], r["path"], r["ts"], r["name"], r["kind"], r["size"]) for r in got] == [
         (0, "", 10, "a", "dir", 5),
         (1, "a", 10, "", "dir", 5),
-        (1, "a", 10, "", "file", 3),
+        (1, "a", 10, "/", "file", 3),
     ]
-
-
-def test_the_arm_is_only_the_sorts():
-    """`rows_sql`'s rows are `LEVEL_SCHEMA`'s, unless the sort asks for what orders them."""
-    src = "(SELECT 1::UTINYINT AS depth, 'a' AS path, 10::BIGINT AS vf, 20::BIGINT AS vt, 'dir' AS kind, 1::BIGINT AS size, 1::BIGINT AS n_files, 1::BIGINT AS churn_cum, 1::BIGINT AS churn_end)"
-    cols = lambda **kw: [d[0] for d in duckdb.connect().execute(f"SELECT * FROM ({ilv.rows_sql(src, **kw)})").description]  # noqa: E731
-    assert (cols(), cols(arm=True)) == (ilv.LEVEL_SCHEMA.names, [*ilv.LEVEL_SCHEMA.names, ilv.LEVEL_ARM])

@@ -1,1 +1,1 @@
-{"bytes": 14176, "groups": 6, "groups_bytes": 5008, "rows": 22, "s": 0.0, "segments": {"open": {"groups": 6, "rows": 22}}, "sort": "level"}
+{"bytes": 14170, "groups": 6, "groups_bytes": 4999, "rows": 22, "s": 0.0, "segments": {"open": {"groups": 6, "rows": 22}}, "sort": "level"}

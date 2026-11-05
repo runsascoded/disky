@@ -23,7 +23,12 @@ With `slash`, that store under `interval-store-slash/`, plus one key with a doub
 `SLASH_KEY`: as `path-index` lists it, a directory `b1/x/` under `b1/x` (name '', as `b1/x`'s own rows are). No
 `expected.json`: `diffLevel.test.ts` compares it with the store's own `path` sort.
 
-    cloud/.venv-or-root/bin/python site/functions/_lib/fixtures/iv-churn/gen.py [PAGES | ROOT | level | slash]
+With `placeholder`, that store under `interval-store-placeholder/`, plus `placeholders(j)`: objects named for a directory
+(`a/`, nearly all of them size 0, in the base and in runs, one that gains bytes and one that goes away), several slashes in a
+row, a key that is both an object and a folder's prefix, and leading slashes (a directory '' at depth 1). Also no
+`expected.json`: the same comparison.
+
+    cloud/.venv-or-root/bin/python site/functions/_lib/fixtures/iv-churn/gen.py [PAGES | ROOT | level | slash | placeholder]
 """
 from __future__ import annotations
 
@@ -45,6 +50,18 @@ SLASH_KEY = "b1/x//k.bin"
 SLASH_FROM = 5
 
 
+def placeholders(j: int) -> dict[str, int]:
+    """Scan `j`'s odd keys (3 the base's last, 4 to 6 the runs'), all from the churn base on."""
+    return {
+        **({"b2/q/": 0} if j >= 3 else {}),  # in the base: an object `b2/q/` and the directory `b2/q` above it
+        **({"b1/x/": 0 if j < 6 else 3} if j >= 5 else {}),  # in a run; gains bytes in the next
+        **({"b1/x/y/": 0} if j == 5 else {}),  # appears, then goes away
+        **({"b2/z///": 0, "b2/z/": 0} if j >= 5 else {}),  # `b2/z/` both an object and the prefix of `b2/z///`
+        **({"b1/w///k.bin": 7} if j >= 5 else {}),  # `b1/w/` and `b1/w//`, directories
+        **({"/lead/k.bin": 9, "//k.bin": 2} if j >= 5 else {}),  # '' (depth 1), `/`, `/lead`
+    }
+
+
 def _load(name: str):
     sys.path.insert(0, str(ROOT / "cloud/tests"))
     spec = importlib.util.spec_from_file_location(name, ROOT / f"cloud/tests/{name}.py")
@@ -53,7 +70,7 @@ def _load(name: str):
     return m
 
 
-def main(pages: int | None = None, root: str | None = None, with_level: bool = False, slash: bool = False) -> None:
+def main(pages: int | None = None, root: str | None = None, with_level: bool = False, slash: bool = False, placeholder: bool = False) -> None:
     from dt_cloud import interval_local as il
     from dt_cloud import interval_store as ist
     from dt_cloud import static_names as sn
@@ -73,6 +90,8 @@ def main(pages: int | None = None, root: str | None = None, with_level: bool = F
             fs = {f: b for f, b in fs.items() if f.startswith(f"{root}/")}
         if slash and j >= SLASH_FROM:
             fs[SLASH_KEY] = 7
+        if placeholder:
+            fs.update(placeholders(j))
         key = LAYOUT.replace("{id}", d)
         (work / "scans" / key).parent.mkdir(parents=True, exist_ok=True)
         t._write(t._rows(fs, v), work / "scans" / key, v)
@@ -83,14 +102,14 @@ def main(pages: int | None = None, root: str | None = None, with_level: bool = F
     for cmd, extra in [(il.build_cmd, build), (il.add_cmd, ["-w", str(work / "add")])]:
         res = CliRunner().invoke(cmd, [*common, *extra], catch_exceptions=False)
         assert res.exit_code == 0, res.output
-    out = HERE / ("interval-store-slash" if slash else "interval-store-level" if with_level else f"interval-store-p{pages}" if pages else f"interval-store-{root}" if root else "interval-store")
+    out = HERE / ("interval-store-placeholder" if placeholder else "interval-store-slash" if slash else "interval-store-level" if with_level else f"interval-store-p{pages}" if pages else f"interval-store-{root}" if root else "interval-store")
     shutil.rmtree(out, ignore_errors=True)
     # What the Worker reads: the served sorts, `scans.json`, the manifests and the runs' `meta.json` / `scans.json`.
     shutil.copytree(work / "store" / ist.PREFIX / "g", out / "g", ignore=shutil.ignore_patterns("verify", "state", "lease", "pv", "pvl", "rd", "ranges", "digest"))
     for f in [out / "g" / "scans.json", *(out / "g" / "deltas").glob("*/scans.json")]:
         doc = json.loads(f.read_text())
         f.write_text(json.dumps({**doc, "bucket": "b"}, indent=1) + "\n")
-    if root or slash:
+    if root or slash or placeholder:
         shutil.rmtree(work)
         return
     expected = []
@@ -160,5 +179,7 @@ if __name__ == "__main__":
         main(2, with_level=True)
     elif arg == "slash":
         main(2, with_level=True, slash=True)
+    elif arg == "placeholder":
+        main(2, with_level=True, placeholder=True)
     else:
         main(int(arg) if arg and arg.isdigit() else None, arg if arg and not arg.isdigit() else None)
