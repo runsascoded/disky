@@ -42,7 +42,8 @@ export const onRequestPost = async (ctx: { request: Request; env: Env; waitUntil
   const r = await dispatchPlan(ctx.env, { planId: planId!, mode, date: body?.date, ...(items ? { items } : {}), actor, siteUrl, buckets, ...(machine ? { machine: machine as SweepMachine } : {}), ...(shown !== undefined ? { shownMinSoftDeleteDays: shown } : {}), ...(expected ? { expected } : {}) }, 'sweep')
   if (r.ok) {
     // Sized from the interval store for the dates it holds (`withPathStore`), as the plans routes size them.
-    const p = withPathStore(ctx).then(c => notifyDispatched(c.env, r, 'www', siteUrl))
+    // The job has launched: an announcement sized from the raw env beats none, and the response still says it's running.
+    const p = withPathStore(ctx).catch(e => { console.log(`dispatch: withPathStore failed: ${(e as Error).message}`); return ctx }).then(c => notifyDispatched(c.env, r, 'www', siteUrl))
     if (ctx.waitUntil) ctx.waitUntil(p)
     else await p
   }
