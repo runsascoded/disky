@@ -32,7 +32,7 @@ import {
   ATTEMPTED, attemptOnly, LOWER_BOUND, NOT_OBSERVABLE, totalsLowerBound, UNDO_CAVEAT, UNDO_LOG_ONLY,
   type Check, commonBucketPrefix, type DeletionRun, elapsed, elapsedDetails, type ExecJob, fmtDur, type LogSummaryFile, loggedOf, logSubdir,
   type PlanSummaryFile, plannedOf, progressEstimate, type ProgressFile, runControls, runFileHref, runFilesRel, runLabel, type RunView, sumProgress, type Tally,
-  verifyRun, viewBuckets, viewLive, viewState, joinRuns,
+  expectedOf, verifyRun, viewBuckets, viewLive, viewState, joinRuns,
 } from './runs'
 import { runHasNoUndo, runNoUndoText } from './softDelete'
 
@@ -111,7 +111,7 @@ export function RunsSection({ runs, jobs, configured, jobsError, admin, busy, ac
     const ps = progress.get(v.key), p = ps ? sumProgress(ps) : null
     const deleted = v.run?.finished_ts ? v.run.deleted_objects : p?.deletes
     const secs = elapsed(v, now)
-    return [v.key, { planned: planOf(v)?.tally.objects, deleted, bytes: v.run?.finished_ts ? v.run.deleted_bytes : p?.bytes, rate: deleted != null && secs != null && secs > 0 ? deleted / secs : undefined }]
+    return [v.key, { planned: planOf(v)?.tally.objects ?? expectedOf(v)?.objects, deleted, bytes: v.run?.finished_ts ? v.run.deleted_bytes : p?.bytes, rate: deleted != null && secs != null && secs > 0 ? deleted / secs : undefined }]
   }))
   const filtered = selectRuns(views, { user: userFilter ?? '', mode: modeFilter ?? '', state: stateFilter ?? '', query: queryFilter ?? '', sort: sort ?? 'started', ascending: direction === 'asc' }, metrics, now)
   const pages = Math.max(1, Math.ceil(filtered.length / pageSize))
@@ -176,6 +176,7 @@ export function RunsSection({ runs, jobs, configured, jobsError, admin, busy, ac
               const live = viewLive(v)
               const ctl = runControls(v, CAPS, admin, now)
               const plan = planOf(v)?.tally
+              const expected = expectedOf(v)
               const attempted = attemptOnly(planOf(v)?.file)
               const skips = planOf(v)?.file.skipped_no_generation
               const prog = progress.get(v.key)
@@ -197,7 +198,11 @@ export function RunsSection({ runs, jobs, configured, jobsError, admin, busy, ac
                     <td className="rid"><RunId id={r?.run_id ?? jobId} href={r ? runHref(r.run_id) : undefined} /></td>
                     <td>{actor && <UserChip who={actor} size={16} />}</td>
                     <td><span className={`tag ${mode}`}>{mode === 'real' ? 'REAL' : 'DR'}</span></td>
-                    <td className="num nb">{plan ? <>{fmtBytes(plan.bytes)} <span className="dim">· {fmtN(plan.objects)}</span></> : <span className="dim">—</span>}</td>
+                    <td className="num nb">{plan ? <>{fmtBytes(plan.bytes)} <span className="dim">· {fmtN(plan.objects)}</span></> : expected ? (
+                      <Tooltip content="What was selected at dispatch, at the sizes /staged showed. This run's manifest replaces it with what it found.">
+                        <span className="run-expected"><span className="tag">expected</span> {fmtBytes(expected.bytes)} <span className="dim">· {fmtN(expected.objects)}</span></span>
+                      </Tooltip>
+                    ) : <span className="dim">—</span>}</td>
                     <td className="num nb">
                       {r?.finished_ts ? (
                         <Tooltip content={mode === 'dry' ? 'Dry run only: no objects were deleted.' : `${attempted ? ATTEMPTED : 'Objects deleted by this real run.'}${lowerBound.has(v.key) ? ` ${LOWER_BOUND}` : ''}`}>

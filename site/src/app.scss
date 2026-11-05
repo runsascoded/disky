@@ -2090,6 +2090,13 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); opacity: 1; }
   min-height: 30px;
   .sel-bar { margin-left: 0; box-shadow: 0 6px 18px rgb(0 0 0 / 0.25); pointer-events: auto; }
 }
+// The app's pager strip (`Pager.tsx`), wherever a list has one; a table's own header pagers restyle it.
+.pg {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin: 6px 0; font-size: 13px; font-variant-numeric: tabular-nums;
+  > span { padding: 0 6px; color: var(--ink-2); }
+  button { font: inherit; line-height: 1.4; background: var(--panel); color: var(--ink); border: 1px solid var(--line); border-radius: 5px; padding: 0 8px; cursor: pointer; &:disabled { opacity: 0.4; cursor: default; } }
+  select.psize { margin-left: 8px; font: inherit; font-size: 12px; background: var(--panel); color: var(--ink-2); border: 1px solid var(--line); border-radius: 4px; padding: 1px 4px; }
+}
 .children-tbl .pager {
   display: flex; align-items: center; flex-wrap: wrap; gap: 4px 10px; margin: 6px 0; font-size: 12px; color: var(--ink-2);
   font-variant-numeric: tabular-nums;
@@ -2940,6 +2947,9 @@ kbd { font: inherit; font-size: 11px; padding: 0 4px; border: 1px solid var(--li
   .stage-batch.emptied .batch-head { opacity: 0.8; }
   .batch-prefix-history { margin: 8px 0 12px 28px; padding-left: 16px; li { margin: 5px 0; overflow-wrap: anywhere; } }
   .runs-pg { flex-wrap: wrap; }
+  .dispatch-confirm-head { display: flex; align-items: center; gap: 10px; margin-top: 8px; }
+  .dispatch-confirm-list { margin: 6px 0; padding-left: 18px; li { margin: 3px 0; overflow-wrap: anywhere; } }
+  .run-expected .tag { margin-left: 0; }
   table.runs {
     th.num, td.num { text-align: right; font-variant-numeric: tabular-nums; }
     td.nb, td.num { white-space: nowrap; }

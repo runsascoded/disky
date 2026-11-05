@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { planDigest, realRun, type RunRow } from '../functions/_lib/plans'
 import {
   attemptOnly, itemsDigest, reusableDryRun, totalsLowerBound,
-  commonBucketPrefix, type DeletionRun, EXEC_CAPS, elapsed, elapsedDetails, type ExecJob, fmtDur, joinRuns, loggedOf, plannedOf, runControls,
+  commonBucketPrefix, type DeletionRun, EXEC_CAPS, elapsed, elapsedDetails, type ExecJob, fmtDur, expectedOf, joinRuns, loggedOf, plannedOf, runControls,
   progressEstimate, type ProgressFile, runDirHref, runFileHref, runFilesRel, runJobId, runLabel, sumProgress, verifyRun, viewBuckets, viewState,
 } from './runs'
 
@@ -23,6 +23,19 @@ describe('runJobId — the Batch job behind a run', () => {
       runJobId({ run_id: GCS_RUN, log_dir: 'gs://data/sweep/2026-09-27-p3/' }),
       runJobId({ run_id: GCS_RUN }),
     ]).toEqual([GCS_JOB, 'cw-sweep-dry-20260928-120000z', GCS_RUN, GCS_RUN])
+  })
+})
+
+describe('expectedOf — the selection total a live run shows until its manifest says', () => {
+  const expected = { bytes: 137_000, objects: 754 }
+  it('a live job has it; a finished one, or one dispatched without a total, has none', () => {
+    expect([
+      expectedOf({ key: 'a', job: job({ job_id: 'a', state: 'RUNNING', expected }), ops: [] }),
+      expectedOf({ key: 'b', job: job({ job_id: 'b', state: 'QUEUED', expected }), ops: [] }),
+      expectedOf({ key: 'c', job: job({ job_id: 'c', state: 'FAILED', expected }), ops: [] }),
+      expectedOf({ key: 'd', job: job({ job_id: 'd', state: 'RUNNING' }), ops: [] }),
+      expectedOf({ key: 'e', run: run(), ops: [] }),
+    ]).toEqual([expected, expected, null, null, null])
   })
 })
 

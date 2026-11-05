@@ -187,6 +187,10 @@ describe('D1', () => {
       status: { state: 'RUNNING', runDuration: '61.5s', statusEvents: [{ description: 'scheduled' }, { description: 'running' }] },
       taskGroups: [{ taskSpec: { environment: { variables: vars }, runnables: [{ container: { commands: ['-c', script] } }] } }],
     })
+    it('a run dispatched with a selection total carries it, display only', () => {
+      const v = sweepJobView(cfg, job('gcs-sweep-real-20260928-120000z', { USER: 'ann', EXPECTED_BYTES: '137000', EXPECTED_OBJECTS: '754' }, 'x'))
+      expect(v.expected).toEqual({ bytes: 137_000, objects: 754 })
+    })
     it('a run: its plan, cut and region; an undo: its target', () => {
       const logs = (uid: string) => `https://console.cloud.google.com/logs/query;query=${encodeURIComponent(`labels.job_uid="${uid}"\nlog_id("batch_task_logs")\ntimestamp >= "2026-09-28T12:00:00Z"`).replace('(', '%28').replace(')', '%29')}?project=my-project`
       expect([

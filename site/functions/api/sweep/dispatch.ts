@@ -10,7 +10,9 @@
 // `items` (the rows checked on /staged; the whole plan when absent), never more
 // (specs/done/delete-what-you-see.md). A dispatch is announced in the plan's Slack thread (specs/done/staged-slack.md).
 import { ADMIN_SCOPE, type Env as AuthEnv, json, requireScope } from '../../_lib/auth.js'
+import { parseExpected } from '../../_lib/dispatch.js'
 import { dispatchBody, dispatchPlan, type ExecEnv, notifyDispatched } from '../../_lib/executor.js'
+import { withPathStore } from '../../_lib/index.js'
 import { SWEEP_MACHINES, type SweepMachine } from '../../_lib/sweepMachines.js'
 import { MAX_MIN_SOFT_DELETE_DAYS } from '../../../src/softDelete.js'
 
@@ -20,7 +22,7 @@ export const onRequestPost = async (ctx: { request: Request; env: Env; waitUntil
   const gated = await requireScope(ctx, ADMIN_SCOPE)
   if (gated instanceof Response) return gated
   const body = (await ctx.request.json().catch(() => null)) as
-    | { mode?: string; date?: string; items?: string[]; buckets?: string[]; plan_id?: number; machine?: string; shown_min_soft_delete_days?: number } | null
+    | { mode?: string; date?: string; items?: string[]; buckets?: string[]; plan_id?: number; machine?: string; shown_min_soft_delete_days?: number; expected?: unknown } | null
   const mode = body?.mode
   const planId = body?.plan_id
   if (!Number.isInteger(planId)) return json({ error: 'plan_id required (an integer)' }, 400)
@@ -35,9 +37,12 @@ export const onRequestPost = async (ctx: { request: Request; env: Env; waitUntil
   if (machine !== undefined && !(machine in SWEEP_MACHINES)) return json({ error: `machine must be one of ${Object.keys(SWEEP_MACHINES).join(', ')}` }, 400)
   const shown = body?.shown_min_soft_delete_days
   if (shown !== undefined && (!Number.isInteger(shown) || shown < 0 || shown > MAX_MIN_SOFT_DELETE_DAYS)) return json({ error: `shown_min_soft_delete_days: an integer 0..${MAX_MIN_SOFT_DELETE_DAYS}` }, 400)
-  const r = await dispatchPlan(ctx.env, { planId: planId!, mode, date: body?.date, ...(items ? { items } : {}), actor, siteUrl, buckets, ...(machine ? { machine: machine as SweepMachine } : {}), ...(shown !== undefined ? { shownMinSoftDeleteDays: shown } : {}) }, 'sweep')
+  // What was selected: display only, so a bad one is dropped, not refused.
+  const expected = parseExpected(body?.expected)
+  const r = await dispatchPlan(ctx.env, { planId: planId!, mode, date: body?.date, ...(items ? { items } : {}), actor, siteUrl, buckets, ...(machine ? { machine: machine as SweepMachine } : {}), ...(shown !== undefined ? { shownMinSoftDeleteDays: shown } : {}), ...(expected ? { expected } : {}) }, 'sweep')
   if (r.ok) {
-    const p = notifyDispatched(ctx.env, r, 'www', siteUrl)
+    // Sized from the interval store for the dates it holds (`withPathStore`), as the plans routes size them.
+    const p = withPathStore(ctx).then(c => notifyDispatched(c.env, r, 'www', siteUrl))
     if (ctx.waitUntil) ctx.waitUntil(p)
     else await p
   }

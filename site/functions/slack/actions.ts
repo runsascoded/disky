@@ -107,7 +107,9 @@ async function handle(env: Env, p: BlockActions, siteUrl: string): Promise<void>
     // only refuses a button drawn for an older item set.
     if (clicked.digest !== g.digest) return tell(p.response_url, 'Not deleting: the plan changed after that button was drawn. Check the updated message.')
   }
-  const r = await dispatchPlan(env, { planId: id, mode, date, actor: email, siteUrl, ...(mode === 'real' && clicked.shownMinSoftDeleteDays !== undefined ? { shownMinSoftDeleteDays: clicked.shownMinSoftDeleteDays } : {}) }, kind)
+  // A real run's selection is what its dry run reviewed, the size the button's confirm named.
+  const expected = mode === 'real' && g.gate.ok ? { bytes: g.gate.dry.deleted_bytes, objects: g.gate.dry.deleted_objects } : undefined
+  const r = await dispatchPlan(env, { planId: id, mode, date, actor: email, siteUrl, expected, ...(mode === 'real' && clicked.shownMinSoftDeleteDays !== undefined ? { shownMinSoftDeleteDays: clicked.shownMinSoftDeleteDays } : {}) }, kind)
   if (!r.ok) {
     // Refused over the terms: the card holds the old ones and redraws only on an event, so redraw it before saying to re-read it.
     if (r.extra?.shown_min_soft_delete_days !== undefined) await notifyPlan(env, db, id, siteUrl)

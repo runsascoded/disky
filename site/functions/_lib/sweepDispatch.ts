@@ -27,7 +27,7 @@
 import type { D1Database } from '@cloudflare/workers-types'
 import { type BatchConfig, batchConfig, notConfigured } from './batchConfig.js'
 import { labelBatchSpec } from './costLabels.js'
-import { type DispatchErr, type DispatchReq, type ExecEnv, type Executor, type Prepared, refuse } from './dispatch.js'
+import { type DispatchErr, type DispatchReq, type ExecEnv, type Executor, expectedVars, type Prepared, refuse } from './dispatch.js'
 import { batchJobsUrl, batchRegionFor, gcpToken } from './gcp.js'
 import { bucketOf, digestLines, NO_SHAPE, type PlanBucketsSnapshot, prefixShape, snapshotPlanBuckets } from './plans.js'
 import { reviewConfig } from './planDispatch.js'
@@ -253,6 +253,8 @@ async function prepare(env: ExecEnv, db: D1Database, req: DispatchReq): Promise<
         PLAN_ID: String(req.planId),
         // the run's item digest, for `sweepReflect` (the executor ignores it)
         PLAN_DIGEST: digest,
+        // what was selected, for the run's row until its manifest says (`/api/sweep/jobs`; the executor ignores it)
+        ...expectedVars(req.expected),
         ...review.vars,
       },
       secrets: review.secrets,

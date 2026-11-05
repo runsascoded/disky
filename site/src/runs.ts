@@ -54,6 +54,8 @@ export interface ExecJob {
   /** Why the step failed, from its own `failure.json` (gcs): what Batch's "exit code 1" event can't say. */
   failure?: string | null
   stop_requested?: boolean
+  /** What was selected at dispatch, by the sizes the page showed: display only. */
+  expected?: { bytes: number; objects: number }
   /** The job's run dir (gcs: `plan`; cw: `run`), `gs://<bucket>/…`. */
   plan?: string
   run?: string
@@ -141,6 +143,9 @@ export function joinRuns(runs: readonly DeletionRun[], jobs: readonly ExecJob[])
 export const viewState = (v: RunView): string => v.job?.stop_requested && v.job.state === 'FAILED' ? 'CANCELLED' : v.job?.state ?? (v.run?.finished_ts ? 'DONE' : 'RECORDING')
 
 export const viewLive = (v: RunView): boolean => LIVE_STATES.has(v.job?.state ?? '')
+
+/** A live run's selection total: what its row shows until the manifest says what it found. */
+export const expectedOf = (v: RunView): NonNullable<ExecJob['expected']> | null => (viewLive(v) ? v.job?.expected ?? null : null)
 
 /** Seconds a run took (or has taken, while live). */
 export function elapsed(v: RunView, now: number): number | null {

@@ -12,6 +12,7 @@ import { SessionLogSwitch } from './SessionLogSwitch'
 import { ActivityKinds } from './ActivityKinds'
 import { SweepSoftDelete } from './SweepSoftDelete'
 import { NO_AUTOFILL } from './noAutofill'
+import { Paginated } from './Pager'
 
 // Share-link console (staff-only; the backend enforces the `admin` scope on
 // every /api/auth/grants route — this page just renders the 403 politely).
@@ -575,7 +576,7 @@ export function AdminPage() {
           show revoked <span className="dim">({revokedCount})</span>
         </label>
       )}
-      <div className="table-scroll">
+      <Paginated rows={shown} label="Share links">{page => <div className="table-scroll">
       <table className="grants">
         <thead>
           <tr>
@@ -583,7 +584,7 @@ export function AdminPage() {
           </tr>
         </thead>
         <tbody>
-          {shown.map(g => (
+          {page.map(g => (
             <Fragment key={g.id}>
             <tr className={g.revokedAt ? 'revoked' : ''}>
               <td className="memo"><MemoCell grant={g} onSave={note => editGrant.mutate({ id: g.id, edit: { note } })} saving={editGrant.isPending} /></td>
@@ -625,7 +626,7 @@ export function AdminPage() {
           )}
         </tbody>
       </table>
-      </div>
+      </div>}</Paginated>
       <PreviewLinks />
       <ActivityKinds />
       <SessionLogSwitch />
