@@ -56,13 +56,13 @@ Every run, dry or real, is readable by any signed-in viewer; only admins dispatc
 
 | Method & path | Purpose |
 |---|---|
-| `GET /api/plans/staged` | The open plan's items, plus `runs`: every deletion run (dry and real), with `run_id`, `mode`, totals (`deleted_bytes`, `deleted_objects`) and its `undo_deadline`. |
+| `GET /api/plans/staged` | The open plan's items, plus `runs`: every deletion run (dry and real), with `run_id`, `mode`, totals (`deleted_bytes`, `deleted_objects`), its `undo_deadline`, the soft-delete minimum it ran under (`min_soft_delete_days`) and the narrowest retention its buckets had (`soft_delete_days`; 0: no undo). |
 | `GET /api/sweep/jobs` | The executor's Batch jobs (runs and undos), live state included. |
 | `GET /api/plans/run?id=<run_id>` | One run: `{ run, bands }`, one band per deleted prefix (`prefix, bytes, objects, gone, overwritten, drift_new_objects, undone_objects`). Run ids hold a `/`: URL-encode them. |
 | `GET /api/plans/prefix-history?id=<plan_id>` | Each staged prefix of a plan → the real run(s) that deleted it. |
 | `GET /v1/files/list?prefix=sweep/runs/<run_id>/` | A run's directory (plan, per-bucket manifests of the exact objects + generations deleted); fetch a file with `/v1/files/get?path=…`. |
 
-Deleted objects stay recoverable for 7 days from each object's deletion, not from job completion; the recorded run deadline is not a new retention window. Ordinary agent tokens cannot restore. Admins can dispatch whole-run recovery through `POST /api/sweep/undo` (`{ run_id, bulk? }`) after the real job finishes and drains, within its recovery window. For prefix-filtered recovery, ask an admin to use the CLI with committed decision logs. Send the run id and prefixes (a reply on the run's thread, or a DM); an agent can assemble them with the recipe below. `/runs/<run_id>` shows progress, deletion records and recovery information; opening it does not start recovery.
+Deleted objects stay recoverable for as long as their bucket retains soft deletes, from each object's deletion, not from job completion; the recorded run deadline is not a new retention window. A real run refuses a bucket retaining less than the deployment's minimum (`GET /api/sweep/settings`: `min_soft_delete_days`, 7 unless an admin has changed it). A run with `soft_delete_days: 0` has **no undo**: a bucket in it had soft delete off, so what it deleted there is permanent, and its `undo_deadline` is null. Ordinary agent tokens cannot restore. Admins can dispatch whole-run recovery through `POST /api/sweep/undo` (`{ run_id, bulk? }`) after the real job finishes and drains, within its recovery window. For prefix-filtered recovery, ask an admin to use the CLI with committed decision logs. Send the run id and prefixes (a reply on the run's thread, or a DM); an agent can assemble them with the recipe below. `/runs/<run_id>` shows progress, deletion records and recovery information; opening it does not start recovery.
 
 ### Ownership
 
@@ -190,7 +190,7 @@ done
 
 ## Notes for agents
 
-- **Staging is reversible until dispatch.** Unstage any time (`DELETE /api/plans/<id>/items`); only an admin's `real` run deletes, and runs are undoable for a window afterwards (see `/staged`).
+- **Staging is reversible until dispatch.** Unstage any time (`DELETE /api/plans/<id>/items`); only an admin's `real` run deletes, and a run is undoable only while its buckets retain soft deletes, and not at all with soft delete off (see `/staged`).
 - **Browse first:** `/api/subtree` (or the parquet index) tells you what a prefix holds and who owns it; stage the deepest prefixes that name what you mean, not a fat ancestor: an ancestor absorbs everything under it.
 - **Explain yourself:** the `note` on a stage batch is what the reviewing admin reads on `/staged`; the `memo` on an assignment is what the ledger shows.
 - There is no client CLI for staging; the surviving `dt-cloud` verbs are the pipeline's and the executor's (`healthcheck`, `sweep manifest --plan`, …).
