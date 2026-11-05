@@ -15,6 +15,7 @@ import re
 import sys
 from collections import Counter
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
 from functools import partial, wraps
 from pathlib import Path
@@ -2591,26 +2592,54 @@ def access_r2_export(
     print(json.dumps(archive["summary"], sort_keys=True))
 
 
-def r2_state_inputs(state: str, before: dt.datetime, stage: Path) -> list[str]:
+#: `r2_state_inputs`: aggregates fetched at once, and state reads before a missing aggregate is an error.
+R2_AGG_WORKERS = 16
+R2_STATE_READS = 5
+
+
+def r2_state_inputs(
+    state: str,
+    before: dt.datetime,
+    stage: Path,
+    read: Callable[[str], bytes] | None = None,
+) -> list[str]:
     """The current aggregates `state` (the collector archive's `state.json`, a path or URL) names for the hours before
-    `before` (`parsers.r2.state_aggs`), copied from beside it into `stage`; their local paths."""
+    `before` (`parsers.r2.state_aggs`), copied from beside it into `stage`; their local paths. The collector publishes a
+    new state, then deletes the aggregates it superseded, so a key gone under this read means a newer state already
+    names its replacement: re-read it and fetch what's new. The result is exactly one state's aggregates."""
     from disk_tree import blobfs
     from disk_tree.access.parsers.r2 import state_aggs
 
-    def read(path: str) -> bytes:
+    def read_blob(path: str) -> bytes:
         with blobfs.open_read(path) if blobfs.is_url(path) else open(path, "rb") as f:
             return f.read()
 
-    doc = json.loads(read(state))
+    read = read or read_blob
     root = state.rsplit("/", 1)[0] if blobfs.is_url(state) else str(Path(state).parent)
-    out = []
-    for key in state_aggs(doc, before):
+
+    def fetch(key: str) -> str | None:
+        """Copies `key` into `stage`; returns it if the archive no longer has it."""
+        try:
+            data = read(blobfs.join(root, key))
+        except FileNotFoundError:
+            return key
         local = stage / key
         local.parent.mkdir(parents=True, exist_ok=True)
-        local.write_bytes(read(blobfs.join(root, key)))
-        out.append(str(local))
-    err(f"r2-agg: {len(out)} hour aggregate(s) from {state}")
-    return out
+        local.write_bytes(data)
+        return None
+
+    fetched: set[str] = set()
+    gone: list[str] = []
+    for _ in range(R2_STATE_READS):
+        keys = state_aggs(json.loads(read(state)), before)
+        with ThreadPoolExecutor(R2_AGG_WORKERS) as pool:
+            gone = [key for key in pool.map(fetch, [k for k in keys if k not in fetched]) if key]
+        fetched |= set(keys) - set(gone)
+        if not gone:
+            err(f"r2-agg: {len(keys)} hour aggregate(s) from {state}")
+            return [str(stage / key) for key in keys]
+        err(f"r2-agg: {len(gone)} aggregate(s) superseded during the read (first: {gone[0]}); re-reading {state}")
+    raise FileNotFoundError(f"r2-agg: {len(gone)} aggregate(s) {state} still names are missing after {R2_STATE_READS} reads (first: {gone[0]})")
 
 
 @access.command("r2-agg")
