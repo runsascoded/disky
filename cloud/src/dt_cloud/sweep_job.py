@@ -33,6 +33,9 @@ def reviewed_job_spec(
         raise ValueError("invalid reviewed deletion workers/rate")
     task = template["taskGroups"][0]["taskSpec"]
     environment = deepcopy(task["environment"])
+    # The template's dispatch's selection (`site/functions/_lib/dispatch.ts`, display only), not this run's.
+    for key in ("EXPECTED_BYTES", "EXPECTED_OBJECTS"):
+        environment["variables"].pop(key, None)
     for key in ("DATA_BUCKET", "PLAN_ID", "PLAN_DIGEST", "D1_DB_ID", "SITE_URL"):
         if not environment["variables"].get(key):
             raise ValueError(f"reviewed job template lacks {key}")
