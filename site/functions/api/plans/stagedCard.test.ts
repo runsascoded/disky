@@ -17,9 +17,9 @@ beforeEach(async () => {
   refresh.mockClear()
 })
 
-const post = async (token: string | null) => {
+const post = async (token: string | null, origin = 'https://site.example.test') => {
   const r = await onRequest({
-    request: new Request('https://site.example.test/api/plans/staged/card', { method: 'POST', headers: token ? { authorization: `Bearer ${token}` } : {} }),
+    request: new Request(`${origin}/api/plans/staged/card`, { method: 'POST', headers: token ? { authorization: `Bearer ${token}` } : {} }),
     env: env as never,
   } as never)
   return { status: r.status, body: await r.json(), refreshes: refresh.mock.calls.length }
@@ -31,8 +31,20 @@ describe('the staged-card ping', () => {
     expect(await post(job.token)).toEqual({ status: 200, body: { refreshed: true }, refreshes: 1 })
     expect((refresh.mock.calls[0] as unknown[])[2]).toBe('https://site.example.test')
   })
-  it('is not there without a configured grant', async () => {
-    expect(await post(job.token)).toEqual({ status: 404, body: { error: 'no staged-card grant on this deployment' }, refreshes: 0 })
+  it('is not there without a configured grant, whoever asks', async () => {
+    const admin = await mint('ops', ['cw', 'admin'])
+    const gone = { status: 404, body: { error: 'no staged-card grant on this deployment' }, refreshes: 0 }
+    expect([await post(job.token), await post(admin.token), await post(null)]).toEqual([gone, gone, gone])
+  })
+  it("refuses a signed-in admin: a session isn't the grant", async () => {
+    env.STAGED_CARD_GRANT = job.grant.id
+    // (a localhost request is the dev identity: a session with every scope, admin included)
+    expect(await post(null, 'http://localhost')).toEqual({ status: 403, body: { error: 'forbidden' }, refreshes: 0 })
+  })
+  it("refuses the named grant itself once it isn't this deployment's viewer", async () => {
+    const other = await mint('scan job', ['gcs:read'])
+    env.STAGED_CARD_GRANT = other.grant.id
+    expect(await post(other.token)).toEqual({ status: 403, body: { error: 'forbidden' }, refreshes: 0 })
   })
   it('refuses any other viewer, even an admin', async () => {
     env.STAGED_CARD_GRANT = job.grant.id
