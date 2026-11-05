@@ -32,6 +32,15 @@ export async function getsOf<T>(f: () => Promise<T>): Promise<[T, string[]]> {
   return [v, [...new Set(keys)]]
 }
 
+/** A view's bytes per storage class in `iv/expected.json`, by tile (`''`: the root, `/d.json`: a child). Each deployment's
+ *  fixture holds its own classes (`CLASS_COLS` / `IV_CLASS_COLS`, `iv/gen.py`), so a test expecting them reads them here. */
+export async function ivClassBytes(date: string, path: string, w: number): Promise<Record<string, Record<string, number>>> {
+  const views = await readJson<{ date: string; path: string; w: number; depth: number | null; tiles: Record<string, { cb: Record<string, number> }> }[]>('iv/expected.json')
+  const view = views.find(v => v.date === date && v.path === path && v.w === w && v.depth === null)
+  if (!view) throw new Error(`iv/expected.json: no view ${date} ${path} w=${w}`)
+  return Object.fromEntries(Object.entries(view.tiles).map(([tile, t]) => [tile, t.cb]))
+}
+
 /** What the real store throws for an absent key (`@rdub/file-tree`'s `NotFoundError`). */
 class NotFoundError extends Error {
   constructor(key: string) {
