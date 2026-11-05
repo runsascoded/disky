@@ -103,6 +103,19 @@ describe('a recorded deletion whose bucket has soft delete off now', () => {
       prefixExecution(prefix, [record], undefined, 700, null),
     ]).toEqual([{ ...recorded, expired: true }, { ...recorded, deadline: null, noUndo: true }, { ...recorded, expired: true }])
   })
+  it('a band already restored has no undo left to lose either: nothing "unavailable", nothing unverified', () => {
+    const restored = { ...record, undone_objects: 5, undo_state: 'partial' }
+    expect([
+      prefixExecution(prefix, [restored], undefined, 300, known(true)),
+      prefixExecution(prefix, [restored], undefined, 300, null),
+      // Its run fully undone: every object is live again, whatever the band's own count (it leaves out the ones an undo found live).
+      prefixExecution(prefix, [{ ...record, undone_objects: 3, undo_state: 'full' }], undefined, 300, known(true)),
+    ]).toEqual([{ ...recorded, undone: 5 }, { ...recorded, undone: 5 }, { ...recorded, undone: 3 }])
+  })
+  it('a band partly restored still has the rest to lose', () => {
+    expect(prefixExecution(prefix, [{ ...record, undone_objects: 3, undo_state: 'partial' }], undefined, 300, known(true)))
+      .toEqual({ ...recorded, undone: 3, unavailable: { buckets: ['b'], asOf: '2026-11-05' } })
+  })
   it('bucketOfPrefix', () => {
     expect([bucketOfPrefix('gs://b/a/'), bucketOfPrefix('s3://bkt/k'), bucketOfPrefix('b/a/')]).toEqual(['b', 'bkt', 'b'])
   })

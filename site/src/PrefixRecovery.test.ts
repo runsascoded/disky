@@ -3,6 +3,7 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { MemoryRouter } from 'react-router-dom'
 import { expect, it } from 'vitest'
 import { PrefixRecovery, recoveryNotes } from './PrefixRecovery'
+import { prefixExecution, type PrefixBandRecord } from './prefixExecution'
 
 it('shows preserved objects beside the recorded deletion count, with a run-detail link', () => {
   const markup = renderToStaticMarkup(createElement(MemoryRouter, null, createElement(PrefixRecovery, {
@@ -39,4 +40,17 @@ it('recoveryNotes: the tooltip states the reason instead of a cutoff', () => {
     "Undo depends on soft delete still being on for b, which this site can't see. The undo job, and `dt-cloud sweep undo` by hand, ask GCS and refuse a bucket where it is off.",
   ])
   expect(recoveryNotes({ ...e, deadline: null, noUndo: true })).toEqual(['This run recorded no undo window: soft delete was off, or it left no record of its retention. Treat its deletes as permanent.'])
+})
+
+it('a restored band on a bucket with soft delete off: "restored", and a tooltip with no "undo unavailable" note', () => {
+  const band: PrefixBandRecord = { prefix: 'gs://b/a/', run_id: 'real-run', started_ts: 100, finished_ts: 200, undo_deadline: 800, undo_state: 'full', bytes: 50, objects: 5, gone: 0, overwritten: 0, drift_new_objects: 0, undone_objects: 5 }
+  const execution = prefixExecution(band.prefix, [band], undefined, 300, { asOf: '2026-11-05', off: { b: true } })
+  const markup = renderToStaticMarkup(createElement(MemoryRouter, null, createElement(PrefixRecovery, { execution, fmtBytes: bytes => `${bytes} B` })))
+  expect(markup.replace(/<[^>]*>/g, '')).toBe('5 logged deleted · restored')
+  expect(recoveryNotes(execution!)).toEqual([
+    'Open recovery details. Prefix-filtered restore is available through the CLI; the web undo button restores the whole run.',
+    'Soft-delete retention starts at each object’s deletion, not when the run finishes. Empty at a scan is not proof of deletion by this run.',
+    'Undo restores every logged generation. An XML run’s log can’t tell an object it deleted from one someone else deleted after the scan, so undo can bring those back too.',
+    'Conservative recovery cutoff: 1970-01-01T00:11:40.000Z',
+  ])
 })
