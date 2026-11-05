@@ -17,7 +17,7 @@ import { type FinishedRun, type Gate, planDigest, planItemLines, planRuns, realG
 import { slackApi, slackPeople, type SlackPerson, slackReady, type SlackEnv, type SlackResult } from './slack.js'
 import type { Env } from './auth.js'
 import { minSoftDeleteDays } from './sweepSettings.js'
-import { runHasNoUndo, slackUndoTerms } from '../../src/softDelete.js'
+import { runHasNoUndo, runPromisedNothing, slackUndoTerms } from '../../src/softDelete.js'
 import { pathScans, storeReady } from './index.js'
 import { MAX_PREFIXES, type PrefixStat, prefixesAt } from './prefixes.js'
 import { expDay, IMAGE_TTL_DAYS, imagePath, ogKey } from './og/sign.js'
@@ -114,7 +114,22 @@ const lastRealRun = (runs: readonly RunRow[]): RunRow | undefined => [...runs].f
 
 /** What a real run's event says of undo: its window, that it has none, or (no record either way) nothing. */
 const undoNote = (r: RunRow): string =>
-  r.undo_deadline ? `; undoable until ${utc(r.undo_deadline)} (www)` : runHasNoUndo(r) ? '; no undo (soft delete off)' : ''
+  r.undo_deadline ? `; undoable until ${utc(r.undo_deadline)} (www)`
+    : runPromisedNothing(r) && r.mode === 'real' ? '; no undo promised (no soft-delete minimum)'
+    : runHasNoUndo(r) ? '; no undo (soft delete off)' : ''
+
+/** The real-delete button's value: the plan, its item set's digest, and the minimum its confirm states, which dispatch holds the
+ * click to (absent: `plan-sweep`, with no such guard). */
+export const realButtonValue = (planId: number, digest: string, minSoftDeleteDays?: number): string =>
+  `${planId}:${digest}${minSoftDeleteDays === undefined ? '' : `:${minSoftDeleteDays}`}`
+
+/** A dispatch button's value (`realButtonValue`; the dry-run's, or a card from before the minimum, has fewer parts), or null if bad. */
+export function parseDispatchButton(value: string): { planId: number; digest?: string; shownMinSoftDeleteDays?: number } | null {
+  const [plan, digest, shown, ...rest] = value.split(':')
+  const planId = Number(plan)
+  if (!Number.isInteger(planId) || rest.length || (shown !== undefined && !/^\d+$/.test(shown))) return null
+  return { planId, ...(digest === undefined ? {} : { digest }), ...(shown === undefined ? {} : { shownMinSoftDeleteDays: Number(shown) }) }
+}
 
 /** The thread's parent message: `{ text, blocks }` for chat.postMessage / chat.update. */
 export function renderParent(v: ParentView): { text: string; blocks: unknown[] } {
@@ -143,7 +158,7 @@ export function renderParent(v: ParentView): { text: string; blocks: unknown[] }
     buttons.push({ type: 'button', action_id: 'staged_dry', value: String(v.planId), text: { type: 'plain_text', text: 'Dry-run' } })
     if (gate.ok) {
       buttons.push({
-        type: 'button', action_id: 'staged_real', value: `${v.planId}:${v.digest}`, style: 'danger',
+        type: 'button', action_id: 'staged_real', value: realButtonValue(v.planId, v.digest, v.minSoftDeleteDays), style: 'danger',
         text: { type: 'plain_text', text: 'Delete for real…' },
         confirm: {
           title: { type: 'plain_text', text: 'Really delete?' },

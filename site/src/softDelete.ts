@@ -8,6 +8,9 @@ export const DEFAULT_MIN_SOFT_DELETE_DAYS = 7
 /** GCS's longest retention (and `sweep execute*`'s `-s` range, and the table's CHECK). */
 export const MAX_MIN_SOFT_DELETE_DAYS = 90
 
+/** The react-query key of `/api/sweep/settings`. */
+export const SWEEP_SETTINGS_KEY = ['sweep', 'settings'] as const
+
 const days = (n: number): string => `${n} ${n === 1 ? 'day' : 'days'}`
 
 const NO_UNDO_ALLOWED = 'No undo: this deployment doesn\'t require soft delete, so treat these deletes as permanent.'
@@ -43,8 +46,25 @@ export function minimumWarning(min: number): string | null {
     : 'At 0 there is no undo: a run deletes from a bucket with soft delete off, and those deletes are permanent. Nothing can restore them.'
 }
 
-/** Did this run's record say it has no undo? (0 measured on a bucket it touched. Null, a run from before the column: it needed 7 days.) */
-export const runHasNoUndo = (r: { mode: string; soft_delete_days?: number | null }): boolean =>
-  r.mode === 'real' && r.soft_delete_days === 0
+/** The retention a run's record stands on, as far as it says. */
+export interface RunRetention { soft_delete_days?: number | null; min_soft_delete_days?: number | null }
 
-export const RUN_NO_UNDO = 'No undo: a bucket in this run had soft delete off, so what it deleted there is gone for good.'
+/** Measured nothing and required nothing: `sweep execute` measures per bucket, so a run of `-s 0` killed before its end record. */
+export const runPromisedNothing = (r: RunRetention): boolean => r.soft_delete_days == null && r.min_soft_delete_days === 0
+
+/** Did this run's record say it has no undo? (0 measured on a bucket it deleted from, or `runPromisedNothing`. Both null, a run from
+ * before the columns: it needed 7 days.) */
+export const runHasNoUndo = (r: RunRetention & { mode: string }): boolean =>
+  r.mode === 'real' && (r.soft_delete_days === 0 || runPromisedNothing(r))
+
+/** Why, for a run `runHasNoUndo` says has none. */
+export const runNoUndoText = (r: RunRetention): string => runPromisedNothing(r)
+  ? 'No undo promised: this run required no soft delete and recorded no retention, so treat its deletes as permanent.'
+  : 'No undo: a bucket in this run had soft delete off, so what it deleted there is gone for good.'
+
+/** Why a real run shown `shown` days (a request naming none: 7) can't run under `current`, or null if it can. Terms are rendered
+ * when a card or page is, and the minimum is read at dispatch, so a weaker one must not slip under a confirm that promised more;
+ * a stronger one only keeps the promise. */
+export const weakerThanShown = (current: number, shown: number): string | null => current < shown
+  ? `not deleting: the soft-delete minimum is now ${days(current)}, lower than the ${days(shown)} these terms promised, so the undo they describe may not exist. Re-read the terms and confirm again.`
+  : null

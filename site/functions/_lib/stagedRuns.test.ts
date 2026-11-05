@@ -20,6 +20,9 @@ const row = (o: Partial<UndoRunRow> = {}): UndoRunRow => ({
 })
 
 describe('undoGate — a finished real run, inside its window, not already undone', () => {
+  it('a run that required nothing and measured nothing says why there is no undo', () => {
+    expect(undoGate(row({ undo_deadline: null, soft_delete_days: null, min_soft_delete_days: 0 }), NOW)).toEqual({ ok: false, status: 409, error: 'no undo promised: this run required no soft delete and recorded no retention, so treat its deletes as permanent' })
+  })
   it('a run that recorded soft delete off says why there is no undo', () => {
     expect(undoGate(row({ undo_deadline: null, soft_delete_days: 0 }), NOW)).toEqual({ ok: false, status: 409, error: 'no undo: a bucket in this run had soft delete off, so what it deleted there is gone for good' })
   })

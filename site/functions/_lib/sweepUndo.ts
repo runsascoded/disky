@@ -13,6 +13,7 @@ import { type DispatchErr, type ExecEnv, refuse } from './dispatch.js'
 import { batchRegionFor, gcpToken } from './gcp.js'
 import { auditRunControl } from './plans.js'
 import { jobStampOf, RUN_ID_RE, submitSweepJob, sweepJobSpec, undoScript } from './sweepDispatch.js'
+import { runPromisedNothing } from '../../src/softDelete.js'
 
 /** The `deletion_runs` columns the undo gate reads. */
 export interface UndoRunRow {
@@ -24,6 +25,8 @@ export interface UndoRunRow {
   buckets: string | null
   /** The narrowest retention measured on its buckets (absent: a D1 from before the column). */
   soft_delete_days?: number | null
+  /** The minimum it ran under. */
+  min_soft_delete_days?: number | null
 }
 
 /** May `row` be undone at `now`? Null = yes, else the refusal. */
@@ -33,6 +36,7 @@ export function undoGate(row: UndoRunRow | null, now: number): DispatchErr | nul
   if (row.finished_ts == null) return refuse(409, 'the run is still in progress; stop it first, undo once it has recorded its end')
   if (row.undo_state === 'full') return refuse(409, 'already undone')
   if (row.soft_delete_days === 0) return refuse(409, 'no undo: a bucket in this run had soft delete off, so what it deleted there is gone for good')
+  if (runPromisedNothing(row)) return refuse(409, 'no undo promised: this run required no soft delete and recorded no retention, so treat its deletes as permanent')
   if (row.undo_deadline == null) return refuse(409, 'the run recorded no undo window')
   if (now >= row.undo_deadline) return refuse(409, 'undo window closed (the soft-delete retention has passed)')
   return null

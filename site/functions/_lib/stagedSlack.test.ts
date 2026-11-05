@@ -15,6 +15,16 @@ const ids = (blocks: unknown[]): string[] =>
 describe('renderParent', () => {
   const base = { planId: 7, siteUrl: 'https://cw-s3.oa.dev', items: 3, batches: 2, stagers: ['ann@openathena.ai', 'bo@coreweave.com'], digest: 'D1', actions: true, closed: false }
 
+  describe('the real-delete button carries the minimum its confirm states', () => {
+    const value = (minSoftDeleteDays?: number) => (renderParent({ ...base, runs: [run({})], minSoftDeleteDays }).blocks as { elements?: { action_id: string; value?: string }[] }[])
+      .flatMap(b => b.elements ?? []).find(e => e.action_id === 'staged_real')!.value
+    it.each<[string, number | undefined, string]>([
+      ['no guard (cw): as it always was', undefined, '7:D1'],
+      ['the default', 7, '7:D1:7'],
+      ['soft delete not required', 0, '7:D1:0'],
+    ])('%s', (_, min, expected) => expect(value(min)).toBe(expected))
+  })
+
   describe('the real-delete confirm says what undo there is', () => {
     const confirmText = (minSoftDeleteDays?: number) => {
       const real = (renderParent({ ...base, runs: [run({})], minSoftDeleteDays }).blocks as { elements?: { action_id: string; confirm?: { text: { text: string } } }[] }[])
@@ -195,6 +205,11 @@ describe('run events', () => {
     it('a window or nothing recorded: as before', () => {
       expect(runEvent({ ...noUndo, soft_delete_days: 7, undo_deadline: 1_790_604_800 }, 'finished')).toBe(':white_check_mark: Real deletion `r1` finished: deleted *2.0 TiB* / 1,234 objects; undoable until 2026-09-28 14:13Z (www).')
       expect(runEvent({ ...noUndo, soft_delete_days: null }, 'finished')).toBe(':white_check_mark: Real deletion `r1` finished: deleted *2.0 TiB* / 1,234 objects.')
+    })
+    it('a run that required nothing and measured nothing promises no undo, and doesn\'t claim soft delete was off', () => {
+      // A killed `sweep execute --for-real -s 0`: no end record, so what its buckets retain was never written.
+      const unmeasured = run({ mode: 'real', run_id: 'r1', undo_deadline: null, soft_delete_days: null, min_soft_delete_days: 0 })
+      expect(runEvent(unmeasured, 'failed', { outcome: { attempted: true, skipped: null, notSwept: [], totals: 'lower-bound' } })).toBe(':warning: *Real deletion* `r1` ended before recording its end: attempted at least *2.0 TiB* / 1,234 objects, from its progress files, which can lag what it did; no undo promised (no soft-delete minimum).')
     })
     it('the parent has no "undoable" line for it', () => {
       const status = (renderParent({ planId: 7, siteUrl: 'https://x', items: 3, batches: 1, stagers: [], digest: 'D1', actions: false, closed: false, runs: [noUndo], now: 1000 }).blocks as { text?: { text: string } }[]).map(b => b.text?.text ?? '')

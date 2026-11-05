@@ -188,6 +188,23 @@ class TestUndoCli:
         result, restored = self.invoke(monkeypatch, {**self.ROW, "soft_delete_days": 0}, "-b", "kept")
         assert (result.exit_code, result.exception, restored) == (0, None, [("kept",)])
 
+    def test_refuses_a_run_that_required_nothing_and_measured_nothing(self, monkeypatch):
+        # A killed `sweep execute --for-real -s 0`: its start row has no measured retention, and nothing promised one.
+        result, restored = self.invoke(monkeypatch, {**self.ROW, "min_soft_delete_days": 0, "soft_delete_days": None})
+        assert (result.exit_code, restored) == (1, [])
+        assert str(result.exception) == (
+            "2026-01-01-p1/20260101T000000Z: no undo promised: it required no soft delete and recorded no retention, so treat its deletes as permanent. "
+            "Name the buckets to try with -b"
+        )
+
+    def test_a_bucket_cut_can_still_try_such_a_run(self, monkeypatch):
+        result, restored = self.invoke(monkeypatch, {**self.ROW, "min_soft_delete_days": 0, "soft_delete_days": None}, "-b", "kept")
+        assert (result.exit_code, result.exception, restored) == (0, None, [("kept",)])
+
+    def test_a_run_that_required_days_and_measured_nothing_is_undone(self, monkeypatch):
+        result, restored = self.invoke(monkeypatch, {**self.ROW, "min_soft_delete_days": 3, "soft_delete_days": None})
+        assert (result.exit_code, result.exception, restored) == (0, None, [()])
+
     def test_a_run_from_before_the_column_is_undone_as_before(self, monkeypatch):
         result, restored = self.invoke(monkeypatch, self.ROW)
         assert (result.exit_code, result.exception, restored) == (0, None, [()])

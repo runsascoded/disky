@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { confirmUndoTerms, minimumWarning, runHasNoUndo, slackUndoTerms } from './softDelete'
+import { confirmUndoTerms, minimumWarning, runHasNoUndo, runNoUndoText, slackUndoTerms } from './softDelete'
 
 describe('slackUndoTerms', () => {
   it.each([
@@ -35,7 +35,23 @@ describe('minimumWarning', () => {
   ])('%i', (min, text) => expect(minimumWarning(min)).toBe(text))
 })
 
+describe('runNoUndoText', () => {
+  it.each<[string, { soft_delete_days?: number | null; min_soft_delete_days?: number | null }, string]>([
+    ['0 measured', { soft_delete_days: 0, min_soft_delete_days: 0 }, 'No undo: a bucket in this run had soft delete off, so what it deleted there is gone for good.'],
+    ['nothing measured or required', { soft_delete_days: null, min_soft_delete_days: 0 }, 'No undo promised: this run required no soft delete and recorded no retention, so treat its deletes as permanent.'],
+  ])('%s', (_, r, text) => expect(runNoUndoText(r)).toBe(text))
+})
+
 describe('runHasNoUndo', () => {
+  it.each<[string, number | null | undefined, number | null | undefined, boolean]>([
+    ['nothing measured, nothing required', null, 0, true],
+    ['nothing measured, days required', null, 3, false],
+    ['nothing measured, from before the columns', null, null, false],
+    ['measured a window, nothing required', 7, 0, false],
+  ])('with its minimum: %s', (_, soft_delete_days, min_soft_delete_days, real) => {
+    expect(runHasNoUndo({ mode: 'real', soft_delete_days, min_soft_delete_days })).toBe(real)
+    expect(runHasNoUndo({ mode: 'dry', soft_delete_days, min_soft_delete_days })).toBe(false)
+  })
   it.each<[string, number | null | undefined, boolean, boolean]>([
     ['0 measured', 0, true, false],
     ['a window', 7, false, false],

@@ -10,7 +10,8 @@
 // the matching DR's exact generations, or, with no such DR, `manifest` then
 // `execute-manifest` deleting only that manifest's, either way after complete
 // preflight and permission checks, and a retention check at the deployment's minimum (`_lib/sweepSettings.ts`, read here at
-// dispatch and passed on the command line, so it can't move under a running job). All record D1 runs and bands; `plan_id`
+// dispatch and passed on the command line, so it can't move under a running job). A real dispatch refuses a minimum lower than
+// the one its confirm showed (`DispatchReq.shownMinSoftDeleteDays`). All record D1 runs and bands; `plan_id`
 // comes from plan.json, with no row inserted here. The `-b` cut is the plan's
 // buckets (∩ `buckets`, when given). The run's item digest rides in the job
 // env (`PLAN_DIGEST`); `_lib/sweepReflect.ts` copies it onto the run's row once
@@ -36,6 +37,7 @@ import { minSoftDeleteDays } from './sweepSettings.js'
 import { totalsReader } from './sweepTotals.js'
 import { listSweepJobs, reflectSweepRuns } from './sweepReflect.js'
 import { DEFAULT_SWEEP_MACHINE, SWEEP_MACHINES, type SweepMachine } from './sweepMachines.js'
+import { DEFAULT_MIN_SOFT_DELETE_DAYS, weakerThanShown } from '../../src/softDelete.js'
 import { RUN_ID_RE, SCAN_ID_RE } from '../../src/scanSlug.js'
 
 /** A run's dir in the data bucket (`DATA_BUCKET`). */
@@ -228,7 +230,13 @@ async function prepare(env: ExecEnv, db: D1Database, req: DispatchReq): Promise<
     ...(snapshot.objects ?? []).map(key => ({ key, kind: 'object' as const })),
   ].filter(i => buckets.includes(bucketOf(i.key, shape.buckets))))
 
+  // The one read: what this checks is what the job's `-s` says.
   const minDays = await minSoftDeleteDays(db)
+  if (req.mode === 'real') {
+    const shown = req.shownMinSoftDeleteDays ?? DEFAULT_MIN_SOFT_DELETE_DAYS
+    const weaker = weakerThanShown(minDays, shown)
+    if (weaker) return refuse(409, weaker, { min_soft_delete_days: minDays, shown_min_soft_delete_days: shown })
+  }
 
   const launch: Prepared['launch'] = async (date, digest, reviewed) => {
     const reuse = req.mode === 'real' ? reusableRunDir(cfg, reviewed) : undefined

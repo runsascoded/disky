@@ -2,14 +2,13 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
 import { Link } from 'react-router-dom'
 import type { CostSnapshot } from './costModel'
-import { type BucketSoftDelete, confirmUndoTerms, DEFAULT_MIN_SOFT_DELETE_DAYS, MAX_MIN_SOFT_DELETE_DAYS, minimumWarning } from './softDelete'
+import { type BucketSoftDelete, confirmUndoTerms, DEFAULT_MIN_SOFT_DELETE_DAYS, MAX_MIN_SOFT_DELETE_DAYS, minimumWarning, SWEEP_SETTINGS_KEY as KEY } from './softDelete'
 
 // `/admin`'s sweep soft-delete minimum (`functions/_lib/sweepSettings.ts`): the narrowest retention a real run accepts, read at
 // dispatch; what each bucket has comes from the newest cost snapshot, read-only and a day old at most, since the site's own
 // account can't read bucket metadata.
 
 const ENDPOINT = '/api/sweep/settings'
-const KEY = ['sweep', 'settings'] as const
 
 export interface SweepSettingsAnswer {
   settings: { min_soft_delete_days: number; updated_by: string; updated_at: number } | null
@@ -121,9 +120,9 @@ export function SweepSoftDeleteView({ answer, draft, onDraft, understood, onUnde
   )
 }
 
-/** The real-delete confirm's undo sentence, for a run of `buckets` (`/staged`). Anything but a promise reads as the danger it is. */
-export function UndoTerms({ buckets }: { buckets: readonly string[] }) {
-  const min = useSweepSettings()
+/** The real-delete confirm's undo sentence, for a run of `buckets` (`/staged`). Anything but a promise reads as the danger it is.
+ * `min` is the caller's `useSweepSettings`: the confirm sends the minimum this states, so the two can't differ. */
+export function UndoTerms({ buckets, min }: { buckets: readonly string[]; min: ReturnType<typeof useSweepSettings> }) {
   const known = useBucketSoftDelete()
   const text = min.data ? confirmUndoTerms(min.data.min_soft_delete_days, buckets, known.data ?? null)
     : min.isError ? 'Could not read this deployment\'s soft-delete minimum: treat these deletes as permanent.'

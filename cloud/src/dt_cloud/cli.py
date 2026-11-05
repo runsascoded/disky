@@ -2392,7 +2392,8 @@ def sweep_undo(only_buckets: tuple[str, ...], bulk: bool, dry_run: bool, bulk_op
     """Restore what a real run deleted, from its `deleted/` logs — the
     soft-delete restore of exactly the logged generations, valid until the
     run's recorded `undo_deadline`; none for a run that recorded soft delete off
-    on a bucket (`soft_delete_days` 0), but `-b` names the buckets that kept theirs. Actual retention starts per object at
+    on a bucket (`soft_delete_days` 0) or required none and recorded no retention (a killed `sweep execute -s 0`), but `-b`
+    names the buckets that kept theirs. Actual retention starts per object at
     deletion, so that record is not an object-level guarantee. RUN is the D1
     run id (`<scan>-p<plan_id>/<utc stamp>`, as /staged lists it) or the run's
     gs:// log dir. Re-runnable: names already live again are left alone. A run
@@ -2427,6 +2428,12 @@ def sweep_undo(only_buckets: tuple[str, ...], bulk: bool, dry_run: bool, bulk_op
         raise SystemExit(
             f"{row['run_id']}: no undo: a bucket in this run had soft delete off, so its deletes are permanent. "
             "Name the buckets that retained theirs with -b (their retention: the run's `deleted-summary.json`)"
+        )
+    # A killed `sweep execute -s 0`: it never wrote what it measured (`sweepReflect` closes it with no deadline), and undo would run unchecked.
+    if row is not None and row.get("soft_delete_days") is None and row.get("min_soft_delete_days") == 0 and not only_buckets:
+        raise SystemExit(
+            f"{row['run_id']}: no undo promised: it required no soft delete and recorded no retention, so treat its deletes as permanent. "
+            "Name the buckets to try with -b"
         )
     log_dir = row["log_dir"] if row is not None else run
     deadline = row.get("undo_deadline") if row is not None else None

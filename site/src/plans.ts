@@ -3,6 +3,7 @@ import { getCurrentScan } from './owners'
 import { DEFAULT_STORE } from './stores'
 import { type DeletionRun, EXEC_CAPS, type ExecCaps, type ExecJob } from './runs'
 import { HttpError, type PlanItem, stageMany as stageManyVia } from './batches'
+import { SWEEP_SETTINGS_KEY } from './softDelete'
 
 export type { DeletionRun, ExecJob } from './runs'
 export { LIVE_STATES } from './runs'
@@ -222,14 +223,16 @@ export function useUnstage(planId: number | null) {
  *  previews deletions and is optional; recovery depends on the store. */
 export function useDispatch(planId: number | null) {
   const qc = useQueryClient()
-  return useMutation<{ job_id: string }, Error, { mode: 'dry' | 'real'; date?: string; items: string[]; buckets?: string[]; machine?: string }>({
-    mutationFn: ({ mode, date, items, buckets, machine }) => {
+  return useMutation<{ job_id: string }, Error, { mode: 'dry' | 'real'; date?: string; items: string[]; buckets?: string[]; machine?: string; shownMinSoftDeleteDays?: number }>({
+    mutationFn: ({ mode, date, items, buckets, machine, shownMinSoftDeleteDays: shown }) => {
       if (planId == null) throw new Error('nothing staged')
       if (!items.length) throw new Error('nothing selected')
       // `items`: exactly the rows checked (an object as `=<key>`); the run never acts on more (specs/done/delete-what-you-see.md)
-      return call(`${EXEC_API}/dispatch`, 'POST', { plan_id: planId, mode, date, items, ...(buckets ? { buckets } : {}), ...(machine ? { machine } : {}) })
+      return call(`${EXEC_API}/dispatch`, 'POST', { plan_id: planId, mode, date, items, ...(buckets ? { buckets } : {}), ...(machine ? { machine } : {}), ...(shown !== undefined ? { shown_min_soft_delete_days: shown } : {}) })
     },
     onSuccess: () => { void qc.invalidateQueries({ queryKey: ['plans'] }); void qc.invalidateQueries({ queryKey: ['sweep-jobs'] }) },
+    // A refusal over stale terms says to re-read them, so bring the ones on the page up to date.
+    onError: () => { void qc.invalidateQueries({ queryKey: SWEEP_SETTINGS_KEY }) },
   })
 }
 

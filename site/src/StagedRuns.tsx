@@ -34,7 +34,7 @@ import {
   type PlanSummaryFile, plannedOf, progressEstimate, type ProgressFile, runControls, runFileHref, runFilesRel, runLabel, type RunView, sumProgress, type Tally,
   verifyRun, viewBuckets, viewLive, viewState, joinRuns,
 } from './runs'
-import { RUN_NO_UNDO, runHasNoUndo } from './softDelete'
+import { runHasNoUndo, runNoUndoText } from './softDelete'
 
 const PAGE_SIZES = [20, 50, Infinity]
 const utc = (ts: number): string => new Date(ts * 1000).toISOString().slice(0, 16).replace('T', ' ')
@@ -243,7 +243,7 @@ export function RunsSection({ runs, jobs, configured, jobsError, admin, busy, ac
                           <span className={now >= r.undo_deadline ? 'dim' : undefined}>{now >= r.undo_deadline ? 'closed' : fmtDur(r.undo_deadline - now)}</span>
                         </Tooltip>
                       ) : r && runHasNoUndo(r) ? (
-                        <Tooltip content={RUN_NO_UNDO}><span>none</span></Tooltip>
+                        <Tooltip content={runNoUndoText(r)}><span>none</span></Tooltip>
                       ) : <span className="dim">—</span>}
                     </td>
                     <td className="nb links">
@@ -368,7 +368,7 @@ export function RunDetail({ run, live, progress, dir, planned, fmtBytes, now }: 
       {r.mode === 'real' && <section id="recovery" className="rd-recovery">
         <h4>Recovery</h4>
         {CAPS.undoUnwindowed ? <p>Recovery depends on the bucket’s versioning and retention settings. This deletion may be permanent; a recorded run deadline does not guarantee recovery.</p> : runHasNoUndo(r) ? <>
-        <p>{RUN_NO_UNDO} A bucket that retained its soft deletes (per bucket, below) can still be restored from the CLI.</p>
+        <p>{runNoUndoText(r)} A bucket that retained its soft deletes (per bucket, below) can still be restored from the CLI.</p>
         <code>dt-cloud sweep undo -b BUCKET {r.run_id}</code>
         </> : <>
         <p>{live ? 'Stop and drain this run before restoring. Its committed decision logs retain exact generations; a restore during deletion could be deleted again.' : 'The web undo control restores the entire run. The CLI can restrict recovery to a selected prefix.'}</p>
