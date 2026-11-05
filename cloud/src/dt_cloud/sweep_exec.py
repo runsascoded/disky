@@ -953,6 +953,15 @@ def undo_run(
     from google.api_core.exceptions import NotFound, PreconditionFailed
 
     buckets = [b for b in logged_buckets if not only_buckets or b in only_buckets]
+    # GCS refuses to restore from a bucket whose soft delete is off now (400 "Soft delete policy is required"), whatever
+    # it retained when the run deleted: refused up front, by name, not once per object.
+    off = [b for b in buckets if _soft_delete_off(client, b)]
+    if off:
+        on = [b for b in buckets if b not in off]
+        raise SystemExit(
+            f"undo unavailable: soft delete is off on {', '.join(off)} (GCS, now): it restores nothing from a bucket with no soft-delete policy"
+            + (f". The run's other buckets still have one: -b {' -b '.join(on)}" if on else "")
+        )
     windows: dict[str, tuple[int, int]] = {}
     if bulk:
         for bucket in buckets:
@@ -1334,6 +1343,18 @@ def _missing_perms(bkt) -> list[str]:
     testIamPermissions with the granted subset; no permission is needed to ask)."""
     granted = set(bkt.test_iam_permissions(list(REAL_PERMS)))
     return [p for p in REAL_PERMS if p not in granted]
+
+
+def _soft_delete_off(client, bucket: str) -> bool:
+    """Is `bucket`'s soft delete off now? False when the caller can't read the bucket (`storage.buckets.get`: a real run's
+    account has it, someone restoring by hand may not): nothing says, so the restores go ahead and GCS answers each."""
+    from google.api_core.exceptions import Forbidden
+
+    try:
+        return _soft_delete_days(client, bucket) == 0
+    except Forbidden as e:
+        err(f"WARN: {bucket}: can't read its soft-delete policy ({e}); restoring without that check")
+        return False
 
 
 def _soft_delete_days(client, bucket: str) -> float:

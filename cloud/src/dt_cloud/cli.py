@@ -2416,6 +2416,8 @@ def sweep_undo(only_buckets: tuple[str, ...], bulk: bool, dry_run: bool, bulk_op
     gs:// log dir. Re-runnable: names already live again are left alone. A run
     with no `deleted-summary.json` (killed) restores what its uploaded parts
     name, and says its log may be partial; `undo_state` then stays `partial`.
+    Refuses a bucket whose soft delete is off now (asked of GCS: it restores
+    nothing from one), naming the run's buckets that still have it for `-b`.
 
     `-B` restores per directory with GCS bulk restore, filtered to the run's
     deletion window (the D1 row's started/finished times, else the log dir's
@@ -3766,6 +3768,10 @@ main.add_command(_cf_usage)
 from .deploy_cost import cost_cmd as _deploy_cost  # noqa: E402
 
 main.add_command(_deploy_cost)
+
+from .soft_delete import soft_delete_cmd as _soft_delete  # noqa: E402
+
+main.add_command(_soft_delete)
 
 from .image_sha import image_sha_cmd as _image_sha  # noqa: E402
 
