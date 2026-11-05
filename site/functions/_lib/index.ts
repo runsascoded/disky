@@ -2143,15 +2143,15 @@ async function readGroupsCached<T>(h: IndexHandle, groups: { rg: number; json: s
     let fetch = miss
     if (iv && h.dataKey && miss.length) {
       // `RUN_READS` at once, as the range reads: each copy inflates to ~2 MB of JSON before it parses.
-      const got = await mapLimit(miss, RUN_READS, g => (stop?.() ? Promise.resolve(null) : coloGroup(h, g.rg)))
-      fetch = miss.filter((g, j) => {
-        const all = got[j]
-        if (!all) return true
+      const left = await mapLimit(miss, RUN_READS, async g => {
+        const all = stop?.() ? null : await coloGroup(h, g.rg)
+        if (!all) return g
         h.trace?.('gcolo', 1)
         take(g.i, g.rg, all, true)
         settle(ivGroupKey(h, g.rg), all)
-        return false
+        return null
       })
+      fetch = left.filter((g): g is typeof miss[number] => !!g)
     }
     for (const g of fetch) [g.start, g.end] = chunkSpan(reviveRowGroup(g.json, h.schema) as unknown as Parameters<typeof chunkSpan>[0], h.columns ?? undefined)
     await mapLimit(planRuns(fetch), RUN_READS, async run => {
