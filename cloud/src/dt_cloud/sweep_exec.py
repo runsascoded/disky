@@ -21,7 +21,7 @@ import threading
 import time
 from bisect import bisect_right
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 
@@ -250,6 +250,26 @@ def split_listing_roots(
     return sorted(roots, key=root_count, reverse=True)
 
 
+#: The narrowest soft-delete retention a real run accepts when nothing says otherwise: what `sweep execute*` default to, and
+#: what the site dispatches when `sweep_settings` has no row (`site/src/softDelete.ts`).
+MIN_SOFT_DELETE_DAYS = 7
+
+
+def undo_deadline_of(finished_ts: int, soft_delete_days: int) -> int | None:
+    """A real run's recorded undo deadline: its end plus the narrowest retention measured on its buckets. None at 0: soft delete
+    is off on a bucket it touched, so there's no window to record (`deletion_runs.soft_delete_days` = 0 says why)."""
+    return finished_ts + soft_delete_days * 86400 if soft_delete_days > 0 else None
+
+
+def narrowest_retention(entries: Iterable[dict]) -> int | None:
+    """The narrowest soft-delete retention a run's undo rests on, over its per-bucket summary entries: only the buckets it may have
+    deleted from, since a bucket of skips has nothing to restore (a delete with no answer, or a bucket cut short, may have). With
+    none of those, every bucket measured; None if none was."""
+    measured = [entry for entry in entries if "soft_delete_days" in entry]
+    deleting = [entry for entry in measured if entry.get("decisions", {}).get("delete") or entry.get("failed_dirs") or entry.get("interrupted") or entry.get("error")]
+    return min((int(entry["soft_delete_days"]) for entry in deleting or measured), default=None)
+
+
 def execute_plan(
     plan_dir: str,
     for_real: bool = False,
@@ -258,7 +278,7 @@ def execute_plan(
     workers: int = 0,
     delete_workers: int = 32,
     max_root_objects: int = 250_000,  # a listing root bigger than this splits into its children (one listing thread per root)
-    min_soft_delete_days: int = 7,
+    min_soft_delete_days: int = MIN_SOFT_DELETE_DAYS,
     client=None,
     stop: threading.Event | None = None,  # set → roots not yet started are skipped; the log and summary still land (`interrupted`)
     profile_dir: str | None = None,
@@ -285,7 +305,7 @@ def execute_plan(
     band_of = band_namer(approved, approved_objects)
 
     mode = "deleted" if for_real else "would-delete"
-    summary: dict = {"plan": plan_dir, "for_real": for_real, "drift": drift, "buckets": {}}
+    summary: dict = {"plan": plan_dir, "for_real": for_real, "drift": drift, "min_soft_delete_days": min_soft_delete_days, "buckets": {}}
     # Deletes run on their own pool, fed by every listing root: a batch of 100
     # is ~1–2 s of sequential server work, so a lopsided root (east5's
     # largest held 31% of the objects) no longer serializes a third of the run
@@ -933,6 +953,15 @@ def undo_run(
     from google.api_core.exceptions import NotFound, PreconditionFailed
 
     buckets = [b for b in logged_buckets if not only_buckets or b in only_buckets]
+    # GCS refuses to restore from a bucket whose soft delete is off now (400 "Soft delete policy is required"), whatever
+    # it retained when the run deleted: refused up front, by name, not once per object.
+    off = [b for b in buckets if _soft_delete_off(client, b)]
+    if off:
+        on = [b for b in buckets if b not in off]
+        raise SystemExit(
+            f"undo unavailable: soft delete is off on {', '.join(off)} (GCS, now): it restores nothing from a bucket with no soft-delete policy"
+            + (f". The run's other buckets still have one: -b {' -b '.join(on)}" if on else "")
+        )
     windows: dict[str, tuple[int, int]] = {}
     if bulk:
         for bucket in buckets:
@@ -1186,11 +1215,22 @@ def run_id_for(plan: dict, started_ts: int) -> str:
 # `deletion_runs.head` / `exec_head` recorded a ledger position a plan-first
 # run doesn't have (it reads no ledger); both are written as 0. Likewise
 # `ledger_drift_dirs`: nothing re-classifies the manifest.
-def record_run_start(plan: dict, plan_dir: str, actor: str, started_ts: int, for_real: bool, buckets: tuple[str, ...] = ()) -> str:
+def record_run_start(
+    plan: dict,
+    plan_dir: str,
+    actor: str,
+    started_ts: int,
+    for_real: bool,
+    buckets: tuple[str, ...] = (),
+    min_soft_delete_days: int = MIN_SOFT_DELETE_DAYS,
+    soft_delete_days: int | None = None,
+) -> str:
     """Insert the run's D1 row as soon as it starts (`finished_ts` NULL, zero
     totals) so the console lists it while it runs; `record_run` fills it in. A
     real run doesn't start without it (`cli._start_recorded`).
-    `buckets` = the `-b` cut, else every bucket in the plan: what undo reads, since a run's bands can leave a bucket out."""
+    `buckets` = the `-b` cut, else every bucket in the plan: what undo reads, since a run's bands can leave a bucket out.
+    `min_soft_delete_days` = the minimum the run runs under, `soft_delete_days` = the narrowest retention its preflight measured
+    (None: not yet, `sweep execute` measures bucket by bucket): what closes a killed run's undo window (`sweepReflect`)."""
     from .index_footer import _creds, _d1_query, _q
 
     run_id = run_id_for(plan, started_ts)
@@ -1199,10 +1239,11 @@ def record_run_start(plan: dict, plan_dir: str, actor: str, started_ts: int, for
     _d1_query(
         "INSERT INTO deletion_runs (run_id, plan, scan, head, exec_head, actor, mode, started_ts, finished_ts, "
         "deleted_bytes, deleted_objects, skipped_gone, skipped_overwritten, drift_dirs, ledger_drift_dirs, "
-        "undo_deadline, log_dir, buckets, plan_id) VALUES ("
+        "undo_deadline, log_dir, buckets, plan_id, min_soft_delete_days, soft_delete_days) VALUES ("
         f"{_q(run_id)}, {_q(plan_dir)}, {_q(plan['date'])}, 0, 0, {_q(actor)}, "
         f"{_q('real' if for_real else 'dry')}, {started_ts}, NULL, 0, 0, 0, 0, 0, 0, NULL, {_q(plan_dir)}, "
-        f"{_q(','.join(sorted(touched))) if touched else 'NULL'}, {int(plan['plan_id'])})",
+        f"{_q(','.join(sorted(touched))) if touched else 'NULL'}, {int(plan['plan_id'])}, {int(min_soft_delete_days)}, "
+        f"{'NULL' if soft_delete_days is None else int(soft_delete_days)})",
         acct, tok,
     )
     return run_id
@@ -1214,7 +1255,8 @@ def record_run(
     actor: str,
     started_ts: int,
     finished_ts: int,
-    soft_delete_days: int = 7,
+    soft_delete_days: int = MIN_SOFT_DELETE_DAYS,
+    min_soft_delete_days: int = MIN_SOFT_DELETE_DAYS,
 ) -> str:
     """Persist the run + per-band rows to D1 (migration 0015) — deletions as
     first-class records the site can surface per path. Returns the run_id.
@@ -1232,20 +1274,22 @@ def record_run(
         tot["skipped_gone"] += d.get("skipped_gone", 0)
         tot["skipped_overwritten"] += d.get("skipped_overwritten", 0)
         tot["drift_dirs"] += len(b.get("drift_dirs", []))
-    undo = f"{finished_ts + soft_delete_days * 86400}" if mode == "real" else "NULL"
+    deadline = undo_deadline_of(finished_ts, soft_delete_days) if mode == "real" else None
+    undo = "NULL" if deadline is None else str(deadline)
     tok, acct = _creds()
     _d1_query(
         "INSERT INTO deletion_runs (run_id, plan, scan, head, exec_head, actor, mode, started_ts, finished_ts, "
         "deleted_bytes, deleted_objects, skipped_gone, skipped_overwritten, drift_dirs, ledger_drift_dirs, "
-        "undo_deadline, log_dir, plan_id) VALUES ("
+        "undo_deadline, log_dir, plan_id, min_soft_delete_days, soft_delete_days) VALUES ("
         f"{_q(run_id)}, {_q(summary['plan'])}, {_q(plan['date'])}, 0, 0, {_q(actor)}, "
         f"{_q(mode)}, {started_ts}, {finished_ts}, {tot['deleted_bytes']}, {tot['deleted_objects']}, "
         f"{tot['skipped_gone']}, {tot['skipped_overwritten']}, {tot['drift_dirs']}, 0, "
-        f"{undo}, {_q(summary['plan'])}, {int(plan['plan_id'])}) "
+        f"{undo}, {_q(summary['plan'])}, {int(plan['plan_id'])}, {int(min_soft_delete_days)}, {int(soft_delete_days)}) "
         "ON CONFLICT (run_id) DO UPDATE SET finished_ts = excluded.finished_ts, deleted_bytes = excluded.deleted_bytes, "
         "deleted_objects = excluded.deleted_objects, skipped_gone = excluded.skipped_gone, "
         "skipped_overwritten = excluded.skipped_overwritten, drift_dirs = excluded.drift_dirs, "
-        "ledger_drift_dirs = excluded.ledger_drift_dirs, undo_deadline = excluded.undo_deadline",
+        "ledger_drift_dirs = excluded.ledger_drift_dirs, undo_deadline = excluded.undo_deadline, "
+        "min_soft_delete_days = excluded.min_soft_delete_days, soft_delete_days = excluded.soft_delete_days",
         acct, tok,
     )
     record_bands(run_id, summary)
@@ -1299,6 +1343,18 @@ def _missing_perms(bkt) -> list[str]:
     testIamPermissions with the granted subset; no permission is needed to ask)."""
     granted = set(bkt.test_iam_permissions(list(REAL_PERMS)))
     return [p for p in REAL_PERMS if p not in granted]
+
+
+def _soft_delete_off(client, bucket: str) -> bool:
+    """Is `bucket`'s soft delete off now? False when the caller can't read the bucket (`storage.buckets.get`: a real run's
+    account has it, someone restoring by hand may not): nothing says, so the restores go ahead and GCS answers each."""
+    from google.api_core.exceptions import Forbidden
+
+    try:
+        return _soft_delete_days(client, bucket) == 0
+    except Forbidden as e:
+        err(f"WARN: {bucket}: can't read its soft-delete policy ({e}); restoring without that check")
+        return False
 
 
 def _soft_delete_days(client, bucket: str) -> float:

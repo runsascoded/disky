@@ -1136,10 +1136,11 @@ def interval_store(ctx: Ctx, arg: str | None) -> None:
     due carries / compaction (`interval-store add`). Never fatal (`-W`): a failure or the timeout warns, the next run
     catches up. Reads the scans' `path` sorts at `<layer2>/index/<gen>/path-index.parquet` from the store, or with
     `options.interval-store.source: data` from the data store, as `static-names` does (so `publish-r2 -S` needn't copy
-    the sorts to the store: specs/lean-scans.md §1.1). `options.interval-store.compact`: the compaction policy (`-C`, e.g.
-    `none` to hold a due compaction while carries continue; default `add`'s).
+    the sorts to the store: specs/lean-scans.md §1.1). `options.interval-store.compact`: the one-machine path's compaction
+    policy (`-C`, e.g. `none` to hold a due compaction while carries continue; default `add`'s).
     `options.interval-store.profile`: the staged path instead (`interval-store append -c`, its per-range stages Batch
-    jobs of their own, in this task's image; `merge_wait` seconds on the merge job), for a store too big for one task."""
+    jobs of their own, in this task's image; `merge_wait` seconds on the merge job), for a store too big for one task. It
+    never reads `options.interval-store.compact`: its policy is the profile's `append.compact` / `append.compact_level`."""
     if ctx.reproc:
         err(f"interval-store: not appending {ctx.scan} (REPROC)")
         return
@@ -1562,6 +1563,16 @@ def _digest_check(p: ScanProfile) -> list[str]:
                        for x in o.get("platforms", []) if x not in DIGEST_TRANSPORTS]
 
 
+@step("staged-card", core=False, soft=True, requires=primary_only("staged-card", "the card sizes at the primary's scans"))
+def staged_card(ctx: Ctx, arg: str | None) -> None:
+    """Re-render the staged plan's Slack card at this scan, in place (the job grant named by the site's `STAGED_CARD_GRANT`)."""
+    with ctx.phase("staged-card"):
+        if ctx.reproc or not ctx.has("SITE_TOKEN", "SITE_URL"):
+            err("no SITE_TOKEN/SITE_URL, or REPROC: skipping the staged card")
+            return
+        ctx.sh(["dt-cloud", "staged-card"], fatal=False, warn=f"staged card refresh failed for {ctx.scan} (it stays at the scan before)")
+
+
 @step("digest", soft=True, options={"template": str, "config": str, "args": list, "platforms": list, "root": str}, requires=_digest_check)
 def digest(ctx: Ctx, arg: str | None) -> None:
     """Converge the usage-digest thread on each platform (`dt-cloud digest -T <template> -C <config> -P <platform>`;
@@ -1670,6 +1681,35 @@ def gcp_cost(ctx: Ctx, arg: str | None) -> None:
             argv += ["-P", prices]
         ctx.sh([*argv, *(a for o in outs for a in ("-o", o))],
                fatal=False, warn="gcp-cost snapshot failed (the scan's outputs stand; the next run writes its day)")
+
+
+#: Where the buckets' soft-delete readings go, beside the cost snapshots (`soft-delete` is never a scan id).
+SOFT_DELETE_PREFIX = "snapshots/soft-delete"
+
+
+@step("soft-delete", core=False, soft=True, options={"buckets": list},
+      requires=primary_only("soft-delete", "the readings are the deployment's, written once by its primary"))
+def soft_delete(ctx: Ctx, arg: str | None) -> None:
+    """Each GCS source bucket's soft-delete retention now (`dt-cloud soft-delete -o`): today's
+    `<data>/snapshots/soft-delete/<date>.json` (+ the R2 archive's copy, which the site reads under `SERVED_R2`); a
+    second run the same day replaces it. What a sweep's undo depends on: the site says "undo unavailable" for a run on
+    a bucket this shows off, and can't say either way for a bucket it doesn't name. `options.soft-delete.buckets`: the
+    buckets to read (default: every `gs://` source's). Needs `storage.buckets.get` on each (what a real sweep's
+    preflight reads). Skipped with no GCS bucket (soft delete is GCS's) or on REPROC; never fatal. Not core, as
+    `gcp-cost`: a deployment that sweeps lists it in `steps`."""
+    if ctx.reproc:
+        err("REPROC: skipping the soft-delete reading")
+        return
+    buckets = ctx.opt("soft-delete", "buckets", None) or [s.bucket for s in ctx.profile.sources if s.kind == "gcs"]
+    if not buckets:
+        err("soft-delete: no gs:// source (and no options.soft-delete.buckets): nothing to read")
+        return
+    with ctx.phase("soft-delete"):
+        outs = [f"{ctx.data_uri}/{SOFT_DELETE_PREFIX}"]
+        if ctx.env.get("R2_ARCHIVE"):
+            outs.append(f"{ctx.env['R2_ARCHIVE']}/{SOFT_DELETE_PREFIX}")
+        ctx.sh(["dt-cloud", "soft-delete", *(a for b in buckets for a in ("-b", b)), *(a for o in outs for a in ("-o", o))],
+               fatal=False, warn="soft-delete reading failed (the scan's outputs stand; the site keeps the last one, dated)")
 
 
 #: Core steps a profile may `skip`.

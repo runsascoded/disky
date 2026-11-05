@@ -5,6 +5,7 @@
 // live here; the HTTP surface is api/plans/[[path]].ts.
 import type { D1Database } from "@cloudflare/workers-types"
 import type { RunOutcome } from "../../src/runs.js"
+import type { ScanDeletion } from "../../src/stagedScan.js"
 
 // A plan prefix stored as `<scheme><bucket>/<path>/` (the deployment's
 // `STORE_SCHEME`: `s3://`, `gs://`, `file:///`); normalized to a relative key
@@ -434,6 +435,26 @@ export async function runDetail(db: D1Database, runId: string): Promise<{ run: R
   return { run, bands: bands.results }
 }
 
+/** What real runs on exactly `scan` recorded on each prefix, band by band, not undone: what `scan`'s sizes are out of date by
+ *  (`withoutDeleted`, which can take an item out of `/staged`'s selection, so this errs toward counting nothing).
+ *  A band's amounts count only from a run that ended with a result: finished, with a non-empty `plan_digest`. A reflection
+ *  writes the digest once Batch says the job SUCCEEDED (`sweepReflect`; `runReflect` also wants every delete answered) and `''`
+ *  on any other end; a run by hand has none (NULL), and nothing says how it ended. An executor that recorded an unanswered
+ *  delete (`failed_dirs`), a bucket's error or a stop exits nonzero after writing its bands, so its job is FAILED and its
+ *  digest `''`. That end is all D1 has of it: a band carries no failed count (`record_bands` drops the summary's). Its
+ *  `objects` never include an unanswered delete, but such a run is not counted at all.
+ *  Any other real run's band comes back with its prefix and no amounts: how much of the prefix that run deleted isn't known,
+ *  so a counted run's band beside it (a resume that deleted only the rest) states no remainder either. */
+export async function scanDeletions(db: D1Database, scan: string): Promise<ScanDeletion[]> {
+  const { results } = await db.prepare(`
+    SELECT b.prefix, b.bytes, b.objects, b.gone, (r.finished_ts IS NOT NULL AND COALESCE(r.plan_digest, '') != '') AS counted
+    FROM deletion_bands b JOIN deletion_runs r ON r.run_id = b.run_id
+    WHERE r.scan = ? AND r.mode = 'real' AND COALESCE(b.undone_objects, 0) = 0
+    ORDER BY b.prefix, r.run_id
+  `).bind(scan).all<ScanDeletion & { counted: number }>()
+  return results.map(({ counted, ...band }) => counted ? band : { prefix: band.prefix, bytes: 0, objects: 0, gone: 0 })
+}
+
 /** The shared open plan trash gestures land in (the newest open one), or null. */
 export async function openPlanId(db: D1Database): Promise<number | null> {
   const row = await db.prepare("SELECT id FROM plans WHERE state = 'open' ORDER BY created_ts DESC LIMIT 1").first<{ id: number }>()
@@ -654,6 +675,10 @@ export interface RunRow {
   skipped_overwritten: number
   plan_digest: string | null
   undo_deadline?: number | null
+  /** The narrowest retention measured on its buckets. 0: no undo (`runHasNoUndo`). */
+  soft_delete_days?: number | null
+  /** The minimum it ran under. */
+  min_soft_delete_days?: number | null
   log_dir?: string | null
 }
 

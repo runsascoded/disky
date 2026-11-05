@@ -24,7 +24,7 @@ import { asOfScans, type ChangedPlan, DiffUnavailable, FooterBudget, type IndexH
 import { readRootAgg } from './view.js'
 
 /** The answer's version, in its edge-cache key: bumped with every change to what a level answers. */
-export const LEVEL_V = 1
+export const LEVEL_V = 2
 
 /** K, the changed children drawn per directory (the rest fold into `other`), is snapped to a power of two in this
  *  range: a display choice (the cells that fit the parent's rectangle), snapped so nearby canvases share entries. */
@@ -310,6 +310,13 @@ async function overBudget(e: unknown, dirs: string[], o: LevelOpts, spend: Level
   return y && [...x, ...y]
 }
 
+/** The path of the child of `dir` that the level sort names `nm`: `/` a last segment that is empty (`interval_level.EMPTY_NAME`):
+ *  `a/` under `a`, and '' (depth 1, a key's leading `/`) under the root. */
+export const levelChild = (dir: string, nm: string): string => {
+  if (nm === '/') return dir && `${dir}/`
+  return dir ? `${dir}/${nm}` : nm
+}
+
 /** One round from the level index: `dirs`' transitions (`readLevel`), split while too wide as `round` splits. Null when a
  *  directory's own transitions show it a file on some side in the range (its own rows are written for directories and
  *  closings only, so a file's changes have none): that round is read from the `path` sort instead. */
@@ -335,11 +342,11 @@ async function levelRound(env: Env, lh: LevelHandle, dirs: string[], o: LevelOpt
     if (nm === '') {
       if (ts.some(r => r.kind !== 'dir' || (r.kindPrev != null && r.kindPrev !== 'dir'))) return null
       const c = transitionsChange(ts)
-      if (c && dir !== '') own.set(dir, c)
+      if (c) own.set(dir, c)
       continue
     }
     const c = transitionsChange(ts)
-    if (c) kids.get(dir)?.push({ p: dir ? `${dir}/${nm}` : nm, ...c })
+    if (c) kids.get(dir)?.push({ p: levelChild(dir, nm), ...c })
   }
   if (o.lap) {
     await syncClock()

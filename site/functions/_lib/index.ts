@@ -2143,15 +2143,15 @@ async function readGroupsCached<T>(h: IndexHandle, groups: { rg: number; json: s
     let fetch = miss
     if (iv && h.dataKey && miss.length) {
       // `RUN_READS` at once, as the range reads: each copy inflates to ~2 MB of JSON before it parses.
-      const got = await mapLimit(miss, RUN_READS, g => (stop?.() ? Promise.resolve(null) : coloGroup(h, g.rg)))
-      fetch = miss.filter((g, j) => {
-        const all = got[j]
-        if (!all) return true
+      const left = await mapLimit(miss, RUN_READS, async g => {
+        const all = stop?.() ? null : await coloGroup(h, g.rg)
+        if (!all) return g
         h.trace?.('gcolo', 1)
         take(g.i, g.rg, all, true)
         settle(ivGroupKey(h, g.rg), all)
-        return false
+        return null
       })
+      fetch = left.filter((g): g is typeof miss[number] => !!g)
     }
     for (const g of fetch) [g.start, g.end] = chunkSpan(reviveRowGroup(g.json, h.schema) as unknown as Parameters<typeof chunkSpan>[0], h.columns ?? undefined)
     await mapLimit(planRuns(fetch), RUN_READS, async run => {
@@ -2387,9 +2387,52 @@ export async function planRects(
   return [...byRg.values()].sort(bySpan).filter(s => !thrAt || s.bMax >= thrAt(Math.max(s.dMin, dMin)))
 }
 
+/** The row groups, and the rows in them, one read decodes at most (`decodeSpans`). */
+const READ_MAX_GROUPS = 250
+const READ_MAX_ROWS = 700_000
+
 /** Whether a span plan fits the decoder's group and row limits, before fetching any data. */
 export function readFits(spans: Span[]): boolean {
-  return spans.length <= 250 && spans.reduce((n, s) => n + (s.rowEnd - s.rowStart), 0) <= 700_000
+  return spans.length <= READ_MAX_GROUPS && spans.reduce((n, s) => n + (s.rowEnd - s.rowStart), 0) <= READ_MAX_ROWS
+}
+
+/** A plan cut down to the read budget, and the factor on the read's thresholds that cut it. */
+export interface Coarser { spans: Span[]; raise: number }
+
+/** How far past the heaviest group left out the raised floor lands: a margin over float rounding, so no row of that
+ *  group can clear it. */
+const RAISE_PAST = 1 + 1e-9
+
+/** `spans` at the lowest floor that fits `readFits`, read off the plan with no further I/O: a group is planned while
+ *  its `bMax` clears its floor (`floorOf`), so multiplying every threshold by `f` keeps exactly those with
+ *  `bMax / floor >= f`. Heaviest first, up to the first group the budget can't take: `f` lands just past that group's
+ *  ratio, and groups tied with it go with it (a floor can't part them), so the result depends only on the plan's
+ *  contents. Every row clearing the raised thresholds is in a kept group: the read returns what a canvas with that
+ *  floor gets, a close record being in a group that holds its size as the version it ends is. Null when no floor
+ *  helps: the plan's heaviest group alone is over budget, or its thresholds are zero (nothing to scale). */
+function coarsen(spans: Span[], floorOf: (s: Span) => number): Coarser | null {
+  const ranked = spans.map(s => ({ s, floor: floorOf(s) }))
+  if (ranked.some(x => !(x.floor > 0))) return null
+  const order = ranked.map(({ s, floor }) => ({ s, clears: s.bMax / floor })).sort((a, b) => b.clears - a.clears)
+  let rows = 0
+  const over = order.findIndex(({ s }, i) => (rows += s.rowEnd - s.rowStart) > READ_MAX_ROWS || i >= READ_MAX_GROUPS)
+  if (over < 0) return { spans, raise: 1 }
+  const out = order[over].clears
+  const kept = order.slice(0, over).filter(x => x.clears > out).map(x => x.s)
+  if (!kept.length) return null
+  return { spans: kept.sort(bySpan), raise: Math.max(1, out * RAISE_PAST) }
+}
+
+/** `planRects`' spans (`plan`) cut to the read budget (`coarsen`): the floor it applies per group, scaled. */
+export function coarsenRects(plan: Span[], rects: Rect[], thrAt: (depth: number) => number): Coarser | null {
+  const dMin = Math.min(...rects.map(q => q.dLo))
+  return coarsen(plan, s => thrAt(Math.max(s.dMin, dMin)))
+}
+
+/** `planSizeRects`' spans (`plan`) cut to the read budget (`coarsen`): its one floor, scaled. */
+export async function coarsenSizeRects(h: IndexHandle, plan: Span[], rects: Rect[], thrAt: (depth: number) => number): Promise<Coarser | null> {
+  const thrMin = await sizeFloor(h, rects, thrAt)
+  return coarsen(plan, () => thrMin)
 }
 
 /** Decode a planned set of groups (cached per isolate, `GROUP_READS` in
@@ -2829,7 +2872,7 @@ const IV_LEVEL_COLS = ['depth', 'path', 'ts', 'name', 'op', 'kind', 'kind_prev',
 /** The columns a level page is kept by (each with a ColumnIndex). */
 const LEVEL_PLAN = ['depth', 'path', 'ts'] as const
 
-/** One transition of a child (`name`; '' the directory itself) under directory `path` at stamp `ts`: `op` 0 appeared,
+/** One transition of a child (`name`; '' the directory itself, `/` a child whose last segment is empty: `levelChild`) under directory `path` at stamp `ts`: `op` 0 appeared,
  *  1 changed, 2 went away; its values after (`kind`, `size`, `n_files`; a closing's `kind` the version that ended) and
  *  before (`kindPrev` null where absent), its cumulative churn after (`churnCum`) and at its previous transition
  *  (`churnPrev`). */

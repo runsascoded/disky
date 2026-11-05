@@ -14,6 +14,7 @@ import { SiteNav } from './SiteNav'
 import { Tooltip } from './Tooltip'
 import { UserChip } from './UserChip'
 import { useDocTitle } from './title'
+import { Pager as ListPager, usePaged } from './Pager'
 
 // /admin/sessions[/:sid] — the session log's viewer (specs/session-log.md),
 // admin-only: the APIs are `requireAdmin`; this page renders their 401/403.
@@ -161,6 +162,8 @@ const isFilter = (s: string | null): s is KindFilter => KIND_FILTERS.some(f => f
 const shown = (l: Line, f: KindFilter): boolean =>
   f === 'all' || (f === 'errors' ? l.error : f === 'actions' ? l.lane === 'input' || l.lane === 'nav' : l.k === 'api')
 
+const TIMELINE_SIZES = [500, 2000]
+
 function SessionView({ sid }: { sid: string }) {
   const q = useQuery({
     queryKey: ['session-log', 'session', sid],
@@ -171,6 +174,8 @@ function SessionView({ sid }: { sid: string }) {
   const [sp, setSp] = useSearchParams()
   const show = sp.get('show')
   const filter: KindFilter = isFilter(show) ? show : 'all'
+  const filtered = useMemo(() => lines.filter(l => shown(l, filter)), [lines, filter])
+  const paged = usePaged(filtered, TIMELINE_SIZES)
   const setFilter = useCallback((f: KindFilter) => setSp(p => {
     const n = new URLSearchParams(p)
     if (f === 'all') n.delete('show'); else n.set('show', f)
@@ -199,6 +204,8 @@ function SessionView({ sid }: { sid: string }) {
   const s = q.data.session
   const jump = (i: number) => {
     setFilter('all')
+    // Under `all` every line is a row: its index in `lines`.
+    paged.reveal(lines.findIndex(l => l.i === i))
     setFocus(i)
     requestAnimationFrame(() => rows.current.get(i)?.scrollIntoView({ block: 'center', behavior: 'smooth' }))
   }
@@ -219,12 +226,13 @@ function SessionView({ sid }: { sid: string }) {
         <table className="sessions timeline">
           <thead><tr><th className="num"><AtHeader at={at} onAt={setAt} /></th><th className="num">time</th><th>kind</th><th>event</th><th></th></tr></thead>
           <tbody onMouseLeave={() => setHot(null)}>
-            {lines.filter(l => shown(l, filter)).map((l, j, rows) => (
-              <EventRow key={l.i} l={l} at={fmtAt(at, l, j ? rows[j - 1] : null, now)} t0={lines[0].t} hot={hot === l.i} focused={focus === l.i} rowRef={rowRef} onHover={setHot} />
+            {paged.rows.map((l, j) => (
+              <EventRow key={l.i} l={l} at={fmtAt(at, l, filtered[paged.from + j - 1] ?? null, now)} t0={lines[0].t} hot={hot === l.i} focused={focus === l.i} rowRef={rowRef} onHover={setHot} />
             ))}
           </tbody>
         </table>
       </div>
+      <ListPager paged={paged} label="Session events" />
     </>
   )
 }

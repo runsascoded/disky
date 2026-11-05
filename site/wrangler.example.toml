@@ -124,6 +124,7 @@ ROOT_LABEL = "my buckets"                   # the store root's crumb label
 # SWEEP_S3_ENDPOINT = "https://s3.example.com"  # `plan-sweep`: the S3 endpoint its runs delete through
 # DISKY_LABELS = "app=disky,deployment=<name>"  # cost-attribution labels on the executor jobs' VMs + disks (each adds `component`); unset = none
 # SLACK_ADMIN_CHANNEL = "C0123456789"          # channel id staged-plan threads post to (with SLACK_BOT_TOKEN); unset = no Slack
+# STAGED_CARD_GRANT = "<grant id>"             # the job grant whose post-scan `staged-card` step re-renders the staged card; prod's env only, never a dev stack sharing its channel; unset = no such route
 
 # --- Link previews (specs/done/dogi.md) ---
 # --- Name search: the static name index on INDEX_R2; private viewer gate ---

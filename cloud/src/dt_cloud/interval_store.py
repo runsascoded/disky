@@ -620,7 +620,7 @@ SORTS = {
     ATTRIBUTION: (ATTRIBUTION, "path, vf", None),
     # The level index (`interval_level`): each child version transition under its parent, `(depth, path)` the parent's,
     # computed from the folded path versions (`interval_level.rows_sql`). Only in a generation that carries it (`leveled`).
-    LEVEL: ("pvl", "depth, path, ts, name", None),
+    LEVEL: ("pvl", ilv.LEVEL_ORDER, None),
 }
 #: Each range-file dir's schema.
 SUB_SCHEMA = {"pv": PV_SCHEMA, "pvl": PVL_SCHEMA, "rd": RD_SCHEMA, "sv": SV_SCHEMA, "svt": SVT_SCHEMA, ATTRIBUTION: AT_SCHEMA}
@@ -796,8 +796,8 @@ SORT_COPIES = 2
 #: order as ascending, never-NULL key columns (strings in code-point order: DuckDB's, Python's and pyarrow's), each
 #: `(name, SQL)` computed into the run spools or a column by name. A `DESC NULLS LAST` size bucket (≥ 0, `BUCKET`) is its
 #: negation with NULL as −1 (so after every bucket); `usr NULLS FIRST` is `(usr IS NOT NULL, coalesce(usr, ''))`. The
-#: key is the whole order, unique a row (a version is one `(path, vf)`, a slice's one `(path, usr, vf)`), so a key
-#: range's rows sorted alone are its rows of the one `ORDER BY`. Every other sort is led by `(depth, path)`: disjoint key
+#: key is the whole order, unique a row (a version is one `(path, vf)`, a slice's one `(path, usr, vf)`, a level row's
+#: `interval_level.LEVEL_KEY`), so a key range's rows sorted alone are its rows of the one `ORDER BY`. Every other sort is led by `(depth, path)`: disjoint key
 #: ranges in key order concatenate.
 _NEG_BUCKET = f"-coalesce({BUCKET}, -1)"
 _USR = [("__un", "(usr IS NOT NULL)::TINYINT"), ("__u", "coalesce(usr, '')")]
@@ -838,26 +838,26 @@ def cut_plan(segs: list[tuple[int, int]], rg_rows: int, k: int) -> list[list[tup
 STAT_COLS = ("depth", "path", "vf", "vt", "ts")
 
 
-def writer_meta(files: list[str], rg_rows: int, page_rows: int = SERVED_PAGE_ROWS) -> int:
-    """What a served sort's writer keeps per row group it has written (`tree_mem.group_meta`), from `files`' footers
-    (the range or delta files it's cut from): their widest column count, `rg_rows / page_rows` pages, and the string
-    statistics columns' bytes a value (the widest file's uncompressed bytes a row of each)."""
-    cols, stat = 1, 0
+def writer_meta(files: list[str], rg_rows: int, page_rows: int = SERVED_PAGE_ROWS, cols: int | None = None) -> int:
+    """What a served sort's writer keeps per row group it has written (`tree_mem.group_meta`), on average over the sort's
+    groups, which is what the plan charges (all of them, at once): `cols`, the sort's columns (default `files`' widest, the
+    range or delta files it's cut from), `rg_rows / page_rows` pages, and the string statistics columns' uncompressed bytes
+    a row over all of `files`: a small file of long paths holds few of the sort's groups."""
+    widest, size, rows = 1, 0, 0
     for f in files:
         if not Path(f).exists():
             continue
         md = pq.read_metadata(f)
-        cols = max(cols, md.num_columns)
+        widest = max(widest, md.num_columns)
         sch = md.schema.to_arrow_schema()
         strs = {i for i, c in enumerate(sch) if c.name in STAT_COLS and (pa.types.is_string(c.type) or pa.types.is_large_string(c.type))}
-        size, rows = 0, 0
+        if not strs:
+            continue
         for g in range(md.num_row_groups):
             rg = md.row_group(g)
             size += sum(rg.column(i).total_uncompressed_size for i in strs)
             rows += rg.num_rows
-        if rows:
-            stat = max(stat, -(-size // rows))
-    return tm.group_meta(cols, -(-rg_rows // page_rows), stat)
+    return tm.group_meta(cols or widest, -(-rg_rows // page_rows), -(-size // rows) if rows else 0)
 
 
 def _served_writer(out: Path, schema: pa.Schema, page: int) -> pq.ParquetWriter:
@@ -1222,7 +1222,8 @@ def write_served(con, src: str | list[str], sort: str, out: Path, schema: pa.Sch
         t0 = monotonic()
         hb.set_stage(f"cut {sort}: sort")
         budget = run_budget(con, k) if budget is None else budget
-        # A level run's rows are up to `ROWS_PER_VERSION` its source's: its sort holds them within the same budget.
+        # A level run's rows are up to `ROWS_PER_VERSION` its source's (any one key range; `rows_bound` is the whole's): its
+        # sort holds them within the same budget.
         runs = cut_runs(src, max(1, budget // ilv.ROWS_PER_VERSION) if level else budget)
         pieced = sort in MERGE_KEYS and len(runs) > 1
         key = merge_key(sort) if sort in MERGE_KEYS else None
@@ -1403,13 +1404,13 @@ def write_groups(out: Path, bounds: Iterable[dict], sort: str, summary) -> dict:
 
 @contextmanager
 def plan_cut(con, tree: tm.Budget | None, files: list[str], *, at_once: int = 1, rg_rows: int = SERVED_RG,
-             what: str = "cut", sort_rows: int | None = None, extra_rows: int = 0) -> Iterator[tuple[int, int]]:
+             what: str = "cut", sort_rows: int | None = None, extra_rows: int = 0, sort_cols: int | None = None) -> Iterator[tuple[int, int]]:
     """The cut's `(procs, run budget)` for `at_once` sorts at once over `files` (local range or delta files: their
     footers size a row and count the rows), as every entry that cuts plans it. `tree`: the process tree's budget
     (`tree_mem.Budget`): the workers planned under it (`Budget.cut`, rows of the files' widest + `SPOOL_EXTRA`, no holder
-    charged more rows than the files have, each sort's writers' metadata `writer_meta` a group over `sort_rows` rows —
-    the most one sort has, default all of `files`' and `extra_rows`: what a sort holds past its files', the level sort's,
-    `interval_level.extra_rows`), DuckDB's limit set to the rest for the block, then the previous limit back; None: the
+    charged more rows than the files have, each sort's writers' metadata `writer_meta` of `sort_cols` columns (the widest
+    sort's; default `files`') a group over `sort_rows` rows — the most one sort has, default all of `files`' and `extra_rows`:
+    what a sort holds past its files', the level sort's, `interval_level.extra_rows`), DuckDB's limit set to the rest for the block, then the previous limit back; None: the
     machine's cores over `at_once`, DuckDB's limit as set. Each run and piece is a share of DuckDB's limit (`run_budget`
     over `at_once × procs`). The block is `TreeWatch`'s phase `what`."""
     with tm.phase(what):
@@ -1424,7 +1425,7 @@ def plan_cut(con, tree: tm.Budget | None, files: list[str], *, at_once: int = 1,
             raise SystemExit(f"{what}: the cut's plan reads its inputs' footers, which aren't local files ({remote[0]}…): mount the store")
         rb, n = row_bytes(files) + SPOOL_EXTRA, max(1, input_rows(files) + extra_rows)
         sort_rows = min(n, sort_rows or n)
-        meta = writer_meta(files, rg_rows)
+        meta = writer_meta(files, rg_rows, cols=sort_cols)
         plan = tree.cut(at_once, cores, rg_rows, rb, CUT_SPOOL_RG, n, meta=meta, sort_rows=sort_rows)
         groups = -(-sort_rows // rg_rows)
         kept = at_once * plan.procs * -(-groups // plan.procs) * meta
@@ -1465,9 +1466,10 @@ def cut_gen(con, gen_dir: Path, scans: dict, *, rg_rows: int = SERVED_RG, jobs: 
         from .interval_compact import input_rows
 
         rows = {sub: input_rows([str(p) for p in (gen_dir / sub).glob("r*.parquet")]) for sub in size}
-        most = max(rows[SORTS[s][0]] + (ilv.extra_rows(rows[SORTS[s][0]]) if s == LEVEL else 0) for s in todo)
-        extra = ilv.extra_rows(rows[SORTS[LEVEL][0]]) if LEVEL in todo else 0
-    with plan_cut(con, tree, ins, at_once=at_once, rg_rows=rg_rows, sort_rows=most, extra_rows=extra) as (procs, budget):
+        extra = ilv.extra_rows(con, [str(p) for p in sorted((gen_dir / SORTS[LEVEL][0]).glob("r*.parquet"))]) if LEVEL in todo else 0
+        most = max(rows[SORTS[s][0]] + (extra if s == LEVEL else 0) for s in todo)
+    cols = max(len(served_schema(s, gen, churn)) for s in todo)
+    with plan_cut(con, tree, ins, at_once=at_once, rg_rows=rg_rows, sort_rows=most, extra_rows=extra, sort_cols=cols) as (procs, budget):
         def one(cur, sort: str) -> dict:
             sub, _, _ = SORTS[sort]
             t1 = monotonic()
@@ -1777,13 +1779,9 @@ def _cut(all_sorts, bucket, no_dyadic, profile, gen, index, jobs, as_jobs, mount
         dst = out_dir / f"{sort}.parquet"
         files = range_files(con, f"{root}/{sub}/r*.parquet")
         bounds = ilv.range_bounds(store.read_json(f"{prefix}/ranges.json")) if sort == LEVEL else None
-        extra = 0
-        if sort == LEVEL and tree is not None:
-            from .interval_compact import input_rows
-
-            extra = ilv.extra_rows(input_rows(files))
+        extra = ilv.extra_rows(con, files) if sort == LEVEL and tree is not None else 0
         # As `cut_gen` sizes each of `as_jobs` sorts at once: the cores and the budget split between them.
-        with plan_cut(con, tree, files, at_once=as_jobs, rg_rows=rg_rows, what=f"cut {sort}", extra_rows=extra) as (procs, budget):
+        with plan_cut(con, tree, files, at_once=as_jobs, rg_rows=rg_rows, what=f"cut {sort}", extra_rows=extra, sort_cols=len(schema)) as (procs, budget):
             procs = min(procs, workers or procs)
             err(f"cut {sort}: {procs} workers, runs of ≤ {budget:,} B (as {as_jobs} sorts at once)")
             doc = write_served(con, files, sort, dst, schema, rg_rows=rg_rows, stamps=stamps, procs=procs, budget=budget, key_bounds=bounds)

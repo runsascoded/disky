@@ -285,7 +285,7 @@ CREATE TABLE deletion_runs (
   undo_state TEXT NOT NULL DEFAULT 'none' CHECK (undo_state IN ('none', 'partial', 'full', 'expired')),
   purge_state TEXT NOT NULL DEFAULT 'none' CHECK (purge_state IN ('none', 'pending', 'done')),
   log_dir TEXT NOT NULL
-, plan_digest TEXT);
+, plan_digest TEXT, min_soft_delete_days INTEGER, soft_delete_days INTEGER);
 
 CREATE TABLE deletion_bands (
   run_id TEXT NOT NULL REFERENCES deletion_runs(run_id),
@@ -454,6 +454,13 @@ CREATE TABLE plan_items (
   added_by TEXT NOT NULL,
   added_ts INTEGER NOT NULL, batch_id INTEGER REFERENCES stage_batches(id), as_of TEXT, kind TEXT CHECK (kind IS NULL OR kind = 'object'),
   PRIMARY KEY (plan_id, prefix)
+);
+
+CREATE TABLE sweep_settings (
+  id                   INTEGER PRIMARY KEY CHECK (id = 1),
+  min_soft_delete_days INTEGER NOT NULL CHECK (min_soft_delete_days BETWEEN 0 AND 90),
+  updated_by           TEXT NOT NULL,
+  updated_at           INTEGER NOT NULL
 );
 
 CREATE UNIQUE INDEX access_log_dedupe ON access_log (event, session_sub, path, bucket) WHERE bucket IS NOT NULL;

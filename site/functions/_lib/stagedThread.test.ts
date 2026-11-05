@@ -34,7 +34,7 @@ vi.mock('./identity.js', async orig => ({
   loadRegistry: async () => ({ 'ann-bee': { name: 'Ann Bee' }, kai: { u: 'kai', name: 'Kai', github: 'kai-gh' } }),
 }))
 
-const { notifyPlan, refreshThread } = await import('./stagedSlack.js')
+const { notifyPlan, refreshStagedCard, refreshThread } = await import('./stagedSlack.js')
 const { onRequestPost: slackActions } = await import('../slack/actions.js')
 
 const SITE = 'https://site.example.org'
@@ -47,7 +47,7 @@ interface Call { method: string; body: Record<string, unknown> }
 
 /** A fake Slack: posts get increasing ts (`200.000001`, …), the parent's
  *  reactions come from `reactions`, every call is recorded. */
-function fakeSlack({ reactions = {} as Record<string, string[]>, delayMs = 0 } = {}): Call[] {
+function fakeSlack({ reactions = {} as Record<string, string[]>, delayMs = 0, onCall = async (_c: Call): Promise<void> => {} } = {}): Call[] {
   const calls: Call[] = []
   let n = 0
   const json = (o: unknown) => new Response(JSON.stringify(o))
@@ -56,6 +56,7 @@ function fakeSlack({ reactions = {} as Record<string, string[]>, delayMs = 0 } =
     const method = url.pathname.replace('/api/', '')
     const body = (init?.body ? JSON.parse(String(init.body)) : Object.fromEntries(url.searchParams)) as Record<string, string>
     if (method !== 'users.lookupByEmail' && method !== 'users.info') calls.push({ method, body })
+    if (method !== 'users.lookupByEmail' && method !== 'users.info') await onCall({ method, body })
     if (delayMs) await new Promise(r => setTimeout(r, delayMs))
     switch (method) {
       case 'chat.postMessage': return json({ ok: true, channel: body.channel, ts: `200.${String(++n).padStart(6, '0')}` })
@@ -84,8 +85,8 @@ function show(c: Call): string {
 /** The calls other than the parent's routine re-render. */
 const events = (calls: Call[]): string[] => calls.filter(c => !(c.method === 'chat.update' && c.body.ts === PARENT && !String(sectionText(c.body.blocks)).startsWith('*Staged plan'))).map(show)
 
-const PARENT_TEXT = (paths: number, batches: number, size: string, objects: string) =>
-  `*Staged for deletion* · plan #1 · ${paths.toLocaleString('en-US')} prefixes in ${batches} ${batches === 1 ? 'batch' : 'batches'}\nstaged by Ann Bee\n*${size}* · ${objects} objects at scan ${SCAN} · owners: Ann Bee ${size}`
+const PARENT_TEXT = (paths: number, size: string, objects: string, empty = '') =>
+  `*Staged for deletion* · plan #1: *${paths.toLocaleString('en-US')} prefixes · ${size} · ${objects} objects* at scan ${SCAN}\nowners: Ann Bee ${size}\n${empty}staged by Ann Bee`
 
 describe('D1', () => {
   /** Plan 1, its thread already posted; `seed`: an older batch (#100, one
@@ -116,8 +117,102 @@ describe('D1', () => {
       await notifyPlan(env, db, 1, SITE, undefined, { now: 1000 })
       expect([lookups, calls.map(c => [c.method, c.body.ts, sectionText(c.body.blocks)])]).toEqual([
         [1000, 1000, 501],
-        [['chat.update', PARENT, `${PARENT_TEXT(2500, 1, '2.4 PiB', '25,000')}\n+1 staged prefix empty at scan, not counted`]],
+        [['chat.update', PARENT, PARENT_TEXT(2500, '2.4 PiB', '25,000', '+1 staged prefix empty at scan, not counted\n')]],
       ])
+    })
+  })
+
+  describe('re-staged after a run deleted it, sized at the scan the run read', () => {
+    /** A finished real run's row and its band on `prefix`: `digest` as its reflection left it (the job's, once it succeeded;
+     *  `''` on any other end; none for a run by hand), `objects` of the prefix's 10 recorded deleted. */
+    function deleted(raw: Awaited<ReturnType<typeof sqliteD1>>['raw'], prefix: string, scan: string, { digest = 'D' as string | null, objects = 10, undone = 0 } = {}) {
+      raw.prepare(`INSERT INTO deletion_runs (run_id, ${RUN_DIR}, scan, head, exec_head, actor, mode, started_ts, finished_ts, plan_digest, log_dir, plan_id)
+        VALUES ('r1', 'p', ?, 0, 0, 'ann', 'real', 10, 20, ?, 'd', 1)`).run(scan, digest)
+      raw.prepare("INSERT INTO deletion_bands (run_id, prefix, bytes, objects, undone_objects) VALUES ('r1', ?, ?, ?, ?)").run(prefix, objects * TiB / 10, objects, undone)
+    }
+    /** The card after `gs://b/x/` is staged again, a run on `scan` having recorded it. */
+    async function card(scan: string, run: Parameters<typeof deleted>[3] = {}) {
+      const calls = fakeSlack()
+      const { db, raw } = await planDb()
+      deleted(raw, 'gs://b/x/', scan, run)
+      await stage(db, 1, ['gs://b/x/'], { ts: 30 })
+      await notifyPlan(env, db, 1, SITE, undefined, { now: 1000 })
+      return calls.map(show)
+    }
+    const EMPTY = `update ${PARENT}: *Staged for deletion* · plan #1: *1 prefix · 1.0 TiB · 10 objects* at scan ${SCAN}\nowners: Ann Bee 1.0 TiB\n+1 staged prefix empty at scan, not counted\nstaged by Ann Bee`
+    const LIVE = `update ${PARENT}: ${PARENT_TEXT(2, '2.0 TiB', '20')}`
+    it('is empty, not live, until a later scan', async () => {
+      expect(await card(SCAN)).toEqual([EMPTY])
+    })
+    it('written back since: a scan after the run holds it, and it is live', async () => {
+      expect(await card('2026-10-07')).toEqual([LIVE])
+    })
+    it('a killed run is not taken at its word: live', async () => {
+      expect(await card(SCAN, { digest: '' })).toEqual([LIVE])
+    })
+    it('a run that ended over a failed directory (9 of 10 answered): live and whole, not the 1 object left', async () => {
+      expect(await card(SCAN, { digest: '', objects: 9 })).toEqual([LIVE])
+    })
+    it('a run by hand, whose end nothing recorded: live', async () => {
+      expect(await card(SCAN, { digest: null })).toEqual([LIVE])
+    })
+    it('an undone run: live', async () => {
+      expect(await card(SCAN, { undone: 10 })).toEqual([LIVE])
+    })
+  })
+
+  describe('`refreshStagedCard`: the post-scan ping', () => {
+    it('edits the card in place and posts nothing, even for a batch no reply shows', async () => {
+      const calls = fakeSlack()
+      const { db } = await planDb()
+      await stage(db, 1, ['gs://b/x/', 'gs://b/empty/x/'], { ts: Math.floor(Date.now() / 1000) })
+      expect(await refreshStagedCard(env, db, SITE)).toBe(true)
+      expect(calls.map(show)).toEqual([`update ${PARENT}: ${PARENT_TEXT(2, '2.0 TiB', '20', '+1 staged prefix empty at scan, not counted\n')}`])
+    })
+    it('a plan with no thread is not given one', async () => {
+      const calls = fakeSlack()
+      const { db, raw } = await planDb()
+      raw.exec('UPDATE plans SET slack_ts = NULL')
+      expect(await refreshStagedCard(env, db, SITE)).toBe(false)
+      expect(calls).toEqual([])
+    })
+    it('a thread in another channel is left there', async () => {
+      const calls = fakeSlack()
+      const { db, raw } = await planDb()
+      raw.exec("UPDATE plans SET slack_channel = 'COTHER'")
+      expect(await refreshStagedCard(env, db, SITE)).toBe(false)
+      expect(calls).toEqual([])
+    })
+    it('no open plan: nothing', async () => {
+      const calls = fakeSlack()
+      const { db, raw } = await planDb()
+      raw.exec("UPDATE plans SET state = 'closed'")
+      expect(await refreshStagedCard(env, db, SITE)).toBe(false)
+      expect(calls).toEqual([])
+    })
+  })
+
+  describe('a stage landing while a notify is mid-flight', () => {
+    it('a notify that rendered too early re-renders the parent and the reply once it has sent, so neither stays stale', async () => {
+      let raced = false
+      const dbRef: { db?: D1Database } = {}
+      const calls = fakeSlack({
+        onCall: async c => {
+          if (c.method !== 'chat.update' || c.body.ts !== PARENT || raced) return
+          raced = true
+          await stage(dbRef.db!, 2, ['gs://b/late/'], { ts: 1000 })
+        },
+      })
+      const { db } = await planDb()
+      dbRef.db = db
+      await notifyPlan(env, db, 1, SITE, await stage(db, 1, ['gs://b/first/'], { ts: 1000 }), { now: 1000 })
+      const firstLine = (c: Call) => sectionText(c.body.blocks).split('\n')[0]
+      const prefixes = (c: Call) => Number(/(\d+) prefix/.exec(firstLine(c))![1])
+      const replies = calls.filter(c => c.body.thread_ts === PARENT || (c.method === 'chat.update' && c.body.ts !== PARENT))
+      expect({
+        parent: calls.filter(c => c.method === 'chat.update' && c.body.ts === PARENT).map(prefixes),
+        reply: firstLine(replies.at(-1)!),
+      }).toEqual({ parent: [2, 3], reply: ':wastebasket: *Ann Bee* staged 2 paths in 2 batches · *2.0 TiB* · 20 objects' })
     })
   })
 
@@ -142,7 +237,8 @@ describe('D1', () => {
       const BO = 'bo@example.org'
       await notifyPlan(env, db, 1, SITE, await stage(db, 1, ['gs://b/ckpt/run-1/step-0/', 'gs://b/empty/a/']), { now: 1000 })
       await notifyPlan(env, db, 1, SITE, await stage(db, 2, ['gs://b/empty/b/', 'gs://b/empty/c/'], { by: BO }), { now: 1100 })
-      const parent = (empty: number) => `*Staged for deletion* · plan #1 · 2 prefixes in 2 batches\nstaged by Ann Bee\n*2.0 TiB* · 20 objects at scan ${SCAN} · owners: Ann Bee 2.0 TiB\n+${empty} staged ${empty === 1 ? 'prefix' : 'prefixes'} empty at scan, not counted`
+      const parent = (empty: number) => PARENT_TEXT(2, '2.0 TiB', '20', `+${empty} staged ${empty === 1 ? 'prefix' : 'prefixes'} empty at scan, not counted
+`)
       expect([
         calls.filter(c => c.method !== 'conversations.replies').map(c => [show(c), c.body.text]),
       ]).toEqual([[
@@ -216,7 +312,7 @@ describe('D1', () => {
         calls.filter(c => c.method === 'chat.update' && c.body.ts === PARENT).map(c => sectionText(c.body.blocks).split('\n')[0]),
         [sectionText(upd.blocks), (upd.blocks as { elements?: { text: { text: string } }[] }[])[1].elements!.map(e => e.text.text)],
       ]).toEqual([
-        ['*Staged for deletion* · plan #1 · 3 prefixes in 2 batches', '*Staged for deletion* · plan #1 · 2 prefixes in 2 batches'],
+        [`*Staged for deletion* · plan #1: *3 prefixes · 3.0 TiB · 30 objects* at scan ${SCAN}`, `*Staged for deletion* · plan #1: *2 prefixes · 2.0 TiB · 20 objects* at scan ${SCAN}`],
         [':wastebasket: *Ann Bee* staged 1 path · *1.0 TiB* · 10 objects\n`b/ckpt/run-1/` 1.0 TiB', ['Reject batch', 'View in www']],
       ])
     })
@@ -324,13 +420,13 @@ describe('D1', () => {
       const link = `<https://ws.slack.com/archives/${CH}/p200000001|a new thread>`
       expect(events(calls)).toEqual([
         `reactions? ${PARENT}`,
-        `post parent: ${PARENT_TEXT(4, 3, '4.0 TiB', '40')}`,
+        `post parent: ${PARENT_TEXT(4, '4.0 TiB', '40')}`,
         `permalink ${NEW}`,
         `post in ${PARENT}: :white_check_mark: Marked done. Continued in ${link}.`,
         `update ${PARENT}: *Staged plan #1* · this thread is done; continued in ${link}.`,
         `post in ${NEW}: :wastebasket: *Ann Bee* staged 1 path · *1.0 TiB* · 10 objects\n\`b/ckpt/run-2/step-0/\` 1.0 TiB`,
         `reactions? ${NEW}`,
-        `update ${NEW}: ${PARENT_TEXT(5, 4, '5.0 TiB', '50')}`,
+        `update ${NEW}: ${PARENT_TEXT(5, '5.0 TiB', '50')}`,
         `update 200.000003: :wastebasket: *Ann Bee* staged 2 paths in 2 batches · *2.0 TiB* · 20 objects\nin \`b/ckpt/\`: \`run-2/step-0/\` 1.0 TiB, \`run-3/step-0/\` 1.0 TiB`,
       ])
       expect(raw.prepare('SELECT slack_channel, slack_ts FROM plans').all()).toEqual([{ slack_channel: CH, slack_ts: NEW }])
@@ -345,7 +441,7 @@ describe('D1', () => {
       await notifyPlan(env, db, 1, SITE, await stage(db, 2, run(2, 1)), { now: 1060 })
       expect(calls.filter(c => c.method === 'chat.postMessage').map(show)).toEqual([
         `post in ${PARENT}: :wastebasket: *Ann Bee* staged 1 path · *1.0 TiB* · 10 objects\n\`b/ckpt/run-1/step-0/\` 1.0 TiB`,
-        `post parent: ${PARENT_TEXT(3, 3, '3.0 TiB', '30')}`,
+        `post parent: ${PARENT_TEXT(3, '3.0 TiB', '30')}`,
         `post in ${PARENT}: :white_check_mark: Marked done. Continued in <https://ws.slack.com/archives/${CH}/p200000002|a new thread>.`,
         `post in 200.000002: :wastebasket: *Ann Bee* staged 1 path · *1.0 TiB* · 10 objects\n\`b/ckpt/run-2/step-0/\` 1.0 TiB`,
       ])

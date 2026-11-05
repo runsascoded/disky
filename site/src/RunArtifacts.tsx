@@ -8,12 +8,13 @@ import { useUnits } from './units'
 import { runDirHref, runFileHref } from './runs'
 import { useRunFiles } from './plans'
 import { memoryTable } from './memoryTable'
+import { Paginated } from './Pager'
 
 export function RunPlan({ dir }: { dir: string }) {
   const [q] = useRunFiles<{ sweep?: string[]; approved?: string[] }>([`${dir}plan.json`], false)
   const prefixes = q.data?.sweep ?? q.data?.approved ?? []
   return <details className="run-plan"><summary>{prefixes.length} reviewed prefixes</summary>
-    {q.error ? <p className="err">{q.error.message}</p> : prefixes.map(p => <div key={p}><code>{p}</code></div>)}
+    {q.error ? <p className="err">{q.error.message}</p> : <Paginated rows={prefixes} label="Reviewed prefixes">{page => page.map(p => <div key={p}><code>{p}</code></div>)}</Paginated>}
   </details>
 }
 

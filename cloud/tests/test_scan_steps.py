@@ -798,6 +798,7 @@ class Ends:
     ("warm_cache", "dt-cloud warm-cache -d", "cache warm-up failed for 2026-10-16T1200"),
     ("probe", "dt-cloud probe -c", "serving probe failed for 2026-10-16T1200 (an HTTP or transport error; data is fine)"),
     ("healthcheck", "dt-cloud healthcheck -d", "the live site's health check failed for 2026-10-16T1200 (data is fine; serving may be degraded)"),
+    ("staged_card", "dt-cloud staged-card", "staged card refresh failed for 2026-10-16T1200 (it stays at the scan before)"),
     ("index_gc", "dt-cloud index-gc -R", "index-gc -F failed (superseded generations stay until the next run)"),
     ("over_time", "dt-cloud over-time-groups -g", "over-time groups failed (the series uses its configured path store)"),
 ])
@@ -808,6 +809,15 @@ def test_optional_command_failure_records_a_failed_phase(tmp_path, env, name, pr
     getattr(S, name)(c, None)
     phase = name.replace("_", "-")
     assert c.run.calls == [("begin", phase), ("end", phase, 1, True, message)]
+
+
+def test_staged_card_pings_the_site_only_with_its_token(tmp_path, env):
+    c = ctx(tmp_path, env)
+    S.staged_card(c, None)
+    assert c.sh_impl.calls == []
+    c.env.update(SITE_TOKEN="t", SITE_URL="https://site.example.org")
+    S.staged_card(c, None)
+    assert c.sh_impl.calls == ["dt-cloud staged-card"]
 
 
 @pytest.mark.parametrize("name,prefix,warn", [
@@ -1451,6 +1461,36 @@ def test_cf_usage_failure_fails_its_phase_not_the_run(tmp_path, env):
     assert (c.run.calls, c.sh_impl.calls) == (
         [("begin", "cf-usage"), ("end", "cf-usage", 1, True, "cf-usage snapshots failed (the scan's outputs stand; the next run backfills)")],
         ["dt-cloud cf-usage -c site/wrangler.toml -d 7 -o <tmp>/data/snapshots/usage"],
+    )
+
+
+def test_soft_delete_reads_each_gcs_source_to_the_data_store_and_r2(tmp_path, env):
+    """`soft-delete` (listed in `steps`): `dt-cloud soft-delete` over every `gs://` source's bucket (or
+    `options.soft-delete.buckets`), the day's document under `snapshots/soft-delete/` in the data store and the R2
+    archive; no GCS bucket, or REPROC: nothing run."""
+    sources = ["gs://g1", "gcs://g2", {"uri": "s3://a", "endpoint": "https://s3.example.org"}]
+    c = ctx(tmp_path, env, steps=["soft-delete"], sources=sources)
+    S.soft_delete(c, None)
+    assert c.sh_impl.calls == ["dt-cloud soft-delete -b g1 -b g2 -o <tmp>/data/snapshots/soft-delete"]
+    r2 = {**env, "R2_ENDPOINT": "https://r2.example.org", "R2_BUCKET": "r2b", "R2_ACCESS_KEY_ID": "k", "R2_SECRET_ACCESS_KEY": "s"}
+    c = ctx(tmp_path, r2, steps=["soft-delete"], sources=sources, options={
+        "soft-delete": {"buckets": ["x", "y"]},
+        "list": {"import": True}, "static-names": {"profile": "sn.json"}, "digest": {"template": "t", "config": "c.yml"},
+    })
+    S.soft_delete(c, None)
+    assert c.sh_impl.calls == ["dt-cloud soft-delete -b x -b y -o <tmp>/data/snapshots/soft-delete -o r2://r2b/snapshots/soft-delete"]
+    for none in (ctx(tmp_path, env, steps=["soft-delete"]), ctx(tmp_path, {**env, "REPROC": "1"}, steps=["soft-delete"], sources=sources)):
+        S.soft_delete(none, None)
+        assert none.sh_impl.calls == []
+
+
+def test_soft_delete_failure_fails_its_phase_not_the_run(tmp_path, env):
+    c = ctx(tmp_path, env, steps=["soft-delete"], sources=["gs://g1"], runner=Runner(tmp_path, fail=("dt-cloud soft-delete -b",)))
+    c.run = Ends()
+    S.soft_delete(c, None)
+    assert (c.run.calls, c.sh_impl.calls) == (
+        [("begin", "soft-delete"), ("end", "soft-delete", 1, True, "soft-delete reading failed (the scan's outputs stand; the site keeps the last one, dated)")],
+        ["dt-cloud soft-delete -b g1 -o <tmp>/data/snapshots/soft-delete"],
     )
 
 

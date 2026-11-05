@@ -5,6 +5,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 
 import pandas as pd
 import pyarrow as pa
@@ -472,9 +473,18 @@ class _UndoHandle:
 @dataclass
 class _UndoClient:
     handle: _UndoHandle
+    #: Buckets whose soft delete is off now, and ones the caller can't read (`storage.buckets.get`); the rest retain 7 days.
+    off: tuple[str, ...] = ()
+    unreadable: tuple[str, ...] = ()
 
     def bucket(self, name):
         return self.handle
+
+    def get_bucket(self, name):
+        from google.api_core.exceptions import Forbidden
+        if name in self.unreadable:
+            raise Forbidden(f"no storage.buckets.get on {name}")
+        return SimpleNamespace(soft_delete_policy=None if name in self.off else SimpleNamespace(retention_duration_seconds=7 * 86400))
 
 
 def _real_run_dir(tmp_path, for_real=True):
@@ -545,6 +555,46 @@ def test_undo_refuses_dry_runs_and_closed_windows(tmp_path):
         undo_run(str(d), client=_UndoClient(_UndoHandle()), deadline=1_700_000_000, now=1_800_000_000)
 
 
+def _two_bucket_run_dir(tmp_path):
+    d = _real_run_dir(tmp_path)
+    (d / "deleted-summary.json").write_text(json.dumps({"plan": str(d), "for_real": True, "buckets": {"b1": {}, "b2": {}}}))
+    pd.DataFrame([{"name": "c/u", "size_bytes": 5, "generation": 21, "decision": "delete", "dir": "c"}]).to_parquet(d / "deleted" / "b2.parquet")
+    return d
+
+
+def test_undo_refuses_a_bucket_whose_soft_delete_is_off_now(tmp_path):
+    """GCS restores nothing from a bucket with no soft-delete policy, whatever it retained when the run deleted: the
+    undo asks GCS and refuses up front, naming the buckets (and the run's others, for `-b`); nothing is restored."""
+    import pytest
+    from dt_cloud.sweep_exec import undo_run
+    d = _two_bucket_run_dir(tmp_path)
+    h = _UndoHandle()
+    with pytest.raises(SystemExit) as one:
+        undo_run(str(d), client=_UndoClient(h, off=("b1",)), now=1_800_000_000)
+    with pytest.raises(SystemExit) as both:
+        undo_run(str(d), client=_UndoClient(h, off=("b1", "b2")), now=1_800_000_000, dry_run=True)
+    assert [str(one.value), str(both.value), h.calls, sorted(p.name for p in d.iterdir())] == [
+        "undo unavailable: soft delete is off on b1 (GCS, now): it restores nothing from a bucket with no soft-delete policy. "
+        "The run's other buckets still have one: -b b2",
+        "undo unavailable: soft delete is off on b1, b2 (GCS, now): it restores nothing from a bucket with no soft-delete policy",
+        [],
+        ["deleted", "deleted-summary.json", "plan-summary.json"],
+    ]
+
+
+def test_undo_restores_the_buckets_named_that_still_have_soft_delete(tmp_path):
+    """`-b` cuts the run to buckets GCS still restores from; a bucket the caller can't read the policy of is restored
+    without that check (GCS answers each object)."""
+    from dt_cloud.sweep_exec import undo_run
+    d = _two_bucket_run_dir(tmp_path)
+    h = _UndoHandle()
+    s = undo_run(str(d), client=_UndoClient(h, off=("b1",)), only_buckets=("b2",), workers=1, now=1_800_000_000)
+    assert (h.calls, {b: v["decisions"] for b, v in s["buckets"].items()}) == ([("c/u", 21, 0)], {"b2": {"restored": 1}})
+    h2 = _UndoHandle()
+    s2 = undo_run(str(d), client=_UndoClient(h2, unreadable=("b1", "b2")), only_buckets=("b2",), workers=1, now=1_800_000_001)
+    assert (h2.calls, {b: v["decisions"] for b, v in s2["buckets"].items()}) == ([("c/u", 21, 0)], {"b2": {"restored": 1}})
+
+
 # ---- bulk undo: `bulkRestore` per logged dir, gated by an exactness precheck ----
 
 W0, W1 = 1_799_000_000, 1_799_000_600  # the run's recorded deletion window
@@ -603,6 +653,9 @@ class _BulkClient:
 
     def bucket(self, name):
         return self.handle
+
+    def get_bucket(self, name):
+        return SimpleNamespace(soft_delete_policy=SimpleNamespace(retention_duration_seconds=7 * 86400))
 
     def list_blobs(self, bucket, prefix="", soft_deleted=False, fields=None):
         self.listings.append((bucket, prefix, soft_deleted))

@@ -9,7 +9,9 @@
 // then `execute`; real runs use parallel XML: `execute-reviewed` deleting only
 // the matching DR's exact generations, or, with no such DR, `manifest` then
 // `execute-manifest` deleting only that manifest's, either way after complete
-// preflight and ≥7d soft-delete/permission checks. All record D1 runs and bands; `plan_id`
+// preflight and permission checks, and a retention check at the deployment's minimum (`_lib/sweepSettings.ts`, read here at
+// dispatch and passed on the command line, so it can't move under a running job). A real dispatch refuses a minimum lower than
+// the one its confirm showed (`DispatchReq.shownMinSoftDeleteDays`). All record D1 runs and bands; `plan_id`
 // comes from plan.json, with no row inserted here. The `-b` cut is the plan's
 // buckets (∩ `buckets`, when given). The run's item digest rides in the job
 // env (`PLAN_DIGEST`); `_lib/sweepReflect.ts` copies it onto the run's row once
@@ -25,15 +27,17 @@
 import type { D1Database } from '@cloudflare/workers-types'
 import { type BatchConfig, batchConfig, notConfigured } from './batchConfig.js'
 import { labelBatchSpec } from './costLabels.js'
-import { type DispatchErr, type DispatchReq, type ExecEnv, type Executor, type Prepared, refuse } from './dispatch.js'
+import { type DispatchErr, type DispatchReq, type ExecEnv, type Executor, expectedVars, type Prepared, refuse } from './dispatch.js'
 import { batchJobsUrl, batchRegionFor, gcpToken } from './gcp.js'
 import { bucketOf, digestLines, NO_SHAPE, type PlanBucketsSnapshot, prefixShape, snapshotPlanBuckets } from './plans.js'
 import { reviewConfig } from './planDispatch.js'
 import { failureReader } from './sweepFailure.js'
 import { outcomeReader } from './sweepOutcome.js'
+import { minSoftDeleteDays } from './sweepSettings.js'
 import { totalsReader } from './sweepTotals.js'
 import { listSweepJobs, reflectSweepRuns } from './sweepReflect.js'
 import { DEFAULT_SWEEP_MACHINE, SWEEP_MACHINES, type SweepMachine } from './sweepMachines.js'
+import { DEFAULT_MIN_SOFT_DELETE_DAYS, weakerThanShown } from '../../src/softDelete.js'
 import { RUN_ID_RE, SCAN_ID_RE } from '../../src/scanSlug.js'
 
 /** A run's dir in the data bucket (`DATA_BUCKET`). */
@@ -69,23 +73,26 @@ export interface SweepScript {
   /** A finished, matching DR selected by the dispatch gate. */
   reviewed?: string
   pacing?: 'guided' | 'adaptive'
+  /** `sweep execute*`'s `-s`: the narrowest soft-delete retention the run accepts. */
+  minSoftDeleteDays: number
 }
 
 /** The Batch container's bash: DR manifest/execute, or parallel XML over a DR's or a fresh manifest's generations.
  * On exit (success or failure) it pings the site's `/api/sweep/jobs`
  * with the job's read grant, so the finished run is reflected — and its
  * result posted to the plan's Slack thread — without anyone polling. */
-export const sweepScript = ({ cfg, mode, jobId, buckets, plan, store, reviewed, pacing = 'guided' }: SweepScript): string => {
+export const sweepScript = ({ cfg, mode, jobId, buckets, plan, store, reviewed, pacing = 'guided', minSoftDeleteDays: minDays }: SweepScript): string => {
   if (pacing !== 'guided' && pacing !== 'adaptive') throw new Error('invalid sweep pacing mode')
+  if (!Number.isInteger(minDays) || minDays < 0) throw new Error('invalid soft-delete minimum')
   const run = runDir(cfg, jobId)
   const bflags = buckets.map(b => `-b ${b}`).join(' ')
   const manifest = (out: string) => `${store.startsWith('r2://') ? R2_DT_CLOUD : 'dt-cloud'} sweep manifest -d "$SWEEP_DATE" --plan "${plan}" ${bflags} -i "${store}" -o "${out}"`
   const pipeline = (command: string, work: string, source: string) =>
-    `dt-cloud sweep ${command} -e xml -j 64 -B ${Math.max(1, Math.min(6, buckets.length))} -c ${pacing} -r 8000 ${bflags} -p "${plan}" -o "${run}" -w ${work} --for-real "${source}"`
+    `dt-cloud sweep ${command} -e xml -j 64 -B ${Math.max(1, Math.min(6, buckets.length))} -c ${pacing} -r 8000 -s ${minDays} ${bflags} -p "${plan}" -o "${run}" -w ${work} --for-real "${source}"`
   // A dry run re-lists each manifest dir to predict decisions. A real run deletes exact generations with no relist: a dry
   // run's reviewed ones, given a dry run of exactly its items at its scan; else its own manifest's, built under `source/`
   // since the executor's output must be new (specs/done/delete-what-you-see.md). `plan` names only the run's items, either way.
-  const steps = mode === 'dry' ? [manifest(run), `dt-cloud sweep execute ${bflags} "${run}"`]
+  const steps = mode === 'dry' ? [manifest(run), `dt-cloud sweep execute -s ${minDays} ${bflags} "${run}"`]
     : reviewed ? [pipeline('execute-reviewed', '/work/reviewed', reviewed)]
     : [manifest(`${run}/source`), pipeline('execute-manifest', '/work/manifest', `${run}/source`)]
   return ['set -euo pipefail', EXIT_TRAP, ...steps].join('\n')
@@ -223,12 +230,20 @@ async function prepare(env: ExecEnv, db: D1Database, req: DispatchReq): Promise<
     ...(snapshot.objects ?? []).map(key => ({ key, kind: 'object' as const })),
   ].filter(i => buckets.includes(bucketOf(i.key, shape.buckets))))
 
+  // The one read: what this checks is what the job's `-s` says.
+  const minDays = await minSoftDeleteDays(db)
+  if (req.mode === 'real') {
+    const shown = req.shownMinSoftDeleteDays ?? DEFAULT_MIN_SOFT_DELETE_DAYS
+    const weaker = weakerThanShown(minDays, shown)
+    if (weaker) return refuse(409, weaker, { min_soft_delete_days: minDays, shown_min_soft_delete_days: shown })
+  }
+
   const launch: Prepared['launch'] = async (date, digest, reviewed) => {
     const reuse = req.mode === 'real' ? reusableRunDir(cfg, reviewed) : undefined
     const region = batchRegionFor(cfg, buckets)
     const jobId = `gcs-sweep-${req.mode}-${jobStampOf(new Date())}z`
     const plan = runDir(cfg, jobId)
-    const script = sweepScript({ cfg, mode: req.mode, jobId, buckets, plan: planJsonPath(cfg, jobId), store: holdStore(env, cfg), reviewed: reuse, pacing })
+    const script = sweepScript({ cfg, mode: req.mode, jobId, buckets, plan: planJsonPath(cfg, jobId), store: holdStore(env, cfg), reviewed: reuse, pacing, minSoftDeleteDays: minDays })
     const spec = sweepJobSpec({
       cfg, jobSa, region, script, actor: req.actor, siteUrl: req.siteUrl, machine: req.machine,
       env: {
@@ -238,6 +253,8 @@ async function prepare(env: ExecEnv, db: D1Database, req: DispatchReq): Promise<
         PLAN_ID: String(req.planId),
         // the run's item digest, for `sweepReflect` (the executor ignores it)
         PLAN_DIGEST: digest,
+        // what was selected, for the run's row until its manifest says (`/api/sweep/jobs`; the executor ignores it)
+        ...expectedVars(req.expected),
         ...review.vars,
       },
       secrets: review.secrets,
@@ -252,7 +269,7 @@ async function prepare(env: ExecEnv, db: D1Database, req: DispatchReq): Promise<
     if (!up.ok) return refuse(500, 'plan.json write failed', { status: up.status, detail: (await up.text()).slice(0, 300) })
     const sub = await submitSweepJob(cfg, token, region, jobId, spec)
     if (sub) return sub
-    return { job_id: jobId, extra: { plan, region, buckets } }
+    return { job_id: jobId, extra: { plan, region, buckets, min_soft_delete_days: minDays } }
   }
   return { prefixes, launch }
 }

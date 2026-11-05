@@ -183,6 +183,12 @@ dt-cloud image-sha [-e SHA [-a]] [-j]  # The running image's source revision (`i
                           # `<sha> dirty` or `unstamped`; `-e` exits 1 unless the image is that sha (or a ≥7-char prefix),
                           # clean (`-a` accepts dirty) and stamped. Job entrypoints (`scan head`/`step`, the
                           # `interval-store` stage tasks) log it
+dt-cloud soft-delete -b BUCKET… [-o ROOT…] [-j]  # Each bucket's GCS soft-delete retention now (`soft_delete.py`, read with
+                          # `storage.buckets.get`): what a sweep's undo has to work with, since GCS restores nothing from a bucket whose
+                          # policy is off. `-o`: the day's `<ROOT>/<date>.json`; the opt-in scan step `soft-delete` writes it under
+                          # `snapshots/soft-delete/` for each `gs://` source, and the site (whose own account can't read bucket
+                          # metadata) reads the newest: a recorded undo on a bucket it shows off is "undo unavailable" (its control
+                          # disabled, the route refusing), one on a bucket it doesn't name is "unverified". `sweep undo` asks GCS itself
 dt-cloud diff-bench -a BEFORE -b AFTER [-S STORE] [-v DATE:PATH]… CASES  # The table a store-layout change ships with (no CURRENT move
                           # without it): the browser's diff + map requests (diff-check's CASES, `-v` views) on two hosts, each
                           # cold (`-n` random w×h cache buckets no page asks for) then warm; per request kind, median cold
@@ -302,7 +308,7 @@ Every deployment (gcs, cw, r2, hf, the r2 demo, …) ships the current full feat
 - **Hosts:** prod and a dev stack: `dev.<host>` (a `branchAliases` CNAME onto the Pages branch `dev`), wrangler's `[env.preview]` with prod's bindings, preview-env secrets, every origin + callback (prod, dev, the `pages.dev` alias, localhost) on the Google OAuth client.
 - **Auth:** app sign-in (Google OIDC + emailed codes), staff domain, admin console, personal agent tokens.
 - **Serving:** the interval store as the Map's path store (`PATH_STORE = "intervals"`, following `interval-store/CURRENT.json`, once `interval-store verify` / a `ps=iv` parity check passes on the first scans); search from the prebuilt static name index only (`FILTER_STATIC`, `NAME_SUMMARY_STATIC`, `FILTER_STATIC_HEAVY`, `FILTER_INDEXED_ONLY = "1"`), no per-scan search sidecars. Per-scan `path`/`bysize` sorts are on their way out (`specs/lean-scans.md`).
-- **Job:** `scan-run supervise` (phases, alerts, `/scans` records, cost labels), `DT_TRIGGER` (`schedule` in the cron body, `manual` from hand submits; with migration `scan-run-trigger`): the run's and the scan's trigger (`/scans`, the digest's reply scan), `index-gc`, cache warm-up (`warm-cache`) and the serving probe (`probe -c`) after each scan, the Slack digest thread.
+- **Job:** `scan-run supervise` (phases, alerts, `/scans` records, cost labels), `DT_TRIGGER` (`schedule` in the cron body, `manual` from hand submits; with migration `scan-run-trigger`): the run's and the scan's trigger (`/scans`, the digest's reply scan), `index-gc`, cache warm-up (`warm-cache`) and the serving probe (`probe -c`) after each scan, the Slack digest thread, and on a staging deployment the `staged-card` step (`dt-cloud staged-card`; the site's prod env names the job's grant in `STAGED_CARD_GRANT`, its dev stack does not).
 - **Meta:** the "data behind this site" store (`STORES_JSON` `meta`) with its own static index.
 
 A deployment's spec lists the baseline items it doesn't have yet as gaps, and those gaps are open work, not follow-ups to propose.

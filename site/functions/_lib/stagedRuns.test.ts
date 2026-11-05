@@ -8,6 +8,7 @@ import { emptiedBatches, stageItems, prefixShape, snapshotPlanBuckets, unstageDe
 import type { SweepBatchJob } from './sweepReflect'
 import { runBuckets, undoGate, type UndoRunRow } from './sweepUndo'
 import { RUN_DIR, sqliteD1 } from './testD1'
+import { fakeR2, softDeleteDoc } from './testR2'
 
 const B1 = 'gcs-a'
 const B2 = 'gcs-b'
@@ -20,9 +21,24 @@ const row = (o: Partial<UndoRunRow> = {}): UndoRunRow => ({
 })
 
 describe('undoGate — a finished real run, inside its window, not already undone', () => {
+  it('a run that required nothing and measured nothing says why there is no undo', () => {
+    expect(undoGate(row({ undo_deadline: null, soft_delete_days: null, min_soft_delete_days: 0 }), NOW)).toEqual({ ok: false, status: 409, error: 'no undo promised: this run required no soft delete and recorded no retention, so treat its deletes as permanent' })
+  })
+  it('a run that recorded soft delete off says why there is no undo', () => {
+    expect(undoGate(row({ undo_deadline: null, soft_delete_days: 0 }), NOW)).toEqual({ ok: false, status: 409, error: 'no undo: a bucket in this run had soft delete off, so what it deleted there is gone for good' })
+  })
   it('accepts a real run closed from what it wrote, once its window is set', () => {
     expect(undoGate(row({ undo_deadline: null }), NOW)).toEqual({ ok: false, status: 409, error: 'the run recorded no undo window' })
     expect(undoGate(row({ finished_ts: NOW - 100, undo_deadline: NOW - 100 + 7 * 86400 }), NOW)).toBeNull()
+  })
+  it('refuses an undo GCS can no longer do, naming the buckets and the snapshot; says where a fresher answer is', () => {
+    expect(undoGate(row(), NOW, { buckets: [B1, B2], asOf: '2026-11-05' })).toEqual({
+      ok: false, status: 409,
+      error: `undo unavailable: soft delete is off on ${B1}, ${B2} (as of 2026-11-05); if that has changed since, \`dt-cloud sweep undo\` asks GCS itself`,
+    })
+    expect(undoGate(row(), NOW, null)).toBeNull()
+    // The run's own record comes first: a closed window stays a closed window.
+    expect(undoGate(row({ undo_deadline: NOW }), NOW, { buckets: [B1], asOf: '2026-11-05' })).toEqual({ ok: false, status: 409, error: 'undo window closed (the soft-delete retention has passed)' })
   })
   it('refuses each other case with its reason, allows the rest', () => {
     const answer = (r: UndoRunRow | null) => { const g = undoGate(r, NOW); return g ? [g.status, g.error] : 'ok' }
@@ -114,6 +130,44 @@ describe('D1', () => {
       expect(fetch).not.toHaveBeenCalled()
     })
 
+    describe('against the job\'s newest reading of the buckets\' soft delete', () => {
+      const snapshot = (off: Record<string, boolean>) => ({ SERVED_R2: '1', INDEX_R2: fakeR2({ 'snapshots/soft-delete/2026-11-05.json': softDeleteDoc('2026-11-05', off) }) })
+      const state = async (db: Awaited<ReturnType<typeof gcsDb>>['db']) => (await db.prepare('SELECT undo_state, undo_deadline FROM deletion_runs WHERE run_id = ?').bind(RUN).first())
+      it('refuses a run on a bucket it shows off, before any GCP call, leaving the row as recorded', async () => {
+        vi.useFakeTimers({ now: NOW * 1000, toFake: ['Date'] })
+        const fetch = vi.fn()
+        vi.stubGlobal('fetch', fetch)
+        const { db } = await gcsDb()
+        expect(await undoRoute({ request: post({ run_id: RUN }), env: { ...await env(db), ...snapshot({ [B1]: true, [B2]: false }) } } as never).then(answer)).toEqual([409, {
+          error: `undo unavailable: soft delete is off on ${B1} (as of 2026-11-05 07:12Z); if that has changed since, \`dt-cloud sweep undo\` asks GCS itself`,
+        }])
+        expect(fetch).not.toHaveBeenCalled()
+        expect(await state(db)).toEqual({ undo_state: 'none', undo_deadline: NOW + 100 })
+      })
+      it('a run with no recorded cut is held to the buckets its bands name: one off refuses it', async () => {
+        vi.useFakeTimers({ now: NOW * 1000, toFake: ['Date'] })
+        const fetch = vi.fn()
+        vi.stubGlobal('fetch', fetch)
+        const { db } = await gcsDb({ buckets: null })
+        expect(await undoRoute({ request: post({ run_id: RUN }), env: { ...await env(db), ...snapshot({ [B1]: false, [B2]: true }) } } as never).then(answer)).toEqual([409, {
+          error: `undo unavailable: soft delete is off on ${B2} (as of 2026-11-05 07:12Z); if that has changed since, \`dt-cloud sweep undo\` asks GCS itself`,
+        }])
+        expect(fetch).not.toHaveBeenCalled()
+      })
+      it.each<[string, Record<string, boolean>]>([
+        ['it shows the run\'s buckets on (another bucket off doesn\'t matter)', { [B1]: false, [B2]: true }],
+        ['it says nothing of the run\'s bucket: unknown isn\'t unavailable, and the job asks GCS itself', { [B2]: true }],
+      ])('dispatches where %s', async (_, off) => {
+        vi.useFakeTimers({ now: NOW * 1000, toFake: ['Date'] })
+        vi.stubGlobal('fetch', vi.fn(async (url: string) => new Response(url === 'https://oauth2.googleapis.com/token' ? JSON.stringify({ access_token: 'tok' }) : '{}')))
+        const { db } = await gcsDb()
+        expect(await undoRoute({ request: post({ run_id: RUN }), env: { ...await env(db), ...snapshot(off) } } as never).then(answer)).toEqual([200, {
+          bulk: false, job_id: 'gcs-undo-19700112-134640z', target: RUN, region: 'us-east1', by: 'dev@example.test',
+        }])
+        expect(await state(db)).toEqual({ undo_state: 'partial', undo_deadline: NOW + 100 })
+      })
+    })
+
     it('submits `gcs-undo-<stamp>z` on the dispatch\'s spec, in the run\'s bucket region, and marks the row partial', async () => {
       vi.useFakeTimers({ now: NOW * 1000, toFake: ['Date'] })
       const calls: { url: string; body: unknown }[] = []
@@ -180,6 +234,10 @@ describe('D1', () => {
       name: `projects/my-project/locations/us-east1/jobs/${id}`, uid: `uid-${id}`, createTime: '2026-09-28T12:00:00Z', region: 'us-east1',
       status: { state: 'RUNNING', runDuration: '61.5s', statusEvents: [{ description: 'scheduled' }, { description: 'running' }] },
       taskGroups: [{ taskSpec: { environment: { variables: vars }, runnables: [{ container: { commands: ['-c', script] } }] } }],
+    })
+    it('a run dispatched with a selection total carries it, display only', () => {
+      const v = sweepJobView(cfg, job('gcs-sweep-real-20260928-120000z', { USER: 'ann', EXPECTED_BYTES: '137000', EXPECTED_OBJECTS: '754' }, 'x'))
+      expect(v.expected).toEqual({ bytes: 137_000, objects: 754 })
     })
     it('a run: its plan, cut and region; an undo: its target', () => {
       const logs = (uid: string) => `https://console.cloud.google.com/logs/query;query=${encodeURIComponent(`labels.job_uid="${uid}"\nlog_id("batch_task_logs")\ntimestamp >= "2026-09-28T12:00:00Z"`).replace('(', '%28').replace(')', '%29')}?project=my-project`

@@ -1581,6 +1581,15 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); opacity: 1; }
 
   h1 { margin-bottom: 8px; }
 
+  .sweep-soft-delete {
+    margin-top: 24px;
+    .status { font-weight: 600; }
+    form { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+    input[type='number'] { width: 5em; }
+    .warn { color: var(--danger); font-weight: 600; }
+    .sweep-soft-delete-buckets { margin-top: 4px; td, th { padding: 2px 16px 2px 0; text-align: left; } }
+  }
+
   .session-log-switch {
     margin-top: 24px;
     .status { font-weight: 600; }
@@ -2080,6 +2089,13 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); opacity: 1; }
   // (or clears) this slot instead of pushing the rest of the page up and down.
   min-height: 30px;
   .sel-bar { margin-left: 0; box-shadow: 0 6px 18px rgb(0 0 0 / 0.25); pointer-events: auto; }
+}
+// The app's pager strip (`Pager.tsx`), wherever a list has one; a table's own header pagers restyle it.
+.pg {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin: 6px 0; font-size: 13px; font-variant-numeric: tabular-nums;
+  > span { padding: 0 6px; color: var(--ink-2); }
+  button { font: inherit; line-height: 1.4; background: var(--panel); color: var(--ink); border: 1px solid var(--line); border-radius: 5px; padding: 0 8px; cursor: pointer; &:disabled { opacity: 0.4; cursor: default; } }
+  select.psize { margin-left: 8px; font: inherit; font-size: 12px; background: var(--panel); color: var(--ink-2); border: 1px solid var(--line); border-radius: 4px; padding: 1px 4px; }
 }
 .children-tbl .pager {
   display: flex; align-items: center; flex-wrap: wrap; gap: 4px 10px; margin: 6px 0; font-size: 12px; color: var(--ink-2);
@@ -2931,6 +2947,9 @@ kbd { font: inherit; font-size: 11px; padding: 0 4px; border: 1px solid var(--li
   .stage-batch.emptied .batch-head { opacity: 0.8; }
   .batch-prefix-history { margin: 8px 0 12px 28px; padding-left: 16px; li { margin: 5px 0; overflow-wrap: anywhere; } }
   .runs-pg { flex-wrap: wrap; }
+  .dispatch-confirm-head { display: flex; align-items: center; gap: 10px; margin-top: 8px; }
+  .dispatch-confirm-list { margin: 6px 0; padding-left: 18px; li { margin: 3px 0; overflow-wrap: anywhere; } }
+  .run-expected .tag { margin-left: 0; }
   table.runs {
     th.num, td.num { text-align: right; font-variant-numeric: tabular-nums; }
     td.nb, td.num { white-space: nowrap; }
@@ -2944,6 +2963,8 @@ kbd { font: inherit; font-size: 11px; padding: 0 4px; border: 1px solid var(--li
     .prog progress { width: 64px; height: 8px; vertical-align: middle; }
     .prog-estimate { display: block; font-size: .9em; }
     td.actions { white-space: nowrap; > * + * { margin-left: 6px; } }
+    // A control shown but unavailable (`UndoControl`): `aria-disabled`, so its tip still opens (hover, focus, a tap pins it).
+    button[aria-disabled="true"] { opacity: 0.45; cursor: help; &:hover { border-color: var(--line); } }
     tr.live td.rid { font-weight: 600; }
     tr.run-detail-row > td { background: var(--panel); padding: 8px 12px 12px; }
     tr.run.linked > td { background: color-mix(in srgb, var(--accent, #4a9eff) 14%, transparent); }

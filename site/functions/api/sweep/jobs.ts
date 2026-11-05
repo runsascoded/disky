@@ -14,7 +14,7 @@
 // exit trap calls this with the job's read grant, so that happens as the run
 // ends.
 import { type Env as AuthEnv, json, requireViewer } from '../../_lib/auth.js'
-import type { ExecEnv } from '../../_lib/dispatch.js'
+import { type ExecEnv, type Expected, expectedOfVars } from '../../_lib/dispatch.js'
 import { type BatchConfig, batchConfig, notConfigured } from '../../_lib/batchConfig.js'
 import { batchLogsUrl, gcpToken } from '../../_lib/gcp.js'
 import { runDir } from '../../_lib/sweepDispatch.js'
@@ -58,6 +58,8 @@ export interface SweepJob {
   /** A failed job's reason from its `failure.json` (null: none recorded). */
   failure?: string | null
   stop_requested?: boolean
+  /** What was selected at dispatch (`EXPECTED_*`), display only; absent: not known. */
+  expected?: Expected
 }
 
 /** One listed Batch job as the console reads it (pure). */
@@ -70,6 +72,7 @@ export function sweepJobView(cfg: Pick<BatchConfig, 'project' | 'dataBucket' | '
   const last = ev.length ? ev[ev.length - 1] : null
   const dur = j.status?.runDuration
   const undo = isUndoJob(j)
+  const expected = expectedOfVars(vars)
   return {
     job_id,
     op: undo ? 'undo' : 'sweep',
@@ -88,6 +91,7 @@ export function sweepJobView(cfg: Pick<BatchConfig, 'project' | 'dataBucket' | '
     plan: runDir(cfg, job_id),
     last_event: last?.description ?? null,
     logs: batchLogsUrl(cfg.project, j.uid, j.createTime),
+    ...(expected ? { expected } : {}),
   }
 }
 

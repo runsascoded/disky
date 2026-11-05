@@ -14,6 +14,8 @@ export const ENDPOINT = '/api/session-log'
 export const FLUSH_MS = 10_000
 export const FILTER_DEBOUNCE_MS = 800
 export const RESIZE_DEBOUNCE_MS = 500
+/** How long a failed fetch waits for its page to hide before it counts as an error. */
+export const LEAVE_MS = 5_000
 
 type Fields = Record<string, unknown>
 /** Sends one batch body; `beacon` on page hide. Resolves to the HTTP status (null: unknown / failed). */
@@ -246,6 +248,16 @@ export function install(p: Page, logger: Logger): () => void {
   }), true)
 
   // API requests: route, status, duration, cache / engine headers, the error body's code.
+  // A full navigation fails the page's fetches as network errors before the page hides, so a failure waits to see which it was.
+  const held = new Map<SlogEvent, ReturnType<typeof setTimeout>>()
+  const release = (leaving: boolean) => {
+    for (const [ev, timer] of held) {
+      clearTimeout(timer)
+      logger.push(leaving ? { ...ev, err: 'abort' } as SlogEvent : ev)
+    }
+    held.clear()
+  }
+  offs.push(() => release(false))
   const origFetch = win.fetch
   const wrapped = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
@@ -261,7 +273,14 @@ export function install(p: Page, logger: Logger): () => void {
     try {
       res = await origFetch.call(win, input, init)
     } catch (e) {
-      safe(() => logger.push({ t, k: 'api', ...base, s: 0, ms: Math.round(p.perfNow() - t0), err: tr((e as Error)?.name === 'AbortError' ? 'abort' : errMsg(e), TRUNC.msg) } as SlogEvent))()
+      safe(() => {
+        const ev = { t, k: 'api', ...base, s: 0, ms: Math.round(p.perfNow() - t0) }
+        if ((e as Error)?.name === 'AbortError') logger.push({ ...ev, err: 'abort' } as SlogEvent)
+        else {
+          const failed = { ...ev, err: tr(errMsg(e), TRUNC.msg) } as SlogEvent
+          held.set(failed, setTimeout(safe(() => { held.delete(failed); logger.push(failed) }), LEAVE_MS))
+        }
+      })()
       throw e
     }
     safe(() => {
@@ -317,7 +336,7 @@ export function install(p: Page, logger: Logger): () => void {
     logger.log('vis', { s: doc.visibilityState })
     if (doc.visibilityState === 'hidden') logger.flush(true)
   }))
-  on(win, 'pagehide', safe(() => logger.flush(true)))
+  on(win, 'pagehide', safe(() => { release(true); logger.flush(true) }))
 
   return () => { for (const off of offs.splice(0).reverse()) off() }
 }

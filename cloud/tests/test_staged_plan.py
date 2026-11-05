@@ -123,10 +123,10 @@ def test_record_run_start_links_the_plan(monkeypatch: pytest.MonkeyPatch) -> Non
     assert sent == [(
         "INSERT INTO deletion_runs (run_id, plan, scan, head, exec_head, actor, mode, started_ts, finished_ts, "
         "deleted_bytes, deleted_objects, skipped_gone, skipped_overwritten, drift_dirs, ledger_drift_dirs, "
-        "undo_deadline, log_dir, buckets, plan_id) VALUES ("
+        "undo_deadline, log_dir, buckets, plan_id, min_soft_delete_days, soft_delete_days) VALUES ("
         "'2026-09-01-p12/20260901T000000Z', 'gs://b/runs/j1', '2026-09-01', 0, 0, 'me@x', "
         f"'dry', {T0}, NULL, 0, 0, 0, 0, 0, 0, NULL, 'gs://b/runs/j1', "
-        f"'{E1}', 12)",
+        f"'{E1}', 12, 7, NULL)",
         "acct", "tok",
     )]
 

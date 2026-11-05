@@ -3,7 +3,7 @@
 // the server's off answer — then `install`'s wiring over a fake page, and the
 // boot shim following the admin switch (against the real endpoint).
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { bodySummary, FILTER_DEBOUNCE_MS, FLUSH_MS, install, Logger, type Page, redactUrl, RESIZE_DEBOUNCE_MS } from './sessionLog'
+import { bodySummary, FILTER_DEBOUNCE_MS, FLUSH_MS, install, LEAVE_MS, Logger, type Page, redactUrl, RESIZE_DEBOUNCE_MS } from './sessionLog'
 import { LIMITS, type SlogBatch } from '../functions/_lib/sessionLogShape'
 import { onRequest } from '../functions/api/session-log/[[path]]'
 import { gateFor } from '../functions/_lib/auth'
@@ -206,12 +206,11 @@ describe('install', () => {
     vi.advanceTimersByTime(FILTER_DEBOUNCE_MS)
     // A <select>.
     fire(doc, 'change', Object.assign(el('select', { 'aria-label': 'assign owner' }), { value: 'ann' }))
-    // Fetches: a hit, a 503 with an error code, a POST (body summarized), a network failure, the log's own endpoint.
+    // Fetches: a hit, a 503 with an error code, a POST (body summarized), the log's own endpoint.
     await win.fetch('/api/subtree?d=2026-10-10&key=SEKRIT')
     tick(40)
     await win.fetch('/api/diff?a=1')
     await win.fetch('/api/actions', { method: 'POST', body: JSON.stringify({ items: ['a', 'b'], kind: 'assign', memo: 'x' }) })
-    await win.fetch('/api/down').catch(() => {})
     await win.fetch('/api/session-log', { method: 'POST', body: '{}' })
     await vi.runOnlyPendingTimersAsync()
     // Errors.
@@ -241,7 +240,6 @@ describe('install', () => {
       { dt: 1100, k: 'api', u: '/api/subtree?d=2026-10-10&key=…', s: 200, ms: 0, c: 'HIT', qe: 'pyrmts' },
       { dt: 1100, k: 'api', m: 'POST', u: '/api/actions', b: { items: 2, kind: 'assign', memo: 'string' }, s: 200, ms: 0 },
       { dt: 1100, k: 'api', u: '/api/diff?a=1', s: 503, ms: 0, err: 'phase2 timeout' },
-      { dt: 1100, k: 'api', u: '/api/down', s: 0, ms: 0, err: 'TypeError: Failed to fetch' },
       { dt: 1100, k: 'error', msg: 'Uncaught Error: kaboom', src: '/assets/index.js?key=…:1:2', st: err.stack },
       { dt: 1100, k: 'reject', msg: 'nope' },
       { dt: 1100, k: 'console', msg: 'Warning: Error: bad prop' },
@@ -255,6 +253,22 @@ describe('install', () => {
     win.history.pushState(null, '', '/c')
     fire(win, 'pagehide')
     expect(sent.length).toBe(1)
+  })
+
+  it('a fetch the leaving page killed is a cancel, not an error; one that fails with the page staying is an error', async () => {
+    const { logger, sent } = rig()
+    const { p, win } = page()
+    install(p, logger)
+    const failures = () => sent.flatMap(s => s.batch.events).filter(e => e.k === 'api').map(e => [e.u, e.err])
+    // A link click starts a full navigation: the browser fails the page's fetches first, and the page hides only after.
+    await win.fetch('/api/down?left').catch(() => {})
+    fire(win, 'pagehide')
+    expect(failures()).toEqual([['/api/down?left', 'abort']])
+    // No navigation follows: the failure is real, reported once the page has had its chance to leave.
+    await win.fetch('/api/down?stayed').catch(() => {})
+    await vi.advanceTimersByTimeAsync(LEAVE_MS)
+    logger.flush(true)
+    expect(failures()).toEqual([['/api/down?left', 'abort'], ['/api/down?stayed', 'TypeError: Failed to fetch']])
   })
 
   it('a pending filter edit is committed by the page-hide flush', () => {
