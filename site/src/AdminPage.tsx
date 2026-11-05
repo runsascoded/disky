@@ -10,6 +10,7 @@ import { useDocTitle } from './title'
 import { PreviewLinks } from './PreviewLinks'
 import { SessionLogSwitch } from './SessionLogSwitch'
 import { ActivityKinds } from './ActivityKinds'
+import { SweepSoftDelete } from './SweepSoftDelete'
 import { NO_AUTOFILL } from './noAutofill'
 
 // Share-link console (staff-only; the backend enforces the `admin` scope on
@@ -628,6 +629,7 @@ export function AdminPage() {
       <PreviewLinks />
       <ActivityKinds />
       <SessionLogSwitch />
+      {DEFAULT_STORE.executor === 'sweep' && <SweepSoftDelete />}
     </main>
   )
 }

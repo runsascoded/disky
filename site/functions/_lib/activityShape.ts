@@ -76,6 +76,7 @@ export function serverKind(method: string, path: string): string | null {
   if (path === '/api/actions') return 'assign'
   if (path === '/api/annotations') return 'note'
   if (path.startsWith('/api/plans')) return 'stage'
+  if (path === '/api/sweep/settings') return 'admin'
   if (/^\/api\/(plan-)?sweep\//.test(path)) return 'deletion'
   if (path === '/api/token') return 'token'
   if (path === '/api/auth/profile' || path === '/api/auth/avatar') return 'profile'

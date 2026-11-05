@@ -20,6 +20,7 @@ import { boolParam, stringParam, useUrlState } from 'use-prms'
 import { SiteNav } from './SiteNav'
 import { SiteKbd } from './SiteKbd'
 import { Tooltip } from './Tooltip'
+import { UndoTerms } from './SweepSoftDelete'
 import { Treemap } from './Treemap'
 import { UserChip, canonId, shortName } from './UserChip'
 import { ownerShares } from './OwnerBar'
@@ -589,6 +590,7 @@ export function StagedPage() {
                       : <>No dry run of exactly this selection at scan <code>{runScan}</code>: deletes from a fresh manifest, with no dry run. A directory that gained new writes since the scan still has its older staged files deleted, and the new files survive; a dry run would report that directory as drift instead.</>}
                 </p>
               )}
+              {armed && DEFAULT_STORE.executor === 'sweep' && <UndoTerms buckets={[...new Set(runRows.map(r => prefixToPath(r.prefix).split('/')[0]))]} />}
               {armed && (
                 <ul className="dispatch-confirm-list" aria-label="To be deleted">
                   {runRows.map(r => <li key={r.prefix}><code>{r.prefix}</code>{r.stat && <span className="dim"> · {fmtBytes(r.stat.b)}</span>}</li>)}

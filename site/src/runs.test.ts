@@ -189,6 +189,10 @@ describe('runControls — per executor capabilities', () => {
   const view = (r: DeletionRun, j?: Partial<ExecJob>, ops: ExecJob[] = []) => ({ key: r.run_id, run: r, ...(j ? { job: job({ job_id: GCS_JOB, ...j }) } : {}), ops })
   const gcs = EXEC_CAPS.sweep
   const cw = EXEC_CAPS['plan-sweep']
+  it('a run with soft delete off offers no undo, on gcs or to an admin', () => {
+    const off = run({ mode: 'real', finished_ts: 2000, undo_deadline: null, undo_state: 'none', soft_delete_days: 0 })
+    expect(runControls(view(off), gcs, true, 2500)).toEqual({ stop: false, undo: false, purge: false, undoing: false })
+  })
   it('a run closed from what it wrote offers undo: its window is set', () => {
     const killed = run({ mode: 'real', finished_ts: 2000, plan_digest: '', undo_deadline: 3000, undo_state: 'none' })
     expect(runControls(view(killed, { state: 'FAILED' }), gcs, true, 2500)).toEqual({ stop: false, undo: true, purge: false, undoing: false })

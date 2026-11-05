@@ -16,6 +16,8 @@ import type { RunOutcome } from '../../src/runs.js'
 import { type FinishedRun, type Gate, planDigest, planItemLines, planRuns, realGate, type RunRow, unstageDeleted } from './plans.js'
 import { slackApi, slackPeople, type SlackPerson, slackReady, type SlackEnv, type SlackResult } from './slack.js'
 import type { Env } from './auth.js'
+import { minSoftDeleteDays } from './sweepSettings.js'
+import { runHasNoUndo, slackUndoTerms } from '../../src/softDelete.js'
 import { pathScans, storeReady } from './index.js'
 import { MAX_PREFIXES, type PrefixStat, prefixesAt } from './prefixes.js'
 import { expDay, IMAGE_TTL_DAYS, imagePath, ogKey } from './og/sign.js'
@@ -65,6 +67,8 @@ export interface ParentView {
   /** What is still queued: the items no real run has deleted (the title and
    *  "staged by"; the gate and the confirm stay on the whole plan). */
   queued?: { items: number; batches: number; stagers: string[] }
+  /** The sweep's soft-delete minimum, what the confirm can promise. Absent: no such guard (`plan-sweep`, whose undo is its own 7-day hold). */
+  minSoftDeleteDays?: number
   /** Unix seconds: whether a real run is still undoable (default: now). */
   now?: number
   /** What the last real run's run dir says of its totals (`lastRunOutcome`); absent or null: nothing to add. */
@@ -108,6 +112,10 @@ export function sizeNotes(z: Sized): string[] {
 /** The plan's newest real run. */
 const lastRealRun = (runs: readonly RunRow[]): RunRow | undefined => [...runs].filter(r => r.mode === 'real').sort((a, b) => b.started_ts - a.started_ts)[0]
 
+/** What a real run's event says of undo: its window, that it has none, or (no record either way) nothing. */
+const undoNote = (r: RunRow): string =>
+  r.undo_deadline ? `; undoable until ${utc(r.undo_deadline)} (www)` : runHasNoUndo(r) ? '; no undo (soft delete off)' : ''
+
 /** The thread's parent message: `{ text, blocks }` for chat.postMessage / chat.update. */
 export function renderParent(v: ParentView): { text: string; blocks: unknown[] } {
   const q = v.queued ?? { items: v.items, batches: v.batches, stagers: v.stagers }
@@ -139,7 +147,7 @@ export function renderParent(v: ParentView): { text: string; blocks: unknown[] }
         text: { type: 'plain_text', text: 'Delete for real…' },
         confirm: {
           title: { type: 'plain_text', text: 'Really delete?' },
-          text: { type: 'mrkdwn', text: `Deletes the ${fmtN(v.items)} staged ${v.items === 1 ? 'prefix' : 'prefixes'}: ${fmtBytes(gate.dry.deleted_bytes)} / ${fmtN(gate.dry.deleted_objects)} objects per the dry-run on scan ${gate.dry.scan}. Recoverable for 7 days (undo in www).` },
+          text: { type: 'mrkdwn', text: `Deletes the ${fmtN(v.items)} staged ${v.items === 1 ? 'prefix' : 'prefixes'}: ${fmtBytes(gate.dry.deleted_bytes)} / ${fmtN(gate.dry.deleted_objects)} objects per the dry-run on scan ${gate.dry.scan}. ${v.minSoftDeleteDays === undefined ? 'Recoverable for 7 days (undo in www).' : slackUndoTerms(v.minSoftDeleteDays)}` },
           confirm: { type: 'plain_text', text: 'Delete' },
           deny: { type: 'plain_text', text: 'Cancel' },
           style: 'danger',
@@ -350,20 +358,20 @@ export function runEvent(r: RunRow, phase: 'dispatched' | 'finished' | 'failed',
   if (phase === 'failed' && o.outcome?.totals) {
     const verb = o.outcome.attempted ? 'attempted' : 'deleted'
     const size = `*${fmtBytes(r.deleted_bytes)}* / ${fmtN(r.deleted_objects)} objects`
-    const until = r.undo_deadline ? `; undoable until ${utc(r.undo_deadline)} (www)` : ''
+    const until = undoNote(r)
     const why = o.reason ? ` (\`${o.reason.replace(/`/g, "'").replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')}\`)` : ''
     if (o.outcome.totals === 'exact') return `:warning: ${kind} ${id} ended unsuccessfully${why}: ${verb} ${size}${until}.${skipsLine(o.outcome)}`
     const said = o.outcome.totals === 'lower-bound'
       ? `: ${verb} at least ${size}, from its progress files, which can lag what it did`
       : `, and what it wrote couldn't be read, so it may have deleted more than its recorded ${size}`
-    return `:warning: ${kind} ${id} ended before recording its end${why}${said}${until}. Undo restores only what its log names.`
+    return `:warning: ${kind} ${id} ended before recording its end${why}${said}${until}.${runHasNoUndo(r) ? '' : ' Undo restores only what its log names.'}`
   }
   if (phase === 'failed' && o.reason) return `:x: ${kind} ${id} ended without a result: \`${o.reason.replace(/`/g, "'").replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')}\``
   if (phase === 'failed') return `:x: ${kind} ${id} ended without a result (its Batch job stopped before the run summary); check its logs in www.`
   const skips = skipsLine(o.outcome)
   if (r.mode === 'dry') return `:test_tube: Dry-run ${id} finished: would delete *${fmtBytes(r.deleted_bytes)}* / ${fmtN(r.deleted_objects)} objects (gone since scan: ${fmtN(r.skipped_gone)}, overwritten: ${fmtN(r.skipped_overwritten)}).${skips}`
-  if (o.outcome?.unread) return `:warning: Real deletion ${id} finished, totals unread: recorded *${fmtBytes(r.deleted_bytes)}* / ${fmtN(r.deleted_objects)} objects${r.undo_deadline ? `; undoable until ${utc(r.undo_deadline)} (www)` : ''}.`
-  return `${skips ? ':warning:' : ':white_check_mark:'} Real deletion ${id} finished: ${o.outcome?.attempted ? 'attempted' : 'deleted'} *${fmtBytes(r.deleted_bytes)}* / ${fmtN(r.deleted_objects)} objects${r.undo_deadline ? `; undoable until ${utc(r.undo_deadline)} (www)` : ''}.${skips}`
+  if (o.outcome?.unread) return `:warning: Real deletion ${id} finished, totals unread: recorded *${fmtBytes(r.deleted_bytes)}* / ${fmtN(r.deleted_objects)} objects${undoNote(r)}.`
+  return `${skips ? ':warning:' : ':white_check_mark:'} Real deletion ${id} finished: ${o.outcome?.attempted ? 'attempted' : 'deleted'} *${fmtBytes(r.deleted_bytes)}* / ${fmtN(r.deleted_objects)} objects${undoNote(r)}.${skips}`
 }
 
 /** No claim that anything is deleted: an XML reply can't prove it, and a run with skips left objects under its prefixes. */
@@ -382,7 +390,7 @@ export function queueWasEmpty(items: readonly string[], fresh: ReadonlySet<strin
 
 /** `GCP_SA_KEY` = the deployment can dispatch (either executor), so the
  * parent message offers the dispatch buttons. */
-export type NotifyEnv = SlackEnv & { GCP_SA_KEY?: string }
+export type NotifyEnv = SlackEnv & { GCP_SA_KEY?: string; EXECUTOR?: string }
 
 /** A stager's stages within this many seconds of their reply's last update
  *  edit that reply instead of posting a new one. */
@@ -702,7 +710,7 @@ export async function notifyPlan(env: NotifyEnv, db: D1Database, planId: number,
       // Sized, prefixes empty at the scan leave the title's counts (the size line names them apart).
       const last = lastRealRun(v.runs)
       const lastOutcome = last?.finished_ts ? await lastRunOutcome(full)?.(last) : null
-      const parent = renderParent({ ...v, lastOutcome, queued: queuedOf(countedItems(v.live, v.deleted, at?.stats ?? null)), names, size, image: await stagedCardUrl(env, db, siteUrl, v.digest) ?? undefined })
+      const parent = renderParent({ ...v, ...(env.EXECUTOR === 'sweep' ? { minSoftDeleteDays: await minSoftDeleteDays(db) } : {}), lastOutcome, queued: queuedOf(countedItems(v.live, v.deleted, at?.stats ?? null)), names, size, image: await stagedCardUrl(env, db, siteUrl, v.digest) ?? undefined })
       return { at, people, names, parent }
     }
     const { at, people, names, parent } = await render(v)

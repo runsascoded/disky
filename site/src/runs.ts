@@ -21,6 +21,10 @@ export interface DeletionRun {
   drift_dirs?: number
   ledger_drift_dirs?: number
   undo_deadline: number | null
+  /** The minimum this run ran under, and the narrowest retention measured on its buckets (0: no undo). Null, or absent on a D1
+   * from before the columns: not recorded (that image required 7 days). */
+  min_soft_delete_days?: number | null
+  soft_delete_days?: number | null
   undo_state: string
   purge_state?: string
   log_dir?: string

@@ -22,6 +22,8 @@ export interface UndoRunRow {
   undo_state: string
   undo_deadline: number | null
   buckets: string | null
+  /** The narrowest retention measured on its buckets (absent: a D1 from before the column). */
+  soft_delete_days?: number | null
 }
 
 /** May `row` be undone at `now`? Null = yes, else the refusal. */
@@ -30,6 +32,7 @@ export function undoGate(row: UndoRunRow | null, now: number): DispatchErr | nul
   if (row.mode !== 'real') return refuse(400, 'only real runs can be undone (a dry run deleted nothing)')
   if (row.finished_ts == null) return refuse(409, 'the run is still in progress; stop it first, undo once it has recorded its end')
   if (row.undo_state === 'full') return refuse(409, 'already undone')
+  if (row.soft_delete_days === 0) return refuse(409, 'no undo: a bucket in this run had soft delete off, so what it deleted there is gone for good')
   if (row.undo_deadline == null) return refuse(409, 'the run recorded no undo window')
   if (now >= row.undo_deadline) return refuse(409, 'undo window closed (the soft-delete retention has passed)')
   return null
@@ -61,7 +64,7 @@ export async function undoSweepRun(
   if (!RUN_ID_RE.test(runId)) return refuse(400, 'bad run_id')
   const db = env.DB
   const row = await db.prepare(
-    'SELECT run_id, mode, finished_ts, undo_state, undo_deadline, buckets FROM deletion_runs WHERE run_id = ?',
+    'SELECT * FROM deletion_runs WHERE run_id = ?',
   ).bind(runId).first<UndoRunRow>()
   const no = undoGate(row, Math.floor(now.getTime() / 1000))
   if (no) return no

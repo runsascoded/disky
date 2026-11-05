@@ -8,7 +8,8 @@
 //     "just finished" edge the Slack thread announces.
 //   - a real job Batch reports terminal while its row is still open (killed, or its final
 //     `record_run` failed) closes with what its run dir says (`sweepTotals.ts`) and an undo window
-//     from the job's end (specs/done/sweep-killed-run-totals.md).
+//     from the job's end (specs/done/sweep-killed-run-totals.md): the retention its start row measured,
+//     none at 0, 7 days on a row from before that was recorded (its image required them).
 //   - a dry job Batch reports terminal while its row is still open (the executor
 //     died before recording the end) is closed, with the empty digest: it
 //     reviewed nothing, so it never opens the real gate.
@@ -51,6 +52,10 @@ export interface SweepBatchJob {
 export const isSweepJob = (j: { name: string }): boolean => /\/jobs\/gcs-sweep-(dry|real)-/.test(j.name)
 /** An undo of a run (`api/sweep/undo`; `TARGET_RUN` in its env). */
 export const isUndoJob = (j: { name: string }): boolean => /\/jobs\/gcs-undo-/.test(j.name)
+/** A killed real run's undo deadline, from the retention its start row recorded. */
+const killedDeadline = (ended: number, softDeleteDays: number | null | undefined): number | null =>
+  softDeleteDays == null ? ended + HOLD_SECS : softDeleteDays > 0 ? ended + softDeleteDays * 86400 : null
+
 export const jobIdOf = (j: { name: string }): string => j.name.slice(j.name.lastIndexOf('/') + 1)
 
 /** Every Batch job in each region a sweep can be dispatched to, newest first.
@@ -98,9 +103,9 @@ export async function reflectSweepRuns(
     ).bind(j.status?.state === 'SUCCEEDED' ? digest : '', logDir).all<{ run_id: string }>()
     for (const { run_id } of finished.results) await finish(run_id, j, j.status?.state === 'SUCCEEDED')
     const killed = await db.prepare(
-      "SELECT run_id, buckets FROM deletion_runs WHERE log_dir = ? AND finished_ts IS NULL AND mode = 'real'",
-    ).bind(logDir).all<{ run_id: string; buckets: string | null }>()
-    for (const { run_id, buckets } of killed.results) {
+      "SELECT * FROM deletion_runs WHERE log_dir = ? AND finished_ts IS NULL AND mode = 'real'",
+    ).bind(logDir).all<{ run_id: string; buckets: string | null; soft_delete_days?: number | null }>()
+    for (const { run_id, buckets, soft_delete_days } of killed.results) {
       const read = await totals?.(jobIdOf(j), buckets) ?? null
       const updated = j.updateTime ? Math.floor(Date.parse(j.updateTime) / 1000) : now
       const ended = Math.min(now, updated)
@@ -109,7 +114,7 @@ export async function reflectSweepRuns(
       const closed = await db.prepare(`
         UPDATE deletion_runs SET finished_ts = ?, plan_digest = ?, undo_deadline = ?, deleted_objects = ?, deleted_bytes = ?, skipped_gone = ?, skipped_overwritten = ?, drift_dirs = ?
         WHERE run_id = ? AND finished_ts IS NULL RETURNING run_id
-      `).bind(ended, ok ? digest : '', ended + HOLD_SECS, read?.deleted_objects ?? 0, read?.deleted_bytes ?? 0, read?.skipped_gone ?? 0, read?.skipped_overwritten ?? 0, read?.drift_dirs ?? 0, run_id).all<{ run_id: string }>()
+      `).bind(ended, ok ? digest : '', killedDeadline(ended, soft_delete_days), read?.deleted_objects ?? 0, read?.deleted_bytes ?? 0, read?.skipped_gone ?? 0, read?.skipped_overwritten ?? 0, read?.drift_dirs ?? 0, run_id).all<{ run_id: string }>()
       if (!closed.results.length) continue
       const why = ok ? null : await reason?.(jobIdOf(j)) ?? null
       const result = await outcome?.(jobIdOf(j)) ?? { attempted: false, skipped: null, notSwept: [] }

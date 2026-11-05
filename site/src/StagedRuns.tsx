@@ -34,6 +34,7 @@ import {
   type PlanSummaryFile, plannedOf, progressEstimate, type ProgressFile, runControls, runFileHref, runFilesRel, runLabel, type RunView, sumProgress, type Tally,
   verifyRun, viewBuckets, viewLive, viewState, joinRuns,
 } from './runs'
+import { RUN_NO_UNDO, runHasNoUndo } from './softDelete'
 
 const PAGE_SIZES = [20, 50, Infinity]
 const utc = (ts: number): string => new Date(ts * 1000).toISOString().slice(0, 16).replace('T', ' ')
@@ -241,6 +242,8 @@ export function RunsSection({ runs, jobs, configured, jobsError, admin, busy, ac
                         <Tooltip content={`${utc(r.undo_deadline)} UTC`}>
                           <span className={now >= r.undo_deadline ? 'dim' : undefined}>{now >= r.undo_deadline ? 'closed' : fmtDur(r.undo_deadline - now)}</span>
                         </Tooltip>
+                      ) : r && runHasNoUndo(r) ? (
+                        <Tooltip content={RUN_NO_UNDO}><span>none</span></Tooltip>
                       ) : <span className="dim">—</span>}
                     </td>
                     <td className="nb links">
@@ -337,8 +340,9 @@ export function RunDetail({ run, live, progress, dir, planned, fmtBytes, now }: 
         {review && Object.keys(review.as_of ?? {}).length > 0 && <div><dt>review cutoffs</dt><dd>{[...new Set(Object.values(review.as_of))].sort().join(' · ')}</dd></div>}
         {analytics.data?.result && <div><dt>failed deletions</dt><dd>{analytics.data.result.delete_failed == null ? 'not recorded' : fmtN(analytics.data.result.delete_failed)}</dd></div>}
         <div><dt>scan</dt><dd>{r.scan ?? '—'}{r.plan_digest ? <> · items <code>{r.plan_digest}</code></> : null}</dd></div>
+        {r.min_soft_delete_days != null && <div><dt>soft-delete minimum</dt><dd>{r.min_soft_delete_days}d{r.soft_delete_days != null && <> · narrowest bucket {r.soft_delete_days}d</>}</dd></div>}
         {r.mode === 'real' && !CAPS.undoUnwindowed && <div><dt>undo</dt><dd>
-          {r.undo_deadline ? <>recorded run deadline {utc(r.undo_deadline)} UTC {now < r.undo_deadline ? <span className="dim">(in {fmtDur(r.undo_deadline - now)})</span> : <span className="dim">(closed)</span>}</> : live ? 'recovery after stop and drain; final deadline not recorded yet' : 'no window recorded'}
+          {runHasNoUndo(r) ? <b>none</b> : r.undo_deadline ? <>recorded run deadline {utc(r.undo_deadline)} UTC {now < r.undo_deadline ? <span className="dim">(in {fmtDur(r.undo_deadline - now)})</span> : <span className="dim">(closed)</span>}</> : live ? 'recovery after stop and drain; final deadline not recorded yet' : 'no window recorded'}
           {' · '}state <b>{r.undo_state}</b>{r.purge_state && r.purge_state !== 'none' && <> · purge <b>{r.purge_state}</b></>}{lower && <span className="dim"> · {UNDO_LOG_ONLY}</span>}
         </dd></div>}
         {r.log_dir && <div><dt>run dir</dt><dd><code>{r.log_dir}</code></dd></div>}
@@ -363,7 +367,10 @@ export function RunDetail({ run, live, progress, dir, planned, fmtBytes, now }: 
       {planned && dir && <RunBucketProgress planned={planned} dir={dir} live={live} log={log} fmtBytes={fmtBytes} dry={r.mode === 'dry'} bands={bands} />}
       {r.mode === 'real' && <section id="recovery" className="rd-recovery">
         <h4>Recovery</h4>
-        {CAPS.undoUnwindowed ? <p>Recovery depends on the bucket’s versioning and retention settings. This deletion may be permanent; a recorded run deadline does not guarantee recovery.</p> : <>
+        {CAPS.undoUnwindowed ? <p>Recovery depends on the bucket’s versioning and retention settings. This deletion may be permanent; a recorded run deadline does not guarantee recovery.</p> : runHasNoUndo(r) ? <>
+        <p>{RUN_NO_UNDO} A bucket that retained its soft deletes (per bucket, below) can still be restored from the CLI.</p>
+        <code>dt-cloud sweep undo -b BUCKET {r.run_id}</code>
+        </> : <>
         <p>{live ? 'Stop and drain this run before restoring. Its committed decision logs retain exact generations; a restore during deletion could be deleted again.' : 'The web undo control restores the entire run. The CLI can restrict recovery to a selected prefix.'}</p>
         <p className="dim">Retention starts separately when each object is deleted, not at run completion. Empty at a scan does not establish that this run deleted it.{conservativeDeadline(r) != null && <> Conservative cutoff for this run: {utc(conservativeDeadline(r)!)} UTC. Later deletions may remain recoverable longer; the stored run deadline is not an object-level guarantee.</>}{attempted && <> Undo restores every logged generation. {UNDO_CAVEAT}</>}</p>
         <code>dt-cloud sweep undo -p gs://BUCKET/PREFIX/ {r.run_id}</code>
