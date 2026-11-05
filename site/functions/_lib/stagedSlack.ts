@@ -664,7 +664,7 @@ async function announceStage(env: SlackEnv, db: D1Database, o: { channel: string
   }
 }
 
-/** How many times a notify re-renders a thread its queue has moved past. Each stage has its own notify, so it needn't chase a stream. */
+/** A cost bound on how many times one notify re-renders a thread, not something correctness rests on: a change it misses has its own notify, which sends later and checks again. */
 const SETTLE_ROUNDS = 3
 
 /** Re-render the plan's parent message (posting it first if the plan has
@@ -696,7 +696,7 @@ export async function notifyPlan(env: NotifyEnv, db: D1Database, planId: number,
         const k = e.toLowerCase()
         const r = people[k] ? undefined : registryPerson(reg, e)
         if (r) people[k] = r
-    }
+      }
       const names: Names = Object.fromEntries(Object.entries(people).flatMap(([e, p]) => p.name ? [[e, p.name]] : []))
       const size = at ? sizeOf(at, queued, u => reg[u]?.name ?? u) : undefined
       // Sized, prefixes empty at the scan leave the title's counts (the size line names them apart).
