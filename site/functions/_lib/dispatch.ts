@@ -33,6 +33,9 @@ export interface DispatchReq {
   siteUrl: string
   /** gcs only: a `-b` cut of the plan's buckets (empty/absent = all). */
   buckets?: string[]
+  /** `sweep` only, real runs: the soft-delete minimum the person confirming was shown (absent: 7, an old card or an API client).
+   *  A lower current minimum refuses the run (`softDelete.weakerThanShown`). */
+  shownMinSoftDeleteDays?: number
   /** gcs only: the executor's machine (`SWEEP_MACHINES`; absent = the default). */
   machine?: 'n2-highmem-8' | 'n2-highmem-32'
 }

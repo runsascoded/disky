@@ -316,7 +316,7 @@ CREATE TABLE deletion_runs (
   undo_state TEXT NOT NULL DEFAULT 'none' CHECK (undo_state IN ('none', 'partial', 'full', 'expired')),
   log_dir TEXT NOT NULL
 , buckets TEXT, plan_id INTEGER REFERENCES plans(id), purge_state TEXT NOT NULL DEFAULT 'none'
-  CHECK (purge_state IN ('none', 'pending', 'done')), plan_digest TEXT);
+  CHECK (purge_state IN ('none', 'pending', 'done')), plan_digest TEXT, min_soft_delete_days INTEGER, soft_delete_days INTEGER);
 
 CREATE TABLE deletion_bands (
   run_id TEXT NOT NULL REFERENCES deletion_runs(run_id),
@@ -483,6 +483,13 @@ CREATE TABLE plan_items (
   added_by TEXT NOT NULL,
   added_ts INTEGER NOT NULL, batch_id INTEGER REFERENCES stage_batches(id), as_of TEXT, kind TEXT CHECK (kind IS NULL OR kind = 'object'),
   PRIMARY KEY (plan_id, prefix)
+);
+
+CREATE TABLE sweep_settings (
+  id                   INTEGER PRIMARY KEY CHECK (id = 1),
+  min_soft_delete_days INTEGER NOT NULL CHECK (min_soft_delete_days BETWEEN 0 AND 90),
+  updated_by           TEXT NOT NULL,
+  updated_at           INTEGER NOT NULL
 );
 
 CREATE TABLE user_emails (

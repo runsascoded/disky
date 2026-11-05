@@ -654,6 +654,10 @@ export interface RunRow {
   skipped_overwritten: number
   plan_digest: string | null
   undo_deadline?: number | null
+  /** The narrowest retention measured on its buckets. 0: no undo (`runHasNoUndo`). */
+  soft_delete_days?: number | null
+  /** The minimum it ran under. */
+  min_soft_delete_days?: number | null
   log_dir?: string | null
 }
 

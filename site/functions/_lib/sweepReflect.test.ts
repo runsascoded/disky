@@ -92,11 +92,11 @@ describe('D1', () => {
     })
     describe('a real run with a start row and no end record closes from what it wrote', () => {
       const id = 'gcs-sweep-real-killed'
-      const opened = async () => {
+      const opened = async (softDeleteDays: number | null = null, minSoftDeleteDays: number | null = null) => {
         const { db, raw } = await sqliteD1()
         raw.exec("INSERT INTO plans (id,name,created_by,created_ts) VALUES (1,'review','actor',1)")
-        await db.prepare(`INSERT INTO deletion_runs (run_id,plan_id,${RUN_DIR},scan,head,exec_head,actor,mode,started_ts,log_dir,buckets)
-          VALUES ('r',1,'manifest','scan',0,0,'actor','real',100,?,'b1,b2')`).bind(runDir(CFG, id)).run()
+        await db.prepare(`INSERT INTO deletion_runs (run_id,plan_id,${RUN_DIR},scan,head,exec_head,actor,mode,started_ts,log_dir,buckets,soft_delete_days,min_soft_delete_days)
+          VALUES ('r',1,'manifest','scan',0,0,'actor','real',100,?,'b1,b2',?,?)`).bind(runDir(CFG, id), softDeleteDays, minSoftDeleteDays).run()
         const row = () => raw.prepare('SELECT finished_ts,deleted_objects,deleted_bytes,skipped_gone,skipped_overwritten,drift_dirs,undo_deadline,plan_digest FROM deletion_runs').all()
         return { db, row }
       }
@@ -104,6 +104,20 @@ describe('D1', () => {
       const ZEROS = { deleted_objects: 0, deleted_bytes: 0, skipped_gone: 0, skipped_overwritten: 0, drift_dirs: 0 }
       const WEEK = 7 * 86400
       const ATTEMPTED = async () => ({ attempted: true, skipped: null, notSwept: [] })
+      it.each<[string, number | null, number | null, number | null]>([
+        ['soft delete off: no window', 0, 0, null],
+        ['the retention it measured', 14, 7, SOON + 14 * 86400],
+        ['a row from before the columns: its image required 7 days', null, null, SOON + 7 * 86400],
+        // `sweep execute` measures bucket by bucket, so its start row holds only what it required.
+        ['nothing measured, 3 days required: those', null, 3, SOON + 3 * 86400],
+        ['nothing measured, 14 days required: those', null, 14, SOON + 14 * 86400],
+        ['nothing measured, nothing required: no window', null, 0, null],
+      ])('the undo deadline: %s', async (_, softDeleteDays, minSoftDeleteDays, deadline) => {
+        const { db, row } = await opened(softDeleteDays, minSoftDeleteDays)
+        const killed = { ...job(id, 'FAILED', 'D'), updateTime: new Date(SOON * 1000).toISOString() }
+        await reflectSweepRuns(CFG, db, [killed], SOON, undefined, RUN_DIR, ATTEMPTED, async () => ({ ...TOTALS, exact: false }))
+        expect(row()).toEqual([{ finished_ts: SOON, ...TOTALS, undo_deadline: deadline, plan_digest: '' }])
+      })
       it('its progress sums: a lower bound, with an undo window from the job\'s end', async () => {
         const { db, row } = await opened()
         const asked: unknown[] = []

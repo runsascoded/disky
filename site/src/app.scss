@@ -1583,6 +1583,15 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); opacity: 1; }
 
   h1 { margin-bottom: 8px; }
 
+  .sweep-soft-delete {
+    margin-top: 24px;
+    .status { font-weight: 600; }
+    form { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+    input[type='number'] { width: 5em; }
+    .warn { color: var(--danger); font-weight: 600; }
+    .sweep-soft-delete-buckets { margin-top: 4px; td, th { padding: 2px 16px 2px 0; text-align: left; } }
+  }
+
   .session-log-switch {
     margin-top: 24px;
     .status { font-weight: 600; }

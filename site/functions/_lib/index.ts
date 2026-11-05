@@ -2829,7 +2829,7 @@ const IV_LEVEL_COLS = ['depth', 'path', 'ts', 'name', 'op', 'kind', 'kind_prev',
 /** The columns a level page is kept by (each with a ColumnIndex). */
 const LEVEL_PLAN = ['depth', 'path', 'ts'] as const
 
-/** One transition of a child (`name`; '' the directory itself) under directory `path` at stamp `ts`: `op` 0 appeared,
+/** One transition of a child (`name`; '' the directory itself, `/` a child whose last segment is empty: `levelChild`) under directory `path` at stamp `ts`: `op` 0 appeared,
  *  1 changed, 2 went away; its values after (`kind`, `size`, `n_files`; a closing's `kind` the version that ended) and
  *  before (`kindPrev` null where absent), its cumulative churn after (`churnCum`) and at its previous transition
  *  (`churnPrev`). */

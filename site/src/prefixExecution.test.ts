@@ -6,6 +6,12 @@ const prefix = 'gs://b/a/'
 const record: PrefixBandRecord = { prefix, run_id: 'real', started_ts: 100, finished_ts: 200, undo_deadline: 800, undo_state: 'none', bytes: 50, objects: 5, gone: 0, overwritten: 0, drift_new_objects: 0, undone_objects: 0 }
 const progress: ProgressFile = { roots: 1, roots_done: 0, decisions: { delete: 10 }, delete_bytes: 100, started: '2026-10-05T00:00:00Z', updated: '2026-10-05T00:00:30Z', done: false }
 
+it('a finished run with no window says so, a running one has not said yet', () => {
+  const noWindow = { ...record, undo_deadline: null }
+  expect(prefixExecution(prefix, [noWindow], undefined, 300)).toEqual({ kind: 'recorded', runId: 'real', objects: 5, bytes: 50, preserved: 0, undone: 0, deadline: null, expired: false, noUndo: true })
+  expect(prefixExecution(prefix, [{ ...noWindow, finished_ts: null }], undefined, 300)).toEqual({ kind: 'recorded', runId: 'real', objects: 5, bytes: 50, preserved: 0, undone: 0, deadline: null, expired: false })
+})
+
 it('does not mistake bucket progress for exact prefix counts or subtract it from a scan', () => {
   expect(prefixExecution(prefix, [], { runId: 'live', progress }, 300)).toEqual({ kind: 'live-bucket', runId: 'live', done: false })
   expect(prefixExecution(prefix, [], { runId: 'live', progress: { ...progress, done: true } }, 300)).toEqual({ kind: 'live-bucket', runId: 'live', done: true })

@@ -23,7 +23,7 @@ import { dispatchPlan, type ExecEnv, executorOf, notifyDispatched } from '../_li
 import { pathScans, withPathStore } from '../_lib/index.js'
 import { audit } from '../_lib/plans.js'
 import { slackUserEmail, verifySlackSignature } from '../_lib/slack.js'
-import { notifyPlan, planGate, slackNames, updateReplies } from '../_lib/stagedSlack.js'
+import { notifyPlan, parseDispatchButton, planGate, slackNames, updateReplies } from '../_lib/stagedSlack.js'
 
 type Env = AuthEnv & ExecEnv
 interface PagesCtx { request: Request; env: Env; waitUntil: (p: Promise<unknown>) => void }
@@ -88,9 +88,9 @@ async function handle(env: Env, p: BlockActions, siteUrl: string): Promise<void>
   if (!env.GCP_SA_KEY) return tell(p.response_url, 'Dispatch is not configured for this deployment; use www.')
   if (!admin) return tell(p.response_url, 'Only admins can dispatch runs.')
   const kind = executorOf(env)
-  const [planId, clickedDigest] = (a.value ?? '').split(':')
-  const id = Number(planId)
-  if (!Number.isInteger(id)) return tell(p.response_url, 'Bad button value.')
+  const clicked = parseDispatchButton(a.value ?? '')
+  if (!clicked) return tell(p.response_url, 'Bad button value.')
+  const id = clicked.planId
   const g = await planGate(db, id)
   if (!g) return tell(p.response_url, 'That plan no longer exists.')
   if (g.closed) return tell(p.response_url, 'That plan is closed.')
@@ -105,10 +105,14 @@ async function handle(env: Env, p: BlockActions, siteUrl: string): Promise<void>
     mode = 'real'
     // The gate itself (and the dry-run's scan) is the executor seam's; this
     // only refuses a button drawn for an older item set.
-    if (clickedDigest !== g.digest) return tell(p.response_url, 'Not deleting: the plan changed after that button was drawn. Check the updated message.')
+    if (clicked.digest !== g.digest) return tell(p.response_url, 'Not deleting: the plan changed after that button was drawn. Check the updated message.')
   }
-  const r = await dispatchPlan(env, { planId: id, mode, date, actor: email, siteUrl }, kind)
-  if (!r.ok) return tell(p.response_url, `Dispatch refused: ${r.error}`)
+  const r = await dispatchPlan(env, { planId: id, mode, date, actor: email, siteUrl, ...(mode === 'real' && clicked.shownMinSoftDeleteDays !== undefined ? { shownMinSoftDeleteDays: clicked.shownMinSoftDeleteDays } : {}) }, kind)
+  if (!r.ok) {
+    // Refused over the terms: the card holds the old ones and redraws only on an event, so redraw it before saying to re-read it.
+    if (r.extra?.shown_min_soft_delete_days !== undefined) await notifyPlan(env, db, id, siteUrl)
+    return tell(p.response_url, `Dispatch refused: ${r.error}`)
+  }
   await notifyDispatched(env, r, 'Slack', siteUrl)
 }
 

@@ -613,7 +613,7 @@ def test_a_drained_run_resumes_from_the_same_manifest(source, tmp_path):
 D1_RUNS = """CREATE TABLE deletion_runs (
   run_id TEXT PRIMARY KEY, plan TEXT, scan TEXT, head INT, exec_head INT, actor TEXT, mode TEXT, started_ts INT, finished_ts INT,
   deleted_bytes INT, deleted_objects INT, skipped_gone INT, skipped_overwritten INT, drift_dirs INT, ledger_drift_dirs INT,
-  undo_deadline INT, log_dir TEXT, buckets TEXT, plan_id INT, plan_digest TEXT
+  undo_deadline INT, log_dir TEXT, buckets TEXT, plan_id INT, plan_digest TEXT, min_soft_delete_days INT, soft_delete_days INT
 )"""
 D1_BANDS = """CREATE TABLE deletion_bands (
   run_id TEXT, prefix TEXT, bytes INT, objects INT, gone INT, overwritten INT, drift_new_objects INT, undone_objects INT,

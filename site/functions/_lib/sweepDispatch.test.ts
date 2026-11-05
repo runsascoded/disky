@@ -41,45 +41,45 @@ describe('sweepScript — the Batch container\'s bash', () => {
   // on exit, ping the site so the finished run is reflected (and posted to Slack) at once
   const trap = `trap 'curl -fsS -m 60 -o /dev/null -H "Authorization: Bearer $SITE_TOKEN" "$SITE_URL/api/sweep/jobs" || true' EXIT`
   it('dry, one bucket: `manifest --plan <run>/plan.json` then execute', () => {
-    expect(sweepScript({ cfg: CFG, mode: 'dry', jobId, buckets: [E1], plan: planJsonPath(CFG, jobId), store: 'gs://my-data' })).toBe([
+    expect(sweepScript({ cfg: CFG, mode: 'dry', jobId, buckets: [E1], plan: planJsonPath(CFG, jobId), store: 'gs://my-data', minSoftDeleteDays: 7 })).toBe([
       'set -euo pipefail',
       trap,
       `dt-cloud sweep manifest -d "$SWEEP_DATE" --plan "gs://my-data/sweep/runs/${jobId}/plan.json" -b ${E1} -i "gs://my-data" -o "gs://my-data/sweep/runs/${jobId}"`,
-      `dt-cloud sweep execute -b ${E1} "gs://my-data/sweep/runs/${jobId}"`,
+      `dt-cloud sweep execute -s 7 -b ${E1} "gs://my-data/sweep/runs/${jobId}"`,
     ].join('\n'))
   })
   it('real, the cut is the plan\'s buckets', () => {
     const reviewed = 'gs://my-data/sweep/runs/gcs-sweep-dry-20261004-020914z'
-    expect(sweepScript({ cfg: CFG, mode: 'real', jobId, buckets: [W4, E1], plan: planJsonPath(CFG, jobId), store: 'gs://my-data', reviewed })).toBe([
+    expect(sweepScript({ cfg: CFG, mode: 'real', jobId, buckets: [W4, E1], plan: planJsonPath(CFG, jobId), store: 'gs://my-data', reviewed, minSoftDeleteDays: 7 })).toBe([
       'set -euo pipefail',
       trap,
-      `dt-cloud sweep execute-reviewed -e xml -j 64 -B 2 -c guided -r 8000 -b ${W4} -b ${E1} -p "gs://my-data/sweep/runs/${jobId}/plan.json" -o "gs://my-data/sweep/runs/${jobId}" -w /work/reviewed --for-real "${reviewed}"`,
+      `dt-cloud sweep execute-reviewed -e xml -j 64 -B 2 -c guided -r 8000 -s 7 -b ${W4} -b ${E1} -p "gs://my-data/sweep/runs/${jobId}/plan.json" -o "gs://my-data/sweep/runs/${jobId}" -w /work/reviewed --for-real "${reviewed}"`,
     ].join('\n'))
   })
   it('uses one controller per selected bucket and supports an explicit adaptive deployment', () => {
     const reviewed = 'gs://my-data/sweep/runs/gcs-sweep-dry-20261004-020914z'
-    expect(sweepScript({ cfg: CFG, mode: 'real', jobId, buckets: [E1], plan: 'gs://my-data/plan.json', store: 'gs://my-data', reviewed, pacing: 'adaptive' }).split('\n')).toEqual([
+    expect(sweepScript({ cfg: CFG, mode: 'real', jobId, buckets: [E1], plan: 'gs://my-data/plan.json', store: 'gs://my-data', reviewed, pacing: 'adaptive', minSoftDeleteDays: 0 }).split('\n')).toEqual([
       'set -euo pipefail', trap,
-      `dt-cloud sweep execute-reviewed -e xml -j 64 -B 1 -c adaptive -r 8000 -b ${E1} -p "gs://my-data/plan.json" -o "gs://my-data/sweep/runs/${jobId}" -w /work/reviewed --for-real "${reviewed}"`,
+      `dt-cloud sweep execute-reviewed -e xml -j 64 -B 1 -c adaptive -r 8000 -s 0 -b ${E1} -p "gs://my-data/plan.json" -o "gs://my-data/sweep/runs/${jobId}" -w /work/reviewed --for-real "${reviewed}"`,
     ])
   })
   it('real without a dry run of exactly its items: its own manifest, then the reviewed run\'s executor over that manifest\'s generations, with no relist', () => {
     const run = `gs://my-data/sweep/runs/${jobId}`
-    expect(sweepScript({ cfg: CFG, mode: 'real', jobId, buckets: [W4, E1], plan: planJsonPath(CFG, jobId), store: 'gs://my-data' })).toBe([
+    expect(sweepScript({ cfg: CFG, mode: 'real', jobId, buckets: [W4, E1], plan: planJsonPath(CFG, jobId), store: 'gs://my-data', minSoftDeleteDays: 30 })).toBe([
       'set -euo pipefail',
       trap,
       `dt-cloud sweep manifest -d "$SWEEP_DATE" --plan "${run}/plan.json" -b ${W4} -b ${E1} -i "gs://my-data" -o "${run}/source"`,
-      `dt-cloud sweep execute-manifest -e xml -j 64 -B 2 -c guided -r 8000 -b ${W4} -b ${E1} -p "${run}/plan.json" -o "${run}" -w /work/manifest --for-real "${run}/source"`,
+      `dt-cloud sweep execute-manifest -e xml -j 64 -B 2 -c guided -r 8000 -s 30 -b ${W4} -b ${E1} -p "${run}/plan.json" -o "${run}" -w /work/manifest --for-real "${run}/source"`,
     ].join('\n'))
   })
   it('real without a dry run, explicit adaptive pacing, an R2 hold store: only the manifest reads through `r2_profile`', () => {
     const run = `gs://my-data/sweep/runs/${jobId}`
     const R2_MAIN = `python -c 'from os import environ; from dt_cloud.scan_steps import r2_profile; env = dict(environ); r2_profile(env); environ.update(env); from dt_cloud.cli import main; main()'`
-    expect(sweepScript({ cfg: CFG, mode: 'real', jobId, buckets: [E1], plan: planJsonPath(CFG, jobId), store: 'r2://my-index', pacing: 'adaptive' }).split('\n')).toEqual([
+    expect(sweepScript({ cfg: CFG, mode: 'real', jobId, buckets: [E1], plan: planJsonPath(CFG, jobId), store: 'r2://my-index', pacing: 'adaptive', minSoftDeleteDays: 7 }).split('\n')).toEqual([
       'set -euo pipefail',
       trap,
       `${R2_MAIN} sweep manifest -d "$SWEEP_DATE" --plan "${run}/plan.json" -b ${E1} -i "r2://my-index" -o "${run}/source"`,
-      `dt-cloud sweep execute-manifest -e xml -j 64 -B 1 -c adaptive -r 8000 -b ${E1} -p "${run}/plan.json" -o "${run}" -w /work/manifest --for-real "${run}/source"`,
+      `dt-cloud sweep execute-manifest -e xml -j 64 -B 1 -c adaptive -r 8000 -s 7 -b ${E1} -p "${run}/plan.json" -o "${run}" -w /work/manifest --for-real "${run}/source"`,
     ])
   })
   it('undo: `sweep undo` of the job\'s TARGET_RUN, behind the same exit trap', () => {

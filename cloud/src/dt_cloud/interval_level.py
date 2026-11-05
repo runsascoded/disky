@@ -1,7 +1,7 @@
 """The level index (specs/diff-progressive.md §3b): the interval store's served sort `level`, what `/api/diff/level` reads.
 
 One row per child version **transition**, keyed `(depth, path, ts, name)`: `depth`/`path` the parent's, `ts` the scan
-stamp of the transition, `name` the child's name under it. Each folded path version (`pvl` piece) opens a transition at
+stamp of the transition, `name` the child's name under it (`EMPTY_NAME` for a last segment that is empty). Each folded path version (`pvl` piece) opens a transition at
 its `vf` (it appears, or replaces the version that ended there), and a version whose `vt` no later version of the path
 continues from closes one there (the path went away). A transition carries the child's values after it (`size`,
 `n_files`, `kind`; zero for a closing), before it (`size_prev`, `n_files_prev`, `kind_prev`; zero / NULL where the
@@ -43,17 +43,17 @@ LEVEL_FLAG = "level"
 LEVEL_DOC = f"served/{LEVEL}.json"
 #: The sort's order: the parent's key, the transition's stamp, the child's name.
 LEVEL_KEY = ["depth", "path", "ts", "name"]
-#: What orders rows sharing a `LEVEL_KEY`, which is at most two: an object named `a/` is a child of `a` named '', as `a`'s own
-#: row is, at the same stamp. `a`'s own comes first (0), as the parent's `name ''` rows do; the child's is 1. Without it their
-#: order is the sort's whim, and a cut's bytes depend on how it was split. One byte of sort key: the rest of the row would do too,
-#: at a wider key on every row.
-LEVEL_ARM = "__arm"
-LEVEL_ORDER = ", ".join([*LEVEL_KEY, LEVEL_ARM])
+LEVEL_ORDER = ", ".join(LEVEL_KEY)
+#: The `name` of a child whose last segment is empty: a path `a/` (an object so named, or the directory of a key `a//b`:
+#: `path-index` keeps both as listed) under `a`, `a//` under `a/`, and '' (depth 1, a key's leading `/`) under the root. A real
+#: name can't hold a `/`, so a path is exactly its parent and `name`: `LEVEL_KEY` is unique (a path has one transition a stamp),
+#: and `name` '' is only ever a path's own row. `diffLevel.levelChild` reads it back.
+EMPTY_NAME = "/"
 LEVEL_SCHEMA = pa.schema([
     pa.field("depth", pa.uint8(), nullable=False),  # the parent's
     pa.field("path", pa.string(), nullable=False),  # the parent's ('' the root)
     pa.field("ts", pa.int64(), nullable=False),  # the transition's scan stamp
-    pa.field("name", pa.string(), nullable=False),  # the child's name under the parent ('' the parent itself)
+    pa.field("name", pa.string(), nullable=False),  # the child's name under the parent ('' the parent itself, `EMPTY_NAME` an empty last segment)
     pa.field("op", pa.int8(), nullable=False),  # 0 appeared, 1 changed, 2 went away
     pa.field("kind", pa.string(), nullable=False),  # after (a closing: the version that ended)
     pa.field("kind_prev", pa.string()),  # before (NULL: absent)
@@ -114,10 +114,10 @@ def record_level(scans: dict) -> dict:
     return out
 
 
-def rows_sql(src: str, opened: str = "true", arm: bool = False) -> str:
+def rows_sql(src: str, opened: str = "true") -> str:
     """The `level` rows (`LEVEL_SCHEMA`, unordered) of the folded path versions in relation `src` (`SOURCE_COLS`, every
     version of each path it holds; `opened`: which of them opened in the file — a run's `RUN_OPENED`). Paths at depth ≥ 1
-    (the root has no row of its own). `arm`: each row's `LEVEL_ARM` too, what the sort's order ends in."""
+    (the root has no row of its own)."""
     same = "pvt = vf AND pkind = kind AND psize = size AND pn = n_files AND pc = churn_cum"
     t = f"""WITH p AS (SELECT depth, path, vf, vt, kind, size, n_files, churn_cum, churn_end, ({opened}) AS opened,
             lag(vt) OVER w AS pvt, lag(kind) OVER w AS pkind, lag(size) OVER w AS psize, lag(n_files) OVER w AS pn,
@@ -134,11 +134,11 @@ def rows_sql(src: str, opened: str = "true", arm: bool = False) -> str:
             FROM p WHERE vt <> {OPEN} AND nvf IS DISTINCT FROM vt)"""
     vals = "op, kind, kind_prev, size, n_files, size_prev, n_files_prev, churn_cum, churn_prev"
     parent = "array_to_string(list_slice(string_split(path, '/'), 1, depth - 1), '/')"
-    child, own = (f", 1::TINYINT AS {LEVEL_ARM}", f", 0::TINYINT AS {LEVEL_ARM}") if arm else ("", "")
+    name = f"coalesce(nullif(string_split(path, '/')[-1], ''), {q(EMPTY_NAME)})"
     return f"""{t}
-        SELECT (depth - 1)::UTINYINT AS depth, {parent} AS path, ts, string_split(path, '/')[-1] AS name, {vals}{child} FROM t
+        SELECT (depth - 1)::UTINYINT AS depth, {parent} AS path, ts, {name} AS name, {vals} FROM t
         UNION ALL
-        SELECT depth, path, ts, '' AS name, {vals}{own} FROM t WHERE kind = 'dir' OR kind_prev = 'dir' OR op = 2"""
+        SELECT depth, path, ts, '' AS name, {vals} FROM t WHERE kind = 'dir' OR kind_prev = 'dir' OR op = 2"""
 
 
 def seg_sql(bounds: list[list] | None) -> str:

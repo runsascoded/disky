@@ -20,6 +20,7 @@ import { boolParam, stringParam, useUrlState } from 'use-prms'
 import { SiteNav } from './SiteNav'
 import { SiteKbd } from './SiteKbd'
 import { Tooltip } from './Tooltip'
+import { UndoTerms, useSweepSettings } from './SweepSoftDelete'
 import { Treemap } from './Treemap'
 import { UserChip, canonId, shortName } from './UserChip'
 import { ownerShares } from './OwnerBar'
@@ -306,6 +307,8 @@ export function StagedPage() {
   const removable = selected.filter(p => { const it = items.find(i => i.prefix === p); return it ? canRemove(it) : false })
 
   const [armed, setArmed] = useState(false)
+  // What the armed confirm states, and what it sends: dispatch refuses a lower minimum than this.
+  const softDeleteMin = useSweepSettings(armed && DEFAULT_STORE.executor === 'sweep')
   // a changed selection disarms: the confirm names exactly what goes
   useEffect(() => setArmed(false), [plan?.id, items.length, selected.join('\n')])
 
@@ -474,7 +477,7 @@ export function StagedPage() {
       <p className="sub">
         Files are not deleted until an admin dispatches a deletion job. Stage prefixes
         from a directory’s table (the trash icon); a memo travels with each gesture.
-        {admin ? ` A dry run previews what would be deleted and is optional.${DEFAULT_STORE.executor === 'plan-sweep' ? ' A real deletion may be permanent; recovery is not guaranteed.' : ' A real run deletes recoverably.'}` : ' An admin reviews and dispatches from here.'}
+        {admin ? ` A dry run previews what would be deleted and is optional.${DEFAULT_STORE.executor === 'plan-sweep' ? ' A real deletion may be permanent; recovery is not guaranteed.' : ' A real run\'s undo terms are stated before you confirm it.'}` : ' An admin reviews and dispatches from here.'}
       </p>
       {error && <p className="staged-err" role="alert">{error.message}</p>}
       {plan?.note && <p className="plan-note">{plan.note}</p>}
@@ -574,7 +577,7 @@ export function StagedPage() {
                 {!armed
                   ? <button type="button" className="danger" disabled={busy || !runScan || !runItems.length} onClick={() => setArmed(true)}>real delete{runItems.length ? <> {runItems.length} selected…</> : <> (check rows)</>}</button>
                   : <>
-                      <button type="button" className="danger armed" disabled={busy} onClick={() => dispatch.mutate({ mode: 'real', date: runScan, items: runItems, buckets: cut, machine }, { onSuccess: () => setArmed(false) })}>
+                      <button type="button" className="danger armed" disabled={busy} onClick={() => dispatch.mutate({ mode: 'real', date: runScan, items: runItems, buckets: cut, machine, shownMinSoftDeleteDays: softDeleteMin.data?.min_soft_delete_days }, { onSuccess: () => setArmed(false) })}>
                         confirm REAL delete of {runItems.length} {runItems.length === 1 ? 'prefix' : 'prefixes'}{stats && <> · {fmtBytes(runTotal)}</>}
                       </button>
                       <button type="button" onClick={() => setArmed(false)}>cancel</button>
@@ -589,6 +592,7 @@ export function StagedPage() {
                       : <>No dry run of exactly this selection at scan <code>{runScan}</code>: deletes from a fresh manifest, with no dry run. A directory that gained new writes since the scan still has its older staged files deleted, and the new files survive; a dry run would report that directory as drift instead.</>}
                 </p>
               )}
+              {armed && DEFAULT_STORE.executor === 'sweep' && <UndoTerms min={softDeleteMin} buckets={[...new Set(runRows.map(r => prefixToPath(r.prefix).split('/')[0]))]} />}
               {armed && (
                 <ul className="dispatch-confirm-list" aria-label="To be deleted">
                   {runRows.map(r => <li key={r.prefix}><code>{r.prefix}</code>{r.stat && <span className="dim"> · {fmtBytes(r.stat.b)}</span>}</li>)}

@@ -539,6 +539,82 @@ describe('level diffs', () => {
       })
     })
 
+    describe('children whose last segment is empty, named \'/\' in the level sort', () => {
+      const oddEnv = async (store: string) => {
+        const { db } = await sqliteD1()
+        return { DB: db, ROOT_LABEL: 'all buckets', PATH_STORE: 'intervals', INTERVAL_STORE_GEN: 'g', INTERVAL_STORE_PREFIX: store, INDEX_R2: r2('iv-churn', []) } as Env
+      }
+      const answer = async (lv: Env, from: string, to: string, dir: string, given?: { level: null }) => {
+        const { t, trace } = traced()
+        const l = (await buildLevels(lv, { from, to, dirs: [dir], k: 512, m: 'churn', chain: false, trace }, given)).get(dir)!
+        return { l: shape(l), index: t['level-index'] ?? 0 }
+      }
+      const pair = async (lv: Env, from: string, to: string, dir: string) => {
+        const [lvl, path] = [await answer(lv, from, to, dir), await answer(lv, from, to, dir, { level: null })]
+        return { dir, from, to, index: lvl.index, same: lvl.l, want: path.l }
+      }
+
+      describe('a directory `b1/x/` under `b1/x` (`interval-store-slash/`: a key `b1/x//k.bin` from 08-05 on)', () => {
+        it('where it changes in the range, the level index answers as the `path` sort does: its child is `b1/x/`, not `b1/x`\'s own', async () => {
+          const lv = await oddEnv('interval-store-slash')
+          const { l, index } = await answer(lv, '2026-08-04', '2026-08-05', 'b1/x')
+          const path = await answer(lv, '2026-08-04', '2026-08-05', 'b1/x', { level: null })
+          expect(l).toEqual(path.l)
+          expect(index).toBe(1)
+          expect([l.a, l.b, l.oa, l.ob, l.churn]).toEqual([100, 47, 4, 5, 67])
+          expect(l.rows.filter(r => r.p === '')).toEqual([{ p: '', k: 'dir', a: 0, b: 7, oa: 0, ob: 1, churn: 7, s: 'added' }])
+        })
+
+        it('where it doesn\'t, the level index still answers, as the `path` sort does', async () => {
+          const lv = await oddEnv('interval-store-slash')
+          const { l, index } = await answer(lv, '2026-08-05', '2026-08-06', 'b1/x')
+          const path = await answer(lv, '2026-08-05', '2026-08-06', 'b1/x', { level: null })
+          expect(index).toBe(1)
+          expect(l).toEqual(path.l)
+        })
+      })
+
+      describe('objects named for a directory, runs of slashes and leading slashes (`interval-store-placeholder/`)', () => {
+        const DATES = ['2026-08-02', '2026-08-03', '2026-08-04', '2026-08-05', '2026-08-06']
+        const DIRS = ['', 'b1', 'b1/x', 'b1/x/y', 'b1/w', 'b1/w/', 'b1/w//', 'b2', 'b2/q', 'b2/z', 'b2/z/', 'b2/z//', '/', '/lead']
+
+        it('a placeholder `b1/x/` is an ordinary child of `b1/x`: the level index answers, with its row', async () => {
+          const lv = await oddEnv('interval-store-placeholder')
+          const { l, index } = await answer(lv, '2026-08-04', '2026-08-05', 'b1/x')
+          expect(index).toBe(1)
+          expect(l.rows.filter(r => r.p === '')).toEqual([{ p: '', k: 'file', a: 0, b: 0, oa: 0, ob: 1, churn: 0, s: 'added' }])
+        })
+
+        it('one gaining bytes, and one in the base, the same', async () => {
+          const lv = await oddEnv('interval-store-placeholder')
+          const grown = await answer(lv, '2026-08-05', '2026-08-06', 'b1/x')
+          const based = await answer(lv, '2026-08-02', '2026-08-03', 'b2/q')
+          expect([grown.index, based.index]).toEqual([1, 1])
+          expect(grown.l.rows.filter(r => r.p === '')).toEqual([{ p: '', k: 'file', a: 0, b: 3, oa: 1, ob: 1, churn: 3, s: 'changed' }])
+          expect(based.l.rows.filter(r => r.p === '')).toEqual([{ p: '', k: 'file', a: 0, b: 0, oa: 0, ob: 1, churn: 0, s: 'added' }])
+        })
+
+        it('every directory over every window: what the `path` sort answers, from the level index', async () => {
+          const lv = await oddEnv('interval-store-placeholder')
+          for (let i = 0; i < DATES.length; i++) {
+            for (let j = i + 1; j < DATES.length; j++) {
+              for (const dir of DIRS) {
+                const got = await pair(lv, DATES[i], DATES[j], dir)
+                expect({ dir, from: got.from, to: got.to, index: got.index, l: got.same }).toEqual({ dir, from: got.from, to: got.to, index: 1, l: got.want })
+              }
+            }
+          }
+        })
+
+        it('the root\'s child \'\' (a key with a leading slash), its own `/` and `/lead` below it', async () => {
+          const lv = await oddEnv('interval-store-placeholder')
+          const root = await pair(lv, '2026-08-04', '2026-08-05', '')
+          expect(root.same.rows.filter(r => r.p === '')).toEqual([{ p: '', k: 'dir', a: 0, b: 11, oa: 0, ob: 2, churn: 11, s: 'added' }])
+          expect(root.same).toEqual(root.want)
+        })
+      })
+    })
+
     it('reads the path sort where a touched file lacks the level index', async () => {
       // `interval-store/` has no level sort: the same answers, by the old read.
       const { t, trace } = traced()
