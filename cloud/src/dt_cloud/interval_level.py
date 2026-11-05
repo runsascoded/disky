@@ -43,6 +43,12 @@ LEVEL_FLAG = "level"
 LEVEL_DOC = f"served/{LEVEL}.json"
 #: The sort's order: the parent's key, the transition's stamp, the child's name.
 LEVEL_KEY = ["depth", "path", "ts", "name"]
+#: What orders rows sharing a `LEVEL_KEY`, which is at most two: an object named `a/` is a child of `a` named '', as `a`'s own
+#: row is, at the same stamp. `a`'s own comes first (0), as the parent's `name ''` rows do; the child's is 1. Without it their
+#: order is the sort's whim, and a cut's bytes depend on how it was split. One byte of sort key: the rest of the row would do too,
+#: at a wider key on every row.
+LEVEL_ARM = "__arm"
+LEVEL_ORDER = ", ".join([*LEVEL_KEY, LEVEL_ARM])
 LEVEL_SCHEMA = pa.schema([
     pa.field("depth", pa.uint8(), nullable=False),  # the parent's
     pa.field("path", pa.string(), nullable=False),  # the parent's ('' the root)
@@ -58,7 +64,8 @@ LEVEL_SCHEMA = pa.schema([
     pa.field("churn_cum", pa.int64(), nullable=False),
     pa.field("churn_prev", pa.int64(), nullable=False),
 ])
-#: The most `level` rows a folded path version makes: its opening and its closing, each also under the path itself.
+#: The most `level` rows a folded path version can make: its opening and its closing, each also under the path itself. What
+#: a run's sort sizes itself to: any one key range could be all directories that went away (`rows_bound` is the whole's).
 ROWS_PER_VERSION = 4
 #: The `pvl` columns the transitions are computed from (a run's deltas add `op`).
 SOURCE_COLS = ["depth", "path", "vf", "vt", "kind", "size", "n_files", "churn_cum", "churn_end"]
@@ -66,10 +73,26 @@ SOURCE_COLS = ["depth", "path", "vf", "vt", "kind", "size", "n_files", "churn_cu
 RUN_OPENED = "op = 1"
 
 
-def extra_rows(rows: int) -> int:
-    """The most `level` rows `rows` folded path versions make past their own count: the level sort's rows aren't its
-    source files', what `tree_mem`'s bounds charge (`interval_store.plan_cut`)."""
-    return (ROWS_PER_VERSION - 1) * rows
+def rows_bound(con, files: list[str]) -> int:
+    """The most `level` rows (`rows_sql`) the folded path versions in `files` (at depth ≥ 1) make: 1 for each version's
+    opening, 2 if it's a directory, and 2 for each that ended (`vt` not `OPEN`). A true upper bound, by what each row needs:
+    a closing is 2 rows, made only by a version that ended and no later version continues; an opening is 2 only if it's a
+    directory or replaces one, and the directory it replaces ended, was continued, so made no closing and has those 2 to
+    spare; `rows_sql`'s `same` and `nvf` only remove rows. One aggregate over three columns, for what `tree_mem`'s bounds
+    charge the sort (`interval_store.plan_cut`)."""
+    if not files:
+        return 0
+    src = ", ".join(q(f) for f in files)
+    return con.execute(f"""SELECT count(*) + count(*) FILTER (WHERE kind = 'dir') + 2 * count(*) FILTER (WHERE vt <> {OPEN})
+                           FROM read_parquet([{src}]) WHERE depth >= 1""").fetchone()[0]
+
+
+def extra_rows(con, files: list[str]) -> int:
+    """How many more `level` rows the versions in `files` can make than there are versions (`rows_bound`, less their count;
+    the root's version makes none): the level sort's rows aren't its source files', what `tree_mem`'s bounds charge."""
+    from .interval_compact import input_rows
+
+    return rows_bound(con, files) - input_rows(files)
 
 
 def leveled(scans: dict, gen_dir: str | Path | None = None) -> bool:
@@ -91,10 +114,10 @@ def record_level(scans: dict) -> dict:
     return out
 
 
-def rows_sql(src: str, opened: str = "true") -> str:
+def rows_sql(src: str, opened: str = "true", arm: bool = False) -> str:
     """The `level` rows (`LEVEL_SCHEMA`, unordered) of the folded path versions in relation `src` (`SOURCE_COLS`, every
     version of each path it holds; `opened`: which of them opened in the file — a run's `RUN_OPENED`). Paths at depth ≥ 1
-    (the root has no row of its own)."""
+    (the root has no row of its own). `arm`: each row's `LEVEL_ARM` too, what the sort's order ends in."""
     same = "pvt = vf AND pkind = kind AND psize = size AND pn = n_files AND pc = churn_cum"
     t = f"""WITH p AS (SELECT depth, path, vf, vt, kind, size, n_files, churn_cum, churn_end, ({opened}) AS opened,
             lag(vt) OVER w AS pvt, lag(kind) OVER w AS pkind, lag(size) OVER w AS psize, lag(n_files) OVER w AS pn,
@@ -111,10 +134,11 @@ def rows_sql(src: str, opened: str = "true") -> str:
             FROM p WHERE vt <> {OPEN} AND nvf IS DISTINCT FROM vt)"""
     vals = "op, kind, kind_prev, size, n_files, size_prev, n_files_prev, churn_cum, churn_prev"
     parent = "array_to_string(list_slice(string_split(path, '/'), 1, depth - 1), '/')"
+    child, own = (f", 1::TINYINT AS {LEVEL_ARM}", f", 0::TINYINT AS {LEVEL_ARM}") if arm else ("", "")
     return f"""{t}
-        SELECT (depth - 1)::UTINYINT AS depth, {parent} AS path, ts, string_split(path, '/')[-1] AS name, {vals} FROM t
+        SELECT (depth - 1)::UTINYINT AS depth, {parent} AS path, ts, string_split(path, '/')[-1] AS name, {vals}{child} FROM t
         UNION ALL
-        SELECT depth, path, ts, '' AS name, {vals} FROM t WHERE kind = 'dir' OR kind_prev = 'dir' OR op = 2"""
+        SELECT depth, path, ts, '' AS name, {vals}{own} FROM t WHERE kind = 'dir' OR kind_prev = 'dir' OR op = 2"""
 
 
 def seg_sql(bounds: list[list] | None) -> str:
