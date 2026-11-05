@@ -10,7 +10,10 @@ export interface ScanDeletion { prefix: string; bytes: number; objects: number; 
  *  later scan holding the prefix is what's really there now, written back or not, and takes no discount.
  *  Exact or not at all. Every object at the scan deleted or already gone: the item is empty at the scan. One run, no objects gone
  *  (their bytes aren't recorded): the remainder, with its owners and classes dropped, since a band doesn't split by them. Anything
- *  else (partial runs may overlap, as a resumed run counts the first's deletions `gone`) stays whole. */
+ *  else (partial runs may overlap, as a resumed run counts the first's deletions `gone`) stays whole.
+ *  A band's `objects` are what the run attempted: on an XML run GCS answers `Deleted` for a generation that was overwritten since
+ *  the scan, so such an object is live though counted here. The item still leaves `/staged`'s selection at this scan, which
+ *  loses nothing: a run on this scan is held to its generations and can't delete that object either. The next scan lists it. */
 export function withoutDeleted<S extends { b: number; o: number; us?: unknown; cb?: unknown }>(stats: Record<string, S>, bands: readonly ScanDeletion[]): Record<string, S> {
   if (!bands.length) return stats
   const byPrefix = new Map<string, ScanDeletion[]>()
