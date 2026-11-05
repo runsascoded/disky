@@ -171,7 +171,7 @@ export function renderParent(v: ParentView): { text: string; blocks: unknown[] }
         text: { type: 'plain_text', text: 'Delete for real…' },
         confirm: {
           title: { type: 'plain_text', text: 'Really delete?' },
-          text: { type: 'mrkdwn', text: `Deletes the ${fmtN(v.items)} staged ${v.items === 1 ? 'prefix' : 'prefixes'}: ${fmtBytes(gate.dry.deleted_bytes)} / ${fmtN(gate.dry.deleted_objects)} objects per the dry-run on scan ${gate.dry.scan}. ${v.minSoftDeleteDays === undefined ? 'Recoverable for 7 days (undo in www).' : slackUndoTerms(v.minSoftDeleteDays)}` },
+          text: { type: 'mrkdwn', text: `Deletes the ${fmtN(v.items)} staged ${v.items === 1 ? 'prefix' : 'prefixes'}: ${fmtBytes(gate.dry.deleted_bytes)} / ${fmtN(gate.dry.deleted_objects)} objects per the dry-run on scan ${gate.dry.scan}. ${v.minSoftDeleteDays === undefined ? 'A real deletion may be permanent; recovery is not guaranteed.' : slackUndoTerms(v.minSoftDeleteDays)}` },
           confirm: { type: 'plain_text', text: 'Delete' },
           deny: { type: 'plain_text', text: 'Cancel' },
           style: 'danger',

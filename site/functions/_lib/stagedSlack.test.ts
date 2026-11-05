@@ -33,7 +33,7 @@ describe('renderParent', () => {
     }
     const head = 'Deletes the 3 staged prefixes: 2.0 TiB / 1,234 objects per the dry-run on scan 2026-09-28T1201.'
     it.each<[string, number | undefined, string]>([
-      ['no guard (cw: its own 7-day hold)', undefined, 'Recoverable for 7 days (undo in www).'],
+      ['no guard (cw: bucket versioning is not required)', undefined, 'A real deletion may be permanent; recovery is not guaranteed.'],
       ['the default', 7, 'Recoverable for at least 7 days (undo in www).'],
       ['shorter', 3, 'Recoverable for at least 3 days, less than the usual 7 (undo in www).'],
       ['soft delete not required', 0, 'No undo: this deployment doesn\'t require soft delete, so treat these deletes as permanent.'],
@@ -97,7 +97,7 @@ describe('renderParent', () => {
   it('puts the dry-run numbers and the recoverability in the real-delete confirm', () => {
     const real = (renderParent({ ...base, runs: [run({})] }).blocks.find(b => (b as { type: string }).type === 'actions') as { elements: Record<string, unknown>[] }).elements[2]
     expect(real.value).toBe('7:D1')
-    expect((real.confirm as { text: { text: string } }).text.text).toBe('Deletes the 3 staged prefixes: 2.0 TiB / 1,234 objects per the dry-run on scan 2026-09-28T1201. Recoverable for 7 days (undo in www).')
+    expect((real.confirm as { text: { text: string } }).text.text).toBe('Deletes the 3 staged prefixes: 2.0 TiB / 1,234 objects per the dry-run on scan 2026-09-28T1201. A real deletion may be permanent; recovery is not guaranteed.')
   })
 })
 
