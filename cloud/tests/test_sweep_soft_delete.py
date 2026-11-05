@@ -5,18 +5,19 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from types import SimpleNamespace
 
 import pytest
 from click.testing import CliRunner
 from google.cloud import storage
 
 from dt_cloud import cli, index_footer
-from dt_cloud.sweep_exec import execute_plan, record_run
+from dt_cloud.sweep_exec import execute_plan, narrowest_retention, record_run
 from dt_cloud.sweep_job import reviewed_job_spec
 from dt_cloud.sweep_reviewed import execute_manifest
 from test_sweep_exec import FakeClient, _client, _plan_dir
 from test_sweep_execute_manifest import (  # noqa: F401 (fixtures)
-    acknowledge, d1, generation_run, generation_source, refuse, reviewed_source, source,
+    acknowledge, d1, generation_run, generation_source, refuse, reviewed_source, source, two_buckets,
 )
 from test_sweep_job import IMAGE, template  # noqa: F401 (fixture)
 
@@ -162,6 +163,43 @@ def test_record_run_deadline_is_the_narrowest_measured_retention(monkeypatch, da
     db.execute("CREATE TABLE deletion_runs (run_id TEXT PRIMARY KEY, plan, scan, head, exec_head, actor, mode, started_ts, finished_ts, deleted_bytes, deleted_objects, skipped_gone, skipped_overwritten, drift_dirs, ledger_drift_dirs, undo_deadline, log_dir, plan_id, min_soft_delete_days, soft_delete_days)")
     db.execute(sent[0])
     assert db.execute("SELECT undo_deadline, min_soft_delete_days, soft_delete_days FROM deletion_runs").fetchall() == [(deadline, 0, days)]
+
+
+class TestNarrowestRetention:
+    """What a run's undo rests on: only the buckets it deleted from, so a bucket of skips can't make it read "no undo"."""
+
+    DELETES = {"soft_delete_days": 7, "decisions": {"delete": 4}}
+    SKIPS = {"soft_delete_days": 0, "decisions": {"skipped_no_generation": 3}}
+
+    @pytest.mark.parametrize("entries, narrowest", [
+        ([DELETES, SKIPS], 7),
+        ([DELETES, {**DELETES, "soft_delete_days": 3}], 3),
+        ([DELETES, {**SKIPS, "decisions": {"delete": 1}}], 0),
+        # Each may have deleted, whatever its tally says: a delete with no answer, or a bucket cut short.
+        ([DELETES, {**SKIPS, "failed_dirs": [{"dir": "a", "objects": 1}]}], 0),
+        ([DELETES, {**SKIPS, "interrupted": {"roots_skipped": 1, "roots": 2}}], 0),
+        ([DELETES, {**SKIPS, "error": "boom"}], 0),
+        # Deleted nothing anywhere: what they measured still stands.
+        ([SKIPS, {**SKIPS, "soft_delete_days": 7}], 0),
+        ([{"decisions": {"delete": 1}}], None),
+        ([], None),
+    ])
+    def test_narrowest(self, entries, narrowest):
+        assert narrowest_retention(entries) == narrowest
+
+    def test_a_run_with_a_bucket_of_skips_at_zero_keeps_the_undo_of_the_bucket_it_deleted_from(self, source, tmp_path):  # noqa: F811
+        directory, plan = source
+        two_buckets(directory, plan)
+        client = FakeClient(blobs={})
+        real = client.get_bucket
+        client.get_bucket = lambda name: SimpleNamespace(soft_delete_policy=None) if name == "b2" else real(name)
+        started = []
+        result = execute_manifest(
+            str(directory), str(plan), str(tmp_path / "out"), str(tmp_path / "work"), for_real=True, client=client, deleter=acknowledge(),
+            on_prepared=lambda _, days: started.append(days),
+        )
+        assert (result["buckets"]["b1"]["soft_delete_days"], result["buckets"]["b2"]["soft_delete_days"]) == (7, 0)
+        assert (started, narrowest_retention(result["buckets"].values())) == ([7], 7)
 
 
 class TestUndoCli:

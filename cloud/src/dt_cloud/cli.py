@@ -2038,12 +2038,12 @@ def sweep_execute(only_buckets: tuple[str, ...], drift: str, max_root_objects: i
     err(f"\n{'deleted' if for_real else 'would delete'}: {total / 1e12:.2f} TB total")
     failed = {b: v["failed_dirs"] for b, v in summary["buckets"].items() if v.get("failed_dirs")}
     if not no_record:
-        from .sweep_exec import record_run
+        from .sweep_exec import narrowest_retention, record_run
         # The undo deadline follows the narrowest window actually measured on
-        # the run's buckets (the guard already refused anything under `-s`); none at 0.
-        windows = [int(v["soft_delete_days"]) for v in summary["buckets"].values() if "soft_delete_days" in v]
+        # the buckets the run deleted from (the guard already refused anything under `-s`); none at 0.
+        narrowest = narrowest_retention(summary["buckets"].values())
         try:
-            run_id = record_run(summary, summary["_plan"], actor=actor, started_ts=started, finished_ts=finished, soft_delete_days=min(windows) if windows else min_soft_delete_days, min_soft_delete_days=min_soft_delete_days)
+            run_id = record_run(summary, summary["_plan"], actor=actor, started_ts=started, finished_ts=finished, soft_delete_days=min_soft_delete_days if narrowest is None else narrowest, min_soft_delete_days=min_soft_delete_days)
             err(f"recorded deletion run {run_id}")
         except Exception as e:  # recording must never mask a completed run
             err(f"WARN: deletion-run record failed: {e}")
@@ -2203,7 +2203,7 @@ def _execute_generations(
     """`execute-reviewed` / `execute-manifest`: run `execute` over SOURCE, recording the run in D1."""
     import signal
     import threading
-    from .sweep_exec import record_run, record_run_start, stop_file_watch
+    from .sweep_exec import narrowest_retention, record_run, record_run_start, stop_file_watch
 
     stop = threading.Event()
     signal.signal(signal.SIGTERM, lambda *_: stop.set())
@@ -2226,9 +2226,9 @@ def _execute_generations(
 
     summary = execute(source, plan_path, out, work_dir, for_real, only_buckets, backend, workers, max_rate, stop, on_prepared=prepared, bucket_workers=bucket_workers, exclude_runs=exclude_runs, on_progress=progress if not no_record else None, pacing=pacing, min_soft_delete_days=min_soft_delete_days)
     if for_real and not no_record:
-        windows = [int(entry["soft_delete_days"]) for entry in summary["buckets"].values()]
+        narrowest = narrowest_retention(summary["buckets"].values())
         try:
-            record_run(summary, summary["_plan"], actor, started, int(dt.datetime.now(dt.timezone.utc).timestamp()), min(windows) if windows else min_soft_delete_days, min_soft_delete_days)
+            record_run(summary, summary["_plan"], actor, started, int(dt.datetime.now(dt.timezone.utc).timestamp()), min_soft_delete_days if narrowest is None else narrowest, min_soft_delete_days)
         except Exception as error:
             err(f"WARN: deletion-run final record failed: {error}")
     failed = any(entry.get("failed_dirs") or entry.get("error") for entry in summary["buckets"].values())

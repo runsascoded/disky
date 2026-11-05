@@ -39,7 +39,7 @@ import pyarrow.parquet as pq
 
 from .staged_plan import StagedPlan, load_plan
 from .sweep_batch import _parts
-from .sweep_exec import MIN_SOFT_DELETE_DAYS, PROGRESS_EVERY, _missing_perms, _soft_delete_days, delete_batch
+from .sweep_exec import MIN_SOFT_DELETE_DAYS, PROGRESS_EVERY, _missing_perms, _soft_delete_days, delete_batch, narrowest_retention
 from .sweep_manifest import ManifestProgress
 from .sweep_journal import DecisionJournal
 from .sweep_xml import XmlDeleter
@@ -498,7 +498,7 @@ def execute_reviewed(
         with fs.open(f"{path}/resume-source.json", "w") as fh:
             json.dump(resume, fh)
     if on_prepared is not None:
-        on_prepared(plan, min((int(guard["soft_delete_days"]) for guard in guards.values()), default=None))
+        on_prepared(plan, narrowest_retention({**guard, "decisions": dry["buckets"][bucket]["decisions"]} for bucket, guard in guards.items()))
     stop = stop or threading.Event()
     slots = threading.BoundedSemaphore(workers * 2)
     batch_size = 1000 if backend == "xml" else 100

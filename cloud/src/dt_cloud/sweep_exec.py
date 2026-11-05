@@ -21,7 +21,7 @@ import threading
 import time
 from bisect import bisect_right
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 
@@ -259,6 +259,15 @@ def undo_deadline_of(finished_ts: int, soft_delete_days: int) -> int | None:
     """A real run's recorded undo deadline: its end plus the narrowest retention measured on its buckets. None at 0: soft delete
     is off on a bucket it touched, so there's no window to record (`deletion_runs.soft_delete_days` = 0 says why)."""
     return finished_ts + soft_delete_days * 86400 if soft_delete_days > 0 else None
+
+
+def narrowest_retention(entries: Iterable[dict]) -> int | None:
+    """The narrowest soft-delete retention a run's undo rests on, over its per-bucket summary entries: only the buckets it may have
+    deleted from, since a bucket of skips has nothing to restore (a delete with no answer, or a bucket cut short, may have). With
+    none of those, every bucket measured; None if none was."""
+    measured = [entry for entry in entries if "soft_delete_days" in entry]
+    deleting = [entry for entry in measured if entry.get("decisions", {}).get("delete") or entry.get("failed_dirs") or entry.get("interrupted") or entry.get("error")]
+    return min((int(entry["soft_delete_days"]) for entry in deleting or measured), default=None)
 
 
 def execute_plan(
