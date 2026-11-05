@@ -18,7 +18,8 @@ import { withoutDeleted } from '../../src/stagedScan.js'
 import { slackApi, slackPeople, type SlackPerson, slackReady, type SlackEnv, type SlackResult } from './slack.js'
 import type { Env } from './auth.js'
 import { minSoftDeleteDays } from './sweepSettings.js'
-import { runHasNoUndo, runPromisedNothing, slackUndoTerms } from '../../src/softDelete.js'
+import { runHasNoUndo, runPromisedNothing, slackUndoTerms, type UndoUnavailable, undoUnavailableText } from '../../src/softDelete.js'
+import { runUndoNow } from './softDeleteNow.js'
 import { pathScans, storeReady } from './index.js'
 import { MAX_PREFIXES, type PrefixStat, prefixesAt } from './prefixes.js'
 import { expDay, IMAGE_TTL_DAYS, imagePath, ogKey } from './og/sign.js'
@@ -74,6 +75,12 @@ export interface ParentView {
   now?: number
   /** What the last real run's run dir says of its totals (`lastRunOutcome`); absent or null: nothing to add. */
   lastOutcome?: RunOutcome | null
+  /** The last real run's recorded undo can't be done now: soft delete is off on a bucket it deleted from (`runUndoNow`). Absent
+   *  or null: not known off. */
+  undoUnavailable?: UndoUnavailable | null
+  /** Nothing says whether its buckets' soft delete is still on (no reading, or none of a bucket of it): the deadline is
+   *  stated as depending on it. Absent: every bucket of it is on as of the reading, or an executor that needs none. */
+  undoUnseen?: boolean
 }
 
 /** A staged set at one scan: totals and its largest owners (by display name). */
@@ -113,9 +120,10 @@ export function sizeNotes(z: Sized): string[] {
 /** The plan's newest real run. */
 const lastRealRun = (runs: readonly RunRow[]): RunRow | undefined => [...runs].filter(r => r.mode === 'real').sort((a, b) => b.started_ts - a.started_ts)[0]
 
-/** What a real run's event says of undo: its window, that it has none, or (no record either way) nothing. */
-const undoNote = (r: RunRow): string =>
-  r.undo_deadline ? `; undoable until ${utc(r.undo_deadline)} (www)`
+/** What a real run's event says of undo: its window (or, `unavailable`, that soft delete is off now where it deleted), that it
+ * has none, or (no record either way) nothing. */
+const undoNote = (r: RunRow, unavailable?: UndoUnavailable | null): string =>
+  r.undo_deadline ? unavailable ? `; ${undoUnavailableText(unavailable)}` : `; undoable until ${utc(r.undo_deadline)} (www)`
     : runPromisedNothing(r) && r.mode === 'real' ? '; no undo promised (no soft-delete minimum)'
     : runHasNoUndo(r) ? '; no undo (soft delete off)' : ''
 
@@ -150,7 +158,7 @@ export function renderParent(v: ParentView): { text: string; blocks: unknown[] }
   const lastReal = lastRealRun(v.runs)
   const realLine = !lastReal ? null
     : lastReal.finished_ts == null ? `Real run in progress (${who(lastReal.actor, v.names)}).`
-    : lastReal.undo_deadline != null && lastReal.undo_deadline > now ? `Last real run ${v.lastOutcome?.unread ? 'recorded' : v.lastOutcome?.attempted ? 'attempted' : 'deleted'} ${v.lastOutcome?.totals === 'lower-bound' ? 'at least ' : ''}${fmtBytes(lastReal.deleted_bytes)} / ${fmtN(lastReal.deleted_objects)} objects, undoable until ${utc(lastReal.undo_deadline)}.${skipsLine(v.lastOutcome ?? undefined)}`
+    : lastReal.undo_deadline != null && lastReal.undo_deadline > now ? `Last real run ${v.lastOutcome?.unread ? 'recorded' : v.lastOutcome?.attempted ? 'attempted' : 'deleted'} ${v.lastOutcome?.totals === 'lower-bound' ? 'at least ' : ''}${fmtBytes(lastReal.deleted_bytes)} / ${fmtN(lastReal.deleted_objects)} objects${v.undoUnavailable ? `; ${undoUnavailableText(v.undoUnavailable)}` : `, undoable until ${utc(lastReal.undo_deadline)}${v.undoUnseen ? ' if the buckets\' soft delete is still on (this site can\'t see it)' : ''}`}.${skipsLine(v.lastOutcome ?? undefined)}`
     : null
   const buttons: unknown[] = [
     { type: 'button', action_id: 'staged_open', text: { type: 'plain_text', text: 'Open in www' }, url: `${v.siteUrl}/staged` },
@@ -367,27 +375,27 @@ function skipsLine(o?: RunOutcome): string {
 
 /** A run's thread reply: the actor by name, the run id linking to its row on
  *  `/staged`. */
-export function runEvent(r: RunRow, phase: 'dispatched' | 'finished' | 'failed', o: { via?: string | null; names?: Names; siteUrl?: string; reason?: string; outcome?: RunOutcome; expected?: { bytes: number; objects: number } } = {}): string {
+export function runEvent(r: RunRow, phase: 'dispatched' | 'finished' | 'failed', o: { via?: string | null; names?: Names; siteUrl?: string; reason?: string; outcome?: RunOutcome; expected?: { bytes: number; objects: number }; undoUnavailable?: UndoUnavailable | null } = {}): string {
   const kind = r.mode === 'dry' ? 'Dry-run' : '*Real deletion*'
   const id = o.siteUrl ? `<${runUrl(o.siteUrl, r.run_id)}|${r.run_id}>` : `\`${r.run_id}\``
   if (phase === 'dispatched') return `${r.mode === 'dry' ? ':test_tube:' : ':rotating_light:'} ${kind} dispatched by ${who(r.actor, o.names)}${o.via ? ` via ${o.via}` : ''} on scan ${r.scan} (${id})${o.expected ? `: expected ${fmtBytes(o.expected.bytes)} / ${fmtN(o.expected.objects)} objects` : ''}`
   if (phase === 'failed' && o.outcome?.totals) {
     const verb = o.outcome.attempted ? 'attempted' : 'deleted'
     const size = `*${fmtBytes(r.deleted_bytes)}* / ${fmtN(r.deleted_objects)} objects`
-    const until = undoNote(r)
+    const until = undoNote(r, o.undoUnavailable)
     const why = o.reason ? ` (\`${o.reason.replace(/`/g, "'").replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')}\`)` : ''
     if (o.outcome.totals === 'exact') return `:warning: ${kind} ${id} ended unsuccessfully${why}: ${verb} ${size}${until}.${skipsLine(o.outcome)}`
     const said = o.outcome.totals === 'lower-bound'
       ? `: ${verb} at least ${size}, from its progress files, which can lag what it did`
       : `, and what it wrote couldn't be read, so it may have deleted more than its recorded ${size}`
-    return `:warning: ${kind} ${id} ended before recording its end${why}${said}${until}.${runHasNoUndo(r) ? '' : ' Undo restores only what its log names.'}`
+    return `:warning: ${kind} ${id} ended before recording its end${why}${said}${until}.${runHasNoUndo(r) || (r.undo_deadline && o.undoUnavailable) ? '' : ' Undo restores only what its log names.'}`
   }
   if (phase === 'failed' && o.reason) return `:x: ${kind} ${id} ended without a result: \`${o.reason.replace(/`/g, "'").replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')}\``
   if (phase === 'failed') return `:x: ${kind} ${id} ended without a result (its Batch job stopped before the run summary); check its logs in www.`
   const skips = skipsLine(o.outcome)
   if (r.mode === 'dry') return `:test_tube: Dry-run ${id} finished: would delete *${fmtBytes(r.deleted_bytes)}* / ${fmtN(r.deleted_objects)} objects (gone since scan: ${fmtN(r.skipped_gone)}, overwritten: ${fmtN(r.skipped_overwritten)}).${skips}`
-  if (o.outcome?.unread) return `:warning: Real deletion ${id} finished, totals unread: recorded *${fmtBytes(r.deleted_bytes)}* / ${fmtN(r.deleted_objects)} objects${undoNote(r)}.`
-  return `${skips ? ':warning:' : ':white_check_mark:'} Real deletion ${id} finished: ${o.outcome?.attempted ? 'attempted' : 'deleted'} *${fmtBytes(r.deleted_bytes)}* / ${fmtN(r.deleted_objects)} objects${undoNote(r)}.${skips}`
+  if (o.outcome?.unread) return `:warning: Real deletion ${id} finished, totals unread: recorded *${fmtBytes(r.deleted_bytes)}* / ${fmtN(r.deleted_objects)} objects${undoNote(r, o.undoUnavailable)}.`
+  return `${skips ? ':warning:' : ':white_check_mark:'} Real deletion ${id} finished: ${o.outcome?.attempted ? 'attempted' : 'deleted'} *${fmtBytes(r.deleted_bytes)}* / ${fmtN(r.deleted_objects)} objects${undoNote(r, o.undoUnavailable)}.${skips}`
 }
 
 /** No claim that anything is deleted: an XML reply can't prove it, and a run with skips left objects under its prefixes. */
@@ -727,12 +735,16 @@ export async function notifyPlan(env: NotifyEnv, db: D1Database, planId: number,
       // Sized, prefixes empty at the scan leave the title's counts (the size line names them apart).
       const last = lastRealRun(v.runs)
       const lastOutcome = last?.finished_ts ? await lastRunOutcome(full)?.(last) : null
-      const parent = renderParent({ ...v, ...(env.EXECUTOR === 'sweep' ? { minSoftDeleteDays: await minSoftDeleteDays(db) } : {}), lastOutcome, queued: queuedOf(countedItems(v.live, v.deleted, at?.stats ?? null)), names, size, image: await stagedCardUrl(env, db, siteUrl, v.digest) ?? undefined })
+      // Only the `sweep` executor's undo restores from soft delete: `plan-sweep`'s card says what it always did.
+      const undo = env.EXECUTOR === 'sweep' && last?.finished_ts ? await runUndoNow(full, db, last, now) : null
+      const parent = renderParent({ ...v, ...(env.EXECUTOR === 'sweep' ? { minSoftDeleteDays: await minSoftDeleteDays(db) } : {}), lastOutcome, undoUnavailable: undo?.unavailable, undoUnseen: !!undo?.unseen, now, queued: queuedOf(countedItems(v.live, v.deleted, at?.stats ?? null)), names, size, image: await stagedCardUrl(env, db, siteUrl, v.digest) ?? undefined })
       return { at, people, names, parent }
     }
     const { at, people, names, parent } = await render(v)
+    // A run's own end: what it measured stands, unless the reading already shows soft delete off where it deleted.
+    const runUndo = runEv && runEv.phase !== 'dispatched' && runEv.run.mode === 'real' && env.EXECUTOR === 'sweep' ? await runUndoNow(full, db, runEv.run, now) : null
     const event: Event | undefined = runEv
-      ? { text: runEvent(runEv.run, runEv.phase, { via: runEv.via, names, siteUrl, reason: runEv.reason, outcome: runEv.outcome, expected: runEv.expected }), ...(by ? { sender: personSender(by, people[by.toLowerCase()], 'dispatched') } : {}) }
+      ? { text: runEvent(runEv.run, runEv.phase, { via: runEv.via, names, siteUrl, reason: runEv.reason, outcome: runEv.outcome, expected: runEv.expected, undoUnavailable: runUndo?.unavailable }), ...(by ? { sender: personSender(by, people[by.toLowerCase()], 'dispatched') } : {}) }
       : said ? { ...said, text: typeof said.text === 'function' ? said.text(who(said.by?.email ?? '', names)) : said.text, ...(said.by ? { sender: personSender(said.by.email, people[said.by.email.toLowerCase()], said.by.verb) } : {}) }
       : undefined
     const channel = env.SLACK_ADMIN_CHANNEL!

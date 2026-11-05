@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { conservativeDeadline, inRunItems, liveTargetOf, prefixExecution, type PrefixBandRecord } from './prefixExecution'
+import { bucketOfPrefix, conservativeDeadline, inRunItems, liveTargetOf, prefixExecution, type PrefixBandRecord } from './prefixExecution'
 import type { ProgressFile } from './runs'
 
 const prefix = 'gs://b/a/'
@@ -75,5 +75,35 @@ describe('a row\'s live run: the run\'s own item set, not its bucket', () => {
     const ix = liveTargetOf('gs://b/later/', 100, [target('b', 200, items)])
     expect(ix).toBe(-1)
     expect(prefixExecution('gs://b/later/', [], undefined, 300)).toBeNull()
+  })
+})
+
+describe('a recorded deletion whose bucket has soft delete off now', () => {
+  const recorded = { kind: 'recorded', runId: 'real', objects: 5, bytes: 50, preserved: 0, undone: 0, deadline: 700, expired: false }
+  const known = (off: boolean) => ({ asOf: '2026-11-05', off: { b: off, other: true } })
+  it('says undo is unavailable, by the prefix\'s own bucket and the snapshot\'s date', () => {
+    expect(prefixExecution(prefix, [record], undefined, 300, known(true))).toEqual({ ...recorded, unavailable: { buckets: ['b'], asOf: '2026-11-05' } })
+  })
+  it('its bucket on, or a site that wasn\'t asked (another executor, a reading still loading): the window as recorded', () => {
+    expect([
+      prefixExecution(prefix, [record], undefined, 300, known(false)),
+      prefixExecution(prefix, [record], undefined, 300),
+    ]).toEqual([recorded, recorded])
+  })
+  it('a bucket the reading does not name, or no reading: the window stands, marked as one this site can\'t vouch for', () => {
+    expect([
+      prefixExecution(prefix, [record], undefined, 300, { asOf: '2026-11-05', off: { other: true } }),
+      prefixExecution(prefix, [record], undefined, 300, null),
+    ]).toEqual([{ ...recorded, unseen: { unseen: ['b'] } }, { ...recorded, unseen: { unseen: ['b'] } }])
+  })
+  it('a window already elapsed, or never recorded, has no undo left to lose', () => {
+    expect([
+      prefixExecution(prefix, [record], undefined, 700, known(true)),
+      prefixExecution(prefix, [{ ...record, undo_deadline: null }], undefined, 300, known(true)),
+      prefixExecution(prefix, [record], undefined, 700, null),
+    ]).toEqual([{ ...recorded, expired: true }, { ...recorded, deadline: null, noUndo: true }, { ...recorded, expired: true }])
+  })
+  it('bucketOfPrefix', () => {
+    expect([bucketOfPrefix('gs://b/a/'), bucketOfPrefix('s3://bkt/k'), bucketOfPrefix('b/a/')]).toEqual(['b', 'bkt', 'b'])
   })
 })

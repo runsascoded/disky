@@ -1,12 +1,12 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
-import { Link } from 'react-router-dom'
-import type { CostSnapshot } from './costModel'
+import { DEFAULT_STORE } from './stores'
 import { type BucketSoftDelete, confirmUndoTerms, DEFAULT_MIN_SOFT_DELETE_DAYS, MAX_MIN_SOFT_DELETE_DAYS, minimumWarning, SWEEP_SETTINGS_KEY as KEY } from './softDelete'
 
 // `/admin`'s sweep soft-delete minimum (`functions/_lib/sweepSettings.ts`): the narrowest retention a real run accepts, read at
-// dispatch; what each bucket has comes from the newest cost snapshot, read-only and a day old at most, since the site's own
-// account can't read bucket metadata.
+// dispatch; what each bucket has is the job's newest reading (`/api/sweep/soft-delete`, the scan step `soft-delete`), as old
+// as the last scan that ran the step, since the site's own account can't read bucket metadata. A bucket with no reading is
+// unknown, and is shown so.
 
 const ENDPOINT = '/api/sweep/settings'
 
@@ -28,24 +28,31 @@ export function useSweepSettings(enabled = true) {
   })
 }
 
-/** The newest cost snapshot's buckets' soft delete (null: this deployment writes none, or it has no storage section). */
-export const bucketSoftDeleteOf = (days: readonly CostSnapshot[]): BucketSoftDelete | null => {
-  const newest = days[days.length - 1]
-  if (!newest?.storage) return null
-  return { asOf: newest.date, off: Object.fromEntries(newest.storage.buckets.map(b => [b.bucket, b.soft_delete_off])) }
-}
-
+/** The buckets' soft delete as the job last read it, for any viewer (null: no reading, or an executor that doesn't restore from
+ * soft delete). */
 export function useBucketSoftDelete(enabled = true) {
   return useQuery<BucketSoftDelete | null>({
-    queryKey: ['cost', 'gcp', 'soft-delete'],
+    queryKey: ['sweep', 'soft-delete'],
     enabled,
     queryFn: async () => {
-      const r = await fetch('/api/cost/gcp?days=1', { credentials: 'same-origin' })
-      if (!r.ok) throw new Error(`cost: HTTP ${r.status}`)
-      return bucketSoftDeleteOf(((await r.json()) as { days: CostSnapshot[] }).days)
+      const r = await fetch('/api/sweep/soft-delete', { credentials: 'same-origin' })
+      if (!r.ok) throw new Error(`soft delete: HTTP ${r.status}`)
+      return ((await r.json()) as { soft_delete: BucketSoftDelete | null }).soft_delete
     },
   })
 }
+
+/** `useBucketSoftDelete` as the run pages take it: undefined while it isn't known whether there is a reading (not `enabled`: an
+ * executor whose undo isn't a soft-delete restore; or still loading), so nothing is qualified yet; null: none (or the read
+ * failed), so a recorded undo is one this site can't vouch for. */
+export function useSoftDeleteNow(enabled: boolean): BucketSoftDelete | null | undefined {
+  const q = useBucketSoftDelete(enabled)
+  return !enabled ? undefined : q.isError ? null : q.data
+}
+
+/** What a bucket's row says: `on`, `off`, or `unknown` (no reading names it). */
+export const bucketState = (bucket: string, known: BucketSoftDelete | null | undefined): 'on' | 'off' | 'unknown' =>
+  known && Object.hasOwn(known.off, bucket) ? known.off[bucket] ? 'off' : 'on' : 'unknown'
 
 const day = (epochS: number): string => new Date(epochS * 1000).toISOString().slice(0, 10)
 
@@ -68,12 +75,14 @@ export interface SweepSoftDeleteViewProps {
   onUnderstood: (b: boolean) => void
   onSave: () => void
   buckets: BucketSoftDelete | null | undefined
+  /** The buckets a sweep acts on (the store's): each gets a row, `unknown` where no reading names it. */
+  swept: readonly string[]
   busy: boolean
   error: string | null
 }
 
 /** The editor, as markup (pure: `SweepSoftDelete` wires it to the API). */
-export function SweepSoftDeleteView({ answer, draft, onDraft, understood, onUnderstood, onSave, buckets, busy, error }: SweepSoftDeleteViewProps) {
+export function SweepSoftDeleteView({ answer, draft, onDraft, understood, onUnderstood, onSave, buckets, swept, busy, error }: SweepSoftDeleteViewProps) {
   const n = Number(draft)
   const valid = draft.trim() !== '' && Number.isInteger(n) && n >= 0 && n <= MAX_MIN_SOFT_DELETE_DAYS
   const warning = valid ? minimumWarning(n) : null
@@ -103,15 +112,18 @@ export function SweepSoftDeleteView({ answer, draft, onDraft, understood, onUnde
         <span className="dim">default {DEFAULT_MIN_SOFT_DELETE_DAYS}; 0..{MAX_MIN_SOFT_DELETE_DAYS}</span>
       </form>
       {error && <p className="error" role="alert">{error}</p>}
-      {buckets && (
+      {swept.length > 0 && (
         <>
-          <p className="dim">What each bucket has, as of {buckets.asOf} (<Link to="/admin/cost/gcp">cost snapshot</Link>; a run measures its buckets itself when it starts):</p>
+          <p className="dim">{buckets
+            ? `What each bucket a sweep acts on has, as the job read it at ${buckets.asOf} (its soft-delete step, after a scan); a run measures its buckets itself when it starts:`
+            : 'No reading of the buckets\' soft delete (the job\'s soft-delete step writes one after a scan), so this site can\'t say what a past run\'s undo has to work with; a run measures its buckets itself when it starts:'}</p>
           <table className="sweep-soft-delete-buckets">
             <thead><tr><th>bucket</th><th>soft delete</th></tr></thead>
             <tbody>
-              {Object.entries(buckets.off).sort(([a], [b]) => a.localeCompare(b)).map(([bucket, off]) => (
-                <tr key={bucket}><td><code>{bucket}</code></td><td className={off ? 'warn' : undefined}>{off ? 'off' : 'on'}</td></tr>
-              ))}
+              {[...swept].sort((a, b) => a.localeCompare(b)).map(bucket => {
+                const state = bucketState(bucket, buckets)
+                return <tr key={bucket}><td><code>{bucket}</code></td><td className={state === 'off' ? 'warn' : state === 'unknown' ? 'dim' : undefined}>{state}</td></tr>
+              })}
             </tbody>
           </table>
         </>
@@ -163,6 +175,7 @@ export function SweepSoftDelete() {
       onUnderstood={setUnderstood}
       onSave={() => save.mutate(Number(draft))}
       buckets={buckets.data}
+      swept={DEFAULT_STORE.buckets}
       busy={save.isPending}
       error={save.error?.message ?? null}
     />

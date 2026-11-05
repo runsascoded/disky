@@ -20,7 +20,7 @@ import { RunArtifacts, RunPlan } from './RunArtifacts'
 import { RunBands } from './RunBands'
 import { RunChecks } from './RunChecks'
 import { runHref } from './runHistory'
-import { conservativeDeadline } from './prefixExecution'
+import { bucketOfPrefix, conservativeDeadline } from './prefixExecution'
 import { percentOf } from './runChart'
 import { selectRuns } from './runTable'
 import { fmtN } from './types'
@@ -30,11 +30,13 @@ import { CAPS, type RunAction, useRunAnalytics, useRunDetail, useRunFiles } from
 import { ReviewPreservation } from './RunPreservation'
 import {
   ATTEMPTED, attemptOnly, LOWER_BOUND, NOT_OBSERVABLE, totalsLowerBound, UNDO_CAVEAT, UNDO_LOG_ONLY,
-  type Check, commonBucketPrefix, type DeletionRun, elapsed, elapsedDetails, type ExecJob, fmtDur, type LogSummaryFile, loggedOf, logSubdir,
+  type Check, commonBucketPrefix, deletedBuckets, type DeletionRun, elapsed, elapsedDetails, type ExecJob, fmtDur, type LogSummaryFile, loggedOf, logSubdir,
   type PlanSummaryFile, plannedOf, progressEstimate, type ProgressFile, runControls, runFileHref, runFilesRel, runLabel, type RunView, sumProgress, type Tally,
-  expectedOf, verifyRun, viewBuckets, viewLive, viewState, joinRuns,
+  expectedOf, undoStatus, verifyRun, viewBuckets, viewLive, viewState, joinRuns,
 } from './runs'
-import { runHasNoUndo, runNoUndoText } from './softDelete'
+import { RecoveryUnavailable, RecoveryUnseen, UndoBy, UndoControl, UndoLine } from './RunUndo'
+import { runHasNoUndo, runNoUndoText, runUndoUnavailable, runUndoUnseen, UNDO_UNSEEN_WHO, undoUnseenText } from './softDelete'
+import { useSoftDeleteNow } from './SweepSoftDelete'
 
 const PAGE_SIZES = [20, 50, Infinity]
 const utc = (ts: number): string => new Date(ts * 1000).toISOString().slice(0, 16).replace('T', ' ')
@@ -118,6 +120,9 @@ export function RunsSection({ runs, jobs, configured, jobsError, admin, busy, ac
   const pg = Math.min(page, pages - 1)
   const shown = filtered.slice(pg * pageSize, (pg + 1) * pageSize)
   const [stopping, setStopping] = useState<ReadonlySet<string>>(new Set())
+  // What the buckets' soft delete is now: a recorded undo on one that is off can't be done (its control is disabled, with why),
+  // and one on a bucket nothing says of is stated as depending on it.
+  const softDelete = useSoftDeleteNow(CAPS.softDelete)
   const cols = 17
   const sortButton = (key: string, label: string) => <button type="button" className="run-sort" onClick={() => { setSort(key); setDirection(sort === key && direction === 'desc' ? 'asc' : 'desc'); setPage(0) }}>{label}{sort === key ? direction === 'asc' ? ' ▴' : ' ▾' : ''}</button>
 
@@ -174,7 +179,10 @@ export function RunsSection({ runs, jobs, configured, jobsError, admin, busy, ac
               const mode = r?.mode ?? (job?.mode === 'real' ? 'real' : 'dry')
               const state = viewState(v)
               const live = viewLive(v)
-              const ctl = runControls(v, CAPS, admin, now)
+              const deleted = deletedBuckets(v, Object.keys(planOf(v)?.file.buckets ?? {}))
+              const unavailable = r ? runUndoUnavailable(r, deleted, softDelete, now) : null
+              const unseen = r ? runUndoUnseen(r, deleted, softDelete, now) : null
+              const ctl = runControls(v, CAPS, admin, now, unavailable)
               const plan = planOf(v)?.tally
               const expected = expectedOf(v)
               const attempted = attemptOnly(planOf(v)?.file)
@@ -242,15 +250,7 @@ export function RunsSection({ runs, jobs, configured, jobsError, admin, busy, ac
                     <td className="num">{attempted && !r?.skipped_overwritten ? <Tooltip content={NOT_OBSERVABLE}><span className="dim">—</span></Tooltip> : r?.finished_ts ? fmtN(r.skipped_overwritten ?? 0) : <span className="dim">—</span>}</td>
                     <td className="num">{r?.finished_ts ? fmtN((r.drift_dirs ?? 0) + (r.ledger_drift_dirs ?? 0)) : <span className="dim">—</span>}</td>
                     <td><TimeCell ts={startedTs ?? undefined} /></td>
-                    <td className="nb">
-                      {mode === 'real' && r?.undo_deadline ? (
-                        <Tooltip content={`${utc(r.undo_deadline)} UTC`}>
-                          <span className={now >= r.undo_deadline ? 'dim' : undefined}>{now >= r.undo_deadline ? 'closed' : fmtDur(r.undo_deadline - now)}</span>
-                        </Tooltip>
-                      ) : r && runHasNoUndo(r) ? (
-                        <Tooltip content={runNoUndoText(r)}><span>none</span></Tooltip>
-                      ) : <span className="dim">—</span>}
-                    </td>
+                    <td className="nb"><UndoBy status={undoStatus(r, now, unavailable, unseen)} now={now} /></td>
                     <td className="nb links">
                       {r && <Link to={runHref(r.run_id)}>details</Link>}
                       {CAPS.runFiles && r && dir && <> · <Link to={runHref(r.run_id, 'plan')}>plan</Link></>}
@@ -269,10 +269,9 @@ export function RunsSection({ runs, jobs, configured, jobsError, admin, busy, ac
                           <button type="button" disabled={busy || stopping.has(jobId)} onClick={() => { setStopping(s => new Set([...s, jobId])); act({ action: 'stop', job_id: jobId }) }}>{stopping.has(jobId) ? 'stopping' : 'stop'}</button>
                         </Tooltip>
                       )}
-                      {ctl.undo && r && (
-                        <Tooltip content={`Restore what this run deleted (a Batch job; until ${r.undo_deadline ? `${utc(r.undo_deadline)} UTC` : 'its window closes'}).${attempted ? ` ${UNDO_CAVEAT}` : ''}${lowerBound.has(v.key) ? ` ${UNDO_LOG_ONLY}` : ''}`}>
-                          <button type="button" disabled={busy} onClick={() => act({ action: 'undo', run_id: r.run_id })}>undo</button>
-                        </Tooltip>
+                      {(ctl.undo || ctl.undoOff) && r && (
+                        <UndoControl off={ctl.undoOff} busy={busy} onUndo={() => act({ action: 'undo', run_id: r.run_id })}
+                          tip={`Restore what this run deleted (a Batch job; until ${r.undo_deadline ? `${utc(r.undo_deadline)} UTC` : 'its window closes'}).${unseen ? ` ${undoUnseenText(unseen)[0].toUpperCase()}${undoUnseenText(unseen).slice(1)}. ${UNDO_UNSEEN_WHO}` : ''}${attempted ? ` ${UNDO_CAVEAT}` : ''}${lowerBound.has(v.key) ? ` ${UNDO_LOG_ONLY}` : ''}`} />
                       )}
                       {ctl.purge && r && (
                         <Tooltip content="Permanently drop this run's deleted versions (irreversible; the undo window has closed).">
@@ -332,6 +331,12 @@ export function RunDetail({ run, live, progress, dir, planned, fmtBytes, now }: 
   const review = analytics.data?.review
   const breakdown = analytics.data?.result?.preserved_breakdown
   const decisionKeys = logged ? [...DECISION_ORDER.filter(k => k in logged.decisions), ...Object.keys(logged.decisions).filter(k => !DECISION_ORDER.includes(k)).sort()] : []
+  // The buckets it deleted from: its cut, else the ones its bands name (as the undo route reads them), else its plan summary's.
+  const bandBuckets = [...new Set(bands.map(b => bucketOfPrefix(b.prefix)))]
+  const buckets = deletedBuckets({ key: r.run_id, run: r, ops: [] }, bandBuckets.length ? bandBuckets : Object.keys(planned?.buckets ?? {}))
+  const softDelete = useSoftDeleteNow(CAPS.softDelete)
+  const unavailable = runUndoUnavailable(r, buckets, softDelete, now)
+  const unseen = runUndoUnseen(r, buckets, softDelete, now)
 
   return (
     <div className="run-detail">
@@ -347,7 +352,7 @@ export function RunDetail({ run, live, progress, dir, planned, fmtBytes, now }: 
         <div><dt>scan</dt><dd>{r.scan ?? '—'}{r.plan_digest ? <> · items <code>{r.plan_digest}</code></> : null}</dd></div>
         {r.min_soft_delete_days != null && <div><dt>soft-delete minimum</dt><dd>{r.min_soft_delete_days}d{r.soft_delete_days != null && <> · narrowest bucket {r.soft_delete_days}d</>}</dd></div>}
         {r.mode === 'real' && !CAPS.undoUnwindowed && <div><dt>undo</dt><dd>
-          {runHasNoUndo(r) ? <b>none</b> : r.undo_deadline ? <>recorded run deadline {utc(r.undo_deadline)} UTC {now < r.undo_deadline ? <span className="dim">(in {fmtDur(r.undo_deadline - now)})</span> : <span className="dim">(closed)</span>}</> : live ? 'recovery after stop and drain; final deadline not recorded yet' : 'no window recorded'}
+          <UndoLine status={undoStatus(r, now, unavailable, unseen)} now={now} live={live} />
           {' · '}state <b>{r.undo_state}</b>{r.purge_state && r.purge_state !== 'none' && <> · purge <b>{r.purge_state}</b></>}{lower && <span className="dim"> · {UNDO_LOG_ONLY}</span>}
         </dd></div>}
         {r.log_dir && <div><dt>run dir</dt><dd><code>{r.log_dir}</code></dd></div>}
@@ -375,9 +380,10 @@ export function RunDetail({ run, live, progress, dir, planned, fmtBytes, now }: 
         {CAPS.undoUnwindowed ? <p>Recovery depends on the bucket’s versioning and retention settings. This deletion may be permanent; a recorded run deadline does not guarantee recovery.</p> : runHasNoUndo(r) ? <>
         <p>{runNoUndoText(r)} A bucket that retained its soft deletes (per bucket, below) can still be restored from the CLI.</p>
         <code>dt-cloud sweep undo -b BUCKET {r.run_id}</code>
-        </> : <>
+        </> : unavailable ? <RecoveryUnavailable unavailable={unavailable} buckets={buckets} runId={r.run_id} /> : <>
         <p>{live ? 'Stop and drain this run before restoring. Its committed decision logs retain exact generations; a restore during deletion could be deleted again.' : 'The web undo control restores the entire run. The CLI can restrict recovery to a selected prefix.'}</p>
         <p className="dim">Retention starts separately when each object is deleted, not at run completion. Empty at a scan does not establish that this run deleted it.{conservativeDeadline(r) != null && <> Conservative cutoff for this run: {utc(conservativeDeadline(r)!)} UTC. Later deletions may remain recoverable longer; the stored run deadline is not an object-level guarantee.</>}{attempted && <> Undo restores every logged generation. {UNDO_CAVEAT}</>}</p>
+        {unseen && <RecoveryUnseen unseen={unseen} />}
         <code>dt-cloud sweep undo -p gs://BUCKET/PREFIX/ {r.run_id}</code>
         </>}
       </section>}
