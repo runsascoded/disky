@@ -40,13 +40,20 @@ describe('digest reply goldens', () => {
   it('a candidate puts each pool on its own line, changing nothing else', async () => {
     const f = Object.fromEntries(await fixtures())['runway-hue-sender.json']
     const lined = replies(f.rows, f.cfg, f.reply, f.variant, { lines: true })
-    expect(lined).toEqual(f.replies.map(r => ({ ...r, body: r.body.replaceAll(' · ', '\n') })))
-    expect(lined.every(r => r.body.includes('\n'))).toBe(true)
+    const onLines = (r: RenderedReply): string => {
+      const parts = r.body.split(' · ')
+      return r.icon_emoji ? `${parts.slice(0, 2).join(' · ')}\n${parts.slice(2).join('\n')}` : parts.join('\n') // a provisional reply's "as of" stays on its headline
+    }
+    expect(lined).toEqual(f.replies.map(r => ({ ...r, body: onLines(r) })))
   })
   it('a candidate\'s collage avatar has a tile per pool the reply marks, in its order, of the same step', async () => {
     const f = Object.fromEntries(await fixtures())['runway-hue-sender.json']
     const collaged = replies(f.rows, f.cfg, f.reply, f.variant, { collage: true })
     for (const [r, plain] of collaged.map((r, i) => [r, f.replies[i]] as const)) {
+      if (plain.icon_emoji) {
+        expect(r).toEqual(plain) // a provisional reply keeps its hourglass
+        continue
+      }
       expect(r.icon_url).toBeNull()
       const steps = [...plain.body.matchAll(/:runway-(?:[a-z]+-)?(\d):/g)].map(m => Number(m[1]))
       expect(r.icon_cells!.map(c => c.n)).toEqual(steps)
