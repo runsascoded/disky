@@ -2,7 +2,7 @@ import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { MutationObserver, QueryClient, QueryClientProvider, type QueryObserverOptions } from '@tanstack/react-query'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { EXEC_JOBS_KEY, JOBS_REFRESH_MS, runActionOptions, usePrefixHistory } from './plans'
+import { dispatchOptions, type DispatchVars, EXEC_JOBS_KEY, JOBS_REFRESH_MS, runActionOptions, usePrefixHistory } from './plans'
 import { QUERY_DEFAULTS } from './queryDefaults'
 import { EXEC_CAPS, joinRuns, runControls, type DeletionRun, type ExecJob } from './runs'
 
@@ -109,5 +109,48 @@ describe('a run control (stop / undo / purge) and the jobs list its feedback com
       [['/api/plan-sweep/undo', 'POST', undefined], ['/api/plan-sweep/jobs', 'GET', 'reload']],
     ])
     client.clear()
+  })
+})
+
+// The guard at the call itself, whatever the page's controls did. `sized`: the scan the page's sizes were read at, so the
+// one its checkable rows, its buckets, its machine and its `expected` come from; `date`: the scan the run reads.
+describe('a dispatch goes out only from a page sized at the scan its run reads', () => {
+  afterEach(() => vi.unstubAllGlobals())
+
+  const NEW = '2026-11-05T0702', OLD = '2026-11-04T0703'
+  const REAL: DispatchVars = { mode: 'real', date: NEW, sized: NEW, items: ['gs://b/x/', '=gs://b/y'], shownMinSoftDeleteDays: 7, expected: { bytes: 1000, objects: 10 } }
+  const DRY: DispatchVars = { mode: 'dry', date: NEW, sized: NEW, items: ['gs://b/x/'], buckets: ['b'], machine: 'n2-highmem-8', expected: { bytes: 600, objects: 6 } }
+  const SAID = 'Sizes are shown at scan 2026-11-04T0703. A run reads the newest scan, 2026-11-05T0702. Switch "sized at scan" back to 2026-11-05T0702 to dispatch.'
+  /** `vars` dispatched on plan `planId`: every request made, as `[url, method, body]`, and the error the page shows. */
+  const dispatched = async (planId: number | null, vars: DispatchVars) => {
+    const calls: [string, string, unknown][] = []
+    vi.stubGlobal('fetch', async (url: string, init: RequestInit) => {
+      calls.push([url, init.method!, init.body ? JSON.parse(init.body as string) : undefined])
+      return new Response(JSON.stringify(init.method === 'POST' ? { job_id: 'job-1' } : { jobs: [], configured: true }))
+    })
+    const client = new QueryClient()
+    const action = new MutationObserver(client, dispatchOptions(client, planId))
+    await action.mutate(vars).catch(() => undefined)
+    client.clear()
+    return { posts: calls.filter(c => c[1] === 'POST'), error: action.getCurrentResult().error?.message ?? null }
+  }
+
+  it('sized at the scan the run reads: posted, real or dry, with the expected size read at that scan', async () => {
+    expect([await dispatched(7, REAL), await dispatched(7, DRY)]).toEqual([
+      { posts: [['/api/plan-sweep/dispatch', 'POST', { plan_id: 7, mode: 'real', date: NEW, items: ['gs://b/x/', '=gs://b/y'], shown_min_soft_delete_days: 7, expected: { bytes: 1000, objects: 10 } }]], error: null },
+      { posts: [['/api/plan-sweep/dispatch', 'POST', { plan_id: 7, mode: 'dry', date: NEW, items: ['gs://b/x/'], buckets: ['b'], machine: 'n2-highmem-8', expected: { bytes: 600, objects: 6 } }]], error: null },
+    ])
+  })
+  it('sized at an older scan: nothing is posted, real or dry, and the error is what the controls say', async () => {
+    expect([await dispatched(7, { ...REAL, sized: OLD }), await dispatched(7, { ...DRY, sized: OLD })]).toEqual([
+      { posts: [], error: SAID },
+      { posts: [], error: SAID },
+    ])
+  })
+  it('nothing staged, or nothing checked: nothing is posted, as before', async () => {
+    expect([await dispatched(null, REAL), await dispatched(7, { ...REAL, items: [] })]).toEqual([
+      { posts: [], error: 'nothing staged' },
+      { posts: [], error: 'nothing selected' },
+    ])
   })
 })

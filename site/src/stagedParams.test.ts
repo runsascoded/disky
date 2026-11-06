@@ -151,4 +151,18 @@ describe('the URL holds /staged\'s view, never what a deletion acts on', () => {
     // The selection hook reads no URL: its only inputs are the rows on screen.
     expect([...src('rowSelection.ts').matchAll(/from '([^']+)'/g)].map(m => m[1])).toEqual(['react', 'use-kbd', 'use-kbd'])
   })
+  // `?d=` is the one key that reaches a run's inputs (the rows that can be checked, the confirm's total): the page
+  // dispatches nothing while it is sized at a scan the run doesn't read (`stagedScan.test.ts`, `plans.test.ts`).
+  it('the scan: one rule turns both run controls off, hides an armed confirm, and is restated to every dispatch', () => {
+    const page = src('StagedPage.tsx')
+    const def = (name: string) => new RegExp(`const ${name} = ([^\\n]+)`).exec(page)?.[1]
+    expect([def('date'), def('runScan'), def('noRun'), def('confirming')]).toEqual(['sizedScan(scans, pickedScan(dP, scans))', "scans[0] ?? ''", 'sizedAtOldScan(date, runScan)', 'armed && !noRun'])
+    expect([...page.matchAll(/<RunButton off=\{(\w+)\} className="(\w+)"/g)].map(m => [m[1], m[2]])).toEqual([['noRun', 'dry'], ['noRun', 'danger']])
+    // Every place the page arms or dispatches: each dispatch names the scan its run reads and the one the page is sized at.
+    expect([...page.matchAll(/setArmed\(true\)|dispatch\.mutate\((?:\{ mode: '\w+', date: \w+, sized: \w+,)?/g)].map(m => m[0])).toEqual([
+      "dispatch.mutate({ mode: 'dry', date: runScan, sized: date,",
+      'setArmed(true)',
+      "dispatch.mutate({ mode: 'real', date: runScan, sized: date,",
+    ])
+  })
 })

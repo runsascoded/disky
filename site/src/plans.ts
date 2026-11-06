@@ -4,7 +4,7 @@ import { DEFAULT_STORE } from './stores'
 import { type DeletionRun, EXEC_CAPS, type ExecCaps, type ExecJob } from './runs'
 import { HttpError, type PlanItem, stageMany as stageManyVia } from './batches'
 import { SWEEP_SETTINGS_KEY } from './softDelete'
-import type { ScanDeletion } from './stagedScan'
+import { type ScanDeletion, sizedAtOldScan } from './stagedScan'
 
 export type { DeletionRun, ExecJob } from './runs'
 export { LIVE_STATES } from './runs'
@@ -238,19 +238,37 @@ export function useUnstage(planId: number | null) {
 /** Dispatch the selected items to the deployment's executor (admin). A dry run
  *  previews deletions and is optional; recovery depends on the store. */
 export function useDispatch(planId: number | null) {
-  const qc = useQueryClient()
-  return useMutation<{ job_id: string }, Error, { mode: 'dry' | 'real'; date?: string; items: string[]; buckets?: string[]; machine?: string; shownMinSoftDeleteDays?: number; expected?: { bytes: number; objects: number } }>({
-    mutationFn: ({ mode, date, items, buckets, machine, shownMinSoftDeleteDays: shown, expected }) => {
-      if (planId == null) throw new Error('nothing staged')
-      if (!items.length) throw new Error('nothing selected')
-      // `items`: exactly the rows checked (an object as `=<key>`); the run never acts on more (specs/done/delete-what-you-see.md)
-      return call(`${EXEC_API}/dispatch`, 'POST', { plan_id: planId, mode, date, items, ...(buckets ? { buckets } : {}), ...(machine ? { machine } : {}), ...(shown !== undefined ? { shown_min_soft_delete_days: shown } : {}), ...(expected ? { expected } : {}) })
-    },
-    onSuccess: () => { void qc.invalidateQueries({ queryKey: ['plans'] }); void qc.invalidateQueries({ queryKey: EXEC_JOBS_KEY }) },
-    // A refusal over stale terms says to re-read them, so bring the ones on the page up to date.
-    onError: () => { void qc.invalidateQueries({ queryKey: SWEEP_SETTINGS_KEY }) },
-  })
+  return useMutation(dispatchOptions(useQueryClient(), planId))
 }
+
+/** One dispatch, as `/staged` sends it. `date`: the scan the run reads (the newest). `sized`: the scan the page's sizes
+ *  were read at, so the one its checkable rows (`items`), `buckets`, `machine` and `expected` come from. */
+export interface DispatchVars {
+  mode: 'dry' | 'real'
+  date: string
+  sized: string
+  items: string[]
+  buckets?: string[]
+  machine?: string
+  shownMinSoftDeleteDays?: number
+  expected?: { bytes: number; objects: number }
+}
+
+/** `useDispatch`'s mutation. It refuses, with nothing posted, a dispatch from a page sized at a scan other than the one
+ *  the run reads (`sizedAtOldScan`), whatever the page's controls did: the refusal is the dispatch's error. */
+export const dispatchOptions = (qc: QueryClient, planId: number | null): UseMutationOptions<{ job_id: string }, Error, DispatchVars> => ({
+  mutationFn: ({ mode, date, sized, items, buckets, machine, shownMinSoftDeleteDays: shown, expected }) => {
+    if (planId == null) throw new Error('nothing staged')
+    if (!items.length) throw new Error('nothing selected')
+    const refused = sizedAtOldScan(sized, date)
+    if (refused) throw new Error(refused)
+    // `items`: exactly the rows checked (an object as `=<key>`); the run never acts on more (specs/done/delete-what-you-see.md)
+    return call(`${EXEC_API}/dispatch`, 'POST', { plan_id: planId, mode, date, items, ...(buckets ? { buckets } : {}), ...(machine ? { machine } : {}), ...(shown !== undefined ? { shown_min_soft_delete_days: shown } : {}), ...(expected ? { expected } : {}) })
+  },
+  onSuccess: () => { void qc.invalidateQueries({ queryKey: ['plans'] }); void qc.invalidateQueries({ queryKey: EXEC_JOBS_KEY }) },
+  // A refusal over stale terms says to re-read them, so bring the ones on the page up to date.
+  onError: () => { void qc.invalidateQueries({ queryKey: SWEEP_SETTINGS_KEY }) },
+})
 
 /** A run control: stop (the run's Batch job) or undo / purge (the run). */
 export type RunAction = { action: 'stop'; job_id: string } | { action: 'undo' | 'purge'; run_id: string }

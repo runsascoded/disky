@@ -4,7 +4,9 @@
 //
 // The URL holds the view, never what a deletion acts on. The checked rows, the armed confirm and the bucket cut are
 // component state (`StagedPage`): a link must not open with rows selected, a delete armed or a run narrowed, so
-// whoever dispatches has checked every row by hand, on the page they are looking at (`stagedParams.test.ts`).
+// whoever dispatches has checked every row by hand, on the page they are looking at (`stagedParams.test.ts`). One
+// param does reach a run's inputs, the scan the page is sized at (`?d=`: which rows can be checked, the confirm's total),
+// so a page sized at any scan but the one a run reads dispatches nothing (`stagedScan.ts` `sizedAtOldScan`).
 //
 // Values use only what a query string leaves bare (`URLSearchParams`: letters, digits, `*-._`): the scroll-spy
 // re-serializes the whole query each time it names a section.
