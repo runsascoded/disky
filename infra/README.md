@@ -11,6 +11,8 @@ Pulumi components, one directory per provider, shared by every deployment, plus 
 
 Two rules hold across `gcp/`: secret **values** are never managed (containers and IAM only; payloads go in with `gcloud secrets versions add`), and IAM is additive (`IAMMember`), so a stack can't clobber anyone else's grants on a shared project or bucket.
 
+A `BatchCron`'s body is posted by Cloud Scheduler, past `dt-cloud`'s own label check, so the component checks it itself (`check_cron_labels`): a submitter whose spec lacks the stack's `$DISKY_LABELS` or a `component` on the job's `labels` or on `allocationPolicy.labels` fails the preview. Batch puts only the allocation policy's labels on a job's VMs and disks, which is what the billing export attributes. A stack with no labels (`DISKY_LABELS=''`) checks nothing.
+
 `gcp/task_logs.py` provides `TaskLogView`: a reusable `batch_task_logs` view restricted to a deployment's Batch job UID prefix, plus an additive `roles/logging.viewAccessor` grant on that view only. It does not grant project-wide log access or change retention/sinks. The gcs stack exports `task_log_view`; put that full resource name in the site's `GCP_LOG_VIEW` var. The authenticated `/api/sweep/logs` reader resolves an exact sweep job's UID from Batch and queries that view with fixed time bounds and 50-entry pages. Run pages poll every ten seconds while active, with a 500-entry panel limit; Logs Explorer remains available for full history.
 
 ## Running a stack

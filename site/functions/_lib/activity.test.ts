@@ -35,6 +35,8 @@ describe('kinds', () => {
       ['POST /api/auth/grants', 'access'],
       ['POST /api/og/mint', 'access'],
       ['PATCH /api/db/allowed_emails', 'admin'],
+      ['POST /api/admins', 'admin'],
+      ['DELETE /api/admins', 'admin'],
       ['PUT /api/session-log/switch', 'admin'],
       ['PUT /api/activity/kinds/view', 'admin'],
       ['PUT /api/digest-settings', 'admin'],

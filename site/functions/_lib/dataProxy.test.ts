@@ -52,7 +52,7 @@ describe('optional files', () => {
   })
 })
 
-// specs/path-scopes.md: `rules.json` is the identity roster (`users`) and the attribution rules (`prefix_owners`:
+// `_lib/restrict.ts`: `rules.json` is the identity roster (`users`) and the attribution rules (`prefix_owners`:
 // a prefix, its owner, a note).
 describe('D1', () => {
   describe('`rules.json`, as a path-restricted link', () => {

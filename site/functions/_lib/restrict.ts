@@ -1,5 +1,5 @@
 /**
- * Path scopes (specs/path-scopes.md): a share link whose grant carries
+ * Path scopes: a share link whose grant carries
  * `<tag>:hide:<prefix>` sees `<prefix>` as one cell (its own row, with its
  * aggregate size) and nothing strictly below it.
  *
@@ -109,6 +109,15 @@ export const isHidden = (path: string, r: Restriction): boolean => {
 /** Whether `path` is a hidden dir itself (shown, but as a leaf). */
 export const isHideRoot = (path: string, r: Restriction): boolean => r.hide.includes(norm(path))
 
+/** Whether a read of `path` under an owner, class or lens scope would break down what `r` hides: `path` is a hidden dir
+ *  or above one. Its hidden cell would be the scope's share of the dir's contents, and its total, less its visible
+ *  children's, the same; a sum can't be filtered on the way out, so the routes refuse it (`restrictedScopeRefused`). An
+ *  unscoped total reveals only the dir's size, which the link shows. */
+export const scopeReachesHidden = (path: string, r: Restriction): boolean => {
+  const p = norm(path)
+  return r.hide.some(h => !p || h === p || h.startsWith(`${p}/`))
+}
+
 const join = (a: string, b: string): string => (a ? (b ? `${a}/${b}` : a) : b)
 
 /** `node` (at store path `path`) with hidden dirs' contents removed: a
@@ -125,28 +134,14 @@ export function restrictTree(node: ViewNode, path: string, r: Restriction): View
   return { ...node, c }
 }
 
-/** The search fields of a subtree/diff body (`matches`, `matched`,
- *  `excluded`), hidden paths removed. */
-function restrictSearch<T extends object>(body: T, r: Restriction): T {
-  const b = body as Record<string, unknown>
-  const out: Record<string, unknown> = { ...b }
-  if (Array.isArray(b.matches)) out.matches = (b.matches as string[]).filter(p => !isHidden(p, r))
-  if (Array.isArray(b.matched)) out.matched = (b.matched as { path: string }[]).filter(m => !isHidden(m.path, r))
-  if (Array.isArray(b.excluded)) out.excluded = (b.excluded as string[]).filter(p => !isHidden(p, r))
-  // The search's exact totals (`matchCount`: every match, beyond the listed ones) count hidden hits and
-  // can't be recounted from the body: dropped, as on a view without them.
-  delete out.matchCount
-  return out as T
-}
-
 /** A `/api/subtree` body for a restricted viewer. */
 export function restrictSubtree<T extends { path: string; tree: ViewNode }>(body: T, r: Restriction): T {
-  return restrictSearch({ ...body, tree: restrictTree(body.tree, body.path, r) }, r)
+  return { ...body, tree: restrictTree(body.tree, body.path, r) }
 }
 
 /** A `/api/diff` body for a restricted viewer: rows are relative to `path`. */
 export function restrictDiff<T extends { path: string; rows: { p: string }[] }>(body: T, r: Restriction): T {
-  return restrictSearch({ ...body, rows: body.rows.filter(row => !isHidden(join(norm(body.path), row.p), r)) }, r)
+  return { ...body, rows: body.rows.filter(row => !isHidden(join(norm(body.path), row.p), r)) }
 }
 
 /** A JSON response re-emitted through `fn` (same status and headers); a
@@ -163,6 +158,15 @@ const plain = (msg: string, status: number): Response => new Response(msg, { sta
 
 /** 404 for a request naming a hidden path (as if it didn't exist). */
 export const hiddenNotFound = (): Response => plain('path not found', 404)
+
+const refused = (error: string, code: string): Response =>
+  new Response(JSON.stringify({ error, code }) + '\n', { status: 403, headers: { 'content-type': 'application/json; charset=utf-8' } })
+
+/** 403 for a name filter: its sums count hidden hits. Its `code` is a refusal the client states as its reason (`filterCaps.ts`). */
+export const restrictedSearchRefused = (): Response => refused('search isn’t available on this link', 'restricted-search')
+
+/** 403 for an owner, class or lens scope at or above a hidden dir (`scopeReachesHidden`); a refusal, as above. */
+export const restrictedScopeRefused = (): Response => refused('this owner, class or user view isn’t available here on this link', 'restricted-scope')
 
 /** 403 for a route a restricted link can't use (raw bytes, D1 path lists). */
 export const restrictedForbidden = (): Response =>

@@ -224,6 +224,9 @@ async function prepare(env: ExecEnv, db: D1Database, req: DispatchReq): Promise<
   if (!snapshot.sweep.length && !snapshot.objects?.length) return refuse(400, 'plan has no items to sweep')
   const buckets = bucketCut(snapshot.buckets, requested)
   if (!buckets.length) return refuse(400, 'buckets name none of the plan\'s', { plan_buckets: snapshot.buckets })
+  // Beside the cut's buckets, or (a cut in no one region) in the deployment's: there is no other default.
+  const region = batchRegionFor(cfg, buckets)
+  if (!region) return refuse(503, notConfigured('dispatch', 'BATCH_REGION'), { buckets })
   // The run acts on the items in its cut: that set is what the digest names.
   const prefixes = digestLines([
     ...snapshot.sweep.map(key => ({ key, kind: 'prefix' as const })),
@@ -240,7 +243,6 @@ async function prepare(env: ExecEnv, db: D1Database, req: DispatchReq): Promise<
 
   const launch: Prepared['launch'] = async (date, digest, reviewed) => {
     const reuse = req.mode === 'real' ? reusableRunDir(cfg, reviewed) : undefined
-    const region = batchRegionFor(cfg, buckets)
     const jobId = `gcs-sweep-${req.mode}-${jobStampOf(new Date())}z`
     const plan = runDir(cfg, jobId)
     const script = sweepScript({ cfg, mode: req.mode, jobId, buckets, plan: planJsonPath(cfg, jobId), store: holdStore(env, cfg), reviewed: reuse, pacing, minSoftDeleteDays: minDays })

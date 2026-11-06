@@ -86,23 +86,9 @@ describe('restrictTree / restrictSubtree / restrictDiff', () => {
     const ryan: ViewNode = { n: 'ryan', k: 'dir', b: 160, o: 5, c: [TREE] }
     expect(restrictTree(ryan, 'Users/ryan', r).c![0].c![0]).toEqual({ n: '2025 tax returns', k: 'dir', b: 100, o: 3 })
   })
-  it('search fields drop hidden paths', () => {
-    const body = {
-      path: 'Users/ryan/Downloads', tree: TREE, q: 'pdf',
-      matches: [`${HIDE}/1040.pdf`, 'Users/ryan/Downloads/notes.txt'],
-      matched: [{ path: `${HIDE}/1040.pdf`, b: 60, o: 1 }, { path: 'Users/ryan/Downloads/notes.txt', b: 10, o: 1 }],
-      excluded: [`${HIDE}/W2.pdf`],
-    }
-    const out = restrictSubtree(body, r)
-    expect([out.matches, out.matched, out.excluded]).toEqual([
-      ['Users/ryan/Downloads/notes.txt'],
-      [{ path: 'Users/ryan/Downloads/notes.txt', b: 10, o: 1 }],
-      [],
-    ])
-  })
-  it('search totals that count hidden hits (`matchCount`) are dropped; the rest of the body is kept as is', () => {
-    const body = { path: 'Users/ryan/Downloads', tree: TREE, q: 'pdf', matches: [], matched: [], matchCount: { n: 3, b: 70, o: 3 }, firstPaint: true }
-    expect(restrictSubtree(body, r)).toEqual({ path: 'Users/ryan/Downloads', tree: restrictTree(TREE, 'Users/ryan/Downloads', r), q: 'pdf', matches: [], matched: [], firstPaint: true })
+  it('only the tree is filtered: a name filter is refused before any body (`api/restrictedFilter.test.ts`), so nothing here filters search fields', () => {
+    const body = { path: 'Users/ryan/Downloads', tree: TREE, firstPaint: true, matches: ['kept'], matchCount: { n: 3, b: 70, o: 3 } }
+    expect(restrictSubtree(body, r)).toEqual({ ...body, tree: restrictTree(TREE, 'Users/ryan/Downloads', r) })
   })
   it('diff rows are relative to the diff’s path', () => {
     const rows = [

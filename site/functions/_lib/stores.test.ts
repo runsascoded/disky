@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import type { Env } from './auth'
 import { requireViewer } from './auth'
 import { cacheKeyFor } from './edgeCache'
@@ -174,7 +174,12 @@ describe('withStore', () => {
     expect(await res('store=Me%2Fta')).toEqual([400, '{"error":"bad store"}\n'])
     // an inherited property of the parsed object is no store
     expect(await res('store=constructor')).toEqual([404, '{"error":"unknown store \'constructor\'"}\n'])
-    expect(await res('store=meta', { STORES_JSON: '{' } as Env)).toEqual([500, `{"error":"STORES_JSON: ${(() => { try { JSON.parse('{') } catch (e) { return (e as Error).message } })()}"}\n`])
+    // Before the gate: a config that doesn't parse says so and no more (JSON.parse's message quotes a fragment of the config).
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const SECRETISH = '{"meta": {"vars": {"STORE_BUCKET": "a-private-bucket-name"'
+    expect(await res('store=meta', { STORES_JSON: SECRETISH } as Env)).toEqual([500, '{"error":"store configuration error"}\n'])
+    expect(log.mock.calls).toEqual([[`STORES_JSON: ${(() => { try { JSON.parse(SECRETISH) } catch (e) { return (e as Error).message } })()}`]])
+    log.mockRestore()
   })
   it('primaryOnly: null for the primary, a 404 for another store', async () => {
     expect(primaryOnly({ request: req('date=2026-09-01') })).toBe(null)
@@ -260,6 +265,6 @@ describe('handlers', () => {
     expect([r.status, await r.text()]).toEqual([401, '{"error":"unauthenticated"}\n'])
     // Localhost dev holds every scope, `admin` included.
     const dev = await requireViewer({ request: new Request('http://localhost/api/subtree?store=meta'), env: storeEnv(PRIMARY, 'meta', META) })
-    expect(dev).toEqual({ email: 'dev@example.test', name: null, scopes: ['gcs', 'cw', 'admin', 'requests', 'cw:assign'], admin: true, via: 'session', subject: null })
+    expect(dev).toEqual({ email: 'dev@example.test', name: null, scopes: ['gcs', 'cw', 'admin', 'cw:assign'], admin: true, via: 'session', subject: null })
   })
 })

@@ -7,6 +7,7 @@ schedule: "5 * * * *"
 gcp:
   project: oa-internal-450019
   service_account: gcs-usage-job@oa-internal-450019.iam.gserviceaccount.com
+  region: us-central1
   job: gcs-sheet-sync
   trigger: gcs-sheet-sync-hourly
 

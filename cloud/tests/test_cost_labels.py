@@ -228,7 +228,7 @@ def _submit_cli(monkeypatch, tmp_path, *args):
     from dt_cloud import batch
 
     posted = []
-    monkeypatch.setattr(batch, "submit_job", lambda spec, job_id, region, project: posted.append((spec, job_id, region, project)) or job_id)
+    monkeypatch.setattr(batch, "submit_job", lambda spec, job_id, region, project, buckets, cross_region: posted.append((spec, job_id, region, project)) or job_id)
     spec = tmp_path / "spec.json"
     spec.write_text(json.dumps({
         "taskGroups": [{"taskSpec": {"runnables": [{"container": {"imageUri": "img", "commands": ["true"]}}],
@@ -253,11 +253,10 @@ def test_batch_submit_cli_round_trip(labeled, monkeypatch, tmp_path):
     }, "sn-race-1", "us-east1", "proj")]
 
 
-def test_batch_submit_cli_defaults_region(labeled, monkeypatch, tmp_path):
-    from dt_cloud.gcp import REGION
-
+def test_batch_submit_cli_region_is_the_deployments(labeled, monkeypatch, tmp_path):
+    """No `-L`: `$BATCH_REGION` (the tests' is `my-region`); neither is an error (`test_batch_region.py`)."""
     r, posted = _submit_cli(monkeypatch, tmp_path, "-c", "analysis")
-    assert (r.exit_code, [(job_id, region, project) for _, job_id, region, project in posted]) == (0, [("sn-race-1", REGION, None)])
+    assert (r.exit_code, [(job_id, region, project) for _, job_id, region, project in posted]) == (0, [("sn-race-1", "my-region", None)])
 
 
 def test_batch_submit_cli_refuses_unlabelled(monkeypatch, tmp_path):
@@ -351,7 +350,7 @@ def test_append_job_uses_actual_catch_up_scan_not_parent_scan(labeled, monkeypat
                     prune=lambda _: None, publish=lambda _: None)
     _, spec = runner.job("anchors", "2026-10-12T2006", 1, "static_anchors", ["run"])
     want = {**DEPLOY, "component": "anchors", "scan_run": "root-uid", "scan_id": "2026-10-12t2006", "stage": "anchors"}
-    assert spec["allocationPolicy"]["labels"] == want
+    assert labels_of(spec) == ({**want, "purpose": "static-names", "gen": "g1"}, want)
     assert spec["taskGroups"][0]["taskSpec"]["environment"]["variables"] == {
         "STATIC_NAMES_BUCKET": "data", "STATIC_NAMES_SCRATCH": "scr",
         "DISKY_LABELS": "app=disky, deployment=gcs", "SCAN_RUN_ID": "root-uid", "SCAN_ID": "2026-10-12T2006",

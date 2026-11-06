@@ -7,13 +7,13 @@
  *
  * Notes are per store: `store=` as every data request carries it (none = the primary, `primary`), a secondary
  * store's key, or a union view's. A secondary store's notes need its viewer scope (`STORES_JSON` `scope`, e.g.
- * `/meta`'s `admin`), as its data does. A path-restricted link (specs/path-scopes.md) reads no note pinned strictly
+ * `/meta`'s `admin`), as its data does. A path-restricted link (`_lib/restrict.ts`) reads no note pinned strictly
  * below a path its store hides (a union view's: below any store's hidden path); the store's own notes, and one on
  * the hidden dir itself, it reads as anyone does. A D1 without the table (migration `chart-annotations` not
  * applied) reads as `{annotations: [], applied: false}`, and a write is a 503 naming the migration. Not
  * edge-cached: one indexed D1 read, and an admin's write must show at once. */
 import { type Ctx, json, requireAdmin, requireViewer } from '../_lib/auth.js'
-import { PRIMARY_STORE, requestedStore, StoreConfigError, unionViews, withStore } from '../_lib/stores.js'
+import { PRIMARY_STORE, requestedStore, StoreConfigError, storeConfigResponse, unionViews, withStore } from '../_lib/stores.js'
 import { addNote, deleteNote, editNote, listNotes, missingScope, missingTable } from '../_lib/annotations.js'
 import { type AnnotationsBody, type NoteFields, parseNote } from '../_lib/annotationShape.js'
 import { noteActivity } from '../_lib/activityHook.js'
@@ -33,7 +33,7 @@ function noteStore(ctx: Ctx): { key: string; ctx: Ctx; union?: true } | Response
   try {
     if (unionViews(ctx.env)[key]) return { key, ctx, union: true }
   } catch (e) {
-    if (e instanceof StoreConfigError) return json({ error: e.message }, 500)
+    if (e instanceof StoreConfigError) return storeConfigResponse(e)
     throw e
   }
   const sc = withStore(ctx)

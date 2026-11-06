@@ -116,7 +116,7 @@ describe('/api/annotations', () => {
     ])
   })
 
-  // specs/path-scopes.md: a link's `<tag>:hide:<prefix>` shows `<prefix>` as one cell and nothing strictly below it.
+  // `_lib/restrict.ts`: a link's `<tag>:hide:<prefix>` shows `<prefix>` as one cell and nothing strictly below it.
   describe('a path-restricted link', () => {
     const note = (id: number, path: string | null) => ({ ...NOTE, id, text: `n${id}`, path })
     const NOTES = [note(1, null), note(2, 'bk/open/x'), note(3, 'bk/secret'), note(4, 'bk/secret/plans/q4'), note(5, 'bk/secretive')]
@@ -209,6 +209,17 @@ describe('/api/annotations', () => {
       [400, { error: 'id: want an integer' }],
       [400, { error: 'id: want an integer' }],
     ])
+  })
+})
+
+describe('/api/annotations under a `STORES_JSON` that doesn\'t parse', () => {
+  it('a 500 that quotes nothing of it, before the gate; the detail goes to the log', async () => {
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const STORES_JSON = '{"meta": {"vars": {"STORE_BUCKET": "a-private-bucket-name"'
+    const res = await onRequest({ request: new Request('https://site.example.test/api/annotations?store=meta'), env: { DB: {}, STORES_JSON } } as never)
+    expect([res.status, await res.text()]).toEqual([500, '{"error":"store configuration error"}\n'])
+    expect(log.mock.calls).toEqual([[`STORES_JSON: ${(() => { try { JSON.parse(STORES_JSON) } catch (e) { return (e as Error).message } })()}`]])
+    log.mockRestore()
   })
 })
 

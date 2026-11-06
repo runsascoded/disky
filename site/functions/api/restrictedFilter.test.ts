@@ -14,7 +14,8 @@ vi.mock('@rdub/file-tree/stores/s3', async () => ({ S3Store: (await import('../_
 // So it is refused: otherwise the link could probe a hidden directory's contents by name. The deployment:
 // `_lib/testUnion.ts`'s primary (roots `bk`, `zz`), with the static name index a stub whose `ckpt` is `bk/ckpt`.
 
-const FORBIDDEN = [403, '{"error":"forbidden for a path-restricted link"}\n']
+const SEARCH_REFUSED = [403, '{"error":"search isn’t available on this link","code":"restricted-search"}\n']
+const SCOPE_REFUSED = [403, '{"error":"this owner, class or user view isn’t available here on this link","code":"restricted-scope"}\n']
 const hit = (path: string, size: number): Hit => ({ path, depth: path.split('/').length, usr: '', vf: 0, vt: Number.MAX_SAFE_INTEGER, size: BigInt(size), n: 1n })
 const INDEX: StaticFilterStore = {
   gen: 'gen-primary',
@@ -51,7 +52,7 @@ describe('D1', () => {
       await get(diff, DIFF, restricted),
       await get(series, SERIES, restricted),
       await get(subtree, `/api/subtree?date=${A}&w=1280&h=768&q=nomatch`, restricted),
-    ]).toEqual([FORBIDDEN, FORBIDDEN, FORBIDDEN, FORBIDDEN])
+    ]).toEqual([SEARCH_REFUSED, SEARCH_REFUSED, SEARCH_REFUSED, SEARCH_REFUSED])
   })
 
   it('a union root\'s name filter: refused when its members refuse, whichever member\'s index holds the match', async () => {
@@ -60,7 +61,7 @@ describe('D1', () => {
     injectedStores.set(union, INDEX)
     const { token } = await gateFor(union)!.mint({ email: null, scopes: ['gcs:read', hideScope('gcs', 'bk'), hideScope('meta', 'mb')], name: 'link', createdBy: 'test', expiresAt: null, maxRedeems: null })
     const r = await subtree({ request: new Request(`https://site.example.test/api/subtree?at=2026-10-01T00:01:00.000Z&w=1280&h=768&q=ckpt`, { headers: { authorization: `Bearer ${token}` } }), env: union })
-    expect([r.status, await r.text()]).toEqual(FORBIDDEN)
+    expect([r.status, await r.text()]).toEqual(SEARCH_REFUSED)
   })
 
   it('the same link without its restriction gets the filter\'s answer, and the restricted one its plain views', async () => {
@@ -73,5 +74,44 @@ describe('D1', () => {
       get(series, '/api/series', restricted),
     ])
     expect(statuses.map(([s]) => s)).toEqual([200, 200, 200, 200, 200, 200])
+  })
+
+  // An owner, class or lens scope narrows a sum to what's below the path, and a sum can't be filtered on the way out:
+  // a hidden dir's own cell under `o=`/`cl=`/`lens=` is the split of what it hides (`scopeReachesHidden`). So is an
+  // ancestor's: its scoped total, less its visible children's, is the hidden dir's.
+  describe('an owner, class or lens scope', () => {
+    const SCOPES = ['o=*', 'o=', 'o=!someone', 'cl=n', 'lens=user:someone', 'lens=user:someone&by=other']
+    const NOT_FOUND = [404, 'path not found']
+    const routes: [string, typeof subtree, (q: string) => string][] = [
+      ['subtree', subtree, q => `/api/subtree?date=${A}&w=1280&h=768&${q}`],
+      ['diff', diff, q => `/api/diff?from=${Z}&to=${A}&w=1280&h=768&${q}`],
+      ['series', series, q => `/api/series?${q}`],
+    ]
+    let deep: string
+    beforeAll(async () => {
+      deep = (await gateFor(env)!.mint({ email: null, scopes: ['gcs:read', hideScope('gcs', 'bk/deep')], name: 'link', createdBy: 'test', expiresAt: null, maxRedeems: null })).token
+    })
+
+    describe.each(routes)('`/api/%s`', (_, route, url) => {
+      it.each(SCOPES)('`%s` at the hidden dir, or at an ancestor of it: refused', async scope => {
+        expect([
+          await get(route, url(`path=bk&${scope}`), restricted),
+          await get(route, url(`path=bk&${scope}`), deep),
+          await get(route, url(scope), deep),
+          await get(route, url(scope), restricted),
+        ]).toEqual([SCOPE_REFUSED, SCOPE_REFUSED, SCOPE_REFUSED, SCOPE_REFUSED])
+      })
+      it.each(SCOPES)('`%s` under the hidden dir: absent, as an unscoped read is', async scope => {
+        expect(await get(route, url(`path=bk/deep&${scope}`), restricted)).toEqual(NOT_FOUND)
+      })
+      it.each(SCOPES)('`%s` beside the hidden dir: answered as the unrestricted link answers', async scope => {
+        const [[status, body], [openStatus, openBody]] = [await get(route, url(`path=zz&${scope}`), restricted), await get(route, url(`path=zz&${scope}`), open)]
+        expect([status, body]).toEqual([openStatus, openBody])
+      })
+      it('unscoped, the hidden dir and its ancestors keep their totals', async () => {
+        const statuses = await Promise.all([url('path=bk'), url('path=bk&o=x'), url('')].map(u => get(route, u, restricted)))
+        expect(statuses.map(([status]) => status)).toEqual([200, 200, 200])
+      })
+    })
   })
 })

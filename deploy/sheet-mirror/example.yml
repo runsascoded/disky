@@ -19,7 +19,7 @@ gcp:
   project: my-gcp-project
   service_account: sheet-mirror@my-gcp-project.iam.gserviceaccount.com
   job: usage-sheet-mirror
-  # region: us-central1            # default
+  region: us-east1                 # where the job runs: required to build/deploy; no default
   # image: <registry>/<name>:<tag> # default: <region>-docker.pkg.dev/<project>/cloud-run-source-deploy/<job>:latest
   # trigger: <scheduler job name>  # default: <job>-trigger
 

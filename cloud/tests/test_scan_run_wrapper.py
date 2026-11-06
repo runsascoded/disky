@@ -624,7 +624,7 @@ def test_a_nextflow_task_records_its_own_job_and_alerts_with_its_logs(job, monke
     once per task, and the step's alert links the task's logs."""
     looked: list[tuple] = []
 
-    def by_uid(uid, project=None, region="us-central1"):
+    def by_uid(uid, project, region):
         looked.append((uid, project, region))
         return {"name": f"projects/{project}/locations/{region}/jobs/nf-1a2b", "uid": uid,
                 "allocationPolicy": {"instances": [{"policy": {"machineType": "n2-standard-16"}}]}}
@@ -638,7 +638,7 @@ def test_a_nextflow_task_records_its_own_job_and_alerts_with_its_logs(job, monke
     assert job("phase-end", "-M", "list b1", at=T0 + 600) == 0
     assert job("phase-begin", "import b1", at=T0 + 600) == 0
     assert job("phase-end", "-M", "import b1", at=T0 + 700) == 0
-    assert looked == [("task-uid-1", "proj-1", "us-central1")]
+    assert looked == [("task-uid-1", "proj-1", "my-region")]  # the profile names no `regions`: `$BATCH_REGION`
     assert job.rows("SELECT phase, started_ts, finished_ts, job_name, machine, task FROM scan_run_phases ORDER BY seq") == [
         ("list b1", T0 + 120, T0 + 600, "nf-1a2b", "n2-standard-16", "list_source (s3://b1)"),
         ("import b1", T0 + 600, T0 + 700, "nf-1a2b", "n2-standard-16", "list_source (s3://b1)"),

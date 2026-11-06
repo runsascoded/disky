@@ -245,6 +245,38 @@ describe('D1', () => {
       expect(await db.prepare('SELECT run_id, undo_state FROM deletion_runs').all().then(r => r.results)).toEqual([{ run_id: RUN, undo_state: 'none' }])
     })
 
+    it('a run whose buckets `BUCKET_REGIONS` does not place runs in `BATCH_REGION`; neither set, it is refused before any GCP call', async () => {
+      vi.useFakeTimers({ now: NOW * 1000, toFake: ['Date'] })
+      const urls: string[] = []
+      vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+        if (url !== 'https://oauth2.googleapis.com/token') urls.push(url)
+        return new Response(url === 'https://oauth2.googleapis.com/token' ? JSON.stringify({ access_token: 'tok' }) : '{}')
+      }))
+      const unplaced = async (extra: Record<string, string>) => {
+        const { db } = await gcsDb()
+        return undoRoute({ request: post({ run_id: RUN }), env: { ...await env(db), BUCKET_REGIONS: '{}', ...extra } } as never).then(answer)
+      }
+      expect(await unplaced({})).toEqual([503, { error: 'undo not configured (BATCH_REGION unset)' }])
+      expect(urls).toEqual([])
+      expect(await unplaced({ BATCH_REGION: 'us-west4' })).toEqual([200, { bulk: false, job_id: 'gcs-undo-19700112-134640z', target: RUN, region: 'us-west4', by: 'dev@example.test' }])
+      expect(urls).toEqual(['https://batch.googleapis.com/v1/projects/my-project/locations/us-west4/jobs?job_id=gcs-undo-19700112-134640z'])
+    })
+
+    it('labels the job and its allocation policy `DISKY_LABELS` + `component: sweep-undo` (the spec above, with none set, carries neither)', async () => {
+      vi.useFakeTimers({ now: NOW * 1000, toFake: ['Date'] })
+      const labels: unknown[] = []
+      vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+        if (url === 'https://oauth2.googleapis.com/token') return new Response(JSON.stringify({ access_token: 'tok' }))
+        const spec = JSON.parse(String(init?.body)) as { labels?: unknown; allocationPolicy: { labels?: unknown } }
+        labels.push(spec.labels, spec.allocationPolicy.labels)
+        return new Response('{}')
+      }))
+      const { db } = await gcsDb()
+      const r = await undoRoute({ request: post({ run_id: RUN }), env: { ...await env(db), DISKY_LABELS: 'app=disky,deployment=gcs' } } as never)
+      const want = { app: 'disky', deployment: 'gcs', component: 'sweep-undo' }
+      expect([r.status, labels]).toEqual([200, [want, want]])
+    })
+
     it('a failed submit leaves the row as it was and says why', async () => {
       vi.stubGlobal('fetch', vi.fn(async (url: string) => url === 'https://oauth2.googleapis.com/token'
         ? new Response(JSON.stringify({ access_token: 'tok' }))

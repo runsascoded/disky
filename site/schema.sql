@@ -112,6 +112,14 @@ CREATE TABLE admin_edits (
   new_json TEXT
 );
 
+CREATE TABLE admin_emails (
+  email  TEXT PRIMARY KEY,
+  note   TEXT,
+  who    TEXT NOT NULL,
+  ts     INTEGER NOT NULL,
+  github TEXT
+);
+
 CREATE TABLE agent_tokens (
   email    TEXT PRIMARY KEY,
   grant_id TEXT NOT NULL,

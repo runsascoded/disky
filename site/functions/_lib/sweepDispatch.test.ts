@@ -152,6 +152,13 @@ describe('a dispatched run\'s hold store (`sweep manifest -i`)', () => {
     SITE_TOKEN: 'projects/my-project/secrets/gcs-sheet-sync-token/versions/latest',
     CLOUDFLARE_API_TOKEN: 'projects/my-project/secrets/cf-pages-token/versions/latest',
   }
+  type Labels = Record<string, string>
+  interface Submitted {
+    url: string
+    spec: { labels?: Labels; allocationPolicy: { labels?: Labels; location: { allowedLocations: string[] } } }
+    commands: string[]
+    environment: { variables: Record<string, string>; secretVariables: Record<string, string> }
+  }
   const saKey = async (): Promise<string> => {
     const { privateKey } = await crypto.subtle.generateKey(
       { name: 'RSASSA-PKCS1-v1_5', modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: 'SHA-256' }, true, ['sign', 'verify'],
@@ -163,36 +170,85 @@ describe('a dispatched run\'s hold store (`sweep manifest -i`)', () => {
   }
   afterEach(() => { vi.unstubAllGlobals() })
 
-  /** The job `sweep.prepare` + `launch` submit under `extra`: its script's manifest line, its env. */
-  const dispatched = async (extra: Partial<ExecEnv>) => {
+  /** `sweep.prepare` under `extra`, a one-item plan on `B1` staged, and every Batch submit it makes. */
+  const prepared = async (extra: Partial<ExecEnv>) => {
     const { db } = await sqliteD1()
     await db.prepare("INSERT INTO plans (id, name, state, created_by, created_ts) VALUES (1, 'Staged', 'open', 'a', 1)").run()
     await db.prepare("INSERT INTO plan_items (plan_id, prefix, added_by, added_ts) VALUES (1, ?, 'a', 1)").bind(`gs://${B1}/a/`).run()
-    const submitted: { commands: string[]; environment: { variables: Record<string, string>; secretVariables: Record<string, string> } }[] = []
+    const submitted: Submitted[] = []
     vi.stubGlobal('fetch', async (url: string, init?: RequestInit) => {
       if (url.includes('oauth2')) return new Response(JSON.stringify({ access_token: 't', expires_in: 3600 }))
       if (url.includes('batch.googleapis.com')) {
-        const { taskSpec } = JSON.parse(String(init?.body)).taskGroups[0]
-        submitted.push({ commands: taskSpec.runnables[0].container.commands, environment: taskSpec.environment })
+        const spec = JSON.parse(String(init?.body))
+        const { taskSpec } = spec.taskGroups[0]
+        submitted.push({ url, spec, commands: taskSpec.runnables[0].container.commands, environment: taskSpec.environment })
       }
       return new Response('{}')
     })
     const env = {
-      DB: db, GCP_SA_KEY: await saKey(), JOB_SA: 'job@my-project.iam.gserviceaccount.com', GCP_PROJECT: 'my-project', DATA_BUCKET: 'my-data', SWEEP_IMAGE: 'img:1',
+      DB: db, GCP_SA_KEY: await saKey(), JOB_SA: 'job@my-project.iam.gserviceaccount.com', GCP_PROJECT: 'my-project', BATCH_REGION: 'my-region', DATA_BUCKET: 'my-data', SWEEP_IMAGE: 'img:1',
       CF_ACCOUNT_ID: 'acct', D1_DB_ID: 'd1-id', D1_DB_NAME: 'my-db', STORE_SCHEME: 'gs', STORE_BUCKETS: B1, ...extra,
     } as ExecEnv
-    const prepared = await sweep.prepare(env, db, { planId: 1, mode: 'dry', actor: 'ann', siteUrl: 'https://site.test' })
-    if (!('launch' in prepared)) throw new Error(JSON.stringify(prepared))
-    const launched = await prepared.launch('2026-11-03T1622', 'digest', undefined)
-    if (!('job_id' in launched)) throw new Error(JSON.stringify(launched))
-    const { commands, environment } = submitted[0]
-    const run = `gs://my-data/sweep/runs/${launched.job_id}`
+    return { prepared: await sweep.prepare(env, db, { planId: 1, mode: 'dry', actor: 'ann', siteUrl: 'https://site.test' }), submitted }
+  }
+
+  /** The one job `sweep.prepare` + `launch` submit under `extra`. */
+  const launched = async (extra: Partial<ExecEnv>) => {
+    const { prepared: p, submitted } = await prepared(extra)
+    if (!('launch' in p)) throw new Error(JSON.stringify(p))
+    const job = await p.launch('2026-11-03T1622', 'digest', undefined)
+    if (!('job_id' in job)) throw new Error(JSON.stringify(job))
+    expect(submitted.length).toBe(1)
+    return { job, ...submitted[0] }
+  }
+
+  /** That job's script's manifest line, and its env. */
+  const dispatched = async (extra: Partial<ExecEnv>) => {
+    const { job, commands, environment } = await launched(extra)
+    const run = `gs://my-data/sweep/runs/${job.job_id}`
     return {
       manifest: commands[1].split('\n').filter(l => l.includes('sweep manifest')).map(l => l.replaceAll(run, '<run>')),
       variables: environment.variables,
       secretVariables: environment.secretVariables,
     }
   }
+
+  describe('the region it is submitted to', () => {
+    const where = async (extra: Partial<ExecEnv>) => {
+      const { job, url, spec } = await launched(extra)
+      return [url.replace(job.job_id, '<job>'), spec.allocationPolicy.location, job.extra.region]
+    }
+    const at = (region: string) => [
+      `https://batch.googleapis.com/v1/projects/my-project/locations/${region}/jobs?job_id=<job>`, { allowedLocations: [`regions/${region}`] }, region,
+    ]
+    it('beside its bucket (`BUCKET_REGIONS`), with or without a deployment region', async () => {
+      const regions = JSON.stringify({ [B1]: 'us-east5' })
+      expect(await where({ BUCKET_REGIONS: regions })).toEqual(at('us-east5'))
+      expect(await where({ BUCKET_REGIONS: regions, BATCH_REGION: undefined })).toEqual(at('us-east5'))
+    })
+    it('a bucket `BUCKET_REGIONS` does not place: the deployment\'s (`BATCH_REGION`)', async () => {
+      expect(await where({})).toEqual(at('my-region'))
+      expect(await where({ BUCKET_REGIONS: JSON.stringify({ other: 'us-east5' }) })).toEqual(at('my-region'))
+    })
+    it('neither names one: refused before anything is submitted (there is no default region)', async () => {
+      const { prepared: p, submitted } = await prepared({ BATCH_REGION: undefined })
+      expect([p, submitted]).toEqual([{ ok: false, status: 503, error: 'dispatch not configured (BATCH_REGION unset)', extra: { buckets: [B1] } }, []])
+    })
+  })
+
+  describe('the cost labels it is submitted with', () => {
+    const labels = async (extra: Partial<ExecEnv>) => {
+      const { spec } = await launched(extra)
+      return [spec.labels, spec.allocationPolicy.labels]
+    }
+    it('`DISKY_LABELS` + `component: sweep`, on the job and on its allocation policy (what its VM and disks bill under)', async () => {
+      const want = { app: 'disky', deployment: 'gcs', component: 'sweep' }
+      expect(await labels({ DISKY_LABELS: 'app=disky, deployment=gcs' })).toEqual([want, want])
+    })
+    it('no `DISKY_LABELS`: none on either', async () => {
+      expect(await labels({})).toEqual([undefined, undefined])
+    })
+  })
 
   it('no review store: the data bucket, no credentials', async () => {
     expect(await dispatched({})).toEqual({
