@@ -346,7 +346,8 @@ def test_without_the_setting_the_job_and_the_generation_are_what_they_were(d1, t
     ar.run_compaction(carried, ic.compactor(RG), "g", carried_dir, tmp_path / "carried" / "w", carry=carry(), **KW)
     # A scan's entry names its source's path, under each world's own `tmp_path`.
     gen_of = lambda d: d / ist.PREFIX / "g.c001"  # noqa: E731
-    bytes_of = lambda d: {k: v for k, v in ar.md5s(gen_of(d)).items() if k != "scans.json"}  # noqa: E731
+    # `served/<sort>.json` and `stats.json` record each cut's seconds; every data file and group index must match.
+    bytes_of = lambda d: {k: v for k, v in ar.md5s(gen_of(d)).items() if k != "scans.json" and not re.fullmatch(r"served/[^/]+\.json", k)}  # noqa: E731
     assert bytes_of(carried_dir) == bytes_of(plain_dir)
     assert (gen_of(carried_dir) / "scans.json").read_text().replace("/carried/", "/plain/") == (gen_of(plain_dir) / "scans.json").read_text()
 
