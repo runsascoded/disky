@@ -58,7 +58,7 @@ import { RootCrumb } from './RootCrumb'
 import { actBlock, noMatches } from './matchAct'
 import { type BlindPanel, blindNote, blindShown } from './filterBlind'
 import { LevelFailure, LoadFailure, mapSlot } from './LoadFailure'
-import { graftSpine, levelAsk, levelError, levelTree, spineFailure, spinePaths, spineReady } from './spine'
+import { graftSpine, levelAsk, levelError, levelTree, spineFailure, spinePaths, spineReady, spineStop } from './spine'
 import { REJECT_MESSAGES, rejectQuery } from '../functions/_lib/indexedOnly'
 import { FilterFlags, FilterNote, matchedNote } from './FilterNote'
 import { UnionScanPicker } from './UnionScanPicker'
@@ -468,32 +468,37 @@ function AppContent() {
   // on this page — path, scan(s), canvas width, scope.
   const viewKey = (p: string, d: string | null | undefined, extra = '') => `${p || '/'}@${d}|w${canW}${scopeQs}${extra}`
   const subtreePaths = useMemo(() => spinePaths(graftPath), [graftPath])
+  /** A level's full view: the pixel-budget tree under `p`, every depth. */
+  const fullQuery = (p: string) => ({
+    queryKey: ['subtree', store.key, cutKey, p, canW, scopeKey],
+    staleTime: Infinity,
+    // A budget-cut answer (`budgetCut`) is upgraded at the edge in the background: ask again until whole.
+    refetchInterval: (q: { state: { data?: { budgetCut?: boolean }; dataUpdateCount: number } }) => budgetCutRefetch(q.state.data, q.state.dataUpdateCount),
+    // Retry transient failures, but not the deterministic ones (409: no
+    // user index for this scan; 413: view too wide) — those surface as-is.
+    retry: (n: number, e: Error) => !/^4\d\d/.test(e.message) && n < 3,
+    retryDelay: (n: number) => 400 * 2 ** n,
+    // With a filter the full read plans each match root's tier (`full=1`);
+    // the companion below paints the coarsest-tier forest first.
+    queryFn: async ({ signal }: { signal?: AbortSignal }) => {
+      const pf = perf.start('treemap', viewKey(p, asof, fq ? '|full' : ''), ['table'])
+      const r = await pf.track(sfetch(
+        `/api/subtree?cv=${API_CV}&${cutQs}&path=${encodeURIComponent(p)}&w=${canW}&h=${Math.round(canW * 0.6)}${scopeQs}${fq ? '&full=1' : ''}`,
+        { credentials: 'include', signal },
+      ))
+      if (!r.ok) { pf.fail(); throw apiError(r.status, await r.text()) }
+      const j = await r.json() as MatchFields & { tree: TreeNode; tier?: string; matches?: string[]; threshold?: number; partialReason?: string; approximateReason?: string; hexRuns?: { min: number; tail: number }; budgetCut?: true; union?: UnionVector }
+      pf.decoded()
+      return j
+    },
+  })
   const subtreeQs = useQueries({
     queries: subtreePaths.map((p, i) => ({
-      queryKey: ['subtree', store.key, cutKey, p, canW, scopeKey],
-      // An ancestor's full view is asked once the viewer zooms out to it (`levelAsk`). One already held (the
-      // viewer drilled down through it) stays observed here, so it is still held then.
+      ...fullQuery(p),
+      // An ancestor's full view is asked once the viewer zooms out to it (`levelAsk`), or once the spine is known
+      // to stop at it (`stopAt`, below). One already held (the viewer drilled down through it) stays observed
+      // here, so it is still held then.
       enabled: !!asof && scopeReady && levelAsk(i, subtreePaths.length, { filtered: !!fq, fullHeld: false }).full,
-      staleTime: Infinity,
-      // A budget-cut answer (`budgetCut`) is upgraded at the edge in the background: ask again until whole.
-      refetchInterval: (q: { state: { data?: { budgetCut?: boolean }; dataUpdateCount: number } }) => budgetCutRefetch(q.state.data, q.state.dataUpdateCount),
-      // Retry transient failures, but not the deterministic ones (409: no
-      // user index for this scan; 413: view too wide) — those surface as-is.
-      retry: (n: number, e: Error) => !/^4\d\d/.test(e.message) && n < 3,
-      retryDelay: (n: number) => 400 * 2 ** n,
-      // With a filter the full read plans each match root's tier (`full=1`);
-      // the companion below paints the coarsest-tier forest first.
-      queryFn: async ({ signal }: { signal?: AbortSignal }) => {
-        const pf = perf.start('treemap', viewKey(p, asof, fq ? '|full' : ''), ['table'])
-        const r = await pf.track(sfetch(
-          `/api/subtree?cv=${API_CV}&${cutQs}&path=${encodeURIComponent(p)}&w=${canW}&h=${Math.round(canW * 0.6)}${scopeQs}${fq ? '&full=1' : ''}`,
-          { credentials: 'include', signal },
-        ))
-        if (!r.ok) { pf.fail(); throw apiError(r.status, await r.text()) }
-        const j = await r.json() as MatchFields & { tree: TreeNode; tier?: string; matches?: string[]; threshold?: number; partialReason?: string; approximateReason?: string; hexRuns?: { min: number; tail: number }; budgetCut?: true; union?: UnionVector }
-        pf.decoded()
-        return j
-      },
     })),
   })
   // Progressive fill: a companion `depth=1` fetch per path — the same pixel
@@ -574,8 +579,10 @@ function AppContent() {
   // Both tiers stamp the graft: a depth-1 tree landing must re-run it just
   // as a full one does.
   const subStamp = [...subtreeQs, ...coarseQs].map(q => q.dataUpdatedAt).join(',')
-  // The levels with no answer yet whose read is in flight (`spineReady` waits on them), stamped as the data is.
-  const subLoading = subtreePaths.map((_, i) => !dataFor(i) && !!(subtreeQs[i]?.isLoading || coarseQs[i]?.isLoading))
+  // The levels with no answer yet whose read is in flight (`spineReady` waits on them), stamped as the data is. A
+  // read paused offline is in flight too: it resumes, and its answer may extend the spine.
+  const inFlight = (q?: { fetchStatus: string }) => !!q && q.fetchStatus !== 'idle'
+  const subLoading = subtreePaths.map((_, i) => !dataFor(i) && (inFlight(subtreeQs[i]) || inFlight(coarseQs[i])))
   const loadStamp = subLoading.map(Number).join('')
   const tree = useMemo((): TreeNode | null => {
     const t = graftSpine(subtreePaths, subtreePaths.map((_, i) => {
@@ -587,6 +594,14 @@ function AppContent() {
     return t && (fq || spineReady(t, graftPath, subLoading)) ? t : null
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [baseTree, subtreePaths, subStamp, loadStamp, fq])
+  // The spine settled short of the drilled path (the scan doesn't hold it: a stale link, a scan switch; or a level
+  // didn't load): the map draws the level it stops at, which as an ancestor asked one level only, so that level
+  // asks its full view now (`spineStop`, `levelAsk`). Not while any level's answer is in flight: until then the
+  // spine may yet reach the path, and a cold drill would ask a second full plan for a level it only passes through.
+  // Not of a level with no answer of its own (its read failed: `levelFail` states that, with its retry).
+  // The same query as `subtreeQs[stopAt]`, which is where its answer is read.
+  const stopAt = fq ? null : spineStop(tree, subtreePaths, subLoading, subtreePaths.map((_, i) => !!dataFor(i)))
+  useQueries({ queries: (stopAt == null ? [] : [subtreePaths[stopAt]]).map(p => ({ ...fullQuery(p), enabled: !!asof && scopeReady })) })
   // Hold the last tree that rendered while the next one loads — whole, so it
   // is self-consistent (it already laid out fine). The map never flashes to
   // nothing across a scope, scan, or drill change, and the page below never
@@ -629,9 +644,9 @@ function AppContent() {
   // scan or scope would sit dimmed under "loading" forever (gcs 2026-10-09: 80 s of a gray map on a 500).
   const mapFailed = !!deepRefused || mapSlot(tree, lastTree.current, rootErr) === 'failed' || !!levelFail?.bare
   // Ask again what failed, of the reads each level asks (`levelAsk`): a full view that failed while its level was the
-  // drilled one is not asked of an ancestor.
+  // drilled one is not asked of an ancestor the spine goes on through.
   const retryMap = () => subtreePaths.forEach((_, i) => {
-    const ask = levelAsk(i, subtreePaths.length, { filtered: !!fq, fullHeld: !!subtreeQs[i]?.data })
+    const ask = levelAsk(i, subtreePaths.length, { filtered: !!fq, fullHeld: !!subtreeQs[i]?.data, stop: stopAt })
     if (ask.full && subtreeQs[i]?.isError) void subtreeQs[i].refetch()
     if (ask.shallow && coarseQs[i]?.isError) void coarseQs[i].refetch()
   })

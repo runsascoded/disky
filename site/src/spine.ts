@@ -19,13 +19,15 @@ export interface LevelAsk { full: boolean; shallow: boolean }
  * children's totals, which its shallow read holds: it asks that alone, and its full view when it becomes the
  * deepest. A full answer already held (`fullHeld`: the viewer drilled down through it) is used as it is, with no
  * shallow read beside it.
+ * When the spine stops short of the drilled path (the scan doesn't hold it, or a level didn't load), the map draws
+ * the level it stops at (`stop`, `spineStop`), so that level, answered one level deep, asks its full view too.
  * Under a name filter every level asks both, as before: a level's forest of match roots is not a prefix of the
  * one below it.
  */
-export function levelAsk(i: number, n: number, o: { filtered: boolean; fullHeld: boolean }): LevelAsk {
+export function levelAsk(i: number, n: number, o: { filtered: boolean; fullHeld: boolean; stop?: number | null }): LevelAsk {
   const deepest = i === n - 1
   if (o.filtered) return { full: true, shallow: true }
-  return { full: deepest, shallow: deepest || !o.fullHeld }
+  return { full: deepest || i === o.stop, shallow: deepest || !o.fullHeld }
 }
 
 /**
@@ -101,13 +103,34 @@ export function nodeAt(tree: TreeNode, segs: string[]): TreeNode | null {
  * (`loading[i]`): not while the spine stops short of the path and a level that could extend it is loading, and not
  * while the drilled node has no children and its own level is loading. The page holds what it drew until then,
  * never an ancestor's view or an empty canvas in passing. Settled levels (answered or failed) are drawn as they
- * are: a path the scan doesn't hold truncates to its deepest ancestor, and `spineFailure` names the level it
- * stopped at.
+ * are: a path the scan doesn't hold truncates to its deepest ancestor (which then asks its full view, `spineStop`),
+ * and `spineFailure` names the level it stopped at.
  */
 export function spineReady(tree: TreeNode, graftPath: string, loading: boolean[]): boolean {
   const at = nodeAt(tree, graftPath.split('/').filter(Boolean))
   if (!at) return !loading.some(Boolean)
   return !!at.c?.length || !loading[loading.length - 1]
+}
+
+/**
+ * The level a settled spine stops at, short of the drilled path (`paths`' last), when the map draws that level's own
+ * answer: the index of the deepest level whose node the grafted `tree` holds. Null when the tree reaches the path,
+ * and while any level is still loading with no answer (`loading[i]`, as `spineReady` takes it): an answer in flight
+ * may yet extend the spine, and a level it then passes through is never asked for a view nobody sees.
+ * Null too when that level has no answer of its own (`answered[i]`: its read failed, and its node is its parent's, bare
+ * or drawn to the depth a held ancestor gave it) or nothing under it: there is no one level for a full view to fill
+ * in. That also keeps the decision off the full view's own state: asking it never changes whether it is asked.
+ */
+export function spineStop(tree: TreeNode | null, paths: string[], loading: boolean[], answered: boolean[]): number | null {
+  if (!tree || loading.some(Boolean)) return null
+  const segs = paths[paths.length - 1].split('/').filter(Boolean)
+  let cur = tree
+  for (let i = 0; i < segs.length; i++) {
+    const next = cur.c?.find(c => c.n === segs[i])
+    if (!next) return answered[i] && cur.c?.length ? i : null
+    cur = next
+  }
+  return null
 }
 
 /**
