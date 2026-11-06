@@ -780,6 +780,7 @@ function Treemap({
   renderLegend,
   renderCrumbSuffix,
   renderFooter,
+  mapOverlay,
   renderCellSubtitle,
   onCellClick,
   cellHref,
@@ -1712,7 +1713,8 @@ function Treemap({
                   failed.error.message
                 ] }),
                 /* @__PURE__ */ jsx("button", { onClick: retry, style: { marginTop: 6, cursor: "pointer" }, children: "Retry" })
-              ] }) }) : pending === viewKey ? /* @__PURE__ */ jsx("div", { className: "dt-treemap-status loading", style: STATUS_STYLE, children: renderLoading ? renderLoading(node, path) : "Loading\u2026" }) : null
+              ] }) }) : pending === viewKey ? /* @__PURE__ */ jsx("div", { className: "dt-treemap-status loading", style: STATUS_STYLE, children: renderLoading ? renderLoading(node, path) : "Loading\u2026" }) : null,
+              mapOverlay
             ]
           }
         ),

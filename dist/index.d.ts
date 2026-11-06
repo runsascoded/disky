@@ -279,6 +279,12 @@ interface TreemapProps<T> {
     /** Row rendered below the map (e.g. a usage-hint footer). */
     renderFooter?: (n: T, path: T[]) => ReactNode;
     /**
+     * Content laid over the map box itself (e.g. a "refreshing" marker in a corner): rendered inside
+     * `.dt-treemap-map`, which is `position: relative`, after the cells. Position it absolutely; it is
+     * clear of the bar, the rollup and the footer at every width, and goes fullscreen with the map.
+     */
+    mapOverlay?: ReactNode;
+    /**
      * Right side of the cell size line — e.g. "$1.2/mo". Rendered inline with
      * the size when the cell is big enough to fit a subtitle; `dims` is the
      * cell's box (plus `hasKids`/`fade`) so the consumer can size its content
@@ -563,7 +569,7 @@ interface CellCtx extends CellDims {
      * `renderCellExtra` only. */
     chain?: number;
 }
-declare function Treemap<T>({ root, initialPath, path: pathProp, getSize, getChildren, hasChildren, loadChildren, onChildrenLoaded, renderLoading, renderLoadError, getLabel, getId, formatSize, formatCell, collapseChains, reclaimTitleSpace, branchOutline, colorForCell, lens, renderCellExtra, renderTooltip, tipMode, renderTipDefault, renderRollup, renderLegend, renderCrumbSuffix, renderFooter, renderCellSubtitle, onCellClick, cellHref, onPathChange, onCellHover, minCellArea, minCellSide, mergeSmall, fullscreen, exportable, onExport, renderTip, chrome, showLabels, sizeAlign, inlineSizeMinWidth, className, mapStyle, depthFade, rootFade, fadeFloor, tiling, borderWidth, edgeEmphasis, borderStep, edgeContrast, dustTexture, nestedHues, foldControl, remainderTail, renderer, a11yLinks, a11yMaxCells, a11yMinSide, outlineGroups, }: TreemapProps<T>): react.JSX.Element;
+declare function Treemap<T>({ root, initialPath, path: pathProp, getSize, getChildren, hasChildren, loadChildren, onChildrenLoaded, renderLoading, renderLoadError, getLabel, getId, formatSize, formatCell, collapseChains, reclaimTitleSpace, branchOutline, colorForCell, lens, renderCellExtra, renderTooltip, tipMode, renderTipDefault, renderRollup, renderLegend, renderCrumbSuffix, renderFooter, mapOverlay, renderCellSubtitle, onCellClick, cellHref, onPathChange, onCellHover, minCellArea, minCellSide, mergeSmall, fullscreen, exportable, onExport, renderTip, chrome, showLabels, sizeAlign, inlineSizeMinWidth, className, mapStyle, depthFade, rootFade, fadeFloor, tiling, borderWidth, edgeEmphasis, borderStep, edgeContrast, dustTexture, nestedHues, foldControl, remainderTail, renderer, a11yLinks, a11yMaxCells, a11yMinSide, outlineGroups, }: TreemapProps<T>): react.JSX.Element;
 
 /** Controlled layout switch; use the same value for `<Treemap reclaimTitleSpace>`. */
 declare function TitleSpaceToggle({ checked, onChange }: {
