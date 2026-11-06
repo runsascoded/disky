@@ -2441,7 +2441,7 @@ export async function readRects(
 /** Whether a read of `h`'s path-first sort thresholds row by row, and so may prune its groups by `b_max`. A folded sort's
  *  row is a whole path; a lens reads one owner's bytes, its slice. An interval store's slice sort read for totals is the
  *  exception: a path's total is its slices' sum, which `b_max` (the largest slice) doesn't bound, so every group of the
- *  rects is planned. (`slices-bytotal` is the sort that prunes for those reads.) A per-scan store's single version has
+ *  rects is planned. (`slices-bytotal` and `readSlicesByFolded` are what prune those reads.) A per-scan store's single version has
  *  nothing to close, and its slices keep their per-slice floor until its sorts retire.
  *
  *  This is what makes a read's versions exact over tiers. A version and its close record have one size. A row over its
@@ -2449,6 +2449,19 @@ export async function readRects(
  *  holding that depth, and is planned wherever it is. A row under it can sit in a group planned for a heavier row while
  *  its close record's group isn't: that row is the one a read can't tell has ended, so it is never kept. */
 export const rowsClearFloors = (h: IndexHandle, lens?: Lens): boolean => h.asOf == null || !!lens || !h.schema.some(l => l.name === 'usr')
+
+/** Every slice of the paths clearing `thrAt`, by way of the folded sort: `fh`'s plan (`spans`, from `planRects`) says which
+ *  paths those are, a row per path with its exact total, and a lookup over the slice sort `h` (no size in its plan, so
+ *  every slice and close record of them) reads theirs. The answer of `readSizeRects` over `slices-bytotal`, for a subtree
+ *  whose size sort is past the read budget: that sort's prefix selects a group per size bucket, segment and tier whatever
+ *  the prefix holds, and its floor rose by orders of magnitude to fit. */
+export async function readSlicesByFolded(h: IndexHandle, fh: IndexHandle, rects: Rect[], thrAt: (depth: number) => number, spans: Span[], stop?: () => boolean): Promise<Row[]> {
+  const paths = await readRects(fh, rects, thrAt, undefined, spans, stop)
+  if (!paths.length) return []
+  const want = new Set(paths.map(r => `${r.depth}\0${r.path}`))
+  const pre: Pre = (d, p) => want.has(`${d}\0${p}`)
+  return (await readAsks(h, paths.map(r => ({ depth: r.depth, path: r.path })), r => pre(r.depth, r.path, r.size), { maxGroups: READ_MAX_GROUPS, stop, pre })).rows
+}
 
 /** The lowest threshold a group spanning depths `dLo..dHi` applies: `thrAt` is monotone in depth. */
 const floorOver = (thrAt: (depth: number) => number, dLo: number, dHi: number): number => Math.min(thrAt(dLo), thrAt(Math.max(dLo, dHi)))

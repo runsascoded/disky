@@ -1,6 +1,6 @@
 import { beforeAll, describe, expect, it, vi } from 'vitest'
 import type { Env } from './auth'
-import { asOfScans, type IndexHandle, openIndex, planRects, readRects, type Row, slices } from './index'
+import { asOfScans, type IndexHandle, openIndex, planRects, readRects, readSlicesByFolded, type Row, slices } from './index'
 import { fixture } from './testStore'
 import { buildView, type ViewNode } from './view'
 
@@ -134,6 +134,24 @@ describe('a read of the path-first slice sort', () => {
         const clears = (r: Row) => total.get(r.path)! >= floor
         got[floor] = (await readRects(h, ALL, () => floor)).filter(clears).map(slice).sort()
         want[floor] = every.filter(clears).map(slice).sort()
+      }
+      expect({ date, got }).toEqual({ date, got: want })
+    }
+  })
+
+  it('by way of the folded sort: every slice of the paths clearing the floor, and no other', async () => {
+    for (const date of [S1, S2]) {
+      const [h, fh] = [await sliced(date), await folded(date)]
+      const every = await readRects(h, ALL)
+      const total = new Map<string, number>()
+      for (const r of every) total.set(r.path, (total.get(r.path) ?? 0) + r.size)
+      const floors = [...new Set([...total.values()].flatMap(t => [t, t + 1]))].sort((a, b) => a - b)
+      const got: Record<number, string[]> = {}
+      const want: Record<number, string[]> = {}
+      for (const floor of floors) {
+        const spans = await planRects(fh, ALL, () => floor)
+        got[floor] = (await readSlicesByFolded(h, fh, ALL, () => floor, spans)).map(slice).sort()
+        want[floor] = every.filter(r => total.get(r.path)! >= floor).map(slice).sort()
       }
       expect({ date, got }).toEqual({ date, got: want })
     }
