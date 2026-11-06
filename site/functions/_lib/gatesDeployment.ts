@@ -14,3 +14,12 @@ export interface DeploymentCase {
 }
 
 export const DEPLOYMENT_ROUTES: Record<string, DeploymentCase[]> = {}
+
+/**
+ * What a path-restricted share link gets from each of those cases a share link's scopes reach (gates `public`,
+ * `signed-in`, `viewer`, `stager`, `assigner`, `email`, `named-grant`), keyed `'<METHOD> <path without its query>'`:
+ * `blocked` (the 403 a restricted link gets, by `RESTRICTED_BLOCKED` or the route), `filtered` (what the link hides
+ * is left out), `pathless` (the answer names no scanned path) or `anonymous` (a public route: the link earns nothing
+ * more). A reachable case without an answer fails the audit.
+ */
+export const DEPLOYMENT_RESTRICTED: Record<string, string> = {}
