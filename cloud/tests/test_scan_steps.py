@@ -198,6 +198,23 @@ def test_static_names_failure_records_failed_phase_and_the_run_goes_on(tmp_path,
     assert c.sh_impl.calls == ["dt-cloud static-names runs add -c 2026-10-16T1200", "dt-cloud static-names runs lag 2026-10-16T1200"]
 
 
+PASSED_OVER = "passed over: the store's append order is past this scan, or its path sort isn't published; no later run appends it"
+
+
+def test_static_names_not_next_is_passed_over(tmp_path, env, monkeypatch):
+    """Exit 3: the append refused the scan (a newer one is already in, or its path sort isn't published), and no later
+    run's append takes it. The phase fails with a `passed over:` clause, which /scans never reads as recovered."""
+    c = ctx(tmp_path, env, runner=Runner(tmp_path, codes={"dt-cloud static-names runs": 3}))
+    phases = []
+    c.run.begin = lambda name: phases.append(("begin", name))
+    c.run.end = lambda name, rc=0, **kw: phases.append(("end", name, rc, kw))
+    monkeypatch.setattr(S, "load_profile_env", lambda *a: c.profile)
+    monkeypatch.setattr(S, "make_ctx", lambda *a: c)
+    assert S.run_step("static-names", None, env) == 0
+    assert phases == [("begin", "static-names"), ("end", "static-names", 3, {
+        "warn": True, "msg": "static-names runs add failed for 2026-10-16T1200", "note": PASSED_OVER})]
+
+
 def test_static_names_busy_is_not_a_failure(tmp_path, env, monkeypatch):
     """Exit 4: another coordinator holds the store's lease (a catch-up, or an earlier scan's run) and appends this scan."""
     c = ctx(tmp_path, env, runner=Runner(tmp_path, codes={"dt-cloud static-names runs": 4}))
@@ -717,6 +734,37 @@ def test_interval_store_staged_append(tmp_path, env, monkeypatch):
     S.interval_store(c, None)
     assert ran == [(["dt-cloud", "interval-store", "append", "-c", "-w", "1800", "2026-10-16T1200"], 3600.0,
                     "/app/job/interval-store.json", "img@sha256:abc")]
+
+
+def test_interval_store_busy_is_a_skip(tmp_path, env, monkeypatch):
+    """Exit 4: another coordinator holds the store's lease, and this run appended nothing. The phase is done with a
+    skip clause, so /scans reads the scan short until an append holds it, and never takes this run's step for one that
+    did an earlier run's work."""
+    from dt_cloud import scan_runs
+
+    monkeypatch.setattr(scan_runs, "run_grouped", lambda cmd, timeout, grace, **kw: scan_runs.Ran(4, False, None))
+    c = gcs_ctx(tmp_path, env, monkeypatch, **{"interval-store": {"profile": "/app/job/interval-store.json"}})
+    phases = []
+    c.run.begin = lambda name: phases.append(("begin", name))
+    c.run.end = lambda name, rc=0, **kw: phases.append(("end", name, rc, kw))
+    S.interval_store(c, None)
+    note = "skipped (busy): another coordinator holds the interval store's lease; this scan comes with its append or the next run"
+    assert phases == [("begin", "interval-store"), ("end", "interval-store", 0, {"note": note})]
+    assert scan_runs.phase_skip(note) == note
+
+
+def test_interval_store_not_next_is_passed_over(tmp_path, env, monkeypatch):
+    """Exit 3: the staged append refused the scan, as static-names' does: failed, with the `passed over:` clause."""
+    from dt_cloud import scan_runs
+
+    monkeypatch.setattr(scan_runs, "run_grouped", lambda cmd, timeout, grace, **kw: scan_runs.Ran(3, False, None))
+    c = gcs_ctx(tmp_path, env, monkeypatch, **{"interval-store": {"profile": "/app/job/interval-store.json"}})
+    phases = []
+    c.run.begin = lambda name: phases.append(("begin", name))
+    c.run.end = lambda name, rc=0, **kw: phases.append(("end", name, rc, kw))
+    S.interval_store(c, None)
+    assert phases == [("begin", "interval-store"), ("end", "interval-store", 3, {
+        "warn": True, "msg": "the scan reads per-scan: the store's append passed it over", "note": PASSED_OVER, "timed_out": None, "terminated": None})]
 
 
 def test_interval_store_adds_from_the_store_or_the_data_store(tmp_path, env, monkeypatch):

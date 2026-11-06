@@ -383,6 +383,21 @@ describe('a succeeded run\'s issues, by what their steps declare (`scanSteps.jso
       ['phase', 'outcome', 'recovery', 'passing', 'detail'], ['phase', 'outcome', 'recovery', 'passing'], ['phase', 'outcome', 'recovery'],
     ])
   })
+  it('a scan its store\'s append passed over is never recovered by a later run\'s append, and says so', () => {
+    const over = 'passed over: the store\'s append order is past this scan, or its path sort isn\'t published; no later run appends it'
+    const ps: ScanRunPhase[] = [
+      { ...failed('static-names'), note: `failed (exit 3), ${over}` }, failed('interval-store', 1),
+      { ...phase('c', 'static-names', 0, 3100, 3300), note: 'overlapped' }, phase('c', 'interval-store', 1, 3100, 3300),
+    ]
+    const issues = phaseIssues(RUNS[2], [RUNS[2], later], ps)
+    expect(issues).toEqual([
+      { phase: 'static-names', outcome: 'failed', recovery: null, detail: over },
+      { phase: 'interval-store', outcome: 'failed', recovery: later },
+    ])
+    expect([issueState(issues[0]), issueNext(issues[0]), runOutcomeLabel(RUNS[2], issues)]).toEqual([
+      'incomplete', 'Not retried: the store appends in scan order and is past this scan. A rebuild or backfill of the store adds it.', 'incomplete · static-names',
+    ])
+  })
   it('a skipped converging step is recovered the same way; a linked attempt of the run\'s own wins over a later run', () => {
     const skip = 'skipped (busy): the store\'s lease is held'
     const retry = run({ run_id: 'retry', scan: RUNS[2].scan, kind: 'phase-recovery', parent: 'b', started_ts: 2800, finished_ts: 2900 })

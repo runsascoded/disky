@@ -1080,7 +1080,7 @@ def static_names(ctx: Ctx, arg: str | None) -> None:
                    else ["build", *args, *ctx.opt("static-names", "build_args", [])])
             ctx.sh(["dt-cloud", "static-names", *sub], fatal=False, warn=f"static-names {sub[0]} failed for {ctx.scan}")
         return
-    from .append_runner import BUSY
+    from .append_runner import BUSY, NOT_NEXT
 
     prof = ctx.opt("static-names", "profile") or ctx.env["STATIC_NAMES_PROFILE"]
     # exit 4: another coordinator (a catch-up, or an earlier scan's run) or a compaction holds the store's lease; it
@@ -1098,6 +1098,8 @@ def static_names(ctx: Ctx, arg: str | None) -> None:
                      allowed_codes=(BUSY,), capture=bool(compact_cmd))
         if ctx.last is not None and ctx.last.returncode == BUSY:
             ctx.skip("busy", STATIC_NAMES_BUSY)
+        elif ctx.last is not None and ctx.last.returncode == NOT_NEXT:
+            ctx.note = PASSED_OVER  # failed, and no later run's append takes the scan: /scans never reads it recovered
         elif out and (deferred := json.loads(out.strip().splitlines()[-1]).get("deferred")):
             err(f"static-names: compaction due ({deferred}): run apart")
             ctx.sh(compact_cmd, fatal=False, warn=f"static-names compaction submit failed for {ctx.scan}")
@@ -1134,6 +1136,11 @@ def static_lag(ctx: Ctx, probe: bool = False) -> dict | None:
                               "catch-up appends them")
     return lag
 
+
+#: A staged append refused the scan (`append_runner.NOT_NEXT`, with `-c`: a newer scan was appended first, or its
+#: `path` sort isn't under the generation's layouts): the failed phase's note. Appends go in scan-id order, so no
+#: later run's takes it, and /scans (`scanRunsModel.phasePassedOver`) never reads the failure as recovered by one.
+PASSED_OVER = "passed over: the store's append order is past this scan, or its path sort isn't published; no later run appends it"
 
 #: Why a scan's static-names step was skipped (`runs add` exit `BUSY`): its phase note's reason, and the probe's.
 STATIC_NAMES_BUSY = ("another coordinator or a compaction holds the static-names store's lease; search for this scan "
@@ -1198,7 +1205,7 @@ def interval_store(ctx: Ctx, arg: str | None) -> None:
 
     timeout = ctx.opt("interval-store", "timeout")
     if ctx.opt("interval-store", "profile"):
-        from .append_runner import BUSY
+        from .append_runner import BUSY, NOT_NEXT
 
         cmd = ["dt-cloud", "interval-store", "append", "-c", "-w", str(ctx.opt("interval-store", "merge_wait", 0)), ctx.scan]
         env = {"INTERVAL_STORE_PROFILE": str(ctx.opt("interval-store", "profile"))}
@@ -1209,7 +1216,13 @@ def interval_store(ctx: Ctx, arg: str | None) -> None:
         with ctx.beating("interval-store") as tail:
             ran = run_grouped(cmd, duration(timeout) if timeout else None, 30.0, env={**ctx.env, **env}, tail=tail)
         if ran.rc == BUSY:
-            ctx.run.end("interval-store", 0, note="another coordinator holds the store's lease; it appends this scan")
+            # this run appended nothing: an explicit skip (`scan_runs.phase_skip`), so /scans reads the scan short until
+            # an append holds it, and never takes this step for one that did an earlier run's work
+            ctx.run.end("interval-store", 0, note=INTERVAL_STORE_BUSY)
+            return
+        if ran.rc == NOT_NEXT:
+            ctx.run.end("interval-store", ran.rc, warn=True, msg="the scan reads per-scan: the store's append passed it over", note=PASSED_OVER,
+                        timed_out=None, terminated=None)
             return
         ctx.run.end("interval-store", ran.rc, warn=True, msg="the scan reads per-scan until a later run appends it",
                     timed_out=timeout if ran.timed_out else None, terminated=ran.signal if ran.rc else None)
@@ -1238,6 +1251,11 @@ def interval_store(ctx: Ctx, arg: str | None) -> None:
         ran = run_grouped(cmd, duration(timeout) if timeout else None, 30.0, env=ctx.env, tail=tail)
     ctx.run.end("interval-store", ran.rc, warn=True, msg="the scan reads per-scan until a later run appends it",
                 timed_out=timeout if ran.timed_out else None, terminated=ran.signal if ran.rc else None)
+
+
+#: Why a scan's staged interval-store step was skipped (`append` exit `BUSY`): its phase note.
+INTERVAL_STORE_BUSY = ("skipped (busy): another coordinator holds the interval store's lease; this scan comes with its "
+                       "append or the next run")
 
 
 def _sync_args(ctx: Ctx) -> list[str]:

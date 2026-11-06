@@ -244,14 +244,22 @@ export function issueLeaves(i: Pick<PhaseIssue, 'phase' | 'outcome' | 'recovery'
 }
 
 /** Where an open issue goes from here: search catches up with the index; a converging step's work comes with a later
- * run's same step; a check is not redone, and reads `passing since` once a later run's passes; any other is not
- * retried. */
-export function issueNext(i: Pick<PhaseIssue, 'phase' | 'outcome'>): string {
+ * run's same step, unless its store's append passed the scan over (`PASSED_OVER`); a check is not redone, and reads
+ * `passing since` once a later run's passes; any other is not retried. */
+export function issueNext(i: Pick<PhaseIssue, 'phase' | 'outcome' | 'detail'>): string {
   if (i.outcome === BEHIND) return 'Search catches up when the static name index appends this scan.'
+  if (PASSED_OVER.test(i.detail ?? '')) return 'Not retried: the store appends in scan order and is past this scan. A rebuild or backfill of the store adds it.'
   const step = stepFailure(i.phase)
   if (step?.converges) return `A later run's ${i.phase} step does this run's work too; none has yet.`
   return step?.checks ? `A check: no later run redoes it for this scan, and no later run's ${i.phase} has passed yet.` : 'Not retried: no later run redoes it.'
 }
+
+/** A failed append's `passed over: …` clause (`dt_cloud.scan_steps.PASSED_OVER`: the store's append refused the scan,
+ * a newer one being in already), at the start of a note's verdict or after a comma. */
+const PASSED_OVER = /(?:^|,\s*)passed over\b/
+
+/** Whether a store's append passed the phase's scan over: no later run's append takes it, so it never converges. */
+export const phasePassedOver = (p: Pick<ScanRunPhase, 'status' | 'note'>): boolean => phaseStatus(p) === 'failed' && PASSED_OVER.test(p.note ?? '')
 
 /** A done phase's `search behind: …` clause (`dt_cloud.scan_steps.probe`: every failure was the search's
  * `scan-not-indexed` refusal), else null. */
@@ -374,9 +382,9 @@ function laterDone(run: ScanRun, p: ScanRunPhase, runs: readonly ScanRun[], phas
 
 /** The run that later did a converging step's work for `run` (`StepFailure.converges`: an append of every pending
  * scan, an ingest from the watermark, a thread converged, a pass over every scan): `laterDone`'s. Null for a step no
- * later run redoes. */
+ * later run redoes, and for a scan its store's append passed over (`phasePassedOver`). */
 const convergedBy = (run: ScanRun, p: ScanRunPhase, runs: readonly ScanRun[], phases: readonly ScanRunPhase[]): ScanRun | null =>
-  (stepFailure(p.phase)?.converges ? laterDone(run, p, runs, phases) : null)
+  (stepFailure(p.phase)?.converges && !phasePassedOver(p) ? laterDone(run, p, runs, phases) : null)
 
 /** A check's `PhaseIssue.passing` (`StepFailure.checks`): the first later run whose same check passed in full
  * (`laterDone` by `checkPassed`), null once `recovery` re-checked this scan; nothing for a step that isn't a check. */
