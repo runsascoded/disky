@@ -3825,6 +3825,10 @@ from .deploy_cost import cost_cmd as _deploy_cost  # noqa: E402
 
 main.add_command(_deploy_cost)
 
+from .fleet_status import fleet_status_cmd as _fleet_status  # noqa: E402
+
+main.add_command(_fleet_status)
+
 from .soft_delete import soft_delete_cmd as _soft_delete  # noqa: E402
 
 main.add_command(_soft_delete)
