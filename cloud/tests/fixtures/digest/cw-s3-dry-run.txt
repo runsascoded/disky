@@ -1,0 +1,13 @@
+<site OP: cw 2026-09, 9 scans to 2026-09-08T0001, params qr,pp>
+
+[← August](<prev-thread>)
+
+![CoreWeave usage — September 2026](<plot-url>)
+
+--- replies (sender: username | body | icon) ---
+9/1 — 713 TiB (+7.8, 1.1%) | :large_yellow_circle: [02a](https://cw.oa.dev/main-data?d=26090112-1d#over-time): 78.4% of 1P (196.8 Ti free), +7.8 Ti/d, ≈25d to full · :large_green_circle: [hero](https://cw.oa.dev/hot-data?d=26090112-1d#over-time): 18% | av_deg50.png?v=4
+9/2 — 715 TiB (+1.8, 0.3%) | :large_yellow_circle: [02a](https://cw.oa.dev/main-data?d=26090212-1d#over-time): 78.6% of 1P (195.0 Ti free), +8.3 Ti/d, ≈23d to full · :large_orange_circle: [hero](https://cw.oa.dev/hot-data?d=26090212-1d#over-time): 18%, +30.3 Ti/d, ≈13d to full | av_deg30.png?v=4
+9/3 — 760 TiB (+45.5, 6.4%) | :large_orange_circle: [02a](https://cw.oa.dev/main-data?d=260903-12h#over-time): 83.6% of 1P (149.5 Ti free), +48.5 Ti/d, ≈3d to full · :large_orange_circle: [hero](https://cw.oa.dev/hot-data?d=260903-12h#over-time): 18%, +30.3 Ti/d, ≈13d to full | av_deg80.png?v=4
+9/4 — 701 TiB (−59.5, 7.8%) | :large_green_circle: [02a](https://cw.oa.dev/main-data?d=26090412-1d12h#over-time): 77.0% of 1P (209.0 Ti free) · :large_green_circle: [hero](https://cw.oa.dev/hot-data?d=26090412-1d12h#over-time): 18% · [more-data](https://cw.oa.dev/more-data?d=26090412-1d12h#over-time): 2 Ti | av_deg-70.png?v=4
+9/7 — 702 TiB (+1.5, 0.2%) | :large_green_circle: [02a](https://cw.oa.dev/main-data?d=260907-3d#over-time): 77.2% of 1P (207.5 Ti free) · :large_green_circle: [hero](https://cw.oa.dev/hot-data?d=260907-3d#over-time): 20% · [more-data](https://cw.oa.dev/more-data?d=260907-3d#over-time): 2 Ti | av_deg10.png?v=4
+9/8 · so far | :arrow_deg80: **790 TiB (+87.5, 12.5%)** · [as of 00:01Z](https://cw.oa.dev/?d=260908-12h#over-time) · :large_orange_circle: [02a](https://cw.oa.dev/main-data?d=260908-12h#over-time): 86.8% of 1P (120.0 Ti free), +25.4 Ti/d, ≈5d to full · :large_green_circle: [hero](https://cw.oa.dev/hot-data?d=260908-12h#over-time): 20% · [more-data](https://cw.oa.dev/more-data?d=260908-12h#over-time): 2 Ti | :hourglass_flowing_sand:

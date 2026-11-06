@@ -35,7 +35,7 @@ describe('/api/digest-reapply', () => {
       'month: YYYY-MM', T, T, T, T, T,
       'dry_run: a boolean',
       'params: digest params: unreadable field "qx" in "qx"',
-      'quota_marks: warning | circles | runway | runway-hue',
+      'quota_marks: warning | circles | runway | runway-hue | arrow-chip',
     ])
   })
 
