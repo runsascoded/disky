@@ -2,6 +2,7 @@
 // behind it, for any list that can outgrow a screen. `Paginated` wraps a table or list; `usePaged` is the hook, for a
 // list that also has to reveal a row by index (a permalink, a jump).
 import { type ReactNode, useState } from 'react'
+import type { Param } from 'use-prms'
 
 const { ceil, floor, max, min } = Math
 
@@ -36,9 +37,18 @@ export interface Paged<T> extends PageWindow {
 
 export const DEFAULT_SIZES: readonly number[] = [50]
 
-/** `rows`' current page. `sizes`: the page sizes on offer, the first the default. */
-export function usePaged<T>(rows: readonly T[], sizes: readonly number[] = DEFAULT_SIZES): Paged<T> {
-  const [page, setPage] = useState(0)
+/** A list's page in the URL (`useUrlState('pg', pageParam)`, handed to `usePaged` as `held`): 1-based (`?pg=2` is the
+ * second page), absent on the first; anything but a whole number ≥ 1 reads as the first. */
+export const pageParam: Param<number> = {
+  encode: p => (p > 0 ? String(p + 1) : undefined),
+  decode: s => (s != null && /^\d+$/.test(s) && +s >= 1 ? +s - 1 : 0),
+}
+
+/** `rows`' current page. `sizes`: the page sizes on offer, the first the default. `held`: the page's state when it
+ * lives elsewhere (the URL: `pageParam`), else the hook keeps it. */
+export function usePaged<T>(rows: readonly T[], sizes: readonly number[] = DEFAULT_SIZES, held?: readonly [number, (page: number) => void]): Paged<T> {
+  const own = useState(0)
+  const [page, setPage] = held ?? own
   const [size, setSize] = useState(sizes[0])
   const w = pageWindow(rows.length, size, page)
   return {
@@ -73,8 +83,9 @@ export function Pager<T>({ paged, label }: { paged: Paged<T>; label: string }) {
   )
 }
 
-/** A list and its pager: `children` renders the current page (`from`: its first row's index in `rows`). */
-export function Paginated<T>({ rows, sizes, label, children }: { rows: readonly T[]; sizes?: readonly number[]; label: string; children: (page: T[], from: number) => ReactNode }) {
-  const paged = usePaged(rows, sizes)
+/** A list and its pager: `children` renders the current page (`from`: its first row's index in `rows`). `held`: as
+ * `usePaged`'s. */
+export function Paginated<T>({ rows, sizes, label, held, children }: { rows: readonly T[]; sizes?: readonly number[]; label: string; held?: readonly [number, (page: number) => void]; children: (page: T[], from: number) => ReactNode }) {
+  const paged = usePaged(rows, sizes, held)
   return <>{children(paged.rows, paged.from)}<Pager paged={paged} label={label} /></>
 }

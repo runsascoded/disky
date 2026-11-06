@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { pageOfIndex, pageWindow } from './Pager'
+import { pageOfIndex, pageParam, pageWindow } from './Pager'
 
 describe('pageWindow: the page of a list, clamped', () => {
   it('names the page, the page count and the half-open row range', () => {
@@ -27,5 +27,12 @@ describe('pageWindow: the page of a list, clamped', () => {
 describe('pageOfIndex: the page holding a row', () => {
   it('finds a linked row across a page boundary', () => {
     expect([0, 49, 50, 5403].map(i => pageOfIndex(i, 50))).toEqual([0, 0, 1, 108])
+  })
+})
+
+describe('pageParam: a list\'s page in the URL', () => {
+  it('is 1-based, absent on the first page, and reads anything else as the first', () => {
+    expect([0, 1, 108].map(p => pageParam.encode(p))).toEqual([undefined, '2', '109'])
+    expect([undefined, '', '1', '2', '109', '0', '-3', '2.5', 'x'].map(s => pageParam.decode(s))).toEqual([0, 0, 0, 1, 108, 0, 0, 0, 0])
   })
 })
