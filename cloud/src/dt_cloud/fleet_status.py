@@ -47,7 +47,7 @@ def parse_site(value: str) -> Site:
 
 
 def outcome(summary: dict) -> str | None:
-    """A run's mark (`MARKS`): `short` when it succeeded with a step's issue still open. None: it did nothing (`nop`)."""
+    """A run's mark (`MARKS`): `short` when it succeeded with a step's issue still open (no later run recovered it or passed since). None: it did nothing (`nop`)."""
     status = summary["run"]["status"]
     if status == "nop":
         return None
@@ -55,7 +55,7 @@ def outcome(summary: dict) -> str | None:
         return "failed"
     if status == "running":
         return "running"
-    return "short" if any(not i.get("recovery") for i in summary.get("phase_issues", [])) else "ok"
+    return "short" if any(not (i.get("recovery") or i.get("passing")) for i in summary.get("phase_issues", [])) else "ok"
 
 
 def read_site(site: Site, n: int) -> Row:
