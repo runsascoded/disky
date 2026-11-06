@@ -11,7 +11,7 @@
  * edge cache accordingly. w/h arrive quantized-up to 128px so resizes mostly
  * re-hit the cache.
  */
-import { filterJson, hiddenNotFound, isHidden, restrictedForbidden, restrictionFor, restrictSubtree, scopeReachesHidden } from '../_lib/restrict.js'
+import { filterJson, hiddenNotFound, isHidden, restrictedScopeRefused, restrictedSearchRefused, restrictionFor, restrictSubtree, scopeReachesHidden } from '../_lib/restrict.js'
 import { type Env, type Identity, presentsCredentials, requireViewer } from '../_lib/auth.js'
 import { ivRefusal, ivRetry, pathGens, withPathStore, storeReady, type Lens } from '../_lib/index.js'
 import { hasLedger, ledgerHead } from '../_lib/ledger.js'
@@ -177,9 +177,9 @@ async function subtreeGated(
   if (restriction && isHidden(path, restriction)) return hiddenNotFound()
   // A name filter's tree sums every match, hidden ones too, and a sum can't be filtered on the way out: answered, it
   // would let the link probe a hidden dir's contents by name.
-  if (restriction && query) return restrictedForbidden()
+  if (restriction && query) return restrictedSearchRefused()
   // An owner, class or lens scope at or above a hidden dir: its sums break down what's hidden, the same way.
-  if (restriction && (lens || owner || classes) && scopeReachesHidden(path, restriction)) return restrictedForbidden()
+  if (restriction && (lens || owner || classes) && scopeReachesHidden(path, restriction)) return restrictedScopeRefused()
   const out = (res: Response | Promise<Response>) =>
     restriction ? Promise.resolve(res).then(r => filterJson(r, (b: Parameters<typeof restrictSubtree>[0]) => restrictSubtree(b, restriction))) : res
 

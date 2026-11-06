@@ -53,7 +53,7 @@ import { budgetCutRefetch } from './budgetCut'
 import type { RowSource } from './MatchActions'
 import { type MatchFields, seriesMatches } from './filterMatches'
 import { QueryHelpTip } from './QueryHelp'
-import { apiError, indexedSyntax, refusalOf, useFilterCaps, useScanPreference } from './filterCaps'
+import { apiError, filterBoxError, indexedSyntax, refusalOf, useFilterCaps, useScanPreference } from './filterCaps'
 import { RootCrumb } from './RootCrumb'
 import { actBlock, noMatches } from './matchAct'
 import { type BlindPanel, blindNote, blindShown } from './filterBlind'
@@ -569,11 +569,11 @@ function AppContent() {
   const deepErr = subtreePaths.length > 1 ? subtreeQs[subtreePaths.length - 1]?.error as Error | undefined : undefined
   const deepRefused = !rootErr && fq && refusalOf(deepErr) ? deepErr : undefined
   const viewErr = rootErr ?? deepRefused
-  // The box's error: the client's own parse, else the server's 400.
+  // The box's error: the client's own parse, else the server's refusal of the query.
   // On a scan the index doesn't cover yet, its `scan-not-indexed` refusal is the box's disabled state and the map
   // slot's catch-up note (with its links), not an error.
   const notIndexed = searchIsOff && refusalOf(viewErr)?.code === 'scan-not-indexed'
-  const fErr = fParse.error ?? fScopeRefused ?? (notIndexed ? undefined : /^400: bad query: (.*)/s.exec(viewErr?.message ?? '')?.[1])
+  const fErr = fParse.error ?? fScopeRefused ?? (notIndexed ? undefined : filterBoxError(viewErr))
   // useQueries returns a fresh array each render; stamp the data so the graft
   // memo re-runs exactly when a response lands.
   // Both tiers stamp the graft: a depth-1 tree landing must re-run it just
