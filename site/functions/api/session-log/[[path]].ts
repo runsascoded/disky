@@ -14,8 +14,9 @@
 // switch is read at most once per `SWITCH_TTL_MS` per isolate, so a change
 // reaches every tab within a minute. The identity is the request's (never the
 // client's say). The retention purge (`SESSION_LOG_RETAIN_DAYS`, default 30)
-// rides the config GET and each page load's first batch, at most hourly per
-// isolate, whether logging is on or off.
+// rides a viewer's config GET (never an anonymous one: the config is public, for
+// `/privacy`, and that traffic writes nothing) and each page load's first batch,
+// at most hourly per isolate, whether logging is on or off.
 import { type Ctx, type Env as AuthEnv, json, requireAdmin, requireViewer } from '../../_lib/auth.js'
 import { cachedSwitch, ingest, listSessions, maybePurge, retainDays, sessionDetail, type SwitchCache, writeSwitch } from '../../_lib/sessionLog.js'
 import { defaultUntil, FOREVER_MS, isForever, isOn, lastDay, LIMITS, maxUntil, parseCursor, parseUntil, type SwitchState, switchState, validateBatch } from '../../_lib/sessionLogShape.js'
@@ -61,11 +62,11 @@ async function current(ctx: C, now: number): Promise<{ until: number | null; rea
  *  visitor, signed in or not); `retainDays`: how long the log is kept. */
 async function config(ctx: C): Promise<Response> {
   const now = Date.now()
-  purgeLater(ctx, now)
+  const id = await requireViewer(ctx)
+  if (!(id instanceof Response) && id.via !== 'public') purgeLater(ctx, now)
   const u = await current(ctx, now)
   const shared = { on: isOn(u), retainDays: retainDays(ctx.env.SESSION_LOG_RETAIN_DAYS) }
   if (!isOn(u)) return json({ enabled: false, until: u.until, reason: u.reason, ...shared }, 200, NO_STORE)
-  const id = await requireViewer(ctx)
   if (id instanceof Response) return json({ enabled: false, until: u.until, reason: 'no viewer identity', ...shared }, 200, NO_STORE)
   return json({ enabled: true, until: u.until, reason: null, ...shared }, 200, NO_STORE)
 }
