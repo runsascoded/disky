@@ -31,9 +31,11 @@ describe('/api/sweep/soft-delete', () => {
   it('a read-only viewer reads the newest reading\'s buckets, and when it was read', async () => {
     expect(await get(viewer)).toEqual([200, { soft_delete: { asOf: '2026-11-05 07:12Z', off: { a: true, b: false } } }, 'private, max-age=300'])
   })
-  it('null with no reading, and on `plan-sweep` (its undo is its own hold: nothing of it is read)', async () => {
+  it('null with no reading', async () => {
     expect(await get(viewer, { INDEX_R2: fakeR2({}) })).toEqual([200, { soft_delete: null }, 'private, max-age=300'])
-    expect(await get(viewer, { EXECUTOR: 'plan-sweep' })).toEqual([200, { soft_delete: null }, 'private, max-age=300'])
+  })
+  it('`plan-sweep` reads the same document', async () => {
+    expect(await get(viewer, { EXECUTOR: 'plan-sweep' })).toEqual(await get(viewer))
   })
   it('viewers only', async () => {
     expect((await get())[0]).toBe(401)

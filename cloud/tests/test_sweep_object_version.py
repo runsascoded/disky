@@ -20,6 +20,9 @@ def run_dir(tmp_path: Path, token: str | None = '"reviewed"') -> Path:
 
 
 class ConditionalStore:
+    def get_bucket_versioning(self, Bucket: str) -> dict:  # noqa: N803
+        return {}
+
     def __init__(self, code: str | None = None) -> None:
         self.code = code
         self.calls = []

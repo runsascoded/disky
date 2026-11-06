@@ -292,7 +292,7 @@ describe('an undo a run recorded, where soft delete is off now', () => {
       runControls(view(run()), EXEC_CAPS.sweep, true, 2000, null),
       runControls(view(run()), EXEC_CAPS.sweep, true, 2000),
     ]).toEqual([
-      { stop: false, undo: false, purge: false, undoing: false, undoOff: 'Undo unavailable: soft delete is off on b1 (as of 2026-11-05). GCS refuses to restore a soft-deleted object from a bucket whose soft delete is off.' },
+      { stop: false, undo: false, purge: false, undoing: false, undoOff: 'Undo unavailable: soft delete is off on b1 (as of 2026-11-05). Undo restores from what the bucket keeps after a delete, so its soft delete (versioning, on S3) has to be on.' },
       { stop: false, undo: true, purge: false, undoing: false, undoOff: null },
       { stop: false, undo: true, purge: false, undoing: false, undoOff: null },
     ])
@@ -333,7 +333,7 @@ describe('an undo a run recorded, where soft delete is off now', () => {
     ])
   })
   it('only the `sweep` executor restores from soft delete: `plan-sweep` reads no snapshot', () => {
-    expect([EXEC_CAPS.sweep.softDelete, EXEC_CAPS['plan-sweep'].softDelete]).toEqual([true, false])
+    expect([EXEC_CAPS.sweep.softDelete, EXEC_CAPS['plan-sweep'].softDelete]).toEqual([true, true])
   })
   it('undoStatus: what a run\'s row says of its undo', () => {
     expect([

@@ -29,6 +29,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -327,6 +328,25 @@ def _write_log(path: Path, rows: list[tuple]) -> None:
     pq.write_table(tbl, path)
 
 
+def _run_retention_days(client: "S3Client", bucket: str, for_real: bool, min_days: int) -> int | None:
+    """What `bucket` retains in days (`soft_delete.retention_days`), held to `min_days` on a real run. None: unreadable, a
+    legitimate state only where nothing is required (a store or key that doesn't offer versioning reads)."""
+    from botocore.exceptions import ClientError
+
+    from .soft_delete import read_s3_bucket, retention_days, retention_seconds
+
+    try:
+        days = retention_days(retention_seconds(read_s3_bucket(client, bucket)))
+    except ClientError as e:
+        if for_real and min_days > 0:
+            raise SweepError(f"not deleting: can't read {bucket}'s retention, and this deployment requires at least {min_days} days ({e})") from e
+        print(f"{bucket}: retention not readable, none recorded ({e})", file=sys.stderr)
+        return None
+    if for_real and days < min_days:
+        raise SweepError(f"not deleting: {bucket} retains deleted data for {days} days, and this deployment requires at least {min_days}")
+    return days
+
+
 def execute_plan(
     run_dir: str,
     *,
@@ -334,14 +354,18 @@ def execute_plan(
     client: "S3Client | None" = None,
     delete_workers: int = 16,
     mtime_tol: int = 1,
+    min_soft_delete_days: int = 0,
 ) -> dict:
     """Execute the manifest under `run_dir` against CoreWeave S3 (boto3).
 
     Lists each curated root, merge-checks every live object against the reviewed
     manifest, and deletes only the reviewed keys whose (size, mtime) still match
     — new keys since the scan are left alone (drift), changed ones skipped
-    (overwritten), vanished ones noted (gone). Bucket versioning is not required
-    or queried: a real deletion may be permanent. A dry run touches nothing.
+    (overwritten), vanished ones noted (gone). A dry run touches nothing.
+
+    `min_soft_delete_days` (`/admin`'s minimum): above 0, a real run refuses a bucket retaining less, or one it can't read.
+    At 0 nothing is required of the bucket and a real deletion may be permanent: a key that can't read its versioning still
+    deletes, and the run records no retention. The summary carries both.
 
     Writes a decision-log parquet + `<deleted|would-delete>-summary.json` under
     `run_dir` and returns the summary. Does NOT write D1 — the Functions layer
@@ -356,6 +380,7 @@ def execute_plan(
     roots = listing_roots(plan_summary)
 
     client = client or s3_client()
+    soft_delete_days = _run_retention_days(client, bucket, for_real, min_soft_delete_days)
 
     manifest_path = run / "manifest" / f"{bucket}.parquet"
     from botocore.exceptions import ClientError
@@ -478,6 +503,8 @@ def execute_plan(
         "bucket": bucket,
         "mode": "real" if for_real else "dry",
         "versioning_guard": False,
+        "min_soft_delete_days": min_soft_delete_days,
+        "soft_delete_days": soft_delete_days,
         **counters,
         "preserved_breakdown": preservation,
         "bands": [{"prefix": b, **v} for b, v in sorted(bands.items())],

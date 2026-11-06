@@ -64,3 +64,40 @@ def test_out_writes_the_days_document_under_each_root_and_prints_where(fake_gcs,
 def test_refuses_no_bucket(fake_gcs):
     r = CliRunner().invoke(main, ["soft-delete"])
     assert (r.exit_code, r.output.strip().split("\n")[-1], fake_gcs) == (2, "Error: no bucket: pass -b", [])
+
+
+@pytest.mark.parametrize(("versioning", "rules", "seconds"), [
+    ({}, [], 0),
+    ({"Status": "Suspended"}, [{"Status": "Enabled", "NoncurrentVersionExpiration": {"NoncurrentDays": 1}}], 0),
+    ({"Status": "Enabled"}, [], None),
+    ({"Status": "Enabled"}, [{"Status": "Disabled", "NoncurrentVersionExpiration": {"NoncurrentDays": 1}}], None),
+    ({"Status": "Enabled"}, [{"Status": "Enabled", "Expiration": {"Days": 30}}], None),
+    ({"Status": "Enabled"}, [{"Status": "Enabled", "NoncurrentVersionExpiration": {"NoncurrentDays": 7}}], 604800),
+    ({"Status": "Enabled"}, [
+        {"Status": "Enabled", "Filter": {"Prefix": "tmp/"}, "NoncurrentVersionExpiration": {"NoncurrentDays": 2}},
+        {"Status": "Enabled", "NoncurrentVersionExpiration": {"NoncurrentDays": 7}},
+    ], 172800),
+])
+def test_s3_retention_is_versioning_plus_the_narrowest_noncurrent_rule(versioning, rules, seconds):
+    assert sd.s3_retention_seconds(versioning, rules) == seconds
+
+
+def test_s3_buckets_read_through_the_endpoint_beside_gcs_ones(fake_gcs, monkeypatch):
+    class Store:
+        def get_bucket_versioning(self, Bucket):  # noqa: N803
+            return {"Status": "Enabled"} if Bucket == "kept" else {"Status": "Suspended"}
+
+        def get_bucket_lifecycle_configuration(self, Bucket):  # noqa: N803
+            from botocore.exceptions import ClientError
+
+            raise ClientError({"Error": {"Code": "NoSuchLifecycleConfiguration", "Message": "none"}}, "GetBucketLifecycleConfiguration")
+
+    endpoints: list[str] = []
+    monkeypatch.setattr("dt_cloud.sweep.s3_client", lambda e: endpoints.append(e) or Store())
+    r = CliRunner().invoke(main, ["soft-delete", "-E", "https://s3.example.org", "-b", "s3://kept", "-b", "s3://paused", "-b", "bkt-b"])
+    assert (r.exit_code, r.output.split("\n"), fake_gcs, endpoints) == (
+        0,
+        ["bkt-b   7d", "kept    no expiry", "paused  off", ""],
+        [["bkt-b"]],
+        ["https://s3.example.org"],
+    )

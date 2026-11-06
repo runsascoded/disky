@@ -1783,18 +1783,19 @@ def plan_sweep_manifest(date: str, interval_store: str | None, l2_path: str | No
 
 @plan_sweep.command("execute")
 @option("-r", "--for-real", is_flag=True, help="Actually delete (may be permanent); default is a dry run")
+@option("-s", "--min-soft-delete-days", default=0, type=IntRange(0, 90), help="Refuse --for-real on a bucket retaining deleted data for less (versioning + a noncurrent rule); 0 requires nothing")
 @argument("run_dir")
-def plan_sweep_execute(for_real: bool, run_dir: str) -> None:
-    """Execute the manifest under RUN_DIR against CoreWeave S3 (boto3).
+def plan_sweep_execute(for_real: bool, min_soft_delete_days: int, run_dir: str) -> None:
+    """Execute the manifest under RUN_DIR against an S3-style store (boto3).
 
     Default is a dry run (touches nothing). `--for-real` deletes reviewed keys
-    whose (size, mtime) still match. Bucket versioning is not required;
-    deletions may be permanent."""
+    whose (size, mtime) still match. With no `-s` minimum, bucket versioning is
+    not required and deletions may be permanent."""
     import json
 
     from .sweep import execute_plan
 
-    s = execute_plan(run_dir, for_real=for_real)
+    s = execute_plan(run_dir, for_real=for_real, min_soft_delete_days=min_soft_delete_days)
     err(
         f"{'REAL' if for_real else 'DRY'}: {s['deleted_objects']} objs / {s['deleted_bytes']} bytes; "
         f"gone {s['skipped_gone']} overwritten {s['skipped_overwritten']} "
@@ -3316,6 +3317,7 @@ def _digest_options(template_default: str):
         option("-V", "--variant", type=Choice(["sender", "body"]), default=None, help="Reply style (cw template): headline as the sender name, posted once from the day's morning scan (sender, default) or bold in the body, edited as the day's scans land (body)"),
         option("-y", "--replies", "reply_range", help="Re-apply only the already-posted replies of this inclusive day range (`A..B`, YYYY-MM-DD) to their current rendering, as -d/--reply"),
         option("-w", "--webhook", help="Discord webhook URL in the digest channel (default $<config discord_webhook_env>: gcs $DISCORD_GCS_USAGE_WEBHOOK, cw none; with -P discord)"),
+        option("-W", "--preview-only", "preview_key", help="Write only the month's preview bundle under this channel key (a lowercase slug, listed in /admin/slack's thread selector): no Slack client, no plot hosted, nothing posted or edited"),
     ]
 
     def deco(f):
@@ -3350,6 +3352,7 @@ def _digest(
     site_url: str | None,
     variant: str | None,
     webhook: str | None,
+    preview_key: str | None,
     reply_range: str | None,
 ) -> None:
     from dataclasses import replace
@@ -3381,6 +3384,11 @@ def _digest(
     selected = op_only or bool(days)
     if selected and (edit_replies or redo_replies or platform != "slack"):
         raise UsageError("-o/--op, -d/--reply and -y/--replies re-apply Slack messages on their own (not with -E, -R or -P discord)")
+    if preview_key:
+        if selected or dry_run or edit_replies or redo_replies or platform != "slack":
+            raise UsageError("-W/--preview-only writes only the bundle (not with -n, -o, -d, -y, -E, -R or -P discord)")
+        dg.preview_only(tpl, root, m, preview_key, variant)
+        return
     if dry_run and not selected:
         print(dg.dry_run(tpl, root, m, variant))
         return
