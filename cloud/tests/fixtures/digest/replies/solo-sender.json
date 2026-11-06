@@ -1,0 +1,314 @@
+{
+ "cfg": {
+  "template": "cw",
+  "title": "S3 usage",
+  "site_url": "https://cw.example.org",
+  "host": "cw.example.org",
+  "unit": {
+   "name": "TiB",
+   "bytes": 1099511627776,
+   "short": "Ti"
+  },
+  "primary": "main-data",
+  "buckets": {
+   "main-data": {
+    "label": "main",
+    "path": null,
+    "zone": null,
+    "quotas": [
+     {
+      "bytes": 1000555581276160,
+      "name": "1 PB",
+      "short": "1P",
+      "classes": []
+     }
+    ]
+   }
+  },
+  "prices": {},
+  "icons_base": "https://icons.example.org"
+ },
+ "rows": {
+  "template": "cw",
+  "closed": false,
+  "pre": [
+   {
+    "scan": "2026-10-28T0001",
+    "slug": "26102800",
+    "tb": 700.0,
+    "extra": {},
+    "classes": null
+   },
+   {
+    "scan": "2026-10-28T0601",
+    "slug": "26102806",
+    "tb": 702.5,
+    "extra": {},
+    "classes": null
+   },
+   {
+    "scan": "2026-10-28T1201",
+    "slug": "26102812",
+    "tb": 705.0,
+    "extra": {},
+    "classes": null
+   },
+   {
+    "scan": "2026-10-28T1801",
+    "slug": "26102818",
+    "tb": 707.5,
+    "extra": {},
+    "classes": null
+   },
+   {
+    "scan": "2026-10-29T0001",
+    "slug": "26102900",
+    "tb": 710.0,
+    "extra": {},
+    "classes": null
+   },
+   {
+    "scan": "2026-10-29T0601",
+    "slug": "26102906",
+    "tb": 712.5,
+    "extra": {},
+    "classes": null
+   },
+   {
+    "scan": "2026-10-29T1201",
+    "slug": "26102912",
+    "tb": 715.0,
+    "extra": {},
+    "classes": null
+   },
+   {
+    "scan": "2026-10-29T1801",
+    "slug": "26102918",
+    "tb": 717.5,
+    "extra": {},
+    "classes": null
+   },
+   {
+    "scan": "2026-10-30T0001",
+    "slug": "26103000",
+    "tb": 720.0,
+    "extra": {},
+    "classes": null
+   },
+   {
+    "scan": "2026-10-30T0601",
+    "slug": "26103006",
+    "tb": 722.5,
+    "extra": {},
+    "classes": null
+   },
+   {
+    "scan": "2026-10-30T1201",
+    "slug": "26103012",
+    "tb": 725.0,
+    "extra": {},
+    "classes": null
+   },
+   {
+    "scan": "2026-10-30T1801",
+    "slug": "26103018",
+    "tb": 727.5,
+    "extra": {},
+    "classes": null
+   }
+  ],
+  "lead": [
+   {
+    "scan": "2026-10-31T0001",
+    "slug": "26103100",
+    "tb": 730.0,
+    "extra": {},
+    "classes": null
+   },
+   {
+    "scan": "2026-10-31T0601",
+    "slug": "26103106",
+    "tb": 732.5,
+    "extra": {},
+    "classes": null
+   },
+   {
+    "scan": "2026-10-31T1201",
+    "slug": "26103112",
+    "tb": 735.0,
+    "extra": {},
+    "classes": null
+   },
+   {
+    "scan": "2026-10-31T1801",
+    "slug": "26103118",
+    "tb": 737.5,
+    "extra": {},
+    "classes": null
+   }
+  ],
+  "rows": [
+   {
+    "scan": "2026-11-01T0001",
+    "slug": "26110100",
+    "tb": 740.0,
+    "extra": {},
+    "classes": null
+   },
+   {
+    "scan": "2026-11-01T0601",
+    "slug": "26110106",
+    "tb": 742.5,
+    "extra": {},
+    "classes": null
+   },
+   {
+    "scan": "2026-11-01T1201",
+    "slug": "26110112",
+    "tb": 745.0,
+    "extra": {},
+    "classes": null
+   },
+   {
+    "scan": "2026-11-01T1801",
+    "slug": "26110118",
+    "tb": 747.5,
+    "extra": {},
+    "classes": null
+   },
+   {
+    "scan": "2026-11-02T0001",
+    "slug": "26110200",
+    "tb": 750.0,
+    "extra": {},
+    "classes": null
+   },
+   {
+    "scan": "2026-11-02T0601",
+    "slug": "26110206",
+    "tb": 752.5,
+    "extra": {},
+    "classes": null
+   },
+   {
+    "scan": "2026-11-02T1201",
+    "slug": "26110212",
+    "tb": 755.0,
+    "extra": {},
+    "classes": null
+   },
+   {
+    "scan": "2026-11-02T1801",
+    "slug": "26110218",
+    "tb": 757.5,
+    "extra": {},
+    "classes": null
+   },
+   {
+    "scan": "2026-11-03T0001",
+    "slug": "26110300",
+    "tb": 760.0,
+    "extra": {},
+    "classes": null
+   },
+   {
+    "scan": "2026-11-03T0601",
+    "slug": "26110306",
+    "tb": 762.5,
+    "extra": {},
+    "classes": null
+   },
+   {
+    "scan": "2026-11-04T0001",
+    "slug": "26110400",
+    "tb": 765.0,
+    "extra": {},
+    "classes": null
+   },
+   {
+    "scan": "2026-11-04T0601",
+    "slug": "26110406",
+    "tb": 767.5,
+    "extra": {},
+    "classes": null
+   },
+   {
+    "scan": "2026-11-04T1201",
+    "slug": "26110412",
+    "tb": 770.0,
+    "extra": {},
+    "classes": null
+   },
+   {
+    "scan": "2026-11-04T1801",
+    "slug": "26110418",
+    "tb": 772.5,
+    "extra": {},
+    "classes": null
+   },
+   {
+    "scan": "2026-11-05T0001",
+    "slug": "26110500",
+    "tb": 775.0,
+    "extra": {},
+    "classes": null
+   },
+   {
+    "scan": "2026-11-05T0601",
+    "slug": "26110506",
+    "tb": 777.5,
+    "extra": {},
+    "classes": null
+   }
+  ]
+ },
+ "reply": {
+  "quota_marks": "warning",
+  "total_headline": false,
+  "reply_hour": 12,
+  "provisional": false,
+  "alert_pct": null,
+  "op_sender": {
+   "icon_emoji": ":calendar:"
+  },
+  "avatar_rev": 4,
+  "triggers": {
+   "2026-11-02T1201": "manual"
+  }
+ },
+ "variant": "sender",
+ "replies": [
+  {
+   "key": "2026-11-04",
+   "scan": "2026-11-04T1201",
+   "username": "11/4 — 770 TiB (+7.5, 1.0%)",
+   "body": "84.6% of 1P (140.0 Ti free) [↗︎](https://cw.example.org/main-data?d=26110412-1d6h#over-time)",
+   "icon_url": "https://icons.example.org/arrows/av_deg40.png?v=4",
+   "icon_emoji": null
+  },
+  {
+   "key": "2026-11-03",
+   "scan": "2026-11-03T0601",
+   "username": "11/3 — 762 TiB (+5.0, 0.7%)",
+   "body": "83.8% of 1P (147.5 Ti free) [↗︎](https://cw.example.org/main-data?d=26110306-12h#over-time)",
+   "icon_url": "https://icons.example.org/arrows/av_deg50.png?v=4",
+   "icon_emoji": null
+  },
+  {
+   "key": "2026-11-02",
+   "scan": "2026-11-02T1801",
+   "username": "11/2 — 758 TiB (+12.5, 1.7%)",
+   "body": "83.2% of 1P (152.5 Ti free) [↗︎](https://cw.example.org/main-data?d=26110218-1d6h#over-time)",
+   "icon_url": "https://icons.example.org/arrows/av_deg50.png?v=4",
+   "icon_emoji": null
+  },
+  {
+   "key": "2026-11-01",
+   "scan": "2026-11-01T1201",
+   "username": "11/1 — 745 TiB (+10.0, 1.4%)",
+   "body": "81.9% of 1P (165.0 Ti free) [↗︎](https://cw.example.org/main-data?d=26110112-1d#over-time)",
+   "icon_url": "https://icons.example.org/arrows/av_deg50.png?v=4",
+   "icon_emoji": null
+  }
+ ]
+}
