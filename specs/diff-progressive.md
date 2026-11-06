@@ -49,7 +49,7 @@ The fix is structural: **don't chain levels inside a request.** Let the client d
 
 ### 2. The client: progressive descent
 
-- On a diff view, request `level(P)` and draw it at once (one round of reads). Above it, the summary (`summary=1`, totals only) already lands first.
+- On a diff view, request `level(P)` and draw it at once (one round of reads). (The page no longer asks `summary=1`; the totals above it come with the pair's `depth=1` diff.)
 - Then request `level(child)` **in parallel** for each drawn child whose cell is big enough to show its children (cell area ≥ a minimum legible area), largest first, at most M requests in flight. Draw each into its cell as it arrives. Recurse until no cell is big enough.
 - The design has one knob per level: K (children drawn per directory) and the minimum cell area. Both are display choices, set from the canvas, not from data.
 - Time to first paint = one level request. Time to complete = depth × one level request, but every intermediate state is a correct, summing map (each unexpanded cell is drawn as a leaf at its own size).

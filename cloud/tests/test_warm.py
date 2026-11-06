@@ -23,9 +23,7 @@ def test_plan_one_width():
         "/api/series?path=&split=roots",
         "/api/subtree?date=2026-09-15&path=&w=1280&h=768",
         "/api/subtree?date=2026-09-15&path=&w=1280&h=768&depth=1",
-        "/api/diff?from=2026-09-14&to=2026-09-15&path=&w=1280&h=768&summary=1",
         "/api/diff?from=2026-09-14&to=2026-09-15&path=&w=1280&h=768",
-        "/api/diff?from=2026-09-08&to=2026-09-15&path=&w=1280&h=768&summary=1",
         "/api/diff?from=2026-09-08&to=2026-09-15&path=&w=1280&h=768",
     ]
 
@@ -34,16 +32,16 @@ TOP = ("", "b1", "b2", "b3")
 
 
 def test_plan_dedupes_pairs_and_counts():
-    # the previous-scan pair and the 1d chip are the same pair: 5 spans + prev → 5 distinct pairs;
-    # × (root + 3 buckets) × 5 widths, each with its full view and its one level (`depth=1`)
+    # the previous-scan pair and the 1d chip are the same pair: 5 spans + prev → 5 distinct pairs (their rows; no
+    # `summary=1` twin: no page asks it); × (root + 3 buckets) × 5 widths, each with its full view and its one level (`depth=1`)
     paths = W.plan("2026-09-15", DATES, TOP)
     # plus one width-independent series per path, first
-    assert len(paths) == len(TOP) + len(W.WIDTHS) * len(TOP) * (2 + 2 * 5)
+    assert len(paths) == len(TOP) + len(W.WIDTHS) * len(TOP) * (2 + 5)
     assert paths[:2] == ["/api/series?path=&split=roots", "/api/series?path=b1"]
     n = len(TOP)
     assert paths[n] == "/api/subtree?date=2026-09-15&path=&w=512&h=307"
     assert paths[n + 1] == "/api/subtree?date=2026-09-15&path=&w=512&h=307&depth=1"
-    assert paths[n + 12] == "/api/subtree?date=2026-09-15&path=b1&w=512&h=307"
+    assert paths[n + 7] == "/api/subtree?date=2026-09-15&path=b1&w=512&h=307"
     assert paths[-1] == "/api/diff?from=2026-08-16&to=2026-09-15&path=b3&w=1920&h=1152"
 
 
@@ -78,11 +76,8 @@ def test_subdaily_plan_one_width():
         "/api/series?path=&split=roots",
         "/api/subtree?date=2026-09-15T1201&path=&w=1280&h=768",
         "/api/subtree?date=2026-09-15T1201&path=&w=1280&h=768&depth=1",
-        "/api/diff?from=2026-09-15T0001&to=2026-09-15T1201&path=&w=1280&h=768&summary=1",
         "/api/diff?from=2026-09-15T0001&to=2026-09-15T1201&path=&w=1280&h=768",
-        "/api/diff?from=2026-09-14T1201&to=2026-09-15T1201&path=&w=1280&h=768&summary=1",
         "/api/diff?from=2026-09-14T1201&to=2026-09-15T1201&path=&w=1280&h=768",
-        "/api/diff?from=2026-09-08T1201&to=2026-09-15T1201&path=&w=1280&h=768&summary=1",
         "/api/diff?from=2026-09-08T1201&to=2026-09-15T1201&path=&w=1280&h=768",
     ]
 

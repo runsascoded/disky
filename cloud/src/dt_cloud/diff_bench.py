@@ -2,8 +2,9 @@
 store-layout change ships with (a new generation pinned on one host, the current one on the other; same code, same
 reader flags — `DIFF_DESCENT` changes which tier answers, so a host with it on is not comparable to one without).
 
-Per request (the browser's mix: a diff's first paint `depth=1`, its full `dm=delta` walk and its `summary=1` headline;
-a map view's `depth=1` and full `/api/subtree`) and per canvas bucket: A and B cold, then A and B warm (their order
+Per request (the browser's mix: a diff's first paint `depth=1` and its full `dm=delta` walk; a map view's `depth=1`
+and full `/api/subtree`; with `-s`, also each diff's `summary=1`, its totals alone, which the API answers and no page
+asks) and per canvas bucket: A and B cold, then A and B warm (their order
 alternating by request). Cold means an edge-cache key nobody asked for: the cache key carries `w`×`h` quantized up to
 128 px (`view.QUANT`), so each bucket is a random canvas taller than it is wide (the site asks for h = 0.6 w, diff-check
 for h = 307), ~180 of them, drawn without replacement; `nc=` does not bust it. A cold sample the edge answered (`x-cache` not `miss`: the bucket was used before) is dropped
@@ -61,9 +62,17 @@ def random_buckets(n: int) -> list[tuple[int, int]]:
     return random.SystemRandom().sample(space, n)
 
 
-def requests_for(cases: list[dict], views: list[str], w: int, h: int, store: str | None = None) -> list[Req]:
+def requests_for(
+    cases: list[dict],
+    views: list[str],
+    w: int,
+    h: int,
+    store: str | None = None,
+    summary: bool = False,
+) -> list[Req]:
     """The browser's requests for each diff case (`{from, to, path}`) and map view (`DATE:PATH`) at one canvas; `store`:
-    a secondary store's (`?store=`, e.g. `meta`), on every request."""
+    a secondary store's (`?store=`, e.g. `meta`), on every request. `summary`: also each diff's `summary=1` (its totals
+    alone), which no page asks."""
     out = []
     st = {"store": store} if store else {}
     for c in cases:
@@ -71,8 +80,9 @@ def requests_for(cases: list[dict], views: list[str], w: int, h: int, store: str
         base = {"cv": CV, **st, "from": c["from"], "to": c["to"], "path": p, "w": w, "h": h}
         name = f"diff {c['from']}→{c['to']} /{p}"
         out += [Req(name, "diff:d1", "/api/diff", {**base, "dm": "delta", "depth": 1}),
-                Req(name, "diff:full", "/api/diff", {**base, "dm": "delta"}),
-                Req(name, "diff:summary", "/api/diff", {**base, "summary": 1})]
+                Req(name, "diff:full", "/api/diff", {**base, "dm": "delta"})]
+        if summary:
+            out.append(Req(name, "diff:summary", "/api/diff", {**base, "summary": 1}))
     for v in views:
         d, p = v.split(":", 1)
         base = {"cv": CV, **st, "date": d, "path": p, "w": w, "h": h}
@@ -161,13 +171,14 @@ def table(kinds: list[Kind]) -> list[str]:
 @option("-n", "--buckets", default=2, type=IntRange(min=1), help="Cold canvas buckets: random w×h, w in [640, 2048], h in (w, 4096] (128 px apart)")
 @option("-o", "--out", type=Path, help="Every sample as TSV")
 @option("-p", "--alpha", default=0.05, type=FloatRange(0, 1), help="Sign-test level at which a kind slower on B fails (exit 2)")
+@option("-s", "--summary", is_flag=True, help="Also time each diff's `summary=1` (its totals alone): an API request, not one a page makes")
 @option("-S", "--store", help="A secondary store's name (`?store=` on every request, e.g. `meta`); default the primary")
 @option("-v", "--view", "views", multiple=True, help="A map view `DATE:PATH` (`2026-10-24T0801:` is the root), repeatable")
 @option("-w", "--widths", help="Comma-separated canvas widths instead of `-n` random buckets (at `-H`, default 307)")
 @argument("cases", required=False)
-def diff_bench_cmd(host_a, host_b, height, buckets, out, alpha, store, views, widths, cases) -> None:
-    """Time CASES (diff-check's `{from, to, path}` list, inline or a file) and `-v` views on A and B; `$SITE_TOKEN`
-    authenticates."""
+def diff_bench_cmd(host_a, host_b, height, buckets, out, alpha, summary, store, views, widths, cases) -> None:
+    """Time CASES (diff-check's `{from, to, path}` list, inline or a file) and `-v` views on A and B, as a page asks
+    them; `$SITE_TOKEN` authenticates."""
     if host_a == host_b:
         raise SystemExit("A and B share an edge cache: B's cold reads would be A's warm ones")
     token = os.environ["SITE_TOKEN"].strip()
@@ -176,7 +187,7 @@ def diff_bench_cmd(host_a, host_b, height, buckets, out, alpha, store, views, wi
     samples: list[Sample] = []
     i = 0
     for w, h in canvases:
-        for r in requests_for(cs, list(views), w, h, store):
+        for r in requests_for(cs, list(views), w, h, store, summary):
             hosts = (host_a, host_b) if i % 2 == 0 else (host_b, host_a)
             i += 1
             for phase in ("cold", "warm"):

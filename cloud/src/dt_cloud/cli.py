@@ -1563,7 +1563,7 @@ def index_extras(attributions: tuple[str, ...], identities_path: str, out_dir: P
 def warm_cache(date: str | None, jobs: int, dry_run: bool, root: str | None, token: str | None, site_url: str | None, widths: str) -> None:
     """Warm the site's subtree + diff caches for a scan: replay the home
     page's default requests (one subtree, the diff span chips 1d/3d/7d/14d/30d
-    and the previous-scan pair, each with its summary) at the common canvas
+    and the previous-scan pair) at the common canvas
     widths, so the first viewer anywhere gets a cache hit (colo cache + global
     KV). Exits nonzero for failed requests; explicit view refusals (409) are reported separately. The pipeline may
     continue with a failed warm-up phase, since the view can be computed on demand."""

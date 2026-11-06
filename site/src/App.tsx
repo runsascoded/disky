@@ -18,7 +18,7 @@ import { NonLive } from './NonLive'
 import { DiskSpace } from './DiskSpace'
 import { ExtLink } from './ExtLink'
 import { DiskSpaceDiff, diskDiffScan } from './DiskSpaceDiff'
-import type { DiffData } from './diffModel'
+import { diffLoadingLabel, type DiffData } from './diffModel'
 import { ScanCombobox } from './ScanCombobox'
 import { ago, buildUserIndex, epochDaysToDate } from './colors'
 import { ChildrenTable } from './ChildrenTable'
@@ -913,22 +913,6 @@ function AppContent() {
       return j
     },
   })
-  // The headline first: the same pair's totals without the row walk land in
-  // a second or two, so the +X / Δobjects line shows while the rows align.
-  const diffSumQ = useQuery<DiffData, Error>({
-    queryKey: ['diff', store.key, diffKey, diffPath, canW, scopeKey, 'summary'],
-    enabled: !!asof && !!diffPrev && scopeReady && diffPathOf !== undefined,
-    staleTime: Infinity,
-    retry: false,
-    queryFn: async ({ signal }: { signal?: AbortSignal }) => {
-      const r = await sfetch(
-        `/api/diff?cv=${API_CV}&${diffQs}&path=${encodeURIComponent(diffPath)}&w=${canW}&h=${Math.round(canW * 0.6)}${scopeQs}&summary=1`,
-        { credentials: 'include', signal },
-      )
-      if (!r.ok) throw apiError(r.status, await r.text())
-      return r.json() as Promise<DiffData>
-    },
-  })
   const diff: DiffData | null = diffQ.data ?? null
   const diffErr = diffQ.error
   // The shown diff is the previous pair's (placeholder) or the pair is still
@@ -949,9 +933,6 @@ function AppContent() {
   useLayoutEffect(() => {
     if (!diffStale && diffSlotRef.current) diffSlotH.current = diffSlotRef.current.offsetHeight
   })
-  // What the subtitle's numbers describe: the full diff once it's this pair's,
-  // else the summary (its own query — current for this key or absent).
-  const diffHead: DiffData | null = diff && !diffStale ? diff : diffSumQ.data ?? null
   // One-line description of the page scope, for the section subtitles:
   // where, then whose, then which names.
   // At the store root the scope is its buckets, counted (`2 buckets`) — the
@@ -1669,11 +1650,7 @@ function AppContent() {
                 </span>
               )}
             </span>
-            {diffHead ? (
-              <>
-                {diffStale && <Loading label="Aligning the rows…" />}
-              </>
-            ) : diffErr && !diffStale && /^(404|409)/.test(diffErr.message) ? (
+            {diff && !diffStale ? null : diffErr && !diffStale && /^(404|409)/.test(diffErr.message) ? (
               <span className="tab-note">
                 {' '}· {diffErr.message.startsWith('404')
                   ? <><code>{graftPath || '/'}</code> is in neither scan’s index — pick other scans or drill up.</>
@@ -1683,7 +1660,8 @@ function AppContent() {
               // The filter's refusal as its reason; any other failure as its message, a 5xx with a retry.
               <>{' · '}<LoadFailure as="span" className="tab-note" err={diffErr} what={`diff ${fmtS(diffPrev)} → ${fmtS(asof)}`} onRetry={() => void diffQ.refetch()} /></>
             ) : (
-              <Loading label={`Aligning ${fmtS(diffPrev)} → ${fmtS(asof)}…`} />
+              // Still aligning: which part, by what the map already draws of this pair (`diffLoadingLabel`).
+              <Loading label={diffLoadingLabel(diffRefining, `${fmtS(diffPrev)} → ${fmtS(asof)}`)} />
             )}
           </span>} />
           <DiskSpaceDiff before={beforeMetaQ.data?.disk_space} after={meta?.disk_space} />

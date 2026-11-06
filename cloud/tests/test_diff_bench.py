@@ -15,7 +15,6 @@ def test_requests_are_the_browsers_mix():
     assert requests_for([{"from": "f", "to": "t", "path": "m"}], ["d:", "d:m"], 1152, 307) == [
         Req("diff f→t /m", "diff:d1", "/api/diff", {"cv": 3, "from": "f", "to": "t", "path": "m", "w": 1152, "h": 307, "dm": "delta", "depth": 1}),
         Req("diff f→t /m", "diff:full", "/api/diff", {"cv": 3, "from": "f", "to": "t", "path": "m", "w": 1152, "h": 307, "dm": "delta"}),
-        Req("diff f→t /m", "diff:summary", "/api/diff", {"cv": 3, "from": "f", "to": "t", "path": "m", "w": 1152, "h": 307, "summary": 1}),
         Req("subtree d /", "subtree:d1", "/api/subtree", {"cv": 3, "date": "d", "path": "", "w": 1152, "h": 307, "depth": 1}),
         Req("subtree d /", "subtree:full", "/api/subtree", {"cv": 3, "date": "d", "path": "", "w": 1152, "h": 307}),
         Req("subtree d /m", "subtree:d1", "/api/subtree", {"cv": 3, "date": "d", "path": "m", "w": 1152, "h": 307, "depth": 1}),
@@ -27,9 +26,17 @@ def test_a_secondary_stores_requests_name_it():
     assert requests_for([{"from": "f", "to": "t", "path": "m"}], ["d:"], 640, 307, "meta") == [
         Req("diff f→t /m", "diff:d1", "/api/diff", {"cv": 3, "store": "meta", "from": "f", "to": "t", "path": "m", "w": 640, "h": 307, "dm": "delta", "depth": 1}),
         Req("diff f→t /m", "diff:full", "/api/diff", {"cv": 3, "store": "meta", "from": "f", "to": "t", "path": "m", "w": 640, "h": 307, "dm": "delta"}),
-        Req("diff f→t /m", "diff:summary", "/api/diff", {"cv": 3, "store": "meta", "from": "f", "to": "t", "path": "m", "w": 640, "h": 307, "summary": 1}),
         Req("subtree d /", "subtree:d1", "/api/subtree", {"cv": 3, "store": "meta", "date": "d", "path": "", "w": 640, "h": 307, "depth": 1}),
         Req("subtree d /", "subtree:full", "/api/subtree", {"cv": 3, "store": "meta", "date": "d", "path": "", "w": 640, "h": 307}),
+    ]
+
+
+def test_a_diffs_summary_is_asked_only_on_request():
+    """`summary=1` (a diff's totals alone) is an API request no page makes: off the browser's mix, on with `summary`."""
+    assert requests_for([{"from": "f", "to": "t", "path": "m"}], [], 1152, 307, summary=True) == [
+        Req("diff f→t /m", "diff:d1", "/api/diff", {"cv": 3, "from": "f", "to": "t", "path": "m", "w": 1152, "h": 307, "dm": "delta", "depth": 1}),
+        Req("diff f→t /m", "diff:full", "/api/diff", {"cv": 3, "from": "f", "to": "t", "path": "m", "w": 1152, "h": 307, "dm": "delta"}),
+        Req("diff f→t /m", "diff:summary", "/api/diff", {"cv": 3, "from": "f", "to": "t", "path": "m", "w": 1152, "h": 307, "summary": 1}),
     ]
 
 
@@ -121,7 +128,6 @@ def test_command_equal_hosts_pass(monkeypatch):
         "request         n cold ms A      B  Δ mean  Δ med  B slower      p warm s A      B",
         "diff:d1         4       100    100    +0.0   +0.0       0/4  1.000    0.250  0.250",
         "diff:full       4       100    100    +0.0   +0.0       0/4  1.000    0.250  0.250",
-        "diff:summary    4       100    100    +0.0   +0.0       0/4  1.000    0.250  0.250",
         "subtree:d1      2       100    100    +0.0   +0.0       0/2  1.000    0.250  0.250",
         "subtree:full    2       100    100    +0.0   +0.0       0/2  1.000    0.250  0.250",
         "0 errors, 0 disagreeing answers, 0 cold samples the edge answered (dropped)",
@@ -134,11 +140,32 @@ def test_command_equal_hosts_pass(monkeypatch):
         ("b", "/api/diff", 1152, None, "delta", None, "cold"), ("a", "/api/diff", 1152, None, "delta", None, "cold"),
         ("b", "/api/diff", 1152, None, "delta", None, "warm"), ("a", "/api/diff", 1152, None, "delta", None, "warm"),
     ]
-    assert len(h.calls) == 2 * 2 * 2 * (3 * 2 + 2)
+    assert len(h.calls) == 2 * 2 * 2 * (2 * 2 + 2)
+
+
+def test_command_times_the_summary_with_s(monkeypatch):
+    h = Hosts(100)
+    r = run(monkeypatch, h, "-w", "1152", "-s", CASES)
+    assert r.exit_code == 0, r.output
+    assert r.stdout.split("\n") == [
+        "A a  B b  canvases 1152×307",
+        "request         n cold ms A      B  Δ mean  Δ med  B slower      p warm s A      B",
+        "diff:d1         2       100    100    +0.0   +0.0       0/2  1.000    0.250  0.250",
+        "diff:full       2       100    100    +0.0   +0.0       0/2  1.000    0.250  0.250",
+        "diff:summary    2       100    100    +0.0   +0.0       0/2  1.000    0.250  0.250",
+        "0 errors, 0 disagreeing answers, 0 cold samples the edge answered (dropped)",
+        "",
+    ]
+    # Each case's third request is its summary (no `dm`, no `depth`), cold on both hosts then warm on both; the
+    # hosts' order alternates by request.
+    assert [c for c in h.calls if c[5] == 1] == [
+        (host, "/api/diff", 1152, None, None, 1, phase)
+        for hosts in (("a", "b"), ("b", "a")) for phase in ("cold", "warm") for host in hosts
+    ]
 
 
 def test_command_slower_b_exits_2(monkeypatch):
-    r = run(monkeypatch, Hosts(130), "-w", "1152,1280,1408", "-p", "0.2", CASES)
+    r = run(monkeypatch, Hosts(130), "-w", "1152,1280,1408", "-p", "0.2", "-s", CASES)
     assert r.exit_code == 2, r.output
     assert r.stdout.split("\n")[2:6] == [
         "diff:d1         6       100    130   +30.0  +30.0       6/6  0.031    0.250  0.250",

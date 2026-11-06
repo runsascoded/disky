@@ -9,9 +9,8 @@ default views — the size-over-time series per path (width-independent; a new
 scan is a new cache key, so its first viewer otherwise pays the over-time
 reads), then each path's subtree, in full and one level deep (`depth=1`: the
 view's first paint, and all a page drilled below the path asks of it), + the
-diff span chips (1d/3d/7d/14d/30d, plus the plain previous-scan pair) each
-with its `summary=1` twin — at the canvas
-widths common laptops and phones produce. The cache keys include the pixel
+diff span chips (1d/3d/7d/14d/30d, plus the plain previous-scan pair) — at the
+canvas widths common laptops and phones produce. The cache keys include the pixel
 budget: the client snaps its window up to the nearest of these WIDTHS
 (`site/src/canvas.ts` `canvasWidth`; past the widest, the 128-px step) and
 sends `h = round(0.6 w)`, so every window up to 1920 px lands on a warmed key.
@@ -97,8 +96,9 @@ def plan(date: str, dates: list[str], paths: tuple[str, ...], widths: tuple[int,
     """The request paths (no host) to replay for ``date``, deduplicated: each
     path's series first, then, in the order the page issues them, per width
     the root's subtree (its full view, then its one level: what every drilled
-    page asks of an ancestor, `site/src/spine.ts`) and each diff pair's summary
-    + full rows, then the same for each bucket drill."""
+    page asks of an ancestor, `site/src/spine.ts`) and each diff pair's rows,
+    then the same for each bucket drill. Not a pair's `summary=1` (its totals
+    alone): no page asks it."""
     earlier = [d for d in dates if d < date]
     pairs: list[str] = []
     if earlier:
@@ -114,9 +114,7 @@ def plan(date: str, dates: list[str], paths: tuple[str, ...], widths: tuple[int,
             out.append(f"/api/subtree?date={date}&path={path}&w={w}&h={h}")
             out.append(f"/api/subtree?date={date}&path={path}&w={w}&h={h}&depth=1")
             for p in pairs:
-                base = f"/api/diff?from={p}&to={date}&path={path}&w={w}&h={h}"
-                out.append(base + "&summary=1")
-                out.append(base)
+                out.append(f"/api/diff?from={p}&to={date}&path={path}&w={w}&h={h}")
     return out
 
 
