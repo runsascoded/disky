@@ -61,7 +61,7 @@ describe('/scans\' filters in the URL (`k`, `st`)', () => {
   it('a kind is its own name, a status a `STATUS_FILTERS` key; each absent on its default, and an unknown status reads as none', () => {
     expect([runKindParam.encode(''), runKindParam.encode('scan'), runKindParam.decode(undefined), runKindParam.decode('merge')]).toEqual([undefined, 'scan', '', 'merge'])
     expect([runStatusParam.encode(''), runStatusParam.encode('attention'), runStatusParam.encode('nop')]).toEqual([undefined, 'attention', 'nop'])
-    expect([undefined, 'attention', 'partial', 'incomplete', 'behind', 'recovered', 'failed', 'running', 'nop', 'succeeded', 'search behind', 'bogus'].map(s => runStatusParam.decode(s))).toEqual(
-      ['', 'attention', 'partial', 'incomplete', 'behind', 'recovered', 'failed', 'running', 'nop', 'succeeded', '', ''])
+    expect([undefined, 'attention', 'partial', 'passing', 'incomplete', 'behind', 'recovered', 'failed', 'running', 'nop', 'succeeded', 'search behind', 'bogus'].map(s => runStatusParam.decode(s))).toEqual(
+      ['', 'attention', 'partial', 'passing', 'incomplete', 'behind', 'recovered', 'failed', 'running', 'nop', 'succeeded', '', ''])
   })
 })

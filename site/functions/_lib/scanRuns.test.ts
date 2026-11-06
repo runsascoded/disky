@@ -80,6 +80,24 @@ INSERT INTO scan_run_outputs (run_id, key, uri, bytes, objects, rows) VALUES
         [],
       ])
     })
+    it('a failed check carries the first later run whose same check passed, on the list and the detail: no recovery, and none while no later check has passed', async () => {
+      const { db, raw } = await sqliteD1()
+      raw.exec(SEED)
+      raw.exec(`
+      UPDATE scan_runs SET status = 'succeeded' WHERE run_id = 'b';
+      INSERT INTO scan_run_phases (run_id, phase, seq, started_ts, finished_ts, status, note) VALUES
+        ('a', 'probe', 2, 390, 395, 'done', 'failed (exit 1), 4 passed, 0 skipped, 2 failed'), ('a', 'healthcheck', 3, 395, 400, 'done', 'failed (exit 1)'),
+        ('b', 'probe', 1, 1200, 1250, 'done', '6 passed, 0 skipped, 0 failed'), ('b', 'healthcheck', 2, 1250, 1300, 'done', 'failed (exit 1)');
+    `)
+      type Issue = { phase: string; outcome: string; recovery: { run_id: string } | null; passing?: { run_id: string } | null }
+      const issues = (b: { phase_issues: Issue[] }) => b.phase_issues.map(i => [i.phase, i.outcome, i.recovery?.run_id ?? null, i.passing?.run_id ?? null])
+      const list = await (await get(db, '')).json() as import('./scanRuns').ScanRunsList
+      const detail = await (await get(db, 'a')).json() as import('./scanRuns').ScanRunDetail
+      expect([list.runs.map(s => [s.run.run_id, issues(s)]), issues(detail)]).toEqual([
+        [['b', [['healthcheck', 'failed', null, null]]], ['a', [['probe', 'failed', null, 'b'], ['healthcheck', 'failed', null, null]]]],
+        [['probe', 'failed', null, 'b'], ['healthcheck', 'failed', null, null]],
+      ])
+    })
     it('lists the store\'s orchestrating runs with their totals and links', async () => {
       const { db, raw } = await sqliteD1()
       raw.exec(SEED)

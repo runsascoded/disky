@@ -3785,8 +3785,9 @@ def _scan_step(profile_path: str | None, name: str, arg: str | None) -> None:
 @_scan.command("steps")
 def _scan_steps() -> None:
     """Print the soft steps' failure table as JSON (`scan_steps.failure_table`): per step, what its failure `leaves`
-    short, whether it is a `side` step (the scan's data and serving are whole without it) and whether a later run
-    `converges` it. /scans classifies a succeeded run's failed phases by it: `site/src/scanSteps.json` is this output
+    short, whether it is a `side` step (the scan's data and serving are whole without it), whether a later run
+    `converges` it and whether it `checks` (a check: nothing redoes it, a later run's passes or doesn't). /scans
+    classifies a succeeded run's failed phases by it: `site/src/scanSteps.json` is this output
     (`dt-cloud scan steps > site/src/scanSteps.json` after changing a step's failure fields; a test compares them)."""
     from .scan_steps import failure_json
 

@@ -3,7 +3,8 @@ import { describe, expect, it } from 'vitest'
 import {
   batchHref, failedAt, logsHref, mapHref, metaHref, outputIndex, phaseIssues, phaseOutcome, phaseOrder, phaseSpans, runTime, type ScanRun, type ScanRunOutput,
   type ScanRunPhase, manualScans, scanRunOf, structureOf, summarize, withDeltas, runOutcome, runOutcomeLine, phaseSkip, overlappingFailures, runTasks, taskLogsHref,
-  isMaintenance, liveness, LOST_S, maintStore, phaseStatus, QUIET_S, issueLeaves, issueNext, issueState, issueWhat, outcomeSteps, runOutcomeLabel, statusMatches, stepFailure, STATUS_FILTERS,
+  isMaintenance, liveness, LOST_S, maintStore, phaseStatus, QUIET_S, issueLeaves, issueNext, issueState, issueWhat, outcomeParts, outcomeSteps, passingSince, runOutcomeLabel, statusMatches,
+  stepFailure, STATUS_FILTERS,
   type PhaseIssue,
 } from './scanRunsModel'
 
@@ -178,7 +179,7 @@ describe('phase spans', () => {
       { ...phase('b', 'probe', 1, 2400, 2500), note: 'failed (exit 1), 4 passed, 0 skipped, 2 failed' },
     ]
     const issues = phaseIssues(RUNS[2], [RUNS[2]], ps)
-    expect(issues).toEqual([{ phase: 'probe', outcome: 'failed', recovery: null, detail: '4 passed, 0 skipped, 2 failed' }])
+    expect(issues).toEqual([{ phase: 'probe', outcome: 'failed', recovery: null, passing: null, detail: '4 passed, 0 skipped, 2 failed' }])
     expect(runOutcomeLine(RUNS[2], issues)).toEqual('incomplete: probe failed')
   })
   it('a phase failed twice is one issue, its attempts counted, the last one\'s verdict its detail', () => {
@@ -186,13 +187,13 @@ describe('phase spans', () => {
       { ...phase('b', 'probe', 0, 2400, 2500), note: 'failed (exit 1), 4 passed, 0 skipped, 2 failed' },
       { ...phase('b', 'probe', 1, 2600, 2700), note: 'failed (exit 1), 5 passed, 0 skipped, 1 failed' },
     ]
-    expect(phaseIssues(RUNS[2], [RUNS[2]], ps)).toEqual([{ phase: 'probe', outcome: 'failed', recovery: null, attempts: 2, detail: '5 passed, 0 skipped, 1 failed' }])
+    expect(phaseIssues(RUNS[2], [RUNS[2]], ps)).toEqual([{ phase: 'probe', outcome: 'failed', recovery: null, passing: null, attempts: 2, detail: '5 passed, 0 skipped, 1 failed' }])
   })
   it('a probe whose only failures are the index\'s lag leaves the run "search behind", not incomplete', () => {
     const lag = 'the static name index covers scans through 2026-10-23T0702, 2 published scans behind (20.1 h); 3 of 9 search requests refused'
     const ps: ScanRunPhase[] = [{ ...phase('b', 'probe', 0, 2400, 2500), note: `search behind: ${lag}` }]
     const issues = phaseIssues(RUNS[2], [RUNS[2]], ps)
-    expect(issues).toEqual([{ phase: 'probe', outcome: 'search behind', recovery: null, reason: lag }])
+    expect(issues).toEqual([{ phase: 'probe', outcome: 'search behind', recovery: null, passing: null, reason: lag }])
     expect([runOutcome(RUNS[2], issues), runOutcomeLine(RUNS[2], issues), phaseSpans(RUNS[2], ps).map(s => s.status)])
       .toEqual(['search behind', `search behind: probe ${lag}`, ['done']])
     const failed = { phase: 'iv', outcome: 'failed', recovery: null }
@@ -233,12 +234,46 @@ describe('a succeeded run\'s issues, by what their steps declare (`scanSteps.jso
   const later = run({ run_id: 'c', scan: '2026-10-08', started_ts: 3000, finished_ts: 3600 })
 
   it('reads a step\'s failure fields; a phase no soft step names has none', () => {
-    expect([stepFailure('warm-cache'), stepFailure('digest'), stepFailure('interval-store'), stepFailure('publish'), stepFailure('toString')]).toEqual([
-      { leaves: 'cache not pre-warmed: this scan\'s first views load cold', side: true, converges: false },
-      { leaves: 'usage digest not posted', side: true, converges: true },
-      { leaves: 'the interval store doesn\'t hold this scan', side: false, converges: true },
+    expect([stepFailure('warm-cache'), stepFailure('digest'), stepFailure('interval-store'), stepFailure('probe'), stepFailure('publish'), stepFailure('toString')]).toEqual([
+      { leaves: 'cache not pre-warmed: this scan\'s first views load cold', side: true, converges: false, checks: false },
+      { leaves: 'usage digest not posted', side: true, converges: true, checks: false },
+      { leaves: 'the interval store doesn\'t hold this scan', side: false, converges: true, checks: false },
+      { leaves: 'the serving probe failed: some of this scan\'s views may not load', side: false, converges: false, checks: true },
       undefined, undefined,
     ])
+  })
+  it('a failed check reads `passing` once a later run\'s same check passed, `incomplete` until one does; a stale search-behind likewise', () => {
+    const behind: PhaseIssue = { phase: 'probe', outcome: 'search behind', recovery: null, passing: null, reason: 'lag' }
+    expect([
+      issueState({ ...issue('probe'), passing: null }), issueState({ ...issue('probe'), passing: later }), issueState({ ...issue('healthcheck'), passing: later }),
+      issueState({ ...issue('probe', later), passing: null }), issueState(behind), issueState({ ...behind, passing: later }),
+    ]).toEqual(['incomplete', 'passing', 'passing', 'recovered', 'behind', 'passing'])
+  })
+  it('a run whose worst issue is a check passing since reads what failed and since which scan; an open issue or search behind outranks it, a side step doesn\'t', () => {
+    const latest = run({ run_id: 'd', scan: '2026-10-09', started_ts: 4000, finished_ts: 4600 })
+    const probe: PhaseIssue = { ...issue('probe'), passing: later }
+    const behind: PhaseIssue = { phase: 'probe', outcome: 'search behind', recovery: null, passing: later, reason: 'lag' }
+    const cases: PhaseIssue[][] = [
+      [probe],
+      [issue('warm-cache'), probe, issue('digest', later)],
+      [{ ...issue('healthcheck'), passing: latest }, probe],
+      [behind],
+      [probe, issue('interval-store')],
+      [{ ...issue('healthcheck'), passing: later }, { phase: 'probe', outcome: 'search behind', recovery: null, passing: null, reason: 'lag' }],
+      [{ ...issue('probe'), passing: null }],
+    ]
+    expect(cases.map(c => [runOutcome(RUNS[2], c), outcomeSteps(c, runOutcome(RUNS[2], c)), outcomeParts(RUNS[2], c), runOutcomeLabel(RUNS[2], c), passingSince(c)?.run_id ?? null])).toEqual([
+      ['passing since', ['probe'], { head: 'probe failed', tail: 'passing since 2026-10-08' }, 'probe failed · passing since 2026-10-08', 'c'],
+      ['passing since', ['probe'], { head: 'probe failed', tail: 'passing since 2026-10-08' }, 'probe failed · passing since 2026-10-08', 'c'],
+      ['passing since', ['healthcheck', 'probe'], { head: 'healthcheck, probe failed', tail: 'passing since 2026-10-09' }, 'healthcheck, probe failed · passing since 2026-10-09', 'd'],
+      ['passing since', ['probe'], { head: 'search behind', tail: 'passing since 2026-10-08' }, 'search behind · passing since 2026-10-08', 'c'],
+      ['incomplete', ['interval-store'], { head: 'incomplete', tail: 'interval-store' }, 'incomplete · interval-store', 'c'],
+      ['search behind', [], { head: 'search behind', tail: null }, 'search behind', 'c'],
+      ['incomplete', ['probe'], { head: 'incomplete', tail: 'probe' }, 'incomplete · probe', null],
+    ])
+    expect([
+      runOutcomeLine(RUNS[2], [issue('warm-cache'), probe]), runOutcomeLine(RUNS[2], [probe, issue('interval-store')]), runOutcomeLine(RUNS[2], [issue('warm-cache')]),
+    ]).toEqual(['probe failed · passing since 2026-10-08', 'incomplete: interval-store failed', 'partial: warm-cache failed'])
   })
   it('a side step\'s failure is `side`, any other step\'s (or an unknown phase\'s) `incomplete`; recovered and behind as they are', () => {
     expect([
@@ -305,6 +340,49 @@ describe('a succeeded run\'s issues, by what their steps declare (`scanSteps.jso
       ['digest', null], ['warm-cache', null], ['interval-store', null],
     ])
   })
+  it('a check\'s failure carries the first later run of its kind whose same check then ran and passed, skipping nothing; no other step carries one, and a re-check of this scan is a recovery', () => {
+    const retry = run({ run_id: 'retry', scan: RUNS[2].scan, kind: 'phase-recovery', parent: 'b', started_ts: 2800, finished_ts: 2900 })
+    const peers = [
+      later,
+      run({ run_id: 'refailed', scan: '2026-10-08', started_ts: 2600, finished_ts: 2900 }),
+      run({ run_id: 'behind', scan: '2026-10-08', started_ts: 2600, finished_ts: 2900 }),
+      run({ run_id: 'skipping', scan: '2026-10-08', started_ts: 2600, finished_ts: 2900 }),
+      run({ run_id: 'older-scan', scan: '2026-10-06', started_ts: 2600, finished_ts: 2800 }),
+      run({ run_id: 'reproc', scan: '2026-10-08', kind: 'reproc', started_ts: 2600, finished_ts: 2800 }),
+      run({ run_id: 'meta', scan: '2026-10-08', store: 'meta', started_ts: 2600, finished_ts: 2800 }),
+      run({ run_id: 'd', scan: '2026-10-09', started_ts: 4000, finished_ts: 4600 }),
+    ]
+    const ps: ScanRunPhase[] = [
+      { ...failed('probe'), note: 'failed (exit 1), 4 passed, 0 skipped, 2 failed' }, failed('healthcheck', 1), failed('warm-cache', 2),
+      { ...phase('refailed', 'probe', 0, 2700, 2800), note: 'failed (exit 1)' },
+      { ...phase('behind', 'probe', 0, 2700, 2850), note: 'search behind: the static name index covers scans through 2026-10-07' },
+      { ...phase('skipping', 'probe', 0, 2700, 2860), note: '4 passed, 2 skipped (static-names skipped (busy): the lease is held), 0 failed' },
+      phase('older-scan', 'probe', 0, 2700, 2750), phase('reproc', 'probe', 0, 2700, 2750), phase('meta', 'probe', 0, 2700, 2750),
+      { ...phase('c', 'probe', 0, 3400, 3500), note: '6 passed, 0 skipped, 0 failed' }, phase('c', 'warm-cache', 1, 3500, 3550),
+      phase('d', 'probe', 0, 4400, 4500), phase('d', 'healthcheck', 1, 4500, 4510),
+      phase('retry', 'healthcheck', 0, 2800, 2900),
+    ]
+    expect([phaseIssues(RUNS[2], [RUNS[2], ...peers], ps), phaseIssues(RUNS[2], [RUNS[2], ...peers.slice(1, 7)], ps), phaseIssues(RUNS[2], [RUNS[2], ...peers, retry], ps)]).toEqual([
+      [
+        { phase: 'probe', outcome: 'failed', recovery: null, passing: later, detail: '4 passed, 0 skipped, 2 failed' },
+        { phase: 'healthcheck', outcome: 'failed', recovery: null, passing: peers[7] },
+        { phase: 'warm-cache', outcome: 'failed', recovery: null },
+      ],
+      [
+        { phase: 'probe', outcome: 'failed', recovery: null, passing: null, detail: '4 passed, 0 skipped, 2 failed' },
+        { phase: 'healthcheck', outcome: 'failed', recovery: null, passing: null },
+        { phase: 'warm-cache', outcome: 'failed', recovery: null },
+      ],
+      [
+        { phase: 'probe', outcome: 'failed', recovery: null, passing: later, detail: '4 passed, 0 skipped, 2 failed' },
+        { phase: 'healthcheck', outcome: 'failed', recovery: retry, passing: null },
+        { phase: 'warm-cache', outcome: 'failed', recovery: null },
+      ],
+    ])
+    expect(phaseIssues(RUNS[2], [RUNS[2], ...peers], ps).map(i => Object.keys(i))).toEqual([
+      ['phase', 'outcome', 'recovery', 'passing', 'detail'], ['phase', 'outcome', 'recovery', 'passing'], ['phase', 'outcome', 'recovery'],
+    ])
+  })
   it('a skipped converging step is recovered the same way; a linked attempt of the run\'s own wins over a later run', () => {
     const skip = 'skipped (busy): the store\'s lease is held'
     const retry = run({ run_id: 'retry', scan: RUNS[2].scan, kind: 'phase-recovery', parent: 'b', started_ts: 2800, finished_ts: 2900 })
@@ -326,27 +404,32 @@ describe('a succeeded run\'s issues, by what their steps declare (`scanSteps.jso
     ]
     expect(issues.map(i => [issueWhat(i), issueNext(i)])).toEqual([
       ['failed', 'Not retried: no later run redoes it.'],
-      ['failed 2x', 'Not retried: no later run redoes it.'],
+      ['failed 2x', 'A check: no later run redoes it for this scan, and no later run\'s probe has passed yet.'],
       ['timed out', 'A later run\'s static-names step does this run\'s work too; none has yet.'],
       ['skipped: the lease is held', 'A later run\'s static-names step does this run\'s work too; none has yet.'],
       ['search behind', 'Search catches up when the static name index appends this scan.'],
       ['failed', 'Not retried: no later run redoes it.'],
     ])
   })
-  it('says what an open issue leaves short; nothing once its work is done, for search behind (its reason says it) or for an unknown phase', () => {
+  it('says what an open issue leaves short; nothing once its work is done or its check passes since, for search behind (its reason says it) or for an unknown phase', () => {
     expect([
       issueLeaves(issue('warm-cache')), issueLeaves(issue('static-names')), issueLeaves(issue('static-names', later)), issueLeaves(issue('publish')),
       issueLeaves({ phase: 'probe', outcome: 'search behind', recovery: null }),
-    ]).toEqual(['cache not pre-warmed: this scan\'s first views load cold', 'search doesn\'t cover this scan', undefined, undefined, undefined])
+      issueLeaves({ ...issue('probe'), passing: null }), issueLeaves({ ...issue('probe'), passing: later }),
+    ]).toEqual([
+      'cache not pre-warmed: this scan\'s first views load cold', 'search doesn\'t cover this scan', undefined, undefined, undefined,
+      'the serving probe failed: some of this scan\'s views may not load', undefined,
+    ])
   })
-  it('the status filter\'s choices: `needs attention` keeps failed and incomplete runs, never a harmless partial', () => {
+  it('the status filter\'s choices: `needs attention` keeps failed and incomplete runs, never a harmless partial nor a check passing since', () => {
     expect(STATUS_FILTERS.map(f => [f.key, f.label])).toEqual([
       ['attention', 'needs attention (failed, incomplete)'], ['succeeded', 'succeeded'], ['partial', 'partial (a side step failed)'],
+      ['passing', 'passing since (a check failed, and has passed since)'],
       ['incomplete', 'incomplete'], ['behind', 'search behind'], ['recovered', 'recovered'], ['failed', 'failed'], ['running', 'running'], ['nop', 'no-op'],
     ])
-    const outcomes = ['succeeded', 'partial', 'incomplete', 'search behind', 'recovered', 'failed', 'running', 'no-op']
-    expect(['', 'attention', 'partial', 'behind', 'nop', 'bogus'].map(k => outcomes.filter(o => statusMatches(k, o)))).toEqual([
-      outcomes, ['incomplete', 'failed'], ['partial'], ['search behind'], ['no-op'], [],
+    const outcomes = ['succeeded', 'partial', 'passing since', 'incomplete', 'search behind', 'recovered', 'failed', 'running', 'no-op']
+    expect(['', 'attention', 'partial', 'passing', 'behind', 'nop', 'bogus'].map(k => outcomes.filter(o => statusMatches(k, o)))).toEqual([
+      outcomes, ['incomplete', 'failed'], ['partial'], ['passing since'], ['search behind'], ['no-op'], [],
     ])
   })
 })

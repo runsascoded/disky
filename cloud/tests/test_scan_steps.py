@@ -625,7 +625,7 @@ def test_soft_steps_declare_what_a_failure_leaves_and_hard_steps_nothing():
     """A soft step's failure leaves the run succeeded, so /scans has to say what's short: every soft step says it
     (`leaves`), and only a soft step can (a hard step's failure fails the run)."""
     assert [n for n, s in S.STEPS.items() if s.soft and not s.leaves] == []
-    assert [n for n, s in S.STEPS.items() if not s.soft and (s.leaves or s.side or s.converges)] == []
+    assert [n for n, s in S.STEPS.items() if not s.soft and (s.leaves or s.side or s.converges or s.checks)] == []
 
 
 def test_step_refuses_a_soft_step_without_leaves_and_failure_fields_on_a_hard_one(monkeypatch):
@@ -636,27 +636,60 @@ def test_step_refuses_a_soft_step_without_leaves_and_failure_fields_on_a_hard_on
             S.step("x", **kw)(lambda ctx, arg: None)
         return str(e.value)
 
-    assert [declare(soft=True), declare(leaves="nothing"), declare(side=True), declare(converges=True),
-            declare(soft=True, side=True)] == [
+    hard = "step x: `leaves` / `side` / `converges` / `checks` describe a soft step's failure (a hard step's fails the run)"
+    assert [declare(soft=True), declare(leaves="nothing"), declare(side=True), declare(converges=True), declare(checks=True),
+            declare(soft=True, side=True), declare(soft=True, leaves="nothing", checks=True, converges=True)] == [
         "step x: a soft step says what its failure leaves short (`leaves`)",
-        "step x: `leaves` / `side` / `converges` describe a soft step's failure (a hard step's fails the run)",
-        "step x: `leaves` / `side` / `converges` describe a soft step's failure (a hard step's fails the run)",
-        "step x: `leaves` / `side` / `converges` describe a soft step's failure (a hard step's fails the run)",
+        hard,
+        hard,
+        hard,
+        hard,
         "step x: a soft step says what its failure leaves short (`leaves`)",
+        "step x: a check does no work for a later run to do (`checks` with `converges`)",
     ]
     assert S.STEPS == {}
 
 
 def test_failure_table_rows():
-    """The three kinds /scans tells apart: a side step nothing redoes, a side step a later run converges, and a
-    serving step (the scan is short until a later run appends it)."""
+    """The kinds /scans tells apart: a side step nothing redoes, a side step a later run converges, a serving step (the
+    scan is short until a later run appends it), and a check (nothing redoes it; a later run's passes or doesn't)."""
     table = S.failure_table()
     assert list(table) == [n for n, s in S.STEPS.items() if s.soft]
     assert {k: table[k] for k in ("warm-cache", "digest", "interval-store", "probe")} == {
-        "warm-cache": {"leaves": "cache not pre-warmed: this scan's first views load cold", "side": True, "converges": False},
-        "digest": {"leaves": "usage digest not posted", "side": True, "converges": True},
-        "interval-store": {"leaves": "the interval store doesn't hold this scan", "side": False, "converges": True},
-        "probe": {"leaves": "the serving probe failed: some of this scan's views may not load", "side": False, "converges": False},
+        "warm-cache": {"leaves": "cache not pre-warmed: this scan's first views load cold", "side": True, "converges": False, "checks": False},
+        "digest": {"leaves": "usage digest not posted", "side": True, "converges": True, "checks": False},
+        "interval-store": {"leaves": "the interval store doesn't hold this scan", "side": False, "converges": True, "checks": False},
+        "probe": {"leaves": "the serving probe failed: some of this scan's views may not load", "side": False, "converges": False, "checks": True},
+    }
+
+
+def test_soft_steps_classification():
+    """Every soft step's failure class, in registry order: `side` (the scan's data and serving are whole without it),
+    `converges` (a later run's same step does this run's work too), `checks` (a check: nothing redoes it)."""
+    assert {n: " ".join(k for k in ("side", "converges", "checks") if f[k]) for n, f in S.failure_table().items()} == {
+        "bucket-check": "side",
+        "access-ingest": "converges",
+        "access-r2": "converges",
+        "static-names": "converges",
+        "publish-r2": "",
+        "interval-store": "converges",
+        "index-rows": "",
+        "index-sync": "",
+        "over-time": "side converges",
+        "index-gc": "side converges",
+        "dups": "side",
+        "age-store": "converges",
+        "retire": "side converges",
+        "store-gc": "side converges",
+        "non-live": "side",
+        "healthcheck": "checks",
+        "warm-cache": "side",
+        "probe": "checks",
+        "staged-card": "side converges",
+        "digest": "side converges",
+        "cf-usage": "side converges",
+        "gcp-cost": "side",
+        "soft-delete": "side",
     }
 
 

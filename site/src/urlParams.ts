@@ -450,8 +450,8 @@ export const URL_PARAMS: Record<string, UrlParamDoc> = {
   },
   st: {
     label: 'Run status',
-    description: 'Lists only the scan runs with this outcome, and charts only those: `attention` (failed, or published with its data or serving short), `succeeded`, `partial` (only a side step failed), `incomplete`, `behind` (search behind), `recovered`, `failed`, `running` or `nop`. When absent (or for any other value), every run is listed.',
-    examples: ['attention', 'partial', 'recovered'],
+    description: 'Lists only the scan runs with this outcome, and charts only those: `attention` (failed, or published with its data or serving short), `succeeded`, `partial` (only a side step failed), `passing` (a check failed, and the same check has passed in a later run), `incomplete`, `behind` (search behind), `recovered`, `failed`, `running` or `nop`. When absent (or for any other value), every run is listed.',
+    examples: ['attention', 'partial', 'passing', 'recovered'],
     pages: ['/scans'],
   },
   store: {

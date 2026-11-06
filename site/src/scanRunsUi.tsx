@@ -6,7 +6,7 @@ import { ago } from './colors'
 import { Tooltip } from './Tooltip'
 import { fmtDur as fmtDurM } from './runs'
 import {
-  BEHIND, issueLeaves, issueNext, issueState, issueWhat, outcomeSteps, overlappingFailures, phaseFill, phaseOutcome, runOutcome, runOutcomeLabel, scanRunOf,
+  BEHIND, issueLeaves, issueNext, issueState, issueWhat, outcomeParts, overlappingFailures, PASSING, phaseFill, phaseOutcome, runOutcome, scanRunOf,
   type PhaseIssue, type PhaseSpan, type RunSummary, type ScanRun,
 } from './scanRunsModel'
 import { fmtTimestamp } from './scan'
@@ -88,18 +88,21 @@ export const colorer = (order: string[]) => (phase: string) => `var(${PALETTE[Ma
 /** The tip on a quiet run's warning (and a lost run's status). */
 export const QUIET_TIP = "The run hasn't written its record (phases, its once-a-minute heartbeat) for this long: its job may have stalled or died. Check its Batch job."
 
-/** Where an issue stands: the run that did its work since (linked through `runHref`), else whether a later run will
+/** Where an issue stands: the run that did its work since (linked through `runHref`); for a failed check, the first
+ * later run whose same check passed (`PhaseIssue.passing`: no re-check of this scan); else whether a later run will
  * (`issueNext`). */
 export function IssueStanding({ issue: i, runHref }: { issue: PhaseIssue; runHref?: (id: string) => string }) {
-  const r = i.recovery
+  const r = i.recovery ?? i.passing
   if (!r) return <>{issueNext(i)}</>
   const attempt = r.kind === 'phase-recovery'
   const label = attempt ? 'a later attempt' : <>the <code>{r.scan}</code> run</>
-  return <>Done by {runHref ? <Link to={runHref(r.run_id)}>{label}</Link> : label}{attempt && r.finished_ts != null && <> at {fmtRunTime(r.finished_ts)}</>}.</>
+  const link = runHref ? <Link to={runHref(r.run_id)}>{label}</Link> : label
+  if (!i.recovery) return <>Passing since {link}: that run's check of the site, not a re-check of this scan.</>
+  return <>Done by {link}{attempt && r.finished_ts != null && <> at {fmtRunTime(r.finished_ts)}</>}.</>
 }
 
 /** A succeeded run's issues, one block each: what happened (with the recorded verdict when it has one), what it
- * leaves short while nothing has done its work (its step's `leaves`), and where it stands. */
+ * leaves short while nothing has done its work nor passed its check since (its step's `leaves`), and where it stands. */
 export function IssueList({ issues, runHref }: { issues: readonly PhaseIssue[]; runHref?: (id: string) => string }) {
   return <div className="sr-issues">{issues.map(i => {
     const more = i.outcome === BEHIND ? i.reason : i.detail
@@ -116,15 +119,17 @@ export function IssueList({ issues, runHref }: { issues: readonly PhaseIssue[]; 
 const OUTCOME_HEAD: Record<string, string> = {
   incomplete: "Published, but the scan's data or serving is short.",
   [BEHIND]: "Data published. Search doesn't cover this scan yet.",
+  [PASSING]: "A check failed on this run. The same check has passed in a later run: the site passes since, which doesn't show this scan did.",
   partial: "The scan's data and serving are complete; a side step failed.",
   recovered: 'Complete: what this run left short was done since.',
 }
-const OUTCOME_CLASS: Record<string, string> = { incomplete: 'warn', [BEHIND]: 'behind', partial: 'partial', recovered: 'succeeded' }
+const OUTCOME_CLASS: Record<string, string> = { incomplete: 'warn', [BEHIND]: 'behind', [PASSING]: 'passing', partial: 'partial', recovered: 'succeeded' }
 
 /** `cell`: rendered as a table cell's content (`Tooltip`'s `cell`: the cell is the hover target, the tip to its right).
  * `lost`: a running run quiet past `LOST_S` (`liveness`), shown `lost?` until `scan-run reconcile` settles it.
- * A succeeded run with issues reads `<outcome> · <steps>` (`runOutcomeLabel`); its tip lists every issue (`IssueList`)
- * and pins on a click or a tap, so a phone reaches it and the recovering run's link (`runHref`) can be followed. */
+ * A succeeded run with issues reads `<outcome> · <steps>`, or `<check> failed · passing since <scan>` (`outcomeParts`);
+ * its tip lists every issue (`IssueList`) and pins on a click or a tap, so a phone reaches it and the recovering (or
+ * passing) run's link (`runHref`) can be followed. */
 export function Status({ run, failedAt, issues = [], cell, lost, runHref }: { run: ScanRun; failedAt?: string | null; issues?: PhaseIssue[]; cell?: boolean; lost?: boolean; runHref?: (id: string) => string }) {
   if (run.status === 'running' && lost) {
     return <Tooltip cell={cell} content={<><div>{QUIET_TIP}</div><div className="dim">Its duration stops at its last write; a later run's start marks it failed once Batch confirms its job ended.</div></>}>
@@ -133,9 +138,9 @@ export function Status({ run, failedAt, issues = [], cell, lost, runHref }: { ru
   }
   if (run.status === 'succeeded' && issues.length) {
     const outcome = runOutcome(run, issues)
-    const steps = outcomeSteps(issues, outcome)
+    const { head, tail } = outcomeParts(run, issues)
     return <Tooltip cell={cell} pinnable content={<><div>{OUTCOME_HEAD[outcome]}</div><IssueList issues={issues} runHref={runHref} /></>}>
-      <span className={`sr-status ${OUTCOME_CLASS[outcome]}`}>{outcome}{steps.length > 0 && <> <span className="sr-steps">{runOutcomeLabel(run, issues).slice(outcome.length + 1)}</span></>}</span>
+      <span className={`sr-status ${OUTCOME_CLASS[outcome]}`}>{head}{tail && <> <span className="sr-steps">· {tail}</span></>}</span>
     </Tooltip>
   }
   const tag = <span className={`sr-status ${run.status}`}>{run.status === 'nop' ? 'no-op' : run.status}</span>
