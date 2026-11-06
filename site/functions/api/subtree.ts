@@ -11,7 +11,7 @@
  * edge cache accordingly. w/h arrive quantized-up to 128px so resizes mostly
  * re-hit the cache.
  */
-import { filterJson, hiddenNotFound, isHidden, restrictionFor, restrictSubtree } from '../_lib/restrict.js'
+import { filterJson, hiddenNotFound, isHidden, restrictedForbidden, restrictionFor, restrictSubtree } from '../_lib/restrict.js'
 import { type Env, type Identity, presentsCredentials, requireViewer } from '../_lib/auth.js'
 import { ivRefusal, ivRetry, pathGens, withPathStore, storeReady, type Lens } from '../_lib/index.js'
 import { hasLedger, ledgerHead } from '../_lib/ledger.js'
@@ -175,6 +175,9 @@ async function subtreeGated(
   // and every body (cached or fresh) is filtered on the way out.
   const restriction = restrictionFor(id, ctx.env)
   if (restriction && isHidden(path, restriction)) return hiddenNotFound()
+  // A name filter's tree sums every match, hidden ones too, and a sum can't be filtered on the way out: answered, it
+  // would let the link probe a hidden dir's contents by name.
+  if (restriction && query) return restrictedForbidden()
   const out = (res: Response | Promise<Response>) =>
     restriction ? Promise.resolve(res).then(r => filterJson(r, (b: Parameters<typeof restrictSubtree>[0]) => restrictSubtree(b, restriction))) : res
 

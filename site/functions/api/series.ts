@@ -13,7 +13,7 @@
  * filled in from the snapshot dir: the chart keeps any history that never
  * got (or lost) its tiers, rather than showing a gap.
  */
-import { hiddenNotFound, isHidden, restrictionFor } from '../_lib/restrict.js'
+import { hiddenNotFound, isHidden, restrictedForbidden, restrictionFor } from '../_lib/restrict.js'
 import { type Ctx, type Identity, json, requireScope, requireViewer } from '../_lib/auth.js'
 import { snapshotsPrefix, traceJoins } from '../_lib/shared.js'
 import { ivRefusal, ivRetry, type Lens, pathGens, withPathStore, pathScans, servedStore, storeReady } from '../_lib/index.js'
@@ -209,6 +209,8 @@ export async function seriesRead(ctx: SeriesCtx, gate: (ctx: SeriesCtx) => Promi
     throw e
   }
   // An indexed-only deployment: what the static index answers, no user lens or class scope (`_lib/indexedOnly.ts`).
+  // A path-restricted link: a name filter's points sum every match, hidden ones too (`/api/subtree`'s refusal).
+  if (restriction && qp.query) return restrictedForbidden()
   const strict = !!qp.query && indexedOnly(env)
   const refused = strict ? rejectQuery(url.searchParams.get('q'), pathTerms(env)) ?? rejectScope(!!(lens || classes)) : null
   if (refused) return new Response(rejectBody(refused), { status: 400, headers: { 'content-type': 'application/json' } })

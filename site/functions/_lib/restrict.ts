@@ -30,11 +30,13 @@ export const isPathScope = (scope: string): boolean => /^[a-z0-9-]+:hide:/.test(
 /** Routes a path-restricted link can't use at all (`_middleware.ts`): raw
  *  bucket bytes, D1-held path lists, and answers naming paths that no route
  *  filters (name search summaries and covers, the static-index bench, the
- *  append stores' health, scan-run outputs). */
+ *  append stores' health, scan-run outputs, the digest's image: a drawn diff
+ *  of whatever path its caller names). */
 export const RESTRICTED_BLOCKED = [
   '/api/path-index', '/v1', '/api/plans', '/api/actions', '/api/db', '/api/owners',
   '/api/estate', '/api/assignments', '/api/sweep', '/api/plan-sweep', '/api/og',
   '/api/name-summary', '/api/name-summary-registry', '/api/static-bench', '/api/filter-cover', '/api/name-matches', '/api/health', '/api/scan-runs',
+  '/api/digest-image',
 ]
 
 export const blockedForRestricted = (pathname: string): boolean =>
@@ -50,7 +52,7 @@ export async function restrictGate(request: Request, env: Env): Promise<Response
 
 /** Whether a restricted viewer may read snapshot file `key` (`/data`, a key
  *  under the store's `own` snapshot dir; `rules.json`, the identity roster, is
- *  checked by the caller): a scan's `meta.json` (totals, owners, classes), and
+ *  the caller's to filter: `restrictRules`): a scan's `meta.json` (totals, owners, classes), and
  *  its whole-fleet `age.json` (rows per top-level dir) unless a hide prefix is
  *  itself top-level — its row would break down what the link hides. Anything
  *  else a scan publishes (`lifecycle.json`'s rule prefixes, and whatever a job
@@ -60,6 +62,13 @@ export function dataAllowed(key: string, own: string, r: Restriction): boolean {
   if (file === 'meta.json') return true
   if (file === 'age.json') return !r.hide.some(h => !h.includes('/'))
   return false
+}
+
+/** `rules.json` for a restricted viewer: the roster (`users`) whole, and the attribution rules (`prefix_owners`:
+ *  a prefix URI, its owner, a note) without those for a prefix strictly below a hidden dir. */
+export function restrictRules<T extends { prefix_owners?: { prefix: string }[] }>(rules: T, r: Restriction): T {
+  if (!Array.isArray(rules.prefix_owners)) return rules
+  return { ...rules, prefix_owners: rules.prefix_owners.filter(row => !isHidden(row.prefix.replace(/^[a-z0-9]+:\/\/\/*/, ''), r)) }
 }
 
 /** A prefix as a scope carries it: auth stores a grant's scopes space- and
@@ -80,6 +89,14 @@ export function restrictionFor(id: Identity | null, env: Env): Restriction | nul
   if (!id || id.via !== 'grant') return null
   const pre = `${restrictTag(env)}:hide:`
   const hide = [...new Set(id.scopes.filter(s => s.startsWith(pre)).map(s => norm(decodePrefix(s.slice(pre.length)))).filter(Boolean))]
+  return hide.length ? { hide } : null
+}
+
+/** Every hide prefix a grant carries, whatever store it names, as one restriction; null without any. For an answer
+ *  that isn't one store's (a union view's notes: a path there is some member's): over-hiding is the safe side. */
+export function restrictionAnyStore(id: Identity | null): Restriction | null {
+  if (!id || id.via !== 'grant') return null
+  const hide = [...new Set(id.scopes.filter(isPathScope).map(s => norm(decodePrefix(s.slice(s.indexOf(':hide:') + ':hide:'.length)))).filter(Boolean))]
   return hide.length ? { hide } : null
 }
 
