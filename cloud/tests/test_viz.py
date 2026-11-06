@@ -328,6 +328,55 @@ def test_r2_agg_cli_reads_the_hours_the_state_names(tmp_path: Path, monkeypatch)
     ]
 
 
+def _state(*keys: str) -> bytes:
+    return json.dumps({"schema_version": 2, "buckets": {"b1": {"hours": {
+        f"2026-07-19T{i:02}": {"agg": key} for i, key in enumerate(keys)
+    }}}}).encode()
+
+
+def test_r2_state_inputs_follows_an_aggregate_superseded_under_the_read(tmp_path: Path):
+    """The collector publishes a state, then deletes what it superseded: a reader of the old state finds a key gone,
+    re-reads, and fetches only the replacement. The result is the newer state's aggregates, nothing of the old one's."""
+    from dt_cloud.cli import r2_state_inputs
+
+    archive = {"agg/h00-r1.json": b"h00", "agg/h01-r2.json": b"h01 new"}
+    states = [_state("agg/h00-r1.json", "agg/h01-r1.json"), _state("agg/h00-r1.json", "agg/h01-r2.json")]
+    reads = []
+
+    def read(path: str) -> bytes:
+        name = Path(path).name
+        reads.append(name)
+        if name == "state.json":
+            return states.pop(0)
+        key = f"agg/{name}"
+        if key not in archive:
+            raise FileNotFoundError(path)
+        return archive[key]
+
+    out = r2_state_inputs(str(tmp_path / "state.json"), dt.datetime(2026, 7, 20, tzinfo=dt.timezone.utc), tmp_path / "stage", read)
+    assert out == [str(tmp_path / "stage/agg/h00-r1.json"), str(tmp_path / "stage/agg/h01-r2.json")]
+    assert [Path(p).read_bytes() for p in out] == [b"h00", b"h01 new"]
+    assert sorted(reads) == ["h00-r1.json", "h01-r1.json", "h01-r2.json", "state.json", "state.json"]
+
+
+def test_r2_state_inputs_refuses_an_aggregate_that_stays_missing(tmp_path: Path):
+    """A key every state keeps naming is a broken archive, not a race: bounded re-reads, then the error."""
+    from dt_cloud.cli import R2_STATE_READS, r2_state_inputs
+
+    reads = []
+
+    def read(path: str) -> bytes:
+        reads.append(Path(path).name)
+        if path.endswith("state.json"):
+            return _state("agg/h00-r1.json")
+        raise FileNotFoundError(path)
+
+    with pytest.raises(FileNotFoundError) as e:
+        r2_state_inputs(str(tmp_path / "state.json"), dt.datetime(2026, 7, 20, tzinfo=dt.timezone.utc), tmp_path / "stage", read)
+    assert str(e.value) == f"r2-agg: 1 aggregate(s) {tmp_path}/state.json still names are missing after {R2_STATE_READS} reads (first: agg/h00-r1.json)"
+    assert reads == ["state.json", "h00-r1.json"] * R2_STATE_READS
+
+
 def test_r2_agg_cli_takes_the_state_or_inputs(tmp_path: Path):
     for args in ([], ["-s", str(tmp_path / "state.json"), str(tmp_path / "x.json")]):
         result = CliRunner().invoke(main, ["access", "r2-agg", "-d", "2026-07-20", "-o", str(tmp_path / "agg.parquet"), *args])

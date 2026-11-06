@@ -44,11 +44,18 @@ export async function publishAvatar(db: D1Database, origin: string, img: { type:
   return `${origin}/a/${sha}.${EXT[img.type] ?? 'png'}`
 }
 
-/** A stored avatar by its path (`AVATAR_PATH`), or null. */
+/** A stored avatar by its path (`AVATAR_PATH`), or null; a D1 without the table (recipe `public-avatars` not yet
+ * applied) stores none. */
 export async function readAvatar(db: D1Database, pathname: string): Promise<{ type: string; bytes: Uint8Array } | null> {
   const m = AVATAR_PATH.exec(pathname)
   if (!m) return null
-  const row = await db.prepare('SELECT type, data FROM public_avatars WHERE sha256 = ?').bind(m[1]).first<{ type: string; data: string }>()
+  let row: { type: string; data: string } | null
+  try {
+    row = await db.prepare('SELECT type, data FROM public_avatars WHERE sha256 = ?').bind(m[1]).first<{ type: string; data: string }>()
+  } catch (e) {
+    if (/no such table/.test(String((e as Error)?.message))) return null
+    throw e
+  }
   if (!row) return null
   const bin = atob(row.data)
   return { type: row.type, bytes: Uint8Array.from(bin, c => c.charCodeAt(0)) }

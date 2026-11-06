@@ -69,13 +69,15 @@ describe('runUndoNow — a run\'s recorded undo against the reading', () => {
       { unavailable: null, unseen: { unseen: [] } },
     ])
   })
-  it('a dry run, a window closed or never recorded: no undo to qualify, and nothing is read', async () => {
+  it('a dry run, a window closed or never recorded, a run already undone: no undo to qualify, and nothing is read', async () => {
     const { db } = await sqliteD1()
     const failing = { SERVED_R2: '1', INDEX_R2: { list: () => { throw new Error('read') }, get: () => { throw new Error('read') } } } as never
     expect([
       await runUndoNow(failing, db, run({ mode: 'dry' }), NOW),
       await runUndoNow(failing, db, run({ undo_deadline: NOW }), NOW),
       await runUndoNow(failing, db, run({ undo_deadline: null }), NOW),
-    ]).toEqual([NEITHER, NEITHER, NEITHER])
+      await runUndoNow(failing, db, run({ undo_state: 'full' }), NOW),
+      await runUndoNow(failing, db, run({ undo_state: 'partial' }), NOW),
+    ]).toEqual([NEITHER, NEITHER, NEITHER, NEITHER, { unavailable: null, unseen: { unseen: ['a', 'b'] } }])
   })
 })

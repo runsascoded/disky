@@ -211,7 +211,6 @@ class TestUndoCli:
         monkeypatch.setattr(index_footer, "_creds", lambda: ("token", "account"))
         monkeypatch.setattr(index_footer, "_d1_query", lambda *_: [row])
         monkeypatch.setattr("dt_cloud.sweep_exec.undo_run", lambda log_dir, **kwargs: restored.append(kwargs["only_buckets"]) or {})
-        monkeypatch.setattr("dt_cloud.sweep_exec.record_undo", lambda *_: "partial")
         return CliRunner().invoke(cli.main, ["sweep", "undo", *flags, row["run_id"]]), restored
 
     def test_refuses_a_run_with_soft_delete_off(self, monkeypatch):

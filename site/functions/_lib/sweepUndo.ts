@@ -2,12 +2,15 @@
 // dispatches `dt-cloud sweep undo <run_id>` as a Batch job on the dispatch's
 // own spec (`sweepJobSpec`: image, job account, D1 + site secrets). The job
 // restores exactly the generations the run's `deleted/` log names (GCS soft
-// delete), refuses on its own past the run's deadline, and records the
-// outcome (`undo_state` full / partial, `deletion_bands.undone_objects`).
+// delete), refuses on its own past the run's deadline or where a bucket's soft
+// delete is off now, and records what it restores as it goes (`undo_state`
+// partial / full, `deletion_bands.undone_objects`: `sweep_exec.UndoRecord`).
 // Here: the gate (the run is a finished real run inside its undo window, not
 // already undone, and soft delete isn't off now on a bucket it deleted from:
-// `softDeleteNow.ts`) and the submit, which marks the row `undo_state = 'partial'`
-// as plan-sweep's undo does — the job's record then settles it.
+// `softDeleteNow.ts`) and the submit. The submit writes nothing on the run's
+// row: an undo job that is refused, or dies before it restores anything, has
+// undone nothing, and only the job knows what it restored. While the job is
+// live the page says so from the job itself (`runControls`' `undoing`).
 import { batchConfig, notConfigured } from './batchConfig.js'
 import { type DispatchErr, type ExecEnv, refuse } from './dispatch.js'
 import { batchRegionFor, gcpToken } from './gcp.js'
@@ -83,7 +86,6 @@ export async function undoSweepRun(
   const token = await gcpToken(env.GCP_SA_KEY)
   const failed = await submitSweepJob(cfg, token, region, jobId, spec)
   if (failed) return failed
-  await db.prepare("UPDATE deletion_runs SET undo_state = 'partial' WHERE run_id = ? AND undo_state != 'full'").bind(runId).run()
   await auditRunControl(db, 'undo', runId, actor, jobId)
   return { ok: true, job_id: jobId, target: runId, region }
 }

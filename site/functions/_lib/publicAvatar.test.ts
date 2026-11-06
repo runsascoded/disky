@@ -101,6 +101,13 @@ describe('the public route', () => {
     expect([AVATAR_PATH.test(`/a/${sha}.png`), AVATAR_PATH.test(`/a/${sha}.html`)]).toEqual([true, false])
   })
 
+  it('404s on a database without the table: a deployment still waiting for the `public-avatars` recipe', async () => {
+    const { db, raw } = await sqliteD1()
+    raw.exec('DROP TABLE public_avatars')
+    const res = await onRequest({ request: new Request(`${ORIGIN}/a/${'0'.repeat(64)}.png`), env: { DB: db } })
+    expect([res.status, await res.text()]).toEqual([404, 'not found\n'])
+  })
+
   it('takes reads only', async () => {
     const { sha } = await stored()
     const r = await onRequest({ request: new Request(`${ORIGIN}/a/${sha}.png`, { method: 'POST' }), env: {} })

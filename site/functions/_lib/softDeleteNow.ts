@@ -10,7 +10,7 @@ import type { D1Database } from '@cloudflare/workers-types'
 import type { Store } from '@rdub/file-tree'
 import type { Env } from './auth.js'
 import { servedStore, storeReady } from './index.js'
-import { type BucketSoftDelete, bucketSoftDeleteOf, runUndoUnavailable, runUndoUnseen, type SoftDeleteSnapshot, type UndoUnavailable, type UndoUnseen } from '../../src/softDelete.js'
+import { type BucketSoftDelete, bucketSoftDeleteOf, runUndoUnavailable, runUndoUnseen, type RunUndoWindow, type SoftDeleteSnapshot, type UndoUnavailable, type UndoUnseen } from '../../src/softDelete.js'
 
 export const SOFT_DELETE_PREFIX = 'snapshots/soft-delete/'
 const DATE_RE = /^(\d{4}-\d{2}-\d{2})\.json$/
@@ -52,15 +52,15 @@ export async function runBuckets(db: D1Database, row: RunBucketsRow): Promise<st
 
 /** What the reading says of the undo `row` recorded, at `now`: `unavailable` (soft delete is off on a bucket it deleted from),
  * `unseen` (nothing says, for some bucket of it), or neither (every bucket of it is on, as of the reading). Reads nothing
- * for a run with no open window: it has no undo to qualify. Only the `sweep` executor's undo is a soft-delete restore:
+ * for a run with no open window, or one already undone: it has no undo to qualify. Only the `sweep` executor's undo is a soft-delete restore:
  * `plan-sweep`'s is its own hold, so a caller there doesn't ask. */
 export async function runUndoNow(
   env: Env,
   db: D1Database,
-  row: RunBucketsRow & { mode: string; undo_deadline?: number | null },
+  row: RunBucketsRow & RunUndoWindow,
   now: number,
 ): Promise<{ unavailable: UndoUnavailable | null; unseen: UndoUnseen | null }> {
-  if (row.mode !== 'real' || row.undo_deadline == null || now >= row.undo_deadline) return { unavailable: null, unseen: null }
+  if (row.mode !== 'real' || row.undo_deadline == null || now >= row.undo_deadline || row.undo_state === 'full') return { unavailable: null, unseen: null }
   const [known, buckets] = await Promise.all([bucketSoftDelete(env), runBuckets(db, row)])
   return { unavailable: runUndoUnavailable(row, buckets, known, now), unseen: runUndoUnseen(row, buckets, known, now) }
 }
