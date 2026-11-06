@@ -416,7 +416,7 @@ def test_runway_reaches_before_the_month():
 def test_quota_marks_must_be_known():
     with pytest.raises(ValueError) as e:
         E.config_from_dict({"template": "cw", "quota_marks": "squares"})
-    assert str(e.value) == "digest config quota_marks: 'squares' is not one of ('warning', 'circles', 'runway', 'runway-hue')"
+    assert str(e.value) == "digest config quota_marks: 'squares' is not one of ('warning', 'circles', 'runway', 'runway-hue', 'arrow-chip')"
 
 
 def _meta2(primary_tib: float, hero_tib: float, objs: int = 1_000_000) -> dict:
@@ -974,7 +974,7 @@ def test_live_settings_override_the_file(monkeypatch):
     assert (LIVE_SETTINGS(cfg), len(calls)) == (None, 3)
     with pytest.raises(ValueError) as e:
         with_settings(cfg, {"params": "", "quota_marks": "squares"})
-    assert str(e.value) == "digest settings quota_marks: 'squares' is not one of ('warning', 'circles', 'runway', 'runway-hue')"
+    assert str(e.value) == "digest settings quota_marks: 'squares' is not one of ('warning', 'circles', 'runway', 'runway-hue', 'arrow-chip')"
 
 
 def test_quota_alert_is_broadcast_while_over_and_deleted_once_under(tmp_path: Path):
