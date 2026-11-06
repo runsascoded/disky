@@ -355,7 +355,7 @@ export function StagedPage() {
 
   const [armed, setArmed] = useState(false)
   // What the armed confirm states, and what it sends: dispatch refuses a lower minimum than this.
-  const softDeleteMin = useSweepSettings(armed && DEFAULT_STORE.executor === 'sweep')
+  const softDeleteMin = useSweepSettings(armed && CAPS.softDelete)
   // a changed selection disarms: the confirm names exactly what goes
   useEffect(() => setArmed(false), [plan?.id, items.length, selected.join('\n')])
 
@@ -644,7 +644,7 @@ export function StagedPage() {
                       : <>No dry run of exactly this selection at scan <code>{runScan}</code>: deletes from a fresh manifest, with no dry run. A directory that gained new writes since the scan still has its older staged files deleted, and the new files survive; a dry run would report that directory as drift instead.</>}
                 </p>
               )}
-              {armed && DEFAULT_STORE.executor === 'sweep' && <UndoTerms min={softDeleteMin} buckets={[...new Set(runRows.map(r => prefixToPath(r.prefix).split('/')[0]))]} />}
+              {armed && CAPS.softDelete && <UndoTerms min={softDeleteMin} buckets={[...new Set(runRows.map(r => prefixToPath(r.prefix).split('/')[0]))]} />}
               {armed && <ConfirmList rows={runRows} fmtBytes={fmtBytes} />}
               {dispatch.error && <p className="staged-err" role="alert">{dispatch.error.message}</p>}
               {pendingJob && (

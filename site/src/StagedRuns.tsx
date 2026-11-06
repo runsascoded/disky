@@ -377,7 +377,7 @@ export function RunDetail({ run, live, progress, dir, planned, fmtBytes, now }: 
       {planned && dir && <RunBucketProgress planned={planned} dir={dir} live={live} log={log} fmtBytes={fmtBytes} dry={r.mode === 'dry'} bands={bands} />}
       {r.mode === 'real' && <section id="recovery" className="rd-recovery">
         <h4>Recovery</h4>
-        {CAPS.undoUnwindowed ? <p>Recovery depends on the bucket’s versioning and retention settings. This deletion may be permanent; a recorded run deadline does not guarantee recovery.</p> : runHasNoUndo(r) ? <>
+        {CAPS.undoUnwindowed ? <p>{runHasNoUndo(r) ? runNoUndoText(r) : 'Recovery depends on the bucket’s versioning and retention settings. This deletion may be permanent; a recorded run deadline does not guarantee recovery.'}</p> : runHasNoUndo(r) ? <>
         <p>{runNoUndoText(r)} A bucket that retained its soft deletes (per bucket, below) can still be restored from the CLI.</p>
         <code>dt-cloud sweep undo -b BUCKET {r.run_id}</code>
         </> : unavailable ? <RecoveryUnavailable unavailable={unavailable} buckets={buckets} runId={r.run_id} /> : <>

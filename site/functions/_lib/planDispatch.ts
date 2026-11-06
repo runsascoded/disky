@@ -18,7 +18,9 @@ import { type DispatchReq, type ExecEnv, type Executor, expectedVars, type Prepa
 import { gcpToken } from './gcp.js'
 import { NO_SHAPE, PlanSpansBuckets, planItemLines, prefixShape, snapshotPlan } from './plans.js'
 import { listBatchJobs, reflectRuns } from './runReflect.js'
+import { defaultMinSoftDeleteDays, weakerThanShown } from '../../src/softDelete.js'
 import { SCAN_ID_RE } from '../../src/scanSlug.js'
+import { minSoftDeleteDays } from './sweepSettings.js'
 
 export function reviewConfig(env: ExecEnv, cfg: Parameters<typeof secretRef>[0]): { vars: Record<string, string>; secrets: Record<string, string> } {
   const store = env.SWEEP_REVIEW_STORE?.trim()
@@ -59,6 +61,14 @@ async function prepare(env: ExecEnv, db: D1Database, req: DispatchReq): Promise<
   const plan = snapshot
   const prefixes = await planItemLines(db, req.planId, req.items)
 
+  // The one read: what this checks is what the job's `-s` says.
+  const minDays = await minSoftDeleteDays(db, 'plan-sweep')
+  if (req.mode === 'real') {
+    const shown = req.shownMinSoftDeleteDays ?? defaultMinSoftDeleteDays('plan-sweep')
+    const weaker = weakerThanShown(minDays, shown)
+    if (weaker) return refuse(409, weaker, { min_soft_delete_days: minDays, shown_min_soft_delete_days: shown })
+  }
+
   const launch: Prepared['launch'] = async (date, digest) => {
     const jobId = `cw-sweep-${req.mode}-${jobStamp()}z`
     const runGs = runGsPath(cfg, jobId)
@@ -73,7 +83,7 @@ async function prepare(env: ExecEnv, db: D1Database, req: DispatchReq): Promise<
     )
     if (!up.ok) return refuse(500, 'plan.json write failed', { status: up.status, detail: (await up.text()).slice(0, 300) })
 
-    const script = planSweepScript(runMnt, req.mode === 'real')
+    const script = planSweepScript(runMnt, req.mode === 'real', minDays)
 
     // the executor deletes from the plan's bucket (`SWEEP_BUCKET` in the job env)
     const spec = sweepBatchSpec(cfg, jobSa, script, plan.bucket, { JOB_ID: jobId, SWEEP_DATE: date, SITE_URL: req.siteUrl, ...expectedVars(req.expected), ...review.vars },
@@ -88,9 +98,9 @@ async function prepare(env: ExecEnv, db: D1Database, req: DispatchReq): Promise<
 
     // `head` / `exec_head` recorded a ledger position a plan-first run doesn't
     // have (it reads no ledger), so both are 0.
-    await db.prepare(PLAN_SWEEP_RUN_INSERT).bind(jobId, req.planId, runGs, date, req.actor, req.mode, Math.floor(Date.now() / 1000), runGs, digest).run()
+    await db.prepare(PLAN_SWEEP_RUN_INSERT).bind(jobId, req.planId, runGs, date, req.actor, req.mode, Math.floor(Date.now() / 1000), runGs, digest, minDays).run()
 
-    return { job_id: jobId, extra: { run: runGs } }
+    return { job_id: jobId, extra: { run: runGs, min_soft_delete_days: minDays } }
   }
   return { prefixes, launch }
 }
@@ -98,18 +108,18 @@ async function prepare(env: ExecEnv, db: D1Database, req: DispatchReq): Promise<
 /** A plan-sweep run's `deletion_runs` row. It names the cw schema's run-dir column (`manifest`; gcs's lineage calls
  *  it `plan`, written by `EXECUTOR=sweep`'s `sweep_exec.py`): plan-sweep runs only where that schema is. */
 export const PLAN_SWEEP_RUN_INSERT = `
-  INSERT INTO deletion_runs (run_id, plan_id, manifest, scan, head, exec_head, actor, mode, started_ts, log_dir, plan_digest)
-  VALUES (?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?)
+  INSERT INTO deletion_runs (run_id, plan_id, manifest, scan, head, exec_head, actor, mode, started_ts, log_dir, plan_digest, min_soft_delete_days)
+  VALUES (?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, ?)
 `
 
 /** The Batch task's script: expand the run dir's `plan.json` into a manifest (`plan-sweep manifest PLAN_PATH`, the
  *  plan positional), then execute it, pinging the site on exit (success or failure) so it reflects the run now. */
-export const planSweepScript = (runMnt: string, forReal: boolean): string => [
+export const planSweepScript = (runMnt: string, forReal: boolean, minSoftDeleteDays: number): string => [
   'set -euo pipefail',
   `trap 'curl -fsS -m 60 -o /dev/null -H "Authorization: Bearer $SITE_TOKEN" "$SITE_URL/api/plan-sweep/jobs" || true' EXIT`,
   `RUN="${runMnt}"`,
   `python -c 'from os import environ; from dt_cloud.scan_steps import r2_profile; env = dict(environ); r2_profile(env); environ.update(env); from dt_cloud.cli import main; main()' plan-sweep manifest "$RUN/plan.json" -d "$SWEEP_DATE" -o "$RUN"`,
-  `dt-cloud plan-sweep execute ${forReal ? '--for-real ' : ''}"$RUN"`,
+  `dt-cloud plan-sweep execute ${forReal ? '--for-real ' : ''}-s ${minSoftDeleteDays} "$RUN"`,
 ].join('\n')
 
 export const planSweep: Executor = {

@@ -1465,20 +1465,20 @@ def test_cf_usage_failure_fails_its_phase_not_the_run(tmp_path, env):
 
 
 def test_soft_delete_reads_each_gcs_source_to_the_data_store_and_r2(tmp_path, env):
-    """`soft-delete` (listed in `steps`): `dt-cloud soft-delete` over every `gs://` source's bucket (or
+    """`soft-delete` (listed in `steps`): `dt-cloud soft-delete` over every `gs://` and `s3://` source's bucket (or
     `options.soft-delete.buckets`), the day's document under `snapshots/soft-delete/` in the data store and the R2
-    archive; no GCS bucket, or REPROC: nothing run."""
+    archive; no such bucket, or REPROC: nothing run."""
     sources = ["gs://g1", "gcs://g2", {"uri": "s3://a", "endpoint": "https://s3.example.org"}]
     c = ctx(tmp_path, env, steps=["soft-delete"], sources=sources)
     S.soft_delete(c, None)
-    assert c.sh_impl.calls == ["dt-cloud soft-delete -b g1 -b g2 -o <tmp>/data/snapshots/soft-delete"]
+    assert c.sh_impl.calls == ["dt-cloud soft-delete -b g1 -b g2 -b s3://a -E https://s3.example.org -o <tmp>/data/snapshots/soft-delete"]
     r2 = {**env, "R2_ENDPOINT": "https://r2.example.org", "R2_BUCKET": "r2b", "R2_ACCESS_KEY_ID": "k", "R2_SECRET_ACCESS_KEY": "s"}
     c = ctx(tmp_path, r2, steps=["soft-delete"], sources=sources, options={
         "soft-delete": {"buckets": ["x", "y"]},
         "list": {"import": True}, "static-names": {"profile": "sn.json"}, "digest": {"template": "t", "config": "c.yml"},
     })
     S.soft_delete(c, None)
-    assert c.sh_impl.calls == ["dt-cloud soft-delete -b x -b y -o <tmp>/data/snapshots/soft-delete -o r2://r2b/snapshots/soft-delete"]
+    assert c.sh_impl.calls == ["dt-cloud soft-delete -b x -b y -E https://s3.example.org -o <tmp>/data/snapshots/soft-delete -o r2://r2b/snapshots/soft-delete"]
     for none in (ctx(tmp_path, env, steps=["soft-delete"]), ctx(tmp_path, {**env, "REPROC": "1"}, steps=["soft-delete"], sources=sources)):
         S.soft_delete(none, None)
         assert none.sh_impl.calls == []

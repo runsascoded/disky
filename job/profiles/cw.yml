@@ -77,8 +77,9 @@ env:
 pass: [DT_RECORD, DT_ALERTS]
 # after each scan, the per-scan files the interval store + static index hold (specs/lean-scans.md §2), retired for real
 # since the reviewed one-off by hand (2026-10-18: 167 scans, ~874 GB over GCS + R2)
-# `gcp-cost`: the day's GCP cost snapshot (`/admin/cost/gcp`), `cf-usage` the Cloudflare one (`/admin/usage`); both never fatal
-steps: [retire, gcp-cost, cf-usage]
+# `gcp-cost`: the day's GCP cost snapshot (`/admin/cost/gcp`), `cf-usage` the Cloudflare one (`/admin/usage`), `soft-delete`
+# what each bucket retains (`/admin`); all never fatal
+steps: [retire, gcp-cost, cf-usage, soft-delete]
 labels: {deployment: cw}
 queue_size: 20
 options:

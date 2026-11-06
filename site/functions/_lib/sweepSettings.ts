@@ -1,9 +1,9 @@
 /** The sweep's deployment settings (D1 `sweep_settings`, migration `sweep-soft-delete`): one row, one typed column per setting,
  * so the database itself refuses a bad value (a key/value table couldn't CHECK this one, and it's a safety setting). Read at
  * dispatch (`sweepDispatch`), which passes it to the job on its command line: a running job can't change value mid-run. No row,
- * or a D1 without the table, reads as today's behaviour: 7 days. */
+ * or a D1 without the table, reads as the executor's default (`defaultMinSoftDeleteDays`). */
 import type { D1Database } from '@cloudflare/workers-types'
-import { DEFAULT_MIN_SOFT_DELETE_DAYS, MAX_MIN_SOFT_DELETE_DAYS } from '../../src/softDelete.js'
+import { defaultMinSoftDeleteDays, MAX_MIN_SOFT_DELETE_DAYS } from '../../src/softDelete.js'
 
 export const TABLE = 'sweep_settings'
 
@@ -21,8 +21,8 @@ export async function getSweepSettings(db: D1Database): Promise<SweepSettings | 
 }
 
 /** The minimum a run dispatched now runs under. */
-export const minSoftDeleteDays = async (db: D1Database): Promise<number> =>
-  (await getSweepSettings(db))?.min_soft_delete_days ?? DEFAULT_MIN_SOFT_DELETE_DAYS
+export const minSoftDeleteDays = async (db: D1Database, executor: string | undefined): Promise<number> =>
+  (await getSweepSettings(db))?.min_soft_delete_days ?? defaultMinSoftDeleteDays(executor)
 
 /** The PUT body, or why it's refused. */
 export function parseSweepSettings(b: unknown): { min_soft_delete_days: number } | string {

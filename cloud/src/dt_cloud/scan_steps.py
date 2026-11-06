@@ -1690,25 +1690,33 @@ SOFT_DELETE_PREFIX = "snapshots/soft-delete"
 @step("soft-delete", core=False, soft=True, options={"buckets": list},
       requires=primary_only("soft-delete", "the readings are the deployment's, written once by its primary"))
 def soft_delete(ctx: Ctx, arg: str | None) -> None:
-    """Each GCS source bucket's soft-delete retention now (`dt-cloud soft-delete -o`): today's
+    """Each GCS or S3 source bucket's soft-delete retention now (`dt-cloud soft-delete -o`): today's
     `<data>/snapshots/soft-delete/<date>.json` (+ the R2 archive's copy, which the site reads under `SERVED_R2`); a
     second run the same day replaces it. What a sweep's undo depends on: the site says "undo unavailable" for a run on
     a bucket this shows off, and can't say either way for a bucket it doesn't name. `options.soft-delete.buckets`: the
-    buckets to read (default: every `gs://` source's). Needs `storage.buckets.get` on each (what a real sweep's
-    preflight reads). Skipped with no GCS bucket (soft delete is GCS's) or on REPROC; never fatal. Not core, as
+    buckets to read (default: every `gs://` and `s3://` source's). Needs `storage.buckets.get` on each GCS bucket (what a
+    real sweep's preflight reads), or versioning + lifecycle reads on an S3 one, over one endpoint. Skipped with no such
+    bucket or on REPROC; never fatal. Not core, as
     `gcp-cost`: a deployment that sweeps lists it in `steps`."""
     if ctx.reproc:
         err("REPROC: skipping the soft-delete reading")
         return
-    buckets = ctx.opt("soft-delete", "buckets", None) or [s.bucket for s in ctx.profile.sources if s.kind == "gcs"]
+    s3 = [s for s in ctx.profile.sources if s.kind == "s3"]
+    buckets = ctx.opt("soft-delete", "buckets", None) or [
+        *(s.bucket for s in ctx.profile.sources if s.kind == "gcs"),
+        *(f"s3://{s.bucket}" for s in s3),
+    ]
     if not buckets:
-        err("soft-delete: no gs:// source (and no options.soft-delete.buckets): nothing to read")
+        err("soft-delete: no gs:// or s3:// source (and no options.soft-delete.buckets): nothing to read")
         return
+    endpoints = sorted({s.endpoint for s in s3 if s.endpoint})
+    if len(endpoints) > 1:
+        raise ValueError(f"soft-delete: s3 sources span endpoints {endpoints}; one reading takes one")
     with ctx.phase("soft-delete"):
         outs = [f"{ctx.data_uri}/{SOFT_DELETE_PREFIX}"]
         if ctx.env.get("R2_ARCHIVE"):
             outs.append(f"{ctx.env['R2_ARCHIVE']}/{SOFT_DELETE_PREFIX}")
-        ctx.sh(["dt-cloud", "soft-delete", *(a for b in buckets for a in ("-b", b)), *(a for o in outs for a in ("-o", o))],
+        ctx.sh(["dt-cloud", "soft-delete", *(a for b in buckets for a in ("-b", b)), *(a for e in endpoints for a in ("-E", e)), *(a for o in outs for a in ("-o", o))],
                fatal=False, warn="soft-delete reading failed (the scan's outputs stand; the site keeps the last one, dated)")
 
 

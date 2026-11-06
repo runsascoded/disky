@@ -51,16 +51,16 @@ describe('/api/sweep/settings', () => {
 
   it('no row reads as 7; a viewer reads, an admin writes, each write logged, and a dispatch reads what was written', async () => {
     expect(await answer(await onRequestGet(req('GET', viewer)))).toEqual([200, { settings: null, min_soft_delete_days: 7 }])
-    expect(await minSoftDeleteDays(db as never)).toBe(7)
+    expect(await minSoftDeleteDays(db as never, 'sweep')).toBe(7)
     expect((await onRequestPut(req('PUT', viewer, { min_soft_delete_days: 0 }))).status).toBe(403)
 
     const set = { min_soft_delete_days: 0, updated_by: 'ops@example.test', updated_at: '<ts>' }
     expect(norm(await answer(await onRequestPut(req('PUT', admin, { min_soft_delete_days: 0 }))))).toEqual([200, { settings: set, min_soft_delete_days: 0 }])
     expect(norm(await answer(await onRequestGet(req('GET', viewer))))).toEqual([200, { settings: set, min_soft_delete_days: 0 }])
-    expect(await minSoftDeleteDays(db as never)).toBe(0)
+    expect(await minSoftDeleteDays(db as never, 'sweep')).toBe(0)
 
     await onRequestPut(req('PUT', admin, { min_soft_delete_days: 14 }))
-    expect(await minSoftDeleteDays(db as never)).toBe(14)
+    expect(await minSoftDeleteDays(db as never, 'sweep')).toBe(14)
     const log = raw.prepare("SELECT pk, action, who, old_json, new_json FROM admin_edits WHERE tbl = 'sweep_settings' ORDER BY id").all() as { pk: string; action: string; who: string; old_json: string | null; new_json: string }[]
     const days = (j: string | null) => j === null ? null : (JSON.parse(j) as { min_soft_delete_days: number }).min_soft_delete_days
     expect(log.map(e => [e.pk, e.action, e.who, days(e.old_json), days(e.new_json)])).toEqual([
@@ -70,9 +70,9 @@ describe('/api/sweep/settings', () => {
   })
 
   it('a bad value is a 400 and changes nothing', async () => {
-    const before = await minSoftDeleteDays(db as never)
+    const before = await minSoftDeleteDays(db as never, 'sweep')
     expect(await answer(await onRequestPut(req('PUT', admin, { min_soft_delete_days: 91 })))).toEqual([400, { error: 'min_soft_delete_days: an integer 0..90' }])
-    expect(await minSoftDeleteDays(db as never)).toBe(before)
+    expect(await minSoftDeleteDays(db as never, 'sweep')).toBe(before)
   })
 
   it('the table itself refuses a value out of range, and a second row', async () => {
@@ -80,14 +80,19 @@ describe('/api/sweep/settings', () => {
     expect(() => raw.prepare("INSERT INTO sweep_settings (id, min_soft_delete_days, updated_by, updated_at) VALUES (2, 7, 'x', 1)").run()).toThrow(/CHECK constraint failed/)
   })
 
-  it('a deployment without the guard refuses a write', async () => {
-    expect(await answer(await onRequestPut(req('PUT', admin, { min_soft_delete_days: 0 }, { EXECUTOR: 'plan-sweep' })))).toEqual([409, { error: 'this deployment\'s executor has no soft-delete guard' }])
+  it('on `plan-sweep`, no row reads as 0, and a write takes', async () => {
+    const plan = { EXECUTOR: 'plan-sweep' }
+    expect(await answer(await onRequestGet(req('GET', viewer, undefined, plan)))).toEqual([200, { settings: null, min_soft_delete_days: 0 }])
+    expect(await minSoftDeleteDays(db as never, 'plan-sweep')).toBe(0)
+    const set = { min_soft_delete_days: 3, updated_by: 'ops@example.test', updated_at: '<ts>' }
+    expect(norm(await answer(await onRequestPut(req('PUT', admin, { min_soft_delete_days: 3 }, plan))))).toEqual([200, { settings: set, min_soft_delete_days: 3 }])
+    expect(await minSoftDeleteDays(db as never, 'plan-sweep')).toBe(3)
   })
 
   it('a D1 without the table reads as 7, and a write says what to apply', async () => {
     const { db: bare, raw: bareRaw } = await sqliteD1()
     bareRaw.exec('DROP TABLE sweep_settings')
-    expect(await minSoftDeleteDays(bare as never)).toBe(7)
+    expect(await minSoftDeleteDays(bare as never, 'sweep')).toBe(7)
     const bareEnv = { ...env, DB: bare }
     const { token } = await gateFor(bareEnv as never)!.mint({ email: 'ops@example.test', scopes: ['cw', 'admin'], name: 'ops', createdBy: 'test', expiresAt: null, maxRedeems: null })
     expect(await answer(await onRequestGet(req('GET', token, undefined, { DB: bare })))).toEqual([200, { settings: null, min_soft_delete_days: 7 }])
