@@ -175,6 +175,18 @@ describe('a lens diff\'s lookups', () => {
     })
   })
 
+  it('a path the lens holds no row of is not absent: an assignment under it is read, and drawn with its size', async () => {
+    const inferred: number[] = []
+    const d = await buildDiff(lensEnv, { ...base, from: LA, to: LB, lens, trace: (n, v) => { if (n === 'inferred') inferred.push(v) } })
+    // B's lookup of `shrink` finds no row of carol's, and its total isn't read (no assignment covers `shrink`): that
+    // is not `shrink`'s absence, so `shrink/a` is read there — its total, as her assignment covers it. Taken as
+    // absence, `shrink/a` was inferred removed (100 → 0 MiB, one lookup) where she holds 8 MiB.
+    // (Only `shrink/a`'s row: `shrink`'s own is that lookup's answer, as before this walk.)
+    expect({ rows: d.rows.filter(r => r.p === 'shrink/a'), lookups: d.lookups, inferred }).toEqual({
+      rows: [row('shrink/a', 2, 'file', 'changed', 100, 8, 1, 1, { l: 2 })], lookups: 2, inferred: [],
+    })
+  })
+
   it('a row group whose metadata is missing fails a lens diff too (its lookups read per name)', async () => {
     let walking = false
     const restore = withoutGroupJson(lensEnv, LB, 'path', () => walking)
