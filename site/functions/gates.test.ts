@@ -647,7 +647,7 @@ describe.each(MODES)('$name', mode => {
       const id = await identify({ request: new Request(`${ORIGIN}/api/me`, { headers: w.headers[who] }), env: w.env })
       return id && { via: id.via, email: id.email, scopes: id.scopes, admin: id.admin }
     }))
-    const staffScopes = mode.listOn ? ['gcs', 'cw', 'requests', 'gcs:assign'] : ['gcs', 'cw', 'admin', 'requests', 'gcs:assign']
+    const staffScopes = mode.listOn ? ['gcs', 'cw', 'gcs:assign'] : ['gcs', 'cw', 'admin', 'gcs:assign']
     expect(byIdentity(ids)).toEqual({
       'anonymous': null,
       'read-only link': { via: 'grant', email: null, scopes: ['gcs:read'], admin: false },

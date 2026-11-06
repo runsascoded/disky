@@ -202,7 +202,6 @@ export interface Ctx {
 export const GCS_SCOPE = 'gcs'
 export const CW_SCOPE = 'cw'
 export const ADMIN_SCOPE = 'admin'
-export const REQUESTS_SCOPE = 'requests'
 
 /** The deployment's base scope: what `requireViewer` asks for. */
 export const baseScope = (env: Env): string => env.BASE_SCOPE ?? GCS_SCOPE
@@ -476,7 +475,7 @@ function authIdentity(auth: Auth): Identity {
  *  without a minted session): the deployment's base scope — which a store
  *  other than gcs/cw (e.g. `laptop`) names itself — plus the fixed ones. */
 const allScopes = (env: Env): string[] =>
-  [...new Set([GCS_SCOPE, CW_SCOPE, ADMIN_SCOPE, REQUESTS_SCOPE, baseScope(env), baseAssignScope(env)])]
+  [...new Set([GCS_SCOPE, CW_SCOPE, ADMIN_SCOPE, baseScope(env), baseAssignScope(env)])]
 
 /** Per request and env: its identity lookup (a D1 read for a session or a grant), so the middleware's gate
  *  (`restrictGate`) and the route, handed the same Request and env, share one. The env is part of the key: the identity

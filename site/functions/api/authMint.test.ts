@@ -99,7 +99,7 @@ describe('`POST /api/auth/request`: an address the policy admits gets a grant by
 
   it('the list off: staff\'s carries `admin`, as it did', async () => {
     const w = await world(false)
-    expect([await w.call(authRoute, '/api/auth/request', null, 'POST', { email: STAFF }), scopesOfGrants(w.raw)]).toEqual([[200, { status: 'auto' }], ['gcs cw admin requests gcs:assign']])
+    expect([await w.call(authRoute, '/api/auth/request', null, 'POST', { email: STAFF }), scopesOfGrants(w.raw)]).toEqual([[200, { status: 'auto' }], ['gcs cw admin gcs:assign']])
   })
 })
 
