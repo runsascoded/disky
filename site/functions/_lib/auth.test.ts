@@ -53,12 +53,12 @@ const cw = (rows: { allowed?: string[]; admin?: string[] }, extra: Partial<Env> 
 
 describe('scopesFor — the in-app policy that replaces the Access policy', () => {
   it('staff get every scope', async () => {
-    expect(await scopesFor(cw({}))('ryan@staff.example.test')).toEqual(['gcs', 'cw', 'admin', 'requests', 'cw:assign'])
+    expect(await scopesFor(cw({}))('ryan@staff.example.test')).toEqual(['gcs', 'cw', 'admin', 'cw:assign'])
   })
 
   it("staff on a store other than gcs/cw also get that store's base scope", async () => {
     const env = cw({}, { BASE_SCOPE: 'laptop', STAFF_DOMAIN: 'lab.example.test' })
-    expect(await scopesFor(env)('alice@lab.example.test')).toEqual(['gcs', 'cw', 'admin', 'requests', 'laptop', 'laptop:assign'])
+    expect(await scopesFor(env)('alice@lab.example.test')).toEqual(['gcs', 'cw', 'admin', 'laptop', 'laptop:assign'])
   })
 
   it('no STAFF_DOMAIN (unset or empty): nobody is staff by domain', async () => {
@@ -113,11 +113,11 @@ describe('ADMIN_LIST — admin is the explicit list, not the staff domain', () =
     cw(rows, { BASE_SCOPE: 'gcs', STAFF_DOMAIN: 'staff.example.test', VIEWER_DOMAINS: undefined, ADMIN_EMAILS: undefined, ADMIN_LIST: '1', ...extra })
 
   it('unlisted staff keep every scope but `admin`', async () => {
-    expect(await scopesFor(listed({ admin: ['lead@staff.example.test'] }))('dev@staff.example.test')).toEqual(['gcs', 'cw', 'requests', 'gcs:assign'])
+    expect(await scopesFor(listed({ admin: ['lead@staff.example.test'] }))('dev@staff.example.test')).toEqual(['gcs', 'cw', 'gcs:assign'])
   })
 
   it('listed staff get every scope, lower-cased', async () => {
-    expect(await scopesFor(listed({ admin: ['lead@staff.example.test'] }))('Lead@Staff.Example.test')).toEqual(['gcs', 'cw', 'admin', 'requests', 'gcs:assign'])
+    expect(await scopesFor(listed({ admin: ['lead@staff.example.test'] }))('Lead@Staff.Example.test')).toEqual(['gcs', 'cw', 'admin', 'gcs:assign'])
   })
 
   it('a listed viewer gets `admin` on top of the viewer scopes; an unlisted one does not', async () => {
@@ -134,20 +134,20 @@ describe('ADMIN_LIST — admin is the explicit list, not the staff domain', () =
     const env = listed({}, { ADMIN_BOOTSTRAP: 'Owner@Example.org, lead@staff.example.test' })
     expect([await scopesFor(env)('owner@example.org'), await scopesFor(env)('LEAD@staff.example.test'), await scopesFor(env)('dev@staff.example.test'), await scopesFor(env)('other@example.org')]).toEqual([
       ['gcs', 'gcs:assign', 'admin'],
-      ['gcs', 'cw', 'admin', 'requests', 'gcs:assign'],
-      ['gcs', 'cw', 'requests', 'gcs:assign'],
+      ['gcs', 'cw', 'admin', 'gcs:assign'],
+      ['gcs', 'cw', 'gcs:assign'],
       null,
     ])
   })
 
   it('`ADMIN_BOOTSTRAP` without `ADMIN_LIST` names nobody (other deployments are unchanged)', async () => {
     const env = listed({}, { ADMIN_LIST: undefined, ADMIN_BOOTSTRAP: 'owner@example.org' })
-    expect([await scopesFor(env)('owner@example.org'), await isAdmin(env, 'owner@example.org'), await scopesFor(env)('dev@staff.example.test')]).toEqual([null, false, ['gcs', 'cw', 'admin', 'requests', 'gcs:assign']])
+    expect([await scopesFor(env)('owner@example.org'), await isAdmin(env, 'owner@example.org'), await scopesFor(env)('dev@staff.example.test')]).toEqual([null, false, ['gcs', 'cw', 'admin', 'gcs:assign']])
   })
 
   it('an empty list and no break-glass: nobody is an admin, and staff are not a fallback', async () => {
     const env = listed({})
-    expect([await isAdmin(env, 'dev@staff.example.test'), await scopesFor(env)('dev@staff.example.test')]).toEqual([false, ['gcs', 'cw', 'requests', 'gcs:assign']])
+    expect([await isAdmin(env, 'dev@staff.example.test'), await scopesFor(env)('dev@staff.example.test')]).toEqual([false, ['gcs', 'cw', 'gcs:assign']])
   })
 
   it('isAdmin: a row or the break-glass, never the domain', async () => {
@@ -163,7 +163,7 @@ describe('ADMIN_LIST — admin is the explicit list, not the staff domain', () =
       raw.exec('DROP TABLE IF EXISTS admin_emails')
       const env = d1Env(db, { ADMIN_BOOTSTRAP: 'lead@staff.example.test' })
       expect([await scopesFor(env)('dev@staff.example.test'), await isAdmin(env, 'dev@staff.example.test'), await scopesFor(env)('lead@staff.example.test')]).toEqual([
-        ['gcs', 'cw', 'requests', 'gcs:assign'], false, ['gcs', 'cw', 'admin', 'requests', 'gcs:assign'],
+        ['gcs', 'cw', 'gcs:assign'], false, ['gcs', 'cw', 'admin', 'gcs:assign'],
       ])
       expect(await adminRoster(env)).toEqual({ list: true, staffDomain: null, table: 'missing', handles: false, rows: [], bootstrap: ['lead@staff.example.test'], none: false })
     })

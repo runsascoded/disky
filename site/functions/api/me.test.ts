@@ -99,7 +99,7 @@ describe('D1', () => {
       expect([r.status, r.headers.get('cache-control'), await r.json()]).toEqual([200, 'private, no-store', {
         email: 'alan@example.test',
         user: 'alan-turing',
-        scopes: ['gcs', 'cw', 'admin', 'requests', 'gcs:assign'],
+        scopes: ['gcs', 'cw', 'admin', 'gcs:assign'],
         admin: true,
         via: 'session',
       }])
