@@ -12,6 +12,8 @@ export interface AdminsData {
   /** The list's table: there, absent from this database, or not read by this deployment. */
   table: 'ok' | 'missing' | 'unused'
   rows: { email: string; note: string | null; who: string; ts: number; github: string | null }[]
+  /** The table has its `github` column; without it (the `admin-list` recipe unapplied), no handle can be stored. */
+  handles: boolean
   /** Break-glass addresses (the deploy setting `ADMIN_BOOTSTRAP`). */
   bootstrap: string[]
   none: boolean
@@ -154,7 +156,7 @@ export function Admins() {
             {paths.map(p => (
               <tr key={p.key}>
                 <td>{p.via === 'link' || p.via === 'staff domain' ? p.who : <code>{p.who}</code>}{p.you && <span className="dim"> (you)</span>}</td>
-                <td>{p.via === 'list' && editable ? <HandleCell handle={p.github} saving={setHandle.isPending} onSave={h => setHandle.mutate({ email: p.who, github: h })} /> : ''}</td>
+                <td>{p.via === 'list' && editable && d.handles ? <HandleCell handle={p.github} saving={setHandle.isPending} onSave={h => setHandle.mutate({ email: p.who, github: h })} /> : ''}</td>
                 <td><Tooltip content={VIA_TIP[p.via]}><span className={`admin-via via-${p.via.replace(' ', '-')}`}>{p.via}</span></Tooltip></td>
                 <td>{p.note ?? ''}</td>
                 <td>{p.addedBy ?? '—'}</td>
@@ -179,7 +181,7 @@ export function Admins() {
       {editable && (
         <form className="admins-add" onSubmit={e => { e.preventDefault(); if (email.trim()) add.mutate() }}>
           <input type="email" value={email} onChange={e => setEmail(e.target.value)} placeholder="email they sign in with" aria-label="Admin’s email" {...NO_AUTOFILL} />
-          <input value={github} onChange={e => setGithub(e.target.value)} placeholder="GitHub handle (optional)" aria-label="GitHub handle" {...NO_AUTOFILL} />
+          {d.handles && <input value={github} onChange={e => setGithub(e.target.value)} placeholder="GitHub handle (optional)" aria-label="GitHub handle" {...NO_AUTOFILL} />}
           <input value={note} onChange={e => setNote(e.target.value)} placeholder="note (optional)" aria-label="Note" />
           <button type="submit" disabled={add.isPending || !email.trim()}>Add admin</button>
           {add.error && <span className="err">{add.error.message}</span>}

@@ -156,10 +156,9 @@ export const TABLES: TableSpec[] = [
   {
     name: 'admin_emails',
     pk: 'email',
-    desc: 'The admin list: emails with the `admin` scope (dispatching deletes, minting links, this console). Edited on /admin (`/api/admins`), which keeps the last admin; read-only here. Takes effect on the next request.',
+    desc: 'The admin list: emails with the `admin` scope (dispatching deletes, minting links, this console). Edited on /admin (`/api/admins`, which also shows GitHub handles and keeps the last admin); read-only here. Takes effect on the next request.',
     columns: [
       { name: 'email', type: 'text' },
-      { name: 'github', type: 'text' },
       { name: 'note', type: 'text' },
       { name: 'who', type: 'text' },
       { name: 'ts', type: 'int' },

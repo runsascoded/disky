@@ -262,9 +262,20 @@ export interface AdminRoster {
   staffDomain: string | null
   table: 'ok' | 'missing' | 'unused'
   rows: AdminRow[]
+  /** Whether the table has its `github` column; without it (the `admin-list` recipe unapplied) rows read `github: null`
+   *  and `/api/admins` adds, removes and edits notes, but stores no handle. */
+  handles: boolean
   bootstrap: string[]
   none: boolean
 }
+
+/** How long a database seen without `admin_emails.github` is taken to still lack it, so the recipe's arrival is seen
+ *  with no deploy. */
+const NO_GITHUB_MS = 60_000
+/** Per isolate and D1 binding: when the list's read last found no `github` column. No `PRAGMA`: the read a request
+ *  makes anyway is the probe, so a database with the column pays nothing, and one without pays one failed statement a
+ *  minute. (A binding object not reused across requests only loses the memo: that request's read fails once more.) */
+const noGithubAt = new WeakMap<object, number>()
 
 export async function adminRoster(env: Env): Promise<AdminRoster> {
   const list = adminListOn(env)
@@ -272,21 +283,30 @@ export async function adminRoster(env: Env): Promise<AdminRoster> {
   const staffDomain = list ? null : env.STAFF_DOMAIN?.trim().toLowerCase() || null
   let table: AdminRoster['table'] = 'unused'
   let rows: AdminRow[] = []
+  let handles = false
   if (readsAdminTable(env)) {
-    const read = (cols: string) => env.DB!.prepare(`SELECT ${cols} FROM admin_emails ORDER BY email`).all<AdminRow>()
+    const db = env.DB!
+    const read = (cols: string) => db.prepare(`SELECT ${cols} FROM admin_emails ORDER BY email`).all<AdminRow>()
+    const readOld = async () => (await read('email, note, who, ts')).results.map(r => ({ ...r, github: null }))
+    const missed = noGithubAt.get(db)
     try {
-      rows = (await read('email, note, who, ts, github')).results
+      if (missed !== undefined && Date.now() - missed < NO_GITHUB_MS) rows = await readOld()
+      else {
+        rows = (await read('email, note, who, ts, github')).results
+        handles = true
+      }
       table = 'ok'
     } catch (e) {
       // A table from before the `github` column (the `admin-list` recipe unapplied): the same admins, no handles.
       if (/no such column: github/.test(String((e as Error)?.message ?? e))) {
-        rows = (await read('email, note, who, ts')).results.map(r => ({ ...r, github: null }))
+        noGithubAt.set(db, Date.now())
+        rows = await readOld()
         table = 'ok'
       } else if (noAdminTable(e)) table = 'missing'
       else throw e
     }
   }
-  return { list, staffDomain, table, rows, bootstrap, none: list && !rows.length && !bootstrap.length }
+  return { list, staffDomain, table, rows, handles, bootstrap, none: list && !rows.length && !bootstrap.length }
 }
 
 /**

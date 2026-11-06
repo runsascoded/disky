@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { type Env, gateFor } from '../_lib/auth'
 import { type Sqlite, sqliteD1, withAdminEmails } from '../_lib/testD1'
 import { onRequest } from './admins'
+import { onRequest as dbRoute } from './db/[[path]]'
 
 const SITE = 'https://gcs.example.test'
 const NOW = 1_800_000_000
@@ -11,15 +12,22 @@ const [LEAD, OWNER, STAFF, GUEST] = ['lead@staff.example.test', 'owner@example.o
 beforeEach(() => { vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(NOW * 1000) })
 afterEach(() => { vi.useRealTimers() })
 
+/** `admin_emails` as the database has it: with its `github` column (`full`), from before that column (`old`: the
+ *  `admin-list` recipe unapplied), or not at all (`none`). */
+type Table = 'full' | 'old' | 'none'
+
 /** A deployment whose admins are the list (`extra` overrides), `admins` on it, `GUEST` and `OWNER` allowlisted. */
-async function world(admins: string[], extra: Partial<Env> = {}, table = true) {
+async function world(admins: string[], extra: Partial<Env> = {}, table: Table = 'full') {
   const { db, raw } = await sqliteD1()
-  if (table) {
-    withAdminEmails(raw)
-    for (const [i, e] of admins.entries()) raw.prepare("INSERT INTO admin_emails (email, note, who, ts) VALUES (?, NULL, 'seed', ?)").run(e, i + 1)
-  } else raw.exec('DROP TABLE IF EXISTS admin_emails')
+  if (table === 'full') withAdminEmails(raw)
+  else raw.exec('DROP TABLE IF EXISTS admin_emails')
+  if (table === 'old') raw.exec('CREATE TABLE admin_emails (email TEXT PRIMARY KEY, note TEXT, who TEXT NOT NULL, ts INTEGER NOT NULL)')
+  if (table !== 'none') for (const [i, e] of admins.entries()) raw.prepare("INSERT INTO admin_emails (email, note, who, ts) VALUES (?, NULL, 'seed', ?)").run(e, i + 1)
   for (const e of [GUEST, OWNER]) raw.prepare("INSERT INTO allowed_emails (email, note, who, ts) VALUES (?, NULL, 'seed', 1)").run(e)
-  const env = { DB: db, SESSION_SECRET: 'secret', BASE_SCOPE: 'gcs', STAFF_DOMAIN: 'staff.example.test', ADMIN_LIST: '1', ...extra } as Env
+  /** Every statement prepared on the database, in order. */
+  const sql: string[] = []
+  const logged = { ...db, prepare: (q: string) => { sql.push(q); return db.prepare(q) } } as typeof db
+  const env = { DB: logged, SESSION_SECRET: 'secret', BASE_SCOPE: 'gcs', STAFF_DOMAIN: 'staff.example.test', ADMIN_LIST: '1', ...extra } as Env
   const gate = gateFor(env)!
   /** A request as `email`'s session (null: signed out), or with a Bearer `token`. */
   const call = async (as: string | null | { token: string }, method = 'GET', query = '', body?: unknown): Promise<[number, unknown]> => {
@@ -29,10 +37,10 @@ async function world(admins: string[], extra: Partial<Env> = {}, table = true) {
     const res = await onRequest({ request: new Request(`${SITE}/api/admins${query}`, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) }), env })
     return [res.status, await res.json()]
   }
-  return { env, raw, gate, call }
+  return { env, raw, gate, call, sql }
 }
 
-const rows = (raw: Sqlite) => raw.prepare('SELECT email, note, who, ts, github FROM admin_emails ORDER BY email').all().map(r => ({ ...r }))
+const rows = (raw: Sqlite) => raw.prepare('SELECT * FROM admin_emails ORDER BY email').all().map(r => ({ ...r }))
 const edits = (raw: Sqlite) => raw.prepare('SELECT tbl, pk, action, who, ts, old_json, new_json FROM admin_edits ORDER BY id').all().map(r => ({ ...r }))
 
 describe('GET /api/admins', () => {
@@ -44,7 +52,7 @@ describe('GET /api/admins', () => {
     await w.gate.revoke(dead.grant.id)
     await w.gate.mint({ email: null, scopes: ['admin'], name: 'expired link', createdBy: LEAD, expiresAt: NOW - 1, maxRedeems: null })
     expect(await w.call(OWNER)).toEqual([200, {
-      list: true, staffDomain: null, table: 'ok', none: false, you: OWNER,
+      list: true, staffDomain: null, table: 'ok', handles: true, none: false, you: OWNER,
       rows: [{ email: LEAD, note: null, who: 'seed', ts: 1, github: null }, { email: OWNER, note: null, who: 'seed', ts: 2, github: null }],
       bootstrap: ['root@example.org'],
       grants: [{ id: link.grant.id, holder: 'ops link', email: null, scopes: ['gcs', 'admin'], createdBy: LEAD, createdAt: NOW, expiresAt: null }],
@@ -60,24 +68,24 @@ describe('GET /api/admins', () => {
   })
 
   it('the list on and empty (or its table missing): nobody is an admin, staff included, and the refusal says so', async () => {
-    const [empty, missing] = [await world([]), await world([], {}, false)]
+    const [empty, missing] = [await world([]), await world([], {}, 'none')]
     expect([await empty.call(STAFF), await missing.call(STAFF), await empty.call(null)]).toEqual([
       [403, { error: 'forbidden', none: true }], [403, { error: 'forbidden', none: true }], [401, { error: 'unauthenticated' }],
     ])
   })
 
   it('the break-glass address is an admin over an empty list or a missing table, and is told which', async () => {
-    const [empty, missing] = [await world([], { ADMIN_BOOTSTRAP: OWNER }), await world([], { ADMIN_BOOTSTRAP: OWNER }, false)]
+    const [empty, missing] = [await world([], { ADMIN_BOOTSTRAP: OWNER }), await world([], { ADMIN_BOOTSTRAP: OWNER }, 'none')]
     const body = { list: true, staffDomain: null, none: false, you: OWNER, rows: [], bootstrap: [OWNER], grants: [] }
     expect([await empty.call(OWNER), await missing.call(OWNER), await missing.call(STAFF)]).toEqual([
-      [200, { ...body, table: 'ok' }], [200, { ...body, table: 'missing' }], [403, { error: 'forbidden', none: false }],
+      [200, { ...body, table: 'ok', handles: true }], [200, { ...body, table: 'missing', handles: false }], [403, { error: 'forbidden', none: false }],
     ])
   })
 
   it('the list off: staff are admins, and the answer names the domain rule', async () => {
     const w = await world([OWNER], { ADMIN_LIST: undefined, ADMIN_EMAILS: '1' })
     expect(await w.call(STAFF)).toEqual([200, {
-      list: false, staffDomain: 'staff.example.test', table: 'ok', none: false, you: STAFF,
+      list: false, staffDomain: 'staff.example.test', table: 'ok', handles: true, none: false, you: STAFF,
       rows: [{ email: OWNER, note: null, who: 'seed', ts: 1, github: null }], bootstrap: [], grants: [],
     }])
   })
@@ -96,22 +104,119 @@ describe('POST /api/admins', () => {
     expect((await w.call(STAFF))[0]).toBe(200)
   })
 
-  it('refuses a non-address or a non-handle (400), a listed one (409), a non-admin (403), and a database without the table or its `github` column (503)', async () => {
+  it('refuses a non-address or a non-handle (400), a listed one (409), a non-admin (403), and a database without the table (503)', async () => {
     const w = await world([LEAD])
-    const missing = await world([], { ADMIN_BOOTSTRAP: OWNER }, false)
-    const old = await world([], { ADMIN_BOOTSTRAP: OWNER }, false)
-    old.raw.exec('CREATE TABLE admin_emails (email TEXT PRIMARY KEY, note TEXT, who TEXT NOT NULL, ts INTEGER NOT NULL)')
+    const missing = await world([], { ADMIN_BOOTSTRAP: OWNER }, 'none')
     expect([
       await w.call(LEAD, 'POST', '', { email: 'not-an-email' }), await w.call(LEAD, 'POST', '', { email: STAFF, github: 'not a handle' }), await w.call(LEAD, 'POST', '', { email: STAFF, github: '-octo' }),
       await w.call(LEAD, 'POST', '', { email: LEAD }),
-      await w.call(STAFF, 'POST', '', { email: STAFF }), await missing.call(OWNER, 'POST', '', { email: STAFF }), await old.call(OWNER, 'POST', '', { email: STAFF }),
+      await w.call(STAFF, 'POST', '', { email: STAFF }), await missing.call(OWNER, 'POST', '', { email: STAFF }),
     ]).toEqual([
       [400, { error: 'not an email address' }], [400, { error: 'not a GitHub handle' }], [400, { error: 'not a GitHub handle' }],
       [409, { error: 'already an admin' }], [403, { error: 'forbidden', none: false }],
       [503, { error: '`admin_emails` does not exist in this database: apply its recipe (`site/migrations/admin-list.sql`) first' }],
-      [503, { error: '`admin_emails` has no `github` column in this database: apply its recipe (`site/migrations/admin-list.sql`) first' }],
     ])
     expect([rows(w.raw), edits(w.raw)]).toEqual([[{ email: LEAD, note: null, who: 'seed', ts: 1, github: null }], []])
+  })
+})
+
+describe('a database from before the `github` column (the `admin-list` recipe unapplied)', () => {
+  // A deployment that keeps `admin_emails` beside the staff domain (`ADMIN_EMAILS`), the list off: staff are the admins.
+  const BESIDE_STAFF = { ADMIN_LIST: undefined, ADMIN_EMAILS: '1' }
+  const seeded = { email: OWNER, note: null, who: 'seed', ts: 1 }
+  const listed = (rows: unknown[]) => ({ list: false, staffDomain: 'staff.example.test', table: 'ok', handles: false, none: false, you: STAFF, rows, bootstrap: [], grants: [] })
+  const NO_HANDLES = [503, { error: '`admin_emails` has no `github` column in this database: GitHub handles arrive with its recipe (`site/migrations/admin-list.sql`). Adding, removing and notes work without it' }]
+
+  it('lists the rows, without handles and saying so', async () => {
+    const w = await world([OWNER], BESIDE_STAFF, 'old')
+    expect(await w.call(STAFF)).toEqual([200, listed([{ ...seeded, github: null }])])
+  })
+
+  it('adds, edits a note and removes, each logged with the row as the table holds it', async () => {
+    const w = await world([OWNER], BESIDE_STAFF, 'old')
+    const added = { email: GUEST, note: 'on call', who: STAFF, ts: NOW }
+    const noted = { ...added, note: 'off the rota' }
+    expect([
+      // The add form's body: a blank handle is no handle.
+      await w.call(STAFF, 'POST', '', { email: GUEST, github: '', note: 'on call' }),
+      await w.call(STAFF, 'PATCH', '', { email: GUEST, note: 'off the rota' }),
+      rows(w.raw),
+      await w.call(STAFF, 'DELETE', `?email=${OWNER}`),
+      rows(w.raw),
+      await w.call(STAFF),
+    ]).toEqual([
+      [200, { ok: true, row: { ...added, github: null } }],
+      [200, { ok: true, row: { ...noted, github: null } }],
+      [noted, seeded],
+      [200, { ok: true }],
+      [noted],
+      [200, listed([{ ...noted, github: null }])],
+    ])
+    expect(edits(w.raw)).toEqual([
+      { tbl: 'admin_emails', pk: GUEST, action: 'insert', who: STAFF, ts: NOW, old_json: null, new_json: JSON.stringify(added) },
+      { tbl: 'admin_emails', pk: GUEST, action: 'update', who: STAFF, ts: NOW, old_json: JSON.stringify(added), new_json: JSON.stringify(noted) },
+      { tbl: 'admin_emails', pk: OWNER, action: 'delete', who: STAFF, ts: NOW, old_json: JSON.stringify(seeded), new_json: null },
+    ])
+  })
+
+  it('a handle is refused, on add and on edit, naming the recipe: nothing is written or logged; clearing one is a no-op', async () => {
+    const w = await world([OWNER], BESIDE_STAFF, 'old')
+    expect([
+      await w.call(STAFF, 'POST', '', { email: GUEST, github: 'octo-guest' }),
+      await w.call(STAFF, 'PATCH', '', { email: OWNER, github: '@octo-owner' }),
+      await w.call(STAFF, 'PATCH', '', { email: OWNER, github: 'octo-owner', note: 'org owner' }),
+      await w.call(STAFF, 'PATCH', '', { email: OWNER, github: 'not a handle' }),
+      await w.call(STAFF, 'PATCH', '', { email: OWNER, github: '' }),
+    ]).toEqual([NO_HANDLES, NO_HANDLES, NO_HANDLES, [400, { error: 'not a GitHub handle' }], [200, { ok: true, row: { ...seeded, github: null } }]])
+    expect([rows(w.raw), edits(w.raw)]).toEqual([[seeded], []])
+  })
+
+  it('the list on: the last admin stays; with a second listed, they may go', async () => {
+    const w = await world([LEAD], {}, 'old')
+    const lead = { email: LEAD, note: null, who: 'seed', ts: 1 }
+    const second = { email: STAFF, note: null, who: LEAD, ts: NOW }
+    expect([
+      await w.call(LEAD, 'DELETE', `?email=${LEAD}`), rows(w.raw), edits(w.raw),
+      await w.call(LEAD, 'POST', '', { email: STAFF }), await w.call(LEAD, 'DELETE', `?email=${LEAD}`), rows(w.raw),
+    ]).toEqual([
+      [409, { error: 'you are the last admin: add another before removing yourself', last: true }], [lead], [],
+      [200, { ok: true, row: { ...second, github: null } }], [200, { ok: true }], [second],
+    ])
+  })
+
+  it('`/api/db/admin_emails` still reads, and is read-only', async () => {
+    const w = await world([OWNER], BESIDE_STAFF, 'old')
+    const cookie = (await w.gate.signIn(STAFF, new Request(SITE)))!.cookie.split(';')[0]
+    const db = async (method: string, query = '') => {
+      const res = await dbRoute({ request: new Request(`${SITE}/api/db/admin_emails${query}`, { method, headers: { cookie } }), env: w.env })
+      return [res.status, await res.json()]
+    }
+    const [status, body] = await db('GET') as [number, { rows: unknown[]; spec: { canWrite: boolean } }]
+    expect([status, body.rows, body.spec.canWrite, await db('DELETE', `?pk=${OWNER}`), rows(w.raw)]).toEqual([200, [seeded], false, [403, { error: 'forbidden' }], [seeded]])
+  })
+
+  it('the column is looked for by the list\'s own read, once: later requests read without it, and ask again after a minute', async () => {
+    const [WITH, WITHOUT] = ['SELECT email, note, who, ts, github FROM admin_emails ORDER BY email', 'SELECT email, note, who, ts FROM admin_emails ORDER BY email']
+    const reads = (w: { sql: string[] }) => w.sql.filter(q => q.endsWith('FROM admin_emails ORDER BY email'))
+    const [old, full] = [await world([OWNER], BESIDE_STAFF, 'old'), await world([OWNER], BESIDE_STAFF)]
+    for (const w of [old, full]) {
+      await w.call(STAFF)
+      await w.call(STAFF, 'POST', '', { email: GUEST })
+      await w.call(STAFF)
+    }
+    expect([reads(old), reads(full)]).toEqual([[WITH, WITHOUT, WITHOUT, WITHOUT], [WITH, WITH, WITH]])
+    // The recipe applied: seen on the first read a minute after the column was last missed.
+    old.raw.exec('ALTER TABLE admin_emails ADD COLUMN github TEXT')
+    old.sql.length = 0
+    const guest = { email: GUEST, note: null, who: STAFF, ts: NOW, github: null }
+    const within = await old.call(STAFF)
+    vi.setSystemTime((NOW + 61) * 1000)
+    expect([within, await old.call(STAFF), await old.call(STAFF, 'PATCH', '', { email: GUEST, github: 'octo-guest' }), reads(old)]).toEqual([
+      [200, listed([guest, { ...seeded, github: null }])],
+      [200, { ...listed([guest, { ...seeded, github: null }]), handles: true }],
+      [200, { ok: true, row: { ...guest, github: 'octo-guest' } }],
+      [WITHOUT, WITH, WITH],
+    ])
   })
 })
 
@@ -192,7 +297,7 @@ it('a deployment with no admin list (neither `ADMIN_LIST` nor `ADMIN_EMAILS`) ha
   const on = await world([LEAD])
   expect([await w.call(STAFF, 'POST', '', { email: GUEST }), await w.call(STAFF), await on.call(LEAD, 'PUT', '', {})]).toEqual([
     [404, { error: 'this deployment keeps no admin list (`ADMIN_LIST` / `ADMIN_EMAILS` unset)' }],
-    [200, { list: false, staffDomain: 'staff.example.test', table: 'unused', none: false, you: STAFF, rows: [], bootstrap: [], grants: [] }],
+    [200, { list: false, staffDomain: 'staff.example.test', table: 'unused', handles: false, none: false, you: STAFF, rows: [], bootstrap: [], grants: [] }],
     [405, { error: 'method not allowed' }],
   ])
 })
