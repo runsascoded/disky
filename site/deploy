@@ -10,6 +10,9 @@ set -euo pipefail
 cd "$(dirname "$0")"
 # The Pages project this checkout deploys: `name = "…"` in wrangler.toml.
 [ -f wrangler.toml ] || { echo "deploy: no site/wrangler.toml: each deployment branch (gcs, cw-s3, m3) carries its own; cloud has only the r2 demo's wrangler.r2*.toml (deployed by .github/workflows/deploy-r2.yml)" >&2; exit 1; }
+# A file that doesn't parse is not an error to wrangler: it logs "Invalid TOML document", ignores the file
+# and deploys with the project's old settings (gcs's prod, 2026-11). Refuse it here, before any build.
+./toml-check wrangler.toml || { echo "deploy: wrangler.toml does not parse (above); fix it, then deploy" >&2; exit 1; }
 PROJECT=$(sed -n 's/^name = "\(.*\)"$/\1/p' wrangler.toml)
 [ -n "$PROJECT" ] || { echo "deploy: no name = ... in wrangler.toml" >&2; exit 1; }
 if [ -f deploy.env ]; then set -a; . ./deploy.env; set +a; fi
@@ -59,7 +62,15 @@ if [ "$mode" = dev ]; then push=false; fi
 # are its own, not production's.
 branch=${PROD_BRANCH:-main}; [ "$mode" = dev ] && branch=${DEV_BRANCH:-dev}
 if [ "$mode" = dev ]; then CLOUDFLARE_ENV=preview pnpm build; else pnpm build; fi
-pnpm exec wrangler pages deploy dist --project-name "$PROJECT" --branch "$branch"
+wlog=$(mktemp)
+trap 'rm -f "$wlog"' EXIT
+pnpm exec wrangler pages deploy dist --project-name "$PROJECT" --branch "$branch" 2>&1 | tee "$wlog"
+# Belt and braces: if wrangler ignored the config anyway (it downgrades a config error to a warning), the
+# deployed bindings and vars are the old ones, whatever exit code it returned.
+if grep -q 'Ignoring configuration file' "$wlog"; then
+  echo "deploy: wrangler ignored wrangler.toml (see its output above): the deployed settings are NOT this checkout's; fix the file and redeploy" >&2
+  exit 1
+fi
 
 # Entry-asset check: the new `index.html` names hashed bundles; an edge still on
 # the previous deployment answers those paths with the SPA fallback (index.html,

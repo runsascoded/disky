@@ -1,6 +1,7 @@
 import { beforeAll, describe, expect, it, vi } from 'vitest'
 import { type Env, gateFor } from '../_lib/auth'
 import { hideScope } from '../_lib/restrict'
+import { parseClasses } from '../_lib/scope'
 import { type Hit, injectedStores, type StaticFilterStore } from '../_lib/staticFilter'
 import { A, unionDeployment, Z } from '../_lib/testUnion'
 import { onRequestGet as diff } from './diff'
@@ -80,7 +81,9 @@ describe('D1', () => {
   // a hidden dir's own cell under `o=`/`cl=`/`lens=` is the split of what it hides (`scopeReachesHidden`). So is an
   // ancestor's: its scoped total, less its visible children's, is the hidden dir's.
   describe('an owner, class or lens scope', () => {
-    const SCOPES = ['o=*', 'o=', 'o=!someone', 'cl=n', 'lens=user:someone', 'lens=user:someone&by=other']
+    // A class this deployment has: another's letter is no scope at all, which proves nothing about the gate.
+    const CLASS = [...'abcdefghijklmnopqrstuvwxyz'].find(l => parseClasses(l))
+    const SCOPES = ['o=*', 'o=', 'o=!someone', `cl=${CLASS}`, 'lens=user:someone', 'lens=user:someone&by=other']
     const NOT_FOUND = [404, 'path not found']
     const routes: [string, typeof subtree, (q: string) => string][] = [
       ['subtree', subtree, q => `/api/subtree?date=${A}&w=1280&h=768&${q}`],

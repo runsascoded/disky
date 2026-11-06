@@ -28,9 +28,6 @@ const NO_UNDO_ALLOWED = 'No undo: this deployment doesn\'t require soft delete, 
 const recoverableFor = (min: number): string =>
   `Recoverable for at least ${days(min)}${min < DEFAULT_MIN_SOFT_DELETE_DAYS ? `, less than the usual ${DEFAULT_MIN_SOFT_DELETE_DAYS}` : ''}`
 
-/** The Slack confirm's undo sentence, on a deployment with this minimum. */
-export const slackUndoTerms = (min: number): string => min > 0 ? `${recoverableFor(min)} (undo in www).` : NO_UNDO_ALLOWED
-
 /** The buckets' soft delete on or off, as of when the job read it (`asOf`: `2026-11-05 07:12Z`). A bucket it doesn't name
  * is unknown. */
 export interface BucketSoftDelete { asOf: string; off: Record<string, boolean> }

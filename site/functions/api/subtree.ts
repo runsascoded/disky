@@ -269,7 +269,7 @@ async function subtreeGated(
     // the client falls back instead of retrying forever.
     if (e instanceof LensUnavailable) return new Response('lens index not available for this scan', { status: 409 })
     const msg = String((e as Error).message ?? e)
-    if (msg.startsWith('query too wide')) return new Response(msg, { status: 413 })
+    if (/^(query|lookup) too wide/.test(msg)) return new Response(msg, { status: 413 })
     if (/D1_ERROR|internal error/i.test(msg)) return new Response(`index backend unavailable, retry: ${msg}`, { status: 503, headers: { 'retry-after': '5' } })
     return new Response(`subtree failed: ${msg}`, { status: 500 })
   }
