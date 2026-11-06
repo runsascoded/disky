@@ -349,6 +349,18 @@ export const URL_PARAMS: Record<string, UrlParamDoc> = {
     examples: ['1'],
     pages: ['/admin'],
   },
+  rn: {
+    label: 'Runs per page',
+    description: 'Page size of the runs table: `50` or `all`. Defaults to 20, and any other value reads as 20.',
+    examples: ['50', 'all'],
+    pages: ['/staged'],
+  },
+  rp: {
+    label: 'Runs page',
+    description: 'The runs table\'s page, 1-based. When absent, the table opens on the page of the run held open by `run`, else on its first page; a page past the end reads as the last.',
+    examples: ['2'],
+    pages: ['/staged'],
+  },
   rm: {
     label: 'Run mode filter',
     description: 'Shows only `real` or only `dry` runs in the runs table. When absent, both are shown.',
@@ -377,7 +389,7 @@ export const URL_PARAMS: Record<string, UrlParamDoc> = {
   },
   run: {
     label: 'Focused run',
-    description: 'A run id (or its Batch job id). The runs table pages to that row, opens its details and scrolls to it once it appears.',
+    description: 'A run id (or its Batch job id). The runs table opens on that row\'s page (unless `rp` names another) with its details open, and scrolls to it once it appears, unless the link also names a `section` to land on.',
     pages: ['/staged'],
   },
   s: {

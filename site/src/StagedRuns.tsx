@@ -22,7 +22,8 @@ import { RunChecks } from './RunChecks'
 import { runHref } from './runHistory'
 import { bucketOfPrefix, conservativeDeadline } from './prefixExecution'
 import { percentOf } from './runChart'
-import { selectRuns } from './runTable'
+import { askedRunsPage, autoRunsPage, runsPage, runsWindow, selectRuns } from './runTable'
+import { RUNS_PAGE_SIZES as PAGE_SIZES, runsPageParam, runsSizeParam } from './stagedParams'
 import { fmtN } from './types'
 import { Loading } from './Busy'
 import { DEFAULT_STORE } from './stores'
@@ -38,7 +39,6 @@ import { RecoveryUnavailable, RecoveryUnseen, UndoBy, UndoControl, UndoLine } fr
 import { runHasNoUndo, runNoUndoText, runUndoUnavailable, runUndoUnseen, UNDO_UNSEEN_WHO, undoUnseenText } from './softDelete'
 import { useSoftDeleteNow } from './SweepSoftDelete'
 
-const PAGE_SIZES = [20, 50, Infinity]
 const utc = (ts: number): string => new Date(ts * 1000).toISOString().slice(0, 16).replace('T', ' ')
 const BUCKET_PREFIX = commonBucketPrefix(DEFAULT_STORE.buckets)
 const shortBucket = (b: string): string => (BUCKET_PREFIX && b.startsWith(BUCKET_PREFIX) ? b.slice(BUCKET_PREFIX.length) : b)
@@ -66,7 +66,7 @@ const dirOf = (v: RunView): string | null => {
   return d ? runFilesRel(d) : null
 }
 
-export function RunsSection({ runs, jobs, configured, jobsError, admin, busy, act, fmtBytes, refreshing }: {
+export function RunsSection({ runs, jobs, configured, jobsError, admin, busy, act, fmtBytes, refreshing, placed = false }: {
   runs: DeletionRun[]
   jobs: ExecJob[]
   configured: boolean
@@ -76,6 +76,9 @@ export function RunsSection({ runs, jobs, configured, jobsError, admin, busy, ac
   act: (a: RunAction) => void
   fmtBytes: (b: number) => string
   refreshing: boolean
+  /** The page arrived at a section its URL names: a run the URL also holds open opens, without the page scrolling
+   *  to it. */
+  placed?: boolean
 }) {
   const views = useMemo(() => joinRuns(runs, jobs), [runs, jobs])
   // What each run planned (`plan-summary.json`, absent until its manifest
@@ -100,8 +103,9 @@ export function RunsSection({ runs, jobs, configured, jobsError, admin, busy, ac
   const progress = new Map<string, ProgressFile[]>()
   progTargets.forEach((t, i) => { const p = progQs[i]?.data; if (p) progress.set(t.key, [...(progress.get(t.key) ?? []), p]) })
 
-  const [pageSize, setPageSize] = useState(PAGE_SIZES[0])
-  const [page, setPage] = useState(0)
+  // The table's view is the URL's (`urlParams.ts`): filters, sort, page and size, and the open run.
+  const [pageSize, setPageSize] = useUrlState('rn', runsSizeParam)
+  const [pageP, setPageP] = useUrlState('rp', runsPageParam)
   const [userFilter, setUserFilter] = useUrlState('ru', stringParam(''))
   const [modeFilter, setModeFilter] = useUrlState('rm', stringParam(''))
   const [stateFilter, setStateFilter] = useUrlState('rs', stringParam(''))
@@ -116,42 +120,52 @@ export function RunsSection({ runs, jobs, configured, jobsError, admin, busy, ac
     return [v.key, { planned: planOf(v)?.tally.objects ?? expectedOf(v)?.objects, deleted, bytes: v.run?.finished_ts ? v.run.deleted_bytes : p?.bytes, rate: deleted != null && secs != null && secs > 0 ? deleted / secs : undefined }]
   }))
   const filtered = selectRuns(views, { user: userFilter ?? '', mode: modeFilter ?? '', state: stateFilter ?? '', query: queryFilter ?? '', sort: sort ?? 'started', ascending: direction === 'asc' }, metrics, now)
+  // `?run=<id>` (a run id, or its Batch job's): the table opens on that row's page, with its detail open.
+  const [runP, setRunP] = useUrlState('run', stringParam())
+  const target = runP ? filtered.findIndex(v => v.key === runP || v.job?.job_id === runP) : -1
   const pages = Math.max(1, Math.ceil(filtered.length / pageSize))
-  const pg = Math.min(page, pages - 1)
-  const shown = filtered.slice(pg * pageSize, (pg + 1) * pageSize)
+  const pg = runsPage(pageP, target, pageSize, filtered.length)
+  const setPage = (p: number) => setPageP(askedRunsPage(p, target, pageSize))
+  // A changed filter or sort starts on the first page: said outright while a run is open, whose page is the default.
+  const firstPage = () => setPageP(runP ? 0 : null)
+  // A page spelled out that is the one the table opens on anyway leaves the URL (once the open run is listed).
+  useEffect(() => {
+    if (pageP != null && (!runP || target >= 0) && pageP === autoRunsPage(target, pageSize)) setPageP(null)
+  }, [pageP, runP, target, pageSize]) // eslint-disable-line react-hooks/exhaustive-deps
+  const [from, to] = runsWindow(pg, pageSize, filtered.length)
+  const shown = filtered.slice(from, to)
   const [stopping, setStopping] = useState<ReadonlySet<string>>(new Set())
   // What the buckets' soft delete is now: a recorded undo on one that is off can't be done (its control is disabled, with why),
   // and one on a bucket nothing says of is stated as depending on it.
   const softDelete = useSoftDeleteNow(CAPS.softDelete)
   const cols = 17
-  const sortButton = (key: string, label: string) => <button type="button" className="run-sort" onClick={() => { setSort(key); setDirection(sort === key && direction === 'desc' ? 'asc' : 'desc'); setPage(0) }}>{label}{sort === key ? direction === 'asc' ? ' ▴' : ' ▾' : ''}</button>
+  const sortButton = (key: string, label: string) => <button type="button" className="run-sort" onClick={() => { setSort(key); setDirection(sort === key && direction === 'desc' ? 'asc' : 'desc'); firstPage() }}>{label}{sort === key ? direction === 'asc' ? ' ▴' : ' ▾' : ''}</button>
 
-  // `?run=<id>` (a run id, or its Batch job's): page to that row, open its
-  // detail, scroll to it — once, when it first appears.
-  const [runP, setRunP] = useUrlState('run', stringParam())
+  // Scroll to the open run's row, once, when it first appears: not on a page that arrived at a section (`placed`),
+  // where the run the URL holds open is part of the view restored, not where it scrolls to.
   const landed = useRef<string | null>(null)
-  const target = runP ? filtered.findIndex(v => v.key === runP || v.job?.job_id === runP) : -1
+  const skip = useRef(placed)
   useEffect(() => {
-    if (!runP) { landed.current = null; return }
+    if (!runP) { landed.current = null; skip.current = false; return }
     if (target < 0 || landed.current === runP) return
     landed.current = runP ?? null
     const v = filtered[target]
-    setPage(Math.floor(target / pageSize))
+    if (skip.current) { skip.current = false; return }
     requestAnimationFrame(() => document.getElementById(rowId(v.key))?.scrollIntoView({ block: 'center' }))
-  }, [target, runP, filtered, pageSize])
+  }, [target, runP, filtered])
 
   if (!views.length) return null
   return (
-    <section id="runs">
+    <section id="runs" data-section="runs">
       <h3>Runs ({views.length}){refreshing && <Loading label="Refreshing runs…" />}</h3>
       {!configured && <p className="dim">Dispatch isn't configured on this deployment (no executor credentials): only recorded runs are listed, without live state.</p>}
       {jobsError && <p className="err">Batch jobs: {jobsError.message}</p>}
       <div className="run-filters">
-        <input aria-label="Filter runs" placeholder="filter runs…" value={queryFilter} onChange={e => { setQueryFilter(e.target.value); setPage(0) }} />
-        <select aria-label="Filter runs by user" value={userFilter} onChange={e => { setUserFilter(e.target.value); setPage(0) }}><option value="">all users</option>{[...new Set(views.map(v => v.run?.actor ?? v.job?.by ?? '').filter(Boolean))].sort().map(u => <option key={u}>{u}</option>)}</select>
-        <select aria-label="Filter run mode" value={modeFilter} onChange={e => { setModeFilter(e.target.value); setPage(0) }}><option value="">real + dry</option><option value="real">real only</option><option value="dry">dry only</option></select>
-        <select aria-label="Filter run state" value={stateFilter} onChange={e => { setStateFilter(e.target.value); setPage(0) }}><option value="">all states</option>{[...new Set(views.map(viewState))].sort().map(s => <option key={s} value={s}>{s.toLowerCase()}</option>)}</select>
-        <label>sort <select aria-label="Sort runs" value={sort} onChange={e => { setSort(e.target.value); setPage(0) }}>{['started', 'by', 'mode', 'planned', 'deleted', 'bytes', 'state', 'rate', 'elapsed', 'gone', 'overwritten', 'drift', 'undo', 'buckets'].map(s => <option key={s}>{s}</option>)}</select></label>
+        <input aria-label="Filter runs" placeholder="filter runs…" value={queryFilter} onChange={e => { setQueryFilter(e.target.value); firstPage() }} />
+        <select aria-label="Filter runs by user" value={userFilter} onChange={e => { setUserFilter(e.target.value); firstPage() }}><option value="">all users</option>{[...new Set(views.map(v => v.run?.actor ?? v.job?.by ?? '').filter(Boolean))].sort().map(u => <option key={u}>{u}</option>)}</select>
+        <select aria-label="Filter run mode" value={modeFilter} onChange={e => { setModeFilter(e.target.value); firstPage() }}><option value="">real + dry</option><option value="real">real only</option><option value="dry">dry only</option></select>
+        <select aria-label="Filter run state" value={stateFilter} onChange={e => { setStateFilter(e.target.value); firstPage() }}><option value="">all states</option>{[...new Set(views.map(viewState))].sort().map(s => <option key={s} value={s}>{s.toLowerCase()}</option>)}</select>
+        <label>sort <select aria-label="Sort runs" value={sort} onChange={e => { setSort(e.target.value); firstPage() }}>{['started', 'by', 'mode', 'planned', 'deleted', 'bytes', 'state', 'rate', 'elapsed', 'gone', 'overwritten', 'drift', 'undo', 'buckets'].map(s => <option key={s}>{s}</option>)}</select></label>
         <button type="button" onClick={() => setDirection(direction === 'asc' ? 'desc' : 'asc')}>{direction === 'asc' ? 'ascending' : 'descending'}</button>
         <span className="dim">{filtered.length} / {views.length}</span>
       </div>
@@ -196,7 +210,8 @@ export function RunsSection({ runs, jobs, configured, jobsError, admin, busy, ac
               const actor = r?.actor ?? job?.by ?? ''
               const dir = dirOf(v)
               const isOpen = v.key === filtered[target]?.key
-              const toggle = () => setRunP(isOpen ? undefined : v.key)
+              // The page stays put: closing the run the table paged to says the page outright; an opened run's page is this one.
+              const toggle = () => { setRunP(isOpen ? undefined : v.key); setPageP(isOpen && pg > 0 ? pg : null) }
               const failed = state === 'FAILED'
               const jobId = job?.job_id ?? v.key
               return (
@@ -292,10 +307,10 @@ export function RunsSection({ runs, jobs, configured, jobsError, admin, busy, ac
       {filtered.length > PAGE_SIZES[0] && (
         <div className="pg runs-pg">
           <button type="button" disabled={pg === 0} onClick={() => setPage(pg - 1)} aria-label="previous runs">‹</button>
-          <span>{pg * pageSize + 1}–{Math.min(filtered.length, (pg + 1) * pageSize)} of {filtered.length}</span>
+          <span>{from + 1}–{to} of {filtered.length}</span>
           <button type="button" disabled={pg >= pages - 1} onClick={() => setPage(pg + 1)} aria-label="next runs">›</button>
           <span className="dim">per page</span>
-          {PAGE_SIZES.map(n => <button key={n} type="button" className={n === pageSize ? 'on' : undefined} onClick={() => { setPageSize(n); setPage(0) }}>{n === Infinity ? 'all' : n}</button>)}
+          {PAGE_SIZES.map(n => <button key={n} type="button" className={n === pageSize ? 'on' : undefined} onClick={() => { setPageSize(n); firstPage() }}>{n === Infinity ? 'all' : n}</button>)}
         </div>
       )}
     </section>

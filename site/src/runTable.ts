@@ -3,6 +3,24 @@ import { elapsed, viewBuckets, viewState, type RunView } from './runs'
 export interface RunTableOptions { user: string; mode: string; state: string; query: string; sort: string; ascending: boolean }
 export interface RunMetrics { planned?: number; deleted?: number; rate?: number; bytes?: number }
 
+const { ceil, floor, max, min } = Math
+
+/** The page the table opens on with no page asked for: the open run's (`target`: its index among the listed runs, -1
+ *  when none is open or it isn't listed), else the first. */
+export const autoRunsPage = (target: number, size: number): number => (target >= 0 && Number.isFinite(size) ? floor(target / size) : 0)
+
+/** The runs table's page: the one asked for (`?rp=`, 0-based; null: none), else `autoRunsPage`; clamped to the list. */
+export const runsPage = (asked: number | null, target: number, size: number, total: number): number =>
+  min(max(asked ?? autoRunsPage(target, size), 0), max(1, ceil(total / size)) - 1)
+
+/** `page`'s rows among `total`, half-open. "All" (`size` Infinity) is one page holding every row. */
+export const runsWindow = (page: number, size: number, total: number): [number, number] =>
+  Number.isFinite(size) ? [min(total, page * size), min(total, (page + 1) * size)] : [0, total]
+
+/** What `?rp=` holds for `page`: nothing when the table opens there anyway, so a link to an open run (`?run=`) pages
+ *  to it, and one whose reader paged away from it says where to. */
+export const askedRunsPage = (page: number, target: number, size: number): number | null => (page === autoRunsPage(target, size) ? null : page)
+
 export function selectRuns(views: readonly RunView[], options: RunTableOptions, metrics: ReadonlyMap<string, RunMetrics>, now: number): RunView[] {
   const actor = (v: RunView) => v.run?.actor ?? v.job?.by ?? ''
   const mode = (v: RunView) => v.run?.mode ?? v.job?.mode ?? 'dry'
