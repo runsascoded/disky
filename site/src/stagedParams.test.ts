@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import {
   adoptSection, dropSection, EARLIER_KEY, FLAT_KEY, foldAll, foldOverride, foldsParam, type Folds, NO_FOLDS, pagesParam, runsPageParam, runsSizeParam,
@@ -131,4 +133,22 @@ describe('a `#` link to a section becomes `?section=`', () => {
 
 it('the spy turned off: its section leaves the query, the rest as written', () => {
   expect(['?section=batch-12', '?q=a%7Cb&section=runs&x=*', '?x=*', ''].map(dropSection)).toEqual(['', '?q=a%7Cb&x=*', '?x=*', ''])
+})
+
+// A link carries a view, never a deletion: what a run acts on (the checked rows, the armed confirm, the bucket cut) is
+// set by hand on the page, every time. Adding a URL param here means editing these lists, in sight of this rule.
+describe('the URL holds /staged\'s view, never what a deletion acts on', () => {
+  const src = (f: string) => readFileSync(join(__dirname, f), 'utf8')
+  const keys = (f: string) => [...src(f).matchAll(/useUrlState\(\s*'([\w-]+)'/g)].map(m => m[1]).sort()
+  it('the page and its runs read exactly these keys', () => {
+    expect(keys('StagedPage.tsx')).toEqual(['d', 'done', 'flat', 'pg', 'q', 's', 'x'])
+    expect(keys('StagedRuns.tsx')).toEqual(['order', 'rm', 'rn', 'rp', 'rq', 'rs', 'ru', 'run', 'sort'])
+  })
+  it('the selection, the armed confirm and the bucket cut are component state', () => {
+    const page = src('StagedPage.tsx')
+    const made = (name: string) => new RegExp(`const (?:\\[${name}, \\w+\\]|${name}) = (\\w+)[<(]`).exec(page)?.[1]
+    expect(['armed', 'bucketsOff', 'sel'].map(made)).toEqual(['useState', 'useState', 'useRowSelection'])
+    // The selection hook reads no URL: its only inputs are the rows on screen.
+    expect([...src('rowSelection.ts').matchAll(/from '([^']+)'/g)].map(m => m[1])).toEqual(['react', 'use-kbd', 'use-kbd'])
+  })
 })

@@ -95,7 +95,7 @@ export const URL_PARAMS: Record<string, UrlParamDoc> = {
   },
   d: {
     label: 'Scan',
-    description: 'Picks the scan the page shows, and optionally the diff\'s start. A slug is a compact `YYMMDD[HH[MM]]` prefix that resolves to the latest matching scan. `END-START` pins both ends, a trailing `-7d`/`-12h` sets a look-back span, and a leading `-` keeps the end on the latest scan. When absent, the page follows the latest scan and diffs against the previous one. The map and `/names` share it, and a slug that matches no scan shows a "no scan matches" notice instead of falling back. On `/dups`, the scan whose duplicate report shows (a slug or a scan id; when absent, the newest scan with a report).',
+    description: 'Picks the scan the page shows, and optionally the diff\'s start. A slug is a compact `YYMMDD[HH[MM]]` prefix that resolves to the latest matching scan. `END-START` pins both ends, a trailing `-7d`/`-12h` sets a look-back span, and a leading `-` keeps the end on the latest scan. When absent, the page follows the latest scan and diffs against the previous one. The map and `/names` share it, and a slug that matches no scan shows a "no scan matches" notice instead of falling back. On `/dups`, the scan whose duplicate report shows (a slug or a scan id; when absent, the newest scan with a report). On `/staged`, the scan the staged prefixes are sized at (the "sized at scan" menu; a slug naming no scan reads as absent); when absent, the newest, which the page keeps following. A run always reads the newest scan, whatever is picked here.',
     examples: ['261009', '26100912', '2610091200', '-7d', '2609040002-7d', '-2609010002', '2609040002-2609010002'],
   },
   date: {
@@ -119,6 +119,12 @@ export const URL_PARAMS: Record<string, UrlParamDoc> = {
   denied: {
     label: 'Denied address',
     description: 'Set when a verified address isn\'t on the access list. The login wall then opens the request-access form, pre-filled with that address.',
+  },
+  done: {
+    label: 'Completed batches open',
+    description: 'When present, the fold of completed (or no longer staged) batches is open: a bare `?done` on its first page, `?done=3` on its third. When absent, it is folded. A `#batch-<id>` link to a batch in it opens it on that batch\'s page.',
+    examples: ['', '3'],
+    pages: ['/staged'],
   },
   dk: {
     label: 'Digest thread',
@@ -311,6 +317,12 @@ export const URL_PARAMS: Record<string, UrlParamDoc> = {
     label: 'Path (legacy)',
     description: 'A legacy link\'s drill path, as a query parameter. It is converted to the URL-path form on load, keeping the other parameters.',
   },
+  pg: {
+    label: 'Staged table pages',
+    description: 'The staged tables that are off their first page, counting from 1, `.`-separated: `12-3` is batch 12 on its third page, `e-2` the group staged before batches existed, and a bare `3` the one flat table (`flat`, or a filter in `q`). A completed batch\'s list of original prefixes pages under its id too. When absent, every table is on its first page; a page past a table\'s end reads as its last.',
+    examples: ['12-3', '3', '12-3.15-2'],
+    pages: ['/staged'],
+  },
   perf: {
     label: 'Perf panel',
     description: '`1` at load shows the time-to-render panel. The timing marks themselves are always recorded.',
@@ -397,6 +409,11 @@ export const URL_PARAMS: Record<string, UrlParamDoc> = {
     description: 'On the map, `c` shades each cell by storage class within its main color (the older spelling `class` is rewritten); when absent, there is no shading. On `/staged`, it sorts the prefix tables by a column key (`name`, `b` size, `o` objects, `d` the listing-time column, `a` last read, `idle`, …), with a `-` prefix for descending; the default is `-b`.',
     examples: ['c', 'name', '-o', 'idle'],
   },
+  section: {
+    label: 'Section in view',
+    description: 'The section the page is scrolled to, written as the reader scrolls (unless the scroll-spy is turned off) and scrolled to on load. On the map, one of its sections (`diff`, `over-time`, …). On `/staged`, a batch (`batch-12`) or `runs`; an older `#batch-12` link is rewritten to it, and also opens that batch. When absent, the page opens at its top.',
+    examples: ['diff', 'batch-12', 'runs'],
+  },
   si: {
     label: 'Decimal units',
     description: 'When present (as a bare `?si`), shows sizes in decimal units (KB, MB, GB), overriding a saved binary-units choice. Decimal is also the default.',
@@ -473,6 +490,12 @@ export const URL_PARAMS: Record<string, UrlParamDoc> = {
     label: 'Force login wall',
     description: 'Development builds only: when present, shows the login wall instead of signing in automatically as the dev identity.',
     examples: [''],
+  },
+  x: {
+    label: 'Expanded batches',
+    description: 'Which staging batches are open, as `<open>_<folded>`: each side lists batch ids (`.`-separated, a run of consecutive ids as `12-15`, `e` for the group staged before batches existed) or is `*` for every batch. `12` opens batch 12, `_7` folds batch 7, `*` is "expand all", `*_7` all but 7, `_*` "collapse all", `12_*` all folded but 12. When absent, each batch follows its completion: open while anything in it is still staged, folded once done.',
+    examples: ['12', '*', '_*', '*_7-9', '12.15_3'],
+    pages: ['/staged'],
   },
   xr: {
     label: 'Time range',

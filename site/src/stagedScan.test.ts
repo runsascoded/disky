@@ -1,7 +1,24 @@
 import { describe, expect, it } from 'vitest'
-import { type ScanDeletion, sizedScan, withoutDeleted } from './stagedScan'
+import { pickedScan, pickedSlug, type ScanDeletion, sizedScan, withoutDeleted } from './stagedScan'
 
 const OLD = '2026-11-04T0703', NEW = '2026-11-05T0702', NEWER = '2026-11-06T0701'
+
+describe('the picked scan in the URL (`?d=`)', () => {
+  it('writes a picked scan as its compact id, the newest as nothing', () => {
+    expect([pickedSlug(OLD, [NEWER, NEW, OLD]), pickedSlug(NEWER, [NEWER, NEW, OLD]), pickedSlug('2026-11-03', [NEW, '2026-11-03'])]).toEqual(['2611040703', undefined, '261103'])
+  })
+  it('reads it back: the scan spelled in full, a day as its latest, anything else as no pick', () => {
+    const scans = [NEWER, NEW, '2026-11-05T0101', OLD]
+    expect([
+      pickedScan('2611040703', scans), pickedScan('2611050101', scans), pickedScan('261105', scans), pickedScan('2026-11-04T0703', scans),
+      pickedScan('261101', scans), pickedScan('nope', scans), pickedScan(undefined, scans), pickedScan('2611040703', []),
+    ]).toEqual([OLD, '2026-11-05T0101', NEW, OLD, null, null, null, null])
+  })
+  it('round-trips every scan but the newest', () => {
+    const scans = [NEWER, NEW, OLD]
+    expect(scans.map(s => sizedScan(scans, pickedScan(pickedSlug(s, scans), scans)))).toEqual(scans)
+  })
+})
 
 describe('sizedScan: which scan a long-open /staged sizes at', () => {
   it('follows the newest when nothing was picked', () => {

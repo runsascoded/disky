@@ -1,3 +1,13 @@
+import { encodeScan, resolveScan } from './scanSlug'
+
+/** The scan a `?d=` slug picks among `scans`: the one it spells in full (`2611040703`), else the newest it is a prefix
+ *  of (`261104`: that day's latest); null for no slug, or one naming no scan (the page then follows the newest). */
+export const pickedScan = (slug: string | undefined, scans: readonly string[]): string | null =>
+  slug ? scans.find(s => encodeScan(s) === slug) ?? resolveScan(slug, scans) : null
+
+/** What `?d=` holds for the scan picked in the menu: its compact id; nothing for the newest, which the page follows. */
+export const pickedSlug = (id: string, scans: readonly string[]): string | undefined => (id === scans[0] ? undefined : encodeScan(id))
+
 /** The scan `/staged` sizes at: the one picked, while the list still has it, else the newest (`scans` newest first). */
 export const sizedScan = (scans: readonly string[], picked: string | null): string =>
   picked && scans.includes(picked) ? picked : scans[0] ?? ''
