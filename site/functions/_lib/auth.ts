@@ -15,6 +15,12 @@
  * row gets the deployment's base scope — email sessions re-derive that from
  * `scopesFor` on every request, so removal bites instantly. Grant sessions
  * carry the scopes they were minted with (normally just the base scope).
+ *
+ * Admin is the `admin` scope, and one function says which email holds it:
+ * `isAdmin`. With `ADMIN_LIST` it is the deployment's explicit list (an
+ * `admin_emails` row, or the break-glass `ADMIN_BOOTSTRAP`) and the staff
+ * domain alone is not; without it, staff are admins. The only other admin is
+ * a grant minted with the scope (by an admin: `POST /api/auth/grants`).
  */
 import { type Auth, createGate, DEFAULT_COOKIE_NAME, type Gate, hasScope, readCookie, type Subject, verifySessionClaims } from '@open-athena/auth'
 import { d1AuditSink, d1GrantStore, d1ProfileStore, d1RequestStore } from '@open-athena/auth/d1'
@@ -38,8 +44,17 @@ export interface Env {
    *  (cw-s3: `coreweave.com`). Unset = allowlist only. */
   VIEWER_DOMAINS?: string
   /** Set where the `admin_emails` table exists (cw-s3; `site/schema.sql`):
-   *  its rows get `admin` on top of the base scope. Unset (gcs) = staff only. */
+   *  its rows get `admin` on top of the base scope, beside the staff domain. Unset = staff only.
+   *  (`ADMIN_LIST` reads the table whether or not this is set.) */
   ADMIN_EMAILS?: string
+  /** `1`: admin is the deployment's explicit list and nothing else: an `admin_emails` row (edited on `/admin`,
+   *  `/api/admins`) or the break-glass `ADMIN_BOOTSTRAP`. Staff keep every other scope; the domain alone is not
+   *  admin. A listed address is admitted to sign in by the list itself. Unset: staff are admins (`isAdmin`). */
+  ADMIN_LIST?: string
+  /** With `ADMIN_LIST`: comma-separated emails that are admins whatever the list holds (break-glass: an empty or
+   *  missing table, or a list nobody on it can use). Named addresses, never a domain; shown on `/admin` as their own
+   *  path, not removable there. Set it as a secret, so the address stays out of the repo. Without `ADMIN_LIST`, unused. */
+  ADMIN_BOOTSTRAP?: string
   /** Local dev only (`.dev.vars`): email the localhost dev identity acts as.
    *  Matters when the D1 binding is remote (writes land in the real ledger). */
   DEV_EMAIL?: string
@@ -210,20 +225,78 @@ const isStaff = (env: Env, email: string): boolean => {
 const viewerDomains = (env: Env): string[] =>
   (env.VIEWER_DOMAINS ?? '').split(',').map(d => d.trim().toLowerCase()).filter(Boolean)
 
-/** Rows of the deployment's `admin_emails` table (where it exists — `ADMIN_EMAILS`)
- *  rank as admins on top of whatever the policy admits them to. */
+/** Whether admin is the explicit list alone (`ADMIN_LIST`). */
+export const adminListOn = (env: Env): boolean => !!env.ADMIN_LIST
+
+/** The break-glass admins (`ADMIN_BOOTSTRAP`), lower-cased; none unless the list is on. */
+export const bootstrapAdmins = (env: Env): string[] =>
+  adminListOn(env) ? (env.ADMIN_BOOTSTRAP ?? '').split(',').map(e => e.trim().toLowerCase()).filter(e => e.includes('@')) : []
+
+/** Whether this deployment reads `admin_emails` at all: the list is on, or `ADMIN_EMAILS` says the table exists. */
+const readsAdminTable = (env: Env): boolean => !!env.DB && (adminListOn(env) || !!env.ADMIN_EMAILS)
+
+const noAdminTable = (e: unknown): boolean => /no such table: admin_emails/.test(String((e as Error)?.message ?? e))
+
+/** Whether `email` (lower-cased) has an `admin_emails` row. With the list on, a database that hasn't the table yet
+ *  (its recipe unapplied) has no rows: sign-in must not break on it, and nobody becomes an admin by it. */
 async function adminRow(env: Env, email: string): Promise<boolean> {
-  if (!env.DB || !env.ADMIN_EMAILS) return false
-  const row = await env.DB.prepare('SELECT email FROM admin_emails WHERE email = ?').bind(email).first()
-  return !!row
+  if (!readsAdminTable(env)) return false
+  try {
+    return !!(await env.DB!.prepare('SELECT email FROM admin_emails WHERE email = ?').bind(email).first())
+  } catch (e) {
+    if (!adminListOn(env) || !noAdminTable(e)) throw e
+    console.warn('ADMIN_LIST is on and `admin_emails` does not exist: nobody is an admin by the list')
+    return false
+  }
+}
+
+/** One `admin_emails` row: who is listed, with who added them and when, and their GitHub handle where known (what
+ *  `dt-cloud admins check` compares with a GitHub org's owners). */
+export interface AdminRow { email: string; note: string | null; who: string; ts: number; github: string | null }
+
+/** The deployment's email admins, as `/admin` shows them (`/api/admins`): the rule in force (`list`, else the staff
+ *  domain), the table's state and rows, the break-glass addresses, and `none`: the list is on and names nobody, so
+ *  no sign-in is an admin until `ADMIN_BOOTSTRAP` names one (or a row is written to the database). */
+export interface AdminRoster {
+  list: boolean
+  staffDomain: string | null
+  table: 'ok' | 'missing' | 'unused'
+  rows: AdminRow[]
+  bootstrap: string[]
+  none: boolean
+}
+
+export async function adminRoster(env: Env): Promise<AdminRoster> {
+  const list = adminListOn(env)
+  const bootstrap = bootstrapAdmins(env)
+  const staffDomain = list ? null : env.STAFF_DOMAIN?.trim().toLowerCase() || null
+  let table: AdminRoster['table'] = 'unused'
+  let rows: AdminRow[] = []
+  if (readsAdminTable(env)) {
+    const read = (cols: string) => env.DB!.prepare(`SELECT ${cols} FROM admin_emails ORDER BY email`).all<AdminRow>()
+    try {
+      rows = (await read('email, note, who, ts, github')).results
+      table = 'ok'
+    } catch (e) {
+      // A table from before the `github` column (the `admin-list` recipe unapplied): the same admins, no handles.
+      if (/no such column: github/.test(String((e as Error)?.message ?? e))) {
+        rows = (await read('email, note, who, ts')).results.map(r => ({ ...r, github: null }))
+        table = 'ok'
+      } else if (noAdminTable(e)) table = 'missing'
+      else throw e
+    }
+  }
+  return { list, staffDomain, table, rows, bootstrap, none: list && !rows.length && !bootstrap.length }
 }
 
 /**
  * Email → scopes: the in-app policy that the Access policy used to be. Staff
- * get everything; a viewer domain (`VIEWER_DOMAINS`) or a D1 `allowed_emails`
+ * get everything (`admin` only where `isAdmin` says so: always, unless
+ * `ADMIN_LIST`); a viewer domain (`VIEWER_DOMAINS`) or a D1 `allowed_emails`
  * row (the app-owned allowlist — see /admin/db) gets the base scope + assign
  * (a `read_only` row: the read-only tier alone), plus
- * `admin` for an `admin_emails` row. Email sessions re-derive scopes here on
+ * `admin` for an admin (`isAdmin`); with `ADMIN_LIST`, a listed address is
+ * admitted by the list itself. Email sessions re-derive scopes here on
  * every request, so removing a row de-authorizes existing sessions on their
  * next request. If the DB isn't bound (local dev), non-staff fall back to
  * allowed — local dev has no gate to enforce.
@@ -244,15 +317,16 @@ export async function allowedRow(db: D1Database, email: string): Promise<{ read_
 
 export const scopesFor = (env: Env) => async (raw: string): Promise<string[] | null> => {
   const email = raw.toLowerCase()
-  const base = baseScope(env)
-  if (isStaff(env, email)) return allScopes(env)
-  if (!env.DB) return [base, baseAssignScope(env)]
+  const viewer = [baseScope(env), baseAssignScope(env)]
+  if (isStaff(env, email)) return (await isAdmin(env, email)) ? allScopes(env) : allScopes(env).filter(s => s !== ADMIN_SCOPE)
+  if (!env.DB) return adminListOn(env) && (await isAdmin(env, email)) ? [...viewer, ADMIN_SCOPE] : viewer
   const byDomain = viewerDomains(env).some(d => email.endsWith(`@${d}`))
   const row = byDomain ? null : await allowedRow(env.DB, email)
-  if (!byDomain && !row) return null
-  if (await adminRow(env, email)) return [base, baseAssignScope(env), ADMIN_SCOPE]
+  // The list admits whom it names: an admin who couldn't sign in would be no admin.
+  if (!byDomain && !row) return adminListOn(env) && (await isAdmin(env, email)) ? [...viewer, ADMIN_SCOPE] : null
+  if (await isAdmin(env, email)) return [...viewer, ADMIN_SCOPE]
   // A `read_only` row is the read-only viewer tier (what a read-only share link carries).
-  return row?.read_only ? [baseReadScope(env)] : [base, baseAssignScope(env)]
+  return row?.read_only ? [baseReadScope(env)] : viewer
 }
 
 export function gateFor(env: Env): Gate | null {
@@ -289,11 +363,19 @@ export interface Identity {
 }
 const withAdmin = (id: Omit<Identity, 'admin'>): Identity => ({ ...id, admin: id.scopes.includes(ADMIN_SCOPE) || id.scopes.includes('*') })
 
-/** Staff (by domain) or an `admin_emails` row (the deployment's own admin
- *  list, `admin_emails` in `site/schema.sql`, where `ADMIN_EMAILS` says it exists). */
-export async function isAdmin(env: Env, email: string): Promise<boolean> {
-  if (isStaff(env, email)) return true
-  return adminRow(env, email.toLowerCase())
+/**
+ * Whether `email` is an admin of this deployment: the one answer every email identity's admin comes from (`scopesFor`
+ * puts the `admin` scope on a session by it, so `requireAdmin`, `Identity.admin`, whoami and the client follow; a
+ * Slack click asks it directly, `slack/actions.ts`). Where admins come from is this function's alone to change.
+ *
+ * - `ADMIN_LIST`: the explicit list (an `admin_emails` row) or the break-glass `ADMIN_BOOTSTRAP`. Never the staff
+ *   domain, and never a fallback to it: an empty or missing list means no admins (`adminRoster().none`).
+ * - otherwise: the staff domain, or an `admin_emails` row where `ADMIN_EMAILS` says the table exists.
+ */
+export async function isAdmin(env: Env, raw: string): Promise<boolean> {
+  const email = raw.toLowerCase()
+  if (adminListOn(env)) return bootstrapAdmins(env).includes(email) || adminRow(env, email)
+  return isStaff(env, email) || adminRow(env, email)
 }
 
 function authIdentity(auth: Auth): Identity {

@@ -103,7 +103,7 @@ CREATE TABLE admin_emails (
   note  TEXT,
   who   TEXT NOT NULL,
   ts    INTEGER NOT NULL
-);
+, github TEXT);
 
 CREATE TABLE agent_tokens (
   email    TEXT PRIMARY KEY,
