@@ -324,21 +324,15 @@ export const URL_PARAMS: Record<string, UrlParamDoc> = {
     description: 'A legacy link\'s drill path, as a query parameter. It is converted to the URL-path form on load, keeping the other parameters.',
   },
   pg: {
-    label: 'Staged table pages',
-    description: 'The staged tables that are off their first page, counting from 1, `.`-separated: `12-3` is batch 12 on its third page, `e-2` the group staged before batches existed, and a bare `3` the one flat table (`flat`, or a filter in `q`). A completed batch\'s list of original prefixes pages under its id too. When absent, every table is on its first page; a page past a table\'s end reads as its last.',
-    examples: ['12-3', '3', '12-3.15-2'],
-    pages: ['/staged'],
+    label: 'Table page',
+    description: 'On /scans, the page of the scan runs table, counting from 1 (absent: the first, the newest runs; a filter change returns to it). On /staged, the staged tables that are off their first page, counting from 1, `.`-separated: `12-3` is batch 12 on its third page, `e-2` the group staged before batches existed, and a bare `3` the one flat table (`flat`, or a filter in `q`). A completed batch\'s list of original prefixes pages under its id too. When absent, every table is on its first page; a page past a table\'s end reads as its last.',
+    examples: ['2', '12-3', '12-3.15-2'],
+    pages: ['/scans', '/staged'],
   },
   perf: {
     label: 'Perf panel',
     description: '`1` at load shows the time-to-render panel. The timing marks themselves are always recorded.',
     examples: ['1'],
-  },
-  pg: {
-    label: 'Runs page',
-    description: 'The page of the scan runs table, counting from 1. When absent, the first page (the newest runs) is shown; a filter change returns to it.',
-    examples: ['2'],
-    pages: ['/scans'],
   },
   ps: {
     label: 'Path store',
