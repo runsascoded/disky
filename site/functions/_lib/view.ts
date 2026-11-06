@@ -29,7 +29,7 @@
  * `f = n_children(P) − kept` — objects and dirs alike.
  */
 import type { Env } from './auth.js'
-import { asOfScans, coarsenRects, coarsenSizeRects, folded, type IndexHandle, intervalsOn, isStore, ivHeldDates, ivLastRead, type Lens, openIndex, pathStoreKey, perScan, planRects, slices, planSizeRects, readAsks, readFits, readRects, readRows, readRootHistoryRows, readSizeRects, readWhole, type Rect, type Row, sizeVariant, type Span, TooWide, type Trace, withTrace } from './index.js'
+import { asOfScans, coarsenRects, coarsenSizeRects, folded, type IndexHandle, intervalsOn, isStore, ivHeldDates, ivLastRead, type Lens, openIndex, pathStoreKey, perScan, planRects, slices, planSizeRects, readAsks, readFits, readRects, readRows, readRootHistoryRows, readSizeRects, rowsClearFloors, readWhole, type Rect, type Row, sizeVariant, type Span, TooWide, type Trace, withTrace } from './index.js'
 import { type FoldedLens, ownerLens, poolLens } from './owners.js'
 import { type ClassScope, classRow, nameFilter, type NamePred, ownerKey, ownerOk, type OwnerScope } from './scope.js'
 import { filterThreshold, looseThreshold, matchRoots, pickTier, rebasedThreshold, rootRects } from './filter.js'
@@ -459,7 +459,7 @@ async function planSubtree(
   const coarsened = async (pp: Span[] | null, size?: { sized: IndexHandle; sh: IndexHandle; sp: Span[] }): Promise<SubtreePlan | null> => {
     if (!coarser) return null
     const cs = size ? await coarsenSizeRects(size.sh, size.sp, rects, thrAt) : null
-    const cp = pp ? coarsenRects(pp, rects, thrAt) : null
+    const cp = pp && rowsClearFloors(pathIdx, lens) ? coarsenRects(pp, rects, thrAt) : null
     const at = (f: number) => (d: number) => f * thrAt(d)
     if (size && cs && (!cp || cs.raise <= cp.raise)) return of(size.sized.variant, cs.spans, stop => readSizeRects(size.sh, rects, at(cs.raise), lens, cs.spans, stop), cs.raise)
     return cp ? of(pathIdx.variant, cp.spans, stop => readRects(pathIdx, rects, at(cp.raise), lens, cp.spans, stop), cp.raise) : null

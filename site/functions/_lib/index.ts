@@ -2434,8 +2434,24 @@ export async function readRects(
   // A row passes the lens iff its usr equals the key.
   const lensOk = (r: Row) => !lens || r.usr === lens.key
   const at = (depth: number, path: string) => rects.some(q => depth >= q.dLo && depth <= q.dHi && path >= q.pLo && path <= q.pHi)
+  if (thrAt && h.asOf != null && rowsClearFloors(h, lens)) return decodeSpans(h, kept, r => r.size >= thrAt(r.depth) && at(r.depth, r.path) && lensOk(r), stop, (d, p, sz) => sz >= thrAt(d) && at(d, p))
   return decodeSpans(h, kept, r => at(r.depth, r.path) && lensOk(r), stop, at)
 }
+
+/** Whether a read of `h`'s path-first sort thresholds row by row, and so may prune its groups by `b_max`. A folded sort's
+ *  row is a whole path; a lens reads one owner's bytes, its slice. An interval store's slice sort read for totals is the
+ *  exception: a path's total is its slices' sum, which `b_max` (the largest slice) doesn't bound, so every group of the
+ *  rects is planned. (`slices-bytotal` is the sort that prunes for those reads.) A per-scan store's single version has
+ *  nothing to close, and its slices keep their per-slice floor until its sorts retire.
+ *
+ *  This is what makes a read's versions exact over tiers. A version and its close record have one size. A row over its
+ *  threshold has `size ≥ thrAt(depth)`, so the close record's group has `b_max` over the floor applied to any group
+ *  holding that depth, and is planned wherever it is. A row under it can sit in a group planned for a heavier row while
+ *  its close record's group isn't: that row is the one a read can't tell has ended, so it is never kept. */
+export const rowsClearFloors = (h: IndexHandle, lens?: Lens): boolean => h.asOf == null || !!lens || !h.schema.some(l => l.name === 'usr')
+
+/** The lowest threshold a group spanning depths `dLo..dHi` applies: `thrAt` is monotone in depth. */
+const floorOver = (thrAt: (depth: number) => number, dLo: number, dHi: number): number => Math.min(thrAt(dLo), thrAt(Math.max(dLo, dHi)))
 
 /** The row groups a `readRects` decodes — the span queries' candidates
  * (rects batched per statement) minus the groups whose biggest row can't
@@ -2448,15 +2464,17 @@ export async function planRects(
   lens?: Lens,
 ): Promise<Span[]> {
   const dMin = Math.min(...rects.map(q => q.dLo))
+  const dMax = Math.max(...rects.map(q => q.dHi))
+  const floored = thrAt && rowsClearFloors(h, lens) ? thrAt : undefined
   const RECTS_PER_QUERY = 20 // D1 binds: 4 per rect (+2 with a lens)
   const byRg = new Map<number, Span>()
   const t0 = now()
   for (let i = 0; i < rects.length; i += RECTS_PER_QUERY) {
-    const spans = await selectSpans(h, rects.slice(i, i + RECTS_PER_QUERY), 4000, thrAt ? thrAt(dMin) : 0, lens)
+    const spans = await selectSpans(h, rects.slice(i, i + RECTS_PER_QUERY), 4000, floored ? floorOver(floored, dMin, dMax) : 0, lens)
     for (const s of spans) byRg.set(spanKey(s), s)
   }
   h.trace?.('spans', now() - t0)
-  return [...byRg.values()].sort(bySpan).filter(s => !thrAt || s.bMax >= thrAt(Math.max(s.dMin, dMin)))
+  return [...byRg.values()].sort(bySpan).filter(s => !floored || s.bMax >= floorOver(floored, Math.max(s.dMin, dMin), s.dMax))
 }
 
 /** The row groups, and the rows in them, one read decodes at most (`decodeSpans`). */
@@ -2495,10 +2513,11 @@ function coarsen(spans: Span[], floorOf: (s: Span) => number): Coarser | null {
   return { spans: kept.sort(bySpan), raise: Math.max(1, out * RAISE_PAST) }
 }
 
-/** `planRects`' spans (`plan`) cut to the read budget (`coarsen`): the floor it applies per group, scaled. */
+/** `planRects`' spans (`plan`) cut to the read budget (`coarsen`): the floor it applies per group, scaled. Only for a plan
+ *  it applied one to (`rowsClearFloors`). */
 export function coarsenRects(plan: Span[], rects: Rect[], thrAt: (depth: number) => number): Coarser | null {
   const dMin = Math.min(...rects.map(q => q.dLo))
-  return coarsen(plan, s => thrAt(Math.max(s.dMin, dMin)))
+  return coarsen(plan, s => floorOver(thrAt, Math.max(s.dMin, dMin), s.dMax))
 }
 
 /** `planSizeRects`' spans (`plan`) cut to the read budget (`coarsen`): its one floor, scaled. */
