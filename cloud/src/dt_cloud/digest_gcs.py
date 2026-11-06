@@ -202,6 +202,10 @@ class Gcs:
     def image_request(self, data: Month, month: dt.date) -> dict:
         return site_render(self.cfg, self.rows_json(data), month)["image"]
 
+    def reply_json(self, data: Month) -> None:
+        """The site doesn't re-render this template's replies."""
+        return None
+
     def rows_json(self, data: Month) -> dict:
         """The month's rows as the site's renderer reads them (`src/digest/gcs.ts` `GcsRows`)."""
         def row(r: Scan) -> dict:
