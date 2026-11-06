@@ -20,6 +20,8 @@ Both tables key on `indexTag`, so a new generation has no pricing. Moving `CURRE
 
 **gcs hold (2026-11-05):** `job/interval-store.json` sets `"compact": "none"` (live on `:latest` since that day), so a due compaction can't move `CURRENT` until pricing is carried off the read path, or Ryan decides otherwise. Carries keep running, and runs accumulate meanwhile. This holds the gate, it doesn't make compaction safe.
 
+**gcs carry (2026-11-06, `w/owner-carry`, off until `owner_carry: true` in `job/interval-store.json`):** `cloud/src/dt_cloud/owner_carry.py` copies `owner_prefix_aggs` to a compaction's new tag before `successor.json`, and again best effort after the R2 pointer; a scan with no row prices itself on its next read. Checked on a real compaction of `2026-10-09b.g3` into a scratch candidate: the site's `ownerTotals` run under Node against the candidate's files gives every row's parsed values on 128 of 128 scans (the same harness against `g3` itself: 128 of 128). What's unexercised is the copy's statement on live D1.
+
 ## Options
 
 The rule either way: **no read path prices.** A read answers from pricing with one bounded read, or returns an explicit not-ready answer. `HIST_PRICE_MAX` and the per-scan branch of `compute` go away.
