@@ -134,10 +134,23 @@ describe('what never gets an attempt', () => {
   it('a presented token (`Bearer`), which is no browser\'s visit', async () => {
     expect(outcome(await visit(await envOf(), '/', { ...NAV, authorization: 'Bearer t' }))).toEqual(WALL)
   })
-  it('a deployment with nothing walled: `PUBLIC_READ`, `AUTH_MODE=public`, or an anonymous policy that serves content', async () => {
+  it('a deployment with nothing walled: `PUBLIC_READ` or `AUTH_MODE=public`', async () => {
     const got = []
-    for (const extra of [{ PUBLIC_READ: '1' }, { AUTH_MODE: 'public' }, { OG_ANONYMOUS: 'shape' }, { OG_ANONYMOUS: 'full' }]) got.push(outcome(await visit(await envOf(extra), '/runs/1')))
-    expect(got).toEqual(Array(4).fill(WALL))
+    for (const extra of [{ PUBLIC_READ: '1' }, { AUTH_MODE: 'public' }]) got.push(outcome(await visit(await envOf(extra), '/runs/1')))
+    expect(got).toEqual(Array(2).fill(WALL))
+  })
+  it('an anonymous card policy (`OG_ANONYMOUS`) walls nothing: a person\'s navigation is still sent to the broker', async () => {
+    const got = []
+    for (const OG_ANONYMOUS of ['shape', 'full']) got.push(outcome(await visit(await envOf({ OG_ANONYMOUS }), '/runs/1')))
+    expect(got).toEqual(Array(2).fill(attemptFor('/runs/1')))
+  })
+  it('a bot on those deployments still gets no redirect, and the shell', async () => {
+    const got = []
+    for (const OG_ANONYMOUS of ['shape', 'full']) {
+      const r = await visit(await envOf({ OG_ANONYMOUS }), '/runs/1', { 'user-agent': 'Slackbot-LinkExpanding 1.0' })
+      got.push([...outcome(r), await r.text()])
+    }
+    expect(got).toEqual(Array(2).fill([200, null, [], SHELL]))
   })
   it('local dev, whose every request is the dev identity', async () => {
     const env = await envOf()

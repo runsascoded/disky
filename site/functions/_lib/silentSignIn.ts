@@ -21,7 +21,7 @@
  */
 import { clearCookie, isSecureRequest, readCookie, sessionCookie } from '@open-athena/auth'
 import { type Ctx, type Env, presentsCredentials, SESSION_COOKIE } from './auth.js'
-import { anonymousPolicy, type PolicyEnv } from './og/policy.js'
+import type { PolicyEnv } from './og/policy.js'
 import { oaLoginConfig } from './oidc.js'
 
 export const SKIP_COOKIE = 'oa_sso_skip'
@@ -56,9 +56,9 @@ const NOT_WALLED = /^\/(api|data|assets|auth|og|a|v1|slack)(\/|$)|^\/(signin|pri
  *  form (`denied`), or one this attempt already answered (`sso`). */
 const OWN_WAY = ['key', 'og', 'denied', 'sso']
 
-/** Nothing is walled here: a public deployment, or an anonymous policy that serves content. */
-const servesAnonymously = (env: Env & PolicyEnv): boolean =>
-  !!env.PUBLIC_READ || env.AUTH_MODE === 'public' || anonymousPolicy(env) !== 'generic'
+/** Nothing is walled here: a public deployment. `OG_ANONYMOUS` (`anonymousPolicy`) is not a reason: it sets only what an
+ *  unfurler's card shows (`anonymousPage`, `stampPage`); a person's page on a `shape` or `full` deployment is still walled. */
+const servesAnonymously = (env: Env & PolicyEnv): boolean => !!env.PUBLIC_READ || env.AUTH_MODE === 'public'
 
 /** The redirect to the broker for this request, or null to serve it as ever. */
 export async function silentAttempt(ctx: { request: Request; env: Env & PolicyEnv }): Promise<Response | null> {
