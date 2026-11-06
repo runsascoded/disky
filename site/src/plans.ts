@@ -76,14 +76,16 @@ export const EXEC_API = `/api/${DEFAULT_STORE.executor}`
 export const CAPS: ExecCaps = EXEC_CAPS[DEFAULT_STORE.executor]
 
 /** One plan-API call: JSON in and out; a non-2xx throws an `HttpError` with its status. `cache`: the fetch's cache mode
- *  (`reload`: from the network whatever the browser holds, and that answer is what it holds next). */
-export async function call<T>(url: string, method = 'GET', body?: unknown, cache?: RequestCache): Promise<T> {
+ *  (`reload`: from the network whatever the browser holds, and that answer is what it holds next). `signal`: aborts it
+ *  (the call rejects with the signal's reason); without one a call waits as long as the network does. */
+export async function call<T>(url: string, method = 'GET', body?: unknown, cache?: RequestCache, signal?: AbortSignal): Promise<T> {
   const r = await fetch(url, {
     method,
     credentials: 'include',
     headers: body ? { 'content-type': 'application/json' } : {},
     body: body ? JSON.stringify(body) : undefined,
     ...(cache ? { cache } : {}),
+    ...(signal ? { signal } : {}),
   })
   // CF returns HTML on a 5xx: read text, then try JSON.
   const text = await r.text()
@@ -256,24 +258,37 @@ export type RunAction = { action: 'stop'; job_id: string } | { action: 'undo' | 
 /** The react-query key of the executor's jobs list (`useExecJobs`). */
 export const EXEC_JOBS_KEY = ['sweep-jobs'] as const
 
+/** How long a run control waits on the jobs list it reads again (`runActionOptions`) before giving that read up. */
+export const JOBS_REFRESH_MS = 15_000
+
+/** `read`, given up after `ms`: its signal aborts, and the read rejects saying `what` didn't answer. */
+async function within<T>(ms: number, what: string, read: (signal: AbortSignal) => Promise<T>): Promise<T> {
+  const gaveUp = new AbortController()
+  const timer = setTimeout(() => gaveUp.abort(new Error(`${what} didn’t answer in ${ms / 1000} s`)), ms)
+  try { return await read(gaveUp.signal) } finally { clearTimeout(timer) }
+}
+
 /** The executor's jobs list. `fresh`: past the browser's copy (the route answers `max-age=10`), for a read that has to see a
- *  job submitted a moment ago. */
-async function execJobs(fresh = false): Promise<{ jobs: ExecJob[]; configured: boolean }> {
-  const d = await call<{ jobs: ExecJob[]; configured?: boolean }>(`${EXEC_API}/jobs`, 'GET', undefined, fresh ? 'reload' : undefined)
+ *  job submitted a moment ago. `signal`: aborts the read. */
+async function execJobs(fresh = false, signal?: AbortSignal): Promise<{ jobs: ExecJob[]; configured: boolean }> {
+  const d = await call<{ jobs: ExecJob[]; configured?: boolean }>(`${EXEC_API}/jobs`, 'GET', undefined, fresh ? 'reload' : undefined, signal)
   return { jobs: d.jobs, configured: d.configured !== false }
 }
 
 /** `useRunAction`'s mutation. What a control did shows from the jobs list (an undo's or a purge's job, a stop's request), so
  *  the control isn't settled until that list is read again, fresh: a copy from before it would offer the control again. A
- *  jobs read already in flight is from before it too, and is dropped. While it is pending the page's controls are disabled. */
+ *  jobs read already in flight is from before it too, and is dropped. While it is pending the page's controls are disabled,
+ *  so that read is one attempt, given up after `JOBS_REFRESH_MS`: a list that hangs holds them no longer than that. */
 export const runActionOptions = (qc: QueryClient): UseMutationOptions<unknown, Error, RunAction> => ({
   mutationFn: a => call(`${EXEC_API}/${a.action}`, 'POST', a.action === 'stop' ? { job_id: a.job_id } : { run_id: a.run_id }),
   onSuccess: async () => {
     void qc.invalidateQueries({ queryKey: ['plans'] })
     await qc.cancelQueries({ queryKey: EXEC_JOBS_KEY })
-    // `staleTime: 0`: read it however fresh the client holds its copy (the app's default keeps one a minute). A list that
-    // can't be read is the list's error (the page shows it), not the control's: that landed.
-    await qc.fetchQuery({ queryKey: EXEC_JOBS_KEY, queryFn: () => execJobs(true), staleTime: 0 }).catch(() => undefined)
+    // `staleTime: 0`: read it however fresh the client holds its copy (the app's default keeps one a minute). `retry: false`,
+    // as the page's own read of it (`useExecJobs`): the app's default would ask twice more. A list that can't be read, or
+    // doesn't answer in time, is the list's error (the page shows it), not the control's: that landed.
+    const read = () => within(JOBS_REFRESH_MS, 'the jobs list', signal => execJobs(true, signal))
+    await qc.fetchQuery({ queryKey: EXEC_JOBS_KEY, queryFn: read, staleTime: 0, retry: false }).catch(() => undefined)
   },
 })
 
