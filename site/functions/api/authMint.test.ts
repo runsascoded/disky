@@ -1,7 +1,7 @@
 // Under `ADMIN_LIST` no path mints a grant carrying `admin` or `*`; a grant already holding one keeps working and stays
 // listed. With the list off, minting is as it was.
 import { describe, expect, it } from 'vitest'
-import { ADMIN_GRANT_REFUSED, ADMIN_ROTATE_REFUSED, ADMIN_WIDEN_REFUSED, type Env, GRANT_TERMS_REFUSED, gateFor, identify } from '../_lib/auth'
+import { ADMIN_GRANT_REFUSED, ADMIN_ROTATE_REFUSED, ADMIN_WIDEN_REFUSED, AdminGrantRefused, type Env, GRANT_TERMS_REFUSED, gateFor, identify } from '../_lib/auth'
 import { type Sqlite, sqliteD1, withAdminEmails } from '../_lib/testD1'
 import { onRequest as adminsRoute } from './admins'
 import { onRequest as authRoute } from './auth/[[path]]'
@@ -237,11 +237,144 @@ describe('an admin grant\'s terms', () => {
   })
 })
 
+// `PATCH /api/auth/grants/<id>` takes `scopes`: the column read on every request, so a live link's sessions get them too.
+describe('editing a grant\'s scopes', () => {
+  const NOW = Math.floor(Date.now() / 1000)
+  const WIDEN = [403, { error: ADMIN_WIDEN_REFUSED }]
+  const NOT_NAMES = [400, { error: 'scopes must be a non-empty list of names' }]
+  type W = Awaited<ReturnType<typeof world>>
+  const patch = (w: W, id: string, edit: unknown) => w.call(authRoute, `/api/auth/grants/${id}`, LEAD, 'PATCH', edit)
+  const stored = (w: W, id: string) => w.raw.prepare('SELECT scopes FROM grants WHERE id = ?').all(id)[0].scopes
+  const identity = async (w: W, token: string) => {
+    const id = await identify({ request: new Request(`${SITE}/api/me`, { headers: { authorization: `Bearer ${token}` } }), env: w.env })
+    return id && { scopes: id.scopes, admin: id.admin }
+  }
+  /** A `PATCH`'s status and what the grant's row then says. */
+  const edited = async (w: W, id: string, scopes: unknown) => {
+    const [status, body] = await patch(w, id, { scopes })
+    return [status, status === 200 ? (body.grant as { scopes: string[] }).scopes : body, stored(w, id)]
+  }
+
+  it.each([
+    [['admin']],
+    [['*']],
+    [['gcs', 'admin']],
+    [['admin', 'gcs']],
+    [['gcs', '*']],
+  ])('the list on: %j on an ordinary link is refused, its row unmoved and its holder no admin', async scopes => {
+    const w = await world()
+    const { grant, token } = await w.existing(['gcs'])
+    expect([await patch(w, grant.id, { scopes }), stored(w, grant.id), await identity(w, token)]).toEqual([REFUSED, 'gcs', { scopes: ['gcs'], admin: false }])
+  })
+
+  it.each([[['gcs admin']], [['gcs,*']], [['gcs,admin']], ['admin'], ['gcs admin'], [[]], [[1]], [null]])('the list on: %j never reaches the store: the package\'s route refuses what isn\'t a list of names', async scopes => {
+    const w = await world()
+    const { grant } = await w.existing(['gcs'])
+    expect([await patch(w, grant.id, { scopes }), stored(w, grant.id)]).toEqual([NOT_NAMES, 'gcs'])
+  })
+
+  // What `carriesAdmin` must catch when the route's check isn't in front of it (`gate.update`, the store itself): the
+  // column reads back split on spaces and commas, and an array stringifies with commas.
+  it.each([
+    [['a', 'admin']],
+    [['admin', 'a']],
+    [['a admin']],
+    [['a,admin']],
+    [['a', '*']],
+    [['a *']],
+    [['a,*']],
+    ['admin'],
+    ['a admin'],
+    ['a,admin'],
+    ['*'],
+    ['a,*'],
+  ])('the list on: `gate.update` with %j is refused at the store', async scopes => {
+    const w = await world()
+    const { grant } = await w.existing(['gcs'])
+    const thrown = await w.gate.update(grant.id, { scopes: scopes as string[] }).catch((e: Error) => [e.constructor, e.message])
+    expect([thrown, stored(w, grant.id)]).toEqual([[AdminGrantRefused, ADMIN_GRANT_REFUSED], 'gcs'])
+  })
+
+  it('the list on: other scopes move freely on an ordinary link, either way, and its holder has them on the next request', async () => {
+    const w = await world()
+    const { grant, token } = await w.existing(['gcs', 'gcs:read'])
+    expect([await edited(w, grant.id, ['gcs:read']), await identity(w, token)]).toEqual([[200, ['gcs:read'], 'gcs:read'], { scopes: ['gcs:read'], admin: false }])
+    expect([await edited(w, grant.id, ['gcs:read', 'gcs']), await identity(w, token)]).toEqual([[200, ['gcs:read', 'gcs'], 'gcs:read gcs'], { scopes: ['gcs:read', 'gcs'], admin: false }])
+  })
+
+  it.each([
+    [['gcs', 'admin'], ['gcs'], 'gcs'],
+    [['gcs', 'gcs:read', 'admin'], ['gcs:read'], 'gcs:read'],
+    [['*'], ['gcs'], 'gcs'],
+  ])('the list on: an admin grant, %j, can drop to %j, and is no admin from then on', async (from, to, row) => {
+    const w = await world()
+    const { grant, token } = await w.existing(from)
+    expect([await edited(w, grant.id, to), await identity(w, token)]).toEqual([[200, to, row], { scopes: to, admin: false }])
+  })
+
+  it.each([
+    [['admin'], ['gcs'], 'admin'],
+    [['gcs', 'admin'], ['gcs', 'gcs:read'], 'gcs admin'],
+  ])('the list on: an admin grant, %j, can\'t trade it for a scope it didn\'t hold (%j)', async (from, to, row) => {
+    const w = await world()
+    const { grant } = await w.existing(from)
+    expect([await patch(w, grant.id, { scopes: to }), stored(w, grant.id)]).toEqual([WIDEN, row])
+  })
+
+  it.each([
+    [['gcs', 'admin'], ['gcs', 'admin'], 'gcs admin'],
+    [['gcs', 'admin'], ['admin'], 'gcs admin'],
+    [['gcs', 'admin'], ['gcs', 'admin', 'gcs:read'], 'gcs admin'],
+    [['gcs', 'admin'], ['*'], 'gcs admin'],
+    [['*'], ['admin'], '*'],
+    [['admin'], ['admin', '*'], 'admin'],
+  ])('the list on: an admin grant, %j, keeping `admin` or `*` through an edit (%j) is refused like any other', async (from, to, row) => {
+    const w = await world()
+    const { grant } = await w.existing(from)
+    expect([await patch(w, grant.id, { scopes: to }), stored(w, grant.id)]).toEqual([REFUSED, row])
+  })
+
+  it('the list on: an expired admin grant dropping `admin` is allowed, and stays expired', async () => {
+    const w = await world()
+    const { grant, token } = await w.existing(['gcs', 'admin'], { expiresAt: NOW - 3600 })
+    expect([await edited(w, grant.id, ['gcs']), await identity(w, token)]).toEqual([[200, ['gcs'], 'gcs'], null])
+  })
+
+  it('the list on: a revoked link is the package\'s 409, whatever the scopes', async () => {
+    const w = await world()
+    const { grant } = await w.existing(['gcs'])
+    await w.gate.revoke(grant.id)
+    expect([await patch(w, grant.id, { scopes: ['admin'] }), stored(w, grant.id)]).toEqual([[409, { error: 'link is revoked' }], 'gcs'])
+  })
+
+  it.each([[{ expiresAt: 'never' }], [{ maxRedeems: 'many' }], [{ sessionTtlS: 'forever' }]])('the list on: bad terms beside good scopes (%j) are refused, and the scopes don\'t land', async terms => {
+    const w = await world()
+    const { grant } = await w.existing(['gcs'])
+    expect([await patch(w, grant.id, { scopes: ['gcs:read'], ...terms }), stored(w, grant.id)]).toEqual([[400, { error: GRANT_TERMS_REFUSED }], 'gcs'])
+  })
+
+  it.each([[{ expiresAt: 'never' }], [{ maxRedeems: 'many' }], [{ sessionTtlS: 'forever' }]])('the list off: bad terms beside good scopes (%j) are refused, and the scopes don\'t land', async terms => {
+    const w = await world(false)
+    const { grant } = await w.existing(['gcs'])
+    expect([await patch(w, grant.id, { scopes: ['gcs:read'], ...terms }), stored(w, grant.id)]).toEqual([[400, { error: GRANT_TERMS_REFUSED }], 'gcs'])
+  })
+
+  it.each([
+    [['admin'], 'admin'],
+    [['*'], '*'],
+    [['gcs', 'admin'], 'gcs admin'],
+  ])('the list off: %j lands, as a mint with it does', async (scopes, row) => {
+    const w = await world(false)
+    const { grant } = await w.existing(['gcs'])
+    expect(await edited(w, grant.id, scopes)).toEqual([200, scopes, row])
+  })
+})
+
 it('the refusals say what to do', () => {
   expect([ADMIN_GRANT_REFUSED, ADMIN_ROTATE_REFUSED, ADMIN_WIDEN_REFUSED]).toEqual([
     'with `ADMIN_LIST` on, a grant can\'t carry `admin` or `*`: add the person to the admin list instead',
     'with `ADMIN_LIST` on, an admin grant can\'t be re-keyed: revoke it, and add the person to the admin list instead',
-    'with `ADMIN_LIST` on, an admin grant can only lose access: it can\'t be re-enabled, or given a later expiry, a higher redemption cap or sessions that outlive its expiry. Add the person to the admin list instead',
+    'with `ADMIN_LIST` on, an admin grant can only lose access: it can\'t be re-enabled, or given new scopes, a later expiry, a higher redemption cap or sessions that outlive its expiry. Add the person to the admin list instead',
   ])
 })
 

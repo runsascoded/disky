@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { shareUrl, withoutOg } from './sharePreview'
+import { shareUrl, withoutOg, withoutSso } from './sharePreview'
 
 describe('withoutOg: the address bar sheds the preview token, nothing else', () => {
   it('drops og= wherever it sits; keeps path, params in order, hash; null when absent', () => {
@@ -37,5 +37,15 @@ describe('shareUrl: the page link, with exactly the token asked for', () => {
       'https://site.example.org/marin-a?d=261002&f=tomat&og=EZjUobkMrUuF#age',
       'https://site.example.org/marin-a?d=261002&f=tomat&key=k123#age',
     ])
+  })
+})
+
+describe('withoutSso (the silent sign-in\'s marker, specs/oa-login-rp.md phase 2)', () => {
+  it('drops `sso=` and keeps the rest, params in order', () => {
+    expect([
+      withoutSso('https://x.test/scans?a=1&sso=login_required&b=2#h'),
+      withoutSso('https://x.test/?sso=error'),
+      withoutSso('https://x.test/scans?a=1'),
+    ]).toEqual(['/scans?a=1&b=2#h', '/', null])
   })
 })

@@ -3,6 +3,8 @@ import { useQuery } from '@tanstack/react-query'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { AuthGate as Gate, deniedEmail, RequestAccessForm, SignInPanel, useForgetWhoami } from '@open-athena/auth/react'
 import { AUTH_MODE, devIdentity, WHOAMI_SOURCE } from './auth'
+import { signInError } from './signInError'
+import { signInNext } from './signInNext'
 import { DEFAULT_STORE, storeEmailAuth } from './stores'
 
 /** The public Google client id, or null where Google sign-in isn't configured
@@ -14,6 +16,21 @@ function useGoogleClient() {
       const r = await fetch('/auth/google/client', { credentials: 'include' })
       if (!r.ok) return null
       return ((await r.json()) as { clientId?: string | null }).clientId ?? null
+    },
+    staleTime: Infinity,
+    retry: false,
+    enabled: AUTH_MODE === 'app',
+  })
+}
+
+/** Whether "Sign in with OA" (OA's broker, specs/oa-login-rp.md) is configured here: the wall then offers it first. */
+function useOaLogin() {
+  return useQuery({
+    queryKey: ['oa-login'],
+    queryFn: async (): Promise<boolean> => {
+      const r = await fetch('/auth/oa/client', { credentials: 'include' })
+      if (!r.ok) return false
+      return ((await r.json()) as { enabled?: boolean }).enabled === true
     },
     staleTime: Infinity,
     retry: false,
@@ -48,6 +65,8 @@ export function AuthGate({ children }: { children: ReactNode }) {
 // returning visitor in with no click at all, once their account has granted
 // this client through the button or prompt. Where Google's script can't load,
 // the button degrades to the plain redirect.
+// With OA's broker configured, the middleware has already tried it silently by the time
+// this shows (`functions/_lib/silentSignIn.ts`): the wall is what's left when that fails.
 // The request-access form + how-to prose fold behind a disclosure — they're the
 // tail for people the policy doesn't yet admit (not staff, not a viewer
 // domain, no `allowed_emails` row), not the wall itself — and unfold on a
@@ -68,6 +87,9 @@ function LoginWall({ next, error }: { next?: string; error?: string }) {
   const google = useGoogleClient()
   const clientId = google.data ?? null
   const googleUrl = next ? `/auth/google?next=${encodeURIComponent(next)}` : '/auth/google'
+  const oa = useOaLogin()
+  // Inside <Gate> (no `next`), back to the page the wall stands in for.
+  const oaUrl = `/auth/oa?next=${encodeURIComponent(next ?? window.location.pathname + window.location.search)}`
   // A verified-but-not-allowed address from the in-page button: land on the
   // same `?denied=` the redirect flow bounces to, so the wall unfolds
   // request-access pre-filled with it.
@@ -85,6 +107,9 @@ function LoginWall({ next, error }: { next?: string; error?: string }) {
         {error && <p className="signin-error" role="alert">{error}</p>}
         {/* Wait for the client id (one small request) rather than flash the
             redirect button and swap it for Google's. */}
+        {oa.data && (
+          <a className="signin signin-oa" href={oaUrl}>Sign in with OA</a>
+        )}
         {google.isFetched && (
           <SignInPanel
             title={null}   // the card's own <h1> + `restrict` line already say what this is
@@ -137,28 +162,11 @@ function RememberedAccount({ email }: { email: string }) {
   )
 }
 
-/** `?error=` on `/signin` → what to tell the person. The Functions send the
- *  adapter's reason (`google:<why>`) or `link` for a dead emailed link. */
-function signInError(code: string | null): string | undefined {
-  if (!code) return undefined
-  if (code === 'link') return 'That sign-in link is no longer valid — it may have expired or already been used. Ask for a fresh code below.'
-  if (code.startsWith('google:')) {
-    const why = code.slice('google:'.length)
-    const replay = /state|nonce/.test(why)
-    return replay
-      ? "Google sign-in didn't complete — the attempt expired or the page was reloaded mid-way. Try again."
-      : `Google sign-in didn't complete (${why}). Try again, or use an emailed code.`
-  }
-  return 'Sign-in didn\'t complete. Try again.'
-}
-
 /** `/signin?next=<path>` — the wall as a page, for the inline "sign in" links
  *  (`signInUrl()`): a guest upgrading to a real identity, or a session that
  *  expired mid-page — and where the sign-in Functions land a failure
  *  (`?error=`). Same-origin paths only; anything else goes home. */
 export function SignInPage() {
-  const params = new URLSearchParams(useLocation().search)
-  const raw = params.get('next') ?? '/'
-  const next = raw.startsWith('/') && !raw.startsWith('//') ? raw : '/'
-  return <LoginWall next={next} error={signInError(params.get('error'))} />
+  const { search } = useLocation()
+  return <LoginWall next={signInNext(search)} error={signInError(search)} />
 }

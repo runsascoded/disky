@@ -887,6 +887,8 @@ button.linkish {
       &:hover { filter: brightness(1.08); }
       &:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
     }
+    // "Sign in with OA" (OA's broker): full width above the panel, the first affordance where it's configured.
+    .signin-oa { display: block; text-align: center; margin-bottom: 12px; }
     // <SignInPanel>: Google button (`.signin`, primary), then an emailed-code
     // form and request-access for the non-Google tail. Left-aligned inputs,
     // full-width controls, an "or" divider between the affordances.
