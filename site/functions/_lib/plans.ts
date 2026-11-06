@@ -684,27 +684,6 @@ export interface RunRow {
   log_dir?: string | null
 }
 
-export type Gate =
-  | { ok: true; dry: RunRow }
-  | { ok: false; reason: string }
-
-/** May the item set with digest `digest` (`items` prefixes) be really deleted
- * now? Yes only after a *finished* dry-run of exactly this set, and with no
- * run of the plan in flight. `runs` are the plan's, any order. A run with no
- * digest (NULL: from before digests, or not yet reflected) or the empty one
- * (it ended without a result) never opens the gate. */
-export function realGate(runs: readonly RunRow[], digest: string, items: number): Gate {
-  if (!items) return { ok: false, reason: "the plan is empty" }
-  const live = runs.find(r => r.finished_ts == null)
-  if (live) return { ok: false, reason: `a ${live.mode} run is in progress (${live.run_id})` }
-  const dry = [...runs].filter(r => r.mode === "dry" && !!r.plan_digest && r.plan_digest === digest).sort((a, b) => b.started_ts - a.started_ts)[0]
-  if (!dry) {
-    const any = runs.some(r => r.mode === "dry")
-    return { ok: false, reason: any ? "the plan changed since the last dry-run; dry-run it again" : "no dry-run of this plan yet" }
-  }
-  return { ok: true, dry }
-}
-
 export type RealRun =
   | { ok: true; reviewed: RunRow | null }
   | { ok: false; reason: string }

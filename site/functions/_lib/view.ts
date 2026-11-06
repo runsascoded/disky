@@ -29,7 +29,7 @@
  * `f = n_children(P) − kept` — objects and dirs alike.
  */
 import type { Env } from './auth.js'
-import { asOfScans, coarsenRects, coarsenSizeRects, folded, type IndexHandle, intervalsOn, isStore, ivHeldDates, ivLastRead, type Lens, openIndex, pathStoreKey, perScan, planRects, slices, planSizeRects, readAsks, readFits, readRects, readRows, readSizeRects, type Rect, type Row, sizeVariant, type Span, TooWide, type Trace, withTrace, readPathHistoryRows } from './index.js'
+import { asOfScans, coarsenRects, coarsenSizeRects, folded, type IndexHandle, intervalsOn, isStore, ivHeldDates, ivLastRead, type Lens, openIndex, pathStoreKey, perScan, planRects, slices, planSizeRects, readAsks, readFits, readRects, readRows, readSizeRects, readSlicesByFolded, rowsClearFloors, type Rect, type Row, sizeVariant, type Span, TooWide, type Trace, withTrace, readPathHistoryRows } from './index.js'
 import { type FoldedLens, ownerLens, poolLens } from './owners.js'
 import { type ClassScope, classRow, nameFilter, type NamePred, ownerKey, ownerOk, type OwnerScope } from './scope.js'
 import { filterThreshold, looseThreshold, matchRoots, pickTier, rebasedThreshold, rootRects } from './filter.js'
@@ -459,10 +459,25 @@ async function planSubtree(
   const coarsened = async (pp: Span[] | null, size?: { sized: IndexHandle; sh: IndexHandle; sp: Span[] }): Promise<SubtreePlan | null> => {
     if (!coarser) return null
     const cs = size ? await coarsenSizeRects(size.sh, size.sp, rects, thrAt) : null
-    const cp = pp ? coarsenRects(pp, rects, thrAt) : null
+    const cp = pp && rowsClearFloors(pathIdx, lens) ? coarsenRects(pp, rects, thrAt) : null
     const at = (f: number) => (d: number) => f * thrAt(d)
     if (size && cs && (!cp || cs.raise <= cp.raise)) return of(size.sized.variant, cs.spans, stop => readSizeRects(size.sh, rects, at(cs.raise), lens, cs.spans, stop), cs.raise)
     return cp ? of(pathIdx.variant, cp.spans, stop => readRects(pathIdx, rects, at(cp.raise), lens, cp.spans, stop), cp.raise) : null
+  }
+  // A slice sort read for totals, neither of whose sorts fits the budget at this floor: the folded sort says which paths
+  // clear it, and a lookup reads their slices (`readSlicesByFolded`), before any floor is raised.
+  const viaFolded = async (): Promise<SubtreePlan | null> => {
+    if (pathIdx.asOf == null || rowsClearFloors(pathIdx, lens)) return null
+    const fh = withTrace(await openIndex(folded(env), date, 'path'), tr)
+    const fp = await planRects(fh, rects, thrAt).catch(e => { if (e instanceof TooWide) return null; throw e })
+    if (!fp) return null
+    if (readFits(fp)) return of(pathIdx.variant, fp, stop => readSlicesByFolded(pathIdx, fh, rects, thrAt, fp, stop))
+    // Past the budget, at the lowest floor that fits it: a drill's folded groups step finely where a size sort's buckets
+    // don't (a broad view's the other way: the caller takes whichever floor is lower).
+    const cut = coarser ? coarsenRects(fp, rects, thrAt) : null
+    if (!cut) return null
+    const raised = (d: number) => cut.raise * thrAt(d)
+    return of(pathIdx.variant, cut.spans, stop => readSlicesByFolded(pathIdx, fh, rects, raised, cut.spans, stop), cut.raise)
   }
   // A store generation: plan the read on both sorts (span queries only, no
   // decode) and decode whichever holds fewer rows. The cost of a `path` read
@@ -480,8 +495,12 @@ async function planSubtree(
   // (per tier), where `bysize` reads a group per size bucket of every segment (gcs `marin-us-central2`
   // at depth 1: 3 groups against 24). Taken when it holds at most `IV_BAND_ROWS`; past that (a flat
   // directory's children) the size sort is planned too and the one holding fewer rows read.
+  // A slice sort read for totals plans every group of its rects (`rowsClearFloors`): a big subtree's would decode every
+  // footer group of the sort to find it can't be read, so past a depth band that plan isn't made.
   if (!pathOnly && pathIdx.asOf != null && (nDesc == null || nDesc > ivPlanRows)) {
-    let pp = !lens && rects.every(q => q.dHi < 1e9) ? await planRects(pathIdx, rects, thrAt) : null
+    const whole = !rowsClearFloors(pathIdx, lens)
+    const fits = (p: Span[] | null) => !!p && readFits(p)
+    let pp = !lens && rects.every(q => q.dHi < 1e9) ? await planRects(pathIdx, rects, thrAt).catch(e => { if (whole && e instanceof TooWide) return null; throw e }) : null
     if (pp && held(pp) <= IV_BAND_ROWS) return fromPath(pp)
     const sized = (lens ? await tryOpen(env, date, 'bysize-user') : null) ?? await tryOpen(env, date, 'bysize')
     if (sized) {
@@ -489,9 +508,12 @@ async function planSubtree(
       const sp = await planSizeRects(sh, rects, thrAt, lens)
       // A tiny subtree can have an unknown row count and a low byte floor: the size sort's
       // boundary groups then exceed the decode budget though its path range fits easily.
-      if (!readFits(sp) && !pp) pp = await planRects(pathIdx, rects, thrAt, lens)
-      if (!readFits(sp) && !readFits(pp!)) {
+      if (!readFits(sp) && !pp && !whole) pp = await planRects(pathIdx, rects, thrAt, lens)
+      if (!readFits(sp) && !fits(pp)) {
+        const via = await viaFolded()
+        if (via?.raise === 1) return via
         const cut = await coarsened(pp, { sized, sh, sp })
+        if (via && (!cut || via.raise < cut.raise)) return via
         if (cut) return cut
       }
       if (pp && (held(pp) < held(sp) || !readFits(sp) && readFits(pp))) return fromPath(pp)
@@ -506,7 +528,10 @@ async function planSubtree(
       const sh = withTrace(sized, tr)
       const [pp, sp] = await Promise.all([planRects(pathIdx, rects, thrAt, lens), planSizeRects(sh, rects, thrAt, lens)])
       if (!readFits(sp) && !readFits(pp)) {
+        const via = await viaFolded()
+        if (via?.raise === 1) return via
         const cut = await coarsened(pp, { sized, sh, sp })
+        if (via && (!cut || via.raise < cut.raise)) return via
         if (cut) return cut
       }
       if (held(sp) < held(pp)) return of(sized.variant, sp, stop => readSizeRects(sh, rects, thrAt, lens, sp, stop))

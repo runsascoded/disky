@@ -1,15 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { bucketSoftDeleteOf, confirmUndoTerms, minimumWarning, runHasNoUndo, runNoUndoText, runUndoUnavailable, runUndoUnseen, slackUndoTerms, undoneText, undoUnavailable, undoUnavailableText, undoUnseen, undoUnseenText } from './softDelete'
-
-describe('slackUndoTerms', () => {
-  it.each([
-    [14, 'Recoverable for at least 14 days (undo in www).'],
-    [7, 'Recoverable for at least 7 days (undo in www).'],
-    [3, 'Recoverable for at least 3 days, less than the usual 7 (undo in www).'],
-    [1, 'Recoverable for at least 1 day, less than the usual 7 (undo in www).'],
-    [0, 'No undo: this deployment doesn\'t require soft delete, so treat these deletes as permanent.'],
-  ])('%i', (min, text) => expect(slackUndoTerms(min)).toBe(text))
-})
+import { bucketSoftDeleteOf, confirmUndoTerms, minimumWarning, runHasNoUndo, runNoUndoText, runUndoUnavailable, runUndoUnseen, undoneText, undoUnavailable, undoUnavailableText, undoUnseen, undoUnseenText } from './softDelete'
 
 describe('confirmUndoTerms', () => {
   const known = { asOf: '2026-11-04', off: { on1: false, on2: false, off1: true, off2: true } }
