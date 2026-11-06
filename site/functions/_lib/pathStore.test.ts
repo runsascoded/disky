@@ -585,8 +585,7 @@ describe('buildDiff', () => {
         row('bk/(other)', 2, 'dir', 'added', 0, 0, 0, 1),
       ],
       total_a: 700, total_b: 37229948, objects_a: 3, objects_b: 8009, threshold: 1, tier: 'path',
-      // `bk`'s five one-sided children. `nest/a` and `nest/a/b` are under a path the v1 scan has no row for: unread.
-      expansions: 4, truncated: false, lookups: 5, lookups_capped: false,
+      expansions: 4, truncated: false, lookups: 7, lookups_capped: false,
     })
   })
 

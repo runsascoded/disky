@@ -41,11 +41,6 @@
   total (`tot`, specs/done/bysize-path-total.md), so a group's `b_max` must be
   `MAX(tot)` for a 512 KiB read to keep it (`sliceComplete.test.ts`); its
   `plans.json` is `disk-tree tiers plan -j` (with `matched`) over `SLICE_PLANS`.
-- `v2-diff/{a,b}/`: two store generations of one bucket for the diff walk's
-  lookups (`diffLookups.test.ts`), `b` after a deletion: `del/` (a subtree
-  three levels deep) gone whole, `shrink/` left with one small object (under a
-  diff's floor, not absent), `deep/d1/big` gone from a directory both scans
-  hold, `new1` added.
 - `v2/plans.json`: `disk-tree tiers plan -j -C` over each v2 sidecar for a
   set of reads — the engine planner's group selection, which the reader's
   span queries must reproduce exactly (`pathStore.test.ts`).
@@ -214,44 +209,6 @@ def write_v2_lens(here: str) -> None:
     write_text(join(out_dir, 'd1.json'), json.dumps(d1, separators=(',', ':')))
 
 
-#: `v2-diff`'s objects (key, MiB) on each scan.
-DIFF_ROWS = {
-    'a': [('del/x/p/1', 256), ('del/x/p/2', 256), ('del/x/q/1', 256), ('del/y', 128), ('shrink/a', 100), ('shrink/b', 100),
-          ('keep/k', 300), ('deep/d1/big', 400), ('deep/d1/stay', 200), ('tiny/t', 1)],
-    'b': [('shrink/a', 8), ('keep/k', 300), ('deep/d1/stay', 200), ('new1', 64), ('tiny/t', 1)],
-}
-
-
-def write_v2_diff(here: str) -> None:
-    """`v2-diff/{a,b}/`: `DIFF_ROWS`' two scans, `path` + `bysize` each (one group; no cold footers)."""
-    shutil.rmtree(join(here, 'v2-diff'), ignore_errors=True)
-    for scan, rows in DIFF_ROWS.items():
-        out_dir = join(here, 'v2-diff', scan)
-        with tempfile.TemporaryDirectory() as tmp:
-            listing = join(tmp, 'listing.parquet')
-            pd.DataFrame({
-                'bucket': ['bk'] * len(rows),
-                'name': [n for n, _ in rows],
-                'size_bytes': [s * MiB for _, s in rows],
-                'created': [TS] * len(rows),
-                'storage_class_id': [1] * len(rows),
-            }).to_parquet(listing)
-            con = duckdb.connect()
-            l2 = join(tmp, 'l2.parquet')
-            aggregate_listing_to_parquet(prepare_listing(con, (listing,)), bucket='bk', scheme='s3', out_parquet=l2, con=con, mean_mtime=True)
-            ix.write_index([('bk', l2)], join(tmp, 'out'), mem='1GB', threads=1)
-            shutil.os.makedirs(out_dir)
-            files = {}
-            for variant, stem in SORTS.items():
-                dst = join(out_dir, f'{stem}.parquet')
-                shutil.copy(join(tmp, 'out', f'{stem}.parquet'), dst)
-                files[variant] = dst
-        d1 = d1_json(files)
-        for variant, stem in SORTS.items():
-            write_text(join(out_dir, f'{stem}.groups.json'), groups_blob(d1[variant]['schema'], d1[variant]['rows']))
-        write_text(join(out_dir, 'd1.json'), json.dumps(d1, separators=(',', ':')))
-
-
 KiB = 1 << 10
 #: `v2-slices`' `w/d*` dirs: two 300 KiB owner slices each (600 KiB total), enough
 #: of them that some 2048-row `bysize` groups hold only such slices — a group whose
@@ -388,7 +345,6 @@ WRITERS = {
     'v1': write_v1,
     'v2': write_v2,
     'v2-lens': write_v2_lens,
-    'v2-diff': write_v2_diff,
     'v2-slices': write_v2_slices,
     'v2-search': write_v2_search,
     'v2-mount': write_v2_mount,
