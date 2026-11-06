@@ -133,6 +133,8 @@ const SPAN = 'from=2026-09-01&to=2026-10-01'
 const STAGING = { STAGING: '1' }
 const INTERVALS = { PATH_STORE: 'intervals', INTERVAL_STORE_GEN: 'g1', INDEX_R2: { get: async () => null, head: async () => null } }
 const GOOGLE = { GOOGLE_CLIENT_ID: 'client-id', GOOGLE_CLIENT_SECRET: 'client-secret' }
+/** "Sign in with OA" configured (`oaLoginConfig`): the broker, and this deployment's client on it. */
+const OA_LOGIN = { OA_LOGIN_ISSUER: 'https://login.example.test', OA_LOGIN_CLIENT_ID: 'client-id', OA_LOGIN_CLIENT_SECRET: 'client-secret' }
 const MAIL = { RESEND_API_KEY: 'resend-key', MAIL_FROM: 'Disky <disky@example.org>' }
 
 const SHARED_ROUTES: Record<string, Case[]> = {
@@ -278,6 +280,11 @@ const SHARED_ROUTES: Record<string, Case[]> = {
   'auth/google/client.ts': [get('/auth/google/client', 'public')],
   'auth/google/onetap.ts': [post('/auth/google/onetap', 'google-credential', GOOGLE), post('/auth/google/onetap', 'unconfigured')],
   'auth/google/onetap/nonce.ts': [get('/auth/google/onetap/nonce', 'public')],
+  // "Sign in with OA" (`specs/oa-login-rp.md`): sign-in itself; a 404 until the deployment has its broker client.
+  'auth/oa.ts': [get('/auth/oa', 'public', OA_LOGIN), get('/auth/oa', 'unconfigured')],
+  'auth/oa/callback.ts': [get('/auth/oa/callback', 'public', OA_LOGIN), get('/auth/oa/callback', 'unconfigured')],
+  // Whether the wall shows the button.
+  'auth/oa/client.ts': [get('/auth/oa/client', 'public')],
   'data/[[path]].ts': [get('/data/scans.json', 'viewer'), get('/data/2026-10-01/meta.json', 'viewer')],
   // A card: its signature picks its tier (unsigned: the anonymous card), nothing signs in.
   'og/[[path]].ts': [get('/og/map.png', 'public')],
@@ -409,6 +416,9 @@ const SHARED_RESTRICTED: Record<string, Restricted> = {
   'GET /auth/google/callback': 'anonymous',
   'GET /auth/google/client': 'anonymous',
   'GET /auth/google/onetap/nonce': 'anonymous',
+  'GET /auth/oa': 'anonymous',
+  'GET /auth/oa/callback': 'anonymous',
+  'GET /auth/oa/client': 'anonymous',
   // The scan list, and a scan's `meta.json`; of the rest, `age.json` unless a hidden dir is top-level, and
   // `rules.json` without the rules below a hidden path (`_lib/restrict.ts` `dataAllowed`, `restrictRules`).
   'GET /data/scans.json': 'filtered',
