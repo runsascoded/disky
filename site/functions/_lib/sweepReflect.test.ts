@@ -58,9 +58,9 @@ describe('D1', () => {
     describe('a finished job\'s outcome, for its Slack message', () => {
       const finishedRow = async (id: string) => {
         const { db } = await sqliteD1()
-        await db.prepare("INSERT INTO plans (id, name, state, created_by, created_ts) VALUES (1, 'Staged', 'open', 'ann@openathena.ai', 1)").run()
+        await db.prepare("INSERT INTO plans (id, name, state, created_by, created_ts) VALUES (1, 'Staged', 'open', 'ann@staff.example.test', 1)").run()
         await db.prepare(`INSERT INTO deletion_runs (run_id, ${RUN_DIR}, scan, head, exec_head, actor, mode, started_ts, finished_ts, log_dir, plan_id)
-          VALUES ('r', ?, '2026-09-28', 0, 0, 'ann@openathena.ai', 'real', 100, 500, ?, 1)`).bind(runDir(CFG, id), runDir(CFG, id)).run()
+          VALUES ('r', ?, '2026-09-28', 0, 0, 'ann@staff.example.test', 'real', 100, 500, ?, 1)`).bind(runDir(CFG, id), runDir(CFG, id)).run()
         return db
       }
       const id = 'gcs-sweep-real-ok'
@@ -175,18 +175,18 @@ describe('D1', () => {
     })
     it('a succeeded job has no reason to read', async () => {
       const { db } = await sqliteD1()
-      await db.prepare("INSERT INTO plans (id, name, state, created_by, created_ts) VALUES (1, 'Staged', 'open', 'ann@openathena.ai', 1)").run()
+      await db.prepare("INSERT INTO plans (id, name, state, created_by, created_ts) VALUES (1, 'Staged', 'open', 'ann@staff.example.test', 1)").run()
       await db.prepare(`INSERT INTO deletion_runs (run_id, ${RUN_DIR}, scan, head, exec_head, actor, mode, started_ts, finished_ts, log_dir, plan_id)
-        VALUES ('r', ?, '2026-09-28', 0, 0, 'ann@openathena.ai', 'real', 100, 500, ?, 1)`).bind(runDir(CFG, 'gcs-sweep-real-ok'), runDir(CFG, 'gcs-sweep-real-ok')).run()
+        VALUES ('r', ?, '2026-09-28', 0, 0, 'ann@staff.example.test', 'real', 100, 500, ?, 1)`).bind(runDir(CFG, 'gcs-sweep-real-ok'), runDir(CFG, 'gcs-sweep-real-ok')).run()
       const reason = async () => { throw new Error('a succeeded job has no failure to read') }
       expect(await reflectSweepRuns(CFG, db, [job('gcs-sweep-real-ok', 'SUCCEEDED', 'D')], SOON, reason, RUN_DIR)).toEqual([{ run_id: 'r', ok: true }])
     })
     it('copies PLAN_DIGEST onto finished rows, closes rows whose job died, leaves the rest; idempotent', async () => {
       const { db } = await sqliteD1()
-      await db.prepare("INSERT INTO plans (id, name, state, created_by, created_ts) VALUES (1, 'Staged', 'open', 'ann@openathena.ai', 1)").run()
+      await db.prepare("INSERT INTO plans (id, name, state, created_by, created_ts) VALUES (1, 'Staged', 'open', 'ann@staff.example.test', 1)").run()
       const row = async (runId: string, jobId: string, finished: number | null) => db.prepare(`
       INSERT INTO deletion_runs (run_id, ${RUN_DIR}, scan, head, exec_head, actor, mode, started_ts, finished_ts, log_dir, plan_id)
-      VALUES (?, ?, '2026-09-28', 0, 0, 'ann@openathena.ai', 'dry', 100, ?, ?, 1)
+      VALUES (?, ?, '2026-09-28', 0, 0, 'ann@staff.example.test', 'dry', 100, ?, ?, 1)
     `).bind(runId, runDir(CFG, jobId), finished, runDir(CFG, jobId)).run()
       await row('2026-09-28-p1/a', 'gcs-sweep-dry-a', 500)   // executor recorded the end
       await row('2026-09-28-p1/b', 'gcs-sweep-dry-b', null)  // still running

@@ -45,37 +45,37 @@ const db = (rows: { allowed?: string[]; admin?: string[] }) => ({
 const cw = (rows: { allowed?: string[]; admin?: string[] }, extra: Partial<Env> = {}): Env => ({
   DB: db(rows),
   BASE_SCOPE: 'cw',
-  STAFF_DOMAIN: 'openathena.ai',
-  VIEWER_DOMAINS: 'coreweave.com',
+  STAFF_DOMAIN: 'staff.example.test',
+  VIEWER_DOMAINS: 'viewer.example.test',
   ADMIN_EMAILS: '1',
   ...extra,
 })
 
 describe('scopesFor — the in-app policy that replaces the Access policy', () => {
   it('staff get every scope', async () => {
-    expect(await scopesFor(cw({}))('ryan@openathena.ai')).toEqual(['gcs', 'cw', 'admin', 'requests', 'cw:assign'])
+    expect(await scopesFor(cw({}))('ryan@staff.example.test')).toEqual(['gcs', 'cw', 'admin', 'requests', 'cw:assign'])
   })
 
   it("staff on a store other than gcs/cw also get that store's base scope", async () => {
-    const env = cw({}, { BASE_SCOPE: 'laptop', STAFF_DOMAIN: 'runsascoded.com' })
-    expect(await scopesFor(env)('ryan@runsascoded.com')).toEqual(['gcs', 'cw', 'admin', 'requests', 'laptop', 'laptop:assign'])
+    const env = cw({}, { BASE_SCOPE: 'laptop', STAFF_DOMAIN: 'lab.example.test' })
+    expect(await scopesFor(env)('alice@lab.example.test')).toEqual(['gcs', 'cw', 'admin', 'requests', 'laptop', 'laptop:assign'])
   })
 
   it('no STAFF_DOMAIN (unset or empty): nobody is staff by domain', async () => {
     for (const STAFF_DOMAIN of [undefined, '']) {
       const env = cw({}, { STAFF_DOMAIN })
-      expect(await scopesFor(env)('ryan@openathena.ai')).toBe(null)
+      expect(await scopesFor(env)('ryan@staff.example.test')).toBe(null)
       expect(await scopesFor(env)('anyone@example.com')).toBe(null)
-      expect(await isAdmin(env, 'ryan@openathena.ai')).toBe(false)
+      expect(await isAdmin(env, 'ryan@staff.example.test')).toBe(false)
     }
   })
 
   it('a viewer domain gets the base scope + assign with no allowlist row', async () => {
-    expect(await scopesFor(cw({}))('someone@coreweave.com')).toEqual(['cw', 'cw:assign'])
+    expect(await scopesFor(cw({}))('someone@viewer.example.test')).toEqual(['cw', 'cw:assign'])
   })
 
   it('a viewer-domain admin_emails row adds admin', async () => {
-    expect(await scopesFor(cw({ admin: ['ops@coreweave.com'] }))('ops@coreweave.com')).toEqual(['cw', 'cw:assign', 'admin'])
+    expect(await scopesFor(cw({ admin: ['ops@viewer.example.test'] }))('ops@viewer.example.test')).toEqual(['cw', 'cw:assign', 'admin'])
   })
 
   it('an allowed_emails row admits any other address, lower-cased', async () => {
@@ -89,7 +89,7 @@ describe('scopesFor — the in-app policy that replaces the Access policy', () =
   it('without ADMIN_EMAILS the admin table is never consulted (gcs shape)', async () => {
     const env = cw({ allowed: ['guest@example.org'] }, { ADMIN_EMAILS: undefined, VIEWER_DOMAINS: undefined, BASE_SCOPE: 'gcs' })
     expect(await scopesFor(env)('guest@example.org')).toEqual(['gcs', 'gcs:assign'])
-    expect(await scopesFor(env)('someone@coreweave.com')).toBeNull()
+    expect(await scopesFor(env)('someone@viewer.example.test')).toBeNull()
   })
 
   it('no DB (local dev) admits non-staff to the base scope + assign', async () => {
@@ -99,10 +99,10 @@ describe('scopesFor — the in-app policy that replaces the Access policy', () =
 
 describe('isAdmin', () => {
   it('staff by domain, otherwise the admin_emails row where the table exists', async () => {
-    expect(await isAdmin(cw({}), 'ryan@openathena.ai')).toBe(true)
-    expect(await isAdmin(cw({ admin: ['ops@coreweave.com'] }), 'Ops@coreweave.com')).toBe(true)
-    expect(await isAdmin(cw({ admin: ['ops@coreweave.com'] }), 'other@coreweave.com')).toBe(false)
-    expect(await isAdmin(cw({ admin: ['ops@coreweave.com'] }, { ADMIN_EMAILS: undefined }), 'ops@coreweave.com')).toBe(false)
+    expect(await isAdmin(cw({}), 'ryan@staff.example.test')).toBe(true)
+    expect(await isAdmin(cw({ admin: ['ops@viewer.example.test'] }), 'Ops@viewer.example.test')).toBe(true)
+    expect(await isAdmin(cw({ admin: ['ops@viewer.example.test'] }), 'other@viewer.example.test')).toBe(false)
+    expect(await isAdmin(cw({ admin: ['ops@viewer.example.test'] }, { ADMIN_EMAILS: undefined }), 'ops@viewer.example.test')).toBe(false)
   })
 })
 
@@ -122,14 +122,14 @@ describe('D1', () => {
       raw.exec('ALTER TABLE allowed_emails DROP COLUMN read_only')
       raw.exec("INSERT INTO allowed_emails (email, note, who, ts) VALUES ('guest@example.org', NULL, 'admin', 1)")
       expect([await allowedRow(db, 'guest@example.org'), await allowedRow(db, 'nobody@example.org')]).toEqual([{ read_only: 0 }, null])
-      const env = { DB: db, BASE_SCOPE: 'cw', STAFF_DOMAIN: 'openathena.ai' } as Env
+      const env = { DB: db, BASE_SCOPE: 'cw', STAFF_DOMAIN: 'staff.example.test' } as Env
       expect(await scopesFor(env)('Guest@example.org')).toEqual(['cw', 'cw:assign'])
     })
 
     it('a `read_only` row is the read-only tier alone — no assign', async () => {
       const { db, raw } = await sqliteD1()
       raw.exec("INSERT INTO allowed_emails (email, note, who, ts, read_only) VALUES ('ro@example.org', NULL, 'admin', 1, 1)")
-      const env = { DB: db, BASE_SCOPE: 'cw', STAFF_DOMAIN: 'openathena.ai' } as Env
+      const env = { DB: db, BASE_SCOPE: 'cw', STAFF_DOMAIN: 'staff.example.test' } as Env
       expect(await scopesFor(env)('ro@example.org')).toEqual(['cw:read'])
     })
   })
