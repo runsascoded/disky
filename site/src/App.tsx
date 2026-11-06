@@ -58,6 +58,7 @@ import { RootCrumb } from './RootCrumb'
 import { actBlock, noMatches } from './matchAct'
 import { type BlindPanel, blindNote, blindShown } from './filterBlind'
 import { LoadFailure, mapSlot } from './LoadFailure'
+import { graftSpine, levelAsk, levelTree, spinePaths, spineReady } from './spine'
 import { REJECT_MESSAGES, rejectQuery } from '../functions/_lib/indexedOnly'
 import { FilterFlags, FilterNote, matchedNote } from './FilterNote'
 import { UnionScanPicker } from './UnionScanPicker'
@@ -453,23 +454,26 @@ function AppContent() {
     return picks
   }, [asof, earlier, times])
   // Lazy drill (specs/done/path-index-lazy-drill.md step 3, now the primary
-  // source): the map's base is the pixel-budget subtree at the store root,
-  // and every level of the drilled path gets its own subtree query, grafted
-  // in depth order — interactive drills hit each level's cache as they go,
-  // and a cold deep link fans the whole chain out in parallel.
+  // source): the map's base is the store root's answer, and every level of
+  // the drilled path gets its own subtree queries, grafted in depth order
+  // (`spine.ts`). The drilled level alone asks its full pixel-budget view; an
+  // ancestor asks one level (`depth=1`: its node on the spine, and its
+  // children ready for a zoom-out's first paint), and its full view once the
+  // viewer zooms out to it. Interactive drills reuse each level's held
+  // answers as they go, and a cold deep link fans the chain's light reads
+  // out in parallel.
   const graftPath = mountedSegs(store.root, fromUrlPath(pathname.slice((store.path === '/' ? '' : store.path).length))).join('/')
   const canW = canvasWidth(typeof window === 'undefined' ? 1280 : window.innerWidth)
   // Perf-mark keys (`perf.ts`): what tells one load of a widget from another
   // on this page — path, scan(s), canvas width, scope.
   const viewKey = (p: string, d: string | null | undefined, extra = '') => `${p || '/'}@${d}|w${canW}${scopeQs}${extra}`
-  const subtreePaths = useMemo(() => {
-    const segs = graftPath.split('/').filter(Boolean)
-    return ['', ...segs.map((_, i) => segs.slice(0, i + 1).join('/'))]
-  }, [graftPath])
+  const subtreePaths = useMemo(() => spinePaths(graftPath), [graftPath])
   const subtreeQs = useQueries({
-    queries: subtreePaths.map(p => ({
+    queries: subtreePaths.map((p, i) => ({
       queryKey: ['subtree', store.key, cutKey, p, canW, scopeKey],
-      enabled: !!asof && scopeReady,
+      // An ancestor's full view is asked once the viewer zooms out to it (`levelAsk`). One already held (the
+      // viewer drilled down through it) stays observed here, so it is still held then.
+      enabled: !!asof && scopeReady && levelAsk(i, subtreePaths.length, { filtered: !!fq, fullHeld: false }).full,
       staleTime: Infinity,
       // A budget-cut answer (`budgetCut`) is upgraded at the edge in the background: ask again until whole.
       refetchInterval: (q: { state: { data?: { budgetCut?: boolean }; dataUpdateCount: number } }) => budgetCutRefetch(q.state.data, q.state.dataUpdateCount),
@@ -499,14 +503,18 @@ function AppContent() {
   // the top level matches, the fill-in adds children under tiles that don't
   // move. The whole held tree (`mapTree`, below) outranks it on later loads,
   // so a scope change never downgrades a held full tree to a coarse one.
+  // An ancestor asks this read alone (`levelAsk`): the same request, so the same cached answer, as the first
+  // paint it made (or, on a zoom-out, will make) as the drilled level.
   const coarseQs = useQueries({
     queries: subtreePaths.map((p, i) => ({
       queryKey: ['subtree', store.key, cutKey, p, canW, scopeKey, 'depth1'],
-      // Deepest path only — see `dataFor`; ancestors use it only under a filter, where it is the
-      // exact forest of match roots (cheap from the static name index).
-      enabled: !!asof && scopeReady && (i === subtreePaths.length - 1 || !!fq),
+      // Under a filter it is the exact forest of match roots (cheap from the static name index), at every level.
+      enabled: !!asof && scopeReady && levelAsk(i, subtreePaths.length, { filtered: !!fq, fullHeld: !!subtreeQs[i]?.data }).shallow,
       staleTime: Infinity,
-      retry: false,
+      // A first paint is optional (the full view follows it). An ancestor's one level is all the spine has of
+      // it, so it retries as a full view does: transient failures, not the deterministic 4xx.
+      retry: (n: number, e: Error) => i < subtreePaths.length - 1 && !fq && !/^4\d\d/.test(e.message) && n < 3,
+      retryDelay: (n: number) => 400 * 2 ** n,
       // Plain view: one depth band. Filtered view: the whole forest from the
       // coarsest tier (`partial`, milliseconds) — the fast first paint of
       // specs/filter-views.md, replaced by the planned-tier read above.
@@ -516,21 +524,20 @@ function AppContent() {
           `/api/subtree?cv=${API_CV}&${cutQs}&path=${encodeURIComponent(p)}&w=${canW}&h=${Math.round(canW * 0.6)}${fq ? '' : '&depth=1'}${scopeQs}`,
           { credentials: 'include', signal },
         ))
-        if (!r.ok) { pf.fail(); throw new Error(`${r.status}`) }
+        if (!r.ok) { pf.fail(); throw apiError(r.status, await r.text()) }
         const j = await r.json() as MatchFields & { tree: TreeNode; tier?: string; partialReason?: string; approximateReason?: string; hexRuns?: { min: number; tail: number }; union?: UnionVector }
         pf.decoded()
         return j
       },
     })),
   })
-  /** The full tree for path i once it's here; for the DEEPEST path only, the
-   * depth-1 one while it isn't. An ancestor must be full or absent: `mapPath`
-   * walks the spine by segment and truncates at the first node without
-   * children, so a depth-1 ancestor would collapse the drill to itself and
-   * the controlled path would thrash until the full spine landed. The
-   * deepest node's children are the visible map — the walk never descends
-   * through them, and that's the level whose speed matters. */
-  // Full > depth-1 (deepest only). Never a *held* previous tree here: a graft
+  /** The tree level i gives the graft (`levelTree`): its full view once it's
+   * here, else its depth-1 one. The deepest node's children are the visible
+   * map. An ancestor gives the spine its node, whose children the next
+   * level's graft supplies: `mapPath` walks the spine by segment and stops at
+   * the first node without the next one, so the map draws once the spine
+   * reaches the drilled path (`spineReady`, below). */
+  // Full > depth-1. Never a *held* previous tree here: a graft
   // must receive a node's own subtree. Holding, say, the previous sibling's
   // tree under a new name puts this node's totals over that node's children,
   // and children that don't sum to their parent send the core's fold
@@ -540,23 +547,18 @@ function AppContent() {
   // Under a filter an ancestor may stand in with its first-paint forest, when that forest carries the
   // next spine segment WITH children (an ancestor of match roots): a drilled deep link then paints
   // from the cheap reads instead of waiting on every ancestor's full forest.
-  const spineHasKids = (t: TreeNode, i: number): boolean => {
-    const seg = subtreePaths[i + 1]?.split('/').pop()
-    return !!t.c?.some(k => k.n === seg && k.c?.length)
-  }
-  const dataFor = (i: number): TreeNode | null => {
-    const full = subtreeQs[i]?.data?.tree
-    if (full) return full
-    const coarse = coarseQs[i]?.data?.tree ?? null
-    if (i === subtreePaths.length - 1) return coarse
-    return fq && coarse && spineHasKids(coarse, i) ? coarse : null
-  }
+  const dataFor = (i: number): TreeNode | null => levelTree({
+    full: subtreeQs[i]?.data?.tree, shallow: coarseQs[i]?.data?.tree,
+    deepest: i === subtreePaths.length - 1, filtered: !!fq, next: subtreePaths[i + 1]?.split('/').pop(),
+  })
   const baseTree: TreeNode | null = dataFor(0)
   // Whether this scan lists objects (a path-store generation, whose leaves
   // can be objects) or is a v1 dir-only index — every response of one scan
   // answers alike, so the first that has landed says.
   const objects = listsObjects([...subtreeQs, ...coarseQs].find(q => q.data?.tier)?.data?.tier)
-  const rootErr = subtreeQs[0]?.error as Error | undefined
+  // The root level's read: its full view at the root (or held, or under a filter), else the one level a drilled page asks of it.
+  const rootQ = (subtreePaths.length > 1 && !fq && !subtreeQs[0]?.data ? coarseQs : subtreeQs)[0]
+  const rootErr = rootQ?.error as Error | undefined
   // A drilled view the filter refuses (a heavy literal with no drilldown is `term-too-common` below the fleet
   // root): its reason, in the box's note and the map slot, as the root's would be — never the held parent's tiles.
   const deepErr = subtreePaths.length > 1 ? subtreeQs[subtreePaths.length - 1]?.error as Error | undefined : undefined
@@ -572,41 +574,19 @@ function AppContent() {
   // Both tiers stamp the graft: a depth-1 tree landing must re-run it just
   // as a full one does.
   const subStamp = [...subtreeQs, ...coarseQs].map(q => q.dataUpdatedAt).join(',')
+  // The levels with no answer yet whose read is in flight (`spineReady` waits on them), stamped as the data is.
+  const subLoading = subtreePaths.map((_, i) => !dataFor(i) && !!(subtreeQs[i]?.isLoading || coarseQs[i]?.isLoading))
+  const loadStamp = subLoading.map(Number).join('')
   const tree = useMemo((): TreeNode | null => {
-    if (!baseTree) return null
-    const graftAt = (t: TreeNode, segs: string[], sub: TreeNode, coarse: boolean): TreeNode => {
-      const rec = (n: TreeNode, i: number): TreeNode => {
-        // A depth-1 stand-in never replaces deeper children the parent's
-        // tree already carries for this node: a drill into a tile the parent
-        // drew to depth would otherwise flatten it to one level until the
-        // full subtree lands (seconds, on a cold path).
-        if (i === segs.length && coarse && n.c?.some(k => k.c?.length)) return n
-        // Keep own totals; adopt the finer children — and the response root's
-        // provenance (`pv`), which a parent-level view may have skipped.
-        if (i === segs.length) return { ...n, c: sub.c, ...(sub.pv ? { pv: sub.pv } : {}) }
-        const seg = segs[i]
-        const kids = n.c ?? []
-        if (kids.some(k => k.n === seg)) return { ...n, c: kids.map(k => (k.n === seg ? rec(k, i + 1) : k)) }
-        // The spine segment fell below this level's pixel budget (it's inside
-        // "(other)"): synthesize it from its own subtree response — the
-        // response root carries the real totals — and shave those bytes off
-        // the fold so the level still sums. Deeper segments wait for their
-        // own level's graft to land.
-        if (i !== segs.length - 1) return n
-        const c = kids.map(k =>
-          k.n === '(other)' ? { ...k, b: Math.max(0, k.b - sub.b), o: Math.max(0, k.o - sub.o) } : k)
-        return { ...n, c: [...c, { ...sub, n: seg }] }
-      }
-      return rec(t, 0)
-    }
-    let t = baseTree
-    subtreePaths.forEach((p, i) => {
+    const t = graftSpine(subtreePaths, subtreePaths.map((_, i) => {
       const sub = dataFor(i)
-      if (p && sub) t = graftAt(t, p.split('/'), sub, !subtreeQs[i]?.data)
-    })
-    return t
+      return sub && { tree: sub, shallow: !subtreeQs[i]?.data }
+    }))
+    // Unfiltered, the map draws once the spine reaches the drilled path with something under it: never an
+    // ancestor's view or an empty canvas in passing while the chain's reads land (the last tree is held, below).
+    return t && (fq || spineReady(t, graftPath, subLoading)) ? t : null
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [baseTree, subtreePaths, subStamp])
+  }, [baseTree, subtreePaths, subStamp, loadStamp, fq])
   // Hold the last tree that rendered while the next one loads — whole, so it
   // is self-consistent (it already laid out fine). The map never flashes to
   // nothing across a scope, scan, or drill change, and the page below never
@@ -642,7 +622,7 @@ function AppContent() {
   const mapFailed = !!deepRefused || mapSlot(tree, lastTree.current, rootErr) === 'failed'
   const retryMap = () => { for (const q of [...subtreeQs, ...coarseQs]) if (q.isError) void q.refetch() }
   // A failed attempt being retried: say so on the held map's marker.
-  const mapRetrying = subtreeQs[0]?.failureReason && !rootErr ? `retrying (${subtreeQs[0].failureReason.message.slice(0, 80)})…` : null
+  const mapRetrying = rootQ?.failureReason && !rootErr ? `retrying (${rootQ.failureReason.message.slice(0, 80)})…` : null
 
   // Bulk actions (the bar, the table's rows) under a filter take its matches under the view as the fewest
   // exact prefixes (`/api/filter-cover`): every match, listed, never a drawn subset or a row's whole prefix.

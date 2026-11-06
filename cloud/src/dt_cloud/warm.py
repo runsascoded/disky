@@ -7,8 +7,10 @@ several seconds; it was 20 s before the batched lookups). So the daily job,
 once the scan is servable, replays the requests the home page makes for its
 default views — the size-over-time series per path (width-independent; a new
 scan is a new cache key, so its first viewer otherwise pays the over-time
-reads), then one subtree + the diff span chips (1d/3d/7d/14d/30d, plus the
-plain previous-scan pair) each with its `summary=1` twin — at the canvas
+reads), then each path's subtree, in full and one level deep (`depth=1`: the
+view's first paint, and all a page drilled below the path asks of it), + the
+diff span chips (1d/3d/7d/14d/30d, plus the plain previous-scan pair) each
+with its `summary=1` twin — at the canvas
 widths common laptops and phones produce. The cache keys include the pixel
 budget: the client snaps its window up to the nearest of these WIDTHS
 (`site/src/canvas.ts` `canvasWidth`; past the widest, the 128-px step) and
@@ -94,8 +96,9 @@ def series_url(path: str) -> str:
 def plan(date: str, dates: list[str], paths: tuple[str, ...], widths: tuple[int, ...] = WIDTHS, spans: tuple[int, ...] = SPANS) -> list[str]:
     """The request paths (no host) to replay for ``date``, deduplicated: each
     path's series first, then, in the order the page issues them, per width
-    the root's subtree and each diff pair's summary + full rows, then the same
-    for each bucket drill."""
+    the root's subtree (its full view, then its one level: what every drilled
+    page asks of an ancestor, `site/src/spine.ts`) and each diff pair's summary
+    + full rows, then the same for each bucket drill."""
     earlier = [d for d in dates if d < date]
     pairs: list[str] = []
     if earlier:
@@ -109,6 +112,7 @@ def plan(date: str, dates: list[str], paths: tuple[str, ...], widths: tuple[int,
         h = round(w * 0.6)
         for path in paths:
             out.append(f"/api/subtree?date={date}&path={path}&w={w}&h={h}")
+            out.append(f"/api/subtree?date={date}&path={path}&w={w}&h={h}&depth=1")
             for p in pairs:
                 base = f"/api/diff?from={p}&to={date}&path={path}&w={w}&h={h}"
                 out.append(base + "&summary=1")
