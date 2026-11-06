@@ -3,6 +3,7 @@
 // delta against the previous scan, a run's summary row, phase lanes, links.
 // DOM-free: the Functions (`_lib/scanRuns.ts`) and the pages share it.
 import { exactSlug, isScanId, scanTime } from './scanSlug'
+import STEP_FAILURES from './scanSteps.json'
 
 export type ScanRunStatus = 'running' | 'succeeded' | 'failed' | 'nop'
 
@@ -200,8 +201,43 @@ export interface PhaseRecovery { run: ScanRun; phases: ScanRunPhase[]; secs: num
 /** A phase that left the run short: failed (`outcome` its `phaseOutcome`; `attempts` when more than one failed,
  * `detail` the last one's verdict, its note without the exit clause), skipped (`outcome` `skipped`, `reason` its note's
  * skip clause), or done with its search behind (`outcome` `search behind`, `reason` its note's `search behind:` clause:
- * the data is published, only the static name index lags it). */
+ * the data is published, only the static name index lags it). `recovery`: the run that did its work since: a linked
+ * attempt of this run's own (a `phase-recovery` child), else, for a step a later run converges, that run. */
 export interface PhaseIssue { phase: string; outcome: string; recovery: ScanRun | null; reason?: string; attempts?: number; detail?: string }
+
+/** A soft step's failure as its step declares it (`dt_cloud.scan_steps.Step`): what it `leaves` short, whether it is a
+ * `side` step (the scan's data and serving are whole without it), and whether a later run's same step `converges` it
+ * (does this run's work too). */
+export interface StepFailure { leaves: string; side: boolean; converges: boolean }
+
+/** The failure fields of the step a phase is named for; undefined for a phase no soft step names (a core stage's
+ * nonfatal command), which reads as leaving the scan short. The table is the registry's own: `scanSteps.json` is
+ * `dt-cloud scan steps`' output, and `cloud/tests/test_scan_steps.py` fails when they differ. */
+export const stepFailure = (phase: string): StepFailure | undefined =>
+  (Object.hasOwn(STEP_FAILURES, phase) ? (STEP_FAILURES as Record<string, StepFailure>)[phase] : undefined)
+
+/** Where an issue stands: `recovered` (a later attempt or run did its work), `behind` (only search lags the scan),
+ * `side` (a side step failed and stays failed: the scan's data and serving are whole), or `incomplete` (the scan's
+ * data or serving is short). */
+export type IssueState = 'recovered' | 'behind' | 'side' | 'incomplete'
+export function issueState(i: Pick<PhaseIssue, 'phase' | 'outcome' | 'recovery'>): IssueState {
+  return i.recovery ? 'recovered' : i.outcome === BEHIND ? 'behind' : stepFailure(i.phase)?.side ? 'side' : 'incomplete'
+}
+
+/** What happened to an issue's phase, in a few words: `failed`, `failed 2x`, `timed out`, `skipped: <reason>` (the
+ * recorded reason, without its `skipped (kind):` head), `search behind`. */
+export function issueWhat(i: Pick<PhaseIssue, 'outcome' | 'reason' | 'attempts'>): string {
+  if (i.outcome === BEHIND) return BEHIND
+  if (i.reason) return `skipped: ${i.reason.replace(/^skipped(?: \([^)]*\))?: /, '')}`
+  return (i.attempts ?? 1) > 1 ? `${i.outcome} ${i.attempts}x` : i.outcome
+}
+
+/** Where an unrecovered issue goes from here: search catches up with the index; a converging step's work comes with
+ * a later run's same step; any other is not retried. */
+export function issueNext(i: Pick<PhaseIssue, 'phase' | 'outcome'>): string {
+  if (i.outcome === BEHIND) return 'Search catches up when the static name index appends this scan.'
+  return stepFailure(i.phase)?.converges ? `A later run's ${i.phase} step does this run's work too; none has yet.` : 'Not retried: no later run redoes it.'
+}
 
 /** A done phase's `search behind: …` clause (`dt_cloud.scan_steps.probe`: every failure was the search's
  * `scan-not-indexed` refusal), else null. */
@@ -211,25 +247,60 @@ export function phaseBehind(p: Pick<ScanRunPhase, 'status' | 'note'>): string | 
 
 export const BEHIND = 'search behind'
 
+/** What a run came to. A succeeded run with issues reads as its worst open one (`issueState`): `incomplete` (the scan's
+ * data or serving is short: the one to look at), else `search behind`, else `partial` (only side steps failed), else
+ * `recovered` (every issue's work was done since). Otherwise its status (`nop` as `no-op`). */
 export function runOutcome(run: Pick<ScanRun, 'status'>, issues: readonly PhaseIssue[] = []): string {
   if (run.status === 'succeeded' && issues.length) {
-    const open = issues.filter(i => i.recovery == null)
-    return !open.length ? 'recovered' : open.every(i => i.outcome === BEHIND) ? BEHIND : 'partial'
+    const states = new Set(issues.map(issueState))
+    return states.has('incomplete') ? 'incomplete' : states.has('behind') ? BEHIND : states.has('side') ? 'partial' : 'recovered'
   }
   return run.status === 'nop' ? 'no-op' : run.status
 }
 
-/** Why a `partial` run is partial, one line per unrecovered issue: `<phase> <skip clause>` for a skip (its recorded
- * reason), `<phase> <outcome>` for a failure. */
+/** The steps behind an outcome: an `incomplete` run's steps that left the scan short, a `partial` run's failed side
+ * steps, a `recovered` run's recovered ones; none for any other outcome. */
+export function outcomeSteps(issues: readonly PhaseIssue[], outcome: string): string[] {
+  const state: IssueState | null = outcome === 'incomplete' ? 'incomplete' : outcome === 'partial' ? 'side' : outcome === 'recovered' ? 'recovered' : null
+  return state ? issues.filter(i => issueState(i) === state).map(i => i.phase) : []
+}
+
+/** `runOutcome` with its steps (`partial · warm-cache`, `recovered · static-names, digest`; past two, the first and a
+ * count: `partial · warm-cache +2`). */
+export function runOutcomeLabel(run: Pick<ScanRun, 'status'>, issues: readonly PhaseIssue[] = []): string {
+  const outcome = runOutcome(run, issues), steps = outcomeSteps(issues, outcome)
+  return steps.length ? `${outcome} · ${steps.length > 2 ? `${steps[0]} +${steps.length - 1}` : steps.join(', ')}` : outcome
+}
+
+/** Why a run is short, one line per unrecovered issue: `<phase> <skip clause>` for a skip (its recorded reason),
+ * `<phase> <outcome>` for a failure. */
 export function partialReasons(issues: readonly PhaseIssue[]): string[] {
   return issues.filter(i => i.recovery == null).map(i => `${i.phase} ${i.reason ?? i.outcome}`)
 }
 
-/** `runOutcome`, a `partial` one with its reasons: `partial: static-names skipped (busy): …`. */
+/** `runOutcome`, a short one with its reasons: `incomplete: static-names skipped (busy): …`, `partial: warm-cache failed`. */
 export function runOutcomeLine(run: Pick<ScanRun, 'status'>, issues: readonly PhaseIssue[] = []): string {
   const outcome = runOutcome(run, issues)
-  return outcome === 'partial' || outcome === BEHIND ? `${outcome}: ${partialReasons(issues).join('; ')}` : outcome
+  return outcome === 'partial' || outcome === 'incomplete' || outcome === BEHIND ? `${outcome}: ${partialReasons(issues).join('; ')}` : outcome
 }
+
+/** /scans' status filter (`?st=<key>`): each choice's label and the outcomes it keeps. `attention` is the runs to look
+ * at (failed, or published short), apart from a `partial` run, whose scan is whole. */
+export const STATUS_FILTERS: readonly { key: string; label: string; outcomes: readonly string[] }[] = [
+  { key: 'attention', label: 'needs attention (failed, incomplete)', outcomes: ['failed', 'incomplete'] },
+  { key: 'succeeded', label: 'succeeded', outcomes: ['succeeded'] },
+  { key: 'partial', label: 'partial (a side step failed)', outcomes: ['partial'] },
+  { key: 'incomplete', label: 'incomplete', outcomes: ['incomplete'] },
+  { key: 'behind', label: BEHIND, outcomes: [BEHIND] },
+  { key: 'recovered', label: 'recovered', outcomes: ['recovered'] },
+  { key: 'failed', label: 'failed', outcomes: ['failed'] },
+  { key: 'running', label: 'running', outcomes: ['running'] },
+  { key: 'nop', label: 'no-op', outcomes: ['no-op'] },
+]
+
+/** Whether a run of `outcome` passes the status filter `key` (`''`: every run; an unknown key: none). */
+export const statusMatches = (key: string, outcome: string): boolean =>
+  !key || !!STATUS_FILTERS.find(f => f.key === key)?.outcomes.includes(outcome)
 
 export function phaseRecoveries(run: ScanRun, runs: readonly ScanRun[], phases: readonly ScanRunPhase[], now: number): PhaseRecovery[] {
   return runs.filter(r => r.parent === run.run_id && r.kind === 'phase-recovery' && r.scan === run.scan && r.store === run.store)
@@ -243,6 +314,22 @@ function failureDetail(note: string | null): string | undefined {
   return rest || undefined
 }
 
+/** A phase that did its work: closed, not failed, skipped or behind. */
+const phaseDid = (p: ScanRunPhase): boolean =>
+  p.finished_ts != null && phaseStatus(p) === 'done' && phaseSkip(p) == null && phaseBehind(p) == null
+
+/** The run that later did a converging step's work for `run` (`StepFailure.converges`: an append of every pending
+ * scan, a thread converged, a pass over every scan): the first other run of `run`'s kind and store, for its scan or a
+ * later one, whose same phase started after `p` ended and did its work. Null for a step no later run redoes. */
+function convergedBy(run: ScanRun, p: ScanRunPhase, runs: readonly ScanRun[], phases: readonly ScanRunPhase[]): ScanRun | null {
+  const end = p.finished_ts
+  if (end == null || !stepFailure(p.phase)?.converges) return null
+  const peers = new Map(runs.filter(r => r.run_id !== run.run_id && !r.parent && r.kind === run.kind && r.store === run.store && r.scan >= run.scan).map(r => [r.run_id, r]))
+  const first = phases.filter(a => a.phase === p.phase && peers.has(a.run_id) && a.started_ts != null && a.started_ts >= end && phaseDid(a))
+    .sort((a, b) => a.finished_ts! - b.finished_ts!)[0]
+  return first ? peers.get(first.run_id)! : null
+}
+
 /** The run's issues, one per phase (its last attempt's; `attempts` counts a phase's failed ones). */
 export function phaseIssues(run: ScanRun, runs: readonly ScanRun[], phases: readonly ScanRunPhase[]): PhaseIssue[] {
   const own = phases.filter(p => p.run_id === run.run_id && (phaseStatus(p) === 'failed' || phaseSkip(p) != null || phaseBehind(p) != null))
@@ -250,9 +337,8 @@ export function phaseIssues(run: ScanRun, runs: readonly ScanRun[], phases: read
   for (const p of own) last.set(p.phase, p)
   return [...last.values()].map(p => {
     const retries = phaseRecoveries(run, runs, phases, 0).filter(r => r.run.status === 'succeeded' && r.phases.some(a =>
-      a.phase === p.phase && phaseStatus(a) === 'done' && phaseSkip(a) == null && phaseBehind(a) == null && a.finished_ts != null
-      && p.finished_ts != null && a.finished_ts > p.finished_ts))
-    const recovery = retries.at(-1)?.run ?? null
+      a.phase === p.phase && phaseDid(a) && p.finished_ts != null && a.finished_ts! > p.finished_ts))
+    const recovery = retries.at(-1)?.run ?? convergedBy(run, p, runs, phases)
     if (phaseStatus(p) !== 'failed') {
       const skip = phaseSkip(p)
       return skip != null ? { phase: p.phase, outcome: 'skipped', recovery, reason: skip } : { phase: p.phase, outcome: BEHIND, recovery, reason: phaseBehind(p)! }

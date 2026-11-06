@@ -62,6 +62,24 @@ INSERT INTO scan_run_outputs (run_id, key, uri, bytes, objects, rows) VALUES
         ['b', []], ['a', [['index', 'retry']]],
       ])
     })
+    it('a later scan\'s run that did a converging step is the earlier run\'s recovery, on the list and the detail; a step nothing redoes has none', async () => {
+      const { db, raw } = await sqliteD1()
+      raw.exec(SEED)
+      raw.exec(`
+      UPDATE scan_runs SET status = 'succeeded' WHERE run_id = 'b';
+      INSERT INTO scan_run_phases (run_id, phase, seq, started_ts, finished_ts, status, note) VALUES
+        ('a', 'warm-cache', 2, 390, 395, 'done', 'failed (exit 1)'), ('a', 'digest', 3, 395, 400, 'done', 'failed (exit 1)'),
+        ('b', 'warm-cache', 1, 1200, 1250, 'done', NULL), ('b', 'digest', 2, 1250, 1300, 'done', NULL);
+    `)
+      const issues = (b: { phase_issues: { phase: string; outcome: string; recovery: { run_id: string } | null }[] }) => b.phase_issues.map(i => [i.phase, i.outcome, i.recovery?.run_id ?? null])
+      const list = await (await get(db, '')).json() as import('./scanRuns').ScanRunsList
+      const detail = await (await get(db, 'a')).json() as import('./scanRuns').ScanRunDetail
+      expect([list.runs.map(s => [s.run.run_id, issues(s)]), issues(detail), detail.recoveries]).toEqual([
+        [['b', []], ['a', [['warm-cache', 'failed', null], ['digest', 'failed', 'b']]]],
+        [['warm-cache', 'failed', null], ['digest', 'failed', 'b']],
+        [],
+      ])
+    })
     it('lists the store\'s orchestrating runs with their totals and links', async () => {
       const { db, raw } = await sqliteD1()
       raw.exec(SEED)
