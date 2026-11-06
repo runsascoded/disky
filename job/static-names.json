@@ -22,6 +22,9 @@
  "machines": {
   "compact": "n2-highmem-32"
  },
+ "ssd_gbs": {
+  "compact": 1500
+ },
  "ssd_gb": 750,
  "spot": true,
  "append_tasks": 16,
