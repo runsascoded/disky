@@ -16,8 +16,8 @@ IMAGE=us-central1-docker.pkg.dev/$PROJECT/cloud-run-source-deploy/pqtk:latest
 SA=gcs-usage-job@$PROJECT.iam.gserviceaccount.com
 STAGING=gs://oa-gcs-usage-dvx/pqtk
 PQTK=${PQTK:-$HOME/c/pqtk/.venv/bin/pqtk}
-# pqtk shells out to gcloud; the active gcloud account is personal, so pin OA.
-export CLOUDSDK_CORE_ACCOUNT=ryan.williams@openathena.ai
+# pqtk shells out to gcloud: pin the account that can reach the bucket, if the active one can't.
+[ -z "${RERG_GCLOUD_ACCOUNT:-}" ] || export CLOUDSDK_CORE_ACCOUNT=$RERG_GCLOUD_ACCOUNT
 
 rows=65536 mode=(-k .bak) machine=n2-standard-4
 while getopts "r:ik:m:" o; do

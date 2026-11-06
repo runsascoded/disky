@@ -64,7 +64,7 @@ PY
 }
 
 vars() {  # container env: defaults + optional passthroughs
-  JOB_IMAGE="$IMAGE" python3 - <<'EOF'
+  JOB_IMAGE="$IMAGE" SUBMIT_REGION="$REGION" python3 - <<'EOF'
 import json, os
 # PIN=1 emits the canonical/cron spec: ignore every ambient override so the body
 # is byte-stable regardless of the caller's shell (the IaC in infra/gcp
@@ -109,6 +109,11 @@ if not pin:  # one-off overrides forwarded only for manual submits, never the cr
               "GCS_ALERT_CEILING_TB", "GCS_ALERT_SPIKE_PCT", "INDEX_RETAIN", "PATH_INDEX_RG_ROWS", "PATH_INDEX_USER_SORT_TIERS", "PATH_INDEX_SEARCH"]:  # SLACK_WEBHOOK is a secretVariable (see below)
         if k in os.environ:
             v[k] = os.environ[k]
+# The one-VM fallback (`NF=0`) names its region for `scan-run task` and `job submit-listing`, and mounts the
+# fleet's and the data bucket from this region on purpose; never in the pinned cron body.
+if not pin and os.environ.get("NF") == "0":
+    v["BATCH_REGION"] = os.environ["SUBMIT_REGION"]
+    v["BATCH_CROSS_REGION"] = "1"
 print(json.dumps(v))
 EOF
 }
