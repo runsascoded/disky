@@ -8,7 +8,7 @@ per `(date, path, w, h, depth)` the view computed from that scan's own rows by t
 (`interval_verify.Scan.view`), flattened (`interval_read.flatten`). The generator asserts the Python
 interval reader returns the same trees.
 
-    cloud/.venv-or-root/bin/python site/functions/_lib/fixtures/iv/gen.py [g2 | g7 | tiered]
+    cloud/.venv-or-root/bin/python site/functions/_lib/fixtures/iv/gen.py [g2 | g7 | g8 | tiered]
 
 `tiered`: the base + per-scan runs generations (`interval_append`): `g3` / `g4` / `g6` over `g1`'s scans (runs unmerged /
 merged pairwise as the old inline publish did / merged by the deferred carries, a revision manifest listing the merged
@@ -274,5 +274,62 @@ def tiered() -> None:
     shutil.rmtree(work)
 
 
+#: `g8`: a base scan and one run in 4-row groups, over owner slices, where `grow`'s total crosses a read's floor between
+#: them (256,000 → 4,450,304 bytes) — for `sliceTotals.test.ts`. In the base's `slices-bytotal` its old slices follow
+#: `big`'s 8 MiB rows: `grow`'s unowned and alice's share a group with them (`b_max` 8 MiB), bob's starts the next
+#: (`b_max` 256,000). In the run's, the close records of alice's and bob's are a group of their own (`b_max` 256,000).
+#: So a read of the run's scan at a floor between the two totals plans the base group holding alice's old slice and not
+#: the run group that closes it: the row is told ended only by its own `tot`.
+G8 = "g8"
+G8_SCANS = ["2026-09-30T0007", "2026-09-30T0008"]
+KiB, MiB = 1 << 10, 1 << 20
+G8_OWNERS = {"big/a": "alice", "big/b": "bob", "grow/a": "alice", "grow/b": "bob"}
+G8_BASE = [("big/a/f0", 8 * MiB), ("big/b/f0", 8 * MiB), ("grow/a/f0", 100 * KiB), ("grow/b/f0", 100 * KiB), ("grow/u0", 50 * KiB)]
+G8_ROWS = [G8_BASE, [*G8_BASE, ("grow/a/f1", 4 * MiB)]]
+
+
+def stale_gen() -> None:
+    from datetime import datetime, timezone
+
+    import pandas as pd
+
+    import dt_cloud.index as ix
+    from disk_tree.find.aggregate_duckdb import aggregate_listing_to_parquet
+    from disk_tree.listing import prepare_listing
+    from dt_cloud import static_names as sn
+
+    work = HERE / "work8"
+    shutil.rmtree(work, ignore_errors=True)
+    work.mkdir()
+    created = datetime(2026, 9, 1, tzinfo=timezone.utc)
+    labels = work / "labels.parquet"
+    pd.DataFrame({"prefix": list(G8_OWNERS), "usr": list(G8_OWNERS.values())}).to_parquet(labels)
+    scans = []
+    for d, rows in zip(G8_SCANS, G8_ROWS):
+        listing, l2 = work / f"{d}.listing.parquet", work / f"{d}.l2.parquet"
+        pd.DataFrame({"bucket": ["bk"] * len(rows), "name": [n for n, _ in rows], "size_bytes": [b for _, b in rows], "created": [created] * len(rows),
+                      "storage_class_id": [1] * len(rows)}).to_parquet(listing)
+        con = duckdb.connect()
+        aggregate_listing_to_parquet(prepare_listing(con, (str(listing),)), bucket="bk", scheme="s3", out_parquet=str(l2), con=con, mean_mtime=True,
+                                     label=str(labels), label_cols=("usr",))
+        ix.write_index([("bk", str(l2))], str(work / "mount" / d), mem="1GB", threads=1, row_group_rows=2048)
+        scans.append({"id": d, "src": f"{d}/path-index.parquet", "ts": sn.scan_epoch(d), "version": 2})
+    tiered_gens(work / "mount", work / "tiered", scans, 1, {"k": 1, "ranges": [{"i": 0, "lo": [0, ""], "hi": None}]}, rg_rows=4, gens={G8: "unmerged"})
+    out = HERE / "interval-store" / G8
+    con = duckdb.connect()
+
+    def groups(f: str) -> list[list[str]]:
+        return [r[0] for r in con.execute(
+            f"SELECT list(path || '|' || coalesce(usr, '') || '|' || tot ORDER BY file_row_number) FROM read_parquet('{out / f}', file_row_number = true) "
+            "GROUP BY file_row_number // 4 ORDER BY min(file_row_number)").fetchall()]
+
+    base, run = groups("served/slices-bytotal.parquet"), groups(f"deltas/{G8_SCANS[1]}/served/slices-bytotal.parquet")
+    # The geometry the test stands on (above): a change to the cut that moves it fails here, not silently in the test.
+    assert base[2] == ["bk/big/b|bob|8388608", "bk/big/b/f0|bob|8388608", "bk/grow||256000", "bk/grow|alice|256000"], base
+    assert run[3] == ["bk/grow|alice|256000", "bk/grow|bob|256000", "bk/grow/a|alice|102400"], run
+    shutil.rmtree(work)
+    print(f"{G8}: {sorted(str(p.relative_to(out)) for p in out.rglob('*') if p.is_file())}", file=sys.stderr)
+
+
 if __name__ == "__main__":
-    {"g2": slices_gen, "g7": unowned_gen, "tiered": tiered}.get(sys.argv[1] if sys.argv[1:] else "", main)()
+    {"g2": slices_gen, "g7": unowned_gen, "g8": stale_gen, "tiered": tiered}.get(sys.argv[1] if sys.argv[1:] else "", main)()
