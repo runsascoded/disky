@@ -38,7 +38,7 @@ STACK = "cw"
 if pulumi.get_stack() != STACK:
     raise ValueError(f"this branch's gcp/ manages only the {STACK!r} stack, not {pulumi.get_stack()!r}")
 
-# Cost attribution (specs/cost-labels.md): `$DISKY_LABELS` (app=disky,deployment=cw-s3, from the
+# Cost attribution (specs/cost-labels.md): `$DISKY_LABELS` (app=disky,deployment=cw, from the
 # shell's `.envrc`) becomes every labelable resource's default labels.
 labeled_provider("cw-s3-labeled", project=project, region=region, labels=cost_labels())
 

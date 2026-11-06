@@ -50,7 +50,7 @@ def test_additive_cw_foundation() -> pulumi.Output:
             assert mocks.resources[f"cw-isolation-{component}"] == {
                 "project": "fixture", "name": bucket, "location": "US-EAST1", "storageClass": "STANDARD",
                 "uniformBucketLevelAccess": True, "publicAccessPrevention": "enforced", "forceDestroy": False,
-                "labels": {**labels, "component": component}, "softDeletePolicy": {"retentionDurationSeconds": seconds},
+                "labels": {"app": "disky", "deployment": "cw", "component": component}, "softDeletePolicy": {"retentionDurationSeconds": seconds},
                 "lifecycleRules": rules,
             }
             assert mocks.resources[f"cw-isolation-{component}-job"] == {

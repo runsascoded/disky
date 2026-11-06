@@ -94,7 +94,7 @@ print(json.dumps({
         }}],
         "serviceAccount": {"email": os.environ["SA"]},
     },
-    "labels": {"app": "disky", "deployment": "cw-s3", "component": "interval-store"},
+    "labels": {"app": "disky", "deployment": "cw", "component": "interval-store"},
     "logsPolicy": {"destination": "CLOUD_LOGGING"},
 }, indent=1))
 EOF

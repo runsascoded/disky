@@ -26,7 +26,7 @@ def prepare_isolation(
             uniform_bucket_level_access=True,
             public_access_prevention="enforced",
             force_destroy=False,
-            labels={**labels, "component": component},
+            labels={"app": "disky", "deployment": "cw", "component": component},
             soft_delete_policy={"retention_duration_seconds": 604800 if days is None else 0},
             lifecycle_rules=[] if days is None else [{"action": {"type": "Delete"}, "condition": {"age": days}}],
             opts=pulumi.ResourceOptions(protect=True),
