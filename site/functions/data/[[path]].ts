@@ -74,7 +74,7 @@ export const onRequest = async (ctx0: { request: Request; env: Env }): Promise<R
     // A root-level primary must not proxy another store's named subdirectory
     // without its scope gate. Every snapshot starts with a canonical scan ID.
     if (!rulesKey && (!key.startsWith(own) || !isScanId(key.slice(own.length).split('/')[0]))) return notFound()
-    // A path-restricted link (specs/path-scopes.md): only the snapshot files that can't name a hidden path, and
+    // A path-restricted link (`_lib/restrict.ts`): only the snapshot files that can't name a hidden path, and
     // `rules.json` without the attribution rules below one.
     const restriction = restrictionFor(gated, ctx.env)
     if (restriction && !rulesKey && !dataAllowed(key, own, restriction)) return restrictedForbidden()

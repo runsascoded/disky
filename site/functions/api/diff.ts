@@ -154,7 +154,7 @@ async function diffGated(
   const gated = await gate
   if (gated instanceof Response) return gated
   early.commit()
-  // A path-restricted link (specs/path-scopes.md): a hidden path is absent,
+  // A path-restricted link (`_lib/restrict.ts`): a hidden path is absent,
   // and every body (cached or fresh) is filtered on the way out.
   const restriction = restrictionFor(gated, ctx.env)
   if (restriction && isHidden(path, restriction)) return hiddenNotFound()

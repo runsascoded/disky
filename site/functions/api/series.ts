@@ -177,7 +177,7 @@ export async function seriesRead(ctx: SeriesCtx, gate: (ctx: SeriesCtx) => Promi
   const paths = parsePaths(url.searchParams.getAll('paths'))
   if (paths.some(p => p.includes('..') || p.startsWith('/'))) return json({ error: 'bad paths' }, 400)
   if (paths.length > SERIES_MAX_PATHS) return json({ error: `too many paths (max ${SERIES_MAX_PATHS})` }, 400)
-  // A path-restricted link (specs/path-scopes.md): hidden paths are absent.
+  // A path-restricted link (`_lib/restrict.ts`): hidden paths are absent.
   const restriction = restrictionFor(gated, env)
   if (restriction && [path, ...paths].some(p => isHidden(p, restriction))) return hiddenNotFound()
   const lensRaw = url.searchParams.get('lens')

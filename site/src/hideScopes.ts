@@ -1,4 +1,4 @@
-/** The share-link console's "Hide" field → path scopes (specs/path-scopes.md).
+/** The share-link console's "Hide" field → path scopes (`_lib/restrict.ts`).
  *
  * One path per line: `/…` or store-relative, optionally led by a secondary
  * store's key (`nas:mnt/user/…`), or `~/…` on a store with a home dir

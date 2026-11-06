@@ -1753,7 +1753,7 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); opacity: 1; }
     input { margin: 0; }
   }
 
-  // The "Hide" paths (specs/path-scopes.md): one per line, monospace like paths elsewhere.
+  // The "Hide" paths (`_lib/restrict.ts`): one per line, monospace like paths elsewhere.
   textarea.hide-paths {
     font: 12.5px var(--mono, ui-monospace, monospace); padding: 4px 7px; min-width: 22em;
     background: var(--surface); color: var(--ink); border: 1px solid var(--line); border-radius: 6px; resize: vertical;
