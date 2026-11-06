@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest'
-import { fmtRunShort, fmtRunTime, runDay, scanRunsApi, scansHref, scansStore } from './scanRunsUi'
+import { createElement } from 'react'
+import { renderToStaticMarkup } from 'react-dom/server'
+import { MemoryRouter } from 'react-router-dom'
+import type { ScanRun } from './scanRunsModel'
+import { fmtRunShort, IssueStanding,fmtRunTime, runDay, scanRunsApi, scansHref, scansStore } from './scanRunsUi'
 import { resolveStores } from './stores'
 import { TEST_REGISTRY } from './testStores'
 
@@ -43,5 +47,18 @@ describe('scan-run display times', () => {
       'Mon Oct 12 · 10:06 PM', 'Tue Oct 13 · 11:06 AM',
       'Wed Dec 31 2025 · 3:00 PM',
     ])
+  })
+})
+
+describe('IssueStanding', () => {
+  const run = (kind: string): ScanRun => ({ run_id: 'r1', scan: '2026-11-01', kind, finished_ts: 1_700_000_000 } as ScanRun)
+  const render = (recovery: ScanRun): string => renderToStaticMarkup(createElement(
+    MemoryRouter, null, createElement(IssueStanding, { issue: { phase: 'static-names', outcome: 'failed', recovery }, runHref: (id: string) => `/scans/${id}` }),
+  ))
+  it('words a recovery inferred from a later run by what the records show', () => {
+    expect(render(run('scan'))).toBe('Held since: a later run&#x27;s <code>static-names</code> step completed (<a href="/scans/r1">the <code>2026-11-01</code> run</a>).')
+  })
+  it('keeps "Done by" for a linked phase-recovery attempt', () => {
+    expect(render(run('phase-recovery'))).toMatch(/^Done by <a href="\/scans\/r1">a later attempt<\/a> at .+\.$/)
   })
 })
