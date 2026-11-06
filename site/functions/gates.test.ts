@@ -235,7 +235,8 @@ const SHARED_ROUTES: Record<string, Case[]> = {
   'api/scan-runs/[[path]].ts': [get('/api/scan-runs', 'viewer')],
   'api/series.ts': [get('/api/series', 'viewer')],
   'api/session-log/[[path]].ts': [
-    // The config says only whether logging is on; a batch is a viewer's, while it is on (off: a 503 before the gate).
+    // The config says only whether logging is on (and purges only for a viewer); a batch is a viewer's, while it is on
+    // (off: a 503 before the gate).
     get('/api/session-log', 'public'),
     post('/api/session-log', 'viewer'),
     get('/api/session-log/switch', 'admin'),
