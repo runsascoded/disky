@@ -353,8 +353,21 @@ export const ADMIN_GRANT_REFUSED = 'with `ADMIN_LIST` on, a grant can\'t carry `
 export const ADMIN_ROTATE_REFUSED = 'with `ADMIN_LIST` on, an admin grant can\'t be re-keyed: revoke it, and add the person to the admin list instead'
 export const ADMIN_WIDEN_REFUSED = 'with `ADMIN_LIST` on, an admin grant can only lose access: it can\'t be re-enabled, or given a later expiry, a higher redemption cap or sessions that outlive its expiry. Add the person to the admin list instead'
 
+export const GRANT_TERMS_REFUSED = 'a grant\'s `expiresAt`, `maxRedeems` and `sessionTtlS` are numbers or null'
+
 /** A write `grantStore` refused; its message is the answer (`/api/auth/*`: a 403). */
 export class AdminGrantRefused extends Error {}
+
+/** A grant's terms `grantStore` refused as malformed; its message is the answer (`/api/auth/*`: a 400). */
+export class BadGrantTerms extends Error {}
+
+/** Refuse a term that isn't a number or null. The package's routes store what they're given: a `PATCH`'s `expiresAt` as
+ *  is, a mint's `expiresInS` added to the clock (`'x'` concatenates). A stored string compares as never reached, so that
+ *  link would outlive any expiry it was given (and an expired one would revive). */
+function checkTerms(terms: { expiresAt?: unknown; maxRedeems?: unknown; sessionTtlS?: unknown }): void {
+  const ok = (v: unknown) => v === null || v === undefined || (typeof v === 'number' && Number.isFinite(v))
+  if (![terms.expiresAt, terms.maxRedeems, terms.sessionTtlS].every(ok)) throw new BadGrantTerms(GRANT_TERMS_REFUSED)
+}
 
 /** The scopes as the `grants` column will read back: it splits on spaces and commas, so `gcs admin` is two. */
 const carriesAdmin = (scopes: unknown): boolean => parseScopes(String(scopes)).some(s => s === ADMIN_SCOPE || s === '*')
@@ -375,7 +388,7 @@ const widens = (grant: Grant, patch: GrantPatch): boolean =>
   || ('expiryEndsSessions' in patch && grant.expiryEndsSessions && !patch.expiryEndsSessions)
 
 /**
- * The gate's grant store. With `ADMIN_LIST` no new credential carries `admin` or `*`: a grant minted with one would be an
+ * The gate's grant store. Every grant's terms are numbers or null (`checkTerms`). With `ADMIN_LIST` no new credential carries `admin` or `*`: a grant minted with one would be an
  * admin whatever the list says, and could edit it. Here rather than in the routes because every path to a grant ends
  * here, the package's included (`POST /api/auth/grants`, a request's approval, `/api/token`). Reads are untouched, so a
  * grant already holding the scope still authenticates, stays on `/admin`, and can be revoked.
@@ -388,7 +401,18 @@ const widens = (grant: Grant, patch: GrantPatch): boolean =>
  *   the store's `setDisabled` refuses a revoked grant, so a revoke stays revoked.
  */
 function grantStore(env: Env): GrantStore {
-  const store = d1GrantStore(env.DB!)
+  const d1 = d1GrantStore(env.DB!)
+  const store: GrantStore = {
+    ...d1,
+    async insert(grant, tokenHash) {
+      checkTerms(grant)
+      return d1.insert(grant, tokenHash)
+    },
+    async update(id, patch) {
+      checkTerms(patch)
+      return d1.update(id, patch)
+    },
+  }
   if (!adminListOn(env)) return store
   return {
     ...store,
