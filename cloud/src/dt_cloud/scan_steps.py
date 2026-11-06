@@ -1683,6 +1683,35 @@ def gcp_cost(ctx: Ctx, arg: str | None) -> None:
                fatal=False, warn="gcp-cost snapshot failed (the scan's outputs stand; the next run writes its day)")
 
 
+#: Where the buckets' soft-delete readings go, beside the cost snapshots (`soft-delete` is never a scan id).
+SOFT_DELETE_PREFIX = "snapshots/soft-delete"
+
+
+@step("soft-delete", core=False, soft=True, options={"buckets": list},
+      requires=primary_only("soft-delete", "the readings are the deployment's, written once by its primary"))
+def soft_delete(ctx: Ctx, arg: str | None) -> None:
+    """Each GCS source bucket's soft-delete retention now (`dt-cloud soft-delete -o`): today's
+    `<data>/snapshots/soft-delete/<date>.json` (+ the R2 archive's copy, which the site reads under `SERVED_R2`); a
+    second run the same day replaces it. What a sweep's undo depends on: the site says "undo unavailable" for a run on
+    a bucket this shows off, and can't say either way for a bucket it doesn't name. `options.soft-delete.buckets`: the
+    buckets to read (default: every `gs://` source's). Needs `storage.buckets.get` on each (what a real sweep's
+    preflight reads). Skipped with no GCS bucket (soft delete is GCS's) or on REPROC; never fatal. Not core, as
+    `gcp-cost`: a deployment that sweeps lists it in `steps`."""
+    if ctx.reproc:
+        err("REPROC: skipping the soft-delete reading")
+        return
+    buckets = ctx.opt("soft-delete", "buckets", None) or [s.bucket for s in ctx.profile.sources if s.kind == "gcs"]
+    if not buckets:
+        err("soft-delete: no gs:// source (and no options.soft-delete.buckets): nothing to read")
+        return
+    with ctx.phase("soft-delete"):
+        outs = [f"{ctx.data_uri}/{SOFT_DELETE_PREFIX}"]
+        if ctx.env.get("R2_ARCHIVE"):
+            outs.append(f"{ctx.env['R2_ARCHIVE']}/{SOFT_DELETE_PREFIX}")
+        ctx.sh(["dt-cloud", "soft-delete", *(a for b in buckets for a in ("-b", b)), *(a for o in outs for a in ("-o", o))],
+               fatal=False, warn="soft-delete reading failed (the scan's outputs stand; the site keeps the last one, dated)")
+
+
 #: Core steps a profile may `skip`.
 SKIPPABLE = tuple(n for n, s in STEPS.items() if s.core and s.skippable)
 

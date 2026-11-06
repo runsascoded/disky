@@ -53,6 +53,27 @@ async function readSummary(cfg: BatchConfig, token: string, jobId: string, mode:
   return readRunJson<RunSummary>(cfg, token, jobId, `${dir}-summary.json`)
 }
 
+/** `undo-summary.json`: the undo job rewrites it as it goes, so it says what a job that died had restored. */
+export interface UndoSummary {
+  dry_run: boolean
+  restored: number
+  restore_failed: number
+  unrecoverable: number
+  finished_ts: number
+}
+
+/** A run's `undo_state` from its newest undo job, once that ended: `full` when the job succeeded with every logged key live
+ *  again, `partial` when it restored anything short of that, else unchanged. A summary older than the job is an earlier
+ *  undo's, and a job that died before writing one reports nothing. */
+async function settleUndo(cfg: BatchConfig, db: D1Database, token: string, j: BatchJob, target: string): Promise<void> {
+  const row = await db.prepare("SELECT undo_state FROM deletion_runs WHERE run_id = ?").bind(target).first<{ undo_state: string }>()
+  if (!row || row.undo_state === 'full') return
+  const s = await readRunJson<UndoSummary>(cfg, token, target, 'undo-summary.json')
+  if (!s || s.dry_run || s.finished_ts * 1000 < Date.parse(j.createTime)) return
+  const state = j.status?.state === 'SUCCEEDED' && !s.restore_failed && !s.unrecoverable ? 'full' : s.restored ? 'partial' : null
+  if (state) await db.prepare("UPDATE deletion_runs SET undo_state = ? WHERE run_id = ?").bind(state, target).run()
+}
+
 async function reflect(db: D1Database, jobId: string, mode: string, s: RunSummary, primary: string): Promise<void> {
   const real = mode === "real"
   const undoDeadline = real ? s.finished_ts + HOLD_SECS : null
@@ -117,15 +138,19 @@ export async function reflectRuns(cfg: BatchConfig, db: D1Database, token: strin
     }
   }
   // Reflect terminal undo/purge ops onto their target run (state guards keep it
-  // idempotent). TARGET_RUN + OP are in the op job's env.
+  // idempotent). TARGET_RUN + OP are in the op job's env. `jobs` is newest first; only a
+  // run's newest undo counts, since each rewrites the same summary.
+  const undoSeen = new Set<string>()
   for (const j of jobs) {
-    if (!/\/jobs\/cw-(undo|purge)-/.test(j.name) || j.status?.state !== "SUCCEEDED") continue
+    if (!/\/jobs\/cw-(undo|purge)-/.test(j.name)) continue
     const vars = j.taskGroups?.[0]?.taskSpec?.environment?.variables ?? {}
     const target = vars.TARGET_RUN
     if (!target) continue
     if (vars.OP === "undo") {
-      await db.prepare("UPDATE deletion_runs SET undo_state = 'full' WHERE run_id = ? AND undo_state = 'partial'").bind(target).run()
-    } else if (vars.OP === "purge") {
+      if (undoSeen.has(target)) continue
+      undoSeen.add(target)
+      if (TERMINAL.has(j.status?.state ?? "")) await settleUndo(cfg, db, token, j, target)
+    } else if (vars.OP === "purge" && j.status?.state === "SUCCEEDED") {
       await db.prepare("UPDATE deletion_runs SET purge_state = 'done' WHERE run_id = ? AND purge_state = 'pending'").bind(target).run()
     }
   }

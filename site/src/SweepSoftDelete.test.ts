@@ -2,13 +2,12 @@ import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { MemoryRouter } from 'react-router-dom'
 import { describe, expect, it } from 'vitest'
-import type { CostSnapshot } from './costModel'
-import { bucketSoftDeleteOf, minimumStatus, SweepSoftDeleteView, type SweepSoftDeleteViewProps } from './SweepSoftDelete'
+import { bucketState, minimumStatus, SweepSoftDeleteView, type SweepSoftDeleteViewProps } from './SweepSoftDelete'
 
 const nop = () => {}
 const DEFAULT = { settings: null, min_soft_delete_days: 7 }
 const view = (over: Partial<SweepSoftDeleteViewProps>) => renderToStaticMarkup(createElement(MemoryRouter, null, createElement(SweepSoftDeleteView, {
-  answer: DEFAULT, draft: '7', onDraft: nop, understood: false, onUnderstood: nop, onSave: nop, buckets: null, busy: false, error: null, ...over,
+  answer: DEFAULT, draft: '7', onDraft: nop, understood: false, onUnderstood: nop, onSave: nop, buckets: null, swept: [], busy: false, error: null, ...over,
 })))
 /** The `<p class="warn">`'s text, or null. */
 const warning = (html: string) => /<p class="warn" role="alert">([^<]*)<\/p>/.exec(html)?.[1]?.replace(/&#x27;/g, "'") ?? null
@@ -37,18 +36,24 @@ describe('the editor', () => {
     expect([warning(up), saveDisabled(up)]).toEqual([null, false])
   })
   it.each(['', '-1', '91', '1.5'])('refuses to save %j', draft => expect(saveDisabled(view({ draft }))).toBe(true))
-  it('lists what each bucket has, by name, when a snapshot says', () => {
-    const html = view({ buckets: { asOf: '2026-11-04', off: { 'b-on': false, 'a-off': true } } })
-    expect([...html.matchAll(/<tr><td><code>([^<]+)<\/code><\/td><td( class="warn")?>(on|off)<\/td><\/tr>/g)].map(m => [m[1], m[3], !!m[2]])).toEqual([['a-off', 'off', true], ['b-on', 'on', false]])
-    expect(/<table/.test(view({ buckets: null }))).toBe(false)
+  const rows = (html: string) => [...html.matchAll(/<tr><td><code>([^<]+)<\/code><\/td><td(?: class="(warn|dim)")?>([^<]+)<\/td><\/tr>/g)].map(m => [m[1], m[3], m[2] ?? null])
+  const note = (html: string) => /<p class="dim">([^<]*)<\/p>/.exec(html)?.[1]?.replace(/&#x27;/g, "'") ?? null
+  it('lists the buckets a sweep acts on, by name: what the reading says of each, unknown where it says nothing', () => {
+    const html = view({ swept: ['c-new', 'b-on', 'a-off'], buckets: { asOf: '2026-11-05 07:12Z', off: { 'b-on': false, 'a-off': true, 'not-swept': true } } })
+    expect(rows(html)).toEqual([['a-off', 'off', 'warn'], ['b-on', 'on', null], ['c-new', 'unknown', 'dim']])
+    expect(note(html)).toBe('What each bucket a sweep acts on has, as the job read it at 2026-11-05 07:12Z (its soft-delete step, after a scan); a run measures its buckets itself when it starts:')
   })
-})
-
-describe('bucketSoftDeleteOf', () => {
-  it('reads the newest document, null without one', () => {
-    const doc = (date: string, off: boolean) => ({ date, storage: { buckets: [{ bucket: 'b', soft_delete_off: off }] } }) as unknown as CostSnapshot
-    expect(bucketSoftDeleteOf([doc('2026-11-03', false), doc('2026-11-04', true)])).toEqual({ asOf: '2026-11-04', off: { b: true } })
-    expect(bucketSoftDeleteOf([])).toBeNull()
-    expect(bucketSoftDeleteOf([{ date: 'd', storage: null } as unknown as CostSnapshot])).toBeNull()
+  it('no reading: every bucket unknown, and says what that means', () => {
+    const html = view({ swept: ['b', 'a'], buckets: null })
+    expect(rows(html)).toEqual([['a', 'unknown', 'dim'], ['b', 'unknown', 'dim']])
+    expect(note(html)).toBe("No reading of the buckets' soft delete (the job's soft-delete step writes one after a scan), so this site can't say what a past run's undo has to work with; a run measures its buckets itself when it starts:")
+  })
+  it('no table for a store with no buckets', () => {
+    expect(/<table/.test(view({ swept: [], buckets: { asOf: 'x', off: { a: true } } }))).toBe(false)
+  })
+  it('bucketState', () => {
+    const known = { asOf: 'x', off: { on: false, off: true } }
+    expect([bucketState('on', known), bucketState('off', known), bucketState('other', known), bucketState('toString', known), bucketState('on', null), bucketState('on', undefined)])
+      .toEqual(['on', 'off', 'unknown', 'unknown', 'unknown', 'unknown'])
   })
 })

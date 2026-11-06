@@ -184,6 +184,12 @@ dt-cloud image-sha [-e SHA [-a]] [-j]  # The running image's source revision (`i
                           # clean (`-a` accepts dirty) and stamped. Benchmark harnesses (`interval-store cut`, `layout-sim`)
                           # log the stamp at start and take `-E/--expect-sha` (+ `--allow-dirty`): refuse to start on any
                           # other image. Job entrypoints (`scan head`/`step`, the `interval-store` stage tasks) log it
+dt-cloud soft-delete -b BUCKET… [-o ROOT…] [-j]  # Each bucket's GCS soft-delete retention now (`soft_delete.py`, read with
+                          # `storage.buckets.get`): what a sweep's undo has to work with, since GCS restores nothing from a bucket whose
+                          # policy is off. `-o`: the day's `<ROOT>/<date>.json`; the opt-in scan step `soft-delete` writes it under
+                          # `snapshots/soft-delete/` for each `gs://` source, and the site (whose own account can't read bucket
+                          # metadata) reads the newest: a recorded undo on a bucket it shows off is "undo unavailable" (its control
+                          # disabled, the route refusing), one on a bucket it doesn't name is "unverified". `sweep undo` asks GCS itself
 dt-cloud diff-bench -a BEFORE -b AFTER [-S STORE] [-v DATE:PATH]… CASES  # The table a store-layout change ships with (no CURRENT move
                           # without it): the browser's diff + map requests (diff-check's CASES, `-v` views) on two hosts, each
                           # cold (`-n` random w×h cache buckets no page asks for) then warm; per request kind, median cold

@@ -15,6 +15,7 @@ import re
 import sys
 from collections import Counter
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
 from functools import partial, wraps
 from pathlib import Path
@@ -1793,30 +1794,36 @@ def plan_sweep_execute(for_real: bool, run_dir: str) -> None:
 @option("-p", "--prefix", "prefixes", multiple=True, help="Restrict undo to keys under this prefix (repeatable)")
 @argument("run_dir")
 def plan_sweep_undo(dry_run: bool, prefixes: tuple[str, ...], run_dir: str) -> None:
-    """Undo a real run under RUN_DIR: remove its delete markers (recoverable
-    delete). Must run before `purge`."""
+    """Undo a real run under RUN_DIR: remove its delete markers. Must run before
+    `purge`. Exits 1 unless every logged key is live again (a key the bucket didn't
+    retain is `unrecoverable`)."""
     import json
 
     from .sweep import undo_run
 
     s = undo_run(run_dir, prefixes=list(prefixes) or None, dry_run=dry_run)
-    err(f"{'DRY ' if dry_run else ''}undo: restored {s['restored']} (failed {s['restore_failed']}, skipped {s['skipped']})")
+    err(f"{'DRY ' if dry_run else ''}undo: restored {s['restored']} (failed {s['restore_failed']}, already live {s['already_live']}, unrecoverable {s['unrecoverable']})")
     print(json.dumps(s))
+    if s["restore_failed"] or s["unrecoverable"]:
+        raise SystemExit(1)
 
 
 @plan_sweep.command("purge")
 @option("-n", "--dry-run", is_flag=True, help="Report what would be purged without touching anything")
 @argument("run_dir")
 def plan_sweep_purge(dry_run: bool, run_dir: str) -> None:
-    """Permanently drop every version of a real run's deleted keys under RUN_DIR
-    — the irreversible space-reclaim stage, after the undo hold."""
+    """Permanently drop the versions a real run's delete left behind under RUN_DIR
+    — the irreversible space-reclaim stage, after the undo hold. A logged key that
+    is live now is left whole. Exits 1 if any version couldn't be dropped."""
     import json
 
     from .sweep import purge_run
 
     s = purge_run(run_dir, dry_run=dry_run)
-    err(f"{'DRY ' if dry_run else ''}purge: {s['purged_versions']} versions / {s['purged_bytes']} bytes (failed {s['purge_failed']})")
+    err(f"{'DRY ' if dry_run else ''}purge: {s['purged_versions']} versions / {s['purged_bytes']} bytes (failed {s['purge_failed']}, live keys skipped {s['skipped_live']})")
     print(json.dumps(s))
+    if s["purge_failed"]:
+        raise SystemExit(1)
 
 
 @main.group()
@@ -2416,6 +2423,13 @@ def sweep_undo(only_buckets: tuple[str, ...], bulk: bool, dry_run: bool, bulk_op
     gs:// log dir. Re-runnable: names already live again are left alone. A run
     with no `deleted-summary.json` (killed) restores what its uploaded parts
     name, and says its log may be partial; `undo_state` then stays `partial`.
+    Refuses a bucket whose soft delete is off now (asked of GCS: it restores
+    nothing from one), naming the run's buckets that still have it for `-b`.
+
+    The run's row is written as restores settle (`sweep_exec.UndoRecord`):
+    `undone_objects` per band, `undo_state` `partial` from the first name
+    live again, `full` once all are. An undo refused, or dead before it
+    restored anything, leaves the row as it was.
 
     `-B` restores per directory with GCS bulk restore, filtered to the run's
     deletion window (the D1 row's started/finished times, else the log dir's
@@ -2423,7 +2437,7 @@ def sweep_undo(only_buckets: tuple[str, ...], bulk: bool, dry_run: bool, bulk_op
     soft-deleted under it in that window is in the run's log (see
     `sweep_exec.undo_run`)."""
     from .index_footer import _creds, _d1_query, _q
-    from .sweep_exec import record_undo, undo_run
+    from .sweep_exec import UndoRecord, undo_run
 
     row = None
     try:
@@ -2458,13 +2472,16 @@ def sweep_undo(only_buckets: tuple[str, ...], bulk: bool, dry_run: bool, bulk_op
         err(f"undo {row['run_id']}: {row['deleted_objects']:,} deleted objects, undo_state={row['undo_state']}, "
             f"window until {dt.datetime.fromtimestamp(deadline, dt.timezone.utc):%Y-%m-%d %H:%MZ}" if deadline else f"undo {row['run_id']}")
     window = (int(row["started_ts"]), int(row["finished_ts"])) if row is not None and row.get("started_ts") and row.get("finished_ts") else None
+    # Written as restores settle, and only then: a refusal below, or a death before the first restore, leaves the row as it is.
+    record = UndoRecord(row["run_id"]) if row is not None and not no_record and not dry_run else None
     summary = undo_run(
         log_dir, only_buckets=only_buckets, prefixes=prefixes, dry_run=dry_run, workers=workers, deadline=deadline,
-        bulk=bulk, window=window, bulk_ops=bulk_ops,
+        bulk=bulk, window=window, bulk_ops=bulk_ops, progress=record,
     )
-    if row is not None and not no_record and not dry_run:
+    if record is not None:
         try:
-            err(f"recorded undo_state={record_undo(row['run_id'], summary, int(row['deleted_objects'] or 0))}")
+            state = record.finish(summary, int(row["deleted_objects"] or 0))
+            err(f"recorded undo_state={state}" if state else f"nothing this run deleted is live again: undo_state stays {row['undo_state']}")
         except Exception as e:  # recording must never mask a completed undo
             err(f"WARN: undo record failed: {e}")
     _hard_exit()
@@ -2589,26 +2606,54 @@ def access_r2_export(
     print(json.dumps(archive["summary"], sort_keys=True))
 
 
-def r2_state_inputs(state: str, before: dt.datetime, stage: Path) -> list[str]:
+#: `r2_state_inputs`: aggregates fetched at once, and state reads before a missing aggregate is an error.
+R2_AGG_WORKERS = 16
+R2_STATE_READS = 5
+
+
+def r2_state_inputs(
+    state: str,
+    before: dt.datetime,
+    stage: Path,
+    read: Callable[[str], bytes] | None = None,
+) -> list[str]:
     """The current aggregates `state` (the collector archive's `state.json`, a path or URL) names for the hours before
-    `before` (`parsers.r2.state_aggs`), copied from beside it into `stage`; their local paths."""
+    `before` (`parsers.r2.state_aggs`), copied from beside it into `stage`; their local paths. The collector publishes a
+    new state, then deletes the aggregates it superseded, so a key gone under this read means a newer state already
+    names its replacement: re-read it and fetch what's new. The result is exactly one state's aggregates."""
     from disk_tree import blobfs
     from disk_tree.access.parsers.r2 import state_aggs
 
-    def read(path: str) -> bytes:
+    def read_blob(path: str) -> bytes:
         with blobfs.open_read(path) if blobfs.is_url(path) else open(path, "rb") as f:
             return f.read()
 
-    doc = json.loads(read(state))
+    read = read or read_blob
     root = state.rsplit("/", 1)[0] if blobfs.is_url(state) else str(Path(state).parent)
-    out = []
-    for key in state_aggs(doc, before):
+
+    def fetch(key: str) -> str | None:
+        """Copies `key` into `stage`; returns it if the archive no longer has it."""
+        try:
+            data = read(blobfs.join(root, key))
+        except FileNotFoundError:
+            return key
         local = stage / key
         local.parent.mkdir(parents=True, exist_ok=True)
-        local.write_bytes(read(blobfs.join(root, key)))
-        out.append(str(local))
-    err(f"r2-agg: {len(out)} hour aggregate(s) from {state}")
-    return out
+        local.write_bytes(data)
+        return None
+
+    fetched: set[str] = set()
+    gone: list[str] = []
+    for _ in range(R2_STATE_READS):
+        keys = state_aggs(json.loads(read(state)), before)
+        with ThreadPoolExecutor(R2_AGG_WORKERS) as pool:
+            gone = [key for key in pool.map(fetch, [k for k in keys if k not in fetched]) if key]
+        fetched |= set(keys) - set(gone)
+        if not gone:
+            err(f"r2-agg: {len(keys)} hour aggregate(s) from {state}")
+            return [str(stage / key) for key in keys]
+        err(f"r2-agg: {len(gone)} aggregate(s) superseded during the read (first: {gone[0]}); re-reading {state}")
+    raise FileNotFoundError(f"r2-agg: {len(gone)} aggregate(s) {state} still names are missing after {R2_STATE_READS} reads (first: {gone[0]})")
 
 
 @access.command("r2-agg")
@@ -3770,6 +3815,10 @@ main.add_command(_cf_usage)
 from .deploy_cost import cost_cmd as _deploy_cost  # noqa: E402
 
 main.add_command(_deploy_cost)
+
+from .soft_delete import soft_delete_cmd as _soft_delete  # noqa: E402
+
+main.add_command(_soft_delete)
 
 from .image_sha import image_sha_cmd as _image_sha  # noqa: E402
 

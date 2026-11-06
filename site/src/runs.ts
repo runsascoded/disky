@@ -3,6 +3,7 @@
 // (`plan-summary.json`, `progress/<bucket>.json`, `<mode>-summary.json`),
 // the checks a run's detail shows, and which controls a run offers under
 // the deployment's executor capabilities. Nothing here names a deployment.
+import { runHasNoUndo, runNoUndoText, UNDO_UNAVAILABLE_WHY, type UndoUnavailable, undoUnavailableText, type UndoUnseen } from './softDelete'
 
 /** A deletion run as the deployment's executor records it (`deletion_runs`;
  * cw's and gcs's rows share these columns). */
@@ -72,6 +73,9 @@ export interface ExecCaps {
   /** Undo is offered for a finished real run that recorded no window (cw:
    *  its route allows it); gcs requires the recorded window. */
   undoUnwindowed: boolean
+  /** Undo restores from the buckets' soft delete (GCS), so a recorded undo is unavailable where that is off now; the page reads
+   *  what the buckets have (`useBucketSoftDelete`). Not `plan-sweep`: its undo is its own hold. */
+  softDelete: boolean
   /** A real run's deleted versions can be purged once its window closes. */
   purge: boolean
   /** A dispatch may name a subset of the plan's buckets. */
@@ -88,14 +92,14 @@ export const EXEC_CAPS: Record<'plan-sweep' | 'sweep', ExecCaps> = {
   // bucket, which its `/v1/files` (the R2 index store) doesn't serve.
   'plan-sweep': {
     stop: true, stopHint: 'Cancel the Batch job: deletes already made may be permanent; a re-dispatch re-lists and skips missing objects.',
-    undo: true, undoUnwindowed: true, purge: true, bucketCut: false, runFiles: false,
+    undo: true, undoUnwindowed: true, softDelete: false, purge: true, bucketCut: false, runFiles: false,
     startHint: 'once the job starts (a few minutes while Batch brings up the VM)',
   },
   // gcs: a plan may span buckets; soft delete expires deleted generations on
   // its own (nothing to purge); its files proxy serves the data bucket.
   sweep: {
     stop: true, stopHint: 'Request a clean stop: in-flight work drains and is logged; remaining work is left for a re-run.',
-    undo: true, undoUnwindowed: false, purge: false, bucketCut: true, runFiles: true,
+    undo: true, undoUnwindowed: false, softDelete: true, purge: false, bucketCut: true, runFiles: true,
     startHint: 'once the job starts (a few minutes while Batch brings up the VM)',
   },
 }
@@ -189,6 +193,13 @@ export function runLabel(id: string): string {
 /** The buckets a run touched: its recorded cut, else its job's; empty = all. */
 export const viewBuckets = (v: RunView): string[] =>
   v.run?.buckets ? v.run.buckets.split(',').map(b => b.trim()).filter(Boolean) : v.job?.buckets ?? []
+
+/** The buckets a run deleted from, as far as the page knows: its recorded cut (else its job's), else `others` (the buckets its
+ * bands name, or its plan summary's). Empty: unknown, so nothing is claimed of them. */
+export const deletedBuckets = (v: RunView, others: readonly string[] = []): string[] => {
+  const cut = viewBuckets(v)
+  return cut.length ? cut : [...others]
+}
 
 /** The longest `<word>-` prefix every bucket shares (`marin-us-east1`,
  * `marin-eu-west4` → `marin-`), for compact bucket names; '' when none. */
@@ -382,17 +393,52 @@ export function verifyRun(run: DeletionRun, planned: Tally | null, logged: Logge
   return checks
 }
 
-/** The run controls a viewer gets at `now`. */
-export function runControls(v: RunView, caps: ExecCaps, admin: boolean, now: number): { stop: boolean; undo: boolean; purge: boolean; undoing: boolean } {
+/** `2026-11-10 12:00`, UTC. */
+export const utcMinute = (ts: number): string => new Date(ts * 1000).toISOString().slice(0, 16).replace('T', ' ')
+
+/** What a run's row says of its undo. `none`: its own record says it has none (`why`). `unavailable`: it recorded a window,
+ * still open, but soft delete is off now on a bucket it deleted from. `open` with `unseen`: nothing here says whether soft
+ * delete is still on where it deleted, so its deadline stands unverified. `unrecorded`: a dry run, a run still going, or a
+ * real run that recorded no window. */
+export type UndoStatus =
+  | { kind: 'none'; why: string }
+  | { kind: 'unavailable'; unavailable: UndoUnavailable; deadline: number }
+  | { kind: 'open'; deadline: number; unseen?: UndoUnseen }
+  | { kind: 'closed'; deadline: number }
+  | { kind: 'unrecorded' }
+
+/** `unavailable`, `unseen`: `runUndoUnavailable`'s and `runUndoUnseen`'s answers for this run. */
+export function undoStatus(r: DeletionRun | undefined, now: number, unavailable: UndoUnavailable | null, unseen: UndoUnseen | null = null): UndoStatus {
+  if (!r || r.mode !== 'real') return { kind: 'unrecorded' }
+  if (runHasNoUndo(r)) return { kind: 'none', why: runNoUndoText(r) }
+  if (r.undo_deadline == null) return { kind: 'unrecorded' }
+  if (now >= r.undo_deadline) return { kind: 'closed', deadline: r.undo_deadline }
+  if (unavailable) return { kind: 'unavailable', unavailable, deadline: r.undo_deadline }
+  return { kind: 'open', deadline: r.undo_deadline, ...(unseen ? { unseen } : {}) }
+}
+
+/** The run controls a viewer gets at `now`. `undoOff`: the undo control is shown, disabled, with this reason (a finished real
+ * run, to an admin, where the executor has an undo, but this run's can't be done); null with `undo` false: no control (a dry
+ * or live run, a viewer). `unavailable`: `runUndoUnavailable`'s answer for the run. */
+export interface RunControls { stop: boolean; undo: boolean; purge: boolean; undoing: boolean; undoOff: string | null }
+
+export function runControls(v: RunView, caps: ExecCaps, admin: boolean, now: number, unavailable: UndoUnavailable | null = null): RunControls {
   const r = v.run
   const undoing = v.ops.some(o => o.op === 'undo' && LIVE_STATES.has(o.state))
   const purging = v.ops.some(o => o.op === 'purge' && LIVE_STATES.has(o.state))
   const stop = caps.stop && admin && viewLive(v) && !!v.job
-  if (!r || !admin || r.mode !== 'real' || !r.finished_ts) return { stop, undo: false, purge: false, undoing }
-  const inWindow = r.undo_deadline != null ? now < r.undo_deadline : caps.undoUnwindowed
-  const undo = caps.undo && r.undo_state !== 'full' && inWindow && !undoing
+  if (!r || !admin || r.mode !== 'real' || !r.finished_ts) return { stop, undo: false, purge: false, undoing, undoOff: null }
+  const text = unavailable && undoUnavailableText(unavailable)
+  const undoOff = !caps.undo ? null
+    : undoing ? 'An undo of this run is in progress.'
+    : r.undo_state === 'full' ? 'Already undone.'
+    : runHasNoUndo(r) ? runNoUndoText(r)
+    : r.undo_deadline == null ? caps.undoUnwindowed ? null : 'This run recorded no undo window.'
+    : now >= r.undo_deadline ? `Undo window closed ${utcMinute(r.undo_deadline)} UTC.`
+    : text ? `${text[0].toUpperCase()}${text.slice(1)}. ${UNDO_UNAVAILABLE_WHY}`
+    : null
   const purge = caps.purge && r.purge_state === 'pending' && r.undo_state !== 'full' && (r.undo_deadline == null || now >= r.undo_deadline) && !purging && !undoing
-  return { stop, undo, purge, undoing }
+  return { stop, undo: caps.undo && !undoOff, purge, undoing, undoOff }
 }
 
 /** A run's item set as `functions/_lib/plans.ts`'s `planDigest` names it: sha-256 of the sorted lines, first 16 hex. */

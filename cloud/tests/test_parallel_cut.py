@@ -50,8 +50,9 @@ def serial_cut(con, src: str, sort: str, out: Path, schema: pa.Schema, *, rg_row
 @pytest.fixture(scope="module")
 def src(tmp_path_factory) -> str:
     """Path versions over 6 scans: ~700 paths, each live over a random run of scans split into versions, so the rows
-    fall in the open segment and several dyadic ones."""
-    rnd = random.Random(7)
+    fall in the open segment and several dyadic ones. The versions' values draw from their own stream, so the segments
+    (what the cut's parts are planned from) don't move with a deployment's `CLASS_COLS`."""
+    rnd, values = random.Random(7), random.Random(8)
     schema = ist.PVL_SCHEMA
     rows = []
     for i in range(700):
@@ -73,13 +74,13 @@ def src(tmp_path_factory) -> str:
                 elif f.name == "vt":
                     row[f.name] = vt
                 elif f.name == "kind":
-                    row[f.name] = rnd.choice("fd")
+                    row[f.name] = values.choice("fd")
                 elif f.name == "us":
-                    row[f.name] = rnd.choice(["", "ann:5", "bob:7"])
+                    row[f.name] = values.choice(["", "ann:5", "bob:7"])
                 elif pa.types.is_floating(f.type):
-                    row[f.name] = rnd.random() * 1e6
+                    row[f.name] = values.random() * 1e6
                 else:
-                    row[f.name] = rnd.randrange(0, 1 << rnd.choice([3, 20, 40 if f.type.bit_width > 32 else 30]))
+                    row[f.name] = values.randrange(0, 1 << values.choice([3, 20, 40 if f.type.bit_width > 32 else 30]))
             rows.append(row)
     p = tmp_path_factory.mktemp("pvl") / "r0000.parquet"
     pq.write_table(pa.Table.from_pylist(rows, schema=schema), p)

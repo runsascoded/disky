@@ -2965,6 +2965,8 @@ kbd { font: inherit; font-size: 11px; padding: 0 4px; border: 1px solid var(--li
     .prog progress { width: 64px; height: 8px; vertical-align: middle; }
     .prog-estimate { display: block; font-size: .9em; }
     td.actions { white-space: nowrap; > * + * { margin-left: 6px; } }
+    // A control shown but unavailable (`UndoControl`): `aria-disabled`, so its tip still opens (hover, focus, a tap pins it).
+    button[aria-disabled="true"] { opacity: 0.45; cursor: help; &:hover { border-color: var(--line); } }
     tr.live td.rid { font-weight: 600; }
     tr.run-detail-row > td { background: var(--panel); padding: 8px 12px 12px; }
     tr.run.linked > td { background: color-mix(in srgb, var(--accent, #4a9eff) 14%, transparent); }

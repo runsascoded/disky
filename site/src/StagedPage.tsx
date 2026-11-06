@@ -20,7 +20,7 @@ import { boolParam, stringParam, useUrlState } from 'use-prms'
 import { SiteNav } from './SiteNav'
 import { SiteKbd } from './SiteKbd'
 import { Tooltip } from './Tooltip'
-import { UndoTerms, useSweepSettings } from './SweepSoftDelete'
+import { UndoTerms, useSoftDeleteNow, useSweepSettings } from './SweepSoftDelete'
 import { Treemap } from './Treemap'
 import { UserChip, canonId, shortName } from './UserChip'
 import { ownerShares } from './OwnerBar'
@@ -197,10 +197,12 @@ export function StagedPage() {
   const liveItemsQs = useRunFiles<RunItems>(liveRuns.map(v => `${runFilesRel(v.run!.log_dir!)}plan.json`), false)
   const progressTargets = liveRuns.flatMap((v, i) => viewBuckets(v).map(bucket => ({ bucket, run: v.run!, items: liveItemsQs[i]?.data, rel: `${runFilesRel(v.run!.log_dir!)}progress/${bucket}.json` })))
   const progressQs = useRunFiles<ProgressFile>(progressTargets.map(t => t.rel), anyLive)
+  // What the buckets' soft delete is now: a recorded deletion on one that is off reads "undo unavailable".
+  const softDelete = useSoftDeleteNow(CAPS.softDelete)
   const rowExecution = (r: Row) => {
     const ix = liveTargetOf(r.prefix, r.added_ts, progressTargets)
     const progress = ix >= 0 ? progressQs[ix]?.data : null
-    return prefixExecution(r.prefix, history.data?.bands ?? [], progress ? { runId: progressTargets[ix].run.run_id, progress } : undefined, Date.now() / 1000)
+    return prefixExecution(r.prefix, history.data?.bands ?? [], progress ? { runId: progressTargets[ix].run.run_id, progress } : undefined, Date.now() / 1000, softDelete)
   }
 
   const runAction = useRunAction()

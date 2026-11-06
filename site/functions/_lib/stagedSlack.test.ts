@@ -33,7 +33,7 @@ describe('renderParent', () => {
     }
     const head = 'Deletes the 3 staged prefixes: 2.0 TiB / 1,234 objects per the dry-run on scan 2026-09-28T1201.'
     it.each<[string, number | undefined, string]>([
-      ['no guard (cw: its own 7-day hold)', undefined, 'Recoverable for 7 days (undo in www).'],
+      ['no guard (cw: bucket versioning is not required)', undefined, 'A real deletion may be permanent; recovery is not guaranteed.'],
       ['the default', 7, 'Recoverable for at least 7 days (undo in www).'],
       ['shorter', 3, 'Recoverable for at least 3 days, less than the usual 7 (undo in www).'],
       ['soft delete not required', 0, 'No undo: this deployment doesn\'t require soft delete, so treat these deletes as permanent.'],
@@ -97,7 +97,7 @@ describe('renderParent', () => {
   it('puts the dry-run numbers and the recoverability in the real-delete confirm', () => {
     const real = (renderParent({ ...base, runs: [run({})] }).blocks.find(b => (b as { type: string }).type === 'actions') as { elements: Record<string, unknown>[] }).elements[2]
     expect(real.value).toBe('7:D1')
-    expect((real.confirm as { text: { text: string } }).text.text).toBe('Deletes the 3 staged prefixes: 2.0 TiB / 1,234 objects per the dry-run on scan 2026-09-28T1201. Recoverable for 7 days (undo in www).')
+    expect((real.confirm as { text: { text: string } }).text.text).toBe('Deletes the 3 staged prefixes: 2.0 TiB / 1,234 objects per the dry-run on scan 2026-09-28T1201. A real deletion may be permanent; recovery is not guaranteed.')
   })
 })
 
@@ -424,5 +424,112 @@ describe('D1', () => {
         queueWasEmpty(items, fresh, new Set(['gs://b/a/']), null),
       ]).toEqual([false, false])
     })
+  })
+})
+
+describe('an undo a run recorded, where soft delete is off now', () => {
+  const base = { planId: 7, siteUrl: 'https://s', items: 1, batches: 1, stagers: [], digest: 'D1', actions: false, closed: false }
+  const real = run({ mode: 'real', run_id: 'r1', undo_deadline: 1_790_604_800 })
+  const off = { buckets: ['b1'], asOf: '2026-11-05' }
+  const ATTEMPTED: RunOutcome = { attempted: true, skipped: null, notSwept: [] }
+  const line = (undoUnavailable?: { buckets: string[]; asOf: string } | null, lastOutcome: RunOutcome | null = ATTEMPTED, now = 1_790_000_000, undoUnseen?: boolean) =>
+    (renderParent({ ...base, runs: [real], lastOutcome, undoUnavailable, undoUnseen, now }).blocks as { text?: { text?: string } }[])
+      .flatMap(b => (b.text?.text ?? '').split('\n')).find(l => /^(Last real run|Real run)/.test(l))
+
+  it('the parent\'s last-real-run line says so, with the bucket and the snapshot\'s date, in place of a deadline', () => {
+    expect(line(off)).toBe('Last real run attempted 2.0 TiB / 1,234 objects; undo unavailable: soft delete is off on b1 (as of 2026-11-05).')
+  })
+  it('mixed buckets: the ones that are off', () => {
+    expect(line({ buckets: ['b1', 'b3'], asOf: '2026-11-05' })).toBe('Last real run attempted 2.0 TiB / 1,234 objects; undo unavailable: soft delete is off on b1, b3 (as of 2026-11-05).')
+  })
+  it('nothing says whether its buckets\' soft delete is still on: the deadline, as depending on it; never "unavailable"', () => {
+    expect([line(null, ATTEMPTED, 1_790_000_000, true), line(off, ATTEMPTED, 1_790_000_000, true)]).toEqual([
+      "Last real run attempted 2.0 TiB / 1,234 objects, undoable until 2026-09-28 14:13Z if the buckets' soft delete is still on (this site can't see it).",
+      'Last real run attempted 2.0 TiB / 1,234 objects; undo unavailable: soft delete is off on b1 (as of 2026-11-05).',
+    ])
+  })
+  it('its buckets on as of the reading, or another executor (nothing passed): the deadline, as recorded', () => {
+    expect([line(null), line(undefined)]).toEqual([
+      'Last real run attempted 2.0 TiB / 1,234 objects, undoable until 2026-09-28 14:13Z.',
+      'Last real run attempted 2.0 TiB / 1,234 objects, undoable until 2026-09-28 14:13Z.',
+    ])
+  })
+  it('keeps what else the line says: a lower bound, the skips', () => {
+    expect(line(off, { attempted: true, skipped: { bytes: 3 * 1024 ** 3, objects: 5678 }, notSwept: [], totals: 'lower-bound' }))
+      .toBe('Last real run attempted at least 2.0 TiB / 1,234 objects; undo unavailable: soft delete is off on b1 (as of 2026-11-05). Skipped, no generation: *3.0 GiB* / 5,678 objects left in place.')
+  })
+  it('a run past its recorded window is history either way', () => {
+    expect(line(off, ATTEMPTED, 1_790_604_800)).toBeUndefined()
+  })
+  it('a run\'s finish says so too, and a killed one drops the word on what undo restores', () => {
+    expect([
+      runEvent(real, 'finished', { undoUnavailable: off }),
+      runEvent(real, 'finished', { outcome: { attempted: false, skipped: null, notSwept: [], unread: true }, undoUnavailable: off }),
+      runEvent({ ...real, plan_digest: '' }, 'failed', { outcome: { ...ATTEMPTED, totals: 'exact' }, undoUnavailable: off }),
+      runEvent({ ...real, plan_digest: '' }, 'failed', { outcome: { ...ATTEMPTED, totals: 'lower-bound' }, undoUnavailable: off }),
+      runEvent(real, 'finished', { undoUnavailable: null }),
+    ]).toEqual([
+      ':white_check_mark: Real deletion `r1` finished: deleted *2.0 TiB* / 1,234 objects; undo unavailable: soft delete is off on b1 (as of 2026-11-05).',
+      ':warning: Real deletion `r1` finished, totals unread: recorded *2.0 TiB* / 1,234 objects; undo unavailable: soft delete is off on b1 (as of 2026-11-05).',
+      ':warning: *Real deletion* `r1` ended unsuccessfully: attempted *2.0 TiB* / 1,234 objects; undo unavailable: soft delete is off on b1 (as of 2026-11-05).',
+      ':warning: *Real deletion* `r1` ended before recording its end: attempted at least *2.0 TiB* / 1,234 objects, from its progress files, which can lag what it did; undo unavailable: soft delete is off on b1 (as of 2026-11-05).',
+      ':white_check_mark: Real deletion `r1` finished: deleted *2.0 TiB* / 1,234 objects; undoable until 2026-09-28 14:13Z (www).',
+    ])
+  })
+  it('a run that recorded no window keeps its own reason', () => {
+    expect(runEvent({ ...real, undo_deadline: null, soft_delete_days: 0 }, 'finished', { undoUnavailable: off }))
+      .toBe(':white_check_mark: Real deletion `r1` finished: deleted *2.0 TiB* / 1,234 objects; no undo (soft delete off).')
+  })
+})
+
+describe('a last real run that was undone', () => {
+  const base = { planId: 7, siteUrl: 'https://s', items: 1, batches: 1, stagers: [], digest: 'D1', actions: false, closed: false }
+  const real = run({ mode: 'real', run_id: 'r1', undo_deadline: 1_790_604_800 })
+  const off = { buckets: ['b1'], asOf: '2026-11-05' }
+  const line = (undo_state: string, o: { undoUnavailable?: typeof off | null; undoUnseen?: boolean; now?: number } = {}) =>
+    (renderParent({ ...base, runs: [{ ...real, undo_state }], now: 1_790_000_000, ...o }).blocks as { text?: { text?: string } }[])
+      .flatMap(b => (b.text?.text ?? '').split('\n')).find(l => /^(Last real run|Real run)/.test(l))
+
+  it('the parent says it was undone, not that it is undoable', () => {
+    expect(line('full')).toBe('Last real run deleted 2.0 TiB / 1,234 objects, since undone.')
+  })
+  it('an undone run has no undo left to qualify: no deadline, no "unavailable", no "if soft delete is still on"', () => {
+    expect([line('full', { undoUnavailable: off }), line('full', { undoUnseen: true })]).toEqual([
+      'Last real run deleted 2.0 TiB / 1,234 objects, since undone.',
+      'Last real run deleted 2.0 TiB / 1,234 objects, since undone.',
+    ])
+  })
+  it('a partly undone run says so, and what the rest has: its deadline, that it depends on soft delete, or that it is unavailable', () => {
+    expect([line('partial'), line('partial', { undoUnseen: true }), line('partial', { undoUnavailable: off })]).toEqual([
+      'Last real run deleted 2.0 TiB / 1,234 objects, since partly undone; the rest undoable until 2026-09-28 14:13Z.',
+      "Last real run deleted 2.0 TiB / 1,234 objects, since partly undone; the rest undoable until 2026-09-28 14:13Z if the buckets' soft delete is still on (this site can't see it).",
+      'Last real run deleted 2.0 TiB / 1,234 objects, since partly undone; undo unavailable: soft delete is off on b1 (as of 2026-11-05).',
+    ])
+  })
+  it('nothing undone: the deadline, as before', () => {
+    expect(line('none')).toBe('Last real run deleted 2.0 TiB / 1,234 objects, undoable until 2026-09-28 14:13Z.')
+  })
+  it('past its recorded window it is history, undone or not', () => {
+    expect([line('full', { now: 1_790_604_800 }), line('partial', { now: 1_790_604_800 })]).toEqual([undefined, undefined])
+  })
+  it('a run\'s own event, rendered from a row an undo already reached, says the same', () => {
+    expect([
+      runEvent({ ...real, undo_state: 'full' }, 'finished'),
+      runEvent({ ...real, undo_state: 'full' }, 'finished', { undoUnavailable: off }),
+      runEvent({ ...real, undo_state: 'partial' }, 'finished'),
+      runEvent({ ...real, undo_state: 'partial' }, 'finished', { undoUnavailable: off }),
+      runEvent({ ...real, undo_state: 'none' }, 'finished'),
+      runEvent({ ...real, undo_state: 'full', plan_digest: '' }, 'failed', { outcome: { attempted: true, skipped: null, notSwept: [], totals: 'exact' } }),
+    ]).toEqual([
+      ':white_check_mark: Real deletion `r1` finished: deleted *2.0 TiB* / 1,234 objects; since undone.',
+      ':white_check_mark: Real deletion `r1` finished: deleted *2.0 TiB* / 1,234 objects; since undone.',
+      ':white_check_mark: Real deletion `r1` finished: deleted *2.0 TiB* / 1,234 objects; since partly undone, the rest undoable until 2026-09-28 14:13Z (www).',
+      ':white_check_mark: Real deletion `r1` finished: deleted *2.0 TiB* / 1,234 objects; since partly undone; undo unavailable: soft delete is off on b1 (as of 2026-11-05).',
+      ':white_check_mark: Real deletion `r1` finished: deleted *2.0 TiB* / 1,234 objects; undoable until 2026-09-28 14:13Z (www).',
+      ':warning: *Real deletion* `r1` ended unsuccessfully: attempted *2.0 TiB* / 1,234 objects; since undone.',
+    ])
+  })
+  it('an undone run that recorded no window (an executor whose undo needs none) says undone, not nothing', () => {
+    expect(runEvent({ ...real, undo_deadline: null, undo_state: 'full' }, 'finished')).toBe(':white_check_mark: Real deletion `r1` finished: deleted *2.0 TiB* / 1,234 objects; since undone.')
   })
 })
