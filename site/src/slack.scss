@@ -14,7 +14,7 @@
     .line.blank { min-height: 0.7em; }
     .line.changed { border-left-color: var(--s8); background: color-mix(in srgb, var(--s8) 10%, transparent); }
     .arrow { display: inline-block; font-weight: 700; margin-right: 2px;
-      &.up { color: #2fa84f; } &.down { color: #e5534b; } &.flat { color: var(--ink-2); } }
+      &.up { color: #e5534b; } &.down { color: #2fa84f; } &.flat { color: var(--ink-2); } }
     .plot { display: block; margin-top: 6px;
       img { width: 100%; border-radius: 6px; }
       img.zoomable { cursor: zoom-in; } } }
@@ -22,14 +22,35 @@
     h3 { font-size: 13.5px; margin: 0 0 6px; }
     > button { font-size: 12px; margin-top: 4px; } }
   .slack-reply { display: flex; gap: 8px; font-size: 13px; line-height: 1.45; padding: 5px 0; overflow-wrap: anywhere;
-    .avi { flex: none; width: 28px; height: 28px; border-radius: 5px; overflow: hidden; display: grid; place-items: center;
-      img { width: 100%; height: 100%; object-fit: cover; } .emoji-icon { font-size: 20px; } }
+    .avi { flex: none; width: 32px; height: 32px; border-radius: 5px; overflow: hidden; display: grid; place-items: center;
+      img, .collage { width: 100%; height: 100%; object-fit: cover; } .emoji-icon { font-size: 20px; } }
     .sender { font-weight: 700; }
     .arrow { display: inline-block; font-weight: 700; margin-right: 2px;
-      &.up { color: #2fa84f; } &.down { color: #e5534b; } &.flat { color: var(--ink-2); } } }
+      &.up { color: #e5534b; } &.down { color: #2fa84f; } &.flat { color: var(--ink-2); } } }
   .slack-lightbox { position: fixed; inset: 0; z-index: 1000; background: rgba(0, 0, 0, 0.85); display: grid; place-items: center;
     cursor: zoom-out; padding: 16px;
     img { max-width: 100%; max-height: 100%; border-radius: 6px; } }
   .slack-add { align-self: center; flex: none; }
+  // `:runway-N:` / `:runway-<shape>-N:` (`runway-hue` marks): the workspace emoji, drawn. A mark's area is near the
+  // circle's (0.79 em²): the pointed shapes scale past their box (no layout effect, so a margin keeps them off their
+  // neighbors), the square inside it.
+  .hue { display: inline-block; width: 1em; height: 1em; border-radius: 50%; vertical-align: -0.15em;
+    &.square { border-radius: 16%; transform: scale(0.88); }
+    &.diamond, &.triangle, &.star { margin-inline: 0.14em; }
+    &.diamond { border-radius: 0; clip-path: polygon(50% 0, 100% 50%, 50% 100%, 0 50%); transform: scale(1.22); }
+    &.triangle { border-radius: 0; clip-path: polygon(50% 0, 100% 100%, 0 100%); transform: translateY(-0.08em) scale(1.25); }
+    &.star { border-radius: 0; transform: scale(1.35);
+      clip-path: polygon(50% 0, 64.7% 29.8%, 97.6% 34.5%, 73.8% 57.7%, 79.4% 90.5%, 50% 75%, 20.6% 90.5%, 26.2% 57.7%, 2.4% 34.5%, 35.3% 29.8%); } }
+  // A candidate `ArrowMark`, drawn (`Toks`): no emoji is uploaded for these.
+  .pool-mark { display: inline-block; width: 1.15em; height: 1.15em; vertical-align: -0.22em; margin-right: 1px; }
+  .slack-reply.changed { border-left: 3px solid var(--s8); padding-left: 5px; background: color-mix(in srgb, var(--s8) 10%, transparent); }
+  .slack-act { margin: 14px 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel);
+    h2 { font-size: 15px; margin: 0 0 6px; }
+    input.wide { width: 11em; }
+    button.armed { background: var(--s8); color: #fff; }
+    button.on { font-weight: 700; } }
+  .slack-runs { font-size: 12.5px; margin: 8px 0; padding-left: 18px;
+    button { font-size: 11.5px; } }
+  .slack-run pre { font-size: 11.5px; max-height: 420px; overflow: auto; white-space: pre-wrap; }
   .slack-rows pre { font-size: 11.5px; max-height: 360px; overflow: auto; }
 }
