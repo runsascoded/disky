@@ -712,13 +712,13 @@ export class Drill {
     const hi = (c: string): Key => P === '' ? [c + '\0', ''] : [c, P + '0']
     const sels = await perTier(tiers, (x, i) => x.files[kind].roots.select(lo(cs[i]), hi(cs[i]), io, thr, req))
     const upper = sels.reduce((s, x) => s + x.rows, 0)
-    if (sels.every(s => s.groups) && upper <= thr) {
+    const roots = async (groups: Entry[][]): Promise<DrillAnswer | DrillOver> => {
       if (maxRows != null && upper > maxRows) return { source: 'over', upper }
       // Hits straight from the columns (no row object per root: a member's ~80K roots, decoded per isolate).
-      const parts = await perTier(tiers, async (x, i) => sels[i].groups!.length ? x.files[kind].roots.read<Hit>(lo(cs[i]), hi(cs[i]), sels[i].groups!, io, hitOf) : [])
-      const c = cs[cs.length - 1]
-      return { source: 'roots', kind, c, upper, hits: R.combine(parts), io }
+      const parts = await perTier(tiers, async (x, i) => groups[i].length ? x.files[kind].roots.read<Hit>(lo(cs[i]), hi(cs[i]), groups[i], io, hitOf) : [])
+      return { source: 'roots', kind, c: cs[cs.length - 1], upper, hits: R.combine(parts), io }
     }
+    if (sels.every(s => s.groups) && upper <= thr) return roots(sels.map(s => s.groups!))
     if (P === '') {
       // No rollup at the fleet root (heavy directories are depth ≥ 1): the catalog's per-bucket cells.
       const got = await this.catalog?.lookup(t, { req })
@@ -745,7 +745,9 @@ export class Drill {
       return rs.groups?.length ? x.files[kind].rollups.read(rlo, rhi, rs.groups, io) : []
     })
     const got = R.stack(parts)
-    if (!got) throw new Error(`static drill: (${JSON.stringify(t)}, ${JSON.stringify(P)}) bounds ${upper} root rows but has no rollup`)
+    // No tier's build found P heavy: its roots passed the bound only over the runs (gcs 11-05: `train` under a bucket, bounded at
+    // 137K rows). They are still P's whole answer, read as any light view's are.
+    if (!got) return roots(await perTier(tiers, async (x, i) => sels[i].groups ?? (await x.files[kind].roots.select(lo(cs[i]), hi(cs[i]), io, undefined, req)).groups!))
     const { head } = got
     const cells: RollupCell[] = got.cells.map(r => ({ kind: r.kind as 1 | 2, child: r.child as string, vf: Number(r.vf) * 1000, b: r.b as bigint, o: r.o as bigint }))
     return { source: 'rollup', kind, c: cs[cs.length - 1], upper, rollup: { dir: P, kept: num(head.vf), rows: num(head.b), children: num(head.o), cells }, io }

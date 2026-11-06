@@ -390,9 +390,10 @@ describe('mutations: each reader rule, broken, makes the views wrong', () => {
       newestCanon: await wrong({ ...DRILL_RULES, canon: (maps, _i, t) => maps[maps.length - 1].get(t)?.c ?? t }),
       // The base's canonical in every tier.
       baseCanon: await wrong({ ...DRILL_RULES, canon: (maps, _i, t) => maps[0].get(t)?.c ?? t }),
-      // The base's own bound (`dispatch_rows`), not the tiers' sum: views over it with no rollup.
+      // The base's own bound (`dispatch_rows`), not the tiers' sum: views over it with no rollup read their roots, a bigger
+      // read and the same answer (they threw: gcs, a literal grown past the bound over a stack's runs).
       baseBound: await wrong({ ...DRILL_RULES, bound: metas => metas[0].dispatch_rows }),
     }
-    expect(got).toEqual({ rules: 0, maxVt: 2075, noStop: 107, newestCanon: 139, baseCanon: 38, baseBound: 20 })
+    expect(got).toEqual({ rules: 0, maxVt: 2075, noStop: 107, newestCanon: 139, baseCanon: 38, baseBound: 0 })
   }, 300_000)  // mutation runs: past 120 s under a busy laptop's full parallel suite (r2 and the mosaic port, 10-17); the file alone runs 18 tests in ~50 s
 })
