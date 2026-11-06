@@ -109,6 +109,15 @@ export const isHidden = (path: string, r: Restriction): boolean => {
 /** Whether `path` is a hidden dir itself (shown, but as a leaf). */
 export const isHideRoot = (path: string, r: Restriction): boolean => r.hide.includes(norm(path))
 
+/** Whether a read of `path` under an owner, class or lens scope would break down what `r` hides: `path` is a hidden dir
+ *  or above one. Its hidden cell would be the scope's share of the dir's contents, and its total, less its visible
+ *  children's, the same; a sum can't be filtered on the way out, so the routes refuse it (`restrictedForbidden`). An
+ *  unscoped total reveals only the dir's size, which the link shows. */
+export const scopeReachesHidden = (path: string, r: Restriction): boolean => {
+  const p = norm(path)
+  return r.hide.some(h => !p || h === p || h.startsWith(`${p}/`))
+}
+
 const join = (a: string, b: string): string => (a ? (b ? `${a}/${b}` : a) : b)
 
 /** `node` (at store path `path`) with hidden dirs' contents removed: a
