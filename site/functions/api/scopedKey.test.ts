@@ -3,11 +3,17 @@ import type { D1Database } from '@cloudflare/workers-types'
 import type { Env } from '../_lib/auth'
 import { sqliteD1 } from '../_lib/testD1'
 import { CACHE_V } from '../_lib/edgeCache'
+import { classKey, parseClasses } from '../_lib/scope'
 import { FILTER_VIEW_V, SCOPED_V, WALK_V } from '../_lib/view'
 
 // The scoped read's answer version (`SCOPED_V`, `&sv=`) is in a view's and a diff's edge-cache key only where the
 // answer is a `scopedRead`: an owner pool or a class scope over the interval store (and a filter under a lens). Every
 // other key (the plain map's and diff's, a lens's, a per-scan store's) is, to the byte, what it was without it.
+
+// Classes this deployment has, as a key spells them: another's letters are no scope at all.
+const LETTERS = [...'abcdefghijklmnopqrstuvwxyz'].filter(l => parseClasses(l))
+const ONE = classKey(parseClasses(LETTERS[0]))
+const TWO = classKey(parseClasses(LETTERS.slice(0, 2).join('')))
 
 const keys: string[] = []
 vi.mock('../_lib/edgeCache.js', async orig => ({
@@ -63,18 +69,18 @@ describe('/api/subtree', () => {
     ])
   })
   it('an owner pool, a class scope, both: the version, after the key as it was', async () => {
-    expect(await asked(subtree, await intervals(), S, ['&o=*', '&o', '&o=!alan', '&cl=nc', '&o=*&cl=s'])).toEqual([
+    expect(await asked(subtree, await intervals(), S, ['&o=*', '&o', '&o=!alan', `&cl=${TWO}`, `&o=*&cl=${ONE}`])).toEqual([
       key({ o: '*', head: 7 }) + SV,
       key({ head: 7 }) + SV,
       key({ o: '!alan', head: 7 }) + SV,
-      key({ cl: 'nc' }) + SV,
-      key({ o: '*', cl: 's', head: 7 }) + SV,
+      key({ cl: TWO }) + SV,
+      key({ o: '*', cl: ONE, head: 7 }) + SV,
     ])
   })
   it('a lens: its key as it was, scoped or not; a filter under it reads as a scope does', async () => {
-    expect(await asked(subtree, await intervals(), S, ['&lens=user:grace', '&lens=user:grace&cl=nc', '&lens=user:grace&by=alan', '&lens=user:grace&q=ckpt', '&by=alan', '&q=ckpt'])).toEqual([
+    expect(await asked(subtree, await intervals(), S, ['&lens=user:grace', `&lens=user:grace&cl=${TWO}`, '&lens=user:grace&by=alan', '&lens=user:grace&q=ckpt', '&by=alan', '&q=ckpt'])).toEqual([
       key({ l: 'user:grace', head: 7 }),
-      key({ l: 'user:grace', cl: 'nc', head: 7 }),
+      key({ l: 'user:grace', cl: TWO, head: 7 }),
       key({ l: 'user:grace', b: 'alan', head: 7 }),
       key({ l: 'user:grace', q: 'ckpt', head: 7 }) + SV,
       key({ b: 'alan' }) + SV,
@@ -82,10 +88,10 @@ describe('/api/subtree', () => {
     ])
   })
   it('a per-scan store: every key as it was', async () => {
-    expect(await asked(subtree, await perScan(), S, ['', '&o=*', '&cl=nc', '&lens=user:grace&q=ckpt'])).toEqual([
+    expect(await asked(subtree, await perScan(), S, ['', '&o=*', `&cl=${TWO}`, '&lens=user:grace&q=ckpt'])).toEqual([
       key({}),
       key({ o: '*', head: 7 }),
-      key({ cl: 'nc' }),
+      key({ cl: TWO }),
       key({ l: 'user:grace', q: 'ckpt', head: 7 }),
     ])
   })
@@ -103,28 +109,28 @@ describe('/api/diff', () => {
     ])
   })
   it('an owner pool, a class scope, both, a scoped summary: the version, after the key as it was', async () => {
-    expect(await asked(diff, await intervals(), D, ['&o=*', '&o', '&cl=nc', '&o=*&cl=s', '&cl=nc&summary=1'])).toEqual([
+    expect(await asked(diff, await intervals(), D, ['&o=*', '&o', `&cl=${TWO}`, `&o=*&cl=${ONE}`, `&cl=${TWO}&summary=1`])).toEqual([
       key({ o: '*', head: 7 }) + SV,
       key({ head: 7 }) + SV,
-      key({ cl: 'nc' }) + SV,
-      key({ o: '*', cl: 's', head: 7 }) + SV,
-      key({ cl: 'nc', s: 1 }) + SV,
+      key({ cl: TWO }) + SV,
+      key({ o: '*', cl: ONE, head: 7 }) + SV,
+      key({ cl: TWO, s: 1 }) + SV,
     ])
   })
   it('a lens: its key as it was, scoped or not; a filter under it reads as a scope does', async () => {
-    expect(await asked(diff, await intervals(), D, ['&lens=user:grace', '&lens=user:grace&cl=nc', '&lens=user:grace&q=ckpt', '&q=ckpt', '&summary=1'])).toEqual([
+    expect(await asked(diff, await intervals(), D, ['&lens=user:grace', `&lens=user:grace&cl=${TWO}`, '&lens=user:grace&q=ckpt', '&q=ckpt', '&summary=1'])).toEqual([
       key({ l: 'user:grace', head: 7 }),
-      key({ l: 'user:grace', cl: 'nc', head: 7 }),
+      key({ l: 'user:grace', cl: TWO, head: 7 }),
       key({ l: 'user:grace', q: 'ckpt', head: 7 }) + SV,
       key({ q: 'ckpt' }),
       key({ s: 1 }),
     ])
   })
   it('a per-scan store: every key as it was', async () => {
-    expect(await asked(diff, await perScan(), D, ['', '&o=*', '&cl=nc', '&lens=user:grace&q=ckpt'])).toEqual([
+    expect(await asked(diff, await perScan(), D, ['', '&o=*', `&cl=${TWO}`, '&lens=user:grace&q=ckpt'])).toEqual([
       key({}),
       key({ o: '*', head: 7 }),
-      key({ cl: 'nc' }),
+      key({ cl: TWO }),
       key({ l: 'user:grace', q: 'ckpt', head: 7 }),
     ])
   })
