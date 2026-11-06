@@ -226,6 +226,11 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      # Wrangler ignores a `wrangler*.toml` that doesn't parse and deploys the old settings: every one in the
+      # tree (the demo's here, a deployment's `wrangler.toml` on its branch) must parse.
+      - name: wrangler*.toml parse
+        run: site/toml-check site/wrangler*.toml
+
       # `pnpm build` = `tsc -b && vite build`: typechecks the SPA and the
       # Functions, then bundles.
       - name: Build site (typecheck + bundle)
