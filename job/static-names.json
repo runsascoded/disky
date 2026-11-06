@@ -19,6 +19,9 @@
  "sa": "cw-s3-job@oa-internal-450019.iam.gserviceaccount.com",
  "r2_sa": "cw-s3-job@oa-internal-450019.iam.gserviceaccount.com",
  "machine": "n2-highmem-16",
+ "machines": {
+  "compact": "n2-highmem-32"
+ },
  "ssd_gb": 750,
  "spot": true,
  "append_tasks": 16,

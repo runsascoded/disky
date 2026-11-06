@@ -102,8 +102,10 @@ options:
   # `compact_cmd`, its own coordinator job, never inside a scan's 6 h task. (`merge: false`, 10-24 → 10-29, left the carries
   # to nothing: 35 level-0 runs, and search refused every scan.)
   static-names: {profile: /app/job/static-names.json, compact_cmd: [env, MERGE=1, bash, /app/job/cw-static-submit.sh]}
-  publish-r2: {barrier: true}
-  interval-store: {timeout: 90m, mem: 12GB}
+  # Only what the site reads beside the path store (`-S`): the sorts and listings cost ~10.6 GB a scan of GCP egress, and the
+  # interval-store append and static-names both read them from the data bucket, in this region.
+  publish-r2: {args: [-S], barrier: true, require: ["{snapshots}/{scan}/meta.json"]}
+  interval-store: {timeout: 90m, mem: 12GB, source: data}
   over-time: {mem: 16GB}
   digest: {template: cw, config: /app/job/digest.yml}
   # cw's own GCS buckets (the CoreWeave buckets and R2 bill elsewhere); compute: every Batch job `$DISKY_LABELS` selects
