@@ -17,10 +17,17 @@ export const fmtShareDays = (days: number): string =>
  * token only matters to link unfurlers, so the address bar drops it on load
  * and a re-share doesn't carry someone else's preview. Everything else
  * (path, other params, hash) is kept, params in order. */
-export function withoutOg(href: string): string | null {
+export const withoutOg = (href: string): string | null => withoutParam(href, 'og')
+
+/** `href` without its `sso=` (null when it has none): the silent sign-in's marker (specs/oa-login-rp.md phase 2) has
+ * done its job once the middleware has seen it, and must not follow the person into a share or a later sign-in's
+ * return URL. */
+export const withoutSso = (href: string): string | null => withoutParam(href, 'sso')
+
+function withoutParam(href: string, param: string): string | null {
   const u = new URL(href)
-  if (!u.searchParams.has('og')) return null
-  u.searchParams.delete('og')
+  if (!u.searchParams.has(param)) return null
+  u.searchParams.delete(param)
   return `${u.pathname}${u.searchParams.size ? `?${u.searchParams}` : ''}${u.hash}`
 }
 

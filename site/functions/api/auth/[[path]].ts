@@ -11,6 +11,7 @@ import { authRoutes } from '@open-athena/auth'
 import { d1AuditQuery } from '@open-athena/auth/d1'
 import { ADMIN_SCOPE, AdminGrantRefused, BadGrantTerms, type Ctx, gateFor, json } from '../../_lib/auth.js'
 import { siteAllowlist } from '../../_lib/allowlist.js'
+import { markedSignedOut } from '../../_lib/silentSignIn.js'
 
 /**
  * Local-dev auto sign-in. The package's admin routes authenticate by a signed
@@ -70,6 +71,8 @@ export const onRequest = async (ctx: Ctx): Promise<Response> => {
     if (!(e instanceof AdminGrantRefused || e instanceof BadGrantTerms)) throw e
     res = json({ error: e.message }, e instanceof BadGrantTerms ? 400 : 403, { 'cache-control': 'no-store' })
   }
+  // A deliberate sign-out: the broker's session outlives it, so no silent attempt until they ask (`_lib/silentSignIn.ts`).
+  if (res.ok && ctx.request.method === 'POST' && new URL(ctx.request.url).pathname === '/api/auth/logout') res = markedSignedOut(ctx.request, ctx.env, res)
   if (!devCookie) return res
   const out = new Response(res.body, res)
   out.headers.append('set-cookie', devCookie)
