@@ -1598,6 +1598,26 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); opacity: 1; }
     .sweep-soft-delete-buckets { margin-top: 4px; td, th { padding: 2px 16px 2px 0; text-align: left; } }
   }
 
+  .admins {
+    margin-top: 24px;
+    .admins-add { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin-top: 10px; }
+    .admins-add input[type='email'] { min-width: min(280px, 100%); }
+    .admins-add input:not([type='email']) { width: 13em; }
+    .admin-via { border-bottom: 1px dotted var(--ink-3); cursor: help; white-space: nowrap; }
+    .via-break-glass, .via-link, .via-staff-domain { color: var(--ink-2); font-style: italic; }
+    .dim { color: var(--ink-3); }
+    .err { color: var(--danger); }
+  }
+  // The admin list names nobody: said to an admin above the table, and to everyone else in place of the console.
+  .admins-notice {
+    margin: 12px 0;
+    padding: 10px 12px;
+    border: 1px solid var(--danger);
+    border-radius: 6px;
+    color: var(--danger);
+    font-weight: 600;
+  }
+
   .session-log-switch {
     margin-top: 24px;
     .status { font-weight: 600; }
