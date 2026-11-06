@@ -12,13 +12,21 @@
  * handler past its gate may fail on a binding this env doesn't have) must equal `EXPECT[gate]`. The matrix runs
  * twice: with `ADMIN_LIST` (admin is the explicit list; the staff domain alone isn't) and without (staff are admins).
  *
- * Not covered here: `_middleware.ts`'s `restrictGate` (a path-restricted link's 403 on the routes that could name a
- * hidden path, ahead of the route's own gate: `_lib/restrict.test.ts`), `PUBLIC_READ` deployments (anonymous passes
- * the viewer gates), and a secondary store's extra scope (`STORE_SCOPE`).
+ * A path-restricted share link (a grant carrying `<tag>:hide:<prefix>`) is its own dimension: every case a share
+ * link's scopes can reach (`LINK_GATES`) declares in `RESTRICTED` what such a link gets from it (`blocked`, `filtered`,
+ * `pathless`, `anonymous`), so a new route can't become readable by one without saying whether it could name what the
+ * link hides. Each is called as the middleware would (`restrictGate`, then the handler): `blocked` must be the 403 a
+ * restricted link gets, the rest must answer it as they answer the same link without its restriction. What a
+ * `filtered` route leaves out is its own tests' to assert (`_lib/restrict.test.ts`, `api/annotations.test.ts`,
+ * `api/restrictedFilter.test.ts`, `api/diff/level.test.ts`, `_lib/dataProxy.test.ts`).
+ *
+ * Not covered here: `PUBLIC_READ` deployments (anonymous passes the viewer gates), and a secondary store's extra
+ * scope (`STORE_SCOPE`).
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { ADMIN_GRANT_REFUSED, type Env, gateFor, identify } from './_lib/auth'
-import { DEPLOYMENT_ROUTES } from './_lib/gatesDeployment'
+import { DEPLOYMENT_RESTRICTED, DEPLOYMENT_ROUTES } from './_lib/gatesDeployment'
+import { hideScope, restrictGate } from './_lib/restrict'
 import { sqliteD1, withAdminEmails, withLedger } from './_lib/testD1'
 
 // The card renderer's wasm (`og/serve.ts`): nothing here draws a card.
@@ -95,6 +103,9 @@ interface World {
   headers: Record<Who, Record<string, string>>
   /** The read-only link's grant id (`named-grant`). */
   readOnlyGrant: string
+  /** A share link with all a link can hold short of admin (the base scope and assign), hiding `HIDDEN` (`restricted`),
+   *  and the same link without the restriction (`open`): their request headers. */
+  links: { restricted: Record<string, string>; open: Record<string, string> }
 }
 
 type Vars = Record<string, unknown>
@@ -280,6 +291,142 @@ const SHARED_ROUTES: Record<string, Case[]> = {
  *  (`_lib/gatesDeployment.ts`, which a deployment branch fills and `cloud` leaves empty). */
 const ROUTES: Record<string, Case[]> = { ...SHARED_ROUTES, ...(DEPLOYMENT_ROUTES as Record<string, Case[]>) }
 
+// ---- a path-restricted link ----------------------------------------------------------------------------------------
+
+/** What a path-restricted share link gets from a route its scopes reach. */
+type Restricted =
+  /** Refused: the 403 `FORBIDDEN_RESTRICTED`, by the middleware (`RESTRICTED_BLOCKED`) or by the route itself. */
+  | 'blocked'
+  /** Answered with what the link hides left out (a hidden path a 404, hidden rows dropped): the route's own tests. */
+  | 'filtered'
+  /** Answered as for any caller past its gate: nothing in it names a scanned path (deployment config, the caller's
+   *  identity, scan ids, a rendering of the request's own body). */
+  | 'pathless'
+  /** A public route: the link's credential earns nothing an anonymous caller doesn't get. */
+  | 'anonymous'
+
+/** The gates a share link can pass with the scopes a restricted link is minted with: everything but `admin` (a grant
+ *  holding it can mint itself an unrestricted link, so no hide scope confines it) and an email session's. `email`: a
+ *  link naming an address (this audit's links name none, so the case only says it is declared). `unconfigured` answers
+ *  everyone alike, before any gate; `slack-signature` and `google-credential` read no site identity. */
+const LINK_GATES: ReadonlySet<Gate> = new Set<Gate>(['public', 'signed-in', 'viewer', 'stager', 'assigner', 'email', 'named-grant'])
+
+/** A case's key in `RESTRICTED`: its method and path, without the query. */
+const linkKey = (c: Case): string => `${c.method} ${c.path.split('?')[0]}`
+
+const SHARED_RESTRICTED: Record<string, Restricted> = {
+  'GET /a/0000.png': 'anonymous',
+  // The ledger: D1-held prefixes, unfiltered.
+  'GET /api/actions': 'blocked',
+  'POST /api/actions': 'blocked',
+  // A hidden path, and a hidden dir itself (its pyramid breaks its contents down), are a 404.
+  'GET /api/age-pyramid': 'filtered',
+  // No note pinned strictly below a hidden path.
+  'GET /api/annotations': 'filtered',
+  'GET /api/assignments': 'blocked',
+  // The caller's own session, profile and face; the access-request flow.
+  'GET /api/auth/whoami': 'pathless',
+  'POST /api/auth/exchange': 'pathless',
+  'POST /api/auth/logout': 'pathless',
+  'POST /api/auth/track': 'pathless',
+  'GET /api/auth/profile': 'pathless',
+  'POST /api/auth/request': 'pathless',
+  'GET /api/auth/decide': 'pathless',
+  'POST /api/auth/decide': 'pathless',
+  'GET /api/auth/avatar/none': 'pathless',
+  'GET /api/db': 'blocked',
+  'GET /api/db/allowed_emails': 'blocked',
+  // A hidden path is a 404, hidden rows are dropped, a name filter is refused (its totals count hidden hits).
+  'GET /api/diff': 'filtered',
+  // A hidden directory, and a hidden dir itself, have no level, and `more` / `wide` name neither.
+  'GET /api/diff/level': 'filtered',
+  // Draws a diff of whatever path the request names.
+  'POST /api/digest-image': 'blocked',
+  // Renders the request's own rows; reads nothing.
+  'POST /api/digest-op': 'pathless',
+  'GET /api/digest-settings': 'pathless',
+  // By the route: its groups name paths in every bucket.
+  'GET /api/dups': 'blocked',
+  'GET /api/estate': 'blocked',
+  'GET /api/filter-caps': 'pathless',
+  'GET /api/filter-cover': 'blocked',
+  'GET /api/filter-scans': 'pathless',
+  'GET /api/health': 'blocked',
+  'GET /api/largest': 'filtered',
+  'GET /api/me': 'pathless',
+  'GET /api/name-matches': 'blocked',
+  'GET /api/name-summary-registry': 'blocked',
+  'POST /api/name-summary-registry': 'blocked',
+  'GET /api/name-summary': 'blocked',
+  'POST /api/name-summary': 'blocked',
+  'POST /api/og/mint': 'blocked',
+  'DELETE /api/og/tokens/none': 'blocked',
+  'GET /api/owners': 'blocked',
+  'GET /api/path-index': 'blocked',
+  'GET /api/plan-sweep/jobs': 'blocked',
+  'GET /api/plans': 'blocked',
+  'GET /api/plans/staged': 'blocked',
+  'POST /api/plans/staged/card': 'blocked',
+  'POST /api/plans/stage': 'blocked',
+  'GET /api/plans/run': 'blocked',
+  'GET /api/plans/run-analytics': 'blocked',
+  'GET /api/plans/1': 'blocked',
+  'DELETE /api/plans/1/items': 'blocked',
+  'POST /api/plans/1/batches/merge': 'blocked',
+  'GET /api/plans/prefix-history': 'blocked',
+  'GET /api/plans/progress': 'blocked',
+  'GET /api/plans/scan-deletions': 'blocked',
+  // By the route: it sizes whatever prefixes the request names.
+  'POST /api/prefixes': 'blocked',
+  'GET /api/scan-runs': 'blocked',
+  // A hidden path is a 404; a name filter is refused (its points count hidden hits).
+  'GET /api/series': 'filtered',
+  // Whether logging is on; the caller's own batch.
+  'GET /api/session-log': 'anonymous',
+  'POST /api/session-log': 'pathless',
+  'GET /api/static-bench': 'blocked',
+  'POST /api/static-bench': 'blocked',
+  // The scan store's bucket and its listing prefixes: config.
+  'GET /api/store': 'pathless',
+  // A hidden path is a 404, a hidden dir a leaf, a name filter refused (its tree counts hidden hits).
+  'GET /api/subtree': 'filtered',
+  'GET /api/sweep/jobs': 'blocked',
+  'GET /api/sweep/logs': 'blocked',
+  'GET /api/sweep/settings': 'blocked',
+  'GET /api/sweep/soft-delete': 'blocked',
+  'GET /api/union-scans': 'pathless',
+  'GET /api/whoami': 'pathless',
+  'GET /assignments': 'anonymous',
+  'POST /auth/email/start': 'anonymous',
+  'POST /auth/email/code': 'anonymous',
+  'GET /auth/email/verify': 'anonymous',
+  'GET /auth/email/poll': 'anonymous',
+  'GET /auth/google': 'anonymous',
+  'GET /auth/google/callback': 'anonymous',
+  'GET /auth/google/client': 'anonymous',
+  'GET /auth/google/onetap/nonce': 'anonymous',
+  // The scan list, and a scan's `meta.json`; of the rest, `age.json` unless a hidden dir is top-level, and
+  // `rules.json` without the rules below a hidden path (`_lib/restrict.ts` `dataAllowed`, `restrictRules`).
+  'GET /data/scans.json': 'filtered',
+  'GET /data/2026-10-01/meta.json': 'filtered',
+  // A restricted link's `key=` never earns the full card (`og/tokens.ts`).
+  'GET /og/map.png': 'anonymous',
+  'GET /og': 'anonymous',
+  'GET /staged': 'anonymous',
+  'GET /user/ann': 'anonymous',
+  'GET /users': 'anonymous',
+  'GET /v1/files/list': 'blocked',
+  'GET /v1/objects/data-bucket/get': 'blocked',
+}
+
+/** Every declared answer: the shared routes', and this deployment's own (`_lib/gatesDeployment.ts`). */
+const RESTRICTED: Record<string, Restricted> = { ...SHARED_RESTRICTED, ...(DEPLOYMENT_RESTRICTED as Record<string, Restricted>) }
+
+/** What a path-restricted link is refused with (`_lib/restrict.ts` `restrictedForbidden`). */
+const FORBIDDEN_RESTRICTED = '{"error":"forbidden for a path-restricted link"}\n'
+/** The directory the restricted link hides. */
+const HIDDEN = 'bk/secret'
+
 // ---- the route modules ---------------------------------------------------------------------------------------------
 
 type Handler = (ctx: Record<string, unknown>) => Response | Promise<Response>
@@ -380,6 +527,10 @@ async function world(mode: Mode): Promise<World> {
   return {
     env,
     readOnlyGrant: readOnly.id,
+    links: {
+      restricted: (await grant('restricted link', ['gcs', 'gcs:assign', hideScope('gcs', HIDDEN)], null)).headers,
+      open: (await grant('open link', ['gcs', 'gcs:assign'], null)).headers,
+    },
     headers: {
       'anonymous': {},
       'read-only link': readOnly.headers,
@@ -397,13 +548,14 @@ async function world(mode: Mode): Promise<World> {
 const CALL_TIMEOUT_MS = 5_000
 const HUNG = Symbol('hung')
 
-/** One call's outcome, and what the handler did (its status, or its throw) for a failure's message. */
-async function call(w: World, handler: Handler, file: string, c: Case, who: Who): Promise<{ outcome: Outcome; did: string }> {
+/** One call, as `headers`' caller: what `run` did with the case's context (its status, or its throw), and a 403's
+ *  body. `as` names the caller in a hang's message. */
+async function answer(w: World, run: Handler, file: string, c: Case, headers: Record<string, string>, as: string): Promise<{ did: string; body?: string }> {
   const vars = typeof c.env === 'function' ? c.env(w) : c.env
   const bodied = c.method !== 'GET'
   const request = new Request(`${ORIGIN}${c.path}`, {
     method: c.method,
-    headers: { ...w.headers[who], ...(bodied ? { 'content-type': 'application/json' } : {}) },
+    headers: { ...headers, ...(bodied ? { 'content-type': 'application/json' } : {}) },
     ...(bodied ? { body: '{}' } : {}),
   })
   const ctx = {
@@ -417,12 +569,26 @@ async function call(w: World, handler: Handler, file: string, c: Case, who: Who)
   }
   let timer: ReturnType<typeof setTimeout> | null = null
   const hung = new Promise<typeof HUNG>(resolve => { timer = setTimeout(() => resolve(HUNG), CALL_TIMEOUT_MS) })
-  const answered = (async () => handler(ctx))().then(r => r.status, e => `threw ${String((e as Error)?.message ?? e).slice(0, 80)}`)
+  const answered = (async () => run(ctx))().then(
+    async r => ({ did: String(r.status), ...(r.status === 403 ? { body: await r.text() } : {}) }),
+    e => ({ did: `threw ${String((e as Error)?.message ?? e).slice(0, 80)}` }),
+  )
   const got = await Promise.race([answered, hung])
   clearTimeout(timer)
-  if (got === HUNG) throw new Error(`${c.method} ${c.path} (${file}) as ${who}: no answer in ${CALL_TIMEOUT_MS} ms`)
-  return { outcome: got === 401 || got === 403 ? got : 'pass', did: String(got) }
+  if (got === HUNG) throw new Error(`${c.method} ${c.path} (${file}) as ${as}: no answer in ${CALL_TIMEOUT_MS} ms`)
+  return got
 }
+
+/** One call's outcome, and what the handler did (its status, or its throw) for a failure's message. */
+async function call(w: World, handler: Handler, file: string, c: Case, who: Who): Promise<{ outcome: Outcome; did: string }> {
+  const { did } = await answer(w, handler, file, c, w.headers[who], who)
+  return { outcome: did === '401' ? 401 : did === '403' ? 403 : 'pass', did }
+}
+
+/** A route as a deployed request reaches it: the middleware's guard for a path-restricted link (`_middleware.ts`
+ *  `restrictGate`), then the handler. */
+const behindMiddleware = (handler: Handler): Handler => async ctx =>
+  (await restrictGate(ctx.request as Request, ctx.env as Env)) ?? handler(ctx)
 
 /** `POST /api/auth/grants` as `who`, through the route. */
 const mintAs = (w: World, who: Who, scopes: string[]): Promise<Response> => (MODULES['api/auth/[[path]].ts'].onRequest as Handler)({
@@ -464,6 +630,10 @@ describe('every route declares its gate', () => {
   })
   it('every gate in the vocabulary is some route\'s', () => {
     expect([...new Set(Object.values(ROUTES).flatMap(cases => cases.map(c => c.gate)))].sort()).toEqual(Object.keys(EXPECT).sort())
+  })
+  it('the cases a share link\'s scopes reach are exactly the ones `RESTRICTED` answers for a path-restricted link', () => {
+    const reachable = [...new Set(Object.values(ROUTES).flatMap(cases => cases.filter(c => LINK_GATES.has(c.gate)).map(linkKey)))].sort()
+    expect(Object.keys(RESTRICTED).sort()).toEqual(reachable)
   })
 })
 
@@ -510,5 +680,30 @@ describe.each(MODES)('$name', mode => {
     for (const who of IDENTITIES) got.push(await call(w, handler, file, c, who))
     const did = IDENTITIES.map((who, i) => `${who}: ${got[i].did}`).join('; ')
     expect(byIdentity(got.map(g => g.outcome)), `${c.method} ${c.path} (${file}) answered ${did}`).toEqual(byIdentity(expected(c.gate, mode)))
+  })
+
+  it('the two share links are who they say: the same scopes, one hiding a directory', async () => {
+    const ids = await Promise.all([w.links.restricted, w.links.open].map(async headers => {
+      const id = await identify({ request: new Request(`${ORIGIN}/api/me`, { headers }), env: w.env })
+      return id && { via: id.via, email: id.email, scopes: id.scopes, admin: id.admin }
+    }))
+    expect(ids).toEqual([
+      { via: 'grant', email: null, scopes: ['gcs', 'gcs:assign', `gcs:hide:${HIDDEN}`], admin: false },
+      { via: 'grant', email: null, scopes: ['gcs', 'gcs:assign'], admin: false },
+    ])
+  })
+
+  const linkCases = cases.filter(({ c }) => LINK_GATES.has(c.gate)).map(x => ({ ...x, title: `a path-restricted link, ${x.c.method} ${x.c.path}${x.c.env ? ' (+env)' : ''}: ${RESTRICTED[linkKey(x.c)] ?? 'undeclared'}` }))
+  it.each(linkCases)('$title', async ({ file, c }) => {
+    const mod = MODULES[file]
+    const deployed = behindMiddleware(mod[handlerFor(mod, c.method)] as Handler)
+    const restricted = await answer(w, deployed, file, c, w.links.restricted, 'the restricted link')
+    const open = await answer(w, deployed, file, c, w.links.open, 'the open link')
+    // Refused as a restricted link is, or answered exactly as the same link without its restriction.
+    const got = restricted.did === '403' && restricted.body === FORBIDDEN_RESTRICTED ? 'blocked'
+      : restricted.did === open.did ? 'as the open link'
+      : `${restricted.did}, the open link ${open.did}`
+    const declared = RESTRICTED[linkKey(c)]
+    expect(got, `${c.method} ${c.path} (${file})`).toEqual(declared === undefined ? 'undeclared' : declared === 'blocked' ? 'blocked' : 'as the open link')
   })
 })
