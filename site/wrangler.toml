@@ -63,7 +63,7 @@ GCP_PROJECT = "oa-internal-450019"    # Batch dispatch (`_lib/gcp.ts`)
 GCP_LOG_VIEW = "projects/oa-internal-450019/locations/global/buckets/_Default/views/gcs-sweep-task-logs"
 # Each fleet bucket's Batch region (us-central2 has no Batch location → us-central1).
 BUCKET_REGIONS = '{"marin-us-east5":"us-east5","marin-us-central1":"us-central1","marin-us-central2":"us-central1","marin-eu-west4":"europe-west4","marin-us-west4":"us-west4","marin-us-east1":"us-east1"}'
-SWEEP_IMAGE = "us-central1-docker.pkg.dev/oa-internal-450019/cloud-run-source-deploy/gcs-usage-snapshot@sha256:5426b2e05141f6f2fe07f6745e5cf11841ee019c0f48ddc34bb44bb13a7ba832"
+SWEEP_IMAGE = "us-central1-docker.pkg.dev/oa-internal-450019/cloud-run-source-deploy/gcs-usage-snapshot@sha256:a981f93b249311ce29023f8e2dd4b32f182b4d2ba1c40c5afbdf7f22392de003"
 SWEEP_PACING = "guided"   # Feedback control within the cold-ramp envelope; adaptive after benchmark validation.
 CF_ACCOUNT_ID = "74981a43be0de7712369306c7b19133d"
 CF_PAGES_SCRIPT = "pages-worker--16777874"   # the project's Functions scripts in the analytics datasets: `<this>-production` / `-preview` (`dt-cloud cf-usage`; the Pages API's `production_script_name`)
@@ -190,7 +190,7 @@ DATA_BUCKET = "oa-gcs-usage-dvx"      # sweep runs / plans data (`sweepDispatch`
 GCP_PROJECT = "oa-internal-450019"    # Batch dispatch (`_lib/gcp.ts`)
 # Each fleet bucket's Batch region (us-central2 has no Batch location → us-central1).
 BUCKET_REGIONS = '{"marin-us-east5":"us-east5","marin-us-central1":"us-central1","marin-us-central2":"us-central1","marin-eu-west4":"europe-west4","marin-us-west4":"us-west4","marin-us-east1":"us-east1"}'
-SWEEP_IMAGE = "us-central1-docker.pkg.dev/oa-internal-450019/cloud-run-source-deploy/gcs-usage-snapshot@sha256:5426b2e05141f6f2fe07f6745e5cf11841ee019c0f48ddc34bb44bb13a7ba832"
+SWEEP_IMAGE = "us-central1-docker.pkg.dev/oa-internal-450019/cloud-run-source-deploy/gcs-usage-snapshot@sha256:a981f93b249311ce29023f8e2dd4b32f182b4d2ba1c40c5afbdf7f22392de003"
 SWEEP_PACING = "guided"
 CF_ACCOUNT_ID = "74981a43be0de7712369306c7b19133d"
 D1_DB_ID = "e52398b7-5538-4bc4-83db-3355a1b5ef9a"   # the `DB` binding's D1: executor jobs record their runs there
