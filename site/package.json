@@ -3,6 +3,7 @@
   "private": true,
   "version": "0.0.1",
   "type": "module",
+  "devPort": 3253,
   "devPort": 3263,
   "scripts": {
     "dev": "vite",
