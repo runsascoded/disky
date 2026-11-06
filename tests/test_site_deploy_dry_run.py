@@ -106,6 +106,13 @@ def test_config_without_dry_run_is_refused(tmp_path: Path):
     )
 
 
+def test_an_unknown_argument_is_refused(tmp_path: Path):
+    """A misspelt `--dry-run` must not fall through to a real deploy."""
+    site = make_site(tmp_path)
+    write_config(site)
+    assert run(site, '--dryrun', '-P') == (1, '', 'deploy: unknown argument --dryrun (nothing built or deployed)\n')
+
+
 def test_dry_run_refuses_a_config_that_does_not_parse(tmp_path: Path):
     site = make_site(tmp_path)
     write_config(site, 'name = "demo-site"\n[vars]\nBATCH_REGION = \\"us-east1\\"\n')

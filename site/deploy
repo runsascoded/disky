@@ -41,7 +41,7 @@ while [ $# -gt 0 ]; do
     -n|--dry-run) dry=true ;;
     --status) status=true ;;
     --config) [ $# -ge 2 ] || { echo "deploy: --config needs a file" >&2; exit 1; }; CONFIG=$2; shift ;;
-    *) ;;
+    *) echo "deploy: unknown argument $1 (nothing built or deployed)" >&2; exit 1 ;;
   esac
   shift
 done
