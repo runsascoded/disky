@@ -129,6 +129,13 @@ const KEY_RE = /^[a-z0-9][a-z0-9-]*$/
 
 export class StoreConfigError extends Error {}
 
+/** A `STORES_JSON` that doesn't parse or validate, as a response: this comes before any gate, and `JSON.parse`'s
+ *  message quotes a fragment of the config, so the detail goes to the log, not the caller. */
+export function storeConfigResponse(e: StoreConfigError): Response {
+  console.error(e.message)
+  return new Response(JSON.stringify({ error: 'store configuration error' }) + '\n', { status: 500, headers: { 'content-type': 'application/json; charset=utf-8' } })
+}
+
 /** A union view (`STORES_JSON` entry with `union`): its member stores
  * (`PRIMARY_STORE` or secondary store keys, in config order), and whether it
  * is the main (no-`store=`) view. */
@@ -293,7 +300,8 @@ export function withStore<C extends { request: Request; env: Env }>(ctx: C): C |
   try {
     stores = secondaryStores(ctx.env)
   } catch (e) {
-    return jsonErr((e as Error).message, 500)
+    if (e instanceof StoreConfigError) return storeConfigResponse(e)
+    throw e
   }
   const cfg = Object.hasOwn(stores, key) ? stores[key] : undefined
   if (!cfg) return jsonErr(`unknown store '${key}'`, 404)

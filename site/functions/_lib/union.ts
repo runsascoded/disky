@@ -28,7 +28,7 @@ import { type Env, json, type Identity, requireViewer } from './auth.js'
 import { ivRetry, pathScans, storeReady, withPathStore } from './index.js'
 import { indexedScan, noScan } from './scanArg.js'
 import { scanTimes } from './scanTimes.js'
-import { PRIMARY_STORE, StoreConfigError, storeKey, type UnionView, unionViews, withStore } from './stores.js'
+import { PRIMARY_STORE, StoreConfigError, storeConfigResponse, storeKey, type UnionView, unionViews, withStore } from './stores.js'
 import { readRootRows, type ViewNode } from './view.js'
 
 type Ctx = { request: Request; env: Env; waitUntil?: (p: Promise<unknown>) => void }
@@ -42,7 +42,7 @@ export function unionFor(request: Request, env: Env): UnionView | null | Respons
   try {
     views = unionViews(env)
   } catch (e) {
-    if (e instanceof StoreConfigError) return json({ error: e.message }, 500)
+    if (e instanceof StoreConfigError) return storeConfigResponse(e)
     throw e
   }
   const raw = new URL(request.url).searchParams.get('store')
