@@ -13,7 +13,7 @@
  * applied) reads as `{annotations: [], applied: false}`, and a write is a 503 naming the migration. Not
  * edge-cached: one indexed D1 read, and an admin's write must show at once. */
 import { type Ctx, json, requireAdmin, requireViewer } from '../_lib/auth.js'
-import { PRIMARY_STORE, requestedStore, StoreConfigError, unionViews, withStore } from '../_lib/stores.js'
+import { PRIMARY_STORE, requestedStore, StoreConfigError, storeConfigResponse, unionViews, withStore } from '../_lib/stores.js'
 import { addNote, deleteNote, editNote, listNotes, missingScope, missingTable } from '../_lib/annotations.js'
 import { type AnnotationsBody, type NoteFields, parseNote } from '../_lib/annotationShape.js'
 import { noteActivity } from '../_lib/activityHook.js'
@@ -33,7 +33,7 @@ function noteStore(ctx: Ctx): { key: string; ctx: Ctx; union?: true } | Response
   try {
     if (unionViews(ctx.env)[key]) return { key, ctx, union: true }
   } catch (e) {
-    if (e instanceof StoreConfigError) return json({ error: e.message }, 500)
+    if (e instanceof StoreConfigError) return storeConfigResponse(e)
     throw e
   }
   const sc = withStore(ctx)

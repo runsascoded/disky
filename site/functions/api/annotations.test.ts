@@ -212,6 +212,17 @@ describe('/api/annotations', () => {
   })
 })
 
+describe('/api/annotations under a `STORES_JSON` that doesn\'t parse', () => {
+  it('a 500 that quotes nothing of it, before the gate; the detail goes to the log', async () => {
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const STORES_JSON = '{"meta": {"vars": {"STORE_BUCKET": "a-private-bucket-name"'
+    const res = await onRequest({ request: new Request('https://site.example.test/api/annotations?store=meta'), env: { DB: {}, STORES_JSON } } as never)
+    expect([res.status, await res.text()]).toEqual([500, '{"error":"store configuration error"}\n'])
+    expect(log.mock.calls).toEqual([[`STORES_JSON: ${(() => { try { JSON.parse(STORES_JSON) } catch (e) { return (e as Error).message } })()}`]])
+    log.mockRestore()
+  })
+})
+
 describe('parseNote', () => {
   it('a full note, a partial patch, and each refusal', () => {
     expect([
