@@ -17,7 +17,7 @@ import { ivRefusal, ivRetry, pathGens, withPathStore, storeReady, type Lens } fr
 import { hasLedger, ledgerHead } from '../_lib/ledger.js'
 import { parseOwner, queryParam, QueryError, classKey, parseClasses } from '../_lib/scope.js'
 import { hasExtras } from '../_lib/extras.js'
-import { ATTEN_DEFAULT, buildView, FILTER_VIEW_V, LensUnavailable, MIN_AREA_DEFAULT, NotFound, QUANT, readRootAgg, readRootRows, type ViewNode } from '../_lib/view.js'
+import { ATTEN_DEFAULT, buildView, FILTER_VIEW_V, LensUnavailable, MIN_AREA_DEFAULT, NotFound, QUANT, readRootAgg, readRootRows, scopedTag, type ViewNode } from '../_lib/view.js'
 import { hexNote, hexQuery, indexedGate, staticTag } from '../_lib/staticFilter.js'
 import { FilterRejected, indexedOnly, pathTerms, rejectBody, rejectQuery, rejectScope } from '../_lib/indexedOnly.js'
 import { cacheEnvTag, cacheKeyFor, cacheMatch, cacheStore, isPartial, keepFor, serverTiming, UPGRADE_DETAIL_GROUPS, UPGRADE_DETAILS_MS, UPGRADE_PHASE2_MS, UPGRADE_SEARCH_LIMITS, upgradePartial } from '../_lib/edgeCache.js'
@@ -148,6 +148,8 @@ async function subtreeGated(
   const keyOf = (date: string, head: number, xtra: boolean, g: string, lensTag: string) => cacheKeyFor('subtree', cacheEnvTag(ctx.env, ctx.request),
     `${date}/${encodeURIComponent(path)}?w=${w}&h=${h}&a=${minArea}&t=${atten}&l=${lensTag}` +
       `&o=${rawOwner ?? ''}&b=${by ?? ''}&D=${depth ?? ''}&cl=${classKey(classes)}&x=${xtra ? 1 : 0}&F=${query && !full ? 0 : 1}&qs=${query ? qp.syntax : ''}&q=${encodeURIComponent(query ? qRaw : '')}&head=${head}&g=${g}&st=${staticTag(ctx.env, query)}${query ? `&fv=${FILTER_VIEW_V}` : ''}` +
+      // A scoped read's answer version, where the view is one (absent otherwise, so no other key moves).
+      scopedTag(ctx.env, { lens, owner, classes, by, query }) +
       // The root's answer carries the deployment's `ROOT_LABEL` (kept in the key: dropping it would flush prod's root entries).
       (path === '' ? `&rl=${encodeURIComponent(ctx.env.ROOT_LABEL ?? '')}` : '') +
       // A union root's member read: the union's threshold (absent otherwise, so no other key moves).
