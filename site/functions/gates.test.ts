@@ -20,8 +20,10 @@
  * `filtered` route leaves out is its own tests' to assert (`_lib/restrict.test.ts`, `api/annotations.test.ts`,
  * `api/restrictedFilter.test.ts`, `api/diff/level.test.ts`, `_lib/dataProxy.test.ts`).
  *
- * Not covered here: `PUBLIC_READ` deployments (anonymous passes the viewer gates), and a secondary store's extra
- * scope (`STORE_SCOPE`).
+ * Not covered here: `PUBLIC_READ` deployments (anonymous passes the viewer gates), a secondary store's extra scope
+ * (`STORE_SCOPE`), and a grant holding `admin` beside a hide scope. Such a grant isn't modelled as restricted because
+ * no hide scope confines it: it can mint itself an unrestricted link (`LINK_GATES`), and `gateFor`'s store refuses one
+ * with `ADMIN_LIST` on. The filters do still apply to it where they run; they just aren't what this audit relies on.
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { ADMIN_GRANT_REFUSED, type Env, gateFor, identify } from './_lib/auth'
