@@ -21,8 +21,8 @@ import { useStore } from './store'
 import { useMinSlug } from './scan'
 import {
   batchHref, isLost, isMaintenance, liveness, logsHref, maintStore, mapHref, metaHref, type OutputDelta, phaseOrder, type PhaseSpan, type RunSummary, type ScanRun,
-  type ScanRunPhase, type PhaseIssue, type PhaseRecovery, BEHIND, issueState, issueWhat, overlappingFailures, phaseFill, phaseOutcome, runOutcome, runOutcomeLine, runTasks,
-  type RunTask, STATUS_FILTERS, statusMatches, stepFailure, taskLogsHref,
+  type ScanRunPhase, type PhaseIssue, type PhaseRecovery, BEHIND, issueLeaves, issueState, issueWhat, overlappingFailures, phaseFill, phaseOutcome, runOutcome, runOutcomeLine, runTasks,
+  type RunTask, STATUS_FILTERS, statusMatches, taskLogsHref,
 } from './scanRunsModel'
 import { colorer, fmtDur, fmtRunTime, getJson, IssueStanding, type Links, PhaseBar, QUIET_TIP, runDay, RunWhen, scanRunsApi, scansHref, scansStore, Status, useScanRuns } from './scanRunsUi'
 import { brushRole, dagNodes, processOf, type DagNode, type Hl, type RunDagRow } from './runDag'
@@ -693,7 +693,7 @@ export function ScanRunPage() {
         {d.phase_issues?.map(i => <div className={`sr-failure ${issueState(i)}`} key={i.phase}>
           {i.outcome === BEHIND
             ? <><b>{i.phase}: search doesn't cover this scan yet.</b> {sentence(i.reason ?? '')} The data is published.</>
-            : <><b>{i.phase}</b> {stop(issueWhat(i))}{i.detail && <> {sentence(i.detail)}</>}{stepFailure(i.phase) && <> {sentence(stepFailure(i.phase)!.leaves)}</>}</>}
+            : <><b>{i.phase}</b> {stop(issueWhat(i))}{i.detail && <> {sentence(i.detail)}</>}{issueLeaves(i) && <> {sentence(issueLeaves(i)!)}</>}</>}
           {' '}<IssueStanding issue={i} runHref={scanHref} />
         </div>)}
         {r.kind === 'phase-recovery' && r.parent && <p className="sub">Phase recovery for <Link to={scanHref(r.parent)}>the original scan run</Link>. This attempt has its own clock; it does not replace the original timings.</p>}

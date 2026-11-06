@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest'
 import {
   batchHref, failedAt, logsHref, mapHref, metaHref, outputIndex, phaseIssues, phaseOutcome, phaseOrder, phaseSpans, runTime, type ScanRun, type ScanRunOutput,
   type ScanRunPhase, manualScans, scanRunOf, structureOf, summarize, withDeltas, runOutcome, runOutcomeLine, phaseSkip, overlappingFailures, runTasks, taskLogsHref,
-  isMaintenance, liveness, LOST_S, maintStore, phaseStatus, QUIET_S, issueNext, issueState, issueWhat, outcomeSteps, runOutcomeLabel, statusMatches, stepFailure, STATUS_FILTERS,
+  isMaintenance, liveness, LOST_S, maintStore, phaseStatus, QUIET_S, issueLeaves, issueNext, issueState, issueWhat, outcomeSteps, runOutcomeLabel, statusMatches, stepFailure, STATUS_FILTERS,
   type PhaseIssue,
 } from './scanRunsModel'
 
@@ -332,6 +332,12 @@ describe('a succeeded run\'s issues, by what their steps declare (`scanSteps.jso
       ['search behind', 'Search catches up when the static name index appends this scan.'],
       ['failed', 'Not retried: no later run redoes it.'],
     ])
+  })
+  it('says what an open issue leaves short; nothing once its work is done, for search behind (its reason says it) or for an unknown phase', () => {
+    expect([
+      issueLeaves(issue('warm-cache')), issueLeaves(issue('static-names')), issueLeaves(issue('static-names', later)), issueLeaves(issue('publish')),
+      issueLeaves({ phase: 'probe', outcome: 'search behind', recovery: null }),
+    ]).toEqual(['cache not pre-warmed: this scan\'s first views load cold', 'search doesn\'t cover this scan', undefined, undefined, undefined])
   })
   it('the status filter\'s choices: `needs attention` keeps failed and incomplete runs, never a harmless partial', () => {
     expect(STATUS_FILTERS.map(f => [f.key, f.label])).toEqual([

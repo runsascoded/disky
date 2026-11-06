@@ -6,7 +6,7 @@ import { ago } from './colors'
 import { Tooltip } from './Tooltip'
 import { fmtDur as fmtDurM } from './runs'
 import {
-  BEHIND, issueNext, issueState, issueWhat, outcomeSteps, overlappingFailures, phaseFill, phaseOutcome, runOutcome, runOutcomeLabel, scanRunOf, stepFailure,
+  BEHIND, issueLeaves, issueNext, issueState, issueWhat, outcomeSteps, overlappingFailures, phaseFill, phaseOutcome, runOutcome, runOutcomeLabel, scanRunOf,
   type PhaseIssue, type PhaseSpan, type RunSummary, type ScanRun,
 } from './scanRunsModel'
 import { fmtTimestamp } from './scan'
@@ -98,14 +98,14 @@ export function IssueStanding({ issue: i, runHref }: { issue: PhaseIssue; runHre
   return <>Done by {runHref ? <Link to={runHref(r.run_id)}>{label}</Link> : label}{attempt && r.finished_ts != null && <> at {fmtRunTime(r.finished_ts)}</>}.</>
 }
 
-/** A succeeded run's issues, one block each: what happened, what it leaves short (its step's `leaves`; the recorded
- * reason or verdict when it has one), and where it stands. */
+/** A succeeded run's issues, one block each: what happened (with the recorded verdict when it has one), what it
+ * leaves short while nothing has done its work (its step's `leaves`), and where it stands. */
 export function IssueList({ issues, runHref }: { issues: readonly PhaseIssue[]; runHref?: (id: string) => string }) {
   return <div className="sr-issues">{issues.map(i => {
     const more = i.outcome === BEHIND ? i.reason : i.detail
     return <div key={i.phase} className={issueState(i)}>
       <div><b>{i.phase}</b> {issueWhat(i)}</div>
-      {i.outcome !== BEHIND && stepFailure(i.phase) && <div>{stepFailure(i.phase)!.leaves}</div>}
+      {issueLeaves(i) && <div>{issueLeaves(i)}</div>}
       {more && <div className="dim">{more}</div>}
       <div className="dim"><IssueStanding issue={i} runHref={runHref} /></div>
     </div>
@@ -117,7 +117,7 @@ const OUTCOME_HEAD: Record<string, string> = {
   incomplete: "Published, but the scan's data or serving is short.",
   [BEHIND]: "Data published. Search doesn't cover this scan yet.",
   partial: "The scan's data and serving are complete; a side step failed.",
-  recovered: 'Complete: what failed in this run was done since.',
+  recovered: 'Complete: what this run left short was done since.',
 }
 const OUTCOME_CLASS: Record<string, string> = { incomplete: 'warn', [BEHIND]: 'behind', partial: 'partial', recovered: 'succeeded' }
 
@@ -135,7 +135,7 @@ export function Status({ run, failedAt, issues = [], cell, lost, runHref }: { ru
     const outcome = runOutcome(run, issues)
     const steps = outcomeSteps(issues, outcome)
     return <Tooltip cell={cell} pinnable content={<><div>{OUTCOME_HEAD[outcome]}</div><IssueList issues={issues} runHref={runHref} /></>}>
-      <span className={`sr-status ${OUTCOME_CLASS[outcome]}`}>{outcome}{steps.length > 0 && <span className="sr-steps">{runOutcomeLabel(run, issues).slice(outcome.length)}</span>}</span>
+      <span className={`sr-status ${OUTCOME_CLASS[outcome]}`}>{outcome}{steps.length > 0 && <> <span className="sr-steps">{runOutcomeLabel(run, issues).slice(outcome.length + 1)}</span></>}</span>
     </Tooltip>
   }
   const tag = <span className={`sr-status ${run.status}`}>{run.status === 'nop' ? 'no-op' : run.status}</span>

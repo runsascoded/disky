@@ -232,6 +232,12 @@ export function issueWhat(i: Pick<PhaseIssue, 'outcome' | 'reason' | 'attempts'>
   return (i.attempts ?? 1) > 1 ? `${i.outcome} ${i.attempts}x` : i.outcome
 }
 
+/** What an open issue leaves short, as its step declares it; undefined once its work is done, for search behind (its
+ * reason says it) and for a phase no soft step names. */
+export function issueLeaves(i: Pick<PhaseIssue, 'phase' | 'outcome' | 'recovery'>): string | undefined {
+  return i.recovery || i.outcome === BEHIND ? undefined : stepFailure(i.phase)?.leaves
+}
+
 /** Where an unrecovered issue goes from here: search catches up with the index; a converging step's work comes with
  * a later run's same step; any other is not retried. */
 export function issueNext(i: Pick<PhaseIssue, 'phase' | 'outcome'>): string {

@@ -10,8 +10,9 @@
     &.running { color: var(--s1); background: color-mix(in srgb, var(--s1) 10%, var(--surface)); }
     // incomplete: published, but the scan's data or serving is short (the one to look at)
     &.warn { color: color-mix(in srgb, var(--s4) 75%, var(--ink)); background: color-mix(in srgb, var(--s4) 14%, var(--surface)); }
-    // partial: only a side step failed, the scan is whole (the chip's own quiet ink); the steps beside any outcome, lighter
-    .sr-steps { font-weight: 400; }
+    // partial: only a side step failed, the scan is whole (the chip's own quiet ink). The steps beside any outcome
+    // are lighter, and wrap under it as one piece in a narrow column (never mid-name).
+    .sr-steps { font-weight: 400; display: inline-block; white-space: nowrap; }
     // search behind: the data is published, only the static name index lags it (neither a failure nor a warning)
     &.behind { color: var(--ink-2); background: var(--panel); outline: 1px dashed var(--ink-3, currentColor); outline-offset: -1px; }
     &.lost { color: var(--danger); background: var(--surface); outline: 1px dashed color-mix(in srgb, var(--danger) 60%, transparent); outline-offset: -1px; }
