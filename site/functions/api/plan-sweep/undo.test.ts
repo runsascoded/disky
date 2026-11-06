@@ -19,7 +19,6 @@ beforeEach(async () => {
   const d = await sqliteD1()
   raw = d.raw
   raw.exec("INSERT INTO plans (id, name, created_by, created_ts) VALUES (1, 'review', 'actor', 1)")
-  raw.prepare("INSERT INTO deletion_bands (run_id, prefix, bytes, objects, gone, overwritten, drift_new_objects, undone_objects) VALUES (?, 's3://b/a/', 1, 1, 0, 0, 0, 0)").run(RUN)
   env = {
     DB: d.db, SESSION_SECRET: 's'.repeat(32), BASE_SCOPE: 'cw', EXECUTOR: 'plan-sweep', GCP_SA_KEY: 'key', JOB_SA: 'job@example.test', GCP_PROJECT: 'p', DATA_BUCKET: 'data',
     SWEEP_IMAGE: 'image', SWEEP_S3_ENDPOINT: 'https://s3.example.test', STORE_SCHEME: 's3://', STORE_BUCKETS: 'b', SERVED_R2: '1', INDEX_R2: fakeR2(READING(false)),
@@ -28,9 +27,12 @@ beforeEach(async () => {
 })
 afterEach(() => vi.unstubAllGlobals())
 
-const run = (days: number | null, min: number | null, deadline: number | null) => raw.prepare(`
-  INSERT INTO deletion_runs (run_id, plan_id, ${RUN_DIR}, scan, head, exec_head, actor, mode, started_ts, finished_ts, log_dir, plan_digest, undo_deadline, soft_delete_days, min_soft_delete_days)
-  VALUES (?, 1, 'm', 'scan', 0, 0, 'actor', 'real', 100, 200, 'logs', 'd', ?, ?, ?)`).run(RUN, deadline, days, min)
+function run(days: number | null, min: number | null, deadline: number | null): void {
+  raw.prepare(`
+    INSERT INTO deletion_runs (run_id, plan_id, ${RUN_DIR}, scan, head, exec_head, actor, mode, started_ts, finished_ts, log_dir, plan_digest, undo_deadline, soft_delete_days, min_soft_delete_days)
+    VALUES (?, 1, 'm', 'scan', 0, 0, 'actor', 'real', 100, 200, 'logs', 'd', ?, ?, ?)`).run(RUN, deadline, days, min)
+  raw.prepare("INSERT INTO deletion_bands (run_id, prefix, bytes, objects, gone, overwritten, drift_new_objects, undone_objects) VALUES (?, 's3://b/a/', 1, 1, 0, 0, 0, 0)").run(RUN)
+}
 
 async function post(): Promise<[number, unknown, number]> {
   const fetched = vi.fn(async () => new Response('{}', { status: 500 }))

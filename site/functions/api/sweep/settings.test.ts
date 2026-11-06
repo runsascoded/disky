@@ -81,6 +81,7 @@ describe('/api/sweep/settings', () => {
   })
 
   it('on `plan-sweep`, no row reads as 0, and a write takes', async () => {
+    raw.exec('DELETE FROM sweep_settings')
     const plan = { EXECUTOR: 'plan-sweep' }
     expect(await answer(await onRequestGet(req('GET', viewer, undefined, plan)))).toEqual([200, { settings: null, min_soft_delete_days: 0 }])
     expect(await minSoftDeleteDays(db as never, 'plan-sweep')).toBe(0)

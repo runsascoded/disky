@@ -1479,7 +1479,7 @@ def test_soft_delete_reads_each_gcs_source_to_the_data_store_and_r2(tmp_path, en
     })
     S.soft_delete(c, None)
     assert c.sh_impl.calls == ["dt-cloud soft-delete -b x -b y -E https://s3.example.org -o <tmp>/data/snapshots/soft-delete -o r2://r2b/snapshots/soft-delete"]
-    for none in (ctx(tmp_path, env, steps=["soft-delete"]), ctx(tmp_path, {**env, "REPROC": "1"}, steps=["soft-delete"], sources=sources)):
+    for none in (ctx(tmp_path, env, steps=["soft-delete"], sources=[{"uri": "r2://r", "endpoint": "https://r2.example.org"}]), ctx(tmp_path, {**env, "REPROC": "1"}, steps=["soft-delete"], sources=sources)):
         S.soft_delete(none, None)
         assert none.sh_impl.calls == []
 
