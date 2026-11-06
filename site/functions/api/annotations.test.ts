@@ -116,7 +116,7 @@ describe('/api/annotations', () => {
     ])
   })
 
-  // specs/path-scopes.md: a link's `<tag>:hide:<prefix>` shows `<prefix>` as one cell and nothing strictly below it.
+  // `_lib/restrict.ts`: a link's `<tag>:hide:<prefix>` shows `<prefix>` as one cell and nothing strictly below it.
   describe('a path-restricted link', () => {
     const note = (id: number, path: string | null) => ({ ...NOTE, id, text: `n${id}`, path })
     const NOTES = [note(1, null), note(2, 'bk/open/x'), note(3, 'bk/secret'), note(4, 'bk/secret/plans/q4'), note(5, 'bk/secretive')]

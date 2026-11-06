@@ -61,7 +61,7 @@ export const onRequestGet = async (ctx0: Ctx): Promise<Response> => {
 
   const gated = await st.time('auth', requireViewer(ctx as never))
   if (gated instanceof Response) return gated
-  // A path-restricted link (specs/path-scopes.md): a hidden path is absent and
+  // A path-restricted link (`_lib/restrict.ts`): a hidden path is absent and
   // hidden files drop out of the (cached, unrestricted) list on the way out —
   // the list can then hold fewer than `n`.
   const restriction = restrictionFor(gated, ctx.env)

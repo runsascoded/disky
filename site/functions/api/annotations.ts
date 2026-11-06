@@ -7,7 +7,7 @@
  *
  * Notes are per store: `store=` as every data request carries it (none = the primary, `primary`), a secondary
  * store's key, or a union view's. A secondary store's notes need its viewer scope (`STORES_JSON` `scope`, e.g.
- * `/meta`'s `admin`), as its data does. A path-restricted link (specs/path-scopes.md) reads no note pinned strictly
+ * `/meta`'s `admin`), as its data does. A path-restricted link (`_lib/restrict.ts`) reads no note pinned strictly
  * below a path its store hides (a union view's: below any store's hidden path); the store's own notes, and one on
  * the hidden dir itself, it reads as anyone does. A D1 without the table (migration `chart-annotations` not
  * applied) reads as `{annotations: [], applied: false}`, and a write is a 503 naming the migration. Not

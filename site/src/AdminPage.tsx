@@ -291,7 +291,7 @@ interface Draft {
   avatar: string | null
   access: Access
   days: string
-  /** Paths the link hides, one per line (specs/path-scopes.md). */
+  /** Paths the link hides, one per line (`_lib/restrict.ts`). */
   hide?: string
   /** Pre-`access` drafts. */
   readOnly?: boolean

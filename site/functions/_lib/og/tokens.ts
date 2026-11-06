@@ -114,7 +114,7 @@ const grantOk = (g: GrantLike, scopes: readonly string[], now: number, need?: st
   canRedeem(g, now) && g.scopes.some((sc: string) => sc === '*' || scopes.includes(sc))
   // A secondary store's own scope (`STORES_JSON` `scope`), as `requireViewer` demands of its reads.
   && (!need || g.scopes.some((sc: string) => sc === '*' || sc === need))
-  // A path-restricted link (specs/path-scopes.md) never earns a full card:
+  // A path-restricted link (`_lib/restrict.ts`) never earns a full card:
   // its tiles would name what the link hides.
   && !g.scopes.some(isPathScope)
 

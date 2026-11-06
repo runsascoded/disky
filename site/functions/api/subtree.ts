@@ -171,7 +171,7 @@ async function subtreeGated(
   if (g0 instanceof Response) return g0
   early.commit()
   const id: Identity | null = g0
-  // A path-restricted link (specs/path-scopes.md): a hidden path is absent,
+  // A path-restricted link (`_lib/restrict.ts`): a hidden path is absent,
   // and every body (cached or fresh) is filtered on the way out.
   const restriction = restrictionFor(id, ctx.env)
   if (restriction && isHidden(path, restriction)) return hiddenNotFound()
