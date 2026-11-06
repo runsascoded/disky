@@ -12,6 +12,7 @@ import { restrictGate } from './_lib/restrict.js'
 import { footerCacheDrain } from './_lib/footerCache.js'
 import { coloPutsSettled, ivRefusal } from './_lib/index.js'
 import { anonymousPage, stampPage, type OgEnv } from './_lib/og/serve.js'
+import { clearedOnSignIn, silentAttempt } from './_lib/silentSignIn.js'
 import { captureWrite, readBody } from './_lib/activityHook.js'
 import { sizeAssignments } from './_lib/activitySize.js'
 import { serverKind } from './_lib/activityShape.js'
@@ -84,6 +85,9 @@ async function serve(ctx: MiddlewareCtx): Promise<Response> {
   const blocked = await restrictGate(ctx.request, ctx.env as never)
   let t = mark('mw-gate', t0)
   if (blocked) return withMiddlewareTiming(blocked, [...phases, ['mw', Date.now() - t0]], nth)
+  // No session, on a deployment with OA's broker: one silent try before the wall (specs/oa-login-rp.md phase 2).
+  const silent = await silentAttempt(ctx)
+  if (silent) return silent
   const url = new URL(ctx.request.url)
   if (ctx.request.method === 'GET') {
     // An unfurl detail must never break the page: on a failure, the page as its route serves it.
@@ -108,6 +112,7 @@ async function serve(ctx: MiddlewareCtx): Promise<Response> {
     if (!refusal) throw e
     res0 = refusal
   }
+  res0 = clearedOnSignIn(ctx.request, ctx.env, res0)
   mark('mw-next', t)
   // Server-Timing on API answers only (pages and assets keep their headers as Pages sent them).
   const res = url.pathname.startsWith('/api/') ? withMiddlewareTiming(res0, [...phases, ['mw', Date.now() - t0]], nth) : res0

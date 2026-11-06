@@ -133,6 +133,8 @@ const SPAN = 'from=2026-09-01&to=2026-10-01'
 const STAGING = { STAGING: '1' }
 const INTERVALS = { PATH_STORE: 'intervals', INTERVAL_STORE_GEN: 'g1', INDEX_R2: { get: async () => null, head: async () => null } }
 const GOOGLE = { GOOGLE_CLIENT_ID: 'client-id', GOOGLE_CLIENT_SECRET: 'client-secret' }
+/** "Sign in with OA" configured (`oaLoginConfig`): the broker, and this deployment's client on it. */
+const OA_LOGIN = { OA_LOGIN_ISSUER: 'https://login.example.test', OA_LOGIN_CLIENT_ID: 'client-id', OA_LOGIN_CLIENT_SECRET: 'client-secret' }
 const MAIL = { RESEND_API_KEY: 'resend-key', MAIL_FROM: 'Disky <disky@example.org>' }
 
 const SHARED_ROUTES: Record<string, Case[]> = {
@@ -158,6 +160,7 @@ const SHARED_ROUTES: Record<string, Case[]> = {
     post('/api/auth/decide', 'public'),
     get('/api/auth/grants', 'admin'),
     post('/api/auth/grants', 'admin'),
+    patch('/api/auth/grants/none', 'admin'),
     post('/api/auth/grants/none/revoke', 'admin'),
     get('/api/auth/requests', 'admin'),
     get('/api/auth/allowed', 'admin'),
@@ -278,6 +281,11 @@ const SHARED_ROUTES: Record<string, Case[]> = {
   'auth/google/client.ts': [get('/auth/google/client', 'public')],
   'auth/google/onetap.ts': [post('/auth/google/onetap', 'google-credential', GOOGLE), post('/auth/google/onetap', 'unconfigured')],
   'auth/google/onetap/nonce.ts': [get('/auth/google/onetap/nonce', 'public')],
+  // "Sign in with OA" (`specs/oa-login-rp.md`): sign-in itself; a 404 until the deployment has its broker client.
+  'auth/oa.ts': [get('/auth/oa', 'public', OA_LOGIN), get('/auth/oa', 'unconfigured')],
+  'auth/oa/callback.ts': [get('/auth/oa/callback', 'public', OA_LOGIN), get('/auth/oa/callback', 'unconfigured')],
+  // Whether the wall shows the button.
+  'auth/oa/client.ts': [get('/auth/oa/client', 'public')],
   'data/[[path]].ts': [get('/data/scans.json', 'viewer'), get('/data/2026-10-01/meta.json', 'viewer')],
   // A card: its signature picks its tier (unsigned: the anonymous card), nothing signs in.
   'og/[[path]].ts': [get('/og/map.png', 'public')],
@@ -409,6 +417,9 @@ const SHARED_RESTRICTED: Record<string, Restricted> = {
   'GET /auth/google/callback': 'anonymous',
   'GET /auth/google/client': 'anonymous',
   'GET /auth/google/onetap/nonce': 'anonymous',
+  'GET /auth/oa': 'anonymous',
+  'GET /auth/oa/callback': 'anonymous',
+  'GET /auth/oa/client': 'anonymous',
   // The scan list, and a scan's `meta.json`; of the rest, `age.json` unless a hidden dir is top-level, and
   // `rules.json` without the rules below a hidden path (`_lib/restrict.ts` `dataAllowed`, `restrictRules`).
   'GET /data/scans.json': 'filtered',
@@ -600,6 +611,12 @@ const mintAs = (w: World, who: Who, scopes: string[]): Promise<Response> => (MOD
   env: w.env,
 }) as Promise<Response>
 
+/** `PATCH /api/auth/grants/<id>` `{ scopes }` as `who`, through the route. */
+const editScopes = (w: World, who: Who, id: string, scopes: string[]): Promise<Response> => (MODULES['api/auth/[[path]].ts'].onRequest as Handler)({
+  request: new Request(`${ORIGIN}/api/auth/grants/${id}`, { method: 'PATCH', headers: { ...w.headers[who], 'content-type': 'application/json' }, body: JSON.stringify({ scopes }) }),
+  env: w.env,
+}) as Promise<Response>
+
 const expected = (gate: Gate, mode: Mode): Outcome[] => EXPECT[gate].map(cell => (typeof cell === 'object' ? (mode.listOn ? cell.listOn : cell.listOff) : cell))
 const byIdentity = <T>(vs: T[]): Record<string, T> => Object.fromEntries(IDENTITIES.map((who, i) => [who, vs[i]]))
 
@@ -674,6 +691,26 @@ describe.each(MODES)('$name', mode => {
   })
   it.each(['listed admin', 'admin grant'] as Who[])('%s minting a viewer grant', async who => {
     expect((await mintAs(w, who, ['gcs'])).status).toBe(200)
+  })
+
+  // The other way to a grant carrying them: an ordinary link's scopes, edited.
+  it.each([
+    { who: 'listed admin', scopes: ['admin'] },
+    { who: 'listed admin', scopes: ['*'] },
+    { who: 'admin grant', scopes: ['gcs', 'admin'] },
+    { who: 'admin grant', scopes: ['*'] },
+  ] as { who: Who; scopes: string[] }[])('$who putting $scopes on a viewer grant', async ({ who, scopes }) => {
+    const { grant } = await (await mintAs(w, 'listed admin', ['gcs'])).json() as { grant: { id: string } }
+    const res = await editScopes(w, who, grant.id, scopes)
+    expect(mode.listOn ? [res.status, await res.json()] : res.status).toEqual(mode.listOn ? [403, { error: ADMIN_GRANT_REFUSED }] : 200)
+  })
+  it.each(['listed admin', 'admin grant'] as Who[])('%s narrowing a viewer grant', async who => {
+    const { grant } = await (await mintAs(w, 'listed admin', ['gcs', 'gcs:read'])).json() as { grant: { id: string } }
+    expect((await editScopes(w, who, grant.id, ['gcs:read'])).status).toBe(200)
+  })
+  it.each(['read-only link', 'viewer', 'agent token'] as Who[])('%s can\'t edit a grant\'s scopes', async who => {
+    const { grant } = await (await mintAs(w, 'listed admin', ['gcs'])).json() as { grant: { id: string } }
+    expect((await editScopes(w, who, grant.id, ['gcs:read'])).status).toBe(403)
   })
 
   const cases = Object.entries(ROUTES).flatMap(([file, cs]) => cs.map(c => ({ file, c, title: `${c.method} ${c.path}${c.env ? ' (+env)' : ''}: ${c.gate}` })))

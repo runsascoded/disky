@@ -8,7 +8,7 @@ import Root from './Root'
 import { SelfProvider } from './SelfProvider'
 import { TooltipGroup } from './Tooltip'
 import { UnitsProvider } from './units'
-import { withoutOg } from './sharePreview'
+import { withoutOg, withoutSso } from './sharePreview'
 import { bootSessionLog } from './sessionLogBoot'
 import { forwardPs } from './pathStoreParam'
 import { describeUrlParams } from './urlParams'
@@ -24,6 +24,9 @@ if (import.meta.env.DEV || location.search.includes('spy=1')) (window as unknown
 // A preview link's `og=` is for unfurlers only: drop it before the router reads the URL.
 const clean = withoutOg(location.href)
 if (clean != null) history.replaceState(history.state, '', clean)
+// The silent sign-in's `?sso=` marker likewise: what it had to stop, it stopped on the way here.
+const unmarked = withoutSso(location.href)
+if (unmarked != null) history.replaceState(history.state, '', unmarked)
 
 // `?ps=…`: every `/api/` request reads the path store the page names (`pathStoreParam.ts`).
 forwardPs(window)

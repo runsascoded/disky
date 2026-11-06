@@ -38,7 +38,7 @@ describe('"Sign in with OA" (`/auth/oa`, specs/oa-login-rp.md)', () => {
       .toEqual([302, 'https://login.oa.test/oidc/authorize', 'disky-test', 'https://dev.example.test/auth/oa/callback', 'code', 'openid email profile', 'S256', true, true, true, false, false])
   })
 
-  it('a failed callback lands on the sign-in page with `oa:<reason>`: the broker\'s own `error=` (e.g. `prompt=none`\'s `login_required`), or the adapter\'s', async () => {
+  it('a failed callback lands on the sign-in page: the broker\'s own `error=` or the adapter\'s, with `oa:<reason>`; `prompt=none`\'s `login_required` with no state to follow, quietly (`_lib/silentSignIn.test.ts`)', async () => {
     const env = await envOf(CONFIGURED)
     const cases = [
       'https://dev.example.test/auth/oa/callback?error=login_required&state=y',
@@ -52,7 +52,7 @@ describe('"Sign in with OA" (`/auth/oa`, specs/oa-login-rp.md)', () => {
       got.push([r.status, r.headers.get('location'), r.headers.get('cache-control')])
     }
     expect(got).toEqual([
-      [302, '/signin?error=oa%3Alogin_required', 'no-store'],
+      [302, '/signin?sso=login_required', 'no-store'],
       [302, '/signin?error=oa%3Aaccess_denied', 'no-store'],
       [302, '/signin?error=oa%3Amissing%20code%20or%20state', 'no-store'],
       [302, '/signin?error=oa%3Abad%20state', 'no-store'],

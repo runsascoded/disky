@@ -343,3 +343,23 @@ Everything after builds on it:
 - the bench records it.
 
 Increment 2 follows directly. Together they are ~2 days, and they make `probe` runs comparable with no more minArea tricks or KV pollution. RUM (3) is next, because "what fraction is warm" is the open question and only real traffic answers it. The scheduled bench (4) is the one real project, and it gets better from having two weeks of RUM to choose its budgets.
+
+## Pending colo puts: a bound was measured and parked (2026-11-06)
+
+`putColoGroup` has no backpressure, so a read can return with its copies still queued. Colo-cold (the state after every new generation), peak pending reached 30–190 MiB at p90, mostly JSON before gzip, and killed requests had last logged 83–135 MiB. So one bounded probe compared the same cold bursts with and without a bound on pending bytes (16 MiB, skipped before `JSON.stringify`), code swapped between aliases mid-run, one colo.
+
+| Kind, at once | Requests each way | Memory kills, off | Memory kills, bound | Peak pending p90, off / bound (MiB) |
+|---|---|---|---|---|
+| plain 16 | 160 | 6 | 0 | 115–135 / 18 |
+| plain 32 | 320 | 2 | 8 | 136–162 / 18 |
+| scoped 12 | 120 | 0 | 0 | 119–190 / 18 |
+| plain 64 | 448 | 176 (39.3%) | 66 (14.7%) | 131–158 / 18 |
+
+- Plain 64: the bound won all 7 paired bursts (sign test p ≈ 0.016), in both swap phases, so it isn't an alias effect. Isolates killed: 22 → 8.
+- Plain 16 and 32: 8/480 both ways, each count one isolate dying. No benefit shown at realistic concurrency.
+- Answers: 888 of 888 pairs byte-identical. 31% of puts skipped.
+- Second pass: plain median 4.0 → 5.6 s, scoped unchanged at 6.2 s; a third pass, to show recovery, wasn't run.
+- The baseline moves with time: the unbounded build had no kills for about 50 minutes, then they began, cause unknown. Compare only within a paired run.
+- Kills left under the bound last logged 16 MiB pending, with 6–12 requests in flight (median 8). The unbounded build also survived 349 MiB of nominal pending. So pending alone doesn't decide a kill; several reads decoding at once is the likely remainder, inferred from logs, since a Worker's heap isn't observable.
+
+**Parked.** No benefit at realistic concurrency, a cost on the second pass, where map latency is the priority, and 16 MiB rests on an assumed baseline (128 limit − 36 fixed LRUs − about 16 for code), so it has no margin we can defend. If kills appear at real load, an isolate-wide cap on concurrent decodes is the candidate to measure, since it bounds the cause inferred above. Separately, `exceededCpu` kills (9 in the run) hit only scoped reads, at low pending; a bound doesn't address them.

@@ -52,7 +52,6 @@ remote = true
 enabled = true
 
 [vars]
-# OWNER_HISTORY_BATCH = "1"   # bounded fleet-root owner history from interval slice versions; canonical fallback
 # --- Build time (vite.config.ts) ---
 STORE = "my-store"                          # required: the `src/stores.ts` registry key this build serves
 AUTH_MODE = "app"                           # `app` (the app's own sign-in) | `public` (no sign-in wall)
@@ -75,7 +74,7 @@ BASE_SCOPE = "my"                           # the scope every viewer needs
                                             # staff keep every other scope. An empty or missing list = no admins (never a fallback to staff).
                                             # Break-glass: the secret `ADMIN_BOOTSTRAP` (comma-separated emails, admins whatever the list holds)
 # GOOGLE_CLIENT_ID = "<id>.apps.googleusercontent.com"  # Google sign-in (with the secret below); unset = `/auth/google` 503s
-# OA_LOGIN_ISSUER = "https://login.oa.dev"   # "Sign in with OA" (OA's broker; with the client id + secret); unset = no `/auth/oa`, no button
+# OA_LOGIN_ISSUER = "https://login.oa.dev"   # "Sign in with OA" (OA's broker; with the client id + secret); one silent try before the wall; unset = no `/auth/oa`, no button, no try
 # OA_LOGIN_CLIENT_ID = "<client id at the broker>"
 # MAIL_FROM = "disk-tree <noreply@example.com>"  # emailed sign-in codes (with RESEND_API_KEY)
 
@@ -131,7 +130,6 @@ ROOT_LABEL = "my buckets"                   # the store root's crumb label
 # SWEEP_S3_ENDPOINT = "https://s3.example.com"  # `plan-sweep`: the S3 endpoint its runs delete through
 # DISKY_LABELS = "app=disky,deployment=<name>"  # cost-attribution labels on the executor jobs' VMs + disks (each adds `component`); unset = none
 # SLACK_ADMIN_CHANNEL = "C0123456789"          # channel id staged-plan threads post to (with SLACK_BOT_TOKEN); unset = no Slack
-# SESSION_MONITOR = "0"                       # GCS temporary aggregate monitor; notifications off by default
 # STAGED_CARD_GRANT = "<grant id>"             # the job grant whose post-scan `staged-card` step re-renders the staged card; prod's env only, never a dev stack sharing its channel; unset = no such route
 
 # --- Link previews (specs/done/dogi.md) ---
