@@ -1,7 +1,7 @@
 // Under `ADMIN_LIST` no path mints a grant carrying `admin` or `*`; a grant already holding one keeps working and stays
 // listed. With the list off, minting is as it was.
 import { describe, expect, it } from 'vitest'
-import { ADMIN_GRANT_REFUSED, ADMIN_ROTATE_REFUSED, ADMIN_WIDEN_REFUSED, type Env, gateFor, identify } from '../_lib/auth'
+import { ADMIN_GRANT_REFUSED, ADMIN_ROTATE_REFUSED, ADMIN_WIDEN_REFUSED, type Env, GRANT_TERMS_REFUSED, gateFor, identify } from '../_lib/auth'
 import { type Sqlite, sqliteD1, withAdminEmails } from '../_lib/testD1'
 import { onRequest as adminsRoute } from './admins'
 import { onRequest as authRoute } from './auth/[[path]]'
@@ -243,4 +243,46 @@ it('the refusals say what to do', () => {
     'with `ADMIN_LIST` on, an admin grant can\'t be re-keyed: revoke it, and add the person to the admin list instead',
     'with `ADMIN_LIST` on, an admin grant can only lose access: it can\'t be re-enabled, or given a later expiry, a higher redemption cap or sessions that outlive its expiry. Add the person to the admin list instead',
   ])
+})
+
+// The package's routes store what they're given: a PATCH's `expiresAt` as is, a mint's `expiresInS` added to the clock
+// (`'x'` concatenates). A stored string compares as never reached (`expires_at <= now` is false), so a link would
+// outlive any expiry it was given. Refused at `grantStore`, for every grant, with the list on or off.
+describe.each([[true], [false]])('a grant\'s terms that aren\'t numbers (the list on: %j)', listOn => {
+  const BAD = [400, { error: GRANT_TERMS_REFUSED }]
+  const NOW = Math.floor(Date.now() / 1000)
+  const row = (raw: Sqlite, id: string) => raw.prepare('SELECT expires_at, max_redeems, session_ttl FROM grants WHERE id = ?').all(id)[0]
+  const isLive = async (env: Env, token: string) => (await identify({ request: new Request(`${SITE}/api/me`, { headers: { authorization: `Bearer ${token}` } }), env })) !== null
+
+  it.each([
+    [{ expiresAt: 'never' }], [{ expiresAt: '1893456000' }], [{ expiresAt: true }], [{ expiresAt: {} }],
+    [{ maxRedeems: 'many' }], [{ maxRedeems: '5' }],
+    [{ sessionTtlS: 'forever' }],
+  ])('`PATCH` %j on a plain link is refused and nothing moves', async edit => {
+    const w = await world(listOn)
+    const { grant } = await w.existing(['gcs'], { expiresAt: NOW + 3600 })
+    expect([await w.call(authRoute, `/api/auth/grants/${grant.id}`, LEAD, 'PATCH', edit), row(w.raw, grant.id)])
+      .toEqual([BAD, { expires_at: NOW + 3600, max_redeems: null, session_ttl: null }])
+  })
+
+  it('an expired plain link stays expired under `expiresAt: "never"`', async () => {
+    const w = await world(listOn)
+    const { grant, token } = await w.existing(['gcs'], { expiresAt: NOW - 3600 })
+    expect([await w.call(authRoute, `/api/auth/grants/${grant.id}`, LEAD, 'PATCH', { expiresAt: 'never' }), await isLive(w.env, token)]).toEqual([BAD, false])
+  })
+
+  it.each([[{ expiresInS: 'x' }], [{ expiresInS: '60' }], [{ maxRedeems: 'many' }], [{ sessionTtlS: 'forever' }]])('minting with %j is refused and nothing is written', async terms => {
+    const w = await world(listOn)
+    expect([await w.call(authRoute, '/api/auth/grants', LEAD, 'POST', { name: 'a link', scopes: ['gcs'], ...terms }), scopesOfGrants(w.raw)]).toEqual([BAD, []])
+  })
+
+  it('numbers and null pass, on a mint and a `PATCH`', async () => {
+    const w = await world(listOn)
+    const [minted, { grant }] = [await w.call(authRoute, '/api/auth/grants', LEAD, 'POST', { name: 'a link', scopes: ['gcs'], expiresInS: 60, maxRedeems: 2 }), await w.existing(['gcs'])]
+    const [edited, cleared] = [
+      await w.call(authRoute, `/api/auth/grants/${grant.id}`, LEAD, 'PATCH', { expiresAt: NOW + 60, maxRedeems: 2, sessionTtlS: 600 }),
+      await w.call(authRoute, `/api/auth/grants/${grant.id}`, LEAD, 'PATCH', { expiresAt: null, maxRedeems: null, sessionTtlS: null }),
+    ]
+    expect([minted[0], edited[0], cleared[0], row(w.raw, grant.id)]).toEqual([200, 200, 200, { expires_at: null, max_redeems: null, session_ttl: null }])
+  })
 })

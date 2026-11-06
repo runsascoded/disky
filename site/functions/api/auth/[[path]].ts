@@ -3,12 +3,13 @@
  * session), logout, request-access, and the admin grant/request/rotate/log
  * routes (minting — with its subject — happens here, via POST /api/auth/grants).
  * With `ADMIN_LIST` the gate's store refuses a grant carrying `admin` or `*`, and
- * anything that gives one back its access (`grantStore`); that refusal leaves the
- * package's routes as a throw, answered here.
+ * anything that gives one back its access (`grantStore`), and with or without it
+ * a term that isn't a number; those refusals leave the package's routes as a throw,
+ * answered here.
  */
 import { authRoutes } from '@open-athena/auth'
 import { d1AuditQuery } from '@open-athena/auth/d1'
-import { ADMIN_SCOPE, AdminGrantRefused, type Ctx, gateFor, json } from '../../_lib/auth.js'
+import { ADMIN_SCOPE, AdminGrantRefused, BadGrantTerms, type Ctx, gateFor, json } from '../../_lib/auth.js'
 import { siteAllowlist } from '../../_lib/allowlist.js'
 
 /**
@@ -66,8 +67,8 @@ export const onRequest = async (ctx: Ctx): Promise<Response> => {
   try {
     res = (await handle(req)) ?? new Response('not found\n', { status: 404 })
   } catch (e) {
-    if (!(e instanceof AdminGrantRefused)) throw e
-    res = json({ error: e.message }, 403, { 'cache-control': 'no-store' })
+    if (!(e instanceof AdminGrantRefused || e instanceof BadGrantTerms)) throw e
+    res = json({ error: e.message }, e instanceof BadGrantTerms ? 400 : 403, { 'cache-control': 'no-store' })
   }
   if (!devCookie) return res
   const out = new Response(res.body, res)
