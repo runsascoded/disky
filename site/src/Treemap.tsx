@@ -179,7 +179,7 @@ const scaleMix = (mix: Record<string, number>, b: number): Record<string, number
   return tot ? Object.fromEntries(Object.entries(mix).map(([c, x]) => [c, (x * b) / tot])) : mix
 }
 
-export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRange, readThrough, readLogged = allLogged, readUnlogged = [], hl, onPickUser, onPickUnowned, onClearHl, pricing, lens, ownerLensed, scheme = 'gs://', redact, ownerIdx, initialPath, path, onPathChange, objects = false, onOpen, brush, onBrush, band, onBand, stagedRings = true, stageHere = false }: {
+export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRange, readThrough, readLogged = allLogged, readUnlogged = [], hl, onPickUser, onPickUnowned, onClearHl, pricing, lens, ownerLensed, scheme = 'gs://', redact, ownerIdx, initialPath, path, onPathChange, objects = false, onOpen, brush, onBrush, band, onBand, stagedRings = true, stageHere = false, mapOverlay }: {
   /** Ring the open plan's staged items (off where every cell is one: /staged). */
   stagedRings?: boolean
   /** Offer the drilled folder's own trash in the owner panel: an unfiltered view (under a filter the bulk bar
@@ -240,6 +240,9 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
   /** Controlled date brush (shared with the age chart); absent → the map keeps its own. */
   band?: DayBand | null
   onBand?: (b: DayBand | null) => void
+  /** Laid over the map's canvas (the core's `mapOverlay`): the "filling in…" marker, in the canvas's corner rather
+   *  than the widget's, where the legend row sits. */
+  mapOverlay?: ReactNode
 }) {
   usePerfCommit('treemap')
   const time = listingTime(scheme)
@@ -824,6 +827,7 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
           {pricing && <> · est. {fmtUsd(estUsd(node))}/mo</>}
         </>
       )}
+      mapOverlay={mapOverlay}
       renderFooter={redact
         ? undefined
         : node => (

@@ -65,7 +65,7 @@ describe('ledgerKey', () => {
 })
 
 // A cold `?o=…` page load, as TSQ sees it: one observer per view query (the map's subtree + its depth-1
-// companion, the diff's depth-1, full walk and summary), each re-optioned on every "render" as the async
+// companion, the diff's depth-1 and full walk), each re-optioned on every "render" as the async
 // inputs land — registry, viewer id, ledger — in the order a cold load meets them. `fetch` records each
 // request and whether it was aborted. The keys and URLs follow `App.tsx`'s shape around the scope parts.
 interface Inputs { oP: string | undefined; registry: boolean; myUser: string | null; myUserReady: boolean; ledger: string | null }
@@ -86,14 +86,13 @@ async function coldLoad(timeline: Inputs[], ledgerer: Ledgerer = ledgerKeyer(), 
     ['subtree-d1', '/api/subtree?date=261007&path=&depth=1'],
     ['diff-l1', '/api/diff?from=261006&to=261007&path=&depth=1'],
     ['diff', '/api/diff?from=261006&to=261007&path='],
-    ['diff-sum', '/api/diff?from=261006&to=261007&path=&summary=1'],
   ]
   const options = (s: Inputs) => {
     const owner = ownerScope({ ownersMode: true, oP: s.oP, byP: undefined, myUser: s.myUser, canon: w => canonIn(s.registry ? REG : EMPTY, w) })
     const ready = ungated || ownerScopeReady({ ownersMode: true, oP: s.oP, byP: undefined, registryReady: s.registry, myUserReady: s.myUserReady })
     const scopeKey = scopeKeyOf(owner.qs, owner.ledgered, ledgerer(s.ledger ?? '0.0', s.ledger !== null))
     return views.map(([name, base]) => {
-      const url = base.replace(/(&depth=1|&summary=1)?$/, `${owner.qs}$1`)
+      const url = base.replace(/(&depth=1)?$/, `${owner.qs}$1`)
       return {
         queryKey: [name, scopeKey],
         enabled: ready,
@@ -117,7 +116,6 @@ const BATCH = (qs: string) => [
   `/api/subtree?date=261007&path=${qs}&depth=1`,
   `/api/diff?from=261006&to=261007&path=${qs}&depth=1`,
   `/api/diff?from=261006&to=261007&path=${qs}`,
-  `/api/diff?from=261006&to=261007&path=${qs}&summary=1`,
 ]
 const settled = (qs: string) => BATCH(qs).map(u => [u, false])
 const aborted = (qs: string) => BATCH(qs).map(u => [u, true])

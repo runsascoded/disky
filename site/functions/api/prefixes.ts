@@ -36,6 +36,6 @@ export const onRequestPost = async (ctx0: Ctx): Promise<Response> => {
   } catch (e) {
     const refusal = ivRefusal(e)
     if (refusal) return refusal
-    return json({ error: (e as Error).message }, 503)
+    return json({ error: (e as Error).message }, 503, { 'cache-control': 'no-store' })
   }
 }

@@ -160,6 +160,12 @@ export interface TreemapProps<T> {
   /** Row rendered below the map (e.g. a usage-hint footer). */
   renderFooter?: (n: T, path: T[]) => ReactNode
   /**
+   * Content laid over the map box itself (e.g. a "refreshing" marker in a corner): rendered inside
+   * `.dt-treemap-map`, which is `position: relative`, after the cells. Position it absolutely; it is
+   * clear of the bar, the rollup and the footer at every width, and goes fullscreen with the map.
+   */
+  mapOverlay?: ReactNode
+  /**
    * Right side of the cell size line — e.g. "$1.2/mo". Rendered inline with
    * the size when the cell is big enough to fit a subtitle; `dims` is the
    * cell's box (plus `hasKids`/`fade`) so the consumer can size its content
@@ -523,6 +529,7 @@ export function Treemap<T>({
   renderLegend,
   renderCrumbSuffix,
   renderFooter,
+  mapOverlay,
   renderCellSubtitle,
   onCellClick,
   cellHref,
@@ -1603,6 +1610,7 @@ export function Treemap<T>({
             {renderLoading ? renderLoading(node, path) : 'Loading…'}
           </div>
         ) : null}
+        {mapOverlay}
       </div>
       {(() => {
         const f = renderFooter?.(node, path)

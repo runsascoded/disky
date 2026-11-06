@@ -29,7 +29,7 @@
  * `f = n_children(P) − kept` — objects and dirs alike.
  */
 import type { Env } from './auth.js'
-import { asOfScans, coarsenRects, coarsenSizeRects, folded, type IndexHandle, isStore, ivHeldDates, ivLastRead, type Lens, openIndex, pathStoreKey, perScan, planRects, slices, planSizeRects, readAsks, readFits, readRects, readRows, readSizeRects, type Rect, type Row, sizeVariant, type Span, TooWide, type Trace, withTrace, readPathHistoryRows } from './index.js'
+import { asOfScans, coarsenRects, coarsenSizeRects, folded, type IndexHandle, isStore, ivHeldDates, ivLastRead, type Lens, openIndex, pathStoreKey, perScan, planRects, slices, planSizeRects, readAsks, readFits, readRects, readRows, readSizeRects, readWhole, type Rect, type Row, sizeVariant, type Span, TooWide, type Trace, withTrace, readPathHistoryRows } from './index.js'
 import { type FoldedLens, ownerLens, poolLens } from './owners.js'
 import { type ClassScope, classRow, nameFilter, type NamePred, ownerKey, ownerOk, type OwnerScope } from './scope.js'
 import { filterThreshold, looseThreshold, matchRoots, pickTier, rebasedThreshold, rootRects } from './filter.js'
@@ -2492,7 +2492,7 @@ export interface Diff {
   /** Directories a budgeted reader (the descent, at `top`) left unexpanded, each drawn as a leaf: cut, not complete. */
   expansions_skipped?: number
   /** The lookup budget ran out: names one side drew that the other side's lookup didn't answer are folded into
-   *  their parent's `(other)` on both sides (never drawn one-sided at 0). */
+   *  their parent's `(other)` on both sides (never drawn one-sided at 0): the lightest of them (`LOOKUP_CAP`). */
   lookups_capped: boolean
   /** …by time (`FILTER_WALK_MS`). */
   lookups_late?: true
@@ -2514,8 +2514,16 @@ export interface Diff {
   searchLate?: true
 }
 
+/** The names a diff's walk reads on the scan that didn't draw them, at most: its reads past the two views. It binds
+ *  only where more names than this crossed the floor or came and went under directories both scans hold (a subtree
+ *  that came or went whole is one); then the lightest stay folded (`lookups_capped`). */
 export const LOOKUP_CAP = 240
-/** A filtered diff's one-sided lookups run this long, at most (each level's are one batched read a side). */
+/** The walk's answer version, in the diff's edge-cache key (`&wv=`, `api/diff.ts`): bumped when the same inputs answer
+ *  differently, so a deploy never serves an earlier walk's cached body (`CACHE_V` would move every view's key too).
+ *  2 (2026-11-05): no lookups under a path a scan has no row for, and the budget spent heaviest first: before, a
+ *  deleted subtree's names spent it level by level, and what else changed stayed in `(other)`. */
+export const WALK_V = 2
+/** A filtered diff's one-sided lookups run this long, at most (each round's are one batched read a side). */
 export const FILTER_WALK_MS = 800
 /** …and its two sides' phase 2 this long (each; they run at once). */
 export const FILTER_DIFF_PHASE2_MS = 900
@@ -2562,7 +2570,11 @@ function floorMeeting(sides: number): () => (floor: number) => Promise<number> {
  * reading as −81 / +141 Ti of churn). A name that clears the floor on one
  * side only is read point-blank from the other side's floor-free tier: if
  * it exists there it shows with its real size (it crossed the floor), else
- * it was added / removed. A name whose lookup the budget leaves unanswered
+ * it was added / removed. Under a path that side has no row for, a name
+ * has none either (a scan's rows are ancestor-closed), so it is absent
+ * there without a read: a subtree that came or went whole costs one lookup,
+ * at its top. The rest are read heaviest first, in rounds that aren't
+ * level-bound. A name whose lookup the budget leaves unanswered
  * (`LOOKUP_CAP`, a filtered diff's `FILTER_WALK_MS`) has an unknown other
  * side, not a zero: it isn't drawn, and stays in `(other)` on both sides.
  * `(other)` is parent − Σ named on each side, so its Δ is the sub-floor
@@ -2692,17 +2704,19 @@ export async function buildDiff(env0: Env, o: DiffOpts): Promise<Diff> {
   const kidsA = va ? kidsIndex(va.kept, path) : new Map<string, string[]>()
   const kidsB = vb ? kidsIndex(vb.kept, path) : new Map<string, string[]>()
 
-  // Point lookups on the floor-free tier, memoized per side.
+  // Point lookups on the floor-free tier, memoized per side. They read whole (`readWhole`): a lookup that finds no
+  // row answers "absent" for the path and everything under it (`gone`), so a row group it selected and could not
+  // read fails the diff (`GroupUnread`) — left out, as other reads leave it, it would draw what is there as removed.
   const fineOf = new Map<string, Promise<IndexHandle>>()
   const fine = (date: string) => {
     let h = fineOf.get(date)
-    if (!h) fineOf.set(date, (h = (lens ? lensSort(env, date) : Promise.resolve('path')).then(s => openFine(env, date, s, lens)).then(x => withTrace(x, tr))))
+    if (!h) fineOf.set(date, (h = (lens ? lensSort(env, date) : Promise.resolve('path')).then(s => openFine(env, date, s, lens)).then(x => readWhole(withTrace(x, tr)))))
     return h
   }
   const fineAllOf = new Map<string, Promise<IndexHandle>>()
   const fineAll = (date: string) => {
     let h = fineAllOf.get(date)
-    if (!h) fineAllOf.set(date, (h = openFine(env, date, 'path')))
+    if (!h) fineAllOf.set(date, (h = openFine(env, date, 'path').then(readWhole)))
     return h
   }
   let lookups = 0
@@ -2727,15 +2741,29 @@ export async function buildDiff(env0: Env, o: DiffOpts): Promise<Diff> {
     out.kind = a.kind
     return out
   }
+  // What a scan is known not to hold: a path its by-path sort has no row for. A scan's rows are ancestor-closed (a
+  // row for every path with anything at or under it), so nothing under such a path has a row there either: a lookup
+  // of it could only answer "none", and none is made (`free`). Only a read that found no row says so — a name under
+  // the floor, outside the filter or scoped to no bytes is not known absent, and what is under it is still read.
+  // Read by `free` alone, in a round. A read the walk's timer stops (`stop`, `lookupsOff`) returns short of rows and
+  // may add paths here it never read, but no round follows it: the timer sets `late` with `lookupsOff`, its round's
+  // answers are dropped (`none`), and the next finds no room (`walkOver`).
+  const gone = [new Set<string>(), new Set<string>()] as const
+  type SideNo = 1 | 2
+  const sideOf = (side: SideNo) => (side === 1 ? { v: va!, date: from } : { v: vb!, date: to })
   // A lookup's answer: the path's total on that side, null for none there, undefined for unanswered (a budget).
-  const lookup = async (date: string, v: Read, p: string, depth: number): Promise<Agg | null | undefined> => {
-    if (!inQuery(p, v)) return null
+  const lookup = async (side: SideNo, p: string, depth: number): Promise<Agg | null | undefined> => {
+    const { v, date } = sideOf(side)
     if (lookups >= lookupCap || walkOver()) { capped = true; return undefined }
     lookups++
     const rows = await readRows(await fine(date), depth, depth, p, p, undefined, lens)
     const needTot = !!v.ownerLens?.needsTotal(p)
     const allRows = needTot ? await readRows(await fineAll(date), depth, depth, p, p) : rows
-    if (!rows.length && !allRows.length) return null
+    if (!rows.length && !allRows.length) {
+      // A lens's sort holds U's rows alone: none there is U's absence, and the path's only where its total was read too.
+      if (!lens || needTot) gone[side - 1].add(p)
+      return null
+    }
     const all = newAgg()
     const mine = newAgg()
     for (const r of allRows) merge(all, classRow(r, o.classes))
@@ -2744,14 +2772,102 @@ export async function buildDiff(env0: Env, o: DiffOpts): Promise<Diff> {
     return a.b > 0 ? a : null
   }
 
-  // One side's lookups for a whole level in one read: `readAsks` turns the
-  // level's (depth, path) asks into a few span queries + one round of group
-  // reads, where the per-ask `lookup` cost two D1 queries and a range read
-  // each, eight at a time — 150 lookups was ~20 s of a 7-day root diff
-  // (2026-09-15). Lens views keep the per-ask path: the user-keyed index's
-  // group stats only hold inside a single-user group, which `readAsks`'s
-  // per-depth rectangles don't model. A batch too wide for the reader's group
-  // cap falls back to per-ask reads rather than failing the diff.
+  /** A name one scan drew, to be read on the other (`side`), under `par`. `w`: its bytes where it was drawn — what
+   *  stays in `(other)` on both scans if it goes unread. `vtLe` / `vfGe`: the version it can be (`free`). `below`:
+   *  the names its drawn side holds under it (bytes, levels down), each read too if this one is found (`belowOf`). */
+  interface Ask { cp: string; d: number; side: SideNo; par: string; other?: Agg; w: number; vtLe?: number; vfGe?: number; below?: { w: number; k: number }[] }
+  const PAR = 8
+  // One side's lookups of a round in one read: `readAsks` turns the (depth, path) asks into a few span queries + one
+  // round of group reads, where the per-ask `lookup` cost two D1 queries and a range read each, eight at a time — 150
+  // lookups was ~20 s of a 7-day root diff (2026-09-15). Lens views keep the per-ask path: the user-keyed index's
+  // group stats only hold inside a single-user group, which `readAsks`'s per-depth rectangles don't model. A round
+  // too wide for the reader's group cap is read a depth at a time (what a level-by-level walk read), and a depth still
+  // too wide per ask, rather than failing the diff. A name left out of the answer went unread (`lookup`'s budgets).
+  const readSide = async (side: SideNo, items: Ask[]): Promise<Map<string, Agg | null>> => {
+    const { v, date } = sideOf(side)
+    const out = new Map<string, Agg | null>()
+    const perAsk = async (qs: Ask[]) => {
+      for (let i = 0; i < qs.length; i += PAR) {
+        const chunk = qs.slice(i, i + PAR)
+        const got = await Promise.all(chunk.map(q => lookup(side, q.cp, q.d)))
+        chunk.forEach((q, j) => { if (got[j] !== undefined) out.set(q.cp, got[j]) })
+      }
+    }
+    if (lens) { await perAsk(items); return out }
+    /** `part` in one read; false when it is too wide for one. */
+    const batch = async (part: Ask[]): Promise<boolean> => {
+      const want = new Set(part.map(q => `${q.d}\0${q.cp}`))
+      let got: Row[]
+      try {
+        got = (await readAsks(await fine(date), part.map(q => ({ depth: q.d, path: q.cp, ...(q.vtLe != null ? { vtLe: q.vtLe } : {}), ...(q.vfGe != null ? { vfGe: q.vfGe } : {}) })), r => want.has(`${r.depth}\0${r.path}`), { maxGroups: 120, stop: () => lookupsOff })).rows
+      } catch (e) {
+        if (!/too wide/.test(String((e as Error).message ?? e))) throw e
+        return false
+      }
+      lookups += part.length
+      const byPath = new Map<string, { all: Agg; mine: Agg }>()
+      for (const r of got) {
+        let e = byPath.get(r.path)
+        if (!e) byPath.set(r.path, (e = { all: newAgg(), mine: newAgg() }))
+        const cr = classRow(r, o.classes)
+        merge(e.all, cr)
+        if (ownerOk(r.usr, owner)) merge(e.mine, cr)
+      }
+      for (const q of part) {
+        const e = byPath.get(q.cp)
+        // No row: the scan doesn't hold the path, nor anything under it (`gone`).
+        if (!e) { gone[side - 1].add(q.cp); out.set(q.cp, null); continue }
+        const a = net(v, q.cp, v.scoped(q.cp, e.all, e.mine))
+        out.set(q.cp, a.b > 0 ? a : null)
+      }
+      return true
+    }
+    if (await batch(items)) return out
+    const byDepth = new Map<number, Ask[]>()
+    for (const q of items) {
+      const l = byDepth.get(q.d)
+      if (l) l.push(q)
+      else byDepth.set(q.d, [q])
+    }
+    // `Server-Timing`: `bydepth` counts the depths read in place of a round's one read, `perask` the names read singly.
+    for (const part of byDepth.values()) {
+      if (byDepth.size > 1 && await batch(part)) { tr?.('bydepth', 1); continue }
+      tr?.('perask', part.length)
+      await perAsk(part)
+    }
+    return out
+  }
+
+  // The walk, twice over the same plan: `settle` and the rounds below find what each name one scan drew is on the
+  // other; then the rows are emitted level by level from those answers, with no read.
+  interface Item { p: string; d: number; a: Agg | null; b: Agg | null; l?: 1 | 2 }
+  /** Whether `it` expands, and the names under it then. */
+  const planOf = (it: Item): { expand: boolean; names: string[] } => {
+    const { p, a, b } = it
+    const ka = kidsA.get(p) ?? []
+    const kb = kidsB.get(p) ?? []
+    // Both sides present, something named under it on either side, and
+    // the totals differ: the children carry the Δ. One-sided subtrees ride
+    // whole on their own row; a byte-identical subtree is one unchanged
+    // row (the renderer infers it as filler), not a walk of its skeleton.
+    const same = !!(a && b && Math.round(a.b) === Math.round(b.b) && Math.round(a.o) === Math.round(b.o))
+    // A one-sided node (a bucket the older scan never covered, a directory
+    // that appeared or vanished) expands too: its children all read as
+    // added / removed, but they still say WHAT arrived — a leaf tile
+    // saying `84 Ti first scanned` says nothing about its shape.
+    const expand = !!((a || b) && !same && (ka.length || kb.length)) && (o.depth == null || it.d - dP < o.depth)
+    return { expand, names: expand ? [...new Set([...ka, ...kb])].sort() : [] }
+  }
+  /** The lookup `cp` (under `it`) needs: on the side that didn't draw it, unless that side knows it anyway (a rollup's
+   *  `exact` / `complete`). A name is drawn on one side at least, so there is one at most. */
+  const askOf = (it: Item, cp: string): Ask | null => {
+    for (const [side, v, drew] of [[1, va, vb], [2, vb, va]] as const) {
+      if (!v || v.kept.has(cp) || v.exact?.has(cp) || v.complete?.(it.p)) continue
+      const other = drew?.kept.get(cp)
+      return { cp, d: it.d + 1, side, par: it.p, w: other?.b ?? 0, ...(other ? { other } : {}) }
+    }
+    return null
+  }
   // Both sides read as of their scans from one interval store, unscoped and unfiltered: a path's row is
   // one version, and its versions never overlap. So a name one side lacks is the other side's very row
   // when that version is live at this side's scan (no read), and otherwise a version that closed by the
@@ -2759,57 +2875,121 @@ export async function buildDiff(env0: Env, o: DiffOpts): Promise<Diff> {
   // outside that window are never read. (Unbounded, 10-08 → 10-09 at the root reads 12 groups to find
   // 17 added names absent, none of them holding an answer.)
   const sameStore = !!(va && vb && va.idx.asOf != null && vb.idx.asOf != null && va.idx.gen === vb.idx.gen && !query && !lens && !owner && !o.classes && !o.by)
-  const lookupMany = async (date: string, v: Read, items: { cp: string; d: number; other?: Agg }[]): Promise<Map<string, Agg | null>> => {
-    const out = new Map<string, Agg | null>()
-    const todo: { cp: string; d: number; vtLe?: number; vfGe?: number }[] = []
-    const D = sameStore ? v.idx.asOf! : null
-    for (const q of items) {
-      if (!inQuery(q.cp, v)) { out.set(q.cp, null); continue }
-      const w = D != null ? q.other?.ver : null
-      if (!w) { todo.push(q); continue }
-      if (w.vf <= D! && D! < w.vt) { out.set(q.cp, q.other!); continue }
-      todo.push(D! < w.vf ? { cp: q.cp, d: q.d, vtLe: w.vf } : { cp: q.cp, d: q.d, vfGe: w.vt })
+  const found = new Map<string, Agg | null>() // `${side}:${cp}`: an answered lookup (null: none there)
+  let inferred = 0
+  /** `q` answered without a read, where what is known says it (true: `found` holds the answer). */
+  const free = (q: Ask): boolean => {
+    const { v } = sideOf(q.side)
+    const key = `${q.side}:${q.cp}`
+    // Under a path that side has no row for (`gone`): none for this name either.
+    if (gone[q.side - 1].has(q.par)) {
+      gone[q.side - 1].add(q.cp)
+      found.set(key, null)
+      inferred++
+      return true
     }
-    const perAsk = async (qs: { cp: string; d: number }[]) => {
-      for (let i = 0; i < qs.length; i += PAR) {
-        const chunk = qs.slice(i, i + PAR)
-        const got = await Promise.all(chunk.map(q => lookup(date, v, q.cp, q.d)))
-        chunk.forEach((q, j) => { if (got[j] !== undefined) out.set(q.cp, got[j]) })
+    if (!inQuery(q.cp, v)) { found.set(key, null); return true }
+    const w = sameStore ? q.other?.ver : null
+    if (!w) return false
+    const D = v.idx.asOf!
+    if (w.vf <= D && D < w.vt) { found.set(key, q.other!); return true }
+    if (D < w.vf) q.vtLe = w.vf
+    else q.vfGe = w.vt
+    return false
+  }
+  const childOf = (p: string, cp: string, d: number): Item => {
+    const ca = va?.kept.get(cp) ?? va?.exact?.get(cp) ?? found.get(`1:${cp}`) ?? null
+    const cb = vb?.kept.get(cp) ?? vb?.exact?.get(cp) ?? found.get(`2:${cp}`) ?? null
+    const lk: 1 | 2 | undefined = ca && !va!.kept.has(cp) && !va!.complete?.(p) ? 1 : cb && !vb!.kept.has(cp) && !vb!.complete?.(p) ? 2 : undefined
+    return { p: cp, d, a: ca, b: cb, ...(lk ? { l: lk } : {}) }
+  }
+  // The lookups still to make: names whose parent's sides are known. Not level-bound: a name one scan drew under a
+  // directory both drew is asked in the first round, whatever its depth.
+  let pending: Ask[] = []
+  /** Plans `top` and everything under it whose sides are known without a read; the names that need one go to `pending`. */
+  const settle = (top: Item) => {
+    const stack = [top]
+    for (let it: Item | undefined; (it = stack.pop()); ) {
+      const { names } = planOf(it)
+      for (const cp of names) {
+        const q = askOf(it, cp)
+        if (q && !free(q)) pending.push(q)
+        else stack.push(childOf(it.p, cp, it.d + 1))
       }
     }
-    if (lens || !todo.length) { await perAsk(todo); return out }
-    const room = walkOver() ? 0 : Math.max(0, lookupCap - lookups)
-    const take = todo.slice(0, room)
-    // Past the budget a name is left unanswered (absent from `out`): the walk folds it, it doesn't read as zero.
-    if (todo.length > room) capped = true
-    if (!take.length) return out
-    const want = new Map(take.map(q => [`${q.d}\0${q.cp}`, q]))
-    let got: Row[]
-    try {
-      got = (await readAsks(await fine(date), take.map(q => ({ depth: q.d, path: q.cp, ...(q.vtLe != null ? { vtLe: q.vtLe } : {}), ...(q.vfGe != null ? { vfGe: q.vfGe } : {}) })), r => want.has(`${r.depth}\0${r.path}`), { maxGroups: 120, stop: () => lookupsOff })).rows
-    } catch (e) {
-      if (!/too wide/.test(String((e as Error).message ?? e))) throw e
-      tr?.('perask', take.length)
-      await perAsk(take)
-      return out
-    }
-    lookups += take.length
-    const byPath = new Map<string, { all: Agg; mine: Agg }>()
-    for (const r of got) {
-      let e = byPath.get(r.path)
-      if (!e) byPath.set(r.path, (e = { all: newAgg(), mine: newAgg() }))
-      const cr = classRow(r, o.classes)
-      merge(e.all, cr)
-      if (ownerOk(r.usr, owner)) merge(e.mine, cr)
-    }
-    for (const q of take) {
-      const e = byPath.get(q.cp)
-      if (!e) { out.set(q.cp, null); continue }
-      const a = net(v, q.cp, v.scoped(q.cp, e.all, e.mine))
-      out.set(q.cp, a.b > 0 ? a : null)
-    }
-    return out
   }
+  const belowOf = (q: Ask): NonNullable<Ask['below']> => {
+    if (q.below) return q.below
+    const kids = q.side === 1 ? kidsB : kidsA
+    const drew = (q.side === 1 ? vb : va)!.kept
+    const out: NonNullable<Ask['below']> = []
+    const stack: [string, number][] = [[q.cp, 0]]
+    for (let x: [string, number] | undefined; (x = stack.pop()); ) {
+      for (const c of kids.get(x[0]) ?? []) {
+        out.push({ w: drew.get(c)!.b, k: x[1] + 1 })
+        stack.push([c, x[1] + 1])
+      }
+    }
+    return (q.below = out)
+  }
+  /** The round's lookups, `room` at most: every pending name that fits the budget even if all that may still need a
+   *  read did — the pending names and, for each, the names its drawn side holds under it (read if it is found, never
+   *  if it is absent) down to what the `after` rounds still to come can reach. A name under another is no heavier
+   *  than it, so the heaviest candidate is always a pending one; a name passed over now waits, and is asked once the
+   *  heavier candidates are read or known absent. So whatever the budget leaves unread is no heavier than anything it
+   *  read. */
+  const heaviest = (room: number, after: number): Ask[] => {
+    const ws: number[] = []
+    for (const q of pending) {
+      ws.push(q.w)
+      const reach = Math.min(after, o.depth != null ? dP + o.depth - q.d : Infinity)
+      if (reach > 0) for (const x of belowOf(q)) if (x.k <= reach) ws.push(x.w)
+    }
+    if (ws.length <= room) return pending
+    const cut = ws.sort((x, y) => y - x)[room - 1]!
+    const byWeight = [...pending].sort((x, y) => y.w - x.w || (x.cp < y.cp ? -1 : 1))
+    const fit = byWeight.filter(q => q.w >= cut).slice(0, room)
+    // (None fits only if a name outweighs the one it is under, which a scan's totals never do: the heaviest then.)
+    return fit.length ? fit : byWeight.slice(0, room)
+  }
+  settle({ p: path, d: dP, a: va?.rootAgg ?? null, b: vb?.rootAgg ?? null })
+  // A round per level of names at most, as a level-by-level walk made (it needs no more when the budget fits).
+  let levels = 0
+  for (const v of [va, vb]) if (v) for (const p of v.kept.keys()) levels = Math.max(levels, p.split('/').length - dP)
+  for (let round = 0; pending.length && round < levels; round++) {
+    const room = walkOver() ? 0 : lookupCap - lookups
+    if (room <= 0) break
+    const take = heaviest(room, levels - round - 1)
+    const taken = new Set(take)
+    pending = pending.filter(q => !taken.has(q))
+    tr?.('rounds', 1)
+    const sideAsks = (side: SideNo) => take.filter(q => q.side === side)
+    const reads = Promise.all([
+      sideAsks(1).length ? readSide(1, sideAsks(1)) : new Map<string, Agg | null>(),
+      sideAsks(2).length ? readSide(2, sideAsks(2)) : new Map<string, Agg | null>(),
+    ])
+    // A filtered diff's round waits for its lookups until `FILTER_WALK_MS` is spent, no longer: the names
+    // still unanswered are folded, as past `LOOKUP_CAP` (`lookups_capped`, `lookups_late`).
+    const left = query ? walkMs - (performance.now() - walkStart) : Infinity
+    let timer: ReturnType<typeof setTimeout> | null = null
+    const none = [new Map<string, Agg | null>(), new Map<string, Agg | null>()] as const
+    const got = left === Infinity ? await reads : await Promise.race([
+      reads,
+      new Promise<typeof none>(r => { timer = setTimeout(() => { late = true; capped = true; lookupsOff = true; r(none) }, Math.max(0, left)) }),
+    ])
+    if (timer != null) clearTimeout(timer)
+    reads.catch(() => {})
+    for (const q of take) {
+      const answer = got[q.side - 1].get(q.cp)
+      // Unanswered (`lookup`'s budgets, the round's time): the name is folded, as one never asked.
+      if (answer === undefined) { capped = true; continue }
+      found.set(`${q.side}:${q.cp}`, answer)
+      settle(childOf(q.par, q.cp, q.d))
+    }
+  }
+  // Names the budget (`lookupCap`, the rounds, a filtered diff's time) never reached.
+  if (pending.length) capped = true
+  if (inferred) tr?.('inferred', inferred)
 
   const rows: DiffRow[] = []
   let expansions = 0
@@ -2823,60 +3003,11 @@ export async function buildDiff(env0: Env, o: DiffOpts): Promise<Diff> {
       ...(x ? { x: true } : {}), ...(l ? { l } : {}),
     })
   }
-  // Level by level, so a level's point lookups run in parallel (each is a
-  // D1 span query + a row-group read; in series they dominated the walk).
-  interface Item { p: string; d: number; a: Agg | null; b: Agg | null; l?: 1 | 2 }
   let level: Item[] = [{ p: path, d: dP, a: va?.rootAgg ?? null, b: vb?.rootAgg ?? null }]
-  const PAR = 8
   while (level.length) {
     const next: Item[] = []
-    // Expansion decisions and the names under each expanded node.
-    const plans = level.map(it => {
-      const { p, a, b } = it
-      const ka = kidsA.get(p) ?? []
-      const kb = kidsB.get(p) ?? []
-      // Both sides present, something named under it on either side, and
-      // the totals differ: the children carry the Δ. One-sided subtrees ride
-      // whole on their own row; a byte-identical subtree is one unchanged
-      // row (the renderer infers it as filler), not a walk of its skeleton.
-      const same = !!(a && b && Math.round(a.b) === Math.round(b.b) && Math.round(a.o) === Math.round(b.o))
-      // A one-sided node (a bucket the older scan never covered, a directory
-      // that appeared or vanished) expands too: its children all read as
-      // added / removed, but they still say WHAT arrived — a leaf tile
-      // saying `84 Ti first scanned` says nothing about its shape.
-      const expand = !!((a || b) && !same && (ka.length || kb.length)) && (o.depth == null || it.d - dP < o.depth)
-      const names = expand ? [...new Set([...ka, ...kb])].sort() : []
-      return { it, expand, names }
-    })
-    // The names one side lacks, looked up on that side — in parallel.
-    const asks: { cp: string; d: number; side: 1 | 2; v: Read; date: string; other?: Agg }[] = []
-    for (const { it, names } of plans) {
-      for (const cp of names) {
-        if (va && !va.kept.has(cp) && !va.exact?.has(cp) && !va.complete?.(it.p)) asks.push({ cp, d: it.d + 1, side: 1, v: va, date: from, other: vb?.kept.get(cp) })
-        if (vb && !vb.kept.has(cp) && !vb.exact?.has(cp) && !vb.complete?.(it.p)) asks.push({ cp, d: it.d + 1, side: 2, v: vb, date: to, other: va?.kept.get(cp) })
-      }
-    }
-    const found = new Map<string, Agg | null>() // `${side}:${cp}`
-    const asked = new Set(asks.map(q => `${q.side}:${q.cp}`))
-    const sideAsks = (side: 1 | 2) => asks.filter(q => q.side === side)
-    const level2 = Promise.all([
-      va && sideAsks(1).length ? lookupMany(from, va, sideAsks(1)) : new Map<string, Agg | null>(),
-      vb && sideAsks(2).length ? lookupMany(to, vb, sideAsks(2)) : new Map<string, Agg | null>(),
-    ])
-    // A filtered diff's level waits for its lookups until `FILTER_WALK_MS` is spent, no longer: the names
-    // still unanswered are folded, as past `LOOKUP_CAP` (`lookups_capped`, `lookups_late`).
-    const left = query ? walkMs - (performance.now() - walkStart) : Infinity
-    let timer: ReturnType<typeof setTimeout> | null = null
-    const none = [new Map<string, Agg | null>(), new Map<string, Agg | null>()] as const
-    const [gotA, gotB] = left === Infinity ? await level2 : await Promise.race([
-      level2,
-      new Promise<typeof none>(r => { timer = setTimeout(() => { if (asks.length) { late = true; capped = true; lookupsOff = true } r(none) }, Math.max(0, left)) }),
-    ])
-    if (timer != null) clearTimeout(timer)
-    level2.catch(() => {})
-    for (const [cp, agg] of gotA) found.set(`1:${cp}`, agg)
-    for (const [cp, agg] of gotB) found.set(`2:${cp}`, agg)
-    for (const { it, expand, names } of plans) {
+    for (const it of level) {
+      const { expand, names } = planOf(it)
       const { p, d, a, b } = it
       if (p !== path) emit(rel(p), d - dP, a, b, expand, it.l)
       if (!expand) continue
@@ -2885,13 +3016,12 @@ export async function buildDiff(env0: Env, o: DiffOpts): Promise<Diff> {
       for (const cp of names) {
         // A name one side drew whose lookup on the other went unanswered (`lookupCap`, the walk's time): its other
         // side is unknown, not zero — it stays in the parent's `(other)` on both sides, which is exact by subtraction.
-        if (asked.has(`1:${cp}`) && !found.has(`1:${cp}`) || asked.has(`2:${cp}`) && !found.has(`2:${cp}`)) continue
-        const ca = va?.kept.get(cp) ?? va?.exact?.get(cp) ?? found.get(`1:${cp}`) ?? null
-        const cb = vb?.kept.get(cp) ?? vb?.exact?.get(cp) ?? found.get(`2:${cp}`) ?? null
-        const lk: 1 | 2 | undefined = ca && !va!.kept.has(cp) && !va!.complete?.(p) ? 1 : cb && !vb!.kept.has(cp) && !vb!.complete?.(p) ? 2 : undefined
-        if (ca) { sum.a.b += ca.b; sum.a.o += ca.o }
-        if (cb) { sum.b.b += cb.b; sum.b.o += cb.o }
-        next.push({ p: cp, d: d + 1, a: ca, b: cb, ...(lk ? { l: lk } : {}) })
+        const q = askOf(it, cp)
+        if (q && !found.has(`${q.side}:${cp}`)) { capped = true; continue }
+        const c = childOf(p, cp, d + 1)
+        if (c.a) { sum.a.b += c.a.b; sum.a.o += c.a.o }
+        if (c.b) { sum.b.b += c.b.b; sum.b.o += c.b.o }
+        next.push(c)
       }
       // A one-sided parent has no residual on its missing side.
       const restA = newAgg()

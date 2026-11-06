@@ -192,7 +192,7 @@ dt-cloud soft-delete -b BUCKET… [-o ROOT…] [-j]  # Each bucket's GCS soft-de
                           # disabled, the route refusing), one on a bucket it doesn't name is "unverified". `sweep undo` asks GCS itself
 dt-cloud diff-bench -a BEFORE -b AFTER [-S STORE] [-v DATE:PATH]… CASES  # The table a store-layout change ships with (no CURRENT move
                           # without it): the browser's diff + map requests (diff-check's CASES, `-v` views) on two hosts, each
-                          # cold (`-n` random w×h cache buckets no page asks for) then warm; per request kind, median cold
+                          # cold (`-n` random w×h cache buckets no page asks for) then warm (`-s`: also each diff's `summary=1`, which no page asks); per request kind, median cold
                           # `Server-Timing` total, the paired Δ (B − A), B-slower count + sign-test p; answers must agree
                           # (totals, rows, nodes). Same reader flags on both (`DIFF_DESCENT` moves the tier). Exit 1 on an error
                           # or a disagreement, 2 if B is slower (p < `-p`); `-o` every sample as TSV
