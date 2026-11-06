@@ -74,9 +74,9 @@ def job_spec() -> dict:
             "instances": [{"policy": {"machineType": "e2-standard-2", "bootDisk": {"type": "pd-balanced", "sizeGb": "30"}}}],
             "serviceAccount": {"email": f"cw-s3-job@{PROJECT}.iam.gserviceaccount.com"},
             "location": {"allowedLocations": [f"regions/{REGION}"]},
-            "labels": {"app": "disky", "deployment": "cw-s3", "component": "isolation-smoke"},
+            "labels": {"app": "disky", "deployment": "cw", "component": "isolation-smoke"},
         },
-        "labels": {"app": "disky", "deployment": "cw-s3", "component": "isolation-smoke"},
+        "labels": {"app": "disky", "deployment": "cw", "component": "isolation-smoke"},
         "logsPolicy": {"destination": "CLOUD_LOGGING"},
     }
 

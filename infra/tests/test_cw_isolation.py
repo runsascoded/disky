@@ -41,7 +41,7 @@ def test_additive_cw_foundation() -> pulumi.Output:
             "cw-isolation-cf-token": "gcp:secretmanager/secret:Secret",
             "cw-isolation-cf-token-job": "gcp:secretmanager/secretIamMember:SecretIamMember",
         }
-        labels = {"app": "disky", "deployment": "cw-s3"}
+        labels = {"app": "disky", "deployment": "cw"}
         for component, seconds, rules in (
             ("data", 604800, []),
             ("scratch", 0, [{"action": {"type": "Delete"}, "condition": {"age": 7}}]),
@@ -50,7 +50,7 @@ def test_additive_cw_foundation() -> pulumi.Output:
             assert mocks.resources[f"cw-isolation-{component}"] == {
                 "project": "fixture", "name": bucket, "location": "US-EAST1", "storageClass": "STANDARD",
                 "uniformBucketLevelAccess": True, "publicAccessPrevention": "enforced", "forceDestroy": False,
-                "labels": {"app": "disky", "deployment": "cw", "component": component}, "softDeletePolicy": {"retentionDurationSeconds": seconds},
+                "labels": {**labels, "component": component}, "softDeletePolicy": {"retentionDurationSeconds": seconds},
                 "lifecycleRules": rules,
             }
             assert mocks.resources[f"cw-isolation-{component}-job"] == {
@@ -93,7 +93,7 @@ def test_separate_publisher_secret_containers() -> pulumi.Output:
             expected[name] = {
                 "project": "fixture", "secretId": f"cw-s3-isolated-r2-{suffix}",
                 "replication": {"auto": {}},
-                "labels": {"app": "disky", "deployment": "cw-s3", "component": "secret"},
+                "labels": {"app": "disky", "deployment": "cw", "component": "secret"},
             }
             expected[name + "-job"] = {
                 "project": "fixture", "secretId": f"cw-s3-isolated-r2-{suffix}",

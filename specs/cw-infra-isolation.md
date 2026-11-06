@@ -35,7 +35,7 @@ Live Cloudflare policy inspection confirms the existing CW R2 token grants read/
 | `cw-s3-isolated-r2-access-key-id`, `cw-s3-isolated-r2-secret-access-key` | Protected CW containers/accessors; bucket-only publisher pair installed without changing old `latest` refs |
 | Dispatcher data-bucket grants | `objectViewer` + `objectCreator` on CW data only; plan creation/result reads without deletion permission |
 
-Every resource with labels carries `app=disky,deployment=cw-s3` plus its component. Grants use additive IAM members, not replacement policies. Data/scratch locations deliberately retain `US-EAST1`; this isolates ownership without mixing in a provider/region relocation. Existing job/dispatch identities, billing project and CW serving R2/D1 stay the same.
+Every resource with labels carries `app=disky,deployment=cw` plus its component. Grants use additive IAM members, not replacement policies. Data/scratch locations deliberately retain `US-EAST1`; this isolates ownership without mixing in a provider/region relocation. Existing job/dispatch identities, billing project and CW serving R2/D1 stay the same.
 
 At foundation creation, live writers still used old targets: empty resources alone did not enable the new pipeline. The later authorized cutover is recorded below. Storage copying temporarily duplicates the approved history; the reviewed quantities/costs stay in private evidence. The data bucket deliberately has no retention deletion; review its ongoing footprint independently. The scratch lifecycle really deletes old objects even though the bucket is protected.
 

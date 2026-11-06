@@ -10,7 +10,7 @@ def prepare_isolation(
     project: str,
     member: pulumi.Input[str],
 ) -> list[pulumi.CustomResource]:
-    labels = {"app": "disky", "deployment": "cw-s3"}
+    labels = {"app": "disky", "deployment": "cw"}
     buckets = []
     resources: list[pulumi.CustomResource] = []
     for component, name, days in (
@@ -26,7 +26,7 @@ def prepare_isolation(
             uniform_bucket_level_access=True,
             public_access_prevention="enforced",
             force_destroy=False,
-            labels={"app": "disky", "deployment": "cw", "component": component},
+            labels={**labels, "component": component},
             soft_delete_policy={"retention_duration_seconds": 604800 if days is None else 0},
             lifecycle_rules=[] if days is None else [{"action": {"type": "Delete"}, "condition": {"age": days}}],
             opts=pulumi.ResourceOptions(protect=True),
@@ -118,7 +118,7 @@ def prepare_credentials(
             project=project,
             secret_id=f"cw-s3-isolated-r2-{suffix}",
             replication={"auto": {}},
-            labels={"app": "disky", "deployment": "cw-s3", "component": "secret"},
+            labels={"app": "disky", "deployment": "cw", "component": "secret"},
             opts=pulumi.ResourceOptions(protect=True),
         )
         accessor = gcp.secretmanager.SecretIamMember(
