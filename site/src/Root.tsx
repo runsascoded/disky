@@ -1,3 +1,4 @@
+import { SiteKbd } from './SiteKbd'
 import { Navigate, Route, Routes, useLocation } from 'react-router-dom'
 import { lazy, Suspense, useEffect } from 'react'
 import { HotkeysProvider } from 'use-kbd'
@@ -26,17 +27,17 @@ import { PerfOverlay } from './dev/PerfOverlay'
 
 // The session log's viewer (admin-only): its own chunk, so the main bundle carries none of it.
 const SessionsPage = lazy(() => import('./SessionsPage').then(m => ({ default: m.SessionsPage })))
-const sessions = <AuthGate><Suspense fallback={<Loading />}><SessionsPage /></Suspense></AuthGate>
+const sessions = <AuthGate><SiteKbd /><Suspense fallback={<Loading />}><SessionsPage /></Suspense></AuthGate>
 const LatencyPage = lazy(() => import('./LatencyPage').then(m => ({ default: m.LatencyPage })))
-const latency = <AuthGate><Suspense fallback={<Loading />}><LatencyPage /></Suspense></AuthGate>
+const latency = <AuthGate><SiteKbd /><Suspense fallback={<Loading />}><LatencyPage /></Suspense></AuthGate>
 const ActivityPage = lazy(() => import('./ActivityPage').then(m => ({ default: m.ActivityPage })))
-const activity = <AuthGate><Suspense fallback={<Loading />}><ActivityPage /></Suspense></AuthGate>
+const activity = <AuthGate><SiteKbd /><Suspense fallback={<Loading />}><ActivityPage /></Suspense></AuthGate>
 const UsagePage = lazy(() => import('./UsagePage').then(m => ({ default: m.UsagePage })))
-const usage = <AuthGate><Suspense fallback={<Loading />}><UsagePage /></Suspense></AuthGate>
+const usage = <AuthGate><SiteKbd /><Suspense fallback={<Loading />}><UsagePage /></Suspense></AuthGate>
 const SlackPage = lazy(() => import('./SlackPage').then(m => ({ default: m.SlackPage })))
-const slack = <AuthGate><Suspense fallback={<Loading />}><SlackPage /></Suspense></AuthGate>
+const slack = <AuthGate><SiteKbd /><Suspense fallback={<Loading />}><SlackPage /></Suspense></AuthGate>
 const CostPage = lazy(() => import('./CostPage').then(m => ({ default: m.CostPage })))
-const cost = <AuthGate><Suspense fallback={<Loading />}><CostPage /></Suspense></AuthGate>
+const cost = <AuthGate><SiteKbd /><Suspense fallback={<Loading />}><CostPage /></Suspense></AuthGate>
 const FederatedScansPreview = import.meta.env.DEV ? lazy(() => import('./dev/FederatedScansPreview')) : null
 const ChildrenTablePreview = import.meta.env.DEV ? lazy(() => import('./dev/ChildrenTablePreview')) : null
 
@@ -78,9 +79,9 @@ export default function Root() {
       {/* The wall as a page (ungated): where the inline "sign in" links go. */}
       <Route path="/signin" element={<SignInPage />} />
       <Route path="/privacy" element={<PrivacyPage />} />
-      <Route path="/admin" element={<AuthGate><AdminPage /></AuthGate>} />
-      <Route path="/admin/db" element={<AuthGate><AdminDbPage /></AuthGate>} />
-      <Route path="/admin/db/:table" element={<AuthGate><AdminDbPage /></AuthGate>} />
+      <Route path="/admin" element={<AuthGate><SiteKbd /><AdminPage /></AuthGate>} />
+      <Route path="/admin/db" element={<AuthGate><SiteKbd /><AdminDbPage /></AuthGate>} />
+      <Route path="/admin/db/:table" element={<AuthGate><SiteKbd /><AdminDbPage /></AuthGate>} />
       <Route path="/admin/sessions" element={sessions} />
       <Route path="/admin/latency" element={latency} />
       <Route path="/admin/activity" element={activity} />
