@@ -96,6 +96,11 @@ dt-cloud dups -o OUT INDEX  # A scan's duplicate-candidate groups (specs/dups.md
                           # crc32c (`exact`; a differing `moved` copy dropped), `-g N` crc32c spot checks on GCS (groups `-l` left
                           # unsettled) → `dups.parquet` + `dups.json`
                           # (the `dups` scan step writes them beside the index; `/api/dups` + `/dups` read them, `DUPS=1`)
+dt-cloud admins check -d DB -o ORG [-c CONFIG] [-j] [-x HANDLE]…  # A deployment's admin list (`admin_emails.github`: the handles recorded
+                          # on `/admin`) against a GitHub org's owners (`gh api orgs/ORG/members?role=admin`; run as an org
+                          # member): who is an owner but not an admin, and the reverse; rows without a handle are counted.
+                          # Read-only (handles only, `wrangler d1 execute --remote`), never a sync; exit 1 on drift. `-x`: a
+                          # difference that is meant (an owner left off the list), reported on its own line, not drift
 dt-cloud interval-store append [-c] [-n] SCAN_ID  # Append one scan to the interval store as a run beside its
                           # base generation (spec `interval-store.md` §2.7; profile `-P`/$INTERVAL_STORE_PROFILE):
                           # prepare → ranges (Batch) → publish (cut, binary-counter merges, manifest) → R2 → prune,
@@ -237,9 +242,11 @@ One gate (`_lib/auth.ts`, `@open-athena/auth` over D1): `identify` → `Identity
 - `/auth/google` (+ `/callback`, `/onetap`) — Google OIDC → email session; `/auth/email/*` — emailed code / magic link → email session
 - `/api/auth/*` — the package's routes: `whoami`, `exchange` (`?key=` share link → grant session), `logout`, request-access, admin grant/request/log console
 - `/api/token` — a session's personal agent token (a non-expiring Bearer grant, the base scope only; grants can't mint one)
+- `/api/admins` — the admins (`/admin`'s "Admins" section): every path to the `admin` scope (the list's rows with who added whom and when, the break-glass addresses, live admin-scope links, the staff domain where it is one), add / remove on the list, each logged to `admin_edits`; the last listed admin can't be removed
 - `/a/<sha256>.<ext>` — **public, no gate**: an activity post's sender face (`_lib/publicAvatar.ts`), only bytes a Slack / Discord post stored in `public_avatars`, named by their own SHA-256 (a profile's or grant's face, else an identicon seeded by an HMAC of the actor under `SESSION_SECRET`); anything else 404s
 
 **A path-restricted link** (a grant carrying `<tag>:hide:<prefix>`, `_lib/restrict.ts`): every route it can reach says what it gets in `functions/gates.test.ts` `RESTRICTED`. Blocked (`RESTRICTED_BLOCKED`, or by the route): whatever can't be filtered, including a name filter (`q=` on `/api/subtree`, `/api/diff`, `/api/series`: its sums count hidden hits). Filtered: the plain views, `/api/annotations`, `/data/rules.json`.
+**Who is an admin:** one function, `isAdmin(env, email)` (`_lib/auth.ts`); `scopesFor` puts the `admin` scope on a session by it, so `requireAdmin`, `Identity.admin`, whoami and the client's admin UI follow, and a Slack click (`slack/actions.ts`) asks it of the clicker's Slack profile email. With `ADMIN_LIST = "1"` an admin is an `admin_emails` row or a break-glass address (the secret `ADMIN_BOOTSTRAP`) and nothing else: staff keep every other scope, an empty or missing list means no admins (never a fallback to the domain; `/admin` says so), and a listed address is admitted by the list. A row may carry the person's GitHub handle (`github`), so the list can be checked against a GitHub org's owners (`dt-cloud admins check`). Unset, the staff domain is admin (plus `admin_emails` rows where `ADMIN_EMAILS`). The only other admin is a grant minted with the scope, which only an admin can mint; agent tokens never carry it. `functions/gates.test.ts` enumerates every Functions route and asserts its gate per identity: a new route needs a row there.
 
 ## Development
 
