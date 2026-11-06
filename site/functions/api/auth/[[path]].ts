@@ -2,10 +2,10 @@
  * The package's whole `/api/auth/*` surface: whoami, exchange (`?key=` →
  * session), logout, request-access, and the admin grant/request/rotate/log
  * routes (minting — with its subject — happens here, via POST /api/auth/grants).
- * With `ADMIN_LIST` the gate's store refuses a grant carrying `admin` or `*`, and
- * anything that gives one back its access (`grantStore`), and with or without it
- * a term that isn't a number; those refusals leave the package's routes as a throw,
- * answered here.
+ * With `ADMIN_LIST` the gate's store refuses a grant carrying `admin` or `*`,
+ * minted or edited in, and anything that gives one back its access (`grantStore`),
+ * and with or without it a term that isn't a number; those refusals leave the
+ * package's routes as a throw, answered here.
  */
 import { authRoutes } from '@open-athena/auth'
 import { d1AuditQuery } from '@open-athena/auth/d1'

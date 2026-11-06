@@ -160,6 +160,7 @@ const SHARED_ROUTES: Record<string, Case[]> = {
     post('/api/auth/decide', 'public'),
     get('/api/auth/grants', 'admin'),
     post('/api/auth/grants', 'admin'),
+    patch('/api/auth/grants/none', 'admin'),
     post('/api/auth/grants/none/revoke', 'admin'),
     get('/api/auth/requests', 'admin'),
     get('/api/auth/allowed', 'admin'),
@@ -610,6 +611,12 @@ const mintAs = (w: World, who: Who, scopes: string[]): Promise<Response> => (MOD
   env: w.env,
 }) as Promise<Response>
 
+/** `PATCH /api/auth/grants/<id>` `{ scopes }` as `who`, through the route. */
+const editScopes = (w: World, who: Who, id: string, scopes: string[]): Promise<Response> => (MODULES['api/auth/[[path]].ts'].onRequest as Handler)({
+  request: new Request(`${ORIGIN}/api/auth/grants/${id}`, { method: 'PATCH', headers: { ...w.headers[who], 'content-type': 'application/json' }, body: JSON.stringify({ scopes }) }),
+  env: w.env,
+}) as Promise<Response>
+
 const expected = (gate: Gate, mode: Mode): Outcome[] => EXPECT[gate].map(cell => (typeof cell === 'object' ? (mode.listOn ? cell.listOn : cell.listOff) : cell))
 const byIdentity = <T>(vs: T[]): Record<string, T> => Object.fromEntries(IDENTITIES.map((who, i) => [who, vs[i]]))
 
@@ -684,6 +691,26 @@ describe.each(MODES)('$name', mode => {
   })
   it.each(['listed admin', 'admin grant'] as Who[])('%s minting a viewer grant', async who => {
     expect((await mintAs(w, who, ['gcs'])).status).toBe(200)
+  })
+
+  // The other way to a grant carrying them: an ordinary link's scopes, edited.
+  it.each([
+    { who: 'listed admin', scopes: ['admin'] },
+    { who: 'listed admin', scopes: ['*'] },
+    { who: 'admin grant', scopes: ['gcs', 'admin'] },
+    { who: 'admin grant', scopes: ['*'] },
+  ] as { who: Who; scopes: string[] }[])('$who putting $scopes on a viewer grant', async ({ who, scopes }) => {
+    const { grant } = await (await mintAs(w, 'listed admin', ['gcs'])).json() as { grant: { id: string } }
+    const res = await editScopes(w, who, grant.id, scopes)
+    expect(mode.listOn ? [res.status, await res.json()] : res.status).toEqual(mode.listOn ? [403, { error: ADMIN_GRANT_REFUSED }] : 200)
+  })
+  it.each(['listed admin', 'admin grant'] as Who[])('%s narrowing a viewer grant', async who => {
+    const { grant } = await (await mintAs(w, 'listed admin', ['gcs', 'gcs:read'])).json() as { grant: { id: string } }
+    expect((await editScopes(w, who, grant.id, ['gcs:read'])).status).toBe(200)
+  })
+  it.each(['read-only link', 'viewer', 'agent token'] as Who[])('%s can\'t edit a grant\'s scopes', async who => {
+    const { grant } = await (await mintAs(w, 'listed admin', ['gcs'])).json() as { grant: { id: string } }
+    expect((await editScopes(w, who, grant.id, ['gcs:read'])).status).toBe(403)
   })
 
   const cases = Object.entries(ROUTES).flatMap(([file, cs]) => cs.map(c => ({ file, c, title: `${c.method} ${c.path}${c.env ? ' (+env)' : ''}: ${c.gate}` })))
