@@ -41,7 +41,7 @@ describe('/api/digest-settings', () => {
     ]).toEqual([
       { template: 'cw', params: 'qh,pp', quota_marks: 'runway-hue' },
       'template: cw | gcs',
-      'quota_marks: warning | circles | runway | runway-hue',
+      'quota_marks: warning | circles | runway | runway-hue | arrow-chip',
       'params: digest params: unreadable field "qx" in "qx"',
       'body: a JSON object',
     ])
@@ -56,7 +56,7 @@ describe('/api/digest-settings', () => {
     await put({ template: 'cw', params: 'qh,pp', quota_marks: 'runway-hue' }, admin)
     const [s2, b2] = await get('?template=cw', viewer)
     expect([s2, norm(b2.settings ?? null)]).toEqual([200, { template: 'cw', params: 'qh,pp', quota_marks: 'runway-hue', updated_by: 'ops@example.test', updated_at: '<ts>' }])
-    expect(await put({ template: 'cw', params: '', quota_marks: 'squares' }, admin)).toEqual([400, { error: 'quota_marks: warning | circles | runway | runway-hue' }])
+    expect(await put({ template: 'cw', params: '', quota_marks: 'squares' }, admin)).toEqual([400, { error: 'quota_marks: warning | circles | runway | runway-hue | arrow-chip' }])
     const log = (await db.prepare("SELECT pk, action, who, old_json, new_json FROM admin_edits WHERE tbl = 'digest_settings' ORDER BY id").all()).results
       .map(r => ({ ...r, old_json: r.old_json && JSON.parse(r.old_json as string).quota_marks, new_json: JSON.parse(r.new_json as string).quota_marks }))
     expect(log).toEqual([
