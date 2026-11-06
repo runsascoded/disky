@@ -13,7 +13,7 @@ cd "$(dirname "$0")"
 # A file that doesn't parse is not an error to wrangler: it logs "Invalid TOML document", ignores the file
 # and deploys with the project's old settings (gcs's prod, 2026-11). Refuse it here, before any build.
 ./toml-check wrangler.toml || { echo "deploy: wrangler.toml does not parse (above); fix it, then deploy" >&2; exit 1; }
-PROJECT=$(sed -n's/^name = "\(.*\)"$/\1/p' wrangler.toml)
+PROJECT=$(sed -n 's/^name = "\(.*\)"$/\1/p' wrangler.toml)
 [ -n "$PROJECT" ] || { echo "deploy: no name = ... in wrangler.toml" >&2; exit 1; }
 if [ -f deploy.env ]; then set -a; . ./deploy.env; set +a; fi
 : "${CLOUDFLARE_ACCOUNT_ID:?deploy: set CLOUDFLARE_ACCOUNT_ID (the Pages project account) in site/deploy.env}"
