@@ -35,7 +35,7 @@
 # read its report (`recompress` prints old → new per file and a totals line).
 set -euo pipefail
 PROJECT=oa-internal-450019
-REGION=us-central1
+REGION=us-east1
 SA=cw-s3-job@$PROJECT.iam.gserviceaccount.com
 IMAGE=${IMAGE:-us-central1-docker.pkg.dev/$PROJECT/cw-s3-usage/scan:latest}
 DATA_BUCKET=${DATA_BUCKET:-oa-cw-s3-usage-data}
@@ -112,7 +112,7 @@ spec = {
     "allocationPolicy": {
         "instances": [{"policy": {"machineType": "n2-standard-2", "bootDisk": {"type": "pd-balanced", "sizeGb": "60"}}}],
         "serviceAccount": {"email": os.environ["SA"]},
-        "location": {"allowedLocations": [f"regions/{os.environ.get('REGION', 'us-central1')}"]},
+        "location": {"allowedLocations": [f"regions/{os.environ.get('REGION', 'us-east1')}"]},
     },
     "logsPolicy": {"destination": "CLOUD_LOGGING"},
 }

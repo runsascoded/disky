@@ -23,7 +23,7 @@ case $CMD in build|add|verify|backfill-churn) ;; *) echo "$0: build, add, verify
 if [ "$CMD" = backfill-churn ] && [ -z "${TO_GEN:-}" ]; then echo "$0 backfill-churn: set TO_GEN (the new generation)" >&2; exit 2; fi
 
 PROJECT=oa-internal-450019
-REGION=us-central1
+REGION=us-east1
 SA=cw-s3-job@$PROJECT.iam.gserviceaccount.com
 IMAGE=${IMAGE:-us-central1-docker.pkg.dev/$PROJECT/cw-s3-usage/scan:latest}
 R2_BUCKET=${R2_BUCKET:-oa-cw-s3-usage-index}

@@ -77,6 +77,7 @@ env:
   # cost labels (specs/done/cost-labels-required.md): `scan head` refuses without them; every Batch job it and its
   # steps submit inherits them
   DISKY_LABELS: app=disky,deployment=cw
+  BATCH_REGION: us-east1
 pass: [DT_RECORD, DT_ALERTS]
 # after each scan, the per-scan files the interval store + static index hold (specs/lean-scans.md §2), retired for real
 # since the reviewed one-off by hand (2026-10-18: 167 scans, ~874 GB over GCS + R2)

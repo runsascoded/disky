@@ -2,7 +2,7 @@
   "name": "cw",
   "comment": "The cw-s3 deployment's scan-run profile (specs/scan-runs-ui.md): `dt-cloud scan-run -c job/scan-runs.json`. Prices: n2/e2 list $/h, us-central1, compute only; a Nextflow run is its head plus its step tasks (`finish -l nf-session=…`).",
   "project": "oa-internal-450019",
-  "regions": ["us-central1"],
+  "regions": ["us-central1", "us-east1"],
   "run_id_env": ["DT_RUN_ID", "BATCH_JOB_UID"],
   "overlapped": ["static-names"],
   "jobs": [

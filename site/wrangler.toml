@@ -73,6 +73,7 @@ DATA_BUCKET = "oa-cw-s3-usage-data"
 SWEEP_REVIEW_STORE = "r2://oa-cw-s3-usage-index"
 SWEEP_REVIEW_SECRETS = '{"R2_ENDPOINT":"cw-s3-r2-endpoint","R2_ACCESS_KEY_ID":"cw-s3-isolated-r2-access-key-id","R2_SECRET_ACCESS_KEY":"cw-s3-isolated-r2-secret-access-key"}'
 GCP_PROJECT = "oa-internal-450019"
+BATCH_REGION = "us-east1"  # beside the data bucket: the sweep executor and digest jobs mount it
 META_TREE_URL = "https://cw.oa.dev/meta"  # /scans outputs link into the meta tree
 SWEEP_IMAGE = "us-central1-docker.pkg.dev/oa-internal-450019/cw-s3-usage/scan:latest"
 DISKY_LABELS = "app=disky,deployment=cw"  # cost labels on executor jobs (specs/cost-labels.md)
@@ -212,6 +213,7 @@ DATA_BUCKET = "oa-cw-s3-usage-data"
 SWEEP_REVIEW_STORE = "r2://oa-cw-s3-usage-index"
 SWEEP_REVIEW_SECRETS = '{"R2_ENDPOINT":"cw-s3-r2-endpoint","R2_ACCESS_KEY_ID":"cw-s3-isolated-r2-access-key-id","R2_SECRET_ACCESS_KEY":"cw-s3-isolated-r2-secret-access-key"}'
 GCP_PROJECT = "oa-internal-450019"
+BATCH_REGION = "us-east1"  # beside the data bucket: the sweep executor and digest jobs mount it
 META_TREE_URL = "https://cw.oa.dev/meta"  # /scans outputs link into the meta tree
 SWEEP_IMAGE = "us-central1-docker.pkg.dev/oa-internal-450019/cw-s3-usage/scan:latest"
 DISKY_LABELS = "app=disky,deployment=cw"  # cost labels on executor jobs (specs/cost-labels.md)

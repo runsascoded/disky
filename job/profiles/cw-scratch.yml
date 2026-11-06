@@ -7,7 +7,7 @@ deployment: cw-scratch
 executor:
   kind: google-batch
   project: oa-internal-450019
-  region: us-central1
+  region: us-east1
   service_account: cw-s3-job@oa-internal-450019.iam.gserviceaccount.com
   image: us-central1-docker.pkg.dev/oa-internal-450019/cw-s3-usage/scan:cw-scratch
   boot_disk: 50

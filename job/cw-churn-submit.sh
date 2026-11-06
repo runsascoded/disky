@@ -19,7 +19,7 @@
 # Scans are given oldest first; adjacent ones are paired. `-p A:B` adds a pair.
 set -euo pipefail
 PROJECT=oa-internal-450019
-REGION=us-central1
+REGION=us-east1
 SA=cw-s3-job@$PROJECT.iam.gserviceaccount.com
 IMAGE=${IMAGE:-us-central1-docker.pkg.dev/$PROJECT/cw-s3-usage/scan:latest}
 DATA_BUCKET=${DATA_BUCKET:-oa-cw-s3-usage-data}

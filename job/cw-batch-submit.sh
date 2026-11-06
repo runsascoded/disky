@@ -27,7 +27,9 @@ set -euo pipefail
 if [ -n "${PIN:-}" ]; then unset IMAGE MACHINE MEMORY_MIB DATA_BUCKET SWEEP_BUCKET; fi
 
 PROJECT=oa-internal-450019
+# A head only orchestrates, so it stays beside the image; the one-VM driver (`NF=0`) mounts the data bucket, so it runs beside that.
 REGION=us-central1
+if [ "${NF:-scan}" = 0 ]; then REGION=us-east1; fi
 SA=cw-s3-job@$PROJECT.iam.gserviceaccount.com
 export IMAGE=${IMAGE:-us-central1-docker.pkg.dev/$PROJECT/cw-s3-usage/scan:latest}  # exported: stage 4f runs on it
 # Measured on a 92M-object scan: 1.1 GB RSS listing, 1.8 GB import. The listing

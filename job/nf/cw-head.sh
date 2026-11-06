@@ -60,7 +60,7 @@ nf=$!
 set +m
 # Nextflow cancels the tasks it knows of; one whose submit was in flight lands after it exits (seen: 23 s later), so
 # the head then cancels whatever still carries the session's label (`nf-session`, nextflow.config).
-stop() { kill -TERM -- "-$nf" 2>/dev/null; wait "$nf" || true; sleep "${NF_SWEEP_DELAY:-30}"; dt-cloud batch-cancel -l "nf-session=$session" || true; sr finish -x "$1" -e "head terminated (signal; session $session)" -l "nf-session=$session"; exit "$1"; }
+stop() { kill -TERM -- "-$nf" 2>/dev/null; wait "$nf" || true; sleep "${NF_SWEEP_DELAY:-30}"; dt-cloud batch-cancel -r us-east1 -l "nf-session=$session" || true; sr finish -x "$1" -e "head terminated (signal; session $session)" -l "nf-session=$session"; exit "$1"; }
 trap 'stop 143' TERM
 trap 'stop 130' INT
 wait "$nf" || rc=$?

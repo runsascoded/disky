@@ -58,6 +58,7 @@ env:
   AWS_EC2_METADATA_DISABLED: "true"
   # cost labels (specs/done/cost-labels-required.md): `scan head` refuses without them
   DISKY_LABELS: app=disky,deployment=cw
+  BATCH_REGION: us-east1
 pass: [DT_RECORD, DT_ALERTS, DISKY_LABELS]
 labels: {deployment: cw}
 options:
