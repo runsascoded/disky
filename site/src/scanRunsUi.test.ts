@@ -3,7 +3,7 @@ import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { MemoryRouter } from 'react-router-dom'
 import type { ScanRun } from './scanRunsModel'
-import { fmtRunShort, IssueStanding,fmtRunTime, runDay, scanRunsApi, scansHref, scansStore } from './scanRunsUi'
+import { fmtRunShort, IssueStanding, OUTCOME_HEAD, fmtRunTime, runDay, scanRunsApi, scansHref, scansStore } from './scanRunsUi'
 import { resolveStores } from './stores'
 import { TEST_REGISTRY } from './testStores'
 
@@ -47,6 +47,12 @@ describe('scan-run display times', () => {
       'Mon Oct 12 · 10:06 PM', 'Tue Oct 13 · 11:06 AM',
       'Wed Dec 31 2025 · 3:00 PM',
     ])
+  })
+})
+
+describe('OUTCOME_HEAD', () => {
+  it('heads a recovered run by pointing at its issues', () => {
+    expect(OUTCOME_HEAD.recovered).toBe('Recovered: see below.')
   })
 })
 

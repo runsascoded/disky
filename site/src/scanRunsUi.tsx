@@ -118,12 +118,12 @@ export function IssueList({ issues, runHref }: { issues: readonly PhaseIssue[]; 
 }
 
 /** A short run's status tip's first line, by outcome. */
-const OUTCOME_HEAD: Record<string, string> = {
+export const OUTCOME_HEAD: Record<string, string> = {
   incomplete: "Published, but the scan's data or serving is short.",
   [BEHIND]: "Data published. Search doesn't cover this scan yet.",
   [PASSING]: "A check failed on this run. The same check has passed in a later run: the site passes since, which doesn't show this scan did.",
   partial: "The scan's data and serving are complete; a side step failed.",
-  recovered: 'Complete: what this run left short was done since.',
+  recovered: 'Recovered: see below.',
 }
 const OUTCOME_CLASS: Record<string, string> = { incomplete: 'warn', [BEHIND]: 'behind', [PASSING]: 'passing', partial: 'partial', recovered: 'succeeded' }
 
