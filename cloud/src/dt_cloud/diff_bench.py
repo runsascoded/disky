@@ -20,6 +20,7 @@ import os
 import random
 import statistics
 import sys
+import urllib.parse
 from dataclasses import asdict, dataclass
 from math import comb
 from pathlib import Path
@@ -89,6 +90,17 @@ def requests_for(
         out += [Req(f"subtree {d} /{p}", "subtree:d1", "/api/subtree", {**base, "depth": 1}),
                 Req(f"subtree {d} /{p}", "subtree:full", "/api/subtree", base)]
     return out
+
+
+def uri_component(s: object) -> str:
+    """`s` escaped as the browser's `encodeURIComponent` escapes it."""
+    return urllib.parse.quote(str(s), safe="!*'()")
+
+
+def browser_url(r: Req) -> str:
+    """`r` as the page's `fetch` sends it (path and query, no host): its parameters in order, each value escaped as
+    `encodeURIComponent` does. `warm-cache` replays these (`warm.plan`), so what it warms is what a page asks."""
+    return f"{r.route}?{'&'.join(f'{k}={uri_component(v)}' for k, v in r.q.items())}"
 
 
 def answer_digest(route: str, body: dict) -> str:

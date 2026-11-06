@@ -1562,8 +1562,9 @@ def index_extras(attributions: tuple[str, ...], identities_path: str, out_dir: P
 @option("-W", "--widths", default="512,1280,1536,1792,1920", help="Canvas widths to warm (the client sends ceil(innerWidth/128)*128; default = phone + common laptops)")
 def warm_cache(date: str | None, jobs: int, dry_run: bool, root: str | None, token: str | None, site_url: str | None, widths: str) -> None:
     """Warm the site's subtree + diff caches for a scan: replay the home
-    page's default requests (one subtree, the diff span chips 1d/3d/7d/14d/30d
-    and the previous-scan pair) at the common canvas
+    page's default requests (the subtree, the diff span chips 1d/3d/7d/14d/30d
+    and the previous-scan pair: each one's first paint, `depth=1`, and its full
+    read, exactly as the page sends them) at the common canvas
     widths, so the first viewer anywhere gets a cache hit (colo cache + global
     KV). Exits nonzero for failed requests; explicit view refusals (409) are reported separately. The pipeline may
     continue with a failed warm-up phase, since the view can be computed on demand."""

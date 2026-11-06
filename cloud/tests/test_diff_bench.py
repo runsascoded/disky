@@ -8,7 +8,7 @@ from math import isnan
 from click.testing import CliRunner
 
 from dt_cloud import diff_bench
-from dt_cloud.diff_bench import Req, Sample, answer_digest, random_buckets, requests_for, sign_test, st_total, summarize
+from dt_cloud.diff_bench import Req, Sample, answer_digest, browser_url, random_buckets, requests_for, sign_test, st_total, summarize
 
 
 def test_requests_are_the_browsers_mix():
@@ -20,6 +20,13 @@ def test_requests_are_the_browsers_mix():
         Req("subtree d /m", "subtree:d1", "/api/subtree", {"cv": 3, "date": "d", "path": "m", "w": 1152, "h": 307, "depth": 1}),
         Req("subtree d /m", "subtree:full", "/api/subtree", {"cv": 3, "date": "d", "path": "m", "w": 1152, "h": 307}),
     ]
+
+
+def test_browser_url_encodes_as_the_page_does():
+    """`encodeURIComponent`'s escapes, in the request's parameter order: `/` and `=` escaped, a space as `%20`, its
+    unreserved marks (`-_.!~*'()`) as they are."""
+    r = Req("subtree d /m", "subtree:d1", "/api/subtree", {"cv": 3, "date": "2026-09-15T1201", "path": "b k/a=1/it's (x)!~*-_.", "w": 1152, "h": 307, "depth": 1})
+    assert browser_url(r) == "/api/subtree?cv=3&date=2026-09-15T1201&path=b%20k%2Fa%3D1%2Fit's%20(x)!~*-_.&w=1152&h=307&depth=1"
 
 
 def test_a_secondary_stores_requests_name_it():

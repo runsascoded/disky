@@ -1,5 +1,7 @@
 """Specs for the cache warm-up plan (`dt_cloud.warm`): exact request lists."""
+import re
 from http.client import IncompleteRead, RemoteDisconnected
+from pathlib import Path
 
 from dt_cloud import warm as W
 import pytest
@@ -21,28 +23,69 @@ def test_nearest_prior_resolves_like_the_site():
 def test_plan_one_width():
     assert W.plan("2026-09-15", DATES, widths=(1280,), spans=(1, 7), paths=("",)) == [
         "/api/series?path=&split=roots",
-        "/api/subtree?date=2026-09-15&path=&w=1280&h=768",
-        "/api/subtree?date=2026-09-15&path=&w=1280&h=768&depth=1",
-        "/api/diff?from=2026-09-14&to=2026-09-15&path=&w=1280&h=768",
-        "/api/diff?from=2026-09-08&to=2026-09-15&path=&w=1280&h=768",
+        "/api/subtree?cv=3&date=2026-09-15&path=&w=1280&h=768&depth=1",
+        "/api/subtree?cv=3&date=2026-09-15&path=&w=1280&h=768",
+        "/api/diff?cv=3&from=2026-09-14&to=2026-09-15&path=&w=1280&h=768&dm=delta&depth=1",
+        "/api/diff?cv=3&from=2026-09-14&to=2026-09-15&path=&w=1280&h=768&dm=delta",
+        "/api/diff?cv=3&from=2026-09-08&to=2026-09-15&path=&w=1280&h=768&dm=delta&depth=1",
+        "/api/diff?cv=3&from=2026-09-08&to=2026-09-15&path=&w=1280&h=768&dm=delta",
     ]
+
+
+def page_urls(src: str, env: dict[str, str]) -> list[str]:
+    """Every `/api/subtree` and `/api/diff` URL template in the page's source, each `${…}` expression replaced by its
+    value in `env` (a `KeyError` for an expression `env` doesn't give)."""
+    return [re.sub(r"\$\{([^}]*)\}", lambda m: env[m[1]], t) for t in re.findall(r"`(/api/(?:subtree|diff)\?[^`]*)`", src)]
+
+
+def test_the_warmed_urls_are_the_pages():
+    """What `warm-cache` asks for a path, a width and a pair is, character for character, what `App.tsx` asks on the
+    default view of that path (unscoped, unfiltered, the Δ diff map): its four URL templates, read from the source.
+    A parameter the page adds, drops or reorders fails here until the warm-up follows (a diff without `dm=delta`
+    is another cache key where `DIFF_DESCENT` is on; one without `depth=1` is not the page's first paint)."""
+    src = (Path(__file__).resolve().parents[2] / "site" / "src" / "App.tsx").read_text()
+    cv = re.search(r"^const API_CV = '(\d+)'$", src, re.M)
+    assert cv is not None
+    path = "ctbk%2Fgbfs%2Fagg%3D1m"  # `encodeURIComponent("ctbk/gbfs/agg=1m")`
+    page = page_urls(src, {
+        "API_CV": cv[1],
+        "cutQs": "date=2026-09-15",
+        "diffQs": "from=2026-09-14&to=2026-09-15",
+        "encodeURIComponent(p)": path,
+        "encodeURIComponent(diffPath)": path,
+        "canW": "1536",
+        "Math.round(canW * 0.6)": "922",
+        "scopeQs": "",
+        "fq ? '&full=1' : ''": "",
+        "fq ? '' : '&depth=1'": "&depth=1",
+        "dmMode": "delta",
+    })
+    urls = [
+        "/api/diff?cv=3&from=2026-09-14&to=2026-09-15&path=ctbk%2Fgbfs%2Fagg%3D1m&w=1536&h=922&dm=delta",
+        "/api/diff?cv=3&from=2026-09-14&to=2026-09-15&path=ctbk%2Fgbfs%2Fagg%3D1m&w=1536&h=922&dm=delta&depth=1",
+        "/api/subtree?cv=3&date=2026-09-15&path=ctbk%2Fgbfs%2Fagg%3D1m&w=1536&h=922",
+        "/api/subtree?cv=3&date=2026-09-15&path=ctbk%2Fgbfs%2Fagg%3D1m&w=1536&h=922&depth=1",
+    ]
+    warmed = W.plan("2026-09-15", ["2026-09-14", "2026-09-15"], ("ctbk/gbfs/agg=1m",), widths=(1536,), spans=())
+    assert (sorted(page), warmed[0], sorted(warmed[1:])) == (urls, "/api/series?path=ctbk%2Fgbfs%2Fagg%3D1m", urls)
 
 
 TOP = ("", "b1", "b2", "b3")
 
 
 def test_plan_dedupes_pairs_and_counts():
-    # the previous-scan pair and the 1d chip are the same pair: 5 spans + prev → 5 distinct pairs (their rows; no
-    # `summary=1` twin: no page asks it); × (root + 3 buckets) × 5 widths, each with its full view and its one level (`depth=1`)
+    # the previous-scan pair and the 1d chip are the same pair: 5 spans + prev → 5 distinct pairs, each asked its first
+    # paint (`depth=1`) and its full walk (no `summary=1` twin: no page asks it); × (root + 3 buckets) × 5 widths, each
+    # with its one level (`depth=1`) and its full view
     paths = W.plan("2026-09-15", DATES, TOP)
     # plus one width-independent series per path, first
-    assert len(paths) == len(TOP) + len(W.WIDTHS) * len(TOP) * (2 + 5)
+    assert len(paths) == len(TOP) + len(W.WIDTHS) * len(TOP) * (2 + 2 * 5)
     assert paths[:2] == ["/api/series?path=&split=roots", "/api/series?path=b1"]
     n = len(TOP)
-    assert paths[n] == "/api/subtree?date=2026-09-15&path=&w=512&h=307"
-    assert paths[n + 1] == "/api/subtree?date=2026-09-15&path=&w=512&h=307&depth=1"
-    assert paths[n + 7] == "/api/subtree?date=2026-09-15&path=b1&w=512&h=307"
-    assert paths[-1] == "/api/diff?from=2026-08-16&to=2026-09-15&path=b3&w=1920&h=1152"
+    assert paths[n] == "/api/subtree?cv=3&date=2026-09-15&path=&w=512&h=307&depth=1"
+    assert paths[n + 1] == "/api/subtree?cv=3&date=2026-09-15&path=&w=512&h=307"
+    assert paths[n + 12] == "/api/subtree?cv=3&date=2026-09-15&path=b1&w=512&h=307&depth=1"
+    assert paths[-1] == "/api/diff?cv=3&from=2026-08-16&to=2026-09-15&path=b3&w=1920&h=1152&dm=delta"
 
 
 def test_paths_from_warm_paths_else_the_sites_root_view(monkeypatch):
@@ -74,20 +117,20 @@ def test_subdaily_nearest_prior():
 def test_subdaily_plan_one_width():
     assert W.plan("2026-09-15T1201", SUBDAILY, widths=(1280,), spans=(1, 7), paths=("",)) == [
         "/api/series?path=&split=roots",
-        "/api/subtree?date=2026-09-15T1201&path=&w=1280&h=768",
-        "/api/subtree?date=2026-09-15T1201&path=&w=1280&h=768&depth=1",
-        "/api/diff?from=2026-09-15T0001&to=2026-09-15T1201&path=&w=1280&h=768",
-        "/api/diff?from=2026-09-14T1201&to=2026-09-15T1201&path=&w=1280&h=768",
-        "/api/diff?from=2026-09-08T1201&to=2026-09-15T1201&path=&w=1280&h=768",
+        "/api/subtree?cv=3&date=2026-09-15T1201&path=&w=1280&h=768&depth=1",
+        "/api/subtree?cv=3&date=2026-09-15T1201&path=&w=1280&h=768",
+        "/api/diff?cv=3&from=2026-09-15T0001&to=2026-09-15T1201&path=&w=1280&h=768&dm=delta&depth=1",
+        "/api/diff?cv=3&from=2026-09-15T0001&to=2026-09-15T1201&path=&w=1280&h=768&dm=delta",
+        "/api/diff?cv=3&from=2026-09-14T1201&to=2026-09-15T1201&path=&w=1280&h=768&dm=delta&depth=1",
+        "/api/diff?cv=3&from=2026-09-14T1201&to=2026-09-15T1201&path=&w=1280&h=768&dm=delta",
+        "/api/diff?cv=3&from=2026-09-08T1201&to=2026-09-15T1201&path=&w=1280&h=768&dm=delta&depth=1",
+        "/api/diff?cv=3&from=2026-09-08T1201&to=2026-09-15T1201&path=&w=1280&h=768&dm=delta",
     ]
 
 
 def test_widths_match_the_sites_canvas_snap():
     # The site snaps its canvas to these widths (`site/src/canvas.ts`), so a
     # width warmed here and not there (or vice versa) is a cache miss for everyone.
-    import re
-    from pathlib import Path
-
     src = (Path(__file__).resolve().parents[2] / "site" / "src" / "canvas.ts").read_text()
     m = re.search(r"WARMED_WIDTHS = \[([\d, ]+)\]", src)
     assert m is not None
