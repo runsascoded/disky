@@ -322,6 +322,70 @@ describe('owner prefix history', () => {
   })
 })
 
+describe('owner totals on a generation the rows were carried to (`owner_carry.py`)', () => {
+  // Past `HIST_PRICE_MAX`, as gcs's ledger: a fold prices per scan, from `owner_prefix_aggs`. The 65 others aren't in the store.
+  const others = Array.from({ length: 65 }, (_, i) => i + 10)
+  const LEDGER = `
+    INSERT INTO actions (id, actor, ts, scan, pattern, set_owner, owner) VALUES
+      (1, 'ops', 1, '${S2}', 'gs://bk/m/', 1, 'alice'), (2, 'ops', 2, '${S2}', 'gs://bk/', 1, 'bob')${others.map(i => `, (${i}, 'ops', ${i}, '${S2}', 'gs://bk/none-${i}/', 1, 'dan')`).join('')};
+    INSERT INTO owner_prefixes (action_id, prefix, owner, ts) VALUES
+      (1, 'gs://bk/m/', 'alice', 1), (2, 'gs://bk/', 'bob', 2)${others.map(i => `, (${i}, 'gs://bk/none-${i}/', 'dan', ${i})`).join('')};
+  `
+  const fold = ({ computed: _, ...body }: Awaited<ReturnType<typeof import('./ownerTotals').ownerTotals>>) => body
+  const OLD = 'pq:iv:g2:s'
+  const NEW = 'pq:iv:g5:s'
+  // The fixture's numbers on `S2`: `bk/m` isn't in that scan's store.
+  const BY_PREFIX = [['gs://bk/', 'bob', 37229948, 8009], ['gs://bk/m/', 'alice', 0, 0]]
+  const tags = async (env: Env) => (await env.DB!.prepare('SELECT scan, idx FROM owner_prefix_aggs ORDER BY idx, scan').all<{ scan: string; idx: string }>()).results.map(r => [r.scan, r.idx])
+
+  /** `g2` priced on every scan and the rows carried to `g5` (`owner_carry.py`'s statement) for `scans`, in a fresh module. */
+  async function carried(scans: string[]) {
+    vi.resetModules()
+    const { ownerTotals } = await import('./ownerTotals')
+    const { perScan, iv } = await seed(LEDGER)
+    const before = { ...iv, INTERVAL_STORE_GEN: 'g2' } as Env
+    const priced = Object.fromEntries(await Promise.all([S1, S2, S3].map(async d => [d, await ownerTotals(before, d)] as const)))
+    expect(await tags(before)).toEqual([S1, S2, S3].map(d => [d, OLD]))
+    await before.DB!.prepare(`INSERT INTO owner_prefix_aggs (scan, idx, body, updated_ts) SELECT scan, '${NEW}', body, 9 FROM owner_prefix_aggs WHERE idx = '${OLD}' AND scan IN (${scans.map(d => `'${d}'`).join(', ')})`).run()
+    vi.resetModules()
+    const { ownerTotals: next } = await import('./ownerTotals')
+    return { next, perScan, priced, env: { ...iv, INTERVAL_STORE_GEN: 'g5' } as Env }
+  }
+
+  it('a carried row answers with no read of the store', async () => {
+    const { next, env, priced } = await carried([S1, S3])
+    const got = await next(env, S1)
+    expect([got.computed.index, got.computed.hist, got.computed.prefixes, got.computed.groups]).toEqual(['pq', undefined, 0, 0])
+    expect(fold(got)).toEqual(fold(priced[S1]))
+  })
+
+  it('a scan with no row prices itself: the totals, not missing or zero ones', async () => {
+    const { next, env, priced, perScan } = await carried([S1, S3])
+    const got = await next(env, S2)
+    expect(got.computed.prefixes).toBe(2 + others.length)
+    expect(got.computed.groups).toBeGreaterThan(0)
+    expect(fold(got)).toEqual(fold(priced[S2]))
+    expect(got.assignments.map(a => [a.prefix, a.owner, a.bytes, a.objects]).filter(([, owner]) => owner !== 'dan')).toEqual(BY_PREFIX)
+    expect(await tags(env)).toEqual([[S1, OLD], [S2, OLD], [S3, OLD], [S1, NEW], [S2, NEW], [S3, NEW]])
+    vi.resetModules()
+    const { ownerTotals: cold } = await import('./ownerTotals')
+    expect(fold(got)).toEqual(fold(await cold(perScan, S2)))
+  })
+
+  it('a carried row lacking a prefix prices that prefix alone', async () => {
+    const { next, env, priced } = await carried([S1])
+    const row = await env.DB!.prepare('SELECT body FROM owner_prefix_aggs WHERE idx = ? AND scan = ?').bind(NEW, S1).first<{ body: string }>()
+    const body = JSON.parse(row!.body) as { asked: string[]; aggs: Record<string, unknown> }
+    const lacking = body.asked.find(k => k.endsWith(':bk/m'))!
+    body.asked = body.asked.filter(k => k !== lacking)
+    delete body.aggs['bk/m']
+    await env.DB!.prepare('UPDATE owner_prefix_aggs SET body = ? WHERE idx = ? AND scan = ?').bind(JSON.stringify(body), NEW, S1).run()
+    const got = await next(env, S1)
+    expect(got.computed.prefixes).toBe(1)
+    expect(fold(got)).toEqual(fold(priced[S1]))
+  })
+})
+
 /** What a read did per-scan: the store's `listing/` keys it fetched. */
 const perScanGets = getsOf
 

@@ -60,6 +60,7 @@ from click import ParamType
 from . import heartbeat as hb
 from .cost_labels import label_batch_spec
 from .maint_runs import Recorder
+from .owner_carry import OwnerCarry
 from .scan_id import SCAN_ID
 from .static_profile import COMPACT_LEVEL, Profile, parse_compact_level
 
@@ -2172,10 +2173,12 @@ def carry_markers(store, prefix: str, old: str, into: str, files: Iterable[str] 
 
 
 def prune_predecessors(store, prefix: str, gen: str, *, now: float, grace_s: float = GRACE_S, dry_run: bool = False,
-                       log: Callable[[str], None] = err) -> list[dict]:
+                       retire: Callable[[str], int] | None = None, log: Callable[[str], None] = err) -> list[dict]:
     """Each generation `gen` was compacted from (its `compaction.json`'s `from`, and theirs while unpruned), deleted from
     `store` once its successor's `compaction.json` is `grace_s` old — but for its `successor.json` — unless the pointer
-    names it. One record per predecessor still holding files: `{gen, objects, bytes, age_s, deleted}`."""
+    names it. One record per predecessor still holding files: `{gen, objects, bytes, age_s, deleted}`. `retire` (gcs's
+    `owner_carry`): called with each generation about to go, first, so a failure leaves its files for the next prune to
+    find (`owner_rows`: what it deleted)."""
     # The chain first (a pruned generation's `compaction.json` goes with it), newest first, to the first pruned one.
     found = []
     g = gen
@@ -2193,6 +2196,8 @@ def prune_predecessors(store, prefix: str, gen: str, *, now: float, grace_s: flo
         go = age >= grace_s and old != cur
         rec = {"gen": old, "objects": len(files), "bytes": sum(files.values()), "age_s": round(age), "deleted": 0}
         if go and not dry_run:
+            if retire is not None:
+                rec["owner_rows"] = retire(old)
             rec["markers"] = carry_markers(store, prefix, old, gen, files)
             rec["deleted"] = store.delete(sorted(files))
         log(f"prune {old} (compacted into {g} {round(age)}s ago): {len(files)} objects, {rec['bytes']:,} B "
@@ -2291,7 +2296,7 @@ def store_newest_runs(store, prefix: str) -> tuple[str | None, list[dict]]:
 
 def compact_store(store, c: Compactor, gen: str, gen_dir: Path, work: Path, *, policy: Policy | int | None, why: str, threads: int = 4,
                   mem: str = "4GB", jobs: int = 1, r2: Callable[[str, str], dict] | None = None, reads: dict | None = None,
-                  promote: bool = True, rec: Recorder | None = None, log: Callable[[str], None] = err) -> dict:
+                  promote: bool = True, rec: Recorder | None = None, carry: OwnerCarry | None = None, log: Callable[[str], None] = err) -> dict:
     """Generation `gen` of `store` (a `blobstore.Store`; its files readable in `gen_dir`: a mirror or a mount) folded
     into the next one (`next_gen`, by `c.fold`) and published: an earlier, unpublished attempt's keys removed; the new
     generation's files in `c.publish_order`, `compaction.json` last; `successor.json` in `gen`; `CURRENT.json` when it
@@ -2311,7 +2316,11 @@ def compact_store(store, c: Compactor, gen: str, gen_dir: Path, work: Path, *, p
     existing candidate is replaced only by another candidate; a promoting compaction refuses it.
 
     `rec`: the run's record (`maint_runs`): phases `fold` (the interval store's then `sorts`: the fold's `progress`
-    hook moves it on), `upload`, `pointer`, `r2`, each with its note (rows, files, GiB, seconds, work-disk / RSS peaks)."""
+    hook moves it on), `upload`, `pointer`, `r2`, each with its note (rows, files, GiB, seconds, work-disk / RSS peaks).
+
+    `carry` (gcs's `owner_carry`, not a candidate's): the priced owner rows copied to the new generation's tag in the
+    `pointer` phase, after the check and before `successor.json` (a failure raises: nothing moved), and again best effort
+    once the R2 pointer has moved (`summary["owner_carry"]`)."""
     from .blobstore import upload_new
     from .maint_runs import NULL, PhaseHook, gib, phase
     from .static_local import DiskPeak, rss_peak_gb
@@ -2385,6 +2394,7 @@ def compact_store(store, c: Compactor, gen: str, gen_dir: Path, work: Path, *, p
             if key := landed():
                 ph.note = f"superseded: {key} landed on {gen} during the fold; {new} deleted, not published"
                 return superseded(key, successor=False)
+            carried = carry.copy(gen, new) if carry is not None else None
             store.write_text(f"{c.prefix}/{gen}/{SUCCESSOR}", json.dumps({"gen": new}) + "\n")
             if key := landed():
                 ph.note = f"superseded: {key} landed on {gen} during the fold; {new} and its successor record deleted, not published"
@@ -2396,6 +2406,8 @@ def compact_store(store, c: Compactor, gen: str, gen_dir: Path, work: Path, *, p
             if summary["current"]:
                 set_current(store, c.prefix, new)
             ph.note = f"{gen}/{SUCCESSOR} → {new}; " + (f"{CURRENT} → {new}" if summary["current"] else f"{CURRENT} names {was}: unchanged")
+            if carried is not None:
+                ph.note += f"; owner rows carried: {carried['changed']} of {carried['rows']}"
     else:
         summary.update(runs=comp["runs"], scans=comp["scans"], why=why, files=len(files), upload_s=up_s,
                        bytes=sum(p.stat().st_size for p in out.rglob("*") if p.is_file()), reads=reads, current=False, candidate=True)
@@ -2406,6 +2418,8 @@ def compact_store(store, c: Compactor, gen: str, gen_dir: Path, work: Path, *, p
             summary["r2"] = r2(new, gen)
             d = summary["r2"]
             ph.note = f"{d.get('copied')} of {d.get('objects')} objects copied ({gib(d.get('bytes'))}) in {d.get('s')}s; the pointer last"
+    if carry is not None and promote:
+        summary["owner_carry"] = carry.repeat(gen, new)
     summary["s"] = round(monotonic() - t0, 1)
     summary["peak"] = {"disk_gb": disk.close(), "rss_gb": rss_peak_gb()}
     log(f"compact {gen} → {new}: {summary['files']} files ({summary['bytes'] / 2**30:.2f} GiB, uploaded in {up_s}s) in {summary['s']}s "
@@ -2454,13 +2468,15 @@ def gen_scans(store, prefix: str) -> list[str]:
     return [s["id"] for s in store.read_json(f"{prefix}/scans.json")["scans"]] + run_scans(runs)
 
 
-def promote_gen(store, prefix: str, new: str, *, r2_bucket: str | None = None, log: Callable[[str], None] = err) -> dict:
+def promote_gen(store, prefix: str, new: str, *, r2_bucket: str | None = None, carry: OwnerCarry | None = None, log: Callable[[str], None] = err) -> dict:
     """Candidate `new` (`compact_store(promote=False)`) made the successor of the generation it was compacted from and,
     when `CURRENT.json` named that one (or nothing), the current generation; with `r2_bucket` (the data bucket the R2
     copy mirrors), then the R2 copy's pointers (`r2_promote`). Refused, nothing moved: `new` not a whole candidate
     (`candidate.json`, `compaction.json`), its source already compacted, `new` lacking a scan its source holds (append
     those to `new` first), or R2 lacking a file of `new`. A scan appended to the source as its successor record is
-    written: the record removed again, refused. Returns `{from, gen, current}`."""
+    written: the record removed again, refused. `carry` (gcs's `owner_carry`): its row check first, the priced owner rows
+    copied to `new`'s tag before the successor record (a failure raises: nothing moved), and again best effort once the
+    pointers have moved. Returns `{from, gen, current}`."""
     new_prefix = f"{prefix}/{new}"
     for marker, what in ((CANDIDATE, "not a candidate"), (COMPACTION, "not whole: its compaction didn't finish")):
         if not store.exists(f"{new_prefix}/{marker}"):
@@ -2469,6 +2485,8 @@ def promote_gen(store, prefix: str, new: str, *, r2_bucket: str | None = None, l
     old_prefix = f"{prefix}/{old}"
     if store.exists(f"{old_prefix}/{SUCCESSOR}"):
         raise SystemExit(f"{store.root}/{old_prefix}: already compacted into {store.read_json(f'{old_prefix}/{SUCCESSOR}')['gen']}")
+    if carry is not None:
+        carry.preflight(old)
 
     def lacking() -> list[str]:
         have = set(gen_scans(store, new_prefix))
@@ -2479,6 +2497,8 @@ def promote_gen(store, prefix: str, new: str, *, r2_bucket: str | None = None, l
                          + f"): append {'them' if len(lack) > 1 else 'it'} to {new} first")
     if r2_bucket and (bad := r2_missing(r2_objects(r2_bucket, [f"{new_prefix}/"]))):
         raise SystemExit(f"r2 {new_prefix}: {len(bad)} files not on R2 (e.g. {bad[0]}): copy the candidate there first")
+    if carry is not None:
+        carry.copy(old, new)
     store.write_text(f"{old_prefix}/{SUCCESSOR}", json.dumps({"gen": new}) + "\n")
     if lack := lacking():
         store.delete([f"{old_prefix}/{SUCCESSOR}"])
@@ -2491,6 +2511,8 @@ def promote_gen(store, prefix: str, new: str, *, r2_bucket: str | None = None, l
     if r2_bucket:
         r2_promote(r2_bucket, prefix, old, log=log)
         log(f"promote {new}: the R2 copy's pointers moved")
+    if carry is not None:
+        carry.repeat(old, new)
     return {"from": old, "gen": new, "current": moved}
 
 
@@ -2509,7 +2531,7 @@ def run_compaction(store, c: Compactor, gen: str, mount: Path, work: Path, *, le
 def compact_generation(store, c: Compactor, gen: str, mount: Path, work: Path, *, policy: Policy | int | None, force: bool = False,
                        r2_bucket: str | None = None, grace_s: float = GRACE_S, now: float | None = None, threads: int = 4, mem: str = "4GB",
                        jobs: int = 1, read_from: str = "gcs", source=None, promote: bool = True, rec: Recorder | None = None,
-                       log: Callable[[str], None] = err) -> dict:
+                       carry: OwnerCarry | None = None, log: Callable[[str], None] = err) -> dict:
     """The Batch `compact` stage (both stores): generation `gen` of `store` (the data bucket, a `blobstore.Store`)
     followed to its newest successor; when `policy` fires (or `force`, with runs), folded into the next one and published
     (`compact_store`) — GCS first, then, with `r2_bucket` (the data bucket the R2 copy mirrors), R2 (`r2_publish_gen`:
@@ -2523,10 +2545,14 @@ def compact_generation(store, c: Compactor, gen: str, mount: Path, work: Path, *
     `rec`: the run's record on `/scans` (`maint_runs`, kind `compact`): started once the generation is resolved (its
     `scan` the newest scan the generation holds: the newest the fold would fold), phases `read`, `due`, then
     `compact_store`'s, then `prune`; finished `nop` when not due, `failed` (re-raised) on any raise, else
-    `succeeded`."""
+    `succeeded`.
+
+    `carry` (gcs's `owner_carry`): checks D1 once the fold is due, before it starts; `compact_store` copies the rows, and
+    the `prune` phase deletes a retired generation's."""
     from .maint_runs import NULL, gib, phase
 
     rec = rec or NULL
+    carry = carry if promote else None
     gen = resolve_gen(store, c.prefix, gen, log)
     prefix = f"{c.prefix}/{gen}"
     _, newest_listed = store_newest_runs(store, prefix)
@@ -2552,14 +2578,17 @@ def compact_generation(store, c: Compactor, gen: str, mount: Path, work: Path, *
             log(f"compact {gen}: not due under {as_policy(policy)}")
             rec.finish("nop")
             return doc
+        if carry is not None:
+            carry.preflight(gen)
         r2 = None
         if r2_bucket:
             r2 = lambda new, old: r2_publish_gen(r2_bucket, c.prefix, new, old, last=c.last, promote=promote, log=log)  # noqa: E731
         doc["compact"] = compact_store(store, c, gen, gen_dir, work, policy=policy, why=why, threads=threads, mem=mem, jobs=jobs, r2=r2, reads=reads,
-                                       promote=promote, rec=rec, log=log)
+                                       promote=promote, rec=rec, carry=carry, log=log)
         if c.prune and promote and not doc["compact"].get("superseded"):
             with phase(rec, "prune") as ph:
-                doc["predecessors"] = prune_predecessors(store, c.prefix, doc["compact"]["gen"], now=time.time() if now is None else now, grace_s=grace_s, log=log)
+                doc["predecessors"] = prune_predecessors(store, c.prefix, doc["compact"]["gen"], now=time.time() if now is None else now, grace_s=grace_s,
+                                                           retire=carry.retire if carry is not None else None, log=log)
                 ph.note = "; ".join(f"{p['gen']}: {p['objects']} objects, {gib(p['bytes'])} " + ("deleted" if p["deleted"] else f"kept ({round(p['age_s'] / 3600)}h old)")
                                     for p in doc["predecessors"]) or "no predecessor holds files"
     except BaseException as e:
