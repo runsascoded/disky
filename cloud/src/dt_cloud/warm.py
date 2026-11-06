@@ -42,6 +42,10 @@ UA = "gcs-usage-warm/1.0"
 #: Refetches after a transport error before a request fails: a body cut short of its Content-Length (the site's Worker
 #: cut off mid-response) or a dropped connection (cw's 10-23T1801 warm-up: 989/990, one `RemoteDisconnected`).
 TRANSPORT_RETRIES = 2
+#: Refetches after a 5xx, `SERVER_RETRY_S · 2^n` apart: a cold `/api/series?split=roots` under the warm-up's own
+#: concurrency answered 503 after 40–47 s on three of cw's scans (11-03, 11-04), and 200 in 8 s alone.
+SERVER_RETRIES = 2
+SERVER_RETRY_S = 15.0
 
 
 def env_paths() -> tuple[str, ...] | None:
@@ -131,7 +135,8 @@ def warm(url: str, headers: dict[str, str], paths: list[str], jobs: int = 4, tim
     def one(path: str) -> tuple[str, int, float, str]:
         req = urllib.request.Request(url.rstrip("/") + path, headers={**headers, "User-Agent": UA})
         t0 = time.time()
-        for _ in range(TRANSPORT_RETRIES + 1):
+        transport_tries = server_tries = 0
+        while True:
             try:
                 with urllib.request.urlopen(req, timeout=timeout) as r:
                     r.read()
@@ -139,9 +144,17 @@ def warm(url: str, headers: dict[str, str], paths: list[str], jobs: int = 4, tim
                 break
             except urllib.error.HTTPError as e:
                 status, tier = e.code, ""
-                break
+                if status < 500 or server_tries == SERVER_RETRIES:
+                    break
+                body = e.read(200).decode("utf-8", "replace").replace("\n", " ")
+                print(f"warm: {status} {time.time() - t0:5.1f}s again {path}: {body}", file=sys.stderr)
+                time.sleep(SERVER_RETRY_S * 2 ** server_tries)
+                server_tries += 1
             except (HTTPException, OSError) as e:  # `IncompleteRead`, `RemoteDisconnected`, resets, `URLError`, timeouts
                 status, tier = 0, type(e).__name__
+                if transport_tries == TRANSPORT_RETRIES:
+                    break
+                transport_tries += 1
             except Exception as e:  # noqa: BLE001 — a warm-up must never fail the job; the miss is just cold for the first viewer
                 status, tier = 0, type(e).__name__
                 break

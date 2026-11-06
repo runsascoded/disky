@@ -3,8 +3,9 @@ import re
 from http.client import IncompleteRead, RemoteDisconnected
 from pathlib import Path
 
-from dt_cloud import warm as W
 import pytest
+
+from dt_cloud import warm as W
 
 DATES = [f"2026-08-{d:02d}" for d in range(10, 32)] + [f"2026-09-{d:02d}" for d in range(1, 16)]
 
@@ -205,3 +206,45 @@ def test_warm_refetches_after_a_transport_error(monkeypatch, error):
     res = W.warm("https://x.test", {}, ["/once", "/always"], jobs=1)
     assert [(p, s, tier) for p, s, _, tier in res] == [("/once", 200, "miss"), ("/always", 0, type(error()).__name__)]
     assert queue == {"/once": [], "/always": []}
+
+
+def test_warm_refetches_after_a_server_error(monkeypatch, capsys):
+    """A 5xx is fetched again after a backoff, its body logged (cw's cold `/api/series?split=roots`); one that recurs every
+    time fails with its status; a 4xx is a definite answer, never refetched."""
+    import io
+    from email.message import Message
+
+    class Whole(io.BytesIO):
+        status = 200
+        headers = {"x-cache": "miss"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def http(code):
+        return W.urllib.error.HTTPError("https://x.test", code, "no", Message(), io.BytesIO(b"busy\n"))
+
+    queue = {
+        "/once": [http(503), Whole(b"{}")],
+        "/always": [http(503) for _ in range(W.SERVER_RETRIES + 1)],
+        "/refused": [http(409)],
+    }
+
+    def urlopen(req, timeout):
+        got = queue[req.full_url.removeprefix("https://x.test")].pop(0)
+        if isinstance(got, Exception):
+            raise got
+        return got
+
+    monkeypatch.setattr(W.urllib.request, "urlopen", urlopen)
+    sleeps: list[float] = []
+    monkeypatch.setattr(W.time, "sleep", sleeps.append)
+    res = W.warm("https://x.test", {}, ["/once", "/always", "/refused"], jobs=1)
+    assert [(p, s, tier) for p, s, _, tier in res] == [("/once", 200, "miss"), ("/always", 503, ""), ("/refused", 409, "")]
+    assert sleeps == [W.SERVER_RETRY_S, W.SERVER_RETRY_S, 2 * W.SERVER_RETRY_S]
+    assert queue == {"/once": [], "/always": [], "/refused": []}
+    again = [re.sub(r" +[\d.]+s", " <t>", line) for line in capsys.readouterr().err.splitlines() if " again " in line]
+    assert again == ["warm: 503 <t> again /once: busy ", "warm: 503 <t> again /always: busy ", "warm: 503 <t> again /always: busy "]
