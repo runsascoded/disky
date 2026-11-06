@@ -2744,6 +2744,9 @@ export async function buildDiff(env0: Env, o: DiffOpts): Promise<Diff> {
   // row for every path with anything at or under it), so nothing under such a path has a row there either: a lookup
   // of it could only answer "none", and none is made (`free`). Only a read that found no row says so — a name under
   // the floor, outside the filter or scoped to no bytes is not known absent, and what is under it is still read.
+  // Read by `free` alone, in a round. A read the walk's timer stops (`stop`, `lookupsOff`) returns short of rows and
+  // may add paths here it never read, but no round follows it: the timer sets `late` with `lookupsOff`, its round's
+  // answers are dropped (`none`), and the next finds no room (`walkOver`).
   const gone = [new Set<string>(), new Set<string>()] as const
   type SideNo = 1 | 2
   const sideOf = (side: SideNo) => (side === 1 ? { v: va!, date: from } : { v: vb!, date: to })
@@ -2825,8 +2828,9 @@ export async function buildDiff(env0: Env, o: DiffOpts): Promise<Diff> {
       if (l) l.push(q)
       else byDepth.set(q.d, [q])
     }
+    // `Server-Timing`: `bydepth` counts the depths read in place of a round's one read, `perask` the names read singly.
     for (const part of byDepth.values()) {
-      if (byDepth.size > 1 && await batch(part)) continue
+      if (byDepth.size > 1 && await batch(part)) { tr?.('bydepth', 1); continue }
       tr?.('perask', part.length)
       await perAsk(part)
     }
