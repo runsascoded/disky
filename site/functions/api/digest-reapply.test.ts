@@ -1,9 +1,10 @@
 // `/api/digest-reapply` (specs/digest-runway-marks.md §4): what a request may name, the digest CLI arguments it
 // becomes, and the Batch task's script.
 import { describe, expect, it } from 'vitest'
-import { parseReapply, reapplyArgs, reapplyScript } from './digest-reapply'
+import { parseReapply, reapplyArgs, reapplyConfig, type ReapplyConfig, reapplyScript } from './digest-reapply'
 
 const base = { month: '2026-11', target: 'op', dry_run: true }
+const CONFIG: ReapplyConfig = { template: 'demo', config: 'job/digest.yml', root: 'snapshots/demo', env_script: 'job/demo-env.sh', r2_bucket: 'demo-index', secrets: { SITE_TOKEN: 'demo-grant' } }
 
 describe('/api/digest-reapply', () => {
   it('reads a target of the month, a channel (default the deployment’s) and candidate settings', () => {
@@ -39,6 +40,18 @@ describe('/api/digest-reapply', () => {
     ])
   })
 
+  it('takes its deployment’s names from `DIGEST_REAPPLY`, or says what’s missing', () => {
+    expect([
+      reapplyConfig(JSON.stringify(CONFIG)),
+      reapplyConfig(undefined),
+      reapplyConfig('nope'),
+      reapplyConfig(JSON.stringify({ ...CONFIG, template: 'a b' })),
+      reapplyConfig(JSON.stringify({ ...CONFIG, env_script: "x'; rm -rf /" })),
+      reapplyConfig(JSON.stringify({ ...CONFIG, secrets: { lower: 'x' } })),
+      reapplyConfig(JSON.stringify({ ...CONFIG, secrets: undefined })),
+    ]).toEqual([CONFIG, 'DIGEST_REAPPLY', 'DIGEST_REAPPLY: not JSON', 'DIGEST_REAPPLY.template', 'DIGEST_REAPPLY.env_script', 'DIGEST_REAPPLY.secrets', 'DIGEST_REAPPLY.secrets'])
+  })
+
   it('becomes the digest CLI’s selectors', () => {
     const r = (o: object) => reapplyArgs({ month: '2026-11', channel: 'C1', target: 'op', dry_run: false, params: null, quota_marks: null, ...o })
     expect([
@@ -55,14 +68,14 @@ describe('/api/digest-reapply', () => {
   })
 
   it('runs the CLI in the scan steps’ environment, its output teed to the run’s file', () => {
-    expect(reapplyScript(['-m', '2026-11', '-c', 'C1', '-o', '-p', ''], '/gcs/data/digest/reapply/cw-digest-20261103-120000z.txt').split('\n')).toEqual([
+    expect(reapplyScript(['-m', '2026-11', '-c', 'C1', '-o', '-p', ''], '/gcs/data/digest/reapply/demo-digest-20261103-120000z.txt', CONFIG).split('\n')).toEqual([
       'set -euo pipefail',
       'cd "${APP_DIR:-/app}"',
-      '. job/cw-env.sh',
+      ". 'job/demo-env.sh'",
       '{ set +x; } 2>/dev/null',
-      "OUT='/gcs/data/digest/reapply/cw-digest-20261103-120000z.txt'",
+      "OUT='/gcs/data/digest/reapply/demo-digest-20261103-120000z.txt'",
       'mkdir -p "$(dirname "$OUT")"',
-      `dt-cloud digest -T cw -C job/digest.yml -r "gs://$DATA_BUCKET/snapshots/cw" '-m' '2026-11' '-c' 'C1' '-o' '-p' '' 2>&1 | tee "$OUT"`,
+      `dt-cloud digest -T 'demo' -C 'job/digest.yml' -r "gs://$DATA_BUCKET/"'snapshots/demo' '-m' '2026-11' '-c' 'C1' '-o' '-p' '' 2>&1 | tee "$OUT"`,
     ])
   })
 })

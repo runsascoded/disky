@@ -4,7 +4,7 @@ Disky works out of the box on an S3-compatible store whose buckets keep deleted 
 
 ## Why it stays off on cw
 
-Versioning is bucket-wide. On 2026-09-15 it was enabled on `marin-us-east-02a`, and within about 16 h it retained about 30 TiB of deleted `tmp/ttl=*` files as noncurrent versions, which pushed the bucket to its quota (`specs/cw-sweep.md`, current policy of 2026-10-20). Any store that enables it needs a `NoncurrentVersionExpiration` rule first.
+Versioning is bucket-wide. On 2026-09-15 it was enabled on `marin-us-east-02a`, and within about 16 h the deleted `tmp/ttl=*` files it retained as noncurrent versions pushed the bucket to its quota (`specs/cw-sweep.md`, current policy of 2026-10-20). Any store that enables it needs a `NoncurrentVersionExpiration` rule first.
 
 ## What "retention" means on S3
 
