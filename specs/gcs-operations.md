@@ -82,7 +82,7 @@ After verify + retire, each run and the CURRENT move on Ryan's go:
 
 The data bucket's "dvx" name is wrong; the target is `oa-gcs-usage-data`, named like cw's / hf's / r2's. GCS can't rename a bucket, so:
 
-1. Create the new bucket in `infra/gcp` (same location `US-EAST1`, soft-delete and lifecycle rules, `deployment`/`component` labels), the job SA's IAM on it. Note the old bucket is labelled `deployment: shared` (cw's `cw-l2/` and static names lived there before cw's 10/13 isolation): confirm nothing of cw's still reads it.
+1. Create the new bucket in `infra/gcp` (same location `US-EAST1`, soft-delete and lifecycle rules, `deployment`/`component` labels), the job SA's IAM on it. The old bucket was labelled `deployment: shared` while cw's `cw-l2/` and static names lived there; since cw's 10/13 isolation no cw job names it (Batch history) and only gcs's accounts hold grants on it, so the stack labels it `gcs`.
 2. Copy (Storage Transfer or `gcloud storage rsync`), then verify object counts and bytes per prefix.
 3. Repoint, in one change: `job/profiles/gcs.yml` + `gcs-meta.yml` (`work`, `data`, the meta store's source and the retire step's stores), `job/static-names.json`, `job/interval-store.json`, `job/batch-submit.sh` / `job/access-submit.sh` (`DATA_BUCKET`, the FUSE mounts), `site/wrangler.toml` (`STORE_BUCKET`, `STORES_JSON`), the Nextflow work dir (`gs://…/nf`, its resume cache stays behind: an in-flight scan can't resume across the move), the HMAC key's bucket access, and the Scheduler bodies via `pulumi up`.
 4. Run one scan end to end on the new bucket, then the site against it (dev, then prod).

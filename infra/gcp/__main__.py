@@ -210,8 +210,9 @@ gcp.storage.Bucket(
     location="US-EAST1",
     storage_class="STANDARD",
     uniform_bucket_level_access=True,
-    # shared with cw-s3 (its `cw-l2/`, static names): no one deployment's
-    labels={"deployment": "shared", "component": "data"},
+    # gcs's alone, so the stack's own `deployment` (the provider's default labels): cw's `cw-l2/` and static
+    # names left for its own bucket at its isolation (2026-10-13), and only gcs's accounts hold grants here
+    labels={"component": "data"},
     # Soft delete off (2026-10-25): `retire` deletes each old scan's sorts and listings daily, and a 7-day
     # window billed them all twice. Everything here is rebuildable from the scans; deletes are final.
     soft_delete_policy=gcp.storage.BucketSoftDeletePolicyArgs(retention_duration_seconds=0),
@@ -244,7 +245,7 @@ scratch = gcp.storage.Bucket(
     location="US-EAST1",
     storage_class="STANDARD",
     uniform_bucket_level_access=True,
-    labels={"deployment": "shared", "component": "scratch"},
+    labels={"component": "scratch"},
     soft_delete_policy=gcp.storage.BucketSoftDeletePolicyArgs(retention_duration_seconds=0),
     lifecycle_rules=[
         gcp.storage.BucketLifecycleRuleArgs(
@@ -268,7 +269,7 @@ backups = gcp.storage.Bucket(
     storage_class="STANDARD",
     uniform_bucket_level_access=True,
     public_access_prevention="enforced",
-    labels={"deployment": "shared", "component": "backups"},
+    labels={"component": "backups"},
     soft_delete_policy=gcp.storage.BucketSoftDeletePolicyArgs(retention_duration_seconds=604800),
     opts=pulumi.ResourceOptions(protect=True),
 )

@@ -114,7 +114,8 @@ options:
   access-ingest: {poller: true}
   # the Nextflow task's cwd isn't the image's `/app`, so the relative default missed it (2026-10-22: exit 2)
   cf-usage: {config: /app/site/wrangler.toml}
-  # the deployment's own buckets (labeled `deployment=shared`, so named here) and its Batch jobs (`$DISKY_LABELS`)
+  # the deployment's own buckets (named here: they carried `deployment=shared` until the stack's `up` relabels them
+  # `gcs`, and a name holds either way) and its Batch jobs (`$DISKY_LABELS`)
   gcp-cost: {buckets: [oa-gcs-usage-dvx, oa-gcs-usage-scratch, oa-gcs-usage-backups]}
   # after each scan, the per-scan files the interval store + static index hold (specs/lean-scans.md §2) and the raw
   # listing shards (`layer1`, once the store's `generation` matches them), retired for real since the hand-run retires
