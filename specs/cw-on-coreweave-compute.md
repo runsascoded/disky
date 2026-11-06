@@ -34,17 +34,16 @@ List `marin-us-east-02a` from an Iris job, beside the same hour's cron listing, 
 - The head submits to Iris and polls (`iris job run --no-wait`), since Nextflow has no Iris executor. Nextflow's `k8s` executor would need its own namespace and RBAC on Marin's cluster, outside Iris and Kueue.
 - Listing shards go to the data bucket as today. Steps that read GCS stay on GCP unless the data bucket moves too, which is a much larger change, and Marin's rule is no reading GCS data from CoreWeave without approval.
 
-## Access needed
+## Access
 
-From Rafal Wojdyla or Russell Power, via #marin-eng:
+Ryan's OA identity already has what phase 1 needs, checked 2026-11-06: `roles/owner` and `marindev` on `hai-gcp-models`, and `iris.oa.dev` opens with an Iris user `ryan`, role `admin`. Submitting a job hasn't been tried.
 
-1. **Marin Dev role** in GCP project `hai-gcp-models`, and **Iris IAP access** to `iris.oa.dev`, for Ryan's OA identity. `cw-us-east-02a` already admits OA addresses as submitters.
-2. **OK to run a recurring job:** low priority, CPU only, about 4 times a day, each under an hour on 32 CPUs, to be sized by phase 1.
-3. **A service identity that can submit,** for the cron. `allowed_submitters` has service-account entries.
-4. **Which CAIOS key:** the scan's existing one, forwarded into the task, or a separate one.
-5. **Anything already known** about LIST through LOTA, and egress from CoreWeave to GCS.
+To settle with Rafal Wojdyla or Russell Power, via #marin-eng:
 
-Phase 1 by hand needs only 1 and 4.
+1. **Which CAIOS key the task uses:** the scan's existing one, forwarded into the task, or a separate one.
+2. **OK to run a recurring job:** low priority, CPU only, about 4 times a day, each under an hour on 32 CPUs, to be sized by phase 1. Phase 1 itself is one job, and being an admin doesn't make Marin's nodes ours to load unannounced.
+3. **A service identity that can submit,** for the cron, if phase 2 happens. `allowed_submitters` has service-account entries.
+4. **Anything already known** about LIST through LOTA, and egress from CoreWeave to GCS.
 
 ## Open
 
