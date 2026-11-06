@@ -3,7 +3,7 @@ import type { D1Database } from '@cloudflare/workers-types'
 import type { Env } from '../_lib/auth'
 import { sqliteD1 } from '../_lib/testD1'
 import { CACHE_V } from '../_lib/edgeCache'
-import { FILTER_VIEW_V, SCOPED_V, WALK_V } from '../_lib/view'
+import {FILTER_VIEW_V, SCOPED_V} from '../_lib/view'
 
 // The scoped read's answer version (`SCOPED_V`, `&sv=`) is in a view's and a diff's edge-cache key only where the
 // answer is a `scopedRead`: an owner pool or a class scope over the interval store (and a filter under a lens). Every
@@ -95,11 +95,11 @@ describe('/api/diff', () => {
   const D = '/api/diff?from=2026-09-01&to=2026-10-01&path=marin-a'
   /** The key before `SCOPED_V`, by its parts that vary here. */
   const key = (o: { l?: string; o?: string; cl?: string; q?: string; head?: number; s?: 1 }) =>
-    `https://diff.cache/v${CACHE_V}/2026-09-01/2026-10-01/marin-a?w=1280&h=896&a=12&t=2&n=500&l=${o.l ?? ''}&o=${o.o ?? ''}&cl=${o.cl ?? ''}&qs=${o.q ? 'simple' : ''}&q=${o.q ?? ''}&head=${o.head ?? 0}&s=${o.s ?? 0}&D=&g=g1&st=${o.q ? `&fv=${FILTER_VIEW_V}` : ''}${o.s ? '' : `&wv=${WALK_V}`}`
+    `https://diff.cache/v${CACHE_V}/2026-09-01/2026-10-01/marin-a?w=1280&h=896&a=12&t=2&n=500&l=${o.l ?? ''}&o=${o.o ?? ''}&cl=${o.cl ?? ''}&qs=${o.q ? 'simple' : ''}&q=${o.q ?? ''}&head=${o.head ?? 0}&s=${o.s ?? 0}&D=&g=g1&st=${o.q ? `&fv=${FILTER_VIEW_V}` : ''}${o.s ? '' : ``}`
 
   it('the plain diff: its key as it was', async () => {
     expect(await asked(diff, await intervals(), D, [''])).toEqual([
-      `https://diff.cache/v${CACHE_V}/2026-09-01/2026-10-01/marin-a?w=1280&h=896&a=12&t=2&n=500&l=&o=&cl=&qs=&q=&head=0&s=0&D=&g=g1&st=&wv=${WALK_V}`,
+      `https://diff.cache/v${CACHE_V}/2026-09-01/2026-10-01/marin-a?w=1280&h=896&a=12&t=2&n=500&l=&o=&cl=&qs=&q=&head=0&s=0&D=&g=g1&st=`,
     ])
   })
   it('an owner pool, a class scope, both, a scoped summary: the version, after the key as it was', async () => {
