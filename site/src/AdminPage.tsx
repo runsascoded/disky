@@ -4,6 +4,7 @@ import { AvatarField } from '@open-athena/auth/react'
 import { Loading } from './Busy'
 import { Link, useSearchParams } from 'react-router-dom'
 import { SiteNav } from './SiteNav'
+import { CAPS } from './plans'
 import { DEFAULT_STORE, STORES } from './stores'
 import { hideScopes } from './hideScopes'
 import { useDocTitle } from './title'
@@ -639,7 +640,7 @@ export function AdminPage() {
       <PreviewLinks />
       <ActivityKinds />
       <SessionLogSwitch />
-      {DEFAULT_STORE.executor === 'sweep' && <SweepSoftDelete />}
+      {CAPS.softDelete && <SweepSoftDelete />}
     </main>
   )
 }

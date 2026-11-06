@@ -234,7 +234,7 @@ async function prepare(env: ExecEnv, db: D1Database, req: DispatchReq): Promise<
   ].filter(i => buckets.includes(bucketOf(i.key, shape.buckets))))
 
   // The one read: what this checks is what the job's `-s` says.
-  const minDays = await minSoftDeleteDays(db)
+  const minDays = await minSoftDeleteDays(db, 'sweep')
   if (req.mode === 'real') {
     const shown = req.shownMinSoftDeleteDays ?? DEFAULT_MIN_SOFT_DELETE_DAYS
     const weaker = weakerThanShown(minDays, shown)

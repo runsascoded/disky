@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
 import { DEFAULT_STORE } from './stores'
-import { type BucketSoftDelete, confirmUndoTerms, DEFAULT_MIN_SOFT_DELETE_DAYS, MAX_MIN_SOFT_DELETE_DAYS, minimumWarning, SWEEP_SETTINGS_KEY as KEY } from './softDelete'
+import { type BucketSoftDelete, confirmUndoTerms, DEFAULT_MIN_SOFT_DELETE_DAYS, defaultMinSoftDeleteDays, MAX_MIN_SOFT_DELETE_DAYS, minimumWarning, SWEEP_SETTINGS_KEY as KEY } from './softDelete'
 
 // `/admin`'s sweep soft-delete minimum (`functions/_lib/sweepSettings.ts`): the narrowest retention a real run accepts, read at
 // dispatch; what each bucket has is the job's newest reading (`/api/sweep/soft-delete`, the scan step `soft-delete`), as old
@@ -77,12 +77,14 @@ export interface SweepSoftDeleteViewProps {
   buckets: BucketSoftDelete | null | undefined
   /** The buckets a sweep acts on (the store's): each gets a row, `unknown` where no reading names it. */
   swept: readonly string[]
+  /** The executor's minimum with no row. */
+  defaultMin?: number
   busy: boolean
   error: string | null
 }
 
 /** The editor, as markup (pure: `SweepSoftDelete` wires it to the API). */
-export function SweepSoftDeleteView({ answer, draft, onDraft, understood, onUnderstood, onSave, buckets, swept, busy, error }: SweepSoftDeleteViewProps) {
+export function SweepSoftDeleteView({ answer, draft, onDraft, understood, onUnderstood, onSave, buckets, swept, defaultMin = DEFAULT_MIN_SOFT_DELETE_DAYS, busy, error }: SweepSoftDeleteViewProps) {
   const n = Number(draft)
   const valid = draft.trim() !== '' && Number.isInteger(n) && n >= 0 && n <= MAX_MIN_SOFT_DELETE_DAYS
   const warning = valid ? minimumWarning(n) : null
@@ -93,7 +95,8 @@ export function SweepSoftDeleteView({ answer, draft, onDraft, understood, onUnde
       <p>
         A real sweep refuses any bucket retaining soft deletes for less than this many days. Undo restores from soft delete, so
         this is the shortest undo a run can have. A run reads it when dispatched, keeps that value to its end, and records it
-        (with what its buckets actually had) on its page; changing it here doesn't touch a run in progress.
+        (with what its buckets actually had) on its page; changing it here doesn't touch a run in progress. On an S3-style store,
+        soft delete means versioning with a noncurrent-version rule.
       </p>
       <p className="status">{minimumStatus(answer)}</p>
       {warning && <p className="warn" role="alert">{warning}</p>}
@@ -109,7 +112,7 @@ export function SweepSoftDeleteView({ answer, draft, onDraft, understood, onUnde
           </label>
         )}
         <button type="submit" disabled={busy || !changed || (!!warning && !understood)}>Save</button>
-        <span className="dim">default {DEFAULT_MIN_SOFT_DELETE_DAYS}; 0..{MAX_MIN_SOFT_DELETE_DAYS}</span>
+        <span className="dim">default {defaultMin}; 0..{MAX_MIN_SOFT_DELETE_DAYS}</span>
       </form>
       {error && <p className="error" role="alert">{error}</p>}
       {swept.length > 0 && (
@@ -142,7 +145,7 @@ export function UndoTerms({ buckets, min }: { buckets: readonly string[]; min: R
   return <p className={/^(Recoverable|Checking)/.test(text) ? 'dispatch-path' : 'dispatch-path staged-err'} role="note">{text}</p>
 }
 
-/** `/admin`'s section: only on the `sweep` executor, the one with a soft-delete guard. */
+/** `/admin`'s section. */
 export function SweepSoftDelete() {
   const qc = useQueryClient()
   const q = useSweepSettings()
@@ -176,6 +179,7 @@ export function SweepSoftDelete() {
       onSave={() => save.mutate(Number(draft))}
       buckets={buckets.data}
       swept={DEFAULT_STORE.buckets}
+      defaultMin={defaultMinSoftDeleteDays(DEFAULT_STORE.executor)}
       busy={save.isPending}
       error={save.error?.message ?? null}
     />

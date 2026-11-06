@@ -24,6 +24,31 @@ it.each([
   expect(raw.prepare('SELECT finished_ts,plan_digest FROM deletion_runs').all()).toEqual([{ finished_ts: finished, plan_digest: digest }])
 })
 
+describe('what a real run retained', () => {
+  const FINISHED = 200
+  it.each([
+    ['a bucket that retained nothing', 0, 1, 0, null, 'none'],
+    ['retained N days', 3, 1, 3, FINISHED + 3 * 86400, 'pending'],
+    ['kept until purged', 36500, 1, 36500, null, 'pending'],
+    ['retention unreadable', null, 1, null, null, 'none'],
+    ['deleted nothing', 3, 0, 3, FINISHED + 3 * 86400, 'none'],
+  ] as const)('%s', async (_, measured, deleted, days, deadline, purge) => {
+    const { db, raw } = await sqliteD1()
+    raw.exec(`INSERT INTO plans (id,name,created_by,created_ts) VALUES (1,'review','actor',1);
+      INSERT INTO deletion_runs (run_id,plan_id,${RUN_DIR},scan,head,exec_head,actor,mode,started_ts,log_dir,plan_digest)
+      VALUES ('cw-sweep-real-test',1,'manifest','scan',0,0,'actor','real',100,'logs','review')`)
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+      mode: 'real', bucket: 'b', deleted_objects: deleted, deleted_bytes: 10, skipped_gone: 0, skipped_overwritten: 0, drift_new: 0, delete_failed: 0,
+      finished_ts: FINISHED, bands: [], min_soft_delete_days: 0, soft_delete_days: measured,
+    }))))
+    const jobs: BatchJob[] = [{ name: 'projects/p/locations/r/jobs/cw-sweep-real-test', uid: 'uid', createTime: '2026-10-21T00:00:00Z', status: { state: 'SUCCEEDED' } }]
+    await reflectRuns({ dataBucket: 'data' } as BatchConfig, db, 'token', jobs, 'b')
+    expect(raw.prepare('SELECT min_soft_delete_days, soft_delete_days, undo_deadline, purge_state FROM deletion_runs').all()).toEqual([
+      { min_soft_delete_days: 0, soft_delete_days: days, undo_deadline: deadline, purge_state: purge },
+    ])
+  })
+})
+
 describe('undo_state', () => {
   const RUN = 'cw-sweep-real-test'
   const CREATED = '2026-11-05T00:00:00Z'

@@ -171,6 +171,11 @@ class _FakeStore:
     def get_bucket_versioning(self, Bucket: str) -> dict:  # noqa: N803
         return {"Status": self._versioning} if self._versioning else {}
 
+    def get_bucket_lifecycle_configuration(self, Bucket: str) -> dict:  # noqa: N803
+        from botocore.exceptions import ClientError
+
+        raise ClientError({"Error": {"Code": "NoSuchLifecycleConfiguration", "Message": "none"}}, "GetBucketLifecycleConfiguration")
+
     def list_objects_v2(self, Bucket: str, Prefix: str = "", ContinuationToken: str | None = None) -> dict:  # noqa: N803
         keys = sorted(k for k in self.objects if k.startswith(Prefix))
         start = int(ContinuationToken) if ContinuationToken else 0
@@ -348,6 +353,9 @@ class _FakeVersionedStore:
     def get_bucket_versioning(self, Bucket: str) -> dict:  # noqa: N803
         return {"Status": "Enabled"}
 
+    def get_bucket_lifecycle_configuration(self, Bucket: str) -> dict:  # noqa: N803
+        return {"Rules": []}
+
     def _live(self, key: str) -> dict | None:
         vs = self.versions.get(key)
         if vs and not vs[-1]["dm"]:
@@ -514,23 +522,64 @@ def test_undo_dry_run_touches_nothing(tmp_path: Path) -> None:
     assert store.versions["marin/ckpt/a"] == before  # unchanged
 
 
+class _NoVersioningPermission(_FakeStore):
+    def get_bucket_versioning(self, Bucket: str) -> dict:  # noqa: N803
+        from botocore.exceptions import ClientError
+
+        raise ClientError({"Error": {"Code": "AccessDenied", "Message": "no"}}, "GetBucketVersioning")
+
+
+class _Retaining(_FakeStore):
+    """Versioning `Enabled`, with a noncurrent rule of `days` (None: no lifecycle configuration)."""
+
+    def __init__(self, objects: dict, days: int | None) -> None:
+        super().__init__(objects)
+        self.days = days
+
+    def get_bucket_lifecycle_configuration(self, Bucket: str) -> dict:  # noqa: N803
+        from botocore.exceptions import ClientError
+
+        if self.days is None:
+            raise ClientError({"Error": {"Code": "NoSuchLifecycleConfiguration", "Message": "none"}}, "GetBucketLifecycleConfiguration")
+        return {"Rules": [{"Status": "Enabled", "NoncurrentVersionExpiration": {"NoncurrentDays": self.days}}]}
+
+
+@pytest.mark.parametrize(("store", "minimum", "error"), [
+    (_FakeStore(_LIVE, versioning=None), 1, f"not deleting: {BUCKET} retains deleted data for 0 days, and this deployment requires at least 1"),
+    (_Retaining(_LIVE, 3), 7, f"not deleting: {BUCKET} retains deleted data for 3 days, and this deployment requires at least 7"),
+    (_NoVersioningPermission(_LIVE), 1, f"not deleting: can't read {BUCKET}'s retention, and this deployment requires at least 1 days (An error occurred (AccessDenied) when calling the GetBucketVersioning operation: no)"),
+])
+def test_real_run_refuses_a_bucket_retaining_less_than_the_minimum(tmp_path: Path, store: _FakeStore, minimum: int, error: str) -> None:
+    run = _run_with_manifest(tmp_path)
+    with pytest.raises(SweepError) as e:
+        execute_plan(str(run), for_real=True, client=store, min_soft_delete_days=minimum)
+    assert (str(e.value), store.objects, store.delete_calls) == (error, _LIVE, 0)
+
+
+@pytest.mark.parametrize(("store", "minimum", "days"), [
+    (_FakeStore(_LIVE, versioning=None), 0, 0),
+    (_Retaining(_LIVE, 3), 3, 3),
+    (_Retaining(_LIVE, None), 90, 36500),
+])
+def test_real_run_records_the_minimum_and_what_the_bucket_retains(tmp_path: Path, store: _FakeStore, minimum: int, days: int) -> None:
+    run = _run_with_manifest(tmp_path)
+    s = execute_plan(str(run), for_real=True, client=store, min_soft_delete_days=minimum)
+    assert (s["min_soft_delete_days"], s["soft_delete_days"], s["deleted_objects"]) == (minimum, days, _COUNTS["deleted_objects"])
+
+
 def test_execute_cli_needs_no_versioning_permission(tmp_path: Path, monkeypatch) -> None:
     from click.testing import CliRunner
 
     from dt_cloud.cli import main
 
-    class NoVersioningPermission(_FakeStore):
-        def get_bucket_versioning(self, Bucket: str) -> dict:  # noqa: N803
-            raise AssertionError("execution must not query bucket versioning")
-
     run = _run_with_manifest(tmp_path)
-    store = NoVersioningPermission(_LIVE)
+    store = _NoVersioningPermission(_LIVE)
     monkeypatch.setattr("dt_cloud.sweep.s3_client", lambda: store)
     result = CliRunner().invoke(main, ["plan-sweep", "execute", "--for-real", str(run)])
     assert result.exit_code == 0, result.output
     summary = json.loads(result.stdout)
     assert {k: summary[k] for k in _COUNTS} == _COUNTS
-    assert (summary["mode"], summary["versioning_guard"]) == ("real", False)
+    assert (summary["mode"], summary["versioning_guard"], summary["min_soft_delete_days"], summary["soft_delete_days"]) == ("real", False, 0, None)
     assert json.loads((run / "deleted-summary.json").read_text()) == summary
     assert store.objects == {k: v for k, v in _LIVE.items() if k != "marin/ckpt/a"}
 

@@ -11,8 +11,8 @@ import type { D1Database } from "@cloudflare/workers-types"
 import type { BatchConfig } from "./batchConfig.js"
 import { batchJobsUrl } from "./gcp.js"
 import type { FinishedRun } from "./plans.js"
+import { NO_EXPIRY_DAYS } from "../../src/softDelete.js"
 
-export const HOLD_SECS = 7 * 24 * 3600 // undo window before purge (cw's own hold; a gcs run records what its buckets retain)
 export const TERMINAL = new Set(["SUCCEEDED", "FAILED", "CANCELLED"])
 
 export interface BatchJob {
@@ -33,6 +33,9 @@ export interface RunSummary {
   skipped_overwritten: number
   drift_new: number
   delete_failed: number
+  /** What `plan-sweep execute` required, and measured on its bucket (null: unreadable). Absent: a job from before they were recorded. */
+  min_soft_delete_days?: number
+  soft_delete_days?: number | null
   preserved_breakdown?: { new_since_review: number; changed_since_review: number; new_since_scan: number; unclassified: number }
   finished_ts: number
   bands: { prefix: string; bytes: number; objects: number; gone: number; overwritten: number; drift_new: number }[]
@@ -76,16 +79,19 @@ async function settleUndo(cfg: BatchConfig, db: D1Database, token: string, j: Ba
 
 async function reflect(db: D1Database, jobId: string, mode: string, s: RunSummary, primary: string): Promise<void> {
   const real = mode === "real"
-  const undoDeadline = real ? s.finished_ts + HOLD_SECS : null
-  const purgeState = real && s.deleted_objects > 0 ? "pending" : "none"
+  // A bucket that retained nothing has no undo and nothing to purge; one that keeps deleted data until purged has no deadline.
+  const days = real ? s.soft_delete_days ?? 0 : 0
+  const undoDeadline = days > 0 && days < NO_EXPIRY_DAYS ? s.finished_ts + days * 86400 : null
+  const purgeState = days > 0 && s.deleted_objects > 0 ? "pending" : "none"
   await db.prepare(`
     UPDATE deletion_runs SET
       finished_ts = ?, deleted_bytes = ?, deleted_objects = ?, skipped_gone = ?,
-      skipped_overwritten = ?, drift_dirs = ?, undo_deadline = ?, purge_state = ?
+      skipped_overwritten = ?, drift_dirs = ?, undo_deadline = ?, purge_state = ?,
+      min_soft_delete_days = COALESCE(?, min_soft_delete_days), soft_delete_days = ?
     WHERE run_id = ? AND finished_ts IS NULL
   `).bind(
     s.finished_ts, s.deleted_bytes, s.deleted_objects, s.skipped_gone,
-    s.skipped_overwritten, s.drift_new, undoDeadline, purgeState, jobId,
+    s.skipped_overwritten, s.drift_new, undoDeadline, purgeState, s.min_soft_delete_days ?? null, s.soft_delete_days ?? null, jobId,
   ).run()
   for (const b of s.bands ?? []) {
     await db.prepare(`

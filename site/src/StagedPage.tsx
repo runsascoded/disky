@@ -55,6 +55,7 @@ import { batchLeads, coalesceBatches, idRanges } from '../functions/_lib/batchGr
 import { useLocation, useNavigate, useNavigationType } from 'react-router-dom'
 import { useSectionSpy, type SectionMode } from 'use-prms/sections'
 import { machineFor } from '../functions/_lib/sweepMachines'
+import { useDocTitle } from './title'
 import { Loading, Skeleton } from './Busy'
 import { copyText } from './CopyName'
 import { Paginated, Pager, pageOfIndex, usePaged } from './Pager'
@@ -180,6 +181,7 @@ const SETTLED_SIZES = [20]
 const SCANS_POLL_MS = 60_000
 
 export function StagedPage() {
+  useDocTitle('Staged')
   const { fmtBytes, units, suffixB } = useUnits()
   const ident = useIdent()
   const admin = useIsAdmin()
@@ -405,7 +407,7 @@ export function StagedPage() {
   // The armed confirm, shown: never at an older scan, the render before that disarm lands included.
   const confirming = armed && !noRun
   // What the armed confirm states, and what it sends: dispatch refuses a lower minimum than this.
-  const softDeleteMin = useSweepSettings(confirming && DEFAULT_STORE.executor === 'sweep')
+  const softDeleteMin = useSweepSettings(confirming && CAPS.softDelete)
 
   // A dispatch may be cut to some of the plan's buckets (`CAPS.bucketCut`):
   // unchecked buckets stay out of the run. The cut's prefixes are what its
@@ -699,7 +701,7 @@ export function StagedPage() {
                       : <>No dry run of exactly this selection at scan <code>{runScan}</code>: deletes from a fresh manifest, with no dry run. A directory that gained new writes since the scan still has its older staged files deleted, and the new files survive; a dry run would report that directory as drift instead.</>}
                 </p>
               )}
-              {confirming && DEFAULT_STORE.executor === 'sweep' && <UndoTerms min={softDeleteMin} buckets={[...new Set(runRows.map(r => prefixToPath(r.prefix).split('/')[0]))]} />}
+              {confirming && CAPS.softDelete && <UndoTerms min={softDeleteMin} buckets={[...new Set(runRows.map(r => prefixToPath(r.prefix).split('/')[0]))]} />}
               {confirming && <ConfirmList rows={runRows} fmtBytes={fmtBytes} />}
               {dispatch.error && <p className="staged-err" role="alert">{dispatch.error.message}</p>}
               {pendingJob && (
