@@ -648,6 +648,14 @@ h2 { font-size: 17px; font-weight: 650; margin: 0 0 4px; }
   p + p { margin-top: 0.6em; }
 }
 .loading { color: var(--ink-3); }
+// An action inside a sentence (a failed load's "retry", `LoadFailure.tsx`): the sentence's own type, underlined as
+// the app's other in-text actions are (the path crumbs), in the page's ink so it reads against a muted or red line.
+button.linkish {
+  background: none; border: none; padding: 0; font: inherit; color: var(--ink); cursor: pointer;
+  text-decoration: underline; text-decoration-color: var(--ink-3); text-underline-offset: 3px;
+  &:hover { text-decoration-color: var(--ink); }
+  &:focus-visible { outline: 2px solid var(--s1); outline-offset: 2px; border-radius: 2px; }
+}
 
 // Cross-site link (prod hosts are one-store-each; see App's `crossSite`).
 .crosslink {
