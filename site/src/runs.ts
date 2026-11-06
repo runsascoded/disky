@@ -73,8 +73,8 @@ export interface ExecCaps {
   /** Undo is offered for a finished real run that recorded no window (cw:
    *  its route allows it); gcs requires the recorded window. */
   undoUnwindowed: boolean
-  /** Undo restores from the buckets' soft delete (GCS), so a recorded undo is unavailable where that is off now; the page reads
-   *  what the buckets have (`useBucketSoftDelete`). Not `plan-sweep`: its undo is its own hold. */
+  /** Undo restores from what the buckets keep after a delete, so a recorded undo is unavailable where that is off now; the page
+   *  reads what the buckets have (`useBucketSoftDelete`). */
   softDelete: boolean
   /** A real run's deleted versions can be purged once its window closes. */
   purge: boolean
@@ -92,7 +92,7 @@ export const EXEC_CAPS: Record<'plan-sweep' | 'sweep', ExecCaps> = {
   // bucket, which its `/v1/files` (the R2 index store) doesn't serve.
   'plan-sweep': {
     stop: true, stopHint: 'Cancel the Batch job: deletes already made may be permanent; a re-dispatch re-lists and skips missing objects.',
-    undo: true, undoUnwindowed: true, softDelete: false, purge: true, bucketCut: false, runFiles: false,
+    undo: true, undoUnwindowed: true, softDelete: true, purge: true, bucketCut: false, runFiles: false,
     startHint: 'once the job starts (a few minutes while Batch brings up the VM)',
   },
   // gcs: a plan may span buckets; soft delete expires deleted generations on

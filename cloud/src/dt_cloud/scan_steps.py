@@ -1185,7 +1185,7 @@ def _iv_check(p: ScanProfile) -> list[str]:
 
 
 @step("interval-store", stage="serve", soft=True, options={"store": str, "timeout": str, "mem": str, "profile": str, "merge_wait": int,
-                                                             "source": str, "compact": str},
+                                                             "source": str, "compact": str, "publish_on_failure": bool},
       requires=_iv_check,
       converges=True, leaves="the interval store doesn't hold this scan")
 def interval_store(ctx: Ctx, arg: str | None) -> None:
@@ -1195,6 +1195,8 @@ def interval_store(ctx: Ctx, arg: str | None) -> None:
     `options.interval-store.source: data` from the data store, as `static-names` does (so `publish-r2 -S` needn't copy
     the sorts to the store: specs/lean-scans.md §1.1). `options.interval-store.compact`: the one-machine path's compaction
     policy (`-C`, e.g. `none` to hold a due compaction while carries continue; default `add`'s).
+    `options.interval-store.publish_on_failure`: a failed append copies the scan's whole served set to R2, for a site that
+    reads only R2 under `publish-r2 -S`: it will list this scan, and read its per-scan sorts until a later run appends it.
     `options.interval-store.profile`: the staged path instead (`interval-store append -c`, its per-range stages Batch
     jobs of their own, in this task's image; `merge_wait` seconds on the merge job), for a store too big for one task. It
     never reads `options.interval-store.compact`: its policy is the profile's `append.compact` / `append.compact_level`."""
@@ -1251,6 +1253,8 @@ def interval_store(ctx: Ctx, arg: str | None) -> None:
         ran = run_grouped(cmd, duration(timeout) if timeout else None, 30.0, env=ctx.env, tail=tail)
     ctx.run.end("interval-store", ran.rc, warn=True, msg="the scan reads per-scan until a later run appends it",
                 timed_out=timeout if ran.timed_out else None, terminated=ran.signal if ran.rc else None)
+    if ran.rc and ctx.opt("interval-store", "publish_on_failure", False):
+        ctx.sh(["dt-cloud", "publish-r2", "-a", ctx.scan], fatal=False, warn=f"publish-r2 of {ctx.scan}'s sorts failed: the site can't read it until a later run appends it")
 
 
 #: Why a scan's staged interval-store step was skipped (`append` exit `BUSY`): its phase note.
@@ -1781,25 +1785,33 @@ SOFT_DELETE_PREFIX = "snapshots/soft-delete"
       requires=primary_only("soft-delete", "the readings are the deployment's, written once by its primary"),
       side=True, leaves="today's soft-delete reading not written: the site keeps the last one, dated")
 def soft_delete(ctx: Ctx, arg: str | None) -> None:
-    """Each GCS source bucket's soft-delete retention now (`dt-cloud soft-delete -o`): today's
+    """Each GCS or S3 source bucket's soft-delete retention now (`dt-cloud soft-delete -o`): today's
     `<data>/snapshots/soft-delete/<date>.json` (+ the R2 archive's copy, which the site reads under `SERVED_R2`); a
     second run the same day replaces it. What a sweep's undo depends on: the site says "undo unavailable" for a run on
     a bucket this shows off, and can't say either way for a bucket it doesn't name. `options.soft-delete.buckets`: the
-    buckets to read (default: every `gs://` source's). Needs `storage.buckets.get` on each (what a real sweep's
-    preflight reads). Skipped with no GCS bucket (soft delete is GCS's) or on REPROC; never fatal. Not core, as
+    buckets to read (default: every `gs://` and `s3://` source's). Needs `storage.buckets.get` on each GCS bucket (what a
+    real sweep's preflight reads), or versioning + lifecycle reads on an S3 one, over one endpoint. Skipped with no such
+    bucket or on REPROC; never fatal. Not core, as
     `gcp-cost`: a deployment that sweeps lists it in `steps`."""
     if ctx.reproc:
         err("REPROC: skipping the soft-delete reading")
         return
-    buckets = ctx.opt("soft-delete", "buckets", None) or [s.bucket for s in ctx.profile.sources if s.kind == "gcs"]
+    s3 = [s for s in ctx.profile.sources if s.kind == "s3"]
+    buckets = ctx.opt("soft-delete", "buckets", None) or [
+        *(s.bucket for s in ctx.profile.sources if s.kind == "gcs"),
+        *(f"s3://{s.bucket}" for s in s3),
+    ]
     if not buckets:
-        err("soft-delete: no gs:// source (and no options.soft-delete.buckets): nothing to read")
+        err("soft-delete: no gs:// or s3:// source (and no options.soft-delete.buckets): nothing to read")
         return
+    endpoints = sorted({s.endpoint for s in s3 if s.endpoint})
+    if len(endpoints) > 1:
+        raise ValueError(f"soft-delete: s3 sources span endpoints {endpoints}; one reading takes one")
     with ctx.phase("soft-delete"):
         outs = [f"{ctx.data_uri}/{SOFT_DELETE_PREFIX}"]
         if ctx.env.get("R2_ARCHIVE"):
             outs.append(f"{ctx.env['R2_ARCHIVE']}/{SOFT_DELETE_PREFIX}")
-        ctx.sh(["dt-cloud", "soft-delete", *(a for b in buckets for a in ("-b", b)), *(a for o in outs for a in ("-o", o))],
+        ctx.sh(["dt-cloud", "soft-delete", *(a for b in buckets for a in ("-b", b)), *(a for e in endpoints for a in ("-E", e)), *(a for o in outs for a in ("-o", o))],
                fatal=False, warn="soft-delete reading failed (the scan's outputs stand; the site keeps the last one, dated)")
 
 

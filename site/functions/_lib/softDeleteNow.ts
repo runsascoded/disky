@@ -52,8 +52,7 @@ export async function runBuckets(db: D1Database, row: RunBucketsRow): Promise<st
 
 /** What the reading says of the undo `row` recorded, at `now`: `unavailable` (soft delete is off on a bucket it deleted from),
  * `unseen` (nothing says, for some bucket of it), or neither (every bucket of it is on, as of the reading). Reads nothing
- * for a run with no open window, or one already undone: it has no undo to qualify. Only the `sweep` executor's undo is a soft-delete restore:
- * `plan-sweep`'s is its own hold, so a caller there doesn't ask. */
+ * for a run with no open window, or one already undone: it has no undo to qualify. */
 export async function runUndoNow(
   env: Env,
   db: D1Database,

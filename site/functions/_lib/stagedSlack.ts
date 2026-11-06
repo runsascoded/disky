@@ -719,14 +719,13 @@ export async function notifyPlan(env: NotifyEnv, db: D1Database, planId: number,
       // Sized, prefixes empty at the scan leave the title's counts (the size line names them apart).
       const last = lastRealRun(v.runs)
       const lastOutcome = last?.finished_ts ? await lastRunOutcome(full)?.(last) : null
-      // Only the `sweep` executor's undo restores from soft delete: `plan-sweep`'s card says what it always did.
-      const undo = env.EXECUTOR === 'sweep' && last?.finished_ts ? await runUndoNow(full, db, last, now) : null
+      const undo = last?.finished_ts ? await runUndoNow(full, db, last, now) : null
       const parent = renderParent({ ...v, lastOutcome, undoUnavailable: undo?.unavailable, undoUnseen: !!undo?.unseen, now, queued: queuedOf(countedItems(v.live, v.deleted, at?.stats ?? null)), names, size, image: await stagedCardUrl(env, db, siteUrl, v.digest) ?? undefined })
       return { at, people, names, parent }
     }
     const { at, people, names, parent } = await render(v)
     // A run's own end: what it measured stands, unless the reading already shows soft delete off where it deleted.
-    const runUndo = runEv && runEv.phase !== 'dispatched' && runEv.run.mode === 'real' && env.EXECUTOR === 'sweep' ? await runUndoNow(full, db, runEv.run, now) : null
+    const runUndo = runEv && runEv.phase !== 'dispatched' && runEv.run.mode === 'real' ? await runUndoNow(full, db, runEv.run, now) : null
     const event: Event | undefined = runEv
       ? { text: runEvent(runEv.run, runEv.phase, { via: runEv.via, names, siteUrl, reason: runEv.reason, outcome: runEv.outcome, expected: runEv.expected, undoUnavailable: runUndo?.unavailable }), ...(by ? { sender: personSender(by, people[by.toLowerCase()], 'dispatched') } : {}) }
       : said ? { ...said, text: typeof said.text === 'function' ? said.text(who(said.by?.email ?? '', names)) : said.text, ...(said.by ? { sender: personSender(said.by.email, people[said.by.email.toLowerCase()], said.by.verb) } : {}) }
