@@ -226,6 +226,24 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      # Wrangler ignores a `wrangler*.toml` that doesn't parse and deploys the old settings: every one in the
+      # tree (the demo's here, a deployment's `wrangler.toml` on its branch) must parse.
+      - name: wrangler*.toml parse
+        run: site/toml-check site/wrangler*.toml
+
+      # `site/deploy` is never executed otherwise; its own checks (config parse, project name, `STATIC_GEN`,
+      # host) broke a deploy twice. `--dry-run` runs them with no credentials, network, build or push. `cloud`
+      # checks the r2 demo's configs and the example; a deployment branch has a `site/wrangler.toml` (and its
+      # `deploy.env`), which the last line then checks as a real deploy would read them.
+      - name: site/deploy --dry-run
+        run: |
+          cd site
+          for c in wrangler.example.toml wrangler.r2.toml wrangler.r2-dev.toml; do
+            ./deploy --dry-run -P --config "$c"
+          done
+          ./deploy --dry-run -P --dev --config wrangler.r2.toml
+          if [ -f wrangler.toml ]; then ./deploy --dry-run -P; ./deploy --dry-run -P --dev; fi
+
       # `pnpm build` = `tsc -b && vite build`: typechecks the SPA and the
       # Functions, then bundles.
       - name: Build site (typecheck + bundle)

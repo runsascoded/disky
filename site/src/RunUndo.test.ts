@@ -26,10 +26,10 @@ describe('the runs table\'s "undo by" cell', () => {
     expect(STATUSES.map(status => /class="tt-ref pinnable"/.test(renderToStaticMarkup(createElement(UndoBy, { status, now: 2000 }))))).toEqual([true, true, false, true, true, false])
   })
   it('an unverified deadline says what it depends on, and who does know', () => {
-    expect(undoUnseenTip(unseen, 9000)).toBe("Recorded deadline: 1970-01-01 02:30 UTC. Undo depends on soft delete still being on for b1, which this site can't see. The undo job, and `dt-cloud sweep undo` by hand, ask GCS and refuse a bucket where it is off.")
+    expect(undoUnseenTip(unseen, 9000)).toBe("Recorded deadline: 1970-01-01 02:30 UTC. Undo depends on soft delete still being on for b1, which this site can't see. The undo job checks the bucket itself, and reports anything it can't restore.")
   })
   it('its tooltip names the buckets and the snapshot\'s date, and keeps the deadline as a record', () => {
-    expect(undoUnavailableTip(off, 9000)).toBe('Undo unavailable: soft delete is off on b1 (as of 2026-11-05). GCS refuses to restore a soft-deleted object from a bucket whose soft delete is off. Recorded deadline: 1970-01-01 02:30 UTC.')
+    expect(undoUnavailableTip(off, 9000)).toBe('Undo unavailable: soft delete is off on b1 (as of 2026-11-05). Undo restores from what the bucket keeps after a delete, so its soft delete (versioning, on S3) has to be on. Recorded deadline: 1970-01-01 02:30 UTC.')
   })
 })
 
@@ -71,13 +71,13 @@ describe('a run\'s detail: its recovery section, where soft delete is off now', 
   }
   it('every bucket off: no undo to offer, and where the snapshot\'s word comes from', () => {
     expect(parts(['b1'])).toEqual([
-      'Undo unavailable: soft delete is off on b1 (as of 2026-11-05). GCS refuses to restore a soft-deleted object from a bucket whose soft delete is off. The web undo is disabled for this run.',
+      'Undo unavailable: soft delete is off on b1 (as of 2026-11-05). Undo restores from what the bucket keeps after a delete, so its soft delete (versioning, on S3) has to be on. The web undo is disabled for this run.',
       'As the job last read it, after a scan. dt-cloud sweep undo asks GCS itself.',
     ])
   })
   it('mixed: the buckets still on can be restored from the CLI, by name', () => {
     expect(parts(['b2', 'b1', 'b3'], { buckets: ['b1'], asOf: '2026-11-05' })).toEqual([
-      'Undo unavailable: soft delete is off on b1 (as of 2026-11-05). GCS refuses to restore a soft-deleted object from a bucket whose soft delete is off. The web undo is disabled for this run.',
+      'Undo unavailable: soft delete is off on b1 (as of 2026-11-05). Undo restores from what the bucket keeps after a delete, so its soft delete (versioning, on S3) has to be on. The web undo is disabled for this run.',
       'As the job last read it, after a scan. dt-cloud sweep undo asks GCS itself.',
       'Not shown off: b2, b3. What the run deleted there can still be restored from the CLI, which asks GCS about each bucket first:',
       'dt-cloud sweep undo -b b2 -b b3 2026-11-01-p1/20261101T120000Z',
@@ -87,7 +87,7 @@ describe('a run\'s detail: its recovery section, where soft delete is off now', 
 
 describe('nothing says whether soft delete is still on where a run deleted', () => {
   it('its recovery section says what the undo depends on, without calling it unavailable', () => {
-    expect(text(createElement(RecoveryUnseen, { unseen: { unseen: [] } }))).toBe("Undo depends on the buckets' soft delete, which this site can't see. The undo job, and `dt-cloud sweep undo` by hand, ask GCS and refuse a bucket where it is off.")
+    expect(text(createElement(RecoveryUnseen, { unseen: { unseen: [] } }))).toBe("Undo depends on the buckets' soft delete, which this site can't see. The undo job checks the bucket itself, and reports anything it can't restore.")
   })
 })
 

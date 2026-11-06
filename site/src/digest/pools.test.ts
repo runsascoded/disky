@@ -74,6 +74,30 @@ describe('quota pressure', () => {
       .toEqual([':runway-8: ', ':runway-3: ', ':runway-2: ', ':runway-1: '])
   })
 
+  it('runway-hue: a shape names its own emoji at each step; a circle or no shape is the plain mark (digest_cw._runway_hue)', () => {
+    const days = [0, 1.8, 3, 6, 10, 19, 33, 60]
+    for (const s of ['square', 'diamond', 'triangle', 'star'] as const) {
+      expect(days.map(d => runwayHue({ days: d, growth: 1 }, 50, s))).toEqual([1, 2, 3, 4, 5, 6, 7, 8].map(n => `:runway-${s}-${n}: `))
+      expect(runwayHue({ days: Infinity, growth: 0 }, 95, s)).toBe(`:runway-${s}-3: `)
+    }
+    expect([runwayHue({ days: 3, growth: 1 }, 50), runwayHue({ days: 3, growth: 1 }, 50, 'circle')]).toEqual([':runway-3: ', ':runway-3: '])
+  })
+
+  it('a pool takes its bucket’s shape, a zone its members’; absent is a circle; only runway-hue draws it', async () => {
+    const f = await load()
+    const rows = f.rows as CwRows
+    const last = rows.rows[rows.rows.length - 1]
+    const q = f.cfg.buckets['main-data'].quotas
+    const cfg: DigestCfg = { ...f.cfg, buckets: {
+      'main-data': { ...f.cfg.buckets['main-data'] },
+      'hot-data': { label: 'hot', path: null, zone: 'z', quotas: q, shape: 'star' },
+      'more-data': { label: 'more', path: null, zone: 'z', quotas: q, shape: 'star' },
+    } }
+    const marks = (m: 'runway' | 'runway-hue') => quotaLine(last, cfg, 90, m, [last]).slice('*Quotas:* '.length).split(' · ').map(c => c.split(' ').slice(0, 2).join(' '))
+    expect(marks('runway-hue')).toEqual([':runway-8: main', ':runway-star-8: z'])
+    expect(marks('runway')).toEqual([':large_green_circle: main', ':large_green_circle: z'])
+  })
+
   it('the runway quota line looks back into the previous month: day 2 of November sees October’s 7-day fill', async () => {
     const f = await load()
     const s = (scan: string, hot: number): CwScan => ({ scan, slug: null, tb: 790, extra: { 'hot-data': hot }, classes: null })

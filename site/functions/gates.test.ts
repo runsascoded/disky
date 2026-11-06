@@ -184,6 +184,7 @@ const SHARED_ROUTES: Record<string, Case[]> = {
   'api/digest-image.ts': [post('/api/digest-image', 'viewer')],
   'api/digest-op.ts': [post('/api/digest-op', 'viewer')],
   'api/digest-preview.ts': [get('/api/digest-preview', 'admin')],
+  'api/digest-reapply.ts': [post('/api/digest-reapply', 'admin'), get('/api/digest-reapply', 'admin')],
   'api/digest-settings.ts': [get('/api/digest-settings', 'viewer'), put('/api/digest-settings', 'admin')],
   'api/dups.ts': [get(`/api/dups?${AT}`, 'viewer', { DUPS: '1' }), get(`/api/dups?${AT}`, 'unconfigured')],
   'api/estate.ts': [get(`/api/estate?${AT}`, 'viewer')],

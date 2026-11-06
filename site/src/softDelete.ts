@@ -3,13 +3,18 @@
 // can undo, and 0 promises nothing. A run's own record says what it actually had (`deletion_runs.soft_delete_days`). DOM-free:
 // the Slack thread (`functions/_lib/stagedSlack.ts`) says the same.
 //
-// What a bucket has *now* is another matter: undo restores from GCS soft delete, and GCS refuses once the bucket's policy is
-// off, whatever it retained when the run deleted. The site's own account can't read bucket metadata, so the job writes what
+// "Soft delete" is what a bucket keeps after a delete: GCS's soft-delete policy, or on an S3-style store versioning plus a
+// noncurrent-version rule (`soft_delete.s3_retention_seconds`). What a bucket has *now* is another matter: GCS refuses to
+// restore once the bucket's policy is off, whatever it retained when the run deleted. The site's own account can't read bucket metadata, so the job writes what
 // its account reads (the scan step `soft-delete`, `SoftDeleteSnapshot`); a bucket that reading doesn't name is unknown here, and
 // the site says so instead of promising, or ruling out, an undo it can't see.
 
-/** `sweep_exec.MIN_SOFT_DELETE_DAYS`: keep identical. No `sweep_settings` row means this. */
+/** `sweep_exec.MIN_SOFT_DELETE_DAYS`: keep identical. The `sweep` executor's minimum with no `sweep_settings` row. */
 export const DEFAULT_MIN_SOFT_DELETE_DAYS = 7
+/** The minimum with no `sweep_settings` row: S3-style stores (`plan-sweep`) don't require versioning unless asked to. */
+export const defaultMinSoftDeleteDays = (executor: string | undefined): number => executor === 'sweep' ? DEFAULT_MIN_SOFT_DELETE_DAYS : 0
+/** `soft_delete.NO_EXPIRY_DAYS`: keep identical. A run's `soft_delete_days` on a bucket that keeps deleted data until purged. */
+export const NO_EXPIRY_DAYS = 36500
 /** GCS's longest retention (and `sweep execute*`'s `-s` range, and the table's CHECK). */
 export const MAX_MIN_SOFT_DELETE_DAYS = 90
 
@@ -28,8 +33,8 @@ const recoverableFor = (min: number): string =>
 export interface BucketSoftDelete { asOf: string; off: Record<string, boolean> }
 
 /** The job's reading (`snapshots/soft-delete/<date>.json`, `dt-cloud soft-delete -o`): each bucket's soft-delete retention
- * when read; 0 = off. */
-export interface SoftDeleteSnapshot { version: number; date: string; as_of: string; buckets: Record<string, { retention_seconds: number }> }
+ * when read; 0 = off, null = kept until purged (S3). */
+export interface SoftDeleteSnapshot { version: number; date: string; as_of: string; buckets: Record<string, { retention_seconds: number | null }> }
 
 /** `soft_delete.SNAPSHOT_VERSION`: the only one read. */
 export const SOFT_DELETE_VERSION = 1
@@ -64,7 +69,7 @@ export const undoUnavailableReason = ({ buckets, asOf }: UndoUnavailable): strin
 export const undoUnavailableText = (u: UndoUnavailable): string => `undo unavailable: ${undoUnavailableReason(u)}`
 
 /** Why, beside `undoUnavailableText`. */
-export const UNDO_UNAVAILABLE_WHY = 'GCS refuses to restore a soft-deleted object from a bucket whose soft delete is off.'
+export const UNDO_UNAVAILABLE_WHY = 'Undo restores from what the bucket keeps after a delete, so its soft delete (versioning, on S3) has to be on.'
 
 /** A recorded undo nothing here can vouch for: `unseen` are the buckets it depends on that no reading names (all of them with
  * no reading at all; none named when the run's buckets themselves aren't known). */
@@ -83,7 +88,7 @@ export const undoUnseenText = ({ unseen }: UndoUnseen): string => unseen.length
   : 'undo depends on the buckets\' soft delete, which this site can\'t see'
 
 /** Who does know, beside `undoUnseenText`. */
-export const UNDO_UNSEEN_WHO = 'The undo job, and `dt-cloud sweep undo` by hand, ask GCS and refuse a bucket where it is off.'
+export const UNDO_UNSEEN_WHO = 'The undo job checks the bucket itself, and reports anything it can\'t restore.'
 
 /** The run columns that say whether it still has an undo to qualify. */
 export interface RunUndoWindow { mode: string; undo_deadline?: number | null; undo_state?: string }

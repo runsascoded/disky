@@ -26,7 +26,7 @@ it('a recorded deletion on a bucket with soft delete off reads "undo unavailable
 it('recoveryNotes: the tooltip states the reason instead of a cutoff', () => {
   const e = { kind: 'recorded' as const, runId: 'real-run', objects: 5, bytes: 50, preserved: 0, undone: 0, deadline: 700, expired: false }
   expect(recoveryNotes({ ...e, unavailable: { buckets: ['b'], asOf: '2026-11-05' } })).toEqual([
-    'Undo unavailable: soft delete is off on b (as of 2026-11-05). GCS refuses to restore a soft-deleted object from a bucket whose soft delete is off.',
+    'Undo unavailable: soft delete is off on b (as of 2026-11-05). Undo restores from what the bucket keeps after a delete, so its soft delete (versioning, on S3) has to be on.',
     'Soft-delete retention starts at each object’s deletion, not when the run finishes. Empty at a scan is not proof of deletion by this run.',
   ])
   expect(recoveryNotes(e)).toEqual([
@@ -37,7 +37,7 @@ it('recoveryNotes: the tooltip states the reason instead of a cutoff', () => {
   ])
   expect(recoveryNotes({ ...e, unseen: { unseen: ['b'] } }).slice(3)).toEqual([
     'Conservative recovery cutoff: 1970-01-01T00:11:40.000Z',
-    "Undo depends on soft delete still being on for b, which this site can't see. The undo job, and `dt-cloud sweep undo` by hand, ask GCS and refuse a bucket where it is off.",
+    "Undo depends on soft delete still being on for b, which this site can't see. The undo job checks the bucket itself, and reports anything it can't restore.",
   ])
   expect(recoveryNotes({ ...e, deadline: null, noUndo: true })).toEqual(['This run recorded no undo window: soft delete was off, or it left no record of its retention. Treat its deletes as permanent.'])
 })

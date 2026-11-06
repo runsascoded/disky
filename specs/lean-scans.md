@@ -331,6 +331,10 @@ The one thing an open plan needs from a raw listing is each object's identity at
 - `/api/path-index`: retire it, or serve export output on demand?
 - Age pyramids: an interval age index (the store has `wts`/`mtime_mean` per version), so `index_schema`, `index-sync` and the last per-scan files go entirely.
 
+## Note: the thresholded phase 1 assumes indexed-only search
+
+With `FILTER_INDEXED_ONLY=1` the filter's matches come from the static name index, not from the path store's rows, so the thresholded phase 1 (`readRects`) never has to find them itself. With indexed-only **off**, a thresholded phase 1 finds fewer matches: `readRects` applies a row-level floor test to what it reads, and the ended versions the interval store keeps (the "ended versions" fix) fall under that floor, so a filtered scope view (a `q=` on a subtree) can go empty although matches exist. Turning indexed-only off on any deployment would need an unfloored phase 1 for filtered reads first. No code change is proposed: the rollout (§4 step 1) puts every deployment on indexed-only.
+
 [interval-store.md]: interval-store.md
 [attr-interval-table.md]: attr-interval-table.md
 [d1-migrations.md]: d1-migrations.md
