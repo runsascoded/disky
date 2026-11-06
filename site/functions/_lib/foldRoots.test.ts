@@ -1,6 +1,7 @@
 // A match-roots answer's forest as a view holds it: the nodes it can use, whatever the number of roots (`foldRoots`).
 import { describe, expect, it } from 'vitest'
-import { foldRoots, MATCH_LIST_CAP, nestRollup } from './view.js'
+import { HELD_BYTES } from './shared.js'
+import { foldRoots, MATCH_LIST_CAP, nestRollup, tooBroadToDiff } from './view.js'
 import type { Hit } from './staticFilter.js'
 
 const A = '2026-10-01T0700', B = '2026-10-02T0700', C = '2026-10-03T0700'
@@ -79,6 +80,14 @@ describe('foldRoots', () => {
       nodes: [{ p: 'b/x/y/ckpt', d: 4, isDir: false, b: 1000, n: 1 }, { p: 'b/x', d: 2, isDir: true, b: 1000, n: 1 }],
       kids: new Map([['b/x', 1], ['b', 1]]),
     })
+  })
+})
+
+describe('tooBroadToDiff', () => {
+  it('refuses a diff of an answer past what an isolate holds of answers', () => {
+    const roots = (n: number) => Array.from({ length: n }, () => ({ path: 'p'.repeat(100) }))
+    const fits = Math.floor(HELD_BYTES / 356)
+    expect([tooBroadToDiff(roots(fits)), tooBroadToDiff(roots(fits + 1))]).toEqual([false, true])
   })
 })
 

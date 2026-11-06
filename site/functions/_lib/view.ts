@@ -37,7 +37,7 @@ import { type SearchFound, type SearchLimits, searchRoots } from './search.js'
 import { planNegative, planPositive } from './searchQuery.js'
 import { hasLedger } from './ledger.js'
 import { ownerAssignments } from './ownerTotals.js'
-import { IsoMap, joinOf, shared } from './shared.js'
+import { HELD_BYTES, hitsBytes, IsoMap, joinOf, shared } from './shared.js'
 import { storeKey } from './stores.js'
 import { extrasFor } from './extras.js'
 import { loadRegistry } from './identity.js'
@@ -1034,6 +1034,7 @@ async function readView(env: Env, o: ViewOpts, cov: Coverage = {}): Promise<Read
         staticRoots = true
       }
       if (shits) {
+        if (o.otherScan && tooBroadToDiff(shits.hits!)) throw new FilterRejected(reject('diff-too-broad'))
         // Per isolate: the same held hits, scan and owner scope aggregate the same (a view's first paint,
         // its full read, a diff's sides and floors, other canvases).
         const memoKey = `${path}\0${date}\0${owner ? ownerKey(owner) : ''}`
@@ -2298,6 +2299,11 @@ function addAgg(into: Agg, from: Agg): void {
   for (const k in from.ub) into.ub[k] = (into.ub[k] ?? 0) + from.ub[k]
 }
 
+/** A diff's two sides each build `Phase1Memo` from a match-roots answer, beside the answer itself. Past what an isolate
+ *  holds of answers at all (`HELD_BYTES`), that doesn't fit one (gcs: `checkpoint` under a bucket, 99K roots: 1102 on every
+ *  read), so the diff is refused, whatever its canvas; a view reads one side, and fits. */
+export const tooBroadToDiff = (hits: readonly { path: string }[]): boolean => hitsBytes(hits) > HELD_BYTES
+
 /** The memo's forest (`Phase1Memo.forest`) under `path` (depth `dP`). */
 function buildForest(m: Phase1Memo, path: string, dP: number): NonNullable<Phase1Memo['forest']> {
   const { mine, depth: rd } = m.p1
@@ -2738,8 +2744,8 @@ export async function buildDiff(env0: Env, o: DiffOpts): Promise<Diff> {
   const otherOf = (date: string): { otherScan?: string } => ra && rb ? { otherScan: date === from ? to : from } : {}
   if (query && ra && rb && !o.summary && o.threshold == null) {
     const [ta, tb] = await Promise.all([
-      readView(env, { ...o, date: from, maxDepth: 0, floorOnly: true }, {}),
-      readView(env, { ...o, date: to, maxDepth: 0, floorOnly: true }, {}),
+      readView(env, { ...o, date: from, maxDepth: 0, floorOnly: true, ...otherOf(from) }, {}),
+      readView(env, { ...o, date: to, maxDepth: 0, floorOnly: true, ...otherOf(to) }, {}),
     ])
     if (ta && tb) floor = Math.max(ta.threshold, tb.threshold)
     tr?.('floors', performance.now() - t0)
