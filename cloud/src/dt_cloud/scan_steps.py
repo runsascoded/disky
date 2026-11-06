@@ -1185,7 +1185,7 @@ def _iv_check(p: ScanProfile) -> list[str]:
 
 
 @step("interval-store", stage="serve", soft=True, options={"store": str, "timeout": str, "mem": str, "profile": str, "merge_wait": int,
-                                                             "source": str, "compact": str},
+                                                             "source": str, "compact": str, "publish_on_failure": bool},
       requires=_iv_check,
       converges=True, leaves="the interval store doesn't hold this scan")
 def interval_store(ctx: Ctx, arg: str | None) -> None:
@@ -1195,6 +1195,8 @@ def interval_store(ctx: Ctx, arg: str | None) -> None:
     `options.interval-store.source: data` from the data store, as `static-names` does (so `publish-r2 -S` needn't copy
     the sorts to the store: specs/lean-scans.md §1.1). `options.interval-store.compact`: the one-machine path's compaction
     policy (`-C`, e.g. `none` to hold a due compaction while carries continue; default `add`'s).
+    `options.interval-store.publish_on_failure`: a failed append copies the scan's whole served set to R2, for a site that
+    reads only R2 under `publish-r2 -S`: it will list this scan, and read its per-scan sorts until a later run appends it.
     `options.interval-store.profile`: the staged path instead (`interval-store append -c`, its per-range stages Batch
     jobs of their own, in this task's image; `merge_wait` seconds on the merge job), for a store too big for one task. It
     never reads `options.interval-store.compact`: its policy is the profile's `append.compact` / `append.compact_level`."""
@@ -1251,6 +1253,8 @@ def interval_store(ctx: Ctx, arg: str | None) -> None:
         ran = run_grouped(cmd, duration(timeout) if timeout else None, 30.0, env=ctx.env, tail=tail)
     ctx.run.end("interval-store", ran.rc, warn=True, msg="the scan reads per-scan until a later run appends it",
                 timed_out=timeout if ran.timed_out else None, terminated=ran.signal if ran.rc else None)
+    if ran.rc and ctx.opt("interval-store", "publish_on_failure", False):
+        ctx.sh(["dt-cloud", "publish-r2", "-a", ctx.scan], fatal=False, warn=f"publish-r2 of {ctx.scan}'s sorts failed: the site can't read it until a later run appends it")
 
 
 #: Why a scan's staged interval-store step was skipped (`append` exit `BUSY`): its phase note.

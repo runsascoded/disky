@@ -105,7 +105,8 @@ options:
   # Only what the site reads beside the path store (`-S`): the sorts and listings cost ~10.6 GB a scan of GCP egress, and the
   # interval-store append and static-names both read them from the data bucket, in this region.
   publish-r2: {args: [-S], barrier: true, require: ["{snapshots}/{scan}/meta.json"]}
-  interval-store: {timeout: 90m, mem: 12GB, source: data}
+  # A failed append (3 of 106 scans in the 3 weeks to 2026-11-06) still lists the scan, and this site reads only R2.
+  interval-store: {timeout: 90m, mem: 12GB, source: data, publish_on_failure: true}
   over-time: {mem: 16GB}
   digest: {template: cw, config: /app/job/digest.yml}
   # cw's own GCS buckets (the CoreWeave buckets and R2 bill elsewhere); compute: every Batch job `$DISKY_LABELS` selects

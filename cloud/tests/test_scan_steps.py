@@ -767,6 +767,22 @@ def test_interval_store_not_next_is_passed_over(tmp_path, env, monkeypatch):
         "warn": True, "msg": "the scan reads per-scan: the store's append passed it over", "note": PASSED_OVER, "timed_out": None, "terminated": None})]
 
 
+@pytest.mark.parametrize(("rc", "opts", "published"), [
+    (1, {"publish_on_failure": True}, ["dt-cloud publish-r2 -a 2026-10-16T1200"]),
+    (0, {"publish_on_failure": True}, []),
+    (1, {}, []),
+])
+def test_interval_store_failure_publishes_the_scans_sorts_when_asked(tmp_path, env, monkeypatch, rc, opts, published):
+    from dt_cloud import scan_runs
+
+    monkeypatch.setattr(scan_runs, "run_grouped", lambda cmd, timeout, grace, **kw: scan_runs.Ran(rc, False, None))
+    env["R2_ARCHIVE"] = "r2://idx"
+    c = gcs_ctx(tmp_path, dict(env), monkeypatch, **{"interval-store": opts})
+    c.sh_impl = Runner(tmp_path, stdout={"dt-cloud interval-store current": "g1\n"})
+    S.interval_store(c, None)
+    assert [x for x in c.sh_impl.calls if x.startswith("dt-cloud publish-r2")] == published
+
+
 def test_interval_store_adds_from_the_store_or_the_data_store(tmp_path, env, monkeypatch):
     """The one-machine `add` reads the scans' sorts from the store by default, and from the data store with
     `source: data` (so `publish-r2 -S` needn't copy them; specs/lean-scans.md §1.1); `compact` passes the policy (`-C`);
