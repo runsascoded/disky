@@ -5,7 +5,10 @@ deployment: cw
 executor:
   kind: google-batch
   project: oa-internal-450019
-  region: us-central1
+  # beside the data bucket (`oa-cw-s3-usage-data`, us-east1): every step reads and writes it, and from us-central1 those
+  # reads and writes were billed as inter-region transfer. The head (the cron's Batch job, infra/gcp) stays in us-central1:
+  # it only orchestrates
+  region: us-east1
   service_account: cw-s3-job@oa-internal-450019.iam.gserviceaccount.com
   image: us-central1-docker.pkg.dev/oa-internal-450019/cw-s3-usage/scan:latest
   boot_disk: 50
