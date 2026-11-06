@@ -252,6 +252,12 @@ scratch = gcp.storage.Bucket(
             action=gcp.storage.BucketLifecycleRuleActionArgs(type="Delete"),
             condition=gcp.storage.BucketLifecycleRuleConditionArgs(age=7),
         ),
+        # Experiments' outputs (races, benches, sims) go under `tmp/`: gone in 3 days. The rest of the bucket keeps
+        # 7, since the interval store's open-version state lives here and an append needs the previous scan's.
+        gcp.storage.BucketLifecycleRuleArgs(
+            action=gcp.storage.BucketLifecycleRuleActionArgs(type="Delete"),
+            condition=gcp.storage.BucketLifecycleRuleConditionArgs(age=3, matches_prefixes=["tmp/"]),
+        ),
     ],
 )
 grant_bucket(f"{SCRATCH_BUCKET}-job", bucket=scratch.name, role="roles/storage.objectAdmin", member=job.member, member_email=job.email_literal, adopt=adopt)
