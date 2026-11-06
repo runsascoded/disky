@@ -353,6 +353,20 @@ def test_head_takes_cost_labels_from_the_profiles_env(tmp_path):
         {"app": "disky", "deployment": "fix", "component": "scan", "scan_id": "2026-10-16t1200"}, "app=disky,deployment=fix")
 
 
+def test_a_tasks_labels_are_the_heads_on_its_job_and_its_allocation():
+    """Nextflow builds each task's Batch job, so no spec of ours is asserted: `base.config` hands nf-google the head's
+    `params.labels` (above) + the session + the step as `process.resourceLabels`, which the pinned plugin puts on the
+    job's `labels` and on its `allocationPolicy.labels` (1.29.1's `GoogleBatchTaskHandler` calls `putAllLabels` on both
+    builders). A plugin bump re-checks that before this pin moves."""
+    base = (Path(__file__).parents[2] / "job" / "nf" / "base.config").read_text()
+    assert H.NF_GOOGLE == "nf-google@1.29.1"
+    assert [ln.strip() for ln in base.splitlines() if ln.strip().startswith(("params.labels", "resourceLabels"))] == [
+        "params.labels = [:]",
+        "resourceLabels = { params.labels + (params.session ? ['nf-session': params.session] : [:]) "
+        "+ [step: task.process.toLowerCase().replaceAll(/[^a-z0-9_-]/, '-').take(63)] }",
+    ]
+
+
 def test_head_records_into_the_profiles_database_and_store(tmp_path, monkeypatch):
     """`head()` with `D1_DB_ID` (and `SCAN_RUNS_PROFILE`) only in the profile's `env` (cw's first prod run on the generic
     head: its own start / finish found no database), and a non-primary `store`: both writes go to the profile's D1, the

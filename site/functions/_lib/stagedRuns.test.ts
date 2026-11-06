@@ -262,6 +262,21 @@ describe('D1', () => {
       expect(urls).toEqual(['https://batch.googleapis.com/v1/projects/my-project/locations/us-west4/jobs?job_id=gcs-undo-19700112-134640z'])
     })
 
+    it('labels the job and its allocation policy `DISKY_LABELS` + `component: sweep-undo` (the spec above, with none set, carries neither)', async () => {
+      vi.useFakeTimers({ now: NOW * 1000, toFake: ['Date'] })
+      const labels: unknown[] = []
+      vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+        if (url === 'https://oauth2.googleapis.com/token') return new Response(JSON.stringify({ access_token: 'tok' }))
+        const spec = JSON.parse(String(init?.body)) as { labels?: unknown; allocationPolicy: { labels?: unknown } }
+        labels.push(spec.labels, spec.allocationPolicy.labels)
+        return new Response('{}')
+      }))
+      const { db } = await gcsDb()
+      const r = await undoRoute({ request: post({ run_id: RUN }), env: { ...await env(db), DISKY_LABELS: 'app=disky,deployment=gcs' } } as never)
+      const want = { app: 'disky', deployment: 'gcs', component: 'sweep-undo' }
+      expect([r.status, labels]).toEqual([200, [want, want]])
+    })
+
     it('a failed submit leaves the row as it was and says why', async () => {
       vi.stubGlobal('fetch', vi.fn(async (url: string) => url === 'https://oauth2.googleapis.com/token'
         ? new Response(JSON.stringify({ access_token: 'tok' }))

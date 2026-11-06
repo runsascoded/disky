@@ -236,6 +236,20 @@ describe('a dispatched run\'s hold store (`sweep manifest -i`)', () => {
     })
   })
 
+  describe('the cost labels it is submitted with', () => {
+    const labels = async (extra: Partial<ExecEnv>) => {
+      const { spec } = await launched(extra)
+      return [spec.labels, spec.allocationPolicy.labels]
+    }
+    it('`DISKY_LABELS` + `component: sweep`, on the job and on its allocation policy (what its VM and disks bill under)', async () => {
+      const want = { app: 'disky', deployment: 'gcs', component: 'sweep' }
+      expect(await labels({ DISKY_LABELS: 'app=disky, deployment=gcs' })).toEqual([want, want])
+    })
+    it('no `DISKY_LABELS`: none on either', async () => {
+      expect(await labels({})).toEqual([undefined, undefined])
+    })
+  })
+
   it('no review store: the data bucket, no credentials', async () => {
     expect(await dispatched({})).toEqual({
       manifest: [`dt-cloud sweep manifest -d "$SWEEP_DATE" --plan "<run>/plan.json" -b ${B1} -i "gs://my-data" -o "<run>"`],

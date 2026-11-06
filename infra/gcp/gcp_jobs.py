@@ -71,6 +71,21 @@ def cost_labels(environ: dict[str, str] | None = None) -> dict[str, str]:
     return parse_labels(env[LABELS_ENV])
 
 
+def check_cron_labels(spec: dict, labels: dict[str, str], name: str) -> None:
+    """Refuse a cron's Batch job `spec` unless its `labels` and its `allocationPolicy.labels` both carry the stack's cost
+    `labels` (as valued) and a `component`.
+
+    Cloud Scheduler posts the body straight to Batch, past `dt-cloud`'s own check (`batch.submit_job`), and Batch puts only
+    `allocationPolicy.labels` on the VMs and disks a job creates: a body labelled on the job alone runs, and bills
+    unlabelled. A stack with no labels (`$DISKY_LABELS` empty or unset) checks nothing."""
+    if not labels:
+        return
+    for where, got in (("labels", spec.get("labels") or {}), ("allocationPolicy.labels", (spec.get("allocationPolicy") or {}).get("labels") or {})):
+        if missing := [k for k, v in labels.items() if got.get(k) != v] + ([] if got.get("component") else ["component"]):
+            raise ValueError(f"cron {name}: its Batch job's {where} lack {', '.join(missing)} (the stack's ${LABELS_ENV} + a component go on "
+                             "the job's `labels` and on `allocationPolicy.labels`: its VMs and disks bill under the latter)")
+
+
 def labeled_provider(name: str, *, project: str, region: str, labels: dict[str, str]) -> gcp.Provider:
     """The stack's GCP provider with `labels` as its `default_labels`, made the provider of every
     `gcp:` resource in the program (a stack transform), so no component needs threading."""
@@ -506,7 +521,8 @@ class BatchCron(ComponentResource):
     The body is `submitter_spec(submitter)`, so the job spec has one source of
     truth: the deployment's tracked `job/*-submit.sh`. The cron calls Batch as
     `sa_email`, which the spec's own `allocationPolicy.serviceAccount` should
-    match.
+    match. A body whose job or allocation policy lacks the stack's cost labels
+    is refused (`check_cron_labels`), before any resource is declared.
     """
 
     def __init__(
@@ -525,8 +541,10 @@ class BatchCron(ComponentResource):
         depends_on: list[pulumi.Resource] | None = None,
         opts: ResourceOptions | None = None,
     ):
+        spec = submitter_spec(submitter)
+        check_cron_labels(spec, parse_labels(os.environ.get(LABELS_ENV, "")), name)
         super().__init__("disky:gcp:BatchCron", name, None, opts)
-        self.spec = submitter_spec(submitter)
+        self.spec = spec
         self.job = _cron(
             name,
             project=project,

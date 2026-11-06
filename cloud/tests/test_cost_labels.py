@@ -350,7 +350,7 @@ def test_append_job_uses_actual_catch_up_scan_not_parent_scan(labeled, monkeypat
                     prune=lambda _: None, publish=lambda _: None)
     _, spec = runner.job("anchors", "2026-10-12T2006", 1, "static_anchors", ["run"])
     want = {**DEPLOY, "component": "anchors", "scan_run": "root-uid", "scan_id": "2026-10-12t2006", "stage": "anchors"}
-    assert spec["allocationPolicy"]["labels"] == want
+    assert labels_of(spec) == ({**want, "purpose": "static-names", "gen": "g1"}, want)
     assert spec["taskGroups"][0]["taskSpec"]["environment"]["variables"] == {
         "STATIC_NAMES_BUCKET": "data", "STATIC_NAMES_SCRATCH": "scr",
         "DISKY_LABELS": "app=disky, deployment=gcs", "SCAN_RUN_ID": "root-uid", "SCAN_ID": "2026-10-12T2006",

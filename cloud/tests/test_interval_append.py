@@ -1051,8 +1051,9 @@ def test_jobs_are_the_profiles_and_carry_the_cost_label(monkeypatch):
     want = {"app": "disky", "deployment": "t", "component": "interval-store", "scan_run": "root-uid"}
     for spec, scan, stage in ((ranges, "2026-08-04", "ranges"), (publish, "2026-08-04", "publish"),
                              (r2, "2026-08-04", "r2"), (merge, "2026-08-04T1236", "merge")):
+        # the cost labels on the job and on its allocation policy (its VMs and disks); the job's own two stay on the job
         assert spec["allocationPolicy"]["labels"] == {**want, "scan_id": scan.lower(), "stage": stage}
-        assert {k: spec["labels"][k] for k in ("purpose", "component", "gen")} == {"purpose": "interval-store", "component": "interval-store", "gen": "g1"}
+        assert spec["labels"] == {**want, "scan_id": scan.lower(), "stage": stage, "purpose": "interval-store", "gen": "g1"}
     cmd = lambda s: s["taskGroups"][0]["taskSpec"]["runnables"][0]["container"]["commands"][1]  # noqa: E731
     assert [s["taskGroups"][0]["taskCount"] for s in (ranges, publish, r2, merge)] == [2, 1, 1, 1]
     assert cmd(ranges) == ("set -euo pipefail; mkdir -p /stage/tmp /stage/out && cd /stage && python3 -u -m dt_cloud.interval_append ranges "
