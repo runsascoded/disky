@@ -702,6 +702,21 @@ describe('interval store: base + runs', () => {
     }
   })
 
+  it('a point lookup shapes only the rows it asked for; a prefix ask shapes the group, as before', async () => {
+    const date = '2026-08-05'
+    const rows = (rs: Row[]) => rs.map(r => [r.depth, r.path, r.size]).sort((x, y) => (`${x[0]}${x[1]}` < `${y[0]}${y[1]}` ? -1 : 1))
+    const whole = await readAsks(await openIndex(env, date, 'path'), [{ depth: 2, under: 'b2' }], r => r.path === 'b2/e')
+    const all = vi.spyOn(IvGroup.prototype, 'all')
+    try {
+      const point = await readAsks(await openIndex(at('g3', [], undefined, { rev: 'point-shape' }), date, 'path'), [{ depth: 2, path: 'b2/e' }], () => true)
+      expect({ rows: rows(point.rows), shaped: all.mock.calls.length }).toEqual({ rows: rows(whole.rows), shaped: 0 })
+      const prefix = await readAsks(await openIndex(at('g3', [], undefined, { rev: 'prefix-shape' }), date, 'path'), [{ depth: 2, under: 'b2' }], r => r.path === 'b2/e')
+      expect({ rows: rows(prefix.rows), shaped: all.mock.calls.length > 0 }).toEqual({ rows: rows(whole.rows), shaped: true })
+    } finally {
+      all.mockRestore()
+    }
+  })
+
   it('reads the base and the runs, nothing else: a view of a scan reads the runs begun by then', async () => {
     const got: Record<string, string[]> = {}
     for (const date of [...new Set(cases.map(c => c.date))].sort()) {

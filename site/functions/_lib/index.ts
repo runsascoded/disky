@@ -3884,6 +3884,20 @@ const groupMayHold = (g: Span & { vfMax?: number; vtMin?: number }, a: Ask): boo
   return !(g.pMax < rect.pLo || g.pMin > rect.pHi)
 }
 
+/** The `Pre` of asks that are all exact paths: a row of a group that isn't one was not asked for, so it is never shaped
+ *  (`IvGroup.pick`): a diff's lookups ask for a few paths of each ~8K-row group. Prefix asks have none: testing each row
+ *  against thousands of ranges would cost more than shaping it. */
+function pointsPre(asks: Ask[]): Pre | undefined {
+  const at = new Map<number, Set<string>>()
+  for (const a of asks) {
+    if (!('path' in a)) return undefined
+    const paths = at.get(a.depth)
+    if (paths) paths.add(a.path)
+    else at.set(a.depth, new Set([a.path]))
+  }
+  return (depth, path) => !!at.get(depth)?.has(path)
+}
+
 /** Point lookups: exact `(depth, path)` rows or `(depth, under-prefix)`
  * ranges, many at once (the totals manifest's ~8k prefixes) — `keep` is the
  * caller's exact test over the rows of the candidate groups. */
@@ -3891,8 +3905,9 @@ export async function readAsks(
   h: IndexHandle,
   asks: Ask[],
   keep: (r: Row) => boolean,
-  { columns, maxGroups = 60, spanCap = 4000, stop, rememberWide, versions = false, pre, lens }: { columns?: string[]; maxGroups?: number; spanCap?: number; stop?: () => boolean; rememberWide?: boolean; versions?: boolean; pre?: Pre; lens?: Lens } = {},
+  { columns, maxGroups = 60, spanCap = 4000, stop, rememberWide, versions = false, pre: pre0, lens }: { columns?: string[]; maxGroups?: number; spanCap?: number; stop?: () => boolean; rememberWide?: boolean; versions?: boolean; pre?: Pre; lens?: Lens } = {},
 ): Promise<{ rows: Row[]; groups: number }> {
+  const pre = pre0 ?? pointsPre(asks)
   // `rememberWide`: a lookup this isolate already found too wide (same generation, asks and budget) throws
   // before any span query — the answer can't change while the generation stands.
   const wideKey = rememberWide ? `${h.mode}\0${h.date}\0${h.variant}\0${'gen' in h ? h.gen : ''}\0${maxGroups}\0${lens?.key ?? ''}\0${asks.map(a => `${a.depth}:${'path' in a ? a.path : `${a.under}/`}`).join('\n')}` : null
