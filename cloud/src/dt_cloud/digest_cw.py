@@ -670,7 +670,7 @@ class Cw:
         """What the replies render under, beyond `cfg_json` and `rows_json` (`src/digest/cwReply.ts` `ReplyCfg`)."""
         c = self.cfg
         triggers = {r.scan: r.trigger for r in month.pre + month.lead + month.rows if r.trigger}
-        return {"quota_marks": c.quota_marks, "total_headline": c.total_headline, "reply_lines": c.reply_lines, "reply_hour": c.reply_hour, "provisional": c.provisional,
+        return {"quota_marks": c.quota_marks, "total_headline": c.total_headline, **({"reply_lines": True} if c.reply_lines else {}), "reply_hour": c.reply_hour, "provisional": c.provisional,
                 "alert_pct": c.alert_pct, "op_sender": c.op_sender(), "avatar_rev": AVATAR_REV, "triggers": triggers}
 
     def units(self, month: Month, variant: str, platform: str = "slack") -> list[Unit]:
