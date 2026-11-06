@@ -3586,6 +3586,19 @@ async function sizeFloor(h: IndexHandle, rects: Rect[], thrAt: (depth: number) =
   return floor
 }
 
+/** A `tot` test (`readSizeRects`) is the handle's, but `columns` are per tier: a run's total-keyed sort without the
+ *  column would hand `Pre` no total, and every row of the run would silently fail the threshold, close records too.
+ *  That run is broken (`IvTierBroken`: cut out, retried without it, a 503 for its own scans and later runs'), as one whose
+ *  sort won't open is. A base without it (and so no `tot` test) reads per slice, as it did before the re-cut. */
+function assertTiersKeyedOnTotal(h: IndexHandle): void {
+  if (!h.columns?.includes(IV_TOTAL_COL)) return
+  for (const t of h.runs ?? []) {
+    if (t.columns?.includes(IV_TOTAL_COL)) continue
+    const sort = t.dataKey!.slice(t.dataKey!.lastIndexOf('/') + 1).replace(/\.parquet$/, '')
+    throw ivMarkBroken(h.env, t.run!, new Error(`generation ${h.env.INTERVAL_STORE_GEN}, tier ${t.run}: sort \`${sort}\` has no \`${IV_TOTAL_COL}\` column under a base whose sort has it, so its rows can't be tested against a threshold`))
+  }
+}
+
 /** The row groups a `readSizeRects` decodes: every group of the size sort
  * whose path range meets a rect's and whose top bucket clears the read's
  * lowest threshold — the planner's `select_bysize`, exactly. */
@@ -3648,6 +3661,7 @@ export async function readSizeRects(
   stop?: () => boolean,
 ): Promise<Row[]> {
   if (!rects.length) return []
+  if (!lens) assertTiersKeyedOnTotal(h)
   const kept = plan ?? await planSizeRects(h, rects, thrAt, lens)
   const lensOk = (r: Row) => !lens || r.usr === lens.key
   const at = (depth: number, path: string) => rects.some(q => depth >= q.dLo && depth <= q.dHi && path >= q.pLo && path < q.pHi)

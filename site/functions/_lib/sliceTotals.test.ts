@@ -1,6 +1,6 @@
 import { beforeAll, describe, expect, it, vi } from 'vitest'
 import type { Env } from './auth'
-import { asOfScans, groupDoc, type IndexHandle, IvGroup, openIndex, planSizeRects, readRects, readSizeRects, type Row, slices, withTrace } from './index'
+import { asOfScans, groupDoc, type IndexHandle, IvGroup, IvTierBroken, IvUnavailable, ivRefusal, openIndex, planSizeRects, readRects, readSizeRects, rowColumns, type Row, slices, withTrace } from './index'
 import { fixture } from './testStore'
 import { buildView } from './view'
 
@@ -145,5 +145,26 @@ describe('a class-scoped view over the total-keyed sort', () => {
       root: [21227520, 6],
       kids: [['big', 16777216, 2], ['grow', 4450304, 4]],
     })
+  })
+})
+
+// Last in the file: it cuts the run out of this isolate's store (`IV_BROKEN_TTL`).
+describe("a run's total-keyed sort without `tot`, under a base that has it", () => {
+  it('is its run broken, by name, not a read short of its rows', async () => {
+    const { byTotal } = await sorts(S2)
+    const run = byTotal.runs![0]
+    expect(run.columns!.slice(-1)).toEqual(['tot'])
+    // The run as its footer would open without the column: `openIvRun`'s schema and `rowColumns` of it.
+    const schema = run.schema.filter(l => l.name !== 'tot')
+    const bare = { ...byTotal, runs: [{ ...run, schema, columns: rowColumns(run.version, schema) }] } as IndexHandle
+    const err = await readSizeRects(bare, ALL, () => MiB).then(() => null, (e: unknown) => e)
+    expect(err).toBeInstanceOf(IvTierBroken)
+    expect((err as Error).message).toBe(`interval store run ${run.run} is broken: generation g8, tier ${run.run}: sort \`slices-bytotal\` has no \`tot\` column under a base whose sort has it, so its rows can't be tested against a threshold`)
+    const res = ivRefusal(err)!
+    expect([res.status, res.headers.get('retry-after'), res.headers.get('cache-control')]).toEqual([503, '30', 'no-store'])
+    // The retry (`ivRetry`) finds the run cut out: its scan is refused, and the scan before it answers.
+    await expect(sorts(S2)).rejects.toBeInstanceOf(IvUnavailable)
+    const before = await sorts(S1)
+    expect((await readSizeRects(before.byTotal, ALL, () => (1 << 24) + 1)).map(slice).sort()).toEqual(['1 bk - 51200 1', '1 bk alice 8491008 2', '1 bk bob 8491008 2'])
   })
 })
