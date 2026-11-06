@@ -7,18 +7,17 @@
  * `COALESCE_S` of their reply's last update edit that one reply in place. A ✅
  * on the parent (or an emptied queue) moves the plan to a new thread on the
  * next event. Automatic posts name people in plain text, never by mention.
- * The pure parts (`renderParent`, `stageReply`, the event texts; the gate is
- * `plans.realGate`) are what the unit tests pin; the rest is Slack + D1 I/O,
+ * The pure parts (`renderParent`, `stageReply`, the event texts) are what the
+ * unit tests pin; the rest is Slack + D1 I/O,
  * best-effort — a Slack failure never fails the gesture that caused it.
  */
 import type { D1Database } from '@cloudflare/workers-types'
 import type { RunOutcome } from '../../src/runs.js'
-import { type FinishedRun, type Gate, openPlanId, planDigest, planItemLines, planRuns, realGate, type RunRow, scanDeletions, unstageDeleted } from './plans.js'
+import { type FinishedRun, openPlanId, planDigest, planItemLines, planRuns, type RunRow, scanDeletions, unstageDeleted } from './plans.js'
 import { withoutDeleted } from '../../src/stagedScan.js'
 import { slackApi, slackPeople, type SlackPerson, slackReady, type SlackEnv, type SlackResult } from './slack.js'
 import type { Env } from './auth.js'
-import { minSoftDeleteDays } from './sweepSettings.js'
-import { runHasNoUndo, runPromisedNothing, slackUndoTerms, undoneText, type UndoUnavailable, undoUnavailableText } from '../../src/softDelete.js'
+import { runHasNoUndo, runPromisedNothing, undoneText, type UndoUnavailable, undoUnavailableText } from '../../src/softDelete.js'
 import { runUndoNow } from './softDeleteNow.js'
 import { pathScans, storeReady } from './index.js'
 import { MAX_PREFIXES, type PrefixStat, prefixesAt } from './prefixes.js'
@@ -58,7 +57,7 @@ export interface ParentView {
   stagers: string[]
   runs: RunRow[]
   digest: string
-  /** Offer the dispatch buttons (the deployment's executor is wired for Slack). */
+  /** Offer Dry-run and the link to delete (the deployment's executor is wired). */
   actions: boolean
   closed: boolean
   names?: Names
@@ -67,10 +66,8 @@ export interface ParentView {
   /** The plan's share card (a signed, full-tier `/og/staged.png` URL). */
   image?: string
   /** What is still queued: the items no real run has deleted (the title and
-   *  "staged by"; the gate and the confirm stay on the whole plan). */
+   *  "staged by"). */
   queued?: { items: number; batches: number; stagers: string[] }
-  /** The sweep's soft-delete minimum, what the confirm can promise. Absent: no such guard (`plan-sweep`, whose undo is its own 7-day hold). */
-  minSoftDeleteDays?: number
   /** Unix seconds: whether a real run is still undoable (default: now). */
   now?: number
   /** What the last real run's run dir says of its totals (`lastRunOutcome`); absent or null: nothing to add. */
@@ -140,26 +137,12 @@ const undoClause = (r: RunRow, deadline: number, v: Pick<ParentView, 'undoUnavai
     : `${since ? '; the rest' : ','} undoable until ${utc(deadline)}${v.undoUnseen ? ' if the buckets\' soft delete is still on (this site can\'t see it)' : ''}`)
 }
 
-/** The real-delete button's value: the plan, its item set's digest, and the minimum its confirm states, which dispatch holds the
- * click to (absent: `plan-sweep`, with no such guard). */
-export const realButtonValue = (planId: number, digest: string, minSoftDeleteDays?: number): string =>
-  `${planId}:${digest}${minSoftDeleteDays === undefined ? '' : `:${minSoftDeleteDays}`}`
-
-/** A dispatch button's value (`realButtonValue`; the dry-run's, or a card from before the minimum, has fewer parts), or null if bad. */
-export function parseDispatchButton(value: string): { planId: number; digest?: string; shownMinSoftDeleteDays?: number } | null {
-  const [plan, digest, shown, ...rest] = value.split(':')
-  const planId = Number(plan)
-  if (!Number.isInteger(planId) || rest.length || (shown !== undefined && !/^\d+$/.test(shown))) return null
-  return { planId, ...(digest === undefined ? {} : { digest }), ...(shown === undefined ? {} : { shownMinSoftDeleteDays: Number(shown) }) }
-}
-
 /** The thread's parent message: `{ text, blocks }` for chat.postMessage / chat.update. */
 export function renderParent(v: ParentView): { text: string; blocks: unknown[] } {
   const q = v.queued ?? { items: v.items, batches: v.batches, stagers: v.stagers }
   const title = v.closed ? `*Staged plan #${v.planId}* (closed)` : `*Staged for deletion* · plan #${v.planId}`
   const by = q.stagers.length ? `staged by ${q.stagers.map(e => who(e, v.names)).join(', ')}` : 'nothing staged'
   const head = [`${title}: ${totalLine(q.items, v.size)}`, ...(v.size ? sizeNotes(v.size) : []), by]
-  const gate = realGate(v.runs, v.digest, v.items)
   const now = v.now ?? Math.floor(Date.now() / 1000)
   // Only what bears on the current set: a dry-run of a set since changed, or a real run past its undo window, is history (the thread and www keep it).
   const latestDry = [...v.runs].filter(r => r.mode === 'dry').sort((a, b) => b.started_ts - a.started_ts)[0]
@@ -178,22 +161,10 @@ export function renderParent(v: ParentView): { text: string; blocks: unknown[] }
   ]
   if (v.actions && !v.closed && v.items) {
     buttons.push({ type: 'button', action_id: 'staged_dry', value: String(v.planId), text: { type: 'plain_text', text: 'Dry-run' } })
-    if (gate.ok) {
-      buttons.push({
-        type: 'button', action_id: 'staged_real', value: realButtonValue(v.planId, v.digest, v.minSoftDeleteDays), style: 'danger',
-        text: { type: 'plain_text', text: 'Delete for real…' },
-        confirm: {
-          title: { type: 'plain_text', text: 'Really delete?' },
-          text: { type: 'mrkdwn', text: `Deletes the ${fmtN(v.items)} staged ${v.items === 1 ? 'prefix' : 'prefixes'}: ${fmtBytes(gate.dry.deleted_bytes)} / ${fmtN(gate.dry.deleted_objects)} objects per the dry-run on scan ${gate.dry.scan}. ${v.minSoftDeleteDays === undefined ? 'A real deletion may be permanent; recovery is not guaranteed.' : slackUndoTerms(v.minSoftDeleteDays)}` },
-          confirm: { type: 'plain_text', text: 'Delete' },
-          deny: { type: 'plain_text', text: 'Cancel' },
-          style: 'danger',
-        },
-      })
-    }
+    // A link: a real delete needs a site session, and no dry run (`plans.realRun`). Its own `action_id`: Slack refuses two alike in a block.
+    buttons.push({ type: 'button', action_id: 'staged_delete_link', text: { type: 'plain_text', text: 'Delete for real…' }, url: `${v.siteUrl}/staged` })
   }
-  const hint = v.actions && !v.closed && v.items && !gate.ok ? `_Delete for real_ appears after a finished dry-run of the current set (${gate.reason}).` : null
-  const status = [dryLine, realLine, hint].filter(Boolean).join('\n')
+  const status = [dryLine, realLine].filter(Boolean).join('\n')
   const blocks = [
     { type: 'section', text: { type: 'mrkdwn', text: head.join('\n') } },
     // Slack refuses a section with no text.
@@ -750,7 +721,7 @@ export async function notifyPlan(env: NotifyEnv, db: D1Database, planId: number,
       const lastOutcome = last?.finished_ts ? await lastRunOutcome(full)?.(last) : null
       // Only the `sweep` executor's undo restores from soft delete: `plan-sweep`'s card says what it always did.
       const undo = env.EXECUTOR === 'sweep' && last?.finished_ts ? await runUndoNow(full, db, last, now) : null
-      const parent = renderParent({ ...v, ...(env.EXECUTOR === 'sweep' ? { minSoftDeleteDays: await minSoftDeleteDays(db) } : {}), lastOutcome, undoUnavailable: undo?.unavailable, undoUnseen: !!undo?.unseen, now, queued: queuedOf(countedItems(v.live, v.deleted, at?.stats ?? null)), names, size, image: await stagedCardUrl(env, db, siteUrl, v.digest) ?? undefined })
+      const parent = renderParent({ ...v, lastOutcome, undoUnavailable: undo?.unavailable, undoUnseen: !!undo?.unseen, now, queued: queuedOf(countedItems(v.live, v.deleted, at?.stats ?? null)), names, size, image: await stagedCardUrl(env, db, siteUrl, v.digest) ?? undefined })
       return { at, people, names, parent }
     }
     const { at, people, names, parent } = await render(v)
@@ -908,11 +879,4 @@ export async function announceFinished(env: NotifyEnv, db: D1Database, runs: rea
     if (ok) await unstageDeleted(db, r.plan_id, [run_id])
     await notifyPlan(env, db, r.plan_id, siteUrl, { run: r, phase: ok ? 'finished' : 'failed', reason, outcome })
   }
-}
-
-/** The plan's current real-deletion gate (fresh from D1), for `/slack/actions`. */
-export async function planGate(db: D1Database, planId: number): Promise<{ gate: Gate; digest: string; items: number; closed: boolean } | null> {
-  const v = await loadView(db, planId, '', false)
-  if (!v) return null
-  return { gate: realGate(v.runs, v.digest, v.items), digest: v.digest, items: v.items, closed: v.closed }
 }

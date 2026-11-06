@@ -15,35 +15,16 @@ const ids = (blocks: unknown[]): string[] =>
 describe('renderParent', () => {
   const base = { planId: 7, siteUrl: 'https://cw-s3.oa.dev', items: 3, batches: 2, stagers: ['ann@staff.example.test', 'bo@viewer.example.test'], digest: 'D1', actions: true, closed: false }
 
-  describe('the real-delete button carries the minimum its confirm states', () => {
-    const value = (minSoftDeleteDays?: number) => (renderParent({ ...base, runs: [run({})], minSoftDeleteDays }).blocks as { elements?: { action_id: string; value?: string }[] }[])
-      .flatMap(b => b.elements ?? []).find(e => e.action_id === 'staged_real')!.value
-    it.each<[string, number | undefined, string]>([
-      ['no guard (cw): as it always was', undefined, '7:D1'],
-      ['the default', 7, '7:D1:7'],
-      ['soft delete not required', 0, '7:D1:0'],
-    ])('%s', (_, min, expected) => expect(value(min)).toBe(expected))
-  })
-
-  describe('the real-delete confirm says what undo there is', () => {
-    const confirmText = (minSoftDeleteDays?: number) => {
-      const real = (renderParent({ ...base, runs: [run({})], minSoftDeleteDays }).blocks as { elements?: { action_id: string; confirm?: { text: { text: string } } }[] }[])
-        .flatMap(b => b.elements ?? []).find(e => e.action_id === 'staged_real')!
-      return real.confirm!.text.text
-    }
-    const head = 'Deletes the 3 staged prefixes: 2.0 TiB / 1,234 objects per the dry-run on scan 2026-09-28T1201.'
-    it.each<[string, number | undefined, string]>([
-      ['no guard (cw: bucket versioning is not required)', undefined, 'A real deletion may be permanent; recovery is not guaranteed.'],
-      ['the default', 7, 'Recoverable for at least 7 days (undo in www).'],
-      ['shorter', 3, 'Recoverable for at least 3 days, less than the usual 7 (undo in www).'],
-      ['soft delete not required', 0, 'No undo: this deployment doesn\'t require soft delete, so treat these deletes as permanent.'],
-    ])('%s', (_, min, terms) => expect(confirmText(min)).toBe(`${head} ${terms}`))
-  })
-
-  it('offers Delete for real only once a matching dry-run has finished', () => {
-    expect(ids(renderParent({ ...base, runs: [] }).blocks)).toEqual(['staged_open', 'staged_dry'])
-    expect(ids(renderParent({ ...base, runs: [run({ plan_digest: 'OLD' })] }).blocks)).toEqual(['staged_open', 'staged_dry'])
-    expect(ids(renderParent({ ...base, runs: [run({})] }).blocks)).toEqual(['staged_open', 'staged_dry', 'staged_real'])
+  describe('Delete for real is a link to /staged, never a dispatch', () => {
+    const OPEN = { type: 'button', action_id: 'staged_open', text: { type: 'plain_text', text: 'Open in www' }, url: 'https://cw-s3.oa.dev/staged' }
+    const DRY = { type: 'button', action_id: 'staged_dry', value: '7', text: { type: 'plain_text', text: 'Dry-run' } }
+    const LINK = { type: 'button', action_id: 'staged_delete_link', text: { type: 'plain_text', text: 'Delete for real…' }, url: 'https://cw-s3.oa.dev/staged' }
+    const buttons = (runs: RunRow[]) => (renderParent({ ...base, runs }).blocks.find(b => (b as { type: string }).type === 'actions') as { elements: unknown[] }).elements
+    it.each<[string, RunRow[]]>([
+      ['with a matching dry run', [run({})]],
+      ['with no dry run: a real run needs none', []],
+      ['with a dry run of a set since changed', [run({ plan_digest: 'OLD' })]],
+    ])('%s', (_, runs) => expect(buttons(runs)).toEqual([OPEN, DRY, LINK]))
   })
 
   it('shows only the www link when dispatch is not wired, the plan is closed, or empty', () => {
@@ -53,8 +34,7 @@ describe('renderParent', () => {
   })
 
   it('says only what bears on the current set: no stale dry-run, no real run past its undo window', () => {
-    const txt = (runs: RunRow[], now = 1000): string => (renderParent({ ...base, runs, now }).blocks[1] as { text: { text: string } }).text.text
-    const hint = (why: string) => `_Delete for real_ appears after a finished dry-run of the current set (${why}).`
+    const txt = (runs: RunRow[], now = 1000): string | null => (renderParent({ ...base, runs, now }).blocks.filter(b => (b as { type: string }).type === 'section')[1] as { text: { text: string } } | undefined)?.text.text ?? null
     const real = run({ mode: 'real', run_id: 'r', plan_digest: 'OLD', undo_deadline: 2000, started_ts: 50 })
     expect([
       txt([]),
@@ -67,23 +47,23 @@ describe('renderParent', () => {
       txt([run({}), { ...real, undo_deadline: null }]),
       txt([run({}), { ...real, finished_ts: null }]),
     ]).toEqual([
-      hint('no dry-run of this plan yet'),
+      null,
       'Latest dry-run would delete *2.0 TiB* / 1,234 objects (scan 2026-09-28T1201) — matches the current plan.',
-      hint('the plan changed since the last dry-run; dry-run it again'),
-      `Latest dry-run (\`cw-sweep-dry-1\`) ended without a result.\n${hint('the plan changed since the last dry-run; dry-run it again')}`,
-      `Dry-run running (ann, scan 2026-09-28T1201).\n${hint('a dry run is in progress (cw-sweep-dry-1)')}`,
+      null,
+      'Latest dry-run (`cw-sweep-dry-1`) ended without a result.',
+      'Dry-run running (ann, scan 2026-09-28T1201).',
       'Latest dry-run would delete *2.0 TiB* / 1,234 objects (scan 2026-09-28T1201) — matches the current plan.\nLast real run deleted 2.0 TiB / 1,234 objects, undoable until 1970-01-01 00:33Z.',
       'Latest dry-run would delete *2.0 TiB* / 1,234 objects (scan 2026-09-28T1201) — matches the current plan.',
       'Latest dry-run would delete *2.0 TiB* / 1,234 objects (scan 2026-09-28T1201) — matches the current plan.',
-      `Latest dry-run would delete *2.0 TiB* / 1,234 objects (scan 2026-09-28T1201) — matches the current plan.\nReal run in progress (ann).\n${hint('a real run is in progress (r)')}`,
+      'Latest dry-run would delete *2.0 TiB* / 1,234 objects (scan 2026-09-28T1201) — matches the current plan.\nReal run in progress (ann).',
     ])
   })
 
   it('leaves out the status section when there is nothing to say (Slack refuses an empty one)', () => {
-    expect(renderParent({ ...base, runs: [], actions: false }).blocks.map(b => (b as { type: string }).type)).toEqual(['section', 'actions'])
+    expect([false, true].map(actions => renderParent({ ...base, runs: [], actions }).blocks.map(b => (b as { type: string }).type))).toEqual([['section', 'actions'], ['section', 'actions']])
   })
 
-  it('titles by what is still queued (deleted items drop out), the gate by the whole plan', () => {
+  it('titles by what is still queued (deleted items drop out)', () => {
     const head = (v: Partial<Parameters<typeof renderParent>[0]>): string => (renderParent({ ...base, runs: [], ...v }).blocks[0] as { text: { text: string } }).text.text
     expect([
       head({}),
@@ -92,12 +72,6 @@ describe('renderParent', () => {
       '*Staged for deletion* · plan #7: *3 prefixes*\nstaged by ann, bo',
       '*Staged for deletion* · plan #7: *1 prefix*\nstaged by bo',
     ])
-  })
-
-  it('puts the dry-run numbers and the recoverability in the real-delete confirm', () => {
-    const real = (renderParent({ ...base, runs: [run({})] }).blocks.find(b => (b as { type: string }).type === 'actions') as { elements: Record<string, unknown>[] }).elements[2]
-    expect(real.value).toBe('7:D1')
-    expect((real.confirm as { text: { text: string } }).text.text).toBe('Deletes the 3 staged prefixes: 2.0 TiB / 1,234 objects per the dry-run on scan 2026-09-28T1201. A real deletion may be permanent; recovery is not guaranteed.')
   })
 })
 
@@ -381,11 +355,11 @@ describe('D1', () => {
     const types = (blocks: unknown[]) => blocks.map(b => (b as { type: string }).type)
     it('an image block last, only with an image and items', () => {
       const v = { ...base, image: 'https://site.example.org/og/staged.png?v=abc&sig=x' }
-      expect([types(renderParent(v).blocks), renderParent(v).blocks[3], types(renderParent({ ...v, items: 0 }).blocks), types(renderParent(base).blocks)]).toEqual([
-        ['section', 'section', 'actions', 'image'],
+      expect([types(renderParent(v).blocks), renderParent(v).blocks[2], types(renderParent({ ...v, items: 0 }).blocks), types(renderParent(base).blocks)]).toEqual([
+        ['section', 'actions', 'image'],
         { type: 'image', image_url: 'https://site.example.org/og/staged.png?v=abc&sig=x', alt_text: 'Plan #7: the staged prefixes as a treemap, coloured by owner' },
         ['section', 'actions'],
-        ['section', 'section', 'actions'],
+        ['section', 'actions'],
       ])
     })
     it('no card without cards on, nor for a non-https origin (Slack fetches it); with them, a full card backed by a fresh `og_tokens` row (cw `0010`)', async () => {
