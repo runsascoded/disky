@@ -403,7 +403,8 @@ class Ctx:
 
     def skip(self, kind: str, reason: str) -> None:
         """The open phase's work was skipped, for `reason`: it ends done, its note's `skipped (<kind>): <reason>`
-        (`scan_runs.phase_skip`) making the run `partial` on /scans with that reason, and a warn alert names it."""
+        (`scan_runs.phase_skip`) making the run read short on /scans with that reason (as its step's failure would),
+        and a warn alert names it."""
         self.skipped = f"skipped ({kind}): {reason}"
 
     def recorded_skip(self, phase: str) -> str | None:
@@ -1072,7 +1073,8 @@ def static_names(ctx: Ctx, arg: str | None) -> None:
     prof = ctx.opt("static-names", "profile") or ctx.env["STATIC_NAMES_PROFILE"]
     # exit 4: another coordinator (a catch-up, or an earlier scan's run) or a compaction holds the store's lease; it
     # appends this scan too, else the next run does. Until then search refuses the scan: an explicit skip (the probe
-    # reads it from the record and skips those refusals; /scans shows the run `partial`, with this reason)
+    # reads it from the record and skips those refusals; /scans shows the run `incomplete`, with this reason, until a
+    # later run's append makes it `recovered`)
     with ctx.phase("static-names", note="overlapped"):
         # `merge: false`: the due carries (and a compaction) wait for `runs merge` on its own schedule, never a scan's task.
         # `compact_cmd`: the carries are submitted here (not waited on), and a due compaction, an hours-long fold, is

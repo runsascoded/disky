@@ -103,8 +103,9 @@ def phase_status(note: str | None) -> str:
 
 def phase_skip(note: str | None) -> str | None:
     """A phase's explicit skip: its note's `skipped[ (kind)]: reason` clause (at the start or after a comma, e.g.
-    `overlapped, skipped (busy): …`), or None. The phase is done, but its work is not: the run reads `partial` with
-    this reason on /scans (`scanRunsModel.phaseSkip`), and a later step may act on it (the probe's `-i`)."""
+    `overlapped, skipped (busy): …`), or None. The phase is done, but its work is not: the run reads short on
+    /scans with this reason (`scanRunsModel.phaseSkip`; `partial` or `incomplete` by its step's `side`, `recovered` once
+    done), and a later step may act on it (the probe's `-i`)."""
     m = re.search(r"(?:^|,\s*)(skipped(?: \([^)]*\))?: .+)$", note or "")
     return m[1] if m else None
 
