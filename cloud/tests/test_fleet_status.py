@@ -23,6 +23,7 @@ RUNS = {"runs": [
     run("succeeded", kind='compact'),
     run("succeeded", issues=[{"phase": "warm-cache"}]),
     run("succeeded", issues=[{"phase": "digest", "recovery": {"scan": "x"}}]),
+    run("succeeded", issues=[{"phase": "probe", "passing": {"scan": "y"}}]),
     run("failed"),
 ]}
 
@@ -52,7 +53,7 @@ def test_one_line_per_site_with_the_unreadable_ones_saying_why(sites):
     result = CliRunner().invoke(main, ARGS)
     assert result.exit_code == 0
     assert result.output.rstrip().split("\n") == [
-        "gcs  scan 2026-11-05T1242 · 12h ago · …✓~✓✗ · build 576e2b53",
+        "gcs  scan 2026-11-05T1242 · 12h ago · …✓~✓✓✗ · build 576e2b53",
         "cw   https://cw.test/api/health → HTTP 503: down",
         "hf   no token ($HF_T)",
     ]
