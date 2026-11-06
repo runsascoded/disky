@@ -130,8 +130,8 @@ importers:
         specifier: ^0.27.20
         version: 0.27.20(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
       '@open-athena/auth':
-        specifier: github:Open-Athena/auth#68e78c9d7a43daabfc5b0ff663e28b8cf8c5436f
-        version: https://codeload.github.com/Open-Athena/auth/tar.gz/68e78c9d7a43daabfc5b0ff663e28b8cf8c5436f(@cloudflare/workers-types@5.20261014.1)(@tanstack/react-query@5.101.4(react@19.2.8))(react@19.2.8)(vue@3.5.44(typescript@5.9.3))
+        specifier: github:Open-Athena/auth#184b574b21f1814b4b5e6c933cfdc97150d8c23f
+        version: https://codeload.github.com/Open-Athena/auth/tar.gz/184b574b21f1814b4b5e6c933cfdc97150d8c23f(@cloudflare/workers-types@5.20261014.1)(@floating-ui/react@0.27.20(react-dom@19.2.8(react@19.2.8))(react@19.2.8))(@tanstack/react-query@5.101.4(react@19.2.8))(react-dom@19.2.8(react@19.2.8))(react@19.2.8)(vue@3.5.44(typescript@5.9.3))
       '@open-athena/treemap':
         specifier: workspace:*
         version: link:../packages/treemap
@@ -1381,20 +1381,26 @@ packages:
     cpu: [x64]
     os: [linux]
 
-  '@open-athena/auth@https://codeload.github.com/Open-Athena/auth/tar.gz/68e78c9d7a43daabfc5b0ff663e28b8cf8c5436f':
-    resolution: {tarball: https://codeload.github.com/Open-Athena/auth/tar.gz/68e78c9d7a43daabfc5b0ff663e28b8cf8c5436f}
-    version: 0.1.0-dist.cf25b10
+  '@open-athena/auth@https://codeload.github.com/Open-Athena/auth/tar.gz/184b574b21f1814b4b5e6c933cfdc97150d8c23f':
+    resolution: {tarball: https://codeload.github.com/Open-Athena/auth/tar.gz/184b574b21f1814b4b5e6c933cfdc97150d8c23f}
+    version: 0.1.0-dist.ee73a03
     peerDependencies:
       '@cloudflare/workers-types': '*'
+      '@floating-ui/react': ^0.27.20
       '@tanstack/react-query': ^5.0.0
       react: ^18.0.0 || ^19.0.0
+      react-dom: ^18.0.0 || ^19.0.0
       vue: ^3.5.0
     peerDependenciesMeta:
       '@cloudflare/workers-types':
         optional: true
+      '@floating-ui/react':
+        optional: true
       '@tanstack/react-query':
         optional: true
       react:
+        optional: true
+      react-dom:
         optional: true
       vue:
         optional: true
@@ -4410,11 +4416,13 @@ snapshots:
   '@napi-rs/lzma-linux-x64-gnu@1.5.1':
     optional: true
 
-  '@open-athena/auth@https://codeload.github.com/Open-Athena/auth/tar.gz/68e78c9d7a43daabfc5b0ff663e28b8cf8c5436f(@cloudflare/workers-types@5.20261014.1)(@tanstack/react-query@5.101.4(react@19.2.8))(react@19.2.8)(vue@3.5.44(typescript@5.9.3))':
+  '@open-athena/auth@https://codeload.github.com/Open-Athena/auth/tar.gz/184b574b21f1814b4b5e6c933cfdc97150d8c23f(@cloudflare/workers-types@5.20261014.1)(@floating-ui/react@0.27.20(react-dom@19.2.8(react@19.2.8))(react@19.2.8))(@tanstack/react-query@5.101.4(react@19.2.8))(react-dom@19.2.8(react@19.2.8))(react@19.2.8)(vue@3.5.44(typescript@5.9.3))':
     optionalDependencies:
       '@cloudflare/workers-types': 5.20261014.1
+      '@floating-ui/react': 0.27.20(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
       '@tanstack/react-query': 5.101.4(react@19.2.8)
       react: 19.2.8
+      react-dom: 19.2.8(react@19.2.8)
       vue: 3.5.44(typescript@5.9.3)
 
   '@parcel/watcher-android-arm64@2.6.0':

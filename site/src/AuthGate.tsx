@@ -4,6 +4,7 @@ import { useLocation, useNavigate } from 'react-router-dom'
 import { AuthGate as Gate, deniedEmail, RequestAccessForm, SignInPanel, useForgetWhoami } from '@open-athena/auth/react'
 import { AUTH_MODE, devIdentity, WHOAMI_SOURCE } from './auth'
 import { signInError } from './signInError'
+import { signInNext } from './signInNext'
 import { DEFAULT_STORE, storeEmailAuth } from './stores'
 
 /** The public Google client id, or null where Google sign-in isn't configured
@@ -167,7 +168,5 @@ function RememberedAccount({ email }: { email: string }) {
  *  (`?error=`). Same-origin paths only; anything else goes home. */
 export function SignInPage() {
   const { search } = useLocation()
-  const raw = new URLSearchParams(search).get('next') ?? '/'
-  const next = raw.startsWith('/') && !raw.startsWith('//') ? raw : '/'
-  return <LoginWall next={next} error={signInError(search)} />
+  return <LoginWall next={signInNext(search)} error={signInError(search)} />
 }
