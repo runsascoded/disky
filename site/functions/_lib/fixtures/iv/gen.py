@@ -66,8 +66,8 @@ def main() -> None:
         if not (work / "out" / sub).is_dir():  # a sort this fixture's ranges don't build (`slices`: `g2`)
             continue
         schema = ist.SUB_SCHEMA[sub]
-        ist.write_served(con, f"read_parquet('{work}/out/{sub}/r*.parquet')", sort, out / "served" / f"{sort}.parquet", schema, rg_rows=4,
-                         stamps=[x["ts"] for x in scans])
+        ist.write_served(con, f"read_parquet('{work}/out/{sub}/r*.parquet')", sort, out / "served" / f"{sort}.parquet", schema,
+                         page_rows=ist.served_page_rows(sort), rg_rows=4, stamps=[x["ts"] for x in scans])
     (out / "scans.json").write_text(json.dumps({"scans": [{"id": s["id"], "ts": s["ts"]} for s in scans]}, indent=1) + "\n")
     store = ir.Store(out / "served")
     expected = []
@@ -128,7 +128,7 @@ def tiered_gens(mount: Path, work: Path, scans: list[dict], n_base: int, ranges:
         for sort in ia.run_sorts():
             sub, _, _ = ist.SORTS[sort]
             ist.write_served(con, f"read_parquet('{base}/{sub}/r*.parquet')", sort, out / "served" / f"{sort}.parquet", ist.SUB_SCHEMA[sub],
-                             rg_rows=rg_rows, stamps=[x["ts"] for x in scans[:n_base]])
+                             page_rows=ist.served_page_rows(sort), rg_rows=rg_rows, stamps=[x["ts"] for x in scans[:n_base]])
         (out / "scans.json").write_text(json.dumps({"scans": [{"id": x["id"], "ts": x["ts"]} for x in scans[:n_base]]}, indent=1) + "\n")
         if mode == "deferred":
             # The bucket as the append writes it: each scan's run (deltas, cut, `meta.json`), published, then the merge stage.
@@ -214,7 +214,7 @@ def slices_gen() -> None:
         if sort in ("reads", ist.ATTRIBUTION):
             continue
         ist.write_served(con, f"read_parquet('{work}/out/{sub}/r*.parquet')", sort, out / "served" / f"{sort}.parquet", ist.SUB_SCHEMA[sub],
-                         rg_rows=256, stamps=[x["ts"] for x in scans])
+                         page_rows=ist.served_page_rows(sort), rg_rows=256, stamps=[x["ts"] for x in scans])
     (out / "scans.json").write_text(json.dumps({"scans": [{"id": x["id"], "ts": x["ts"]} for x in scans]}, indent=1) + "\n")
     shutil.rmtree(work)
     print(f"{G2}: {sorted(p.name for p in (out / 'served').iterdir())}", file=sys.stderr)

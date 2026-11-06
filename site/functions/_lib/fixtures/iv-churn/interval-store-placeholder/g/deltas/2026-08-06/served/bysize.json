@@ -1,1 +1,1 @@
-{"bytes": 19096, "groups": 6, "groups_bytes": 5631, "rows": 20, "s": 0.0, "segments": {"hist": {"groups": 3, "rows": 10}, "open": {"groups": 3, "rows": 10}}, "sort": "bysize"}
+{"bytes": 13403, "groups": 6, "groups_bytes": 5213, "rows": 20, "s": 0.0, "segments": {"hist": {"groups": 3, "rows": 10}, "open": {"groups": 3, "rows": 10}}, "sort": "bysize"}

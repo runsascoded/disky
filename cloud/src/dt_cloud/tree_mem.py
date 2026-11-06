@@ -83,8 +83,9 @@ PART_GROUPS = 3
 #: metadata and statistics, its page-index builders): a worker's part grows by this × columns every served group.
 #: Measured ~2.1 KiB (one-page groups of 19 columns: 36–41 KiB a group).
 CHUNK_META = 2304
-#: Bytes it keeps per page of each column (its OffsetIndex location, its ColumnIndex entry): measured ~48 B, plus each
-#: statistics string column's min and max (`interval_store.STAT_COLS`; `group_meta`'s `stat_bytes`).
+#: Bytes it keeps per page of each column of a sort with a page index (its OffsetIndex location, its ColumnIndex entry):
+#: measured ~48 B, plus each statistics string column's min and max (`interval_store.STAT_COLS`; `group_meta`'s `stat_bytes`).
+#: A sort without one (`interval_store.served_page_rows`) keeps nothing per page.
 PAGE_META = 48
 #: The buffer a joining worker copies through (`parquet_pages._copy_range`, without `copy_file_range`).
 CONCAT_BUF = 1 << 24
@@ -179,7 +180,7 @@ def part_bytes(spool_rows: int, rg_rows: int, rb: int) -> int:
 def group_meta(cols: int, pages: int, stat_bytes: int = 0) -> int:
     """What the parquet writer keeps per served row group it has written, until it closes: `CHUNK_META` a column chunk,
     `PAGE_META` a page of each column, and the min and max of each page of its statistics string columns (`stat_bytes`
-    a value, summed over them)."""
+    a value, summed over them). `pages`: those its page index records, 0 without one."""
     return cols * CHUNK_META + pages * (cols * PAGE_META + 2 * stat_bytes)
 
 

@@ -405,7 +405,7 @@ def _cut(rel_root: Path, out: Path) -> Path:
     con = duckdb.connect()
     for sort in ia.run_sorts():
         sub, _, _ = ist.SORTS[sort]
-        ist.write_served(con, ia.delta_relation(str(rel_root), sub), sort, out / f"{sort}.parquet", ist.SUB_SCHEMA[sub], rg_rows=4)
+        ist.write_served(con, ia.delta_relation(str(rel_root), sub), sort, out / f"{sort}.parquet", ist.SUB_SCHEMA[sub], page_rows=ist.served_page_rows(sort), rg_rows=4)
     return out
 
 
@@ -418,7 +418,7 @@ def served(world):
     base = root / "served-base"
     for sort in ("path", "bysize"):
         sub, _, _ = ist.SORTS[sort]
-        ist.write_served(con, f"read_parquet('{world['base']}/{sub}/r*.parquet')", sort, base / f"{sort}.parquet", ist.SUB_SCHEMA[sub], rg_rows=4,
+        ist.write_served(con, f"read_parquet('{world['base']}/{sub}/r*.parquet')", sort, base / f"{sort}.parquet", ist.SUB_SCHEMA[sub], page_rows=ist.served_page_rows(sort), rg_rows=4,
                          stamps=[s["ts"] for s in base_scans])
     cut = {}
     for d, stack in world["stacks"].items():

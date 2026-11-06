@@ -101,7 +101,7 @@ def staged(world, local, tmp_path_factory):
     (base / "ranges.json").unlink()
     for sort, (sub, _, _) in ((s, ist.SORTS[s]) for s in ist.served_sorts(True)):
         ist.write_served(con, f"read_parquet('{base}/{sub}/r*.parquet')", sort, base / "served" / f"{sort}.parquet", ist.served_schema(sort, churn=True),
-                         rg_rows=RG, stamps=[s["ts"] for s in scans[:BASE]])
+                         page_rows=ist.served_page_rows(sort), rg_rows=RG, stamps=[s["ts"] for s in scans[:BASE]])
     runs, prev = {}, None
     for j, s in enumerate(scans[BASE:], BASE):
         out = tmp / "runs" / s["id"]

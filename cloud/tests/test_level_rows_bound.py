@@ -152,6 +152,9 @@ def test_writer_meta_is_the_sorts_columns_and_the_files_mean_width(tmp_path):
     stat = -(-size // 10_000)
     assert ist.writer_meta([long, short], 8192, 256, cols=13) == tm.group_meta(13, 32, stat)
     assert ist.writer_meta([long, short], 8192, 256) == tm.group_meta(len(SCHEMA), 32, stat)
+    # A sort without pages: its columns, nothing a page, no string statistics.
+    assert ist.writer_meta([long, short], 8192, None, cols=13) == tm.group_meta(13, 0) == 13 * tm.CHUNK_META
+    assert ist.writer_meta([long, short], 8192, None) == tm.group_meta(len(SCHEMA), 0)
 
 
 def test_the_level_plan_charges_the_level_sorts_columns(tmp_path, monkeypatch):

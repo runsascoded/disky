@@ -6,6 +6,7 @@ import { ahead, clearIsolate, loadScopes } from './shared'
 import { sqliteD1 } from './testD1'
 import { fixtureR2 as r2 } from './testR2'
 import { readJson } from './testStore'
+import { buildDiff, buildView } from './view'
 
 vi.mock('@rdub/file-tree/stores/s3', async () => ({ S3Store: (await import('./testStore')).S3Store }))
 
@@ -153,6 +154,81 @@ describe('level diffs', () => {
     // Pages were read and skipped, and a group read by page decodes fewer rows than its 4 (it'd be read whole otherwise).
     expect([counts.pgroups > 0, counts.pskip > 0, counts.pages > 0]).toEqual([true, true, true])
     expect(decoded.filter(([rows, groups]) => rows >= 4 * groups && groups > 0)).toEqual([])
+  })
+
+  describe('a generation whose tiers were cut across a change of page settings (base and runs, some with a page index, some without)', () => {
+    // `interval-store/` (no page index: what the cut writes) and `-p2/` (2-row pages and a page index: what it wrote from
+    // 2b.1 until pages went back to the level sort alone) are the same store, so each tier — the base's `served/`, or a
+    // run — can come from either. A run cut in that time keeps its pages until a carry or a compaction rewrites it.
+    const PLAIN = 'interval-store'
+    const PAGED = 'interval-store-p2'
+    const MERGED = 'deltas/2026-08-04_2026-08-05'
+    const NEWEST = 'deltas/2026-08-06'
+    const tierOf = (rest: string): string | null => /^g\/(deltas\/[^/]+)\//.exec(rest)?.[1] ?? (rest.startsWith('g/served/') ? 'base' : null)
+    const mixed = (name: string, from: (tier: string) => string, reads: string[]): R2Bucket => {
+      const under = r2('iv-churn', reads)
+      const real = (key: string): string => {
+        const rest = key.slice(name.length + 1)
+        const tier = tierOf(rest)
+        return `${tier ? from(tier) : PLAIN}/${rest}`
+      }
+      return {
+        get: (key: string, o?: R2GetOptions) => under.get(real(key), o),
+        head: (key: string) => under.head(real(key)),
+        list: async ({ prefix }: { prefix: string }) => {
+          const { objects, truncated } = await under.list({ prefix: real(prefix) })
+          return { truncated, objects: objects.map(x => ({ ...x, key: x.key.replace(/^[^/]+\//, `${name}/`) })) }
+        },
+      } as unknown as R2Bucket
+    }
+    const envOf = async (prefix: string, bucket: R2Bucket) => ({ DB: (await sqliteD1()).db, ROOT_LABEL: 'all buckets', PATH_STORE: 'intervals', INTERVAL_STORE_GEN: 'g', INTERVAL_STORE_PREFIX: prefix, INDEX_R2: bucket }) as Env
+    /** The `path` data files read, as `<store> <tier>`. */
+    const tiersRead = (reads: string[]): string[] => [...new Set(reads.filter(k => k.endsWith('/served/path.parquet')).map(k => `${k.split('/')[0]} ${tierOf(k.slice(k.indexOf('/') + 1))}`))].sort()
+    const SCANS = ['2026-07-30', '2026-07-31', '2026-08-02', '2026-08-03', '2026-08-04', '2026-08-05', '2026-08-06']
+    const DIRS = ['', 'b1', 'b1/x', 'b2', 'b2/z']
+
+    it.each([
+      ['a paged base under runs without an index', 'interval-store-mix-a', (t: string) => (t === 'base' ? PAGED : PLAIN),
+        [`${PAGED} base`, `${PLAIN} ${MERGED}`, `${PLAIN} ${NEWEST}`]],
+      ['a base without an index under paged runs', 'interval-store-mix-b', (t: string) => (t === 'base' ? PLAIN : PAGED),
+        [`${PLAIN} base`, `${PAGED} ${MERGED}`, `${PAGED} ${NEWEST}`]],
+      ['a base without an index, a merged run with one, a newer run without (a store once the cut stops paging `path`)', 'interval-store-mix-c', (t: string) => (t === MERGED ? PAGED : PLAIN),
+        [`${PLAIN} base`, `${PAGED} ${MERGED}`, `${PLAIN} ${NEWEST}`]],
+    ])('%s: levels, Map views and walk diffs are the unpaged store\'s, each tier read as it was cut', async (_, name, from, tiers) => {
+      const reads: string[] = []
+      const env = await envOf(name, mixed(name, from, reads))
+      const plain = await envOf(PLAIN, r2('iv-churn', []))
+
+      // `/api/diff/level`: the one reader of `path`'s pages. A group with an index is read by page, one without whole.
+      const got = []
+      const counts = { pgroups: 0, pages: 0 }
+      for (const c of cases) {
+        const trace = (k: string, v: number) => { if (k in counts) counts[k as keyof typeof counts] += v }
+        got.push(shape((await buildLevels(env, { from: c.from, to: c.to, dirs: [c.path], k: 512, m: 'churn', chain: false, trace })).get(c.path)!))
+      }
+      expect(got).toEqual(cases.map(wanted))
+      expect([counts.pgroups > 0, counts.pages > 0]).toEqual([true, true])
+      expect(tiersRead(reads)).toEqual([...tiers].sort())
+
+      // The Map and the walk diff: whole groups from every tier, no page index asked for, the same answers.
+      const paged: string[] = []
+      const trace = (k: string) => { if (/^p(groups|ages|skip|rows|index|data|json|gets|rounds)/.test(k)) paged.push(k) }
+      reads.length = 0
+      for (const date of SCANS) {
+        for (const path of DIRS) {
+          const o = { date, path, w: 8, h: 6, minArea: 12, atten: 2 }
+          expect(await buildView(env, { ...o, trace })).toEqual(await buildView(plain, o))
+        }
+      }
+      for (let i = 1; i < SCANS.length; i++) {
+        for (const path of DIRS) {
+          const o = { from: SCANS[i - 1], to: SCANS[i], path, w: 8, h: 6, minArea: 12, atten: 2, top: 100 }
+          expect(await buildDiff(env, { ...o, trace })).toEqual(await buildDiff(plain, o))
+        }
+      }
+      expect(paged).toEqual([])
+      expect(tiersRead(reads)).toEqual([...tiers].sort())
+    })
   })
 
   it('counts GET rounds: a slot-bound GET is in the round after the one freeing its slot; colo lookups add none', async () => {
