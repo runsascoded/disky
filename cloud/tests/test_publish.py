@@ -186,6 +186,24 @@ def test_publish_verifies_required_destination_even_when_skipped(monkeypatch):
     assert dest == {obj.key: P.Dest(size=7, md5=MD5_HEX)}
 
 
+def test_publish_copies_a_throttled_object_again(monkeypatch):
+    """cw's `2026-11-04T1802`: one `UploadPart` R2 throttled past botocore's retries failed the scan's publish."""
+    obj, dest = publication_store(monkeypatch)
+    landed = P.copy_one
+    fails = [RuntimeError("An error occurred (ServiceUnavailable) when calling the UploadPart operation: Reduce your concurrent request rate for the same object.")]
+
+    def copy(src_bucket, s3, bucket, o):
+        if fails:
+            raise fails.pop()
+        landed(src_bucket, s3, bucket, o)
+
+    monkeypatch.setattr(P, "copy_one", copy)
+    sleeps: list[float] = []
+    monkeypatch.setattr(P.time, "sleep", sleeps.append)
+    report = P.publish("s", layer2="listing/{scan}/index/", required=(obj.key,))
+    assert (report, sleeps, dest) == (P.Report(copied=[obj.key], skipped=[], bytes=7), [P.R2_RETRY_S], {obj.key: P.Dest(size=7, md5=MD5_HEX)})
+
+
 def test_publish_refuses_unverified_required_destination(monkeypatch):
     obj, _ = publication_store(monkeypatch, corrupt_dest=True)
     with pytest.raises(ValueError) as exc:
