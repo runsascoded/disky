@@ -101,10 +101,49 @@ export function nodeAt(tree: TreeNode, segs: string[]): TreeNode | null {
  * (`loading[i]`): not while the spine stops short of the path and a level that could extend it is loading, and not
  * while the drilled node has no children and its own level is loading. The page holds what it drew until then,
  * never an ancestor's view or an empty canvas in passing. Settled levels (answered or failed) are drawn as they
- * are: a path the scan doesn't hold truncates to its deepest ancestor.
+ * are: a path the scan doesn't hold truncates to its deepest ancestor, and `spineFailure` names the level it
+ * stopped at.
  */
 export function spineReady(tree: TreeNode, graftPath: string, loading: boolean[]): boolean {
   const at = nodeAt(tree, graftPath.split('/').filter(Boolean))
   if (!at) return !loading.some(Boolean)
   return !!at.c?.length || !loading[loading.length - 1]
+}
+
+/**
+ * A level's failure: the error its read ended on, once the level has no answer (`answered`) and no read of it is
+ * still in flight (`loading`, which a read is through its retries). The full view's first: where a level asks both
+ * reads (the drilled one), that is the read the map waits on.
+ */
+export function levelError(o: { answered: boolean; loading: boolean; full?: Error | null; shallow?: Error | null }): Error | undefined {
+  return o.answered || o.loading ? undefined : o.full ?? o.shallow ?? undefined
+}
+
+/** A level that didn't load: its path, the error its read ended on, and whether its node is on the spine all the same
+ *  (`bare`: drawn by its parent, with nothing under it) or the spine stops above it. */
+export interface LevelFailure { path: string; err: Error; bare: boolean }
+
+/**
+ * The failed level that keeps the grafted `tree` from drawing the drilled path (`paths`' last), given each level's
+ * failure (`errs[i]`, `levelError`): walking the spine down from the root, the first failed level whose node has
+ * nothing under it (`bare`: the map would draw that node, empty), or the level of the first node the spine lacks, if
+ * that one failed (the map draws the ancestor above it). Null when the path is drawn, and when what stops it didn't
+ * fail (still loading, or a path that is simply empty).
+ * A failed ancestor is not always one: when its parent's answer drew its node, the level below grafts itself under
+ * that node and the spine goes on. It stops where the failed level's node was folded away by its parent, or where
+ * the level below failed too.
+ * The root's failure leaves no tree at all: that one is the view's, not a level's.
+ */
+export function spineFailure(tree: TreeNode, paths: string[], errs: (Error | undefined)[]): LevelFailure | null {
+  const segs = paths[paths.length - 1].split('/').filter(Boolean)
+  const failed = (i: number, bare: boolean): LevelFailure | null => errs[i] ? { path: paths[i], err: errs[i], bare } : null
+  let cur = tree
+  // Level `i` answers the path of `i` segments, whose node is `cur`.
+  for (let i = 0; ; i++) {
+    if (!cur.c?.length && errs[i]) return failed(i, true)
+    if (i === segs.length) return null
+    const next = cur.c?.find(c => c.n === segs[i])
+    if (!next) return failed(i + 1, false)
+    cur = next
+  }
 }

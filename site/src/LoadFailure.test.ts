@@ -2,7 +2,7 @@ import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 import { apiError } from './filterCaps'
-import { LoadFailure, mapSlot } from './LoadFailure'
+import { LevelFailure, LoadFailure, mapSlot } from './LoadFailure'
 
 // A failed map, diff or series load, stated inline (`LoadFailure`), and the map slot's precedence (`mapSlot`): the
 // gcs incident (2026-10-09) was a 500 on every heavy literal, drawn as a held gray map under "loading view…" for
@@ -58,5 +58,37 @@ describe('mapSlot: the asked-for view\'s failure outranks a held tree', () => {
       mapSlot(null, held, err), mapSlot(null, null, err),
       mapSlot(null, held, null), mapSlot(null, null, null),
     ]).toEqual(['map', 'map', 'failed', 'failed', 'held', 'skeleton'])
+  })
+})
+
+describe('LevelFailure: a level of the drilled path that didn\'t load', () => {
+  const level = (err: unknown, shown: string | null = 'bk/a') =>
+    renderToStaticMarkup(createElement(LevelFailure, { path: 'bk/a/b', err, onRetry: () => {}, ...(shown ? { shown } : {}) }))
+
+  it('a 5xx or no response: which level, the server\'s message, what the map shows instead, a retry', () => {
+    expect([level(apiError(500, 'subtree failed: boom')), level(new TypeError('Failed to fetch'))]).toEqual([
+      `<p class="level-failed load-failed" role="alert">couldn’t load <code>bk/a/b</code>: 500: subtree failed: boom · showing <code>bk/a</code> ${RETRY}</p>`,
+      `<p class="level-failed load-failed" role="alert">couldn’t load <code>bk/a/b</code>: Failed to fetch · showing <code>bk/a</code> ${RETRY}</p>`,
+    ])
+  })
+
+  it('a path the scan doesn\'t hold (404) reads as that: no retry, the same request answers the same', () => {
+    expect(level(apiError(404, 'path not found'))).toEqual(
+      '<p class="level-failed" role="status"><code>bk/a/b</code> isn’t in this scan · showing <code>bk/a</code></p>',
+    )
+  })
+
+  it('any other 4xx keeps its message and offers no retry; a filter refusal keeps its reason', () => {
+    const refused = JSON.stringify({ error: 'This term is too common to search below the root.', code: 'term-too-common' })
+    expect([level(apiError(413, 'view too wide')), level(apiError(400, refused))]).toEqual([
+      '<p class="level-failed load-failed" role="alert">couldn’t load <code>bk/a/b</code>: 413: view too wide · showing <code>bk/a</code></p>',
+      '<p class="level-failed filter-refused" role="status"><code>bk/a/b</code>: This term is too common to search below the root. · showing <code>bk/a</code></p>',
+    ])
+  })
+
+  it('in the map\'s place (all it has is the failed level\'s own node, empty): nothing is named as shown', () => {
+    expect(level(apiError(503, 'index backend unavailable'), null)).toEqual(
+      `<p class="level-failed load-failed" role="alert">couldn’t load <code>bk/a/b</code>: 503: index backend unavailable ${RETRY}</p>`,
+    )
   })
 })

@@ -57,8 +57,8 @@ import { apiError, indexedSyntax, refusalOf, useFilterCaps, useScanPreference } 
 import { RootCrumb } from './RootCrumb'
 import { actBlock, noMatches } from './matchAct'
 import { type BlindPanel, blindNote, blindShown } from './filterBlind'
-import { LoadFailure, mapSlot } from './LoadFailure'
-import { graftSpine, levelAsk, levelTree, spinePaths, spineReady } from './spine'
+import { LevelFailure, LoadFailure, mapSlot } from './LoadFailure'
+import { graftSpine, levelAsk, levelError, levelTree, spineFailure, spinePaths, spineReady } from './spine'
 import { REJECT_MESSAGES, rejectQuery } from '../functions/_lib/indexedOnly'
 import { FilterFlags, FilterNote, matchedNote } from './FilterNote'
 import { UnionScanPicker } from './UnionScanPicker'
@@ -617,10 +617,24 @@ function AppContent() {
   // depth-1 one, or a refresh; a corner marker, nothing dimmed).
   const mapStale = !tree && !!lastTree.current
   const mapBusy = mapStale || subtreeQs.some(q => q.isFetching)
+  // A level below the root that failed with no answer, its retries spent, where the spine stops (`spineFailure`): the
+  // map would draw the deepest ancestor it has under a URL that names something else, so the slot says which level,
+  // and why, over that map; or would draw the failed level's own node, empty (`bare`), and the slot states the
+  // failure in its place. The root's own failure is `rootErr`'s.
+  const levelFail = tree && spineFailure(tree, subtreePaths, subtreePaths.map((_, i) => levelError({
+    answered: !!dataFor(i), loading: subLoading[i],
+    full: subtreeQs[i]?.error as Error | null | undefined, shallow: coarseQs[i]?.error as Error | null | undefined,
+  })))
   // The asked-for view failed (any non-2xx, its retries spent): the slot states it — a held tree from another
   // scan or scope would sit dimmed under "loading" forever (gcs 2026-10-09: 80 s of a gray map on a 500).
-  const mapFailed = !!deepRefused || mapSlot(tree, lastTree.current, rootErr) === 'failed'
-  const retryMap = () => { for (const q of [...subtreeQs, ...coarseQs]) if (q.isError) void q.refetch() }
+  const mapFailed = !!deepRefused || mapSlot(tree, lastTree.current, rootErr) === 'failed' || !!levelFail?.bare
+  // Ask again what failed, of the reads each level asks (`levelAsk`): a full view that failed while its level was the
+  // drilled one is not asked of an ancestor.
+  const retryMap = () => subtreePaths.forEach((_, i) => {
+    const ask = levelAsk(i, subtreePaths.length, { filtered: !!fq, fullHeld: !!subtreeQs[i]?.data })
+    if (ask.full && subtreeQs[i]?.isError) void subtreeQs[i].refetch()
+    if (ask.shallow && coarseQs[i]?.isError) void coarseQs[i].refetch()
+  })
   // A failed attempt being retried: say so on the held map's marker.
   const mapRetrying = rootQ?.failureReason && !rootErr ? `retrying (${rootQ.failureReason.message.slice(0, 80)})…` : null
 
@@ -1417,6 +1431,10 @@ function AppContent() {
               once they land. A scan that lists objects always has something
               to draw under a directory. */}
           {effMode === 'read' && readThru && <ReadThroughBanner through={readThru} />}
+          {/* The spine stops above a level that didn't load: which, and why, over the ancestor the map draws instead. */}
+          {levelFail && mapPath && (
+            <LevelFailure path={levelFail.path} err={levelFail.err} onRetry={retryMap} shown={mapPath.slice(1).map(n => n.n).join('/') || store.rootLabel} />
+          )}
           <div id="tree-map" className={[
             'busy-host',
             !objects && mapPath && mapPath.length > 1 && !mapPath[mapPath.length - 1].c?.length && subtreeQs[subtreeQs.length - 1]?.data ? 'leaf' : '',
@@ -1532,6 +1550,9 @@ function AppContent() {
       ) : viewErr ? (
         // The filter's refusal as its reason, inline; any other failure as its message, a 5xx with a retry.
         <LoadFailure err={viewErr} what="view" onRetry={retryMap} />
+      ) : levelFail?.bare ? (
+        // A level below the root didn't load and nothing is under its node: its failure, not an empty canvas.
+        <LevelFailure path={levelFail.path} err={levelFail.err} onRetry={retryMap} />
       ) : noScansYet(scansQ) ? (
         // The list answered and is empty: no snapshot has index rows in D1,
         // so no view will ever load — a skeleton here would spin forever.

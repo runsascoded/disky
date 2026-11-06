@@ -2607,6 +2607,12 @@ a.staged-chip {
 // to decide when a deep link has landed.
 :root { --anchor-gap: 16px; }
 #tree-map, #tbl, #over-time, #diff, #mtime, #dispatch, #runs { scroll-margin-top: calc(var(--topbar-h, 48px) + var(--anchor-gap)); }
+// A level of the drilled path that didn't load (`LevelFailure`): one line over the map drawn without it.
+.level-failed {
+  margin: 0 0 -10px; font-size: 13px; color: var(--ink-2);
+  code { color: var(--ink); }
+  &.load-failed { color: var(--danger); }
+}
 .leaf-note { margin: -8px 0 4px; color: var(--ink-2); code { color: var(--ink); } }
 // Nothing drawable under the drilled node: the canvas folds away (the owner
 // panel / rollup above it stay).

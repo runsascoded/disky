@@ -1,6 +1,6 @@
 import { QueryClient, QueryObserver } from '@tanstack/react-query'
 import { describe, expect, it } from 'vitest'
-import { graftSpine, levelAsk, levelTree, nodeAt, spinePaths, spineReady } from './spine'
+import { graftSpine, levelAsk, levelError, levelTree, nodeAt, spineFailure, spinePaths, spineReady } from './spine'
 import type { TreeNode } from './types'
 
 const dir = (n: string, b: number, c?: TreeNode[]): TreeNode => ({ n, k: 'dir', b, o: b, ...(c ? { c } : {}) })
@@ -178,5 +178,71 @@ describe('spineReady: when the grafted tree may be drawn', () => {
   })
   it('drawn as soon as the drilled node has children, whatever else loads', () => {
     expect([ready('bk/a', [true, true, true]), ready('', [true])]).toEqual([true, true])
+  })
+})
+
+describe('levelError: a level\'s failure, once it has settled with no answer', () => {
+  const full = new Error('500: full'), shallow = new Error('500: depth=1')
+  it('none while the level has an answer or a read still in flight (its retries included)', () => {
+    expect([
+      levelError({ answered: true, loading: false, full, shallow }),
+      levelError({ answered: false, loading: true, shallow }),
+      levelError({ answered: false, loading: false }),
+    ]).toEqual([undefined, undefined, undefined])
+  })
+  it('an ancestor\'s is its one level\'s; the drilled level\'s is its full view\'s, the read the map waits on', () => {
+    expect([
+      levelError({ answered: false, loading: false, shallow }),
+      levelError({ answered: false, loading: false, full, shallow }),
+    ]).toEqual([shallow, full])
+  })
+})
+
+describe('spineFailure: the failed level that keeps the map off the drilled path', () => {
+  // bk = a (90) + z (10); a = b (80); b = c (70); c = x (60). Every level answers one level deep, as on a cold deep link.
+  const paths = spinePaths('bk/a/b/c')
+  const root = dir('all', 100, [dir('bk', 100)])
+  const bk = dir('bk', 100, [dir('a', 90), dir('z', 10)])
+  const a = dir('a', 90, [dir('b', 80)])
+  const b = dir('b', 80, [dir('c', 70)])
+  const c = dir('c', 70, [dir('x', 60)])
+  const E500 = new Error('500: boom'), E404 = new Error('404: path not found')
+  /** The grafted tree of `levels` (null: no answer), the path it reaches, and the failure reported for `errs`. */
+  const drawn = (levels: (TreeNode | null)[], errs: (Error | undefined)[]) => {
+    const tree = graftSpine(paths, levels.map(t => t && { tree: t, shallow: true }))!
+    const reached = ['bk', 'a', 'b', 'c'].filter((_, i, segs) => nodeAt(tree, segs.slice(0, i + 1))).join('/')
+    return [reached, spineFailure(tree, paths, errs)]
+  }
+  const none = [undefined, undefined, undefined, undefined, undefined]
+
+  it('every level answered: the path is drawn, nothing failed', () => {
+    expect(drawn([root, bk, a, b, c], none)).toEqual(['bk/a/b/c', null])
+  })
+  it('one failed ancestor whose node its parent drew: the level below grafts itself under that node, and the path is still drawn', () => {
+    expect(drawn([root, bk, null, b, c], [undefined, undefined, E500, undefined, undefined])).toEqual(['bk/a/b/c', null])
+  })
+  it('two failed levels in a row: the spine stops at the first one\'s node, bare, and that level is the one reported', () => {
+    expect(drawn([root, bk, null, null, c], [undefined, undefined, E500, E500, undefined])).toEqual(['bk/a', { path: 'bk/a', err: E500, bare: true }])
+  })
+  it('a failed ancestor its parent folded into "(other)": the spine stops above it', () => {
+    const bkFolded = dir('bk', 100, [dir('z', 10), { ...dir('(other)', 90), f: 4 }])
+    expect(drawn([root, bkFolded, null, b, c], [undefined, undefined, E500, undefined, undefined])).toEqual(['bk', { path: 'bk/a', err: E500, bare: false }])
+  })
+  it('the drilled level failed: its node is on the spine with nothing under it (bare)', () => {
+    expect(drawn([root, bk, a, b, null], [undefined, undefined, undefined, undefined, E500])).toEqual(['bk/a/b/c', { path: 'bk/a/b/c', err: E500, bare: true }])
+  })
+  it('a path the scan doesn\'t hold: every level from the first missing one is refused, and the first is the one reported', () => {
+    const aWithout = dir('a', 90, [dir('y', 80)])
+    expect(drawn([root, bk, aWithout, null, null], [undefined, undefined, undefined, E404, E404])).toEqual(['bk/a', { path: 'bk/a/b', err: E404, bare: false }])
+  })
+  it('a failed ancestor the spine got past is not reported for a level further down', () => {
+    // `bk/a` failed (grafted past, as above); `bk/a/b/c` is what the spine lacks.
+    expect(drawn([root, bk, null, dir('b', 80, [dir('y', 70)]), null], [undefined, undefined, E500, undefined, E404])).toEqual(['bk/a/b', { path: 'bk/a/b/c', err: E404, bare: false }])
+  })
+  it('a short spine with no failure (levels still loading, or settled without one) reports none', () => {
+    expect(drawn([root, bk, null, null, null], none)).toEqual(['bk/a', null])
+  })
+  it('a drilled level that answered empty is drawn as it is, whatever failed above it', () => {
+    expect(drawn([root, bk, null, b, dir('c', 70)], [undefined, undefined, E500, undefined, undefined])).toEqual(['bk/a/b/c', null])
   })
 })
