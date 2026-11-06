@@ -11,13 +11,13 @@
  * edge cache accordingly. w/h arrive quantized-up to 128px so resizes mostly
  * re-hit the cache.
  */
-import { filterJson, hiddenNotFound, isHidden, restrictionFor, restrictSubtree } from '../_lib/restrict.js'
+import { filterJson, hiddenNotFound, isHidden, restrictedScopeRefused, restrictedSearchRefused, restrictionFor, restrictSubtree, scopeReachesHidden } from '../_lib/restrict.js'
 import { type Env, type Identity, presentsCredentials, requireViewer } from '../_lib/auth.js'
 import { ivRefusal, ivRetry, pathGens, withPathStore, storeReady, type Lens } from '../_lib/index.js'
 import { hasLedger, ledgerHead } from '../_lib/ledger.js'
 import { parseOwner, queryParam, QueryError, classKey, parseClasses } from '../_lib/scope.js'
 import { hasExtras } from '../_lib/extras.js'
-import { ATTEN_DEFAULT, buildView, FILTER_VIEW_V, LensUnavailable, MIN_AREA_DEFAULT, NotFound, QUANT, readRootAgg, readRootRows, type ViewNode } from '../_lib/view.js'
+import { ATTEN_DEFAULT, buildView, FILTER_VIEW_V, LensUnavailable, MIN_AREA_DEFAULT, NotFound, QUANT, readRootAgg, readRootRows, scopedTag, type ViewNode } from '../_lib/view.js'
 import { hexNote, hexQuery, indexedGate, staticTag } from '../_lib/staticFilter.js'
 import { FilterRejected, indexedOnly, pathTerms, rejectBody, rejectQuery, rejectScope } from '../_lib/indexedOnly.js'
 import { cacheEnvTag, cacheKeyFor, cacheMatch, cacheStore, isPartial, keepFor, serverTiming, UPGRADE_DETAIL_GROUPS, UPGRADE_DETAILS_MS, UPGRADE_PHASE2_MS, UPGRADE_SEARCH_LIMITS, upgradePartial } from '../_lib/edgeCache.js'
@@ -148,6 +148,8 @@ async function subtreeGated(
   const keyOf = (date: string, head: number, xtra: boolean, g: string, lensTag: string) => cacheKeyFor('subtree', cacheEnvTag(ctx.env, ctx.request),
     `${date}/${encodeURIComponent(path)}?w=${w}&h=${h}&a=${minArea}&t=${atten}&l=${lensTag}` +
       `&o=${rawOwner ?? ''}&b=${by ?? ''}&D=${depth ?? ''}&cl=${classKey(classes)}&x=${xtra ? 1 : 0}&F=${query && !full ? 0 : 1}&qs=${query ? qp.syntax : ''}&q=${encodeURIComponent(query ? qRaw : '')}&head=${head}&g=${g}&st=${staticTag(ctx.env, query)}${query ? `&fv=${FILTER_VIEW_V}` : ''}` +
+      // A scoped read's answer version, where the view is one (absent otherwise, so no other key moves).
+      scopedTag(ctx.env, { lens, owner, classes, by, query }) +
       // The root's answer carries the deployment's `ROOT_LABEL` (kept in the key: dropping it would flush prod's root entries).
       (path === '' ? `&rl=${encodeURIComponent(ctx.env.ROOT_LABEL ?? '')}` : '') +
       // A union root's member read: the union's threshold (absent otherwise, so no other key moves).
@@ -169,10 +171,15 @@ async function subtreeGated(
   if (g0 instanceof Response) return g0
   early.commit()
   const id: Identity | null = g0
-  // A path-restricted link (specs/path-scopes.md): a hidden path is absent,
+  // A path-restricted link (`_lib/restrict.ts`): a hidden path is absent,
   // and every body (cached or fresh) is filtered on the way out.
   const restriction = restrictionFor(id, ctx.env)
   if (restriction && isHidden(path, restriction)) return hiddenNotFound()
+  // A name filter's tree sums every match, hidden ones too, and a sum can't be filtered on the way out: answered, it
+  // would let the link probe a hidden dir's contents by name.
+  if (restriction && query) return restrictedSearchRefused()
+  // An owner, class or lens scope at or above a hidden dir: its sums break down what's hidden, the same way.
+  if (restriction && (lens || owner || classes) && scopeReachesHidden(path, restriction)) return restrictedScopeRefused()
   const out = (res: Response | Promise<Response>) =>
     restriction ? Promise.resolve(res).then(r => filterJson(r, (b: Parameters<typeof restrictSubtree>[0]) => restrictSubtree(b, restriction))) : res
 

@@ -22,7 +22,7 @@ export const onRequestGet = async (ctx: Ctx & { env: Env; waitUntil?: (p: Promis
   const gated = await requireViewer(ctx)
   if (gated instanceof Response) return gated
   if (!ctx.env.GCP_SA_KEY) return json({ jobs: [], configured: false })
-  const cfg = batchConfig(ctx.env, ["GCP_PROJECT", "DATA_BUCKET"])
+  const cfg = batchConfig(ctx.env, ["GCP_PROJECT", "BATCH_REGION", "DATA_BUCKET"])
   if ("missing" in cfg) return json({ error: notConfigured("jobs", cfg.missing) }, 503)
   const shape = prefixShape(ctx.env)
   if (!shape) return json({ error: `jobs ${NO_SHAPE}` }, 503)

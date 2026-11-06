@@ -7,15 +7,10 @@ login`` credentials both work.
 """
 from __future__ import annotations
 
-import os
 import re
 from datetime import datetime, timedelta, timezone
 from json import dumps
 from typing import Any
-
-# The default Batch region (`$BATCH_REGION`): a job whose buckets name no
-# region of their own (`$LISTING_REGIONS`) runs here.
-REGION = os.environ.get("BATCH_REGION", "").strip() or "us-central1"
 
 _session = None
 _project: str | None = None
@@ -76,9 +71,11 @@ def _post(url: str, body: dict) -> dict:
     return r.json()
 
 
-def batch_jobs(project: str | None = None, region: str = REGION) -> list[dict]:
-    """Recent Batch jobs, newest first."""
-    project = project or gcp_project()
+def batch_jobs(project: str | None = None, region: str | None = None) -> list[dict]:
+    """Recent Batch jobs in `region` (default `$BATCH_REGION`: `deploy.batch_region`), newest first."""
+    from .deploy import batch_region
+
+    region, project = batch_region(region), project or gcp_project()
     jobs = _pages(f"https://batch.googleapis.com/v1/projects/{project}/locations/{region}/jobs", "jobs")
     return sorted(jobs, key=lambda j: j.get("createTime", ""), reverse=True)
 
@@ -106,16 +103,21 @@ def batch_tasks(job: dict) -> list[dict]:
     return tasks
 
 
-def batch_job(name: str, project: str | None = None, region: str = REGION) -> dict:
-    project = project or gcp_project()
+def batch_job(name: str, project: str | None = None, region: str | None = None) -> dict:
+    """The Batch job `name` in `region` (default `$BATCH_REGION`)."""
+    from .deploy import batch_region
+
+    region, project = batch_region(region), project or gcp_project()
     return _get(f"https://batch.googleapis.com/v1/projects/{project}/locations/{region}/jobs/{name}")
 
 
-def batch_job_by_uid(uid: str, project: str | None = None, region: str = REGION) -> dict | None:
+def batch_job_by_uid(uid: str, project: str | None = None, region: str | None = None) -> dict | None:
     """The Batch job whose uid is `uid` (a task knows only its `$BATCH_JOB_UID`), or None. Follows the pages: a
     filtered list can answer an empty page and a `nextPageToken` (the filter runs per page), so the first page alone
     missed 2 of a run's 10 tasks."""
-    project = project or gcp_project()
+    from .deploy import batch_region
+
+    region, project = batch_region(region), project or gcp_project()
     url = f"https://batch.googleapis.com/v1/projects/{project}/locations/{region}/jobs"
     params = {"filter": f'uid="{uid}"'}
     while True:

@@ -12,20 +12,11 @@ import { withoutOg } from './sharePreview'
 import { bootSessionLog } from './sessionLogBoot'
 import { forwardPs } from './pathStoreParam'
 import { describeUrlParams } from './urlParams'
+import { QUERY_DEFAULTS } from './queryDefaults'
 import 'use-kbd/styles.css'
 import './app.scss'
 
-// A tab left open on the latest scan should pick up new data on its own, so
-// queries stay fresh in the background rather than only on mount.
-const queryClient = new QueryClient({
-  defaultOptions: {
-    queries: {
-      staleTime: 60_000,
-      refetchOnWindowFocus: true,
-      retry: 2,
-    },
-  },
-})
+const queryClient = new QueryClient({ defaultOptions: QUERY_DEFAULTS })
 // Dev / `?spy=1`: the cache on `window.__qc`, so a console session can watch
 // which queries refetch (the render spy says what re-rendered; this says why).
 if (import.meta.env.DEV || location.search.includes('spy=1')) (window as unknown as { __qc?: QueryClient }).__qc = queryClient

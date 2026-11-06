@@ -18,7 +18,7 @@ import { NonLive } from './NonLive'
 import { DiskSpace } from './DiskSpace'
 import { ExtLink } from './ExtLink'
 import { DiskSpaceDiff, diskDiffScan } from './DiskSpaceDiff'
-import type { DiffData } from './diffModel'
+import { diffLoadingLabel, type DiffData } from './diffModel'
 import { ScanCombobox } from './ScanCombobox'
 import { ago, buildUserIndex, epochDaysToDate } from './colors'
 import { ChildrenTable } from './ChildrenTable'
@@ -53,11 +53,12 @@ import { budgetCutRefetch } from './budgetCut'
 import type { RowSource } from './MatchActions'
 import { type MatchFields, seriesMatches } from './filterMatches'
 import { QueryHelpTip } from './QueryHelp'
-import { apiError, indexedSyntax, refusalOf, useFilterCaps, useScanPreference } from './filterCaps'
+import { apiError, filterBoxError, indexedSyntax, refusalOf, useFilterCaps, useScanPreference } from './filterCaps'
 import { RootCrumb } from './RootCrumb'
 import { actBlock, noMatches } from './matchAct'
 import { type BlindPanel, blindNote, blindShown } from './filterBlind'
-import { LoadFailure, mapSlot } from './LoadFailure'
+import { LevelFailure, LoadFailure, mapSlot } from './LoadFailure'
+import { graftSpine, levelAsk, levelError, levelTree, spineFailure, spinePaths, spineReady, spineStop } from './spine'
 import { REJECT_MESSAGES, rejectQuery } from '../functions/_lib/indexedOnly'
 import { FilterFlags, FilterNote, matchedNote } from './FilterNote'
 import { UnionScanPicker } from './UnionScanPicker'
@@ -453,43 +454,51 @@ function AppContent() {
     return picks
   }, [asof, earlier, times])
   // Lazy drill (specs/done/path-index-lazy-drill.md step 3, now the primary
-  // source): the map's base is the pixel-budget subtree at the store root,
-  // and every level of the drilled path gets its own subtree query, grafted
-  // in depth order — interactive drills hit each level's cache as they go,
-  // and a cold deep link fans the whole chain out in parallel.
+  // source): the map's base is the store root's answer, and every level of
+  // the drilled path gets its own subtree queries, grafted in depth order
+  // (`spine.ts`). The drilled level alone asks its full pixel-budget view; an
+  // ancestor asks one level (`depth=1`: its node on the spine, and its
+  // children ready for a zoom-out's first paint), and its full view once the
+  // viewer zooms out to it. Interactive drills reuse each level's held
+  // answers as they go, and a cold deep link fans the chain's light reads
+  // out in parallel.
   const graftPath = mountedSegs(store.root, fromUrlPath(pathname.slice((store.path === '/' ? '' : store.path).length))).join('/')
   const canW = canvasWidth(typeof window === 'undefined' ? 1280 : window.innerWidth)
   // Perf-mark keys (`perf.ts`): what tells one load of a widget from another
   // on this page — path, scan(s), canvas width, scope.
   const viewKey = (p: string, d: string | null | undefined, extra = '') => `${p || '/'}@${d}|w${canW}${scopeQs}${extra}`
-  const subtreePaths = useMemo(() => {
-    const segs = graftPath.split('/').filter(Boolean)
-    return ['', ...segs.map((_, i) => segs.slice(0, i + 1).join('/'))]
-  }, [graftPath])
+  const subtreePaths = useMemo(() => spinePaths(graftPath), [graftPath])
+  /** A level's full view: the pixel-budget tree under `p`, every depth. */
+  const fullQuery = (p: string) => ({
+    queryKey: ['subtree', store.key, cutKey, p, canW, scopeKey],
+    staleTime: Infinity,
+    // A budget-cut answer (`budgetCut`) is upgraded at the edge in the background: ask again until whole.
+    refetchInterval: (q: { state: { data?: { budgetCut?: boolean }; dataUpdateCount: number } }) => budgetCutRefetch(q.state.data, q.state.dataUpdateCount),
+    // Retry transient failures, but not the deterministic ones (409: no
+    // user index for this scan; 413: view too wide) — those surface as-is.
+    retry: (n: number, e: Error) => !/^4\d\d/.test(e.message) && n < 3,
+    retryDelay: (n: number) => 400 * 2 ** n,
+    // With a filter the full read plans each match root's tier (`full=1`);
+    // the companion below paints the coarsest-tier forest first.
+    queryFn: async ({ signal }: { signal?: AbortSignal }) => {
+      const pf = perf.start('treemap', viewKey(p, asof, fq ? '|full' : ''), ['table'])
+      const r = await pf.track(sfetch(
+        `/api/subtree?cv=${API_CV}&${cutQs}&path=${encodeURIComponent(p)}&w=${canW}&h=${Math.round(canW * 0.6)}${scopeQs}${fq ? '&full=1' : ''}`,
+        { credentials: 'include', signal },
+      ))
+      if (!r.ok) { pf.fail(); throw apiError(r.status, await r.text()) }
+      const j = await r.json() as MatchFields & { tree: TreeNode; tier?: string; matches?: string[]; threshold?: number; partialReason?: string; approximateReason?: string; hexRuns?: { min: number; tail: number }; budgetCut?: true; union?: UnionVector }
+      pf.decoded()
+      return j
+    },
+  })
   const subtreeQs = useQueries({
-    queries: subtreePaths.map(p => ({
-      queryKey: ['subtree', store.key, cutKey, p, canW, scopeKey],
-      enabled: !!asof && scopeReady,
-      staleTime: Infinity,
-      // A budget-cut answer (`budgetCut`) is upgraded at the edge in the background: ask again until whole.
-      refetchInterval: (q: { state: { data?: { budgetCut?: boolean }; dataUpdateCount: number } }) => budgetCutRefetch(q.state.data, q.state.dataUpdateCount),
-      // Retry transient failures, but not the deterministic ones (409: no
-      // user index for this scan; 413: view too wide) — those surface as-is.
-      retry: (n: number, e: Error) => !/^4\d\d/.test(e.message) && n < 3,
-      retryDelay: (n: number) => 400 * 2 ** n,
-      // With a filter the full read plans each match root's tier (`full=1`);
-      // the companion below paints the coarsest-tier forest first.
-      queryFn: async ({ signal }: { signal?: AbortSignal }) => {
-        const pf = perf.start('treemap', viewKey(p, asof, fq ? '|full' : ''), ['table'])
-        const r = await pf.track(sfetch(
-          `/api/subtree?cv=${API_CV}&${cutQs}&path=${encodeURIComponent(p)}&w=${canW}&h=${Math.round(canW * 0.6)}${scopeQs}${fq ? '&full=1' : ''}`,
-          { credentials: 'include', signal },
-        ))
-        if (!r.ok) { pf.fail(); throw apiError(r.status, await r.text()) }
-        const j = await r.json() as MatchFields & { tree: TreeNode; tier?: string; matches?: string[]; threshold?: number; partialReason?: string; approximateReason?: string; hexRuns?: { min: number; tail: number }; budgetCut?: true; union?: UnionVector }
-        pf.decoded()
-        return j
-      },
+    queries: subtreePaths.map((p, i) => ({
+      ...fullQuery(p),
+      // An ancestor's full view is asked once the viewer zooms out to it (`levelAsk`), or once the spine is known
+      // to stop at it (`stopAt`, below). One already held (the viewer drilled down through it) stays observed
+      // here, so it is still held then.
+      enabled: !!asof && scopeReady && levelAsk(i, subtreePaths.length, { filtered: !!fq, fullHeld: false }).full,
     })),
   })
   // Progressive fill: a companion `depth=1` fetch per path — the same pixel
@@ -499,14 +508,18 @@ function AppContent() {
   // the top level matches, the fill-in adds children under tiles that don't
   // move. The whole held tree (`mapTree`, below) outranks it on later loads,
   // so a scope change never downgrades a held full tree to a coarse one.
+  // An ancestor asks this read alone (`levelAsk`): the same request, so the same cached answer, as the first
+  // paint it made (or, on a zoom-out, will make) as the drilled level.
   const coarseQs = useQueries({
     queries: subtreePaths.map((p, i) => ({
       queryKey: ['subtree', store.key, cutKey, p, canW, scopeKey, 'depth1'],
-      // Deepest path only — see `dataFor`; ancestors use it only under a filter, where it is the
-      // exact forest of match roots (cheap from the static name index).
-      enabled: !!asof && scopeReady && (i === subtreePaths.length - 1 || !!fq),
+      // Under a filter it is the exact forest of match roots (cheap from the static name index), at every level.
+      enabled: !!asof && scopeReady && levelAsk(i, subtreePaths.length, { filtered: !!fq, fullHeld: !!subtreeQs[i]?.data }).shallow,
       staleTime: Infinity,
-      retry: false,
+      // A first paint is optional (the full view follows it). An ancestor's one level is all the spine has of
+      // it, so it retries as a full view does: transient failures, not the deterministic 4xx.
+      retry: (n: number, e: Error) => i < subtreePaths.length - 1 && !fq && !/^4\d\d/.test(e.message) && n < 3,
+      retryDelay: (n: number) => 400 * 2 ** n,
       // Plain view: one depth band. Filtered view: the whole forest from the
       // coarsest tier (`partial`, milliseconds) — the fast first paint of
       // specs/filter-views.md, replaced by the planned-tier read above.
@@ -516,21 +529,20 @@ function AppContent() {
           `/api/subtree?cv=${API_CV}&${cutQs}&path=${encodeURIComponent(p)}&w=${canW}&h=${Math.round(canW * 0.6)}${fq ? '' : '&depth=1'}${scopeQs}`,
           { credentials: 'include', signal },
         ))
-        if (!r.ok) { pf.fail(); throw new Error(`${r.status}`) }
+        if (!r.ok) { pf.fail(); throw apiError(r.status, await r.text()) }
         const j = await r.json() as MatchFields & { tree: TreeNode; tier?: string; partialReason?: string; approximateReason?: string; hexRuns?: { min: number; tail: number }; union?: UnionVector }
         pf.decoded()
         return j
       },
     })),
   })
-  /** The full tree for path i once it's here; for the DEEPEST path only, the
-   * depth-1 one while it isn't. An ancestor must be full or absent: `mapPath`
-   * walks the spine by segment and truncates at the first node without
-   * children, so a depth-1 ancestor would collapse the drill to itself and
-   * the controlled path would thrash until the full spine landed. The
-   * deepest node's children are the visible map — the walk never descends
-   * through them, and that's the level whose speed matters. */
-  // Full > depth-1 (deepest only). Never a *held* previous tree here: a graft
+  /** The tree level i gives the graft (`levelTree`): its full view once it's
+   * here, else its depth-1 one. The deepest node's children are the visible
+   * map. An ancestor gives the spine its node, whose children the next
+   * level's graft supplies: `mapPath` walks the spine by segment and stops at
+   * the first node without the next one, so the map draws once the spine
+   * reaches the drilled path (`spineReady`, below). */
+  // Full > depth-1. Never a *held* previous tree here: a graft
   // must receive a node's own subtree. Holding, say, the previous sibling's
   // tree under a new name puts this node's totals over that node's children,
   // and children that don't sum to their parent send the core's fold
@@ -540,73 +552,56 @@ function AppContent() {
   // Under a filter an ancestor may stand in with its first-paint forest, when that forest carries the
   // next spine segment WITH children (an ancestor of match roots): a drilled deep link then paints
   // from the cheap reads instead of waiting on every ancestor's full forest.
-  const spineHasKids = (t: TreeNode, i: number): boolean => {
-    const seg = subtreePaths[i + 1]?.split('/').pop()
-    return !!t.c?.some(k => k.n === seg && k.c?.length)
-  }
-  const dataFor = (i: number): TreeNode | null => {
-    const full = subtreeQs[i]?.data?.tree
-    if (full) return full
-    const coarse = coarseQs[i]?.data?.tree ?? null
-    if (i === subtreePaths.length - 1) return coarse
-    return fq && coarse && spineHasKids(coarse, i) ? coarse : null
-  }
+  const dataFor = (i: number): TreeNode | null => levelTree({
+    full: subtreeQs[i]?.data?.tree, shallow: coarseQs[i]?.data?.tree,
+    deepest: i === subtreePaths.length - 1, filtered: !!fq, next: subtreePaths[i + 1]?.split('/').pop(),
+  })
   const baseTree: TreeNode | null = dataFor(0)
   // Whether this scan lists objects (a path-store generation, whose leaves
   // can be objects) or is a v1 dir-only index — every response of one scan
   // answers alike, so the first that has landed says.
   const objects = listsObjects([...subtreeQs, ...coarseQs].find(q => q.data?.tier)?.data?.tier)
-  const rootErr = subtreeQs[0]?.error as Error | undefined
+  // The root level's read: its full view at the root (or held, or under a filter), else the one level a drilled page asks of it.
+  const rootQ = (subtreePaths.length > 1 && !fq && !subtreeQs[0]?.data ? coarseQs : subtreeQs)[0]
+  const rootErr = rootQ?.error as Error | undefined
   // A drilled view the filter refuses (a heavy literal with no drilldown is `term-too-common` below the fleet
   // root): its reason, in the box's note and the map slot, as the root's would be — never the held parent's tiles.
   const deepErr = subtreePaths.length > 1 ? subtreeQs[subtreePaths.length - 1]?.error as Error | undefined : undefined
   const deepRefused = !rootErr && fq && refusalOf(deepErr) ? deepErr : undefined
   const viewErr = rootErr ?? deepRefused
-  // The box's error: the client's own parse, else the server's 400.
+  // The box's error: the client's own parse, else the server's refusal of the query.
   // On a scan the index doesn't cover yet, its `scan-not-indexed` refusal is the box's disabled state and the map
   // slot's catch-up note (with its links), not an error.
   const notIndexed = searchIsOff && refusalOf(viewErr)?.code === 'scan-not-indexed'
-  const fErr = fParse.error ?? fScopeRefused ?? (notIndexed ? undefined : /^400: bad query: (.*)/s.exec(viewErr?.message ?? '')?.[1])
+  const fErr = fParse.error ?? fScopeRefused ?? (notIndexed ? undefined : filterBoxError(viewErr))
   // useQueries returns a fresh array each render; stamp the data so the graft
   // memo re-runs exactly when a response lands.
   // Both tiers stamp the graft: a depth-1 tree landing must re-run it just
   // as a full one does.
   const subStamp = [...subtreeQs, ...coarseQs].map(q => q.dataUpdatedAt).join(',')
+  // The levels with no answer yet whose read is in flight (`spineReady` waits on them), stamped as the data is. A
+  // read paused offline is in flight too: it resumes, and its answer may extend the spine.
+  const inFlight = (q?: { fetchStatus: string }) => !!q && q.fetchStatus !== 'idle'
+  const subLoading = subtreePaths.map((_, i) => !dataFor(i) && (inFlight(subtreeQs[i]) || inFlight(coarseQs[i])))
+  const loadStamp = subLoading.map(Number).join('')
   const tree = useMemo((): TreeNode | null => {
-    if (!baseTree) return null
-    const graftAt = (t: TreeNode, segs: string[], sub: TreeNode, coarse: boolean): TreeNode => {
-      const rec = (n: TreeNode, i: number): TreeNode => {
-        // A depth-1 stand-in never replaces deeper children the parent's
-        // tree already carries for this node: a drill into a tile the parent
-        // drew to depth would otherwise flatten it to one level until the
-        // full subtree lands (seconds, on a cold path).
-        if (i === segs.length && coarse && n.c?.some(k => k.c?.length)) return n
-        // Keep own totals; adopt the finer children — and the response root's
-        // provenance (`pv`), which a parent-level view may have skipped.
-        if (i === segs.length) return { ...n, c: sub.c, ...(sub.pv ? { pv: sub.pv } : {}) }
-        const seg = segs[i]
-        const kids = n.c ?? []
-        if (kids.some(k => k.n === seg)) return { ...n, c: kids.map(k => (k.n === seg ? rec(k, i + 1) : k)) }
-        // The spine segment fell below this level's pixel budget (it's inside
-        // "(other)"): synthesize it from its own subtree response — the
-        // response root carries the real totals — and shave those bytes off
-        // the fold so the level still sums. Deeper segments wait for their
-        // own level's graft to land.
-        if (i !== segs.length - 1) return n
-        const c = kids.map(k =>
-          k.n === '(other)' ? { ...k, b: Math.max(0, k.b - sub.b), o: Math.max(0, k.o - sub.o) } : k)
-        return { ...n, c: [...c, { ...sub, n: seg }] }
-      }
-      return rec(t, 0)
-    }
-    let t = baseTree
-    subtreePaths.forEach((p, i) => {
+    const t = graftSpine(subtreePaths, subtreePaths.map((_, i) => {
       const sub = dataFor(i)
-      if (p && sub) t = graftAt(t, p.split('/'), sub, !subtreeQs[i]?.data)
-    })
-    return t
+      return sub && { tree: sub, shallow: !subtreeQs[i]?.data }
+    }))
+    // Unfiltered, the map draws once the spine reaches the drilled path with something under it: never an
+    // ancestor's view or an empty canvas in passing while the chain's reads land (the last tree is held, below).
+    return t && (fq || spineReady(t, graftPath, subLoading)) ? t : null
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [baseTree, subtreePaths, subStamp])
+  }, [baseTree, subtreePaths, subStamp, loadStamp, fq])
+  // The spine settled short of the drilled path (the scan doesn't hold it: a stale link, a scan switch; or a level
+  // didn't load): the map draws the level it stops at, which as an ancestor asked one level only, so that level
+  // asks its full view now (`spineStop`, `levelAsk`). Not while any level's answer is in flight: until then the
+  // spine may yet reach the path, and a cold drill would ask a second full plan for a level it only passes through.
+  // Not of a level with no answer of its own (its read failed: `levelFail` states that, with its retry).
+  // The same query as `subtreeQs[stopAt]`, which is where its answer is read.
+  const stopAt = fq ? null : spineStop(tree, subtreePaths, subLoading, subtreePaths.map((_, i) => !!dataFor(i)))
+  useQueries({ queries: (stopAt == null ? [] : [subtreePaths[stopAt]]).map(p => ({ ...fullQuery(p), enabled: !!asof && scopeReady })) })
   // Hold the last tree that rendered while the next one loads — whole, so it
   // is self-consistent (it already laid out fine). The map never flashes to
   // nothing across a scope, scan, or drill change, and the page below never
@@ -637,12 +632,26 @@ function AppContent() {
   // depth-1 one, or a refresh; a corner marker, nothing dimmed).
   const mapStale = !tree && !!lastTree.current
   const mapBusy = mapStale || subtreeQs.some(q => q.isFetching)
+  // A level below the root that failed with no answer, its retries spent, where the spine stops (`spineFailure`): the
+  // map would draw the deepest ancestor it has under a URL that names something else, so the slot says which level,
+  // and why, over that map; or would draw the failed level's own node, empty (`bare`), and the slot states the
+  // failure in its place. The root's own failure is `rootErr`'s.
+  const levelFail = tree && spineFailure(tree, subtreePaths, subtreePaths.map((_, i) => levelError({
+    answered: !!dataFor(i), loading: subLoading[i],
+    full: subtreeQs[i]?.error as Error | null | undefined, shallow: coarseQs[i]?.error as Error | null | undefined,
+  })))
   // The asked-for view failed (any non-2xx, its retries spent): the slot states it — a held tree from another
   // scan or scope would sit dimmed under "loading" forever (gcs 2026-10-09: 80 s of a gray map on a 500).
-  const mapFailed = !!deepRefused || mapSlot(tree, lastTree.current, rootErr) === 'failed'
-  const retryMap = () => { for (const q of [...subtreeQs, ...coarseQs]) if (q.isError) void q.refetch() }
+  const mapFailed = !!deepRefused || mapSlot(tree, lastTree.current, rootErr) === 'failed' || !!levelFail?.bare
+  // Ask again what failed, of the reads each level asks (`levelAsk`): a full view that failed while its level was the
+  // drilled one is not asked of an ancestor the spine goes on through.
+  const retryMap = () => subtreePaths.forEach((_, i) => {
+    const ask = levelAsk(i, subtreePaths.length, { filtered: !!fq, fullHeld: !!subtreeQs[i]?.data, stop: stopAt })
+    if (ask.full && subtreeQs[i]?.isError) void subtreeQs[i].refetch()
+    if (ask.shallow && coarseQs[i]?.isError) void coarseQs[i].refetch()
+  })
   // A failed attempt being retried: say so on the held map's marker.
-  const mapRetrying = subtreeQs[0]?.failureReason && !rootErr ? `retrying (${subtreeQs[0].failureReason.message.slice(0, 80)})…` : null
+  const mapRetrying = rootQ?.failureReason && !rootErr ? `retrying (${rootQ.failureReason.message.slice(0, 80)})…` : null
 
   // Bulk actions (the bar, the table's rows) under a filter take its matches under the view as the fewest
   // exact prefixes (`/api/filter-cover`): every match, listed, never a drawn subset or a row's whole prefix.
@@ -933,22 +942,6 @@ function AppContent() {
       return j
     },
   })
-  // The headline first: the same pair's totals without the row walk land in
-  // a second or two, so the +X / Δobjects line shows while the rows align.
-  const diffSumQ = useQuery<DiffData, Error>({
-    queryKey: ['diff', store.key, diffKey, diffPath, canW, scopeKey, 'summary'],
-    enabled: !!asof && !!diffPrev && scopeReady && diffPathOf !== undefined,
-    staleTime: Infinity,
-    retry: false,
-    queryFn: async ({ signal }: { signal?: AbortSignal }) => {
-      const r = await sfetch(
-        `/api/diff?cv=${API_CV}&${diffQs}&path=${encodeURIComponent(diffPath)}&w=${canW}&h=${Math.round(canW * 0.6)}${scopeQs}&summary=1`,
-        { credentials: 'include', signal },
-      )
-      if (!r.ok) throw apiError(r.status, await r.text())
-      return r.json() as Promise<DiffData>
-    },
-  })
   const diff: DiffData | null = diffQ.data ?? null
   const diffErr = diffQ.error
   // The shown diff is the previous pair's (placeholder) or the pair is still
@@ -969,9 +962,6 @@ function AppContent() {
   useLayoutEffect(() => {
     if (!diffStale && diffSlotRef.current) diffSlotH.current = diffSlotRef.current.offsetHeight
   })
-  // What the subtitle's numbers describe: the full diff once it's this pair's,
-  // else the summary (its own query — current for this key or absent).
-  const diffHead: DiffData | null = diff && !diffStale ? diff : diffSumQ.data ?? null
   // One-line description of the page scope, for the section subtitles:
   // where, then whose, then which names.
   // At the store root the scope is its buckets, counted (`2 buckets`) — the
@@ -1456,6 +1446,10 @@ function AppContent() {
               once they land. A scan that lists objects always has something
               to draw under a directory. */}
           {effMode === 'read' && readThru && <ReadThroughBanner through={readThru} />}
+          {/* The spine stops above a level that didn't load: which, and why, over the ancestor the map draws instead. */}
+          {levelFail && mapPath && (
+            <LevelFailure path={levelFail.path} err={levelFail.err} onRetry={retryMap} shown={mapPath.slice(1).map(n => n.n).join('/') || store.rootLabel} />
+          )}
           <div id="tree-map" className={[
             'busy-host',
             !objects && mapPath && mapPath.length > 1 && !mapPath[mapPath.length - 1].c?.length && subtreeQs[subtreeQs.length - 1]?.data ? 'leaf' : '',
@@ -1489,7 +1483,9 @@ function AppContent() {
             band={band}
             onBand={setBand}
             stageHere={!fq}
-          />{mapStale ? <Busy label={mapRetrying ?? 'loading view…'} /> : mapBusy ? <Busy corner label="filling in…" /> : null}</div>
+            // In the canvas's corner, not the widget's: the legend row above the canvas spans the widget at phone width.
+            mapOverlay={!mapStale && mapBusy ? <Busy corner label="filling in…" /> : undefined}
+          />{mapStale && <Busy label={mapRetrying ?? 'loading view…'} />}</div>
           {/* A drilled directory with nothing drawable under it: the scope came
               up empty, or (a v1 scan) it holds only objects or directories
               under this view's floor. Say so rather than show a blank canvas. */}
@@ -1571,6 +1567,9 @@ function AppContent() {
       ) : viewErr ? (
         // The filter's refusal as its reason, inline; any other failure as its message, a 5xx with a retry.
         <LoadFailure err={viewErr} what="view" onRetry={retryMap} />
+      ) : levelFail?.bare ? (
+        // A level below the root didn't load and nothing is under its node: its failure, not an empty canvas.
+        <LevelFailure path={levelFail.path} err={levelFail.err} onRetry={retryMap} />
       ) : noScansYet(scansQ) ? (
         // The list answered and is empty: no snapshot has index rows in D1,
         // so no view will ever load — a skeleton here would spin forever.
@@ -1689,11 +1688,7 @@ function AppContent() {
                 </span>
               )}
             </span>
-            {diffHead ? (
-              <>
-                {diffStale && <Loading label="Aligning the rows…" />}
-              </>
-            ) : diffErr && !diffStale && /^(404|409)/.test(diffErr.message) ? (
+            {diff && !diffStale ? null : diffErr && !diffStale && /^(404|409)/.test(diffErr.message) ? (
               <span className="tab-note">
                 {' '}· {diffErr.message.startsWith('404')
                   ? <><code>{graftPath || '/'}</code> is in neither scan’s index — pick other scans or drill up.</>
@@ -1703,7 +1698,8 @@ function AppContent() {
               // The filter's refusal as its reason; any other failure as its message, a 5xx with a retry.
               <>{' · '}<LoadFailure as="span" className="tab-note" err={diffErr} what={`diff ${fmtS(diffPrev)} → ${fmtS(asof)}`} onRetry={() => void diffQ.refetch()} /></>
             ) : (
-              <Loading label={`Aligning ${fmtS(diffPrev)} → ${fmtS(asof)}…`} />
+              // Still aligning: which part, by what the map already draws of this pair (`diffLoadingLabel`).
+              <Loading label={diffLoadingLabel(diffRefining, `${fmtS(diffPrev)} → ${fmtS(asof)}`)} />
             )}
           </span>} />
           <DiskSpaceDiff before={beforeMetaQ.data?.disk_space} after={meta?.disk_space} />

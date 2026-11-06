@@ -218,7 +218,7 @@ def _held() -> int:
     return tm.tree_pss() if tm.has_procfs() else tm.own_bytes()
 
 
-def _measured_part(spool: str, n: int, rg: int, page: int, out: str) -> tuple[int, int]:
+def _measured_part(spool: str, n: int, rg: int, page: int | None, out: str) -> tuple[int, int]:
     """In a spawned cut worker: what it holds once imported, and its peak while writing a part of `n` rows of `spool`
     (`cut_part`) in `rg`-row groups of `page`-row pages, sampled every 2 ms (and its `ru_maxrss` without procfs)."""
     import resource
@@ -244,13 +244,13 @@ def _measured_part(spool: str, n: int, rg: int, page: int, out: str) -> tuple[in
     return base, max(peak[0], _held())
 
 
-@pytest.mark.parametrize("rg, page", [(256, 8), (1024, 1024)])
+@pytest.mark.parametrize("rg, page", [(256, 8), (1024, 1024), (256, None), (1024, None)])
 def test_a_cut_worker_holds_its_estimate(tmp_path, rg, page):
     """A real cut worker (spawned, `worker_init`'d, as `write_served`'s pool runs `cut_part`) writing a part of 400K rows
     from 64Ki-row spool groups: what it holds past its imports (PSS, sampled) is within `tree_mem.worker_bytes` of the
     plan's inputs — `rb` and the writer's metadata a group (`interval_store.writer_meta`) from the spool's footer — and
     that estimate is within `WORKER_SLACK` × it. Many small groups (32 pages each) make the writer's metadata the most
-    of it; one-page groups, the spool's batches."""
+    of it; one-page groups, the spool's batches; a sort without pages keeps nothing a page (`writer_meta` with None)."""
     from concurrent.futures import ProcessPoolExecutor
     from multiprocessing import get_context
 

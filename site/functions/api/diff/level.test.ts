@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Env } from '../../_lib/auth'
 import { sqliteD1 } from '../../_lib/testD1'
 import { fixture } from '../../_lib/testStore'
@@ -28,7 +28,7 @@ const slowed = <A extends unknown[], R>(name: keyof typeof lag, f: (...a: A) => 
 }
 
 /** `credentials: false`: the request presents none, so `ahead` starts nothing before the gate (a test's baseline). */
-const knobs = vi.hoisted(() => ({ credentials: true }))
+const knobs = vi.hoisted(() => ({ credentials: true, more: [] as string[], wide: [] as string[] }))
 
 vi.mock('../../_lib/auth.js', async orig => {
   const m = await orig<typeof import('../../_lib/auth.js')>()
@@ -56,7 +56,17 @@ vi.mock('../../_lib/edgeCache.js', async orig => {
 })
 vi.mock('../../_lib/diffLevel.js', async orig => {
   const m = await orig<typeof import('../../_lib/diffLevel.js')>()
-  return { ...m, prepareLevels: slowed('prep', m.prepareLevels) }
+  return {
+    ...m,
+    prepareLevels: slowed('prep', m.prepareLevels),
+    // What a read past its budget leaves for later (`knobs`): the real read, then these named.
+    buildLevels: async (...a: Parameters<typeof m.buildLevels>) => {
+      const got = await m.buildLevels(...a)
+      a[1].more?.push(...knobs.more)
+      a[1].wide?.push(...knobs.wide)
+      return got
+    },
+  }
 })
 
 const { onRequestGet: level } = await import('./level')
@@ -229,6 +239,26 @@ describe('a level request\'s fixed phase', () => {
     const hidden = await at('example.test', { authorization: `Bearer ${token}` })
     expect([primed.status, primed.headers.get('x-cache'), again.headers.get('x-cache'), hidden.status, await hidden.text()])
       .toEqual([200, 'miss', 'hit', 404, 'path not found'])
+  })
+})
+
+describe('a path-restricted identity', () => {
+  beforeEach(async () => {
+    await quiesce()
+    await cold()
+    env = { ...env, BASE_SCOPE: 'laptop', SESSION_SECRET: 'test-secret', CACHE_NS: '' } as Env
+  })
+  afterEach(() => { knobs.more = []; knobs.wide = [] })
+
+  it('`more` and `wide` name no hidden dir, nor anything below one (a chain can walk into it)', async () => {
+    const { gateFor } = await import('../../_lib/auth')
+    const { hideScope } = await import('../../_lib/restrict')
+    const { token } = await gateFor(env)!.mint({ email: null, scopes: ['laptop', hideScope('laptop', 'b1')], name: 'restricted link', createdBy: 'ryan@example.test', expiresAt: null, maxRedeems: null })
+    knobs.more = ['b1/secret/x', 'b2/later', 'b1']
+    knobs.wide = ['b1/secret/y', 'b3/wide']
+    const r = await level({ request: new Request('http://example.test/api/diff/level?from=2026-08-02&to=2026-08-06&p=', { headers: { authorization: `Bearer ${token}` } }), env })
+    const { more, wide } = await r.json() as { more?: string[]; wide?: string[] }
+    expect([r.status, more, wide]).toEqual([200, ['b2/later'], ['b3/wide']])
   })
 })
 

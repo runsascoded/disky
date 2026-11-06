@@ -405,7 +405,7 @@ def _cut(rel_root: Path, out: Path) -> Path:
     con = duckdb.connect()
     for sort in ia.run_sorts():
         sub, _, _ = ist.SORTS[sort]
-        ist.write_served(con, ia.delta_relation(str(rel_root), sub), sort, out / f"{sort}.parquet", ist.SUB_SCHEMA[sub], rg_rows=4)
+        ist.write_served(con, ia.delta_relation(str(rel_root), sub), sort, out / f"{sort}.parquet", ist.SUB_SCHEMA[sub], page_rows=ist.served_page_rows(sort), rg_rows=4)
     return out
 
 
@@ -418,7 +418,7 @@ def served(world):
     base = root / "served-base"
     for sort in ("path", "bysize"):
         sub, _, _ = ist.SORTS[sort]
-        ist.write_served(con, f"read_parquet('{world['base']}/{sub}/r*.parquet')", sort, base / f"{sort}.parquet", ist.SUB_SCHEMA[sub], rg_rows=4,
+        ist.write_served(con, f"read_parquet('{world['base']}/{sub}/r*.parquet')", sort, base / f"{sort}.parquet", ist.SUB_SCHEMA[sub], page_rows=ist.served_page_rows(sort), rg_rows=4,
                          stamps=[s["ts"] for s in base_scans])
     cut = {}
     for d, stack in world["stacks"].items():
@@ -1051,8 +1051,9 @@ def test_jobs_are_the_profiles_and_carry_the_cost_label(monkeypatch):
     want = {"app": "disky", "deployment": "t", "component": "interval-store", "scan_run": "root-uid"}
     for spec, scan, stage in ((ranges, "2026-08-04", "ranges"), (publish, "2026-08-04", "publish"),
                              (r2, "2026-08-04", "r2"), (merge, "2026-08-04T1236", "merge")):
+        # the cost labels on the job and on its allocation policy (its VMs and disks); the job's own two stay on the job
         assert spec["allocationPolicy"]["labels"] == {**want, "scan_id": scan.lower(), "stage": stage}
-        assert {k: spec["labels"][k] for k in ("purpose", "component", "gen")} == {"purpose": "interval-store", "component": "interval-store", "gen": "g1"}
+        assert spec["labels"] == {**want, "scan_id": scan.lower(), "stage": stage, "purpose": "interval-store", "gen": "g1"}
     cmd = lambda s: s["taskGroups"][0]["taskSpec"]["runnables"][0]["container"]["commands"][1]  # noqa: E731
     assert [s["taskGroups"][0]["taskCount"] for s in (ranges, publish, r2, merge)] == [2, 1, 1, 1]
     assert cmd(ranges) == ("set -euo pipefail; mkdir -p /stage/tmp /stage/out && cd /stage && python3 -u -m dt_cloud.interval_append ranges "

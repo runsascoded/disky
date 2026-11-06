@@ -7,15 +7,17 @@ sizes) from `cloud/tests/test_interval_churn.py`'s generator, under `interval-st
 computed from the scans' files alone: each child that changed (its range churn, bytes and objects at both scans), and
 the path's own.
 
-With `PAGES` (an int), the same store cut in `PAGES`-row data pages with a page index, under `interval-store-p<PAGES>/`
-(2b.1's page reads; `diffLevel.test.ts` checks both answer `expected.json`). `interval-store/` was cut before served
-sorts carried a page index, and stays so: the reader's whole-group path for older generations.
+With `PAGES` (an int), the same store as the cut wrote it from 2b.1 until pages went back to the level sort alone
+(`interval_store.served_page_rows`): every sort in `PAGES`-row data pages with a page index, under
+`interval-store-p<PAGES>/`. Runs cut in that time hold such files until a carry or a compaction rewrites them, so
+`diffLevel.test.ts` checks that both stores answer `expected.json`, and tiers of both kinds side by side. `interval-store/`
+has no page index: what the cut writes for every sort but `level`.
 
 With `ROOT` (a top-level name, `b1` or `b2`), a store of only the files under it, under `interval-store-<ROOT>/`, and no
 `expected.json`: two of them, one per root, are a union view's members (`unionLevel.test.ts`), whose union answers as
 the whole store does.
 
-With `level`, the same store built with the level sort (`build -l`; its runs carry it), in 2-row pages, under
+With `level`, the same store built with the level sort (`build -l`; its runs carry it), that sort in 2-row pages, under
 `interval-store-level/` (`/api/diff/level`'s level index, specs/diff-progressive.md §3b); `expected.json` is checked, not
 rewritten.
 
@@ -77,6 +79,9 @@ def main(pages: int | None = None, root: str | None = None, with_level: bool = F
 
     if pages:
         ist.SERVED_PAGE_ROWS = pages
+        if not with_level:
+            # 2b.1's writer: every sort paged, not the level sort alone.
+            ist.served_page_rows = lambda sort: ist.SERVED_PAGE_ROWS
 
     t = _load("test_interval_churn")
     work = HERE / "work"

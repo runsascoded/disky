@@ -35,6 +35,8 @@ describe('kinds', () => {
       ['POST /api/auth/grants', 'access'],
       ['POST /api/og/mint', 'access'],
       ['PATCH /api/db/allowed_emails', 'admin'],
+      ['POST /api/admins', 'admin'],
+      ['DELETE /api/admins', 'admin'],
       ['PUT /api/session-log/switch', 'admin'],
       ['PUT /api/activity/kinds/view', 'admin'],
       ['PUT /api/digest-settings', 'admin'],
@@ -68,14 +70,14 @@ describe('kinds', () => {
       authLine('POST', '/api/auth/grants/g1/revoke'),
       authLine('PATCH', '/api/auth/grants/g1'),
       authLine('POST', '/api/auth/requests/r9/approve'),
-      authLine('DELETE', '/api/auth/allowed/bob%40x.edu'),
+      authLine('DELETE', '/api/auth/allowed/bob%40example.test'),
       authLine('POST', '/api/auth/allowed/sync'),
     ]).toEqual([
       'minted a grant',
       'revoked grant g1',
       'edited grant g1',
       'approved access request r9',
-      'removed bob@x.edu from the sign-in allowlist',
+      'removed bob@example.test from the sign-in allowlist',
       'synced the sign-in allowlist',
     ])
   })
@@ -465,7 +467,7 @@ describe('D1 and sinks', () => {
     const data: Record<string, unknown> = {}
     noteActivity({ data }, { line: 'added a note on 2026-10-20: "x"', note: 4 })
     await captureWrite({ request: req('/api/annotations', { at: '2026-10-20', text: 'x' }), env: full, data } as never, 'note', null, wait, NOW)
-    const plain = req('/api/auth/grants', { email: 'bob@x.edu', scopes: ['gcs'], days: 7 })
+    const plain = req('/api/auth/grants', { email: 'bob@example.test', scopes: ['gcs'], days: 7 })
     await captureWrite({ request: plain, env: full } as never, 'access', plain.clone().text(), wait, NOW + 1000)
     expect((await eventsOf(db, 1)).map(e => [e.kind, e.actor, e.via, e.line, e.detail])).toEqual([
       ['note', 'ann@example.test', 'grant', 'added a note on 2026-10-20: "x"', { note: 4 }],

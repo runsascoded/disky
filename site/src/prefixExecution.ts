@@ -13,9 +13,11 @@ export type PrefixExecution = null | {
   kind: 'recorded'; runId: string; objects: number; bytes: number; preserved: number; undone: number; deadline: number | null; expired: boolean
   /** A finished run that recorded no window: nothing to promise (soft delete off, the usual reason). */
   noUndo?: boolean
-  /** Its window is still open, but soft delete is off now on the prefix's bucket: nothing there can be restored. */
+  /** Its window is still open and not all of it is restored, but soft delete is off now on the prefix's bucket: nothing there
+   *  can be restored. */
   unavailable?: UndoUnavailable
-  /** Its window is still open, and nothing here says whether soft delete is still on for the prefix's bucket. */
+  /** Its window is still open and not all of it is restored, and nothing here says whether soft delete is still on for the
+   *  prefix's bucket. */
   unseen?: UndoUnseen
 } | {
   kind: 'live-prefix'; runId: string; objects: number; bytes: number
@@ -38,7 +40,8 @@ export function prefixExecution(prefix: string, records: readonly PrefixBandReco
   const r = records.filter(r => r.prefix === prefix && (r.objects > 0 || r.drift_new_objects > 0 || r.overwritten > 0)).sort((a, b) => b.started_ts - a.started_ts)[0]
   if (r) {
     const deadline = conservativeDeadline(r)
-    const open = deadline != null && now < deadline
+    // An undo to lose: inside its window, with something of the band still deleted (its run not undone, the band not restored).
+    const open = deadline != null && now < deadline && r.undo_state !== 'full' && r.undone_objects < r.objects
     const unavailable = open ? undoUnavailable([bucketOfPrefix(prefix)], known) : null
     const unseen = open && known !== undefined && !unavailable ? undoUnseen([bucketOfPrefix(prefix)], known) : null
     return { kind: 'recorded', runId: r.run_id, objects: r.objects, bytes: r.bytes, preserved: r.drift_new_objects + r.overwritten, undone: r.undone_objects, deadline, expired: deadline != null && now >= deadline, ...(r.finished_ts != null && r.undo_deadline == null ? { noUndo: true } : {}), ...(unavailable ? { unavailable } : {}), ...(unseen ? { unseen } : {}) }

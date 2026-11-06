@@ -56,7 +56,7 @@ def test_listing_job_spec_task_per_bucket():
     assert tg["taskSpec"]["computeResource"] == {"cpuMilli": 30000, "memoryMib": 48000}
     alloc = spec["allocationPolicy"]
     assert alloc["instances"][0]["policy"] == {"machineType": "n2-standard-32", "bootDisk": {"type": "pd-balanced", "sizeGb": "50"}}
-    assert (alloc["serviceAccount"], alloc["location"]) == ({"email": "job@my-project.iam.gserviceaccount.com"}, {"allowedLocations": ["regions/us-central1"]})
+    assert (alloc["serviceAccount"], alloc["location"]) == ({"email": "job@my-project.iam.gserviceaccount.com"}, {"allowedLocations": ["regions/my-region"]})
 
 
 def test_legacy_weights_dirs_are_scanned_for_their_bucket_only():

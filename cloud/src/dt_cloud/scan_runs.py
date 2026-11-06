@@ -103,8 +103,9 @@ def phase_status(note: str | None) -> str:
 
 def phase_skip(note: str | None) -> str | None:
     """A phase's explicit skip: its note's `skipped[ (kind)]: reason` clause (at the start or after a comma, e.g.
-    `overlapped, skipped (busy): …`), or None. The phase is done, but its work is not: the run reads `partial` with
-    this reason on /scans (`scanRunsModel.phaseSkip`), and a later step may act on it (the probe's `-i`)."""
+    `overlapped, skipped (busy): …`), or None. The phase is done, but its work is not: the run reads short on
+    /scans with this reason (`scanRunsModel.phaseSkip`; `partial` or `incomplete` by its step's `side`, `recovered` once
+    done), and a later step may act on it (the probe's `-i`)."""
     m = re.search(r"(?:^|,\s*)(skipped(?: \([^)]*\))?: .+)$", note or "")
     return m[1] if m else None
 
@@ -1080,11 +1081,14 @@ def _now() -> int:
 
 
 def lookup_job(profile: Profile, run_id: str, batch_job_name: str | None, from_batch: bool, region: str | None) -> Mapping | None:
-    """The run's Batch job: `-J` by name, `-B` by the run id (its uid) in the profile's regions; else None."""
+    """The run's Batch job: `-J` by name (in `region`, else the profile's first, else `$BATCH_REGION`), `-B` by the run
+    id (its uid) in the profile's regions; else None."""
     if batch_job_name:
+        from .deploy import batch_region
         from .gcp import batch_job
 
-        return batch_job(batch_job_name, profile.project, region or (profile.regions[0] if profile.regions else "us-central1"))
+        region = batch_region(region or (profile.regions[0] if profile.regions else None), "pass -R/--region, name the profile's `regions`")
+        return batch_job(batch_job_name, profile.project, region)
     if from_batch:
         from .scan_runs_backfill import fetch_jobs
 
@@ -1501,16 +1505,17 @@ class JobRun:
         t: dict[str, str] = {}
         if uid and uid != self.run_id and self.recording:
             try:
+                from .deploy import batch_region
                 from .gcp import batch_job_by_uid
 
-                job = next((j for r in (self.profile.regions or ("us-central1",))
-                            if (j := batch_job_by_uid(uid, self.profile.project, r))), None)
+                regions = self.profile.regions or (batch_region(how="name the profile's `regions`"),)
+                job = next((j for r in regions if (j := batch_job_by_uid(uid, self.profile.project, r))), None)
                 if job is None:
-                    err(f"scan-run: no Batch job with uid {uid} in {self.profile.regions}")
+                    err(f"scan-run: no Batch job with uid {uid} in {regions}")
                 else:
                     jf = job_fields(self.profile, job)
                     t = {"uid": uid, **{k: jf[k] for k in ("job_name", "region", "machine") if jf[k]}}
-            except Exception as e:  # noqa: BLE001 — the task's links are a nicety; the phase records without them
+            except (Exception, SystemExit) as e:  # noqa: BLE001 — the task's links are a nicety; the phase records without them
                 err(f"scan-run: task lookup failed ({type(e).__name__}: {e}); phases record without their task")
         self.save(task=t)
         return {**t, **node}

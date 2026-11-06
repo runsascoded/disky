@@ -96,6 +96,12 @@ dt-cloud dups -o OUT INDEX  # A scan's duplicate-candidate groups (specs/dups.md
                           # crc32c (`exact`; a differing `moved` copy dropped), `-g N` crc32c spot checks on GCS (groups `-l` left
                           # unsettled) → `dups.parquet` + `dups.json`
                           # (the `dups` scan step writes them beside the index; `/api/dups` + `/dups` read them, `DUPS=1`)
+dt-cloud admins check -d DB -o ORG [-c CONFIG] [-j] [-x HANDLE]…  # A deployment's admin list (`admin_emails.github`: the handles recorded
+                          # on `/admin`) against a GitHub org's owners (`gh api orgs/ORG/members?role=admin`; run as an org
+                          # member): who is an owner but not an admin, and the reverse; rows without a handle are counted.
+                          # Read-only (handles only, `wrangler d1 execute --remote`), never a sync; exit 1 on drift, 3 when the comparison
+                          # isn't available (no `github` column or no table: the recipe unapplied). `-x`: a
+                          # difference that is meant (an owner left off the list), reported on its own line, not drift
 dt-cloud interval-store append [-c] [-n] SCAN_ID  # Append one scan to the interval store as a run beside its
                           # base generation (spec `interval-store.md` §2.7; profile `-P`/$INTERVAL_STORE_PROFILE):
                           # prepare → ranges (Batch) → publish (cut, binary-counter merges, manifest) → R2 → prune,
@@ -183,6 +189,17 @@ dt-cloud image-sha [-e SHA [-a]] [-j]  # The running image's source revision (`i
                           # `<sha> dirty` or `unstamped`; `-e` exits 1 unless the image is that sha (or a ≥7-char prefix),
                           # clean (`-a` accepts dirty) and stamped. Job entrypoints (`scan head`/`step`, the
                           # `interval-store` stage tasks) log it
+dt-cloud batch submit -c COMPONENT [-L REGION] [-b BUCKET]… [-X] JOB_ID SPEC  # The shell's Batch submit, through `batch.submit_job` (the
+                          # one place a job is created): labelled from `$DISKY_LABELS` + `-c` on the job and its allocation policy
+                          # (`cost_labels.py`), in `-L`, else `$BATCH_REGION`. There is no default region (`deploy.batch_region`): neither
+                          # set is an error, here and in `job status|logs|watch|metrics`, `batch-cancel` (`-r`), `sweep sync-progress`,
+                          # `scan-run task`, and `job submit-listing` for a bucket `$LISTING_REGIONS` doesn't name. A job whose VMs
+                          # (`allocationPolicy.location.allowedLocations`, else the region) run outside the location of a bucket it
+                          # mounts (gcsfuse volumes) or names (`-b`) is refused (`batch.check_region`: one `buckets.get` per bucket
+                          # per process; a multi-region bucket takes its continent's regions, a dual-region its two) unless
+                          # `-X/--cross-region` (`job submit-listing -X` too; `$BATCH_CROSS_REGION=1` for the submitters with no flag:
+                          # the static-names / interval-store runners, `scan-run task`). A bucket whose location can't be read is
+                          # noted on stderr and not checked; a bucket reached only by URL and not named isn't seen
 dt-cloud soft-delete -b BUCKET… [-o ROOT…] [-j]  # Each bucket's GCS soft-delete retention now (`soft_delete.py`, read with
                           # `storage.buckets.get`): what a sweep's undo has to work with, since GCS restores nothing from a bucket whose
                           # policy is off. `-o`: the day's `<ROOT>/<date>.json`; the opt-in scan step `soft-delete` writes it under
@@ -191,7 +208,7 @@ dt-cloud soft-delete -b BUCKET… [-o ROOT…] [-j]  # Each bucket's GCS soft-de
                           # disabled, the route refusing), one on a bucket it doesn't name is "unverified". `sweep undo` asks GCS itself
 dt-cloud diff-bench -a BEFORE -b AFTER [-S STORE] [-v DATE:PATH]… CASES  # The table a store-layout change ships with (no CURRENT move
                           # without it): the browser's diff + map requests (diff-check's CASES, `-v` views) on two hosts, each
-                          # cold (`-n` random w×h cache buckets no page asks for) then warm; per request kind, median cold
+                          # cold (`-n` random w×h cache buckets no page asks for) then warm (`-s`: also each diff's `summary=1`, which no page asks); per request kind, median cold
                           # `Server-Timing` total, the paired Δ (B − A), B-slower count + sign-test p; answers must agree
                           # (totals, rows, nodes). Same reader flags on both (`DIFF_DESCENT` moves the tier). Exit 1 on an error
                           # or a disagreement, 2 if B is slower (p < `-p`); `-o` every sample as TSV
@@ -205,6 +222,8 @@ disk-tree tiers plan SIDECAR P THR  # The reader's span selection run offline ov
                           # count, `-j` JSON. Measured on a 20K-child flat dir at 2048-row groups: `path`
                           # decodes 10 groups / 20,015 rows for 1,250 answers, `bysize` 1 group / 2,048
 ```
+
+**What `batch.check_region` can't see:** it reads a spec's gcsfuse mounts and the buckets `-b`/`buckets=` name, at `batch.submit_job`, so a job's region is checked only that far. A bucket the job reaches only by URL (a `gs://` path in its script or args, not mounted or named) isn't seen; name it. Nor is any job that doesn't go through `submit_job`: Nextflow's tasks (its `google-batch` executor posts them), the site's REST submits (`_lib/sweepDispatch.ts`, `_lib/cwBatch.ts`), `BatchCron` bodies (Cloud Scheduler posts them; `BatchCron` checks only their labels), and raw `gcloud batch jobs submit`. Those keep a job beside its buckets by configuration alone.
 
 ### Site (`site/`) and widget packages
 
@@ -237,7 +256,17 @@ One gate (`_lib/auth.ts`, `@open-athena/auth` over D1): `identify` → `Identity
 - `/auth/google` (+ `/callback`, `/onetap`) — Google OIDC → email session; `/auth/email/*` — emailed code / magic link → email session
 - `/api/auth/*` — the package's routes: `whoami`, `exchange` (`?key=` share link → grant session), `logout`, request-access, admin grant/request/log console
 - `/api/token` — a session's personal agent token (a non-expiring Bearer grant, the base scope only; grants can't mint one)
+- `/api/admins` — the admins (`/admin`'s "Admins" section): every path to the `admin` scope (the list's rows with who added whom and when, the break-glass addresses, live admin-scope links, the staff domain where it is one), add / remove on the list, each logged to `admin_edits`; the last listed admin can't be removed
 - `/a/<sha256>.<ext>` — **public, no gate**: an activity post's sender face (`_lib/publicAvatar.ts`), only bytes a Slack / Discord post stored in `public_avatars`, named by their own SHA-256 (a profile's or grant's face, else an identicon seeded by an HMAC of the actor under `SESSION_SECRET`); anything else 404s
+
+**A path-restricted link** (a grant carrying `<tag>:hide:<prefix>`, `_lib/restrict.ts`): every route it can reach says what it gets in `functions/gates.test.ts` `RESTRICTED`. Blocked (`RESTRICTED_BLOCKED`, or by the route): whatever can't be filtered, including a name filter (`q=` on `/api/subtree`, `/api/diff`, `/api/series`: its sums count hidden hits) and an owner, class or lens scope at or above a hidden dir (`o=`, `cl=`, `lens=` on the same three: its sums break down what's hidden; under one is a 404, as unscoped). Filtered: the plain views, `/api/annotations`, `/data/rules.json`.
+
+**Who is an admin:** one function, `isAdmin(env, email)` (`_lib/auth.ts`); `scopesFor` puts the `admin` scope on a session by it, so `requireAdmin`, `Identity.admin`, whoami and the client's admin UI follow, and a Slack click (`slack/actions.ts`) asks it of the clicker's Slack profile email. With `ADMIN_LIST = "1"` an admin is an `admin_emails` row or a break-glass address (the secret `ADMIN_BOOTSTRAP`) and nothing else: staff keep every other scope, an empty or missing list means no admins (never a fallback to the domain; `/admin` says so), and a listed address is admitted by the list. A row may carry the person's GitHub handle (`github`), so the list can be checked against a GitHub org's owners (`dt-cloud admins check`). Unset, the staff domain is admin (plus `admin_emails` rows where `ADMIN_EMAILS`). The only other admin is a grant holding the scope (`admin` or `*`), which only an admin could mint, and which with `ADMIN_LIST` nobody can: the gate's store (`grantStore`) refuses to insert one, whichever path asks (`POST /api/auth/grants`, a request's approval: 403), or to re-key one (`/rotate`), or to give one back access (a later or cleared expiry, a higher cap, sessions that outlive the expiry, re-enabling: 403; shortening and disabling pass); the grant the package mints by itself for an address the policy admits (`POST /api/auth/request`) goes in without the scope. A live admin grant keeps working under the list, stays on `/admin`, and can be revoked. Agent tokens never carry it. `functions/gates.test.ts` enumerates every Functions route and asserts its gate per identity: a new route needs a row there.
+
+**Rolling out `ADMIN_LIST`:** merging changes nothing while it's unset, and `/api/admins` edits the list from the merge on, recipe applied or not (without `site/migrations/admin-list.sql` it stores no GitHub handles). To turn it on:
+1. Apply the recipe, seed the list on `/admin`, and check it (`dt-cloud admins check`).
+2. List the live admin grants (`/admin`'s Admins section, "link" rows; `created_by = 'policy'` rows are ones the package minted for a request, whose token nobody was given) and have them revoked. Each is an admin whatever the list says.
+3. Set `ADMIN_LIST` and `ADMIN_BOOTSTRAP` on **every environment sharing that D1, at the same time**, prod and dev stack alike: a dev stack on prod's D1 with the list off lets every staff sign-in edit the list from dev.
 
 ## Development
 

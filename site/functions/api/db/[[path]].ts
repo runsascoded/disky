@@ -14,7 +14,7 @@
  * is neither listed nor served (404).
  */
 import type { D1Database } from '@cloudflare/workers-types'
-import { type Ctx, identify, json } from '../../_lib/auth.js'
+import { baseScope, type Ctx, identify, json } from '../../_lib/auth.js'
 import { TABLES, type TableSpec, tableSpec } from '../../_lib/tables.js'
 import { noteActivity } from '../../_lib/activityHook.js'
 
@@ -33,12 +33,13 @@ export const onRequest = async (ctx: Ctx): Promise<Response> => {
   if (!id) return json({ error: 'unauthenticated' }, 401)
   const scopes = new Set(id.scopes)
   const has = (s: string) => scopes.has(s) || scopes.has('*')
+  const canRead = (t: TableSpec) => has(t.readScope === 'base' ? baseScope(env) : t.readScope)
   const who = id.email ?? id.name ?? 'unknown'
 
   const rest = new URL(request.url).pathname.replace(/^\/api\/db\/?/, '')
   const present = await d1Tables(env.DB)
   if (!rest) {
-    const tables = TABLES.filter(t => present.has(t.name) && has(t.readScope)).map(t => ({
+    const tables = TABLES.filter(t => present.has(t.name) && canRead(t)).map(t => ({
       name: t.name, pk: t.pk, columns: t.columns, desc: t.desc, orderBy: t.orderBy,
       canWrite: t.writeScope != null && has(t.writeScope),
     }))
@@ -48,7 +49,7 @@ export const onRequest = async (ctx: Ctx): Promise<Response> => {
   const spec = tableSpec(rest)
   if (!spec) return json({ error: 'unknown table' }, 404)
   if (!present.has(spec.name)) return json({ error: `no ${spec.name} table on this deployment` }, 404)
-  if (!has(spec.readScope)) return json({ error: 'forbidden' }, 403)
+  if (!canRead(spec)) return json({ error: 'forbidden' }, 403)
   const canWrite = spec.writeScope != null && has(spec.writeScope)
 
   if (request.method === 'GET') {

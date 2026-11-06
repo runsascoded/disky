@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { bucketSoftDeleteOf, confirmUndoTerms, minimumWarning, runHasNoUndo, runNoUndoText, runUndoUnavailable, runUndoUnseen, slackUndoTerms, undoUnavailable, undoUnavailableText, undoUnseen, undoUnseenText } from './softDelete'
+import { bucketSoftDeleteOf, confirmUndoTerms, minimumWarning, runHasNoUndo, runNoUndoText, runUndoUnavailable, runUndoUnseen, slackUndoTerms, undoneText, undoUnavailable, undoUnavailableText, undoUnseen, undoUnseenText } from './softDelete'
 
 describe('slackUndoTerms', () => {
   it.each([
@@ -155,5 +155,11 @@ describe('undoUnavailable — a recorded undo GCS can no longer do', () => {
       runUndoUnavailable(partly, ['off1'], known, 100),
       runUndoUnseen(partly, ['other'], known, 100),
     ]).toEqual([null, null, null, off, { unseen: ['other'] }])
+  })
+})
+
+describe('undoneText', () => {
+  it('a run\'s `undo_state`, in the words of its row\'s tag; nothing undone, or a row from before the column, has none', () => {
+    expect([{ undo_state: 'full' }, { undo_state: 'partial' }, { undo_state: 'none' }, {}].map(undoneText)).toEqual(['undone', 'partly undone', null, null])
   })
 })

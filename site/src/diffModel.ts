@@ -46,6 +46,10 @@ export interface DiffData {
   budgetCut?: true
 }
 
+/** The diff header's label while the pair's full walk aligns: `pair` (`11/4 → 11/5`) until the map draws its first
+ *  paint (`firstPaint`: this pair's `depth=1` diff, which carries the totals), then the rows that are still to come. */
+export const diffLoadingLabel = (firstPaint: boolean, pair: string): string => firstPaint ? 'Aligning the rows…' : `Aligning ${pair}…`
+
 export type AreaMode = 'max' | 'delta'
 
 export interface DiffNode {

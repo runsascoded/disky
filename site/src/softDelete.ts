@@ -96,6 +96,11 @@ export const UNDO_UNSEEN_WHO = 'The undo job checks the bucket itself, and repor
 /** The run columns that say whether it still has an undo to qualify. */
 export interface RunUndoWindow { mode: string; undo_deadline?: number | null; undo_state?: string }
 
+/** What an undo has made of a run, in the words of its row's tag on `/staged` and of the Slack thread: `full`, every object it
+ * deleted is live again; `partial`, some are. Null: nothing of it is undone. */
+export const undoneText = (r: { undo_state?: string }): 'undone' | 'partly undone' | null =>
+  r.undo_state === 'full' ? 'undone' : r.undo_state === 'partial' ? 'partly undone' : null
+
 /** Only a real run inside its recorded window, not already undone, has an undo to lose: a closed window, a run that recorded
  * none, or one whose every deleted object is live again already says so itself. */
 const undoOpen = (r: RunUndoWindow, now: number): boolean => r.mode === 'real' && r.undo_deadline != null && now < r.undo_deadline && r.undo_state !== 'full'

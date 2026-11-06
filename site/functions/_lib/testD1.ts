@@ -112,6 +112,13 @@ export function withLedger(raw: Sqlite): void {
   raw.exec(LEDGER_DDL)
 }
 
+/** The admin list's table (`admin_emails`), for tests of the code that reads or writes it, on a branch whose schema
+ * doesn't carry it yet: created as `cloud`'s schema has it. */
+export function withAdminEmails(raw: Sqlite): void {
+  if (tables(raw).includes('admin_emails')) return
+  raw.exec('CREATE TABLE admin_emails (email TEXT PRIMARY KEY, note TEXT, who TEXT NOT NULL, ts INTEGER NOT NULL, github TEXT)')
+}
+
 /** No ownership ledger, for tests of a deployment without one (cw's schema),
  * whichever branch's schema the database was built from. */
 export function withoutLedger(raw: Sqlite): void {

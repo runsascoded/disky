@@ -13,7 +13,7 @@
  * filled in from the snapshot dir: the chart keeps any history that never
  * got (or lost) its tiers, rather than showing a gap.
  */
-import { hiddenNotFound, isHidden, restrictionFor } from '../_lib/restrict.js'
+import { hiddenNotFound, isHidden, restrictedScopeRefused, restrictedSearchRefused, restrictionFor, scopeReachesHidden } from '../_lib/restrict.js'
 import { type Ctx, type Identity, json, requireScope, requireViewer } from '../_lib/auth.js'
 import { snapshotsPrefix, traceJoins } from '../_lib/shared.js'
 import { ivRefusal, ivRetry, type Lens, pathGens, withPathStore, pathScans, servedStore, storeReady } from '../_lib/index.js'
@@ -177,10 +177,14 @@ export async function seriesRead(ctx: SeriesCtx, gate: (ctx: SeriesCtx) => Promi
   const paths = parsePaths(url.searchParams.getAll('paths'))
   if (paths.some(p => p.includes('..') || p.startsWith('/'))) return json({ error: 'bad paths' }, 400)
   if (paths.length > SERIES_MAX_PATHS) return json({ error: `too many paths (max ${SERIES_MAX_PATHS})` }, 400)
-  // A path-restricted link (specs/path-scopes.md): hidden paths are absent.
+  // A path-restricted link (`_lib/restrict.ts`): hidden paths are absent.
   const restriction = restrictionFor(gated, env)
   if (restriction && [path, ...paths].some(p => isHidden(p, restriction))) return hiddenNotFound()
   const lensRaw = url.searchParams.get('lens')
+  const owner = parseOwner(url.searchParams.get('o'))
+  const classes = parseClasses(url.searchParams.get('cl'))
+  // An owner, class or lens scope at or above a hidden dir: `/api/subtree`'s refusal.
+  if (restriction && (lensRaw || owner || classes) && [path, ...paths].some(p => scopeReachesHidden(p, restriction))) return restrictedScopeRefused()
   let lens: Lens | undefined
   if (lensRaw) {
     if (env.STORE_KEY) return json({ error: LENS_PRIMARY_ONLY }, 400)
@@ -192,8 +196,6 @@ export async function seriesRead(ctx: SeriesCtx, gate: (ctx: SeriesCtx) => Promi
     lens = resolved
   }
   const lensTag = lensParam(lens)
-  const owner = parseOwner(url.searchParams.get('o'))
-  const classes = parseClasses(url.searchParams.get('cl'))
   // `q=` (`qs=`): the map's filter. A single literal on a scan of the static name index's generation is
   // answered from it — Σ that scan's own match roots under `path` (`staticFilter.ts`); other scans and
   // other queries take `paths=`, the current scan's match roots, as before. A view root the query
@@ -209,6 +211,8 @@ export async function seriesRead(ctx: SeriesCtx, gate: (ctx: SeriesCtx) => Promi
     throw e
   }
   // An indexed-only deployment: what the static index answers, no user lens or class scope (`_lib/indexedOnly.ts`).
+  // A path-restricted link: a name filter's points sum every match, hidden ones too (`/api/subtree`'s refusal).
+  if (restriction && qp.query) return restrictedSearchRefused()
   const strict = !!qp.query && indexedOnly(env)
   const refused = strict ? rejectQuery(url.searchParams.get('q'), pathTerms(env)) ?? rejectScope(!!(lens || classes)) : null
   if (refused) return new Response(rejectBody(refused), { status: 400, headers: { 'content-type': 'application/json' } })

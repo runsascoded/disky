@@ -47,6 +47,17 @@ def layer2_prefix(explicit: str | None = None, flag: str = "-l") -> str:
     return v
 
 
+def batch_region(explicit: str | None = None, how: str | None = None) -> str:
+    """The region a Batch job runs (or is looked up) in: `explicit` (a profile's, a spec's, a command's option), else
+    `$BATCH_REGION`. No default: a job belongs beside the buckets it reads, and only the deployment knows where those
+    are (a fallback region read another region's bucket, billed as inter-region transfer). Neither → exit naming
+    `$BATCH_REGION` and `how` else to say it (`pass -L/--region`)."""
+    v = (explicit or env("BATCH_REGION") or "").strip()
+    if not v:
+        raise SystemExit(f"no Batch region: {f'{how}, or ' if how else ''}export BATCH_REGION (the region the deployment's Batch jobs run in, beside its buckets)")
+    return v
+
+
 def words(new: str, *old: str, what: str) -> list[str]:
     """A required space-separated list (`$ACCESS_BUCKETS="a b c"`)."""
     return require(new, *old, what=what).split()

@@ -78,6 +78,7 @@ export async function undoSweepRun(
   if (no) return no
 
   const region = batchRegionFor(cfg, await runBuckets(db, row!))
+  if (!region) return refuse(503, notConfigured('undo', 'BATCH_REGION'))
   const jobId = `gcs-undo-${jobStampOf(now)}z`
   const spec = sweepJobSpec({
     cfg, jobSa: env.JOB_SA, region, script: undoScript({ bulk }), actor, siteUrl,

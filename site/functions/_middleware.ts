@@ -10,7 +10,7 @@ import { withBuild } from './_lib/build.js'
 import { hostRedirect } from './_lib/hostRedirect.js'
 import { restrictGate } from './_lib/restrict.js'
 import { footerCacheDrain } from './_lib/footerCache.js'
-import { coloPutsSettled } from './_lib/index.js'
+import { coloPutsSettled, ivRefusal } from './_lib/index.js'
 import { anonymousPage, stampPage, type OgEnv } from './_lib/og/serve.js'
 import { captureWrite, readBody } from './_lib/activityHook.js'
 import { sizeAssignments } from './_lib/activitySize.js'
@@ -94,7 +94,16 @@ async function serve(ctx: MiddlewareCtx): Promise<Response> {
   // consumes it, and it is recorded once the route answers 2xx.
   const activityKind = serverKind(ctx.request.method, url.pathname)
   const body = activityKind ? readBody(ctx.request) : null
-  const res0 = await ctx.next()
+  let res0: Response
+  try {
+    res0 = await ctx.next()
+  } catch (e) {
+    // An interval-store refusal a route let escape (`withPathStore`'s pointer read runs before most routes' own
+    // handling): its 503 + `Retry-After`, not the runtime's bare 500. Anything else stays thrown.
+    const refusal = ivRefusal(e)
+    if (!refusal) throw e
+    res0 = refusal
+  }
   mark('mw-next', t)
   // Server-Timing on API answers only (pages and assets keep their headers as Pages sent them).
   const res = url.pathname.startsWith('/api/') ? withMiddlewareTiming(res0, [...phases, ['mw', Date.now() - t0]], nth) : res0

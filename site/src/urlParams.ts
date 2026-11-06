@@ -95,7 +95,7 @@ export const URL_PARAMS: Record<string, UrlParamDoc> = {
   },
   d: {
     label: 'Scan',
-    description: 'Picks the scan the page shows, and optionally the diff\'s start. A slug is a compact `YYMMDD[HH[MM]]` prefix that resolves to the latest matching scan. `END-START` pins both ends, a trailing `-7d`/`-12h` sets a look-back span, and a leading `-` keeps the end on the latest scan. When absent, the page follows the latest scan and diffs against the previous one. The map and `/names` share it, and a slug that matches no scan shows a "no scan matches" notice instead of falling back. On `/dups`, the scan whose duplicate report shows (a slug or a scan id; when absent, the newest scan with a report).',
+    description: 'Picks the scan the page shows, and optionally the diff\'s start. A slug is a compact `YYMMDD[HH[MM]]` prefix that resolves to the latest matching scan. `END-START` pins both ends, a trailing `-7d`/`-12h` sets a look-back span, and a leading `-` keeps the end on the latest scan. When absent, the page follows the latest scan and diffs against the previous one. The map and `/names` share it, and a slug that matches no scan shows a "no scan matches" notice instead of falling back. On `/dups`, the scan whose duplicate report shows (a slug or a scan id; when absent, the newest scan with a report). On `/staged`, the scan the staged prefixes are sized at (the "sized at scan" menu; a slug naming no scan reads as absent); when absent, the newest, which the page keeps following. A run always reads the newest scan, so while an older one is picked the page dispatches none, dry or real: its run controls say to switch back.',
     examples: ['261009', '26100912', '2610091200', '-7d', '2609040002-7d', '-2609010002', '2609040002-2609010002'],
   },
   date: {
@@ -119,6 +119,12 @@ export const URL_PARAMS: Record<string, UrlParamDoc> = {
   denied: {
     label: 'Denied address',
     description: 'Set when a verified address isn\'t on the access list. The login wall then opens the request-access form, pre-filled with that address.',
+  },
+  done: {
+    label: 'Completed batches open',
+    description: 'When present, the fold of completed (or no longer staged) batches is open: a bare `?done` on its first page, `?done=3` on its third. When absent, it is folded. A `#batch-<id>` link to a batch in it opens it on that batch\'s page.',
+    examples: ['', '3'],
+    pages: ['/staged'],
   },
   dk: {
     label: 'Digest thread',
@@ -182,6 +188,12 @@ export const URL_PARAMS: Record<string, UrlParamDoc> = {
     label: 'Binary units',
     description: 'When present (as a bare `?iec`), shows sizes in binary units (KiB, MiB, GiB). Picking units also saves the choice in this browser. When absent, the saved choice applies, else decimal units.',
     examples: [''],
+  },
+  k: {
+    label: 'Run kind',
+    description: 'Lists only the scan runs of this kind (`scan`, `reproc`, or a maintenance kind: `compact`, `merge`, `race`), and charts only those. When absent, every kind is listed.',
+    examples: ['scan', 'merge'],
+    pages: ['/scans'],
   },
   key: {
     label: 'Share key',
@@ -311,6 +323,12 @@ export const URL_PARAMS: Record<string, UrlParamDoc> = {
     label: 'Path (legacy)',
     description: 'A legacy link\'s drill path, as a query parameter. It is converted to the URL-path form on load, keeping the other parameters.',
   },
+  pg: {
+    label: 'Table page',
+    description: 'On /scans, the page of the scan runs table, counting from 1 (absent: the first, the newest runs; a filter change returns to it). On /staged, the staged tables that are off their first page, counting from 1, `.`-separated: `12-3` is batch 12 on its third page, `e-2` the group staged before batches existed, and a bare `3` the one flat table (`flat`, or a filter in `q`). A completed batch\'s list of original prefixes pages under its id too. When absent, every table is on its first page; a page past a table\'s end reads as its last.',
+    examples: ['2', '12-3', '12-3.15-2'],
+    pages: ['/scans', '/staged'],
+  },
   perf: {
     label: 'Perf panel',
     description: '`1` at load shows the time-to-render panel. The timing marks themselves are always recorded.',
@@ -349,6 +367,18 @@ export const URL_PARAMS: Record<string, UrlParamDoc> = {
     examples: ['1'],
     pages: ['/admin'],
   },
+  rn: {
+    label: 'Runs per page',
+    description: 'Page size of the runs table: `50` or `all`. Defaults to 20, and any other value reads as 20.',
+    examples: ['50', 'all'],
+    pages: ['/staged'],
+  },
+  rp: {
+    label: 'Runs page',
+    description: 'The runs table\'s page, 1-based. When absent, the table opens on the page of the run held open by `run`, else on its first page; a page past the end reads as the last.',
+    examples: ['2'],
+    pages: ['/staged'],
+  },
   rm: {
     label: 'Run mode filter',
     description: 'Shows only `real` or only `dry` runs in the runs table. When absent, both are shown.',
@@ -377,13 +407,18 @@ export const URL_PARAMS: Record<string, UrlParamDoc> = {
   },
   run: {
     label: 'Focused run',
-    description: 'A run id (or its Batch job id). The runs table pages to that row, opens its details and scrolls to it once it appears.',
+    description: 'A run id (or its Batch job id). The runs table opens on that row\'s page (unless `rp` names another) with its details open, and scrolls to it once it appears, unless the link also names a `section` to land on.',
     pages: ['/staged'],
   },
   s: {
     label: 'Shade / staged sort',
     description: 'On the map, `c` shades each cell by storage class within its main color (the older spelling `class` is rewritten); when absent, there is no shading. On `/staged`, it sorts the prefix tables by a column key (`name`, `b` size, `o` objects, `d` the listing-time column, `a` last read, `idle`, …), with a `-` prefix for descending; the default is `-b`.',
     examples: ['c', 'name', '-o', 'idle'],
+  },
+  section: {
+    label: 'Section in view',
+    description: 'The section the page is scrolled to, written as the reader scrolls (unless the scroll-spy is turned off) and scrolled to on load. On the map, one of its sections (`diff`, `over-time`, …). On `/staged`, a batch (`batch-12`) or `runs`; an older `#batch-12` link is rewritten to it, and also opens that batch. When absent, the page opens at its top.',
+    examples: ['diff', 'batch-12', 'runs'],
   },
   si: {
     label: 'Decimal units',
@@ -406,6 +441,12 @@ export const URL_PARAMS: Record<string, UrlParamDoc> = {
     label: 'Render spy',
     description: '`1` installs the render spy (`window.__renderSpy`) and exposes the query cache as `window.__qc`, for debugging re-renders and refetches. Both are always on in development builds.',
     examples: ['1'],
+  },
+  st: {
+    label: 'Run status',
+    description: 'Lists only the scan runs with this outcome, and charts only those: `attention` (failed, or published with its data or serving short), `succeeded`, `partial` (only a side step failed), `passing` (a check failed, and the same check has passed in a later run), `incomplete`, `behind` (search behind), `recovered`, `failed`, `running` or `nop`. When absent (or for any other value), every run is listed.',
+    examples: ['attention', 'partial', 'passing', 'recovered'],
+    pages: ['/scans'],
   },
   store: {
     label: 'Scans store',
@@ -452,7 +493,7 @@ export const URL_PARAMS: Record<string, UrlParamDoc> = {
   },
   w: {
     label: 'Run window',
-    description: 'Lists only the scan runs that started in this UTC window, written as `START~END` stamps (`YYYY-MM-DDTHHMM`) and set by dragging on the duration chart. Esc clears it. When absent, every run is listed.',
+    description: 'Lists only the scan runs that started in this UTC window, written as `START~END` stamps (`YYYY-MM-DDTHHMM`) and set by dragging on the duration chart. Esc clears it, and Back undoes it. When absent, every run is listed.',
     examples: ['2026-10-12T0600~2026-10-13T0600'],
     pages: ['/scans'],
   },
@@ -461,6 +502,12 @@ export const URL_PARAMS: Record<string, UrlParamDoc> = {
     label: 'Force login wall',
     description: 'Development builds only: when present, shows the login wall instead of signing in automatically as the dev identity.',
     examples: [''],
+  },
+  x: {
+    label: 'Expanded batches',
+    description: 'Which staging batches are open, as `<open>_<folded>`: each side lists batch ids (`.`-separated, a run of consecutive ids as `12-15`, `e` for the group staged before batches existed) or is `*` for every batch. `12` opens batch 12, `_7` folds batch 7, `*` is "expand all", `*_7` all but 7, `_*` "collapse all", `12_*` all folded but 12. When absent, each batch follows its completion: open while anything in it is still staged, folded once done.',
+    examples: ['12', '*', '_*', '*_7-9', '12.15_3'],
+    pages: ['/staged'],
   },
   xr: {
     label: 'Time range',

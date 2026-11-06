@@ -723,6 +723,22 @@ describe('<Treemap>', () => {
     )
     expect(screen.getByText('rollup:root')).toBeInTheDocument()
   })
+
+  it('renders mapOverlay inside the map box: over the cells, clear of the bar, the rollup and the footer', () => {
+    const { container } = render(
+      <Treemap
+        root={tree}
+        {...accessors}
+        renderLegend={() => <span>legend</span>}
+        renderRollup={() => <span>rollup</span>}
+        renderFooter={() => <span>footer</span>}
+        mapOverlay={<span className="ov">filling in…</span>}
+      />,
+    )
+    expect([...container.querySelectorAll('.ov')].map(el => [el.textContent, el.parentElement?.className])).toEqual([['filling in…', 'dt-treemap-map']])
+    // The map box is the overlay's positioning context.
+    expect((container.querySelector('.dt-treemap-map') as HTMLElement).style.position).toBe('relative')
+  })
 })
 
 /**

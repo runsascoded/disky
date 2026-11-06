@@ -1403,22 +1403,37 @@ def batch_group() -> None:
 
 
 @batch_group.command("submit")
+@option("-b", "--bucket", "buckets", multiple=True, help="A bucket the job reads or writes by URL (repeatable): region-checked like the ones it mounts")
 @option("-c", "--component", required=True, help="The job's `component` cost label (e.g. `race`, `analysis`, `access`)")
-@option("-L", "--region", help="Batch region (default: `$BATCH_REGION`, else us-central1)")
+@option("-L", "--region", help="Batch region (default: `$BATCH_REGION`; there is no other)")
 @option("-p", "--project", help="GCP project (default: `$GCP_PROJECT` / ADC's)")
+@option("-X", "--cross-region", is_flag=True, help="Submit a job that runs outside the region of a bucket it mounts or names (`-b`); also `$BATCH_CROSS_REGION=1`")
 @argument("job_id")
 @argument("spec_file", type=File("r"))
-def batch_submit(component: str, region: str | None, project: str | None, job_id: str, spec_file) -> None:
+def batch_submit(
+    buckets: tuple[str, ...],
+    component: str,
+    region: str | None,
+    project: str | None,
+    cross_region: bool,
+    job_id: str,
+    spec_file,
+) -> None:
     """Submit SPEC_FILE (a Batch job's JSON, `-` = stdin) as JOB_ID, labelled from `$DISKY_LABELS` + `-c` (and
     `$SCAN_RUN_ID` / `$SCAN_ID` when set) on the job and its allocation policy, `$DISKY_LABELS` forwarded into its tasks'
     env. Deployment scripts and ad-hoc jobs (races, analysis) submit through it, never gcloud's own submit: a spec
-    missing a required label is refused (`batch.submit_job`). Prints the job's name."""
+    missing a required label is refused (`batch.submit_job`). Prints the job's name.
+
+    The region is `-L`, else `$BATCH_REGION`: with neither, an error (there is no default). A job whose VMs run outside
+    the location of a bucket it mounts (gcsfuse volumes) or names (`-b`) is refused (`batch.check_region`: its reads and
+    writes there are billed as inter-region transfer) unless `-X`; a bucket whose location can't be read is noted on
+    stderr and not checked."""
     from .batch import submit_job
     from .cost_labels import label_batch_spec
-    from .gcp import REGION
+    from .deploy import batch_region
 
     spec = label_batch_spec(json.load(spec_file), component)
-    print(submit_job(spec, job_id, region or REGION, project))
+    print(submit_job(spec, job_id, batch_region(region, "pass -L/--region"), project, buckets=buckets, cross_region=cross_region or None))
 
 
 @main.command("labels")
@@ -1562,8 +1577,9 @@ def index_extras(attributions: tuple[str, ...], identities_path: str, out_dir: P
 @option("-W", "--widths", default="512,1280,1536,1792,1920", help="Canvas widths to warm (the client sends ceil(innerWidth/128)*128; default = phone + common laptops)")
 def warm_cache(date: str | None, jobs: int, dry_run: bool, root: str | None, token: str | None, site_url: str | None, widths: str) -> None:
     """Warm the site's subtree + diff caches for a scan: replay the home
-    page's default requests (one subtree, the diff span chips 1d/3d/7d/14d/30d
-    and the previous-scan pair, each with its summary) at the common canvas
+    page's default requests (the subtree, the diff span chips 1d/3d/7d/14d/30d
+    and the previous-scan pair: each one's first paint, `depth=1`, and its full
+    read, exactly as the page sends them) at the common canvas
     widths, so the first viewer anywhere gets a cache hit (colo cache + global
     KV). Exits nonzero for failed requests; explicit view refusals (409) are reported separately. The pipeline may
     continue with a failed warm-up phase, since the view can be computed on demand."""
@@ -2825,7 +2841,7 @@ def access_status(buckets: tuple[str, ...], data_bucket: str, log_bucket: str | 
 
 @main.group()
 def job() -> None:
-    """Read-only ops for the daily snapshot Batch job (status/logs/watch/metrics)."""
+    """Read-only ops for the daily snapshot Batch job (status/logs/watch/metrics), in `$BATCH_REGION`."""
 
 
 def _resolve_job(name: str) -> dict:
@@ -2913,6 +2929,7 @@ def job_watch(interval: int, no_logs: bool, name: str | None) -> None:
 @option("-P", "--procs", default=24, help="bulk-list worker processes per task")
 @option("-w", "--workers", "threads", default=10, help="Concurrent prefix streams per process")
 @option("-W", "--wait", "wait", is_flag=True, help="Block until the job reaches a terminal state")
+@option("-X", "--cross-region", is_flag=True, help="Submit a job that runs outside the region of a bucket it mounts (the data bucket, the listed ones); also `$BATCH_CROSS_REGION=1`")
 def job_submit_listing(
     buckets: tuple[str, ...],
     date: str,
@@ -2921,26 +2938,31 @@ def job_submit_listing(
     procs: int,
     threads: int,
     wait: bool,
+    cross_region: bool,
 ) -> None:
     """Submit the DIY fleet-listing Batch job (one task per bucket; one job per
-    region, from `$LISTING_REGIONS`). Runs as `$JOB_SA` from `$JOB_IMAGE` in
-    `$GCP_PROJECT`, writing under `$DATA_BUCKET`.
+    region: a bucket's in `$LISTING_REGIONS`, else `$BATCH_REGION`). Runs as
+    `$JOB_SA` from `$JOB_IMAGE` in `$GCP_PROJECT`, writing under `$DATA_BUCKET`.
 
     Tasks reuse completed listings (``-x reuse``), so re-submitting for the
     same date only re-lists buckets that haven't finished — safe to retry.
+
+    A job mounts the data bucket and the buckets it lists: one that runs outside
+    any of their regions is refused (`batch.check_region`) unless `-X`.
     """
-    from .batch import REGION, fleet_buckets, listing_job_spec, listing_regions, submit_job, wait_jobs
+    from .batch import fleet_buckets, listing_job_spec, listing_regions, submit_job, wait_jobs
+    from .deploy import batch_region
 
     bkts = list(buckets) or fleet_buckets()
     old = dict(spec.split("=", 1) for spec in legacy)
     regions = listing_regions()
     by_region: dict[str, list[str]] = {}
     for b in bkts:
-        by_region.setdefault(regions.get(b, REGION), []).append(b)
+        by_region.setdefault(batch_region(regions.get(b), f"name {b}'s region in $LISTING_REGIONS"), []).append(b)
     jobs = []
     for region, rb in by_region.items():
         spec = listing_job_spec(date, rb, machine=machine, procs=procs, threads=threads, region=region, legacy=old)
-        name = submit_job(spec, region=region)
+        name = submit_job(spec, region=region, cross_region=cross_region or None)
         err(f"submitted {name} [{region}]: {len(rb)} bucket task(s) on {machine}")
         print(name)
         jobs.append((name, region))
@@ -3710,6 +3732,10 @@ from .d1_schema import cli as _d1_schema  # noqa: E402
 
 main.add_command(_d1_schema)
 
+from .admins import cli as _admins  # noqa: E402
+
+main.add_command(_admins)
+
 from .non_live import non_live_cmd as _non_live  # noqa: E402
 
 main.add_command(_non_live)
@@ -3752,12 +3778,12 @@ def _secrets_exec(project: str | None, bindings: tuple[str, ...], cmd: tuple[str
 @main.command("batch-cancel")
 @option("-l", "--label", "labels", multiple=True, required=True, help="KEY=VALUE (repeatable): cancel only jobs carrying every one")
 @option("-n", "--dry-run", is_flag=True, help="List the live jobs that match; cancel none")
-@option("-r", "--region", default=None, help="Batch region (default `$BATCH_REGION`, else us-central1)")
+@option("-r", "--region", default=None, help="Batch region (default `$BATCH_REGION`; there is no other)")
 def _batch_cancel(labels: tuple[str, ...], dry_run: bool, region: str | None) -> None:
     """Cancel (delete) every live Batch job carrying all of the `-l` labels, e.g. a killed Nextflow head's leftover
     tasks (`-l nf-session=<id>`). Prints each job's name."""
     from .batch import cancel_labelled
-    from .gcp import REGION
+    from .deploy import batch_region
 
     want = {}
     for l in labels:
@@ -3765,7 +3791,7 @@ def _batch_cancel(labels: tuple[str, ...], dry_run: bool, region: str | None) ->
         if not sep or not k:
             raise UsageError(f"label must be KEY=VALUE: {l!r}")
         want[k] = v
-    for n in cancel_labelled(want, region=region or REGION, dry_run=dry_run, log=err):
+    for n in cancel_labelled(want, region=batch_region(region, "pass -r/--region"), dry_run=dry_run, log=err):
         print(n)
 
 
@@ -3787,6 +3813,18 @@ def _scan_step(profile_path: str | None, name: str, arg: str | None) -> None:
 
     log_job_stamp(f"scan step {name}")
     sys.exit(run_step(name, arg, profile_path=profile_path))
+
+
+@_scan.command("steps")
+def _scan_steps() -> None:
+    """Print the soft steps' failure table as JSON (`scan_steps.failure_table`): per step, what its failure `leaves`
+    short, whether it is a `side` step (the scan's data and serving are whole without it), whether a later run
+    `converges` it and whether it `checks` (a check: nothing redoes it, a later run's passes or doesn't). /scans
+    classifies a succeeded run's failed phases by it: `site/src/scanSteps.json` is this output
+    (`dt-cloud scan steps > site/src/scanSteps.json` after changing a step's failure fields; a test compares them)."""
+    from .scan_steps import failure_json
+
+    sys.stdout.write(failure_json())
 
 
 @_scan.command("head")
@@ -3819,6 +3857,10 @@ main.add_command(_cf_usage)
 from .deploy_cost import cost_cmd as _deploy_cost  # noqa: E402
 
 main.add_command(_deploy_cost)
+
+from .fleet_status import fleet_status_cmd as _fleet_status  # noqa: E402
+
+main.add_command(_fleet_status)
 
 from .soft_delete import soft_delete_cmd as _soft_delete  # noqa: E402
 

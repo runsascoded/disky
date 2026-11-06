@@ -14,7 +14,7 @@ What does **not** transfer: mgu's `@pulumi/gcp` half (Cloud Scheduler / Batch / 
 ## Accounts (resolved 2026-09-10, by the user)
 
 Three CF accounts, confirmed:
-- **RAC** (`Ryan@runsascoded.com`) — `0dcad5654e9744de6616f74b8df4af63` = `.envrc`'s `CLOUDFLARE_ACCOUNT_ID` and the R2 endpoint host. **Holds the demo:** `disk-tree-demo` bucket + Pages project + the `r2.rbw.sh`/`rbw.sh` zone (+ the private `disk-tree` project/bucket + `disk-tree-auth` D1). This is dt's one **managing** account.
+- **RAC** (Ryan's personal Cloudflare login) — `0dcad5654e9744de6616f74b8df4af63` = `.envrc`'s `CLOUDFLARE_ACCOUNT_ID` and the R2 endpoint host. **Holds the demo:** `disk-tree-demo` bucket + Pages project + the `r2.rbw.sh`/`rbw.sh` zone (+ the private `disk-tree` project/bucket + `disk-tree-auth` D1). This is dt's one **managing** account.
 - **OA** (Open Athena) — `74981a43be0de7712369306c7b19133d`. mgu's home; nothing of dt's. (`cfn-demo-and-flask-localhost-peer.md`'s "Open Athena" label on `0dcad…` was wrong — that id is RAC.)
 - **HCCS** — `2363642879f18d37d52dca114059937e`. The source buckets are moving here (`ctbk`/`nj-crashes`/`path` read via the `CF_HCCS_R2_*` RO key; `jc-taxes` appears to still be RAC per the `disk-tree-wrangler` R2 policy). **Foreign-owned — dt reads, never manages.**
 

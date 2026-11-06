@@ -1,10 +1,10 @@
-import { useMutation, useQueries, useQuery, useQueryClient } from '@tanstack/react-query'
+import { type QueryClient, useMutation, type UseMutationOptions, useQueries, useQuery, useQueryClient } from '@tanstack/react-query'
 import { getCurrentScan } from './owners'
 import { DEFAULT_STORE } from './stores'
 import { type DeletionRun, EXEC_CAPS, type ExecCaps, type ExecJob } from './runs'
 import { HttpError, type PlanItem, stageMany as stageManyVia } from './batches'
 import { SWEEP_SETTINGS_KEY } from './softDelete'
-import type { ScanDeletion } from './stagedScan'
+import { type ScanDeletion, sizedAtOldScan } from './stagedScan'
 
 export type { DeletionRun, ExecJob } from './runs'
 export { LIVE_STATES } from './runs'
@@ -75,13 +75,17 @@ export const EXEC_API = `/api/${DEFAULT_STORE.executor}`
  *  run files): the console keys every control on these, never on a name. */
 export const CAPS: ExecCaps = EXEC_CAPS[DEFAULT_STORE.executor]
 
-/** One plan-API call: JSON in and out; a non-2xx throws an `HttpError` with its status. */
-export async function call<T>(url: string, method = 'GET', body?: unknown): Promise<T> {
+/** One plan-API call: JSON in and out; a non-2xx throws an `HttpError` with its status. `cache`: the fetch's cache mode
+ *  (`reload`: from the network whatever the browser holds, and that answer is what it holds next). `signal`: aborts it
+ *  (the call rejects with the signal's reason); without one a call waits as long as the network does. */
+export async function call<T>(url: string, method = 'GET', body?: unknown, cache?: RequestCache, signal?: AbortSignal): Promise<T> {
   const r = await fetch(url, {
     method,
     credentials: 'include',
     headers: body ? { 'content-type': 'application/json' } : {},
     body: body ? JSON.stringify(body) : undefined,
+    ...(cache ? { cache } : {}),
+    ...(signal ? { signal } : {}),
   })
   // CF returns HTML on a 5xx: read text, then try JSON.
   const text = await r.text()
@@ -234,40 +238,88 @@ export function useUnstage(planId: number | null) {
 /** Dispatch the selected items to the deployment's executor (admin). A dry run
  *  previews deletions and is optional; recovery depends on the store. */
 export function useDispatch(planId: number | null) {
-  const qc = useQueryClient()
-  return useMutation<{ job_id: string }, Error, { mode: 'dry' | 'real'; date?: string; items: string[]; buckets?: string[]; machine?: string; shownMinSoftDeleteDays?: number; expected?: { bytes: number; objects: number } }>({
-    mutationFn: ({ mode, date, items, buckets, machine, shownMinSoftDeleteDays: shown, expected }) => {
-      if (planId == null) throw new Error('nothing staged')
-      if (!items.length) throw new Error('nothing selected')
-      // `items`: exactly the rows checked (an object as `=<key>`); the run never acts on more (specs/done/delete-what-you-see.md)
-      return call(`${EXEC_API}/dispatch`, 'POST', { plan_id: planId, mode, date, items, ...(buckets ? { buckets } : {}), ...(machine ? { machine } : {}), ...(shown !== undefined ? { shown_min_soft_delete_days: shown } : {}), ...(expected ? { expected } : {}) })
-    },
-    onSuccess: () => { void qc.invalidateQueries({ queryKey: ['plans'] }); void qc.invalidateQueries({ queryKey: ['sweep-jobs'] }) },
-    // A refusal over stale terms says to re-read them, so bring the ones on the page up to date.
-    onError: () => { void qc.invalidateQueries({ queryKey: SWEEP_SETTINGS_KEY }) },
-  })
+  return useMutation(dispatchOptions(useQueryClient(), planId))
 }
+
+/** One dispatch, as `/staged` sends it. `date`: the scan the run reads (the newest). `sized`: the scan the page's sizes
+ *  were read at, so the one its checkable rows (`items`), `buckets`, `machine` and `expected` come from. */
+export interface DispatchVars {
+  mode: 'dry' | 'real'
+  date: string
+  sized: string
+  items: string[]
+  buckets?: string[]
+  machine?: string
+  shownMinSoftDeleteDays?: number
+  expected?: { bytes: number; objects: number }
+}
+
+/** `useDispatch`'s mutation. It refuses, with nothing posted, a dispatch from a page sized at a scan other than the one
+ *  the run reads (`sizedAtOldScan`), whatever the page's controls did: the refusal is the dispatch's error. */
+export const dispatchOptions = (qc: QueryClient, planId: number | null): UseMutationOptions<{ job_id: string }, Error, DispatchVars> => ({
+  mutationFn: ({ mode, date, sized, items, buckets, machine, shownMinSoftDeleteDays: shown, expected }) => {
+    if (planId == null) throw new Error('nothing staged')
+    if (!items.length) throw new Error('nothing selected')
+    const refused = sizedAtOldScan(sized, date)
+    if (refused) throw new Error(refused)
+    // `items`: exactly the rows checked (an object as `=<key>`); the run never acts on more (specs/done/delete-what-you-see.md)
+    return call(`${EXEC_API}/dispatch`, 'POST', { plan_id: planId, mode, date, items, ...(buckets ? { buckets } : {}), ...(machine ? { machine } : {}), ...(shown !== undefined ? { shown_min_soft_delete_days: shown } : {}), ...(expected ? { expected } : {}) })
+  },
+  onSuccess: () => { void qc.invalidateQueries({ queryKey: ['plans'] }); void qc.invalidateQueries({ queryKey: EXEC_JOBS_KEY }) },
+  // A refusal over stale terms says to re-read them, so bring the ones on the page up to date.
+  onError: () => { void qc.invalidateQueries({ queryKey: SWEEP_SETTINGS_KEY }) },
+})
 
 /** A run control: stop (the run's Batch job) or undo / purge (the run). */
 export type RunAction = { action: 'stop'; job_id: string } | { action: 'undo' | 'purge'; run_id: string }
 
+/** The react-query key of the executor's jobs list (`useExecJobs`). */
+export const EXEC_JOBS_KEY = ['sweep-jobs'] as const
+
+/** How long a run control waits on the jobs list it reads again (`runActionOptions`) before giving that read up. */
+export const JOBS_REFRESH_MS = 15_000
+
+/** `read`, given up after `ms`: its signal aborts, and the read rejects saying `what` didn't answer. */
+async function within<T>(ms: number, what: string, read: (signal: AbortSignal) => Promise<T>): Promise<T> {
+  const gaveUp = new AbortController()
+  const timer = setTimeout(() => gaveUp.abort(new Error(`${what} didn’t answer in ${ms / 1000} s`)), ms)
+  try { return await read(gaveUp.signal) } finally { clearTimeout(timer) }
+}
+
+/** The executor's jobs list. `fresh`: past the browser's copy (the route answers `max-age=10`), for a read that has to see a
+ *  job submitted a moment ago. `signal`: aborts the read. */
+async function execJobs(fresh = false, signal?: AbortSignal): Promise<{ jobs: ExecJob[]; configured: boolean }> {
+  const d = await call<{ jobs: ExecJob[]; configured?: boolean }>(`${EXEC_API}/jobs`, 'GET', undefined, fresh ? 'reload' : undefined, signal)
+  return { jobs: d.jobs, configured: d.configured !== false }
+}
+
+/** `useRunAction`'s mutation. What a control did shows from the jobs list (an undo's or a purge's job, a stop's request), so
+ *  the control isn't settled until that list is read again, fresh: a copy from before it would offer the control again. A
+ *  jobs read already in flight is from before it too, and is dropped. While it is pending the page's controls are disabled,
+ *  so that read is one attempt, given up after `JOBS_REFRESH_MS`: a list that hangs holds them no longer than that. */
+export const runActionOptions = (qc: QueryClient): UseMutationOptions<unknown, Error, RunAction> => ({
+  mutationFn: a => call(`${EXEC_API}/${a.action}`, 'POST', a.action === 'stop' ? { job_id: a.job_id } : { run_id: a.run_id }),
+  onSuccess: async () => {
+    void qc.invalidateQueries({ queryKey: ['plans'] })
+    await qc.cancelQueries({ queryKey: EXEC_JOBS_KEY })
+    // `staleTime: 0`: read it however fresh the client holds its copy (the app's default keeps one a minute). `retry: false`,
+    // as the page's own read of it (`useExecJobs`): the app's default would ask twice more. A list that can't be read, or
+    // doesn't answer in time, is the list's error (the page shows it), not the control's: that landed.
+    const read = () => within(JOBS_REFRESH_MS, 'the jobs list', signal => execJobs(true, signal))
+    await qc.fetchQuery({ queryKey: EXEC_JOBS_KEY, queryFn: read, staleTime: 0, retry: false }).catch(() => undefined)
+  },
+})
+
 export function useRunAction() {
-  const qc = useQueryClient()
-  return useMutation<unknown, Error, RunAction>({
-    mutationFn: a => call(`${EXEC_API}/${a.action}`, 'POST', a.action === 'stop' ? { job_id: a.job_id } : { run_id: a.run_id }),
-    onSuccess: () => { void qc.invalidateQueries({ queryKey: ['plans'] }); void qc.invalidateQueries({ queryKey: ['sweep-jobs'] }) },
-  })
+  return useMutation(runActionOptions(useQueryClient()))
 }
 
 /** The executor's recent jobs (live state from Batch); `configured` false =
  * the deployment has no dispatch credentials (recorded runs only). */
 export function useExecJobs(live = false) {
   return useQuery<{ jobs: ExecJob[]; configured: boolean }, Error>({
-    queryKey: ['sweep-jobs'],
-    queryFn: async () => {
-      const d = await call<{ jobs: ExecJob[]; configured?: boolean }>(`${EXEC_API}/jobs`)
-      return { jobs: d.jobs, configured: d.configured !== false }
-    },
+    queryKey: EXEC_JOBS_KEY,
+    queryFn: () => execJobs(),
     refetchInterval: live ? 20_000 : false,
     retry: false,
   })

@@ -198,6 +198,23 @@ def test_static_names_failure_records_failed_phase_and_the_run_goes_on(tmp_path,
     assert c.sh_impl.calls == ["dt-cloud static-names runs add -c 2026-10-16T1200", "dt-cloud static-names runs lag 2026-10-16T1200"]
 
 
+PASSED_OVER = "passed over: the store's append order is past this scan, or its path sort isn't published; no later run appends it"
+
+
+def test_static_names_not_next_is_passed_over(tmp_path, env, monkeypatch):
+    """Exit 3: the append refused the scan (a newer one is already in, or its path sort isn't published), and no later
+    run's append takes it. The phase fails with a `passed over:` clause, which /scans never reads as recovered."""
+    c = ctx(tmp_path, env, runner=Runner(tmp_path, codes={"dt-cloud static-names runs": 3}))
+    phases = []
+    c.run.begin = lambda name: phases.append(("begin", name))
+    c.run.end = lambda name, rc=0, **kw: phases.append(("end", name, rc, kw))
+    monkeypatch.setattr(S, "load_profile_env", lambda *a: c.profile)
+    monkeypatch.setattr(S, "make_ctx", lambda *a: c)
+    assert S.run_step("static-names", None, env) == 0
+    assert phases == [("begin", "static-names"), ("end", "static-names", 3, {
+        "warn": True, "msg": "static-names runs add failed for 2026-10-16T1200", "note": PASSED_OVER})]
+
+
 def test_static_names_busy_is_not_a_failure(tmp_path, env, monkeypatch):
     """Exit 4: another coordinator holds the store's lease (a catch-up, or an earlier scan's run) and appends this scan."""
     c = ctx(tmp_path, env, runner=Runner(tmp_path, codes={"dt-cloud static-names runs": 4}))
@@ -621,6 +638,87 @@ def test_a_hard_failure_fails_a_soft_step(tmp_path, monkeypatch):
     assert S.run_step("boom", None, env) == 3
 
 
+def test_soft_steps_declare_what_a_failure_leaves_and_hard_steps_nothing():
+    """A soft step's failure leaves the run succeeded, so /scans has to say what's short: every soft step says it
+    (`leaves`), and only a soft step can (a hard step's failure fails the run)."""
+    assert [n for n, s in S.STEPS.items() if s.soft and not s.leaves] == []
+    assert [n for n, s in S.STEPS.items() if not s.soft and (s.leaves or s.side or s.converges or s.checks)] == []
+
+
+def test_step_refuses_a_soft_step_without_leaves_and_failure_fields_on_a_hard_one(monkeypatch):
+    monkeypatch.setattr(S, "STEPS", {})
+
+    def declare(**kw):
+        with pytest.raises(ValueError) as e:
+            S.step("x", **kw)(lambda ctx, arg: None)
+        return str(e.value)
+
+    hard = "step x: `leaves` / `side` / `converges` / `checks` describe a soft step's failure (a hard step's fails the run)"
+    assert [declare(soft=True), declare(leaves="nothing"), declare(side=True), declare(converges=True), declare(checks=True),
+            declare(soft=True, side=True), declare(soft=True, leaves="nothing", checks=True, converges=True)] == [
+        "step x: a soft step says what its failure leaves short (`leaves`)",
+        hard,
+        hard,
+        hard,
+        hard,
+        "step x: a soft step says what its failure leaves short (`leaves`)",
+        "step x: a check does no work for a later run to do (`checks` with `converges`)",
+    ]
+    assert S.STEPS == {}
+
+
+def test_failure_table_rows():
+    """The kinds /scans tells apart: a side step nothing redoes, a side step a later run converges, a serving step (the
+    scan is short until a later run appends it), and a check (nothing redoes it; a later run's passes or doesn't)."""
+    table = S.failure_table()
+    assert list(table) == [n for n, s in S.STEPS.items() if s.soft]
+    assert {k: table[k] for k in ("warm-cache", "digest", "interval-store", "probe")} == {
+        "warm-cache": {"leaves": "cache not pre-warmed: this scan's first views load cold", "side": True, "converges": False, "checks": False},
+        "digest": {"leaves": "usage digest not posted", "side": True, "converges": True, "checks": False},
+        "interval-store": {"leaves": "the interval store doesn't hold this scan", "side": False, "converges": True, "checks": False},
+        "probe": {"leaves": "the serving probe failed: some of this scan's views may not load", "side": False, "converges": False, "checks": True},
+    }
+
+
+def test_soft_steps_classification():
+    """Every soft step's failure class, in registry order: `side` (the scan's data and serving are whole without it),
+    `converges` (a later run's same step does this run's work too), `checks` (a check: nothing redoes it)."""
+    assert {n: " ".join(k for k in ("side", "converges", "checks") if f[k]) for n, f in S.failure_table().items()} == {
+        "bucket-check": "side",
+        "access-ingest": "converges",
+        "access-r2": "converges",
+        "static-names": "converges",
+        "publish-r2": "",
+        "interval-store": "converges",
+        "index-rows": "",
+        "index-sync": "",
+        "over-time": "side converges",
+        "index-gc": "side converges",
+        "dups": "side",
+        "age-store": "converges",
+        "retire": "side converges",
+        "store-gc": "side converges",
+        "non-live": "side",
+        "healthcheck": "checks",
+        "warm-cache": "side",
+        "probe": "checks",
+        "staged-card": "side converges",
+        "digest": "side converges",
+        "cf-usage": "side converges",
+        "gcp-cost": "side",
+        "soft-delete": "side",
+    }
+
+
+def test_the_sites_step_table_is_the_registrys():
+    """`site/src/scanSteps.json` (what /scans classifies a failed phase by) is `dt-cloud scan steps`' output, byte for
+    byte: regenerate it with `dt-cloud scan steps > site/src/scanSteps.json` after changing a step's failure fields."""
+    out = CliRunner().invoke(main, ["scan", "steps"])
+    assert (out.exit_code, out.stdout) == (0, S.failure_json())
+    assert (Path(__file__).parents[2] / "site" / "src" / "scanSteps.json").read_text() == S.failure_json()
+    assert json.loads(S.failure_json()) == S.failure_table()
+
+
 def test_interval_store_staged_append(tmp_path, env, monkeypatch):
     from dt_cloud import scan_runs
 
@@ -636,6 +734,37 @@ def test_interval_store_staged_append(tmp_path, env, monkeypatch):
     S.interval_store(c, None)
     assert ran == [(["dt-cloud", "interval-store", "append", "-c", "-w", "1800", "2026-10-16T1200"], 3600.0,
                     "/app/job/interval-store.json", "img@sha256:abc")]
+
+
+def test_interval_store_busy_is_a_skip(tmp_path, env, monkeypatch):
+    """Exit 4: another coordinator holds the store's lease, and this run appended nothing. The phase is done with a
+    skip clause, so /scans reads the scan short until an append holds it, and never takes this run's step for one that
+    did an earlier run's work."""
+    from dt_cloud import scan_runs
+
+    monkeypatch.setattr(scan_runs, "run_grouped", lambda cmd, timeout, grace, **kw: scan_runs.Ran(4, False, None))
+    c = gcs_ctx(tmp_path, env, monkeypatch, **{"interval-store": {"profile": "/app/job/interval-store.json"}})
+    phases = []
+    c.run.begin = lambda name: phases.append(("begin", name))
+    c.run.end = lambda name, rc=0, **kw: phases.append(("end", name, rc, kw))
+    S.interval_store(c, None)
+    note = "skipped (busy): another coordinator holds the interval store's lease; this scan comes with its append or the next run"
+    assert phases == [("begin", "interval-store"), ("end", "interval-store", 0, {"note": note})]
+    assert scan_runs.phase_skip(note) == note
+
+
+def test_interval_store_not_next_is_passed_over(tmp_path, env, monkeypatch):
+    """Exit 3: the staged append refused the scan, as static-names' does: failed, with the `passed over:` clause."""
+    from dt_cloud import scan_runs
+
+    monkeypatch.setattr(scan_runs, "run_grouped", lambda cmd, timeout, grace, **kw: scan_runs.Ran(3, False, None))
+    c = gcs_ctx(tmp_path, env, monkeypatch, **{"interval-store": {"profile": "/app/job/interval-store.json"}})
+    phases = []
+    c.run.begin = lambda name: phases.append(("begin", name))
+    c.run.end = lambda name, rc=0, **kw: phases.append(("end", name, rc, kw))
+    S.interval_store(c, None)
+    assert phases == [("begin", "interval-store"), ("end", "interval-store", 3, {
+        "warn": True, "msg": "the scan reads per-scan: the store's append passed it over", "note": PASSED_OVER, "timed_out": None, "terminated": None})]
 
 
 def test_interval_store_adds_from_the_store_or_the_data_store(tmp_path, env, monkeypatch):

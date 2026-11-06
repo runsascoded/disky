@@ -1,1 +1,1 @@
-{"bytes": 24187, "groups": 8, "groups_bytes": 5998, "rows": 25, "s": 0.0, "segments": {"L0": {"blocks": 3, "groups": 4, "rows": 14}, "L1": {"blocks": 1, "groups": 1, "rows": 1}, "open": {"groups": 3, "rows": 10}}, "sort": "path"}
+{"bytes": 16934, "groups": 8, "groups_bytes": 5495, "rows": 25, "s": 0.0, "segments": {"L0": {"blocks": 3, "groups": 4, "rows": 14}, "L1": {"blocks": 1, "groups": 1, "rows": 1}, "open": {"groups": 3, "rows": 10}}, "sort": "path"}

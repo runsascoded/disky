@@ -19,8 +19,8 @@ const GUEST_WHOAMI = {
   kind: 'grant',
   id: 'test-grant',
   name: null,
-  subject: { first: 'Rob Howley', last: null, email: 'howley.robert@gmail.com', avatar: AVATAR },
-  email: 'howley.robert@gmail.com',
+  subject: { first: 'Alice Example', last: null, email: 'alice@example.test', avatar: AVATAR },
+  email: 'alice@example.test',
   scopes: ['gcs:read'],
   admin: false,
   expiresAt: null,
@@ -32,18 +32,18 @@ test('guest chip shows the grant subject (avatar + name), not registry initials'
 
   // The chip: an <img> avatar (the subject's), not the colored-initial fallback.
   const chip = page.locator('button.tb-avatar')
-  await expect(chip).toHaveAttribute('aria-label', 'Signed in as Rob Howley')
+  await expect(chip).toHaveAttribute('aria-label', 'Signed in as Alice Example')
   const avi = chip.locator('img.user-avatar')
   await expect(avi).toHaveAttribute('src', AVATAR)
-  await expect(avi).toHaveAttribute('alt', 'Rob Howley')
+  await expect(avi).toHaveAttribute('alt', 'Alice Example')
   await expect(chip.locator('span.user-avatar.fallback')).toHaveCount(0)
 
   // The menu card: the subject name + bound email + a plain "guest share link"
   // tag — and none of the SSO/owner framing (no registry warning, no estate link).
   await chip.click()
   const card = page.locator('.user-menu .user-card')
-  await expect(card.locator('.uc-head b')).toHaveText('Rob Howley')
-  await expect(card.locator('.uc-sub')).toHaveText('howley.robert@gmail.com')
+  await expect(card.locator('.uc-head b')).toHaveText('Alice Example')
+  await expect(card.locator('.uc-sub')).toHaveText('alice@example.test')
   await expect(card.getByText('guest share link')).toBeVisible()
   await expect(card.locator('.uc-warn')).toHaveCount(0)
   await expect(card.getByText('Storage Breakdown')).toHaveCount(0)

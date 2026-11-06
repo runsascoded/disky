@@ -18,7 +18,7 @@ import { withoutDeleted } from '../../src/stagedScan.js'
 import { slackApi, slackPeople, type SlackPerson, slackReady, type SlackEnv, type SlackResult } from './slack.js'
 import type { Env } from './auth.js'
 import { minSoftDeleteDays } from './sweepSettings.js'
-import { runHasNoUndo, runPromisedNothing, slackUndoTerms, type UndoUnavailable, undoUnavailableText } from '../../src/softDelete.js'
+import { runHasNoUndo, runPromisedNothing, slackUndoTerms, undoneText, type UndoUnavailable, undoUnavailableText } from '../../src/softDelete.js'
 import { runUndoNow } from './softDeleteNow.js'
 import { pathScans, storeReady } from './index.js'
 import { MAX_PREFIXES, type PrefixStat, prefixesAt } from './prefixes.js'
@@ -120,12 +120,25 @@ export function sizeNotes(z: Sized): string[] {
 /** The plan's newest real run. */
 const lastRealRun = (runs: readonly RunRow[]): RunRow | undefined => [...runs].filter(r => r.mode === 'real').sort((a, b) => b.started_ts - a.started_ts)[0]
 
-/** What a real run's event says of undo: its window (or, `unavailable`, that soft delete is off now where it deleted), that it
- * has none, or (no record either way) nothing. */
-const undoNote = (r: RunRow, unavailable?: UndoUnavailable | null): string =>
-  r.undo_deadline ? unavailable ? `; ${undoUnavailableText(unavailable)}` : `; undoable until ${utc(r.undo_deadline)} (www)`
+/** What a real run's event says of undo: that it was undone (nothing is left to qualify), or its window (or, `unavailable`, that
+ * soft delete is off now where it deleted; after a partial undo, the rest's), that it has none, or (no record either way) nothing. */
+const undoNote = (r: RunRow, unavailable?: UndoUnavailable | null): string => {
+  const undone = undoneText(r)
+  const since = undone ? `; since ${undone}` : ''
+  if (r.undo_state === 'full') return since
+  return since + (r.undo_deadline ? unavailable ? `; ${undoUnavailableText(unavailable)}` : `${since ? ', the rest' : ';'} undoable until ${utc(r.undo_deadline)} (www)`
     : runPromisedNothing(r) && r.mode === 'real' ? '; no undo promised (no soft-delete minimum)'
-    : runHasNoUndo(r) ? '; no undo (soft delete off)' : ''
+    : runHasNoUndo(r) ? '; no undo (soft delete off)' : '')
+}
+
+/** …and the parent's line for its last real run, inside the window it recorded (`deadline`). */
+const undoClause = (r: RunRow, deadline: number, v: Pick<ParentView, 'undoUnavailable' | 'undoUnseen'>): string => {
+  const undone = undoneText(r)
+  const since = undone ? `, since ${undone}` : ''
+  if (r.undo_state === 'full') return since
+  return since + (v.undoUnavailable ? `; ${undoUnavailableText(v.undoUnavailable)}`
+    : `${since ? '; the rest' : ','} undoable until ${utc(deadline)}${v.undoUnseen ? ' if the buckets\' soft delete is still on (this site can\'t see it)' : ''}`)
+}
 
 /** The real-delete button's value: the plan, its item set's digest, and the minimum its confirm states, which dispatch holds the
  * click to (absent: a card rendered without one). */
@@ -158,7 +171,7 @@ export function renderParent(v: ParentView): { text: string; blocks: unknown[] }
   const lastReal = lastRealRun(v.runs)
   const realLine = !lastReal ? null
     : lastReal.finished_ts == null ? `Real run in progress (${who(lastReal.actor, v.names)}).`
-    : lastReal.undo_deadline != null && lastReal.undo_deadline > now ? `Last real run ${v.lastOutcome?.unread ? 'recorded' : v.lastOutcome?.attempted ? 'attempted' : 'deleted'} ${v.lastOutcome?.totals === 'lower-bound' ? 'at least ' : ''}${fmtBytes(lastReal.deleted_bytes)} / ${fmtN(lastReal.deleted_objects)} objects${v.undoUnavailable ? `; ${undoUnavailableText(v.undoUnavailable)}` : `, undoable until ${utc(lastReal.undo_deadline)}${v.undoUnseen ? ' if the buckets\' soft delete is still on (this site can\'t see it)' : ''}`}.${skipsLine(v.lastOutcome ?? undefined)}`
+    : lastReal.undo_deadline != null && lastReal.undo_deadline > now ? `Last real run ${v.lastOutcome?.unread ? 'recorded' : v.lastOutcome?.attempted ? 'attempted' : 'deleted'} ${v.lastOutcome?.totals === 'lower-bound' ? 'at least ' : ''}${fmtBytes(lastReal.deleted_bytes)} / ${fmtN(lastReal.deleted_objects)} objects${undoClause(lastReal, lastReal.undo_deadline, v)}.${skipsLine(v.lastOutcome ?? undefined)}`
     : null
   const buttons: unknown[] = [
     { type: 'button', action_id: 'staged_open', text: { type: 'plain_text', text: 'Open in www' }, url: `${v.siteUrl}/staged` },

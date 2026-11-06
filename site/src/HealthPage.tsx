@@ -183,7 +183,7 @@ function LastRun() {
   return (
     <span className="hl-lastrun">
       <Link to={`/scans/${encodeURIComponent(last.run.run_id)}`}><code>{last.run.scan}</code></Link>
-      <Status run={last.run} failedAt={last.failed_at} issues={last.phase_issues} />
+      <Status run={last.run} failedAt={last.failed_at} issues={last.phase_issues} runHref={id => `/scans/${encodeURIComponent(id)}`} />
       <span className="dim">{last.run.started_ts == null ? 'start not recorded' : fmtRunTime(last.run.started_ts)}</span>
       <span>{last.secs == null ? '—' : fmtDur(last.secs)}</span>
       <PhaseBar spans={last.spans} secs={last.secs} color={colorer(order)} width={140} />

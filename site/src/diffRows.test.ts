@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { buildTree } from './diffModel'
+import { buildTree, diffLoadingLabel } from './diffModel'
 import type { DiffData, DiffRow } from './diffModel'
 import { deltaPct, diffCellAction, diffTableRows, fmtPct, sortDiffRows } from './diffRows'
 import type { DiffTableRow } from './diffRows'
@@ -143,5 +143,11 @@ describe('deltaPct / fmtPct', () => {
     expect(fmtPct(0.0123)).toBe('+1.23%')
     expect(fmtPct(12.345)).toBe('+1.2k%')
     expect(fmtPct(0)).toBe('+0.00%')
+  })
+})
+
+describe('diffLoadingLabel: the diff header while the full walk aligns', () => {
+  it('names the pair until its first paint (`depth=1`) is on the map, then says the rows are what\'s left', () => {
+    expect([diffLoadingLabel(false, '11/4 → 11/5'), diffLoadingLabel(true, '11/4 → 11/5')]).toEqual(['Aligning 11/4 → 11/5…', 'Aligning the rows…'])
   })
 })

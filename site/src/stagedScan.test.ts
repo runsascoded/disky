@@ -1,7 +1,24 @@
 import { describe, expect, it } from 'vitest'
-import { type ScanDeletion, sizedScan, withoutDeleted } from './stagedScan'
+import { pickedScan, pickedSlug, type ScanDeletion, sizedAtOldScan, sizedScan, withoutDeleted } from './stagedScan'
 
 const OLD = '2026-11-04T0703', NEW = '2026-11-05T0702', NEWER = '2026-11-06T0701'
+
+describe('the picked scan in the URL (`?d=`)', () => {
+  it('writes a picked scan as its compact id, the newest as nothing', () => {
+    expect([pickedSlug(OLD, [NEWER, NEW, OLD]), pickedSlug(NEWER, [NEWER, NEW, OLD]), pickedSlug('2026-11-03', [NEW, '2026-11-03'])]).toEqual(['2611040703', undefined, '261103'])
+  })
+  it('reads it back: the scan spelled in full, a day as its latest, anything else as no pick', () => {
+    const scans = [NEWER, NEW, '2026-11-05T0101', OLD]
+    expect([
+      pickedScan('2611040703', scans), pickedScan('2611050101', scans), pickedScan('261105', scans), pickedScan('2026-11-04T0703', scans),
+      pickedScan('261101', scans), pickedScan('nope', scans), pickedScan(undefined, scans), pickedScan('2611040703', []),
+    ]).toEqual([OLD, '2026-11-05T0101', NEW, OLD, null, null, null, null])
+  })
+  it('round-trips every scan but the newest', () => {
+    const scans = [NEWER, NEW, OLD]
+    expect(scans.map(s => sizedScan(scans, pickedScan(pickedSlug(s, scans), scans)))).toEqual(scans)
+  })
+})
 
 describe('sizedScan: which scan a long-open /staged sizes at', () => {
   it('follows the newest when nothing was picked', () => {
@@ -15,6 +32,30 @@ describe('sizedScan: which scan a long-open /staged sizes at', () => {
   })
   it('no scans yet: none', () => {
     expect(sizedScan([], null)).toBe('')
+  })
+})
+
+// Everything a dispatch sends is read off the sizes on the page (the rows still staged, so the ones that can be checked;
+// the buckets, the machine, the confirm's total, the run row's expected size), and `?d=` can arrive in a link.
+describe('sizedAtOldScan: no run is dispatched from sizes at a scan the run does not read', () => {
+  const scans = [NEW, OLD]
+  /** What the run controls say for a `?d=` slug: nothing (they act), or why they don't. */
+  const at = (slug: string | undefined) => sizedAtOldScan(sizedScan(scans, pickedScan(slug, scans)), scans[0])
+  it('sized at the newest scan (no pick, the newest picked, a slug naming no scan): a run may be dispatched', () => {
+    expect([at(undefined), at('2611050702'), at('261105'), at('261101')]).toEqual([null, null, null, null])
+  })
+  it('an older scan picked, as a link\'s `?d=` does: refused, with what the controls say', () => {
+    const said = 'Sizes are shown at scan 2026-11-04T0703. A run reads the newest scan, 2026-11-05T0702. Switch "sized at scan" back to 2026-11-05T0702 to dispatch.'
+    expect([at('2611040703'), at('261104')]).toEqual([said, said])
+  })
+  it('a link naming what was the newest scan: refused once a newer one lands', () => {
+    expect([sizedAtOldScan(sizedScan([NEW, OLD], NEW), NEW), sizedAtOldScan(sizedScan([NEWER, NEW, OLD], NEW), NEWER)]).toEqual([
+      null,
+      'Sizes are shown at scan 2026-11-05T0702. A run reads the newest scan, 2026-11-06T0701. Switch "sized at scan" back to 2026-11-06T0701 to dispatch.',
+    ])
+  })
+  it('no scans yet: nothing to refuse (the controls are off for want of a scan)', () => {
+    expect(sizedAtOldScan(sizedScan([], null), '')).toBe(null)
   })
 })
 

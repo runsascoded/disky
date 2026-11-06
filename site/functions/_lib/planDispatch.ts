@@ -43,7 +43,7 @@ async function prepare(env: ExecEnv, db: D1Database, req: DispatchReq): Promise<
   if (!env.GCP_SA_KEY) return refuse(503, 'dispatch not configured (GCP_SA_KEY secret missing)')
   if (!env.JOB_SA) return refuse(503, 'dispatch not configured (JOB_SA var missing)')
   const jobSa = env.JOB_SA
-  const cfg = batchConfig(env, ['GCP_PROJECT', 'DATA_BUCKET', 'SWEEP_IMAGE', 'SWEEP_S3_ENDPOINT'])
+  const cfg = batchConfig(env, ['GCP_PROJECT', 'BATCH_REGION', 'DATA_BUCKET', 'SWEEP_IMAGE', 'SWEEP_S3_ENDPOINT'])
   if ('missing' in cfg) return refuse(503, notConfigured('dispatch', cfg.missing))
   const review = reviewConfig(env, cfg)
   const shape = prefixShape(env)
@@ -128,7 +128,7 @@ export const planSweep: Executor = {
   prepare,
   async refresh(env, db) {
     if (!env.GCP_SA_KEY) return []
-    const cfg = batchConfig(env, ['GCP_PROJECT', 'DATA_BUCKET'])
+    const cfg = batchConfig(env, ['GCP_PROJECT', 'BATCH_REGION', 'DATA_BUCKET'])
     const shape = prefixShape(env)
     if ('missing' in cfg || !shape) return []
     const token = await gcpToken(env.GCP_SA_KEY)

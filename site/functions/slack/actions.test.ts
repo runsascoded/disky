@@ -5,7 +5,7 @@ import { planDigest } from '../_lib/plans'
 import { planSweep } from '../_lib/planDispatch'
 import { refuse } from '../_lib/dispatch'
 import { notifyPlan, renderParent } from '../_lib/stagedSlack'
-import { RUN_DIR, sqliteD1 } from '../_lib/testD1'
+import { RUN_DIR, sqliteD1, withAdminEmails } from '../_lib/testD1'
 import { onRequestPost } from './actions'
 
 vi.mock('../_lib/gcp.js', async original => ({ ...await original<typeof import('../_lib/gcp.js')>(), gcpToken: async () => 'token' }))
@@ -42,7 +42,7 @@ async function world(minimum: number) {
   /** The button a card drawn at this minimum shows. */
   const button = (shown: number | undefined) => (renderParent({ planId: 1, siteUrl: SITE, items: 1, batches: 1, stagers: [], digest, actions: true, closed: false, runs: [dry], minSoftDeleteDays: shown }).blocks as { elements?: { action_id: string; value?: string }[] }[])
     .flatMap(b => b.elements ?? []).find(e => e.action_id === 'staged_real')!.value!
-  return { db, digest, setMinimum, button }
+  return { db, raw, digest, setMinimum, button }
 }
 
 /** Click `value` on the real-delete button: what the clicker is told, and each submitted job's `-s`. */
@@ -115,5 +115,31 @@ describe('the real-delete button', () => {
     expect(await click(db, card, { ...ENV, EXECUTOR: 'plan-sweep' })).toEqual({ told: ['Dispatch refused: reached plan-sweep'], minimums: [] })
     expect(prepare.mock.calls.map(([, , req]) => req.shownMinSoftDeleteDays)).toEqual([undefined])
     expect(vi.mocked(notifyPlan)).not.toHaveBeenCalled()
+  })
+})
+
+// Who may click: the clicker's Slack profile email, asked of `isAdmin` (the site's one admin rule), nothing of Slack's.
+describe('who may dispatch from Slack', () => {
+  const LISTED = { ...ENV, ADMIN_LIST: '1' }
+  it('the list off: the staff domain dispatches', async () => {
+    const { db, button } = await world(7)
+    expect(await click(db, button(7))).toEqual({ told: [], minimums: ['7'] })
+  })
+  it('`ADMIN_LIST`: a staff-domain clicker off the list is refused (an empty list and a missing table too), and nothing is submitted', async () => {
+    const [empty, other, missing] = [await world(7), await world(7), await world(7)]
+    for (const w of [empty, other]) withAdminEmails(w.raw)
+    other.raw.exec("INSERT INTO admin_emails (email, note, who, ts) VALUES ('lead@example.test', NULL, 'seed', 1)")
+    missing.raw.exec('DROP TABLE IF EXISTS admin_emails')
+    const refused = { told: ['Only admins can dispatch runs.'], minimums: [] }
+    expect([await click(empty.db, empty.button(7), LISTED), await click(other.db, other.button(7), LISTED), await click(missing.db, missing.button(7), LISTED)]).toEqual([refused, refused, refused])
+  })
+  it('`ADMIN_LIST`: a listed clicker dispatches, and so does the break-glass address', async () => {
+    const [listed, glass] = [await world(7), await world(7)]
+    withAdminEmails(listed.raw)
+    listed.raw.exec("INSERT INTO admin_emails (email, note, who, ts) VALUES ('ops@example.test', NULL, 'seed', 1)")
+    glass.raw.exec('DROP TABLE IF EXISTS admin_emails')
+    expect([await click(listed.db, listed.button(7), LISTED), await click(glass.db, glass.button(7), { ...LISTED, ADMIN_BOOTSTRAP: 'Ops@example.test' })]).toEqual([
+      { told: [], minimums: ['7'] }, { told: [], minimums: ['7'] },
+    ])
   })
 })

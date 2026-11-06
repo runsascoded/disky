@@ -139,7 +139,7 @@ describe('planDigest — sha-256 of the sorted prefixes joined by `\\n`, first 1
 
 describe('realGate', () => {
   const run = (o: Partial<RunRow>): RunRow => ({
-    run_id: 'cw-sweep-dry-1', mode: 'dry', scan: '2026-09-28T1201', actor: 'ann@openathena.ai', started_ts: 100,
+    run_id: 'cw-sweep-dry-1', mode: 'dry', scan: '2026-09-28T1201', actor: 'ann@staff.example.test', started_ts: 100,
     finished_ts: 200, deleted_bytes: 2 * 1024 ** 4, deleted_objects: 1234, skipped_gone: 0, skipped_overwritten: 0,
     plan_digest: 'D1', undo_deadline: null, ...o,
   })
