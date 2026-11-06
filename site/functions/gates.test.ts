@@ -1,0 +1,486 @@
+/**
+ * The gate audit: every Pages Functions route, the gate it sits behind, and what each kind of caller gets from it.
+ *
+ * `ROUTES` declares, per route file, one case per distinct gate branch (a catch-all or an all-method `onRequest`
+ * gates per method and sub-path). A route file with no entry, an entry with no file, an exported handler no case
+ * reaches, or a case another file would serve fails the enumeration tests, so a new route can't ship without
+ * saying who may call it.
+ *
+ * Each case is then called, through the route's own exported handler and a real gate (`gateFor` over an in-memory
+ * D1), as seven identities, and the outcomes (`401`, `403`, or `pass`: anything else, a throw included, since a
+ * handler past its gate may fail on a binding this env doesn't have) must equal `EXPECT[gate]`. The matrix runs
+ * twice: with `ADMIN_LIST` (admin is the explicit list; the staff domain alone isn't) and without (staff are admins).
+ *
+ * Not covered here: `_middleware.ts`'s `restrictGate` (a path-restricted link's 403 on the routes that could name a
+ * hidden path, ahead of the route's own gate: `_lib/restrict.test.ts`), `PUBLIC_READ` deployments (anonymous passes
+ * the viewer gates), and a secondary store's extra scope (`STORE_SCOPE`).
+ */
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
+import { type Env, gateFor, identify } from './_lib/auth'
+import { sqliteD1, withAdminEmails, withLedger } from './_lib/testD1'
+
+// The card renderer's wasm (`og/serve.ts`): nothing here draws a card.
+vi.mock('./_lib/og/vendor/resvg.wasm', () => ({ default: new Uint8Array() }))
+
+// ---- the vocabulary ------------------------------------------------------------------------------------------------
+
+/** What stands between a caller and a route. */
+type Gate =
+  /** No identity needed. */
+  | 'public'
+  /** Refused before any gate, the same for everyone: the deployment hasn't the feature (a 404, 409 or 503). */
+  | 'unconfigured'
+  /** Any identity the gate authenticates, whatever its scopes (`identify`, the auth package's `auth`). */
+  | 'signed-in'
+  /** `requireViewer`: the base scope or its read-only tier. */
+  | 'viewer'
+  /** `requireStager`, or a check of the bare base scope: a read-only link can't. */
+  | 'stager'
+  /** `requireAssigner` (the assign scope, or admin), then an email on the identity (the ledger's actor). */
+  | 'assigner'
+  /** The `admin` scope: `requireAdmin`, `requireScope(ADMIN_SCOPE)`, the auth package's admin routes. */
+  | 'admin'
+  /** An email session only: no grant, whatever its scopes or email. */
+  | 'session'
+  /** An email session, or a grant holding `admin`. */
+  | 'session-or-admin'
+  /** Any identity carrying an email; one without (an unnamed link) reads as signed out. */
+  | 'email'
+  /** `requireViewer`, then one grant by id (`STAGED_CARD_GRANT`; here the read-only link's). */
+  | 'named-grant'
+  /** Signed in, and refused whoever asks (a read-only table's write). */
+  | 'nobody'
+  /** Slack's request signature; no site identity is consulted. */
+  | 'slack-signature'
+  /** A Google id_token in the body; no site identity is consulted. */
+  | 'google-credential'
+
+const IDENTITIES = ['anonymous', 'read-only link', 'viewer', 'staff, not listed', 'listed admin', 'admin grant', 'agent token'] as const
+type Who = typeof IDENTITIES[number]
+type Outcome = 401 | 403 | 'pass'
+
+const P = 'pass'
+/** The one cell that depends on the mode: staff are admins by their domain, unless admin is the list alone. */
+const STAFF = { listOn: 403, listOff: P } as const
+type Cell = Outcome | typeof STAFF
+
+/** Gate × identity → outcome, in `IDENTITIES` order. */
+const EXPECT: Record<Gate, readonly [Cell, Cell, Cell, Cell, Cell, Cell, Cell]> = {
+  //                     anonymous  read-only  viewer  staff,  listed  admin  agent
+  //                                link               not     admin   grant  token
+  //                                                   listed
+  'public':             [P,         P,         P,      P,      P,      P,     P],
+  'unconfigured':       [P,         P,         P,      P,      P,      P,     P],
+  'signed-in':          [401,       P,         P,      P,      P,      P,     P],
+  'viewer':             [401,       P,         P,      P,      P,      P,     P],
+  'stager':             [401,       403,       P,      P,      P,      P,     P],
+  'assigner':           [401,       403,       P,      P,      P,      403,   P],
+  'admin':              [401,       403,       403,    STAFF,  P,      P,     403],
+  'session':            [401,       403,       P,      P,      P,      403,   403],
+  'session-or-admin':   [401,       403,       P,      P,      P,      P,     403],
+  'email':              [401,       401,       P,      P,      P,      401,   P],
+  'named-grant':        [401,       P,         403,    403,    403,    403,   403],
+  'nobody':             [401,       403,       403,    403,    403,    403,   403],
+  'slack-signature':    [401,       401,       401,    401,    401,    401,   401],
+  'google-credential':  [401,       401,       401,    401,    401,    401,   401],
+}
+
+// ---- the routes ----------------------------------------------------------------------------------------------------
+
+interface World {
+  env: Env
+  /** Each identity's request headers. */
+  headers: Record<Who, Record<string, string>>
+  /** The read-only link's grant id (`named-grant`). */
+  readOnlyGrant: string
+}
+
+type Vars = Record<string, unknown>
+interface Case {
+  method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE'
+  /** Path and query, on `ORIGIN`. */
+  path: string
+  gate: Gate
+  /** Vars and bindings on top of the world's env: what the deployment needs for the route to take this branch. */
+  env?: Vars | ((w: World) => Vars)
+}
+
+const route = (method: Case['method']) => (path: string, gate: Gate, env?: Case['env']): Case => ({ method, path, gate, ...(env ? { env } : {}) })
+const get = route('GET')
+const post = route('POST')
+const put = route('PUT')
+const patch = route('PATCH')
+const del = route('DELETE')
+
+/** A scan-reading route checks its view before its gate: a date it accepts. */
+const AT = 'date=2026-10-01'
+const SPAN = 'from=2026-09-01&to=2026-10-01'
+const STAGING = { STAGING: '1' }
+const INTERVALS = { PATH_STORE: 'intervals', INTERVAL_STORE_GEN: 'g1', INDEX_R2: { get: async () => null, head: async () => null } }
+const GOOGLE = { GOOGLE_CLIENT_ID: 'client-id', GOOGLE_CLIENT_SECRET: 'client-secret' }
+const MAIL = { RESEND_API_KEY: 'resend-key', MAIL_FROM: 'Disky <disky@example.org>' }
+
+const ROUTES: Record<string, Case[]> = {
+  // An activity post's sender face, named by its own SHA-256.
+  'a/[[path]].ts': [get('/a/0000.png', 'public')],
+  'api/actions.ts': [get('/api/actions', 'viewer'), post('/api/actions', 'assigner')],
+  'api/activity/[[path]].ts': [get('/api/activity/kinds', 'admin'), put('/api/activity/kinds/assign', 'admin'), post('/api/activity/render', 'admin')],
+  'api/admin/r2-probe.ts': [get('/api/admin/r2-probe', 'admin')],
+  'api/admins.ts': [get('/api/admins', 'admin'), post('/api/admins', 'admin'), patch('/api/admins', 'admin'), del('/api/admins', 'admin')],
+  'api/age-pyramid.ts': [get(`/api/age-pyramid?${AT}`, 'viewer')],
+  'api/annotations.ts': [get('/api/annotations', 'viewer'), post('/api/annotations', 'admin'), patch('/api/annotations', 'admin'), del('/api/annotations?id=1', 'admin')],
+  'api/assignments.ts': [get(`/api/assignments?${AT}`, 'viewer')],
+  // `@open-athena/auth`'s `authRoutes`.
+  'api/auth/[[path]].ts': [
+    get('/api/auth/whoami', 'signed-in'),
+    post('/api/auth/exchange', 'public'),
+    post('/api/auth/logout', 'public'),
+    post('/api/auth/track', 'public'),
+    get('/api/auth/profile', 'signed-in'),
+    put('/api/auth/profile', 'session'),
+    post('/api/auth/request', 'public'),
+    get('/api/auth/decide', 'public'),
+    post('/api/auth/decide', 'public'),
+    get('/api/auth/grants', 'admin'),
+    post('/api/auth/grants', 'admin'),
+    post('/api/auth/grants/none/revoke', 'admin'),
+    get('/api/auth/requests', 'admin'),
+    get('/api/auth/allowed', 'admin'),
+    post('/api/auth/allowed/sync', 'admin'),
+    get('/api/auth/log', 'admin'),
+    post('/api/auth/avatar', 'session-or-admin'),
+    get('/api/auth/avatar/none', 'signed-in'),
+  ],
+  'api/cost/[cloud].ts': [get('/api/cost/gcp', 'admin')],
+  // Per table: its `readScope` to read, its `writeScope` to write (`_lib/tables.ts`).
+  'api/db/[[path]].ts': [
+    get('/api/db', 'signed-in'),
+    get('/api/db/allowed_emails', 'stager'),
+    post('/api/db/allowed_emails', 'admin'),
+    patch('/api/db/allowed_emails', 'admin'),
+    del('/api/db/allowed_emails', 'admin'),
+    get('/api/db/admin_edits', 'admin'),
+    post('/api/db/admin_edits', 'nobody'),
+    post('/api/db/actions', 'nobody'),
+  ],
+  'api/diff.ts': [get(`/api/diff?${SPAN}`, 'viewer')],
+  // Level diffs read the interval store: without one, a 409 before the gate.
+  'api/diff/level.ts': [get(`/api/diff/level?${SPAN}&p=a`, 'viewer', INTERVALS), get(`/api/diff/level?${SPAN}&p=a`, 'unconfigured')],
+  'api/digest-image.ts': [post('/api/digest-image', 'viewer')],
+  'api/digest-op.ts': [post('/api/digest-op', 'viewer')],
+  'api/digest-preview.ts': [get('/api/digest-preview', 'admin')],
+  'api/digest-settings.ts': [get('/api/digest-settings', 'viewer'), put('/api/digest-settings', 'admin')],
+  'api/dups.ts': [get(`/api/dups?${AT}`, 'viewer', { DUPS: '1' }), get(`/api/dups?${AT}`, 'unconfigured')],
+  'api/estate.ts': [get(`/api/estate?${AT}`, 'viewer')],
+  // Deployment config only.
+  'api/filter-caps.ts': [get('/api/filter-caps', 'public')],
+  'api/filter-cover.ts': [get(`/api/filter-cover?${AT}&q=abc`, 'viewer')],
+  'api/filter-scans.ts': [get('/api/filter-scans?q=abc', 'viewer')],
+  'api/footer-cache.ts': [get('/api/footer-cache', 'admin'), post('/api/footer-cache', 'admin')],
+  'api/health.ts': [get('/api/health', 'viewer')],
+  'api/largest.ts': [get(`/api/largest?${AT}`, 'viewer')],
+  'api/me.ts': [get('/api/me', 'viewer')],
+  'api/name-matches.ts': [get(`/api/name-matches?${AT}&q=abc`, 'viewer')],
+  'api/name-summary-registry.ts': [get('/api/name-summary-registry', 'viewer'), post('/api/name-summary-registry', 'viewer')],
+  'api/name-summary.ts': [get('/api/name-summary', 'viewer'), post('/api/name-summary', 'viewer')],
+  'api/og/[[path]].ts': [post('/api/og/mint', 'stager'), del('/api/og/tokens/none', 'stager'), get('/api/og/tokens', 'admin')],
+  'api/owner-prices.ts': [post('/api/owner-prices', 'admin')],
+  'api/owners.ts': [get(`/api/owners?${AT}`, 'viewer')],
+  'api/path-index.ts': [get(`/api/path-index?${AT}`, 'viewer')],
+  'api/plan-sweep/dispatch.ts': [post('/api/plan-sweep/dispatch', 'admin')],
+  'api/plan-sweep/jobs.ts': [get('/api/plan-sweep/jobs', 'viewer')],
+  'api/plan-sweep/purge.ts': [post('/api/plan-sweep/purge', 'admin')],
+  'api/plan-sweep/stop.ts': [post('/api/plan-sweep/stop', 'admin')],
+  'api/plan-sweep/undo.ts': [post('/api/plan-sweep/undo', 'admin')],
+  'api/plans/[[path]].ts': [
+    get('/api/plans', 'viewer'),
+    post('/api/plans', 'admin'),
+    get('/api/plans/staged', 'viewer'),
+    // The scan job's ping: one grant, by id; a deployment that names none has no such route.
+    post('/api/plans/staged/card', 'named-grant', w => ({ STAGED_CARD_GRANT: w.readOnlyGrant })),
+    post('/api/plans/staged/card', 'unconfigured'),
+    // Staging: on a deployment that stages, else no such route.
+    post('/api/plans/stage', 'stager', STAGING),
+    post('/api/plans/stage', 'unconfigured'),
+    get('/api/plans/run?id=none', 'viewer'),
+    get('/api/plans/run-analytics?id=none', 'viewer'),
+    get('/api/plans/1', 'viewer'),
+    patch('/api/plans/1', 'admin'),
+    post('/api/plans/1/slack', 'admin'),
+    post('/api/plans/1/items', 'admin'),
+    post('/api/plans/1/items', 'admin', STAGING),
+    // Unstaging: admins, and on a deployment that stages a stager (their own items).
+    del('/api/plans/1/items', 'admin'),
+    del('/api/plans/1/items', 'stager', STAGING),
+    post('/api/plans/1/batches/merge', 'stager', STAGING),
+    post('/api/plans/1/batches/merge', 'unconfigured'),
+  ],
+  'api/plans/prefix-history.ts': [get('/api/plans/prefix-history', 'viewer')],
+  'api/plans/progress.ts': [get('/api/plans/progress', 'viewer')],
+  'api/plans/scan-deletions.ts': [get('/api/plans/scan-deletions', 'viewer')],
+  'api/prefixes.ts': [post('/api/prefixes', 'viewer')],
+  'api/scan-runs/[[path]].ts': [get('/api/scan-runs', 'viewer')],
+  'api/series.ts': [get('/api/series', 'viewer')],
+  'api/session-log/[[path]].ts': [
+    // The config says only whether logging is on; a batch is a viewer's, while it is on (off: a 503 before the gate).
+    get('/api/session-log', 'public'),
+    post('/api/session-log', 'viewer'),
+    get('/api/session-log/switch', 'admin'),
+    put('/api/session-log/switch', 'admin'),
+    get('/api/session-log/sessions', 'admin'),
+    get('/api/session-log/sessions/none', 'admin'),
+    get('/api/session-log/latency', 'admin'),
+  ],
+  'api/static-bench.ts': [get('/api/static-bench', 'viewer'), post('/api/static-bench', 'viewer')],
+  'api/store.ts': [get('/api/store', 'viewer')],
+  'api/subtree.ts': [get(`/api/subtree?${AT}`, 'viewer')],
+  'api/sweep/dispatch.ts': [post('/api/sweep/dispatch', 'admin')],
+  'api/sweep/jobs.ts': [get('/api/sweep/jobs', 'viewer')],
+  'api/sweep/logs.ts': [get('/api/sweep/logs', 'viewer')],
+  'api/sweep/settings.ts': [get('/api/sweep/settings', 'viewer'), put('/api/sweep/settings', 'admin')],
+  'api/sweep/soft-delete.ts': [get('/api/sweep/soft-delete', 'viewer')],
+  'api/sweep/stop.ts': [post('/api/sweep/stop', 'admin')],
+  'api/sweep/undo.ts': [post('/api/sweep/undo', 'admin')],
+  // A personal agent token is its email session's alone to manage.
+  'api/token.ts': [get('/api/token', 'session'), post('/api/token', 'session'), del('/api/token', 'session')],
+  'api/union-scans.ts': [get('/api/union-scans', 'viewer')],
+  'api/usage.ts': [get('/api/usage', 'admin')],
+  'api/whoami.ts': [get('/api/whoami', 'email')],
+  // Page unfurls: a title and a description for a crawler (`/staged`: the open plan's item count), no names or sizes.
+  'assignments.ts': [get('/assignments', 'public')],
+  // Sign-in itself: dormant (503) until the deployment has its mail sender / its Google client.
+  'auth/email/[[path]].ts': [
+    post('/auth/email/start', 'public', MAIL),
+    post('/auth/email/code', 'public', MAIL),
+    get('/auth/email/verify', 'public', MAIL),
+    get('/auth/email/poll', 'public', MAIL),
+    post('/auth/email/start', 'unconfigured'),
+  ],
+  'auth/google.ts': [get('/auth/google', 'public', GOOGLE), get('/auth/google', 'unconfigured')],
+  'auth/google/callback.ts': [get('/auth/google/callback', 'public', GOOGLE), get('/auth/google/callback', 'unconfigured')],
+  'auth/google/client.ts': [get('/auth/google/client', 'public')],
+  'auth/google/onetap.ts': [post('/auth/google/onetap', 'google-credential', GOOGLE), post('/auth/google/onetap', 'unconfigured')],
+  'auth/google/onetap/nonce.ts': [get('/auth/google/onetap/nonce', 'public')],
+  'data/[[path]].ts': [get('/data/scans.json', 'viewer'), get('/data/2026-10-01/meta.json', 'viewer')],
+  // A card: its signature picks its tier (unsigned: the anonymous card), nothing signs in.
+  'og/[[path]].ts': [get('/og/map.png', 'public')],
+  'og/index.ts': [get('/og', 'public')],
+  'slack/actions.ts': [post('/slack/actions', 'slack-signature', { SLACK_SIGNING_SECRET: 'slack-secret' }), post('/slack/actions', 'unconfigured')],
+  'staged.ts': [get('/staged', 'public')],
+  'user/[id].ts': [get('/user/ann', 'public')],
+  'users.ts': [get('/users', 'public')],
+  'v1/files/[[path]].ts': [get('/v1/files/list?prefix=snapshots/', 'viewer')],
+  // Scanned objects: a member, never a read-only guest.
+  'v1/objects/[[path]].ts': [get('/v1/objects/data-bucket/get?path=x', 'stager', { OBJECT_BUCKETS: 'data-bucket' })],
+}
+
+// ---- the route modules ---------------------------------------------------------------------------------------------
+
+type Handler = (ctx: Record<string, unknown>) => Response | Promise<Response>
+type RouteModule = Record<string, unknown>
+type Glob = (patterns: string[]) => Record<string, () => Promise<RouteModule>>
+
+/** Every route module: all of `functions/` but the library, the tests and the middleware. */
+const LOADERS = (import.meta as ImportMeta & { glob: Glob }).glob(['./**/*.ts', '!./_lib/**', '!./**/*.test.ts', '!./_middleware.ts'])
+const FILES = Object.keys(LOADERS).map(k => k.replace(/^\.\//, '')).sort()
+
+const handlerNames = (mod: RouteModule): string[] => Object.keys(mod).filter(k => k.startsWith('onRequest')).sort()
+/** The export Pages calls for `method`: its own (`onRequestGet`), else the all-method `onRequest`. */
+const handlerFor = (mod: RouteModule, method: string): string => {
+  const own = `onRequest${method[0]}${method.slice(1).toLowerCase()}`
+  return own in mod ? own : 'onRequest'
+}
+
+/** A route file's path pattern, by segment (`og/index.ts` is `/og`). */
+const patternOf = (file: string): string[] => {
+  const segs = file.replace(/\.ts$/, '').split('/')
+  return segs.at(-1) === 'index' ? segs.slice(0, -1) : segs
+}
+
+/** Pages' `params` for `path` on `file`'s route (`[id]`: a segment; `[[path]]`: the rest, as an array), or null
+ *  when the file's route doesn't match the path. */
+function paramsOf(file: string, path: string): Record<string, string | string[]> | null {
+  const pattern = patternOf(file)
+  const segs = path.split('?')[0].split('/').filter(Boolean)
+  const params: Record<string, string | string[]> = {}
+  for (const [i, p] of pattern.entries()) {
+    const rest = /^\[\[(\w+)\]\]$/.exec(p)
+    if (rest) return { ...params, [rest[1]]: segs.slice(i) }
+    if (i >= segs.length) return null
+    const one = /^\[(\w+)\]$/.exec(p)
+    if (one) params[one[1]] = segs[i]
+    else if (p !== segs[i]) return null
+  }
+  return segs.length === pattern.length ? params : null
+}
+
+/** A route's rank among those matching one path, as Pages picks: per segment, a literal over `[one]` over
+ *  `[[rest]]`; an exact end over a catch-all's empty rest. */
+const rankOf = (file: string): string => [...patternOf(file).map(p => (p.startsWith('[[') ? 0 : p.startsWith('[') ? 1 : 2)), 3].join('')
+/** The route file that serves `path`. */
+const servedBy = (path: string): string | null => FILES.filter(f => paramsOf(f, path)).sort((a, b) => (rankOf(a) < rankOf(b) ? 1 : -1))[0] ?? null
+
+// ---- the callers ---------------------------------------------------------------------------------------------------
+
+// Not localhost: a localhost request is the full-scope dev identity (`identify`).
+const ORIGIN = 'https://gcs.example.test'
+const STAFF_DOMAIN = 'staff.example.test'
+const EMAILS = { viewer: 'vera@example.org', staff: `sam@${STAFF_DOMAIN}`, listed: 'lee@example.org' }
+
+interface Mode {
+  name: string
+  listOn: boolean
+  vars: Record<string, string>
+}
+const MODES: Mode[] = [
+  { name: '`ADMIN_LIST` on: admin is the list, the staff domain alone is not', listOn: true, vars: { ADMIN_LIST: '1' } },
+  // `ADMIN_EMAILS`: the `admin_emails` table is read, so the listed address stays an admin beside staff.
+  { name: '`ADMIN_LIST` off: staff are admins', listOn: false, vars: { ADMIN_EMAILS: '1' } },
+]
+
+async function world(mode: Mode): Promise<World> {
+  const { db, raw } = await sqliteD1()
+  withAdminEmails(raw)
+  withLedger(raw)
+  const env = {
+    BASE_SCOPE: 'gcs', SESSION_SECRET: 'gates-test-secret', STAFF_DOMAIN, DB: db,
+    // The index store "configured": the scan-reading routes check it before their gate.
+    GCS_HMAC_KEY_ID: 'key', GCS_HMAC_SECRET: 'secret', STORE_BUCKET: 'index-bucket',
+    // No SPA shell: a page unfurl passes the asset server's answer on.
+    ASSETS: { fetch: async () => new Response('no static assets in the gate audit', { status: 404 }) },
+    ...mode.vars,
+  } as unknown as Env
+  const row = 'VALUES (?, NULL, ?, 0)'
+  await db.prepare(`INSERT INTO allowed_emails (email, note, who, ts) ${row}`).bind(EMAILS.viewer, 'test').run()
+  await db.prepare(`INSERT INTO admin_emails (email, note, who, ts) ${row}`).bind(EMAILS.listed, 'test').run()
+  // The list admits whom it names; without it, an `admin_emails` row signs in only where something else admits it.
+  if (!mode.listOn) await db.prepare(`INSERT INTO allowed_emails (email, note, who, ts) ${row}`).bind(EMAILS.listed, 'test').run()
+  // Session logging on (no end date), so a batch reaches its gate.
+  await db.prepare('INSERT INTO session_log_switch (id, until_ms, who, ts) VALUES (1, ?, ?, 0)').bind(8_640_000_000_000_000, 'test').run()
+
+  const gate = gateFor(env)!
+  const session = async (email: string): Promise<Record<string, string>> => {
+    const signed = await gate.signIn(email, new Request(`${ORIGIN}/signin`))
+    if (!signed) throw new Error(`${email} is not admitted to sign in (${mode.name})`)
+    return { cookie: signed.cookie.split(';')[0] }
+  }
+  const grant = async (name: string, scopes: string[], email: string | null) => {
+    const { grant, token } = await gate.mint({ email, scopes, name, createdBy: 'test', expiresAt: null, maxRedeems: null })
+    return { id: grant.id, headers: { authorization: `Bearer ${token}` } }
+  }
+  const readOnly = await grant('read-only link', ['gcs:read'], null)
+  return {
+    env,
+    readOnlyGrant: readOnly.id,
+    headers: {
+      'anonymous': {},
+      'read-only link': readOnly.headers,
+      'viewer': await session(EMAILS.viewer),
+      'staff, not listed': await session(EMAILS.staff),
+      'listed admin': await session(EMAILS.listed),
+      'admin grant': (await grant('admin link', ['gcs', 'admin'], null)).headers,
+      // What `/api/token` mints for the listed admin: their email, the base scope and assign, never admin.
+      'agent token': (await grant('CLI / agent token', ['gcs', 'gcs:assign'], EMAILS.listed)).headers,
+    },
+  }
+}
+
+/** A hung handler is a failure naming the route, never a pass. */
+const CALL_TIMEOUT_MS = 5_000
+const HUNG = Symbol('hung')
+
+/** One call's outcome, and what the handler did (its status, or its throw) for a failure's message. */
+async function call(w: World, handler: Handler, file: string, c: Case, who: Who): Promise<{ outcome: Outcome; did: string }> {
+  const vars = typeof c.env === 'function' ? c.env(w) : c.env
+  const bodied = c.method !== 'GET'
+  const request = new Request(`${ORIGIN}${c.path}`, {
+    method: c.method,
+    headers: { ...w.headers[who], ...(bodied ? { 'content-type': 'application/json' } : {}) },
+    ...(bodied ? { body: '{}' } : {}),
+  })
+  const ctx = {
+    request,
+    env: { ...w.env, ...vars },
+    params: paramsOf(file, c.path),
+    data: {},
+    // Work a handler leaves behind may fail on the bindings this env lacks.
+    waitUntil: (p: Promise<unknown>) => { p.catch(() => undefined) },
+    next: async () => new Response('next', { status: 404 }),
+  }
+  let timer: ReturnType<typeof setTimeout> | null = null
+  const hung = new Promise<typeof HUNG>(resolve => { timer = setTimeout(() => resolve(HUNG), CALL_TIMEOUT_MS) })
+  const answered = (async () => handler(ctx))().then(r => r.status, e => `threw ${String((e as Error)?.message ?? e).slice(0, 80)}`)
+  const got = await Promise.race([answered, hung])
+  clearTimeout(timer)
+  if (got === HUNG) throw new Error(`${c.method} ${c.path} (${file}) as ${who}: no answer in ${CALL_TIMEOUT_MS} ms`)
+  return { outcome: got === 401 || got === 403 ? got : 'pass', did: String(got) }
+}
+
+const expected = (gate: Gate, mode: Mode): Outcome[] => EXPECT[gate].map(cell => (typeof cell === 'object' ? (mode.listOn ? cell.listOn : cell.listOff) : cell))
+const byIdentity = <T>(vs: T[]): Record<string, T> => Object.fromEntries(IDENTITIES.map((who, i) => [who, vs[i]]))
+
+// ---- the audit -----------------------------------------------------------------------------------------------------
+
+const MODULES: Record<string, RouteModule> = {}
+
+beforeAll(async () => {
+  // Nothing leaves the process. A 404, not a 5xx: the stores' S3 client (`aws4fetch`) retries a 5xx with backoff,
+  // long past the timeout.
+  vi.stubGlobal('fetch', async () => new Response('no network in the gate audit', { status: 404 }))
+  // The colo cache: always a miss.
+  vi.stubGlobal('caches', { default: { match: async () => undefined, put: async () => undefined, delete: async () => false } })
+  for (const file of FILES) MODULES[file] = await LOADERS[`./${file}`]()
+})
+afterAll(() => { vi.unstubAllGlobals() })
+
+describe('every route declares its gate', () => {
+  it('the route files are exactly the ones `ROUTES` declares', () => {
+    expect(FILES).toEqual(Object.keys(ROUTES).sort())
+  })
+  it('each file exports exactly the handlers its cases reach', () => {
+    const exported = Object.fromEntries(FILES.map(f => [f, handlerNames(MODULES[f])]))
+    const reached = Object.fromEntries(FILES.map(f => [f, [...new Set((ROUTES[f] ?? []).map(c => handlerFor(MODULES[f], c.method)))].sort()]))
+    expect(reached).toEqual(exported)
+  })
+  it('each case\'s path is served by the file it is declared under (the most specific route wins)', () => {
+    const elsewhere = Object.entries(ROUTES).flatMap(([file, cases]) => cases
+      .filter(c => servedBy(c.path) !== file)
+      .map(c => `${c.method} ${c.path}: declared under ${file}, served by ${servedBy(c.path)}`))
+    expect(elsewhere).toEqual([])
+  })
+  it('every gate in the vocabulary is some route\'s', () => {
+    expect([...new Set(Object.values(ROUTES).flatMap(cases => cases.map(c => c.gate)))].sort()).toEqual(Object.keys(EXPECT).sort())
+  })
+})
+
+describe.each(MODES)('$name', mode => {
+  let w: World
+  beforeAll(async () => { w = await world(mode) })
+
+  it('the seven identities are who they say (how they signed in, scopes, admin)', async () => {
+    const ids = await Promise.all(IDENTITIES.map(async who => {
+      const id = await identify({ request: new Request(`${ORIGIN}/api/me`, { headers: w.headers[who] }), env: w.env })
+      return id && { via: id.via, email: id.email, scopes: id.scopes, admin: id.admin }
+    }))
+    const staffScopes = mode.listOn ? ['gcs', 'cw', 'requests', 'gcs:assign'] : ['gcs', 'cw', 'admin', 'requests', 'gcs:assign']
+    expect(byIdentity(ids)).toEqual({
+      'anonymous': null,
+      'read-only link': { via: 'grant', email: null, scopes: ['gcs:read'], admin: false },
+      'viewer': { via: 'session', email: EMAILS.viewer, scopes: ['gcs', 'gcs:assign'], admin: false },
+      'staff, not listed': { via: 'session', email: EMAILS.staff, scopes: staffScopes, admin: !mode.listOn },
+      'listed admin': { via: 'session', email: EMAILS.listed, scopes: ['gcs', 'gcs:assign', 'admin'], admin: true },
+      'admin grant': { via: 'grant', email: null, scopes: ['gcs', 'admin'], admin: true },
+      'agent token': { via: 'grant', email: EMAILS.listed, scopes: ['gcs', 'gcs:assign'], admin: false },
+    })
+  })
+
+  const cases = Object.entries(ROUTES).flatMap(([file, cs]) => cs.map(c => ({ file, c, title: `${c.method} ${c.path}${c.env ? ' (+env)' : ''}: ${c.gate}` })))
+  it.each(cases)('$title', async ({ file, c }) => {
+    const mod = MODULES[file]
+    const handler = mod[handlerFor(mod, c.method)] as Handler
+    const got: { outcome: Outcome; did: string }[] = []
+    for (const who of IDENTITIES) got.push(await call(w, handler, file, c, who))
+    const did = IDENTITIES.map((who, i) => `${who}: ${got[i].did}`).join('; ')
+    expect(byIdentity(got.map(g => g.outcome)), `${c.method} ${c.path} (${file}) answered ${did}`).toEqual(byIdentity(expected(c.gate, mode)))
+  })
+})
