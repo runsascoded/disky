@@ -17,7 +17,7 @@
  * the viewer gates), and a secondary store's extra scope (`STORE_SCOPE`).
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
-import { type Env, gateFor, identify } from './_lib/auth'
+import { ADMIN_GRANT_REFUSED, type Env, gateFor, identify } from './_lib/auth'
 import { DEPLOYMENT_ROUTES } from './_lib/gatesDeployment'
 import { sqliteD1, withAdminEmails, withLedger } from './_lib/testD1'
 
@@ -370,8 +370,10 @@ async function world(mode: Mode): Promise<World> {
     if (!signed) throw new Error(`${email} is not admitted to sign in (${mode.name})`)
     return { cookie: signed.cookie.split(';')[0] }
   }
+  // Minted with the list off, on the same database: the list refuses to mint an admin grant, and one from before it stands.
+  const before = gateFor({ ...env, ADMIN_LIST: undefined })!
   const grant = async (name: string, scopes: string[], email: string | null) => {
-    const { grant, token } = await gate.mint({ email, scopes, name, createdBy: 'test', expiresAt: null, maxRedeems: null })
+    const { grant, token } = await before.mint({ email, scopes, name, createdBy: 'test', expiresAt: null, maxRedeems: null })
     return { id: grant.id, headers: { authorization: `Bearer ${token}` } }
   }
   const readOnly = await grant('read-only link', ['gcs:read'], null)
@@ -421,6 +423,12 @@ async function call(w: World, handler: Handler, file: string, c: Case, who: Who)
   if (got === HUNG) throw new Error(`${c.method} ${c.path} (${file}) as ${who}: no answer in ${CALL_TIMEOUT_MS} ms`)
   return { outcome: got === 401 || got === 403 ? got : 'pass', did: String(got) }
 }
+
+/** `POST /api/auth/grants` as `who`, through the route. */
+const mintAs = (w: World, who: Who, scopes: string[]): Promise<Response> => (MODULES['api/auth/[[path]].ts'].onRequest as Handler)({
+  request: new Request(`${ORIGIN}/api/auth/grants`, { method: 'POST', headers: { ...w.headers[who], 'content-type': 'application/json' }, body: JSON.stringify({ name: 'a link', scopes }) }),
+  env: w.env,
+}) as Promise<Response>
 
 const expected = (gate: Gate, mode: Mode): Outcome[] => EXPECT[gate].map(cell => (typeof cell === 'object' ? (mode.listOn ? cell.listOn : cell.listOff) : cell))
 const byIdentity = <T>(vs: T[]): Record<string, T> => Object.fromEntries(IDENTITIES.map((who, i) => [who, vs[i]]))
@@ -478,6 +486,20 @@ describe.each(MODES)('$name', mode => {
       'admin grant': { via: 'grant', email: null, scopes: ['gcs', 'admin'], admin: true },
       'agent token': { via: 'grant', email: EMAILS.listed, scopes: ['gcs', 'gcs:assign'], admin: false },
     })
+  })
+
+  // What `admin` lets a caller mint: under the list, no grant carrying `admin` or `*`, for any admin.
+  it.each([
+    { who: 'listed admin', scopes: ['admin'] },
+    { who: 'listed admin', scopes: ['*'] },
+    { who: 'admin grant', scopes: ['gcs', 'admin'] },
+    { who: 'admin grant', scopes: ['*'] },
+  ] as { who: Who; scopes: string[] }[])('$who minting a grant with $scopes', async ({ who, scopes }) => {
+    const res = await mintAs(w, who, scopes)
+    expect(mode.listOn ? [res.status, await res.json()] : res.status).toEqual(mode.listOn ? [403, { error: ADMIN_GRANT_REFUSED }] : 200)
+  })
+  it.each(['listed admin', 'admin grant'] as Who[])('%s minting a viewer grant', async who => {
+    expect((await mintAs(w, who, ['gcs'])).status).toBe(200)
   })
 
   const cases = Object.entries(ROUTES).flatMap(([file, cs]) => cs.map(c => ({ file, c, title: `${c.method} ${c.path}${c.env ? ' (+env)' : ''}: ${c.gate}` })))

@@ -456,7 +456,11 @@ export function AdminPage() {
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ endSessions: false }),
       })
-      if (!r.ok) throw new Error(`rotate failed: ${r.status}`)
+      if (!r.ok) {
+        // With `ADMIN_LIST`, an admin link can't be re-keyed: the answer says what to do instead.
+        const b = await r.json().catch(() => null) as { error?: string } | null
+        throw new Error(b?.error ?? `rotate failed: ${r.status}`)
+      }
       return r.json() as Promise<{ id: string; token: string }>
     },
     onSuccess: ({ token }) => {
@@ -579,6 +583,7 @@ export function AdminPage() {
           show revoked <span className="dim">({revokedCount})</span>
         </label>
       )}
+      {rotate.error && <p className="err" role="alert">{rotate.error.message}</p>}
       <Paginated rows={shown} label="Share links">{page => <div className="table-scroll">
       <table className="grants">
         <thead>
