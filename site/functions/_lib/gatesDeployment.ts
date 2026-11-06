@@ -13,7 +13,12 @@ export interface DeploymentCase {
   env?: Record<string, unknown>
 }
 
-export const DEPLOYMENT_ROUTES: Record<string, DeploymentCase[]> = {}
+export const DEPLOYMENT_ROUTES: Record<string, DeploymentCase[]> = {
+  'api/digest-reapply.ts': [
+    { method: 'POST', path: '/api/digest-reapply', gate: 'admin' },
+    { method: 'GET', path: '/api/digest-reapply', gate: 'admin' },
+  ],
+}
 
 /**
  * What a path-restricted share link gets from each of those cases a share link's scopes reach (gates `public`,

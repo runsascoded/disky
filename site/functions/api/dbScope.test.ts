@@ -9,8 +9,12 @@ import { onRequest } from './db/[[path]]'
 
 const LISTED = 'lee@example.org'
 const ORIGIN = 'https://cw.example.test'
-const BASE_TABLES = TABLES.filter(t => t.readScope !== 'admin').map(t => t.name)
-const ALL_TABLES = TABLES.map(t => t.name)
+// A registry table this deployment's D1 doesn't have is neither listed nor served (cw's `/api/db`).
+const { raw: schema } = await sqliteD1()
+const present = new Set((schema.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as { name: string }[]).map(t => t.name))
+const HELD = TABLES.filter(t => present.has(t.name))
+const BASE_TABLES = HELD.filter(t => t.readScope !== 'admin').map(t => t.name)
+const ALL_TABLES = HELD.map(t => t.name)
 
 // Both ways a non-staff address is a listed admin: `ADMIN_EMAILS` needs the address allowed too; `ADMIN_LIST` admits it by the list.
 type AdminMode = 'ADMIN_EMAILS' | 'ADMIN_LIST'

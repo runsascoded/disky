@@ -20,7 +20,7 @@ beforeEach(async () => {
   raw = d.raw
   raw.exec("INSERT INTO plans (id, name, created_by, created_ts) VALUES (1, 'review', 'actor', 1)")
   env = {
-    DB: d.db, SESSION_SECRET: 's'.repeat(32), BASE_SCOPE: 'cw', EXECUTOR: 'plan-sweep', GCP_SA_KEY: 'key', JOB_SA: 'job@example.test', GCP_PROJECT: 'p', DATA_BUCKET: 'data',
+    DB: d.db, SESSION_SECRET: 's'.repeat(32), BASE_SCOPE: 'cw', EXECUTOR: 'plan-sweep', GCP_SA_KEY: 'key', JOB_SA: 'job@example.test', GCP_PROJECT: 'p', BATCH_REGION: 'r', DATA_BUCKET: 'data',
     SWEEP_IMAGE: 'image', SWEEP_S3_ENDPOINT: 'https://s3.example.test', STORE_SCHEME: 's3://', STORE_BUCKETS: 'b', SERVED_R2: '1', INDEX_R2: fakeR2(READING(false)),
   }
   token = (await gateFor(env as never)!.mint({ email: 'ops@example.test', scopes: ['cw', 'admin'], name: 'ops', createdBy: 'test', expiresAt: null, maxRedeems: null })).token

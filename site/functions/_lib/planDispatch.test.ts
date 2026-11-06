@@ -53,7 +53,7 @@ describe('retired sweep review inputs', () => {
 
 describe('the soft-delete minimum', () => {
   const ENV = {
-    GCP_SA_KEY: 'key', JOB_SA: 'job@example.test', GCP_PROJECT: 'p', DATA_BUCKET: 'data', SWEEP_IMAGE: 'image', SWEEP_S3_ENDPOINT: 'https://s3.example.test',
+    GCP_SA_KEY: 'key', JOB_SA: 'job@example.test', GCP_PROJECT: 'p', BATCH_REGION: 'r', DATA_BUCKET: 'data', SWEEP_IMAGE: 'image', SWEEP_S3_ENDPOINT: 'https://s3.example.test',
     STORE_SCHEME: 's3://', STORE_BUCKETS: 'b',
   } as unknown as ExecEnv
   async function prepared(minimum: number | null, shown?: number) {
