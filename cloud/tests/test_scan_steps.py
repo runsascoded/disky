@@ -621,6 +621,54 @@ def test_a_hard_failure_fails_a_soft_step(tmp_path, monkeypatch):
     assert S.run_step("boom", None, env) == 3
 
 
+def test_soft_steps_declare_what_a_failure_leaves_and_hard_steps_nothing():
+    """A soft step's failure leaves the run succeeded, so /scans has to say what's short: every soft step says it
+    (`leaves`), and only a soft step can (a hard step's failure fails the run)."""
+    assert [n for n, s in S.STEPS.items() if s.soft and not s.leaves] == []
+    assert [n for n, s in S.STEPS.items() if not s.soft and (s.leaves or s.side or s.converges)] == []
+
+
+def test_step_refuses_a_soft_step_without_leaves_and_failure_fields_on_a_hard_one(monkeypatch):
+    monkeypatch.setattr(S, "STEPS", {})
+
+    def declare(**kw):
+        with pytest.raises(ValueError) as e:
+            S.step("x", **kw)(lambda ctx, arg: None)
+        return str(e.value)
+
+    assert [declare(soft=True), declare(leaves="nothing"), declare(side=True), declare(converges=True),
+            declare(soft=True, side=True)] == [
+        "step x: a soft step says what its failure leaves short (`leaves`)",
+        "step x: `leaves` / `side` / `converges` describe a soft step's failure (a hard step's fails the run)",
+        "step x: `leaves` / `side` / `converges` describe a soft step's failure (a hard step's fails the run)",
+        "step x: `leaves` / `side` / `converges` describe a soft step's failure (a hard step's fails the run)",
+        "step x: a soft step says what its failure leaves short (`leaves`)",
+    ]
+    assert S.STEPS == {}
+
+
+def test_failure_table_rows():
+    """The three kinds /scans tells apart: a side step nothing redoes, a side step a later run converges, and a
+    serving step (the scan is short until a later run appends it)."""
+    table = S.failure_table()
+    assert list(table) == [n for n, s in S.STEPS.items() if s.soft]
+    assert {k: table[k] for k in ("warm-cache", "digest", "interval-store", "probe")} == {
+        "warm-cache": {"leaves": "cache not pre-warmed: this scan's first views load cold", "side": True, "converges": False},
+        "digest": {"leaves": "usage digest not posted", "side": True, "converges": True},
+        "interval-store": {"leaves": "the interval store doesn't hold this scan", "side": False, "converges": True},
+        "probe": {"leaves": "the serving probe failed: some of this scan's views may not load", "side": False, "converges": False},
+    }
+
+
+def test_the_sites_step_table_is_the_registrys():
+    """`site/src/scanSteps.json` (what /scans classifies a failed phase by) is `dt-cloud scan steps`' output, byte for
+    byte: regenerate it with `dt-cloud scan steps > site/src/scanSteps.json` after changing a step's failure fields."""
+    out = CliRunner().invoke(main, ["scan", "steps"])
+    assert (out.exit_code, out.stdout) == (0, S.failure_json())
+    assert (Path(__file__).parents[2] / "site" / "src" / "scanSteps.json").read_text() == S.failure_json()
+    assert json.loads(S.failure_json()) == S.failure_table()
+
+
 def test_interval_store_staged_append(tmp_path, env, monkeypatch):
     from dt_cloud import scan_runs
 
