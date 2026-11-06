@@ -15,8 +15,9 @@ const ALL_TABLES = TABLES.map(t => t.name)
 async function site(BASE_SCOPE: string) {
   const { db, raw } = await sqliteD1()
   withAdminEmails(raw)
-  const env = { BASE_SCOPE, ADMIN_LIST: '1', SESSION_SECRET: 's'.repeat(32), STAFF_DOMAIN: 'staff.example.test', DB: db } as Env
+  const env = { BASE_SCOPE, ADMIN_EMAILS: '1', SESSION_SECRET: 's'.repeat(32), STAFF_DOMAIN: 'staff.example.test', DB: db } as Env
   await db.prepare('INSERT INTO admin_emails (email, note, who, ts) VALUES (?, NULL, ?, 0)').bind(LISTED, 'test').run()
+  await db.prepare('INSERT INTO allowed_emails (email, who, ts) VALUES (?, ?, 0)').bind(LISTED, 'test').run()
   const gate = gateFor(env)!
   const signed = await gate.signIn(LISTED, new Request(`${ORIGIN}/signin`))
   const headersOf = async (scopes: string[]) => ({ authorization: `Bearer ${(await gate.mint({ email: null, scopes, name: 'link', createdBy: 'test', expiresAt: null, maxRedeems: null })).token}` })
