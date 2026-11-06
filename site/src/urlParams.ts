@@ -189,6 +189,12 @@ export const URL_PARAMS: Record<string, UrlParamDoc> = {
     description: 'When present (as a bare `?iec`), shows sizes in binary units (KiB, MiB, GiB). Picking units also saves the choice in this browser. When absent, the saved choice applies, else decimal units.',
     examples: [''],
   },
+  k: {
+    label: 'Run kind',
+    description: 'Lists only the scan runs of this kind (`scan`, `reproc`, or a maintenance kind: `compact`, `merge`, `race`), and charts only those. When absent, every kind is listed.',
+    examples: ['scan', 'merge'],
+    pages: ['/scans'],
+  },
   key: {
     label: 'Share key',
     description: 'A share-link credential. On load it is exchanged for a session and removed from the address bar, so it never carries over into later navigation or re-shares.',
@@ -328,6 +334,12 @@ export const URL_PARAMS: Record<string, UrlParamDoc> = {
     description: '`1` at load shows the time-to-render panel. The timing marks themselves are always recorded.',
     examples: ['1'],
   },
+  pg: {
+    label: 'Runs page',
+    description: 'The page of the scan runs table, counting from 1. When absent, the first page (the newest runs) is shown; a filter change returns to it.',
+    examples: ['2'],
+    pages: ['/scans'],
+  },
   ps: {
     label: 'Path store',
     description: 'Picks which path store the page\'s data comes from: it is read once at load and forwarded on every same-origin `/api/` request. `iv` reads the interval store on a deployment where that is opt-in, and `scan` reads the per-scan sorts on one that serves the interval store (the parity check). It has no effect on requests to a secondary store. When absent, the deployment\'s default store is used.',
@@ -436,6 +448,12 @@ export const URL_PARAMS: Record<string, UrlParamDoc> = {
     description: '`1` installs the render spy (`window.__renderSpy`) and exposes the query cache as `window.__qc`, for debugging re-renders and refetches. Both are always on in development builds.',
     examples: ['1'],
   },
+  st: {
+    label: 'Run status',
+    description: 'Lists only the scan runs with this outcome, and charts only those: `attention` (failed, or published with its data or serving short), `succeeded`, `partial` (only a side step failed), `incomplete`, `behind` (search behind), `recovered`, `failed`, `running` or `nop`. When absent (or for any other value), every run is listed.',
+    examples: ['attention', 'partial', 'recovered'],
+    pages: ['/scans'],
+  },
   store: {
     label: 'Scans store',
     description: 'Which configured store\'s scan runs to show, by its key. When absent, or for an unknown key, the primary store\'s runs are shown.',
@@ -481,7 +499,7 @@ export const URL_PARAMS: Record<string, UrlParamDoc> = {
   },
   w: {
     label: 'Run window',
-    description: 'Lists only the scan runs that started in this UTC window, written as `START~END` stamps (`YYYY-MM-DDTHHMM`) and set by dragging on the duration chart. Esc clears it. When absent, every run is listed.',
+    description: 'Lists only the scan runs that started in this UTC window, written as `START~END` stamps (`YYYY-MM-DDTHHMM`) and set by dragging on the duration chart. Esc clears it, and Back undoes it. When absent, every run is listed.',
     examples: ['2026-10-12T0600~2026-10-13T0600'],
     pages: ['/scans'],
   },

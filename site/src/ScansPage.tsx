@@ -4,7 +4,7 @@
 // writes, and the stores' maintenance jobs (compactions, merges: `dt_cloud.maint_runs`)
 // in the same table. DIY SVG: a duration strip over all runs, a phase bar per row,
 // and a phase timeline per run.
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent, type ReactNode, type RefObject } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent, type ReactNode, type RefObject } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Link, Navigate, useLocation, useNavigate, useParams } from 'react-router-dom'
 import { useUrlState } from 'use-prms'
@@ -12,7 +12,7 @@ import { SiteNav } from './SiteNav'
 import { useDocTitle } from './title'
 import { SiteKbd } from './SiteKbd'
 import { Tooltip } from './Tooltip'
-import { axisTicks, inSpan, type RunSpan, runSpanParam } from './runChart'
+import { axisTicks, inSpan, type RunSpan, runKindParam, runSpanParam, runStatusParam } from './runChart'
 import { fmtBytesPrecise, fmtN } from './types'
 import { useUnits } from './units'
 import { useStores } from './auth'
@@ -26,7 +26,7 @@ import {
 } from './scanRunsModel'
 import { colorer, fmtDur, fmtRunTime, getJson, IssueStanding, type Links, PhaseBar, QUIET_TIP, runDay, RunWhen, scanRunsApi, scansHref, scansStore, Status, useScanRuns } from './scanRunsUi'
 import { brushRole, dagNodes, processOf, type DagNode, type Hl, type RunDagRow } from './runDag'
-import { Pager, usePaged } from './Pager'
+import { DEFAULT_SIZES, pageParam, Pager, usePaged } from './Pager'
 import './scans.scss'
 
 type DetailResponse = Links & {
@@ -273,9 +273,16 @@ export function ScansPage() {
   const slug = useMinSlug(store)
   const nav = useNavigate()
   const { bytes, delta } = useBytes()
-  const [kind, setKind] = useState('')
-  const [status, setStatus] = useState('')
-  const [span, setSpan] = useUrlState('w', runSpanParam)
+  // The view's state is the URL's (defaults absent), so a filtered list can be linked and survives a reload. A filter
+  // or a window is a history entry (Back undoes it, to the page it was picked on) and starts on the first page;
+  // turning a page is not one.
+  const [kind, setKindP] = useUrlState('k', runKindParam, true)
+  const [status, setStatusP] = useUrlState('st', runStatusParam, true)
+  const [span, setSpanP] = useUrlState('w', runSpanParam, true)
+  const [page, setPage] = useUrlState('pg', pageParam)
+  const first = useCallback(<T,>(set: (v: T) => void) => (v: T) => { set(v); if (page) setPage(0) }, [page, setPage])
+  const setKind = first(setKindP), setStatus = first(setStatusP)
+  const setSpan = useMemo(() => first(setSpanP), [first, setSpanP])
   const hover = useHoverRun()
   const stores = useStores()
   useEffect(() => {
@@ -289,10 +296,11 @@ export function ScansPage() {
   const now = Math.floor(Date.now() / 1000)
   const order = useMemo(() => phaseOrder(runs.flatMap(r => r.spans.map((s, i) => ({ phase: s.phase, seq: i })))), [runs])
   const color = colorer(order)
-  const kinds = [...new Set(runs.map(r => r.run.kind))].sort()
+  // the runs' kinds, and the URL's own when no run has it (a stale link shows what it filters by)
+  const kinds = [...new Set([...runs.map(r => r.run.kind), ...(kind ? [kind] : [])])].sort()
   const filtered = runs.filter(r => (!kind || r.run.kind === kind) && statusMatches(status, runOutcome(r.run, r.phase_issues)))
   const shown = filtered.filter(r => inSpan(span, r.run.started_ts))
-  const paged = usePaged(shown)
+  const paged = usePaged(shown, DEFAULT_SIZES, [page, setPage])
   return (
     <main className="staged-page scans-page">
       <SiteNav />
@@ -349,6 +357,7 @@ export function ScansPage() {
             </tbody>
           </table>
         </div>
+        <Pager paged={paged} label="Scan runs" />
       </>)}
       <SiteKbd />
     </main>

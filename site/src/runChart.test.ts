@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { alignedTicks, axisTicks, chartRange, durationLabel, inSpan, parseDuration, percentOf, rollingRates, runSpanParam, runWindowParam, shiftWindow, zoomWindow } from './runChart'
+import { alignedTicks, axisTicks, chartRange, durationLabel, inSpan, parseDuration, percentOf, rollingRates, runKindParam, runSpanParam, runStatusParam, runWindowParam, shiftWindow, zoomWindow } from './runChart'
 import type { HistoryPoint } from './runHistory'
 
 describe('run time range and axes', () => {
@@ -54,5 +54,14 @@ describe("the scans page's window (`?w=`)", () => {
   it('holds the runs that started in its minutes, both ends inclusive', () => {
     expect(['2026-10-11T06:01:59Z', '2026-10-11T06:02:00Z', '2026-10-17T12:02:59Z', '2026-10-17T12:03:00Z'].map(s => inSpan(w, ts(s)))).toEqual([false, true, true, false])
     expect([inSpan(null, null), inSpan(w, null)]).toEqual([true, false])
+  })
+})
+
+describe('/scans\' filters in the URL (`k`, `st`)', () => {
+  it('a kind is its own name, a status a `STATUS_FILTERS` key; each absent on its default, and an unknown status reads as none', () => {
+    expect([runKindParam.encode(''), runKindParam.encode('scan'), runKindParam.decode(undefined), runKindParam.decode('merge')]).toEqual([undefined, 'scan', '', 'merge'])
+    expect([runStatusParam.encode(''), runStatusParam.encode('attention'), runStatusParam.encode('nop')]).toEqual([undefined, 'attention', 'nop'])
+    expect([undefined, 'attention', 'partial', 'incomplete', 'behind', 'recovered', 'failed', 'running', 'nop', 'succeeded', 'search behind', 'bogus'].map(s => runStatusParam.decode(s))).toEqual(
+      ['', 'attention', 'partial', 'incomplete', 'behind', 'recovered', 'failed', 'running', 'nop', 'succeeded', '', ''])
   })
 })
