@@ -474,15 +474,27 @@ const handles = new IsoMap<string, Promise<IndexHandle>>('handles')
 const handleAt = new IsoMap<string, number>('handleAt')
 
 export async function openIndex(env: Env, date: string, variant = 'path'): Promise<IndexHandle> {
-  if (intervalsOn(env)) {
-    const h = await openInterval(env, date, variant)
-    if (h) return h
-    // A date the store holds never reads per-scan (its per-scan sorts are retired once the store holds it:
-    // `dt-cloud scan retire`): a broken run's scan is a 503 (`IvUnavailable`), a variant the store doesn't serve
-    // (a v1 `user` / `coarse*` tier, a sliced read of a generation without slice sorts) is "not synced". What
-    // stays per-scan (age pyramids, the over-time archive, search sidecars) asks for it: `perScan(env)`.
-    await ivRefuseHeld(env, date, variant)
+  if (!intervalsOn(env)) return openPerScan(env, date, variant)
+  const h = await openInterval(env, date, variant)
+  if (h) return h
+  // A date the store holds never reads per-scan (its per-scan sorts are retired once the store holds it:
+  // `dt-cloud scan retire`): a broken run's scan is a 503 (`IvUnavailable`), a variant the store doesn't serve
+  // (a v1 `user` / `coarse*` tier, a sliced read of a generation without slice sorts) is "not synced". What
+  // stays per-scan (age pyramids, the over-time archive, search sidecars) asks for it: `perScan(env)`.
+  await ivRefuseHeld(env, date, variant)
+  try {
+    return await openPerScan(env, date, variant)
+  } catch (e) {
+    // The generation doesn't hold the date, which is why it read per-scan: a missing index there says so. A site
+    // pinned to a generation behind the store's reads a newer scan this way, and that scan's per-scan sorts are
+    // retired once the store's current generation holds it (gcs's dev, 2026-11-05).
+    if (!(e instanceof Error) || !e.message.includes('not synced')) throw e
+    throw new Error(`scan ${date} is not in interval store generation ${env.INTERVAL_STORE_GEN}${ivRev(env)} and reads per-scan: ${e.message}`)
   }
+}
+
+/** `date`'s per-scan index (the D1 pointer's generation). */
+async function openPerScan(env: Env, date: string, variant: string): Promise<IndexHandle> {
   const ck = `${storeKey(env)}:${date}:${variant}`
   const at = handleAt.get(ck)
   if (at == null || Date.now() - at >= HANDLE_TTL) {
@@ -535,8 +547,9 @@ export const intervalsOn = (env: Env): boolean => env.PATH_STORE === 'intervals'
  *  `ps=iv` (so one deployment serves both, side by side), `intervals` for every request but one asking `ps=scan` (the
  *  per-scan sorts, for a parity check). A secondary store opts in with its own namespace. The
  *  generation is `INTERVAL_STORE_GEN` (a pin), else the store's current one (`ivGen`), fixed for the
- *  request: none (no pointer yet) reads per-scan stores. The static name index's generation is fixed here too
- *  (`withStaticGen`), whatever the path store. */
+ *  request: none (no pointer yet) reads per-scan stores, and a pointer that can't be read (none held) throws
+ *  `IvStoreUnavailable`, which the middleware answers (`ivRefusal`) for a route that calls this outside its own
+ *  handling. The static name index's generation is fixed here too (`withStaticGen`), whatever the path store. */
 export async function withPathStore<C extends { request: Request; env: Env }>(ctx: C): Promise<C> {
   const w = (ctx as { waitUntil?: unknown }).waitUntil
   const out = (e: Env): C => (e === ctx.env ? ctx : { ...ctx, env: e, ...(typeof w === 'function' ? { waitUntil: w.bind(ctx) } : {}) })
@@ -555,9 +568,10 @@ export const IV_CURRENT = 'interval-store/CURRENT.json'
 /** The static name index's (`compact_store`, specs/static-compaction.md): the same shape, moved on R2 last. */
 export const STATIC_CURRENT = 'static-names/CURRENT.json'
 
-/** `env`'s interval-store generation: `INTERVAL_STORE_GEN` when set (a pin), else `IV_CURRENT`'s (`currentGen`). */
+/** `env`'s interval-store generation: `INTERVAL_STORE_GEN` when set (a pin), else `IV_CURRENT`'s (`currentGen`): null
+ *  without a pointer object, an `IvStoreUnavailable` when its read fails and the isolate holds no earlier one. */
 export async function ivGen(env: Env): Promise<string | null> {
-  return env.INTERVAL_STORE_GEN?.trim() || currentGen(env, `${ivPrefix(env)}/CURRENT.json`, 'current')
+  return env.INTERVAL_STORE_GEN?.trim() || currentGen(env, `${ivPrefix(env)}/CURRENT.json`, 'current', true)
 }
 
 /** `env`'s static name index generation: `STATIC_GEN` when set (a pin), else, for the primary store of a deployment
@@ -585,8 +599,10 @@ const currents = new IsoMap<string, { at: number; p: Promise<string | null>; ok?
 
 /** The generation a store's `CURRENT.json` pointer (`key`: `{"gen": …}`) names (null without one or without
  *  `INDEX_R2`), held `IV_STATE_TTL` per isolate and in the colo cache: a compaction is served within the colo's TTL
- *  plus the isolate's. A failed read keeps the last pointer, or (none yet) null. `name`: the read's join name. */
-async function currentGen(env: Env, key: string, name: string): Promise<string | null> {
+ *  plus the isolate's. A failed read keeps the last pointer; with none yet it is null, or under `refuse` (the
+ *  interval store's: `ivGen`) an `IvStoreUnavailable`: a pointer that couldn't be read is not a store without one,
+ *  whose scans read per-scan. `name`: the read's join name. */
+async function currentGen(env: Env, key: string, name: string, refuse = false): Promise<string | null> {
   if (!env.INDEX_R2) return null
   const k = `${storeKey(env)}|${key}`
   const cur = currents.get(k)
@@ -597,7 +613,7 @@ async function currentGen(env: Env, key: string, name: string): Promise<string |
     if (got !== STALLED) return got
     if (currents.get(k) === cur) currents.delete(k)
     const now = currents.get(k)
-    if (now && now !== cur) return currentGen(env, key, name)
+    if (now && now !== cur) return currentGen(env, key, name, refuse)
   }
   const last = cur?.ok
   const entry: { at: number; p: Promise<string | null>; ok?: string | null } = { at: Date.now(), p: Promise.resolve(null) }
@@ -614,6 +630,7 @@ async function currentGen(env: Env, key: string, name: string): Promise<string |
     console.error(`${key}: ${(e as Error).message}; ${last !== undefined ? 'serving the last pointer' : 'none held'}`)
     if (last !== undefined) { entry.ok = last; return last }
     if (currents.get(k) === entry) currents.delete(k)
+    if (refuse) throw new IvStoreUnavailable('pointer', key, e)
     return null
   })
   currents.set(k, entry)
@@ -751,10 +768,27 @@ export class IvUnavailable extends Error {
   }
 }
 
-/** The 503 + `Retry-After` a broken run's read answers (`IvUnavailable`, or an uncaught `IvTierBroken`); null for
- *  any other error. Never cached (`no-store`). */
+/** How soon a read refused as `IvStoreUnavailable` is worth retrying, in seconds: nothing of the failed read is held,
+ *  so the next request reads again. */
+export const IV_UNREAD_RETRY = 1
+
+/** A read that decides which store answers a scan failed, with nothing held to answer from: the store's generation
+ *  pointer (`CURRENT.json`: the request can't tell its generation) or the generation's state (`scans.json` and the
+ *  newest manifest: it can't tell which scans the generation holds). Refused (a 503, `ivRefusal`), never taken for
+ *  "no store" or "not held": either reads the scan per-scan, where a scan the store holds is retired, and answers
+ *  with that index's absence instead of this failure. */
+export class IvStoreUnavailable extends Error {
+  readonly retryAfter = IV_UNREAD_RETRY
+  constructor(readonly what: 'pointer' | 'state', readonly key: string, cause: unknown) {
+    super(`interval store ${what} ${key} is unreadable: ${cause instanceof Error ? cause.message : String(cause)}; retry in ${IV_UNREAD_RETRY}s`)
+    this.name = 'IvStoreUnavailable'
+  }
+}
+
+/** The 503 + `Retry-After` a broken run's read answers (`IvUnavailable`, or an uncaught `IvTierBroken`), and an
+ *  unreadable pointer's or state's (`IvStoreUnavailable`); null for any other error. Never cached (`no-store`). */
 export function ivRefusal(e: unknown): Response | null {
-  if (!(e instanceof IvUnavailable || e instanceof IvTierBroken)) return null
+  if (!(e instanceof IvUnavailable || e instanceof IvTierBroken || e instanceof IvStoreUnavailable)) return null
   return new Response(`${e.message}\n`, { status: 503, headers: { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store', 'retry-after': String(e.retryAfter) } })
 }
 
@@ -812,7 +846,8 @@ export async function ivRetry<T>(f: () => Promise<T>): Promise<T> {
 }
 
 /** The newest manifest (`manifests.ts`: a scan's `manifests/<scan id>.json`, or a merge's revision of it
- *  `<scan id>.mNNN.json`), or null (none, or a bucket without `list`). */
+ *  `<scan id>.mNNN.json`), or null (none, or a bucket without `list`). One listed and not found is an error (manifests
+ *  are immutable and never removed while newest): read as "none", its runs' scans would pass for not held. */
 async function ivManifest(env: Env): Promise<IvManifest | null> {
   const r2 = env.INDEX_R2! as R2Bucket & { list?: R2Bucket['list'] }
   if (typeof r2.list !== 'function') return null
@@ -827,7 +862,7 @@ async function ivManifest(env: Env): Promise<IvManifest | null> {
   const name = newestManifest(names)
   if (name === null) return null
   const o = await env.INDEX_R2!.get(`${prefix}${name}`)
-  if (!o) return null
+  if (!o) throw new Error(`${prefix}${name} is listed and not found`)
   const m = await o.json<IvManifest>()
   if (!Array.isArray(m.runs) || !Array.isArray(m.scans) || typeof m.stamps !== 'object') throw new Error(`interval store: bad ${prefix}${name}`)
   return m
@@ -897,7 +932,7 @@ async function loadIvState(env: Env): Promise<IvState> {
 }
 
 /** The store's state, re-read once it is `IV_STATE_TTL` old (`IV_BROKEN_TTL` when cut); a failed re-read keeps
- *  serving the last good one. */
+ *  serving the last good one, and a failed read with none held is an `IvStoreUnavailable`. */
 async function ivState(env: Env): Promise<IvState> {
   const k = ivGenKey(env)
   const cur = ivStates.get(k)
@@ -915,7 +950,11 @@ async function ivState(env: Env): Promise<IvState> {
   const entry: { at: number; p: Promise<IvState>; ok?: IvState } = { at: Date.now(), p: Promise.resolve(null as unknown as IvState) }
   entry.p = loadIvState(env).then(
     st => { entry.ok = st; return st },
-    e => { if (ivStates.get(k) === entry) ivStates.delete(k); if (last) return last; throw e },
+    e => {
+      if (ivStates.get(k) === entry) ivStates.delete(k)
+      if (last) return last
+      throw new IvStoreUnavailable('state', `${ivPrefix(env)}/${env.INTERVAL_STORE_GEN}`, e)
+    },
   )
   ivStates.set(k, entry)
   track(entry.p, ivJoin(env, 'state'), () => { if (ivStates.get(k) === entry) ivStates.delete(k) })
