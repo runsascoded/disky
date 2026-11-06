@@ -200,10 +200,10 @@ dt-cloud batch submit -c COMPONENT [-L REGION] [-b BUCKET]… [-X] JOB_ID SPEC  
                           # `-X/--cross-region` (`job submit-listing -X` too; `$BATCH_CROSS_REGION=1` for the submitters with no flag:
                           # the static-names / interval-store runners, `scan-run task`). A bucket whose location can't be read is
                           # noted on stderr and not checked; a bucket reached only by URL and not named isn't seen
-dt-cloud soft-delete -b BUCKET… [-o ROOT…] [-j]  # Each bucket's GCS soft-delete retention now (`soft_delete.py`, read with
-                          # `storage.buckets.get`): what a sweep's undo has to work with, since GCS restores nothing from a bucket whose
-                          # policy is off. `-o`: the day's `<ROOT>/<date>.json`; the opt-in scan step `soft-delete` writes it under
-                          # `snapshots/soft-delete/` for each `gs://` source, and the site (whose own account can't read bucket
+dt-cloud soft-delete -b BUCKET… [-E ENDPOINT] [-o ROOT…] [-j]  # Each bucket's soft-delete retention now (`soft_delete.py`): GCS's (`NAME`, read with
+                          # `storage.buckets.get`, and GCS restores nothing from a bucket whose policy is off), or an S3-style store's (`s3://NAME`:
+                          # versioning plus the narrowest noncurrent rule; null = kept until purged). What a sweep's undo has to work with. `-o`: the day's `<ROOT>/<date>.json`; the opt-in scan step `soft-delete` writes it under
+                          # `snapshots/soft-delete/` for each `gs://` and `s3://` source, and the site (whose own account can't read bucket
                           # metadata) reads the newest: a recorded undo on a bucket it shows off is "undo unavailable" (its control
                           # disabled, the route refusing), one on a bucket it doesn't name is "unverified". `sweep undo` asks GCS itself
 dt-cloud diff-bench -a BEFORE -b AFTER [-S STORE] [-v DATE:PATH]… CASES  # The table a store-layout change ships with (no CURRENT move
@@ -237,6 +237,8 @@ from two workspace packages:
   consumer (e.g. file-tree) pins this.
 - **`@disk-tree/react`** (`packages/react/`) — `<TimeSeries>`/`<BytesOverTime>` built on the core
   (which it re-exports for back-compat).
+
+Digest and publish knobs: `dt-cloud digest -W KEY` writes only a month's preview bundle (`/admin/slack`), posting nothing. `/api/digest-reapply` re-applies the digest to chosen messages from `/admin/slack`, as a Batch job named by the `DIGEST_REAPPLY` var (unset: 503). `options.interval-store.publish_on_failure`: a failed append copies the scan's whole served set to R2, for a site that reads only R2 under `publish-r2 -S`.
 
 ### D1 schema (`site/schema.sql`)
 
