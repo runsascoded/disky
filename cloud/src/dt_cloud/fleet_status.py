@@ -68,15 +68,17 @@ def read_site(site: Site, n: int) -> Row:
     try:
         health = get_json(site.url, token, "/api/health")
         runs = get_json(site.url, token, "/api/scan-runs")
+        fresh = health.get("freshness") or {}
+        row.scan = fresh.get("newest_scan")
+        row.age_s = fresh.get("newest_scan_age")
+        row.build = ((health.get("build") or {}).get("sha") or "")[:8] or None
+        scans = [r for r in runs.get("runs", []) if r["run"]["kind"] not in MAINTENANCE]
+        row.runs = [o for o in map(outcome, scans) if o][:n]
     except SiteError as e:
         row.error = str(e)
-        return row
-    fresh = health.get("freshness") or {}
-    row.scan = fresh.get("newest_scan")
-    row.age_s = fresh.get("newest_scan_age")
-    row.build = ((health.get("build") or {}).get("sha") or "")[:8] or None
-    scans = [r for r in runs.get("runs", []) if r["run"]["kind"] not in MAINTENANCE]
-    row.runs = [o for o in map(outcome, scans) if o][:n]
+    except (AttributeError, KeyError, TypeError) as e:
+        # A site on another build's shape is a row too: it mustn't lose the other sites' lines.
+        row.error = f"unexpected answer: {type(e).__name__}: {e}"
     return row
 
 
