@@ -8,11 +8,15 @@ counted. Only handles are read from the database: no address is selected or prin
 (`-x HANDLE`: an owner deliberately left off the list, an admin who isn't an owner) is reported on its own line and
 isn't drift; one named there that no longer differs is said so, for the caller to drop.
 
+A database without the handles (no `github` column or no `admin_emails` table: the `admin-list` recipe unapplied) has
+nothing to compare, which is its own answer (`EXIT_UNAVAILABLE`), neither drift nor in sync.
+
 GitHub lists an org's owners to its members only: run it as a member of the org (`gh auth status`), or the owners
 come back incomplete."""
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 from collections.abc import Sequence
@@ -25,6 +29,21 @@ from click import Path as ClickPath, echo, group, option
 err = partial(print, file=sys.stderr)
 
 HANDLES_SQL = "SELECT github, COUNT(*) AS n FROM admin_emails GROUP BY github ORDER BY github"
+
+EXIT_DRIFT = 1
+# Not click's 2 (a usage error).
+EXIT_UNAVAILABLE = 3
+
+
+class HandlesUnavailable(Exception):
+    """The database has no handles to compare; the message says why."""
+
+
+# What the database answers when the recipe is unapplied, and what that means.
+UNAVAILABLE = (
+    (re.compile(r"no such column: github"), "`admin_emails` has no `github` column in this database (its recipe, `site/migrations/admin-list.sql`, is unapplied)"),
+    (re.compile(r"no such table: admin_emails"), "this database has no `admin_emails` table (its recipe, `site/migrations/admin-list.sql`, is unapplied)"),
+)
 
 
 @dataclass(frozen=True)
@@ -90,11 +109,18 @@ def list_handles(
     site: Path,
 ) -> tuple[list[str], int]:
     """The list's handles and its count of rows without one, read-only (`wrangler d1 execute <db> --remote --json`,
-    run from `site`)."""
+    run from `site`). `HandlesUnavailable` where the database hasn't them; any other failure raises as it is."""
     cmd = ["pnpm", "exec", "wrangler", "d1", "execute", db, "--remote", "--json", "--command", HANDLES_SQL]
     if config is not None:
         cmd += ["-c", str(config)]
-    out = subprocess.run(cmd, cwd=site, check=True, capture_output=True, text=True).stdout
+    try:
+        out = subprocess.run(cmd, cwd=site, check=True, capture_output=True, text=True).stdout
+    except subprocess.CalledProcessError as e:
+        said = f"{e.stdout or ''}\n{e.stderr or ''}"
+        for pattern, reason in UNAVAILABLE:
+            if pattern.search(said):
+                raise HandlesUnavailable(reason) from None
+        raise
     (res,) = json.loads(out)
     rows = res["results"]
     return [r["github"] for r in rows if r["github"]], sum(int(r["n"]) for r in rows if not r["github"])
@@ -131,13 +157,19 @@ def check_cmd(
     org: str,
     expected: tuple[str, ...],
 ) -> None:
-    """Compare the admin list's GitHub handles with ORG's owners; exit 1 on drift. Reads only; changes nothing."""
+    """Compare the admin list's GitHub handles with ORG's owners. Reads only; changes nothing.
+
+    Exit status: 0 in sync; 1 drift; 3 the comparison isn't available (the database has no `github` column or no `admin_emails` table: its recipe is unapplied), which says nothing about drift."""
     from .d1_schema import site_dir
 
     site = site_dir()
     # wrangler runs in site/: a config given from here is passed absolute (else it is taken as site-relative)
     cfg = config.resolve() if config is not None and config.exists() else config
-    handles, no_handle = list_handles(d1, config=cfg, site=site)
+    try:
+        handles, no_handle = list_handles(d1, config=cfg, site=site)
+    except HandlesUnavailable as e:
+        echo(json.dumps({"org": org, "available": False, "reason": str(e), "in_sync": None}) if as_json else f"{org}: the handle comparison isn't available: {e}")
+        sys.exit(EXIT_UNAVAILABLE)
     d = drift(org_owners(org), handles, no_handle, [h.lstrip("@") for h in expected])
     if as_json:
         echo(json.dumps({"org": org, **asdict(d), "in_sync": d.in_sync}))
@@ -145,4 +177,4 @@ def check_cmd(
         for line in render(org, d):
             echo(line)
     if not d.in_sync:
-        sys.exit(1)
+        sys.exit(EXIT_DRIFT)

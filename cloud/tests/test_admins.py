@@ -3,13 +3,14 @@ from __future__ import annotations
 
 import json
 import subprocess
+from inspect import cleandoc
 from pathlib import Path
 
 import pytest
 from click.testing import CliRunner
 
 from dt_cloud import admins
-from dt_cloud.admins import HANDLES_SQL, Drift, drift, list_handles, org_owners, render
+from dt_cloud.admins import EXIT_UNAVAILABLE, HANDLES_SQL, Drift, HandlesUnavailable, check_cmd, drift, list_handles, org_owners, render
 from dt_cloud.cli import main
 
 
@@ -97,6 +98,63 @@ def test_list_handles_reads_handles_only(monkeypatch: pytest.MonkeyPatch, tmp_pa
         {"cwd": tmp_path, "check": True, "capture_output": True, "text": True},
     )]
     assert HANDLES_SQL == "SELECT github, COUNT(*) AS n FROM admin_emails GROUP BY github ORDER BY github"
+
+
+def _wrangler_fails(monkeypatch: pytest.MonkeyPatch, *, stdout: str = "", stderr: str = "") -> None:
+    def run(cmd, **kw):
+        raise subprocess.CalledProcessError(1, cmd, output=stdout, stderr=stderr)
+
+    monkeypatch.setattr(admins.subprocess, "run", run)
+
+
+NO_COLUMN = "`admin_emails` has no `github` column in this database (its recipe, `site/migrations/admin-list.sql`, is unapplied)"
+NO_TABLE = "this database has no `admin_emails` table (its recipe, `site/migrations/admin-list.sql`, is unapplied)"
+
+
+@pytest.mark.parametrize("failed, reason", [
+    ({"stderr": "✘ [ERROR] no such column: github: SQLITE_ERROR"}, NO_COLUMN),
+    ({"stdout": json.dumps({"error": {"text": "no such column: github: SQLITE_ERROR"}})}, NO_COLUMN),
+    ({"stderr": "✘ [ERROR] no such table: admin_emails: SQLITE_ERROR"}, NO_TABLE),
+])
+def test_list_handles_says_why_the_handles_are_unavailable(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, failed: dict, reason: str) -> None:
+    _wrangler_fails(monkeypatch, **failed)
+    with pytest.raises(HandlesUnavailable) as e:
+        list_handles("my-db", site=tmp_path)
+    assert str(e.value) == reason
+
+
+def test_list_handles_any_other_failure_still_raises(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _wrangler_fails(monkeypatch, stderr="✘ [ERROR] Authentication error")
+    with pytest.raises(subprocess.CalledProcessError):
+        list_handles("my-db", site=tmp_path)
+
+
+def _cli_no_column(monkeypatch: pytest.MonkeyPatch, *args: str):
+    _wrangler_fails(monkeypatch, stderr="✘ [ERROR] no such column: github: SQLITE_ERROR")
+
+    def no_owners(org: str) -> list[str]:
+        raise AssertionError("the org isn't asked when there is nothing to compare")
+
+    monkeypatch.setattr(admins, "org_owners", no_owners)
+    return CliRunner().invoke(main, ["admins", "check", "-d", "my-db", "-o", "my-org", *args])
+
+
+def test_check_without_the_column_reports_unavailable_exit_3(monkeypatch: pytest.MonkeyPatch) -> None:
+    r = _cli_no_column(monkeypatch)
+    assert (EXIT_UNAVAILABLE, r.exit_code, r.output.split("\n")) == (3, 3, [f"my-org: the handle comparison isn't available: {NO_COLUMN}", ""])
+
+
+def test_check_without_the_column_json(monkeypatch: pytest.MonkeyPatch) -> None:
+    r = _cli_no_column(monkeypatch, "-j")
+    assert (r.exit_code, json.loads(r.output)) == (3, {"org": "my-org", "available": False, "reason": NO_COLUMN, "in_sync": None})
+
+
+def test_check_help_documents_its_exit_statuses() -> None:
+    assert cleandoc(check_cmd.help) == (
+        "Compare the admin list's GitHub handles with ORG's owners. Reads only; changes nothing.\n\n"
+        "Exit status: 0 in sync; 1 drift; 3 the comparison isn't available (the database has no `github` column or no "
+        "`admin_emails` table: its recipe is unapplied), which says nothing about drift."
+    )
 
 
 def _cli(monkeypatch: pytest.MonkeyPatch, owners: list[str], handles: list[str], no_handle: int, *args: str):

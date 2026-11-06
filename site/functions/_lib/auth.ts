@@ -23,7 +23,7 @@
  * a grant minted with the scope (by an admin: `POST /api/auth/grants`), which
  * `ADMIN_LIST` refuses to mint (`grantStore`); one already live keeps working.
  */
-import { type Auth, createGate, DEFAULT_COOKIE_NAME, type Gate, type GrantStore, hasScope, parseScopes, readCookie, type Subject, verifySessionClaims } from '@open-athena/auth'
+import { type Auth, createGate, DEFAULT_COOKIE_NAME, type Gate, type Grant, type GrantPatch, type GrantStore, hasScope, parseScopes, readCookie, type Subject, verifySessionClaims } from '@open-athena/auth'
 import { d1AuditSink, d1GrantStore, d1ProfileStore, d1RequestStore } from '@open-athena/auth/d1'
 import type { AnalyticsEngineDataset, D1Database, KVNamespace, R2Bucket } from '@cloudflare/workers-types'
 import { grantCaller, meterOf } from './usage.js'
@@ -352,12 +352,28 @@ export const scopesFor = (env: Env) => async (raw: string): Promise<string[] | n
 
 export const ADMIN_GRANT_REFUSED = 'with `ADMIN_LIST` on, a grant can\'t carry `admin` or `*`: add the person to the admin list instead'
 export const ADMIN_ROTATE_REFUSED = 'with `ADMIN_LIST` on, an admin grant can\'t be re-keyed: revoke it, and add the person to the admin list instead'
+export const ADMIN_WIDEN_REFUSED = 'with `ADMIN_LIST` on, an admin grant can only lose access: it can\'t be re-enabled, or given a later expiry, a higher redemption cap or sessions that outlive its expiry. Add the person to the admin list instead'
 
 /** A write `grantStore` refused; its message is the answer (`/api/auth/*`: a 403). */
 export class AdminGrantRefused extends Error {}
 
 /** The scopes as the `grants` column will read back: it splits on spaces and commas, so `gcs admin` is two. */
 const carriesAdmin = (scopes: unknown): boolean => parseScopes(String(scopes)).some(s => s === ADMIN_SCOPE || s === '*')
+
+/** Whether `next` loosens a limit that `null` lifts (an expiry, a redemption cap). What isn't a number loosens: a stored
+ *  string compares as never reached. */
+const loosens = (cur: number | null, next: unknown): boolean => {
+  if (next === null || next === undefined) return cur !== null
+  return typeof next !== 'number' || !Number.isFinite(next) || (cur !== null && next > cur)
+}
+
+/** Whether `patch` gives `grant` anything back: what ended it (an expiry, an exhausted cap) reopens. `sessionTtlS` isn't
+ *  here: it reopens nothing, and applies only to later redemptions. */
+const widens = (grant: Grant, patch: GrantPatch): boolean =>
+  ('expiresAt' in patch && loosens(grant.expiresAt, patch.expiresAt))
+  || ('maxRedeems' in patch && loosens(grant.maxRedeems, patch.maxRedeems))
+  // Sessions that outlive the expiry: an expired grant's come back (`sessionValid`).
+  || ('expiryEndsSessions' in patch && grant.expiryEndsSessions && !patch.expiryEndsSessions)
 
 /**
  * The gate's grant store. With `ADMIN_LIST` no new credential carries `admin` or `*`: a grant minted with one would be an
@@ -368,6 +384,9 @@ const carriesAdmin = (scopes: unknown): boolean => parseScopes(String(scopes)).s
  * - `insert`: refused, except the grant the package mints by itself for an address the policy admits
  *   (`POST /api/auth/request`, `createdBy: 'policy'`), whose asker can't be told no: it goes in without the scope.
  * - `rotate`: refused for an admin grant: re-keying hands out a new secret carrying the scope.
+ * - `update`, `setDisabled`: an admin grant can lose access but not regain it (`widens`; re-enabling): an expired or
+ *   disabled one is an admin again otherwise. Shortening an expiry and disabling pass. Neither touches `revoked_at`, and
+ *   the store's `setDisabled` refuses a revoked grant, so a revoke stays revoked.
  */
 function grantStore(env: Env): GrantStore {
   const store = d1GrantStore(env.DB!)
@@ -383,6 +402,18 @@ function grantStore(env: Env): GrantStore {
       const grant = await store.byId(id)
       if (grant && carriesAdmin(grant.scopes)) throw new AdminGrantRefused(ADMIN_ROTATE_REFUSED)
       return store.rotate(id, newTokenHash, sessionsInvalidBefore)
+    },
+    async update(id, patch) {
+      const grant = await store.byId(id)
+      if (grant && carriesAdmin(grant.scopes) && widens(grant, patch)) throw new AdminGrantRefused(ADMIN_WIDEN_REFUSED)
+      return store.update(id, patch)
+    },
+    async setDisabled(id, nowS) {
+      if (nowS === null) {
+        const grant = await store.byId(id)
+        if (grant && grant.disabledAt !== null && carriesAdmin(grant.scopes)) throw new AdminGrantRefused(ADMIN_WIDEN_REFUSED)
+      }
+      return store.setDisabled(id, nowS)
     },
   }
 }
