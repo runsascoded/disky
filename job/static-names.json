@@ -20,10 +20,10 @@
  "r2_sa": "cw-s3-job@oa-internal-450019.iam.gserviceaccount.com",
  "machine": "n2-highmem-16",
  "machines": {
-  "compact": "n2-highmem-32"
+  "compact": "n2-highmem-48"
  },
  "ssd_gbs": {
-  "compact": 1500
+  "compact": 3000
  },
  "ssd_gb": 750,
  "spot": true,
