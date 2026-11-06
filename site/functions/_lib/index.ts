@@ -1235,7 +1235,9 @@ export const V1_ROW_COLUMNS = ['path', 'depth', 'usr', 'b', 'o', 'wts', 'wb', 'c
 /** The interval store's storage-class byte columns, by class (`interval_store.CLASS_COLS`): their one definition on
  * the site, so a deployment that names its classes renames them here and there only. */
 export const IV_CLASS_COLS = { 2: 'c2', 3: 'c3', 4: 'c4' } as const
-export const IV_ROW_COLUMNS = ['depth', 'path', 'usr', 'vf', 'vt', 'kind', 'size', 'n_files', 'n_children', 'n_desc', 'mtime', 'wts', 'wb', IV_CLASS_COLS[2], IV_CLASS_COLS[3], IV_CLASS_COLS[4], 'us', 'last_read', 'tot']
+export const IV_ROW_COLUMNS = ['depth', 'path', 'usr', 'vf', 'vt', 'kind', 'size', 'n_files', 'n_children', 'n_desc', 'mtime', 'wts', 'wb', IV_CLASS_COLS[2], IV_CLASS_COLS[3], IV_CLASS_COLS[4], 'us', 'last_read']
+/** A total-keyed slice sort's own column (`Row.tot`), projected with the rest where the sort has it. */
+export const IV_TOTAL_COL = 'tot'
 /** An interval store's churn columns (`interval_churn.py`), projected only by a read that asks for them (`withChurn`):
  *  every other read leaves their bytes unfetched. */
 export const IV_CHURN_COLS = ['churn_cum', 'churn_end']
@@ -1263,7 +1265,7 @@ export function rowColumns(version: number, schema: SchemaElement[]): string[] |
   if (version < 2) return null
   if (version >= 3) {
     const have = new Set(schema.slice(1).map(l => l.name))
-    return IV_ROW_COLUMNS.filter(c => have.has(c))
+    return [...IV_ROW_COLUMNS, IV_TOTAL_COL].filter(c => have.has(c))
   }
   const have = new Set(schema.slice(1).map(l => l.name))
   return V2_ROW_COLUMNS.filter(c => have.has(c))
@@ -1729,7 +1731,7 @@ const toRowV3 = (r: Record<string, unknown>): Row => {
     us: r.us == null ? null : usMap(str(r.us), size),
     vf: num(r.vf),
     vt: num(r.vt),
-    ...('tot' in r ? { tot: num(r.tot) } : {}),
+    ...(IV_TOTAL_COL in r ? { tot: num(r[IV_TOTAL_COL]) } : {}),
     ...('churn_cum' in r ? { churn_cum: r.churn_cum == null ? null : num(r.churn_cum), churn_end: r.churn_end == null ? null : num(r.churn_end) } : {}),
   }
 }
@@ -1953,7 +1955,7 @@ export class IvGroup {
     if (d < 0 || p < 0 || s < 0) return this.all()
     const shape = toRow(this.h)
     const [dv, pv, sv] = [v[d], v[p], v[s]]
-    const tv = cols.includes('tot') ? v[cols.indexOf('tot')] : null
+    const tv = cols.includes(IV_TOTAL_COL) ? v[cols.indexOf(IV_TOTAL_COL)] : null
     const out: Row[] = []
     for (let i = 0; i < pv.length; i++) {
       if (!pre(dv[i] as number, pv[i] as string, sv[i] as number, tv ? num(tv[i]) : undefined)) continue
@@ -3650,7 +3652,7 @@ export async function readSizeRects(
   const lensOk = (r: Row) => !lens || r.usr === lens.key
   const at = (depth: number, path: string) => rects.some(q => depth >= q.dLo && depth <= q.dHi && path >= q.pLo && path < q.pHi)
   if (lens || !keyedOnTotal(h)) return decodeSpans(h, kept, r => r.size >= thrAt(r.depth) && at(r.depth, r.path) && lensOk(r), stop, (d, p, sz) => sz >= thrAt(d) && at(d, p))
-  if (h.columns?.includes('tot')) return decodeSpans(h, kept, r => r.tot! >= thrAt(r.depth) && at(r.depth, r.path), stop, (d, p, _sz, tot) => tot! >= thrAt(d) && at(d, p))
+  if (h.columns?.includes(IV_TOTAL_COL)) return decodeSpans(h, kept, r => r.tot! >= thrAt(r.depth) && at(r.depth, r.path), stop, (d, p, _sz, tot) => tot! >= thrAt(d) && at(d, p))
   // A per-scan store's rows (no versions, no `tot` on a `Row`): the slices' sum.
   const rows = await decodeSpans(h, kept, r => at(r.depth, r.path), stop, at)
   const tot = new Map<string, number>()
