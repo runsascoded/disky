@@ -46,7 +46,7 @@ def sites(monkeypatch):
     return calls
 
 
-ARGS = ["fleet-status", "-s", "gcs=https://gcs.test=GCS_T", "-s", "cw=https://cw.test=CW_T", "-s", "hf=https://hf.test=HF_T"]
+ARGS = ["fleet-status", "-n", "6", "-s", "gcs=https://gcs.test=GCS_T", "-s", "cw=https://cw.test=CW_T", "-s", "hf=https://hf.test=HF_T"]
 
 
 def test_one_line_per_site_with_the_unreadable_ones_saying_why(sites):
