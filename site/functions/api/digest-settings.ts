@@ -15,7 +15,7 @@ import { parseParams } from '../../src/digest/codec.js'
 export const TABLE = 'digest_settings'
 export const TEMPLATES = ['cw', 'gcs']
 /** `digest.QUOTA_MARKS`: keep identical. */
-export const QUOTA_MARKS = ['warning', 'circles', 'runway', 'runway-hue']
+export const QUOTA_MARKS = ['warning', 'circles', 'runway', 'runway-hue', 'arrow-chip']
 
 export interface DigestSettings { template: string; params: string; quota_marks: string; updated_by: string; updated_at: number }
 

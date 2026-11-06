@@ -13,6 +13,8 @@ export type ReplyMarks = 'warning' | 'circles' | PoolMark
 export interface ReplyCfg {
   quota_marks: ReplyMarks
   total_headline: boolean
+  /** Absent: a bundle from before the option. */
+  reply_lines?: boolean
   reply_hour: number
   provisional: boolean
   alert_pct: number | null
@@ -246,5 +248,5 @@ export function replies(rows: CwRows, cfg: DigestCfg, rc: ReplyCfg, variant: str
     const open = dayRows(rows, variant, rc, true).at(-1)
     if (open?.provisional) days.push(open)
   }
-  return days.map(d => reply(d, variant, cfg, rc, marks, total, over.lines ?? false, over.collage ?? false)).reverse()
+  return days.map(d => reply(d, variant, cfg, rc, marks, total, over.lines ?? rc.reply_lines ?? false, over.collage ?? false)).reverse()
 }

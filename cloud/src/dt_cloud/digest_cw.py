@@ -45,7 +45,7 @@ import json
 import math
 from collections import OrderedDict
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from .digest import (
@@ -99,9 +99,9 @@ def _bucket_link(bucket: str, scan: str, since: dt.datetime | None, cfg: DigestC
 #: `quota_marks: circles` / `runway`: a pool under this share renders as a bare `NN%` (no quota, no headroom).
 QUIET_PCT = 25
 #: The `quota_marks` whose clauses are brief (`QUIET_PCT`) and marked by a circle.
-BRIEF_MARKS = ("circles", "runway", "runway-hue")
+BRIEF_MARKS = ("circles", "runway", "runway-hue", "arrow-chip")
 #: The `quota_marks` that mark each pool by its runway, in config order.
-RUNWAY_MARKS = ("runway", "runway-hue")
+RUNWAY_MARKS = ("runway", "runway-hue", "arrow-chip")
 
 
 def _quota_clause(tb: float, q: Quota, u: Units = UNITS["TiB"], brief: bool = False) -> str:
@@ -137,9 +137,14 @@ def _zone_clause(members: list[tuple[str, float]], scan: str, since: dt.datetime
     return f"{parts} {cfg.unit.short}" + (f": {_quota_clause(total, q, cfg.unit, cfg.quota_marks in BRIEF_MARKS)}" if q else "")
 
 
+def _tail_sep(cfg: DigestConfig) -> str:
+    """Between a reply's pools, and before them when its headline is in the body (`reply_lines`: each on its own line)."""
+    return "\n" if cfg.reply_lines else " · "
+
+
 def _tail(day: DayRow, cfg: DigestConfig) -> str:
     """The daily reply's per-bucket tail: the primary then each extra bucket as
-    a linked `% of quota (free)` clause, ` · `-joined. Buckets sharing a
+    a linked `% of quota (free)` clause, joined by `_tail_sep`. Buckets sharing a
     ``zone`` collapse into one clause at the first one's position. A store of
     one configured bucket (hf: the whole org) drops the label, which would only
     repeat the store: its clause, then a trailing `[↗︎]` over-time link (`LINK_ARROW`)."""
@@ -150,14 +155,14 @@ def _tail(day: DayRow, cfg: DigestConfig) -> str:
         body = ", ".join(_quota_clause(_scoped(day.tb, day.classes, q), q, cfg.unit) for q in qs) if qs else f"{day.tb:,.0f} {cfg.unit.short}"
         return f"{body} [{LINK_ARROW}]({link})"
     cs = _clauses(day, cfg)
+    sep = _tail_sep(cfg)
     if cfg.quota_marks in RUNWAY_MARKS:
         # config order: a reply series reads by position, the marks draw the eye (specs/digest-runway-marks.md)
-        hue = cfg.quota_marks == "runway-hue"
-        return " · ".join(f"{_runway_hue(r, fill, shape) if hue else _runway_mark(r, fill)} {c}{_runway_text(r, cfg)}" if fill is not None else c
-                          for c, fill, _, r, shape in cs)
+        return sep.join(f"{_pool_mark(r, fill, shape, cfg)} {c}{_runway_text(r, cfg)}" if fill is not None else c
+                        for c, fill, _, r, shape in cs)
     if cfg.quota_marks == "circles":
         cs = sorted(cs, key=lambda c: -1.0 if c[1] is None else -c[1])
-    return " · ".join(f"{m} {c}" if (m := _mark(fill, over, cfg)) else c for c, fill, over, _, _ in cs)
+    return sep.join(f"{m} {c}" if (m := _mark(fill, over, cfg)) else c for c, fill, over, _, _ in cs)
 
 
 #: Marks a quota clause at or over `alert_pct` (the daily replies' tail and the alert reply).
@@ -192,9 +197,11 @@ RUNWAY_FULL_PCT = 95
 @dataclass(frozen=True)
 class Runway:
     """A quota group's runway at a scan: ``days`` to full at ``growth`` (its unit per day; None: no earlier scan in
-    reach), ``math.inf`` when not growing, 0 when at or over quota."""
+    reach), ``math.inf`` when not growing, 0 when at or over quota. ``used``: what its quota counts now, set by a
+    group's reading (`_group_runway`)."""
     days: float
     growth: float | None
+    used: float = 0.0
 
 
 def _growth(hist: list[tuple[dt.datetime, float]], t: dt.datetime, v: float) -> float | None:
@@ -236,8 +243,27 @@ RUNWAY_HUE_FULL_N = 3
 
 def _runway_hue(r: Runway, fill: float, shape: str = "circle") -> str:
     """A pool's `:runway-N:` / `:runway-<shape>-N:` by its runway (`RUNWAY_HUE_*`) and shape."""
+    return f":runway-{'' if shape == 'circle' else f'{shape}-'}{_hue_step(r, fill)}:"
+
+
+def _hue_step(r: Runway, fill: float) -> int:
+    """A pool's runway color, 1 (red) … 8."""
     n = 1 + sum(r.days >= c for c in RUNWAY_HUE_D)
-    return f":runway-{'' if shape == 'circle' else f'{shape}-'}{min(n, RUNWAY_HUE_FULL_N) if fill >= RUNWAY_FULL_PCT else n}:"
+    return min(n, RUNWAY_HUE_FULL_N) if fill >= RUNWAY_FULL_PCT else n
+
+
+def _pool_chip(r: Runway, fill: float) -> str:
+    """`quota_marks: arrow-chip`: the workspace emoji `:pool-chip-N-D:`, a white arrow at the pool's weekly growth rate (as the
+    trend arrows' scale reads a percent) on a rounded square in its runway color."""
+    d = deg(r.growth / r.used * 100 if r.growth is not None and r.used > 0 else 0, 7)
+    return f":pool-chip-{_hue_step(r, fill)}-{d}:"
+
+
+def _pool_mark(r: Runway, fill: float, shape: str, cfg: DigestConfig) -> str:
+    """A pool's mark under `RUNWAY_MARKS`."""
+    if cfg.quota_marks == "arrow-chip":
+        return _pool_chip(r, fill)
+    return _runway_hue(r, fill, shape) if cfg.quota_marks == "runway-hue" else _runway_mark(r, fill)
 
 
 def _runway_text(r: Runway, cfg: DigestConfig) -> str:
@@ -270,7 +296,7 @@ def _group_runway(g: list[str], day: DayRow, cfg: DigestConfig) -> Runway | None
     for q in qs:
         v = _group_used(g, day, q, cfg)
         hist = [(scan_ts(x.scan), _group_used(g, x, q, cfg)) for x in day.hist if x.scan < day.scan]
-        out.append(_runway(q.bytes / cfg.unit.bytes - v, _growth(hist, t, v)))
+        out.append(replace(_runway(q.bytes / cfg.unit.bytes - v, _growth(hist, t, v)), used=v))
     return min(out, key=lambda r: r.days)
 
 
@@ -548,12 +574,12 @@ def reply(day: DayRow, variant: str, cfg: DigestConfig) -> Reply:
     tail = _tail(day, cfg)
     if day.provisional:
         url = _diff_url(day.scan, day.since, cfg.site_url, slug=day.slug)
-        return Reply(f"{_md(day.date)} · so far", f":arrow_deg{d}: **{size}** · [as of {scan_ts(day.scan):%H:%M}Z]({url}) · {tail}", icon_emoji=PROVISIONAL_ICON)
+        return Reply(f"{_md(day.date)} · so far", f":arrow_deg{d}: **{size}** · [as of {scan_ts(day.scan):%H:%M}Z]({url}){_tail_sep(cfg)}{tail}", icon_emoji=PROVISIONAL_ICON)
     if variant == "sender":
         return Reply(f"{_md(day.date)} — {size}", tail, icon_url=f"{cfg.need('icons_base')}/arrows/av_deg{d}.png?v={AVATAR_REV}")
     if variant == "body":
         url = _diff_url(day.scan, day.since, cfg.site_url, slug=day.slug)
-        return Reply(cfg.title, f":arrow_deg{d}: [{_md(day.date)}]({url}) — **{size}** · {tail}", **cfg.op_sender())
+        return Reply(cfg.title, f":arrow_deg{d}: [{_md(day.date)}]({url}) — **{size}**{_tail_sep(cfg)}{tail}", **cfg.op_sender())
     raise ValueError(f"variant must be one of {VARIANTS}, not {variant!r}")
 
 
@@ -644,7 +670,7 @@ class Cw:
         """What the replies render under, beyond `cfg_json` and `rows_json` (`src/digest/cwReply.ts` `ReplyCfg`)."""
         c = self.cfg
         triggers = {r.scan: r.trigger for r in month.pre + month.lead + month.rows if r.trigger}
-        return {"quota_marks": c.quota_marks, "total_headline": c.total_headline, "reply_hour": c.reply_hour, "provisional": c.provisional,
+        return {"quota_marks": c.quota_marks, "total_headline": c.total_headline, "reply_lines": c.reply_lines, "reply_hour": c.reply_hour, "provisional": c.provisional,
                 "alert_pct": c.alert_pct, "op_sender": c.op_sender(), "avatar_rev": AVATAR_REV, "triggers": triggers}
 
     def units(self, month: Month, variant: str, platform: str = "slack") -> list[Unit]:

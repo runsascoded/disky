@@ -61,7 +61,7 @@ export function jobParams(s: string): string {
 }
 
 /** A candidate's OP marks have no emoji in Slack, so the job can't post them. */
-export const previewMarks = (p: DigestParams): boolean => (ARROW_MARKS as string[]).includes(p.quotas)
+export const previewMarks = (p: DigestParams): boolean => p.quotas !== 'arrow-chip' && (ARROW_MARKS as string[]).includes(p.quotas)
 
 function defaults(): DigestParams {
   return { ...DEFAULT_PARAMS, todayAt: [...DEFAULT_PARAMS.todayAt], headline: [...DEFAULT_PARAMS.headline] }

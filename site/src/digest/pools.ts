@@ -119,7 +119,7 @@ export function runwayHue(r: Runway, pct: number, shape: Shape = 'circle'): stri
   return `:runway-${shape === 'circle' ? '' : `${shape}-`}${hueStep(r, pct)}: `
 }
 
-/** Candidate marks, previewed on `/admin/slack` only (no emoji uploaded, and the job's params refuse them): the angle
+/** Arrow marks, previewed on `/admin/slack`; only `arrow-chip` has its emoji uploaded and is one the job renders: the angle
  *  is the weekly-normalized rate driving the runway, as the trend arrows' scale reads a percent; the color its
  *  `runway-hue` step. `arrow`: a bare arrow in that color; `arrow-disc` / `arrow-chip`: white on a colored disc / rounded
  *  square; `arrow-circle`: today's trend arrow beside a `:runway-N:` circle. */

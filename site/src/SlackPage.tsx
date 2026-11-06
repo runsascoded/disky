@@ -165,7 +165,7 @@ const HEADLINES: [string, DigestParams['headline']][] = [['mtd · window', ['mtd
 const ARROW_MARK_OPTIONS = <>
   <option value="arrow">A: arrow, runway color (preview)</option>
   <option value="arrow-disc">B: white arrow on runway disc (preview)</option>
-  <option value="arrow-chip">C: white arrow on runway square (preview)</option>
+  <option value="arrow-chip">C: white arrow on runway square</option>
   <option value="arrow-circle">D: trend arrow + runway circle (preview)</option>
 </>
 const POOL_MARK_OPTIONS = <>

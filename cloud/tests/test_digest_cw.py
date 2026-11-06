@@ -282,6 +282,17 @@ def test_runway_hue_shape_marks_each_step(shape: str):
     assert D._runway_hue(D.Runway(D.math.inf, 0.0), 95.0, shape) == f":runway-{shape}-3:"
 
 
+@pytest.mark.parametrize(("r", "fill", "mark"), [
+    (D.Runway(5.0, 2.0, 100.0), 50.0, ":pool-chip-3-60:"),
+    (D.Runway(float("inf"), -1.0, 100.0), 50.0, ":pool-chip-8--50:"),
+    (D.Runway(float("inf"), None, 100.0), 50.0, ":pool-chip-8-0:"),
+    (D.Runway(100.0, 0.5, 100.0), 99.0, ":pool-chip-3-40:"),
+    (D.Runway(0.0, 1.0, 0.0), 100.0, ":pool-chip-1-0:"),
+])
+def test_pool_chip_is_the_runway_color_and_the_weekly_rate(r, fill: float, mark: str):
+    assert D._pool_chip(r, fill) == mark
+
+
 def test_runway_hue_circle_is_the_plain_mark():
     r = D.Runway(3.0, 1.0)
     assert (D._runway_hue(r, 50.0), D._runway_hue(r, 50.0, "circle")) == (":runway-3:", ":runway-3:")

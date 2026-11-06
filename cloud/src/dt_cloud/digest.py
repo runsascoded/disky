@@ -168,6 +168,8 @@ class DigestConfig:
     primary: str | None = None
     # cw: a reply's headline totals every bucket the scan has, not the primary's alone
     total_headline: bool = False
+    # cw: a reply's pools each on their own line, not ` · `-joined
+    reply_lines: bool = False
     buckets: dict[str, Bucket] = field(default_factory=dict)
     prices: dict[str, float] = field(default_factory=dict)
     units: str = "TiB"
@@ -263,7 +265,7 @@ def parse_bytes(v: int | str) -> int:
 
 
 TEMPLATES = ("gcs", "cw")
-QUOTA_MARKS = ("warning", "circles", "runway", "runway-hue")
+QUOTA_MARKS = ("warning", "circles", "runway", "runway-hue", "arrow-chip")
 #: A bucket's `runway-hue` mark (`Bucket.shape`); the site's `digest/mrkdwn.ts` draws each.
 QUOTA_SHAPES = ("circle", "square", "diamond", "triangle", "star")
 # the scalar fields' accepted YAML types (`buckets` / `prices` are parsed below)
