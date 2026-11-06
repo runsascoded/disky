@@ -22,7 +22,7 @@ const store: Store = {
   owners: false,
   executor: 'plan-sweep',
   lifecycle: { tracked: 'job/cw-lifecycle.json', rules: 's3', recordedFrom: '2026-09-17' },
-  buckets: ['marin-us-east-02a', 'hero-checkpoints', 'marin-us-east-06a', 'rhoarnet-us-east-08a', 'marin-us-east-08a', 'marin-us-west-04a'],
+  buckets: ['marin-us-east-02a', 'hero-checkpoints', 'marin-us-east-06a', 'rhoarnet-us-east-08a', 'marin-us-east-08a', 'marin-us-west-04a', 'marinfold-exp368-rno2a', 'marin-rno2a'],
   peers: OA_PEERS,
   // CoreWeave's own per-bucket totals and zone quotas, sampled more often than the 6-hourly scans.
   liveTotals: { label: 'Live bucket totals (Grafana)', href: 'https://grafana.oa.dev/d/marin-storage/storage?orgId=1&from=now-7d&to=now&timezone=utc' },
