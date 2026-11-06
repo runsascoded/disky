@@ -1,7 +1,7 @@
 // Under `ADMIN_LIST` no path mints a grant carrying `admin` or `*`; a grant already holding one keeps working and stays
 // listed. With the list off, minting is as it was.
 import { describe, expect, it } from 'vitest'
-import { ADMIN_GRANT_REFUSED, ADMIN_ROTATE_REFUSED, type Env, gateFor, identify } from '../_lib/auth'
+import { ADMIN_GRANT_REFUSED, ADMIN_ROTATE_REFUSED, ADMIN_WIDEN_REFUSED, type Env, gateFor, identify } from '../_lib/auth'
 import { type Sqlite, sqliteD1, withAdminEmails } from '../_lib/testD1'
 import { onRequest as adminsRoute } from './admins'
 import { onRequest as authRoute } from './auth/[[path]]'
@@ -22,7 +22,8 @@ async function world(listOn = true) {
   const env = (listOn ? { ...base, ADMIN_LIST: '1' } : base) as Env
   const gate = gateFor(env)!
   /** A grant from before the flip: minted with the list off, on the same database. */
-  const existing = (scopes: string[]) => gateFor(base)!.mint({ email: null, scopes, name: 'old link', createdBy: LEAD, expiresAt: null, maxRedeems: null })
+  const existing = (scopes: string[], terms: { expiresAt?: number | null; maxRedeems?: number | null; expiryEndsSessions?: boolean } = {}) =>
+    gateFor(base)!.mint({ email: null, scopes, name: 'old link', createdBy: LEAD, expiresAt: null, maxRedeems: null, ...terms })
   const cookie = async (email: string) => (await gate.signIn(email, new Request(SITE)))!.cookie.split(';')[0]
   const call = async (route: typeof authRoute, path: string, as: string | null, method = 'POST', body?: unknown): Promise<[number, Record<string, unknown>]> => {
     const headers: Record<string, string> = body === undefined ? {} : { 'content-type': 'application/json' }
@@ -142,9 +143,104 @@ describe('a live admin grant, under the list', () => {
   })
 })
 
+describe('an admin grant\'s terms', () => {
+  const NOW = Math.floor(Date.now() / 1000)
+  const [PAST, SOON, LATER] = [NOW - 3600, NOW + 3600, NOW + 7200]
+  const WIDEN = [403, { error: ADMIN_WIDEN_REFUSED }]
+  type W = Awaited<ReturnType<typeof world>>
+  const patch = (w: W, id: string, edit: unknown) => w.call(authRoute, `/api/auth/grants/${id}`, LEAD, 'PATCH', edit)
+  const verb = (w: W, id: string, v: 'enable' | 'disable') => w.call(authRoute, `/api/auth/grants/${id}/${v}`, LEAD)
+  /** The grant's terms as stored. */
+  const terms = (w: W, id: string) => ({ ...w.raw.prepare('SELECT expires_at, max_redeems, expiry_ends_sessions, disabled_at IS NOT NULL AS disabled, revoked_at IS NOT NULL AS revoked FROM grants WHERE id = ?').all(id)[0] })
+  const stored = (o: Partial<{ expires_at: number; max_redeems: number; expiry_ends_sessions: number; disabled: number; revoked: number }>) => ({ expires_at: null, max_redeems: null, expiry_ends_sessions: 1, disabled: 0, revoked: 0, ...o })
+  const isAdmin = async (w: W, token: string) => (await identify({ request: new Request(`${SITE}/api/me`, { headers: { authorization: `Bearer ${token}` } }), env: w.env }))?.admin ?? null
+
+  it.each([[['gcs', 'admin']], [['*']]])('the list on, %j: reviving an expired one, by a later expiry or none, is refused', async scopes => {
+    const w = await world()
+    const { grant, token } = await w.existing(scopes, { expiresAt: PAST })
+    expect([await patch(w, grant.id, { expiresAt: LATER }), await patch(w, grant.id, { expiresAt: null }), terms(w, grant.id), await isAdmin(w, token)])
+      .toEqual([WIDEN, WIDEN, stored({ expires_at: PAST }), null])
+  })
+
+  it('the list on: letting sessions outlive the expiry is refused too: it revives one as surely', async () => {
+    const w = await world()
+    const { grant } = await w.existing(['gcs', 'admin'], { expiresAt: PAST })
+    expect([await patch(w, grant.id, { expiryEndsSessions: false }), terms(w, grant.id)]).toEqual([WIDEN, stored({ expires_at: PAST })])
+  })
+
+  it('the list on: a live one\'s expiry can\'t move later or go, and a value that isn\'t a time is refused', async () => {
+    const w = await world()
+    const { grant } = await w.existing(['gcs', 'admin'], { expiresAt: SOON })
+    const { grant: never } = await w.existing(['gcs', 'admin'])
+    expect([
+      await patch(w, grant.id, { expiresAt: LATER }), await patch(w, grant.id, { expiresAt: null }), await patch(w, grant.id, { expiresAt: String(LATER) }),
+      await patch(w, never.id, { expiresAt: 'never' }),
+      terms(w, grant.id), terms(w, never.id),
+    ]).toEqual([WIDEN, WIDEN, WIDEN, WIDEN, stored({ expires_at: SOON }), stored({})])
+  })
+
+  it('the list on: a redemption cap can\'t rise or go', async () => {
+    const w = await world()
+    const { grant } = await w.existing(['gcs', 'admin'], { maxRedeems: 1 })
+    expect([await patch(w, grant.id, { maxRedeems: 2 }), await patch(w, grant.id, { maxRedeems: null }), terms(w, grant.id)]).toEqual([WIDEN, WIDEN, stored({ max_redeems: 1 })])
+  })
+
+  it('the list on: disabling is allowed; re-enabling is refused, and it stays disabled', async () => {
+    const w = await world()
+    const { grant } = await w.existing(['*'])
+    expect([await verb(w, grant.id, 'disable'), await verb(w, grant.id, 'enable'), terms(w, grant.id)]).toEqual([[200, { ok: true }], WIDEN, stored({ disabled: 1 })])
+  })
+
+  it('the list on: shortening an expiry, setting one, lowering a cap and editing a memo are allowed', async () => {
+    const w = await world()
+    const { grant, token } = await w.existing(['gcs', 'admin'])
+    const steps = [
+      await patch(w, grant.id, { expiresAt: LATER }), await patch(w, grant.id, { expiresAt: SOON }),
+      await patch(w, grant.id, { expiresAt: SOON, note: 'on call' }),
+    ].map(([status, body]) => [status, (body.grant as { expiresAt: number; note: string | null }).expiresAt, (body.grant as { note: string | null }).note])
+    expect(steps).toEqual([[200, LATER, null], [200, SOON, null], [200, SOON, 'on call']])
+    const { grant: capped } = await w.existing(['gcs', 'admin'], { maxRedeems: 5 })
+    expect([(await patch(w, capped.id, { maxRedeems: 1 }))[0], terms(w, grant.id), terms(w, capped.id), await isAdmin(w, token)])
+      .toEqual([200, stored({ expires_at: SOON }), stored({ max_redeems: 1 }), true])
+  })
+
+  it('the list on: an expiry can be moved into the past: that ends it', async () => {
+    const w = await world()
+    const { grant, token } = await w.existing(['gcs', 'admin'], { expiresAt: SOON })
+    expect([(await patch(w, grant.id, { expiresAt: PAST }))[0], await isAdmin(w, token)]).toEqual([200, null])
+  })
+
+  it('the list on: a revoke stays revoked, whatever is asked after it', async () => {
+    const w = await world()
+    const { grant, token } = await w.existing(['gcs', 'admin'], { expiresAt: SOON })
+    expect((await w.call(authRoute, `/api/auth/grants/${grant.id}/revoke`, LEAD))[0]).toBe(200)
+    expect([
+      await patch(w, grant.id, { expiresAt: LATER }), await verb(w, grant.id, 'enable'), (await patch(w, grant.id, { expiresAt: PAST }))[0],
+      terms(w, grant.id), await isAdmin(w, token),
+    ]).toEqual([WIDEN, [200, { ok: false }], 200, stored({ expires_at: PAST, revoked: 1 }), null])
+  })
+
+  it('the list on: other grants\' terms move freely', async () => {
+    const w = await world()
+    const { grant } = await w.existing(['gcs'], { expiresAt: PAST })
+    expect([(await patch(w, grant.id, { expiresAt: null }))[0], await verb(w, grant.id, 'disable'), await verb(w, grant.id, 'enable'), terms(w, grant.id)])
+      .toEqual([200, [200, { ok: true }], [200, { ok: true }], stored({})])
+  })
+
+  it('the list off: an admin grant is revived and re-enabled as before', async () => {
+    const w = await world(false)
+    const { grant, token } = await w.existing(['gcs', 'admin'], { expiresAt: PAST })
+    expect([
+      (await patch(w, grant.id, { expiresAt: LATER }))[0], (await patch(w, grant.id, { expiresAt: null }))[0],
+      await verb(w, grant.id, 'disable'), await verb(w, grant.id, 'enable'), terms(w, grant.id), await isAdmin(w, token),
+    ]).toEqual([200, 200, [200, { ok: true }], [200, { ok: true }], stored({}), true])
+  })
+})
+
 it('the refusals say what to do', () => {
-  expect([ADMIN_GRANT_REFUSED, ADMIN_ROTATE_REFUSED]).toEqual([
+  expect([ADMIN_GRANT_REFUSED, ADMIN_ROTATE_REFUSED, ADMIN_WIDEN_REFUSED]).toEqual([
     'with `ADMIN_LIST` on, a grant can\'t carry `admin` or `*`: add the person to the admin list instead',
     'with `ADMIN_LIST` on, an admin grant can\'t be re-keyed: revoke it, and add the person to the admin list instead',
+    'with `ADMIN_LIST` on, an admin grant can only lose access: it can\'t be re-enabled, or given a later expiry, a higher redemption cap or sessions that outlive its expiry. Add the person to the admin list instead',
   ])
 })
