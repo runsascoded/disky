@@ -64,6 +64,12 @@ def test_one_line_per_site_with_the_unreadable_ones_saying_why(sites):
     ]
 
 
+def test_an_unexpected_answer_is_that_sites_row(sites, monkeypatch):
+    monkeypatch.setattr(fleet_status, "get_json", lambda url, token, path: HEALTH if path == "/api/health" else {"runs": [{}]})
+    result = CliRunner().invoke(main, ["fleet-status", "-s", "gcs=https://gcs.test=GCS_T"])
+    assert (result.exit_code, result.output) == (0, "gcs  unexpected answer: KeyError: 'run'\n")
+
+
 def test_n_keeps_the_newest_runs(sites):
     result = CliRunner().invoke(main, ["fleet-status", "-n", "2", "-s", "gcs=https://gcs.test=GCS_T", "-j"])
     assert json.loads(result.output) == [{
