@@ -1,7 +1,7 @@
 import { expect, it } from 'vitest'
 import { adminPaths, type AdminsData, emptyNotice } from './Admins'
 
-const base: AdminsData = { list: true, staffDomain: null, table: 'ok', rows: [], bootstrap: [], none: false, grants: [], you: 'lead@example.org' }
+const base: AdminsData = { list: true, staffDomain: null, table: 'ok', rows: [], handles: true, bootstrap: [], none: false, grants: [], you: 'lead@example.org' }
 const row = (email: string, ts: number, who = 'seed', note: string | null = null, github: string | null = null) => ({ email, note, who, ts, github })
 const path = (p: Partial<ReturnType<typeof adminPaths>[number]>) => ({ github: null, note: null, addedBy: null, ts: null, you: false, removable: false, why: null, ...p })
 

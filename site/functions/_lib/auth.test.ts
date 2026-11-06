@@ -165,19 +165,19 @@ describe('ADMIN_LIST — admin is the explicit list, not the staff domain', () =
       expect([await scopesFor(env)('dev@staff.example.test'), await isAdmin(env, 'dev@staff.example.test'), await scopesFor(env)('lead@staff.example.test')]).toEqual([
         ['gcs', 'cw', 'requests', 'gcs:assign'], false, ['gcs', 'cw', 'admin', 'requests', 'gcs:assign'],
       ])
-      expect(await adminRoster(env)).toEqual({ list: true, staffDomain: null, table: 'missing', rows: [], bootstrap: ['lead@staff.example.test'], none: false })
+      expect(await adminRoster(env)).toEqual({ list: true, staffDomain: null, table: 'missing', handles: false, rows: [], bootstrap: ['lead@staff.example.test'], none: false })
     })
 
     it('adminRoster: the rows with who added them and when, and `none` when the list is on with nobody on it', async () => {
       const { db, raw } = await sqliteD1()
       withAdminEmails(raw)
-      expect(await adminRoster(d1Env(db))).toEqual({ list: true, staffDomain: null, table: 'ok', rows: [], bootstrap: [], none: true })
+      expect(await adminRoster(d1Env(db))).toEqual({ list: true, staffDomain: null, table: 'ok', handles: true, rows: [], bootstrap: [], none: true })
       raw.exec("INSERT INTO admin_emails (email, note, who, ts, github) VALUES ('owner@example.org', 'org owner', 'lead@staff.example.test', 7, 'octo-owner'), ('lead@staff.example.test', NULL, 'seed', 3, NULL)")
       const rows = [{ email: 'lead@staff.example.test', note: null, who: 'seed', ts: 3, github: null }, { email: 'owner@example.org', note: 'org owner', who: 'lead@staff.example.test', ts: 7, github: 'octo-owner' }]
-      expect(await adminRoster(d1Env(db))).toEqual({ list: true, staffDomain: null, table: 'ok', bootstrap: [], none: false, rows })
+      expect(await adminRoster(d1Env(db))).toEqual({ list: true, staffDomain: null, table: 'ok', handles: true, bootstrap: [], none: false, rows })
       // The list off: the staff domain is the admin rule, the table (where `ADMIN_EMAILS`) adds to it.
-      expect(await adminRoster(d1Env(db, { ADMIN_LIST: undefined, ADMIN_EMAILS: '1' }))).toEqual({ list: false, staffDomain: 'staff.example.test', table: 'ok', bootstrap: [], none: false, rows })
-      expect(await adminRoster(d1Env(db, { ADMIN_LIST: undefined }))).toEqual({ list: false, staffDomain: 'staff.example.test', table: 'unused', rows: [], bootstrap: [], none: false })
+      expect(await adminRoster(d1Env(db, { ADMIN_LIST: undefined, ADMIN_EMAILS: '1' }))).toEqual({ list: false, staffDomain: 'staff.example.test', table: 'ok', handles: true, bootstrap: [], none: false, rows })
+      expect(await adminRoster(d1Env(db, { ADMIN_LIST: undefined }))).toEqual({ list: false, staffDomain: 'staff.example.test', table: 'unused', handles: false, rows: [], bootstrap: [], none: false })
     })
 
     it('adminRoster: a table from before the `github` column lists the same admins, with no handles', async () => {
@@ -186,7 +186,7 @@ describe('ADMIN_LIST — admin is the explicit list, not the staff domain', () =
       raw.exec('CREATE TABLE admin_emails (email TEXT PRIMARY KEY, note TEXT, who TEXT NOT NULL, ts INTEGER NOT NULL)')
       raw.exec("INSERT INTO admin_emails (email, note, who, ts) VALUES ('owner@example.org', NULL, 'seed', 7)")
       expect([await adminRoster(d1Env(db)), await isAdmin(d1Env(db), 'owner@example.org')]).toEqual([
-        { list: true, staffDomain: null, table: 'ok', bootstrap: [], none: false, rows: [{ email: 'owner@example.org', note: null, who: 'seed', ts: 7, github: null }] },
+        { list: true, staffDomain: null, table: 'ok', handles: false, bootstrap: [], none: false, rows: [{ email: 'owner@example.org', note: null, who: 'seed', ts: 7, github: null }] },
         true,
       ])
     })
