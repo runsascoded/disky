@@ -4,7 +4,8 @@
  * `ROUTES` declares, per route file, one case per distinct gate branch (a catch-all or an all-method `onRequest`
  * gates per method and sub-path). A route file with no entry, an entry with no file, an exported handler no case
  * reaches, or a case another file would serve fails the enumeration tests, so a new route can't ship without
- * saying who may call it.
+ * saying who may call it. A route only a deployment's branch carries is declared in `_lib/gatesDeployment.ts`, the
+ * one file of this audit that branch edits.
  *
  * Each case is then called, through the route's own exported handler and a real gate (`gateFor` over an in-memory
  * D1), as seven identities, and the outcomes (`401`, `403`, or `pass`: anything else, a throw included, since a
@@ -17,6 +18,7 @@
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { type Env, gateFor, identify } from './_lib/auth'
+import { DEPLOYMENT_ROUTES } from './_lib/gatesDeployment'
 import { sqliteD1, withAdminEmails, withLedger } from './_lib/testD1'
 
 // The card renderer's wasm (`og/serve.ts`): nothing here draws a card.
@@ -120,7 +122,7 @@ const INTERVALS = { PATH_STORE: 'intervals', INTERVAL_STORE_GEN: 'g1', INDEX_R2:
 const GOOGLE = { GOOGLE_CLIENT_ID: 'client-id', GOOGLE_CLIENT_SECRET: 'client-secret' }
 const MAIL = { RESEND_API_KEY: 'resend-key', MAIL_FROM: 'Disky <disky@example.org>' }
 
-const ROUTES: Record<string, Case[]> = {
+const SHARED_ROUTES: Record<string, Case[]> = {
   // An activity post's sender face, named by its own SHA-256.
   'a/[[path]].ts': [get('/a/0000.png', 'public')],
   'api/actions.ts': [get('/api/actions', 'viewer'), post('/api/actions', 'assigner')],
@@ -273,6 +275,10 @@ const ROUTES: Record<string, Case[]> = {
   // Scanned objects: a member, never a read-only guest.
   'v1/objects/[[path]].ts': [get('/v1/objects/data-bucket/get?path=x', 'stager', { OBJECT_BUCKETS: 'data-bucket' })],
 }
+
+/** Every route of this branch: the shared ones above, and the ones only this deployment carries
+ *  (`_lib/gatesDeployment.ts`, which a deployment branch fills and `cloud` leaves empty). */
+const ROUTES: Record<string, Case[]> = { ...SHARED_ROUTES, ...(DEPLOYMENT_ROUTES as Record<string, Case[]>) }
 
 // ---- the route modules ---------------------------------------------------------------------------------------------
 
