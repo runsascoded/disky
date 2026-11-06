@@ -20,9 +20,10 @@
  * `isAdmin`. With `ADMIN_LIST` it is the deployment's explicit list (an
  * `admin_emails` row, or the break-glass `ADMIN_BOOTSTRAP`) and the staff
  * domain alone is not; without it, staff are admins. The only other admin is
- * a grant minted with the scope (by an admin: `POST /api/auth/grants`).
+ * a grant minted with the scope (by an admin: `POST /api/auth/grants`), which
+ * `ADMIN_LIST` refuses to mint (`grantStore`); one already live keeps working.
  */
-import { type Auth, createGate, DEFAULT_COOKIE_NAME, type Gate, hasScope, readCookie, type Subject, verifySessionClaims } from '@open-athena/auth'
+import { type Auth, createGate, DEFAULT_COOKIE_NAME, type Gate, type GrantStore, hasScope, parseScopes, readCookie, type Subject, verifySessionClaims } from '@open-athena/auth'
 import { d1AuditSink, d1GrantStore, d1ProfileStore, d1RequestStore } from '@open-athena/auth/d1'
 import type { AnalyticsEngineDataset, D1Database, KVNamespace, R2Bucket } from '@cloudflare/workers-types'
 import { grantCaller, meterOf } from './usage.js'
@@ -349,10 +350,47 @@ export const scopesFor = (env: Env) => async (raw: string): Promise<string[] | n
   return row?.read_only ? [baseReadScope(env)] : viewer
 }
 
+export const ADMIN_GRANT_REFUSED = 'with `ADMIN_LIST` on, a grant can\'t carry `admin` or `*`: add the person to the admin list instead'
+export const ADMIN_ROTATE_REFUSED = 'with `ADMIN_LIST` on, an admin grant can\'t be re-keyed: revoke it, and add the person to the admin list instead'
+
+/** A write `grantStore` refused; its message is the answer (`/api/auth/*`: a 403). */
+export class AdminGrantRefused extends Error {}
+
+/** The scopes as the `grants` column will read back: it splits on spaces and commas, so `gcs admin` is two. */
+const carriesAdmin = (scopes: unknown): boolean => parseScopes(String(scopes)).some(s => s === ADMIN_SCOPE || s === '*')
+
+/**
+ * The gate's grant store. With `ADMIN_LIST` no new credential carries `admin` or `*`: a grant minted with one would be an
+ * admin whatever the list says, and could edit it. Here rather than in the routes because every path to a grant ends
+ * here, the package's included (`POST /api/auth/grants`, a request's approval, `/api/token`). Reads are untouched, so a
+ * grant already holding the scope still authenticates, stays on `/admin`, and can be revoked.
+ *
+ * - `insert`: refused, except the grant the package mints by itself for an address the policy admits
+ *   (`POST /api/auth/request`, `createdBy: 'policy'`), whose asker can't be told no: it goes in without the scope.
+ * - `rotate`: refused for an admin grant: re-keying hands out a new secret carrying the scope.
+ */
+function grantStore(env: Env): GrantStore {
+  const store = d1GrantStore(env.DB!)
+  if (!adminListOn(env)) return store
+  return {
+    ...store,
+    async insert(grant, tokenHash) {
+      if (!carriesAdmin(grant.scopes)) return store.insert(grant, tokenHash)
+      if (grant.createdBy !== 'policy') throw new AdminGrantRefused(ADMIN_GRANT_REFUSED)
+      return store.insert({ ...grant, scopes: parseScopes(String(grant.scopes)).filter(s => !carriesAdmin(s)) }, tokenHash)
+    },
+    async rotate(id, newTokenHash, sessionsInvalidBefore) {
+      const grant = await store.byId(id)
+      if (grant && carriesAdmin(grant.scopes)) throw new AdminGrantRefused(ADMIN_ROTATE_REFUSED)
+      return store.rotate(id, newTokenHash, sessionsInvalidBefore)
+    },
+  }
+}
+
 export function gateFor(env: Env): Gate | null {
   if (!env.DB || !env.SESSION_SECRET) return null
   return createGate({
-    store: d1GrantStore(env.DB),
+    store: grantStore(env),
     requests: d1RequestStore(env.DB),
     audit: d1AuditSink(env.DB),
     // The name + face Google verified at sign-in (seeded by default),

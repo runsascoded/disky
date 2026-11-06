@@ -37,7 +37,9 @@ async function world(admins: string[], extra: Partial<Env> = {}, table: Table = 
     const res = await onRequest({ request: new Request(`${SITE}/api/admins${query}`, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) }), env })
     return [res.status, await res.json()]
   }
-  return { env, raw, gate, call, sql }
+  /** Minting as it was before the list: a grant the list didn't mint, on the same database. */
+  const before = gateFor({ ...env, ADMIN_LIST: undefined })!
+  return { env, raw, gate, before, call, sql }
 }
 
 const rows = (raw: Sqlite) => raw.prepare('SELECT * FROM admin_emails ORDER BY email').all().map(r => ({ ...r }))
@@ -46,11 +48,11 @@ const edits = (raw: Sqlite) => raw.prepare('SELECT tbl, pk, action, who, ts, old
 describe('GET /api/admins', () => {
   it('an admin sees every admin path: the rows with who added whom and when, the break-glass, the admin grants', async () => {
     const w = await world([LEAD, OWNER], { ADMIN_BOOTSTRAP: 'Root@example.org' })
-    const link = await w.gate.mint({ email: null, scopes: ['gcs', 'admin'], name: 'ops link', createdBy: LEAD, expiresAt: null, maxRedeems: null })
+    const link = await w.before.mint({ email: null, scopes: ['gcs', 'admin'], name: 'ops link', createdBy: LEAD, expiresAt: null, maxRedeems: null })
     await w.gate.mint({ email: GUEST, scopes: ['gcs'], name: 'guest link', createdBy: LEAD, expiresAt: null, maxRedeems: null })
-    const dead = await w.gate.mint({ email: null, scopes: ['*'], name: 'revoked link', createdBy: LEAD, expiresAt: null, maxRedeems: null })
+    const dead = await w.before.mint({ email: null, scopes: ['*'], name: 'revoked link', createdBy: LEAD, expiresAt: null, maxRedeems: null })
     await w.gate.revoke(dead.grant.id)
-    await w.gate.mint({ email: null, scopes: ['admin'], name: 'expired link', createdBy: LEAD, expiresAt: NOW - 1, maxRedeems: null })
+    await w.before.mint({ email: null, scopes: ['admin'], name: 'expired link', createdBy: LEAD, expiresAt: NOW - 1, maxRedeems: null })
     expect(await w.call(OWNER)).toEqual([200, {
       list: true, staffDomain: null, table: 'ok', handles: true, none: false, you: OWNER,
       rows: [{ email: LEAD, note: null, who: 'seed', ts: 1, github: null }, { email: OWNER, note: null, who: 'seed', ts: 2, github: null }],
@@ -267,7 +269,7 @@ describe('DELETE /api/admins', () => {
 
   it('the last admin can\'t be removed, by themselves or by an admin grant: nothing changes, nothing is logged', async () => {
     const w = await world([LEAD])
-    const link = await w.gate.mint({ email: null, scopes: ['gcs', 'admin'], name: 'ops link', createdBy: LEAD, expiresAt: null, maxRedeems: null })
+    const link = await w.before.mint({ email: null, scopes: ['gcs', 'admin'], name: 'ops link', createdBy: LEAD, expiresAt: null, maxRedeems: null })
     expect([await w.call(LEAD, 'DELETE', `?email=${LEAD}`), await w.call(link, 'DELETE', `?email=${LEAD}`), await w.call(LEAD, 'DELETE', `?email=${OWNER}`)]).toEqual([
       [409, { error: 'you are the last admin: add another before removing yourself', last: true }],
       [409, { error: 'that is the last admin: add another before removing them', last: true }],
