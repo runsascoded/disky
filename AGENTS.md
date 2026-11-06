@@ -223,6 +223,8 @@ disk-tree tiers plan SIDECAR P THR  # The reader's span selection run offline ov
                           # decodes 10 groups / 20,015 rows for 1,250 answers, `bysize` 1 group / 2,048
 ```
 
+**What `batch.check_region` can't see:** it reads a spec's gcsfuse mounts and the buckets `-b`/`buckets=` name, at `batch.submit_job`, so a job's region is checked only that far. A bucket the job reaches only by URL (a `gs://` path in its script or args, not mounted or named) isn't seen; name it. Nor is any job that doesn't go through `submit_job`: Nextflow's tasks (its `google-batch` executor posts them), the site's REST submits (`_lib/sweepDispatch.ts`, `_lib/cwBatch.ts`), `BatchCron` bodies (Cloud Scheduler posts them; `BatchCron` checks only their labels), and raw `gcloud batch jobs submit`. Those keep a job beside its buckets by configuration alone.
+
 ### Site (`site/`) and widget packages
 
 `site/` is the hosted/serverless app: Vite + React + TypeScript, with Pages Functions over R2 / GCS +
