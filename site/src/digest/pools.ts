@@ -110,7 +110,7 @@ export function runwayMark(r: Runway, pct: number): string {
 export const RUNWAY_HUE_D = [1.8, 3, 6, 10, 19, 33, 60]
 export const RUNWAY_HUE_FULL_N = 3
 
-function hueStep(r: Runway, pct: number): number {
+export function hueStep(r: Runway, pct: number): number {
   const n = 1 + RUNWAY_HUE_D.filter(c => r.days >= c).length
   return pct >= RUNWAY_FULL_PCT ? Math.min(n, RUNWAY_HUE_FULL_N) : n
 }
@@ -128,7 +128,7 @@ export const ARROW_MARKS: ArrowMark[] = ['arrow', 'arrow-disc', 'arrow-chip', 'a
 /** Every mark over a pool's runway. */
 export type PoolMark = 'runway' | 'runway-hue' | ArrowMark
 
-const weeklyDeg = (r: Runway, v: number): number => deg(r.growth != null && v > 0 ? (r.growth / v) * 100 : 0, 7)
+export const weeklyDeg = (r: Runway, v: number): number => deg(r.growth != null && v > 0 ? (r.growth / v) * 100 : 0, 7)
 
 /** A pool's mark, with its trailing space; `v`: what its quota counts now. */
 export function poolMark(mode: PoolMark, r: Runway, pct: number, v: number, shape: Shape = 'circle'): string {

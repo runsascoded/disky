@@ -4,7 +4,7 @@
 import { scanTime } from '../scanSlug'
 import { type DigestCfg, deg, pct, tb as signed, type Quota } from './common'
 import { bucketLink, type CwRows, type CwScan, dextra, diffUrl, dlink, scoped } from './cw'
-import { growth, mark, poolMark, type PoolMark, QUIET_PCT, runway, type Runway, RUNWAY_WINDOWS_D, runwayText } from './pools'
+import { growth, hueStep, mark, poolMark, type PoolMark, QUIET_PCT, runway, type Runway, RUNWAY_WINDOWS_D, runwayText, weeklyDeg } from './pools'
 import { dayOf, fixed, grouped, hhmm, md, pyRound } from './pyfmt'
 
 export type ReplyMarks = 'warning' | 'circles' | PoolMark
@@ -22,10 +22,23 @@ export interface ReplyCfg {
   triggers: Record<string, string>
 }
 
-export interface RenderedReply { key: string; scan: string; username: string; body: string; icon_url: string | null; icon_emoji: string | null }
+/** One quota pool's tile in a candidate's collage avatar: its `runway-hue` step and the arrow's angle (`poolMark`'s). */
+export interface ReplyCell { n: number; deg: number }
 
-/** What a candidate overrides; absent: as the bundle was rendered. */
-export interface ReplyOverrides { marks?: ReplyMarks; total?: boolean }
+export interface RenderedReply {
+  key: string
+  scan: string
+  username: string
+  body: string
+  icon_url: string | null
+  icon_emoji: string | null
+  /** A candidate's collage avatar, in the reply's pool order; the job has no such avatar. */
+  icon_cells?: ReplyCell[]
+}
+
+/** What a candidate overrides; absent: as the bundle was rendered. `lines`: each pool on its own line, its mark leading.
+ *  `collage`: the sender avatar is one tile per pool, not the day's trend arrow. */
+export interface ReplyOverrides { marks?: ReplyMarks; total?: boolean; lines?: boolean; collage?: boolean }
 
 const HOURS_PER_WEEK = 168
 const ALERT_MARK = ':warning:'
@@ -163,7 +176,7 @@ function clause(g: Member[], day: DayRow, cfg: DigestCfg, marks: ReplyMarks): st
 }
 
 /** The reply's per-bucket tail (`_tail`). */
-function tail(day: DayRow, cfg: DigestCfg, rc: ReplyCfg, marks: ReplyMarks): string {
+function tail(day: DayRow, cfg: DigestCfg, rc: ReplyCfg, marks: ReplyMarks, sep: string): string {
   if (Object.keys(cfg.buckets).length <= 1 && !Object.keys(day.s.extra).length) {
     const b = cfg.buckets[cfg.primary!]
     const qs = b?.quotas ?? []
@@ -181,13 +194,21 @@ function tail(day: DayRow, cfg: DigestCfg, rc: ReplyCfg, marks: ReplyMarks): str
       if (f === null || !rw) return c
       const m = poolMark(marks as PoolMark, rw.r, f, rw.v, cfg.buckets[g[0][0]]?.shape ?? 'circle')
       return `${m}${c}${runwayText(rw.r, cfg)}`
-    }).join(' · ')
+    }).join(sep)
   }
   if (marks === 'circles') {
     cs.sort((a, b) => (b.f ?? -1) - (a.f ?? -1))
-    return cs.map(({ c, f }) => (f === null ? c : `${mark(f, rc.alert_pct ?? 90)}${c}`)).join(' · ')
+    return cs.map(({ c, f }) => (f === null ? c : `${mark(f, rc.alert_pct ?? 90)}${c}`)).join(sep)
   }
-  return cs.map(({ c, over }) => (over ? `${ALERT_MARK} ${c}` : c)).join(' · ')
+  return cs.map(({ c, over }) => (over ? `${ALERT_MARK} ${c}` : c)).join(sep)
+}
+
+/** The day's tile per pool that has a quota, in the reply's order. */
+function cells(day: DayRow, cfg: DigestCfg): ReplyCell[] {
+  return groups(day, cfg).flatMap(g => {
+    const [f, rw] = [fill(g, day, cfg), groupRunway(g.map(([b]) => b), day, cfg)]
+    return f === null || !rw ? [] : [{ n: hueStep(rw.r, f), deg: weeklyDeg(rw.r, rw.v) }]
+  })
 }
 
 function headline(day: DayRow, total: boolean): [number, number] {
@@ -196,22 +217,24 @@ function headline(day: DayRow, total: boolean): [number, number] {
   return [pyRound(day.s.tb + sum(Object.values(day.s.extra)), 1), pyRound((day.dtb ?? 0) + sum(Object.values(day.dextra)), 1)]
 }
 
-function reply(day: DayRow, variant: string, cfg: DigestCfg, rc: ReplyCfg, marks: ReplyMarks, total: boolean): RenderedReply {
+function reply(day: DayRow, variant: string, cfg: DigestCfg, rc: ReplyCfg, marks: ReplyMarks, total: boolean, lines: boolean, collage: boolean): RenderedReply {
   const [v, dv] = headline(day, total)
   const prev = v - dv
   const d = deg(prev ? (dv / prev) * 100 : 0, day.hours ? HOURS_PER_WEEK / day.hours : 7)
   const size = `${grouped(v, 0)} ${cfg.unit.name} (${signed(dv)}, ${pct(dv, v)}%)`
-  const t = tail(day, cfg, rc, marks)
+  const sep = lines ? '\n' : ' · '
+  const t = tail(day, cfg, rc, marks, sep)
   const when = md(dayOf(day.date))
   const url = diffUrl(day.s.scan, dlink(day.s), day.since, cfg.site_url)
   const base = { key: day.date, scan: day.s.scan }
   if (day.provisional) {
-    return { ...base, username: `${when} · so far`, body: `:arrow_deg${d}: **${size}** · [as of ${hhmm(scanTime(day.s.scan))}Z](${url}) · ${t}`, icon_url: null, icon_emoji: PROVISIONAL_ICON }
+    return { ...base, username: `${when} · so far`, body: `:arrow_deg${d}: **${size}** · [as of ${hhmm(scanTime(day.s.scan))}Z](${url})${sep}${t}`, icon_url: null, icon_emoji: PROVISIONAL_ICON }
   }
   if (variant === 'sender') {
-    return { ...base, username: `${when} — ${size}`, body: t, icon_url: `${cfg.icons_base}/arrows/av_deg${d}.png?v=${rc.avatar_rev}`, icon_emoji: null }
+    const sender = { ...base, username: `${when} — ${size}`, body: t, icon_url: `${cfg.icons_base}/arrows/av_deg${d}.png?v=${rc.avatar_rev}`, icon_emoji: null }
+    return collage ? { ...sender, icon_url: null, icon_cells: cells(day, cfg) } : sender
   }
-  return { ...base, username: cfg.title, body: `:arrow_deg${d}: [${when}](${url}) — **${size}** · ${t}`, icon_url: rc.op_sender.icon_url ?? null, icon_emoji: rc.op_sender.icon_emoji ?? null }
+  return { ...base, username: cfg.title, body: `:arrow_deg${d}: [${when}](${url}) — **${size}**${sep}${t}`, icon_url: rc.op_sender.icon_url ?? null, icon_emoji: rc.op_sender.icon_emoji ?? null }
 }
 
 /** The month's replies as the converge posts them, newest first (`digest.replies_json`). */
@@ -223,5 +246,5 @@ export function replies(rows: CwRows, cfg: DigestCfg, rc: ReplyCfg, variant: str
     const open = dayRows(rows, variant, rc, true).at(-1)
     if (open?.provisional) days.push(open)
   }
-  return days.map(d => reply(d, variant, cfg, rc, marks, total)).reverse()
+  return days.map(d => reply(d, variant, cfg, rc, marks, total, over.lines ?? false, over.collage ?? false)).reverse()
 }

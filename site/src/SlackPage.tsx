@@ -4,9 +4,9 @@ import { Link } from 'react-router-dom'
 import { stringParam, useUrlState } from 'use-prms'
 import { SiteNav } from './SiteNav'
 import { useDocTitle } from './title'
-import { DEFAULT_PARAMS, type DigestParams, imageRequest, opText, type CwRows, type PreviewBundle, type PreviewReply, type RenderedReply, replies as renderReplies } from './digest'
+import { DEFAULT_PARAMS, type DigestParams, imageRequest, opText, type CwRows, type PreviewBundle, type PreviewReply, type RenderedReply, type ReplyCell, replies as renderReplies } from './digest'
 import { decodeParams, encodeParams, jobParams, previewMarks } from './digest/codec'
-import { type Tok, tokenize } from './digest/mrkdwn'
+import { RUNWAY_HUE, type Tok, tokenize } from './digest/mrkdwn'
 import './slack.scss'
 
 // /admin/slack (specs/slack-preview-page.md), admin only: the monthly digest's OP as the job posted it (its preview
@@ -65,6 +65,28 @@ function PoolMarkSvg({ form, deg, color }: { form: 'bare' | 'disc' | 'chip'; deg
   )
 }
 
+/** A candidate's collage avatar: a tile per pool, in its reply's order, each its `runway-hue` color with its arrow. */
+function CollageAvatar({ cells }: { cells: ReplyCell[] }) {
+  const [gap, cols] = [3, Math.ceil(Math.sqrt(cells.length))]
+  const rows = Array.from({ length: Math.ceil(cells.length / cols) }, (_, i) => cells.slice(i * cols, (i + 1) * cols))
+  const h = (100 - gap * (rows.length - 1)) / rows.length
+  return (
+    <svg className="collage" viewBox="0 0 100 100" aria-label="each pool's runway">
+      {rows.flatMap((row, y) => row.map((c, x) => {
+        const w = (100 - gap * (row.length - 1)) / row.length
+        const [left, top] = [x * (w + gap), y * (h + gap)]
+        const scale = Math.min(w, h) / 100
+        return (
+          <g key={`${y}-${x}`}>
+            <rect x={left} y={top} width={w} height={h} rx="5" fill={RUNWAY_HUE[c.n - 1]} />
+            <polygon points={ARROW_POINTS} fill="#fff" transform={`translate(${left + w / 2} ${top + h / 2}) rotate(${-c.deg}) scale(${scale}) translate(-50 -50)`} />
+          </g>
+        )
+      }))}
+    </svg>
+  )
+}
+
 function Toks({ toks, plot }: { toks: Tok[]; plot: ReactNode }) {
   return <>{toks.map((k, i) => {
     switch (k.t) {
@@ -110,12 +132,13 @@ function Op({ text, plotReq, live }: { text: string; plotReq: Record<string, unk
 
 /** A reply as Slack shows it: its sender (name + avatar, or emoji icon) over its body. */
 function Reply({ r, changed }: { r: PreviewReply | RenderedReply; changed?: boolean }) {
-  const icon = r.icon_url ? <img src={r.icon_url} alt="" /> : <span className="emoji-icon"><Toks toks={tokenize(r.icon_emoji ?? '')} plot={null} /></span>
+  const cells = 'icon_cells' in r ? r.icon_cells : undefined
+  const icon = cells ? <CollageAvatar cells={cells} /> : r.icon_url ? <img src={r.icon_url} alt="" /> : <span className="emoji-icon"><Toks toks={tokenize(r.icon_emoji ?? '')} plot={null} /></span>
   return (
     <div className={`slack-reply${changed ? ' changed' : ''}`}>
       <div className="avi">{icon}</div>
       <div><div className="sender"><Toks toks={tokenize(r.username)} plot={null} /></div>
-        <div className="body"><Toks toks={tokenize(r.body)} plot={null} /></div></div>
+        <div className="body">{r.body.split('\n').map((l, i) => <div key={i}><Toks toks={tokenize(l)} plot={null} /></div>)}</div></div>
     </div>
   )
 }
@@ -176,6 +199,8 @@ function Controls({ p, set }: { p: DigestParams; set: (p: DigestParams) => void 
         <option value="warning">⚠️ over the alert share</option><option value="circles">🔴🟠🟡🟢 by fill</option>{POOL_MARK_OPTIONS}</select></label>
       <label>reply headline <select value={p.replyTotal === undefined ? '' : p.replyTotal ? 'total' : 'primary'} onChange={e => set({ ...p, replyTotal: e.target.value === '' ? undefined : e.target.value === 'total' })}>
         <option value="">as rendered</option><option value="primary">primary</option><option value="total">every bucket</option></select></label>
+      <label><input type="checkbox" checked={!!p.replyLines} onChange={e => set({ ...p, replyLines: e.target.checked || undefined })} /> reply pools on their own lines</label>
+      <label><input type="checkbox" checked={!!p.replyCollage} onChange={e => set({ ...p, replyCollage: e.target.checked || undefined })} /> reply avatar: collage of pools</label>
     </div>
   )
 }
@@ -312,7 +337,7 @@ function Bundle({ b, cands, setCands }: { b: PreviewBundle; cands: string[]; set
   const live = b.op.split('\n').map(norm)
   const [form, setForm] = useState({ params: posted, quota_marks: 'runway' })
   const replyCfg = b.rows.template === 'cw' ? b.reply : null
-  const candReplies = (p: DigestParams) => replyCfg ? renderReplies(b.rows as CwRows, b.cfg, replyCfg, b.variant, { marks: p.replyMarks, total: p.replyTotal }) : null
+  const candReplies = (p: DigestParams) => replyCfg ? renderReplies(b.rows as CwRows, b.cfg, replyCfg, b.variant, { marks: p.replyMarks, total: p.replyTotal, lines: p.replyLines, collage: p.replyCollage }) : null
   const rendered = candReplies(DEFAULT_PARAMS)
   const repliesMatch = !!rendered && JSON.stringify(rendered) === JSON.stringify(b.replies)
   return <>

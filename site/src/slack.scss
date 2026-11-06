@@ -22,8 +22,8 @@
     h3 { font-size: 13.5px; margin: 0 0 6px; }
     > button { font-size: 12px; margin-top: 4px; } }
   .slack-reply { display: flex; gap: 8px; font-size: 13px; line-height: 1.45; padding: 5px 0; overflow-wrap: anywhere;
-    .avi { flex: none; width: 28px; height: 28px; border-radius: 5px; overflow: hidden; display: grid; place-items: center;
-      img { width: 100%; height: 100%; object-fit: cover; } .emoji-icon { font-size: 20px; } }
+    .avi { flex: none; width: 32px; height: 32px; border-radius: 5px; overflow: hidden; display: grid; place-items: center;
+      img, .collage { width: 100%; height: 100%; object-fit: cover; } .emoji-icon { font-size: 20px; } }
     .sender { font-weight: 700; }
     .arrow { display: inline-block; font-weight: 700; margin-right: 2px;
       &.up { color: #e5534b; } &.down { color: #2fa84f; } &.flat { color: var(--ink-2); } } }

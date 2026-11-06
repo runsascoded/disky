@@ -52,6 +52,10 @@ export interface DigestParams {
   replyMarks?: ReplyMarks
   /** cw, the page only: its replies' headline over every bucket, or the primary; absent: as rendered. */
   replyTotal?: boolean
+  /** cw, the page only: each pool on its own line in a reply. */
+  replyLines?: boolean
+  /** cw, the page only: a reply's sender avatar is one tile per pool. */
+  replyCollage?: boolean
 }
 
 export const DEFAULT_PARAMS: DigestParams = {

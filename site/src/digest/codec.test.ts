@@ -42,9 +42,9 @@ describe('digest params in a URL', () => {
 
 describe('the page\'s reply fields', () => {
   it('round-trip, and never reach the job', () => {
-    const p: DigestParams = { ...DEFAULT_PARAMS, quotas: 'arrow-disc', replyMarks: 'arrow-chip', replyTotal: true }
-    expect([encodeParams(p), decodeParams('qb,ms,rt'), jobParams('qr,pp,ms,rt')]).toEqual(['qb,ms,rt', p, 'qr,pp'])
-    const errs = ['qb', 'ms', 'rt'].map(s => {
+    const p: DigestParams = { ...DEFAULT_PARAMS, quotas: 'arrow-disc', replyMarks: 'arrow-chip', replyTotal: true, replyLines: true, replyCollage: true }
+    expect([encodeParams(p), decodeParams('qb,ms,rt,ul,sc'), jobParams('qr,pp,ms,rt,ul,sc')]).toEqual(['qb,ms,rt,ul,sc', p, 'qr,pp'])
+    const errs = ['qb', 'ms', 'rt', 'ul', 'sc'].map(s => {
       try {
         parseParams(s)
         return null
@@ -52,6 +52,6 @@ describe('the page\'s reply fields', () => {
         return (e as Error).message
       }
     })
-    expect(errs).toEqual(['qb', 'ms', 'rt'].map(s => `digest params: "${s}" is for the preview page only`))
+    expect(errs).toEqual(['qb', 'ms', 'rt', 'ul', 'sc'].map(s => `digest params: "${s}" is for the preview page only`))
   })
 })

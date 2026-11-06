@@ -9,7 +9,7 @@ import * as gcs from './gcs'
 export * from './common'
 export type { CwRows, CwScan } from './cw'
 export { replies } from './cwReply'
-export type { RenderedReply, ReplyCfg, ReplyMarks } from './cwReply'
+export type { RenderedReply, ReplyCell, ReplyCfg, ReplyMarks } from './cwReply'
 export type { GcsRow, GcsRows } from './gcs'
 
 export type DigestRows = cw.CwRows | gcs.GcsRows
