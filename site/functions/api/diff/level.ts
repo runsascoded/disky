@@ -186,7 +186,7 @@ async function levelsOf(ctx0: Ctx, member?: MemberLevel): Promise<Response> {
       if (refused) return refused
       if (e instanceof DiffUnavailable) return new Response(e.message, { status: 409 })
       const msg = String((e as Error).message ?? e)
-      if (msg.startsWith('query too wide')) return new Response(msg, { status: 413 })
+      if (/^(query|lookup) too wide/.test(msg)) return new Response(msg, { status: 413 })
       if (/D1_ERROR|internal error/i.test(msg)) return new Response(`index backend unavailable, retry: ${msg}`, { status: 503, headers: { 'retry-after': '5' } })
       return new Response(`level diff failed: ${msg}`, { status: 500 })
     }
