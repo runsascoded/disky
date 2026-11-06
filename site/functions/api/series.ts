@@ -13,7 +13,7 @@
  * filled in from the snapshot dir: the chart keeps any history that never
  * got (or lost) its tiers, rather than showing a gap.
  */
-import { hiddenNotFound, isHidden, restrictedForbidden, restrictionFor } from '../_lib/restrict.js'
+import { hiddenNotFound, isHidden, restrictedForbidden, restrictionFor, scopeReachesHidden } from '../_lib/restrict.js'
 import { type Ctx, type Identity, json, requireScope, requireViewer } from '../_lib/auth.js'
 import { snapshotsPrefix, traceJoins } from '../_lib/shared.js'
 import { ivRefusal, ivRetry, type Lens, pathGens, withPathStore, pathScans, servedStore, storeReady } from '../_lib/index.js'
@@ -181,6 +181,10 @@ export async function seriesRead(ctx: SeriesCtx, gate: (ctx: SeriesCtx) => Promi
   const restriction = restrictionFor(gated, env)
   if (restriction && [path, ...paths].some(p => isHidden(p, restriction))) return hiddenNotFound()
   const lensRaw = url.searchParams.get('lens')
+  const owner = parseOwner(url.searchParams.get('o'))
+  const classes = parseClasses(url.searchParams.get('cl'))
+  // An owner, class or lens scope at or above a hidden dir: `/api/subtree`'s refusal.
+  if (restriction && (lensRaw || owner || classes) && [path, ...paths].some(p => scopeReachesHidden(p, restriction))) return restrictedForbidden()
   let lens: Lens | undefined
   if (lensRaw) {
     if (env.STORE_KEY) return json({ error: LENS_PRIMARY_ONLY }, 400)
@@ -192,8 +196,6 @@ export async function seriesRead(ctx: SeriesCtx, gate: (ctx: SeriesCtx) => Promi
     lens = resolved
   }
   const lensTag = lensParam(lens)
-  const owner = parseOwner(url.searchParams.get('o'))
-  const classes = parseClasses(url.searchParams.get('cl'))
   // `q=` (`qs=`): the map's filter. A single literal on a scan of the static name index's generation is
   // answered from it — Σ that scan's own match roots under `path` (`staticFilter.ts`); other scans and
   // other queries take `paths=`, the current scan's match roots, as before. A view root the query

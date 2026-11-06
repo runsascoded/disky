@@ -12,7 +12,7 @@
  * immutable per (from, to, path, budget, scope) plus the ledger head under a
  * user lens, and edge-cached accordingly.
  */
-import { filterJson, hiddenNotFound, isHidden, restrictDiff, restrictedForbidden, restrictionFor } from '../_lib/restrict.js'
+import { filterJson, hiddenNotFound, isHidden, restrictDiff, restrictedForbidden, restrictionFor, scopeReachesHidden } from '../_lib/restrict.js'
 import { type Env, type Identity, json, presentsCredentials, requireViewer } from '../_lib/auth.js'
 import { DESCENT_V } from '../_lib/diffDescent.js'
 import { DiffUnavailable, intervalsOn, ivRefusal, ivRetry, pathGens, withPathStore, storeReady, type Lens } from '../_lib/index.js'
@@ -160,6 +160,8 @@ async function diffGated(
   if (restriction && isHidden(path, restriction)) return hiddenNotFound()
   // A name filter's totals sum every match, hidden ones too (`/api/subtree`'s refusal).
   if (restriction && qp.query) return restrictedForbidden()
+  // An owner, class or lens scope at or above a hidden dir: `/api/subtree`'s refusal.
+  if (restriction && (lens || owner || classes) && scopeReachesHidden(path, restriction)) return restrictedForbidden()
   const out = (res: Response | Promise<Response>) =>
     restriction ? Promise.resolve(res).then(r => filterJson(r, (b: Parameters<typeof restrictDiff>[0]) => restrictDiff(b, restriction))) : res
   // Both ends must be indexed scans: a miss is a 404, never another scan.
