@@ -1,6 +1,6 @@
 import { beforeAll, describe, expect, it, vi } from 'vitest'
 import type { Env } from './auth'
-import { sqliteD1 } from './testD1'
+import { sqliteD1, type Sqlite, withLedger } from './testD1'
 import { type D1Variant, readJson, seedGeneration } from './testStore'
 import { buildDiff, type Diff, type DiffRow } from './view'
 
@@ -22,14 +22,33 @@ const B = '2026-09-29T0001'
 const MiB = 1 << 20
 let env: Env
 
+const FILES = (scan: string) => ({ path: { parquet: `v2-diff/${scan}/path-index.parquet`, groups: `v2-diff/${scan}/path-index.groups.json` }, bysize: { parquet: `v2-diff/${scan}/path-index-bysize.parquet`, groups: `v2-diff/${scan}/path-index-bysize.groups.json` } })
+/** A D1 holding the fixture's two scans as dates `a` and `b`, and what `more` adds. */
+const seeded = async (a: string, b: string, more?: (raw: Sqlite) => void): Promise<Env> => {
+  const { db, raw } = await sqliteD1()
+  for (const [scan, date] of [['a', a], ['b', b]]) seedGeneration(raw, { date, gen: `g${scan}`, dir: `cw-l2/${date}/index/g${scan}`, variants: await readJson<Record<string, D1Variant>>(`v2-diff/${scan}/d1.json`), files: FILES(scan) })
+  more?.(raw)
+  return { DB: db, ROOT_LABEL: 'root', GCS_HMAC_KEY_ID: 'k', GCS_HMAC_SECRET: 's' } as Env
+}
+
 beforeAll(async () => {
   ;(globalThis as unknown as { caches: unknown }).caches = { default: { match: async () => undefined, put: async () => {} } }
-  const { db, raw } = await sqliteD1()
-  const files = (scan: string) => ({ path: { parquet: `v2-diff/${scan}/path-index.parquet`, groups: `v2-diff/${scan}/path-index.groups.json` }, bysize: { parquet: `v2-diff/${scan}/path-index-bysize.parquet`, groups: `v2-diff/${scan}/path-index-bysize.groups.json` } })
-  seedGeneration(raw, { date: A, gen: 'ga', dir: `cw-l2/${A}/index/ga`, variants: await readJson<Record<string, D1Variant>>('v2-diff/a/d1.json'), files: files('a') })
-  seedGeneration(raw, { date: B, gen: 'gb', dir: `cw-l2/${B}/index/gb`, variants: await readJson<Record<string, D1Variant>>('v2-diff/b/d1.json'), files: files('b') })
-  env = { DB: db, ROOT_LABEL: 'root', GCS_HMAC_KEY_ID: 'k', GCS_HMAC_SECRET: 's' } as Env
+  env = await seeded(A, B)
 })
+
+/** `env`'s D1 answering no metadata (`rg_json`) for the row groups of `date`'s `variant` while `on()`: the span query
+ *  before it still returns them, as when a scan's footer rows are deleted between a read's two statements. Patched in
+ *  place (an open handle holds the `env` it was opened with); the returned function puts `prepare` back. */
+const withoutGroupJson = (env: Env, date: string, variant: string, on: () => boolean): (() => void) => {
+  const db = env.DB as unknown as { prepare: (sql: string) => { bind: (...args: unknown[]) => unknown } }
+  const prepare = db.prepare
+  db.prepare = (sql: string) => {
+    const st = prepare(sql)
+    if (!sql.startsWith('SELECT rg, rg_json FROM index_row_groups')) return st
+    return { bind: (...args: unknown[]) => (on() && args[0] === date && args[1] === variant ? { all: async () => ({ results: [], success: true, meta: {} }) } : st.bind(...args)) }
+  }
+  return () => { db.prepare = prepare }
+}
 
 const row = (p: string, d: number, k: DiffRow['k'], s: DiffRow['s'], a: number, b: number, oa: number, ob: number, more: Pick<DiffRow, 'x' | 'l'> = {}): DiffRow =>
   ({ p, d, k, s, a: a * MiB, b: b * MiB, oa, ob, ...more })
@@ -73,9 +92,9 @@ const swapped = (d: Diff): Diff => ({
   total_a: d.total_b, total_b: d.total_a, objects_a: d.objects_b, objects_b: d.objects_a,
 })
 
-describe('a diff\'s lookups', () => {
-  const base = { path: 'bk', w: 1280, h: 800, minArea: 12, atten: 2, top: 500, threshold: 16 * MiB }
+const base = { path: 'bk', w: 1280, h: 800, minArea: 12, atten: 2, top: 500, threshold: 16 * MiB }
 
+describe('a diff\'s lookups', () => {
   it('a deleted subtree costs one lookup: what is under it is drawn with its sizes, unread', async () => {
     const rounds: number[] = []
     const d = await buildDiff(env, { ...base, from: A, to: B, trace: (n, v) => { if (n === 'rounds') rounds.push(v) } })
@@ -118,9 +137,50 @@ describe('a diff\'s lookups', () => {
     })
   })
 
+  it('a row group whose metadata is missing fails the diff: no name is answered absent by a group that was not read', async () => {
+    // B's `path` sort loses its group's metadata once the walk starts (the span query still finds the group): the
+    // lookups' reads decoded nothing. Taken as "no row", every name A drew was absent on B, and `shrink` (8 MiB there)
+    // with what is under it read as removed.
+    let walking = false
+    const restore = withoutGroupJson(env, B, 'path', () => walking)
+    const got = await buildDiff(env, { ...base, from: A, to: B, trace: n => { if (n === 'rounds') walking = true } })
+      .then(d => d.rows.filter(r => r.p.startsWith('shrink')), err => `${(err as Error).name}: ${(err as Error).message}`)
+      .finally(restore)
+    expect(got).toEqual(`GroupUnread: row group 0 of ${B}'s \`path\` sort has no metadata: its rows were not read`)
+  })
+
   it('a budget of exactly the names read is the whole answer', async () => {
     // Six: the level-by-level walk spent them on `del`'s subtree (13 names one scan drew) and folded the rest.
     expect(await buildDiff(env, { ...base, from: A, to: B, lookupCap: 6 })).toEqual(WHOLE)
     expect(await buildDiff(env, { ...base, from: A, to: B, lookupCap: 1e9 })).toEqual(WHOLE)
+  })
+})
+
+// Under a user's lens a lookup reads that user's rows (here the `path` sort filtered to her: the fixture attributes
+// nothing to anyone), so "no row" is her absence at the path, not the path's: what the ledger assigns her under it is
+// still hers. Carol is assigned `keep/` and the object `shrink/a`: her view draws `shrink` and `shrink/a` on A (100
+// MiB), and on B (8 MiB) folds them under the floor.
+describe('a lens diff\'s lookups', () => {
+  const LA = '2026-10-01T0001'
+  const LB = '2026-10-02T0001'
+  const lens = { key: 'carol' }
+  let lensEnv: Env
+  beforeAll(async () => {
+    lensEnv = await seeded(LA, LB, raw => {
+      withLedger(raw)
+      const assigned: [string, string][] = [['s3://bk/keep/', 'NULL'], ['s3://bk/shrink/a', "'object'"]]
+      raw.exec(assigned.map(([prefix, kind], i) =>
+        `INSERT INTO actions (id, actor, ts, scan, pattern, set_owner, owner, kind) VALUES (${i + 1}, 'ann', 1, '${LA}', '${prefix}', 1, 'carol', ${kind});` +
+        `INSERT INTO owner_prefixes (action_id, prefix, owner, ts, kind) VALUES (${i + 1}, '${prefix}', 'carol', 1, ${kind});`).join('\n'))
+    })
+  })
+
+  it('a row group whose metadata is missing fails a lens diff too (its lookups read per name)', async () => {
+    let walking = false
+    const restore = withoutGroupJson(lensEnv, LB, 'path', () => walking)
+    const got = await buildDiff(lensEnv, { ...base, from: LA, to: LB, lens, trace: n => { if (n === 'rounds') walking = true } })
+      .then(d => d.rows.filter(r => r.p === 'shrink/a'), err => `${(err as Error).name}: ${(err as Error).message}`)
+      .finally(restore)
+    expect(got).toEqual(`GroupUnread: row group 0 of ${LB}'s \`path\` sort has no metadata: its rows were not read`)
   })
 })

@@ -29,7 +29,7 @@
  * `f = n_children(P) − kept` — objects and dirs alike.
  */
 import type { Env } from './auth.js'
-import { asOfScans, coarsenRects, coarsenSizeRects, folded, type IndexHandle, isStore, ivHeldDates, ivLastRead, type Lens, openIndex, pathStoreKey, perScan, planRects, slices, planSizeRects, readAsks, readFits, readRects, readRows, readRootHistoryRows, readSizeRects, type Rect, type Row, sizeVariant, type Span, TooWide, type Trace, withTrace } from './index.js'
+import { asOfScans, coarsenRects, coarsenSizeRects, folded, type IndexHandle, isStore, ivHeldDates, ivLastRead, type Lens, openIndex, pathStoreKey, perScan, planRects, slices, planSizeRects, readAsks, readFits, readRects, readRows, readRootHistoryRows, readSizeRects, readWhole, type Rect, type Row, sizeVariant, type Span, TooWide, type Trace, withTrace } from './index.js'
 import { type FoldedLens, ownerLens, poolLens } from './owners.js'
 import { type ClassScope, classRow, nameFilter, type NamePred, ownerKey, ownerOk, type OwnerScope } from './scope.js'
 import { filterThreshold, looseThreshold, matchRoots, pickTier, rebasedThreshold, rootRects } from './filter.js'
@@ -2703,17 +2703,19 @@ export async function buildDiff(env0: Env, o: DiffOpts): Promise<Diff> {
   const kidsA = va ? kidsIndex(va.kept, path) : new Map<string, string[]>()
   const kidsB = vb ? kidsIndex(vb.kept, path) : new Map<string, string[]>()
 
-  // Point lookups on the floor-free tier, memoized per side.
+  // Point lookups on the floor-free tier, memoized per side. They read whole (`readWhole`): a lookup that finds no
+  // row answers "absent" for the path and everything under it (`gone`), so a row group it selected and could not
+  // read fails the diff (`GroupUnread`) — left out, as other reads leave it, it would draw what is there as removed.
   const fineOf = new Map<string, Promise<IndexHandle>>()
   const fine = (date: string) => {
     let h = fineOf.get(date)
-    if (!h) fineOf.set(date, (h = (lens ? lensSort(env, date) : Promise.resolve('path')).then(s => openFine(env, date, s, lens)).then(x => withTrace(x, tr))))
+    if (!h) fineOf.set(date, (h = (lens ? lensSort(env, date) : Promise.resolve('path')).then(s => openFine(env, date, s, lens)).then(x => readWhole(withTrace(x, tr)))))
     return h
   }
   const fineAllOf = new Map<string, Promise<IndexHandle>>()
   const fineAll = (date: string) => {
     let h = fineAllOf.get(date)
-    if (!h) fineAllOf.set(date, (h = openFine(env, date, 'path')))
+    if (!h) fineAllOf.set(date, (h = openFine(env, date, 'path').then(readWhole)))
     return h
   }
   let lookups = 0
