@@ -28,10 +28,11 @@ export const DEPLOYMENT_ROUTES: Record<string, DeploymentCase[]> = {
   'auth/oa/callback.ts': [get('/auth/oa/callback', 'public', OA_LOGIN), get('/auth/oa/callback', 'unconfigured')],
   // Whether the wall shows the button.
   'auth/oa/client.ts': [get('/auth/oa/client', 'public')],
-  // A deletion run's unfurl for a crawler: its state and object counts, no prefixes, sizes or names.
+  // A deletion run's unfurl: the shell is public, but its stamp is the run's (state and object counts, no prefixes,
+  // sizes or names) only to a signed-in viewer; anyone else gets one fixed stamp, whether the id exists or not.
   'runs/[[id]].ts': [get('/runs/plan-1/20261104T125245Z', 'public')],
-  // That run's card, a branch of the card route the shared table declares: counts only, for any fetcher (`_lib/og/run.ts`).
-  'og/[[path]].ts': [get('/og/map.png', 'public'), get('/og/run.png?id=plan-1/20261104T125245Z', 'public')],
+  // That run's card, a branch of the card route the shared table declares: counts only, for a signed-in viewer (`_lib/og/run.ts`).
+  'og/[[path]].ts': [get('/og/map.png', 'public'), get('/og/run.png?id=plan-1/20261104T125245Z', 'viewer')],
 }
 
 /**
@@ -46,7 +47,7 @@ export const DEPLOYMENT_RESTRICTED: Record<string, string> = {
   'GET /auth/oa': 'anonymous',
   'GET /auth/oa/callback': 'anonymous',
   'GET /auth/oa/client': 'anonymous',
-  // A deletion run's unfurl and card: its state and counts, for any fetcher; no prefixes, sizes or names.
-  'GET /runs/plan-1/20261104T125245Z': 'anonymous',
-  'GET /og/run.png': 'anonymous',
+  // A deletion run's unfurl and card: its state and counts, for a link's viewer; no prefixes, sizes or names.
+  'GET /runs/plan-1/20261104T125245Z': 'pathless',
+  'GET /og/run.png': 'pathless',
 }
