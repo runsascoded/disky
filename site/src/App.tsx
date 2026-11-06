@@ -1468,7 +1468,9 @@ function AppContent() {
             band={band}
             onBand={setBand}
             stageHere={!fq}
-          />{mapStale ? <Busy label={mapRetrying ?? 'loading view…'} /> : mapBusy ? <Busy corner label="filling in…" /> : null}</div>
+            // In the canvas's corner, not the widget's: the legend row above the canvas spans the widget at phone width.
+            mapOverlay={!mapStale && mapBusy ? <Busy corner label="filling in…" /> : undefined}
+          />{mapStale && <Busy label={mapRetrying ?? 'loading view…'} />}</div>
           {/* A drilled directory with nothing drawable under it: the scope came
               up empty, or (a v1 scan) it holds only objects or directories
               under this view's floor. Say so rather than show a blank canvas. */}
