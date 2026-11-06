@@ -10,7 +10,7 @@ import { parseNote } from '../_lib/annotationShape'
 const NOW = Date.UTC(2026, 9, 18, 12, 0, 0)
 const T = NOW / 1000
 const HOST = 'https://site.example.test'
-const STORES_JSON = JSON.stringify({ meta: { scope: 'admin', vars: { ROOT_LABEL: 'our storage' } } })
+const STORES_JSON = JSON.stringify({ meta: { scope: 'admin', vars: { ROOT_LABEL: 'our storage' } }, all: { union: ['primary', 'meta'] } })
 
 beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(NOW) })
 afterEach(() => { vi.useRealTimers() })
@@ -34,7 +34,9 @@ async function setup() {
   }
   const edits = () => (raw.prepare("SELECT tbl, pk, action, who, ts, old_json, new_json FROM admin_edits WHERE tbl = 'chart_annotations' ORDER BY id").all() as { tbl: string; pk: string; action: string; who: string; ts: number; old_json: string | null; new_json: string | null }[])
     .map(r => ({ ...r, old_json: r.old_json ? JSON.parse(r.old_json as string) : null, new_json: r.new_json ? JSON.parse(r.new_json as string) : null }))
-  return { raw, call, viewer, admin, edits }
+  /** A share link (no email) carrying `scopes`. */
+  const link = async (scopes: string[]) => (await gate.mint({ email: null, scopes, name: 'link', createdBy: 'test', expiresAt: null, maxRedeems: null })).token
+  return { raw, call, viewer, admin, edits, link }
 }
 
 const NOTE = { id: 1, at: '2026-10-13', text: 'Scope change: oa-gcs-usage-dvx left the meta store', author: 'ops@example.test', created: T, updated: T, path: null, url: null, kind: null }
@@ -112,6 +114,47 @@ describe('/api/annotations', () => {
       [404, { error: 'no such annotation' }],
       [404, { error: 'unknown store \'nope\'' }],
     ])
+  })
+
+  // specs/path-scopes.md: a link's `<tag>:hide:<prefix>` shows `<prefix>` as one cell and nothing strictly below it.
+  describe('a path-restricted link', () => {
+    const note = (id: number, path: string | null) => ({ ...NOTE, id, text: `n${id}`, path })
+    const NOTES = [note(1, null), note(2, 'bk/open/x'), note(3, 'bk/secret'), note(4, 'bk/secret/plans/q4'), note(5, 'bk/secretive')]
+    async function withNotes(store = '') {
+      const s = await setup()
+      for (const n of NOTES) await s.call('POST', store, { token: s.admin, body: { at: n.at, text: n.text, ...(n.path ? { path: n.path } : {}) } })
+      return s
+    }
+    const ids = ([status, body]: readonly [number, unknown]) => [status, (body as { annotations: { id: number }[] }).annotations.map(a => a.id)]
+
+    it('reads no note pinned strictly below a hidden path: the store’s own, the hidden dir’s and its lookalike’s stay', async () => {
+      const { call, link } = await withNotes()
+      expect([
+        await call('GET', '', { token: await link(['cw:read', 'cw:hide:bk/secret']) }),
+        await call('GET', '', { token: await link(['cw:read']) }),
+      ]).toEqual([
+        [200, { annotations: [NOTES[0], NOTES[1], NOTES[2], NOTES[4]], applied: true }],
+        [200, { annotations: NOTES, applied: true }],
+      ])
+    })
+
+    it('a restriction is its store’s: another store’s tag hides nothing here, and a secondary store’s notes follow its own', async () => {
+      const { call, link } = await withNotes('?store=meta')
+      const metaOnly = await link(['cw', 'admin', 'meta:hide:bk/secret'])
+      const primaryOnly = await link(['cw', 'admin', 'cw:hide:bk/secret'])
+      expect([
+        ids(await call('GET', '?store=meta', { token: metaOnly })),
+        ids(await call('GET', '?store=meta', { token: primaryOnly })),
+      ]).toEqual([[200, [1, 2, 3, 5]], [200, [1, 2, 3, 4, 5]]])
+    })
+
+    it('a union view’s notes: hidden under any store’s restriction (a note there is some member’s path)', async () => {
+      const { call, link } = await withNotes('?store=all')
+      expect([
+        ids(await call('GET', '?store=all', { token: await link(['cw:read', 'meta:hide:bk/secret']) })),
+        ids(await call('GET', '?store=all', { token: await link(['cw:read']) })),
+      ]).toEqual([[200, [1, 2, 3, 5]], [200, [1, 2, 3, 4, 5]]])
+    })
   })
 
   it('a D1 without the table (migration not applied): GET is an empty list, a write a 503', async () => {

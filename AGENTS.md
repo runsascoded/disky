@@ -241,6 +241,8 @@ One gate (`_lib/auth.ts`, `@open-athena/auth` over D1): `identify` → `Identity
 - `/api/me` — the caller's canonical owner id (`_lib/me.ts`): what `user=me` / `lens=user:me` / `owner: '@me'` resolve to
 - `/a/<sha256>.<ext>` — **public, no gate**: an activity post's sender face (`_lib/publicAvatar.ts`), only bytes a Slack / Discord post stored in `public_avatars`, named by their own SHA-256 (a profile's or grant's face, else an identicon seeded by an HMAC of the actor under `SESSION_SECRET`); anything else 404s
 
+**A path-restricted link** (a grant carrying `<tag>:hide:<prefix>`, `_lib/restrict.ts`): every route it can reach says what it gets in `functions/gates.test.ts` `RESTRICTED`. Blocked (`RESTRICTED_BLOCKED`, or by the route): whatever can't be filtered, including a name filter (`q=` on `/api/subtree`, `/api/diff`, `/api/series`: its sums count hidden hits). Filtered: the plain views, `/api/annotations`, `/data/rules.json`.
+
 ## Development
 
 During ongoing implementation, treat a concrete bug report about the code we own as an implied request to fix it: reproduce, implement, verify, and coordinate the deployment handoff without requiring a second prompt. Honor explicitly read-only requests. Code-fix authority does not imply unrelated infrastructure applies, permission changes, or another session's live cutover. Report separately what is fixed locally and what is actually deployed.

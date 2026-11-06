@@ -1,5 +1,6 @@
-import type { Param } from 'use-prms'
+import { enumParam, type Param } from 'use-prms'
 import type { HistoryPoint } from './runHistory'
+import { STATUS_FILTERS } from './scanRunsModel'
 
 const { ceil, floor, log10, max, min, pow, round } = Math
 export interface RunWindow { end: number | null; duration: number | null }
@@ -50,6 +51,10 @@ export const runSpanParam: Param<RunSpan | null> = {
     return a != null && b != null && a < b ? [a, b] : null
   },
 }
+/** /scans' kind filter (`?k=<kind>`: `scan`, `merge`, …); absent: every kind. */
+export const runKindParam: Param<string> = { encode: k => k || undefined, decode: s => s ?? '' }
+/** /scans' status filter (`?st=<key>`, a `STATUS_FILTERS` key); absent, or a key it doesn't have: every status. */
+export const runStatusParam: Param<string> = enumParam<string>('', ['', ...STATUS_FILTERS.map(f => f.key)])
 /** Whether a run started in the window (its `[from, to]` minutes, inclusive: the stamps drop seconds). */
 export const inSpan = (w: RunSpan | null, ts: number | null | undefined): boolean => !w || (ts != null && ts >= w[0] && ts < w[1] + 60)
 

@@ -12,13 +12,13 @@
  * immutable per (from, to, path, budget, scope) plus the ledger head under a
  * user lens, and edge-cached accordingly.
  */
-import { filterJson, hiddenNotFound, isHidden, restrictDiff, restrictionFor } from '../_lib/restrict.js'
+import { filterJson, hiddenNotFound, isHidden, restrictDiff, restrictedForbidden, restrictionFor } from '../_lib/restrict.js'
 import { type Env, type Identity, json, presentsCredentials, requireViewer } from '../_lib/auth.js'
 import { DESCENT_V } from '../_lib/diffDescent.js'
 import { DiffUnavailable, intervalsOn, ivRefusal, ivRetry, pathGens, withPathStore, storeReady, type Lens } from '../_lib/index.js'
 import { hasLedger, ledgerHead } from '../_lib/ledger.js'
 import { classKey, parseClasses, parseOwner, queryParam, QueryError } from '../_lib/scope.js'
-import { ATTEN_DEFAULT, buildDiff, type DiffRow, FILTER_VIEW_V, LensUnavailable, MIN_AREA_DEFAULT, NotFound, QUANT, readRootAgg, WALK_V } from '../_lib/view.js'
+import { ATTEN_DEFAULT, buildDiff, type DiffRow, FILTER_VIEW_V, LensUnavailable, MIN_AREA_DEFAULT, NotFound, QUANT, readRootAgg, scopedTag, WALK_V } from '../_lib/view.js'
 import { hexNote, hexQuery, indexedGate, staticTag } from '../_lib/staticFilter.js'
 import { FilterRejected, indexedOnly, pathTerms, rejectBody, rejectQuery, rejectScope } from '../_lib/indexedOnly.js'
 import { cacheEnvTag, cacheKeyFor, cacheMatch, cacheStore, isPartial, keepFor, serverTiming, UPGRADE_PHASE2_MS, UPGRADE_SEARCH_LIMITS, UPGRADE_WALK_MS, upgradePartial } from '../_lib/edgeCache.js'
@@ -136,6 +136,8 @@ async function diffGated(
       `&o=${rawOwner ?? ''}&cl=${classKey(classes)}&qs=${query ? qp.syntax : ''}&q=${encodeURIComponent(query ? qRaw : '')}&head=${head}&s=${summary ? 1 : 0}&D=${depth ?? ''}&g=${g}&st=${staticTag(ctx.env, query)}${query ? `&fv=${FILTER_VIEW_V}` : ''}` +
       // The walk's answer version (a summary has no walk: its key stays).
       (summary ? '' : `&wv=${WALK_V}`) +
+      // A scoped read's answer version, where the diff is one (absent otherwise, so no other key moves).
+      scopedTag(ctx.env, { lens, owner, classes, query }) +
       // A union root's member diff: the union's threshold (absent otherwise, so no other key moves).
       (member?.threshold !== undefined ? `&T=${member.threshold}` : '') + (descent && ctx.env.DIFF_DESCENT === '1' ? `&dm=d${DESCENT_V}` : ''),
     storeKey(ctx.env),
@@ -156,6 +158,8 @@ async function diffGated(
   // and every body (cached or fresh) is filtered on the way out.
   const restriction = restrictionFor(gated, ctx.env)
   if (restriction && isHidden(path, restriction)) return hiddenNotFound()
+  // A name filter's totals sum every match, hidden ones too (`/api/subtree`'s refusal).
+  if (restriction && qp.query) return restrictedForbidden()
   const out = (res: Response | Promise<Response>) =>
     restriction ? Promise.resolve(res).then(r => filterJson(r, (b: Parameters<typeof restrictDiff>[0]) => restrictDiff(b, restriction))) : res
   // Both ends must be indexed scans: a miss is a 404, never another scan.

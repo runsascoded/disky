@@ -81,6 +81,9 @@ export interface Row {
   /** An interval-store row's validity `[vf, vt)` (epoch seconds of scans). */
   vf?: number
   vt?: number
+  /** A row of an interval store's total-keyed slice sort (`slices-bytotal`): its path's total, every slice's bytes,
+   *  for as long as the row stands (a slice's version is split where its path's total changes). */
+  tot?: number
   /** An interval-store row's cumulative churn (bytes added + removed under the path, scan by scan) at its `vf`, and on
    *  a closed version at its `vt` (`interval_churn.py`); absent on a generation without churn. */
   churn_cum?: number | null
@@ -1233,6 +1236,8 @@ export const V1_ROW_COLUMNS = ['path', 'depth', 'usr', 'b', 'o', 'wts', 'wb', 'c
  * the site, so a deployment that names its classes renames them here and there only. */
 export const IV_CLASS_COLS = { 2: 'nearline_bytes', 3: 'coldline_bytes', 4: 'archive_bytes' } as const
 export const IV_ROW_COLUMNS = ['depth', 'path', 'usr', 'vf', 'vt', 'kind', 'size', 'n_files', 'n_children', 'n_desc', 'mtime', 'wts', 'wb', IV_CLASS_COLS[2], IV_CLASS_COLS[3], IV_CLASS_COLS[4], 'us', 'last_read']
+/** A total-keyed slice sort's own column (`Row.tot`), projected with the rest where the sort has it. */
+export const IV_TOTAL_COL = 'tot'
 /** An interval store's churn columns (`interval_churn.py`), projected only by a read that asks for them (`withChurn`):
  *  every other read leaves their bytes unfetched. */
 export const IV_CHURN_COLS = ['churn_cum', 'churn_end']
@@ -1260,7 +1265,7 @@ export function rowColumns(version: number, schema: SchemaElement[]): string[] |
   if (version < 2) return null
   if (version >= 3) {
     const have = new Set(schema.slice(1).map(l => l.name))
-    return IV_ROW_COLUMNS.filter(c => have.has(c))
+    return [...IV_ROW_COLUMNS, IV_TOTAL_COL].filter(c => have.has(c))
   }
   const have = new Set(schema.slice(1).map(l => l.name))
   return V2_ROW_COLUMNS.filter(c => have.has(c))
@@ -1726,6 +1731,7 @@ const toRowV3 = (r: Record<string, unknown>): Row => {
     us: r.us == null ? null : usMap(str(r.us), size),
     vf: num(r.vf),
     vt: num(r.vt),
+    ...(IV_TOTAL_COL in r ? { tot: num(r[IV_TOTAL_COL]) } : {}),
     ...('churn_cum' in r ? { churn_cum: r.churn_cum == null ? null : num(r.churn_cum), churn_end: r.churn_end == null ? null : num(r.churn_end) } : {}),
   }
 }
@@ -1917,9 +1923,10 @@ export function groupRows(d: GroupDoc): Record<string, unknown>[] {
   return out
 }
 
-/** A read's cheap test of a row from its raw `depth`, `path` and `size`, true for every row its `keep` holds (and
- *  maybe more): an interval store's group shapes only the rows it passes (`IvGroup.pick`). */
-export type Pre = (depth: number, path: string, size: number) => boolean
+/** A read's cheap test of a row from its raw `depth`, `path` and `size` (and `tot`, on a sort that has it: `Row.tot`),
+ *  true for every row its `keep` holds (and maybe more): an interval store's group shapes only the rows it passes
+ *  (`IvGroup.pick`). */
+export type Pre = (depth: number, path: string, size: number, tot?: number) => boolean
 
 /** An interval store's group as the isolate holds it, every version: its decoded columns, each row shaped only
  *  when a read wants it. A drilled view keeps a few of a size sort's 8K rows per group, and shaping all of them
@@ -1942,15 +1949,16 @@ export class IvGroup {
     return this.rows
   }
   pick(pre: Pre): Row[] {
-    if (this.rows) return this.rows.filter(r => pre(r.depth, r.path, r.size))
+    if (this.rows) return this.rows.filter(r => pre(r.depth, r.path, r.size, r.tot))
     const { cols, v } = this.doc!
     const [d, p, s] = ['depth', 'path', 'size'].map(c => cols.indexOf(c))
     if (d < 0 || p < 0 || s < 0) return this.all()
     const shape = toRow(this.h)
     const [dv, pv, sv] = [v[d], v[p], v[s]]
+    const tv = cols.includes(IV_TOTAL_COL) ? v[cols.indexOf(IV_TOTAL_COL)] : null
     const out: Row[] = []
     for (let i = 0; i < pv.length; i++) {
-      if (!pre(dv[i] as number, pv[i] as string, sv[i] as number)) continue
+      if (!pre(dv[i] as number, pv[i] as string, sv[i] as number, tv ? num(tv[i]) : undefined)) continue
       const r: Record<string, unknown> = {}
       for (let j = 0; j < cols.length; j++) r[cols[j]] = v[j][i]
       out.push(shape(r))
@@ -2507,6 +2515,8 @@ export async function coarsenSizeRects(h: IndexHandle, plan: Span[], rects: Rect
 /** `pre`: a cheap superset of `keep` on a row's raw `depth`, `path` and `size` (`Pre`): an interval store's groups
  *  shape only the rows it passes. */
 /** `versions`: an interval store's rows are returned every version (tiers combined), not only those live at its scan. */
+/** The trace's `held`: the rows the read holds once its groups are decoded (every tier's kept versions, before they
+ *  are combined) — what its memory grows with, where `ngroups` is what it fetched. */
 async function decodeSpans(h: IndexHandle, kept: Span[], keep: (r: Row) => boolean, stop?: () => boolean, pre?: Pre, versions = false): Promise<Row[]> {
   if (!readFits(kept)) throw new Error('query too wide: drill deeper or raise minArea')
   let t0 = now()
@@ -2520,7 +2530,9 @@ async function decodeSpans(h: IndexHandle, kept: Span[], keep: (r: Row) => boole
       return (await readGroupsCached(t, withJson(t, mine, jsons, h.whole), rows => rows.filter(keep), stop, true, pre)).flat()
     })))
     h.trace?.('groups', now() - t0, h.variant)
-    return versions ? combineVersions(got.flat()) : combineLive(h, got.flat())
+    const all = got.flat()
+    h.trace?.('held', all.length)
+    return versions ? combineVersions(all) : combineLive(h, all)
   }
   const jsons = await fetchGroupJson(h, kept.map(s => s.rg))
   h.trace?.('rgjson', now() - t0)
@@ -2528,7 +2540,9 @@ async function decodeSpans(h: IndexHandle, kept: Span[], keep: (r: Row) => boole
   t0 = now()
   const perGroup = await readGroupsCached(h, withJson(h, kept, jsons, h.whole), rows => rows.filter(keep), stop, versions, pre)
   h.trace?.('groups', now() - t0, h.variant)
-  return perGroup.flat()
+  const rows = perGroup.flat()
+  h.trace?.('held', rows.length)
+  return rows
 }
 
 /** A version that opens or closes in `(d1, d2]`. */
@@ -3572,6 +3586,19 @@ async function sizeFloor(h: IndexHandle, rects: Rect[], thrAt: (depth: number) =
   return floor
 }
 
+/** A `tot` test (`readSizeRects`) is the handle's, but `columns` are per tier: a run's total-keyed sort without the
+ *  column would hand `Pre` no total, and every row of the run would silently fail the threshold, close records too.
+ *  That run is broken (`IvTierBroken`: cut out, retried without it, a 503 for its own scans and later runs'), as one whose
+ *  sort won't open is. A base without it (and so no `tot` test) reads per slice, as it did before the re-cut. */
+function assertTiersKeyedOnTotal(h: IndexHandle): void {
+  if (!h.columns?.includes(IV_TOTAL_COL)) return
+  for (const t of h.runs ?? []) {
+    if (t.columns?.includes(IV_TOTAL_COL)) continue
+    const sort = t.dataKey!.slice(t.dataKey!.lastIndexOf('/') + 1).replace(/\.parquet$/, '')
+    throw ivMarkBroken(h.env, t.run!, new Error(`generation ${h.env.INTERVAL_STORE_GEN}, tier ${t.run}: sort \`${sort}\` has no \`${IV_TOTAL_COL}\` column under a base whose sort has it, so its rows can't be tested against a threshold`))
+  }
+}
+
 /** The row groups a `readSizeRects` decodes: every group of the size sort
  * whose path range meets a rect's and whose top bucket clears the read's
  * lowest threshold — the planner's `select_bysize`, exactly. */
@@ -3613,7 +3640,18 @@ export const keyedOnTotal = (h: IndexHandle): boolean => h.schema.some(l => l.na
  * the threshold sums (in whole or in part) below it. A sort cut per slice
  * (before the re-cut) thresholds per slice: drawn dirs short of their small
  * slices, all-small-slice dirs missing. A lens reads one owner's bytes, so
- * its test stays per slice (sound on either cut: `MAX(tot) ≥ MAX(size)`). */
+ * its test stays per slice (sound on either cut: `MAX(tot) ≥ MAX(size)`).
+ *
+ * An interval store's total-keyed rows carry that total (`Row.tot`), and the
+ * test is each row's own, `tot ≥ thrAt(depth)`, as the unsliced sort's is on
+ * `size` — made on the raw columns (`Pre`), so a row under the threshold is
+ * never shaped. Summing the decoded slices there instead held every row of
+ * every planned group until the sums were known (most of a group at a deep
+ * depth's threshold is under it), and counted versions that had ended: a
+ * version's close record carries its `tot`, so it is in a planned group
+ * whenever its version clears the threshold, but not when the version sits
+ * under it in a group planned for its heavier rows — it then read as live
+ * beside the path's current slices, and the path as that much bigger. */
 export async function readSizeRects(
   h: IndexHandle,
   rects: Rect[],
@@ -3623,10 +3661,13 @@ export async function readSizeRects(
   stop?: () => boolean,
 ): Promise<Row[]> {
   if (!rects.length) return []
+  if (!lens) assertTiersKeyedOnTotal(h)
   const kept = plan ?? await planSizeRects(h, rects, thrAt, lens)
   const lensOk = (r: Row) => !lens || r.usr === lens.key
   const at = (depth: number, path: string) => rects.some(q => depth >= q.dLo && depth <= q.dHi && path >= q.pLo && path < q.pHi)
   if (lens || !keyedOnTotal(h)) return decodeSpans(h, kept, r => r.size >= thrAt(r.depth) && at(r.depth, r.path) && lensOk(r), stop, (d, p, sz) => sz >= thrAt(d) && at(d, p))
+  if (h.columns?.includes(IV_TOTAL_COL)) return decodeSpans(h, kept, r => r.tot! >= thrAt(r.depth) && at(r.depth, r.path), stop, (d, p, _sz, tot) => tot! >= thrAt(d) && at(d, p))
+  // A per-scan store's rows (no versions, no `tot` on a `Row`): the slices' sum.
   const rows = await decodeSpans(h, kept, r => at(r.depth, r.path), stop, at)
   const tot = new Map<string, number>()
   const key = (r: Row) => `${r.depth}\0${r.path}`

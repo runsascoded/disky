@@ -67,11 +67,12 @@ def _root(store: Store, prefix: str, mount: str | None) -> str:
 
 #: A served sort's row-group size: the per-scan path store's (decode cost per group is the same).
 SERVED_RG = 8192
-#: A served sort's rows per data page, every column's pages aligned on them, with a page index (ColumnIndex +
+#: A paged served sort's rows per data page, every column's pages aligned on them, with a page index (ColumnIndex +
 #: OffsetIndex) so a reader decodes only the pages its rect and range can touch (specs/diff-progressive.md §3b, 2b.1).
 #: Measured over gcs's 804 level requests: rows decoded fall about linearly with the page (p50 per request 132,717 at
 #: whole 8,192-row groups; 9,216 at 1,024; 2,304 at 256; 1,152 at 128) while the ranged GETs stay ~flat; 256 is 44×
-#: fewer rows than whole groups for 32 pages a group. Read at call time, so a test can cut tiny pages.
+#: fewer rows than whole groups for 32 pages a group. Only the level sort is paged (`served_page_rows`). Read at call
+#: time, so a test can cut tiny pages.
 SERVED_PAGE_ROWS = 256
 #: The range files' row-group size (an intermediate: only `cut` and the verifier read them).
 RANGE_RG = 65536
@@ -834,21 +835,35 @@ def cut_plan(segs: list[tuple[int, int]], rg_rows: int, k: int) -> list[list[tup
     return [p for p in parts if p] or [[]]
 
 
-#: The served sorts' columns with statistics (`_served_writer`): their pages' bounds are the page index's.
+#: The paged sorts' columns with statistics (`_served_writer`): their pages' bounds are the page index's.
 STAT_COLS = ("depth", "path", "vf", "vt", "ts")
+#: The unpaged sorts' columns with statistics: what the served sorts wrote before they had pages.
+UNPAGED_STAT_COLS = ("depth", "vf", "vt")
 
 
-def writer_meta(files: list[str], rg_rows: int, page_rows: int = SERVED_PAGE_ROWS, cols: int | None = None) -> int:
+def served_page_rows(sort: str) -> int | None:
+    """A served sort's rows per page, or None for a sort written without pages (`_served_writer`). Only the level sort is
+    paged: its reader requires a page index (`readLevel`). Every other sort, `path` included, is written as before 2b.1:
+    the Map and the diff walk read whole groups, and the one reader of `path`'s pages (`readChanged`, under
+    `/api/diff/level`) takes each group as it finds it, so files of both kinds serve side by side
+    (specs/diff-progressive.md §3b)."""
+    return SERVED_PAGE_ROWS if sort == LEVEL else None
+
+
+def writer_meta(files: list[str], rg_rows: int, page_rows: int | None = SERVED_PAGE_ROWS, cols: int | None = None) -> int:
     """What a served sort's writer keeps per row group it has written (`tree_mem.group_meta`), on average over the sort's
     groups, which is what the plan charges (all of them, at once): `cols`, the sort's columns (default `files`' widest, the
     range or delta files it's cut from), `rg_rows / page_rows` pages, and the string statistics columns' uncompressed bytes
-    a row over all of `files`: a small file of long paths holds few of the sort's groups."""
+    a row over all of `files`: a small file of long paths holds few of the sort's groups. `page_rows` None (an unpaged
+    sort): no page index and no string statistics, so nothing a page, however many its bytes make."""
     widest, size, rows = 1, 0, 0
     for f in files:
         if not Path(f).exists():
             continue
         md = pq.read_metadata(f)
         widest = max(widest, md.num_columns)
+        if page_rows is None:
+            continue
         sch = md.schema.to_arrow_schema()
         strs = {i for i, c in enumerate(sch) if c.name in STAT_COLS and (pa.types.is_string(c.type) or pa.types.is_large_string(c.type))}
         if not strs:
@@ -857,15 +872,19 @@ def writer_meta(files: list[str], rg_rows: int, page_rows: int = SERVED_PAGE_ROW
             rg = md.row_group(g)
             size += sum(rg.column(i).total_uncompressed_size for i in strs)
             rows += rg.num_rows
+    if page_rows is None:
+        return tm.group_meta(cols or widest, 0)
     return tm.group_meta(cols or widest, -(-rg_rows // page_rows), -(-size // rows) if rows else 0)
 
 
-def _served_writer(out: Path, schema: pa.Schema, page: int) -> pq.ParquetWriter:
-    """A served sort's writer (`write_served`): zstd, `page`-row pages with a page index, statistics on the planning
-    columns, a dictionary on the low-cardinality strings only."""
+def _served_writer(out: Path, schema: pa.Schema, page: int | None) -> pq.ParquetWriter:
+    """A served sort's writer (`write_served`): zstd, a dictionary on the low-cardinality strings only. `page`: `page`-row
+    pages with a page index, statistics on the planning columns. None (`served_page_rows`): as the served sorts were written
+    before they had pages, no page index, no statistics on `path`, parquet's default pages: closed past 1 MiB of a column's
+    values, so a group's page but for its long `path`s (~half the groups of a real store's sorts hold 2 or 3 of those)."""
+    paged = {"write_page_index": True, "write_batch_size": page, "data_page_size": 1} if page else {}
     return pq.ParquetWriter(out, schema, compression=sn.CODEC, use_dictionary=[c for c in ("kind", "kind_prev", "us", "usr", "user", "source") if c in schema.names],
-                            write_statistics=[c for c in STAT_COLS if c in schema.names],
-                            write_page_index=True, write_batch_size=page, data_page_size=1)
+                            write_statistics=[c for c in (STAT_COLS if page else UNPAGED_STAT_COLS) if c in schema.names], **paged)
 
 
 def _file_rows(path: str, start: int, n: int, batch: int, columns: list[str]):
@@ -1109,7 +1128,7 @@ def _piece_sql(src: str, cols: list[str], key: list[str], lo: tuple | None, hi: 
 
 
 def cut_part(pieces: list[tuple[str, int, int]], groups: list[tuple[int, int, int]], out: str, schema: pa.Schema,
-             size_col: str | None, kv: dict, page: int, rg_rows: int) -> int:
+             size_col: str | None, kv: dict, page: int | None, rg_rows: int) -> int:
     """One part of a cut (`write_served`): its `groups` (`cut_plan`'s) read from the spool `pieces` holding exactly the
     part's rows (`(file, first row, rows)`, in order) and written to `out` as one writer of the whole sort writes them,
     then `kv`; each group's `_bounds` a JSON line of `<out>.bounds` (`read_bounds`). Returns its groups. Holds a spool
@@ -1151,8 +1170,8 @@ def read_bounds(files: list[Path]) -> Iterator[dict]:
                 yield json.loads(line)
 
 
-def write_served(con, src: str | list[str], sort: str, out: Path, schema: pa.Schema, *, rg_rows: int = SERVED_RG,
-                 stamps: list[int] | None = None, page_rows: int | None = None, procs: int | None = None,
+def write_served(con, src: str | list[str], sort: str, out: Path, schema: pa.Schema, *, page_rows: int | None, rg_rows: int = SERVED_RG,
+                 stamps: list[int] | None = None, procs: int | None = None,
                  part_rows: int = CUT_PART_ROWS, budget: int | None = None, piece_rows: int | None = None,
                  spool_rows: int = CUT_SPOOL_RG, opened: str = "true", key_bounds: list[list] | None = None) -> dict:
     """One served sort to `out`: its segments in order (`seg_sql`: the open versions, then the closed ones — one
@@ -1160,11 +1179,12 @@ def write_served(con, src: str | list[str], sort: str, out: Path, schema: pa.Sch
     segment's last may be short, so no group mixes segments), zstd. `src` is a relation of `schema` rows, or a
     generation's range files (`range_files`: disjoint `(depth, path)` key ranges, in key order). Writes `<out
     stem>.groups.parquet` beside it (`GROUPS_SCHEMA`: per group the exact bounds of its rows — never truncated
-    statistics — and the compact metadata the Worker revives). Pages hold `page_rows` rows (`SERVED_PAGE_ROWS`; a group's
-    last may be short), aligned across columns: pyarrow caps a page by bytes, not rows, so a 1-byte target closes one
-    after every `write_batch_size` values (an all-null column, encoding no bytes, stays one page a group). The page index
-    carries `path`'s bounds too (its statistics on), and `path` has no dictionary (it's almost all distinct: its
-    dictionary page would be about the whole chunk, fetched by every page read).
+    statistics — and the compact metadata the Worker revives). `page_rows`: the sort's pages (`served_page_rows`), each
+    `page_rows` rows (a group's last may be short), aligned across columns: pyarrow caps a page by bytes, not rows, so a
+    1-byte target closes one after every `write_batch_size` values (an all-null column, encoding no bytes, stays one page
+    a group). The page index carries `path`'s bounds too (its statistics on), and `path` has no dictionary (it's almost
+    all distinct: its dictionary page would be about the whole chunk, fetched by every page read). None: no page index
+    (`_served_writer`), for a sort read only by whole groups.
 
     The level sort (`LEVEL`) is cut from the folded path versions' transitions (`interval_level.rows_sql` over each run, a
     path's versions never split across runs; `opened`: which versions opened in the source, a run's deltas'
@@ -1210,7 +1230,6 @@ def write_served(con, src: str | list[str], sort: str, out: Path, schema: pa.Sch
 
     _, order, size_col = SORTS[sort]
     out.parent.mkdir(parents=True, exist_ok=True)
-    page = page_rows or SERVED_PAGE_ROWS
     level = sort == LEVEL
     kv = {"store": "interval", "version": str(STORE_VERSION), "sort": sort, "order": order,
           "segments": "keys" if level else "open,dyadic" if stamps else "open,hist", "open": str(OPEN)}
@@ -1322,7 +1341,7 @@ def write_served(con, src: str | list[str], sort: str, out: Path, schema: pa.Sch
         with ProcessPoolExecutor(len(parts), mp_context=get_context("spawn"), initializer=tm.worker_init) if len(parts) > 1 else nullcontext() as ex:
             def args(i: int, groups: list) -> tuple:
                 lo, hi = (groups[0][1], groups[-1][1] + groups[-1][2]) if groups else (0, 0)
-                return _trim(pieces, lo, hi), groups, str(work / f"part-{i:04d}.parquet"), schema, size_col, kv, page, rg_rows
+                return _trim(pieces, lo, hi), groups, str(work / f"part-{i:04d}.parquet"), schema, size_col, kv, page_rows, rg_rows
 
             hb.set_stage(f"cut {sort}: write")
             prog = hb.Progress(f"cut {sort}", total=len(parts), total_rows=total, unit="parts")
@@ -1404,12 +1423,14 @@ def write_groups(out: Path, bounds: Iterable[dict], sort: str, summary) -> dict:
 
 @contextmanager
 def plan_cut(con, tree: tm.Budget | None, files: list[str], *, at_once: int = 1, rg_rows: int = SERVED_RG,
-             what: str = "cut", sort_rows: int | None = None, extra_rows: int = 0, sort_cols: int | None = None) -> Iterator[tuple[int, int]]:
+             what: str = "cut", sort_rows: int | None = None, extra_rows: int = 0, sort_cols: int | None = None,
+             page_rows: int | None = SERVED_PAGE_ROWS, meta: int | None = None) -> Iterator[tuple[int, int]]:
     """The cut's `(procs, run budget)` for `at_once` sorts at once over `files` (local range or delta files: their
     footers size a row and count the rows), as every entry that cuts plans it. `tree`: the process tree's budget
     (`tree_mem.Budget`): the workers planned under it (`Budget.cut`, rows of the files' widest + `SPOOL_EXTRA`, no holder
-    charged more rows than the files have, each sort's writers' metadata `writer_meta` of `sort_cols` columns (the widest
-    sort's; default `files`') a group over `sort_rows` rows — the most one sort has, default all of `files`' and `extra_rows`:
+    charged more rows than the files have, each sort's writers' metadata `writer_meta` of `sort_cols` columns and
+    `page_rows`-row pages (the sort's, `served_page_rows`; default `files`' columns; or `meta`, already reckoned: `cut_gen`'s
+    sorts differ) a group over `sort_rows` rows — the most one sort has, default all of `files`' and `extra_rows`:
     what a sort holds past its files', the level sort's, `interval_level.extra_rows`), DuckDB's limit set to the rest for the block, then the previous limit back; None: the
     machine's cores over `at_once`, DuckDB's limit as set. Each run and piece is a share of DuckDB's limit (`run_budget`
     over `at_once × procs`). The block is `TreeWatch`'s phase `what`."""
@@ -1425,7 +1446,7 @@ def plan_cut(con, tree: tm.Budget | None, files: list[str], *, at_once: int = 1,
             raise SystemExit(f"{what}: the cut's plan reads its inputs' footers, which aren't local files ({remote[0]}…): mount the store")
         rb, n = row_bytes(files) + SPOOL_EXTRA, max(1, input_rows(files) + extra_rows)
         sort_rows = min(n, sort_rows or n)
-        meta = writer_meta(files, rg_rows, cols=sort_cols)
+        meta = writer_meta(files, rg_rows, page_rows, cols=sort_cols) if meta is None else meta
         plan = tree.cut(at_once, cores, rg_rows, rb, CUT_SPOOL_RG, n, meta=meta, sort_rows=sort_rows)
         groups = -(-sort_rows // rg_rows)
         kept = at_once * plan.procs * -(-groups // plan.procs) * meta
@@ -1460,7 +1481,7 @@ def cut_gen(con, gen_dir: Path, scans: dict, *, rg_rows: int = SERVED_RG, jobs: 
     size = {sub: sum(p.stat().st_size for p in (gen_dir / sub).glob("r*.parquet")) for sub in {SORTS[s][0] for s in todo}}
     at_once = max(1, min(jobs, len(todo)))
     ins = [str(p) for sub in sorted(size) for p in sorted((gen_dir / sub).glob("r*.parquet"))]
-    most = None
+    most = meta = None
     extra = 0
     if tree is not None:
         from .interval_compact import input_rows
@@ -1468,14 +1489,19 @@ def cut_gen(con, gen_dir: Path, scans: dict, *, rg_rows: int = SERVED_RG, jobs: 
         rows = {sub: input_rows([str(p) for p in (gen_dir / sub).glob("r*.parquet")]) for sub in size}
         extra = ilv.extra_rows(con, [str(p) for p in sorted((gen_dir / SORTS[LEVEL][0]).glob("r*.parquet"))]) if LEVEL in todo else 0
         most = max(rows[SORTS[s][0]] + (extra if s == LEVEL else 0) for s in todo)
-    cols = max(len(served_schema(s, gen, churn)) for s in todo)
-    with plan_cut(con, tree, ins, at_once=at_once, rg_rows=rg_rows, sort_rows=most, extra_rows=extra, sort_cols=cols) as (procs, budget):
+        # The plan charges `at_once` sorts of `most` rows, a group's metadata each: what the costliest `at_once` keep, over them.
+        keeps = sorted(((-(-(rows[SORTS[s][0]] + (extra if s == LEVEL else 0)) // rg_rows))
+                        * writer_meta([str(p) for p in (gen_dir / SORTS[s][0]).glob("r*.parquet")], rg_rows, served_page_rows(s), cols=len(served_schema(s, gen, churn)))
+                        for s in todo), reverse=True)
+        meta = -(-sum(keeps[:at_once]) // max(1, at_once * -(-most // rg_rows)))
+    with plan_cut(con, tree, ins, at_once=at_once, rg_rows=rg_rows, sort_rows=most, extra_rows=extra, meta=meta) as (procs, budget):
         def one(cur, sort: str) -> dict:
             sub, _, _ = SORTS[sort]
             t1 = monotonic()
             with tm.phase(f"sort {sort}"):
                 sd = write_served(cur, [str(p) for p in sorted((gen_dir / sub).glob("r*.parquet"))], sort, served / f"{sort}.parquet",
-                                  served_schema(sort, gen, churn), rg_rows=rg_rows, stamps=stamps, procs=procs, budget=budget, key_bounds=bounds)
+                                  served_schema(sort, gen, churn), page_rows=served_page_rows(sort), rg_rows=rg_rows, stamps=stamps, procs=procs,
+                                  budget=budget, key_bounds=bounds)
             sd["s"] = round(monotonic() - t1, 1)
             (served / f"{sort}.json").write_text(json.dumps(sd, sort_keys=True) + "\n")
             return sd
@@ -1785,10 +1811,11 @@ def _cut(all_sorts, bucket, no_dyadic, profile, gen, index, jobs, as_jobs, mount
         bounds = ilv.range_bounds(store.read_json(f"{prefix}/ranges.json")) if sort == LEVEL else None
         extra = ilv.extra_rows(con, files) if sort == LEVEL and tree is not None else 0
         # As `cut_gen` sizes each of `as_jobs` sorts at once: the cores and the budget split between them.
-        with plan_cut(con, tree, files, at_once=as_jobs, rg_rows=rg_rows, what=f"cut {sort}", extra_rows=extra, sort_cols=len(schema)) as (procs, budget):
+        pages = served_page_rows(sort)
+        with plan_cut(con, tree, files, at_once=as_jobs, rg_rows=rg_rows, what=f"cut {sort}", extra_rows=extra, sort_cols=len(schema), page_rows=pages) as (procs, budget):
             procs = min(procs, workers or procs)
             err(f"cut {sort}: {procs} workers, runs of ≤ {budget:,} B (as {as_jobs} sorts at once)")
-            doc = write_served(con, files, sort, dst, schema, rg_rows=rg_rows, stamps=stamps, procs=procs, budget=budget, key_bounds=bounds)
+            doc = write_served(con, files, sort, dst, schema, page_rows=pages, rg_rows=rg_rows, stamps=stamps, procs=procs, budget=budget, key_bounds=bounds)
         doc["s"] = round(monotonic() - t0, 1)
         err(f"cut {sort}: {doc['rows']:,} rows, {doc['groups']:,} groups, {doc['bytes']:,} B in {doc['s']}s")
         (out_dir / f"{sort}.json").write_text(json.dumps(doc, sort_keys=True) + "\n")

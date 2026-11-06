@@ -10,7 +10,8 @@ Every step reads two things:
 
 Adding a step (gcs's access-ingest, rules, healthcheck, … are steps like any other): copy one below.
 
-    @step("access-ingest", core=False, stage="pre", soft=True, options={"glob": str})
+    @step("access-ingest", core=False, stage="pre", soft=True, options={"glob": str},
+          converges=True, leaves="this scan's read recency misses the newest access logs")
     def access_ingest(ctx: Ctx, arg: str | None) -> None:
         if ctx.done(ctx.data_root / "access" / ctx.scan / "_SUCCESS"):   # skip-if-done: its own outputs
             return
@@ -24,6 +25,16 @@ Adding a step (gcs's access-ingest, rules, healthcheck, … are steps like any o
   task, in registry order). The core's own stages (`list`, `index`, `serve`, `sync`) are wired in `scan.nf` itself.
 - `soft`: the step never fails the run (an unexpected error is a warning, exit 0), so a dependent step always runs:
   the DAG's "soft dependency" (index waits for access-ingest, but runs without its output).
+- `leaves`, `side`, `converges`, `checks`: a soft step's failure, as /scans reads it (the run succeeded, so its
+  status has to say what's short). `leaves`: what the failure leaves short, in a few plain words (required). `side`:
+  the scan's data and serving are whole without it (`partial`, the quiet ink); unset, they are not (`incomplete`, the
+  warning ink). `converges`: a later run's same step does this run's work too (an append of every pending scan, an
+  ingest from the watermark, a thread converged, a pass over every scan), so its success after this failure reads
+  `recovered`, linked to that run: set only where the step's code catches up (a false `recovered` is worse than a
+  false `incomplete`). `checks`: the step is a check, not work (`probe`, `healthcheck`): nothing redoes it, and a
+  later run's pass says the site passes since, not that this scan was fine, so it reads `<step> failed · passing since
+  <scan>` (the quiet ink), linked to the first later run whose check passed, and `incomplete` until one does.
+  `failure_table()` is what the site reads (`site/src/scanSteps.json`: `dt-cloud scan steps`, checked by the tests).
 - `options`: the keys the step takes under the profile's `options.<step>`, with their types (unknown keys refused).
 - `requires(profile)`: profile-level checks, returned as problems (validated with the profile, before any task).
 - Credentials: every step's call runs under `dt-cloud secrets exec` with the profile's `secrets`, overlaid by its own
@@ -94,10 +105,17 @@ class Step:
     soft: bool = False
     arg: bool = False
     options: Mapping[str, type] = field(default_factory=dict)
-    check: Callable[[ScanProfile], list[str]] | None = None
+    requirement: Callable[[ScanProfile], list[str]] | None = None
+    #: A soft step's failure, as /scans reads it (the module docstring): what it leaves short, whether the scan's data
+    #: and serving are whole without it, whether a later run's same step does this run's work too, and whether the
+    #: step is a check (nothing redoes it; a later run's passes or doesn't).
+    leaves: str | None = None
+    side: bool = False
+    converges: bool = False
+    checks: bool = False
 
     def requires(self, profile: ScanProfile) -> list[str]:
-        return self.check(profile) if self.check else []
+        return self.requirement(profile) if self.requirement else []
 
 
 #: Every step, in DAG order (the profile's `enabled()` and the post task keep it).
@@ -106,11 +124,31 @@ STEPS: dict[str, Step] = {}
 
 def step(name: str, *, core: bool = True, skippable: bool = True, stage: str = "post", soft: bool = False,
          arg: bool = False, options: Mapping[str, type] | None = None,
-         requires: Callable[[ScanProfile], list[str]] | None = None):
+         requires: Callable[[ScanProfile], list[str]] | None = None,
+         leaves: str | None = None, side: bool = False, converges: bool = False, checks: bool = False):
+    if not soft and (leaves or side or converges or checks):
+        raise ValueError(f"step {name}: `leaves` / `side` / `converges` / `checks` describe a soft step's failure (a hard step's fails the run)")
+    if soft and not leaves:
+        raise ValueError(f"step {name}: a soft step says what its failure leaves short (`leaves`)")
+    if checks and converges:
+        raise ValueError(f"step {name}: a check does no work for a later run to do (`checks` with `converges`)")
+
     def deco(fn: Callable[[Ctx, str | None], None]) -> Callable[[Ctx, str | None], None]:
-        STEPS[name] = Step(name, fn, core, skippable, stage, soft, arg, options or {}, requires)
+        STEPS[name] = Step(name, fn, core, skippable, stage, soft, arg, options or {}, requires, leaves, side, converges, checks)
         return fn
     return deco
+
+
+def failure_table() -> dict[str, dict[str, str | bool | None]]:
+    """Each soft step's failure fields, in registry order: what /scans classifies a succeeded run's failed (or
+    skipped) phase by. A phase named for no soft step isn't here, and reads as leaving the scan short."""
+    return {n: {"leaves": s.leaves, "side": s.side, "converges": s.converges, "checks": s.checks} for n, s in STEPS.items() if s.soft}
+
+
+def failure_json() -> str:
+    """`failure_table()` as the site's `scanSteps.json`: one step a line."""
+    rows = [f"  {json.dumps(n)}: {json.dumps(f, ensure_ascii=False)}" for n, f in failure_table().items()]
+    return "{\n" + ",\n".join(rows) + "\n}\n"
 
 
 class _Printer:
@@ -373,7 +411,8 @@ class Ctx:
 
     def skip(self, kind: str, reason: str) -> None:
         """The open phase's work was skipped, for `reason`: it ends done, its note's `skipped (<kind>): <reason>`
-        (`scan_runs.phase_skip`) making the run `partial` on /scans with that reason, and a warn alert names it."""
+        (`scan_runs.phase_skip`) making the run read short on /scans with that reason (as its step's failure would),
+        and a warn alert names it."""
         self.skipped = f"skipped ({kind}): {reason}"
 
     def recorded_skip(self, phase: str) -> str | None:
@@ -464,10 +503,12 @@ def copy_atomic(src: Path, dst: Path) -> None:
 # The steps. Phase names are the record's (`job/scan-runs.json` ties outputs to `layer-2`, `index-write`, `publish`).
 
 
-@step("bucket-check", stage="pre", soft=True)
+@step("bucket-check", stage="pre", soft=True,
+      side=True, leaves="a bucket outside the profile's sources may hold storage the site doesn't count")
 def bucket_check(ctx: Ctx, arg: str | None) -> None:
     """Every bucket each S3 endpoint's key can list is scanned or empty: a non-empty one outside the sources (a new
-    zone's bucket) is billed storage the site would miss, so it alerts every run until added. Never fatal."""
+    zone's bucket) is billed storage the site would miss, so it alerts every run until added. Never fatal. A `side`
+    step: the scan of the profile's sources is whole either way (the gap is the profile's, and the alert's to raise)."""
     by_endpoint: dict[str | None, set[str]] = {}
     for s in ctx.profile.sources:
         if s.kind == "s3":
@@ -492,10 +533,13 @@ def bucket_check(ctx: Ctx, arg: str | None) -> None:
                     f"non-empty bucket(s) not in the profile's sources: `{text}`"], fatal=False, warn="unscanned-bucket alert not sent")
 
 
-@step("access-ingest", core=False, stage="pre", soft=True, options={"args": list, "poller": bool})
+@step("access-ingest", core=False, stage="pre", soft=True, options={"args": list, "poller": bool},
+      converges=True, leaves="this scan's read recency misses the newest access logs")
 def access_ingest(ctx: Ctx, arg: str | None) -> None:
     """The buckets' access logs → the read-recency shards (`dt-cloud access ingest`, incremental and watermarked: its
-    settings in the env), beside `list`. Soft: `index` runs without the newest shards, and the next run catches up.
+    settings in the env), beside `list`. Soft: `index` runs without the newest shards, and the next run catches up
+    (`converges`: each bucket's watermark advances only past an uploaded chunk, and every run ingests everything listed
+    after it, so a later run's ingest holds what this one missed; this scan's own index stays as it was cut).
 
     `options.access-ingest.poller: true`: the deployment runs `access ingest` as its own scheduled job (the hourly
     poller, specs/access-log-freshness.md §A), so the scan leaves this step out (`ScanProfile.enabled`) and `index`
@@ -518,13 +562,15 @@ def _access_r2_check(p: ScanProfile) -> list[str]:
     return ["options.access-r2.state: required (the collector archive's `state.json`, e.g. `r2://<archive>/state.json`)"]
 
 
-@step("access-r2", core=False, stage="pre", soft=True, options={"state": str, "out": str, "endpoint": str}, requires=_access_r2_check)
+@step("access-r2", core=False, stage="pre", soft=True, options={"state": str, "out": str, "endpoint": str}, requires=_access_r2_check,
+      converges=True, leaves="this scan's read recency is as of the previous aggregate")
 def access_r2(ctx: Ctx, arg: str | None) -> None:
     """The R2 access collector's read aggregates → one layer-2a parquet for `index` (`options.index.access`), beside
     `list`: `dt-cloud access r2-agg -s <state>`, every hour the collector's `state.json` names, cut at the scan's
     instant. Cumulative (all reads before the scan), so it replaces the data store's one key (`out`, default
     `access/r2/agg.parquet`) rather than adding a shard. No reads yet, or a failure: the earlier aggregate stays (valid as
-    of its scan) and `index` runs with it. The collector archive's key goes in `options.access-r2.secrets`, its endpoint
+    of its scan) and `index` runs with it; a later run's aggregate (every hour before its own, later scan) replaces it
+    (`converges`). The collector archive's key goes in `options.access-r2.secrets`, its endpoint
     in `endpoint` (default `$R2_ENDPOINT`), set for this one command only."""
     if ctx.reproc:
         err("access-r2 off under REPROC")
@@ -1000,7 +1046,8 @@ def _static_check(p: ScanProfile) -> list[str]:
 
 @step("static-names", stage="serve", soft=True, options={"profile": str, "gen": str, "store": str, "mem": str, "build_args": list, "current_key": str,
                                                           "merge": bool, "compact_cmd": list},
-      requires=_static_check)
+      requires=_static_check,
+      converges=True, leaves="search doesn't cover this scan")
 def static_names(ctx: Ctx, arg: str | None) -> None:
     """Append this scan (and any earlier one still pending, in scan-id order) to the static name index as a run
     (`static-names runs add -c`: its stages are Batch jobs of their own; idempotent). Runs beside publish-r2 →
@@ -1033,12 +1080,13 @@ def static_names(ctx: Ctx, arg: str | None) -> None:
                    else ["build", *args, *ctx.opt("static-names", "build_args", [])])
             ctx.sh(["dt-cloud", "static-names", *sub], fatal=False, warn=f"static-names {sub[0]} failed for {ctx.scan}")
         return
-    from .append_runner import BUSY
+    from .append_runner import BUSY, NOT_NEXT
 
     prof = ctx.opt("static-names", "profile") or ctx.env["STATIC_NAMES_PROFILE"]
     # exit 4: another coordinator (a catch-up, or an earlier scan's run) or a compaction holds the store's lease; it
     # appends this scan too, else the next run does. Until then search refuses the scan: an explicit skip (the probe
-    # reads it from the record and skips those refusals; /scans shows the run `partial`, with this reason)
+    # reads it from the record and skips those refusals; /scans shows the run `incomplete`, with this reason, until a
+    # later run's append makes it `recovered`)
     with ctx.phase("static-names", note="overlapped"):
         # `merge: false`: the due carries (and a compaction) wait for `runs merge` on its own schedule, never a scan's task.
         # `compact_cmd`: the carries are submitted here (not waited on), and a due compaction, an hours-long fold, is
@@ -1050,6 +1098,8 @@ def static_names(ctx: Ctx, arg: str | None) -> None:
                      allowed_codes=(BUSY,), capture=bool(compact_cmd))
         if ctx.last is not None and ctx.last.returncode == BUSY:
             ctx.skip("busy", STATIC_NAMES_BUSY)
+        elif ctx.last is not None and ctx.last.returncode == NOT_NEXT:
+            ctx.note = PASSED_OVER  # failed, and no later run's append takes the scan: /scans never reads it recovered
         elif out and (deferred := json.loads(out.strip().splitlines()[-1]).get("deferred")):
             err(f"static-names: compaction due ({deferred}): run apart")
             ctx.sh(compact_cmd, fatal=False, warn=f"static-names compaction submit failed for {ctx.scan}")
@@ -1087,12 +1137,18 @@ def static_lag(ctx: Ctx, probe: bool = False) -> dict | None:
     return lag
 
 
+#: A staged append refused the scan (`append_runner.NOT_NEXT`, with `-c`: a newer scan was appended first, or its
+#: `path` sort isn't under the generation's layouts): the failed phase's note. Appends go in scan-id order, so no
+#: later run's takes it, and /scans (`scanRunsModel.phasePassedOver`) never reads the failure as recovered by one.
+PASSED_OVER = "passed over: the store's append order is past this scan, or its path sort isn't published; no later run appends it"
+
 #: Why a scan's static-names step was skipped (`runs add` exit `BUSY`): its phase note's reason, and the probe's.
 STATIC_NAMES_BUSY = ("another coordinator or a compaction holds the static-names store's lease; search for this scan "
                      "comes with its append or the next run")
 
 
-@step("publish-r2", stage="serve", soft=True, options={"args": list, "require": list, "keys": list, "barrier": bool})
+@step("publish-r2", stage="serve", soft=True, options={"args": list, "require": list, "keys": list, "barrier": bool},
+      leaves="the scan's served files aren't all on R2")
 def publish_r2(ctx: Ctx, arg: str | None) -> None:
     """The scan's served subset (snapshot JSONs, the layer-2 dir) to R2, idempotent by size + md5; `-a`: every
     `index/<gen>/` under the scan, not D1's (the scan is listed after). Options: `args` (e.g. `-S`: only the small files
@@ -1130,7 +1186,8 @@ def _iv_check(p: ScanProfile) -> list[str]:
 
 @step("interval-store", stage="serve", soft=True, options={"store": str, "timeout": str, "mem": str, "profile": str, "merge_wait": int,
                                                              "source": str, "compact": str},
-      requires=_iv_check)
+      requires=_iv_check,
+      converges=True, leaves="the interval store doesn't hold this scan")
 def interval_store(ctx: Ctx, arg: str | None) -> None:
     """Append this scan (and any pending) to the change-interval path store beside its current generation, then the
     due carries / compaction (`interval-store add`). Never fatal (`-W`): a failure or the timeout warns, the next run
@@ -1148,7 +1205,7 @@ def interval_store(ctx: Ctx, arg: str | None) -> None:
 
     timeout = ctx.opt("interval-store", "timeout")
     if ctx.opt("interval-store", "profile"):
-        from .append_runner import BUSY
+        from .append_runner import BUSY, NOT_NEXT
 
         cmd = ["dt-cloud", "interval-store", "append", "-c", "-w", str(ctx.opt("interval-store", "merge_wait", 0)), ctx.scan]
         env = {"INTERVAL_STORE_PROFILE": str(ctx.opt("interval-store", "profile"))}
@@ -1159,7 +1216,13 @@ def interval_store(ctx: Ctx, arg: str | None) -> None:
         with ctx.beating("interval-store") as tail:
             ran = run_grouped(cmd, duration(timeout) if timeout else None, 30.0, env={**ctx.env, **env}, tail=tail)
         if ran.rc == BUSY:
-            ctx.run.end("interval-store", 0, note="another coordinator holds the store's lease; it appends this scan")
+            # this run appended nothing: an explicit skip (`scan_runs.phase_skip`), so /scans reads the scan short until
+            # an append holds it, and never takes this step for one that did an earlier run's work
+            ctx.run.end("interval-store", 0, note=INTERVAL_STORE_BUSY)
+            return
+        if ran.rc == NOT_NEXT:
+            ctx.run.end("interval-store", ran.rc, warn=True, msg="the scan reads per-scan: the store's append passed it over", note=PASSED_OVER,
+                        timed_out=None, terminated=None)
             return
         ctx.run.end("interval-store", ran.rc, warn=True, msg="the scan reads per-scan until a later run appends it",
                     timed_out=timeout if ran.timed_out else None, terminated=ran.signal if ran.rc else None)
@@ -1190,6 +1253,11 @@ def interval_store(ctx: Ctx, arg: str | None) -> None:
                 timed_out=timeout if ran.timed_out else None, terminated=ran.signal if ran.rc else None)
 
 
+#: Why a scan's staged interval-store step was skipped (`append` exit `BUSY`): its phase note.
+INTERVAL_STORE_BUSY = ("skipped (busy): another coordinator holds the interval store's lease; this scan comes with its "
+                       "append or the next run")
+
+
 def _sync_args(ctx: Ctx) -> list[str]:
     """Both halves' arguments: the generation, the store, `options.index-sync.variants` (`-v` each; default every
     variant the generation holds) and `options.index-sync.d1_rows: false` (`-R`: the cold footer files and the pointers,
@@ -1212,7 +1280,8 @@ def _sync_check(p: ScanProfile) -> list[str]:
          "interval store: every read of it would plan from cold footers)"])
 
 
-@step("index-rows", skippable=False, stage="serve", soft=True)
+@step("index-rows", skippable=False, stage="serve", soft=True,
+      leaves="the scan's index rows aren't all in D1")
 def index_rows(ctx: Ctx, arg: str | None) -> None:
     """The index tiers' row groups to D1 (`index-sync -r`), invisible until `index-sync` flips the pointers: overlaps
     static-names and interval-store. Re-runnable (INSERT OR REPLACE)."""
@@ -1224,7 +1293,8 @@ def index_rows(ctx: Ctx, arg: str | None) -> None:
 
 
 @step("index-sync", skippable=False, stage="sync", soft=True, options={"retain": int, "variants": list, "d1_rows": bool},
-      requires=_sync_check)
+      requires=_sync_check,
+      leaves="the scan isn't listed on the site")
 def index_sync(ctx: Ctx, arg: str | None) -> None:
     """List the scan: flip its pointers (`index-sync -p`, which checks the rows `index-rows` uploaded), last of the
     serving steps, so a listed scan is whole (searchable, on R2, in the interval store); then drop superseded
@@ -1243,7 +1313,8 @@ def index_sync(ctx: Ctx, arg: str | None) -> None:
         ctx.sh(["dt-cloud", "index-gc", *store_args(ctx), *(["-r", retain] if retain else []), ctx.scan], fatal=False, warn="index-gc failed")
 
 
-@step("over-time", soft=True, options={"mem": str, "threads": int})
+@step("over-time", soft=True, options={"mem": str, "threads": int},
+      side=True, converges=True, leaves="new over-time groups not sealed: the size-over-time chart reads their scans one by one")
 def over_time(ctx: Ctx, arg: str | None) -> None:
     """Seal every full K-scan run of indexed scans not yet grouped (`over-time-groups`, idempotent), read from and
     published to R2 when set up (else the data store, each new group then copied to R2 by `publish-r2 -L`)."""
@@ -1264,7 +1335,8 @@ def over_time(ctx: Ctx, arg: str | None) -> None:
                 ctx.sh(["dt-cloud", "publish-r2", "-L", gid], fatal=False, warn=f"publish-r2 failed for over-time group {gid}")
 
 
-@step("index-gc", soft=True, options={"grace": str, "dry": bool})
+@step("index-gc", soft=True, options={"grace": str, "dry": bool},
+      side=True, converges=True, leaves="superseded index generations not deleted")
 def index_gc(ctx: Ctx, arg: str | None) -> None:
     """Delete superseded index generations' files (no `index_schema` row of the store names them, older than the grace)
     from the data store and R2, over every scan. `options.index-gc.dry`: list them only (`-n`, what would go, in the
@@ -1279,14 +1351,17 @@ def index_gc(ctx: Ctx, arg: str | None) -> None:
 
 
 @step("dups", core=False, soft=True, options={"floor": int, "check": int, "check_objects": int, "suspect_copies": int,
-                                               "mem": str, "threads": int, "listing": bool})
+                                               "mem": str, "threads": int, "listing": bool},
+      side=True, leaves="no duplicate-candidate report for this scan: /dups shows the newest earlier scan's")
 def dups(ctx: Ctx, arg: str | None) -> None:
     """The scan's duplicate-candidate groups (`dt-cloud dups`, specs/dups.md §1) beside its index:
     `<layer2>index/<gen>/dups.{parquet,json}` (`dups.json` last, the skip-if-done mark), read from the scan's `bysize`
     sort (its `tot` prunes the read to the paths over the floor), else its `path` sort. Options: `floor` (bytes),
     `suspect_copies`, `check` (spot-check the top N groups' copies on GCS), `check_objects`, `mem`, `threads`,
     `listing` (`-l` each source's raw listing shards in the data store: copies proven `exact` by their objects'
-    crc32c, which the listing carries with `options.list.bulk_args: [-c]`). Off unless the profile lists it in `steps`; never fatal."""
+    crc32c, which the listing carries with `options.list.bulk_args: [-c]`). Off unless the profile lists it in `steps`; never fatal.
+    A `side` step: only `/api/dups` reads the report, a dateless request the newest recent scan's that has one, a dated
+    one a 404 for a scan without."""
     key_dir = ctx.data_root / ctx.index_key
     if ctx.done(key_dir / "dups.json", "dups"):
         return
@@ -1316,9 +1391,12 @@ def _age_check(p: ScanProfile) -> list[str]:
 
 
 @step("age-store", core=False, soft=True, options={"store": str, "gen": str, "keep": int, "execute": bool, "copies": list, "threads": int, "mem": str},
-      requires=_age_check)
+      requires=_age_check,
+      converges=True, leaves="the age store doesn't hold this scan")
 def age_store(ctx: Ctx, arg: str | None) -> None:
-    """Append verified histogram cells, then retire covered old pyramids on each copy. Runs before path retirement."""
+    """Append verified histogram cells, then retire covered old pyramids on each copy. Runs before path retirement.
+    `converges`: `-t <scan>` appends every scan through this one that the store lacks, oldest first (an earlier run's
+    uncovered scan with it: its pyramids are retired only once covered)."""
     if ctx.reproc:
         err("age-store off under REPROC")
         return
@@ -1355,7 +1433,8 @@ def cleanup(path: Path) -> Iterator[None]:
 @step("retire", core=False, soft=True, options={"keep": int, "execute": bool, "static_gen": str, "static_store": str, "store": str,
                                                 "layer2": bool, "layer1": bool, "cache": bool, "copies": list, "backup": str, "markers_only": bool,
                                                 "verify_jobs": int},
-      requires=_retire_check)
+      requires=_retire_check,
+      side=True, converges=True, leaves="older scans' per-scan files not retired")
 def retire(ctx: Ctx, arg: str | None) -> None:
     """Retire the per-scan sorts, footers, search sidecars (and, `layer2: true`, layer-2 listings; `layer1: true`, the raw
     listing shards under `layout.listing`; `cache: true`, its `dir-cache/`) of every scan but the
@@ -1410,7 +1489,8 @@ def retire(ctx: Ctx, arg: str | None) -> None:
                    warn=f"retire failed on {root} (its per-scan files stay; the next run retries)")
 
 
-@step("store-gc", core=False, soft=True, options={"execute": bool, "grace": int, "store": str, "copies": list, "static_gens": list})
+@step("store-gc", core=False, soft=True, options={"execute": bool, "grace": int, "store": str, "copies": list, "static_gens": list},
+      side=True, converges=True, leaves="superseded store generations not collected")
 def store_gc(ctx: Ctx, arg: str | None) -> None:
     """Superseded interval-store generations (`dt-cloud store-gc -l`): what the current generation was compacted or
     backfilled from, past the grace (`grace` seconds, default 3 days), its parity markers moved first; on the interval
@@ -1447,7 +1527,8 @@ def _snap_root(ctx: Ctx) -> str:
     return f"{ctx.env.get('R2_ARCHIVE') or ctx.data_uri}/{ctx.snapshots}"
 
 
-@step("non-live", core=False, stage="side", soft=True, options={"classes": list})
+@step("non-live", core=False, stage="side", soft=True, options={"classes": list},
+      side=True, leaves="non-live bytes not measured for this scan: its map's non-live line is short or absent")
 def non_live(ctx: Ctx, arg: str | None) -> None:
     """Each source's non-live bytes (`dt-cloud non-live`, specs/non-live-bytes.md phase 1): per class of
     `options.non-live.classes` (each one the sources' provider has: `soft-deleted` on GCS, `noncurrent` /
@@ -1456,7 +1537,8 @@ def non_live(ctx: Ctx, arg: str | None) -> None:
     `non-live.json` (every bucket's rows: what the site reads beside `meta.json`). A `side` step: its own task from the
     scan's start, beside `list` and `index`, which never wait on it (gcs's soft-deleted listings take ~18 min); only
     `publish-r2` (its snapshot dir reaches R2 with the scan's others) and the post steps do. Read-only; off unless the
-    profile lists it in `steps`. Never fatal: a failure warns, the scan's other outputs stand."""
+    profile lists it in `steps`. Never fatal: a failure warns, the scan's other outputs stand (`side=True`: the map's
+    one line reads `non-live.json` as optional, and nothing else reads it)."""
     classes = ctx.opt("non-live", "classes", [])
     if not classes:
         err("non-live: no options.non-live.classes: nothing measured")
@@ -1481,10 +1563,11 @@ def non_live(ctx: Ctx, arg: str | None) -> None:
                    fatal=False, warn=f"non-live failed on {', '.join(uris)} (the scan's other outputs stand)")
 
 
-@step("healthcheck", core=False, soft=True)
+@step("healthcheck", core=False, soft=True,
+      checks=True, leaves="the site's health check failed for this scan: serving may be degraded")
 def healthcheck(ctx: Ctx, arg: str | None) -> None:
     """Is the site serving the scan (`dt-cloud healthcheck -d`: fresh, subtree + the data JSONs serve)? A failure
-    warns: the data is fine, serving may be degraded."""
+    warns: the data is fine, serving may be degraded. A check (`checks`): nothing redoes it for this scan."""
     with ctx.phase("healthcheck"):
         if ctx.reproc or not ctx.has("SITE_TOKEN", "SITE_URL"):
             err("no SITE_TOKEN/SITE_URL, or REPROC: skipping the health check")
@@ -1493,7 +1576,8 @@ def healthcheck(ctx: Ctx, arg: str | None) -> None:
                warn=f"the live site's health check failed for {ctx.scan} (data is fine; serving may be degraded)")
 
 
-@step("warm-cache", soft=True, requires=primary_only("warm-cache", "its requests carry no `store=`: it would warm the primary's views"))
+@step("warm-cache", soft=True, requires=primary_only("warm-cache", "its requests carry no `store=`: it would warm the primary's views"),
+      side=True, leaves="cache not pre-warmed: this scan's first views load cold")
 def warm_cache(ctx: Ctx, arg: str | None) -> None:
     """Warm the site's subtree + diff caches for the scan (its job grant, `SITE_TOKEN`)."""
     with ctx.phase("warm-cache"):
@@ -1503,14 +1587,16 @@ def warm_cache(ctx: Ctx, arg: str | None) -> None:
         ctx.sh(["dt-cloud", "warm-cache", "-d", ctx.scan, "-r", _snap_root(ctx)], fatal=False, warn=f"cache warm-up failed for {ctx.scan}")
 
 
-@step("probe", soft=True, requires=primary_only("probe", "its requests carry no `store=`: it would probe the primary's views"))
+@step("probe", soft=True, requires=primary_only("probe", "its requests carry no `store=`: it would probe the primary's views"),
+      checks=True, leaves="the serving probe failed: some of this scan's views may not load")
 def probe(ctx: Ctx, arg: str | None) -> None:
     """Replay the site's page loads uncached (`probe -c`): one cold-latency record per scan under `probes/<subdir>/`.
     When this run's record says its static-names step was skipped (`Ctx.recorded_skip`), the probe gets that reason
     (`-i`) and skips the search's `scan-not-indexed` refusals for it; otherwise they fail it. The phase's note is the
     probe's verdict (`n passed, n skipped (reason), n failed`), on a failure too. When every failure was that refusal
     (the static name index lags the scan: its data is published), the phase is done, its note `search behind: …` in
-    plain words (/scans: "search behind", not "partial"); `static_lag` alerts once per lag episode."""
+    plain words (/scans: "search behind", not "partial"); `static_lag` alerts once per lag episode. A check (`checks`):
+    it replays the site as it stands, so a later run's pass says the site passes since, not that this scan's views did."""
     lagged = False
     try:
         with ctx.phase("probe"):
@@ -1563,7 +1649,8 @@ def _digest_check(p: ScanProfile) -> list[str]:
                        for x in o.get("platforms", []) if x not in DIGEST_TRANSPORTS]
 
 
-@step("staged-card", core=False, soft=True, requires=primary_only("staged-card", "the card sizes at the primary's scans"))
+@step("staged-card", core=False, soft=True, requires=primary_only("staged-card", "the card sizes at the primary's scans"),
+      side=True, converges=True, leaves="the staged plan's Slack card stays at the scan before")
 def staged_card(ctx: Ctx, arg: str | None) -> None:
     """Re-render the staged plan's Slack card at this scan, in place (the job grant named by the site's `STAGED_CARD_GRANT`)."""
     with ctx.phase("staged-card"):
@@ -1573,7 +1660,8 @@ def staged_card(ctx: Ctx, arg: str | None) -> None:
         ctx.sh(["dt-cloud", "staged-card"], fatal=False, warn=f"staged card refresh failed for {ctx.scan} (it stays at the scan before)")
 
 
-@step("digest", soft=True, options={"template": str, "config": str, "args": list, "platforms": list, "root": str}, requires=_digest_check)
+@step("digest", soft=True, options={"template": str, "config": str, "args": list, "platforms": list, "root": str}, requires=_digest_check,
+      side=True, converges=True, leaves="usage digest not posted")
 def digest(ctx: Ctx, arg: str | None) -> None:
     """Converge the usage-digest thread on each platform (`dt-cloud digest -T <template> -C <config> -P <platform>`;
     `options.digest.platforms`, default slack), each skipped without its transport's env. The plot's upload
@@ -1607,7 +1695,8 @@ USAGE_PREFIX = "snapshots/usage"
 
 
 @step("cf-usage", core=False, soft=True, options={"config": str, "days": int},
-      requires=primary_only("cf-usage", "the usage snapshots are the deployment's, written once by its primary"))
+      requires=primary_only("cf-usage", "the usage snapshots are the deployment's, written once by its primary"),
+      side=True, converges=True, leaves="Cloudflare usage snapshots not written")
 def cf_usage(ctx: Ctx, arg: str | None) -> None:
     """The deployment's Cloudflare usage per day (`dt-cloud cf-usage -o`, specs/usage-metrics.md): `<data>/snapshots/
     usage/<date>.json` (+ the R2 archive's copy, which the site's `/admin/usage` reads under `SERVED_R2`) for each of
@@ -1644,7 +1733,8 @@ def deployment_selector(env: Mapping[str, str]) -> str | None:
 @step("gcp-cost", core=False, soft=True,
       options={"buckets": list, "bucket-labels": str, "job-labels": str, "locations": list, "project": str,
                "window": str, "horizons": str, "prices": str},
-      requires=primary_only("gcp-cost", "the cost snapshots are the deployment's, written once by its primary"))
+      requires=primary_only("gcp-cost", "the cost snapshots are the deployment's, written once by its primary"),
+      side=True, leaves="today's cloud cost snapshot not written")
 def gcp_cost(ctx: Ctx, arg: str | None) -> None:
     """The deployment's GCP storage and Batch compute cost, now and projected (`dt-cloud cost -o`): today's
     `<data>/snapshots/cost/gcp/<date>.json` (+ the R2 archive's copy, which the site's `/admin/cost/gcp` reads under
@@ -1688,7 +1778,8 @@ SOFT_DELETE_PREFIX = "snapshots/soft-delete"
 
 
 @step("soft-delete", core=False, soft=True, options={"buckets": list},
-      requires=primary_only("soft-delete", "the readings are the deployment's, written once by its primary"))
+      requires=primary_only("soft-delete", "the readings are the deployment's, written once by its primary"),
+      side=True, leaves="today's soft-delete reading not written: the site keeps the last one, dated")
 def soft_delete(ctx: Ctx, arg: str | None) -> None:
     """Each GCS source bucket's soft-delete retention now (`dt-cloud soft-delete -o`): today's
     `<data>/snapshots/soft-delete/<date>.json` (+ the R2 archive's copy, which the site reads under `SERVED_R2`); a

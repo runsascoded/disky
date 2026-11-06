@@ -8,7 +8,12 @@
     &.succeeded { color: var(--grew); background: color-mix(in srgb, var(--grew) 10%, var(--surface)); }
     &.failed { color: var(--danger); background: color-mix(in srgb, var(--danger) 10%, var(--surface)); }
     &.running { color: var(--s1); background: color-mix(in srgb, var(--s1) 10%, var(--surface)); }
+    // incomplete: published, but the scan's data or serving is short (the one to look at)
     &.warn { color: color-mix(in srgb, var(--s4) 75%, var(--ink)); background: color-mix(in srgb, var(--s4) 14%, var(--surface)); }
+    // partial: only a side step failed, the scan is whole (the chip's own quiet ink); passing: a check failed and has
+    // passed in a later run (the same quiet ink: nothing to look at). The steps (or `passing since <scan>`) beside any
+    // outcome are lighter, and wrap under it as one piece in a narrow column (never mid-name).
+    .sr-steps { font-weight: 400; display: inline-block; white-space: nowrap; }
     // search behind: the data is published, only the static name index lags it (neither a failure nor a warning)
     &.behind { color: var(--ink-2); background: var(--panel); outline: 1px dashed var(--ink-3, currentColor); outline-offset: -1px; }
     &.lost { color: var(--danger); background: var(--surface); outline: 1px dashed color-mix(in srgb, var(--danger) 60%, transparent); outline-offset: -1px; }
@@ -97,7 +102,9 @@
   .sr-bar { vertical-align: middle; .sr-bar-bg { fill: var(--other); } }
   .sr-runs .links, .runs .links { color: var(--ink-3); }
   .sr-failure { margin: 10px 0; padding: 8px 12px; border-left: 3px solid var(--danger); background: color-mix(in srgb, var(--danger) 6%, var(--surface)); font-size: 13.5px;
-    &.recovered { border-color: var(--grew); background: color-mix(in srgb, var(--grew) 6%, var(--surface)); }
+    &.recovered, &.behind { border-color: var(--grew); background: color-mix(in srgb, var(--grew) 6%, var(--surface)); }
+    // a side step that failed and stays failed (the scan is whole), and a failed check that has passed since
+    &.side, &.passing { border-color: var(--ink-3); background: var(--panel); }
     code { white-space: pre-wrap; word-break: break-word; } }
   .sr-recovery { margin: 8px 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: 4px; font-size: 13px; p { margin: 6px 0 0; } }
   .sr-facts { display: flex; flex-wrap: wrap; gap: 4px 22px; margin: 10px 0 0; font-size: 13px;
@@ -110,6 +117,9 @@
   @media (max-width: 640px) { h1 { font-size: 19px; } }
 }
 .sr-tip { border-collapse: collapse; td { padding: 1px 6px 1px 0; } .num { text-align: right; } }
+// A status tip's issues (`IssueList`; in the tooltip's portal, so outside `.scans-page`): one block each.
+.sr-issues { > div { margin-top: 6px; padding-left: 8px; border-left: 2px solid var(--ink-3);
+    &.incomplete { border-color: var(--danger); } &.recovered { border-color: var(--grew); } } }
 .scans-page {
   .sr-kind { font-size: 12px; color: var(--ink-3); }
   .sr-live { display: block; font-size: 12px; color: var(--ink-2); white-space: nowrap; .sr-quiet { color: var(--danger); }

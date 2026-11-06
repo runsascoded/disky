@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import type { Env, Identity } from './auth'
 import { gateFor } from './auth'
 import { shareKeyGrant } from './og/tokens'
-import { blockedForRestricted, dataAllowed, filterJson, hideScope, isHidden, restrictDiff, restrictGate, restrictionFor, restrictSubtree, restrictTree } from './restrict'
+import { blockedForRestricted, dataAllowed, filterJson, hideScope, isHidden, restrictDiff, restrictGate, restrictionAnyStore, restrictionFor, restrictSubtree, restrictTree } from './restrict'
 import { storeEnv } from './stores'
 import { sqliteD1 } from './testD1'
 import type { ViewNode } from './view'
@@ -39,6 +39,17 @@ describe('restrictionFor', () => {
   it('a secondary store’s tag is its key', () => {
     const nas = storeEnv({ ...ENV, STORES_JSON: '{"nas": {}}' } as Env, 'nas', {})
     expect(restrictionFor(id('grant', ['laptop', hideScope('laptop', HIDE), 'nas:hide:mnt/user/backups']), nas)).toEqual({ hide: ['mnt/user/backups'] })
+  })
+})
+
+describe('restrictionAnyStore', () => {
+  it('a grant’s hide prefixes on every store, as one restriction; none for an unrestricted grant or an email session', () => {
+    expect([
+      restrictionAnyStore(id('grant', ['laptop', hideScope('laptop', HIDE), 'nas:hide:mnt/user/backups', `nas:hide:/${encodeURI(HIDE)}/`])),
+      restrictionAnyStore(id('grant', ['laptop', 'laptop:read'])),
+      restrictionAnyStore(id('session', ['laptop', 'nas:hide:mnt/user/backups'])),
+      restrictionAnyStore(null),
+    ]).toEqual([{ hide: [HIDE, 'mnt/user/backups'] }, null, null, null])
   })
 })
 
@@ -122,6 +133,9 @@ describe('blockedForRestricted', () => {
       false, false, false, false, false, false,
     ])
   })
+  it('blocks the digest’s image (it draws a diff of whatever path its caller names); its text and settings name no path', () => {
+    expect(['/api/digest-image', '/api/digest-op', '/api/digest-settings', '/api/digest-images'].map(blockedForRestricted)).toEqual([true, false, false, false])
+  })
   it('raw-bytes and D1-list routes, by path segment', () => {
     expect([
       '/api/path-index', '/v1/files/listing/x', '/v1', '/api/plans/run', '/api/db/actions', '/api/og/mint',
@@ -179,6 +193,15 @@ describe('D1', () => {
       }))
       expect(got).toEqual(urls.map(() => [403, '{"error":"forbidden for a path-restricted link"}\n']))
       expect(await Promise.all(urls.map(u => restrictGate(bearer(u, open.key), open.env)))).toEqual(urls.map(() => null))
+    })
+    it('the digest’s image is refused to a restricted link (its `diff` would draw a hidden path’s children), and to it alone', async () => {
+      const restricted = await linkEnv(scopes)
+      const open = await linkEnv(['laptop'])
+      const post = (key: string) => bearer('/api/digest-image', key, { method: 'POST', body: JSON.stringify({ diff: { from: '2026-10-08', to: '2026-10-09', path: HIDE, title: 't' } }) })
+      const refused = await restrictGate(post(restricted.key), restricted.env)
+      expect([refused && [refused.status, await refused.text()], await restrictGate(post(open.key), open.env)]).toEqual([
+        [403, '{"error":"forbidden for a path-restricted link"}\n'], null,
+      ])
     })
     it('`/data`: a restricted link is refused lifecycle.json and other snapshot files, before any store read', async () => {
       const { env, key } = await linkEnv(scopes)

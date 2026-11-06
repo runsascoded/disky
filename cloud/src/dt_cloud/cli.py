@@ -3786,6 +3786,18 @@ def _scan_step(profile_path: str | None, name: str, arg: str | None) -> None:
     sys.exit(run_step(name, arg, profile_path=profile_path))
 
 
+@_scan.command("steps")
+def _scan_steps() -> None:
+    """Print the soft steps' failure table as JSON (`scan_steps.failure_table`): per step, what its failure `leaves`
+    short, whether it is a `side` step (the scan's data and serving are whole without it), whether a later run
+    `converges` it and whether it `checks` (a check: nothing redoes it, a later run's passes or doesn't). /scans
+    classifies a succeeded run's failed phases by it: `site/src/scanSteps.json` is this output
+    (`dt-cloud scan steps > site/src/scanSteps.json` after changing a step's failure fields; a test compares them)."""
+    from .scan_steps import failure_json
+
+    sys.stdout.write(failure_json())
+
+
 @_scan.command("head")
 @option("-F", "--fresh", is_flag=True, help="Run every task with Nextflow's cache off (each step still skips what its own outputs say is done): after a cached task's output was lost")
 @option("-n", "--dry-run", is_flag=True, help="Write the params, executor config and history line; print the Nextflow command; run nothing")

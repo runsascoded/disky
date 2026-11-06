@@ -29,7 +29,7 @@
  * `f = n_children(P) − kept` — objects and dirs alike.
  */
 import type { Env } from './auth.js'
-import { asOfScans, coarsenRects, coarsenSizeRects, folded, type IndexHandle, isStore, ivHeldDates, ivLastRead, type Lens, openIndex, pathStoreKey, perScan, planRects, slices, planSizeRects, readAsks, readFits, readRects, readRows, readSizeRects, readWhole, type Rect, type Row, sizeVariant, type Span, TooWide, type Trace, withTrace, readPathHistoryRows } from './index.js'
+import { asOfScans, coarsenRects, coarsenSizeRects, folded, type IndexHandle, intervalsOn, isStore, ivHeldDates, ivLastRead, type Lens, openIndex, pathStoreKey, perScan, planRects, slices, planSizeRects, readAsks, readFits, readRects, readRows, readSizeRects, readWhole, type Rect, type Row, sizeVariant, type Span, TooWide, type Trace, withTrace, readPathHistoryRows } from './index.js'
 import { type FoldedLens, ownerLens, poolLens } from './owners.js'
 import { type ClassScope, classRow, nameFilter, type NamePred, ownerKey, ownerOk, type OwnerScope } from './scope.js'
 import { filterThreshold, looseThreshold, matchRoots, pickTier, rebasedThreshold, rootRects } from './filter.js'
@@ -2299,6 +2299,20 @@ const rootName = (path: string, env?: Env) => (path === '' ? env?.ROOT_LABEL ?? 
 
 /** A read scoped by owner or class needs owner-slice rows: the interval store's slice sorts (`slices`). */
 const sliced = (env: Env, o: { lens?: Lens; owner?: OwnerScope; classes?: ClassScope; by?: string }): Env => (o.lens || o.owner || o.classes || o.by ? slices(env) : env)
+
+/** A scoped read's answer version, in the view's and the diff's edge-cache keys (`&sv=`, `api/subtree.ts`, `api/diff.ts`)
+ *  only where the answer is one (`scopedRead`): bumped when the same inputs answer differently there, so a deploy never
+ *  serves an earlier scoped read's cached body, and no other key moves (`CACHE_V` would move every plain view's too).
+ *  1 (2026-11-06): a read of the total-keyed slice sort tests each row's own `tot` (`readSizeRects`): before, a
+ *  path's ended slices could be counted beside its current ones. */
+export const SCOPED_V = 1
+/** Whether a view or a diff reads the interval store's total-keyed slice sort with no lens (`readSizeRects`' `tot`
+ *  test): an owner pool or a class scope (a `by=` without its lens reads the same rows), and a filter under a lens,
+ *  whose match reads pass none (`readView`'s phases 1 and 2). A lens alone reads per slice, as does a per-scan store. */
+export const scopedRead = (env: Env, o: { lens?: unknown; owner?: unknown; classes?: unknown; by?: unknown; query?: unknown }): boolean =>
+  intervalsOn(env) && (o.lens ? !!o.query : !!(o.owner || o.classes || o.by))
+/** `SCOPED_V`'s term of a cache key: empty for a request that isn't a `scopedRead`, whose key is then what it was. */
+export const scopedTag = (env: Env, o: Parameters<typeof scopedRead>[1]): string => (scopedRead(env, o) ? `&sv=${SCOPED_V}` : '')
 
 export async function buildView(env0: Env, o: ViewOpts): Promise<View> {
   const env = sliced(asOfScans(env0, [o.date]), o)

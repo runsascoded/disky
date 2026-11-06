@@ -11,7 +11,7 @@
  *
  * Every write appends old/new row JSON to `admin_edits`.
  */
-import { type Ctx, identify, json } from '../../_lib/auth.js'
+import { baseScope, type Ctx, identify, json } from '../../_lib/auth.js'
 import { TABLES, type TableSpec, tableSpec } from '../../_lib/tables.js'
 import { noteActivity } from '../../_lib/activityHook.js'
 
@@ -24,11 +24,12 @@ export const onRequest = async (ctx: Ctx): Promise<Response> => {
   if (!id) return json({ error: 'unauthenticated' }, 401)
   const scopes = new Set(id.scopes)
   const has = (s: string) => scopes.has(s) || scopes.has('*')
+  const canRead = (t: TableSpec) => has(t.readScope === 'base' ? baseScope(env) : t.readScope)
   const who = id.email ?? id.name ?? 'unknown'
 
   const rest = new URL(request.url).pathname.replace(/^\/api\/db\/?/, '')
   if (!rest) {
-    const tables = TABLES.filter(t => has(t.readScope)).map(t => ({
+    const tables = TABLES.filter(canRead).map(t => ({
       name: t.name, pk: t.pk, columns: t.columns, desc: t.desc, orderBy: t.orderBy,
       canWrite: t.writeScope != null && has(t.writeScope),
     }))
@@ -37,7 +38,7 @@ export const onRequest = async (ctx: Ctx): Promise<Response> => {
 
   const spec = tableSpec(rest)
   if (!spec) return json({ error: 'unknown table' }, 404)
-  if (!has(spec.readScope)) return json({ error: 'forbidden' }, 403)
+  if (!canRead(spec)) return json({ error: 'forbidden' }, 403)
   const canWrite = spec.writeScope != null && has(spec.writeScope)
 
   if (request.method === 'GET') {

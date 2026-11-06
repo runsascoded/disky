@@ -4,7 +4,7 @@ import { closedParent, countedItems, PLAN_SENDER, QUEUE_EMPTIED, queueWasEmpty, 
 import { sqliteD1 } from './testD1.js'
 
 const run = (o: Partial<RunRow>): RunRow => ({
-  run_id: 'cw-sweep-dry-1', mode: 'dry', scan: '2026-09-28T1201', actor: 'ann@openathena.ai', started_ts: 100,
+  run_id: 'cw-sweep-dry-1', mode: 'dry', scan: '2026-09-28T1201', actor: 'ann@staff.example.test', started_ts: 100,
   finished_ts: 200, deleted_bytes: 2 * 1024 ** 4, deleted_objects: 1234, skipped_gone: 0, skipped_overwritten: 0,
   plan_digest: 'D1', undo_deadline: null, ...o,
 })
@@ -13,7 +13,7 @@ const ids = (blocks: unknown[]): string[] =>
   ((blocks.find(b => (b as { type: string }).type === 'actions') as { elements: { action_id: string }[] }).elements).map(e => e.action_id)
 
 describe('renderParent', () => {
-  const base = { planId: 7, siteUrl: 'https://cw-s3.oa.dev', items: 3, batches: 2, stagers: ['ann@openathena.ai', 'bo@coreweave.com'], digest: 'D1', actions: true, closed: false }
+  const base = { planId: 7, siteUrl: 'https://cw-s3.oa.dev', items: 3, batches: 2, stagers: ['ann@staff.example.test', 'bo@viewer.example.test'], digest: 'D1', actions: true, closed: false }
 
   describe('the real-delete button carries the minimum its confirm states', () => {
     const value = (minSoftDeleteDays?: number) => (renderParent({ ...base, runs: [run({})], minSoftDeleteDays }).blocks as { elements?: { action_id: string; value?: string }[] }[])
@@ -87,7 +87,7 @@ describe('renderParent', () => {
     const head = (v: Partial<Parameters<typeof renderParent>[0]>): string => (renderParent({ ...base, runs: [], ...v }).blocks[0] as { text: { text: string } }).text.text
     expect([
       head({}),
-      head({ queued: { items: 1, batches: 1, stagers: ['bo@coreweave.com'] } }),
+      head({ queued: { items: 1, batches: 1, stagers: ['bo@viewer.example.test'] } }),
     ]).toEqual([
       '*Staged for deletion* · plan #7: *3 prefixes*\nstaged by ann, bo',
       '*Staged for deletion* · plan #7: *1 prefix*\nstaged by bo',
@@ -155,7 +155,7 @@ describe('run events', () => {
     const site = 'https://cw-s3.oa.dev'
     const link = '<https://cw-s3.oa.dev/staged?run=cw-sweep-dry-1|cw-sweep-dry-1>'
     expect(runEvent(run({ finished_ts: null }), 'dispatched', { via: 'Slack' })).toBe(':test_tube: Dry-run dispatched by ann via Slack on scan 2026-09-28T1201 (`cw-sweep-dry-1`)')
-    expect(runEvent(run({ finished_ts: null }), 'dispatched', { via: 'www', names: { 'ann@openathena.ai': 'Ann Example' }, siteUrl: site }))
+    expect(runEvent(run({ finished_ts: null }), 'dispatched', { via: 'www', names: { 'ann@staff.example.test': 'Ann Example' }, siteUrl: site }))
       .toBe(`:test_tube: Dry-run dispatched by Ann Example via www on scan 2026-09-28T1201 (${link})`)
     expect(runEvent(run({ skipped_gone: 2 }), 'finished', { siteUrl: site })).toBe(`:test_tube: Dry-run ${link} finished: would delete *2.0 TiB* / 1,234 objects (gone since scan: 2, overwritten: 0).`)
     expect(runEvent(run({ mode: 'real', run_id: 'cw-sweep-real-1', undo_deadline: 1_790_604_800 }), 'finished')).toBe(':white_check_mark: Real deletion `cw-sweep-real-1` finished: deleted *2.0 TiB* / 1,234 objects; undoable until 2026-09-28 14:13Z (www).')
@@ -263,7 +263,7 @@ describe('names and sizes (plain text, never a mention)', () => {
   const base = { planId: 7, siteUrl: 'https://cw-s3.oa.dev', items: 3, batches: 2, stagers: [] as string[], digest: 'D1', actions: true, closed: false, runs: [] as RunRow[] }
   const size = { scan: '2026-10-02', b: 51 * 2 ** 40, o: 179327698, empty: 5, owners: [{ label: 'Grace Hopper', b: 16 * 2 ** 40 }, { label: 'hedy-lamarr', b: 6 * 2 ** 40 }] }
   it('the first line states the total; owners only when they hold most of it; stagers by Slack name (else the local part)', () => {
-    const v = { ...base, stagers: ['A.B@x.org', 'c.d@x.org'], names: { 'a.b@x.org': 'Ann Bee' } }
+    const v = { ...base, stagers: ['A.B@example.org', 'c.d@example.org'], names: { 'a.b@example.org': 'Ann Bee' } }
     const lines = (z: typeof size) => (renderParent({ ...v, size: z }).blocks[0] as { text: { text: string } }).text.text.split('\n')
     expect([lines(size), lines({ ...size, empty: 0, o: 999, b: 40 * 2 ** 40 })]).toEqual([
       [
@@ -364,8 +364,8 @@ describe('stage replies: compact, phone-width', () => {
 describe('senders', () => {
   it('an event posts as the person (their Slack avatar), else their local part with a generic icon', () => {
     expect([
-      personSender('a.b@x.org', { name: 'Ann Bee', image: 'https://img/a.png' }, 'staged'),
-      personSender('c.d@x.org', undefined, 'staged'),
+      personSender('a.b@example.org', { name: 'Ann Bee', image: 'https://img/a.png' }, 'staged'),
+      personSender('c.d@example.org', undefined, 'staged'),
       PLAN_SENDER,
     ]).toEqual([
       { username: 'Ann Bee · staged', icon_url: 'https://img/a.png' },

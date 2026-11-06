@@ -1,6 +1,25 @@
+import { encodeScan, resolveScan } from './scanSlug'
+
+/** The scan a `?d=` slug picks among `scans`: the one it spells in full (`2611040703`), else the newest it is a prefix
+ *  of (`261104`: that day's latest); null for no slug, or one naming no scan (the page then follows the newest). */
+export const pickedScan = (slug: string | undefined, scans: readonly string[]): string | null =>
+  slug ? scans.find(s => encodeScan(s) === slug) ?? resolveScan(slug, scans) : null
+
+/** What `?d=` holds for the scan picked in the menu: its compact id; nothing for the newest, which the page follows. */
+export const pickedSlug = (id: string, scans: readonly string[]): string | undefined => (id === scans[0] ? undefined : encodeScan(id))
+
 /** The scan `/staged` sizes at: the one picked, while the list still has it, else the newest (`scans` newest first). */
 export const sizedScan = (scans: readonly string[], picked: string | null): string =>
   picked && scans.includes(picked) ? picked : scans[0] ?? ''
+
+/** Why `/staged` dispatches nothing, dry or real, while it is sized at a scan (`sized`) other than the one a run reads
+ *  (`run`, the newest): what its run controls say in place of acting, and what a dispatch is refused with (`plans.ts`
+ *  `dispatchOptions`); null when they are the same scan. Everything a dispatch sends is read off the page's sizes: which
+ *  rows are still staged, so can be checked at all; the buckets a run can be cut to; the machine it gets; the total its
+ *  confirm names; its row's expected size. At another scan none of those is what the run reads, and the pick can arrive
+ *  in a link (`?d=`). */
+export const sizedAtOldScan = (sized: string, run: string): string | null =>
+  sized === run ? null : `Sizes are shown at scan ${sized}. A run reads the newest scan, ${run}. Switch "sized at scan" back to ${run} to dispatch.`
 
 /** What a real run on one scan recorded for a staged item (`deletion_bands`, not undone). Its amounts, if the run ended with a result;
  *  all zero if it didn't (killed, stopped, failed, still going, or by hand): that it deleted from the prefix, and not how much. */

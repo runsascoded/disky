@@ -151,8 +151,9 @@ def backfill_attribution(store: Store, gen: str, new_gen: str, scans_root: str, 
     for x in ("parquet", "groups.parquet", "json"):
         (out / "served" / f"{AT}.{x}").unlink(missing_ok=True)
     files = [str(p) for p in sorted((out / AT).glob("r*.parquet"))]
-    with ist.plan_cut(con, tree, files, rg_rows=rg_rows, what=f"cut {AT}") as (procs, budget):
-        sd = ist.write_served(con, files, AT, out / "served" / f"{AT}.parquet", ist.served_schema(AT), rg_rows=rg_rows, stamps=stamps,
+    pages = ist.served_page_rows(AT)
+    with ist.plan_cut(con, tree, files, rg_rows=rg_rows, what=f"cut {AT}", page_rows=pages) as (procs, budget):
+        sd = ist.write_served(con, files, AT, out / "served" / f"{AT}.parquet", ist.served_schema(AT), page_rows=pages, rg_rows=rg_rows, stamps=stamps,
                               procs=procs, budget=budget)
     (out / "served" / f"{AT}.json").write_text(json.dumps(sd, sort_keys=True) + "\n")
     (out / "scans.json").write_text(json.dumps(doc, indent=1) + "\n")

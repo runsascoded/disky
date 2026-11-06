@@ -515,17 +515,43 @@ describe('D1', () => {
       expect(raw.prepare('SELECT sid FROM session_log_batches').all()).toEqual([{ sid: 'sid-bbbbbb' }])
     })
 
-    it('the config GET purges past SESSION_LOG_RETAIN_DAYS — with logging off — at most hourly; a missing table is a nop', async () => {
-      const s = await setup({ SESSION_LOG_RETAIN_DAYS: '7' }, null)
-      const day = 86_400
-      s.raw.exec(`
+    const OLD_AND_NEW = (day: number) => `
       INSERT INTO session_log (sid, started_ms, last_ms, n_events, n_errors, n_batches, received_ts) VALUES
         ('old', 0, 0, 1, 0, 1, ${NOW / 1000 - 8 * day}), ('new', 0, 0, 1, 0, 1, ${NOW / 1000 - 6 * day});
-    `)
-      await s.call('GET', '')
+    `
+
+    it('an anonymous GET answers exactly as before and purges nothing, logging off or on', async () => {
+      const off = await setup({ SESSION_LOG_RETAIN_DAYS: '7' }, null)
+      const on = await setup({ SESSION_LOG_RETAIN_DAYS: '7' })
+      for (const s of [off, on]) s.raw.exec(OLD_AND_NEW(86_400))
+      purgeState.last = 0
+      expect([await off.call('GET', ''), await on.call('GET', '')]).toEqual([
+        [200, { enabled: false, until: null, reason: 'off', on: false, retainDays: 7 }],
+        [200, { enabled: false, until: Date.UTC(2026, 9, 18), reason: 'no viewer identity', on: true, retainDays: 7 }],
+      ])
+      expect([
+        purgeState.last,
+        off.raw.prepare('SELECT sid FROM session_log ORDER BY sid').all(),
+        on.raw.prepare('SELECT sid FROM session_log ORDER BY sid').all(),
+      ]).toEqual([0, [{ sid: 'new' }, { sid: 'old' }], [{ sid: 'new' }, { sid: 'old' }]])
+    })
+
+    it('an anonymous GET on a PUBLIC_READ deploy: logged, and it purges nothing either', async () => {
+      const pub = await setup({ PUBLIC_READ: '1', SESSION_LOG_RETAIN_DAYS: '7' })
+      pub.raw.exec(OLD_AND_NEW(86_400))
+      purgeState.last = 0
+      expect(await pub.call('GET', '')).toEqual([200, { enabled: true, until: Date.UTC(2026, 9, 18), reason: null, on: true, retainDays: 7 }])
+      expect([purgeState.last, pub.raw.prepare('SELECT sid FROM session_log ORDER BY sid').all()]).toEqual([0, [{ sid: 'new' }, { sid: 'old' }]])
+    })
+
+    it('a viewer\'s config GET purges past SESSION_LOG_RETAIN_DAYS — with logging off — at most hourly; a missing table is a nop', async () => {
+      const s = await setup({ SESSION_LOG_RETAIN_DAYS: '7' }, null)
+      const day = 86_400
+      s.raw.exec(OLD_AND_NEW(day))
+      await s.call('GET', '', { token: s.viewer })
       expect(s.raw.prepare('SELECT sid FROM session_log').all()).toEqual([{ sid: 'new' }])
       vi.setSystemTime(NOW + 2 * day * 1000)
-      await s.call('GET', '')
+      await s.call('GET', '', { token: s.viewer })
       expect(s.raw.prepare('SELECT sid FROM session_log').all()).toEqual([])
       const bare = await setup()
       bare.raw.exec('DROP TABLE session_log; DROP TABLE session_log_batches')

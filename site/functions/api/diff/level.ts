@@ -172,7 +172,10 @@ async function levelsOf(ctx0: Ctx, member?: MemberLevel): Promise<Response> {
       }
       const levels = [...out.values()].map(l => (l.next && shut(l.next) ? { ...l, next: undefined } : l))
       st.mark('fixed')
-      const body = JSON.stringify({ from, to, k, m, levels, ...(more.length ? { more } : {}), ...(wide.length ? { wide } : {}) })
+      // A chain can walk into a hidden dir before its levels are dropped: the ones it left unread are named here.
+      const later = more.filter(p => !shut(p))
+      const tooWide = wide.filter(p => !shut(p))
+      const body = JSON.stringify({ from, to, k, m, levels, ...(later.length ? { more: later } : {}), ...(tooWide.length ? { wide: tooWide } : {}) })
       await syncClock()
       st.lap('encode')
       return new Response(body, {

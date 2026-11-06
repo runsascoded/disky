@@ -11,14 +11,14 @@
   "2026-08-05": 1785888000
  },
  "rows": 36,
- "bytes": 104481,
+ "bytes": 80669,
  "sorts": {
   "path": {
    "sort": "path",
    "rows": 36,
    "groups": 9,
-   "bytes": 30574,
-   "groups_bytes": 6167,
+   "bytes": 19327,
+   "groups_bytes": 5559,
    "segments": {
     "open": {
      "groups": 6,
@@ -35,8 +35,8 @@
    "sort": "bysize",
    "rows": 36,
    "groups": 9,
-   "bytes": 30660,
-   "groups_bytes": 6164,
+   "bytes": 19303,
+   "groups_bytes": 5564,
    "segments": {
     "open": {
      "groups": 6,
@@ -82,5 +82,5 @@
    "extra": 0
   }
  },
- "check_s": -0.0
+ "check_s": 0.0
 }

@@ -431,7 +431,8 @@ def cut_level(con, root: str, out: Path, *, rg_rows: int = ist.SERVED_RG, tree: 
     files = sorted(str(p) for p in Path(root, "pvl").glob("r*.parquet"))
     extra = ilv.extra_rows(con, files) if tree is not None else 0
     with ist.plan_cut(con, tree, files, rg_rows=rg_rows, what=f"cut {ilv.LEVEL}", extra_rows=extra, sort_cols=len(ilv.LEVEL_SCHEMA)) as (procs, budget):
-        doc = ist.write_served(con, level_source(root), ilv.LEVEL, out / f"{ilv.LEVEL}.parquet", ilv.LEVEL_SCHEMA, rg_rows=rg_rows, opened=ilv.RUN_OPENED,
+        doc = ist.write_served(con, level_source(root), ilv.LEVEL, out / f"{ilv.LEVEL}.parquet", ilv.LEVEL_SCHEMA, page_rows=ist.served_page_rows(ilv.LEVEL),
+                               rg_rows=rg_rows, opened=ilv.RUN_OPENED,
                                procs=procs, budget=budget)
     doc["s"] = round(monotonic() - t0, 1)
     out.mkdir(parents=True, exist_ok=True)
@@ -444,8 +445,10 @@ def cut_run(con, root: str, out: Path, *, rg_rows: int = ist.SERVED_RG, sliced: 
     """A run's served sorts (`run_sorts(sliced)`, the attribution sort when the run holds its table, the level sort with
     `level`: `cut_level`) from its delta files under `root` → `out/<sort>.parquet` + `.groups.parquet` + `<sort>.json`.
     Open versions then close records (`seg_sql` without stamps: segment 0, then 1). `GENERATION` in
-    `interval_store.GENERATION_SORT` with `generation`. `tree`: the process tree's budget each sort's workers and DuckDB
-    limit are planned under (`interval_store.plan_cut`, over its delta files); None: every core, DuckDB's limit as set."""
+    `interval_store.GENERATION_SORT` with `generation`. Only the level sort is paged (`interval_store.served_page_rows`),
+    whatever the runs a carry merges were cut with: it reads their delta files, never their served sorts. `tree`: the
+    process tree's budget each sort's workers and DuckDB limit are planned under (`interval_store.plan_cut`, over its
+    delta files); None: every core, DuckDB's limit as set."""
     docs = {}
     for sort in run_sorts(sliced, has_table(root, AT), level):
         if sort == ilv.LEVEL:
@@ -455,8 +458,9 @@ def cut_run(con, root: str, out: Path, *, rg_rows: int = ist.SERVED_RG, sliced: 
         t0 = monotonic()
         schema = ist.served_schema(sort, generation, churn)
         files = sorted(str(p) for p in Path(root, sub).glob("r*.parquet"))
-        with ist.plan_cut(con, tree, files, rg_rows=rg_rows, what=f"cut {sort}", sort_cols=len(schema)) as (procs, budget):
-            doc = ist.write_served(con, delta_relation(root, sub, cols=schema.names), sort, out / f"{sort}.parquet", schema, rg_rows=rg_rows,
+        pages = ist.served_page_rows(sort)
+        with ist.plan_cut(con, tree, files, rg_rows=rg_rows, what=f"cut {sort}", sort_cols=len(schema), page_rows=pages) as (procs, budget):
+            doc = ist.write_served(con, delta_relation(root, sub, cols=schema.names), sort, out / f"{sort}.parquet", schema, page_rows=pages, rg_rows=rg_rows,
                                    procs=procs, budget=budget)
         doc["s"] = round(monotonic() - t0, 1)
         (out / f"{sort}.json").write_text(json.dumps(doc, sort_keys=True) + "\n")

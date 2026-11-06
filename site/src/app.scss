@@ -2941,6 +2941,8 @@ kbd { font: inherit; font-size: 11px; padding: 0 4px; border: 1px solid var(--li
     &.danger { border-color: var(--danger); color: var(--danger); font-weight: 650; }
     &.danger.armed { background: var(--danger); color: #fff; }
   }
+  // A run control shown but unavailable (`RunButton`: sized at an older scan): `aria-disabled`, so its tip still opens.
+  .dispatch button[aria-disabled="true"] { opacity: 0.45; cursor: help; &:not(.danger):hover { border-color: var(--line); } }
   .close-plan button, .run-detail button.more, .runs-pg button {
     font: inherit; font-size: 13px; padding: 3px 12px; cursor: pointer;
     background: var(--panel); color: var(--ink); border: 1px solid var(--line); border-radius: 6px;
