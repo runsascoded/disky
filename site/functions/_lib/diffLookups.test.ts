@@ -1,0 +1,126 @@
+import { beforeAll, describe, expect, it, vi } from 'vitest'
+import type { Env } from './auth'
+import { sqliteD1 } from './testD1'
+import { type D1Variant, readJson, seedGeneration } from './testStore'
+import { buildDiff, type Diff, type DiffRow } from './view'
+
+vi.mock('@rdub/file-tree/stores/s3', async () => ({ S3Store: (await import('./testStore')).S3Store }))
+
+// The diff walk's point lookups (`buildDiff`: a name one scan drew, read on the other) over `fixtures/v2-diff/`: two
+// store generations of bucket `bk` (`fixtures/gen.py`, MiB), `B` after a deletion.
+//
+//   A: del/x/p/{1,2} 256 each, del/x/q/1 256, del/y 128 · shrink/{a,b} 100 each · keep/k 300 ·
+//      deep/d1/big 400, deep/d1/stay 200 · tiny/t 1
+//   B: shrink/a 8 · keep/k 300 · deep/d1/stay 200 · new1 64 · tiny/t 1
+//
+// Diffed at `bk` with a 16 MiB floor doubling per level (`atten: 2`): `del`'s subtree (8 names) is drawn on A only,
+// `shrink` on A only though B still holds it (8 MiB, under the floor), `deep/d1/big` on A only under a directory both
+// draw, `new1` on B only; `tiny` is under the floor on both.
+
+const A = '2026-09-28T0001'
+const B = '2026-09-29T0001'
+const MiB = 1 << 20
+let env: Env
+
+beforeAll(async () => {
+  ;(globalThis as unknown as { caches: unknown }).caches = { default: { match: async () => undefined, put: async () => {} } }
+  const { db, raw } = await sqliteD1()
+  const files = (scan: string) => ({ path: { parquet: `v2-diff/${scan}/path-index.parquet`, groups: `v2-diff/${scan}/path-index.groups.json` }, bysize: { parquet: `v2-diff/${scan}/path-index-bysize.parquet`, groups: `v2-diff/${scan}/path-index-bysize.groups.json` } })
+  seedGeneration(raw, { date: A, gen: 'ga', dir: `cw-l2/${A}/index/ga`, variants: await readJson<Record<string, D1Variant>>('v2-diff/a/d1.json'), files: files('a') })
+  seedGeneration(raw, { date: B, gen: 'gb', dir: `cw-l2/${B}/index/gb`, variants: await readJson<Record<string, D1Variant>>('v2-diff/b/d1.json'), files: files('b') })
+  env = { DB: db, ROOT_LABEL: 'root', GCS_HMAC_KEY_ID: 'k', GCS_HMAC_SECRET: 's' } as Env
+})
+
+const row = (p: string, d: number, k: DiffRow['k'], s: DiffRow['s'], a: number, b: number, oa: number, ob: number, more: Pick<DiffRow, 'x' | 'l'> = {}): DiffRow =>
+  ({ p, d, k, s, a: a * MiB, b: b * MiB, oa, ob, ...more })
+const x = { x: true } as const
+
+/** `del`'s subtree as A drew it, every name absent on B. */
+const DEL_BELOW = [
+  row('del/x/p/1', 4, 'file', 'removed', 256, 0, 1, 0),
+  row('del/x/p/2', 4, 'file', 'removed', 256, 0, 1, 0),
+  row('del/x/q/1', 4, 'file', 'removed', 256, 0, 1, 0),
+  row('del/y', 2, 'file', 'removed', 128, 0, 1, 0),
+]
+/** The whole answer A → B: every name either scan drew, with its size on both. */
+const WHOLE: Diff = {
+  rows: [
+    row('deep', 1, 'dir', 'changed', 600, 200, 2, 1, x),
+    row('del', 1, 'dir', 'removed', 896, 0, 4, 0, x),
+    // B holds `shrink` under the floor: read there (`l: 2`), and its names read too.
+    row('shrink', 1, 'dir', 'changed', 200, 8, 2, 1, { ...x, l: 2 }),
+    row('deep/d1', 2, 'dir', 'changed', 600, 200, 2, 1, x),
+    row('del/x', 2, 'dir', 'removed', 768, 0, 3, 0, x),
+    row('del/x/p', 3, 'dir', 'removed', 512, 0, 2, 0, x),
+    row('del/x/q', 3, 'dir', 'removed', 256, 0, 1, 0, x),
+    row('deep/d1/big', 3, 'file', 'removed', 400, 0, 1, 0),
+    ...DEL_BELOW,
+    row('shrink/b', 2, 'file', 'removed', 100, 0, 1, 0),
+    row('shrink/a', 2, 'file', 'changed', 100, 8, 1, 1, { l: 2 }),
+    row('new1', 1, 'file', 'added', 0, 64, 0, 1),
+  ],
+  total_a: 1997 * MiB, total_b: 573 * MiB, objects_a: 10, objects_b: 5, threshold: 16 * MiB, tier: 'path',
+  expansions: 8, truncated: false,
+  // `del`, `shrink`, `new1` and `deep/d1/big` (their parents are on both scans), then `shrink/{a,b}` (B holds
+  // `shrink`). Nothing under `del`: B has no row for it, so none for what is under it.
+  lookups: 6, lookups_capped: false,
+}
+
+/** `d` with its scans swapped (B → A). */
+const swapped = (d: Diff): Diff => ({
+  ...d,
+  rows: d.rows.map(r => ({ ...r, a: r.b, b: r.a, oa: r.ob, ob: r.oa, s: r.s === 'added' ? 'removed' : r.s === 'removed' ? 'added' : r.s, ...(r.l ? { l: r.l === 1 ? 2 : 1 } : {}) } as DiffRow)),
+  total_a: d.total_b, total_b: d.total_a, objects_a: d.objects_b, objects_b: d.objects_a,
+})
+
+describe('a diff\'s lookups', () => {
+  const base = { path: 'bk', w: 1280, h: 800, minArea: 12, atten: 2, top: 500, threshold: 16 * MiB }
+
+  it('a deleted subtree costs one lookup: what is under it is drawn with its sizes, unread', async () => {
+    const rounds: number[] = []
+    const d = await buildDiff(env, { ...base, from: A, to: B, trace: (n, v) => { if (n === 'rounds') rounds.push(v) } })
+    expect(d).toEqual(WHOLE)
+    // Two rounds of reads for four levels of names: the first four lookups at once, whatever their depth, then
+    // `shrink`'s two.
+    expect(rounds).toEqual([1, 1])
+  })
+
+  it('the same the other way round: an added subtree is one lookup on the older scan', async () => {
+    expect(await buildDiff(env, { ...base, from: B, to: A })).toEqual(swapped(WHOLE))
+  })
+
+  it('a directory under the floor is not absent: its names are read, and drawn with what they hold', async () => {
+    const d = await buildDiff(env, { ...base, from: A, to: B })
+    expect(d.rows.filter(r => r.p.startsWith('shrink'))).toEqual([
+      row('shrink', 1, 'dir', 'changed', 200, 8, 2, 1, { ...x, l: 2 }),
+      row('shrink/b', 2, 'file', 'removed', 100, 0, 1, 0),
+      row('shrink/a', 2, 'file', 'changed', 100, 8, 1, 1, { l: 2 }),
+    ])
+  })
+
+  it('a budget short of the names is spent on the heaviest, whatever their depth', async () => {
+    // Two lookups: `del` (896 MiB, depth 1) and `deep/d1/big` (400, depth 3) before `shrink` (200) and `new1` (64),
+    // which stay in `bk`'s `(other)` on both scans (201 → 73 MiB with `tiny`).
+    expect(await buildDiff(env, { ...base, from: A, to: B, lookupCap: 2 })).toEqual({
+      ...WHOLE,
+      rows: [
+        row('deep', 1, 'dir', 'changed', 600, 200, 2, 1, x),
+        row('del', 1, 'dir', 'removed', 896, 0, 4, 0, x),
+        row('deep/d1', 2, 'dir', 'changed', 600, 200, 2, 1, x),
+        row('del/x', 2, 'dir', 'removed', 768, 0, 3, 0, x),
+        row('del/x/p', 3, 'dir', 'removed', 512, 0, 2, 0, x),
+        row('del/x/q', 3, 'dir', 'removed', 256, 0, 1, 0, x),
+        row('deep/d1/big', 3, 'file', 'removed', 400, 0, 1, 0),
+        ...DEL_BELOW,
+        row('(other)', 1, 'dir', 'changed', 201, 73, 3, 3),
+      ],
+      expansions: 7, lookups: 2, lookups_capped: true,
+    })
+  })
+
+  it('a budget of exactly the names read is the whole answer', async () => {
+    // Six: the level-by-level walk spent them on `del`'s subtree (13 names one scan drew) and folded the rest.
+    expect(await buildDiff(env, { ...base, from: A, to: B, lookupCap: 6 })).toEqual(WHOLE)
+    expect(await buildDiff(env, { ...base, from: A, to: B, lookupCap: 1e9 })).toEqual(WHOLE)
+  })
+})
