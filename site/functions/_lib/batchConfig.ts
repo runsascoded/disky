@@ -1,8 +1,8 @@
 // The deployment's GCP Batch settings for the sweep executors
 // (specs/done/oa-decoupling.md step 5): which project the jobs run in, where, from
 // which image, against which data bucket. All from `[vars]`; nothing here
-// names a deployment. A route asks for the keys it needs and answers 503
-// naming the first one unset.
+// names a deployment, the region included (`BATCH_REGION`: no default). A route
+// asks for the keys it needs and answers 503 naming the first one unset.
 import { type Labels, parseLabels } from './costLabels.js'
 
 /** The `[vars]` (and the `GCP_SA_KEY` secret) the executors read. */
@@ -13,7 +13,11 @@ export interface BatchEnv {
   GCP_SA_KEY?: string
   /** Full resource name of an IaC-managed, task-log-only Logging view. */
   GCP_LOG_VIEW?: string
-  /** The default Batch region (a job whose buckets span regions runs here). */
+  /** The deployment's Batch region: where a job whose buckets name no one
+   *  region of their own (`BUCKET_REGIONS`) runs. No default: a job belongs
+   *  beside its buckets, and only the deployment knows where those are. The
+   *  plan-sweep routes need it (their jobs always run there); a sweep whose
+   *  cut `BUCKET_REGIONS` places in one region doesn't. */
   BATCH_REGION?: string
   /** `{bucket: region}` as JSON: a one-region bucket cut runs its job there,
    *  beside the data. Unset: every job in `BATCH_REGION`. */
@@ -53,9 +57,7 @@ export interface BatchConfig {
   labels?: Labels
 }
 
-export type BatchKey = 'GCP_PROJECT' | 'DATA_BUCKET' | 'SWEEP_IMAGE' | 'CF_ACCOUNT_ID' | 'SWEEP_S3_ENDPOINT' | 'D1_DB_ID'
-
-export const DEFAULT_BATCH_REGION = 'us-central1'
+export type BatchKey = 'GCP_PROJECT' | 'BATCH_REGION' | 'DATA_BUCKET' | 'SWEEP_IMAGE' | 'CF_ACCOUNT_ID' | 'SWEEP_S3_ENDPOINT' | 'D1_DB_ID'
 
 const projectOfKey = (saKey?: string): string => {
   if (!saKey) return ''
@@ -67,7 +69,7 @@ const projectOfKey = (saKey?: string): string => {
 export function batchConfig(env: BatchEnv, need: readonly BatchKey[]): BatchConfig | { missing: BatchKey } {
   const cfg: BatchConfig = {
     project: env.GCP_PROJECT || projectOfKey(env.GCP_SA_KEY),
-    region: env.BATCH_REGION || DEFAULT_BATCH_REGION,
+    region: env.BATCH_REGION ?? '',
     bucketRegions: env.BUCKET_REGIONS ? JSON.parse(env.BUCKET_REGIONS) as Record<string, string> : {},
     dataBucket: env.DATA_BUCKET ?? '',
     image: env.SWEEP_IMAGE ?? '',
@@ -78,7 +80,7 @@ export function batchConfig(env: BatchEnv, need: readonly BatchKey[]): BatchConf
     labels: parseLabels(env.DISKY_LABELS),
   }
   const field: Record<BatchKey, keyof BatchConfig> = {
-    GCP_PROJECT: 'project', DATA_BUCKET: 'dataBucket', SWEEP_IMAGE: 'image', CF_ACCOUNT_ID: 'cfAccountId', SWEEP_S3_ENDPOINT: 's3Endpoint', D1_DB_ID: 'd1DbId',
+    GCP_PROJECT: 'project', BATCH_REGION: 'region', DATA_BUCKET: 'dataBucket', SWEEP_IMAGE: 'image', CF_ACCOUNT_ID: 'cfAccountId', SWEEP_S3_ENDPOINT: 's3Endpoint', D1_DB_ID: 'd1DbId',
   }
   const missing = need.find(k => !cfg[field[k]])
   return missing ? { missing } : cfg

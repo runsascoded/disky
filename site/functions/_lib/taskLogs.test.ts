@@ -12,7 +12,7 @@ const CREATED = '2026-10-05T02:47:18.280290576Z'
 const UNTIL = '2026-10-05T16:30:00.000Z'
 const UID = 'gcs-sweep-real-202-e41f66a7-9ad5-46400'
 const name = `projects/proj/locations/us-central1/jobs/${JOB}`
-const env = { GCP_PROJECT: 'proj', GCP_SA_KEY: 'key', GCP_LOG_VIEW: VIEW }
+const env = { GCP_PROJECT: 'proj', BATCH_REGION: 'us-central1', GCP_SA_KEY: 'key', GCP_LOG_VIEW: VIEW }
 const request = (query: string) => new Request(`https://gcs.example/api/sweep/logs?${query}`)
 const get = async (query: string, overrides = {}) => { const r = await onRequestGet({ request: request(query), env: { ...env, ...overrides } }); return [r.status, await r.json()] }
 
@@ -59,11 +59,14 @@ describe('authenticated task-log endpoint', () => {
       get(`job=${JOB}`, { GCP_LOG_VIEW: VIEW.replace('proj', 'other') }),
       get('job=unrelated-job'), get(`job=${JOB}&region=other`), get(`job=${JOB}&cursor=x`),
       get(`job=${JOB}&until=bad`), get(`job=${JOB}&until=2099-01-01`),
+      // no `region=` and no BATCH_REGION: there is no region to default to
+      get(`job=${JOB}`, { BATCH_REGION: undefined }),
     ])).toEqual([
       [503, { error: 'Task logs not configured (GCP_SA_KEY / GCP_LOG_VIEW)' }],
       [503, { error: 'Invalid task-log view configuration' }],
       [400, { error: 'Invalid sweep job or region' }], [400, { error: 'Invalid sweep job or region' }],
       [400, { error: 'Invalid log cursor or upper time bound' }], [400, { error: 'Invalid log cursor or upper time bound' }], [400, { error: 'Invalid log cursor or upper time bound' }],
+      [400, { error: 'Invalid sweep job or region' }],
     ])
     expect(fetch).not.toHaveBeenCalled()
   })

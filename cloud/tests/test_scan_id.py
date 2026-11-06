@@ -100,10 +100,10 @@ def test_submit_listing_keys_by_scan_id(monkeypatch):
     calls = []
     monkeypatch.setattr("dt_cloud.batch.listing_regions", lambda: {})
     monkeypatch.setattr("dt_cloud.batch.listing_job_spec", lambda date, buckets, **kw: {"date": date, "buckets": buckets})
-    monkeypatch.setattr("dt_cloud.batch.submit_job", lambda spec, region: calls.append((spec, region)) or "job-1")
+    monkeypatch.setattr("dt_cloud.batch.submit_job", lambda spec, region, cross_region: calls.append((spec, region, cross_region)) or "job-1")
     r = CliRunner().invoke(main, ["job", "submit-listing", "-d", "2026-10-09T0601", "-b", "b1"])
     assert (r.exit_code, r.stdout) == (0, "job-1\n")
-    assert calls == [({"date": "2026-10-09T0601", "buckets": ["b1"]}, "us-central1")]
+    assert calls == [({"date": "2026-10-09T0601", "buckets": ["b1"]}, "my-region", None)]
 
 
 @pytest.mark.parametrize("v, ok", [

@@ -189,6 +189,17 @@ dt-cloud image-sha [-e SHA [-a]] [-j]  # The running image's source revision (`i
                           # `<sha> dirty` or `unstamped`; `-e` exits 1 unless the image is that sha (or a ≥7-char prefix),
                           # clean (`-a` accepts dirty) and stamped. Job entrypoints (`scan head`/`step`, the
                           # `interval-store` stage tasks) log it
+dt-cloud batch submit -c COMPONENT [-L REGION] [-b BUCKET]… [-X] JOB_ID SPEC  # The shell's Batch submit, through `batch.submit_job` (the
+                          # one place a job is created): labelled from `$DISKY_LABELS` + `-c` on the job and its allocation policy
+                          # (`cost_labels.py`), in `-L`, else `$BATCH_REGION`. There is no default region (`deploy.batch_region`): neither
+                          # set is an error, here and in `job status|logs|watch|metrics`, `batch-cancel` (`-r`), `sweep sync-progress`,
+                          # `scan-run task`, and `job submit-listing` for a bucket `$LISTING_REGIONS` doesn't name. A job whose VMs
+                          # (`allocationPolicy.location.allowedLocations`, else the region) run outside the location of a bucket it
+                          # mounts (gcsfuse volumes) or names (`-b`) is refused (`batch.check_region`: one `buckets.get` per bucket
+                          # per process; a multi-region bucket takes its continent's regions, a dual-region its two) unless
+                          # `-X/--cross-region` (`job submit-listing -X` too; `$BATCH_CROSS_REGION=1` for the submitters with no flag:
+                          # the static-names / interval-store runners, `scan-run task`). A bucket whose location can't be read is
+                          # noted on stderr and not checked; a bucket reached only by URL and not named isn't seen
 dt-cloud soft-delete -b BUCKET… [-o ROOT…] [-j]  # Each bucket's GCS soft-delete retention now (`soft_delete.py`, read with
                           # `storage.buckets.get`): what a sweep's undo has to work with, since GCS restores nothing from a bucket whose
                           # policy is off. `-o`: the day's `<ROOT>/<date>.json`; the opt-in scan step `soft-delete` writes it under

@@ -27,7 +27,7 @@ export const onRequestPost = async (ctx: Ctx & { env: Env }): Promise<Response> 
   if (!ctx.env.DB) return json({ error: "not configured (no D1 binding)" }, 503)
   if (!ctx.env.GCP_SA_KEY) return json({ error: "not configured (no GCP_SA_KEY)" }, 503)
   if (!ctx.env.JOB_SA) return json({ error: "not configured (no JOB_SA)" }, 503)
-  const cfg = batchConfig(ctx.env, ["GCP_PROJECT", "DATA_BUCKET", "SWEEP_IMAGE", "SWEEP_S3_ENDPOINT"])
+  const cfg = batchConfig(ctx.env, ["GCP_PROJECT", "BATCH_REGION", "DATA_BUCKET", "SWEEP_IMAGE", "SWEEP_S3_ENDPOINT"])
   if ("missing" in cfg) return json({ error: notConfigured("undo", cfg.missing) }, 503)
   const shape = prefixShape(ctx.env)
   if (!shape) return json({ error: `undo ${NO_SHAPE}` }, 503)

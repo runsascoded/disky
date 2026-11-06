@@ -1,7 +1,8 @@
 """Every test runs as a deployment with a neutral data bucket and site
 (`dt_cloud.deploy`): dt-cloud has no default of its own. A test of the unset
 case removes them with `monkeypatch.delenv`. The layer-2 template and the
-static-names profile start unset. Cost labels are required (specs/done/cost-labels-required.md):
+static-names profile start unset. The Batch region is a neutral one too (`BATCH_REGION=my-region`: no default
+either), with no cross-region override. Cost labels are required (specs/done/cost-labels-required.md):
 every test runs as deployment `test` (`DISKY_LABELS=app=disky,deployment=test`), never the shell's;
 a test of the missing case removes or replaces it.
 
@@ -90,8 +91,9 @@ def _deployment_env(monkeypatch):
     monkeypatch.setenv("DATA_BUCKET", "my-data")
     monkeypatch.setenv("SITE_URL", "https://site.example.org")
     monkeypatch.setenv("DISKY_LABELS", "app=disky,deployment=test")
+    monkeypatch.setenv("BATCH_REGION", "my-region")
     # Deployment config the generic code requires (no defaults): unset unless a test sets it.
-    for v in ("LAYER2_PREFIX", "STATIC_NAMES_PROFILE", "STATIC_NAMES_GEN", "SCAN_RUN_ID", "SCAN_ID"):
+    for v in ("LAYER2_PREFIX", "STATIC_NAMES_PROFILE", "STATIC_NAMES_GEN", "SCAN_RUN_ID", "SCAN_ID", "BATCH_CROSS_REGION", "LISTING_REGIONS"):
         monkeypatch.delenv(v, raising=False)
     # the cw digest's scan triggers come from the site (`/api/scan-runs`): none recorded, unless a test says otherwise
     from dt_cloud import digest_cw

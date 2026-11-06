@@ -147,9 +147,21 @@ def test_cli_submit_resume_and_failure(monkeypatch, mode, state, expected_code):
         assert loads(result.output) == {"job": name, "shape": SHAPES["compute"], "labels": spec["labels"]}
         assert calls == []
     else:
-        assert calls == ([("submit", spec, name, "us-central1")] if mode == "new" else []) + [("wait", [(name, "us-central1")], 15)]
-        assert logs == [f"scan task {'submitted' if mode == 'new' else 'resumed'}: {name} [us-central1]"]
+        assert calls == ([("submit", spec, name, "my-region")] if mode == "new" else []) + [("wait", [(name, "my-region")], 15)]
+        assert logs == [f"scan task {'submitted' if mode == 'new' else 'resumed'}: {name} [my-region]"]
         assert result.output.splitlines() == ([f"{name}: FAILED"] if state == "FAILED" else [])
+
+
+def test_cli_needs_the_controllers_region(monkeypatch):
+    """The controller's job is found, and its workers submitted, in `$BATCH_REGION`: unset, nothing is looked up."""
+    from dt_cloud import gcp
+
+    monkeypatch.setenv("BATCH_JOB_UID", "root-uid")
+    monkeypatch.delenv("BATCH_REGION")
+    monkeypatch.setattr(gcp, "session", lambda: pytest.fail("reached the network"))
+    result = CliRunner().invoke(task_cmd, ["-s", "compute", SCAN])
+    assert (result.exit_code, result.output) == (
+        1, "no Batch region: export BATCH_REGION (the region the deployment's Batch jobs run in, beside its buckets)\n")
 
 
 def test_worker_owns_ssd_mount_even_with_a_boot_disk_only_controller():

@@ -10,12 +10,13 @@ own procs x threads prefix streams do the scaling.
 from __future__ import annotations
 
 import json
+import sys
 import time
 from typing import Mapping, Sequence
 
 from .cost_labels import check_spec, label_batch_spec
-from .deploy import data_bucket as env_data_bucket, env, require, words
-from .gcp import REGION, batch_job, gcp_project, session
+from .deploy import batch_region, data_bucket as env_data_bucket, env, require, words
+from .gcp import batch_job, gcp_project, session
 
 
 def fleet_buckets() -> list[str]:
@@ -27,8 +28,8 @@ def fleet_buckets() -> list[str]:
 def listing_regions() -> dict[str, str]:
     """`{bucket: region}` (`$LISTING_REGIONS`, JSON): list a bucket from a VM near
     it. Cross-ocean list pages pay full RTT per page (a European bucket listed
-    from us-central1 measured ~10x slower than same-continent). Unset = every
-    bucket from `REGION`."""
+    from another continent measured ~10x slower than same-continent). A bucket
+    it doesn't name is listed from `$BATCH_REGION` (`deploy.batch_region`)."""
     return json.loads(env("LISTING_REGIONS") or "{}")
 
 
@@ -54,7 +55,7 @@ def listing_job_spec(
     machine: str = "n2-standard-32",
     procs: int = 24,
     threads: int = 10,
-    region: str = REGION,
+    region: str | None = None,
     legacy: Mapping[str, str] | None = None,
     image: str | None = None,
     service_account: str | None = None,
@@ -69,7 +70,7 @@ def listing_job_spec(
     FUSE-mounted (the buckets read-only, for the weights scan); object pages
     stream via the API and shards write via gs://.
     """
-    data_bucket = data_bucket or env_data_bucket()
+    data_bucket, region = data_bucket or env_data_bucket(), batch_region(region)
     legacy = dict(legacy or {})
     old_dirs = "".join(f" /gcs/{data_bucket}/{sub}/*" for sub in legacy.values())
     old_cases = "".join(f' */{sub}/*) [ "$b" = {b} ] || continue;;' for b, sub in legacy.items())
@@ -133,12 +134,107 @@ disk-tree bulk-list "gcs://$b" -o "gs://{listing_dir(data_bucket, date, "$b")}" 
     }, "listing", scan_id=date)
 
 
-def submit_job(spec: dict, job_id: str | None = None, region: str = REGION, project: str | None = None) -> str:
-    """POST a Batch job (in `project`, default `gcp_project()`); returns its short name (server-generated if no id).
+#: A multi-region bucket location → the prefix of the regions inside it. By name, so by continent: `US` is every `us-*`
+#: region; `EU` takes every `europe-*` one (London and Zurich too, which the EU multi-region stores nothing in); the
+#: `northamerica-*` / `southamerica-*` regions are in none.
+MULTI_REGIONS = {"US": "us-", "EU": "europe-", "ASIA": "asia-"}
+#: A predefined dual-region location → its two regions (a configurable one names its own: `customPlacementConfig`).
+DUAL_REGIONS = {
+    "ASIA1": ("asia-northeast1", "asia-northeast2"),
+    "EUR4": ("europe-north1", "europe-west4"),
+    "EUR5": ("europe-west1", "europe-west2"),
+    "EUR7": ("europe-west2", "europe-west3"),
+    "EUR8": ("europe-west3", "europe-west6"),
+    "NAM4": ("us-central1", "us-east1"),
+}
+#: `$BATCH_CROSS_REGION=1`: `submit_job`'s `cross_region` for a submitter with no flag of its own (the static-names and
+#: interval-store runners, `scan-run task`).
+CROSS_REGION_ENV = "BATCH_CROSS_REGION"
 
-    The one place dt-cloud creates a Batch job (`tests/test_cost_labels.py` greps for others): a spec missing a required
-    cost label on the job or its allocation policy is refused here (`cost_labels.check_spec`), before the network."""
-    check_spec(spec, f"Batch job {job_id or '(unnamed)'}")
+_LOCATIONS: dict[str, dict | str] = {}
+
+
+class CrossRegion(ValueError):
+    """A Batch job would run outside the region of a bucket it mounts or names (`check_region`)."""
+
+
+def bucket_location(bucket: str) -> dict | str:
+    """`bucket`'s `location`, `locationType` and `customPlacementConfig` (`buckets.get`), or why they can't be read
+    (`HTTP <status>`: no `storage.buckets.get` there, or no such bucket). One GET per bucket per process."""
+    if bucket not in _LOCATIONS:
+        r = session().get(f"https://storage.googleapis.com/storage/v1/b/{bucket}", params={"fields": "location,locationType,customPlacementConfig"})
+        _LOCATIONS[bucket] = r.json() if r.status_code == 200 else f"HTTP {r.status_code}"
+    return _LOCATIONS[bucket]
+
+
+def in_location(region: str, location: Mapping) -> bool | None:
+    """Whether a VM in `region` is inside a bucket's `location` (`bucket_location`): the region itself; one of a
+    dual-region's two (`DUAL_REGIONS`, or its `customPlacementConfig.dataLocations`); any region of a multi-region's
+    continent (`MULTI_REGIONS`). None: a multi- or dual-region code neither table knows."""
+    if placed := (location.get("customPlacementConfig") or {}).get("dataLocations"):
+        return region in {r.lower() for r in placed}
+    code = location["location"].upper()
+    if code in DUAL_REGIONS:
+        return region in DUAL_REGIONS[code]
+    if code in MULTI_REGIONS:
+        return region.startswith(MULTI_REGIONS[code])
+    return None if location.get("locationType") in ("multi-region", "dual-region") else region == code.lower()
+
+
+def job_regions(spec: Mapping, region: str) -> list[str]:
+    """The regions a job's VMs may run in: its `allocationPolicy.location.allowedLocations` (`regions/<r>`, or a
+    `zones/<r>-<z>`'s region), else the `region` it is submitted to."""
+    allowed = ((spec.get("allocationPolicy") or {}).get("location") or {}).get("allowedLocations") or []
+    regions = [name.rsplit("-", 1)[0] if kind == "zones" else name for kind, _, name in (a.partition("/") for a in allowed)]
+    return list(dict.fromkeys(regions)) or [region]
+
+
+def mounted_buckets(spec: Mapping) -> list[str]:
+    """The buckets a job's tasks mount by gcsfuse (`taskSpec.volumes[].gcs.remotePath`, a bucket or `<bucket>/<dir>`)."""
+    return list(dict.fromkeys(v["gcs"]["remotePath"].split("/", 1)[0] for g in spec.get("taskGroups", [])
+                              for v in g.get("taskSpec", {}).get("volumes", []) if v.get("gcs", {}).get("remotePath")))
+
+
+def check_region(spec: Mapping, region: str, buckets: Sequence[str] = (), what: str = "Batch job") -> list[str]:
+    """Refuse (`CrossRegion`) a job whose VMs (`job_regions`) run outside the location of a bucket it mounts
+    (`mounted_buckets`) or that its submitter names (`buckets`): every byte it reads or writes there is billed as
+    inter-region transfer. Returns a note per bucket it could not check (its location unreadable, or a location code
+    `in_location` doesn't know). A bucket the job reaches only by URL, unnamed by its submitter, is not seen."""
+    regions, notes, far = job_regions(spec, region), [], []
+    for b in dict.fromkeys([*mounted_buckets(spec), *buckets]):
+        location = bucket_location(b)
+        if isinstance(location, str):
+            notes.append(f"{what}: bucket {b}: location unreadable ({location}); its region is not checked")
+            continue
+        inside = [in_location(r, location) for r in regions]
+        if None in inside:
+            notes.append(f"{what}: bucket {b}: location {location['location']} ({location.get('locationType')}) is not one this check knows; its region is not checked")
+        elif not all(inside):
+            placed = (location.get("customPlacementConfig") or {}).get("dataLocations")
+            far.append(f"{b} ({'+'.join(placed) if placed else location['location']})")
+    if far:
+        raise CrossRegion(f"{what} in {', '.join(regions)}: not in the region of its bucket(s) {', '.join(far)}. Run it beside them, or pass "
+                          f"-X/--cross-region (or export {CROSS_REGION_ENV}=1) to submit it and pay for the transfer")
+    return notes
+
+
+def submit_job(spec: dict, job_id: str | None = None, region: str | None = None, project: str | None = None, *,
+               buckets: Sequence[str] = (), cross_region: bool | None = None) -> str:
+    """POST a Batch job (in `region`, default `$BATCH_REGION`; in `project`, default `gcp_project()`); returns its short
+    name (server-generated if no id).
+
+    The one place dt-cloud creates a Batch job (`tests/test_cost_labels.py` greps for others), so the two refusals are
+    here, before the POST: a spec missing a required cost label on the job or its allocation policy
+    (`cost_labels.check_spec`), and a job outside the region of the buckets it mounts or `buckets` names (`check_region`;
+    its notes go to stderr) unless `cross_region` (default `$BATCH_CROSS_REGION`) says so."""
+    what = f"Batch job {job_id or '(unnamed)'}"
+    check_spec(spec, what)
+    region = batch_region(region)
+    if cross_region is None:
+        cross_region = env(CROSS_REGION_ENV) == "1"
+    if not cross_region:
+        for note in check_region(spec, region, buckets, what):
+            print(f"note: {note}", file=sys.stderr)
     url = f"https://batch.googleapis.com/v1/projects/{project or gcp_project()}/locations/{region}/jobs"
     params = {"job_id": job_id} if job_id else None
     r = session().post(url, json=spec, params=params)
@@ -173,12 +269,13 @@ def live_labelled(jobs: Sequence[Mapping], labels: Mapping[str, str]) -> list[st
             and all(j.get("labels", {}).get(k) == v for k, v in labels.items())]
 
 
-def cancel_labelled(labels: Mapping[str, str], *, region: str = REGION, dry_run: bool = False, log=None) -> list[str]:
-    """Delete (= cancel) every live Batch job in ``region`` carrying all of ``labels``; returns their names. A driver
-    killed mid-submit leaves jobs it never saw submitted: a run's own label finds them (a Nextflow head's session)."""
+def cancel_labelled(labels: Mapping[str, str], *, region: str | None = None, dry_run: bool = False, log=None) -> list[str]:
+    """Delete (= cancel) every live Batch job in ``region`` (default ``$BATCH_REGION``) carrying all of ``labels``;
+    returns their names. A driver killed mid-submit leaves jobs it never saw submitted: a run's own label finds them (a
+    Nextflow head's session)."""
     from .gcp import batch_jobs
 
-    project = gcp_project()
+    region, project = batch_region(region), gcp_project()
     names = live_labelled(batch_jobs(project, region), labels)
     for n in names:
         if log:
