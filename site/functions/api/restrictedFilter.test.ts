@@ -14,7 +14,8 @@ vi.mock('@rdub/file-tree/stores/s3', async () => ({ S3Store: (await import('../_
 // So it is refused: otherwise the link could probe a hidden directory's contents by name. The deployment:
 // `_lib/testUnion.ts`'s primary (roots `bk`, `zz`), with the static name index a stub whose `ckpt` is `bk/ckpt`.
 
-const FORBIDDEN = [403, '{"error":"forbidden for a path-restricted link"}\n']
+const SEARCH_REFUSED = [403, '{"error":"search isn’t available on this link","code":"restricted-search"}\n']
+const SCOPE_REFUSED = [403, '{"error":"this owner, class or user view isn’t available here on this link","code":"restricted-scope"}\n']
 const hit = (path: string, size: number): Hit => ({ path, depth: path.split('/').length, usr: '', vf: 0, vt: Number.MAX_SAFE_INTEGER, size: BigInt(size), n: 1n })
 const INDEX: StaticFilterStore = {
   gen: 'gen-primary',
@@ -51,7 +52,7 @@ describe('D1', () => {
       await get(diff, DIFF, restricted),
       await get(series, SERIES, restricted),
       await get(subtree, `/api/subtree?date=${A}&w=1280&h=768&q=nomatch`, restricted),
-    ]).toEqual([FORBIDDEN, FORBIDDEN, FORBIDDEN, FORBIDDEN])
+    ]).toEqual([SEARCH_REFUSED, SEARCH_REFUSED, SEARCH_REFUSED, SEARCH_REFUSED])
   })
 
   it('a union root\'s name filter: refused when its members refuse, whichever member\'s index holds the match', async () => {
@@ -60,7 +61,7 @@ describe('D1', () => {
     injectedStores.set(union, INDEX)
     const { token } = await gateFor(union)!.mint({ email: null, scopes: ['gcs:read', hideScope('gcs', 'bk'), hideScope('meta', 'mb')], name: 'link', createdBy: 'test', expiresAt: null, maxRedeems: null })
     const r = await subtree({ request: new Request(`https://site.example.test/api/subtree?at=2026-10-01T00:01:00.000Z&w=1280&h=768&q=ckpt`, { headers: { authorization: `Bearer ${token}` } }), env: union })
-    expect([r.status, await r.text()]).toEqual(FORBIDDEN)
+    expect([r.status, await r.text()]).toEqual(SEARCH_REFUSED)
   })
 
   it('the same link without its restriction gets the filter\'s answer, and the restricted one its plain views', async () => {
@@ -98,7 +99,7 @@ describe('D1', () => {
           await get(route, url(`path=bk&${scope}`), deep),
           await get(route, url(scope), deep),
           await get(route, url(scope), restricted),
-        ]).toEqual([FORBIDDEN, FORBIDDEN, FORBIDDEN, FORBIDDEN])
+        ]).toEqual([SCOPE_REFUSED, SCOPE_REFUSED, SCOPE_REFUSED, SCOPE_REFUSED])
       })
       it.each(SCOPES)('`%s` under the hidden dir: absent, as an unscoped read is', async scope => {
         expect(await get(route, url(`path=bk/deep&${scope}`), restricted)).toEqual(NOT_FOUND)

@@ -13,7 +13,7 @@
  * filled in from the snapshot dir: the chart keeps any history that never
  * got (or lost) its tiers, rather than showing a gap.
  */
-import { hiddenNotFound, isHidden, restrictedForbidden, restrictionFor, scopeReachesHidden } from '../_lib/restrict.js'
+import { hiddenNotFound, isHidden, restrictedScopeRefused, restrictedSearchRefused, restrictionFor, scopeReachesHidden } from '../_lib/restrict.js'
 import { type Ctx, type Identity, json, requireScope, requireViewer } from '../_lib/auth.js'
 import { snapshotsPrefix, traceJoins } from '../_lib/shared.js'
 import { ivRefusal, ivRetry, type Lens, pathGens, withPathStore, pathScans, servedStore, storeReady } from '../_lib/index.js'
@@ -184,7 +184,7 @@ export async function seriesRead(ctx: SeriesCtx, gate: (ctx: SeriesCtx) => Promi
   const owner = parseOwner(url.searchParams.get('o'))
   const classes = parseClasses(url.searchParams.get('cl'))
   // An owner, class or lens scope at or above a hidden dir: `/api/subtree`'s refusal.
-  if (restriction && (lensRaw || owner || classes) && [path, ...paths].some(p => scopeReachesHidden(p, restriction))) return restrictedForbidden()
+  if (restriction && (lensRaw || owner || classes) && [path, ...paths].some(p => scopeReachesHidden(p, restriction))) return restrictedScopeRefused()
   let lens: Lens | undefined
   if (lensRaw) {
     if (env.STORE_KEY) return json({ error: LENS_PRIMARY_ONLY }, 400)
@@ -212,7 +212,7 @@ export async function seriesRead(ctx: SeriesCtx, gate: (ctx: SeriesCtx) => Promi
   }
   // An indexed-only deployment: what the static index answers, no user lens or class scope (`_lib/indexedOnly.ts`).
   // A path-restricted link: a name filter's points sum every match, hidden ones too (`/api/subtree`'s refusal).
-  if (restriction && qp.query) return restrictedForbidden()
+  if (restriction && qp.query) return restrictedSearchRefused()
   const strict = !!qp.query && indexedOnly(env)
   const refused = strict ? rejectQuery(url.searchParams.get('q'), pathTerms(env)) ?? rejectScope(!!(lens || classes)) : null
   if (refused) return new Response(rejectBody(refused), { status: 400, headers: { 'content-type': 'application/json' } })

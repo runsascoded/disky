@@ -111,7 +111,7 @@ export const isHideRoot = (path: string, r: Restriction): boolean => r.hide.incl
 
 /** Whether a read of `path` under an owner, class or lens scope would break down what `r` hides: `path` is a hidden dir
  *  or above one. Its hidden cell would be the scope's share of the dir's contents, and its total, less its visible
- *  children's, the same; a sum can't be filtered on the way out, so the routes refuse it (`restrictedForbidden`). An
+ *  children's, the same; a sum can't be filtered on the way out, so the routes refuse it (`restrictedScopeRefused`). An
  *  unscoped total reveals only the dir's size, which the link shows. */
 export const scopeReachesHidden = (path: string, r: Restriction): boolean => {
   const p = norm(path)
@@ -158,6 +158,15 @@ const plain = (msg: string, status: number): Response => new Response(msg, { sta
 
 /** 404 for a request naming a hidden path (as if it didn't exist). */
 export const hiddenNotFound = (): Response => plain('path not found', 404)
+
+const refused = (error: string, code: string): Response =>
+  new Response(JSON.stringify({ error, code }) + '\n', { status: 403, headers: { 'content-type': 'application/json; charset=utf-8' } })
+
+/** 403 for a name filter: its sums count hidden hits. Its `code` is a refusal the client states as its reason (`filterCaps.ts`). */
+export const restrictedSearchRefused = (): Response => refused('search isn’t available on this link', 'restricted-search')
+
+/** 403 for an owner, class or lens scope at or above a hidden dir (`scopeReachesHidden`); a refusal, as above. */
+export const restrictedScopeRefused = (): Response => refused('this owner, class or user view isn’t available here on this link', 'restricted-scope')
 
 /** 403 for a route a restricted link can't use (raw bytes, D1 path lists). */
 export const restrictedForbidden = (): Response =>
