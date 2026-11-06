@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { ADMIN_SCOPE, allowedRow, baseScope, type Ctx, type Env, identify, isAdmin, requireScope, scopesFor } from './auth'
-import { sqliteD1 } from './testD1'
+import { ADMIN_SCOPE, adminRoster, allowedRow, baseScope, type Ctx, type Env, identify, isAdmin, requireScope, scopesFor } from './auth'
+import { sqliteD1, withAdminEmails } from './testD1'
 
 // A non-localhost request, so identify() doesn't take the dev short-circuit
 // (which would return a full-scope admin regardless of PUBLIC_READ).
@@ -103,6 +103,93 @@ describe('isAdmin', () => {
     expect(await isAdmin(cw({ admin: ['ops@viewer.example.test'] }), 'Ops@viewer.example.test')).toBe(true)
     expect(await isAdmin(cw({ admin: ['ops@viewer.example.test'] }), 'other@viewer.example.test')).toBe(false)
     expect(await isAdmin(cw({ admin: ['ops@viewer.example.test'] }, { ADMIN_EMAILS: undefined }), 'ops@viewer.example.test')).toBe(false)
+  })
+})
+
+// `ADMIN_LIST`: admin is the deployment's explicit list (`admin_emails` rows, plus the break-glass
+// `ADMIN_BOOTSTRAP`), and the staff domain alone is not.
+describe('ADMIN_LIST — admin is the explicit list, not the staff domain', () => {
+  const listed = (rows: { allowed?: string[]; admin?: string[] }, extra: Partial<Env> = {}): Env =>
+    cw(rows, { BASE_SCOPE: 'gcs', STAFF_DOMAIN: 'staff.example.test', VIEWER_DOMAINS: undefined, ADMIN_EMAILS: undefined, ADMIN_LIST: '1', ...extra })
+
+  it('unlisted staff keep every scope but `admin`', async () => {
+    expect(await scopesFor(listed({ admin: ['lead@staff.example.test'] }))('dev@staff.example.test')).toEqual(['gcs', 'cw', 'requests', 'gcs:assign'])
+  })
+
+  it('listed staff get every scope, lower-cased', async () => {
+    expect(await scopesFor(listed({ admin: ['lead@staff.example.test'] }))('Lead@Staff.Example.test')).toEqual(['gcs', 'cw', 'admin', 'requests', 'gcs:assign'])
+  })
+
+  it('a listed viewer gets `admin` on top of the viewer scopes; an unlisted one does not', async () => {
+    const env = listed({ allowed: ['owner@example.org', 'guest@example.org'], admin: ['owner@example.org'] })
+    expect([await scopesFor(env)('owner@example.org'), await scopesFor(env)('guest@example.org')]).toEqual([['gcs', 'gcs:assign', 'admin'], ['gcs', 'gcs:assign']])
+  })
+
+  it('a listed address is admitted by the list itself (no allowlist row, no viewer domain)', async () => {
+    const env = listed({ admin: ['owner@example.org'] })
+    expect([await scopesFor(env)('owner@example.org'), await scopesFor(env)('other@example.org')]).toEqual([['gcs', 'gcs:assign', 'admin'], null])
+  })
+
+  it('`ADMIN_BOOTSTRAP` (break-glass) names admins whatever the list holds: admitted, admin, case-insensitive', async () => {
+    const env = listed({}, { ADMIN_BOOTSTRAP: 'Owner@Example.org, lead@staff.example.test' })
+    expect([await scopesFor(env)('owner@example.org'), await scopesFor(env)('LEAD@staff.example.test'), await scopesFor(env)('dev@staff.example.test'), await scopesFor(env)('other@example.org')]).toEqual([
+      ['gcs', 'gcs:assign', 'admin'],
+      ['gcs', 'cw', 'admin', 'requests', 'gcs:assign'],
+      ['gcs', 'cw', 'requests', 'gcs:assign'],
+      null,
+    ])
+  })
+
+  it('`ADMIN_BOOTSTRAP` without `ADMIN_LIST` names nobody (other deployments are unchanged)', async () => {
+    const env = listed({}, { ADMIN_LIST: undefined, ADMIN_BOOTSTRAP: 'owner@example.org' })
+    expect([await scopesFor(env)('owner@example.org'), await isAdmin(env, 'owner@example.org'), await scopesFor(env)('dev@staff.example.test')]).toEqual([null, false, ['gcs', 'cw', 'admin', 'requests', 'gcs:assign']])
+  })
+
+  it('an empty list and no break-glass: nobody is an admin, and staff are not a fallback', async () => {
+    const env = listed({})
+    expect([await isAdmin(env, 'dev@staff.example.test'), await scopesFor(env)('dev@staff.example.test')]).toEqual([false, ['gcs', 'cw', 'requests', 'gcs:assign']])
+  })
+
+  it('isAdmin: a row or the break-glass, never the domain', async () => {
+    const env = listed({ admin: ['owner@example.org'] }, { ADMIN_BOOTSTRAP: 'lead@staff.example.test' })
+    expect(await Promise.all(['Owner@example.org', 'lead@staff.example.test', 'dev@staff.example.test', 'other@example.org'].map(e => isAdmin(env, e)))).toEqual([true, true, false, false])
+  })
+
+  describe('D1', () => {
+    const d1Env = (db: Env['DB'], extra: Partial<Env> = {}): Env => ({ DB: db, BASE_SCOPE: 'gcs', STAFF_DOMAIN: 'staff.example.test', ADMIN_LIST: '1', ...extra })
+
+    it('a database without `admin_emails`: sign-in still works, nobody is an admin by the list, the break-glass still is', async () => {
+      const { db, raw } = await sqliteD1()
+      raw.exec('DROP TABLE IF EXISTS admin_emails')
+      const env = d1Env(db, { ADMIN_BOOTSTRAP: 'lead@staff.example.test' })
+      expect([await scopesFor(env)('dev@staff.example.test'), await isAdmin(env, 'dev@staff.example.test'), await scopesFor(env)('lead@staff.example.test')]).toEqual([
+        ['gcs', 'cw', 'requests', 'gcs:assign'], false, ['gcs', 'cw', 'admin', 'requests', 'gcs:assign'],
+      ])
+      expect(await adminRoster(env)).toEqual({ list: true, staffDomain: null, table: 'missing', rows: [], bootstrap: ['lead@staff.example.test'], none: false })
+    })
+
+    it('adminRoster: the rows with who added them and when, and `none` when the list is on with nobody on it', async () => {
+      const { db, raw } = await sqliteD1()
+      withAdminEmails(raw)
+      expect(await adminRoster(d1Env(db))).toEqual({ list: true, staffDomain: null, table: 'ok', rows: [], bootstrap: [], none: true })
+      raw.exec("INSERT INTO admin_emails (email, note, who, ts, github) VALUES ('owner@example.org', 'org owner', 'lead@staff.example.test', 7, 'octo-owner'), ('lead@staff.example.test', NULL, 'seed', 3, NULL)")
+      const rows = [{ email: 'lead@staff.example.test', note: null, who: 'seed', ts: 3, github: null }, { email: 'owner@example.org', note: 'org owner', who: 'lead@staff.example.test', ts: 7, github: 'octo-owner' }]
+      expect(await adminRoster(d1Env(db))).toEqual({ list: true, staffDomain: null, table: 'ok', bootstrap: [], none: false, rows })
+      // The list off: the staff domain is the admin rule, the table (where `ADMIN_EMAILS`) adds to it.
+      expect(await adminRoster(d1Env(db, { ADMIN_LIST: undefined, ADMIN_EMAILS: '1' }))).toEqual({ list: false, staffDomain: 'staff.example.test', table: 'ok', bootstrap: [], none: false, rows })
+      expect(await adminRoster(d1Env(db, { ADMIN_LIST: undefined }))).toEqual({ list: false, staffDomain: 'staff.example.test', table: 'unused', rows: [], bootstrap: [], none: false })
+    })
+
+    it('adminRoster: a table from before the `github` column lists the same admins, with no handles', async () => {
+      const { db, raw } = await sqliteD1()
+      raw.exec('DROP TABLE IF EXISTS admin_emails')
+      raw.exec('CREATE TABLE admin_emails (email TEXT PRIMARY KEY, note TEXT, who TEXT NOT NULL, ts INTEGER NOT NULL)')
+      raw.exec("INSERT INTO admin_emails (email, note, who, ts) VALUES ('owner@example.org', NULL, 'seed', 7)")
+      expect([await adminRoster(d1Env(db)), await isAdmin(d1Env(db), 'owner@example.org')]).toEqual([
+        { list: true, staffDomain: null, table: 'ok', bootstrap: [], none: false, rows: [{ email: 'owner@example.org', note: null, who: 'seed', ts: 7, github: null }] },
+        true,
+      ])
+    })
   })
 })
 

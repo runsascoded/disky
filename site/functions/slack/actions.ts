@@ -8,9 +8,11 @@
  *
  * Authority is the site's, not Slack's: the request is verified with the
  * app's signing secret, the clicking user is mapped to their email
- * (`users.info`), and the same rules as www apply — dispatch needs `admin`
- * (staff domain or an `admin_emails` row); rejecting needs admin or being the one
- * who staged the batches. Dispatch goes through the deployment's
+ * (`users.info`), and the same rules as www apply — dispatch needs an admin
+ * (`isAdmin` of that email: the admin list where `ADMIN_LIST`, else the staff
+ * domain or an `admin_emails` row); rejecting needs an admin or being the one
+ * who staged the batches. The email is the Slack profile's, so whoever controls
+ * a workspace account carrying a listed address acts as that admin here. Dispatch goes through the deployment's
  * executor (`EXECUTOR`, `_lib/executor.ts`) — the same code path as /staged,
  * so a real deletion needs a finished dry-run of exactly the current item
  * set and runs against that dry-run's scan. Slack wants an answer within 3 s,
