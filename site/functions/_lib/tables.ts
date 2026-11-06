@@ -3,8 +3,9 @@
  * rendered by the FE's generic `DbTable`). Adding an editable/viewable table
  * to the admin dashboard = adding an entry here — no new endpoints or UI.
  *
- * `readScope` / `writeScope` gate access per table: 'gcs' read = visible to
- * every signed-in viewer (the shareable-RO case, e.g. the email whitelist);
+ * `readScope` / `writeScope` gate access per table: 'base' read = visible to
+ * every holder of the deployment's base scope (`baseScope`; the shareable-RO
+ * case, e.g. the email whitelist);
  * 'admin' = staff console only; writeScope null = read-only (logs).
  */
 export interface ColumnSpec {
@@ -24,7 +25,7 @@ export interface TableSpec {
   /** Single-column TEXT primary key. */
   pk: string
   columns: ColumnSpec[]
-  readScope: 'gcs' | 'admin'
+  readScope: 'base' | 'admin'
   writeScope: 'admin' | null
   orderBy: string
   /** One-line description shown in the dashboard. */
@@ -49,7 +50,7 @@ export const TABLES: TableSpec[] = [
       { name: 'who', type: 'text', server: 'who' },
       { name: 'ts', type: 'int', server: 'now' },
     ],
-    readScope: 'gcs',
+    readScope: 'base',
     writeScope: 'admin',
     orderBy: 'email',
     normalize: (col, v) => (col === 'email' ? v.trim().toLowerCase() : v),
@@ -65,7 +66,7 @@ export const TABLES: TableSpec[] = [
       { name: 'who', type: 'text', server: 'who' },
       { name: 'ts', type: 'int', server: 'now' },
     ],
-    readScope: 'gcs',
+    readScope: 'base',
     writeScope: 'admin',
     orderBy: 'user, email',
     normalize: (col, v) => (col === 'email' ? v.trim().toLowerCase() : col === 'user' ? v.trim().toLowerCase() : v),
@@ -88,7 +89,7 @@ export const TABLES: TableSpec[] = [
       { name: 'owner', type: 'text' },
       { name: 'memo', type: 'text' },
     ],
-    readScope: 'gcs',
+    readScope: 'base',
     writeScope: null,
     orderBy: 'id DESC',
   },
@@ -130,7 +131,7 @@ export const TABLES: TableSpec[] = [
       { name: 'log_dir', type: 'text' },
       { name: 'buckets', type: 'text' },
     ],
-    readScope: 'gcs',
+    readScope: 'base',
     writeScope: null,
     orderBy: 'started_ts DESC',
   },
@@ -148,7 +149,7 @@ export const TABLES: TableSpec[] = [
       { name: 'drift_new_objects', type: 'int' },
       { name: 'undone_objects', type: 'int' },
     ],
-    readScope: 'gcs',
+    readScope: 'base',
     writeScope: null,
     orderBy: 'run_id DESC, bytes DESC',
   },
