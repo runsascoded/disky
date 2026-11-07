@@ -27,7 +27,7 @@ import { LENS_PRIMARY_ONLY, storeKey, withStore } from '../_lib/stores.js'
 import { lensParam, ME_UNRESOLVED, resolveLens } from '../_lib/me.js'
 import { isScanId } from '../../src/scanSlug.js'
 import { scanArg } from '../_lib/scanArg.js'
-import { ahead, loadScopes, traceJoins } from '../_lib/shared.js'
+import { ahead, HELD_BYTES, loadScopes, traceJoins } from '../_lib/shared.js'
 import { cutoffOf, type FilteredRoot, memberOf, memberRequest, membersAt, openUnion, type Refusal, refusalOf, refusalResponse, type Union, UnionOverlap, unionFilterFields, unionFor } from '../_lib/union.js'
 import { filterThreshold } from '../_lib/filter.js'
 import type { UnionView } from '../_lib/stores.js'
@@ -188,7 +188,7 @@ async function diffGated(
     const cacheKey = keyOf(head, g, lensTag, deltaOk)
     // …and both scans covered by the static index for this literal (else `scan-not-indexed`).
     if (query && indexedOnly(ctx.env)) {
-      const r = await st.time('indexed', indexedGate(ctx.env, query.ast, path, [from, to]))
+      const r = await st.time('indexed', indexedGate(ctx.env, query.ast, path, [from, to], { maxBytes: HELD_BYTES }))
       if (r) return new Response(rejectBody(r), { status: 400, headers: { 'content-type': 'application/json' } })
     }
     // The worker's answer: the diff's JSON and what to keep of it — `phase2Ms` (a background full run's) over

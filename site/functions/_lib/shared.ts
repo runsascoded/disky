@@ -542,8 +542,10 @@ let heldIds = 0
 /** A held-answer key prefix unique to one source instance (`HeldAnswers` keys span every source). */
 export const heldId = (name: string): string => `${name}#${heldIds++}\0`
 
-/** Decoded hits' estimated bytes: ~250 apiece beyond the path (V8: the object, two bigints, two doubles). */
-export const hitsBytes = (hits: readonly { path: string }[]): number => hits.reduce((n, h) => n + 256 + h.path.length, 0)
+/** A decoded hit's estimated bytes beyond its path (V8: the object, two bigints, two doubles). */
+export const HIT_BYTES = 256
+/** Decoded hits' estimated bytes. */
+export const hitsBytes = (hits: readonly { path: string }[]): number => hits.reduce((n, h) => n + HIT_BYTES + h.path.length, 0)
 /** A rollup's cells' estimated bytes: ~160 apiece beyond the child's name. */
 export const cellsBytes = (cells: readonly { child: string }[]): number => cells.reduce((n, c) => n + 160 + c.child.length, 0)
 

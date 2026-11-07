@@ -1004,7 +1004,10 @@ async function readView(env: Env, o: ViewOpts, cov: Coverage = {}): Promise<Read
       if (sfs && !skey && staticLiteral(pq, pathTerms(env))) throw new FilterRejected(reject('scan-not-indexed'))
       // A dir-only (v1) scan's index never saw a file: whatever answers, its matches are its folders'.
       if (skey && (await dirsOnlyOf(sfs, [date])).length) noteCoverage(cov, 'dirsOnly', DIRS_ONLY)
-      const raw = skey ? await sfs!.source.hits(skey, path, { firstPaint: o.firstPaint }) : null
+      // A diff asks the source to say, before it reads them, that the two sides' memos won't fit (`tooBroadToDiff`).
+      const ask: HitOpts = { firstPaint: o.firstPaint, ...(o.otherScan ? { maxBytes: HELD_BYTES } : {}) }
+      const raw = skey ? await sfs!.source.hits(skey, path, ask) : null
+      if (ask.over) throw new FilterRejected(reject(ask.overScans!.includes(date) ? 'diff-too-broad' : 'scan-not-indexed'))
       let shits = raw
       // An answer that doesn't cover the scan — a heavy literal past the drill base (a run with no live `drill/` cuts
       // the drill's stack: that run's scans and every later one's), a light read over a stack cut mid-read, the
