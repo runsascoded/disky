@@ -1,8 +1,10 @@
-/** SVG → PNG with resvg-wasm, at the card's intrinsic 1200×630. A Worker may
- * not compile wasm from bytes at runtime, so the Function imports the vendored
- * `vendor/resvg.wasm` as a build-time module and passes it to `ensureWasm`;
- * Node (tests) passes the raw bytes. Fonts are TTF buffers (no system fonts on
- * the edge): the site serves them from `public/_fonts/`. */
+/** SVG → PNG with resvg-wasm, at the card's intrinsic size. A Worker may not
+ * compile wasm from bytes at runtime, so the Function imports the wasm as a
+ * build-time module (`site/`: its vendored `vendor/resvg.wasm`; `fleet/`:
+ * `@resvg/resvg-wasm/index_bg.wasm`, the same bytes) and passes it to
+ * `ensureWasm`; Node (tests) passes the raw bytes. Fonts are TTF buffers (no
+ * system fonts on the edge): each app serves them at `FONT_FILES` (`site/`
+ * from `public/_fonts/`, `fleet/` the same files copied at build). */
 import { Resvg, initWasm } from '@resvg/resvg-wasm'
 
 let wasmReady: Promise<unknown> | null = null

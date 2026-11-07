@@ -19,6 +19,7 @@
     "bench:diff": "node bench/diff.ts"
   },
   "dependencies": {
+    "@disk-tree/pages-kit": "workspace:*",
     "@disk-tree/react": "workspace:*",
     "@floating-ui/react": "^0.27.20",
     "@open-athena/auth": "github:Open-Athena/auth#184b574b21f1814b4b5e6c933cfdc97150d8c23f",

@@ -8,8 +8,9 @@
 import { staticLayout, treemapSvg } from '@open-athena/treemap/svg'
 import { diffBorderWidth, diffCellStyle } from '../../../src/diffStyle.js'
 import type { DiffNode } from '../../../src/diffModel.js'
-import { esc, fmtB, fmtSI } from './card.js'
-import { interWidth } from './interMetrics.js'
+import { esc, fmtB, fmtSI, interWidth, niceTicks, spread } from '@disk-tree/pages-kit/og/text'
+
+export { niceTicks, spread }
 
 export const DIGEST_W = 900
 const PAD = 24
@@ -59,17 +60,6 @@ const r1 = (n: number) => Math.round(n * 10) / 10
 
 function text(x: number, y: number, s: string, px: number, o: { fill?: string; weight?: 400 | 600; anchor?: 'start' | 'middle' | 'end' } = {}): string {
   return `<text x="${r1(x)}" y="${r1(y)}" font-size="${px}" font-weight="${o.weight ?? 400}" fill="${o.fill ?? INK}"${o.anchor && o.anchor !== 'start' ? ` text-anchor="${o.anchor}"` : ''}>${esc(s)}</text>`
-}
-
-/** ~`n` round ticks over `[lo, hi]`: steps of 1, 2, 2.5 or 5 × 10^k. */
-export function niceTicks(lo: number, hi: number, n = 6): number[] {
-  const raw = (hi - lo) / n
-  const mag = 10 ** Math.floor(Math.log10(raw))
-  const step = [1, 2, 2.5, 5, 10].map(m => m * mag).find(s => s >= raw)!
-  const out: number[] = []
-  // `|| 0`: a tick at a lo just under zero is -0, which would label `-0`
-  for (let v = Math.ceil(lo / step) * step; v <= hi + 1e-9; v += step) out.push(Math.round(v * 1e6) / 1e6 || 0)
-  return out
 }
 
 const fmtSigned = (n: number, fmt: (n: number) => string) => `${n < 0 ? '−' : '+'}${fmt(Math.abs(n))}`
@@ -374,19 +364,6 @@ export interface PoolsCardInput {
   alertPct: number
   diff?: { root: DiffNode; title: string } | null
   units?: DigestUnits
-}
-
-/** Labels' y's pushed apart to at least `gap`, kept inside `[lo, hi]` (order preserved). */
-export function spread(ys: number[], gap: number, lo: number, hi: number): number[] {
-  const order = ys.map((y, i) => [y, i] as const).sort((a, b) => a[0] - b[0])
-  const out = order.map(([y]) => y)
-  for (let k = 1; k < out.length; k++) out[k] = Math.max(out[k], out[k - 1] + gap)
-  const over = out.length ? out[out.length - 1] - hi : 0
-  if (over > 0) for (let k = out.length - 1; k >= 0; k--) out[k] = Math.min(out[k] - over, k < out.length - 1 ? out[k + 1] - gap : Infinity)
-  for (let k = 0; k < out.length; k++) out[k] = Math.max(out[k], lo + k * gap)
-  const res = new Array<number>(ys.length)
-  order.forEach(([, i], k) => { res[i] = out[k] })
-  return res
 }
 
 /** The quota-pools digest image's SVG, `DIGEST_W` wide (specs/digest-quota-pressure.md): every pool's share of its
