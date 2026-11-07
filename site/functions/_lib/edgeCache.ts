@@ -20,7 +20,7 @@
 
 import { PRIMARY_STORE } from './stores.js'
 import { SEARCH_LIMITS, type SearchLimits } from './search.js'
-import { colo, isolatePut, IsoMap, IsoSet } from './shared.js'
+import { colo, isolatePut, IsoMap, IsoSet, type Trace } from './shared.js'
 import { currentMeter } from './usage.js'
 
 const TTL = 86400
@@ -127,6 +127,13 @@ export type Keep = boolean | { partialTtl: number }
  *  else all. A read budget's cut is deterministic, so kept like a whole answer. */
 export const keepFor = (a: { interiors?: { late?: number }; searchLate?: true; detailsLate?: true; lookups_late?: true }): Keep => a.interiors?.late || a.searchLate || a.detailsLate || a.lookups_late ? { partialTtl: PARTIAL_TTL } : true
 
+/** Which time budgets cut an answer (`keepFor`'s causes, `+`-joined: `phase2`, `search`, `details`, `lookups`), or
+ *  `null` for a whole one: what an upgrade's `cut` line names. */
+export function cutReason(a: { interiors?: { late?: number }; searchLate?: true; detailsLate?: true; lookups_late?: true }): string | null {
+  const r = [a.interiors?.late ? 'phase2' : '', a.searchLate ? 'search' : '', a.detailsLate ? 'details' : '', a.lookups_late ? 'lookups' : ''].filter(Boolean)
+  return r.length ? r.join('+') : null
+}
+
 /** Store `body` (already-serialized JSON) per `keep` and return the client response. With ``waitUntil``
  * (the Pages `EventContext`'s) the writes run after the response is sent — a KV put is hundreds of ms the
  * viewer needn't wait for; without it they complete first. A partial answer's client copy says so
@@ -186,14 +193,31 @@ const gaveUp = new IsoMap<string, number>('edge-gave-up')
 /** What `upgradePartial` did: `scheduled`, or why not. */
 export type Upgrade = 'scheduled' | 'no-waituntil' | 'in-flight' | 'gave-up'
 
+/** A background run's result: the body, what to keep, and (cut short) which budgets cut it (`cutReason`). */
+export type UpgradeRun = { body: string; keep: Keep; cut?: string | null }
+
+/** Where an upgrade's lines go (tests swap it). */
+export const upgradeLog = { line: (s: string): void => console.log(s) }
+
+/** One upgrade event as a line a tail can count: `upgrade: <key> <event> <reason> <ms> <groups>`, five fields after the
+ *  colon, none with spaces. `started` when the run begins; then exactly one of `done` (whole, stored), `cut` (a budget cut
+ *  it again: the reason names which), `failed` (it threw: the reason is the message). A `started` with no end line is a
+ *  run the isolate didn't survive (`exceededMemory`, a CPU or wall kill). `ms`: since the start; `groups`: row groups the
+ *  run decoded (its trace's `group` calls). */
+export function upgradeLine(key: string, ev: 'started' | 'done' | 'cut' | 'failed', reason: string, ms: number, groups: number): string {
+  const tok = (x: string) => x.replace(/\s+/g, '_').slice(0, 160) || '-'
+  return `upgrade: ${tok(key.replace(/^https:\/\//, ''))} ${ev} ${tok(reason)} ${Math.round(ms)} ${groups}`
+}
+
 /** After serving a partial answer (budget-cut: the miss that produced it, or a partial hit), compute the full
  *  one in the background (`waitUntil`) with `compute` (the endpoint's build at `UPGRADE_PHASE2_MS`). A whole
  *  answer replaces the colo entry, at the normal TTL (and goes to KV, as any whole answer does); one cut
- *  short again leaves the partial as it is. `done` (tests) settles with the run. */
+ *  short again leaves the partial as it is. Every run logs its start and its end (`upgradeLine`); `compute` gets the
+ *  trace that counts its decoded groups. */
 export function upgradePartial(
   env: CacheEnv,
   key: Request,
-  compute: () => Promise<{ body: string; keep: Keep }>,
+  compute: (trace: Trace) => Promise<UpgradeRun>,
   waitUntil: ((p: Promise<unknown>) => void) | undefined,
   now = Date.now(),
 ): Upgrade {
@@ -206,13 +230,24 @@ export function upgradePartial(
     gaveUp.delete(k)
   }
   upgrading.add(k)
+  let groups = 0
+  const trace: Trace = name => { if (name === 'group') groups++ }
+  const t0 = performance.now()
+  const log = (ev: 'started' | 'done' | 'cut' | 'failed', reason: string) => upgradeLog.line(upgradeLine(k, ev, reason, performance.now() - t0, groups))
+  log('started', '-')
   waitUntil((async () => {
     try {
-      const { body, keep } = await compute()
-      if (keep === true) await cacheStore(env, key, body)
-      else gaveUp.set(k, now + PARTIAL_TTL * 1000)
-    } catch {
+      const { body, keep, cut } = await compute(trace)
+      if (keep === true) {
+        await cacheStore(env, key, body)
+        log('done', '-')
+      } else {
+        gaveUp.set(k, now + PARTIAL_TTL * 1000)
+        log('cut', cut ?? 'budget')
+      }
+    } catch (e) {
       gaveUp.set(k, now + PARTIAL_TTL * 1000)
+      log('failed', (e as Error)?.message ?? String(e))
     } finally {
       upgrading.delete(k)
     }
