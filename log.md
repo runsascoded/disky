@@ -2,6 +2,13 @@
 
 Running record of disk-cleanup passes on this Mac. Newest first. Each entry: what was scanned (free space before/after), what was deleted, and the **measured** bytes freed (`reclaim`/`overcount`, not apparent size).
 
+## Ingest recovery and disk audit (2026-11-07)
+
+- Resumed the latest Claude m3 handoff after Ryan approved its four pending steps. Verified that live Batch revision 41 still used image `sha256:1352e64e…` and the two-hour timeout, while the required `DISKY_LABELS` profile fix was already committed in `dced3909`.
+- Reviewed and applied the bounded Pulumi update: only the source archive/image rebuild and existing job definition changed. Revision **42** now pins image `sha256:03316a24e357ab963ea3659d1b5001a72a350afec80555407b888694cffa85c1` and permits **14,400 seconds**. The build-source diff was only `job/profiles/m3.yml`; CPU, memory, disk, permissions and secrets stayed at their existing settings.
+- Submitted the specifically approved `2026-11-03T16-26-13Z` capture for re-ingest as job `7942cbc3-fa92-4278-ae75-d0ceffa81819`; its live log is `tmp/read-ingest-recovery-1107.txt`. Age-history verification and production site promotion remain dependent on that run's result.
+- Read-only disk audit: Data volume free space was **16 GiB** at the new check (Claude's earlier check recorded 13 GiB); its saved APFS report had **3 GiB VM**, so the older 20 GiB swap diagnosis does not describe this pass. `~/c/disky` reports 137.2 GiB apparent, of which `.claude/worktrees` is **73.9 GiB apparent / 15.6 GiB exclusive / 58.4 GiB shared**. No new cleanup target was deleted; measured bytes freed by this work: **0**. Evidence is under `tmp/read-*-1107.*` and `tmp/read-audit-*-2026-11-07.txt`.
+
 ## Pass (2026-11-03): ENOSPC, 12 → 23 G free
 
 - Start: **12 G free (98%)**; another session hit `ENOSPC`. Swap 19.3 of 20 GiB used. Since 10/21 (site diff 10/21 18:04 → 11/3 06:06): free −55 G; growth in `Library/Caches/go-build` (+11 G), `.claude/worktrees` (+7.2 G), `c/disky/tmp` (+6.6 G), `.cache/uv` (+5.4 G), `c/disky/wt` (+4.8 G).

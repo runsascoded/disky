@@ -25,6 +25,8 @@ config:
   disk-tree-m3:vcpu: "2"
   disk-tree-m3:memory_mib: "16384"
   disk-tree-m3:ephemeral_gib: "120"
+  # Allow the initial age-history build and slower interval/static appends to finish.
+  disk-tree-m3:timeout_s: "14400"
   disk-tree-m3:env:
     R2_ENDPOINT_URL: https://0dcad5654e9744de6616f74b8df4af63.r2.cloudflarestorage.com
     # index-sync → the site's D1 (cf/: `disk-tree-m3-db`)
