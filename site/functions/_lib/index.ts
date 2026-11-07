@@ -169,6 +169,8 @@ interface D1Handle {
   /** An interval store's data file (its R2 key, revision-suffixed): its decoded row groups are held in the colo
    *  under it (`coloGroups`). */
   dataKey?: string
+  /** A sort with its own columns, not the `Row` shape (the attribution table): its rows stay raw records (`toRow`). */
+  ownRows?: true
   /** A run's handle (its key, `deltas/<first>[_<last>]`): a group can matter at `asOf` when a version in it opened by
    *  then (`vfMin ≤ asOf`), live or not — a close record is not live, yet it ends one. */
   run?: string
@@ -1166,7 +1168,7 @@ async function openIvAttribution(env: Env, st: IvState, date: string): Promise<I
       const kv = new Map((footer.metadata.key_value_metadata ?? []).map(e => [e.key, e.value]))
       const file: FileSlice = { get byteLength() { return 0 }, slice: async (s0, e) => toBuffer((await src.get(key, { offset: s0, length: (e ?? s0) - s0 })).bytes) }
       const h: PqHandle = { mode: 'pq', file, env, date, variant: IV_ATTR, gen: `iv:${gen}${ivRev(env)}${run ? `/${run}` : ''}`, dir, schema: JSON.parse(kv.get('schema')!) as SchemaElement[],
-        version: Number(kv.get('version')), columns: null, floor: null, footer, asOf, src, dataKey: key, ...(run ? { run } : {}) }
+        version: Number(kv.get('version')), columns: IV_ATTR_COLS, ownRows: true, floor: null, footer, asOf, src, dataKey: key, ...(run ? { run } : {}) }
       return h
     }
     const [h0, ...rest] = await Promise.all(tiers.map(open))
@@ -1211,10 +1213,9 @@ export async function ivAttribution(env: Env, date: string, path: string, maxRow
   const best = new Map<string, { path: string; vf: number; vt: number; user: string | null; source: string | null; evidence: string | null }>()
   await Promise.all([...byTier].map(([i, ss]) => onTier(h, i, async t => {
     const jsons = await fetchGroupJson(t, ss.map(s => s.rg))
-    await mapLimit(ss, GROUP_READS, async s => {
-      const j = jsons.get(s.rg)
-      if (!j) return
-      for (const r of await readGroupRaw(t, j, IV_ATTR_COLS)) {
+    const groups = ss.flatMap(s => { const json = jsons.get(s.rg); return json ? [{ rg: s.rg, json }] : [] })
+    for (const rows of await readGroupsCached(t, groups, rows => rows as unknown as Record<string, unknown>[], undefined, true)) {
+      for (const r of rows) {
         const p = str(r.path)
         if (!want(p)) continue
         const v = { path: p, vf: num(r.vf), vt: num(r.vt), user: r.user == null ? null : str(r.user), source: r.source == null ? null : str(r.source), evidence: r.evidence == null ? null : str(r.evidence) }
@@ -1222,7 +1223,7 @@ export async function ivAttribution(env: Env, date: string, path: string, maxRow
         const c = best.get(k)
         if (!c || v.vt < c.vt) best.set(k, v)
       }
-    })
+    }
   })))
   return [...best.values()].filter(v => v.vf <= D && D < v.vt).sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))
     .map(({ path: p, user, source, evidence }) => ({ path: p, user, source, evidence }))
@@ -1743,8 +1744,8 @@ export function usMap(us: string, size: number): Record<string, number> | null {
   return Object.fromEntries(JSON.parse(us) as [string, number][])
 }
 
-/** The decoder for a handle's generation. */
-export const toRow = (h: { version: number }): ((r: Record<string, unknown>) => Row) => (h.version >= 3 ? toRowV3 : h.version >= 2 ? toRowV2 : toRowV1)
+/** The decoder for a handle's generation (a sort with its own columns: none, `ownRows`). */
+export const toRow = (h: { version: number; ownRows?: true }): ((r: Record<string, unknown>) => Row) => (h.ownRows ? r => r as unknown as Row : h.version >= 3 ? toRowV3 : h.version >= 2 ? toRowV2 : toRowV1)
 
 // --- D1 metadata: revive stored RowGroup JSON into hyparquet's shape ---------
 
@@ -1934,7 +1935,7 @@ export type Pre = (depth: number, path: string, size: number, tot?: number) => b
  *  `Pre` passes, without the rest. A group whose values JSON can't hold (`groupDoc` null) is held shaped. */
 export class IvGroup {
   private rows?: Row[]
-  constructor(private readonly h: { version: number }, private doc: GroupDoc | null, rows?: Row[]) {
+  constructor(private readonly h: { version: number; ownRows?: true }, private doc: GroupDoc | null, rows?: Row[]) {
     this.rows = rows
   }
   get length(): number {
