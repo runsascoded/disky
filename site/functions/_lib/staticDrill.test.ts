@@ -8,7 +8,7 @@ import { FilterRejected, REJECT_MESSAGES } from './indexedOnly'
 import { type Blobs, type Hit, scanAt, StaticNames } from './staticNames'
 import { sqliteD1 } from './testD1'
 import { type D1Variant, fixture, FILES, readJson, seedGeneration } from './testStore'
-import { buildDiff, buildView, type Diff, type DiffRow, NotFound, type View, type ViewNode } from './view'
+import { allMatchRoots, buildDiff, buildView, type Diff, type DiffRow, NotFound, type View, type ViewNode } from './view'
 import { searchKey } from './search'
 import { resetUpgrades } from './edgeCache'
 import { warmSubtree } from '../api/subtree'
@@ -361,6 +361,31 @@ describe('D1', () => {
       }
       expect(got).toEqual(want)
       expect(got.length).toBe(TERMS.length * 5 * 5)
+    })
+
+    it('a view folds its phase 1 (`foldPhase1`): its tile budget\'s nodes held, not every root\'s forest; the cover lists every root', async () => {
+      const folds: string[] = []
+      const trace = (n: string, _ms: number, d?: string) => { if (n === 'fold') folds.push(d!) }
+      const v = await view(envStatic(), B, '', 'bin', { w: 320, h: 200, maxTiles: 1, trace })
+      const u = await view(envStatic(), B, '', 'bin', { w: 320, h: 200, maxTiles: 1, unfolded: true, trace })
+      expect(JSON.stringify(v)).toEqual(JSON.stringify(u))
+      expect(folds).toEqual(['5 of 27 nodes, 11 of 11 roots'])
+      const cover = await allMatchRoots(envStatic(), { date: B, path: '', query: q('bin') })
+      expect([cover!.roots.length, folds.length]).toEqual([11, 1])
+    })
+
+    it('a folded view (`foldPhase1`, no other scan) is the unfolded one, body for body, on every term, path, scan, canvas and tile budget', async () => {
+      const got: unknown[] = [], want: unknown[] = []
+      const CANVASES = [{ w: W, h: H }, { w: W, h: H, maxTiles: 3 }, { w: 320, h: 200, maxTiles: 1 }, { w: W, h: H, maxDepth: 1 }, { w: 640, h: 400, maxTiles: 2, maxDepth: 2 }, { w: W, h: H, firstPaint: true }, { w: 320, h: 200, maxTiles: 2, firstPaint: true }]
+      const PATHS = ['', 'bk', 'bk/data', 'tomato-bk', 'zz']
+      for (const t of TERMS) for (const P of PATHS) for (const date of [A, B]) for (const c of CANVASES) {
+        const o = { date, path: P, minArea: MIN_AREA, atten: ATTEN, query: q(t), ...c }
+        const run = (x: object) => buildView(envStatic(), { ...o, ...x }).then(v => JSON.stringify(v), e => { if (e instanceof FilterRejected || e instanceof NotFound) return String(e); throw e })
+        got.push([t, P, date, c, await run({})])
+        want.push([t, P, date, c, await run({ unfolded: true })])
+      }
+      expect(got).toEqual(want)
+      expect(got.length).toBe(TERMS.length * PATHS.length * 2 * CANVASES.length)
     })
 
     it('a diff whose view root matches counts it: its one match, as the view lists it', async () => {

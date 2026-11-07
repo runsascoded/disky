@@ -155,8 +155,9 @@ export interface ViewOpts {
   otherScan?: string
   /** …and the diff's `to` scan: its value is the one a root live on both lists (`foldPhase1`'s match list). */
   diffTo?: string
-  /** A diff side's phase 1 unfolded: every match root and ancestor held (`Phase1Memo`), and a diff whose answer is past
-   *  what an isolate holds refused as before (`tooBroadToDiff`). Tests compare the fold against it. */
+  /** Phase 1 unfolded: every match root and ancestor held (`Phase1Memo`), and a diff whose answer is past what an
+   *  isolate holds refused as before (`tooBroadToDiff`). The cover (`allMatchRoots`) lists every root; tests compare
+   *  the fold against it. */
   unfolded?: boolean
 }
 
@@ -1012,10 +1013,10 @@ async function readView(env: Env, o: ViewOpts, cov: Coverage = {}): Promise<Read
       if (sfs && !skey && staticLiteral(pq, pathTerms(env))) throw new FilterRejected(reject('scan-not-indexed'))
       // A dir-only (v1) scan's index never saw a file: whatever answers, its matches are its folders'.
       if (skey && (await dirsOnlyOf(sfs, [date])).length) noteCoverage(cov, 'dirsOnly', DIRS_ONLY)
-      // A diff side whose phase 1 folds (`foldPhase1`: no owner scope, pool or exclusions) holds what either side can
-      // draw, whatever the answer's size. Any other diff asks the source to say, before it reads them, that the two
-      // sides' memos won't fit (`tooBroadToDiff`).
-      const folds = !!o.otherScan && !o.unfolded && !owner && !negP && !pl
+      // A read whose phase 1 folds (`foldPhase1`: no owner scope, pool or exclusions) holds what it (a diff side: either
+      // side) can draw, whatever the answer's size: a view is a diff with no other scan. Any other diff asks the source
+      // to say, before it reads them, that the two sides' memos won't fit (`tooBroadToDiff`).
+      const folds = !o.unfolded && !owner && !negP && !pl
       const ask: HitOpts = { firstPaint: o.firstPaint, ...(o.otherScan && !folds ? { maxBytes: HELD_BYTES } : {}) }
       const raw = skey ? await sfs!.source.hits(skey, path, ask) : null
       if (ask.over) throw new FilterRejected(reject(ask.overScans!.includes(date) ? 'diff-too-broad' : 'scan-not-indexed'))
@@ -1048,8 +1049,8 @@ async function readView(env: Env, o: ViewOpts, cov: Coverage = {}): Promise<Read
         staticRoots = true
       }
       if (shits) {
-        // The fold reads the other scan's bytes from this answer: one that doesn't cover it can't.
-        const fold = folds && covers(shits, [o.otherScan!])
+        // A diff side's fold reads the other scan's bytes from this answer: one that doesn't cover it can't.
+        const fold = folds && (!o.otherScan || covers(shits, [o.otherScan]))
         if (o.otherScan && !fold && tooBroadToDiff(shits.hits!)) throw new FilterRejected(reject('diff-too-broad'))
         // Per isolate: the same held hits, scan and owner scope aggregate the same (a view's first paint,
         // its full read, a diff's sides and floors, other canvases).
@@ -1071,13 +1072,17 @@ async function readView(env: Env, o: ViewOpts, cov: Coverage = {}): Promise<Read
           if (tot.b <= 0) return null
           const T = o.threshold ?? filterThreshold(tot.b, w, h, minArea)
           if (o.floorOnly) return { rootAll, rootAgg: { ...tot, cb: { ...tot.cb }, ub: { ...tot.ub } }, kept: new Map(), aggDepth: new Map(), foldedOf: new Map(), threshold: T, thrAt: rebasedThreshold(T, atten, dP), tier: p1Tier, idx, truncated: false, ownerLens: ol, scoped }
-          const fo: FoldOpts = { date, other: o.otherScan!, to: o.diffTo ?? date, T, atten, budget: o.maxTiles ?? tileBudget(w, h), maxDepth, subdivMin: T * (FILTER_SUBDIV_AREA / minArea) }
+          const fo: FoldOpts = { date, other: o.otherScan ?? date, to: o.diffTo ?? date, T, atten, budget: o.maxTiles ?? tileBudget(w, h), maxDepth, subdivMin: T * (FILTER_SUBDIV_AREA / minArea) }
           const foldKey = `${memoKey}\0${fo.other}\0${fo.to}\0${T}\0${fo.budget}\0${maxDepth ?? ''}\0${atten}\0${fo.subdivMin}`
           let fm = byHits.get(foldKey)
           if (!fm) {
+            const tf = performance.now()
             fm = foldPhase1(path, dP, shits.hits!, fo)
             byHits.set(foldKey, fm)
             if (byHits.size > 8) byHits.delete(byHits.keys().next().value!)
+            // The forest's nodes held to draw (of all its nodes), and its roots held to list (of all its roots).
+            const F = fm.forest!
+            tr?.('fold', performance.now() - tf, `${F.nb.size} of ${F.nodes} nodes, ${F.matched.length} of ${F.nRoots} roots`)
           }
           p1 = fm.p1
           roots = fm.roots
@@ -2338,6 +2343,8 @@ interface Phase1Memo {
     kids?: Map<string, number>
     /** …the scan's match roots, held or not; and the diff's count over both scans (`Read.matchTotal`). */
     nRoots?: number
+    /** …and its nodes (roots and their ancestors under P on either scan), held or not. */
+    nodes?: number
     union?: { n: number; b: number; o: number }
   }
 }
@@ -2361,7 +2368,7 @@ function rootsTotal(hits: Hit[], date: string): Agg {
 
 export interface FoldOpts {
   date: string
-  /** The diff's other scan, and its `to` (`date` or `other`). */
+  /** The diff's other scan, and its `to` (`date` or `other`); a view's: `date`, both. */
   other: string
   to: string
   /** The threshold this side draws at (the diff's shared floor), attenuated per level below P by `atten`. */
@@ -2375,7 +2382,9 @@ export interface FoldOpts {
 }
 
 /** A diff side's phase 1 (`Phase1Memo`, its forest built) from a match-roots answer spanning both scans, holding only
- *  what the lean path can use, so that its every result is the unfolded memo's at any number of roots:
+ *  what the lean path can use, so that its every result is the unfolded memo's at any number of roots. A view is the
+ *  same with no other scan (`other` = `to` = `date`): one scan's criteria, half the bound below.
+ *  Held:
  *  - per scan, the `budget` heaviest forest nodes over their level's threshold, ranked as `capTiles` ranks them (bytes,
  *    then shallowest, then path). `capTiles` draws at most that many and ranks an ancestor ahead of its descendants, so
  *    no other node is drawn on that scan, whatever phase 2 adds; the rest are counted (`kids`) into their parents'
@@ -2431,7 +2440,8 @@ export function foldPhase1(path: string, dP: number, hits: Hit[], o: FoldOpts): 
   const byPath = (x: number, y: number) => (paths[x] < paths[y] ? -1 : paths[x] > paths[y] ? 1 : 0)
   // Picked: bit 1 by `date`'s criteria, bit 2 by `other`'s.
   const picked = new Uint8Array(N)
-  for (const s of [0, 1] as const) {
+  // A view (no other scan): its one scan's criteria.
+  for (const s of o.other === o.date ? [0] as const : [0, 1] as const) {
     const b = bytes[s], ob = objs[s], bit = 1 << s
     const over: number[] = []
     for (let i = 0; i < N; i++) if ((live[i] & bit) && b[i] >= thr(depths[i])) over.push(i)
@@ -2504,7 +2514,7 @@ export function foldPhase1(path: string, dP: number, hits: Hit[], o: FoldOpts): 
   const matched = [...roots.map(p => ({ path: p, b: Math.round(mine.get(p)!.b), o: Math.round(mine.get(p)!.o) })), ...listed.map(i => ({ path: paths[i], b: Math.round(bytes[0][i]), o: Math.round(objs[0][i]) }))]
     .sort((x, y) => y.b - x.b || (x.path < y.path ? -1 : x.path > y.path ? 1 : 0))
   const total = rootsTotal(hits, o.date)
-  return { p1: { all: mine, mine, depth: rdepth }, roots, forest: { depth, nb, sums, total, matched, kids, nRoots, union } }
+  return { p1: { all: mine, mine, depth: rdepth }, roots, forest: { depth, nb, sums, total, matched, kids, nRoots, union, nodes: N } }
 }
 
 /** A map read through to `base` where it holds no entry of its own (writes stay here). */
@@ -2695,7 +2705,7 @@ export async function buildView(env0: Env, o: ViewOpts): Promise<View> {
     return node
   }
   const tree = build(path, v.rootAgg)
-  return { tree, tier: v.tier, index: v.idx.asOf != null ? `iv:${env.INTERVAL_STORE_GEN}` : v.idx.mode, threshold: v.threshold, nodes: kept.size, truncated: v.truncated, ...(v.matched ? { ...matchLists(v.matched, kept), ...(v.matchCount ? { matchCount: v.matchCount, matchesCapped: true as const } : {}) } : v.matches ? { matches: v.matches } : {}), ...(v.rollup ? { rollup: v.rollup } : {}), ...(v.excluded ? { excluded: v.excluded } : {}), ...(v.firstPaint ? { firstPaint: true } : {}), ...(v.interiors ? { interiors: v.interiors } : {}), ...(query ? coverageFields(cov) : {}) }
+  return { tree, tier: v.tier, index: v.idx.asOf != null ? `iv:${env.INTERVAL_STORE_GEN}` : v.idx.mode, threshold: v.threshold, nodes: kept.size, truncated: v.truncated, ...(v.matched ? { ...matchLists(v.matched, kept, v.matchTotal), ...(v.matchCount ? { matchCount: v.matchCount, matchesCapped: true as const } : {}) } : v.matches ? { matches: v.matches } : {}), ...(v.rollup ? { rollup: v.rollup } : {}), ...(v.excluded ? { excluded: v.excluded } : {}), ...(v.firstPaint ? { firstPaint: true } : {}), ...(v.interiors ? { interiors: v.interiors } : {}), ...(query ? coverageFields(cov) : {}) }
 }
 
 /** The most match roots a response lists (`matches` / `matched`) beyond those the tree draws. */
@@ -3427,7 +3437,7 @@ async function openFine(env: Env, date: string, sort: string, lens?: Lens): Prom
  *  index's roots are held per isolate. */
 export async function allMatchRoots(env: Env, o: { date: string; path: string; query: NamePred }): Promise<{ roots: { path: string; b: number; o: number }[]; coverage: Coverage; rollup: boolean } | null> {
   const cov: Coverage = {}
-  const v = await readView(env, { date: o.date, path: o.path, query: o.query, w: 1280, h: 800, minArea: MIN_AREA_DEFAULT, atten: ATTEN_DEFAULT, maxDepth: 0, firstPaint: true }, cov)
+  const v = await readView(env, { date: o.date, path: o.path, query: o.query, w: 1280, h: 800, minArea: MIN_AREA_DEFAULT, atten: ATTEN_DEFAULT, maxDepth: 0, firstPaint: true, unfolded: true }, cov)
   if (!v) return v === null && (cov.partial || cov.approximate || cov.dirsOnly) ? { roots: [], coverage: cov, rollup: false } : null
   return { roots: (v.matched ?? []).slice().sort((x, y) => (x.path < y.path ? -1 : x.path > y.path ? 1 : 0)), coverage: cov, rollup: !!v.rollup }
 }

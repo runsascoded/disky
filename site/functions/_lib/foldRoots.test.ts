@@ -1,7 +1,7 @@
 // A match-roots answer's forest as a view holds it: the nodes it can use, whatever the number of roots (`foldRoots`).
 import { describe, expect, it } from 'vitest'
 import { HELD_BYTES } from './shared.js'
-import { foldPhase1, type FoldOpts, foldRoots, MATCH_LIST_CAP, nestRollup, tooBroadToDiff } from './view.js'
+import { foldPhase1, type FoldOpts, foldRoots, MATCH_LIST_CAP, matchLists, nestRollup, tooBroadToDiff } from './view.js'
 import type { Hit } from './staticFilter.js'
 
 const A = '2026-10-01T0700', B = '2026-10-02T0700', C = '2026-10-03T0700'
@@ -159,5 +159,20 @@ describe('foldPhase1', () => {
       ['b/big/ckpt'], 2, 1, 1 + MATCH_LIST_CAP, 5001, { n: 5001, b: 105_000, o: 5001 },
     ])
     expect(s.kids).toEqual([['b/big', 1], ['b', 51]])
+  })
+
+  it("a view's (no other scan: `other` = `to` = `date`) holds the same bound, and lists what the whole list would", () => {
+    const light = Array.from({ length: 5000 }, (_, i) => hit(`b/d${i % 50}/e${i}/ckpt-${i}`, 1 + (i % 7)))
+    const hits = [hit('b/big/ckpt', 100_000), ...light]
+    const m = foldPhase1('b', 1, hits, opts({ date: A, other: A, to: A, budget: 10, T: 1000 }))
+    const s = shape(m)
+    const lightB = light.reduce((n, h) => n + Number(h.size), 0)
+    expect([s.roots, s.nb, s.sums, s.matched.length, s.nRoots, s.union]).toEqual([
+      ['b/big/ckpt'], [['b/big/ckpt', 100_000], ['b/big', 100_000]], [['b/big', 100_000, 1]], 1 + MATCH_LIST_CAP, 5001, { n: 5001, b: 100_000 + lightB, o: 5001 },
+    ])
+    // The response's lists from the held ones and the count are the lists from every root.
+    const every = hits.map(h => ({ path: h.path, b: Number(h.size), o: 1 })).sort((x, y) => y.b - x.b || (x.path < y.path ? -1 : 1))
+    const kept = new Map([['b/big', 1], ['b/big/ckpt', 1]])
+    expect(matchLists(m.forest!.matched, kept, m.forest!.union)).toEqual(matchLists(every, kept))
   })
 })
