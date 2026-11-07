@@ -42,7 +42,7 @@ export const indexedSyntax = (paths: boolean): QuerySyntax => INDEXED[paths ? 1 
 
 /** The refusal codes an API answers a filter with (`functions/_lib/indexedOnly.ts`): a reason to show
  *  inline, never a failure to retry. */
-const REFUSAL = /^(?:unsupported-[a-z-]+|scan-not-indexed|term-too-common|owner-too-common|anchor-not-indexed|too-broad)$/
+const REFUSAL = /^(?:unsupported-[a-z-]+|scan-not-indexed|term-too-common|owner-too-common|anchor-not-indexed|too-broad|diff-too-broad)$/
 /** A path-restricted link's refusals (`functions/_lib/restrict.ts`; 403s): the same, a reason with no retry. */
 const RESTRICTED_REFUSAL = /^restricted-(?:search|scope)$/
 
