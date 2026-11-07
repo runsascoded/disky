@@ -71,24 +71,28 @@ def requests_for(
     store: str | None = None,
     summary: bool = False,
 ) -> list[Req]:
-    """The browser's requests for each diff case (`{from, to, path}`) and map view (`DATE:PATH`) at one canvas; `store`:
+    """The browser's requests for each diff case (`{from, to, path[, q]}`) and map view (`DATE:PATH[:Q]`) at one canvas
+    (`q`: a name filter, as `?f=` sends it); `store`:
     a secondary store's (`?store=`, e.g. `meta`), on every request. `summary`: also each diff's `summary=1` (its totals
     alone), which no page asks."""
     out = []
     st = {"store": store} if store else {}
     for c in cases:
         p = c.get("path", "")
-        base = {"cv": CV, **st, "from": c["from"], "to": c["to"], "path": p, "w": w, "h": h}
-        name = f"diff {c['from']}→{c['to']} /{p}"
+        q = {"q": c["q"]} if c.get("q") else {}
+        base = {"cv": CV, **st, "from": c["from"], "to": c["to"], "path": p, **q, "w": w, "h": h}
+        name = f"diff {c['from']}→{c['to']} /{p}" + (f" q={c['q']}" if q else "")
         out += [Req(name, "diff:d1", "/api/diff", {**base, "dm": "delta", "depth": 1}),
                 Req(name, "diff:full", "/api/diff", {**base, "dm": "delta"})]
         if summary:
             out.append(Req(name, "diff:summary", "/api/diff", {**base, "summary": 1}))
     for v in views:
-        d, p = v.split(":", 1)
-        base = {"cv": CV, **st, "date": d, "path": p, "w": w, "h": h}
-        out += [Req(f"subtree {d} /{p}", "subtree:d1", "/api/subtree", {**base, "depth": 1}),
-                Req(f"subtree {d} /{p}", "subtree:full", "/api/subtree", base)]
+        d, p, *f = v.split(":", 2)
+        q = {"q": f[0]} if f and f[0] else {}
+        base = {"cv": CV, **st, "date": d, "path": p, **q, "w": w, "h": h}
+        name = f"subtree {d} /{p}" + (f" q={f[0]}" if q else "")
+        out += [Req(name, "subtree:d1", "/api/subtree", {**base, "depth": 1}),
+                Req(name, "subtree:full", "/api/subtree", base)]
     return out
 
 
