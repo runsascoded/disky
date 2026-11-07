@@ -20,9 +20,14 @@ possibly) is counted from the base drill's roots (fewer than `floor` per directo
 topmost touched ancestor's rows). The short literals are their own classes."""
 from __future__ import annotations
 
-from collections import Counter
+import os
+import shutil
+import tempfile
+from bisect import bisect_left
 from pathlib import Path
+from time import monotonic
 
+import pyarrow as pa
 import pyarrow.parquet as pq
 
 from . import static_drill as sd
@@ -41,31 +46,85 @@ def _union(parts: list[str], empty: str) -> str:
     return " UNION ALL ".join(parts) if parts else f"SELECT * FROM ({empty}) WHERE false"
 
 
+#: At least this many floor crossers are counted on worker processes (`base_counts_parallel`); fewer, here.
+PARALLEL_MIN = 200_000
+
+
+def count_under(gf, ci: str, d: str) -> int:
+    """The roots of `ci` strictly under directory `d` (`d/ ≤ path < d0`) in one tier's roots group file, from its index: a
+    group wholly inside counts its `rows` undecoded, a boundary group is decoded once (cached) and its keys bisected. Each
+    `(q, path, usr, vf)` is one row in a tier's file (its build combines them), so this is the rows `TierReads.rows`
+    returns for the range, counted without reading them."""
+    lo, hi = d + "/", d + "0"
+    groups, _ = gf.select((ci, lo), (ci, hi))
+    n = 0
+    for g in groups:
+        if g["q_min"] == ci == g["q_max"] and lo <= g["k_min"] and g["k_max"] < hi:
+            n += g["rows"]
+            continue
+        t, runs = gf.group_rows(g)
+        run = runs.get(ci)
+        if run is None:
+            continue
+        s, e, keys = run
+        if keys is None:
+            keys = run[2] = t.column(gf.key).slice(s, e - s).to_pylist()
+        n += bisect_left(keys, hi) - bisect_left(keys, lo)
+    return n
+
+
 def base_counts(tier: sd.Tier, kind: str, cands: list[tuple[str, str]]) -> dict[tuple[str, str], int]:
-    """The base tier's root rows strictly under each `(c, dir)` of `cands` (`c` its canonical there): every directory's
-    rows counted from those of its topmost ancestor among `cands` (`static_drill.chunk_tops`), read once."""
-    want = set(cands)
-    tops = [cands[i] for i in sd.chunk_tops(cands)]
-    counts: Counter = Counter()
-    reads = sd.TierReads([tier], kind)
-    try:
-        ranges = [(c, d + "/", d + "0", 0) for c, d in tops]
-        for a, b in reads.windows(reads.plan(ranges, "rows")):
-            for c, lo, hi, o in ranges[a:b]:
-                for r in reads.rows(c, lo, hi, only=o):
-                    segs = r["path"].split("/")
-                    for j in range(1, len(segs)):
-                        if (key := (c, "/".join(segs[:j]))) in want:
-                            counts[key] += 1
-    finally:
-        reads.close()
-    return {key: counts[key] for key in cands}
+    """The base tier's root rows strictly under each `(c, dir)` of `cands` (`c` its canonical there; `count_under`)."""
+    gf = tier.group_file(kind, "roots")
+    return {(c, d): count_under(gf, tier.canon(c, kind), d) if gf is not None else 0 for c, d in cands}
 
 
-def measure_kind(con, tiers: list[sd.Tier], meas: Path, kind: str, out: Path, *, floor: int, members: str | None = None) -> dict:
+_BC: tuple | None = None
+
+
+def _bc_init(root: str, name: str, kind: str) -> None:
+    global _BC
+    tier = sd.Tier(root, name)
+    _BC = (tier, kind)
+
+
+def _bc_part(srcs: list[str], out: str) -> int:
+    """One share of `base_counts_parallel`: `srcs`' `(c, dir)` rows, sorted (so neighbors share groups), counted → `out`."""
+    tier, kind = _BC
+    tab = pq.read_table(srcs, columns=["c", "dir"]).sort_by([("c", "ascending"), ("dir", "ascending")])
+    cands = list(zip(tab.column("c").to_pylist(), tab.column("dir").to_pylist()))
+    counts = base_counts(tier, kind, cands)
+    pq.write_table(pa.table({"c": [c for c, _ in cands], "dir": [d for _, d in cands],
+                             "rows": pa.array([counts[k] for k in cands], pa.int64())}), out)
+    return len(cands)
+
+
+def base_counts_parallel(con, tier: sd.Tier, kind: str, src: str, into: str, n: int, *, jobs: int, work: Path) -> None:
+    """`base_counts` of DuckDB table `src`'s `(c, dir)` rows (`n` of them) into table `into` `(c, dir, rows)`, on `jobs` worker
+    processes: `src` cut in sorted shares (parquet under `work`), each counted against the tier's own group files. Nothing
+    of `src` is held in Python here: a compaction's crossers ran to 191M (cw, 2026-11-06)."""
+    from concurrent.futures import ProcessPoolExecutor
+    from multiprocessing import get_context
+
+    parts = max(1, min(jobs * 8, n // 10_000))
+    cut = work / "cands"
+    con.execute(f"""COPY (SELECT c, dir, ((row_number() OVER (ORDER BY c, dir) - 1) * {parts} // {n})::INTEGER AS part FROM {src})
+        TO {q(str(cut))} (FORMAT parquet, PARTITION_BY (part))""")
+    shares = sorted((int(d.name.split("=", 1)[1]), sorted(str(f) for f in d.glob("*.parquet"))) for d in cut.glob("part=*"))
+    with ProcessPoolExecutor(jobs, mp_context=get_context("spawn"), initializer=_bc_init,
+                             initargs=(str(tier.root), tier.name, kind)) as pool:
+        for f in [pool.submit(_bc_part, fs, str(work / f"out-{i:05d}.parquet")) for i, fs in shares]:
+            f.result()
+    con.execute(f"INSERT INTO {into} SELECT c, dir, rows FROM read_parquet({q(str(work / 'out-*.parquet'))})")
+
+
+def measure_kind(con, tiers: list[sd.Tier], meas: Path, kind: str, out: Path, *, floor: int, members: str | None = None,
+                 jobs: int | None = None) -> dict:
     """One kind's measurement → `out` (`(q, k, dir, rows)` sorted, as `finish_drill` writes it), from `tiers` (the base's
     drill, then the runs', oldest first), the base's `roots-measure/` `meas`, and (long) the members' `members` parquet
-    (column `q`). Returns counts."""
+    (column `q`). The floor crossers' base rows are counted on `jobs` processes (default: every CPU) when there are at least
+    `PARALLEL_MIN` of them. Returns counts."""
+    jobs = jobs or os.cpu_count() or 1
     runs = list(enumerate(tiers))[1:]
     long = kind == "long"
     if long:
@@ -96,11 +155,22 @@ def measure_kind(con, tiers: list[sd.Tier], meas: Path, kind: str, out: Path, *,
                 + (" SEMI JOIN im_mt USING (q)" if long else ""))
     # touched below the base's floor, no header: the base's rows there are counted (per base canonical)
     c0, mt = ("mt.c0", "JOIN im_mt AS mt USING (q) WHERE mt.base") if long else ("d.q", "")
-    cands = con.execute(f"""SELECT DISTINCT {c0} AS c, d.dir FROM im_d AS d ANTI JOIN im_h USING (q, dir) ANTI JOIN im_b USING (q, dir) {mt}
-        ORDER BY c, d.dir""").fetchall()
-    bx = base_counts(tiers[0], kind, cands) if cands else {}
+    con.execute(f"""CREATE OR REPLACE TEMP TABLE im_c AS SELECT DISTINCT {c0} AS c, d.dir
+        FROM im_d AS d ANTI JOIN im_h USING (q, dir) ANTI JOIN im_b USING (q, dir) {mt}""")
+    n = con.execute("SELECT count(*) FROM im_c").fetchone()[0]
     con.execute("CREATE OR REPLACE TEMP TABLE im_bx (c VARCHAR, dir VARCHAR, rows BIGINT)")
-    sd.insert_rows(con, "im_bx", [(c, d, n) for (c, d), n in bx.items()])
+    t0 = monotonic()
+    if n >= PARALLEL_MIN and jobs > 1 and tiers[0].ranged is None:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        work = Path(tempfile.mkdtemp(prefix=f"base-counts-{kind}-", dir=out.parent))
+        try:
+            base_counts_parallel(con, tiers[0], kind, "im_c", "im_bx", n, jobs=jobs, work=work)
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+    elif n:
+        cands = con.execute("SELECT c, dir FROM im_c ORDER BY c, dir").fetchall()
+        sd.insert_rows(con, "im_bx", [(c, d, x) for (c, d), x in base_counts(tiers[0], kind, cands).items()])
+    base_s = monotonic() - t0
     bc = "mt.c0" if long else "x.q"
     con.execute(f"CREATE OR REPLACE TEMP TABLE im_out ({MEASURE_COLS})")
     con.execute(f"""INSERT INTO im_out SELECT q, len(string_split(dir, '/')), dir, rows FROM (
@@ -114,26 +184,29 @@ def measure_kind(con, tiers: list[sd.Tier], meas: Path, kind: str, out: Path, *,
     pq.write_table(con.execute("SELECT * FROM im_out ORDER BY q, k, dir").to_arrow_table(), out / "s0000.parquet", compression=CODEC)
     doc = {k: con.execute(f"SELECT count(*) FROM {t}").fetchone()[0] for k, t in (("headers", "im_h"), ("dcount", "im_d"), ("base", "im_b"),
                                                                                   ("rows", "im_out"))}
-    doc["base_counted"] = len(bx)
-    for t in ("im_h", "im_d", "im_b", "im_bx", "im_out", "im_mt", *(f"im_a{i}" for i in range(len(tiers)))):
+    doc["base_counted"] = n
+    doc["base_count_s"] = round(base_s, 1)
+    for t in ("im_h", "im_d", "im_b", "im_c", "im_bx", "im_out", "im_mt", *(f"im_a{i}" for i in range(len(tiers)))):
         con.execute(f"DROP TABLE IF EXISTS {t}")
     return doc
 
 
-def incremental_measure(con, tiers: list[sd.Tier], meas: Path, members: str, out: Path, *, floor: int, log=err) -> dict:
+def incremental_measure(con, tiers: list[sd.Tier], meas: Path, members: str, out: Path, *, floor: int, log=err,
+                        jobs: int | None = None) -> dict:
     """The compacted generation's `roots-measure/` in `out` (`dirs/s0000.parquet`, `short/dirs/s0000.parquet`), from
     `tiers` (the base generation's drill, then its runs', oldest first), the base's `roots-measure/` `meas` and the new
     catalog's `members.parquet` `members`: what `static_local.finish_drill` measures from every root, file for file.
     Every run's `dcount` must count only new roots (`meta.json` `dcount`: `static_drill.DCOUNT_FRESH`); a tier built
-    before counts closes too and is refused. Returns per kind its counts."""
+    before counts closes too and is refused. `jobs`: `measure_kind`'s. Returns per kind its counts."""
     stale = [t.name for t in tiers[1:] if t.meta.get("dcount") != sd.DCOUNT_FRESH]
     if stale:
         raise ValueError(f"runs whose dcount counts closes too (built before `dcount: {sd.DCOUNT_FRESH}`): {', '.join(stale)}")
     doc = {}
     for kind in sd.KINDS:
-        doc[kind] = measure_kind(con, tiers, meas, kind, out / SUBS[kind], floor=floor, members=members if kind == "long" else None)
+        doc[kind] = measure_kind(con, tiers, meas, kind, out / SUBS[kind], floor=floor, members=members if kind == "long" else None,
+                                 jobs=jobs)
         log(f"measure {kind}: {doc[kind]['rows']:,} directories ({doc[kind]['headers']:,} by run headers, {doc[kind]['dcount']:,} run counts, "
-            f"{doc[kind]['base_counted']:,} counted below the base's floor)")
+            f"{doc[kind]['base_counted']:,} counted below the base's floor, in {doc[kind]['base_count_s']}s)")
     return doc
 
 
