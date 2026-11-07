@@ -1,7 +1,7 @@
 import { beforeAll, describe, expect, it, vi } from 'vitest'
 import type { Env } from './auth'
 import { parseQuery } from './scope'
-import { Drill, DRILL_RULES, type DrillAnswer, rollupAt, rollupTotal } from './staticDrill'
+import { Drill, DRILL_RULES, type DrillAnswer, DrillSource, rollupAt, rollupTotal } from './staticDrill'
 import { covers, drillSource, type Found, type HitOpts, type HitSource, indexedGate, injectedStores, liveTotal, SuffixHits, type StaticFilterStore } from './staticFilter'
 import { catalogAnswer, StaticCatalog } from './staticCatalog'
 import { FilterRejected, REJECT_MESSAGES } from './indexedOnly'
@@ -229,7 +229,7 @@ describe('D1', () => {
     })
   })
 
-  describe('a roots answer past `maxBytes`, from page headers (`Drill.rootsFloor`): refused before it is read', () => {
+  describe('a roots answer past `maxBytes`, from its path chunks (`Drill.rootsFloor`): refused before it is read', () => {
     const io0 = () => ({ top: 'isolate' as const, index_reads: 0, index_bytes: 0, groups: 0, bytes: 0, rows_read: 0 })
     /** The fixture's selected groups of `(t, P)`, with the range. */
     const groupsOf = async (t: string, P: string) => {
@@ -247,20 +247,20 @@ describe('D1', () => {
       return { got, blobs }
     }
 
-    it('a group\'s path bytes are its decoded paths\' exactly', async () => {
+    it('a group\'s key length is its decoded paths\' exactly', async () => {
       const { roots, groups } = await groupsOf('.bin', '')
       const got: number[] = []
       const want: number[] = []
       for (const g of groups) {
         const paths = await roots.read<string>(['', ''], ['￿', ''], [g], io0(), (c, i) => c.path[i] as string)
-        want.push(paths.reduce((n, p) => n + utf8(p), 0))
-        got.push(await roots.keyBytes(g, io0()) as number)
+        want.push(paths.reduce((n, p) => n + p.length, 0))
+        got.push(await roots.keyUnits(g, io0()) as number)
       }
       expect(got).toEqual(want)
       expect(groups.length).toBeGreaterThan(0)
     })
 
-    it('the floor: the bytes of the groups wholly inside the range; nothing for a rollup, the catalog, a plain view, a non-member', async () => {
+    it('the floor: `hitsBytes` of the groups wholly inside the range; nothing for a rollup, the catalog, a plain view, a non-member', async () => {
       const drill = newDrill()
       const got: [string, string, string, number][] = []
       const want: [string, string, string, number][] = []
@@ -271,7 +271,7 @@ describe('D1', () => {
         if (a.source === 'roots') {
           const { roots, groups, lo, hi } = await groupsOf(a.c, P)
           const inside = groups.filter(g => (g.qMin > lo[0] || (g.qMin === lo[0] && g.kMin >= lo[1])) && (g.qMax < hi[0] || (g.qMax === hi[0] && g.kMax < hi[1])))
-          for (const g of inside) for (const p of await roots.read<string>(['', ''], ['￿', ''], [g], io0(), (c, i) => c.path[i] as string)) bytes += 256 + utf8(p)
+          for (const g of inside) for (const p of await roots.read<string>(['', ''], ['￿', ''], [g], io0(), (c, i) => c.path[i] as string)) bytes += 256 + p.length
           expect(bytes).toBeLessThanOrEqual(hitsBytes(a.hits))
         }
         want.push([t, P, a.source, bytes])
@@ -343,6 +343,43 @@ describe('D1', () => {
     it('within the bound the diff is the one it was', async () => {
       const [cap, plain] = await Promise.all([diffOf(envStatic(capped(1e12, [])), 'bin', ''), diffOf(envStatic(), 'bin', '')])
       expect(cap).toEqual(plain)
+    })
+
+    describe('paths that aren\'t ASCII (`fixtures/static-drill-utf8`): the floor is in `hitsBytes`\' code units, not UTF-8 bytes', () => {
+      const files = new Map<string, ArrayBuffer>()
+      beforeAll(async () => { await readTree('static-drill-utf8', files) })
+      const source = () => new DrillSource(new Drill(blobsOf(files), null), undefined)
+      const CASES = [['ckpt', 'bk'], ['ckpt', 'bk/d'], ['本', 'bk'], ['本', 'bk/d']] as const
+
+      it('a group\'s key length is its paths\' `String.length`, fewer than their UTF-8 bytes', async () => {
+        const roots = (await new Drill(blobsOf(files), null).state()).tiers[0].files.long.roots
+        const { groups } = await roots.select(['ckpt', 'bk/'], ['ckpt', 'bk0'], io0())
+        const got: [number, number, number][] = []
+        const want: [number, number, number][] = []
+        for (const g of groups!) {
+          const paths = await roots.read<string>(['', ''], ['￿', ''], [g], io0(), (c, i) => c.path[i] as string)
+          const units = paths.reduce((n, p) => n + p.length, 0)
+          got.push([g.rows, await roots.keyUnits(g, io0()) as number, paths.reduce((n, p) => n + utf8(p), 0)])
+          want.push([4, units, units + paths.length * 16])
+        }
+        expect(got).toEqual(want)
+        expect(got.length).toBe(3)
+      })
+
+      it('an answer right at `maxBytes` (its own `hitsBytes`) is answered; a byte under it, refused unread', async () => {
+        const got: [string, string, number, number, boolean | undefined, number, boolean | undefined][] = []
+        const want: typeof got = []
+        for (const [t, P] of CASES) {
+          const whole = (await source().hits(t, P))!.hits!
+          const bytes = hitsBytes(whole)
+          const at: HitOpts = { maxBytes: bytes }, under: HitOpts = { maxBytes: bytes - 1 }
+          const answered = (await source().hits(t, P, at))?.hits ?? []
+          const refused = await source().hits(t, P, under)
+          got.push([t, P, whole.length, await new Drill(blobsOf(files), null).rootsFloor(t, P), at.over, answered.length, refused === null && under.over])
+          want.push([t, P, 12, bytes, undefined, 12, true])
+        }
+        expect(got).toEqual(want)
+      })
     })
   })
 

@@ -201,8 +201,16 @@ function meet(n: number, min: (i: number) => Key, max: (i: number) => Key, lo: K
 const PLAIN = 0
 /** `Drill.rootsFloor`'s key reads at a time, between looks at whether they have said enough. */
 const FLOOR_READS = 4
-/** A path's bytes, generously: a tier whose rows couldn't pass the bound even at this reads no path chunk. */
+/** A path's length, generously: a tier whose rows couldn't pass the bound even at this reads no path chunk. */
 const LONG_KEY = 1024
+
+/** The UTF-16 code units (`String.length`) of the UTF-8 in `b[i, end)`: a byte that doesn't continue a character
+ *  (`10xxxxxx`) starts one, and one that leads four bytes (`11110xxx`, past the BMP) is a surrogate pair. */
+function utf16Units(b: Uint8Array, i: number, end: number): number {
+  let n = 0
+  for (; i < end; i++) { const x = b[i]; if ((x & 0xc0) !== 0x80) n += x >= 0xf0 ? 2 : 1 }
+  return n
+}
 
 /** What a drill read cost (the `x-static-io`/trace detail). */
 export interface DrillIo { top: 'isolate' | 'cache' | 'file'; index_reads: number; index_bytes: number; groups: number; bytes: number; rows_read: number }
@@ -309,23 +317,32 @@ export class GroupFile {
     return rows
   }
 
-  /** `g`'s key column's UTF-8 bytes, from its page headers alone, nothing decompressed: a page of a required plain
-   *  `BYTE_ARRAY` column is each value's 4-byte length and its bytes. Null: a dictionary or any other encoding. */
-  async keyBytes(g: Entry, io: DrillIo): Promise<number | null> {
+  /** `g`'s key column's length in UTF-16 code units (`String.length`, what `hitsBytes` counts), its pages decompressed
+   *  and nothing decoded: a page of a required plain `BYTE_ARRAY` column is each value's 4-byte length and its UTF-8
+   *  bytes, the code units counted from those (a path's bytes are its length only if it is ASCII). Null: a dictionary,
+   *  any other encoding, or levels (a nullable column). */
+  async keyUnits(g: Entry, io: DrillIo): Promise<number | null> {
     const c = SCHEMA[this.set].columns.indexOf(KEY[this.set]) * 3
     if (g.chunks[c + 2]) return null
     const buf = await this.blobs.range(g.file, g.chunks[c], g.chunks[c + 1])
     io.bytes += buf.byteLength
     const reader = { view: new DataView(buf), offset: 0 }
-    let bytes = 0
+    let units = 0
     while (reader.offset < buf.byteLength) {
-      const h = deserializeTCompactProtocol(reader) as { field_2: number; field_3: number; field_5?: { field_1: number; field_2: number }; field_8?: { field_1: number; field_4: number } }
+      const h = deserializeTCompactProtocol(reader) as { field_2: number; field_3: number; field_5?: { field_1: number; field_2: number }; field_8?: { field_1: number; field_4: number; field_5: number; field_6: number; field_7?: boolean } }
       const [values, encoding] = h.field_5 ? [h.field_5.field_1, h.field_5.field_2] : h.field_8 ? [h.field_8.field_1, h.field_8.field_4] : [0, -1]
-      if (encoding !== PLAIN) return null
-      bytes += h.field_2 - 4 * values
+      if (encoding !== PLAIN || (h.field_8 && (h.field_8.field_5 || h.field_8.field_6))) return null
+      const body = new Uint8Array(buf, reader.offset, h.field_3)
       reader.offset += h.field_3
+      const page = h.field_8?.field_7 === false ? body : compressors.ZSTD!(body, h.field_2)
+      const view = new DataView(page.buffer, page.byteOffset, page.byteLength)
+      for (let v = 0, i = 0; v < values; v++) {
+        const n = view.getUint32(i, true)
+        units += utf16Units(page, i + 4, i + 4 + n)
+        i += 4 + n
+      }
     }
-    return bytes
+    return units
   }
 
   /** The rows of `groups` with `lo ≤ (q, key) < hi`: one ranged GET per data file. `row` makes each one from
@@ -729,10 +746,10 @@ export class Drill {
   /** `t`'s (lowercase) view at `P`, on any scan of `state` (default: the current one). */
   view(t: string, P: string, state?: DrillState, req?: Req): Promise<DrillAnswer> { return this.bounded(t, P, state, undefined, req) as Promise<DrillAnswer> }
 
-  /** What `t`'s roots answer at `P` holds at least, in `hitsBytes`' terms, decoding nothing: the row groups wholly
-   *  inside its range (each row is a hit; an edge group's may not be), their paths' bytes from page headers. The tier
-   *  holding the most, not their sum: `combine` folds rows a later tier restates. UTF-8 bytes stand for `hitsBytes`'
-   *  string lengths, the same for an ASCII path. 0: no roots answer (a rollup, the catalog, a plain view, a non-member).
+  /** What `t`'s roots answer at `P` holds at least, in `hitsBytes`' terms, with no hit decoded: the row groups wholly
+   *  inside its range (each row is a hit; an edge group's may not be), their paths' lengths from the path chunk alone
+   *  (`GroupFile.keyUnits`). The tier holding the most, not their sum: `combine` folds rows a later tier restates.
+   *  0: no roots answer (a rollup, the catalog, a plain view, a non-member).
    *  `past`: a tier's reads stop once the floor is over it, and a tier that couldn't reach it reads nothing. */
   async rootsFloor(t: string, P: string, state?: DrillState, past?: number, req?: Req): Promise<number> {
     const s = await this.selected(t, P, state, req)
@@ -746,7 +763,7 @@ export class Drill {
       if (past != null && rows * (HIT_BYTES + LONG_KEY) <= past) return rows * HIT_BYTES
       let floor = rows * HIT_BYTES
       for (let g = 0; g < inside.length && !(past != null && floor > past); g += FLOOR_READS) {
-        for (const n of await Promise.all(inside.slice(g, g + FLOOR_READS).map(e => roots.keyBytes(e, s.io)))) floor += n ?? 0
+        for (const n of await Promise.all(inside.slice(g, g + FLOOR_READS).map(e => roots.keyUnits(e, s.io)))) floor += n ?? 0
       }
       return floor
     })
