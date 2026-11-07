@@ -8,6 +8,14 @@ import type { Env } from './_lib/env'
 import { readFleet } from './_lib/fleet'
 import { ANSWERS, fleetEnv, NOW, stubFetch } from './_lib/testFleet'
 
+// On Workers the wasm import is a compiled module (wrangler's bundling); Node would load it as an ES module instead.
+vi.mock('@resvg/resvg-wasm/index_bg.wasm', async () => {
+  const { readFile } = await (import(/* @vite-ignore */ 'node:fs/promises' as string) as Promise<Fs>)
+  // Node's constructor (Workers' types declare none)
+  const { Module } = WebAssembly as unknown as { Module: new (bytes: Uint8Array) => WebAssembly.Module }
+  return { default: new Module(await readFile('node_modules/@resvg/resvg-wasm/index_bg.wasm')) }
+})
+
 const { onRequest: middleware } = await import('./_middleware')
 const { onRequestGet: apiFleet } = await import('./api/fleet/index')
 const { onRequestPost: slackPost } = await import('./api/fleet/slack')
