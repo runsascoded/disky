@@ -20,7 +20,7 @@ const rows: CwRows = {
   lead: [scan('2026-08-31T1200', 50, { a: 10, still: 5 })],
   rows: [scan('2026-09-07T1200', 60, { a: 15, still: 5 }), scan('2026-09-14T1200', 58, { a: 15.5, b: 20, still: 5 })],
 }
-const text = (quotas: 'runway-hue' | 'off') =>
+const text = (quotas: 'runway-hue' | 'arrow-chip' | 'off') =>
   opText(rows, '2026-09', cfg, { plotUrl: null, prevUrl: null }, { ...DEFAULT_PARAMS, layout: 'pools', quotas }).replace(/\]\([^)]*\)/g, ']').split('\n')
 
 const WEEKS = [
@@ -42,6 +42,13 @@ describe("the OP's per-pool layout", () => {
       '',
       ...WEEKS,
     ])
+  })
+  it('says what the chips mean, under the heading, only when the marks are chips', () => {
+    expect(text('arrow-chip').slice(3, 5)).toEqual([
+      '*Buckets* (Δ month-to-date)',
+      '_Color: days until full. Arrow: growth rate, the fastest of the last 1, 3 and 7 days._',
+    ])
+    expect(text('runway-hue')[4]).toEqual(':runway-8: [main] 58 TiB (+8.0) · 58.0% of 100Ti (42.0 Ti free)')
   })
   it('keeps the lines without marks when the quota marks are off', () => {
     expect(text('off').slice(4, 7)).toEqual([
