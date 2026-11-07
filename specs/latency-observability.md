@@ -437,3 +437,58 @@ Sign tests over the 40 blocks (two-sided; discordant blocks only):
 - Owner-scoped, pool and `NOT` diffs still build the unfolded memo on both sides, and are refused past `HELD_BYTES` (`tooBroadToDiff`). The fold has no owner scope or exclusions yet.
 - An answer that doesn't cover the other scan: the fold reads both scans' bytes from one answer, so such a diff stays unfolded and refused past the bound.
 - The fold's own transient memory on the broadest answers (above).
+
+## Background upgrades made visible; the fold's transient work in typed columns (2026-11-07)
+
+**Every upgrade logs its outcome.** A budget-cut answer starts a background upgrade (`upgradePartial`, `waitUntil`). Each run now writes `upgrade: <key> started - 0 0` and exactly one end line, `done`, `cut <budgets>` (`cutReason`: `phase2`, `search`, `details`, `lookups`) or `failed <message>`, each with its ms and the row groups it decoded (`upgradeLine`). A `started` with no end line is a run the isolate didn't survive. What is served is unchanged.
+
+**What today's upgrade does** (`marin-us-east5`, `q=checkpoint`, `full=1`, 1152×2304, scan `2026-11-07T0701`; 5 cold rounds per arm, each a miss and then, 45 s later, a partial hit in the same namespace, read from the deployments' tails):
+
+| Build | Upgrades started | `done` | `cut` | No end line (`exceededMemory` on the event) | Re-ask 45 s later whole |
+|---|---|---|---|---|---|
+| `o/gcs` before the folds | 10 | 0 | 1 (phase 2, at 10 s) | 9 | 0 / 5 |
+| + the map fold | 6 | 5 | 1 (phase 2) | 0 | 4 / 5 |
+
+The earlier inference was half right. Today's upgrade on the miss decodes nothing, but it doesn't throw: the isolate is killed for memory right after the response, so `upgradePartial`'s `catch` never runs. The upgrade a partial hit starts decodes 20–55 groups, then is killed too (4 of 5) or cut at its phase-2 budget (1 of 5). With the map fold, upgrades finish and the partial is replaced.
+
+**The fold's transient work** (`foldPhase1`, this branch). Phase stops put the folded map's peak in phase 1: a `Map` from every node's path, an ancestor string per node, and growing `number[]` columns, over about 99K hits and 284K nodes. In Node, the live heap after a forced GC grew 57 MiB while the ancestors were made; the path map alone held 14 MiB. Now the live hits are sorted by `dirOrder` (each path as if it ended in `/`, so a path comes just before its descendants and they follow in one run). Two walks with a stack of the open chain first count the nodes, then fill `Int32Array` / `Float64Array` / `Uint8Array` columns of exactly that length. A node is a prefix of a hit's path (`src`, `plen`), and its string is cut only when it is compared or held. A view allocates one scan's numbers. Sizes stay doubles. Every size and every sum is a whole number below 2^53, the fleet's total included, so each addition is exact and the order of summing can't change a result.
+
+Answers are unchanged:
+- The fold's tests and the folded-vs-unfolded sweeps (`staticDrill.test.ts`) pass, and a budget one short fails four of them.
+- On real bytes (Node replay of the recorded reads, phase 2, details and the diff walk's budgets lifted), old and new folds give the same bytes on 63 of 63 answered cases: 7 path/term pairs × 3 canvases × first paint and full, plus the diff (`2026-10-26T0701` → `2026-11-07T0701`) of each.
+- With the diff walk's 800 ms budget still on, 7 of the 21 diffs differ between any two runs: budget timing, not the fold.
+
+**Worker peak by ballast**, same method as above (calibration 239–247 MiB; peak = calibration less survived, ±4). Two passes, one request at a time, 14 s between trials so a trial's background upgrade ends first:
+
+| Request | Map fold: survived / peak (MiB) | + typed fold: survived / peak (MiB) |
+|---|---|---|
+| `marin-us-east5`, `checkpoint`, map | 37, 40 / 202–203 | 112, 117 / 122–127 |
+| …stopped after phase 1 | 40, 42 / 199–201 | 130, 122 / 109–117 |
+| `marin-us-central2`, `results`, map | 125, 125 / 114–118 | 120, 132 / 107–119 |
+| diff at `marin-us-east5`, `checkpoint` | 66, 86 / 153–173 | 103, 103 / 136–140 |
+
+The `checkpoint` map's peak fell by about 75 MiB, now well under the kill line, and the diff's by 20–35. `results` didn't move: its peak isn't the fold. Phase 1 is no longer where the `checkpoint` map peaks (109–117 MiB there, 122–127 whole), so the held hits (two `BigInt`s each) are left as objects. Untested: what typed hit columns would save.
+
+**CPU** (tail `cpuTime`: the request and its `waitUntil` upgrade), medians in seconds. Each line is one request at a time, in a fresh namespace. Warm repeats the request in the same namespace with the response cache salted (`x-evf-rk`), so the isolate's memos and the colo's copies stay:
+
+| Request | Map fold: cold / warm | + typed fold: cold / warm |
+|---|---|---|
+| `marin-us-east5`, `checkpoint`, map (8 rounds) | 9.5 / 6.5 | 13.9 / 6.6 |
+| …the same in the ballast trials (7 / 11 surviving trials), cold | 9.6 | 9.7 |
+| …the ballast trials stopped after phase 1 (5 / 8), cold | 3.5 | 2.9 |
+| `marin-us-central2`, `results`, map (8 rounds) | 7.3 / 3.8 | 7.2 / 3.7 |
+| diff at `marin-us-east5`, `checkpoint` (8 / 7 rounds) | 12.8 / 8.7 | 14.1 / 9.0 |
+| …the same in the ballast trials (6 / 8), cold | 10.5 | 6.4 |
+
+Up to the end of phase 1 the new fold costs less CPU (in Node too: 141–243 ms vs 216–274 ms). The whole `checkpoint` map is level in the ballast trials, which leave 14 s between requests. It is 4 s higher in the cold rounds, every one of the 8, on both a `cloud`-based and a `gcs`-based pair of builds. In those rounds both builds' upgrades end `done` with the same group counts, but in the first 3 rounds the new one's took longer (11–12 s vs 7 s). Unexplained, not yet measured further.
+
+**Paired page loads**, `w/map-fold` vs this branch, both on `gcs` (`21ed8ae0` + part 1, and + part 2), wasm zstd and prod's flags at run time. Same method as above: headless Chrome at 1280×800, a cold namespace per round, two streams interleaving the arms in fixed blocks, offset. 40 rounds per arm on `/marin-us-east5?f=checkpoint`, 26 on `/marin-us-east5`:
+
+| Arm | Rounds with a 503 | 503s | Killed (exceededMemory) | First map med / p90 (s) | Map stops changing med / p90 (s) | Page CPU med (s) | Diff on the page | Whole at end |
+|---|---|---|---|---|---|---|---|---|
+| map fold | 4 / 40 | 5 | 4 | 8.2 / 12.3 | 21.7 / 30.0 | 61.7 | rows 40 | 40 / 40 |
+| + typed fold | 3 / 40 | 3 | 2 | 7.8 / 10.8 | 19.1 / 28.6 | 58.7 | rows 40 | 40 / 40 |
+
+Sign tests over the 40 blocks: rounds with a 503, 3 vs 2 discordant (p = 1); rounds with a kill, 3 vs 1 (p = 0.63); the map stopped changing sooner on this branch in 23 of 40 blocks (p = 0.43). No measurable change on the page. On the plain guard there were no 503s or kills on either arm, and stop times (8.8 vs 8.9 s) and page CPU (13.5 vs 13.9 s) were level, 13 of 26 blocks each way.
+
+The upgrade lines over those loads (both tails): of the `full=1` map's upgrades, 90 vs 91 `done`, 10 vs 10 `cut`, and 12 vs 7 killed (a `started` with no end, `exceededMemory` on the event). For the diff, 40 vs 40 `done`, 3 vs 3 `cut`, and 3 vs 3 killed. Killed requests themselves were 1 vs 0 maps and 3 vs 2 diffs.
