@@ -1,8 +1,8 @@
 import { beforeAll, describe, expect, it, vi } from 'vitest'
 import type { Env } from './auth'
 import { parseQuery } from './scope'
-import { Drill, type DrillAnswer, rollupAt, rollupTotal } from './staticDrill'
-import { covers, drillSource, type Found, type HitSource, injectedStores, liveTotal, SuffixHits, type StaticFilterStore } from './staticFilter'
+import { Drill, DRILL_RULES, type DrillAnswer, DrillSource, rollupAt, rollupTotal } from './staticDrill'
+import { covers, drillSource, type Found, type HitOpts, type HitSource, indexedGate, injectedStores, liveTotal, SuffixHits, type StaticFilterStore } from './staticFilter'
 import { catalogAnswer, StaticCatalog } from './staticCatalog'
 import { FilterRejected, REJECT_MESSAGES } from './indexedOnly'
 import { type Blobs, type Hit, scanAt, StaticNames } from './staticNames'
@@ -12,6 +12,7 @@ import { buildDiff, buildView, type Diff, type DiffRow, NotFound, type View, typ
 import { searchKey } from './search'
 import { resetUpgrades } from './edgeCache'
 import { warmSubtree } from '../api/subtree'
+import { HELD_BYTES, hitsBytes } from './shared'
 
 // Every test in this file: tests take seconds alone but past 30 s under the full parallel suite (gcs, cw: 10-17).
 vi.setConfig({ testTimeout: 120_000 })
@@ -225,6 +226,160 @@ describe('D1', () => {
       const src = drillSource(drillBlobs(undefined, { 'scans.json': { scans: [{ id: A }] } }))
       const f = (await src.hits('0', 'bk/fill'))!
       expect([covers(f, [A]), covers(f, [B]), covers(f, [A, B]), covers({ hits: [], io: {} }, [B])]).toEqual([true, false, false, true])
+    })
+  })
+
+  describe('a roots answer past `maxBytes`, from its path chunks (`Drill.rootsFloor`): refused before it is read', () => {
+    const io0 = () => ({ top: 'isolate' as const, index_reads: 0, index_bytes: 0, groups: 0, bytes: 0, rows_read: 0 })
+    /** The fixture's selected groups of `(t, P)`, with the range. */
+    const groupsOf = async (t: string, P: string) => {
+      const roots = (await newDrill().state()).tiers[0].files[[...t].length <= 2 ? 'short' : 'long'].roots
+      const lo: readonly [string, string] = P === '' ? [t, ''] : [t, `${P}/`], hi: readonly [string, string] = P === '' ? [`${t}\0`, ''] : [t, `${P}0`]
+      const { groups } = await roots.select(lo, hi, io0())
+      return { roots, lo, hi, groups: groups! }
+    }
+    const utf8 = (p: string) => new TextEncoder().encode(p).length
+    /** Every roots data file range read: `[key, offset, length]`. */
+    const spans = () => {
+      const got: [string, number, number | undefined][] = []
+      const inner = drillBlobs()
+      const blobs: Blobs = { ...inner, range(key, offset, length) { if (/^drill\/(long|short)\/roots/.test(key)) got.push([key, offset, length]); return inner.range(key, offset, length) } }
+      return { got, blobs }
+    }
+
+    it('a group\'s key length is its decoded paths\' exactly', async () => {
+      const { roots, groups } = await groupsOf('.bin', '')
+      const got: number[] = []
+      const want: number[] = []
+      for (const g of groups) {
+        const paths = await roots.read<string>(['', ''], ['￿', ''], [g], io0(), (c, i) => c.path[i] as string)
+        want.push(paths.reduce((n, p) => n + p.length, 0))
+        got.push(await roots.keyUnits(g, io0()) as number)
+      }
+      expect(got).toEqual(want)
+      expect(groups.length).toBeGreaterThan(0)
+    })
+
+    it('the floor: `hitsBytes` of the groups wholly inside the range; nothing for a rollup, the catalog, a plain view, a non-member', async () => {
+      const drill = newDrill()
+      const got: [string, string, string, number][] = []
+      const want: [string, string, string, number][] = []
+      for (const [t, P] of [['bin', ''], ['bin', 'bk'], ['tomat', 'bk'], ['x', 'bk'], ['om', 'bk'], ['safetensors', 'bk'], ['0', 'bk/fill'], ['0', ''], ['nomatch', ''], ['tomat', 'bk/data/tomato']] as const) {
+        const a = await drill.view(t, P)
+        got.push([t, P, a.source, await drill.rootsFloor(t, P)])
+        let bytes = 0
+        if (a.source === 'roots') {
+          const { roots, groups, lo, hi } = await groupsOf(a.c, P)
+          const inside = groups.filter(g => (g.qMin > lo[0] || (g.qMin === lo[0] && g.kMin >= lo[1])) && (g.qMax < hi[0] || (g.qMax === hi[0] && g.kMax < hi[1])))
+          for (const g of inside) for (const p of await roots.read<string>(['', ''], ['￿', ''], [g], io0(), (c, i) => c.path[i] as string)) bytes += 256 + p.length
+          expect(bytes).toBeLessThanOrEqual(hitsBytes(a.hits))
+        }
+        want.push([t, P, a.source, bytes])
+      }
+      expect(got).toEqual(want)
+      expect(got.filter(([, , , b]) => b > 0).length).toBeGreaterThan(0)
+    })
+
+    it('past the dispatch bound with no rollup the answer is still its roots, so the floor is theirs; a rollup stays nothing', async () => {
+      const low = new Drill(drillBlobs(), null, { rules: { ...DRILL_RULES, bound: () => 0 } })
+      const [a, floor, want, rollup] = [await low.view('.bin', 'bk/data'), await low.rootsFloor('.bin', 'bk/data'), await newDrill().rootsFloor('.bin', 'bk/data'), await low.rootsFloor('0', 'bk/fill')]
+      expect([a.source, floor, want, rollup]).toEqual(['roots', 1127, 1127, 0])
+    })
+
+    it('past `maxBytes` declines (`over`, the scans), reading only path chunks; at it, answers as ever', async () => {
+      const t = 'bin', P = ''
+      const floor = await newDrill().rootsFloor(t, P)
+      const { got, blobs } = spans()
+      const opts: HitOpts = { maxBytes: floor - 1 }
+      expect(await drillSource(blobs).hits(t, P, opts)).toBe(null)
+      expect([opts.over, opts.overScans]).toEqual([true, DATES])
+      const { groups } = await groupsOf('.bin', P) // `bin`'s canonical
+      const chunks = groups.map(g => [g.file, g.chunks[3], g.chunks[4]].join())
+      expect(got.length).toBeGreaterThan(0)
+      expect(got.map(([k, o, n]) => [k.replace(/^drill\//, ''), o, n].join()).filter(x => !chunks.includes(x))).toEqual([])
+      const at: HitOpts = { maxBytes: floor }
+      const [whole, allowed] = [await drillSource(drillBlobs()).hits(t, P), await drillSource(drillBlobs()).hits(t, P, at)]
+      expect([at.over, allowed!.hits!.map(h => h.path)]).toEqual([undefined, whole!.hits!.map(h => h.path)])
+    })
+
+    /** The static store with every `maxBytes` a read asks replaced by `cap`, and what it asked recorded. */
+    const capped = (cap: number, asked: (number | undefined)[], blobs: Blobs = drillBlobs()): StaticFilterStore => {
+      const heavy = drillSource(blobs)
+      const src: HitSource = { hits(k, u, o, r) { asked.push(o?.maxBytes); if (o?.maxBytes != null) o.maxBytes = cap; return heavy.hits(k, u, o, r) } }
+      return heavyStore(src)
+    }
+    const diffOf = (env: Env, t: string, P: string) => buildDiff(env, { from: A, to: B, path: P, w: W, h: H, minArea: MIN_AREA, atten: ATTEN, top: 200, query: q(t) })
+    const code = (p: Promise<unknown>) => p.then(() => 'answered', e => { if (e instanceof FilterRejected) return e.reject.code; throw e })
+
+    it('`buildDiff` refuses `diff-too-broad` having read no answer, asking `HELD_BYTES`; a view of one side never asks', async () => {
+      const asked: (number | undefined)[] = []
+      const { got, blobs } = spans()
+      expect(await code(diffOf(envStatic(capped(1, asked, blobs)), 'bin', ''))).toBe('diff-too-broad')
+      const { groups } = await groupsOf('.bin', '')
+      expect(got.map(([, o]) => o).filter(o => !groups.map(g => g.chunks[3]).includes(o))).toEqual([])
+      expect([...new Set(asked)]).toEqual([HELD_BYTES])
+      const views: (number | undefined)[] = []
+      await view(envStatic(capped(1, views)), B, '', 'bin')
+      expect([...new Set(views)]).toEqual([undefined])
+    })
+
+    it('the gate a diff passes first reads no answer either, and tells coverage as with it read', async () => {
+      const { got, blobs } = spans()
+      const asked = () => ({ maxBytes: 1 })
+      expect(await indexedGate(envStatic(heavyStore(drillSource(blobs))) as never, q('bin').ast, '', [A, B], asked())).toBe(null)
+      const { groups } = await groupsOf('.bin', '')
+      expect(got.map(([, o]) => o).filter(o => !groups.map(g => g.chunks[3]).includes(o))).toEqual([])
+      const only = heavyStore(drillSource(drillBlobs(undefined, { 'scans.json': { scans: [{ id: A }] } })))
+      expect((await indexedGate(envStatic(only) as never, q('bin').ast, '', [A, B], asked()))?.code).toBe('scan-not-indexed')
+      expect((await indexedGate(envStatic(only) as never, q('bin').ast, '', [A, B]))?.code).toBe('scan-not-indexed')
+    })
+
+    it('a scan the drill doesn\'t cover answers as with the answer read: each side in turn, the first refusal the diff\'s', async () => {
+      const only = (id: string) => drillBlobs(undefined, { 'scans.json': { scans: [{ id }] } })
+      expect(await code(diffOf(envStatic(capped(1, [], only(B))), 'bin', ''))).toBe('scan-not-indexed')
+      expect(await code(diffOf(envStatic(capped(1, [], only(A))), 'bin', ''))).toBe('diff-too-broad')
+    })
+
+    it('within the bound the diff is the one it was', async () => {
+      const [cap, plain] = await Promise.all([diffOf(envStatic(capped(1e12, [])), 'bin', ''), diffOf(envStatic(), 'bin', '')])
+      expect(cap).toEqual(plain)
+    })
+
+    describe('paths that aren\'t ASCII (`fixtures/static-drill-utf8`): the floor is in `hitsBytes`\' code units, not UTF-8 bytes', () => {
+      const files = new Map<string, ArrayBuffer>()
+      beforeAll(async () => { await readTree('static-drill-utf8', files) })
+      const source = () => new DrillSource(new Drill(blobsOf(files), null), undefined)
+      const CASES = [['ckpt', 'bk'], ['ckpt', 'bk/d'], ['本', 'bk'], ['本', 'bk/d']] as const
+
+      it('a group\'s key length is its paths\' `String.length`, fewer than their UTF-8 bytes', async () => {
+        const roots = (await new Drill(blobsOf(files), null).state()).tiers[0].files.long.roots
+        const { groups } = await roots.select(['ckpt', 'bk/'], ['ckpt', 'bk0'], io0())
+        const got: [number, number, number][] = []
+        const want: [number, number, number][] = []
+        for (const g of groups!) {
+          const paths = await roots.read<string>(['', ''], ['￿', ''], [g], io0(), (c, i) => c.path[i] as string)
+          const units = paths.reduce((n, p) => n + p.length, 0)
+          got.push([g.rows, await roots.keyUnits(g, io0()) as number, paths.reduce((n, p) => n + utf8(p), 0)])
+          want.push([4, units, units + paths.length * 16])
+        }
+        expect(got).toEqual(want)
+        expect(got.length).toBe(3)
+      })
+
+      it('an answer right at `maxBytes` (its own `hitsBytes`) is answered; a byte under it, refused unread', async () => {
+        const got: [string, string, number, number, boolean | undefined, number, boolean | undefined][] = []
+        const want: typeof got = []
+        for (const [t, P] of CASES) {
+          const whole = (await source().hits(t, P))!.hits!
+          const bytes = hitsBytes(whole)
+          const at: HitOpts = { maxBytes: bytes }, under: HitOpts = { maxBytes: bytes - 1 }
+          const answered = (await source().hits(t, P, at))?.hits ?? []
+          const refused = await source().hits(t, P, under)
+          got.push([t, P, whole.length, await new Drill(blobsOf(files), null).rootsFloor(t, P), at.over, answered.length, refused === null && under.over])
+          want.push([t, P, 12, bytes, undefined, 12, true])
+        }
+        expect(got).toEqual(want)
+      })
     })
   })
 

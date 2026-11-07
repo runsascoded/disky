@@ -75,7 +75,12 @@ export interface HitOpts {
   /** A nested read's budget (`view.ts` `nestRollup`): a source whose answer would be more than this many match
    *  roots — bounded so from its index before a read, or held with that many — declines (null) and sets `over`. */
   maxRows?: number
+  /** A diff's refusal (`view.ts` `tooBroadToDiff`): a source that can tell, before reading it, that the answer's
+   *  `hitsBytes` are past this declines (null) and sets `over` and `overScans`. One that can't just answers. */
+  maxBytes?: number
   over?: boolean
+  /** With `over` from `maxBytes`: the scans the answer would have covered (`covers`). */
+  overScans?: string[]
 }
 
 /** Every read's `req`: the request reading (`reqOf(env)`): what it joins of other requests' reads, and owns of its own
@@ -485,7 +490,7 @@ export async function staticCompound(s: StaticFilterStore, plan: BoolPlan, path:
  *  across a dir-only and a full scan, `scan-dirs-only`: `dirsOnlySplit`); a dir-only scan alone passes, its
  *  view flagged `dirsOnly`. A view root
  *  the literal matches is the plain view (nothing to search). The answer is held per isolate, so the view's
- *  own read reuses it. */
+ *  own read reuses it; one past what an isolate holds isn't, so a diff, which refuses those, passes `maxBytes`. */
 export async function indexedGate(env: StaticFilterEnv, ast: QueryAst | undefined, path: string, dates: string[], opts?: HitOpts): Promise<FilterReject | null> {
   const paths = pathTerms(env)
   const key = staticLiteral(ast, paths)
@@ -513,5 +518,8 @@ export async function indexedGate(env: StaticFilterEnv, ast: QueryAst | undefine
   const split = await dirsOnlySplit(s, ast, path, dates, paths)
   if (split) return split
   const found = await s!.source.hits(key, path, opts)
-  return found && covers(found, dates) ? null : declined(s, skey, found)
+  // Past a diff's `maxBytes`, unread: the coverage test as for the answer it stands for (`buildDiff` refuses it, once it
+  // knows both sides exist).
+  const seen: Found | null = opts?.over ? { hits: [], io: {}, scans: opts.overScans } : found
+  return seen && covers(seen, dates) ? null : declined(s, skey, seen)
 }

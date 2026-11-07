@@ -114,6 +114,7 @@ function poolsText(m: CwRows, month: number, cfg: DigestCfg, p: DigestParams, li
     `_as of ${md(dayOf(date(last)))} ${hhmm(ts(last))}Z_`,
     '',
     '*Buckets* (Δ month-to-date)',
+    ...(p.quotas === 'arrow-chip' ? [CHIP_KEY] : []),
     ...rows.map(({ p: pl, v, mark, text }) => `${mark}${name(pl)} ${grouped(v, 0)} ${u.name}${change(pl.buckets)}${members(pl)} · ${text}`),
     ...Object.keys(last.extra).filter(b => !inPool.has(b)).map(b => `${bucketLink(b, last, mtdSince, cfg)} ${grouped(last.extra[b], 0)} ${u.name}${change([b])}`),
     '',
@@ -145,6 +146,9 @@ function poolsText(m: CwRows, month: number, cfg: DigestCfg, p: DigestParams, li
   if (links.plotUrl !== null) lines.push('', `![${cfg.title} — ${monthYear(month)}](${links.plotUrl})`)
   return lines.join('\n')
 }
+
+/** What `arrow-chip`'s two channels say (`digest_cw._pool_chip`). */
+const CHIP_KEY = '_Color: days until full. Arrow: growth rate, the fastest of the last 1, 3 and 7 days._'
 
 /** A week's line names the pools that moved at least this much, in the config's unit. */
 export const WEEK_MOVER = 1
