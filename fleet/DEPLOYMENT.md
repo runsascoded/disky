@@ -9,13 +9,13 @@ This deployment serves public docs and a staff-only aggregate fleet page, not a 
 - KV namespace: `disky-oa-fleet`, `be540648c50f46c2b667de5b669de17b`, bound as `FLEET_KV`.
 - Zone: `oa.dev`, `169959d6aafcbfd77764b8efafa3a509`.
 
-Wrangler owns deployment bindings and nonsecret settings. These resources were created through the API, not a Pulumi apply; the shared dashboard component currently requires D1, which this app deliberately does not have. Do not apply that component unchanged or create an unused D1.
+Wrangler owns deployment bindings and nonsecret settings. These resources were created through the API, not a Pulumi apply; the shared dashboard component currently requires D1, which this app deliberately does not have. Do not apply that component unchanged or create an unused D1. This branch has no pending D1 migration recipes because it has no D1 databases; `site/schema.sql` remains the shared code's current schema, checked by CI.
 
 ## Release gates
 
 The code merges `cloud`, preserving this branch's README index and hourly health workflow. `.github/workflows/fleet-deploy.yml` waits for successful CI, refuses stale commits, deploys preview, verifies its anonymous gates, and only then builds/deploys production. Both builds run on GitHub, not the laptop. Set repository variable `FLEET_DEPLOY_ENABLED=1` only after secret provisioning is approved and complete. `.github/workflows/fleet-update.yml` refreshes the persistent post hourly, separately gated by `FLEET_POST_ENABLED=1`; leave that off until source data, sign-in and the first post are verified. Its logs omit the signed card URL.
 
-The Cloudflare token was verified active. Credential persistence was blocked pending explicit approval: `CF_FRONT_DOOR_TOKEN` to this repo's Actions secrets; newly generated distinct production/preview session and job secrets to Pages (production job token also in Actions); `DISKY_SLACK_BOT_TOKEN` to Pages production only. No secret values belong in Git, workflow output or chat. Never rotate existing secrets during setup.
+Ryan explicitly approved credential persistence on 2026-11-07. Provisioned: `CF_FRONT_DOOR_TOKEN` in this repo's Actions secrets; distinct production/preview `SESSION_SECRET` and `FLEET_JOB_TOKEN` in Pages (production job token also in Actions); `DISKY_SLACK_BOT_TOKEN` in Pages production only. Names and environment placement were verified without logging values. No secret values belong in Git, workflow output or chat. Never rotate existing secrets during setup.
 
 The broker owner provisions `oa-disky` for `https://disky.oa.dev/auth/oa/callback`, and `oa-disky-dev` for the preview/localhost callbacks. Client secrets go directly to the corresponding Pages environment, never to the laptop. Read tokens for each underlying deployment must be explicitly provided for fleet use; do not silently reuse unrelated job or admin credentials.
 
@@ -23,7 +23,7 @@ DNS is not cut over until the deployed anonymous gates pass. Planned proxied CNA
 
 ## Open
 
-- Credential approval/provisioning and broker clients.
+- Broker clients and their corresponding Pages client secrets.
 - Source read tokens, including a read-scoped way to get GCS/CW meta totals (not an admin grant).
 - Preview and production deploys, DNS, browser sign-in and card verification.
 - Hourly fleet update after the first post is verified; preview never receives the bot token.
