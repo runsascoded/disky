@@ -1,7 +1,7 @@
 // A match-roots answer's forest as a view holds it: the nodes it can use, whatever the number of roots (`foldRoots`).
 import { describe, expect, it } from 'vitest'
 import { HELD_BYTES } from './shared.js'
-import { foldRoots, MATCH_LIST_CAP, nestRollup, tooBroadToDiff } from './view.js'
+import { foldPhase1, type FoldOpts, foldRoots, MATCH_LIST_CAP, matchLists, nestRollup, tooBroadToDiff } from './view.js'
 import type { Hit } from './staticFilter.js'
 
 const A = '2026-10-01T0700', B = '2026-10-02T0700', C = '2026-10-03T0700'
@@ -109,5 +109,70 @@ describe('nestRollup over a roots answer', () => {
     expect(n.rollupKids).toEqual(new Map([['', 1], ['b/big', 1], ['b', 51]]))
     expect(n.exact.bo('b/big')).toEqual({ b: 1000, o: 1 })
     expect(n.exact.bo('b/big/ckpt')).toEqual({ b: 1000, o: 1 })
+  })
+})
+
+describe('foldPhase1', () => {
+  const opts = (o: Partial<FoldOpts> = {}): FoldOpts => ({ date: A, other: B, to: B, T: 100, atten: 2, budget: 2, subdivMin: 1e12, ...o })
+  const hits = [
+    hit('b/x/y/ckpt-1', 500),
+    hit('b/x/y/ckpt-2', 10),
+    hit('b/w/v/ckpt-3', 6),
+    hit('b/w/v/ckpt-4', 4),
+    // Live on `B` alone: drawn there, so a root this side counts but doesn't hold.
+    hit('b/z/ckpt-5', 300, B),
+  ]
+  const shape = (m: ReturnType<typeof foldPhase1>) => ({
+    roots: m.roots,
+    mine: [...m.p1.mine].map(([p, a]) => [p, a.b, a.o]),
+    nb: [...m.forest!.nb],
+    sums: [...m.forest!.sums].map(([p, a]) => [p, a.b, a.o]),
+    kids: [...m.forest!.kids!],
+    matched: m.forest!.matched.map(x => [x.path, x.b]),
+    total: [m.forest!.total.b, m.forest!.total.o],
+    nRoots: m.forest!.nRoots,
+    union: m.forest!.union,
+  })
+
+  it("holds each scan's `budget` heaviest drawable nodes and its drawn roots, counts the rest into their parents, and lists the others", () => {
+    expect(shape(foldPhase1('b', 1, hits, opts()))).toEqual({
+      // Over their floors on `A` (100, 200, 400 at depths 2–4): `b/x`, `b/x/y` (the budget's 2) and the drawn root `ckpt-1`.
+      roots: ['b/x/y/ckpt-1'],
+      mine: [['b/x/y/ckpt-1', 500, 1]],
+      nb: [['b/x/y/ckpt-1', 500], ['b/x/y', 510], ['b/x', 510]],
+      sums: [['b/x/y', 510, 2], ['b/x', 510, 2]],
+      kids: [['b/x/y', 2], ['b/x', 1], ['b', 2]],
+      matched: [['b/x/y/ckpt-1', 500], ['b/x/y/ckpt-2', 10], ['b/w/v/ckpt-3', 6], ['b/w/v/ckpt-4', 4]],
+      total: [520, 4],
+      nRoots: 4,
+      union: { n: 5, b: 820, o: 5 },
+    })
+    // The other side: `ckpt-5` is its own; `b/x`'s chain the same, being the heaviest on both.
+    expect(shape(foldPhase1('b', 1, hits, opts({ date: B, other: A }))).roots).toEqual(['b/x/y/ckpt-1', 'b/z/ckpt-5'])
+  })
+
+  it('holds a bounded number of nodes, whatever the number of roots', () => {
+    const light = Array.from({ length: 5000 }, (_, i) => hit(`b/d${i % 50}/e${i}/ckpt-${i}`, 1))
+    // Each `b/dN` holds 100 bytes, under its floor (200).
+    const s = shape(foldPhase1('b', 1, [hit('b/big/ckpt', 100_000), ...light], opts({ budget: 10, T: 200 })))
+    expect([s.roots, s.nb.length, s.sums.length, s.matched.length, s.nRoots, s.union]).toEqual([
+      ['b/big/ckpt'], 2, 1, 1 + MATCH_LIST_CAP, 5001, { n: 5001, b: 105_000, o: 5001 },
+    ])
+    expect(s.kids).toEqual([['b/big', 1], ['b', 51]])
+  })
+
+  it("a view's (no other scan: `other` = `to` = `date`) holds the same bound, and lists what the whole list would", () => {
+    const light = Array.from({ length: 5000 }, (_, i) => hit(`b/d${i % 50}/e${i}/ckpt-${i}`, 1 + (i % 7)))
+    const hits = [hit('b/big/ckpt', 100_000), ...light]
+    const m = foldPhase1('b', 1, hits, opts({ date: A, other: A, to: A, budget: 10, T: 1000 }))
+    const s = shape(m)
+    const lightB = light.reduce((n, h) => n + Number(h.size), 0)
+    expect([s.roots, s.nb, s.sums, s.matched.length, s.nRoots, s.union]).toEqual([
+      ['b/big/ckpt'], [['b/big/ckpt', 100_000], ['b/big', 100_000]], [['b/big', 100_000, 1]], 1 + MATCH_LIST_CAP, 5001, { n: 5001, b: 100_000 + lightB, o: 5001 },
+    ])
+    // The response's lists from the held ones and the count are the lists from every root.
+    const every = hits.map(h => ({ path: h.path, b: Number(h.size), o: 1 })).sort((x, y) => y.b - x.b || (x.path < y.path ? -1 : 1))
+    const kept = new Map([['b/big', 1], ['b/big/ckpt', 1]])
+    expect(matchLists(m.forest!.matched, kept, m.forest!.union)).toEqual(matchLists(every, kept))
   })
 })
