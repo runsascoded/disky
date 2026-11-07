@@ -228,9 +228,11 @@ export function imageRequest(m: CwRows, month: number, cfg: DigestCfg, p: Digest
   const { start, seen, back } = window(m, month, p)
   const scans = [back, ...seen.filter(r => date(r) >= iso(start) && r !== back)]
   const q = primaryQuotas(cfg)[0]
+  // the per-pool layout's map is every bucket's, as its headline is
+  const scope = p.layout === 'pools' ? null : cfg.primary
   const body: Record<string, unknown> = {
     title: `${cfg.title} — ${monthYear(month)}`,
-    note: [cfg.host, ...(cfg.primary && Object.keys(last.extra).length ? [cfg.primary] : []), u.name].join(' · '),
+    note: [cfg.host, ...(scope && Object.keys(last.extra).length ? [scope] : []), u.name].join(' · '),
     month: iso(month).slice(0, 7),
     from: iso(start),
     points: scans.map(r => ({ scan: r.scan, bytes: pyRound((q ? scoped(r.tb, r.classes, q) : r.tb) * u.bytes) })),
@@ -253,7 +255,7 @@ export function imageRequest(m: CwRows, month: number, cfg: DigestCfg, p: Digest
   const from = p.diff === 'mtd' ? base(m) : back
   if (from !== last) {
     const s = `${md(dayOf(date(from)))} → ${md(dayOf(date(last)))}`
-    body.diff = { from: from.scan, to: last.scan, path: cfg.primary ?? '', title: cfg.primary ? `What changed in ${cfg.primary} — ${s}` : `What changed — ${s}` }
+    body.diff = { from: from.scan, to: last.scan, path: scope ?? '', title: scope ? `What changed in ${scope} — ${s}` : `What changed — ${s}` }
   }
   return body
 }
