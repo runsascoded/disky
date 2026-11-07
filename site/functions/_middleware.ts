@@ -12,7 +12,7 @@ import { restrictGate } from './_lib/restrict.js'
 import { footerCacheDrain } from './_lib/footerCache.js'
 import { coloPutsSettled, ivRefusal } from './_lib/index.js'
 import ZSTD_MODULE from './_lib/vendor/zstd.wasm'
-import { zstdUse } from './_lib/zstd.js'
+import { zstdUse, type ZstdEnv } from './_lib/zstd.js'
 import { anonymousPage, stampPage, type OgEnv } from './_lib/og/serve.js'
 import { clearedOnSignIn, silentAttempt } from './_lib/silentSignIn.js'
 import { captureWrite, readBody } from './_lib/activityHook.js'
@@ -57,7 +57,7 @@ export const assetMiss = (): Response => new Response('asset not found\n', {
   headers: { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' },
 })
 
-type MiddlewareCtx = { request: Request; env: OgEnv & UsageEnv & { ZSTD_WASM?: string }; next: () => Promise<Response>; waitUntil?: (p: Promise<unknown>) => void; data?: Record<string, unknown> }
+type MiddlewareCtx = { request: Request; env: OgEnv & UsageEnv & ZstdEnv; next: () => Promise<Response>; waitUntil?: (p: Promise<unknown>) => void; data?: Record<string, unknown> }
 
 export const onRequest = async (ctx: MiddlewareCtx): Promise<Response> => {
   zstdUse(ctx.env.ZSTD_WASM === '1' ? ZSTD_MODULE : null)

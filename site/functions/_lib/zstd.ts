@@ -17,6 +17,8 @@
 import { decompress } from 'fzstd'
 import type { Compressors } from 'hyparquet'
 
+export type ZstdEnv = { ZSTD_WASM?: string }
+
 /** The module's initial linear memory (64 pages). */
 export const WASM_INITIAL_BYTES = 64 * 65536
 /** Input + output past this stays on fzstd, leaving the rest for the module's own data, stack and decoding context
