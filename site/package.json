@@ -1,0 +1,66 @@
+{
+  "name": "disk-tree-site",
+  "private": true,
+  "version": "0.0.1",
+  "type": "module",
+  "devPort": 3263,
+  "scripts": {
+    "dev": "vite",
+    "dev:full": "./dev",
+    "build": "node scripts/build-id.mjs && tsc -b && tsc -p functions && vite build",
+    "preview": "vite preview",
+    "shots": "scrns",
+    "clean": "rm -rf node_modules/.vite dist",
+    "build-id": "node scripts/build-id.mjs",
+    "test": "vitest run",
+    "test:e2e": "playwright test",
+    "test:e2e:list": "playwright test --list",
+    "bench": "node bench/bench.ts",
+    "bench:diff": "node bench/diff.ts"
+  },
+  "dependencies": {
+    "@disk-tree/pages-kit": "workspace:*",
+    "@disk-tree/react": "workspace:*",
+    "@floating-ui/react": "^0.27.20",
+    "@open-athena/auth": "github:Open-Athena/auth#184b574b21f1814b4b5e6c933cfdc97150d8c23f",
+    "@rdub/file-tree": "https://github.com/runsascoded/file-tree#9d9bd749469aa4ae76b860ea9a403c3ab18df80b",
+    "@open-athena/treemap": "workspace:*",
+    "@rdub/treemap": "workspace:@open-athena/treemap@*",
+    "@resvg/resvg-wasm": "^2.6.2",
+    "@tanstack/react-query": "^5.101.4",
+    "@tanstack/react-table": "^8.21.3",
+    "fzstd": "0.1.1",
+    "hyparquet": "^1.27.1",
+    "pyrmts": "github:runsascoded/pyrmts#ad35ff808beb8bbbe8d4fb7dddb894de4421bb62&path:/js/packages/pyrmts",
+    "pyrmts-cfw": "github:runsascoded/pyrmts#ad35ff808beb8bbbe8d4fb7dddb894de4421bb62&path:/js/packages/pyrmts-cfw",
+    "pyrmts-react": "github:runsascoded/pyrmts#ad35ff808beb8bbbe8d4fb7dddb894de4421bb62&path:/js/packages/pyrmts-react",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "react-icons": "^5.7.0",
+    "react-router-dom": "^6.30.6",
+    "use-kbd": "https://github.com/runsascoded/use-kbd#9db5013f5e4034a14530dff37f1c015dc37c8c77",
+    "use-prms": "https://github.com/runsascoded/use-prms#bb731063bf4202c0501e9c3d6fdada0817f699a4"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261013.1",
+    "@playwright/test": "^1.56.0",
+    "@types/node": "24.13.3",
+    "@types/react": "^19.1.0",
+    "@types/react-dom": "^19.1.0",
+    "@vitejs/plugin-react": "^4.5.0",
+    "puppeteer": "^25.4.0",
+    "sass": "^1.89.0",
+    "scrns": "https://github.com/runsascoded/scrns#65420fd6cdf71c53be9a03def1de33a075e9975a",
+    "typescript": "^5.8.0",
+    "vite": "^7.0.0",
+    "vitest": "^4.1.11",
+    "wrangler": "4.150.0"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild",
+      "@parcel/watcher"
+    ]
+  },
+  "packageManager": "pnpm@10.18.1"
+}

@@ -1,0 +1,65 @@
+name: disky.oa.dev
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [front-door]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: disky-oa-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: >-
+      github.repository == 'Open-Athena/disky'
+      && vars.FLEET_DEPLOY_ENABLED == '1'
+      && (github.event_name == 'workflow_dispatch' ||
+          (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'))
+    runs-on: ubuntu-latest
+    env:
+      CLOUDFLARE_ACCOUNT_ID: "74981a43be0de7712369306c7b19133d"
+      FLEET_DOCS_INDEX: README.md
+      FLEET_REPO: https://github.com/Open-Athena/disky
+      FLEET_REF: front-door
+      PUPPETEER_SKIP_DOWNLOAD: "true"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+      - name: Refuse a stale deployment
+        run: |
+          set -euo pipefail
+          tip=$(git ls-remote origin refs/heads/front-door | cut -f1)
+          test "$(git rev-parse HEAD)" = "$tip"
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --dir fleet test
+      - run: pnpm --dir packages/pages-kit typecheck
+      - name: Build preview
+        run: FLEET_ORIGIN=https://dev.disky.oa.dev pnpm --dir fleet build
+      - name: Deploy preview
+        working-directory: fleet
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_FRONT_DOOR_TOKEN }}
+        run: pnpm exec wrangler pages deploy dist --project-name disky-oa --branch dev
+      - name: Verify preview gates
+        run: python fleet/scripts/smoke.py https://dev.disky-oa.pages.dev
+      - name: Build production
+        run: FLEET_ORIGIN=https://disky.oa.dev pnpm --dir fleet build
+      - name: Deploy production
+        working-directory: fleet
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_FRONT_DOOR_TOKEN }}
+        run: pnpm exec wrangler pages deploy dist --project-name disky-oa --branch front-door
+      - name: Verify production gates
+        run: python fleet/scripts/smoke.py https://disky-oa.pages.dev

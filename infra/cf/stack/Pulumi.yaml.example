@@ -1,0 +1,14 @@
+# A deployment's Cloudflare stack. Copy to `infra/cf/Pulumi.yaml` and rename the
+# project; the program is the shared one in `stack/` (config only).
+name: my-deployment-cf
+description: Cloudflare resources for my deployment — Pages project, custom domain + CNAME, D1
+main: stack/
+runtime:
+  name: python
+  options:
+    toolchain: uv
+# Where Pulumi keeps state: a bucket (`gs://…`, `s3://…`), Pulumi Cloud (omit
+# this block), or a local dir (`file://./state`, passphrase-encrypted; keep it
+# out of a public repo).
+backend:
+  url: file://./state

@@ -1,0 +1,17 @@
+{
+ "gen": "fixture",
+ "cells_rows": 410,
+ "row_groups": 103,
+ "members_short": 106,
+ "members_long": 18,
+ "bytes": 51888,
+ "cell_rg": 4,
+ "membership": {
+  "max_rows": 4,
+  "max_bytes": null
+ },
+ "hex_runs": {
+  "min": 16,
+  "tail": 8
+ }
+}

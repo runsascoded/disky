@@ -1,0 +1,27 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "jsx": "react-jsx",
+    "strict": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "isolatedModules": true,
+    "useDefineForClassFields": true,
+    // One React for type-checking. `@rdub/file-tree` is workspace-linked and
+    // dev-pins React 18, so its `.d.ts` files would otherwise resolve `react`
+    // to its own `@types/react@18` — a second `ReactNode` (pre-`bigint`) that
+    // then leaks into anything sharing a `react` peer (AuthGate's `children`).
+    // Runtime is already deduped in vite.config.ts; this is the tsc half.
+    "baseUrl": ".",
+    "paths": {
+      "react": ["./node_modules/@types/react"],
+      "react/*": ["./node_modules/@types/react/*"],
+      "react-dom": ["./node_modules/@types/react-dom"],
+      "react-dom/*": ["./node_modules/@types/react-dom/*"]
+    }
+  },
+  "include": ["src"]
+}

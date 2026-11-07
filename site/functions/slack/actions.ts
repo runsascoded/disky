@@ -1,0 +1,127 @@
+/**
+ * POST /slack/actions — Slack interactivity for the staged-deletion thread
+ * (specs/done/staged-slack.md). Buttons on the plan's parent message: Dry-run;
+ * on each stage reply: Reject (every batch the reply covers — a coalesced reply
+ * covers a stager's recent batches; per-batch rejection is www's). ("Open in
+ * www" and "Delete for real…" are URL buttons; Slack still calls here, and
+ * they're acked.)
+ *
+ * A real delete is never started from here: it needs a site session, on
+ * `/staged`. A click on the dispatching "Delete for real…" still sitting in old
+ * messages (`staged_real`) is answered with a link there, before anything else.
+ *
+ * Authority is the site's, not Slack's: the request is verified with the
+ * app's signing secret, the clicking user is mapped to their email
+ * (`users.info`), and the same rules as www apply — a dry run needs an admin
+ * (`isAdmin` of that email: the admin list where `ADMIN_LIST`, else the staff
+ * domain or an `admin_emails` row); rejecting needs an admin or being the one
+ * who staged the batches. The email is the Slack profile's, so whoever controls
+ * a workspace account carrying a listed address acts as that admin here. A dry run goes through the deployment's
+ * executor (`EXECUTOR`, `_lib/executor.ts`) — the same code path as /staged.
+ * Slack wants an answer within 3 s, so this acks at once and does the work after the response; outcomes go to
+ * the thread (everyone) or back to the clicker ephemerally (refusals, errors).
+ * Unconfigured (no signing secret or D1) it answers 503 and does nothing.
+ */
+import { type Env as AuthEnv, isAdmin } from '../_lib/auth.js'
+import { dispatchPlan, type ExecEnv, executorOf, notifyDispatched } from '../_lib/executor.js'
+import { pathScans, withPathStore } from '../_lib/index.js'
+import { audit } from '../_lib/plans.js'
+import { slackUserEmail, verifySlackSignature } from '../_lib/slack.js'
+import { notifyPlan, slackNames, updateReplies } from '../_lib/stagedSlack.js'
+
+type Env = AuthEnv & ExecEnv
+interface PagesCtx { request: Request; env: Env; waitUntil: (p: Promise<unknown>) => void }
+
+interface BlockActions {
+  type: string
+  user: { id: string }
+  response_url?: string
+  actions: { action_id: string; value?: string }[]
+}
+
+async function tell(url: string | undefined, text: string): Promise<void> {
+  if (!url) return
+  await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ response_type: 'ephemeral', replace_original: false, text }) })
+    .catch(() => undefined)
+}
+
+async function latestScan(env: Env): Promise<string | null> {
+  return (await pathScans(env, true)).results.at(-1)?.date ?? null
+}
+
+async function handle(env: Env, p: BlockActions, siteUrl: string): Promise<void> {
+  const db = env.DB!
+  const a = p.actions[0]
+  const email = await slackUserEmail(env, p.user.id)
+  if (!email) return tell(p.response_url, "Couldn't resolve your Slack account to an email (the app needs `users:read.email`).")
+  const admin = await isAdmin(env, email)
+
+  if (a.action_id === 'staged_reject') {
+    // `<plan>:r<reply>` rejects every batch a coalesced stage reply covers;
+    // `<plan>:<batch>` (replies posted before coalescing) one batch.
+    const [planS, ref = ''] = (a.value ?? '').split(':')
+    const planId = Number(planS)
+    const replyId = ref.startsWith('r') ? Number(ref.slice(1)) : null
+    const batchId = replyId == null ? Number(ref) : null
+    if (!Number.isInteger(planId) || !Number.isInteger(replyId ?? batchId) || !ref) return tell(p.response_url, 'Bad button value.')
+    const batches = (replyId != null
+      ? await db.prepare('SELECT id, created_by, reply_id FROM stage_batches WHERE reply_id = ? AND plan_id = ? ORDER BY id').bind(replyId, planId).all<{ id: number; created_by: string; reply_id: number | null }>()
+      : await db.prepare('SELECT id, created_by, reply_id FROM stage_batches WHERE id = ? AND plan_id = ?').bind(batchId, planId).all<{ id: number; created_by: string; reply_id: number | null }>()).results
+    const what = replyId != null ? 'These batches' : `Batch #${batchId}`
+    if (!batches.length) return tell(p.response_url, `${what} no longer ${replyId != null ? 'exist' : 'exists'}.`)
+    if (!admin && batches.some(b => b.created_by.toLowerCase() !== email)) return tell(p.response_url, 'Only an admin or the person who staged a batch can reject it.')
+    const plan = await db.prepare('SELECT state FROM plans WHERE id = ?').bind(planId).first<{ state: string }>()
+    if (plan?.state !== 'open') return tell(p.response_url, 'That plan is closed.')
+    let n = 0, k = 0
+    for (const b of batches) {
+      const items = (await db.prepare('SELECT prefix FROM plan_items WHERE plan_id = ? AND batch_id = ?').bind(planId, b.id).all<{ prefix: string }>()).results
+      if (!items.length) continue
+      await db.prepare('DELETE FROM plan_items WHERE plan_id = ? AND batch_id = ?').bind(planId, b.id).run()
+      await audit(db, 'plan_items', String(planId), 'delete', email, { batch_id: b.id, prefixes: items.map(i => i.prefix), via: 'slack' }, null)
+      n += items.length; k++
+    }
+    if (!n) return tell(p.response_url, `${what} ${replyId != null ? 'have' : 'has'} nothing left staged.`)
+    const name = (await slackNames(env, [email]))[email] ?? email.replace(/@.*$/, '')
+    await notifyPlan(env, db, planId, siteUrl, { text: `:no_entry_sign: ${name} rejected ${k} ${k === 1 ? 'batch' : 'batches'} (${n.toLocaleString('en-US')} ${n === 1 ? 'path' : 'paths'} unstaged)` })
+    const rid = replyId ?? batches[0].reply_id
+    if (rid != null) await updateReplies(env, db, planId, siteUrl, { replyIds: [rid] })
+    return
+  }
+
+  if (a.action_id !== 'staged_dry') return
+  if (!env.GCP_SA_KEY) return tell(p.response_url, 'Dispatch is not configured for this deployment; use www.')
+  if (!admin) return tell(p.response_url, 'Only admins can dispatch runs.')
+  const kind = executorOf(env)
+  const id = Number(a.value ?? '')
+  if (!Number.isInteger(id)) return tell(p.response_url, 'Bad button value.')
+  const plan = await db.prepare('SELECT state FROM plans WHERE id = ?').bind(id).first<{ state: string }>()
+  if (!plan) return tell(p.response_url, 'That plan no longer exists.')
+  if (plan.state !== 'open') return tell(p.response_url, 'That plan is closed.')
+  const date = await latestScan(env)
+  if (!date) return tell(p.response_url, 'No indexed scan to run against.')
+  const r = await dispatchPlan(env, { planId: id, mode: 'dry', date, actor: email, siteUrl }, kind)
+  if (!r.ok) return tell(p.response_url, `Dispatch refused: ${r.error}`)
+  await notifyDispatched(env, r, 'Slack', siteUrl)
+}
+
+export const onRequestPost = async (ctx: PagesCtx): Promise<Response> => {
+  const { env, request } = ctx
+  if (!env.SLACK_SIGNING_SECRET || !env.DB) return new Response('slack actions not configured', { status: 503 })
+  const body = await request.text()
+  const ok = await verifySlackSignature(env.SLACK_SIGNING_SECRET, request.headers.get('x-slack-request-timestamp'), request.headers.get('x-slack-signature'), body)
+  if (!ok) return new Response('bad signature', { status: 401 })
+  const raw = new URLSearchParams(body).get('payload')
+  let p: BlockActions
+  try { p = JSON.parse(raw ?? '') as BlockActions } catch { return new Response('bad payload', { status: 400 }) }
+  if (p.type !== 'block_actions' || !p.actions?.length) return new Response('', { status: 200 })
+  const clicked = p.actions[0].action_id
+  if (clicked === 'staged_open' || clicked === 'staged_delete_link') return new Response('', { status: 200 })
+  const siteUrl = new URL(request.url).origin
+  if (clicked === 'staged_real') {
+    ctx.waitUntil(tell(p.response_url, `Slack no longer starts deletes, and this click deleted nothing. To delete, use <${siteUrl}/staged|the staged page>.`))
+    return new Response('', { status: 200 })
+  }
+  // Sized from the interval store for the dates it holds (`withPathStore`), as the plans routes size them.
+  ctx.waitUntil(withPathStore(ctx).then(c => handle(c.env, p, siteUrl)).catch(e => tell(p.response_url, `Something went wrong: ${(e as Error).message}`)))
+  return new Response('', { status: 200 })
+}

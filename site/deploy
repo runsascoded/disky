@@ -1,0 +1,173 @@
+#!/usr/bin/env bash
+# Build and deploy to Cloudflare Pages — the project named in wrangler.toml.
+# The deployment's own settings come from `site/deploy.env` (on its branch;
+# specs/done/oa-decoupling.md): `CLOUDFLARE_ACCOUNT_ID` (required), `PTR_SHORT` (the
+# local deploy-pointer prefix; default the project name), `PUSH_REMOTE`
+# (default the branch's configured push remote), and `PROD_BRANCH` / `DEV_BRANCH`
+# (the Pages branches a deploy / `--dev` deploy targets: the project's production
+# branch and its dev alias's; default `main` / `dev`).
+#
+# `-n`/`--dry-run`: run every check and lookup below that needs no credentials or network (config
+# parses, project name, `STATIC_GEN`, host, push remote), print what a deploy would do, and exit before
+# the build, before any `wrangler` call, before moving a pointer or pushing. CI runs it (`site` job).
+# `--config FILE` (only with `--dry-run`) checks another config than `wrangler.toml`, e.g. `cloud`'s
+# `wrangler.r2.toml`.
+set -euo pipefail
+cd "$(dirname "$0")"
+
+# Flags first: `--dry-run` changes what the checks below require.
+# Push is the DEFAULT: everything deployed is public-facing, so
+# the deployed commit (and the branch that contains it) belong on GitHub too —
+# otherwise agents reading the repo infer from stale source (bit us 8/27+8/28).
+# `-P`/`--no-push` keeps a deploy local (rare: experiments off the main branch).
+#
+# `-d`/`--dev`: a PREVIEW deploy — `--branch $DEV_BRANCH` (default `dev`) → https://<branch>.<project>.pages.dev
+# (the Access app covers `*.<project>.pages.dev`, so it is gated like prod). Same
+# D1 + vars as production unless `[env.preview]` in wrangler.toml overrides them
+# (Pages: overriding ANY of vars/d1/kv there means restating ALL of them), and
+# its own preview-scoped secrets (`wrangler pages secret put <NAME> --project-name
+# <project> --env preview`; the GCS HMAC pair is already there). The dev stack for
+# real-prod numbers on unmerged work; moves the local `<short>-dev` pointer, never
+# the prod one, and does not push (an unmerged branch is not the public face).
+push=true
+mode=prod
+dry=false
+status=false
+CONFIG=wrangler.toml
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -P|--no-push) push=false ;;
+    -d|--dev) mode=dev ;;
+    -n|--dry-run) dry=true ;;
+    --status) status=true ;;
+    --config) [ $# -ge 2 ] || { echo "deploy: --config needs a file" >&2; exit 1; }; CONFIG=$2; shift ;;
+    *) echo "deploy: unknown argument $1 (nothing built or deployed)" >&2; exit 1 ;;
+  esac
+  shift
+done
+if [ "$CONFIG" != wrangler.toml ] && ! $dry; then
+  echo "deploy: --config only goes with --dry-run (wrangler deploys wrangler.toml, whatever else is named)" >&2; exit 1
+fi
+if [ "$mode" = dev ]; then push=false; fi
+
+# The Pages project this checkout deploys: `name = "…"` in the config.
+[ -f "$CONFIG" ] || { echo "deploy: no site/$CONFIG: each deployment branch (gcs, cw-s3, m3) carries its own; cloud has only the r2 demo's wrangler.r2*.toml (deployed by .github/workflows/deploy-r2.yml)" >&2; exit 1; }
+# A file that doesn't parse is not an error to wrangler: it logs "Invalid TOML document", ignores the file
+# and deploys with the project's old settings (gcs's prod, 2026-11). Refuse it here, before any build.
+./toml-check "$CONFIG" || { echo "deploy: $CONFIG does not parse (above); fix it, then deploy" >&2; exit 1; }
+PROJECT=$(sed -n 's/^name = "\([^"]*\)"[[:space:]]*\(#.*\)*$/\1/p' "$CONFIG")
+[ -n "$PROJECT" ] || { echo "deploy: no name = ... in $CONFIG" >&2; exit 1; }
+if [ -f deploy.env ]; then set -a; . ./deploy.env; set +a; fi
+# A dry run needs no credentials (CI has none): the account is only reported.
+if $dry; then
+  account="unset (not needed for --dry-run)"
+  [ -z "${CLOUDFLARE_ACCOUNT_ID:-}" ] || account="set (not needed for --dry-run)"
+else
+  : "${CLOUDFLARE_ACCOUNT_ID:?deploy: set CLOUDFLARE_ACCOUNT_ID (the Pages project account) in site/deploy.env}"
+fi
+
+# One source for the live static name index generation: the deployment's
+# static-names profile file (`STATIC_NAMES_FILE` in deploy.env, repo-relative,
+# e.g. `job/static-names.json` — what its jobs load as `STATIC_NAMES_PROFILE`).
+# Pages takes vars only from wrangler.toml, so every `STATIC_GEN` there must
+# equal the file's `gen`; a mismatch refuses the deploy. Better, pin none: the
+# site follows `static-names/CURRENT.json` (which a compaction moves) as the
+# jobs follow a compacted generation's `successor.json`.
+static="STATIC_NAMES_FILE unset (STATIC_GEN not checked)"
+if [ -n "${STATIC_NAMES_FILE:-}" ]; then
+  gen=$(python3 -c 'import json, sys; g = json.load(open(sys.argv[1])).get("gen"); print(g or ""); sys.exit(0 if g else 1)' "../$STATIC_NAMES_FILE") \
+    || { echo "deploy: $STATIC_NAMES_FILE has no gen" >&2; exit 1; }
+  bad=$(sed -n 's/^STATIC_GEN = "\([^"]*\)".*/\1/p' "$CONFIG" | grep -vxF "$gen" | sort -u | tr '\n' ' ' || true)
+  [ -z "$bad" ] || { echo "deploy: $CONFIG STATIC_GEN ${bad% } ≠ $STATIC_NAMES_FILE gen $gen: set them equal (or drop STATIC_GEN: the site follows static-names/CURRENT.json), then deploy" >&2; exit 1; }
+  static="$STATIC_NAMES_FILE gen $gen (every STATIC_GEN equal)"
+fi
+
+# `--status`: report whether HEAD is deployed (no build/deploy). Delegates to the
+# standalone `cf-status` (queries the CF Pages deployments API, compares to HEAD).
+if $status && ! $dry; then exec ./cf-status; fi
+
+# Auth via the repo's direnv CLOUDFLARE_API_TOKEN (Pages write on the account).
+# We deliberately do NOT fall back to `wrangler login` OAuth: that session tends
+# to drift to another account and then fails with auth error 10000.
+# A preview build takes the `[env.preview.vars]` overrides (`vite.config.ts`
+# reads `CLOUDFLARE_ENV`, as wrangler does): the dev stack's `STORE`/`AUTH_MODE`
+# are its own, not production's.
+branch=${PROD_BRANCH:-main}; [ "$mode" = dev ] && branch=${DEV_BRANCH:-dev}
+host=$(sed -n "s/^${mode^^}_HOST = \"\([^\"]*\)\".*/\1/p" "$CONFIG" | head -1)
+[ -n "$host" ] || host="$PROJECT.pages.dev"
+# One pointer per Pages project: `<short>-prod` / `<short>-dev`, where `<short>`
+# is `PTR_SHORT` (default the project name). Branches are
+# shared across worktrees, so a single `prod`
+# name would have each deployment's deploy clobber the other's (it did,
+# 2026-09-28). No exceptions: a deployment that used the bare `prod` renames
+# its pointer once (`git branch -m prod <short>-prod`).
+short=${PTR_SHORT:-$PROJECT}
+ptr="$short-prod"; [ "$mode" = dev ] && ptr="$short-dev"
+# The push remote: resolved before the build, so a missing one fails before anything ships.
+gbranch=
+remote=
+if $push; then
+  gbranch=$(git rev-parse --abbrev-ref HEAD)
+  remote=${PUSH_REMOTE:-}
+  if [ -z "$remote" ]; then
+    remote=$(git config "branch.$gbranch.pushRemote" || git config remote.pushDefault || git config "branch.$gbranch.remote" || true)
+  fi
+  [ -n "$remote" ] || { echo "deploy: no push remote: set PUSH_REMOTE in site/deploy.env (or branch.$gbranch.pushRemote), or pass -P" >&2; exit 1; }
+fi
+
+if $dry; then
+  echo "deploy --dry-run: nothing built, deployed, moved or pushed"
+  echo "  config:  $CONFIG (parses)"
+  echo "  project: $PROJECT"
+  echo "  mode:    $mode"
+  echo "  branch:  $branch"
+  echo "  host:    $host"
+  echo "  static:  $static"
+  echo "  account: $account"
+  echo "  pointer: $ptr"
+  if $push; then echo "  push:    $gbranch -> $remote"; else echo "  push:    no"; fi
+  exit 0
+fi
+
+if [ "$mode" = dev ]; then CLOUDFLARE_ENV=preview pnpm build; else pnpm build; fi
+wlog=$(mktemp)
+trap 'rm -f "$wlog"' EXIT
+pnpm exec wrangler pages deploy dist --project-name "$PROJECT" --branch "$branch" 2>&1 | tee "$wlog"
+# Belt and braces: if wrangler ignored the config anyway (it downgrades a config error to a warning), the
+# deployed bindings and vars are the old ones, whatever exit code it returned.
+if grep -q 'Ignoring configuration file' "$wlog"; then
+  echo "deploy: wrangler ignored wrangler.toml (see its output above): the deployed settings are NOT this checkout's; fix the file and redeploy" >&2
+  exit 1
+fi
+
+# Entry-asset check: the new `index.html` names hashed bundles; an edge still on
+# the previous deployment answers those paths with the SPA fallback (index.html,
+# 200), and a browser that caches that HTML under the bundle's name shows a blank
+# page for hours (2026-10-09). Fetch each entry asset fresh until it comes back
+# as its real type; warn (don't fail the deploy) if it never does.
+for asset in $(grep -o '/assets/[^"]*\.\(js\|css\)' dist/index.html | sort -u); do
+  ok=false
+  for i in $(seq 1 12); do
+    r=$(curl -s -o /dev/null -w '%{http_code} %{content_type}' "https://$host$asset?deploy-check=$(date +%s)$i")
+    code=${r%% *}; ct=${r#* }
+    # A 200 of the asset's own type; the SPA fallback (text/html) and the
+    # middleware's no-store miss (404 text/plain) both mean "not here yet".
+    case "$code $ct" in "200 text/html"*|"200 text/plain"*|"200 ") sleep 5 ;; 200\ *) ok=true; break ;; *) sleep 5 ;; esac
+  done
+  if $ok; then echo "asset ok: $asset ($ct)"; else echo "WARN: https://$host$asset still not served as its type after 60s (got '$code $ct') — browsers loading now may cache the SPA fallback; re-check, and tell viewers ⌘⇧R" >&2; fi
+done
+
+# On a successful deploy, advance the local `<short>-prod` (or, for `--dev`,
+# `<short>-dev`) pointer to exactly what we shipped (HEAD). Kept in sync by deploy itself, so
+# it can't drift the way a hand-updated branch would; `cf-status` stays the
+# authority (it reads CF's own deployment metadata) and this is the git-native
+# convenience for `git log <short>-prod..HEAD` / offline diffing. Local only: it is never
+# pushed, so the shared repo's branch list carries just the deployment branches.
+sha=$(git rev-parse HEAD)
+git branch -f "$ptr" "$sha"
+echo "moved local $ptr → ${sha:0:9}"
+[ "$mode" = dev ] && echo "preview: https://$branch.$PROJECT.pages.dev"
+if $push; then
+  git push "$remote" "$gbranch" || echo "WARN: push of $gbranch to $remote failed (deploy itself succeeded)" >&2
+  echo "pushed $gbranch → $remote"
+fi

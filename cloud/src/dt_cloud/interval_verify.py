@@ -1,0 +1,656 @@
+"""Parity of the interval store against the per-scan path store (specs/interval-store.md §9): for sampled
+`(P, D)` (scan ids from the deployment profile's `verify_scans`) the interval reader's view (`interval_read.Store.view`) against the same view computed from the
+scan's own per-scan `path` sort — every tile, its bytes, objects, kind, age, last read, classes, owners
+and `(other)` — and diffs between sampled dates; with each side's read cost (the interval read as made,
+the per-scan read as the Worker would plan it from that scan's footer index).
+
+    dt-cloud interval-store verify -P PROFILE -g GEN [-i TASK -n TASKS]   # Batch: TASKS tasks split the sampled scans
+"""
+from __future__ import annotations
+
+import json
+import math
+import os
+import sys
+from functools import partial
+from pathlib import Path
+from time import monotonic
+
+import pyarrow.parquet as pq
+
+from . import interval_read as ir
+from .static_names import V2_OPTIONAL, q, read_json
+
+err = partial(print, file=sys.stderr, flush=True)
+
+W, H = 1280, 768
+
+# ── The per-scan reference (independent SQL over the scan's own rows) ──────
+
+
+def agg_sql(version: int) -> str:
+    """Per `(depth, path)`: the reader's `merge` over a path's rows, from the per-scan file's own columns."""
+    if version == 2:
+        return """count(*) AS n, sum(size)::BIGINT AS b, sum(n_files)::BIGINT AS o, bool_or(kind <> 'file') AS is_dir, max(n_children) AS nc,
+            sum(CASE WHEN mtime_mean IS NOT NULL THEN mtime_mean * size ELSE 0 END) AS wts,
+            sum(CASE WHEN mtime_mean IS NOT NULL THEN size ELSE 0 END)::BIGINT AS wb, max(mtime)::BIGINT AS m, max(last_read) AS a,
+            sum(coalesce(sum_storage_class_id_2, 0))::BIGINT AS c2, sum(coalesce(sum_storage_class_id_3, 0))::BIGINT AS c3,
+            sum(coalesce(sum_storage_class_id_4, 0))::BIGINT AS c4"""
+    return """count(*) AS n, sum(b)::BIGINT AS b, sum(o)::BIGINT AS o, true AS is_dir, NULL::BIGINT AS nc,
+        sum(CASE WHEN wb > 0 THEN (wts / wb) * wb ELSE 0 END) AS wts, sum(coalesce(wb, 0))::BIGINT AS wb, NULL::BIGINT AS m, max(a) AS a,
+        sum(coalesce(c2, 0))::BIGINT AS c2, sum(coalesce(c3, 0))::BIGINT AS c3, sum(coalesce(c4, 0))::BIGINT AS c4"""
+
+
+def size_col(version: int) -> str:
+    return "size" if version == 2 else "b"
+
+
+class Scan:
+    """One scan's per-scan `path` sort, queried with DuckDB: in place (a local parquet), or with `table` loaded once into
+    that native table of `con`'s database (`verify_task`'s). A query over the parquet pays for its footer and per-group
+    statistics every time — gcs's sorts hold ~400M rows in ~50K groups, ~4 s a query whatever it reads, so the diffs'
+    one-sided lookups (two queries each, hundreds a diff) ran for hours — while the table's zonemaps over the same
+    `(depth, path)` order answer a point query in milliseconds, and a full scan several times faster."""
+
+    def __init__(self, con, file: str, version: int, key: str = "", *, table: str | None = None):
+        self.con, self.file, self.v, self.key, self.table = con, file, version, key, table
+        self.src = f"read_parquet({q(file)})"
+        if table is not None:
+            # Rows in the file's order (DuckDB preserves insertion order), so the zonemaps prune by `(depth, path)`.
+            con.execute(f"CREATE OR REPLACE TABLE {table} AS SELECT * FROM {self.src}")
+            self.src = table
+        have = {r[0] for r in con.execute(f"DESCRIBE SELECT * FROM {self.src}").fetchall()}
+        # Columns the scan lacks read as NULL, as the builder reads them (`static_names.V2_OPTIONAL`): no owner
+        # axis names no owner, and an absent storage-class pivot holds no bytes (cw's sorts carry only class 1).
+        missing = ["NULL::VARCHAR AS usr"] if "usr" not in have else []
+        if version == 2:
+            missing += [f"NULL::BIGINT AS {c}" for c in V2_OPTIONAL.values() if c not in have and c != "usr"]
+        if missing:
+            self.src = f"(SELECT *, {', '.join(missing)} FROM {self.src})"
+
+    def drop(self) -> None:
+        """Free the loaded table (a nop in place)."""
+        if self.table is not None:
+            self.con.execute(f"DROP TABLE IF EXISTS {self.table}")
+
+    def _want(self, paths: list[tuple[int, str]]) -> None:
+        self.con.execute("CREATE OR REPLACE TEMP TABLE want (depth INTEGER, path VARCHAR)")
+        self.con.executemany("INSERT INTO want VALUES (?, ?)", paths)
+
+    def _aggs(self, where: str, having: str = "") -> list[dict]:
+        cur = self.con.execute(f"SELECT depth, path, {agg_sql(self.v)} FROM {self.src} WHERE {where} GROUP BY depth, path {having}")
+        cols = [d[0] for d in cur.description]
+        return [dict(zip(cols, r)) for r in cur.fetchall()]
+
+    def _same_path_objects(self, paths: list[tuple[int, str]], thr_min: float) -> dict[str, tuple]:
+        """Object rows under `thr_min` at paths that are also directories (a key and a prefix of the
+        same name): what the pre-aggregation filter dropped from those paths' totals."""
+        if not paths:
+            return {}
+        self._want(paths)
+        return {p: (b, o, wts, wb, m, c2, c3, c4) for p, b, o, wts, wb, m, c2, c3, c4 in self.con.execute(
+            f"""SELECT s.path, sum(size)::BIGINT, sum(n_files)::BIGINT, sum(CASE WHEN mtime_mean IS NOT NULL THEN mtime_mean * size ELSE 0 END),
+                sum(CASE WHEN mtime_mean IS NOT NULL THEN size ELSE 0 END)::BIGINT, max(mtime)::BIGINT, sum(coalesce(sum_storage_class_id_2, 0))::BIGINT,
+                sum(coalesce(sum_storage_class_id_3, 0))::BIGINT, sum(coalesce(sum_storage_class_id_4, 0))::BIGINT
+                FROM {self.src} s JOIN want w ON s.depth = w.depth AND s.path = w.path WHERE s.kind = 'file' AND s.size < {thr_min!r}
+                GROUP BY s.path""").fetchall()}
+
+    def _users(self, paths: list[tuple[int, str]]) -> dict[str, dict[str, int]]:
+        if not paths:
+            return {}
+        self._want(paths)
+        out: dict[str, dict[str, int]] = {}
+        for p, u, b in self.con.execute(f"""SELECT s.path, s.usr, sum(s.{size_col(self.v)})::BIGINT FROM {self.src} s JOIN want w ON s.depth = w.depth AND s.path = w.path
+                WHERE s.usr IS NOT NULL AND s.usr <> '' GROUP BY s.path, s.usr""").fetchall():
+            out.setdefault(p, {})[u] = b
+        return out
+
+    @staticmethod
+    def to_agg(r: dict, ub: dict[str, int]) -> ir.Agg:
+        a = ir.Agg(b=r["b"], o=r["o"], kind="dir" if r["is_dir"] else "file", nc=r["nc"], a=r["a"], m=r["m"])
+        if r["wb"] > 0:
+            a.wts, a.wb = r["wts"], r["wb"]
+        for k in ("c2", "c3", "c4"):
+            if r[k]:
+                a.cb[k[1]] = r[k]
+        a.ub = ub
+        return a
+
+    def lookup(self, path: str) -> ir.Agg | None:
+        rs = self._aggs(f"depth = {ir.depth_of(path)} AND path = {q(path)}")
+        return self.to_agg(rs[0], self._users([(rs[0]["depth"], path)]).get(path, {})) if rs else None
+
+    def lookup_many(self, paths) -> dict[str, ir.Agg]:
+        """`lookup` of every path in `paths`, in one query (a path absent from the scan is absent)."""
+        want = [(ir.depth_of(p), p) for p in sorted(set(paths))]
+        if not want:
+            return {}
+        self._want(want)
+        cur = self.con.execute(f"""SELECT s.depth, s.path, {agg_sql(self.v)} FROM {self.src} s JOIN want w ON s.depth = w.depth AND s.path = w.path
+            GROUP BY s.depth, s.path""")
+        cols = [d[0] for d in cur.description]
+        rs = [dict(zip(cols, r)) for r in cur.fetchall()]
+        users = self._users([(r["depth"], r["path"]) for r in rs])
+        return {r["path"]: self.to_agg(r, users.get(r["path"], {})) for r in rs}
+
+    def view(self, path: str, w: int = W, h: int = H, *, max_depth: int | None = None, threshold: float | None = None,
+             min_area: float = ir.MIN_AREA, atten: float = ir.ATTEN) -> dict:
+        dP = ir.depth_of(path)
+        if path == "":
+            tops = self._aggs("depth = 1")
+            users = self._users([(1, r["path"]) for r in tops])
+            root = ir.Agg(kind="dir", nc=len(tops))
+            reads = [r["a"] for r in tops if r["a"] is not None]
+            root.a = max(reads) if reads else None
+            for r in tops:
+                a = self.to_agg(r, users.get(r["path"], {}))
+                root.b += a.b; root.o += a.o; root.wts += a.wts; root.wb += a.wb
+                if a.m is not None:
+                    root.m = a.m if root.m is None else max(root.m, a.m)
+                for key in ("cb", "ub"):
+                    for k, v in getattr(a, key).items():
+                        getattr(root, key)[k] = getattr(root, key).get(k, 0) + v
+        else:
+            root = self.lookup(path)
+            if root is None:
+                return {"tree": None}
+        if root.b <= 0:
+            return {"tree": None}
+        thr = threshold if threshold is not None else root.b * min_area / (w * h)
+        thr_at = lambda d: thr * atten ** max(0, d - dP - 1)
+        lo, hi = ir.p_range(path)
+        d_hi = f" AND depth <= {dP + max_depth}" if max_depth is not None else ""
+        # The per-depth threshold as SQL: `thr · atten^(depth − dP − 1)` (atten > 0). An object is one row
+        # (one owner slice), so objects under the lowest threshold can't be tiles and are skipped before
+        # the aggregation; a path that is both an object and a directory gets its small object rows back
+        # below (`_same_path_objects`).
+        thr_min = min(thr_at(dP + 1), thr_at(dP + max_depth) if max_depth is not None else thr_at(dP + 1))
+        skip = f" AND (kind <> 'file' OR size >= {thr_min!r})" if self.v == 2 else ""
+        rows = self._aggs(f"depth > {dP}{d_hi} AND path >= {q(lo)} AND path < {q(hi)}{skip}",
+                          f"HAVING sum({size_col(self.v)}) >= {thr!r} * pow({atten!r}, greatest(0, depth - {dP} - 1))")
+        if skip:
+            extra = self._same_path_objects([(r["depth"], r["path"]) for r in rows if r["is_dir"]], thr_min)
+            for r in rows:
+                if r["path"] in extra:
+                    b, o, wts, wb, m, c2, c3, c4 = extra[r["path"]]
+                    if m is not None:
+                        r["m"] = m if r["m"] is None else max(r["m"], m)
+                    r["b"] += b; r["o"] += o; r["wts"] += wts; r["wb"] += wb; r["c2"] += c2; r["c3"] += c3; r["c4"] += c4
+        # SQL's float threshold vs the reader's: re-test in Python so the boundary is the same arithmetic.
+        rows = [r for r in rows if r["b"] >= thr_at(r["depth"])]
+        users = self._users([(r["depth"], r["path"]) for r in rows])
+        kept = {r["path"]: self.to_agg(r, users.get(r["path"], {})) for r in rows}
+        return {"tree": ir.tree(path, root, kept, thr_at), "threshold": thr, "kept": {p: (a.b, a.o, a.kind) for p, a in kept.items()},
+                "root": (root.b, root.o)}
+
+    def root_b(self, path: str) -> int:
+        """P's total (`readRootAgg`): its own row's bytes, the root's the sum of the buckets'."""
+        sc = size_col(self.v)
+        where = "depth = 1" if path == "" else f"depth = {ir.depth_of(path)} AND path = {q(path)}"
+        return int(self.con.execute(f"SELECT coalesce(sum({sc}), 0) FROM {self.src} WHERE {where}").fetchone()[0])
+
+    def bysize_tiles(self, path: str, thr: float, atten: float = ir.ATTEN, max_depth: int | None = None) -> dict[str, int]:
+        """What the per-scan Worker's `bysize` read keeps (`readSizeRects`): rows — owner slices — with
+        `size ≥ thrAt(depth)`, so a tile's bytes are its slices over the threshold only."""
+        dP = ir.depth_of(path)
+        lo, hi = ir.p_range(path)
+        d_hi = f" AND depth <= {dP + max_depth}" if max_depth is not None else ""
+        sc = size_col(self.v)
+        return {p: b for p, b in self.con.execute(
+            f"""SELECT path, sum({sc})::BIGINT FROM {self.src} WHERE depth > {dP}{d_hi} AND path >= {q(lo)} AND path < {q(hi)}
+                AND {sc} >= {thr!r} * pow({atten!r}, greatest(0, depth - {dP} - 1)) GROUP BY path""").fetchall()}
+
+
+# ── The per-scan read the Worker would make (cost only, from the scan's footer index) ──
+
+V2_COLS = ["path", "depth", "usr", "kind", "size", "n_files", "n_children", "n_desc", "mtime", "mtime_mean", "last_read",
+           "sum_storage_class_id_2", "sum_storage_class_id_3", "sum_storage_class_id_4"]
+V1_COLS = ["path", "depth", "usr", "b", "o", "wts", "wb", "c2", "c3", "c4", "a"]
+
+
+class Footer:
+    """A per-scan sort's footer rows (`.groups.parquet`, else `.groups.json`) and its projected bytes."""
+
+    def __init__(self, groups: list[dict], schema: list[dict], floor: int | None, cols: list[str]):
+        self.groups, self.floor = groups, floor
+        names = [e["name"] for e in schema[1:]]
+        self.idx = [names.index(c) for c in cols if c in names]
+
+    @classmethod
+    def load(cls, src, key_parquet: str, version: int) -> "Footer | None":
+        """From `src` (a `blobstore.Store` over the scans' root: `gs://`, `r2://`, `s3://`, a dir)."""
+        import io
+
+        cols = V2_COLS if version == 2 else V1_COLS
+        gp = key_parquet.removesuffix(".parquet") + ".groups.parquet"
+        if src.exists(gp):
+            data = src.read_bytes(gp)
+            t = pq.read_table(io.BytesIO(data))
+            kv = {k.decode(): v.decode() for k, v in (pq.read_metadata(io.BytesIO(data)).metadata or {}).items()}
+            return cls(t.to_pylist(), json.loads(kv["schema"]), int(kv["floor_bytes"]) if "floor_bytes" in kv else None, cols)
+        gj = key_parquet.removesuffix(".parquet") + ".groups.json"
+        if not src.exists(gj):
+            return None
+        doc = json.loads(src.read_bytes(gj))
+        fields = ("rg", "d_min", "d_max", "p_min", "p_max", "b_max", "u_min", "u_max", "row_start", "row_end", "rg_json", "b_min")
+        return cls([dict(zip(fields, g)) for g in doc["groups"]], doc["schema"], doc.get("floor_bytes"), cols)
+
+    def nbytes(self, g: dict) -> int:
+        _, _, cols = json.loads(g["rg_json"])
+        return sum(cols[i][1] for i in self.idx)
+
+    def cost(self, gs: list[dict]) -> tuple[int, int, int]:
+        return len(gs), sum(g["row_end"] - g["row_start"] for g in gs), sum(self.nbytes(g) for g in gs)
+
+
+def plan_rects(f: Footer, d_lo: int, d_hi: int, lo: str, hi: str, thr_at) -> list[dict]:
+    out = []
+    for g in f.groups:
+        if g["d_max"] < d_lo or g["d_min"] > d_hi:
+            continue
+        if g["d_min"] == g["d_max"] and (g["p_max"] < lo or g["p_min"] > hi):
+            continue
+        if g["b_max"] < thr_at(max(g["d_min"], d_lo)):
+            continue
+        out.append(g)
+    return out
+
+
+def plan_size(f: Footer, lo: str, hi: str, thr_min: float) -> list[dict]:
+    return [g for g in f.groups if g["b_max"] >= math.floor(thr_min) and g["p_max"] >= lo and g["p_min"] < hi]
+
+
+def perscan_cost(footers: dict[str, Footer], version: int, path: str, thr: float, root_b: int, *, atten: float = ir.ATTEN,
+                 max_depth: int | None = None) -> dict:
+    """The per-scan Worker's reads for a plain view: P's root row(s), then the subtree from whichever
+    store sort plans fewer rows (v2), or the coarsest v1 tier whose floor the threshold clears."""
+    dP = ir.depth_of(path)
+    lo, hi = ir.p_range(path)
+    d_lo, d_hi = dP + 1, (dP + max_depth if max_depth is not None else 10_000)
+    thr_at = lambda d: thr * atten ** max(0, d - dP - 1)
+    root_d, root_lo, root_hi = (1, "", "￿") if path == "" else (dP, path, path)
+    tot = {"groups": 0, "rows": 0, "bytes": 0}
+
+    def add(name: str, gs: list[dict], f: Footer) -> None:
+        n, r, b = f.cost(gs)
+        tot["groups"] += n; tot["rows"] += r; tot["bytes"] += b
+        tot.setdefault("by_sort", {})[name] = [n, r, b]
+
+    if version == 2:
+        fp, fs = footers["path"], footers["bysize"]
+        add("root", plan_rects(fp, root_d, root_d, root_lo, root_hi, lambda d: 0), fp)
+        pp = plan_rects(fp, d_lo, d_hi, lo, hi, thr_at)
+        sp = plan_size(fs, lo, hi, min(thr_at(d_lo), thr_at(d_hi if d_hi < 10_000 else d_lo)))
+        held = lambda gs: sum(g["row_end"] - g["row_start"] for g in gs)
+        name, gs, f = ("bysize", sp, fs) if held(sp) < held(pp) else ("path", pp, fp)
+        add(name, gs, f)
+        tot["served"] = name
+        return tot
+    tiers = [(n, footers[n]) for n in ("coarse16", "coarse20", "coarse24") if footers.get(n)]
+    root_tier = next(((n, f) for n, f in tiers if plan_rects(f, root_d, root_d, root_lo, root_hi, lambda d: 0)), ("path", footers["path"]))
+    add("root", plan_rects(root_tier[1], root_d, root_d, root_lo, root_hi, lambda d: 0), root_tier[1])
+    pick = next(((n, f) for n, f in tiers if f.floor is not None and thr >= f.floor), ("path", footers["path"]))
+    add(pick[0], plan_rects(pick[1], d_lo, d_hi, lo, hi, thr_at), pick[1])
+    tot["served"] = pick[0]
+    return tot
+
+
+# ── Comparison ─────────────────────────────────────────────────────────────
+
+
+def compare(got: dict | None, want: dict | None, *, with_f: bool) -> list[str]:
+    """Differences between two trees, flattened: every tile and `(other)`, every field (`f` only where
+    the scan knows its children: a v1 scan's `(other)` count is whatever its read happened to see)."""
+    if got is None or want is None:
+        return [] if got is None and want is None else [f"tree: {'missing' if got is None else 'present'} vs reference"]
+    g, w = ir.flatten(got), ir.flatten(want)
+    out = []
+    for p in sorted(set(g) | set(w)):
+        if p not in g or p not in w:
+            out.append(f"{p}: {'missing' if p not in g else 'extra'}")
+            continue
+        a, b = dict(g[p]), dict(w[p])
+        if not with_f:
+            a.pop("f", None); b.pop("f", None)
+        if a != b:
+            out.append(f"{p}: {a} != {b}")
+    return out
+
+
+def cases_for(scan: Scan, date: str) -> list[dict]:
+    """The sampled views of one scan: the root (and its first level), two buckets, and dirs at depths
+    2–8 picked by a hash of their path and the date (big ones and arbitrary ones), plus a depth-1 band."""
+    def pick(where: str, k: int) -> list[str]:
+        sc = size_col(scan.v)
+        kind = " AND kind = 'dir'" if scan.v == 2 else ""
+        return [r[0] for r in scan.con.execute(
+            f"SELECT path FROM {scan.src} WHERE {where}{kind} AND {sc} > 0 GROUP BY path ORDER BY hash(path || {q(date)}) LIMIT {k}").fetchall()]
+
+    sc = size_col(scan.v)
+    cases = [{"path": ""}, {"path": "", "max_depth": 1}]
+    cases += [{"path": p} for p in pick("depth = 1", 2)]
+    cases += [{"path": p} for p in pick(f"depth = 2 AND {sc} >= 1e12", 2)]
+    cases += [{"path": p} for p in pick(f"depth BETWEEN 3 AND 5 AND {sc} >= 1e10", 2)]
+    cases += [{"path": p} for p in pick("depth BETWEEN 3 AND 5", 1)]
+    cases += [{"path": p} for p in pick("depth BETWEEN 6 AND 9", 2)]
+    big = pick(f"depth = 2 AND {sc} >= 1e12", 1)
+    cases += [{"path": p, "max_depth": 1} for p in big]
+    return cases
+
+
+def run_date(store: ir.Store, scan: Scan, date: str, ts: int, prev: tuple[Scan, str, int] | None, out, src, *,
+             changes: bool = False) -> dict:
+    """Every sampled case of one scan (and its diffs against `prev`), one JSON line each; `src` (a `blobstore.Store`)
+    holds the per-scan footers. Each diff's one-sided paths are looked up in one read per side (`lookup_many`), not one
+    per path. `changes`: also count each diff's changed versions (`Store.changes`, a cost statistic, never compared): it
+    reads every group with an open or close in the span, the whole root's in a churning one (130–200M rows a gcs root diff)."""
+    summary = {"date": date, "views": 0, "view_eq": 0, "diffs": 0, "diff_eq": 0}
+    footers = _footers(src, scan.key, scan.v)
+    cases = cases_for(scan, date)
+    for c in cases:
+        t0 = monotonic()
+        want = scan.view(c["path"], max_depth=c.get("max_depth"))
+        t_ref = monotonic() - t0
+        t0 = monotonic()
+        got = store.view(ts, c["path"], W, H, max_depth=c.get("max_depth"))
+        t_iv = monotonic() - t0
+        diffs = compare(got["tree"], want["tree"], with_f=scan.v == 2 or c["path"] == "")
+        rec = {"kind": "view", "date": date, **c, "eq": not diffs, "diffs": diffs[:20], "n_diffs": len(diffs),
+               "tiles": len(want.get("kept") or {}), "threshold": want.get("threshold"),
+               "iv_cost": got["cost"], "iv_served": got.get("served"), "t_ref": round(t_ref, 2), "t_iv": round(t_iv, 2)}
+        if want.get("tree") is not None:
+            # The per-scan side's read cost needs its footers (`.groups.parquet` / `.groups.json` sidecars); a sort
+            # without them has no cost to report (`null`), its parity is checked all the same.
+            rec["ps_cost"] = perscan_cost(footers, scan.v, c["path"], want["threshold"], want["root"][0], max_depth=c.get("max_depth")) \
+                if all(footers.values()) else None
+            if scan.v == 2:
+                bys = scan.bysize_tiles(c["path"], want["threshold"], max_depth=c.get("max_depth"))
+                ex = {p: v[0] for p, v in want["kept"].items()}
+                rec["ps_bysize_off"] = {"tiles_missing": sum(1 for p in ex if p not in bys), "tiles_extra": sum(1 for p in bys if p not in ex),
+                                        "bytes_differ": sum(1 for p in ex if p in bys and bys[p] != ex[p]),
+                                        "bytes_short": sum(ex[p] - bys.get(p, 0) for p in ex)}
+        out.write(json.dumps(rec) + "\n")
+        out.flush()
+        summary["views"] += 1
+        summary["view_eq"] += rec["eq"]
+        err(f"  {date} {c}: eq={rec['eq']} tiles={rec['tiles']} iv={got['cost']['groups']}g/{got['cost']['rows']}r ref {t_ref:.1f}s iv {t_iv:.1f}s"
+            + (f" — {diffs[:3]}" if diffs else ""))
+    if prev:
+        pscan, pdate, pts = prev
+        for c in [x for x in cases if "max_depth" not in x][:4]:
+            path = c["path"]
+            ra, rb = pscan.root_b(path), scan.root_b(path)
+            if ra <= 0 or rb <= 0:
+                continue
+            # `buildDiff`: one floor for both sides, from the larger root.
+            thr = max(ra, rb) * ir.MIN_AREA / (W * H)
+            t0 = monotonic()
+            wa, wb = pscan.view(path, threshold=thr), scan.view(path, threshold=thr)
+            # Across the v1 → v2 cutover the objects fold (`ir.diff`'s `fold`): the per-scan side knows each scan's
+            # format from its source, the store from its rows (`Store.view`'s `objects`, what `buildDiff` tests).
+            fold = pscan.v != scan.v
+            need_a, need_b = ir.one_sided(wa, wb, fold=fold)
+            want = ir.diff(wa, wb, pscan.lookup_many(need_a).get, scan.lookup_many(need_b).get, fold=fold)
+            t_ref = monotonic() - t0
+            t0 = monotonic()
+            ga, gb = store.view(pts, path, W, H, threshold=thr), store.view(ts, path, W, H, threshold=thr)
+            cost = ir.Cost()
+            got_fold = ga["objects"] != gb["objects"]
+            got_a, got_b = ir.one_sided(ga, gb, fold=got_fold)
+            got = ir.diff(ga, gb, store.lookup_many(pts, got_a, cost).get, store.lookup_many(ts, got_b, cost).get, fold=got_fold)
+            t_iv = monotonic() - t0
+            eq = got == want and got_fold == fold
+            rec = {"kind": "diff", "from": pdate, "to": date, "path": path, "eq": eq, "rows": len(want), "fold": [got_fold, fold],
+                   "changed": sum(1 for r in want if r[2] != "unchanged"), "one_sided": [len(need_a), len(need_b)],
+                   "mismatch": [list(x) for x in sorted(set(got) ^ set(want))][:20],
+                   "iv_cost": {"views": [ga["cost"], gb["cost"]], "lookups": cost.total()},
+                   "t_ref": round(t_ref, 2), "t_iv": round(t_iv, 2)}
+            if changes:
+                ch_cost = ir.Cost()
+                rec["changes"] = {"versions": store.changes(pts, ts, path, ch_cost), "cost": ch_cost.total()}
+            out.write(json.dumps(rec) + "\n")
+            out.flush()
+            summary["diffs"] += 1
+            summary["diff_eq"] += eq
+            err(f"  diff {pdate}→{date} {path!r}: eq={eq} rows={len(want)} changed={rec['changed']} one-sided={rec['one_sided']} "
+                f"ref {t_ref:.1f}s iv {t_iv:.1f}s")
+    return summary
+
+
+def generation_parity(con, scan_file: str, served: str, runs: list[str], ts: int) -> dict | None:
+    """The objects' `generation` at a scan, store against the scan's own sort, where both carry it (None otherwise): the
+    scan's objects with one (a key that is also a folder's prefix excepted: the store folds it into the folder), and how
+    many the store's version live at the scan (the `path` sort, base and runs) gives the same."""
+    from .interval_store import GENERATION_SORT, file_has_generation, identity_column
+
+    files = [f"{served}/{GENERATION_SORT}.parquet", *(f"{r}/{GENERATION_SORT}.parquet" for r in runs)]
+    if not file_has_generation(files[0]) or not file_has_generation(scan_file):
+        return None
+    GENERATION = identity_column(file_has_generation(files[0]))
+    from disk_tree.object_version import version_sql
+
+    cols = {r[0] for r in con.execute(f"DESCRIBE SELECT * FROM read_parquet({q(scan_file)})").fetchall()}
+    own_identity = version_sql(cols) if GENERATION == "version" else GENERATION
+    union = " UNION ALL ".join(f"SELECT depth, path, vf, vt, kind, {GENERATION} FROM read_parquet({q(f)})" for f in files)
+    live = f"""SELECT depth, path, {GENERATION} FROM (SELECT * FROM ({union}) QUALIFY row_number() OVER (PARTITION BY depth, path, vf ORDER BY vt) = 1)
+        WHERE vf <= {ts} AND {ts} < vt AND kind = 'file'"""
+    own = f"""SELECT depth::UTINYINT AS depth, path, any_value({own_identity}) AS {GENERATION} FROM read_parquet({q(scan_file)})
+        GROUP BY depth, path HAVING bool_and(kind = 'file') AND count(*) = 1 AND any_value({own_identity}) IS NOT NULL"""
+    n, eq = con.execute(f"""SELECT count(*), count(*) FILTER (WHERE l.{GENERATION} = o.{GENERATION})
+        FROM ({own}) o LEFT JOIN ({live}) l USING (depth, path)""").fetchone()
+    return {"objects": n, "equal": eq}
+
+
+def _footers(src, key: str, version: int) -> dict[str, Footer]:
+    d = key.rsplit("/", 1)[0]
+    if version == 2:
+        return {"path": Footer.load(src, key, 2), "bysize": Footer.load(src, f"{d}/path-index-bysize.parquet", 2)}
+    out = {"path": Footer.load(src, key, 1)}
+    for e in (16, 20, 24):
+        out[f"coarse{e}"] = Footer.load(src, f"{d}/path-index-coarse{e}.parquet", 1)
+    return out
+
+
+def attribution_of(con, s: dict, src, mount: str | None, tmp: Path, served: str, runs: list[str]) -> dict:
+    """Scan `s`'s attribution table against its own `attribution.parquet` (beside its `path` sort, under `mount` or
+    through `src`), copied to `tmp` first; a covered scan without its file is every row missing (`rows` -1)."""
+    import shutil
+
+    from .interval_attribution import attribution_parity
+    from .interval_store import attribution_src
+
+    key = s.get("attribution_src") or attribution_src(s)
+    local = tmp / f"{s['id']}.attribution.parquet"
+    if mount:
+        if not Path(f"{mount}/{key}").is_file():
+            return {"rows": -1, "store": -1, "missing": 1, "extra": 0}
+        shutil.copyfile(f"{mount}/{key}", local)
+    elif src.exists(key):
+        src.get(key, local)
+    else:
+        return {"rows": -1, "store": -1, "missing": 1, "extra": 0}
+    try:
+        return attribution_parity(con, str(local), served, runs, s["ts"])
+    finally:
+        local.unlink(missing_ok=True)
+
+
+#: Verify's DuckDB memory on a dedicated verify VM (`interval-store verify` on Batch).
+VERIFY_MEM = 80 << 30
+VERIFY_THREADS = 16
+
+
+def verify_budget(ram: int, cpus: int) -> tuple[int, int]:
+    """Verify's DuckDB threads and memory limit (bytes) on a machine with `ram` bytes and `cpus` cores: `VERIFY_MEM` /
+    `VERIFY_THREADS`, capped at 3/4 of the RAM and the cores, so a smaller machine (a scan's `post`, where `scan retire`
+    verifies in the task) spills instead of being killed (2026-10-21: 80 GB on a 32 GB `post`)."""
+    return min(VERIFY_THREADS, cpus), min(VERIFY_MEM, ram * 3 // 4)
+
+
+def verify_task(sampled: list[str], task: int, tasks: int, served: str, scans: dict, out_path: Path, tmp: Path, mount: str | None,
+                runs: list[str] = (), on_summary=None, *, changes: bool = False, covered: set[str] = frozenset(), share: int = 1) -> list[dict]:
+    """This task's share of the `sampled` scan ids (contiguous, so each diff's previous scan is local),
+    each scan's per-scan `path` sort copied to local disk first: from `mount`, else through the scans' root (`scans["bucket"]`:
+    a URL, a dir, or a bare GCS bucket name), then loaded into a table of a DuckDB database under `tmp` (`Scan`'s `table`;
+    two scans' at a time at most: the diffs' `from` and the scan). `runs`: the newest manifest's runs' served dirs, read
+    beside the base. `on_summary(summary)` runs as each scan completes (its marker written then: a later scan killed
+    mid-task loses only itself). `changes`: `run_date`'s. `covered`: the scans the store's attribution table covers
+    (`interval_append.covered_scans`): each one's table is compared with its own `attribution.parquet`, whole
+    (`interval_attribution.attribution_parity`). `share`: this task's process is one of that many on the machine (its
+    DuckDB budget the machine's split that many ways)."""
+    import duckdb
+
+    from .blobstore import Store, store_url
+
+    by_id = {s["id"]: s for s in scans["scans"]}
+    per = math.ceil(len(sampled) / tasks)
+    mine = sampled[max(0, task * per - 1):(task + 1) * per]  # the one before this task's share: its diffs' `from`
+    first_own = sampled[task * per] if task * per < len(sampled) else None
+    store = ir.Store(served, runs)
+    tmp.mkdir(parents=True, exist_ok=True)
+    db = tmp / "verify.duckdb"
+    for f in (db, db.with_name(db.name + ".wal")):
+        f.unlink(missing_ok=True)
+    con = duckdb.connect(str(db))
+    threads, mem = verify_budget(os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") // share, max(1, (os.cpu_count() or 1) // share))
+    con.execute(f"SET threads={threads}; SET memory_limit='{mem >> 20}MB'; SET temp_directory={q(str(tmp / 'spill'))}")
+    src = Store(store_url(scans["bucket"]))
+    prev = None
+    summaries = []
+    with out_path.open("w") as out:
+        for date in mine:
+            s = by_id[date]
+            local = tmp / f"{date}.parquet"
+            t0 = monotonic()
+            if mount:
+                import shutil
+
+                shutil.copyfile(f"{mount}/{s['src']}", local)
+            else:
+                src.get(s["src"], local)
+            err(f"{date}: per-scan path sort copied ({local.stat().st_size:,} B, {monotonic() - t0:.0f}s)")
+            t0 = monotonic()
+            scan = Scan(con, str(local), s["version"], s["src"], table=f"scan_{mine.index(date)}")
+            err(f"{date}: per-scan path sort loaded ({monotonic() - t0:.0f}s)")
+            if date == first_own or (first_own and sampled.index(date) > sampled.index(first_own)):
+                summary = run_date(store, scan, date, s["ts"], prev, out, src, changes=changes)
+                if (g := generation_parity(con, str(local), served, list(runs), s["ts"])) is not None:
+                    summary["generation"] = g
+                    err(f"  {date} generation: {g['equal']:,} of {g['objects']:,} objects equal")
+                if date in covered:
+                    summary["attribution"] = attribution_of(con, s, src, mount, tmp, served, list(runs))
+                    a = summary["attribution"]
+                    err(f"  {date} attribution: {a['rows']:,} prefixes, the store {a['store']:,}; {a['missing']:,} missing, {a['extra']:,} extra")
+                summaries.append(summary)
+                if on_summary is not None:
+                    on_summary(summary)
+            os.unlink(local)
+            if prev:
+                prev[0].drop()
+            prev = (scan, date, s["ts"])
+    return summaries
+
+
+# ── Per-scan parity markers (`scan retire`'s gate) ─────────────────────────
+
+
+def marker_key(prefix: str, scan: str) -> str:
+    """Scan `scan`'s parity marker in the generation at `prefix` (`interval-store/<gen>`)."""
+    return f"{prefix}/verify/{scan}.json"
+
+
+def marker(summary: dict, gen: str) -> dict:
+    """A scan's parity marker from its `run_date` summary: its views and diffs (and objects' `generation`, where the store
+    and the scan carry it: `generation_parity`), and `pass` when it had views and every view, diff and generation was
+    equal."""
+    ok = summary["views"] > 0 and summary["views"] == summary["view_eq"] and summary["diffs"] == summary["diff_eq"]
+    g = summary.get("generation")
+    if g is not None:
+        ok = ok and g["objects"] == g["equal"]
+    a = summary.get("attribution")
+    if a is not None:
+        ok = ok and a["missing"] == a["extra"] == 0
+    return {"scan": summary["date"], "gen": gen, "pass": ok, **{k: summary[k] for k in ("views", "view_eq", "diffs", "diff_eq")},
+            **({"generation": g} if g is not None else {}), **({"attribution": a} if a is not None else {})}
+
+
+def rows_pass(m: dict) -> bool:
+    """Whether a marker's comparison, its objects' `generation` aside, passed: the sampled verify's views and diffs (and
+    the attribution table, where it was compared), or the append check's tables (the attribution table's among them) and
+    cut."""
+    if m.get("how") != "append":
+        a = m.get("attribution")
+        return m["views"] > 0 and m["views"] == m["view_eq"] and m["diffs"] == m["diff_eq"] and (a is None or a["missing"] == a["extra"] == 0)
+    return m["tables"].get("pvl", {}).get("rows", 0) > 0 and all(v["missing"] == v["extra"] == 0 for v in (*m["tables"].values(), *m["cut"].values()))
+
+
+def failure(m: dict) -> str:
+    """Why a failing marker failed: the sampled verify's views and diffs equal (`marker`), or the append check's rows
+    missing and extra per table and served sort, and objects' generations equal (`interval_append.append_marker`)."""
+    if m.get("how") != "append":
+        a = m.get("attribution")
+        return f"{m['view_eq']}/{m['views']} views, {m['diff_eq']}/{m['diffs']} diffs equal" + (
+            f"; attribution {a['missing']} missing, {a['extra']} extra" if a and (a["missing"] or a["extra"]) else "")
+    bad = [] if m["tables"].get("pvl", {}).get("rows") else ["no rows"]
+    bad += [f"{t} {v['missing']} missing, {v['extra']} extra" for t, v in m["tables"].items() if v["missing"] or v["extra"]]
+    bad += [f"cut {s} {v['missing']} missing, {v['extra']} extra" for s, v in m["cut"].items() if v["missing"] or v["extra"]]
+    if (g := m.get("generation")) and g["equal"] != g["objects"]:
+        bad.append(f"generation {g['equal']}/{g['objects']} equal")
+    return "; ".join(bad)
+
+
+def verify_scans(store, gen: str, root: str, scans: list[dict], tmp: Path, *, changes: bool = False, jobs: int = 1) -> dict[str, dict]:
+    """Parity of `scans` (`{id, src, ts, version}`, oldest first; `src` under `root`, a dir or URL) against generation
+    `gen` of `store` (a `blobstore.Store`: base + the newest manifest's runs, as the reader serves them), each scan's
+    marker written to `verify/<id>.json` in the generation; returns the markers by scan id. `jobs`: the scans split into
+    that many contiguous shares (`verify_task`'s), each verified in a process of its own with that share of the
+    machine (cw's 10-24T1202 retire verified a backlog's 6 scans one after another: ~7–8 min each)."""
+    from .interval_store import PREFIX, download_served, verify_runs
+
+    from .append_runner import latest_key
+    from .interval_append import covered_scans
+
+    prefix = f"{PREFIX}/{gen}"
+    download_served(store, prefix, tmp / "served")
+    runs = verify_runs(store, prefix, tmp / "runs", {"scans": []})
+    doc = {"bucket": root, "scans": scans}
+    newest = latest_key([k.removeprefix(f"{prefix}/") for k in store.keys(f"{prefix}/manifests/")])
+    covered = covered_scans(store.read_json(f"{prefix}/scans.json"), store.read_json(f"{prefix}/{newest}") if newest else None)
+    out = {}
+
+    def write(s: dict) -> None:
+        m = marker(s, gen)
+        store.write_text(marker_key(prefix, s["date"]), json.dumps(m) + "\n")
+        out[s["date"]] = m
+
+    ids = [s["id"] for s in scans]
+    jobs = max(1, min(jobs, len(ids)))
+    if jobs == 1:
+        verify_task(ids, 0, 1, str(tmp / "served"), doc, tmp / "verify.jsonl", tmp, None, runs, on_summary=write, changes=changes,
+                    covered=covered)
+        return out
+    from concurrent.futures import ProcessPoolExecutor
+    from multiprocessing import get_context
+
+    with ProcessPoolExecutor(jobs, mp_context=get_context("spawn")) as ex:
+        parts = [ex.submit(_verify_part, store.root, prefix, gen, ids, i, jobs, str(tmp / "served"), doc, str(tmp / f"part{i}"), runs, changes, covered)
+                 for i in range(jobs)]
+        for f in parts:
+            out |= f.result()
+    return out
+
+
+def _verify_part(root: str, prefix: str, gen: str, ids: list[str], i: int, jobs: int, served: str, doc: dict, tmp: str, runs: list[str],
+                 changes: bool, covered: set[str]) -> dict[str, dict]:
+    """`verify_scans`' share `i` of `jobs`, in a process of its own: its scans' markers written and returned."""
+    from .blobstore import Store
+
+    store, part, out = Store(root), Path(tmp), {}
+
+    def write(s: dict) -> None:
+        m = marker(s, gen)
+        store.write_text(marker_key(prefix, s["date"]), json.dumps(m) + "\n")
+        out[s["date"]] = m
+
+    verify_task(ids, i, jobs, served, doc, part / "verify.jsonl", part, None, runs, on_summary=write, changes=changes, covered=covered, share=jobs)
+    return out

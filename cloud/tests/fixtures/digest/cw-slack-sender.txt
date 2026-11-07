@@ -1,0 +1,52 @@
+{"op": "-- lands", "scan": "2026-09-01T0001"}
+{"op": "post", "content": "<site OP: cw 2026-09, 1 scans to 2026-09-01T0001, params ->\n\n![S3 usage — September 2026](https://cw.icons.example.org/plot-<id>.png?v=<ts>)", "thread_id": null, "username": "S3 usage — September 2026", "icon_url": null, "icon_emoji": ":calendar:"}
+{"op": "-- lands", "scan": "2026-09-01T1201"}
+{"op": "edit", "ts": "m1", "content": "<site OP: cw 2026-09, 2 scans to 2026-09-01T1201, params ->\n\n![S3 usage — September 2026](https://cw.icons.example.org/plot-<id>.png?v=<ts>)"}
+{"op": "post", "content": "[main](https://cw.example.org/main-data?d=26090112-1d#over-time): 78.4% of 1P (196.8 Ti free) · [hot](https://cw.example.org/hot-data?d=26090112-1d#over-time): 89.2% of 100Ti (10.8 Ti free)", "thread_id": "m1", "username": "9/1 — 713 TiB (+7.8, 1.1%)", "icon_url": "https://icons.example.org/arrows/av_deg50.png?v=4", "icon_emoji": null}
+{"op": "-- lands", "scan": "2026-09-02T0001"}
+{"op": "edit", "ts": "m1", "content": "<site OP: cw 2026-09, 3 scans to 2026-09-02T0001, params ->\n\n![S3 usage — September 2026](https://cw.icons.example.org/plot-<id>.png?v=<ts>)"}
+{"op": "-- lands", "scan": "2026-09-02T1201"}
+{"op": "edit", "ts": "m1", "content": "<site OP: cw 2026-09, 4 scans to 2026-09-02T1201, params ->\n\n![S3 usage — September 2026](https://cw.icons.example.org/plot-<id>.png?v=<ts>)"}
+{"op": "post", "content": "[main](https://cw.example.org/main-data?d=26090212-1d#over-time): 78.6% of 1P (195.0 Ti free) · [hot](https://cw.example.org/hot-data?d=26090212-1d#over-time): 91.0% of 100Ti (9.0 Ti free)", "thread_id": "m1", "username": "9/2 — 715 TiB (+1.8, 0.3%)", "icon_url": "https://icons.example.org/arrows/av_deg30.png?v=4", "icon_emoji": null}
+{"op": "-- lands", "scan": "2026-09-03T0001"}
+{"op": "edit", "ts": "m1", "content": "<site OP: cw 2026-09, 5 scans to 2026-09-03T0001, params ->\n\n![S3 usage — September 2026](https://cw.icons.example.org/plot-<id>.png?v=<ts>)"}
+{"op": "-- lands", "scan": "2026-09-04T0001"}
+{"op": "edit", "ts": "m1", "content": "<site OP: cw 2026-09, 6 scans to 2026-09-04T0001, params ->\n\n![S3 usage — September 2026](https://cw.icons.example.org/plot-<id>.png?v=<ts>)"}
+{"op": "post", "content": "[main](https://cw.example.org/main-data?d=260903-12h#over-time): 83.6% of 1P (149.5 Ti free) · [hot](https://cw.example.org/hot-data?d=260903-12h#over-time): 91.0% of 100Ti (9.0 Ti free)", "thread_id": "m1", "username": "9/3 — 760 TiB (+45.5, 6.4%)", "icon_url": "https://icons.example.org/arrows/av_deg80.png?v=4", "icon_emoji": null}
+{"op": "-- lands", "scan": "2026-09-04T1201"}
+{"op": "edit", "ts": "m1", "content": "<site OP: cw 2026-09, 7 scans to 2026-09-04T1201, params ->\n\n![S3 usage — September 2026](https://cw.icons.example.org/plot-<id>.png?v=<ts>)"}
+{"op": "post", "content": "[main](https://cw.example.org/main-data?d=26090412-1d12h#over-time): 77.0% of 1P (209.0 Ti free) · [hot](https://cw.example.org/hot-data?d=26090412-1d12h#over-time): 92.5% of 100Ti (7.5 Ti free) · [more-data](https://cw.example.org/more-data?d=26090412-1d12h#over-time): 2 Ti", "thread_id": "m1", "username": "9/4 — 701 TiB (−59.5, 7.8%)", "icon_url": "https://icons.example.org/arrows/av_deg-70.png?v=4", "icon_emoji": null}
+{"op": "-- lands", "scan": "2026-09-07T1201"}
+{"op": "edit", "ts": "m1", "content": "<site OP: cw 2026-09, 8 scans to 2026-09-07T1201, params ->\n\n![S3 usage — September 2026](https://cw.icons.example.org/plot-<id>.png?v=<ts>)"}
+{"op": "post", "content": "[main](https://cw.example.org/main-data?d=260907-3d#over-time): 77.2% of 1P (207.5 Ti free) · [hot](https://cw.example.org/hot-data?d=260907-3d#over-time): 99.0% of 100Ti (1.0 Ti free) · [more-data](https://cw.example.org/more-data?d=260907-3d#over-time): 2 Ti", "thread_id": "m1", "username": "9/7 — 702 TiB (+1.5, 0.2%)", "icon_url": "https://icons.example.org/arrows/av_deg10.png?v=4", "icon_emoji": null}
+{"op": "-- lands", "scan": "2026-09-08T0001"}
+{"op": "edit", "ts": "m1", "content": "<site OP: cw 2026-09, 9 scans to 2026-09-08T0001, params ->\n\n![S3 usage — September 2026](https://cw.icons.example.org/plot-<id>.png?v=<ts>)"}
+{"op": "edit", "ts": "m1", "content": "<site OP: cw 2026-09, 9 scans to 2026-09-08T0001, params ->\n\n![S3 usage — September 2026](https://cw.icons.example.org/plot-<id>.png?v=<ts>)"}
+--- state ---
+{
+ "op_ts": "m1",
+ "plot_name": "plot-<id>.png",
+ "posted": {
+  "2026-09-01": {
+   "scan": "2026-09-01T1201",
+   "ts": "m2"
+  },
+  "2026-09-02": {
+   "scan": "2026-09-02T1201",
+   "ts": "m3"
+  },
+  "2026-09-03": {
+   "scan": "2026-09-03T0001",
+   "ts": "m4"
+  },
+  "2026-09-04": {
+   "scan": "2026-09-04T1201",
+   "ts": "m5"
+  },
+  "2026-09-07": {
+   "scan": "2026-09-07T1201",
+   "ts": "m6"
+  }
+ },
+ "variant": "sender"
+}

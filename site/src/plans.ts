@@ -1,0 +1,326 @@
+import { type QueryClient, useMutation, type UseMutationOptions, useQueries, useQuery, useQueryClient } from '@tanstack/react-query'
+import { getCurrentScan } from './owners'
+import { DEFAULT_STORE } from './stores'
+import { type DeletionRun, EXEC_CAPS, type ExecCaps, type ExecJob } from './runs'
+import { HttpError, type PlanItem, stageMany as stageManyVia } from './batches'
+import { SWEEP_SETTINGS_KEY } from './softDelete'
+import { type ScanDeletion, sizedAtOldScan } from './stagedScan'
+
+export type { DeletionRun, ExecJob } from './runs'
+export { LIVE_STATES } from './runs'
+
+// Client for the deletion-plan API (specs/done/staged-delete.md; the OA build plan
+// `sweep-plan-union.md`). The opt-in trash model: a trash gesture *stages*
+// prefixes (any signed-in full viewer may) into a shared open plan; an admin
+// approves + dispatches from /staged. Nothing is deleted by inaction.
+
+export interface StageResult {
+  /** null: nothing staged and no plan open. */
+  plan_id: number | null
+  /** null: nothing new staged, so no batch. */
+  batch_id: number | null
+  /** What this gesture added (an item already staged doesn't count). */
+  staged: string[]
+  /** The staged items that are exact objects (absent: none). */
+  staged_objects?: string[]
+  /** Skipped: a staged ancestor already names them. */
+  covered: string[]
+  /** Removed: staged descendants a new prefix now names. */
+  absorbed: string[]
+  /** Refused: nothing under them at the newest scan (deleted since, or never there; absent: none). */
+  gone?: string[]
+  /** The scan the new items are staged against (null: no scan synced yet). */
+  as_of: string | null
+}
+
+/** One trash gesture: the prefixes it stages and an optional shared memo (the
+ *  reason for the deletion, stored once on the batch — not copied per path). */
+export interface StageArgs {
+  /** Folder prefixes and exact objects; a bare string is a folder prefix. */
+  prefixes: (string | PlanItem)[]
+  note?: string
+}
+
+export interface PlanSummary {
+  id: number
+  name: string
+  note: string | null
+  state: 'open' | 'closed'
+  created_by: string
+  created_ts: number
+  closed_ts: number | null
+}
+/** `as_of`: the scan the item was staged against (null: staged before `as_of` existed). */
+export interface StagedItem { prefix: string; /** What `prefix` names (absent: a folder — a pre-`kind` server). */ kind?: 'prefix' | 'object'; note: string | null; added_by: string; added_ts: number; batch_id: number | null; as_of: string | null }
+export interface StageBatch { id: number; plan_id: number; note: string | null; created_by: string; created_ts: number }
+/** A stage batch with no items left, and what became of what it staged
+ *  (`functions/_lib/plans.ts` `emptiedBatches`). */
+export interface EmptiedBatch extends StageBatch {
+  /** Original staged paths retained in the audit history. */
+  prefixes: string[]
+  staged: number
+  covered: number
+  absorbed: { into: number; n: number }[]
+  unstaged: number
+  /** Taken out by the real run that deleted them. */
+  deleted: number
+}
+export interface StagedPlan { plan: PlanSummary | null; items: StagedItem[]; batches: StageBatch[]; emptied?: EmptiedBatch[]; runs: DeletionRun[] }
+/** A plan as `GET /api/plans` lists it. */
+export interface PlanListing extends PlanSummary { items: number; runs: number }
+
+/** The deployment's executor routes: cw's plan-first Batch bridge or gcs's. */
+export const EXEC_API = `/api/${DEFAULT_STORE.executor}`
+/** What the deployment's executor can do (stop / undo / purge / bucket cut /
+ *  run files): the console keys every control on these, never on a name. */
+export const CAPS: ExecCaps = EXEC_CAPS[DEFAULT_STORE.executor]
+
+/** One plan-API call: JSON in and out; a non-2xx throws an `HttpError` with its status. `cache`: the fetch's cache mode
+ *  (`reload`: from the network whatever the browser holds, and that answer is what it holds next). `signal`: aborts it
+ *  (the call rejects with the signal's reason); without one a call waits as long as the network does. */
+export async function call<T>(url: string, method = 'GET', body?: unknown, cache?: RequestCache, signal?: AbortSignal): Promise<T> {
+  const r = await fetch(url, {
+    method,
+    credentials: 'include',
+    headers: body ? { 'content-type': 'application/json' } : {},
+    body: body ? JSON.stringify(body) : undefined,
+    ...(cache ? { cache } : {}),
+    ...(signal ? { signal } : {}),
+  })
+  // CF returns HTML on a 5xx: read text, then try JSON.
+  const text = await r.text()
+  let data: unknown = null
+  try { data = JSON.parse(text) } catch { data = null }
+  if (!r.ok) {
+    const msg = data && typeof data === 'object' && 'error' in data ? String((data as { error: unknown }).error) : `${r.status} ${text.slice(0, 200)}`
+    throw new HttpError(msg, r.status)
+  }
+  return data as T
+}
+
+/** Stage `prefixes` in `STAGE_CHUNK`-sized POSTs, then fold the batches into the first
+ *  (`batches.ts` `stageMany`): one gesture, one batch to review, however many prefixes. */
+export const stageMany = (prefixes: (string | PlanItem)[], note?: string, post: typeof call = call): Promise<StageResult> =>
+  stageManyVia(prefixes, note, getCurrentScan(), post)
+
+/** Stage prefixes for deletion (POST /api/plans/stage, batched past `STAGE_CHUNK`). Pass canonical
+ *  `<scheme>bucket/…/` prefixes (trailing slash) and, optionally, one memo for
+ *  the whole gesture. The gesture is "as of" the scan on screen: the executor
+ *  deletes only objects that scan already had, unchanged. Invalidates the
+ *  plans query so /staged reflects it. */
+export function useStage() {
+  const qc = useQueryClient()
+  return useMutation<StageResult, Error, StageArgs>({
+    mutationFn: ({ prefixes, note }: StageArgs) => stageMany(prefixes, note),
+    onSuccess: () => { void qc.invalidateQueries({ queryKey: ['plans'] }) },
+  })
+}
+
+/** The plan /staged shows (polled while a run is live): the shared open plan
+ * (GET /api/plans/staged), or plan `id` (GET /api/plans/:id — a closed one
+ * keeps its runs and their undo windows reachable). */
+export function useStagedPlan(live = false, id: number | null = null, enabled = true) {
+  return useQuery<StagedPlan, Error>({
+    queryKey: ['plans', id ?? 'staged'],
+    queryFn: () => call<StagedPlan>(id == null ? '/api/plans/staged' : `/api/plans/${id}`),
+    refetchInterval: live ? 20_000 : false,
+    enabled,
+  })
+}
+
+/** Every plan, newest first, with its item and run counts (GET /api/plans). */
+export function usePlanList() {
+  return useQuery<PlanListing[], Error>({
+    queryKey: ['plans', 'list'],
+    queryFn: async () => (await call<{ plans: PlanListing[] }>('/api/plans')).plans,
+    staleTime: 60_000,
+  })
+}
+
+/** Close a plan (admin; PATCH /api/plans/:id): the next trash gesture opens a
+ * fresh one. Its runs stay reachable through the plan picker. */
+export function useClosePlan() {
+  const qc = useQueryClient()
+  return useMutation<unknown, Error, number>({
+    mutationFn: id => call(`/api/plans/${id}`, 'PATCH', { state: 'closed' }),
+    onSuccess: () => { void qc.invalidateQueries({ queryKey: ['plans'] }) },
+  })
+}
+
+export interface RunBand { prefix: string; bytes: number; objects: number; gone: number; overwritten: number; drift_new_objects: number; undone_objects: number }
+export interface RunAnalytics {
+  review: { objects: number; bytes: number; as_of: Record<string, string>; skipped_after_as_of: { objects: number; bytes: number; new_objects?: number; changed_objects?: number } } | null
+  result: { delete_failed: number; preserved_breakdown?: { new_since_review: number; changed_since_review: number; new_since_scan: number; unclassified: number } } | null
+  analysis?: { method: 'review-snapshots'; scan: string; created_at: string; review_omissions: { objects: number; bytes: number; new_objects: number; changed_objects: number }; prefixes?: { prefix: string; objects: number; new_objects: number; changed_objects: number }[]; execution: { outside_review: number; keys_recorded: boolean } } | null
+}
+
+export function usePrefixHistory(planId: number | null, live: boolean) {
+  return useQuery<{ bands: import('./prefixExecution').PrefixBandRecord[] }, Error>({
+    queryKey: ['prefix-history', planId],
+    queryFn: () => call(`/api/plans/prefix-history?id=${planId}`),
+    enabled: planId != null,
+    refetchInterval: live ? 30_000 : false,
+    staleTime: 20_000,
+  })
+}
+
+/** What a scan's sizes are out of date by (`withoutDeleted`). */
+export function useScanDeletions(scan: string, live: boolean) {
+  return useQuery<{ bands: ScanDeletion[] }, Error>({
+    queryKey: ['scan-deletions', scan],
+    queryFn: () => call(`/api/plans/scan-deletions?scan=${encodeURIComponent(scan)}`),
+    enabled: !!scan,
+    refetchInterval: live ? 30_000 : false,
+    staleTime: 20_000,
+  })
+}
+
+/** One run's D1 record and its per-band rows (GET /api/plans/run?id=). */
+export function useRunDetail(runId: string, enabled: boolean, live = false) {
+  return useQuery<{ run: DeletionRun; bands: RunBand[] }, Error>({
+    queryKey: ['run-detail', runId],
+    queryFn: () => call(`/api/plans/run?id=${encodeURIComponent(runId)}`),
+    enabled,
+    refetchInterval: q => live && !q.state.data?.run.finished_ts ? 30_000 : false,
+  })
+}
+
+/** Optional artifacts load independently; D1 totals and prefix outcomes stay immediately usable. */
+export function useRunAnalytics(runId: string, live: boolean) {
+  return useQuery<RunAnalytics, Error>({
+    queryKey: ['run-analytics', runId],
+    queryFn: () => call(`/api/plans/run-analytics?id=${encodeURIComponent(runId)}`),
+    enabled: DEFAULT_STORE.executor === 'plan-sweep',
+    staleTime: 30_000,
+    refetchInterval: live ? 30_000 : false,
+    retry: 1,
+  })
+}
+
+/** A file in the deployment's files proxy as JSON; null when it isn't there. */
+export async function filesJson<T>(rel: string): Promise<T | null> {
+  const r = await fetch(`/v1/files/get?path=${encodeURIComponent(rel)}`, { credentials: 'include' })
+  if (r.status === 404) return null
+  if (!r.ok) throw new Error(`${rel}: ${r.status}`)
+  return r.json() as Promise<T>
+}
+
+/** Run-dir JSON files (`CAPS.runFiles`), each polled every `poll` ms while
+ * `live(rel)` — only until it appears, with `untilPresent` (a manifest step's
+ * summary lands minutes in, then never changes). */
+export function useRunFiles<T>(rels: readonly string[], live: boolean | ((rel: string) => boolean), { poll = 30_000, untilPresent = false } = {}) {
+  const isLive = typeof live === 'function' ? live : () => live
+  return useQueries({
+    queries: rels.map(rel => ({
+      queryKey: ['run-file', rel],
+      queryFn: () => filesJson<T>(rel),
+      enabled: CAPS.runFiles,
+      retry: false,
+      staleTime: isLive(rel) ? 20_000 : Infinity,
+      refetchInterval: (q: { state: { data?: T | null } }) => (isLive(rel) && !(untilPresent && q.state.data) ? poll : false),
+    })),
+  })
+}
+
+/** Take prefixes back out of a plan (DELETE /api/plans/:id/items) — an admin
+ *  any of them, a stager only their own. */
+export function useUnstage(planId: number | null) {
+  const qc = useQueryClient()
+  return useMutation<{ removed: string[] }, Error, string[]>({
+    mutationFn: prefixes => {
+      if (planId == null) throw new Error('nothing staged')
+      return call(`/api/plans/${planId}/items`, 'DELETE', { prefixes })
+    },
+    onSuccess: () => { void qc.invalidateQueries({ queryKey: ['plans'] }) },
+  })
+}
+
+/** Dispatch the selected items to the deployment's executor (admin). A dry run
+ *  previews deletions and is optional; recovery depends on the store. */
+export function useDispatch(planId: number | null) {
+  return useMutation(dispatchOptions(useQueryClient(), planId))
+}
+
+/** One dispatch, as `/staged` sends it. `date`: the scan the run reads (the newest). `sized`: the scan the page's sizes
+ *  were read at, so the one its checkable rows (`items`), `buckets`, `machine` and `expected` come from. */
+export interface DispatchVars {
+  mode: 'dry' | 'real'
+  date: string
+  sized: string
+  items: string[]
+  buckets?: string[]
+  machine?: string
+  shownMinSoftDeleteDays?: number
+  expected?: { bytes: number; objects: number }
+}
+
+/** `useDispatch`'s mutation. It refuses, with nothing posted, a dispatch from a page sized at a scan other than the one
+ *  the run reads (`sizedAtOldScan`), whatever the page's controls did: the refusal is the dispatch's error. */
+export const dispatchOptions = (qc: QueryClient, planId: number | null): UseMutationOptions<{ job_id: string }, Error, DispatchVars> => ({
+  mutationFn: ({ mode, date, sized, items, buckets, machine, shownMinSoftDeleteDays: shown, expected }) => {
+    if (planId == null) throw new Error('nothing staged')
+    if (!items.length) throw new Error('nothing selected')
+    const refused = sizedAtOldScan(sized, date)
+    if (refused) throw new Error(refused)
+    // `items`: exactly the rows checked (an object as `=<key>`); the run never acts on more (specs/done/delete-what-you-see.md)
+    return call(`${EXEC_API}/dispatch`, 'POST', { plan_id: planId, mode, date, items, ...(buckets ? { buckets } : {}), ...(machine ? { machine } : {}), ...(shown !== undefined ? { shown_min_soft_delete_days: shown } : {}), ...(expected ? { expected } : {}) })
+  },
+  onSuccess: () => { void qc.invalidateQueries({ queryKey: ['plans'] }); void qc.invalidateQueries({ queryKey: EXEC_JOBS_KEY }) },
+  // A refusal over stale terms says to re-read them, so bring the ones on the page up to date.
+  onError: () => { void qc.invalidateQueries({ queryKey: SWEEP_SETTINGS_KEY }) },
+})
+
+/** A run control: stop (the run's Batch job) or undo / purge (the run). */
+export type RunAction = { action: 'stop'; job_id: string } | { action: 'undo' | 'purge'; run_id: string }
+
+/** The react-query key of the executor's jobs list (`useExecJobs`). */
+export const EXEC_JOBS_KEY = ['sweep-jobs'] as const
+
+/** How long a run control waits on the jobs list it reads again (`runActionOptions`) before giving that read up. */
+export const JOBS_REFRESH_MS = 15_000
+
+/** `read`, given up after `ms`: its signal aborts, and the read rejects saying `what` didn't answer. */
+async function within<T>(ms: number, what: string, read: (signal: AbortSignal) => Promise<T>): Promise<T> {
+  const gaveUp = new AbortController()
+  const timer = setTimeout(() => gaveUp.abort(new Error(`${what} didn’t answer in ${ms / 1000} s`)), ms)
+  try { return await read(gaveUp.signal) } finally { clearTimeout(timer) }
+}
+
+/** The executor's jobs list. `fresh`: past the browser's copy (the route answers `max-age=10`), for a read that has to see a
+ *  job submitted a moment ago. `signal`: aborts the read. */
+async function execJobs(fresh = false, signal?: AbortSignal): Promise<{ jobs: ExecJob[]; configured: boolean }> {
+  const d = await call<{ jobs: ExecJob[]; configured?: boolean }>(`${EXEC_API}/jobs`, 'GET', undefined, fresh ? 'reload' : undefined, signal)
+  return { jobs: d.jobs, configured: d.configured !== false }
+}
+
+/** `useRunAction`'s mutation. What a control did shows from the jobs list (an undo's or a purge's job, a stop's request), so
+ *  the control isn't settled until that list is read again, fresh: a copy from before it would offer the control again. A
+ *  jobs read already in flight is from before it too, and is dropped. While it is pending the page's controls are disabled,
+ *  so that read is one attempt, given up after `JOBS_REFRESH_MS`: a list that hangs holds them no longer than that. */
+export const runActionOptions = (qc: QueryClient): UseMutationOptions<unknown, Error, RunAction> => ({
+  mutationFn: a => call(`${EXEC_API}/${a.action}`, 'POST', a.action === 'stop' ? { job_id: a.job_id } : { run_id: a.run_id }),
+  onSuccess: async () => {
+    void qc.invalidateQueries({ queryKey: ['plans'] })
+    await qc.cancelQueries({ queryKey: EXEC_JOBS_KEY })
+    // `staleTime: 0`: read it however fresh the client holds its copy (the app's default keeps one a minute). `retry: false`,
+    // as the page's own read of it (`useExecJobs`): the app's default would ask twice more. A list that can't be read, or
+    // doesn't answer in time, is the list's error (the page shows it), not the control's: that landed.
+    const read = () => within(JOBS_REFRESH_MS, 'the jobs list', signal => execJobs(true, signal))
+    await qc.fetchQuery({ queryKey: EXEC_JOBS_KEY, queryFn: read, staleTime: 0, retry: false }).catch(() => undefined)
+  },
+})
+
+export function useRunAction() {
+  return useMutation(runActionOptions(useQueryClient()))
+}
+
+/** The executor's recent jobs (live state from Batch); `configured` false =
+ * the deployment has no dispatch credentials (recorded runs only). */
+export function useExecJobs(live = false) {
+  return useQuery<{ jobs: ExecJob[]; configured: boolean }, Error>({
+    queryKey: EXEC_JOBS_KEY,
+    queryFn: () => execJobs(),
+    refetchInterval: live ? 20_000 : false,
+    retry: false,
+  })
+}

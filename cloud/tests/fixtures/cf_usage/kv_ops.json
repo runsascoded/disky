@@ -1,0 +1,63 @@
+{
+  "data": {
+    "viewer": {
+      "accounts": [
+        {
+          "kvOperationsAdaptiveGroups": [
+            {
+              "sum": {
+                "requests": 50000
+              },
+              "dimensions": {
+                "date": "2026-10-19",
+                "namespaceId": "0123456789abcdef0123456789abcdef",
+                "actionType": "read"
+              }
+            },
+            {
+              "sum": {
+                "requests": 3000
+              },
+              "dimensions": {
+                "date": "2026-10-19",
+                "namespaceId": "0123456789abcdef0123456789abcdef",
+                "actionType": "write"
+              }
+            },
+            {
+              "sum": {
+                "requests": 70000
+              },
+              "dimensions": {
+                "date": "2026-10-20",
+                "namespaceId": "0123456789abcdef0123456789abcdef",
+                "actionType": "read"
+              }
+            },
+            {
+              "sum": {
+                "requests": 100
+              },
+              "dimensions": {
+                "date": "2026-10-20",
+                "namespaceId": "0123456789abcdef0123456789abcdef",
+                "actionType": "delete"
+              }
+            },
+            {
+              "sum": {
+                "requests": 50
+              },
+              "dimensions": {
+                "date": "2026-10-20",
+                "namespaceId": "0123456789abcdef0123456789abcdef",
+                "actionType": "list"
+              }
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "errors": null
+}

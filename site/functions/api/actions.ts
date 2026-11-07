@@ -1,0 +1,185 @@
+/**
+ * Actions ledger (specs/done/actions-ledger.md): attribution as an append-only WAL.
+ *
+ *   GET  /api/actions?log=1    → { total, rows: [...] } — every owner action,
+ *                                newest first, with its status (actionLog.ts).
+ *   GET  /api/actions          → { owners: [...] } — the live expanded owner
+ *                                rows joined to their raw action's
+ *                                provenance; the client folds them
+ *                                (most-recent-wins) over the tree.
+ *   POST /api/actions          → append one action (or an array of them):
+ *                                { pattern, owner, kind?, set_owner?, memo?, scan?, allow_missing? }.
+ *                                `owner: null` clears; `'@me'` resolves to the
+ *                                actor's canonical user id. `kind` says what
+ *                                `pattern` names (specs/done/file-assign.md):
+ *                                `'prefix'` (default) a folder `…/`, `'object'`
+ *                                one exact key (no trailing slash) — owning
+ *                                that key and nothing else. No regex patterns
+ *                                yet. An assignment (not a clear) of a pattern
+ *                                the newest scan holds nothing under is a 400
+ *                                listing `missing`, nothing written, unless
+ *                                `allow_missing: true`. The assign scope (every signed-in
+ *                                viewer, and their agent token) or admin;
+ *                                share links are read-only here.
+ *
+ * Anyone with the base scope can read; the ledger keeps the full
+ * who-did-what trail.
+ */
+import { type Ctx, json, requireAssigner, requireViewer } from '../_lib/auth.js'
+import { primaryOnly } from '../_lib/stores.js'
+import { ownerIdFor } from '../_lib/me.js'
+import { actionLog } from '../_lib/actionLog.js'
+import { hasLedger } from '../_lib/ledger.js'
+import { canonicalObject, type ItemKind, NO_SHAPE, type PrefixShape, prefixShape } from '../_lib/plans.js'
+import { isScanId } from '../../src/scanSlug.js'
+import { noteActivity } from '../_lib/activityHook.js'
+import { pathScans, storeReady, withPathStore } from '../_lib/index.js'
+import { MAX_PREFIXES, prefixesAt } from '../_lib/prefixes.js'
+
+const reEscape = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+/** `<scheme><bucket>/<path>/` over the scanned buckets (`STORE_SCHEME` /
+ * `STORE_BUCKETS`), dir prefixes only. */
+const prefixRe = (shape: PrefixShape): RegExp =>
+  new RegExp(`^${reEscape(shape.scheme)}(?:${shape.buckets.map(reEscape).join('|')})\\/(?:[^\\s]*\\/)?$`)
+
+interface ActionBody {
+  pattern?: string
+  kind?: ItemKind
+  set_owner?: boolean
+  owner?: string | null
+  memo?: string
+  scan?: string
+  /** Assign a pattern the newest scan holds nothing under (data not landed yet). */
+  allow_missing?: boolean
+}
+
+const bad = (error: string) => ({ error })
+
+/** `<scheme><bucket>/<key>` over the scanned buckets, the key exact (no
+ * trailing slash): the stored form must already be canonical. */
+const isObjectPattern = (pattern: string, shape: PrefixShape): boolean => {
+  const bucket = shape.buckets.find(b => pattern.startsWith(`${shape.scheme}${b}/`))
+  return !!bucket && canonicalObject(pattern, shape, bucket) === pattern
+}
+
+function validate(b: ActionBody, shape: PrefixShape): { error: string } | {
+  pattern: string
+  kind: ItemKind
+  owner: string | null
+  memo: string | null
+  scan: string
+  allowMissing: boolean
+} {
+  const pattern = b.pattern ?? ''
+  const kind = b.kind ?? 'prefix'
+  if (kind !== 'prefix' && kind !== 'object') return bad(`kind must be 'prefix' or 'object'`)
+  if (kind === 'prefix' && (!prefixRe(shape).test(pattern) || pattern.length > 512)) {
+    return bad(`pattern must be ${shape.scheme}<bucket>/<path>/ over a scanned bucket (trailing slash; regex patterns not accepted yet)`)
+  }
+  if (kind === 'object' && (!isObjectPattern(pattern, shape) || pattern.length > 1024)) {
+    return bad(`an object pattern must be ${shape.scheme}<bucket>/<key> over a scanned bucket (the exact key, no trailing slash)`)
+  }
+  // Touching the axis = the key is present (null = clear); `set_owner` may
+  // also be passed explicitly.
+  if (!(b.set_owner ?? 'owner' in b)) return bad('action must set an owner (null to clear)')
+  // '@me' = resolve the actor's canonical user id server-side (assignments).
+  const owner = b.owner ?? null
+  if (owner !== null && (typeof owner !== 'string' || owner.length > 128)) return bad('owner must be a user id')
+  const memo = b.memo?.slice(0, 1024) ?? null
+  const scan = isScanId(b.scan) ? b.scan : 'unknown'
+  return { pattern, kind, owner, memo, scan, allowMissing: b.allow_missing === true }
+}
+
+export const onRequest = async (ctx: Ctx): Promise<Response> => {
+  // The ownership ledger is the primary store's: `store=<other>` is a 404.
+  const notHere = primaryOnly(ctx)
+  if (notHere) return notHere
+  const { request, env } = ctx
+  if (!env.DB) return json({ error: 'actions backend not configured (DB)' }, 503)
+  // cw's D1 (and any lineage without the ledger tables) has no ownership to read or write.
+  if (!(await hasLedger(env))) return json({ error: 'no ownership ledger on this deployment' }, 404)
+
+  if (request.method === 'GET') {
+    const gated = await requireViewer(ctx)
+    if (gated instanceof Response) return gated
+    // `?log=1[&limit=&offset=]`: every owner action newest first, with its
+    // status (live / superseded / overridden / retracted) — the audit view.
+    const u = new URL(request.url)
+    if (u.searchParams.get('log')) {
+      return json(await actionLog(env, Number(u.searchParams.get('limit') ?? 50), Number(u.searchParams.get('offset') ?? 0)))
+    }
+    const owners = await env.DB.prepare(
+      "SELECT o.prefix, COALESCE(o.kind, 'prefix') AS kind, o.owner, o.ts, a.actor AS who, a.memo, a.id AS action_id " +
+      'FROM owner_prefixes o JOIN actions a ON a.id = o.action_id ' +
+      'WHERE o.tombstoned IS NULL ORDER BY o.prefix, o.ts',
+    ).all()
+    return json({ owners: owners.results })
+  }
+
+  if (request.method === 'POST') {
+    // Any signed-in viewer may assign any prefix to anyone (the ledger keeps
+    // who did it); a share link may not, unless minted with the assign scope.
+    const id = await requireAssigner(ctx)
+    if (id instanceof Response) return id
+    if (!id.email) return json({ error: 'assigning needs an identity with an email' }, 403)
+    const raw = (await request.json()) as ActionBody | ActionBody[]
+    const items = Array.isArray(raw) ? raw : [raw]
+    if (!items.length || items.length > 500) return json({ error: 'expected 1–500 actions' }, 400)
+    const shape = prefixShape(env)
+    if (!shape) return json({ error: `actions ${NO_SHAPE}` }, 503)
+    const parsed = items.map(b => validate(b, shape))
+    const firstErr = parsed.find(p => 'error' in p)
+    if (firstErr && 'error' in firstErr) return json(firstErr, 400)
+    const ts = Math.floor(Date.now() / 1000)
+    const ok = parsed as Exclude<ReturnType<typeof validate>, { error: string }>[]
+    if (ok.some(p => p.owner === '@me')) {
+      const me = await ownerIdFor(env, id.email)
+      for (const p of ok) if (p.owner === '@me') p.owner = me
+    }
+    // An assignment must name something the newest scan holds (a typo'd or example path is refused, not
+    // ledgered), unless `allow_missing`; a clear never is (a stale assignment's path may be gone).
+    const check = ok.filter(p => p.owner !== null && !p.allowMissing)
+    // The interval store for the dates it holds (`withPathStore`), as the map's own reads.
+    const penv = check.length ? (await withPathStore(ctx)).env : env
+    const newest = check.length && storeReady(penv) ? (await pathScans(penv, true)).results.at(-1)?.date : undefined
+    if (newest) {
+      const held = new Set<string>()
+      const keys = [...new Set(check.map(p => p.pattern))]
+      for (let i = 0; i < keys.length; i += MAX_PREFIXES) {
+        const { stats } = await prefixesAt(penv, newest, keys.slice(i, i + MAX_PREFIXES))
+        for (const [k, st] of Object.entries(stats)) if (st.b > 0 || st.o > 0) held.add(k)
+      }
+      const missing = keys.filter(k => !held.has(k))
+      if (missing.length) {
+        return json({ error: `nothing under ${missing.length === 1 ? 'this pattern' : `${missing.length} patterns`} in the newest scan (${newest}); check the path, or pass \`allow_missing: true\` to assign it before its data lands`, missing, scan: newest }, 400)
+      }
+    }
+    const stmts = []
+    for (const p of ok) {
+      // `kind`: NULL = prefix (every pre-`kind` row), 'object' = the exact key.
+      const kind = p.kind === 'object' ? 'object' : null
+      stmts.push(
+        env.DB.prepare(
+          'INSERT INTO actions (actor, ts, scan, pattern, kind, set_owner, owner, memo) VALUES (?, ?, ?, ?, ?, 1, ?, ?)',
+        ).bind(id.email, ts, p.scan, p.pattern, kind, p.owner, p.memo),
+      )
+      // Patterns expand 1:1. The batch runs sequentially inside one
+      // transaction, so "newest actions row" is the INSERT just above.
+      stmts.push(
+        env.DB.prepare(
+          'INSERT INTO owner_prefixes (action_id, prefix, kind, owner, ts) SELECT id, ?, ?, ?, ? FROM actions ORDER BY id DESC LIMIT 1',
+        ).bind(p.pattern, kind, p.owner, ts),
+      )
+    }
+    await env.DB.batch(stmts)
+    noteActivity(ctx, ...ok.map(p => ({
+      line: `\`${p.pattern}\` → ${p.owner ?? 'nobody'}${p.memo ? ` ("${p.memo.slice(0, 80)}")` : ''}`,
+      pattern: p.pattern,
+      owner: p.owner,
+      ...(p.kind === 'object' ? { object: true } : {}),
+    })))
+    return json({ ok: true, count: parsed.length, ts })
+  }
+
+  return json({ error: 'method not allowed' }, 405)
+}

@@ -1,13 +1,290 @@
 name: CI
 
-# Stub: the real workflow is .github/workflows/ci.yml on each deploy branch
-# (gcs, cw, hf, r2), where it runs on push. This file only makes it
-# dispatchable from the Actions UI; dispatch it with the deploy branch as ref.
+# Every long-lived branch (cloud, local and the deployments that merge them);
+# `dist/**` branches are build outputs, and a deployment's `<deploy>-prod` /
+# `<deploy>-dev` pointers are pushed at a sha its own branch already tested
+# (`dev`, the demo's dev branch, stays: `deploy-r2.yml` deploys on its CI).
 on:
+  push:
+    branches-ignore: ['dist/**', '*-prod', '*-dev']
+  pull_request:
   workflow_dispatch:
 
 jobs:
-  stub:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # The suites are deterministic (seeded fixtures): a tree whose inputs
+      # already passed on this Python is not re-run. `engine` keys on the
+      # blob ids of the engine's sources, tests and pins.
+      - name: Test inputs key
+        id: key
+        run: echo "key=engine-${{ matrix.python-version }}-$(git ls-tree -r HEAD -- src tests pyproject.toml uv.lock | sha256sum | cut -c1-32)" >> "$GITHUB_OUTPUT"
+
+      - name: Already passed?
+        id: passed
+        uses: actions/cache/restore@v4
+        with:
+          path: .tests-passed
+          key: ${{ steps.key.outputs.key }}
+          lookup-only: true
+
+      - name: Install uv
+        if: steps.passed.outputs.cache-hit != 'true'
+        uses: astral-sh/setup-uv@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        if: steps.passed.outputs.cache-hit != 'true'
+        run: uv python install ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        if: steps.passed.outputs.cache-hit != 'true'
+        run: uv sync --frozen --all-extras
+
+      - name: Run tests
+        if: steps.passed.outputs.cache-hit != 'true'
+        # GHA runners have 4 cores: one xdist worker each, the tests handed out one by one (`slow` included)
+        run: uv run pytest tests/ -v -n auto --dist loadgroup --durations=30
+
+      - name: Record pass
+        if: steps.passed.outputs.cache-hit != 'true'
+        run: mkdir -p .tests-passed && echo "${{ github.sha }}" > .tests-passed/sha
+
+      - if: steps.passed.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: .tests-passed
+          key: ${{ steps.key.outputs.key }}
+
+  typecheck:
+    name: Type Check
     runs-on: ubuntu-latest
     steps:
-      - run: echo "The real 'CI' workflow is on the deploy branches, e.g. https://github.com/Open-Athena/disky/blob/gcs/.github/workflows/ci.yml"
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install dependencies
+        run: uv sync --frozen --all-extras
+
+      - name: Run mypy
+        run: uv run mypy src/disk_tree --ignore-missing-imports
+
+  treemap-widget:
+    name: "@open-athena/treemap (typecheck + test)"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        # pnpm version comes from root package.json's `packageManager` field;
+        # passing `version:` here on top of that is a hard error in v4.
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Type check
+        run: cd packages/treemap && pnpm typecheck
+
+      - name: Test
+        run: cd packages/treemap && pnpm test
+
+  react-widgets:
+    name: "@disk-tree/react (typecheck + test)"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        # pnpm version comes from root package.json's `packageManager` field;
+        # passing `version:` here on top of that is a hard error in v4.
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Type check
+        run: cd packages/react && pnpm typecheck
+
+      - name: Test
+        run: cd packages/react && pnpm test
+
+  dt-cloud-test:
+    name: dt-cloud tests (${{ matrix.python-version }}, ${{ matrix.shard.name }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
+        # Shards by fixture: `test_static_drill.py`'s `world` (a minute to build, per config) splits by config, so
+        # each shard builds its own a few times; `rest` is everything the others don't name (new files land there).
+        shard:
+          - name: drill-R3
+            args: tests/test_static_drill.py -k R3-K2
+          - name: drill-R5
+            args: tests/test_static_drill.py -k R5-K1
+          - name: oracles
+            args: >-
+              tests/test_static_drill.py tests/test_static_hex.py tests/test_static_anchors.py
+              tests/test_static_anchors_hex.py -k "not R3-K2 and not R5-K1"
+          - name: rest
+            args: >-
+              tests --ignore=tests/test_static_drill.py --ignore=tests/test_static_hex.py
+              --ignore=tests/test_static_anchors.py --ignore=tests/test_static_anchors_hex.py
+    steps:
+      # Full history: a pending D1 recipe (`site/migrations/*.sql`) is checked
+      # against `site/schema.sql` as it was before the recipe landed
+      # (`test_d1_schema.py`, `dt_cloud.d1_schema.pre_image`).
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # The suites are deterministic (seeded fixtures): a tree whose inputs
+      # already passed on this Python is not re-run. `dt-cloud` keys on the
+      # tracked files' blob ids, minus docs (they read `site/`'s schema
+      # and Functions too, so the whole tree counts).
+      - name: Test inputs key
+        id: key
+        run: echo "key=dt-cloud-${{ matrix.python-version }}-${{ matrix.shard.name }}-$(git ls-tree -r HEAD | grep -vE '[[:space:]](specs/|.*\.md$)' | sha256sum | cut -c1-32)" >> "$GITHUB_OUTPUT"
+
+      - name: Already passed?
+        id: passed
+        uses: actions/cache/restore@v4
+        with:
+          path: .tests-passed
+          key: ${{ steps.key.outputs.key }}
+          lookup-only: true
+
+      - name: Install uv
+        if: steps.passed.outputs.cache-hit != 'true'
+        uses: astral-sh/setup-uv@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        if: steps.passed.outputs.cache-hit != 'true'
+        run: uv python install ${{ matrix.python-version }}
+
+      # One workspace env from the root lockfile (`cloud/` is a member), at the
+      # pins the job images install `--frozen`.
+      - name: Sync dt-cloud
+        if: steps.passed.outputs.cache-hit != 'true'
+        run: uv sync --frozen --all-packages --all-extras --all-groups
+
+      - name: Run dt-cloud tests
+        if: steps.passed.outputs.cache-hit != 'true'
+        # one xdist worker per core, `slow` included; `loadgroup`: the conftest keeps the tests sharing a
+        # module-scoped fixture together in chunks (one build per chunk), the rest go out one by one
+        run: cd cloud && uv run --no-sync pytest ${{ matrix.shard.args }} -v -n auto --dist loadgroup --durations=30
+
+      - name: Record pass
+        if: steps.passed.outputs.cache-hit != 'true'
+        run: mkdir -p .tests-passed && echo "${{ github.sha }}" > .tests-passed/sha
+
+      - if: steps.passed.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: .tests-passed
+          key: ${{ steps.key.outputs.key }}
+
+  site:
+    name: Site typecheck, build + tests
+    runs-on: ubuntu-latest
+    env:
+      PUPPETEER_SKIP_DOWNLOAD: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        # pnpm version comes from root package.json's `packageManager` field.
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24  # the D1 test fake uses `node:sqlite` (Node ≥ 22.5)
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # Wrangler ignores a `wrangler*.toml` that doesn't parse and deploys the old settings: every one in the
+      # tree (the demo's here, a deployment's `wrangler.toml` on its branch) must parse.
+      - name: wrangler*.toml parse
+        run: site/toml-check site/wrangler*.toml
+
+      # `site/deploy` is never executed otherwise; its own checks (config parse, project name, `STATIC_GEN`,
+      # host) broke a deploy twice. `--dry-run` runs them with no credentials, network, build or push. `cloud`
+      # checks the r2 demo's configs and the example; a deployment branch has a `site/wrangler.toml` (and its
+      # `deploy.env`), which the last line then checks as a real deploy would read them.
+      - name: site/deploy --dry-run
+        run: |
+          cd site
+          for c in wrangler.example.toml wrangler.r2.toml wrangler.r2-dev.toml; do
+            ./deploy --dry-run -P --config "$c"
+          done
+          ./deploy --dry-run -P --dev --config wrangler.r2.toml
+          if [ -f wrangler.toml ]; then ./deploy --dry-run -P; ./deploy --dry-run -P --dev; fi
+
+      # `pnpm build` = `tsc -b && vite build`: typechecks the SPA and the
+      # Functions, then bundles.
+      - name: Build site (typecheck + bundle)
+        run: cd site && pnpm build
+
+      - name: Site tests
+        run: cd site && timeout 900 pnpm vitest run --testTimeout=20000
+
+  fleet:
+    name: Fleet app typecheck, build + tests
+    runs-on: ubuntu-latest
+    env:
+      PUPPETEER_SKIP_DOWNLOAD: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        # pnpm version comes from root package.json's `packageManager` field.
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # The example here; the deploying branch's `fleet/wrangler.toml` too, where it has one.
+      - name: wrangler*.toml parse
+        run: site/toml-check fleet/wrangler*.toml
+
+      # What `site/` and `fleet/` share (`packages/pages-kit`), checked on its own.
+      - name: "@disk-tree/pages-kit typecheck"
+        run: cd packages/pages-kit && pnpm typecheck
+
+      # `pnpm build` = `tsc -p . && tsc -p functions && vite build`: the page, the Functions (and their specs), then
+      # the bundle.
+      - name: Build (typecheck + bundle)
+        run: cd fleet && pnpm build
+
+      - name: Tests
+        run: cd fleet && pnpm test

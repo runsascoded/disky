@@ -1,0 +1,9 @@
+# Build the sheet-mirror image. The context is the minimal repo-root-shaped
+# tree `build.sh` stages, with the Dockerfile under deploy/sheet-mirror/ —
+# hence a config instead of `builds submit --tag` (which only finds a root
+# Dockerfile).
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args: ['build', '-f', 'deploy/sheet-mirror/Dockerfile', '-t', '${_IMAGE}', '.']
+images:
+  - '${_IMAGE}'

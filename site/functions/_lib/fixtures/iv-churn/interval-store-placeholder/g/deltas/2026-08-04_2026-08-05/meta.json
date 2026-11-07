@@ -1,0 +1,71 @@
+{
+ "gen": "g",
+ "key": "deltas/2026-08-04_2026-08-05",
+ "first": "2026-08-04",
+ "last": "2026-08-05",
+ "level": 1,
+ "scans": [
+  "2026-08-04",
+  "2026-08-05"
+ ],
+ "stamps": {
+  "2026-08-04": 1785801600,
+  "2026-08-05": 1785888000
+ },
+ "rows": 39,
+ "bytes": 89743,
+ "sorts": {
+  "path": {
+   "sort": "path",
+   "rows": 39,
+   "groups": 10,
+   "bytes": 21291,
+   "groups_bytes": 5675,
+   "segments": {
+    "open": {
+     "groups": 6,
+     "rows": 24
+    },
+    "hist": {
+     "groups": 4,
+     "rows": 15
+    }
+   },
+   "s": 0.0
+  },
+  "bysize": {
+   "sort": "bysize",
+   "rows": 39,
+   "groups": 10,
+   "bytes": 21316,
+   "groups_bytes": 5674,
+   "segments": {
+    "open": {
+     "groups": 6,
+     "rows": 24
+    },
+    "hist": {
+     "groups": 4,
+     "rows": 15
+    }
+   },
+   "s": 0.0
+  },
+  "level": {
+   "sort": "level",
+   "rows": 50,
+   "groups": 13,
+   "bytes": 29828,
+   "groups_bytes": 5959,
+   "segments": {
+    "open": {
+     "groups": 13,
+     "rows": 50
+    }
+   },
+   "s": 0.0
+  }
+ },
+ "merge_s": 0.0,
+ "cut_s": 0.1
+}

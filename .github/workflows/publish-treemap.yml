@@ -1,0 +1,64 @@
+name: Publish @open-athena/treemap
+
+# Publishes a `dist/treemap` commit (`build-dist.yml`'s output: the packed package, `dist/` + README + package.json)
+# to npm, as-is but for its version (`<version>-dist.<sha>` → `<version>`), so npm serves the same build a
+# `github:…#<dist-sha>` pin installs.
+#
+# Tag a SOURCE commit `treemap-v<version>` (a tag push runs this file as it is in the tagged commit, and a dist commit
+# holds no workflows). The job takes the newest dist commit built from an ancestor of the tag with `packages/treemap`
+# unchanged since (so its bytes are the tag's package), checks its version against the tag, and publishes it; a
+# version npm has already is left alone.
+#
+# Auth: npm trusted publishing (GitHub's OIDC token; no stored npm token), set on npmjs.com → the package's settings →
+# Trusted publisher: GitHub Actions, this repo, workflow `publish-treemap.yml`. It can only be set once the package
+# exists, so 0.1.0 was published by hand, from its dist commit `f54c983e`. Provenance is attached automatically.
+on:
+  push:
+    tags: ["treemap-v*"]
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+      - name: The tag's dist commit
+        id: dist
+        run: |
+          git fetch -q origin dist/treemap
+          for d in $(git log --format=%H origin/dist/treemap); do
+            src=$(git log -1 --format=%B "$d" | sed -n 's/^Built from \([0-9a-f]\{40\}\)$/\1/p')
+            [ -n "$src" ] || continue
+            git merge-base --is-ancestor "$src" "$GITHUB_SHA" || continue
+            git diff --quiet "$src" "$GITHUB_SHA" -- packages/treemap || { echo "packages/treemap changed after $src (the newest dist build before the tag): wait for build-dist.yml"; exit 1; }
+            echo "sha=$d" >> "$GITHUB_OUTPUT"; echo "dist commit $d, built from $src"; exit 0
+          done
+          echo "no dist/treemap commit built from an ancestor of $GITHUB_SHA"; exit 1
+      - name: Check out the dist commit, versioned as the tag
+        run: |
+          git checkout -q "${{ steps.dist.outputs.sha }}"
+          v=${GITHUB_REF_NAME#treemap-v}
+          node -e '
+            const fs = require("fs"), p = JSON.parse(fs.readFileSync("package.json"))
+            const base = p.version.replace(/-dist\.[0-9a-f]+$/, "")
+            if (p.name !== "@open-athena/treemap" || base !== process.argv[1]) { console.error(`${p.name}@${p.version} ≠ @open-athena/treemap@${process.argv[1]}`); process.exit(1) }
+            p.version = base
+            fs.writeFileSync("package.json", JSON.stringify(p, null, 2) + "\n")
+          ' "$v"
+      # npm ≥ 11.5.1 speaks trusted publishing. `--ignore-scripts`: the dist commit is already built (its `prepack`
+      # would run the source's `tsup`). A version npm has already is left alone.
+      - name: Publish
+        run: |
+          v=$(node -p 'require("./package.json").version')
+          if npm view "@open-athena/treemap@$v" version >/dev/null 2>&1; then echo "@open-athena/treemap@$v is on npm already"; exit 0; fi
+          npm install -g npm@11.6.2
+          npm publish --access public --ignore-scripts

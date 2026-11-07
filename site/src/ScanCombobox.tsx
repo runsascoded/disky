@@ -1,0 +1,187 @@
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
+import { fmtScan, scanGroups, type ScanLabel } from './scan'
+import { slog } from './sessionLogBoot'
+
+/**
+ * A scan chooser as an ARIA combobox (a filterable listbox), replacing the
+ * native `<select>` + `<optgroup>`: the grouped list of every scan is long and
+ * a native select can't be typed-to-filtered by its human label. Follows the
+ * APG combobox-with-listbox pattern — a button shows the current scan; opening
+ * reveals a filter input (`role="combobox"`, `aria-activedescendant`) over a
+ * `role="listbox"` grouped by day. Arrow keys move the active option, Enter
+ * selects, Esc closes, typing filters against the rendered label ("8/19 6:08a").
+ */
+export function ScanCombobox({ value, scans, onChange, label, className, fmt = fmtScan }: {
+  value: string
+  /** In display order (newest first). */
+  scans: string[]
+  onChange: (id: string) => void
+  label: string
+  className?: string
+  /** A scan's label (the page's `scanLabeler`, which knows each date-only
+   *  scan's start); default `fmtScan`. */
+  fmt?: ScanLabel
+}) {
+  const [open, setOpen] = useState(false)
+  const [query, setQuery] = useState('')
+  const [activeId, setActiveId] = useState<string | null>(value)
+  const wrapRef = useRef<HTMLDivElement>(null)
+  const btnRef = useRef<HTMLButtonElement>(null)
+  const inputRef = useRef<HTMLInputElement>(null)
+  const listRef = useRef<HTMLUListElement>(null)
+  const baseId = useId()
+  const listId = `${baseId}-list`
+  const optId = (id: string) => `${baseId}-opt-${id.replace(/[^a-zA-Z0-9]/g, '')}`
+
+  // Filter over the human label (what the reader sees), so typing "6:08" or
+  // "8/19" narrows the list; empty query shows everything.
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase()
+    return q ? scans.filter(id => fmt(id).toLowerCase().includes(q)) : scans
+  }, [scans, query, fmt])
+  const groups = useMemo(() => scanGroups(filtered, undefined, fmt), [filtered, fmt])
+
+  const close = useCallback((focusBtn = true) => {
+    setOpen(false)
+    setQuery('')
+    if (focusBtn) btnRef.current?.focus()
+  }, [])
+
+  const commit = useCallback((id: string) => {
+    slog('pick', { n: `scan:${label}`, v: id })
+    onChange(id)
+    close()
+  }, [onChange, close, label])
+
+  // Open: seed the active option with the current value (or the first row) and
+  // focus the filter input.
+  useEffect(() => {
+    if (!open) return
+    setActiveId(scans.includes(value) ? value : scans[0] ?? null)
+    const t = setTimeout(() => inputRef.current?.focus(), 0)
+    return () => clearTimeout(t)
+  }, [open, value, scans])
+
+  // Keep the active option in view as it changes.
+  useEffect(() => {
+    if (!open || !activeId) return
+    listRef.current?.querySelector(`#${CSS.escape(optId(activeId))}`)?.scrollIntoView({ block: 'nearest' })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, activeId])
+
+  // If the query narrows past the active option, move it to the first match.
+  useEffect(() => {
+    if (open && activeId && !filtered.includes(activeId)) setActiveId(filtered[0] ?? null)
+  }, [open, filtered, activeId])
+
+  // Close on an outside pointer-down.
+  useEffect(() => {
+    if (!open) return
+    const onDown = (e: MouseEvent) => {
+      if (!wrapRef.current?.contains(e.target as Node)) close(false)
+    }
+    document.addEventListener('mousedown', onDown)
+    return () => document.removeEventListener('mousedown', onDown)
+  }, [open, close])
+
+  const move = (delta: number) => {
+    if (!filtered.length) return
+    const i = activeId ? filtered.indexOf(activeId) : -1
+    const next = Math.max(0, Math.min(filtered.length - 1, (i < 0 ? (delta > 0 ? 0 : filtered.length - 1) : i + delta)))
+    setActiveId(filtered[next])
+  }
+
+  const onInputKey = (e: React.KeyboardEvent) => {
+    switch (e.key) {
+      case 'ArrowDown': e.preventDefault(); move(1); break
+      case 'ArrowUp': e.preventDefault(); move(-1); break
+      case 'Home': e.preventDefault(); setActiveId(filtered[0] ?? null); break
+      case 'End': e.preventDefault(); setActiveId(filtered[filtered.length - 1] ?? null); break
+      case 'Enter': e.preventDefault(); if (activeId) commit(activeId); break
+      case 'Escape': e.preventDefault(); close(); break
+      case 'Tab': close(false); break
+    }
+  }
+
+  return (
+    <div ref={wrapRef} className={`scan-picker${className ? ` ${className}` : ''}`}>
+      <button
+        ref={btnRef}
+        type="button"
+        className="tb-select scan sp-trigger"
+        aria-label={label}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        onClick={() => setOpen(o => !o)}
+        onKeyDown={e => {
+          if (!open && (e.key === 'ArrowDown' || e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); setOpen(true) }
+        }}
+      >
+        <span className="sp-value">{fmt(value)}</span>
+        <span className="sp-caret" aria-hidden>▾</span>
+      </button>
+      {open && (
+        <div className="sp-pop" role="dialog" aria-label={label}>
+          <input
+            ref={inputRef}
+            type="text"
+            className="sp-filter"
+            role="combobox"
+            aria-expanded="true"
+            aria-controls={listId}
+            aria-activedescendant={activeId ? optId(activeId) : undefined}
+            aria-autocomplete="list"
+            placeholder="filter scans…"
+            value={query}
+            onChange={e => setQuery(e.target.value)}
+            onKeyDown={onInputKey}
+          />
+          <ul ref={listRef} className="sp-list" role="listbox" id={listId} aria-label={label}>
+            {groups.length === 0 && <li className="sp-empty" role="presentation">no scans match</li>}
+            <ScanOptions groups={groups} value={value} activeId={activeId} optId={optId} onPick={commit} onHover={setActiveId} />
+          </ul>
+        </div>
+      )}
+    </div>
+  )
+}
+
+/** The listbox's rows: a day with several scans is a header over its times; a
+ *  day with one scan is that one option, the day then its time (dimmed) when
+ *  the label has one — not a header over a lone row. */
+export function ScanOptions({ groups, value, activeId, optId, onPick, onHover }: {
+  groups: { day: string; scans: { id: string; label: string }[] }[]
+  value: string
+  activeId: string | null
+  optId: (id: string) => string
+  onPick: (id: string) => void
+  onHover: (id: string) => void
+}) {
+  return <>{groups.map(g => {
+    const opt = (sc: { id: string; label: string }, solo: boolean) => (
+      <li
+        key={sc.id}
+        id={optId(sc.id)}
+        role="option"
+        aria-selected={sc.id === value}
+        className={'sp-opt' + (solo ? ' solo' : '') + (sc.id === activeId ? ' active' : '') + (sc.id === value ? ' sel' : '')}
+        // pointer-down (not click) so the outside-close handler
+        // doesn't fire first and swallow the selection.
+        onMouseDown={e => { e.preventDefault(); onPick(sc.id) }}
+        onMouseEnter={() => onHover(sc.id)}
+      >
+        {solo
+          ? <>{g.day}{sc.label !== g.day && <span className="sp-time">{sc.label}</span>}</>
+          : sc.label}
+      </li>
+    )
+    return g.scans.length === 1
+      ? opt(g.scans[0], true)
+      : (
+        <li key={g.day} role="presentation" className="sp-group">
+          <div className="sp-day" role="presentation">{g.day}</div>
+          <ul role="presentation">{g.scans.map(sc => opt(sc, false))}</ul>
+        </li>
+      )
+  })}</>
+}

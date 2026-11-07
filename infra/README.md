@@ -1,0 +1,102 @@
+# infra — a deployment's cloud resources as code
+
+Pulumi components, one directory per provider, shared by every deployment, plus a shared stack program per provider that builds a deployment from config alone. A deployment branch adds only its `Pulumi.yaml` (pointing at the shared program) and `Pulumi.<stack>.yaml`. The components and programs carry no account ids, zone ids, buckets or secret names; those are the config's.
+
+| dir | component | what it owns | who else writes there |
+|---|---|---|---|
+| `cf/` | `cfn_dashboard.py` (`CfnDashboard`); the program `stack/` | the Cloudflare surface of a `site/` deployment: the Pages project shell, its custom domain + CNAME, preview-branch aliases, the D1 database, an optional `CACHE_KV` namespace, an optional R2 serving bucket, an optional Zero Trust Access gate | `wrangler pages deploy` fills each deploy's bindings and vars from the branch's `site/wrangler.toml` |
+| `cf/` | `capture_trigger.py` (`CaptureTrigger`) | a laptop deployment's capture trigger: the queue, and the R2 event notification that publishes a finished capture's marker (`captures/…/_SUCCESS.json`) to it | the consumer Worker (`capture-trigger/`, on `local`) is wrangler's |
+| `cf/` | `cron-dispatch/` (a Worker, deployed by wrangler) | GitHub Actions workflows started on Cloudflare's cron (`workflow_dispatch`), since GitHub's own `schedule:` runs hours late; configuration only (`wrangler.example.toml`), reusable for any repo; r2's is `wrangler.r2.toml` | the `GITHUB_TOKEN` secret (fine-grained, Actions read/write) goes in with `wrangler secret put` |
+| `gcp/` | `gcp_jobs.py` (`JobAccount`, `Secrets`, `BatchCron`, `RunJobCron`, `grant_secret`, `grant_bucket`) | a deployment's scheduled jobs: their service accounts and project roles, Secret Manager containers and accessors, Cloud Scheduler crons (→ Batch, or → a Cloud Run job), bucket grants | the Batch spec is generated from the branch's `job/*-submit.sh` under `PIN=1 DRY=1`; a Cloud Run job's image and plain env are its deploy script's |
+
+Two rules hold across `gcp/`: secret **values** are never managed (containers and IAM only; payloads go in with `gcloud secrets versions add`), and IAM is additive (`IAMMember`), so a stack can't clobber anyone else's grants on a shared project or bucket.
+
+A `BatchCron`'s body is posted by Cloud Scheduler, past `dt-cloud`'s own label check, so the component checks it itself (`check_cron_labels`): a submitter whose spec lacks the stack's `$DISKY_LABELS` or a `component` on the job's `labels` or on `allocationPolicy.labels` fails the preview. Batch puts only the allocation policy's labels on a job's VMs and disks, which is what the billing export attributes. A stack with no labels (`DISKY_LABELS=''`) checks nothing.
+
+`gcp/task_logs.py` provides `TaskLogView`: a reusable `batch_task_logs` view restricted to a deployment's Batch job UID prefix, plus an additive `roles/logging.viewAccessor` grant on that view only. It does not grant project-wide log access or change retention/sinks. The gcs stack exports `task_log_view`; put that full resource name in the site's `GCP_LOG_VIEW` var. The authenticated `/api/sweep/logs` reader resolves an exact sweep job's UID from Batch and queries that view with fixed time bounds and 50-entry pages. Run pages poll every ten seconds while active, with a 500-entry panel limit; Logs Explorer remains available for full history.
+
+## Running a stack
+
+```bash
+cd infra/<cf|gcp>
+pulumi preview -s <stack>   # read-only; `up` is a human's call
+```
+
+Pulumi runs the program under `uv`, from `infra/pyproject.toml`. Give it its own environment (`UV_PROJECT_ENVIRONMENT=infra/.venv`): in a shell where the repo's `.venv` is active, `uv` would sync infra's dependencies into the engine's venv.
+
+Every deployment's Cloudflare stack runs the shared `cf/stack/` program (gcs and cw-s3 moved onto it on 2026-10-03, `specs/done/iac-templates.md` phase 4, previews unchanged). Their GCP stacks still have their own `infra/gcp/__main__.py`.
+
+## Tests
+
+The components' and programs' tests run under Pulumi's mocks, with no cloud account: every resource a config declares, by type and name.
+
+```bash
+UV_PROJECT_ENVIRONMENT=infra/.venv uv run --project infra --with pytest pytest infra/tests
+```
+
+## Starting a deployment
+
+A deployment is a branch off `cloud` (or off `local`, for a laptop deployment) that adds config and nothing else. It serves a Map of one or more buckets' usage at a domain you own, from an index you build on a schedule.
+
+**You need:**
+- a Cloudflare account with a zone for the site's domain, and an API token for the Cloudflare stack (its permissions are listed in `cf/stack/Pulumi.stack.example.yaml`);
+- a bucket for the index (R2, S3 or GCS) with a read-only key pair for the site and a read-write one for the indexing job;
+- read access to the buckets you'll scan;
+- the Pulumi CLI, `uv`, `pnpm`, and wrangler (from `site/`'s dependencies).
+
+**1. The Cloudflare stack.** Copy `cf/stack/Pulumi.yaml.example` to `cf/Pulumi.yaml` (rename the project, choose a state backend) and `cf/stack/Pulumi.stack.example.yaml` to `cf/Pulumi.<stack>.yaml`, and fill in the ids and names. Then:
+
+```bash
+cd infra/cf
+pulumi stack init <stack>
+pulumi preview      # read it: everything should be a create
+pulumi up
+pulumi stack output d1_database_id
+```
+
+That makes the Pages project, the custom domain and its CNAME, and the D1 database, plus the optional blocks you uncommented.
+
+**2. The site's config.** Copy `site/wrangler.example.toml` to `site/wrangler.toml` and fill it in: the Pages project, the D1 id from step 1, the index bucket (`STORE_*`), and the vars for the features you want. Each key has a one-line comment; optional ones stay commented out. Add a matching entry to the store registry in `site/src/stores.ts`, under the key `STORE` names.
+
+**3. The database schema.** Create it from the branch's schema file, `site/schema.sql` (its current state: the index footer plus the sign-in, grant, plan and log tables, which a deployment without those features leaves empty):
+
+```bash
+cd site && pnpm exec wrangler d1 execute <d1Name> --remote --file schema.sql
+```
+
+A later schema change arrives as a recipe in `site/migrations/<slug>.sql`: apply it the same way (`--file migrations/<slug>.sql`) to each of the branch's databases, then `git rm` it ([`specs/done/d1-migrations.md`](../specs/done/d1-migrations.md)).
+
+**4. Secrets.** Set each `# secret` line of `wrangler.example.toml` that applies, for example:
+
+```bash
+pnpm exec wrangler pages secret put STORE_ACCESS_KEY_ID --project-name <pagesProject>
+```
+
+`SESSION_SECRET` is required wherever anyone signs in. Values never go in git or in Pulumi state.
+
+**5. Build and deploy.**
+
+```bash
+cd site && pnpm build && pnpm exec wrangler pages deploy dist --project-name <pagesProject> --branch main
+```
+
+The build reads `STORE` and `AUTH_MODE` from `wrangler.toml`. `.github/workflows/deploy-r2.yml` is r2.rbw.sh's version of this step.
+
+**6. The index.** The site shows nothing until a scan is indexed and its footer is in D1:
+
+```bash
+disk-tree bulk-list <scheme>://<bucket> -o work/listing/<bucket>    # once per bucket
+cd cloud && dt-cloud path-index -S -d <date> -l 'work/listing/*/*.parquet' -P work/index/path-index.parquet -o work/snap
+# upload work/index/ → <index bucket>/listing/<date>/index/<gen>/ and work/snap/ → snapshots/<sub>/<date>/
+dt-cloud index-sync <date> -g <gen> -b <index bucket> -k listing/<date>/index/<gen> -d work/index -v path -v bysize
+```
+
+`index-sync` needs `CLOUDFLARE_API_TOKEN` (D1 edit), `CLOUDFLARE_ACCOUNT_ID`, `D1_DB_ID` and `D1_DB_NAME`. `.github/workflows/daily-ingest.yml` is r2.rbw.sh's daily version, and a template for a scheduled one.
+
+**Optional:**
+- **Scheduled jobs on GCP** (scans on Batch, a Cloud Run job): `gcp/gcp_jobs.py`'s components, used by the gcs and cw-s3 branches' `gcp/__main__.py`.
+- **A laptop deployment** (scans of local disks, uploaded as captures and ingested on AWS Batch): branch off `local`, whose `infra/README.md` continues this walkthrough.
+
+## Adopting live resources
+
+A deployment's resources mostly predate its stack, so a stack starts by importing them. Every component takes `existing=` per resource, and the stack's `adopting` config turns those into import ids all at once (`gcp_jobs.Adopt`). The first `up` with `adopting: "true"` imports; then set it to `"false"`. Read the adopting preview before running `up`: anything other than `= import`, or an `~ update` you can explain, means the code doesn't match what's live.

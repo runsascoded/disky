@@ -1,0 +1,124 @@
+/** What the map's filter accepts on this deployment (`/api/filter-caps`), and the client's side of an
+ *  indexed-only deployment (`functions/_lib/indexedOnly.ts`): its inline refusals, its one-form help, and
+ *  the server's structured 400s turned into the filter box's message. */
+import { useQuery } from '@tanstack/react-query'
+import type { QuerySyntax } from '../functions/_lib/queryAst'
+import { indexedHelp } from '../functions/_lib/indexedOnly'
+import { plain } from '../functions/_lib/querySyntax'
+import { useStore, useStoreFetch } from './store'
+import { type DefaultScanMode, prefersIndexed } from './defaultScan'
+
+/** `pathTerms`: an indexed-only deployment answers path terms (`a/b`; `SEARCH_PATH_TERMS`), absent: a term holding
+ *  `/` is refused (`unsupported-slash`). `rootLabel`: the store root's label (`ROOT_LABEL`), the unfiltered view's
+ *  root crumb; `rootTitle`: that crumb's tooltip (`ROOT_TITLE`) — each absent when the deployment sets none, or
+ *  before it loads. */
+export interface FilterCaps { indexedOnly: boolean; pathTerms?: boolean; defaultScan?: 'searchable'; rootLabel?: string; rootTitle?: string }
+
+/** The deployment's filter capabilities for this subtree's store (unloaded or unreachable: none, i.e. every
+ *  form, and no root label). `defaultScan: 'searchable'` (`DEFAULT_SCAN`, `defaultScan.ts`): a view with no `?d=`
+ *  opens on the newest scan the static name index covers; absent, on the newest. `loaded`: the caps have answered
+ *  (or failed), so `defaultScan` is known. */
+export function useFilterCaps(): FilterCaps & { loaded: boolean } {
+  const store = useStore()
+  const sfetch = useStoreFetch()
+  const q = useQuery({
+    queryKey: ['filter-caps', store.key],
+    queryFn: async (): Promise<FilterCaps> => {
+      const r = await sfetch('/api/filter-caps', { credentials: 'include' })
+      if (!r.ok) return { indexedOnly: false }
+      return await r.json() as FilterCaps
+    },
+    staleTime: Infinity,
+    retry: 1,
+  })
+  return { ...(q.data ?? { indexedOnly: false }), loaded: !q.isPending }
+}
+
+const indexed = (paths: boolean): QuerySyntax => ({ id: plain.id, parse: q => plain.parse(q), describe: () => indexedHelp(paths) })
+const INDEXED = [indexed(false), indexed(true)] as const
+/** The filter box's syntax on an indexed-only deployment: `plain`'s parse (every character literal), its help (with
+ *  the path-term form where `paths`, `FilterCaps.pathTerms`); one object per flag, a stable identity for memos. */
+export const indexedSyntax = (paths: boolean): QuerySyntax => INDEXED[paths ? 1 : 0]
+
+/** The refusal codes an API answers a filter with (`functions/_lib/indexedOnly.ts`): a reason to show
+ *  inline, never a failure to retry. */
+const REFUSAL = /^(?:unsupported-[a-z-]+|scan-not-indexed|term-too-common|owner-too-common|anchor-not-indexed|too-broad|diff-too-broad)$/
+/** A path-restricted link's refusals (`functions/_lib/restrict.ts`; 403s): the same, a reason with no retry. */
+const RESTRICTED_REFUSAL = /^restricted-(?:search|scope)$/
+
+/** A failed API response: `message` as `apiErrorMessage` words it; `refusal` the structured
+ *  `{ error, code }` body's reason when its code is a filter refusal (`REFUSAL`); `status` the HTTP status. */
+export class ApiError extends Error {
+  constructor(message: string, readonly refusal?: { code: string; reason: string }, readonly status?: number) { super(message); this.name = 'ApiError' }
+}
+
+/** A failed API response as a throwable `ApiError`. */
+export function apiError(status: number, text: string): ApiError {
+  let refusal: ApiError['refusal']
+  try {
+    const j = JSON.parse(text) as { error?: unknown; code?: unknown }
+    if (typeof j.error === 'string' && typeof j.code === 'string' && ((status === 400 && REFUSAL.test(j.code)) || (status === 403 && RESTRICTED_REFUSAL.test(j.code)))) refusal = { code: j.code, reason: j.error }
+  } catch { /* not JSON */ }
+  return new ApiError(apiErrorMessage(status, text), refusal, status)
+}
+
+/** An error's filter refusal (a reason to state inline, with no retry or status), else null. */
+export const refusalOf = (e: unknown): { code: string; reason: string } | null => (e instanceof ApiError && e.refusal) || null
+
+/** What a failed view says under the filter box: a query the server refused (`400: bad query: …`), or search being
+ *  refused to this link; a failure that isn't the query's says nothing there. */
+export function filterBoxError(e: Error | undefined): string | undefined {
+  const r = refusalOf(e)
+  return r?.code === 'restricted-search' ? r.reason : /^400: bad query: (.*)/s.exec(e?.message ?? '')?.[1]
+}
+
+/** How a failed load reads inline: a filter refusal's reason, or the failure's message — with a retry when it may
+ *  pass next time (a 5xx, or no response at all), never for a 4xx (the same request fails the same way). */
+export type Failure = { refusal: string } | { message: string; retry: boolean }
+export function failureOf(e: unknown): Failure {
+  const r = refusalOf(e)
+  if (r) return { refusal: r.reason }
+  const status = e instanceof ApiError ? e.status : undefined
+  return { message: e instanceof Error ? e.message : String(e), retry: status == null || status >= 500 }
+}
+
+/** A failed API response as an error message: a structured refusal (`{ error, code }`) as the filter box's
+ *  `bad query: …` (shown under the box), anything else as its status and text. */
+export function apiErrorMessage(status: number, text: string): string {
+  try {
+    const j = JSON.parse(text) as { error?: unknown; code?: unknown }
+    if (status === 400 && typeof j.error === 'string' && typeof j.code === 'string') return `400: bad query: ${j.error}`
+  } catch { /* not JSON */ }
+  return `${status}: ${text.slice(0, 120)}`
+}
+
+/** The scans the static name index covers in this subtree's store (`/api/filter-scans`), when `enabled`:
+ *  `'loading'` until known, null when there's no static filter (or the list can't be had: no preference), else
+ *  the ids. */
+export function useIndexedScans(enabled: boolean): string[] | null | 'loading' {
+  const store = useStore()
+  const sfetch = useStoreFetch()
+  const q = useQuery({
+    queryKey: ['filter-scans', store.key],
+    queryFn: async (): Promise<string[] | null> => {
+      const r = await sfetch('/api/filter-scans', { credentials: 'include' })
+      if (!r.ok) return null
+      return (await r.json() as { scans: string[] | null }).scans
+    },
+    enabled,
+    staleTime: 60_000,
+    refetchInterval: 5 * 60_000,
+  })
+  return !enabled ? null : q.isPending ? 'loading' : q.data ?? null
+}
+
+/** A page's default-scan preference (`defaultScan.ts`, the deployment's `DEFAULT_SCAN` from the caps), for `useScan`:
+ *  `prefer` is `'loading'` until the caps answer (nothing is picked before the mode is known), the covered scans when
+ *  the view prefers them (a `filtered` one, or any on a `searchable` deployment), else undefined (the newest scan);
+ *  `covered` the covered list itself (null: no static filter), for the search box's off state. */
+export function useScanPreference(filtered: boolean): { prefer: readonly string[] | null | 'loading' | undefined; covered: string[] | null | 'loading' } {
+  const { indexedOnly, defaultScan: cap, loaded } = useFilterCaps()
+  const mode: DefaultScanMode = cap ?? 'newest'
+  const covered = useIndexedScans(loaded && (indexedOnly || mode === 'searchable'))
+  return { prefer: !loaded ? 'loading' : prefersIndexed(mode, filtered) ? covered : undefined, covered }
+}

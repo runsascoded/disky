@@ -1,0 +1,13 @@
+.git
+.venv
+tmp
+node_modules
+site/node_modules
+site/dist
+site/public/data/20*
+wt
+gh
+cloud/.venv
+ui/node_modules
+packages/react/node_modules
+cloud/tmp

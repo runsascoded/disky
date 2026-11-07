@@ -1,0 +1,17 @@
+{
+ "R": 3,
+ "K": 2,
+ "rg": 5,
+ "idx_rg": 3,
+ "dispatch_slack_groups": 4,
+ "end_rollups": {
+  "row_groups": 516,
+  "rows": 2062,
+  "files": 1
+ },
+ "exact_rollups": {
+  "row_groups": 145,
+  "rows": 580,
+  "files": 1
+ }
+}

@@ -1,0 +1,24 @@
+{
+ "gen": "fixture",
+ "R": 6,
+ "K": 3,
+ "rg": 4,
+ "idx_rg": 3,
+ "dispatch_rows": 14,
+ "long_roots": {
+  "row_groups": 262,
+  "index_row_groups": 88
+ },
+ "long_rollups": {
+  "row_groups": 6,
+  "index_row_groups": 2
+ },
+ "short_roots": {
+  "row_groups": 770,
+  "index_row_groups": 257
+ },
+ "short_rollups": {
+  "row_groups": 11,
+  "index_row_groups": 4
+ }
+}

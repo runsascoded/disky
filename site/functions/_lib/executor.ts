@@ -1,0 +1,124 @@
+/**
+ * The dispatch seam (specs/done/staged-slack.md): one code path per executor,
+ * shared by the /staged console's HTTP routes (`api/plan-sweep/dispatch`,
+ * `api/sweep/dispatch`) and `/slack/actions`. The deployment names its
+ * executor with the `[vars]` `EXECUTOR` (= its `Store.executor` in
+ * `src/stores.ts`): `plan-sweep` (cw's plan-first Batch bridge, the default)
+ * or `sweep` (gcs's). An HTTP route passes its own kind; Slack uses the var.
+ *
+ * `dispatchPlan` owns what both executors share: request validation, the
+ * item set the run acts on (the rows checked on /staged, `req.items`; the whole
+ * plan when absent) and its digest (recorded on the run), and the real run's
+ * terms (`realRun`): no run of the plan in flight; no prior dry run required
+ * (specs/done/delete-what-you-see.md: a real run once deleted a prefix its dry run
+ * covered but the person had unchecked) — a dry run of exactly that set at that
+ * scan is reused when there is one, else the run builds its own manifest.
+ */
+import type { D1Database } from '@cloudflare/workers-types'
+import { type DispatchErr, type DispatchReq, type ExecEnv, type Executor, type Expected, refuse } from './dispatch.js'
+import { NotInPlan, planDigest, planRuns, realRun, type RunRow } from './plans.js'
+
+import { announceFinished, notifyPlan } from './stagedSlack.js'
+import { planSweep } from './planDispatch.js'
+import { sweep } from './sweepDispatch.js'
+
+export type { DispatchReq, ExecEnv }
+
+export const EXECUTOR_KINDS = ['plan-sweep', 'sweep'] as const
+export type ExecutorKind = typeof EXECUTOR_KINDS[number]
+
+/** The deployment's executor: `EXECUTOR`, default `plan-sweep`. Anything else
+ * is a misconfiguration, and throws. */
+export function executorOf(env: { EXECUTOR?: string }): ExecutorKind {
+  const e = env.EXECUTOR ?? 'plan-sweep'
+  if (!(EXECUTOR_KINDS as readonly string[]).includes(e)) throw new Error(`unknown EXECUTOR ${JSON.stringify(e)} (expected ${EXECUTOR_KINDS.join(' | ')})`)
+  return e as ExecutorKind
+}
+
+export const EXECUTORS: Record<ExecutorKind, Executor> = { 'plan-sweep': planSweep, sweep }
+
+/** The plan-first executor an HTTP route under `/api/plan-sweep/` dispatches
+ * to: the deployment's own, never gcs's `sweep`. */
+export const planFirstKind = (env: { EXECUTOR?: string }): ExecutorKind => {
+  const k = executorOf(env)
+  return k === 'sweep' ? 'plan-sweep' : k
+}
+
+export interface DispatchOk {
+  ok: true
+  job_id: string
+  plan_id: number
+  mode: 'dry' | 'real'
+  date: string
+  actor: string
+  /** `planDigest` of the item set the run acts on. */
+  digest: string
+  /** What the dispatcher selected, display only. */
+  expected?: Expected
+  /** Executor-specific response fields (`run`, `plan`, `region`, `buckets`). */
+  extra: Record<string, unknown>
+}
+export type DispatchResult = DispatchOk | DispatchErr
+
+/** Bring runs up to date and announce any that just finished. */
+export async function refreshRuns(env: ExecEnv, db: D1Database, siteUrl: string, ex: Executor): Promise<void> {
+  const done = await ex.refresh(env, db)
+  if (done.length) await announceFinished(env, db, done, siteUrl)
+}
+
+export async function dispatchPlan(
+  env: ExecEnv,
+  req: DispatchReq,
+  kind: ExecutorKind = executorOf(env),
+  executors: Record<ExecutorKind, Executor> = EXECUTORS,
+): Promise<DispatchResult> {
+  if (!env.DB) return refuse(503, 'plans store not configured (no D1 binding)')
+  // Each executor checks its own credentials in `prepare` (the GCP ones need
+  // `GCP_SA_KEY`).
+  const ex = executors[kind]
+  if (req.date !== undefined && !ex.dateRe.test(req.date)) return refuse(400, `date must be a scan id (${ex.dateHint})`)
+  if (req.mode === 'dry' && req.date === undefined) return refuse(400, `date required for a dry run (${ex.dateHint})`)
+  const db = env.DB
+
+  let prep: Awaited<ReturnType<Executor['prepare']>>
+  try {
+    prep = await ex.prepare(env, db, req)
+  } catch (e) {
+    if (e instanceof NotInPlan) return refuse(400, e.message)
+    throw e
+  }
+  if ('ok' in prep) return prep
+  if (!prep.prefixes.length) return refuse(400, 'nothing selected')
+  const digest = await planDigest(prep.prefixes)
+
+  let date = req.date
+  let reviewed: RunRow | undefined
+  if (req.mode === 'real') {
+    await refreshRuns(env, db, req.siteUrl, ex)
+    const run = realRun(await planRuns(db, req.planId), digest, prep.prefixes.length, date)
+    if (!run.ok) return refuse(409, `not deleting: ${run.reason}`)
+    reviewed = run.reviewed ?? undefined
+    date = date ?? reviewed?.scan
+  }
+  if (date === undefined) throw new Error('unreachable: a dry run without a date was refused above')
+
+  const launched = await prep.launch(date, digest, reviewed)
+  if ('ok' in launched) return launched
+  return { ok: true, job_id: launched.job_id, plan_id: req.planId, mode: req.mode, date, actor: req.actor, digest, ...(req.expected ? { expected: req.expected } : {}), extra: launched.extra }
+}
+
+/** Announce a dispatch in the plan's thread (`via`: www / Slack). */
+export async function notifyDispatched(env: ExecEnv, r: DispatchOk, via: string, siteUrl: string): Promise<void> {
+  if (!env.DB) return
+  const row: RunRow = {
+    run_id: r.job_id, mode: r.mode, scan: r.date, actor: r.actor, started_ts: 0, finished_ts: null,
+    deleted_bytes: 0, deleted_objects: 0, skipped_gone: 0, skipped_overwritten: 0, plan_digest: r.digest,
+  }
+  await notifyPlan(env, env.DB, r.plan_id, siteUrl, { run: row, phase: 'dispatched', via, expected: r.expected })
+}
+
+/** An HTTP route's JSON for a dispatch result (the shape /staged reads). */
+export function dispatchBody(r: DispatchResult): { body: Record<string, unknown>; status: number } {
+  if (!r.ok) return { body: { error: r.error, ...r.extra }, status: r.status }
+  return { body: { job_id: r.job_id, plan_id: r.plan_id, mode: r.mode, date: r.date, ...r.extra, by: r.actor }, status: 200 }
+}

@@ -1,0 +1,37 @@
+{
+ "bucket": "b",
+ "layouts": [
+  "listing/{id}/path-index.parquet"
+ ],
+ "scans": [
+  {
+   "id": "2026-07-30",
+   "src": "listing/2026-07-30/path-index.parquet",
+   "size": 9708,
+   "ts": 1785369600,
+   "version": 1
+  },
+  {
+   "id": "2026-07-31",
+   "src": "listing/2026-07-31/path-index.parquet",
+   "size": 9786,
+   "ts": 1785456000,
+   "version": 1
+  },
+  {
+   "id": "2026-08-02",
+   "src": "listing/2026-08-02/path-index.parquet",
+   "size": 9743,
+   "ts": 1785628800,
+   "version": 1
+  },
+  {
+   "id": "2026-08-03",
+   "src": "listing/2026-08-03/path-index.parquet",
+   "size": 10339,
+   "ts": 1785715200,
+   "version": 2
+  }
+ ],
+ "slices": true
+}

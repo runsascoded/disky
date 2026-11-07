@@ -1,0 +1,421 @@
+"""Publish a scan's *served* artifacts from the GCS scan store to R2.
+
+The site's read path (`/data/*`, `/api/subtree|diff|series|path-index`, the
+`/v1/files` browser) serves derived artifacts — snapshot JSONs, the index tiers
++ their `.groups.json` manifests, the layer-2 parquets. Those are copies already,
+so they can live wherever serving is cheapest: colocated with the CF Worker in
+R2 (no cross-provider round trips, no egress on reads). An ingest that keeps
+building against GCS (cw's GCP Batch job) runs this as its final "publish to
+the serving cloud" stage (cw-s3 specs/done/r2-serving-migration.md §3); a deploy
+whose ingest already writes to R2 (r2.rbw.sh) never needs it.
+
+The served subset's layout is a deployment parameter: snapshots live under
+`snapshots/<SNAPSHOTS_SUBDIR>/<scan>/` (the site's `snapshotsPrefix`), and the
+layer-2 dir — canonical parquets, `index/<gen>/` tiers, `.groups.json`, age
+pyramids — under `LAYER2_PREFIX` (a `{scan}` template, `deploy.layer2_prefix`;
+required: each deployment names its own).
+
+Idempotent: an object already in R2 with the same size and md5 is skipped, so a
+re-run (or a backfill over every scan) only moves what's missing or changed.
+The GCS md5 travels as R2 object metadata (`gcs-md5`) because a multipart
+upload's ETag isn't an md5.
+
+R2 is reached through its S3-compatible API; creds come from the env:
+  R2_ENDPOINT           https://<account id>.r2.cloudflarestorage.com
+  R2_BUCKET             the serving bucket (the `r2_bucket` CF stack output)
+  R2_ACCESS_KEY_ID      an R2 API token's id       (`r2_s3_access_key_id` output)
+  R2_SECRET_ACCESS_KEY  sha256 of the token value  (`r2_s3_secret_access_key` output)
+"""
+from __future__ import annotations
+
+import base64
+import hashlib
+import mimetypes
+import re
+import os
+import sys
+import time
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
+from functools import partial
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Callable
+
+if TYPE_CHECKING:
+
+    from mypy_boto3_s3.client import S3Client
+
+err = partial(print, file=sys.stderr)
+
+# The GCS md5 rides along as object metadata: the durable identity check a
+# re-run compares against (R2's multipart ETag is not an md5).
+MD5_META = "gcs-md5"
+SNAPSHOTS_SUBDIR = os.environ.get("SNAPSHOTS_SUBDIR", "")
+# Python's built-in map only: `mimetypes.guess_type` also reads the host's
+# `/etc/mime.types`, so a local file's content type would depend on the machine.
+MIME_TYPES = mimetypes.MimeTypes()
+
+
+def snapshots_prefix(scan: str, subdir: str = SNAPSHOTS_SUBDIR) -> str:
+    """`snapshots/<subdir>/<scan>/`, or `snapshots/<scan>/` for the default
+    (no-subdir) store — mirrors the site's `snapshotsPrefix`."""
+    sub = subdir.strip("/")
+    return f"snapshots/{sub}/{scan}/" if sub else f"snapshots/{scan}/"
+
+
+def served_prefixes(scan: str, subdir: str, layer2: str) -> list[str]:
+    """The key prefixes that make up one scan's served subset: the published
+    snapshot JSONs and the layer-2 dir, which holds `index/<gen>/` — every
+    tier + `.groups.json` manifest + age pyramid the index reader serves — and,
+    on cw, the canonical parquets the file browser opens."""
+    return [snapshots_prefix(scan, subdir), layer2.format(scan=scan)]
+
+
+def md5_hex(b64: str | None) -> str | None:
+    """GCS reports `md5_hash` base64; R2/S3 ETags are hex."""
+    return base64.b64decode(b64).hex() if b64 else None
+
+
+@dataclass(frozen=True)
+class Obj:
+    """A source object: what's needed to decide + copy."""
+    key: str
+    size: int
+    md5: str | None
+    content_type: str | None = None
+
+
+@dataclass(frozen=True)
+class Dest:
+    """What R2 knows about an existing object."""
+    size: int
+    md5: str | None
+
+
+def dest_from_head(head: dict[str, Any] | None) -> Dest | None:
+    """A HEAD response → `Dest`; None when the object is absent. The md5 is the
+    `gcs-md5` metadata a previous publish stamped, else the ETag when it is a
+    plain (single-part) md5, else unknown."""
+    if head is None:
+        return None
+    md5 = (head.get("Metadata") or {}).get(MD5_META)
+    if md5 is None:
+        etag = (head.get("ETag") or "").strip('"')
+        md5 = etag if etag and "-" not in etag else None
+    return Dest(size=int(head["ContentLength"]), md5=md5)
+
+
+def should_copy(src: Obj, dst: Dest | None) -> bool:
+    """Copy when the object is missing, a different size, or a different md5
+    (when both sides know one). Same size + unknown md5 on either side counts
+    as present — the size check is the cheap floor; md5 is the tiebreak."""
+    if dst is None or dst.size != src.size:
+        return True
+    return src.md5 is not None and dst.md5 is not None and src.md5 != dst.md5
+
+
+def is_listing(key: str, layer2_dir: str) -> bool:
+    """A canonical per-bucket listing — a `.parquet` directly under the scan's
+    layer-2 dir (`cw-l2/<scan>/<bucket>.parquet`), as opposed to the served
+    tiers under `index/<gen>/`. The base's layout (`listing/<scan>/index/`) has
+    none. Nothing served reads these (the site reads the tiers; only the
+    `/files` viewer opened them), so a deployment may keep them out of R2
+    (`publish -L`)."""
+    if not key.startswith(layer2_dir):
+        return False
+    rest = key[len(layer2_dir):]
+    return "/" not in rest and rest.endswith(".parquet") and not TIER_STEM.match(rest)
+
+
+# The index artifacts `write_index` / the over-time build emit: never listings,
+# even at a layer-2 dir's top level (the base's pre-generation layout put the
+# tiers straight in `listing/<scan>/index/`).
+TIER_STEM = re.compile(r"^(path-index|age-index|age-pyramid|over-time)(\.|-)")
+
+
+# A key inside a generation dir: `<…>/index/<gen>/<file>` → `<…>/index/<gen>`
+# (the form D1's `index_schema.dir` stores). Loose files directly under an
+# `index/` (the base's pre-generation layout) have no generation.
+GEN_KEY = re.compile(r"^(?P<dir>.*/index/[^/]+)/[^/]")
+
+
+def gen_dir(key: str, layer2_dir: str) -> str | None:
+    """The generation dir holding ``key``, when it is under ``layer2_dir``."""
+    if not key.startswith(layer2_dir):
+        return None
+    m = GEN_KEY.match(key)
+    return m["dir"] if m and len(m["dir"]) > len(layer2_dir) else None
+
+
+# The extras sidecars the site reads from a generation dir (`extras.py`; the site's `_lib/extras.ts`):
+# with the snapshot JSONs, the "small" served subset (`publish -S`).
+EXTRAS_FILES = frozenset({"attr.tsv", "attr.tsv.idx.json"})
+# The age chart's per-scan tiers (`index_footer.INDEX_VARIANTS`' `age-pyramid-<bin>`), small beside the sorts.
+AGE_PYRAMID = re.compile(r"age-pyramid-\d+[hd]\.parquet")
+
+
+def is_small(key: str, layer2_dir: str) -> bool:
+    """Whether ``key`` is in the small served subset: anything outside the layer-2 dir (the snapshot
+    JSONs, `snapshots/rules.json`), and inside it only the extras sidecars and the age pyramids
+    (`age-pyramid-<bin>.parquet`: the age chart reads them per scan, specs/lean-scans.md §1.3) —
+    never a sort, a listing or a rollup. What a deployment whose path store is served from
+    elsewhere (an interval store) still needs beside it: the page's header JSONs, the age chart's
+    tiers and the provenance its views carry."""
+    name = key.rsplit("/", 1)[-1]
+    return not key.startswith(layer2_dir) or name in EXTRAS_FILES or AGE_PYRAMID.fullmatch(name) is not None
+
+
+def served(
+    objs: list[Obj],
+    layer2_dir: str,
+    *,
+    listings: bool = True,
+    pointed: set[str] | None = None,
+    small: bool = False,
+) -> tuple[list[Obj], dict[str, tuple[int, int]]]:
+    """The objects `publish` copies, and the unpointed generations it leaves
+    out (`{gen dir: (objects, bytes)}`). Without ``listings`` the canonical
+    per-bucket listings stay behind; with ``pointed`` (D1's pointer dirs),
+    every `index/<gen>/` none of them names does too — the site reads
+    generations only through their pointers, so a superseded one in R2 is
+    dead weight (specs/storage-consolidation.md phase 1). Everything outside
+    a generation dir (snapshot JSONs, sidecars beside the layer-2) is kept.
+    With ``small``, only the small subset (`is_small`)."""
+    keep = {p.rstrip("/") for p in pointed} if pointed is not None else None
+    out: list[Obj] = []
+    dropped: dict[str, tuple[int, int]] = {}
+    for o in objs:
+        if small and not is_small(o.key, layer2_dir):
+            continue
+        if not listings and is_listing(o.key, layer2_dir):
+            continue
+        d = gen_dir(o.key, layer2_dir) if keep is not None else None
+        if d is not None and d not in keep:
+            n, b = dropped.get(d, (0, 0))
+            dropped[d] = (n + 1, b + o.size)
+            continue
+        out.append(o)
+    return out, dropped
+
+
+@dataclass
+class Report:
+    copied: list[str] = field(default_factory=list)
+    skipped: list[str] = field(default_factory=list)
+    bytes: int = 0
+
+    def summary(self, scan: str, dry_run: bool) -> str:
+        verb = "would copy" if dry_run else "copied"
+        return f"publish-r2 {scan}: {verb} {len(self.copied)} ({self.bytes:,} B), skipped {len(self.skipped)} up to date"
+
+
+#: The R2 client's connection pool (`r2_client`).
+R2_POOL = 128
+#: Parts of one object a multipart upload to R2 sends at a time (`copy_one`; s3transfer's default is 10): R2 throttles
+#: concurrent writes to one object, and `R2_WORKERS` objects in flight already fill the pool.
+R2_PART_CONCURRENCY = 4
+
+
+def r2_client() -> "S3Client":
+    """boto3 S3 client for R2 (creds from the env, see the module doc)."""
+    import boto3
+    from botocore.config import Config
+
+    endpoint = os.environ.get("R2_ENDPOINT")
+    if not endpoint:
+        raise SystemExit("R2: need $R2_ENDPOINT (https://<account id>.r2.cloudflarestorage.com)")
+    return boto3.client(
+        "s3",
+        endpoint_url=endpoint,
+        region_name="auto",
+        aws_access_key_id=os.environ.get("R2_ACCESS_KEY_ID"),
+        aws_secret_access_key=os.environ.get("R2_SECRET_ACCESS_KEY"),
+        # Many objects in flight (`append_runner.R2_WORKERS`), each a multipart transfer of its own threads: botocore's
+        # default pool of 10 connections would serialize them.
+        config=Config(s3={"addressing_style": "path"}, retries={"max_attempts": 10, "mode": "standard"}, max_pool_connections=R2_POOL),
+    )
+
+
+def r2_bucket() -> str:
+    b = os.environ.get("R2_BUCKET")
+    if not b:
+        raise SystemExit("R2: need $R2_BUCKET (the serving bucket)")
+    return b
+
+
+def local_root(src_bucket: str) -> Path | None:
+    """A source that is a local dir (an absolute path: the local executor's data store), else None (a GCS bucket)."""
+    return Path(src_bucket) if src_bucket.startswith("/") else None
+
+
+def file_md5(path: Path) -> str:
+    h = hashlib.md5()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def list_source(src_bucket: str, prefixes: list[str]) -> list[Obj]:
+    """Every object under the served prefixes, sorted by key: a GCS bucket's (its md5s), or a local dir's (keys are
+    paths relative to it, md5s computed; dot-files, a writer's temps, left out)."""
+    root = local_root(src_bucket)
+    if root is not None:
+        found: dict[str, Obj] = {}
+        for prefix in prefixes:
+            base = root / prefix if prefix.endswith("/") else (root / prefix).parent
+            if not base.is_dir():
+                continue
+            for f in base.rglob("*"):
+                key = f.relative_to(root).as_posix()
+                if f.is_file() and key.startswith(prefix) and not f.name.startswith("."):
+                    found[key] = Obj(key=key, size=f.stat().st_size, md5=file_md5(f), content_type=MIME_TYPES.guess_type(f.name)[0])
+        return sorted(found.values(), key=lambda o: o.key)
+    from google.cloud import storage
+
+    client = storage.Client()
+    out: list[Obj] = []
+    for prefix in prefixes:
+        for blob in client.list_blobs(src_bucket, prefix=prefix):
+            if blob.name.endswith("/"):
+                continue
+            out.append(Obj(key=blob.name, size=int(blob.size or 0), md5=md5_hex(blob.md5_hash), content_type=blob.content_type))
+    return sorted(out, key=lambda o: o.key)
+
+
+def head_dest(s3: "S3Client", bucket: str, key: str) -> Dest | None:
+    from botocore.exceptions import ClientError
+
+    try:
+        return dest_from_head(s3.head_object(Bucket=bucket, Key=key))
+    except ClientError as e:
+        if e.response.get("Error", {}).get("Code") in ("404", "NoSuchKey", "NotFound"):
+            return None
+        raise
+
+
+def copy_one(src_bucket: str, s3: "S3Client", bucket: str, obj: Obj) -> None:
+    """One object → R2, stamping its md5: streamed from GCS (no local spool), or uploaded from a local dir."""
+    extra: dict[str, Any] = {"Metadata": {MD5_META: obj.md5} if obj.md5 else {}}
+    if obj.content_type:
+        extra["ContentType"] = obj.content_type
+    from boto3.s3.transfer import TransferConfig
+
+    cfg = TransferConfig(max_concurrency=R2_PART_CONCURRENCY)
+    root = local_root(src_bucket)
+    if root is not None:
+        s3.upload_file(str(root / obj.key), bucket, obj.key, ExtraArgs=extra, Config=cfg)
+        return
+    from google.cloud import storage
+
+    blob = storage.Client().bucket(src_bucket).blob(obj.key)
+    with blob.open("rb") as f:
+        s3.upload_fileobj(f, bucket, obj.key, ExtraArgs=extra, Config=cfg)
+
+
+#: Attempts at one object's copy (`copy_retrying`) R2 throttled past botocore's own retries, backing off `R2_RETRY_S · 2^n`
+#: (cw's level-5 compaction's copy, 2026-10-29, and its `2026-11-04T1802` scan's publish each died on one throttled part).
+R2_ATTEMPTS = 5
+R2_RETRY_S = 15.0
+#: The error codes R2 throttles with (`ServiceUnavailable: Reduce your concurrent request rate for the same object`).
+R2_THROTTLED = ("ServiceUnavailable", "SlowDown", "TooManyRequests")
+_R2_THROTTLED_RE = re.compile(r"\((?:" + "|".join(R2_THROTTLED) + r")\)")
+
+
+def r2_throttled(e: BaseException) -> bool:
+    """R2 throttled the request: botocore's `ClientError` (`(<code>)` in its message) or boto3's `S3UploadFailedError`
+    wrapping one (a multipart upload's failed part)."""
+    return bool(_R2_THROTTLED_RE.search(str(e)))
+
+
+def copy_retrying(src_bucket: str, s3: "S3Client", bucket: str, obj: Obj, *, log: Callable[[str], None] = err) -> None:
+    """`copy_one`, the whole object again when R2 throttles it (at most `R2_ATTEMPTS` times); any other failure raises."""
+    for n in range(R2_ATTEMPTS):
+        try:
+            copy_one(src_bucket, s3, bucket, obj)
+            return
+        except Exception as e:
+            if not r2_throttled(e) or n == R2_ATTEMPTS - 1:
+                raise
+            log(f"  ↻ {obj.key}: R2 throttled ({e}); again in {R2_RETRY_S * 2 ** n:.0f}s")
+            time.sleep(R2_RETRY_S * 2 ** n)
+
+
+def publish(
+    scan: str,
+    *,
+    src_bucket: str | None = None,
+    prefixes: list[str] | None = None,
+    subdir: str = SNAPSHOTS_SUBDIR,
+    layer2: str,
+    dry_run: bool = False,
+    workers: int = 8,
+    listings: bool = True,
+    pointed: set[str] | None = None,
+    small: bool = False,
+    required: tuple[str, ...] = (),
+) -> Report:
+    """Copy the scan's served subset to R2, skipping what's already there.
+    Dry-run lists the keys it would copy on stdout and touches nothing.
+    `listings=False` leaves the canonical per-bucket listings (`is_listing`)
+    in GCS only. ``pointed`` (the D1 pointer dirs, `index_footer.pointers`)
+    leaves out every `index/<gen>/` dir none of them names (`served`); None
+    copies every generation. ``small`` copies only the small subset (`is_small`)."""
+    prefixes = prefixes or served_prefixes(scan, subdir, layer2)
+    if src_bucket is None:
+        from .deploy import data_bucket
+        src_bucket = data_bucket()
+    objs, dropped = served(list_source(src_bucket, prefixes), layer2.format(scan=scan), listings=listings, pointed=pointed, small=small)
+    by_key = {o.key: o for o in objs}
+    missing = sorted(set(required) - by_key.keys())
+    if missing:
+        raise ValueError(f"publish-r2: missing required source keys: {', '.join(missing)}")
+    for d in sorted(dropped):
+        n, b = dropped[d]
+        err(f"publish-r2 {scan}: left out unpointed generation {d}/ ({n} objects, {b:,} B)")
+    if not objs:
+        raise SystemExit(f"publish-r2: nothing under {', '.join(prefixes)} in {src_bucket if local_root(src_bucket) else f'gs://{src_bucket}'}")
+    s3, bucket = r2_client(), r2_bucket()
+    report = Report()
+    required_keys = set(required)
+
+    def decide(obj: Obj) -> tuple[Obj, bool]:
+        dst = head_dest(s3, bucket, obj.key)
+        needs_checksum = obj.key in required_keys and obj.md5 is not None and (dst is None or dst.md5 != obj.md5)
+        return obj, needs_checksum or should_copy(obj, dst)
+
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        decisions = list(ex.map(decide, objs))
+    todo = [o for o, do in decisions if do]
+    report.skipped = [o.key for o, do in decisions if not do]
+    if dry_run:
+        for o in todo:
+            print(o.key)
+        report.copied = [o.key for o in todo]
+        report.bytes = sum(o.size for o in todo)
+        err(report.summary(scan, dry_run=True))
+        return report
+
+    def do_copy(obj: Obj) -> Obj:
+        copy_retrying(src_bucket, s3, bucket, obj)
+        err(f"  → {obj.key} ({obj.size:,} B)")
+        return obj
+
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        for obj in ex.map(do_copy, todo):
+            report.copied.append(obj.key)
+            report.bytes += obj.size
+    # Required artifacts are the visibility barrier: a successful upload or a
+    # same-size skip alone is not proof that their contents can be served.
+    def verified(key: str) -> bool:
+        src = by_key[key]
+        dst = head_dest(s3, bucket, key)
+        return dst is not None and dst.size == src.size and (src.md5 is None or dst.md5 == src.md5)
+
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        checks = list(ex.map(verified, required))
+    bad = sorted(key for key, ok in zip(required, checks) if not ok)
+    if bad:
+        raise ValueError(f"publish-r2: required destination verification failed: {', '.join(bad)}")
+    err(report.summary(scan, dry_run=False))
+    return report

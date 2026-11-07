@@ -1,0 +1,76 @@
+// GCP auth for the sweep console's dispatch bridge: the `GCP_SA_KEY` Pages
+// secret (a dedicated SA — Batch-submit + actAs the job SA, nothing else)
+// self-signs a JWT that is exchanged for a cloud-platform access token. No
+// SDK — Workers-compatible WebCrypto only. Tokens are memoized per isolate
+// (50 min of their 60) via `shared`, so the console's polls don't re-mint.
+import type { BatchConfig } from './batchConfig.js'
+import { shared } from './shared.js'
+
+export const batchJobsUrl = (cfg: BatchConfig, region: string): string => `https://batch.googleapis.com/v1/projects/${cfg.project}/locations/${region}/jobs`
+/** Logs Explorer for one Batch job, with an explicit lower time bound so an
+ * old run does not inherit the console's "last 5 minutes" default. `;query=`
+ * is parsed as URL params, so `(`/`)` are escaped too (`encodeURIComponent`
+ * leaves them, and the console cuts the query at the first `(`). */
+export const batchLogsUrl = (project: string, uid: string, created: string): string => {
+  const query = `labels.job_uid="${uid}"\nlog_id("batch_task_logs")\ntimestamp >= "${created}"`
+  return `https://console.cloud.google.com/logs/query;query=${encodeURIComponent(query).replace(/\(/g, '%28').replace(/\)/g, '%29')}?project=${encodeURIComponent(project)}`
+}
+/** Where a sweep job runs: the one region its bucket cut lives in
+ * (`BUCKET_REGIONS`), else the deployment's (`BATCH_REGION`: an uncut run
+ * touches several regions; nowhere is right for all), else '' (neither names
+ * one: the caller refuses; there is no default). A sweep executor runs beside
+ * its bucket: every listing page and every delete sub-request is a round trip
+ * to it. */
+export const batchRegionFor = (cfg: BatchConfig, buckets: readonly string[]): string => {
+  const regions = new Set(buckets.map(b => cfg.bucketRegions[b]).filter(Boolean))
+  return regions.size === 1 ? [...regions][0] : cfg.region
+}
+/** Every region a sweep job may have been dispatched to. */
+export const batchRegions = (cfg: BatchConfig): string[] => [...new Set([cfg.region, ...Object.values(cfg.bucketRegions)])].filter(Boolean)
+
+const b64url = (buf: ArrayBuffer | Uint8Array): string => {
+  const bytes = buf instanceof Uint8Array ? buf : new Uint8Array(buf)
+  let s = ''
+  for (const b of bytes) s += String.fromCharCode(b)
+  return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+}
+
+async function mint(saKey: string): Promise<{ token: string; exp: number }> {
+  const sa = JSON.parse(saKey) as { client_email: string; private_key: string }
+  const pem = sa.private_key.replace(/-----[A-Z ]+-----|\s/g, '')
+  const der = Uint8Array.from(atob(pem), c => c.charCodeAt(0))
+  const key = await crypto.subtle.importKey(
+    'pkcs8', der, { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' }, false, ['sign'],
+  )
+  const now = Math.floor(Date.now() / 1000)
+  const enc = new TextEncoder()
+  const unsigned = `${b64url(enc.encode(JSON.stringify({ alg: 'RS256', typ: 'JWT' })))}.${b64url(enc.encode(JSON.stringify({
+    iss: sa.client_email,
+    scope: 'https://www.googleapis.com/auth/cloud-platform',
+    aud: 'https://oauth2.googleapis.com/token',
+    iat: now,
+    exp: now + 3600,
+  })))}`
+  const sig = await crypto.subtle.sign('RSASSA-PKCS1-v1_5', key, enc.encode(unsigned))
+  const r = await fetch('https://oauth2.googleapis.com/token', {
+    method: 'POST',
+    headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer',
+      assertion: `${unsigned}.${b64url(sig)}`,
+    }),
+  })
+  if (!r.ok) throw new Error(`token exchange: ${r.status} ${await r.text()}`)
+  return { token: ((await r.json()) as { access_token: string }).access_token, exp: now + 3000 }
+}
+
+const memo = new Map<string, Promise<{ token: string; exp: number }>>()
+
+/** Service-account JWT → OAuth access token (cloud-platform scope), memoized. */
+export async function gcpToken(saKey: string): Promise<string> {
+  const k = saKey.slice(-32) // key material never leaves the isolate; the memo key is a tail
+  const got = await shared(memo, k, () => mint(saKey), 10_000)
+  if (got.exp > Date.now() / 1000) return got.token
+  memo.delete(k)
+  return (await shared(memo, k, () => mint(saKey), 10_000)).token
+}

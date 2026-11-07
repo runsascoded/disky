@@ -1,0 +1,306 @@
+// /api/plans[/:id[/items]] — CRUD for first-class deletion plans (specs/cw-sweep.md).
+//
+//   GET    /api/plans              list plans (+ item/run counts)          viewer
+//   POST   /api/plans              { name, note? } -> { id }               admin
+//   GET    /api/plans/:id          plan + items + runs                     viewer
+//   PATCH  /api/plans/:id          { state: 'closed' }                     admin
+//   POST   /api/plans/:id/items    { prefixes: [...], note? }              admin
+//   DELETE /api/plans/:id/items    { prefixes: [...] }                     admin
+//   POST   /api/plans/:id/batches/merge { into, ids: [...], note? } -> { into, merged, items }
+//                                                                          admin, or the batches' stager
+//   POST   /api/plans/stage        { prefixes: [...], objects?: [...], note?, as_of? } -> { plan_id, batch_id, staged, staged_objects, covered, absorbed, gone, as_of }
+//                                                                          stager (`STAGING` deployments)
+//   GET    /api/plans/staged       the shared open plan (+ items, batches, emptied batches, runs), or { plan: null }   viewer
+//   GET    /api/plans/run?id=<run> one run's record + its per-band rows      viewer
+//
+// Reads are open to any authenticated viewer; curating a plan's items and
+// closing plans require admin; staging (the opt-in trash proposal) needs the
+// full base scope, and a stager may remove what they staged themselves. Items
+// are editable only while the plan is `open`. Prefixes canonicalize in the
+// deployment's shape (`STORE_SCHEME` / `STORE_BUCKETS`).
+import type { D1Database } from "@cloudflare/workers-types"
+import { type Ctx, type Env as AuthEnv, json, requireAdmin, requireStager, requireViewer } from "../../_lib/auth.js"
+import { audit, canonicalPrefix, mergeBatches, NO_SHAPE, openPlanId, planDetail, type PlanRow, type PrefixShape, prefixShape, runDetail, stageItems } from "../../_lib/plans.js"
+import { pathScans, storeReady, withPathStore } from "../../_lib/index.js"
+import { MAX_PREFIXES, prefixesAt } from "../../_lib/prefixes.js"
+import { notifyPlan, refreshStagedCard, refreshThread, type NotifyEnv } from "../../_lib/stagedSlack.js"
+import { batchConfig, type BatchEnv } from "../../_lib/batchConfig.js"
+import { gcpToken } from "../../_lib/gcp.js"
+import { readRunJson } from "../../_lib/runReflect.js"
+
+type Env = AuthEnv & NotifyEnv & BatchEnv & {
+  DB?: D1Database
+  /** The job grant whose post-scan ping re-renders the staged card (`/api/plans/staged/card`); unset, there's no such route.
+   *  Only the stack that owns the card sets it: a dev stack sharing its D1 and channel must not. */
+  STAGED_CARD_GRANT?: string
+}
+type Bg = (p: Promise<unknown>) => void
+
+const now = (): number => Math.floor(Date.now() / 1000)
+
+async function readBody(req: Request): Promise<Record<string, unknown>> {
+  return ((await req.json().catch(() => null)) as Record<string, unknown> | null) ?? {}
+}
+
+async function listPlans(db: D1Database): Promise<Response> {
+  const { results } = await db.prepare(`
+    SELECT p.*,
+      (SELECT count(*) FROM plan_items i WHERE i.plan_id = p.id) AS items,
+      (SELECT count(*) FROM deletion_runs r WHERE r.plan_id = p.id) AS runs
+    FROM plans p ORDER BY p.created_ts DESC
+  `).all()
+  return json({ plans: results })
+}
+
+async function getPlan(db: D1Database, id: number, staging: boolean): Promise<Response> {
+  // On a staging deployment the memo lives on the item's stage batch (one
+  // gesture, one note) — joined back so a staged item carries the reason it
+  // was trashed. Elsewhere `stage_batches` doesn't exist.
+  const d = await planDetail(db, id, staging)
+  return d ? json(d) : json({ error: "no such plan" }, 404)
+}
+
+async function getStaged(db: D1Database, staging: boolean): Promise<Response> {
+  const id = await openPlanId(db)
+  if (id == null) return json({ plan: null, items: [], batches: [], emptied: [], runs: [] })
+  return json(await planDetail(db, id, staging))
+}
+
+async function createPlan(db: D1Database, who: string, body: Record<string, unknown>): Promise<Response> {
+  const name = typeof body.name === "string" ? body.name.trim() : ""
+  if (!name) return json({ error: "name required" }, 400)
+  const note = typeof body.note === "string" ? body.note : null
+  const row = await db.prepare(
+    "INSERT INTO plans (name, note, state, created_by, created_ts) VALUES (?, ?, 'open', ?, ?) RETURNING id",
+  ).bind(name, note, who, now()).first<{ id: number }>()
+  const id = row!.id
+  await audit(db, "plans", String(id), "insert", who, null, { name, note })
+  return json({ id }, 201)
+}
+
+async function closePlan(db: D1Database, who: string, id: number, body: Record<string, unknown>): Promise<Response> {
+  if (body.state !== "closed") return json({ error: "only { state: 'closed' } is supported" }, 400)
+  const plan = await db.prepare("SELECT * FROM plans WHERE id = ?").bind(id).first<PlanRow>()
+  if (!plan) return json({ error: "no such plan" }, 404)
+  await db.prepare("UPDATE plans SET state = 'closed', closed_ts = ? WHERE id = ?").bind(now(), id).run()
+  await audit(db, "plans", String(id), "update", who, { state: plan.state }, { state: "closed" })
+  return json({ id, state: "closed" })
+}
+
+async function editItems(
+  db: D1Database, who: string, id: number, add: boolean, body: Record<string, unknown>, shape: PrefixShape, own = false,
+): Promise<Response> {
+  const plan = await db.prepare("SELECT * FROM plans WHERE id = ?").bind(id).first<PlanRow>()
+  if (!plan) return json({ error: "no such plan" }, 404)
+  if (plan.state !== "open") return json({ error: "plan is closed; reopen or make a new plan" }, 409)
+  const raw = Array.isArray(body.prefixes) ? body.prefixes : []
+  if (!raw.length) return json({ error: "prefixes required" }, 400)
+  const prefixes: string[] = []
+  for (const r of raw) {
+    const c = typeof r === "string" ? canonicalPrefix(r, shape) : null
+    if (!c) return json({ error: `bad prefix ${JSON.stringify(r)}` }, 400)
+    prefixes.push(c)
+  }
+  const note = typeof body.note === "string" ? body.note : null
+  const ts = now()
+  if (add) {
+    for (const p of prefixes) {
+      await db.prepare(
+        "INSERT OR IGNORE INTO plan_items (plan_id, prefix, note, added_by, added_ts) VALUES (?, ?, ?, ?, ?)",
+      ).bind(id, p, note, who, ts).run()
+    }
+    await audit(db, "plan_items", String(id), "insert", who, null, { prefixes })
+  } else {
+    // A stager (not admin) may only take back what they staged themselves.
+    for (const p of prefixes) {
+      const r = own
+        ? await db.prepare("DELETE FROM plan_items WHERE plan_id = ? AND prefix = ? AND added_by = ?").bind(id, p, who).run()
+        : await db.prepare("DELETE FROM plan_items WHERE plan_id = ? AND prefix = ?").bind(id, p).run()
+      if (own && !r.meta.changes) return json({ error: `not yours to unstage: ${p}` }, 403)
+    }
+    await audit(db, "plan_items", String(id), "delete", who, { prefixes, own }, null)
+  }
+  return json({ id, [add ? "added" : "removed"]: prefixes })
+}
+
+const background = (ctx: { waitUntil?: Bg }, p: Promise<unknown>): void => { if (ctx.waitUntil) ctx.waitUntil(p); else void p }
+
+export const onRequest = async (ctx0: Ctx & { env: Env; waitUntil?: Bg }): Promise<Response> => {
+  // The interval store for the dates it holds (`withPathStore`), as the map's own reads: never per-scan rows an
+  // unpinned deployment's job no longer writes (`index-sync -R`).
+  const ctx = await withPathStore(ctx0)
+  if (!ctx.env.DB) return json({ error: "plans store not configured (no D1 binding)" }, 503)
+  const db = ctx.env.DB
+  const shape = prefixShape(ctx.env)
+  const staging = !!ctx.env.STAGING
+  const segs = new URL(ctx.request.url).pathname.replace(/^\/api\/plans\/?/, "").split("/").filter(Boolean)
+  const method = ctx.request.method
+
+  // /api/plans
+  if (segs.length === 0) {
+    if (method === "GET") {
+      const gated = await requireViewer(ctx)
+      return gated instanceof Response ? gated : listPlans(db)
+    }
+    if (method === "POST") {
+      const gated = await requireAdmin(ctx)
+      return gated instanceof Response ? gated : createPlan(db, (gated.email ?? gated.name ?? 'guest'), await readBody(ctx.request))
+    }
+    return json({ error: "method not allowed" }, 405)
+  }
+
+  // /api/plans/staged — the shared open plan, for the /staged console.
+  if (segs.length === 1 && segs[0] === "staged" && method === "GET") {
+    const gated = await requireViewer(ctx)
+    return gated instanceof Response ? gated : getStaged(db, staging)
+  }
+
+  // /api/plans/staged/card — the job's post-scan ping: writes to Slack, so one named grant, never a viewer.
+  if (segs.length === 2 && segs[0] === "staged" && segs[1] === "card" && method === "POST") {
+    if (!ctx.env.STAGED_CARD_GRANT) return json({ error: "no staged-card grant on this deployment" }, 404)
+    const gated = await requireViewer(ctx)
+    if (gated instanceof Response) return gated
+    if (gated.via !== "grant" || gated.grantId !== ctx.env.STAGED_CARD_GRANT) return json({ error: "forbidden" }, 403)
+    return json({ refreshed: await refreshStagedCard(ctx.env as NotifyEnv, db, new URL(ctx.request.url).origin) })
+  }
+
+  // /api/plans/stage — the opt-in trash proposal, on deployments that stage.
+  if (segs.length === 1 && segs[0] === "stage" && method === "POST") {
+    if (!staging) return json({ error: "this deployment does not stage; admins curate plans directly" }, 404)
+    // The full base scope: a read-only guest link can't propose.
+    const gated = await requireStager(ctx)
+    if (gated instanceof Response) return gated
+    if (!shape) return json({ error: `staging ${NO_SHAPE}` }, 503)
+    const body = await readBody(ctx.request)
+    const strs = (v: unknown): string[] => Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : []
+    // `prefixes`: folders; `objects`: exact keys (specs/done/file-assign.md) —
+    // the kind is which list an item came in, never its shape.
+    const prefixes = strs(body.prefixes)
+    const objects = strs(body.objects)
+    const note = typeof body.note === "string" ? body.note : null
+    // The scan the gesture stages against: a named scan date that exists,
+    // else the latest scan (none synced yet = null: the dispatch scan stands in).
+    const scans = (await pathScans(ctx.env, true)).results.map(r => r.date)
+    let asOf: string | null = scans.at(-1) ?? null
+    if (body.as_of !== undefined && body.as_of !== null) {
+      if (typeof body.as_of !== "string" || !scans.includes(body.as_of)) {
+        return json({ error: `as_of must be a scan date (${scans.length ? `latest ${scans.at(-1)}` : "no scans yet"})`, as_of: body.as_of }, 400)
+      }
+      asOf = body.as_of
+    }
+    const by = gated.email ?? gated.name ?? "guest"
+    // Each item is checked against the newest scan, whatever scan it was picked at: one with nothing under it
+    // there is refused (`gone`), never a plan row.
+    const newest = scans.at(-1)
+    const present = newest && storeReady(ctx.env) ? async (keys: string[]) => {
+      const held = new Set<string>()
+      for (let i = 0; i < keys.length; i += MAX_PREFIXES) {
+        const { stats } = await prefixesAt(ctx.env, newest, keys.slice(i, i + MAX_PREFIXES))
+        for (const [k, s] of Object.entries(stats)) if (s.b > 0 || s.o > 0) held.add(k)
+      }
+      return held
+    } : undefined
+    const res = await stageItems(db, { prefixes, objects }, by, note, shape, asOf, present)
+    if ("error" in res) return json(res, 400)
+    // Announce the batch in the plan's Slack thread (specs/done/staged-slack.md),
+    // after the response — a Slack hiccup never fails the gesture.
+    if (res.plan_id != null && res.batch_id != null && res.staged.length) {
+      const siteUrl = new URL(ctx.request.url).origin
+      background(ctx, notifyPlan(ctx.env, db, res.plan_id, siteUrl,
+        { stage: { planId: res.plan_id, batchId: res.batch_id, by, prefixes: res.staged, covered: res.covered.length, note, siteUrl } }))
+    }
+    return json(res, 201)
+  }
+
+  // /api/plans/run?id=<run_id> — one run's record + per-band rows (a run id
+  // may hold a `/`, so it rides in the query).
+  if (segs.length === 1 && (segs[0] === "run" || segs[0] === "run-analytics") && method === "GET") {
+    const gated = await requireViewer(ctx)
+    if (gated instanceof Response) return gated
+    const runId = new URL(ctx.request.url).searchParams.get("id") ?? ""
+    if (!runId) return json({ error: "id required" }, 400)
+    const d = await runDetail(db, runId)
+    if (!d) return json({ error: "no such run" }, 404)
+    if (segs[0] === 'run') return json(d)
+    const cfg = batchConfig(ctx.env, ["GCP_PROJECT", "DATA_BUCKET"])
+    if (ctx.env.GCP_SA_KEY && !("missing" in cfg) && /^cw-sweep-(real|dry)-[a-z0-9-]+$/.test(runId)) {
+      const token = await gcpToken(ctx.env.GCP_SA_KEY)
+      const [review, result, analysis] = await Promise.all([
+        readRunJson(cfg, token, runId, 'plan-summary.json'),
+        readRunJson(cfg, token, runId, `${d.run.mode === 'real' ? 'deleted' : 'would-delete'}-summary.json`),
+        readRunJson(cfg, token, runId, 'preservation-analysis.json'),
+      ])
+      return json({ review, result, analysis }, 200, { 'cache-control': 'private, max-age=30' })
+    }
+    return json({ review: null, result: null, analysis: null })
+  }
+
+  const id = Number(segs[0])
+  if (!Number.isInteger(id) || id <= 0) return json({ error: "bad plan id" }, 400)
+
+  // /api/plans/:id
+  if (segs.length === 1) {
+    if (method === "GET") {
+      const gated = await requireViewer(ctx)
+      return gated instanceof Response ? gated : getPlan(db, id, staging)
+    }
+    if (method === "PATCH") {
+      const gated = await requireAdmin(ctx)
+      return gated instanceof Response ? gated : closePlan(db, (gated.email ?? gated.name ?? 'guest'), id, await readBody(ctx.request))
+    }
+    return json({ error: "method not allowed" }, 405)
+  }
+
+  // /api/plans/:id/slack — admin: re-render the plan's Slack thread (parent,
+  // every coalesced stage reply, and the pre-coalescing stage-batch replies
+  // named by `{ replies: { <batch_id>: <ts> } }`),
+  // e.g. after the message format changes. Edits don't notify anyone.
+  if (segs.length === 2 && segs[1] === "slack" && method === "POST") {
+    const gated = await requireAdmin(ctx)
+    if (gated instanceof Response) return gated
+    const body = await readBody(ctx.request)
+    const replies = (body.replies && typeof body.replies === "object" ? body.replies : {}) as Record<string, unknown>
+    const ok = Object.entries(replies).filter((e): e is [string, string] => /^\d+$/.test(e[0]) && typeof e[1] === "string" && /^\d+\.\d+$/.test(e[1]))
+    return json(await refreshThread(ctx.env as NotifyEnv, db, id, new URL(ctx.request.url).origin, Object.fromEntries(ok.map(([b, t]) => [Number(b), t]))))
+  }
+
+  // /api/plans/:id/items — admins curate; on a staging deployment a stager
+  // may DELETE (unstage) their own items.
+  if (segs.length === 2 && segs[1] === "items" && (method === "POST" || method === "DELETE")) {
+    const gated = await (staging && method === "DELETE" ? requireStager(ctx) : requireAdmin(ctx))
+    if (gated instanceof Response) return gated
+    const who = gated.email ?? gated.name ?? 'guest'
+    if (!shape) return json({ error: `plan items ${NO_SHAPE}` }, 503)
+    const res = await editItems(db, who, id, method === "POST", await readBody(ctx.request), shape, !gated.admin)
+    if (res.ok) {
+      const body = (await res.clone().json()) as { added?: string[]; removed?: string[] }
+      const n = (body.added ?? body.removed ?? []).length
+      const verb = body.added ? "added" : "unstaged"
+      background(ctx, notifyPlan(ctx.env, db, id, new URL(ctx.request.url).origin,
+        { text: (name: string) => `:leftwards_arrow_with_hook: ${name} ${verb} ${n} ${n === 1 ? "prefix" : "prefixes"}`, by: { email: who, verb } }))
+    }
+    return res
+  }
+
+  // /api/plans/:id/batches/merge — fold a chunked staging's batches into one
+  // (a stager may merge their own; `mergeBatches` refuses mixed stagers).
+  if (segs.length === 3 && segs[1] === "batches" && segs[2] === "merge" && method === "POST") {
+    if (!staging) return json({ error: "this deployment does not stage" }, 404)
+    const gated = await requireStager(ctx)
+    if (gated instanceof Response) return gated
+    const who = gated.email ?? gated.name ?? "guest"
+    const body = await readBody(ctx.request)
+    const into = Number(body.into)
+    const ids = Array.isArray(body.ids) ? (body.ids as unknown[]).map(Number) : []
+    if (!Number.isInteger(into) || !ids.length || !ids.every(Number.isInteger)) return json({ error: "into (batch id) and ids (batch ids) required" }, 400)
+    if (!gated.admin) {
+      const rows = (await db.prepare("SELECT created_by FROM stage_batches WHERE id IN (SELECT value FROM json_each(?))").bind(JSON.stringify([into, ...ids])).all<{ created_by: string }>()).results
+      if (rows.some(r => r.created_by.toLowerCase() !== who.toLowerCase())) return json({ error: "not yours to merge" }, 403)
+    }
+    const note = typeof body.note === "string" ? body.note : null
+    const res = await mergeBatches(db, id, into, ids, note, who)
+    return "error" in res ? json({ error: res.error }, res.status) : json(res)
+  }
+
+  return json({ error: "not found" }, 404)
+}

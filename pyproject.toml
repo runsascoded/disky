@@ -1,0 +1,103 @@
+[project]
+name = "disk-tree"
+version = "0.1.0"
+description = "Disk/Cloud space usage analyzer"
+readme = "README.md"
+authors = [{name = "Ryan Williams"}]
+license = {text = "Apache License 2.0"}
+requires-python = ">=3.11"
+
+dependencies = [
+    "click",
+    "duckdb",
+    "flask",
+    "flask-sqlalchemy",
+    "pandas",
+    "pyarrow",
+    "python-dateutil",
+    "pyyaml>=6.0.3",
+    "sqlalchemy",
+    "utz",
+]
+
+[project.optional-dependencies]
+dev = [
+    "mypy",
+    "pytest",
+]
+mem = [
+    "memray",
+]
+# Sharded bulk listers for cloud object stores. Split by scheme so users pay
+# only for the SDK they use; `bulk` pulls all three for convenience.
+gcs = [
+    "fsspec",
+    "gcsfs",
+    "google-cloud-storage",
+]
+s3 = [
+    "boto3",
+    "fsspec",
+    "s3fs>=2024.10",
+]
+r2 = [
+    "boto3",
+    "fsspec",
+    "s3fs>=2024.10",
+]
+bulk = [
+    "boto3",
+    "fsspec",
+    "gcsfs",
+    "google-cloud-storage",
+    "s3fs>=2024.10",
+]
+
+[project.scripts]
+disk-tree = "disk_tree.cli.main:cli"
+
+[project.entry-points."fsspec.specs"]
+r2 = "disk_tree.r2fs.R2FileSystem"
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "pytest-xdist>=3.6",
+]
+
+[tool.pytest.ini_options]
+markers = [
+    "slow: the long tail (byte-identity sweeps, brute-force oracles); CI runs them, `scripts/remote-test` skips them unless `-a`",
+]
+
+[tool.uv.workspace]
+# `cloud/` (dt-cloud, the cloud overlay) is a workspace member: ONE lockfile
+# for the engine and the overlay, one environment, so the job images, CI and
+# the laptop all resolve the same pins (before this, `cloud/uv.lock` and
+# `uv.lock` disagreed on 34 packages and each `uv sync` repointed the shared
+# venv to whichever ran last; the job image ignored both and resolved fresh).
+members = ["cloud"]
+
+[tool.uv.sources]
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+packages = ["disk_tree"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.sdist]
+exclude = [
+    ".claude/",
+    ".idea/",
+    ".venv/",
+    "node_modules/",
+    "screenshots/",
+    "tmp/",
+    "*.iml",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/disk_tree"]

@@ -1,0 +1,42 @@
+{
+  "_metadata": {
+    "major_version": 1,
+    "minor_version": 1
+  },
+  "display_information": {
+    "name": "<Store> Usage Bot",
+    "description": "Storage-usage digest and staged-deletion review for <what> \u2014 <host>",
+    "background_color": "#0d1117"
+  },
+  "features": {
+    "bot_user": {
+      "display_name": "<Store> Usage Bot",
+      "always_online": false
+    }
+  },
+  "oauth_config": {
+    "scopes": {
+      "bot": [
+        "chat:write",
+        "chat:write.customize",
+        "chat:write.public",
+        "channels:history",
+        "groups:history",
+        "channels:read",
+        "groups:read",
+        "users:read",
+        "users:read.email",
+        "emoji:read"
+      ]
+    }
+  },
+  "settings": {
+    "org_deploy_enabled": false,
+    "socket_mode_enabled": false,
+    "token_rotation_enabled": false,
+    "interactivity": {
+      "is_enabled": true,
+      "request_url": "https://<host>/slack/actions"
+    }
+  }
+}

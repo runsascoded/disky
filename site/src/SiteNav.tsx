@@ -1,0 +1,490 @@
+import {
+  FloatingFocusManager,
+  FloatingNode,
+  FloatingPortal,
+  FloatingTree,
+  autoUpdate,
+  flip,
+  offset,
+  safePolygon,
+  shift,
+  useClick,
+  useDismiss,
+  useFloating,
+  useFloatingNodeId,
+  useHover,
+  useInteractions,
+  useRole,
+} from '@floating-ui/react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import type { KeyboardEvent, ReactNode } from 'react'
+import { DEFAULT_STORE, DUPS, STORES, storeForPath } from './stores'
+import { useStore } from './store'
+import { scansHref } from './scanRunsUi'
+import { FaGithub } from 'react-icons/fa'
+import { MdMenu } from 'react-icons/md'
+import { Link, useLocation } from 'react-router-dom'
+import { AboutModal } from './About'
+import { Avatar } from './Avatar'
+import { AUTH_MODE, signInUrl, useCanAssign, useCanStage, useIdent, useIsAdmin, useSignOut, useStores } from './auth'
+import { ShareDialog } from './ShareDialog'
+import { closeDialog, openDialog, useDialog } from './dialogs'
+import { UrlParamsModal } from './UrlParamsModal'
+import { useRegistry } from './identities'
+import { PEERS, REPO_URL, peerHref } from './SiteKbd'
+import { buildLine } from './build'
+import { useMyUser, useUserEmails } from './owners'
+import ProfileModal from './ProfileModal'
+import TokenModal from './TokenModal'
+import { UserCard, ghHandle, shortName } from './UserChip'
+import { useUnits } from './units'
+import { Tooltip } from './Tooltip'
+import { useScrollSpyPref } from './prefs'
+
+/** The deployment's mark (`MARK`, `scripts/marks/`): the favicon, and the header's logo beside the title — a store's own
+ *  `mark` instead while its routes are open, as the tab icon does (`marks.ts`). */
+const MARK: string = import.meta.env.VITE_MARK
+
+// The one bar every page wears, pinned to the viewport top: the site nav
+// folded into a ☰ menu (far left), the page's own scope/controls across the
+// middle, and the signed-in identity as an avatar menu (far right — the
+// Display submenu, token, sign-out live in it; with no avatar — a public
+// deploy, or signed out — the Display submenu sits in ☰ instead). On the home page the middle IS the page scope
+// (scan, diff window, color axis, owner axis, name filter), so every
+// section below reads against a visible statement of what it's scoped to,
+// and the bar looks the same parked at the top as it does stuck mid-page.
+//
+// The bar's rendered height is published as `--topbar-h` on <html>, so
+// anchored sections park just under it (`scroll-margin-top`) however many
+// rows the controls wrap onto.
+export const TOPBAR_VAR = '--topbar-h'
+/** The bar's current height (px) — where anchored sections park. */
+export const topbarH = (): number =>
+  parseFloat(getComputedStyle(document.documentElement).getPropertyValue(TOPBAR_VAR)) || 48
+
+export function SiteNav({ children, menu, crumbs }: {
+  /** Page controls for the middle of the bar. */
+  children?: ReactNode
+  /** Page-specific entries appended to the ☰ menu (after the site links). */
+  menu?: MenuEntry[]
+  /** Where the page is (the drilled path): the first row, beside the brand;
+   * the controls then take a row of their own under it. */
+  crumbs?: ReactNode
+}) {
+  const mark = storeForPath(useLocation().pathname).mark ?? MARK
+  const ref = useRef<HTMLDivElement>(null)
+  const row2Ref = useRef<HTMLDivElement | null>(null)
+  // `--topbar-h` = the sticky bar's height (row 1 when the controls overlay);
+  // `--tb-row2-h` = the controls' own height, so the flow spacer under the bar
+  // reserves exactly that at the top of the page — where the overlay would
+  // otherwise sit over the first slice of content. Measured in a layout effect
+  // (synchronous, post-layout, so no zero-on-mount read) after every render,
+  // plus on viewport resize (which wraps the controls to a different height).
+  const measure = () => {
+    const el = ref.current
+    const root = document.documentElement
+    if (el) root.style.setProperty(TOPBAR_VAR, `${el.offsetHeight}px`)
+    const r2 = row2Ref.current
+    root.style.setProperty('--tb-row2-h', r2 ? `${r2.offsetHeight}px` : '0px')
+  }
+  useLayoutEffect(measure)
+  useEffect(() => {
+    window.addEventListener('resize', measure)
+    return () => window.removeEventListener('resize', measure)
+  }, [])
+  // The crumbs scroll horizontally when they don't fit (a phone), and snap
+  // to their END on every path change so the basename — the one segment the
+  // reader needs — is what shows, not `<root label>/<bucket>/…`.
+  const crumbsRef = useRef<HTMLDivElement | null>(null)
+  const { pathname } = useLocation()
+  useLayoutEffect(() => {
+    const el = crumbsRef.current
+    if (el) el.scrollLeft = el.scrollWidth
+  }, [pathname])
+  // The path row stays pinned; on a phone the controls row is an OVERLAY (out of
+  // page flow — CSS below, gated to a narrow viewport) that auto-hides on scroll
+  // down and returns on scroll up, like a native toolbar. Out of flow is the
+  // whole point: toggling it moves no content and can't perturb `window.scrollY`
+  // (an in-flow control row sits in the sticky bar above the viewport, so
+  // collapsing it drops scrollY by its own height and a scroll-driven fold then
+  // reads its own change and loops). So we can just watch scroll DIRECTION.
+  const hasControls = !!(crumbs && children)
+  const [hidden, setHidden] = useState(false)
+  useEffect(() => {
+    if (!hasControls) { setHidden(false); return }
+    let lastY = window.scrollY
+    let raf = 0
+    const update = () => {
+      raf = 0
+      const y = Math.max(0, window.scrollY)
+      if (y <= 4) { setHidden(false); lastY = y; return }   // always shown at the top
+      const dy = y - lastY
+      if (dy > 10) { setHidden(true); lastY = y }            // scrolled down → hide
+      else if (dy < -10) { setHidden(false); lastY = y }     // scrolled up → show
+      // small moves in the dead band leave lastY put, so a slow drag accumulates
+    }
+    const onScroll = () => { if (!raf) raf = requestAnimationFrame(update) }
+    window.addEventListener('scroll', onScroll, { passive: true })
+    return () => { window.removeEventListener('scroll', onScroll); if (raf) cancelAnimationFrame(raf) }
+  }, [hasControls])
+  return (
+    <>
+    <div className={'topbar' + (hidden ? ' ctrl-hidden' : '')} ref={ref}>
+      <div className="tb-row">
+        <NavMenu extra={menu} />
+        {mark && <Link to="/" className="tb-mark" aria-label="home"><img src={`/icons/${mark}.svg`} alt="" width={24} height={24} /></Link>}
+        {crumbs ? <div className="tb-crumbs" ref={crumbsRef}>{crumbs}</div> : <div className="tb-mid">{children}</div>}
+        <UserMenu />
+        <SiteDialogs />
+      </div>
+      {hasControls && <div className="tb-row tb-row2" ref={row2Ref}><div className="tb-mid">{children}</div></div>}
+    </div>
+    {/* A flow spacer the height of the controls: at the top it holds their
+        place under the overlay so nothing is covered; once scrolled it rides up
+        off-screen, so hiding the overlay leaves no gap. Zero on desktop. */}
+    {hasControls && <div className="tb-row2-spacer" aria-hidden />}
+    </>
+  )
+}
+
+export interface MenuEntry {
+  key: string
+  label: ReactNode
+  onClick: () => void
+}
+
+/** A click-toggled floating menu anchored to its trigger button. A node in a
+ *  `<FloatingTree>`, so a submenu (`DisplayMenu`) counts as inside it: a click
+ *  or focus there doesn't dismiss it. */
+function useMenu(placement: 'bottom-start' | 'bottom-end') {
+  const [open, setOpen] = useState(false)
+  const nodeId = useFloatingNodeId()
+  const { refs, floatingStyles, context } = useFloating({
+    nodeId,
+    open,
+    onOpenChange: setOpen,
+    placement,
+    middleware: [offset(6), flip(), shift({ padding: 8 })],
+    whileElementsMounted: autoUpdate,
+  })
+  const { getReferenceProps, getFloatingProps } = useInteractions([
+    useClick(context),
+    useDismiss(context),
+    useRole(context, { role: 'menu' }),
+  ])
+  return { open, setOpen, nodeId, refs, floatingStyles, context, getReferenceProps, getFloatingProps }
+}
+
+/** The open site dialog, portaled to <body>: rendered inside the sticky bar,
+ * a modal stacks under the page's own panels (the map's info box). */
+function SiteDialogs() {
+  const d = useDialog()
+  if (!d) return null
+  return (
+    <FloatingPortal>
+      {d === 'about' && <AboutModal onClose={closeDialog} />}
+      {d === 'share' && <ShareDialog onClose={closeDialog} />}
+      {d === 'profile' && <ProfileModal onClose={closeDialog} />}
+      {d === 'token' && <TokenModal onClose={closeDialog} />}
+      {d === 'params' && <UrlParamsModal onClose={closeDialog} />}
+    </FloatingPortal>
+  )
+}
+
+function NavMenu(props: { extra?: MenuEntry[] }) {
+  return <FloatingTree><NavMenuInner {...props} /></FloatingTree>
+}
+
+function NavMenuInner({ extra }: { extra?: MenuEntry[] }) {
+  const { pathname } = useLocation()
+  // No avatar menu (public deploy, signed out): the Display submenu lives here.
+  const noUserMenu = !useIdent()
+  const canAssign = useCanAssign()
+  const isAdmin = useIsAdmin()
+  const stores = useStores()
+  // Full viewers share with a detailed preview (guest links can't: a token
+  // outlives the session that minted it).
+  const canShare = useCanStage()
+  const m = useMenu('bottom-start')
+  // The subtree's store: its own map (`/meta`), and only the affordances it
+  // has (ownership, staging are the primary's).
+  const store = useStore()
+  // The map is "here" at the store's root only (a drilled path is a place of
+  // its own); every other page, on it or under it.
+  const here = (to: string) => (to === store.path ? pathname === to : pathname === to || pathname.startsWith(to + '/'))
+  const link = (to: string, label: string) => (
+    <Link key={to} role="menuitem" className="mi" to={to} aria-current={here(to) ? 'page' : undefined} onClick={() => m.setOpen(false)}>
+      {label}
+    </Link>
+  )
+  return (
+    <>
+      <button type="button" className="tb-menu-btn" ref={m.refs.setReference} {...m.getReferenceProps()} aria-label="Site menu" title="Site menu">
+        <MdMenu aria-hidden />
+      </button>
+      <FloatingNode id={m.nodeId}>
+      {m.open && (
+        <FloatingPortal>
+          <FloatingFocusManager context={m.context} modal={false}>
+            <div className="menu-pop" ref={m.refs.setFloating} style={m.floatingStyles} {...m.getFloatingProps()}>
+              {link(store.path, 'Map')}
+              {canAssign && store.owners && link('/users', 'Users')}
+              {canAssign && store.owners && link('/assignments', 'Assignments')}
+              {store.staging && link('/staged', 'Staged')}
+              {DUPS && store === DEFAULT_STORE && link('/dups', 'Duplicates')}
+              {link(scansHref(store), 'Scan runs')}
+              {link('/health', 'Health')}
+              {DEFAULT_STORE.metaTree && <a role="menuitem" className="mi" href={DEFAULT_STORE.metaTree} target="_blank" rel="noreferrer" onClick={() => m.setOpen(false)}>Meta <span className="dim">(the data bucket)</span> ↗</a>}
+              {isAdmin && link('/admin', 'Admin')}
+              {/* The store switcher — only a multi-store deploy has one
+                  (specs/done/multi-store.md phase 2): each configured store at its
+                  own path, the current one marked. */}
+              {stores.length > 1 && (
+                <>
+                  <hr />
+                  {stores.map(s => (
+                    <Link key={`store:${s.key}`} role="menuitem" className="mi store-link" to={s.path} aria-current={s.key === store.key ? 'true' : undefined} onClick={() => m.setOpen(false)}>
+                      {s.label} <span className="dim">{s.path}</span>
+                    </Link>
+                  ))}
+                </>
+              )}
+              <hr />
+              {canShare && (
+                <button type="button" role="menuitem" className="mi" onClick={() => { m.setOpen(false); openDialog('share') }}>Share…</button>
+              )}
+              <button type="button" role="menuitem" className="mi" onClick={() => { m.setOpen(false); openDialog('about') }}>About — the data, axes &amp; colors</button>
+              <button type="button" role="menuitem" className="mi" onClick={() => { m.setOpen(false); openDialog('params') }}>URL params — what this link sets</button>
+              {noUserMenu && <DisplayMenu side="right" />}
+              {extra?.map(e => (
+                <button key={e.key} type="button" role="menuitem" className="mi" onClick={() => { m.setOpen(false); e.onClick() }}>{e.label}</button>
+              ))}
+              <hr />
+              {PEERS.map(p => <a key={p.prod} role="menuitem" className="mi" href={peerHref(p, location.href)} onPointerDown={e => { e.currentTarget.href = peerHref(p, location.href) }} onClick={() => m.setOpen(false)}>{p.label} <span className="dim">this page</span></a>)}
+              {DEFAULT_STORE.liveTotals && <a role="menuitem" className="mi" href={DEFAULT_STORE.liveTotals.href} target="_blank" rel="noreferrer">{DEFAULT_STORE.liveTotals.label} ↗</a>}
+              <a role="menuitem" className="mi" href={REPO_URL} target="_blank" rel="noreferrer"><FaGithub aria-hidden /> Source on GitHub ↗</a>
+              <BuildLine />
+            </div>
+          </FloatingFocusManager>
+        </FloatingPortal>
+      )}
+      </FloatingNode>
+    </>
+  )
+}
+
+/** The "Display ▸" submenu: per-browser display choices — byte units (SI / IEC), the trailing "B", and the
+ *  scroll-spy — in the avatar menu, or in ☰ when there's no avatar. A flyout beside the parent menu (a node of
+ *  its `<FloatingTree>`): hover opens it with a mouse; Enter / Space / → / a tap opens it and focuses its first
+ *  item, ↑ ↓ Home End move, ← / Esc close it back to its trigger. Choosing an item applies at once and leaves
+ *  the menu open. */
+function DisplayMenu({ side }: { side: 'left' | 'right' }) {
+  const { units, suffixB, setUnits, setSuffixB } = useUnits()
+  const [spy, setSpy] = useScrollSpyPref()
+  const [open, setOpen] = useState(false)
+  // Focus the first item on a keyboard / touch open; a hover open leaves focus where it is.
+  const [focusFirst, setFocusFirst] = useState(false)
+  const nodeId = useFloatingNodeId()
+  const other = side === 'left' ? 'right' : 'left'
+  const { refs, floatingStyles, context } = useFloating({
+    nodeId,
+    open,
+    onOpenChange: (o, _e, reason) => { setOpen(o); if (o) setFocusFirst(reason !== 'hover') },
+    placement: `${side}-start`,
+    // Beside the parent menu (padding-aligned with the trigger); where neither side fits (a phone), over the
+    // parent below the trigger.
+    middleware: [
+      offset({ mainAxis: 4, alignmentAxis: -7 }),
+      flip({ fallbackPlacements: [`${other}-start`, 'bottom-end', 'bottom-start', 'top-end'] }),
+      shift({ padding: 8 }),
+    ],
+    whileElementsMounted: autoUpdate,
+  })
+  const { getReferenceProps, getFloatingProps } = useInteractions([
+    useHover(context, { mouseOnly: true, delay: { open: 60 }, handleClose: safePolygon({ blockPointerEvents: true }) }),
+    useClick(context, { ignoreMouse: true }),
+    useDismiss(context),
+    useRole(context, { role: 'menu' }),
+  ])
+  const items = (): HTMLElement[] => Array.from(refs.floating.current?.querySelectorAll<HTMLElement>('[role^="menuitem"]') ?? [])
+  useEffect(() => {
+    if (open && focusFirst) requestAnimationFrame(() => items()[0]?.focus())
+  }, [open, focusFirst]) // eslint-disable-line react-hooks/exhaustive-deps
+  const back = () => { setOpen(false); (refs.domReference.current as HTMLElement | null)?.focus() }
+  const onTriggerKey = (e: KeyboardEvent) => {
+    if (e.key === (side === 'left' ? 'ArrowLeft' : 'ArrowRight')) { e.preventDefault(); setFocusFirst(true); setOpen(true) }
+  }
+  const onMenuKey = (e: KeyboardEvent) => {
+    const all = items()
+    const i = all.indexOf(document.activeElement as HTMLElement)
+    const go = (j: number) => { e.preventDefault(); all[(j + all.length) % all.length]?.focus() }
+    if (e.key === 'ArrowDown') go(i + 1)
+    else if (e.key === 'ArrowUp') go(i < 0 ? -1 : i - 1)
+    else if (e.key === 'Home') go(0)
+    else if (e.key === 'End') go(-1)
+    else if (e.key === (side === 'left' ? 'ArrowRight' : 'ArrowLeft') || e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); back() }
+  }
+  const unit = (units === 'iec' ? 'Ti' : 'T') + (suffixB ? 'B' : '')
+  // Tips beside the flyout, away from the parent menu; on a phone (no room beside) above the item.
+  const tip = window.innerWidth < 640 ? 'top' : side
+  const check = (on: boolean) => <span className="mi-check" aria-hidden>{on ? '✓' : ''}</span>
+  return (
+    <>
+      <button
+        type="button"
+        role="menuitem"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        className={'mi mi-sub' + (open ? ' open' : '')}
+        ref={refs.setReference}
+        {...getReferenceProps({ onKeyDown: onTriggerKey })}
+      >
+        Display <span className="dim">{unit}</span><span className="mi-caret" aria-hidden>▸</span>
+      </button>
+      <FloatingNode id={nodeId}>
+        {open && (
+          <FloatingPortal>
+            <FloatingFocusManager context={context} modal={false} initialFocus={-1} returnFocus={false}>
+              <div className="menu-pop sub-menu" ref={refs.setFloating} style={floatingStyles} aria-label="Display" {...getFloatingProps({ onKeyDown: onMenuKey })}>
+                <div className="menu-head" role="presentation">Byte units</div>
+                <div role="group" aria-label="Byte units">
+                  <Tooltip placement={tip} content={<>Decimal units, powers of 1000: 1 T = 10¹² bytes, as bills, quotas and most dashboards quote them. The default. Remembered in this browser; a copied link stays plain. (<kbd>i</kbd> toggles.)</>}>
+                    <button type="button" role="menuitemradio" aria-checked={units === 'si'} className="mi" onClick={() => setUnits('si')}>
+                      {check(units === 'si')} SI <span className="dim">T, G, M (1000ⁿ)</span>
+                    </button>
+                  </Tooltip>
+                  <Tooltip placement={tip} content={<>Binary units, powers of 1024: 1 Ti = 2⁴⁰ bytes (≈ 1.1 T). Remembered in this browser, and a copied link carries it (<code>?iec</code>). (<kbd>i</kbd> toggles.)</>}>
+                    <button type="button" role="menuitemradio" aria-checked={units === 'iec'} className="mi" onClick={() => setUnits('iec')}>
+                      {check(units === 'iec')} IEC <span className="dim">Ti, Gi, Mi (1024ⁿ)</span>
+                    </button>
+                  </Tooltip>
+                </div>
+                <Tooltip placement={tip} content={<>Show the trailing “B” on sizes ({units === 'iec' ? '1.2 TiB' : '1.2 TB'}); off (the default), the tighter {units === 'iec' ? '1.2 Ti' : '1.2 T'} fits dense treemap cells better. Remembered in this browser; a copied link carries it (<code>?rb</code>). (<kbd>B</kbd> toggles.)</>}>
+                  <button type="button" role="menuitemcheckbox" aria-checked={suffixB} className="mi" onClick={() => setSuffixB(!suffixB)}>
+                    {check(suffixB)} “B” suffix <span className="dim">{units === 'iec' ? 'TiB' : 'TB'}</span>
+                  </button>
+                </Tooltip>
+                <hr />
+                <Tooltip placement={tip} content="On (the default): as you scroll the map page, the URL's #section names the section in view, so a copied link opens there. Off: the URL keeps the section you last linked or clicked. Remembered in this browser.">
+                  <button type="button" role="menuitemcheckbox" aria-checked={spy === 'on'} className="mi" onClick={() => setSpy(spy === 'on' ? 'off' : 'on')}>
+                    {check(spy === 'on')} Section in URL while scrolling
+                  </button>
+                </Tooltip>
+              </div>
+            </FloatingFocusManager>
+          </FloatingPortal>
+        )}
+      </FloatingNode>
+    </>
+  )
+}
+
+/** The page's build (`build.ts`): which deploy a report is about. Its commit links to GitHub when it names one. The
+ *  API's responses carry theirs (`x-disky-build`), so a mismatch shows a stale isolate or tab. */
+function BuildLine() {
+  const b = buildLine(REPO_URL)
+  if (!b) return null
+  const text = <><code>{b.sha}</code> · {b.time}</>
+  return (
+    <div className="menu-build" title="This page's build: commit · build time (the API names its own in the x-disky-build header)">
+      build {b.href ? <a href={b.href} target="_blank" rel="noreferrer">{text}</a> : text}
+    </div>
+  )
+}
+
+function UserMenu() {
+  return <FloatingTree><UserMenuInner /></FloatingTree>
+}
+
+function UserMenuInner() {
+  const ident = useIdent()
+  const canAssign = useCanAssign()
+  const signOut = useSignOut()
+  // The email → user map exists only on an attribution store.
+  const ownersOn = !!ident && DEFAULT_STORE.owners
+  const myUser = useMyUser(ident?.email, ownersOn)
+  const emails = useUserEmails(ownersOn)
+  const m = useMenu('bottom-end')
+  // Public deploys have no auth — no sign-in affordance.
+  if (!ident) return AUTH_MODE === 'public' ? null : <a className="tb-signin" href={signInUrl()}>sign in</a>
+  const who = myUser ?? ident.email
+  // A guest (share-link) session shows its own subject — the name + avatar the
+  // admin minted it with — not the owner-registry lookup (which an external
+  // guest isn't in, so it'd fall back to an email-derived initial + "ping Ryan").
+  const guest = ident.guest
+  const dispName = guest ? (ident.name ?? ident.email) : shortName(who)
+  return (
+    <>
+      <button type="button" className="tb-avatar" ref={m.refs.setReference} {...m.getReferenceProps()} aria-label={`Signed in as ${dispName}`} title={dispName}>
+        {guest || ident.avatar
+          ? <Avatar src={ident.avatar} name={dispName} size={26} />
+          : <Avatar github={ghHandle(who)} name={shortName(who)} size={26} />}
+      </button>
+      <FloatingNode id={m.nodeId}>
+      {m.open && (
+        <FloatingPortal>
+          <FloatingFocusManager context={m.context} modal={false}>
+            <div className="menu-pop user-menu" ref={m.refs.setFloating} style={m.floatingStyles} {...m.getFloatingProps()}>
+              {guest
+                ? <GuestCard name={dispName} avatar={ident.avatar} email={ident.email} />
+                : <UserCard who={who} avatar={ident.avatar} extra={<SessionLines email={ident.email} user={myUser} emails={emails} />} />}
+              <hr />
+              <DisplayMenu side="left" />
+              {!guest && (
+                <button type="button" role="menuitem" className="mi" onClick={() => { m.setOpen(false); openDialog('profile') }}>
+                  Profile…
+                </button>
+              )}
+              {canAssign && (
+                <button type="button" role="menuitem" className="mi" onClick={() => { m.setOpen(false); openDialog('token') }}>
+                  Agent / CLI Token…
+                </button>
+              )}
+              <button type="button" role="menuitem" className="mi" onClick={signOut}>Log Out</button>
+            </div>
+          </FloatingFocusManager>
+        </FloatingPortal>
+      )}
+      </FloatingNode>
+    </>
+  )
+}
+
+// A guest (share-link) session's card: the subject the admin minted — avatar +
+// name + (if present) the bound email. No registry framing (storage-breakdown
+// link, alias lines, "not mapped" warning) — a guest isn't an owner.
+function GuestCard({ name, avatar, email }: { name: string; avatar?: string; email: string }) {
+  return (
+    <div className="user-card">
+      <div className="uc-head">
+        <Avatar src={avatar} name={name} size={38} />
+        <div className="uc-id"><b>{name}</b></div>
+      </div>
+      {email.includes('@') && <div className="uc-sub">{email}</div>}
+      <div className="uc-session"><div className="dim">guest share link</div></div>
+    </div>
+  )
+}
+
+// Session-specific lines appended to the identity card (the card itself —
+// avatar, name, group, GitHub, storage link — is the shared <UserCard>):
+// which sign-in email this session is, the user's other aliases and sign-in
+// emails, or a warning when the email maps to no user.
+function SessionLines({ email, user, emails }: { email: string; user: string | null; emails?: Record<string, string> }) {
+  const reg = useRegistry()
+  const aliases = user ? Object.keys(reg).filter(k => k !== user && reg[k].u === user) : []
+  const others = user && emails ? Object.keys(emails).filter(e => emails[e] === user && e !== email.toLowerCase()) : []
+  return (
+    <div className="uc-session">
+      <div>Signed in as <code>{email}</code></div>
+      {user ? (
+        <>
+          {aliases.length > 0 && <div>aliases: {aliases.map(a => <code key={a}>{a}</code>)}</div>}
+          {others.length > 0 && <div>also signs in as: {others.map(e => <code key={e}>{e}</code>)}</div>}
+        </>
+      ) : DEFAULT_STORE.owners ? (
+        <div className="uc-warn">Not mapped to a user in the identity registry — the “me” owner filter won't resolve; ping Ryan.</div>
+      ) : null}
+    </div>
+  )
+}

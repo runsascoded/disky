@@ -1,0 +1,671 @@
+"""`dt_cloud.interval_local`: the single-machine `interval-store build` writes the generation the staged path's stages
+write over the same ranges (range files and served sorts, byte for byte), and `interval-store add` appends scans as runs
+that are the staged path's appends byte for byte (the open versions refolded from the published generation, not kept),
+read version for version as a full rebuild, and serve every view at every scan as the per-scan reference does. A URL
+store gets the local store's files; an interrupted add's unpublished run is redone and its stale keys replaced. And
+the store seam (`blobstore`): bare bucket names, the serving-R2 no-op, the staged chain's GCS-only profile."""
+from __future__ import annotations
+
+import json
+import random
+import shutil
+from pathlib import Path
+
+import duckdb
+import pyarrow.parquet as pq
+import pytest
+from click.testing import CliRunner
+from test_interval_append import _rows, _views_equal, build_full, combine
+from test_interval_store import V2_FROM, _scan_rows, _universe, _write
+
+from dt_cloud import append_runner as ar
+from dt_cloud import blobstore as bs
+from dt_cloud import interval_append as ia
+from dt_cloud import interval_churn as ich
+from dt_cloud import interval_local as il
+from dt_cloud import interval_store as ist
+from dt_cloud import static_names as sn
+
+#: Four scans in the base (three v1 indexes, one v2 store generation), then four appended (v2, a timed id among them).
+DATES = ["2026-07-30", "2026-07-31", "2026-08-02", "2026-08-03", "2026-08-04", "2026-08-04T1236", "2026-08-05", "2026-08-07"]
+BASE = 4
+LAYOUT = "listing/{id}/path-index.parquet"
+RG = 4
+
+
+@pytest.fixture(scope="module")
+def world(tmp_path_factory):
+    root = tmp_path_factory.mktemp("ivl")
+    rng = random.Random(11)
+    paths = _universe(rng)
+    scans = []
+    for j, d in enumerate(DATES):
+        v = 2 if j >= V2_FROM else 1
+        key = LAYOUT.replace("{id}", d)
+        (root / key).parent.mkdir(parents=True, exist_ok=True)
+        _write(_scan_rows(rng, paths, j), root / key, v)
+        scans.append({"id": d, "src": key, "ts": sn.scan_epoch(d), "version": v})
+    return {"root": root, "scans": scans, "paths": paths}
+
+
+def _build(world, store: Path | str, work: Path, gen: str = "g") -> dict:
+    args = ["-g", gen, "-L", LAYOUT, "-s", str(world["root"]), "-o", str(store), "-w", str(work), "-k", "3", "-r", str(RG), "-p", "2", "-M", "1GB",
+            "-t", DATES[BASE - 1]]
+    res = CliRunner().invoke(il.build_cmd, args, catch_exceptions=False)
+    assert res.exit_code == 0, res.output
+    return json.loads(res.stdout)
+
+
+def _add(world, store: Path | str, work: Path, gen: str = "g", *extra: str) -> dict:
+    args = ["-g", gen, "-L", LAYOUT, "-s", str(world["root"]), "-o", str(store), "-w", str(work), "-r", str(RG), "-p", "2", "-M", "1GB", *extra]
+    res = CliRunner().invoke(il.add_cmd, args, catch_exceptions=False)
+    assert res.exit_code == 0, res.output
+    return json.loads(res.stdout)
+
+
+def _parquets(d: Path) -> dict[str, bytes]:
+    return {p.relative_to(d).as_posix(): p.read_bytes() for p in sorted(d.rglob("*.parquet"))}
+
+
+@pytest.fixture(scope="module")
+def local(world, tmp_path_factory):
+    """A local store: the base built over the first four scans (a copy kept), then the other four added."""
+    tmp = tmp_path_factory.mktemp("ivl-store")
+    store = tmp / "store"
+    summary = _build(world, store, tmp / "work-build")
+    gen = store / ist.PREFIX / "g"
+    shutil.copytree(store, tmp / "base-only")
+    out = _add(world, store, tmp / "work-add")
+    # The appends' parity markers, as `add` left them (later tests' `verify` runs overwrite them).
+    markers = {p.stem: json.loads(p.read_text()) for p in sorted((gen / "verify").glob("*.json"))}
+    return {"tmp": tmp, "store": store, "gen": gen, "base_only": tmp / "base-only", "summary": summary, "out": out, "markers": markers}
+
+
+@pytest.fixture(scope="module")
+def staged(world, local, tmp_path_factory):
+    """The staged path's stages over the local build's ranges: the base's range files and served sorts, then each
+    appended scan's run from the previous run's open state (as `runs ranges` reads it from the scratch bucket)."""
+    tmp = tmp_path_factory.mktemp("ivl-staged")
+    root, scans = world["root"], world["scans"]
+    ranges = json.loads((local["gen"] / "ranges.json").read_text())
+    doc = {"bucket": str(root), "scans": scans[:BASE]}
+    base = tmp / "base"
+    con = duckdb.connect()
+    for i in range(ranges["k"]):
+        ist.build_range(doc, ranges, i, base, con, mount=str(root))
+        ist.fold_range(str(base), i, base, con)
+        ist.build_slices_range(doc, ranges, i, base, con, mount=str(root))
+        ist.slice_totals_range(str(base), i, base, con)
+    (base / "ranges.json").write_text(json.dumps(ranges))
+    ich.churn_gen(con, base, ranges["k"], ich.churn_from(scans[:BASE])["ts"], tmp / "churn-work")
+    (base / "ranges.json").unlink()
+    for sort, (sub, _, _) in ((s, ist.SORTS[s]) for s in ist.served_sorts(True)):
+        ist.write_served(con, f"read_parquet('{base}/{sub}/r*.parquet')", sort, base / "served" / f"{sort}.parquet", ist.served_schema(sort, churn=True),
+                         page_rows=ist.served_page_rows(sort), rg_rows=RG, stamps=[s["ts"] for s in scans[:BASE]])
+    runs, prev = {}, None
+    for j, s in enumerate(scans[BASE:], BASE):
+        out = tmp / "runs" / s["id"]
+        count = ich.counts_at(scans[j - 1], s)
+        for i in range(ranges["k"]):
+            name = f"r{i:04d}"
+            state = ia.run_state_sql(str(prev / "state"), name) if prev else ia.base_state_sql(str(base), name, churn=True)
+            ia.append_range(con, state, s, ranges["ranges"][i], name, out, bucket="b", mount=str(root), check=[str(base), *map(str, runs.values())],
+                            churn=True, count=count)
+        st = out / "state"
+        ich.apply_run(con, out, st, ranges, s["ts"], out, open_rows=lambda name: f"SELECT * FROM read_parquet('{st}/pvl/{name}.parquet')")
+        ia.cut_run(con, str(out), out / "served", rg_rows=RG, churn=True)
+        runs[s["id"]] = out
+        prev = out
+    return {"base": base, "runs": runs, "ranges": ranges}
+
+
+def test_build_writes_the_staged_generation(world, local, staged):
+    gen = local["gen"]
+    for sub in ("pv", "rd", "pvl", "sv", "svt", "served"):
+        got = {k: v for k, v in _parquets(gen).items() if k.startswith(f"{sub}/")}
+        want = {k: v for k, v in _parquets(staged["base"]).items() if k.startswith(f"{sub}/")}
+        assert sorted(got) == sorted(want) and got == want, sub
+    assert sorted(p.name for p in (gen / "served").iterdir()) == sorted(
+        [*(f"{s}{x}" for s in ist.served_sorts(True) for x in (".parquet", ".groups.parquet", ".json")), "stats.json"])
+    assert json.loads((gen / "scans.json").read_text()) == {
+        "bucket": str(world["root"]), "layouts": [LAYOUT], "churn": True,
+        "scans": [{**s, "size": (world["root"] / s["src"]).stat().st_size} for s in world["scans"][:BASE]], "slices": True}
+    s = local["summary"]
+    assert (s["gen"], s["scans"], s["ranges"], s["slices"], sorted(s["stages"]), sorted(s["peaks"])) == (
+        "g", BASE, staged["ranges"]["k"], True, ["churn", "cut", "slices", "versions"], ["churn", "cut", "slices", "versions"])
+
+
+def test_build_refuses_an_existing_generation(world, local, tmp_path):
+    res = CliRunner().invoke(il.build_cmd, ["-g", "g", "-L", LAYOUT, "-s", str(world["root"]), "-o", str(local["store"]), "-w", str(tmp_path)])
+    assert (res.exit_code, res.output.strip().splitlines()[-1]) == (1, f"{local['store']}/{ist.PREFIX}/g/ exists: a generation is never rewritten")
+
+
+def test_add_publishes_each_scan_then_one_carry(world, local):
+    ids = [s["id"] for s in world["scans"][BASE:]]
+    gen = local["gen"]
+    assert sorted(p.name for p in (gen / "manifests").iterdir()) == [*(f"{d}.json" for d in ids), f"{ids[-1]}.m001.json"]
+    newest = json.loads((gen / "manifests" / f"{ids[-1]}.m001.json").read_text())
+    assert [(r["key"], r["level"], r["scans"]) for r in newest["runs"]] == [(ar.run_key(ids[0], ids[-1]), 2, ids)]
+    assert newest["scans"] == DATES
+    out = local["out"]
+    assert ([a["scan"] for a in out["added"]], [a["runs"] for a in out["added"]]) == (
+        ids, [[f"deltas/{d}" for d in ids[:j + 1]] for j in range(len(ids))])
+    assert [(m["inputs"], m["output"], m["manifest"]) for m in out["merge"]["merged"]] == [
+        ([f"deltas/{d}" for d in ids], ar.run_key(ids[0], ids[-1]), f"manifests/{ids[-1]}.m001.json")]
+    # the base's files are never rewritten
+    base = local["base_only"] / ist.PREFIX / "g"
+    assert {k: v for k, v in _parquets(gen).items() if (base / k).exists()} == _parquets(base)
+
+
+def test_each_run_is_the_staged_append(world, local, staged):
+    """The refolded open versions give each run the bytes the staged path's state chain gives it: deltas and served sorts."""
+    k = staged["ranges"]["k"]
+    for d, run in staged["runs"].items():
+        got = _parquets(local["gen"] / "deltas" / d)
+        assert sorted(got) == sorted([*(f"{t}/r{i:04d}.parquet" for t in ia.tables() for i in range(k)),
+                                      *(f"served/{s}{x}" for s in ia.run_sorts() for x in (".parquet", ".groups.parquet"))]), d
+        assert got == {key: v for key, v in _parquets(run).items() if not key.startswith("state/")}, d
+
+
+@pytest.mark.parametrize("t", ia.tables())
+def test_base_and_runs_are_a_full_rebuild(world, local, tmp_path, t):
+    """Base + the newest manifest's runs (the merged one), and base + the level-0 runs alone: `build`/`fold` over every
+    scan, version for version."""
+    gen = local["gen"]
+    full = build_full(world["scans"], world["root"], tmp_path / "full", churn=True)
+    want = combine([_rows(full, t)], t)
+    newest = json.loads((gen / "manifests" / f"{DATES[-1]}.m001.json").read_text())
+    for runs in ([gen / r["key"] for r in newest["runs"]], [gen / "deltas" / d for d in DATES[BASE:]]):
+        assert combine([_rows(gen, t), *(_rows(r, t) for r in runs)], t) == want
+
+
+def test_add_writes_each_scans_parity_marker(world, local, tmp_path):
+    """Each appended scan's marker (`scan retire`'s gate) from its append: every row of every table equal, as many as a
+    full rebuild through the scan has live at it, checked against the base and the runs its manifest lists before its
+    own; every served sort of its run equal to its deltas."""
+    import pyarrow.parquet as pq
+
+    gen = local["gen"]
+    ids = DATES[BASE:]
+    want = {}
+    for j, d in enumerate(ids):
+        s = world["scans"][BASE + j]
+        full = build_full(world["scans"][:BASE + j + 1], world["root"], tmp_path / f"full-{d}", churn=True)
+        n = {t: sum(1 for p in sorted((full / t).glob("r*.parquet")) for r in pq.read_table(p, columns=["vf", "vt"]).to_pylist() if r["vf"] <= s["ts"] < r["vt"])
+             for t in ia.tables()}
+        cut = {sort: {"rows": pq.read_metadata(gen / "deltas" / d / "served" / f"{sort}.parquet").num_rows, "missing": 0, "extra": 0} for sort in ia.run_sorts()}
+        want[d] = {"scan": d, "gen": "g", "how": "append", "pass": True, "manifest": f"manifests/{d}.json", "runs": [f"deltas/{x}" for x in ids[:j]],
+                   "ranges": 3, "tables": {t: {"rows": v, "store": v, "missing": 0, "extra": 0} for t, v in n.items()}, "cut": cut}
+    assert local["markers"] == want
+    assert all(m["tables"]["pvl"]["rows"] > 0 for m in want.values())
+
+
+def test_changes_counts_the_same_a_group_at_a_time(world, local):
+    """`Store.changes` (verify's diff stat) reads its groups in chunks: any chunk size counts what one read does, between
+    every pair of consecutive scans, at the root and below."""
+    from dt_cloud import interval_read as ir
+
+    st = ir.Store(local["gen"] / "served")
+    ts = [s["ts"] for s in world["scans"]]
+    paths = ["", *sorted({p for p in world["paths"] if "." not in p.rsplit("/", 1)[-1]})]
+    counts = lambda chunk: [st.changes(a, b, p, ir.Cost(), chunk=chunk) for a, b in zip(ts, ts[1:]) for p in paths]  # noqa: E731
+    whole = counts(10 ** 9)
+    assert (counts(1), sum(whole) > 0) == (whole, True)
+
+
+def test_every_view_at_every_scan_is_the_per_scan_readers(world, local):
+    """The generation as the reader opens it (the base's served sorts, the newest manifest's runs' served sorts): at
+    every scan, base or appended, every directory's view is the per-scan reference's, tile for tile."""
+    from dt_cloud import interval_read as ir
+
+    gen = local["gen"]
+    newest = json.loads((gen / "manifests" / f"{DATES[-1]}.m001.json").read_text())
+    runs = [gen / r["key"] / "served" for r in newest["runs"]]
+    paths = ["", *sorted({p for p in world["paths"] if "." not in p.rsplit("/", 1)[-1]})]
+    assert _views_equal(world, lambda s: ir.Store(gen / "served", runs), paths) > 0
+
+
+def test_add_with_nothing_pending_is_a_nop(world, local, tmp_path):
+    before = {p.relative_to(local["gen"]).as_posix(): p.read_bytes() for p in sorted(local["gen"].rglob("*")) if p.is_file()}
+    out = _add(world, local["store"], tmp_path / "work")
+    ids = DATES[BASE:]
+    assert out == {"gen": "g", "after": DATES[-1], "added": [], "merge": None, "files": 0,
+                   "prune": {"manifest": f"manifests/{ids[-1]}.m001.json", "grace": [f"manifests/{d}.json" for d in ids], "runs": [],
+                             "objects": 0, "bytes": 0, "deleted": 0},
+                   "compact": None, "predecessors": []}
+    assert {p.relative_to(local["gen"]).as_posix(): p.read_bytes() for p in sorted(local["gen"].rglob("*")) if p.is_file()} == before
+
+
+def test_an_unpublished_run_is_redone_and_its_stale_keys_replaced(world, local, tmp_path):
+    """An earlier add died after uploading part of the first pending scan's run (no manifest): the rerun redoes the run,
+    overwrites its keys and removes the ones it doesn't write; the generation ends as a clean add's."""
+    store = tmp_path / "store"
+    shutil.copytree(local["base_only"], store)
+    run = store / ist.PREFIX / "g" / "deltas" / DATES[BASE]
+    (run / "pvl").mkdir(parents=True)
+    (run / "pvl" / "r0000.parquet").write_bytes(b"torn")
+    (run / "junk.txt").write_text("an earlier attempt's\n")
+    _add(world, store, tmp_path / "work")
+    assert _parquets(store / ist.PREFIX / "g") == _parquets(local["gen"])
+    assert (run / "junk.txt").exists() is False
+
+
+def test_a_url_store_matches_a_local_one(world, local, tmp_path):
+    """A URL store (fsspec `memory://`): build then add give the local store's data files and manifests."""
+    import fsspec
+
+    url = f"memory://{tmp_path.name}/store"
+    _build(world, url, tmp_path / "work-build")
+    _add(world, url, tmp_path / "work-add")
+    fs = fsspec.filesystem("memory")
+    got = {k.split("/store/", 1)[1]: fs.cat_file(k) for k in sorted(fs.find(f"/{tmp_path.name}/store"))}
+    want = {f"{ist.PREFIX}/g/{p.relative_to(local['gen']).as_posix()}": p.read_bytes() for p in sorted(local["gen"].rglob("*")) if p.is_file()}
+    # The store's pointer, beside its only generation (the build wrote it).
+    assert got.pop(f"{ist.PREFIX}/CURRENT.json") == (local["store"] / ist.PREFIX / "CURRENT.json").read_bytes() == b'{"gen": "g"}\n'
+    assert sorted(got) == sorted(want)
+    stable = lambda k: k.endswith(".parquet") or "/manifests/" in k or k.endswith("/scans.json")  # noqa: E731 — the rest carry timings
+    assert {k: v for k, v in got.items() if stable(k)} == {k: v for k, v in want.items() if stable(k)}
+
+
+def test_publish_order():
+    keys = ["manifests/a.json", "deltas/a/meta.json", "scans.json", "deltas/a/served/path.parquet", "deltas/a/scans.json", "served/path.parquet",
+            "manifests/a.m001.json", "deltas/a_b/meta.json"]
+    assert il.publish_order(keys) == ["deltas/a/scans.json", "deltas/a/served/path.parquet", "served/path.parquet", "deltas/a/meta.json",
+                                      "deltas/a_b/meta.json", "scans.json", "manifests/a.json", "manifests/a.m001.json"]
+    from dt_cloud.blobstore import publish_steps
+
+    assert publish_steps(il.publish_order(keys), il.publish_tier) == [
+        ["deltas/a/scans.json", "deltas/a/served/path.parquet", "served/path.parquet"], ["deltas/a/meta.json"], ["deltas/a_b/meta.json"],
+        ["scans.json"], ["manifests/a.json"], ["manifests/a.m001.json"]]
+
+
+def test_open_state_is_the_staged_state(world, local, staged):
+    """`open_state_sql` over the base and the published runs is the staged path's `state/` after the newest scan, with its churn
+    apply's opened versions (`pvl-fix/`) in place of their paths'."""
+    con = duckdb.connect()
+    gen = local["gen"]
+    newest = json.loads((gen / "manifests" / f"{DATES[-1]}.m001.json").read_text())
+    last = staged["runs"][DATES[-1]]
+    for i in range(staged["ranges"]["k"]):
+        name = f"r{i:04d}"
+        got = il.open_state_sql(str(gen), [str(gen / r["key"]) for r in newest["runs"]], name, churn=True)
+        want = ia.run_state_sql(str(last / "state"), name)
+        for t in ia.tables():
+            order = ", ".join(ia.IDENT[t])
+            rows = lambda sql: con.execute(f"SELECT * FROM ({sql}) ORDER BY {order}").fetchall()  # noqa: E731
+            assert rows(got[t]) == rows(want[t]), (name, t)
+
+
+# ── The store seam ─────────────────────────────────────────────────────────
+
+
+def test_store_url_and_serving():
+    assert [bs.store_url(r) for r in ("oa-bucket", "gs://oa-bucket/", "r2://demo", "s3://b/p", "/abs/dir", "rel/dir", "./d")] == [
+        "gs://oa-bucket", "gs://oa-bucket", "r2://demo", "s3://b/p", "/abs/dir", "rel/dir", "./d"]
+    assert [bs.gs_bucket(r) for r in ("oa-bucket", "gs://oa-bucket", "gs://oa-bucket/sub", "r2://demo", "/d")] == ["oa-bucket", "oa-bucket", None, None, None]
+    assert [bs.serves(r, b) for r, b in (("r2://demo", "demo"), ("r2://demo/", "demo"), ("r2://demo/sub", "demo"), ("gs://demo", "demo"),
+                                           ("r2://demo", None), ("demo", "demo"))] == [True, True, False, False, False, False]
+
+
+def test_r2_copies_are_no_ops_on_the_serving_bucket(monkeypatch):
+    errs = []
+    monkeypatch.setenv("R2_BUCKET", "demo")
+    monkeypatch.setattr(ia, "err", errs.append)
+    monkeypatch.setattr(ist, "err", errs.append)
+    r = CliRunner().invoke(ia.cli, ["r2", "-b", "r2://demo", "-g", "g", "-R", "g", "-S", "r2://demo", "-d", "2026-08-04"])
+    assert (r.exit_code, r.output) == (0, "")
+    r = CliRunner().invoke(ist.cli, ["r2-copy", "-b", "r2://demo", "-g", "g"])
+    assert (r.exit_code, r.output) == (0, "")
+    assert errs == ["r2 2026-08-04: the store r2://demo is the serving R2 bucket; nothing to copy",
+                    "r2-copy g: the store r2://demo is the serving R2 bucket; nothing to copy"]
+
+
+def test_the_staged_chain_takes_a_gcs_bucket_by_name_or_url(tmp_path):
+    def cfg(bucket: str):
+        p = tmp_path / f"{len(list(tmp_path.iterdir()))}.json"
+        p.write_text(json.dumps({"bucket": bucket, "append": {"gen": "g", "scratch": "gs://scr", "layouts": [LAYOUT], "region": "r", "image": "i",
+                                                              "sa": "sa", "r2_bucket": "demo"}}))
+        return ia.load_config(str(p), environ={})
+
+    assert [(c.p.bucket, c.p.scratch) for c in (cfg("data"), cfg("gs://data"))] == [("data", "scr"), ("data", "scr")]
+    with pytest.raises(SystemExit) as e:
+        cfg("r2://demo")
+    assert str(e.value) == ("interval store: the staged append mounts a GCS bucket; bucket 'r2://demo' is not one "
+                            "(append on one machine: `dt-cloud interval-store add`)")
+
+
+def test_run_store_over_a_dir_creates_once_and_leases(tmp_path):
+    from datetime import datetime, timedelta, timezone
+
+    s = bs.run_store(str(tmp_path / "data"), str(tmp_path / "scr"), "g", prefix="interval-store")
+    s.create("manifests/a.json", "{}\n")
+    with pytest.raises(FileExistsError):
+        s.create("manifests/a.json", "{}\n")
+    assert (s.keys("manifests/"), s.read_json("manifests/a.json")) == (["manifests/a.json"], {})
+    now = datetime(2026, 10, 14, tzinfo=timezone.utc)
+    assert (s.lease("x", now, 60), s.lease("y", now, 60)) == (None, {"owner": "x", "at": now.isoformat()})
+    assert s.lease("y", now + timedelta(seconds=61), 60) is None
+    s.release("y")
+    assert (tmp_path / "scr" / "interval-store" / "g" / "merge.lease.json").exists() is False
+
+
+def test_add_prunes_the_folded_runs_after_the_grace(world, tmp_path):
+    """The four scans appended one `add` at a time, as if `AGE` s apart (each `add` first ages the store's manifests by
+    that much), grace `-G 600`: once a revision folds runs and is itself superseded past the grace, those runs leave the
+    store but for `interval_append.FOLDED_RETAIN`; the newest manifest still reads as the full rebuild."""
+    import os
+
+    ids = [s["id"] for s in world["scans"][BASE:]]
+    store = tmp_path / "store"
+    _build(world, store, tmp_path / "work-build")
+    gen = store / ist.PREFIX / "g"
+    AGE, GRACE = 700, 600
+    outs = []
+    for d in ids:
+        for p in (gen / "manifests").glob("*.json"):
+            t = p.stat().st_mtime - AGE
+            os.utime(p, (t, t))
+        outs.append(_add(world, store, tmp_path / "work", "g", "-t", d, "-G", str(GRACE)))
+    newest = json.loads(sorted((gen / "manifests").iterdir(), key=lambda p: ar.parse_manifest(p.name))[-1].read_text())
+    live = {r["key"] for r in newest["runs"]}
+    pruned = sorted(r["key"] for o in outs for r in o["prune"]["runs"])
+    assert pruned == sorted(f"deltas/{d}" for d in ids[:2])
+    for key in pruned:
+        assert sorted(p.relative_to(gen / key).as_posix() for p in (gen / key).rglob("*") if p.is_file()) == sorted(
+            [*(f"ranges/{p.name}" for p in (gen / key / "ranges").glob("*")), "scans.json"]), key
+    for t in ia.tables():
+        full = build_full(world["scans"], world["root"], tmp_path / f"full-{t}", churn=True)
+        assert combine([_rows(gen, t), *(_rows(gen / k, t) for k in sorted(live))], t) == combine([_rows(full, t)], t)
+
+
+# ── A generation without the owner axis ────────────────────────────────────
+
+
+def _unowned_world(root: Path, owned: tuple[str, ...] = ()) -> dict:
+    """The world's scans (same generator and seed) with no owner named (cw-s3, r2.rbw.sh): `usr` NULL on every row of the
+    v1 indexes, no `usr` column in the v2 sorts; but the `owned` scans, which keep theirs."""
+    import pyarrow.parquet as pq
+
+    rng = random.Random(11)
+    paths = _universe(rng)
+    scans = []
+    for j, d in enumerate(DATES):
+        v = 2 if j >= V2_FROM else 1
+        key = LAYOUT.replace("{id}", d)
+        (root / key).parent.mkdir(parents=True, exist_ok=True)
+        rows = _scan_rows(rng, paths, j)
+        _write(rows if d in owned else [{**r, "usr": None} for r in rows], root / key, v)
+        if v == 2 and d not in owned:
+            pq.write_table(pq.read_table(root / key).drop_columns(["usr"]), root / key, row_group_size=7)
+        scans.append({"id": d, "src": key, "ts": sn.scan_epoch(d), "version": v})
+    return {"root": root, "scans": scans, "paths": paths}
+
+
+@pytest.fixture(scope="module")
+def unowned(tmp_path_factory):
+    """A store over the unowned scans: the base built over the first four, then the other four added."""
+    tmp = tmp_path_factory.mktemp("ivl-unowned")
+    world = _unowned_world(tmp / "scans")
+    store = tmp / "store"
+    summary = _build(world, store, tmp / "work-build")
+    out = _add(world, store, tmp / "work-add")
+    return {"world": world, "tmp": tmp, "gen": store / ist.PREFIX / "g", "summary": summary, "out": out}
+
+
+def test_an_unowned_generation_builds_and_appends_no_slices(unowned):
+    """No scan names an owner: the build records `"slices": false` and builds no `sv/`, `svt/`, `sv-digest/` or slice sort;
+    each run carries `pvl` and the folded sorts alone, and so does the merged run."""
+    gen, world = unowned["gen"], unowned["world"]
+    ids = DATES[BASE:]
+    assert json.loads((gen / "scans.json").read_text()) == {
+        "bucket": str(world["root"]), "layouts": [LAYOUT], "churn": True,
+        "scans": [{**s, "size": (world["root"] / s["src"]).stat().st_size} for s in world["scans"][:BASE]], "slices": False}
+    assert json.loads((gen / "served" / "stats.json").read_text())["slices"] is False
+    s = unowned["summary"]
+    assert (s["slices"], sorted(s["stages"]), sorted(s["sorts"])) == (False, ["churn", "cut", "versions"], ["bysize", "path", "reads"])
+    assert sorted(p.name for p in gen.iterdir()) == ["deltas", "digest", "manifests", "pv", "pvl", "ranges.json", "rd", "scans.json", "served", "verify"]
+    assert sorted(p.name for p in (gen / "served").iterdir()) == sorted(
+        [*(f"{x}{e}" for x in ("path", "bysize", "reads") for e in (".parquet", ".groups.parquet", ".json")), "stats.json"])
+    k = json.loads((gen / "ranges.json").read_text())["k"]
+    merged = ar.run_key(ids[0], ids[-1])
+    for key in [*(f"deltas/{d}" for d in ids), merged]:
+        assert sorted(_parquets(gen / key)) == sorted([*(f"pvl/r{i:04d}.parquet" for i in range(k)),
+                                                       *(f"served/{x}{e}" for x in ("path", "bysize") for e in (".parquet", ".groups.parquet"))]), key
+    newest = json.loads((gen / "manifests" / f"{ids[-1]}.m001.json").read_text())
+    assert [(r["key"], r["scans"]) for r in newest["runs"]] == [(merged, ids)]
+
+
+def test_an_unowned_generation_is_a_full_rebuild(unowned, tmp_path):
+    """Base + the newest manifest's run (merged), and base + the level-0 runs: `build`/`fold` over every scan, version for
+    version (`pvl`), and every directory's view at every scan is the per-scan reference's."""
+    from dt_cloud import interval_read as ir
+
+    gen, world = unowned["gen"], unowned["world"]
+    full = build_full(world["scans"], world["root"], tmp_path / "full", churn=True)
+    want = combine([_rows(full, "pvl")], "pvl")
+    newest = json.loads((gen / "manifests" / f"{DATES[-1]}.m001.json").read_text())
+    for runs in ([gen / r["key"] for r in newest["runs"]], [gen / "deltas" / d for d in DATES[BASE:]]):
+        assert combine([_rows(gen, "pvl"), *(_rows(r, "pvl") for r in runs)], "pvl") == want
+    paths = ["", *sorted({p for p in world["paths"] if "." not in p.rsplit("/", 1)[-1]})]
+    assert _views_equal(world, lambda s: ir.Store(gen / "served", [gen / r["key"] / "served" for r in newest["runs"]]), paths) > 0
+
+
+def test_a_scan_naming_owners_is_refused_by_an_unowned_generation(tmp_path):
+    """The base names no owner; the first scan past it does: `add` refuses before appending anything (its owners need a
+    new base generation), and the staged append's range task refuses it too."""
+    owned = DATES[BASE]
+    world = _unowned_world(tmp_path / "scans", owned=(owned,))
+    store = tmp_path / "store"
+    _build(world, store, tmp_path / "work-build")
+    gen = store / ist.PREFIX / "g"
+    before = {p.relative_to(gen).as_posix(): p.read_bytes() for p in sorted(gen.rglob("*")) if p.is_file()}
+    args = ["-g", "g", "-L", LAYOUT, "-s", str(world["root"]), "-o", str(store), "-w", str(tmp_path / "work-add"), "-r", str(RG), "-p", "2", "-M", "1GB"]
+    res = CliRunner().invoke(il.add_cmd, args)
+    msg = (f"{owned}: names owners (`usr`), but the generation has no owner axis (`scans.json` `\"slices\": false`); "
+           "its owners need a new base generation (`interval-store build`)")
+    assert (res.exit_code, res.output.strip().splitlines()[-1]) == (1, msg)
+    assert {p.relative_to(gen).as_posix(): p.read_bytes() for p in sorted(gen.rglob("*")) if p.is_file()} == before
+    ranges = json.loads((gen / "ranges.json").read_text())
+    s = world["scans"][BASE]
+    with pytest.raises(SystemExit) as e:
+        for i, r in enumerate(ranges["ranges"]):
+            name = f"r{i:04d}"
+            ia.append_range(duckdb.connect(), ia.base_state_sql(str(gen), name, False), s, r, name, tmp_path / "run", bucket="b",
+                            mount=str(world["root"]), sliced=False)
+    assert str(e.value) == msg
+
+
+def test_the_staged_stages_agree_on_an_unowned_generation(unowned, tmp_path):
+    """The staged commands over the unowned base (its `scans.json` without the flag, its `ranges.json`): the slice stages
+    (`build-ranges -S`, `fold -S`, the slice sorts' `cut`) build nothing, the rest the local build's files byte for byte,
+    and the cut records `"slices": false` in `scans.json`, as the local build does."""
+    gen = unowned["gen"]
+    store = tmp_path / "store"
+    prefix = store / ist.PREFIX / "g"
+    prefix.mkdir(parents=True)
+    scans = json.loads((gen / "scans.json").read_text())
+    (prefix / "scans.json").write_text(json.dumps({k: v for k, v in scans.items() if k != "slices"}, indent=1) + "\n")
+    shutil.copy(gen / "ranges.json", prefix / "ranges.json")
+    k = json.loads((gen / "ranges.json").read_text())["k"]
+    common = ["-b", str(store), "-g", "g", "-o", str(tmp_path / "out"), "-T", str(tmp_path / "tmp"), "-p", "2", "-M", "1GB"]
+    every = ",".join(str(i) for i in range(k))
+    stages = [
+        ["build-ranges", *common, "-r", every],
+        ["build-ranges", *common, "-r", every, "-S"],
+        ["fold", *common, "-i", "0", "-n", str(k)],
+        ["fold", *common, "-i", "0", "-n", str(k), "-S"],
+        ["churn", *common],
+        ["cut", *common, "-r", str(RG), *(x for s in ist.SORTS for x in ("-s", s))],
+        ["cut", *common, "-i", str(ist.CUT_TASKS.index("stats"))],
+    ]
+    for args in stages:
+        res = CliRunner().invoke(ist.cli, args, catch_exceptions=False)
+        assert res.exit_code == 0, (args, res.output)
+    assert json.loads((prefix / "scans.json").read_text()) == scans
+    assert json.loads((prefix / "served" / "stats.json").read_text())["slices"] is False
+    base = {key: v for key, v in _parquets(gen).items() if not key.startswith(("deltas/", "manifests/"))}
+    assert _parquets(prefix) == base
+    # A cut into a new generation (`-O`) gives it its own ranges and base, not just the served sorts: self-contained.
+    common = [*common[:4], "-o", str(tmp_path / "out2"), *common[6:]]
+    for args in [["cut", *common, "-O", "g2", "-r", str(RG), *(x for s in ist.SORTS for x in ("-s", s))], ["cut", *common, "-O", "g2", "-i", str(ist.CUT_TASKS.index("stats"))]]:
+        res = CliRunner().invoke(ist.cli, args, catch_exceptions=False)
+        assert res.exit_code == 0, (args, res.output)
+    g2 = store / ist.PREFIX / "g2"
+    assert (_parquets(g2), (g2 / "ranges.json").read_text()) == (base, (prefix / "ranges.json").read_text())
+
+
+def test_verify_reads_a_non_gcs_store(world, local, tmp_path):
+    """`interval-store verify` over a dir store (as over `r2://`): the served sorts and the per-scan sorts and footers
+    through `blobstore.Store`, no GCS client; every sampled view and diff of the base's scans (`scans.json`'s) equals the
+    per-scan path store's. The fixture's per-scan sorts have no footer sidecars, so their read cost is `null`."""
+    sampled = DATES[:BASE]
+    res = CliRunner().invoke(ist.cli, ["verify", "-b", str(local["store"]), "-g", "g", "-s", ",".join(sampled), "-o", str(tmp_path / "out"),
+                                       "-T", str(tmp_path / "tmp"), "-i", "0"], catch_exceptions=False)
+    assert res.exit_code == 0, res.output
+    summaries = json.loads(res.stdout.strip().splitlines()[-1])
+    assert [s["date"] for s in summaries] == sampled
+    assert [(s["views"] == s["view_eq"], s["diffs"] == s["diff_eq"]) for s in summaries] == [(True, True)] * len(sampled)
+    assert sum(s["views"] for s in summaries) > 0
+    recs = [json.loads(ln) for ln in (tmp_path / "out" / "verify" / f"t00-{sampled[0]}.jsonl").read_text().splitlines()]
+    assert sorted({r["ps_cost"] is None for r in recs if r["kind"] == "view" and "ps_cost" in r}) == [True]
+
+
+def test_verify_keeps_the_markers_of_scans_it_finished_when_killed_later(world, local, tmp_path, monkeypatch):
+    """Each scan's marker and the task's summaries so far go up as the scan completes: a task killed on a later scan (an
+    OOM in its diffs) keeps every scan before it."""
+    from dt_cloud import interval_verify as iv
+
+    store = tmp_path / "store"
+    shutil.copytree(local["store"], store)
+    shutil.rmtree(store / "interval-store" / "g" / "verify", ignore_errors=True)  # the module's earlier verify runs'
+    real = iv.run_date
+
+    def oom(st, scan, date, *a, **k):
+        if date == DATES[2]:
+            raise MemoryError(date)
+        return real(st, scan, date, *a, **k)
+    monkeypatch.setattr(iv, "run_date", oom)
+    with pytest.raises(MemoryError):
+        CliRunner().invoke(ist.cli, ["verify", "-b", str(store), "-g", "g", "-s", ",".join(DATES[:4]), "-o", str(tmp_path / "out"),
+                                     "-T", str(tmp_path / "tmp"), "-i", "0"], catch_exceptions=False)
+    verify = store / "interval-store" / "g" / "verify"
+    tag = f"t00-{DATES[0]}"
+    assert (sorted(p.name for p in verify.iterdir()), [s["date"] for s in json.loads((verify / f"{tag}.json").read_text())]) == (
+        sorted([f"{DATES[0]}.json", f"{DATES[1]}.json", f"{tag}.json", f"{tag}.jsonl"]), DATES[:2])
+
+
+def test_verify_samples_the_appended_scans(world, local, tmp_path):
+    """`verify` reads the newest manifest's runs beside the base (as the Worker does), so a scan an `add` appended is
+    sampled like a base scan: every view and diff of every scan, base and appended, equals the per-scan path store's."""
+    res = CliRunner().invoke(ist.cli, ["verify", "-b", str(local["store"]), "-g", "g", "-s", ",".join(DATES), "-o", str(tmp_path / "out"),
+                                       "-T", str(tmp_path / "tmp"), "-i", "0"], catch_exceptions=False)
+    assert res.exit_code == 0, res.output
+    summaries = json.loads(res.stdout.strip().splitlines()[-1])
+    assert [s["date"] for s in summaries] == DATES
+    assert [(s["views"] == s["view_eq"], s["diffs"] == s["diff_eq"]) for s in summaries] == [(True, True)] * len(DATES)
+    assert min(s["views"] for s in summaries) > 0
+    # Each scan's parity marker (`scan retire`'s gate), uploaded beside the run's records.
+    markers = {d: json.loads((local["gen"] / "verify" / f"{d}.json").read_text()) for d in DATES}
+    assert markers == {s["date"]: {"scan": s["date"], "gen": "g", "pass": True, **{k: s[k] for k in ("views", "view_eq", "diffs", "diff_eq")}}
+                       for s in summaries}
+
+
+def test_lookup_many_reads_each_group_once_for_what_lookup_answers(world, local, monkeypatch):
+    """`Store.lookup_many` (verify's diff lookups, base + the newest manifest's runs): at every scan, every path's answer
+    is `lookup`'s (a path with no live version, or never listed, is absent), from exactly the groups the per-path
+    lookups read, each decoded once."""
+    from dt_cloud import interval_read as ir
+
+    gen = local["gen"]
+    newest = json.loads((gen / "manifests" / f"{DATES[-1]}.m001.json").read_text())
+    st = ir.Store(gen / "served", [gen / r["key"] / "served" for r in newest["runs"]])
+    reads: list[tuple[str, int]] = []
+    real = ir.Sort.read
+
+    def spy(self, gs, columns, cost):
+        reads.extend((self.path, g["rg"]) for g in gs)
+        return real(self, gs, columns, cost)
+    monkeypatch.setattr(ir.Sort, "read", spy)
+    paths = [*world["paths"], "b1/nope", "b3"]
+    for s in world["scans"]:
+        reads.clear()
+        one = {p: st.lookup(s["ts"], p, ir.Cost()) for p in paths}
+        per_path = set(reads)
+        reads.clear()
+        many = st.lookup_many(s["ts"], paths, ir.Cost())
+        assert (many, sorted(reads)) == ({p: a for p, a in one.items() if a is not None}, sorted(per_path)), s["id"]
+    assert st.lookup_many(world["scans"][0]["ts"], [], ir.Cost()) == {}
+
+
+def test_one_sided_is_what_diff_looks_up():
+    from dt_cloud import interval_read as ir
+
+    a = {"kept": {"x": (5, 1, "dir"), "x/f": (3, 1, "file"), "y": (2, 1, "dir")}}
+    b = {"kept": {"x": (6, 1, "dir"), "z": (4, 2, "dir"), "z/g": (4, 1, "file")}}
+    assert (ir.one_sided(a, b), ir.one_sided(a, b, fold=True)) == ((["z", "z/g"], ["x/f", "y"]), (["z"], ["y"]))
+    asked: list[tuple[str, str]] = []
+    look = lambda side: lambda p: asked.append((side, p))  # noqa: E731
+    for fold in (False, True):
+        asked.clear()
+        ir.diff(a, b, look("a"), look("b"), fold=fold)
+        need_a, need_b = ir.one_sided(a, b, fold=fold)
+        assert sorted(asked) == sorted([*(("a", p) for p in need_a), *(("b", p) for p in need_b)])
+
+
+@pytest.mark.parametrize("j", [0, BASE, len(DATES) - 1])
+def test_scan_table_reads_as_the_parquet(world, tmp_path, j):
+    """`Scan(…, table=)` (verify's per-scan reference, loaded once): every view, lookup and pick is the in-place parquet
+    read's, `lookup_many` is `lookup` per path, and `drop` frees the table."""
+    from dt_cloud.interval_verify import Scan, cases_for, compare
+
+    s = world["scans"][j]
+    f = str(world["root"] / s["src"])
+    con = duckdb.connect(str(tmp_path / "v.duckdb"))
+    pq_scan, tbl = Scan(duckdb.connect(), f, s["version"]), Scan(con, f, s["version"], table="scan_0")
+    dirs = ["", *sorted({p for p in world["paths"] if "." not in p.rsplit("/", 1)[-1]})]
+    for path in dirs:
+        for md in (None, 1):
+            # Tied siblings come in either order (as SQL returns them): the trees compare as the check does, the rest exactly.
+            got, want = tbl.view(path, 8, 6, max_depth=md), pq_scan.view(path, 8, 6, max_depth=md)
+            rest = lambda v: {k: x for k, x in v.items() if k != "tree"}  # noqa: E731
+            assert (compare(got["tree"], want["tree"], with_f=True), rest(got)) == ([], rest(want)), (path, md)
+    paths = [*world["paths"], "b1/nope"]
+    want = {p: a for p in paths if (a := pq_scan.lookup(p)) is not None}
+    assert (tbl.lookup_many(paths), pq_scan.lookup_many(paths), {p: tbl.lookup(p) for p in want}) == (want, want, want)
+    assert cases_for(tbl, s["id"]) == cases_for(pq_scan, s["id"])
+    tables = lambda: [r[0] for r in con.execute("SELECT table_name FROM duckdb_tables() WHERE NOT temporary").fetchall()]  # noqa: E731
+    assert tables() == ["scan_0"]
+    tbl.drop()
+    assert tables() == []
+
+
+def _verify_recs(local, out: Path, *extra: str) -> list[dict]:
+    res = CliRunner().invoke(ist.cli, ["verify", "-b", str(local["store"]), "-g", "g", "-s", ",".join(DATES), "-o", str(out / "out"),
+                                       "-T", str(out / "tmp"), "-i", "0", *extra], catch_exceptions=False)
+    assert res.exit_code == 0, res.output
+    return [json.loads(ln) for ln in (out / "out" / "verify" / f"t00-{DATES[0]}.jsonl").read_text().splitlines()]
+
+
+def test_verify_diffs_count_changes_only_when_asked(world, local, tmp_path):
+    """A diff's record: its one-sided paths (looked up in one read a side) and timings; `Store.changes` — a cost statistic
+    that reads every group with an open or close in the span — only with `-c`, where it is `changes`' count. Either way
+    every diff is equal, the one-sided lookups are exercised, and each per-scan sort is gone (its copy deleted, its table
+    dropped) once the task moves past it."""
+    from dt_cloud import interval_read as ir
+
+    keys = ["changed", "eq", "fold", "from", "iv_cost", "kind", "mismatch", "one_sided", "path", "rows", "t_iv", "t_ref", "to"]
+    for extra, with_changes in (((), False), (("-c",), True)):
+        out = tmp_path / str(with_changes)
+        recs = [r for r in _verify_recs(local, out, *extra) if r["kind"] == "diff"]
+        assert sorted({tuple(sorted(r)) for r in recs}) == [tuple(sorted(keys + ["changes"] * with_changes))]
+        assert ({r["eq"] for r in recs}, sum(sum(r["one_sided"]) for r in recs) > 0) == ({True}, True)
+        con = duckdb.connect(str(out / "tmp" / "verify.duckdb"), read_only=True)
+        assert ([r[0] for r in con.execute("SHOW TABLES").fetchall()], sorted((out / "tmp").glob("*.parquet"))) == (
+            [f"scan_{len(DATES) - 1}"], [])
+        con.close()
+    gen = local["gen"]
+    newest = json.loads((gen / "manifests" / f"{DATES[-1]}.m001.json").read_text())
+    st = ir.Store(gen / "served", [gen / r["key"] / "served" for r in newest["runs"]])
+    ts = {s["id"]: s["ts"] for s in world["scans"]}
+    assert [r["changes"]["versions"] for r in recs] == [st.changes(ts[r["from"]], ts[r["to"]], r["path"], ir.Cost()) for r in recs]
+

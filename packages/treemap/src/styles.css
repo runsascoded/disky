@@ -1,0 +1,66 @@
+/* Minimal defaults for @open-athena/treemap. All values are CSS custom properties so
+ * consumers can theme without ejecting.
+ */
+
+.dt-treemap {
+  --dt-treemap-container-bg: #202024;
+  --dt-treemap-ink: #d0d0d8;
+  --dt-treemap-folded: #4a4a52;
+  --dt-treemap-folded-ink: #d0d0d8;
+  --dt-treemap-tip-bg: #1a1a1e;
+  --dt-treemap-tip-ink: #e6e6ea;
+  --dt-treemap-tip-border: #333;
+  /* shared-edge tiling stroke; defaults to the container color (a thin gutter) */
+  --dt-treemap-edge: var(--dt-treemap-container-bg);
+  color: var(--dt-treemap-ink);
+  font-family: system-ui, sans-serif;
+}
+
+.dt-treemap-bar a {
+  color: inherit;
+}
+
+/* Keyboard focus only (`:focus-visible`, not `:focus`) — a mouse click focuses
+   the cell too, but must not flash a focus outline on mousedown; the pin visual
+   (below) is what a click commits, on mouseup. */
+.dt-treemap-cell:focus-visible {
+  outline: 2px solid rgba(255, 255, 255, 0.5);
+  outline-offset: -2px;
+}
+
+/* Pinned cell: the same accent ring the canvas renderer draws (and the pinned
+   tooltip's border), so one click yields one coherent blue indicator on both
+   cell and tip — committed together on mouseup, nothing on mousedown. */
+.dt-treemap-cell.pinned {
+  outline: 2px solid var(--dt-treemap-pin, rgba(120, 170, 255, 0.95));
+  outline-offset: -2px;
+}
+
+/* Canvas a11y overlay: transparent, focusable elements over the cells. Invisible
+   until focused, when the browser's focus ring rings the cell for keyboard
+   users (the canvas underneath is the visual). */
+.dt-treemap-a11y-cell {
+  -webkit-appearance: none;
+  appearance: none;
+}
+.dt-treemap-a11y-cell:focus-visible {
+  outline: 2px solid var(--dt-treemap-focus, rgba(120, 170, 255, 0.95));
+  outline-offset: -2px;
+}
+
+/* Pinned tooltip: an accent border (matching the pinned-cell ring) so a pinned
+   tip reads as distinct from a transient hover tip. */
+.dt-treemap-tip.pinned {
+  border-color: var(--dt-treemap-pin, rgba(120, 170, 255, 0.95)) !important;
+}
+
+/* Diff treemap map box: taller on phones (a 340px strip of a portrait screen
+   is unreadable), 340px at ≥600px. Replaces the MUI `sm` breakpoint sx the
+   widget used before it moved into the core. */
+.dt-diff-map {
+  position: relative;
+  height: min(75vh, 560px);
+}
+@media (min-width: 600px) {
+  .dt-diff-map { height: 340px; }
+}

@@ -1,0 +1,5 @@
+{
+  "extends": "../functions/tsconfig.json",
+  "compilerOptions": { "types": ["@cloudflare/workers-types", "node"] },
+  "include": ["view-mem.ts"]
+}

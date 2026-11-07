@@ -1,0 +1,18 @@
+{
+ "shards": [
+  {
+   "i": 0,
+   "lo": "   ",
+   "hi": "m",
+   "rows": 12122,
+   "prefixes": 1057
+  },
+  {
+   "i": 1,
+   "lo": "m",
+   "hi": null,
+   "rows": 127,
+   "prefixes": 51
+  }
+ ]
+}

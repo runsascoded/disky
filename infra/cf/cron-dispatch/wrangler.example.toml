@@ -1,0 +1,17 @@
+# cron-dispatch: Cloudflare cron → GitHub `workflow_dispatch`. Copy to
+# `wrangler.toml`, fill in, then:
+#   pnpm -C infra/cf/cron-dispatch run deploy
+#   pnpm -C infra/cf/cron-dispatch exec wrangler secret put GITHUB_TOKEN
+# The token: fine-grained, the target repos only, "Actions: read and write".
+# Then drop the workflows' own `schedule:` triggers, so nothing runs twice.
+name = "my-cron-dispatch"
+main = "src/index.ts"
+compatibility_date = "2026-09-01"
+account_id = "<cf-account-id>"
+workers_dev = false
+
+[triggers]
+crons = ["15 7 * * *"]          # UTC; each one needs a DISPATCH entry, by exact string
+
+[vars]
+DISPATCH = '{"15 7 * * *": [{"repo": "me/my-repo", "workflow": "daily.yml", "ref": "main"}]}'

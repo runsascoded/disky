@@ -1,6 +1,6 @@
 # disky @ Open Athena
 
-**This branch is only an index. The code lives on the deploy branches below.**
+**This branch deploys the public docs and staff-only fleet dashboard at [disky.oa.dev]. Each storage dashboard has its own deployment branch below.**
 
 [disky] maps where storage goes: scheduled scans of a store's buckets, then a treemap site with sizes over time, diffs between scans, owners and read recency. Open Athena runs four deployments, one per storage provider. Each has its own branch in this repo, and each branch merges the shared base, [`runsascoded/disky@cloud`][cloud].
 
@@ -25,7 +25,9 @@ The sites are Open-Athena-gated. Each branch's README says how its scan runs, wh
 ## What's on this branch
 
 - **`.github/workflows/health.yml`**: the hourly serving check across all four sites. It lives here because GitHub runs `schedule:` workflows only from a repo's default branch.
-- **A stub for `CI`**: GitHub dispatches a workflow by hand only once a file of that name exists on the default branch. The stub has the real workflow's `name:`, `on: workflow_dispatch` only, and one step that prints where the real file is; dispatching it with a deploy branch as the ref runs that branch's real file. CI itself runs on each deploy branch's pushes.
+- **Shared code from `cloud`**, including `fleet/`: public docs and a staff-only fleet page over the four deployments. `fleet/wrangler.toml` is this deployment's configuration; broker client and source tokens are encrypted Pages secrets.
+- **`CI`**: tests the shared code before publishing. The front-door deployment workflow builds and checks preview before production; `FLEET_DEPLOY_ENABLED=1` enables it after credentials are configured.
+- **The hourly fleet post** is not enabled until source tokens and sign-in are verified; the existing healthcheck keeps its own schedule.
 
 ## Elsewhere
 
@@ -44,3 +46,4 @@ The sites are Open-Athena-gated. Each branch's README says how its scan runs, wh
 [hf.oa.dev]: https://hf.oa.dev
 [r2.oa.dev]: https://r2.oa.dev
 [r2.rbw.sh]: https://r2.rbw.sh
+[disky.oa.dev]: https://disky.oa.dev

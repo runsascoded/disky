@@ -1,0 +1,1136 @@
+"""Extract a parquet's footer as hyparquet-compatible JSON (schema + per-row-group
+column metadata) and sync it to the site's D1, so the Cloudflare reader can build
+a subset ``FileMetaData`` for a prefix query without parsing the whole footer on a
+cold isolate (specs/done/path-agnostic-serving.md §2.1 — the footer-in-D1 seam).
+
+Only the fields a *read* needs are kept, in the compact form the reader revives
+(`reviveRowGroup` in `site/functions/_lib/index.ts`):
+
+    rg_json = [num_rows, codec, [[data_page_offset, total_compressed_size, dictionary_page_offset|0], …]]
+
+one triple per leaf column in schema order — hyparquet reads nothing else from a
+column chunk (physical type and `path_in_schema` come from `index_schema`). Per
+group, the (depth, path, bytes, usr) min/max sit in their own columns for the
+row-group pruning SQL. ~250 B per group: D1 holds every scan's every tier (2M+
+groups) under its 10 GB cap, where the verbose thrift-shaped JSON (~3 KB) hit
+8.4 GB at 38 scans (2026-09-06).
+
+Generations (specs/done/view-serving.md, "Index rewrite vs D1 footer"): a run never
+overwrites a parquet D1 points at. Each run writes its tiers under a fresh
+``listing/<date>/index/<gen>/`` and syncs them tagged with that ``gen``
+(``index_row_groups`` PK is (date, variant, gen, rg), so two generations
+coexist); the ``index_schema`` row — (gen, dir) per (date, variant) — is the
+pointer, written last as one ``INSERT OR REPLACE`` so readers flip from the old
+complete set to the new complete set with no window. Stale generations are
+swept by ``gc_d1`` (end of the job) and at the start of the next sync.
+"""
+from __future__ import annotations
+
+import json
+import os
+import re
+import subprocess
+import tempfile
+from dataclasses import dataclass
+from pathlib import Path
+
+import pyarrow.parquet as pq
+
+from .secrets import env_secret
+
+# Physical/logical strings pyarrow emits already match parquet-thrift (and thus
+# hyparquet) — no remapping table needed; we just restructure.
+
+
+def _site_dir() -> Path:
+    """Nearest ancestor ``site/`` (the Pages app: ``site/functions``; repo layout).
+    Not keyed on ``wrangler.toml``: ``cloud`` carries none (each deployment
+    branch owns its own; the r2 demo's is ``wrangler.r2.toml``)."""
+    for base in [Path.cwd(), *Path.cwd().parents, Path(__file__).resolve().parents[3]]:
+        cand = base / "site"
+        if (cand / "functions").is_dir():
+            return cand
+    raise FileNotFoundError("site/ not found (run from the repo)")
+
+
+# `index_schema.version`, per synced file. A reader keys its row shape off it
+# (specs/done/path-store.md §5 phase 1): 1 = the dir-only index (`b, o, wts, wb, …`
+# wire names, no `kind`); 2 = a path-store sort cut by the engine's
+# `write_tiers` — every row, objects included, `kind` on each, the layer-2's
+# column names (§1.1), and a `bysize` sibling. Told apart by the `tier`
+# key-value the engine stamps; the age pyramid / over-time tiers stay 1.
+INDEX_VERSION_LEGACY = 1
+INDEX_VERSION_STORE = 2
+#: Size column candidates, first present wins (the engine's `groups.SIZE_COLS`):
+#: a labeled `bysize`'s path total `tot` (its sort key), a store sort's `size`,
+#: a legacy index's `b`.
+SIZE_COLS = ("tot", "size", "b")
+
+
+def _schema_json(md: "pq.FileMetaData") -> dict:
+    """hyparquet `FileMetaData.schema` (root element + one leaf per column),
+    versioned by whether the file is a store sort (`tier` in its metadata)."""
+    sch = md.schema
+    # The Arrow name of the root isn't load-bearing (reads key off leaf
+    # path_in_schema); use a stable placeholder.
+    root = {"repetition_type": "REQUIRED", "name": "schema", "num_children": md.num_columns}
+    leaves = []
+    for i in range(md.num_columns):
+        col = sch.column(i)
+        el: dict = {"type": col.physical_type, "repetition_type": "OPTIONAL" if col.max_definition_level else "REQUIRED", "name": col.name}
+        ct = col.converted_type
+        if ct and ct != "NONE":
+            el["converted_type"] = ct
+        leaves.append(el)
+    version = INDEX_VERSION_STORE if b"tier" in (md.metadata or {}) else INDEX_VERSION_LEGACY
+    return {"version": version, "schema": [root, *leaves]}
+
+
+def _group_rows(md: "pq.FileMetaData") -> list[dict]:
+    """One row per row group: pruning stats + the stripped RowGroup JSON.
+    `b_min` (with `b_max`, a `bysize` sort's bucket range per group) rides the
+    blob only — D1's `index_row_groups` has no column for it."""
+    rows = []
+    row_start = 0
+    names = md.schema.names
+    di = names.index("depth")
+    pi = names.index("path")
+    size_col = next((c for c in SIZE_COLS if c in names), None)
+    if size_col is None:
+        raise ValueError(f"no size column ({'/'.join(SIZE_COLS)}) in {names}")
+    bi = names.index(size_col)
+    # The age index (variant `age`) has no ownership column; its `u_min/u_max`
+    # stay NULL, and the (depth, path) rectangle prunes it like any other tier.
+    ui = names.index("usr") if "usr" in names else None
+
+    def _srange(stats) -> tuple:
+        # (min, max) of a string column's stats, or (None, None) when absent
+        # (an all-NULL group has no min/max). Bytes → str for JSON.
+        if stats is None or not stats.has_min_max:
+            return None, None
+        def s(v):
+            return v.decode() if isinstance(v, bytes) else v
+        return s(stats.min), s(stats.max)
+
+    for g in range(md.num_row_groups):
+        rg = md.row_group(g)
+        n = rg.num_rows
+        codecs = {rg.column(c).compression for c in range(rg.num_columns)}
+        if len(codecs) != 1:
+            raise ValueError(f"row group {g}: mixed codecs {sorted(codecs)} (one codec per group assumed)")
+        cols = [
+            [cc.data_page_offset, cc.total_compressed_size, cc.dictionary_page_offset or 0]
+            for cc in (rg.column(c) for c in range(rg.num_columns))
+        ]
+        ds, ps, bs = rg.column(di).statistics, rg.column(pi).statistics, rg.column(bi).statistics
+        u_min, u_max = _srange(rg.column(ui).statistics) if ui is not None else (None, None)
+        rows.append({
+            "rg": g,
+            "d_min": int(ds.min), "d_max": int(ds.max),
+            "p_min": ps.min, "p_max": ps.max,
+            "b_max": int(bs.max),
+            "u_min": u_min, "u_max": u_max,
+            "row_start": row_start, "row_end": row_start + n,
+            "rg_json": json.dumps([n, codecs.pop(), cols], separators=(",", ":")),
+            "b_min": int(bs.min),
+        })
+        row_start += n
+    return rows
+
+
+def bucket_base(base: str) -> str:
+    """A tier location's root as given (`-b`, `$DATA_BUCKET`): an fsspec URL or a
+    local/mounted path (absolute, or `.`-relative) as is; a bare name is a GCS
+    bucket (`gs://<name>`)."""
+    if "://" in base or base.startswith(("/", ".")):
+        return base
+    return f"gs://{base}"
+
+
+def exists(parquet_path: str) -> bool:
+    """Whether a tier file is there to sync — a deployment produces only some
+    of `INDEX_VARIANTS` (gcs's `path-index` writes no age pyramid), and
+    `index-sync` skips the rest instead of dying on the first absent one."""
+    from disk_tree import blobfs
+
+    return blobfs.exists(parquet_path)
+
+
+def blobfs_row_groups(path: str) -> list[int]:
+    """Rows per row group of the parquet at ``path`` (its footer only)."""
+    from disk_tree import blobfs
+
+    return blobfs.row_group_sizes(path)
+
+
+def not_uploaded(remote: str, names: list[str]) -> list[str]:
+    """Of `names`, the files `remote` (the generation's dir where the site reads it) doesn't hold."""
+    return [n for n in names if not exists(f"{remote}/{n}")]
+
+
+def meta_started(meta_path: str) -> str | None:
+    """A snapshot `meta.json`'s ``started`` (the scan's start instant, ISO
+    8601: `path-index` stamps a bucket scan's, `capture-meta` a capture's), from
+    a local path or fsspec URL; None when the meta carries none."""
+    from disk_tree import blobfs
+
+    with (blobfs.open_read(meta_path) if blobfs.is_url(meta_path) else open(meta_path, "rb")) as f:
+        started = json.load(f).get("started")
+    if started is not None and not isinstance(started, str):
+        raise ValueError(f"{meta_path}: `started` is {started!r}, not an ISO 8601 string")
+    return started
+
+
+def extract(parquet_path: str) -> tuple[dict, list[dict]]:
+    """Return (schema_meta, group_rows) from a local/mounted parquet or any URL
+    `blobfs` resolves (`gs://`, `r2://`, `s3://`)."""
+    # `blobfs.open_read` names its cache: gcsfs's adaptive prefetcher, which blobfs
+    # opts the process out of, hung the interpreter at exit once pyarrow had read
+    # through a handle (an `index-sync` from a laptop synced, then never exited).
+    from disk_tree import blobfs
+
+    with (blobfs.open_read(parquet_path) if blobfs.is_url(parquet_path) else open(parquet_path, "rb")) as f:
+        md = pq.ParquetFile(f).metadata
+    schema = _schema_json(md)
+    # A floored tier (the age pyramid; the retired coarse tiers before it)
+    # records its absolute floor F in the parquet key-value metadata; it lands
+    # in D1 beside the schema so the reader can plan without touching the file.
+    # The store's sorts have no floor (every byte floor is a prefix of `bysize`).
+    kv = md.metadata or {}
+    if b"coarse_floor" in kv:
+        schema["floor_bytes"] = int(kv[b"coarse_floor"])
+    return schema, _group_rows(md)
+
+
+GROUPS_BLOB_SUFFIX = ".groups.json"
+GROUPS_BLOB_VERSION = 1
+
+
+def groups_blob_path(parquet_path: str) -> str:
+    """The group-manifest blob beside a tier: `…/path-index-by-user.parquet` →
+    `…/path-index-by-user.groups.json`."""
+    if not parquet_path.endswith(".parquet"):
+        raise ValueError(f"not a parquet path: {parquet_path}")
+    return parquet_path[: -len(".parquet")] + GROUPS_BLOB_SUFFIX
+
+
+def groups_blob(schema: dict, rows: list[dict]) -> str:
+    """The blob's JSON: what `sync_d1` puts in `index_schema` + `index_row_groups`
+    for one tier, as one document — the site's fallback for a scan whose row
+    groups retention retired from D1 (`_lib/index.ts` `openBlob`). Groups are
+    compact arrays in `index_row_groups` column order, then the appended
+    `b_min` (the engine's `groups.GROUP_FIELDS`; positional readers ignore
+    the tail); `rg_json` stays the string the reader revives."""
+    groups = [
+        [r["rg"], r["d_min"], r["d_max"], r["p_min"], r["p_max"], r["b_max"], r["u_min"], r["u_max"], r["row_start"], r["row_end"], r["rg_json"], r["b_min"]]
+        for r in rows
+    ]
+    body = {"v": GROUPS_BLOB_VERSION, "version": schema["version"], "schema": schema["schema"], "floor_bytes": schema.get("floor_bytes"), "groups": groups}
+    return json.dumps(body, separators=(",", ":"))
+
+
+def _write(out: str, data: bytes) -> None:
+    """Bytes to a local/mounted path or a URL (`blobfs`: `gs://`, `r2://`, `s3://`), unless it already holds exactly them:
+    `index-rows` re-derives the footers the `index` step wrote, while `publish-r2` copies them by the generation it
+    listed, and a rewrite of the same bytes still replaces that generation (a 404 mid-copy, 2026-10-29)."""
+    from disk_tree import blobfs
+
+    if blobfs.exists(out):
+        with blobfs.open_read(out) if blobfs.is_url(out) else open(out, "rb") as f:
+            if f.read() == data:
+                return
+    blobfs.write_bytes(out, data)
+
+
+def write_groups_blob(parquet_path: str, schema: dict, rows: list[dict]) -> tuple[str, int]:
+    """Write the group-manifest blob beside ``parquet_path`` (local, mounted,
+    or `gs://`); returns (path, bytes)."""
+    out = groups_blob_path(parquet_path)
+    text = groups_blob(schema, rows)
+    _write(out, text.encode())
+    return out, len(text)
+
+
+# The cold footer tier (specs/done/path-store.md §1.6): the same rows as one small
+# parquet beside the tier, `FOOTER_ROW_GROUP_ROWS` rows per group with stats on
+# the pruning columns — what the site range-reads (`_lib/index.ts` `pq` mode)
+# once retention retires a scan's rows from D1. The engine owns the format.
+def groups_parquet_path(parquet_path: str) -> str:
+    """`…/path-index-bysize.parquet` → `…/path-index-bysize.groups.parquet`."""
+    from disk_tree.find.groups import groups_parquet_path as gpp
+
+    return gpp(parquet_path)
+
+
+def write_groups_parquet(parquet_path: str, schema: dict, rows: list[dict], row_group_rows: int | None = None) -> tuple[str, int]:
+    """Write the cold footer tier beside ``parquet_path`` (local, mounted,
+    `gs://`, or an fsspec URL); returns (path, bytes)."""
+    from disk_tree.find.groups import FOOTER_ROW_GROUP_ROWS, groups_parquet_bytes
+
+    out = groups_parquet_path(parquet_path)
+    data = groups_parquet_bytes(schema, rows, row_group_rows or FOOTER_ROW_GROUP_ROWS)
+    _write(out, data)
+    return out, len(data)
+
+
+def read_groups_blob(parquet_path: str) -> tuple[dict, list[dict]]:
+    """``(schema, rows)`` from the `.groups.json` beside ``parquet_path`` —
+    `extract`'s result without reading the tier's own footer (the backfill's
+    cheap source: `index-blob -J`)."""
+    from disk_tree.find.groups import groups_from_json
+
+    from disk_tree import blobfs
+
+    return groups_from_json(blobfs.read_text(groups_blob_path(parquet_path)))
+
+
+def _sql_escape(s: str) -> str:
+    return s.replace("'", "''")
+
+
+# The D1 database `/query` runs one SQL string; we send multi-row INSERTs.
+# Deployment config (specs/done/denovo-factor.md): the site's D1, as `site/wrangler.toml`
+# binds it — `D1_DB_ID` / `D1_DB_NAME` in the job's environment. No default:
+# every deployment names its own D1 (a default once pointed at gcs's production
+# D1, so a run that forgot it wrote there).
+#: Import-time values, for display only; every query reads `$D1_DB_ID` when it runs (`_d1_query`).
+D1_DB_ID = os.environ.get("D1_DB_ID", "")
+D1_DB_NAME = os.environ.get("D1_DB_NAME", "")
+
+
+def _creds() -> tuple[str, str]:
+    """(api_token, account_id) from the env, falling back to the repo .envrc —
+    so it works in the Batch job (env) and from a laptop (direnv/.envrc)."""
+    tok = env_secret("CLOUDFLARE_API_TOKEN", "")
+    acct = os.environ.get("CLOUDFLARE_ACCOUNT_ID") or os.environ.get("OA_CF_ACCT", "")
+    if not (tok and acct):
+        try:
+            envrc = _site_dir().parent / ".envrc"
+            for line in envrc.read_text().splitlines():
+                m = re.match(r"^\s*export\s+(CLOUDFLARE_API_TOKEN|OA_CF_ACCT)=[\"']?([^\"'\s]+)", line)
+                if m:
+                    if m.group(1) == "CLOUDFLARE_API_TOKEN" and not tok:
+                        tok = m.group(2)
+                    if m.group(1) == "OA_CF_ACCT" and not acct:
+                        acct = m.group(2)
+        except FileNotFoundError:
+            pass
+    if not (tok and acct):
+        raise RuntimeError("need CLOUDFLARE_API_TOKEN + CLOUDFLARE_ACCOUNT_ID (or OA_CF_ACCT)")
+    return tok, acct
+
+
+# Transient-error retries for the D1 HTTP API: the 2026-09-01 daily run's
+# index-sync 401'd on the [team] variant after the same token had just synced
+# [path] and [user] — CF's API throws occasional spurious 401/5xx under
+# sustained load. Retried statuses, attempts, and base sleep (doubles per try).
+D1_RETRY_STATUSES = (401, 429, 500, 502, 503, 504)
+D1_RETRIES = 4
+D1_RETRY_SLEEP = 5.0
+# Per-request wall clock. A request that never answers (observed 2026-09-06:
+# the `[team]` sync of one REPROC went silent for an hour while a concurrent
+# job's syncs completed) must fail into the retry loop, not hang the job to
+# its maxRunDuration. A ~64 KB INSERT answers in ~1 s; 60 s is generous.
+D1_TIMEOUT = 60.0
+# Bytes of SQL per multi-row INSERT (D1 caps a statement at 100 KB): ~100
+# compact group rows per request, so a 27k-group tier syncs in ~270 requests.
+INSERT_BYTES = 64_000
+
+
+#: Rows one D1 `DELETE` removes at most (`d1_delete`). D1 fails a statement that deletes millions of rows (gcs's
+#: `scan retire` of 50 scans' `index_row_groups`, 2M+ rows: `7500 internal error`, 2026-10-18).
+D1_DELETE_ROWS = 5000
+
+
+#: The smallest statement `d1_delete` halves down to after D1 resets one for its CPU time (7429).
+D1_DELETE_MIN_ROWS = 250
+
+
+class D1CpuLimit(RuntimeError):
+    """D1 reset a statement for exceeding its CPU time limit (error 7429), after `_d1_query`'s retries."""
+
+
+def d1_delete(table: str, where: str, acct: str, tok: str, db_id: str = "", *, batch: int | None = None) -> int:
+    """Delete `table`'s rows matching `where` (a SQL predicate, no `WHERE`; it may refer to `table` by name) in
+    statements of at most `batch` rows (default `D1_DELETE_ROWS`), until one deletes none; returns rows deleted.
+    **Every D1 delete that can match more than a few thousand rows goes through this**, never one `DELETE … WHERE`.
+    A statement D1 resets for its CPU time (7429; cw's 2026-10-23T1801 `gc_d1` on `index_row_groups`, where the same
+    delete had always passed) is retried at half the rows, down to `D1_DELETE_MIN_ROWS`. A failure part way leaves
+    the rest, and a rerun deletes them."""
+    batch = batch or D1_DELETE_ROWS
+    n = 0
+    while True:
+        try:
+            k = len(_d1_query(f"DELETE FROM {table} WHERE rowid IN (SELECT rowid FROM {table} WHERE {where} LIMIT {batch}) RETURNING 1 AS n;",
+                              acct, tok, db_id))
+        except D1CpuLimit:
+            if batch <= D1_DELETE_MIN_ROWS:
+                raise
+            batch = max(batch // 2, D1_DELETE_MIN_ROWS)
+            continue
+        if not k:
+            return n
+        n += k
+
+
+def _d1_query(sql: str, acct: str, tok: str, db_id: str = "") -> list[dict]:
+    """Run one SQL string against D1 over the HTTP API (no Node/wrangler).
+    Returns the statement's result rows (`[]` for writes); `meta` per row batch
+    is dropped. Refuses without a database id (`$D1_DB_ID`)."""
+    # The process's `$D1_DB_ID` now, not at import: a caller (`dt-cloud scan head`) may set it after importing this module.
+    db_id = db_id or os.environ.get("D1_DB_ID", "")
+    if not db_id:
+        raise RuntimeError("no D1 database: set $D1_DB_ID (and $D1_DB_NAME) to this deployment's D1")
+    import time
+    import urllib.error
+    import urllib.request
+
+    url = f"https://api.cloudflare.com/client/v4/accounts/{acct}/d1/database/{db_id}/query"
+    for attempt in range(D1_RETRIES + 1):
+        req = urllib.request.Request(
+            url,
+            data=json.dumps({"sql": sql}).encode(),
+            headers={"Authorization": f"Bearer {tok}", "Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            resp = json.loads(urllib.request.urlopen(req, timeout=D1_TIMEOUT).read())
+        except urllib.error.HTTPError as e:
+            if e.code in D1_RETRY_STATUSES and attempt < D1_RETRIES:
+                time.sleep(D1_RETRY_SLEEP * 2**attempt)
+                continue
+            # Surface D1's error body (scope/SQL) without echoing the token.
+            body = e.read().decode()
+            raise (D1CpuLimit if "7429" in body else RuntimeError)(f"D1 query failed ({e.code}): {body[:300]}") from None
+        except (urllib.error.URLError, TimeoutError) as e:  # no answer / no route
+            if attempt < D1_RETRIES:
+                time.sleep(D1_RETRY_SLEEP * 2**attempt)
+                continue
+            raise RuntimeError(f"D1 query gave no answer after {D1_RETRIES + 1} tries: {e}") from None
+        if not resp.get("success"):
+            errors = resp.get("errors") or []
+            raise (D1CpuLimit if any(e.get("code") == 7429 for e in errors if isinstance(e, dict)) else RuntimeError)(f"D1 query error: {errors}")
+        return [row for r in resp.get("result", []) for row in r.get("results", [])]
+    raise AssertionError("unreachable")
+
+
+def _q(v) -> str:  # nullable string literal for SQL
+    return "NULL" if v is None else f"'{_sql_escape(v)}'"
+
+
+# Multi-store deploys (specs/done/multi-store.md). The primary store's SQL is
+# exactly what it was before stores existed, so it runs on a D1 with or
+# without the store migration (`store_scoped_index`, cw 0006 / gcs 0030). A
+# secondary store's rows are namespaced twice: their `variant` is
+# `<store>:<variant>` (so no primary query, which always names a bare variant,
+# can see them; and the row-group PK (date, variant, gen, rg) stays disjoint),
+# and they name the `store` column, which only exists once migrated — so a
+# secondary store fails loudly on an un-migrated D1.
+PRIMARY_STORE = "primary"
+_STORE_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
+
+
+def check_store(store: str) -> str:
+    """``store`` if it is ``PRIMARY_STORE`` or a valid `STORES_JSON` key."""
+    if store != PRIMARY_STORE and not _STORE_RE.match(store):
+        raise ValueError(f"bad store {store!r} (want {PRIMARY_STORE!r} or [a-z0-9][a-z0-9-]*)")
+    return store
+
+
+def d1_variant(variant: str, store: str = PRIMARY_STORE) -> str:
+    """The variant as D1 records it: the primary's as-is, a secondary store's
+    as ``<store>:<variant>`` (the site's `d1Variant`)."""
+    return variant if check_store(store) == PRIMARY_STORE else f"{store}:{variant}"
+
+
+class IncompleteGeneration(RuntimeError):
+    """A pointer-only flip refused: the generation's rows in D1 don't match
+    its footer (a rows phase that never ran, died part-way, or whose rows a
+    gc swept before the flip)."""
+
+
+@dataclass
+class Flip:
+    """One variant's pointer flip, checked and ready: what `flip_d1` writes.
+    ``pointed``: the pointer already names (``gen``, ``key``) — the flip is a
+    no-op."""
+    date: str
+    variant: str  # as the store names it (no `<store>:` prefix)
+    gen: str
+    key: str
+    store: str
+    schema: dict
+    n: int  # row groups in the footer (= rows the generation holds in D1)
+    pointed: bool
+    started: str | None = None  # the scan's start, recorded on the pointer (None: keep the row's)
+
+
+def _scope(store: str) -> tuple[str, str, str]:
+    """(WHERE prefix, INSERT column, INSERT value) naming a secondary store;
+    all empty for the primary, whose SQL is the pre-stores SQL."""
+    if check_store(store) == PRIMARY_STORE:
+        return "", "", ""
+    return f"store='{_sql_escape(store)}' AND ", "store, ", f"'{_sql_escape(store)}', "
+
+
+def _pointer_sql(
+    date: str,
+    variant: str,
+    gen: str,
+    key: str,
+    schema: dict,
+    store: str,
+    started: str | None = None,
+) -> list[str]:
+    """The flip — the ``index_schema`` row, one upsert — then the
+    store-generation retirements that follow it (``variant`` unprefixed).
+
+    The upsert sets every column it names and keeps the rest: ``started`` (the
+    scan's start instant, `0021_index_schema_started`) is named only when
+    given, so a sync without one never clears a recorded start (and runs on a
+    D1 that predates the column)."""
+    st, sc, sv = _scope(store)
+    d1v = d1_variant(variant, store)
+    floor = schema.get("floor_bytes")
+    cols = ["version", "schema_json", "floor_bytes", "gen", "dir"] + ([] if started is None else ["started"])
+    started_v = "" if started is None else f", '{_sql_escape(started)}'"
+    schema_sql = (
+        f"INSERT INTO index_schema ({sc}date, variant, {', '.join(cols)}) VALUES "
+        f"({sv}'{date}', '{d1v}', {schema['version']}, '{_sql_escape(json.dumps(schema['schema'], separators=(',', ':')))}', "
+        f"{'NULL' if floor is None else int(floor)}, '{_sql_escape(gen)}', '{_sql_escape(key)}'{started_v}) "
+        f"ON CONFLICT DO UPDATE SET {', '.join(f'{c} = excluded.{c}' for c in cols)};"
+    )
+    # A store generation's `path` sort replaces the dir-only index outright: the
+    # coarse tiers an earlier generation of the same date synced are stale (and
+    # a reader that found them would answer from them). Retire them after the
+    # flip — rows first (the `user` rows are found through its pointer), then
+    # the pointers; the reader ignores both on a store date meanwhile.
+    retire_sql: list[str] = []
+    if schema["version"] >= 2 and variant == "path":
+        like = _sql_escape(d1_variant("coarse", store)) + "%"
+        # …and a version-1 `user` sort (a store generation serves lenses from
+        # its own sorts; a v2 `user` sort, where a deployment writes one, stays)
+        user = _sql_escape(d1_variant("user", store))
+        v1_user = f"SELECT gen FROM index_schema WHERE {st}date='{date}' AND variant='{user}' AND version < 2"
+        retire_sql = [
+            f"DELETE FROM index_row_groups WHERE {st}date='{date}' AND variant LIKE '{like}';",
+            f"DELETE FROM index_row_groups WHERE {st}date='{date}' AND variant='{user}' AND gen IN ({v1_user});",
+            f"DELETE FROM index_schema WHERE {st}date='{date}' AND variant LIKE '{like}';",
+            f"DELETE FROM index_schema WHERE {st}date='{date}' AND variant='{user}' AND version < 2;",
+        ]
+    return [schema_sql, *retire_sql]
+
+
+def sync_d1(
+    date: str,
+    parquet_path: str,
+    *,
+    variant: str = "path",
+    gen: str,
+    key: str,
+    db_id: str = "",
+    remote: bool = True,
+    insert_bytes: int = INSERT_BYTES,
+    blob: bool = True,
+    store: str = PRIMARY_STORE,
+    rows_only: bool = False,
+    started: str | None = None,
+    d1_rows: bool = True,
+) -> int:
+    """Extract the footer of ``parquet_path`` (one tier/sort ``variant`` of
+    scan ``date``, generation ``gen``, living under the bucket-relative dir
+    ``key``) and publish it to D1 (index_row_groups + index_schema) over the
+    Cloudflare **HTTP API** — pure Python, so it runs in the Node-less Batch
+    image. Returns #row groups written. ``remote=False`` uses the local wrangler
+    D1 (dev only, via `d1 execute`).
+
+    Order matters for atomicity: every group row (tagged ``gen``) lands first;
+    the schema row — the pointer readers key off — is written LAST, as one
+    upsert, so a reader sees either the previous complete
+    generation or this one, never a half-written set. A mid-run failure leaves
+    the pointer untouched (still serving the previous generation) and orphan
+    rows the next sync/gc sweeps. Nothing is deleted before the flip.
+
+    ``rows_only`` stops before the flip: the generation's rows are staged,
+    invisible (every reader query names the pointer's gen), until
+    `check_flip` + `flip_d1` point at them — so the slow part (the row
+    INSERTs) can run before the scan is ready to list. Re-running it is
+    clean: the rows are ``INSERT OR REPLACE`` on (date, variant, gen, rg).
+
+    The same rows also land beside the parquet first, twice: the cold footer
+    tier (``write_groups_parquet``, `.groups.parquet`) — the durable copy the
+    site range-reads once retention retires this tier's rows from D1 — and
+    the `.groups.json` blob, the fallback for a reader or a generation
+    without the parquet.
+
+    ``store`` (default the primary, whose SQL is unchanged) files the rows
+    under a secondary store: variant ``<store>:<variant>`` and the ``store``
+    column set (which needs the store migration).
+
+    ``started`` (ISO 8601) records the scan's start on the pointer row
+    (`_pointer_sql`); None keeps whatever start the row already holds.
+
+    ``d1_rows=False`` (specs/lean-scans.md §1.4) writes the cold footer files
+    and no row group to D1: no INSERT, no footer LRU entry. The site then plans
+    this generation from `.groups.parquet` (`pq` mode), which is what a
+    deployment wants when its reads of the store are the interval store's and
+    a per-scan read is only a fallback. Only the rows half: the CLI flips the
+    pointer through `check_flip(d1_rows=False)`."""
+    if not d1_rows and not (rows_only and blob):
+        raise ValueError("d1_rows=False writes the cold footer only: pass rows_only=True and blob=True (flip with check_flip)")
+    st, sc, sv = _scope(store)
+    d1v = d1_variant(variant, store)
+    schema, rows = extract(parquet_path)
+    if blob:
+        write_groups_parquet(parquet_path, schema, rows)
+        write_groups_blob(parquet_path, schema, rows)
+    # Leftovers from earlier flips (any gen that is neither the current pointer's
+    # nor this one) go first — they are unreachable by construction. Without D1
+    # rows, this gen's own unpointed rows go too: a partial set left by an earlier
+    # rows phase would otherwise be trusted once the pointer names it.
+    this = f"AND gen <> '{_sql_escape(gen)}' " if d1_rows else ""
+    unpointed = f"{this}AND gen <> COALESCE((SELECT gen FROM index_schema WHERE {st}date='{date}' AND variant='{d1v}'), '')"
+    gc_sql = f"DELETE FROM index_row_groups WHERE {st}date='{date}' AND variant='{d1v}' {unpointed};"
+    pointer_sql = [] if rows_only else _pointer_sql(date, variant, gen, key, schema, store, started)
+
+    def group_values(r: dict) -> str:
+        return (
+            f"({sv}'{date}', '{d1v}', '{_sql_escape(gen)}', {r['rg']}, {r['d_min']}, {r['d_max']}, "
+            f"'{_sql_escape(r['p_min'])}', '{_sql_escape(r['p_max'])}', {r['b_max']}, "
+            f"{_q(r['u_min'])}, {_q(r['u_max'])}, "
+            f"{r['row_start']}, {r['row_end']}, '{_sql_escape(r['rg_json'])}')"
+        )
+
+    cols = f"({sc}date, variant, gen, rg, d_min, d_max, p_min, p_max, b_max, u_min, u_max, row_start, row_end, rg_json)"
+    # OR REPLACE: a chunk whose request timed out may or may not have landed;
+    # re-sending it must be a no-op, not a PK collision (date, variant, gen, rg).
+    head = f"INSERT OR REPLACE INTO index_row_groups {cols} VALUES "
+    if not remote:  # dev: local wrangler D1
+        stmts = [gc_sql] + [f"{head}{group_values(r)};" for r in (rows if d1_rows else [])] + pointer_sql
+        site = _site_dir()
+        for i in range(0, len(stmts), 300):
+            with tempfile.NamedTemporaryFile("w", suffix=".sql", delete=False) as tf:
+                tf.write("\n".join(stmts[i : i + 300]))
+                sqlpath = tf.name
+            subprocess.run(["npx", "wrangler", "d1", "execute", os.environ.get("D1_DB_NAME", ""), "--local", "--file", sqlpath], check=True, cwd=str(site))
+        return len(rows)
+
+    tok, acct = _creds()
+    # The footer LRU (`footer_cache`, where migrated): a store sort with its cold footer written is an
+    # entry, `filling` while its rows land (a reader serves the cold footer meanwhile) and `hot` once all
+    # have. Other variants stay untracked (trusted, never evicted).
+    cache = footer_cache_present(acct, tok, db_id)
+    track = cache and blob and variant in SORT_VARIANTS
+    if cache:
+        # The swept generations' entries go first: a fill guarded on its entry then lands nothing more.
+        _d1_query(f"DELETE FROM footer_cache WHERE date='{date}' AND variant='{d1v}' {unpointed};", acct, tok, db_id)
+    _d1_query(gc_sql, acct, tok, db_id)
+    if not d1_rows:
+        return len(rows)
+    if track:
+        _d1_query(_claim_sql(date, d1v, gen, now=_now()), acct, tok, db_id)
+    for chunk in _pack(head, [group_values(r) for r in rows], insert_bytes):
+        _d1_query(chunk, acct, tok, db_id)
+    if track:
+        _d1_query(_hot_sql(date, d1v, gen, n=len(rows), nbytes=sum(row_bytes(r) for r in rows), now=_now()), acct, tok, db_id)
+    # The pointer flip (schema row last), then the retirements: rows, then pointers.
+    for sql in pointer_sql:
+        _d1_query(sql, acct, tok, db_id)
+    return len(rows)
+
+
+def check_flip(
+    date: str,
+    parquet_path: str,
+    *,
+    variant: str = "path",
+    gen: str,
+    key: str,
+    db_id: str = "",
+    store: str = PRIMARY_STORE,
+    started: str | None = None,
+    d1_rows: bool = True,
+) -> Flip:
+    """The pointer phase's gate: read ``parquet_path``'s footer and check D1
+    holds exactly its row groups under ``gen`` — ``rg`` 0..n-1, one row each
+    (the PK makes them distinct) — before anything points at them. Raises
+    `IncompleteGeneration` otherwise. A pointer already naming (``gen``,
+    ``key``) passes unchecked (``pointed``; retention may since have retired
+    its rows to the cold tier) — and, given ``started``, is ``pointed`` only
+    once it records that start too (else the flip re-writes the row).
+
+    ``d1_rows=False``: the generation is served from its cold footer
+    (`sync_d1(d1_rows=False)`), so D1 must hold **none** of its rows (or all
+    of them: a complete set is trusted as before), and the cold
+    `.groups.parquet` beside ``parquet_path`` must hold exactly the footer's
+    row groups. A partial set is refused: a reader trusts any rows of an
+    untracked generation (`footerCache.trusted`)."""
+    st, _, _ = _scope(store)
+    d1v = d1_variant(variant, store)
+    schema, rows = extract(parquet_path)
+    tok, acct = _creds()
+    where = f"{st}date='{_sql_escape(date)}' AND variant='{_sql_escape(d1v)}'"
+    cols = "gen, dir" if started is None else "gen, dir, started"
+    cur = _d1_query(f"SELECT {cols} FROM index_schema WHERE {where};", acct, tok, db_id)
+    flip = Flip(date=date, variant=variant, gen=gen, key=key, store=store, schema=schema, n=len(rows), pointed=False, started=started)
+    if cur and cur[0]["gen"] == gen and cur[0]["dir"] == key:
+        flip.pointed = started is None or cur[0]["started"] == started
+        return flip
+    (got,) = _d1_query(
+        f"SELECT COUNT(*) AS n, MIN(rg) AS lo, MAX(rg) AS hi FROM index_row_groups WHERE {where} AND gen='{_sql_escape(gen)}';",
+        acct, tok, db_id,
+    )
+    n, lo, hi = int(got["n"]), got["lo"], got["hi"]
+    want_hi = len(rows) - 1 if rows else None
+    if not d1_rows and n == 0:
+        cold = groups_parquet_path(parquet_path)
+        have = sum(blobfs_row_groups(cold)) if exists(cold) else None
+        if have != len(rows):
+            raise IncompleteGeneration(
+                f"{date} [{d1v}] gen {gen}: the cold footer {cold} holds {'nothing' if have is None else f'{have} row groups'}, "
+                f"the footer {len(rows)} — not flipping; re-run the rows phase (`index-sync -r -R`)"
+            )
+        return flip
+    if n != len(rows) or (rows and (lo != 0 or hi != want_hi)):
+        raise IncompleteGeneration(
+            f"{date} [{d1v}] gen {gen}: D1 holds {n} row groups (rg {lo}..{hi}), the footer {len(rows)} — "
+            f"not flipping; re-run the rows phase (`index-sync -r`)"
+        )
+    return flip
+
+
+def flip_d1(flip: Flip, db_id: str = "") -> bool:
+    """Point (date, variant) at ``flip``'s generation — the schema row, then
+    the retirements `sync_d1` runs after it. False (nothing written) when the
+    pointer already names it."""
+    if flip.pointed:
+        return False
+    tok, acct = _creds()
+    for sql in _pointer_sql(flip.date, flip.variant, flip.gen, flip.key, flip.schema, flip.store, flip.started):
+        _d1_query(sql, acct, tok, db_id)
+    return True
+
+
+#: A `footer_cache` row's store, from its variant (`d1_variant`: `<store>:<variant>` or the primary's bare name),
+#: so `gc_d1`'s pointer lookup is a primary-key probe of `index_schema`.
+FOOTER_CACHE_STORE = (
+    "CASE WHEN instr(footer_cache.variant, ':') > 0 "
+    "THEN substr(footer_cache.variant, 1, instr(footer_cache.variant, ':') - 1) "
+    f"ELSE '{PRIMARY_STORE}' END"
+)
+
+
+def gc_d1(date: str, db_id: str = "", store: str = PRIMARY_STORE, dry_run: bool = False) -> int:
+    """Delete every row group of ``date`` whose generation is not the one its
+    variant's schema row points at (leftovers of a flip, or of a sync that
+    failed before flipping). Returns rows deleted (``dry_run``: counted, not
+    deleted). Safe any time: readers only ever query the pointer's
+    generation, and a handle outlives the pointer by at most its cache TTL
+    (`_lib/index.ts`), which the end-of-job call clears."""
+    tok, acct = _creds()
+    # The primary's statement (unchanged) matches each row to the pointer of its
+    # own (date, variant), so a secondary store's namespaced rows are judged by
+    # their own pointer too; `store=` restricts the sweep to that store.
+    sw = "" if check_store(store) == PRIMARY_STORE else f"store = '{_sql_escape(store)}' AND "
+    # The pointer lookup names `store` too, so it is a primary-key probe (`index_schema` is keyed
+    # `(store, date, variant)`): on `(date, variant)` alone D1 scans every schema row per row group,
+    # and a ~26K-group scan × ~2.3K schema rows ran out of CPU (7429; cw, 2026-10-26).
+    where = (
+        "WHERE {sw}date = '{d}' AND gen <> COALESCE("
+        "(SELECT s.gen FROM index_schema s WHERE s.store = index_row_groups.store AND s.date = index_row_groups.date "
+        "AND s.variant = index_row_groups.variant), '')"
+    ).format(sw=sw, d=_sql_escape(date))
+    if dry_run:
+        rows = _d1_query(f"SELECT COUNT(*) AS n FROM index_row_groups {where};", acct, tok, db_id)
+        return int(rows[0]["n"]) if rows else 0
+    if footer_cache_present(acct, tok, db_id):
+        # Those generations' LRU entries first (a fill still running then lands nothing more). A
+        # secondary store's variants carry its prefix (this table has no `store` column).
+        vw = "" if store == PRIMARY_STORE else f"variant LIKE '{_sql_escape(store)}:%' AND "
+        _d1_query(
+            f"DELETE FROM footer_cache WHERE {vw}date = '{_sql_escape(date)}' AND gen <> COALESCE("
+            f"(SELECT s.gen FROM index_schema s WHERE s.store = {FOOTER_CACHE_STORE} AND s.date = footer_cache.date "
+            "AND s.variant = footer_cache.variant), '');",
+            acct, tok, db_id,
+        )
+    return d1_delete("index_row_groups", where.removeprefix("WHERE "), acct, tok, db_id)
+
+
+def started_sql(date: str, started: str, store: str = PRIMARY_STORE) -> str:
+    """The backfill of one scan's start onto its `path` pointer
+    (`index_schema.started`, `0021_index_schema_started`), only where none is
+    recorded yet. Names ``store`` explicitly: the column postdates the store
+    migration, so every D1 that has it has ``store``."""
+    return (
+        f"UPDATE index_schema SET started = '{_sql_escape(started)}' WHERE store = '{_sql_escape(check_store(store))}' "
+        f"AND date = '{_sql_escape(date)}' AND variant = '{_sql_escape(d1_variant('path', store))}' AND started IS NULL;"
+    )
+
+
+def fill_starts(snapshots: str, store: str = PRIMARY_STORE, db_id: str = "") -> list[tuple[str, str]]:
+    """Fill the start of every date-only `path` pointer of ``store`` that has
+    none, from its own ``<snapshots>/<scan id>/meta.json`` (``snapshots``: the
+    store's snapshot dir, a local path or fsspec URL); a scan whose meta is
+    absent or carries no ``started`` is left as it is. A timed id carries its
+    time in the id, so it is never read. Returns the ``(scan id, started)``
+    pairs written; once a store is filled, a call is one D1 read."""
+    from disk_tree import blobfs
+
+    from .scan_id import is_scan_id
+
+    tok, acct = _creds()
+    sw = f"store = '{_sql_escape(check_store(store))}' AND "
+    missing = _d1_query(f"SELECT date FROM index_schema WHERE {sw}variant = '{_sql_escape(d1_variant('path', store))}' AND started IS NULL;", acct, tok, db_id)
+    base = snapshots.rstrip("/")
+    filled: list[tuple[str, str]] = []
+    for date in sorted(r["date"] for r in missing):
+        if not is_scan_id(date) or "T" in date:
+            continue
+        meta = f"{base}/{date}/meta.json"
+        started = meta_started(meta) if blobfs.exists(meta) else None
+        if started is None:
+            continue
+        _d1_query(started_sql(date, started, store), acct, tok, db_id)
+        filled.append((date, started))
+    return filled
+
+
+def snapshot_starts(snapshots: str) -> list[tuple[str, str | None]]:
+    """``(scan id, meta.started)`` for every ``<scan id>/meta.json`` under the
+    snapshot dir ``snapshots`` (local path or fsspec URL), by id."""
+    from disk_tree import blobfs
+
+    from .scan_id import is_scan_id
+
+    metas = {m.rsplit("/", 2)[-2]: m for m in blobfs.glob(blobfs.join(snapshots.rstrip("/"), "*/meta.json"))}
+    return [(scan, meta_started(metas[scan])) for scan in sorted(metas) if is_scan_id(scan)]
+
+
+def pointers(db_id: str = "") -> list[tuple[str, str, str]]:
+    """Every ``index_schema`` row as ``(date, variant, dir)``, across every
+    store (a secondary store's variants keep their ``<store>:`` prefix): the
+    generation dirs some reader can reach. `gen_gc` keeps all of them."""
+    tok, acct = _creds()
+    rows = _d1_query("SELECT date, variant, dir FROM index_schema ORDER BY date, variant;", acct, tok, db_id)
+    return [(r["date"], r["variant"], r["dir"]) for r in rows if r.get("dir")]
+
+
+# The path store's sorts (specs/done/path-store.md §1.2), variant → file under the
+# generation dir: `path` = every row sorted `(depth, path)`, `bysize` = the same
+# rows sorted `(⌊log2 size⌋ desc, path)`. Both are cut by the engine's
+# `write_tiers` (`index-write` / `path-index`); the by-user copies are the same
+# two sorts led by `usr`, written only where the scan attributes ownership (a
+# layer 2 with a `usr` column). No coarse tiers: every byte floor is a prefix of
+# `bysize`. Which variants a deployment has is a property of its generations,
+# not config: `index-sync` / `index-blob` skip an absent file, and `index-gc -r`
+# retires only the rows D1 holds.
+STORE_SORTS: dict[str, str] = {"path": "path-index.parquet", "bysize": "path-index-bysize.parquet"}
+USER_SORTS: dict[str, str] = {"user": "path-index-by-user.parquet", "bysize-user": "path-index-bysize-by-user.parquet"}
+# Every store sort — what `index-gc -r` retires for scans past the retention
+# window (their pointers stay; the reader range-reads the `.groups.parquet`
+# cold tier beside the parquet instead).
+SORT_VARIANTS = (*STORE_SORTS, *USER_SORTS)
+
+# Index variants the site reads (functions/_lib/index.ts `indexKey` mirrors
+# this), by served file name. D1 keys (date, variant).
+INDEX_VARIANTS: dict[str, str] = {**STORE_SORTS, **USER_SORTS}
+# The age chart's backend: multi-scale path-major pyramid tiers, one per bin
+# (specs/done/age-index.md, Phase B — supersedes the single-bin `age-index.parquet`).
+# Standalone indexes, own base names; the footer's (depth, path, b) stats prune
+# them as usual, `usr` absent (u_min/u_max NULL). Keep in sync with
+# `AGE_PYRAMID_VARIANTS` in dt_cloud.index.
+for _b in ("1h", "3h", "6h", "12h", "1d", "2d", "4d", "8d"):
+    INDEX_VARIANTS[f"age-pyramid-{_b}"] = f"age-pyramid-{_b}.parquet"
+# The cross-scan over-time index (specs/done/obs-axis-indexing.md Phase 1): a single
+# SCD-2 interval table over the *observation* axis, not per-scan. Its (depth,
+# path, b) stats prune like any tier; `usr` absent, the extra `__scan_lo/hi`
+# columns carry no stats the reader needs. `dt_cloud.overtime.OVER_TIME_*`.
+INDEX_VARIANTS["over-time"] = "over-time.parquet"
+
+
+def cold_path(base: str, gdir: str, variant: str) -> str:
+    """Where (date, variant)'s cold footer tier lives: the pointer's dir
+    ``gdir`` under ``base`` (a bucket name — a GCS bucket, `bucket_base` —, a
+    mounted dir, or an fsspec URL like `r2://bucket`)."""
+    return groups_parquet_path(f"{bucket_base(base).rstrip('/')}/{gdir}/{INDEX_VARIANTS[variant]}")
+
+
+def retire_d1(
+    retain: int,
+    db_id: str = "",
+    store: str = PRIMARY_STORE,
+    base: str | None = None,
+    has_cold=exists,
+) -> tuple[list[tuple[str, str, int]], list[tuple[str, str, str]]]:
+    """Retention (specs/done/path-store.md §1.6): drop the store sorts' row groups
+    (`SORT_VARIANTS`) for every synced scan older than the newest ``retain``
+    — they are 95 % of D1's index bytes (thousands of groups per sort per
+    scan) and a deep drill into an old scan is rare. The pointer stays, and
+    the reader range-reads the tier's cold footer (`.groups.parquet`) beside
+    the parquet instead; the age pyramid and over-time tiers are kept for
+    every scan.
+
+    A (date, variant) whose `.groups.parquet` is absent (``has_cold`` of
+    `cold_path(base, <pointer dir>, variant)` is false) keeps its rows — the
+    only other way back would be the whole `.groups.json`, which a Worker
+    can't hold for a large sort; backfill it (`index-blob`) and re-run.
+
+    Returns ``(retired, skipped)``: (date, variant, rows deleted) per retired
+    variant, (date, variant, missing path) per variant kept for want of its
+    cold footer."""
+    if base is None:
+        from .deploy import data_bucket
+        base = data_bucket()
+    tok, acct = _creds()
+    dates = sorted({d for d, _ in synced_variants(db_id, store)})
+    old = set(dates[:-retain] if retain > 0 else dates)
+    sw = "" if store == PRIMARY_STORE else f"store = '{_sql_escape(store)}' AND "
+    names = {d1_variant(v, store): v for v in SORT_VARIANTS}
+    vin = ", ".join(f"'{_sql_escape(n)}'" for n in names)
+    # What is still in D1 (an already-retired variant costs no existence
+    # check), and where each pointer's files live.
+    held = _d1_query(f"SELECT DISTINCT date, variant FROM index_row_groups WHERE {sw}variant IN ({vin});", acct, tok, db_id)
+    dirs = {
+        (r["date"], r["variant"]): r["dir"]
+        for r in _d1_query(f"SELECT date, variant, dir FROM index_schema WHERE {sw}variant IN ({vin});", acct, tok, db_id)
+    }
+    order = {v: i for i, v in enumerate(SORT_VARIANTS)}
+    todo = sorted(((r["date"], names[r["variant"]]) for r in held if r["date"] in old), key=lambda dv: (dv[0], order[dv[1]]))
+    retired: list[tuple[str, str, int]] = []
+    skipped: list[tuple[str, str, str]] = []
+    cache = bool(todo) and footer_cache_present(acct, tok, db_id)
+    for d, v in todo:
+        d1v = d1_variant(v, store)
+        gdir = dirs.get((d, d1v))
+        cold = cold_path(base, gdir, v) if gdir else None
+        if cold is None or not has_cold(cold):
+            skipped.append((d, v, cold or f"(no pointer for {d} [{v}])"))
+            continue
+        dv = f"date = '{_sql_escape(d)}' AND variant = '{_sql_escape(d1v)}'"
+        if cache:
+            # The footer LRU's eviction order (`footerCache.ts`): every generation's entry `evicting` first
+            # (readers go cold, a running fill lands nothing more), then the rows, then the entries.
+            _d1_query(
+                "INSERT INTO footer_cache (date, variant, gen, state, started_ts) "
+                f"SELECT DISTINCT date, variant, gen, 'evicting', {_now()} FROM index_row_groups WHERE {sw}{dv} "
+                "ON CONFLICT (date, variant, gen) DO UPDATE SET state = 'evicting', started_ts = excluded.started_ts;",
+                acct, tok, db_id,
+            )
+        n = d1_delete("index_row_groups", f"{sw}{dv}", acct, tok, db_id)
+        if cache:
+            _d1_query(f"DELETE FROM footer_cache WHERE {dv};", acct, tok, db_id)
+        if n:
+            retired.append((d, v, n))
+    return retired, skipped
+
+
+# --- the footer LRU (specs/done/footer-lru.md; the site's `_lib/footerCache.ts`) ---------------------
+#
+# `footer_cache` tracks which (scan, variant, generation) footer sets `index_row_groups` holds: `filling`
+# (rows landing; readers serve the cold `.groups.parquet`), `hot` (complete; readers use D1), `evicting`
+# (demoted; rows deleted after `EVICT_GRACE_S`, then the entry). The site fills entries on a miss and
+# stamps `last_access_day`; `evict` here runs the same pass as its `evictFooters`. On a D1 without the
+# table (`footer_cache_present`) every footer-cache statement is skipped.
+
+# Keep in sync with `_lib/footerCache.ts`.
+ROW_FIXED_BYTES = 64
+EVICT_GRACE_S = 120
+DEFAULT_MAX_ROWS = 1_000_000
+
+
+def _now() -> int:
+    import time
+
+    return int(time.time())
+
+
+def row_bytes(r: dict) -> int:
+    """A row's share of an entry's ``bytes``: its text columns' lengths + ``ROW_FIXED_BYTES``."""
+    return len(r["p_min"]) + len(r["p_max"]) + len(r["u_min"] or "") + len(r["u_max"] or "") + len(r["rg_json"]) + ROW_FIXED_BYTES
+
+
+def footer_cache_present(acct: str, tok: str, db_id: str = "") -> bool:
+    """Whether this D1 has the footer LRU's table (`footer_cache`, in `site/schema.sql`)."""
+    return bool(_d1_query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'footer_cache';", acct, tok, db_id))
+
+
+def _claim_sql(date: str, variant: str, gen: str, *, now: int) -> str:
+    """A sync's claim on its entry: `filling`, whatever it was (the sync's rows are about to land)."""
+    return (
+        "INSERT INTO footer_cache (date, variant, gen, state, started_ts) VALUES "
+        f"('{_sql_escape(date)}', '{_sql_escape(variant)}', '{_sql_escape(gen)}', 'filling', {now}) "
+        "ON CONFLICT (date, variant, gen) DO UPDATE SET state = 'filling', started_ts = excluded.started_ts;"
+    )
+
+
+def _hot_sql(date: str, variant: str, gen: str, *, n: int, nbytes: int, now: int) -> str:
+    """Mark the entry `hot` iff it is still `filling` and holds exactly ``n`` rows."""
+    k = f"date = '{_sql_escape(date)}' AND variant = '{_sql_escape(variant)}' AND gen = '{_sql_escape(gen)}'"
+    return (
+        f"UPDATE footer_cache SET state = 'hot', rows = {n}, bytes = {nbytes}, filled_ts = {now}, last_access_day = {now // 86400} "
+        f"WHERE {k} AND state = 'filling' AND (SELECT COUNT(*) FROM index_row_groups WHERE {k}) = {n};"
+    )
+
+
+@dataclass
+class Entry:
+    """One `footer_cache` entry; ``variant`` as D1 names it (a secondary store's `<store>:` prefix kept)."""
+    date: str
+    variant: str
+    gen: str
+    rows: int
+    bytes: int
+    last_access_day: int
+
+
+@dataclass
+class Eviction:
+    hot: tuple[int, int, int]  # the hot entries' (count, rows, bytes) before the pass
+    demoted: list[Entry]
+    deleted: list[Entry]
+
+
+def _key(e: Entry) -> str:
+    return f"date = '{_sql_escape(e.date)}' AND variant = '{_sql_escape(e.variant)}' AND gen = '{_sql_escape(e.gen)}'"
+
+
+def evict(
+    max_rows: int = DEFAULT_MAX_ROWS,
+    max_bytes: int | None = None,
+    *,
+    grace: int = EVICT_GRACE_S,
+    now: int | None = None,
+    dry_run: bool = False,
+    db_id: str = "",
+) -> Eviction:
+    """One eviction pass, as the site's `evictFooters`: demote the least recently read `hot` entries
+    (ties: the older scan first) until the rest fit the budget, then delete the rows — then the entry —
+    of every entry demoted at least ``grace`` seconds ago. ``dry_run``: report, write nothing."""
+    tok, acct = _creds()
+    if not footer_cache_present(acct, tok, db_id):
+        raise RuntimeError("no footer_cache table in this D1: create it as `site/schema.sql` has it")
+    now = _now() if now is None else now
+    cols = "date, variant, gen, rows, bytes, last_access_day"
+    order = "ORDER BY last_access_day, date, variant, gen"
+    hot = [Entry(**r) for r in _d1_query(f"SELECT {cols} FROM footer_cache WHERE state = 'hot' {order};", acct, tok, db_id)]
+    rows = sum(e.rows for e in hot)
+    nbytes = sum(e.bytes for e in hot)
+    totals = (len(hot), rows, nbytes)
+    demoted: list[Entry] = []
+    for e in hot:
+        if not (rows > max_rows or (max_bytes is not None and nbytes > max_bytes)):
+            break
+        demoted.append(e)
+        rows -= e.rows
+        nbytes -= e.bytes
+    if not dry_run:
+        for e in demoted:
+            _d1_query(f"UPDATE footer_cache SET state = 'evicting', started_ts = {now} WHERE {_key(e)} AND state = 'hot';", acct, tok, db_id)
+    due = [Entry(**r) for r in _d1_query(f"SELECT {cols} FROM footer_cache WHERE state = 'evicting' AND started_ts <= {now - grace} {order};", acct, tok, db_id)]
+    if not dry_run:
+        for e in due:
+            d1_delete("index_row_groups", _key(e), acct, tok, db_id)
+            _d1_query(f"DELETE FROM footer_cache WHERE {_key(e)} AND state = 'evicting';", acct, tok, db_id)
+    return Eviction(hot=totals, demoted=demoted, deleted=due)
+
+
+def adopt(
+    store: str = PRIMARY_STORE,
+    base: str | None = None,
+    has_cold=exists,
+    db_id: str = "",
+) -> tuple[list[Entry], list[tuple[str, str, str]]]:
+    """Track the store sorts synced before the footer LRU: each pointed (scan, sort) whose rows are in D1
+    with no `footer_cache` entry becomes `hot`, read today (so eviction orders them by scan, oldest first —
+    what `index-gc -r` did). Only where its cold footer exists (else eviction would leave the scan to the
+    `.groups.json` blob): the rest are returned as skipped, as `retire_d1` does. One query per pointed sort
+    (each over its own rows): run it once after the migration."""
+    if base is None:
+        from .deploy import data_bucket
+
+        base = data_bucket()
+    tok, acct = _creds()
+    sw = "" if check_store(store) == PRIMARY_STORE else f"s.store = '{_sql_escape(store)}' AND "
+    names = {d1_variant(v, store): v for v in SORT_VARIANTS}
+    vin = ", ".join(f"'{_sql_escape(n)}'" for n in names)
+    # The pointed sorts not yet tracked, then each one's size over its own rows: one query over every sort's rows
+    # reads the whole table (gcs: 6.5M rows), past what D1 lets one query scan.
+    pointed = _d1_query(
+        "SELECT s.date AS date, s.variant AS variant, s.gen AS gen, s.dir AS dir FROM index_schema s "
+        f"WHERE {sw}s.variant IN ({vin}) "
+        "AND NOT EXISTS (SELECT 1 FROM footer_cache c WHERE c.date = s.date AND c.variant = s.variant AND c.gen = s.gen) "
+        "ORDER BY s.date, s.variant;",
+        acct, tok, db_id,
+    )
+    got = []
+    for p in pointed:
+        size = _d1_query(
+            f"SELECT COUNT(*) AS rows, SUM(LENGTH(p_min) + LENGTH(p_max) + COALESCE(LENGTH(u_min), 0) + COALESCE(LENGTH(u_max), 0) + LENGTH(rg_json) + {ROW_FIXED_BYTES}) AS bytes "
+            f"FROM index_row_groups WHERE date = '{_sql_escape(p['date'])}' AND variant = '{_sql_escape(p['variant'])}' AND gen = '{_sql_escape(p['gen'])}';",
+            acct, tok, db_id,
+        )[0]
+        if size["rows"]:
+            got.append({**p, **size})
+    now = _now()
+    adopted: list[Entry] = []
+    skipped: list[tuple[str, str, str]] = []
+    for r in got:
+        cold = cold_path(base, r["dir"], names[r["variant"]])
+        if not has_cold(cold):
+            skipped.append((r["date"], names[r["variant"]], cold))
+            continue
+        e = Entry(date=r["date"], variant=r["variant"], gen=r["gen"], rows=int(r["rows"]), bytes=int(r["bytes"]), last_access_day=now // 86400)
+        _d1_query(
+            "INSERT OR IGNORE INTO footer_cache (date, variant, gen, state, rows, bytes, started_ts, filled_ts, last_access_day) VALUES "
+            f"('{_sql_escape(e.date)}', '{_sql_escape(e.variant)}', '{_sql_escape(e.gen)}', 'hot', {e.rows}, {e.bytes}, {now}, {now}, {e.last_access_day});",
+            acct, tok, db_id,
+        )
+        adopted.append(e)
+    return adopted, skipped
+
+
+def index_dir(date: str, variant: str = "path", db_id: str = "", store: str = PRIMARY_STORE) -> str | None:
+    """Bucket-relative dir holding ``date``'s ``variant`` parquet — the D1
+    pointer (``index_schema.dir``); None when that (date, variant) was never
+    synced. The parquet is ``<dir>/<INDEX_VARIANTS[variant]>``."""
+    tok, acct = _creds()
+    sw = "" if check_store(store) == PRIMARY_STORE else f"store = '{_sql_escape(store)}' AND "
+    rows = _d1_query(
+        f"SELECT dir FROM index_schema WHERE {sw}date = '{_sql_escape(date)}' AND variant = '{_sql_escape(d1_variant(variant, store))}';",
+        acct, tok, db_id,
+    )
+    return rows[0]["dir"] if rows else None
+
+
+def _pack(head: str, values: list[str], limit: int) -> list[str]:
+    """Greedy multi-row INSERT statements: `head` + comma-joined `values` + `;`,
+    each as long as fits in `limit` bytes (a lone oversized tuple still ships)."""
+    out: list[str] = []
+    cur: list[str] = []
+    size = len(head) + 1
+    for v in values:
+        if cur and size + len(v) + 1 > limit:
+            out.append(head + ",".join(cur) + ";")
+            cur, size = [], len(head) + 1
+        cur.append(v)
+        size += len(v) + 1
+    if cur:
+        out.append(head + ",".join(cur) + ";")
+    return out
+
+
+def synced_variants(db_id: str = "", store: str = PRIMARY_STORE) -> list[tuple[str, str]]:
+    """Every (date, variant) of ``store`` with a schema row in D1 (= a complete
+    sync); variants as the store names them (a secondary store's prefix off).
+    The primary's query is unchanged: secondary rows (a `:` in the variant)
+    are dropped here, not in SQL."""
+    tok, acct = _creds()
+    if check_store(store) == PRIMARY_STORE:
+        rows = _d1_query("SELECT date, variant FROM index_schema ORDER BY date, variant;", acct, tok, db_id)
+        return [(r["date"], r["variant"]) for r in rows if ":" not in r["variant"]]
+    rows = _d1_query(
+        f"SELECT date, variant FROM index_schema WHERE store = '{_sql_escape(store)}' ORDER BY date, variant;",
+        acct, tok, db_id,
+    )
+    pre = f"{store}:"
+    return [(r["date"], r["variant"][len(pre):]) for r in rows if r["variant"].startswith(pre)]

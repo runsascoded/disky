@@ -1,0 +1,158 @@
+#!/usr/bin/env python3
+"""The test files affected by the changes since REV (committed, staged, unstaged and untracked), one per line,
+relative to the repo root: what `scripts/remote-test -c REV` runs.
+
+A static import graph over `src/disk_tree`, `cloud/src/dt_cloud` and the two test dirs (stdlib `ast`, every
+`import` anywhere in a file, function-local ones included; importing `a.b.c` depends on `a`, `a.b` and `a.b.c`):
+- a changed module affects every module that imports it, transitively; a test file is selected when it, or a
+  module it reaches, is affected. A suite's `conftest.py` counts as imported by each of its tests.
+- a test that runs `dt-cloud` / `disk-tree` in a subprocess depends on that CLI's root module (and so on every
+  subcommand it registers).
+- a changed non-Python file (`site/schema.sql`, a fixture, `job/scan.nf`, …) affects the Python files that name
+  it: its basename, or any run of ≥ 2 of its path components (`fixtures/v2-search`).
+- `pyproject.toml`, `uv.lock` and `conftest.py` changes select whole suites; docs (`*.md`, `specs/`) nothing.
+Changed files nothing names are listed on stderr: CI still runs every test."""
+import ast
+import subprocess
+import sys
+from pathlib import Path
+
+ROOT = Path(subprocess.run(["git", "rev-parse", "--show-toplevel"], capture_output=True, text=True, check=True).stdout.strip())
+PKGS = {"disk_tree": ROOT / "src", "dt_cloud": ROOT / "cloud" / "src"}
+SUITES = {"tests": ROOT / "tests", "cloud/tests": ROOT / "cloud" / "tests"}
+CLIS = {"dt-cloud": "dt_cloud.cli", "disk-tree": "disk_tree.cli.main"}
+WHOLE = {"pyproject.toml", "uv.lock", "cloud/pyproject.toml"}
+err = lambda *a: print(*a, file=sys.stderr)
+
+
+def git(*args: str) -> list[str]:
+    out = subprocess.run(["git", *args], cwd=ROOT, capture_output=True, text=True, check=True).stdout
+    return [l for l in out.splitlines() if l]
+
+
+def module_name(path: Path) -> str | None:
+    for pkg, base in PKGS.items():
+        if path.is_relative_to(base / pkg):
+            parts = list(path.relative_to(base).with_suffix("").parts)
+            return ".".join(parts[:-1] if parts[-1] == "__init__" else parts)
+    return None
+
+
+def imports(path: Path, mod: str | None, suite_mods: set[str]) -> set[str]:
+    text = path.read_text()
+    tree = ast.parse(text, str(path))
+    is_pkg = path.name == "__init__.py"
+    out: set[str] = set()
+
+    def add(name: str) -> None:
+        parts = name.split(".")
+        out.update(".".join(parts[: i + 1]) for i in range(len(parts)))
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for a in node.names:
+                add(a.name)
+        elif isinstance(node, ast.ImportFrom):
+            if node.level:
+                if mod is None:
+                    continue
+                base = mod.split(".")
+                base = base[: len(base) - node.level + (1 if is_pkg else 0)]
+                name = ".".join(base + ([node.module] if node.module else []))
+            else:
+                name = node.module or ""
+            add(name)
+            for a in node.names:
+                add(f"{name}.{a.name}")
+    if "subprocess" in out:
+        for cli, root in CLIS.items():
+            if f'"{cli}"' in text or f"'{cli}'" in text:
+                add(root)
+    return {m for m in out if m.split(".")[0] in PKGS or m in suite_mods}
+
+
+def mentions(path: str) -> list[str]:
+    parts = path.split("/")
+    names = {"/".join(parts[i:j]) for i in range(len(parts)) for j in range(i + 2, len(parts) + 1)}
+    if "." in parts[-1]:
+        names.add(parts[-1])
+    return sorted(names)
+
+
+def main() -> None:
+    if len(sys.argv) != 2:
+        sys.exit("usage: affected-tests REV")
+    rev = sys.argv[1]
+    changed = sorted(set(git("diff", "--name-only", rev)) | set(git("ls-files", "--others", "--exclude-standard")))
+
+    # Every Python file of the graph: (node id, path); a test-dir helper's id is `<suite>:<module>`.
+    files: dict[str, Path] = {}
+    for pkg, base in PKGS.items():
+        for p in (base / pkg).rglob("*.py"):
+            files[module_name(p)] = p
+    tests: dict[str, list[str]] = {}
+    for suite, d in SUITES.items():
+        for p in d.glob("*.py"):
+            files[f"{suite}:{p.stem}"] = p
+            if p.name.startswith("test_"):
+                tests.setdefault(suite, []).append(f"{suite}:{p.stem}")
+
+    deps: dict[str, set[str]] = {}
+    for node, p in files.items():
+        suite, _, stem = node.rpartition(":")
+        suite_mods = {n.split(":")[1] for n in files if n.startswith(f"{suite}:")} if suite else set()
+        ds = imports(p, None if suite else node, suite_mods)
+        deps[node] = {f"{suite}:{d}" if d in suite_mods else d for d in ds if f"{suite}:{d}" in files or d in files}
+        if suite and stem != "conftest" and f"{suite}:conftest" in files:
+            deps[node].add(f"{suite}:conftest")
+
+    seeds: set[str] = set()
+    whole: set[str] = set()
+    unmatched = []
+    texts = {node: p.read_text() for node, p in files.items()}
+    for c in changed:
+        p = ROOT / c
+        if c in WHOLE:
+            whole |= set(SUITES) if c != "cloud/pyproject.toml" else {"cloud/tests"}
+            continue
+        if c.endswith(".md") or c.startswith("specs/"):
+            continue
+        node = next((n for n, f in files.items() if f == p), None)
+        if node is not None:
+            seeds.add(node)
+            continue
+        if c.endswith(".py") and not p.exists():  # a deleted module: whatever named it is affected
+            seeds |= {n for n, ds in deps.items() if (module_name(p) or "") in ds}
+            continue
+        names = mentions(c)
+        hit = {n for n, t in texts.items() if any(m in t for m in names)}
+        if hit:
+            seeds |= hit
+        else:
+            unmatched.append(c)
+    if unmatched:
+        err(f"affected-tests: no Python file names {len(unmatched)} changed file(s): {' '.join(unmatched)}")
+
+    rdeps: dict[str, set[str]] = {}
+    for n, ds in deps.items():
+        for d in ds:
+            rdeps.setdefault(d, set()).add(n)
+    affected = set(seeds)
+    todo = list(seeds)
+    while todo:
+        for n in rdeps.get(todo.pop(), ()):
+            if n not in affected:
+                affected.add(n)
+                todo.append(n)
+
+    out = []
+    for suite, ts in tests.items():
+        for t in ts:
+            if suite in whole or t in affected:
+                out.append(f"{suite}/{t.split(':')[1]}.py")
+    for t in sorted(out):
+        print(t)
+
+
+if __name__ == "__main__":
+    main()

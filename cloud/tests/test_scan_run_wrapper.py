@@ -1,0 +1,827 @@
+"""`dt-cloud scan-run start / phase-begin / phase-end / phase -- CMD / finish` (specs/done/scan-job-wrapper.md): the
+recorded rows, byte-exact PHASE lines, alert payloads through a fake transport, one alert per failure across
+processes, redaction, and `-T`'s process-group kill."""
+from __future__ import annotations
+
+import json
+import os
+import re
+import signal
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+import pytest
+from click.testing import CliRunner
+
+from disk_tree.notify import push
+from dt_cloud import scan_runs
+from dt_cloud.d1_schema import table_ddl
+from dt_cloud.scan_runs import SqliteSink, cli, duration, parse_profile, phase_line, redact
+
+DDL = table_ddl(scan_runs.TABLES)  # the tables as `site/schema.sql` has them
+T0 = 1_760_000_000
+SCAN = "2026-10-14T0600"
+PROFILE = {
+    "store": "primary",
+    "project": "proj-1",
+    "run_id_env": ["JOB_ID"],
+    "alerts": {"label": "cw-s3", "logs_url": "https://logs.test/q;uid={job_uid}?project={project}&job={job}"},
+    "secrets": ["SITE_TOKEN", "SLACK_BOT_TOKEN"],
+}
+SECRET = "s3cr3t-site-token"
+NOTIFY_ENV = ("PUSHOVER_TOKEN", "PUSHOVER_USER", "DISCORD_NOTIFY_WEBHOOK", "SLACK_BOT_TOKEN", "SLACK_ALERT_CHANNEL", "SITE_URL",
+              "DISK_TREE_NOTIFY", "DISKY_NOTIFY", "DT_ALERTS", "DT_RECORD", "SCAN_ID", "BATCH_JOB_UID", "NF_PROCESS", "NF_TAG")
+
+
+class Transport:
+    """The `post` seam `disk-tree notify` sends through: records each Slack request, answers `ok`."""
+
+    def __init__(self):
+        self.calls: list[tuple[str, dict, dict]] = []
+
+    def __call__(self, url: str, body: bytes, headers: dict[str, str]) -> tuple[int, str]:
+        self.calls.append((url, headers, json.loads(body)))
+        return 200, '{"ok":true}'
+
+    def texts(self) -> list[str]:
+        return [b["text"] for _, _, b in self.calls]
+
+
+class Job:
+    """A job's environment, in process: the profile, a SQLite record, a pinned clock, captured stderr."""
+
+    def __init__(self, tmp: Path, monkeypatch: pytest.MonkeyPatch):
+        self.tmp, self.mp = tmp, monkeypatch
+        self.profile = tmp / "scan-runs.json"
+        self.profile.write_text(json.dumps(PROFILE))
+        self.db = tmp / "runs.sqlite"
+        SqliteSink(self.db, ddl=DDL)
+        for k in NOTIFY_ENV:
+            monkeypatch.delenv(k, raising=False)
+        monkeypatch.setenv("TMPDIR", str(tmp))
+        monkeypatch.setenv("JOB_ID", "u1")
+        monkeypatch.setenv("DT_JOB_START", str(T0))
+        self.said: list[str] = []
+        monkeypatch.setattr(scan_runs, "err", self.said.append)
+
+    def __call__(self, cmd: str, *args: str, at: int) -> int:
+        self.mp.setattr(scan_runs, "_now", lambda: at)
+        r = CliRunner().invoke(cli, [cmd, "-c", str(self.profile), "-s", str(self.db), *args])
+        assert (r.exception is None or isinstance(r.exception, SystemExit), r.stdout) == (True, "")
+        return r.exit_code
+
+    def rows(self, sql: str) -> list[tuple]:
+        return [tuple(r.values()) for r in SqliteSink(self.db).query(sql)]
+
+    def take(self) -> list[str]:
+        out, self.said[:] = list(self.said), []
+        return out
+
+
+@pytest.fixture
+def job(tmp_path, monkeypatch) -> Job:
+    return Job(tmp_path, monkeypatch)
+
+
+@pytest.fixture
+def slack(monkeypatch) -> Transport:
+    t = Transport()
+    monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-test")
+    monkeypatch.setenv("SLACK_ALERT_CHANNEL", "C0ALERTS")
+    monkeypatch.setattr(push, "http_post", t)
+    return t
+
+
+def test_phase_lines_are_the_scripts_markers_and_parse_back():
+    lines = [
+        phase_line("listing-fanout", 0, start=True),
+        phase_line("listing-fanout", 1514),
+        phase_line("access-ingest", 1520, "overlapped the listing"),
+        phase_line("publish-r2", 3601, "failed (exit 3)"),
+    ]
+    assert lines == [
+        "PHASE-START listing-fanout: 0s (wall)",
+        "PHASE listing-fanout: 1514s (wall)",
+        "PHASE access-ingest: 1520s (wall, overlapped the listing)",
+        "PHASE publish-r2: 3601s (wall, failed (exit 3))",
+    ]
+    p = parse_profile({})
+    assert [m.group("name") for m in [re.match(p.phase_start_marker, lines[0])]] == ["listing-fanout"]
+    assert [(m.group("name"), m.group("note")) for m in (re.match(p.phase_marker, ln) for ln in lines[1:])] == [
+        ("listing-fanout", "wall"), ("access-ingest", "wall, overlapped the listing"), ("publish-r2", "wall, failed (exit 3"),
+    ]
+
+
+def test_duration_and_redact():
+    assert [duration(s) for s in ("90", "90s", "2m", "1.5h", "1d")] == [90, 90, 120, 5400, 86400]
+    with pytest.raises(ValueError, match="not a duration: '2x'"):
+        duration("2x")
+    env = {"A": "tok-long\n", "B": "tok", "C": ""}
+    assert redact("tok-long tok tok-long\n x", ["B", "A", "C"], env) == "<A> <B> <A>\n x"
+
+
+def test_start_phases_finish_record_exact_rows(job):
+    assert job("start", "-k", "reproc", "-p", "parent-uid", "-m", "box-1", "--no-spot", "-T", "1", "-j", "job-9",
+               "-R", "us-east1", SCAN, at=T0 + 5) == 0
+    assert job("phase-begin", "listing", at=T0 + 10) == 0
+    assert job("phase-end", "-M", "listing", at=T0 + 70) == 0
+    assert job("phase-begin", "-g", "G1", "index", at=T0 + 70) == 0
+    assert job("phase-end", "-M", "-q", "3 buckets", "index", at=T0 + 100) == 0
+    assert job("phase-begin", "publish", at=T0 + 100) == 0
+    assert job("phase-end", "-M", "-x", "3", "-m", "D1 pointers not advanced", "publish", at=T0 + 130) == 3
+    job.mp.setenv("DT_ALERTS", "stderr")
+    assert job("finish", "-x", "3", "-e", "exit 3: dt-cloud publish-r2 (run.sh:12)", at=T0 + 131) == 0
+    assert job.rows("SELECT run_id, scan, kind, status, parent, failed_phase, error, started_ts, finished_ts, gen, job_name, "
+                    "region, machine, spot, tasks, source FROM scan_runs") == [
+        ("u1", SCAN, "reproc", "failed", "parent-uid", "publish", "exit 3: dt-cloud publish-r2 (run.sh:12)", T0 + 5, T0 + 131,
+         "G1", "job-9", "us-east1", "box-1", 0, 1, "job"),
+    ]
+    assert job.rows("SELECT phase, seq, started_ts, finished_ts, status, note FROM scan_run_phases ORDER BY seq") == [
+        ("listing", 0, T0 + 10, T0 + 70, "done", None),
+        ("index", 1, T0 + 70, T0 + 100, "done", "3 buckets"),
+        ("publish", 2, T0 + 100, T0 + 130, "failed", "failed (exit 3)"),
+    ]
+    assert job.take() == [
+        f"scan-run: {SCAN} u1 running",
+        "PHASE-START listing: 10s (wall)",
+        f"scan-run: {SCAN} u1 running · phase listing",
+        "PHASE listing: 70s (wall)",
+        f"scan-run: {SCAN} u1 running · phase listing",
+        "PHASE-START index: 70s (wall)",
+        f"scan-run: {SCAN} u1 running · phase index",
+        "PHASE index: 100s (wall, 3 buckets)",
+        f"scan-run: {SCAN} u1 running · phase index",
+        "PHASE-START publish: 100s (wall)",
+        f"scan-run: {SCAN} u1 running · phase publish",
+        "PHASE publish: 130s (wall, failed (exit 3))",
+        f"scan-run: {SCAN} u1 running · phase publish",
+        "alert (no channel configured): ❌ cw-s3 2026-10-14T0600: publish failed (exit 3): D1 pointers not advanced",
+        f"scan-run: {SCAN} u1 failed",  # the phase alerted: `finish` posts no second alert
+    ]
+    assert sorted(p.name for p in (job.tmp / "dt-scan-run").iterdir()) == []  # `finish` clears the state + marker
+
+
+@pytest.mark.parametrize("rc, status", [(0, "nop"), (1, "failed")])
+def test_nop_kept_by_a_clean_finish(job, rc, status):
+    job.mp.setenv("DT_ALERTS", "stderr")
+    assert job("start", SCAN, at=T0) == 0
+    assert job("nop", at=T0 + 5) == 0
+    assert job("finish", "-x", str(rc), at=T0 + 6) == 0
+    assert job.rows("SELECT status, started_ts, finished_ts FROM scan_runs") == [(status, T0, T0 + 6)]
+
+
+def test_no_run_id_or_record_off_records_nothing_but_marks_and_alerts(job):
+    job.mp.delenv("JOB_ID")
+    job.mp.setenv("SCAN_ID", SCAN)
+    job.mp.setenv("DT_ALERTS", "stderr")
+    assert job("phase-end", "-x", "1", "p", at=T0 + 4) == 1
+    job.mp.setenv("JOB_ID", "u1")
+    job.mp.setenv("DT_RECORD", "off")
+    assert job("phase-end", "-W", "-x", "2", "q", at=T0 + 5) == 0
+    assert job.rows("SELECT run_id FROM scan_runs") == []
+    assert job.take() == [
+        "PHASE p: 4s (wall, failed (exit 1))",
+        "alert (suppressed): ❌ cw-s3 2026-10-14T0600: p failed (exit 1)",
+        "PHASE q: 5s (wall, failed (exit 2))",
+        "alert (suppressed): ⚠️ cw-s3 2026-10-14T0600: q failed (exit 2)",
+    ]
+
+
+def test_missing_job_start_refuses_and_runs_nothing(job):
+    job.mp.delenv("DT_JOB_START")
+    ran = job.tmp / "ran"
+    assert [
+        job("phase-begin", "p", at=T0),
+        job("phase-end", "p", at=T0),
+        job("phase", "-M", "p", "--", "touch", str(ran), at=T0),
+    ] == [2, 2, 2]
+    assert (ran.exists(), job.take()) == (False, [
+        "scan-run: $DT_JOB_START is not set: export DT_JOB_START=$(date +%s) at the job's top",
+    ] * 3)
+
+
+def test_alert_payloads_warn_fail_and_finish(job, slack):
+    job.mp.setenv("SITE_URL", "https://site.test/")
+    url = "https://logs.test/q;uid=u1?project=proj-1&job=job-9"
+    footer = f"<{url}|task logs> · <https://site.test/scans/u1|scan> · <https://site.test/scans|all scans>"
+
+    def payload(text: str) -> tuple[str, dict, dict]:
+        return (push.SLACK_URL, {"Content-Type": "application/json; charset=utf-8", "Authorization": "Bearer xoxb-test"},
+                {"channel": "C0ALERTS", "text": text, "unfurl_links": False, "unfurl_media": False})
+
+    assert job("start", "-j", "job-9", SCAN, at=T0) == 0
+    resume = f"dt-cloud static-names runs add -c {SCAN}"
+    assert job("phase-end", "-M", "-W", "-x", "1", "-m", "the scan publishes; search says not available", "-R", resume,
+               "static-names", at=T0 + 50) == 0
+    assert job("phase-end", "-M", "-x", "1", "publish", at=T0 + 60) == 1
+    assert job("finish", "-x", "1", at=T0 + 61) == 0
+    # a second run: no phase alerted, so `finish` does, with the ERR trap's text
+    assert job("start", "-j", "job-9", SCAN, at=T0 + 100) == 0
+    assert job("finish", "-x", "2", "-e", "exit 2: cp a b (run.sh:40)", at=T0 + 101) == 0
+    assert slack.calls == [
+        payload(f"*⚠️ cw-s3 {SCAN}*\nstatic-names failed (exit 1): the scan publishes; search says not available\n"
+                f"Resume: `{resume}`\n{footer}"),
+        payload(f"*❌ cw-s3 {SCAN}*\npublish failed (exit 1)\n{footer}"),
+        payload(f"*❌ cw-s3 {SCAN}*\nrun failed (exit 2): exit 2: cp a b (run.sh:40)\n{footer}"),
+    ]
+    assert [ln for ln in job.take() if ln.startswith("alert")] == ["alert: slack: sent"] * 3
+
+
+@pytest.mark.parametrize("site,run,store,expected", [
+    (None, 'r', 'primary', ()),
+    ('https://site.test/', None, 'primary', (('all scans', 'https://site.test/scans'),)),
+    ('https://site.test/', 'head/task', 'meta', (('scan', 'https://site.test/meta/scans/head%2Ftask'), ('all scans', 'https://site.test/meta/scans'))),
+])
+def test_scan_alert_links(site, run, store, expected):
+    assert scan_runs.scan_alert_links(site, run, store) == expected
+
+
+CMD = ('( cd "$app/cloud" && "$time_bin" -v -o "$work/static-time.txt" "$app/.venv/bin/dt-cloud" static-names "$cmd" '
+       '-g "$STATIC_GEN" -L "listing/$store/{id}/index/{gen}/path-index.parquet" -s "r2://$bucket" -o "r2://$bucket" '
+       '-w "$work/static-names" -p "$(nproc)" -M "${STATIC_MEM:-5GB}" ${hex[@]+"${hex[@]}"} )')
+
+
+V2_OOM = {"memory.events": "low 0\nhigh 0\nmax 12\noom 1\noom_kill 1\n", "memory.max": f"{16 * 2**30}\n",
+          "memory.peak": f"{int(15.98 * 2**30)}\n"}
+V1_NO_COUNT = {"memory.oom_control": "oom_kill_disable 0\nunder_oom 0\n", "memory.limit_in_bytes": "9223372036854771712\n"}
+
+
+@pytest.mark.parametrize("files, error, recorded, alert", [
+    pytest.param(
+        V2_OOM, f"exit 137: {CMD} (ingest.sh:172)",
+        f"out of memory (OOM-killed), peak 16.0 GiB of 16.0 GiB: exit 137: {CMD} (ingest.sh:172)",
+        # 240 characters: the head, `…`, the location
+        'out of memory (OOM-killed), peak 16.0 GiB of 16.0 GiB: exit 137: ( cd "$app/cloud" && "$time_bin" -v -o '
+        '"$work/static-time.txt" "$app/.venv/bin/dt-cloud" static-names "$cmd" -g "$STATIC_GEN" -L '
+        '"listing/$store/{id}/index/{g… (ingest.sh:172)',
+        id="cgroup-v2-oom-kill-long-command",
+    ),
+    pytest.param(V1_NO_COUNT, "killed (SIGKILL)", "killed (SIGKILL), most likely out of memory", None,
+                 id="supervise-kill-cgroup-v1-unlimited"),
+    pytest.param({}, "exit 137: false (run.sh:3)", "killed (SIGKILL), most likely out of memory: exit 137: false (run.sh:3)",
+                 None, id="no-cgroup"),
+    pytest.param(V2_OOM, "exit 2: false (run.sh:3)", "exit 2: false (run.sh:3)", None, id="not-137-untouched"),
+])
+def test_exit_137_says_out_of_memory(job, slack, tmp_path, files, error, recorded, alert):
+    """A SIGKILL nobody here sent (exit 137) is the OOM killer's: `finish` says so, with the cgroup's limit and peak,
+    and the alert clips a long ERR-trap command (the record keeps it whole)."""
+    cg = tmp_path / "cgroup"
+    cg.mkdir()
+    for name, text in files.items():
+        (cg / name).write_text(text)
+    job.mp.setenv("DT_CGROUP", str(cg))
+    rc = int(error.split(":")[0].split()[1]) if error.startswith("exit") else 137
+    assert job("start", SCAN, at=T0) == 0
+    assert job("finish", "-x", str(rc), "-e", error, at=T0 + 1) == 0
+    assert job.rows("SELECT error FROM scan_runs") == [(recorded,)]
+    assert slack.texts() == [f"*❌ cw-s3 {SCAN}*\nrun failed (exit {rc}): {alert or recorded}"]
+    if alert:
+        assert len(alert) == 240
+
+
+def test_logs_url_missing_a_fact_posts_no_link(job, slack):
+    assert job("start", SCAN, at=T0) == 0  # no `-j`: `{job}` is unknown
+    assert job("finish", "-x", "1", at=T0 + 1) == 0
+    assert slack.texts() == [f"*❌ cw-s3 {SCAN}*\nrun failed (exit 1)"]
+
+
+def test_redaction_of_a_seeded_secret(job, slack):
+    job.mp.setenv("SITE_TOKEN", f"{SECRET}\n")  # as injected: with its newline
+    assert job("start", SCAN, at=T0) == 0
+    assert job("phase-end", "-M", "-W", "-x", "1", "-q", f"token {SECRET}", "-m", f"rejected {SECRET}",
+               "-R", f"SITE_TOKEN={SECRET} dt-cloud index-sync -p {SCAN}", "index-sync", at=T0 + 10) == 0
+    assert job("finish", "-x", "1", "-e", f"exit 1: curl -H 'Authorization: Bearer {SECRET}' (run.sh:9)", at=T0 + 11) == 0
+    assert slack.texts() == [
+        f"*⚠️ cw-s3 {SCAN}*\nindex-sync failed (exit 1): rejected <SITE_TOKEN>\nResume: `SITE_TOKEN=<SITE_TOKEN> dt-cloud index-sync -p {SCAN}`",
+        f"*❌ cw-s3 {SCAN}*\nrun failed (exit 1): exit 1: curl -H 'Authorization: Bearer <SITE_TOKEN>' (run.sh:9)",
+    ]
+    assert job.rows("SELECT error FROM scan_runs") == [("exit 1: curl -H 'Authorization: Bearer <SITE_TOKEN>' (run.sh:9)",)]
+    assert job.rows("SELECT phase, note FROM scan_run_phases") == [("index-sync", "failed (exit 1), token <SITE_TOKEN>")]
+    said = job.take()
+    assert said[0:2] == [f"scan-run: {SCAN} u1 running", "PHASE index-sync: 10s (wall, failed (exit 1), token <SITE_TOKEN>)"]
+    assert SECRET not in "\n".join(said) + job.db.read_bytes().decode(errors="replace")  # secondary: nowhere at all
+
+
+def test_timeout_kills_the_process_group_grandchild_included(job):
+    """CMD's grandchild ignores TERM (as does CMD): past `-T`, the group gets TERM, then after `-G` KILL; exit 124."""
+    job.mp.setenv("DT_ALERTS", "stderr")
+    assert job("start", SCAN, at=T0) == 0
+    pidfile = job.tmp / "grandchild.pid"
+    script = f'trap "" TERM; sleep 60 & echo $! > {pidfile}; wait'
+    t = time.monotonic()
+    assert job("phase", "-M", "-T", "1s", "-G", "0.5", "slow", "--", "bash", "-c", script, at=T0 + 7) == 124
+    elapsed = time.monotonic() - t
+    gpid = int(pidfile.read_text())
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        try:
+            os.kill(gpid, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.05)
+    else:
+        pytest.fail(f"grandchild {gpid} survived the group kill")
+    assert elapsed < 10
+    assert [ln for ln in job.take() if not ln.startswith("scan-run: ")] == [
+        "PHASE-START slow: 7s (wall)",
+        "PHASE slow: 7s (wall, failed (exit 124))",
+        f"alert (suppressed): ❌ cw-s3 {SCAN}: slow failed (exit 124, timed out after 1s)",
+    ]
+
+
+def test_phase_sugar_passes_cmd_exit_through(job):
+    job.mp.setenv("DT_ALERTS", "stderr")
+    assert job("start", SCAN, at=T0) == 0
+    assert job("phase", "-M", "-W", "ok", "--", "true", at=T0 + 1) == 0
+    assert job("phase", "-M", "-W", "soft", "--", "sh", "-c", "exit 5", at=T0 + 2) == 0
+    assert job("phase", "-M", "hard", "--", "sh", "-c", "exit 6", at=T0 + 3) == 6
+    assert job.rows("SELECT phase, started_ts, finished_ts, status, note FROM scan_run_phases ORDER BY seq") == [
+        ("ok", T0 + 1, T0 + 1, "done", None),
+        ("soft", T0 + 2, T0 + 2, "failed", "failed (exit 5)"),
+        ("hard", T0 + 3, T0 + 3, "failed", "failed (exit 6)"),
+    ]
+
+
+DT_CLOUD = Path(sys.executable).with_name("dt-cloud")
+SCRIPT_HEAD = """set -euo pipefail
+export DT_JOB_START=$(date +%s)
+sr() { dt-cloud scan-run "$1" -s "$DB" "${@:2}"; }
+trap 'SR_ERR="exit $?: $BASH_COMMAND"' ERR
+trap 'sr finish -x $? ${SR_ERR:+-e "$SR_ERR"}' EXIT
+sr start "$SCAN"
+"""
+
+
+@pytest.mark.parametrize("body, rc, alerts, run", [
+    pytest.param(
+        '( sr phase -M bg -- false ) & BG=$!\nsr phase -M fg -- true\nwait "$BG"\necho unreachable\n',
+        1, [f"alert (suppressed): ❌ cw-s3 {SCAN}: bg failed (exit 1)"],
+        ("failed", "bg", 'exit 1: wait "$BG"'),
+        id="background-phase-then-finish",
+    ),
+    pytest.param(
+        "sr phase -M fg -- true\nfalse\n",
+        1, [f"alert (suppressed): ❌ cw-s3 {SCAN}: run failed (exit 1): exit 1: false"],
+        ("failed", None, "exit 1: false"),
+        id="unphased-failure",
+    ),
+    pytest.param("sr phase -M fg -- true\n", 0, [], ("succeeded", None, None), id="clean"),
+])
+def test_one_alert_across_processes(tmp_path, body, rc, alerts, run):
+    """A job script's real shape: traps, `start`, phases (one in a background subshell), `finish` from the EXIT
+    trap. Each failure alerts exactly once, whichever process saw it first."""
+    (tmp_path / "scan-runs.json").write_text(json.dumps(PROFILE))
+    db = tmp_path / "runs.sqlite"
+    SqliteSink(db, ddl=DDL)
+    script = tmp_path / "job.sh"
+    script.write_text(SCRIPT_HEAD + body)
+    env = {k: v for k, v in os.environ.items() if k not in NOTIFY_ENV}
+    env.update(PATH=f"{DT_CLOUD.parent}:{env['PATH']}", TMPDIR=str(tmp_path), JOB_ID="u-bg", SCAN=SCAN, DB=str(db),
+               SCAN_RUNS_PROFILE=str(tmp_path / "scan-runs.json"), DT_ALERTS="stderr")
+    p = subprocess.run(["bash", str(script)], env=env, capture_output=True, text=True, timeout=120)
+    lines = p.stderr.splitlines()
+    assert (p.returncode, p.stdout, [ln for ln in lines if ln.startswith("alert")]) == (rc, "", alerts)
+    phases = sorted(re.sub(r": \d+s ", ": <N>s ", ln) for ln in lines if ln.startswith("PHASE"))
+    expected_phases = ["PHASE fg: <N>s (wall)", "PHASE-START fg: <N>s (wall)"]
+    if "bg" in body:
+        expected_phases = sorted(expected_phases + ["PHASE bg: <N>s (wall, failed (exit 1))", "PHASE-START bg: <N>s (wall)"])
+    assert phases == expected_phases
+    s = SqliteSink(db)
+    assert [tuple(r.values()) for r in s.query("SELECT status, failed_phase, error FROM scan_runs")] == [run]
+    assert sorted(p.name for p in (tmp_path / "dt-scan-run").iterdir()) == []
+
+
+SUPERVISED_HEAD = SCRIPT_HEAD.replace("sr start", "trap 'exit 143' TERM\ntrap 'exit 130' INT\nsr start")
+
+
+class Supervised:
+    """`dt-cloud scan-run supervise [-G grace] -- bash job.sh`, a real process tree over a SQLite record."""
+
+    def __init__(self, tmp: Path, script: str, grace: str = "5", heartbeat: str = "0"):
+        self.tmp = tmp
+        (tmp / "scan-runs.json").write_text(json.dumps(PROFILE))
+        self.db = tmp / "runs.sqlite"
+        SqliteSink(self.db, ddl=DDL)
+        (tmp / "job.sh").write_text(script)
+        env = {k: v for k, v in os.environ.items() if k not in NOTIFY_ENV}
+        env.update(PATH=f"{DT_CLOUD.parent}:{env['PATH']}", TMPDIR=str(tmp), JOB_ID="u-sv", SCAN=SCAN, DB=str(self.db),
+                   SCAN_RUNS_PROFILE=str(tmp / "scan-runs.json"), DT_ALERTS="stderr", T=str(tmp))
+        self.p = subprocess.Popen([str(DT_CLOUD), "scan-run", "supervise", "-G", grace, "-H", heartbeat, "--", "bash", str(tmp / "job.sh")],
+                                  env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+    def pid(self, name: str, timeout: float = 30) -> int:
+        """The pid a job process wrote to `$T/<name>` (waiting for it)."""
+        f = self.tmp / name
+        deadline = time.monotonic() + timeout
+        while not (f.exists() and f.read_text().strip()):
+            assert (self.p.poll(), time.monotonic() < deadline) == (None, True), f"no {name} pid"
+            time.sleep(0.05)
+        return int(f.read_text())
+
+    def end(self, sig: int | None = None) -> tuple[int, str, list[str]]:
+        if sig:
+            self.p.send_signal(sig)
+        out, stderr = self.p.communicate(timeout=60)
+        return self.p.returncode, out, stderr.splitlines()
+
+    def run_row(self) -> list[tuple]:
+        return [tuple(r.values()) for r in SqliteSink(self.db).query("SELECT status, failed_phase, error FROM scan_runs")]
+
+    def leftovers(self) -> list[str]:
+        return sorted(p.name for p in (self.tmp / "dt-scan-run").iterdir())
+
+
+def gone(*pids: int, timeout: float = 5) -> list[int]:
+    """Which of `pids` still exist after `timeout` (orphans are reaped by init/launchd shortly after they die)."""
+    deadline = time.monotonic() + timeout
+    while True:
+        alive = []
+        for pid in pids:
+            try:
+                os.kill(pid, 0)
+                alive.append(pid)
+            except ProcessLookupError:
+                pass
+        if not alive or time.monotonic() > deadline:
+            return alive
+        time.sleep(0.05)
+
+
+def statuses(lines: list[str]) -> list[str]:
+    """The record's own progress lines (`scan-run: <scan> <run> <status>[ · phase P]`)."""
+    return [ln for ln in lines if ln.startswith("scan-run")]
+
+
+def alerts(lines: list[str]) -> list[str]:
+    return [ln for ln in lines if ln.startswith("alert")]
+
+
+def test_supervise_heartbeat_keeps_a_waiting_run_fresh(tmp_path):
+    """A phase that waits a long time writes nothing itself: `supervise`'s heartbeat logs the running phase and moves
+    the run row's `updated_ts` every `-H`, so `/scans` doesn't read the run as quiet."""
+    sv = Supervised(tmp_path, SUPERVISED_HEAD + 'sr phase -M wait -- sh -c \'echo $$ > "$T/child"; sleep 4\'\nsr finish -x 0\n',
+                    heartbeat="0.3")
+    sv.pid("child")
+    stamp = lambda: SqliteSink(sv.db).query("SELECT updated_ts FROM scan_runs")[0]["updated_ts"]  # noqa: E731
+    first = stamp()
+    time.sleep(2.5)
+    moved = stamp() - first
+    rc, out, lines = sv.end()
+    assert (rc, out, moved >= 2) == (0, "", True)
+    # before the phase begins a beat may name none
+    assert {ln for ln in lines if ln.startswith("heartbeat")} - {"heartbeat: alive"} == {"heartbeat: alive · wait"}
+    assert sv.run_row() == [("succeeded", None, None)]
+
+
+def test_heartbeat_never_touches_a_finished_run(tmp_path):
+    """The beat races the job's finishing write: it stamps only a `running` row, and never changes a status."""
+    sink = SqliteSink(tmp_path / "runs.sqlite", ddl=DDL)
+    profile = parse_profile(PROFILE)
+    scan_runs.record(sink, profile, SCAN, "r-run", 100, start=True)
+    scan_runs.record(sink, profile, SCAN, "r-done", 100, start=True)
+    scan_runs.record(sink, profile, SCAN, "r-done", 150, exit_code=0)
+    sink.execute([scan_runs.heartbeat_sql("r-run", 200), scan_runs.heartbeat_sql("r-done", 200)])
+    assert [tuple(r.values()) for r in sink.query("SELECT run_id, status, updated_ts FROM scan_runs ORDER BY run_id")] == [
+        ("r-done", "succeeded", 150),
+        ("r-run", "running", 200),
+    ]
+
+
+def test_supervise_term_fails_the_run_once_and_empties_the_tree(tmp_path):
+    """(a) The platform TERMs the entrypoint mid-phase: the whole group gets it at once, the phase ends failed and
+    alerts, the script's traps finish 143, and `supervise`'s record (`terminated`) is the run's; nothing survives."""
+    sv = Supervised(tmp_path, SUPERVISED_HEAD + 'echo $$ > "$T/job"\nsr phase -M fg -- sh -c \'echo $$ > "$T/child"; exec sleep 60\'\n')
+    job, child = sv.pid("job"), sv.pid("child")
+    rc, out, lines = sv.end(signal.SIGTERM)
+    assert (rc, out, alerts(lines)) == (143, "", [f"alert (suppressed): ❌ cw-s3 {SCAN}: fg failed (exit 143, terminated by SIGTERM)"])
+    assert sv.run_row() == [("failed", "fg", "terminated (SIGTERM)")]
+    assert statuses(lines) == [
+        f"scan-run: {SCAN} u-sv running",
+        f"scan-run: {SCAN} u-sv running · phase fg",
+        f"scan-run: {SCAN} u-sv running · phase fg",
+        f"scan-run: {SCAN} u-sv failed",  # the script's EXIT trap (`exit 143` from its TERM trap)
+        f"scan-run: {SCAN} u-sv failed",  # `supervise`'s
+    ]
+    assert (gone(job, child), sv.leftovers()) == ([], [])
+
+
+def test_supervise_kills_what_ignores_term_after_the_grace(tmp_path):
+    """(b) The phase's command ignores TERM: after `-G` the group is KILLed (no trap runs), and `supervise` records the
+    run failed and posts the one alert."""
+    cmd = 'trap "" TERM; sleep 60 & echo $! > "$T/child"; wait'
+    sv = Supervised(tmp_path, SUPERVISED_HEAD + f"sr phase -M fg -- bash -c '{cmd}'\n", grace="0.5")
+    child = sv.pid("child")
+    t = time.monotonic()
+    rc, out, lines = sv.end(signal.SIGTERM)
+    assert (rc, out, alerts(lines), time.monotonic() - t < 10) == (137, "", [
+        f"alert (suppressed): ❌ cw-s3 {SCAN}: run failed (exit 143) in fg: terminated (SIGTERM); killed after the 0.5s grace",
+    ], True)
+    assert sv.run_row() == [("failed", "fg", "terminated (SIGTERM); killed after the 0.5s grace")]
+    assert [tuple(r.values()) for r in SqliteSink(sv.db).query("SELECT phase, status, note FROM scan_run_phases")] == [
+        ("fg", "failed", "failed (exit 143)"),
+    ]
+    assert (gone(child), sv.leftovers()) == ([], [])
+
+
+def test_supervise_termination_overrides_a_recorded_success(tmp_path):
+    """(c) The observed m3 bug: the script's EXIT trap records success (`$?` was 0) as the platform terminates it.
+    `supervise` re-records the run failed, and alerts once (the trap's `finish -x 0` posted nothing)."""
+    head = SCRIPT_HEAD.replace("sr finish -x $? ${SR_ERR:+-e \"$SR_ERR\"}", "sr finish -x 0")
+    sv = Supervised(tmp_path, head + 'sh -c \'echo $$ > "$T/child"; exec sleep 60\'\n')
+    child = sv.pid("child")
+    rc, out, lines = sv.end(signal.SIGTERM)
+    assert (rc, out, alerts(lines)) == (143, "", [f"alert (suppressed): ❌ cw-s3 {SCAN}: run failed (exit 143): terminated (SIGTERM)"])
+    assert statuses(lines) == [
+        f"scan-run: {SCAN} u-sv running",
+        f"scan-run: {SCAN} u-sv succeeded",
+        f"scan-run: {SCAN} u-sv failed",
+    ]
+    assert sv.run_row() == [("failed", None, "terminated (SIGTERM)")]
+    assert (gone(child), sv.leftovers()) == ([], [])
+
+
+@pytest.mark.parametrize("body, status", [
+    pytest.param("sr phase -M fg -- true\n", "succeeded", id="clean"),
+    pytest.param("sr nop\n", "nop", id="nop"),
+])
+def test_supervise_clean_run_passes_through_untouched(tmp_path, body, status):
+    """(d) No signal, exit 0: the script's own record stands, `supervise` writes nothing more and clears the state."""
+    sv = Supervised(tmp_path, SUPERVISED_HEAD + body)
+    rc, out, lines = sv.end()
+    assert (rc, out, alerts(lines)) == (0, "", [])
+    expected = [f"scan-run: {SCAN} u-sv running"]
+    expected += [f"scan-run: {SCAN} u-sv running · phase fg"] * 2 if "phase" in body else [f"scan-run: {SCAN} u-sv nop"]
+    assert statuses(lines) == expected + [f"scan-run: {SCAN} u-sv {status}"]
+    assert (sv.run_row(), sv.leftovers()) == ([(status, None, None)], [])
+
+
+def test_phase_forwards_a_received_term_to_its_session(tmp_path):
+    """Without `supervise`, a TERM sent to `phase -T` itself reaches CMD's own process group at once; the phase ends
+    failed with 143."""
+    (tmp_path / "scan-runs.json").write_text(json.dumps(PROFILE))
+    env = {k: v for k, v in os.environ.items() if k not in NOTIFY_ENV}
+    env.update(TMPDIR=str(tmp_path), DT_JOB_START=str(int(time.time())), DT_ALERTS="stderr", SCAN_ID=SCAN,
+               SCAN_RUNS_PROFILE=str(tmp_path / "scan-runs.json"))
+    pidfile = tmp_path / "child"
+    p = subprocess.Popen([str(DT_CLOUD), "scan-run", "phase", "-M", "-T", "1h", "fg", "--", "sh", "-c",
+                          f"echo $$ > {pidfile}; exec sleep 60"], env=env, stderr=subprocess.PIPE, text=True)
+    deadline = time.monotonic() + 30
+    while not (pidfile.exists() and pidfile.read_text().strip()):
+        assert time.monotonic() < deadline
+        time.sleep(0.05)
+    t = time.monotonic()
+    p.send_signal(signal.SIGTERM)
+    _, stderr = p.communicate(timeout=30)
+    lines = [re.sub(r": \d+s ", ": <N>s ", ln) for ln in stderr.splitlines()]
+    assert (p.returncode, lines, time.monotonic() - t < 5) == (143, [
+        "PHASE-START fg: <N>s (wall)",
+        "PHASE fg: <N>s (wall, failed (exit 143))",
+        f"alert (suppressed): ❌ cw-s3 {SCAN}: fg failed (exit 143, terminated by SIGTERM)",
+    ], True)
+    assert gone(int(pidfile.read_text())) == []
+
+
+def test_explicit_times_for_phases_before_the_job(job):
+    """A run that starts before its job (`start -t`: its capture's start) and phases that ended before the job existed
+    (`phase-end -t`): recorded at the stated instants; their PHASE lines count from `$DT_JOB_START`, so negative."""
+    assert job("start", "-t", str(T0 - 300), SCAN, at=T0 + 1) == 0
+    assert job("phase-begin", "-b", str(T0 - 300), "capture", at=T0 + 1) == 0
+    assert job("phase-end", "-M", "-t", str(T0 - 120), "capture", at=T0 + 1) == 0
+    assert job("phase-begin", "-b", str(T0 - 120), "queue", at=T0 + 1) == 0
+    assert job("phase-end", "-M", "-t", str(T0), "queue", at=T0 + 1) == 0
+    assert job("phase-begin", "fetch", at=T0 + 1) == 0
+    assert job("phase-end", "-M", "fetch", at=T0 + 5) == 0
+    assert job("finish", "-x", "0", at=T0 + 6) == 0
+    assert job.rows("SELECT status, started_ts, finished_ts FROM scan_runs") == [("succeeded", T0 - 300, T0 + 6)]
+    assert job.rows("SELECT phase, started_ts, finished_ts, status FROM scan_run_phases ORDER BY seq") == [
+        ("capture", T0 - 300, T0 - 120, "done"),
+        ("queue", T0 - 120, T0, "done"),
+        ("fetch", T0 + 1, T0 + 5, "done"),
+    ]
+    assert [ln for ln in job.take() if ln.startswith("PHASE ")] == [
+        "PHASE capture: -120s (wall)", "PHASE queue: 0s (wall)", "PHASE fetch: 5s (wall)",
+    ]
+
+
+def test_an_unphased_failure_inside_a_begun_phase_names_it(job):
+    """`set -e` kills the script inside a begun phase (no failing `phase-end`): `finish` names the one running phase."""
+    assert job("start", SCAN, at=T0 + 1) == 0
+    assert job("phase-begin", "listing", at=T0 + 2) == 0
+    assert job("phase-end", "-M", "listing", at=T0 + 3) == 0
+    assert job("phase-begin", "index", at=T0 + 4) == 0
+    job.mp.setenv("DT_ALERTS", "stderr")
+    assert job("finish", "-x", "3", "-e", "exit 3: cp a b (run.sh:9)", at=T0 + 5) == 0
+    assert job.rows("SELECT status, failed_phase, error FROM scan_runs") == [("failed", "index", "exit 3: cp a b (run.sh:9)")]
+    assert [ln for ln in job.take() if ln.startswith("alert")] == [
+        f"alert (suppressed): ❌ cw-s3 {SCAN}: run failed (exit 3) in index: exit 3: cp a b (run.sh:9)",
+    ]
+
+
+def test_a_nextflow_task_records_its_own_job_and_alerts_with_its_logs(job, monkeypatch):
+    """A step in its own Batch job (`$BATCH_JOB_UID` ≠ the run id): each phase records that job + machine, looked up
+    once per task, and the step's alert links the task's logs."""
+    looked: list[tuple] = []
+
+    def by_uid(uid, project, region):
+        looked.append((uid, project, region))
+        return {"name": f"projects/{project}/locations/{region}/jobs/nf-1a2b", "uid": uid,
+                "allocationPolicy": {"instances": [{"policy": {"machineType": "n2-standard-16"}}]}}
+
+    monkeypatch.setattr("dt_cloud.gcp.batch_job_by_uid", by_uid)
+    assert job("start", "-j", "head-job", "-R", "us-central1", SCAN, at=T0) == 0
+    job.mp.setenv("BATCH_JOB_UID", "task-uid-1")
+    job.mp.setenv("NF_PROCESS", "list_source")
+    job.mp.setenv("NF_TAG", "s3://b1")
+    assert job("phase-begin", "list b1", at=T0 + 120) == 0
+    assert job("phase-end", "-M", "list b1", at=T0 + 600) == 0
+    assert job("phase-begin", "import b1", at=T0 + 600) == 0
+    assert job("phase-end", "-M", "import b1", at=T0 + 700) == 0
+    assert looked == [("task-uid-1", "proj-1", "my-region")]  # the profile names no `regions`: `$BATCH_REGION`
+    assert job.rows("SELECT phase, started_ts, finished_ts, job_name, machine, task FROM scan_run_phases ORDER BY seq") == [
+        ("list b1", T0 + 120, T0 + 600, "nf-1a2b", "n2-standard-16", "list_source (s3://b1)"),
+        ("import b1", T0 + 600, T0 + 700, "nf-1a2b", "n2-standard-16", "list_source (s3://b1)"),
+    ]
+    assert job.rows("SELECT job_name, machine FROM scan_runs") == [("head-job", None)]
+    jr = scan_runs.JobRun(str(job.profile), None, False, None, str(job.db))
+    assert jr.logs_url() == "https://logs.test/q;uid=task-uid-1?project=proj-1&job=nf-1a2b"
+
+
+def test_the_runs_own_job_looks_nothing_up(job, monkeypatch):
+    monkeypatch.setattr("dt_cloud.gcp.batch_job_by_uid", lambda *a, **k: pytest.fail("looked up the run's own job"))
+    job.mp.setenv("BATCH_JOB_UID", "u1")
+    assert job("start", SCAN, at=T0) == 0
+    assert job("phase-begin", "listing", at=T0 + 10) == 0
+    assert job("phase-end", "-M", "listing", at=T0 + 70) == 0
+    assert job.rows("SELECT phase, job_name, machine, task FROM scan_run_phases") == [("listing", None, None, None)]
+
+
+def test_finish_stores_the_runs_dag_and_a_local_tasks_node(job, tmp_path):
+    """`finish -D`: the head's DAG, reduced to the engine-neutral graph, beside the run; a task without a Batch job of its own (the local executor) still
+    names its pipeline node, untagged."""
+    dag = tmp_path / "dag.mmd"
+    dag.write_text('flowchart TB\n    v0(["index"])\n    v1(["post"])\n    v0 --> v1\n')
+    assert job("start", SCAN, at=T0) == 0
+    job.mp.setenv("NF_PROCESS", "index")
+    job.mp.setenv("NF_TAG", "")
+    assert job("phase-begin", "index-write", at=T0 + 10) == 0
+    assert job("phase-end", "-M", "index-write", at=T0 + 70) == 0
+    job.mp.delenv("NF_PROCESS")
+    assert job("finish", "-x", "0", "-D", str(dag), at=T0 + 80) == 0
+    assert job.rows("SELECT phase, job_name, task FROM scan_run_phases") == [("index-write", None, "index")]
+    assert job.rows("SELECT run_id, engine, dag FROM scan_run_dags") == [
+        ("u1", "nextflow", '{"nodes":[{"id":"index","label":"index"},{"id":"post","label":"post"}],"edges":[["index","post"]]}'),
+    ]
+
+
+def test_dag_command_stores_a_runs_archived_dag(job, tmp_path):
+    """`scan-run dag RUN FILE`: a run recorded before its head stored its DAG gets it from the archive's `dag.mmd`."""
+    dag = tmp_path / "dag.mmd"
+    dag.write_text('flowchart TB\n    v0(["list_source"])\n    v1(( ))\n    v2(["index"])\n    v0 --> v1\n    v1 --> v2\n')
+    assert job("start", SCAN, at=T0) == 0
+    r = CliRunner().invoke(cli, ["dag", "-c", str(job.profile), "-s", str(job.db), "u1", str(dag)])
+    assert (r.exit_code, r.stdout, job.take()[-1]) == (0, "", "scan-run dag: u1 · nextflow · 2 nodes, 1 edges")
+    assert job.rows("SELECT run_id, engine, dag FROM scan_run_dags") == [
+        ("u1", "nextflow", '{"nodes":[{"id":"list_source","label":"list_source"},{"id":"index","label":"index"}],"edges":[["list_source","index"]]}'),
+    ]
+
+
+def test_a_dag_the_database_refuses_never_leaves_the_run_unfinished(job, tmp_path):
+    """A database whose `scan_run_dags` is in another shape (the migration not applied yet): the run still finishes."""
+    SqliteSink(job.db).execute(["DROP TABLE scan_run_dags", "CREATE TABLE scan_run_dags (run_id TEXT PRIMARY KEY, mermaid TEXT NOT NULL)"])
+    dag = tmp_path / "dag.mmd"
+    dag.write_text('flowchart TB\n    v0(["index"])\n')
+    assert job("start", SCAN, at=T0) == 0
+    assert job("finish", "-x", "0", "-D", str(dag), at=T0 + 80) == 0
+    assert job.rows("SELECT status, finished_ts FROM scan_runs") == [("succeeded", T0 + 80)]
+    assert [l for l in job.take() if l.startswith("scan-run record failed")] == [
+        "scan-run record failed (the scan continues): OperationalError: table scan_run_dags has no column named engine",
+    ]
+
+
+def test_start_reconciles_earlier_lost_runs_and_never_fails_on_it(job):
+    """`start` marks failed the store's earlier `running` runs whose Batch job ended (here: deleted), not its own; a
+    failing reconcile is reported and the run still starts."""
+    assert job("start", "-j", "job-old", "-R", "us-east1", "2026-10-13T0600", at=T0 - 86400) == 0
+    lookups: list[tuple[str, str, str]] = []
+    job.mp.setattr(scan_runs, "batch_lookup", lambda project, name, region: lookups.append((project, name, region)))
+    job.mp.setenv("JOB_ID", "u2")
+    job.take()
+    assert job("start", "-j", "job-new", "-R", "us-east1", SCAN, at=T0) == 0
+    assert lookups == [("proj-1", "job-old", "us-east1")]
+    assert job.rows("SELECT run_id, status, error, finished_ts, updated_ts FROM scan_runs ORDER BY run_id") == [
+        ("u1", "failed", "lost: Batch job not found (deleted)", T0 - 86400, T0),
+        ("u2", "running", None, None, T0),
+    ]
+    assert job.take() == [
+        f"scan-run: {SCAN} u2 running",
+        "scan-run reconcile: u1 (2026-10-13T0600) → failed: lost: Batch job not found (deleted)",
+    ]
+
+    def boom(*a, **kw):
+        raise RuntimeError("D1 down")
+
+    job.mp.setattr(scan_runs, "reconcile", boom)
+    job.mp.setenv("JOB_ID", "u3")
+    assert job("start", SCAN, at=T0 + 10) == 0
+    assert job.rows("SELECT run_id, status FROM scan_runs WHERE run_id = 'u3'") == [("u3", "running")]
+    assert job.take() == [
+        f"scan-run: {SCAN} u3 running",
+        "scan-run reconcile failed (the run continues): RuntimeError: D1 down",
+    ]
+
+
+def test_phase_heartbeat_notes_the_commands_latest_line_and_ends_with_the_phase(job):
+    """`phase -- CMD` under `$DT_HEARTBEAT_S`: while CMD runs, each beat sets the running phase's note to CMD's latest
+    output line (after its latest runner stage) and bumps the run's `updated_ts`; the phase's end replaces the live
+    note with its own (none here)."""
+    job.mp.setenv("DT_HEARTBEAT_S", "0.05")
+    assert job("start", SCAN, at=T0) == 0
+    beats: list[tuple[str | None, str | None, int]] = []
+    sql, real_end = scan_runs.phase_beat_sql, scan_runs.JobRun.end
+
+    def phase_beat_sql(rid, phase, note, now):
+        beats.append((phase, note, now))
+        return sql(rid, phase, note, now)
+
+    seen: list[list[tuple]] = []
+
+    def end(self, name, *a, **kw):
+        seen.append(job.rows("SELECT phase, status, note FROM scan_run_phases"))
+        return real_end(self, name, *a, **kw)
+
+    job.mp.setattr(scan_runs, "phase_beat_sql", phase_beat_sql)
+    job.mp.setattr(scan_runs.JobRun, "end", end)
+    cmd = "echo one >&2; echo 'merge 2: drill/a: start' >&2; echo two >&2; sleep 0.6"
+    assert job("phase", "-M", "fg", "--", "sh", "-c", cmd, at=T0 + 60) == 0
+    # the first beats race CMD's first lines; the last follow its last line (a timed wait never beats early)
+    assert (len(beats) >= 3, beats[-1]) == (True, ("fg", "0s · merge 2: drill/a · two", T0 + 60))
+    # the phase's end found the last beat's note on the running row, and wrote its own over it
+    assert seen == [[("fg", "running", "0s · merge 2: drill/a · two")]]
+    assert job.rows("SELECT phase, status, note FROM scan_run_phases") == [("fg", "done", None)]
+    assert job.rows("SELECT status, updated_ts FROM scan_runs") == [("running", T0 + 60)]
+
+
+def test_a_failing_heartbeat_never_fails_the_phase(job, monkeypatch):
+    """Every beat's write fails: CMD's phase still runs to its end and records done; one warning per ten failures
+    (a 0.3 s command at 0.05 s beats fails at most six)."""
+    from dt_cloud import heartbeat
+
+    job.mp.setenv("DT_HEARTBEAT_S", "0.05")
+    assert job("start", SCAN, at=T0) == 0
+    said: list[str] = []
+    monkeypatch.setattr(heartbeat, "err", said.append)
+
+    def touch(self, phase, note, at=None):
+        raise RuntimeError("D1 query failed (503)")
+
+    monkeypatch.setattr(scan_runs.JobRun, "touch", touch)
+    assert job("phase", "-M", "fg", "--", "sh", "-c", "sleep 0.3", at=T0 + 30) == 0
+    assert job.rows("SELECT phase, status, finished_ts FROM scan_run_phases") == [("fg", "done", T0 + 30)]
+    assert said == ["scan-run heartbeat (fg): write failed (1 so far; the work goes on): RuntimeError: D1 query failed (503)"]
+
+
+def test_phase_beat_sql_touches_only_running_rows(job):
+    """A beat racing the phase's end (or the run's finish) changes nothing: both updates match running rows only."""
+    assert job("start", SCAN, at=T0) == 0
+    assert job("phase-begin", "fg", at=T0 + 10) == 0
+    s = SqliteSink(job.db)
+    s.execute(scan_runs.phase_beat_sql("u1", "fg", "1m · step 2/9", T0 + 70))
+    assert (job.rows("SELECT phase, status, note FROM scan_run_phases"), job.rows("SELECT updated_ts FROM scan_runs")) == (
+        [("fg", "running", "1m · step 2/9")], [(T0 + 70,)])
+    assert job("phase-end", "-M", "-q", "9 steps", "fg", at=T0 + 80) == 0
+    assert job("finish", "-x", "0", at=T0 + 90) == 0
+    s.execute(scan_runs.phase_beat_sql("u1", "fg", "1m · step 9/9", T0 + 95))
+    assert (job.rows("SELECT phase, status, note FROM scan_run_phases"), job.rows("SELECT status, updated_ts FROM scan_runs")) == (
+        [("fg", "done", "9 steps")], [("succeeded", T0 + 90)])
+    assert scan_runs.phase_beat_sql("u1", "fg", "it's 2/9", 5) == [
+        "UPDATE scan_run_phases SET note = 'it''s 2/9' WHERE run_id = 'u1' AND phase = 'fg' AND status = 'running' AND finished_ts IS NULL",
+        "UPDATE scan_runs SET updated_ts = 5 WHERE run_id = 'u1' AND status = 'running'",
+    ]
+
+
+def test_supervise_beat_writes_the_database_its_job_named(job, monkeypatch):
+    """`supervise -H`'s beat writes the D1 its job named: the job script exports `$D1_DB_ID` after `supervise` started
+    it (gcs's `run.sh`), so `start` passes it along through the pointer."""
+    ptr = job.tmp / "supervise.json"
+    monkeypatch.setenv("DT_SUPERVISE", str(ptr))
+    monkeypatch.setenv("D1_DB_ID", "db-of-the-job")
+    assert job("start", SCAN, at=T0) == 0
+    assert json.loads(ptr.read_text())["env"] == {"D1_DB_ID": "db-of-the-job"}
+    monkeypatch.delenv("D1_DB_ID")  # `supervise`'s own env
+    wrote: list[tuple[str | None, list[str]]] = []
+
+    class D1:
+        def __init__(self, db_id=None):
+            self.db_id = db_id
+
+        def execute(self, statements):
+            wrote.append((self.db_id, list(statements)))
+
+    monkeypatch.setattr(scan_runs, "D1Sink", D1)
+    j = scan_runs.JobRun.pointed(ptr)
+    j.sqlite = None
+    job.mp.setattr(scan_runs, "_now", lambda: T0 + 60)
+    j.beat()
+    assert wrote == [("db-of-the-job", [f"UPDATE scan_runs SET updated_ts = {T0 + 60} WHERE run_id = 'u1' AND status = 'running'"])]

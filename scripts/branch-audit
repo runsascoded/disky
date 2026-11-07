@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+# Branch parity audit (specs/one-clone-layout.md "Monitoring"): for each
+# branch pair, diff-of-diffs (git-didi) per surface since the pair's
+# merge-base — files where the two branches' changes differ. Surfaces expected
+# at parity (react lib, python engine, site src + functions) should print
+# `parity`; anything else is either base-bound work not yet cherry-picked up,
+# or a regression from a merge. Run before and after each parent merge:
+# cloud → local → m3 / tauri-native-app; cloud → gcs / cw.
+#
+# Pairs and surfaces come from `.claude/cp.yml` (every peer vs `cloud`, plus
+# `gcs cw`), so one config drives both `git cp` and this audit.
+#
+#   scripts/branch-audit                  # every configured pair, every surface
+#   scripts/branch-audit gcs cloud site/src   # one pair, one or more surfaces
+set -euo pipefail
+cd "$(dirname "$0")/.."
+command -v git-didi >/dev/null || { echo "git-didi missing: uv tool install git-didi" >&2; exit 1; }
+
+# A linked worktree has no `.claude/cp.yml` of its own: fall back to the main
+# worktree's (the git common dir's parent).
+CFG=.claude/cp.yml
+[ -f "$CFG" ] || CFG=$(git rev-parse --path-format=absolute --git-common-dir)/../.claude/cp.yml
+if [ $# -ge 2 ]; then
+  PAIRS=("$1 $2")
+else
+  # local is an intermediate parent even when an older peer config omits it.
+  PAIRS=("local cloud")
+  for b in $(sed -n '/^branches:/,/^[a-z]/p' "$CFG" | grep -E '^  [a-z0-9-]+:' | sed 's/^  \([^:]*\):.*/\1/'); do
+    case "$b" in
+      cloud|local) ;;
+      m3|tauri-native-app) PAIRS+=("$b local") ;;
+      *) PAIRS+=("$b cloud") ;;
+    esac
+  done
+  PAIRS+=("gcs cw")
+fi
+if [ $# -ge 3 ]; then
+  SURFACES=("${@:3}")
+else
+  read -ra SURFACES <<<"$(sed -n 's/^surfaces: *\[\(.*\)\]/\1/p' "$CFG" | tr -d ',')"
+fi
+
+for pair in "${PAIRS[@]}"; do
+  set -- $pair
+  a=$1; b=$2
+  git rev-parse -q --verify "$a" >/dev/null || { echo "## $a ↔ $b: ref $a missing"; continue; }
+  git rev-parse -q --verify "$b" >/dev/null || { echo "## $a ↔ $b: ref $b missing"; continue; }
+  mb=$(git merge-base "$a" "$b")
+  echo "## $a ↔ $b  (merge-base ${mb:0:9}, $(git log -1 --format=%ad --date=short "$mb"))"
+  echo "  incoming: $(git rev-list --count "$a..$b") commits; outgoing: $(git rev-list --count "$b..$a") commits (includes deployment changes and adapted picks)"
+  echo "  tagged outgoing candidates (review intent and cherry-pick trailers):"
+  git log --no-merges --format='    %h %s' --grep='^\[cloud\]' --grep='^\[local\]' --grep='^\[base\]' "$b..$a"
+  for s in "${SURFACES[@]}"; do
+    out=$(git-didi stat --pager never --color never "$mb..$a" "$mb..$b" "$s" 2>&1 || true)
+    if grep -q "No differences" <<<"$out"; then
+      printf '  %-22s parity\n' "$s"
+    else
+      n=$(grep -cE '^[-+][0-9-]+\s' <<<"$out" || true)
+      printf '  %-22s %s files differ  (git-didi stat %s..%s %s..%s %s)\n' "$s" "$n" "${mb:0:9}" "$a" "${mb:0:9}" "$b" "$s"
+    fi
+  done
+done

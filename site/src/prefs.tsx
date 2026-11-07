@@ -1,0 +1,120 @@
+import { Explain } from './Help'
+import { useEffect, useRef, useSyncExternalStore } from 'react'
+import type { Tiling } from '@disk-tree/react'
+import { Tooltip } from './Tooltip'
+import { BorderStepToggle, TitleSpaceToggle } from '@disk-tree/react'
+import { DEFAULT_STORE } from './stores'
+import { AT_MODES, type AtMode } from './sessionsModel'
+
+// Treemap rendering preferences — per-browser, persisted in localStorage,
+// read by every treemap on the site. Same module-store + useSyncExternalStore
+// shape as upstream disk-tree's `ui/src/utils/tiling.ts`.
+//
+// - `tiling`: `shared` (cells share edges — one stroke per boundary, exact
+//   areas; the default) vs `gaps` (2px gutters, rounded corners).
+// - `renderer`: `dom` (one element per cell; the default, full feature
+//   parity) vs `canvas` (one paint loop for the whole map — for the 1e3–1e6
+//   cell views the DOM renderer bogs down on; per-cell React extras — the
+//   actor badges — don't draw there yet).
+export type Renderer = 'dom' | 'canvas'
+
+function pref<T extends string>(key: string, ok: readonly T[], dflt: T) {
+  const KEY = `gcs-usage:${key}`
+  const load = (): T => {
+    try {
+      const v = localStorage.getItem(KEY)
+      if (v && (ok as readonly string[]).includes(v)) return v as T
+    } catch { /* no storage */ }
+    return dflt
+  }
+  let current: T = load()
+  const listeners = new Set<() => void>()
+  const get = () => current
+  const set = (t: T): void => {
+    if (t === current) return
+    current = t
+    try { localStorage.setItem(KEY, t) } catch { /* in-memory only */ }
+    listeners.forEach(l => l())
+  }
+  const subscribe = (l: () => void) => { listeners.add(l); return () => { listeners.delete(l) } }
+  const use = (): [T, (t: T) => void] => [useSyncExternalStore(subscribe, get, get), set]
+  return { use, set }
+}
+
+const tiling = pref<Tiling>('tiling', ['shared', 'gaps'], 'shared')
+const renderer = pref<Renderer>('renderer', ['dom', 'canvas'], 'dom')
+const titleSpace = pref<'reclaim' | 'full'>('title-space', ['reclaim', 'full'], DEFAULT_STORE.reclaimTitleSpace ? 'reclaim' : 'full')
+export const useTitleSpace = titleSpace.use
+// Whole-pixel seams, each parent's ≥1px wider than its children's (`<Treemap borderStep>`); off by default.
+const borderStep = pref<'on' | 'off'>('border-step', ['on', 'off'], 'off')
+export const useBorderStep = borderStep.use
+// The help line (specs/done/edu-drawer.md): on until the reader turns it off.
+const help = pref<'on' | 'off'>('help', ['on', 'off'], 'on')
+export const useHelpPref = help.use
+export const setHelpPref = help.set
+// The scroll-spy (`useSectionSpy`): the section in view named in the URL (`?section=`) as the reader scrolls; on until turned off.
+const scrollSpy = pref<'on' | 'off'>('scroll-spy', ['on', 'off'], 'on')
+export const useScrollSpyPref = scrollSpy.use
+// The session timeline's first column (`/admin/sessions/:sid`): offset into the session (+ gap since the row above), or ago.
+const sessionAt = pref<AtMode>('session-at', AT_MODES, 'start')
+export const useSessionAt = sessionAt.use
+export const useTiling = tiling.use
+export const setTiling = tiling.set
+export const useRenderer = renderer.use
+
+const TILING_TIP = 'Cell gutters. Off (default): cells share edges — one stroke per boundary, areas stay exact. On: gaps and rounded corners between cells.'
+const RENDERER_TIP = 'DOM (default): one element per cell — every feature, keyboard focus on every cell. Canvas: the whole map painted in one pass, for views of thousands of cells that make the DOM renderer crawl; outlines, tooltips and drilling work the same, but the marker avatars on cells don’t draw there yet.'
+
+/** Map-display preferences behind a ⚙ (in the treemap's key line): tiling
+ * gutters and the renderer. A native `<details>`, so it closes on Esc /
+ * toggle and needs no outside-click plumbing. */
+export function SettingsMenu() {
+  const [t, setT] = useTiling()
+  const [r, setR] = useRenderer()
+  const [space, setSpace] = useTitleSpace()
+  const [step, setStep] = useBorderStep()
+  // A native <details> only closes on its own summary; close it on any click
+  // outside too, like a menu.
+  const ref = useRef<HTMLDetailsElement | null>(null)
+  useEffect(() => {
+    const onDoc = (e: MouseEvent) => {
+      const el = ref.current
+      if (el?.open && !el.contains(e.target as Node)) el.open = false
+    }
+    document.addEventListener('click', onDoc)
+    return () => document.removeEventListener('click', onDoc)
+  }, [])
+  return (
+    <details className="map-settings" ref={ref}>
+      <summary title="Map display settings" aria-label="Map display settings">⚙</summary>
+      {/* Every pointer phase stops here: the menu floats over the map, and a
+          tap on it must not reach the cell underneath (on a phone a tap on
+          the renderer toggle also drilled the map — the synthesized mouse
+          sequence, not the click, is what the cells saw). */}
+      <div className="menu" onClick={e => e.stopPropagation()} onPointerDown={e => e.stopPropagation()} onMouseDown={e => e.stopPropagation()} onTouchStart={e => e.stopPropagation()} onTouchEnd={e => e.stopPropagation()}>
+        <Explain text="Let complete columns to the right of a parent's label use its empty title strip. Sibling areas keep the same bytes-per-pixel scale. Off: reserve a full-width title bar.">
+          <span className="row"><TitleSpaceToggle checked={space === 'reclaim'} onChange={checked => setSpace(checked ? 'reclaim' : 'full')} /></span>
+        </Explain>
+        <Explain text="Seams widen one whole pixel per level up, so a parent's outline always reads thicker than the lines between its children. Off: thinner, size-capped seams that keep more of each cell's area.">
+          <span className="row"><BorderStepToggle checked={step === 'on'} onChange={checked => setStep(checked ? 'on' : 'off')} /></span>
+        </Explain>
+        <Explain text={TILING_TIP}>
+          <label className="row">
+            <input type="checkbox" checked={t === 'gaps'} onChange={e => setT(e.target.checked ? 'gaps' : 'shared')} />
+            gaps between cells
+          </label>
+        </Explain>
+        <Explain text={RENDERER_TIP}>
+          <span className="row">
+            renderer
+            <span className="seg">
+              {(['dom', 'canvas'] as const).map(k => (
+                <button key={k} type="button" className={r === k ? 'on' : ''} onClick={() => setR(k)}>{k === 'dom' ? 'DOM' : 'canvas'}</button>
+              ))}
+            </span>
+          </span>
+        </Explain>
+      </div>
+    </details>
+  )
+}

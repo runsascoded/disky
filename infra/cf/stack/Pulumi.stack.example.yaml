@@ -1,0 +1,39 @@
+# One deployment's Cloudflare config. Copy to `infra/cf/Pulumi.<stack>.yaml`;
+# the key prefix is your `Pulumi.yaml`'s `name`. Ids are not secrets.
+#
+# The provider reads `CLOUDFLARE_API_TOKEN` from the environment. The token
+# needs, on the account, Cloudflare Pages and D1 (edit), and on the zone, DNS
+# (edit). Each optional block below adds its product: Workers KV Storage
+# (`kvName`); Workers R2 Storage and account API tokens (`r2Bucket`); Access
+# apps and policies (`access`); Queues and Workers R2 Storage (`capturesBucket`).
+config:
+  my-deployment-cf:accountId: <cf-account-id>
+  my-deployment-cf:zoneId: <zone-id>                # the zone holding `domain`
+  my-deployment-cf:pagesProject: my-deployment      # served at <pagesProject>.pages.dev
+  # my-deployment-cf:productionBranch: main
+  my-deployment-cf:domain: disk.example.com
+  my-deployment-cf:d1Name: my-deployment-db
+
+  # --- Optional ---
+  # A hostname for a preview branch (a dev stack on the same project):
+  # my-deployment-cf:branchAliases:
+  #   - {domain: dev.disk.example.com, branch: dev}
+  # Or a separate dev site, its own Pages project on the same D1:
+  # my-deployment-cf:devProject: my-deployment-dev
+  # my-deployment-cf:devDomain: dev.disk.example.com
+  # A global cache tier behind each colo's cache (site `CACHE_KV`):
+  # my-deployment-cf:kvName: my-deployment-cache
+  # Serve the index from R2 (site `STORE_*`), with a read/write token for the publisher:
+  # my-deployment-cf:r2Bucket: my-deployment-index
+  # A Zero Trust Access gate (most deployments use the site's own sign-in instead):
+  # my-deployment-cf:access:
+  #   name: my-deployment
+  #   uris: [disk.example.com]
+  #   emailDomains: [example.com]
+  # A laptop deployment's capture trigger: `<capturesBucket>/captures/**/_SUCCESS.json`
+  # → this queue → the `capture-trigger` Worker → the AWS Batch ingest (`infra/aws`):
+  # my-deployment-cf:capturesBucket: my-captures-bucket
+  # my-deployment-cf:capturesQueue: my-deployment-captures
+  # Adopt live resources instead of creating them: `{key: import id}` over the
+  # keys `CfnDashboard`'s docstring lists (infra/README.md, "Adopting live resources").
+  # my-deployment-cf:importIds: {}

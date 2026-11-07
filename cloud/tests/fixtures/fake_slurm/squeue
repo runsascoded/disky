@@ -1,0 +1,4 @@
+#!/bin/bash
+# A fake `squeue` (see sbatch): every job not cancelled, `<id> <PD|R>`.
+cat "$FAKE_SLURM"/jobs/* 2>/dev/null
+exit 0

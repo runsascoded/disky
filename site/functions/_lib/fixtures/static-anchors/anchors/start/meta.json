@@ -1,0 +1,11 @@
+{
+ "R": 3,
+ "K": 2,
+ "rg": 5,
+ "idx_rg": 3,
+ "start_rollups": {
+  "row_groups": 220,
+  "rows": 878,
+  "files": 1
+ }
+}

@@ -1,0 +1,51 @@
+# An EXAMPLE scan profile shaped like cw-s3's (S3-compatible sources, per-source import, google-batch), with neutral
+# placeholder names: a deployment's real profile lives only on its own branch (`job/profiles/<deployment>.yml`).
+deployment: cw-s3
+executor:
+  kind: google-batch
+  project: example-project
+  region: us-central1
+  service_account: scan-job@example-project.iam.gserviceaccount.com
+  image: us-central1-docker.pkg.dev/example-project/scans/scan:cw
+  boot_disk: 50
+work: gs://example-data/nf
+data: gs://example-data
+layout:
+  layer2: cw-l2/{scan}/
+  snapshots: cw
+sources:
+  - {uri: s3://bucket-big, machine: n2-standard-8, procs: 8}
+  - s3://bucket-b
+  - {uri: s3://bucket-c, disk: {request: 375, type: local-ssd}}
+machines:
+  small: e2-standard-2
+  medium: e2-standard-4
+  big: {type: n2-standard-8, disk: 200}
+  list: {type: e2-standard-4, disk: 100}
+  post: e2-highmem-4
+secrets:
+  AWS_ACCESS_KEY_ID: example-access-key-id
+  AWS_SECRET_ACCESS_KEY: example-secret-access-key
+  CLOUDFLARE_API_TOKEN: example-cf-token
+  SITE_TOKEN: example-job-grant
+env:
+  SCAN_RUNS_PROFILE: /app/job/scan-runs.json
+  D1_DB_ID: 00000000-0000-0000-0000-000000000000
+  SITE_URL: https://site.example.org
+  R2_BUCKET: example-r2
+pass: [DT_RECORD, DT_ALERTS]
+labels: {deployment: cw-s3}
+options:
+  list:
+    import: true
+    bulk_args: [-a]
+    threads: 8
+    import_args: [-e, stream, -j, "{nproc}", -m, -p, storage_class_id]
+  index:
+    webdata: [python, /app/job/cw-webdata.py, "{web}", "{sources}", -l, Example CoreWeave, -a, "{date}"]
+    lifecycle: true
+    mem: 16GB
+  static-names: {profile: /app/job/static-names.json}
+  interval-store: {timeout: 90m, mem: 12GB}
+  over-time: {mem: 16GB}
+  digest: {template: cw, config: /app/job/digest.yml}

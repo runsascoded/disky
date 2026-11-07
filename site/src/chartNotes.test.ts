@@ -1,0 +1,87 @@
+import { describe, expect, it } from 'vitest'
+import { authorName, defaultNoteAt, noteMarkers, notesHere, notesInView, shortLabel, type ChartAnnotation } from './chartNotes'
+
+const note = (id: number, at: string, text = `note ${id}`, path: string | null = null, kind: string | null = null): ChartAnnotation =>
+  ({ id, at, text, author: 'ops@example.test', created: 0, updated: 0, path, url: null, kind })
+const midnight = (d: string) => Date.parse(`${d.slice(0, 10)}T00:00:00Z`)
+const DAY = 86_400_000
+
+describe('notesInView', () => {
+  // The chart's xOf: a scan it plots sits at its start (10-13's at 07:00); any other date at UTC midnight.
+  const starts: Record<string, number> = { '2026-10-13': midnight('2026-10-13') + 7 * 3_600_000 }
+  const xOf = (at: string) => starts[at] ?? midnight(at)
+  const notes = [note(3, '2026-10-13', 'Scope change: oa-gcs-usage-dvx left the meta store\nnot a deletion'), note(1, '2026-09-01'), note(2, '2026-10-17'), note(4, '2026-10-13')]
+
+  it('all: every note inside the plotted span, by x then id, each labelled by its first line', () => {
+    expect(notesInView(notes, xOf, midnight('2026-08-20'), midnight('2026-10-18')).map(m => [m.key, m.x, m.label])).toEqual([
+      ['note-1', midnight('2026-09-01'), 'note 1'],
+      ['note-3', starts['2026-10-13'], 'Scope change: oa-gcs-usage-…'],
+      ['note-4', starts['2026-10-13'], 'note 4'],
+      ['note-2', midnight('2026-10-17'), 'note 2'],
+    ])
+  })
+
+  it('1w: notes before the range (and after the latest scan) are hidden; the span’s ends are inclusive', () => {
+    const last = midnight('2026-10-17')
+    expect([
+      notesInView(notes, xOf, last - 7 * DAY, last).map(m => m.key),
+      notesInView(notes, xOf, last - 3 * DAY, last - DAY).map(m => m.key),
+      notesInView(notes, xOf, starts['2026-10-13'], starts['2026-10-13']).map(m => m.key),
+    ]).toEqual([
+      ['note-3', 'note-4', 'note-2'],
+      [],
+      ['note-3', 'note-4'],
+    ])
+  })
+
+  it('a note whose x is unknown (NaN) is dropped', () => {
+    expect(notesInView([note(1, '2026-10-13')], () => NaN, -Infinity, Infinity)).toEqual([])
+  })
+})
+
+describe('notesHere / noteMarkers', () => {
+  const notes = [
+    note(1, '2026-10-01', 'store-wide'),
+    note(2, '2026-10-02', 'ask', 'marin-us-east-02a', 'cleanup ask'),
+    note(3, '2026-10-03', 'grug ask', 'marin-us-east-02a/marin/grug', 'cleanup ask'),
+    note(4, '2026-10-04', 'scope', 'marin-us-east-02a', 'scope change'),
+    note(5, '2026-10-05', 'sibling', 'marin-us-east-02ab'),
+  ]
+  const ids = (prefix: string) => notesHere(notes, prefix).map(n => n.id)
+
+  it('a note shows at its path and below; store-wide ones everywhere; a sibling sharing a name prefix doesn’t match; kind never filters', () => {
+    expect([ids(''), ids('marin-us-east-02a'), ids('/marin-us-east-02a/'), ids('marin-us-east-02a/marin'), ids('marin-us-east-02a/marin/grug/x'), ids('marin-us-east-02ab')]).toEqual([
+      [1], [1, 2, 4], [1, 2, 4], [1, 2, 4], [1, 2, 3, 4], [1, 5],
+    ])
+  })
+
+  it('the "notes" toggle: offered where the chart has notes (whatever the span); off draws none, on draws those in the span', () => {
+    const xOf = (at: string) => midnight(at)
+    const keys = (prefix: string, shown: boolean, from: string, to: string) => noteMarkers(notes, prefix, shown, xOf, midnight(from), midnight(to)).map(m => m.key)
+    expect({
+      offered: [notesHere([], '').length > 0, notesHere([note(9, '2026-10-01', 'x', 'other-bucket')], '').length > 0, notesHere(notes, '').length > 0],
+      on: keys('marin-us-east-02a/marin/grug', true, '2026-09-01', '2026-10-31'),
+      zoomed: keys('marin-us-east-02a/marin/grug', true, '2026-10-02', '2026-10-03'),
+      off: keys('marin-us-east-02a/marin/grug', false, '2026-09-01', '2026-10-31'),
+    }).toEqual({
+      offered: [false, false, true],
+      on: ['note-1', 'note-2', 'note-3', 'note-4'],
+      zoomed: ['note-2', 'note-3'],
+      off: [],
+    })
+  })
+})
+
+describe('labels and defaults', () => {
+  it('shortLabel / defaultNoteAt / authorName', () => {
+    expect([
+      shortLabel('short'),
+      shortLabel('  first line  \nsecond'),
+      shortLabel('abcdefghij', 6),
+      defaultNoteAt(['2026-10-01', '2026-10-13'], '2026-10-17'),
+      defaultNoteAt(undefined, '2026-10-17T1201'),
+      defaultNoteAt(undefined, undefined),
+      authorName('ops@example.test'),
+    ]).toEqual(['short', 'first line', 'abcde…', '2026-10-13', '2026-10-17T1201', '', 'ops'])
+  })
+})

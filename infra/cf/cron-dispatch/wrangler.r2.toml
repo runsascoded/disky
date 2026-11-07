@@ -1,0 +1,15 @@
+# r2.rbw.sh's schedules (the demo deployed from `cloud`): the daily ingest.
+# Deploy with the account from the environment (kept out of this public file):
+#   CLOUDFLARE_ACCOUNT_ID=… pnpm exec wrangler deploy -c wrangler.r2.toml
+#   pnpm exec wrangler secret put GITHUB_TOKEN -c wrangler.r2.toml
+# Then remove `schedule:` from .github/workflows/daily-ingest.yml.
+name = "disky-cron-dispatch"
+main = "src/index.ts"
+compatibility_date = "2026-09-01"
+workers_dev = false
+
+[triggers]
+crons = ["15 7 * * *"]
+
+[vars]
+DISPATCH = '{"15 7 * * *": [{"repo": "runsascoded/disky", "workflow": "daily-ingest.yml", "ref": "cloud"}]}'

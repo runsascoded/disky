@@ -1,0 +1,67 @@
+import { describe, expect, it } from 'vitest'
+import { alignedTicks, axisTicks, chartRange, durationLabel, inSpan, parseDuration, percentOf, rollingRates, runKindParam, runSpanParam, runStatusParam, runWindowParam, shiftWindow, zoomWindow } from './runChart'
+import type { HistoryPoint } from './runHistory'
+
+describe('run time range and axes', () => {
+  it('uses URL-safe end + duration, with latest and all-time modes', () => {
+    const fixed = { end: Date.parse('2026-10-05T12:00:00Z') / 1000, duration: 5400 }
+    expect([runWindowParam.encode(fixed), runWindowParam.decode(runWindowParam.encode(fixed)), runWindowParam.decode('all'), runWindowParam.decode('2h'), runWindowParam.decode('bad~1h')]).toEqual([
+      '2026-10-05T12:00:00.000Z~90m', fixed, { end: null, duration: null }, { end: null, duration: 7200 }, { end: null, duration: 3600 },
+    ])
+  })
+  it('accepts continuous compound durations but rejects partial/zero/unbounded input', () => {
+    expect(['1h30m', '1.5h', '90m', '0s', 'hi1h', '1hgarbage', '400d'].map(parseDuration)).toEqual([5400, 5400, 5400, null, null, null, null])
+    expect([60, 3600, 5400, 86400].map(durationLabel)).toEqual(['1m', '1h', '90m', '1d'])
+  })
+  it('keeps a live range anchored to the clock even if samples are stale', () => {
+    const points: HistoryPoint[] = [{ ts: 1000, objects: 10, bytes: 100, rate: 1, byteRate: 10 }]
+    expect([chartRange(points, { end: null, duration: 60 }, 2000), chartRange(points, { end: 1500, duration: null }, 2000), shiftWindow([1000, 1600], -1), zoomWindow([1000, 1600], 0.5)]).toEqual([
+      [1940, 2000], [1000, 1500], { end: 1300, duration: 600 }, { end: 1450, duration: 300 },
+    ])
+  })
+  it('makes readable zero-based y ticks and preserves percentages over 100', () => {
+    expect([axisTicks(5952), axisTicks(151687316), axisTicks(0)]).toEqual([[0, 2000, 4000, 6000], [0, 50000000, 100000000, 150000000, 200000000], [0, 0.25, 0.5, 0.75, 1]])
+    expect([percentOf(3, 4), percentOf(5, 4), percentOf(0, 0)]).toEqual(['75.0%', '125.0%', '—'])
+    expect([percentOf(2999, 3000), percentOf(1, 10000), percentOf(3000, 3000)]).toEqual(['>99.9%', '<0.1%', '100.0%'])
+  })
+  it('weights rolling rates by time and breaks smoothing at missing intervals', () => {
+    const points = [
+      { ts: 0, objects: 0, bytes: 0, rate: null, byteRate: null },
+      { ts: 30, objects: 300, bytes: 300, rate: 10, byteRate: 100 },
+      { ts: 90, objects: 1500, bytes: 1500, rate: 20, byteRate: 200 },
+      { ts: 500, objects: 2000, bytes: 2000, rate: null, byteRate: null },
+      { ts: 530, objects: 2900, bytes: 2900, rate: 30, byteRate: 300 },
+    ]
+    expect(rollingRates(points, 60)).toEqual([null, 10, 20, null, 30])
+    expect(rollingRates(points, 90)).toEqual([null, 10, 50 / 3, null, 30])
+    expect(rollingRates(points, 90, 'byteRate')).toEqual([null, 100, 500 / 3, null, 300])
+  })
+  it('aligns dual axes at nice shared ticks in display units', () => {
+    expect(alignedTicks(175466921, 50.4)).toEqual([[0, 50000000, 100000000, 150000000, 200000000], [0, 20, 40, 60, 80]])
+    expect(alignedTicks(5952, 50.4)).toEqual([[0, 2000, 4000, 6000], [0, 20, 40, 60]])
+  })
+})
+
+describe("the scans page's window (`?w=`)", () => {
+  const ts = (iso: string) => Date.parse(iso) / 1000
+  const w: [number, number] = [ts('2026-10-11T06:02:00Z'), ts('2026-10-17T12:02:00Z')]
+  it('round-trips as scan-id stamps, and refuses anything else', () => {
+    expect([
+      runSpanParam.encode(w), runSpanParam.decode('2026-10-11T0602~2026-10-17T1202'), runSpanParam.encode(null),
+      runSpanParam.decode(undefined), runSpanParam.decode('2026-10-17T1202~2026-10-11T0602'), runSpanParam.decode('2026-10-11~2026-10-17'), runSpanParam.decode('2026-10-11T0602'),
+    ]).toEqual(['2026-10-11T0602~2026-10-17T1202', w, undefined, null, null, null, null])
+  })
+  it('holds the runs that started in its minutes, both ends inclusive', () => {
+    expect(['2026-10-11T06:01:59Z', '2026-10-11T06:02:00Z', '2026-10-17T12:02:59Z', '2026-10-17T12:03:00Z'].map(s => inSpan(w, ts(s)))).toEqual([false, true, true, false])
+    expect([inSpan(null, null), inSpan(w, null)]).toEqual([true, false])
+  })
+})
+
+describe('/scans\' filters in the URL (`k`, `st`)', () => {
+  it('a kind is its own name, a status a `STATUS_FILTERS` key; each absent on its default, and an unknown status reads as none', () => {
+    expect([runKindParam.encode(''), runKindParam.encode('scan'), runKindParam.decode(undefined), runKindParam.decode('merge')]).toEqual([undefined, 'scan', '', 'merge'])
+    expect([runStatusParam.encode(''), runStatusParam.encode('attention'), runStatusParam.encode('nop')]).toEqual([undefined, 'attention', 'nop'])
+    expect([undefined, 'attention', 'partial', 'passing', 'incomplete', 'behind', 'recovered', 'failed', 'running', 'nop', 'succeeded', 'search behind', 'bogus'].map(s => runStatusParam.decode(s))).toEqual(
+      ['', 'attention', 'partial', 'passing', 'incomplete', 'behind', 'recovered', 'failed', 'running', 'nop', 'succeeded', '', ''])
+  })
+})

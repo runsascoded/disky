@@ -1,0 +1,118 @@
+// CF Pages Function: the snapshot data the client reads beside the views.
+//
+// The app fetches /data/<store>/scans.json (the scan picker: D1's scans), and
+// /data/<store>/<scan>/{age,meta,lifecycle}.json and /data/rules.json (the
+// files the scan job publishes under `snapshots/`). Read live, so a new scan
+// surfaces with no site redeploy, through the served seam (`servedStore`):
+// `INDEX_R2` where the job copies them to R2 (`SERVED_R2`), else the store
+// seam's bucket. Same-origin behind the app's auth (no CORS). CF Pages serves
+// static assets before Functions, so this only works because public/data/ is
+// no longer shipped (see the build).
+import { withStore } from '../_lib/stores.js'
+import { snapshotsPrefix } from '../_lib/shared.js'
+import { type Env, requireViewer } from '../_lib/auth.js'
+import { dataAllowed, filterJson, restrictedForbidden, restrictionFor, restrictRules } from '../_lib/restrict.js'
+import { pathScans, servedStore, storeReady } from '../_lib/index.js'
+import { scanStarts } from '../_lib/scanTimes.js'
+import { isScanId } from '../../src/scanSlug.js'
+
+// Scan ids are `YYYY-MM-DD`, optionally sub-daily as `YYYY-MM-DDTHHMM` (no
+// colon: it keeps the id safe as an object-key path segment). GCS publishes one
+// scan a day so its ids stay date-only; CoreWeave runs ad hoc, several a day.
+// `private`: these responses are now auth-gated — browser caching only.
+const CACHE = 'private, max-age=300' // daily cadence — ≤5min staleness is fine
+
+export const onRequest = async (ctx0: { request: Request; env: Env }): Promise<Response> => {
+  // `store=<key>`: a secondary store's env overlay (none = the primary, as is).
+  const ctx = withStore(ctx0)
+  if (ctx instanceof Response) return ctx
+  if (!ctx.env.SERVED_R2 && !storeReady(ctx.env)) {
+    return new Response('data proxy not configured (missing index store creds)', { status: 503 })
+  }
+  // Every payload is members-only: the edge (CF Access) session is the identity
+  // (a public deploy grants the base viewer scope via PUBLIC_READ).
+  const rel = new URL(ctx.request.url).pathname.replace(/^\/data\//, '')
+  const gated = await requireViewer(ctx)
+  if (gated instanceof Response) return gated
+  // The served seam (`_lib/index.ts` `servedStore`): `INDEX_R2` under `SERVED_R2`, else the store
+  // seam (GCS by default, any S3-compatible store once `STORE_*` is set) — same data, same keys.
+  const own = snapshotsPrefix(ctx.env)
+  const notFound = () => new Response('not found', { status: 404 })
+  const rulesKey = !ctx.env.STORE_KEY && rel === 'rules.json' ? 'snapshots/rules.json' : null
+  const store = servedStore(ctx.env, rulesKey ? [rulesKey] : [own])
+
+  try {
+    // `<store>/scans.json` → the store's scans, newest-first: D1's, alone. Every view reads the path
+    // index, so a scan is servable exactly when D1 points at one (`pathScans`); no store LIST, which
+    // sat on every first paint's critical path. The URL names the env's own snapshot dir
+    // (`snapshots/<SNAPSHOTS_SUBDIR>/`, the client's `store.base`); any other is a 404.
+    const scansM = /^(?:([a-z0-9-]+)\/)?scans\.json$/.exec(rel)
+    if (scansM) {
+      const prefix = scansM[1] ? `snapshots/${scansM[1]}/` : 'snapshots/'
+      if (prefix !== snapshotsPrefix(ctx.env)) return notFound()
+      if (!ctx.env.DB) return new Response('scan list not configured (DB)', { status: 503 })
+      const dates = (await pathScans(ctx.env, false)).results.map(r => r.date).filter(d => isScanId(d))
+      dates.sort().reverse()
+      return new Response(JSON.stringify(dates), {
+        headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': CACHE },
+      })
+    }
+    // `<store>/scan-times.json` → `{ <date-only scan id>: <started> }`: each date-only scan's start
+    // instant, as its `path` pointer records it (`index_schema.started`; `scanStarts`) — one D1 query
+    // for the picker's times, however many scans share a day. A scan with no recorded start is left
+    // out. Names no path, so a restricted link reads it as it reads `scans.json`.
+    const timesM = /^(?:([a-z0-9-]+)\/)?scan-times\.json$/.exec(rel)
+    if (timesM) {
+      const prefix = timesM[1] ? `snapshots/${timesM[1]}/` : 'snapshots/'
+      if (prefix !== snapshotsPrefix(ctx.env)) return notFound()
+      return new Response(JSON.stringify(await scanStarts(ctx.env)), {
+        headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': CACHE },
+      })
+    }
+    // rules.json → snapshots/rules.json ; else /data/<date>/<file> → snapshots/<date>/<file>
+    const key = rulesKey ?? `snapshots/${rel}`
+    // A root-level primary must not proxy another store's named subdirectory
+    // without its scope gate. Every snapshot starts with a canonical scan ID.
+    if (!rulesKey && (!key.startsWith(own) || !isScanId(key.slice(own.length).split('/')[0]))) return notFound()
+    // A path-restricted link (`_lib/restrict.ts`): only the snapshot files that can't name a hidden path, and
+    // `rules.json` without the attribution rules below one.
+    const restriction = restrictionFor(gated, ctx.env)
+    if (restriction && !rulesKey && !dataAllowed(key, own, restriction)) return restrictedForbidden()
+    const { bytes, contentType } = await store.get(key)
+    if (restriction && rulesKey) {
+      const whole = new Response(bytes, { headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': CACHE } })
+      return await filterJson(whole, (rules: Parameters<typeof restrictRules>[0]) => restrictRules(rules, restriction))
+    }
+    // A date-only scan id can't say *when* in that day the scan ran, and the
+    // daily GCS job publishes ids without a time — but the object itself knows.
+    // Splice its lastModified into meta.json so the UI can show the real
+    // publish time; sizes move enough over 24h that "which 8/17?" matters.
+    if (key.endsWith('/meta.json')) {
+      const meta = JSON.parse(new TextDecoder().decode(bytes)) as Record<string, unknown>
+      // Newer scans carry `published` as data (the job stamps it; older metas
+      // were back-stamped by `dt-cloud stamp-published`). Only a meta without
+      // it falls back to the object's mtime — which is the *copy* time, not the
+      // publish time, once the served copy lives in R2.
+      if (typeof meta.published === 'string') {
+        return new Response(bytes, {
+          headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': CACHE },
+        })
+      }
+      const dir = key.slice(0, key.lastIndexOf('/') + 1)
+      const published = (await store.list(dir)).entries.find(e => e.key === key)?.lastModified
+      if (published) {
+        return new Response(JSON.stringify({ ...meta, published }), {
+          headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': CACHE },
+        })
+      }
+    }
+    return new Response(bytes, {
+      headers: { 'content-type': contentType ?? 'application/json; charset=utf-8', 'cache-control': CACHE },
+    })
+  } catch {
+    // `?optional=1`: a file a scan may lack (`non-live.json`) is answered 204, not a 404 every such scan logs
+    return new URL(ctx.request.url).searchParams.get('optional') === '1'
+      ? new Response(null, { status: 204, headers: { 'cache-control': CACHE } })
+      : new Response('not found', { status: 404 })
+  }
+}

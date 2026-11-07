@@ -1,0 +1,33 @@
+# Source upload for Cloud Build / `gcloud run jobs deploy --source`
+# (superset of .dockerignore: also excludes repo-local working state the
+# Docker build never needs).
+.git
+.venv
+tmp
+.tmp
+.dvc
+slck
+dscrd
+.envrc
+site/.dev.vars
+node_modules
+site/node_modules
+site/dist
+site/public/data/20*
+wt
+gh
+specs
+cloud/.venv
+ui/node_modules
+packages/react/node_modules
+packages/treemap/node_modules
+cloud/tmp
+thrds
+screenshots
+site/screenshots
+*.csv
+# wrangler dev state + Playwright output: ~235 MiB the image never reads
+site/.wrangler
+.wrangler
+site/playwright-report
+site/test-results

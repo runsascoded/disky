@@ -1,0 +1,229 @@
+"""Read-only GCP API helpers for job/SII ops (Batch, Logging, Monitoring).
+
+Everything here is observational — list/describe/read — so the CLI commands
+built on it are safe to auto-approve. REST via ADC (no gcloud subprocess
+parsing); ``gcloud auth application-default login`` or plain ``gcloud auth
+login`` credentials both work.
+"""
+from __future__ import annotations
+
+import re
+from datetime import datetime, timedelta, timezone
+from json import dumps
+from typing import Any
+
+_session = None
+_project: str | None = None
+
+
+def gcp_project() -> str:
+    """The deployment's GCP project: `$GCP_PROJECT`, else the one the ADC
+    credentials name. Neither → exit naming the variable."""
+    global _project
+    if _project is None:
+        from .deploy import env
+
+        p = env("GCP_PROJECT")
+        if not p:
+            import google.auth
+
+            try:
+                _, p = google.auth.default()
+            except google.auth.exceptions.DefaultCredentialsError:
+                p = None
+        if not p:
+            raise SystemExit("GCP_PROJECT is unset (and the default credentials name no project): export the deployment's GCP project")
+        _project = p
+    return _project
+
+
+def session():
+    global _session
+    if _session is None:
+        import google.auth
+        from google.auth.transport.requests import AuthorizedSession
+
+        creds, _ = google.auth.default()
+        _session = AuthorizedSession(quota_creds(creds))
+    return _session
+
+
+def quota_creds(creds):
+    """User credentials (`gcloud auth … login`) bill the deployment's project as their quota project; a service
+    account's already bill its own, and the `x-goog-user-project` header would demand `serviceusage.services.use`
+    of it (the job's `gcp-cost` step got a 403 on every bucket read, 2026-10-27)."""
+    from google.oauth2.credentials import Credentials
+
+    if isinstance(creds, Credentials) and not creds.quota_project_id:
+        return creds.with_quota_project(gcp_project())
+    return creds
+
+
+def _get(url: str, **params: Any) -> dict:
+    r = session().get(url, params=params or None)
+    r.raise_for_status()
+    return r.json()
+
+
+def _post(url: str, body: dict) -> dict:
+    r = session().post(url, json=body)
+    r.raise_for_status()
+    return r.json()
+
+
+def batch_jobs(project: str | None = None, region: str | None = None) -> list[dict]:
+    """Recent Batch jobs in `region` (default `$BATCH_REGION`: `deploy.batch_region`), newest first."""
+    from .deploy import batch_region
+
+    region, project = batch_region(region), project or gcp_project()
+    jobs = _pages(f"https://batch.googleapis.com/v1/projects/{project}/locations/{region}/jobs", "jobs")
+    return sorted(jobs, key=lambda j: j.get("createTime", ""), reverse=True)
+
+
+def _pages(url: str, key: str) -> list[dict]:
+    return [row for page in pages(url) for row in page.get(key, [])]
+
+
+def pages(url: str, **params: str) -> list[dict]:
+    """Every page a GET list endpoint answers with `params`, following `nextPageToken`."""
+    out: list[dict] = []
+    while True:
+        page = _get(url, **params)
+        out.append(page)
+        if not (token := page.get("nextPageToken")):
+            return out
+        params["pageToken"] = token
+
+
+def batch_tasks(job: dict) -> list[dict]:
+    """Every task, including its retry status events, across a job's groups."""
+    tasks = []
+    for group in job.get("taskGroups", []):
+        tasks.extend(_pages(f"https://batch.googleapis.com/v1/{group['name']}/tasks", "tasks"))
+    return tasks
+
+
+def batch_job(name: str, project: str | None = None, region: str | None = None) -> dict:
+    """The Batch job `name` in `region` (default `$BATCH_REGION`)."""
+    from .deploy import batch_region
+
+    region, project = batch_region(region), project or gcp_project()
+    return _get(f"https://batch.googleapis.com/v1/projects/{project}/locations/{region}/jobs/{name}")
+
+
+def batch_job_by_uid(uid: str, project: str | None = None, region: str | None = None) -> dict | None:
+    """The Batch job whose uid is `uid` (a task knows only its `$BATCH_JOB_UID`), or None. Follows the pages: a
+    filtered list can answer an empty page and a `nextPageToken` (the filter runs per page), so the first page alone
+    missed 2 of a run's 10 tasks."""
+    from .deploy import batch_region
+
+    region, project = batch_region(region), project or gcp_project()
+    url = f"https://batch.googleapis.com/v1/projects/{project}/locations/{region}/jobs"
+    params = {"filter": f'uid="{uid}"'}
+    while True:
+        page = _get(url, **params)
+        if jobs := page.get("jobs"):
+            return jobs[0]
+        if not (token := page.get("nextPageToken")):
+            return None
+        params["pageToken"] = token
+
+
+def log_entries(
+    filter_: str,
+    project: str | None = None,
+    limit: int = 50,
+    asc: bool = False,
+) -> list[dict]:
+    project = project or gcp_project()
+    entries: list[dict] = []
+    body = {
+        "resourceNames": [f"projects/{project}"],
+        "filter": filter_,
+        "orderBy": "timestamp asc" if asc else "timestamp desc",
+        "pageSize": min(limit, 1000),
+    }
+    while len(entries) < limit:
+        d = _post("https://logging.googleapis.com/v2/entries:list", body)
+        entries.extend(d.get("entries", []))
+        tok = d.get("nextPageToken")
+        if not tok:
+            break
+        body["pageToken"] = tok
+    return entries[:limit]
+
+
+def task_log_filter(uid: str, grep: str | None = None) -> str:
+    f = f'labels.job_uid="{uid}" log_id("batch_task_logs")'
+    if grep:
+        pattern = dumps(grep)
+        f += f' (textPayload=~{pattern} OR jsonPayload.message=~{pattern})'
+    return f
+
+
+def job_instance_id(uid: str, project: str | None = None) -> str | None:
+    """The Batch VM's numeric instance id, scraped from agent heartbeat logs."""
+    for e in log_entries(f'labels.job_uid="{uid}" log_id("batch_agent_logs")', project, limit=5):
+        if m := re.search(r"instance_id:(\d+)", e.get("textPayload", "")):
+            return m.group(1)
+    return None
+
+
+METRICS = {
+    "cpu": ("compute.googleapis.com/instance/cpu/utilization", 100, "%cpu"),
+    "net": ("compute.googleapis.com/instance/network/received_bytes_count", 1e-6, "MB/s rx"),
+    "disk": ("compute.googleapis.com/instance/disk/read_bytes_count", 1e-6, "MB/s read"),
+}
+
+
+def vm_metric(
+    instance_id: str,
+    metric: str,
+    minutes: int = 30,
+    project: str | None = None,
+    start: str | None = None,
+    end: str | None = None,
+) -> list[tuple[str, float]]:
+    """(end_time, scaled value) points for a VM metric, newest first.
+
+    Default window is the last ``minutes``; pass RFC3339 ``start``/``end`` to
+    cover a finished job's lifetime instead.
+    """
+    project = project or gcp_project()
+    mtype, scale, _unit = METRICS[metric]
+    now = datetime.now(timezone.utc)
+    d = _get(
+        f"https://monitoring.googleapis.com/v3/projects/{project}/timeSeries",
+        **{
+            "filter": f'metric.type="{mtype}" resource.labels.instance_id="{instance_id}"',
+            "interval.startTime": start or (now - timedelta(minutes=minutes)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "interval.endTime": end or now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "aggregation.alignmentPeriod": "60s",
+            "aggregation.perSeriesAligner": "ALIGN_RATE" if mtype.endswith("_count") else "ALIGN_MEAN",
+        },
+    )
+    pts = []
+    for ts in d.get("timeSeries", []):
+        for p in ts.get("points", []):
+            v = p["value"].get("doubleValue", p["value"].get("int64Value", 0))
+            pts.append((p["interval"]["endTime"], float(v) * scale))
+    return pts
+
+
+def sii_project() -> str:
+    """The project holding the buckets' Storage Insights report configs (`$SII_PROJECT`)."""
+    from .deploy import require
+
+    return require("SII_PROJECT", what="the GCP project holding the buckets' Storage Insights report configs")
+
+
+def sii_report_configs(location: str) -> list[dict]:
+    d = _get(
+        f"https://storageinsights.googleapis.com/v1/projects/{sii_project()}/locations/{location}/reportConfigs"
+    )
+    return d.get("reportConfigs", [])
+
+
+def sii_report_details(config_name: str) -> list[dict]:
+    d = _get(f"https://storageinsights.googleapis.com/v1/{config_name}/reportDetails")
+    return sorted(d.get("reportDetails", []), key=lambda r: r.get("snapshotTime", ""), reverse=True)

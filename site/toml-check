@@ -1,0 +1,39 @@
+#!/usr/bin/env python3
+"""Parse each given TOML file; exit 1 naming `file:line:col: message` for every one that doesn't parse.
+
+Wrangler logs `Invalid TOML document`, then "Ignoring configuration file for now, and proceeding with
+project deploy": a bad `wrangler.toml` deploys with the project's old settings. `site/deploy` runs this
+before building; CI runs it over every `site/wrangler*.toml`.
+
+Parser: stdlib `tomllib` (Python >= 3.11, the repo's floor). Node has no TOML parser to hand (wrangler
+bundles its own, unreachable from `site/`), and the macOS system python3 is older, so too-old python fails
+loudly rather than passing the file unchecked.
+"""
+import re
+import sys
+
+if sys.version_info < (3, 11):
+    sys.exit(f'toml-check: needs python3 >= 3.11 for tomllib (this is {sys.version.split()[0]}); run it from the project venv')
+
+from tomllib import TOMLDecodeError, load
+
+
+def main(paths: list[str]) -> int:
+    bad = 0
+    for path in paths:
+        try:
+            with open(path, 'rb') as f:
+                load(f)
+        except TOMLDecodeError as e:
+            msg = str(e)
+            m = re.search(r'\(at line (\d+), column (\d+)\)$', msg)
+            where = f'{m[1]}:{m[2]}' if m else '?'
+            print(f'toml-check: {path}:{where}: {msg}', file=sys.stderr)
+            bad += 1
+    return 1 if bad else 0
+
+
+if __name__ == '__main__':
+    if len(sys.argv) < 2:
+        sys.exit('usage: toml-check FILE…')
+    sys.exit(main(sys.argv[1:]))

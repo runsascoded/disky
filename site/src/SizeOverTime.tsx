@@ -1,0 +1,616 @@
+import { Tooltip } from './Tooltip'
+import { SectionAnchor } from './SectionAnchor'
+import { Explain } from './Help'
+import { TimeSeries, XOverview } from '@disk-tree/react'
+import type { Annotation, Series as TsSeries } from '@disk-tree/react'
+import { slotColor } from './colors'
+import { useQuery } from '@tanstack/react-query'
+import { type ReactNode, useMemo, useRef, useState } from 'react'
+import { boolParam, useUrlState } from 'use-prms'
+import { shortName } from './UserChip'
+import { useStore, useStoreFetch } from './store'
+import { useUnits } from './units'
+import { fmtBytesStep } from './types'
+import { bandCallouts, pickAnnotations, relativeSeries, seriesGaps, stackSeries, unitTicks, youngestGenesis } from './series'
+import { DAY, fmtScan, scanInstant, type ScanLabel, type ScanTimes } from './scan'
+import type { Band } from './series'
+import { stringParam } from 'use-prms'
+import { perf, usePerfCommit } from './perf'
+import { SERIES_MAX_PATHS } from '../functions/_lib/seriesLimits'
+import { ApiError, apiError } from './filterCaps'
+import { LoadFailure } from './LoadFailure'
+import { SeriesEmpty } from './SeriesEmpty'
+import { SeriesMissingNote } from './UnionNotes'
+import { defaultNoteAt, noteMarkers, notesHere, type ChartAnnotation, type NoteMarker } from './chartNotes'
+import { NoteForm, NoteTip, useChartNotes, useNoteWrite } from './NoteWidgets'
+import { manualScans } from './scanRunsModel'
+import { useScanRuns } from './scanRunsUi'
+import { useActions } from 'use-kbd'
+import { MdFitScreen, MdZoomOut } from 'react-icons/md'
+import { brushDomain, fitToWindow, fmtXr, inXDomain, parseXr, presetOf, resolveXDomain, spanDomain, X_PRESETS, type XDomain } from './xDomain'
+
+// Stored bytes over the historical scans, scoped exactly like the map: the
+// drilled prefix, a user, or an owner pool (`/api/series` — one row read per
+// scan in that scan's index tiers; specs/done/view-serving.md §1). Nothing is
+// precomputed per prefix and nothing is floored.
+
+interface Pt { x: number; y: number; y0?: number }
+interface Series { path: string; points: { date: string; b: number; o: number; missing?: string[] }[]; unindexed?: string[]; roots?: { path: string; points: { date: string; b: number; o: number }[] }[] }
+
+// Default prominence-suppression radius for the local-extrema callouts, in days
+// (≈6 scans at the 12-hourly cadence): peaks/dips within this of a more
+// prominent one collapse to it.
+const DEFAULT_RADIUS_DAYS = 3
+// Default prominence floor for those callouts, as a percentage of the trace's
+// range: a wobble smaller than this isn't a peak or dip worth a label.
+const DEFAULT_FLOOR_PCT = 10
+
+type YFrom = 'data' | 'zero'
+type Layout = 'stacked' | 'lines'
+// What the y-axis measures: bytes, bytes gained since each trace's first shown
+// scan, or that as a percentage of the start.
+type Values = 'abs' | 'delta' | 'pct'
+
+// The displayed x-range (`?xr=`, `xDomain.ts`): `1w` / `1m` (the last N days before the latest scan), a brushed
+// span of two scans (`<from>..<to>`), or every scan (the default). Separate from the diff window, which it only
+// frames: zooming never moves the window, and the chart keeps the context around it.
+// Scans a hand submit started (`manualScans`), drawn apart from the schedule's (`?mm`): a tick under the x-axis
+// (default), hollow dots (`h`), or not at all (`0`). The tooltip names them in every style, and the legend the mark.
+type ManualMark = 'hollow' | 'tick' | 'off'
+const MANUAL_MARKS: [ManualMark, string][] = [
+  ['tick', 'A tick under the x-axis at each manual scan'],
+  ['hollow', 'Manual scans’ dots drawn hollow'],
+  ['off', 'Manual scans drawn like the schedule’s'],
+]
+
+function ManualMarkToggle({ v, set }: { v: ManualMark; set: (m: ManualMark) => void }) {
+  return (
+    <span className="gran" role="radiogroup" aria-label="Manual scans">
+      <span className="lbl">manual scans</span>
+      {MANUAL_MARKS.map(([m, text]) => (
+        <Explain key={m} text={text}>
+          <button role="radio" aria-checked={v === m} className={v === m ? 'on' : ''} onClick={() => set(m)}>{m}</button>
+        </Explain>
+      ))}
+    </span>
+  )
+}
+
+function XRangeToggle({ domain, set, onFit, canFit }: { domain: XDomain; set: (d: XDomain) => void; onFit: () => void; canFit: boolean }) {
+  const on = presetOf(domain)
+  return (
+    <span className="gran x-range" role="group" aria-label="X-axis range">
+      {X_PRESETS.map(([r, days]) => (
+        <Explain key={r} text={days ? `Only the last ${days === 7 ? 'week' : '30 days'} of scans` : 'Every scan'}>
+          <button role="radio" aria-checked={on === r} className={on === r ? 'on' : ''} onClick={() => set(parseXr(r))}>{r}</button>
+        </Explain>
+      ))}
+      {canFit && (
+        <Explain text="Zoom to the diff window (with a scan of context each side); the strip under the chart shows where it sits">
+          <button type="button" className="icon" aria-label="zoom to the diff window" onClick={onFit}><MdFitScreen /></button>
+        </Explain>
+      )}
+      {domain.kind === 'span' && (
+        <Explain text="Show every scan again (or double-click the strip under the chart)">
+          <button type="button" className="icon" aria-label="reset zoom" onClick={() => set({ kind: 'all' })}><MdZoomOut /></button>
+        </Explain>
+      )}
+    </span>
+  )
+}
+
+// Per-root layout at the store root (`?ln` — lines on): stacked bands (the
+// composition; a root's band starts at its genesis) or overlaid lines (each
+// root's own movement).
+function LayoutToggle({ v, set }: { v: Layout; set: (l: Layout) => void }) {
+  return (
+    <span className="gran" role="radiogroup" aria-label="Roots layout">
+      <span className="lbl">roots</span>
+      {(['stacked', 'lines'] as Layout[]).map(l => (
+        <Explain key={l} text={l === 'stacked' ? 'One band per bucket, stacked to the total; a bucket’s band starts at the first scan that covered it' : 'One line per bucket (the total is in the tooltip — drawn, it would dwarf them)'}>
+          <button role="radio" aria-checked={v === l} className={v === l ? 'on' : ''} onClick={() => set(l)}>{l}</button>
+        </Explain>
+      ))}
+    </span>
+  )
+}
+
+// y-axis origin toggle (`?fit` — fit on): anchor at zero (default — honest
+// proportions; the Δ / % values are the way to see a small movement in a
+// large total) or fit the y-range to the data. Stacked, "fit" zooms to the
+// stack's top edge (the total's own movement), clipping the bands below.
+function YFromToggle({ v, set, stacked }: { v: YFrom; set: (y: YFrom) => void; stacked: boolean }) {
+  return (
+    <span className="gran" role="radiogroup" aria-label="Y-axis range">
+      <span className="lbl">y-axis</span>
+      {(['zero', 'data'] as YFrom[]).map(y => (
+        <Explain key={y} text={y === 'data' ? (stacked ? 'Zoom the y-range to the top of the stack — the total’s own movement, and which band it came from' : 'Fit the y-range to the data (a small movement in a large total stays visible)') : 'Start the y-axis at zero (honest proportions)'}>
+          <button role="radio" aria-checked={v === y} className={v === y ? 'on' : ''} onClick={() => set(y)}>{y === 'data' ? 'fit' : 'from 0'}</button>
+        </Explain>
+      ))}
+    </span>
+  )
+}
+
+// What the y-axis measures (`?ym=d|p`; abs = default). Δ and % put buckets
+// of very different sizes on one comparable axis: each trace starts at 0 and
+// shows what it gained or lost since — the question "what moved", which the
+// absolute stack answers only for the biggest bucket.
+function ValuesToggle({ v, set }: { v: Values; set: (m: Values) => void }) {
+  const opts: [Values, string, string][] = [
+    ['abs', 'abs', 'Stored bytes'],
+    ['delta', 'Δ', 'Bytes gained (or lost) since each trace’s first shown scan — every trace starts at 0, so buckets of any size compare'],
+    ['pct', '%', 'Growth since each trace’s first shown scan, as a percentage of its size then'],
+  ]
+  return (
+    <span className="gran" role="radiogroup" aria-label="Y-axis values">
+      <span className="lbl">values</span>
+      {opts.map(([m, label, text]) => (
+        <Explain key={m} text={text}>
+          <button role="radio" aria-checked={v === m} className={v === m ? 'on' : ''} onClick={() => set(m)}>{label}</button>
+        </Explain>
+      ))}
+    </span>
+  )
+}
+
+// Points sit at UTC midnight of each scan's calendar date, so labels format
+// in UTC too — a local-time render shows the 8/23 scan as “Aug 22” in the US.
+// x → the scan id it came from: date-only ids sit at midnight; a sub-daily
+// id keeps its `THHMM` (`2026-09-17T1201`), so a pick or brush names the
+// exact scan.
+export const dateOfX = (x: number) => {
+  const iso = new Date(x).toISOString()
+  return iso.slice(11, 16) === '00:00' ? iso.slice(0, 10) : `${iso.slice(0, 10)}T${iso.slice(11, 13)}${iso.slice(14, 16)}`
+}
+const fmtX = (x: number) => new Date(x).toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' })
+// The x-axis over a span under two days (a new store's first scans): times of day, local as the scan picker's, since
+// every tick would otherwise read the same date.
+const fmtXTime = (x: number) => new Date(x).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })
+// A scan's instant: `YYYY-MM-DDTHHMM` = that UTC time, `YYYY-MM-DD` = its
+// start when known (`times`), else UTC midnight. Two scans a day must not share
+// an x (the bands key by x, and a shared x drew the total as a vertical step
+// against the band).
+export const xOfScan = (d: string, times?: ScanTimes) => {
+  const t = scanInstant(d, times)
+  return Number.isNaN(t) ? new Date(d.slice(0, 10)).getTime() : t
+}
+// Signed formats for the relative modes: `+1.2 Ti` / `−340 Gi` / `0`, `+3.1%`.
+const signed = (y: number, mag: string) => (y < 0 ? `−${mag}` : y > 0 ? `+${mag}` : mag)
+const fmtPct = (y: number) => {
+  const a = Math.abs(y * 100)
+  return a === 0 ? '0%' : signed(y, `${a >= 10 ? a.toFixed(0) : a.toFixed(1)}%`)
+}
+
+export function SizeOverTime({ scans, times, fmt = fmtScan, prefix, user, pool, ledgerRev, scopeReady = true, onPickDate, onBrush, window: win, admin = false, scopeLabel = 'all buckets', refused, paths, pathsTotal, queryOnly, filterLabel, filterQs }: {
+  /** The store's root scope word for the unscoped subtitle (`all buckets`, `the whole bucket`). */
+  scopeLabel?: string
+  /** The page view's filter refusal (`term-too-common`, …): no match roots to sum, so the series is never asked
+   *  for, and the chart's slot states the refusal instead. */
+  refused?: unknown
+  /** The page filter's match roots: the series is their sum per scan. */
+  paths?: string[]
+  /** The match roots' exact count (`matchCount.n`): more than `SERIES_MAX_PATHS` asks with the query alone. */
+  pathsTotal?: number
+  /** The filter's view was a rollup (a heavy literal): `paths` lists only some match roots, so the series
+   * is asked for the query alone (the server sums the rollup per scan). */
+  queryOnly?: boolean
+  /** The filter text, for the subtitle. */
+  filterLabel?: string
+  /** The filter as query params (`&q=…&qs=…`): a static-index literal is summed per scan server-side
+   *  from that scan's own match roots, whatever their number; `paths` is the fallback. */
+  filterQs?: string
+  scans: string[]
+  /** The date-only scans' known starts (`useScan`): each sits at its start. */
+  times?: ScanTimes
+  /** A scan's label (the page's `scanLabeler`) — the tooltip's x. */
+  fmt?: ScanLabel
+  prefix: string
+  /** The owner axis's user: their bytes under `prefix`, per scan. */
+  user?: string | null
+  /** The ownership ledger's revision: a user or pool series folds the live
+   * assignments server-side, so an assignment refetches it. */
+  ledgerRev?: string
+  /** The owner axis is final (`ownerScopeReady`): until then `user` / `pool` may not be what the page
+   *  asked for, and the series waits rather than fetch a scope it will drop. */
+  scopeReady?: boolean
+  /** The owner axis's pool — `unowned` = bytes no person owns, `owned`
+   * = bytes some person owns — under `prefix`, per scan. `user` wins. */
+  pool?: 'unowned' | 'owned' | null
+  /** Click a point → view the page as of that scan (pins `?d=`). */
+  onPickDate?: (date: string) => void
+  /** Drag across the chart → make [from, to] the page's diff window. */
+  onBrush?: (from: string, to: string) => void
+  /** The page's current diff window (scan ids), shaded on the chart. */
+  window?: [string, string]
+  /** The viewer is an admin (`useIsAdmin`): may add, edit and delete the chart's notes. */
+  admin?: boolean
+}) {
+  const { fmtBytes, units, suffixB } = useUnits()
+  const [fitP, setFitP] = useUrlState('fit', boolParam)
+  const yFrom: YFrom = fitP ? 'data' : 'zero'
+  const setYFrom = (y: YFrom) => setFitP(y === 'data')
+  const [linesP, setLinesP] = useUrlState('ln', boolParam)
+  const layout: Layout = linesP ? 'lines' : 'stacked'
+  const setLayout = (l: Layout) => setLinesP(l === 'lines')
+  const [xrP, setXrP] = useUrlState('xr', stringParam())
+  const xDomain = useMemo(() => parseXr(xrP), [xrP])
+  const setXDomain = (d: XDomain) => setXrP(fmtXr(d))
+  const [ymP, setYmP] = useUrlState('ym', stringParam())
+  const values: Values = ymP === 'd' ? 'delta' : ymP === 'p' ? 'pct' : 'abs'
+  const setValues = (m: Values) => setYmP(m === 'delta' ? 'd' : m === 'pct' ? 'p' : undefined)
+  const relative = values !== 'abs'
+  // Local-peak/dip callouts (specs/done/obs-axis-indexing.md): on by default, radius
+  // is the prominence-suppression distance in days (`?ex=0` off; `?exr=<days>`),
+  // floor the least prominence that earns a label, as % of the trace's range
+  // (`?exp=<pct>`).
+  const [exP, setExP] = useUrlState('ex', stringParam())
+  const extrema = exP !== '0'
+  const setExtrema = (on: boolean) => setExP(on ? undefined : '0')
+  const [exrP, setExrP] = useUrlState('exr', stringParam())
+  const radiusDays = exrP && !Number.isNaN(+exrP) ? +exrP : DEFAULT_RADIUS_DAYS
+  const setRadiusDays = (d: number) => setExrP(d === DEFAULT_RADIUS_DAYS ? undefined : String(d))
+  const [expP, setExpP] = useUrlState('exp', stringParam())
+  const floorPct = expP && !Number.isNaN(+expP) ? +expP : DEFAULT_FLOOR_PCT
+  const setFloorPct = (p: number) => setExpP(p === DEFAULT_FLOOR_PCT ? undefined : String(p))
+  const [gearOpen, setGearOpen] = useState(false)
+  const [mmP, setMmP] = useUrlState('mm', stringParam())
+  const manualMark: ManualMark = mmP === 'h' ? 'hollow' : mmP === '0' ? 'off' : 'tick'
+  const setManualMark = (m: ManualMark) => setMmP(m === 'hollow' ? 'h' : m === 'off' ? '0' : undefined)
+  useActions(Object.fromEntries(MANUAL_MARKS.map(([m, text]) => [`over-time:manual-${m}`, {
+    label: `Size over time: ${text.charAt(0).toLowerCase()}${text.slice(1)}`, group: 'Size over time', keywords: ['manual', 'scan', 'trigger'], handler: () => setManualMark(m),
+  }])))
+
+  // The store root, unscoped: one trace per root (specs/done/root-geneses.md §2).
+  const split = !prefix && !user && !pool && !paths?.length && !filterLabel
+  // A filter with more match roots than one series request charts sends only the query: the server
+  // answers it from the static name index, or refuses (400) and the chart says why.
+  const nPaths = pathsTotal ?? paths?.length ?? 0
+  const overMax = nPaths > SERIES_MAX_PATHS
+  const scope = (user ? `&lens=user:${encodeURIComponent(user)}` : pool ? `&o=${pool}` : '') + (paths?.length && !overMax && !queryOnly ? `&paths=${encodeURIComponent(paths.join(','))}` : '') + (filterLabel && filterQs ? filterQs : '') + (split ? '&split=roots' : '')
+  // The subtree's store: its key in the query key (two mounted stores may
+  // share a prefix spelling), its `store=` on the request.
+  const store = useStore()
+  const sfetch = useStoreFetch()
+  // at a mixed-provider store's root the traces are its buckets, each named with its scheme (`r2://…`)
+  const rootName = (k: string) => (!prefix && store.bucketSchemes?.[k] ? store.bucketSchemes[k] + k : k)
+  const seriesQ = useQuery<Series>({
+    queryKey: ['series', store.key, prefix, scope, scans.length, user || pool ? ledgerRev : null],
+    // Under a filter, wait for its match roots: the whole-store series is not
+    // what the page asked for.
+    enabled: scopeReady && scans.length > 1 && !(filterLabel && !paths?.length && !((queryOnly || overMax) && filterQs)) && !(overMax && !filterQs),
+    staleTime: 5 * 60_000,
+    queryFn: async () => {
+      const pf = perf.start('series', `${prefix || '/'}${scope}|n${scans.length}`)
+      const r = await pf.track(sfetch(`/api/series?path=${encodeURIComponent(prefix)}${scope}`, { credentials: 'include' }))
+      if (!r.ok) { pf.fail(); throw apiError(r.status, await r.text()) }
+      const j = await r.json() as Series
+      pf.decoded()
+      return j
+    },
+  })
+  usePerfCommit('series')
+  // Too many match roots for `paths=`, and the server couldn't sum the query itself.
+  const tooMany = overMax && (!filterQs || (seriesQ.error instanceof ApiError && seriesQ.error.status === 400))
+
+  const label = user ? shortName(user) : pool ?? (prefix || 'total')
+  // Every scan's point (the overview strip draws them all), and the displayed range over them (`resolveXDomain`:
+  // null = all). The cut applies to every trace, so the stack, the total, the y-fit, the callouts and the notes
+  // all follow the visible window.
+  const fullTotal = useMemo(() => (seriesQ.data?.points ?? []).map(p => ({ x: xOfScan(p.date, times), y: p.b })).sort((a, b) => a.x - b.x), [seriesQ.data, times])
+  const xRange = useMemo(() => resolveXDomain(xDomain, fullTotal.map(p => p.x), id => xOfScan(id, times)), [xDomain, fullTotal, times])
+  // The diff window in x (shaded on the chart and the strip; callouts mark its ends).
+  const winX = useMemo(() => (win ? [xOfScan(win[0], times), xOfScan(win[1], times)] as [number, number] : undefined), [win, times])
+  const toPts = (points: { date: string; b: number }[]): Pt[] => points.map(p => ({ x: xOfScan(p.date, times), y: p.b })).filter(p => inXDomain(xRange, p.x)).sort((a, b) => a.x - b.x)
+  const total = useMemo(() => toPts(seriesQ.data?.points ?? []), [seriesQ.data, xRange, times])
+  // Scans the answer doesn't cover (a filter's static index): gaps in the line, with a muted note — never zeros.
+  const gaps = useMemo(
+    () => seriesGaps(seriesQ.data?.unindexed?.filter(d => inXDomain(xRange, xOfScan(d, times))), total.map(p => p.x), d => xOfScan(d, times), -Infinity, fmtX),
+    [seriesQ.data, total, times, xRange],
+  )
+  // x → the scan id it plots (a pick or brush names that exact scan, and the
+  // tooltip labels it); an x no point sits on falls back to its UTC minute.
+  const idOfX = useMemo(() => {
+    const m = new Map((seriesQ.data?.points ?? []).map(p => [xOfScan(p.date, times), p.date]))
+    return (x: number) => m.get(x) ?? dateOfX(x)
+  }, [seriesQ.data, times])
+  const runsQ = useScanRuns(store)
+  const manual = useMemo(() => manualScans(runsQ.data?.runs ?? []), [runsQ.data])
+  const manualXs = useMemo(
+    () => (seriesQ.data?.points ?? []).filter(p => manual.has(p.date)).map(p => xOfScan(p.date, times)),
+    [seriesQ.data, manual, times],
+  )
+  // the legend names the mark while one is drawn in view
+  const manualLegend = manualMark !== 'off' && manualXs.some(x => inXDomain(xRange, x))
+  // The roots' traces (split mode), keyed by bucket, in the map's colours: slot by size at the latest scan (largest =
+  // slot 0; a root that scan doesn't hold ranks last), each slot's `slotColor`, as the map colours the root's children.
+  const roots = useMemo(() => {
+    const rs = seriesQ.data?.roots ?? []
+    if (rs.length < 2) return []
+    const end = rs.reduce((m, r) => { const d = r.points[r.points.length - 1]?.date; return d && d > m ? d : m }, '')
+    const latest = (r: { points: { date: string; b: number }[] }) => { const p = r.points[r.points.length - 1]; return p?.date === end ? p.b : -1 }
+    const bySize = [...rs].sort((a, b) => latest(b) - latest(a))
+    const slot = new Map(bySize.map((r, i) => [r.path, i]))
+    return rs.map(r => ({ key: r.path, color: slotColor(slot.get(r.path)!), points: toPts(r.points) }))
+  }, [seriesQ.data, xRange, times])
+  // The x before which the total lacks a root — the total is dashed there.
+  const genesis = useMemo(() => youngestGenesis(roots), [roots])
+  // The relative modes' traces: each root, and the total, against its own
+  // first shown point.
+  const relTotal = useMemo(() => (relative ? relativeSeries([{ key: 'total', points: total }], values)[0].points : total), [relative, values, total])
+  const relRoots = useMemo(() => (relative ? relativeSeries(roots, values).map((t, i) => ({ ...roots[i], points: t.points })) : roots), [relative, values, roots])
+  const stacked = roots.length > 0 && layout === 'stacked' && !relative
+  const totalLine = { key: 'total', label: 'total', color: 'var(--ink-3)', area: false, dots: false, strokeWidth: 1 } as const
+  const series = useMemo((): TsSeries<Pt>[] => {
+    if (total.length < 2) return []
+    if (!roots.length) return [{ key: 'scoped', label, color: 'var(--s1)', points: relTotal }]
+    if (stacked) {
+      // Bands stack up to the total; the total rides along the stack's top
+      // edge as a thin grey line (dashed before the youngest genesis) so the
+      // tooltip lists it and the pre-genesis stretch reads as incomplete.
+      // `y0: 0` keeps its tooltip value the whole total, not a band height;
+      // `fit` makes the y-axis "fit" zoom to it.
+      const bands: TsSeries<Pt>[] = stackSeries(roots).map((s, i) => ({ key: s.key, label: rootName(s.key), color: roots[i].color, points: s.points as Band[] }))
+      return [...bands, { ...totalLine, fit: true, points: total.map(p => ({ ...p, y0: 0 })), dashBeforeX: genesis ?? undefined }]
+    }
+    // Lines: the total is drawn only on a relative axis, where it's the same
+    // scale as its parts; in bytes it would dwarf them, so it's tooltip-only.
+    return [...relRoots.map(r => ({ key: r.key, label: rootName(r.key), color: r.color, area: false, points: r.points })), { ...totalLine, plot: relative, points: relTotal, dashBeforeX: genesis ?? undefined }]
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [total, roots, stacked, relative, relTotal, relRoots, label, genesis, prefix, store.bucketSchemes])
+  // A scope that owns nothing here in any scan is a flat zero line — say so
+  // instead of drawing an empty axis.
+  const allZero = series.length === 1 && total.every(p => p.y === 0)
+
+  // Callouts at the points a reader looks for first: the ends of the series,
+  // its extremes, and — when a range is brushed — that range's own endpoints
+  // (the size at the start/end of the selection). Coinciding roles (first is
+  // also max; window-end is also last) share one label. With roots they
+  // annotate the total (stacked: each band's own height too, inside the band;
+  // lines in bytes: nothing — the total isn't drawn and six lines' worth of
+  // labels would be noise). Picking is a pure helper (`pickAnnotations`, tested).
+  const yTickValues = useMemo(() => {
+    if (values === 'pct') return undefined // the chart's own nice ticks, formatted as %
+    const ys = series.filter(s => s.plot !== false).flatMap(s => s.points.map(p => p.y))
+    if (!ys.length) return undefined
+    const max = Math.max(0, ...ys)
+    const min = relative ? Math.min(0, ...ys) : yFrom === 'data' ? Math.min(...ys) : 0
+    // Fit mode pads 5% each side (TimeSeries), so tick that slightly wider range.
+    const pad = yFrom === 'data' ? (max - min) * 0.05 : 0
+    return unitTicks(relative ? min - pad : Math.max(0, min - pad), max + pad, units === 'iec' ? 1024 : 1000)
+  }, [series, units, yFrom, values, relative])
+  // A fitted axis can span a sliver of a large total: its labels (ticks,
+  // tooltip, callouts) carry enough decimals to tell the ticks apart.
+  const tickStep = yTickValues && yTickValues.length > 1 ? yTickValues[1] - yTickValues[0] : 0
+  const fmtFit = (y: number) => fmtBytesStep(y, tickStep, units, suffixB)
+  const fmtY = values === 'pct' ? fmtPct : relative ? (y: number) => signed(y, fmtBytes(Math.abs(y))) : yFrom === 'data' ? fmtFit : fmtBytes
+  const annotations = useMemo((): Annotation[] => {
+    const radius = extrema ? radiusDays * DAY : undefined
+    const floor = floorPct / 100
+    if (roots.length && !stacked && !relative) return []
+    const pts = roots.length ? relTotal : series.length === 1 ? series[0].points : []
+    const out: Annotation[] = pickAnnotations(pts, winX, radius, floor)
+      // A relative trace's first point is 0 by construction — no callout.
+      .filter(c => !relative || c.x !== pts[0].x)
+      // Above a stack there's nothing; below its top edge are the bands (and
+      // their own callouts), so the total's labels always go above.
+      .map(c => ({ x: c.x, y: c.y, label: fmtY(c.y), below: stacked ? false : c.below }))
+    if (stacked) {
+      // The stack's top edge per x, from the bands themselves (their own sums).
+      const top = new Map<number, number>()
+      for (const s of series) if (s.key !== 'total') for (const b of s.points as Band[]) top.set(b.x, Math.max(top.get(b.x) ?? -Infinity, b.y))
+      for (const s of series) {
+        if (s.key === 'total') continue
+        for (const c of bandCallouts(s.points as Band[], radius, floor, top)) out.push({ x: c.x, y: c.y, y0: c.y0, label: fmtBytes(c.h) })
+      }
+    }
+    return out
+  }, [series, relTotal, roots, stacked, relative, winX, extrema, radiusDays, floorPct, fmtY, fmtBytes])
+
+
+  // Hand-written notes pinned to dates (spec `chart-annotations.md`): drawn inside the plotted span only, so a
+  // `1w` / `1m` range hides older ones; the y-axis mode never moves them. Admins add (the button, or alt-click a
+  // point for its date), edit and delete; everyone else reads.
+  const { notes, applied } = useChartNotes()
+  const isAdmin = admin
+  const noteWrite = useNoteWrite()
+  const [noteForm, setNoteForm] = useState<{ at: string; note?: ChartAnnotation } | null>(null)
+  // A note scoped to a path shows on its chart and those below it (`notesHere`); one "notes" toggle (`?nn` hides
+  // them) is offered when this chart has any.
+  const [nnP, setNnP] = useUrlState('nn', boolParam)
+  const notesShown = !nnP
+  const hasNotes = useMemo(() => notesHere(notes, prefix).length > 0, [notes, prefix])
+  const markers = useMemo(
+    () => (total.length ? noteMarkers(notes, prefix, notesShown, at => xOfScan(at, times), total[0].x, total[total.length - 1].x) : []),
+    [notes, prefix, notesShown, total, times],
+  )
+  const latestId = total.length ? idOfX(total[total.length - 1].x) : undefined
+  // "Fit" to the diff window: its scans plus one of context each side (`fitToWindow`), offered while
+  // that isn't already what the chart shows.
+  const allXs = useMemo(() => fullTotal.map(p => p.x), [fullTotal])
+  const fitR = useMemo(() => (winX ? fitToWindow(winX, allXs) : undefined), [winX, allXs])
+  const fitTarget = fitR !== undefined && (fitR?.[0] !== xRange?.[0] || fitR?.[1] !== xRange?.[1])
+  const fitWin = () => { if (fitR !== undefined) setXDomain(spanDomain(fitR, idOfX)) }
+  // Alt held on the press that becomes a pick: an admin's alt-click opens the form at that point's scan.
+  const altRef = useRef(false)
+  const canNote = isAdmin && applied
+  const pickX = (x: number) => {
+    if (altRef.current && canNote) setNoteForm({ at: idOfX(x) })
+    else onPickDate?.(idOfX(x))
+  }
+  const renderMarker = (m: { key: string }, node: ReactNode) => {
+    const { note } = m as NoteMarker
+    return (
+      <Tooltip pinnable={isAdmin || note.url !== null} content={
+        <NoteTip
+          note={note}
+          fmt={fmt}
+          onEdit={canNote ? () => setNoteForm({ at: note.at, note }) : undefined}
+          onDelete={canNote ? () => noteWrite.mutate({ method: 'DELETE', id: note.id }) : undefined}
+        />
+      }>{node}</Tooltip>
+    )
+  }
+
+  const firstX = total[0]?.x
+  if (scans.length < 2) return null
+  return (
+    <section id="over-time">
+      <h2>
+        <SectionAnchor id="over-time">Size over time</SectionAnchor>
+        <Tooltip content={<>
+          {user
+            ? <><b>{shortName(user)}</b>’s bytes{prefix ? <> under <code>{prefix}</code></> : ''} per scan.</>
+            : pool === 'unowned'
+              ? <>Bytes no person owns{prefix ? <> under <code>{prefix}</code></> : ''}, per scan.</>
+              : pool === 'owned'
+                ? <>Bytes owned by a person{prefix ? <> under <code>{prefix}</code></> : ''}, per scan.</>
+                : paths?.length
+                  ? <>Stored bytes under “{filterLabel}” ({paths.length} {paths.length === 1 ? 'prefix' : 'prefixes'}) per scan.</>
+                : prefix
+                  ? <>Stored bytes under <code>{prefix}</code> per scan.</>
+                  : roots.length
+                    ? <>Stored bytes per scan, one {stacked ? 'band' : 'line'} per bucket{genesis != null && <> — the total is dashed before every bucket was in the scan</>}.</>
+                    : <>Total stored bytes per scan ({scopeLabel}).</>}
+          {relative && <> Shown as {values === 'pct' ? 'growth' : 'bytes gained'} since each trace’s first shown scan.</>}
+          {' '}Each point is that scan’s own index row — exact, at any depth. Click a point to view that scan; drag to set the diff window. Drag across the strip under the chart to zoom (double-click it for every scan).
+        </>}>
+          <span className="info" aria-label="about this chart" tabIndex={0}>ⓘ</span>
+        </Tooltip>
+        <XRangeToggle domain={xDomain} set={setXDomain} onFit={fitWin} canFit={!!fitTarget} />
+        <ValuesToggle v={values} set={setValues} />
+        {!relative && <YFromToggle v={yFrom} set={setYFrom} stacked={stacked} />}
+        {roots.length > 0 && !relative && <LayoutToggle v={layout} set={setLayout} />}
+        <Explain text="Annotation options">
+          <button
+            type="button"
+            className={`gear${gearOpen ? ' on' : ''}`}
+            aria-label="annotation options"
+            aria-expanded={gearOpen}
+            onClick={() => setGearOpen(o => !o)}
+            style={{ background: 'none', border: 'none', cursor: 'pointer', font: 'inherit', color: 'inherit', opacity: gearOpen ? 1 : 0.55, padding: '0 2px' }}
+          >⚙</button>
+        </Explain>
+        {hasNotes && (
+          <Explain text={notesShown ? 'Hide the notes pinned to dates on this chart' : 'Show the notes pinned to dates on this chart'}>
+            <button type="button" className={`note-toggle${notesShown ? ' on' : ''}`} aria-pressed={notesShown} onClick={() => setNnP(notesShown)}>notes</button>
+          </Explain>
+        )}
+        {isAdmin && (
+          <Explain text={applied ? 'Add a note pinned to a date on this chart (or alt-click a point to note that scan)' : 'Notes are off here: this deployment’s D1 lacks the chart-annotations migration'}>
+            <button type="button" className="note-add" disabled={!applied} aria-expanded={!!noteForm} onClick={() => setNoteForm(f => (f ? null : { at: defaultNoteAt(win, latestId) }))}>+ note</button>
+          </Explain>
+        )}
+        {store.liveTotals && (
+          <a className="over-time-live" href={store.liveTotals.href} target="_blank" rel="noreferrer"
+             style={{ marginLeft: 'auto', fontSize: '0.6em', fontWeight: 'normal', opacity: 0.8 }}>
+            {store.liveTotals.label} ↗
+          </a>
+        )}
+      </h2>
+      {gearOpen && (
+        <div className="over-time-config" style={{ display: 'flex', alignItems: 'center', gap: 16, flexWrap: 'wrap', margin: '0 0 6px', fontSize: '0.85em', opacity: 0.92 }}>
+          <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
+            <input type="checkbox" checked={extrema} onChange={e => setExtrema(e.target.checked)} />
+            mark local peaks &amp; dips
+          </label>
+          <label
+            title="Prominence-suppression radius, in days: nearby peaks/dips collapse to the more prominent one"
+            style={{ display: 'inline-flex', alignItems: 'center', gap: 8, opacity: extrema ? 1 : 0.4 }}
+          >
+            radius
+            <input type="range" min={0.5} max={30} step={0.5} value={radiusDays} disabled={!extrema} onChange={e => setRadiusDays(+e.target.value)} />
+            <b style={{ minWidth: 30, textAlign: 'right' }}>{radiusDays}</b>
+          </label>
+          <label
+            title="Prominence floor, as a percentage of the trace's range: a peak or dip that stands out by less gets no label"
+            style={{ display: 'inline-flex', alignItems: 'center', gap: 8, opacity: extrema ? 1 : 0.4 }}
+          >
+            floor
+            <input type="range" min={0} max={50} step={1} value={floorPct} disabled={!extrema} onChange={e => setFloorPct(+e.target.value)} />
+            <b style={{ minWidth: 30, textAlign: 'right' }}>{floorPct}%</b>
+          </label>
+          {manual.size > 0 && <ManualMarkToggle v={manualMark} set={setManualMark} />}
+        </div>
+      )}
+      {noteForm && <NoteForm key={noteForm.note?.id ?? 'new'} at={noteForm.at} path={prefix} note={noteForm.note} onClose={() => setNoteForm(null)} />}
+      {noteWrite.isError && <p className="err sub">note: {(noteWrite.error as Error).message}</p>}
+      {/* A refetch's failure over a chart still drawn; with no chart, the slot below states it. */}
+      {seriesQ.isError && !tooMany && (allZero || series.length > 0) && <LoadFailure err={seriesQ.error} what="series" className="sub" onRetry={() => void seriesQ.refetch()} />}
+      {tooMany ? (
+        <p className="loading">size over time charts up to {SERIES_MAX_PATHS} matches; this filter has {nPaths.toLocaleString()}. Narrow it to chart.</p>
+      ) : allZero ? (
+        <p className="loading">
+          {user ? <><b>{shortName(user)}</b> owns nothing{prefix ? <> under <code>{prefix}</code></> : ''} in any scan</>
+            : pool === 'unowned' ? <>nothing{prefix ? <> under <code>{prefix}</code></> : ''} is unowned in any scan</>
+              : <>nothing{prefix ? <> under <code>{prefix}</code></> : ''} in any scan</>}
+        </p>
+      ) : series.length > 0 ? (
+        <div onPointerDownCapture={e => { altRef.current = e.altKey }}>
+        <TimeSeries<Pt>
+          series={series}
+          getX={p => p.x}
+          getY={p => p.y}
+          getY0={stacked ? p => p.y0 ?? 0 : undefined}
+          formatY={fmtY}
+          formatX={total.length > 1 && total[total.length - 1].x - total[0].x < 2 * DAY ? fmtXTime : fmtX}
+          formatTipX={x => fmt(idOfX(x)) + (manual.has(idOfX(x)) ? ' · manual' : '')}
+          hollowXs={manualMark === 'hollow' ? manualXs : undefined}
+          tickXs={manualMark === 'tick' ? manualXs : undefined}
+          yTickValues={yTickValues}
+          yFrom={relative ? 'zero' : yFrom}
+          yLabel={values === 'pct' ? 'growth' : relative ? 'bytes since start' : 'stored bytes'}
+          height={220}
+          annotations={annotations}
+          onPickX={onPickDate || canNote ? pickX : undefined}
+          onBrush={onBrush && ((x0, x1) => onBrush(idOfX(x0), idOfX(x1)))}
+          window={winX}
+          gaps={gaps.xs}
+          markers={markers}
+          renderMarker={renderMarker}
+        />
+        {fullTotal.length > 2 && (
+          <Explain className="overview-help" text="Every scan: drag across this strip to zoom the chart to that stretch, double-click it to show every scan. The lit part is what the chart shows; the blue band is the diff window.">
+            <XOverview
+              className="over-time-overview"
+              points={fullTotal}
+              domain={xRange}
+              window={winX}
+              onDomain={(x0, x1) => { const d = brushDomain(x0, x1, allXs, idOfX); if (d) setXDomain(d) }}
+              onReset={() => setXDomain({ kind: 'all' })}
+            />
+          </Explain>
+        )}
+        </div>
+      ) : (
+        <SeriesEmpty err={refused ?? (seriesQ.isError ? seriesQ.error : undefined)} loading={seriesQ.isLoading} onRetry={() => void seriesQ.refetch()} />
+      )}
+      {gaps.note && !tooMany && <p className="gap-note">{gaps.note}</p>}
+      {/* A union's points before some member's first scan: partial totals, named — never a zero for it. */}
+      {!tooMany && <SeriesMissingNote points={seriesQ.data?.points} />}
+      {(roots.length > 0 || manualLegend) && (
+        <div className="legend roots-legend">
+          {roots.map(r => (
+            <span className="li" key={r.key}>
+              <span className="sw" style={{ background: r.color }} />
+              {rootName(r.key)}
+              {r.points[0] && firstX != null && r.points[0].x > firstX && <span className="since"> · since {fmtX(r.points[0].x)}</span>}
+            </span>
+          ))}
+          {manualLegend && (
+            <Explain text="Started by hand, not by the schedule (⚙ changes the mark)">
+              <span className="li manual">
+                <svg width="10" height="10" aria-hidden="true">
+                  {manualMark === 'tick'
+                    ? <path d="M5,2l4,7h-8z" fill="var(--dt-ts-tick, rgba(139,148,158,0.9))" />
+                    : <circle cx="5" cy="5" r="3.5" fill="none" stroke="currentColor" strokeWidth="1.5" />}
+                </svg>
+                manual scan
+              </span>
+            </Explain>
+          )}
+        </div>
+      )}
+    </section>
+  )
+}

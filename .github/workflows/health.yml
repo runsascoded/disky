@@ -8,7 +8,7 @@ name: Healthcheck
 # Needs a read-only grant token per host in the repo secrets (`GCS_USAGE_TOKEN`,
 # `CW_S3_USAGE_TOKEN`, `HF_USAGE_TOKEN`, `R2_USAGE_TOKEN`); a matrix entry skips
 # (exit 0) when its secret is absent. Each entry checks out its own deploy
-# branch: this branch (`front-door`) holds no code.
+# branch, rather than the front door's own copy of the shared code.
 on:
   schedule:
     - cron: "17 * * * *" # hourly, offset off the top of the hour

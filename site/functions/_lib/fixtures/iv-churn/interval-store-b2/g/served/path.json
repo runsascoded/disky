@@ -1,0 +1,1 @@
+{"bytes": 10834, "groups": 5, "groups_bytes": 5146, "rows": 8, "s": 0.0, "segments": {"L0": {"blocks": 2, "groups": 2, "rows": 2}, "L1": {"blocks": 1, "groups": 1, "rows": 1}, "open": {"groups": 2, "rows": 5}}, "sort": "path"}

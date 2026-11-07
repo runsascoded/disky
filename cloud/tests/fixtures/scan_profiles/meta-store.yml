@@ -1,0 +1,53 @@
+# An EXAMPLE second profile of one deployment, with neutral placeholder names: the deployment's own derived storage (its
+# data bucket and its R2 serving bucket) scanned as the site store `meta` (`STORES_JSON` key), through the same scan.nf
+# as its primary profile. Its own layout, static-names generation and store. Credentials by call: every list call gets
+# `options.list.secrets` over the profile's `secrets`, and the R2 source's its own key over both (`sources[].secrets`:
+# the same ENV names, its binding wins); no other step sees an `AWS_*` key.
+deployment: example
+store: meta
+executor:
+  kind: google-batch
+  project: example-project
+  region: us-west1
+  service_account: scan-job@example-project.iam.gserviceaccount.com
+  image: us-west1-docker.pkg.dev/example-project/scans/scan:example
+work: gs://example-data/nf
+data: gs://example-data
+layout:
+  layer2: meta-l2/{scan}/
+  snapshots: meta
+  listing: meta-listing/{scan}/
+sources:
+  - gcs://example-data
+  - uri: r2://example-serving
+    endpoint: https://example-account.r2.example.org
+    secrets: {AWS_ACCESS_KEY_ID: example-serving-key-id, AWS_SECRET_ACCESS_KEY: example-serving-secret}
+machines:
+  small: e2-standard-2
+  medium: e2-standard-4
+  big: {type: e2-standard-8, disk: 100}
+  list: e2-standard-4
+  post: e2-standard-4
+skip: [bucket-check, interval-store, over-time, warm-cache, probe, digest]
+secrets:
+  CLOUDFLARE_API_TOKEN: example-cf-token
+  R2_ACCESS_KEY_ID: example-serving-key-id
+  R2_SECRET_ACCESS_KEY: example-serving-secret
+env:
+  R2_ENDPOINT: https://example-account.r2.example.org
+  R2_BUCKET: example-serving
+labels: {deployment: example}
+options:
+  list:
+    secrets: {AWS_ACCESS_KEY_ID: example-source-key-id, AWS_SECRET_ACCESS_KEY: example-source-secret}
+  index:
+    mode: path-index
+    args: [-U]
+    mem: 12GB
+    age_pyramids: true
+    verify: true
+  static-names: {gen: 2026-01-01meta, build_args: [-x, "16,8"]}
+  index-sync:
+    variants: [path, bysize, age-pyramid-1h, age-pyramid-3h, age-pyramid-6h, age-pyramid-12h, age-pyramid-1d,
+               age-pyramid-2d, age-pyramid-4d, age-pyramid-8d]
+  index-gc: {dry: true}

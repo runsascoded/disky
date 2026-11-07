@@ -1,0 +1,33 @@
+{
+  "data": {
+    "viewer": {
+      "accounts": [
+        {
+          "kvStorageAdaptiveGroups": [
+            {
+              "max": {
+                "byteCount": 2000000000,
+                "keyCount": 41000
+              },
+              "dimensions": {
+                "date": "2026-10-19",
+                "namespaceId": "0123456789abcdef0123456789abcdef"
+              }
+            },
+            {
+              "max": {
+                "byteCount": 2500000000,
+                "keyCount": 43000
+              },
+              "dimensions": {
+                "date": "2026-10-20",
+                "namespaceId": "0123456789abcdef0123456789abcdef"
+              }
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "errors": null
+}

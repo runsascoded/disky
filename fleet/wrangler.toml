@@ -1,0 +1,25 @@
+name = "disky-oa"
+pages_build_output_dir = "dist"
+compatibility_date = "2026-11-07"
+
+[vars]
+STAFF_DOMAIN = "openathena.ai"
+OA_LOGIN_ISSUER = "https://login.oa.dev"
+OA_LOGIN_CLIENT_ID = "oa-disky"
+FLEET_JSON = '[{"name":"gcs","url":"https://gcs.oa.dev","token":"FLEET_TOKEN_GCS","color":"#EA4335"},{"name":"cw","url":"https://cw.oa.dev","token":"FLEET_TOKEN_CW","color":"#4C5FF0"},{"name":"hf","url":"https://hf.oa.dev","token":"FLEET_TOKEN_HF","color":"#FFD21E"},{"name":"r2","url":"https://r2.oa.dev","token":"FLEET_TOKEN_R2","color":"#F38020"}]'
+SLACK_FLEET_CHANNEL = "C0CFMN7FYG4"
+
+[[kv_namespaces]]
+binding = "FLEET_KV"
+id = "be540648c50f46c2b667de5b669de17b"
+
+[env.preview.vars]
+STAFF_DOMAIN = "openathena.ai"
+OA_LOGIN_ISSUER = "https://login.oa.dev"
+OA_LOGIN_CLIENT_ID = "oa-disky-dev"
+FLEET_JSON = '[{"name":"gcs","url":"https://gcs.oa.dev","token":"FLEET_TOKEN_GCS","color":"#EA4335"},{"name":"cw","url":"https://cw.oa.dev","token":"FLEET_TOKEN_CW","color":"#4C5FF0"},{"name":"hf","url":"https://hf.oa.dev","token":"FLEET_TOKEN_HF","color":"#FFD21E"},{"name":"r2","url":"https://r2.oa.dev","token":"FLEET_TOKEN_R2","color":"#F38020"}]'
+SLACK_FLEET_CHANNEL = ""
+
+[[env.preview.kv_namespaces]]
+binding = "FLEET_KV"
+id = "be540648c50f46c2b667de5b669de17b"

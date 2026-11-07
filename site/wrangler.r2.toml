@@ -1,0 +1,97 @@
+# CF Pages config for the PUBLIC R2 deploy (r2.rbw.sh) — the union-of-roots Map
+# over public R2 buckets (ctbk, crashes, jc-taxes). Unlike gcs/cw this deploy is
+# anonymous (no CF Access, no app gate): `PUBLIC_READ` grants the base viewer
+# scope to everyone (reads open, mutations still closed — see _lib/auth.ts).
+#
+# Deploy (deploy-r2.yml does this on a push to `cloud`):
+#   WRANGLER_CONFIG=wrangler.r2.toml pnpm build   (the r2 store + public auth:
+#   vite.config.ts reads `STORE` / `AUTH_MODE` below; on `cloud`, which has no
+#   wrangler.toml, a bare `pnpm build` falls back to this file)
+#   swap this in as wrangler.toml (Pages rejects -c), then
+#   wrangler pages deploy dist --project-name disk-tree-demo
+# r2.rbw.sh IS the existing `disk-tree-demo` Pages project (was the ui/ static
+# demo) — this cuts it over to the site/ Map.
+name = "disk-tree-demo"
+pages_build_output_dir = "dist"
+compatibility_date = "2026-06-01"
+# Usage attribution (`functions/_lib/usage.ts`, specs/usage-metrics.md): one Analytics Engine point per Functions
+# request; `nodejs_als` gives the point its R2/D1/KV counters and cache tier.
+compatibility_flags = ["nodejs_als"]
+
+[[analytics_engine_datasets]]
+binding = "USAGE"
+dataset = "disky_usage_r2_demo"
+
+# D1: this public deploy reads only the index footer (index_schema +
+# index_row_groups); its other tables (auth, grants, plans) stay empty
+# (PUBLIC_READ). Created with `wrangler d1 create disk-tree-demo-db`, its schema
+# from the branch's schema file (specs/done/d1-migrations.md):
+#   wrangler d1 execute disk-tree-demo-db --remote --file schema.sql
+# and each pending recipe likewise (`--file migrations/<slug>.sql`), then
+# `git rm` the recipe (this is `cloud`'s only database; wrangler.r2-dev.toml
+# binds the same one). Needs CLOUDFLARE_ACCOUNT_ID + a D1-scoped token.
+[[d1_databases]]
+binding = "DB"
+database_name = "disk-tree-demo-db"
+database_id = "261d0c80-8f73-442e-979a-4e25725b2271"
+remote = true
+
+# The static name index lives beside the tiers, in the same bucket (the Worker reads it through the binding).
+[[r2_buckets]]
+binding = "INDEX_R2"
+bucket_name = "disk-tree-demo"
+
+[observability]
+enabled = true
+
+[vars]
+# The prod ↔ dev host pair (`src/hosts.ts`, read at build time): `g d` / `g D` open this page on the other one.
+PROD_HOST = "r2.rbw.sh"
+DEV_HOST = "dev.r2.rbw.sh"
+STORE = "r2"                     # build-time: the `src/stores.ts` registry key (vite.config.ts)
+AUTH_MODE = "public"             # build-time: no sign-in wall (src/auth.ts)
+MARK = "r2"                      # build-time: favicon + badge, `public/icons/r2.*` (vite.config.ts)
+ROOT_LABEL = "Public R2 Treemap Demo"
+OG_CARDS = "1"
+STORE_SCHEME = "r2://"
+BASE_SCOPE = "r2"
+PUBLIC_READ = "1"                # anonymous viewer scope; reads open (_lib/auth.ts)
+SNAPSHOTS_SUBDIR = "r2"          # this store's snapshots: snapshots/r2/ (_lib/shared.ts)
+FILTER_INDEXED_ONLY = "1"        # search is the static name index only (every deployment): a form it can't answer is refused, never walked
+# DEFAULT_SCAN = "searchable"    # unset (`newest`): open on the newest published scan, search disabled until the static name index appends it (`src/defaultScan.ts`)
+# The static name index (exact `?f=` literals; `_lib/staticFilter.ts`), in INDEX_R2 under `static-names/<gen>/`: the
+# daily ingest appends each scan to its lineage (`dt-cloud static-names add -u`, base generation 2026-10-15, built with
+# anchors), and publishes the generation it lands in to this pointer, which a compaction moves; the site follows it (a
+# `STATIC_GEN` pin would stop at a compacted generation, which receives no more appends).
+STATIC_CURRENT_KEY = "static-names/primary-CURRENT.json"
+# The interval store (every scan's tree as versioned intervals; `_lib/index.ts` `intervalsOn`), in INDEX_R2 under
+# `interval-store/<gen>/`: built by the daily ingest's `interval-store build` on its first run, then one `add` per scan,
+# which compacts it into a new generation every 2^5 scans and moves `interval-store/CURRENT.json` to it. No
+# INTERVAL_STORE_GEN: the site serves the generation CURRENT.json names (`ivGen`); setting it pins one (a compacted
+# generation leaves R2 an hour after its successor lands, so a pin must move with it). `PATH_STORE = "opt-in"` serves it
+# only to requests with `ps=iv` (parity checks against the per-scan path store); `"intervals"` makes it the Map's path store.
+PATH_STORE = "intervals"
+FILTER_STATIC = "1"
+FILTER_STATIC_HEAVY = "1"        # heavy literals (catalog members, 1–2 characters) from the drilldown (`drill/`)
+CACHE_NS = ""                    # response-cache keys as prod's (no host tag; `_lib/edgeCache.ts` `cacheEnvTag`), whatever host serves them
+# The index reader (makeStore, _lib/index.ts) points at R2. STORE_BUCKET is the
+# bucket the daily ingestion writes the tiers into (the existing demo bucket).
+STORE_BUCKET = "disk-tree-demo"
+STORE_REGION = "auto"
+# The "data behind this site" store (`_lib/stores.ts`, the frontend's `src/stores/meta.ts`), mounted at `/meta`: the
+# demo's own bucket, disk-tree-demo, scanned by the daily ingest after the primary (`meta-l2/` tiers,
+# `snapshots/meta/`), with its own static name index (its own lineage, followed by its `STATIC_CURRENT_KEY`) and its
+# own interval store as its Map's path store (`meta/interval-store/`, following its own `CURRENT.json`).
+# Public as the primary is (no `scope`; `OG_ANONYMOUS` and the filter policy inherited); read with the primary's RO
+# keypair (the same Pages secrets). No `all` union view: the home page stays the three public buckets.
+STORES_EXTRA = "meta"
+STORES_JSON = '{"meta":{"path":"/meta","vars":{"ROOT_LABEL":"Public R2 Treemap Demo disky metadata","ROOT_TITLE":"Data behind this site: the daily scans’ indexes, snapshots and name index in disk-tree-demo (R2)","SNAPSHOTS_SUBDIR":"meta","STORE_SCHEME":"r2://","STORE_BUCKETS":"disk-tree-demo","STORE_PREFIXES":"meta-l2/,snapshots/meta/","STORE_BUCKET":"disk-tree-demo","STORE_REGION":"auto","STATIC_CURRENT_KEY":"static-names/meta-CURRENT.json","FILTER_STATIC_HEAVY":"1","PATH_STORE":"intervals","INTERVAL_STORE_PREFIX":"meta/interval-store"},"secrets":{"STORE_ENDPOINT":"STORE_ENDPOINT","STORE_ACCESS_KEY_ID":"STORE_ACCESS_KEY_ID","STORE_SECRET_ACCESS_KEY":"STORE_SECRET_ACCESS_KEY"}}}'
+
+# Set as Pages env vars/secrets at deploy — NOT committed (disk-tree is a public
+# repo; the account id in the R2 endpoint stays out of git):
+#   wrangler pages secret put STORE_ENDPOINT --project-name disk-tree-demo   (=$R2_ENDPOINT_URL)
+#   wrangler pages secret put STORE_ACCESS_KEY_ID --project-name disk-tree-demo      (=$R2_RO_ACCESS_KEY_ID)
+#   wrangler pages secret put STORE_SECRET_ACCESS_KEY --project-name disk-tree-demo  (=$R2_RO_SECRET_ACCESS_KEY)
+# The reader only GETs the index tiers, so it takes the RO keypair; the daily
+# ingestion uses the RW keypair to upload them. No GCS_HMAC_*/GCP_SA_KEY/ACCESS_*
+# — this deploy is public + GCS-free.

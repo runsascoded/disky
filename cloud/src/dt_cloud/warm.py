@@ -1,0 +1,175 @@
+"""Warm the site's caches for a freshly published scan (`dt-cloud warm-cache`).
+
+The site's `/api/subtree` and `/api/diff` are auth-gated, immutable per scan,
+and cached in two tiers (colo cache + global KV, `site/functions/_lib/edgeCache.ts`).
+The first viewer of a scan would otherwise pay the compute (a root diff is
+several seconds; it was 20 s before the batched lookups). So the daily job,
+once the scan is servable, replays the requests the home page makes for its
+default views — the size-over-time series per path (width-independent; a new
+scan is a new cache key, so its first viewer otherwise pays the over-time
+reads), then each path's subtree, one level deep (`depth=1`: the view's first
+paint, and all a page drilled below the path asks of it) and in full, + the
+diff span chips (1d/3d/7d/14d/30d, plus the plain previous-scan pair), each
+pair's first paint (`depth=1`) and its full walk — at the canvas widths common
+laptops and phones produce. The subtree and diff requests are the page-request
+model's (`diff_bench.requests_for`, the browser's mix), sent as the page sends
+them (`browser_url`): the same parameters (`cv`, `dm=delta`, `depth=1`), so
+the same cache keys. The cache keys include the pixel
+budget: the client snaps its window up to the nearest of these WIDTHS
+(`site/src/canvas.ts` `canvasWidth`; past the widest, the 128-px step) and
+sends `h = round(0.6 w)`, so every window up to 1920 px lands on a warmed key.
+Keep the two lists equal.
+
+Pure planning (`nearest_prior`, `plan`) is unit-tested; `scan_dates` lists the
+published scans, `warm` does the HTTP."""
+from __future__ import annotations
+
+import datetime as dt
+import os
+import sys
+import time
+import urllib.error
+import urllib.request
+from concurrent.futures import ThreadPoolExecutor
+from http.client import HTTPException
+
+from .diff_bench import browser_url, requests_for, uri_component
+
+WIDTHS = (512, 1280, 1536, 1792, 1920)
+SPANS = (1, 3, 7, 14, 30)
+# Every request carries it: Cloudflare bans urllib's default User-Agent (error 1010, a 403)
+UA = "gcs-usage-warm/1.0"
+#: Refetches after a transport error before a request fails: a body cut short of its Content-Length (the site's Worker
+#: cut off mid-response) or a dropped connection (cw's 10-23T1801 warm-up: 989/990, one `RemoteDisconnected`).
+TRANSPORT_RETRIES = 2
+#: Refetches after a 5xx, `SERVER_RETRY_S · 2^n` apart: a cold `/api/series?split=roots` under the warm-up's own
+#: concurrency answered 503 after 40–47 s on three of cw's scans (11-03, 11-04), and 200 in 8 s alone.
+SERVER_RETRIES = 2
+SERVER_RETRY_S = 15.0
+
+
+def env_paths() -> tuple[str, ...] | None:
+    """The paths to warm from `$WARM_PATHS` (comma-separated; `""` = the root),
+    e.g. a single-bucket deployment's bucket + its top-level dirs. Unset → None
+    (the caller asks the site: `top_paths`)."""
+    v = os.environ.get("WARM_PATHS")
+    return tuple(v.split(",")) if v else None
+
+
+def root_children(subtree: dict) -> tuple[str, ...]:
+    """The root + its children's names from an `/api/subtree` response, folds
+    (`(other)`) left out: the views everyone opens first."""
+    kids = (subtree.get("tree") or {}).get("c") or []
+    return ("", *(k["n"] for k in kids if not k["n"].startswith("(")))
+
+
+def top_paths(base_url: str, headers: dict[str, str], date: str, timeout: float = 120) -> tuple[str, ...]:
+    """The default paths to warm: the store root and its top level, as the
+    site's root view of ``date`` lists them."""
+    import json
+
+    req = urllib.request.Request(f"{base_url.rstrip('/')}/api/subtree?date={date}&path=&w=1280&h=768&depth=1", headers={**headers, "User-Agent": UA})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return root_children(json.load(r))
+
+
+def scan_dates(root: str) -> list[str]:
+    """Published scan ids under the snapshots dir ``root`` (a local dir or a
+    URL `blobfs` resolves: `gs://`, `r2://`, `s3://`), ascending."""
+    from .digest import list_scans
+
+    return list_scans(root)
+
+
+def _ts(date: str) -> int:
+    return int(dt.datetime.fromisoformat(date).replace(tzinfo=dt.timezone.utc).timestamp())
+
+
+def nearest_prior(dates: list[str], date: str, days: int) -> str | None:
+    """The scan nearest to ``date - days`` among the scans before ``date`` —
+    what the site's span chips resolve to (`scan.ts` `nearestScan` over the
+    earlier scans)."""
+    earlier = [d for d in dates if d < date]
+    if not earlier:
+        return None
+    t = _ts(date) - days * 86400
+    return min(earlier, key=lambda d: abs(_ts(d) - t))
+
+
+def series_url(path: str) -> str:
+    """The size-over-time request `SizeOverTime.tsx` makes for an unscoped
+    ``path``: the store root asks for one trace per root (`split=roots`)."""
+    return "/api/series?path=&split=roots" if path == "" else f"/api/series?path={uri_component(path)}"
+
+
+def plan(date: str, dates: list[str], paths: tuple[str, ...], widths: tuple[int, ...] = WIDTHS, spans: tuple[int, ...] = SPANS) -> list[str]:
+    """The request paths (no host) to replay for ``date``, deduplicated: each
+    path's series first, then, per width, the root's subtree (its one level:
+    the first paint, and what every drilled page asks of an ancestor,
+    `site/src/spine.ts`; then its full view) and each diff pair (its first
+    paint, `depth=1`, then its full walk), then the same for each bucket
+    drill: the page's own requests for those views (`requests_for`), as it
+    sends them. Not a pair's `summary=1` (its totals alone): no page asks it."""
+    earlier = [d for d in dates if d < date]
+    pairs: list[str] = []
+    if earlier:
+        pairs.append(earlier[-1])  # the default pair: the previous scan
+    for s in spans:
+        p = nearest_prior(dates, date, s)
+        if p and p not in pairs:
+            pairs.append(p)
+    out: list[str] = [series_url(path) for path in paths]
+    for w in widths:
+        h = round(w * 0.6)
+        for path in paths:
+            reqs = requests_for([], [f"{date}:{path}"], w, h) + requests_for([{"from": p, "to": date, "path": path} for p in pairs], [], w, h)
+            out += [browser_url(r) for r in reqs]
+    return out
+
+
+def warm(url: str, headers: dict[str, str], paths: list[str], jobs: int = 4, timeout: float = 120) -> list[tuple[str, int, float, str]]:
+    """GET each path with ``headers`` (the Access service token pair), ``jobs``
+    at a time; returns
+    ``(path, status, seconds, x-cache)`` per request (status 0 = transport
+    error). Logs one line per request to stderr."""
+    def one(path: str) -> tuple[str, int, float, str]:
+        req = urllib.request.Request(url.rstrip("/") + path, headers={**headers, "User-Agent": UA})
+        t0 = time.time()
+        transport_tries = server_tries = 0
+        while True:
+            try:
+                with urllib.request.urlopen(req, timeout=timeout) as r:
+                    r.read()
+                    status, tier = r.status, r.headers.get("x-cache", "")
+                break
+            except urllib.error.HTTPError as e:
+                status, tier = e.code, ""
+                if status < 500 or server_tries == SERVER_RETRIES:
+                    break
+                body = e.read(200).decode("utf-8", "replace").replace("\n", " ")
+                print(f"warm: {status} {time.time() - t0:5.1f}s again {path}: {body}", file=sys.stderr)
+                time.sleep(SERVER_RETRY_S * 2 ** server_tries)
+                server_tries += 1
+            except (HTTPException, OSError) as e:  # `IncompleteRead`, `RemoteDisconnected`, resets, `URLError`, timeouts
+                status, tier = 0, type(e).__name__
+                if transport_tries == TRANSPORT_RETRIES:
+                    break
+                transport_tries += 1
+            except Exception as e:  # noqa: BLE001 — a warm-up must never fail the job; the miss is just cold for the first viewer
+                status, tier = 0, type(e).__name__
+                break
+        secs = time.time() - t0
+        print(f"warm: {status} {secs:5.1f}s {tier:4s} {path}", file=sys.stderr)
+        return path, status, secs, tier
+
+    with ThreadPoolExecutor(max_workers=jobs) as ex:
+        return list(ex.map(one, paths))
+
+
+def summary(res: list[tuple[str, int, float, str]], date: str) -> str:
+    """`warm`'s results as one line: warmed (200), refused (409: the site can't answer that view, e.g. a diff from before a
+    union store's first scan — a definite answer, nothing to warm) and failed (anything else)."""
+    refused = sum(1 for r in res if r[1] == 409)
+    failed = sum(1 for r in res if r[1] not in (200, 409))
+    tail = (f"; {refused} refused (409)" if refused else "") + (f"; {failed} failed" if failed else "")
+    return f"warm-cache: {len(res) - refused - failed}/{len(res)} warmed for {date} in {sum(r[2] for r in res):.0f}s of request time{tail}"
