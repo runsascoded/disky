@@ -437,3 +437,34 @@ Sign tests over the 40 blocks (two-sided; discordant blocks only):
 - Owner-scoped, pool and `NOT` diffs still build the unfolded memo on both sides, and are refused past `HELD_BYTES` (`tooBroadToDiff`). The fold has no owner scope or exclusions yet.
 - An answer that doesn't cover the other scan: the fold reads both scans' bytes from one answer, so such a diff stays unfolded and refused past the bound.
 - The fold's own transient memory on the broadest answers (above).
+
+## The typed fold's cold CPU: a background upgrade cut at its budget, not the fold (2026-11-07)
+
+**What today's upgrade does at that path** (`marin-us-east5`, `q=checkpoint`, `full=1`, 1152×2304, scan `2026-11-07T0701`; upgrade lines from `upgradeLine`, read from the probe deployments' tails). Before the map fold, 10 upgrades started: 9 have no end line and their tail event says `exceededMemory`, 1 ended `cut` in phase 2, none completed. `upgradePartial` isn't swallowing an error: the isolate is killed before its `catch` can run. With the map fold, 5 of 6 ended `done` (1 `cut` in phase 2).
+
+**The question.** The typed fold (`foldPhase1` over exactly sized `Int32Array` / `Float64Array` / `Uint8Array` columns, hits in `dirOrder`) lowered the map's peak with byte-identical answers, but the cold map's tail `cpuTime` went from 9.5 to 13.9 s median in 8 cold rounds, while warm and the ballast trials were level.
+
+**Method.** `cloud` (`64fb768f`) vs `cloud` + the typed fold, each on its own toml-less preview alias with prod's flags at run time. One request at a time; before each cold request a ballast request past the memory limit kills the isolate, so the next meets a fresh one (checked by its request count, retried until it is 1), and each cold request gets a fresh namespace (isolate memos cleared, colo keys namespaced). Arms alternate order every round. The upgrade is split from the request by asking the same URL with its upgrade switched off; phase stops (`x-evp-stop`) end a request at a phase hook, and an upgrade-only stop ends the upgrade at one. Every decoded group is logged with its file offset and whether the upgrade decoded it. Kinds: `full` (request and upgrade), `noup` (request alone), `warm` (same namespace, response cache salted), and the earlier protocol's overlap (a warm request 2 s after the cold one). 26–27 cold whole requests per arm, 18–19 requests alone, 20 warm.
+
+**Where the time is** (medians of tail `cpuTime`, s):
+
+| | `cloud` | + typed fold |
+|---|---|---|
+| Cold request alone (`noup`) | 3.8 | 3.9 |
+| Cold, request and upgrade | 9.7 | 10.4 |
+| …upgrade ended `done` | 9.6 (24) | 10.2 (19) |
+| …upgrade ended `cut` (phase 2) | 16.7 (2) | 14.0 (8) |
+| Warm, request and upgrade | 5.4 | 5.3 |
+
+- The request is level. The 4 s is in the background upgrade, and only when it is cut: a cut upgrade runs to its 10 s phase-2 budget and costs about 4 s more CPU than one that finishes, while decoding fewer groups.
+- Every upgrade that ended `done` decoded the same groups on both arms: the request and its upgrade together decoded the same 86 distinct groups, and no group twice. Cut ones decoded 64–84.
+- The typed fold's upgrade is cut when its request's phase 2 decoded only the minimum, 11 groups: 8 of 11 such runs, vs 2 of 26 on `cloud` (whose request always decodes 11; Fisher p < 0.001). When the typed fold's request decoded 17–33 groups, 0 of 16 were cut. Its faster phase 1 leaves more of the request's phase-2 budget, since a Worker's clock stands still through CPU-only work; on `cloud` the fold's CPU uses that budget up (inferred: the clock moves only across I/O).
+- The phase stops don't split the request cleanly: a stopped request costs more than a whole one (the roots' details read, started before phase 2, keeps decoding after the throw), so they are left out of the table.
+
+**Why the upgrade is cut.** Two more arms on the same rounds:
+- Grow-only typed columns held per isolate, reused across folds (the root's hypothesis: cold JIT and zeroing of exactly sized arrays): 3 of 7 cut at 11 request groups, cold median 11.2 s. No better. In Node the fold is no faster with reuse (180–230 ms vs 125–195 ms per fold), and with JIT off the typed fold is only 0.3 s slower than the old one (969 vs 649 ms), so neither allocation nor a cold comparator sort explains 4 s.
+- The typed fold plus the old fold's transient working set rebuilt and dropped (a `Map` from every node's path, made after the walk): 1 of 12 cut, all at 11 request groups (vs 8 of 11, p = 0.003); request and upgrade 11.5 s median, about 1 s over `cloud` for the extra map.
+
+So what the old fold gave the upgrade was its heap state, not anything it computed: a fresh isolate that has just held the old fold's large short-lived working set runs the upgrade's decodes without being cut; one that hasn't, mostly is. A Worker's GC isn't observable, so this is inferred from the arms, not measured. Node didn't reproduce it, with its default heap or a constrained one (`--trace-gc`: the typed fold had fewer mark-compacts).
+
+**Decision.** No fix kept: the only arm that removed it allocates garbage on purpose, and the reuse arm didn't help. The typed fold stays (its peak drop is what lets upgrades finish at all). The cost is in a background upgrade on a fresh isolate, about 4 s of CPU in roughly a third of cold misses, with the partial left in place until the next ask; warm requests and the request itself are level. If it matters, the thing to bound is a cut upgrade's wasted run, not the fold (untested).
