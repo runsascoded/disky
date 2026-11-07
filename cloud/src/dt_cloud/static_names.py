@@ -1675,6 +1675,44 @@ def r2_copy_cmd(bucket, gen, dry_run, only, workers, exclude) -> None:
     print(json.dumps({"gen": gen, **doc}))
 
 
+@cli.command("remeasure")
+@option("-j", "--jobs", type=IntRange(1), help="Processes counting the floor crossers (default: every CPU)")
+@option("-M", "--mem", default="8GB", help="DuckDB memory limit")
+@option("-p", "--threads", type=IntRange(1), default=os.cpu_count(), help="DuckDB threads")
+@option("-r", "--root", required=True, help="The store as a local dir (a bucket's mount): `<root>/static-names/GEN/`")
+@option("-w", "--work", required=True, help="Work dir (DuckDB's temp, and the measurement, under `roots-measure/`)")
+@argument("gen")
+def remeasure_cmd(jobs, mem, threads, root, work, gen) -> None:
+    """A compacted generation GEN's `roots-measure/` measured again from its `compaction.json` (the base's drill and
+    measurement and the runs': `static_measure.incremental_measure`) into WORK, timed, then compared md5 for md5 with GEN's
+    own: a race of the compaction's measurement step alone. Prints a JSON summary; exit 1 on any difference."""
+    import hashlib
+
+    from . import static_drill as sd, static_measure as sme
+    from .append_runner import COMPACTION
+    from .static_local import FLOOR
+
+    g = Path(root) / PREFIX
+    rec = json.loads((g / gen / COMPACTION).read_text())
+    base = g / rec["from"]
+    tiers = [sd.Tier(base / "drill", "base"), *(sd.Tier(base / k / "drill", k) for k in rec["runs"])]
+    out = Path(work) / "roots-measure"
+    con = connect(threads, mem, Path(work) / "duckdb")
+    t0 = monotonic()
+    doc = sme.incremental_measure(con, tiers, base / "roots-measure", str(g / gen / "catalog" / "members.parquet"), out,
+                                  floor=tiers[0].meta.get("floor", FLOOR), jobs=jobs)
+    s = round(monotonic() - t0, 1)
+
+    def md5s(d: Path) -> dict[str, str]:
+        return {str(p.relative_to(d)): hashlib.md5(p.read_bytes()).hexdigest() for p in sorted(d.rglob("*.parquet"))}
+
+    got, want = md5s(out), md5s(g / gen / "roots-measure")
+    diff = sorted(k for k in got.keys() | want.keys() if got.get(k) != want.get(k))
+    print(json.dumps({"gen": gen, "from": rec["from"], "runs": rec["runs"], "s": s, "measure": doc, "files": len(want), "differ": diff}, indent=1))
+    if diff:
+        raise SystemExit(1)
+
+
 @cli.command("query")
 @option("-b", "--bucket", default=data_bucket, help="The store: a GCS bucket name, or a URL (`r2://…`, `s3://…`) or dir")
 @option("-d", "--date", "dates", multiple=True, required=True, help="Scan date; repeat")
