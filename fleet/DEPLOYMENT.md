@@ -13,7 +13,7 @@ Wrangler owns deployment bindings and nonsecret settings. These resources were c
 
 ## Release gates
 
-The code merges `cloud`, preserving this branch's README index and hourly health workflow. `.github/workflows/fleet-deploy.yml` waits for successful CI, refuses stale commits, deploys preview, verifies its anonymous gates, and only then builds/deploys production. Both builds run on GitHub, not the laptop. Set repository variable `FLEET_DEPLOY_ENABLED=1` only after secret provisioning is approved and complete.
+The code merges `cloud`, preserving this branch's README index and hourly health workflow. `.github/workflows/fleet-deploy.yml` waits for successful CI, refuses stale commits, deploys preview, verifies its anonymous gates, and only then builds/deploys production. Both builds run on GitHub, not the laptop. Set repository variable `FLEET_DEPLOY_ENABLED=1` only after secret provisioning is approved and complete. `.github/workflows/fleet-update.yml` refreshes the persistent post hourly, separately gated by `FLEET_POST_ENABLED=1`; leave that off until source data, sign-in and the first post are verified. Its logs omit the signed card URL.
 
 The Cloudflare token was verified active. Credential persistence was blocked pending explicit approval: `CF_FRONT_DOOR_TOKEN` to this repo's Actions secrets; newly generated distinct production/preview session and job secrets to Pages (production job token also in Actions); `DISKY_SLACK_BOT_TOKEN` to Pages production only. No secret values belong in Git, workflow output or chat. Never rotate existing secrets during setup.
 

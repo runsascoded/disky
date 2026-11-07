@@ -27,7 +27,7 @@ The sites are Open-Athena-gated. Each branch's README says how its scan runs, wh
 - **`.github/workflows/health.yml`**: the hourly serving check across all four sites. It lives here because GitHub runs `schedule:` workflows only from a repo's default branch.
 - **Shared code from `cloud`**, including `fleet/`: public docs and a staff-only fleet page over the four deployments. `fleet/wrangler.toml` is this deployment's configuration; broker client and source tokens are encrypted Pages secrets.
 - **`CI`**: tests the shared code before publishing. The front-door deployment workflow builds and checks preview before production; `FLEET_DEPLOY_ENABLED=1` enables it after credentials are configured.
-- **The hourly fleet post** is not enabled until source tokens and sign-in are verified; the existing healthcheck keeps its own schedule.
+- **The hourly fleet post** (`fleet-update.yml`, `FLEET_POST_ENABLED=1`) is not enabled until source tokens, sign-in and the first post are verified; the existing healthcheck keeps its own schedule.
 
 ## Elsewhere
 

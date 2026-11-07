@@ -1,0 +1,33 @@
+name: Fleet status update
+
+on:
+  schedule:
+    - cron: "43 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: disky-oa-fleet-update
+  cancel-in-progress: false
+
+jobs:
+  update:
+    if: github.repository == 'Open-Athena/disky' && vars.FLEET_POST_ENABLED == '1'
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    env:
+      FLEET_JOB_TOKEN: ${{ secrets.FLEET_JOB_TOKEN }}
+    steps:
+      - name: Refresh the persistent fleet post
+        run: |
+          set -euo pipefail
+          test -n "$FLEET_JOB_TOKEN"
+          mkdir -p tmp
+          # No redirects or response dump: the response carries a signed private-card URL.
+          curl --silent --show-error --fail --max-time 90 \
+            --request POST --header "Authorization: Bearer $FLEET_JOB_TOKEN" \
+            --output tmp/fleet-update.json https://disky.oa.dev/api/fleet/slack
+          python -c 'import json; from pathlib import Path; data = json.loads(Path("tmp/fleet-update.json").read_text()); print(json.dumps({k: data[k] for k in ("action", "channel", "ts")}))'
+          rm tmp/fleet-update.json
