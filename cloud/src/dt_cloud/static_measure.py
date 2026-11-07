@@ -48,6 +48,9 @@ def _union(parts: list[str], empty: str) -> str:
 
 #: At least this many floor crossers are counted on worker processes (`base_counts_parallel`); fewer, here.
 PARALLEL_MIN = 200_000
+#: Decoded groups each worker keeps (`CachedGroupFile.cap_groups`): its share is sorted, so neighbors share groups and a few
+#: suffice; the default (`static_drill.GROUP_CACHE`, 2048) on 48 workers took a highmem-48 past its RAM (cw, 2026-11-07).
+WORKER_GROUPS = 16
 
 
 def count_under(gf, ci: str, d: str) -> int:
@@ -85,6 +88,8 @@ _BC: tuple | None = None
 def _bc_init(root: str, name: str, kind: str) -> None:
     global _BC
     tier = sd.Tier(root, name)
+    if (gf := tier.group_file(kind, "roots")) is not None:
+        gf.cap_groups = WORKER_GROUPS
     _BC = (tier, kind)
 
 
@@ -111,6 +116,7 @@ def base_counts_parallel(con, tier: sd.Tier, kind: str, src: str, into: str, n: 
     con.execute(f"""COPY (SELECT c, dir, ((row_number() OVER (ORDER BY c, dir) - 1) * {parts} // {n})::INTEGER AS part FROM {src})
         TO {q(str(cut))} (FORMAT parquet, PARTITION_BY (part))""")
     shares = sorted((int(d.name.split("=", 1)[1]), sorted(str(f) for f in d.glob("*.parquet"))) for d in cut.glob("part=*"))
+    err(f"base counts {kind}: {n:,} floor crossers in {len(shares)} shares on {jobs} processes")
     with ProcessPoolExecutor(jobs, mp_context=get_context("spawn"), initializer=_bc_init,
                              initargs=(str(tier.root), tier.name, kind)) as pool:
         for f in [pool.submit(_bc_part, fs, str(work / f"out-{i:05d}.parquet")) for i, fs in shares]:
