@@ -44,6 +44,7 @@
     "attribution": true,
     "compact_level": 5,
     "compact": "none",
+    "owner_carry": true,
     "machines": {"compact": "n2-highmem-32"},
     "ssd_gbs": {"compact": 1500},
     "compact_jobs": 4,

@@ -45,7 +45,7 @@ machines:
   # default disk filled on 2026-10-21 and every step after retire failed; and its DuckDB is tuned for 80 GB (a 32 GB
   # machine was killed mid-verify the same day). Scans appended since the check need neither (specs/scan-cs3.md item 4)
   post: {type: e2-highmem-16, disk: 400}
-steps: [access-ingest, healthcheck, retire, dups, cf-usage, gcp-cost]
+steps: [access-ingest, healthcheck, retire, dups, cf-usage, gcp-cost, soft-delete]
 # over-time groups and the generation-file sweep (`index-gc -F`) aren't in the one-VM job yet: each is its own change
 skip: [bucket-check, over-time, index-gc]
 secrets:
