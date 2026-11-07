@@ -311,10 +311,20 @@ describe('D1', () => {
     const diffOf = (env: Env, t: string, P: string) => buildDiff(env, { from: A, to: B, path: P, w: W, h: H, minArea: MIN_AREA, atten: ATTEN, top: 200, query: q(t) })
     const code = (p: Promise<unknown>) => p.then(() => 'answered', e => { if (e instanceof FilterRejected) return e.reject.code; throw e })
 
-    it('`buildDiff` refuses `diff-too-broad` having read no answer, asking `HELD_BYTES`; a view of one side never asks', async () => {
+    const unfoldedOf = (env: Env, t: string, P: string) => buildDiff(env, { from: A, to: B, path: P, w: W, h: H, minArea: MIN_AREA, atten: ATTEN, top: 200, query: q(t), unfolded: true })
+
+    it('an unscoped diff of an answer past `HELD_BYTES` answers, asking no bound: its sides fold (`foldPhase1`)', async () => {
+      const asked: (number | undefined)[] = []
+      const d = await diffOf(envStatic(capped(1, asked)), 'bin', '')
+      expect([...new Set(asked)]).toEqual([undefined])
+      expect(d).toEqual(await unfoldedOf(envStatic(), 'bin', ''))
+      expect([d.rows.length, d.matchCount]).toEqual([9, { n: 12, b: 3156498, o: 12 }])
+    })
+
+    it('`buildDiff` unfolded refuses `diff-too-broad` having read no answer, asking `HELD_BYTES`; a view of one side never asks', async () => {
       const asked: (number | undefined)[] = []
       const { got, blobs } = spans()
-      expect(await code(diffOf(envStatic(capped(1, asked, blobs)), 'bin', ''))).toBe('diff-too-broad')
+      expect(await code(unfoldedOf(envStatic(capped(1, asked, blobs)), 'bin', ''))).toBe('diff-too-broad')
       const { groups } = await groupsOf('.bin', '')
       expect(got.map(([, o]) => o).filter(o => !groups.map(g => g.chunks[3]).includes(o))).toEqual([])
       expect([...new Set(asked)]).toEqual([HELD_BYTES])
@@ -337,7 +347,28 @@ describe('D1', () => {
     it('a scan the drill doesn\'t cover answers as with the answer read: each side in turn, the first refusal the diff\'s', async () => {
       const only = (id: string) => drillBlobs(undefined, { 'scans.json': { scans: [{ id }] } })
       expect(await code(diffOf(envStatic(capped(1, [], only(B))), 'bin', ''))).toBe('scan-not-indexed')
-      expect(await code(diffOf(envStatic(capped(1, [], only(A))), 'bin', ''))).toBe('diff-too-broad')
+      expect(await code(unfoldedOf(envStatic(capped(1, [], only(A))), 'bin', ''))).toBe('diff-too-broad')
+    })
+
+    it('a folded diff is the unfolded one, body for body, on every term, path, canvas and tile budget', async () => {
+      const got: unknown[] = [], want: unknown[] = []
+      const CANVASES = [{ w: W, h: H }, { w: W, h: H, maxTiles: 3 }, { w: 320, h: 200, maxTiles: 1 }, { w: W, h: H, depth: 1 }, { w: 640, h: 400, maxTiles: 2, depth: 2 }]
+      for (const t of TERMS) for (const P of ['', 'bk', 'bk/data', 'tomato-bk', 'zz']) for (const c of CANVASES) {
+        const o = { from: A, to: B, path: P, minArea: MIN_AREA, atten: ATTEN, top: 200, query: q(t), ...c }
+        const run = (x: object) => buildDiff(envStatic(), { ...o, ...x }).then(d => JSON.stringify(d), e => { if (e instanceof FilterRejected || e instanceof NotFound) return String(e); throw e })
+        got.push([t, P, c, await run({})])
+        want.push([t, P, c, await run({ unfolded: true })])
+      }
+      expect(got).toEqual(want)
+      expect(got.length).toBe(TERMS.length * 5 * 5)
+    })
+
+    it('a diff whose view root matches counts it: its one match, as the view lists it', async () => {
+      const d = await diffOf(envStatic(), 'tomato', 'tomato-bk')
+      const v = await view(envStatic(), B, 'tomato-bk', 'tomato')
+      const plain = await buildDiff(base, { from: A, to: B, path: 'tomato-bk', w: W, h: H, minArea: MIN_AREA, atten: ATTEN, top: 200 })
+      expect([d.rows, d.total_a, d.total_b]).toEqual([plain.rows, plain.total_a, plain.total_b])
+      expect([v.matches, d.matched, d.matchCount]).toEqual([['tomato-bk'], [{ path: 'tomato-bk', b: d.total_b, o: d.objects_b }], { n: 1, b: d.total_b, o: d.objects_b }])
     })
 
     it('within the bound the diff is the one it was', async () => {
@@ -1069,7 +1100,8 @@ describe('D1', () => {
         for (const cut of [{}, { lookupCap: 0 }, { walkMs: 0 }]) {
           const d: Diff = Object.keys(cut).length ? await buildDiff(env, { ...o, ...cut }) : full
           if (d.lookups_late) lateCases++
-          const roots = (d.matched ?? []).map(m => m.path)
+          // A view root the query matches is read whole, as the unfiltered diff reads it (its one match): not a forest.
+          const roots = q(t)(P) ? [] : (d.matched ?? []).map(m => m.path)
           const drawn = d.rows.filter(r => !r.p.endsWith('(other)')).map(r => [P === '' ? r.p : `${P}/${r.p}`, r] as const).filter(([p]) => roots.some(R => p.startsWith(`${R}/`)))
           rows += drawn.length; looked += drawn.filter(([, r]) => r.l).length
           if (d !== full) folded += full.rows.filter(r => !r.p.endsWith('(other)')).length - d.rows.filter(r => !r.p.endsWith('(other)')).length
