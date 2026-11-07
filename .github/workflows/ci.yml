@@ -251,3 +251,39 @@ jobs:
 
       - name: Site tests
         run: cd site && timeout 900 pnpm vitest run --testTimeout=20000
+
+  fleet:
+    name: Fleet app typecheck, build + tests
+    runs-on: ubuntu-latest
+    env:
+      PUPPETEER_SKIP_DOWNLOAD: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        # pnpm version comes from root package.json's `packageManager` field.
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # The example here; the deploying branch's `fleet/wrangler.toml` too, where it has one.
+      - name: wrangler*.toml parse
+        run: site/toml-check fleet/wrangler*.toml
+
+      # What `site/` and `fleet/` share (`packages/pages-kit`), checked on its own.
+      - name: "@disk-tree/pages-kit typecheck"
+        run: cd packages/pages-kit && pnpm typecheck
+
+      # `pnpm build` = `tsc -p . && tsc -p functions && vite build`: the page, the Functions (and their specs), then
+      # the bundle.
+      - name: Build (typecheck + bundle)
+        run: cd fleet && pnpm build
+
+      - name: Tests
+        run: cd fleet && pnpm test
