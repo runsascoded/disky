@@ -1406,8 +1406,11 @@ def age_store(ctx: Ctx, arg: str | None) -> None:
         return
     o = ctx.profile.opts("age-store")
     layout = ctx.profile.layout.layer2.replace("{scan}", "{id}") + "index/{gen}/age-pyramid-1h.parquet"
-    roots = list(dict.fromkeys([ctx.data_uri, *o.get("copies", [])]))
-    argv = ["dt-cloud", "age-store", "-g", o["gen"], "-L", layout, "-o", o["store"], "-s", ctx.data_uri,
+    # A local data store is task scratch; earlier scans' pyramids live in the archive.
+    archive = ctx.env.get("R2_ARCHIVE")
+    source = archive if ctx.profile.data_bucket is None and archive else ctx.data_uri
+    roots = list(dict.fromkeys([source, *o.get("copies", [])]))
+    argv = ["dt-cloud", "age-store", "-g", o["gen"], "-L", layout, "-o", o["store"], "-s", source,
             "-T", ctx.profile.store, "-t", ctx.scan, "-w", ctx.work / "age-store", "-k", o.get("keep", 2),
             *(a for root in roots for a in ("-r", root)), *(["-x"] if o.get("execute") else []),
             *(["-p", o["threads"]] if o.get("threads") else []), *(["-M", o["mem"]] if o.get("mem") else [])]
