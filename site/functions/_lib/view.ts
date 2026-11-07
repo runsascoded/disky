@@ -2330,6 +2330,14 @@ const REGION_READS = 24
  *  literal is held) → per scan and owner scope, its aggregates and sorted roots. Read-only once built. */
 const staticPhase1 = new WeakMap<Hit[], Map<string, Phase1Memo>>()
 
+/** Paths ordered as each one with a `/` appended orders: a path just before its descendants, which follow it in one run
+ *  (`a/b` < `a/b/c` < `a/b.x`; plain string order puts `a/b.x` between them). No string is made. */
+export function dirOrder(a: string, b: string): number {
+  if (a === b) return 0
+  if (a < b) return b.length > a.length && b.charCodeAt(a.length) < 47 && b.startsWith(a) ? 1 : -1
+  return a.length > b.length && a.charCodeAt(b.length) < 47 && a.startsWith(b) ? -1 : 1
+}
+
 /** A static literal's phase 1, held per isolate, and (unscoped, nothing excluded) everything about its
  *  forest that the pixel budget doesn't decide, built on first use: its roots as a set, every forest node's
  *  depth and bytes (roots and their ancestors under P), each ancestor's aggregate and the roots' total, and
@@ -2399,66 +2407,92 @@ export interface FoldOpts {
  *  and let go after the second. */
 export function foldPhase1(path: string, dP: number, hits: Hit[], o: FoldOpts): Phase1Memo {
   const D = scanAt(o.date), E = scanAt(o.other)
-  const at = new Map<string, number>()
-  const paths: string[] = [], depths: number[] = [], parents: number[] = []
-  // Per node: bytes and objects on each scan (0: `date`, 1: `other`), where it is live (a bit per scan), a match root.
-  const bytes: [number[], number[]] = [[], []], objs: [number[], number[]] = [[], []]
-  const live: number[] = [], isRoot: number[] = []
-  const hitNode = new Int32Array(hits.length).fill(-1)
-  const nodeOf = (p: string, d: number): number => {
-    let i = at.get(p)
-    if (i == null) {
-      i = paths.length
-      at.set(p, i); paths.push(p); depths.push(d); parents.push(-1)
-      bytes[0].push(0); bytes[1].push(0); objs[0].push(0); objs[1].push(0); live.push(0); isRoot.push(0)
-    }
-    return i
-  }
-  const add = (i: number, on: number, size: number, n: number) => {
-    live[i] |= on
-    if (on & 1) { bytes[0][i] += size; objs[0][i] += n }
-    if (on & 2) { bytes[1][i] += size; objs[1][i] += n }
-  }
+  // A diff side's other scan has numbers of its own; a view's `other` is its `date`, so it has none.
+  const two = o.other !== o.date
+  // The hits live on either scan, in `dirOrder`: a path just before its descendants, which follow it in one run.
+  const on = new Uint8Array(hits.length)
+  let nLive = 0
   for (let k = 0; k < hits.length; k++) {
     const h = hits[k]
-    const on = (h.vf <= D && D < h.vt ? 1 : 0) | (h.vf <= E && E < h.vt ? 2 : 0)
-    if (!on) continue
-    const size = Number(h.size), n = Number(h.n)
-    const i = nodeOf(h.path, h.depth)
-    hitNode[k] = i
-    isRoot[i] = 1
-    add(i, on, size, n)
+    if ((on[k] = (h.vf <= D && D < h.vt ? 1 : 0) | (h.vf <= E && E < h.vt ? 2 : 0))) nLive++
   }
-  // The roots' ancestors, each made once: a walk up from a root stops at the first node it already knows (a hit's
-  // whole chain per hit made a string per level per version: on a broad term, more than the memo it replaces).
-  const nRootNodes = paths.length
-  for (let r = 0; r < nRootNodes; r++) {
-    let child = r
-    for (let q = parentOf(paths[r]), d = depths[r] - 1; q.length > path.length; q = parentOf(q), d--) {
-      const known = at.get(q)
-      if (known != null) { parents[child] = known; break }
-      const i = nodeOf(q, d)
-      parents[child] = i
-      child = i
-      if (q === '') break
+  const order = new Int32Array(nLive)
+  for (let k = 0, j = 0; k < hits.length; k++) if (on[k]) order[j++] = k
+  order.sort((x, y) => dirOrder(hits[x].path, hits[y].path))
+  // Two walks over that order, each with a stack of the open nodes (the previous root and its ancestors under P): the
+  // first counts the nodes, the second fills columns of exactly that many. A node is a prefix of a hit's path (`src`,
+  // `plen`): no string is made for an ancestor until it is compared or held. A parent is made before its children.
+  const stackLen: number[] = [], stackNode: number[] = []
+  let N = 0
+  let src = new Int32Array(0), plen = src, depths = src, parents = src, hitNode = src
+  let bytes0 = new Float64Array(0), objs0 = bytes0, bytes1 = bytes0, objs1 = bytes0
+  let live = new Uint8Array(0), isRoot = live
+  for (const fill of [false, true]) {
+    if (fill) {
+      src = new Int32Array(N); plen = new Int32Array(N); depths = new Int32Array(N); parents = new Int32Array(N).fill(-1)
+      hitNode = new Int32Array(hits.length).fill(-1)
+      bytes0 = new Float64Array(N); objs0 = new Float64Array(N)
+      bytes1 = two ? new Float64Array(N) : bytes0; objs1 = two ? new Float64Array(N) : objs0
+      live = new Uint8Array(N); isRoot = new Uint8Array(N)
     }
-  }
-  at.clear()
-  const N = paths.length
-  // Bottom-up: each node's numbers into its parent's, deepest first.
-  const byDepth: number[][] = []
-  for (let i = 0; i < N; i++) (byDepth[depths[i]] ??= []).push(i)
-  for (let d = byDepth.length - 1; d >= 0; d--) {
-    for (const i of byDepth[d] ?? []) {
-      const p = parents[i]
-      if (p < 0) continue
-      live[p] |= live[i]
-      bytes[0][p] += bytes[0][i]; objs[0][p] += objs[0][i]
-      bytes[1][p] += bytes[1][i]; objs[1][p] += objs[1][i]
+    let n = 0, sp = 0, prev = '', i = -1
+    for (let j = 0; j < nLive; j++) {
+      const k = order[j], p = hits[k].path
+      // Another version of the last root's path: the same node.
+      if (j === 0 || p !== prev) {
+        // Close what isn't an ancestor of `p`: a stacked prefix of `prev` is one where `p` shares it and goes on with a `/`.
+        const m = Math.min(prev.length, p.length)
+        let L = 0
+        while (L < m && prev.charCodeAt(L) === p.charCodeAt(L)) L++
+        while (sp > 0 && (stackLen[sp - 1] > L || p.charCodeAt(stackLen[sp - 1]) !== 47)) sp--
+        const top = sp
+        for (let s = p.indexOf('/', (sp > 0 ? stackLen[sp - 1] : path.length) + 1); s !== -1; s = p.indexOf('/', s + 1)) {
+          stackLen[sp] = s; stackNode[sp] = n++; sp++
+        }
+        stackLen[sp] = p.length; stackNode[sp] = n++; sp++
+        i = stackNode[sp - 1]
+        if (fill) {
+          // The root, and the ancestors made for it, top down: each the child of the one above.
+          const d = hits[k].depth
+          for (let x = top; x < sp; x++) {
+            const node = stackNode[x]
+            src[node] = k; plen[node] = stackLen[x]; depths[node] = d - (sp - 1 - x)
+            if (x > 0) parents[node] = stackNode[x - 1]
+          }
+          isRoot[i] = 1
+        }
+        prev = p
+      }
+      if (!fill) continue
+      hitNode[k] = i
+      const h = hits[k], size = Number(h.size), cnt = Number(h.n), b = on[k]
+      live[i] |= b
+      if (b & 1) { bytes0[i] += size; objs0[i] += cnt }
+      if (two && (b & 2)) { bytes1[i] += size; objs1[i] += cnt }
     }
+    N = n
   }
+  // A node's path: a root's is its hit's; an ancestor's is cut on first use, and kept.
+  const cut = new Map<number, string>()
+  const paths = (i: number): string => {
+    const s = hits[src[i]].path
+    if (plen[i] === s.length) return s
+    let q = cut.get(i)
+    if (q === undefined) cut.set(i, (q = s.slice(0, plen[i])))
+    return q
+  }
+  // Bottom-up: each node's numbers into its parent's, children first (made after their parent, so in reverse order).
+  // Whole bytes and objects summed below 2^53 (the fleet's totals are) are exact in any order.
+  for (let i = N - 1; i >= 0; i--) {
+    const p = parents[i]
+    if (p < 0) continue
+    live[p] |= live[i]
+    bytes0[p] += bytes0[i]; objs0[p] += objs0[i]
+    if (two) { bytes1[p] += bytes1[i]; objs1[p] += objs1[i] }
+  }
+  const bytes: [Float64Array, Float64Array] = [bytes0, bytes1], objs: [Float64Array, Float64Array] = [objs0, objs1]
   const thr = (d: number) => o.T * o.atten ** Math.max(0, d - dP - 1)
-  const byPath = (x: number, y: number) => (paths[x] < paths[y] ? -1 : paths[x] > paths[y] ? 1 : 0)
+  const byPath = (x: number, y: number) => { const a = paths(x), b = paths(y); return a < b ? -1 : a > b ? 1 : 0 }
   // Picked: bit 1 by `date`'s criteria, bit 2 by `other`'s.
   const picked = new Uint8Array(N)
   // A view (no other scan): its one scan's criteria.
@@ -2513,14 +2547,14 @@ export function foldPhase1(path: string, dP: number, hits: Hit[], o: FoldOpts): 
   const depth = new Map<string, number>(), nb = new Map<string, number>(), sums = new Map<string, Agg>()
   for (const i of liveRoots) {
     if (!held(i)) continue
-    const p = paths[i]
+    const p = paths(i)
     roots.push(p); mine.set(p, aggOf.get(i)!); rdepth.set(p, depths[i]); depth.set(p, depths[i]); nb.set(p, bytes[0][i])
   }
   const seen = new Uint8Array(N)
   for (const r of liveRoots) {
     for (let j = parents[r]; j >= 0 && !seen[j]; j = parents[j]) {
       seen[j] = 1
-      if (held(j)) { const p = paths[j]; depth.set(p, depths[j]); nb.set(p, bytes[0][j]); sums.set(p, aggOf.get(j)!) }
+      if (held(j)) { const p = paths(j); depth.set(p, depths[j]); nb.set(p, bytes[0][j]); sums.set(p, aggOf.get(j)!) }
     }
   }
   // Children on `date` per held node (and P): a drawn one folds these less its drawn ones.
@@ -2529,10 +2563,10 @@ export function foldPhase1(path: string, dP: number, hits: Hit[], o: FoldOpts): 
     if (!(live[i] & 1)) continue
     const par = parents[i]
     if (par >= 0 && !held(par)) continue
-    const k = par < 0 ? path : paths[par]
+    const k = par < 0 ? path : paths(par)
     kids.set(k, (kids.get(k) ?? 0) + 1)
   }
-  const matched = [...roots.map(p => ({ path: p, b: Math.round(mine.get(p)!.b), o: Math.round(mine.get(p)!.o) })), ...listed.map(i => ({ path: paths[i], b: Math.round(bytes[0][i]), o: Math.round(objs[0][i]) }))]
+  const matched = [...roots.map(p => ({ path: p, b: Math.round(mine.get(p)!.b), o: Math.round(mine.get(p)!.o) })), ...listed.map(i => ({ path: paths(i), b: Math.round(bytes[0][i]), o: Math.round(objs[0][i]) }))]
     .sort((x, y) => y.b - x.b || (x.path < y.path ? -1 : x.path > y.path ? 1 : 0))
   const total = rootsTotal(hits, o.date)
   return { p1: { all: mine, mine, depth: rdepth }, roots, forest: { depth, nb, sums, total, matched, kids, nRoots, union, nodes: N } }
