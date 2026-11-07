@@ -2422,20 +2422,39 @@ export function foldPhase1(path: string, dP: number, hits: Hit[], o: FoldOpts): 
     const on = (h.vf <= D && D < h.vt ? 1 : 0) | (h.vf <= E && E < h.vt ? 2 : 0)
     if (!on) continue
     const size = Number(h.size), n = Number(h.n)
-    let child = nodeOf(h.path, h.depth)
-    hitNode[k] = child
-    isRoot[child] = 1
-    add(child, on, size, n)
-    for (let q = parentOf(h.path), d = h.depth - 1; q.length > path.length; q = parentOf(q), d--) {
+    const i = nodeOf(h.path, h.depth)
+    hitNode[k] = i
+    isRoot[i] = 1
+    add(i, on, size, n)
+  }
+  // The roots' ancestors, each made once: a walk up from a root stops at the first node it already knows (a hit's
+  // whole chain per hit made a string per level per version: on a broad term, more than the memo it replaces).
+  const nRootNodes = paths.length
+  for (let r = 0; r < nRootNodes; r++) {
+    let child = r
+    for (let q = parentOf(paths[r]), d = depths[r] - 1; q.length > path.length; q = parentOf(q), d--) {
+      const known = at.get(q)
+      if (known != null) { parents[child] = known; break }
       const i = nodeOf(q, d)
       parents[child] = i
-      add(i, on, size, n)
       child = i
       if (q === '') break
     }
   }
   at.clear()
   const N = paths.length
+  // Bottom-up: each node's numbers into its parent's, deepest first.
+  const byDepth: number[][] = []
+  for (let i = 0; i < N; i++) (byDepth[depths[i]] ??= []).push(i)
+  for (let d = byDepth.length - 1; d >= 0; d--) {
+    for (const i of byDepth[d] ?? []) {
+      const p = parents[i]
+      if (p < 0) continue
+      live[p] |= live[i]
+      bytes[0][p] += bytes[0][i]; objs[0][p] += objs[0][i]
+      bytes[1][p] += bytes[1][i]; objs[1][p] += objs[1][i]
+    }
+  }
   const thr = (d: number) => o.T * o.atten ** Math.max(0, d - dP - 1)
   const byPath = (x: number, y: number) => (paths[x] < paths[y] ? -1 : paths[x] > paths[y] ? 1 : 0)
   // Picked: bit 1 by `date`'s criteria, bit 2 by `other`'s.
