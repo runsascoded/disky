@@ -370,14 +370,16 @@ function detailLines(b: Burst, o: SummaryOpts, lead: string[]): string[] {
 /** Who a signed-in burst's Slack post is sent as: the profile's name, else the email's local part. */
 export const senderName = (actor: string, profileName: string | null | undefined): string => profileName?.trim() || actorName(actor)
 
-const stop = (fmt: Fmt, [p, n]: [string, number]): string => `${fmt.code(p)}${n > 1 ? ` ×${n}` : ''}`
+/** A visited path, linked to that page on the burst's site (code-formatted when the burst has no origin). */
+const stop = (fmt: Fmt, origin: string, [p, n]: [string, number]): string =>
+  `${origin ? fmt.link(`${origin}${p}`, p) : fmt.code(p)}${n > 1 ? ` ×${n}` : ''}`
 
 /** Where the burst went: up to `TRAIL_KEEP` stops, in order; past that, the most-viewed `top` paths, then the last
  *  `TRAIL_KEEP` stops. A burst from before trails were kept lists its most-viewed paths. */
-export function pageLines(b: Pick<Burst, 'pages' | 'trail'>, fmt: Fmt, top: number): string[] {
-  const hist = (n: number) => Object.entries(b.pages).slice(0, n).map(e => stop(fmt, e)).join(', ')
+export function pageLines(b: Pick<Burst, 'origin' | 'pages' | 'trail'>, fmt: Fmt, top: number): string[] {
+  const hist = (n: number) => Object.entries(b.pages).slice(0, n).map(e => stop(fmt, b.origin, e)).join(', ')
   if (!b.trail.n) return Object.keys(b.pages).length ? [`Pages: ${hist(top)}`] : []
-  const path = b.trail.last.map(e => stop(fmt, e)).join(' → ')
+  const path = b.trail.last.map(e => stop(fmt, b.origin, e)).join(' → ')
   if (b.trail.n <= b.trail.last.length) return [`Pages: ${path}`]
   return [`Pages (${fmtN(b.trail.n)} stops): ${hist(top)}`, `Last ${b.trail.last.length}: ${path}`]
 }

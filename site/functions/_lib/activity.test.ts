@@ -153,7 +153,7 @@ describe('rendering', () => {
       '3 assignments · 4 page loads · 9 URL changes',
       'Largest assignment: `gs://b/y/` (2.0 PiB) → bob',
       'Owners: bob, cleared',
-      'Pages: `/` ×3 → `/users`',
+      `Pages: <${ORIGIN}/|/> ×3 → <${ORIGIN}/users|/users>`,
       `<${ORIGIN}/admin/activity?burst=7|activity> · <${ORIGIN}/admin/sessions/sid-aaaaaaaaaa|session sid-aaaa>`,
     ])
   })
@@ -178,7 +178,7 @@ describe('rendering', () => {
     expect(renderDetails(burst, o).split('\n')).toEqual([
       'Largest assignment: `gs://b/y/` (2.0 PiB) → bob',
       'Owners: bob, cleared',
-      'Pages: `/` ×3 → `/users`',
+      `Pages: <${ORIGIN}/|/> ×3 → <${ORIGIN}/users|/users>`,
       `<${ORIGIN}/admin/sessions/sid-aaaaaaaaaa|session sid-aaaa>`,
     ])
     expect(renderDetails({ ...burst, pages: {}, trail: emptyTrail(), sids: [] }, { ...o, highlights: {} })).toBe('')
@@ -190,8 +190,10 @@ describe('rendering', () => {
       ...burst, pages: { '/': 9, '/a': 4, '/b': 2 }, trail: { n: 14, last: [['/a', 1], ['/', 2]] },
       sids: ['s1aaaaaa', 's2aaaaaa', 's3aaaaaa', 's4aaaaaa'],
     }
-    expect(pageLines(long, SLACK, 2)).toEqual(['Pages (14 stops): `/` ×9, `/a` ×4', 'Last 2: `/a` → `/` ×2'])
-    expect(pageLines({ pages: { '/': 2 }, trail: emptyTrail() }, SLACK, 2)).toEqual(['Pages: `/` ×2'])
+    expect(pageLines(long, SLACK, 2)).toEqual([`Pages (14 stops): <${ORIGIN}/|/> ×9, <${ORIGIN}/a|/a> ×4`, `Last 2: <${ORIGIN}/a|/a> → <${ORIGIN}/|/> ×2`])
+    expect(pageLines({ origin: ORIGIN, pages: { '/': 2 }, trail: emptyTrail() }, SLACK, 2)).toEqual([`Pages: <${ORIGIN}/|/> ×2`])
+    expect(pageLines({ origin: '', pages: { '/a b': 1 }, trail: emptyTrail() }, DISCORD, 2)).toEqual(['Pages: `/a b`'])
+    expect(pageLines({ origin: ORIGIN, pages: { '/x': 1 }, trail: emptyTrail() }, DISCORD, 2)).toEqual([`Pages: [/x](<${ORIGIN}/x>)`])
     expect(sessionLinks(long, SLACK)).toEqual([`<${ORIGIN}/admin/sessions?u=ann%40example.test|4 sessions>`])
   })
 
@@ -315,10 +317,10 @@ describe('D1 and sinks', () => {
     // One parent (+ its details reply), posted once; each resumption re-renders them and the one `resume` reply.
     expect(calls.filter(c => c.url.endsWith('chat.postMessage')).map(c => [c.body.thread_ts ?? null, String(c.body.text).split('\n')[0]])).toEqual([
       [null, `1 page load · 2026-10-21 15:00Z · <${ORIGIN}/admin/activity?burst=1|activity>`],
-      ['1.000001', 'Pages: `/`'],
+      ['1.000001', `Pages: <${ORIGIN}/|/>`],
       ['1.000001', '*1 resumption*'],
       [null, `1 page load · 2026-10-21 21:17Z · <${ORIGIN}/admin/activity?burst=2|activity>`],
-      ['1.000004', 'Pages: `/`'],
+      ['1.000004', `Pages: <${ORIGIN}/|/>`],
     ])
     expect(String(calls.filter(c => c.url.endsWith('chat.update')).at(-1)!.body.text).split('\n')).toEqual([
       '*2 resumptions*',
@@ -342,7 +344,7 @@ describe('D1 and sinks', () => {
     const link = `<${ORIGIN}/admin/sessions/sid-aaaaaa?show=errors|15:00>`
     expect(calls.map(c => [c.body.thread_ts ?? null, c.body.username ?? null, String(c.body.text).split('\n')])).toEqual([
       [null, 'Ann Lee', [`1 page load · 3 errors · 2026-10-21 15:00Z · <${ORIGIN}/admin/activity?burst=1|activity>`]],
-      ['1.000001', 'Ann Lee', ['Pages: `/admin`', `<${ORIGIN}/admin/sessions/sid-aaaaaa|session sid-aaaa>`]],
+      ['1.000001', 'Ann Lee', [`Pages: <${ORIGIN}/admin|/admin>`, `<${ORIGIN}/admin/sessions/sid-aaaaaa|session sid-aaaa>`]],
       ['1.000001', 'Ann Lee', ['*3 errors*', `• ${link} GET /api/auth/whoami → failed · 3300ms · TypeError: Failed to fetch on \`/admin\` ×2`, `• ${link} console.error: a&lt;b on \`/admin\``]],
     ])
   })
@@ -353,7 +355,7 @@ describe('D1 and sinks', () => {
     await feed(env, wait, 'sid-aaaaaa', [{ t: NOW, k: 'start', u: '/' }] as SlogEvent[], NOW)
     expect(calls.map(c => [c.body.thread_ts ?? null, c.body.username ?? null, String(c.body.text).split('\n')[0]])).toEqual([
       [null, null, `*ann* (browser) · 1 page load · 2026-10-21 15:00Z · <${ORIGIN}/admin/activity?burst=1|activity>`],
-      ['1.000001', null, 'Pages: `/`'],
+      ['1.000001', null, `Pages: <${ORIGIN}/|/>`],
     ])
   })
 
@@ -371,9 +373,9 @@ describe('D1 and sinks', () => {
     expect(await rerender(env, [1, 7])).toEqual([1])
     expect(calls.map(c => [c.url.replace('https://slack.com/api/', ''), c.body.thread_ts ?? c.body.ts ?? null, String(c.body.text).split('\n')[0]])).toEqual([
       ['chat.postMessage', null, `1 page load · 2026-10-21 15:00Z · <${ORIGIN}/admin/activity?burst=1|activity>`],
-      ['chat.postMessage', '1.000001', 'Pages: `/scans`'],
+      ['chat.postMessage', '1.000001', `Pages: <${ORIGIN}/scans|/scans>`],
       ['chat.update', '1.000001', `1 page load · 2026-10-21 15:00Z · <${ORIGIN}/admin/activity?burst=1|activity>`],
-      ['chat.update', '1.000002', 'Pages: `/scans`'],
+      ['chat.update', '1.000002', `Pages: <${ORIGIN}/scans|/scans>`],
       ['chat.postMessage', '1.000001', '*1 error*'],
     ])
   })
@@ -418,9 +420,9 @@ describe('D1 and sinks', () => {
     await Promise.all(pending)
     expect(calls.map(c => [c.url.replace('https://slack.com/api/', ''), String(c.body.text).split('\n')[0]])).toEqual([
       ['chat.postMessage', `1 page load · 2026-10-21 15:00Z · <${ORIGIN}/admin/activity?burst=1|activity>`],
-      ['chat.postMessage', 'Pages: `/`'],
+      ['chat.postMessage', `Pages: <${ORIGIN}/|/>`],
       ['chat.update', `2 page loads · 2026-10-21 15:00–15:00Z · <${ORIGIN}/admin/activity?burst=1|activity>`],
-      ['chat.update', 'Pages: `/` ×2'],
+      ['chat.update', `Pages: <${ORIGIN}/|/> ×2`],
     ])
     expect((await loadBurst(db, 1))!.dirty).toBe(false)
   })
