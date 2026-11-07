@@ -6,6 +6,7 @@
   "display_information": {
     "name": "CoreWeave Usage Bot",
     "description": "Storage-usage digest and staged-deletion review for the Marin CoreWeave buckets \u2014 cw.oa.dev",
+    "long_description": "Posts a daily storage-usage thread for the Marin CoreWeave buckets, and staged-deletion reviews for admins. Dashboard: https://cw.oa.dev\n\nEach pool's mark answers two questions.\n\nColor: how soon will it fill? Days until full at its current pace, from deep green (60 days or more, or not filling) to red (under 2 days, or at or over quota). A pool at least 95% full never shows better than orange.\n\nArrow: how fast is it moving? Its growth rate as a share of what it holds, the fastest of the last 1, 3 and 7 days. It points down only if the pool shrank over all three.",
     "background_color": "#0d1117"
   },
   "features": {
