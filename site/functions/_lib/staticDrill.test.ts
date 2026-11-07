@@ -1,17 +1,18 @@
 import { beforeAll, describe, expect, it, vi } from 'vitest'
 import type { Env } from './auth'
 import { parseQuery } from './scope'
-import { Drill, type DrillAnswer, rollupAt, rollupTotal } from './staticDrill'
-import { covers, drillSource, type Found, type HitSource, injectedStores, liveTotal, SuffixHits, type StaticFilterStore } from './staticFilter'
+import { Drill, DRILL_RULES, type DrillAnswer, DrillSource, rollupAt, rollupTotal } from './staticDrill'
+import { covers, drillSource, type Found, type HitOpts, type HitSource, indexedGate, injectedStores, liveTotal, SuffixHits, type StaticFilterStore } from './staticFilter'
 import { catalogAnswer, StaticCatalog } from './staticCatalog'
 import { FilterRejected, REJECT_MESSAGES } from './indexedOnly'
 import { type Blobs, type Hit, scanAt, StaticNames } from './staticNames'
 import { sqliteD1 } from './testD1'
 import { type D1Variant, fixture, FILES, readJson, seedGeneration } from './testStore'
-import { buildDiff, buildView, type Diff, type DiffRow, NotFound, type View, type ViewNode } from './view'
+import { allMatchRoots, buildDiff, buildView, type Diff, type DiffRow, NotFound, type View, type ViewNode } from './view'
 import { searchKey } from './search'
 import { resetUpgrades } from './edgeCache'
 import { warmSubtree } from '../api/subtree'
+import { HELD_BYTES, hitsBytes } from './shared'
 
 // Every test in this file: tests take seconds alone but past 30 s under the full parallel suite (gcs, cw: 10-17).
 vi.setConfig({ testTimeout: 120_000 })
@@ -225,6 +226,216 @@ describe('D1', () => {
       const src = drillSource(drillBlobs(undefined, { 'scans.json': { scans: [{ id: A }] } }))
       const f = (await src.hits('0', 'bk/fill'))!
       expect([covers(f, [A]), covers(f, [B]), covers(f, [A, B]), covers({ hits: [], io: {} }, [B])]).toEqual([true, false, false, true])
+    })
+  })
+
+  describe('a roots answer past `maxBytes`, from its path chunks (`Drill.rootsFloor`): refused before it is read', () => {
+    const io0 = () => ({ top: 'isolate' as const, index_reads: 0, index_bytes: 0, groups: 0, bytes: 0, rows_read: 0 })
+    /** The fixture's selected groups of `(t, P)`, with the range. */
+    const groupsOf = async (t: string, P: string) => {
+      const roots = (await newDrill().state()).tiers[0].files[[...t].length <= 2 ? 'short' : 'long'].roots
+      const lo: readonly [string, string] = P === '' ? [t, ''] : [t, `${P}/`], hi: readonly [string, string] = P === '' ? [`${t}\0`, ''] : [t, `${P}0`]
+      const { groups } = await roots.select(lo, hi, io0())
+      return { roots, lo, hi, groups: groups! }
+    }
+    const utf8 = (p: string) => new TextEncoder().encode(p).length
+    /** Every roots data file range read: `[key, offset, length]`. */
+    const spans = () => {
+      const got: [string, number, number | undefined][] = []
+      const inner = drillBlobs()
+      const blobs: Blobs = { ...inner, range(key, offset, length) { if (/^drill\/(long|short)\/roots/.test(key)) got.push([key, offset, length]); return inner.range(key, offset, length) } }
+      return { got, blobs }
+    }
+
+    it('a group\'s key length is its decoded paths\' exactly', async () => {
+      const { roots, groups } = await groupsOf('.bin', '')
+      const got: number[] = []
+      const want: number[] = []
+      for (const g of groups) {
+        const paths = await roots.read<string>(['', ''], ['￿', ''], [g], io0(), (c, i) => c.path[i] as string)
+        want.push(paths.reduce((n, p) => n + p.length, 0))
+        got.push(await roots.keyUnits(g, io0()) as number)
+      }
+      expect(got).toEqual(want)
+      expect(groups.length).toBeGreaterThan(0)
+    })
+
+    it('the floor: `hitsBytes` of the groups wholly inside the range; nothing for a rollup, the catalog, a plain view, a non-member', async () => {
+      const drill = newDrill()
+      const got: [string, string, string, number][] = []
+      const want: [string, string, string, number][] = []
+      for (const [t, P] of [['bin', ''], ['bin', 'bk'], ['tomat', 'bk'], ['x', 'bk'], ['om', 'bk'], ['safetensors', 'bk'], ['0', 'bk/fill'], ['0', ''], ['nomatch', ''], ['tomat', 'bk/data/tomato']] as const) {
+        const a = await drill.view(t, P)
+        got.push([t, P, a.source, await drill.rootsFloor(t, P)])
+        let bytes = 0
+        if (a.source === 'roots') {
+          const { roots, groups, lo, hi } = await groupsOf(a.c, P)
+          const inside = groups.filter(g => (g.qMin > lo[0] || (g.qMin === lo[0] && g.kMin >= lo[1])) && (g.qMax < hi[0] || (g.qMax === hi[0] && g.kMax < hi[1])))
+          for (const g of inside) for (const p of await roots.read<string>(['', ''], ['￿', ''], [g], io0(), (c, i) => c.path[i] as string)) bytes += 256 + p.length
+          expect(bytes).toBeLessThanOrEqual(hitsBytes(a.hits))
+        }
+        want.push([t, P, a.source, bytes])
+      }
+      expect(got).toEqual(want)
+      expect(got.filter(([, , , b]) => b > 0).length).toBeGreaterThan(0)
+    })
+
+    it('past the dispatch bound with no rollup the answer is still its roots, so the floor is theirs; a rollup stays nothing', async () => {
+      const low = new Drill(drillBlobs(), null, { rules: { ...DRILL_RULES, bound: () => 0 } })
+      const [a, floor, want, rollup] = [await low.view('.bin', 'bk/data'), await low.rootsFloor('.bin', 'bk/data'), await newDrill().rootsFloor('.bin', 'bk/data'), await low.rootsFloor('0', 'bk/fill')]
+      expect([a.source, floor, want, rollup]).toEqual(['roots', 1127, 1127, 0])
+    })
+
+    it('past `maxBytes` declines (`over`, the scans), reading only path chunks; at it, answers as ever', async () => {
+      const t = 'bin', P = ''
+      const floor = await newDrill().rootsFloor(t, P)
+      const { got, blobs } = spans()
+      const opts: HitOpts = { maxBytes: floor - 1 }
+      expect(await drillSource(blobs).hits(t, P, opts)).toBe(null)
+      expect([opts.over, opts.overScans]).toEqual([true, DATES])
+      const { groups } = await groupsOf('.bin', P) // `bin`'s canonical
+      const chunks = groups.map(g => [g.file, g.chunks[3], g.chunks[4]].join())
+      expect(got.length).toBeGreaterThan(0)
+      expect(got.map(([k, o, n]) => [k.replace(/^drill\//, ''), o, n].join()).filter(x => !chunks.includes(x))).toEqual([])
+      const at: HitOpts = { maxBytes: floor }
+      const [whole, allowed] = [await drillSource(drillBlobs()).hits(t, P), await drillSource(drillBlobs()).hits(t, P, at)]
+      expect([at.over, allowed!.hits!.map(h => h.path)]).toEqual([undefined, whole!.hits!.map(h => h.path)])
+    })
+
+    /** The static store with every `maxBytes` a read asks replaced by `cap`, and what it asked recorded. */
+    const capped = (cap: number, asked: (number | undefined)[], blobs: Blobs = drillBlobs()): StaticFilterStore => {
+      const heavy = drillSource(blobs)
+      const src: HitSource = { hits(k, u, o, r) { asked.push(o?.maxBytes); if (o?.maxBytes != null) o.maxBytes = cap; return heavy.hits(k, u, o, r) } }
+      return heavyStore(src)
+    }
+    const diffOf = (env: Env, t: string, P: string) => buildDiff(env, { from: A, to: B, path: P, w: W, h: H, minArea: MIN_AREA, atten: ATTEN, top: 200, query: q(t) })
+    const code = (p: Promise<unknown>) => p.then(() => 'answered', e => { if (e instanceof FilterRejected) return e.reject.code; throw e })
+
+    const unfoldedOf = (env: Env, t: string, P: string) => buildDiff(env, { from: A, to: B, path: P, w: W, h: H, minArea: MIN_AREA, atten: ATTEN, top: 200, query: q(t), unfolded: true })
+
+    it('an unscoped diff of an answer past `HELD_BYTES` answers, asking no bound: its sides fold (`foldPhase1`)', async () => {
+      const asked: (number | undefined)[] = []
+      const d = await diffOf(envStatic(capped(1, asked)), 'bin', '')
+      expect([...new Set(asked)]).toEqual([undefined])
+      expect(d).toEqual(await unfoldedOf(envStatic(), 'bin', ''))
+      expect([d.rows.length, d.matchCount]).toEqual([9, { n: 12, b: 3156498, o: 12 }])
+    })
+
+    it('`buildDiff` unfolded refuses `diff-too-broad` having read no answer, asking `HELD_BYTES`; a view of one side never asks', async () => {
+      const asked: (number | undefined)[] = []
+      const { got, blobs } = spans()
+      expect(await code(unfoldedOf(envStatic(capped(1, asked, blobs)), 'bin', ''))).toBe('diff-too-broad')
+      const { groups } = await groupsOf('.bin', '')
+      expect(got.map(([, o]) => o).filter(o => !groups.map(g => g.chunks[3]).includes(o))).toEqual([])
+      expect([...new Set(asked)]).toEqual([HELD_BYTES])
+      const views: (number | undefined)[] = []
+      await view(envStatic(capped(1, views)), B, '', 'bin')
+      expect([...new Set(views)]).toEqual([undefined])
+    })
+
+    it('the gate a diff passes first reads no answer either, and tells coverage as with it read', async () => {
+      const { got, blobs } = spans()
+      const asked = () => ({ maxBytes: 1 })
+      expect(await indexedGate(envStatic(heavyStore(drillSource(blobs))) as never, q('bin').ast, '', [A, B], asked())).toBe(null)
+      const { groups } = await groupsOf('.bin', '')
+      expect(got.map(([, o]) => o).filter(o => !groups.map(g => g.chunks[3]).includes(o))).toEqual([])
+      const only = heavyStore(drillSource(drillBlobs(undefined, { 'scans.json': { scans: [{ id: A }] } })))
+      expect((await indexedGate(envStatic(only) as never, q('bin').ast, '', [A, B], asked()))?.code).toBe('scan-not-indexed')
+      expect((await indexedGate(envStatic(only) as never, q('bin').ast, '', [A, B]))?.code).toBe('scan-not-indexed')
+    })
+
+    it('a scan the drill doesn\'t cover answers as with the answer read: each side in turn, the first refusal the diff\'s', async () => {
+      const only = (id: string) => drillBlobs(undefined, { 'scans.json': { scans: [{ id }] } })
+      expect(await code(diffOf(envStatic(capped(1, [], only(B))), 'bin', ''))).toBe('scan-not-indexed')
+      expect(await code(unfoldedOf(envStatic(capped(1, [], only(A))), 'bin', ''))).toBe('diff-too-broad')
+    })
+
+    it('a folded diff is the unfolded one, body for body, on every term, path, canvas and tile budget', async () => {
+      const got: unknown[] = [], want: unknown[] = []
+      const CANVASES = [{ w: W, h: H }, { w: W, h: H, maxTiles: 3 }, { w: 320, h: 200, maxTiles: 1 }, { w: W, h: H, depth: 1 }, { w: 640, h: 400, maxTiles: 2, depth: 2 }]
+      for (const t of TERMS) for (const P of ['', 'bk', 'bk/data', 'tomato-bk', 'zz']) for (const c of CANVASES) {
+        const o = { from: A, to: B, path: P, minArea: MIN_AREA, atten: ATTEN, top: 200, query: q(t), ...c }
+        const run = (x: object) => buildDiff(envStatic(), { ...o, ...x }).then(d => JSON.stringify(d), e => { if (e instanceof FilterRejected || e instanceof NotFound) return String(e); throw e })
+        got.push([t, P, c, await run({})])
+        want.push([t, P, c, await run({ unfolded: true })])
+      }
+      expect(got).toEqual(want)
+      expect(got.length).toBe(TERMS.length * 5 * 5)
+    })
+
+    it('a view folds its phase 1 (`foldPhase1`): its tile budget\'s nodes held, not every root\'s forest; the cover lists every root', async () => {
+      const folds: string[] = []
+      const trace = (n: string, _ms: number, d?: string) => { if (n === 'fold') folds.push(d!) }
+      const v = await view(envStatic(), B, '', 'bin', { w: 320, h: 200, maxTiles: 1, trace })
+      const u = await view(envStatic(), B, '', 'bin', { w: 320, h: 200, maxTiles: 1, unfolded: true, trace })
+      expect(JSON.stringify(v)).toEqual(JSON.stringify(u))
+      expect(folds).toEqual(['5 of 27 nodes, 11 of 11 roots'])
+      const cover = await allMatchRoots(envStatic(), { date: B, path: '', query: q('bin') })
+      expect([cover!.roots.length, folds.length]).toEqual([11, 1])
+    })
+
+    it('a folded view (`foldPhase1`, no other scan) is the unfolded one, body for body, on every term, path, scan, canvas and tile budget', async () => {
+      const got: unknown[] = [], want: unknown[] = []
+      const CANVASES = [{ w: W, h: H }, { w: W, h: H, maxTiles: 3 }, { w: 320, h: 200, maxTiles: 1 }, { w: W, h: H, maxDepth: 1 }, { w: 640, h: 400, maxTiles: 2, maxDepth: 2 }, { w: W, h: H, firstPaint: true }, { w: 320, h: 200, maxTiles: 2, firstPaint: true }]
+      const PATHS = ['', 'bk', 'bk/data', 'tomato-bk', 'zz']
+      for (const t of TERMS) for (const P of PATHS) for (const date of [A, B]) for (const c of CANVASES) {
+        const o = { date, path: P, minArea: MIN_AREA, atten: ATTEN, query: q(t), ...c }
+        const run = (x: object) => buildView(envStatic(), { ...o, ...x }).then(v => JSON.stringify(v), e => { if (e instanceof FilterRejected || e instanceof NotFound) return String(e); throw e })
+        got.push([t, P, date, c, await run({})])
+        want.push([t, P, date, c, await run({ unfolded: true })])
+      }
+      expect(got).toEqual(want)
+      expect(got.length).toBe(TERMS.length * PATHS.length * 2 * CANVASES.length)
+    })
+
+    it('a diff whose view root matches counts it: its one match, as the view lists it', async () => {
+      const d = await diffOf(envStatic(), 'tomato', 'tomato-bk')
+      const v = await view(envStatic(), B, 'tomato-bk', 'tomato')
+      const plain = await buildDiff(base, { from: A, to: B, path: 'tomato-bk', w: W, h: H, minArea: MIN_AREA, atten: ATTEN, top: 200 })
+      expect([d.rows, d.total_a, d.total_b]).toEqual([plain.rows, plain.total_a, plain.total_b])
+      expect([v.matches, d.matched, d.matchCount]).toEqual([['tomato-bk'], [{ path: 'tomato-bk', b: d.total_b, o: d.objects_b }], { n: 1, b: d.total_b, o: d.objects_b }])
+    })
+
+    it('within the bound the diff is the one it was', async () => {
+      const [cap, plain] = await Promise.all([diffOf(envStatic(capped(1e12, [])), 'bin', ''), diffOf(envStatic(), 'bin', '')])
+      expect(cap).toEqual(plain)
+    })
+
+    describe('paths that aren\'t ASCII (`fixtures/static-drill-utf8`): the floor is in `hitsBytes`\' code units, not UTF-8 bytes', () => {
+      const files = new Map<string, ArrayBuffer>()
+      beforeAll(async () => { await readTree('static-drill-utf8', files) })
+      const source = () => new DrillSource(new Drill(blobsOf(files), null), undefined)
+      const CASES = [['ckpt', 'bk'], ['ckpt', 'bk/d'], ['本', 'bk'], ['本', 'bk/d']] as const
+
+      it('a group\'s key length is its paths\' `String.length`, fewer than their UTF-8 bytes', async () => {
+        const roots = (await new Drill(blobsOf(files), null).state()).tiers[0].files.long.roots
+        const { groups } = await roots.select(['ckpt', 'bk/'], ['ckpt', 'bk0'], io0())
+        const got: [number, number, number][] = []
+        const want: [number, number, number][] = []
+        for (const g of groups!) {
+          const paths = await roots.read<string>(['', ''], ['￿', ''], [g], io0(), (c, i) => c.path[i] as string)
+          const units = paths.reduce((n, p) => n + p.length, 0)
+          got.push([g.rows, await roots.keyUnits(g, io0()) as number, paths.reduce((n, p) => n + utf8(p), 0)])
+          want.push([4, units, units + paths.length * 16])
+        }
+        expect(got).toEqual(want)
+        expect(got.length).toBe(3)
+      })
+
+      it('an answer right at `maxBytes` (its own `hitsBytes`) is answered; a byte under it, refused unread', async () => {
+        const got: [string, string, number, number, boolean | undefined, number, boolean | undefined][] = []
+        const want: typeof got = []
+        for (const [t, P] of CASES) {
+          const whole = (await source().hits(t, P))!.hits!
+          const bytes = hitsBytes(whole)
+          const at: HitOpts = { maxBytes: bytes }, under: HitOpts = { maxBytes: bytes - 1 }
+          const answered = (await source().hits(t, P, at))?.hits ?? []
+          const refused = await source().hits(t, P, under)
+          got.push([t, P, whole.length, await new Drill(blobsOf(files), null).rootsFloor(t, P), at.over, answered.length, refused === null && under.over])
+          want.push([t, P, 12, bytes, undefined, 12, true])
+        }
+        expect(got).toEqual(want)
+      })
     })
   })
 
@@ -908,7 +1119,8 @@ describe('D1', () => {
         for (const cut of [{}, { lookupCap: 0 }, { walkMs: 0 }]) {
           const d: Diff = Object.keys(cut).length ? await buildDiff(env, { ...o, ...cut }) : full
           if (d.lookups_late) lateCases++
-          const roots = (d.matched ?? []).map(m => m.path)
+          // A view root the query matches is read whole, as the unfiltered diff reads it (its one match): not a forest.
+          const roots = q(t)(P) ? [] : (d.matched ?? []).map(m => m.path)
           const drawn = d.rows.filter(r => !r.p.endsWith('(other)')).map(r => [P === '' ? r.p : `${P}/${r.p}`, r] as const).filter(([p]) => roots.some(R => p.startsWith(`${R}/`)))
           rows += drawn.length; looked += drawn.filter(([, r]) => r.l).length
           if (d !== full) folded += full.rows.filter(r => !r.p.endsWith('(other)')).length - d.rows.filter(r => !r.p.endsWith('(other)')).length

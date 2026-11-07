@@ -11,7 +11,7 @@
 import { execFileSync } from 'node:child_process'
 import { mkdirSync, writeFileSync, rmSync } from 'node:fs'
 import { join, resolve } from 'node:path'
-import { STORES, banner, mark } from './marks.mjs'
+import { STORES, banner, fleetMark, mark } from './marks.mjs'
 
 const out = resolve(process.argv[2] ?? new URL('../../site/public/icons', import.meta.url).pathname)
 mkdirSync(out, { recursive: true })
@@ -40,6 +40,11 @@ for (const key of ['gcs', 'cw', 'hf']) {
   rmSync(bleed)
   console.log(`slack ${key}`)
 }
+const fleetBleed = join(bots, 'disky.bleed.tmp.svg')
+writeFileSync(fleetBleed, fleetMark({ bleed: true }))
+png(fleetBleed, 1024, join(bots, 'disky.png'))
+rmSync(fleetBleed)
+console.log('slack disky')
 for (const theme of ['light', 'dark']) {
   const base = join(out, `banner-${theme}`)
   writeFileSync(`${base}.svg`, banner(theme === 'dark') + '\n')

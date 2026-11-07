@@ -163,6 +163,8 @@ interface D1Handle {
   /** An interval store's data file (its R2 key, revision-suffixed): its decoded row groups are held in the colo
    *  under it (`coloGroups`). */
   dataKey?: string
+  /** A sort with its own columns, not the `Row` shape (the attribution table): its rows stay raw records (`toRow`). */
+  ownRows?: true
   /** A run's handle (its key, `deltas/<first>[_<last>]`): a group can matter at `asOf` when a version in it opened by
    *  then (`vfMin ≤ asOf`), live or not — a close record is not live, yet it ends one. */
   run?: string
@@ -1160,7 +1162,7 @@ async function openIvAttribution(env: Env, st: IvState, date: string): Promise<I
       const kv = new Map((footer.metadata.key_value_metadata ?? []).map(e => [e.key, e.value]))
       const file: FileSlice = { get byteLength() { return 0 }, slice: async (s0, e) => toBuffer((await src.get(key, { offset: s0, length: (e ?? s0) - s0 })).bytes) }
       const h: PqHandle = { mode: 'pq', file, env, date, variant: IV_ATTR, gen: `iv:${gen}${ivRev(env)}${run ? `/${run}` : ''}`, dir, schema: JSON.parse(kv.get('schema')!) as SchemaElement[],
-        version: Number(kv.get('version')), columns: null, floor: null, footer, asOf, src, dataKey: key, ...(run ? { run } : {}) }
+        version: Number(kv.get('version')), columns: IV_ATTR_COLS, ownRows: true, floor: null, footer, asOf, src, dataKey: key, ...(run ? { run } : {}) }
       return h
     }
     const [h0, ...rest] = await Promise.all(tiers.map(open))
@@ -1205,10 +1207,9 @@ export async function ivAttribution(env: Env, date: string, path: string, maxRow
   const best = new Map<string, { path: string; vf: number; vt: number; user: string | null; source: string | null; evidence: string | null }>()
   await Promise.all([...byTier].map(([i, ss]) => onTier(h, i, async t => {
     const jsons = await fetchGroupJson(t, ss.map(s => s.rg))
-    await mapLimit(ss, GROUP_READS, async s => {
-      const j = jsons.get(s.rg)
-      if (!j) return
-      for (const r of await readGroupRaw(t, j, IV_ATTR_COLS)) {
+    const groups = ss.flatMap(s => { const json = jsons.get(s.rg); return json ? [{ rg: s.rg, json }] : [] })
+    for (const rows of await readGroupsCached(t, groups, rows => rows as unknown as Record<string, unknown>[], undefined, true)) {
+      for (const r of rows) {
         const p = str(r.path)
         if (!want(p)) continue
         const v = { path: p, vf: num(r.vf), vt: num(r.vt), user: r.user == null ? null : str(r.user), source: r.source == null ? null : str(r.source), evidence: r.evidence == null ? null : str(r.evidence) }
@@ -1216,7 +1217,7 @@ export async function ivAttribution(env: Env, date: string, path: string, maxRow
         const c = best.get(k)
         if (!c || v.vt < c.vt) best.set(k, v)
       }
-    })
+    }
   })))
   return [...best.values()].filter(v => v.vf <= D && D < v.vt).sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))
     .map(({ path: p, user, source, evidence }) => ({ path: p, user, source, evidence }))
@@ -1737,8 +1738,8 @@ export function usMap(us: string, size: number): Record<string, number> | null {
   return Object.fromEntries(JSON.parse(us) as [string, number][])
 }
 
-/** The decoder for a handle's generation. */
-export const toRow = (h: { version: number }): ((r: Record<string, unknown>) => Row) => (h.version >= 3 ? toRowV3 : h.version >= 2 ? toRowV2 : toRowV1)
+/** The decoder for a handle's generation (a sort with its own columns: none, `ownRows`). */
+export const toRow = (h: { version: number; ownRows?: true }): ((r: Record<string, unknown>) => Row) => (h.ownRows ? r => r as unknown as Row : h.version >= 3 ? toRowV3 : h.version >= 2 ? toRowV2 : toRowV1)
 
 // --- D1 metadata: revive stored RowGroup JSON into hyparquet's shape ---------
 
@@ -1874,7 +1875,7 @@ async function readGroupVersions(h: IndexHandle, rgJson: string, columns?: strin
 // --- an interval store's decoded row groups, through the colo cache ------------------------------------
 //
 // Decoding a row group is the cold read's CPU: ~25 ms on a laptop for an 8K-row group of the interval store, four
-// fifths of it zstd (`fzstd`, pure JS: Workers compile no wasm at runtime), and several times that on a Worker. An
+// fifths of it zstd (`fzstd`, pure JS, unless `ZSTD_WASM`: `_lib/zstd.ts`), and several times that on a Worker. An
 // interval store's group serves every scan (`ivGroupKey`) and never changes, so the first isolate in a colo to
 // decode it holds it there as gzipped columnar JSON (~2 MB, ~0.3 MB stored; inflated and parsed natively in a few
 // ms): every later isolate reads that instead of the range and its decode.
@@ -1928,7 +1929,7 @@ export type Pre = (depth: number, path: string, size: number, tot?: number) => b
  *  `Pre` passes, without the rest. A group whose values JSON can't hold (`groupDoc` null) is held shaped. */
 export class IvGroup {
   private rows?: Row[]
-  constructor(private readonly h: { version: number }, private doc: GroupDoc | null, rows?: Row[]) {
+  constructor(private readonly h: { version: number; ownRows?: true }, private doc: GroupDoc | null, rows?: Row[]) {
     this.rows = rows
   }
   get length(): number {
@@ -3859,6 +3860,20 @@ const groupMayHold = (g: Span & { vfMax?: number; vtMin?: number }, a: Ask): boo
   return !(g.pMax < rect.pLo || g.pMin > rect.pHi)
 }
 
+/** The `Pre` of asks that are all exact paths: a row of a group that isn't one was not asked for, so it is never shaped
+ *  (`IvGroup.pick`): a diff's lookups ask for a few paths of each ~8K-row group. Prefix asks have none: testing each row
+ *  against thousands of ranges would cost more than shaping it. */
+function pointsPre(asks: Ask[]): Pre | undefined {
+  const at = new Map<number, Set<string>>()
+  for (const a of asks) {
+    if (!('path' in a)) return undefined
+    const paths = at.get(a.depth)
+    if (paths) paths.add(a.path)
+    else at.set(a.depth, new Set([a.path]))
+  }
+  return (depth, path) => !!at.get(depth)?.has(path)
+}
+
 /** Point lookups: exact `(depth, path)` rows or `(depth, under-prefix)`
  * ranges, many at once (the totals manifest's ~8k prefixes) — `keep` is the
  * caller's exact test over the rows of the candidate groups. */
@@ -3866,8 +3881,9 @@ export async function readAsks(
   h: IndexHandle,
   asks: Ask[],
   keep: (r: Row) => boolean,
-  { columns, maxGroups = 60, spanCap = 4000, stop, rememberWide, versions = false, pre, lens }: { columns?: string[]; maxGroups?: number; spanCap?: number; stop?: () => boolean; rememberWide?: boolean; versions?: boolean; pre?: Pre; lens?: Lens } = {},
+  { columns, maxGroups = 60, spanCap = 4000, stop, rememberWide, versions = false, pre: pre0, lens }: { columns?: string[]; maxGroups?: number; spanCap?: number; stop?: () => boolean; rememberWide?: boolean; versions?: boolean; pre?: Pre; lens?: Lens } = {},
 ): Promise<{ rows: Row[]; groups: number }> {
+  const pre = pre0 ?? pointsPre(asks)
   // `rememberWide`: a lookup this isolate already found too wide (same generation, asks and budget) throws
   // before any span query — the answer can't change while the generation stands.
   const wideKey = rememberWide ? `${h.mode}\0${h.date}\0${h.variant}\0${'gen' in h ? h.gen : ''}\0${maxGroups}\0${lens?.key ?? ''}\0${asks.map(a => `${a.depth}:${'path' in a ? a.path : `${a.under}/`}`).join('\n')}` : null

@@ -35,7 +35,7 @@ import { subBlobs } from './staticRuns.js'
 import { compressors } from './zstd.js'
 import { type HexRule, occurs, ruleOf } from './hexRuns.js'
 import { isScanId } from '../../src/scanSlug.js'
-import { cellsBytes, heldAnswers, heldId, hitsBytes, inFlight, Memo, type Req } from './shared.js'
+import { cellsBytes, heldAnswers, heldId, HIT_BYTES, hitsBytes, inFlight, Memo, type Req } from './shared.js'
 
 export const DRILL_DIR = 'drill'
 
@@ -197,6 +197,21 @@ function meet(n: number, min: (i: number) => Key, max: (i: number) => Key, lo: K
   return [a, Math.max(a, b)]
 }
 
+/** Parquet's `PLAIN` encoding (`PageHeader`'s `encoding`). */
+const PLAIN = 0
+/** `Drill.rootsFloor`'s key reads at a time, between looks at whether they have said enough. */
+const FLOOR_READS = 4
+/** A path's length, generously: a tier whose rows couldn't pass the bound even at this reads no path chunk. */
+const LONG_KEY = 1024
+
+/** The UTF-16 code units (`String.length`) of the UTF-8 in `b[i, end)`: a byte that doesn't continue a character
+ *  (`10xxxxxx`) starts one, and one that leads four bytes (`11110xxx`, past the BMP) is a surrogate pair. */
+function utf16Units(b: Uint8Array, i: number, end: number): number {
+  let n = 0
+  for (; i < end; i++) { const x = b[i]; if ((x & 0xc0) !== 0x80) n += x >= 0xf0 ? 2 : 1 }
+  return n
+}
+
 /** What a drill read cost (the `x-static-io`/trace detail). */
 export interface DrillIo { top: 'isolate' | 'cache' | 'file'; index_reads: number; index_bytes: number; groups: number; bytes: number; rows_read: number }
 const newIo = (): DrillIo => ({ top: 'isolate', index_reads: 0, index_bytes: 0, groups: 0, bytes: 0, rows_read: 0 })
@@ -300,6 +315,34 @@ export class GroupFile {
     // fetches a file's groups as one span (606 MB for `4`'s base roots).
     for (const n of await Promise.all(partial.map(e => this.read(lo, hi, [e], io, () => 1)))) rows += n.length
     return rows
+  }
+
+  /** `g`'s key column's length in UTF-16 code units (`String.length`, what `hitsBytes` counts), its pages decompressed
+   *  and nothing decoded: a page of a required plain `BYTE_ARRAY` column is each value's 4-byte length and its UTF-8
+   *  bytes, the code units counted from those (a path's bytes are its length only if it is ASCII). Null: a dictionary,
+   *  any other encoding, or levels (a nullable column). */
+  async keyUnits(g: Entry, io: DrillIo): Promise<number | null> {
+    const c = SCHEMA[this.set].columns.indexOf(KEY[this.set]) * 3
+    if (g.chunks[c + 2]) return null
+    const buf = await this.blobs.range(g.file, g.chunks[c], g.chunks[c + 1])
+    io.bytes += buf.byteLength
+    const reader = { view: new DataView(buf), offset: 0 }
+    let units = 0
+    while (reader.offset < buf.byteLength) {
+      const h = deserializeTCompactProtocol(reader) as { field_2: number; field_3: number; field_5?: { field_1: number; field_2: number }; field_8?: { field_1: number; field_4: number; field_5: number; field_6: number; field_7?: boolean } }
+      const [values, encoding] = h.field_5 ? [h.field_5.field_1, h.field_5.field_2] : h.field_8 ? [h.field_8.field_1, h.field_8.field_4] : [0, -1]
+      if (encoding !== PLAIN || (h.field_8 && (h.field_8.field_5 || h.field_8.field_6))) return null
+      const body = new Uint8Array(buf, reader.offset, h.field_3)
+      reader.offset += h.field_3
+      const page = h.field_8?.field_7 === false ? body : compressors.ZSTD!(body, h.field_2)
+      const view = new DataView(page.buffer, page.byteOffset, page.byteLength)
+      for (let v = 0, i = 0; v < values; v++) {
+        const n = view.getUint32(i, true)
+        units += utf16Units(page, i + 4, i + 4 + n)
+        i += 4 + n
+      }
+    }
+    return units
   }
 
   /** The rows of `groups` with `lo ≤ (q, key) < hi`: one ranged GET per data file. `row` makes each one from
@@ -535,6 +578,23 @@ export interface DrillOpts {
   log?: (msg: string) => void
 }
 
+/** `t`'s roots under a path, selected and not read (`Drill.selected`). */
+interface Selected {
+  st: DrillState
+  tiers: DrillTier[]
+  kind: Kind
+  /** Each tier's canonical of `t`. */
+  cs: string[]
+  /** The base's root rows of a long member. */
+  all: number | null
+  thr: number
+  io: DrillIo
+  lo: (c: string) => Key
+  hi: (c: string) => Key
+  sels: { groups: Entry[] | null; rows: number }[]
+  upper: number
+}
+
 /** The drilldown over a generation (`blobs` keyed under it): the base `drill/` plus each run's `<run>/drill/`. */
 export class Drill {
   private held = new Map<string, DrillTier>()
@@ -686,8 +746,32 @@ export class Drill {
   /** `t`'s (lowercase) view at `P`, on any scan of `state` (default: the current one). */
   view(t: string, P: string, state?: DrillState, req?: Req): Promise<DrillAnswer> { return this.bounded(t, P, state, undefined, req) as Promise<DrillAnswer> }
 
-  /** `view`, except roots bounded past `maxRows` are not read (`over`). */
-  async bounded(t: string, P: string, state?: DrillState, maxRows?: number, req?: Req): Promise<DrillAnswer | DrillOver> {
+  /** What `t`'s roots answer at `P` holds at least, in `hitsBytes`' terms, with no hit decoded: the row groups wholly
+   *  inside its range (each row is a hit; an edge group's may not be), their paths' lengths from the path chunk alone
+   *  (`GroupFile.keyUnits`). The tier holding the most, not their sum: `combine` folds rows a later tier restates.
+   *  0: no roots answer (a rollup, the catalog, a plain view, a non-member).
+   *  `past`: a tier's reads stop once the floor is over it, and a tier that couldn't reach it reads nothing. */
+  async rootsFloor(t: string, P: string, state?: DrillState, past?: number, req?: Req): Promise<number> {
+    const s = await this.selected(t, P, state, req)
+    if ('source' in s) return 0
+    if ((!s.sels.every(x => x.groups) || s.upper > s.thr) && (P === '' || await this.rollupOf(s, P, req))) return 0
+    const groups = await this.rootGroups(s, req)
+    const floors = await perTier(s.tiers, async (x, i) => {
+      const lo = s.lo(s.cs[i]), hi = s.hi(s.cs[i]), roots = x.files[s.kind].roots
+      const inside = groups[i].filter(g => cmpKey([g.qMin, g.kMin], lo) >= 0 && cmpKey([g.qMax, g.kMax], hi) < 0)
+      const rows = inside.reduce((n, g) => n + g.rows, 0)
+      if (past != null && rows * (HIT_BYTES + LONG_KEY) <= past) return rows * HIT_BYTES
+      let floor = rows * HIT_BYTES
+      for (let g = 0; g < inside.length && !(past != null && floor > past); g += FLOOR_READS) {
+        for (const n of await Promise.all(inside.slice(g, g + FLOOR_READS).map(e => roots.keyUnits(e, s.io)))) floor += n ?? 0
+      }
+      return floor
+    })
+    return Math.max(0, ...floors)
+  }
+
+  /** `t`'s members on each tier of `state` and their roots' groups under `P` (`plain`, `none`: no such thing). */
+  private async selected(t: string, P: string, state?: DrillState, req?: Req): Promise<DrillAnswer | Selected> {
     if (occurs(t, P.toLowerCase(), await this.hexRuns(req))) return { source: 'plain' }
     const st = state ?? await this.state(req)
     const { tiers } = st
@@ -712,13 +796,36 @@ export class Drill {
     const hi = (c: string): Key => P === '' ? [c + '\0', ''] : [c, P + '0']
     const sels = await perTier(tiers, (x, i) => x.files[kind].roots.select(lo(cs[i]), hi(cs[i]), io, thr, req))
     const upper = sels.reduce((s, x) => s + x.rows, 0)
-    if (sels.every(s => s.groups) && upper <= thr) {
+    return { st, tiers, kind, cs, all, thr, io, lo, hi, sels, upper }
+  }
+
+  /** `P`'s rollup over the tiers of a selection, if any tier's build found it heavy. */
+  private async rollupOf({ tiers, kind, cs, io }: Selected, P: string, req?: Req): Promise<ReturnType<DrillRules['stack']>> {
+    return this.rules.stack(await perTier(tiers, async (x, i) => {
+      const rlo: Key = [cs[i], P], rhi: Key = [cs[i], P + '\0']
+      const rs = await x.files[kind].rollups.select(rlo, rhi, io, undefined, req)
+      return rs.groups?.length ? x.files[kind].rollups.read(rlo, rhi, rs.groups, io) : []
+    }))
+  }
+
+  /** Each tier's root groups of a selection (one whose bound stopped its look at the index, looked at whole). */
+  private rootGroups({ tiers, kind, cs, io, lo, hi, sels }: Selected, req?: Req): Promise<Entry[][]> {
+    return perTier(tiers, async (x, i) => sels[i].groups ?? (await x.files[kind].roots.select(lo(cs[i]), hi(cs[i]), io, undefined, req)).groups!)
+  }
+
+  /** `view`, except roots bounded past `maxRows` are not read (`over`). */
+  async bounded(t: string, P: string, state?: DrillState, maxRows?: number, req?: Req): Promise<DrillAnswer | DrillOver> {
+    const s = await this.selected(t, P, state, req)
+    if ('source' in s) return s
+    const { st, tiers, kind, cs, all, thr, io, lo, hi, sels, upper } = s
+    const R = this.rules
+    const roots = async (groups: Entry[][]): Promise<DrillAnswer | DrillOver> => {
       if (maxRows != null && upper > maxRows) return { source: 'over', upper }
       // Hits straight from the columns (no row object per root: a member's ~80K roots, decoded per isolate).
-      const parts = await perTier(tiers, async (x, i) => sels[i].groups!.length ? x.files[kind].roots.read<Hit>(lo(cs[i]), hi(cs[i]), sels[i].groups!, io, hitOf) : [])
-      const c = cs[cs.length - 1]
-      return { source: 'roots', kind, c, upper, hits: R.combine(parts), io }
+      const parts = await perTier(tiers, async (x, i) => groups[i].length ? x.files[kind].roots.read<Hit>(lo(cs[i]), hi(cs[i]), groups[i], io, hitOf) : [])
+      return { source: 'roots', kind, c: cs[cs.length - 1], upper, hits: R.combine(parts), io }
     }
+    if (sels.every(s => s.groups) && upper <= thr) return roots(sels.map(s => s.groups!))
     if (P === '') {
       // No rollup at the fleet root (heavy directories are depth ≥ 1): the catalog's per-bucket cells.
       const got = await this.catalog?.lookup(t, { req })
@@ -739,13 +846,10 @@ export class Drill {
       const narrow = got.scans && st.scans.some(d => !got.scans!.includes(d)) ? { scans: st.scans.filter(d => got.scans!.includes(d)) } : {}
       return { source: 'catalog', kind, c: cs[cs.length - 1], upper, rollup: { dir: '', kept: buckets, rows, children: buckets, cells }, io, ...narrow }
     }
-    const parts = await perTier(tiers, async (x, i) => {
-      const rlo: Key = [cs[i], P], rhi: Key = [cs[i], P + '\0']
-      const rs = await x.files[kind].rollups.select(rlo, rhi, io, undefined, req)
-      return rs.groups?.length ? x.files[kind].rollups.read(rlo, rhi, rs.groups, io) : []
-    })
-    const got = R.stack(parts)
-    if (!got) throw new Error(`static drill: (${JSON.stringify(t)}, ${JSON.stringify(P)}) bounds ${upper} root rows but has no rollup`)
+    const got = await this.rollupOf(s, P, req)
+    // No tier's build found P heavy: its roots passed the bound only over the runs (gcs 11-05: `train` under a bucket, bounded at
+    // 137K rows). They are still P's whole answer, read as any light view's are.
+    if (!got) return roots(await this.rootGroups(s, req))
     const { head } = got
     const cells: RollupCell[] = got.cells.map(r => ({ kind: r.kind as 1 | 2, child: r.child as string, vf: Number(r.vf) * 1000, b: r.b as bigint, o: r.o as bigint }))
     return { source: 'rollup', kind, c: cs[cs.length - 1], upper, rollup: { dir: P, kept: num(head.vf), rows: num(head.b), children: num(head.o), cells }, io }
@@ -767,6 +871,8 @@ export class DrillSource implements HitSource {
    *  (`shared.ts`). */
   private held = new Memo<DrillAnswer | DrillOver>('static-drill-answer')
   private id = heldId('static-drill-answer')
+  /** Whether an answer's floor is past a bound (`hitsOn`): small, and what a refused diff's two sides share. */
+  private past = new Memo<boolean>('static-drill-past', 256)
   /** `cache`: roots answers across isolates (the colo's Cache API) — decoding a member's ~80K roots from the
    *  drill's parquet is seconds of an edge isolate's CPU, each new isolate again. */
   constructor(readonly drill: Drill, readonly cache?: HitCache) {}
@@ -825,6 +931,12 @@ export class DrillSource implements HitSource {
 
   private async hitsOn(key: string, under: string, st: DrillState, t0: number, opts?: HitOpts, req?: Req): Promise<Found | null> {
     const k = DrillSource.key(key, under, st)
+    const bound = opts?.maxBytes
+    if (bound != null && !this.held.held(k) && await this.past.get(`${k}\0${bound}`, async () => await this.drill.rootsFloor(key, under, st, bound, req) > bound, req)) {
+      opts!.over = true
+      opts!.overScans = st.scans
+      return null
+    }
     if (this.cache && !this.held.held(k)) {
       const hits = await this.cache.get(k)
       if (hits) {

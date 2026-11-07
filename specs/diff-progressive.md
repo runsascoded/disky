@@ -211,6 +211,80 @@ The lazy descent's planner, ms and row budgets, `HandOff`, `DESCENT_V`, and `DIF
 1. On gcs, cw, hf and r2: for each diff-check case, the level requests the progressive client would issue (count, depth), and each one's decoded groups and rows, computed offline from footers (`tiers plan`-style). That gives a projected first paint and full-map time per case, against the walk's measured wall and `cpuTime`.
 2. Churn rows' size per scan on gcs (the busiest), to confirm O(changes × depth) in practice.
 
+## Render test of the walk's lookup fix (2026-11-06)
+
+`dd6b0650`, `4bc60b3c`, `e7c3ba97`, `196896c5` (no lookups under a path a scan doesn't hold, the budget spent heaviest first) are on `cloud` and reverted on gcs and cw. This is what they buy on the map and what they cost. Old: gcs's build. With: the same plus the fix. Same requests, Δ mode, on preview deployments with prod's flags. 147 diffs (root and 6 buckets; 1, 7 and 14 days, across and away from a large delete; three canvases) for the bodies, 69 of which differ; the cold table's requests are a subset.
+
+**Decision.** The fix stays reverted until the walk is down. Lookup caps are out: they trade accuracy without getting back to old.
+
+### What the extra rows do
+
+The with body has 61,516 nodes old doesn't. 25% of them (15,623) are drawn in Δ mode (a cell ≥ 12 px², or a chain label), and those hold 62% of the real |Δ| measured against the with body's frontier. 14% of |Δ| sits in the drawn extras' own cells; the rest rolls up into cells above them.
+
+**Why most aren't drawn.** They are not unchanged rows let through by a size-vs-|Δ| mismatch: 3 of the 61,516 have |Δ| = 0 and 82% are `removed`. They go undrawn because of the treemap's nesting gate (`w > 90 && h > 44`, `packages/treemap/src/layout.ts`): 74% are under a cell too small to nest. They are real change the canvas has no room to show at that level.
+
+**On the map.** On the larger delete-spanning diffs (57 with over 500 rows), `(other)` goes from about 90% of |Δ| to 20–30%, and a median 33% of the map's area differs. Rows ×2.3, cells ×1.5. Old's totals aren't wrong: nearly every extra (61,510) hangs under a directory old also expands, so old holds that |Δ| in the right parent's `(other)`. What it loses is the names, and the map's shape.
+
+### Which way the baseline leans
+
+"Real |Δ|" is against a body that is itself cut: over the 69 differing diffs, 27 have `lookups_capped: true`, 30 are `truncated`, and `(other)` is 2–45% of the body's |Δ| (median 21%; 20–40% where the fix matters). So neither 62% nor the `(other)` shares are the truth. Which way each is wrong:
+
+- **Rows it does name aren't overstated.** A name the budget leaves unread is never drawn one-sided (it stays in `(other)` on both sides); a named row's two sizes are read, or known absent from a read that found no row. So the capped body's named |Δ| is exact.
+- **The total can only be low.** Refining a frontier row can only raise Σ|Δ| (|x + y| ≤ |x| + |y|), and it can't pass what `(other)` itself holds: pooled, the total is at most 1.20× the capped one (the median diff 1.09×).
+- **So 62% is a lower bound on what old leaves unnamed.** What old names is fixed, so the share it leaves unnamed only grows with the total, and against the capped total it is already (extras + `(other)`) / total: a median 88%. 62% counts only the part the capped body could name.
+- **62% as the extras' own share is not a bound.** If the total grew and nothing new were named, it would fall, to 52% pooled at the limit; if all of `(other)` were named it would reach 90%.
+- **Old's `(other)` (90%) is a lower bound too**, for the same reason. **With's (20–30%) is what that build leaves**, not a floor for the walk.
+
+Measured rather than bounded: the same requests with the budget lifted, so `lookups_capped` is false. One sample each.
+
+| Request | Lookups | Rows | `(other)` | Extras' share | Total vs capped |
+|---|---|---|---|---|---|
+| 1d root | 240 → 292 | 1,694 → 1,696 | 24.7% → 24.7% | 72.2% → 72.2% | ×1.000 |
+| 7d root | 240 → 544 | 1,844 → 1,945 | 30.4% → 29.7% | 63.6% → 64.4% | ×1.001 |
+| 14d root | 240 → 587 | 1,919 → 2,028 | 32.7% → 32.2% | 62.6% → 63.3% | ×1.003 |
+| 14d bucket | 240 → 871 | 1,392 → 2,107 | 16.7% → 12.8% | 73.6% → 77.7% | ×1.010 |
+
+So the lean is the expected way and small: the budget moves these shares by 0–4 points. The `(other)` left is not unread lookups. Every one of these bodies is still `truncated` (500 leaves), and a name under both scans' floors stays folded whatever the budget. Past the budget's reach the lean is unmeasured: no body here is free of truncation or floors, so the total could still be low by up to the bound above.
+
+### Rendering isn't the cost
+
+Body → cells is 7–15 ms. The cost is reads (colo-cold wall in seconds, row groups read, `walk` in ms; medians, n = 3, the with 14d and 7d roots over their 2 samples that weren't killed):
+
+| Request | Old wall | With wall | Old groups | With groups | Old walk | With walk |
+|---|---|---|---|---|---|---|
+| 14d root | 7.9 | 28.1 | 88 | 356 | 1,926 | 23,516 |
+| 7d root | 8.3 | 36.1 | 86 | 252 | 1,152 | 30,034 |
+| 1d root | 4.2 | 16.1 | 64 | 130 | 332 | 11,442 |
+| 14d bucket | 10.5 | 22.4 | 144 | 294 | 3,210 | 14,649 |
+| 1d bucket | 11.7 | 9.5 | 119 | 133 | 699 | 4,099 |
+| 14d, before the delete, root | 24.8 | 15.8 | 200 | 134 | 19,304 | 10,344 |
+
+`exceededCpu` over the cold samples: 2 of 19 with (both roots, a 503 at 32.5 s of CPU), 0 of 18 old. Over the three requests also sampled colo-warm (n = 4): old 1.5–2.8 s, with 3.4–15.1 s. Where nothing large was deleted the fix reads less than old: its lookups skip what a read has already found absent.
+
+### Levers
+
+Colo-cold wall in seconds / groups, n = 3–4, on three requests, and what each body does to the with body's map (the median share of map area that moves, rows kept):
+
+| Lever | 14d root | 1d root | 14d bucket | Area moved | Rows kept |
+|---|---|---|---|---|---|
+| Old | 7.9 / 88 | 4.2 / 64 | 10.5 / 144 | 33% | |
+| With | 28.1 / 356 | 16.1 / 130 | 22.4 / 294 | | |
+| With, at the map's real canvas | 23.0 / 318 | 13.3 / 97 | 30.1 / 279 | 4.7% | 68% |
+| With, no expansion below the nesting gate | 15.6 / 275 | 6.7 / 85 | 28.8 / 279 | 4.5% | 39% |
+| Both | 16.3 / 191 | 6.8 / 74 | 24.5 / 250 | 7.9% | 38% |
+| Lookup cap 120 | 28.2 / 314 | 12.2 / 113 | 20.4 / 253 | 4.9% | 95% |
+| Lookup cap 60 | 19.3 / 203 | 7.9 / 84 | 20.4 / 261 | 9.5% | 87% |
+
+None gets back to old. The gate was a probe's overlay, deciding from a lower bound on the diff's movement, not a candidate reviewed for correctness. Caps lose accuracy (a tenth of the map at 60) and still cost 2–4× old; lifting the budget entirely cost no more than 240 in the warm samples above (9.6–12.4 s against 11.7–12.9 s on the 14d root, few samples).
+
+**A lossless body cut.** Dropping what a walk can tell is below the nesting gate keeps about 40% of the rows (median 39.95%) and 42% of the bytes, with no change to the drawn map, over those 57 diffs. It needs a wire field: a closed directory has to carry its movement (`ma` / `mr`), since its added and removed bytes can no longer be read from rows under it. It is computed from the finished body, so it shrinks the response, not the walk.
+
+**The canvas.** The map is 1152×360 at 1280, 1536 and 1920 wide, 327×360 on a phone. The page asks for `w × 0.6w` (`site/src/App.tsx`), so a wider window reads more for the same map: at 1920, 1.39× the rows and 1.17× the cells of 1280. This affects every full map, with or without the fix.
+
+### Limits
+
+gcs only. Colo-cold samples: fresh response and decoded-group keys, with footers still in the colo; isolates not controlled. n = 3–4 per request and lever, medians with no significance test, and walls vary widely between samples of one request. Bodies are one sample each. The levers' body comparisons are 3 requests (6 for the real canvas). All on one snapshot of the store (2026-11-06), whose run count sets how much a read touches.
+
 ## Open questions
 
 1. Area = net or gross (above).

@@ -363,3 +363,77 @@ Increment 2 follows directly. Together they are ~2 days, and they make `probe` r
 - Kills left under the bound last logged 16 MiB pending, with 6–12 requests in flight (median 8). The unbounded build also survived 349 MiB of nominal pending. So pending alone doesn't decide a kill; several reads decoding at once is the likely remainder, inferred from logs, since a Worker's heap isn't observable.
 
 **Parked.** No benefit at realistic concurrency, a cost on the second pass, where map latency is the priority, and 16 MiB rests on an assumed baseline (128 limit − 36 fixed LRUs − about 16 for code), so it has no margin we can defend. If kills appear at real load, an isolate-wide cap on concurrent decodes is the candidate to measure, since it bounds the cause inferred above. Separately, `exceededCpu` kills (9 in the run) hit only scoped reads, at low pending; a bound doesn't address them.
+
+## The zstd decoder: wasm behind a flag (2026-11-06)
+
+`ZSTD_WASM = "1"` decodes pages in zstd's own decoder (`site/functions/_lib/zstd.ts`), a statically imported wasm module, instead of `fzstd`. Off by default, on no deployment yet. The module is `zstddec` 0.3.4's decoder (zstd 1.5.7) with one edit, its memory section's initial size, 258 pages to 64; about 54 KiB in the bundle, a fifth of `@bokuweb/zstd-wasm`'s, at the same speed in Node and with a named, decoder-only surface.
+
+Memory, measured on Workers by the JS allocation at which one request dies (no API reports an isolate's heap):
+
+- Requests die at about 248 MiB of JS, not the documented 128. The module's whole initial memory is charged, touched or not: the upstream 16 MiB moved the threshold by 12–16 MiB, the edited 4 MiB by about 4.
+- `memory.grow` past about 256 MiB throws a catchable `RangeError`; past the threshold in JS, the request gets a 1102.
+- A decode is synchronous and frees all it took, so the heap's need is one frame's, not a sum over reads. The largest column chunk in gcs's served sorts decompresses to about 3 MiB, and a frame past `WASM_FRAME_MAX` stays on fzstd, so the heap can't grow by construction. Over 30 minutes on one isolate, about 4M frames, among them the largest the module takes: linear memory stayed at its initial size, no growth, one instance.
+
+Paired bursts, as the bound's: both codes on the same cold URLs and fresh group namespaces, codes swapped between aliases between phases, one colo. Kills are exceededMemory + exceededCpu, requests each way, medians within the code.
+
+| Kind, at once | Requests each way | Kills, JS | Kills, wasm | Wall median, JS / wasm (s) | CPU median, JS / wasm (s) | Bursts wasm faster / slower |
+|---|---|---|---|---|---|---|
+| plain 16 | 224 | 3 + 0 | 0 + 0 | 12.4 / 7.9 | 9.2 / 5.2 | 13 / 1 |
+| plain 32 | 384 | 7 + 0 | 11 + 0 | 16.0 / 8.5 | 8.8 / 4.9 | 12 / 0 |
+| plain 64 | 768 | 73 + 0 | 67 + 0 | 15.9 / 11.9 | 8.4 / 4.4 | 11 / 1 |
+| scoped 12 | 168 | 0 + 2 | 0 + 0 | 20.4 / 13.4 | 13.2 / 7.1 | 12 / 2 |
+
+- Memory kills: 83 vs 78, with no difference by burst (plain 64: 5 bursts each way). Pending colo puts peaked no higher (plain 64 p90 146 vs 119 MiB). So wasm neither fixes the memory kills nor adds to them.
+- Warm (second pass, nothing to decode): the same, as it should be. Answers: 1675 of 1675 pairs byte-identical.
+- At one request at a time on a long-lived isolate the gain is larger: read CPU median 16.9 → 5.0 s, wall 20.2 → 6.9 s, and `exceededCpu` 6 of 97 reads vs 0 of 243 (the heaviest scoped diffs, which fzstd can't finish inside the 30 s budget). Fewer requests fit in the same 40 minutes on JS, so the counts differ.
+
+Colo copies, for the deferred-copy decision: at that same concurrency, copies off takes wasm's read CPU from 5.0 to 2.9 s and wall from 6.9 to 4.9 s (JS: 16.9 to 14.6 s). A put costs about 20 ms, so copies go from about a seventh of a cold read's CPU to about two fifths.
+
+## A broad term's phase 1, folded to what can be drawn (2026-11-07)
+
+A broad literal under one bucket (`checkpoint` under `marin-us-east5`, `results` under `marin-us-central2`: about 97K match roots each, over 250K forest nodes) held every root's aggregate and every ancestor's sums (`Phase1Memo`) through phase 2. A diff held two, and was refused past `HELD_BYTES` (`diff-too-broad`). Both now fold phase 1 (`foldPhase1`, `view.ts`): a diff side since `752732e0`, the single-date map (first paint and full read) since this branch, as a diff with no other scan.
+
+**What a read holds.** Per scan, at a canvas of w×h and tile budget k = ⌊w·h / `TILE_AREA`⌋:
+- the k heaviest forest nodes over their level's threshold, in `capTiles`'s order (bytes, then shallowest, then path);
+- the drawn roots phase 2 reads (`REGION_READS`, 24) and looks up (`ROOT_DETAILS`, 48);
+- the `MATCH_LIST_CAP` (200) heaviest roots not held already, for the match list;
+- exact totals, the match count, and per held node its children's count (`kids`), for the `(other)`s.
+
+That is at most k + 72 aggregates plus 200 list entries for a map, and 2k + 144 plus 200 for a diff side, whatever the answer's size. A first pass sums bytes, objects and liveness per node: each hit into its root, each root's ancestors made once (a walk up stops at the first node it knows), then level by level upward. A second pass sums owners into the held nodes only.
+
+**Why nothing drawn is lost.** `capTiles` keeps the k best of everything the read drew (forest and phase-2 rows) in a total order, then drops any node whose parent fell out. A forest node outside its scan's k best forest nodes has k forest nodes ahead of it, all in that set, so it is never kept. A node under its threshold is never a candidate. An ancestor ranks ahead of its descendants: it holds at least their bytes and its threshold is lower. Phase 2 reads and looks up the heaviest drawn roots, and those are held. The response lists every kept root, then the 200 heaviest of the rest, and those are among the held or the listed. Counts and totals come from the first pass, exact. Tests: every term, path, scan, canvas, tile budget and first paint gives the unfolded body byte for byte (`staticDrill.test.ts`). A budget one short fails that sweep. On real bytes (Node replay, phase 2 and detail budgets lifted so a body depends on bytes alone), folded and unfolded bodies match on 31 of 31 answered cases: 7 path/term pairs × 3 canvases × first paint and full, the rest refused or unrecorded alike. The cover (`allMatchRoots`) still reads unfolded: it lists every root.
+
+**What a new canvas costs.** The fold is cached per isolate by canvas and threshold, beside the held answer. A broad answer is past what an isolate holds (`HELD_BYTES`), so it is re-read per request anyway and every request folds: two passes over the hits, 170–280 ms in Node at these sizes, where the unfolded memo cost about the same to build. For a held answer, a new canvas costs one fold instead of reusing the canvas-free memo.
+
+**Memory on Workers**, by ballast: each trial a cold isolate and colo namespace holding N MiB, in 1 MiB chunks, for its life; a read's peak is the calibration request's survivable ballast (243–247 MiB) less its own, ±4 MiB per bisect. Single-date maps at 1152×2304, scan `2026-11-07T0701`:
+
+| Map | Today: survived / peak (MiB) | Folded: survived / peak (MiB) |
+|---|---|---|
+| `marin-us-central2`, `results` | 37, 41 / 204–208 | 123, 123, 119, 119 / 122–126 |
+| `marin-us-east5`, `checkpoint` | 37, 37 / 208 | 37, 41, 37, 37 / 204–208 |
+| fleet root, `checkpoint` | 49, 74 / 171–196 | 37, 41, 37, 66 / 179–208 |
+
+- The fleet root answers from rollups, not roots, so it doesn't fold; its spread is the method's noise.
+- `checkpoint` under `marin-us-east5` didn't move. Phase stops (`x-evp-stop`) show where its peak is. Today: survived 132 after the answer's read, 115 after phase 1, 41 after phase 2, so the memo plus phase 2's decodes make the peak. Folded: 129 after the read, but 33–37 after phase 1, so the fold's own transient work makes the peak instead. Making each ancestor once didn't move it (33 before, 37 after). The fold's working arrays and path map are per node, and they come right after the answer's read, whose garbage is still uncollected. Typed, presized arrays are the candidate. Inferred, not measured.
+- CPU (tail `cpuTime`, a request and its `waitUntil` work). Medians of 3, one request at a time; warm means the same namespace, the response cache salted, so the isolate's memos and the colo's copies are kept. `results`: cold 7.1 s today vs 7.3 s folded, warm 8.0 vs 3.9 s. `checkpoint` under `marin-us-east5`: cold 5.2 vs 9.3 s, warm 3.7 vs 5.2 s. The fleet root: cold 11.1 vs 10.4 s, warm 7.9 vs 8.2 s (no fold there). Both builds return the same first answer, but only the folded one's background upgrade then reads phase 2 (76 more path groups). Today's upgrade decodes nothing after the response, so it most likely fails and gives up silently (`upgradePartial` swallows the error). Inferred, not measured. In Node, per request, cold / warm: `checkpoint` 3.9 / 2.8–2.9 s folded vs 4.4 / 3.4–3.7 s unfolded; `results` 3.3 / 2.2–2.5 s vs 4.7 / 2.4–2.6 s.
+
+**Paired page loads**, deciding whether both folds ship to gcs. A real browser (headless Chrome, 1280×800) loaded `/marin-us-east5?f=checkpoint` cold: a fresh namespace per round, so isolate memos are cleared and colo keys namespaced. Four builds from `o/gcs`, all with wasm zstd on and prod's flags at run time. **A**: today. **B**: + the diff fold (`752732e0`). **C**: + both folds (this branch). **D**: + the map fold alone (C with the diff fold off). Two streams ran at once, each interleaving the arms in fixed blocks, offset so that the two streams were always on different arms. 40 rounds per arm. Kills come from the deployments' tails, page CPU is Σ tail `cpuTime` over the round's requests, and "stops changing" is the last change in the drawn cell count.
+
+| Arm | Rounds with a 503 | 503s | Killed (exceededMemory) | First map med / p90 (s) | Map stops changing med / p90 (s) | Page CPU med (s) | Diff on the page | Whole at end |
+|---|---|---|---|---|---|---|---|---|
+| A, today | 6 / 40 | 6 | 7 | 7.8 / 11.6 | 26.4 / 34.3 | 55.0 | refused (`diff-too-broad`) 40 | 40 / 40 |
+| B, diff fold | 12 / 40 | 33 | 23 | 8.2 / 16.8 | 23.8 / 38.6 | 68.9 | rows 40 | 40 / 40 |
+| C, both folds | 1 / 40 | 1 | 1 | 7.8 / 10.7 | 19.8 / 25.5 | 55.9 | rows 40 | 40 / 40 |
+| D, map fold | 0 / 40 | 0 | 0 | 7.8 / 11.5 | 18.6 / 26.3 | 45.5 | refused 40 | 40 / 40 |
+
+Sign tests over the 40 blocks (two-sided; discordant blocks only):
+- **C vs A.** Rounds with a 503: 1 vs 6, p = 0.125. Rounds with a kill: 1 vs 7, p = 0.070. The map stopped changing sooner in 37 of 40 blocks, p < 0.001. C is no worse than A, and the diff answers.
+- **B vs A.** The diff fold alone is worse: 12 vs 6 rounds with a 503 (p = 0.24), and 23 kills vs 7. Ship it only with the map fold. **B vs C**: 12 vs 1, p = 0.003.
+- **D vs A.** 0 vs 6 rounds with a 503, p = 0.031. **C vs D**: 1 vs 0, p = 1. Answering the diff costs about 10 s of page CPU (55.9 vs 45.5 s median).
+- **Plain guard** (`/marin-us-east5`, 26 rounds per arm): no 503s and no kills on any arm. Maps stopped changing at a median of 7.7–8.5 s on every arm (no block test below p = 0.3), and page CPU was 11.6–14.0 s.
+- About a quarter of A's loads had a 503 on an earlier day. This day's A had 6 of 40, so compare only within a paired run.
+
+**Open, untested.** Don't assume these fit:
+- Owner-scoped, pool and `NOT` diffs still build the unfolded memo on both sides, and are refused past `HELD_BYTES` (`tooBroadToDiff`). The fold has no owner scope or exclusions yet.
+- An answer that doesn't cover the other scan: the fold reads both scans' bytes from one answer, so such a diff stays unfolded and refused past the bound.
+- The fold's own transient memory on the broadest answers (above).
