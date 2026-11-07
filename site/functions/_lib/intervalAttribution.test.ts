@@ -1,10 +1,24 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Env } from './auth'
-import { asOfScans, ivAttributes, ivAttribution, type IvAttribution } from './index'
+import { asOfScans, coloPutsSettled, ivAttributes, ivAttribution, type IvAttribution } from './index'
 import { extrasFor, hasExtras, viewOfRows, type AttrRow } from './extras'
+import { clearIsolate } from './shared'
 import { FILES, fixture, readJson } from './testStore'
 
 vi.mock('@rdub/file-tree/stores/s3', async () => ({ S3Store: (await import('./testStore')).S3Store }))
+
+/** Decodes of the attribution sort's row groups (its `evidence` column is no other read's). */
+const attrDecodes = vi.hoisted(() => ({ n: 0 }))
+vi.mock('hyparquet', async orig => {
+  const m = await orig<typeof import('hyparquet')>()
+  return {
+    ...m,
+    parquetReadObjects: (o: Parameters<typeof m.parquetReadObjects>[0]) => {
+      if (o.columns?.includes('evidence')) attrDecodes.n++
+      return m.parquetReadObjects(o)
+    },
+  }
+})
 
 // The interval store's attribution table (specs/attr-interval-table.md), read as of a scan: `fixtures/iv-attr/` holds
 // two generations over eight scans (`gen.py`): `g`, whose base has the table and whose four runs are unmerged (the
@@ -58,6 +72,8 @@ const scope = (rows: AttrRow[], p: string): AttrRow[] => {
 }
 const asRows = (rows: IvAttribution[]): AttrRow[] => rows.map(r => [r.path, r.user, r.source, r.evidence])
 const USERS = ['alice', 'bob', 'carol', 'dave', 'erin', 'mallory']
+/** The attribution sort's row groups in generation `g`: its base's and its runs'. */
+const GROUPS = 7
 
 let want: Expected
 beforeEach(async () => {
@@ -130,6 +146,30 @@ describe('the attribution table as of a scan', () => {
     const uncoveredRun = want.scans.filter((x, i) => i >= 4 && want.maps[x] === null).map(x => `interval-store/g/deltas/${x}/`)
     expect(reads.filter(k => uncoveredRun.some(u => k.startsWith(u)))).toEqual([])
     expect(await ivAttribution(env('g'), d, '', 1)).toBeNull()
+  })
+
+  it('decodes each group once: a read after it, of this isolate or another in the colo, decodes none', async () => {
+    const copies = new Map<string, ArrayBuffer>()
+    ;(globalThis as unknown as { caches: unknown }).caches = { default: {
+      match: async (k: Request) => { const b = copies.get(k.url); return b ? new Response(b) : undefined },
+      put: async (k: Request, r: Response) => { copies.set(k.url, await r.arrayBuffer()) },
+    } }
+    clearIsolate()
+    attrDecodes.n = 0
+    const d = want.scans[want.scans.length - 1]
+    const e = env('g')
+    const first = await ivAttribution(e, d, '')
+    await coloPutsSettled()
+    const decoded = attrDecodes.n
+    const second = await ivAttribution(e, d, '')
+    const drill = await ivAttribution(e, d, 'b1')
+    const afterHeld = attrDecodes.n
+    clearIsolate()
+    const reader = env('g')
+    const third = await ivAttribution(reader, d, '')
+    expect({ decoded, afterHeld, afterColo: attrDecodes.n }).toEqual({ decoded: GROUPS, afterHeld: GROUPS, afterColo: GROUPS })
+    expect([first, second, third].map(a => asRows(a!))).toEqual([want.maps[d], want.maps[d], want.maps[d]])
+    expect(asRows(drill!)).toEqual(scope(want.maps[d]!, 'b1'))
   })
 
   it('a generation without the table never opens it', async () => {

@@ -196,6 +196,7 @@ GCP_PROJECT = "oa-internal-450019"    # Batch dispatch (`_lib/gcp.ts`)
 BUCKET_REGIONS = '{"marin-us-east5":"us-east5","marin-us-central1":"us-central1","marin-us-central2":"us-central1","marin-eu-west4":"europe-west4","marin-us-west4":"us-west4","marin-us-east1":"us-east1"}'
 # Where a sweep cut spanning regions runs (a one-region cut runs in its own, per BUCKET_REGIONS).
 BATCH_REGION = "us-central1"
+ZSTD_WASM = "1"   # parquet pages decode in wasm: dev first; prod after a look at it
 # Admin is the `admin_emails` table (and the break-glass secret `ADMIN_BOOTSTRAP`), not the staff domain.
 ADMIN_LIST = "1"
 SWEEP_IMAGE = "us-central1-docker.pkg.dev/oa-internal-450019/cloud-run-source-deploy/gcs-usage-snapshot@sha256:a981f93b249311ce29023f8e2dd4b32f182b4d2ba1c40c5afbdf7f22392de003"

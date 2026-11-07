@@ -153,6 +153,7 @@ ROOT_LABEL = "my buckets"                   # the store root's crumb label
 # INTERVAL_STORE_PREFIX = "history/meta/interval-store"  # independent history namespace; defaults to interval-store
 # AGE_STORE_PREFIX = "history/meta-age"    # verified age-cell history under <prefix>/interval-store; uncovered scans keep per-scan readers
 # INTERVAL_STORE_REV = "2"                  # with PATH_STORE: bump when the generation's files are rewritten in place (re-keys the caches)
+# ZSTD_WASM = "1"                       # parquet pages decode in zstd's own wasm decoder rather than `fzstd` (`_lib/zstd.ts`): about half the CPU of a cold read, 4 MiB of isolate memory (specs/latency-observability.md)
 # DIFF_DESCENT = "1"                     # with PATH_STORE: Δ-mode diffs (`dm=delta`, unscoped) by lazy descent over the interval store (`_lib/diffDescent.ts`; its planner hands busy, broad paths to the as-of walk); no index beyond the store's
 # OWNER_HISTORY_BATCH = "1"                # prototype (specs/root-owner-history.md; off): a fleet-root owner series from one bounded interval-store version read, the canonical per-scan reader as fallback
 # FOOTER_CACHE_MAX_ROWS = "1000000"        # the footer LRU's budget (`_lib/footerCache.ts`, specs/done/footer-lru.md): the most `index_row_groups` rows its hot entries keep; evicted by `POST /api/footer-cache` / `dt-cloud footer-evict`. Default 1,000,000
