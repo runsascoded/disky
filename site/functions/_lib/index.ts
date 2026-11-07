@@ -1881,7 +1881,7 @@ async function readGroupVersions(h: IndexHandle, rgJson: string, columns?: strin
 // --- an interval store's decoded row groups, through the colo cache ------------------------------------
 //
 // Decoding a row group is the cold read's CPU: ~25 ms on a laptop for an 8K-row group of the interval store, four
-// fifths of it zstd (`fzstd`, pure JS: Workers compile no wasm at runtime), and several times that on a Worker. An
+// fifths of it zstd (`fzstd`, pure JS, unless `ZSTD_WASM`: `_lib/zstd.ts`), and several times that on a Worker. An
 // interval store's group serves every scan (`ivGroupKey`) and never changes, so the first isolate in a colo to
 // decode it holds it there as gzipped columnar JSON (~2 MB, ~0.3 MB stored; inflated and parsed natively in a few
 // ms): every later isolate reads that instead of the range and its decode.

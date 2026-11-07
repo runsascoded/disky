@@ -363,3 +363,29 @@ Increment 2 follows directly. Together they are ~2 days, and they make `probe` r
 - Kills left under the bound last logged 16 MiB pending, with 6–12 requests in flight (median 8). The unbounded build also survived 349 MiB of nominal pending. So pending alone doesn't decide a kill; several reads decoding at once is the likely remainder, inferred from logs, since a Worker's heap isn't observable.
 
 **Parked.** No benefit at realistic concurrency, a cost on the second pass, where map latency is the priority, and 16 MiB rests on an assumed baseline (128 limit − 36 fixed LRUs − about 16 for code), so it has no margin we can defend. If kills appear at real load, an isolate-wide cap on concurrent decodes is the candidate to measure, since it bounds the cause inferred above. Separately, `exceededCpu` kills (9 in the run) hit only scoped reads, at low pending; a bound doesn't address them.
+
+## The zstd decoder: wasm behind a flag (2026-11-06)
+
+`ZSTD_WASM = "1"` decodes pages in zstd's own decoder (`site/functions/_lib/zstd.ts`), a statically imported wasm module, instead of `fzstd`. Off by default, on no deployment yet. The module is `zstddec` 0.3.4's decoder (zstd 1.5.7) with one edit, its memory section's initial size, 258 pages to 64; about 54 KiB in the bundle, a fifth of `@bokuweb/zstd-wasm`'s, at the same speed in Node and with a named, decoder-only surface.
+
+Memory, measured on Workers by the JS allocation at which one request dies (no API reports an isolate's heap):
+
+- Requests die at about 248 MiB of JS, not the documented 128. The module's whole initial memory is charged, touched or not: the upstream 16 MiB moved the threshold by 12–16 MiB, the edited 4 MiB by about 4.
+- `memory.grow` past about 256 MiB throws a catchable `RangeError`; past the threshold in JS, the request gets a 1102.
+- A decode is synchronous and frees all it took, so the heap's need is one frame's, not a sum over reads. The largest column chunk in gcs's served sorts decompresses to about 3 MiB, and a frame past `WASM_FRAME_MAX` stays on fzstd, so the heap can't grow by construction. Over 30 minutes on one isolate, about 4M frames, among them the largest the module takes: linear memory stayed at its initial size, no growth, one instance.
+
+Paired bursts, as the bound's: both codes on the same cold URLs and fresh group namespaces, codes swapped between aliases between phases, one colo. Kills are exceededMemory + exceededCpu, requests each way, medians within the code.
+
+| Kind, at once | Requests each way | Kills, JS | Kills, wasm | Wall median, JS / wasm (s) | CPU median, JS / wasm (s) | Bursts wasm faster / slower |
+|---|---|---|---|---|---|---|
+| plain 16 | 224 | 3 + 0 | 0 + 0 | 12.4 / 7.9 | 9.2 / 5.2 | 13 / 1 |
+| plain 32 | 384 | 7 + 0 | 11 + 0 | 16.0 / 8.5 | 8.8 / 4.9 | 12 / 0 |
+| plain 64 | 768 | 73 + 0 | 67 + 0 | 15.9 / 11.9 | 8.4 / 4.4 | 11 / 1 |
+| scoped 12 | 168 | 0 + 2 | 0 + 0 | 20.4 / 13.4 | 13.2 / 7.1 | 12 / 2 |
+
+- Memory kills: 83 vs 78, with no difference by burst (plain 64: 5 bursts each way). Pending colo puts peaked no higher (plain 64 p90 146 vs 119 MiB). So wasm neither fixes the memory kills nor adds to them.
+- Warm (second pass, nothing to decode): the same, as it should be. Answers: 1675 of 1675 pairs byte-identical.
+- At one request at a time on a long-lived isolate the gain is larger: read CPU median 16.9 → 5.0 s, wall 20.2 → 6.9 s, and `exceededCpu` 6 of 97 reads vs 0 of 243 (the heaviest scoped diffs, which fzstd can't finish inside the 30 s budget). Fewer requests fit in the same 40 minutes on JS, so the counts differ.
+
+Colo copies, for the deferred-copy decision: at that same concurrency, copies off takes wasm's read CPU from 5.0 to 2.9 s and wall from 6.9 to 4.9 s (JS: 16.9 to 14.6 s). A put costs about 20 ms, so copies go from about a seventh of a cold read's CPU to about two fifths.
+
