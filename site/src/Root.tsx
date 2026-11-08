@@ -40,6 +40,7 @@ const CostPage = lazy(() => import('./CostPage').then(m => ({ default: m.CostPag
 const cost = <AuthGate><SiteKbd /><Suspense fallback={<Loading />}><CostPage /></Suspense></AuthGate>
 const FederatedScansPreview = import.meta.env.DEV ? lazy(() => import('./dev/FederatedScansPreview')) : null
 const ChildrenTablePreview = import.meta.env.DEV ? lazy(() => import('./dev/ChildrenTablePreview')) : null
+const ScanDurationsPreview = import.meta.env.DEV ? lazy(() => import('./dev/ScanDurationsPreview')) : null
 
 // `?perf=1` at load: the time-to-render panel (specs/render-bench.md). The
 // marks themselves are always on (`perf.ts`); only the panel is opt-in.
@@ -73,6 +74,7 @@ export default function Root() {
     <Routes>
       {FederatedScansPreview && <Route path="/dev/federated-scans" element={<Suspense fallback={<Loading />}><FederatedScansPreview /></Suspense>} />}
       {ChildrenTablePreview && <Route path="/dev/children-table" element={<Suspense fallback={<Loading />}><ChildrenTablePreview /></Suspense>} />}
+      {ScanDurationsPreview && <Route path="/dev/scan-durations" element={<Suspense fallback={<Loading />}><ScanDurationsPreview /></Suspense>} />}
       {STORES.map(s => (
         <Route key={s.key} path={`${s.path.replace(/\/$/, '')}/og`} element={<OgPage store={s} />} />
       ))}

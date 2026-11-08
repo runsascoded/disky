@@ -114,7 +114,7 @@ describe('every page route of the app has its own card or none, never a folder c
       '/files/*': 'files', '/scans': 'scans', '/scans/*': 'scan', '/health': 'health', '/names': 'names', '/dups': 'dups',
       '/sweep': 'staged', '/hot': 'names', '/marks': 'map', '/mark': 'map',
       // the dev previews, the OG render pages, a redirect to a map, a redirect to the root, and `functions/runs`' own stamp
-      '/dev/federated-scans': null, '/dev/children-table': null, '/users/og': null, '/user/:id/og': null, '/meta/*': null, '/users/*': null, '/runs/*': null,
+      '/dev/federated-scans': null, '/dev/children-table': null, '/dev/scan-durations': null, '/users/og': null, '/user/:id/og': null, '/meta/*': null, '/users/*': null, '/runs/*': null,
     })
   })
 })
