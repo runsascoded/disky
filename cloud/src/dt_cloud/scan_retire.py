@@ -226,6 +226,8 @@ def has_identity(store: Store, keys: Iterable[str], column: str, *, workers: int
         i = names.index(column)
         for g in range(md.num_row_groups):
             rg = md.row_group(g)
+            if not rg.num_rows:
+                continue
             st = rg.column(i).statistics
             if st is None or not st.has_null_count or st.null_count < rg.num_rows:
                 return True

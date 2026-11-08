@@ -325,6 +325,23 @@ def _shard(path: Path, generation: list[int | None]) -> int:
     return path.stat().st_size
 
 
+def test_empty_listing_shards_do_not_claim_to_hold_object_identities(tmp_path):
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    from dt_cloud.blobstore import Store
+
+    pq.write_table(pa.table({'generation': pa.array([], pa.int64()), 'version': pa.array([], pa.string())}), tmp_path / 'empty.parquet')
+    pq.write_table(pa.table({'generation': pa.array([None], pa.int64()), 'version': pa.array([None], pa.string())}), tmp_path / 'null.parquet')
+    pq.write_table(pa.table({'generation': pa.array([7], pa.int64()), 'version': pa.array(['"etag"'], pa.string())}), tmp_path / 'known.parquet')
+    store = Store(str(tmp_path))
+    assert {column: sr.has_identity(store, ['empty.parquet', 'null.parquet'], column) for column in ('generation', 'version')} == {
+        'generation': False, 'version': False,
+    }
+    assert {column: sr.has_identity(store, ['empty.parquet', 'known.parquet'], column) for column in ('generation', 'version')} == {
+        'generation': True, 'version': True,
+    }
+
+
 def test_layer1_goes_unless_it_carries_generation_no_marker_vouches_for(fx, d1):
     """Raw listing shards (`-1`) retire with their scan. One whose shards carry a non-null `generation` keeps them unless
     its marker compared every object's generation equal; an all-null column (S3, an older GCS listing) is no
