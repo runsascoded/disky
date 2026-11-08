@@ -20,7 +20,7 @@ import { DEFAULT_STORE, type Store } from './stores'
 import { useStore } from './store'
 import { useMinSlug } from './scan'
 import {
-  batchHref, isLost, isMaintenance, liveness, logsHref, maintStore, mapHref, metaHref, type OutputDelta, phaseOrder, type PhaseSpan, type RunSummary, type ScanRun,
+  batchHref, isLost, isMaintenance, liveness, logsHref, maintStore, mapHref, metaHref, type OutputDelta, phaseOrder, processingSecs, type PhaseSpan, type RunSummary, type ScanRun,
   type ScanRunPhase, type PhaseIssue, type PhaseRecovery, BEHIND, overlappingFailures, phaseFill, phaseOutcome, runOutcome, runOutcomeLine, runTasks, type RunTask, taskLogsHref,
 } from './scanRunsModel'
 import { colorer, fmtDur, fmtRunTime, getJson, type Links, PhaseBar, QUIET_TIP, runDay, RunWhen, scanRunsApi, scansHref, scansStore, Status, useScanRuns } from './scanRunsUi'
@@ -295,7 +295,8 @@ export function ScansPage() {
         <p className="dim">Scan runs aren't recorded on this deployment yet (its D1 has no <code>scan_runs</code> table: migration <code>scan_runs</code>, then <code>dt-cloud scan-run backfill</code>).</p>
       ) : (<>
         <section className="sr-chart">
-          <h3>Duration by run</h3>
+          <h3>End-to-end duration by run</h3>
+          <p className="dim">Includes capture and queue wait. The table shows processing time separately when the queue timing is recorded.</p>
           <DurationStrip runs={filtered} color={color} onPick={id => nav(scanHref(id))} win={span} onWin={setSpan} hover={hover} />
           <Legend order={order} color={color} run={hover.id ? runs.find(r => r.run.run_id === hover.id) : undefined} />
         </section>
@@ -311,7 +312,7 @@ export function ScansPage() {
           <table className="runs sr-runs">
             <thead><tr>
               <th><Tooltip content="When the scan started, in your time zone; hover for its id.">scan</Tooltip></th><th>status</th>
-              <th className="num">duration</th><th className="hide-md">phases</th>
+              <th className="num"><Tooltip content="Processing time after the queue, with total elapsed time below. Without queue timing, the total is shown.">duration</Tooltip></th><th className="hide-md">phases</th>
               <th className="num"><Tooltip content="Bytes of the run's top-level outputs (listing, index, snapshot, …).">wrote</Tooltip></th>
               <th className="num"><Tooltip content="Against the previous scan's same structures. Green grew, red shrank.">Δ prev</Tooltip></th>
               <th className="num"><Tooltip content="Compute estimate: the machine's list $/h × run hours × tasks, including the run's downstream jobs (listing fan-out).">cost</Tooltip></th>
@@ -323,6 +324,7 @@ export function ScansPage() {
                 const maint = isMaintenance(r.kind)
                 const map = r.status === 'succeeded' && !maint ? mapHref(r.scan, store.path, slug) : null
                 const live = liveness(r, s.spans, now)
+                const processing = processingSecs(s.secs, s.spans)
                 return (
                   <tr key={r.run_id} className={[r.status === 'failed' && 'failed', hover.id === r.run_id && 'brushed'].filter(Boolean).join(' ') || undefined}
                     onPointerEnter={() => hover.enter(r.run_id)} onPointerLeave={hover.leave}>
@@ -330,7 +332,10 @@ export function ScansPage() {
                       {r.trigger === 'manual' && <> <Tooltip content="Started by hand (a submit or a resume), not by the schedule."><span className="dim">manual</span></Tooltip></>}
                       {(kinds.length > 1 || s.downstream > 0) && <div className="sr-kind">{kinds.length > 1 && <KindLabel run={r} />}{s.downstream > 0 && <Tooltip content={`${s.downstream} downstream job${s.downstream > 1 ? 's' : ''} (listing fan-out, …)`}><span>{kinds.length > 1 ? ' + ' : '+ '}{s.downstream} job{s.downstream > 1 ? 's' : ''}</span></Tooltip>}</div>}</td>
                     <td><Status cell run={r} failedAt={s.failed_at} issues={s.phase_issues} lost={live?.lost} />{live && <Live live={live} />}</td>
-                    <td className="num nb">{s.secs == null ? <span className="dim">—</span> : fmtDur(s.secs)}</td>
+                    <td className="num nb">{s.secs == null ? <span className="dim">—</span> : processing == null ? fmtDur(s.secs) : <>
+                      <span>{fmtDur(processing)} processing</span>
+                      <div className="sr-kind dim">{fmtDur(s.secs)} incl. wait</div>
+                    </>}</td>
                     <td className="hide-md"><PhaseBar cell spans={s.spans} secs={s.secs} color={color} width={130} /></td>
                     <td className="num nb">{bytes(s.out_bytes)}</td>
                     <td className={`num nb ${deltaClass(s.delta_bytes)}`}>{delta(s.delta_bytes)}</td>
