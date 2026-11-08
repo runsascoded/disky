@@ -26,11 +26,11 @@ export function checkpointReceipt(raw: unknown, account: string, source: string,
  * behind any saved bound cannot move the state backwards. Legacy day aggregates have no compatible proof. */
 export function compactHistory(buckets: Record<string, History>, receipt: Receipt): number {
   if (Object.entries(buckets).some(([name, b]) => b.closed &&
-      (b.closed.checkpoint !== receipt.checkpoint.uri || !(receipt.cursors[name] >= b.closed.through)))) return 0
+      (b.closed.checkpoint !== receipt.checkpoint.uri || !Object.hasOwn(receipt.cursors, name) || !(receipt.cursors[name] >= b.closed.through)))) return 0
   let removed = 0
   for (const [name, b] of Object.entries(buckets)) {
     const cursor = receipt.cursors[name]
-    if (cursor === undefined || Object.keys(b.legacy_days ?? {}).length) continue
+    if (!Object.hasOwn(receipt.cursors, name) || Object.keys(b.legacy_days ?? {}).length) continue
     for (const hour of Object.keys(b.frozen)) {
       const stamp = Date.parse(hour + (hour.length === 13 ? ':00:00Z' : ':00Z')) / 1000
       if (!Number.isFinite(stamp) || stamp > cursor) continue
