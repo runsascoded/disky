@@ -203,10 +203,11 @@ def lineage(store: Store, gen: str) -> list[str]:
     `attribution-backfill.json` `from`: the same versions, so their parity markers hold), newest first."""
     from .interval_attribution import RECORD
     from .interval_backfill import BACKFILL
+    from .interval_churn import BACKFILL as CHURN_BACKFILL
 
     out = [gen]
     while True:
-        key = next((k for k in (f"{PREFIX}/{out[-1]}/{x}" for x in (ic.COMPACTION, BACKFILL, RECORD)) if store.exists(k)), None)
+        key = next((k for k in (f"{PREFIX}/{out[-1]}/{x}" for x in (ic.COMPACTION, BACKFILL, RECORD, CHURN_BACKFILL)) if store.exists(k)), None)
         if key is None or (frm := store.read_json(key)["from"]) in out:
             return out
         out.append(frm)

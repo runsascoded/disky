@@ -299,6 +299,21 @@ def test_drop_path_pointer(fx, d1):
 LAYER1 = "listing/{id}/*/shard-*.parquet"
 
 
+def test_churn_backfill_preserves_its_predecessors_retirement_proofs(tmp_path):
+    from dt_cloud.blobstore import Store
+    from dt_cloud.interval_churn import BACKFILL
+    from dt_cloud.interval_compact import COMPACTION
+
+    store = Store(str(tmp_path))
+    store.write_text(f'interval-store/new/{BACKFILL}', json.dumps({'from': 'prior'}))
+    store.write_text(f'interval-store/prior/{COMPACTION}', json.dumps({'from': 'base'}))
+    proof = {'pass': True, 'scan': '2026-10-12T1809', 'generation': {'objects': 2, 'equal': 2}}
+    store.write_text('interval-store/prior/verify/2026-10-12T1809.json', json.dumps(proof))
+    lineage = sr.lineage(store, 'new')
+    assert lineage == ['new', 'prior', 'base']
+    assert sr.find_marker_in(store, lineage, '2026-10-12T1809') == ('prior', proof)
+
+
 def _shard(path: Path, generation: list[int | None]) -> int:
     import pyarrow as pa
     import pyarrow.parquet as pq
