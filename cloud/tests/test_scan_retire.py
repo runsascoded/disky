@@ -109,6 +109,24 @@ def _run(fx, *extra: str) -> dict:
     return json.loads(res.stdout)
 
 
+def test_review_refuses_changed_plan_before_backup_or_deletion(fx, tmp_path, monkeypatch):
+    from dt_cloud.blobstore import Store
+
+    src = Store(str(fx['root']))
+    before = src.listing('')
+    review = tmp_path / 'review.json'
+    review.write_text(json.dumps({'roots': [{'root': src.root, 'files': []}], 'd1_changes': False}))
+    backup_calls = []
+    monkeypatch.setattr(sr, 'backup', lambda *a, **kw: backup_calls.append(True))
+    with pytest.raises(ValueError) as error:
+        sr.retire(src.root, [LAYOUT], iv_root=str(fx['store']), static_gen=STATIC_GEN,
+                  layer2s=[LAYER2], execute=True, markers_only=True, d1=False, d1_elsewhere=True,
+                  backup_root=str(tmp_path / 'backup'), review=review)
+    assert str(error.value) == 'deletion review mismatch: 23 extra, 0 missing, 0 size changes; nothing deleted'
+    assert backup_calls == []
+    assert src.listing('') == before
+
+
 def test_retirement_follows_a_compacted_static_generation(fx, d1):
     before = _run(fx)
     old = fx["store"] / "static-names" / STATIC_GEN

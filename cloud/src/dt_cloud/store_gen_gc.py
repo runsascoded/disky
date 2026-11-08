@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
+from pathlib import Path
 
 from click import Choice, IntRange, command, option
 
@@ -90,8 +91,13 @@ def plan(store: Store, kind: str, keep: list[str], *, lineage_only: bool, grace_
 
 
 def run(store: Store, kind: str, keep: list[str], *, lineage_only: bool = False, grace_s: float = GRACE_S, now: float,
-        execute: bool = False) -> list[dict]:
+        execute: bool = False, review: Path | None = None) -> list[dict]:
     recs = plan(store, kind, keep, lineage_only=lineage_only, grace_s=grace_s, now=now)
+    if review is not None:
+        from .delete_review import validate
+
+        files = {key: store.size(key) for r in recs if r['action'] == 'delete' for key in r['_files']}
+        validate(review, store.root, files)
     cur = ic.chain(store, ic.resolve(store)[0])[-1] if kind == "interval-store" else None
     for r in recs:
         files = r.pop("_files")
@@ -109,14 +115,16 @@ def run(store: Store, kind: str, keep: list[str], *, lineage_only: bool = False,
 @option("-k", "--keep", multiple=True, help="A generation to keep whatever else holds (repeat): every one a site reads (`STATIC_GEN`, a pinned `INTERVAL_STORE_GEN`)")
 @option("-l", "--lineage-only", is_flag=True, help="interval-store: only what the current generation was compacted or backfilled from (the scan step's mode)")
 @option("-o", "--out", "store_root", required=True, help="The store: a dir or URL (where `interval-store/` / `static-names/` live)")
+@option("-r", "--review", help="Require exact keys and sizes from a reviewed JSON manifest before deleting")
 @option("-t", "--kind", type=Choice(["interval-store", "static-names"]), required=True, help="Which generations")
 @option("-x", "--execute", is_flag=True, help="Delete (default: a dry run)")
-def store_gc_cmd(grace_s, keep, lineage_only, store_root, kind, execute) -> None:
+def store_gc_cmd(grace_s, keep, lineage_only, store_root, review, kind, execute) -> None:
     """Delete superseded generations of a store's interval store or static name index, past a grace (a dry run unless
     -x). Prints a JSON summary."""
     import time
 
     if lineage_only and kind != "interval-store":
         raise SystemExit("-l: interval-store only")
-    recs = run(Store(store_url(store_root)), kind, list(keep), lineage_only=lineage_only, grace_s=grace_s, now=time.time(), execute=execute)
+    recs = run(Store(store_url(store_root)), kind, list(keep), lineage_only=lineage_only, grace_s=grace_s, now=time.time(), execute=execute,
+               review=Path(review) if review else None)
     print(json.dumps({"kind": kind, "execute": execute, "generations": recs}, indent=1))
