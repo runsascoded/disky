@@ -122,6 +122,19 @@ describe('bursts (pure)', () => {
     expect(activityEventLine({ line: 're-rendered 9 activity bursts', route: '/api/other' }, SLACK, ORIGIN)).toBe('re-rendered 9 activity bursts')
   })
 
+  it('limits refresh target links to five while retaining full requested/rendered counts', () => {
+    expect(activityRefreshLine({ action: 'activity-render', requested: [1, 2, 3, 4, 5, 6, 7], rendered: [1, 2, 3, 4, 5, 6] }, SLACK, ORIGIN)).toBe(
+      `refreshed 6 activity summaries (7 requested, 1 skipped) · display refresh of existing activity posts · summaries: <${ORIGIN}/admin/activity?burst=1|#1>, <${ORIGIN}/admin/activity?burst=2|#2>, <${ORIGIN}/admin/activity?burst=3|#3>, <${ORIGIN}/admin/activity?burst=4|#4>, <${ORIGIN}/admin/activity?burst=5|#5>, +1 more`,
+    )
+  })
+
+  it('repeated non-refresh admin lines count actions rather than requests', () => {
+    expect(renderLines('admin', [
+      { ts: S, route: '/api/db/flags', line: 'updated flag' },
+      { ts: S + 30, route: '/api/db/flags', line: 'updated flag' },
+    ], SLACK).split('\n')).toEqual(['*2 admin actions*', '• 15:00 updated flag (2 actions)'])
+  })
+
   it('joins within the gap, either side', () => {
     expect([joins(null, 100, 900), joins({ last_ts: 100 }, 1000, 900), joins({ last_ts: 100 }, 1001, 900), joins({ last_ts: 1000 }, 50, 900)])
       .toEqual([false, true, false, false])
@@ -549,5 +562,23 @@ describe('D1 and sinks', () => {
       ['chat.postMessage', null, `1 admin action · 2026-10-21 15:00Z · <${ORIGIN}/admin/activity?burst=1|activity>`],
       ['chat.postMessage', '1.000001', `*1 admin action*\n• 15:00 refreshed 1 activity summary (2 requested, 1 skipped) · reason: make Pages clickable · summaries: <${ORIGIN}/admin/activity?burst=7|#7>`],
     ])
+  })
+
+  it('rejects a malformed refresh purpose before rendering or recording any summary', async () => {
+    const calls = stubFetch()
+    const { env, wait } = await setup({ SLACK_BOT_TOKEN: 'xoxb', SLACK_ADMIN_CHANNEL: 'C1' })
+    await recordServer(env, who, [assign(S, 'gs://b/x/')], wait, NOW)
+    calls.length = 0
+    const full = { ...env, SESSION_SECRET: 's'.repeat(32), BASE_SCOPE: 'gcs' }
+    const { token } = await gateFor(full as never)!.mint({ email: 'ann@example.test', scopes: ['gcs', 'admin'], name: 'ann', createdBy: 't', expiresAt: null, maxRedeems: null })
+    for (const body of ['{', JSON.stringify({ reason: ['wrong'] })]) {
+      const data: Record<string, unknown> = {}
+      const response = await activityRoute({ env: full, data, params: { path: ['render'] }, request: new Request(`${ORIGIN}/api/activity/render?burst=1`, {
+        method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body,
+      }) } as never)
+      expect([response.status, await response.json(), data, calls]).toEqual([
+        400, { error: body === '{' ? 'body is not JSON' : 'reason must be a string' }, {}, [],
+      ])
+    }
   })
 })
