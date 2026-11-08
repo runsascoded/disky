@@ -131,6 +131,10 @@ Each deployment: merge `cloud`, apply `site/migrations/activity-feed.sql` to its
 
 ## Verified
 
+### Activity refresh audit detail (2026-11-07)
+
+Manual summary refreshes record the selected and rendered group IDs, optional date selection and optional purpose (`POST /api/activity/render`, JSON `{ "reason": "…" }`). Sink lines show requested/rendered/skipped counts, the purpose and up to five links to affected groups. A repeated refresh line says `(N requests)` rather than `×N`; other repeated admin lines say `(N actions)`. The admin count is labelled actions, since regenerating posts need not change a setting. Older count-only refresh events explain that they refreshed existing activity summaries and that target IDs were not retained. No extra notifications, requests or activity kinds are introduced; existing burst threads continue to be edited in place. `rendered` remains the set of processed groups, not a remote delivery receipt.
+
 - `wrangler pages dev` over the built site with a local D1 (2026-10-21): a kinds `PUT`, the switch set to "no end date", an agent-token mint and a session-log batch landed in one burst, each server event with its route's line (`ctx.data` reaching the middleware), and a kind turned off was dropped from the next batch before storage. `/admin/activity` and `/privacy` checked in Chrome. The `/admin` table is covered by a render test; Slack / Discord against a stubbed `fetch`.
 
 ## Tests
