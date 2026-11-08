@@ -91,8 +91,8 @@ def parity(con: DuckDBPyConnection, summary: Path, full: Path) -> None:
     differing = con.execute(f'SELECT count(*) FROM (({a} EXCEPT ALL {b}) UNION ALL ({b} EXCEPT ALL {a}))').fetchone()[0]
     if differing:
         raise ValueError(f'read checkpoint: {differing} differing read-lens rows; nothing published')
-    bounds_a = con.execute(f'SELECT min(first_ts), max(last_ts) FROM read_parquet({q(str(summary))})').fetchone()
-    bounds_b = con.execute(f'SELECT min(last_ts), max(last_ts) FROM read_parquet({q(str(full))})').fetchone()
+    bounds_a = con.execute(f'SELECT epoch_us(min(first_ts)), epoch_us(max(last_ts)) FROM read_parquet({q(str(summary))})').fetchone()
+    bounds_b = con.execute(f'SELECT epoch_us(min(last_ts)), epoch_us(max(last_ts)) FROM read_parquet({q(str(full))})').fetchone()
     if bounds_a != bounds_b:
         raise ValueError(f'read checkpoint: observation bounds differ: {bounds_a} != {bounds_b}; nothing published')
 

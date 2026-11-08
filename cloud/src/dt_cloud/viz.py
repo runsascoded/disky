@@ -530,7 +530,9 @@ def write_path_index(
         acc = f"read_parquet({globs}, union_by_name = true)"
         have = {r[0] for r in con.execute(f"DESCRIBE SELECT * FROM {acc}").fetchall()}
         if 'history_before' in have:
-            closed = con.execute(f"SELECT MAX(history_before) FROM {acc}").fetchone()[0]
+            closed = con.execute(f"SELECT MAX(history_before) AT TIME ZONE 'UTC' FROM {acc}").fetchone()[0]
+            if closed is not None:
+                closed = closed.replace(tzinfo=dt.timezone.utc)
             if closed is not None and dt.datetime.combine(dt.date.fromisoformat(asof[:10]), dt.time(), dt.timezone.utc) < closed:
                 raise ValueError(f"read summary closes history before {closed.isoformat()}; use the historical scan's interval store or original access inputs")
         day_of = [f"CAST({c} AS DATE)" for c in ("day", "hour") if c in have]

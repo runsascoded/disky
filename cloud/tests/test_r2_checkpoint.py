@@ -39,7 +39,8 @@ def state(root: Path, frozen: dict[str, list[tuple[str, str]]], active: dict[str
 
 def totals(path: Path) -> list[tuple]:
     with duckdb.connect() as con:
-        return con.execute('SELECT bucket,path,op,sum(n_ops)::BIGINT,max(last_ts),bool_or(sampled) FROM read_parquet(?) GROUP BY 1,2,3 ORDER BY 1,2,3', [str(path)]).fetchall()
+        rows = con.execute("SELECT bucket,path,op,sum(n_ops)::BIGINT,max(last_ts) AT TIME ZONE 'UTC',bool_or(sampled) FROM read_parquet(?) GROUP BY 1,2,3 ORDER BY 1,2,3", [str(path)]).fetchall()
+        return [(b, p, op, n, ts.replace(tzinfo=UTC), sampled) for b, p, op, n, ts, sampled in rows]
 
 
 def test_bootstrap_and_unchanged_update_match_full_history(tmp_path: Path) -> None:
