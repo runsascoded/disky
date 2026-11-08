@@ -23,7 +23,7 @@ if TYPE_CHECKING:
     from duckdb import DuckDBPyConnection
 
 META = b'r2_read_checkpoint'
-EMPTY = "SELECT NULL::VARCHAR bucket, NULL::VARCHAR path, NULL::VARCHAR op, NULL::TIMESTAMP hour, NULL::BIGINT n_ops, NULL::TIMESTAMPTZ last_ts, NULL::TIMESTAMPTZ first_ts, NULL::BOOLEAN sampled WHERE false"
+EMPTY = "SELECT NULL::VARCHAR bucket, NULL::VARCHAR path, NULL::VARCHAR op, NULL::TIMESTAMP AS hour, NULL::BIGINT n_ops, NULL::TIMESTAMPTZ last_ts, NULL::TIMESTAMPTZ first_ts, NULL::BOOLEAN sampled WHERE false"
 LEAF = "bucket, path, hour, op, n_ops, NULL::BIGINT bytes_out, NULL::BIGINT bytes_in, NULL::BIGINT n_requesters, last_ts, sampled"
 
 
@@ -175,7 +175,7 @@ def sync(
             normalized(con, [local[k] for k in selected['frozen']], 'new_closed', cut)
             normalized(con, [local[k] for k in selected['active']], 'active', cut)
             old = f'SELECT * FROM read_parquet({q(str(previous))})' if previous.exists() else EMPTY
-            con.execute(f"""CREATE TEMP TABLE closed AS SELECT bucket, path, op, max(hour) hour,
+            con.execute(f"""CREATE TEMP TABLE closed AS SELECT bucket, path, op, max(hour) AS hour,
                 sum(n_ops)::BIGINT n_ops, max(last_ts) last_ts, min(first_ts) first_ts, bool_or(sampled) sampled
                 FROM ({old} UNION ALL BY NAME SELECT * FROM new_closed) GROUP BY bucket, path, op""")
             metadata.update(account=selected['account'], cursors=selected['cursors'], windows=metadata['windows'] + len(selected['frozen']))
