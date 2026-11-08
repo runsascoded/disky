@@ -172,6 +172,12 @@ export function withDeltas(run: ScanRun, outputs: readonly ScanRunOutput[], inde
 /** A phase on the run's clock: seconds from the run's start. */
 export interface PhaseSpan { phase: string; start: number; end: number; status: ScanRunPhase['status']; note: string | null; lane: number; machine?: string | null; task?: string | null }
 
+/** Processing starts after a completed queue phase. A retry may wait days after capture before its job starts. */
+export function processingSecs(total: number | null, spans: readonly PhaseSpan[]): number | null {
+  const queued = spans.filter(s => s.phase === 'queue' && s.status === 'done')
+  return total == null || !queued.length ? null : Math.max(0, total - Math.max(...queued.map(s => s.end)))
+}
+
 /** A phase's status, a closed one's note naming a nonfatal failure (`failed (exit N)`, legacy `wall, failed …`) over
  * its recorded `done`. A running phase stays running: its note is a heartbeat's live output line, whatever it says. */
 export function phaseStatus(p: Pick<ScanRunPhase, 'status' | 'note'>): ScanRunPhase['status'] {
