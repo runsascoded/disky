@@ -338,6 +338,37 @@ def test_layer1_goes_unless_it_carries_generation_no_marker_vouches_for(fx, d1):
         "listing/2026-07-30/b/shard-000.parquet", "listing/2026-08-04T1236/b/shard-000.parquet"]
 
 
+def test_layer1_string_versions_require_a_string_identity_comparison(fx, d1):
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    root = fx["root"]
+    dates = ["2026-07-30", "2026-08-04", "2026-08-04T1236"]
+    keys = [f"listing/{date}/b/shard-000.parquet" for date in dates]
+    for key, token in zip(keys, ['"etag"', '"etag"', None]):
+        path = root / key
+        path.parent.mkdir(parents=True, exist_ok=True)
+        pq.write_table(pa.table({'bucket': ['b'], 'name': ['f'], 'size_bytes': [1],
+                                 'generation': pa.array([None], pa.int64()), 'version': pa.array([token], pa.string())}), path)
+    markers = fx["store"] / "interval-store/g/verify"
+    for date, proof in zip(dates, [{'objects': 1, 'equal': 1}, {'objects': 1, 'equal': 1, 'column': 'version'}, None]):
+        path = markers / f'{date}.json'
+        marker = json.loads(path.read_text())
+        if proof:
+            marker['generation'] = proof
+        path.write_text(json.dumps(marker))
+    report = _run(fx, '-m', '-1', LAYER1)
+    assert {r['id']: (bool(r['delete'].get('layer1')), bool(r['keep'].get('layer1'))) for r in report['scans'] if r['status'] == 'retire'} == {
+        dates[0]: (False, True), dates[1]: (True, False), dates[2]: (True, False),
+    }
+    assert next(r['held'] for r in report['scans'] if r['id'] == dates[0]) == (
+        "layer1: its listing has `version`, which its marker didn't compare equal; "
+        "attribution: the interval store's attribution table doesn't cover the scan"
+    )
+    _run(fx, '-x', '-m', '-1', LAYER1)
+    assert [key for key in keys if (root / key).exists()] == [keys[0]]
+
+
 def test_the_attribution_map_goes_only_covered_and_vouched_for(fx, d1, monkeypatch):
     """A scan's `attr.tsv` (and `attribution.parquet`) retire only when the interval store's attribution table covers the
     scan and its marker compared the table with the scan's map, equal; else they stay (`held`) while the rest retires."""

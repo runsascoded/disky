@@ -212,19 +212,17 @@ def lineage(store: Store, gen: str) -> list[str]:
         out.append(frm)
 
 
-def has_generation(store: Store, keys: Iterable[str], *, workers: int = 16) -> bool:
-    """Whether any of the listing shards `keys` has a non-null `generation` (from the footers: a row group whose
-    statistics count fewer nulls than rows, or has none). The canonical listing has the column everywhere, all-null where
-    the lister has no generations (S3, R2, a listing before GCS's were recorded)."""
+def has_identity(store: Store, keys: Iterable[str], column: str, *, workers: int = 16) -> bool:
+    """Whether a listing carries a non-null identity, conservatively inferred from its row-group footers."""
     import pyarrow.parquet as pq
 
     def one(key: str) -> bool:
         with store.open(key) as fh:
             md = pq.ParquetFile(fh).metadata
         names = md.schema.to_arrow_schema().names
-        if ist.GENERATION not in names:
+        if column not in names:
             return False
-        i = names.index(ist.GENERATION)
+        i = names.index(column)
         for g in range(md.num_row_groups):
             rg = md.row_group(g)
             st = rg.column(i).statistics
@@ -234,6 +232,10 @@ def has_generation(store: Store, keys: Iterable[str], *, workers: int = 16) -> b
 
     with ThreadPoolExecutor(workers) as ex:
         return any(ex.map(one, sorted(keys)))
+
+
+def has_generation(store: Store, keys: Iterable[str], *, workers: int = 16) -> bool:
+    return has_identity(store, keys, ist.GENERATION, workers=workers)
 
 
 def generation_vouched(marker: dict) -> bool:
@@ -465,6 +467,12 @@ def retire(scans_root: str, layouts: list[str], *, iv_root: str, static_gen: str
             if r["status"] == "retire" and raw and not generation_vouched(markers[r["id"]]) and has_generation(src, raw):
                 s.held.add("layer1")
                 r["held"] = "layer1: its listing has `generation`, which its marker didn't compare equal"
+            if r["status"] == "retire" and raw and has_identity(src, raw, "version"):
+                marker = markers[r["id"]]
+                if not generation_vouched(marker) or marker.get("generation", {}).get("column") != "version":
+                    s.held.add("layer1")
+                    why = "layer1: its listing has `version`, which its marker didn't compare equal"
+                    r["held"] = f"{r['held']}; {why}" if r.get("held") else why
             if r["status"] == "retire" and any(c == "attribution" for _, c in s.objects.values()):
                 why = None
                 if r["id"] not in covered:

@@ -535,7 +535,7 @@ def check_tables(con, roots: list[str], name: str, D: int, *, sliced: bool = Tru
             g = gcol[0]
             n, eq = con.execute(f"""SELECT count(*), count(*) FILTER (WHERE l.{g} = o.{g}) FROM c_scan o
                 LEFT JOIN c_store l ON l.depth = o.depth AND l.path = o.path WHERE o.kind = 'file' AND o.{g} IS NOT NULL""").fetchone()
-            out["generation"] = {"objects": int(n), "equal": int(eq)}
+            out["generation"] = {"objects": int(n), "equal": int(eq), **({"column": "version"} if g == "version" else {})}
     con.execute("DROP TABLE IF EXISTS c_store; DROP TABLE IF EXISTS c_scan")
     return out
 
@@ -592,7 +592,7 @@ def append_marker(gen: str, scan: str, manifest: dict, docs: list[dict], cut: di
     if any(d["check"]["runs"] != runs for d in docs):
         return None
     tabs: dict[str, dict[str, int]] = {}
-    gen_eq: dict[str, int] | None = None
+    gen_eq: dict | None = None
     for d in docs:
         for t, v in d["check"].items():
             if t == "generation":
@@ -603,6 +603,8 @@ def append_marker(gen: str, scan: str, manifest: dict, docs: list[dict], cut: di
                     e[k] += v[k]
     ok = (tabs.get("pvl", {}).get("rows", 0) > 0 and all(v["missing"] == v["extra"] == 0 for v in (*tabs.values(), *cut.values()))
           and (gen_eq is None or gen_eq["equal"] == gen_eq["objects"]))
+    if gen_eq is not None and all(d["check"].get("generation", {}).get("column") == "version" for d in docs):
+        gen_eq["column"] = "version"
     return {"scan": scan, "gen": gen, "how": "append", "pass": ok, "manifest": f"manifests/{scan}.json", "runs": runs, "ranges": len(docs),
             "tables": tabs, "cut": cut, **({"generation": gen_eq} if gen_eq is not None else {})}
 
