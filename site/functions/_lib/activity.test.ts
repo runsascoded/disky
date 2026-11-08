@@ -9,13 +9,14 @@ import {
   rerender, THROTTLE_MS, type Wait, writeKind,
 } from './activity'
 import {
-  addTrail, authLine, type Burst, clientKind, DISCORD, emptyTrail, highlights, joins, keptEvents, mergeKinds, pageLines,
+  activityEventLine, activityRefreshLine, addTrail, authLine, type Burst, clientKind, DISCORD, emptyTrail, highlights, joins, keptEvents, mergeKinds, pageLines,
   renderDetails, renderDiscord, renderHeadline, renderLines, renderSummary, senderName, type ServerEvent, serverKind, sessionLinks, SLACK, tallyClient,
 } from './activityShape'
 import { captureWrite, noteActivity } from './activityHook'
 import { ingest } from './sessionLog'
 import { resetSlackScopes } from './slack'
 import type { SlogEvent } from './sessionLogShape'
+import { onRequest as activityRoute } from '../api/activity/[[path]]'
 
 const NOW = Date.UTC(2026, 9, 21, 15, 0, 0)  // 2026-10-21T15:00Z
 const S = Math.floor(NOW / 1000)
@@ -96,6 +97,29 @@ describe('kinds', () => {
 })
 
 describe('bursts (pure)', () => {
+  it('a refresh names its purpose, scope, selected/rendered/skipped counts and linked targets', () => {
+    const detail = { action: 'activity-render' as const, requested: [7, 8, 9], rendered: [7, 9], since: '2026-10-24', reason: 'make <Pages> clickable' }
+    expect(activityRefreshLine(detail, SLACK, ORIGIN)).toBe(
+      `refreshed 2 activity summaries (3 requested, 1 skipped) · active since 2026-10-24 · reason: make &lt;Pages&gt; clickable · summaries: <${ORIGIN}/admin/activity?burst=7|#7>, <${ORIGIN}/admin/activity?burst=9|#9>`,
+    )
+    expect(activityEventLine({ line: 'stored plain line', route: '/api/activity/render', detail }, DISCORD, ORIGIN)).toBe(
+      `refreshed 2 activity summaries (3 requested, 1 skipped) · active since 2026-10-24 · reason: make <Pages> clickable · summaries: [#7](<${ORIGIN}/admin/activity?burst=7>), [#9](<${ORIGIN}/admin/activity?burst=9>)`,
+    )
+    expect(activityRefreshLine({ action: 'activity-render', requested: [1], rendered: [] })).toBe(
+      'refreshed 0 activity summaries (1 requested, 1 skipped) · display refresh of existing activity posts',
+    )
+  })
+
+  it('old refreshes explain the operation and repeated admin lines count requests, not target summaries', () => {
+    const e = { ts: S, line: 're-rendered 9 activity bursts', route: '/api/activity/render' }
+    const line = activityEventLine(e, SLACK, ORIGIN)
+    expect(renderLines('admin', [{ ...e, line }, { ...e, ts: S + 30, line }], SLACK).split('\n')).toEqual([
+      '*2 admin actions*',
+      '• 15:00 refreshed 9 existing activity summaries (display refresh; target IDs were not recorded) (2 requests)',
+    ])
+    expect(activityEventLine({ line: 're-rendered 9 activity bursts', route: '/api/other' }, SLACK, ORIGIN)).toBe('re-rendered 9 activity bursts')
+  })
+
   it('joins within the gap, either side', () => {
     expect([joins(null, 100, 900), joins({ last_ts: 100 }, 1000, 900), joins({ last_ts: 100 }, 1001, 900), joins({ last_ts: 1000 }, 50, 900)])
       .toEqual([false, true, false, false])
@@ -474,6 +498,34 @@ describe('D1 and sinks', () => {
     expect((await eventsOf(db, 1)).map(e => [e.kind, e.actor, e.via, e.line, e.detail])).toEqual([
       ['note', 'ann@example.test', 'grant', 'added a note on 2026-10-20: "x"', { note: 4 }],
       ['access', 'ann@example.test', 'grant', 'minted a grant', { body: { email: 'string', scopes: 1, days: 'number' } }],
+    ])
+  })
+
+  it('the admin refresh route records exact unique targets, skipped ids and an optional purpose', async () => {
+    const { env, wait } = await setup()
+    await recordServer(env, who, [assign(S, 'gs://b/x/')], wait, NOW)
+    const full = { ...env, SESSION_SECRET: 's'.repeat(32), BASE_SCOPE: 'gcs' }
+    const { token } = await gateFor(full as never)!.mint({ email: 'ann@example.test', scopes: ['gcs', 'admin'], name: 'ann', createdBy: 't', expiresAt: null, maxRedeems: null })
+    const data: Record<string, unknown> = {}
+    const response = await activityRoute({ env: full, data, params: { path: ['render'] }, request: new Request(`${ORIGIN}/api/activity/render?burst=1&burst=99&burst=1`, {
+      method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body: JSON.stringify({ reason: '  make Pages\nclickable  ' }),
+    }) } as never)
+    expect([response.status, await response.json(), data.activity]).toEqual([200, { rendered: [1] }, [{
+      line: 'refreshed 1 activity summary (2 requested, 1 skipped) · reason: make Pages clickable · summaries: #1',
+      action: 'activity-render', requested: [1, 99], rendered: [1], reason: 'make Pages clickable',
+    }]])
+  })
+
+  it('Slack receives one linked refresh entry in the existing burst thread', async () => {
+    const calls = stubFetch()
+    const { env, wait } = await setup({ SLACK_BOT_TOKEN: 'xoxb', SLACK_ADMIN_CHANNEL: 'C1' })
+    const detail = { action: 'activity-render' as const, requested: [7, 8], rendered: [7], reason: 'make Pages clickable' }
+    await recordServer(env, who, [{ ts: S, kind: 'admin', actor: who.actor, via: who.via, method: 'POST', route: '/api/activity/render',
+      line: activityRefreshLine(detail), detail,
+    }], wait, NOW)
+    expect(calls.map(c => [c.url.split('/').pop(), c.body.thread_ts ?? null, c.body.text])).toEqual([
+      ['chat.postMessage', null, `1 admin action · 2026-10-21 15:00Z · <${ORIGIN}/admin/activity?burst=1|activity>`],
+      ['chat.postMessage', '1.000001', `*1 admin action*\n• 15:00 refreshed 1 activity summary (2 requested, 1 skipped) · reason: make Pages clickable · summaries: <${ORIGIN}/admin/activity?burst=7|#7>`],
     ])
   })
 })

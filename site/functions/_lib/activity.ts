@@ -11,7 +11,7 @@ import { slackApi, type SlackEnv, slackPeople, slackScopes } from './slack.js'
 import { dataUriImage, identiconPng, identiconSeed, publishAvatar } from './publicAvatar.js'
 import type { SlogBatch, SlogEvent } from './sessionLogShape.js'
 import {
-  addPages, addTrail, type Burst, DISCORD, emptyTrail, type Fmt, fmtGap, highlights, joins, KIND_DEFS, type KindConf,
+  activityEventLine, addPages, addTrail, type Burst, DISCORD, emptyTrail, type Fmt, fmtGap, highlights, joins, KIND_DEFS, type KindConf,
   type KindRow, type KindsConf, actorName, mergeKinds, renderDetails, renderDiscord, renderHeadline, renderLines, renderSummary, reported, senderName,
   type ServerEvent, sessionUrl,
   SLACK, tallyClient,
@@ -346,7 +346,7 @@ async function render(env: ActivityEnv, b: StoredBurst, conf: KindsConf, now: nu
    *  session (an error to the session's errors). */
   const lineEvents = (es: readonly ServerEvent[], fmt: Fmt) => es.map(e => {
     const sid = (e.kind === 'error' || e.kind === 'resume') && typeof e.detail?.sid === 'string' ? e.detail.sid : null
-    if (!sid) return e
+    if (!sid) return { ...e, line: activityEventLine(e, fmt, b.origin) }
     return { ...e, line: `${fmt.esc(e.line)}${e.route ? ` on ${fmt.code(e.route)}` : ''}`, href: sessionUrl(b.origin, sid, e.kind === 'error' ? 'errors' : undefined) }
   })
   const s = sinks(env)

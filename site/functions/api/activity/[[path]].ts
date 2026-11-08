@@ -8,7 +8,7 @@
 //                                                                         or ?since= (YYYY-MM-DD: every burst active since)
 import { type Ctx, type Env as AuthEnv, json, requireAdmin } from '../../_lib/auth.js'
 import { type ActivityEnv, burstEvents, listBursts, loadBurst, readKinds, rerender, sinks, slackParent, writeKind } from '../../_lib/activity.js'
-import { KIND_BY_NAME, KIND_DEFS, NOTIFY, type Notify } from '../../_lib/activityShape.js'
+import { activityRefreshLine, KIND_BY_NAME, KIND_DEFS, NOTIFY, type Notify } from '../../_lib/activityShape.js'
 import { noteActivity } from '../../_lib/activityHook.js'
 
 type C = Ctx & { env: AuthEnv & ActivityEnv; params?: { path?: string | string[] } }
@@ -72,15 +72,26 @@ export const onRequest = async (ctx: C): Promise<Response> => {
       return json({ burst, events: await burstEvents(db, burst, await readKinds(db, Date.now())), slack: ts && channel ? permalink(channel, ts) : null }, 200, NO_STORE)
     }
     if (segs[0] === 'render' && segs.length === 1 && m === 'POST') {
+      let reason: string | undefined
+      if (ctx.request.body !== null) {
+        let body: { reason?: unknown } | null
+        try { body = await ctx.request.json() } catch { return json({ error: 'body is not JSON' }, 400) }
+        if (body === null || typeof body !== 'object' || Array.isArray(body) || (body.reason !== undefined && typeof body.reason !== 'string')) {
+          return json({ error: 'reason must be a string' }, 400)
+        }
+        reason = typeof body.reason === 'string' ? body.reason.trim().replace(/\s+/g, ' ').slice(0, 240) || undefined : undefined
+      }
       const since = q.get('since')
       const sinceMs = since ? Date.parse(since) : NaN
       if (since && Number.isNaN(sinceMs)) return json({ error: `bad since ${since}` }, 400)
-      const ids = since
+      const selected = since
         ? (await db.prepare('SELECT id FROM activity_bursts WHERE last_ts >= ? ORDER BY id').bind(Math.floor(sinceMs / 1000)).all<{ id: number }>()).results.map(r => r.id)
         : q.getAll('burst').filter(b => /^\d+$/.test(b)).map(Number)
+      const ids = [...new Set(selected.filter(id => Number.isSafeInteger(id) && id > 0))]
       if (!ids.length) return json({ error: 'name bursts (?burst=ID) or ?since=YYYY-MM-DD' }, 400)
       const rendered = await rerender(ctx.env, ids)
-      noteActivity(ctx, { line: `re-rendered ${rendered.length} activity burst${rendered.length === 1 ? '' : 's'}` })
+      const detail = { action: 'activity-render' as const, requested: ids, rendered, ...(since ? { since } : {}), ...(reason ? { reason } : {}) }
+      noteActivity(ctx, { line: activityRefreshLine(detail), ...detail })
       return json({ rendered }, 200, NO_STORE)
     }
   } catch (e) {
