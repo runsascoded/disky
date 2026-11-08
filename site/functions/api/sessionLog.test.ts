@@ -4,17 +4,20 @@
 // schema (`session_log*` in `site/schema.sql`) and the real gate (Bearer
 // grants minted in the same in-memory D1).
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { onRequest, purgeState } from './session-log/[[path]]'
+import { onRequest } from './session-log/[[path]]'
 import { gateFor } from '../_lib/auth'
 import { sqliteD1 } from '../_lib/testD1'
-import { listSessions, purge } from '../_lib/sessionLog'
+import { d1SessionLogStore } from '@open-athena/auth/session-log/d1'
+import type { SessionFilter } from '@open-athena/auth/session-log'
+const listSessions = (db: D1Database, filter: SessionFilter) => d1SessionLogStore(db).listSessions(filter)
+const purge = (db: D1Database, cutoff: number) => d1SessionLogStore(db).purge(cutoff)
 import { latency } from '../_lib/sessionLatency'
 import { FOREVER_MS, fmtCursor, isForever, LIMITS, parseCursor, parseUntil, type SessionRow, switchState, validateBatch } from '../_lib/sessionLogShape'
 
 const NOW = Date.UTC(2026, 9, 12, 15, 0, 0)  // 2026-10-12T15:00Z
 const HOST = 'https://site.example.test'
 
-beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(NOW); purgeState.last = 0 })
+beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(NOW) })
 afterEach(() => { vi.useRealTimers() })
 
 describe('D1', () => {
@@ -277,11 +280,11 @@ describe('D1', () => {
         await s.call('GET', '', { token: s.viewer }),
       ]).toEqual([
         [200, onForever(HAND_2100, 'ryan', 1_760_000_000)],
-        [200, { enabled: true, until: HAND_2100, reason: null, on: true, retainDays: 30 }],
+        [200, { enabled: true, until: HAND_2100, reason: null, on: true, retainDays: 30, appEvents: {} }],
       ])
       s.raw.prepare('UPDATE session_log_switch SET until_ms = ?').run(Date.UTC(2200, 0, 1))
       vi.setSystemTime(Date.UTC(2031, 0, 1))
-      expect(await s.call('GET', '', { token: s.viewer })).toEqual([200, { enabled: true, until: Date.UTC(2200, 0, 1), reason: null, on: true, retainDays: 30 }])
+      expect(await s.call('GET', '', { token: s.viewer })).toEqual([200, { enabled: true, until: Date.UTC(2200, 0, 1), reason: null, on: true, retainDays: 30, appEvents: {} }])
     })
   })
 
@@ -386,18 +389,18 @@ describe('D1', () => {
         await on.call('GET', ''),
         await on.call('GET', '', { token: on.viewer }),
       ]).toEqual([
-        [200, { enabled: false, until: null, reason: 'off', on: false, retainDays: 30 }],
-        [200, { enabled: false, until: null, reason: 'off', on: false, retainDays: 30 }],
-        [200, { enabled: false, until: Date.UTC(2026, 9, 18), reason: 'no viewer identity', on: true, retainDays: 30 }],
-        [200, { enabled: true, until: Date.UTC(2026, 9, 18), reason: null, on: true, retainDays: 30 }],
+        [200, { enabled: false, until: null, reason: 'off', on: false, retainDays: 30, appEvents: {} }],
+        [200, { enabled: false, until: null, reason: 'off', on: false, retainDays: 30, appEvents: {} }],
+        [200, { enabled: false, until: Date.UTC(2026, 9, 18), reason: 'no viewer identity', on: true, retainDays: 30, appEvents: {} }],
+        [200, { enabled: true, until: Date.UTC(2026, 9, 18), reason: null, on: true, retainDays: 30, appEvents: {} }],
       ])
       vi.setSystemTime(Date.UTC(2026, 9, 18))
-      expect(await on.call('GET', '', { token: on.viewer })).toEqual([200, { enabled: false, until: Date.UTC(2026, 9, 18), reason: 'expired', on: false, retainDays: 30 }])
+      expect(await on.call('GET', '', { token: on.viewer })).toEqual([200, { enabled: false, until: Date.UTC(2026, 9, 18), reason: 'expired', on: false, retainDays: 30, appEvents: {} }])
     })
 
     it('a PUBLIC_READ deploy logs anonymous viewers', async () => {
       const pub = await setup({ PUBLIC_READ: '1' })
-      expect(await pub.call('GET', '')).toEqual([200, { enabled: true, until: Date.UTC(2026, 9, 18), reason: null, on: true, retainDays: 30 }])
+      expect(await pub.call('GET', '')).toEqual([200, { enabled: true, until: Date.UTC(2026, 9, 18), reason: null, on: true, retainDays: 30, appEvents: {} }])
     })
 
     it(`reads the switch at most once per ${TTL / 1000} s per isolate; an admin change in this isolate applies at once`, async () => {
@@ -424,15 +427,15 @@ describe('D1', () => {
       vi.setSystemTime(NOW + 30_000)
       seen.push(await cfg())
       expect(seen).toEqual([
-        { enabled: true, until: NOW + 30_000, reason: null, on: true, retainDays: 30 },
-        { enabled: false, until: NOW + 30_000, reason: 'expired', on: false, retainDays: 30 },
+        { enabled: true, until: NOW + 30_000, reason: null, on: true, retainDays: 30, appEvents: {} },
+        { enabled: false, until: NOW + 30_000, reason: 'expired', on: false, retainDays: 30, appEvents: {} },
       ])
     })
 
     it('without the migration: off ("not set up")', async () => {
       const s = await setup({}, null)
       s.raw.exec('DROP TABLE session_log_switch')
-      expect(await s.call('GET', '', { token: s.viewer })).toEqual([200, { enabled: false, until: null, reason: 'not set up', on: false, retainDays: 30 }])
+      expect(await s.call('GET', '', { token: s.viewer })).toEqual([200, { enabled: false, until: null, reason: 'not set up', on: false, retainDays: 30, appEvents: {} }])
     })
   })
 
@@ -524,24 +527,21 @@ describe('D1', () => {
       const off = await setup({ SESSION_LOG_RETAIN_DAYS: '7' }, null)
       const on = await setup({ SESSION_LOG_RETAIN_DAYS: '7' })
       for (const s of [off, on]) s.raw.exec(OLD_AND_NEW(86_400))
-      purgeState.last = 0
       expect([await off.call('GET', ''), await on.call('GET', '')]).toEqual([
-        [200, { enabled: false, until: null, reason: 'off', on: false, retainDays: 7 }],
-        [200, { enabled: false, until: Date.UTC(2026, 9, 18), reason: 'no viewer identity', on: true, retainDays: 7 }],
+        [200, { enabled: false, until: null, reason: 'off', on: false, retainDays: 7, appEvents: {} }],
+        [200, { enabled: false, until: Date.UTC(2026, 9, 18), reason: 'no viewer identity', on: true, retainDays: 7, appEvents: {} }],
       ])
       expect([
-        purgeState.last,
         off.raw.prepare('SELECT sid FROM session_log ORDER BY sid').all(),
         on.raw.prepare('SELECT sid FROM session_log ORDER BY sid').all(),
-      ]).toEqual([0, [{ sid: 'new' }, { sid: 'old' }], [{ sid: 'new' }, { sid: 'old' }]])
+      ]).toEqual([[{ sid: 'new' }, { sid: 'old' }], [{ sid: 'new' }, { sid: 'old' }]])
     })
 
     it('an anonymous GET on a PUBLIC_READ deploy: logged, and it purges nothing either', async () => {
       const pub = await setup({ PUBLIC_READ: '1', SESSION_LOG_RETAIN_DAYS: '7' })
       pub.raw.exec(OLD_AND_NEW(86_400))
-      purgeState.last = 0
-      expect(await pub.call('GET', '')).toEqual([200, { enabled: true, until: Date.UTC(2026, 9, 18), reason: null, on: true, retainDays: 7 }])
-      expect([purgeState.last, pub.raw.prepare('SELECT sid FROM session_log ORDER BY sid').all()]).toEqual([0, [{ sid: 'new' }, { sid: 'old' }]])
+      expect(await pub.call('GET', '')).toEqual([200, { enabled: true, until: Date.UTC(2026, 9, 18), reason: null, on: true, retainDays: 7, appEvents: {} }])
+      expect(pub.raw.prepare('SELECT sid FROM session_log ORDER BY sid').all()).toEqual([{ sid: 'new' }, { sid: 'old' }])
     })
 
     it('a viewer\'s config GET purges past SESSION_LOG_RETAIN_DAYS — with logging off — at most hourly; a missing table is a nop', async () => {
@@ -555,8 +555,7 @@ describe('D1', () => {
       expect(s.raw.prepare('SELECT sid FROM session_log').all()).toEqual([])
       const bare = await setup()
       bare.raw.exec('DROP TABLE session_log; DROP TABLE session_log_batches')
-      purgeState.last = 0
-      expect(await bare.call('GET', '', { token: bare.viewer })).toEqual([200, { enabled: true, until: Date.UTC(2026, 9, 18), reason: null, on: true, retainDays: 30 }])
+      expect(await bare.call('GET', '', { token: bare.viewer })).toEqual([200, { enabled: true, until: Date.UTC(2026, 9, 18), reason: null, on: true, retainDays: 30, appEvents: {} }])
     })
   })
 
