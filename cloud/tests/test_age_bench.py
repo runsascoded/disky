@@ -30,3 +30,30 @@ def test_empty_or_different_cases_refuse():
         capture([], lambda _: None, 1)
     with pytest.raises(ValueError, match='^age benchmark cases differ from baseline$'):
         capture([{'date': 'other'}], lambda _: None, 1, {'cases': [{'query': {'date': 'original'}}]})
+    with pytest.raises(ValueError, match='^age benchmark baseline did not pass$'):
+        capture([{'date': 'same'}], lambda _: None, 1, {'cases': [{'query': {'date': 'same'}}], 'pass': False})
+
+
+def test_cli_does_not_hide_cold_failures_with_automatic_retries(tmp_path, monkeypatch):
+    import json
+
+    from click.testing import CliRunner
+    from dt_cloud import deploy, diff_check
+    from dt_cloud.age_bench import age_bench_cmd
+
+    query = {'date': '2026-11-07T1944'}
+    cases = tmp_path / 'cases.json'
+    cases.write_text(json.dumps([query]))
+    out = tmp_path / 'out.json'
+    calls = []
+    monkeypatch.setattr(deploy, 'site_token', lambda _: 'fixture-read-token')
+
+    def fetch(host, query, token, **kwargs):
+        calls.append((host, query, token, kwargs))
+        return 503, 'unavailable', .1, '', ''
+
+    monkeypatch.setattr(diff_check, 'fetch', fetch)
+    result = CliRunner().invoke(age_bench_cmd, ['-u', 'https://fixture', '-n', '1', '-o', str(out), str(cases)])
+    assert result.exit_code == 1
+    assert calls == [('https://fixture', query, 'fixture-read-token', {'retries': 1, 'route': '/api/age-pyramid'})] * 2
+    assert (json.loads(out.read_text())['pass'], json.loads(out.read_text())['cases'][0]['statuses']) == (False, [503, 503])

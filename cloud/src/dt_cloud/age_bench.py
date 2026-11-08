@@ -25,6 +25,8 @@ def capture(
         raise ValueError('age benchmark needs at least one case')
     if baseline is not None and [c['query'] for c in baseline['cases']] != cases:
         raise ValueError('age benchmark cases differ from baseline')
+    if baseline is not None and baseline.get('pass') is not True:
+        raise ValueError('age benchmark baseline did not pass')
     samples: list[list[tuple]] = [[] for _ in cases]
     for _ in range(repeats + 1):
         for query, values in zip(cases, samples):
@@ -53,7 +55,7 @@ def age_bench_cmd(baseline: Path | None, deployment: str | None, repeats: int, o
     from .diff_check import fetch
 
     token = site_token(None)
-    result = capture(json.loads(cases.read_text()), lambda query: fetch(url, query, token, route='/api/age-pyramid'),
+    result = capture(json.loads(cases.read_text()), lambda query: fetch(url, query, token, retries=1, route='/api/age-pyramid'),
                      repeats, json.loads(baseline.read_text()) if baseline else None)
     result.update(url=url, deployment=deployment)
     out.parent.mkdir(parents=True, exist_ok=True)
