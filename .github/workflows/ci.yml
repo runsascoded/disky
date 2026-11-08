@@ -8,9 +8,16 @@ on:
   push:
     branches-ignore: ['dist/**', '*-prod', '*-dev']
   pull_request:
+  workflow_dispatch:
+    inputs:
+      cloud_tests:
+        description: 'Space-separated cloud pytest paths or node IDs (focused checks only; no full-suite pass cache)'
+        required: true
+        type: string
 
 jobs:
   test:
+    if: github.event_name != 'workflow_dispatch'
     name: Test
     runs-on: ubuntu-latest
     strategy:
@@ -63,6 +70,7 @@ jobs:
           key: ${{ steps.key.outputs.key }}
 
   release-build-id:
+    if: github.event_name != 'workflow_dispatch'
     name: Release and preview tooling
     runs-on: ubuntu-latest
     steps:
@@ -73,6 +81,7 @@ jobs:
       - run: node --test site/scripts/build-id.test.mjs .github/actions/cf-preview/preview.test.mjs
 
   typecheck:
+    if: github.event_name != 'workflow_dispatch'
     name: Type Check
     runs-on: ubuntu-latest
     steps:
@@ -91,6 +100,7 @@ jobs:
         run: uv run mypy src/disk_tree --ignore-missing-imports
 
   treemap-widget:
+    if: github.event_name != 'workflow_dispatch'
     name: "@open-athena/treemap (typecheck + test)"
     runs-on: ubuntu-latest
     steps:
@@ -116,6 +126,7 @@ jobs:
         run: cd packages/treemap && pnpm test
 
   react-widgets:
+    if: github.event_name != 'workflow_dispatch'
     name: "@disk-tree/react (typecheck + test)"
     runs-on: ubuntu-latest
     steps:
@@ -141,6 +152,7 @@ jobs:
         run: cd packages/react && pnpm test
 
   dt-cloud-test:
+    if: github.event_name != 'workflow_dispatch'
     name: dt-cloud tests (${{ matrix.python-version }}, ${{ matrix.shard.name }})
     runs-on: ubuntu-latest
     strategy:
@@ -217,6 +229,7 @@ jobs:
           key: ${{ steps.key.outputs.key }}
 
   site:
+    if: github.event_name != 'workflow_dispatch'
     name: Site typecheck, build + tests
     runs-on: ubuntu-latest
     env:
@@ -263,6 +276,7 @@ jobs:
         run: cd site && timeout 900 pnpm vitest run --testTimeout=20000
 
   fleet:
+    if: github.event_name != 'workflow_dispatch'
     name: Fleet app typecheck, build + tests
     runs-on: ubuntu-latest
     env:
@@ -297,3 +311,29 @@ jobs:
 
       - name: Tests
         run: cd fleet && pnpm test
+
+  focused-cloud-test:
+    if: github.event_name == 'workflow_dispatch'
+    name: Focused cloud tests (${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.12', '3.13']
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@v4
+      - run: uv python install '${{ matrix.python-version }}'
+      - run: uv sync --frozen --all-packages --all-extras --all-groups
+      - name: Run selected tests
+        working-directory: cloud
+        env:
+          CLOUD_TESTS: ${{ inputs.cloud_tests }}
+        run: |
+          read -r -a selected <<< "$CLOUD_TESTS"
+          test "${#selected[@]}" -gt 0
+          uv run --no-sync pytest "${selected[@]}" -v --durations=10
