@@ -948,6 +948,68 @@ def test_reconcile_cli_store_and_threshold(tmp_path, monkeypatch):
     profile.write_text(json.dumps({"store": "primary"}))
     r = CliRunner().invoke(cli, base)
     assert (r.exit_code, str(r.exception)) == (1, "scan-run reconcile: the profile names no project (its runs' Batch jobs can't be looked up)")
+
+
+@pytest.mark.parametrize("state", ["SUBMITTED", "PENDING", "RUNNABLE", "STARTING", "RUNNING"])
+def test_aws_reconcile_keeps_live_jobs(state):
+    assert scan_runs.aws_lost_reason({"status": state}) is None
+
+
+def test_aws_reconcile_terminal_facts_and_unknown_retention():
+    assert scan_runs.aws_lost_reason({
+        "status": "FAILED", "statusReason": "Job attempt duration\nexceeded timeout", "stoppedAt": 1234567,
+    }) == ("lost: AWS Batch job FAILED; Job attempt duration exceeded timeout", 1234)
+    assert scan_runs.aws_lost_reason({"status": "SUCCEEDED", "stoppedAt": 2345678}) == (
+        "lost: AWS Batch job SUCCEEDED, but the run never recorded its end", 2345,
+    )
+    assert scan_runs.aws_lost_reason(None) == (
+        "lost: AWS Batch job not found (outside retention or deleted)", None,
+    )
+
+
+def test_aws_reconcile_cli_uses_batch_id_for_meta_and_preserves_other_store(tmp_path, monkeypatch):
+    rid = "12345678-1234-1234-1234-123456789abc"
+    profile = tmp_path / "scan-runs.json"
+    profile.write_text(json.dumps({"store": "primary"}))
+    db = tmp_path / "runs.sqlite"
+    s = SqliteSink(db, ddl=DDL)
+    for run_id, store in [(rid, "primary"), (f"{rid}-meta", "meta")]:
+        s.execute([scan_runs.run_sql(Run(run_id, "2026-10-18T0701", "scan", "running", store=store,
+                                         region="us-east-1", started_ts=900), 1000)])
+        s.execute([scan_runs.phase_sql(run_id, Phase("index", 0, 950, None, "running"))])
+    lookups = []
+
+    def lookup(job_id, region):
+        lookups.append((job_id, region))
+        return {"status": "FAILED", "statusReason": "Job attempt duration exceeded timeout", "stoppedAt": 1200000}
+
+    monkeypatch.setattr(scan_runs, "aws_batch_lookup", lookup)
+    monkeypatch.setattr(scan_runs, "_now", lambda: 3000)
+    args = ["reconcile", "-b", "aws", "-c", str(profile), "-s", str(db), "-K", "meta"]
+    before = rows(s, "SELECT * FROM scan_runs ORDER BY run_id")
+    dry = CliRunner().invoke(cli, [*args, "-n"])
+    assert (dry.exit_code, dry.exception) == (0, None)
+    assert rows(s, "SELECT * FROM scan_runs ORDER BY run_id") == before
+    result = CliRunner().invoke(cli, args)
+    assert (result.exit_code, result.exception, result.stdout) == (0, None, "")
+    assert lookups == [(rid, "us-east-1"), (rid, "us-east-1")]
+    assert rows(s, "SELECT run_id, status, finished_ts, failed_phase FROM scan_runs ORDER BY run_id") == [
+        (rid, "running", None, None), (f"{rid}-meta", "failed", 1200, "index"),
+    ]
+    assert rows(s, "SELECT run_id, status, finished_ts FROM scan_run_phases ORDER BY run_id") == [
+        (rid, "running", None), (f"{rid}-meta", "failed", 1200),
+    ]
+    again = CliRunner().invoke(cli, args)
+    assert (again.exit_code, again.exception, again.stdout) == (0, None, "")
+    assert lookups == [(rid, "us-east-1"), (rid, "us-east-1")]
+
+
+def test_aws_job_id_rejects_non_batch_runs():
+    assert [scan_runs.aws_run_job({"run_id": rid}) for rid in [
+        "12345678-1234-1234-1234-123456789abc", "12345678-1234-1234-1234-123456789abc-meta", "local-run", "task-id-meta",
+    ]] == ["12345678-1234-1234-1234-123456789abc", "12345678-1234-1234-1234-123456789abc", None, None]
+
+
 def test_one_verified_repair_can_link_multiple_scans_without_rewriting_failures():
     s, job = recovery_fixture()
     record(s, PROFILE, '2026-10-09', 'second', 100, start=True)

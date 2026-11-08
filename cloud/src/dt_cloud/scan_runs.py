@@ -924,6 +924,34 @@ def lost_reason(job: Mapping | None) -> tuple[str, int | None] | None:
     return clip_error(f"lost: {what}" + (f"; last event: {last}" if last else "")), ended
 
 
+def aws_batch_lookup(job_id: str, region: str) -> Mapping | None:
+    """AWS Batch retains ended jobs for a limited time; an empty response is unknown history."""
+    import boto3
+
+    jobs = boto3.client("batch", region_name=region).describe_jobs(jobs=[job_id])["jobs"]
+    return jobs[0] if jobs else None
+
+
+def aws_lost_reason(job: Mapping | None) -> tuple[str, int | None] | None:
+    if job is None:
+        return "lost: AWS Batch job not found (outside retention or deleted)", None
+    state = job.get("status")
+    if state not in ("SUCCEEDED", "FAILED"):
+        return None
+    what = f"lost: AWS Batch job {state}"
+    if state == "SUCCEEDED":
+        what += ", but the run never recorded its end"
+    reason = " ".join((job.get("statusReason") or "").split())
+    ended = job.get("stoppedAt")
+    return clip_error(what + (f"; {reason}" if reason else "")), int(ended // 1000) if ended else None
+
+
+def aws_run_job(row: Mapping) -> str | None:
+    """A recorded AWS run uses its Batch UUID, optionally followed by the secondary meta run's suffix."""
+    rid = row["run_id"].removesuffix("-meta")
+    return rid if re.fullmatch(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", rid) else None
+
+
 def reconcile(
     sink: Sink,
     profile: Profile,
@@ -933,6 +961,8 @@ def reconcile(
     out: Sink | None = None,
     skip: str | None = None,
     log: Callable[[str], None] | None = None,
+    job_key: Callable[[Mapping], str | None] | None = None,
+    reason: Callable[[Mapping | None], tuple[str, int | None] | None] = lost_reason,
 ) -> list[Lost]:
     """Mark failed the profile store's `running` rows quiet for over `after_s` whose Batch job (`lookup(job_name,
     region)`) has ended: FAILED / CANCELLED, deleted or not found, and SUCCEEDED too (its own trap never recorded the
@@ -947,11 +977,12 @@ def reconcile(
         rid = row["run_id"]
         if rid == skip:
             continue
-        if not row["job_name"] or not row["region"]:
+        key = job_key(row) if job_key else row["job_name"]
+        if not key or not row["region"]:
             log(f"scan-run reconcile: {rid} ({row['scan']}): no Batch job recorded; left running")
             continue
         try:
-            why = lost_reason(lookup(row["job_name"], row["region"]))
+            why = reason(lookup(key, row["region"]))
         except Exception as e:  # noqa: BLE001 — one row's lookup never stops the others'
             log(f"scan-run reconcile: {rid} ({row['scan']}): Batch lookup failed: {type(e).__name__}: {e}")
             continue
@@ -1142,22 +1173,24 @@ def recovery_cmd(
 
 @cli.command("reconcile")
 @option("-a", "--after", default="30m", help="Reconcile `running` rows with no write (phase, heartbeat) for this long (N[s|m|h|d]; default 30m: 30 missed heartbeats)")
+@option("-b", "--backend", type=Choice(["gcp", "aws"]), default="gcp", help="The Batch provider whose job state settles the runs (default gcp)")
 @option("-c", "--profile", "profile_path", default=None, help=f"The deployment's profile JSON (default ${PROFILE_ENV})")
 @option("-d", "--d1", default=None, help="D1 database id (default $D1_DB_ID)")
 @option("-K", "--store", "store_key", default=None, help="The store whose runs to reconcile (default the profile's `store`)")
 @option("-n", "--dry-run", is_flag=True, help="Read the record and Batch, print the SQL instead of writing it")
 @option("-s", "--sqlite", default=None, help="Use a local scan-run SQLite database instead of D1")
-def reconcile_cmd(after, profile_path, d1, store_key, dry_run, sqlite) -> None:
+def reconcile_cmd(after, backend, profile_path, d1, store_key, dry_run, sqlite) -> None:
     """Mark failed the `running` runs whose Batch job ended without recording it (maxRunDuration, a lost VM, a delete):
     the error names the job's state and last status event. Runs whose job still runs are left alone; no alerts."""
     profile = load_profile(profile_path)
     if store_key:
         profile = replace(profile, store=store_key)
-    if not profile.project:
+    if backend == "gcp" and not profile.project:
         raise SystemExit("scan-run reconcile: the profile names no project (its runs' Batch jobs can't be looked up)")
     sink = sink_for(False, sqlite, d1)
-    lost = reconcile(sink, profile, _now(), partial(batch_lookup, profile.project), int(duration(after)),
-                     out=PrintSink() if dry_run else None)
+    lookup = aws_batch_lookup if backend == "aws" else partial(batch_lookup, profile.project)
+    opts = {"job_key": aws_run_job, "reason": aws_lost_reason} if backend == "aws" else {}
+    lost = reconcile(sink, profile, _now(), lookup, int(duration(after)), out=PrintSink() if dry_run else None, **opts)
     err(f"scan-run reconcile: {len(lost)} lost run{'' if len(lost) == 1 else 's'}{' (dry run)' if dry_run else ''}")
 
 
