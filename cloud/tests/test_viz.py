@@ -823,3 +823,62 @@ def test_generation_is_opt_in(tmp_path: Path, listing: str):
     assert sorted(_rows(bysize, ["path", "kind", "generation"]), key=str) == sorted(want, key=str)
     assert list(pd.read_parquet(off).columns) == STORE_COLS
     assert list(pd.read_parquet(off.with_name("path-index-bysize.parquet")).columns) == [*STORE_COLS, "tot"]
+<<<<<<< HEAD
+=======
+
+
+@pytest.mark.parametrize('native', [False, True], ids=['opaque-etags', 'exact-gcs-generations'])
+def test_object_versions_reach_both_path_index_sorts(tmp_path: Path, listing: str, native: bool):
+    """Opt-in string identities survive direct indexing; unknown tokens and directory tokens stay NULL."""
+    df = pd.read_parquet(listing)
+    tokens = ['9007199254740993', '9007199254740995', None, '9007199254740997'] if native else ['"a-multipart-2"', '"b"', None, '"c"']
+    if native:
+        df['generation'] = pd.Series([9007199254740993, 9007199254740995, None, 9007199254740997], dtype='Int64')
+    else:
+        df['version'] = tokens
+    source = tmp_path / 'version-listing.parquet'
+    df.to_parquet(source)
+    path = tmp_path / 'version/path-index.parquet'
+    result = CliRunner().invoke(main, ['path-index', '-V', '-U', '-d', '2026-07-20', '-l', str(source),
+                                      '-o', str(tmp_path / 'snap'), '-P', str(path)], catch_exceptions=False)
+    assert result.exit_code == 0, result.output
+    want = [
+        ('b1', 'dir', None), ('b1/datasets', 'dir', None), ('b1/top.bin', 'file', tokens[3]), ('b1/users', 'dir', None),
+        ('b1/datasets/raw', 'dir', None), ('b1/users/rw', 'dir', None),
+        ('b1/datasets/raw/part0', 'file', tokens[2]), ('b1/users/rw/ckpt', 'dir', None),
+        ('b1/users/rw/ckpt/model.bin', 'file', tokens[0]), ('b1/users/rw/ckpt/opt.bin', 'file', tokens[1]),
+    ]
+    for filename, extra in [('path-index.parquet', []), ('path-index-bysize.parquet', ['tot'])]:
+        frame = pd.read_parquet(path.with_name(filename))
+        assert list(frame.columns) == [*STORE_COLS, 'version', *extra]
+        assert sorted(_rows(frame, ['path', 'kind', 'version'])) == sorted(want)
+
+
+def test_r2_read_checkpoint_preserves_index_and_observation_window(tmp_path: Path, listing: str, attribution: str) -> None:
+    """A hot key's old read cannot disappear from the observed window when its closed rows coalesce."""
+    from dt_cloud.r2_checkpoint import sync
+
+    archive = tmp_path / 'archive'
+    old = _r2_agg_file(archive, TS['d0702'], 'unsampled', [('users/rw/ckpt/x', 'GetObject', 2)])
+    recent = _r2_agg_file(archive, TS['d0703'], 'sampled', [('users/rw/ckpt/x', 'GetObject', 3)])
+    state = archive / 'state.json'
+    state.write_text(json.dumps({'schema_version': 2, 'account': 'a', 'buckets': {'b1': {
+        'frozen': {'2026-07-02T00': old, '2026-07-03T00': recent}, 'hours': {},
+    }}}))
+    summary, full = tmp_path / 'summary.parquet', tmp_path / 'full.parquet'
+    sync(str(state), str(tmp_path / 'closed.parquet'), dt.datetime(2026, 7, 20, tzinfo=dt.timezone.utc), summary, tmp_path / 'sync', verify=True)
+    result = CliRunner().invoke(main, ['access', 'r2-agg', '-d', '2026-07-20', '-o', str(full), '-s', str(state)])
+    assert result.exit_code == 0, result.exception
+    identities = tmp_path / 'identities.yaml'
+    identities.write_text(IDENTITIES_YAML)
+    answers = []
+    for label, source in [('full', full), ('summary', summary)]:
+        index = tmp_path / label / 'path-index.parquet'
+        meta = write_path_index((listing,), tmp_path / label, '2026-07-20', (attribution,), identities,
+                                access=(str(source),), path_index=index)
+        answers.append((meta['access'], _rows(pd.read_parquet(index), STORE_COLS)))
+    assert answers[0] == answers[1]
+    assert answers[0][0] == {'from': epoch_day(TS['d0702']), 'to': epoch_day(TS['d0703']), 'through': '2026-07-03T00:00Z', 'buckets': ['b1']}
+    with pytest.raises(ValueError, match='^read summary closes history before .*; use the historical scan.s interval store or original access inputs$'):
+        write_path_index((listing,), tmp_path / 'too-old', '2026-07-03', access=(str(summary),))
+>>>>>>> dc1c39623 (Carry opaque versions through `path-index -V` and sharded roots)

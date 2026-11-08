@@ -328,7 +328,7 @@ def root_rows(con, roots: Sequence[Path]) -> "pa.Table | None":
         d AS (SELECT path, sum(own_o)::BIGINT AS own_o, sum(n_subdirs)::BIGINT AS n_subdirs FROM s GROUP BY path),
         n AS (SELECT path, sum(n_desc)::BIGINT AS n_desc FROM s GROUP BY path)
         SELECT *, CAST(sum(size) OVER (PARTITION BY path) AS BIGINT) AS tot
-        FROM (SELECT {store_select(generation=True)} FROM p JOIN d USING (path) JOIN n USING (path))
+        FROM (SELECT {store_select(generation=True, object_version=True)} FROM p JOIN d USING (path) JOIN n USING (path))
         ORDER BY path, usr
     """).to_arrow_table()
 
