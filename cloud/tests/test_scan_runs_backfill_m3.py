@@ -263,3 +263,61 @@ def test_machine_of() -> None:
         {"type": "VCPU", "value": "4"}, {"type": "MEMORY", "value": "16384"}]}})] == [
         "fargate-arm64-1vcpu-8gib", None, "fargate-x86-64-4vcpu-16gib",
     ]
+
+
+def test_scan_head_failure_before_recorder_is_backfilled_as_startup():
+    cap = "captures/m3/root/2026-11-04T11-01-05Z"
+    stream = "disk-tree-m3/default/startup"
+    log = events("2026-11-04T11:09:20", [
+        (0, f"[scan] capture={cap} scan=2026-11-04T1101 gen=202611041101 host=m3 store=primary profile=m3.yml trigger=unset"),
+        (1, "Traceback (most recent call last):"),
+        (2, "dt_cloud.cost_labels.MissingCostLabels: cost labels: missing app, deployment"),
+    ])
+    job = {
+        "jobId": "startup-job", "jobArn": "arn:aws:batch:us-east-1:111:job/startup-job", "jobName": "ingest-startup",
+        "status": "FAILED", "statusReason": "Essential container in task exited",
+        "startedAt": ts("2026-11-04T11:09:10") * 1000, "stoppedAt": ts("2026-11-04T11:09:40") * 1000,
+        "container": {"logStreamName": stream, "exitCode": 1},
+    }
+    inp = bf.Inputs("disk-tree", [obj(f"{cap}/_SUCCESS.json", 10, "2026-11-04T11:08:29+00:00")], {},
+                    [job], [], {stream: log})
+    assert bf.runs(PROFILE, inp) == [Record(Run(
+        "startup-job", "2026-11-04T1101", "ingest", "failed", source="backfill", store="primary", failed_phase="startup",
+        error="Batch: Essential container in task exited (exit 1)", started_ts=ts("2026-11-04T11:01:05"),
+        finished_ts=ts("2026-11-04T11:09:40"), job_name="ingest-startup", region="us-east-1", spot=1, tasks=1, gen="202611041101",
+    ), (
+        Phase("capture", 0, ts("2026-11-04T11:01:05"), ts("2026-11-04T11:08:29")),
+        Phase("queue", 1, ts("2026-11-04T11:08:29"), ts("2026-11-04T11:09:10")),
+    ))]
+    recorded = [*log, {"timestamp": ts("2026-11-04T11:09:50") * 1000, "message": "PHASE-START index: 40s (wall)"}]
+    assert bf.attempt_of(stream, recorded, PROFILE) is None
+
+
+def test_cli_selects_exact_run_ids_and_refuses_missing_without_writes(tmp_path):
+    INPUTS.save(tmp_path / "inputs")
+    db = tmp_path / "runs.sqlite"
+    s = SqliteSink(db, ddl=DDL)
+    args = ["-i", str(tmp_path / "inputs"), "-s", str(db)]
+    missing = CliRunner().invoke(bf.main, [*args, "-I", "job-a", "-I", "missing"])
+    assert (missing.exit_code, str(missing.exception)) == (
+        1, "scan-run backfill: no reconstructable run for ['missing']; wrote nothing",
+    )
+    assert s.query("SELECT run_id FROM scan_runs") == []
+    result = CliRunner().invoke(bf.main, [*args, "-I", "job-a"])
+    assert (result.exit_code, result.exception) == (0, None)
+    assert s.query("SELECT run_id, status FROM scan_runs") == [{"run_id": "job-a", "status": "succeeded"}]
+
+
+def test_selected_fetch_never_reads_all_account_history(monkeypatch, tmp_path):
+    calls = []
+
+    def fetch_selected(*args):
+        calls.append(args)
+        return INPUTS
+
+    monkeypatch.setattr(bf, "fetch_failed_runs", fetch_selected)
+    db = tmp_path / "runs.sqlite"
+    result = CliRunner().invoke(bf.main, ["-e", "https://r2.example", "-I", "job-a", "-s", str(db)])
+    assert (result.exit_code, result.exception) == (0, None)
+    assert calls == [("disk-tree", "https://r2.example", "m3", "r", "us-east-1", "disk-tree-m3-ingest", "/disk-tree-m3-ingest/batch", ("job-a",))]
+    assert SqliteSink(db).query("SELECT run_id FROM scan_runs") == [{"run_id": "job-a"}]

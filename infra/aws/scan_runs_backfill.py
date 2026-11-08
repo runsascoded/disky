@@ -41,7 +41,7 @@ err = partial(print, file=sys.stderr)
 
 HERE = Path(__file__).resolve().parent
 STAMP = re.compile(r"(\d{4})-(\d{2})-(\d{2})T(\d{2})-(\d{2})-(\d{2})Z$")
-CAPTURE_LINE = re.compile(r"^\[ingest\] capture=(?P<key>\S+) date=(?P<scan>\S+) gen=(?P<gen>\S+)(?P<rest>.*)$")
+CAPTURE_LINE = re.compile(r"^\[(?P<runner>ingest|scan)\] capture=(?P<key>\S+) (?:date|scan)=(?P<scan>\S+) gen=(?P<gen>\S+)(?P<rest>.*)$")
 #: The ingest's own lines, in order: each ends its phase (`ingest.sh` before it printed `PHASE` markers).
 LINE_PHASES = (
     ("fetch", re.compile(r"^\[ingest\] fetched ")),
@@ -150,6 +150,56 @@ def _jsonable(v):
     return json.loads(json.dumps(v, default=str))
 
 
+def fetch_failed_runs(
+    bucket: str,
+    endpoint: str,
+    r2_profile: str | None,
+    aws_profile: str | None,
+    region: str,
+    job_def: str,
+    log_group: str,
+    run_ids: Sequence[str],
+) -> Inputs:
+    """Fetch only selected failed jobs, their logs and capture markers; failed runs have no published outputs."""
+    import boto3
+
+    aws = boto3.Session(profile_name=aws_profile, region_name=region)
+    batch, logs = aws.client("batch"), aws.client("logs")
+    ids = list(dict.fromkeys(run_ids))
+    jobs = [j for i in range(0, len(ids), 100) for j in batch.describe_jobs(jobs=ids[i:i + 100])["jobs"]]
+    if missing := sorted(set(ids) - {j["jobId"] for j in jobs}):
+        raise ValueError(f"Batch no longer retains selected jobs: {missing}")
+    if not_failed := sorted(j["jobId"] for j in jobs if j["status"] != "FAILED"):
+        raise ValueError(f"selected fetch requires failed jobs: {not_failed}")
+    r2 = boto3.Session(profile_name=r2_profile).client("s3", endpoint_url=endpoint, region_name="auto")
+    objects, events = [], {}
+    for job in jobs:
+        err(f"fetch: {job['jobId']}")
+        prefix = f"r2://{bucket}/"
+        cap = next((x[len(prefix):].rstrip('/') for x in job.get("container", {}).get("command", ())
+                    if x.startswith(prefix + "captures/")), None)
+        if not cap:
+            raise ValueError(f"selected job {job['jobId']} names no capture in {bucket}")
+        key = cap + "/_SUCCESS.json"
+        marker = r2.head_object(Bucket=bucket, Key=key)
+        objects.append({"key": key, "size": marker["ContentLength"], "last_modified": marker["LastModified"].isoformat()})
+        attempts = job.get("attempts") or [job]
+        streams = sorted({a.get("container", {}).get("logStreamName") for a in attempts} - {None})
+        for stream in streams:
+            out, token = [], None
+            while True:
+                kw = {"nextToken": token} if token else {}
+                page = logs.get_log_events(logGroupName=log_group, logStreamName=stream, startFromHead=True, **kw)
+                out.extend({"timestamp": e["timestamp"], "message": e["message"]} for e in page["events"])
+                if page["nextForwardToken"] == token:
+                    break
+                token = page["nextForwardToken"]
+            events[stream] = out
+    jobdefs = [d for page in batch.get_paginator("describe_job_definitions").paginate(jobDefinitionName=job_def)
+               for d in page["jobDefinitions"]]
+    return Inputs(bucket, objects, {}, _jsonable(jobs), _jsonable(jobdefs), events)
+
+
 # ── Reconstruction ──────────────────────────────────────────────────────────
 
 
@@ -166,10 +216,14 @@ class Attempt:
     end: int
     phases: tuple[tuple[str, int], ...]  # (phase, end) in order
     sync_started: bool
+    startup: bool = False
 
 
 def attempt_of(stream: str, events: Sequence[Mapping], profile: Profile) -> Attempt | None:
-    """The attempt a task log records, or None (no `[ingest] capture=` line: not an ingest's log)."""
+    """A legacy ingest or a scan head that failed before recording phases.
+
+    Nextflow's recorded phases can overlap; this sequential legacy reconstruction must not replace them.
+    """
     lines = [(e["timestamp"] // 1000, e["message"].rstrip("\n")) for e in sorted(events, key=lambda e: e["timestamp"])]
     head = next(((t, m) for t, x in lines if (m := CAPTURE_LINE.match(x))), None)
     if head is None:
@@ -178,6 +232,9 @@ def attempt_of(stream: str, events: Sequence[Mapping], profile: Profile) -> Atte
     fields_ = dict(kv.split("=", 1) for kv in m.group("rest").split() if "=" in kv)
     marker = re.compile(profile.phase_marker)
     marked = [(mm.group("name"), t) for t, x in lines if (mm := marker.search(x)) and mm.group("name") not in profile.phase_ignore]
+    startup = m.group("runner") == "scan"
+    if startup and (marked or any(x.startswith("PHASE-START ") for _, x in lines)):
+        return None
     if marked:
         phases = tuple(marked)
     else:
@@ -192,8 +249,11 @@ def attempt_of(stream: str, events: Sequence[Mapping], profile: Profile) -> Atte
             ends.pop("capture-meta")
         phases = tuple((p, ends[p]) for p in ORDER if p in ends)
     store = fields_.get("store", "laptop")
-    return Attempt(stream, m.group("key").rstrip("/"), m.group("scan"), m.group("gen"), store, fields_.get("d1", "primary"),
-                   lines[0][0], lines[-1][0], phases, any(INDEX_SYNC_STARTED.match(x) for _, x in lines))
+    d1_store = store if startup else fields_.get("d1", "primary")
+    if startup and store == "primary":
+        store = "laptop"
+    return Attempt(stream, m.group("key").rstrip("/"), m.group("scan"), m.group("gen"), store, d1_store,
+                   lines[0][0], lines[-1][0], phases, any(INDEX_SYNC_STARTED.match(x) for _, x in lines), startup)
 
 
 def machine_of(jobdef: Mapping | None) -> str | None:
@@ -280,7 +340,7 @@ def record_of(
     failed_phase = error = None
     if status == "failed":
         done = {p for p, _ in last.phases}
-        failed_phase = next((p for p in ORDER if p not in done), None)
+        failed_phase = "startup" if last.startup else next((p for p in ORDER if p not in done), None)
         error = failure_of(job) if job else "the task log stops before the ingest finished"
     started = captured if captured is not None else job_start
     finished = None if status == "running" else end
@@ -326,6 +386,7 @@ def attach_outputs(inp: Inputs, built: Sequence[tuple[Record, Attempt]]) -> list
 @option("-e", "--endpoint", envvar="DISK_TREE_R2_ENDPOINT_URL", default="https://0dcad5654e9744de6616f74b8df4af63.r2.cloudflarestorage.com", help="R2 endpoint (default $DISK_TREE_R2_ENDPOINT_URL, else m3's account)")
 @option("-g", "--log-group", default="/disk-tree-m3-ingest/batch", help="The ingest's CloudWatch log group")
 @option("-i", "--inputs", default=None, help="Read the inputs from this dir (as `-w` saved them) instead of fetching")
+@option("-I", "--run-id", "run_ids", multiple=True, help="Write only these exact Batch run ids; live fetch reads only selected failed jobs (repeatable)")
 @option("-j", "--json-out", default=None, help="Also write the records as JSON to this file")
 @option("-J", "--job-def", default="disk-tree-m3-ingest", help="The ingest's Batch job definition (its revisions' sizes are the runs' machines)")
 @option("-n", "--dry-run", is_flag=True, help="Print the SQL instead of writing it")
@@ -335,17 +396,27 @@ def attach_outputs(inp: Inputs, built: Sequence[tuple[Record, Attempt]]) -> list
 @option("-R", "--r2-profile", default="m3", help="AWS profile holding the R2 keys (default m3)")
 @option("-s", "--sqlite", default=None, help="Write to this local SQLite file (created from the migration) instead of D1")
 @option("-w", "--save-inputs", default=None, help="Save the fetched inputs to this dir first (replay with -i)")
-def main(aws_profile, bucket, profile_path, d1, endpoint, log_group, inputs, json_out, job_def, dry_run, summary, queue, region, r2_profile,
+def main(aws_profile, bucket, profile_path, d1, endpoint, log_group, inputs, run_ids, json_out, job_def, dry_run, summary, queue, region, r2_profile,
          sqlite, save_inputs) -> None:
     """Rebuild m3's past ingest runs from R2, CloudWatch and Batch (read-only), and upsert them as scan runs."""
     import time
 
     profile = load_profile(profile_path)
-    inp = Inputs.load(Path(inputs)) if inputs else fetch(bucket, endpoint, r2_profile, aws_profile, region, queue, job_def, log_group)
+    if inputs:
+        inp = Inputs.load(Path(inputs))
+    elif run_ids:
+        inp = fetch_failed_runs(bucket, endpoint, r2_profile, aws_profile, region, job_def, log_group, run_ids)
+    else:
+        inp = fetch(bucket, endpoint, r2_profile, aws_profile, region, queue, job_def, log_group)
     if save_inputs:
         inp.save(Path(save_inputs))
     sink = sink_for(dry_run, sqlite, d1)
     recs = runs(profile, inp)
+    if run_ids:
+        wanted = set(run_ids)
+        recs = [r for r in recs if r.run.run_id in wanted]
+        if missing := sorted(wanted - {r.run.run_id for r in recs}):
+            raise SystemExit(f"scan-run backfill: no reconstructable run for {missing}; wrote nothing")
     if json_out:
         Path(json_out).write_text(json.dumps([as_json(r) for r in recs], indent=1) + "\n")
     write_all(sink, recs, int(time.time()))
