@@ -2,8 +2,6 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
-
 from click import IntRange, argument, command, option
 
 from .blobstore import Store
@@ -23,14 +21,15 @@ def audit(store: Store, prefix: str, depth: int) -> dict:
 
 @command('store-audit')
 @option('-d', '--depth', default=1, type=IntRange(min=1), help='Group keys by this many path components')
-@option('-o', '--out', type=Path, help='Write the complete inventory JSON here; stdout contains the summary')
+@option('-o', '--out', help='Complete inventory JSON, local path or URL; stdout contains the summary')
 @option('-p', '--prefix', default='', help='Inventory only this prefix')
 @argument('root')
-def store_audit_cmd(depth: int, out: Path | None, prefix: str, root: str) -> None:
+def store_audit_cmd(depth: int, out: str | None, prefix: str, root: str) -> None:
     """List sizes and exact keys without reading object bodies or deleting anything."""
     result = audit(Store(root), prefix, depth)
     if out:
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(json.dumps(result, sort_keys=True, indent=2) + '\n')
+        from disk_tree.blobfs import write_text
+
+        write_text(out, json.dumps(result, sort_keys=True, indent=2) + '\n')
     result.pop('files')
     print(json.dumps(result, sort_keys=True, indent=2))

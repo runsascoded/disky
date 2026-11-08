@@ -1,5 +1,11 @@
+import json
+
+import pytest
+from click.testing import CliRunner
+from disk_tree.blobfs import read_text
+
 from dt_cloud.blobstore import Store
-from dt_cloud.store_audit import audit
+from dt_cloud.store_audit import audit, store_audit_cmd
 
 
 def test_inventory_reports_exact_keys_sizes_and_prefix_groups(tmp_path):
@@ -23,3 +29,15 @@ def test_inventory_of_empty_prefix_is_empty(tmp_path):
     assert audit(Store(str(tmp_path)), 'missing', 1) == {
         'root': str(tmp_path), 'prefix': 'missing', 'objects': 0, 'bytes': 0, 'groups': {}, 'files': {},
     }
+
+
+@pytest.mark.parametrize('remote', [False, True])
+def test_cli_saves_exact_keys_locally_or_remotely_and_prints_only_summary(tmp_path, remote):
+    source = Store(str(tmp_path / 'source'))
+    source.write_bytes('a/x', b'123')
+    out = f'memory://{tmp_path.name}/inventory.json' if remote else str(tmp_path / 'out/inventory.json')
+    result = CliRunner().invoke(store_audit_cmd, ['-o', out, source.root], catch_exceptions=False)
+    assert result.exit_code == 0
+    expected = {'root': source.root, 'prefix': '', 'bytes': 3, 'objects': 1, 'groups': {'a': {'bytes': 3, 'objects': 1}}}
+    assert json.loads(result.stdout) == expected
+    assert json.loads(read_text(out)) == {**expected, 'files': {'a/x': 3}}
