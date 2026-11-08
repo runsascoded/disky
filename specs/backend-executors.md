@@ -43,3 +43,11 @@ An automatic planner may route directly to a capable executor using measured wor
 The `disky`/`cloud` session should commit the initial spec before implementation under the usual spec workflow, then own shared package/API changes and CI. GCS will adopt shared commits and perform GCS dev/prod verification; other deployment owners adopt the same shared interfaces. No deployment-branch merge into `cloud` is required.
 
 Phase 1 can start now. It is not blocked by the research index, a final cloud-provider choice, fleet compaction or a production generation move. Before reporting work as active, the owning session must actually accept/start the handoff; delivery to an inactive session is not execution.
+
+## Implementation checkpoint — 2026-11-08
+
+Phase 1 source is in `wt/backend-auth`: explicit reader object/metadata/cache ports, legacy Worker adapters, ordinary-process CLI over hash-verified immutable bytes and actual SQLite, and a real workerd/R2/D1 parity runner. A process binds one capsule for life; request budgets and cache context are explicit, and a caller limit cannot quarantine an immutable run. `scripts/remote-test --executor` runs the harness on the configured dev node. See `site/executor/README.md` for commands, coverage and remaining limitations.
+
+Verification pending: the configured `mgu` host is unreachable and the `oa-ci-dev` SSO needed to start it is expired. Executor, Functions and UI TypeScript checks pass; the remote parity and affected runtime tests have not run. No parity, latency or speedup result is claimed. Worker CPU/memory and aggregation-only CPU remain profiling gaps (the harness records null rather than substituting elapsed time). Keep this spec pending until acceptance is established; no hosted infrastructure or production routing changed.
+
+Working branch: `w/backend-auth` at `/Users/ryan/c/disky/wt/backend-auth`; executor checkpoint `03a03bbf`, auth checkpoint `1ccf5b0c`. Both are local source checkpoints pending runtime verification, not deployment handoffs. Browser verification could not start because the Chrome DevTools MCP profile is already in use; no browser or running dev server was changed.

@@ -40,3 +40,11 @@ Prepare an app-owned recipe for auth's `migrations/session-log/0002_actor.sql`, 
 ## Rollout
 
 Apply the change on disky's main branch, then carry it to each deployment worktree (`wt/gcs`, `wt/cw`, `wt/hf`, `wt/r2`) per `specs/branch-layout.md`. Don't change any production logging switch's state as part of this. CIC `/admin` (switch) and `/admin/sessions` (list and one session) on the local dev server with logging on, then deploy per deployment.
+
+## Implementation checkpoint — 2026-11-08
+
+Shared routes, client boot and list/timeline/switch UI are wired in `wt/backend-auth`, preserving the custom admin gate, private activity feed, per-kind muting, switch audit and latency route. The two direct app event call sites emit built-ins only: `pick(n,v)` and `prefetch(w,p,d)`; `appEvents` is empty. The app-owned `session-log-actor.sql` recipe and regenerated schema pass `dt-cloud d1-schema check -p`; no live migration or switch write was performed.
+
+Adoption is not ready for rollout: source review found shared-package regressions against disky's current behavior (cancelled API requests counted as errors, missing benign ResizeObserver filtering, anonymous config reads able to trigger retention writes). The auth owner has the exact source/test references and a request for a verified corrected pin and a pure server-side event-summary export. Until then the app-specific classification shim remains, and the shared route retention test is expected to expose the upstream gap. Functions/UI type checks pass; the affected runtime suite and browser verification remain pending the test host and corrected package. Keep this spec pending.
+
+Working branch: `w/backend-auth` at `/Users/ryan/c/disky/wt/backend-auth`; executor checkpoint `03a03bbf`, auth checkpoint `1ccf5b0c`. Both are local source checkpoints pending runtime verification, not deployment handoffs. Browser verification could not start because the Chrome DevTools MCP profile is already in use; no browser or running dev server was changed.
