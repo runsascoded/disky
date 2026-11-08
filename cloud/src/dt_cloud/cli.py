@@ -2658,6 +2658,7 @@ def r2_state_inputs(
     before: dt.datetime,
     stage: Path,
     read: Callable[[str], bytes] | None = None,
+    select: Callable[[dict], list[str]] | None = None,
 ) -> list[str]:
     """The current aggregates `state` (the collector archive's `state.json`, a path or URL) names for the hours before
     `before` (`parsers.r2.state_aggs`), copied from beside it into `stage`; their local paths. The collector publishes a
@@ -2687,7 +2688,8 @@ def r2_state_inputs(
     fetched: set[str] = set()
     gone: list[str] = []
     for _ in range(R2_STATE_READS):
-        keys = state_aggs(json.loads(read(state)), before)
+        snapshot = json.loads(read(state))
+        keys = select(snapshot) if select else state_aggs(snapshot, before)
         with ThreadPoolExecutor(R2_AGG_WORKERS) as pool:
             gone = [key for key in pool.map(fetch, [k for k in keys if k not in fetched]) if key]
         fetched |= set(keys) - set(gone)
@@ -3898,6 +3900,10 @@ main.add_command(_image_sha)
 from .eligibility_census import eligibility_census_cmd as _eligibility_census  # noqa: E402
 
 main.add_command(_eligibility_census)
+
+from .r2_checkpoint import sync_cmd as _r2_sync  # noqa: E402
+
+access.add_command(_r2_sync)
 
 if __name__ == "__main__":
     main()

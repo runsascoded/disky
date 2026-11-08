@@ -529,6 +529,10 @@ def write_path_index(
         # column a part has.
         acc = f"read_parquet({globs}, union_by_name = true)"
         have = {r[0] for r in con.execute(f"DESCRIBE SELECT * FROM {acc}").fetchall()}
+        if 'history_before' in have:
+            closed = con.execute(f"SELECT MAX(history_before) FROM {acc}").fetchone()[0]
+            if closed is not None and dt.datetime.combine(dt.date.fromisoformat(asof[:10]), dt.time(), dt.timezone.utc) < closed:
+                raise ValueError(f"read summary closes history before {closed.isoformat()}; use the historical scan's interval store or original access inputs")
         day_of = [f"CAST({c} AS DATE)" for c in ("day", "hour") if c in have]
         if not day_of:
             raise ValueError(f"access aggregates have neither `day` nor `hour`: {sorted(have)}")
@@ -545,8 +549,9 @@ def write_path_index(
             GROUP BY 1, 2
             """
         )
+        first = 'COALESCE(first_ts, last_ts)' if 'first_ts' in have else 'last_ts'
         lo, hi, hr = con.execute(
-            f"SELECT CAST(floor(epoch(MIN(last_ts)) / 86400) AS INTEGER), "
+            f"SELECT CAST(floor(epoch(MIN({first})) / 86400) AS INTEGER), "
             f"CAST(floor(epoch(MAX(last_ts)) / 86400) AS INTEGER), "
             f"CAST(floor(epoch(MAX(last_ts)) / 3600) AS BIGINT) FROM {acc} "
             f"WHERE {day} < DATE '{asof}'"
