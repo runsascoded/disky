@@ -7,11 +7,13 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent, type ReactNode, type RefObject } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Link, Navigate, useLocation, useNavigate, useParams } from 'react-router-dom'
-import { useUrlState } from 'use-prms'
+import { stringParam, useUrlState } from 'use-prms'
+import { TS_PAD, XOverview } from '@disk-tree/react'
 import { SiteNav } from './SiteNav'
 import { useDocTitle } from './title'
 import { SiteKbd } from './SiteKbd'
 import { Tooltip } from './Tooltip'
+import { Explain } from './Help'
 import { axisTicks, inSpan, type RunSpan, runSpanParam } from './runChart'
 import { fmtBytesPrecise, fmtN } from './types'
 import { useUnits } from './units'
@@ -25,6 +27,10 @@ import {
 } from './scanRunsModel'
 import { colorer, fmtDur, fmtRunTime, getJson, type Links, PhaseBar, QUIET_TIP, runDay, RunWhen, scanRunsApi, scansHref, scansStore, Status, useScanRuns } from './scanRunsUi'
 import { brushRole, dagNodes, processOf, type DagNode, type Hl, type RunDagRow } from './runDag'
+import { durationAxis, durationSegments } from './durationAxis'
+import { XRangeControls } from './XRangeControls'
+import { brushDomain, fitToWindow, fmtXr, inXDomain, parseXr, resolveXDomain, spanDomain, type XDomain } from './xDomain'
+import { scanTime } from './scanSlug'
 import './scans.scss'
 
 type DetailResponse = Links & {
@@ -118,29 +124,39 @@ const DRAG_PX = 4
 
 /** Duration per run over time, stacked by phase; a failed run in the danger ink. Dragging across it picks a window
  * (`win`; the runs outside it dim); hovering a bar brushes its table row (`hover`). */
-function DurationStrip({ runs, color, onPick, win, onWin, hover }: {
+interface DurationProps {
   runs: RunSummary[]; color: (p: string) => string; onPick: (id: string) => void
   win: RunSpan | null; onWin: (w: RunSpan | null) => void; hover: HoverRun
+}
+
+// Match the minute precision of the shared range URL, including retries of the same capture.
+const runX = (ts: number) => Math.floor(ts / 60) * 60
+const rangeId = (x: number) => new Date(x).toISOString().slice(0, 16).replace(':', '')
+
+function DurationStrip({ runs, color, onPick, win, onWin, hover, range, autoBreak }: DurationProps & {
+  range: readonly [number, number] | null; autoBreak: boolean
 }) {
   const [ref, W] = useWidth<HTMLDivElement>()
   const [drag, setDrag] = useState<[number, number] | null>(null)
   const dragged = useRef(false)
-  const pts = runs.filter(r => r.secs != null && r.run.started_ts != null)
-  if (pts.length < 2) return null
+  const pts = runs.filter(r => r.secs != null && r.run.started_ts != null && inXDomain(range, runX(r.run.started_ts) * 1000))
+  if (!pts.length) return <p className="dim">No runs in this range.</p>
   const now = Math.floor(Date.now() / 1000)
-  const H = W < 500 ? 150 : 190, L = 36, R = 6, T = 8, B = 20
-  const t0 = Math.min(...pts.map(p => p.run.started_ts!)), t1 = Math.max(...pts.map(p => p.run.started_ts!))
+  const H = W < 500 ? 180 : 220, L = TS_PAD.left, R = TS_PAD.right, T = 8, B = 20
+  const t0 = Math.min(...pts.map(p => runX(p.run.started_ts!))), t1 = Math.max(...pts.map(p => runX(p.run.started_ts!)))
   const span = Math.max(3600, t1 - t0)
-  const hours = Math.max(...pts.map(p => p.secs!)) / 3600
-  const ticks = axisTicks(hours)
-  const top = ticks[ticks.length - 1] || 1
+  const { ticks, top, cut } = durationAxis(pts.map(p => p.secs! / 3600), autoBreak, pts.flatMap(p => p.spans.flatMap(s => [s.start / 3600, s.end / 3600])))
+  const gap = cut ? 16 : 0
+  const visible = top - (cut ? cut[1] - cut[0] : 0)
+  const unit = (H - T - B - gap) / visible
   const x = (t: number) => L + ((t - t0) / span) * (W - L - R)
-  const y = (h: number) => H - B - (h / top) * (H - T - B)
+  const y = (h: number) => H - B - (h - (cut && h >= cut[1] ? cut[1] - cut[0] : 0)) * unit - (cut && h >= cut[1] ? gap : 0)
+  const gapY = cut ? y(cut[0]) - gap / 2 : 0
   const bw = Math.max(1.5, Math.min(14, ((W - L - R) / pts.length) * 0.7))
   // Runs aren't evenly spaced (a daily cadence, then 6-hourly, plus hand submits), so each bar narrows to fit between
   // its neighbors, and its hover target runs from the midpoint with the one before to the midpoint with the one after:
   // fixed-width targets overlapped where runs are dense, and the later-drawn bar took its neighbor's edge.
-  const byX = [...pts].sort((a, b) => a.run.started_ts! - b.run.started_ts!), xs = byX.map(p => x(p.run.started_ts!))
+  const byX = [...pts].sort((a, b) => a.run.started_ts! - b.run.started_ts!), xs = byX.map(p => x(runX(p.run.started_ts!)))
   const cols = new Map(byX.map((p, i) => {
     const c = xs[i]
     const prev = i > 0 ? xs[i - 1] : -Infinity, next = i < xs.length - 1 ? xs[i + 1] : Infinity
@@ -183,10 +199,10 @@ function DurationStrip({ runs, color, onPick, win, onWin, hover }: {
   const band = drag ? [Math.min(...drag), Math.max(...drag)] : win ? [x(win[0]), x(win[1])] : null
   return (
     <div className="sr-svgwrap" ref={ref}>
-      <svg className={`sr-strip${drag ? ' dragging' : ''}`} width={W} height={H} viewBox={`0 0 ${W} ${H}`} role="img" aria-label="Run duration over time, by phase; drag to pick a window"
+      <svg className={`sr-strip${drag ? ' dragging' : ''}`} width={W} height={H} viewBox={`0 0 ${W} ${H}`} role="img" aria-label={`Run duration over time, by phase; drag to pick a window${cut ? `; y-axis break omits ${cut[0]} to ${cut[1]} hours` : ''}`}
         onPointerDown={onDown} style={{ touchAction: 'pan-y', userSelect: 'none' }}>
-        {band && <rect className="sr-band" x={Math.max(L, band[0])} y={T} width={Math.max(1, Math.min(W - R, band[1]) - Math.max(L, band[0]))} height={H - T - B} />}
-        {ticks.map(h => <g key={h}><line className="grid" x1={L} x2={W - R} y1={y(h)} y2={y(h)} /><text className="tick" x={L - 6} y={y(h) + 4} textAnchor="end">{h}h</text></g>)}
+        {band && band[1] >= L && band[0] <= W - R && <rect className="sr-band" x={Math.max(L, band[0])} y={T} width={Math.max(1, Math.min(W - R, band[1]) - Math.max(L, band[0]))} height={H - T - B} />}
+        {ticks.map(h => <g key={h}><line className="grid" x1={L} x2={W - R} y1={y(h)} y2={y(h)} /><text className="tick sr-y-tick" x={L - 6} y={y(h) + 4} textAnchor="end">{h}h</text></g>)}
         {days.filter((_, i) => i % labelEvery === 0).map(d => {
           const t = Date.parse(`${d}T00:00:00`) / 1000
           return <text key={d} className="tick" x={Math.min(W - R - 16, Math.max(L + 16, x(t)))} y={H - 6} textAnchor="middle">{d.slice(5)}</text>
@@ -199,21 +215,55 @@ function DurationStrip({ runs, color, onPick, win, onWin, hover }: {
           const out = !drag && !inSpan(win, p.run.started_ts)
           return (
             <g key={id} className={`sr-col${failed ? ' failed' : ''}${lost ? ' lost' : ''}${hover.id === id ? ' brushed' : hover.id || out ? ' dimmed' : ''}`}
-              onClick={() => { if (!dragged.current) onPick(id) }} role="link" aria-label={`${p.run.scan} ${p.run.kind} run`}
+              onClick={() => { if (!dragged.current) onPick(id) }} role="link" tabIndex={0} aria-label={`${p.run.scan} ${p.run.kind} run`}
+              onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onPick(id) } }}
               onPointerMove={() => { if (!drag) hover.enter(id) }} onPointerLeave={hover.leave}>
               <rect className="sr-col-hit" x={lo} y={T} width={Math.max(0, hi - lo)} height={H - T - B} />
-              <rect className="sr-col-total" x={cx} y={y(p.secs! / 3600)} width={bw} height={Math.max(1, y(0) - y(p.secs! / 3600))} />
-              {!failed && main.map(s => (
-                <rect key={s.phase} x={cx} y={y(s.end / 3600)} width={bw} height={Math.max(0.5, y(s.start / 3600) - y(s.end / 3600))} style={{ fill: phaseFill(s, color) }} />
-              ))}
-              {!failed && overlappingFailures(p.spans).map(s => <rect key={`failed-${s.phase}`} x={cx + bw * 0.6} y={y(s.end / 3600)} width={Math.max(1, bw * 0.4)} height={Math.max(0.5, y(s.start / 3600) - y(s.end / 3600))} style={{ fill: 'var(--danger)' }} />)}
+              {durationSegments(0, p.secs! / 3600, cut).map(([a, b], i) => <rect key={`total-${i}`} className="sr-col-total" x={cx} y={y(b)} width={bw} height={Math.max(1, y(a) - y(b))} />)}
+              {!failed && main.flatMap(s => durationSegments(s.start / 3600, s.end / 3600, cut).map(([a, b], i) => (
+                <rect key={`${s.phase}-${i}`} x={cx} y={y(b)} width={bw} height={Math.max(0.5, y(a) - y(b))} style={{ fill: phaseFill(s, color) }} />
+              )))}
+              {!failed && overlappingFailures(p.spans).flatMap(s => durationSegments(s.start / 3600, s.end / 3600, cut).map(([a, b], i) => <rect key={`failed-${s.phase}-${i}`} x={cx + bw * 0.6} y={y(b)} width={Math.max(1, bw * 0.4)} height={Math.max(0.5, y(a) - y(b))} style={{ fill: 'var(--danger)' }} />))}
+              {cut && p.secs! / 3600 >= cut[1] && <path className="sr-break-mark" d={`M${cx - 1},${gapY + 5} l${bw + 2},-4 M${cx - 1},${gapY - 1} l${bw + 2},-4`} />}
             </g>
           )
         })}
         <line className="axis" x1={L} x2={W - R} y1={y(0)} y2={y(0)} />
+        {cut && <path className="sr-break-mark" d={`M${L - 4},${gapY + 5} l8,-4 M${L - 4},${gapY - 1} l8,-4`} />}
       </svg>
+      {cut && <p className="sr-cut-note">Y-axis break: {cut[0]}–{cut[1]}h omitted. Bar heights use the same scale on both sides.</p>}
     </div>
   )
+}
+
+/** The homepage's range controls and overview over the run chart; zoom never changes the row-selection window. */
+export function ScanDurationChart(props: DurationProps) {
+  const [xr, setXr] = useUrlState('xr', stringParam())
+  const [yb, setYb] = useUrlState('yb', stringParam())
+  const domain = parseXr(xr)
+  const setDomain = (d: XDomain) => setXr(fmtXr(d))
+  const points = props.runs.filter(r => r.run.started_ts != null && r.secs != null).map(r => ({ x: runX(r.run.started_ts!) * 1000, y: r.secs! }))
+  const xs = [...new Set(points.map(p => p.x))]
+  const range = resolveXDomain(domain, xs, scanTime)
+  const window = props.win ? [props.win[0] * 1000, props.win[1] * 1000] as const : undefined
+  const fit = window ? { onClick: () => setDomain(spanDomain(fitToWindow(window, xs), rangeId)), label: 'zoom to selected runs', description: 'Zoom to the selected runs, with one run of context on each side' } : undefined
+  return <>
+    <div className="sr-chart-head">
+      <h3>End-to-end duration by run</h3>
+      <XRangeControls domain={domain} set={setDomain} fit={fit} />
+      <span className="gran" role="group" aria-label="Y-axis scale">
+        <span className="lbl">y-axis</span>
+        <Tooltip content="Collapse a large empty interval automatically, with a visible axis break. Run ends and phase transitions stay visible."><button type="button" aria-pressed={yb !== '0'} className={yb !== '0' ? 'on' : ''} onClick={() => setYb(undefined)}>auto break</button></Tooltip>
+        <Tooltip content="Show the full linear scale, including empty ranges."><button type="button" aria-pressed={yb === '0'} className={yb === '0' ? 'on' : ''} onClick={() => setYb('0')}>full</button></Tooltip>
+      </span>
+    </div>
+    <p className="dim">Includes capture and queue wait. The table shows processing time separately when the queue timing is recorded.</p>
+    <DurationStrip {...props} range={range} autoBreak={yb !== '0'} />
+    {xs.length > 2 && <Explain className="overview-help" text="Every run: drag this strip to zoom the chart; double-click to show all dates. Dragging the chart above selects table rows.">
+      <XOverview points={points} domain={range} window={window} label="Scan runs: drag to zoom, double-click for all dates"
+        onDomain={(a, b) => { const d = brushDomain(a, b, xs, rangeId); if (d) setDomain(d) }} onReset={() => setDomain({ kind: 'all' })} />
+    </Explain>}
+  </>
 }
 
 /** The phase legend, and the hovered run's readout (a bar's or a table row's): each phase's time in it, beside its
@@ -295,9 +345,7 @@ export function ScansPage() {
         <p className="dim">Scan runs aren't recorded on this deployment yet (its D1 has no <code>scan_runs</code> table: migration <code>scan_runs</code>, then <code>dt-cloud scan-run backfill</code>).</p>
       ) : (<>
         <section className="sr-chart">
-          <h3>End-to-end duration by run</h3>
-          <p className="dim">Includes capture and queue wait. The table shows processing time separately when the queue timing is recorded.</p>
-          <DurationStrip runs={filtered} color={color} onPick={id => nav(scanHref(id))} win={span} onWin={setSpan} hover={hover} />
+          <ScanDurationChart runs={filtered} color={color} onPick={id => nav(scanHref(id))} win={span} onWin={setSpan} hover={hover} />
           <Legend order={order} color={color} run={hover.id ? runs.find(r => r.run.run_id === hover.id) : undefined} />
         </section>
         <div className="run-filters">

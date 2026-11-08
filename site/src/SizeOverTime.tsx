@@ -26,8 +26,8 @@ import { NoteForm, NoteTip, useChartNotes, useNoteWrite } from './NoteWidgets'
 import { manualScans } from './scanRunsModel'
 import { useScanRuns } from './scanRunsUi'
 import { useActions } from 'use-kbd'
-import { MdFitScreen, MdZoomOut } from 'react-icons/md'
-import { brushDomain, fitToWindow, fmtXr, inXDomain, parseXr, presetOf, resolveXDomain, spanDomain, X_PRESETS, type XDomain } from './xDomain'
+import { brushDomain, fitToWindow, fmtXr, inXDomain, parseXr, resolveXDomain, spanDomain, type XDomain } from './xDomain'
+import { XRangeControls } from './XRangeControls'
 
 // Stored bytes over the historical scans, scoped exactly like the map: the
 // drilled prefix, a user, or an owner pool (`/api/series` — one row read per
@@ -72,29 +72,6 @@ function ManualMarkToggle({ v, set }: { v: ManualMark; set: (m: ManualMark) => v
           <button role="radio" aria-checked={v === m} className={v === m ? 'on' : ''} onClick={() => set(m)}>{m}</button>
         </Explain>
       ))}
-    </span>
-  )
-}
-
-function XRangeToggle({ domain, set, onFit, canFit }: { domain: XDomain; set: (d: XDomain) => void; onFit: () => void; canFit: boolean }) {
-  const on = presetOf(domain)
-  return (
-    <span className="gran x-range" role="group" aria-label="X-axis range">
-      {X_PRESETS.map(([r, days]) => (
-        <Explain key={r} text={days ? `Only the last ${days === 7 ? 'week' : '30 days'} of scans` : 'Every scan'}>
-          <button role="radio" aria-checked={on === r} className={on === r ? 'on' : ''} onClick={() => set(parseXr(r))}>{r}</button>
-        </Explain>
-      ))}
-      {canFit && (
-        <Explain text="Zoom to the diff window (with a scan of context each side); the strip under the chart shows where it sits">
-          <button type="button" className="icon" aria-label="zoom to the diff window" onClick={onFit}><MdFitScreen /></button>
-        </Explain>
-      )}
-      {domain.kind === 'span' && (
-        <Explain text="Show every scan again (or double-click the strip under the chart)">
-          <button type="button" className="icon" aria-label="reset zoom" onClick={() => set({ kind: 'all' })}><MdZoomOut /></button>
-        </Explain>
-      )}
     </span>
   )
 }
@@ -477,7 +454,10 @@ export function SizeOverTime({ scans, times, fmt = fmtScan, prefix, user, pool, 
         </>}>
           <span className="info" aria-label="about this chart" tabIndex={0}>ⓘ</span>
         </Tooltip>
-        <XRangeToggle domain={xDomain} set={setXDomain} onFit={fitWin} canFit={!!fitTarget} />
+        <XRangeControls domain={xDomain} set={setXDomain} fit={fitTarget ? {
+          onClick: fitWin, label: 'zoom to the diff window',
+          description: 'Zoom to the diff window (with a scan of context each side); the strip under the chart shows where it sits',
+        } : undefined} />
         <ValuesToggle v={values} set={setValues} />
         {!relative && <YFromToggle v={yFrom} set={setYFrom} stacked={stacked} />}
         {roots.length > 0 && !relative && <LayoutToggle v={layout} set={setLayout} />}
