@@ -204,10 +204,11 @@ def lineage(store: Store, gen: str) -> list[str]:
     from .interval_attribution import RECORD
     from .interval_backfill import BACKFILL
     from .interval_churn import BACKFILL as CHURN_BACKFILL
+    from .interval_identity import RECORD as OBJECT_VERSION_MIGRATION
 
     out = [gen]
     while True:
-        key = next((k for k in (f"{PREFIX}/{out[-1]}/{x}" for x in (ic.COMPACTION, BACKFILL, RECORD, CHURN_BACKFILL)) if store.exists(k)), None)
+        key = next((k for k in (f"{PREFIX}/{out[-1]}/{x}" for x in (ic.COMPACTION, BACKFILL, RECORD, CHURN_BACKFILL, OBJECT_VERSION_MIGRATION)) if store.exists(k)), None)
         if key is None or (frm := store.read_json(key)["from"]) in out:
             return out
         out.append(frm)
