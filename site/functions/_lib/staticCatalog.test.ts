@@ -163,6 +163,21 @@ describe('static dispatch', () => {
     expect(nameResultForRegistry(parseName(body, request), registry).after.root).toEqual({ b: 1146, o: 14 })
   })
 
+  it.each(['oa-r2', 'cw-s3'])('serves names for the hyphenated deployment %s', async STORE => {
+    const env = { ...ENV, STORE }, s = fixtureStore(), logical_store = `${STORE}_fleet`
+    const registry = await staticRegistryBody(env, s)
+    expect(registry).toEqual({
+      schema: 'static-name-registry-v1', logical_store, generation: STATIC_GEN, max_rows: 4, bucket_paths: BUCKETS,
+      dates: DATES, levels: 1, scope: HOT_SCOPE, capabilities: { bucket_drill: false, child_drill: false, fallback: false },
+    })
+    const response = await staticSummary(env, params({ date: '2026-09-01', name: 'foo' }), s)
+    expect(response.status).toBe(200)
+    const body = await response.json()
+    expect(body).toEqual({ ...side('2026-09-01', 'catalog', 'foo', { 'bkt-a': [1061, 12], 'bkt-b': [85, 2] }), logical_store })
+    expect(nameResultForRegistry(parseName(body, { date: '2026-09-01', name: 'foo' }), parseNameRegistry(registry)).after.root).toEqual({ b: 1146, o: 14 })
+    expect(() => parseName({ ...body as object, target: 'static-names' }, { date: '2026-09-01', name: 'foo' })).toThrow('Name summary returned an invalid dated contract.')
+  })
+
   it('answers a diff from the suffix postings, both sides on the same plan', async () => {
     const response = await staticSummary(ENV, params({ from: '2026-08-01', date: '2026-10-01', name: 'bkt' }), fixtureStore())
     const body = await response.json() as Record<string, unknown>

@@ -105,6 +105,7 @@ const iso = isScanId
 /** A store's bucket set: at least one, unique, slash- and NUL-free names — any fleet's size (gcs 6, cw 5). */
 const bucketPaths = (value: unknown): value is string[] => Array.isArray(value) && value.length > 0 && new Set(value).size === value.length && value.every(path => typeof path === 'string' && !!path && !path.includes('/') && !path.includes('\0'))
 const id = (value: unknown): value is string => typeof value === 'string' && /^[a-z][a-z0-9_]*$/.test(value)
+const storeId = (value: unknown): value is string => typeof value === 'string' && /^[a-z][a-z0-9_-]*$/.test(value)
 const hash = (value: unknown): value is string => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value)
 const generation = (value: unknown): value is string => typeof value === 'string' && /^[a-f0-9]{32}$/.test(value)
 function fail(): never { throw new Error('Name summary returned an invalid dated contract.') }
@@ -203,7 +204,7 @@ function datedExecution(body: Record<string, unknown>): NameExecution {
 }
 function datedView(value: unknown): { view: HotView; execution: NameExecution; store: string } {
   const body = record(value)
-  if (body.schema !== 'dated-name-summary-v1' || body.path !== '' || body.exact !== true || body.incremental !== false || body.levels !== 1 || body.scope !== HOT_SCOPE || !id(body.target) || !id(body.logical_store) || !iso(body.date) || typeof body.pattern !== 'string' ||
+  if (body.schema !== 'dated-name-summary-v1' || body.path !== '' || body.exact !== true || body.incremental !== false || body.levels !== 1 || body.scope !== HOT_SCOPE || !id(body.target) || !storeId(body.logical_store) || !iso(body.date) || typeof body.pattern !== 'string' ||
       datedNameRequest(new URLSearchParams({ name: body.pattern, date: body.date })).name !== body.pattern) fail()
   capabilities(body.capabilities)
   if (!Array.isArray(body.buckets) || !body.buckets.length) fail()
@@ -305,7 +306,7 @@ export function parseNameRegistry(value: unknown): NameRegistry {
     return { dated: false, dates: (body.dates as string[]).map(date => ({ date, plans: ['catalog', 'bounded-name-postings'], kind: 'frozen-history' })) }
   }
   if (body.schema === 'static-name-registry-v1') {
-    if (!keys(body, ['schema', 'logical_store', 'generation', 'max_rows', 'bucket_paths', 'dates', 'levels', 'scope', 'capabilities']) || !id(body.logical_store) || body.levels !== 1 || body.scope !== HOT_SCOPE ||
+    if (!keys(body, ['schema', 'logical_store', 'generation', 'max_rows', 'bucket_paths', 'dates', 'levels', 'scope', 'capabilities']) || !storeId(body.logical_store) || body.levels !== 1 || body.scope !== HOT_SCOPE ||
         !bucketPaths(body.bucket_paths) ||
         !Array.isArray(body.dates) || !body.dates.length || body.dates.length > 400 || body.dates.some((day, i) => !iso(day) || (i > 0 && (body.dates as string[])[i - 1] >= day))) fail()
     capabilities(body.capabilities)
@@ -313,7 +314,7 @@ export function parseNameRegistry(value: unknown): NameRegistry {
     return { dated: true, dates: (body.dates as string[]).map(date => ({ date, plans: ['catalog', 'bounded-name-postings'], kind: 'static-names-v1', source_identity })),
       logical_store: body.logical_store as string, bucket_paths: [...body.bucket_paths as string[]], static: { generation: source_identity.generation, max_rows: source_identity.max_rows } }
   }
-  if (body.schema !== 'dated-name-summary-registry-v1' || !keys(body, ['schema', 'logical_store', 'bucket_paths', 'dates', 'levels', 'scope', 'daily_catalog_slots', 'legacy', 'capabilities']) || !id(body.logical_store) || body.levels !== 1 || body.scope !== HOT_SCOPE || body.daily_catalog_slots !== 2 || !bucketPaths(body.bucket_paths) || !Array.isArray(body.dates) || !body.dates.length || body.dates.length > 400) fail()
+  if (body.schema !== 'dated-name-summary-registry-v1' || !keys(body, ['schema', 'logical_store', 'bucket_paths', 'dates', 'levels', 'scope', 'daily_catalog_slots', 'legacy', 'capabilities']) || !storeId(body.logical_store) || body.levels !== 1 || body.scope !== HOT_SCOPE || body.daily_catalog_slots !== 2 || !bucketPaths(body.bucket_paths) || !Array.isArray(body.dates) || !body.dates.length || body.dates.length > 400) fail()
   capabilities(body.capabilities)
   if (record(body.legacy).schema !== 'name-summary-registry-v1') fail()
   const legacy = parseNameRegistry(body.legacy), dates: NameScan[] = (body.dates as unknown[]).map(value => {
