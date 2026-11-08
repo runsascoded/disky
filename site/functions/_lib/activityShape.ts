@@ -152,7 +152,8 @@ export interface ActivityRefresh {
 
 export function activityRefreshLine(d: ActivityRefresh, fmt?: Fmt, origin = ''): string {
   const esc = fmt?.esc ?? ((s: string) => s)
-  const skipped = d.requested.filter(id => !d.rendered.includes(id)).length
+  const rendered = new Set(d.rendered)
+  const skipped = d.requested.filter(id => !rendered.has(id)).length
   const line = `refreshed ${d.rendered.length} activity ${d.rendered.length === 1 ? 'summary' : 'summaries'} (${d.requested.length} requested, ${skipped} skipped)`
   const scope = d.since ? `active since ${esc(d.since)}` : ''
   const reason = d.reason ? `reason: ${esc(d.reason)}` : 'display refresh of existing activity posts'
