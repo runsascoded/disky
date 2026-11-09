@@ -34,8 +34,25 @@ mode=prod
 dry=false
 status=false
 CONFIG=wrangler.toml
+usage() {
+  cat <<'EOF'
+Usage: site/deploy [--dev] [--no-push] [--dry-run] [--config FILE]
+       site/deploy --status
+
+  -h, --help       Show this help without loading deployment configuration.
+  -d, --dev        Deploy the configured preview branch; never push Git.
+  -P, --no-push    Do not push the source branch after a production deploy.
+  -n, --dry-run    Print the plan; no credentials, build, deploy or Git writes.
+      --config    Check another TOML file; requires --dry-run.
+      --status    Compare the deployed source revision with this checkout.
+
+Run from the intended deployment checkout. Preview may share production data.
+This command does not apply D1 recipes, build job images or apply infrastructure.
+EOF
+}
 while [ $# -gt 0 ]; do
   case "$1" in
+    -h|--help) usage; exit 0 ;;
     -P|--no-push) push=false ;;
     -d|--dev) mode=dev ;;
     -n|--dry-run) dry=true ;;
@@ -84,7 +101,9 @@ fi
 
 # `--status`: report whether HEAD is deployed (no build/deploy). Delegates to the
 # standalone `cf-status` (queries the CF Pages deployments API, compares to HEAD).
-if $status && ! $dry; then exec ./cf-status; fi
+if $status && ! $dry; then
+  if [ "$mode" = dev ]; then exec ./cf-status --dev; else exec ./cf-status; fi
+fi
 
 # Auth via the repo's direnv CLOUDFLARE_API_TOKEN (Pages write on the account).
 # We deliberately do NOT fall back to `wrangler login` OAuth: that session tends
@@ -93,7 +112,9 @@ if $status && ! $dry; then exec ./cf-status; fi
 # reads `CLOUDFLARE_ENV`, as wrangler does): the dev stack's `STORE`/`AUTH_MODE`
 # are its own, not production's.
 branch=${PROD_BRANCH:-main}; [ "$mode" = dev ] && branch=${DEV_BRANCH:-dev}
-host=$(sed -n "s/^${mode^^}_HOST = \"\([^\"]*\)\".*/\1/p" "$CONFIG" | head -1)
+host_key=PROD_HOST
+[ "$mode" = dev ] && host_key=DEV_HOST
+host=$(sed -n "s/^${host_key} = \"\([^\"]*\)\".*/\1/p" "$CONFIG" | head -1)
 [ -n "$host" ] || host="$PROJECT.pages.dev"
 # One pointer per Pages project: `<short>-prod` / `<short>-dev`, where `<short>`
 # is `PTR_SHORT` (default the project name). Branches are
