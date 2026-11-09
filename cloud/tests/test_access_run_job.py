@@ -47,3 +47,16 @@ if args[:2]==['access','ingest']:
     expected.append(['scan-run', 'finish', '-x', str(rc)])
     assert result.returncode == rc, result.stderr
     assert actual == expected
+
+
+@pytest.mark.parametrize(('pin', 'trigger'), [('', 'manual'), ('1', 'schedule')])
+def test_access_submitter_records_its_actual_trigger(pin, trigger):
+    script = Path(__file__).resolve().parents[2] / 'job' / 'access-submit.sh'
+    if not script.exists():
+        pytest.skip('GCS deployment submitter only')
+    result = run(['bash', str(script)], env={**os.environ, 'DRY': '1', 'PIN': pin, 'DT_TRIGGER': 'manual'}, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    task = json.loads(result.stdout)['taskGroups'][0]['taskSpec']
+    assert (task['environment']['variables']['DT_TRIGGER'], task['runnables'][0]['container']['commands']) == (
+        trigger, ['-c', 'exec dt-cloud scan-run supervise -H 60 -- bash job/access-run.sh'],
+    )

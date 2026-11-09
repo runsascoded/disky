@@ -42,7 +42,7 @@ spec = {
                 "variables": {
                     "DATA_BUCKET": "oa-gcs-usage-dvx",
                     "PARALLEL": "$PARALLEL",
-                    "DT_TRIGGER": "manual",
+                    "DT_TRIGGER": "schedule" if "${PIN:-}" else "${DT_TRIGGER:-manual}",
                     "ACCESS_LOG_BUCKET": "marin-usage-logs",
                     "ACCESS_BUCKETS": "marin-us-central1 marin-us-central2 marin-us-east1 marin-us-east5 marin-eu-west4 marin-us-west1 marin-us-west4",
                     "SLACK_ALERT_CHANNEL": "C0C579HNRFB",  # #gcs-admin
