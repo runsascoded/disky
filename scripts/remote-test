@@ -11,6 +11,7 @@
 # Usage:
 #   scripts/remote-test [opts] [pytest args/paths…]   # engine (`tests/`) and dt-cloud (`cloud/tests/`) suites
 #   scripts/remote-test --site [opts] [vitest args…]   # site vitest (`site/`)
+#   scripts/remote-test --fleet [opts] [vitest args…]  # fleet vitest (`fleet/`)
 #   scripts/remote-test --executor [opts]              # Node/workerd query parity (`site/executor/`)
 # Paths under `cloud/` run in the dt-cloud suite (from `cloud/`, as CI does), others in the engine suite; with no
 # paths, both suites run. Options:
@@ -44,6 +45,7 @@ changed_since=
 rdir=
 workers=auto
 site=
+jsdir=site
 executor=
 sync_only=
 
@@ -51,8 +53,9 @@ need() { [ $# -ge 2 ] || { echo "remote-test: $1 needs a value" >&2; exit 2; }; 
 # This script's options come first; the first argument that isn't one (or `--`) starts the test runner's.
 while [ $# -gt 0 ]; do
   case $1 in
-    --site) site=1; shift ;;
-    --executor) site=1; executor=1; shift ;;
+    --site) site=1; jsdir=site; shift ;;
+    --fleet) site=1; jsdir=fleet; shift ;;
+    --executor) site=1; jsdir=site; executor=1; shift ;;
     -a) all=1; shift ;;
     -s) sync_only=1; shift ;;
     -c) need "$@"; changed_since=$2; shift 2 ;;
@@ -172,7 +175,7 @@ if [ -n "$site" ] && [ -z "$sync_only" ]; then
   if [ -n "$executor" ]; then
     cd site && exec pnpm executor:parity $(q "$@")
   fi
-  cd site && exec pnpm vitest run $(q "$@")
+  cd $jsdir && exec pnpm vitest run $(q "$@")
 fi
 command -v uv >/dev/null || curl -LsSf https://astral.sh/uv/install.sh | sh
 export VIRTUAL_ENV=\$PWD/.venv PATH=\$PWD/.venv/bin:\$PATH  # as \`uv run\`: tests run the env's CLIs (\`dt-cloud\`)
