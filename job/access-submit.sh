@@ -25,17 +25,7 @@ PY
 }
 
 # 48GB: 24GB OOM'd on a row-heavy 53GB chunk (2026-08-23); the scan step's peak RSS was 51GB (2026-10-18)
-read -r -d '' SCRIPT <<EOF || true
-set -o pipefail
-dt-cloud access ingest -j -x -P $PARALLEL -M 48GB | tee /tmp/access.json
-rc=\$?
-if [ \$rc -ne 0 ]; then
-  if [ \$rc -eq 3 ]; then what="stalled delivery: \$(python3 -c 'import json; print(", ".join(json.load(open("/tmp/access.json"))["stalled"]))' 2>/dev/null)"
-  else what="ingest failed (exit \$rc)"; fi
-  DISKY_NOTIFY=slack disk-tree notify -t "gcs access logs" "\$what · Batch job \$BATCH_JOB_UID" || true
-fi
-exit \$rc
-EOF
+SCRIPT='exec dt-cloud scan-run supervise -H 60 -- bash job/access-run.sh'
 
 spec=$(mktemp)
 python3 - "$spec" "$SCRIPT" <<PY
@@ -51,12 +41,15 @@ spec = {
             "environment": {
                 "variables": {
                     "DATA_BUCKET": "oa-gcs-usage-dvx",
+                    "PARALLEL": "$PARALLEL",
+                    "DT_TRIGGER": "manual",
                     "ACCESS_LOG_BUCKET": "marin-usage-logs",
                     "ACCESS_BUCKETS": "marin-us-central1 marin-us-central2 marin-us-east1 marin-us-east5 marin-eu-west4 marin-us-west1 marin-us-west4",
                     "SLACK_ALERT_CHANNEL": "C0C579HNRFB",  # #gcs-admin
                 },
                 "secretVariables": {
                     "SLACK_BOT_TOKEN": "projects/$PROJECT/secrets/gcs-alert-slack-bot-token/versions/latest",
+                    "CLOUDFLARE_API_TOKEN": "projects/$PROJECT/secrets/cf-pages-token/versions/latest",
                 },
             },
         },

@@ -303,6 +303,9 @@ class JobKind:
     scan: tuple[Mapping[str, str], ...]
     #: A downstream kind: linked to the orchestrating run of the same scan whose window holds it (`parent`).
     downstream: bool = False
+    #: A standalone single-command job's phase, when older logs have no explicit phase markers.
+    single_phase: str | None = None
+    nop_marker: str | None = None
 
 
 @dataclass(frozen=True)
@@ -401,7 +404,8 @@ def parse_profile(d: Mapping, base: Path | None = None) -> Profile:
     if bad := sorted(set(kw["alerts"]) - {"label", "logs_url", "comment"}):
         raise ValueError(f"scan-run profile: unknown alerts fields {bad}")
     kw["jobs"] = tuple(JobKind(kind=j["kind"], where=j.get("where", {}), scan=tuple(j.get("scan", ())),
-                               downstream=bool(j.get("downstream", False))) for j in d.get("jobs", ()))
+                               downstream=bool(j.get("downstream", False)), single_phase=j.get("single_phase"),
+                               nop_marker=j.get("nop_marker")) for j in d.get("jobs", ()))
     kw["outputs"] = tuple(OutputSpec(key=o["key"], uri=anchor_static_gen(o["uri"], base), after=o.get("after"), kinds=tuple(o.get("kinds", ())),
                                      exclude=tuple(o.get("exclude", ())), split=o.get("split"), rows=o.get("rows"),
                                      manifest=bool(o.get("manifest", False))) for o in d.get("outputs", ()))

@@ -76,6 +76,9 @@ export interface OutputDelta extends ScanRunOutput {
 export const MAINT_KINDS = ['compact', 'race', 'merge'] as const
 export const isMaintenance = (kind: string): boolean => (MAINT_KINDS as readonly string[]).includes(kind)
 
+/** Independent pollers are runs, but never published snapshots or scan-freshness evidence. */
+export const isScanProducer = (kind: string): boolean => !isMaintenance(kind) && kind !== 'access-ingest'
+
 /** A maintenance run's store (`interval-store`, `static-names`): its `gen`'s first segment; null for a scan's run. */
 export const maintStore = (run: Pick<ScanRun, 'kind' | 'gen'>): string | null =>
   isMaintenance(run.kind) && run.gen?.includes('/') ? run.gen.split('/')[0] : null
@@ -477,6 +480,7 @@ export interface RunSummary {
 export function manualScans(rows: readonly RunSummary[]): Set<string> {
   const first = new Map<string, ScanRun>()
   for (const { run } of rows) {
+    if (!isScanProducer(run.kind)) continue
     const f = first.get(run.scan)
     if (!f || (run.started_ts ?? Infinity) < (f.started_ts ?? Infinity)) first.set(run.scan, run)
   }
@@ -484,7 +488,7 @@ export function manualScans(rows: readonly RunSummary[]): Set<string> {
 }
 
 export function scanRunOf(rows: readonly RunSummary[], scan: string): ScanRun | undefined {
-  const runs = rows.map(r => r.run).filter(r => r.scan === scan && !isMaintenance(r.kind))
+  const runs = rows.map(r => r.run).filter(r => r.scan === scan && isScanProducer(r.kind))
   return runs.find(r => r.status === 'succeeded') ?? runs[0]
 }
 

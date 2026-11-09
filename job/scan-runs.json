@@ -4,6 +4,9 @@
   "project": "oa-internal-450019",
   "regions": ["us-central1", "europe-west4", "us-east1"],
   "jobs": [
+    {"kind": "access-ingest", "single_phase": "access-ingest", "nop_marker": "^ingest lease held by ",
+     "where": {"image": "gcs-usage-snapshot", "commands": "dt-cloud access ingest|job/access-run\\.sh", "env": ["ACCESS_LOG_BUCKET"], "no_env": ["SCRATCH"]},
+     "scan": [{"env": "ACCESS_RUN_ID"}, {"created": "%Y-%m-%dT%H%M"}]},
     {"kind": "compute", "downstream": true, "where": {"entrypoint": "^bash$", "commands": "^job/run.sh$", "env": ["SCAN_COMPUTE_ONLY", "SCAN_ROOT_UID"], "no_env": ["SCRATCH"]},
      "scan": [{"env": "SNAP_ID"}]},
     {"kind": "access", "downstream": true, "where": {"entrypoint": "^bash$", "commands": "^job/run.sh$", "env": ["ACCESS_ONLY", "SCAN_ROOT_UID"], "no_env": ["SCRATCH"]},
@@ -27,8 +30,8 @@
     {"key": "listing", "uri": "gs://oa-gcs-usage-dvx/listing/{scan}/", "exclude": ["dir-cache/", "index/"], "split": "dir",
      "rows": {"json": "_SUCCESS.json", "field": "objects"}, "after": "listing-fanout", "kinds": ["scan"]},
     {"key": "dir-cache", "uri": "gs://oa-gcs-usage-dvx/listing/{scan}/dir-cache/", "after": "path-index", "kinds": ["scan", "compute"]},
-    {"key": "path-index", "uri": "gs://oa-gcs-usage-dvx/listing/{scan}/index/{gen}/", "split": "stem", "rows": "groups", "after": "path-index upload"},
-    {"key": "snapshot", "uri": "gs://oa-gcs-usage-dvx/snapshots/{scan}/", "after": "publish"},
+    {"key": "path-index", "uri": "gs://oa-gcs-usage-dvx/listing/{scan}/index/{gen}/", "split": "stem", "rows": "groups", "after": "path-index upload", "kinds": ["scan", "reproc", "compute"]},
+    {"key": "snapshot", "uri": "gs://oa-gcs-usage-dvx/snapshots/{scan}/", "after": "publish", "kinds": ["scan", "reproc", "compute"]},
     {"key": "static", "uri": "gs://oa-gcs-usage-dvx/static-names/{static_gen:static-names.json}/manifests/{scan}.json", "manifest": true, "kinds": ["scan"]}
   ],
   "prices": {"n2-highmem-48": 3.1443, "n2-highmem-32": 2.0962, "n2-highmem-16": 1.0481, "n2-highmem-8": 0.5241, "n2-highmem-4": 0.2620, "n2-standard-32": 1.5539, "n2-standard-8": 0.3885, "n2-standard-4": 0.194244, "e2-standard-4": 0.13402284},

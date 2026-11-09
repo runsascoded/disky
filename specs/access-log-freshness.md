@@ -102,3 +102,11 @@ From the gcs session (2026-10-18), after the `2026-10-18T0701` scan's 158-min `p
 3. `[cloud]`: C's lens state and the idle rule (site + staging).
 4. Per deployment: hourly Scheduler (gcs via `infra/gcp` Pulumi, user-gated `pulumi up`), and drop `access-ingest` from `steps`.
 5. D only if it's still needed.
+
+## Independent ingest runs on `/scans`
+
+The GCS hourly poller has its own `access-ingest` run kind. `job/access-run.sh`, under `scan-run supervise -H 60`, records its start, phase, exit and heartbeat with the existing tables. Failures keep their original timing and error, and the phase's converging-step relationship links a later completed ingest. A held lease is an explicit no-op with a skipped phase, so it cannot stand in for recovery. The existing single failure notification links the run page; recording does not add another Slack alert.
+
+`job/scan-runs.json` also recognizes the older direct-command pollers. Their single phase is explicitly reconstructed from the Batch task window when phase markers are unavailable. The kind-specific no-op marker identifies lease skips without changing snapshot classification. These records write no snapshot outputs, cannot satisfy snapshot freshness, and have their own chronological navigation. A scan's detail page links the hourly history and displays the newest observed access timestamp from that scan's immutable metadata; this is not a complete-delivery watermark.
+
+Rollout requires the producer image plus the existing hourly Scheduler body's command changed to `exec dt-cloud scan-run supervise -H 60 -- bash job/access-run.sh`, the existing job's CF token supplied for recording, and `DT_TRIGGER=schedule`. Manual submissions use `job/access-submit.sh` and `DT_TRIGGER=manual`. These changes do not create a schedule, migrate D1 or modify IAM. Backfill recent jobs from their Batch records and retained logs, verify no-op classification, then check an actual ingest's recorded lifecycle. Site, image and Scheduler rollout are separate from source completion.

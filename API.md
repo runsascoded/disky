@@ -201,3 +201,5 @@ done
 
 [API.md]: https://github.com/Open-Athena/disky/blob/gcs/API.md
 [operations]: specs/gcs-operations.md
+
+`GET /api/scan-runs` includes independent hourly access-log ingests as `run.kind = "access-ingest"`, alongside scans and maintenance runs. Their `scan` field is the ingest run's clock identifier, not a published snapshot. Run detail (`/api/scan-runs/:run_id`) retains failures and links later completed ingests in `phase_issues[].recovery`. A held ingest lease is a no-op, not recovery. Filter the UI at `/scans?k=access-ingest`; snapshot links and scan freshness exclude these jobs.

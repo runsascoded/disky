@@ -983,3 +983,31 @@ def test_phase_skip_is_an_explicit_skip_clause():
         None,
         None,
     ]
+
+
+@pytest.mark.parametrize(('state', 'held', 'status', 'phase_status'), [
+    ('FAILED', False, 'failed', 'failed'), ('SUCCEEDED', False, 'succeeded', 'done'),
+    ('SUCCEEDED', True, 'nop', 'done'), ('RUNNING', False, 'running', 'running'),
+])
+def test_single_command_job_backfill(state, held, status, phase_status):
+    profile = parse_profile({'jobs': [{
+        'kind': 'access-ingest', 'where': {'commands': 'access ingest'},
+        'scan': [{'created': '%Y-%m-%dT%H%M'}], 'single_phase': 'access-ingest',
+        'nop_marker': '^ingest lease held by ',
+    }]})
+    end = '2026-11-09T08:52:11Z'
+    events = [(*RUNNING, '2026-11-09T08:21:23Z')]
+    if state != 'RUNNING': events.append(('RUNNING', state, end))
+    j = job('poller', 'poller-uid', '2026-11-09T08:20:23Z', state, events, commands=['dt-cloud access ingest'])
+    logs = [log('poller-uid', end, 'ingest lease held by other — skipping')] if held else []
+    recs = reconstruct(profile, [j], logs, None, ts('2026-11-09T09:00:00Z'))
+    assert len(recs) == 1
+    r = recs[0]
+    assert (r.run.kind, r.run.scan, r.run.parent, r.run.status, r.run.failed_phase) == (
+        'access-ingest', '2026-11-09T0820', None, status, 'access-ingest' if state == 'FAILED' else None,
+    )
+    assert r.phases == (Phase(
+        'access-ingest', 0, ts('2026-11-09T08:21:23Z'), None if state == 'RUNNING' else ts(end), phase_status,
+        'skipped: job reported no work' if held else 'backfilled from Batch task window; no phase markers retained',
+    ),)
+    assert r.outputs == ()
