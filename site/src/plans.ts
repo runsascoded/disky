@@ -5,6 +5,7 @@ import { type DeletionRun, EXEC_CAPS, type ExecCaps, type ExecJob } from './runs
 import { HttpError, type PlanItem, stageMany as stageManyVia } from './batches'
 import { SWEEP_SETTINGS_KEY } from './softDelete'
 import { type ScanDeletion, sizedAtOldScan } from './stagedScan'
+import type { BatchDeletion } from './batchDeletion'
 
 export type { DeletionRun, ExecJob } from './runs'
 export { LIVE_STATES } from './runs'
@@ -64,6 +65,7 @@ export interface EmptiedBatch extends StageBatch {
   unstaged: number
   /** Taken out by the real run that deleted them. */
   deleted: number
+  deletion?: BatchDeletion
 }
 export interface StagedPlan { plan: PlanSummary | null; items: StagedItem[]; batches: StageBatch[]; emptied?: EmptiedBatch[]; runs: DeletionRun[] }
 /** A plan as `GET /api/plans` lists it. */

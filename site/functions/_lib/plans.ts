@@ -6,6 +6,7 @@
 import type { D1Database } from "@cloudflare/workers-types"
 import type { RunOutcome } from "../../src/runs.js"
 import type { ScanDeletion } from "../../src/stagedScan.js"
+import { addBatchDeletion, type BatchDeletion } from "../../src/batchDeletion.js"
 
 // A plan prefix stored as `<scheme><bucket>/<path>/` (the deployment's
 // `STORE_SCHEME`: `s3://`, `gs://`, `file:///`); normalized to a relative key
@@ -333,16 +334,24 @@ export interface EmptiedBatch extends StageBatchRow {
   unstaged: number
   /** Taken out by the real run that deleted them (`unstageDeleted`). */
   deleted: number
+  deletion?: BatchDeletion
 }
+
+interface CompletionBand { run_id: string; prefix: string; bytes: number; objects: number }
 
 /** The plan's emptied stage batches, by replaying its `plan_items` audit trail
  * (pure): who held each prefix, and which gesture took it away. */
-export function emptiedBatches(batches: readonly StageBatchRow[], items: readonly PlanItemRow[], edits: readonly PlanEdit[]): EmptiedBatch[] {
+export function emptiedBatches(batches: readonly StageBatchRow[], items: readonly PlanItemRow[], edits: readonly PlanEdit[], bands: readonly CompletionBand[] = []): EmptiedBatch[] {
   const live = new Set(items.map(i => i.batch_id))
+  const completionBands = new Map<string, Map<string, CompletionBand>>()
+  for (const band of bands) {
+    if (!completionBands.has(band.run_id)) completionBands.set(band.run_id, new Map())
+    completionBands.get(band.run_id)!.set(band.prefix, band)
+  }
   const parse = (s: string | null): Record<string, unknown> => { try { return (s ? JSON.parse(s) : {}) as Record<string, unknown> } catch { return {} } }
   const strs = (v: unknown): string[] => Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : []
   const owner = new Map<string, number | null>()
-  const fate = new Map<number, { prefixes: Set<string>; staged: number; covered: number; absorbed: Map<number, number>; unstaged: number; deleted: number }>()
+  const fate = new Map<number, { prefixes: Set<string>; staged: number; covered: number; absorbed: Map<number, number>; unstaged: number; deleted: number; deletion?: BatchDeletion }>()
   const of = (b: number) => { let f = fate.get(b); if (!f) fate.set(b, f = { prefixes: new Set(), staged: 0, covered: 0, absorbed: new Map(), unstaged: 0, deleted: 0 }); return f }
   for (const e of edits) {
     const o = parse(e.old_json)
@@ -373,6 +382,7 @@ export function emptiedBatches(batches: readonly StageBatchRow[], items: readonl
         const t = of(into)
         for (const p of f.prefixes) t.prefixes.add(p)
         t.staged += f.staged; t.covered += f.covered; t.unstaged += f.unstaged; t.deleted += f.deleted
+        t.deletion = addBatchDeletion(t.deletion, f.deletion)
         for (const [k, v] of f.absorbed) t.absorbed.set(k, (t.absorbed.get(k) ?? 0) + v)
         fate.delete(b)
       }
@@ -388,14 +398,21 @@ export function emptiedBatches(batches: readonly StageBatchRow[], items: readonl
       const byRun = typeof o.deleted_by === 'string'
       for (const p of strs(o.prefixes)) {
         const was = owner.get(p)
-        if (was != null) { if (byRun) of(was).deleted++; else of(was).unstaged++ }
+        if (was != null) {
+          const f = of(was)
+          if (byRun) {
+            f.deleted++
+            const band = completionBands.get(String(o.deleted_by))?.get(p)
+            if (band) f.deletion = addBatchDeletion(f.deletion, { bytes: band.bytes, objects: band.objects, prefixes: 1 })
+          } else f.unstaged++
+        }
         owner.delete(p)
       }
     }
   }
   return batches.filter(b => !live.has(b.id)).map(b => {
     const f = of(b.id)
-    return { ...b, prefixes: [...f.prefixes].sort(), staged: f.staged, covered: f.covered, absorbed: [...f.absorbed].map(([into, n]) => ({ into, n })).sort((x, y) => x.into - y.into), unstaged: f.unstaged, deleted: f.deleted }
+    return { ...b, prefixes: [...f.prefixes].sort(), staged: f.staged, covered: f.covered, absorbed: [...f.absorbed].map(([into, n]) => ({ into, n })).sort((x, y) => x.into - y.into), unstaged: f.unstaged, deleted: f.deleted, ...(f.deletion ? { deletion: f.deletion } : {}) }
   })
 }
 
@@ -422,8 +439,13 @@ export async function planDetail(db: D1Database, id: number, staging: boolean): 
   const editsQ = staging
     ? db.prepare("SELECT action, old_json, new_json FROM admin_edits WHERE tbl = 'plan_items' AND pk = ? ORDER BY id").bind(String(id)).all<PlanEdit>()
     : Promise.resolve({ results: [] as PlanEdit[] })
-  const [items, batches, runs, edits] = await Promise.all([itemsQ, batchesQ, runsQ, editsQ])
-  return { plan, items: items.results, batches: batches.results, emptied: emptiedBatches(batches.results, items.results, edits.results), runs: runs.results }
+  const bandsQ = staging
+    ? db.prepare(`SELECT b.run_id, b.prefix, b.bytes, b.objects FROM deletion_bands b
+        JOIN deletion_runs r ON r.run_id = b.run_id
+        WHERE r.plan_id = ? AND r.mode = 'real' AND r.finished_ts IS NOT NULL`).bind(id).all<CompletionBand>()
+    : Promise.resolve({ results: [] as CompletionBand[] })
+  const [items, batches, runs, edits, bands] = await Promise.all([itemsQ, batchesQ, runsQ, editsQ, bandsQ])
+  return { plan, items: items.results, batches: batches.results, emptied: emptiedBatches(batches.results, items.results, edits.results, bands.results), runs: runs.results }
 }
 
 /** One run's D1 record and its per-band rows (largest first) — the run detail
