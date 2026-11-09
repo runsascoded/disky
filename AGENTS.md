@@ -432,9 +432,11 @@ refused unless `ALLOW_DIRTY=1`. A benchmark on a throwaway tag:
 - `site/dev` — Vite on **:3253** + `wrangler pages dev` on **:3254** (a stale
   `oa_auth` cookie on localhost disables the DEV_IDENTITY stub → sign-in wall).
 - `site/deploy` — **manual** deploy to gcs.oa.dev (pushing git does NOT deploy);
-  moves the local `prod` branch pointer to the shipped SHA and pushes the branch
-  + `prod` to GitHub (`o`) by default (`-P` to skip). `site/deploy --status`
-  compares deployed vs HEAD; `site/deploy --dev` ships to dev.gcs.oa.dev.
+  moves the local `gcs-prod` pointer to the shipped SHA and pushes only the
+  source branch to GitHub (`o`) by default (`-P` to skip). The deployment
+  pointers stay local. `site/deploy --status` checks canonical production;
+  `site/deploy --dev` ships to dev.gcs.oa.dev and moves only local `gcs-dev`,
+  without pushing. `site/deploy --status --dev` checks that preview branch.
 - D1 schema: `site/schema.sql` is gcs's own (`specs/done/d1-migrations.md`). A
   change is a recipe `site/migrations/<slug>.sql` plus `dt-cloud d1-schema dump
   site/schema.sql site/migrations/<slug>.sql -o site/schema.sql`; apply with
