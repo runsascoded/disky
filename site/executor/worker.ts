@@ -12,7 +12,7 @@ export default {
       const objects = readerObjects(env)!
       execute = createExecutor(capsule, { objects, metadata: readerMetadata(env)!, files: filesFromObjects(objects), cache: caches.default })
     }
-    try { return Response.json(await execute(await request.json() as KernelRequest, request.signal)) }
+    try { return Response.json(await execute(await request.json() as KernelRequest, request.headers.get('x-fixture-cancel') === '1' ? AbortSignal.abort() : request.signal)) }
     catch (error) { return Response.json({ state: 'failed', name: (error as Error).name, message: (error as Error).message }, { status: 500 }) }
   },
 }

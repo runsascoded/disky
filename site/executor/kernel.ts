@@ -38,6 +38,14 @@ export type KernelRequest = { version: 1; capsule: string; budgets: Budgets } & 
   | { kind: 'diff'; options: DiffControls & { from: string; to: string } }
 )
 export interface Budgets { deadlineMs: number; gets: number; bytes: number; outputBytes: number }
+export function validBudgets(raw: unknown): raw is Budgets {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return false
+  const values = raw as Record<string, unknown>
+  const keys = Object.keys(values).sort()
+  return keys.length === 4 && keys.join(',') === 'bytes,deadlineMs,gets,outputBytes'
+    && keys.every(key => typeof values[key] === 'number' && Number.isFinite(values[key]) && (values[key] as number) >= 0)
+    && ['bytes', 'gets', 'outputBytes'].every(key => Number.isSafeInteger(values[key]))
+}
 export class ExecutionLimit extends ReaderStopped {
   constructor(readonly code: 'deadline' | 'gets' | 'bytes' | 'output' | 'cancelled') { super(`executor ${code} limit`); this.name = 'ExecutionLimit' }
 }
@@ -84,7 +92,7 @@ export function createExecutor(input: Capsule, services: ReaderServices) {
     const dates = request.kind === 'map' ? [request.options.date] : [request.options.from, request.options.to]
     if (dates.some(d => !capsule.dates.includes(d))) return { ...identity, state: 'unavailable' as const, code: 'scan-not-in-capsule' }
     const b = request.budgets
-    if (Object.values(b).length !== 4 || Object.values(b).some(n => !Number.isFinite(n) || n < 0)) throw new Error('invalid execution budgets')
+    if (!validBudgets(b)) return { ...identity, state: 'unsupported' as const, code: 'invalid-budgets' }
     const check = () => {
       if (signal?.aborted) throw new ExecutionLimit('cancelled')
       if (performance.now() - start >= b.deadlineMs) throw new ExecutionLimit('deadline')
@@ -105,6 +113,7 @@ export function createExecutor(input: Capsule, services: ReaderServices) {
       const serializationStart = performance.now()
       const outputBytes = new TextEncoder().encode(JSON.stringify(body)).byteLength
       const serializationMs = performance.now() - serializationStart
+      check()
       if (outputBytes > b.outputBytes) throw new ExecutionLimit('output')
       // Preserve the entire kernel body, including remainders, coverage and its own partial-answer flags.
       return { ...identity, state: 'answered' as const, body, telemetry: { ...counters, outputBytes, serializationMs, elapsedMs: performance.now() - start, trace } }

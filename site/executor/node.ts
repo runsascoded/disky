@@ -1,6 +1,6 @@
 /** Ordinary Node adapter: real filesystem input + node:sqlite, without Cloudflare globals or bindings. */
 import { createHash } from 'node:crypto'
-import { readFile } from 'node:fs/promises'
+import { open } from 'node:fs/promises'
 import { resolve, relative, isAbsolute } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import type { ReaderMetadata, ReaderObjects, ReaderStatement, ReaderServices } from '../functions/_lib/readerRuntime.js'
@@ -48,6 +48,25 @@ export function sqliteMetadata(sql: string): ReaderMetadata {
 
 /** Small correctness capsules are verified and copied into owned bytes before any request. Later filesystem
  * changes cannot change the pinned input. This bounded fixture adapter is not a production filesystem cache. */
+export async function readBounded(path: string, cap: number): Promise<Uint8Array> {
+  const file = await open(path, 'r')
+  try {
+    const stat = await file.stat()
+    if (!stat.isFile() || stat.size > cap) throw new Error('capsule exceeds its input-byte cap')
+    // The extra byte detects growth after stat; allocation never exceeds the remaining admission cap + 1.
+    const bytes = new Uint8Array(stat.size + 1)
+    let offset = 0
+    while (offset < bytes.length) {
+      const result = await file.read(bytes, offset, bytes.length - offset, offset)
+      if (!result.bytesRead) break
+      offset += result.bytesRead
+    }
+    if (offset > cap) throw new Error('capsule exceeds its input-byte cap')
+    if (offset !== stat.size) throw new Error('capsule object changed while reading')
+    return bytes.slice(0, offset)
+  } finally { await file.close() }
+}
+
 export async function nodeExecutor(document: CapsuleFile, root: string, maxBytes = 16 * 1024 * 1024) {
   const content = new Map<string, Uint8Array>()
   let total = 0
@@ -55,7 +74,7 @@ export async function nodeExecutor(document: CapsuleFile, root: string, maxBytes
     const path = resolve(root, object.file), rel = relative(resolve(root), path)
     if (rel.startsWith('..') || isAbsolute(rel)) throw new Error('capsule path escapes root')
     if (content.has(object.key)) throw new Error(`duplicate capsule key ${object.key}`)
-    const bytes = await readFile(path)
+    const bytes = await readBounded(path, maxBytes - total)
     total += bytes.byteLength
     if (total > maxBytes) throw new Error('capsule exceeds its input-byte cap')
     if (sha256(bytes) !== object.sha256) throw new Error(`capsule hash mismatch: ${object.key}`)

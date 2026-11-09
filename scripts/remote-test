@@ -89,7 +89,9 @@ fi
 
 # A node that stops itself when idle is started on demand (`$REMOTE_TEST_INSTANCE`).
 instance=${REMOTE_TEST_INSTANCE:-}
-if ! ssh -o ConnectTimeout=5 "$host" true 2>/dev/null; then
+ssh_opts=()
+git_ssh=${GIT_SSH_COMMAND:-ssh}
+if ! ssh "${ssh_opts[@]}" -o ConnectTimeout=5 "$host" true 2>/dev/null; then
   [ -n "$instance" ] || { echo "remote-test: $host doesn't answer" >&2; exit 1; }
   aws=(aws ${REMOTE_TEST_AWS_PROFILE:+--profile "$REMOTE_TEST_AWS_PROFILE"} --region "${REMOTE_TEST_REGION:-us-east-1}")
   echo "remote-test: $host doesn't answer; starting $instance" >&2
@@ -102,15 +104,21 @@ if ! ssh -o ConnectTimeout=5 "$host" true 2>/dev/null; then
     exit 1
   fi
   "${aws[@]}" ec2 wait instance-running --instance-ids "$instance" || exit 1
+  # A stopped instance gets a new public address. Preserve the alias's user/key config but replace its stale DNS.
+  dns=$("${aws[@]}" ec2 describe-instances --instance-ids "$instance" --query 'Reservations[0].Instances[0].PublicDnsName' --output text) || exit 1
+  [[ $dns =~ ^[a-zA-Z0-9.-]+$ && $dns != None ]] || { echo "remote-test: $instance has no public DNS" >&2; exit 1; }
+  ssh_opts=(-o "HostName=$dns")
+  git_ssh="ssh -o HostName=$dns"
+  echo "remote-test: $host now at $dns" >&2
   for _ in $(seq 36); do  # SSH up within ~3 min
-    ssh -o ConnectTimeout=5 "$host" true 2>/dev/null && break
+    ssh "${ssh_opts[@]}" -o ConnectTimeout=5 "$host" true 2>/dev/null && break
     sleep 5
   done
-  ssh -o ConnectTimeout=5 "$host" true 2>/dev/null || { echo "remote-test: $host is running but SSH isn't up after 3 min" >&2; exit 1; }
+  ssh "${ssh_opts[@]}" -o ConnectTimeout=5 "$host" true 2>/dev/null || { echo "remote-test: $host is running but SSH isn't up after 3 min" >&2; exit 1; }
 fi
 
-ssh "$host" "set -e; [ -d $rdir/.git ] || { mkdir -p $rdir && git init -q $rdir; }"
-out=$(git push -q -f "$host:$rdir" "$sha:refs/heads/remote-test" 2>&1) || { echo "$out" >&2; exit 1; }
+ssh "${ssh_opts[@]}" "$host" "set -e; [ -d $rdir/.git ] || { mkdir -p $rdir && git init -q $rdir; }"
+out=$(GIT_SSH_COMMAND="$git_ssh" git push -q -f "$host:$rdir" "$sha:refs/heads/remote-test" 2>&1) || { echo "$out" >&2; exit 1; }
 
 # The tests to run: engine paths, cloud paths (relative to `cloud/`), and options for both.
 opts=()
@@ -193,6 +201,6 @@ EOF
 echo "remote-test: $host:$rdir @ ${sha:0:12} → $log" >&2
 set +e
 # `-t` (when this is a terminal): ^C reaches the remote run; the log drops the terminal's `\r`s
-ssh -t -o LogLevel=QUIET "$host" "bash -c $(printf %q "$remote")" 2>&1 | tee >(tr -d '\r' > "$log")
+ssh "${ssh_opts[@]}" -t -o LogLevel=QUIET "$host" "bash -c $(printf %q "$remote")" 2>&1 | tee >(tr -d '\r' > "$log")
 rc=${PIPESTATUS[0]}
 exit "$rc"

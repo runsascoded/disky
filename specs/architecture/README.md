@@ -22,7 +22,7 @@ What is still open for exact `?f=` at any drill and date (compaction of the stat
 
 ## Portable executor work
 
-The local correctness harness extracts explicit object, metadata-SQL and cache adapters around the existing map/diff reader. It compares an ordinary Node process with real local workerd/R2/D1 over immutable synthetic capsules, with no production routing change. Implementation and exact commands are in the [executor harness]; acceptance remains pending the remote parity run and runtime profiling gaps recorded there. Hosted transports and capability-based routing are subsequent phases of [backend executors].
+The verified local correctness harness extracts explicit object, metadata-SQL and cache adapters around the existing map/diff reader. It passed 143 complete semantic response comparisons between an ordinary Node process and real local workerd/R2/D1 over immutable synthetic capsules, with no production routing change. Implementation and commands are in the [executor harness]; [executor results] records the synthetic timings, separate sampling profiles and limits. Hosted transports, pinned real-data benchmarks and capability-based routing are subsequent phases of [backend executors].
 
 ## Retired: the ClickHouse query box (2026-10-03 → 10-10)
 
@@ -44,3 +44,4 @@ For one week a ClickHouse VM behind a tunnel served name search and history expe
 
 [executor harness]: ../../site/executor/README.md
 [backend executors]: ../backend-executors.md
+[executor results]: ../../site/executor/results.md

@@ -1,6 +1,6 @@
 # Portable query executors
 
-Status: implementation handoff, 2026-11-08. Shared-code owner: the `disky` session on `cloud`; GCS owns its deployment validation and rollout. No backend implementation is claimed by this spec. Index research runs independently and is not a prerequisite.
+Status: Phase 1 implemented and verified, 2026-11-09; Phases 2–3 pending. Shared-code owner: the `disky` session on `cloud`; GCS owns its deployment validation and rollout. Index research runs independently and is not a prerequisite.
 
 Selected by Ryan for implementation on 2026-11-08: Phase 1 first, followed by `auth-session-log-adoption.md`. Phases 2–3 remain subsequent deployment work; this implementation does not provision a backend or change production routing.
 
@@ -44,8 +44,15 @@ The `disky`/`cloud` session should commit the initial spec before implementation
 
 Phase 1 can start now. It is not blocked by the research index, a final cloud-provider choice, fleet compaction or a production generation move. Before reporting work as active, the owning session must actually accept/start the handoff; delivery to an inactive session is not execution.
 
-## Implementation checkpoint — 2026-11-08
+## Phase 1 acceptance — 2026-11-09
 
-Phase 1 source is in `wt/backend-auth`: explicit reader object/metadata/cache ports, legacy Worker adapters, ordinary-process CLI over hash-verified immutable bytes and actual SQLite, and a real workerd/R2/D1 parity runner. A process binds one capsule for life; request budgets and cache context are explicit, and a caller limit cannot quarantine an immutable run. `scripts/remote-test --executor` runs the harness on the configured dev node. See `site/executor/README.md` for commands, coverage and remaining limitations.
+Implemented explicit reader object/metadata/cache ports, default Worker adapters, an ordinary-process CLI over hash-verified immutable bytes and actual SQLite, and a real workerd/R2/D1 parity runner. A process binds one capsule for life; request budgets and cache context are explicit, and a caller limit cannot quarantine an immutable run. Input files are capped before allocation, exact budget names/types are validated, and cancellation/refusal/partial answers retain their semantics. `scripts/remote-test --executor` runs the harness on the configured dev node and resolves an EC2 instance's current DNS after restarting it. See [executor harness] for commands and remaining limitations.
 
-Verification pending: the configured `mgu` host is unreachable and the `oa-ci-dev` SSO needed to start it is expired. Executor, Functions and UI TypeScript checks pass; the remote parity and affected runtime tests have not run. No parity, latency or speedup result is claimed. Worker CPU/memory and aggregation-only CPU remain profiling gaps (the harness records null rather than substituting elapsed time). Keep this spec pending until acceptance is established; no hosted infrastructure or production routing changed.
+After Ryan renewed AWS SSO, the existing `mgu` dev node passed 143 exact semantic comparisons across three capsules and cold/warm/concurrency-two passes. Separate Node/workerd sampling profiles distinguish reader/decode and aggregation stacks, with actual Node process CPU/memory and Worker heap snapshots; these are explicitly limited measurements, not per-request Worker CPU or peak RSS. [Measured acceptance] records the small synthetic timings and limitations. The full site suite passed 4,345 tests; two additional budget/file-admission tests passed separately. No production routing or new hosted infrastructure changed.
+
+The production site build, Functions/UI type checks, separate executor type check and standalone bundled CLI capture/run smoke all passed on the same dev node. The CLI root returned the expected 20 bytes and three objects. Public CI has not been triggered for these local commits.
+
+Keep this spec pending for Phases 2–3. Phase 1 verifies portability, not fleet-scale speedup. Cooperative deadlines do not preempt synchronous JavaScript; per-scan metadata caches and arbitrary capsule switching are not independently portable. A production filesystem/object-store adapter, capability transport and pinned real-data measurements remain required before a hosted cutover.
+
+[executor harness]: ../site/executor/README.md
+[Measured acceptance]: ../site/executor/results.md
