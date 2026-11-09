@@ -38,9 +38,14 @@ Known open costs: selected nonempty match roots remain unbounded by M; endpoint 
 | Experiment | State | Execution / evidence | Next decision |
 | --- | --- | --- | --- |
 | Portable executor Phase 1 | Verified | `site/executor/results.md`; 143 synthetic response pairs | Real-data adapter and explicit dev transport |
-| Joint eligibility census | Source implementation active | Bounded subagent `index_research`; no data job started | Exact fixture verification, then GCS-qualified complete subtree |
+| Joint eligibility census | CLI implemented; 25 correctness cases verified | `dt-cloud eligibility-census`; `mgu:disky-test/index-research`, source snapshot `c13f4ceaf2a8`, 2026-11-09 13:55 UTC; `tmp/census-tiny.json` and `tmp/census-tiny-resources.log` | GCS-qualified complete historical subtree and version-row export |
 | Fleet-scale candidate reader | Not started | No joint successor/index built | Census must justify construction first |
 
 Update this table with the exact source revision, input identity, host/job ID, start/end times and artifact paths when work runs. Agent delivery or a suggested command is not a running experiment. Keep at most two research experiments active at once; each must have a bounded question and a result that changes the next action.
 
+The first checked-in adversarial capsule has seven events over two own paths. Its exact CLI report has 15 positive recursive value versions and nine coalesced positive intervals; direct substring point joins fall from 32 to 20. It preserves the final zero-byte object's count. This is a reproducible implementation check, not fleet sizing or a query-latency result. The census is single-threaded and in memory; its default input caps are intentionally smaller than the maximum real-data experiment envelope above, with explicit CLI overrides. A version-Parquet adapter and independent complete-subtree qualification remain open. See [census contract] for the schema, measured-resource caveats and unsupported modes.
+
+The finalized module passes mypy and all 25 focused cases on `mgu`. The standalone CLI was exercised over the checked-in fixture as well as through tests. No full-fleet data job or physical index build has been started.
+
 [executor results]: ../site/executor/results.md
+[census contract]: ../cloud/docs/eligibility-census.md
