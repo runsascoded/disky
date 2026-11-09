@@ -4,12 +4,19 @@ From the root session, 2026-11-07. Ryan's go: "yes sg" to: a Pages project + DNS
 
 ## Status
 
-- **Built on `cloud`** (`rw/fleet-site`, 2026-11-07): the app `fleet/`, its specs and CI job, and `packages/pages-kit` (what it shares with `site/`). Nothing created on Cloudflare, no secrets set, nothing deployed or posted.
-- **Open:** the deployment on `o/front-door` (its `fleet/wrangler.toml`, the Pages project + DNS, the secrets below, the hourly cron), and the deployments' fleet tokens (§ Open).
+- **Built on `cloud`** (`rw/fleet-site`, 2026-11-07): the app `fleet/`, its specs and CI job, and `packages/pages-kit` (what it shares with `site/`). `o/front-door` adds the deployment config and gated release/hourly workflows; CI passed at `b34c4165`.
+- **Provisioned, verified 2026-11-09:** the `disky-oa` Pages project and fleet KV, Actions deployment/job credentials, separate Pages production/preview session/job/client secrets, and production-only bot token. The broker owner completed the two clients and direct secret installation after direct user approval. See [deployment record].
+- **Open:** the four source read tokens and GCS/CW meta summary contract, first preview/production deployment, DNS, browser sign-in/card verification, and the first automated post. Live Cloudflare reports no deployment or custom-domain/DNS cutover; both GitHub release flags remain unset.
 
 ## Why
 
 `#disky-admin` gets one status post for all four OA deployments (gcs, cw, hf, r2), edited in place, with an auto-updating image. No current site sees all four, and gcs figures can't be public. So a small site of its own: public docs, a signed-in fleet page, and the fleet card as a dOGI image (`/og/fleet.png`, signed like the staged card) that the Slack post and the page's `og:image` both use.
+
+## Delivery scope
+
+The first deliverable implemented here is one persistent fleet post, with its text and signed image refreshed hourly. It does not yet implement the fuller channel workflow in [Ryan's November 6 draft]: one reply a day while nominal; anything concerning gets its own top-level post and thread; the next nominal update opens a new thread; and a month's thread looks back `max(29d, month-to-date)`. Daily replies, concern/incident thread transitions, monthly history selection and their persistent state remain open work. The current card plots seven days, and its reader retains 14 recent scan runs and 30 days of daily meta points, so it cannot yet supply that whole history contract.
+
+Fixture previews verify formatting and rendering only. Approval of a first real post requires a deployed dry-run payload and card backed by the four explicitly provisioned source grants, with missing metrics and source errors reviewed; fixture output is not that payload.
 
 ## Shape
 
@@ -34,7 +41,7 @@ From the root session, 2026-11-07. Ryan's go: "yes sg" to: a Pages project + DNS
   - **No D1.** `@open-athena/auth`'s gate needs a grant store, but only share links and Bearer tokens read it. Here it's an empty one (`NO_GRANTS`: every lookup misses, every write refused). A session is a signed cookie under `SESSION_SECRET`, judged by its signature. The policy admits `STAFF_DOMAIN` (comma-separated), a var the spec didn't list.
   - A Bearer token or `?key=` link is refused, never looked up.
   - Locally, `DEV_EMAIL` (`.dev.vars` only) makes a localhost request that address.
-- **`/api/fleet`** fetches each deployment's `/api/health`, `/api/scan-runs` and `/api/series?store=meta` (the `/meta` store's bytes per scan), with that deployment's token. `/api/scan-runs` takes no `limit`, so the fleet keeps the newest `FLEET_RUNS` (default 14), maintenance runs (`compact`, `race`, `merge`) left out.
+- **`/api/fleet`** fetches each deployment's `/api/health`, `/api/scan-runs` and `/api/series?store=meta` (the `/meta` store's bytes per scan), with that deployment's token. `/api/scan-runs` takes no `limit`, so the fleet keeps the newest `FLEET_RUNS` (default 14), maintenance runs (`compact`, `race`, `merge`) and no-op (`nop`) runs left out.
   - It returns one JSON (`functions/_lib/fleetTypes.ts`), per deployment:
     - `health`: newest scan, its age, gaps summed.
     - `last` and `runs`: id, scan, start, duration, status, `failed_at`, open step issues, cost.
@@ -68,7 +75,7 @@ From the root session, 2026-11-07. Ryan's go: "yes sg" to: a Pages project + DNS
 
 ## Open
 
-- `/meta` usage on gcs and cw is `scope: admin` today, so a read grant gets 403. Either the fleet tokens carry a scope that reaches it, or `/meta` usage gets a read-scoped summary route. That's each deployment's call. Until then their `/meta` trace is missing and the panel's note names them.
+- `/meta` usage on gcs and cw is `scope: admin` today, so a read grant gets 403. Keep that gate; the source-owner handoff calls for an allowlisted aggregate summary route under `fleet:read`, rather than an admin grant or broader access to the whole meta store. This spec's secret/config list is the existing source-token handoff: dedicated source grants must be explicitly provided and installed for fleet use, never copied from unrelated job credentials. No narrow fleet summary route or `fleet:read` handling was found in the checked-out `cloud`, `gcs`, `cw`, `hf` or `r2` Functions source on 2026-11-09. Until the contract is implemented and rolled out by the sources, gcs/cw's `/meta` trace is missing and the panel's note names them.
 - gcs `cost_usd` is null on every run (likely its machine type is missing from `scan_runs.py`'s price table). The cost panel's note names it.
 - Meta scans aren't in `/api/scan-runs` on r2 and cw.
 
@@ -85,3 +92,8 @@ From the root session, 2026-11-07. Ryan's go: "yes sg" to: a Pages project + DNS
 - `_lib/slack.test.ts`: the Slack builder's text and blocks, by exact equality.
 - `_lib/wranglerExample.test.ts`: the example toml names every `Env` field.
 - `src/docs.test.ts`: the docs' link rewriting.
+
+For an offline review artifact without posting or changing the goldens, run from `fleet/`: `node scripts/preview.mjs --fixture --out ../tmp/fleet-preview`. It writes the exact Slack builder's JSON/text and full dark/light SVG/PNG cards, clearly marked as fixture data. `--doc FILE` instead takes an `/api/fleet` JSON response. The message's image signature is the invalid `PREVIEW_ONLY` placeholder; only the deployed `POST /api/fleet/slack?dry=1` returns the usable signed URL. Keep that live response private, since it carries the full card's access credential.
+
+[deployment record]: ../fleet/DEPLOYMENT.md
+[Ryan's November 6 draft]: https://openathena.slack.com/archives/C0CFMN7FYG4/p1793969930968119

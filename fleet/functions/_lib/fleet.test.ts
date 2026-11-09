@@ -30,6 +30,7 @@ const ANSWERS = {
     project: null,
     runs: [
       runWire('m1', '2026-11-07', 'compact', 'succeeded', NOW - H, 600, 0.02, null, []),
+      runWire('n1', '2026-11-07', 'scan', 'nop', NOW - 2 * H, 0, 0, null, []),
       runWire('r1', '2026-11-07', 'scan', 'succeeded', NOW - 7 * H, 7668, 0.5, null, [
         { phase: 'dups', outcome: 'failed', recovery: null, passing: null },
         { phase: 'probe', outcome: 'failed', recovery: { run_id: 'r0' }, passing: null },
@@ -68,7 +69,7 @@ describe('/api/fleet\'s document over stubbed deployments', () => {
     ])
   })
 
-  it('folds the answers: maintenance runs skipped, open issues only, /meta now / 1 d / 7 d and the newest scan per day; each failure named', async () => {
+  it('folds the answers: maintenance and no-op runs skipped, open issues only, /meta now / 1 d / 7 d and the newest scan per day; each failure named', async () => {
     const r1 = { run_id: 'r1', scan: '2026-11-07', status: 'succeeded', started: NOW - 7 * H, secs: 7668, cost_usd: 0.5, failed_at: null, open_issues: ['dups'] }
     const r2 = { run_id: 'r2', scan: '2026-11-06', status: 'failed', started: NOW - 31 * H, secs: 3600, cost_usd: null, failed_at: 'index', open_issues: [] }
     const noToken = 'no token (FLEET_TOKEN_B unset)'

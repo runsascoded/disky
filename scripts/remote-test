@@ -11,6 +11,8 @@
 # Usage:
 #   scripts/remote-test [opts] [pytest args/paths…]   # engine (`tests/`) and dt-cloud (`cloud/tests/`) suites
 #   scripts/remote-test --site [opts] [vitest args…]   # site vitest (`site/`)
+#   scripts/remote-test --fleet [opts] [vitest args…]  # fleet vitest (`fleet/`)
+#   scripts/remote-test --executor [opts]              # Node/workerd query parity (`site/executor/`)
 # Paths under `cloud/` run in the dt-cloud suite (from `cloud/`, as CI does), others in the engine suite; with no
 # paths, both suites run. Options:
 #   -a        include `slow`-marked tests (default: `-m 'not slow'`)
@@ -43,13 +45,17 @@ changed_since=
 rdir=
 workers=auto
 site=
+jsdir=site
+executor=
 sync_only=
 
 need() { [ $# -ge 2 ] || { echo "remote-test: $1 needs a value" >&2; exit 2; }; }
 # This script's options come first; the first argument that isn't one (or `--`) starts the test runner's.
 while [ $# -gt 0 ]; do
   case $1 in
-    --site) site=1; shift ;;
+    --site) site=1; jsdir=site; shift ;;
+    --fleet) site=1; jsdir=fleet; shift ;;
+    --executor) site=1; jsdir=site; executor=1; shift ;;
     -a) all=1; shift ;;
     -s) sync_only=1; shift ;;
     -c) need "$@"; changed_since=$2; shift 2 ;;
@@ -86,7 +92,9 @@ fi
 
 # A node that stops itself when idle is started on demand (`$REMOTE_TEST_INSTANCE`).
 instance=${REMOTE_TEST_INSTANCE:-}
-if ! ssh -o ConnectTimeout=5 "$host" true 2>/dev/null; then
+ssh_opts=()
+git_ssh=${GIT_SSH_COMMAND:-ssh}
+if ! ssh "${ssh_opts[@]}" -o ConnectTimeout=5 "$host" true 2>/dev/null; then
   [ -n "$instance" ] || { echo "remote-test: $host doesn't answer" >&2; exit 1; }
   aws=(aws ${REMOTE_TEST_AWS_PROFILE:+--profile "$REMOTE_TEST_AWS_PROFILE"} --region "${REMOTE_TEST_REGION:-us-east-1}")
   echo "remote-test: $host doesn't answer; starting $instance" >&2
@@ -99,15 +107,21 @@ if ! ssh -o ConnectTimeout=5 "$host" true 2>/dev/null; then
     exit 1
   fi
   "${aws[@]}" ec2 wait instance-running --instance-ids "$instance" || exit 1
+  # A stopped instance gets a new public address. Preserve the alias's user/key config but replace its stale DNS.
+  dns=$("${aws[@]}" ec2 describe-instances --instance-ids "$instance" --query 'Reservations[0].Instances[0].PublicDnsName' --output text) || exit 1
+  [[ $dns =~ ^[a-zA-Z0-9.-]+$ && $dns != None ]] || { echo "remote-test: $instance has no public DNS" >&2; exit 1; }
+  ssh_opts=(-o "HostName=$dns")
+  git_ssh="ssh -o HostName=$dns"
+  echo "remote-test: $host now at $dns" >&2
   for _ in $(seq 36); do  # SSH up within ~3 min
-    ssh -o ConnectTimeout=5 "$host" true 2>/dev/null && break
+    ssh "${ssh_opts[@]}" -o ConnectTimeout=5 "$host" true 2>/dev/null && break
     sleep 5
   done
-  ssh -o ConnectTimeout=5 "$host" true 2>/dev/null || { echo "remote-test: $host is running but SSH isn't up after 3 min" >&2; exit 1; }
+  ssh "${ssh_opts[@]}" -o ConnectTimeout=5 "$host" true 2>/dev/null || { echo "remote-test: $host is running but SSH isn't up after 3 min" >&2; exit 1; }
 fi
 
-ssh "$host" "set -e; [ -d $rdir/.git ] || { mkdir -p $rdir && git init -q $rdir; }"
-out=$(git push -q -f "$host:$rdir" "$sha:refs/heads/remote-test" 2>&1) || { echo "$out" >&2; exit 1; }
+ssh "${ssh_opts[@]}" "$host" "set -e; [ -d $rdir/.git ] || { mkdir -p $rdir && git init -q $rdir; }"
+out=$(GIT_SSH_COMMAND="$git_ssh" git push -q -f "$host:$rdir" "$sha:refs/heads/remote-test" 2>&1) || { echo "$out" >&2; exit 1; }
 
 # The tests to run: engine paths, cloud paths (relative to `cloud/`), and options for both.
 opts=()
@@ -158,7 +172,10 @@ if [ -n "$site" ] && [ -z "$sync_only" ]; then
   fi
   command -v pnpm >/dev/null || npm install -g --prefix \$HOME/.local/node pnpm@10 >/dev/null
   PUPPETEER_SKIP_DOWNLOAD=1 pnpm install --frozen-lockfile --reporter=silent
-  cd site && exec pnpm vitest run $(q "$@")
+  if [ -n "$executor" ]; then
+    cd site && exec pnpm executor:parity $(q "$@")
+  fi
+  cd $jsdir && exec pnpm vitest run $(q "$@")
 fi
 command -v uv >/dev/null || curl -LsSf https://astral.sh/uv/install.sh | sh
 export VIRTUAL_ENV=\$PWD/.venv PATH=\$PWD/.venv/bin:\$PATH  # as \`uv run\`: tests run the env's CLIs (\`dt-cloud\`)
@@ -187,6 +204,6 @@ EOF
 echo "remote-test: $host:$rdir @ ${sha:0:12} → $log" >&2
 set +e
 # `-t` (when this is a terminal): ^C reaches the remote run; the log drops the terminal's `\r`s
-ssh -t -o LogLevel=QUIET "$host" "bash -c $(printf %q "$remote")" 2>&1 | tee >(tr -d '\r' > "$log")
+ssh "${ssh_opts[@]}" -t -o LogLevel=QUIET "$host" "bash -c $(printf %q "$remote")" 2>&1 | tee >(tr -d '\r' > "$log")
 rc=${PIPESTATUS[0]}
 exit "$rc"

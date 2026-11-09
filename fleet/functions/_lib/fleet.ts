@@ -112,7 +112,7 @@ export async function readDeployment(d: Deployment, env: Env, now: number, nRuns
     }, e => { out.errors.health = why(e) }),
     getJson<RunsWire>(f, `${d.url}/api/scan-runs`, token).then(r => {
       if (!r.configured) { out.errors.runs = 'scan runs are not set up'; return }
-      out.runs = r.runs.filter(s => !MAINT_KINDS.has(s.run.kind)).slice(0, nRuns).map(fleetRun)
+      out.runs = r.runs.filter(s => !MAINT_KINDS.has(s.run.kind) && s.run.status !== 'nop').slice(0, nRuns).map(fleetRun)
       out.last = out.runs[0] ?? null
     }, e => { out.errors.runs = why(e) }),
     getJson<SeriesWire>(f, `${d.url}/api/series?store=meta`, token).then(s => {
