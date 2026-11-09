@@ -29,8 +29,12 @@ describe('D1', () => {
     const { db, raw } = await sqliteD1()
     const env = { DB: db, SESSION_SECRET: 's'.repeat(32), BASE_SCOPE: 'cw', ...vars }
     const gate = gateFor(env as never)!
-    const tok = async (email: string, scopes: string[]) =>
-      (await gate.mint({ email, scopes, name: email, createdBy: 'test', expiresAt: null, maxRedeems: null })).token
+    const grantIds: Record<string, string> = {}
+    const tok = async (email: string, scopes: string[]) => {
+      const { token, grant } = await gate.mint({ email, scopes, name: email, createdBy: 'test', expiresAt: null, maxRedeems: null })
+      grantIds[email] = grant.id
+      return token
+    }
     const viewer = await tok('ann@example.test', ['cw'])
     const adminT = await tok('ops@example.test', ['cw', 'admin'])
     const call = async (method: string, path: string, opts: { token?: string; body?: string; headers?: Record<string, string> } = {}) => {
@@ -51,7 +55,7 @@ describe('D1', () => {
       raw.exec('DELETE FROM admin_edits')
     }
     const put = (body: unknown, token = adminT) => call('PUT', '/switch', { token, body: JSON.stringify(body) })
-    return { db, raw, env, call, put, viewer, adminT }
+    return { db, raw, env, call, put, viewer, adminT, gate, grantIds }
   }
 
   const ev = (t: number, k: string, f: Record<string, unknown> = {}) => ({ t, k, ...f })
@@ -293,7 +297,7 @@ describe('D1', () => {
      *  have errors; even ones are bob's. */
     async function seeded(n: number) {
       const s = await setup({}, null)
-      const ins = s.raw.prepare('INSERT INTO session_log VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+      const ins = s.raw.prepare('INSERT INTO session_log (sid, email, via, build, ua, started_ms, last_ms, n_events, n_errors, n_batches, first_url, received_ts) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
       for (let i = 0; i < n; i++) {
         const last = i >= 4 && i <= 6 ? NOW - 4000 : NOW - i * 1000
         ins.run(`sid-s${String(i).padStart(4, '0')}`, i % 2 ? 'ann@example.test' : 'bob@example.test', 'session', 'b', null, last - 500, last, 1, i % 2, 1, null, NOW / 1000)
@@ -441,7 +445,7 @@ describe('D1', () => {
 
   describe('POST /api/session-log', () => {
     it('stores a batch under the request identity and summarizes the session', async () => {
-      const { call, viewer, raw } = await setup()
+      const { call, viewer, raw, grantIds } = await setup()
       expect(await call('POST', '', { token: viewer, body: batch() })).toEqual([204, null])
       expect(await call('POST', '', {
         token: viewer,
@@ -450,7 +454,7 @@ describe('D1', () => {
       expect(raw.prepare('SELECT * FROM session_log').all()).toEqual([{
         sid: 'sid-aaaaaa', email: 'ann@example.test', via: 'grant', build: 'abc1234567', ua: 'UA/1',
         started_ms: NOW - 5000, last_ms: NOW - 1000, n_events: 5, n_errors: 2, n_batches: 2,
-        first_url: '/?d=2026-10-10', received_ts: NOW / 1000,
+        first_url: '/?d=2026-10-10', received_ts: NOW / 1000, grant_id: grantIds['ann@example.test'], subject_name: null,
       }])
       expect(raw.prepare('SELECT sid, pid, seq, received_ts, first_ms, last_ms, n FROM session_log_batches ORDER BY seq').all()).toEqual([
         { sid: 'sid-aaaaaa', pid: 'pid-111111', seq: 0, received_ts: NOW / 1000, first_ms: NOW - 5000, last_ms: NOW - 4000, n: 2 },
@@ -561,7 +565,7 @@ describe('D1', () => {
 
   describe('admin reads', () => {
     it('lists sessions (filters) and returns one session’s events in time order — admins only', async () => {
-      const { call, viewer, adminT } = await setup()
+      const { call, viewer, adminT, grantIds } = await setup()
       await call('POST', '', { token: viewer, body: batch({ events: [ev(NOW - 5000, 'start', { u: '/' }), ev(NOW - 1000, 'nav', { u: '/a' })] }) })
       // A reload: the same tab's sid, a new page load; its clock interleaves.
       await call('POST', '', { token: viewer, body: batch({ pid: 'pid-222222', events: [ev(NOW - 3000, 'error', { msg: 'x' })] }) })
@@ -584,7 +588,7 @@ describe('D1', () => {
       expect(await call('GET', '/sessions/sid-aaaaaa', { token: adminT })).toEqual([200, {
         session: {
           sid: 'sid-aaaaaa', email: 'ann@example.test', via: 'grant', build: 'abc1234567', ua: 'UA/1',
-          started_ms: NOW - 5000, last_ms: NOW - 1000, n_events: 3, n_errors: 1, n_batches: 2, first_url: '/', received_ts: NOW / 1000,
+          started_ms: NOW - 5000, last_ms: NOW - 1000, n_events: 3, n_errors: 1, n_batches: 2, first_url: '/', received_ts: NOW / 1000, grant_id: grantIds['ann@example.test'],
         },
         events: [
           { t: NOW - 5000, k: 'start', u: '/', pid: 'pid-111111', seq: 0 },
@@ -636,4 +640,35 @@ describe('D1', () => {
       expect(await latency(db, { since: NOW - 86_400_000 }, 1)).toEqual(body)
     })
   })
+})
+
+it('records the trusted grant recipient and id, never the private memo or client-supplied identity', async () => {
+  const { db, raw } = await sqliteD1()
+  const env = { DB: db, SESSION_SECRET: 's'.repeat(32), BASE_SCOPE: 'cw' }
+  const gate = gateFor(env as never)!
+  const { grant, token } = await gate.mint({ email: null, scopes: ['cw'], name: 'private memo', subject: { name: 'Trusted recipient' }, createdBy: 'test', expiresAt: null, maxRedeems: null })
+  raw.prepare('INSERT INTO session_log_switch VALUES (1, ?, ?, ?)').run(NOW + 86_400_000, 'ops', NOW / 1000)
+  const response = await onRequest({ request: new Request(`${HOST}/api/session-log`, {
+    method: 'POST', headers: { authorization: `Bearer ${token}` },
+    body: JSON.stringify({ sid: 'sid-actor1', pid: 'pid-actor1', seq: 0, build: 'build1', grantId: 'forged', subjectName: 'forged', events: [{ t: NOW, k: 'start', u: '/' }] }),
+  }), env } as never)
+  expect(response.status).toBe(204)
+  expect(raw.prepare('SELECT email, via, grant_id, subject_name FROM session_log').all()).toEqual([
+    { email: null, via: 'grant', grant_id: grant.id, subject_name: 'Trusted recipient' },
+  ])
+})
+
+it('keeps cancelled API requests in the session while counting only real failures as errors', async () => {
+  const { db, raw } = await sqliteD1()
+  const env = { DB: db, SESSION_SECRET: 's'.repeat(32), BASE_SCOPE: 'cw', PUBLIC_READ: '1' }
+  raw.prepare('INSERT INTO session_log_switch VALUES (1, ?, ?, ?)').run(NOW + 86_400_000, 'ops', NOW / 1000)
+  const events = [
+    { t: NOW, k: 'api', u: '/cancelled', s: 0, ms: 1, err: 'abort' },
+    { t: NOW + 1, k: 'api', u: '/failed', s: 0, ms: 2, err: 'network' },
+    { t: NOW + 2, k: 'api', u: '/server-error', s: 500, ms: 3 },
+  ]
+  const response = await onRequest({ request: new Request(`${HOST}/api/session-log`, { method: 'POST', body: JSON.stringify({ sid: 'sid-cancel', pid: 'pid-cancel', seq: 0, build: 'b', events }) }), env } as never)
+  expect(response.status).toBe(204)
+  expect(raw.prepare('SELECT n_events, n_errors FROM session_log').all()).toEqual([{ n_events: 3, n_errors: 2 }])
+  expect((await d1SessionLogStore(db).sessionDetail('sid-cancel'))?.events).toEqual(events.map(event => ({ ...event, pid: 'pid-cancel', seq: 0 })))
 })

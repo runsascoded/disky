@@ -61,7 +61,7 @@ describe('the /admin session-log switch', () => {
   })
   it('not set up (no migration): no form', () => {
     expect(render({ ...OFF, reason: 'not set up' })).toBe(
-      `<section class="oa-slog-switch">${intro}<p class="oa-slog-status">Not set up on this deployment (no session_log tables): apply the session-log migration.</p></section>`,
+      `<section class="oa-slog-switch">${intro}<p class="oa-slog-status">Not set up on this deployment (no session_log tables): apply migrations/session-log/.</p></section>`,
     )
   })
 })

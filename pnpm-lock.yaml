@@ -4,6 +4,11 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
+patchedDependencies:
+  '@open-athena/auth@0.1.0-dist.22b5eae':
+    hash: 8e76536a6efaa3423702429659fece146b25534978510ce5937e07d403b82c7b
+    path: patches/@open-athena__auth@0.1.0-dist.22b5eae.patch
+
 importers:
 
   .: {}
@@ -202,7 +207,7 @@ importers:
         version: 0.27.20(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
       '@open-athena/auth':
         specifier: github:Open-Athena/auth#2c9be8e54a709c8a41e2aab2372cb98e501bdc55
-        version: https://codeload.github.com/Open-Athena/auth/tar.gz/2c9be8e54a709c8a41e2aab2372cb98e501bdc55(@cloudflare/workers-types@5.20261014.1)(@floating-ui/react@0.27.20(react-dom@19.2.8(react@19.2.8))(react@19.2.8))(@tanstack/react-query@5.101.4(react@19.2.8))(react-dom@19.2.8(react@19.2.8))(react@19.2.8)(vue@3.5.44(typescript@5.9.3))
+        version: https://codeload.github.com/Open-Athena/auth/tar.gz/2c9be8e54a709c8a41e2aab2372cb98e501bdc55(patch_hash=8e76536a6efaa3423702429659fece146b25534978510ce5937e07d403b82c7b)(@cloudflare/workers-types@5.20261014.1)(@floating-ui/react@0.27.20(react-dom@19.2.8(react@19.2.8))(react@19.2.8))(@tanstack/react-query@5.101.4(react@19.2.8))(react-dom@19.2.8(react@19.2.8))(react@19.2.8)(vue@3.5.44(typescript@5.9.3))
       '@open-athena/treemap':
         specifier: workspace:*
         version: link:../packages/treemap
@@ -4531,7 +4536,7 @@ snapshots:
       react-dom: 19.2.8(react@19.2.8)
       vue: 3.5.44(typescript@5.9.3)
 
-  '@open-athena/auth@https://codeload.github.com/Open-Athena/auth/tar.gz/2c9be8e54a709c8a41e2aab2372cb98e501bdc55(@cloudflare/workers-types@5.20261014.1)(@floating-ui/react@0.27.20(react-dom@19.2.8(react@19.2.8))(react@19.2.8))(@tanstack/react-query@5.101.4(react@19.2.8))(react-dom@19.2.8(react@19.2.8))(react@19.2.8)(vue@3.5.44(typescript@5.9.3))':
+  '@open-athena/auth@https://codeload.github.com/Open-Athena/auth/tar.gz/2c9be8e54a709c8a41e2aab2372cb98e501bdc55(patch_hash=8e76536a6efaa3423702429659fece146b25534978510ce5937e07d403b82c7b)(@cloudflare/workers-types@5.20261014.1)(@floating-ui/react@0.27.20(react-dom@19.2.8(react@19.2.8))(react@19.2.8))(@tanstack/react-query@5.101.4(react@19.2.8))(react-dom@19.2.8(react@19.2.8))(react@19.2.8)(vue@3.5.44(typescript@5.9.3))':
     optionalDependencies:
       '@cloudflare/workers-types': 5.20261014.1
       '@floating-ui/react': 0.27.20(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
