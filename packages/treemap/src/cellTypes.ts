@@ -11,6 +11,12 @@ export interface CellStyle {
   ink?: string
   /** repeating-gradient overlay (e.g. the class-lens hatch marin uses) */
   hatch?: string
+  /** Density hint for an aggregated cell supplied by the consumer. Draws the dust grid in both renderers. */
+  dustCount?: number
+  /** Horizontal fill bands, in top-to-bottom order. Shared by DOM, canvas and image export. */
+  bands?: { color: string; frac: number }[]
+  /** Diagonal stripes: CSS angle, painted width and repeat period in pixels. */
+  stripes?: { angle: number; color: string; width: number; period: number }[]
   /**
    * Shared-tiling stroke for THIS cell, overriding `--dt-treemap-edge`. Each
    * cell paints its own half of every boundary it shares, so neighbours may

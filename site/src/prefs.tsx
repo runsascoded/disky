@@ -12,10 +12,8 @@ import { AT_MODES, type AtMode } from './sessionsModel'
 //
 // - `tiling`: `shared` (cells share edges — one stroke per boundary, exact
 //   areas; the default) vs `gaps` (2px gutters, rounded corners).
-// - `renderer`: `dom` (one element per cell; the default, full feature
-//   parity) vs `canvas` (one paint loop for the whole map — for the 1e3–1e6
-//   cell views the DOM renderer bogs down on; per-cell React extras — the
-//   actor badges — don't draw there yet).
+// - `renderer`: `canvas` (the default, one paint loop for dense maps) vs
+//   `dom` (one element per cell). Explicit saved choices take precedence.
 export type Renderer = 'dom' | 'canvas'
 
 function pref<T extends string>(key: string, ok: readonly T[], dflt: T) {
@@ -42,7 +40,7 @@ function pref<T extends string>(key: string, ok: readonly T[], dflt: T) {
 }
 
 const tiling = pref<Tiling>('tiling', ['shared', 'gaps'], 'shared')
-const renderer = pref<Renderer>('renderer', ['dom', 'canvas'], 'dom')
+const renderer = pref<Renderer>('renderer', ['dom', 'canvas'], 'canvas')
 const titleSpace = pref<'reclaim' | 'full'>('title-space', ['reclaim', 'full'], DEFAULT_STORE.reclaimTitleSpace ? 'reclaim' : 'full')
 export const useTitleSpace = titleSpace.use
 // Whole-pixel seams, each parent's ≥1px wider than its children's (`<Treemap borderStep>`); off by default.
@@ -63,7 +61,7 @@ export const setTiling = tiling.set
 export const useRenderer = renderer.use
 
 const TILING_TIP = 'Cell gutters. Off (default): cells share edges — one stroke per boundary, areas stay exact. On: gaps and rounded corners between cells.'
-const RENDERER_TIP = 'DOM (default): one element per cell — every feature, keyboard focus on every cell. Canvas: the whole map painted in one pass, for views of thousands of cells that make the DOM renderer crawl; outlines, tooltips and drilling work the same, but the marker avatars on cells don’t draw there yet.'
+const RENDERER_TIP = 'Canvas (default): paints dense maps in one pass, with grid textures, diff bands, labels, tooltips and drilling. DOM: one element per cell. Both support keyboard navigation; an explicitly saved choice is kept.'
 
 /** Map-display preferences behind a ⚙ (in the treemap's key line): tiling
  * gutters and the renderer. A native `<details>`, so it closes on Esc /
