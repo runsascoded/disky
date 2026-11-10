@@ -121,6 +121,13 @@ ROOT_LABEL = "my buckets"                   # the store root's crumb label
 # BUCKET_REGIONS = '{"my-bucket": "us-east1"}'  # a one-region bucket cut runs its job there, beside the data; unset = BATCH_REGION
 # DATA_BUCKET = "my-data"                      # the bucket a run's plan.json, manifest and logs land in (dispatch requires it)
 # SWEEP_IMAGE = "<region>-docker.pkg.dev/<project>/<repo>/<image>:<tag>"  # the executor's image (dispatch requires it)
+# History retention is opt-in: jobs build immutable candidates; adoption is a separate environment CAS.
+# HISTORY_CURRENT_KEY = "history/environments/dev/CURRENT.json"  # unset: follow the scan pipeline's writer generations
+# HISTORY_IMAGE = "<region>-docker.pkg.dev/<project>/<repo>/<image>@sha256:<digest>"  # pinned history worker image
+# HISTORY_DATA_STORE = "gs://my-data-bucket"  # source generations, beside the Batch workers
+# HISTORY_SERVING_STORE = "r2://my-index-bucket"  # immutable candidate artifacts and environment pointers
+# HISTORY_REGION = "us-east1"                 # beside HISTORY_DATA_STORE; no default
+# HISTORY_SECRETS = '{"R2_ENDPOINT":"my-r2-endpoint","R2_ACCESS_KEY_ID":"my-r2-key","R2_SECRET_ACCESS_KEY":"my-r2-secret"}'  # env variable -> Secret Manager name, never values
 # SWEEP_REVIEW_STORE = "r2://<index-bucket>"  # historical review inputs after per-scan retirement (`sweep`: the `as_of` hold store; unset = gs://$DATA_BUCKET)
 # SWEEP_REVIEW_SECRETS = '{"R2_ENDPOINT":"<endpoint-secret>","R2_ACCESS_KEY_ID":"<key-secret>","R2_SECRET_ACCESS_KEY":"<secret-secret>"}'
 # SWEEP_PACING = "guided"                    # per-bucket feedback; adaptive is a faster probe, enable after a controlled benchmark
@@ -189,3 +196,4 @@ ROOT_LABEL = "my buckets"                   # the store root's crumb label
 # dev DEV_EMAIL                             local dev only (`.dev.vars`): the identity localhost acts as
 # overlay STORE_KEY                         set by STORES_JSON's per-store overlay, never directly
 # overlay STORE_SCOPE
+# overlay HISTORY_VERSION_CACHE              one request's captured history pointer/version; never deployment configuration
