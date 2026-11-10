@@ -121,15 +121,18 @@ def execute_run(
     dry = run.get("mode") == "dry"
     # a staged dir covers staged items under it: size + delete each byte once
     selection = run.get("selected_items_json")
-    items = json.loads(selection) if selection is not None else run_items(db, run["plan_id"], schema)
+    missing_selection = schema.execution and selection is None
+    items = [] if missing_selection else json.loads(selection) if selection is not None else run_items(db, run["plan_id"], schema)
     if not isinstance(items, list) or any(not isinstance(uri, str) for uri in items):
         raise ValueError("invalid recorded run selection")
     uris = uncovered(items)
-    if schema.execution:
+    if schema.execution and not missing_selection:
         db.query("UPDATE deletion_runs SET executor_started_ts = COALESCE(executor_started_ts, ?) WHERE run_id = ?", [now(), run["run_id"]])
 
     deleted_bytes = deleted_objects = deleted_paths = 0
-    errors: list[tuple[str, str]] = []
+    errors: list[tuple[str, str]] = [
+        ("(selection)", "Request has no saved checked paths; nothing was moved. Review the staged items and submit a new request."),
+    ] if missing_selection else []
     trashed = not dry and trash_fn is not None
     for uri in uris:
         nbytes = nobjs = 0
