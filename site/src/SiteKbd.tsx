@@ -19,7 +19,8 @@ import { useShare } from './sharePreview'
 
 /** The source link (SpeedDial, omnibar, user menu): the deployment's
  * `REPO_URL` (wrangler `[vars]`, read at build time), else this repo. */
-export const REPO_URL = import.meta.env.VITE_REPO_URL || 'https://github.com/runsascoded/disky'
+export { REPO_URL } from './build'
+import { SOURCE_URL } from './build'
 const HOSTS = hostPair(import.meta.env.VITE_PROD_HOST, import.meta.env.VITE_DEV_HOST)
 /** The other deployments: the family list less this one. */
 export const PEERS: Peer[] = (STORES[0]?.peers ?? []).filter(p => p.prod !== import.meta.env.VITE_PROD_HOST)
@@ -127,7 +128,7 @@ export function SiteKbd({ extra = [], placeholder }: {
         { label: toUrl('This page on ', peerHref(p, href)), group: 'Pages', keywords: [p.label, p.prod.split('.')[0]], handler: () => location.assign(peerHref(p, location.href)) },
       ]),
     ),
-    'page:github': { label: 'Source on GitHub ↗', group: 'Pages', handler: () => window.open(REPO_URL, '_blank', 'noreferrer') },
+    'page:github': { label: 'Source on GitHub ↗', group: 'Pages', handler: () => window.open(SOURCE_URL, '_blank', 'noreferrer') },
     ...Object.fromEntries(
       USERS.filter(u => pathname !== `/user/${u}`).map(u => [
         `userpage:${u}`,
@@ -170,7 +171,7 @@ export function SiteKbd({ extra = [], placeholder }: {
   return (
     <>
       <SpeedDial TooltipRenderer={SpeedDialTip} actions={[
-        { key: 'github', label: 'GitHub', icon: <FaGithub />, href: REPO_URL },
+        { key: 'github', label: 'GitHub', icon: <FaGithub />, href: SOURCE_URL },
         ...extra,
         { key: 'help', label: `Help line: ${help}`, icon: <MdHelpOutline />, onClick: toggleHelp },
         { key: 'params', label: 'URL params', icon: <MdLink />, onClick: () => openDialog('params') },
