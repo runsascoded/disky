@@ -319,6 +319,7 @@ export function ScansPage() {
     ])),
   })
   const filtered = runs.filter(r => runKindMatches(kind, r.run.kind) && statusMatches(status, runOutcome(r.run, r.phase_issues)))
+  const visiblePhases = new Set(filtered.flatMap(r => r.spans.map(s => s.phase)))
   const shown = filtered.filter(r => inSpan(span, r.run.started_ts))
   const paged = usePaged(shown, DEFAULT_SIZES, [page, setPage])
   return (
@@ -346,7 +347,7 @@ export function ScansPage() {
         <section className="sr-chart">
           <h3>Duration by run</h3>
           <DurationStrip runs={filtered} color={color} onPick={id => nav(scanHref(id))} win={span} onWin={setSpan} hover={hover} />
-          <Legend order={order} color={color} run={hover.id ? runs.find(r => r.run.run_id === hover.id) : undefined} />
+          <Legend order={order.filter(p => visiblePhases.has(p))} color={color} run={hover.id ? runs.find(r => r.run.run_id === hover.id) : undefined} />
         </section>
         <div className="runs-wrap">
           <table className="runs sr-runs">

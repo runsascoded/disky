@@ -43,7 +43,7 @@
   }
   .sr-job-type { display: inline-block; border-left: 3px solid var(--job-ink); padding: 1px 6px; font-size: 12px; background: color-mix(in srgb, var(--job-ink) 9%, var(--surface)); border-radius: 3px; }
   table.sr-runs tbody td { padding-top: 3px; padding-bottom: 3px; }
-  .sr-runs .sr-status { white-space: nowrap; }
+  .sr-runs .sr-status { white-space: nowrap; max-width: 180px; overflow: hidden; text-overflow: ellipsis; vertical-align: middle; }
   .sr-runs tbody td:first-child { border-left: 2px solid color-mix(in srgb, var(--job-ink) 50%, transparent); }
   .sr-output-link { color: inherit; text-decoration: underline dotted; text-underline-offset: 3px; }
   .sw { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 5px; vertical-align: baseline;
