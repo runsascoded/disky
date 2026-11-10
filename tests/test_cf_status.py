@@ -31,7 +31,7 @@ def test_preview_paginates_and_rejects_other_branches_and_failed_builds():
         calls.append(path)
         return {'result': [dep('other', 'preview'), dep('r2', 'preview', 'failure')], 'result_info': {'total_pages': 2}} if len(calls) == 1 else {'result': [expected], 'result_info': {'total_pages': 2}}
     assert S.deployment(fetch, 'demo', 'r2') == expected
-    assert calls == ['demo/deployments?env=preview&per_page=100&page=1', 'demo/deployments?env=preview&per_page=100&page=2']
+    assert calls == ['demo/deployments?env=preview&per_page=25&page=1', 'demo/deployments?env=preview&per_page=25&page=2']
 
 
 @pytest.mark.parametrize('canonical', [None, dep(environment='preview'), dep(status='failure')])

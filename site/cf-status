@@ -54,15 +54,15 @@ def deployment(
         if not result or result.get("environment") != "production" or result.get("latest_stage", {}).get("status") != "success":
             raise ValueError("no successful canonical production deployment found")
         return result
-    for page in range(1, 11):
-        query = urlencode({"env": "preview", "per_page": 100, "page": page})
+    for page in range(1, 41):
+        query = urlencode({"env": "preview", "per_page": 25, "page": page})
         result = fetch(f"{project}/deployments?{query}")
         for item in result["result"]:
             metadata = item.get("deployment_trigger", {}).get("metadata", {}) or {}
             if item.get("environment") == "preview" and metadata.get("branch") == branch and item.get("latest_stage", {}).get("status") == "success":
                 return item
         pages = result.get("result_info", {}).get("total_pages")
-        if not result["result"] or (pages is not None and page >= pages) or (pages is None and len(result["result"]) < 100):
+        if not result["result"] or (pages is not None and page >= pages) or (pages is None and len(result["result"]) < 25):
             raise ValueError(f"no successful preview deployment for branch {branch}")
     raise ValueError(f"preview branch {branch} not found within 1000 deployments; inspect Pages directly")
 
