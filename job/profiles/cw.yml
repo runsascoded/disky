@@ -28,6 +28,7 @@ sources:
   - {uri: s3://rhoarnet-us-east-08a, endpoint: https://cwobject.com}
   - {uri: s3://marin-us-east-08a, endpoint: https://cwobject.com}
   - {uri: s3://marin-us-west-04a, endpoint: https://cwobject.com}
+  - {uri: s3://marin-us-east-01a, endpoint: https://cwobject.com}
   - {uri: s3://marinfold-exp368-rno2a, endpoint: https://cwobject.com}
   - {uri: s3://marin-rno2a, endpoint: https://cwobject.com}
 machines:
@@ -60,7 +61,7 @@ env:
   D1_DB_NAME: oa-cw-s3-usage-db
   INDEX_VARIANTS: path                              # no user-sorted tiers here
   SITE_URL: https://cw.oa.dev
-  WARM_PATHS: ",marin-us-east-02a,marin-us-east-02a/marin,marin-us-east-02a/tmp,marin-us-east-02a/iris,hero-checkpoints,hero-checkpoints/tmp,hero-checkpoints/marin,marin-us-east-06a,marin-us-east-06a/marin,rhoarnet-us-east-08a,marin-us-east-08a,marin-us-west-04a,marinfold-exp368-rno2a,marin-rno2a"
+  WARM_PATHS: ",marin-us-east-02a,marin-us-east-02a/marin,marin-us-east-02a/tmp,marin-us-east-02a/iris,hero-checkpoints,hero-checkpoints/tmp,hero-checkpoints/marin,marin-us-east-06a,marin-us-east-06a/marin,rhoarnet-us-east-08a,marin-us-east-08a,marin-us-west-04a,marin-us-east-01a,marinfold-exp368-rno2a,marin-rno2a"
   SWEEP_BUCKET: marin-us-east-02a
   SWEEP_S3_ENDPOINT: https://cwobject.com
   # the R2 serving bucket each scan's served subset is published to (`cw-s3` CF stack's `r2_bucket`)
@@ -83,7 +84,7 @@ pass: [DT_RECORD, DT_ALERTS]
 # since the reviewed one-off by hand (2026-10-18: 167 scans, ~874 GB over GCS + R2)
 # `gcp-cost`: the day's GCP cost snapshot (`/admin/cost/gcp`), `cf-usage` the Cloudflare one (`/admin/usage`), `soft-delete`
 # what each bucket retains (`/admin`); all never fatal
-steps: [retire, gcp-cost, cf-usage, soft-delete]
+steps: [retire, gcp-cost, cf-usage, soft-delete, store-gc]
 labels: {deployment: cw}
 queue_size: 20
 options:
@@ -116,3 +117,14 @@ options:
   # the data bucket, then the R2 copy: every scan but the newest 2, each verified against the interval store in this task
   # first (about one per run once caught up; a failed or unverifiable scan keeps its files)
   retire: {keep: 2, execute: true, verify_jobs: 3, static_gen: 2026-10-15cw.c001, layer2: true, copies: [r2]}
+  # Both copies must have the same complete current base before any predecessor is collected. The main lineage follows
+  # CURRENT; meta is pinned in both production and preview. Builder leases exclude concurrent append/compaction.
+  store-gc:
+    execute: true
+    grace: 259200
+    store: r2://oa-cw-s3-usage-index
+    copies: []
+    static_store: gs://oa-cw-s3-usage-data
+    static_copies: [r2://oa-cw-s3-usage-index]
+    static_gens: [2026-10-18meta]
+    scratch: oa-cw-s3-usage-scratch

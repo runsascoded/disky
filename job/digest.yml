@@ -62,6 +62,8 @@ buckets:
   rhoarnet-us-east-08a: {label: rhoarnet, zone: 08a, shape: square, quota: {bytes: 500 TiB, name: 500 TiB, short: 500Ti}}
   marin-us-east-08a: {label: 08a, zone: 08a, shape: square, quota: {bytes: 500 TiB, name: 500 TiB, short: 500Ti}}
   marin-us-west-04a: {label: 04a, shape: triangle, quota: {bytes: 100 TiB, name: 100 TiB, short: 100Ti}}
+  # The 01a quota has not been verified; report its measured bytes without inventing headroom.
+  marin-us-east-01a: {label: 01a}
   marinfold-exp368-rno2a: {label: marinfold, zone: rno2a, shape: star, quota: {bytes: 100 TiB, name: 100 TiB, short: 100Ti}}
   marin-rno2a: {label: rno2a, zone: rno2a, shape: star, quota: {bytes: 100 TiB, name: 100 TiB, short: 100Ti}}
 prices: {}
