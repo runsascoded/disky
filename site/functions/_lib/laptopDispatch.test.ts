@@ -2,7 +2,7 @@ import type { D1Database } from '@cloudflare/workers-types'
 import { describe, expect, it } from 'vitest'
 import type { DispatchReq } from './dispatch'
 import { dispatchPlan, EXECUTORS } from './executor'
-import { AGENT, DATE_RE, laptopExecutor, STALE_S } from './laptopDispatch'
+import { AGENT, DATE_RE, laptopExecutor, laptopStatus, STALE_S } from './laptopDispatch'
 import { planDigest } from './plans'
 import { sqliteD1 } from './testD1'
 
@@ -52,8 +52,45 @@ describe('the laptop executor', () => {
     await seen(s.db, Math.floor(NOW / 1000) - STALE_S - 1)
     const stale = await dispatchPlan(s.env, req({ date: '2026-09-29' }), 'laptop', s.executors)
     expect([never, stale]).toEqual([
-      { ok: false, status: 503, error: 'laptop not reachable: its drainer has never checked in; the items stay staged', extra: { last_seen: null } },
-      { ok: false, status: 503, error: `laptop not reachable: its drainer last checked in ${STALE_S + 1} s ago; the items stay staged`, extra: { last_seen: Math.floor(NOW / 1000) - STALE_S - 1 } },
+      { ok: false, status: 503, error: 'Cleanup agent disconnected. Request not submitted; the items remain staged. Open disky on the laptop, check its network connection, then check again.', extra: { code: 'cleanup_agent_offline', executor: 'laptop', ready: false, last_seen: null, checked_at: NOW / 1000, stale_after: STALE_S } },
+      { ok: false, status: 503, error: 'Cleanup agent disconnected. Request not submitted; the items remain staged. Open disky on the laptop, check its network connection, then check again.', extra: { code: 'cleanup_agent_offline', executor: 'laptop', ready: false, last_seen: NOW / 1000 - STALE_S - 1, checked_at: NOW / 1000, stale_after: STALE_S } },
+    ])
+    expect(await runs(s.db)).toEqual([])
+  })
+
+  it('reports the same readiness boundary the dispatch gate uses', async () => {
+    const s = await setup()
+    const statuses = [await laptopStatus(s.db, NOW)]
+    for (const age of [STALE_S, STALE_S + 1, 5]) {
+      await seen(s.db, NOW / 1000 - age)
+      statuses.push(await laptopStatus(s.db, NOW))
+    }
+    expect(statuses).toEqual([null, STALE_S, STALE_S + 1, 5].map(age => ({
+      executor: 'laptop', ready: age != null && age <= STALE_S, last_seen: age == null ? null : NOW / 1000 - age, checked_at: NOW / 1000, stale_after: STALE_S,
+    })))
+  })
+
+  it('freezes exactly the checked rows, preserving exact-object keys', async () => {
+    const s = await setup()
+    await seen(s.db, NOW / 1000)
+    await s.db.prepare("UPDATE plan_items SET kind = 'object' WHERE prefix = ?").bind(B).run()
+    const result = await dispatchPlan(s.env, req({ date: '2026-09-29', items: [`=${B}`] }), 'laptop', s.executors)
+    expect(result).toEqual({
+      ok: true, job_id: 'laptop-dry-20260929t221530z', plan_id: 1, mode: 'dry', date: '2026-09-29', actor: ACTOR,
+      digest: await planDigest([`=${B}`]), extra: { agent_seen: NOW / 1000 },
+    })
+    expect((await s.db.prepare('SELECT selected_items_json FROM deletion_runs').all()).results).toEqual([{ selected_items_json: JSON.stringify([B]) }])
+  })
+
+  it('refuses an empty selection or a selected row removed since the page loaded', async () => {
+    const s = await setup()
+    await seen(s.db, NOW / 1000)
+    expect([
+      await dispatchPlan(s.env, req({ date: '2026-09-29', items: [] }), 'laptop', s.executors),
+      await dispatchPlan(s.env, req({ date: '2026-09-29', items: ['file:///absent/'] }), 'laptop', s.executors),
+    ]).toEqual([
+      { ok: false, status: 400, error: 'plan has no items' },
+      { ok: false, status: 400, error: 'not in the plan: file:///absent/' },
     ])
     expect(await runs(s.db)).toEqual([])
   })

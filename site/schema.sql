@@ -264,7 +264,7 @@ CREATE TABLE deletion_runs (
   undo_state TEXT NOT NULL DEFAULT 'none' CHECK (undo_state IN ('none', 'partial', 'full', 'expired')),
   purge_state TEXT NOT NULL DEFAULT 'none' CHECK (purge_state IN ('none', 'pending', 'done')),
   log_dir TEXT NOT NULL
-, plan_digest TEXT, freed_bytes INTEGER);
+, plan_digest TEXT, freed_bytes INTEGER, selected_items_json TEXT, executor_started_ts INTEGER, execution_errors_json TEXT);
 
 CREATE TABLE deletion_bands (
   run_id TEXT NOT NULL REFERENCES deletion_runs(run_id),

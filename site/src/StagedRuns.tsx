@@ -31,7 +31,7 @@ import { ReviewPreservation } from './RunPreservation'
 import {
   type Check, commonBucketPrefix, type DeletionRun, elapsed, elapsedDetails, type ExecJob, fmtDur, type LogSummaryFile, loggedOf, logSubdir,
   type PlanSummaryFile, plannedOf, progressEstimate, type ProgressFile, runControls, runFileHref, runFilesRel, runLabel, type RunView, sumProgress, type Tally,
-  verifyRun, viewBuckets, viewLive, viewState, joinRuns,
+  verifyRun, viewBuckets, viewLive, viewState, joinRuns, runErrors,
 } from './runs'
 
 const PAGE_SIZES = [20, 50, Infinity]
@@ -180,7 +180,9 @@ export function RunsSection({ runs, jobs, configured, jobsError, admin, busy, ac
               const dir = dirOf(v)
               const isOpen = v.key === filtered[target]?.key
               const toggle = () => setRunP(isOpen ? undefined : v.key)
-              const failed = state === 'FAILED'
+              const failed = state === 'FAILED' || state === 'COMPLETED_WITH_ERRORS'
+              const laptop = r?.log_dir === 'laptop'
+              const errors = runErrors(r)
               const jobId = job?.job_id ?? v.key
               return (
                 <Fragment key={v.key}>
@@ -193,8 +195,8 @@ export function RunsSection({ runs, jobs, configured, jobsError, admin, busy, ac
                     <td className="num nb">
                       {r?.finished_ts ? (
                         <>
-                          <Tooltip content={mode === 'dry' ? 'Dry run only: no objects were deleted.' : 'Objects deleted by this real run.'}>
-                            <RunOutcome mode={mode}>{fmtBytes(r.deleted_bytes)} <span className="dim">· {fmtN(r.deleted_objects)}</span></RunOutcome>
+                          <Tooltip content={mode === 'dry' ? 'Dry run only: no objects were deleted.' : laptop ? 'Moved to Trash on the laptop. Space is freed when Trash is emptied.' : 'Objects deleted by this real run.'}>
+                            <RunOutcome mode={mode}>{laptop && mode === 'real' && <>moved to Trash </>}{fmtBytes(r.deleted_bytes)} <span className="dim">· {fmtN(r.deleted_objects)}</span></RunOutcome>
                           </Tooltip>
                           {r.freed_bytes != null && (
                             <Tooltip content={<>What deleting this set would <b>actually</b> free, measured on the laptop: bytes it shares with a clone or hardlink outside the set (e.g. a <code>.venv</code>’s files cloned from <code>~/.cache/uv</code>) stay on disk. The size before it counts every path in full.</>}>
@@ -220,7 +222,10 @@ export function RunsSection({ runs, jobs, configured, jobsError, admin, busy, ac
                       ) : <span className="dim">—</span>}
                     </td>
                     <td>
-                      <span className="rstate">{state.toLowerCase()}</span>
+                      <Tooltip content={laptop && !r?.finished_ts ? 'The agent must acknowledge the start and record completion. A disconnected agent may delay this request; do not submit it again.' : 'Recorded executor state.'}>
+                        <span className="rstate">{state === 'COMPLETED_WITH_ERRORS' ? 'completed with issues' : laptop && state === 'PENDING' ? 'waiting for result' : laptop && state === 'QUEUED' ? 'waiting for agent' : state.toLowerCase()}</span>
+                      </Tooltip>
+                      {!!errors.length && <details className="why"><summary>{errors.length} {errors.length === 1 ? 'issue' : 'issues'}</summary>{errors.map(([path, message]) => <div key={path}><code>{path}</code>: {message}</div>)}</details>}
                       {state === 'CANCELLED' && <Tooltip content="A STOP request was recorded. Batch may report this clean interruption as FAILED (exit 130); acknowledged deletions remain logged."><span className="dim"> · intentional stop</span></Tooltip>}
                       {failed && job?.last_event && <details className="why"><summary>why</summary><div>{job.last_event}</div></details>}
                       {ctl.undoing && <span className="tag">undoing</span>}
@@ -325,7 +330,8 @@ export function RunDetail({ run, live, progress, dir, planned, fmtBytes, now }: 
       {CAPS.runFiles && <RunProgress id={run.run_id} live={live} fmtBytes={fmtBytes} planned={planned} />}
       <dl className="rd-totals">
         {live ? <div><dt>live progress</dt><dd>{progress ? <>{fmtBytes(progress.bytes)} · {fmtN(progress.deletes)} {r.mode === 'real' ? 'deleted' : 'would delete'} · {fmtN(progress.gone)} gone</> : 'waiting for progress'}<span className="dim"> · final totals recorded when the run ends</span></dd></div>
-          : <div><dt>final totals</dt><dd>{fmtBytes(r.deleted_bytes)} · {fmtN(r.deleted_objects)} {r.mode === 'real' ? 'deleted' : 'would delete'} · {fmtN(r.skipped_gone)} already gone · {fmtN(r.skipped_overwritten ?? 0)} replaced objects preserved</dd></div>}
+          : <div><dt>final totals</dt><dd>{fmtBytes(r.deleted_bytes)} · {fmtN(r.deleted_objects)} {r.mode === 'real' ? r.log_dir === 'laptop' ? 'moved to Trash' : 'deleted' : 'would delete'} · {fmtN(r.skipped_gone)} already gone · {fmtN(r.skipped_overwritten ?? 0)} replaced objects preserved</dd></div>}
+        {r.log_dir === 'laptop' && r.finished_ts && <div><dt>cleanup result</dt><dd>{r.execution_errors_json == null ? 'Per-path errors were not recorded by this older agent; completion alone does not confirm every path succeeded.' : runErrors(r).length ? `${runErrors(r).length} path issue(s); see the run row for details.` : 'Completed without recorded path errors.'}</dd></div>}
         <div><dt>elapsed</dt><dd>{fmtDur((r.finished_ts ?? now) - r.started_ts)}</dd></div>
         {review && <div><dt>reviewed manifest</dt><dd>{fmtN(review.objects)} objects · {fmtBytes(review.bytes)}</dd></div>}
         {review && Object.keys(review.as_of ?? {}).length > 0 && <div><dt>review cutoffs</dt><dd>{[...new Set(Object.values(review.as_of))].sort().join(' · ')}</dd></div>}
