@@ -150,10 +150,15 @@ if $dry; then
   exit 0
 fi
 
+export VITE_BUILD_ENVIRONMENT="$mode"
+export VITE_SOURCE_REF="${VITE_SOURCE_REF:-$(git symbolic-ref --short -q HEAD || true)}"
 if [ "$mode" = dev ]; then CLOUDFLARE_ENV=preview pnpm build; else pnpm build; fi
 wlog=$(mktemp)
 trap 'rm -f "$wlog"' EXIT
-pnpm exec wrangler pages deploy dist --project-name "$PROJECT" --branch "$branch" 2>&1 | tee "$wlog"
+source_sha=$(git rev-parse HEAD)
+source_dirty=false
+[ -z "$(git status --porcelain --untracked-files=no)" ] || source_dirty=true
+pnpm exec wrangler pages deploy dist --project-name "$PROJECT" --branch "$branch" --commit-hash "$source_sha" --commit-dirty="$source_dirty" 2>&1 | tee "$wlog"
 # Belt and braces: if wrangler ignored the config anyway (it downgrades a config error to a warning), the
 # deployed bindings and vars are the old ones, whatever exit code it returned.
 if grep -q 'Ignoring configuration file' "$wlog"; then
