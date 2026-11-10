@@ -96,6 +96,20 @@ def test_empty_recorded_selection_never_falls_back_to_the_live_plan(db):
     assert touched == []
 
 
+def test_upgraded_agent_refuses_snapshotless_requests_from_an_older_site(db):
+    execution_schema(db)
+    _enqueue(db, "old-site", 1, [A, B])
+    touched = []
+    drain.drain_once(db, size_fn=lambda uri: touched.append(uri) or (10, 1), delete_fn=touched.append, now=lambda: 400)
+    assert touched == []
+    record = db.query("SELECT executor_started_ts, finished_ts, deleted_bytes, execution_errors_json FROM deletion_runs")[0]
+    record["execution_errors_json"] = json.loads(record["execution_errors_json"])
+    assert record == {
+        "executor_started_ts": None, "finished_ts": 400, "deleted_bytes": 0,
+        "execution_errors_json": [["(selection)", "Request has no saved checked paths; nothing was moved. Review the staged items and submit a new request."]],
+    }
+
+
 def _enqueue(db, run_id, plan_id, prefixes, mode="real"):
     db.query("INSERT INTO plans (id, name, created_by, created_ts) VALUES (?, 'Staged', 'ryan', 1)", [plan_id])
     db.query(
