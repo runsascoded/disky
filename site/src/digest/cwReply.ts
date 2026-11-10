@@ -1,3 +1,4 @@
+import { compactQuietLines, QUIET_BYTES } from './compact'
 /** The `cw` digest template's replies (`digest_cw.day_rows` / `reply`, ported byte for byte; goldens:
  * `./replyParity.test.ts`), so `/admin/slack` can show a candidate's replies. The job still renders what it posts in
  * Python. `ArrowMark`s exist only here: a preview of marks with no emoji uploaded. Pure; DOM-free. */
@@ -191,18 +192,19 @@ function tail(day: DayRow, cfg: DigestCfg, rc: ReplyCfg, marks: ReplyMarks, sep:
     const rw = RUNWAY_MARKS.includes(marks) ? groupRunway(g.map(([b]) => b), day, cfg) : null
     return { g, c: clause(g, day, cfg, marks), f, over: rc.alert_pct !== null && f !== null && f >= rc.alert_pct, rw }
   })
-  if (RUNWAY_MARKS.includes(marks)) {
-    return cs.map(({ g, c, f, rw }) => {
-      if (f === null || !rw) return c
-      const m = poolMark(marks as PoolMark, rw.r, f, rw.v, cfg.buckets[g[0][0]]?.shape ?? 'circle')
-      return `${m}${c}${runwayText(rw.r, cfg)}`
-    }).join(sep)
-  }
-  if (marks === 'circles') {
-    cs.sort((a, b) => (b.f ?? -1) - (a.f ?? -1))
-    return cs.map(({ c, f }) => (f === null ? c : `${mark(f, rc.alert_pct ?? 90)}${c}`)).join(sep)
-  }
-  return cs.map(({ c, over }) => (over ? `${ALERT_MARK} ${c}` : c)).join(sep)
+  if (marks === 'circles') cs.sort((a, b) => (b.f ?? -1) - (a.f ?? -1))
+  const lines = cs.map(({ g, c, f, rw, over }) => {
+    let text = c
+    if (RUNWAY_MARKS.includes(marks) && f !== null && rw) {
+      text = `${poolMark(marks as PoolMark, rw.r, f, rw.v, cfg.buckets[g[0][0]]?.shape ?? 'circle')}${c}${runwayText(rw.r, cfg)}`
+    } else if (marks === 'circles' && f !== null) text = `${mark(f, rc.alert_pct ?? 90)}${c}`
+    else if (!RUNWAY_MARKS.includes(marks) && marks !== 'circles' && over) text = `${ALERT_MARK} ${c}`
+    const total = g.reduce((n, [, v]) => n + v, 0)
+    const change = g.reduce((n, [b]) => n + (b === cfg.primary ? day.dtb ?? 0 : day.dextra[b] ?? 0), 0)
+    return { text, quiet: total * cfg.unit.bytes < QUIET_BYTES && Math.abs(change) * cfg.unit.bytes < QUIET_BYTES && !over && (f === null || f < QUIET_PCT) && (!rw || rw.r.days >= 60) }
+  })
+  return (sep === '\n' ? compactQuietLines(lines) : lines.map(x => x.text)).join(sep)
+
 }
 
 /** The day's tile per pool that has a quota, in the reply's order. */
