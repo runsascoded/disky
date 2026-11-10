@@ -22,6 +22,7 @@ does.
 """
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable, Optional
@@ -51,6 +52,7 @@ class Schema:
     hold: bool             # deletion_runs.undo_deadline + purge_state (site/)
     agents: bool           # the `agents` heartbeat table
     freed: bool = False    # deletion_runs.freed_bytes: a dry run's measured reclaim (specs/apfs-sharing.md)
+    execution: bool = False  # immutable selection, execution start and per-path errors
 
     @classmethod
     def detect(cls, db: Any) -> "Schema":
@@ -65,6 +67,7 @@ class Schema:
             hold="undo_deadline" in runs and "purge_state" in runs,
             agents=bool(cols("agents")),
             freed="freed_bytes" in runs,
+            execution={"selected_items_json", "executor_started_ts", "execution_errors_json"} <= runs,
         )
 
 
@@ -73,7 +76,8 @@ def pending_runs(db: Any, schema: Optional[Schema] = None) -> list[dict]:
     (a `batch_job` run is running remotely — the Batch job finishes it)."""
     schema = schema or Schema.detect(db)
     return db.query(
-        "SELECT run_id, plan_id, mode, actor, started_ts FROM deletion_runs "
+        "SELECT run_id, plan_id, mode, actor, started_ts"
+        + (", selected_items_json" if schema.execution else "") + " FROM deletion_runs "
         "WHERE finished_ts IS NULL" + (" AND batch_job IS NULL" if schema.batch_job else "") + " ORDER BY started_ts"
     )
 
@@ -116,15 +120,22 @@ def execute_run(
     schema = schema or Schema.detect(db)
     dry = run.get("mode") == "dry"
     # a staged dir covers staged items under it: size + delete each byte once
-    uris = uncovered(run_items(db, run["plan_id"], schema))
-    sized = [(uri, *size_fn(uri)) for uri in uris]  # (uri, bytes, objects)
+    selection = run.get("selected_items_json")
+    items = json.loads(selection) if selection is not None else run_items(db, run["plan_id"], schema)
+    if not isinstance(items, list) or any(not isinstance(uri, str) for uri in items):
+        raise ValueError("invalid recorded run selection")
+    uris = uncovered(items)
+    if schema.execution:
+        db.query("UPDATE deletion_runs SET executor_started_ts = COALESCE(executor_started_ts, ?) WHERE run_id = ?", [now(), run["run_id"]])
 
     deleted_bytes = deleted_objects = deleted_paths = 0
     errors: list[tuple[str, str]] = []
     trashed = not dry and trash_fn is not None
-    for uri, nbytes, nobjs in sized:
+    for uri in uris:
+        nbytes = nobjs = 0
         deleted = 0
         try:
+            nbytes, nobjs = size_fn(uri)
             if not dry:
                 if trash_fn is not None:
                     trash_fn(uri, run["run_id"])
@@ -163,6 +174,9 @@ def execute_run(
     if freed is not None:
         sets += ", freed_bytes = ?"
         params.append(freed)
+    if schema.execution:
+        sets += ", execution_errors_json = ?"
+        params.append(json.dumps(errors))
     if schema.hold and trashed and deleted_paths:
         sets += ", undo_deadline = ?, purge_state = 'pending'"
         params.append(finished + hold_s if hold_s is not None else None)

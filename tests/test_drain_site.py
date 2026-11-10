@@ -5,6 +5,7 @@ trashing, and the post-run hook, which are schema-independent."""
 from __future__ import annotations
 
 import sqlite3
+import json
 
 import pytest
 
@@ -43,6 +44,56 @@ class FakeD1:
 
 A = "file:///Users/ryan/c/old-repo/"
 B = "file:///Users/ryan/Downloads/big.iso/"
+
+
+def execution_schema(db):
+    for column in ["selected_items_json TEXT", "executor_started_ts INTEGER", "execution_errors_json TEXT"]:
+        db.query(f"ALTER TABLE deletion_runs ADD COLUMN {column}")
+
+
+def test_recorded_selection_survives_plan_edits_and_acknowledges_start(db):
+    execution_schema(db)
+    _enqueue(db, "selected", 1, [A, B])
+    db.query("UPDATE deletion_runs SET selected_items_json = ?", [json.dumps([B])])
+    db.query("DELETE FROM plan_items WHERE prefix = ?", [B])
+    deleted = []
+
+    def size(uri):
+        assert db.query("SELECT executor_started_ts FROM deletion_runs") == [{"executor_started_ts": 300}]
+        return 100, 2
+
+    drain.drain_once(db, size_fn=size, delete_fn=deleted.append, now=lambda: 300)
+    assert deleted == [B]
+    assert db.query("SELECT executor_started_ts, finished_ts, execution_errors_json FROM deletion_runs") == [
+        {"executor_started_ts": 300, "finished_ts": 300, "execution_errors_json": "[]"},
+    ]
+
+
+def test_per_path_errors_reach_the_site_record_and_do_not_hide_successes(db):
+    execution_schema(db)
+    _enqueue(db, "partial", 1, [A, B])
+    db.query("UPDATE deletion_runs SET selected_items_json = ?", [json.dumps([A, B])])
+    deleted = []
+
+    def delete(uri):
+        if uri == B:
+            raise PermissionError("access denied")
+        deleted.append(uri)
+
+    drain.drain_once(db, size_fn=lambda uri: (10, 1), delete_fn=delete, now=lambda: 400)
+    assert deleted == [A]
+    record = db.query("SELECT finished_ts, deleted_bytes, deleted_objects, execution_errors_json FROM deletion_runs")[0]
+    record["execution_errors_json"] = json.loads(record["execution_errors_json"])
+    assert record == {"finished_ts": 400, "deleted_bytes": 10, "deleted_objects": 1, "execution_errors_json": [[B, "access denied"]]}
+
+
+def test_empty_recorded_selection_never_falls_back_to_the_live_plan(db):
+    execution_schema(db)
+    _enqueue(db, "empty-selection", 1, [A, B])
+    db.query("UPDATE deletion_runs SET selected_items_json = '[]'")
+    touched = []
+    drain.drain_once(db, size_fn=lambda uri: touched.append(uri) or (10, 1), delete_fn=touched.append, now=lambda: 400)
+    assert touched == []
 
 
 def _enqueue(db, run_id, plan_id, prefixes, mode="real"):

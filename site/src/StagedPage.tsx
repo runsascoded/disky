@@ -34,6 +34,8 @@ import { applyLedger } from './ledgerOverlay'
 import { useOwnerIndex, useOwners } from './owners'
 import { useRowSelection, useRowSelectionKeys } from './rowSelection'
 import { CAPS, useDispatch, useExecJobs, usePrefixHistory, useRunAction, useRunFiles, useStagedPlan, useUnstage } from './plans'
+import { CleanupAgentStatus, useCleanupAgent } from './CleanupAgentStatus'
+import { dispatchFailure } from './dispatchStatus'
 import type { EmptiedBatch, StagedItem } from './plans'
 import { joinRuns, LIVE_STATES, runFilesRel, viewBuckets, viewLive, type ProgressFile } from './runs'
 import { PrefixRecovery } from './PrefixRecovery'
@@ -140,6 +142,9 @@ export function StagedPage() {
   const [live, setLive] = useState(false)
   const staged = useStagedPlan(live, null)
   const jobs = useExecJobs(live)
+  const laptop = DEFAULT_STORE.executor === 'laptop'
+  const agent = useCleanupAgent(admin && laptop)
+  const agentOffline = !agent.error && agent.data?.ready === false
   const jobList = useMemo(() => jobs.data?.jobs ?? [], [jobs.data])
   const plan = staged.data?.plan ?? null
   const items = useMemo(() => staged.data?.items ?? [], [staged.data])
@@ -161,7 +166,7 @@ export function StagedPage() {
   // A job that ended without recording one stops counting.
   const dispatched = dispatch.data?.job_id
   const dispatchedState = dispatched ? jobList.find(j => j.job_id === dispatched)?.state : undefined
-  const pendingJob = dispatched && !views.some(v => v.job?.job_id === dispatched && v.run) && !['SUCCEEDED', 'FAILED', 'CANCELLED'].includes(dispatchedState ?? '') ? dispatched : null
+  const pendingJob = dispatched && !views.some(v => v.run?.run_id === dispatched || (v.job?.job_id === dispatched && v.run)) && !['SUCCEEDED', 'FAILED', 'CANCELLED'].includes(dispatchedState ?? '') ? dispatched : null
   const pendingState = pendingJob ? dispatchedState : undefined
   const anyLive = !!pendingJob
     || views.some(v => viewLive(v) || v.ops.some(o => LIVE_STATES.has(o.state)) || (v.run && !v.run.finished_ts && !v.job))
@@ -464,7 +469,7 @@ export function StagedPage() {
       <p className="sub">
         Files are not deleted until an admin dispatches a deletion job. Stage prefixes
         from a directory’s table (the trash icon); a memo travels with each gesture.
-        {admin ? ` A dry run previews what would be deleted and is optional.${DEFAULT_STORE.executor === 'plan-sweep' ? ' A real deletion may be permanent; recovery is not guaranteed.' : ' A real run deletes recoverably.'}` : ' An admin reviews and dispatches from here.'}
+        {admin ? ` A dry run previews what would be deleted and is optional.${laptop ? ' A real run moves paths to the laptop’s Trash for 7 days.' : DEFAULT_STORE.executor === 'plan-sweep' ? ' A real deletion may be permanent; recovery is not guaranteed.' : ' A real run deletes recoverably.'}` : ' An admin reviews and dispatches from here.'}
       </p>
       {error && <p className="staged-err" role="alert">{error.message}</p>}
       {plan?.note && <p className="plan-note">{plan.note}</p>}
@@ -542,6 +547,7 @@ export function StagedPage() {
           {admin && activeRows.length > 0 && (
             <div className="dispatch" id="dispatch">
               <h3>Dispatch</h3>
+              {laptop && <CleanupAgentStatus agent={agent.data} error={agent.error} checking={agent.isFetching} recheck={() => { void agent.refetch(); void staged.refetch() }} />}
               {activeRows.length > 0 && CAPS.bucketCut && planBuckets.length > 1 && (
                 <details className="dispatch-buckets" open={!!cut}>
                   <summary className="dim">limit this run to some buckets{cut ? <> — <b>{onBuckets.length} of {planBuckets.length}</b> checked</> : ''}</summary>
@@ -558,13 +564,13 @@ export function StagedPage() {
                 </details>
               )}
               <div className="dispatch-btns">
-                <button type="button" className="dry" disabled={busy || !runScan || !runItems.length} onClick={() => dispatch.mutate({ mode: 'dry', date: runScan, items: runItems, buckets: cut, machine })}>
+                <button type="button" className="dry" disabled={busy || agentOffline || !runScan || !runItems.length} onClick={() => dispatch.mutate({ mode: 'dry', date: runScan, items: runItems, buckets: cut, machine })}>
                   dry-run {runItems.length ? <>{runItems.length} selected</> : <>(check rows)</>}
                 </button>
                 {!armed
-                  ? <button type="button" className="danger" disabled={busy || !runScan || !runItems.length} onClick={() => setArmed(true)}>real delete{runItems.length ? <> {runItems.length} selected…</> : <> (check rows)</>}</button>
+                  ? <button type="button" className="danger" disabled={busy || agentOffline || !runScan || !runItems.length} onClick={() => setArmed(true)}>real delete{runItems.length ? <> {runItems.length} selected…</> : <> (check rows)</>}</button>
                   : <>
-                      <button type="button" className="danger armed" disabled={busy} onClick={() => dispatch.mutate({ mode: 'real', date: runScan, items: runItems, buckets: cut, machine }, { onSuccess: () => setArmed(false) })}>
+                      <button type="button" className="danger armed" disabled={busy || agentOffline} onClick={() => dispatch.mutate({ mode: 'real', date: runScan, items: runItems, buckets: cut, machine }, { onSuccess: () => setArmed(false) })}>
                         confirm REAL delete of {runItems.length} {runItems.length === 1 ? 'prefix' : 'prefixes'}{stats && <> · {fmtBytes(runTotal)}</>}
                       </button>
                       <button type="button" onClick={() => setArmed(false)}>cancel</button>
@@ -575,13 +581,13 @@ export function StagedPage() {
                   {runRows.map(r => <li key={r.prefix}><code>{r.prefix}</code>{r.stat && <span className="dim"> · {fmtBytes(r.stat.b)}</span>}</li>)}
                 </ul>
               )}
-              {dispatch.error && <p className="staged-err" role="alert">{dispatch.error.message}</p>}
+              {dispatch.error && <p className="staged-err" role="alert">{dispatchFailure(dispatch.error)}</p>}
               {pendingJob && (
                 <p className="dispatch-pending">
-                  Dispatched <code>{pendingJob}</code> · {(pendingState ?? 'submitted').toLowerCase()}. Its run appears below {CAPS.startHint}.
+                  Request accepted · <code>{pendingJob}</code> · {(pendingState ?? 'submitted').toLowerCase()}. Completion has not been confirmed. Its run appears below {CAPS.startHint}.
                 </p>
               )}
-              <p className="dispatch-note dim">A run acts on the checked rows only. Each is read at the scan it was staged at: objects written since are left alone (re-stage to include them), and anything rewritten since is skipped. A real run doesn't need a dry run first.{machine && <> Runs on <code>{machine}</code>.</>}</p>
+              <p className="dispatch-note dim">{laptop ? 'A real run moves the checked paths and their current contents to Trash on the laptop, retained for 7 days. Sizes are estimates from the scan; space is freed when Trash is emptied. A dry run previews sizes without moving files.' : <>A run acts on the checked rows only. Each is read at the scan it was staged at: objects written since are left alone (re-stage to include them), and anything rewritten since is skipped. A real run doesn't need a dry run first.{machine && <> Runs on <code>{machine}</code>.</>}</>}</p>
             </div>
           )}
         </>

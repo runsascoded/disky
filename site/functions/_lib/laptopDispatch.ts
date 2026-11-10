@@ -10,7 +10,7 @@
  */
 import type { D1Database } from '@cloudflare/workers-types'
 import { type DispatchReq, type ExecEnv, type Executor, type Prepared, refuse } from './dispatch.js'
-import type { FinishedRun } from './plans.js'
+import { digestLines, planItems, type FinishedRun } from './plans.js'
 
 export const DATE_RE = /^\d{4}-\d{2}-\d{2}(?:T\d{4})?$/
 export const AGENT = 'drainer'
@@ -20,6 +20,12 @@ export const STALE_S = 180
 export async function agentSeen(db: D1Database, name: string = AGENT): Promise<number | null> {
   const r = await db.prepare('SELECT seen_ts FROM agents WHERE name = ?').bind(name).first<{ seen_ts: number }>()
   return r?.seen_ts ?? null
+}
+
+export async function laptopStatus(db: D1Database, now = Date.now()) {
+  const last_seen = await agentSeen(db)
+  const checked_at = Math.floor(now / 1000)
+  return { executor: 'laptop' as const, ready: last_seen != null && checked_at - last_seen <= STALE_S, last_seen, checked_at, stale_after: STALE_S }
 }
 
 /** `20260929t221530z`: sortable, safe in a run id. */
@@ -32,22 +38,22 @@ export function laptopExecutor(now: () => number = Date.now): Executor {
     async prepare(_env: ExecEnv, db: D1Database, req: DispatchReq): Promise<Prepared | ReturnType<typeof refuse>> {
       const plan = await db.prepare('SELECT id FROM plans WHERE id = ?').bind(req.planId).first<{ id: number }>()
       if (!plan) return refuse(404, 'no such plan')
-      const prefixes = (await db.prepare('SELECT prefix FROM plan_items WHERE plan_id = ? ORDER BY prefix').bind(req.planId).all<{ prefix: string }>()).results.map(i => i.prefix)
+      const items = await planItems(db, req.planId, req.items)
+      const prefixes = digestLines(items)
       if (!prefixes.length) return refuse(400, 'plan has no items')
-      const seen = await agentSeen(db)
-      const age = seen == null ? null : Math.round(now() / 1000 - seen)
-      if (age == null || age > STALE_S) {
-        const when = age == null ? 'has never checked in' : `last checked in ${age} s ago`
-        return refuse(503, `laptop not reachable: its drainer ${when}; the items stay staged`, { last_seen: seen })
+      const status = await laptopStatus(db, now())
+      const seen = status.last_seen
+      if (!status.ready) {
+        return refuse(503, 'Cleanup agent disconnected. Request not submitted; the items remain staged. Open disky on the laptop, check its network connection, then check again.', { code: 'cleanup_agent_offline', ...status })
       }
       const launch: Prepared['launch'] = async (date, digest) => {
         const runId = `laptop-${req.mode}-${stamp(now())}`
         // No manifest / log dir on the edge (the drainer keeps its trash
         // manifest on the laptop) and no ledger heads (plan-first).
         await db.prepare(`
-          INSERT INTO deletion_runs (run_id, plan_id, manifest, scan, head, exec_head, actor, mode, started_ts, log_dir, plan_digest)
-          VALUES (?, ?, 'laptop', ?, 0, 0, ?, ?, ?, 'laptop', ?)
-        `).bind(runId, req.planId, date, req.actor, req.mode, Math.floor(now() / 1000), digest).run()
+          INSERT INTO deletion_runs (run_id, plan_id, manifest, scan, head, exec_head, actor, mode, started_ts, log_dir, plan_digest, selected_items_json)
+          VALUES (?, ?, 'laptop', ?, 0, 0, ?, ?, ?, 'laptop', ?, ?)
+        `).bind(runId, req.planId, date, req.actor, req.mode, Math.floor(now() / 1000), digest, JSON.stringify(items.map(i => i.key))).run()
         return { job_id: runId, extra: { agent_seen: seen } }
       }
       return { prefixes, launch }

@@ -87,7 +87,7 @@ export async function call<T>(url: string, method = 'GET', body?: unknown): Prom
   try { data = JSON.parse(text) } catch { data = null }
   if (!r.ok) {
     const msg = data && typeof data === 'object' && 'error' in data ? String((data as { error: unknown }).error) : `${r.status} ${text.slice(0, 200)}`
-    throw new HttpError(msg, r.status)
+    throw new HttpError(msg, r.status, data)
   }
   return data as T
 }
@@ -230,6 +230,7 @@ export function useDispatch(planId: number | null) {
       return call(`${EXEC_API}/dispatch`, 'POST', { plan_id: planId, mode, date, items, ...(buckets ? { buckets } : {}), ...(machine ? { machine } : {}) })
     },
     onSuccess: () => { void qc.invalidateQueries({ queryKey: ['plans'] }); void qc.invalidateQueries({ queryKey: ['sweep-jobs'] }) },
+    onError: () => { void qc.invalidateQueries({ queryKey: ['cleanup-agent'] }); void qc.invalidateQueries({ queryKey: ['plans'] }) },
   })
 }
 

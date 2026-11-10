@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   commonBucketPrefix, type DeletionRun, EXEC_CAPS, elapsed, elapsedDetails, type ExecJob, fmtDur, joinRuns, loggedOf, plannedOf, runControls,
-  progressEstimate, type ProgressFile, runDirHref, runFileHref, runFilesRel, runJobId, runLabel, sumProgress, verifyRun, viewBuckets, viewState,
+  progressEstimate, type ProgressFile, runDirHref, runFileHref, runFilesRel, runJobId, runLabel, sumProgress, verifyRun, viewBuckets, viewState, viewLive, runErrors,
 } from './runs'
 
 const GCS_JOB = 'gcs-sweep-real-20260928-120000z'
@@ -12,6 +12,19 @@ const run = (o: Partial<DeletionRun> = {}): DeletionRun => ({
   undo_deadline: 9000, undo_state: 'none', purge_state: 'none', log_dir: `gs://data/sweep/runs/${GCS_JOB}`, buckets: 'b1', ...o,
 })
 const job = (o: Partial<ExecJob> & { job_id: string }): ExecJob => ({ op: 'sweep', state: 'SUCCEEDED', created: '2026-09-28T12:00:00Z', ...o })
+
+it('laptop runs distinguish queued, acknowledged, legacy pending and completed with path issues', () => {
+  const states = [
+    run({ log_dir: 'laptop', finished_ts: null, selected_items_json: '["file:///a"]' }),
+    run({ log_dir: 'laptop', finished_ts: null, executor_started_ts: 1100 }),
+    run({ log_dir: 'laptop', finished_ts: null }),
+    run({ log_dir: 'laptop', execution_errors_json: '[["file:///a","access denied"]]' }),
+    run({ log_dir: 'laptop', execution_errors_json: '[]' }),
+  ].map(run => ({ key: run.run_id, run, ops: [] }))
+  expect(states.map(viewState)).toEqual(['QUEUED', 'RUNNING', 'PENDING', 'COMPLETED_WITH_ERRORS', 'DONE'])
+  expect(states.map(viewLive)).toEqual([true, true, true, false, false])
+  expect(runErrors(states[3].run)).toEqual([['file:///a', 'access denied']])
+})
 
 describe('runJobId — the Batch job behind a run', () => {
   it('gcs: the log dir\'s job; cw: the run id itself; a CLI run: its run id', () => {

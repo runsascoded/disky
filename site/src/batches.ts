@@ -10,7 +10,7 @@ export type { ItemKind, PlanItem } from '../functions/_lib/plans'
 /** A failed API call with its HTTP status: a 4xx is a refusal (the request can't be honoured as asked,
  *  shown muted), a 5xx a failure (worth a retry, shown red). An error without a status is the network's. */
 export class HttpError extends Error {
-  constructor(message: string, readonly status: number) { super(message) }
+  constructor(message: string, readonly status: number, readonly details?: unknown) { super(message) }
 }
 
 /** A refusal, not a failure: an error carrying a 4xx status. A 5xx or a network error (no status) is a failure. */

@@ -30,6 +30,9 @@ export interface DeletionRun {
   /** A dry run's measured reclaim — what the set as a whole would actually
    *  free (clone/hardlink-shared bytes don't count); null = not measured. */
   freed_bytes?: number | null
+  selected_items_json?: string | null
+  executor_started_ts?: number | null
+  execution_errors_json?: string | null
 }
 
 /** An executor Batch job, as `/api/<executor>/jobs` lists it. */
@@ -142,9 +145,18 @@ export function joinRuns(runs: readonly DeletionRun[], jobs: readonly ExecJob[])
 }
 
 /** A run's state word: Batch's while its job is listed, else what D1 says. */
-export const viewState = (v: RunView): string => v.job?.stop_requested && v.job.state === 'FAILED' ? 'CANCELLED' : v.job?.state ?? (v.run?.finished_ts ? 'DONE' : 'RECORDING')
+export const runErrors = (r?: DeletionRun): [string, string][] => r?.execution_errors_json ? JSON.parse(r.execution_errors_json) as [string, string][] : []
 
-export const viewLive = (v: RunView): boolean => LIVE_STATES.has(v.job?.state ?? '')
+export const viewState = (v: RunView): string => {
+  if (!v.job && v.run?.log_dir === 'laptop') {
+    if (v.run.finished_ts) return runErrors(v.run).length ? 'COMPLETED_WITH_ERRORS' : 'DONE'
+    if (v.run.executor_started_ts != null) return 'RUNNING'
+    return v.run.selected_items_json != null ? 'QUEUED' : 'PENDING'
+  }
+  return v.job?.stop_requested && v.job.state === 'FAILED' ? 'CANCELLED' : v.job?.state ?? (v.run?.finished_ts ? 'DONE' : 'RECORDING')
+}
+
+export const viewLive = (v: RunView): boolean => LIVE_STATES.has(viewState(v)) || viewState(v) === 'PENDING'
 
 /** Seconds a run took (or has taken, while live). */
 export function elapsed(v: RunView, now: number): number | null {
@@ -156,6 +168,15 @@ export function elapsed(v: RunView, now: number): number | null {
 
 /** Recorded executor timestamps, distinct from Batch runtime and queueing. */
 export function elapsedDetails(v: RunView): string[] {
+  if (v.run?.log_dir === 'laptop') {
+    const local = (ts: number) => new Date(ts * 1000).toLocaleString()
+    return [
+      `Request accepted: ${local(v.run.started_ts)}`,
+      v.run.executor_started_ts != null ? `Cleanup agent started: ${local(v.run.executor_started_ts)}` : 'Cleanup agent start not recorded',
+      v.run.finished_ts != null ? `Cleanup agent finished: ${local(v.run.finished_ts)}` : 'Completion not confirmed',
+      'Elapsed includes waiting for the cleanup agent.',
+    ]
+  }
   const stamp = (ts: number) => new Date(ts * 1000).toISOString().replace('T', ' ').replace('.000Z', ' UTC')
   const lines: string[] = []
   if (v.job?.created) lines.push(`Dispatched: ${stamp(Date.parse(v.job.created) / 1000)}`)
