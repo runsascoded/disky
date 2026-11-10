@@ -47,6 +47,10 @@ def test_render_exact_success_omits_private_controller_fields():
     assert N.render(doc(account_id='private', credentials={'secret': 'private'}, error='private')) == SUCCESS
 
 
+def test_github_bot_actor_is_rendered_without_rejecting_automated_releases():
+    assert N.render(doc(actor='github-actions[bot]')) == SUCCESS.replace('`louisa`', '`github-actions[bot]`')
+
+
 @pytest.mark.parametrize('site,label', [('gcs', 'GCS'), ('cw', 'CW'), ('hf', 'HF'), ('r2', 'R2')])
 @pytest.mark.parametrize('mode', ['dev', 'prod'])
 def test_each_site_and_environment_uses_its_own_identity(site, label, mode):
