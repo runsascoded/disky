@@ -18,6 +18,21 @@
  * grant's name or note (`callerOf`, emails masked), never a path, query string, email or address.
  */
 import type { AnalyticsEngineDataset, D1Database, D1PreparedStatement, D1Result, KVNamespace, R2Bucket, R2ObjectBody } from '@cloudflare/workers-types'
+import { BUILD } from './build.js'
+
+/** Bounded diagnostic labels, also safe as HTTP header values. An overflow is explicit, never silent. */
+export class GenerationLabels {
+  private readonly labels = new Set<string>()
+  private overflow = false
+  add(...parts: string[]): void {
+    // Reject malformed UTF-16 too: diagnostics must never fail a request.
+    if (parts.some(s => s.length > 192 || /[\uD800-\uDFFF]/u.test(s))) { this.overflow = true; return }
+    const label = parts.map(encodeURIComponent).join('=')
+    if (label.length > 256 || (!this.labels.has(label) && this.labels.size >= 8)) { this.overflow = true; return }
+    this.labels.add(label)
+  }
+  value(): string { return [...this.labels].sort().concat(this.overflow ? ['(overflow)'] : []).join(',') }
+}
 
 /** How the request proved who it is: a browser session, a share link's session, a Bearer token, nobody, or nobody
  *  with a crawler's user agent. */
@@ -34,6 +49,10 @@ export class Meter {
   caller: string | null = null
   cache: CacheTier = 'none'
   store = 'primary'
+  /** Selected even on a response-cache hit; store-qualified because union requests can select several. */
+  readonly staticGen = new GenerationLabels()
+  /** Actual R2 GET/HEAD attempts, including missing objects; empty on a fully cached response. */
+  readonly staticReads = new GenerationLabels()
   r2Reads = 0
   r2Bytes = 0
   d1Queries = 0
@@ -125,14 +144,15 @@ export interface UsagePoint {
 }
 
 /** The request's data point (spec `usage-metrics.md` §2's field table): blobs route, method, via, caller, status
- *  class, cache, store, host (`prod` on `prodHost`, else `dev`: a dev stack may share prod's dataset); doubles
+ *  class, cache, store, host (`prod` on `prodHost`, else `dev`: a dev stack may share prod's dataset), selected
+ *  static generations, attempted static R2 generations, server build; doubles
  *  count, wall ms, R2 reads, R2 bytes, D1 queries, D1 rows read, KV reads, D1 rows written; indexed by caller. */
 export function usagePoint(m: Meter, request: Request, res: Response, wallMs: number, prodHost?: string): UsagePoint {
   const url = new URL(request.url)
   const html = (res.headers.get('content-type') ?? '').startsWith('text/html')
   const who = m.via && m.caller ? { via: m.via, caller: m.caller } : anonymousCaller(request)
   return {
-    blobs: [routeOf(url.pathname, request.method, html), request.method, who.via, who.caller, statusClass(res.status), m.cache, m.store, url.host === prodHost ? 'prod' : 'dev'],
+    blobs: [routeOf(url.pathname, request.method, html), request.method, who.via, who.caller, statusClass(res.status), m.cache, m.store, url.host === prodHost ? 'prod' : 'dev', m.staticGen.value(), m.staticReads.value(), BUILD.sha],
     doubles: [1, Math.max(0, Math.round(wallMs)), m.r2Reads, m.r2Bytes, m.d1Queries, m.d1RowsRead, m.kvReads, m.d1RowsWritten],
     indexes: [who.caller],
   }
@@ -211,6 +231,7 @@ export function meteredR2(r2: R2Bucket): R2Bucket {
     get(target, p) {
       if (p === 'get') {
         return async (...args: Parameters<R2Bucket['get']>) => {
+          noteStaticRead(args[0])
           const o = await target.get(...args)
           const m = currentMeter()
           if (m) {
@@ -222,6 +243,7 @@ export function meteredR2(r2: R2Bucket): R2Bucket {
       }
       if (p === 'head') {
         return async (...args: Parameters<R2Bucket['head']>) => {
+          noteStaticRead(args[0])
           const o = await target.head(...args)
           const m = currentMeter()
           if (m) m.r2Reads++
@@ -231,6 +253,21 @@ export function meteredR2(r2: R2Bucket): R2Bucket {
       return forward(target, p)
     },
   })
+}
+
+function noteStaticRead(key: string): void {
+  const gen = /^static-names\/([^/]+)\//.exec(key)?.[1]
+  if (gen && gen !== 'src') currentMeter()?.staticReads.add(gen)
+}
+
+/** Applied after cache lookup, replacing any diagnostics stored with the cached response. `res` must have mutable headers. */
+export function generationHeaders(res: Response, m: Meter): Response {
+  for (const [header, labels] of [['x-disky-static-gen', m.staticGen], ['x-disky-static-reads', m.staticReads]] as const) {
+    const value = labels.value()
+    if (value) res.headers.set(header, value)
+    else res.headers.delete(header)
+  }
+  return res
 }
 
 const realStmt = new WeakMap<object, D1PreparedStatement>()

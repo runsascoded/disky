@@ -1,9 +1,11 @@
 import { describe, expect, it, vi } from 'vitest'
 import { type Ctx, type Env, gateFor, identify } from './auth'
+import { BUILD } from './build'
+import { withStaticGen } from './index'
 import { cacheKeyFor, cacheMatch } from './edgeCache'
 import { withStore } from './stores'
 import { sqliteD1 } from './testD1'
-import { anonymousCaller, grantCaller, Meter, METER, meterOf, ROUTES, routeOf, type UsagePoint, writeUsage } from './usage'
+import { anonymousCaller, grantCaller, GenerationLabels, Meter, METER, meterOf, ROUTES, routeOf, type UsagePoint, writeUsage } from './usage'
 
 const stampPage = vi.fn(async (_env: unknown, _url: URL, res: Response) => res)
 const anonymousPage = vi.fn(async (): Promise<Response | null> => null)
@@ -196,7 +198,7 @@ describe('the middleware writes one point per request', () => {
     expect(status).toEqual(200)
     expect(batched.map(b => b.map(s => (s as FakeStmt).sql))).toEqual([['SELECT a', 'SELECT b']])
     expect(points.map(shape)).toEqual([{
-      blobs: ['/api/subtree', 'GET', 'session', 'session', '2xx', 'miss', 'primary', 'dev'],
+      blobs: ['/api/subtree', 'GET', 'session', 'session', '2xx', 'miss', 'primary', 'dev', '', '', BUILD.sha],
       doubles: [1, -1, 3, 300, 4, 17, 1, 7],
       indexes: ['session'],
     }])
@@ -208,7 +210,7 @@ describe('the middleware writes one point per request', () => {
     const req = new Request('https://gcs.example.test/scans?x=1', { headers: { 'user-agent': 'Discordbot/2.0' } })
     await serveOne(req, env, async () => new Response('<!doctype html>\n', { headers: { 'content-type': 'text/html; charset=utf-8' } }))
     expect(points.map(shape)).toEqual([{
-      blobs: ['page', 'GET', 'bot', 'bot', '2xx', 'none', 'primary', 'prod'],
+      blobs: ['page', 'GET', 'bot', 'bot', '2xx', 'none', 'primary', 'prod', '', '', BUILD.sha],
       doubles: [1, -1, 0, 0, 0, 0, 0, 0],
       indexes: ['bot'],
     }])
@@ -221,7 +223,7 @@ describe('the middleware writes one point per request', () => {
       return json({ error: 'unauthenticated' }, 401)
     })
     expect(points.map(shape)).toEqual([{
-      blobs: ['/api/actions', 'POST', 'public', 'public', '4xx', 'none', 'primary', 'dev'],
+      blobs: ['/api/actions', 'POST', 'public', 'public', '4xx', 'none', 'primary', 'dev', '', '', BUILD.sha],
       doubles: [1, -1, 0, 0, 0, 0, 0, 0],
       indexes: ['public'],
     }])
@@ -238,7 +240,7 @@ describe('the middleware writes one point per request', () => {
       return (await cacheMatch(c.env, cacheKeyFor('subtree', '', 'k', 'meta')))!
     })
     expect(points.map(shape)).toEqual([{
-      blobs: ['/api/subtree', 'GET', 'session', 'session', '2xx', 'edge-hit', 'meta', 'dev'],
+      blobs: ['/api/subtree', 'GET', 'session', 'session', '2xx', 'edge-hit', 'meta', 'dev', '', '', BUILD.sha],
       doubles: [1, -1, 0, 0, 0, 0, 0, 0],
       indexes: ['session'],
     }])
@@ -276,5 +278,55 @@ describe('no binding, no point', () => {
   it('`meterOf` finds the Pages context\'s meter outside any async context', () => {
     const m = new Meter()
     expect([meterOf({ data: { [METER]: m } }) === m, meterOf({}), meterOf({ request: new Request('https://x.test/') })]).toEqual([true, undefined, undefined])
+  })
+})
+
+describe('static generation diagnostics', () => {
+  it('records selections on cache hits, actual reads separately, and replaces cached headers', async () => {
+    const { env, points } = bindings()
+    const pending: Promise<unknown>[] = []
+    const response = () => new Response('{}', { headers: {
+      'content-type': 'application/json',
+      'x-disky-static-gen': 'primary=obsolete',
+      'x-disky-static-reads': 'obsolete',
+    } })
+    const serve = (read: boolean) => onRequest({
+      request: new Request('https://x.test/api/subtree'), env: env as never, data: {},
+      waitUntil: p => { pending.push(p) },
+      next: async () => {
+        await withStaticGen({ STATIC_GEN: 'new.c002' })
+        // Re-entry must not duplicate selections; a union member stays store-qualified.
+        await withStaticGen({ STATIC_GEN: 'new.c002' })
+        await withStaticGen({ STORE_KEY: 'meta', STATIC_GEN: 'meta.c001' })
+        if (read) {
+          const r2 = (env as Env).INDEX_R2!
+          await r2.get('static-names/new.c002/catalog/meta.json')
+          await r2.head('static-names/new.c002/missing.parquet')
+          await r2.get('static-names/CURRENT.json')
+          await r2.get('static-names/src/scan.parquet')
+        }
+        return response()
+      },
+    })
+    const cold = await serve(true), cached = await serve(false)
+    await Promise.all(pending)
+    expect([cold, cached].map(r => [r.headers.get('x-disky-static-gen'), r.headers.get('x-disky-static-reads')])).toEqual([
+      ['meta=meta.c001,primary=new.c002', 'new.c002'],
+      ['meta=meta.c001,primary=new.c002', null],
+    ])
+    expect(points.map(p => p.blobs.slice(8))).toEqual([
+      ['meta=meta.c001,primary=new.c002', 'new.c002', BUILD.sha],
+      ['meta=meta.c001,primary=new.c002', '', BUILD.sha],
+    ])
+  })
+
+  it('bounds label count and length, escapes delimiters, and explicitly reports overflow', () => {
+    const labels = new GenerationLabels()
+    labels.add('a,b', 'x=y')
+    labels.add('a,b', 'x=y')
+    for (let i = 0; i < 9; i++) labels.add('s', String(i))
+    labels.add('x'.repeat(193))
+    labels.add('\ud800')
+    expect(labels.value()).toEqual('a%2Cb=x%3Dy,s=0,s=1,s=2,s=3,s=4,s=5,s=6,(overflow)')
   })
 })
