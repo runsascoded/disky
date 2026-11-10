@@ -14,7 +14,7 @@ import {
 } from './activityShape'
 import { captureWrite, noteActivity } from './activityHook'
 import { ingest } from './sessionLog'
-import { resetSlackScopes } from './slack'
+import { resetSlackScopes, resetSlackPeople } from './slack'
 import type { SlogEvent } from './sessionLogShape'
 
 const NOW = Date.UTC(2026, 9, 21, 15, 0, 0)  // 2026-10-21T15:00Z
@@ -231,11 +231,13 @@ describe('rendering', () => {
 /** A stubbed `fetch`: Slack posts get ts `1.00000N`, Discord posts id `dN`; every call is recorded. */
 /** Slack (and Discord) as fetch: posts get sequential ids; `auth.test` answers with `scopes` (the installed app's) and
  *  isn't logged. */
-function stubFetch(fail = false, scopes = 'chat:write,chat:write.customize') {
+function stubFetch(fail = false, scopes = 'chat:write,chat:write.customize', photo: string | null = null) {
   const calls: { url: string; method: string; body: Record<string, unknown> }[] = []
   let n = 0
   resetSlackScopes()
+  resetSlackPeople()
   vi.stubGlobal('fetch', vi.fn(async (url: string, init: RequestInit) => {
+    if (url.includes('/users.lookupByEmail?')) return new Response(JSON.stringify(photo ? { ok: true, user: { id: 'U1', profile: { image_192: photo } } } : { ok: false, error: 'users_not_found' }))
     if (url.endsWith('auth.test')) return new Response(JSON.stringify({ ok: true }), { headers: { 'x-oauth-scopes': scopes } })
     const body = JSON.parse(String(init.body ?? '{}'))
     calls.push({ url, method: init.method ?? 'GET', body })
@@ -296,6 +298,21 @@ describe('D1 and sinks', () => {
     ])
   })
 
+  it('does not report a second resumption when another batch already extended the burst', async () => {
+    const { db, raw, env, wait } = await setup()
+    await feed(env, wait, 'sid-resume-race', [{ t: NOW, k: 'start', u: '/' }] as SlogEvent[], NOW)
+    const later = S + 2 * 3600
+    const prepare = db.prepare.bind(db)
+    const intercept = vi.spyOn(db, 'prepare').mockImplementation(sql => {
+      if (sql.includes('EXISTS (SELECT 1 FROM json_each(sids)')) raw.prepare('UPDATE activity_bursts SET last_ts = ? WHERE id = 1').run(later)
+      return prepare(sql)
+    })
+    try {
+      expect(await burstFor(db, who.actor, who.via, ORIGIN, later, undefined, 'sid-resume-race')).toEqual({ id: 1 })
+      expect((await loadBurst(db, 1))!.last_ts).toBe(later)
+    } finally { intercept.mockRestore() }
+  })
+
   it('a tab back after the gap continues its own burst and thread; another tab opens a new one', async () => {
     const calls = stubFetch()
     const { db, env, wait } = await setup({ SLACK_BOT_TOKEN: 'xoxb', SLACK_ADMIN_CHANNEL: 'C1' })
@@ -346,6 +363,18 @@ describe('D1 and sinks', () => {
       [null, 'Ann Lee', [`1 page load · 3 errors · 2026-10-21 15:00Z · <${ORIGIN}/admin/activity?burst=1|activity>`]],
       ['1.000001', 'Ann Lee', [`Pages: <${ORIGIN}/admin|/admin>`, `<${ORIGIN}/admin/sessions/sid-aaaaaa|session sid-aaaa>`]],
       ['1.000001', 'Ann Lee', ['*3 errors*', `• ${link} GET /api/auth/whoami → failed · 3300ms · TypeError: Failed to fetch on \`/admin\` ×2`, `• ${link} console.error: a&lt;b on \`/admin\``]],
+    ])
+  })
+
+  it('uses Slack photos on the parent and replies, keeping Discord on the site fallback', async () => {
+    const photo = 'https://avatars.slack-edge.com/ann.png'
+    const calls = stubFetch(false, 'chat:write,chat:write.customize', photo)
+    const { env, wait } = await setup({ SLACK_BOT_TOKEN: 'xoxb', SLACK_ADMIN_CHANNEL: 'C1', DISCORD_ADMIN_WEBHOOK: 'https://discord.example.test/hook' })
+    await feed(env, wait, 'sid-slack-photo', [{ t: NOW, k: 'start', u: '/' }] as SlogEvent[], NOW)
+    expect(calls.map(c => ({ url: c.url, username: c.body.username, icon: c.body.icon_url ?? c.body.avatar_url ?? null }))).toEqual([
+      { url: 'https://slack.com/api/chat.postMessage', username: 'ann', icon: photo },
+      { url: 'https://slack.com/api/chat.postMessage', username: 'ann', icon: photo },
+      { url: 'https://discord.example.test/hook?wait=true', username: 'ann', icon: null },
     ])
   })
 

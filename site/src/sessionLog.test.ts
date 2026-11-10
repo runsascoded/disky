@@ -186,6 +186,21 @@ function page() {
 }
 
 describe('install', () => {
+  it('records connectivity and visibility on failed fetches after a tab resumes', async () => {
+    const { logger } = rig()
+    const { p, win, doc } = page()
+    Object.assign(win, { navigator: { onLine: false } })
+    const undo = install(p, logger)
+    fire(doc, 'visibilitychange')
+    vi.advanceTimersByTime(250)
+    await win.fetch('/api/down').catch(() => {})
+    vi.advanceTimersByTime(LEAVE_MS)
+    expect(logger.buffered.filter(e => e.k === 'api')).toEqual([
+      { t: T0 + 250, k: 'api', u: '/api/down', s: 0, ms: 0, online: false, visibility: 'visible', visible_ms: 250, err: 'TypeError: Failed to fetch' },
+    ])
+    undo()
+  })
+
   it('records nav, clicks, the filter (debounced), picks, fetches, errors and viewport/visibility; a hidden page beacons', async () => {
     const { logger, sent } = rig()
     const { p, win, doc, con, origError, tick } = page()

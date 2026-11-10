@@ -174,6 +174,7 @@ export interface Page {
     innerHeight: number
     devicePixelRatio: number
     fetch: typeof fetch
+    navigator?: { onLine: boolean }
   }
   doc: EventTarget & { visibilityState: string; referrer: string }
   con: { error: (...a: unknown[]) => void }
@@ -183,6 +184,7 @@ export interface Page {
 /** Wire `logger` to the page; returns the undo (restores every patch and listener). */
 export function install(p: Page, logger: Logger): () => void {
   const { win, doc, con } = p
+  let visibleAt: number | null = null
   const origin = win.location.origin
   const offs: (() => void)[] = []
   const on = (t: EventTarget, type: string, fn: (e: Event) => void, capture = false) => {
@@ -277,7 +279,8 @@ export function install(p: Page, logger: Logger): () => void {
         const ev = { t, k: 'api', ...base, s: 0, ms: Math.round(p.perfNow() - t0) }
         if ((e as Error)?.name === 'AbortError') logger.push({ ...ev, err: 'abort' } as SlogEvent)
         else {
-          const failed = { ...ev, err: tr(errMsg(e), TRUNC.msg) } as SlogEvent
+          const context = win.navigator ? { online: win.navigator.onLine, visibility: doc.visibilityState, ...(visibleAt === null ? {} : { visible_ms: Math.max(0, Date.now() - visibleAt) }) } : {}
+          const failed = { ...ev, ...context, err: tr(errMsg(e), TRUNC.msg) } as SlogEvent
           held.set(failed, setTimeout(safe(() => { held.delete(failed); logger.push(failed) }), LEAVE_MS))
         }
       })()
@@ -333,6 +336,7 @@ export function install(p: Page, logger: Logger): () => void {
   on(win, 'resize', () => { if (rz) clearTimeout(rz); rz = setTimeout(safe(viewport), RESIZE_DEBOUNCE_MS) })
   offs.push(() => { if (rz) clearTimeout(rz) })
   on(doc, 'visibilitychange', safe(() => {
+    if (doc.visibilityState === 'visible') visibleAt = Date.now()
     logger.log('vis', { s: doc.visibilityState })
     if (doc.visibilityState === 'hidden') logger.flush(true)
   }))
