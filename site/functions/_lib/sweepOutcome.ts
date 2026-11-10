@@ -21,6 +21,8 @@ export async function runOutcomeOf(jobId: string, get: Get): Promise<RunOutcome 
   const summary = JSON.parse(new TextDecoder().decode(bytes)) as PlanSummaryFile
   const skips = summary.skipped_no_generation
   if (skips && !(isCount(skips.objects) && isCount(skips.bytes) && Array.isArray(skips.whole_buckets))) throw new Error('malformed skipped_no_generation')
+  const preserved = summary.total?.skipped_after_as_of
+  if (preserved && !(isCount(preserved.objects) && isCount(preserved.bytes))) throw new Error('malformed skipped_after_as_of')
   return runOutcome(summary)
 }
 

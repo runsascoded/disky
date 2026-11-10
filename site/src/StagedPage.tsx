@@ -145,8 +145,8 @@ function EmptiedLine({ e, batches, fmtBytes }: { e: EmptiedBatch; batches: Map<n
     )
   })
   if (e.deleted) parts.push(<Tooltip key="d" content="The reviewed snapshot was processed successfully. Newer objects were left alone and require a separate staging review."><span>{n(e.deleted)} completed</span></Tooltip>)
-  if (e.deletion) parts.push(<Tooltip key="size" content={`Recorded deletions from the real runs that completed ${e.deletion.prefixes} of ${e.deleted} prefixes. These are execution totals, independent of the current scan. Earlier attempts and missing historical bands are not included; later restores do not change these totals.`}>
-    <span>{e.deletion.prefixes < e.deleted && 'at least '}{fmtBytes(e.deletion.bytes)} · {fmtN(e.deletion.objects)} {e.deletion.objects === 1 ? 'object' : 'objects'} deleted{e.deletion.prefixes < e.deleted && ' (partial history)'}</span>
+  if (e.deletion) parts.push(<Tooltip key="size" content={`Recorded processing totals from the real runs that completed ${e.deletion.prefixes} of ${e.deleted} prefixes. Generation-specific acknowledgements can include versions already gone, so these totals do not prove reclaimed storage. Earlier attempts and missing bands are excluded; later restores do not change these counts.`}>
+    <span>{e.deletion.prefixes < e.deleted && 'at least '}{fmtBytes(e.deletion.bytes)} · {fmtN(e.deletion.objects)} {e.deletion.objects === 1 ? 'object' : 'objects'} processed{e.deletion.prefixes < e.deleted && ' (partial history)'}</span>
   </Tooltip>)
   else if (e.deleted) parts.push(<span key="size">deletion size unavailable</span>)
   if (e.unstaged) parts.push(<span key="u">{n(e.unstaged)} unstaged</span>)

@@ -160,3 +160,65 @@ def test_a_null_generation_in_a_reviewed_log_still_refuses(source, tmp_path):
     pq.write_table(pa.Table.from_pylist(rows), directory / "would-delete/b1.parquet")
     with pytest.raises(ValueError, match="^b1: reviewed delete row lacks a positive generation$"):
         prepare_reviewed(str(directory), str(plan), str(tmp_path / "work"))
+
+
+@pytest.mark.parametrize('from_manifest', [False, True])
+@pytest.mark.parametrize(('for_real', 'stopped'), [(True, False), (False, False), (True, True)])
+def test_completed_empty_review_records_scope_without_deleting_newer_versions(tmp_path, monkeypatch, from_manifest, for_real, stopped):
+    from dt_cloud import index_footer
+    from dt_cloud.sweep_exec import record_bands
+
+    directory = tmp_path / 'empty-review'
+    directory.mkdir()
+    prefixes = ['gs://b1/a/', 'gs://b1/b/', 'gs://b2/c/']
+    original = {
+        'plan_id': 1, 'date': '2026-10-03', 'approved': prefixes,
+        'as_of': {p: '2026-10-01' for p in prefixes},
+        'buckets': {'b1': {'objects': 3, 'skipped_after_as_of': {'bytes': 12, 'objects': 3}}, 'b2': {'objects': 0}},
+    }
+    (directory / 'plan-summary.json').write_text(json.dumps(original))
+    (directory / 'would-delete-summary.json').write_text(json.dumps({'for_real': False, 'buckets': {}}))
+    plan = tmp_path / 'plan.json'
+    plan.write_text(json.dumps({'plan_id': 1, 'sweep': prefixes, 'as_of': original['as_of']}))
+    calls = []
+    sent = []
+    monkeypatch.setattr(index_footer, '_creds', lambda: ('tok', 'acct'))
+    monkeypatch.setattr(index_footer, '_d1_query', lambda sql, *_: sent.append(sql))
+    stop = threading.Event()
+    if stopped: stop.set()
+    result = execute_reviewed(str(directory), str(plan), str(tmp_path / 'out'), str(tmp_path / 'work'),
+        for_real=for_real, stop=stop, from_manifest=from_manifest, only_buckets=('b1',), client=FakeClient(blobs={}), deleter=lambda *args: calls.append(args))
+    assert calls == []
+    completed = for_real and not stopped
+    assert result['buckets'] == ({'b1': {
+        'decisions': {}, 'delete_bytes': 0, 'drift_dirs': [], 'failed_dirs': [],
+        'bands': {'gs://b1/a/': {'bytes': 0, 'objects': 0}, 'gs://b1/b/': {'bytes': 0, 'objects': 0}},
+        'completed_empty_review': True,
+    }} if completed else {})
+    assert result['_plan']['approved'] == prefixes[:2]
+    assert result['_plan']['total'] == {'eligible': {'objects': 0, 'bytes': 0}, 'skipped_after_as_of': {'bytes': 12, 'objects': 3}}
+    assert record_bands('empty', result) == (2 if completed else 0)
+    assert sent == ([
+        'INSERT INTO deletion_bands (run_id, prefix, bytes, objects, gone, overwritten, drift_new_objects, undone_objects) VALUES '
+        "('empty', 'gs://b1/a/', 0, 0, 0, 0, 0, 0), ('empty', 'gs://b1/b/', 0, 0, 0, 0, 0, 0) ON CONFLICT (run_id, prefix) DO NOTHING",
+    ] if completed else [])
+
+
+@pytest.mark.parametrize('from_manifest', [False, True])
+def test_a_zero_eligible_bucket_with_missing_generation_evidence_is_not_completed(tmp_path, from_manifest):
+    directory = tmp_path / 'missing-generation'
+    directory.mkdir()
+    original = {
+        'plan_id': 1, 'date': '2026-10-03', 'approved': ['gs://b1/a/'],
+        'buckets': {'b1': {'eligible': {'bytes': 0, 'objects': 0}, 'skipped_no_generation': {'bytes': 12, 'objects': 3}}},
+    }
+    (directory / 'plan-summary.json').write_text(json.dumps(original))
+    (directory / 'would-delete-summary.json').write_text(json.dumps({'for_real': False, 'buckets': {}}))
+    plan = tmp_path / 'plan.json'
+    plan.write_text(json.dumps({'plan_id': 1, 'sweep': original['approved']}))
+    calls = []
+    result = execute_reviewed(str(directory), str(plan), str(tmp_path / 'out'), str(tmp_path / 'work'),
+        for_real=True, from_manifest=from_manifest, client=FakeClient(blobs={}), deleter=lambda *args: calls.append(args))
+    assert calls == []
+    assert result['buckets'] == {}
+    assert result['_plan']['approved'] == []
