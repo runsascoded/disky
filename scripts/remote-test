@@ -23,7 +23,7 @@
 #   -P VER    Python version for the remote env (default `$REMOTE_TEST_PYTHON`, else 3.13)
 #   -s        sync only (the source and the Python env from the lock), run nothing
 # Output streams here and is saved to `tmp/remote-test-<timestamp>.log`; the exit code is the test runner's (the
-# first suite's nonzero code, including a suite that selected no tests).
+# first suite's nonzero code, a valid suite empty under the selection filters excepted).
 #
 # The node is per machine, not in the repo: `$REMOTE_TEST_CONFIG` (default `~/.config/disky/remote-test.env`) is
 # sourced first when it exists, and sets any of (the environment wins over it when it uses `: "${VAR:=…}"`):
@@ -78,6 +78,48 @@ mkdir -p tmp
 ts=$(date +%Y%m%dT%H%M%S)
 log=tmp/remote-test-$ts.log
 
+# The tests to run: engine paths, cloud paths (relative to `cloud/`), and options for both.
+opts=()
+engine=()
+cloud=()
+takes_value='^(-k|-m|-p|-o|-W|--deselect|--ignore|--ignore-glob|--durations|--maxfail|--rootdir|-c|--confcutdir)$'
+if [ -z "$site" ]; then
+  while [ $# -gt 0 ]; do
+    a=$1; shift
+    if [[ $a =~ $takes_value ]] && [ $# -gt 0 ]; then opts+=("$a" "$1"); shift
+    elif [[ $a == -* ]]; then opts+=("$a")
+    elif [[ $a == cloud/* ]]; then cloud+=("${a#cloud/}")
+    else engine+=("$a")
+    fi
+  done
+  if [ -n "$changed_since" ]; then
+    [ ${#engine[@]} -eq 0 ] && [ ${#cloud[@]} -eq 0 ] || { echo "remote-test: -c takes no paths" >&2; exit 2; }
+    while IFS= read -r t; do
+      if [ -z "$t" ]; then continue; elif [[ $t == cloud/* ]]; then cloud+=("${t#cloud/}"); else engine+=("$t"); fi
+    done < <(python3 scripts/affected-tests "$changed_since")
+    if [ ${#engine[@]} -eq 0 ] && [ ${#cloud[@]} -eq 0 ]; then
+      echo "remote-test: no tests affected by changes since $changed_since" >&2
+      exit 0
+    fi
+    echo "remote-test: $(( ${#engine[@]} + ${#cloud[@]} )) test files affected since $changed_since" >&2
+  elif [ ${#engine[@]} -eq 0 ] && [ ${#cloud[@]} -eq 0 ]; then
+    engine=(tests); cloud=(tests)
+  fi
+  [ -n "$all" ] || opts=(-m 'not slow' "${opts[@]}")
+  [ "$workers" = 0 ] || opts=(-n "$workers" --dist loadgroup "${opts[@]}")
+fi
+
+if [ -z "$site" ]; then
+  for path in "${engine[@]}"; do
+    file=${path%%::*}
+    [ -e "$file" ] || { echo "remote-test: test path does not exist: $file" >&2; exit 2; }
+  done
+  for path in "${cloud[@]}"; do
+    file=cloud/${path%%::*}
+    [ -e "$file" ] || { echo "remote-test: test path does not exist: $file" >&2; exit 2; }
+  done
+fi
+
 # Snapshot the worktree into a commit on top of HEAD, through a throwaway index.
 idx=$(mktemp "$root/tmp/remote-test-index.XXXXXX")
 trap 'rm -f "$idx"' EXIT
@@ -123,36 +165,6 @@ fi
 ssh "${ssh_opts[@]}" "$host" "set -e; [ -d $rdir/.git ] || { mkdir -p $rdir && git init -q $rdir; }"
 out=$(GIT_SSH_COMMAND="$git_ssh" git push -q -f "$host:$rdir" "$sha:refs/heads/remote-test" 2>&1) || { echo "$out" >&2; exit 1; }
 
-# The tests to run: engine paths, cloud paths (relative to `cloud/`), and options for both.
-opts=()
-engine=()
-cloud=()
-takes_value='^(-k|-m|-p|-o|-W|--deselect|--ignore|--ignore-glob|--durations|--maxfail|--rootdir|-c|--confcutdir)$'
-if [ -z "$site" ]; then
-  while [ $# -gt 0 ]; do
-    a=$1; shift
-    if [[ $a =~ $takes_value ]] && [ $# -gt 0 ]; then opts+=("$a" "$1"); shift
-    elif [[ $a == -* ]]; then opts+=("$a")
-    elif [[ $a == cloud/* ]]; then cloud+=("${a#cloud/}")
-    else engine+=("$a")
-    fi
-  done
-  if [ -n "$changed_since" ]; then
-    [ ${#engine[@]} -eq 0 ] && [ ${#cloud[@]} -eq 0 ] || { echo "remote-test: -c takes no paths" >&2; exit 2; }
-    while IFS= read -r t; do
-      if [ -z "$t" ]; then continue; elif [[ $t == cloud/* ]]; then cloud+=("${t#cloud/}"); else engine+=("$t"); fi
-    done < <(python3 scripts/affected-tests "$changed_since")
-    if [ ${#engine[@]} -eq 0 ] && [ ${#cloud[@]} -eq 0 ]; then
-      echo "remote-test: no tests affected by changes since $changed_since" >&2
-      exit 0
-    fi
-    echo "remote-test: $(( ${#engine[@]} + ${#cloud[@]} )) test files affected since $changed_since" >&2
-  elif [ ${#engine[@]} -eq 0 ] && [ ${#cloud[@]} -eq 0 ]; then
-    engine=(tests); cloud=(tests)
-  fi
-  [ -n "$all" ] || opts=(-m 'not slow' "${opts[@]}")
-  [ "$workers" = 0 ] || opts=(-n "$workers" --dist loadgroup "${opts[@]}")
-fi
 
 q() { [ $# -eq 0 ] || printf '%q ' "$@"; }
 remote=$(cat <<EOF
@@ -188,6 +200,7 @@ rc=0; ran=0
 suite() {  # suite <dir> <pytest args…>: run one suite from <dir>, folding its exit code into rc
   local dir=\$1; shift
   (cd "\$dir" && pytest "\$@"); local r=\$?
+  if [ \$r = 5 ]; then return; fi  # an existing suite may be empty under a shared -k / -m filter
   ran=1
   [ \$rc != 0 ] || rc=\$r
 }
