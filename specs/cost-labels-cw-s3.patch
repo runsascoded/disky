@@ -1,0 +1,123 @@
+diff --git a/infra/gcp/__main__.py b/infra/gcp/__main__.py
+index f625179e..274019c1 100644
+--- a/infra/gcp/__main__.py
++++ b/infra/gcp/__main__.py
+@@ -19,7 +19,7 @@ from pathlib import Path
+ import pulumi
+ import pulumi_gcp as gcp
+
+-from gcp_jobs import Adopt, BatchCron, JobAccount, Secrets, grant_bucket, grant_secret
++from gcp_jobs import Adopt, BatchCron, JobAccount, Secrets, cost_labels, grant_bucket, grant_secret, labeled_provider
+
+ cfg = pulumi.Config()
+ gcp_cfg = pulumi.Config("gcp")
+@@ -32,6 +32,10 @@ STACK = "cw-s3"
+ if pulumi.get_stack() != STACK:
+     raise ValueError(f"this branch's gcp/ manages only the {STACK!r} stack, not {pulumi.get_stack()!r}")
+
++# Cost attribution (specs/cost-labels.md): `$DISKY_LABELS` (app=disky,deployment=cw-s3, from the
++# shell's `.envrc`) becomes every labelable resource's default labels.
++labeled_provider("cw-s3-labeled", project=project, region=region, labels=cost_labels())
++
+ dispatch = JobAccount(
+     "cw-s3-dispatch",
+     project=project,
+diff --git a/job/cw-batch-submit.sh b/job/cw-batch-submit.sh
+index a7be1205..bcf64e51 100755
+--- a/job/cw-batch-submit.sh
++++ b/job/cw-batch-submit.sh
+@@ -33,6 +33,14 @@ MEMORY_MIB=${MEMORY_MIB:-30000}
+ DATA_BUCKET=${DATA_BUCKET:-oa-gcs-usage-dvx}
+ JOB_ID=${JOB_ID:-cw-scan-$(date -u +%Y%m%d-%H%M%S)}
+
++labels() {  # cost labels (specs/cost-labels.md): $DISKY_LABELS + component $1, as JSON; {} when unset
++  python3 - "$1" <<'PY'
++import json, os, sys
++d = dict(i.strip().split("=", 1) for i in os.environ.get("DISKY_LABELS", "").split(",") if i.strip())
++print(json.dumps({**d, "component": sys.argv[1]} if d else {}))
++PY
++}
++
+ vars() {
+   python3 - <<'EOF'
+ import json, os
+@@ -42,6 +50,8 @@ import json, os
+ pin = bool(os.environ.get("PIN"))
+ g = (lambda k, d="": d) if pin else os.environ.get
+ v = {
++    # the stack's cost labels (PIN keeps them: `submitter_spec` passes them through)
++    **({"DISKY_LABELS": os.environ["DISKY_LABELS"]} if os.environ.get("DISKY_LABELS") else {}),
+     "SWEEP_BUCKET": g("SWEEP_BUCKET", "marin-us-east-02a"),
+     "SWEEP_S3_ENDPOINT": g("SWEEP_S3_ENDPOINT", "https://cwobject.com"),
+     "DATA_BUCKET": g("DATA_BUCKET", "oa-gcs-usage-dvx"),
+@@ -117,8 +127,10 @@ cat > "$spec" <<EOF
+       }
+     }],
+     "serviceAccount": {"email": "$SA"},
+-    "location": {"allowedLocations": ["regions/$REGION"]}
++    "location": {"allowedLocations": ["regions/$REGION"]},
++    "labels": $(labels scan)
+   },
++  "labels": $(labels scan),
+   "logsPolicy": {"destination": "CLOUD_LOGGING"}
+ }
+ EOF
+diff --git a/job/cw-meta-submit.sh b/job/cw-meta-submit.sh
+index 4317628a..ea839897 100755
+--- a/job/cw-meta-submit.sh
++++ b/job/cw-meta-submit.sh
+@@ -44,12 +44,22 @@ MEMORY_MIB=${MEMORY_MIB:-15000}
+ DATA_BUCKET=${DATA_BUCKET:-oa-gcs-usage-dvx}
+ JOB_ID=${JOB_ID:-cw-meta-scan-$(date -u +%Y%m%d-%H%M%S)}
+
++labels() {  # cost labels (specs/cost-labels.md): $DISKY_LABELS + component $1, as JSON; {} when unset
++  python3 - "$1" <<'PY'
++import json, os, sys
++d = dict(i.strip().split("=", 1) for i in os.environ.get("DISKY_LABELS", "").split(",") if i.strip())
++print(json.dumps({**d, "component": sys.argv[1]} if d else {}))
++PY
++}
++
+ vars() {
+   python3 - <<'EOF'
+ import json, os
+ pin = bool(os.environ.get("PIN"))
+ g = (lambda k, d="": d) if pin else os.environ.get
+ v = {
++    # the stack's cost labels (PIN keeps them: `submitter_spec` passes them through)
++    **({"DISKY_LABELS": os.environ["DISKY_LABELS"]} if os.environ.get("DISKY_LABELS") else {}),
+     "DATA_BUCKET": g("DATA_BUCKET", "oa-gcs-usage-dvx"),
+     # The scan's roots (`<scheme>://<bucket>`, space-separated; the first is the
+     # store's primary root): the GCS data bucket, then cw's R2 serving bucket.
+@@ -118,8 +128,10 @@ cat > "$spec" <<EOF
+       }
+     }],
+     "serviceAccount": {"email": "$SA"},
+-    "location": {"allowedLocations": ["regions/$REGION"]}
++    "location": {"allowedLocations": ["regions/$REGION"]},
++    "labels": $(labels meta-scan)
+   },
++  "labels": $(labels meta-scan),
+   "logsPolicy": {"destination": "CLOUD_LOGGING"}
+ }
+ EOF
+diff --git a/site/wrangler.toml b/site/wrangler.toml
+index db464bef..4b8967ff 100644
+--- a/site/wrangler.toml
++++ b/site/wrangler.toml
+@@ -63,6 +63,7 @@ DATA_BUCKET = "oa-gcs-usage-dvx"
+ GCP_PROJECT = "oa-internal-450019"
+ META_TREE_URL = "https://cw-s3.oa.dev/meta"  # /scans outputs link into the meta tree
+ SWEEP_IMAGE = "us-central1-docker.pkg.dev/oa-internal-450019/cloud-run-source-deploy/gcs-usage-snapshot:cw"
++DISKY_LABELS = "app=disky,deployment=cw-s3"  # cost labels on executor jobs (specs/cost-labels.md)
+ SWEEP_S3_ENDPOINT = "https://cwobject.com"
+ REPO_URL = "https://github.com/Open-Athena/marin-gcs-usage"  # the site's "Source on GitHub" link (build-time)
+ # The in-app viewer policy (specs/done/oidc-cutover-cw.md): these domains get the
+@@ -168,6 +169,7 @@ DATA_BUCKET = "oa-gcs-usage-dvx"
+ GCP_PROJECT = "oa-internal-450019"
+ META_TREE_URL = "https://cw-s3.oa.dev/meta"  # /scans outputs link into the meta tree
+ SWEEP_IMAGE = "us-central1-docker.pkg.dev/oa-internal-450019/cloud-run-source-deploy/gcs-usage-snapshot:cw"
++DISKY_LABELS = "app=disky,deployment=cw-s3"  # cost labels on executor jobs (specs/cost-labels.md)
+ SWEEP_S3_ENDPOINT = "https://cwobject.com"
+ VIEWER_DOMAINS = "coreweave.com"
+ # The opt-in trash model (specs/staged-delete.md): any full viewer stages

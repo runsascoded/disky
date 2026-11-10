@@ -1,0 +1,17 @@
+> that was the run's kind
+
+  what are the other kinds?
+
+  > - "details" links: yes, redundant with the date links. Removed.
+
+  that should be to cloud and gcs too, yea?
+
+  > - Logs link:
+
+  same?
+
+  > I can do the first two in cw-run.sh if you want them. They'd need an
+  image rebuild.
+
+  will it speed up the overall job meaningfully? or any optimizations we
+  can make to the long phases?
