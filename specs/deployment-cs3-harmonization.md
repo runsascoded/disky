@@ -54,9 +54,12 @@ CW's active GC/thinning changes overlap retirement, compaction, publishing and s
 
 ## Validation and current blockers
 
-The earlier shared deploy/status suite passed 25 cases on `mgu`. The census separately passed 25 cases and mypy there. New combined source adoption and ownership-receipt checks remain pending: the existing dev node's `oa-ci-dev` AWS SSO expired before it could be started. Ryan has been asked to refresh that login. No heavy test/data work is moved to the laptop to bypass it.
+The earlier shared deploy/status suite passed 25 cases on `mgu`. The census separately passed 25 cases and mypy there. New combined source adoption and ownership-receipt checks remain pending: the existing dev node's `oa-ci-dev` AWS SSO expired before it could be started. Ryan has been asked to refresh that login. No heavy test/data work is moved to the laptop to bypass it. The additive ownership checkpoint is committed as `9f1236959`; [ownership contract] describes the exact evidence and limits. Final source/test AST parsing and whitespace checks pass; they are not runtime acceptance. Changes remain isolated in `wt/harmonize`, not rolled out.
+
+Resume remote checks from that worktree with `REMOTE_TEST_CONFIG=/dev/null REMOTE_TEST_HOST=mgu REMOTE_TEST_INSTANCE=i-033c60f359aca85e8 REMOTE_TEST_AWS_PROFILE=oa-ci-dev scripts/remote-test -n 4 -d disky-test/harmonize-python`, passing the changed Python suites plus scan-run wrapper/recording, native generation-GC and deploy dry-run regressions. Run the four changed staged/deletion site suites separately with `--site -d disky-test/harmonize-site`. Nextflow execution checks additionally need a working Nextflow installation. Use the existing node; no new compute deployment is required. Confirm its current address through the helper rather than trusting the stale SSH alias DNS.
 
 Use targeted suites for nominal threads, scan finalization, ownership receipts, reviewed sweeps, Batch reconciliation, version-aware path inputs, interval parity, native retirement/GC and deploy/status helpers. Exercise affected site routes/outcomes in Vitest and typecheck the final tree. Any visible changed UI needs browser verification; local source testing alone is not a production smoke. Record exact source/test IDs and each owner's deployed revision separately.
 
 [operator runbook]: oa-deployment-handoff.md
 [index rethink]: fleet-index-research.md
+[ownership contract]: ../docs/nextflow-ownership.md
