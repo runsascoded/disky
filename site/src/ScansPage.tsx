@@ -8,11 +8,12 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, typ
 import { useQuery } from '@tanstack/react-query'
 import { Link, Navigate, useLocation, useNavigate, useParams } from 'react-router-dom'
 import { useUrlState } from 'use-prms'
+import { useActions } from 'use-kbd'
 import { SiteNav } from './SiteNav'
 import { useDocTitle } from './title'
 import { SiteKbd } from './SiteKbd'
 import { Tooltip } from './Tooltip'
-import { axisTicks, inSpan, type RunSpan, runKindParam, runSpanParam, runStatusParam } from './runChart'
+import { axisTicks, includeRunKind, inSpan, runFilterKinds, runKindLabel, runKindMatches, type RunSpan, runKindParam, runSpanParam, runStatusParam } from './runChart'
 import { fmtBytesPrecise, fmtN, type Meta } from './types'
 import { readThrough } from './readLens'
 import { useUnits } from './units'
@@ -67,11 +68,11 @@ export function ScansRoute({ run }: { run?: boolean }) {
   return run ? <ScanRunPage /> : <ScansPage />
 }
 
-function useBytes() {
+function useBytes(alwaysSuffix = false) {
   const { units, suffixB } = useUnits()
   return {
-    bytes: (b: number | null | undefined) => (b == null ? '—' : fmtBytesPrecise(b, units, suffixB)),
-    delta: (b: number | null | undefined) => (b == null ? '—' : b === 0 ? '±0' : `${b > 0 ? '+' : '−'}${fmtBytesPrecise(Math.abs(b), units, suffixB)}`),
+    bytes: (b: number | null | undefined) => (b == null ? '—' : fmtBytesPrecise(b, units, alwaysSuffix || suffixB)),
+    delta: (b: number | null | undefined) => (b == null ? '—' : b === 0 ? '±0' : `${b > 0 ? '+' : '−'}${fmtBytesPrecise(Math.abs(b), units, alwaysSuffix || suffixB)}`),
   }
 }
 
@@ -283,7 +284,7 @@ export function ScansPage() {
   const q = useScanRuns(store)
   const slug = useMinSlug(store)
   const nav = useNavigate()
-  const { bytes, delta } = useBytes()
+  const { bytes, delta } = useBytes(true)
   // The view's state is the URL's (defaults absent), so a filtered list can be linked and survives a reload. A filter
   // or a window is a history entry (Back undoes it, to the page it was picked on) and starts on the first page;
   // turning a page is not one.
@@ -308,38 +309,52 @@ export function ScansPage() {
   const order = useMemo(() => phaseOrder(runs.flatMap(r => r.spans.map((s, i) => ({ phase: s.phase, seq: i })))), [runs])
   const color = colorer(order)
   // the runs' kinds, and the URL's own when no run has it (a stale link shows what it filters by)
-  const kinds = [...new Set([...runs.map(r => r.run.kind), ...(kind ? [kind] : [])])].sort()
-  const filtered = runs.filter(r => (!kind || r.run.kind === kind) && statusMatches(status, runOutcome(r.run, r.phase_issues)))
+  const kinds = [...new Set([...runs.map(r => r.run.kind), ...runFilterKinds(kind)])].sort()
+  useActions({
+    'runs:all-types': { label: 'Show all job types', group: 'Job types', keywords: ['scans', 'AL', 'access logs', 'filter'], handler: () => setKind('') },
+    ...Object.fromEntries(kinds.flatMap(k => [
+      [`runs:only:${k}`, { label: `Show only ${runKindLabel(k)}`, group: 'Job types', keywords: ['filter', k], handler: () => setKind(k) }],
+      [`runs:include:${k}`, { label: `Include ${runKindLabel(k)}`, group: 'Job types', keywords: ['show', 'filter', k], handler: () => setKind(includeRunKind(kind, k, true)) }],
+      [`runs:exclude:${k}`, { label: `Exclude ${runKindLabel(k)}`, group: 'Job types', keywords: ['hide', 'filter', k], handler: () => setKind(includeRunKind(kind, k, false)) }],
+    ])),
+  })
+  const filtered = runs.filter(r => runKindMatches(kind, r.run.kind) && statusMatches(status, runOutcome(r.run, r.phase_issues)))
   const shown = filtered.filter(r => inSpan(span, r.run.started_ts))
   const paged = usePaged(shown, DEFAULT_SIZES, [page, setPage])
   return (
     <main className="staged-page scans-page">
       <SiteNav />
       <h1>Scan runs</h1>
-      <p className="sub">Each scan job's run: when it ran, how long each phase took, what it wrote, and how each structure changed against the previous scan; and the stores' maintenance jobs (<code>compact</code>, <code>merge</code>) beside the scan they follow. The stores they append to are on <Link to="/health">Health</Link>.</p>
+      <p className="sub">Scans, access-log ingests and maintenance jobs: timing, status and compute estimates. Output size measures the generated scan files (listings, indexes, snapshots); its change compares those files with earlier scans. The stores they append to are on <Link to="/health">Health</Link>.</p>
       {q.isLoading ? <p>Loading runs…</p> : q.error ? <p className="err">{q.error.message}</p> : !q.data?.configured ? (
         <p className="dim">Scan runs aren't recorded on this deployment yet (its D1 has no <code>scan_runs</code> table: migration <code>scan_runs</code>, then <code>dt-cloud scan-run backfill</code>).</p>
       ) : (<>
-        <section className="sr-chart">
-          <h3>Duration by run</h3>
-          <DurationStrip runs={filtered} color={color} onPick={id => nav(scanHref(id))} win={span} onWin={setSpan} hover={hover} />
-          <Legend order={order} color={color} run={hover.id ? runs.find(r => r.run.run_id === hover.id) : undefined} />
-        </section>
         <div className="run-filters">
-          {kinds.length > 1 && <select aria-label="Filter by kind" value={kind} onChange={e => setKind(e.target.value)}><option value="">all kinds</option>{kinds.map(k => <option key={k}>{k}</option>)}</select>}
+          <fieldset className="sr-type-filters"><legend>Job types</legend>
+            <button type="button" className="sr-all-types" disabled={!kind} onClick={() => setKind('')}>All</button>
+            {kinds.map(k => <span key={k} className={`sr-type-filter ${kindClass(k)}${runKindMatches(kind, k) ? '' : ' excluded'}`}>
+              <label><input type="checkbox" checked={runKindMatches(kind, k)} onChange={e => setKind(includeRunKind(kind, k, e.target.checked))} />{runKindLabel(k)} <span className="dim">{runs.filter(r => r.run.kind === k).length}</span></label>
+              <Tooltip content={`Show only ${runKindLabel(k)}`}><button type="button" aria-label={`Show only ${runKindLabel(k)}`} onClick={() => setKind(k)}>only</button></Tooltip>
+            </span>)}
+          </fieldset>
           <select aria-label="Filter by status" value={status} onChange={e => setStatus(e.target.value)}><option value="">all statuses</option>{STATUS_FILTERS.map(f => <option key={f.key} value={f.key}>{f.label}</option>)}</select>
           <span className="dim">{shown.length} / {runs.length} runs</span>
           {span
             ? <Tooltip content="The runs that started in the window dragged on the chart. Esc clears it."><button type="button" className="sr-span" onClick={() => setSpan(null)}>{fmtRunTime(span[0])} → {fmtRunTime(span[1])} ✕</button></Tooltip>
             : <span className="dim hide-md">Drag across the chart to pick a window.</span>}
         </div>
+        <section className="sr-chart">
+          <h3>Duration by run</h3>
+          <DurationStrip runs={filtered} color={color} onPick={id => nav(scanHref(id))} win={span} onWin={setSpan} hover={hover} />
+          <Legend order={order} color={color} run={hover.id ? runs.find(r => r.run.run_id === hover.id) : undefined} />
+        </section>
         <div className="runs-wrap">
           <table className="runs sr-runs">
             <thead><tr>
-              <th><Tooltip content="When the run started, in your time zone; hover for its id.">run</Tooltip></th><th>status</th>
+              <th><Tooltip content="When the run started, in your time zone; hover for its id.">run</Tooltip></th><th>job type</th><th>status</th>
               <th className="num">duration</th><th className="hide-md">phases</th>
-              <th className="num"><Tooltip content="Bytes of the run's top-level outputs (listing, index, snapshot, …).">wrote</Tooltip></th>
-              <th className="num"><Tooltip content="Against the previous scan's same structures. Green grew, red shrank.">Δ prev</Tooltip></th>
+              <th className="num"><Tooltip content="Total recorded size of generated scan files: listings, indexes, snapshots, etc. Open the run for the breakdown. This is not the size of the storage being scanned, bytes transferred, or all retained indexes.">output files</Tooltip></th>
+              <th className="num"><Tooltip content="Change in those generated files' recorded sizes, each compared with the newest earlier scan recording the same structure. This is not a change in the storage being scanned or additional storage retained.">output Δ</Tooltip></th>
               <th className="num"><Tooltip content="Compute estimate: the machine's list $/h × run hours × tasks, including the run's downstream jobs (listing fan-out).">cost</Tooltip></th>
               <th className="hide-md">links</th>
             </tr></thead>
@@ -349,15 +364,16 @@ export function ScansPage() {
                 const map = r.status === 'succeeded' && isScanProducer(r.kind) ? mapHref(r.scan, store.path, slug) : null
                 const live = liveness(r, s.spans, now)
                 return (
-                  <tr key={r.run_id} className={[r.status === 'failed' && 'failed', hover.id === r.run_id && 'brushed'].filter(Boolean).join(' ') || undefined}
+                  <tr key={r.run_id} className={[kindClass(r.kind), r.status === 'failed' && 'failed', hover.id === r.run_id && 'brushed'].filter(Boolean).join(' ')}
                     onPointerEnter={() => hover.enter(r.run_id)} onPointerLeave={hover.leave}>
                     <td className="nb"><RunWhen ts={r.started_ts} scan={r.scan} href={scanHref(r.run_id)} />
                       {r.trigger === 'manual' && <> <Tooltip content="Started by hand (a submit or a resume), not by the schedule."><span className="dim">manual</span></Tooltip></>}
-                      {(kinds.length > 1 || s.downstream > 0) && <div className="sr-kind">{kinds.length > 1 && <KindLabel run={r} />}{s.downstream > 0 && <Tooltip content={`${s.downstream} downstream job${s.downstream > 1 ? 's' : ''} (listing fan-out, …)`}><span>{kinds.length > 1 ? ' + ' : '+ '}{s.downstream} job{s.downstream > 1 ? 's' : ''}</span></Tooltip>}</div>}</td>
+                    </td>
+                    <td className="nb"><span className={`sr-job-type ${kindClass(r.kind)}`}><KindLabel run={r} /></span>{s.downstream > 0 && <Tooltip content={`${s.downstream} downstream jobs (listing fan-out, etc.)`}><span className="dim"> +{s.downstream}</span></Tooltip>}</td>
                     <td><Status cell run={r} failedAt={s.failed_at} issues={s.phase_issues} lost={live?.lost} runHref={scanHref} />{live && <Live live={live} />}</td>
                     <td className="num nb">{s.secs == null ? <span className="dim">—</span> : fmtDur(s.secs)}</td>
                     <td className="hide-md"><PhaseBar cell spans={s.spans} secs={s.secs} color={color} width={130} /></td>
-                    <td className="num nb">{bytes(s.out_bytes)}</td>
+                    <td className="num nb">{s.out_bytes == null ? '—' : <Link className="sr-output-link" to={scanHref(r.run_id)}>{bytes(s.out_bytes)}</Link>}</td>
                     <td className={`num nb ${deltaClass(s.delta_bytes)}`}>{delta(s.delta_bytes)}</td>
                     <td className="num nb">{s.cost_usd == null ? <span className="dim">—</span> : usd(s.cost_usd)}</td>
                     <td className="nb links hide-md">{map && <><Link to={map}>map</Link> · </>}<Links run={r} links={q.data!} /></td>
@@ -644,8 +660,10 @@ function RunList({ runs, links, title, scanHref }: { runs: ScanRun[]; links: Lin
 /** A run's kind, a maintenance run's with its store (`compact · interval-store`). */
 function KindLabel({ run }: { run: ScanRun }) {
   const st = maintStore(run)
-  return <>{run.kind === 'access-ingest' ? 'access-log ingest' : run.kind}{st && <span className="dim"> · {st}</span>}</>
+  return <>{runKindLabel(run.kind)}{st && <span className="dim"> · {st}</span>}</>
 }
+
+const kindClass = (kind: string): string => kind === 'access-ingest' ? 'sr-type-access' : isMaintenance(kind) ? 'sr-type-maintenance' : 'sr-type-scan'
 
 /** A running run's current phase and its elapsed time (its heartbeat's live note in the tip), and a warning when the
  * run has gone quiet (no heartbeat). */
