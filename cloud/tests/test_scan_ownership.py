@@ -27,7 +27,9 @@ def snapshot(tmp_path: Path, raw: bytes | None) -> O.TraceSnapshot:
 
 
 def context(store: str = 'primary', run: str | None = 'run-1', attempt: str = 'head-1') -> dict:
-    profile = parse({'deployment': 'example', 'store': store, 'executor': {'kind': 'local'}, 'work': 'gs://bucket/nf',
+    profile = parse({'deployment': 'example', 'store': store,
+                     'executor': {'kind': 'google-batch', 'project': 'test-project', 'region': 'us-central1', 'image': 'registry/scan:test'},
+                     'work': 'gs://bucket/nf',
                      'data': 'gs://bucket/data', 'layout': {'layer2': 'l2/{scan}/', 'snapshots': ''}, 'sources': ['s3://source'],
                      'skip': ['static-names', 'digest', 'interval-store', 'warm-cache', 'probe'], 'options': {'list': {'import': True}}})
     return O.context(profile, '{}', '2026-11-09T1200', 'g1', 'session-1', run, 'DT_RUN_ID' if run else 'unrecorded',
@@ -146,7 +148,7 @@ def test_context_records_unknown_pins_and_actual_run_separately():
         'identity': {'deployment': 'example', 'store': 'primary', 'scan': '2026-11-09T1200', 'gen': 'g1',
                      'run_id': None, 'run_id_source': 'unrecorded', 'record_run_id': '', 'head_attempt': 'head-1', 'session': 'session-1'},
         'source': {'profile_sha256': sha256(b'{}').hexdigest(), 'git_sha': None, 'git_dirty': None,
-                   'task_image': None, 'task_image_pinned': False, 'executor': 'local', 'work_root': 'gs://bucket/nf',
+                   'task_image': 'registry/scan:test', 'task_image_pinned': False, 'executor': 'google-batch', 'work_root': 'gs://bucket/nf',
                    'data_root': 'gs://bucket/data', 'task_work_root': TASK_ROOT, 'source_uris': ['s3://source']},
         'started_at': '2026-11-09T12:00:00+00:00',
     }
@@ -218,7 +220,11 @@ def test_gcs_uses_atomic_create_precondition_and_compares_existing_bytes(tmp_pat
                 raise PreconditionFailed('exists')
             objects[self.key] = src.read()
 
-    monkeypatch.setattr(storage, 'Client', lambda: SimpleNamespace(bucket=lambda name: SimpleNamespace(blob=Blob)))
+    monkeypatch.setattr(
+        storage,
+        'Client',
+        lambda: SimpleNamespace(bucket=lambda name: SimpleNamespace(blob=lambda key: Blob(f'{name}/{key}'))),
+    )
     fs = SimpleNamespace(open=lambda key, mode: BytesIO(objects[key]))
     store = Store('gs://bucket/nf', fs=fs, base='bucket/nf')
     captured = snapshot(tmp_path, HEADER.encode())
