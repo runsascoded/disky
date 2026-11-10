@@ -1,4 +1,4 @@
-"""Nominal scan threads, after the authoritative run has finished (specs/nominal-run-threads.md).
+"""Nominal scan threads, after the authoritative run has finished (specs/done/nominal-run-threads.md).
 
 The site's run summaries are the outcome oracle. A renewed object-generation lease serializes writers; a
 persisted send intent and owned Slack message metadata recover a post whose response/state write was lost.

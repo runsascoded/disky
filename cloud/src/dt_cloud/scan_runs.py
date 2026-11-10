@@ -2052,7 +2052,7 @@ def supervised_finish(ptr: Path, ran: Ran, grace: float) -> None:
 @option('-r', '--run-id', default=None, help='Require this authoritative terminal run record to be visible')
 @option('-x', '--execute', is_flag=True, help='Update Slack and persist state (default: render only; no Slack calls or state writes)')
 def nominal_cmd(adopt_check: bool, profile_path: str | None, out: str | None, run_id: str | None, execute: bool) -> None:
-    """Render or converge the deployment's nominal run thread (specs/nominal-run-threads.md)."""
+    """Render or converge the deployment's nominal run thread (specs/done/nominal-run-threads.md)."""
     from click import echo
 
     from .nominal import run

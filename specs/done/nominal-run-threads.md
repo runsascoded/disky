@@ -1,5 +1,7 @@
 # Nominal scan runs in the admin channel
 
+Status: shared implementation complete and adopted into root's harmonization branch, 2026-11-10. The historical checkpoints below are superseded by this receipt. HF supplied shared commit `f9cf9d97` plus its separate configuration rollout; HF reported clean production/dev source `6d062763`, successful CI `42725869481`, and a real finalized run `2026-11-10T0033` automatically updating the existing thread to 29 clean runs with no pending intent. Root independently validated the reporter/finalizer suites as part of the November 10 remote source checks. Other deployments remain opt-in; this source adoption posts no messages or changes any channel configuration.
+
 Requested 2026-11-07: HF's admin channel shows old pipeline failures without the succeeding run history. Mirror the PATH/HBT nominal polling thread: update a parent summary and append linked run replies. Keep the data-usage digest in its own channel.
 
 ## Evidence and initial draft
