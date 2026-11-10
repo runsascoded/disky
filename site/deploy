@@ -151,7 +151,6 @@ if $dry; then
 fi
 
 export VITE_BUILD_ENVIRONMENT="$mode"
-export VITE_SOURCE_REF="${VITE_SOURCE_REF:-$(git symbolic-ref --short -q HEAD || true)}"
 if [ "$mode" = dev ]; then CLOUDFLARE_ENV=preview pnpm build; else pnpm build; fi
 wlog=$(mktemp)
 trap 'rm -f "$wlog"' EXIT
