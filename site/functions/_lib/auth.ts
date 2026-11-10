@@ -33,6 +33,15 @@ import { isPreviewHost } from './previewHost.js'
 import { grantCaller, meterOf } from './usage.js'
 
 export interface Env {
+  /** Optional immutable reader release, independently CAS-adopted on dev and prod. */
+  HISTORY_CURRENT_KEY?: string
+  HISTORY_VERSION_CACHE?: import('./historyVersion.js').HistoryVersionSnapshot
+  /** Offline history maintenance jobs; unset keeps dispatch disabled. */
+  HISTORY_IMAGE?: string
+  HISTORY_DATA_STORE?: string
+  HISTORY_SERVING_STORE?: string
+  HISTORY_REGION?: string
+  HISTORY_SECRETS?: string
   DB?: D1Database
   SESSION_SECRET?: string
   /** OIDC (our own Google client) — the ZT-free sign-in path. Set as Pages

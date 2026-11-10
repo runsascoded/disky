@@ -185,6 +185,9 @@ dt-cloud interval-store level-sim GEN REQUESTS  # `readLevel`'s two waves priced
                           # only sidecars and the kept groups' page indexes (cached under `-c`); gets and bytes match live `lv-*` spans exactly
                           # `-s 256,512,1024` (+ `-F` sidecar row-group sizes): a table per mode, today / held page indexes (cold,
                           # colo warm, warm) / the sort cut in small groups with no page index, from the real file's page indexes
+dt-cloud history run -i JOB_ID -r SERVING_STORE -w WORK  # One `/api/admin/history` job (`history_jobs.py`, spec `scan-thinning.md`): a
+                          # thinning preview (scores, protections, the removal sequence) or a candidate build (fresh interval + static
+                          # generations over the retained scans, verified, an immutable `history/versions/<id>.json`). Never moves a CURRENT
 dt-cloud image-sha [-e SHA [-a]] [-j]  # The running image's source revision (`image_sha.py`): `$DISKY_GIT_SHA` /
                           # `$DISKY_GIT_DIRTY`, which the image build stamps (`dt-cloud image build` → `job/Dockerfile`
                           # `ARG`/`ENV` + OCI labels `org.opencontainers.image.revision`, `disky.dirty`). Prints `<sha>`,
@@ -280,6 +283,7 @@ One gate (`_lib/auth.ts`, `@open-athena/auth` over D1): `identify` → `Identity
 - `/api/auth/*` — the package's routes: `whoami`, `exchange` (`?key=` share link → grant session), `logout`, request-access, admin grant/request/log console
 - `/api/token` — a session's personal agent token (a non-expiring Bearer grant, the base scope only; grants can't mint one)
 - `/api/admins` — the admins (`/admin`'s "Admins" section): every path to the `admin` scope (the list's rows with who added whom and when, the break-glass addresses, live admin-scope links, the staff domain where it is one), add / remove on the list, each logged to `admin_edits`; the last listed admin can't be removed
+- `/api/admin/history` (+ `/history-adopt`) — admin only: scan-history thinning (`specs/scan-thinning.md`, `/scans#history`). `history` lists the preview/build jobs under `history/jobs/` and POSTs a new one to Batch (`dt-cloud history run`); dispatch needs every `HISTORY_*` job var + `GCP_SA_KEY`, `JOB_SA`, `GCP_PROJECT` (else 503, and GET says `enabled: false`). `history-adopt` CAS-moves this environment's reader pointer (`HISTORY_CURRENT_KEY`; unset: GET `enabled: false`, POST 503) to a verified immutable `history/versions/<id>.json`. With `HISTORY_CURRENT_KEY` unset, readers never read history (`_lib/historyVersion.ts`)
 - `/a/<sha256>.<ext>` — **public, no gate**: an activity post's sender face (`_lib/publicAvatar.ts`), only bytes a Slack / Discord post stored in `public_avatars`, named by their own SHA-256 (a profile's or grant's face, else an identicon seeded by an HMAC of the actor under `SESSION_SECRET`); anything else 404s
 
 **A store's `series_scope`** (`STORES_JSON`, `_lib/stores.ts`): a grant holding it beside the viewer scope reads that store's root-level `/api/series` (only `store=`; no `path`, `lens`, `o`, `cl`, `q`, …) and nothing else of a store its `scope` closes; never a public, anonymous or path-restricted caller (`api/series.ts` `summaryGate`, its table in `functions/gates.test.ts`). A summary reader's token (a fleet dashboard's) is base read + that scope.
