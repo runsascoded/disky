@@ -120,7 +120,8 @@ def test_d1_query_posts_and_parses(monkeypatch):
         def read(self):
             return json.dumps({"success": True, "result": [{"results": [{"run_id": "1-x"}], "success": True}]}).encode()
 
-    def fake_urlopen(req):
+    def fake_urlopen(req, *, timeout):
+        seen["timeout"] = timeout
         seen["url"] = req.full_url
         seen["body"] = json.loads(req.data.decode())
         seen["auth"] = req.headers["Authorization"]
@@ -133,6 +134,7 @@ def test_d1_query_posts_and_parses(monkeypatch):
     assert seen["url"] == "https://api.cloudflare.com/client/v4/accounts/acct/d1/database/dbid/query"
     assert seen["body"] == {"sql": "SELECT * FROM deletion_runs WHERE finished_ts IS NULL", "params": []}
     assert seen["auth"] == "Bearer tok"
+    assert seen["timeout"] == 30
 
 
 def test_announce_off_returns_no_callback():

@@ -23,6 +23,7 @@ from disk_tree.env import get as env_get, name as env_name
 DATABASE_ID_VAR = env_name("D1_DATABASE_ID")
 
 API = "https://api.cloudflare.com/client/v4"
+REQUEST_TIMEOUT_S = 30
 
 
 class D1Error(RuntimeError):
@@ -81,7 +82,7 @@ class D1Client:
             headers={"Authorization": f"Bearer {self.token}", "Content-Type": "application/json"},
             method="POST",
         )
-        with urlopen(req) as resp:
+        with urlopen(req, timeout=REQUEST_TIMEOUT_S) as resp:
             payload = json.loads(resp.read().decode())
         if not payload.get("success"):
             raise D1Error(f"D1 query failed: {payload.get('errors')}")
