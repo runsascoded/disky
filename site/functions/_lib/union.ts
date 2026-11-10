@@ -268,12 +268,24 @@ export type RootRow = { path: string; b: number; o: number; m?: number | null; k
  *  threshold folded into its `(other)` is listed too, out of the fold: the root's bucket table lists every
  *  member's every root, however small against the union's total (the treemap may still dust it). */
 export function unionRoot(view: UnionView, label: string, members: readonly { store: string; date: string; tree: ViewNode; roots?: readonly RootRow[] | null }[]): ViewNode {
+  const attribution = (nodes: readonly ViewNode[]): Record<string, unknown> => {
+    const us = new Map<string, number>()
+    let unknown = 0
+    for (const n of nodes) {
+      unknown += Number(n.ou ?? 0)
+      for (const [u, b] of (n.us ?? []) as [string, number][]) us.set(u, (us.get(u) ?? 0) + b)
+    }
+    return { ...(us.size ? { us: [...us].sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1)) } : {}), ...(unknown ? { ou: unknown } : {}) }
+  }
   const kids: ViewNode[] = []
   const other: ViewNode = { n: '(other)', k: 'dir', b: 0, o: 0, f: 0 }
+  const folds: ViewNode[] = []
+  let lifted = false
   const seen = new Map<string, string>()
   for (const m of members) {
     for (const c of m.tree.c ?? []) {
       if (c.n === '(other)') {
+        folds.push(c)
         other.b += c.b; other.o += c.o; other.f = (other.f ?? 0) + (c.f ?? 0)
         continue
       }
@@ -289,6 +301,7 @@ export function unionRoot(view: UnionView, label: string, members: readonly { st
       if (prev) throw new UnionOverlap(`union view '${view.key}': root '${r.path}' is in stores ${prev}, ${m.store}`)
       seen.set(r.path, m.store)
       kids.push({ n: r.path, k: r.k ?? 'dir', b: r.b, o: r.o, ...(r.m ? { d: Math.floor(r.m / 86400), t: r.m } : {}), src: m.store, at: m.date })
+      lifted = true
       other.b -= r.b; other.o -= r.o
       if (other.f !== undefined) other.f -= 1
     }
@@ -297,10 +310,15 @@ export function unionRoot(view: UnionView, label: string, members: readonly { st
   kids.sort((x, y) => y.b - x.b || (x.n < y.n ? -1 : x.n > y.n ? 1 : 0))
   // Lifted roots leave the fold what the threshold folded beside them (nothing, at a bucket root); never below zero.
   other.b = Math.max(0, other.b); other.o = Math.max(0, other.o)
+  // Root rows carry no owner split to subtract. A surviving fold after lifting therefore has unknown
+  // ownership; filtered unions lift no rows and retain each member's complete fold attribution.
+  const foldOwners = attribution(folds)
+  Object.assign(other, lifted && Object.keys(foldOwners).length ? (other.b ? { ou: other.b } : {}) : foldOwners)
   if (other.b > 0 || other.o > 0) kids.push(other)
   return {
     n: label, k: 'dir',
     b: members.reduce((n, m) => n + m.tree.b, 0), o: members.reduce((n, m) => n + m.tree.o, 0),
+    ...attribution(members.map(m => m.tree)),
     ...(kids.length ? { c: kids } : {}),
   }
 }

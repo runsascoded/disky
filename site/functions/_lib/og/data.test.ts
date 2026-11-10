@@ -16,6 +16,17 @@ describe('D1', () => {
   describe('tiles and legend', () => {
     const users = [{ u: 'ann', b: 9 }, { u: 'bo', b: 5 }]
     const color = ownerColors(users)
+    it('keeps unavailable ownership separate from known unowned bytes in share cards', () => {
+      const unknown: TreeNode = { n: 'unknown', b: 100, o: 1, us: [['ann', 30]], ou: 50 }
+      expect(legendOf(unknown, color, u => u.toUpperCase())).toEqual([
+        { label: 'owner detail unavailable', color: '#2b2e35', b: 50 },
+        { label: 'ANN', color: '#4269d0', b: 30 },
+        { label: 'unowned', color: UNOWNED_COLOR, b: 20 },
+      ])
+      expect([dominant(unknown), tilesOf({ n: 'root', b: 100, o: 1, c: [unknown] }, color)]).toEqual([
+        null, [{ name: 'unknown', b: 100, color: '#2b2e35' }],
+      ])
+    })
     const tree: TreeNode = {
       n: 'root', b: 100, o: 10, us: [['ann', 50], ['bo', 20]],
       c: [
