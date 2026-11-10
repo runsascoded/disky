@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { outcomeReaderOf, UNREAD } from './sweepOutcome'
 import { runDir } from './sweepDispatch'
-import { reflectSweepRuns, type SweepBatchJob } from './sweepReflect'
+import { reflectSweepRuns, settleSweepJobs, type SweepBatchJob } from './sweepReflect'
 import { RUN_DIR, sqliteD1 } from './testD1'
 
 const CFG = { dataBucket: 'my-data' }
@@ -15,6 +15,35 @@ const job = (id: string, state: string, digest?: string, vars: Record<string, st
 const SOON = Date.parse('2026-09-28T13:00:00Z') / 1000
 
 describe('D1', () => {
+  it('settles late zero-count bands by the successful Batch job directory, keeping failed, unlisted and newer staging', async () => {
+    const { db, raw } = await sqliteD1()
+    raw.exec("INSERT INTO plans (id,name,state,created_by,created_ts) VALUES (1,'review','open','actor',1)")
+    const cases = [
+      ['empty', 'gcs-sweep-real-empty', 'SUCCEEDED', 50],
+      ['failed', 'gcs-sweep-real-failed', 'FAILED', 50],
+      ['running', 'gcs-sweep-real-running', 'RUNNING', 50],
+      ['unlisted', 'gcs-sweep-real-unlisted', 'SUCCEEDED', 50],
+      ['restaged', 'gcs-sweep-real-restaged', 'SUCCEEDED', 150],
+      ['undo', 'gcs-undo-elsewhere', 'SUCCEEDED', 50],
+    ] as const
+    for (const [id, batch, , added] of cases) {
+      const dir = runDir(CFG, batch)
+      raw.prepare(`INSERT INTO deletion_runs (run_id,plan_id,${RUN_DIR},scan,head,exec_head,actor,mode,started_ts,finished_ts,plan_digest,log_dir)
+        VALUES (?,1,?,'scan',0,0,'actor','real',100,200,'review',?)`).run(`run-${id}`, dir, dir)
+      raw.prepare('INSERT INTO plan_items (plan_id,prefix,added_by,added_ts) VALUES (1,?,?,?)').run(`gs://bucket/${id}/`, 'actor', added)
+      raw.prepare('INSERT INTO deletion_bands (run_id,prefix,bytes,objects) VALUES (?,?,0,0)').run(`run-${id}`, `gs://bucket/${id}/`)
+    }
+    const jobs = cases.filter(([id]) => id !== 'unlisted').map(([, batch, state]) => job(batch, state, 'review'))
+    expect(await settleSweepJobs(CFG, db, jobs)).toEqual(['gs://bucket/empty/'])
+    expect(await settleSweepJobs(CFG, db, jobs)).toEqual([])
+    expect(raw.prepare('SELECT prefix FROM plan_items ORDER BY prefix').all()).toEqual([
+      { prefix: 'gs://bucket/failed/' }, { prefix: 'gs://bucket/restaged/' }, { prefix: 'gs://bucket/running/' },
+      { prefix: 'gs://bucket/undo/' }, { prefix: 'gs://bucket/unlisted/' },
+    ])
+    expect(raw.prepare("SELECT who,old_json FROM admin_edits WHERE tbl='plan_items'").all()).toEqual([
+      { who: 'run:run-empty', old_json: JSON.stringify({ prefixes: ['gs://bucket/empty/'], deleted_by: 'run-empty' }) },
+    ])
+  })
   describe('reflectSweepRuns — gcs: the digest lands once the executor recorded the end', () => {
     it('does not call a failed job successful just because the executor recorded final totals', async () => {
       const { db, raw } = await sqliteD1()
