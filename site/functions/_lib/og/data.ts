@@ -23,7 +23,7 @@ import { barControls } from '../../../src/pageBar.js'
 import { readState, readThrough } from '../../../src/readLens.js'
 import { applyLedger } from '../../../src/ledgerOverlay.js'
 import { ownerIndex } from '../../../src/ownerIndex.js'
-import { type ColorMode, type Meta, MODE_LABELS, mtimeDay, type TreeNode, type UserInfo } from '../../../src/types.js'
+import { type ColorMode, type Meta, MODE_LABELS, mtimeDay, type TreeNode, type UserInfo, unownedBytes } from '../../../src/types.js'
 import { type CardData, type CardTile, type LegendItem, fmtB } from './card.js'
 import type { OgTier } from './sign.js'
 
@@ -138,8 +138,7 @@ export function ownerColors(users: UserInfo[]): (u: string | null) => string {
 export function dominant(n: TreeNode): string | null {
   const [top] = n.owners ?? []
   if (!top) return null
-  const owned = (n.owners ?? []).reduce((s, [, b]) => s + b, 0)
-  return top[1] >= n.bytes - owned ? top[0] : null
+  return top[1] >= Math.max(unownedBytes(n), n.unknown_owner_bytes ?? 0) ? top[0] : null
 }
 
 /** Tiles: the view's children (folds grey), each with its children nested to the view's depth. In
@@ -166,7 +165,7 @@ export function tilesOf(tree: TreeNode, color: (u: string | null) => string, mod
   if (lo > hi) { lo = 0; hi = 0 }
   const fill = (n: TreeNode, slot: number, i: number, count: number, container: boolean): string => {
     if (mode === 'tree') return slotColor(slot, i, count)
-    if (mode === 'user') return color(dominant(n))
+    if (mode === 'user') return (n.unknown_owner_bytes ?? 0) > Math.max(n.owners?.[0]?.[1] ?? 0, unownedBytes(n)) ? FOLD_COLOR : color(dominant(n))
     if (container) return FRAME_COLOR
     const d = mtimeDay(n)
     if (mode === 'date') return d != null && hi > lo ? dateColor((d - lo) / (hi - lo)) : '#5d5c55'
@@ -204,9 +203,10 @@ export function slotTiles(tiles: CardTile[]): CardTile[] {
 /** The legend: the root's owners by bytes, then the unowned remainder. */
 export function legendOf(tree: TreeNode, color: (u: string | null) => string, name: (u: string) => string, max = 6): LegendItem[] {
   const us = (tree.owners ?? []).slice(0, max)
-  const owned = (tree.owners ?? []).reduce((s, [, b]) => s + b, 0)
   const items: LegendItem[] = us.map(([u, b]) => ({ label: name(u), color: color(u), b }))
-  if (tree.bytes - owned > 0) items.push({ label: 'unowned', color: UNOWNED_COLOR, b: tree.bytes - owned })
+  const unowned = unownedBytes(tree)
+  if (unowned > 0) items.push({ label: 'unowned', color: UNOWNED_COLOR, b: unowned })
+  if (tree.unknown_owner_bytes) items.push({ label: 'owner detail unavailable', color: FOLD_COLOR, b: tree.unknown_owner_bytes })
   return items.sort((a, b) => b.b - a.b).slice(0, max)
 }
 

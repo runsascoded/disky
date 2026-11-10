@@ -112,6 +112,15 @@ describe('memberRequest', () => {
 })
 
 describe('unionRoot', () => {
+  it('preserves known and unavailable owner bytes in combined roots and their folds', () => {
+    const tree: ViewNode = { name: 'root', kind: 'dir', bytes: 100, objects: 2, owners: [['alice', 30]], unknown_owner_bytes: 50, children: [{ name: '(other)', kind: 'dir' as const, bytes: 100, objects: 2, owners: [['alice', 30]], unknown_owner_bytes: 50 }] }
+    const second: ViewNode = { name: 'second', kind: 'dir', bytes: 50, objects: 1, owners: [['alice', 10]], unknown_owner_bytes: 25, children: [{ name: '(other)', kind: 'dir' as const, bytes: 50, objects: 1, owners: [['alice', 10]], unknown_owner_bytes: 25 }] }
+    expect(unionRoot(view, 'Fleet', [{ store: 'primary', date: 'A', tree }, { store: 'meta', date: 'B', tree: second }])).toEqual({
+      name: 'Fleet', kind: 'dir', bytes: 150, objects: 3, owners: [['alice', 40]], unknown_owner_bytes: 75,
+      children: [{ name: '(other)', kind: 'dir', bytes: 150, objects: 3, owners: [['alice', 40]], unknown_owner_bytes: 75 }],
+    })
+  })
+
   const view = { key: 'all', members: ['primary', 'meta'], main: true, sources: {} }
   const leaf = (name: string, bytes: number, objects = 1): ViewNode => ({ name, kind: 'dir', bytes, objects })
   it('tags each member’s roots, sorts them, sums the `(other)`s (last) and the totals', () => {
