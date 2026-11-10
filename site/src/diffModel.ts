@@ -4,6 +4,8 @@
 
 const { abs, max } = Math
 
+export const isSynthetic = (n: Pick<DiffNode, 'label' | 'status'>): boolean => n.status === 'filler' || n.label === '(other)'
+
 // `/api/diff` row (functions/_lib/view.ts `DiffRow`): p=path (relative to
 // the diffed root) d=depth k=kind s=status a/b=bytes oa/ob=objects
 // x=expanded l=read by a point lookup on side 1|2.
