@@ -63,7 +63,7 @@ def receipt(value: dict) -> dict:
     dirty = value.get('dirty')
     require(dirty is None or type(dirty) is bool, 'dirty must be a boolean or null')
     actor = value.get('actor')
-    require(actor is None or isinstance(actor, str) and fullmatch(r'[A-Za-z0-9_.@+-]{1,128}', actor) is not None,
+    require(actor is None or isinstance(actor, str) and fullmatch(r'[A-Za-z0-9_.@+-]{1,128}(?:\[bot\])?', actor) is not None,
             'actor must be a plain user identifier or null')
     actor_source = value.get('actor_source')
     require(actor_source in (None, 'local', 'github'), 'actor_source must be local, github or null')
