@@ -142,6 +142,22 @@ def _tail_sep(cfg: DigestConfig) -> str:
     return "\n" if cfg.reply_lines else " · "
 
 
+def _compact_quiet_lines(rows: list[tuple[str, bool]]) -> list[str]:
+    """Share a line, retaining each bucket's link and quota clause as independent text."""
+    quiet = [text for text, yes in rows if yes]
+    if len(quiet) < 2:
+        return [text for text, _ in rows]
+    out = []
+    emitted = False
+    for text, yes in rows:
+        if not yes:
+            out.append(text)
+        elif not emitted:
+            out.append(" · ".join(quiet))
+            emitted = True
+    return out
+
+
 def _tail(day: DayRow, cfg: DigestConfig) -> str:
     """The daily reply's per-bucket tail: the primary then each extra bucket as
     a linked `% of quota (free)` clause, joined by `_tail_sep`. Buckets sharing a
@@ -154,15 +170,23 @@ def _tail(day: DayRow, cfg: DigestConfig) -> str:
         link = _diff_url(day.scan, day.since, cfg.site_url, cfg.primary if b is None or b.path is None else b.path, day.slug)
         body = ", ".join(_quota_clause(_scoped(day.tb, day.classes, q), q, cfg.unit) for q in qs) if qs else f"{day.tb:,.0f} {cfg.unit.short}"
         return f"{body} [{LINK_ARROW}]({link})"
-    cs = _clauses(day, cfg)
-    sep = _tail_sep(cfg)
-    if cfg.quota_marks in RUNWAY_MARKS:
-        # config order: a reply series reads by position, the marks draw the eye (specs/digest-runway-marks.md)
-        return sep.join(f"{_pool_mark(r, fill, shape, cfg)} {c}{_runway_text(r, cfg)}" if fill is not None else c
-                        for c, fill, _, r, shape in cs)
+    cs = list(zip(_clauses(day, cfg), _groups(day, cfg)))
     if cfg.quota_marks == "circles":
-        cs = sorted(cs, key=lambda c: -1.0 if c[1] is None else -c[1])
-    return sep.join(f"{m} {c}" if (m := _mark(fill, over, cfg)) else c for c, fill, over, _, _ in cs)
+        cs.sort(key=lambda x: -1.0 if x[0][1] is None else -x[0][1])
+    lines = []
+    for (c, fill, over, r, shape), group in cs:
+        if cfg.quota_marks in RUNWAY_MARKS:
+            text = f"{_pool_mark(r, fill, shape, cfg)} {c}{_runway_text(r, cfg)}" if fill is not None else c
+        else:
+            mark = _mark(fill, over, cfg)
+            text = f"{mark} {c}" if mark else c
+        total = sum(v for _, v in group)
+        change = sum((day.dtb or 0) if name == cfg.primary else (day.dextra.get(name) or 0) for name, _ in group)
+        quiet = (total * cfg.unit.bytes < TIB / 2 and abs(change) * cfg.unit.bytes < TIB / 2
+                 and not over and (fill is None or fill < QUIET_PCT) and (r is None or r.days >= RUNWAY_TEXT_D))
+        lines.append((text, quiet))
+    return _tail_sep(cfg).join(_compact_quiet_lines(lines) if cfg.reply_lines else [text for text, _ in lines])
+
 
 
 #: Marks a quota clause at or over `alert_pct` (the daily replies' tail and the alert reply).

@@ -1,8 +1,9 @@
+import { compactQuietLines, QUIET_BYTES } from './compact'
 /** The `cw` digest template's OP: its text and its plot's `/api/digest-image` request, from the month's scans
  * (the job sends them: `Cw.rows_json`; goldens: `./parity.test.ts`). The replies: `./cwReply.ts`. Pure; DOM-free. */
 import { encodeScan, scanTime } from '../scanSlug'
 import { type BucketCfg, deg, type DigestCfg, type DigestParams, type OpLinks, prevMonthLink, type Quota, span, tb, weekOf, windowLabel, windowStart } from './common'
-import { type Pool, poolRows, pools, quotaLine, used } from './pools'
+import { type Pool, poolRows, pools, quotaLine, QUIET_PCT, used } from './pools'
 import { addDays, dayOf, fixed, grouped, hhmm, iso, md, mon3, monthYear, pyRound } from './pyfmt'
 
 export interface CwScan {
@@ -115,8 +116,16 @@ function poolsText(m: CwRows, month: number, cfg: DigestCfg, p: DigestParams, li
     '',
     '*Buckets* (Δ month-to-date)',
     ...(p.quotas === 'arrow-chip' ? [CHIP_KEY] : []),
-    ...rows.map(({ p: pl, v, mark, text }) => `${mark}${name(pl)} ${grouped(v, 0)} ${u.name}${change(pl.buckets)}${members(pl)} · ${text}`),
-    ...Object.keys(last.extra).filter(b => !inPool.has(b)).map(b => `${bucketLink(b, last, mtdSince, cfg)} ${grouped(last.extra[b], 0)} ${u.name}${change([b])}`),
+    ...compactQuietLines([
+      ...rows.map(({ p: pl, v, mark, text, pct, tail }) => ({
+        text: `${mark}${name(pl)} ${grouped(v, 0)} ${u.name}${change(pl.buckets)}${members(pl)} · ${text}`,
+        quiet: v * u.bytes < QUIET_BYTES && Math.abs(moved(pl.buckets, b0, last, cfg)) * u.bytes < QUIET_BYTES && pct < QUIET_PCT && !tail,
+      })),
+      ...Object.keys(last.extra).filter(b => !inPool.has(b)).map(b => ({
+        text: `${bucketLink(b, last, mtdSince, cfg)} ${grouped(last.extra[b], 0)} ${u.name}${change([b])}`,
+        quiet: last.extra[b] * u.bytes < QUIET_BYTES && Math.abs(moved([b], b0, last, cfg)) * u.bytes < QUIET_BYTES,
+      })),
+    ]),
     '',
     '*Weekly changes*',
   ]
