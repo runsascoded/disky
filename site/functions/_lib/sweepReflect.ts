@@ -24,7 +24,7 @@
 import type { D1Database } from '@cloudflare/workers-types'
 import type { BatchConfig } from './batchConfig.js'
 import { batchJobsUrl, batchRegions } from './gcp.js'
-import type { FinishedRun } from './plans.js'
+import { settleOpenPlan, type FinishedRun } from './plans.js'
 import { runDir } from './sweepDispatch.js'
 import type { FailureReader } from './sweepFailure.js'
 import type { OutcomeReader } from './sweepOutcome.js'
@@ -60,6 +60,20 @@ const killedDeadline = (ended: number, r: RunRetention): number | null => {
 }
 
 export const jobIdOf = (j: { name: string }): string => j.name.slice(j.name.lastIndexOf('/') + 1)
+
+/** Reconcile completion bands that arrived after a job's first terminal reflection. */
+export async function settleSweepJobs(cfg: Pick<BatchConfig, 'dataBucket'>, db: D1Database, jobs: readonly SweepBatchJob[]): Promise<string[]> {
+  const dirs = [...new Set(jobs.filter(j => isSweepJob(j) && j.status?.state === 'SUCCEEDED').map(j => runDir(cfg, jobIdOf(j))))]
+  const ids: string[] = []
+  // Batch names and deletion run ids differ. Resolve their recorded directories, within D1's binding limit.
+  for (let i = 0; i < dirs.length; i += 100) {
+    const chunk = dirs.slice(i, i + 100)
+    const { results } = await db.prepare(`SELECT run_id FROM deletion_runs WHERE log_dir IN (${chunk.map(() => '?').join(',')})`)
+      .bind(...chunk).all<{ run_id: string }>()
+    ids.push(...results.map(r => r.run_id))
+  }
+  return settleOpenPlan(db, ids)
+}
 
 /** Every Batch job in each region a sweep can be dispatched to, newest first.
  * Throws when a region's listing fails. */
