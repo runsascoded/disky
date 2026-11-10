@@ -39,7 +39,7 @@ export function OwnerControls({ uri, idx, node, lensed, userIdx, onPickUser, sta
   // attribution — one person by name, a mix as a bar (OwnerBar).
   const shares = ownerShares(node ?? { name: '', bytes: 0, objects: 0 })
   const soleOwner = !cl && shares.length > 0 && shares[0][1] >= 0.98 * node!.bytes ? shares[0][0] : null
-  const mixed = !cl && !soleOwner && shares.length > 0
+  const mixed = !cl && !soleOwner && (shares.length > 0 || !!node?.unknown_owner_bytes)
   return (
     <div className="owner-controls" onClick={e => e.stopPropagation()}>
       <span className="owner">

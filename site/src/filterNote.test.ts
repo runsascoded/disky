@@ -10,6 +10,7 @@ const NO_INDEX = 'this scan has no search index; small matches may be missing'
 describe('the filter note: errors and completeness, spelled out', () => {
   it.each<[string, Parameters<typeof FilterNote>[0], string]>([
     ['complete', { matched: '7 MiB matched', coverage: {} }, '<span class="fnote">7 MiB matched</span>'],
+    ['unknown ownership', { matched: '7 MiB matched', coverage: { ownerDetailsMissing: true } }, '<span class="fnote">7 MiB matched<span class="fflag">Some owner detail is unavailable; unknown bytes are separate from unowned.</span></span>'],
     ['partial', { matched: '7 MiB matched', coverage: { partialReason: 'the row read hit its budget (128 path groups)' } },
       '<span class="fnote">7 MiB matched<span class="fflag">partial results: the row read hit its budget (128 path groups)</span></span>'],
     ['approximate', { matched: 'no matches', coverage: { approximateReason: NO_INDEX } },

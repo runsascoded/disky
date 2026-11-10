@@ -7,6 +7,7 @@ import { Tooltip } from './Tooltip'
 export interface Coverage {
   partialReason?: string
   approximateReason?: string
+  ownerDetailsMissing?: boolean
   /** A heavy literal's fleet root from the static catalog alone (`rollup.bucketsOnly`): exact per-bucket
    *  totals, but no view inside a bucket without the full index — or, `'scoped'` (`^q`'s starts-with catalog,
    *  `rollup.scopedBelow`), a view inside one where the term's matches there are few enough. */
@@ -37,13 +38,14 @@ export const DIRS_ONLY = 'this scan lists folders only — files aren’t search
 export const BUCKETS_ONLY_SCOPED = 'per-bucket totals only at the top: inside a bucket, this term is searched where its matches are few enough'
 
 /** The coverage flags, spelled out — never a silent "fewer matches". */
-export function FilterFlags({ partialReason, approximateReason, bucketsOnly, dirsOnly, hexRuns }: Coverage) {
+export function FilterFlags({ partialReason, approximateReason, ownerDetailsMissing, bucketsOnly, dirsOnly, hexRuns }: Coverage) {
   return (
     <>
       {dirsOnly && <span className="fflag">{DIRS_ONLY}</span>}
       {bucketsOnly && <span className="fflag">{bucketsOnly === 'scoped' ? BUCKETS_ONLY_SCOPED : BUCKETS_ONLY}</span>}
       {partialReason && <span className="fflag">partial results: {partialReason}</span>}
       {approximateReason && <span className="fflag">approximate: {approximateReason}</span>}
+      {ownerDetailsMissing && <span className="fflag">Some owner detail is unavailable; unknown bytes are separate from unowned.</span>}
       {hexRuns && <HexRunsInfo min={hexRuns.min} />}
     </>
   )

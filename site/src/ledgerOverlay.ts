@@ -28,6 +28,7 @@ import type { TreeNode } from './types'
 /** Owner → bytes, with the unowned remainder under a key no user id can be. */
 type Vec = Map<string, number>
 const UNOWNED = '\0'
+const UNKNOWN = '\u0001'
 
 const add = (v: Vec, k: string, b: number) => v.set(k, (v.get(k) ?? 0) + b)
 
@@ -53,28 +54,30 @@ export interface LedgerSize { b: number; us: Record<string, number> }
 export function applyLedger(root: TreeNode, idx: OwnerIndex, scheme: string, canon: (u: string) => string = u => u, sizes?: ReadonlyMap<string, LedgerSize>): TreeNode {
   if (!idx.count) return root
   const touched = touchedPrefixes(idx)
-  const scanVec = (us: Iterable<[string, number]>, b: number): Vec => {
+  const scanVec = (us: Iterable<[string, number]>, b: number, unknown = 0): Vec => {
     const v: Vec = new Map()
     let owned = 0
     for (const [u, x] of us) {
       add(v, canon(u), x)
       owned += x
     }
-    add(v, UNOWNED, Math.max(0, b - owned))
+    add(v, UNOWNED, Math.max(0, b - owned - unknown))
+    if (unknown) add(v, UNKNOWN, unknown)
     return v
   }
-  const split = (n: TreeNode): Vec => scanVec(n.owners ?? [], n.bytes)
+  const split = (n: TreeNode): Vec => scanVec(n.owners ?? [], n.bytes, n.unknown_owner_bytes)
   const addAll = (v: Vec, w: Vec, sign: 1 | -1) => { for (const [k, b] of w) add(v, k, sign * b) }
   const top = (us: TreeNode['owners']) => (us?.length ? canon(us[0][0]) : null)
   const withUs = (n: TreeNode, v: Vec, cov: string | null, c?: TreeNode[]): TreeNode => {
     const us = [...v.entries()]
-      .filter(([k, b]) => k !== UNOWNED && b > 0.5)
+      .filter(([k, b]) => k !== UNOWNED && k !== UNKNOWN && b > 0.5)
       .sort((x, y) => y[1] - x[1] || (x[0] < y[0] ? -1 : x[0] > y[0] ? 1 : 0))
-    const { owners: _owners, provenance, children: _c, ...rest } = n
+    const { owners: _owners, unknown_owner_bytes: _unknown, provenance, children: _c, ...rest } = n
     // Provenance explains the scan's top owner: gone once an assignment
     // covers the node or moves its top owner.
     const keepPv = provenance && cov == null && top(us) === top(n.owners)
-    return { ...rest, ...(us.length ? { owners: us } : {}), ...(keepPv ? { provenance } : {}), ...(c ? { children: c } : {}) }
+    const unknown = Math.max(0, v.get(UNKNOWN) ?? 0)
+    return { ...rest, ...(us.length ? { owners: us } : {}), ...(unknown > 0.5 ? { unknown_owner_bytes: unknown } : {}), ...(keepPv ? { provenance } : {}), ...(c ? { children: c } : {}) }
   }
   // `segs` = the node's path below the root; null = a fold (no path of its
   // own), which inherits `inherited` — its parent's assignee.

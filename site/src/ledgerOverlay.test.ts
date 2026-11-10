@@ -31,6 +31,23 @@ const scan = (): TreeNode => ({
 })
 
 describe('applyLedger', () => {
+  it('moves assigned bytes out of unknown ownership and preserves the unknown remainder', () => {
+    const tree: TreeNode = { name: 'gs://', bytes: 100, objects: 2, unknown_owner_bytes: 100, children: [
+      { name: 'b', bytes: 100, objects: 2, unknown_owner_bytes: 100, children: [
+        { name: 'assigned', bytes: 30, objects: 1, unknown_owner_bytes: 30 },
+        { name: 'unknown', bytes: 70, objects: 1, unknown_owner_bytes: 70 },
+      ] },
+    ] }
+    expect(applyLedger(tree, idx(row('gs://b/assigned/', 'alice', 1)), 'gs://')).toEqual({
+      name: 'gs://', bytes: 100, objects: 2, unknown_owner_bytes: 70, owners: [['alice', 30]], children: [
+        { name: 'b', bytes: 100, objects: 2, unknown_owner_bytes: 70, owners: [['alice', 30]], children: [
+          { name: 'assigned', bytes: 30, objects: 1, owners: [['alice', 30]] },
+          { name: 'unknown', bytes: 70, objects: 1, unknown_owner_bytes: 70 },
+        ] },
+      ],
+    })
+  })
+
   it('no live assignment: the scan tree, as is (same object)', () => {
     const t = scan()
     expect(applyLedger(t, idx(), 'gs://')).toBe(t)

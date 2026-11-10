@@ -94,8 +94,10 @@ export interface ViewNode {
   last_read?: number
   /** Non-Standard storage class id → bytes, largest first; Standard is `bytes` less their sum. */
   class_bytes?: Record<string, number>
-  /** `[owner, bytes]`, largest first; unowned is `bytes` less their sum. */
+  /** `[owner, bytes]`, largest first; known unowned is `bytes` less their sum and `unknown_owner_bytes`. */
   owners?: [string, number][]
+  /** Bytes whose ownership was not read (an unexpanded rollup's); absent: zero. Not unowned. */
+  unknown_owner_bytes?: number
   children?: ViewNode[]
   /** An `(other)` fold: how many children it stands in for. */
   folded?: number
@@ -315,7 +317,9 @@ interface Agg {
   m: number | null
   a: number | null // subtree-max last-read epoch day (read lens); null = never read
   cb: Record<string, number>
-  ub: Record<string, number>  // per-user bytes; unowned = b − Σ ub
+  ub: Record<string, number>  // per-user bytes; known unowned = (ownerKnown ?? b) − Σ ub
+  /** A rollup may know only some owners. Absent: its complete ownership was read; zero: not read yet. */
+  ownerKnown?: number
   /** What the path is; null on a synthesized aggregate (a fold, a filtered ancestor). */
   kind: 'file' | 'dir' | null
   /** Direct children, objects + dirs — the same on every slice of a path;
@@ -329,6 +333,14 @@ interface Agg {
 }
 
 const newAgg = (): Agg => ({ b: 0, o: 0, wts: 0, wb: 0, m: null, a: null, cb: {}, ub: {}, kind: null, nc: null, nd: null })
+
+/** Display detail from disjoint matched roots, without changing matched bytes, objects or owners. */
+function addDisplayDetail(into: Agg, from: Agg): void {
+  into.wts += from.wts; into.wb += from.wb
+  if (from.m != null) into.m = into.m == null ? from.m : Math.max(into.m, from.m)
+  if (from.a != null) into.a = into.a == null ? from.a : Math.max(into.a, from.a)
+  for (const k in from.cb) into.cb[k] = (into.cb[k] ?? 0) + from.cb[k]
+}
 
 function merge(a: Agg, r: Row): void {
   a.b += r.size
@@ -356,6 +368,7 @@ function subtract(parent: Agg, kids: Agg[]): Agg {
   out.m = parent.m // likewise its newest stamp
   const sum = (f: (a: Agg) => number) => kids.reduce((s, k) => s + f(k), 0)
   out.b = parent.b - sum(a => a.b)
+  if (parent.ownerKnown != null) out.ownerKnown = Math.max(0, Math.min(out.b, parent.ownerKnown - sum(a => a.ownerKnown ?? a.b)))
   out.o = Math.max(0, parent.o - sum(a => a.o))
   out.wts = parent.wts - sum(a => a.wts)
   out.wb = Math.max(0, parent.wb - sum(a => a.wb))
@@ -375,6 +388,7 @@ function scale(a: Agg, frac: number): Agg {
   if (frac === 1) return a
   const out = newAgg()
   out.b = a.b * frac
+  if (a.ownerKnown != null) out.ownerKnown = a.ownerKnown * frac
   out.o = a.o * frac
   out.wts = a.wts * frac
   out.wb = a.wb * frac
@@ -387,8 +401,9 @@ function scale(a: Agg, frac: number): Agg {
   return out
 }
 
-function display(a: Agg): Pick<ViewNode, 'mtime' | 'last_read' | 'class_bytes' | 'owners'> {
-  const out: Pick<ViewNode, 'mtime' | 'last_read' | 'class_bytes' | 'owners'> = {}
+function display(a: Agg): Pick<ViewNode, 'mtime' | 'last_read' | 'class_bytes' | 'owners' | 'unknown_owner_bytes'> {
+  const out: Pick<ViewNode, 'mtime' | 'last_read' | 'class_bytes' | 'owners' | 'unknown_owner_bytes'> = {}
+  if (a.ownerKnown != null && a.ownerKnown < a.b) out.unknown_owner_bytes = Math.round(a.b - a.ownerKnown)
   // A folder's date is its newest write, not a byte-weighted mean: a mean of
   // half-July, half-September reads "August", a date nothing was written on.
   // An mtime of 0 is a listing's "unknown" (no object was written in 1970): no date, as for none.
@@ -784,6 +799,9 @@ interface Read {
    * one side didn't draw from here instead of a point lookup, absent = zero under a parent `complete` says
    * is known whole. */
   exact?: Map<string, Agg>
+  /** Static roots: answer only the requested ancestors, without retaining their full forest.
+   * An absent key is inside a matching root and needs the ordinary path-store lookup. */
+  matchedTotals?: (paths: string[]) => Map<string, Agg | null>
   complete?: (p: string) => boolean
   /** A rollup read: the paths answered (P, the nested ones, the match roots whose insides were read, and the other
    *  side's answered paths this scan doesn't hold; `ViewOpts.nestForce`). */
@@ -995,6 +1013,7 @@ async function readView(env: Env, o: ViewOpts, cov: Coverage = {}): Promise<Read
     let staticRoots = false
     /** …held per isolate (`staticPhase1`). */
     let memo: Phase1Memo | null = null
+    let matchedHits: Hit[] | undefined
     // The search reads the `path` sort (its names' row groups are that
     // sort's); a lens without assignments keeps the old read.
     const pathIdx = !tiers.length && !lens ? (sort === 'path' && fine ? fine : withTrace(await openFine(env, date, 'path'), tr)) : null
@@ -1080,6 +1099,7 @@ async function readView(env: Env, o: ViewOpts, cov: Coverage = {}): Promise<Read
         staticRoots = true
       }
       if (shits) {
+        if (!owner && !negP && !pl) matchedHits = shits.hits!
         // A diff side's fold reads the other scan's bytes from this answer: one that doesn't cover it can't.
         const fold = folds && (!o.otherScan || covers(shits, [o.otherScan]))
         if (o.otherScan && !fold && tooBroadToDiff(shits.hits!)) throw new FilterRejected(reject('diff-too-broad'))
@@ -1359,19 +1379,13 @@ async function readView(env: Env, o: ViewOpts, cov: Coverage = {}): Promise<Read
       // The looked-up roots' own rows (ages, classes): into the total and their drawn ancestors, as summing
       // the roots would have.
       const copied = new Set<string>()
-      const addDetail = (into: Agg, d: Agg) => {
-        into.wts += d.wts; into.wb += d.wb
-        if (d.m != null) into.m = into.m == null ? d.m : Math.max(into.m, d.m)
-        if (d.a != null) into.a = into.a == null ? d.a : Math.max(into.a, d.a)
-        for (const k in d.cb) into.cb[k] = (into.cb[k] ?? 0) + d.cb[k]
-      }
       for (const [r, d] of rootAggOf as Overlay<string, Agg>) {
-        addDetail(matchedAgg, d)
+        addDisplayDetail(matchedAgg, d)
         for (let q = parentOf(r); q.length > path.length; q = parentOf(q)) {
           const a = aggsF.get(q)
           if (a) {
             if (!copied.has(q)) { copied.add(q); aggsF.set(q, { ...a, cb: { ...a.cb }, ub: { ...a.ub } }) }
-            addDetail(aggsF.get(q)!, d)
+            addDisplayDetail(aggsF.get(q)!, d)
           }
           if (q === '') break
         }
@@ -1463,6 +1477,7 @@ async function readView(env: Env, o: ViewOpts, cov: Coverage = {}): Promise<Read
       // Heaviest first (ties by path): the list a bulk action and the series read.
       matched: lean ? lean.forest!.matched.slice() : roots.map(r => ({ path: r, b: Math.round(rootNet.get(r)!.b), o: Math.round(rootNet.get(r)!.o) })).sort((x, y) => y.b - x.b || (x.path < y.path ? -1 : x.path > y.path ? 1 : 0)),
       matchSet: rootSet,
+      ...(matchedHits ? { matchedTotals: (paths: string[]) => matchedAncestorTotals(matchedHits!, date, paths) } : {}),
       ...(lean?.forest?.union ? { matchTotal: lean.forest.union } : {}),
       ...(excl.size ? { excluded: [...excl.keys()].sort(), excl } : {}),
       ...(o.firstPaint ? { firstPaint: true } : {}), ...(interiors ? { interiors } : {}), ownerLens: ol, scoped,
@@ -1896,8 +1911,10 @@ export interface NestOpts {
 /** The nodes `foldRoots` keeps of a roots answer's forest, each at its total on the scan read, and per directory drawable
  *  on that scan its children there, drawn or not (`kids`: its child list's fold count). */
 export interface FoldedRoots {
-  nodes: { p: string; d: number; isDir: boolean; b: number; n: number }[]
+  nodes: { p: string; d: number; isDir: boolean; b: number; n: number; ub?: Record<string, number> }[]
   kids: Map<string, number>
+  /** Owner bytes over every live hit, including roots too small to retain as nodes. */
+  owners?: Record<string, number>
 }
 
 /** A match-roots answer under `dir` on `date`, folded to the nodes a view can use, whatever the number of roots: a forest
@@ -1966,13 +1983,31 @@ export function foldRoots(dir: string, hits: Hit[], o: { date: string; other?: s
   spare.sort((x, y) => ranked(y) - ranked(x) || (paths[x] < paths[y] ? -1 : paths[x] > paths[y] ? 1 : 0))
   const listed = new Set(spare.slice(0, MATCH_LIST_CAP))
   const nodes: FoldedRoots['nodes'] = []
+  const retained = new Map<number, FoldedRoots['nodes'][number]>()
   const kids = new Map<string, number>()
   for (const i of order) {
     const par = parents[i]
     if (canD(par)) { const k = par < 0 ? dir : paths[par]; kids.set(k, (kids.get(k) ?? 0) + 1) }
-    if (canD(i) || canE(i) || listed.has(i)) nodes.push({ p: paths[i], d: depths[i], isDir: !!isDir[i], b: bs[i], n: ns[i] })
+    if (canD(i) || canE(i) || listed.has(i)) {
+      const node = { p: paths[i], d: depths[i], isDir: !!isDir[i], b: bs[i], n: ns[i] }
+      nodes.push(node); retained.set(i, node)
+    }
   }
-  return { nodes, kids }
+  // Allocate owner maps only for the bounded retained nodes, not the whole forest. Every live hit still
+  // contributes to their ancestors and the answered directory, including hits below the drawing threshold.
+  const owners: Record<string, number> = {}
+  for (const h of hits) {
+    if (!h.usr || !(h.vf <= D && D < h.vt)) continue
+    const b = Number(h.size)
+    owners[h.usr] = (owners[h.usr] ?? 0) + b
+    for (let i = at.get(h.path)!; i >= 0; i = parents[i]) {
+      const node = retained.get(i)
+      if (!node) continue
+      const ub = node.ub ??= {}
+      ub[h.usr] = (ub[h.usr] ?? 0) + b
+    }
+  }
+  return { nodes, kids, ...(Object.keys(owners).length ? { owners } : {}) }
 }
 
 export async function nestRollup(o: NestOpts): Promise<Nest | null> {
@@ -1990,10 +2025,12 @@ export async function nestRollup(o: NestOpts): Promise<Nest | null> {
   const addRollup = (dir: string, r: Rollup, d: number): Agg => {
     const { kids, rest } = rollupAt(r, date)
     const tot = newAgg()
+    tot.ownerKnown = 0
     tot.b = Number(rest[0]); tot.o = Number(rest[1])
     const names: string[] = []
     for (const [c, b, ob] of kids) {
       const a = newAgg()
+      a.ownerKnown = 0
       a.b = Number(b); a.o = Number(ob)
       const cp = dir === '' ? c : `${dir}/${c}`
       if (!isRoot(cp)) a.kind = 'dir'
@@ -2008,16 +2045,31 @@ export async function nestRollup(o: NestOpts): Promise<Nest | null> {
    *  Children are listed (`kidsOf`, kept ones) and counted (`rollupKids`) under the nodes a view can draw on `date`, so
    *  every drawn node's list and fold count are whole. */
   const fold = (dir: string, hits: Hit[]): FoldedRoots => foldRoots(dir, hits, { date, other: o.other, thrAt, last: maxDepth != null ? dP + maxDepth : Infinity, isRoot })
-  const addRoots = (dir: string, { nodes, kids }: FoldedRoots) => {
+  const addRoots = (dir: string, { nodes, kids, owners }: FoldedRoots) => {
     rootsDirs.add(dir)
     for (const [k, n] of kids) {
       rollupKids.set(k, n)
       if (!kidsOf.has(k)) kidsOf.set(k, [])
     }
-    for (const { p, d, isDir, b, n } of nodes) {
+    for (const { p, d, isDir, b, n, ub } of nodes) {
       if (exact.has(p)) exact.grow(p, b, n)
       else { exact.addLite(p, b, n, isDir); depthOf.set(p, d) }
+      if (ub) {
+        const a = exact.get(p)!
+        for (const u in ub) a.ub[u] = (a.ub[u] ?? 0) + ub[u]
+      }
       kidsOf.get(parentOf(p))?.push(p)
+    }
+    // Fetched roots answers are disjoint partitions. Their known owner bytes roll up across the enclosing
+    // rollup cells without adding their bytes/objects a second time.
+    const known = exact.get(dir)!.b
+    for (let p = dir; ; p = parentOf(p)) {
+      const a = p === path ? total : exact.get(p)
+      if (a) {
+        a.ownerKnown = (a.ownerKnown ?? 0) + known
+        if (owners) for (const u in owners) a.ub[u] = (a.ub[u] ?? 0) + owners[u]
+      }
+      if (p === path || p === '') break
     }
     if (!kidsOf.has(dir)) kidsOf.set(dir, [])
   }
@@ -2254,7 +2306,25 @@ async function rollupRead(env: Env, o: ViewOpts, rollup: Rollup, x: {
     }
     for (const [p, d] of own) {
       const a = exact.get(p)!
+      const unknown = a.b - (a.ownerKnown ?? a.b)
+      const previousOwners = a.ub
       a.kind = d.kind; a.wts = d.wts; a.wb = d.wb; a.m = d.m; a.a = d.a; a.cb = d.cb; a.ub = d.ub; a.nc = d.nc; a.nd = d.nd
+      a.ownerKnown = a.b
+      for (let q = parentOf(p); ; q = parentOf(q)) {
+        const parent = q === path ? total : exact.get(q)
+        if (parent) {
+          addDisplayDetail(parent, d)
+          if (unknown > 0) {
+            parent.ownerKnown = (parent.ownerKnown ?? 0) + unknown
+            for (const u of new Set([...Object.keys(previousOwners), ...Object.keys(d.ub)])) {
+              const b = (parent.ub[u] ?? 0) + (d.ub[u] ?? 0) - (previousOwners[u] ?? 0)
+              if (b > 0) parent.ub[u] = b
+              else delete parent.ub[u]
+            }
+          }
+        }
+        if (q === path || q === '') break
+      }
     }
     tr?.('details', performance.now() - t0, String(own.size))
   }
@@ -2295,8 +2365,9 @@ async function readRootAllRows(env: Env, date: string, path: string, dP: number)
  *  budget is kept briefly and upgraded (`Coverage.searchLate`), where 6 kept it whole; 8 — a root's interior under an
  *  unfiltered view's read bound (64 groups / 512K rows), the interval store planned as the plain view plans it; 9 — a
  *  diff's name whose lookup the walk's budget left unanswered folds into `(other)` on both sides, where it read as
- *  added / removed at zero (a root's interior child over its threshold on one scan only). */
-export const FILTER_VIEW_V = 9
+ *  added / removed at zero (a root's interior child over its threshold on one scan only); 10 — restore
+ *  rollup ownership/detail, expose unread ownership, and recover filtered ancestors missing on one diff side. */
+export const FILTER_VIEW_V = 10
 
 /** A filter view's phase 2 (the insides of its match roots) subdivides a root only when its tile is at
  *  least this many px² — room for a title and a few legible cells; a smaller root is one exact tile. */
@@ -2403,6 +2474,40 @@ function rootsTotal(hits: Hit[], date: string): Agg {
     if (h.usr) t.ub[h.usr] = (t.ub[h.usr] ?? 0) + size
   }
   return t
+}
+
+/** Sum live matching roots into a bounded set of missing diff ancestors. The numeric forest was
+ * discarded after phase 1; rebuilding every ancestor as an Agg would defeat that memory bound. */
+function matchedAncestorTotals(hits: Hit[], date: string, paths: string[]): Map<string, Agg | null> {
+  const D = scanAt(date)
+  const out = new Map<string, Agg | null>(paths.map(p => [p, null]))
+  const ancestors = new Set<string>()
+  for (const p of paths) for (let q = parentOf(p); ; q = parentOf(q)) {
+    ancestors.add(q)
+    if (!q) break
+  }
+  const covering = new Set<string>()
+  for (const h of hits) {
+    if (!(h.vf <= D && D < h.vt)) continue
+    if (ancestors.has(h.path)) covering.add(h.path)
+    const b = Number(h.size), o = Number(h.n)
+    for (let p = h.path; ; p = parentOf(p)) {
+      if (out.has(p)) {
+        let a = out.get(p)
+        if (!a) out.set(p, (a = newAgg()))
+        a.b += b; a.o += o
+        if (h.usr) a.ub[h.usr] = (a.ub[h.usr] ?? 0) + b
+      }
+      if (!p) break
+    }
+  }
+  // A descendant's whole row is in scope when a matching directory covers it. Its root aggregate
+  // cannot tell us that descendant's own total, so leave these for the floor-free point lookup.
+  for (const p of paths) for (let q = parentOf(p); ; q = parentOf(q)) {
+    if (covering.has(q)) { out.delete(p); break }
+    if (!q) break
+  }
+  return out
 }
 
 export interface FoldOpts {
@@ -3326,8 +3431,10 @@ export async function buildDiff(env0: Env, o: DiffOpts): Promise<Diff> {
   const sameStore = !!(va && vb && va.idx.asOf != null && vb.idx.asOf != null && va.idx.gen === vb.idx.gen && !query && !lens && !owner && !o.classes && !o.by)
   const found = new Map<string, Agg | null>() // `${side}:${cp}`: an answered lookup (null: none there)
   let inferred = 0
-  /** `q` answered without a read, where what is known says it (true: `found` holds the answer). */
-  const free = (q: Ask): boolean => {
+  /** `q` answered without a read, where what is known says it (true: `found` holds the answer; `'match'`: a name
+   *  outside the filter on a side that sums its matching roots, `matchedTotals`, answered with its round's others in
+   *  `settle`). `covered`: a name `matchedTotals` left to the read (inside a matching directory). */
+  const free = (q: Ask, covered = false): boolean | 'match' => {
     const { v } = sideOf(q.side)
     const key = `${q.side}:${q.cp}`
     // Under a path that side has no row for (`gone`): none for this name either.
@@ -3337,7 +3444,11 @@ export async function buildDiff(env0: Env, o: DiffOpts): Promise<Diff> {
       inferred++
       return true
     }
-    if (!inQuery(q.cp, v)) { found.set(key, null); return true }
+    if (!covered && !inQuery(q.cp, v)) {
+      if (v.matchedTotals) return 'match'
+      found.set(key, null)
+      return true
+    }
     const w = sameStore ? q.other?.ver : null
     if (!w) return false
     const D = v.idx.asOf!
@@ -3358,12 +3469,31 @@ export async function buildDiff(env0: Env, o: DiffOpts): Promise<Diff> {
   /** Plans `top` and everything under it whose sides are known without a read; the names that need one go to `pending`. */
   const settle = (top: Item) => {
     const stack = [top]
-    for (let it: Item | undefined; (it = stack.pop()); ) {
-      const { names } = planOf(it)
-      for (const cp of names) {
-        const q = askOf(it, cp)
-        if (q && !free(q)) pending.push(q)
-        else stack.push(childOf(it.p, cp, it.d + 1))
+    for (;;) {
+      const matching: Ask[] = []
+      for (let it: Item | undefined; (it = stack.pop()); ) {
+        const { names } = planOf(it)
+        for (const cp of names) {
+          const q = askOf(it, cp)
+          const f = q ? free(q) : true
+          if (f === 'match') matching.push(q!)
+          else if (!f) pending.push(q!)
+          else stack.push(childOf(it.p, cp, it.d + 1))
+        }
+      }
+      if (!matching.length) break
+      // A filtered diff's ancestors of matching roots drawn on the other side only: summed from this side's live
+      // matching roots, the pass's names at once (the numeric forest isn't kept). A name inside a matching
+      // directory isn't answered there and is read as any other.
+      for (const side of [1, 2] as const) {
+        const qs = matching.filter(q => q.side === side)
+        if (!qs.length) continue
+        const got = sideOf(side).v.matchedTotals!(qs.map(q => q.cp))
+        for (const q of qs) {
+          if (got.has(q.cp)) found.set(`${q.side}:${q.cp}`, got.get(q.cp)!)
+          else if (!free(q, true)) { pending.push(q); continue }
+          stack.push(childOf(q.par, q.cp, q.d))
+        }
       }
     }
   }

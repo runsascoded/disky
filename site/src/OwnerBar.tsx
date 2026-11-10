@@ -4,7 +4,7 @@ import { userColor } from './colors'
 import type { UserIndexEntry } from './colors'
 import { ClassMixTip, Tooltip } from './Tooltip'
 import type { TreeNode } from './types'
-import { CLASS_COLORS, CLASS_NAMES, classMix } from './types'
+import { CLASS_COLORS, CLASS_NAMES, classMix, unownedBytes } from './types'
 import { ghHandle, shortName } from './UserChip'
 import { useUnits } from './units'
 
@@ -32,8 +32,8 @@ export function OwnerBar({ node, userIdx, width = 110, note, onPickUser }: {
   const { fmtBytes } = useUnits()
   const [all, setAll] = useState(false)
   const shares = ownerShares(node)
-  if (shares.length === 0) return null
-  const attributed = shares.reduce((s, [, b]) => s + b, 0)
+  if (shares.length === 0 && !node.unknown_owner_bytes) return null
+  const unowned = unownedBytes(node)
   const color = (u: string) => (userIdx ? userColor(u, userIdx) : 'var(--ink-3)')
   const pct = (b: number) => Math.round((100 * b) / node.bytes)
   const rows = all ? shares : shares.slice(0, TOP)
@@ -48,9 +48,10 @@ export function OwnerBar({ node, userIdx, width = 110, note, onPickUser }: {
         </div>
       ))}
       {shares.length > TOP && !all && <div className="more" onClick={() => setAll(true)}>… and {shares.length - TOP} more</div>}
-      {node.bytes > attributed && (
-        <div className="row"><i style={{ background: 'var(--t-unattr)' }} />unattributed<span className="n">{fmtBytes(node.bytes - attributed)} · {pct(node.bytes - attributed)}%</span></div>
+      {unowned > 0 && (
+        <div className="row"><i style={{ background: 'var(--t-unattr)' }} />unattributed<span className="n">{fmtBytes(unowned)} · {pct(unowned)}%</span></div>
       )}
+      {node.unknown_owner_bytes ? <div className="row"><i style={{ background: 'var(--other)' }} />owner detail unavailable<span className="n">{fmtBytes(node.unknown_owner_bytes)} · {pct(node.unknown_owner_bytes)}%</span></div> : null}
       <div className="how">Attribution comes from paths, W&B run metadata and sidecar files; assigning overrides it.{onPickUser ? ' Click a person to show only their data.' : ''}</div>
     </span>
   )
@@ -58,6 +59,7 @@ export function OwnerBar({ node, userIdx, width = 110, note, onPickUser }: {
     <Tooltip content={tip} pinnable>
       <span className="own-bar" style={{ width }} aria-label="ownership distribution">
         {shares.map(([u, b]) => <i key={u} style={{ width: `${(100 * b) / node.bytes}%`, background: color(u) }} />)}
+        {node.unknown_owner_bytes ? <i style={{ width: `${(100 * node.unknown_owner_bytes) / node.bytes}%`, background: 'var(--other)' }} /> : null}
       </span>
     </Tooltip>
   )

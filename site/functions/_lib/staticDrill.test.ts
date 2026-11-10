@@ -481,6 +481,32 @@ describe('D1', () => {
     (v.matched ?? []).map(m => [m.path, m.bytes, m.objects]).sort((x, y) => (x[0] < y[0] ? -1 : 1))
 
   describe('the map\'s views from the drilldown (`/api/subtree`)', () => {
+    it('rolls fetched root display details into the same ancestors as a roots-dispatched view', async () => {
+      const make = (bound: number) => envStatic(heavyStore(new DrillSource(new Drill(drillBlobs(), new StaticCatalog(drillBlobs()), { rules: { ...DRILL_RULES, bound: () => bound } }))))
+      const opts = { threshold: 0.5, phase2Ms: 10_000, detailsWait: 10_000 }
+      const roots = await view(make(Number.MAX_SAFE_INTEGER), A, '', 'bin', opts)
+      const rollup = await view(make(0), A, '', 'bin', opts)
+      const details = (v: View) => [v.tree, ...v.tree.children ?? []].filter(n => n.name === 'root' || n.name === 'bk').map(n => ({ name: n.name, bytes: n.bytes, objects: n.objects, mtime: n.mtime, classes: n.class_bytes, owners: n.owners }))
+      expect(details(rollup)).toEqual(details(roots))
+    })
+
+    it('characterizes rich fields under forced roots and rollup dispatch with identical finite budgets', async () => {
+      const make = (bound: number) => envStatic(heavyStore(new DrillSource(new Drill(drillBlobs(), new StaticCatalog(drillBlobs()), { rules: { ...DRILL_RULES, bound: () => bound } }))))
+      const opts = { threshold: 0.5, maxDepth: 1, phase2Ms: 10_000, detailsWait: 10_000 }
+      const roots = await view(make(Number.MAX_SAFE_INTEGER), A, '', 'bin', opts)
+      const rollup = await view(make(0), A, '', 'bin', opts)
+      // The depth cap intentionally prevents expansion: mark missing ownership explicitly, rather than
+      // allowing an absent owner mix to imply that every byte is unowned.
+      expect([roots, rollup].map(v => ({
+        tier: v.tier, bytes: v.tree.bytes, objects: v.tree.objects, owners: v.tree.owners, unknownOwners: v.tree.unknown_owner_bytes,
+        children: v.tree.children?.map(c => [c.name, c.bytes, c.objects]),
+        detailsLate: v.detailsLate, partial: v.partial, approximate: v.approximate,
+      }))).toEqual([
+        { tier: 'drill+fine', bytes: 3154098, objects: 10, owners: [['bob', 1051576], ['alice', 5050]], unknownOwners: undefined, children: [['bk', 3153988, 8], ['tomato-bk', 100, 1], ['zz', 10, 1]], detailsLate: undefined, partial: undefined, approximate: undefined },
+        { tier: 'rollup', bytes: 3154098, objects: 10, owners: undefined, unknownOwners: 3154098, children: [['bk', 3153988, 8], ['tomato-bk', 100, 1], ['zz', 10, 1]], detailsLate: undefined, partial: undefined, approximate: undefined },
+      ])
+    })
+
     it('roots answers: the same view as the search sidecars\', and brute force\'s match roots', async () => {
       const drill = newDrill()
       const got: unknown[] = []

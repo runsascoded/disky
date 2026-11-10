@@ -307,9 +307,11 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
       if (it.last_read != null && it.last_read > ma) ma = it.last_read
     }
     const folded: TreeNode = { name: `(+${tiny.length})`, bytes, objects }
+    const unknown = tiny.reduce((s, it) => s + (it.unknown_owner_bytes ?? 0), 0)
+    if (unknown) folded.unknown_owner_bytes = unknown
     if (mt >= 0) folded.mtime = mt
     if (ma >= 0) folded.last_read = ma
-    const topUs = Object.entries(us).sort((a, c) => c[1] - a[1]).slice(0, 5)
+    const topUs = Object.entries(us).sort((a, c) => c[1] - a[1])
     if (topUs.length) folded.owners = topUs as [string, number][]
     return folded
   }, [])
@@ -393,9 +395,11 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
         } else {
           const us = (kid.owners ?? []).filter(([, b]) => b >= 0.06 * kid.bytes).slice(0, 4)
           const rem = kid.bytes - us.reduce((s, [, b]) => s + b, 0)
+          const unknown = Math.min(kid.unknown_owner_bytes ?? 0, rem)
           if (us.length && (us.length > 1 || rem >= 0.06 * kid.bytes)) {
             segments = us.map(([uu, b]) => ({ color: coldShade(userColor(uu, userIdx), cold), frac: b / kid.bytes }))
-            if (rem >= 0.06 * kid.bytes) segments.push({ color: userColor(null, userIdx), frac: rem / kid.bytes })
+            if (rem - unknown >= 0.06 * kid.bytes) segments.push({ color: userColor(null, userIdx), frac: (rem - unknown) / kid.bytes })
+            if (unknown > 0) segments.push({ color: 'var(--other)', frac: unknown / kid.bytes })
             bg = 'var(--panel)'
             ink = 'var(--ink)'
           } else if (us.length === 1) {
@@ -406,7 +410,7 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
             bg = coldShade(base, cold)
             ink = inkFor(base)
           } else {
-            bg = userColor(null, userIdx)
+            bg = kid.unknown_owner_bytes ? 'var(--other)' : userColor(null, userIdx)
             ink = inkFor(bg)
           }
         }
@@ -456,17 +460,18 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
   // what no person owns is the unowned pool. $ figures use class-aware
   // per-user rates when the snapshot carries them.
   const rollupFor = (node: TreeNode) => {
-    if (mode !== 'user' || !node.owners) return []
+    if (mode !== 'user' || (!node.owners && !node.unknown_owner_bytes)) return []
     const userRate = (u: string) => pricing && (pricing.userRates?.[u] ?? pricing.blended)
-    const us = node.owners
+    const us = node.owners ?? []
     const userTotal = us.reduce((s, [, b]) => s + b, 0)
-    const unattr = Math.max(0, node.bytes - userTotal)
+    const unattr = unownedBytes(node)
     const shown = us.filter(([, b], i) => i < 5 || (i < 12 && b >= 0.01 * node.bytes))
     const otherUsers = userTotal - shown.reduce((s, [, b]) => s + b, 0)
     return [
       ...shown.map(([u, b]) => ({ k: u, b, col: userColor(u, userIdx), rate: userRate(u), mix: pricing?.userMix?.[u], hl: { user: u } as Highlight | undefined })),
       ...(otherUsers > 0 ? [{ k: `(other users ×${us.length - shown.length})`, b: otherUsers, col: 'var(--other)', rate: pricing?.blended, mix: undefined, hl: undefined }] : []),
       ...(unattr > 0 ? [{ k: 'unowned', b: unattr, col: 'var(--t-unattr)', rate: pricing?.blended, mix: undefined, hl: { unowned: true } as Highlight | undefined }] : []),
+      ...(node.unknown_owner_bytes ? [{ k: '(owner detail unavailable)', b: node.unknown_owner_bytes, col: 'var(--other)', rate: pricing?.blended, mix: undefined, hl: undefined }] : []),
     ].sort((a, b) => b.b - a.b)
   }
 

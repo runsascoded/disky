@@ -13,6 +13,8 @@ export interface TreeNode {
   last_read?: number
   /** Top owners → bytes, largest first. */
   owners?: [string, number][]
+  /** Bytes whose ownership was not read (a rollup's unexpanded cells); distinct from known unowned bytes. */
+  unknown_owner_bytes?: number
   /** Non-Standard class → bytes (`"2"` NL, `"3"` CL, `"4"` AR); Standard = `bytes` − their sum. */
   class_bytes?: Record<string, number>
   children?: TreeNode[]
@@ -63,7 +65,8 @@ export interface UserInfo {
 export const userBytes = (n: Pick<TreeNode, 'owners'>): number => (n.owners ?? []).reduce((s, [, b]) => s + b, 0)
 /** Bytes nobody owns under a node — the unowned pool. Ownership has one
  * axis (a person or nobody); there is no group facet. */
-export const unownedBytes = (n: Pick<TreeNode, 'bytes' | 'owners'>): number => Math.max(0, n.bytes - userBytes(n))
+export const unownedBytes = (n: Pick<TreeNode, 'bytes' | 'owners' | 'unknown_owner_bytes'>): number =>
+  Math.max(0, n.bytes - userBytes(n) - (n.unknown_owner_bytes ?? 0))
 
 export interface AgeRow {
   d: number   // listing day, epoch days (GCS: created; S3/R2/local: modified)
