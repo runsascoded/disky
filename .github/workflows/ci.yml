@@ -63,14 +63,14 @@ jobs:
           key: ${{ steps.key.outputs.key }}
 
   release-build-id:
-    name: Release build identity
+    name: Release and preview tooling
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 24
-      - run: node --test site/scripts/build-id.test.mjs
+      - run: node --test site/scripts/build-id.test.mjs .github/actions/cf-preview/preview.test.mjs
 
   typecheck:
     name: Type Check
