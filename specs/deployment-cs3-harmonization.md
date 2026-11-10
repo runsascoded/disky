@@ -1,6 +1,8 @@
 # Deployment and CS3 harmonization
 
-Status: active, 2026-11-09. Scope: GCS, CW, HF and OA R2, including each meta store. Root `cloud` owns shared source; deployment owners own configuration, verification, infrastructure applies and cutovers. Louisa's permissions are outside this work. The [operator runbook] describes the four release lanes. This spec records the missing parity and the implementation order, independently of the [index rethink].
+Status: active, updated 2026-11-10. Scope: GCS, CW, HF and OA R2, including each meta store. Root `cloud` owns shared source; deployment owners own configuration, verification, infrastructure applies and cutovers. Individual access grants remain a separate action; the team release workflow and credential inventory are covered by the [release workflow proposal]. The [operator runbook] describes the four release lanes. This spec records the missing parity and the implementation order, independently of the [index rethink].
+
+November 10 checkpoint: shared guard/status/reporting fixes and per-head work ownership receipts are tested, committed and integrated into root `cloud` through `8b88cff59`. Deployment-wide adoption, history/age rollout, native retirement and a work-retention planner remain open; this spec is not complete. GCS's bounded read-only investigation of the old static-generation mismatches is running under its owner. The [release workflow proposal] now covers Ryan/Louisa's PR/dev/prod process; no branch/protection/trigger/credential changes were applied.
 
 ## Acceptance
 
@@ -31,9 +33,11 @@ The same audit found `static-names/src` (127,418,229 bytes) is a source cache wi
 
 The marker guard is now implemented in shared `store_gen_gc.plan` for both static and interval stores, with an explicit held reason. Three remote regression cases failed before the fix and passed after it, covering caches with nested scan markers, incomplete builds and forwarding records. A further 22 selected native GC, compaction/independent-lineage and exact-review cases passed on `mgu` (93 seconds, snapshot `014b8cdf3b3a`, `wt/harmonize/tmp/remote-test-20261110T103109.log`; the three explicit regression passes are in `remote-gc-marker-regressions.log`). An old static-GC fixture now includes the real generation marker it was pretending to represent. No live object, config or pointer was changed.
 
+The GCS owner's subsequent six-case pinned diagnosis retained complete bodies and found equal byte/object totals in all six. With explicit 30-second phase/detail/walk budgets, `ck`/`eval` complete row objects also agree; their remaining full-JSON difference is the documented generation-wide `matchCount.n` upper bound. `tomat`/`grug` complete JSON agrees. `safetensors` still has rich owner/provenance and some age/class detail absent under roots-versus-rollup dispatch; this remains a rich-body acceptance gap. No predecessor payload is cleared by the diagnosis. The real captured-inventory planner now natively holds `src` with the new guard, while reporting the same old-generation candidate byte total. Evidence is the owner's `diagnosis.txt` and `classification-guard.json/log` under the inventory directory above.
+
 ## Source adoption in progress
 
-The isolated `w/harmonization` branch is based on `cloud` `917560a2`. Changes below are local source adoption pending combined validation; no release or cleanup is implied.
+The isolated `w/harmonization` branch started at `cloud` `917560a2`. The shared changes below passed combined validation and are integrated into root `cloud`; adoption by each deployment and live release/cleanup remain separate.
 
 | Shared change | Source handoff | Acceptance |
 | --- | --- | --- |
@@ -50,8 +54,8 @@ CW's active GC/thinning changes overlap retirement, compaction, publishing and s
 
 ## Implementation sequence
 
-1. Finish shared-source adoption and targeted Python/site checks. Keep root's unrelated staged changes intact. Publish exact handoff commits and test evidence to owners; distinguish local fixes, branch adoption and deployed fixes.
-2. Add work ownership evidence before implementing Nextflow cleanup: deployment/store/actual run/head-attempt identity, exact configured task root, full workdirs, cached/shared references, trace digest and explicit missing/truncated evidence. Immutable local/GCS writes refuse a different receipt at the same key. Existing report links remain unchanged. A receipt is an inventory prerequisite, not output parity or permission to delete.
+1. **Shared-source integration complete:** targeted Python/site checks passed and exact handoff commits/evidence were sent to owners. Root's unrelated staged changes remain byte-identical. Deployment adoption is still tracked separately.
+2. **Ownership evidence complete; cleanup planner open:** receipts carry deployment/store/actual run/head-attempt identity, configured task root, full workdirs, cached/shared references, trace digest and missing/truncated evidence. Immutable local/GCS writes refuse mismatched contents. Existing report links remain unchanged. This is an inventory prerequisite, not output parity or permission to delete.
 3. Bring GCS/CW meta histories and CW/GCS age histories to the shared baseline on candidate generations. Verify every promised scan against its existing reader and check fresh append/restart behavior. Only then produce exact native retirement manifests; report retained and held bytes by representation and root. No cleanup from missing or mismatched proofs.
 4. Reconcile published generation GC with CW's validated source, protect all primary/meta/static rollback roots and active reader/writer references, and prove continuation from the retained generation. R2 can then re-plan its already-held proposal with the shared guard stack. Configuration changes that enable deletion require the exact review and deployment owner cutover.
 5. Implement a read-only completion-aware work/cache/report planner over complete ownership receipts. Protect active/failed resumable runs, shared cached workdirs, explicit holds and output proof. Define a resume fence and recovery window before any executor. Do not copy HF's blanket TTL as an ownership proof.
@@ -71,3 +75,4 @@ Use targeted suites for nominal threads, scan finalization, ownership receipts, 
 [operator runbook]: oa-deployment-handoff.md
 [index rethink]: fleet-index-research.md
 [ownership contract]: ../docs/nextflow-ownership.md
+[release workflow proposal]: oa-release-workflow.md

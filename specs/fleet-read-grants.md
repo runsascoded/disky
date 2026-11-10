@@ -2,6 +2,8 @@
 
 Status: deployment-owner handoff, 2026-11-09. Root owns the `disky.oa.dev` consumer and Pages secret placement; GCS, CW, HF and R2 own their source access policies and grant issuance. This handoff does not authorize a permission change or live rollout by itself. Ryan has authorized the fleet dashboard; preserve each deployment's source-policy review.
 
+November 10 recheck: both Pages environments still lack all four `FLEET_TOKEN_*` bindings; no canonical fleet deployment exists and both GitHub release flags are unset. The basic daily scan/build rollup should not wait for meta charts: establish its dedicated read contract first, retaining the broader meta aggregate work separately. Daily/monthly posting semantics still need implementation; the existing hourly persistent-card updater alone does not deliver them. See [fleet delivery scope] for the current verified status.
+
 The consumer is built and verified, and the OA broker clients are provisioned. The four `FLEET_TOKEN_*` secrets are absent. Existing `fleet/functions/_lib/fleet.ts` reads `/api/health`, `/api/scan-runs` and `/api/series?store=meta` with each source's token. GCS/CW admin-gate the meta store; using an admin token would give the consumer unnecessary authority. No narrow fleet-summary endpoint currently exists in the checked-out deployment sources.
 
 ## Required handoff

@@ -4,6 +4,10 @@ From the root session, 2026-11-07. Ryan's go: "yes sg" to: a Pages project + DNS
 
 ## Status
 
+November 10 live readback: Pages `disky-oa` still has no canonical deployment, only `disky-oa.pages.dev`; production/preview have the existing broker/session/job secrets but no `FLEET_TOKEN_*` bindings. GitHub has neither release-enable flag set. Slack search including bot messages still shows the November 6 hand-collected draft and Ryan's November 10 TODO thread, with no automated fleet rollup. The feature is not live. Nonsecret readback artifacts: root `tmp/cs3-audit/fleet-live-readiness-nov10.json`, `fleet-release-flags-nov10.jsonl` and `oa-repo-release-metadata.json`.
+
+Next delivery should satisfy the requested four-deployment status first: newest scan/freshness, five recent outcome marks and serving build, with a maintained monthly parent and one nominal daily reply. `dt-cloud fleet-status` already renders the basic rows, but it is not a scheduled publisher. Dedicated source grants, daily/monthly persistent delivery, concern transitions and real dry-run review remain implementation/rollout work. Meta charts and the new web dashboard should not be additional prerequisites for the basic daily status; unavailable extra metrics must remain explicit. The old hourly image refresh alone does not satisfy this daily/monthly contract. [Release workflow proposal] handles PR/dev/prod automation separately.
+
 - **Built on `cloud`** (`rw/fleet-site`, 2026-11-07): the app `fleet/`, its specs and CI job, and `packages/pages-kit` (what it shares with `site/`). `o/front-door` adds the deployment config and gated release/hourly workflows; CI passed at `b34c4165`.
 - **Provisioned, verified 2026-11-09:** the `disky-oa` Pages project and fleet KV, Actions deployment/job credentials, separate Pages production/preview session/job/client secrets, and production-only bot token. The broker owner completed the two clients and direct secret installation after direct user approval. See [deployment record].
 - **Open:** the four source read tokens and GCS/CW meta summary contract, first preview/production deployment, DNS, browser sign-in/card verification, and the first automated post. Live Cloudflare reports no deployment or custom-domain/DNS cutover; both GitHub release flags remain unset.
@@ -97,3 +101,4 @@ For an offline review artifact without posting or changing the goldens, run from
 
 [deployment record]: https://github.com/Open-Athena/disky/blob/front-door/fleet/DEPLOYMENT.md
 [Ryan's November 6 draft]: https://openathena.slack.com/archives/C0CFMN7FYG4/p1793969930968119
+[Release workflow proposal]: oa-release-workflow.md
