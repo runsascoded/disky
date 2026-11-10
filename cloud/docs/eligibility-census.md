@@ -41,7 +41,7 @@ Each JSONL row has exactly these fields, ends with a newline, and is at most 1 M
 
 Rows are ordered by scan; ordering within one scan is immaterial. All same-scan changes are folded atomically before validation or version boundaries. A deletion followed by replacement at the same scan therefore cannot introduce a false empty interval. `owner` is text (`""` is unowned), `class` is nonempty text, bytes are signed 64-bit integers and each row's object delta is −1, 0 or +1. At a scan boundary each own `(path,owner,class)` has count 0 or 1, nonnegative Int64 bytes, and zero bytes when absent. Across joint cells an own path has at most one object. Transfer an object by removing its complete old state and adding its complete new state at the same scan. An object whose key also names a folder remains a separate own contribution to that node's recursive values.
 
-This format is an exported own-object event contract; feeding recursive directory sums as events double-counts contributions. A Parquet/version-row adapter is not implemented. Liveness overrides, object-version selectors, physical/membership churn and Boolean query plans are outside this stock census.
+This format is an exported own-object event contract; feeding recursive directory sums as events double-counts contributions. A Parquet/version-row adapter is not implemented; the proposed [producer qualification contract] defines the minimum source truth needed before building one. Liveness overrides, object-version selectors, physical/membership churn and Boolean query plans are outside this stock census.
 
 ## Counts and bytes
 
@@ -54,3 +54,5 @@ Default limits: 64 MiB input, 100K event rows, 50K distinct own paths, 16 scans,
 The JSON report on stdout is deterministic for identical input and limits. A separate stderr JSON resource record reports construction wall time, process CPU, process-lifetime high-water RSS, single-thread execution and zero work-disk writes. RSS includes the interpreter/imports and any earlier work in that process; it is not a per-request allocator measurement. Redirect stdout/stderr separately when preserving results.
 
 A producer and consumer must pin hierarchy, attribution and scan semantics together. The census has no stable DFS allocator, joint range-min/successor structure, query refinement or performance crossover claim. Use its complete-scope counts to decide whether a physical-index experiment is justified.
+
+[producer qualification contract]: eligibility-producer.md
