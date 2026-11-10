@@ -481,6 +481,23 @@ describe('D1', () => {
     (v.matched ?? []).map(m => [m.path, m.b, m.o]).sort((x, y) => (x[0] < y[0] ? -1 : 1))
 
   describe('the map\'s views from the drilldown (`/api/subtree`)', () => {
+    it('characterizes rich fields under forced roots and rollup dispatch with identical finite budgets', async () => {
+      const make = (bound: number) => envStatic(heavyStore(new DrillSource(new Drill(drillBlobs(), new StaticCatalog(drillBlobs()), { rules: { ...DRILL_RULES, bound: () => bound } }))))
+      const opts = { threshold: 0.5, maxDepth: 1, phase2Ms: 10_000, detailsWait: 10_000 }
+      const roots = await view(make(Number.MAX_SAFE_INTEGER), A, '', 'bin', opts)
+      const rollup = await view(make(0), A, '', 'bin', opts)
+      // Characterization of the retirement blocker, not rich-body acceptance: the same data and finite
+      // budgets lose owner detail without a coverage flag when row-group bounds select the rollup.
+      expect([roots, rollup].map(v => ({
+        tier: v.tier, bytes: v.tree.b, objects: v.tree.o, owners: v.tree.us,
+        children: v.tree.c?.map(c => [c.n, c.b, c.o]),
+        detailsLate: v.detailsLate, partial: v.partial, approximate: v.approximate,
+      }))).toEqual([
+        { tier: 'drill+fine', bytes: 3154098, objects: 10, owners: [['bob', 1051576], ['alice', 5050]], children: [['bk', 3153988, 8], ['tomato-bk', 100, 1], ['zz', 10, 1]], detailsLate: undefined, partial: undefined, approximate: undefined },
+        { tier: 'rollup', bytes: 3154098, objects: 10, owners: undefined, children: [['bk', 3153988, 8], ['tomato-bk', 100, 1], ['zz', 10, 1]], detailsLate: undefined, partial: undefined, approximate: undefined },
+      ])
+    })
+
     it('roots answers: the same view as the search sidecars\', and brute force\'s match roots', async () => {
       const drill = newDrill()
       const got: unknown[] = []
