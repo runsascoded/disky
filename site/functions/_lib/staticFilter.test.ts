@@ -211,6 +211,23 @@ describe('static filter: the treemap / table view (`/api/subtree`)', () => {
 })
 
 describe('static filter: the diff view (`/api/diff`)', () => {
+  it.each([0, 50])('keeps the old %i-byte matched total of an ancestor drawn only on the newer side', async before => {
+    const hit = (path: string, size: number, vf: number, vt: number): Hit => ({ path, depth: 4, usr: '', vf, vt, size: BigInt(size), n: 1n })
+    const hits = [
+      hit('bk/p/hf/safetensors.bin', before, Date.parse(A), Date.parse(B)),
+      hit('bk/p/hf/safetensors.bin', 1000, Date.parse(B), 9e15),
+      hit('bk/steady/hf/safetensors.bin', 2000, Date.parse(A), 9e15),
+    ]
+    const source: HitSource = { async hits() { return { hits, io: { from: 'test' } } } }
+    const d = await buildDiff(envStatic({ source, scans: async () => DATES, gen: 'synthetic' }), {
+      from: A, to: B, path: '', w: W, h: H, minArea: MIN_AREA, atten: ATTEN, top: 200,
+      threshold: 100, query: q('safetensors'),
+    })
+    expect(d.rows.filter(r => r.p === 'bk/p').map(({ p, a, b, oa, ob, s }) => ({ p, a, b, oa, ob, s }))).toEqual([
+      { p: 'bk/p', a: before, b: 1000, oa: 1, ob: 1, s: 'changed' },
+    ])
+  })
+
   for (const root of ROOTS) {
     it(`= the search-sidecar diff, under '${root}'`, async () => {
       const got: unknown[] = []

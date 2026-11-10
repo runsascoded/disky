@@ -715,7 +715,7 @@ function AppContent() {
     if (!fq) return undefined
     const d = subtreeQs[subtreeQs.length - 1]?.data ?? coarseQs[coarseQs.length - 1]?.data ?? subtreeQs[0]?.data
     const r = (d as { rollup?: { bucketsOnly?: true; scopedBelow?: true } } | undefined)?.rollup
-    return d && { partialReason: d.partialReason, approximateReason: d.approximateReason, bucketsOnly: r?.bucketsOnly ? (r.scopedBelow ? 'scoped' as const : true) : false, dirsOnly: !!(d as { dirsOnly?: true }).dirsOnly, hexRuns: d.hexRuns }
+    return d && { partialReason: d.partialReason, approximateReason: d.approximateReason, ownerDetailsMissing: !!d.tree.ou, bucketsOnly: r?.bucketsOnly ? (r.scopedBelow ? 'scoped' as const : true) : false, dirsOnly: !!(d as { dirsOnly?: true }).dirsOnly, hexRuns: d.hexRuns }
   }, [fq, subStamp]) // eslint-disable-line react-hooks/exhaustive-deps
   const meta: Meta | null = metaQ.data ?? null
   const scanRun = useScanRunOf(store, asof)

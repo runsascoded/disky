@@ -10,6 +10,7 @@ export interface TreeNode {
   t?: number                   // …that newest listing time's instant, epoch seconds (absent from older cached responses)
   a?: number                   // last-read epoch day (access logs; MAX over the whole subtree)
   us?: [string, number][]      // top users -> bytes
+  ou?: number                 // bytes whose ownership was not read; distinct from known unowned bytes
   cb?: Record<string, number>  // non-STANDARD class -> bytes ("2" NL, "3" CL, "4" AR); STANDARD = b - sum
   c?: TreeNode[]
   f?: number                   // an `(other)` fold: how many children it stands in for (drives the dust hatch density)
@@ -49,7 +50,7 @@ export interface UserInfo {
 export const userBytes = (n: Pick<TreeNode, 'us'>): number => (n.us ?? []).reduce((s, [, b]) => s + b, 0)
 /** Bytes nobody owns under a node — the unowned pool. Ownership has one
  * axis (a person or nobody); there is no group facet. */
-export const unownedBytes = (n: Pick<TreeNode, 'b' | 'us'>): number => Math.max(0, n.b - userBytes(n))
+export const unownedBytes = (n: Pick<TreeNode, 'b' | 'us' | 'ou'>): number => Math.max(0, n.b - userBytes(n) - (n.ou ?? 0))
 
 export interface AgeRow {
   d: number   // listing day, epoch days (GCS: created; S3/R2/local: modified)

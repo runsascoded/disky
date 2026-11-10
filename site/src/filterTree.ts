@@ -22,18 +22,21 @@ export function reaggregate(n: TreeNode, kids: TreeNode[]): TreeNode {
   const us: Record<string, number> = {}
   let b = 0
   let o = 0
+  let unknown = 0
   let wd = 0
   let wdb = 0
   for (const k of kids) {
     b += k.b
     o += k.o
+    unknown += k.ou ?? 0
     for (const [u, ub] of k.us ?? []) us[u] = (us[u] ?? 0) + ub
     if (k.d != null) {
       wd += k.d * k.b
       wdb += k.b
     }
   }
-  const out: TreeNode = { ...n, b, o, c: kids }
+  const { ou: _ou, ...rest } = n
+  const out: TreeNode = { ...rest, b, o, c: kids, ...(unknown ? { ou: unknown } : {}) }
   out.us = Object.keys(us).length
     ? (Object.entries(us).sort((a, c) => c[1] - a[1]) as [string, number][])
     : undefined

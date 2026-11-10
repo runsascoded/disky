@@ -162,7 +162,7 @@ export function ChildrenTable({ node, segs, scheme, bucketSchemes, scan, flatOk 
   // attribution and no ledger → no `owner(s)`): a store without those axes
   // shouldn't read as a table of dashes.
   const hasRead = kids.some(k => k.a != null)
-  const hasOwners = (!!ownerIdx && store.owners) || kids.some(k => k.us?.length)
+  const hasOwners = (!!ownerIdx && store.owners) || kids.some(k => k.us?.length || k.ou)
 
   // Created-month ink: an age gradient over the listed rows' range, so a
   // column of "May / Jun / Apr" also reads at a glance as older ↔ newer.
@@ -446,7 +446,7 @@ export function ChildrenTable({ node, segs, scheme, bucketSchemes, scan, flatOk 
                     : shares.length === 1 && shares[0][1] >= 0.98 * k.b ? <OwnerFactChip who={shares[0][0]} inferred={k.pv ?? null} />
                     // Picking a person from a ROW's bar means "this directory,
                     // theirs only": drill into the row, then apply the lens.
-                    : shares.length ? <OwnerBar node={k} userIdx={userIdx} width={70} onPickUser={onPickUser && to?.kind === 'drill' ? u => { onOpen(kidSegs); onPickUser(u) } : undefined} />
+                    : shares.length || k.ou ? <OwnerBar node={k} userIdx={userIdx} width={70} onPickUser={onPickUser && to?.kind === 'drill' ? u => { onOpen(kidSegs); onPickUser(u) } : undefined} />
                     : <span className="none">—</span>}
                 </td>
                 )}
