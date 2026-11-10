@@ -13,6 +13,8 @@ const { onRequest } = await import('../_middleware')
 describe('routeOf: a fixed table, never a raw path', () => {
   it('maps paths to their patterns; an HTML GET outside /api/ is `page`, anything else `other`', () => {
     const cases: [string, string, boolean][] = [
+      ['/api/admin/history', 'POST', false],
+      ['/api/admin/history-adopt', 'POST', false],
       ['/api/subtree', 'GET', false],
       ['/api/subtree/extra', 'GET', false],
       ['/api/plans', 'GET', false],
@@ -34,6 +36,7 @@ describe('routeOf: a fixed table, never a raw path', () => {
       ['/wp-login.php', 'GET', false],
     ]
     expect(cases.map(([p, m, h]) => routeOf(p, m, h))).toEqual([
+      '/api/admin/history', '/api/admin/history-adopt',
       '/api/subtree', 'other', '/api/plans/*', '/api/plans/*', '/api/plans/progress', '/api/auth/*', '/auth/google/*',
       '/auth/google/*', '/data/*', '/og/*', '/og/*', '/user/*', '/assets/*', 'page', 'page', 'page', 'other', 'other',
       'other',
