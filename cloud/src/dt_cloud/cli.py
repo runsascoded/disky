@@ -3877,5 +3877,9 @@ from .image_sha import image_sha_cmd as _image_sha  # noqa: E402
 
 main.add_command(_image_sha)
 
+from .history_jobs import cli as _history  # noqa: E402
+
+main.add_command(_history)
+
 if __name__ == "__main__":
     main()

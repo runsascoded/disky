@@ -636,6 +636,10 @@ export function AdminPage() {
         </tbody>
       </table>
       </div>}</Paginated>
+      <section id="history">
+        <h2>Scan history</h2>
+        <p><Link to="/scans#history">Review scan retention on Scan runs</Link>: compare proposals with the timeline and choose scans to retain.</p>
+      </section>
       <Admins />
       <PreviewLinks />
       <ActivityKinds />

@@ -1,3 +1,4 @@
+import { HistoryVersionError } from './_lib/historyVersion.js'
 // Every HTML page response gets its card stamped into `<head>`
 // (specs/done/dogi.md): crawlers never run the React router, so the edge says what
 // each URL shows. Everything else passes through untouched, except an
@@ -107,7 +108,9 @@ async function serve(ctx: MiddlewareCtx): Promise<Response> {
   } catch (e) {
     // An interval-store refusal a route let escape (`withPathStore`'s pointer read runs before most routes' own
     // handling): its 503 + `Retry-After`, not the runtime's bare 500. Anything else stays thrown.
-    const refusal = ivRefusal(e)
+    const refusal = e instanceof HistoryVersionError
+      ? new Response(JSON.stringify({ error: e.message, code: e.code }), { status: e.status, headers: { 'content-type': 'application/json', 'cache-control': 'no-store' } })
+      : ivRefusal(e)
     if (!refusal) throw e
     res0 = refusal
   }
