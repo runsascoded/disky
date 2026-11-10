@@ -517,20 +517,21 @@ def bucket_check(ctx: Ctx, arg: str | None) -> None:
         err("bucket-check: no s3 sources")
         return
     found: list[str] = []
+    errors: list[str] = []
     with ctx.phase("bucket-check"):
         for endpoint, scanned in by_endpoint.items():
-            found += unscanned(s3_client(endpoint), scanned)
+            result = unscanned(s3_client(endpoint), scanned)
+            found.extend(result.buckets)
+            errors.extend(result.errors)
+        messages = []
         if found:
-            from .scan_runs import scan_alert_links
-
-            text = " ".join(found)
-            message = f"unscanned-bucket check: {text}"
+            messages.append(f"non-empty buckets outside the profile's sources: {' '.join(found)}")
+        if errors:
+            messages.append(f"bucket discovery incomplete: {'; '.join(errors)}")
+        if messages:
+            message = "; ".join(messages)
             err(f"WARN: {message}")
             ctx.failure = (1, message)
-            links = scan_alert_links(ctx.env.get("SITE_URL"), getattr(ctx.run, "run_id", None), ctx.profile.store)
-            link_args = [arg for label, url in links for arg in ("-L", label, url)]
-            ctx.sh(["disk-tree", "notify", "-t", f"⚠️ {ctx.profile.deployment} {ctx.scan}", *link_args,
-                    f"non-empty bucket(s) not in the profile's sources: `{text}`"], fatal=False, warn="unscanned-bucket alert not sent")
 
 
 @step("access-ingest", core=False, stage="pre", soft=True, options={"args": list, "poller": bool},
@@ -598,22 +599,28 @@ def s3_client(endpoint: str | None):
     return boto3.client("s3", endpoint_url=endpoint, config=Config(s3={"addressing_style": "virtual"}))
 
 
-def unscanned(client, scanned: set[str]) -> list[str]:
-    """The non-empty buckets `client` lists that aren't in `scanned`; a failed check is an entry naming the call."""
+@dataclass
+class BucketDiscovery:
+    buckets: list[str]
+    errors: list[str]
+
+
+def unscanned(client, scanned: set[str]) -> BucketDiscovery:
+    """Confirmed non-empty unscanned buckets, separately from calls whose coverage is unknown."""
     try:
         names = sorted(b["Name"] for b in client.list_buckets()["Buckets"])
-    except Exception as e:  # noqa: BLE001 — reported in the alert, never fatal
-        return [f"check failed: ListBuckets: {type(e).__name__}: {e}"]
-    out = []
+    except Exception as e:  # noqa: BLE001 — reported as a failed side check, never a bucket finding
+        return BucketDiscovery([], [f"ListBuckets: {type(e).__name__}: {e}"])
+    result = BucketDiscovery([], [])
     for n in names:
         if n in scanned:
             continue
         try:
             if client.list_objects_v2(Bucket=n, MaxKeys=1).get("KeyCount"):
-                out.append(n)
-        except Exception as e:  # noqa: BLE001
-            out.append(f"{n} (check failed: ListObjectsV2: {type(e).__name__}: {e})")
-    return out
+                result.buckets.append(n)
+        except Exception as e:  # noqa: BLE001 — this bucket's emptiness is unknown
+            result.errors.append(f"ListObjectsV2 {n}: {type(e).__name__}: {e}")
+    return result
 
 
 def _list_check(p: ScanProfile) -> list[str]:

@@ -428,7 +428,7 @@ class FakeS3:
 
 def test_unscanned():
     s3 = FakeS3({"scanned": 5, "empty": 0, "new": 3, "denied": PermissionError("no")})
-    assert S.unscanned(s3, {"scanned"}) == ["denied (check failed: ListObjectsV2: PermissionError: no)", "new"]
+    assert S.unscanned(s3, {"scanned"}) == S.BucketDiscovery(["new"], ["ListObjectsV2 denied: PermissionError: no"])
 
 
 def test_run_step_fake_fail_unknown(tmp_path, monkeypatch):
@@ -1004,7 +1004,7 @@ def test_interval_current_failure_records_failed_phase(tmp_path, env):
     ]
 
 
-def test_bucket_check_findings_and_failed_alert_are_not_recorded_done(tmp_path, env, monkeypatch):
+def test_bucket_check_findings_leave_notification_to_the_phase_alert(tmp_path, env, monkeypatch):
     env["SITE_URL"] = "https://site.test"
     c = ctx(tmp_path, env, Runner(tmp_path, fail=("disk-tree notify -t",)), sources=["s3://a"])
     c.run = Ends()
@@ -1013,11 +1013,28 @@ def test_bucket_check_findings_and_failed_alert_are_not_recorded_done(tmp_path, 
     S.bucket_check(c, None)
     assert c.run.calls == [
         ("begin", "bucket-check"),
-        ("end", "bucket-check", 1, True, "unscanned-bucket check: b new"),
+        ("end", "bucket-check", 1, True, "non-empty buckets outside the profile's sources: b new"),
     ]
-    assert c.sh_impl.calls == [
-        "disk-tree notify -t ⚠️ fix 2026-10-16T1200 -L scan https://site.test/scans/head -L all scans https://site.test/scans non-empty bucket(s) not in the profile's sources: `b new`",
+    assert c.sh_impl.calls == []
+
+
+def test_bucket_discovery_failure_is_not_a_nonempty_bucket(tmp_path, env, monkeypatch):
+    class BrokenListing:
+        def list_buckets(self):
+            raise RuntimeError("provider unavailable")
+
+    client = BrokenListing()
+    assert S.unscanned(client, {"a"}) == S.BucketDiscovery([], ["ListBuckets: RuntimeError: provider unavailable"])
+    c = ctx(tmp_path, env, Runner(tmp_path), sources=["s3://a"])
+    c.run = Ends()
+    monkeypatch.setattr(S, "s3_client", lambda endpoint: client)
+    S.bucket_check(c, None)
+    assert c.run.calls == [
+        ("begin", "bucket-check"),
+        ("end", "bucket-check", 1, True, "bucket discovery incomplete: ListBuckets: RuntimeError: provider unavailable"),
     ]
+    assert c.sh_impl.calls == []
+
 
 
 def test_optional_step_initialization_failure_fails_task(tmp_path, env, monkeypatch):
