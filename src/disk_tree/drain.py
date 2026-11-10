@@ -150,6 +150,7 @@ def execute_run(
             deleted_objects += nobjs
         except Exception as e:  # one URI failing must not strand the rest of the run
             errors.append((uri, str(e)))
+            nbytes = nobjs = 0
         # idempotent on a retry of a half-finished run
         if schema.bands_deleted:
             db.query(
