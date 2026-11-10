@@ -23,7 +23,7 @@
 #   -P VER    Python version for the remote env (default `$REMOTE_TEST_PYTHON`, else 3.13)
 #   -s        sync only (the source and the Python env from the lock), run nothing
 # Output streams here and is saved to `tmp/remote-test-<timestamp>.log`; the exit code is the test runner's (the
-# first suite's nonzero code, a suite that selected no tests excepted).
+# first suite's nonzero code, including a suite that selected no tests).
 #
 # The node is per machine, not in the repo: `$REMOTE_TEST_CONFIG` (default `~/.config/disky/remote-test.env`) is
 # sourced first when it exists, and sets any of (the environment wins over it when it uses `: "${VAR:=…}"`):
@@ -188,7 +188,6 @@ rc=0; ran=0
 suite() {  # suite <dir> <pytest args…>: run one suite from <dir>, folding its exit code into rc
   local dir=\$1; shift
   (cd "\$dir" && pytest "\$@"); local r=\$?
-  if [ \$r = 5 ]; then return; fi  # no tests selected in this suite
   ran=1
   [ \$rc != 0 ] || rc=\$r
 }
