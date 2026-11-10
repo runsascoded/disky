@@ -27,6 +27,7 @@ import type { TreeNode } from './types'
 import { CLASS_NAMES, fmtN } from './types'
 import { useUnits } from './units'
 import { pathCopy, pathText } from './pathCrumbs'
+import { useObjectDismiss } from './useObjectDismiss'
 
 /** A file-tree `Store` over a public bucket's base URL: range GETs straight
  *  to `<base>/<key>` (the bucket's CORS must admit this site). Objects are
@@ -176,13 +177,9 @@ export default function ObjectPanel({ segs, node, onClose }: {
   const uri = store.scheme + segs.join('/')
   const shown = pathText(store.scheme, segs)
   const dl = ft?.getUrl?.(key)
-  // Opening scrolls the panel into view; Escape closes it.
+  // Opening scrolls the panel into view.
   useEffect(() => { ref.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' }) }, [uri])
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape' && !(e.target as HTMLElement)?.closest('input, textarea, select')) onClose() }
-    document.addEventListener('keydown', onKey)
-    return () => document.removeEventListener('keydown', onKey)
-  }, [onClose])
+  useObjectDismiss(ref, onClose)
   return (
     <section className="object-panel" id="object" ref={ref} aria-label={`object ${segs[segs.length - 1]}`}>
       <header>
@@ -193,7 +190,7 @@ export default function ObjectPanel({ segs, node, onClose }: {
           {node?.d != null && <> · {listingTime(store.scheme).label} {epochDaysToDate(node.d)}</>}
         </span>
         {dl && <a className="obj-dl" href={dl} download={segs[segs.length - 1]} target="_blank" rel="noreferrer">download</a>}
-        <button type="button" className="obj-close" aria-label="Close the object (Esc)" title="Close (Esc)" onClick={onClose}>×</button>
+        <button type="button" className="obj-close" aria-label="Close the object (Esc)" onClick={onClose}>Close <span aria-hidden="true">×</span></button>
       </header>
       <div className="obj-uri"><code>{shown}</code></div>
       {!src ? <Loading label="Resolving this object’s data source…" />
