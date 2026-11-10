@@ -1,0 +1,286 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = ["click==8.3.0"]
+# ///
+"""Exact-revision OA Pages releases. Plan/validate without CF credentials; record only inside an approved job."""
+from hashlib import sha256
+from json import dumps, loads
+from os import environ
+from pathlib import Path
+from re import MULTILINE, findall, fullmatch, search
+from subprocess import run
+from time import sleep
+from tomllib import loads as toml_loads
+from urllib.parse import urlencode
+from urllib.error import HTTPError
+from urllib.request import Request, urlopen
+
+from click import Choice, ClickException, Path as ClickPath, argument, group, option
+
+
+CONFIG = Path(__file__).resolve().parents[1] / 'deploy/oa/sites.json'
+PROTOCOL = 'disky-pages-v1'
+
+
+def api(path: str, body: dict | None = None) -> object:
+    args = ['gh', 'api', path]
+    if body is not None:
+        args += ['--method', 'POST', '--input', '-']
+    result = run(args, input=None if body is None else dumps(body), capture_output=True, text=True)
+    if result.returncode:
+        raise ClickException(f'GitHub API failed: {path} (exit {result.returncode})')
+    return loads(result.stdout)
+
+
+def pages(path: str) -> dict | list[dict]:
+    account = environ['CLOUDFLARE_ACCOUNT_ID']
+    require(account == loads(CONFIG.read_text())['account_id'], 'Cloudflare account differs from the controller allowlist')
+    req = Request(f'https://api.cloudflare.com/client/v4/accounts/{account}/pages/projects/{path}', headers={
+        'Authorization': f'Bearer {environ["CLOUDFLARE_API_TOKEN"]}',
+    })
+    with urlopen(req, timeout=30) as response:
+        value = loads(response.read())
+    if not value['success']:
+        raise ClickException('Cloudflare Pages readback failed')
+    return value['result']
+
+
+def paginated(path: str) -> list:
+    items = []
+    for page in range(1, 101):
+        batch = api(f'{path}{"&" if "?" in path else "?"}per_page=100&page={page}')
+        rows = batch['workflow_runs'] if isinstance(batch, dict) else batch
+        items.extend(rows)
+        if len(rows) < 100:
+            return items
+    raise ClickException('GitHub pagination exceeded 100 pages; narrow the release query')
+
+
+def require(condition: bool, message: str) -> None:
+    if not condition:
+        raise ClickException(message)
+
+
+def plan_release(event: dict, event_name: str, repository: str) -> dict:
+    config = loads(CONFIG.read_text())
+    require(repository == config['repository'], 'OA releases run only in the configured repository')
+    prefix = f'repos/{repository}'
+    if event_name == 'workflow_run':
+        ci = event['workflow_run']
+        target, sha, mode = ci['head_branch'], ci['head_sha'], 'dev'
+        require(ci['head_repository']['full_name'] == repository and ci['event'] == 'push'
+                and ci['conclusion'] == 'success' and ci['path'] == '.github/workflows/ci.yml',
+                'Only successful in-repository integration push CI can deploy dev')
+        dev_id = None
+    elif event_name == 'workflow_dispatch':
+        inputs = event['inputs']
+        target, sha, mode = inputs['deployment'], inputs['sha'], 'prod'
+        dev_id = inputs['dev_deployment']
+        require(bool(fullmatch(r'[1-9][0-9]*', dev_id)), 'Name the successful dev deployment ID')
+    else:
+        raise ClickException('Unsupported release event')
+    require(target in config['sites'], 'Unknown OA deployment')
+    require(bool(fullmatch(r'[0-9a-f]{40}', sha)), 'A full lowercase source SHA is required')
+    site = config['sites'][target]
+    if mode == 'dev':
+        tip = api(f'{prefix}/git/ref/heads/{target}')['object']['sha']
+        require(tip == sha, 'Obsolete CI completion: source branch has moved')
+    else:
+        comparison = api(f'{prefix}/compare/{sha}...{target}')
+        require(comparison['status'] in ('ahead', 'identical'), 'Production SHA is not on the deployment branch')
+        proof = api(f'{prefix}/deployments/{dev_id}')
+        payload = proof.get('payload') or {}
+        statuses = paginated(f'{prefix}/deployments/{dev_id}/statuses')
+        require(proof['sha'] == sha and proof['environment'] == f'{target}-dev'
+                and proof['creator']['login'] == 'github-actions[bot]'
+                and payload.get('protocol') == PROTOCOL and payload.get('source_branch') == target
+                and statuses and statuses[0]['state'] in ('success', 'inactive')
+                and any(s['state'] == 'success' for s in statuses),
+                'Production requires a successful exact-SHA dev release from this controller')
+        runs = paginated(f'{prefix}/actions/workflows/ci.yml/runs?{urlencode({"head_sha": sha, "event": "push", "branch": target})}')
+        require(bool(runs), 'No CI receipt for this source SHA')
+        ci = runs[0]
+        require(ci['conclusion'] == 'success' and ci['head_sha'] == sha
+                and ci['head_branch'] == target and ci['head_repository']['full_name'] == repository,
+                'The latest CI attempt for this revision must succeed')
+    return {
+        'protocol': PROTOCOL, 'repository': repository, 'source_branch': target, 'sha': sha,
+        'mode': mode, 'environment': f'{target}-{mode}', 'project': site['project'],
+        'pages_branch': site[f'{mode}_branch'], 'host': site[f'{mode}_host'],
+        'ci_run': ci['id'], 'dev_deployment': dev_id,
+    }
+
+
+def fingerprint(root: Path) -> str:
+    require(root.is_dir() and (root / 'index.html').is_file(), 'Missing built site artifact')
+    digest = sha256()
+    for path in sorted(root.rglob('*')):
+        if path.is_file():
+            digest.update(dumps([path.relative_to(root).as_posix(), sha256(path.read_bytes()).hexdigest()]).encode())
+            digest.update(b'\n')
+    return digest.hexdigest()
+
+
+def validate_source(source: Path, sha: str) -> None:
+    head = run(['git', '-C', str(source), 'rev-parse', 'HEAD'], capture_output=True, text=True)
+    require(head.returncode == 0 and head.stdout.strip() == sha, 'Source checkout differs from the approved SHA')
+    clean = run(['git', '-C', str(source), 'diff', '--quiet', 'HEAD', '--'], capture_output=True)
+    require(clean.returncode == 0, 'Source checkout has tracked changes')
+
+
+def status(receipt: dict, state: str, url: str = '') -> None:
+    api(f'repos/{receipt["repository"]}/deployments/{receipt["id"]}/statuses', {
+        'state': state, 'log_url': receipt['run_url'], 'environment_url': url,
+        'auto_inactive': state == 'success',
+    })
+
+
+@group()
+def main() -> None:
+    """Plan, fingerprint and record a release; never apply schemas or infrastructure."""
+
+
+@main.command('plan')
+@option('-e', '--event', type=ClickPath(path_type=Path), required=True)
+@option('-n', '--event-name', type=Choice(['workflow_run', 'workflow_dispatch']), required=True)
+@option('-o', '--output', type=ClickPath(path_type=Path), required=True)
+@option('-r', '--repository', required=True)
+def plan(event: Path, event_name: str, output: Path, repository: str) -> None:
+    value = plan_release(loads(event.read_text()), event_name, repository)
+    output.write_text(dumps(value, indent=2) + '\n')
+    github_output = environ.get('GITHUB_OUTPUT')
+    if github_output:
+        with open(github_output, 'a') as file:
+            for key in ['sha', 'source_branch', 'mode', 'environment', 'project', 'pages_branch', 'host']:
+                file.write(f'{key}={value[key]}\n')
+    print(dumps(value, indent=2))
+
+
+def credential_names(path: Path) -> dict:
+    """Only identifiers and an inheritance flag. Never return assignment values or source command arguments."""
+    source = path.read_text()
+    names = sorted(set(findall(r'^[ \t]*(?:export[ \t]+)?([A-Z][A-Z0-9_]*)[ \t]*=', source, MULTILINE)))
+    return {
+        'path': str(path),
+        'names': [name for name in names if any(term in name for term in ('TOKEN', 'SECRET', 'CF_', 'CLOUDFLARE', 'R2_'))],
+        'inherits': bool(search(r'^[ \t]*(?:source_up|source_env(?:_if_exists)?|dotenv(?:_if_exists)?)(?:[ \t]|$)', source, MULTILINE)),
+    }
+
+
+@main.command('credential-names')
+@argument('paths', nargs=-1, type=ClickPath(exists=True, path_type=Path), required=True)
+def credentials(paths: tuple[Path, ...]) -> None:
+    """Inventory local variable names, never values. Inherited files require a separate explicit inventory."""
+    print(dumps([credential_names(path) for path in paths], indent=2))
+
+
+@main.command('seal')
+@option('-o', '--output', type=ClickPath(path_type=Path), required=True)
+@option('-p', '--plan', 'plan_path', type=ClickPath(path_type=Path), required=True)
+@argument('source', type=ClickPath(path_type=Path))
+def seal(output: Path, plan_path: Path, source: Path) -> None:
+    """Bind the upload to the checked config and the built artifact, without deployment secrets."""
+    value = loads(plan_path.read_text())
+    validate_source(source, value['sha'])
+    config = source / 'site/wrangler.toml'
+    parsed = toml_loads(config.read_text())
+    require(parsed['name'] == value['project'], 'Pages project differs from the controller allowlist')
+    var = parsed.get('vars', {})
+    if value['mode'] == 'dev':
+        var = parsed.get('env', {}).get('preview', {}).get('vars', var)
+    require(var.get(f'{value["mode"].upper()}_HOST') == value['host'], 'Host differs from the controller allowlist')
+    require((source / 'site/dist/_worker.js/index.js').is_file(), 'Build the Functions bundle before sealing the artifact')
+    value['config_sha256'] = sha256(config.read_bytes()).hexdigest()
+    value['artifact_sha256'] = fingerprint(source / 'site/dist')
+    value['entry_assets'] = {
+        path.relative_to(source / 'site/dist').as_posix(): sha256(path.read_bytes()).hexdigest()
+        for path in sorted((source / 'site/dist/assets').glob('*'))
+        if path.suffix in ('.js', '.css')
+        and f'/assets/{path.name}' in (source / 'site/dist/index.html').read_text()
+    }
+    require(bool(value['entry_assets']), 'No entry assets in the built site')
+    output.write_text(dumps(value, indent=2) + '\n')
+
+
+@main.command('begin')
+@option('-o', '--output', type=ClickPath(path_type=Path), required=True)
+@option('-p', '--plan', 'plan_path', type=ClickPath(path_type=Path), required=True)
+@option('-s', '--seal', 'seal_path', type=ClickPath(path_type=Path), required=True)
+@argument('source', type=ClickPath(path_type=Path))
+def begin(output: Path, plan_path: Path, seal_path: Path, source: Path) -> None:
+    """After environment approval, revalidate the source and create a deployment of its SHA."""
+    value, sealed = loads(plan_path.read_text()), loads(seal_path.read_text())
+    validate_source(source, value['sha'])
+    require(all(sealed.get(k) == v for k, v in value.items()), 'Approved plan and artifact seal differ')
+    require(sha256((source / 'site/wrangler.toml').read_bytes()).hexdigest() == sealed['config_sha256']
+            and fingerprint(source / 'site/dist') == sealed['artifact_sha256'], 'Upload artifact/config changed')
+    prefix = f'repos/{value["repository"]}'
+    project = pages(value['project'])
+    expected_prod = loads(CONFIG.read_text())['sites'][value['source_branch']]['prod_branch']
+    require(project['production_branch'] == expected_prod, 'Cloudflare production branch differs from the allowlist')
+    prior = paginated(f'{prefix}/deployments?environment={value["environment"]}')
+    previous = next((d['id'] for d in prior if any(s['state'] == 'success' for s in paginated(f'{prefix}/deployments/{d["id"]}/statuses'))), None)
+    run_url = f'https://github.com/{value["repository"]}/actions/runs/{environ["GITHUB_RUN_ID"]}'
+    canonical = project.get('canonical_deployment')
+    payload = {
+        **sealed, 'run_url': run_url, 'previous_deployment': previous,
+        'production_cloudflare_before_upload': None if not canonical else {
+            'id': canonical['id'], 'sha': canonical['deployment_trigger']['metadata']['commit_hash'],
+        },
+    }
+    deployment = api(f'{prefix}/deployments', {
+        'ref': value['sha'], 'environment': value['environment'], 'auto_merge': False, 'required_contexts': [],
+        'description': f'{value["source_branch"]} {value["sha"][:12]} via OA release',
+        'production_environment': value['mode'] == 'prod', 'payload': payload,
+    })
+    receipt = {**payload, 'id': deployment['id']}
+    output.write_text(dumps(receipt, indent=2) + '\n')
+    status(receipt, 'in_progress')
+
+
+@main.command('finish')
+@option('-f', '--failed', is_flag=True)
+@argument('receipt_path', type=ClickPath(path_type=Path))
+def finish(failed: bool, receipt_path: Path) -> None:
+    """Success requires CF's deployment identity and the live host's build header to agree."""
+    receipt = loads(receipt_path.read_text())
+    if failed:
+        status(receipt, 'failure')
+        return
+    project = pages(receipt['project'])
+    deployment = project['canonical_deployment'] if receipt['mode'] == 'prod' else next((
+        d for d in pages(f'{receipt["project"]}/deployments?env=preview')
+        if d['deployment_trigger']['metadata']['branch'] == receipt['pages_branch']
+    ), None)
+    require(bool(deployment), 'No matching Cloudflare deployment')
+    metadata = deployment['deployment_trigger']['metadata']
+    require(metadata['commit_hash'] == receipt['sha'] and not metadata.get('commit_dirty')
+            and deployment['latest_stage']['status'] == 'success', 'Cloudflare is not serving the clean requested revision')
+    for attempt in range(12):
+        req = Request(f'https://{receipt["host"]}/api/health?release-check={environ["GITHUB_RUN_ID"]}-{attempt}')
+        try:
+            response = urlopen(req, timeout=20)
+        except HTTPError as error:
+            if error.code not in (401, 403):
+                raise
+            response = error
+        with response:
+            build = response.headers.get('x-disky-build', '').split(' ', 1)[0]
+        if build == receipt['sha']:
+            break
+        sleep(5)
+    else:
+        raise ClickException('Live host did not return the requested build header')
+    for asset, digest in receipt['entry_assets'].items():
+        with urlopen(f'https://{receipt["host"]}/{asset}', timeout=30) as response:
+            require(sha256(response.read()).hexdigest() == digest, f'Live entry asset differs: {asset}')
+    receipt['cloudflare_deployment'] = deployment['id']
+    receipt['cloudflare_url'] = deployment['url']
+    receipt_path.write_text(dumps(receipt, indent=2) + '\n')
+    status(receipt, 'success', f'https://{receipt["host"]}')
+    print(dumps(receipt, indent=2))
+
+
+if __name__ == '__main__':
+    main()

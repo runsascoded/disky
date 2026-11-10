@@ -1,8 +1,8 @@
 # Deployment and CS3 harmonization
 
-Status: active, updated 2026-11-10. Scope: GCS, CW, HF and OA R2, including each meta store. Root `cloud` owns shared source; deployment owners own configuration, verification, infrastructure applies and cutovers. Individual access grants remain a separate action; the team release workflow and credential inventory are covered by the [release workflow proposal]. The [operator runbook] describes the four release lanes. This spec records the missing parity and the implementation order, independently of the [index rethink].
+Status: active, updated 2026-11-10. Scope: GCS, CW, HF and OA R2, including each meta store. Root `cloud` owns shared source; deployment owners own configuration, verification, infrastructure applies and cutovers. Individual access grants remain a separate action; the team release workflow and credential inventory are covered by the [release workflow]. The [operator runbook] describes the four release lanes. This spec records the missing parity and the implementation order, independently of the [index rethink].
 
-November 10 checkpoint: shared guard/status/reporting fixes and per-head work ownership receipts are tested, committed and integrated into root `cloud` through `8b88cff59`. Deployment-wide adoption, history/age rollout, native retirement and a work-retention planner remain open; this spec is not complete. GCS's bounded read-only investigation of the old static-generation mismatches is running under its owner. The [release workflow proposal] now covers Ryan/Louisa's PR/dev/prod process; no branch/protection/trigger/credential changes were applied.
+November 10 checkpoint: shared guard/status/reporting fixes and per-head work ownership receipts are tested, committed and integrated into root `cloud` through `8b88cff59`. Deployment-wide adoption, history/age rollout, native retirement and a work-retention planner remain open; this spec is not complete. GCS's bounded read-only investigation of the old static-generation mismatches is running under its owner. Ryan accepted the four-source-branch / eight-environment [release workflow]. The controller, exact-SHA release receipts, safe credential-name inventory and source/build UI are implemented locally; live environment/protection/trigger/credential setup remains unapplied. GCS has repaired two rich-reader regressions and is checking its complete shared-scan acceptance set; the predecessor cleanup hold remains in force until that gate passes.
 
 ## Acceptance
 
@@ -75,4 +75,4 @@ Use targeted suites for nominal threads, scan finalization, ownership receipts, 
 [operator runbook]: oa-deployment-handoff.md
 [index rethink]: fleet-index-research.md
 [ownership contract]: ../docs/nextflow-ownership.md
-[release workflow proposal]: oa-release-workflow.md
+[release workflow]: oa-release-workflow.md

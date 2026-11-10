@@ -25,7 +25,7 @@ jobs:
       # blob ids of the engine's sources, tests and pins.
       - name: Test inputs key
         id: key
-        run: echo "key=engine-${{ matrix.python-version }}-$(git ls-tree -r HEAD -- src tests pyproject.toml uv.lock | sha256sum | cut -c1-32)" >> "$GITHUB_OUTPUT"
+        run: echo "key=engine-${{ matrix.python-version }}-$(git ls-tree -r HEAD -- src tests scripts deploy/oa .github/workflows/oa-release.yml pyproject.toml uv.lock | sha256sum | cut -c1-32)" >> "$GITHUB_OUTPUT"
 
       - name: Already passed?
         id: passed
@@ -61,6 +61,16 @@ jobs:
         with:
           path: .tests-passed
           key: ${{ steps.key.outputs.key }}
+
+  release-build-id:
+    name: Release build identity
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: node --test site/scripts/build-id.test.mjs
 
   typecheck:
     name: Type Check
