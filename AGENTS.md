@@ -121,6 +121,8 @@ dt-cloud static-names add -g GEN -L LAYOUT -s SCANS -o STORE  # Append every sca
                           # gets them only by a rebuild into a new GEN — `manifests/<id>.json`), then the binary counter's carries; a URL
                           # store's generation is mirrored into `-w`, new files go up data → `meta.json`s → manifests.
                           # Small deployments' path (the r2 demo's daily ingest); gcs/cw run the stages on Batch
+dt-cloud generation-gc -t KIND -o STORE -k PIN…  # Collect verified compaction predecessors: plans by default, `-x -s SCRATCH` executes
+                          # (protocol, receipts, grace and pins: `specs/done/generation-gc-and-r2-copy.md`)
 dt-cloud interval-store migrate-object-version -g OLD -O NEW -o STORE  # Adopt string object versions without raw listings:
                           # fold existing ranges/runs; native GCS generations become exact strings, unknowns stay NULL.
                           # `-R` names borrowed source ranges. Source and CURRENT stay unchanged pending verification/cutover.
