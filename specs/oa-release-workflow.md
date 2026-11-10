@@ -1,8 +1,8 @@
 # OA review and release workflow
 
-Status: proposed, 2026-11-10, following Ryan's [team TODOs] and deployment-branch discussion. No branches, protections, environment secrets, live deploy triggers or infrastructure were changed. This is the concrete release plan for the remaining work in [harmonization].
+Status: four-source-branch / eight-environment model accepted by Ryan, 2026-11-10, following Ryan's [team TODOs] and deployment-branch discussion. No branches, protections, environment secrets, live deploy triggers or infrastructure were changed. This is the concrete release plan for the remaining work in [harmonization].
 
-## Recommended first model
+## Accepted first model
 
 Keep `cloud` as the shared code branch and the existing `gcs`, `cw`, `hf`, `r2` branches as their deployment integration branches. Use eight [GitHub deployment environments], named `gcs-dev`, `gcs-prod`, `cw-dev`, `cw-prod`, `hf-dev`, `hf-prod`, `r2-dev`, `r2-prod`. Environments hold release credentials, branch restrictions, approvals and deployment records; they are not additional code forks or isolated databases. Keep the current domains and Pages production/preview branch mappings.
 
@@ -70,7 +70,7 @@ The intended per-deployment storage split is one GCS data/artifact bucket for pi
 
 ## First team rehearsal and rollout order
 
-1. Agree this branch/environment model and implement the shared release workflow offline with exact routing/trigger tests. Prepare the environment/credential inventory and branch protection diff; do not activate live triggers before that review.
+1. Implement this accepted branch/environment model with the shared release workflow offline with exact routing/trigger tests. Prepare the environment/credential inventory and branch protection diff; do not activate live triggers before that review.
 2. Pilot HF, currently the cleanest history/retirement baseline: Louisa creates a small `work/hf/...` PR, CI verifies it, merge deploys dev, the source/build is checked, then production promotes the reviewed revision. Rehearse rollback too.
 3. Carry the same workflow to GCS, CW and R2, changing only the explicit target configuration. Preserve their own image/schema/IaC lanes and intrinsic store differences.
 4. Add release revision/deployment results to the fleet status source so the overview can say what actually serves, not merely the branch tip. Finish the daily/monthly status delivery in [fleet plan] independently of a branch rename.
