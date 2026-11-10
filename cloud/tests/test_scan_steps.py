@@ -1369,6 +1369,18 @@ def test_store_gc_collects_the_interval_stores_lineage_on_each_copy(tmp_path, en
     assert x.sh_impl.calls == ["dt-cloud store-gc -t interval-store -l -x -o gs://iv"]
 
 
+def test_store_gc_coordinates_static_copies_and_declares_secondary_pins(tmp_path, env):
+    c = ctx(tmp_path, env, steps=['store-gc'], options={**NL_OPTS, 'store-gc': {
+        'store': 'r2://idx', 'copies': [], 'static_store': 'gs://data', 'static_copies': ['r2://idx'],
+        'static_gens': ['meta'], 'scratch': 'scratch', 'grace': 259200, 'execute': True,
+    }})
+    S.store_gc(c, None)
+    assert c.sh_impl.calls == [
+        'dt-cloud store-gc -t interval-store -l -G 259200 -x -o r2://idx',
+        'dt-cloud generation-gc -t static-names -o gs://data -k meta -c r2://idx -s scratch -G 259200 -x',
+    ]
+
+
 def test_retire_failure_warns_and_needs_its_keep(tmp_path, env):
     c = ctx(tmp_path, env, runner=Runner(tmp_path, fail=("dt-cloud scan retire",)), steps=["retire"],
             options={"list": {"import": True}, "static-names": {"gen": "s1", "store": "r2://idx"}, "digest": {"template": "t", "config": "c.yml"},

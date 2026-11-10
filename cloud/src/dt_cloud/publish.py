@@ -294,7 +294,7 @@ def head_dest(s3: "S3Client", bucket: str, key: str) -> Dest | None:
         raise
 
 
-def copy_one(src_bucket: str, s3: "S3Client", bucket: str, obj: Obj) -> None:
+def copy_one(src_bucket: str, s3: "S3Client", bucket: str, obj: Obj, *, dest_key: str | None = None) -> None:
     """One object → R2, stamping its md5: streamed from GCS (no local spool), or uploaded from a local dir."""
     extra: dict[str, Any] = {"Metadata": {MD5_META: obj.md5} if obj.md5 else {}}
     if obj.content_type:
@@ -302,15 +302,16 @@ def copy_one(src_bucket: str, s3: "S3Client", bucket: str, obj: Obj) -> None:
     from boto3.s3.transfer import TransferConfig
 
     cfg = TransferConfig(max_concurrency=R2_PART_CONCURRENCY)
+    key = obj.key if dest_key is None else dest_key
     root = local_root(src_bucket)
     if root is not None:
-        s3.upload_file(str(root / obj.key), bucket, obj.key, ExtraArgs=extra, Config=cfg)
+        s3.upload_file(str(root / obj.key), bucket, key, ExtraArgs=extra, Config=cfg)
         return
     from google.cloud import storage
 
     blob = storage.Client().bucket(src_bucket).blob(obj.key)
     with blob.open("rb") as f:
-        s3.upload_fileobj(f, bucket, obj.key, ExtraArgs=extra, Config=cfg)
+        s3.upload_fileobj(f, bucket, key, ExtraArgs=extra, Config=cfg)
 
 
 #: Attempts at one object's copy (`copy_retrying`) R2 throttled past botocore's own retries, backing off `R2_RETRY_S · 2^n`

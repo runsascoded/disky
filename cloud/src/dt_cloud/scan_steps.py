@@ -1493,7 +1493,8 @@ def retire(ctx: Ctx, arg: str | None) -> None:
                    warn=f"retire failed on {root} (its per-scan files stay; the next run retries)")
 
 
-@step("store-gc", core=False, soft=True, options={"execute": bool, "grace": int, "store": str, "copies": list, "static_gens": list},
+@step("store-gc", core=False, soft=True, options={"execute": bool, "grace": int, "store": str, "copies": list, "static_gens": list,
+                                              "static_store": str, "static_copies": list, "scratch": str},
       side=True, converges=True, leaves="superseded store generations not collected")
 def store_gc(ctx: Ctx, arg: str | None) -> None:
     """Superseded interval-store generations (`dt-cloud store-gc -l`): what the current generation was compacted or
@@ -1515,7 +1516,15 @@ def store_gc(ctx: Ctx, arg: str | None) -> None:
     with ctx.phase("store-gc", note=None if ctx.opt("store-gc", "execute") else "dry run"):
         for root in dict.fromkeys(r for r in [store, *ctx.opt("store-gc", "copies", [archive])] if r):
             ctx.sh(["dt-cloud", "store-gc", *args, "-o", root], fatal=False, warn=f"store-gc failed on {root} (the generations stay)")
-        if ctx.opt("store-gc", "static_gens") and archive:
+        if ctx.opt("store-gc", "static_store"):
+            static = ["dt-cloud", "generation-gc", "-t", "static-names", "-o", ctx.opt("store-gc", "static_store"),
+                      *(a for g in ctx.opt("store-gc", "static_gens", []) for a in ("-k", g)),
+                      *(a for root in ctx.opt("store-gc", "static_copies", []) for a in ("-c", root)),
+                      *(["-s", ctx.opt("store-gc", "scratch")] if ctx.opt("store-gc", "scratch") else []),
+                      *(["-G", ctx.opt("store-gc", "grace")] if ctx.opt("store-gc", "grace") is not None else []),
+                      *(["-x"] if ctx.opt("store-gc", "execute") else [])]
+            ctx.sh(static, fatal=False, warn="coordinated static generation cleanup failed (the generations stay)")
+        elif ctx.opt("store-gc", "static_gens") and archive:
             static = ["-t", "static-names", *(a for g in ctx.opt("store-gc", "static_gens") for a in ("-k", g)),
                       *(["-x"] if ctx.opt("store-gc", "execute") else [])]
             ctx.sh(["dt-cloud", "store-gc", *static, "-o", archive], fatal=False,

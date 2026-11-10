@@ -198,15 +198,23 @@ def attribution_covered(store: Store, gen: str) -> set[str]:
     return covered_scans(store.read_json(f"{prefix}/scans.json"), store.read_json(f"{prefix}/{newest}") if newest else None)
 
 
-def lineage(store: Store, gen: str) -> list[str]:
-    """`gen`, then each generation it was compacted or backfilled from (`compaction.json` / `backfill.json` /
-    `attribution-backfill.json` `from`: the same versions, so their parity markers hold), newest first."""
+def lineage_record(store: Store, gen: str) -> str | None:
+    """The completed fold/backfill record carrying this generation's parent, including derived-column migrations."""
     from .interval_attribution import RECORD
     from .interval_backfill import BACKFILL
+    from .interval_churn import BACKFILL as CHURN_BACKFILL
+    from .interval_identity import RECORD as IDENTITY_MIGRATION
 
+    return next((key for name in (ic.COMPACTION, BACKFILL, RECORD, CHURN_BACKFILL, IDENTITY_MIGRATION)
+                 if store.exists(key := f'{PREFIX}/{gen}/{name}')), None)
+
+
+def lineage(store: Store, gen: str) -> list[str]:
+    """`gen`, then its completed compaction/backfill parents, newest first. Their snapshot parity markers still hold:
+    churn, attribution and object-version migrations preserve the historical path/size views."""
     out = [gen]
     while True:
-        key = next((k for k in (f"{PREFIX}/{out[-1]}/{x}" for x in (ic.COMPACTION, BACKFILL, RECORD)) if store.exists(k)), None)
+        key = lineage_record(store, out[-1])
         if key is None or (frm := store.read_json(key)["from"]) in out:
             return out
         out.append(frm)

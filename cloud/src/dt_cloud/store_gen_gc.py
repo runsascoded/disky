@@ -47,8 +47,9 @@ def gen_dirs(store: Store, prefix: str) -> dict[str, dict[str, int]]:
 
 def plan(store: Store, kind: str, keep: list[str], *, lineage_only: bool, grace_s: float, now: float) -> list[dict]:
     """One record per generation of `kind` in `store`: `{gen, objects, bytes, newest, action, reason}`."""
-    from .scan_retire import lineage
+    from .scan_retire import lineage, lineage_record
 
+    cutovers = {}
     if kind == "static-names":
         if not keep:
             raise SystemExit("-t static-names: name every live generation with -k (the job can't see which each site reads)")
@@ -65,7 +66,11 @@ def plan(store: Store, kind: str, keep: list[str], *, lineage_only: bool, grace_
             raise SystemExit(f"{store.root}/{prefix}: no current generation ({how}): nothing is known to be live")
         newest = ic.chain(store, cur)[-1]
         protected = {*ic.chain(store, cur), *keep}
-        line = set(lineage(store, newest)) - {newest}
+        parents = lineage(store, newest)
+        line = set(parents) - {newest}
+        for child, parent in zip(parents, parents[1:]):
+            key = lineage_record(store, child)
+            cutovers[parent] = store.mtimes(f'{prefix}/{child}').get(key, now)
         cur = newest
     out = []
     for g, files in sorted(gen_dirs(store, prefix).items()):
@@ -73,7 +78,7 @@ def plan(store: Store, kind: str, keep: list[str], *, lineage_only: bool, grace_
         files = {k: n for k, n in files.items() if k != f"{prefix}/{g}/{ar.SUCCESSOR}"}
         if not files:
             continue
-        mt = max(store.mtimes(f"{prefix}/{g}").values())
+        mt = max(*store.mtimes(f"{prefix}/{g}").values(), cutovers.get(g, 0))
         rec = {"gen": g, "objects": len(files), "bytes": sum(files.values()),
                "newest": datetime.fromtimestamp(mt, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), "lineage": g in line}
         if g in protected:
@@ -91,13 +96,18 @@ def plan(store: Store, kind: str, keep: list[str], *, lineage_only: bool, grace_
 
 def run(store: Store, kind: str, keep: list[str], *, lineage_only: bool = False, grace_s: float = GRACE_S, now: float,
         execute: bool = False) -> list[dict]:
-    recs = plan(store, kind, keep, lineage_only=lineage_only, grace_s=grace_s, now=now)
     cur = ic.chain(store, ic.resolve(store)[0])[-1] if kind == "interval-store" else None
+    recs = plan(store, kind, keep, lineage_only=lineage_only, grace_s=grace_s, now=now)
     for r in recs:
         files = r.pop("_files")
         if r["action"] == "delete" and execute:
             if r["lineage"]:
+                if ic.chain(store, ic.resolve(store)[0])[-1] != cur:
+                    raise RuntimeError('interval-store: current changed during GC; stopped before deleting ' + r['gen'])
                 r["markers"] = ic.carry_markers(store, r["gen"], cur)
+                forwarding = f'{ist.PREFIX}/{r["gen"]}/{ar.SUCCESSOR}'
+                if not store.exists(forwarding):
+                    store.write_text(forwarding, json.dumps({'gen': cur}) + '\n')
             r["deleted"] = store.delete(files)
         err(f"{kind}/{r['gen']}: {r['objects']:,} objects, {r['bytes']:,} B, newest {r['newest']}: "
             + (("deleted" if execute else "would delete") if r["action"] == "delete" else f"kept ({r['reason']})"))

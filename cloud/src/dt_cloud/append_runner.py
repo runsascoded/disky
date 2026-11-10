@@ -1583,11 +1583,13 @@ def r2_missing(objs: list, *, workers: int = 16) -> list[str]:
         return [o.key for o, do in ex.map(lambda o: (o, pub.should_copy(o, pub.head_dest(s3, r2, o.key))), objs) if do]
 
 
-def r2_copy(bucket: str, objs: list, *, workers: int = 8, dry_run: bool = False, log: Callable[[str], None] = err) -> dict:
-    """Copy `objs` GCS → R2 under the same keys (`publish.copy_one`'s streaming copy, the GCS md5 stamped as metadata),
+def r2_copy(bucket: str, objs: list, *, workers: int = 8, dry_run: bool = False, local_root: Path | None = None,
+            log: Callable[[str], None] = err) -> dict:
+    """Copy `objs` GCS → R2 under the same keys (the GCS md5 stamped as metadata),
     skipping objects already there with the same size and md5. An object R2 throttles is copied again, whole
     (`publish.copy_retrying`); any other failure raises. Returns `{objects, copied, bytes, s}` (`keys` too on a dry run: what
-    would be copied)."""
+    would be copied). `local_root`: upload the builder's existing files after checking their size and md5 against
+    GCS, avoiding another download of the generation. Without it, stream from GCS."""
     from . import publish as pub
 
     s3, r2 = pub.r2_client(), pub.r2_bucket()
@@ -1599,7 +1601,13 @@ def r2_copy(bucket: str, objs: list, *, workers: int = 8, dry_run: bool = False,
     t0, done = monotonic(), 0
 
     def one(o):
-        pub.copy_retrying(bucket, s3, r2, o, log=log)
+        source = bucket
+        if local_root is not None:
+            path = local_root / o.key
+            if path.stat().st_size != o.size or o.md5 is None or pub.file_md5(path) != o.md5:
+                raise ValueError(f"{path}: local output differs from its published source object")
+            source = str(local_root.resolve())
+        pub.copy_retrying(source, s3, r2, o, log=log)
         return o
 
     with ThreadPoolExecutor(workers) as ex:
@@ -2396,21 +2404,23 @@ R2_WORKERS = 32
 
 
 def r2_publish_gen(bucket: str, prefix: str, new: str, old: str, *, last: tuple[str, ...] = ("scans.json",), workers: int = R2_WORKERS,
+                   local_root: Path | None = None,
                    promote: bool = True, log: Callable[[str], None] = err) -> dict:
     """A compacted generation to R2 from GCS (`gs://<bucket>/<prefix>/<new>/`, under the same keys): its files, those its
     readers open it by (`last`, generation-relative) after the rest and `compaction.json` after them; checked there; then
     the old generation's `successor.json`; then `<prefix>/CURRENT.json` (as GCS has it), last: an R2 reader following
     the pointer never finds a generation that isn't whole. Raises (`SystemExit`, the pointer not moved) when the check
-    fails. `promote` off (a candidate): the generation only; `r2_promote` copies the two pointers later."""
+    fails. `local_root` uploads the verified local outputs instead of downloading them again from GCS.
+    `promote` off (a candidate): the generation only; `r2_promote` copies the two pointers later."""
     t0 = monotonic()
     root = f"{prefix}/{new}/"
     tail_names = [*last, COMPACTION]
     objs = r2_objects(bucket, [root])
     body = [o for o in objs if o.key.removeprefix(root) not in tail_names]
     tail = sorted((o for o in objs if o.key.removeprefix(root) in tail_names), key=lambda o: tail_names.index(o.key.removeprefix(root)))
-    doc = r2_copy(bucket, body, workers=workers, log=log)
+    doc = r2_copy(bucket, body, workers=workers, local_root=local_root, log=log)
     for o in tail:
-        r2_copy(bucket, [o], workers=1, log=log)
+        r2_copy(bucket, [o], workers=1, local_root=local_root, log=log)
     if bad := r2_missing([*body, *tail], workers=workers):
         raise SystemExit(f"r2 {prefix}/{new}: {len(bad)} of {len(objs)} files not on R2 after the copy (e.g. {bad[0]}): pointer not moved")
     if promote:
@@ -2531,7 +2541,8 @@ def compact_generation(store, c: Compactor, gen: str, mount: Path, work: Path, *
             return doc
         r2 = None
         if r2_bucket:
-            r2 = lambda new, old: r2_publish_gen(r2_bucket, c.prefix, new, old, last=c.last, promote=promote, log=log)  # noqa: E731
+            r2 = lambda new, old: r2_publish_gen(r2_bucket, c.prefix, new, old, last=c.last, local_root=work / "store",
+                                               promote=promote, log=log)  # noqa: E731
         doc["compact"] = compact_store(store, c, gen, gen_dir, work, policy=policy, why=why, threads=threads, mem=mem, jobs=jobs, r2=r2, reads=reads,
                                        promote=promote, rec=rec, log=log)
         if c.prune and promote and not doc["compact"].get("superseded"):

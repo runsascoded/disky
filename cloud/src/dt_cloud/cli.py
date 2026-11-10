@@ -3752,6 +3752,13 @@ from .store_gen_gc import store_gc_cmd as _store_gc  # noqa: E402
 
 main.add_command(_store_gc)
 
+from .generation_gc import command_cmd as _generation_gc  # noqa: E402
+
+main.add_command(_generation_gc)
+from .r2_copy_probe import command_cmd as _r2_copy_probe  # noqa: E402
+
+main.add_command(_r2_copy_probe)
+
 
 @main.group("secrets")
 def _secrets() -> None:
