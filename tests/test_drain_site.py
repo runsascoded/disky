@@ -85,6 +85,10 @@ def test_per_path_errors_reach_the_site_record_and_do_not_hide_successes(db):
     record = db.query("SELECT finished_ts, deleted_bytes, deleted_objects, execution_errors_json FROM deletion_runs")[0]
     record["execution_errors_json"] = json.loads(record["execution_errors_json"])
     assert record == {"finished_ts": 400, "deleted_bytes": 10, "deleted_objects": 1, "execution_errors_json": [[B, "access denied"]]}
+    assert db.query("SELECT prefix, bytes, objects FROM deletion_bands ORDER BY prefix") == [
+        {"prefix": B, "bytes": 0, "objects": 0},
+        {"prefix": A, "bytes": 10, "objects": 1},
+    ]
 
 
 def test_empty_recorded_selection_never_falls_back_to_the_live_plan(db):
