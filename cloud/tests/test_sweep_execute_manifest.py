@@ -544,8 +544,10 @@ def test_a_bucket_with_nothing_eligible_needs_no_manifest(source, tmp_path):
     (directory / "plan-summary.json").write_text(json.dumps(summary))
     (directory / "manifest/b1.parquet").unlink()
     result = execute_manifest(str(directory), str(plan), str(tmp_path / "out"), str(tmp_path / "work"), for_real=True, client=FakeClient(blobs={}), deleter=refuse)
-    assert result["buckets"] == {}
-    assert json.loads((tmp_path / "out/deleted-summary.json").read_text())["buckets"] == {}
+    expected = {"b1": {"decisions": {}, "delete_bytes": 0, "drift_dirs": [], "failed_dirs": [],
+                       "bands": {"gs://b1/a/": {"bytes": 0, "objects": 0}}, "completed_empty_review": True}}
+    assert result["buckets"] == expected
+    assert json.loads((tmp_path / "out/deleted-summary.json").read_text())["buckets"] == expected
 
 
 def test_a_bucket_cut_takes_only_its_rows(source, tmp_path):

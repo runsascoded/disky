@@ -507,3 +507,9 @@ describe('a last real run that was undone', () => {
     expect(runEvent({ ...real, undo_deadline: null, undo_state: 'full' }, 'finished')).toBe(':white_check_mark: Real deletion `r1` finished: deleted *2.0 TiB* / 1,234 objects; since undone.')
   })
 })
+
+it('explains an empty completed review without claiming soft delete is off', () => {
+  expect(runEvent(run({ run_id: 'empty', mode: 'real', deleted_bytes: 0, deleted_objects: 0, undo_deadline: null, soft_delete_days: 0 }), 'finished', {
+    outcome: { attempted: true, skipped: null, notSwept: [], preserved: { bytes: 12, objects: 3 } },
+  })).toBe(':warning: Real deletion `empty` finished: attempted *0 B* / 0 objects; nothing to undo (no objects processed). Preserved since staging: *12 B* / 3 newer or changed objects.')
+})

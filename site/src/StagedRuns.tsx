@@ -201,6 +201,7 @@ export function RunsSection({ runs, jobs, configured, jobsError, admin, busy, ac
               const expected = expectedOf(v)
               const attempted = attemptOnly(planOf(v)?.file)
               const skips = planOf(v)?.file.skipped_no_generation
+              const preserved = planOf(v)?.file.total?.skipped_after_as_of
               const prog = progress.get(v.key)
               const p = prog ? sumProgress(prog) : null
               const estimate = prog ? progressEstimate(prog, plan?.objects, now) : null
@@ -254,6 +255,7 @@ export function RunsSection({ runs, jobs, configured, jobsError, admin, busy, ac
                       {failed && (job?.failure || job?.last_event) && <details className="why"><summary>why</summary>{job.failure && <div>{job.failure}</div>}{job.last_event && <div className={job.failure ? 'dim' : undefined}>{job.last_event}</div>}</details>}
                       {skips && skips.whole_buckets.length > 0 && <Tooltip content={<>Nothing was deleted in {skips.whole_buckets.map(shortBucket).join(', ')}: none of its objects had a generation in the scan's listing. Its prefixes stay staged.</>}><span className="tag not-swept">{skips.whole_buckets.length} {skips.whole_buckets.length === 1 ? 'bucket' : 'buckets'} not swept</span></Tooltip>}
                       {skips && skips.objects > 0 && <Tooltip content={`${fmtBytes(skips.bytes)} in objects the scan's listing has no generation for. Left in place, and logged per object as skipped_no_generation; not counted in deleted.`}><span className="tag">{fmtN(skips.objects)} skipped: no generation</span></Tooltip>}
+                      {preserved && preserved.objects > 0 && <Tooltip content={`${fmtBytes(preserved.bytes)} in versions new or changed since staging. Preserved by the original review cutoff.`}><span className="tag">{fmtN(preserved.objects)} newer/changed preserved</span></Tooltip>}
                       {ctl.undoing && <span className="tag">undoing</span>}
                       {r?.undo_state === 'full' && <span className="tag">undone</span>}
                       {r?.undo_state === 'partial' && !ctl.undoing && <Tooltip content="Some of what this run deleted is live again, not all of it: an undo restored part, or found it live. Undo again to retry the rest."><span className="tag">partly undone</span></Tooltip>}
@@ -337,6 +339,7 @@ export function RunDetail({ run, live, progress, dir, planned, fmtBytes, now }: 
   const log = logQ?.data ?? null
   const lower = totalsLowerBound(run, logQ?.data)
   const logged = log ? loggedOf(log) : null
+  const nothingProcessed = !live && !!log && !lower && run.deleted_bytes === 0 && run.deleted_objects === 0
   const plan = planned ? plannedOf(planned) : null
   const attempted = attemptOnly(planned)
   const skips = planned?.skipped_no_generation
@@ -360,6 +363,7 @@ export function RunDetail({ run, live, progress, dir, planned, fmtBytes, now }: 
         {live ? <div><dt>live progress</dt><dd>{progress ? <>{fmtBytes(progress.bytes)} · {fmtN(progress.deletes)} {r.mode === 'dry' ? 'would delete' : attempted ? 'acknowledged' : 'deleted'}{!attempted && <> · {fmtN(progress.gone)} gone</>}</> : 'waiting for progress'}<span className="dim"> · final totals recorded when the run ends</span></dd></div>
           : <div><dt>{lower ? 'totals so far' : 'final totals'}</dt><dd>{lower && 'at least '}{fmtBytes(r.deleted_bytes)} · {fmtN(r.deleted_objects)} {r.mode === 'dry' ? 'would delete' : attempted ? 'attempted and acknowledged' : 'deleted'}{attempted ? <span className="dim"> · {NOT_OBSERVABLE}</span> : <> · {fmtN(r.skipped_gone)} already gone · {fmtN(r.skipped_overwritten ?? 0)} replaced objects preserved</>}{lower && <span className="dim"> · {LOWER_BOUND}</span>}</dd></div>}
         {skips && <div><dt>skipped: no generation</dt><dd>{fmtBytes(skips.bytes)} · {fmtN(skips.objects)} objects left in place, logged per object{skips.whole_buckets.length > 0 && <> · <b className="err">not swept: {skips.whole_buckets.join(', ')}</b> (none of its objects had a generation; its prefixes stay staged)</>}</dd></div>}
+        {planned?.total?.skipped_after_as_of && <div><dt>preserved since staging</dt><dd>{fmtBytes(planned.total.skipped_after_as_of.bytes)} · {fmtN(planned.total.skipped_after_as_of.objects)} newer or changed objects, outside the original review</dd></div>}
         <div><dt>elapsed</dt><dd>{fmtDur((r.finished_ts ?? now) - r.started_ts)}</dd></div>
         {review && <div><dt>reviewed manifest</dt><dd>{fmtN(review.objects)} objects · {fmtBytes(review.bytes)}</dd></div>}
         {review && Object.keys(review.as_of ?? {}).length > 0 && <div><dt>review cutoffs</dt><dd>{[...new Set(Object.values(review.as_of))].sort().join(' · ')}</dd></div>}
@@ -367,7 +371,7 @@ export function RunDetail({ run, live, progress, dir, planned, fmtBytes, now }: 
         <div><dt>scan</dt><dd>{r.scan ?? '—'}{r.plan_digest ? <> · items <code>{r.plan_digest}</code></> : null}</dd></div>
         {r.min_soft_delete_days != null && <div><dt>soft-delete minimum</dt><dd>{r.min_soft_delete_days}d{r.soft_delete_days != null && <> · narrowest bucket {r.soft_delete_days}d</>}</dd></div>}
         {r.mode === 'real' && !CAPS.undoUnwindowed && <div><dt>undo</dt><dd>
-          <UndoLine status={undoStatus(r, now, unavailable, unseen)} now={now} live={live} />
+          {nothingProcessed ? 'nothing to undo (no objects processed)' : <UndoLine status={undoStatus(r, now, unavailable, unseen)} now={now} live={live} />}
           {' · '}state <b>{r.undo_state}</b>{r.purge_state && r.purge_state !== 'none' && <> · purge <b>{r.purge_state}</b></>}{lower && <span className="dim"> · {UNDO_LOG_ONLY}</span>}
         </dd></div>}
         {r.log_dir && <div><dt>run dir</dt><dd><code>{r.log_dir}</code></dd></div>}
@@ -392,7 +396,7 @@ export function RunDetail({ run, live, progress, dir, planned, fmtBytes, now }: 
       {planned && dir && <RunBucketProgress planned={planned} dir={dir} live={live} log={log} fmtBytes={fmtBytes} dry={r.mode === 'dry'} bands={bands} />}
       {r.mode === 'real' && <section id="recovery" className="rd-recovery">
         <h4>Recovery</h4>
-        {CAPS.undoUnwindowed ? <p>{runHasNoUndo(r) ? runNoUndoText(r) : 'Recovery depends on the bucket’s versioning and retention settings. This deletion may be permanent; a recorded run deadline does not guarantee recovery.'}</p> : runHasNoUndo(r) ? <>
+        {nothingProcessed ? <p>Nothing to undo: this completed run processed no objects.</p> : CAPS.undoUnwindowed ? <p>{runHasNoUndo(r) ? runNoUndoText(r) : 'Recovery depends on the bucket’s versioning and retention settings. This deletion may be permanent; a recorded run deadline does not guarantee recovery.'}</p> : runHasNoUndo(r) ? <>
         <p>{runNoUndoText(r)} A bucket that retained its soft deletes (per bucket, below) can still be restored from the CLI.</p>
         <code>dt-cloud sweep undo -b BUCKET {r.run_id}</code>
         </> : unavailable ? <RecoveryUnavailable unavailable={unavailable} buckets={buckets} runId={r.run_id} /> : <>
