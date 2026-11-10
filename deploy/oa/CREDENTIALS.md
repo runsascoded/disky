@@ -42,3 +42,11 @@ This is a **source-use and variable-name audit**, November 10, 2026. It does not
 | R2 | Analytics token | Yes; other effective credentials are inherited or runtime-provided |
 
 Remaining credential audit gates: owner-confirm each live token's ID/policy/expiry and all Secret Manager/runtime consumers; identify unused or overbroad credentials without revoking them; provision/reuse the Pages-only instances; record vault recovery and environment ownership. Token verification alone confirms status, not the full policy. No token has been rotated, revoked, created or copied into GitHub by this implementation.
+
+## Qualified source for the first pilot
+
+Cloudflare account-console review on November 10 identified active token `26aeaa3d6a7309d54e4dd66768c427b6`, named `oa-hf-usage pages (job: digest plot)`, with Pages Write for the OA account and no other displayed roles. HF source names its Secret Manager key `hf-usage-cf-pages-token` in project `oa-internal-450019`; this is a candidate for owner-approved reuse, not a claim its stored value has been compared or installed into GitHub. D1/R2 credentials remain separate. GCS automation remains held pending its dedicated Pages-only token qualification.
+
+PR custom hostnames add a separate zone DNS Write role for Pages. The OAx console currently has an unsubmitted `disky-pr-preview-dns (CI)` token review restricted to `oa.dev`, with a proposed 90-day expiry (February 8, 2027). User creation/save as `CF_PREVIEW_DNS_TOKEN` is pending. No one-time secret should be pasted into chat or copied from a browser transcript. Workers native Previews use a separate Worker authority and a preconfigured parent wildcard domain, not this Pages-only deploy token. See [preview lifecycle] for the explicit binding/auth policy and live-pilot requirements.
+
+[preview lifecycle]: ../../.github/actions/cf-preview/README.md

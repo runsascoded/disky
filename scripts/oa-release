@@ -141,6 +141,40 @@ def main() -> None:
     """Plan, fingerprint and record a release; never apply schemas or infrastructure."""
 
 
+def setup_plan(targets: tuple[str, ...]) -> dict:
+    config = loads(CONFIG.read_text())
+    require(bool(targets) and len(set(targets)) == len(targets), 'Select distinct deployment targets')
+    require(all(target in config['sites'] for target in targets), 'Unknown OA deployment')
+    return {
+        'repository': config['repository'],
+        'operator_policy': 'Existing repository write/maintain/admin; explicit production dispatch, self-approval allowed; no added merge-review requirement',
+        'environments': [
+            {
+                'name': f'{target}-{mode}',
+                'settings': {'wait_timer': 0, 'prevent_self_review': False, 'reviewers': [],
+                             'deployment_branch_policy': {'protected_branches': False, 'custom_branch_policies': True}},
+                'branch_policy': {'name': config['controller_branch'], 'type': 'branch'},
+                'variables': {'CLOUDFLARE_ACCOUNT_ID': config['account_id']},
+                'secret_names': ['CF_PAGES_DEPLOY_TOKEN'],
+            }
+            for target in targets for mode in ['dev', 'prod']
+        ],
+        'repository_variables': {'OA_SITE_RELEASE_ENABLED': 'false', 'OA_SITE_RELEASE_TARGETS': dumps(list(targets), separators=(',', ':'))},
+        'production_action': 'Manual promotion of a successful exact-SHA dev deployment',
+        'preview_data_policy': 'Unchanged; per-PR preview activation is separate',
+    }
+
+
+@main.command('setup-plan')
+@option('-o', '--output', type=ClickPath(path_type=Path), required=True)
+@option('-t', '--target', 'targets', type=Choice(['gcs', 'cw', 'hf', 'r2']), multiple=True, required=True)
+def setup(output: Path, targets: tuple[str, ...]) -> None:
+    """Write the exact environment/settings plan for review. No APIs or writes outside OUTPUT."""
+    value = setup_plan(targets)
+    output.write_text(dumps(value, indent=2) + '\n')
+    print(dumps(value, indent=2))
+
+
 @main.command('plan')
 @option('-e', '--event', type=ClickPath(path_type=Path), required=True)
 @option('-n', '--event-name', type=Choice(['workflow_run', 'workflow_dispatch']), required=True)
