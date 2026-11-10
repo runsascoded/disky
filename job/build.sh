@@ -15,8 +15,7 @@
 # worktree is refused (it would image that other checkout).
 #
 # Env: PROJECT, IMAGE (override the tag, e.g. a throwaway tag to test a build),
-# ALLOW_DIRTY=1 (build a tree with uncommitted changes to tracked files; stamped
-# dirty), ALLOW_OTHER_CHECKOUT=1 (build this script's checkout from another's cwd).
+# ALLOW_OTHER_CHECKOUT=1 (build this script's checkout from another's cwd).
 set -euo pipefail
 caller=$PWD
 cd "$(dirname "$0")/.."
@@ -36,31 +35,24 @@ JOB=${JOB:-cw-run.sh}
 TAG=${TAG:-latest}
 IMAGE=${IMAGE:-us-central1-docker.pkg.dev/$PROJECT/cw-s3-usage/scan:$TAG}
 
-sha=$(git rev-parse HEAD)
+sha=$(scripts/require-clean)
 branch=$(git rev-parse --abbrev-ref HEAD)
-dirty_paths=$(git status --porcelain --untracked-files=no)
-dirty=0
-if [ -n "$dirty_paths" ]; then dirty=1; fi
 
 {
   echo "================================================================"
   echo "building checkout: $root"
   echo "  branch: $branch"
   echo "  sha:    $sha"
-  echo "  dirty:  $dirty"
-  if [ "$dirty" = 1 ]; then
-    echo "  uncommitted changes to tracked files:"
-    echo "$dirty_paths" | sed 's/^/    /'
-  fi
+  echo "  dirty:  0"
   echo "  image:  $IMAGE"
   echo "================================================================"
 } >&2
 
-if [ "$dirty" = 1 ] && [ "${ALLOW_DIRTY:-}" != 1 ]; then
-  echo "refusing to build a dirty tree: commit (or ALLOW_DIRTY=1 to build it stamped dirty)" >&2
-  exit 1
-fi
-
-echo "building $IMAGE (Cloud Build; context = $root, minus .gcloudignore)" >&2
-exec gcloud builds submit --project "$PROJECT" --config cloudbuild.yaml \
-  --substitutions "_IMAGE=$IMAGE,_JOB=$JOB,_GIT_SHA=$sha,_GIT_DIRTY=$dirty" .
+# Freeze the upload from Git rather than racing concurrent edits in the worktree.
+mkdir -p tmp
+source_dir=$(mktemp -d "$root/tmp/cw-build-source.XXXXXX")
+trap 'rm -rf "$source_dir"' EXIT
+git archive "$sha" | tar -x -C "$source_dir"
+echo "building $IMAGE (Cloud Build; committed source $sha, minus .gcloudignore)" >&2
+gcloud builds submit --project "$PROJECT" --config "$source_dir/cloudbuild.yaml" \
+  --substitutions "_IMAGE=$IMAGE,_JOB=$JOB,_GIT_SHA=$sha,_GIT_DIRTY=0" "$source_dir"

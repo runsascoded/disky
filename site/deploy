@@ -49,6 +49,8 @@ if [ "$CONFIG" != wrangler.toml ] && ! $dry; then
   echo "deploy: --config only goes with --dry-run (wrangler deploys wrangler.toml, whatever else is named)" >&2; exit 1
 fi
 if [ "$mode" = dev ]; then push=false; fi
+source_sha=
+if ! $dry && ! $status; then source_sha=$(../scripts/require-clean); fi
 
 # The Pages project this checkout deploys: `name = "…"` in the config.
 [ -f "$CONFIG" ] || { echo "deploy: no site/$CONFIG: each deployment branch (gcs, cw-s3, m3) carries its own; cloud has only the r2 demo's wrangler.r2*.toml (deployed by .github/workflows/deploy-r2.yml)" >&2; exit 1; }
@@ -130,9 +132,10 @@ if $dry; then
 fi
 
 if [ "$mode" = dev ]; then CLOUDFLARE_ENV=preview pnpm build; else pnpm build; fi
+../scripts/require-clean "$source_sha" >/dev/null
 wlog=$(mktemp)
 trap 'rm -f "$wlog"' EXIT
-pnpm exec wrangler pages deploy dist --project-name "$PROJECT" --branch "$branch" 2>&1 | tee "$wlog"
+pnpm exec wrangler pages deploy dist --project-name "$PROJECT" --branch "$branch" --commit-hash "$source_sha" --commit-dirty=false 2>&1 | tee "$wlog"
 # Belt and braces: if wrangler ignored the config anyway (it downgrades a config error to a warning), the
 # deployed bindings and vars are the old ones, whatever exit code it returned.
 if grep -q 'Ignoring configuration file' "$wlog"; then
@@ -163,7 +166,7 @@ done
 # authority (it reads CF's own deployment metadata) and this is the git-native
 # convenience for `git log <short>-prod..HEAD` / offline diffing. Local only: it is never
 # pushed, so the shared repo's branch list carries just the deployment branches.
-sha=$(git rev-parse HEAD)
+sha=$source_sha
 git branch -f "$ptr" "$sha"
 echo "moved local $ptr → ${sha:0:9}"
 [ "$mode" = dev ] && echo "preview: https://$branch.$PROJECT.pages.dev"

@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# Print the committed source revision, or refuse a release with uncommitted input.
+set -euo pipefail
+root=$(git rev-parse --show-toplevel)
+cd "$root"
+sha=$(git rev-parse HEAD)
+changes=$(git status --porcelain --untracked-files=all --ignore-submodules=none)
+if [ -n "$changes" ]; then
+  echo "release: commit all source changes before deploying or building an image" >&2
+  echo "$changes" >&2
+  exit 1
+fi
+if [ $# -gt 0 ] && [ "$sha" != "$1" ]; then
+  echo "release: HEAD changed during the build; rebuild from the intended commit" >&2
+  exit 1
+fi
+echo "$sha"

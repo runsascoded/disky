@@ -304,24 +304,29 @@ def audit_logs() -> None:
 
 
 @cli.command("deploy-site")
-@option("-a", "--apply", is_flag=True, help="Deploy the built CW site without committing, pushing or moving Git pointers")
+@option("-a", "--apply", is_flag=True, help="Build and deploy committed CW source without pushing")
 @argument("environment", type=Choice(["preview", "production"]))
 def deploy_site(apply: bool, environment: str) -> None:
-    """Deploy a previously built dirty working tree, reporting that fact explicitly."""
+    """Use the guarded site release path; a stale prebuilt directory is not a release."""
     config = tomllib.loads((ROOT / "site/wrangler.toml").read_text())
     variables = config["vars"] if environment == "production" else config["env"]["preview"]["vars"]
-    profile = json.loads((ROOT / "job/static-names.json").read_text())
-    if config["name"] != "oa-cw-s3-usage" or variables["DATA_BUCKET"] != "oa-cw-s3-usage-data" or variables["STATIC_GEN"] != profile["gen"]:
+    if config["name"] != "oa-cw-s3-usage" or variables["DATA_BUCKET"] != "oa-cw-s3-usage-data":
         raise ClickException("Site configuration does not match the CW isolation profile")
-    report = {"project": config["name"], "environment": environment, "action": "planned", "uncommitted_source": True}
-    if apply:
-        outputs = load_outputs()
-        verify_credentials(outputs)
-        report["log"] = wrangler(outputs, ["pages", "deploy", str(ROOT / "site/dist"), "--project-name", config["name"],
-                                          "--branch", "main" if environment == "production" else "dev",
-                                          "--commit-dirty=true", "--commit-message", "CW deployment verification"])
-        report["action"] = "deployed; live checks required"
-    print(json.dumps(report, indent=2))
+    command = [str(ROOT / "site/deploy"), "-P", *(["--dev"] if environment == "preview" else [])]
+    if not apply:
+        print(json.dumps({"environment": environment, "action": "planned", "command": command}, indent=2))
+        return
+    run([str(ROOT / "scripts/require-clean")], cwd=ROOT, check=True)
+    outputs = load_outputs()
+    verify_credentials(outputs)
+    result = run(command, cwd=ROOT, env={**os.environ, "CLOUDFLARE_API_TOKEN": outputs["isolation_pages_token"]},
+                 capture_output=True, text=True, check=False)
+    diagnostic = result.stdout + result.stderr
+    for key in (*SECRETS.values(), "isolation_r2_reader_key_id", "isolation_r2_reader_secret"):
+        diagnostic = diagnostic.replace(outputs[key], "<redacted>")
+    if result.returncode:
+        raise ClickException("CW site deployment failed:\n" + diagnostic)
+    print(json.dumps({"environment": environment, "action": "deployed; live checks required", "log": diagnostic}, indent=2))
 
 
 @cli.command("verify-site")
@@ -420,6 +425,7 @@ def deploy_icons(apply: bool, kind: str) -> None:
     if not apply:
         print(json.dumps(report, indent=2))
         return
+    source_sha = run([str(ROOT / "scripts/require-clean")], cwd=ROOT, capture_output=True, text=True, check=True).stdout.strip()
     outputs = load_outputs()
     verify_credentials(outputs)
     assets = ROOT / "job/icons"
@@ -457,7 +463,7 @@ def deploy_icons(apply: bool, kind: str) -> None:
     env = {**os.environ, "CLOUDFLARE_API_TOKEN": outputs["isolation_pages_token"],
            "WRANGLER_LOG_PATH": str(ROOT / f"tmp/cw-isolation-icons-{kind}-wrangler.log")}
     result = run(["pnpm", "--dir", str(ROOT / "infra/cf/cron-dispatch"), "exec", "wrangler", "pages", "deploy",
-                  str(assets), "--project-name", report["project"], "--branch", branch, "--commit-dirty=true"],
+                  str(assets), "--project-name", report["project"], "--branch", branch, "--commit-hash", source_sha, "--commit-dirty=false"],
                  env=env, capture_output=True, text=True, cwd=ROOT, check=False)
     # Deployment logs contain no credential values, but still redact before emitting.
     diagnostic = result.stdout + result.stderr

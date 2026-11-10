@@ -273,6 +273,8 @@ One gate (`_lib/auth.ts`, `@open-athena/auth` over D1): `identify` → `Identity
 
 ## Development
 
+Deploy sites and build release images only from committed source. `scripts/require-clean` refuses staged, unstaged and nonignored untracked changes; there is no dirty-source override. `site/deploy` checks again after building and records the verified commit. `job/build.sh` uploads a Git archive of that commit, so concurrent working-tree edits cannot enter the image. Read-only deployment status and dry runs remain available on a dirty tree.
+
 During ongoing implementation, treat a concrete bug report about the code we own as an implied request to fix it: reproduce, implement, verify, and coordinate the deployment handoff without requiring a second prompt. Honor explicitly read-only requests. Code-fix authority does not imply unrelated infrastructure applies, permission changes, or another session's live cutover. Report separately what is fixed locally and what is actually deployed.
 
 When another agent sends a useful, in-scope handoff, proactively review, implement or adopt, test, and coordinate it. A review queue tracks work; adding an item is not completion. Prefer coherent shared-code picks over merging deployment branches, preserve unrelated changes, and leave deployment-specific applies and live cutovers with their owners.
