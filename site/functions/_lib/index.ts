@@ -43,6 +43,7 @@ import { newestManifest } from './manifests.js'
 import { colo, inFlight, IsoMap, IsoSet, join, JOIN, type Join, Memo, registerIsolate, reqOf, scopeOf, shared, STALLED, track } from './shared.js'
 import { d1Variant, isPrimary, PRIMARY_STORE, storeKey } from './stores.js'
 import { compressors } from './zstd.js'
+import { currentMeter } from './usage.js'
 
 /** A leaf of the stored parquet schema (`index_schema.schema_json`). */
 export interface SchemaElement { type: string; name: string; repetition_type: string; converted_type?: string }
@@ -628,8 +629,12 @@ export type StaticGenEnv = { STATIC_GEN?: string; STATIC_CURRENT_KEY?: string; I
  *  without a pointer (an unset `STATIC_GEN` reads as it always has). */
 export async function withStaticGen<E extends StaticGenEnv>(env: E): Promise<E> {
   env = await withHistoryVersion(env)
-  if (env.STATIC_GEN?.trim()) return env
+  if (env.STATIC_GEN?.trim()) {
+    currentMeter()?.staticGen.add(env.STORE_KEY || 'primary', env.STATIC_GEN.trim())
+    return env
+  }
   const gen = await staticCurrentGen(env)
+  if (gen) currentMeter()?.staticGen.add(env.STORE_KEY || 'primary', gen)
   return gen ? { ...env, STATIC_GEN: gen } : env
 }
 

@@ -20,7 +20,7 @@ import { captureWrite, readBody } from './_lib/activityHook.js'
 import { sizeAssignments } from './_lib/activitySize.js'
 import { serverKind } from './_lib/activityShape.js'
 import type { Ctx } from './_lib/auth.js'
-import { instrumentBindings, Meter, metered, usagePoint, type UsageEnv, writeUsage } from './_lib/usage.js'
+import { generationHeaders, instrumentBindings, Meter, metered, usagePoint, type UsageEnv, writeUsage } from './_lib/usage.js'
 
 const isHtml = (res: Response): boolean => (res.headers.get('content-type') ?? '').startsWith('text/html')
 
@@ -68,7 +68,7 @@ export const onRequest = async (ctx: MiddlewareCtx): Promise<Response> => {
   const left: Promise<unknown>[] = []
   const wu = ctx.waitUntil
   const sctx: MiddlewareCtx = wu ? { ...ctx, waitUntil: p => { left.push(p); wu(p) } } : ctx
-  const res = withBuild(await metered(m, ctx, () => { instrumentBindings(ctx.env); return serve(sctx) }))
+  const res = generationHeaders(withBuild(await metered(m, ctx, () => { instrumentBindings(ctx.env); return serve(sctx) })), m)
   if (wu && ctx.env.USAGE) {
     const wallMs = Date.now() - m.t0
     wu(Promise.allSettled(left)
