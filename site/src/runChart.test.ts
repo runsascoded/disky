@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { alignedTicks, axisTicks, chartRange, durationLabel, inSpan, parseDuration, percentOf, rollingRates, runKindParam, runSpanParam, runStatusParam, runWindowParam, shiftWindow, zoomWindow } from './runChart'
+import { alignedTicks, axisTicks, chartRange, durationLabel, includeRunKind, inSpan, parseDuration, percentOf, rollingRates, runFilterKinds, runKindMatches, runKindParam, runSpanParam, runStatusParam, runWindowParam, shiftWindow, zoomWindow } from './runChart'
 import type { HistoryPoint } from './runHistory'
 
 describe('run time range and axes', () => {
@@ -58,6 +58,27 @@ describe("the scans page's window (`?w=`)", () => {
 })
 
 describe('/scans\' filters in the URL (`k`, `st`)', () => {
+  const kinds = ['scan', 'access-ingest', 'compact']
+  const selected = (filter: string) => kinds.filter(k => runKindMatches(filter, k))
+  it('includes multiple kinds, excludes kinds from all, and retains old single-kind links', () => {
+    expect(['', 'scan', 'scan,compact', '!access-ingest', 'scan,compact,!compact', '!'].map(selected)).toEqual([
+      kinds, ['scan'], ['scan', 'compact'], ['scan', 'compact'], ['scan'], [],
+    ])
+    expect(runFilterKinds('scan,!access-ingest,!')).toEqual(['scan', 'access-ingest'])
+  })
+  it('toggles inclusion without widening a whitelist or dropping exclusions for future kinds', () => {
+    const filters = [
+      includeRunKind('', 'access-ingest', false),
+      includeRunKind('!access-ingest', 'access-ingest', true),
+      includeRunKind('scan', 'access-ingest', true),
+      includeRunKind('scan', 'scan', false),
+      includeRunKind('!', 'access-ingest', true),
+      includeRunKind('!access-ingest,!future-job', 'access-ingest', true),
+    ]
+    expect(filters).toEqual(['!access-ingest', '', 'access-ingest,scan', '!', 'access-ingest', '!future-job'])
+    expect(filters.map(selected)).toEqual([['scan', 'compact'], kinds, ['scan', 'access-ingest'], [], ['access-ingest'], kinds])
+    expect(runKindMatches(filters[5], 'future-job')).toBe(false)
+  })
   it('a kind is its own name, a status a `STATUS_FILTERS` key; each absent on its default, and an unknown status reads as none', () => {
     expect([runKindParam.encode(''), runKindParam.encode('scan'), runKindParam.decode(undefined), runKindParam.decode('merge')]).toEqual([undefined, 'scan', '', 'merge'])
     expect([runStatusParam.encode(''), runStatusParam.encode('attention'), runStatusParam.encode('nop')]).toEqual([undefined, 'attention', 'nop'])

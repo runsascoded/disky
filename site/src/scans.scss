@@ -59,6 +59,25 @@
   .nb { white-space: nowrap; }
   .run-filters { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 12px 0 0; font-size: 13px; select { font: inherit; }
     .gran button { font-size: 13px; padding: 2px 10px; } }
+  .sr-type-scan { --job-ink: var(--s1); }
+  .sr-type-access { --job-ink: var(--s5); }
+  .sr-type-maintenance { --job-ink: var(--s4); }
+  .sr-type-filters { border: 0; padding: 0; margin: 0; display: flex; flex-wrap: wrap; gap: 5px; align-items: center;
+    legend { float: left; margin-right: 8px; color: var(--ink-3); }
+    button { font: inherit; color: var(--ink-2); border: 1px solid var(--line); border-radius: 4px; background: var(--surface); cursor: pointer; padding: 2px 6px; }
+    button:disabled { opacity: 0.5; cursor: default; }
+  }
+  .sr-type-filter { display: inline-flex; align-items: center; gap: 4px; border: 1px solid color-mix(in srgb, var(--job-ink) 45%, var(--line)); border-left: 3px solid var(--job-ink); border-radius: 4px; padding: 2px 4px; background: color-mix(in srgb, var(--job-ink) 7%, var(--surface));
+    label { display: inline-flex; align-items: center; gap: 4px; cursor: pointer; white-space: nowrap; }
+    input { margin: 0; accent-color: var(--job-ink); }
+    button { font-size: 11px; border: 0; padding: 1px 4px; }
+    &.excluded { background: var(--surface); border-left-color: var(--line); label { color: var(--ink-3); } }
+  }
+  .sr-job-type { display: inline-block; border-left: 3px solid var(--job-ink); padding: 1px 6px; font-size: 12px; background: color-mix(in srgb, var(--job-ink) 9%, var(--surface)); border-radius: 3px; }
+  table.sr-runs tbody td { padding-top: 3px; padding-bottom: 3px; }
+  .sr-runs .sr-status { white-space: nowrap; }
+  .sr-runs tbody td:first-child { border-left: 2px solid color-mix(in srgb, var(--job-ink) 50%, transparent); }
+  .sr-output-link { color: inherit; text-decoration: underline dotted; text-underline-offset: 3px; }
   .sw { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 5px; vertical-align: baseline;
     &.failed { background: color-mix(in srgb, var(--danger) 70%, transparent); } }
   .sr-legend { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12px; color: var(--ink-2); margin-top: 4px; }
