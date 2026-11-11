@@ -1,5 +1,5 @@
 import type { D1Database } from '@cloudflare/workers-types'
-import { readSwitch } from './sessionLog.js'
+import { d1SessionLogStore } from '@open-athena/auth/session-log/d1'
 import type { SlackEnv } from './slack.js'
 
 export const MONITOR_SCOPE = 'gcs:session-monitor:read'
@@ -97,7 +97,7 @@ export async function check(
   dry: boolean,
   send: typeof sendAlert = sendAlert,
 ): Promise<Record<string, unknown>> {
-  const sw = await readSwitch(db)
+  const sw = await d1SessionLogStore(db).readSwitch()
   if (!sw || sw === 'missing' || sw.until_ms === null || sw.until_ms <= now * 1000 || now * 1000 >= MONITOR_END_MS) return { status: 'disabled' }
   // Pin all reads/writes to primary: a stale replica must not replenish the budget or erase a thread.
   const prior = await db.prepare('SELECT version, lease_until, checked_s, signal_s, alert_s, day, attempts, thread_ts, delivery FROM session_monitor WHERE id = 1').first<State>()
