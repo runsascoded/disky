@@ -2454,12 +2454,28 @@ def gen_scans(store, prefix: str) -> list[str]:
     return [s["id"] for s in store.read_json(f"{prefix}/scans.json")["scans"]] + run_scans(runs)
 
 
-def promote_gen(store, prefix: str, new: str, *, r2_bucket: str | None = None, log: Callable[[str], None] = err) -> dict:
+def r2_wanted(bucket: str, store, gen_prefix: str, served: tuple[str, ...] = ("",)) -> list:
+    """What the R2 copy of generation `gen_prefix` holds (the data bucket's objects): its base as `compact-r2` copied it
+    (everything outside its runs' and manifests' dirs), the newest manifest, and that manifest's runs' files under the
+    run-relative `served` prefixes, as `r2_publish` copies them (a run's other files, and runs no manifest lists any more,
+    stay on GCS only)."""
+    newest, runs = store_newest_runs(store, gen_prefix)
+    skip = {f"{gen_prefix}/manifests/", *(f"{gen_prefix}/{r['key'].split('/', 1)[0]}/" for r in runs)}
+    out = r2_objects(bucket, [f"{gen_prefix}/"], keep=lambda k: not k.startswith(tuple(skip)))
+    if newest:
+        out += r2_objects(bucket, [f"{gen_prefix}/{newest}"])
+    for r in runs:
+        out += r2_objects(bucket, [f"{gen_prefix}/{r['key']}/{s}" for s in served])
+    return out
+
+
+def promote_gen(store, prefix: str, new: str, *, r2_bucket: str | None = None, served: tuple[str, ...] = ("",),
+                log: Callable[[str], None] = err) -> dict:
     """Candidate `new` (`compact_store(promote=False)`) made the successor of the generation it was compacted from and,
     when `CURRENT.json` named that one (or nothing), the current generation; with `r2_bucket` (the data bucket the R2
     copy mirrors), then the R2 copy's pointers (`r2_promote`). Refused, nothing moved: `new` not a whole candidate
     (`candidate.json`, `compaction.json`), its source already compacted, `new` lacking a scan its source holds (append
-    those to `new` first), or R2 lacking a file of `new`. A scan appended to the source as its successor record is
+    those to `new` first), or R2 lacking a file of `new` (`r2_wanted`: of runs appended since, the `served` files). A scan appended to the source as its successor record is
     written: the record removed again, refused. Returns `{from, gen, current}`."""
     new_prefix = f"{prefix}/{new}"
     for marker, what in ((CANDIDATE, "not a candidate"), (COMPACTION, "not whole: its compaction didn't finish")):
@@ -2477,7 +2493,7 @@ def promote_gen(store, prefix: str, new: str, *, r2_bucket: str | None = None, l
     if lack := lacking():
         raise SystemExit(f"{new} lacks {len(lack)} scan{'s' * (len(lack) != 1)} {old} holds ({lack[0]}" + (f" … {lack[-1]}" if len(lack) > 1 else "")
                          + f"): append {'them' if len(lack) > 1 else 'it'} to {new} first")
-    if r2_bucket and (bad := r2_missing(r2_objects(r2_bucket, [f"{new_prefix}/"]))):
+    if r2_bucket and (bad := r2_missing(r2_wanted(r2_bucket, store, new_prefix, served))):
         raise SystemExit(f"r2 {new_prefix}: {len(bad)} files not on R2 (e.g. {bad[0]}): copy the candidate there first")
     store.write_text(f"{old_prefix}/{SUCCESSOR}", json.dumps({"gen": new}) + "\n")
     if lack := lacking():
