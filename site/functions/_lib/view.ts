@@ -2849,7 +2849,8 @@ export async function buildView(env0: Env, o: ViewOpts): Promise<View> {
     }
     const kids = childPaths
       .map(cp => build(cp, kept.get(cp)!))
-      .sort((x, y) => y.b - x.b)
+      // bytes, then name: equal-sized siblings never take the order the store happened to read them in
+      .sort((x, y) => y.b - x.b || (x.n < y.n ? -1 : x.n > y.n ? 1 : 0))
     const kidAggs = childPaths.map(cp => kept.get(cp)!)
     const rest = subtract(a, kidAggs)
     node.c = kids
