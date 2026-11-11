@@ -197,6 +197,9 @@ database_name = "oa-cw-s3-usage-db"   # the SAME ledger as prod (marks made on d
 database_id = "7f1e1326-b879-4ecd-8621-846621c24f36"
 
 [env.preview.vars]
+PROD_HOST = "cw.oa.dev"
+DEV_HOST = "dev.cw.oa.dev"
+REPO_URL = "https://github.com/Open-Athena/marin-gcs-usage"
 HOST_REDIRECTS = "cw-s3.oa.dev=cw.oa.dev,dev.cw-s3.oa.dev=dev.cw.oa.dev"
 ROOT_LABEL = "Marin CoreWeave (dev)"
 # Response-cache namespace (`_lib/edgeCache.ts`): this stack shares prod's KV, so its keys carry their own tag;
