@@ -3,8 +3,10 @@
 // any `(unchanged)` filler) → one flat row each, with the before/after/Δ
 // numbers the map's tooltip shows, plus the column sorts. Pure, so the
 // derivation and every sort order are unit-tested (`diffRows.test.ts`).
-import type { DiffNode } from './diffModel'
+import { isSynthetic, type DiffNode } from './diffModel'
 import type { CellAction } from './objects'
+
+export { isSynthetic } from './diffModel'
 
 const { abs } = Math
 
@@ -41,14 +43,32 @@ export const deltaPct = (a: number, b: number): number | null => (a > 0 ? (b - a
 export const statusOf = (n: DiffNode): DiffStatus =>
   n.first ? 'first' : n.status === 'filler' || n.status === 'root' ? 'unchanged' : n.status
 
-export const isSynthetic = (n: DiffNode): boolean => n.status === 'filler' || n.label.startsWith('(')
+/** The real containing folder of a synthetic remainder, relative to the compared scope. `[]` means the scope
+ *  itself; `null` means a real entry. Never navigate to the reserved display label. */
+export function diffRemainderParent(n: Pick<DiffNode, 'key' | 'label' | 'status'>): string[] | null {
+  if (!isSynthetic(n)) return null
+  return n.key.split('/').slice(0, -1)
+}
 
-/** A diff cell's click: an object opens, any named directory drills (a leaf
- *  here is just one the diff didn't enumerate below), and the root, a fold or
- *  the filler — or an ⌥-click — pins its tip. Every scan generation alike: a
- *  v1 pair simply has no object rows. */
-export const diffCellAction = (n: Pick<DiffNode, 'k' | 'status' | 'label'>, alt = false): CellAction =>
-  alt || n.status === 'root' || isSynthetic(n as DiffNode) ? 'pin' : n.k === 'file' ? 'open' : 'drill'
+/** Normal clicks open objects, drill directories, or inspect a remainder's containing folder. The root and
+ *  an explicit ⌥-click pin the totals instead. */
+export const diffCellAction = (n: Pick<DiffNode, 'k' | 'status' | 'label'>, alt = false): CellAction | 'remainder' =>
+  alt || n.status === 'root' ? 'pin' : isSynthetic(n) ? 'remainder' : n.k === 'file' ? 'open' : 'drill'
+
+export function followDiffCell(
+  n: Pick<DiffNode, 'key' | 'k' | 'status' | 'label'>,
+  alt: boolean,
+  handlers: { open?: (segs: string[]) => void; drill?: (segs: string[]) => void; listing: () => void },
+): boolean {
+  const action = diffCellAction(n, alt)
+  if (action === 'pin') return false
+  const parent = action === 'remainder' ? diffRemainderParent(n)! : null
+  if (parent?.length === 0) { handlers.listing(); return true }
+  const go = action === 'open' ? handlers.open : handlers.drill
+  if (!go) return false
+  go(parent ?? n.key.split('/'))
+  return true
+}
 
 export function diffTableRows(cells: DiffNode[]): DiffTableRow[] {
   return cells.map(n => {

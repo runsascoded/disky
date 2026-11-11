@@ -20,9 +20,16 @@ export function cssColor(el: Element, color: string): string {
 export function colorResolver(el: Element): (color: string) => string {
   const cache = new Map<string, string>()
   return (color: string) => {
-    if (!color.startsWith('var(')) return color
-    let v = cache.get(color)
-    if (v === undefined) { v = cssColor(el, color); cache.set(color, v) }
-    return v
+    if (!color.includes('var(')) return color
+    const cached = cache.get(color)
+    if (cached !== undefined) return cached
+    let resolved = cssColor(el, color)
+    for (let i = 0; i < 8 && resolved.includes('var('); i++) {
+      const next: string = resolved.replace(/var\(\s*(--[\w-]+)\s*(?:,\s*([^()]*))?\)/g, (_m, name: string, fallback?: string) => getComputedStyle(el).getPropertyValue(name).trim() || fallback?.trim() || `var(${name})`)
+      if (next === resolved) break
+      resolved = next
+    }
+    cache.set(color, resolved)
+    return resolved
   }
 }

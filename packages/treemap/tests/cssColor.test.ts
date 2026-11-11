@@ -29,6 +29,12 @@ describe('cssColor', () => {
 })
 
 describe('colorResolver', () => {
+  it('resolves variables nested inside class-shading color mixes', () => {
+    const el = document.createElement('div')
+    el.style.setProperty('--surface', '#202020')
+    const resolve = colorResolver(el)
+    expect(resolve('color-mix(in oklab, rgb(0 255 0) 50%, var(--surface))')).toBe('color-mix(in oklab, rgb(0 255 0) 50%, #202020)')
+  })
   it('resolves vars and passes non-vars through', () => {
     const el = document.createElement('div')
     el.style.setProperty('--mk', '#123456')
