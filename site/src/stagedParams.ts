@@ -11,7 +11,7 @@
 // Values use only what a query string leaves bare (`URLSearchParams`: letters, digits, `*-._`): the scroll-spy
 // re-serializes the whole query each time it names a section.
 import type { Param } from 'use-prms'
-import { SECTION_KEY } from './homeSections'
+import { encodeSection, SECTION_KEY } from './homeSections'
 
 /** A group's key (`StagedPage`'s `gkey`): a session's lead batch id; the items staged before batches existed; the one
  *  table of the flat view. */
@@ -163,12 +163,12 @@ export function sectionOfHash(hash: string): LinkedSection | null {
 const without = (search: string, keys: string[]): string[] =>
   search.replace(/^\?/, '').split('&').filter(kv => kv && !keys.includes(kv.split('=')[0]))
 
-/** The query a `#` link settles on: `to` named in `?section=`, where the scroll-spy keeps the section in view. A link
+/** The query a `#` link settles on: `to` named in `?v=` (`encodeSection`), where the scroll-spy keeps the section in view. A link
  *  to a batch shows batches, so the filter and the flat table go (they show one table, no batch to land on). The
  *  other params keep their spelling: only whole `key=value` pairs are dropped. */
 export function adoptSection(search: string, to: LinkedSection): string {
   const rest = without(search, [SECTION_KEY, ...(to.batch == null ? [] : ['q', 'flat'])])
-  return `?${[...rest, `${SECTION_KEY}=${to.section}`].join('&')}`
+  return `?${[...rest, `${SECTION_KEY}=${encodeSection(to.section)}`].join('&')}`
 }
 
 /** `search` less its section: what the URL holds once the scroll-spy is turned off. */

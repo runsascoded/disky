@@ -103,7 +103,7 @@ export function SiteKbd({ extra = [], placeholder }: {
       handler: toggleHelp,
     },
     'spy:toggle': {
-      label: `Section spy (?section= in the URL while scrolling): ${spy} (toggle)`,
+      label: `Section spy (?v= in the URL while scrolling): ${spy} (toggle)`,
       description: 'Names the section in view (tree-map, tbl, over-time, diff, mtime) in the URL as you scroll, so a copied link opens there and unfurls with that section\'s card.',
       group: 'View',
       keywords: ['section', 'spy', 'scroll', 'url', 'param'],

@@ -2,12 +2,12 @@
  * params the card is drawn from (and that a view token is minted over), and
  * the unfurl's title. Pure: no env, no I/O. */
 import { mountedSegs, urlSegsOf } from '../../../src/pathCrumbs.js'
-import { SECTION_KEY } from '../../../src/homeSections.js'
+import { sectionParam } from '../../../src/homeSections.js'
 import { canonicalSel } from '../../../src/scanSlug.js'
 
 export type OgKind = 'map' | 'diff' | 'series' | 'staged' | 'users' | 'user' | 'assignments'
 
-/** The home sections with a card of their own (`?section=<id>`), by kind: the diff, and size over time. */
+/** The home sections with a card of their own (`?v=d`, `?v=o`), by kind: the diff, and size over time. */
 export const KIND_SECTION: Partial<Record<OgKind, string>> = { diff: 'diff', series: 'over-time' }
 
 export interface PageView {
@@ -93,11 +93,11 @@ export function pageView(url: URL, site: string, root: readonly string[] = [], s
 function mapView(segs: string[], sp: URLSearchParams, site: string, root: readonly string[], lead: Record<string, string>): PageView {
   const tree = mountedSegs(root, segs)
   const path = tree.join('/')
-  const section = sp.get(SECTION_KEY)
+  const section = sectionParam(sp)
   const params: Record<string, string> = { ...lead, ...(path ? { path } : {}), ...pick(sp, section === KIND_SECTION.series ? SERIES_KEYS : MAP_KEYS) }
   const where = urlSegsOf(root, tree).join('/') || site
   const extras = [params.f ? `filter: ${params.f}` : null, params.o !== undefined ? `owner: ${params.o === '' ? 'unowned' : params.o === '*' ? 'owned' : params.o}` : null].filter(Boolean)
-  // The section in view (`?section=`: the home page's scroll-spy writes it, and share links carry it).
+  // The section in view (`?v=`, or a legacy `?section=`: the home page's scroll-spy writes it, share links carry it).
   if (section === KIND_SECTION.diff) {
     const dm = sp.get('dm')
     return { kind: 'diff', params: { ...params, ...(dm === 'max' ? { dm } : {}) }, title: [where, 'changes', ...extras].join(' · ') }
