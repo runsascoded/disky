@@ -3,7 +3,7 @@
  * session-log events are which kind, bursts, and the Slack / Discord renderings. No Workers or DOM types; the D1 and
  * sink I/O is `activity.ts`.
  */
-import { benignError, isErrorEvent, isFailedApi, type SlogEvent, summarize, TRUNC } from './sessionLogShape.js'
+import { benignError, isErrorEvent, isFailedApi, offlineFailure, type SlogEvent, summarize, TRUNC } from './sessionLogShape.js'
 
 export const NOTIFY = ['off', 'count', 'line'] as const
 export type Notify = typeof NOTIFY[number]
@@ -84,21 +84,6 @@ export function serverKind(method: string, path: string): string | null {
   if (path === '/api/digest-op') return 'digest'
   if (path.startsWith('/api/db') || path === '/api/admins' || path === '/api/session-log/switch' || path.startsWith('/api/activity/') || path === '/api/digest-settings') return 'admin'
   return 'write'
-}
-
-/** How late past a failed fetch its batch may arrive before the failure counts as the client's network, not ours. The
- *  logger flushes every 10 s, so a batch that took longer was held by a client that couldn't reach any host (its own
- *  upload failed too): a laptop closed mid-refresh, its errors delivered on wake. `navigator.onLine` stays true through
- *  most of these, so it alone can't say. */
-export const OFFLINE_LAG_MS = 60_000
-
-/** A failed fetch the client's network never carried (an `api` event with no status, not a cancellation), that no one
- *  saw fail: in a hidden tab, while the browser said it was offline, or reported `OFFLINE_LAG_MS` past it (`receivedMs`:
- *  when its batch arrived). Counted as a request, never as an error. */
-export function offlineFailure(e: SlogEvent, receivedMs?: number): boolean {
-  if (e.k !== 'api' || e.s !== 0 || e.err === 'abort') return false
-  const x = e as SlogEvent & { online?: unknown; visibility?: unknown }
-  return x.online === false || x.visibility === 'hidden' || (receivedMs !== undefined && receivedMs - e.t > OFFLINE_LAG_MS)
 }
 
 /** A session-log event's kind, or null (`dropped` markers). */
@@ -205,9 +190,8 @@ export function addPages(pages: Record<string, number>, more: Record<string, num
 export interface ClientError { ts: number; line: string; page: string | null }
 
 /** A batch's client events, per kind (the recorded kinds only), the paths viewed (by count, and in order), and its
- *  errors (when `error` is recorded). An error's page is the latest `view` / `nav` before it in the batch. */
-/** A batch's events counted by kind, its pages and trail, and its errors (`offlineFailure`s are requests, given
- *  `receivedMs`, when the batch arrived). */
+ *  errors (when `error` is recorded). An error's page is the latest `view` / `nav` before it in the batch;
+ *  the auth package's `offlineFailure`s count as requests (`receivedMs`: when the batch arrived). */
 export function tallyClient(events: readonly SlogEvent[], conf: KindsConf, receivedMs?: number): {
   counts: Record<string, number>; pages: Record<string, number>; trail: string[]; errors: ClientError[]
 } {
