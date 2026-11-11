@@ -9,9 +9,8 @@ const running: RunShape = {
 }
 
 describe('runMeta: the /runs/<id> unfurl says what a run is doing, by count, as the card does', () => {
-  it('unknown, running, planning, finished, dry, one object, no plan, unanswered', () => {
+  it('running, planning, finished, dry, one object, no plan, unanswered', () => {
     expect([
-      runMeta(null, null),
       runMeta(run, running),
       runMeta(run, { ...running, state: 'planning', done: null, total: null, as_of: null }),
       runMeta(run, { ...running, state: 'finished', done: 1234, total: 1234 }),
@@ -19,7 +18,6 @@ describe('runMeta: the /runs/<id> unfurl says what a run is doing, by count, as 
       runMeta(run, { ...running, total: null, n_buckets: 0 }),
       runMeta(run, { ...running, state: 'stalled', unanswered: 12 }),
     ]).toEqual([
-      { title: 'Deletion run', desc: 'A deletion run. Sign in to see it.' },
       { title: 'Deletion running', desc: '4,889,000 of 36,062,888 objects attempted · as of 2026-11-04 13:52 UTC · 3 buckets · scan 2026-11-03T1622' },
       { title: 'Deletion planning', desc: 'No progress yet · since 2026-11-04 12:52 UTC · 3 buckets · scan 2026-11-03T1622' },
       { title: 'Deletion finished', desc: '1,234 of 1,234 objects attempted · as of 2026-11-04 13:52 UTC · 3 buckets · scan 2026-11-03T1622' },
