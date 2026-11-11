@@ -8,6 +8,7 @@ WORKDIR /repo
 COPY pnpm-workspace.yaml package.json pnpm-lock.yaml ./
 COPY packages/treemap ./packages/treemap
 COPY packages/react ./packages/react
+COPY packages/pages-kit ./packages/pages-kit
 COPY site ./site
 RUN corepack enable && pnpm install --frozen-lockfile
 RUN cd site && pnpm build
