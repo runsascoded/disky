@@ -1,4 +1,5 @@
 import { useEffect } from 'react'
+import { useDocTitle } from './title'
 import { Link, useLocation, useParams } from 'react-router-dom'
 import { SiteNav } from './SiteNav'
 import { SiteKbd } from './SiteKbd'
@@ -27,7 +28,7 @@ export function RunPage() {
   const fmtBytes = (b: number) => fmtBytesPrecise(b, units, suffixB)
   const { hash } = useLocation()
   useEffect(() => { if (hash && run) requestAnimationFrame(() => document.getElementById(hash.slice(1))?.scrollIntoView()) }, [hash, run, view?.job?.job_id])
-  useEffect(() => { document.title = `Deletion run ${runLabel(id)}` }, [id])
+  useDocTitle(`Deletion run ${runLabel(id)}`, 'Staged')
   return <main className="staged-page run-page">
     <SiteNav />
     <p><Link to="/staged#runs">Staged deletions / runs</Link></p>
