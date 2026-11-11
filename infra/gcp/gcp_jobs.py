@@ -741,3 +741,72 @@ class BatchSubmitCron(RunJobCron):
             retry=retry,
             **kw,
         )
+
+
+class CronAlerts(ComponentResource):
+    """The backstop for a `BatchSubmitCron`'s failures its own script can't report, as Cloud Monitoring alert policies
+    to `channels` (notification channel ids): event-driven, no time windows.
+
+    - `<job> failed`: a Cloud Run execution of `job` ended failed (`run.googleapis.com/job/completed_execution_count`,
+      `result="failed"`): the container never started, ran out of memory, hit its timeout, or the script exited
+      nonzero (which also posts its own, fuller alert).
+    - `<trigger> couldn't start the job`: Cloud Scheduler logged a failed attempt to run it (its call to the job's
+      `:run`; it retries per its retry config, so each failed attempt is one log entry), at most one notification an hour.
+
+    Not covered: a trigger paused or deleted produces no event at all."""
+
+    TYPE = "disky:gcp:CronAlerts"
+
+    def __init__(self, name: str, *, project: str, job: str, trigger: str, channels: Sequence[pulumi.Input[str]], opts: ResourceOptions | None = None):
+        super().__init__(self.TYPE, name, None, opts)
+        M = gcp.monitoring
+        child = ResourceOptions(parent=self)
+        self.failed = M.AlertPolicy(
+            f"{name}-failed",
+            project=project,
+            display_name=f"{job} failed",
+            combiner="OR",
+            conditions=[M.AlertPolicyConditionArgs(
+                display_name="a failed execution",
+                condition_threshold=M.AlertPolicyConditionConditionThresholdArgs(
+                    filter=(f'resource.type = "cloud_run_job" AND resource.labels.job_name = "{job}" AND '
+                            'metric.type = "run.googleapis.com/job/completed_execution_count" AND metric.labels.result = "failed"'),
+                    comparison="COMPARISON_GT",
+                    threshold_value=0,
+                    duration="0s",
+                    aggregations=[M.AlertPolicyConditionConditionThresholdAggregationArgs(alignment_period="300s", per_series_aligner="ALIGN_DELTA")],
+                    trigger=M.AlertPolicyConditionConditionThresholdTriggerArgs(count=1),
+                ),
+            )],
+            documentation=M.AlertPolicyDocumentationArgs(
+                mime_type="text/markdown",
+                content=(f"A run of the Cloud Run job `{job}` failed, so today's Batch job may not exist. Its logs say why; "
+                         f"re-run it once fixed (a no-op if the job exists): `gcloud run jobs execute {job} --region <region> --project {project}`"),
+            ),
+            notification_channels=list(channels),
+            opts=child,
+        )
+        self.unstarted = M.AlertPolicy(
+            f"{name}-unstarted",
+            project=project,
+            display_name=f"{trigger} couldn't start {job}",
+            combiner="OR",
+            conditions=[M.AlertPolicyConditionArgs(
+                display_name="a failed Scheduler attempt",
+                condition_matched_log=M.AlertPolicyConditionConditionMatchedLogArgs(
+                    filter=f'resource.type = "cloud_scheduler_job" AND resource.labels.job_id = "{trigger}" AND severity >= ERROR',
+                ),
+            )],
+            alert_strategy=M.AlertPolicyAlertStrategyArgs(
+                notification_rate_limit=M.AlertPolicyAlertStrategyNotificationRateLimitArgs(period="3600s"),
+                auto_close="1800s",
+            ),
+            documentation=M.AlertPolicyDocumentationArgs(
+                mime_type="text/markdown",
+                content=f"Cloud Scheduler `{trigger}` failed to run the Cloud Run job `{job}` (after its retries, one entry each attempt).",
+            ),
+            notification_channels=list(channels),
+            opts=child,
+        )
+        self.register_outputs({})
+
