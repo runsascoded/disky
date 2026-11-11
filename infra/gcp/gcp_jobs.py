@@ -1009,6 +1009,14 @@ class MonitoringRelay(ComponentResource):
             labels={"topic": self.topic.id},
             opts=ResourceOptions(parent=self, depends_on=[self.subscription]),
         )
+        # Monitoring's notification agent (`MONITORING_AGENT`) isn't made by the project's first Pub/Sub channel (gcs,
+        # 2026-11-11: the grant below failed, "does not exist"): created explicitly, as the Pub/Sub agent is.
+        monitoring_agent = gcp.projects.ServiceIdentity(
+            f"{name}-monitoring-agent",
+            project=project,
+            service="monitoring.googleapis.com",
+            opts=child,
+        )
         number = gcp.organizations.get_project_output(project_id=project).number
         gcp.pubsub.TopicIAMMember(
             f"{name}-monitoring-publisher",
@@ -1016,7 +1024,7 @@ class MonitoringRelay(ComponentResource):
             topic=self.topic.name,
             role="roles/pubsub.publisher",
             member=number.apply(lambda n: "serviceAccount:" + MONITORING_AGENT.format(number=n)),
-            opts=ResourceOptions(parent=self, depends_on=[self.notification_channel]),
+            opts=ResourceOptions(parent=self, depends_on=[self.notification_channel, monitoring_agent]),
         )
         self.channel: pulumi.Output[str] = self.notification_channel.name
         self.register_outputs({"channel": self.channel, "topic": self.topic.id, "service": self.service.uri})
