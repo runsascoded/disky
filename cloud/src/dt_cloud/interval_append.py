@@ -1403,6 +1403,10 @@ def compact_cmd(bucket, gen, ranges_gen, scratch, policy, read_from, grace_s, jo
     print(json.dumps(doc, indent=1))
 
 
+#: A run's files its R2 copy holds (run-relative prefixes, `r2_publish`): its served sorts, what the site reads.
+RUN_R2 = ("served/",)
+
+
 @cli.command("promote")
 @option("-b", "--bucket", required=True, help="The store: a bucket name (gs://) or URL")
 @option("-O", "--owner-carry", is_flag=True, help="gcs: carry the priced owner rows to GEN first (`owner_carry`; needs the D1 env)")
@@ -1413,7 +1417,7 @@ def promote_cmd(bucket, owner_carry, to_r2, gen) -> None:
     (when it named the source), then with `-r` the R2 copy's. Refused unless GEN holds every scan its source does."""
     if (b := gs_bucket(bucket)) is None:
         raise SystemExit(f"interval store: promote moves a GCS bucket's pointers; {bucket!r} is not one")
-    print(json.dumps(ar.promote_gen(Store(f"gs://{b}"), PREFIX, gen, r2_bucket=b if to_r2 else None, carry=OwnerCarry() if owner_carry else None), indent=1))
+    print(json.dumps(ar.promote_gen(Store(f"gs://{b}"), PREFIX, gen, r2_bucket=b if to_r2 else None, served=RUN_R2, carry=OwnerCarry() if owner_carry else None), indent=1))
 
 
 @cli.command("compact-r2")
@@ -1445,7 +1449,7 @@ def r2_cmd(bucket, gen, ranges_gen, scratch, scan, manifest, workers) -> None:
         return
     if gs_bucket(bucket) is None:
         raise SystemExit(f"r2: copies from a whole GCS bucket, not {bucket}")
-    doc = ar.r2_publish(gs_bucket(bucket), f"{PREFIX}/{gen}", manifest or scan, served=("served/",), workers=workers)
+    doc = ar.r2_publish(gs_bucket(bucket), f"{PREFIX}/{gen}", manifest or scan, served=RUN_R2, workers=workers)
     pruned = ar.prune_folded(ar.r2_run_store(f"{PREFIX}/{gen}"), where=" r2")
     print(json.dumps({"gen": gen, "scan": scan, **doc, "prune": _summary(pruned)}))
 
