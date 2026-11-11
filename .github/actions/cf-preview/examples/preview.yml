@@ -1,7 +1,9 @@
 # Copy into a caller only after policy/config review and pin ACTION_SHA below.
 # This example targets main. Disky's default-branch controller needs its own four-target routing wrapper.
-# Mode: `/preview <mode>` (this run), else a `preview:<mode>` label, else `ui` (the PR's front end over
-# read-only production data). Only `ui` is implemented; `stack` and `pipeline` are refused at the gate.
+# Mode: `/preview <mode>` (this run), else a `preview:<mode>` label, else `full`: the PR's whole build (front end +
+# Functions) as the `pr-N` branch of the deployment's own Pages project, so it runs on that project's preview
+# environment (the dev stack's bindings and secrets) at https://pr-N.<project>.pages.dev. Only `full` is implemented;
+# `stack` and `pipeline` are refused at the gate. Approving a head runs its server code against the dev stack's data.
 name: PR preview
 on:
   pull_request_target:
@@ -15,7 +17,7 @@ on:
         required: true
         type: string
       mode:
-        description: ui | stack | pipeline; empty = the PR's preview:<mode> label, else ui
+        description: full | stack | pipeline; empty = the PR's preview:<mode> label, else full
         required: false
         type: string
 permissions:
@@ -58,18 +60,24 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
-      # `ui` publishes only the static build (the PR's Functions are never deployed in that mode).
+      # The PR's Functions are compiled here, into the artifact (`dist/_worker.js`), so the credentialed publisher never
+      # builds PR source, and the base checkout's `functions/` can't stand in for them. `VITE_BUILD_SHA` is what the
+      # publish probe reads back (`x-disky-build` on `/api/health`).
       - name: Caller-specific frozen build and tests
+        working-directory: site
         env:
           PREVIEW_URL: ${{ needs.gate.outputs.url }}
+          VITE_BUILD_SHA: ${{ needs.gate.outputs.sha }}
+          CLOUDFLARE_ENV: preview
         run: |
           pnpm install --frozen-lockfile
           pnpm build
+          pnpm exec wrangler pages functions build functions --outdir dist/_worker.js
           pnpm test
       - uses: actions/upload-artifact@v4
         with:
           name: preview-${{ needs.gate.outputs.sha }}
-          path: dist
+          path: site/dist
           include-hidden-files: true
   publish:
     needs: [gate, build]
@@ -88,6 +96,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
+      # The base checkout's `site/` is where the trusted Wrangler runs (the target's `working_directory`): its
+      # `wrangler.toml` `[env.preview]` is the deployment's preview environment, as on `dev`.
       - name: Install trusted deployment tools
         run: pnpm install --frozen-lockfile
       - uses: actions/download-artifact@v4
@@ -104,7 +114,6 @@ jobs:
           artifact: ${{ runner.temp }}/preview-artifact
           github-token: ${{ github.token }}
           deploy-token: ${{ secrets.CF_PREVIEW_DEPLOY_TOKEN }}
-          dns-token: ${{ secrets.CF_PREVIEW_DNS_TOKEN }}
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -131,7 +140,6 @@ jobs:
           config: .github/cf-preview.json
           github-token: ${{ github.token }}
           deploy-token: ${{ secrets.CF_PREVIEW_DEPLOY_TOKEN }}
-          dns-token: ${{ secrets.CF_PREVIEW_DNS_TOKEN }}
       - uses: actions/upload-artifact@v4
         if: always()
         with:
