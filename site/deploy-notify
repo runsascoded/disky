@@ -5,6 +5,7 @@
 # ///
 """Review a deployment receipt; send only with an explicit flag. Greens are run-length threaded, reds are top-level posts."""
 from getpass import getuser
+from collections.abc import Mapping
 from json import dumps, loads
 from os import environ
 from pathlib import Path
@@ -174,6 +175,12 @@ def load(path: Path) -> dict:
     return receipt(value)
 
 
+def run_url(env: Mapping[str, str]) -> str | None:
+    """The GitHub Actions run that recorded the notice (`GITHUB_SERVER_URL`/`GITHUB_REPOSITORY`/`GITHUB_RUN_ID`), else None."""
+    server, repo, run = (env.get(k) for k in ('GITHUB_SERVER_URL', 'GITHUB_REPOSITORY', 'GITHUB_RUN_ID'))
+    return f'{server}/{repo}/actions/runs/{run}' if server and repo and run else None
+
+
 @group()
 def main() -> None:
     """Record, review and explicitly send site deployment notices. Rendering never posts."""
@@ -237,7 +244,7 @@ def record_cmd(
         'host': var.get(f'{mode.upper()}_HOST', parsed['name'] + '.pages.dev'), 'verified': verified,
         'dirty': dirty == 'true', 'actor': actor, 'actor_source': 'github' if environ.get('GITHUB_ACTOR') else 'local',
         'attempt': str(uuid4()), 'cloudflare_deployment': urlsplit(cf_url).hostname.split('.')[0] if cf_url else None,
-        'cloudflare_url': cf_url, 'run_url': None,
+        'cloudflare_url': cf_url, 'run_url': run_url(environ),
     })
     output.write_text(dumps(r, indent=2) + '\n')
 

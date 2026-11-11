@@ -145,6 +145,7 @@ jobs:
           control/scripts/oa-release plan -e "$GITHUB_EVENT_PATH" -n "$GITHUB_EVENT_NAME" -r "$GITHUB_REPOSITORY" -o plan.json
           control/scripts/oa-release begin -p plan.json -s seal.json -o receipt.json source
       - name: Upload the sealed build to Cloudflare
+        id: upload
         working-directory: source/site
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CF_PAGES_DEPLOY_TOKEN }}
@@ -152,8 +153,11 @@ jobs:
           PROJECT: ${{ needs.plan.outputs.project }}
           PAGES_BRANCH: ${{ needs.plan.outputs.pages_branch }}
           SOURCE_SHA: ${{ needs.plan.outputs.sha }}
-        run: pnpm exec wrangler pages deploy dist --project-name "$PROJECT" --branch "$PAGES_BRANCH" --commit-hash "$SOURCE_SHA" --commit-dirty=false
+        run: |
+          set -o pipefail
+          pnpm exec wrangler pages deploy dist --project-name "$PROJECT" --branch "$PAGES_BRANCH" --commit-hash "$SOURCE_SHA" --commit-dirty=false 2>&1 | tee "$RUNNER_TEMP/upload.log"
       - name: Verify CF readback and live build; record success
+        id: verify
         env:
           GH_TOKEN: ${{ github.token }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CF_PAGES_DEPLOY_TOKEN }}
@@ -164,6 +168,28 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: if [ -f receipt.json ]; then control/scripts/oa-release finish -f receipt.json; fi
+      # Slack notice (`site/deploy-notify`: greens threaded per deployment, reds top-level), only where the environment
+      # sets `DEPLOY_NOTIFICATIONS_ENABLED=1` with its bot token and channel. A notice failure never fails the release.
+      - name: Deploy notice
+        if: always() && vars.DEPLOY_NOTIFICATIONS_ENABLED == '1'
+        continue-on-error: true
+        env:
+          DEPLOY_NOTIFICATIONS_ENABLED: ${{ vars.DEPLOY_NOTIFICATIONS_ENABLED }}
+          SLACK_DEPLOY_BOT_TOKEN: ${{ secrets.SLACK_DEPLOY_BOT_TOKEN }}
+          SLACK_DEPLOY_CHANNEL: ${{ vars.SLACK_DEPLOY_CHANNEL }}
+          VITE_SOURCE_REF: ${{ needs.plan.outputs.source_branch }}
+          MODE: ${{ needs.plan.outputs.mode }}
+          SOURCE_SHA: ${{ needs.plan.outputs.sha }}
+          JOB_STATUS: ${{ job.status }}
+          UPLOAD: ${{ steps.upload.outcome }}
+          VERIFY: ${{ steps.verify.outcome }}
+        run: |
+          case "$JOB_STATUS" in success) status=success ;; cancelled) status=cancelled ;; *) status=failure ;; esac
+          if [ "$UPLOAD" != success ]; then stage=upload; elif [ "$VERIFY" != success ]; then stage=verify; else stage=finish; fi
+          verified=(); [ "$VERIFY" = success ] && verified=(-v)
+          control/site/deploy-notify record -c source/site/wrangler.toml -e "$MODE" -g "$SOURCE_SHA" -l "$RUNNER_TEMP/upload.log" \
+            -o notice.json -s "$status" -t "$stage" -u false "${verified[@]}"
+          control/site/deploy-notify send -x notice.json
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -172,4 +198,5 @@ jobs:
             plan.json
             seal.json
             receipt.json
+            notice.json
           retention-days: 90

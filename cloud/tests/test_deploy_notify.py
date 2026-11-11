@@ -288,3 +288,13 @@ if len(sys.argv) == 1: print('{SHA}')
     }
     assert result.stderr == ('Error: SLACK_DEPLOY_BOT_TOKEN must be a Slack bot token\n'
                              'WARN: deploy notification failed; original deployment exit status preserved\n' if enabled else '')
+
+
+@pytest.mark.parametrize('env, url', [
+    ({'GITHUB_SERVER_URL': 'https://github.com', 'GITHUB_REPOSITORY': 'Open-Athena/disky', 'GITHUB_RUN_ID': '123'},
+     'https://github.com/Open-Athena/disky/actions/runs/123'),
+    ({'GITHUB_SERVER_URL': 'https://github.com', 'GITHUB_REPOSITORY': 'Open-Athena/disky'}, None),
+    ({}, None),
+])
+def test_run_url_names_the_recording_actions_run(env, url):
+    assert N.run_url(env) == url
