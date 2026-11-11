@@ -10,6 +10,12 @@ runtime:
   options:
     toolchain: uv
 config:
+  gcs-usage-gcp:alertChannel:
+    description: "A console-made Monitoring notification channel id for the daily scan's `CronAlerts` (optional, beside or instead of alertRelay)"
+    default: ""
+  gcs-usage-gcp:alertRelay:
+    description: "true: create the `MonitoringRelay` (Monitoring → Pub/Sub → Cloud Run → the job's Slack bot) and point `CronAlerts` at it"
+    default: false
   gcs-usage-gcp:adopting:
     description: "Import the live resources each component marks `existing` (first `up` only; then false)"
   gcs-usage-gcp:batchDeleteEdition:

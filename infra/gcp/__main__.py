@@ -11,7 +11,7 @@ from pathlib import Path
 import pulumi
 import pulumi_gcp as gcp
 
-from gcp_jobs import Adopt, BatchCron, BatchSubmitCron, CronAlerts, DeploymentImages, JobAccount, RunJobCron, Secrets, StorageBatchDelete, cost_labels, grant_bucket, labeled_provider
+from gcp_jobs import Adopt, BatchCron, BatchSubmitCron, CronAlerts, DeploymentImages, JobAccount, MonitoringRelay, RunJobCron, Secrets, StorageBatchDelete, cost_labels, grant_bucket, labeled_provider
 from task_logs import TaskLogBucket, TaskLogView
 
 cfg = pulumi.Config()
@@ -166,10 +166,28 @@ daily = BatchSubmitCron(
     opts=pulumi.ResourceOptions(depends_on=[secrets, static_secrets, snapshot_secret]),
 )
 # The backstop for what the submitter's own alert can't report (it never started, or the trigger couldn't run it), to
-# the Monitoring notification channel `alertChannel` names (#gcs-admin's Slack channel, made in the console: Slack
-# channels need its OAuth). Unset: no policies.
-if alert_channel := cfg.get("alertChannel"):
-    CronAlerts(DAILY, project=project, job="gcs-usage-snapshot-submit", trigger=DAILY, channels=[alert_channel])
+# #gcs-admin through either channel, or both while one is verified against the other:
+# - `alertRelay: true`: the relay (`MonitoringRelay`, specs/monitoring-relay.md): Monitoring → Pub/Sub → a Cloud Run
+#   service on the job image posting with the job's own Slack bot, all in this stack;
+# - `alertChannel`: a Monitoring notification channel's id, made in the console (Monitoring's Slack app; its OAuth is
+#   a console step).
+# Neither: no policies.
+alert_channels = [c for c in [cfg.get("alertChannel")] if c]
+if cfg.get_bool("alertRelay"):
+    relay = MonitoringRelay(
+        "gcs-alert-relay",
+        project=project,
+        region=region,
+        image=f"{region}-docker.pkg.dev/{project}/cloud-run-source-deploy/gcs-usage-snapshot:latest",
+        account_id="gcs-usage-alert-relay",
+        env={"SLACK_ALERT_CHANNEL": "C0C579HNRFB"},  # #gcs-admin
+        secret_env={"SLACK_BOT_TOKEN": "gcs-alert-slack-bot-token"},
+        opts=pulumi.ResourceOptions(depends_on=[secrets]),
+    )
+    alert_channels.append(relay.channel)
+    pulumi.export("alert_relay_channel", relay.channel)
+if alert_channels:
+    CronAlerts(DAILY, project=project, job="gcs-usage-snapshot-submit", trigger=DAILY, channels=alert_channels)
 
 # The access-log poller (specs/access-log-freshness.md §A): GCS delivers each hour's usage CSVs ~9–16 h late, so
 # ingest them hourly as they land instead of in the daily scan; the scan's `index` reads `access/agg` as it stands.
