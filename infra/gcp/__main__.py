@@ -11,7 +11,7 @@ from pathlib import Path
 import pulumi
 import pulumi_gcp as gcp
 
-from gcp_jobs import Adopt, BatchCron, DeploymentImages, JobAccount, RunJobCron, Secrets, StorageBatchDelete, cost_labels, grant_bucket, labeled_provider
+from gcp_jobs import Adopt, BatchCron, BatchSubmitCron, DeploymentImages, JobAccount, RunJobCron, Secrets, StorageBatchDelete, cost_labels, grant_bucket, labeled_provider
 from task_logs import TaskLogBucket, TaskLogView
 
 cfg = pulumi.Config()
@@ -140,16 +140,30 @@ snapshot_secret = Secrets(
     adopt=adopt,
 )
 
-daily = BatchCron(
-    "gcs-usage-snapshot-daily",
+# The daily scan: Cloud Scheduler → the Cloud Run job `gcs-usage-snapshot-submit` → `job/scan-submit.sh`, which submits
+# `job/batch-submit.sh`'s PIN spec as `gcs-usage-snapshot-YYYYMMDD` (a 409 for that name = already submitted), retries
+# transient failures for 30 min, and posts to #gcs-admin if it still can't. Scheduler posting the spec to Batch itself
+# (`BatchCron`) can do neither: one POST, no job id, so a 502 is a silent missed scan (2026-11-08) and a retry a possible
+# second one. The trigger keeps its name, adopted from its `BatchCron` (`cron_aliases`) and updated in place.
+DAILY = "gcs-usage-snapshot-daily"
+daily = BatchSubmitCron(
+    DAILY,
     project=project,
     region=region,
+    job="gcs-usage-snapshot-submit",
+    trigger=DAILY,
     schedule="0 7 * * *",
     submitter=job_dir / "batch-submit.sh",
-    sa_email=job.email,
+    script=job_dir / "scan-submit.sh",
+    sa_email=job.email_literal,
+    image=f"{region}-docker.pkg.dev/{project}/cloud-run-source-deploy/gcs-usage-snapshot:latest",
+    env={"SLACK_ALERT_CHANNEL": "C0C579HNRFB"},  # #gcs-admin
+    secret_env={"SLACK_BOT_TOKEN": "gcs-alert-slack-bot-token"},
+    labels={"component": "scan-submit"},
+    description="The daily scan: runs the submitter job, which names the day's Batch job, retries, and alerts",
+    cron_aliases=[f"urn:pulumi:{STACK}::{pulumi.get_project()}::disky:gcp:BatchCron$gcp:cloudscheduler/job:Job::{DAILY}"],
     adopt=adopt,
-    existing=True,
-    depends_on=[secrets, static_secrets, snapshot_secret],
+    opts=pulumi.ResourceOptions(depends_on=[secrets, static_secrets, snapshot_secret]),
 )
 
 # The access-log poller (specs/access-log-freshness.md §A): GCS delivers each hour's usage CSVs ~9–16 h late, so
@@ -321,4 +335,4 @@ if batch_delete_edition != "DISABLED":
     pulumi.export("storage_batch_service_agent", batch_delete.agent.email)
 
 pulumi.export("job_account", job.email)
-pulumi.export("crons", [daily.job.name, meta.job.name, sheet_sync.cron.name])
+pulumi.export("crons", [daily.cron.name, meta.job.name, sheet_sync.cron.name])

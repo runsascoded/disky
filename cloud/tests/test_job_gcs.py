@@ -206,3 +206,65 @@ def test_cron_is_the_nextflow_head():
         ["CLOUDFLARE_API_TOKEN", "SLACK_BOT_TOKEN"], "schedule",
         {"machineType": "e2-standard-2", "bootDisk": {"type": "pd-balanced", "sizeGb": "30"}},
     )
+
+
+def test_cron_spec_survives_the_submitters_labelling():
+    """The daily submitter (`job/scan-submit.sh`) posts the PIN spec through `dt-cloud batch submit -c scan`, whose
+    labelling (`label_batch_spec`) must leave the spec as the stack rendered it (and `pulumi preview` showed it)."""
+    from dt_cloud.cost_labels import label_batch_spec
+
+    env = {"PATH": environ["PATH"], "DRY": "1", "PIN": "1", "DISKY_LABELS": "app=disky,deployment=gcs"}
+    spec = loads(run(["bash", "job/batch-submit.sh"], cwd=ROOT_DIR, env=env, check=True, capture_output=True, text=True).stdout)
+    assert label_batch_spec(spec, "scan", {"DISKY_LABELS": env["DISKY_LABELS"]}) == spec
+
+
+def scan_submit(tmp_path: Path, dt_rc: int, dt_err: str) -> tuple:
+    """Run `job/scan-submit.sh` as its Cloud Run job does (`bash -c` its text) against fake `dt-cloud` (`dt_err` on
+    stderr, exit `dt_rc`), `disk-tree` and `date`; returns (exit code, stdout, dt-cloud's argv, the spec file it was
+    handed, disk-tree's argv or None, disk-tree's `$DISKY_NOTIFY` line or None)."""
+    bin_, rec = tmp_path / "bin", tmp_path / "rec"
+    bin_.mkdir()
+    rec.mkdir()
+    (tmp_path / "dt-err").write_text(dt_err)
+    fakes = {
+        "dt-cloud": f'printf "%s\\0" "$@" > {rec}/dt; for a; do last=$a; done; cp "$last" {rec}/spec\n'
+                    f'cat {tmp_path}/dt-err >&2\nif [ {dt_rc} -eq 0 ]; then echo gcs-usage-snapshot-20261108; fi\nexit {dt_rc}\n',
+        "disk-tree": f'printf "%s\\0" "$@" > {rec}/notify; echo "DISKY_NOTIFY=$DISKY_NOTIFY" > {rec}/notify-env\n',
+        "date": "echo gcs-usage-snapshot-20261108\n",
+    }
+    for name, body in fakes.items():
+        (bin_ / name).write_text("#!/usr/bin/env bash\n" + body)
+        (bin_ / name).chmod(0o755)
+    env = {"PATH": f"{bin_}:{environ['PATH']}", "BATCH_SPEC": '{"labels": {"component": "scan"}}', "CLOUD_RUN_EXECUTION": "gcs-usage-snapshot-submit-x7k2p"}
+    r = run(["bash", "-c", (ROOT_DIR / "job/scan-submit.sh").read_text()], env=env, capture_output=True, text=True)
+
+    def recorded(name: str) -> str | None:
+        return (rec / name).read_text() if (rec / name).exists() else None
+
+    argv = lambda name: None if (text := recorded(name)) is None else text.split("\0")[:-1]  # noqa: E731
+    return r.returncode, r.stdout, argv("dt"), recorded("spec"), argv("notify"), recorded("notify-env")
+
+
+DT_ARGS = ["batch", "submit", "-c", "scan", "-p", "oa-internal-450019", "-L", "us-central1", "-t", "-e", "-r", "1800",
+           "gcs-usage-snapshot-%Y%m%d"]
+
+
+def test_scan_submit_names_the_day_and_alerts_nobody_on_success(tmp_path):
+    exists = "note: Batch job gcs-usage-snapshot-20261108 already exists: counted as submitted"
+    rc, out, dt, spec, notify, _ = scan_submit(tmp_path, 0, exists + "\n")
+    assert (rc, dt[:-1], spec, notify) == (0, DT_ARGS, '{"labels": {"component": "scan"}}', None)
+    assert out.splitlines() == [exists, "gcs-usage-snapshot-20261108"]
+
+
+def test_scan_submit_posts_to_gcs_admin_when_the_submit_gives_up(tmp_path):
+    failed = "Batch job gcs-usage-snapshot-20261108: submit failed 12 times over 1800s; the last: HTTP 502"
+    retrying = "note: Batch job gcs-usage-snapshot-20261108: attempt 11 failed (HTTP 502); retrying in 300s"
+    rc, _, dt, _, notify, notify_env = scan_submit(tmp_path, 1, f"{retrying}\n{failed}\n")
+    logs = "https://console.cloud.google.com/run/jobs/executions/details/us-central1/gcs-usage-snapshot-submit-x7k2p/logs?project=oa-internal-450019"
+    assert (rc, dt[:-1], notify_env) == (1, DT_ARGS, "DISKY_NOTIFY=slack\n")
+    assert notify == [
+        "notify", "-t", "gcs daily scan: not submitted", "-u", logs, "-l", "submitter logs",
+        f"No scan today: Batch job gcs-usage-snapshot-20261108 was not created (exit 1). {failed}\n"
+        "Re-run once Batch answers (a no-op if the job exists): "
+        "`gcloud run jobs execute gcs-usage-snapshot-submit --region us-central1 --project oa-internal-450019`",
+    ]

@@ -420,9 +420,15 @@ stay behind the site's auth.
 
 `job/` — daily snapshot pipeline on **GCP Batch** (`run.sh` entrypoint,
 `batch-submit.sh`, `build.sh` → Cloud Build image). Cloud Scheduler cron
-`gcs-usage-snapshot-daily` 07:00 UTC runs the `:latest` image built from this
-branch (live in GCP, body edited in place, never regenerated). A rebuild is how
-`job/` or pipeline changes reach prod.
+`gcs-usage-snapshot-daily` 07:00 UTC runs the Cloud Run job
+`gcs-usage-snapshot-submit` (infra/gcp `BatchSubmitCron`), whose
+`job/scan-submit.sh` submits `batch-submit.sh`'s PIN spec (rendered at
+`pulumi up`) as `gcs-usage-snapshot-YYYYMMDD`: a 409 for that name is
+"already submitted", so Scheduler's retries and a hand re-run
+(`gcloud run jobs execute gcs-usage-snapshot-submit --region us-central1`) never
+start a second scan that day; transient failures retry for 30 min, then it
+posts to #gcs-admin. The Batch job runs the `:latest` image built from this
+branch. A rebuild is how `job/` or pipeline changes reach prod.
 
 `build.sh` images the checkout it lives in, stamped with its `git rev-parse HEAD`
 and dirty state (`dt-cloud image-sha` reads it back). From a worktree, run that
