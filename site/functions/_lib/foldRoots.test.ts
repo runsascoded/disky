@@ -1,7 +1,7 @@
 // A match-roots answer's forest as a view holds it: the nodes it can use, whatever the number of roots (`foldRoots`).
 import { describe, expect, it } from 'vitest'
 import { HELD_BYTES } from './shared.js'
-import { foldPhase1, type FoldOpts, foldRoots, MATCH_LIST_CAP, matchLists, nestRollup, tooBroadToDiff } from './view.js'
+import { dirOrder, foldPhase1, type FoldOpts, foldRoots, MATCH_LIST_CAP, matchLists, nestRollup, tooBroadToDiff } from './view.js'
 import type { Hit } from './staticFilter.js'
 
 const A = '2026-10-01T0700', B = '2026-10-02T0700', C = '2026-10-03T0700'
@@ -127,7 +127,8 @@ describe('foldPhase1', () => {
     mine: [...m.p1.mine].map(([p, a]) => [p, a.b, a.o]),
     nb: [...m.forest!.nb],
     sums: [...m.forest!.sums].map(([p, a]) => [p, a.b, a.o]),
-    kids: [...m.forest!.kids!],
+    // Read by key only (`kids.get`): its order is the walk's, not part of the answer.
+    kids: [...m.forest!.kids!].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)),
     matched: m.forest!.matched.map(x => [x.path, x.b]),
     total: [m.forest!.total.b, m.forest!.total.o],
     nRoots: m.forest!.nRoots,
@@ -141,7 +142,7 @@ describe('foldPhase1', () => {
       mine: [['b/x/y/ckpt-1', 500, 1]],
       nb: [['b/x/y/ckpt-1', 500], ['b/x/y', 510], ['b/x', 510]],
       sums: [['b/x/y', 510, 2], ['b/x', 510, 2]],
-      kids: [['b/x/y', 2], ['b/x', 1], ['b', 2]],
+      kids: [['b', 2], ['b/x', 1], ['b/x/y', 2]],
       matched: [['b/x/y/ckpt-1', 500], ['b/x/y/ckpt-2', 10], ['b/w/v/ckpt-3', 6], ['b/w/v/ckpt-4', 4]],
       total: [520, 4],
       nRoots: 4,
@@ -158,7 +159,32 @@ describe('foldPhase1', () => {
     expect([s.roots, s.nb.length, s.sums.length, s.matched.length, s.nRoots, s.union]).toEqual([
       ['b/big/ckpt'], 2, 1, 1 + MATCH_LIST_CAP, 5001, { n: 5001, b: 105_000, o: 5001 },
     ])
-    expect(s.kids).toEqual([['b/big', 1], ['b', 51]])
+    expect(s.kids).toEqual([['b', 51], ['b/big', 1]])
+  })
+
+  it('`dirOrder`: a path just before its descendants, which follow it in one run (plain order puts `b/x.y` among them)', () => {
+    const ps = ['b/x/z', 'b/x.y', 'b/x', 'b/w', 'b/x/a.b', 'b/x/a', 'b/x/a/c', 'b', 'b/x/a!']
+    expect([...ps].sort(dirOrder)).toEqual(['b', 'b/w', 'b/x.y', 'b/x', 'b/x/a!', 'b/x/a.b', 'b/x/a', 'b/x/a/c', 'b/x/z'])
+    expect([dirOrder('b/x', 'b/x'), dirOrder('b/x', 'b/x/a'), dirOrder('b/x/a', 'b/x'), dirOrder('b/x.y', 'b/x'), dirOrder('b/x', 'b/x.y')]).toEqual([0, -1, 1, -1, 1])
+  })
+
+  it('a root under another root, and a sibling whose name goes on past it with a char below `/`: one node each, sums exact', () => {
+    // `b/x` is a root and the parent of `b/x/z/ckpt`'s chain; `b/x.y/ckpt` sorts between them as plain strings. Sizes
+    // near 2^51: their sums (below 2^53) are exact.
+    const big = 2 ** 51
+    const hs = [hit('b/x/z/ckpt', big + 5), hit('b/x', big + 100), hit('b/x.y/ckpt', 7), hit('b/x/z/ckpt', 3, A, B)]
+    const m = foldPhase1('b', 1, hs, opts({ date: A, other: A, to: A, T: 1, budget: 100 }))
+    expect([shape(m), m.forest!.nodes]).toEqual([{
+      roots: ['b/x', 'b/x.y/ckpt', 'b/x/z/ckpt'],
+      mine: [['b/x', 2 * big + 108, 3], ['b/x.y/ckpt', 7, 1], ['b/x/z/ckpt', big + 8, 2]],
+      nb: [['b/x', 2 * big + 108], ['b/x.y/ckpt', 7], ['b/x/z/ckpt', big + 8], ['b/x.y', 7], ['b/x/z', big + 8]],
+      sums: [['b/x.y', 7, 1], ['b/x/z', big + 8, 2], ['b/x', 2 * big + 108, 3]],
+      kids: [['b', 2], ['b/x', 1], ['b/x.y', 1], ['b/x/z', 1]],
+      matched: [['b/x', 2 * big + 108], ['b/x/z/ckpt', big + 8], ['b/x.y/ckpt', 7]],
+      total: [2 * big + 115, 4],
+      nRoots: 3,
+      union: { n: 3, b: 3 * big + 123, o: 6 },
+    }, 5])
   })
 
   it("a view's (no other scan: `other` = `to` = `date`) holds the same bound, and lists what the whole list would", () => {

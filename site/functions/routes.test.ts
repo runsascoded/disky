@@ -102,6 +102,15 @@ it('private anonymous unfurls bypass route handlers that read protected metadata
   expect([result === generic, next.mock.calls]).toEqual([true, []])
 })
 
+it('an unfurl failure never breaks the page: the route answers, as it does without one', async () => {
+  const page = html()
+  anonymousPage.mockRejectedValueOnce(new Error('credential read failed'))
+  stampPage.mockRejectedValueOnce(new Error('stamp failed'))
+  const next = vi.fn(async () => page)
+  const result = await onRequest({ request: new Request('https://cw.example/marin-a'), env: {} as never, next })
+  expect([result === page, next.mock.calls.length]).toEqual([true, 1])
+})
+
 describe('every response names the build serving it (`x-disky-build: <sha> <time>`)', () => {
   it('the header is `<sha> <iso time>`, from the generated build module', () => {
     expect([buildId(), /^[0-9a-f]{40}(-dirty)?$|^unknown$/.test(BUILD.sha), /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/.test(BUILD.time)]).toEqual([`${BUILD.sha} ${BUILD.time}`, true, true])

@@ -3,8 +3,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } fr
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
-  PROTOCOL, authorize, previewPlan, publishPages, publishWorker, requireThat,
-  retirePages, retireWorker, validateArtifact, wranglerUpload,
+  MODES, PROTOCOL, authorize, modePlan, publishUi, requireImplemented, requireThat, retireUi, selectMode, uiSettings, wranglerUpload,
 } from './preview.mjs'
 
 const input = name => process.env[`PREVIEW_${name.toUpperCase()}`] || ''
@@ -25,15 +24,21 @@ export function apiClient(origin, tokenForPath, fetcher = fetch) {
   }
 }
 
+const COMMAND = new RegExp(`^/preview(?:\\s+(${MODES.join('|')}))?(?:\\s+([0-9a-f]{40}))?$`, 'i')
+
+/** `/preview [<mode>] [<full head sha>]` on a PR, a dispatch (`pr`, optional `mode`), or a PR event (its mode from labels). */
 export function eventRequest(event, eventName, actor) {
   if (eventName === 'issue_comment') {
-    const command = event.comment.body.trim().match(/^\/preview(?:\s+([0-9a-f]{40}))?$/i)
+    const command = event.comment.body.trim().match(COMMAND)
     requireThat(event.issue.pull_request && command, 'Not a preview command on a PR')
-    return { number: event.issue.number, requestedSha: command[1]?.toLowerCase(), actor, manual: true }
+    return { number: event.issue.number, mode: command[1]?.toLowerCase(), requestedSha: command[2]?.toLowerCase(), actor, manual: true }
   }
   requireThat(['pull_request_target', 'pull_request', 'workflow_dispatch'].includes(eventName), 'Unsupported preview event')
-  return { number: Number(event.pull_request?.number ?? event.inputs?.pr), actor, manual: eventName === 'workflow_dispatch' }
+  const mode = eventName === 'workflow_dispatch' && event.inputs?.mode ? event.inputs.mode : undefined
+  return { number: Number(event.pull_request?.number ?? event.inputs?.pr), mode, actor, manual: eventName === 'workflow_dispatch' }
 }
+
+const MODE_SUMMARY = { ui: 'this PR’s front end over production data, read-only' }
 
 async function record(github, plan, receipt, state, runUrl) {
   const env = `preview/${plan.target}/pr-${plan.pr}`
@@ -49,7 +54,9 @@ async function record(github, plan, receipt, state, runUrl) {
 
 async function comment(github, plan, receipt, runUrl) {
   const marker = `<!-- ${PROTOCOL}:${plan.target} -->`
-  const body = receipt.retired ? `${marker}\nPreview retired after PR closure. [Cleanup receipt](${runUrl}).` : `${marker}\nPreview of \`${plan.sha}\`: ${receipt.url}\n\n[Build and deployment](${runUrl}). Preview runtime data/bindings follow this repository's preview policy.`
+  const body = receipt.retired
+    ? `${marker}\nPreview retired after PR closure. [Cleanup receipt](${runUrl}).`
+    : `${marker}\nPreview (\`${plan.mode}\`: ${MODE_SUMMARY[plan.mode]}) of \`${plan.sha}\`: ${receipt.url}\n\n[Build and deployment](${runUrl}). Select another mode with a \`preview:<mode>\` label or \`/preview <mode>\`.`
   const comments = []
   for (let page = 1; page <= 100; page++) {
     const batch = await github('GET', `/repos/${plan.repository}/issues/${plan.pr}/comments?per_page=100&page=${page}`)
@@ -111,24 +118,29 @@ export async function main() {
   const pr = await github('GET', `/repos/${config.repository}/pulls/${request.number}`)
   const target = input('target') || pr.base.ref
   const sha = input('sha') || request.requestedSha || pr.head.sha
-  const plan = previewPlan(config, target, request.number, sha)
-  requireThat(!request.requestedSha || request.requestedSha === sha, 'Comment approval and requested SHA differ')
   const operation = input('operation')
   requireThat(['gate', 'publish', 'retire'].includes(operation), 'Unknown preview operation')
+  // Retire removes every implemented mode's resources (today: `ui`), whatever the labels say now. Publish takes the
+  // mode gate chose (`mode` input), so a label changed in between cannot switch it.
+  const selection = operation === 'retire' ? { mode: 'ui', source: 'retire' }
+    : input('mode') ? { mode: input('mode'), source: 'gate' }
+      : selectMode({ requested: request.mode, labels: pr.labels.map(label => label.name) })
+  requireImplemented(selection.mode)
+  const plan = modePlan(config, target, request.number, sha, selection.mode)
+  requireThat(!request.requestedSha || request.requestedSha === sha, 'Comment approval and requested SHA differ')
   const authorized = await authorize({ github, repository: plan.repository, target, number: request.number, sha,
     actor: request.actor, manual: request.manual, closed: operation === 'retire' })
   const output = (key, value) => {
     if (process.env.GITHUB_OUTPUT) appendFileSync(process.env.GITHUB_OUTPUT, `${key}=${value}\n`)
   }
-  output('sha', plan.sha); output('pr', plan.pr); output('target', target)
+  output('sha', plan.sha); output('pr', plan.pr); output('target', target); output('mode', plan.mode)
   if (authorized.base.sha) output('base_sha', authorized.base.sha)
   output('url', `https://${plan.hostname}`)
-  if (operation === 'gate') { console.log(JSON.stringify(plan, null, 2)); return }
+  if (operation === 'gate') { console.log(JSON.stringify({ ...plan, mode_source: selection.source }, null, 2)); return }
   requireThat(input('deploy_token'), 'Missing provider deployment token')
-  if (plan.provider === 'pages') requireThat(input('dns_token'), 'Pages custom hostnames need a separate DNS token')
+  requireThat(input('dns_token'), 'Pages custom hostnames need a separate DNS token')
   const cfApi = apiClient('https://api.cloudflare.com/client/v4', path => path.startsWith('/zones/') ? input('dns_token') : input('deploy_token'))
-  const selected = config.targets[target]
-  if (operation === 'publish') revisionProbe(selected.verification)
+  const { target: selected, layer } = uiSettings(config.targets[target])
   const workDir = resolve(input('work_directory') || `${process.env.RUNNER_TEMP || 'tmp'}/cf-preview-${request.number}`)
   mkdirSync(workDir, { recursive: true })
   const receiptPath = joinReceipt(workDir)
@@ -147,17 +159,14 @@ export async function main() {
   let receipt
   try {
   if (operation === 'retire') {
-    receipt = await (plan.provider === 'pages' ? retirePages : retireWorker)({ cf, plan })
+    receipt = await retireUi({ cf, plan })
   } else {
     requireThat(input('artifact'), 'Missing built artifact path')
     const artifact = resolve(input('artifact'))
     requireThat(existsSync(artifact), 'Missing built artifact')
-    validateArtifact(artifact)
-    const upload = wranglerUpload(selected.wrangler, { artifact, cwd: resolve(dirname(configPath), selected.working_directory || '.'),
-      token: input('deploy_token'), account: plan.account })
-    receipt = plan.provider === 'pages'
-      ? await publishPages({ cf, plan, upload })
-      : await publishWorker({ cf, plan, upload, artifact, workDir, template: selected.worker_template })
+    const cwd = resolve(dirname(configPath), selected.working_directory || '.')
+    const uploader = staging => wranglerUpload(selected.wrangler, { artifact: staging, cwd, token: input('deploy_token'), account: plan.account })
+    receipt = await publishUi({ cf, plan, layer, artifact, workDir, cwd, uploader })
     // A pushed head during upload must not be advertised as the current PR preview.
     await authorize({ github, repository: plan.repository, target, number: request.number, sha,
       actor: request.actor, manual: request.manual })

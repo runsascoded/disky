@@ -379,6 +379,11 @@ describe('buildView on a store generation', () => {
     ] }))
   })
 
+  it('a view whose children are all under the threshold: the folder as one `(other)`, never an empty tree', async () => {
+    const v = await buildView(env, { ...base, date: V2, path: 'bk/flat', threshold: 64 * KiB, smallRows: 4096 })
+    expect([v.nodes, v.tree]).toEqual([0, node('flat', 'dir', 32767500, 8000, { c: [node('(other)', 'dir', 32767500, 8000, { f: 8000 })] })])
+  })
+
   it('ignores a coarse pointer an earlier v1 generation left on a store date', async () => {
     const want = await buildView(env, { ...base, date: V2, path: '', threshold: 32 * KiB, smallRows: 4096 })
     const v = await buildView(env, { ...base, date: V2_STALE, path: '', threshold: 32 * KiB, smallRows: 4096 })

@@ -563,7 +563,8 @@ def _access_r2_check(p: ScanProfile) -> list[str]:
     return ["options.access-r2.state: required (the collector archive's `state.json`, e.g. `r2://<archive>/state.json`)"]
 
 
-@step("access-r2", core=False, stage="pre", soft=True, options={"state": str, "out": str, "endpoint": str}, requires=_access_r2_check,
+@step("access-r2", core=False, stage="pre", soft=True, options={"state": str, "out": str, "endpoint": str, "checkpoint": str,
+                                                              "verify": bool, "mem": str, "threads": int}, requires=_access_r2_check,
       converges=True, leaves="this scan's read recency is as of the previous aggregate")
 def access_r2(ctx: Ctx, arg: str | None) -> None:
     """The R2 access collector's read aggregates → one layer-2a parquet for `index` (`options.index.access`), beside
@@ -572,15 +573,25 @@ def access_r2(ctx: Ctx, arg: str | None) -> None:
     `access/r2/agg.parquet`) rather than adding a shard. No reads yet, or a failure: the earlier aggregate stays (valid as
     of its scan) and `index` runs with it; a later run's aggregate (every hour before its own, later scan) replaces it
     (`converges`). The collector archive's key goes in `options.access-r2.secrets`, its endpoint
-    in `endpoint` (default `$R2_ENDPOINT`), set for this one command only."""
+    in `endpoint` (default `$R2_ENDPOINT`), set for this one command only.
+
+    `checkpoint`: opt into `r2-sync`, folding immutable frozen windows into one conditional Parquet checkpoint and
+    replacing the bounded active window set each scan. `verify` compares against full history before publication;
+    turn it on for bootstrap, then off after parity passes. Without a checkpoint the hourly format is unchanged."""
     if ctx.reproc:
         err("access-r2 off under REPROC")
         return
     local = ctx.work / "access-r2" / "agg.parquet"
     endpoint = ctx.opt("access-r2", "endpoint") or ctx.env.get("R2_ENDPOINT")
     env = {"DISK_TREE_R2_ENDPOINT_URL": str(endpoint)} if endpoint else {}
+    command = "r2-sync" if ctx.opt("access-r2", "checkpoint") else "r2-agg"
+    extra = []
+    if command == "r2-sync":
+        extra = ["-c", ctx.opt("access-r2", "checkpoint"), "-w", ctx.work / "access-r2" / "checkpoint",
+                 "-M", ctx.opt("access-r2", "mem", "2GB"), "-p", ctx.opt("access-r2", "threads", 2),
+                 *(["-v"] if ctx.opt("access-r2", "verify", False) else [])]
     with ctx.phase("access-r2"):
-        ran = ctx.sh(["dt-cloud", "access", "r2-agg", "-d", ctx.scan, "-o", local, "-s", ctx.opt("access-r2", "state")], fatal=False,
+        ran = ctx.sh(["dt-cloud", "access", command, "-d", ctx.scan, "-o", local, "-s", ctx.opt("access-r2", "state"), *extra], fatal=False,
                      env=env, warn="r2 read aggregate failed (the index reads the previous one)")
         if ran is None or not local.exists():
             return

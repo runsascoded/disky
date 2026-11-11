@@ -516,8 +516,14 @@ export const URL_PARAMS: Record<string, UrlParamDoc> = {
   },
   xr: {
     label: 'Time range',
-    description: 'The size-over-time chart\'s displayed x-range: `1w` or `1m` (the last week / 30 days of scans), or `<from>..<to>` (two scan ids: the stretch brushed on the strip under the chart, or fitted to the diff window). It only frames the chart; the diff window is `w`. When absent, the chart shows all scans.',
+    description: 'The size-over-time or scan-duration chart\'s displayed x-range: `1w` or `1m` (the last week / 30 days), or `<from>..<to>` (two scan stamps: the stretch brushed on the overview strip, or fitted to the selection). It only frames the chart; the selected window is `w`. When absent, the chart shows every date.',
     examples: ['1w', '1m', '2026-09-01..2026-10-01'],
+  },
+  yb: {
+    label: 'Duration axis break',
+    description: 'On scan-duration charts, `0` shows the full linear y-axis. By default a large empty range is collapsed, with slash marks on the axis and affected bars and an explicit omitted-range label. Run ends and phase transitions are kept visible.',
+    examples: ['0'],
+    pages: ['/scans', '/dev/scan-durations'],
   },
   ym: {
     label: 'Y values',

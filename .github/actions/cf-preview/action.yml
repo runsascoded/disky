@@ -1,5 +1,5 @@
 name: Cloudflare PR preview lifecycle
-description: Authorize, publish a custom PR hostname, and retire owned Pages or Workers previews.
+description: Authorize, publish a custom PR hostname, and retire owned Pages previews (`ui` mode - PR front end over read-only production data).
 inputs:
   operation:
     description: gate, publish, or retire
@@ -13,6 +13,8 @@ inputs:
     description: Config target; defaults to the live PR base branch
   sha:
     description: Exact head captured by gate (publish only)
+  mode:
+    description: Preview mode captured by gate (publish only); gate selects it from `/preview <mode>`, a `preview:<mode>` label, else `ui`
   github-token:
     description: Scoped job token; publish needs deployments and PR comments write
     required: true
@@ -29,6 +31,9 @@ outputs:
   base_sha:
     description: Trusted base revision captured with the head
     value: ${{ steps.lifecycle.outputs.base_sha }}
+  mode:
+    description: Selected preview mode (`ui`; `stack` and `pipeline` are specified, not implemented)
+    value: ${{ steps.lifecycle.outputs.mode }}
   pr:
     description: PR number
     value: ${{ steps.lifecycle.outputs.pr }}
@@ -56,6 +61,7 @@ runs:
         PREVIEW_ARTIFACT: ${{ inputs.artifact }}
         PREVIEW_TARGET: ${{ inputs.target }}
         PREVIEW_SHA: ${{ inputs.sha }}
+        PREVIEW_MODE: ${{ inputs.mode }}
         PREVIEW_GITHUB_TOKEN: ${{ inputs.github-token }}
         PREVIEW_DEPLOY_TOKEN: ${{ inputs.deploy-token }}
         PREVIEW_DNS_TOKEN: ${{ inputs.dns-token }}

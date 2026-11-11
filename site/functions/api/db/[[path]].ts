@@ -10,8 +10,8 @@
  *   DELETE /api/db/<t>?pk=…   → delete row
  *
  * Every write appends old/new row JSON to `admin_edits`. A registry table this
- * deployment's D1 doesn't have (gcs's `user_emails` / `actions` / `claims` on cw)
- * is neither listed nor served (404).
+ * deployment's D1 doesn't have (`user_emails` / `actions` / `claims` aren't in
+ * every deployment's schema) is neither listed nor served (404).
  */
 import type { D1Database } from '@cloudflare/workers-types'
 import { baseScope, type Ctx, identify, json } from '../../_lib/auth.js'

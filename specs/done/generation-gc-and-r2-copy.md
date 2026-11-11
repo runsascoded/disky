@@ -14,6 +14,8 @@ Automatic cleanup collects verified compaction predecessors after a three-day gr
 
 Pins are deployment configuration, including secondary stores and both production and preview. A new pin must be configured before cleanup can run against its generation. Default dry runs never acquire a writer lease or delete objects; `-x` requires the scratch bucket.
 
+A deployment opts in through its own profile's `store-gc` step (`static_store`, `static_copies`, `scratch`, `execute`); its rollout and measurements are recorded on its branch.
+
 ## CW rollout
 
 The primary follows `static-names/CURRENT.json`; meta pins `2026-10-18meta` in both environments. The scan's post `store-gc` step coordinates `gs://oa-cw-s3-usage-data` and `r2://oa-cw-s3-usage-index`, using `oa-cw-s3-usage-scratch` for leases and a 259,200-second grace. A failed or busy cleanup is recorded as a maintenance shortfall and a later scan retries it. Existing interval-store lineage cleanup stays enabled on the R2 interval store.

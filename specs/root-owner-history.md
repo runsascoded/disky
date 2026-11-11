@@ -1,6 +1,18 @@
 # Compact root owner history
 
-Status: query-time batch prototype rejected for production performance; `OWNER_HISTORY_BATCH` is disabled on both dev and production. The tested navigation/scan UI promotion is separate. Next design proposal: compact root-only owner byte/object history artifacts, built once instead of decoding general path groups in every cold request. Publishing/backfilling these artifacts and changing the daily builder require the user's next design approval.
+Status: `OWNER_HISTORY_BATCH` now means a bounded window per request (below), off on dev and production until measured on dev. The whole-history batch prototype this spec began with stays rejected. Compact artifacts remain the way to make a whole series one read; they need the user's design approval and are not built.
+
+## A window of scans per request
+
+`/api/series?o=…` (2026-11): 14 user-visible 503s at about 32 s of Worker CPU each, on many paths. Profiled in Node against gcs's live stores (`site/bench/view-mem.ts`, one cold process per request): about 85% of the CPU is decoding row groups, not the ledger fold. The cause is the store's layout: a path's closed versions are spread over the dyadic time blocks (`specs/interval-store.md` §2.4), at most 2S of them, each sorted on its own. A point at one scan touches about log2 S of them, a whole history all of them: 204 distinct groups (240 decodes) at S = 124 for a path with a few rows in each, about 0.13 s of CPU a group on the edge. A single version read doesn't change that (the same groups, and the 60-group cap below refuses it), and the cost grows with S.
+
+Cost per request now, aligned window of K = `SERIES_CHUNK` = 16 scans: the 2K blocks inside it, log2(S/K) above it, the open segment, per tier, at most two groups each: G ≤ 2·(2K + log2(S/K) + 1 + 2·tiers), independent of S. Measured: 32–34 groups, a seventh of the whole request's CPU, at root and at a drilled path alike. The reader decodes each group once, the columns a total needs only (30% less CPU and memory than per-scan points over the same window). Past its group cap it falls back to the per-scan reads of the same K scans, also bounded. The fold stays O(K · assignments).
+
+The client reads the newest window, then the others newest first, two at a time (`fillSeriesWindows`), drawing as they come. A window's cache key names only its scans, so a new scan leaves the older windows cached; a ledger change still makes them cold, each still bounded. Parity: every point of the concatenated windows equalled the whole series on the live stores at root and at a drilled path (all 124 scans); fixtures compare pools at every depth with assignments, base and runs. A lens's history reader stays root only (below the root a covering assignment wants the path's total, which its rows don't hold); lens and class series are windowed over per-scan reads. A share card reads the newest window only.
+
+To turn on: `OWNER_HISTORY_BATCH = "1"` in `[env.preview.vars]`, compare `dt-cloud probe` full bodies with prod, check `cpuTime` in the analytics, then prod.
+
+## The first prototype
 
 The existing interval slice sorts carry exact owner bytes and object counts over multiple dates. The personal-owner root history fast path uses the user-first sort, reads the selected user's needed depth-1 versions once, combines base/run close records by minimum `vt`, filters each held date, then invokes the existing per-date live-assignment fold. It does not use stale snapshot ownership or estimate objects from bytes. Uncovered dates, missing slice sorts, bounded-read refusals, or unreadable history use the canonical per-scan reader. Broad owner pools, drilled, multi-path, class, and text-query histories retain their existing readers.
 

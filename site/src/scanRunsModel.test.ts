@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest'
 import {
   batchHref, failedAt, logsHref, mapHref, metaHref, outputIndex, phaseIssues, phaseOutcome, phaseOrder, phaseSpans, runTime, type ScanRun, type ScanRunOutput,
   type ScanRunPhase, manualScans, scanRunOf, structureOf, summarize, withDeltas, runOutcome, runOutcomeLine, phaseSkip, overlappingFailures, runTasks, taskLogsHref,
-  isMaintenance, liveness, LOST_S, maintStore, phaseStatus, QUIET_S, issueLeaves, issueNext, issueState, issueWhat, outcomeParts, outcomeSteps, passingSince, runOutcomeLabel, statusMatches,
+  isMaintenance, liveness, LOST_S, maintStore, phaseStatus, processingSecs, QUIET_S, issueLeaves, issueNext, issueState, issueWhat, outcomeParts, outcomeSteps, passingSince, runOutcomeLabel, statusMatches,
   stepFailure, STATUS_FILTERS,
   type PhaseIssue,
 } from './scanRunsModel'
@@ -35,6 +35,19 @@ const PHASES = [
   phase('b', 'listing', 0, 2000, 2300), phase('b', 'ingest', 1, 2000, 2310), phase('b', 'index', 2, 2310, 2500),
   phase('b-fail', 'listing', 0, 1000, 1050),
 ]
+
+describe('processing time excludes a delayed capture-to-ingest queue', () => {
+  it('shows a two-hour retry independently of four days waiting to start', () => {
+    const before = 4 * 86400
+    const r = run({ run_id: 'retry', scan: '2026-11-03', started_ts: 0 })
+    const spans = phaseSpans(r, [phase('retry', 'capture', 0, 0, 360), phase('retry', 'queue', 1, 360, before)])
+    expect(processingSecs(before + 7200, spans)).toEqual(7200)
+    expect(processingSecs(before - 1, spans)).toEqual(0)
+    expect(processingSecs(null, spans)).toEqual(null)
+    expect(processingSecs(7200, [])).toEqual(null)
+    expect(processingSecs(7200, [{ ...spans[1], status: 'running' }])).toEqual(null)
+  })
+})
 
 describe('deltas against the previous scan', () => {
   it('compares each structure to the newest earlier scan that has it; a failed run is no baseline', () => {

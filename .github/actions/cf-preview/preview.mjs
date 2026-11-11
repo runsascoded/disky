@@ -1,6 +1,10 @@
 import { execFileSync } from 'node:child_process'
-import { lstatSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs'
-import { isAbsolute, join, resolve } from 'node:path'
+import { cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { dirname, isAbsolute, join, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { DEFAULT_ALLOW, DEFAULT_DENY, DEFAULT_FORWARD, REVISION_PATH, TOKEN_VAR } from './layer.mjs'
+
+const LAYER_SOURCE = join(dirname(fileURLToPath(import.meta.url)), 'layer.mjs')
 
 export const PROTOCOL = 'cf-preview-v1'
 const WRITERS = new Set(['write', 'maintain', 'admin'])
@@ -189,4 +193,137 @@ export function wranglerUpload(command, { artifact, cwd, token, account }) {
       cwd, stdio: 'inherit', env: { ...process.env, CLOUDFLARE_API_TOKEN: token, CLOUDFLARE_ACCOUNT_ID: account },
     })
   }
+}
+
+/** Preview modes (specs/cf-pr-previews.md § Modes). Only `ui` is implemented; the others are specified. */
+export const MODES = ['ui', 'stack', 'pipeline']
+export const IMPLEMENTED_MODES = ['ui']
+export const DEFAULT_MODE = 'ui'
+const MODE_LABEL = /^preview:(.*)$/
+
+/** An explicit `/preview <mode>` (or dispatch input) wins for its run; else one `preview:<mode>` label; else `ui`. */
+export function selectMode({ requested, labels = [] }) {
+  const named = [...new Set(labels.map(label => label.match(MODE_LABEL)?.[1]).filter(mode => mode !== undefined))].sort()
+  const unknown = named.filter(mode => !MODES.includes(mode))
+  requireThat(unknown.length === 0, `Unknown preview mode label: ${unknown.map(mode => `preview:${mode}`).join(', ')}`)
+  requireThat(named.length <= 1, `Conflicting preview mode labels: ${named.map(mode => `preview:${mode}`).join(', ')}`)
+  if (requested !== undefined) {
+    requireThat(MODES.includes(requested), `Unknown preview mode: ${requested}`)
+    return { mode: requested, source: 'comment' }
+  }
+  return named.length ? { mode: named[0], source: 'label' } : { mode: DEFAULT_MODE, source: 'default' }
+}
+
+export function requireImplemented(mode) {
+  requireThat(IMPLEMENTED_MODES.includes(mode), `Preview mode ${mode} is specified but not implemented (specs/cf-pr-previews.md)`)
+}
+
+const bareHttpsOrigin = value => {
+  let url
+  try { url = new URL(value) } catch { return false }
+  return url.protocol === 'https:' && value.replace(/\/$/, '') === url.origin
+}
+const rules = (value, fallback, name) => {
+  const list = value ?? fallback
+  requireThat(Array.isArray(list) && list.every(rule => typeof rule === 'string' && rule.startsWith('/') && !rule.includes('..')),
+    `Invalid ui ${name} rules`)
+  return list
+}
+
+/** A `ui` target: the base target with its `modes.ui` overrides, and the read-only layer's settings, validated. */
+export function uiSettings(target) {
+  const ui = target?.modes?.ui
+  requireThat(ui && typeof ui === 'object', 'Target has no ui mode configured')
+  requireThat(target.provider === 'pages', 'ui mode is implemented for Pages targets only')
+  requireThat(typeof ui.project === 'string' && ui.project !== target.project, 'ui mode needs its own dedicated Pages project')
+  requireThat(bareHttpsOrigin(ui.upstream), 'ui upstream must be a bare https origin')
+  const viewers = ui.viewers
+  if (viewers !== 'public') {
+    requireThat(viewers && /^[a-z0-9-]+\.cloudflareaccess\.com$/.test(viewers.access?.team_domain ?? '')
+      && /^[a-f0-9]{64}$/.test(viewers.access?.aud ?? ''), 'ui viewers need a Cloudflare Access team domain and AUD tag, or "public"')
+    const lists = [viewers.emails ?? [], viewers.domains ?? []]
+    requireThat(lists.every(list => Array.isArray(list) && list.every(x => typeof x === 'string' && x.length > 0 && x === x.toLowerCase()))
+      && lists.some(list => list.length > 0), 'ui viewers need a lower-case email or domain allow list')
+  }
+  const { modes: _modes, verification: _verification, ...base } = target
+  return {
+    target: {
+      ...base, project: ui.project, domain: ui.domain ?? target.domain,
+      wrangler: ui.wrangler ?? target.wrangler, working_directory: ui.working_directory ?? target.working_directory,
+      verification: { path: REVISION_PATH },
+    },
+    layer: {
+      upstream: ui.upstream.replace(/\/$/, ''),
+      viewers: viewers === 'public' ? 'public'
+        : { access: { team_domain: viewers.access.team_domain, aud: viewers.access.aud }, emails: viewers.emails ?? [], domains: viewers.domains ?? [] },
+      forward: rules(ui.forward, DEFAULT_FORWARD, 'forward'),
+      deny: rules(ui.deny, DEFAULT_DENY, 'deny'),
+      allow: rules(ui.allow, DEFAULT_ALLOW, 'allow'),
+    },
+  }
+}
+
+/** One mode's plan for one target: the provider-neutral plan of its effective target, plus the mode. */
+export function modePlan(config, target, number, sha, mode) {
+  requireImplemented(mode)
+  requireThat(config.targets[target], 'Unknown preview target/provider')
+  const { target: effective } = uiSettings(config.targets[target])
+  return { ...previewPlan({ repository: config.repository, targets: { [target]: effective } }, target, number, sha), mode }
+}
+
+// Pages preview settings that are not bindings. Anything else non-empty in the project's preview config is one.
+const PAGES_SETTINGS = new Set(['env_vars', 'compatibility_date', 'compatibility_flags', 'fail_open', 'always_use_latest_compatibility_date',
+  'build_image_major_version', 'usage_model', 'placement', 'limits', 'wrangler_config_hash'])
+const empty = value => value === null || value === undefined || (typeof value === 'object' && Object.keys(value).length === 0)
+const describe = vars => `[${vars.map(([name, type]) => `${name} (${type})`).join(', ')}]`
+
+/** A `ui` project's preview environment holds no binding, and no variable but the read grant (nothing when public). */
+export function uiProjectCheck(project, layer) {
+  const preview = project.deployment_configs?.preview ?? {}
+  const bindings = Object.keys(preview).filter(key => !PAGES_SETTINGS.has(key) && !empty(preview[key])).sort()
+  requireThat(bindings.length === 0, `ui project has preview bindings: ${bindings.join(', ')}`)
+  const actual = Object.entries(preview.env_vars ?? {}).filter(([, value]) => value !== null).map(([name, value]) => [name, value.type]).sort()
+  const expected = layer.viewers === 'public' ? [] : [[TOKEN_VAR, 'secret_text']]
+  requireThat(JSON.stringify(actual) === JSON.stringify(expected),
+    `ui project preview variables must be exactly ${describe(expected)}, found ${describe(actual)}`)
+}
+
+/** Neither Pages Functions nor a wrangler config may be picked up from the directory Wrangler runs in. */
+export function uiCwdCheck(cwd) {
+  const found = ['functions', 'wrangler.toml', 'wrangler.json', 'wrangler.jsonc'].filter(name => existsSync(join(cwd, name)))
+  requireThat(found.length === 0, `ui deploy directory must not hold ${found.join(', ')}`)
+}
+
+/** The preview's `_worker.js`: the trusted layer's source with this publish's settings, nothing from the PR. */
+export function uiWorker(layer, plan) {
+  const config = { ...layer, sha: plan.sha, pr: plan.pr, hostname: plan.hostname }
+  return `${readFileSync(LAYER_SOURCE, 'utf8')}\nconst CONFIG = ${JSON.stringify(config)}\nexport default { fetch: (request, env) => handle(request, env, CONFIG) }\n`
+}
+
+export const UI_ROUTES = { version: 1, include: ['/*'], exclude: [] }
+
+/** Copy the PR's static build, replacing whatever worker/routing it carried with the layer's. Returns what was replaced. */
+export function stageUi({ artifact, staging, layer, plan }) {
+  validateArtifact(artifact)
+  rmSync(staging, { recursive: true, force: true })
+  cpSync(artifact, staging, { recursive: true })
+  const replaced = ['_worker.js', '_routes.json'].filter(name => existsSync(join(staging, name)))
+  for (const name of replaced) rmSync(join(staging, name), { recursive: true, force: true })
+  writeFileSync(join(staging, '_worker.js'), uiWorker(layer, plan))
+  writeFileSync(join(staging, '_routes.json'), `${JSON.stringify(UI_ROUTES)}\n`)
+  return replaced
+}
+
+/** `ui` publish: the dedicated project is binding-free, the staged build carries only the layer, then the Pages lifecycle. */
+export async function publishUi({ cf, plan, layer, artifact, workDir, cwd, uploader }) {
+  uiCwdCheck(cwd)
+  uiProjectCheck(await cf('GET', `/accounts/${plan.account}/pages/projects/${plan.project}`), layer)
+  const staging = join(workDir, 'ui-site')
+  const replaced = stageUi({ artifact, staging, layer, plan })
+  const receipt = await publishPages({ cf, plan, upload: uploader(staging) })
+  return { ...receipt, mode: 'ui', upstream: layer.upstream, viewers: layer.viewers === 'public' ? 'public' : 'access', replaced }
+}
+
+export async function retireUi({ cf, plan }) {
+  return { ...await retirePages({ cf, plan }), mode: 'ui' }
 }

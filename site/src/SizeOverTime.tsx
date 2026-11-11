@@ -4,14 +4,14 @@ import { Explain } from './Help'
 import { TimeSeries, XOverview } from '@disk-tree/react'
 import type { Annotation, Series as TsSeries } from '@disk-tree/react'
 import { slotColor } from './colors'
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { type ReactNode, useMemo, useRef, useState } from 'react'
 import { boolParam, useUrlState } from 'use-prms'
 import { shortName } from './UserChip'
 import { useStore, useStoreFetch } from './store'
 import { useUnits } from './units'
 import { fmtBytesStep } from './types'
-import { bandCallouts, pickAnnotations, relativeSeries, seriesGaps, stackSeries, unitTicks, youngestGenesis } from './series'
+import { bandCallouts, fillSeriesWindows, pickAnnotations, relativeSeries, seriesGaps, stackSeries, unitTicks, youngestGenesis } from './series'
 import { DAY, fmtScan, scanInstant, type ScanLabel, type ScanTimes } from './scan'
 import type { Band } from './series'
 import { stringParam } from 'use-prms'
@@ -26,8 +26,8 @@ import { NoteForm, NoteTip, useChartNotes, useNoteWrite } from './NoteWidgets'
 import { manualScans } from './scanRunsModel'
 import { useScanRuns } from './scanRunsUi'
 import { useActions } from 'use-kbd'
-import { MdFitScreen, MdZoomOut } from 'react-icons/md'
-import { brushDomain, fitToWindow, fmtXr, inXDomain, parseXr, presetOf, resolveXDomain, spanDomain, X_PRESETS, type XDomain } from './xDomain'
+import { brushDomain, fitToWindow, fmtXr, inXDomain, parseXr, resolveXDomain, spanDomain, type XDomain } from './xDomain'
+import { XRangeControls } from './XRangeControls'
 
 // Stored bytes over the historical scans, scoped exactly like the map: the
 // drilled prefix, a user, or an owner pool (`/api/series` — one row read per
@@ -35,7 +35,7 @@ import { brushDomain, fitToWindow, fmtXr, inXDomain, parseXr, presetOf, resolveX
 // precomputed per prefix and nothing is floored.
 
 interface Pt { x: number; y: number; y0?: number }
-interface Series { path: string; points: { date: string; b: number; o: number; missing?: string[] }[]; unindexed?: string[]; roots?: { path: string; points: { date: string; b: number; o: number }[] }[] }
+interface Series { path: string; chunks?: number; failed?: string[]; points: { date: string; b: number; o: number; missing?: string[] }[]; unindexed?: string[]; roots?: { path: string; points: { date: string; b: number; o: number }[] }[] }
 
 // Default prominence-suppression radius for the local-extrema callouts, in days
 // (≈6 scans at the 12-hourly cadence): peaks/dips within this of a more
@@ -72,29 +72,6 @@ function ManualMarkToggle({ v, set }: { v: ManualMark; set: (m: ManualMark) => v
           <button role="radio" aria-checked={v === m} className={v === m ? 'on' : ''} onClick={() => set(m)}>{m}</button>
         </Explain>
       ))}
-    </span>
-  )
-}
-
-function XRangeToggle({ domain, set, onFit, canFit }: { domain: XDomain; set: (d: XDomain) => void; onFit: () => void; canFit: boolean }) {
-  const on = presetOf(domain)
-  return (
-    <span className="gran x-range" role="group" aria-label="X-axis range">
-      {X_PRESETS.map(([r, days]) => (
-        <Explain key={r} text={days ? `Only the last ${days === 7 ? 'week' : '30 days'} of scans` : 'Every scan'}>
-          <button role="radio" aria-checked={on === r} className={on === r ? 'on' : ''} onClick={() => set(parseXr(r))}>{r}</button>
-        </Explain>
-      ))}
-      {canFit && (
-        <Explain text="Zoom to the diff window (with a scan of context each side); the strip under the chart shows where it sits">
-          <button type="button" className="icon" aria-label="zoom to the diff window" onClick={onFit}><MdFitScreen /></button>
-        </Explain>
-      )}
-      {domain.kind === 'span' && (
-        <Explain text="Show every scan again (or double-click the strip under the chart)">
-          <button type="button" className="icon" aria-label="reset zoom" onClick={() => set({ kind: 'all' })}><MdZoomOut /></button>
-        </Explain>
-      )}
     </span>
   )
 }
@@ -274,6 +251,7 @@ export function SizeOverTime({ scans, times, fmt = fmtScan, prefix, user, pool, 
   const sfetch = useStoreFetch()
   // at a mixed-provider store's root the traces are its buckets, each named with its scheme (`r2://…`)
   const rootName = (k: string) => (!prefix && store.bucketSchemes?.[k] ? store.bucketSchemes[k] + k : k)
+  const qc = useQueryClient()
   const seriesQ = useQuery<Series>({
     queryKey: ['series', store.key, prefix, scope, scans.length, user || pool ? ledgerRev : null],
     // Under a filter, wait for its match roots: the whole-store series is not
@@ -286,7 +264,13 @@ export function SizeOverTime({ scans, times, fmt = fmtScan, prefix, user, pool, 
       if (!r.ok) { pf.fail(); throw apiError(r.status, await r.text()) }
       const j = await r.json() as Series
       pf.decoded()
-      return j
+      if (!j.chunks) return j
+      const key = ['series', store.key, prefix, scope, scans.length, user || pool ? ledgerRev : null]
+      return fillSeriesWindows(j, async i => {
+        const w = await sfetch(`/api/series?path=${encodeURIComponent(prefix)}${scope}&chunk=${i}`, { credentials: 'include' })
+        if (!w.ok) throw apiError(w.status, await w.text())
+        return await w.json() as Series
+      }, s => qc.setQueryData(key, s))
     },
   })
   usePerfCommit('series')
@@ -477,7 +461,10 @@ export function SizeOverTime({ scans, times, fmt = fmtScan, prefix, user, pool, 
         </>}>
           <span className="info" aria-label="about this chart" tabIndex={0}>ⓘ</span>
         </Tooltip>
-        <XRangeToggle domain={xDomain} set={setXDomain} onFit={fitWin} canFit={!!fitTarget} />
+        <XRangeControls domain={xDomain} set={setXDomain} fit={fitTarget ? {
+          onClick: fitWin, label: 'zoom to the diff window',
+          description: 'Zoom to the diff window (with a scan of context each side); the strip under the chart shows where it sits',
+        } : undefined} />
         <ValuesToggle v={values} set={setValues} />
         {!relative && <YFromToggle v={yFrom} set={setYFrom} stacked={stacked} />}
         {roots.length > 0 && !relative && <LayoutToggle v={layout} set={setLayout} />}

@@ -1,5 +1,5 @@
-// `/api/db`: the registry's tables are offered only where this deployment's D1 has them — cw's D1 has no
-// `user_emails` / `actions` / `claims` (gcs's owner axis), so they're neither listed nor read (404, not a D1 error).
+// `/api/db`: the registry's tables are offered only where this deployment's D1 has them — a schema without
+// `user_emails` / `actions` / `claims` (the test D1's) has them neither listed nor read (404, not a D1 error).
 import { describe, expect, it } from 'vitest'
 import { onRequest } from './[[path]]'
 import { gateFor } from '../../_lib/auth'
@@ -7,7 +7,7 @@ import { sqliteD1 } from '../../_lib/testD1'
 
 async function setup() {
   const { db, raw } = await sqliteD1()
-  const env = { DB: db, SESSION_SECRET: 's'.repeat(32), BASE_SCOPE: 'cw' }
+  const env = { DB: db, SESSION_SECRET: 's'.repeat(32), BASE_SCOPE: 'base' }
   const token = (await gateFor(env as never)!.mint({
     email: 'ops@example.test', scopes: ['*'], name: 'ops', createdBy: 'test', expiresAt: null, maxRedeems: null,
   })).token

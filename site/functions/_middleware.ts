@@ -94,7 +94,11 @@ async function serve(ctx: MiddlewareCtx): Promise<Response> {
   if (silent) return silent
   const url = new URL(ctx.request.url)
   if (ctx.request.method === 'GET') {
-    const anonymous = await anonymousPage(ctx.env, url)
+    // An unfurl detail must never break the page: on a failure, the page as its route serves it.
+    const anonymous = await anonymousPage(ctx.env, url).catch((e: Error) => {
+      console.log(`og anonymous page failed: ${e.message}`)
+      return null
+    })
     t = mark('mw-anon', t)
     if (anonymous) return withMiddlewareTiming(anonymous, [...phases, ['mw', Date.now() - t0]], nth)
   }

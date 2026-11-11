@@ -89,7 +89,17 @@ export function apiErrorMessage(status: number, text: string): string {
     const j = JSON.parse(text) as { error?: unknown; code?: unknown }
     if (status === 400 && typeof j.error === 'string' && typeof j.code === 'string') return `400: bad query: ${j.error}`
   } catch { /* not JSON */ }
-  return `${status}: ${text.slice(0, 120)}`
+  return `${status}: ${plainText(text).slice(0, 120)}`
+}
+
+/** A failure body as words: Cloudflare's own pages (an HTML document, or a bare `error code: N`) by what they
+ *  mean, never their markup. 1102: the Worker ran out of its CPU or memory on this request. */
+export function plainText(text: string): string {
+  const code = /error code:\s*(\d+)/i.exec(text)?.[1]
+  if (code === '1102') return 'this view needs more work than one request can do — drill in, or narrow the scope'
+  if (!/^\s*<(?:!doctype|html)/i.test(text)) return text
+  const title = /<title>([^<]*)<\/title>/i.exec(text)?.[1]?.trim()
+  return code ? `the server failed (Cloudflare error ${code})` : title || 'the server failed'
 }
 
 /** The scans the static name index covers in this subtree's store (`/api/filter-scans`), when `enabled`:
