@@ -3,7 +3,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { type Env, gateFor } from '../_lib/auth'
 import { claim, PENDING_S, settle } from '../_lib/scanDispatch'
-import { type Sqlite, sqliteD1, withAdminEmails } from '../_lib/testD1'
+import { type Sqlite, sqliteD1, withAdminEmails, withScanDispatch } from '../_lib/testD1'
 import { onRequestPost as dispatch } from './scan-runs/dispatch'
 import { onRequestGet as list } from './scan-runs/[[path]]'
 
@@ -21,10 +21,13 @@ afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals() })
 
 interface Call { url: string; method: string; auth: string | null; body: unknown }
 
-/** A deployment with `ADMIN` on its admin list and the dispatch configured; Cloud Run answers `answer`. */
-async function world(answer: () => Response = () => Response.json(OP), extra: Record<string, unknown> = {}) {
+/** A deployment with `ADMIN` on its admin list and the dispatch configured; Cloud Run answers `answer`. `table`: its D1
+ *  has `scan_dispatch` (the recipe applied). */
+async function world(answer: () => Response = () => Response.json(OP), extra: Record<string, unknown> = {}, table = true) {
   const { db, raw } = await sqliteD1()
   withAdminEmails(raw)
+  if (table) withScanDispatch(raw)
+  else raw.exec('DROP TABLE IF EXISTS scan_dispatch')
   raw.prepare("INSERT INTO admin_emails (email, note, who, ts) VALUES (?, NULL, 'seed', 1)").run(ADMIN)
   const env = { DB: db, SESSION_SECRET: 'secret', BASE_SCOPE: 'gcs', ADMIN_LIST: '1', GCP_SA_KEY: '{}', SCAN_SUBMIT_JOB: JOB, ...extra } as Env
   const calls: Call[] = []
@@ -42,9 +45,9 @@ async function world(answer: () => Response = () => Response.json(OP), extra: Re
   return { raw, calls, post, get }
 }
 
-/** The dispatch log, each row's pk (a fresh uuid) as `ID`. */
-const log = (raw: Sqlite) => raw.prepare("SELECT pk, action, who, ts, new_json FROM admin_edits WHERE tbl = 'scan_dispatch' ORDER BY id").all()
-  .map(r => ({ pk: r.pk === null ? null : 'ID', action: r.action, who: r.who, ts: r.ts, new_json: JSON.parse(String(r.new_json)) }))
+/** The dispatches (`scan_dispatch`), oldest first, each id (a fresh uuid) checked and shown as `ID`. */
+const log = (raw: Sqlite): Record<string, unknown>[] => raw.prepare('SELECT * FROM scan_dispatch ORDER BY ts, rowid').all()
+  .map(r => ({ ...r, id: /^[0-9a-f-]{36}$/.test(String(r.id)) ? 'ID' : r.id }))
 const run = (raw: Sqlite, id: string, kind: string, status: string, started: number, updated: number, store = 'primary', parent: string | null = null) =>
   raw.prepare("INSERT INTO scan_runs (run_id, scan, kind, parent, status, started_ts, source, updated_ts, store) VALUES (?, '2026-11-11T0700', ?, ?, ?, ?, 'job', ?, ?)")
     .run(id, kind, parent, status, started, updated, store)
@@ -58,10 +61,10 @@ describe('POST /api/scan-runs/dispatch', () => {
       body: { overrides: { containerOverrides: [{ env: [{ name: 'DT_TRIGGER', value: 'manual' }] }] } },
     }])
     expect(log(w.raw)).toEqual([
-      { pk: 'ID', action: 'claim', who: ADMIN, ts: NOW, new_json: { job: JOB, trigger: 'manual' } },
-      { pk: 'ID', action: 'dispatched', who: ADMIN, ts: NOW, new_json: { execution: EXEC, operation: OP.name } },
+      { id: 'ID', ts: NOW, who: ADMIN, job: JOB, state: 'dispatched', execution: EXEC, operation: OP.name, error: null, updated_ts: NOW },
     ])
-    expect(new Set(w.raw.prepare("SELECT pk FROM admin_edits WHERE tbl = 'scan_dispatch'").all().map(r => r.pk)).size).toBe(1)
+    // nothing in the admin table log: `admin_edits.action` is `insert | update | delete` on most deployments' schemas
+    expect(w.raw.prepare('SELECT count(*) AS n FROM admin_edits').all()).toEqual([{ n: 0 }])
   })
 
   it('refuses while a scan of the primary store runs; a lost one, a maintenance job or another store’s scan doesn’t count', async () => {
@@ -105,22 +108,25 @@ describe('POST /api/scan-runs/dispatch', () => {
   })
 
   it('the claim is the lock: of two past the checks, one wins; a failed one releases it', async () => {
-    const { db } = await sqliteD1()
+    const { db, raw } = await sqliteD1()
+    withScanDispatch(raw)
     const tries = [await claim(db, 'a', ADMIN, NOW, JOB), await claim(db, 'b', ADMIN, NOW, JOB)]
-    await settle(db, 'a', ADMIN, NOW, 'failed', { error: 'x' })
-    expect([...tries, await claim(db, 'c', ADMIN, NOW, JOB)]).toEqual([true, false, true])
+    await settle(db, 'a', NOW + 5, { state: 'failed', error: 'x' })
+    expect([...tries, await claim(db, 'c', ADMIN, NOW + 6, JOB)]).toEqual([true, false, true])
+    expect(log(raw).map(r => [r.id, r.state, r.error, r.updated_ts])).toEqual([['a', 'failed', 'x', NOW + 5], ['c', 'claimed', null, NOW + 6]])
   })
 
   it('a refusal from Cloud Run is a 500 with its detail, and releases the claim', async () => {
     let status = 403
     const w = await world(() => (status === 200 ? Response.json(OP) : new Response('{"error":{"code":403,"message":"Permission denied"}}', { status })))
     expect(await w.post()).toEqual([500, { error: 'scan dispatch failed (Cloud Run 403)', detail: '{"error":{"code":403,"message":"Permission denied"}}' }])
-    expect(log(w.raw).map(r => [r.action, r.new_json])).toEqual([
-      ['claim', { job: JOB, trigger: 'manual' }],
-      ['failed', { status: 403, error: '{"error":{"code":403,"message":"Permission denied"}}' }],
-    ])
+    expect(log(w.raw)).toEqual([{
+      id: 'ID', ts: NOW, who: ADMIN, job: JOB, state: 'failed', execution: null, operation: null,
+      error: 'Cloud Run 403: {"error":{"code":403,"message":"Permission denied"}}', updated_ts: NOW,
+    }])
     status = 200
     expect(await w.post()).toEqual([200, { execution: EXEC, operation: OP.name }])
+    expect(log(w.raw).map(r => r.state)).toEqual(['failed', 'dispatched'])
   })
 
   it('unconfigured: 503 naming what’s missing, before any call', async () => {
@@ -133,6 +139,11 @@ describe('POST /api/scan-runs/dispatch', () => {
       [503, { error: 'scan dispatch not configured (GCP_SA_KEY unset)' }, 0],
     ])
   })
+
+  it('a D1 without `scan_dispatch` (the recipe unapplied): 503 naming it, before any call', async () => {
+    const w = await world(undefined, {}, false)
+    expect([...(await w.post()), w.calls.length]).toEqual([503, { error: 'scan dispatch is not set up on this deployment (no scan_dispatch table)' }, 0])
+  })
 })
 
 describe('GET /api/scan-runs: dispatch', () => {
@@ -144,5 +155,7 @@ describe('GET /api/scan-runs: dispatch', () => {
     run(w.raw, 'live', 'scan', 'running', NOW + 1, NOW + 1)
     expect(await w.get()).toEqual({ running: 'live', pending_since: null })
     expect(await (await world(undefined, { SCAN_SUBMIT_JOB: undefined })).get()).toBeNull()
+    // no `scan_dispatch` table: no button, as with no `scan_runs`
+    expect(await (await world(undefined, {}, false)).get()).toBeNull()
   })
 })

@@ -7,12 +7,14 @@
 //
 // One scan at a time: a dispatch is refused while a scan run of the primary store is running (not lost:
 // `scanRunsModel.isLost`), and while an earlier dispatch is pending: claimed within `PENDING_S`, not failed, and no
-// scan run has started since (the run appears only once its head records it, minutes after the dispatch). The claim is
-// one conditional insert, so two clicks (or two admins) can't both start one. Every dispatch is logged to
-// `admin_edits` (`tbl = 'scan_dispatch'`, pk = the dispatch's id): its `claim`, then `dispatched` (with the Cloud
-// Run execution) or `failed` (with why, which releases the claim).
+// scan run has started since (the run appears only once its head records it, minutes after the dispatch). Each
+// dispatch is a row of `scan_dispatch` (migration `scan-dispatch`): who claimed it and when, then its outcome,
+// `dispatched` (the Cloud Run execution) or `failed` (why, which releases the claim). The claim is one conditional
+// insert (`INSERT … SELECT … WHERE NOT EXISTS <a pending claim>`), so two clicks (or two admins) can't both start one;
+// pending turns on the time and on `scan_runs`, which no unique index can express. The table is the dispatches' audit
+// trail (read-only on /admin's tables, `_lib/tables.ts`); a D1 without it has no "Run a scan".
 import type { D1Database } from '@cloudflare/workers-types'
-import { isLost, isScanProducer, MAINT_KINDS, type ScanRun } from '../../src/scanRunsModel.js'
+import { isLost, MAINT_KINDS, type ScanRun } from '../../src/scanRunsModel.js'
 import { PRIMARY_STORE } from './stores.js'
 
 /** The Cloud Run job's resource name: `projects/<p>/locations/<region>/jobs/<job>`. */
@@ -21,7 +23,7 @@ const JOB_RE = /^projects\/[a-z][a-z0-9-]{4,28}[a-z0-9]\/locations\/[a-z]+-[a-z]
 /** `SCAN_SUBMIT_JOB` when it is a job's resource name; null when unset or malformed (the route answers 503). */
 export const submitJob = (raw: string | undefined): string | null => (raw && JOB_RE.test(raw) ? raw : null)
 
-/** The `admin_edits` table name a dispatch logs under. */
+/** The table each dispatch is a row of. */
 export const TBL = 'scan_dispatch'
 /** The store a dispatch scans: the submitter's. */
 export const STORE = PRIMARY_STORE
@@ -35,39 +37,53 @@ export interface Pending { id: string; ts: number; who: string; execution: strin
 export type Running = Pick<ScanRun, 'run_id' | 'scan' | 'started_ts'>
 export interface DispatchState { running: Running | null; pending: Pending | null }
 
-const STARTED_SINCE = `NOT EXISTS (SELECT 1 FROM scan_runs r WHERE r.store = ? AND r.parent IS NULL AND r.started_ts >= c.ts
-    AND r.kind NOT IN (${[...MAINT_KINDS, 'access-ingest'].map(k => `'${k}'`).join(', ')}))`
-/** A claim (`c`) still pending: recent, not failed, no scan run started since. Binds: since, store. */
-const PENDING_WHERE = `c.tbl = '${TBL}' AND c.action = 'claim' AND c.ts > ?
-  AND NOT EXISTS (SELECT 1 FROM admin_edits f WHERE f.tbl = '${TBL}' AND f.pk = c.pk AND f.action = 'failed')
-  AND ${STARTED_SINCE}`
+/** The table a D1 error says is missing (`no such table: <t>`), else null. */
+export const missingTable = (e: unknown): string | null => /no such table: (\w+)/i.exec(String((e as Error)?.message ?? e))?.[1] ?? null
 
-/** The running scan and the pending dispatch that block a new one (either null). */
+/** Run kinds that aren't the store's scan: its maintenance jobs and the access-log ingest. */
+const NOT_SCANS = [...MAINT_KINDS, 'access-ingest'].map(k => `'${k}'`).join(', ')
+/** A claim (`c`) still pending: recent, not failed, no scan run started since. Binds: since, store. */
+const PENDING_WHERE = `c.ts > ? AND c.state <> 'failed'
+  AND NOT EXISTS (SELECT 1 FROM scan_runs r WHERE r.store = ? AND r.parent IS NULL AND r.started_ts >= c.ts AND r.kind NOT IN (${NOT_SCANS}))`
+
+/** The running scan and the pending dispatch that block a new one (either null). A D1 without `scan_runs` or
+ *  `scan_dispatch` throws its `no such table` (`missingTable`): that deployment has no dispatch. */
 export async function dispatchState(db: D1Database, now: number): Promise<DispatchState> {
   const [runs, pending] = await Promise.all([
-    db.prepare("SELECT run_id, scan, kind, started_ts, updated_ts, status FROM scan_runs WHERE store = ? AND parent IS NULL AND status = 'running'")
+    db.prepare(`SELECT run_id, scan, kind, started_ts, updated_ts, status FROM scan_runs
+        WHERE store = ? AND parent IS NULL AND status = 'running' AND kind NOT IN (${NOT_SCANS})`)
       .bind(STORE).all<ScanRun>(),
-    db.prepare(`SELECT c.pk AS id, c.ts, c.who,
-        (SELECT json_extract(d.new_json, '$.execution') FROM admin_edits d WHERE d.tbl = '${TBL}' AND d.pk = c.pk AND d.action = 'dispatched') AS execution
-      FROM admin_edits c WHERE ${PENDING_WHERE} ORDER BY c.ts DESC, c.id DESC LIMIT 1`)
+    db.prepare(`SELECT c.id, c.ts, c.who, c.execution FROM ${TBL} c WHERE ${PENDING_WHERE} ORDER BY c.ts DESC, c.rowid DESC LIMIT 1`)
       .bind(now - PENDING_S, STORE).first<Pending>(),
   ])
-  const live = runs.results.filter(r => isScanProducer(r.kind) && !isLost(r, now)).sort((a, b) => (b.started_ts ?? 0) - (a.started_ts ?? 0))[0]
+  const live = runs.results.filter(r => !isLost(r, now)).sort((a, b) => (b.started_ts ?? 0) - (a.started_ts ?? 0))[0]
   return { running: live ? { run_id: live.run_id, scan: live.scan, started_ts: live.started_ts } : null, pending: pending ?? null }
 }
 
-/** Claim the dispatch: logs its `claim` unless one is pending, atomically. False: one is. */
+/** Claim the dispatch: inserts its row (`claimed`) unless one is pending, atomically. False: one is. */
 export async function claim(db: D1Database, id: string, who: string, now: number, job: string): Promise<boolean> {
-  const r = await db.prepare(`INSERT INTO admin_edits (tbl, pk, action, who, ts, old_json, new_json)
-      SELECT '${TBL}', ?, 'claim', ?, ?, NULL, ? WHERE NOT EXISTS (SELECT 1 FROM admin_edits c WHERE ${PENDING_WHERE})`)
-    .bind(id, who, now, JSON.stringify({ job, trigger: 'manual' }), now - PENDING_S, STORE).run()
+  const r = await db.prepare(`INSERT INTO ${TBL} (id, ts, who, job, state, updated_ts)
+      SELECT ?, ?, ?, ?, 'claimed', ? WHERE NOT EXISTS (SELECT 1 FROM ${TBL} c WHERE ${PENDING_WHERE})`)
+    .bind(id, now, who, job, now, now - PENDING_S, STORE).run()
   return (r.meta.changes ?? 0) > 0
 }
 
-/** The claim's outcome: `dispatched` (the execution) or `failed` (which releases it). */
-export const settle = (db: D1Database, id: string, who: string, now: number, action: 'dispatched' | 'failed', detail: object) =>
-  db.prepare('INSERT INTO admin_edits (tbl, pk, action, who, ts, old_json, new_json) VALUES (?, ?, ?, ?, ?, NULL, ?)')
-    .bind(TBL, id, action, who, now, JSON.stringify(detail)).run()
+/** A claim's outcome: `dispatched` (the Cloud Run execution and operation) or `failed` (why; it releases the claim). */
+export type Outcome =
+  | { state: 'dispatched'; execution: string | null; operation: string | null }
+  | { state: 'failed'; error: string }
+
+/** Record the claim's outcome. */
+export const settle = (db: D1Database, id: string, now: number, o: Outcome) =>
+  db.prepare(`UPDATE ${TBL} SET state = ?, execution = ?, operation = ?, error = ?, updated_ts = ? WHERE id = ? AND state = 'claimed'`)
+    .bind(
+      o.state,
+      o.state === 'dispatched' ? o.execution : null,
+      o.state === 'dispatched' ? o.operation : null,
+      o.state === 'failed' ? o.error : null,
+      now,
+      id,
+    ).run()
 
 /** The Cloud Run Admin API call that runs `job` as a manual scan. */
 export const runRequest = (job: string): { url: string; body: unknown } => ({
