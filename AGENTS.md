@@ -190,7 +190,7 @@ dt-cloud image-sha [-e SHA [-a]] [-j]  # The running image's source revision (`i
                           # clean (`-a` accepts dirty) and stamped. Benchmark harnesses (`interval-store cut`, `layout-sim`)
                           # log the stamp at start and take `-E/--expect-sha` (+ `--allow-dirty`): refuse to start on any
                           # other image. Job entrypoints (`scan head`/`step`, the `interval-store` stage tasks) log it
-dt-cloud batch submit -c COMPONENT [-L REGION] [-b BUCKET]… [-X] JOB_ID SPEC  # The shell's Batch submit, through `batch.submit_job` (the
+dt-cloud batch submit -c COMPONENT [-L REGION] [-b BUCKET]… [-X] [-t] [-e] [-r SECONDS] JOB_ID SPEC  # The shell's Batch submit, through `batch.submit_job` (the
                           # one place a job is created): labelled from `$DISKY_LABELS` + `-c` on the job and its allocation policy
                           # (`cost_labels.py`), in `-L`, else `$BATCH_REGION`. There is no default region (`deploy.batch_region`): neither
                           # set is an error, here and in `job status|logs|watch|metrics`, `batch-cancel` (`-r`), `sweep sync-progress`,
@@ -200,7 +200,11 @@ dt-cloud batch submit -c COMPONENT [-L REGION] [-b BUCKET]… [-X] JOB_ID SPEC  
                           # per process; a multi-region bucket takes its continent's regions, a dual-region its two) unless
                           # `-X/--cross-region` (`job submit-listing -X` too; `$BATCH_CROSS_REGION=1` for the submitters with no flag:
                           # the static-names / interval-store runners, `scan-run task`). A bucket whose location can't be read is
-                          # noted on stderr and not checked; a bucket reached only by URL and not named isn't seen
+                          # noted on stderr and not checked; a bucket reached only by URL and not named isn't seen.
+                          # Idempotent (a scheduled submit): `-t` JOB_ID is a strftime template over UTC now (`scan-%Y%m%d`: one
+                          # job per period, `batch.job_id_at`, checked against Batch's id rule), `-e` a 409 for that id counts as
+                          # submitted, `-r` retries 429/5xx/connection failures (5 s doubling to 300 s) for that long, then exit 1
+                          # (`SubmitFailed`); `-r` needs `-e`, since only the id makes a retry after a lost answer safe
 dt-cloud soft-delete -b BUCKET… [-E ENDPOINT] [-o ROOT…] [-j]  # Each bucket's soft-delete retention now (`soft_delete.py`): GCS's (`NAME`, read with
                           # `storage.buckets.get`, and GCS restores nothing from a bucket whose policy is off), or an S3-style store's (`s3://NAME`:
                           # versioning plus the narrowest noncurrent rule; null = kept until purged). What a sweep's undo has to work with. `-o`: the day's `<ROOT>/<date>.json`; the opt-in scan step `soft-delete` writes it under
