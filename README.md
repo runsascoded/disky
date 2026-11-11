@@ -107,6 +107,10 @@ Each deployment's favicon and badge is a small treemap in its store's colors, wi
 
 All names and marks belong to their owners; disky is not affiliated with or endorsed by any of them.
 
+## Storage growth
+
+[`docs/cs3.md`](docs/cs3.md): what each prefix of the data bucket and its R2 copy grows with, what bounds it, and what's still open (the goal: storage proportional to changes in the fleet, not to scans).
+
 ## Development
 
 The `dt-cloud` CLI lives in `cloud/`:

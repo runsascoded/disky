@@ -418,6 +418,19 @@ stay behind the site's auth.
 `job/`, `cf/` (Pulumi stack), `site/wrangler.toml`, gcs's D1 schema
 (`site/schema.sql`), branding, and this section.
 
+Shared work done here (anything another deployment would want) is its own
+commit, subject prefixed `[cloud]`, with no gcs defaults in it; send its sha to
+the root `disky` session when it's committed, which picks it onto `cloud`. gcs
+config (a store's `bucketSchemes`, a profile value) and gcs wiring are separate
+`[gcs]` commits. A `[cloud]` commit nobody sent is how a fix stays on one
+deployment (cw's canvas default sat on `cw` for a day).
+
+#### Storage growth (CS3)
+
+`docs/cs3.md`: each prefix of the data bucket and the R2 copy, what it grows
+with (changes, scans, time × activity), what bounds it, and what's open, with
+the dates to revisit. Update it when a prefix's bound changes.
+
 #### Job
 
 `job/` — daily snapshot pipeline on **GCP Batch** (`run.sh` entrypoint,
