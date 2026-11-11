@@ -1,16 +1,22 @@
 # Copy into a caller only after policy/config review and pin ACTION_SHA below.
 # This example targets main. Disky's default-branch controller needs its own four-target routing wrapper.
+# Mode: `/preview <mode>` (this run), else a `preview:<mode>` label, else `ui` (the PR's front end over
+# read-only production data). Only `ui` is implemented; `stack` and `pipeline` are refused at the gate.
 name: PR preview
 on:
   pull_request_target:
     branches: [main]
-    types: [opened, reopened, synchronize, ready_for_review, closed]
+    types: [opened, reopened, synchronize, ready_for_review, labeled, unlabeled, closed]
   issue_comment:
     types: [created]
   workflow_dispatch:
     inputs:
       pr:
         required: true
+        type: string
+      mode:
+        description: ui | stack | pipeline; empty = the PR's preview:<mode> label, else ui
+        required: false
         type: string
 permissions:
   contents: read
@@ -21,11 +27,13 @@ jobs:
   gate:
     if: >-
       github.event.action != 'closed' &&
+      (!contains(fromJSON('["labeled","unlabeled"]'), github.event.action) || startsWith(github.event.label.name, 'preview:')) &&
       (github.event_name != 'issue_comment' || (github.event.issue.pull_request && startsWith(github.event.comment.body, '/preview')))
     runs-on: ubuntu-latest
     outputs:
       sha: ${{ steps.gate.outputs.sha }}
       base_sha: ${{ steps.gate.outputs.base_sha }}
+      mode: ${{ steps.gate.outputs.mode }}
       url: ${{ steps.gate.outputs.url }}
     steps:
       - uses: actions/checkout@v4
@@ -50,6 +58,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
+      # `ui` publishes only the static build (the PR's Functions are never deployed in that mode).
       - name: Caller-specific frozen build and tests
         env:
           PREVIEW_URL: ${{ needs.gate.outputs.url }}
@@ -91,6 +100,7 @@ jobs:
           operation: publish
           config: .github/cf-preview.json
           sha: ${{ needs.gate.outputs.sha }}
+          mode: ${{ needs.gate.outputs.mode }}
           artifact: ${{ runner.temp }}/preview-artifact
           github-token: ${{ github.token }}
           deploy-token: ${{ secrets.CF_PREVIEW_DEPLOY_TOKEN }}
