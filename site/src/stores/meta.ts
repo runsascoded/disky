@@ -20,6 +20,7 @@ const store: Store = {
   owners: false,
   executor: 'plan-sweep',
   buckets: ['oa-gcs-usage-dvx', 'oa-gcs-usage-index'],
+  bucketSchemes: { 'oa-gcs-usage-dvx': 'gs://', 'oa-gcs-usage-index': 'r2://' },
   rootLabel: 'Marin GCS disky metadata',
   objectsNote: 'Scan outputs are written once per job run and never rewritten in place, so created is the object’s publish time.',
   wall: {
