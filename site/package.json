@@ -24,7 +24,7 @@
     "@disk-tree/pages-kit": "workspace:*",
     "@disk-tree/react": "workspace:*",
     "@floating-ui/react": "^0.27.20",
-    "@open-athena/auth": "github:Open-Athena/auth#2c9be8e54a709c8a41e2aab2372cb98e501bdc55",
+    "@open-athena/auth": "github:Open-Athena/auth#f171cabce74c8e8008d7262e953f41125ecde5a1",
     "@rdub/file-tree": "https://github.com/runsascoded/file-tree#9d9bd749469aa4ae76b860ea9a403c3ab18df80b",
     "@open-athena/treemap": "workspace:*",
     "@rdub/treemap": "workspace:@open-athena/treemap@*",
