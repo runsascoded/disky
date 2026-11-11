@@ -8,10 +8,10 @@
  * "Continue as <it>".
  */
 import { googleOneTapNonce } from '@open-athena/auth/oidc'
-import { type Ctx, gateFor } from '../../../_lib/auth.js'
+import { cookieNames, type Ctx, gateFor } from '../../../_lib/auth.js'
 
 export const onRequestGet = async (ctx: Ctx): Promise<Response> => {
-  const gate = gateFor(ctx.env)
+  const gate = gateFor(ctx.env, ctx.request)
   if (!gate) return new Response('auth not configured (DB / SESSION_SECRET)\n', { status: 503 })
-  return googleOneTapNonce({ gate })({ request: ctx.request })
+  return googleOneTapNonce({ gate, accountHintCookie: cookieNames(ctx.env, ctx.request).accountHint })({ request: ctx.request })
 }

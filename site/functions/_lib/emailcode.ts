@@ -16,7 +16,7 @@ export type EmailCodeHandlers = ReturnType<typeof emailCodeAuth>
 /** The four email-code handlers, or null if the deployment isn't configured
  *  for it (no gate — DB/SESSION_SECRET — or no Resend sender). */
 export function emailCodeFor(env: Env, request: Request): EmailCodeHandlers | null {
-  const gate = gateFor(env)
+  const gate = gateFor(env, request)
   if (!gate || !env.DB || !env.RESEND_API_KEY || !env.MAIL_FROM) return null
   const origin = new URL(request.url).origin
   return emailCodeAuth({

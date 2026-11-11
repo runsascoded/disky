@@ -24,7 +24,9 @@
  * `ADMIN_LIST` refuses to mint or edit in (`grantStore`); one already live keeps
  * working.
  */
-import { type Auth, createGate, DEFAULT_COOKIE_NAME, type Gate, type Grant, type GrantPatch, type GrantStore, hasScope, parseScopes, readCookie, type Subject, verifySessionClaims } from '@open-athena/auth'
+import { type Auth, createGate, DEFAULT_COOKIE_NAME, type Gate, type Grant, type GrantPatch, type GrantStore, hasScope, isSecureRequest, parseScopes, readCookie, type Subject, verifySessionClaims } from '@open-athena/auth'
+import { DEFAULT_ACCOUNT_HINT_COOKIE } from '@open-athena/auth/oidc'
+import { OA_NONCE_COOKIE } from '@disk-tree/pages-kit/oa'
 import { d1AuditSink, d1GrantStore, d1ProfileStore, d1RequestStore } from '@open-athena/auth/d1'
 import type { AnalyticsEngineDataset, D1Database, KVNamespace, R2Bucket } from '@cloudflare/workers-types'
 import { grantCaller, meterOf } from './usage.js'
@@ -40,6 +42,17 @@ export interface Env {
   OA_LOGIN_ISSUER?: string
   OA_LOGIN_CLIENT_ID?: string
   OA_LOGIN_CLIENT_SECRET?: string
+  /** The deployment's preview client at the broker (`<client id>-preview`), set only in the Pages preview environment:
+   *  the only client a preview host (`isPreviewHost`) signs in with. Unset there: no `/auth/oa`, no button. */
+  OA_LOGIN_PREVIEW_CLIENT_ID?: string
+  OA_LOGIN_PREVIEW_CLIENT_SECRET?: string
+  /** The Pages project's `pages.dev` subdomain (`<project>.pages.dev`; Cloudflare suffixes the name when it was taken),
+   *  which makes `<one label>.<it>` a preview host (`isPreviewHost`): a PR's `pr-N` branch, the `dev` alias, a deployment
+   *  hash. Unset: no host is one. */
+  PAGES_SUBDOMAIN?: string
+  /** `1`: on https, the session, nonce and account-hint cookies are `__Host-` named (`cookieNames`). Turning it on (or
+   *  off) signs everyone out once: the old name's session is no longer read. */
+  AUTH_HOST_COOKIES?: string
   GOOGLE_CLIENT_SECRET?: string
   /** Email-code fallback (ZT One-Time-PIN replacement) — Resend sender + `from`
    *  address (`Name <addr@verified-domain>`). Absent → `/auth/email/*` 503s. */
@@ -455,7 +468,51 @@ function grantStore(env: Env): GrantStore {
   }
 }
 
-export function gateFor(env: Env): Gate | null {
+/** Whether `request` came to a preview host: one DNS label under the project's `pages.dev` subdomain (`PAGES_SUBDOMAIN`,
+ *  from config, never the request), as a PR's `pr-N` branch, the `dev` alias or a deployment hash. A custom domain
+ *  (prod, `dev.<host>`) never is, nor the subdomain itself, nor anything deeper or longer. Such a host serves code no
+ *  one reviewed for production: it signs in only through the broker's preview client, never silently. */
+export function isPreviewHost(env: Env, request: Request): boolean {
+  const sub = env.PAGES_SUBDOMAIN?.toLowerCase()
+  if (!sub || !/^[a-z0-9-]+\.pages\.dev$/.test(sub)) return false
+  const host = new URL(request.url).hostname
+  return host.endsWith(`.${sub}`) && /^[a-z0-9-]+$/.test(host.slice(0, -sub.length - 1))
+}
+
+/** The auth cookies' names on this request. */
+export interface CookieNames {
+  /** The gate's session cookie (its retained-session handle follows as `<name>_rs`). */
+  session: string
+  /** The Google round trip's nonce. */
+  googleNonce: string
+  /** The broker round trip's nonce (its own: a Google round trip in another tab keeps its own). */
+  oaNonce: string
+  /** Google's remembered accounts (`<name>` + `<name>_accounts`); `false` on a preview host, which keeps none. */
+  accountHint: string | false
+}
+
+const HOST_PREFIX = '__Host-'
+/** The package's nonce cookie for `oidcStart` / `oidcCallback` (not exported). */
+const GOOGLE_NONCE_COOKIE = 'oa_oidc'
+
+/** The auth cookies' names: the package's defaults, `__Host-` prefixed where `AUTH_HOST_COOKIES` is on and the request is
+ *  https (the prefix needs `Secure`; their other attributes, `Path=/` and no `Domain`, already qualify). */
+export function cookieNames(env: Env, request: Request): CookieNames {
+  const prefix = env.AUTH_HOST_COOKIES === '1' && isSecureRequest(request) ? HOST_PREFIX : ''
+  return {
+    session: prefix + DEFAULT_COOKIE_NAME,
+    googleNonce: prefix + GOOGLE_NONCE_COOKIE,
+    oaNonce: prefix + OA_NONCE_COOKIE,
+    accountHint: isPreviewHost(env, request) ? false : prefix + DEFAULT_ACCOUNT_HINT_COOKIE,
+  }
+}
+
+/** The session cookie the gate reads on `request` (`presentsCredentials` verifies it). */
+export const sessionCookieName = (env: Env, request: Request): string => cookieNames(env, request).session
+
+/** The gate, its session cookie named for `request` (`cookieNames`). Without one (a test minting grants, or reading
+ *  only Bearer tokens), the package's default name. */
+export function gateFor(env: Env, request?: Request): Gate | null {
   if (!env.DB || !env.SESSION_SECRET) return null
   return createGate({
     store: grantStore(env),
@@ -466,12 +523,9 @@ export function gateFor(env: Env): Gate | null {
     profiles: d1ProfileStore(env.DB),
     secret: env.SESSION_SECRET,
     policy: scopesFor(env),
-    cookieName: SESSION_COOKIE,
+    cookieName: request ? sessionCookieName(env, request) : DEFAULT_COOKIE_NAME,
   })
 }
-
-/** The session cookie the gate reads (`presentsCredentials` verifies it). */
-export const SESSION_COOKIE = DEFAULT_COOKIE_NAME
 
 /** Identity + scopes however the request proved them; null if it didn't. */
 export interface Identity {
@@ -543,7 +597,7 @@ async function identifyOnce(ctx: Ctx): Promise<Identity | null> {
     meterOf(ctx)?.identified('session', 'session')
     return withAdmin({ email: ctx.env.DEV_EMAIL ?? 'dev@example.test', name: null, scopes: allScopes(ctx.env), via: 'session', subject: null })
   }
-  const gate = gateFor(ctx.env)
+  const gate = gateFor(ctx.env, ctx.request)
   if (!gate) return null
   const auth = await gate.authenticate(ctx.request)
   if (!auth) return null
@@ -557,7 +611,7 @@ async function identifyOnce(ctx: Ctx): Promise<Identity | null> {
 }
 
 /** Whether a request may pass the gate before it is asked: a public deployment, local dev, or a session cookie
- *  (`SESSION_COOKIE`) that verifies — the package's `verifySessionClaims` (its HMAC signature under the gate's
+ *  (`sessionCookieName`) that verifies — the package's `verifySessionClaims` (its HMAC signature under the gate's
  *  `SESSION_SECRET`, `crypto.subtle`, no I/O) with its expiry not past. Nothing else starts what a route starts beside
  *  its gate (`shared.ahead`), which then waits for it: no credential, other cookies, a forged, malformed or expired
  *  session, a `Basic` header — and a `Bearer` token or `?key=` link, which only the gate's D1 lookup can check (agent and
@@ -568,7 +622,7 @@ export async function presentsCredentials(ctx: Ctx): Promise<boolean> {
   const url = new URL(ctx.request.url)
   if (ctx.env.PUBLIC_READ || url.hostname === 'localhost' || url.hostname === '127.0.0.1') return true
   if (/^Bearer (.+)$/.test(ctx.request.headers.get('authorization') ?? '') || url.searchParams.get('key')) return false
-  const cookie = readCookie(ctx.request, SESSION_COOKIE)
+  const cookie = readCookie(ctx.request, sessionCookieName(ctx.env, ctx.request))
   // No gate (`gateFor`), no pass.
   if (!cookie || !ctx.env.DB || !ctx.env.SESSION_SECRET) return false
   return (await verifySessionClaims(cookie, ctx.env.SESSION_SECRET, Date.now())) !== null

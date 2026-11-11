@@ -24,7 +24,7 @@ const TOKEN_NAME = 'CLI / agent token'
 export const onRequest = async (ctx: Ctx): Promise<Response> => {
   const { request, env } = ctx
   if (!env.DB) return json({ error: 'token backend not configured (DB)' }, 503)
-  const gate = gateFor(env)
+  const gate = gateFor(env, request)
   if (!gate) return json({ error: 'auth backend not configured (DB / SESSION_SECRET)' }, 503)
 
   const id = await identify(ctx)

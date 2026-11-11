@@ -9,7 +9,7 @@
  * reads D1: a session is judged by its signature (`presentsCredentials`), so a signed-in visit pays nothing.
  */
 import * as oa from '@disk-tree/pages-kit/oa'
-import { type Ctx, type Env, presentsCredentials, SESSION_COOKIE } from './auth.js'
+import { type Ctx, type Env, isPreviewHost, presentsCredentials, sessionCookieName } from './auth.js'
 import type { PolicyEnv } from './og/policy.js'
 import { oaLoginConfig } from './oidc.js'
 
@@ -23,9 +23,12 @@ const NOT_WALLED = /^\/(api|data|assets|auth|og|a|v1|slack)(\/|$)|^\/(signin|pri
  *  unfurler's card shows (`anonymousPage`, `stampPage`); a person's page on a `shape` or `full` deployment is still walled. */
 const servesAnonymously = (env: Env & PolicyEnv): boolean => !!env.PUBLIC_READ || env.AUTH_MODE === 'public'
 
-/** The redirect to the broker for this request, or null to serve it as ever. */
-export function silentAttempt(ctx: { request: Request; env: Env & PolicyEnv }): Promise<Response | null> {
+/** The redirect to the broker for this request, or null to serve it as ever. Never on a preview host (`isPreviewHost`):
+ *  a PR's unreviewed code signs nobody in unasked (and the broker answers its client's `prompt=none` with
+ *  `interaction_required` until the person has clicked through once). */
+export async function silentAttempt(ctx: { request: Request; env: Env & PolicyEnv }): Promise<Response | null> {
   const { request, env } = ctx
+  if (isPreviewHost(env, request)) return null
   return oa.silentAttempt(request, {
     notWalled: NOT_WALLED,
     anonymous: () => servesAnonymously(env),
@@ -41,4 +44,4 @@ export const markedSignedOut = (request: Request, env: Env, res: Response): Resp
 /** Any route's response: one minting the session (every sign-in path converges on it) also clears the no-attempt state.
  *  Everything else, and everything on an unconfigured deployment, is `res` itself. */
 export const clearedOnSignIn = (request: Request, env: Env, res: Response): Response =>
-  oa.clearedOnSignIn(request, SESSION_COOKIE, () => !!oaLoginConfig(env, request), res)
+  oa.clearedOnSignIn(request, sessionCookieName(env, request), () => !!oaLoginConfig(env, request), res)

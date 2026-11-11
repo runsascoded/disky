@@ -1,5 +1,5 @@
 /**
- * Local-dev sign-in marker. The app session cookie (`oa_auth`) is HttpOnly, so
+ * Local-dev sign-in marker. The app session cookie (`oa_auth`, or `__Host-oa_auth`) is HttpOnly, so
  * the SPA's localhost identity stub (`devIdentity` in src/auth.ts) can't tell
  * a real sign-in happened and would keep stubbing — `?wall` would show the
  * wall again right after a successful Google / email-code sign-in. In local
@@ -14,7 +14,7 @@ export const DEV_SESSION_COOKIE = 'oa_dev_session'
  *  marker cookie alongside it. Otherwise `res` is returned untouched. */
 export const markDevSession = (res: Response, env: { DEV_EMAIL?: string }): Response => {
   if (!env.DEV_EMAIL) return res
-  const setsSession = res.headers.getSetCookie().some(c => c.startsWith('oa_auth='))
+  const setsSession = res.headers.getSetCookie().some(c => /^(__Host-)?oa_auth=/.test(c))
   if (!setsSession) return res
   const out = new Response(res.body, res)
   out.headers.append('set-cookie', `${DEV_SESSION_COOKIE}=1; Path=/; SameSite=Lax`)
