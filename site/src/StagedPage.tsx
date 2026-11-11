@@ -73,7 +73,7 @@ const prefixToPath = (prefix: string): string => {
   return m ? m[1] : prefix
 }
 
-// The section in view lives in the query (`?v=b12`, `?v=r`: `encodeSection`), as on the map: beside the rest of
+// The section in view lives in the query (`?v=batch-12`, `?v=runs`: `encodeSection`), as on the map: beside the rest of
 // the view, where a reload, a copied link and the server (a sign-in bounce, a link preview) all see it. A `#batch-12`
 // fragment is a link *to* a batch (its permalink, a Slack thread's, the staged card's): the page adopts it into the
 // param itself (`adoptSection`; the spy can't, as the sections aren't known until the batches load) and reveals the
@@ -349,7 +349,7 @@ export function StagedPage() {
   const location = useLocation()
   const navigate = useNavigate()
   const navType = useNavigationType()
-  // A `#batch-12` link (a permalink, a Slack thread's): into `?v=b12`, with the batch to reveal once it has loaded.
+  // A `#batch-12` link (a permalink, a Slack thread's): into `?v=batch-12`, with the batch to reveal once it has loaded.
   const [reveal, setReveal] = useState<number | null>(null)
   useEffect(() => {
     const to = sectionOfHash(location.hash)

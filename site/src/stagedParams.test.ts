@@ -125,14 +125,14 @@ describe('a `#` link to a section becomes `?v=`', () => {
     expect([
       adoptSection('', { section: 'batch-12', batch: 12 }),
       adoptSection('?q=hedy%7Cgrace&flat&s=-o&x=*_7', { section: 'batch-12', batch: 12 }),
-      adoptSection('?v=b3&x=3', { section: 'batch-12', batch: 12 }),
+      adoptSection('?v=batch-3&x=3', { section: 'batch-12', batch: 12 }),
       adoptSection('?q=hedy&run=a%2Fb', { section: 'runs', batch: null }),
-    ]).toEqual(['?v=b12', '?s=-o&x=*_7&v=b12', '?x=3&v=b12', '?q=hedy&run=a%2Fb&v=r'])
+    ]).toEqual(['?v=batch-12', '?s=-o&x=*_7&v=batch-12', '?x=3&v=batch-12', '?q=hedy&run=a%2Fb&v=runs'])
   })
 })
 
 it('the spy turned off: its section leaves the query, the rest as written', () => {
-  expect(['?v=b12', '?q=a%7Cb&v=r&x=*', '?x=*', ''].map(dropSection)).toEqual(['', '?q=a%7Cb&x=*', '?x=*', ''])
+  expect(['?v=batch-12', '?q=a%7Cb&v=runs&x=*', '?x=*', ''].map(dropSection)).toEqual(['', '?q=a%7Cb&x=*', '?x=*', ''])
 })
 
 // A link carries a view, never a deletion: what a run acts on (the checked rows, the armed confirm, the bucket cut) is

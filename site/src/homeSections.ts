@@ -1,5 +1,5 @@
 // The home page's sections (DOM-free: the Pages Functions share it). The scroll-spy (`useSectionSpy`, param mode)
-// names the one in view as `?v=<code>` (`encodeSection`), where a link-preview unfurler can see it (fragments never
+// names the one in view as `?v=<name>` (`encodeSection`), where a link-preview unfurler can see it (fragments never
 // reach the server); deep links scroll to it.
 
 /** The URL param holding the section in view. Not `s`, use-prms' default: the home page's `?s=` is the shade axis
@@ -9,15 +9,20 @@ export const SECTION_KEY = 'v'
  * (`migrateSection`), so older links and Slack unfurls keep landing on their section. */
 export const LEGACY_SECTION_KEY = 'section'
 
-/** Section id → its `?v=` code. A staged batch `batch-12` is `b12`; any other id is written as itself. */
-const CODES: Record<string, string> = { 'tree-map': 'm', tbl: 't', 'over-time': 'o', diff: 'd', mtime: 'c', runs: 'r' }
-const IDS: Record<string, string> = Object.fromEntries(Object.entries(CODES).map(([id, c]) => [c, id]))
+/** Section id → its `?v=` name, where a shorter one reads as well (`over-time` → `time`); a staged batch
+ * (`batch-12`) and any other id are written as themselves. */
+const NAMES: Record<string, string> = { 'tree-map': 'map', tbl: 'table', 'over-time': 'time' }
+/** `?v=` name → section id: `NAMES` inverted, plus the one-letter codes minted 2026-11-11 (`?v=o`), still read. */
+const IDS: Record<string, string> = {
+  ...Object.fromEntries(Object.entries(NAMES).map(([id, n]) => [n, id])),
+  m: 'tree-map', t: 'tbl', o: 'over-time', d: 'diff', c: 'mtime', r: 'runs',
+}
 
-/** A section id as `?v=` spells it (`over-time` → `o`, `batch-12` → `b12`). */
-export const encodeSection = (id: string): string => CODES[id] ?? id.replace(/^batch-(\d+)$/, 'b$1')
+/** A section id as `?v=` spells it (`over-time` → `time`, `diff` → `diff`). */
+export const encodeSection = (id: string): string => NAMES[id] ?? id
 
-/** A `?v=` (or legacy `?section=`) value → its section id: a code, or an id spelled out (`diff`, a retired anchor
- * such as `changes`, `batch-12`). */
+/** A `?v=` (or legacy `?section=`) value → its section id: a name, an id spelled out (`diff`, a retired anchor
+ * such as `changes`, `batch-12`), or a one-letter code (`o`, `b12`). */
 export function decodeSection(v: string): string {
   if (Object.hasOwn(IDS, v)) return IDS[v]
   const b = /^b(\d+)$/.exec(v)
@@ -30,7 +35,7 @@ export function sectionParam(sp: URLSearchParams): string | null {
   return v == null ? null : decodeSection(v)
 }
 
-/** `search` with a legacy `section=<id>` pair rewritten in place as `v=<code>` (dropped when `v=` is there already);
+/** `search` with a legacy `section=<id>` pair rewritten in place as `v=<name>` (dropped when `v=` is there already);
  * the other pairs as written. Null when there is none. */
 export function migrateSection(search: string): string | null {
   const pairs = search.replace(/^\?/, '').split('&').filter(Boolean)

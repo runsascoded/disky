@@ -1,4 +1,4 @@
-/** The size-over-time card (`?v=o`): the page's "Size over time" chart (`src/SizeOverTime.tsx`) as a
+/** The size-over-time card (`?v=time`): the page's "Size over time" chart (`src/SizeOverTime.tsx`) as a
  * card, from the series the page reads (`/api/series`'s `seriesRead`), scoped as the page scopes it. */
 import type { Env } from '../auth.js'
 import { canonId, loadRegistry } from '../identity.js'
