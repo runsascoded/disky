@@ -19,7 +19,7 @@ from pathlib import Path
 import pulumi
 import pulumi_gcp as gcp
 
-from gcp_jobs import Adopt, BatchCron, JobAccount, Secrets, cost_labels, grant_bucket, grant_secret, labeled_provider
+from gcp_jobs import Adopt, BatchCron, BatchSubmitCron, JobAccount, Secrets, cost_labels, grant_bucket, grant_secret, labeled_provider
 from cw_isolation import prepare_credentials, prepare_dispatcher, prepare_isolation
 
 cfg = pulumi.Config()
@@ -118,16 +118,30 @@ if cfg.get_bool("prepareIsolation"):
     isolation_ready.extend(prepare_dispatcher(dispatch.member))
 
 ready = [job, secrets, *shared_ready, *isolation_ready]
-scan = BatchCron(
-    "cw-usage-snapshot",
+# The 6-hourly scan: Cloud Scheduler → the Cloud Run job `cw-usage-snapshot-submit` → `job/cw-scan-submit.sh`, which
+# submits `job/cw-batch-submit.sh`'s PIN spec as `cw-usage-snapshot-YYYYMMDD-HH` (a 409 for that name = already
+# submitted), retries transient failures for 30 min, and posts to #cw-s3-admin if it still can't. Scheduler posting the
+# spec to Batch itself (`BatchCron`) can do neither: one POST, no job id, so a 5xx is a silently missed scan and a retry
+# a possible second one. The trigger keeps its name, adopted from its `BatchCron` (`cron_aliases`) and updated in place.
+SCAN = "cw-usage-snapshot"
+scan = BatchSubmitCron(
+    SCAN,
     project=project,
     region=region,
+    job=f"{SCAN}-submit",
+    trigger=SCAN,
     schedule="0 */6 * * *",
     submitter=job_dir / "cw-batch-submit.sh",
-    sa_email=job.email,
+    script=job_dir / "cw-scan-submit.sh",
+    sa_email=job.email_literal,
+    image=f"{region}-docker.pkg.dev/{project}/cw-s3-usage/scan:latest",
+    env={"SLACK_ALERT_CHANNEL": "C0C53CPM886"},  # #cw-s3-admin
+    secret_env={"SLACK_BOT_TOKEN": "cw-s3-slack-bot-token"},
+    labels={"component": "scan-submit"},
+    description="The 6-hourly scan: runs the submitter job, which names the slot's Batch job, retries, and alerts",
+    cron_aliases=[f"urn:pulumi:{STACK}::{pulumi.get_project()}::disky:gcp:BatchCron$gcp:cloudscheduler/job:Job::{SCAN}"],
     adopt=adopt,
-    existing=True,
-    depends_on=ready,
+    opts=pulumi.ResourceOptions(depends_on=ready),
 )
 meta = BatchCron(
     "cw-meta-snapshot",
@@ -143,4 +157,4 @@ meta = BatchCron(
 )
 
 pulumi.export("job_account", job.email)
-pulumi.export("crons", [scan.job.name, meta.job.name])
+pulumi.export("crons", [scan.cron.name, meta.job.name])
