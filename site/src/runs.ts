@@ -236,7 +236,7 @@ export interface PlanSummaryFile {
   contract?: string
   backend?: 'xml' | 'json'
   buckets: Record<string, { objects?: number; dirs?: number; eligible?: Tally; outside_bands?: Tally; skipped_no_generation?: BucketSkips }>
-  total?: { eligible?: Tally; outside_bands?: Tally }
+  total?: { eligible?: Tally; outside_bands?: Tally; skipped_after_as_of?: Tally }
   skipped_no_generation?: Tally & { whole_buckets: string[] }
 }
 
@@ -257,6 +257,8 @@ export interface RunOutcome {
   skipped: Tally | null
   /** Buckets none of whose objects had one, so not swept at all. */
   notSwept: string[]
+  /** Current versions outside the staging cutoff, left untouched. */
+  preserved?: Tally
   /** Its `plan-summary.json` couldn't be read, so the other fields say nothing. */
   unread?: boolean
   /** A real run closed from what it wrote, with no end record (`sweepTotals.ts`): how far its D1 totals go. */
@@ -268,7 +270,8 @@ export function runOutcome(s: PlanSummaryFile): RunOutcome | null {
   const attempted = attemptOnly(s)
   const skips = s.skipped_no_generation
   const skipped = skips && skips.objects > 0 ? { bytes: skips.bytes, objects: skips.objects } : null
-  return attempted || skipped ? { attempted, skipped, notSwept: skipped ? skips!.whole_buckets : [] } : null
+  const preserved = s.total?.skipped_after_as_of
+  return attempted || skipped || preserved?.objects ? { attempted, skipped, notSwept: skipped ? skips!.whole_buckets : [], ...(preserved?.objects ? { preserved } : {}) } : null
 }
 
 export const NOT_OBSERVABLE = 'Not observable on this run: an XML multi-delete acknowledges every generation it is sent, so a key already gone or overwritten reads the same as one it deleted.'

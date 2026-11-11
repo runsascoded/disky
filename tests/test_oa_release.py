@@ -286,3 +286,25 @@ def test_source_checkout_must_be_clean_and_exact(monkeypatch, head, dirty, messa
         assert str(error.value) == message
     else:
         assert release.validate_source(Path('source'), SHA) is None
+
+
+def test_setup_plan_is_scoped_and_disabled_without_extra_approval_clicks(tmp_path):
+    output = tmp_path / 'setup.json'
+    result = CliRunner().invoke(release.main, ['setup-plan', '-t', 'hf', '-o', str(output)])
+    assert result.exit_code == 0
+    expected = {
+        'repository': REPO,
+        'operator_policy': 'Existing repository write/maintain/admin; explicit production dispatch, self-approval allowed; no added merge-review requirement',
+        'environments': [{
+            'name': f'hf-{mode}',
+            'settings': {'wait_timer': 0, 'prevent_self_review': False, 'reviewers': [],
+                         'deployment_branch_policy': {'protected_branches': False, 'custom_branch_policies': True}},
+            'branch_policy': {'name': 'front-door', 'type': 'branch'},
+            'variables': {'CLOUDFLARE_ACCOUNT_ID': '74981a43be0de7712369306c7b19133d'},
+            'secret_names': ['CF_PAGES_DEPLOY_TOKEN'],
+        } for mode in ['dev', 'prod']],
+        'repository_variables': {'OA_SITE_RELEASE_ENABLED': 'false', 'OA_SITE_RELEASE_TARGETS': '["hf"]'},
+        'production_action': 'Manual promotion of a successful exact-SHA dev deployment',
+        'preview_data_policy': 'Unchanged; per-PR preview activation is separate',
+    }
+    assert loads(result.output) == loads(output.read_text()) == expected

@@ -13,7 +13,9 @@ import {
   renderDetails, renderDiscord, renderHeadline, renderLines, renderSummary, senderName, type ServerEvent, serverKind, sessionLinks, SLACK, tallyClient,
 } from './activityShape'
 import { captureWrite, noteActivity } from './activityHook'
-import { ingest } from './sessionLog'
+import { d1SessionLogStore } from '@open-athena/auth/session-log/d1'
+import type { SessionLogWho, SlogBatch } from '@open-athena/auth/session-log'
+const ingest = (db: D1Database, who: SessionLogWho, ua: string | null, batch: SlogBatch, now: number) => d1SessionLogStore(db).ingest(who, ua, batch, now)
 import { resetSlackScopes } from './slack'
 import type { SlogEvent } from './sessionLogShape'
 
@@ -124,6 +126,26 @@ describe('bursts (pure)', () => {
     expect(tallyClient(events, mergeKinds([])).errors).toEqual([
       { ts: 2, line: 'GET /api/scan-runs → failed · 3214ms · TypeError: Failed to fetch', page: '/scans' },
       { ts: 4, line: 'unhandled rejection: boom', page: '/users' },
+    ])
+  })
+
+  it('a failed fetch no one saw fail (a hidden tab, offline, or delivered over a minute late) counts as a request, not an error', () => {
+    const fail = { k: 'api', s: 0, ms: 1215, err: 'TypeError: Failed to fetch' }
+    const events = [
+      { t: 1000, k: 'start', u: '/' },
+      { ...fail, t: 2000, u: '/api/a' },
+      { ...fail, t: 3000, u: '/api/b', online: false, visibility: 'visible' },
+      { ...fail, t: 4000, u: '/api/c', online: true, visibility: 'hidden' },
+      { ...fail, t: 5000, u: '/api/d', online: true, visibility: 'visible' },
+    ] as SlogEvent[]
+    const tally = (receivedMs?: number) => {
+      const { counts, errors } = tallyClient(events, mergeKinds([]), receivedMs)
+      return { counts, errors: errors.map(e => e.line.split(' ')[1]) }
+    }
+    expect([tally(), tally(5000 + 60_000), tally(2000 + 60_001)]).toEqual([
+      { counts: { view: 1, api: 2, error: 2 }, errors: ['/api/a', '/api/d'] },
+      { counts: { view: 1, api: 3, error: 1 }, errors: ['/api/d'] },
+      { counts: { view: 1, api: 3, error: 1 }, errors: ['/api/d'] },
     ])
   })
 

@@ -3,6 +3,7 @@ import { CONTAINER_BG, parseColor } from './colors'
 import { candidates, type CellText, fitCandidate, inlineRoom } from './cellText'
 import { colorResolver } from './cssColor'
 import { drawDust } from './DustHatch'
+import { bandRects, drawStripes, dustInk } from './cellPaint'
 import { resolveCellStyle, resolveRing, type StyleOpts } from './cellStyle'
 import { flattenPlaced, hitTest, type FoldedNode, type PlacedCell } from './layout'
 import { squarify } from './squarify'
@@ -17,10 +18,10 @@ import { squarify } from './squarify'
  * straight back to `<Treemap>`'s drill/tooltip handlers, the identical path a
  * DOM cell's event takes.
  *
- * Parity is staged. This first cut draws base + faded bg + shared edge stroke +
- * dust tail + labels, and hit-tests cells (folded dust resolves to its specific
- * child, like the DOM tile). Segments (makeup stripes), chain-label rendering,
- * `cellHref` anchors, and the lazy-load overlay are still DOM-only.
+ * Paints fills, bands, stripe patterns, density grids, composition segments and
+ * primary labels. React cell extras are positioned above the canvas. Folded
+ * dust resolves to its specific child, like the DOM tile; keyboard anchors
+ * share the same retained geometry and interaction handlers.
  */
 
 /** A resolved pointer hit: a real cell, or a specific child under a dust tile. */
@@ -38,6 +39,8 @@ export interface CanvasHit<T> {
 }
 
 export interface TreemapCanvasProps<T> {
+  /** React overlays for visible real cells; the canvas still paints their fill and primary labels. */
+  renderCellExtra?: (n: T, path: T[], ctx: { w: number; h: number; fade: number; hasKids: boolean; chain: number }) => React.ReactNode
   cells: PlacedCell<T>[]
   width: number
   height: number
@@ -110,11 +113,29 @@ function readLabelSizes(el: Element): void {
   lblFsSm = px(cs.getPropertyValue('--dt-treemap-lbl-fs-sm'), 11.5)
 }
 
-/** A CSS color → `rgba()` at `alpha`, or null if it isn't a parseable solid
- * (a gradient/`color-mix`) so the caller can skip or fall back. A `var()`
- * reference is resolved against the canvas first (see `resolveVar`). */
+/** CSS solid colors are resolved once to sRGB, including browser-supported color mixes. */
+const browserColors = new Map<string, [number, number, number, number]>()
+let colorProbe: CanvasRenderingContext2D | null = null
+
 function rgbaAt(c: string | undefined, alpha: number): string | null {
-  const p = parseColor(resolveVar(c ?? ''))
+  const resolved = resolveVar(c ?? '')
+  let p = parseColor(resolved) ?? browserColors.get(resolved)
+  // The browser resolves CSS Color 4 (notably class-shading color-mix) to sRGB once per distinct color.
+  if (!p && !resolved.includes('var(') && typeof CSS !== 'undefined' && CSS.supports('color', resolved)) {
+    if (!colorProbe) {
+      const canvas = document.createElement('canvas')
+      canvas.width = canvas.height = 1
+      colorProbe = canvas.getContext('2d', { willReadFrequently: true })
+    }
+    if (colorProbe) {
+      colorProbe.clearRect(0, 0, 1, 1)
+      colorProbe.fillStyle = resolved
+      colorProbe.fillRect(0, 0, 1, 1)
+      const [r, g, b, a] = colorProbe.getImageData(0, 0, 1, 1).data
+      p = [r, g, b, a / 255]
+      browserColors.set(resolved, p)
+    }
+  }
   if (!p) return null
   return `rgba(${p[0]}, ${p[1]}, ${p[2]}, ${p[3] * alpha})`
 }
@@ -142,6 +163,7 @@ export function TreemapCanvas<T>({
   onHover,
   onClick,
   onLeave,
+  renderCellExtra,
 }: TreemapCanvasProps<T>) {
   const ref = useRef<HTMLCanvasElement>(null)
   // Callback ref that keeps both the internal ref (used by the paint effect)
@@ -324,6 +346,10 @@ export function TreemapCanvas<T>({
           }}
         />
       )}
+      {renderCellExtra && flat.filter(c => !c.folded && Math.min(c.w, c.h) >= 6).map(c => {
+        const extra = renderCellExtra(c.node as T, c.path, { w: c.w, h: c.h, fade: styleOpts.fadeAt(c.depth), hasKids: c.hasKids, chain: c.chainLabels ? c.chainLabels.length - 1 : 0 })
+        return extra == null ? null : <div key={idFor(c.node as T, c.path)} className="dt-treemap-canvas-extra" style={{ position: 'absolute', left: c.x, top: c.y, width: c.w, height: c.h, overflow: 'hidden', pointerEvents: 'none' }}>{extra}</div>
+      })}
       {/* A11y/keyboard/link overlay. Transparent and pointer-events:none — the
           canvas above handles all mouse input; these focusable anchors/buttons
           exist for keyboard, screen readers, Vimium, real `cellHref` links, and
@@ -436,11 +462,16 @@ function paintCell<T>(ctx: CanvasRenderingContext2D, cell: PlacedCell<T>, o: Pai
   const bw = cw - 2 * inset
   const bh = ch - 2 * inset
   if (bw > 0 && bh > 0) {
-    const fill = rgbaAt(style.bg, alpha)
+    const fill = style.bands?.length ? null : rgbaAt(style.bg, alpha)
     if (fill) {
       ctx.fillStyle = fill
       ctx.fillRect(bx, by, bw, bh)
     }
+    for (const band of bandRects(style.bands, bh)) {
+      const fill = rgbaAt(band.color, alpha)
+      if (fill && band.height > 0) { ctx.fillStyle = fill; ctx.fillRect(bx, by + band.top, bw, band.height) }
+    }
+    if (style.stripes?.length) drawStripes(ctx, bx, by, bw, bh, style.stripes, c => rgbaAt(c, alpha) ?? 'transparent')
   }
 
   // Shared edge: this cell's half-stroke ring (contrast default or pinned).
@@ -463,6 +494,14 @@ function paintCell<T>(ctx: CanvasRenderingContext2D, cell: PlacedCell<T>, o: Pai
       ctx.setLineDash([])
     }
     drawDust(ctx, bx, by, bw, bh, (cell.node as FoldedNode<T>).count)
+  }
+
+  if (!folded && dustTexture && style.dustCount !== undefined && Math.min(w, h) >= 6) {
+    const gridStyle = { ...style, bg: resolveVar(style.bg ?? ''), bands: style.bands?.map(b => ({ ...b, color: resolveVar(b.color) })), ink: resolveVar(style.ink ?? '') }
+    ctx.save()
+    ctx.globalAlpha = alpha
+    drawDust(ctx, bx, by, bw, bh, style.dustCount, dustInk(gridStyle, fade))
+    ctx.restore()
   }
 
   // Makeup stripes: a leaf cell with a mixed composition renders proportional

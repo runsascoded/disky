@@ -34,8 +34,25 @@ mode=prod
 dry=false
 status=false
 CONFIG=wrangler.toml
+usage() {
+  cat <<'EOF'
+Usage: site/deploy [--dev] [--no-push] [--dry-run] [--config FILE]
+       site/deploy --status
+
+  -h, --help       Show this help without loading deployment configuration.
+  -d, --dev        Deploy the configured preview branch; never push Git.
+  -P, --no-push    Do not push the source branch after a production deploy.
+  -n, --dry-run    Print the plan; no credentials, build, deploy or Git writes.
+      --config    Check another TOML file; requires --dry-run.
+      --status    Compare the deployed source revision with this checkout.
+
+Run from the intended deployment checkout. Preview may share production data.
+This command does not apply D1 recipes, build job images or apply infrastructure.
+EOF
+}
 while [ $# -gt 0 ]; do
   case "$1" in
+    -h|--help) usage; exit 0 ;;
     -P|--no-push) push=false ;;
     -d|--dev) mode=dev ;;
     -n|--dry-run) dry=true ;;
@@ -49,6 +66,8 @@ if [ "$CONFIG" != wrangler.toml ] && ! $dry; then
   echo "deploy: --config only goes with --dry-run (wrangler deploys wrangler.toml, whatever else is named)" >&2; exit 1
 fi
 if [ "$mode" = dev ]; then push=false; fi
+source_sha=
+if ! $dry && ! $status; then source_sha=$(../scripts/require-clean); fi
 
 # The Pages project this checkout deploys: `name = "…"` in the config.
 [ -f "$CONFIG" ] || { echo "deploy: no site/$CONFIG: each deployment branch (gcs, cw-s3, m3) carries its own; cloud has only the r2 demo's wrangler.r2*.toml (deployed by .github/workflows/deploy-r2.yml)" >&2; exit 1; }
@@ -84,7 +103,9 @@ fi
 
 # `--status`: report whether HEAD is deployed (no build/deploy). Delegates to the
 # standalone `cf-status` (queries the CF Pages deployments API, compares to HEAD).
-if $status && ! $dry; then exec ./cf-status; fi
+if $status && ! $dry; then
+  if [ "$mode" = dev ]; then exec ./cf-status --dev; else exec ./cf-status; fi
+fi
 
 # Auth via the repo's direnv CLOUDFLARE_API_TOKEN (Pages write on the account).
 # We deliberately do NOT fall back to `wrangler login` OAuth: that session tends
@@ -93,7 +114,9 @@ if $status && ! $dry; then exec ./cf-status; fi
 # reads `CLOUDFLARE_ENV`, as wrangler does): the dev stack's `STORE`/`AUTH_MODE`
 # are its own, not production's.
 branch=${PROD_BRANCH:-main}; [ "$mode" = dev ] && branch=${DEV_BRANCH:-dev}
-host=$(sed -n "s/^${mode^^}_HOST = \"\([^\"]*\)\".*/\1/p" "$CONFIG" | head -1)
+host_key=PROD_HOST
+[ "$mode" = dev ] && host_key=DEV_HOST
+host=$(sed -n "s/^${host_key} = \"\([^\"]*\)\".*/\1/p" "$CONFIG" | head -1)
 [ -n "$host" ] || host="$PROJECT.pages.dev"
 # One pointer per Pages project: `<short>-prod` / `<short>-dev`, where `<short>`
 # is `PTR_SHORT` (default the project name). Branches are
@@ -129,10 +152,37 @@ if $dry; then
   exit 0
 fi
 
-if [ "$mode" = dev ]; then CLOUDFLARE_ENV=preview pnpm build; else pnpm build; fi
+source_dirty=false
 wlog=$(mktemp)
-trap 'rm -f "$wlog"' EXIT
-pnpm exec wrangler pages deploy dist --project-name "$PROJECT" --branch "$branch" 2>&1 | tee "$wlog"
+mkdir -p ../tmp
+notice_receipt=${DEPLOY_NOTICE_RECEIPT:-../tmp/deploy-notice-$(date -u +%Y%m%dT%H%M%S)-$$.json}
+notice_stage=build
+finish_deploy() {
+  local rc=$? result=success
+  trap - EXIT
+  [ "$rc" -eq 0 ] || result=failure
+  case "$rc" in 130|143) result=cancelled ;; esac
+  if ./deploy-notify record -c "$CONFIG" -e "$mode" -g "$source_sha" -l "$wlog" -o "$notice_receipt" -s "$result" -t "$notice_stage" -u "$source_dirty"; then
+    echo "deploy notice: receipt $notice_receipt"
+    if [ "${DEPLOY_NOTIFICATIONS_ENABLED:-}" = 1 ]; then
+      ./deploy-notify send -x "$notice_receipt" || echo 'WARN: deploy notification failed; original deployment exit status preserved' >&2
+    else
+      echo 'deploy notice: Slack delivery disabled pending template/transport review'
+    fi
+  else
+    echo 'WARN: could not record the deployment notice; original deployment exit status preserved' >&2
+  fi
+  rm -f "$wlog"
+  exit "$rc"
+}
+trap finish_deploy EXIT
+export VITE_BUILD_ENVIRONMENT="$mode"
+if [ "$mode" = dev ]; then CLOUDFLARE_ENV=preview pnpm build; else pnpm build; fi
+# Source edited during the build: refused before anything is published, so there is no deployment to notice.
+if ! ../scripts/require-clean "$source_sha" >/dev/null; then trap - EXIT; rm -f "$wlog"; exit 1; fi
+notice_stage=upload
+pnpm exec wrangler pages deploy dist --project-name "$PROJECT" --branch "$branch" --commit-hash "$source_sha" --commit-dirty=false 2>&1 | tee "$wlog"
+notice_stage=verify
 # Belt and braces: if wrangler ignored the config anyway (it downgrades a config error to a warning), the
 # deployed bindings and vars are the old ones, whatever exit code it returned.
 if grep -q 'Ignoring configuration file' "$wlog"; then
@@ -157,13 +207,14 @@ for asset in $(grep -o '/assets/[^"]*\.\(js\|css\)' dist/index.html | sort -u); 
   if $ok; then echo "asset ok: $asset ($ct)"; else echo "WARN: https://$host$asset still not served as its type after 60s (got '$code $ct') — browsers loading now may cache the SPA fallback; re-check, and tell viewers ⌘⇧R" >&2; fi
 done
 
+notice_stage=finish
 # On a successful deploy, advance the local `<short>-prod` (or, for `--dev`,
 # `<short>-dev`) pointer to exactly what we shipped (HEAD). Kept in sync by deploy itself, so
 # it can't drift the way a hand-updated branch would; `cf-status` stays the
 # authority (it reads CF's own deployment metadata) and this is the git-native
 # convenience for `git log <short>-prod..HEAD` / offline diffing. Local only: it is never
 # pushed, so the shared repo's branch list carries just the deployment branches.
-sha=$(git rev-parse HEAD)
+sha=$source_sha
 git branch -f "$ptr" "$sha"
 echo "moved local $ptr → ${sha:0:9}"
 [ "$mode" = dev ] && echo "preview: https://$branch.$PROJECT.pages.dev"

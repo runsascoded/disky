@@ -369,6 +369,8 @@ class Profile:
     alerts: Mapping[str, str] = field(default_factory=dict)
     #: Env vars whose values never leave the job: each is replaced by `<NAME>` in any alert, note or error text.
     secrets: tuple[str, ...] = ()
+    #: Optional nominal Slack thread, updated only after the authoritative final run record (nominal.Config).
+    nominal: Mapping[str, object] | None = None
 
     def kind(self, name: str) -> JobKind | None:
         return next((k for k in self.jobs if k.kind == name), None)
@@ -398,6 +400,10 @@ def parse_profile(d: Mapping, base: Path | None = None) -> Profile:
     em = d.get("error_marker", ())
     kw["error_marker"] = (em,) if isinstance(em, str) else tuple(em)
     kw["alerts"] = dict(d.get("alerts", {}))
+    if d.get("nominal") is not None:
+        from .nominal import config
+
+        config(d['nominal'])
     if bad := sorted(set(kw["alerts"]) - {"label", "logs_url", "comment"}):
         raise ValueError(f"scan-run profile: unknown alerts fields {bad}")
     kw["jobs"] = tuple(JobKind(kind=j["kind"], where=j.get("where", {}), scan=tuple(j.get("scan", ())),
@@ -1967,6 +1973,9 @@ def finish_cmd(dag_path, dag_engine, error, cost_labels, rc, profile_path, d1, d
     if j.supervised:
         j.save(finished=rc)  # `supervise` reads it (and clears the state) once the job has exited
     else:
+        from .nominal import report_job
+
+        report_job(j)
         j.clear()
 
 
@@ -2030,4 +2039,29 @@ def supervised_finish(ptr: Path, ran: Ran, grace: float) -> None:
         j.finish(128 + ran.signal, why)
     elif ran.rc and finished is None:
         j.finish(ran.rc, f"killed ({signame(ran.died_of)})" if ran.died_of else f"exit {ran.rc}, without `finish`")
+    from .nominal import report_job
+
+    report_job(j)
     j.clear()
+
+
+@cli.command('nominal')
+@option('-a', '--adopt-check', is_flag=True, help='Read/verify the configured existing Slack parent and render only missing replies; writes nothing')
+@option('-c', '--profile', 'profile_path', default=None, help=f'The deployment scan-run profile (default ${PROFILE_ENV}); reads its nominal configuration')
+@option('-o', '--out', default=None, help='Write the rendered review copy or execution summary to this file')
+@option('-r', '--run-id', default=None, help='Require this authoritative terminal run record to be visible')
+@option('-x', '--execute', is_flag=True, help='Update Slack and persist state (default: render only; no Slack calls or state writes)')
+def nominal_cmd(adopt_check: bool, profile_path: str | None, out: str | None, run_id: str | None, execute: bool) -> None:
+    """Render or converge the deployment's nominal run thread (specs/done/nominal-run-threads.md)."""
+    from click import echo
+
+    from .nominal import run
+
+    p = load_profile(profile_path)
+    if not p.nominal:
+        raise ValueError('scan-run nominal: profile has no nominal configuration')
+    text = run(p.nominal, os.environ, p.project, run_id, execute, adopt_check)
+    if out:
+        Path(out).write_text(text.rstrip() + '\n')
+    else:
+        echo(text)

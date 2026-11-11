@@ -1,0 +1,69 @@
+name: Cloudflare PR preview lifecycle
+description: Authorize, publish a custom PR hostname, and retire owned Pages previews (`ui` mode - PR front end over read-only production data).
+inputs:
+  operation:
+    description: gate, publish, or retire
+    required: true
+  config:
+    description: JSON policy from a trusted base checkout, never from the PR artifact
+    required: true
+  artifact:
+    description: Credential-free build artifact directory (publish only)
+  target:
+    description: Config target; defaults to the live PR base branch
+  sha:
+    description: Exact head captured by gate (publish only)
+  mode:
+    description: Preview mode captured by gate (publish only); gate selects it from `/preview <mode>`, a `preview:<mode>` label, else `ui`
+  github-token:
+    description: Scoped job token; publish needs deployments and PR comments write
+    required: true
+  deploy-token:
+    description: Provider deployment token; never provide to the build job
+  dns-token:
+    description: Separate DNS Edit token for the configured zone (Pages custom domains)
+  work-directory:
+    description: Local scratch/receipt directory
+outputs:
+  sha:
+    description: Captured full source SHA
+    value: ${{ steps.lifecycle.outputs.sha }}
+  base_sha:
+    description: Trusted base revision captured with the head
+    value: ${{ steps.lifecycle.outputs.base_sha }}
+  mode:
+    description: Selected preview mode (`ui`; `stack` and `pipeline` are specified, not implemented)
+    value: ${{ steps.lifecycle.outputs.mode }}
+  pr:
+    description: PR number
+    value: ${{ steps.lifecycle.outputs.pr }}
+  target:
+    description: Matched trusted target
+    value: ${{ steps.lifecycle.outputs.target }}
+  url:
+    description: Stable custom preview URL
+    value: ${{ steps.lifecycle.outputs.url }}
+  receipt:
+    description: Secret-free lifecycle receipt path
+    value: ${{ steps.lifecycle.outputs.receipt }}
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-node@v4
+      with:
+        node-version: 24
+    - id: lifecycle
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+        PREVIEW_OPERATION: ${{ inputs.operation }}
+        PREVIEW_CONFIG: ${{ inputs.config }}
+        PREVIEW_ARTIFACT: ${{ inputs.artifact }}
+        PREVIEW_TARGET: ${{ inputs.target }}
+        PREVIEW_SHA: ${{ inputs.sha }}
+        PREVIEW_MODE: ${{ inputs.mode }}
+        PREVIEW_GITHUB_TOKEN: ${{ inputs.github-token }}
+        PREVIEW_DEPLOY_TOKEN: ${{ inputs.deploy-token }}
+        PREVIEW_DNS_TOKEN: ${{ inputs.dns-token }}
+        PREVIEW_WORK_DIRECTORY: ${{ inputs.work-directory }}
+      run: node "$ACTION_PATH/run.mjs"

@@ -3,7 +3,7 @@
  * session-log events are which kind, bursts, and the Slack / Discord renderings. No Workers or DOM types; the D1 and
  * sink I/O is `activity.ts`.
  */
-import { benignError, isErrorEvent, isFailedApi, type SlogEvent, summarize, TRUNC } from './sessionLogShape.js'
+import { benignError, isErrorEvent, isFailedApi, offlineFailure, type SlogEvent, summarize, TRUNC } from './sessionLogShape.js'
 
 export const NOTIFY = ['off', 'count', 'line'] as const
 export type Notify = typeof NOTIFY[number]
@@ -190,8 +190,9 @@ export function addPages(pages: Record<string, number>, more: Record<string, num
 export interface ClientError { ts: number; line: string; page: string | null }
 
 /** A batch's client events, per kind (the recorded kinds only), the paths viewed (by count, and in order), and its
- *  errors (when `error` is recorded). An error's page is the latest `view` / `nav` before it in the batch. */
-export function tallyClient(events: readonly SlogEvent[], conf: KindsConf): {
+ *  errors (when `error` is recorded). An error's page is the latest `view` / `nav` before it in the batch;
+ *  the auth package's `offlineFailure`s count as requests (`receivedMs`: when the batch arrived). */
+export function tallyClient(events: readonly SlogEvent[], conf: KindsConf, receivedMs?: number): {
   counts: Record<string, number>; pages: Record<string, number>; trail: string[]; errors: ClientError[]
 } {
   const counts: Record<string, number> = {}
@@ -200,7 +201,7 @@ export function tallyClient(events: readonly SlogEvent[], conf: KindsConf): {
   const errors: ClientError[] = []
   let page: string | null = null
   for (const e of events) {
-    const k = clientKind(e)
+    const k = offlineFailure(e, receivedMs) ? 'api' : clientKind(e)
     if ((e.k === 'start' || e.k === 'nav') && typeof e.u === 'string') page = pathOf(e.u)
     if (!k || !conf[k]?.log || (k === 'error' && benignError(e.msg))) continue
     counts[k] = (counts[k] ?? 0) + 1

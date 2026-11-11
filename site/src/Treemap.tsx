@@ -2,7 +2,7 @@ import { Explain } from './Help'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { PointerEvent, ReactNode } from 'react'
 import { stringParam, useUrlState } from 'use-prms'
-import { DustHatch, Treemap as DtTreemap } from '@disk-tree/react'
+import { Treemap as DtTreemap } from '@disk-tree/react'
 import type { CellCtx, CellStyle } from '@disk-tree/react'
 import { Avatar } from './Avatar'
 import { CopyName, copyText } from './CopyName'
@@ -414,10 +414,10 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
       // cells only (cells are semi-transparent, so a parent hatch would bleed
       // through all-STANDARD children)
       const coldFrac = lens && !ctx.hasKids ? Object.values(kid.cb ?? {}).reduce((a, b) => a + b, 0) / kid.b : 0
-      const coldHatch = coldFrac > 0.01
-        ? `repeating-linear-gradient(135deg, rgb(120 170 255 / ${(0.18 + 0.5 * coldFrac).toFixed(2)}) 0 4px, transparent 4px 9px)`
-        : undefined
-      const hatch = [writtenHatch ? WRITTEN_HATCH : undefined, coldHatch].filter(Boolean).join(', ') || undefined
+      const stripes: CellStyle['stripes'] = [
+        ...(writtenHatch ? [45, 135].map(angle => ({ angle, color: 'rgb(0 0 0 / 0.3)', width: 1.5, period: 7 })) : []),
+        ...(coldFrac > 0.01 ? [{ angle: 135, color: `rgb(120 170 255 / ${(0.18 + 0.5 * coldFrac).toFixed(2)})`, width: 4, period: 9 }] : []),
+      ]
       // highlight mode: leaf cells not majority-owned by the selected user
       // (or, for the unowned pin, not majority-unowned) fade back
       let dim = false
@@ -444,7 +444,8 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
         : bg.includes('gradient')
           ? undefined
           : `color-mix(in oklab, ${bg} ${depth === 1 ? 40 : 62}%, var(--surface))`
-      return { bg, ink, hatch, segments, edge, opacity: dim ? 0.22 : undefined }
+      const dustCount = kid.n === '(other)' ? Math.max(1, kid.f ?? 1) : undefined
+      return { bg, ink, stripes, segments, edge, dustCount, opacity: dim ? 0.22 : undefined }
     },
     [mode, shade, slotOf, userIdx, dateRange, readRange, readThrough, readLogged, readTint, effHl, effBand, lens],
   )
@@ -480,16 +481,6 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
   // directory of step dirs is one level and gets hairlines, not the
   // bucket-grade 6px frame around every cell.
   const viewLevels = drillPath?.length ? tileLevels(drillPath[drillPath.length - 1]) : 1
-
-  // Per-cell overlay: a dust hatch on every `(other)` fold, at ANY depth. The
-  // server builds these tiles (view.ts: parent − Σ kept kids, with `f` = how
-  // many children they stand in for), so they're plain nodes to the core and
-  // never hit its own fold hatch — draw the core's `DustHatch` here so a fold
-  // reads as "many small things", not a flat grey block.
-  const renderCellExtra = (n: TreeNode, _cellPath: TreeNode[], box: { w: number; h: number; fade?: number; hasKids?: boolean; chain?: number }) =>
-    n.n.startsWith('(') && box.w >= 8 && box.h >= 8
-      ? <DustHatch w={box.w} h={box.h} count={Math.max(1, n.f ?? 1)} />
-      : null
 
   const renderRollup = (node: TreeNode, path: TreeNode[]) => {
     if (redact) return null
@@ -815,7 +806,6 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
           <div className="vc-hint">Hover a cell for its details · click one to open it.</div>
         </div>
       )}
-      renderCellExtra={renderCellExtra}
       renderRollup={renderRollup}
       renderLegend={redact ? undefined : legend}
       renderCrumbSuffix={node => (

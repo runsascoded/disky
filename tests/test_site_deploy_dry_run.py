@@ -43,6 +43,25 @@ def write_config(site: Path, text: str = CONFIG, name: str = 'wrangler.toml') ->
     return f
 
 
+def test_help_without_config_credentials_or_deployment_commands(tmp_path: Path):
+    site = make_site(tmp_path)
+    expected = '''Usage: site/deploy [--dev] [--no-push] [--dry-run] [--config FILE]
+       site/deploy --status
+
+  -h, --help       Show this help without loading deployment configuration.
+  -d, --dev        Deploy the configured preview branch; never push Git.
+  -P, --no-push    Do not push the source branch after a production deploy.
+  -n, --dry-run    Print the plan; no credentials, build, deploy or Git writes.
+      --config    Check another TOML file; requires --dry-run.
+      --status    Compare the deployed source revision with this checkout.
+
+Run from the intended deployment checkout. Preview may share production data.
+This command does not apply D1 recipes, build job images or apply infrastructure.
+'''
+    assert run(site, '--help') == run(site, '-h') == (0, expected, '')
+    assert sorted(p.name for p in site.iterdir()) == ['deploy', 'toml-check']
+
+
 def test_dry_run_prod_prints_the_plan_and_needs_no_credentials(tmp_path: Path):
     site = make_site(tmp_path)
     write_config(site)
@@ -111,6 +130,15 @@ def test_an_unknown_argument_is_refused(tmp_path: Path):
     site = make_site(tmp_path)
     write_config(site)
     assert run(site, '--dryrun', '-P') == (1, '', 'deploy: unknown argument --dryrun (nothing built or deployed)\n')
+
+
+def test_dev_status_forwards_the_target_without_building(tmp_path: Path):
+    site = make_site(tmp_path)
+    write_config(site)
+    status = site / 'cf-status'
+    status.write_text('#!/bin/sh\nprintf "status %s\\n" "$*"\n')
+    status.chmod(0o755)
+    assert run(site, '--status', '--dev', env={'CLOUDFLARE_ACCOUNT_ID': 'test'}) == (0, 'status --dev\n', '')
 
 
 def test_dry_run_refuses_a_config_that_does_not_parse(tmp_path: Path):

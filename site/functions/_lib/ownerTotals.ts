@@ -1,3 +1,4 @@
+import { readerMetadata } from './readerWorker.js'
 /** Per-user owned bytes for a scan — the ownership ledger folded server-side
  * and priced against the floor-free path index (specs/done/path-agnostic-serving.md
  * §2.3), so every consumer (`/users`, `/user/:id`, `/api/assignments`, the
@@ -55,7 +56,7 @@ const indexTag = (idx: { mode: string }): string => `${idx.mode}:${'gen' in idx 
 async function storePriced(env: Env, date: string, tag: string, cache: PrefixCache): Promise<void> {
   const body = JSON.stringify(cache)
   if (body.length > PREFIX_CACHE_MAX) return
-  await env.DB!.prepare('INSERT OR REPLACE INTO owner_prefix_aggs (scan, idx, body, updated_ts) VALUES (?, ?, ?, ?)')
+  await readerMetadata(env)!.prepare('INSERT OR REPLACE INTO owner_prefix_aggs (scan, idx, body, updated_ts) VALUES (?, ?, ?, ?)')
     .bind(date, tag, body, Math.floor(Date.now() / 1000)).run()
 }
 
@@ -84,7 +85,7 @@ async function compute(env: Env, date: string, owners: Map<string, OwnerRow>, he
       computed: { at: Math.floor(Date.now() / 1000), ms: Date.now() - t0, groups: hist.groups, prefixes: hist.prefixes, index: idx.mode, hist: true },
     }
   }
-  const row = await env.DB!.prepare('SELECT body FROM owner_prefix_aggs WHERE scan = ? AND idx = ?').bind(date, tag).first<{ body: string }>()
+  const row = await readerMetadata(env)!.prepare('SELECT body FROM owner_prefix_aggs WHERE scan = ? AND idx = ?').bind(date, tag).first<{ body: string }>()
   const prior = row ? JSON.parse(row.body) as PrefixCache : null
   const cache: PrefixCache = prior?.v === PREFIX_CACHE_VERSION ? prior : { v: PREFIX_CACHE_VERSION, buckets: [], asked: [], aggs: {} }
   const asked = new Set(cache.asked)

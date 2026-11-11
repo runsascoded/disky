@@ -355,6 +355,20 @@ def test_the_marker_sums_the_ranges_checks():
     assert (empty["pass"], failure(empty)) == (False, "no rows")
 
 
+@pytest.mark.parametrize('columns, expected', [
+    (['version', 'version'], {'objects': 8, 'equal': 8, 'column': 'version'}),
+    (['version', None], {'objects': 8, 'equal': 8}),
+])
+def test_marker_vouches_for_string_tokens_only_when_every_range_compared_them(columns, expected):
+    docs = []
+    for column in columns:
+        doc = _doc(['deltas/a_b', 'deltas/c'])
+        doc['check']['generation'] = {'objects': 4, 'equal': 4, **({'column': column} if column else {})}
+        docs.append(doc)
+    marker = ia.append_marker('g', 'd', MANIFEST, docs, CUT)
+    assert (marker['pass'], marker['generation']) == (True, expected)
+
+
 def test_no_marker_when_the_append_cant_vouch():
     """No check on a range or the cut (appended before it), or a range checked against other runs than the manifest's
     (a carry's revision landed between the ranges and the publish): no marker."""

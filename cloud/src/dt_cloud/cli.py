@@ -420,6 +420,7 @@ def wandb_mine(
 @option("-S", "--search", is_flag=True, help="Also write the search sidecars beside the `path` sort (`path-index.{rows,trigrams,rows-search}.parquet`: the filter view's segment-name index, specs/done/path-store-search.md); upload them with the generation dir")
 @option("-u", "--user-sort-tiers", default=None, help="Only these sorts get a `-by-user` copy, comma-separated (`bysize`: the copy a lens view reads; default every sort)")
 @option("-U", "--no-user-sorts", "user_sorts", is_flag=True, flag_value=False, default=True, help="Skip every `-by-user` sort copy (a lens then reads the mixed-user sorts, filtered per row — fine below the root, too wide at a user's root view; see -u)")
+@option("-V", "--object-version", is_flag=True, help="Carry opaque object versions (R2/S3 ETags or exact decimal GCS generations) as a string `version`, NULL on dirs; requires a version-aware interval generation")
 @option("-P", "--path-index", "path_index", type=Path, default=None, help="Write the path store here (`<dir>/path-index.parquet`, the `path` sort; `path-index-bysize.parquet` and the by-user copies land beside it — specs/done/path-store.md §4.3)")
 @option("-x", "--access", "access", multiple=True, help="Access-log layer-2a agg parquet glob(s); adds per-node last-read ('a') for the read-recency lens")
 def build_path_index(
@@ -427,6 +428,7 @@ def build_path_index(
     dir_cache: Path | None,
     asof: str,
     generation: bool,
+    object_version: bool,
     identities_path: str | None,
     listings: tuple[str, ...],
     out_dir: Path | None,
@@ -463,7 +465,7 @@ def build_path_index(
             raise UsageError(str(e))
         partial = write_path_index(
             listings, path_index.parent, asof, attributions, identities_path, access=access, dir_cache=dir_cache, path_index=path_index,
-            user_sorts=user_sorts, row_group_rows=row_group_rows, generation=generation, path_only=path_only, part=part,
+            user_sorts=user_sorts, row_group_rows=row_group_rows, generation=generation, object_version=object_version, path_only=path_only, part=part,
             user_sort_tiers=tuple(t for t in user_sort_tiers.split(",") if t) if user_sort_tiers else None,
         )
         err(f"wrote part {part.id} beside {path_index} ({partial['total_bytes']/1e12:.1f} TB, {partial['total_objects']:,} objects)")
@@ -472,7 +474,7 @@ def build_path_index(
         out_dir = Path("site/public/data") / asof
     meta = write_path_index(
         listings, out_dir, asof, attributions, identities_path, access=access, dir_cache=dir_cache, path_index=path_index,
-        user_sorts=user_sorts, row_group_rows=row_group_rows, search=search, generation=generation, path_only=path_only,
+        user_sorts=user_sorts, row_group_rows=row_group_rows, search=search, generation=generation, object_version=object_version, path_only=path_only,
         user_sort_tiers=tuple(t for t in user_sort_tiers.split(",") if t) if user_sort_tiers else None,
     )
     err(f"wrote {out_dir}/: age.json meta.json ({meta['total_bytes']/1e12:.0f} TB, {meta['total_objects']:,} objects)")
@@ -1405,16 +1407,22 @@ def batch_group() -> None:
 @batch_group.command("submit")
 @option("-b", "--bucket", "buckets", multiple=True, help="A bucket the job reads or writes by URL (repeatable): region-checked like the ones it mounts")
 @option("-c", "--component", required=True, help="The job's `component` cost label (e.g. `race`, `analysis`, `access`)")
+@option("-e", "--exists-ok", is_flag=True, help="A job already named JOB_ID (409) counts as submitted: its name is printed, exit 0")
 @option("-L", "--region", help="Batch region (default: `$BATCH_REGION`; there is no other)")
 @option("-p", "--project", help="GCP project (default: `$GCP_PROJECT` / ADC's)")
+@option("-r", "--retry-for", type=float, default=0, help="Retry a 429, a 5xx or a connection failure with exponential backoff for up to this many seconds, then exit 1 (needs -e)")
+@option("-t", "--time-id", is_flag=True, help="JOB_ID is a strftime template over the current UTC time (e.g. `scan-%Y%m%d`: one job per UTC day)")
 @option("-X", "--cross-region", is_flag=True, help="Submit a job that runs outside the region of a bucket it mounts or names (`-b`); also `$BATCH_CROSS_REGION=1`")
 @argument("job_id")
 @argument("spec_file", type=File("r"))
 def batch_submit(
     buckets: tuple[str, ...],
     component: str,
+    exists_ok: bool,
     region: str | None,
     project: str | None,
+    retry_for: float,
+    time_id: bool,
     cross_region: bool,
     job_id: str,
     spec_file,
@@ -1427,13 +1435,30 @@ def batch_submit(
     The region is `-L`, else `$BATCH_REGION`: with neither, an error (there is no default). A job whose VMs run outside
     the location of a bucket it mounts (gcsfuse volumes) or names (`-b`) is refused (`batch.check_region`: its reads and
     writes there are billed as inter-region transfer) unless `-X`; a bucket whose location can't be read is noted on
-    stderr and not checked."""
-    from .batch import submit_job
+    stderr and not checked.
+
+    An idempotent submit (a scheduled one): `-t` names the job for its period (`batch.job_id_at`), `-e` counts that job
+    already existing as done, and `-r` retries transient failures, which the id makes safe: a retry after an answer lost
+    once Batch created the job meets that job (409), never starts a second. A repeated trigger in the same period is a
+    no-op the same way."""
+    from .batch import SubmitFailed, job_id_at, submit_job
     from .cost_labels import label_batch_spec
     from .deploy import batch_region
 
+    if retry_for and not exists_ok:
+        raise UsageError("-r/--retry-for needs -e/--exists-ok: without it, a retry after a lost answer fails on the job it created")
+    if time_id:
+        try:
+            job_id = job_id_at(job_id, dt.datetime.now(dt.timezone.utc))
+        except ValueError as e:
+            raise UsageError(str(e)) from e
     spec = label_batch_spec(json.load(spec_file), component)
-    print(submit_job(spec, job_id, batch_region(region, "pass -L/--region"), project, buckets=buckets, cross_region=cross_region or None))
+    try:
+        print(submit_job(spec, job_id, batch_region(region, "pass -L/--region"), project, buckets=buckets,
+                         cross_region=cross_region or None, exists_ok=exists_ok, retry_for=retry_for))
+    except SubmitFailed as e:
+        print(e, file=sys.stderr)
+        raise SystemExit(1) from e
 
 
 @main.command("labels")
@@ -3869,6 +3894,10 @@ main.add_command(_soft_delete)
 from .image_sha import image_sha_cmd as _image_sha  # noqa: E402
 
 main.add_command(_image_sha)
+
+from .eligibility_census import eligibility_census_cmd as _eligibility_census  # noqa: E402
+
+main.add_command(_eligibility_census)
 
 if __name__ == "__main__":
     main()

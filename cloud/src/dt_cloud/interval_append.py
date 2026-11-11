@@ -535,7 +535,7 @@ def check_tables(con, roots: list[str], name: str, D: int, *, sliced: bool = Tru
             g = gcol[0]
             n, eq = con.execute(f"""SELECT count(*), count(*) FILTER (WHERE l.{g} = o.{g}) FROM c_scan o
                 LEFT JOIN c_store l ON l.depth = o.depth AND l.path = o.path WHERE o.kind = 'file' AND o.{g} IS NOT NULL""").fetchone()
-            out["generation"] = {"objects": int(n), "equal": int(eq)}
+            out["generation"] = {"objects": int(n), "equal": int(eq), **({"column": "version"} if g == "version" else {})}
     con.execute("DROP TABLE IF EXISTS c_store; DROP TABLE IF EXISTS c_scan")
     return out
 
@@ -592,7 +592,7 @@ def append_marker(gen: str, scan: str, manifest: dict, docs: list[dict], cut: di
     if any(d["check"]["runs"] != runs for d in docs):
         return None
     tabs: dict[str, dict[str, int]] = {}
-    gen_eq: dict[str, int] | None = None
+    gen_eq: dict | None = None
     for d in docs:
         for t, v in d["check"].items():
             if t == "generation":
@@ -603,6 +603,8 @@ def append_marker(gen: str, scan: str, manifest: dict, docs: list[dict], cut: di
                     e[k] += v[k]
     ok = (tabs.get("pvl", {}).get("rows", 0) > 0 and all(v["missing"] == v["extra"] == 0 for v in (*tabs.values(), *cut.values()))
           and (gen_eq is None or gen_eq["equal"] == gen_eq["objects"]))
+    if gen_eq is not None and all(d["check"].get("generation", {}).get("column") == "version" for d in docs):
+        gen_eq["column"] = "version"
     return {"scan": scan, "gen": gen, "how": "append", "pass": ok, "manifest": f"manifests/{scan}.json", "runs": runs, "ranges": len(docs),
             "tables": tabs, "cut": cut, **({"generation": gen_eq} if gen_eq is not None else {})}
 
@@ -1400,6 +1402,13 @@ def compact_cmd(bucket, gen, ranges_gen, scratch, policy, read_from, grace_s, jo
     print(json.dumps(doc, indent=1))
 
 
+#: A run's files its R2 copy holds (run-relative prefixes, `r2_publish`): its served sorts, what the site reads.
+RUN_R2 = ("served/",)
+#: A generation's files appends write on GCS alone (generation-relative): the scans' parity markers (`verify/<id>.json`,
+#: `scan retire`'s gate), never read by the site.
+GCS_ONLY = ("verify/",)
+
+
 @cli.command("promote")
 @option("-b", "--bucket", required=True, help="The store: a bucket name (gs://) or URL")
 @option("-r", "--r2", "to_r2", is_flag=True, help="Then the R2 copy's pointers (the candidate must be on R2 already: `compact -N --r2`)")
@@ -1409,7 +1418,7 @@ def promote_cmd(bucket, to_r2, gen) -> None:
     (when it named the source), then with `-r` the R2 copy's. Refused unless GEN holds every scan its source does."""
     if (b := gs_bucket(bucket)) is None:
         raise SystemExit(f"interval store: promote moves a GCS bucket's pointers; {bucket!r} is not one")
-    print(json.dumps(ar.promote_gen(Store(f"gs://{b}"), PREFIX, gen, r2_bucket=b if to_r2 else None), indent=1))
+    print(json.dumps(ar.promote_gen(Store(f"gs://{b}"), PREFIX, gen, r2_bucket=b if to_r2 else None, served=RUN_R2, gcs_only=GCS_ONLY), indent=1))
 
 
 @cli.command("compact-r2")
@@ -1441,7 +1450,7 @@ def r2_cmd(bucket, gen, ranges_gen, scratch, scan, manifest, workers) -> None:
         return
     if gs_bucket(bucket) is None:
         raise SystemExit(f"r2: copies from a whole GCS bucket, not {bucket}")
-    doc = ar.r2_publish(gs_bucket(bucket), f"{PREFIX}/{gen}", manifest or scan, served=("served/",), workers=workers)
+    doc = ar.r2_publish(gs_bucket(bucket), f"{PREFIX}/{gen}", manifest or scan, served=RUN_R2, workers=workers)
     pruned = ar.prune_folded(ar.r2_run_store(f"{PREFIX}/{gen}"), where=" r2")
     print(json.dumps({"gen": gen, "scan": scan, **doc, "prune": _summary(pruned)}))
 

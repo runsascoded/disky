@@ -6,7 +6,8 @@ import { stringParam, useUrlState } from 'use-prms'
 import { useRenderer, useTiling } from './prefs'
 import { useUnits } from './units'
 import { deltaColor, diffBorderWidth, diffCellStyle, diffRoot, FIRST_SCANNED, UNCHANGED_GREY } from './diffStyle'
-import { diffCellAction } from './diffRows'
+import { followDiffCell } from './diffRows'
+import { DiffRemainder, showDiffFolderListing } from './DiffRemainder'
 import type { AreaMode, DiffData, DiffNode } from './diffModel'
 import { usePerfCommit } from './perf'
 
@@ -192,7 +193,7 @@ export function DiffTreemap({ model, onDrill, onOpen }: {
   onOpen?: (segs: string[]) => void
 }) {
   usePerfCommit('dtm')
-  const { root, areaMode, label, fmtBytes, fmtDelta, fmtN, fmtNDelta } = model
+  const { data, root, areaMode, label, fmtBytes, fmtDelta, fmtN, fmtNDelta } = model
   // The main map's renderer / tiling prefs apply here too.
   const [tiling] = useTiling()
   const [renderer] = useRenderer()
@@ -200,19 +201,11 @@ export function DiffTreemap({ model, onDrill, onOpen }: {
   return (
     <div className="diff-tm">
       <DtTreemap<DiffNode>
+        key={JSON.stringify([label, data.prev, data.curr])}
         root={root}
-        // Controlled at its root: a drill is the page's, not this map's. `k`
-        // decides (`diffCellAction`): an object opens, a directory drills —
-        // with or without enumerated children (the page's own read brings
-        // them) — and a fold or filler pins its tip.
+        // Drills belong to the page; remainder cells target their real parent, never the display label.
         path={[root]}
-        onCellClick={(n, _p, e) => {
-          const act = diffCellAction(n, e.altKey)
-          const go = act === 'open' ? onOpen : act === 'drill' ? onDrill : undefined
-          if (!go) return false
-          go(n.key.split('/'))
-          return true
-        }}
+        onCellClick={(n, _p, e) => followDiffCell(n, e.altKey, { open: onOpen, drill: onDrill, listing: showDiffFolderListing })}
         getSize={n => n.weight}
         getChildren={n => n.children}
         getLabel={n => (n.first ? `${n.label} (first scanned)` : n.label)}
@@ -270,6 +263,7 @@ export function DiffTreemap({ model, onDrill, onOpen }: {
                 : n.status}
               {n.lookup && ' · under the floor on one side, read exactly'}
             </div>
+            <DiffRemainder node={n} onDrill={onDrill} />
           </>
         )}
         // Resting card (nothing hovered / on a phone): the whole diff's totals

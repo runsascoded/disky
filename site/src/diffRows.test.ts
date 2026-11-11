@@ -83,7 +83,7 @@ describe('diffTableRows', () => {
 })
 
 describe('diffCellAction', () => {
-  it('`k` decides: an object opens, a directory drills (enumerated below or not); root, fold, filler and ⌥-click pin', () => {
+  it('`k` decides: an object opens, a directory drills (enumerated below or not); remainders inspect their parent; root and ⌥-click pin', () => {
     // `ckpt`'s one enumerated child leaves 10 MB unexplained: an `(unchanged)` filler.
     const { cells } = buildTree(data([
       row('ckpt', 'changed', 10_000_000, 13_000_000, 10, 11, true),
@@ -94,10 +94,10 @@ describe('diffCellAction', () => {
     const all = [...cells, ...cells.flatMap(c => c.children ?? [])]
     expect(all.map(n => [n.key, diffCellAction(n), diffCellAction(n, true)])).toEqual([
       ['ckpt', 'drill', 'pin'],
-      ['(other)', 'pin', 'pin'],
+      ['(other)', 'remainder', 'pin'],
       ['logs', 'drill', 'pin'],
       ['ckpt/model.safetensors', 'open', 'pin'],
-      ['ckpt/__unchanged__', 'pin', 'pin'],
+      ['ckpt/__unchanged__', 'remainder', 'pin'],
     ])
     expect(diffCellAction({ k: 'dir', status: 'root', label: 'ctbk' })).toBe('pin')
   })

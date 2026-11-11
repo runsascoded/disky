@@ -1,7 +1,21 @@
 import { describe, expect, it } from 'vitest'
-import { buildLine } from './build'
+import { buildLine, sourceUrl } from './build'
 
 describe('the ☰ menu\'s build line', () => {
+  it('links the deployment branch separately from the running commit', () => {
+    const repo = 'https://github.com/Open-Athena/disky/'
+    expect(['gcs', 'cw', 'hf', 'r2', 'work/hf/size chart', ''].map(ref => sourceUrl(repo, ref))).toEqual([
+      'https://github.com/Open-Athena/disky/tree/gcs',
+      'https://github.com/Open-Athena/disky/tree/cw',
+      'https://github.com/Open-Athena/disky/tree/hf',
+      'https://github.com/Open-Athena/disky/tree/r2',
+      'https://github.com/Open-Athena/disky/tree/work/hf/size%20chart',
+      'https://github.com/Open-Athena/disky',
+    ])
+    expect(buildLine(repo, '1234567890abcdef1234567890abcdef12345678', '')).toEqual({
+      sha: '12345678', time: '', href: 'https://github.com/Open-Athena/disky/commit/1234567890abcdef1234567890abcdef12345678',
+    })
+  })
   it('a clean build links its commit; a dirty or unknown one names itself, unlinked; none, no line', () => {
     const repo = 'https://github.com/runsascoded/disky'
     expect([

@@ -109,6 +109,24 @@ def _run(fx, *extra: str) -> dict:
     return json.loads(res.stdout)
 
 
+def test_review_refuses_changed_plan_before_backup_or_deletion(fx, tmp_path, monkeypatch):
+    from dt_cloud.blobstore import Store
+
+    src = Store(str(fx['root']))
+    before = src.listing('')
+    review = tmp_path / 'review.json'
+    review.write_text(json.dumps({'roots': [{'root': src.root, 'files': []}], 'd1_changes': False}))
+    backup_calls = []
+    monkeypatch.setattr(sr, 'backup', lambda *a, **kw: backup_calls.append(True))
+    with pytest.raises(ValueError) as error:
+        sr.retire(src.root, [LAYOUT], iv_root=str(fx['store']), static_gen=STATIC_GEN,
+                  layer2s=[LAYER2], execute=True, markers_only=True, d1=False, d1_elsewhere=True,
+                  backup_root=str(tmp_path / 'backup'), review=review)
+    assert str(error.value) == 'deletion review mismatch: 23 extra, 0 missing, 0 size changes; nothing deleted'
+    assert backup_calls == []
+    assert src.listing('') == before
+
+
 def test_retirement_follows_a_compacted_static_generation(fx, d1):
     before = _run(fx)
     old = fx["store"] / "static-names" / STATIC_GEN
@@ -299,6 +317,21 @@ def test_drop_path_pointer(fx, d1):
 LAYER1 = "listing/{id}/*/shard-*.parquet"
 
 
+@pytest.mark.parametrize('record', ['backfill-churn.json', 'object-version-migration.json'])
+def test_history_conversion_preserves_its_predecessors_retirement_proofs(tmp_path, record):
+    from dt_cloud.blobstore import Store
+    from dt_cloud.interval_compact import COMPACTION
+
+    store = Store(str(tmp_path))
+    store.write_text(f'interval-store/new/{record}', json.dumps({'from': 'prior'}))
+    store.write_text(f'interval-store/prior/{COMPACTION}', json.dumps({'from': 'base'}))
+    proof = {'pass': True, 'scan': '2026-10-12T1809', 'generation': {'objects': 2, 'equal': 2}}
+    store.write_text('interval-store/prior/verify/2026-10-12T1809.json', json.dumps(proof))
+    lineage = sr.lineage(store, 'new')
+    assert lineage == ['new', 'prior', 'base']
+    assert sr.find_marker_in(store, lineage, '2026-10-12T1809') == ('prior', proof)
+
+
 def _shard(path: Path, generation: list[int | None]) -> int:
     import pyarrow as pa
     import pyarrow.parquet as pq
@@ -308,6 +341,23 @@ def _shard(path: Path, generation: list[int | None]) -> int:
     pq.write_table(pa.table({"bucket": ["b"] * n, "name": [f"o{i}" for i in range(n)], "size_bytes": [1] * n,
                              "generation": pa.array(generation, pa.int64())}), path)
     return path.stat().st_size
+
+
+def test_empty_listing_shards_do_not_claim_to_hold_object_identities(tmp_path):
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    from dt_cloud.blobstore import Store
+
+    pq.write_table(pa.table({'generation': pa.array([], pa.int64()), 'version': pa.array([], pa.string())}), tmp_path / 'empty.parquet')
+    pq.write_table(pa.table({'generation': pa.array([None], pa.int64()), 'version': pa.array([None], pa.string())}), tmp_path / 'null.parquet')
+    pq.write_table(pa.table({'generation': pa.array([7], pa.int64()), 'version': pa.array(['"etag"'], pa.string())}), tmp_path / 'known.parquet')
+    store = Store(str(tmp_path))
+    assert {column: sr.has_identity(store, ['empty.parquet', 'null.parquet'], column) for column in ('generation', 'version')} == {
+        'generation': False, 'version': False,
+    }
+    assert {column: sr.has_identity(store, ['empty.parquet', 'known.parquet'], column) for column in ('generation', 'version')} == {
+        'generation': True, 'version': True,
+    }
 
 
 def test_layer1_goes_unless_it_carries_generation_no_marker_vouches_for(fx, d1):
@@ -336,6 +386,37 @@ def test_layer1_goes_unless_it_carries_generation_no_marker_vouches_for(fx, d1):
     _run(fx, "-x", "-m", "-1", LAYER1)
     assert sorted(k for k in before if k.startswith("listing/") and k not in _files(root)) == [
         "listing/2026-07-30/b/shard-000.parquet", "listing/2026-08-04T1236/b/shard-000.parquet"]
+
+
+def test_layer1_string_versions_require_a_string_identity_comparison(fx, d1):
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    root = fx["root"]
+    dates = ["2026-07-30", "2026-08-04", "2026-08-04T1236"]
+    keys = [f"listing/{date}/b/shard-000.parquet" for date in dates]
+    for key, token in zip(keys, ['"etag"', '"etag"', None]):
+        path = root / key
+        path.parent.mkdir(parents=True, exist_ok=True)
+        pq.write_table(pa.table({'bucket': ['b'], 'name': ['f'], 'size_bytes': [1],
+                                 'generation': pa.array([None], pa.int64()), 'version': pa.array([token], pa.string())}), path)
+    markers = fx["store"] / "interval-store/g/verify"
+    for date, proof in zip(dates, [{'objects': 1, 'equal': 1}, {'objects': 1, 'equal': 1, 'column': 'version'}, None]):
+        path = markers / f'{date}.json'
+        marker = json.loads(path.read_text())
+        if proof:
+            marker['generation'] = proof
+        path.write_text(json.dumps(marker))
+    report = _run(fx, '-m', '-1', LAYER1)
+    assert {r['id']: (bool(r['delete'].get('layer1')), bool(r['keep'].get('layer1'))) for r in report['scans'] if r['status'] == 'retire'} == {
+        dates[0]: (False, True), dates[1]: (True, False), dates[2]: (True, False),
+    }
+    assert next(r['held'] for r in report['scans'] if r['id'] == dates[0]) == (
+        "layer1: its listing has `version`, which its marker didn't compare equal; "
+        "attribution: the interval store's attribution table doesn't cover the scan"
+    )
+    _run(fx, '-x', '-m', '-1', LAYER1)
+    assert [key for key in keys if (root / key).exists()] == [keys[0]]
 
 
 def test_the_attribution_map_goes_only_covered_and_vouched_for(fx, d1, monkeypatch):

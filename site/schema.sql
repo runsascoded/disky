@@ -406,7 +406,7 @@ CREATE TABLE session_log (
   n_batches   INTEGER NOT NULL,
   first_url   TEXT,
   received_ts INTEGER NOT NULL
-);
+, grant_id TEXT, subject_name TEXT);
 
 CREATE TABLE session_log_batches (
   sid         TEXT NOT NULL,

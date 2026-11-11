@@ -140,20 +140,21 @@ def dir_exprs() -> dict[str, str]:
         "sum_storage_class_id_3": "coalesce(p.c3, 0)::BIGINT",
         "sum_storage_class_id_4": "coalesce(p.c4, 0)::BIGINT",
         GENERATION: "NULL::BIGINT",
+        "version": "NULL::VARCHAR",
     }
 
 
-def store_columns_for(generation: bool) -> list[str]:
-    """The store's columns (`STORE_L2_SHAPE`'s, + `generation` last with `-G`)."""
+def store_columns_for(generation: bool, object_version: bool = False) -> list[str]:
+    """The store columns, with opt-in numeric and/or opaque object identities last."""
     from .index import GENERATION
 
-    return [*store_columns([STORE_L2_SHAPE]), *([GENERATION] if generation else [])]
+    return [*store_columns([STORE_L2_SHAPE]), *([GENERATION] if generation else []), *(['version'] if object_version else [])]
 
 
-def store_select(generation: bool) -> str:
+def store_select(generation: bool, object_version: bool = False) -> str:
     """The SELECT list of a store dir row (`dir_exprs`) in the store's column order."""
     exprs = dir_exprs()
-    return ", ".join(f"{exprs[c]} AS {c}" for c in store_columns_for(generation))
+    return ", ".join(f"{exprs[c]} AS {c}" for c in store_columns_for(generation, object_version))
 
 
 def _write_store(
@@ -169,6 +170,7 @@ def _write_store(
     user_sort_tiers: tuple[str, ...] | None = None,
     search: bool = False,
     generation: bool = False,
+    object_version: bool = False,
     path_only: bool = False,
     groups: bool = True,
     roots: tuple[Path, str] | None = None,
@@ -221,7 +223,7 @@ def _write_store(
             """
         )
     _rss("dstruct")
-    columns = store_columns_for(generation)
+    columns = store_columns_for(generation, object_version)
     # An object is attributed to its dir's owner (the same deepest-prefix join
     # `dir_attr` resolved per dir; a leaf needs no explosion). The access log is
     # per dir, so `last_read` is NULL on object rows.
@@ -236,6 +238,7 @@ def _write_store(
         "created": "floor(epoch(x.created))::BIGINT", "last_read": "NULL::INTEGER",
         **{f"sum_storage_class_id_{c}": f"(CASE WHEN x.storage_class_id = {c} THEN x.size_bytes ELSE 0 END)::BIGINT" for c in (2, 3, 4)},
         GENERATION: f"x.{GENERATION}::BIGINT",
+        "version": "x.version::VARCHAR",
     }
     sel = lambda exprs: ", ".join(f"{exprs[c]} AS {c}" for c in columns)  # noqa: E731
     store = path_index.with_name(STORE_L2)
@@ -301,6 +304,7 @@ def write_path_index(
     user_sort_tiers: tuple[str, ...] | None = None,
     search: bool = False,
     generation: bool = False,
+    object_version: bool = False,
     path_only: bool = False,
     part: "Part | None" = None,
 ) -> dict:
@@ -321,7 +325,8 @@ def write_path_index(
     ``search`` writes the search sidecars beside the `path` sort
     (specs/done/path-store-search.md). ``generation`` (`path-index -G`, gcs) adds
     each object's `generation` from the listing as the store's last column
-    (NULL on dirs); off, the sorts have no such column. ``path_only``
+    (NULL on dirs); off, the sorts have no such column. ``object_version`` (`-V`) carries the normalized listing's
+    opaque string `version` instead (ETag or an exact decimal native generation), also NULL on dirs. ``path_only``
     (`path-index -O`, specs/lean-scans.md §1.1 step 2) cuts the `path` sort
     alone: no `bysize`, no `-by-user` copies, no `.groups.*` sidecars, no
     search sidecars — the input the interval store and the static name index
@@ -623,7 +628,7 @@ def write_path_index(
 
         pdir = path_index.parent
         sorts = _write_store(con, src, path_index, attr=attr, fp_dir=fp_dir, maxseg=maxseg, user_sorts=user_sorts, row_group_rows=row_group_rows,
-                             user_sort_tiers=user_sort_tiers, search=search, generation=generation, path_only=path_only,
+                             user_sort_tiers=user_sort_tiers, search=search, generation=generation, object_version=object_version, path_only=path_only,
                              groups=part is None, roots=(pdir / ROOTS, part.id) if part else None)
         _rss("store")
         if part is not None:

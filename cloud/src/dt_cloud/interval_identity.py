@@ -15,6 +15,8 @@ from .blobstore import Store, mirror, upload_new
 from .interval_local import publish_order, publish_tier
 from .static_local import _check_gen, workdir
 
+RECORD = 'object-version-migration.json'
+
 
 def migrate(store: Store, gen: str, target: str, work: Path, *, ranges_gen: str | None = None,
             threads: int = 4, mem: str = "4GB", rg_rows: int = ist.SERVED_RG) -> dict:
@@ -45,7 +47,7 @@ def migrate(store: Store, gen: str, target: str, work: Path, *, ranges_gen: str 
                                  rg_rows=rg_rows, identity=ist.OBJECT_VERSION_FIELD)
     record = {"from": gen, "gen": target, "manifest": manifest, "scans": len(doc["scans"]),
               "object_version": doc["object_version"], "rows": rows}
-    (out / "object-version-migration.json").write_text(json.dumps(record, indent=1) + "\n")
+    (out / RECORD).write_text(json.dumps(record, indent=1) + "\n")
     upload_new(store, out, prefix, {}, publish_order, tier=publish_tier)
     return record
 

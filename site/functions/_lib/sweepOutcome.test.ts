@@ -120,3 +120,9 @@ describe('lastRunOutcomeOf: the plan card\'s read of its last real run', () => {
     log.mockRestore()
   })
 })
+
+it('keeps newer-version preservation distinct from missing generation evidence', async () => {
+  expect(await reading({ ...GENERATIONS, total: { eligible: { objects: 0, bytes: 0 }, skipped_after_as_of: { objects: 3, bytes: 12 } } })(JOB)).toEqual({
+    attempted: true, skipped: null, notSwept: [], preserved: { objects: 3, bytes: 12 },
+  })
+})

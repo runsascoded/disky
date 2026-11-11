@@ -416,9 +416,9 @@ export const URL_PARAMS: Record<string, UrlParamDoc> = {
     examples: ['c', 'name', '-o', 'idle'],
   },
   section: {
-    label: 'Section in view',
-    description: 'The section the page is scrolled to, written as the reader scrolls (unless the scroll-spy is turned off) and scrolled to on load. On the map, one of its sections (`diff`, `over-time`, …). On `/staged`, a batch (`batch-12`) or `runs`; an older `#batch-12` link is rewritten to it, and also opens that batch. When absent, the page opens at its top.',
-    examples: ['diff', 'batch-12', 'runs'],
+    label: 'Section in view (older spelling)',
+    description: 'The spelling of `v` before 2026-11-11, with the section id (`diff`, `over-time`, `batch-12`). Rewritten to `v` on load; link previews read either.',
+    examples: ['diff', 'over-time'],
   },
   si: {
     label: 'Decimal units',
@@ -490,6 +490,11 @@ export const URL_PARAMS: Record<string, UrlParamDoc> = {
     description: 'The metric the Cloudflare usage page\'s attribution table ranks its top rows by: `requests`, `r2_reads`, `d1_rows_read` or `d1_rows_written`. Defaults to `requests`.',
     examples: ['d1_rows_written'],
     pages: ['/admin/usage'],
+  },
+  v: {
+    label: 'Section in view',
+    description: 'The section the page is scrolled to, written as the reader scrolls (unless the scroll-spy is turned off) and scrolled to on load. On the map: `map`, `table`, `time` (size over time), `diff`, `mtime` (bytes by modification date). On `/staged`: a batch (`batch-12`) or `runs`; an older `#batch-12` link is rewritten to it, and also opens that batch. The one-letter codes briefly written on 2026-11-11 (`v=o`, `v=b12`) are read too. When absent, the page opens at its top.',
+    examples: ['d', 'o', 'b12', 'r'],
   },
   w: {
     label: 'Run window',

@@ -1,0 +1,7 @@
+{"scan":0,"path":"b/Hit/zero","owner":"a","class":"1","bytes_delta":0,"objects_delta":1}
+{"scan":0,"path":"b/Hit/Hit/x","owner":"a","class":"1","bytes_delta":5,"objects_delta":1}
+{"scan":1,"path":"b/Hit/Hit/x","owner":"a","class":"1","bytes_delta":-5,"objects_delta":-1}
+{"scan":1,"path":"b/Hit/Hit/x","owner":"a","class":"1","bytes_delta":12,"objects_delta":1}
+{"scan":2,"path":"b/Hit/Hit/x","owner":"a","class":"1","bytes_delta":-12,"objects_delta":-1}
+{"scan":2,"path":"b/Hit/Hit/x","owner":"minor","class":"2","bytes_delta":12,"objects_delta":1}
+{"scan":3,"path":"b/Hit/Hit/x","owner":"minor","class":"2","bytes_delta":-12,"objects_delta":-1}

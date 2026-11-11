@@ -104,7 +104,7 @@ it('private anonymous unfurls bypass route handlers that read protected metadata
 
 describe('every response names the build serving it (`x-disky-build: <sha> <time>`)', () => {
   it('the header is `<sha> <iso time>`, from the generated build module', () => {
-    expect([buildId(), /^[0-9a-f]{10}(-dirty)?$|^unknown$/.test(BUILD.sha), /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/.test(BUILD.time)]).toEqual([`${BUILD.sha} ${BUILD.time}`, true, true])
+    expect([buildId(), /^[0-9a-f]{40}(-dirty)?$|^unknown$/.test(BUILD.sha), /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/.test(BUILD.time)]).toEqual([`${BUILD.sha} ${BUILD.time}`, true, true])
   })
   it('a cached endpoint\'s miss and its colo hit — the stored copy written by an older build — both carry the current build', async () => {
     const held = new Map<string, Response>()
