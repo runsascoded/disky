@@ -33,6 +33,9 @@ describe('digest params', () => {
   it('diff: month-to-date instead of the window', async () => {
     expect((await at({ diff: 'mtd' })).image.diff).toEqual({ from: '2026-08-31T0800', to: '2026-09-01T0800', path: 'main-data', title: 'What changed in main-data — 8/31 → 9/1' })
   })
+  it("the per-pool layout's map is every bucket's, not the primary's", async () => {
+    expect((await at({ diff: 'mtd', layout: 'pools' })).image.diff).toEqual({ from: '2026-08-31T0800', to: '2026-09-01T0800', path: '', title: 'What changed — 8/31 → 9/1' })
+  })
   it("today's position: sent only when not the card's default", async () => {
     expect([(await at({})).image.today_at, (await at({ todayAt: [0.8, 1] })).image.today_at]).toEqual([undefined, [0.8, 1]])
   })

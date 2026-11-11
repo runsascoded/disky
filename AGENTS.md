@@ -121,6 +121,8 @@ dt-cloud static-names add -g GEN -L LAYOUT -s SCANS -o STORE  # Append every sca
                           # gets them only by a rebuild into a new GEN — `manifests/<id>.json`), then the binary counter's carries; a URL
                           # store's generation is mirrored into `-w`, new files go up data → `meta.json`s → manifests.
                           # Small deployments' path (the r2 demo's daily ingest); gcs/cw run the stages on Batch
+dt-cloud generation-gc -t KIND -o STORE -k PIN…  # Collect verified compaction predecessors: plans by default, `-x -s SCRATCH` executes
+                          # (protocol, receipts, grace and pins: `specs/done/generation-gc-and-r2-copy.md`)
 dt-cloud interval-store migrate-object-version -g OLD -O NEW -o STORE  # Adopt string object versions without raw listings:
                           # fold existing ranges/runs; native GCS generations become exact strings, unknowns stay NULL.
                           # `-R` names borrowed source ranges. Source and CURRENT stay unchanged pending verification/cutover.
@@ -210,6 +212,10 @@ dt-cloud soft-delete -b BUCKET… [-E ENDPOINT] [-o ROOT…] [-j]  # Each bucket
                           # `snapshots/soft-delete/` for each `gs://` and `s3://` source, and the site (whose own account can't read bucket
                           # metadata) reads the newest: a recorded undo on a bucket it shows off is "undo unavailable" (its control
                           # disabled, the route refusing), one on a bucket it doesn't name is "unverified". `sweep undo` asks GCS itself
+dt-cloud monitoring-relay serve [-c slack] [-p PORT]  # Cloud Monitoring incidents → `disk-tree notify` (specs/monitoring-relay.md):
+                          # a Pub/Sub push endpoint (infra `MonitoringRelay`'s Cloud Run service), each incident posted with the
+                          # deployment's own bot (policy, condition, opened/resolved, documentation, incident link); 204 once
+                          # posted, 500 to be redelivered. `render FILE` prints the text for a notification's JSON (`-s` posts it)
 dt-cloud diff-bench -a BEFORE -b AFTER [-S STORE] [-v DATE:PATH]… CASES  # The table a store-layout change ships with (no CURRENT move
                           # without it): the browser's diff + map requests (diff-check's CASES, `-v` views) on two hosts, each
                           # cold (`-n` random w×h cache buckets no page asks for) then warm (`-s`: also each diff's `summary=1`, which no page asks); per request kind, median cold
@@ -276,6 +282,8 @@ One gate (`_lib/auth.ts`, `@open-athena/auth` over D1): `identify` → `Identity
 3. Set `ADMIN_LIST` and `ADMIN_BOOTSTRAP` on **every environment sharing that D1, at the same time**, prod and dev stack alike: a dev stack on prod's D1 with the list off lets every staff sign-in edit the list from dev.
 
 ## Development
+
+Shared work done on a deployment branch is its own commit, subject prefixed `[cloud]`, with no deployment defaults; send its sha to the root `disky` session when committed. Config and wiring are separate `[<deploy>]` commits. An unsent `[cloud]` commit is how a fix stays on one deployment.
 
 Deploy sites and build release images only from committed source. `scripts/require-clean` refuses staged, unstaged and nonignored untracked changes; there is no dirty-source override. `site/deploy` checks again after building and records the verified commit. A deployment's image build (gcs/cw `job/build.sh`) uploads a Git archive of that commit, so concurrent working-tree edits cannot enter the image. Read-only deployment status and dry runs remain available on a dirty tree.
 

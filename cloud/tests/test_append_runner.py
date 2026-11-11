@@ -94,11 +94,11 @@ def test_r2_copy_copies_a_throttled_object_again_after_a_backoff(monkeypatch):
     monkeypatch.setattr(ar.time, "sleep", sleeps.append)
     logs: list[str] = []
     doc = ar.r2_copy("data", list(r2.gcs.values()), workers=1, log=logs.append)
-    assert (r2.r2, sleeps, doc["copied"]) == (["a/b", "a/c"], [ar.R2_RETRY_S, 2 * ar.R2_RETRY_S], 2)
+    assert (r2.r2, sleeps, doc["copied"]) == (["a/b", "a/c"], [pub.R2_RETRY_S, 2 * pub.R2_RETRY_S], 2)
     assert [m for m in logs if "↻" in m] == [f"  ↻ a/b: R2 throttled ({THROTTLED}); again in {s:.0f}s" for s in sleeps]
 
 
-@pytest.mark.parametrize("msg, attempts", [(THROTTLED, ar.R2_ATTEMPTS), ("An error occurred (AccessDenied) when calling the PutObject operation", 1)])
+@pytest.mark.parametrize("msg, attempts", [(THROTTLED, pub.R2_ATTEMPTS), ("An error occurred (AccessDenied) when calling the PutObject operation", 1)])
 def test_r2_copy_raises_past_its_attempts_or_on_any_other_error(monkeypatch, msg, attempts):
     r2 = R2(["a/b"])
     r2.patch(monkeypatch, {"runs": []})

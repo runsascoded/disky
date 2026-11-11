@@ -517,20 +517,21 @@ def bucket_check(ctx: Ctx, arg: str | None) -> None:
         err("bucket-check: no s3 sources")
         return
     found: list[str] = []
+    errors: list[str] = []
     with ctx.phase("bucket-check"):
         for endpoint, scanned in by_endpoint.items():
-            found += unscanned(s3_client(endpoint), scanned)
+            result = unscanned(s3_client(endpoint), scanned)
+            found.extend(result.buckets)
+            errors.extend(result.errors)
+        messages = []
         if found:
-            from .scan_runs import scan_alert_links
-
-            text = " ".join(found)
-            message = f"unscanned-bucket check: {text}"
+            messages.append(f"non-empty buckets outside the profile's sources: {' '.join(found)}")
+        if errors:
+            messages.append(f"bucket discovery incomplete: {'; '.join(errors)}")
+        if messages:
+            message = "; ".join(messages)
             err(f"WARN: {message}")
             ctx.failure = (1, message)
-            links = scan_alert_links(ctx.env.get("SITE_URL"), getattr(ctx.run, "run_id", None), ctx.profile.store)
-            link_args = [arg for label, url in links for arg in ("-L", label, url)]
-            ctx.sh(["disk-tree", "notify", "-t", f"⚠️ {ctx.profile.deployment} {ctx.scan}", *link_args,
-                    f"non-empty bucket(s) not in the profile's sources: `{text}`"], fatal=False, warn="unscanned-bucket alert not sent")
 
 
 @step("access-ingest", core=False, stage="pre", soft=True, options={"args": list, "poller": bool},
@@ -562,7 +563,8 @@ def _access_r2_check(p: ScanProfile) -> list[str]:
     return ["options.access-r2.state: required (the collector archive's `state.json`, e.g. `r2://<archive>/state.json`)"]
 
 
-@step("access-r2", core=False, stage="pre", soft=True, options={"state": str, "out": str, "endpoint": str}, requires=_access_r2_check,
+@step("access-r2", core=False, stage="pre", soft=True, options={"state": str, "out": str, "endpoint": str, "checkpoint": str,
+                                                              "verify": bool, "mem": str, "threads": int}, requires=_access_r2_check,
       converges=True, leaves="this scan's read recency is as of the previous aggregate")
 def access_r2(ctx: Ctx, arg: str | None) -> None:
     """The R2 access collector's read aggregates → one layer-2a parquet for `index` (`options.index.access`), beside
@@ -571,15 +573,25 @@ def access_r2(ctx: Ctx, arg: str | None) -> None:
     `access/r2/agg.parquet`) rather than adding a shard. No reads yet, or a failure: the earlier aggregate stays (valid as
     of its scan) and `index` runs with it; a later run's aggregate (every hour before its own, later scan) replaces it
     (`converges`). The collector archive's key goes in `options.access-r2.secrets`, its endpoint
-    in `endpoint` (default `$R2_ENDPOINT`), set for this one command only."""
+    in `endpoint` (default `$R2_ENDPOINT`), set for this one command only.
+
+    `checkpoint`: opt into `r2-sync`, folding immutable frozen windows into one conditional Parquet checkpoint and
+    replacing the bounded active window set each scan. `verify` compares against full history before publication;
+    turn it on for bootstrap, then off after parity passes. Without a checkpoint the hourly format is unchanged."""
     if ctx.reproc:
         err("access-r2 off under REPROC")
         return
     local = ctx.work / "access-r2" / "agg.parquet"
     endpoint = ctx.opt("access-r2", "endpoint") or ctx.env.get("R2_ENDPOINT")
     env = {"DISK_TREE_R2_ENDPOINT_URL": str(endpoint)} if endpoint else {}
+    command = "r2-sync" if ctx.opt("access-r2", "checkpoint") else "r2-agg"
+    extra = []
+    if command == "r2-sync":
+        extra = ["-c", ctx.opt("access-r2", "checkpoint"), "-w", ctx.work / "access-r2" / "checkpoint",
+                 "-M", ctx.opt("access-r2", "mem", "2GB"), "-p", ctx.opt("access-r2", "threads", 2),
+                 *(["-v"] if ctx.opt("access-r2", "verify", False) else [])]
     with ctx.phase("access-r2"):
-        ran = ctx.sh(["dt-cloud", "access", "r2-agg", "-d", ctx.scan, "-o", local, "-s", ctx.opt("access-r2", "state")], fatal=False,
+        ran = ctx.sh(["dt-cloud", "access", command, "-d", ctx.scan, "-o", local, "-s", ctx.opt("access-r2", "state"), *extra], fatal=False,
                      env=env, warn="r2 read aggregate failed (the index reads the previous one)")
         if ran is None or not local.exists():
             return
@@ -598,22 +610,28 @@ def s3_client(endpoint: str | None):
     return boto3.client("s3", endpoint_url=endpoint, config=Config(s3={"addressing_style": "virtual"}))
 
 
-def unscanned(client, scanned: set[str]) -> list[str]:
-    """The non-empty buckets `client` lists that aren't in `scanned`; a failed check is an entry naming the call."""
+@dataclass
+class BucketDiscovery:
+    buckets: list[str]
+    errors: list[str]
+
+
+def unscanned(client, scanned: set[str]) -> BucketDiscovery:
+    """Confirmed non-empty unscanned buckets, separately from calls whose coverage is unknown."""
     try:
         names = sorted(b["Name"] for b in client.list_buckets()["Buckets"])
-    except Exception as e:  # noqa: BLE001 — reported in the alert, never fatal
-        return [f"check failed: ListBuckets: {type(e).__name__}: {e}"]
-    out = []
+    except Exception as e:  # noqa: BLE001 — reported as a failed side check, never a bucket finding
+        return BucketDiscovery([], [f"ListBuckets: {type(e).__name__}: {e}"])
+    result = BucketDiscovery([], [])
     for n in names:
         if n in scanned:
             continue
         try:
             if client.list_objects_v2(Bucket=n, MaxKeys=1).get("KeyCount"):
-                out.append(n)
-        except Exception as e:  # noqa: BLE001
-            out.append(f"{n} (check failed: ListObjectsV2: {type(e).__name__}: {e})")
-    return out
+                result.buckets.append(n)
+        except Exception as e:  # noqa: BLE001 — this bucket's emptiness is unknown
+            result.errors.append(f"ListObjectsV2 {n}: {type(e).__name__}: {e}")
+    return result
 
 
 def _list_check(p: ScanProfile) -> list[str]:
@@ -1496,7 +1514,8 @@ def retire(ctx: Ctx, arg: str | None) -> None:
                    warn=f"retire failed on {root} (its per-scan files stay; the next run retries)")
 
 
-@step("store-gc", core=False, soft=True, options={"execute": bool, "grace": int, "store": str, "copies": list, "static_gens": list},
+@step("store-gc", core=False, soft=True, options={"execute": bool, "grace": int, "store": str, "copies": list, "static_gens": list,
+                                              "static_store": str, "static_copies": list, "scratch": str},
       side=True, converges=True, leaves="superseded store generations not collected")
 def store_gc(ctx: Ctx, arg: str | None) -> None:
     """Superseded interval-store generations (`dt-cloud store-gc -l`): what the current generation was compacted or
@@ -1518,7 +1537,15 @@ def store_gc(ctx: Ctx, arg: str | None) -> None:
     with ctx.phase("store-gc", note=None if ctx.opt("store-gc", "execute") else "dry run"):
         for root in dict.fromkeys(r for r in [store, *ctx.opt("store-gc", "copies", [archive])] if r):
             ctx.sh(["dt-cloud", "store-gc", *args, "-o", root], fatal=False, warn=f"store-gc failed on {root} (the generations stay)")
-        if ctx.opt("store-gc", "static_gens") and archive:
+        if ctx.opt("store-gc", "static_store"):
+            static = ["dt-cloud", "generation-gc", "-t", "static-names", "-o", ctx.opt("store-gc", "static_store"),
+                      *(a for g in ctx.opt("store-gc", "static_gens", []) for a in ("-k", g)),
+                      *(a for root in ctx.opt("store-gc", "static_copies", []) for a in ("-c", root)),
+                      *(["-s", ctx.opt("store-gc", "scratch")] if ctx.opt("store-gc", "scratch") else []),
+                      *(["-G", ctx.opt("store-gc", "grace")] if ctx.opt("store-gc", "grace") is not None else []),
+                      *(["-x"] if ctx.opt("store-gc", "execute") else [])]
+            ctx.sh(static, fatal=False, warn="coordinated static generation cleanup failed (the generations stay)")
+        elif ctx.opt("store-gc", "static_gens") and archive:
             static = ["-t", "static-names", *(a for g in ctx.opt("store-gc", "static_gens") for a in ("-k", g)),
                       *(["-x"] if ctx.opt("store-gc", "execute") else [])]
             ctx.sh(["dt-cloud", "store-gc", *static, "-o", archive], fatal=False,

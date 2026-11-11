@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { bandCallouts, geneses, pickAnnotations, prominentExtrema, relativeSeries, seriesGaps, stackSeries, unitTicks, youngestGenesis } from './series'
+import { bandCallouts, fillSeriesWindows, geneses, pickAnnotations, prominentExtrema, relativeSeries, seriesGaps, stackSeries, unitTicks, youngestGenesis } from './series'
 
 const P = { key: 'p', points: [{ x: 1, y: 90 }, { x: 2, y: 100 }, { x: 3, y: 101 }] }
 const H = { key: 'h', points: [{ x: 3, y: 40 }] }
@@ -269,5 +269,31 @@ describe('seriesGaps: a series\' unindexed scans as gaps, never zeros', () => {
       { xs: [], note: null },
       { xs: at('2026-09-29'), note: '1 scan not indexed (gaps in the line)' },
     ])
+  })
+})
+
+describe('fillSeriesWindows', () => {
+  const win = (dates: string[], more: object = {}) => ({ points: dates.map(date => ({ date })), ...more })
+  it('fills newest first, reporting the series so far, and drops `chunks`', async () => {
+    const asked: number[] = []
+    const seen: string[][] = []
+    const got = await fillSeriesWindows(
+      win(['e'], { chunks: 3, path: 'p' }),
+      async i => { asked.push(i); return win(i === 1 ? ['c', 'd'] : ['a', 'b']) },
+      s => seen.push(s.points.map(p => p.date)),
+      1,
+    )
+    expect(asked).toEqual([1, 0])
+    expect(seen).toEqual([['c', 'd', 'e'], ['a', 'b', 'c', 'd', 'e']])
+    expect(got).toEqual({ path: 'p', points: [{ date: 'a' }, { date: 'b' }, { date: 'c' }, { date: 'd' }, { date: 'e' }] })
+  })
+  it('merges the windows\' named scans, and reads nothing for a single window', async () => {
+    const got = await fillSeriesWindows(win(['c'], { chunks: 2, failed: ['z'] }), async () => win(['a'], { failed: ['b'], unindexed: ['y'] }), () => {})
+    expect(got).toEqual({ points: [{ date: 'a' }, { date: 'c' }], failed: ['b', 'z'], unindexed: ['y'] })
+    const read = async (): Promise<ReturnType<typeof win>> => { throw new Error('unread') }
+    expect(await fillSeriesWindows(win(['a'], { chunks: 1 }), read, () => {})).toEqual({ points: [{ date: 'a' }] })
+  })
+  it('rejects when a window fails', async () => {
+    await expect(fillSeriesWindows(win(['b'], { chunks: 2 }), async () => { throw new Error('503') }, () => {})).rejects.toThrow('503')
   })
 })

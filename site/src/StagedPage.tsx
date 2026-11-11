@@ -42,6 +42,7 @@ import { useOwnerIndex, useOwners } from './owners'
 import { useRowSelection, useRowSelectionKeys } from './rowSelection'
 import { CAPS, useDispatch, useExecJobs, usePrefixHistory, useRunAction, useRunFiles, useScanDeletions, useStagedPlan, useUnstage } from './plans'
 import type { EmptiedBatch, StagedItem } from './plans'
+import { addBatchDeletion } from './batchDeletion'
 import { itemsDigest, joinRuns, LIVE_STATES, reusableDryRun, runFilesRel, viewBuckets, viewLive, type ProgressFile } from './runs'
 import { PrefixRecovery } from './PrefixRecovery'
 import { liveTargetOf, prefixExecution } from './prefixExecution'
@@ -133,7 +134,7 @@ function SessionLink({ g }: { g: Group }) {
 
 /** An emptied gesture's fate, as one line: what absorbed it, what was taken
  * back, what was already covered. */
-function EmptiedLine({ e, batches }: { e: EmptiedBatch; batches: Map<number, { created_by: string; created_ts: number }> }) {
+function EmptiedLine({ e, batches, fmtBytes }: { e: EmptiedBatch; batches: Map<number, { created_by: string; created_ts: number }>; fmtBytes: (b: number) => string }) {
   const n = (k: number) => `${k} ${k === 1 ? 'prefix' : 'prefixes'}`
   const parts: ReactNode[] = e.absorbed.map(a => {
     const into = batches.get(a.into)
@@ -144,6 +145,10 @@ function EmptiedLine({ e, batches }: { e: EmptiedBatch; batches: Map<number, { c
     )
   })
   if (e.deleted) parts.push(<Tooltip key="d" content="The reviewed snapshot was processed successfully. Newer objects were left alone and require a separate staging review."><span>{n(e.deleted)} completed</span></Tooltip>)
+  if (e.deletion) parts.push(<Tooltip key="size" content={`Recorded deletions from the real runs that completed ${e.deletion.prefixes} of ${e.deleted} prefixes. These are execution totals, independent of the current scan. Earlier attempts and missing historical bands are not included; later restores do not change these totals.`}>
+    <span>{e.deletion.prefixes < e.deleted && 'at least '}{fmtBytes(e.deletion.bytes)} · {fmtN(e.deletion.objects)} {e.deletion.objects === 1 ? 'object' : 'objects'} deleted{e.deletion.prefixes < e.deleted && ' (partial history)'}</span>
+  </Tooltip>)
+  else if (e.deleted) parts.push(<span key="size">deletion size unavailable</span>)
   if (e.unstaged) parts.push(<span key="u">{n(e.unstaged)} unstaged</span>)
   if (e.covered) parts.push(<span key="c">{n(e.covered)} already covered by a staged ancestor</span>)
   if (!parts.length) parts.push(<span key="none">nothing new (already staged)</span>)
@@ -321,10 +326,10 @@ export function StagedPage() {
     for (const e of emptied) {
       const k = lead(e.id)
       if (byBatch.has(k)) continue
-      const g = gone.get(k) ?? { ...(batchById.get(k) ?? e), id: k, prefixes: [], staged: 0, covered: 0, absorbed: [], unstaged: 0, deleted: 0 }
+      const g = gone.get(k) ?? { ...(batchById.get(k) ?? e), id: k, prefixes: [], staged: 0, covered: 0, absorbed: [], unstaged: 0, deleted: 0, deletion: undefined }
       const absorbed = new Map(g.absorbed.map(a => [a.into, a.n]))
       for (const a of e.absorbed) if (lead(a.into) !== k) absorbed.set(lead(a.into), (absorbed.get(lead(a.into)) ?? 0) + a.n)
-      gone.set(k, { ...g, prefixes: [...new Set([...g.prefixes, ...(e.prefixes ?? [])])].sort(), staged: g.staged + e.staged, covered: g.covered + e.covered, unstaged: g.unstaged + e.unstaged, deleted: g.deleted + e.deleted, absorbed: [...absorbed].map(([into, n]) => ({ into, n })) })
+      gone.set(k, { ...g, prefixes: [...new Set([...g.prefixes, ...(e.prefixes ?? [])])].sort(), staged: g.staged + e.staged, covered: g.covered + e.covered, unstaged: g.unstaged + e.unstaged, deleted: g.deleted + e.deleted, deletion: addBatchDeletion(g.deletion, e.deletion), absorbed: [...absorbed].map(([into, n]) => ({ into, n })) })
     }
     const ids = (id: number | null) => id == null ? [] : membersOf.get(id) ?? [id]
     return [...[...byBatch.entries()]
@@ -504,7 +509,7 @@ export function StagedPage() {
           <button type="button" className="fold" aria-expanded={open} aria-label={open ? 'collapse completed batch' : 'expand completed batch'}
             onClick={() => fold(g, open)}><Tri open={open} /></button>
           <UserChip who={g.emptied.created_by} size={18} /> staged <Tooltip content={iso(g.emptied.created_ts)}><span>{relAgo(g.emptied.created_ts)}</span></Tooltip>
-          <span className="dim">· <EmptiedLine e={g.emptied} batches={batchById} /></span>
+          <span className="dim">· <EmptiedLine e={g.emptied} batches={batchById} fmtBytes={fmtBytes} /></span>
           <SessionLink g={g} />
           {g.emptied.note && <i className="memo">{g.emptied.note}</i>}
         </div>
@@ -613,14 +618,14 @@ export function StagedPage() {
             <section className="staged-map">
               <h3>{q.trim() ? <>staged, matching “{q.trim()}”</> : 'everything staged'}</h3>
               <div className="map-box">
-                <Treemap key={`all:${date}`} root={tree} mode="user" userIdx={userIdx} dateRange={null} scheme={store.scheme} />
+                <Treemap key={`all:${date}`} root={tree} stagedRings={false} mode="user" userIdx={userIdx} dateRange={null} scheme={store.scheme} />
               </div>
             </section>
             {selTree && (
               <section className="staged-map">
                 <h3>selected · {selected.length} · {fmtBytes(selTotal.b)}</h3>
                 <div className="map-box">
-                  <Treemap key={`sel:${date}:${selKey}`} root={selTree} mode="user" userIdx={userIdx} dateRange={null} scheme={store.scheme} />
+                  <Treemap key={`sel:${date}:${selKey}`} root={selTree} stagedRings={false} mode="user" userIdx={userIdx} dateRange={null} scheme={store.scheme} />
                 </div>
               </section>
             )}

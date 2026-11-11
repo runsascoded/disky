@@ -741,3 +741,239 @@ class BatchSubmitCron(RunJobCron):
             retry=retry,
             **kw,
         )
+
+
+class CronAlerts(ComponentResource):
+    """The backstop for a `BatchSubmitCron`'s failures its own script can't report, as Cloud Monitoring alert policies
+    to `channels`, event-driven, no time windows. A channel is a notification channel's id
+    (`projects/<project>/notificationChannels/<n>`): a `MonitoringRelay`'s `.channel` (the deployment's own bot, all in
+    the stack), or one made by hand in the console (e.g. Monitoring's Slack app, whose OAuth the stack can't do).
+
+    - `<job> failed`: a Cloud Run execution of `job` ended failed (`run.googleapis.com/job/completed_execution_count`,
+      `result="failed"`): the container never started, ran out of memory, hit its timeout, or the script exited
+      nonzero (which also posts its own, fuller alert).
+    - `<trigger> couldn't start the job`: Cloud Scheduler logged a failed attempt to run it (its call to the job's
+      `:run`; it retries per its retry config, so each failed attempt is one log entry), at most one notification an hour.
+
+    Not covered: a trigger paused or deleted produces no event at all."""
+
+    TYPE = "disky:gcp:CronAlerts"
+
+    def __init__(self, name: str, *, project: str, job: str, trigger: str, channels: Sequence[pulumi.Input[str]], opts: ResourceOptions | None = None):
+        if not channels:
+            raise ValueError(f"CronAlerts {name}: no notification channels (policies nobody is told of)")
+        super().__init__(self.TYPE, name, None, opts)
+        M = gcp.monitoring
+        child = ResourceOptions(parent=self)
+        self.failed = M.AlertPolicy(
+            f"{name}-failed",
+            project=project,
+            display_name=f"{job} failed",
+            combiner="OR",
+            conditions=[M.AlertPolicyConditionArgs(
+                display_name="a failed execution",
+                condition_threshold=M.AlertPolicyConditionConditionThresholdArgs(
+                    filter=(f'resource.type = "cloud_run_job" AND resource.labels.job_name = "{job}" AND '
+                            'metric.type = "run.googleapis.com/job/completed_execution_count" AND metric.labels.result = "failed"'),
+                    comparison="COMPARISON_GT",
+                    threshold_value=0,
+                    duration="0s",
+                    aggregations=[M.AlertPolicyConditionConditionThresholdAggregationArgs(alignment_period="300s", per_series_aligner="ALIGN_DELTA")],
+                    trigger=M.AlertPolicyConditionConditionThresholdTriggerArgs(count=1),
+                ),
+            )],
+            documentation=M.AlertPolicyDocumentationArgs(
+                mime_type="text/markdown",
+                content=(f"A run of the Cloud Run job `{job}` failed, so this period's Batch job may not exist. Its logs say why; "
+                         f"re-run it once fixed (a no-op if the job exists): `gcloud run jobs execute {job} --region <region> --project {project}`"),
+            ),
+            notification_channels=list(channels),
+            opts=child,
+        )
+        self.unstarted = M.AlertPolicy(
+            f"{name}-unstarted",
+            project=project,
+            display_name=f"{trigger} couldn't start {job}",
+            combiner="OR",
+            conditions=[M.AlertPolicyConditionArgs(
+                display_name="a failed Scheduler attempt",
+                condition_matched_log=M.AlertPolicyConditionConditionMatchedLogArgs(
+                    filter=f'resource.type = "cloud_scheduler_job" AND resource.labels.job_id = "{trigger}" AND severity >= ERROR',
+                ),
+            )],
+            alert_strategy=M.AlertPolicyAlertStrategyArgs(
+                notification_rate_limit=M.AlertPolicyAlertStrategyNotificationRateLimitArgs(period="3600s"),
+                auto_close="1800s",
+            ),
+            documentation=M.AlertPolicyDocumentationArgs(
+                mime_type="text/markdown",
+                content=f"Cloud Scheduler `{trigger}` failed to run the Cloud Run job `{job}` (after its retries, one entry each attempt).",
+            ),
+            notification_channels=list(channels),
+            opts=child,
+        )
+        self.register_outputs({})
+
+
+#: Who publishes a Pub/Sub notification channel's messages: the project's Monitoring notification service agent, made
+#: when the project's first Pub/Sub channel is (so its grant on the topic follows the channel).
+MONITORING_AGENT = "service-{number}@gcp-sa-monitoring-notification.iam.gserviceaccount.com"
+
+
+class MonitoringRelay(ComponentResource):
+    """Cloud Monitoring alerts to the deployment's own alert channel (its Slack bot, through `disk-tree notify`), with
+    no console step: a Pub/Sub notification channel on a topic, and a push subscription delivering each incident to a
+    Cloud Run service that runs `dt-cloud monitoring-relay serve` from the deployment's `image` (spec
+    specs/monitoring-relay.md). `.channel` is the notification channel, for `CronAlerts` or any alert policy.
+
+    - the topic, published to by the Monitoring notification agent (`MONITORING_AGENT`, granted once the channel exists);
+    - the service, as its own account (`account_id`), which reads `secret_env`'s secrets (e.g. the bot token) and
+      nothing else; `env` beside them (e.g. `SLACK_ALERT_CHANNEL`); scaled to zero between alerts, one instance at most;
+    - the push, authenticated by an OIDC token as that same account (`run.invoker` on the service, which Cloud Run
+      checks: the service admits no one else), minted by the Pub/Sub service agent (`serviceAccountTokenCreator` on
+      the account). Undelivered (no channel took it: 500), a message is retried, 10 s backing off to 10 min, for a day.
+
+    The image is the stack's as given: Cloud Run pins the digest `:latest` meant when the revision was made, so a
+    rebuilt image reaches the relay by a new revision (`gcloud run deploy <name> --image <image>`), not by `up` alone."""
+
+    TYPE = "disky:gcp:MonitoringRelay"
+
+    def __init__(
+        self,
+        name: str,
+        *,
+        project: str,
+        region: str,
+        image: pulumi.Input[str],
+        account_id: str,
+        secret_env: dict[str, str],
+        env: dict[str, str] | None = None,
+        channels: str = "slack",
+        memory: str = "1Gi",
+        labels: dict[str, str] | None = None,
+        display_name: str | None = None,
+        opts: ResourceOptions | None = None,
+    ):
+        super().__init__(self.TYPE, name, None, opts)
+        child = ResourceOptions(parent=self)
+        labels = {"component": "alert-relay", **(labels or {})}
+        api = gcp.projects.Service(
+            f"{name}-pubsub-api",
+            project=project,
+            service="pubsub.googleapis.com",
+            disable_on_destroy=False,
+            deletion_policy="ABANDON",
+            opts=child,
+        )
+        pubsub_agent = gcp.projects.ServiceIdentity(
+            f"{name}-pubsub-agent",
+            project=project,
+            service="pubsub.googleapis.com",
+            opts=ResourceOptions(parent=self, depends_on=[api]),
+        )
+        self.topic = gcp.pubsub.Topic(name, project=project, name=name, labels=labels, opts=ResourceOptions(parent=self, depends_on=[api]))
+        self.account = gcp.serviceaccount.Account(
+            f"{name}-sa",
+            project=project,
+            account_id=account_id,
+            display_name=f"{name}: Monitoring incidents to the deployment's alert channel",
+            opts=child,
+        )
+        member = sa_member(self.account.email)
+        grants = [
+            gcp.secretmanager.SecretIamMember(
+                f"{name}-{sid}-accessor",
+                project=project,
+                secret_id=sid,
+                role="roles/secretmanager.secretAccessor",
+                member=member,
+                opts=child,
+            )
+            for sid in sorted(set(secret_env.values()))
+        ]
+        self.service = gcp.cloudrunv2.Service(
+            name,
+            project=project,
+            location=region,
+            name=name,
+            deletion_protection=False,
+            ingress="INGRESS_TRAFFIC_ALL",
+            labels=labels,
+            template=gcp.cloudrunv2.ServiceTemplateArgs(
+                service_account=self.account.email,
+                timeout="60s",
+                scaling=gcp.cloudrunv2.ServiceTemplateScalingArgs(min_instance_count=0, max_instance_count=1),
+                containers=[gcp.cloudrunv2.ServiceTemplateContainerArgs(
+                    image=image,
+                    commands=["dt-cloud", "monitoring-relay", "serve", "-c", channels],
+                    resources=gcp.cloudrunv2.ServiceTemplateContainerResourcesArgs(
+                        limits={"cpu": "1000m", "memory": memory}, cpu_idle=True, startup_cpu_boost=True,
+                    ),
+                    envs=[
+                        gcp.cloudrunv2.ServiceTemplateContainerEnvArgs(name=var, value=value)
+                        for var, value in (env or {}).items()
+                    ] + [
+                        gcp.cloudrunv2.ServiceTemplateContainerEnvArgs(
+                            name=var,
+                            value_source=gcp.cloudrunv2.ServiceTemplateContainerEnvValueSourceArgs(
+                                secret_key_ref=gcp.cloudrunv2.ServiceTemplateContainerEnvValueSourceSecretKeyRefArgs(secret=sid, version="latest"),
+                            ),
+                        )
+                        for var, sid in secret_env.items()
+                    ],
+                )],
+            ),
+            opts=ResourceOptions(parent=self, depends_on=grants, ignore_changes=["client", "clientVersion"]),
+        )
+        invoker = gcp.cloudrunv2.ServiceIamMember(
+            f"{name}-invoker",
+            project=project,
+            location=region,
+            name=self.service.name,
+            role="roles/run.invoker",
+            member=member,
+            opts=child,
+        )
+        token = gcp.serviceaccount.IAMMember(
+            f"{name}-pubsub-token",
+            service_account_id=self.account.name,
+            role="roles/iam.serviceAccountTokenCreator",
+            member=pubsub_agent.member,
+            opts=child,
+        )
+        self.subscription = gcp.pubsub.Subscription(
+            name,
+            project=project,
+            name=name,
+            topic=self.topic.id,
+            labels=labels,
+            ack_deadline_seconds=60,
+            message_retention_duration="86400s",
+            retry_policy=gcp.pubsub.SubscriptionRetryPolicyArgs(minimum_backoff="10s", maximum_backoff="600s"),
+            expiration_policy=gcp.pubsub.SubscriptionExpirationPolicyArgs(ttl=""),
+            push_config=gcp.pubsub.SubscriptionPushConfigArgs(
+                push_endpoint=self.service.uri,
+                oidc_token=gcp.pubsub.SubscriptionPushConfigOidcTokenArgs(service_account_email=self.account.email, audience=self.service.uri),
+            ),
+            opts=ResourceOptions(parent=self, depends_on=[invoker, token]),
+        )
+        self.notification_channel = gcp.monitoring.NotificationChannel(
+            name,
+            project=project,
+            type="pubsub",
+            display_name=display_name or f"{name} (Pub/Sub, relayed to {channels})",
+            labels={"topic": self.topic.id},
+            opts=ResourceOptions(parent=self, depends_on=[self.subscription]),
+        )
+        number = gcp.organizations.get_project_output(project_id=project).number
+        gcp.pubsub.TopicIAMMember(
+            f"{name}-monitoring-publisher",
+            project=project,
+            topic=self.topic.name,
+            role="roles/pubsub.publisher",
+            member=number.apply(lambda n: "serviceAccount:" + MONITORING_AGENT.format(number=n)),
+            opts=ResourceOptions(parent=self, depends_on=[self.notification_channel]),
+        )
+        self.channel: pulumi.Output[str] = self.notification_channel.name
+        self.register_outputs({"channel": self.channel, "topic": self.topic.id, "service": self.service.uri})
+
