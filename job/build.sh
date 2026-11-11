@@ -33,7 +33,9 @@ if caller_root=$(git -C "$caller" rev-parse --show-toplevel 2>/dev/null) && [ "$
 fi
 
 PROJECT=${PROJECT:-oa-internal-450019}
+DEFAULT_IMAGE=0
 if [ -z "${IMAGE:-}" ]; then
+  DEFAULT_IMAGE=1
   IMAGE=us-central1-docker.pkg.dev/$PROJECT/cloud-run-source-deploy/gcs-usage-snapshot:latest
   MIRROR=${MIRROR-us-east1-docker.pkg.dev/$PROJECT/gcs-usage/scan:latest}
 fi
@@ -66,5 +68,22 @@ if [ "$dirty" = 1 ] && [ "${ALLOW_DIRTY:-}" != 1 ]; then
 fi
 
 echo "building $IMAGE (Cloud Build; context = $root, minus .gcloudignore)" >&2
-exec gcloud builds submit --project "$PROJECT" --config cloudbuild.yaml \
+gcloud builds submit --project "$PROJECT" --config cloudbuild.yaml \
   --substitutions "_IMAGE=$IMAGE,_MIRROR=$MIRROR,_GIT_SHA=$sha,_GIT_DIRTY=$dirty" .
+
+# Cloud Run resolves an image tag to its digest when a job or service is created or updated, not when it runs: the
+# deployment's Cloud Run consumers of `:latest` (the daily scan's submitter, the alert relay) keep the build they were
+# made from until updated. A default build re-points them at it (same tag, so the stack sees no change); one that
+# doesn't exist yet is skipped.
+if [ "$DEFAULT_IMAGE" = 1 ]; then
+  for job in gcs-usage-snapshot-submit; do
+    if gcloud run jobs describe "$job" --project "$PROJECT" --region us-central1 --format='value(name)' >/dev/null 2>&1; then
+      gcloud run jobs update "$job" --project "$PROJECT" --region us-central1 --image "$IMAGE" --quiet >&2 && echo "re-pointed Cloud Run job $job at $IMAGE" >&2
+    fi
+  done
+  for svc in gcs-alert-relay; do
+    if gcloud run services describe "$svc" --project "$PROJECT" --region us-central1 --format='value(metadata.name)' >/dev/null 2>&1; then
+      gcloud run services update "$svc" --project "$PROJECT" --region us-central1 --image "$IMAGE" --quiet >&2 && echo "re-pointed Cloud Run service $svc at $IMAGE" >&2
+    fi
+  done
+fi
