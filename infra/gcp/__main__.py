@@ -11,7 +11,7 @@ from pathlib import Path
 import pulumi
 import pulumi_gcp as gcp
 
-from gcp_jobs import Adopt, BatchCron, BatchSubmitCron, DeploymentImages, JobAccount, RunJobCron, Secrets, StorageBatchDelete, cost_labels, grant_bucket, labeled_provider
+from gcp_jobs import Adopt, BatchCron, BatchSubmitCron, CronAlerts, DeploymentImages, JobAccount, RunJobCron, Secrets, StorageBatchDelete, cost_labels, grant_bucket, labeled_provider
 from task_logs import TaskLogBucket, TaskLogView
 
 cfg = pulumi.Config()
@@ -165,6 +165,11 @@ daily = BatchSubmitCron(
     adopt=adopt,
     opts=pulumi.ResourceOptions(depends_on=[secrets, static_secrets, snapshot_secret]),
 )
+# The backstop for what the submitter's own alert can't report (it never started, or the trigger couldn't run it), to
+# the Monitoring notification channel `alertChannel` names (#gcs-admin's Slack channel, made in the console: Slack
+# channels need its OAuth). Unset: no policies.
+if alert_channel := cfg.get("alertChannel"):
+    CronAlerts(DAILY, project=project, job="gcs-usage-snapshot-submit", trigger=DAILY, channels=[alert_channel])
 
 # The access-log poller (specs/access-log-freshness.md §A): GCS delivers each hour's usage CSVs ~9–16 h late, so
 # ingest them hourly as they land instead of in the daily scan; the scan's `index` reads `access/agg` as it stands.
