@@ -25,7 +25,7 @@
     "2026-10-09"
   ],
   "append": {
-    "gen": "2026-10-09b.g3",
+    "gen": "2026-10-09b.g3.c001",
     "ranges_gen": "2026-10-09b.g3",
     "layouts": [
       "listing/{id}/path-index.parquet",
@@ -43,7 +43,6 @@
     "append_tasks": 16,
     "attribution": true,
     "compact_level": 5,
-    "compact": "none",
     "owner_carry": true,
     "machines": {"compact": "n2-highmem-32"},
     "ssd_gbs": {"compact": 1500},
