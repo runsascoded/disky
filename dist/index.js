@@ -71,6 +71,48 @@ function DustHatch({ w, h, count, color, baseLines = 3, ratio = 1.32 }) {
   );
 }
 
+// src/cellPaint.ts
+function bandRects(bands, height) {
+  const total = bands?.reduce((sum, b) => sum + Math.max(0, b.frac), 0) ?? 0;
+  let top = 0;
+  return (bands ?? []).map((b) => {
+    const h = total ? height * Math.max(0, b.frac) / total : 0;
+    const rect = { color: b.color, top, height: h };
+    top += h;
+    return rect;
+  });
+}
+function dustInk(style, fade = 1) {
+  const dominant = style.bands?.reduce((a, b) => !a || b.frac > a.frac ? b : a, void 0);
+  const edge = contrastEdge(dominant?.color ?? style.bg, fade);
+  return edge?.startsWith("rgba(0,") ? "rgba(0, 0, 0, 0.65)" : edge ? "rgba(255, 255, 255, 0.65)" : style.ink;
+}
+function stripeBackground(stripes) {
+  return stripes?.map((s) => `repeating-linear-gradient(${s.angle}deg, ${s.color} 0 ${s.width}px, transparent ${s.width}px ${s.period}px)`).join(", ") || void 0;
+}
+function drawStripes(ctx, x, y, w, h, stripes, color) {
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(x, y, w, h);
+  ctx.clip();
+  for (const s of [...stripes].reverse()) {
+    if (s.period <= 0 || s.width <= 0) continue;
+    const angle = s.angle * Math.PI / 180;
+    const nx = Math.sin(angle), ny = -Math.cos(angle);
+    const reach = Math.hypot(w, h);
+    ctx.strokeStyle = color(s.color);
+    ctx.lineWidth = s.width;
+    ctx.beginPath();
+    for (let at = -reach; at <= reach; at += s.period) {
+      const ox = x + w / 2 + nx * at, oy = y + h / 2 + ny * at;
+      ctx.moveTo(ox - ny * reach, oy + nx * reach);
+      ctx.lineTo(ox + ny * reach, oy - nx * reach);
+    }
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
 // src/cssColor.ts
 function cssColor(el, color) {
   const m = /^\s*var\(\s*(--[\w-]+)\s*(?:,\s*([^)]*))?\)\s*$/.exec(color);
@@ -81,13 +123,17 @@ function cssColor(el, color) {
 function colorResolver(el) {
   const cache = /* @__PURE__ */ new Map();
   return (color) => {
-    if (!color.startsWith("var(")) return color;
-    let v = cache.get(color);
-    if (v === void 0) {
-      v = cssColor(el, color);
-      cache.set(color, v);
+    if (!color.includes("var(")) return color;
+    const cached = cache.get(color);
+    if (cached !== void 0) return cached;
+    let resolved = cssColor(el, color);
+    for (let i = 0; i < 8 && resolved.includes("var("); i++) {
+      const next = resolved.replace(/var\(\s*(--[\w-]+)\s*(?:,\s*([^()]*))?\)/g, (_m, name, fallback) => getComputedStyle(el).getPropertyValue(name).trim() || fallback?.trim() || `var(${name})`);
+      if (next === resolved) break;
+      resolved = next;
     }
-    return v;
+    cache.set(color, resolved);
+    return resolved;
   };
 }
 var CONTAINER_RGB = `rgb(${CONTAINER_BG[0]}, ${CONTAINER_BG[1]}, ${CONTAINER_BG[2]})`;
@@ -106,8 +152,26 @@ function readLabelSizes(el) {
   lblFs = px(cs.getPropertyValue("--dt-treemap-lbl-fs"), 13.5);
   lblFsSm = px(cs.getPropertyValue("--dt-treemap-lbl-fs-sm"), 11.5);
 }
+var browserColors = /* @__PURE__ */ new Map();
+var colorProbe = null;
 function rgbaAt(c, alpha) {
-  const p = parseColor(resolveVar(c ?? ""));
+  const resolved = resolveVar(c ?? "");
+  let p = parseColor(resolved) ?? browserColors.get(resolved);
+  if (!p && !resolved.includes("var(") && typeof CSS !== "undefined" && CSS.supports("color", resolved)) {
+    if (!colorProbe) {
+      const canvas = document.createElement("canvas");
+      canvas.width = canvas.height = 1;
+      colorProbe = canvas.getContext("2d", { willReadFrequently: true });
+    }
+    if (colorProbe) {
+      colorProbe.clearRect(0, 0, 1, 1);
+      colorProbe.fillStyle = resolved;
+      colorProbe.fillRect(0, 0, 1, 1);
+      const [r, g, b, a] = colorProbe.getImageData(0, 0, 1, 1).data;
+      p = [r, g, b, a / 255];
+      browserColors.set(resolved, p);
+    }
+  }
   if (!p) return null;
   return `rgba(${p[0]}, ${p[1]}, ${p[2]}, ${p[3] * alpha})`;
 }
@@ -133,7 +197,8 @@ function TreemapCanvas({
   canvasRef,
   onHover,
   onClick,
-  onLeave
+  onLeave,
+  renderCellExtra
 }) {
   const ref = useRef(null);
   const setCanvas = (el) => {
@@ -287,6 +352,10 @@ function TreemapCanvas({
         }
       }
     ),
+    renderCellExtra && flat.filter((c) => !c.folded && Math.min(c.w, c.h) >= 6).map((c) => {
+      const extra = renderCellExtra(c.node, c.path, { w: c.w, h: c.h, fade: styleOpts.fadeAt(c.depth), hasKids: c.hasKids, chain: c.chainLabels ? c.chainLabels.length - 1 : 0 });
+      return extra == null ? null : /* @__PURE__ */ jsx("div", { className: "dt-treemap-canvas-extra", style: { position: "absolute", left: c.x, top: c.y, width: c.w, height: c.h, overflow: "hidden", pointerEvents: "none" }, children: extra }, idFor(c.node, c.path));
+    }),
     overlayCells.length > 0 && /* @__PURE__ */ jsx("div", { style: { position: "absolute", inset: 0, pointerEvents: "none" }, children: overlayCells.map((cell) => {
       const node = cell.node;
       const href = cellHref?.(node, cell.path);
@@ -360,11 +429,19 @@ function paintCell(ctx, cell, o) {
   const bw = cw - 2 * inset;
   const bh = ch - 2 * inset;
   if (bw > 0 && bh > 0) {
-    const fill = rgbaAt(style.bg, alpha);
+    const fill = style.bands?.length ? null : rgbaAt(style.bg, alpha);
     if (fill) {
       ctx.fillStyle = fill;
       ctx.fillRect(bx, by, bw, bh);
     }
+    for (const band of bandRects(style.bands, bh)) {
+      const fill2 = rgbaAt(band.color, alpha);
+      if (fill2 && band.height > 0) {
+        ctx.fillStyle = fill2;
+        ctx.fillRect(bx, by + band.top, bw, band.height);
+      }
+    }
+    if (style.stripes?.length) drawStripes(ctx, bx, by, bw, bh, style.stripes, (c) => rgbaAt(c, alpha) ?? "transparent");
   }
   if (shared && edge > 0) {
     const stroke = style.edge ? rgbaAt(style.edge, 1) : builtinEdge ? rgbaAt(builtinEdge, 1) : null;
@@ -383,6 +460,13 @@ function paintCell(ctx, cell, o) {
       ctx.setLineDash([]);
     }
     drawDust(ctx, bx, by, bw, bh, cell.node.count);
+  }
+  if (!folded && dustTexture && style.dustCount !== void 0 && Math.min(w, h) >= 6) {
+    const gridStyle = { ...style, bg: resolveVar(style.bg ?? ""), bands: style.bands?.map((b) => ({ ...b, color: resolveVar(b.color) })), ink: resolveVar(style.ink ?? "") };
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    drawDust(ctx, bx, by, bw, bh, style.dustCount, dustInk(gridStyle, fade));
+    ctx.restore();
   }
   const segs = style.segments;
   if (segs && segs.length > 1 && !hasKids && !dust && Math.min(w, h) >= 18) {
@@ -1286,8 +1370,8 @@ function Treemap({
                 // An inset `ring` is a box-shadow on the cell box, under this layer: leave it bare too, or it
                 // would only show as far as the shared edge (and not at all in gaps mode).
                 inset: Math.max(shared ? edge : 0, ring?.inset ? ring.width : 0),
-                background: style.bg,
-                ...style.hatch && { backgroundImage: style.hatch },
+                background: style.bands?.length ? void 0 : style.bg,
+                ...(style.hatch || style.stripes) && { backgroundImage: style.hatch ?? stripeBackground(style.stripes) },
                 // Dashed frame marks the dust tile as not-a-real-cell.
                 ...foldedNode && dustTexture && Math.min(r.w, r.h) >= 8 && {
                   border: "1px dashed var(--dt-treemap-folded-edge, rgba(150, 150, 165, 0.55))",
@@ -1297,7 +1381,8 @@ function Treemap({
                 pointerEvents: "none"
               },
               children: [
-                foldedNode && dustTexture && Math.min(r.w, r.h) >= 6 && /* @__PURE__ */ jsx(DustHatch, { w: boxW, h: boxH, count: foldedNode.count }),
+                bandRects(style.bands, boxH).map((b, i) => /* @__PURE__ */ jsx("div", { style: { position: "absolute", left: 0, right: 0, top: b.top, height: b.height, background: b.color } }, i)),
+                (foldedNode || style.dustCount !== void 0) && dustTexture && Math.min(r.w, r.h) >= 6 && /* @__PURE__ */ jsx(DustHatch, { w: boxW, h: boxH, count: foldedNode?.count ?? style.dustCount, color: foldedNode ? void 0 : dustInk(style, fadeAt(depth)) }),
                 style.segments && style.segments.length > 1 && kids.length === 0 && !dust && Math.min(r.w, r.h) >= 18 && (() => {
                   const inset = shared ? Math.max(1, bw) : 3;
                   const gap = 1;
@@ -1691,6 +1776,7 @@ function Treemap({
                   a11yMinSide,
                   pinnedKey: pinnedTip?.key ?? null,
                   canvasRef: exportable ? canvasElRef : void 0,
+                  renderCellExtra,
                   onHover: (hit, x, y) => activateHover(hit.node, hit.path, hit.key, x, y),
                   onClick: (hit, e) => hit.foldChild ? activatePin(hit.node, hit.path, hit.key, e.clientX, e.clientY) : activateClick(hit.node, hit.path, hit.key, hit.drillable, e.clientX, e.clientY, e),
                   onLeave: () => {

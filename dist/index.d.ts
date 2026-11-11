@@ -1,7 +1,7 @@
 import * as react from 'react';
 import { ReactNode, CSSProperties, RefObject } from 'react';
-import { P as PlacedCell, C as CellText, a as CellStyle, T as Tiling, S as StyleOpts } from './cellStyle-DVNsfe4P.js';
-export { F as FoldedNode, L as LayoutConfig, N as NAME_MIN_PX, R as ResolvedStyle, c as candidates, b as cellStroke, f as fitCandidate, d as flattenPlaced, e as foldedOf, h as hitTest, i as inlineRoom, g as isFolded, l as layoutCells, r as resolveCellStyle } from './cellStyle-DVNsfe4P.js';
+import { P as PlacedCell, C as CellText, a as CellStyle, T as Tiling, S as StyleOpts } from './cellStyle-BK7SUL-l.js';
+export { F as FoldedNode, L as LayoutConfig, N as NAME_MIN_PX, R as ResolvedStyle, c as candidates, b as cellStroke, f as fitCandidate, d as flattenPlaced, e as foldedOf, h as hitTest, i as inlineRoom, g as isFolded, l as layoutCells, r as resolveCellStyle } from './cellStyle-BK7SUL-l.js';
 export { Rect, foldSmall, foldThin, squarify, squarifyRemainder } from './squarify.js';
 export { divergingColor, divergingInk } from './divergingColor.js';
 export { parseColor } from './parseColor.js';
@@ -640,10 +640,10 @@ declare function DustHatch({ w, h, count, color, baseLines, ratio }: DustHatchPr
  * straight back to `<Treemap>`'s drill/tooltip handlers, the identical path a
  * DOM cell's event takes.
  *
- * Parity is staged. This first cut draws base + faded bg + shared edge stroke +
- * dust tail + labels, and hit-tests cells (folded dust resolves to its specific
- * child, like the DOM tile). Segments (makeup stripes), chain-label rendering,
- * `cellHref` anchors, and the lazy-load overlay are still DOM-only.
+ * Paints fills, bands, stripe patterns, density grids, composition segments and
+ * primary labels. React cell extras are positioned above the canvas. Folded
+ * dust resolves to its specific child, like the DOM tile; keyboard anchors
+ * share the same retained geometry and interaction handlers.
  */
 /** A resolved pointer hit: a real cell, or a specific child under a dust tile. */
 interface CanvasHit<T> {
@@ -659,6 +659,14 @@ interface CanvasHit<T> {
     foldChild: boolean;
 }
 interface TreemapCanvasProps<T> {
+    /** React overlays for visible real cells; the canvas still paints their fill and primary labels. */
+    renderCellExtra?: (n: T, path: T[], ctx: {
+        w: number;
+        h: number;
+        fade: number;
+        hasKids: boolean;
+        chain: number;
+    }) => React.ReactNode;
     cells: PlacedCell<T>[];
     width: number;
     height: number;
@@ -691,7 +699,7 @@ interface TreemapCanvasProps<T> {
     onClick: (hit: CanvasHit<T>, e: React.MouseEvent) => void;
     onLeave: () => void;
 }
-declare function TreemapCanvas<T>({ cells, width, height, styleOpts, getSize, getLabel, formatSize, formatCell, sizeAlign, inlineSizeMinWidth, idFor, expandable, dustTexture, cellHref, a11yLinks, a11yMaxCells, a11yMinSide, pinnedKey, canvasRef, onHover, onClick, onLeave, }: TreemapCanvasProps<T>): react.JSX.Element;
+declare function TreemapCanvas<T>({ cells, width, height, styleOpts, getSize, getLabel, formatSize, formatCell, sizeAlign, inlineSizeMinWidth, idFor, expandable, dustTexture, cellHref, a11yLinks, a11yMaxCells, a11yMinSide, pinnedKey, canvasRef, onHover, onClick, onLeave, renderCellExtra, }: TreemapCanvasProps<T>): react.JSX.Element;
 
 /**
  * Headless hover+pin state machine — the common core of the legend/map/cell
