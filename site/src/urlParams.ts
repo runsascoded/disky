@@ -417,7 +417,7 @@ export const URL_PARAMS: Record<string, UrlParamDoc> = {
   },
   section: {
     label: 'Section in view (older spelling)',
-    description: 'The spelling of `v` before 2026-11-11, with the section spelled out (`diff`, `over-time`, `batch-12`). Rewritten to `v` on load; link previews read either.',
+    description: 'The spelling of `v` before 2026-11-11, with the section id (`diff`, `over-time`, `batch-12`). Rewritten to `v` on load; link previews read either.',
     examples: ['diff', 'over-time'],
   },
   si: {
@@ -493,7 +493,7 @@ export const URL_PARAMS: Record<string, UrlParamDoc> = {
   },
   v: {
     label: 'Section in view',
-    description: 'The section the page is scrolled to, written as the reader scrolls (unless the scroll-spy is turned off) and scrolled to on load. On the map: `m` map, `t` table, `o` size over time, `d` diff, `c` bytes by creation date. On `/staged`: a batch (`b12`) or `r` the runs; an older `#batch-12` link is rewritten to it, and also opens that batch. A section spelled out (`v=diff`) is read too. When absent, the page opens at its top.',
+    description: 'The section the page is scrolled to, written as the reader scrolls (unless the scroll-spy is turned off) and scrolled to on load. On the map: `map`, `table`, `time` (size over time), `diff`, `mtime` (bytes by modification date). On `/staged`: a batch (`batch-12`) or `runs`; an older `#batch-12` link is rewritten to it, and also opens that batch. The one-letter codes briefly written on 2026-11-11 (`v=o`, `v=b12`) are read too. When absent, the page opens at its top.',
     examples: ['d', 'o', 'b12', 'r'],
   },
   w: {

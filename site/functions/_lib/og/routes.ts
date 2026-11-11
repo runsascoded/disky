@@ -7,7 +7,7 @@ import { canonicalSel } from '../../../src/scanSlug.js'
 
 export type OgKind = 'map' | 'diff' | 'series' | 'staged' | 'users' | 'user' | 'assignments'
 
-/** The home sections with a card of their own (`?v=d`, `?v=o`), by kind: the diff, and size over time. */
+/** The home sections with a card of their own (`?v=diff`, `?v=time`), by kind: the diff, and size over time. */
 export const KIND_SECTION: Partial<Record<OgKind, string>> = { diff: 'diff', series: 'over-time' }
 
 export interface PageView {
