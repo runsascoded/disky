@@ -158,7 +158,7 @@ INSERT INTO scan_run_outputs (run_id, key, uri, bytes, objects, rows) VALUES
       const { db, raw } = await sqliteD1()
       raw.exec('DROP TABLE scan_run_outputs; DROP TABLE scan_run_phases; DROP TABLE scan_runs')
       const r = await get(db, '')
-      expect([r.status, await r.json()]).toEqual([200, { configured: false, runs: [], project: 'proj', meta: 'https://h.test/meta' }])
+      expect([r.status, await r.json()]).toEqual([200, { configured: false, runs: [], project: 'proj', meta: 'https://h.test/meta', dispatch: null }])
     })
   })
 })

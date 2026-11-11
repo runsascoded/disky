@@ -13,6 +13,7 @@ import { SiteNav } from './SiteNav'
 import { useDocTitle } from './title'
 import { SiteKbd } from './SiteKbd'
 import { Tooltip } from './Tooltip'
+import { RunScanButton } from './RunScan'
 import { axisTicks, includeRunKind, inSpan, runFilterKinds, runKindLabel, runKindMatches, type RunSpan, runKindParam, runSpanParam, runStatusParam } from './runChart'
 import { fmtBytesPrecise, fmtN, type Meta } from './types'
 import { readThrough } from './readLens'
@@ -325,7 +326,10 @@ export function ScansPage() {
   return (
     <main className="staged-page scans-page">
       <SiteNav />
-      <h1>Scan runs</h1>
+      <div className="staged-head sr-head">
+        <h1>Scan runs</h1>
+        <RunScanButton block={q.data?.dispatch} runs={runs} queryKey={['scan-runs', store.key]} />
+      </div>
       <p className="sub">Scans, access-log ingests and maintenance jobs: timing, status and compute estimates. Output size measures the generated scan files (listings, indexes, snapshots); its change compares those files with earlier scans. The stores they append to are on <Link to="/health">Health</Link>.</p>
       {q.isLoading ? <p>Loading runs…</p> : q.error ? <p className="err">{q.error.message}</p> : !q.data?.configured ? (
         <p className="dim">Scan runs aren't recorded on this deployment yet (its D1 has no <code>scan_runs</code> table: migration <code>scan_runs</code>, then <code>dt-cloud scan-run backfill</code>).</p>
