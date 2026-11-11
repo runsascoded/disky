@@ -3900,6 +3900,10 @@ from .image_sha import image_sha_cmd as _image_sha  # noqa: E402
 
 main.add_command(_image_sha)
 
+from .monitoring_relay import cli as _monitoring_relay  # noqa: E402
+
+main.add_command(_monitoring_relay)
+
 from .eligibility_census import eligibility_census_cmd as _eligibility_census  # noqa: E402
 
 main.add_command(_eligibility_census)

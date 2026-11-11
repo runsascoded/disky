@@ -211,6 +211,10 @@ dt-cloud soft-delete -b BUCKET… [-E ENDPOINT] [-o ROOT…] [-j]  # Each bucket
                           # `snapshots/soft-delete/` for each `gs://` and `s3://` source, and the site (whose own account can't read bucket
                           # metadata) reads the newest: a recorded undo on a bucket it shows off is "undo unavailable" (its control
                           # disabled, the route refusing), one on a bucket it doesn't name is "unverified". `sweep undo` asks GCS itself
+dt-cloud monitoring-relay serve [-c slack] [-p PORT]  # Cloud Monitoring incidents → `disk-tree notify` (specs/monitoring-relay.md):
+                          # a Pub/Sub push endpoint (infra `MonitoringRelay`'s Cloud Run service), each incident posted with the
+                          # deployment's own bot (policy, condition, opened/resolved, documentation, incident link); 204 once
+                          # posted, 500 to be redelivered. `render FILE` prints the text for a notification's JSON (`-s` posts it)
 dt-cloud diff-bench -a BEFORE -b AFTER [-S STORE] [-v DATE:PATH]… CASES  # The table a store-layout change ships with (no CURRENT move
                           # without it): the browser's diff + map requests (diff-check's CASES, `-v` views) on two hosts, each
                           # cold (`-n` random w×h cache buckets no page asks for) then warm (`-s`: also each diff's `summary=1`, which no page asks); per request kind, median cold
