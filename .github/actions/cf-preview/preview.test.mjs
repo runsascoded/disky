@@ -140,8 +140,9 @@ test('close can retire a prior target after the PR was retargeted', async () => 
 })
 
 test('Worker publication uses native Previews without modifying parent domains or inheriting Base settings', async t => {
-  const { mkdtempSync, readFileSync, rmSync } = await import('node:fs')
+  const { mkdirSync, mkdtempSync, readFileSync, rmSync } = await import('node:fs')
   const { resolve } = await import('node:path')
+  mkdirSync(resolve('tmp'), { recursive: true })
   const workDir = mkdtempSync(resolve('tmp/cf-preview-worker-'))
   t.after(() => rmSync(workDir, { recursive: true }))
   let uploaded = false
@@ -200,9 +201,10 @@ test('native Worker preview cleanup refuses a mismatched slug before any deletio
 })
 
 test('a PR artifact cannot use symlinks to upload files outside its build', async t => {
-  const { mkdtempSync, rmSync, symlinkSync, writeFileSync } = await import('node:fs')
+  const { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } = await import('node:fs')
   const { resolve } = await import('node:path')
   const { validateArtifact } = await import('./preview.mjs')
+  mkdirSync(resolve('tmp'), { recursive: true })
   const root = mkdtempSync(resolve('tmp/cf-preview-artifact-'))
   t.after(() => rmSync(root, { recursive: true }))
   writeFileSync(resolve(root, 'index.html'), '<html></html>')
