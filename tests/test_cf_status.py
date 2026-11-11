@@ -34,6 +34,17 @@ def test_preview_paginates_and_rejects_other_branches_and_failed_builds():
     assert calls == ['demo/deployments?env=preview&per_page=25&page=1', 'demo/deployments?env=preview&per_page=25&page=2']
 
 
+def test_preview_search_keeps_its_thousand_deployment_bound():
+    calls = []
+    def fetch(path):
+        calls.append(path)
+        return {'result': [dep('other', 'preview')] * 25, 'result_info': {'total_pages': 41}}
+    with pytest.raises(ValueError) as exc:
+        S.deployment(fetch, 'demo', 'dev')
+    assert str(exc.value) == 'preview branch dev not found within 1000 deployments; inspect Pages directly'
+    assert calls == [f'demo/deployments?env=preview&per_page=25&page={page}' for page in range(1, 41)]
+
+
 @pytest.mark.parametrize('canonical', [None, dep(environment='preview'), dep(status='failure')])
 def test_missing_or_invalid_production_does_not_fall_back(canonical):
     with pytest.raises(ValueError) as exc:

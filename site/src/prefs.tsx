@@ -52,7 +52,7 @@ export const useBorderStep = borderStep.use
 const help = pref<'on' | 'off'>('help', ['on', 'off'], 'on')
 export const useHelpPref = help.use
 export const setHelpPref = help.set
-// The scroll-spy (`useSectionSpy`): the section in view named in the URL (`?section=`) as the reader scrolls; on until turned off.
+// The scroll-spy (`useSectionSpy`): the section in view named in the URL (`?v=`) as the reader scrolls; on until turned off.
 const scrollSpy = pref<'on' | 'off'>('scroll-spy', ['on', 'off'], 'on')
 export const useScrollSpyPref = scrollSpy.use
 // The session timeline's first column (`/admin/sessions/:sid`): offset into the session (+ gap since the row above), or ago.

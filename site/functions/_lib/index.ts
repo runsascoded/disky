@@ -1,3 +1,5 @@
+import { ReaderStopped, readerExecution, readerServices, type ReaderObjects } from './readerRuntime.js'
+import { readerMetadata, readerObjects } from './readerWorker.js'
 /**
  * A scan's index tiers (`<dir>/path-index[-coarse<E>][-by-user].parquet`) as
  * a row-group-pruned range reader — shared by `/api/subtree` (pixel-budget
@@ -171,6 +173,14 @@ interface D1Handle {
   run?: string
 }
 
+/** Actual decoder work, including metadata rows; absent an executor there is no telemetry callback. */
+async function decodeObjects(options: Parameters<typeof parquetReadObjects>[0]) {
+  const start = performance.now()
+  const rows = await parquetReadObjects(options)
+  readerExecution()?.decoded(rows.length, performance.now() - start)
+  return rows
+}
+
 /** Ranged reads of whole-key objects (`S3Store`'s `get` shape). `tail`, where the store has suffix
  *  reads (R2): an object's last `n` bytes and its size in one request, with no size probe first. */
 export interface ByteStore {
@@ -298,6 +308,8 @@ export const storePrefixes = (env: Env, defaults: string[]): string[] =>
     : defaults
 
 export function makeStore(env: Env) {
+  const supplied = readerServices(env)
+  if (supplied) return supplied.files
   return S3Store({
     ...storeTarget(env),
     prefixes: storePrefixes(env, ['listing/', 'snapshots/']),
@@ -311,8 +323,10 @@ export function makeStore(env: Env) {
  * Cloudflare; unset: through the store seam, as before. A deployment whose `STORE_*` is already R2 reads
  * the same bytes either way; the seam's other branch goes once every deployment publishes and binds. */
 export function servedStore(env: Env, prefixes: string[]): Store {
+  const supplied = readerServices(env)
+  if (supplied) return supplied.files
   if (!env.SERVED_R2) return S3Store({ ...storeTarget(env), prefixes, ...storeCreds(env) })
-  if (!env.INDEX_R2) throw new Error('SERVED_R2 is set but the INDEX_R2 binding is missing')
+  if (!readerObjects(env)) throw new Error('SERVED_R2 is set but the INDEX_R2 binding is missing')
   return R2Store(env.INDEX_R2 as unknown as Parameters<typeof R2Store>[0], { prefixes })
 }
 
@@ -347,7 +361,7 @@ export const sizeVariant = (sort: string): string => (sort === 'path' ? 'bysize'
  * the scan was never synced. For the raw-parquet proxy and other readers
  * outside the D1 row-group path. */
 export async function indexDir(env: Env, date: string, variant = 'path'): Promise<string | null> {
-  if (!env.DB) return null
+  if (!readerMetadata(env)) return null
   const r = await schemaRow<{ dir: string | null }>(env, 'dir', date, variant)
   return r?.dir ?? null
 }
@@ -357,8 +371,8 @@ export async function indexDir(env: Env, date: string, variant = 'path'): Promis
  * names `store` and its namespaced variant (`d1Variant`). */
 export function schemaRow<T>(env: Env, cols: string, date: string, variant: string): Promise<T | null> {
   return isPrimary(env)
-    ? env.DB!.prepare(`SELECT ${cols} FROM index_schema WHERE date = ? AND variant = ?`).bind(date, variant).first<T>()
-    : env.DB!.prepare(`SELECT ${cols} FROM index_schema WHERE store = ? AND date = ? AND variant = ?`).bind(storeKey(env), date, d1Variant(env, variant)).first<T>()
+    ? readerMetadata(env)!.prepare(`SELECT ${cols} FROM index_schema WHERE date = ? AND variant = ?`).bind(date, variant).first<T>()
+    : readerMetadata(env)!.prepare(`SELECT ${cols} FROM index_schema WHERE store = ? AND date = ? AND variant = ?`).bind(storeKey(env), date, d1Variant(env, variant)).first<T>()
 }
 
 /** Bumped when the interval store's answer for the same inputs changes (a rule only its reads take): its dates' cache
@@ -374,7 +388,7 @@ export const IV_ANSWER_V = 2
  * cached from the old generation for the cache's whole TTL. One query per 90
  * dates (D1's bind limit is 100). */
 export async function pathGens(env: Env, dates: string[]): Promise<string> {
-  if (!env.DB || !dates.length) return ''
+  if (!readerMetadata(env) || !dates.length) return ''
   const gens = new Map<string, string>()
   const uniq = [...new Set(dates)]
   // The interval store's dates (below) are keyed by its generation whatever D1 says: only the others ask D1 (an
@@ -387,8 +401,8 @@ export async function pathGens(env: Env, dates: string[]): Promise<string> {
     // Both sorts' generations: a view may read either, and `bysize` is repointed on its own (a re-cut,
     // `index-sync -v bysize`), so a key over `path` alone kept serving the old cut's cached views.
     const { results } = isPrimary(env)
-      ? await env.DB.prepare(`SELECT date, variant, gen FROM index_schema WHERE variant IN ('path', 'bysize') AND date IN (${marks}) ORDER BY date, variant`).bind(...chunk).all<{ date: string; variant: string; gen: string | null }>()
-      : await env.DB.prepare(`SELECT date, variant, gen FROM index_schema WHERE store = ? AND variant IN (?, ?) AND date IN (${marks}) ORDER BY date, variant`).bind(storeKey(env), d1Variant(env, 'path'), d1Variant(env, 'bysize'), ...chunk).all<{ date: string; variant: string; gen: string | null }>()
+      ? await readerMetadata(env)!.prepare(`SELECT date, variant, gen FROM index_schema WHERE variant IN ('path', 'bysize') AND date IN (${marks}) ORDER BY date, variant`).bind(...chunk).all<{ date: string; variant: string; gen: string | null }>()
+      : await readerMetadata(env)!.prepare(`SELECT date, variant, gen FROM index_schema WHERE store = ? AND variant IN (?, ?) AND date IN (${marks}) ORDER BY date, variant`).bind(storeKey(env), d1Variant(env, 'path'), d1Variant(env, 'bysize'), ...chunk).all<{ date: string; variant: string; gen: string | null }>()
     for (const r of results) gens.set(r.date, `${gens.get(r.date) ?? ''}${r.variant}:${r.gen ?? ''},`)
   }
   let h = 0x811c9dc5
@@ -413,8 +427,8 @@ const ivKeyed = (st: IvState, dates: string[]): Set<string> => new Set(dates.fil
 export async function pathScans(env: Env, order: boolean): Promise<{ results: { date: string }[] }> {
   const [d1, held] = await Promise.all([
     isPrimary(env)
-      ? env.DB!.prepare("SELECT DISTINCT date FROM index_schema WHERE variant = 'path'").all<{ date: string }>()
-      : env.DB!.prepare('SELECT DISTINCT date FROM index_schema WHERE store = ? AND variant = ?').bind(storeKey(env), d1Variant(env, 'path')).all<{ date: string }>(),
+      ? readerMetadata(env)!.prepare("SELECT DISTINCT date FROM index_schema WHERE variant = 'path'").all<{ date: string }>()
+      : readerMetadata(env)!.prepare('SELECT DISTINCT date FROM index_schema WHERE store = ? AND variant = ?').bind(storeKey(env), d1Variant(env, 'path')).all<{ date: string }>(),
     storeHeldScans(env),
   ])
   const dates = [...new Set([...d1.results.map(r => r.date), ...held])]
@@ -438,8 +452,8 @@ export async function storeHeldScans(env: Env): Promise<string[]> {
 export function pathScanStarts(env: Env): Promise<{ results: { date: string; started: string }[] }> {
   const known = "started IS NOT NULL AND date NOT LIKE '%T%'"
   return isPrimary(env)
-    ? env.DB!.prepare(`SELECT date, started FROM index_schema WHERE variant = 'path' AND ${known}`).all<{ date: string; started: string }>()
-    : env.DB!.prepare(`SELECT date, started FROM index_schema WHERE store = ? AND variant = ? AND ${known}`).bind(storeKey(env), d1Variant(env, 'path')).all<{ date: string; started: string }>()
+    ? readerMetadata(env)!.prepare(`SELECT date, started FROM index_schema WHERE variant = 'path' AND ${known}`).all<{ date: string; started: string }>()
+    : readerMetadata(env)!.prepare(`SELECT date, started FROM index_schema WHERE store = ? AND variant = ? AND ${known}`).bind(storeKey(env), d1Variant(env, 'path')).all<{ date: string; started: string }>()
 }
 
 function fileFor(env: Env, dir: string, variant: string): FileSlice {
@@ -502,7 +516,7 @@ async function openPerScan(env: Env, date: string, variant: string): Promise<Ind
     handleAt.set(ck, Date.now())
   }
   return ivOwn(env, await shared(handles, ck, async (): Promise<IndexHandle> => {
-    if (!env.DB) throw new Error('index reader not configured (DB)')
+    if (!readerMetadata(env)) throw new Error('index reader not configured (DB)')
     const s = await schemaRow<{ version: number; schema_json: string; floor_bytes: number | null; gen: string | null; dir: string | null }>(env, 'version, schema_json, floor_bytes, gen, dir', date, variant)
     if (!s || !s.gen || !s.dir) throw new Error(`index variant '${variant}' not synced for ${date}`)
     // A pointer whose row groups were retired (`index-gc -r`) or evicted still names
@@ -513,7 +527,7 @@ async function openPerScan(env: Env, date: string, variant: string): Promise<Ind
     // not applied), the pre-LRU probe: any row at all.
     const k = { date, variant: d1Variant(env, variant), gen: s.gen }
     const p = await probe(env, k)
-    const d1 = p ? trusted(p) : !!(await env.DB.prepare('SELECT 1 AS x FROM index_row_groups WHERE date = ? AND variant = ? AND gen = ? LIMIT 1').bind(k.date, k.variant, k.gen).first<{ x: number }>())
+    const d1 = p ? trusted(p) : !!(await readerMetadata(env)!.prepare('SELECT 1 AS x FROM index_row_groups WHERE date = ? AND variant = ? AND gen = ? LIMIT 1').bind(k.date, k.variant, k.gen).first<{ x: number }>())
     const schema = JSON.parse(s.schema_json) as SchemaElement[]
     const base = { file: fileFor(env, s.dir, variant), env, date, variant, gen: s.gen, dir: s.dir, schema, version: s.version, columns: rowColumns(s.version, schema), floor: s.floor_bytes == null ? null : num(s.floor_bytes) }
     if (d1) {
@@ -541,7 +555,7 @@ async function openPerScan(env: Env, date: string, variant: string): Promise<Ind
  *  from the interval store, as of that scan, and never per-scan (a variant the store doesn't serve is "not synced",
  *  a scan a broken run cut out a 503: `openIndex`); a date the generation doesn't hold reads per-scan stores, and
  *  what stays per scan (age pyramids, the over-time archive) reads through `perScan`. */
-export const intervalsOn = (env: Env): boolean => env.PATH_STORE === 'intervals' && !!env.INTERVAL_STORE_GEN && !!env.INDEX_R2
+export const intervalsOn = (env: Env): boolean => env.PATH_STORE === 'intervals' && !!env.INTERVAL_STORE_GEN && !!readerObjects(env)
 
 /** A request's path store: `PATH_STORE=opt-in` reads the interval store only for requests asking
  *  `ps=iv` (so one deployment serves both, side by side), `intervals` for every request but one asking `ps=scan` (the
@@ -607,7 +621,7 @@ const currents = new IsoMap<string, { at: number; p: Promise<string | null>; ok?
  *  interval store's: `ivGen`) an `IvStoreUnavailable`: a pointer that couldn't be read is not a store without one,
  *  whose scans read per-scan. `name`: the read's join name. */
 async function currentGen(env: Env, key: string, name: string, refuse = false): Promise<string | null> {
-  if (!env.INDEX_R2) return null
+  if (!readerObjects(env)) return null
   const k = `${storeKey(env)}|${key}`
   const cur = currents.get(k)
   if (cur && Date.now() - cur.at < IV_STATE_TTL) {
@@ -625,12 +639,16 @@ async function currentGen(env: Env, key: string, name: string, refuse = false): 
     const ck = coloKey(env, key, 'current=1')
     const hit = await colo().match(ck)
     if (hit) return (await hit.json<{ gen: string | null }>()).gen
-    const o = await env.INDEX_R2!.get(key)
+    const o = await readerObjects(env)!.get(key)
     const gen = o ? (await o.json<{ gen?: unknown }>()).gen : null
     if (gen !== null && (typeof gen !== 'string' || !gen)) throw new Error(`${key}: bad pointer`)
     await colo().put(ck, new Response(JSON.stringify({ gen }), { headers: { 'content-type': 'application/json', 'cache-control': `max-age=${IV_STATE_TTL / 1000}` } }))
     return gen
   })().then(gen => { entry.ok = gen; return gen }, e => {
+    if (e instanceof ReaderStopped) {
+      if (currents.get(k) === entry) currents.delete(k)
+      throw e
+    }
     console.error(`${key}: ${(e as Error).message}; ${last !== undefined ? 'serving the last pointer' : 'none held'}`)
     if (last !== undefined) { entry.ok = last; return last }
     if (currents.get(k) === entry) currents.delete(k)
@@ -689,11 +707,11 @@ const IV_SIBLING = new Map([['path', 'bysize'], ['bysize', 'path'], ['slices', '
 const ivFooters = new IsoMap<string, Promise<FooterIndex>>('ivFooters')
 function ivFooter(env: Env, file: string): Promise<FooterIndex> {
   const key = ivKey(env, `${ivPrefix(env)}/${env.INTERVAL_STORE_GEN!}/served/${file}.groups.parquet`)
-  return shared(ivFooters, `${storeKey(env)}|${key}`, () => openIvFooter(env, key, r2Bytes(env.INDEX_R2!)), 30_000, ivJoin(env, 'footer'))
+  return shared(ivFooters, `${storeKey(env)}|${key}`, () => openIvFooter(env, key, r2Bytes(readerObjects(env)!)), 30_000, ivJoin(env, 'footer'))
 }
 
 /** `INDEX_R2` as a `ByteStore`. */
-export function r2Bytes(r2: R2Bucket): ByteStore {
+export function r2Bytes(r2: ReaderObjects): ByteStore {
   return {
     async get(key0, { offset, length }) {
       // A `?…` suffix versions a key for the caches (`ivKey`); the object is the key before it.
@@ -827,6 +845,7 @@ export async function ivHolder(env: Env, date: string): Promise<string | null> {
 
 /** Cut run `key` out of the env's store for `IV_BROKEN_TTL` (logged once per window), and drop the held state. */
 export function ivMarkBroken(env: Env, key: string, error: unknown): IvTierBroken {
+  if (error instanceof ReaderStopped) throw error
   const e = error instanceof IvTierBroken ? error : new IvTierBroken(key, error)
   const k = `${ivGenKey(env)}|${key}`
   const was = ivBroken.get(k)
@@ -853,7 +872,7 @@ export async function ivRetry<T>(f: () => Promise<T>): Promise<T> {
  *  `<scan id>.mNNN.json`), or null (none, or a bucket without `list`). One listed and not found is an error (manifests
  *  are immutable and never removed while newest): read as "none", its runs' scans would pass for not held. */
 async function ivManifest(env: Env): Promise<IvManifest | null> {
-  const r2 = env.INDEX_R2! as R2Bucket & { list?: R2Bucket['list'] }
+  const r2 = readerObjects(env)!
   if (typeof r2.list !== 'function') return null
   const prefix = `${ivPrefix(env)}/${env.INTERVAL_STORE_GEN}/manifests/`
   const names: string[] = []
@@ -865,7 +884,7 @@ async function ivManifest(env: Env): Promise<IvManifest | null> {
   } while (cursor)
   const name = newestManifest(names)
   if (name === null) return null
-  const o = await env.INDEX_R2!.get(`${prefix}${name}`)
+  const o = await readerObjects(env)!.get(`${prefix}${name}`)
   if (!o) throw new Error(`${prefix}${name} is listed and not found`)
   const m = await o.json<IvManifest>()
   if (!Array.isArray(m.runs) || !Array.isArray(m.scans) || typeof m.stamps !== 'object') throw new Error(`interval store: bad ${prefix}${name}`)
@@ -886,7 +905,7 @@ async function ivStateDoc(env: Env): Promise<IvStateDoc> {
   const ck = coloKey(env, ivKey(env, `${ivPrefix(env)}/${gen}/scans.json`), 'state=4')
   const hit = await colo().match(ck)
   if (hit) return hit.json<IvStateDoc>()
-  const [o, manifest] = await Promise.all([env.INDEX_R2!.get(`${ivPrefix(env)}/${gen}/scans.json`), ivManifest(env)])
+  const [o, manifest] = await Promise.all([readerObjects(env)!.get(`${ivPrefix(env)}/${gen}/scans.json`), ivManifest(env)])
   if (!o) throw new Error(`interval store ${gen}: no scans.json`)
   const j = await o.json<{ scans: { id: string; ts: number; version?: number; attribution_src?: string }[]; slices?: boolean; attribution?: boolean; churn?: boolean }>()
   // The attribution table's base coverage: the scans whose entry names their map (`interval_store.ATTRIBUTION_SRC`).
@@ -956,6 +975,7 @@ async function ivState(env: Env): Promise<IvState> {
     st => { entry.ok = st; return st },
     e => {
       if (ivStates.get(k) === entry) ivStates.delete(k)
+      if (e instanceof ReaderStopped) throw e
       if (last) return last
       throw new IvStoreUnavailable('state', `${ivPrefix(env)}/${env.INTERVAL_STORE_GEN}`, e)
     },
@@ -976,8 +996,8 @@ function ivRunFooter(env: Env, run: string, file: string): Promise<FooterIndex> 
   const dir = `${ivPrefix(env)}/${env.INTERVAL_STORE_GEN!}/${run}/served`
   const key = ivKey(env, `${dir}/${file}.groups.parquet`)
   return shared(ivFooters, `${storeKey(env)}|${key}`, async () => {
-    const r2 = env.INDEX_R2! as R2Bucket & { head?: R2Bucket['head'] }
-    const [footer, data] = await Promise.all([openIvFooter(env, key, r2Bytes(env.INDEX_R2!)), typeof r2.head === 'function' ? r2.head(`${dir}/${file}.parquet`) : Promise.resolve(true)])
+    const r2 = readerObjects(env)!
+    const [footer, data] = await Promise.all([openIvFooter(env, key, r2Bytes(readerObjects(env)!)), typeof r2.head === 'function' ? r2.head(`${dir}/${file}.parquet`) : Promise.resolve(true)])
     if (!data) throw Object.assign(new Error(`${dir}/${file}.parquet: not found`), { name: 'NotFoundError' })
     return footer
   }, 30_000, ivJoin(env, 'run-footer'))
@@ -1033,7 +1053,7 @@ export async function openInterval(env: Env, date: string, variant: string, retr
   const ck = `iv:${ivGenKey(env)}:${date}:${variant}${sliced ? ':s' : ''}|${runs.map(r => r.key).join(',')}`
   try {
     return ivOwn(env, await shared(handles, ck, async (): Promise<IndexHandle> => {
-      const src = r2Bytes(env.INDEX_R2!)
+      const src = r2Bytes(readerObjects(env)!)
       const dir = `${ivPrefix(env)}/${gen}/served`
       const key = ivKey(env, `${dir}/${file0}.parquet`)
       const footer = await ivFooter(env, file0)
@@ -1154,7 +1174,7 @@ async function openIvAttribution(env: Env, st: IvState, date: string): Promise<I
   const gen = env.INTERVAL_STORE_GEN!
   const ck = `iv:${ivGenKey(env)}:${date}:${IV_ATTR}|${tiers.map(t => t ?? '').join(',')}`
   return ivOwn(env, await shared(handles, ck, async (): Promise<IndexHandle> => {
-    const src = r2Bytes(env.INDEX_R2!)
+    const src = r2Bytes(readerObjects(env)!)
     const open = async (run: string | null): Promise<IndexHandle> => {
       const dir = run ? `${ivPrefix(env)}/${gen}/${run}/served` : `${ivPrefix(env)}/${gen}/served`
       const key = ivKey(env, `${dir}/${IV_ATTR}.parquet`)
@@ -1482,7 +1502,7 @@ async function readFooterCols(h: PqHandle, fg: FooterGroup, columns: string[]): 
   const buf = await cachedRange(h.env, h.footer.key, start, end, h.src)
   const file: FileSlice = { byteLength: end, slice: async (s, e) => buf.slice(s - start, (e ?? end) - start) }
   const metadata = { ...h.footer.metadata, row_groups: [fg.meta], num_rows: fg.meta.num_rows }
-  return (await parquetReadObjects({ file, metadata, columns, compressors })) as Record<string, unknown>[]
+  return (await decodeObjects({ file, metadata, columns, compressors })) as Record<string, unknown>[]
 }
 
 // --- the interval store's footers, pre-decoded through the colo cache ---------------------------------
@@ -1546,7 +1566,7 @@ async function ivFooterDoc(h: PqHandle, fg: FooterGroup): Promise<{ groups: Blob
       const buf = toBuffer((await h.src!.get(h.footer.key, { offset: ffg.byteStart, length: ffg.byteEnd - ffg.byteStart })).bytes)
       const file: FileSlice = { byteLength: ffg.byteEnd, slice: async (s, e) => buf.slice(s - ffg.byteStart, (e ?? ffg.byteEnd) - ffg.byteStart) }
       const metadata = { ...full.metadata, row_groups: [ffg.meta], num_rows: ffg.meta.num_rows }
-      const rows = (await parquetReadObjects({ file, metadata, columns: IV_FOOTER_COLS, compressors })) as Record<string, unknown>[]
+      const rows = (await decodeObjects({ file, metadata, columns: IV_FOOTER_COLS, compressors })) as Record<string, unknown>[]
       doc = Object.fromEntries(IV_FOOTER_COLS.map(c => [c, rows.map(r => r[c] == null ? null : typeof r[c] === 'string' ? r[c] as string : num(r[c]))]))
       await colo().put(ck, new Response(JSON.stringify(doc), { headers: { 'content-type': 'application/json', 'cache-control': `max-age=${BLOB_CACHE_TTL}` } }))
     }
@@ -1858,7 +1878,7 @@ async function readGroupRaw(h: IndexHandle, rgJson: string, columns?: string[], 
     file = bufferSlice(await fetchRange(h, s, e), s)
   }
   const t0 = now()
-  const rows = (await parquetReadObjects({ file, metadata, columns, compressors })) as Record<string, unknown>[]
+  const rows = (await decodeObjects({ file, metadata, columns, compressors })) as Record<string, unknown>[]
   h.trace?.('group', now() - t0, h.variant)
   return rows
 }
@@ -2349,7 +2369,7 @@ async function selectSpans1(h: IndexHandle, rects: Rect[], cap = 4000, bMin = 0,
   const bFloor = bMin > 0 ? ' AND b_max >= ?' : ''
   const sql = `SELECT rg, d_min, d_max, p_min, p_max, b_max, row_start, row_end FROM index_row_groups WHERE date = ? AND variant = ? AND gen = ? AND (${where.join(' OR ')})${bFloor} ORDER BY rg LIMIT ${cap + 1}`
   if (bMin > 0) binds.push(Math.floor(bMin))
-  const res = await h.env.DB!.prepare(sql).bind(h.date, d1Variant(h.env, h.variant), h.gen, ...binds).all<{ rg: number; d_min: number; d_max: number; p_min: string; p_max: string; b_max: number; row_start: number; row_end: number }>()
+  const res = await readerMetadata(h.env)!.prepare(sql).bind(h.date, d1Variant(h.env, h.variant), h.gen, ...binds).all<{ rg: number; d_min: number; d_max: number; p_min: string; p_max: string; b_max: number; row_start: number; row_end: number }>()
   if (res.results.length > cap) throw new TooWide(`query too wide: >${cap} row groups (drill deeper or raise minArea)`)
   return res.results.map(r => ({ rg: r.rg, dMin: num(r.d_min), dMax: num(r.d_max), pMin: r.p_min, pMax: r.p_max, bMax: num(r.b_max), rowStart: num(r.row_start), rowEnd: num(r.row_end) }))
 }
@@ -2374,7 +2394,7 @@ async function fetchGroupJson(h: IndexHandle, rgs: number[]): Promise<Map<number
   for (let i = 0; i < rgs.length; i += 80) {
     const chunk = rgs.slice(i, i + 80)
     const sql = `SELECT rg, rg_json FROM index_row_groups WHERE date = ? AND variant = ? AND gen = ? AND rg IN (${chunk.map(() => '?').join(',')})`
-    const res = await h.env.DB!.prepare(sql).bind(h.date, d1Variant(h.env, h.variant), h.gen, ...chunk).all<{ rg: number; rg_json: string }>()
+    const res = await readerMetadata(h.env)!.prepare(sql).bind(h.date, d1Variant(h.env, h.variant), h.gen, ...chunk).all<{ rg: number; rg_json: string }>()
     for (const r of res.results) out.set(r.rg, r.rg_json)
   }
   return out
@@ -2831,7 +2851,7 @@ async function readChangedPages(t: IndexHandle, spans: Span[], rects: Rect[], d1
     const metadata = { version: t.version, schema: t.schema, num_rows: p.rg.num_rows, row_groups: [p.rg], metadata_length: 0 } as unknown as FileMetaData
     const pageLocationsByGroup = [Object.fromEntries(cols.map(name => [name, p.locs[name]]))]
     const opts = { file, metadata, columns: cols, compressors, pageRangesByGroup: [p.ranges], pageLocationsByGroup }
-    const raw = (await parquetReadObjects(opts as Parameters<typeof parquetReadObjects>[0]).catch((e: Error) => {
+    const raw = (await decodeObjects(opts as Parameters<typeof parquetReadObjects>[0]).catch((e: Error) => {
       const layout = cols.map(name => `${name}:${p.locs[name].map(l => `${l.first_row_index}@${l.offset}+${l.compressed_page_size}`).join(',')}`).join(' ')
       throw new Error(`page read of group ${p.s.rg} (${p.n} rows, ranges ${JSON.stringify(p.ranges)}): ${e.message}; pages ${layout}`)
     })) as Record<string, unknown>[]
@@ -2998,7 +3018,7 @@ export async function openIvLevel(env: Env, from: string, to: string, trace?: Tr
   const gen = env.INTERVAL_STORE_GEN!
   const missing = (run: string | null) => { const at = ivNoLevel.get(`${ivGenKey(env)}|${run ?? ''}`); return at != null && Date.now() - at < 60_000 }
   if (tiers.some(missing)) return null
-  const src = r2Bytes(env.INDEX_R2!)
+  const src = r2Bytes(readerObjects(env)!)
   let footerMax = 0
   const open = async (run: string | null): Promise<PqHandle | null> => {
     const t1 = now()
@@ -3320,7 +3340,7 @@ export async function readLevel(lh: LevelHandle, dirs: string[], spend: LevelSpe
   for (const p of planned) {
     const metadata = { version: p.t.version, schema: p.t.schema, num_rows: p.rg.num_rows, row_groups: [p.rg], metadata_length: 0 } as unknown as FileMetaData
     const opts = { file: dataFiles.get(p.t)!, metadata, columns: IV_LEVEL_COLS, compressors, pageRangesByGroup: [p.ranges], pageLocationsByGroup: [p.locs] }
-    for (const r of (await parquetReadObjects(opts as Parameters<typeof parquetReadObjects>[0])) as Record<string, unknown>[]) {
+    for (const r of (await decodeObjects(opts as Parameters<typeof parquetReadObjects>[0])) as Record<string, unknown>[]) {
       const ts = num(r.ts)
       const depth = num(r.depth)
       const path = str(r.path)
@@ -3385,6 +3405,7 @@ export async function decodeColumns(schema: SchemaElement[], rg: RowGroup, file:
       for (let i = 0; i < columnData.length; i++) arr[rowStart + i] = columnData[i]
     },
   })
+  readerExecution()?.decoded(n, 0)
   return out
 }
 
@@ -3558,7 +3579,7 @@ async function selectSizeSpans1(h: IndexHandle, ranges: { pLo: string; pHi: stri
   const lensSql = lens ? ' AND u_min <= ? AND u_max >= ?' : ''
   if (lens) binds.push(lens.key, lens.key)
   const sql = `SELECT rg, d_min, d_max, p_min, p_max, b_max, row_start, row_end FROM index_row_groups WHERE date = ? AND variant = ? AND gen = ? AND (${where})${floor}${lensSql} ORDER BY rg LIMIT ${cap + 1}`
-  const res = await h.env.DB!.prepare(sql).bind(h.date, d1Variant(h.env, h.variant), h.gen, ...binds).all<{ rg: number; d_min: number; d_max: number; p_min: string; p_max: string; b_max: number; row_start: number; row_end: number }>()
+  const res = await readerMetadata(h.env)!.prepare(sql).bind(h.date, d1Variant(h.env, h.variant), h.gen, ...binds).all<{ rg: number; d_min: number; d_max: number; p_min: string; p_max: string; b_max: number; row_start: number; row_end: number }>()
   if (res.results.length > cap) throw new Error(`query too wide: >${cap} row groups (drill deeper or raise minArea)`)
   return res.results.map(r => ({ rg: r.rg, dMin: num(r.d_min), dMax: num(r.d_max), pMin: r.p_min, pMax: r.p_max, bMax: num(r.b_max), rowStart: num(r.row_start), rowEnd: num(r.row_end) }))
 }
@@ -3581,7 +3602,7 @@ async function tierMaxDepth(h: IndexHandle): Promise<number> {
   }
   const k = `${storeKey(h.env)}|${h.date}|${h.variant}|${h.gen}`
   return shared(maxDepths, k, async () => {
-    const r = await h.env.DB!.prepare('SELECT MAX(d_max) AS d FROM index_row_groups WHERE date = ? AND variant = ? AND gen = ?').bind(h.date, d1Variant(h.env, h.variant), h.gen).first<{ d: number | null }>()
+    const r = await readerMetadata(h.env)!.prepare('SELECT MAX(d_max) AS d FROM index_row_groups WHERE date = ? AND variant = ? AND gen = ?').bind(h.date, d1Variant(h.env, h.variant), h.gen).first<{ d: number | null }>()
     return num(r?.d)
   }, 10_000, ivJoin(h.env, 'max-depth'))
 }
@@ -3698,7 +3719,7 @@ async function pageSizeSpans(h: IndexHandle, range: { pLo: string; pHi: string }
     return all.filter(g => g.rg > after).sort((a, b) => a.rg - b.rg).slice(0, limit)
   }
   const sql = 'SELECT rg, d_min, d_max, p_min, p_max, b_max, row_start, row_end FROM index_row_groups WHERE date = ? AND variant = ? AND gen = ? AND p_max >= ? AND p_min < ? AND rg > ? ORDER BY rg LIMIT ?'
-  const res = await h.env.DB!.prepare(sql).bind(h.date, d1Variant(h.env, h.variant), h.gen, range.pLo, range.pHi, after, limit).all<{ rg: number; d_min: number; d_max: number; p_min: string; p_max: string; b_max: number; row_start: number; row_end: number }>()
+  const res = await readerMetadata(h.env)!.prepare(sql).bind(h.date, d1Variant(h.env, h.variant), h.gen, range.pLo, range.pHi, after, limit).all<{ rg: number; d_min: number; d_max: number; p_min: string; p_max: string; b_max: number; row_start: number; row_end: number }>()
   return res.results.map(r => ({ rg: r.rg, dMin: num(r.d_min), dMax: num(r.d_max), pMin: r.p_min, pMax: r.p_max, bMax: num(r.b_max), rowStart: num(r.row_start), rowEnd: num(r.row_end) }))
 }
 

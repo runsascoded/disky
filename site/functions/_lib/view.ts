@@ -1,3 +1,4 @@
+import { readerMetadata } from './readerWorker.js'
 /** One view = "path + scan + scope + pixel budget", answered from the index
  * tiers (specs/done/view-serving.md §1–2). Shared by `/api/subtree` (the map),
  * `/api/todo` (the review backlog) and anything else that wants a folded tree.
@@ -680,7 +681,7 @@ const assignerMemo = new IsoMap<string, Promise<Map<string, string>>>('assignerM
 async function assignerMap(env: Env): Promise<Map<string, string>> {
   return shared(assignerMemo, 'ue', async () => {
     const m = new Map<string, string>()
-    const ue = await env.DB!.prepare('SELECT email, user FROM user_emails').all<{ email: string; user: string }>()
+    const ue = await readerMetadata(env)!.prepare('SELECT email, user FROM user_emails').all<{ email: string; user: string }>()
     for (const r of ue.results) m.set(r.email.toLowerCase(), r.user)
     return m
   }, 10_000, joinOf(env, 'assigners'))

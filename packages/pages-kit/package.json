@@ -1,0 +1,24 @@
+{
+  "name": "@disk-tree/pages-kit",
+  "private": true,
+  "version": "0.0.0",
+  "description": "What disky's Pages apps share (`site/`, `fleet/`): server-drawn cards (SVG → PNG through resvg-wasm, signed card URLs, text and axis helpers) and \"Sign in with OA\" (the broker's OIDC config, its routes, silent sign-in). Consumed as TypeScript source.",
+  "type": "module",
+  "exports": {
+    "./og/render": "./src/og/render.ts",
+    "./og/sign": "./src/og/sign.ts",
+    "./og/text": "./src/og/text.ts",
+    "./oa": "./src/oa.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc -p ."
+  },
+  "dependencies": {
+    "@open-athena/auth": "github:Open-Athena/auth#baf7314a61f04eb73c4ccc40a5b675a865d0357e",
+    "@resvg/resvg-wasm": "^2.6.2"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261013.1",
+    "typescript": "^5.8.0"
+  }
+}

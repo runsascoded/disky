@@ -1,0 +1,48 @@
+# The fleet app's Pages config (specs/disky-oa-dev.md): every key the Functions read. Copy to `wrangler.toml` on the
+# branch that deploys it and fill it in; `cloud` carries only this example.
+#
+# - `[vars]`: plain values, committed with the branch.
+# - Secrets (the `# secret` lines): never committed. Set each with
+#     wrangler pages secret put <NAME> --project-name <project>
+# - Bindings (`[[kv_namespaces]]`): optional here.
+#
+# No D1: sessions are signed cookies (`SESSION_SECRET`), checked by signature alone (`functions/_lib/env.ts`).
+#
+# Build-time env (`vite.config.ts`, set where the build runs, not here): `FLEET_ORIGIN` (absolute `og:` URLs),
+# `FLEET_DOCS_INDEX` (the Markdown `/` renders, repo-relative), `FLEET_REPO` / `FLEET_REF` (where docs links point).
+
+name = "my-fleet"                           # the Pages project
+pages_build_output_dir = "dist"
+compatibility_date = "2026-06-01"
+
+[vars]
+# The deployments: each `token` names the secret holding that deployment's read token (a grant on the deployment that
+# reaches `/api/health`, `/api/scan-runs` and `/api/series?store=meta`); `color` is its trace on the card.
+FLEET_JSON = '[{"name":"gcs","url":"https://gcs.example.com","token":"FLEET_TOKEN_GCS","color":"#EA4335"},{"name":"cw","url":"https://cw.example.com","token":"FLEET_TOKEN_CW","color":"#4C5FF0"},{"name":"hf","url":"https://hf.example.com","token":"FLEET_TOKEN_HF","color":"#FFD21E"},{"name":"r2","url":"https://r2.example.com","token":"FLEET_TOKEN_R2","color":"#F38020"}]'
+# FLEET_RUNS = "14"                         # runs per deployment `/api/fleet` returns
+
+# Who may sign in to `/fleet`: addresses at these domains (comma-separated).
+STAFF_DOMAIN = "example.com"
+
+# "Sign in with OA" (specs/oa-login-rp.md): the broker and this app's client there. Unset: no sign-in.
+OA_LOGIN_ISSUER = "https://login.example.com"
+OA_LOGIN_CLIENT_ID = "my-fleet"
+
+# The Slack post (`POST /api/fleet/slack`): its channel (an id), and its ts when pinned by hand instead of kept in KV.
+SLACK_FLEET_CHANNEL = "C0123456789"
+# SLACK_FLEET_TS = "1762524000.000100"
+
+# Secrets:
+# SESSION_SECRET            # secret: signs sessions and card URLs
+# OA_LOGIN_CLIENT_SECRET    # secret: this app's client secret at the broker
+# FLEET_TOKEN_GCS           # secret: one per `FLEET_JSON` `token`, each deployment's read token
+# FLEET_TOKEN_CW            # secret
+# FLEET_TOKEN_HF            # secret
+# FLEET_TOKEN_R2            # secret
+# FLEET_JOB_TOKEN           # secret: the Bearer token `POST /api/fleet/slack` takes (the hourly cron's)
+# DISKY_SLACK_BOT_TOKEN     # secret: the bot that posts and edits the fleet message
+
+# Where the Slack post's channel + ts are kept between runs (without it: `SLACK_FLEET_TS`, after one `?new=1` post).
+# [[kv_namespaces]]
+# binding = "FLEET_KV"
+# id = "<namespace id>"

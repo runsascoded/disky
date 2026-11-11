@@ -62,7 +62,7 @@ import { copyText } from './CopyName'
 import { Paginated, Pager, pageOfIndex, usePaged } from './Pager'
 import { pickedScan, pickedSlug, sizedAtOldScan, sizedScan, withoutDeleted } from './stagedScan'
 import { adoptSection, dropSection, EARLIER_KEY, foldAll, foldOverride, foldsParam, pagesParam, sectionOfHash, setFold, settledParam, settleFolds } from './stagedParams'
-import { SECTION_KEY } from './homeSections'
+import { decodeSection, encodeSection, SECTION_KEY } from './homeSections'
 import { useScrollSpyPref } from './prefs'
 
 const iso = (ts: number): string => new Date(ts * 1000).toISOString()
@@ -74,12 +74,12 @@ const prefixToPath = (prefix: string): string => {
   return m ? m[1] : prefix
 }
 
-// The section in view lives in the query (`?section=batch-12`, `?section=runs`), as on the map: beside the rest of
+// The section in view lives in the query (`?v=batch-12`, `?v=runs`: `encodeSection`), as on the map: beside the rest of
 // the view, where a reload, a copied link and the server (a sign-in bounce, a link preview) all see it. A `#batch-12`
 // fragment is a link *to* a batch (its permalink, a Slack thread's, the staged card's): the page adopts it into the
 // param itself (`adoptSection`; the spy can't, as the sections aren't known until the batches load) and reveals the
 // batch. Module constants: `useSectionSpy` re-resolves its mode, and reads its sections, by these objects' identity.
-const SECTION_MODE: SectionMode = { kind: 'param', key: SECTION_KEY, adoptFragment: false }
+const SECTION_MODE: SectionMode = { kind: 'param', key: SECTION_KEY, encode: encodeSection, decode: decodeSection, adoptFragment: false }
 // Found in the document, so always in page order: live batches, the completed ones' page while their fold is open
 // (folded, they have no position to compare), then the runs.
 const SECTIONS = { selector: '.staged-batches > [data-section], .staged-settled[open] > [data-section], #runs[data-section]' }
@@ -354,7 +354,7 @@ export function StagedPage() {
   const location = useLocation()
   const navigate = useNavigate()
   const navType = useNavigationType()
-  // A `#batch-12` link (a permalink, a Slack thread's): into `?section=`, with the batch to reveal once it has loaded.
+  // A `#batch-12` link (a permalink, a Slack thread's): into `?v=batch-12`, with the batch to reveal once it has loaded.
   const [reveal, setReveal] = useState<number | null>(null)
   useEffect(() => {
     const to = sectionOfHash(location.hash)

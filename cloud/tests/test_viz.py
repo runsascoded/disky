@@ -823,3 +823,30 @@ def test_generation_is_opt_in(tmp_path: Path, listing: str):
     assert sorted(_rows(bysize, ["path", "kind", "generation"]), key=str) == sorted(want, key=str)
     assert list(pd.read_parquet(off).columns) == STORE_COLS
     assert list(pd.read_parquet(off.with_name("path-index-bysize.parquet")).columns) == [*STORE_COLS, "tot"]
+
+
+@pytest.mark.parametrize('native', [False, True], ids=['opaque-etags', 'exact-gcs-generations'])
+def test_object_versions_reach_both_path_index_sorts(tmp_path: Path, listing: str, native: bool):
+    """Opt-in string identities survive direct indexing; unknown tokens and directory tokens stay NULL."""
+    df = pd.read_parquet(listing)
+    tokens = ['9007199254740993', '9007199254740995', None, '9007199254740997'] if native else ['"a-multipart-2"', '"b"', None, '"c"']
+    if native:
+        df['generation'] = pd.Series([9007199254740993, 9007199254740995, None, 9007199254740997], dtype='Int64')
+    else:
+        df['version'] = tokens
+    source = tmp_path / 'version-listing.parquet'
+    df.to_parquet(source)
+    path = tmp_path / 'version/path-index.parquet'
+    result = CliRunner().invoke(main, ['path-index', '-V', '-U', '-d', '2026-07-20', '-l', str(source),
+                                      '-o', str(tmp_path / 'snap'), '-P', str(path)], catch_exceptions=False)
+    assert result.exit_code == 0, result.output
+    want = [
+        ('b1', 'dir', None), ('b1/datasets', 'dir', None), ('b1/top.bin', 'file', tokens[3]), ('b1/users', 'dir', None),
+        ('b1/datasets/raw', 'dir', None), ('b1/users/rw', 'dir', None),
+        ('b1/datasets/raw/part0', 'file', tokens[2]), ('b1/users/rw/ckpt', 'dir', None),
+        ('b1/users/rw/ckpt/model.bin', 'file', tokens[0]), ('b1/users/rw/ckpt/opt.bin', 'file', tokens[1]),
+    ]
+    for filename, extra in [('path-index.parquet', []), ('path-index-bysize.parquet', ['tot'])]:
+        frame = pd.read_parquet(path.with_name(filename))
+        assert list(frame.columns) == [*STORE_COLS, 'version', *extra]
+        assert sorted(_rows(frame, ['path', 'kind', 'version'])) == sorted(want)

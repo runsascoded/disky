@@ -15,5 +15,5 @@ export default defineConfig({
     enforce: 'pre',
     load: id => id.endsWith('/vendor/zstd.wasm') ? `import { readFileSync } from 'node:fs'\nexport default new WebAssembly.Module(readFileSync(${JSON.stringify(id)}))\n` : null,
   }],
-  test: { include: ['functions/**/*.test.ts', 'src/**/*.test.ts', 'bench/**/*.test.ts'], testTimeout: 30_000 },
+  test: { include: ['functions/**/*.test.ts', 'src/**/*.test.ts', 'bench/**/*.test.ts', 'executor/**/*.test.ts'], testTimeout: 30_000 },
 })

@@ -36,6 +36,9 @@ def test_etag_only_changes_survive_build_append_merge_and_compaction(tmp_path: P
     assert result.exit_code == 0, result.output
     runs = _newest_runs(gen)
     assert [p.name for p in runs] == [f"{dates[2]}_{dates[3]}"]
+    assert [json.loads((gen / 'verify' / f'{date}.json').read_text())['generation'] for date in dates[2:]] == [
+        {'objects': 1, 'equal': 1, 'column': 'version'}, {'objects': 1, 'equal': 1, 'column': 'version'},
+    ]
     compacted = tmp_path / "compacted"
     ic.compact_gen(gen, compacted, tmp_path / "compact-work", gen="g", new_gen="g.c001", level=None,
                    rg_rows=4, threads=1, mem="2GB")
@@ -45,6 +48,12 @@ def test_etag_only_changes_survive_build_append_merge_and_compaction(tmp_path: P
     ts = [sn.scan_epoch(d) for d in dates]
     assert rows == [(ts[0], ts[1], '"a"'), (ts[1], ts[3], '"b"'), (ts[3], sn.OPEN, '"c"')]
     assert pq.read_schema(compacted / "served/path.parquet").field("version") == ist.OBJECT_VERSION_FIELD
+    from dt_cloud.interval_verify import generation_parity
+
+    with duckdb.connect() as con:
+        assert generation_parity(con, str(source / f'index/{dates[0]}/path-index.parquet'), str(compacted / 'served'), [], ts[0]) == {
+            'objects': 1, 'equal': 1, 'column': 'version',
+        }
 
 
 @pytest.mark.parametrize("legacy", [None, 9007199254740993])

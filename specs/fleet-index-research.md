@@ -1,0 +1,139 @@
+# Fleet query-index research
+
+Status: active, 2026-11-09. Cross-deployment owner: the root `disky` session (`cloud`). Experimental source lives on `w/fleet-index-research` in `wt/index-research`; GCS owns its deployment inputs, real-data qualification and rollout. This is the first-principles index/storage/algorithm work, separate from the fleet-status dashboard, executor transport and deployment/CS3 harmonization. Those workstreams proceed independently. No hosted infrastructure apply, permission change or production generation move follows from this spec.
+
+## Decision being made
+
+Find an economical exact design for `(S,E,D,Q,U,C,L,M)`: dated maps and diffs under subtree, case-insensitive name, ownership, class and liveness selectors, returning a bounded useful partition with exact measures. Evaluate total storage, build/append/compaction work and physical serving reads together. A larger executor can complete a costly plan; it does not establish that its access path scales. A small answer does not establish a small discovery cost.
+
+The leading decomposition is **shared segment text/topology + joint selected-presence discovery + separate historical numeric measures**, with a costed packed scan/aggregate fallback. It is a candidate, not an implemented fleet index or accepted all-axis complexity bound. The competing summary-heavy design materializes expensive complete predicates/positive time blocks. The next decision is which representation is economical on a qualified real scope, before building either fleet-wide.
+
+The current interval/static-name indexes remain the serving baseline. The private November 9 memo/journal are preserved, with hashes, under ignored `tmp/prior-research/`; originals remain in the GCS worktree. Their suggestion to finish portable Phase 1 is superseded by its verified acceptance below. Historical ClickHouse measurements remain retired evidence, not the proposed service.
+
+## Query and output contract
+
+Every request pins semantic/policy version, store, immutable generation and append manifest, ordered scan IDs, ownership policy/revision, staging/deletion revision, normalized query AST, metric, scope and rendering/output budgets. A cache or continuation carries the same identities. A response reports the identities actually read. Mixed generations, unavailable dates and unsupported semantics are explicit failures, never nearest-date substitution or stale-slice reuse.
+
+The atomic measure is an **own object**, identified by its original case-sensitive full key and dated state, with nonnegative byte size and an independent count of one. Directory values are derived sums, not independent additive contributions. A key that also names a directory contributes its own object once alongside descendants. An object-version selector is an additional identity predicate; recursive validity versions do not provide that selector.
+
+For dated predicate `F_t`, define `B(P,t,F)` and `N(P,t,F)` as selected own bytes/counts at or below path P. U and C are evaluated jointly on each dated object state. The first census uses immutable/dately versioned attribution. Production's live-assignment semantics must be preserved when comparing against its reader; a historical-attribution experiment is separately labelled and compared to its own oracle. L is a pinned live overlay, not another historical scan. Its implementation is a later gate.
+
+The initial name contract is one positive literal, wholly within one basename, with inherited directory coverage: an own object matches if any segment of its path matches. An ancestor of D can therefore cover D even when no segment strictly below D matches. Matching ancestors/descendants reduce to disjoint outer roots before measures are summed. Shared text retains original identities separately from normalized labels. Case normalization and Unicode behavior must match the declared runtime policy; today's Python `str.lower()` character census is not evidence of JavaScript Unicode parity. Anchors, AND/OR/NOT and literal slash behavior follow the normalized language version and require explicit plans; they are not inferred from a substring interval.
+
+The primitive partitions D into immediate child subtrees plus D's own-object component when present. That component uses an explicit result kind, not a synthetic reserved pathname. For each returned disjoint component, report exact selected bytes/counts, endpoint measures where requested, the chosen score, and selection/completeness state. Other holds the exact omitted partition. Counts include zero-byte objects. Root and child totals reconcile independently in every additive channel. Direct label-hit counts, matched object counts and recursive path counts are different measures.
+
+For a positive share policy with denominator K, return every component with positive score at least `total/K`, deterministic identity ordering, and exact Other. There are at most K qualifying disjoint components; reserve an Other row by choosing `1 <= K <= M-1`. With `M = 1`, return the exact unrefined total/count partition. If total score is zero, return exact counts/totals without pretending every zero-score component meets a zero threshold. A flat directory can legitimately have only Other. A recursive rendering replaces frontier components by their disjoint child partitions while keeping the global renderable frontier within M; context/ancestor metadata has its own explicit record/byte cap. This primitive does not yet specify the production reader's complete pixel/attenuation policy. An alternative refinement policy receives its own version and must be compared against a scan implementing that same policy.
+
+Exact globally ranked top-M is a stronger optional result contract. It needs an omission certificate and deterministic tie rule. Do not relabel a share-threshold partition as top-M. A budget-exhausted plan either returns a declared continuation with exact coverage/revisions or refuses. It never inserts an unverified estimate into a complete-looking cell, silently drops candidates or overwrites a complete cache entry with a partial answer.
+
+Rich fields need separate aggregation laws. For example, maxima cannot be maintained by subtracting a removed maximum; weighted means need numerator/denominator channels. A bounded point-fetch phase for selected rows is possible only when its access path and I/O are included. No rich-field parity is inferred from scalar byte/count equality.
+
+### Four temporal operations
+
+| Operation | Exact measure | Required source/channel | What does not establish it |
+| --- | --- | --- | --- |
+| Stock at E | Selected own bytes/counts live at E | Complete dated validity/state | Partial initial baseline or size deltas filtered to a later object version |
+| Endpoint diff S→E | Before/after stock and signed difference | Exact endpoint state under one declared selector policy; discover eligibility at either endpoint | Positive eligibility only at E; removed branches would disappear |
+| Observed physical size churn | Per observed own transition: positive/negative size changes, summed separately; churn = added + removed | Full intervening observed scan states/events, with owner/class attribution policy pinned | Absolute directory net change; endpoint eligibility; stock-only export |
+| Membership churn | Per own transition `abs(selected_after_stock-selected_before_stock)` | Paired before/after predicate evaluation | Adding full old/new activations; an owner transfer selected on both sides can have zero membership churn |
+
+“Physical size churn” here means size change observed across available scans, excluding ownership/class-only moves. It does not recover writes/deletes between two unobserved scans or equal-size rewrites without additional identity evidence. If the product requires a different physical-event definition, version that channel explicitly. For one fixed selected-stock basis, added minus removed equals endpoint delta and added plus removed equals churn. These identities cannot be transferred between different attribution/churn policies.
+
+A birth and death observed strictly inside `(S,E]` can have empty endpoint stock and positive interval churn. Endpoint stock eligibility is therefore insufficient for churn discovery. Positive event-activity intervals or dyadic added/removed/churn blocks need their own construction and update accounting.
+
+Absolute net change is `abs(B(child,E)-B(child,S))` after aggregating that child's signed endpoint difference. It is not the sum of own-object absolute changes and need not add to the parent's absolute net change. The positive additive share/rank argument applies directly to stock or declared churn, not this score. Net-mode discovery can use added+removed as a safe upper bound, then score candidate children exactly; cancellation can make the bound loose. Report Other's endpoint delta separately from any sum of omitted child scores.
+
+## State and candidate access paths
+
+A generation has a shared dictionary of original path identities, parent relations and normalized segment labels; historical own-state versions; joint recursive byte/count value versions; and optional eligibility/discovery structures. Generation-local DFS coordinates make subtrees intervals. Text sharing is valid even when two paths have different weight histories. Sharing a numeric payload requires equality of its complete supported dated function, not equal present totals or a hash alone.
+
+**Candidate A: joint selected-presence plus numeric measures.** For each `(node,owner,class)`, keep recursive `(vf,vt,bytes,objects)` values. Coalesce consecutive count-positive values into maximal positive intervals; byte changes need not split eligibility. Exact/prefix labels use one label coordinate per interval. A joint minimum/successor query must constrain label, DFS cursor/scope, validity and selected U/C cells together. After checking selected count inside D and any covering matching ancestor, discover the next eligible node, measure it once and jump past its subtree. Minimum is idempotent, so repeated occurrences do not duplicate the chosen root; summing their weights would still double-count.
+
+For substring discovery, compare two actual representations: (A1) join each eligibility interval to each eligible suffix position of its label; (A2) enumerate matching vocabulary IDs and query their joint temporal/facet structures. A1 pays character×interval storage/update replication; A2 pays matching vocabulary discovery and K-way successor work. A suffix interval or compressed vocabulary does not remove the join for free. The census must size both options before either is selected.
+
+Selected discovery replaces structural R with `R_selected`; it does not bound `R_selected` by M. The fragmented all-positive case can still contain one selected root per matching leaf. A separate weighted-prefix/rank/aggregate index or a scan may be cheaper there. Static text/navigation results do not supply that weighted temporal oracle. A textbook multidimensional range tree proves existence for a restricted point model but can multiply storage by logarithmic powers and scatter dependent reads; it is not the physical layout being adopted.
+
+**Candidate B: complete heavy predicate cells and positive time summaries.** Materialize only predicates/covers whose complete representation is justified, including joint U/C where needed; intern exactly equal result sets/functions and version their changes. For disjoint positive time blocks, a child above share phi in the combined selected total must exceed share phi in at least one block. Their qualifying identities can be unioned and scored exactly. This is a useful threshold certificate when the summaries represent the **whole selected predicate**, not independent facet winners. For m blocks, at most `m/phi` block candidates precede deduplication. Arbitrary uncommon Boolean/live combinations can require new cells or a complete fallback. Census both membership lists and summary payloads; a compact number of heavy cells alone is insufficient.
+
+**Control C: packed scan/aggregate executor.** Stream complete selected own states/events once, aggregate disjoint children, then refine/select under the same policy. Reuse dictionaries and permit caching under the same resident budget as the index. Bound grouping memory with sorted input or measured external spill. An exact process executor is a useful overflow lane and comparison control; it is not a claim that scanning the full fleet is always interactive. Existing portable-kernel execution and a redesigned packed scan are separate benchmark arms.
+
+The recommended hybrid chooses A or B only when its work certificate predicts a win over C within the resource envelope. A prediction must include discovery preparation, dictionaries, selector boxes, source runs and output work. Do not deliberately exhaust the Worker before restarting the complete query elsewhere.
+
+### Rejected shortcuts and current evidence
+
+| Shortcut / experiment | Evidence | Decision |
+| --- | --- | --- |
+| Union fixed per-block top-K winners | Synthetic winner hidden at rank 33 in two blocks requires all 65 candidates for top-1 certification | Reject as a completeness proof; use valid unseen-score bounds or the separate share contract |
+| Compress payload while retaining a huge raw sparse directory | Factored 34-event geometry fell from 4.11MB to 1.40MB interned, but directory remained 1.32MB; no scan crossover | Reject this raw fleet layout; retain exact reference |
+| Smaller spatial tree | 124,134 packed bytes; 288 scalar/48 prefix comparisons; cold pages median/max 7/12 versus scan 1/1 on its tiny fixture | Keep as reference/selective component, not a proven winner |
+| Shared segment text | Tiny witness reduces event-path/own-path/shared-edge/vocabulary characters 562→176→102→56 | Useful decomposition; no weighted-index size/runtime result |
+| Coalesced selected presence | Earlier 34-event witness: 83 positive values→38 positive intervals; 33 exact byte/count pairs | Justifies census gate, not successor acceptance |
+| Independent marginal owner/class/text indexes | Intersection winners and selected nonemptiness can differ from every marginal | Charge complete intersection or build/verify a joint structure |
+| Warm index versus forced-cold scan | Index metadata budget can already hold a tiny scan | Reject unequal-residency comparison |
+
+These are bounded synthetic results from the preserved journal, with different fixtures/contracts. They are not fleet ratios, a cross-platform ranking or production speed claims. ClickHouse's retired retrieval/root-total timings likewise do not establish complete broad TM/dTM performance.
+
+## Cost model and publication invariants
+
+Record `V` own-state changes, `A = sum(changed own facet cells × affected ancestors)`, `J` recursive value versions, `I` positive-count intervals, `P_sub = sum(intervals_for_node × normalized_label_characters)`, matching vocabulary cardinality K, selected outer roots R, selector boxes m, and immutable files/runs F. Initial state is a real input/build term. Same-stamp replacement and tuple transfers fold atomically before value/eligibility boundaries. Worst-case eligibility churn remains proportional to ancestor/facet changes; present coalescing ratios are not guaranteed.
+
+A's logical query ledger is `T_pattern + T_count(D) + T_covering_ancestor + (R+1)×m×T_successor + R×T_value`, plus run/coordinate translation and refinement prefix/scoring work. This is an accounting decomposition, not an implemented complexity guarantee. Add a second endpoint for endpoint-diff eligibility; event churn needs another channel. Include every rich-field lookup and serialization. Sequential successor jumps are dependent; F runs can multiply both discovery and measures.
+
+The physical ledger measures metadata/dictionary load, selected compressed pages/bytes, actual GET spans, dependent waves at declared concurrency, decoded rows, CPU, working memory and complete response/serialization time. Keep logical rows separate from compressed bytes, page amplification and RTTs. Report cold process, warm metadata and warm data separately; cache identity includes all pinned revisions. Predict complete time as fixed setup + dependent read waves/throughput + decode/aggregate/serialize CPU, then compare prediction with measured time rather than fitting a per-case cutoff after the result.
+
+Storage includes shared text/topology, own histories, recursive values, eligibility points, directories/offsets, all physical sort copies, source/run overlap, compaction overlap and replicas. Update cost includes read/write bytes, peak RAM/work disk, elapsed/CPU time, dictionaries and all affected catalogs. Fixed-width count×width terms are structural estimates, explicitly separate from actual encoded/index files. Report the steady state, worst accepted update and restart/load/old-generation overlap independently.
+
+Original keys remain stable identities. Dense DFS ranks can shift when a new path arrives; a published generation never changes their meanings. Accept one of: rebuild a fresh immutable coordinate generation, stable order keys with validated ancestry, or logical-prefix translation into each run's immutable local dictionary. Measure the chosen translation and cross-run merge. Do not borrow a numeric ID from a different dictionary, treat append deltas as folded nonempty state, or infer source presence from structural ancestry.
+
+Publish data/dictionaries and verified manifests before the serving pointer, atomically exposing one complete source/run set. Pin retries to source hashes and output identity; verify idempotent publication and crash recovery before continuous serving. Compaction produces a fresh generation and must preserve query answers across bases/runs. A query keeps old bytes/revisions until completion or explicitly refuses their retirement.
+
+Retaining all as-of scans necessarily preserves enough information about distinct historical changes; “steady state” cannot mean constant total historical bytes under unbounded new identities/events. The storage target is shared identity/text plus represented changes and justified indexes, rather than one full snapshot per scan. Bound serving run fanout, manifests, caches, retry state, temporary disk and retained superseded generations by an explicit compaction/retirement policy. Measure compaction overlap and long-run write amplification; do not call an append-only accumulation or an occasionally unbounded rebuild constant-size maintenance. Deployment/CS3 harmonization can reuse these invariants without waiting for this candidate index.
+
+Live prefix ownership/staging can be resolved into disjoint override regions, but region count, ancestor intersection and duplicate-root reconciliation belong in the cost. Version-specific masks may create many holes and invalidate old eligibility; minimum has no scalar subtraction repair. Boolean OR/AND/NOT require exact document/coverage union/intersection/complement against the selected universe. Regex/glob/slash extensions need their own language/access-path gate. These remain desired functionality, not free compositions or reasons to narrow the overall goal to today's supported forms. Until implemented, retain explicit existing refusals.
+
+## Experiment 1: qualified stock eligibility census
+
+The reusable `dt-cloud eligibility-census` is implemented in `5f88c81ab`. It consumes a hash-pinned local complete-scope event capsule, validates atomic joint own stock and counts recursive values/eligibility. Its fixed-facet stock contract and limitations are in [census contract]. The initial implementation has 25 focused correctness cases and mypy acceptance on `mgu`; it is single-threaded and in memory. No successor, physical index, fleet sizing or new cloud data run has been accepted.
+
+Measure full recursive value changes including zero, positive byte/count value versions, coalesced count-positive intervals, exact/prefix points, direct substring character joins, atomic own changes and raw event×ancestor updates. Record structural byte terms separately from encoded sizes and measured resources. Compare literal/ancestor-heavy, fragmented and minority tuples so a high overall compression ratio cannot hide an expensive selected subset.
+
+The minimum real input that changes the next decision is **one complete, hash-pinned historical subtree with several represented U/C tuples, nontrivial label repetition and observed stock changes across declared scans**. Prefer one scope containing both repeated directory coverage and fragmented matching leaves; otherwise qualify two small complete scopes under one shared resource cap. Start with up to 16 scans covering initialization plus at least one byte change, zero crossing and tuple transfer if those occur in the source. Report absent phenomena rather than inventing them or silently sampling. A scope with one constant tuple and no transitions can validate export truth but cannot decide the joint temporal/substring tradeoff.
+
+GCS supplies source generation/manifest identity, the exact own-object/attribution/class semantics, object-era coverage and independent per-scan scope totals plus U/C cross-checks. Qualify all files/partitions needed for that scope across the chosen window; no `LIMIT`, hash sample, omitted run or nearest-date read. A complete subtree export may retain a producer assertion, but hash/count verification alone cannot prove no upstream row was omitted. The proposed normalized version-row handoff and qualification checks are in [producer contract]. It is documentation only pending a producer that can supply that truth; another fixture-only adapter cycle is not the next research result.
+
+Initial real-data admission: at most 500,000 own paths, 16 scans, four threads, 8 GiB working RAM, 20 GiB work disk and a 30-minute deadline. These are experiment bounds, not calibrated predictions or production refusal policy. The census defaults are smaller, with explicit overrides; never raise work caps merely to force a completion. Choose a smaller qualified complete scope if necessary. All heavy work runs on a coordinated dev node; no fleet data/dependency caches on the laptop. Source qualification, export and census each have their own measured resource ledger.
+
+Gate: zero discrepancies between the export/census snapshots and independently qualified scope totals/counts and per-tuple measures; no ambiguous own slices, overlapping validity, inferred zero-byte class or missing initial stock. Produce J/I/P_sub ratios, tuple/depth distributions and raw/coalesced maintenance counts. Advance A1 only if its estimated points plus the proposed physical directories fit the declared build/storage budget; advance A2 when enumeration avoids that amplification at acceptable measured K. A failed qualification or excessive amplification changes the next design choice; it is not an invitation to launch a fleet build.
+
+## Experiment 2: physical-layout crossover
+
+After the real census, pick at most two candidate physical layouts plus C. Specify encoded schema, page/block sizes, dictionary/metadata placement, append/merge plan and a predeclared storage/update budget before construction. Measure actual output files and reopened readers; a reader must not retain a hidden source event list or builder map. A range-min “oracle” that scans all source rows is a correctness control, not an indexed arm.
+
+Replay identical complete requests: selective/broad/fragmented names; inherited ancestor coverage inside/outside D; deep scopes; majority/minority U/C pools; zero-byte counts; endpoint additions/removals; varied observed timelines. Every accepted request compares exact root/component/Other channels with an independent own-state scan. Score/refinement policy is identical across arms. Unsupported churn/live/Boolean forms remain explicit; successful stock cases do not accept them.
+
+Use equal resident-memory/read/deadline budgets and identical concurrency. Charge preload and every unique prefix/discovery/score read, and allow the scan to aggregate all immediate children in one pass. Preserve query-level counters and files/hashes, not just medians. Record build/update/compaction/RSS/work-disk separately from serving. Cold/warm labels must describe which caches are actually controlled.
+
+Predeclare an engineering margin of at least 20% complete-response improvement for a proposed accelerated workload class, without worse p95 than its scan control under the same caps; report repeats and dispersion, not a significance claim from tiny samples. Physical-read acceptance additionally requires `index_pages + preload_pages / reused_requests < scan_pages` at a stated reuse count. A missed crossover selects scan/overflow for that class; it does not disqualify indexing for another measured class. No fleet rollout follows from one subtree's win. A fleet construction needs source-wide census/storage/update envelopes, scan coverage and production-policy parity first.
+
+## Executor and deployment gates
+
+Portable Phase 1 is already verified: 143 exact synthetic complete-body Node/workerd comparisons, separate sampling profiles, source commits `03a03bbf`/`476fba3c`, with [executor results]. Its 16 MiB fixture adapter is not production capture. Preserve existing reader semantics/refusals in executor comparisons; compare an alternative research policy only to the matching research oracle until a deliberate product change is approved.
+
+Next executor acceptance uses bounded real-data capture on identical immutable generation/scans and ownership/deletion revisions, measuring full body, physical reads, startup/working set and controlled concurrency. Capability transport and dev-only explicit routing proceed independently. Select hosted compute/data placement from measurements, not this spec's index preference. Production cutovers remain deployment-owner actions with rollback and old pinned generations available in flight.
+
+## Progress ledger
+
+| Experiment | State | Execution / evidence | Next decision |
+| --- | --- | --- | --- |
+| Portable executor Phase 1 | Verified | `site/executor/results.md`; 143 synthetic response pairs | Real-data adapter and explicit dev transport |
+| Joint eligibility census | CLI implemented; 25 correctness cases and mypy verified | `5f88c81ab`; `mgu:disky-test/index-research`, source snapshot `c13f4ceaf2a8`, 2026-11-09 13:55 UTC; `tmp/census-tiny.json` / `tmp/census-tiny-resources.log` | Producer-qualified complete historical subtree |
+| Normalized version-row handoff | Specified, adapter not implemented | [producer contract]; no data downloaded | Confirm actual producer truth/mapping and independent totals |
+| Candidate physical reader | Not started | No joint successor/index built | Qualified census and predeclared layout/crossover budgets |
+
+The checked-in adversarial capsule has seven events over two own paths: 21 recursive value versions including zero (15 positive), nine coalesced positive intervals, 27 raw event×ancestor updates and substring joins 32→20. Final count includes its zero-byte object. This is reproducible tiny implementation acceptance, not fleet compression or latency evidence.
+
+Update the ledger with source revision, input identity/hashes, host/job, start/end timestamps, resource caps and artifact paths for every real run. Delivery or a suggested command is not a running experiment. Keep at most two active experiments, each with a bounded question and a result that selects the next action. Do not repeat old full-fleet censuses or portable synthetic parity to stand in for the missing qualified joint-index evidence.
+
+[executor results]: ../site/executor/results.md
+[census contract]: ../cloud/docs/eligibility-census.md
+[producer contract]: ../cloud/docs/eligibility-producer.md

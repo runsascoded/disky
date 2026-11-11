@@ -5,16 +5,11 @@
  * `?account=choose` pass through as for `/auth/google`. Not configured: 404 (the wall shows no button).
  *
  * Without `prompt=none` this is a person asking to sign in, which ends any suppression of the silent attempt, a
- * deliberate sign-out's included (`_lib/silentSignIn.ts`).
+ * deliberate sign-out's included (`_lib/silentSignIn.ts`). The handler is `@disk-tree/pages-kit/oa`'s, shared with
+ * `fleet/`.
  */
-import { oidcStart } from '@open-athena/auth/oidc'
+import { oaStart } from '@disk-tree/pages-kit/oa'
 import { type Ctx } from '../_lib/auth.js'
 import { oaLoginConfig } from '../_lib/oidc.js'
-import { resumed } from '../_lib/silentSignIn.js'
 
-export const onRequest = async (ctx: Ctx): Promise<Response> => {
-  const cfg = oaLoginConfig(ctx.env, ctx.request)
-  if (!cfg) return new Response('Not found\n', { status: 404 })
-  const res = await oidcStart(cfg)({ request: ctx.request })
-  return new URL(ctx.request.url).searchParams.get('prompt') === 'none' ? res : resumed(ctx.request, res)
-}
+export const onRequest = (ctx: Ctx): Promise<Response> => oaStart(oaLoginConfig(ctx.env, ctx.request), ctx.request)

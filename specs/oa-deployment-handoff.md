@@ -2,6 +2,8 @@
 
 Status: source audit and shared tooling fixes, 2026-11-09. Requested by Ryan so Louisa can operate all four deployments during his two-month leave. Operator access and a release rehearsal remain unverified. No site, image, database, infrastructure or permission was changed by this audit.
 
+Current scope: Ryan has set operator permissions aside and prioritized deploy/CS3 harmonization. See [harmonization plan] for the latest source audit, adoption ledger and implementation sequence. The live revision readback below is a historical snapshot: GCS and HF subsequently supplied clean rollout receipts, so its dirty-HF finding must not be repeated as current live state without another readback. CW's newer source still needs a coherent published handoff.
+
 ## What is shared
 
 All four have the same broad architecture: the shared Python/TypeScript code, a Cloudflare Pages site over deployment-owned D1/R2 resources, GCP-built scan images, GCP Batch/Scheduler pipelines, and separate Cloudflare/GCP Pulumi stacks. The object-store API differs; the control plane remains Cloudflare plus GCP even for HF and R2. A Git push is not the OA site's deploy command.
@@ -35,7 +37,7 @@ The status helper was byte-identical across all four published branches, but sel
 ## Before leave: completion criteria
 
 1. **Recoverable state.** Move R2's two state backends to an agreed OA-controlled backend, or establish an OA-controlled encrypted backup and demonstrate restore on another machine. The passphrase must be recoverable independently of Ryan's laptop. Do not merely copy a state directory without testing decryption. A backend move is reviewed infrastructure work; do not change the backend URL or initialize a second stack over live resources blindly.
-2. **Uniform tooling.** Carry the shared deploy/status fixes to all four published branches; CW also needs the already-existing TOML validation/dry-run guard. Reconcile the operator sections of `AGENTS.md`: the current helpers keep `<deployment>-prod/dev` pointers locally and push the source branch, while some older prose says a prod pointer is pushed too. Use the script as authority until the prose is fixed.
+2. **Uniform tooling.** Carry the shared deploy/status fixes to all four published branches; CW also needs the already-existing TOML validation/dry-run guard (`616b6d44`, `25d05693`, `d7c65eb0`, `e0ac5bde`, in history order; review their accompanying tests/CI changes). Its published branch does not yet contain `site/toml-check`. Reconcile the operator sections of `AGENTS.md`: the current helpers keep `<deployment>-prod/dev` pointers locally and push the source branch, while some older prose says a prod pointer is pushed too. Use the script as authority until the prose is fixed.
 3. **Candidate first.** Use an explicit candidate image destination for GCS/CW/HF; their default build commands update the live tags. Resolve and record the candidate digest, verify its source stamp and run the owner-approved smoke against that digest before promotion. Keep R2's existing scheduler digest pin. All four release records must retain the previous image digest.
 4. **A clean published source baseline.** Do not hand off local-only commits, dirty worktrees or untracked source as the authoritative release. Current image guards inspect tracked changes; included untracked source is an additional provenance gap to audit before calling a build reproducible. The site build marks tracked changes dirty, but a commit alone still cannot reconstruct those bytes.
 5. **Schema ordering.** Verify the live schema read-only before applying a recipe, apply only the unapplied recipes required by the release, and keep site/image compatibility explicit. A recipe present in Git may already have been applied; HF currently has local deletions of applied recipes that are not in its published branch. Do not apply every file blindly or load `schema.sql` over a live database.
@@ -98,3 +100,4 @@ Cloudflare's [project API] exposes the canonical production deployment; its [dep
 
 [project API]: https://developers.cloudflare.com/api/resources/pages/subresources/projects/methods/get/
 [deployment-list API]: https://developers.cloudflare.com/api/resources/pages/subresources/projects/subresources/deployments/methods/list/
+[harmonization plan]: deployment-cs3-harmonization.md

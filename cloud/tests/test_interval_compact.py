@@ -212,6 +212,7 @@ def test_store_gc_deletes_superseded_generations_past_the_grace(run, tmp_path):
     for g in ("s1", "s2"):
         (store / "static-names" / g).mkdir(parents=True)
         (store / "static-names" / g / "meta.json").write_text("{}")
+        (store / "static-names" / g / "scans.json").write_text('{"scans":[]}\n')
     st, later = Store(str(store)), time.time() + sg.GRACE_S
     acts = lambda recs: [(r["gen"], r["action"]) for r in recs]  # noqa: E731
     assert acts(sg.run(st, "interval-store", [], lineage_only=True, now=time.time())) == [

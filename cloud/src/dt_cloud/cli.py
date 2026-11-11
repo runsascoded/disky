@@ -420,6 +420,7 @@ def wandb_mine(
 @option("-S", "--search", is_flag=True, help="Also write the search sidecars beside the `path` sort (`path-index.{rows,trigrams,rows-search}.parquet`: the filter view's segment-name index, specs/done/path-store-search.md); upload them with the generation dir")
 @option("-u", "--user-sort-tiers", default=None, help="Only these sorts get a `-by-user` copy, comma-separated (`bysize`: the copy a lens view reads; default every sort)")
 @option("-U", "--no-user-sorts", "user_sorts", is_flag=True, flag_value=False, default=True, help="Skip every `-by-user` sort copy (a lens then reads the mixed-user sorts, filtered per row — fine below the root, too wide at a user's root view; see -u)")
+@option("-V", "--object-version", is_flag=True, help="Carry opaque object versions (R2/S3 ETags or exact decimal GCS generations) as a string `version`, NULL on dirs; requires a version-aware interval generation")
 @option("-P", "--path-index", "path_index", type=Path, default=None, help="Write the path store here (`<dir>/path-index.parquet`, the `path` sort; `path-index-bysize.parquet` and the by-user copies land beside it — specs/done/path-store.md §4.3)")
 @option("-x", "--access", "access", multiple=True, help="Access-log layer-2a agg parquet glob(s); adds per-node last-read ('a') for the read-recency lens")
 def build_path_index(
@@ -427,6 +428,7 @@ def build_path_index(
     dir_cache: Path | None,
     asof: str,
     generation: bool,
+    object_version: bool,
     identities_path: str | None,
     listings: tuple[str, ...],
     out_dir: Path | None,
@@ -463,7 +465,7 @@ def build_path_index(
             raise UsageError(str(e))
         partial = write_path_index(
             listings, path_index.parent, asof, attributions, identities_path, access=access, dir_cache=dir_cache, path_index=path_index,
-            user_sorts=user_sorts, row_group_rows=row_group_rows, generation=generation, path_only=path_only, part=part,
+            user_sorts=user_sorts, row_group_rows=row_group_rows, generation=generation, object_version=object_version, path_only=path_only, part=part,
             user_sort_tiers=tuple(t for t in user_sort_tiers.split(",") if t) if user_sort_tiers else None,
         )
         err(f"wrote part {part.id} beside {path_index} ({partial['total_bytes']/1e12:.1f} TB, {partial['total_objects']:,} objects)")
@@ -472,7 +474,7 @@ def build_path_index(
         out_dir = Path("site/public/data") / asof
     meta = write_path_index(
         listings, out_dir, asof, attributions, identities_path, access=access, dir_cache=dir_cache, path_index=path_index,
-        user_sorts=user_sorts, row_group_rows=row_group_rows, search=search, generation=generation, path_only=path_only,
+        user_sorts=user_sorts, row_group_rows=row_group_rows, search=search, generation=generation, object_version=object_version, path_only=path_only,
         user_sort_tiers=tuple(t for t in user_sort_tiers.split(",") if t) if user_sort_tiers else None,
     )
     err(f"wrote {out_dir}/: age.json meta.json ({meta['total_bytes']/1e12:.0f} TB, {meta['total_objects']:,} objects)")
@@ -3897,6 +3899,10 @@ main.add_command(_soft_delete)
 from .image_sha import image_sha_cmd as _image_sha  # noqa: E402
 
 main.add_command(_image_sha)
+
+from .eligibility_census import eligibility_census_cmd as _eligibility_census  # noqa: E402
+
+main.add_command(_eligibility_census)
 
 if __name__ == "__main__":
     main()

@@ -16,12 +16,15 @@
     "test:e2e": "playwright test",
     "test:e2e:list": "playwright test --list",
     "bench": "node bench/bench.ts",
-    "bench:diff": "node bench/diff.ts"
+    "bench:diff": "node bench/diff.ts",
+    "executor:build": "esbuild executor/cli.ts --bundle --platform=node --format=esm --outfile=../tmp/executor/cli.mjs",
+    "executor:parity": "esbuild executor/parity.ts --bundle --platform=node --format=esm --packages=external --outfile=tmp/executor/parity.mjs && node tmp/executor/parity.mjs"
   },
   "dependencies": {
+    "@disk-tree/pages-kit": "workspace:*",
     "@disk-tree/react": "workspace:*",
     "@floating-ui/react": "^0.27.20",
-    "@open-athena/auth": "github:Open-Athena/auth#184b574b21f1814b4b5e6c933cfdc97150d8c23f",
+    "@open-athena/auth": "github:Open-Athena/auth#baf7314a61f04eb73c4ccc40a5b675a865d0357e",
     "@rdub/file-tree": "https://github.com/runsascoded/file-tree#9d9bd749469aa4ae76b860ea9a403c3ab18df80b",
     "@open-athena/treemap": "workspace:*",
     "@rdub/treemap": "workspace:@open-athena/treemap@*",
@@ -53,7 +56,9 @@
     "typescript": "^5.8.0",
     "vite": "^7.0.0",
     "vitest": "^4.1.11",
-    "wrangler": "4.150.0"
+    "wrangler": "4.150.0",
+    "esbuild": "0.28.2",
+    "miniflare": "5.20261006.2-beta"
   },
   "pnpm": {
     "onlyBuiltDependencies": [

@@ -30,7 +30,7 @@ import { colorModeCodec } from '../../../src/colorMode.js'
 import { diffCard, resolveDiffScans } from './diff.js'
 import { seriesCard } from './series.js'
 import { encodeScan } from '../../../src/scanSlug.js'
-import { SECTION_KEY } from '../../../src/homeSections.js'
+import { encodeSection, SECTION_KEY } from '../../../src/homeSections.js'
 import type { ColorMode } from '../../../src/types.js'
 
 export type OgEnv = Env & PolicyEnv & {
@@ -237,7 +237,7 @@ async function cardData(env: OgEnv, kind: string, params: Record<string, string>
   const page = kind === 'map' || Object.hasOwn(KIND_SECTION, kind) ? `/${params.path ?? ''}` : kind === 'user' ? `/user/${params.id ?? ''}` : `/${kind}`
   const pu = new URL(page, url.origin)
   const section = KIND_SECTION[kind as OgKind]
-  if (section) pu.searchParams.set(SECTION_KEY, section)
+  if (section) pu.searchParams.set(SECTION_KEY, encodeSection(section))
   for (const [k, v] of Object.entries(params)) if (k !== 'path' && k !== 'id' && k !== 'store') pu.searchParams.set(k, v)
   const title = pageView(pu, site.name, site.root, params.store)?.title ?? site.name
   switch (kind) {

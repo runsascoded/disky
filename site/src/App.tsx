@@ -30,7 +30,7 @@ import { useFolderSearch } from './folderSearch'
 import { Busy, Loading, Skeleton } from './Busy'
 import { useRules } from './rules'
 import { useSectionSpy, withoutSection, type SectionMode } from 'use-prms/sections'
-import { LEGACY_ANCHORS, SECTION_IDS, SECTION_KEY } from './homeSections'
+import { decodeSection, encodeSection, LEGACY_ANCHORS, SECTION_IDS, SECTION_KEY } from './homeSections'
 import { useScrollSpyPref } from './prefs'
 import { SectionAnchor } from './SectionAnchor'
 import { barControls } from './pageBar'
@@ -145,10 +145,11 @@ const SPANS: [string, number][] = [['1d', 1], ['3d', 3], ['7d', 7], ['14d', 14],
 // five minutes since) is never replayed after a reader rule changes. Bump
 // with `CACHE_V` in functions/_lib/edgeCache.ts.
 const API_CV = '3'
-// The section in view lives in the query (`?section=diff`), where a link preview's unfurler sees it; an incoming
-// `#diff` (or a retired `#changes`) is adopted into it. A module constant: `useSectionSpy` re-resolves its mode,
-// and re-binds its scroll listener, whenever this object's identity changes.
-const SECTION_MODE: SectionMode = { kind: 'param', key: SECTION_KEY }
+// The section in view lives in the query (`?v=diff`, `encodeSection`), where a link preview's unfurler sees it; an
+// incoming `#diff` (or a retired `#changes`) is adopted into it, a legacy `?section=diff` rewritten (`main.tsx`). A
+// module constant: `useSectionSpy` re-resolves its mode, and re-binds its scroll listener, whenever this object's
+// identity changes.
+const SECTION_MODE: SectionMode = { kind: 'param', key: SECTION_KEY, encode: encodeSection, decode: decodeSection }
 
 function AppContent() {
   // Which object store to render: the subtree's <StoreProvider> (Root mounts
@@ -750,7 +751,7 @@ function AppContent() {
   // The treemap's drill path now lives in the URL *path* (below the store's own
   // route prefix), so a drilled prefix is a real shareable URL —
   // `/my-bucket/some/dir`, not `/?p=my-bucket/some/dir`. View
-  // options stay query params (`?c`, `?mt`, …), the section in view among them (`?section=`).
+  // options stay query params (`?c`, `?mt`, …), the section in view among them (`?v=`).
   const storeBase = store.path === '/' ? '' : store.path
   // Decoded once: a dir name with spaces or URL delimiters travels encoded (`toUrlPath`). A store's own scan root
   // (`Store.root`) is its mount: it leads every path, and its URLs leave it out.

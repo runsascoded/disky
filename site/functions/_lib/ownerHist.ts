@@ -1,3 +1,4 @@
+import { readerMetadata } from './readerWorker.js'
 /** Assignment prefixes priced over an interval store's whole history (specs/owner-prefix-history.md): one D1 row
  * per prefix (`owner_prefix_hist`) holding its aggregate's versions over scan ordinals, as the store holds its
  * rows. An owner change reads and writes nothing; a new prefix is one history read and one row, however many
@@ -69,7 +70,7 @@ async function load(env: Env, tag: string, refresh = false): Promise<Map<string,
   const cur = tables.get(tag)
   if (cur && !refresh && Date.now() - cur.at < LOAD_TTL) return cur.rows
   return shared(refreshing, tag, async () => {
-    const { results } = await env.DB!.prepare('SELECT depth, path, hz, versions FROM owner_prefix_hist WHERE idx = ?').bind(tag)
+    const { results } = await readerMetadata(env)!.prepare('SELECT depth, path, hz, versions FROM owner_prefix_hist WHERE idx = ?').bind(tag)
       .all<{ depth: number; path: string; hz: number; versions: string }>()
     const t = tables.get(tag) ?? { at: 0, rows: new Map<string, Hist>() }
     for (const r of results) {
@@ -111,10 +112,10 @@ async function price(env: Env, tag: string, rows: Map<string, Hist>, keys: Map<s
     const now = Math.floor(Date.now() / 1000)
     const stmts = [...put].map(([k, h]) => {
       const i = k.indexOf(':')
-      return env.DB!.prepare('INSERT OR REPLACE INTO owner_prefix_hist (idx, depth, path, hz, versions, updated_ts) VALUES (?, ?, ?, ?, ?, ?)')
+      return readerMetadata(env)!.prepare('INSERT OR REPLACE INTO owner_prefix_hist (idx, depth, path, hz, versions, updated_ts) VALUES (?, ?, ?, ?, ?, ?)')
         .bind(tag, Number(k.slice(0, i)), k.slice(i + 1), h.hz, JSON.stringify(h.versions), now)
     })
-    for (let i = 0; i < stmts.length; i += 100) await env.DB!.batch(stmts.slice(i, i + 100))
+    for (let i = 0; i < stmts.length; i += 100) await readerMetadata(env)!.batch(stmts.slice(i, i + 100))
     for (const [k, h] of put) rows.set(k, h)
     return { groups: got.groups, hz: got.hz }
   }, WAIT, joinOf(env, 'owner-hist-price'))
