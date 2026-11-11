@@ -277,6 +277,8 @@ One gate (`_lib/auth.ts`, `@open-athena/auth` over D1): `identify` → `Identity
 
 ## Development
 
+Shared work done on a deployment branch is its own commit, subject prefixed `[cloud]`, with no deployment defaults; send its sha to the root `disky` session when committed. Config and wiring are separate `[<deploy>]` commits. An unsent `[cloud]` commit is how a fix stays on one deployment.
+
 Deploy sites and build release images only from committed source. `scripts/require-clean` refuses staged, unstaged and nonignored untracked changes; there is no dirty-source override. `site/deploy` checks again after building and records the verified commit. A deployment's image build (gcs/cw `job/build.sh`) uploads a Git archive of that commit, so concurrent working-tree edits cannot enter the image. Read-only deployment status and dry runs remain available on a dirty tree.
 
 During ongoing implementation, treat a concrete bug report about the code we own as an implied request to fix it: reproduce, implement, verify, and coordinate the deployment handoff without requiring a second prompt. Honor explicitly read-only requests. Code-fix authority does not imply unrelated infrastructure applies, permission changes, or another session's live cutover. Report separately what is fixed locally and what is actually deployed.
