@@ -476,6 +476,23 @@ RETRY = gcp.cloudscheduler.JobRetryConfigArgs(
     max_backoff_duration="3600s",
     max_doublings=5,
 )
+# A cron whose target is safe to repeat (`BatchSubmitCron`: a second run of the submitter meets the period's job and
+# stops): a failed or timed-out call is retried, 30 s doubling to 5 min, within 30 min of the scheduled time.
+IDEMPOTENT_RETRY = gcp.cloudscheduler.JobRetryConfigArgs(
+    retry_count=5,
+    max_retry_duration="1800s",
+    min_backoff_duration="30s",
+    max_backoff_duration="300s",
+    max_doublings=4,
+)
+
+
+def checked_spec(submitter: Path, name: str) -> dict:
+    """`submitter_spec(submitter)`, refused (`check_cron_labels`) unless its job and allocation policy carry the stack's
+    cost labels: a cron's job reaches Batch with what the stack rendered, so the check is here, before any resource."""
+    spec = submitter_spec(submitter)
+    check_cron_labels(spec, parse_labels(os.environ.get(LABELS_ENV, "")), name)
+    return spec
 
 
 def _cron(
@@ -493,6 +510,8 @@ def _cron(
     existing: bool,
     parent: pulumi.Resource,
     depends_on: list[pulumi.Resource] | None = None,
+    retry: gcp.cloudscheduler.JobRetryConfigArgs = RETRY,
+    aliases: Sequence[pulumi.Input[str] | pulumi.Alias] = (),
 ) -> gcp.cloudscheduler.Job:
     return gcp.cloudscheduler.Job(
         name,
@@ -510,8 +529,8 @@ def _cron(
             body=body,
             oauth_token=gcp.cloudscheduler.JobHttpTargetOauthTokenArgs(service_account_email=sa_email, scope=SCOPE),
         ),
-        retry_config=RETRY,
-        opts=adopt.opts(existing, f"projects/{project}/locations/{region}/jobs/{name}", parent=parent, depends_on=depends_on),
+        retry_config=retry,
+        opts=adopt.opts(existing, f"projects/{project}/locations/{region}/jobs/{name}", parent=parent, depends_on=depends_on, aliases=list(aliases)),
     )
 
 
@@ -541,8 +560,7 @@ class BatchCron(ComponentResource):
         depends_on: list[pulumi.Resource] | None = None,
         opts: ResourceOptions | None = None,
     ):
-        spec = submitter_spec(submitter)
-        check_cron_labels(spec, parse_labels(os.environ.get(LABELS_ENV, "")), name)
+        spec = checked_spec(submitter, name)
         super().__init__("disky:gcp:BatchCron", name, None, opts)
         self.spec = spec
         self.job = _cron(
@@ -567,10 +585,15 @@ class RunJobCron(ComponentResource):
     """A Cloud Run job and the Cloud Scheduler cron that runs it, both as `sa`.
 
     Pulumi owns the job's shell (account, limits, the secret env it reads, its
-    `labels` on top of the provider's defaults); the image and plain env are a
-    deploy's (`gcloud run jobs update`), so they are `ignore_changes`, as
-    `wrangler` owns a Pages deploy's contents under `cf/`.
+    `labels` on top of the provider's defaults, its `command`/`args` when given);
+    the image and plain env are a deploy's (`gcloud run jobs update`), so they
+    are `ignore_changes`, as `wrangler` owns a Pages deploy's contents under
+    `cf/`. Given `env`, the plain env is the stack's instead (no longer ignored).
+    `retry`: the cron's (default `RETRY`: none); `cron_aliases`: the cron's
+    former URNs, for a cron moving here from another component.
     """
+
+    TYPE = "disky:gcp:RunJobCron"
 
     def __init__(
         self,
@@ -590,11 +613,17 @@ class RunJobCron(ComponentResource):
         time_zone: str = "Etc/UTC",
         trigger: str | None = None,
         labels: dict[str, str] | None = None,
+        command: list[str] | None = None,
+        args: list[str] | None = None,
+        env: dict[str, str] | None = None,
+        retry: gcp.cloudscheduler.JobRetryConfigArgs = RETRY,
+        description: str | None = None,
+        cron_aliases: Sequence[pulumi.Input[str] | pulumi.Alias] = (),
         adopt: Adopt,
         existing: bool = False,
         opts: ResourceOptions | None = None,
     ):
-        super().__init__("disky:gcp:RunJobCron", name, None, opts)
+        super().__init__(self.TYPE, name, None, opts)
         job_path = f"projects/{project}/locations/{region}/jobs/{job}"
         self.job = gcp.cloudrunv2.Job(
             job,
@@ -611,8 +640,13 @@ class RunJobCron(ComponentResource):
                     containers=[
                         gcp.cloudrunv2.JobTemplateTemplateContainerArgs(
                             image=image,
+                            commands=command,
+                            args=args,
                             resources=gcp.cloudrunv2.JobTemplateTemplateContainerResourcesArgs(limits={"cpu": cpu, "memory": memory}),
                             envs=[
+                                gcp.cloudrunv2.JobTemplateTemplateContainerEnvArgs(name=var, value=value)
+                                for var, value in (env or {}).items()
+                            ] + [
                                 gcp.cloudrunv2.JobTemplateTemplateContainerEnvArgs(
                                     name=var,
                                     value_source=gcp.cloudrunv2.JobTemplateTemplateContainerEnvValueSourceArgs(
@@ -629,7 +663,8 @@ class RunJobCron(ComponentResource):
                 existing,
                 job_path,
                 parent=self,
-                ignore_changes=["template.template.containers[0].image", "template.template.containers[0].envs", "client", "clientVersion", "annotations", "launchStage"],
+                ignore_changes=["template.template.containers[0].image", *([] if env is not None else ["template.template.containers[0].envs"]),
+                                "client", "clientVersion", "annotations", "launchStage"],
             ),
         )
         invoker = "roles/run.invoker"
@@ -651,10 +686,58 @@ class RunJobCron(ComponentResource):
             body=None,
             sa_email=sa_email,
             time_zone=time_zone,
-            description=None,
+            description=description,
             adopt=adopt,
             existing=existing,
             parent=self,
             depends_on=[self.job],
+            retry=retry,
+            aliases=cron_aliases,
         )
         self.register_outputs({"job": self.job.name, "cron": self.cron.name})
+
+
+#: Where `BatchSubmitCron` hands its script the Batch job's spec (JSON).
+SPEC_ENV = "BATCH_SPEC"
+
+
+class BatchSubmitCron(RunJobCron):
+    """A cron that submits a Batch job through a Cloud Run job, which retries and alerts, instead of Cloud Scheduler
+    posting the body to Batch once (`BatchCron`), where a 5xx is a silently missed run and a retried POST a possible
+    second job.
+
+    The spec is `checked_spec(submitter)` as `BatchCron`'s (rendered and label-checked at `up`), handed to the job as
+    `$BATCH_SPEC` beside `env`; the job runs `script` (a deployment's tracked shell script, its text passed as `bash -c`,
+    so the job runs what the stack previewed, whatever the image's checkout). The script owns the submit: an
+    idempotent one (`dt-cloud batch submit -t -e -r`: the job named for its period, a 409 counted as submitted, transient
+    failures retried for a bounded window) and an alert if that still fails. Because a repeat is harmless, the cron
+    retries its own call (`IDEMPOTENT_RETRY`), and the Cloud Run task is not retried (`max_retries=0`: the script's own
+    window is the retry, and a second attempt would alert twice). `timeout` must outlast the script's window.
+    """
+
+    TYPE = "disky:gcp:BatchSubmitCron"
+
+    def __init__(
+        self,
+        name: str,
+        *,
+        submitter: Path,
+        script: Path,
+        env: dict[str, str] | None = None,
+        memory: str = "1Gi",
+        timeout: str = "2400s",
+        retry: gcp.cloudscheduler.JobRetryConfigArgs = IDEMPOTENT_RETRY,
+        **kw,
+    ):
+        self.spec = checked_spec(submitter, name)
+        labels_env = {LABELS_ENV: os.environ[LABELS_ENV]} if LABELS_ENV in os.environ else {}
+        super().__init__(
+            name,
+            command=["bash", "-c", script.read_text()],
+            env={SPEC_ENV: json.dumps(self.spec, sort_keys=True), **labels_env, **(env or {})},
+            memory=memory,
+            timeout=timeout,
+            max_retries=0,
+            retry=retry,
+            **kw,
+        )
