@@ -13,7 +13,9 @@ import { fmtTimestamp } from './scan'
 import { DEFAULT_STORE, STORES, type Store, storeQuery, storeUrl } from './stores'
 
 export interface Links { project: string | null; meta: string | null }
-export type ListResponse = Links & { configured: boolean; runs: RunSummary[] }
+/** What would refuse "Run a scan" now (`/api/scan-runs`' `dispatch`); null where the deployment has no such action. */
+export interface DispatchBlock { running: string | null; pending_since: number | null }
+export type ListResponse = Links & { configured: boolean; runs: RunSummary[]; dispatch?: DispatchBlock | null }
 
 export async function getJson<T>(url: string): Promise<T> {
   const r = await fetch(url, { credentials: 'include' })

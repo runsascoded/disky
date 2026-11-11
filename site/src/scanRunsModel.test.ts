@@ -4,7 +4,7 @@ import {
   batchHref, failedAt, logsHref, mapHref, metaHref, outputIndex, phaseIssues, phaseOutcome, phaseOrder, phaseSpans, runTime, type ScanRun, type ScanRunOutput,
   type ScanRunPhase, manualScans, scanRunOf, structureOf, summarize, withDeltas, runOutcome, runOutcomeLine, phaseSkip, overlappingFailures, runTasks, taskLogsHref,
   isMaintenance, liveness, LOST_S, maintStore, phaseStatus, processingSecs, QUIET_S, issueLeaves, issueNext, issueState, issueWhat, outcomeParts, outcomeSteps, passingSince, runOutcomeLabel, statusMatches,
-  stepFailure, STATUS_FILTERS,
+  stepFailure, STATUS_FILTERS, typicalScanSecs, aboutDur,
   type PhaseIssue,
 } from './scanRunsModel'
 
@@ -98,6 +98,26 @@ describe('manualScans: the scans a hand submit started (the size chart marks the
       run({ run_id: 'old', scan: '2026-10-15', started_ts: 50 }),
     ], [], [], 3500)
     expect([...manualScans(rows)].sort()).toEqual(['2026-10-18T1354', '2026-10-18T2009'])
+  })
+})
+
+describe('typicalScanSecs: the confirm\'s "about N hours" for a manual scan', () => {
+  it('the median of the newest succeeded scans; failures, other kinds, downstream jobs and running ones don\'t count', () => {
+    const h = 3600
+    const rows = summarize([
+      run({ run_id: 's1', scan: '2026-11-01', started_ts: 1 * 86400, finished_ts: 1 * 86400 + 5 * h }),
+      run({ run_id: 's2', scan: '2026-11-02', started_ts: 2 * 86400, finished_ts: 2 * 86400 + 4 * h }),
+      run({ run_id: 's3', scan: '2026-11-03', started_ts: 3 * 86400, finished_ts: 3 * 86400 + 6 * h }),
+      run({ run_id: 's4', scan: '2026-11-04', started_ts: 4 * 86400, finished_ts: 4 * 86400 + 7 * h }),
+      run({ run_id: 'f', scan: '2026-11-05', status: 'failed', started_ts: 5 * 86400, finished_ts: 5 * 86400 + 1 * h }),
+      run({ run_id: 'c', scan: '2026-11-05', kind: 'compact', started_ts: 5 * 86400, finished_ts: 5 * 86400 + 20 * h }),
+      run({ run_id: 'r', scan: '2026-11-06', status: 'running', started_ts: 6 * 86400, finished_ts: null, updated_ts: 6 * 86400 }),
+    ], [], [], 6 * 86400 + 60)
+    expect([typicalScanSecs(rows), typicalScanSecs(rows, 3), typicalScanSecs(rows, 1), typicalScanSecs([])]).toEqual([5.5 * h, 6 * h, 7 * h, null])
+  })
+  it('reads as hours to the half, else minutes', () => {
+    expect([aboutDur(5.4 * 3600), aboutDur(3600), aboutDur(1.2 * 3600), aboutDur(40 * 60), aboutDur(20)]).toEqual(
+      ['about 5.5 hours', 'about 1 hour', 'about 1 hour', 'about 40 minutes', 'about 1 minute'])
   })
 })
 
