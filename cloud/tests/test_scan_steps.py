@@ -1427,7 +1427,7 @@ class AggRunner(Runner):
         self.empty = empty
 
     def __call__(self, argv, env, stdout=None, text=True):
-        if argv[:3] == ["dt-cloud", "access", "r2-agg"] and not self.empty:
+        if argv[:2] == ["dt-cloud", "access"] and argv[2] in ("r2-agg", "r2-sync") and not self.empty:
             out = Path(argv[argv.index("-o") + 1])
             out.parent.mkdir(parents=True, exist_ok=True)
             out.write_text(f"agg as of {argv[argv.index('-d') + 1]}")
@@ -1735,3 +1735,15 @@ def test_import_args_mem(tmp_path, env, monkeypatch):
     c = ctx(tmp_path, env, options={"list": {"import": True, "import_args": ["-e", "stream", "-j", "{nproc}", "-M", "{mem}"]},
                                     "static-names": {"profile": "sn.json"}, "digest": {"template": "t", "config": "c.yml"}})
     assert c.expand(c.opt("list", "import_args")) == ["-e", "stream", "-j", "4", "-M", "9GB"]
+
+
+def test_access_r2_checkpoint_is_explicit_and_runs_in_task_scratch(tmp_path, env):
+    c = ctx(tmp_path, env, AggRunner(tmp_path), steps=['access-r2'], options={
+        **R2_BASE, 'access-r2': {'state': 'r2://logs/state.json', 'checkpoint': 'gs://data/access/r2/closed.parquet',
+                               'verify': True, 'mem': '3GB', 'threads': 4},
+    })
+    S.access_r2(c, None)
+    assert c.sh_impl.calls == [
+        'dt-cloud access r2-sync -d 2026-10-16T1200 -o <tmp>/t/dt-scan/2026-10-16T1200/access-r2/agg.parquet -s r2://logs/state.json -c gs://data/access/r2/closed.parquet -w <tmp>/t/dt-scan/2026-10-16T1200/access-r2/checkpoint -M 3GB -p 4 -v',
+    ]
+    assert (tmp_path / 'data/access/r2/agg.parquet').read_text() == 'agg as of 2026-10-16T1200'
