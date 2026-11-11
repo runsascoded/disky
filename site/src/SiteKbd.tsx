@@ -113,26 +113,26 @@ export function SiteKbd({ extra = [], placeholder }: {
     ...Object.fromEntries(
       PAGES.map(([to, label]) => [
         `page:${to}`,
-        { ...pageAction(to, label), handler: () => navigate(to) },
+        { ...pageAction(to, label), href: to, handler: () => navigate(to) },
       ]),
     ),
     ...Object.fromEntries(
       stores.filter(s => s.key !== store.key).map(s => [
         `store:${s.key}`,
-        { label: `${s.label} store (${s.path})`, group: 'Pages', handler: () => navigate(s.path) },
+        { label: `${s.label} store (${s.path})`, group: 'Pages', href: s.path, handler: () => navigate(s.path) },
       ]),
     ),
     ...Object.fromEntries(
       PEERS.map(p => [
         `peer:${p.prod}`,
-        { label: toUrl('This page on ', peerHref(p, href)), group: 'Pages', keywords: [p.label, p.prod.split('.')[0]], handler: () => location.assign(peerHref(p, location.href)) },
+        { label: toUrl('This page on ', peerHref(p, href)), group: 'Pages', keywords: [p.label, p.prod.split('.')[0]], href: peerHref(p, href), handler: () => location.assign(peerHref(p, location.href)) },
       ]),
     ),
-    'page:github': { label: 'Source on GitHub ↗', group: 'Pages', handler: () => window.open(SOURCE_URL, '_blank', 'noreferrer') },
+    'page:github': { label: 'Source on GitHub ↗', group: 'Pages', href: SOURCE_URL, handler: () => window.open(SOURCE_URL, '_blank', 'noreferrer') },
     ...Object.fromEntries(
       USERS.filter(u => pathname !== `/user/${u}`).map(u => [
         `userpage:${u}`,
-        { label: `${u} — storage breakdown (/user/${u})`, group: 'User pages', handler: () => navigate(`/user/${u}`) },
+        { label: `${u} — storage breakdown (/user/${u})`, group: 'User pages', href: `/user/${u}`, handler: () => navigate(`/user/${u}`) },
       ]),
     ),
     ...(HOSTS ? {
@@ -140,6 +140,7 @@ export function SiteKbd({ extra = [], placeholder }: {
         label: toUrl(`This page on ${location.hostname === HOSTS.dev ? 'prod' : 'dev'}: `, otherHostUrl(href, HOSTS)),
         group: 'Pages',
         defaultBindings: ['g d'],
+        href: otherHostUrl(href, HOSTS),
         handler: () => location.assign(otherHostUrl(location.href, HOSTS)),
       },
       'host:toggle-tab': {
