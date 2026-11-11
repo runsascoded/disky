@@ -8,7 +8,8 @@ from urllib.request import Request, urlopen
 
 def check(origin: str) -> None:
     for path, method, expected in [('/', 'GET', 200), ('/api/fleet', 'GET', 401), ('/api/fleet/slack', 'POST', 401), ('/og/fleet.png', 'GET', 200)]:
-        request = Request(origin.rstrip('/') + path, method=method)
+        # Cloudflare's bot rules refuse Python's default `Python-urllib/…` agent with a 403.
+        request = Request(origin.rstrip('/') + path, method=method, headers={'User-Agent': 'disky-fleet-smoke/1'})
         try:
             response = urlopen(request, timeout=60)
         except HTTPError as error:
