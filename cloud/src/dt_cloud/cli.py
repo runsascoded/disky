@@ -1407,16 +1407,22 @@ def batch_group() -> None:
 @batch_group.command("submit")
 @option("-b", "--bucket", "buckets", multiple=True, help="A bucket the job reads or writes by URL (repeatable): region-checked like the ones it mounts")
 @option("-c", "--component", required=True, help="The job's `component` cost label (e.g. `race`, `analysis`, `access`)")
+@option("-e", "--exists-ok", is_flag=True, help="A job already named JOB_ID (409) counts as submitted: its name is printed, exit 0")
 @option("-L", "--region", help="Batch region (default: `$BATCH_REGION`; there is no other)")
 @option("-p", "--project", help="GCP project (default: `$GCP_PROJECT` / ADC's)")
+@option("-r", "--retry-for", type=float, default=0, help="Retry a 429, a 5xx or a connection failure with exponential backoff for up to this many seconds, then exit 1 (needs -e)")
+@option("-t", "--time-id", is_flag=True, help="JOB_ID is a strftime template over the current UTC time (e.g. `scan-%Y%m%d`: one job per UTC day)")
 @option("-X", "--cross-region", is_flag=True, help="Submit a job that runs outside the region of a bucket it mounts or names (`-b`); also `$BATCH_CROSS_REGION=1`")
 @argument("job_id")
 @argument("spec_file", type=File("r"))
 def batch_submit(
     buckets: tuple[str, ...],
     component: str,
+    exists_ok: bool,
     region: str | None,
     project: str | None,
+    retry_for: float,
+    time_id: bool,
     cross_region: bool,
     job_id: str,
     spec_file,
@@ -1429,13 +1435,30 @@ def batch_submit(
     The region is `-L`, else `$BATCH_REGION`: with neither, an error (there is no default). A job whose VMs run outside
     the location of a bucket it mounts (gcsfuse volumes) or names (`-b`) is refused (`batch.check_region`: its reads and
     writes there are billed as inter-region transfer) unless `-X`; a bucket whose location can't be read is noted on
-    stderr and not checked."""
-    from .batch import submit_job
+    stderr and not checked.
+
+    An idempotent submit (a scheduled one): `-t` names the job for its period (`batch.job_id_at`), `-e` counts that job
+    already existing as done, and `-r` retries transient failures, which the id makes safe: a retry after an answer lost
+    once Batch created the job meets that job (409), never starts a second. A repeated trigger in the same period is a
+    no-op the same way."""
+    from .batch import SubmitFailed, job_id_at, submit_job
     from .cost_labels import label_batch_spec
     from .deploy import batch_region
 
+    if retry_for and not exists_ok:
+        raise UsageError("-r/--retry-for needs -e/--exists-ok: without it, a retry after a lost answer fails on the job it created")
+    if time_id:
+        try:
+            job_id = job_id_at(job_id, dt.datetime.now(dt.timezone.utc))
+        except ValueError as e:
+            raise UsageError(str(e)) from e
     spec = label_batch_spec(json.load(spec_file), component)
-    print(submit_job(spec, job_id, batch_region(region, "pass -L/--region"), project, buckets=buckets, cross_region=cross_region or None))
+    try:
+        print(submit_job(spec, job_id, batch_region(region, "pass -L/--region"), project, buckets=buckets,
+                         cross_region=cross_region or None, exists_ok=exists_ok, retry_for=retry_for))
+    except SubmitFailed as e:
+        print(e, file=sys.stderr)
+        raise SystemExit(1) from e
 
 
 @main.command("labels")

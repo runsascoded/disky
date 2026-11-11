@@ -228,7 +228,7 @@ def _submit_cli(monkeypatch, tmp_path, *args):
     from dt_cloud import batch
 
     posted = []
-    monkeypatch.setattr(batch, "submit_job", lambda spec, job_id, region, project, buckets, cross_region: posted.append((spec, job_id, region, project)) or job_id)
+    monkeypatch.setattr(batch, "submit_job", lambda spec, job_id, region, project, buckets, cross_region, exists_ok, retry_for: posted.append((spec, job_id, region, project)) or job_id)
     spec = tmp_path / "spec.json"
     spec.write_text(json.dumps({
         "taskGroups": [{"taskSpec": {"runnables": [{"container": {"imageUri": "img", "commands": ["true"]}}],
