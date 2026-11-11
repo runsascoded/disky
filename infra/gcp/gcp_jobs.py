@@ -24,6 +24,7 @@ component takes `existing=` (the resource is live, import it) and the stack's
 """
 
 import base64
+import hashlib
 import json
 import os
 import re
@@ -699,6 +700,26 @@ class RunJobCron(ComponentResource):
 
 #: Where `BatchSubmitCron` hands its script the Batch job's spec (JSON).
 SPEC_ENV = "BATCH_SPEC"
+#: The role a `BatchSubmitCron` dispatcher holds on its Cloud Run job: run it, with overrides (`run.jobs.run`,
+#: `run.jobs.runWithOverrides`, `run.executions.cancel`), nothing else; the narrowest predefined role that can override.
+RUN_WITH_OVERRIDES = "roles/run.jobsExecutorWithOverrides"
+
+
+def env_guard(env: dict[str, str], overridable: Sequence[str]) -> str:
+    """Bash that refuses to go on unless each of `env`'s variables (the plain env the stack sets on the job) not named in
+    `overridable` still holds the stack's value, compared by SHA-256 (`$BATCH_SPEC` is kilobytes): a run with
+    overrides (Cloud Run's `containerOverrides[].env`, which no IAM condition can narrow to some variables) may change
+    those, and only those. Exits 2 naming the variable. Secret-sourced variables aren't pinned (their values aren't the
+    stack's to know)."""
+    allowed = ", ".join(overridable) or "none"
+    lines = [
+        f"# The stack's env, pinned (`BatchSubmitCron`): a run may override only {allowed}.",
+        '_pin() { [ "${!1+set}" = set ] && [ "$(printf %s "${!1}" | sha256sum | cut -d" " -f1)" = "$2" ] || '
+        f"{{ echo \"refused: \\$$1 is not the stack's value (a run may override only {allowed})\" >&2; exit 2; }}; }}",
+        *(f"_pin {var} {hashlib.sha256(value.encode()).hexdigest()}" for var, value in sorted(env.items()) if var not in overridable),
+        "unset -f _pin",
+    ]
+    return "\n".join(lines) + "\n"
 
 
 class BatchSubmitCron(RunJobCron):
@@ -713,6 +734,14 @@ class BatchSubmitCron(RunJobCron):
     failures retried for a bounded window) and an alert if that still fails. Because a repeat is harmless, the cron
     retries its own call (`IDEMPOTENT_RETRY`), and the Cloud Run task is not retried (`max_retries=0`: the script's own
     window is the retry, and a second attempt would alert twice). `timeout` must outlast the script's window.
+
+    A run by hand (e.g. a site's "run a scan now"): `dispatchers` (`{name: member}`) each get `RUN_WITH_OVERRIDES` on
+    this one job, and `overridable` names the env variables such a run may set (`containerOverrides[].env`), which the
+    script reads to vary its run (its job id, its trigger). With either, the script is prefixed by `env_guard`: every
+    other plain variable the stack sets, the spec included, must still be the stack's, so an override can vary the run
+    only as the script allows, never swap the spec. Not a boundary against the dispatcher itself (it could set a
+    variable the stack doesn't, e.g. `BASH_ENV`): grant it only to an account already trusted to submit the job's Batch
+    work as its account.
     """
 
     TYPE = "disky:gcp:BatchSubmitCron"
@@ -724,6 +753,8 @@ class BatchSubmitCron(RunJobCron):
         submitter: Path,
         script: Path,
         env: dict[str, str] | None = None,
+        overridable: Sequence[str] = (),
+        dispatchers: dict[str, pulumi.Input[str]] | None = None,
         memory: str = "1Gi",
         timeout: str = "2400s",
         retry: gcp.cloudscheduler.JobRetryConfigArgs = IDEMPOTENT_RETRY,
@@ -731,16 +762,29 @@ class BatchSubmitCron(RunJobCron):
     ):
         self.spec = checked_spec(submitter, name)
         labels_env = {LABELS_ENV: os.environ[LABELS_ENV]} if LABELS_ENV in os.environ else {}
+        job_env = {SPEC_ENV: json.dumps(self.spec, sort_keys=True), **labels_env, **(env or {})}
+        guard = env_guard(job_env, overridable) if overridable or dispatchers else ""
         super().__init__(
             name,
-            command=["bash", "-c", script.read_text()],
-            env={SPEC_ENV: json.dumps(self.spec, sort_keys=True), **labels_env, **(env or {})},
+            command=["bash", "-c", guard + script.read_text()],
+            env=job_env,
             memory=memory,
             timeout=timeout,
             max_retries=0,
             retry=retry,
             **kw,
         )
+        job = kw["job"]
+        for who, member in (dispatchers or {}).items():
+            gcp.cloudrunv2.JobIamMember(
+                f"{job}-dispatch-{who}",
+                project=kw["project"],
+                location=kw["region"],
+                name=job,
+                role=RUN_WITH_OVERRIDES,
+                member=member,
+                opts=ResourceOptions(parent=self, depends_on=[self.job]),
+            )
 
 
 class CronAlerts(ComponentResource):
