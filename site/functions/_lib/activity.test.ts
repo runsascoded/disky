@@ -129,6 +129,26 @@ describe('bursts (pure)', () => {
     ])
   })
 
+  it('a failed fetch no one saw fail (a hidden tab, offline, or delivered over a minute late) counts as a request, not an error', () => {
+    const fail = { k: 'api', s: 0, ms: 1215, err: 'TypeError: Failed to fetch' }
+    const events = [
+      { t: 1000, k: 'start', u: '/' },
+      { ...fail, t: 2000, u: '/api/a' },
+      { ...fail, t: 3000, u: '/api/b', online: false, visibility: 'visible' },
+      { ...fail, t: 4000, u: '/api/c', online: true, visibility: 'hidden' },
+      { ...fail, t: 5000, u: '/api/d', online: true, visibility: 'visible' },
+    ] as SlogEvent[]
+    const tally = (receivedMs?: number) => {
+      const { counts, errors } = tallyClient(events, mergeKinds([]), receivedMs)
+      return { counts, errors: errors.map(e => e.line.split(' ')[1]) }
+    }
+    expect([tally(), tally(5000 + 60_000), tally(2000 + 60_001)]).toEqual([
+      { counts: { view: 1, api: 2, error: 2 }, errors: ['/api/a', '/api/d'] },
+      { counts: { view: 1, api: 3, error: 1 }, errors: ['/api/d'] },
+      { counts: { view: 1, api: 3, error: 1 }, errors: ['/api/d'] },
+    ])
+  })
+
   it('keeps a trail: repeats of the previous path fold in, the latest stops kept', () => {
     const t = addTrail(emptyTrail(), ['/', '/', '/a', '/'])
     expect(t).toEqual({ n: 3, last: [['/', 2], ['/a', 1], ['/', 1]] })

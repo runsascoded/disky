@@ -156,10 +156,10 @@ export const MAX_ERROR_EVENTS = 100
 /** A burst's client errors, read from the session-log batches fed into it (`burst_id`): each on the page it happened
  *  on, `detail.sid` its session; the first `MAX_ERROR_EVENTS`. */
 export async function batchErrors(db: D1Database, b: Pick<StoredBurst, 'id' | 'actor' | 'via'>, conf: KindsConf): Promise<ServerEvent[]> {
-  const r = await db.prepare('SELECT sid, events FROM session_log_batches WHERE burst_id = ? ORDER BY first_ms, sid, pid, seq')
-    .bind(b.id).all<{ sid: string; events: string }>()
+  const r = await db.prepare('SELECT sid, events, received_ts FROM session_log_batches WHERE burst_id = ? ORDER BY first_ms, sid, pid, seq')
+    .bind(b.id).all<{ sid: string; events: string; received_ts: number }>()
   return r.results
-    .flatMap(({ sid, events }) => tallyClient(JSON.parse(events) as SlogEvent[], conf).errors.map((e): ServerEvent => ({
+    .flatMap(({ sid, events, received_ts }) => tallyClient(JSON.parse(events) as SlogEvent[], conf, received_ts * 1000).errors.map((e): ServerEvent => ({
       ts: e.ts, kind: 'error', actor: b.actor, via: b.via, method: '', route: e.page ?? '', line: e.line, detail: { sid },
     })))
     .sort((x, y) => x.ts - y.ts)
@@ -201,7 +201,7 @@ export async function feedClient(
   if (!db || !events.length) return null
   try {
     const conf = await readKinds(db, now)
-    const { counts, pages, trail, errors } = tallyClient(events, conf)
+    const { counts, pages, trail, errors } = tallyClient(events, conf, now)
     if (!Object.keys(counts).length) return null
     const ts = Math.floor(Math.max(...events.map(e => e.t)) / 1000)
     const at = Math.min(ts, Math.floor(now / 1000))
