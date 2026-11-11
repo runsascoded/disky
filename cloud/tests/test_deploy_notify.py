@@ -205,6 +205,11 @@ if {upload_rc}:
     sys.exit({upload_rc})
 print('Deployment complete! https://abcdef12.demo-site.pages.dev')
 ''')
+    # `site/deploy` releases only committed source (`scripts/require-clean`): this tree is the fake git's clean `SHA`.
+    (tmp_path / 'scripts').mkdir()
+    executable(tmp_path / 'scripts/require-clean', f'''import sys
+if len(sys.argv) == 1: print('{SHA}')
+''')
     path = tmp_path / 'receipt.json'
     result = subprocess.run([str(site / 'deploy'), '-P'], cwd=tmp_path, capture_output=True, text=True, env={
         'PATH': str(bins) + os.pathsep + os.path.dirname(sys.executable) + os.pathsep + '/usr/bin:/bin',
