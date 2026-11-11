@@ -9,10 +9,11 @@
 // links, `meta` (`META_TREE_URL`, the `/meta` store's base URL) the output links;
 // either unset = no such links. `dispatch` (the primary store's list, where `SCAN_SUBMIT_JOB` and `GCP_SA_KEY` are set:
 // "Run a scan", `POST /api/scan-runs/dispatch`) is what would refuse one now: `{ running: <run id> | null,
-// pending_since: <ts> | null }`; null where there is no such action.
+// pending_since: <ts> | null }`; null where there is no such action (unset, another store, or a D1 without the
+// `scan_dispatch` table).
 import type { D1Database } from '@cloudflare/workers-types'
 import { type Env as AuthEnv, json, requireViewer } from '../../_lib/auth.js'
-import { dispatchState, STORE, submitJob } from '../../_lib/scanDispatch.js'
+import { dispatchState, missingTable, STORE, submitJob } from '../../_lib/scanDispatch.js'
 import { loadDag, loadScanRuns, scanRunDetail, scanRunsList } from '../../_lib/scanRuns.js'
 import { storeKey, withStore } from '../../_lib/stores.js'
 
@@ -36,7 +37,10 @@ export const onRequestGet = async (ctx0: { request: Request; env: Env; params?: 
   const headers = { 'cache-control': 'private, max-age=15' }
   if (!id) {
     const dispatch: DispatchBlock | null = rows && submitJob(ctx.env.SCAN_SUBMIT_JOB) && ctx.env.GCP_SA_KEY && storeKey(ctx.env) === STORE
-      ? await dispatchState(db, now).then(s => ({ running: s.running?.run_id ?? null, pending_since: s.pending?.ts ?? null }))
+      ? await dispatchState(db, now).then(
+        s => ({ running: s.running?.run_id ?? null, pending_since: s.pending?.ts ?? null }),
+        e => { if (missingTable(e)) return null; throw e },
+      )
       : null
     return json({ ...scanRunsList(rows, now), ...links, dispatch }, 200, headers)
   }

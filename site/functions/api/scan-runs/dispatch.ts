@@ -4,14 +4,14 @@
 //   POST /api/scan-runs/dispatch → 200 { execution, operation }                                                   admin
 //     409 { error, running } / { error, pending }: a scan is running, or an earlier dispatch hasn't recorded its run
 //     500 { error, detail }: Cloud Run refused (the claim is released)
-//     503: not configured (`SCAN_SUBMIT_JOB`, `GCP_SA_KEY`, `DB`)
+//     503: not configured (`SCAN_SUBMIT_JOB`, `GCP_SA_KEY`, `DB`), or its D1 has no `scan_runs` / `scan_dispatch` table
 //
 // No body. `execution` is the Cloud Run execution's resource name (null if the operation didn't carry one); the scan
 // shows on /scans once its head records the run, a few minutes on.
 import type { D1Database } from '@cloudflare/workers-types'
 import { type Ctx, json, requireAdmin } from '../../_lib/auth.js'
 import { gcpToken } from '../../_lib/gcp.js'
-import { claim, dispatchState, executionOf, refusal, runRequest, settle, submitJob } from '../../_lib/scanDispatch.js'
+import { claim, dispatchState, executionOf, missingTable, refusal, runRequest, settle, submitJob } from '../../_lib/scanDispatch.js'
 
 type Env = { DB?: D1Database; GCP_SA_KEY?: string; SCAN_SUBMIT_JOB?: string }
 
@@ -32,7 +32,8 @@ export const onRequestPost = async (ctx: Ctx): Promise<Response> => {
   try {
     state = await dispatchState(db, now)
   } catch (e) {
-    if (/no such table/i.test(String((e as Error).message ?? e))) return json({ error: 'scan runs are not set up on this deployment (no scan_runs table)' }, 503)
+    const t = missingTable(e)
+    if (t) return json({ error: `scan dispatch is not set up on this deployment (no ${t} table)` }, 503)
     throw e
   }
   const why = refusal(state, now)
@@ -49,19 +50,19 @@ export const onRequestPost = async (ctx: Ctx): Promise<Response> => {
     r = await fetch(url, { method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body: JSON.stringify(body) })
   } catch (e) {
     const error = (e as Error).message ?? String(e)
-    await settle(db, key, who, Math.floor(Date.now() / 1000), 'failed', { error })
+    await settle(db, key, Math.floor(Date.now() / 1000), { state: 'failed', error: error.slice(0, 1000) })
     return json({ error: 'scan dispatch failed', detail: error.slice(0, 1000) }, 500, NO_STORE)
   }
   const text = await r.text()
   if (!r.ok) {
     console.error('scan dispatch failed', r.status, text.slice(0, 2000))
-    await settle(db, key, who, Math.floor(Date.now() / 1000), 'failed', { status: r.status, error: text.slice(0, 1000) })
+    await settle(db, key, Math.floor(Date.now() / 1000), { state: 'failed', error: `Cloud Run ${r.status}: ${text.slice(0, 1000)}` })
     // 500, not 502: Cloudflare replaces an origin 502 with its own page, losing the detail.
     return json({ error: `scan dispatch failed (Cloud Run ${r.status})`, detail: text.slice(0, 1000) }, 500, NO_STORE)
   }
   let op: { name?: string } | null = null
   try { op = JSON.parse(text) as { name?: string } } catch { op = null }
   const out = { execution: executionOf(op), operation: op?.name ?? null }
-  await settle(db, key, who, Math.floor(Date.now() / 1000), 'dispatched', out)
+  await settle(db, key, Math.floor(Date.now() / 1000), { state: 'dispatched', ...out })
   return json(out, 200, NO_STORE)
 }
