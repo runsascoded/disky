@@ -8,7 +8,7 @@ Storage-usage attribution and cleanup for the Marin GCS buckets: **who is using
 what**, and a **staged-deletion** workflow to reclaim space. Browse it at
 **[gcs.oa.dev]** (Open-Athena-gated).
 
-This repo carries one branch per [disky] deployment: `gcs` (the default, this README), `cw-s3`, `hf` and `r2`, each merging the shared `cloud` base.
+This repo carries one branch per [disky] deployment: `gcs` (the default, this README), `cw`, `hf` and `r2`, each merging the shared `cloud` base.
 
 The identity map (`cloud/src/dt_cloud/identities.yaml`: handles, teams, login
 aliases) is curated in-repo; it maps already-public GitHub / W&B handles to a
@@ -86,11 +86,11 @@ The daily job posts the same digest to Slack `#gcs-usage` and Discord `#gcs-usag
 
 Monorepo — a shared engine plus the Marin-specific app and site:
 
-- **`cloud/`** — the `marin-gcs-usage` package (the `dt-cloud` CLI: attribution
+- **`cloud/`** — the `dt-cloud` package (its CLI: attribution
   builders, reporting, the mark & sweep ledger client, access-log ingest).
-- **`src/disk_tree/`** — the [disk-tree] engine (indexing, tree aggregation,
-  storage backends) this repo is built on; installed as the root `disk-tree`
-  package.
+- **`src/disk_tree/`** — the disk-tree engine (indexing, tree aggregation,
+  storage backends), shared by every [disky] deployment on its `cloud` branch;
+  installed as the root `disk-tree` package.
 - **`site/`** — the [gcs.oa.dev] web app: a Cloudflare Pages SPA (treemap +
   browse + mark UI) with Pages Functions serving `/data` and `/api/*`.
 
@@ -137,7 +137,6 @@ stack (Vite UI + `wrangler pages dev` for the Functions).
 [disky]: https://github.com/runsascoded/disky
 [marin]: https://github.com/marin-community/marin
 [marin#6790]: https://github.com/marin-community/marin/issues/6790
-[disk-tree]: https://github.com/runsascoded/disk-tree
 [thrds]: https://github.com/runsascoded/thrds
 [Simple Icons]: https://simpleicons.org
 [Noto Emoji]: https://github.com/googlefonts/noto-emoji
