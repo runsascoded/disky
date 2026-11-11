@@ -17,7 +17,7 @@ from dt_cloud.cli import main
 from dt_cloud.monitoring_relay import duration, handle, notice_for, render, server
 
 URL = "https://console.cloud.google.com/monitoring/alerting/incidents/0.nabc123?project=proj"
-DOC = ("A run of the Cloud Run job `daily-submit` failed, so today's Batch job may not exist. Its logs say why; "
+DOC = ("A run of the Cloud Run job `daily-submit` failed, so this period's Batch job may not exist. Its logs say why; "
        "re-run it once fixed (a no-op if the job exists): `gcloud run jobs execute daily-submit --region <region> --project proj`")
 OPEN = {
     "version": "1.2",
@@ -45,7 +45,7 @@ CLOSED = {"version": "1.2", "incident": {**OPEN["incident"], "state": "closed", 
 OPEN_TEXT = [
     "*⚠️ daily-submit failed*",
     "a failed execution · opened 2026-11-11 07:05 UTC",
-    "A run of the Cloud Run job `daily-submit` failed, so today's Batch job may not exist. Its logs say why; re-run it once "
+    "A run of the Cloud Run job `daily-submit` failed, so this period's Batch job may not exist. Its logs say why; re-run it once "
     "fixed (a no-op if the job exists): `gcloud run jobs execute daily-submit --region &lt;region&gt; --project proj`",
     f"<{URL}|incident>",
 ]
