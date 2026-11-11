@@ -1,0 +1,90 @@
+--- a/src/client/session-log/logger.ts
++++ b/src/client/session-log/logger.ts
+@@ -9 +9 @@
+-import { type AppEvents, bodySummary, BUILTIN_FIELDS, type Kind, LIMITS, type SlogBatch, type SlogEvent, TRUNC } from '../../core/session-log-shape.js'
++import { type AppEvents, benignError, bodySummary, BUILTIN_FIELDS, type Kind, LIMITS, type SlogBatch, type SlogEvent, TRUNC } from '../../core/session-log-shape.js'
+@@ -13,0 +14 @@
++export const LEAVE_MS = 5_000
+@@ -85,0 +87 @@
++    if (e.k === 'error' && benignError(e.msg)) return
+@@ -287,0 +290,10 @@
++  // A full navigation can fail requests before pagehide: distinguish that from a page staying open.
++  const held = new Map<SlogEvent, ReturnType<typeof setTimeout>>()
++  const release = (leaving: boolean) => {
++    for (const [event, timer] of held) {
++      clearTimeout(timer)
++      logger.push(leaving ? { ...event, err: 'abort' } as SlogEvent : event)
++    }
++    held.clear()
++  }
++  offs.push(() => release(false))
+@@ -303 +315,8 @@
+-      safe(() => logger.push({ t, k: 'api', ...base, s: 0, ms: Math.round(p.perfNow() - t0), err: tr((e as Error)?.name === 'AbortError' ? 'abort' : errMsg(e), TRUNC.msg) } as SlogEvent))()
++      safe(() => {
++        const event = { t, k: 'api', ...base, s: 0, ms: Math.round(p.perfNow() - t0) } as SlogEvent
++        if ((e as Error)?.name === 'AbortError') logger.push({ ...event, err: 'abort' } as SlogEvent)
++        else {
++          const failed = { ...event, err: tr(errMsg(e), TRUNC.msg) } as SlogEvent
++          held.set(failed, setTimeout(safe(() => { held.delete(failed); logger.push(failed) }), LEAVE_MS))
++        }
++      })()
+@@ -358 +377 @@
+-  on(win, 'pagehide', safe(() => logger.flush(true)))
++  on(win, 'pagehide', safe(() => { release(true); logger.flush(true) }))
+--- a/src/core/session-log-shape.ts
++++ b/src/core/session-log-shape.ts
+@@ -97,6 +97,16 @@
+-/** Kinds (and api statuses) that count as errors in the session summary. */
+-export const isErrorEvent = (e: { k: Kind; s?: unknown }): boolean =>
+-  e.k === 'error' ||
+-  e.k === 'reject' ||
+-  e.k === 'console' ||
+-  (e.k === 'api' && typeof e.s === 'number' && (e.s === 0 || e.s >= 500))
++/** Browser reports that aren't faults: `ResizeObserver loop …` is Chrome saying a resize callback deferred a frame. */
++const BENIGN_ERRORS = [/^ResizeObserver loop /]
++
++/** Whether an error message is one of `BENIGN_ERRORS` (neither logged by the client nor counted by the feed). */
++export const benignError = (msg: unknown): boolean => typeof msg === 'string' && BENIGN_ERRORS.some(r => r.test(msg))
++
++/** A request the page cancelled itself (`err: 'abort'`: its `AbortSignal` fired, e.g. a newer selection superseded it). */
++export const isCancelled = (e: { k?: unknown, s?: unknown, err?: unknown }): boolean => e.k === 'api' && e.s === 0 && e.err === 'abort'
++
++/** A request that failed: no response (other than the page's own cancel) or a 5xx. */
++export const isFailedApi = (e: { k?: unknown, s?: unknown, err?: unknown }): boolean =>
++  e.k === 'api' && typeof e.s === 'number' && (e.s >= 500 || (e.s === 0 && !isCancelled(e)))
++
++/** Kinds (and api statuses) that count as errors in the session summary; a cancelled request is not one. */
++export const isErrorEvent = (e: Pick<SlogEvent, 'k'> & { s?: unknown, err?: unknown }): boolean =>
++  e.k === 'error' || e.k === 'reject' || e.k === 'console' || isFailedApi(e)
+--- a/src/react/session-log/model.ts
++++ b/src/react/session-log/model.ts
+@@ -6 +6 @@
+-import { isErrorEvent, KINDS, type SessionPage, type StoredEvent } from '../../core/session-log-shape.js'
++import { isCancelled, isErrorEvent, KINDS, type SessionPage, type StoredEvent } from '../../core/session-log-shape.js'
+@@ -8 +8 @@
+-/** `1h 02m`, `3m 07s`, `12s`, `450ms`. */
++/** `4d 12h 43m`, `1h 02m`, `3m 07s`, `12s`, `450ms`. */
+@@ -15 +15,3 @@
+-  return `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, '0')}m`
++  const h = Math.floor(m / 60)
++  if (h < 24) return `${h}h ${String(m % 60).padStart(2, '0')}m`
++  return `${Math.floor(h / 24)}d ${String(h % 24).padStart(2, '0')}h`
+@@ -18 +20 @@
+-/** `+1:02.345` (offset into the session). */
++/** An offset or gap: `+2.345s` under a minute (to the ms), else two units: `+3m 07s`, `+1h 02m`, `+4d 12h`. */
+@@ -21,2 +23 @@
+-  const m = Math.floor(t / 60_000), s = Math.floor((t % 60_000) / 1000), r = t % 1000
+-  return `+${m}:${String(s).padStart(2, '0')}.${String(r).padStart(3, '0')}`
++  return `+${t < 60_000 ? `${(t / 1000).toFixed(3)}s` : fmtDuration(t)}`
+@@ -49 +50 @@
+-      return `${str(e.m) || 'GET'} ${str(e.u)}${b} → ${e.s === 0 ? 'failed' : str(e.s)} · ${str(e.ms)}ms${e.c ? ` · ${str(e.c)}` : ''}${e.qe ? ` · ${str(e.qe)}` : ''}${e.err ? ` · ${str(e.err)}` : ''}`
++      return `${str(e.m) || 'GET'} ${str(e.u)}${b} → ${isCancelled(e) ? 'cancelled' : e.s === 0 ? 'failed' : str(e.s)} · ${str(e.ms)}ms${e.c ? ` · ${str(e.c)}` : ''}${e.qe ? ` · ${str(e.qe)}` : ''}${e.err && !isCancelled(e) ? ` · ${str(e.err)}` : ''}`
+--- a/src/session-log/routes.ts
++++ b/src/session-log/routes.ts
+@@ -128 +128,2 @@
+-    await purgeLater(ctx, now)
++    const viewer = await identify(req)
++    if (viewer && viewer.via !== 'public') await purgeLater(ctx, now)
+@@ -134 +135 @@
+-    if (!(await identify(req))) return off('no viewer identity')
++    if (!viewer) return off('no viewer identity')

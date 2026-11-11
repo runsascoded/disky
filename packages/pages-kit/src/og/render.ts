@@ -1,0 +1,33 @@
+/** SVG → PNG with resvg-wasm, at the card's intrinsic size. A Worker may not
+ * compile wasm from bytes at runtime, so the Function imports the wasm as a
+ * build-time module (`site/`: its vendored `vendor/resvg.wasm`; `fleet/`:
+ * `@resvg/resvg-wasm/index_bg.wasm`, the same bytes) and passes it to
+ * `ensureWasm`; Node (tests) passes the raw bytes. Fonts are TTF buffers (no
+ * system fonts on the edge): each app serves them at `FONT_FILES` (`site/`
+ * from `public/_fonts/`, `fleet/` the same files copied at build). */
+import { Resvg, initWasm } from '@resvg/resvg-wasm'
+
+let wasmReady: Promise<unknown> | null = null
+
+/** Initialize resvg once per isolate; concurrent callers share the init. */
+export function ensureWasm(source: WebAssembly.Module | BufferSource): Promise<unknown> {
+  if (!wasmReady) wasmReady = initWasm(source)
+  return wasmReady
+}
+
+/** The faces a card uses (Inter, OFL), as the site serves them. */
+export const FONT_FILES = ['/_fonts/Inter-400.ttf', '/_fonts/Inter-600.ttf']
+
+/** `ensureWasm` must have resolved first. `zoom` scales the raster (a 2×
+ * image of the same layout). */
+export function svgToPng(svg: string, fonts: Uint8Array[], zoom = 1): Uint8Array {
+  const resvg = new Resvg(svg, {
+    ...(zoom !== 1 ? { fitTo: { mode: 'zoom' as const, value: zoom } } : {}),
+    font: { fontBuffers: fonts, defaultFontFamily: 'Inter', sansSerifFamily: 'Inter', loadSystemFonts: false },
+  })
+  try {
+    return resvg.render().asPng()
+  } finally {
+    resvg.free()
+  }
+}

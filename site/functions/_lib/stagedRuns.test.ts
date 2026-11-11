@@ -413,6 +413,19 @@ describe('D1', () => {
   })
 
   describe('unstageDeleted — a finished real run takes what it deleted out of the queue', () => {
+    it('completes a verified empty review once, recording zero processing rather than deleting newer versions', async () => {
+      const { db, raw } = await gcsDb()
+      const prefix = `gs://${B1}/newer-only/`
+      raw.prepare('INSERT INTO plan_items (plan_id, prefix, added_by, added_ts) VALUES (1, ?, ?, 50)').run(prefix, 'ann')
+      raw.prepare('INSERT INTO deletion_bands (run_id, prefix, bytes, objects) VALUES (?, ?, 0, 0)').run(RUN, prefix)
+      expect(await unstageDeleted(db, 1, [RUN])).toEqual([prefix])
+      expect(await unstageDeleted(db, 1, [RUN])).toEqual([])
+      expect(raw.prepare('SELECT prefix FROM plan_items').all()).toEqual([])
+      expect(raw.prepare('SELECT bytes, objects FROM deletion_bands WHERE run_id = ? AND prefix = ?').all(RUN, prefix)).toEqual([{ bytes: 0, objects: 0 }])
+      expect(raw.prepare("SELECT action, who, old_json, new_json FROM admin_edits WHERE tbl = 'plan_items'").all()).toEqual([
+        { action: 'delete', who: `run:${RUN}`, old_json: JSON.stringify({ prefixes: [prefix], deleted_by: RUN }), new_json: null },
+      ])
+    })
     it('a prefix a run left no band for (it had skips) stays staged beside a clean one; a later clean run takes it out', async () => {
       const { db, raw } = await gcsDb()
       const partly = `gs://${B1}/partly/`, clean = `gs://${B1}/clean/`

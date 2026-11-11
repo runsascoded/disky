@@ -4,17 +4,20 @@
 // schema (`session_log*` in `site/schema.sql`) and the real gate (Bearer
 // grants minted in the same in-memory D1).
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { onRequest, purgeState } from './session-log/[[path]]'
+import { onRequest } from './session-log/[[path]]'
 import { gateFor } from '../_lib/auth'
 import { sqliteD1 } from '../_lib/testD1'
-import { listSessions, purge } from '../_lib/sessionLog'
+import { d1SessionLogStore } from '@open-athena/auth/session-log/d1'
+import type { SessionFilter } from '@open-athena/auth/session-log'
+const listSessions = (db: D1Database, filter: SessionFilter) => d1SessionLogStore(db).listSessions(filter)
+const purge = (db: D1Database, cutoff: number) => d1SessionLogStore(db).purge(cutoff)
 import { latency } from '../_lib/sessionLatency'
 import { FOREVER_MS, fmtCursor, isForever, LIMITS, parseCursor, parseUntil, type SessionRow, switchState, validateBatch } from '../_lib/sessionLogShape'
 
 const NOW = Date.UTC(2026, 9, 12, 15, 0, 0)  // 2026-10-12T15:00Z
 const HOST = 'https://site.example.test'
 
-beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(NOW); purgeState.last = 0 })
+beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(NOW) })
 afterEach(() => { vi.useRealTimers() })
 
 describe('D1', () => {
@@ -26,8 +29,12 @@ describe('D1', () => {
     const { db, raw } = await sqliteD1()
     const env = { DB: db, SESSION_SECRET: 's'.repeat(32), BASE_SCOPE: 'cw', ...vars }
     const gate = gateFor(env as never)!
-    const tok = async (email: string, scopes: string[]) =>
-      (await gate.mint({ email, scopes, name: email, createdBy: 'test', expiresAt: null, maxRedeems: null })).token
+    const grantIds: Record<string, string> = {}
+    const tok = async (email: string, scopes: string[]) => {
+      const { token, grant } = await gate.mint({ email, scopes, name: email, createdBy: 'test', expiresAt: null, maxRedeems: null })
+      grantIds[email] = grant.id
+      return token
+    }
     const viewer = await tok('ann@example.test', ['cw'])
     const adminT = await tok('ops@example.test', ['cw', 'admin'])
     const call = async (method: string, path: string, opts: { token?: string; body?: string; headers?: Record<string, string> } = {}) => {
@@ -48,7 +55,7 @@ describe('D1', () => {
       raw.exec('DELETE FROM admin_edits')
     }
     const put = (body: unknown, token = adminT) => call('PUT', '/switch', { token, body: JSON.stringify(body) })
-    return { db, raw, env, call, put, viewer, adminT }
+    return { db, raw, env, call, put, viewer, adminT, gate, grantIds }
   }
 
   const ev = (t: number, k: string, f: Record<string, unknown> = {}) => ({ t, k, ...f })
@@ -277,11 +284,11 @@ describe('D1', () => {
         await s.call('GET', '', { token: s.viewer }),
       ]).toEqual([
         [200, onForever(HAND_2100, 'ryan', 1_760_000_000)],
-        [200, { enabled: true, until: HAND_2100, reason: null, on: true, retainDays: 30 }],
+        [200, { enabled: true, until: HAND_2100, reason: null, on: true, retainDays: 30, appEvents: {} }],
       ])
       s.raw.prepare('UPDATE session_log_switch SET until_ms = ?').run(Date.UTC(2200, 0, 1))
       vi.setSystemTime(Date.UTC(2031, 0, 1))
-      expect(await s.call('GET', '', { token: s.viewer })).toEqual([200, { enabled: true, until: Date.UTC(2200, 0, 1), reason: null, on: true, retainDays: 30 }])
+      expect(await s.call('GET', '', { token: s.viewer })).toEqual([200, { enabled: true, until: Date.UTC(2200, 0, 1), reason: null, on: true, retainDays: 30, appEvents: {} }])
     })
   })
 
@@ -290,7 +297,7 @@ describe('D1', () => {
      *  have errors; even ones are bob's. */
     async function seeded(n: number) {
       const s = await setup({}, null)
-      const ins = s.raw.prepare('INSERT INTO session_log VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+      const ins = s.raw.prepare('INSERT INTO session_log (sid, email, via, build, ua, started_ms, last_ms, n_events, n_errors, n_batches, first_url, received_ts) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
       for (let i = 0; i < n; i++) {
         const last = i >= 4 && i <= 6 ? NOW - 4000 : NOW - i * 1000
         ins.run(`sid-s${String(i).padStart(4, '0')}`, i % 2 ? 'ann@example.test' : 'bob@example.test', 'session', 'b', null, last - 500, last, 1, i % 2, 1, null, NOW / 1000)
@@ -386,18 +393,18 @@ describe('D1', () => {
         await on.call('GET', ''),
         await on.call('GET', '', { token: on.viewer }),
       ]).toEqual([
-        [200, { enabled: false, until: null, reason: 'off', on: false, retainDays: 30 }],
-        [200, { enabled: false, until: null, reason: 'off', on: false, retainDays: 30 }],
-        [200, { enabled: false, until: Date.UTC(2026, 9, 18), reason: 'no viewer identity', on: true, retainDays: 30 }],
-        [200, { enabled: true, until: Date.UTC(2026, 9, 18), reason: null, on: true, retainDays: 30 }],
+        [200, { enabled: false, until: null, reason: 'off', on: false, retainDays: 30, appEvents: {} }],
+        [200, { enabled: false, until: null, reason: 'off', on: false, retainDays: 30, appEvents: {} }],
+        [200, { enabled: false, until: Date.UTC(2026, 9, 18), reason: 'no viewer identity', on: true, retainDays: 30, appEvents: {} }],
+        [200, { enabled: true, until: Date.UTC(2026, 9, 18), reason: null, on: true, retainDays: 30, appEvents: {} }],
       ])
       vi.setSystemTime(Date.UTC(2026, 9, 18))
-      expect(await on.call('GET', '', { token: on.viewer })).toEqual([200, { enabled: false, until: Date.UTC(2026, 9, 18), reason: 'expired', on: false, retainDays: 30 }])
+      expect(await on.call('GET', '', { token: on.viewer })).toEqual([200, { enabled: false, until: Date.UTC(2026, 9, 18), reason: 'expired', on: false, retainDays: 30, appEvents: {} }])
     })
 
     it('a PUBLIC_READ deploy logs anonymous viewers', async () => {
       const pub = await setup({ PUBLIC_READ: '1' })
-      expect(await pub.call('GET', '')).toEqual([200, { enabled: true, until: Date.UTC(2026, 9, 18), reason: null, on: true, retainDays: 30 }])
+      expect(await pub.call('GET', '')).toEqual([200, { enabled: true, until: Date.UTC(2026, 9, 18), reason: null, on: true, retainDays: 30, appEvents: {} }])
     })
 
     it(`reads the switch at most once per ${TTL / 1000} s per isolate; an admin change in this isolate applies at once`, async () => {
@@ -424,21 +431,21 @@ describe('D1', () => {
       vi.setSystemTime(NOW + 30_000)
       seen.push(await cfg())
       expect(seen).toEqual([
-        { enabled: true, until: NOW + 30_000, reason: null, on: true, retainDays: 30 },
-        { enabled: false, until: NOW + 30_000, reason: 'expired', on: false, retainDays: 30 },
+        { enabled: true, until: NOW + 30_000, reason: null, on: true, retainDays: 30, appEvents: {} },
+        { enabled: false, until: NOW + 30_000, reason: 'expired', on: false, retainDays: 30, appEvents: {} },
       ])
     })
 
     it('without the migration: off ("not set up")', async () => {
       const s = await setup({}, null)
       s.raw.exec('DROP TABLE session_log_switch')
-      expect(await s.call('GET', '', { token: s.viewer })).toEqual([200, { enabled: false, until: null, reason: 'not set up', on: false, retainDays: 30 }])
+      expect(await s.call('GET', '', { token: s.viewer })).toEqual([200, { enabled: false, until: null, reason: 'not set up', on: false, retainDays: 30, appEvents: {} }])
     })
   })
 
   describe('POST /api/session-log', () => {
     it('stores a batch under the request identity and summarizes the session', async () => {
-      const { call, viewer, raw } = await setup()
+      const { call, viewer, raw, grantIds } = await setup()
       expect(await call('POST', '', { token: viewer, body: batch() })).toEqual([204, null])
       expect(await call('POST', '', {
         token: viewer,
@@ -447,7 +454,7 @@ describe('D1', () => {
       expect(raw.prepare('SELECT * FROM session_log').all()).toEqual([{
         sid: 'sid-aaaaaa', email: 'ann@example.test', via: 'grant', build: 'abc1234567', ua: 'UA/1',
         started_ms: NOW - 5000, last_ms: NOW - 1000, n_events: 5, n_errors: 2, n_batches: 2,
-        first_url: '/?d=2026-10-10', received_ts: NOW / 1000,
+        first_url: '/?d=2026-10-10', received_ts: NOW / 1000, grant_id: grantIds['ann@example.test'], subject_name: null,
       }])
       expect(raw.prepare('SELECT sid, pid, seq, received_ts, first_ms, last_ms, n FROM session_log_batches ORDER BY seq').all()).toEqual([
         { sid: 'sid-aaaaaa', pid: 'pid-111111', seq: 0, received_ts: NOW / 1000, first_ms: NOW - 5000, last_ms: NOW - 4000, n: 2 },
@@ -524,24 +531,21 @@ describe('D1', () => {
       const off = await setup({ SESSION_LOG_RETAIN_DAYS: '7' }, null)
       const on = await setup({ SESSION_LOG_RETAIN_DAYS: '7' })
       for (const s of [off, on]) s.raw.exec(OLD_AND_NEW(86_400))
-      purgeState.last = 0
       expect([await off.call('GET', ''), await on.call('GET', '')]).toEqual([
-        [200, { enabled: false, until: null, reason: 'off', on: false, retainDays: 7 }],
-        [200, { enabled: false, until: Date.UTC(2026, 9, 18), reason: 'no viewer identity', on: true, retainDays: 7 }],
+        [200, { enabled: false, until: null, reason: 'off', on: false, retainDays: 7, appEvents: {} }],
+        [200, { enabled: false, until: Date.UTC(2026, 9, 18), reason: 'no viewer identity', on: true, retainDays: 7, appEvents: {} }],
       ])
       expect([
-        purgeState.last,
         off.raw.prepare('SELECT sid FROM session_log ORDER BY sid').all(),
         on.raw.prepare('SELECT sid FROM session_log ORDER BY sid').all(),
-      ]).toEqual([0, [{ sid: 'new' }, { sid: 'old' }], [{ sid: 'new' }, { sid: 'old' }]])
+      ]).toEqual([[{ sid: 'new' }, { sid: 'old' }], [{ sid: 'new' }, { sid: 'old' }]])
     })
 
     it('an anonymous GET on a PUBLIC_READ deploy: logged, and it purges nothing either', async () => {
       const pub = await setup({ PUBLIC_READ: '1', SESSION_LOG_RETAIN_DAYS: '7' })
       pub.raw.exec(OLD_AND_NEW(86_400))
-      purgeState.last = 0
-      expect(await pub.call('GET', '')).toEqual([200, { enabled: true, until: Date.UTC(2026, 9, 18), reason: null, on: true, retainDays: 7 }])
-      expect([purgeState.last, pub.raw.prepare('SELECT sid FROM session_log ORDER BY sid').all()]).toEqual([0, [{ sid: 'new' }, { sid: 'old' }]])
+      expect(await pub.call('GET', '')).toEqual([200, { enabled: true, until: Date.UTC(2026, 9, 18), reason: null, on: true, retainDays: 7, appEvents: {} }])
+      expect(pub.raw.prepare('SELECT sid FROM session_log ORDER BY sid').all()).toEqual([{ sid: 'new' }, { sid: 'old' }])
     })
 
     it('a viewer\'s config GET purges past SESSION_LOG_RETAIN_DAYS — with logging off — at most hourly; a missing table is a nop', async () => {
@@ -555,14 +559,13 @@ describe('D1', () => {
       expect(s.raw.prepare('SELECT sid FROM session_log').all()).toEqual([])
       const bare = await setup()
       bare.raw.exec('DROP TABLE session_log; DROP TABLE session_log_batches')
-      purgeState.last = 0
-      expect(await bare.call('GET', '', { token: bare.viewer })).toEqual([200, { enabled: true, until: Date.UTC(2026, 9, 18), reason: null, on: true, retainDays: 30 }])
+      expect(await bare.call('GET', '', { token: bare.viewer })).toEqual([200, { enabled: true, until: Date.UTC(2026, 9, 18), reason: null, on: true, retainDays: 30, appEvents: {} }])
     })
   })
 
   describe('admin reads', () => {
     it('lists sessions (filters) and returns one session’s events in time order — admins only', async () => {
-      const { call, viewer, adminT } = await setup()
+      const { call, viewer, adminT, grantIds } = await setup()
       await call('POST', '', { token: viewer, body: batch({ events: [ev(NOW - 5000, 'start', { u: '/' }), ev(NOW - 1000, 'nav', { u: '/a' })] }) })
       // A reload: the same tab's sid, a new page load; its clock interleaves.
       await call('POST', '', { token: viewer, body: batch({ pid: 'pid-222222', events: [ev(NOW - 3000, 'error', { msg: 'x' })] }) })
@@ -585,7 +588,7 @@ describe('D1', () => {
       expect(await call('GET', '/sessions/sid-aaaaaa', { token: adminT })).toEqual([200, {
         session: {
           sid: 'sid-aaaaaa', email: 'ann@example.test', via: 'grant', build: 'abc1234567', ua: 'UA/1',
-          started_ms: NOW - 5000, last_ms: NOW - 1000, n_events: 3, n_errors: 1, n_batches: 2, first_url: '/', received_ts: NOW / 1000,
+          started_ms: NOW - 5000, last_ms: NOW - 1000, n_events: 3, n_errors: 1, n_batches: 2, first_url: '/', received_ts: NOW / 1000, grant_id: grantIds['ann@example.test'],
         },
         events: [
           { t: NOW - 5000, k: 'start', u: '/', pid: 'pid-111111', seq: 0 },
@@ -637,4 +640,35 @@ describe('D1', () => {
       expect(await latency(db, { since: NOW - 86_400_000 }, 1)).toEqual(body)
     })
   })
+})
+
+it('records the trusted grant recipient and id, never the private memo or client-supplied identity', async () => {
+  const { db, raw } = await sqliteD1()
+  const env = { DB: db, SESSION_SECRET: 's'.repeat(32), BASE_SCOPE: 'cw' }
+  const gate = gateFor(env as never)!
+  const { grant, token } = await gate.mint({ email: null, scopes: ['cw'], name: 'private memo', subject: { name: 'Trusted recipient' }, createdBy: 'test', expiresAt: null, maxRedeems: null })
+  raw.prepare('INSERT INTO session_log_switch VALUES (1, ?, ?, ?)').run(NOW + 86_400_000, 'ops', NOW / 1000)
+  const response = await onRequest({ request: new Request(`${HOST}/api/session-log`, {
+    method: 'POST', headers: { authorization: `Bearer ${token}` },
+    body: JSON.stringify({ sid: 'sid-actor1', pid: 'pid-actor1', seq: 0, build: 'build1', grantId: 'forged', subjectName: 'forged', events: [{ t: NOW, k: 'start', u: '/' }] }),
+  }), env } as never)
+  expect(response.status).toBe(204)
+  expect(raw.prepare('SELECT email, via, grant_id, subject_name FROM session_log').all()).toEqual([
+    { email: null, via: 'grant', grant_id: grant.id, subject_name: 'Trusted recipient' },
+  ])
+})
+
+it('keeps cancelled API requests in the session while counting only real failures as errors', async () => {
+  const { db, raw } = await sqliteD1()
+  const env = { DB: db, SESSION_SECRET: 's'.repeat(32), BASE_SCOPE: 'cw', PUBLIC_READ: '1' }
+  raw.prepare('INSERT INTO session_log_switch VALUES (1, ?, ?, ?)').run(NOW + 86_400_000, 'ops', NOW / 1000)
+  const events = [
+    { t: NOW, k: 'api', u: '/cancelled', s: 0, ms: 1, err: 'abort' },
+    { t: NOW + 1, k: 'api', u: '/failed', s: 0, ms: 2, err: 'network' },
+    { t: NOW + 2, k: 'api', u: '/server-error', s: 500, ms: 3 },
+  ]
+  const response = await onRequest({ request: new Request(`${HOST}/api/session-log`, { method: 'POST', body: JSON.stringify({ sid: 'sid-cancel', pid: 'pid-cancel', seq: 0, build: 'b', events }) }), env } as never)
+  expect(response.status).toBe(204)
+  expect(raw.prepare('SELECT n_events, n_errors FROM session_log').all()).toEqual([{ n_events: 3, n_errors: 2 }])
+  expect((await d1SessionLogStore(db).sessionDetail('sid-cancel'))?.events).toEqual(events.map(event => ({ ...event, pid: 'pid-cancel', seq: 0 })))
 })

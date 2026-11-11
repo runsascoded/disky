@@ -31,8 +31,8 @@ import { ShareDialog } from './ShareDialog'
 import { closeDialog, openDialog, useDialog } from './dialogs'
 import { UrlParamsModal } from './UrlParamsModal'
 import { useRegistry } from './identities'
-import { PEERS, REPO_URL, peerHref } from './SiteKbd'
-import { buildLine } from './build'
+import { PEERS, peerHref } from './SiteKbd'
+import { BUILD_ENVIRONMENT, REPO_URL, SOURCE_REF, SOURCE_URL, buildLine } from './build'
 import { useMyUser, useUserEmails } from './owners'
 import ProfileModal from './ProfileModal'
 import TokenModal from './TokenModal'
@@ -262,7 +262,7 @@ function NavMenuInner({ extra }: { extra?: MenuEntry[] }) {
               <hr />
               {PEERS.map(p => <a key={p.prod} role="menuitem" className="mi" href={peerHref(p, location.href)} onPointerDown={e => { e.currentTarget.href = peerHref(p, location.href) }} onClick={() => m.setOpen(false)}>{p.label} <span className="dim">this page</span></a>)}
               {DEFAULT_STORE.liveTotals && <a role="menuitem" className="mi" href={DEFAULT_STORE.liveTotals.href} target="_blank" rel="noreferrer">{DEFAULT_STORE.liveTotals.label} ↗</a>}
-              <a role="menuitem" className="mi" href={REPO_URL} target="_blank" rel="noreferrer"><FaGithub aria-hidden /> Source on GitHub ↗</a>
+              <a role="menuitem" className="mi" href={SOURCE_URL} target="_blank" rel="noreferrer"><FaGithub aria-hidden /> Source on GitHub ↗</a>
               <BuildLine />
             </div>
           </FloatingFocusManager>
@@ -387,6 +387,7 @@ function BuildLine() {
   const text = <><code>{b.sha}</code> · {b.time}</>
   return (
     <div className="menu-build" title="This page's build: commit · build time (the API names its own in the x-disky-build header)">
+      {[BUILD_ENVIRONMENT, SOURCE_REF].filter(Boolean).join(' · ')}{(BUILD_ENVIRONMENT || SOURCE_REF) && ' · '}
       build {b.href ? <a href={b.href} target="_blank" rel="noreferrer">{text}</a> : text}
     </div>
   )

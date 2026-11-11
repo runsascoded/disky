@@ -1,3 +1,4 @@
+import type { ReaderCache, ReaderObjects, ObjectRange } from './readerRuntime.js'
 /** Static name search (specs/architecture/static-name-search.md): answer a literal's per-bucket first-hit
  *  totals from the suffix shards on R2 alone — no D1, no footer parse on the hot path.
  *
@@ -580,8 +581,8 @@ export class StaticNames {
 }
 
 /** `Blobs` over an R2 bucket binding (keys under `prefix`, a generation's `staticPrefix`). */
-export function r2Blobs(r2: R2Bucket, prefix: string): Blobs {
-  const get = async (key: string, range?: R2Range) => {
+export function r2Blobs(r2: ReaderObjects, prefix: string): Blobs {
+  const get = async (key: string, range?: ObjectRange) => {
     const o = await r2.get(`${prefix}/${key}`, range ? { range } : undefined)
     if (!o) throw new Error(`static names: ${prefix}/${key} is missing`)
     return o
@@ -604,7 +605,7 @@ export function r2Blobs(r2: R2Bucket, prefix: string): Blobs {
 }
 
 /** The colo's Cache API as the index tier between isolates (JSON; ~1 MB per shard group index). */
-export function cacheIndexes<T = GroupIndex>(cache: Cache, prefix: string, version = 'index-v2'): IndexCache<T> {
+export function cacheIndexes<T = GroupIndex>(cache: ReaderCache, prefix: string, version = 'index-v2'): IndexCache<T> {
   const url = (file: string) => `https://static-names.invalid/${prefix}/${file}.${version}.json`
   return {
     async get(file) {

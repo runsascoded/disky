@@ -439,6 +439,13 @@ def execute_reviewed(
     prepare = prepare_manifest if from_manifest else prepare_reviewed
     kind = "manifest" if from_manifest else "reviewed"
     plan, dry, files, artifacts = prepare(source, plan_path, work_dir, only_buckets)
+    # A completed review can contain only versions newer than the staging cutoff. Its empty buckets have no
+    # decision files, but still prove that the requested scope has no eligible work. Missing generations do not.
+    empty_buckets = {
+        bucket: entry for bucket, entry in plan["buckets"].items()
+        if not entry.get("eligible", {}).get("objects", 0) and not entry.get("skipped_no_generation", {}).get("objects", 0)
+        and (not only_buckets or bucket in only_buckets)
+    }
     resume = None
     if exclude_runs:
         from .sweep_resume import subtract_settled
@@ -464,12 +471,19 @@ def execute_reviewed(
         }
         for bucket in files
     }
+    selected.update({bucket: {**entry, "eligible": {"objects": 0, "bytes": 0}} for bucket, entry in empty_buckets.items()})
+    preserved = {
+        key: sum(entry.get("skipped_after_as_of", {}).get(key, 0) for bucket, entry in plan["buckets"].items()
+                 if not only_buckets or bucket in only_buckets)
+        for key in ("objects", "bytes")
+    }
     plan = {
         **plan,
         "buckets": selected,
         "approved": [prefix for prefix in plan["approved"] if prefix.split("/", 3)[2] in selected],
         **({"approved_objects": objs} if (objs := [key for key in plan.get("approved_objects", []) if key.split("/", 3)[2] in selected]) else {}),
-        "total": {"eligible": {key: sum(entry["eligible"][key] for entry in selected.values()) for key in ("objects", "bytes")}},
+        "total": {"eligible": {key: sum(entry["eligible"][key] for entry in selected.values()) for key in ("objects", "bytes")},
+                  **({"skipped_after_as_of": preserved} if preserved["objects"] else {})},
         **skipped_totals(selected),
     }
     client = client or storage.Client()
@@ -730,6 +744,13 @@ def execute_reviewed(
                 except Exception:
                     stop.set()
                     raise
+    if for_real and not stop.is_set():
+        for bucket in empty_buckets:
+            prefixes = [p for p in [*plan["approved"], *plan.get("approved_objects", [])] if p.split("/", 3)[2] == bucket]
+            summary["buckets"][bucket] = {
+                "decisions": {}, "delete_bytes": 0, "drift_dirs": [], "failed_dirs": [],
+                "bands": {p: {"bytes": 0, "objects": 0} for p in prefixes}, "completed_empty_review": True,
+            }
     with fs.open(f"{path}/{mode}-summary.json", "w") as fh:
         json.dump(summary, fh)
     summary["_plan"] = plan

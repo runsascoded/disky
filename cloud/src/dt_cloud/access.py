@@ -244,6 +244,9 @@ def sweep_ingested(
     ``usage/`` and not yet an L0 shard", so any CSV the polled path ingested has
     to leave ``usage/`` before the drain starts, or it gets ingested a second
     time. Only safe once the polled ingest has stopped for good.
+
+    Archive copies pin the listed source generation and use bounded retries. A source is deleted only after
+    its copy succeeds, with the same generation guard; an already-deleted source generation is complete.
     """
     from concurrent.futures import ThreadPoolExecutor
 
@@ -257,12 +260,30 @@ def sweep_ingested(
     blobs = list(client.list_blobs(log_bucket, prefix=prefix, end_offset=floor))
     if not blobs:
         return 0
+    from google.api_core.exceptions import NotFound
+    from google.cloud.storage.retry import DEFAULT_RETRY
+
     bkt = client.bucket(log_bucket)
 
     def move(blob) -> None:
+        generation = blob.generation
+        if generation is None:
+            raise ValueError(f"usage log has no listed generation: {blob.name}")
         base = blob.name.rsplit("/", 1)[-1]
-        bkt.copy_blob(blob, bkt, f"ingested/{base}")
-        blob.delete()
+        # A fixed source generation makes retrying this archive key content-idempotent. The SDK's default
+        # conditional copy retry does not recognize `sourceGeneration`, so select its bounded retry explicitly.
+        bkt.copy_blob(
+            blob,
+            bkt,
+            f"ingested/{base}",
+            source_generation=generation,
+            retry=DEFAULT_RETRY,
+        )
+        try:
+            blob.delete(if_generation_match=generation)
+        except NotFound:
+            # The copy succeeded; a lost delete response or another cleanup already removed this generation.
+            pass
 
     with ThreadPoolExecutor(max_workers=workers) as ex:
         list(ex.map(move, blobs))

@@ -1,5 +1,8 @@
 # Age histogram history and independent store locations
 
+Completed shared implementation; archived 2026-11-08 after checking `age_store.update`/`covered`/`retire`, the optional scan step, independent path/static prefixes and their regression tests. The earlier full shared-source CI passed at the front-door checkpoint. Deployment enablement remains opt-in; this archive is not a claim that every deployment has enabled age history.
+
+
 The eight age-pyramid tiers contain a histogram for each path. Directory means cannot reconstruct those histograms. Permanent full per-scan pyramid copies are replaced by change intervals over exact cells, using the existing interval-store implementation and range reader.
 
 ## Representation

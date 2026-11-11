@@ -13,6 +13,9 @@
     "onlyBuiltDependencies": [
       "puppeteer",
       "esbuild"
-    ]
+    ],
+    "patchedDependencies": {
+      "@open-athena/auth@0.1.0-dist.22b5eae": "patches/@open-athena__auth@0.1.0-dist.22b5eae.patch"
+    }
   }
 }

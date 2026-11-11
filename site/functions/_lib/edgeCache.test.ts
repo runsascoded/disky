@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from 'vitest'
-import { CACHE_V, cacheEnvTag, cacheKeyFor, cacheMatch, cacheStore, keepFor, PARTIAL_TTL, resetUpgrades, upgradePartial } from './edgeCache'
+import { CACHE_V, cacheEnvTag, cacheKeyFor, cacheMatch, cacheStore, cutReason, keepFor, PARTIAL_TTL, resetUpgrades, upgradeLog, upgradePartial } from './edgeCache'
 
 // `cacheStore` keeps an answer in the colo cache and KV; a budget-cut answer (a filter view whose phase 2 its
 // time budget cut short) in the colo cache only, for `PARTIAL_TTL` seconds; `false`: served, not kept.
@@ -123,6 +123,38 @@ describe('upgradePartial', () => {
     expect([got, again, expired, runs, await entry()]).toEqual([
       'scheduled', ['gave-up', 'gave-up'], 'scheduled', 2, ['public, s-maxage=120', 'ttl=120', PARTIAL],
     ])
+  })
+
+  it('every run logs its start and exactly one end: done, cut (which budgets) or failed (the message), with its decoded groups', async () => {
+    const { env, bg, waitUntil } = setup()
+    const lines: string[] = []
+    const prev = upgradeLog.line
+    upgradeLog.line = s => { lines.push(s) }
+    try {
+      const k2 = cacheKeyFor('subtree', '', 'd/p?q=cut'), k3 = cacheKeyFor('subtree', '', 'd/p?q=boom')
+      upgradePartial(env, key, async trace => { trace('group', 3); trace('fetch', 9); trace('group', 4); return { body: FULL, keep: true } }, waitUntil)
+      upgradePartial(env, k2, async trace => { trace('group', 1); return { body: PARTIAL, keep: keepFor({ interiors: { late: 1 }, searchLate: true }), cut: cutReason({ interiors: { late: 1 }, searchLate: true }) } }, waitUntil)
+      upgradePartial(env, k3, async trace => { trace('group', 1); throw new Error('Memory limit would be exceeded') }, waitUntil)
+      // Skipped (in flight): no line.
+      upgradePartial(env, key, async () => ({ body: FULL, keep: true }), waitUntil)
+      await Promise.all(bg)
+    } finally { upgradeLog.line = prev }
+    // The ends settle in whatever order their awaits do: sorted.
+    expect(lines.map(l => l.replace(/ \d+ (\d+)$/, ' <ms> $1')).sort()).toEqual([
+      `upgrade: subtree.cache/v${CACHE_V}/d/p?q=boom failed Memory_limit_would_be_exceeded <ms> 1`,
+      `upgrade: subtree.cache/v${CACHE_V}/d/p?q=boom started - <ms> 0`,
+      `upgrade: subtree.cache/v${CACHE_V}/d/p?q=cut cut phase2+search <ms> 1`,
+      `upgrade: subtree.cache/v${CACHE_V}/d/p?q=cut started - <ms> 0`,
+      `upgrade: subtree.cache/v${CACHE_V}/d/p?q=heavy done - <ms> 2`,
+      `upgrade: subtree.cache/v${CACHE_V}/d/p?q=heavy started - <ms> 0`,
+    ])
+  })
+
+  it('`cutReason`: each budget that cut an answer, or null for a whole one', () => {
+    expect([
+      cutReason({}), cutReason({ interiors: { late: 0 } }), cutReason({ interiors: { late: 2 } }), cutReason({ detailsLate: true }),
+      cutReason({ lookups_late: true, searchLate: true }), cutReason({ interiors: { late: 1 }, searchLate: true, detailsLate: true, lookups_late: true }),
+    ]).toEqual([null, null, 'phase2', 'details', 'search+lookups', 'phase2+search+details+lookups'])
   })
 
   it('a background run that throws: the partial stays, no unhandled rejection, treated as cut short', async () => {

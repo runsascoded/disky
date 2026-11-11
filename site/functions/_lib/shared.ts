@@ -1,3 +1,4 @@
+import { readerCache, type ReaderCache } from './readerRuntime.js'
 /** Per-isolate memos of promises shared across requests — and what a request does about another request's work.
  *
  * Workers freeze a cancelled request's pending promises (a viewer navigating away mid-compute): they never settle
@@ -266,8 +267,8 @@ function pendingIn<T>(map: Map<string, Promise<T>>): Pending<T> {
 
 /** The colo cache (the Workers Cache API's default), its puts as isolate writes: in a scope, held for that request
  *  (its own `match`es see them) and put at the commit. */
-export function colo(): Cache {
-  const c = (caches as unknown as { default: Cache }).default
+export function colo(): ReaderCache {
+  const c = readerCache() ?? (caches as unknown as { default: Cache }).default
   const s = scopeOf()
   if (!s) return c
   type Put = { buf: ArrayBuffer; init: ResponseInit }
@@ -288,7 +289,7 @@ export function colo(): Cache {
       s.defer(() => { c.delete(r, o).catch(() => {}) })
       return true
     },
-  } as Cache
+  }
 }
 
 const typical = new IsoMap<string, number>('join-typical')

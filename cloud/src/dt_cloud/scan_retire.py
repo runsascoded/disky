@@ -220,21 +220,21 @@ def lineage(store: Store, gen: str) -> list[str]:
         out.append(frm)
 
 
-def has_generation(store: Store, keys: Iterable[str], *, workers: int = 16) -> bool:
-    """Whether any of the listing shards `keys` has a non-null `generation` (from the footers: a row group whose
-    statistics count fewer nulls than rows, or has none). The canonical listing has the column everywhere, all-null where
-    the lister has no generations (S3, R2, a listing before GCS's were recorded)."""
+def has_identity(store: Store, keys: Iterable[str], column: str, *, workers: int = 16) -> bool:
+    """Whether a listing carries a non-null identity, conservatively inferred from its row-group footers."""
     import pyarrow.parquet as pq
 
     def one(key: str) -> bool:
         with store.open(key) as fh:
             md = pq.ParquetFile(fh).metadata
         names = md.schema.to_arrow_schema().names
-        if ist.GENERATION not in names:
+        if column not in names:
             return False
-        i = names.index(ist.GENERATION)
+        i = names.index(column)
         for g in range(md.num_row_groups):
             rg = md.row_group(g)
+            if not rg.num_rows:
+                continue
             st = rg.column(i).statistics
             if st is None or not st.has_null_count or st.null_count < rg.num_rows:
                 return True
@@ -242,6 +242,10 @@ def has_generation(store: Store, keys: Iterable[str], *, workers: int = 16) -> b
 
     with ThreadPoolExecutor(workers) as ex:
         return any(ex.map(one, sorted(keys)))
+
+
+def has_generation(store: Store, keys: Iterable[str], *, workers: int = 16) -> bool:
+    return has_identity(store, keys, ist.GENERATION, workers=workers)
 
 
 def generation_vouched(marker: dict) -> bool:
@@ -388,7 +392,7 @@ def retire(scans_root: str, layouts: list[str], *, iv_root: str, static_gen: str
            only: list[str] = (),
            execute: bool = False, markers_only: bool = False, backup_root: str | None = None, d1: bool = True,
            d1_store: str = F.PRIMARY_STORE, drop_path: bool = False, work: Path | None = None, d1_elsewhere: bool = False,
-           verify_jobs: int = 1) -> dict:
+           verify_jobs: int = 1, review: Path | None = None) -> dict:
     """Plan (and with `execute`, carry out) the retirement; returns the report (`scans`, `totals`, `d1`, …)."""
     scans_root, iv_root = store_url(scans_root), store_url(iv_root)  # a bare bucket name is a GCS bucket (a profile's)
     src = Store(scans_root)
@@ -473,6 +477,12 @@ def retire(scans_root: str, layouts: list[str], *, iv_root: str, static_gen: str
             if r["status"] == "retire" and raw and not generation_vouched(markers[r["id"]]) and has_generation(src, raw):
                 s.held.add("layer1")
                 r["held"] = "layer1: its listing has `generation`, which its marker didn't compare equal"
+            if r["status"] == "retire" and raw and has_identity(src, raw, "version"):
+                marker = markers[r["id"]]
+                if not generation_vouched(marker) or marker.get("generation", {}).get("column") != "version":
+                    s.held.add("layer1")
+                    why = "layer1: its listing has `version`, which its marker didn't compare equal"
+                    r["held"] = f"{r['held']}; {why}" if r.get("held") else why
             if r["status"] == "retire" and any(c == "attribution" for _, c in s.objects.values()):
                 why = None
                 if r["id"] not in covered:
@@ -500,9 +510,13 @@ def retire(scans_root: str, layouts: list[str], *, iv_root: str, static_gen: str
         if report["d1_left"]:
             left = sorted({d["date"] for d in report["d1_left"]})
             err(f"retire: -R leaves D1 rows for {len(left)} retiring scans ({', '.join(left)}): retire them with D1 too")
+        doomed = {k: n for sid in retiring for k, n in scans[sid].deletable().items()}
+        if review is not None:
+            from .delete_review import validate
+
+            validate(review, src.root, doomed, d1=d1)
         if not execute:
             return report
-        doomed = {k: n for sid in retiring for k, n in scans[sid].deletable().items()}
         if backup_root:
             report["backup"] = backup(src, Store(store_url(backup_root)), doomed, work / "backup")
             err(f"retire: backed up {report['backup']['objects']} objects ({report['backup']['bytes']:,} B) to {backup_root}")
@@ -567,6 +581,7 @@ def render(report: dict) -> list[str]:
 @option("-o", "--out", "iv_root", required=True, help="The interval store: a dir or URL (where `interval-store/` lives)")
 @option("-P", "--drop-path-pointer", is_flag=True, help="Also delete the `path` pointers (`index_schema`): only once the site lists scans from the stores")
 @option("-R", "--no-d1", is_flag=True, help="Leave D1 alone (a second copy of the files, or a deployment without D1 pointers)")
+@option("-r", "--review", help="Require exact keys and byte sizes from this reviewed JSON manifest; fails before deletion on any difference")
 @option("-s", "--scans", "scans_root", required=True, help="Where the per-scan files are: a dir or URL, the root of -L's and -l's keys")
 @option("-S", "--static-store", "static_root", help="The static name index's store (default: -o)")
 @option("-t", "--store", "d1_store", default=F.PRIMARY_STORE, help="The D1 store these scans' rows belong to (`primary`, or a `STORES_JSON` key)")
@@ -574,7 +589,7 @@ def render(report: dict) -> list[str]:
 @option("-x", "--execute", is_flag=True, help="Back up (-b), delete the D1 rows, then the files")
 @argument("ids", nargs=-1)
 def retire_cmd(layer1s, backup_root, caches, d1_elsewhere, gen, static_gen, as_json, verify_jobs, keep, layer2s, layouts, markers_only, dry_run, iv_root,
-               drop_path_pointer, no_d1, scans_root, static_root, d1_store, work, execute, ids) -> None:
+               drop_path_pointer, no_d1, review, scans_root, static_root, d1_store, work, execute, ids) -> None:
     """Retire the per-scan sorts, footers, search sidecars, layer-2 and raw listings and rollup caches of the scans the interval store and the
     static name index both hold and a parity marker vouches for (all but the newest -k; IDS: only these). A dry run by
     default: per scan the objects and bytes per class it would delete and keep, the totals, and the D1 rows that would
@@ -584,7 +599,7 @@ def retire_cmd(layer1s, backup_root, caches, d1_elsewhere, gen, static_gen, as_j
     report = retire(scans_root, list(layouts), iv_root=iv_root, static_gen=static_gen, iv_gen=gen, static_root=static_root,
                     layer2s=list(layer2s), layer1s=list(layer1s), caches=list(caches), keep=keep, only=list(ids), execute=execute, markers_only=markers_only,
                     backup_root=backup_root, d1=not no_d1, d1_elsewhere=d1_elsewhere, d1_store=d1_store, drop_path=drop_path_pointer,
-                    work=Path(work) if work else None, verify_jobs=verify_jobs)
+                    work=Path(work) if work else None, verify_jobs=verify_jobs, review=Path(review) if review else None)
     if as_json:
         print(json.dumps(report))
         return

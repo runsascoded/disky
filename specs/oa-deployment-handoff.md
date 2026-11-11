@@ -1,6 +1,8 @@
 # OA deployment handoff and operator runbook
 
-Status: source audit and shared tooling fixes, 2026-11-09. Requested by Ryan so Louisa can operate all four deployments through a repeatable operator handoff. Operator access and a release rehearsal remain unverified. No site, image, database, infrastructure or permission was changed by this audit.
+Status: source audit and shared tooling fixes, 2026-11-09. Requested by Ryan so Louisa can operate all four deployments during his two-month leave. Operator access and a release rehearsal remain unverified. No site, image, database, infrastructure or permission was changed by this audit.
+
+Current scope: Ryan has set operator permissions aside and prioritized deploy/CS3 harmonization. See [harmonization plan] for the latest source audit, adoption ledger and implementation sequence. The live revision readback below is a historical snapshot: GCS and HF subsequently supplied clean rollout receipts, so its dirty-HF finding must not be repeated as current live state without another readback. CW's newer source still needs a coherent published handoff.
 
 ## What is shared
 
@@ -98,3 +100,4 @@ Cloudflare's [project API] exposes the canonical production deployment; its [dep
 
 [project API]: https://developers.cloudflare.com/api/resources/pages/subresources/projects/methods/get/
 [deployment-list API]: https://developers.cloudflare.com/api/resources/pages/subresources/projects/subresources/deployments/methods/list/
+[harmonization plan]: deployment-cs3-harmonization.md

@@ -13,8 +13,10 @@ import {
   renderDetails, renderDiscord, renderHeadline, renderLines, renderSummary, senderName, type ServerEvent, serverKind, sessionLinks, SLACK, tallyClient,
 } from './activityShape'
 import { captureWrite, noteActivity } from './activityHook'
-import { ingest } from './sessionLog'
-import { resetSlackScopes, resetSlackPeople } from './slack'
+import { d1SessionLogStore } from '@open-athena/auth/session-log/d1'
+import type { SessionLogWho, SlogBatch } from '@open-athena/auth/session-log'
+const ingest = (db: D1Database, who: SessionLogWho, ua: string | null, batch: SlogBatch, now: number) => d1SessionLogStore(db).ingest(who, ua, batch, now)
+import { resetSlackPeople, resetSlackScopes } from './slack'
 import type { SlogEvent } from './sessionLogShape'
 
 const NOW = Date.UTC(2026, 9, 21, 15, 0, 0)  // 2026-10-21T15:00Z

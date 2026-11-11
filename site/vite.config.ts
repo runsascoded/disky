@@ -143,7 +143,10 @@ const markIcons: Plugin = {
 // The build's identity (`scripts/build-id.mjs`): its commit (the session log stamps it on every batch,
 // specs/session-log.md; `VITE_BUILD_SHA` overrides) and time, written for the Functions bundle too
 // (`functions/_lib/build.gen.ts`), so the page and the `x-disky-build` header agree.
-const BUILD_ID = writeBuildId()
+const BUILD_ID = writeBuildId(new Date(), {
+  ...process.env,
+  VITE_SOURCE_REF: process.env.VITE_SOURCE_REF ?? VARS.SOURCE_REF,
+})
 
 export default defineConfig({
   define: {
@@ -158,6 +161,8 @@ export default defineConfig({
     'import.meta.env.VITE_DUPS': JSON.stringify(DUPS),
     'import.meta.env.VITE_BUILD_SHA': JSON.stringify(BUILD_ID.sha),
     'import.meta.env.VITE_BUILD_TIME': JSON.stringify(BUILD_ID.time),
+    'import.meta.env.VITE_SOURCE_REF': JSON.stringify(BUILD_ID.ref),
+    'import.meta.env.VITE_BUILD_ENVIRONMENT': JSON.stringify(BUILD_ID.environment),
   },
   plugins: [react(), devSeriesIndex, devChildrenActions, llmsTxt, markIcons],
   server: {

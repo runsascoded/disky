@@ -1,0 +1,221 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = ["click==8.3.0", "thrds @ https://github.com/Open-Athena/thrds/archive/6f207846b32012d6a1550011f95bc561caf8ff1c.tar.gz"]
+# ///
+"""Review a deployment receipt; send only with an explicit flag and reviewed channel capability."""
+from getpass import getuser
+from json import dumps, loads
+from os import environ
+from pathlib import Path
+from re import findall, fullmatch
+from subprocess import check_output
+from tomllib import loads as toml_loads
+from urllib.error import HTTPError, URLError
+from urllib.parse import quote, urlsplit
+from urllib.request import HTTPRedirectHandler, Request, build_opener
+from uuid import uuid4
+
+from click import Choice, ClickException, Path as ClickPath, argument, group, option
+
+
+RESULTS = ('success', 'failure', 'cancelled')
+STAGES = ('build', 'upload', 'verify', 'finish')
+
+
+def require(condition: bool, message: str) -> None:
+    if not condition:
+        raise ClickException(message)
+
+
+def https_url(value: str, field: str) -> str:
+    parsed = urlsplit(value)
+    require(parsed.scheme == 'https' and bool(parsed.hostname) and parsed.netloc == parsed.hostname
+            and not parsed.query and not parsed.fragment and not any(c in value for c in '<>\n\r`'),
+            f'{field}: expected an HTTPS URL without credentials, port, query or fragment')
+    return value
+
+
+def receipt(value: dict) -> dict:
+    """Project an allowlist; controller receipts can contain private data that must never reach Slack."""
+    require(value.get('notice_version') == 1, 'notice_version must be 1')
+    deployment = value.get('deployment') or value.get('source_branch')
+    require(isinstance(deployment, str) and fullmatch(r'[a-z0-9][a-z0-9-]{0,63}', deployment) is not None,
+            'deployment must be a site slug')
+    require(value.get('mode') in ('dev', 'prod'), 'mode must be dev or prod')
+    require(value.get('status') in RESULTS, 'status must be success, failure or cancelled')
+    require(value.get('stage') in STAGES, 'stage must be build, upload, verify or finish')
+    sha = value.get('sha')
+    require(sha is None or isinstance(sha, str) and fullmatch('[0-9a-f]{40}', sha) is not None,
+            'sha must be a full 40-character revision or null')
+    ref = value.get('source_branch')
+    require(ref is None or isinstance(ref, str) and fullmatch(r'[A-Za-z0-9_./+-]+', ref) is not None,
+            'source_branch must be a plain source ref or null')
+    repo = value.get('repository')
+    require(isinstance(repo, str) and fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', repo) is not None,
+            'repository must be owner/name')
+    host = value.get('host')
+    require(isinstance(host, str) and fullmatch(r'[a-z0-9][a-z0-9.-]*[a-z0-9]', host) is not None,
+            'host must be a DNS name')
+    verified = value.get('verified', False)
+    require(type(verified) is bool and (not verified or value['status'] == 'success'),
+            'verified must be a boolean and requires success')
+    dirty = value.get('dirty')
+    require(dirty is None or type(dirty) is bool, 'dirty must be a boolean or null')
+    actor = value.get('actor')
+    require(actor is None or isinstance(actor, str) and fullmatch(r'[A-Za-z0-9_.@+-]{1,128}', actor) is not None,
+            'actor must be a plain user identifier or null')
+    actor_source = value.get('actor_source')
+    require(actor_source in (None, 'local', 'github'), 'actor_source must be local, github or null')
+    attempt = value.get('attempt')
+    require(isinstance(attempt, str) and fullmatch(r'[A-Za-z0-9_.:-]{1,128}', attempt) is not None,
+            'attempt must be a plain attempt identifier')
+    cf_id = value.get('cloudflare_deployment')
+    require(cf_id is None or isinstance(cf_id, str) and fullmatch(r'[A-Za-z0-9-]{1,64}', cf_id) is not None,
+            'cloudflare_deployment must be an ID or null')
+    urls = {}
+    for key in ('cloudflare_url', 'run_url'):
+        url = value.get(key)
+        require(url is None or isinstance(url, str), f'{key} must be a URL or null')
+        urls[key] = https_url(url, key) if url else None
+    return {
+        'notice_version': 1, 'deployment': deployment, 'mode': value['mode'], 'status': value['status'],
+        'stage': value['stage'], 'sha': sha, 'source_branch': ref, 'repository': repo, 'host': host,
+        'verified': verified, 'dirty': dirty, 'actor': actor, 'actor_source': actor_source,
+        'attempt': attempt, 'cloudflare_deployment': cf_id, **urls,
+    }
+
+
+def render(value: dict) -> str:
+    r = receipt(value)
+    outcome = {'success': 'deployment succeeded', 'failure': f"deployment failed during {r['stage']}",
+               'cancelled': 'deployment cancelled'}[r['status']]
+    emoji = {'success': '✅', 'failure': '❌', 'cancelled': '⏹️'}[r['status']]
+    repo = f"https://github.com/{r['repository']}"
+    source = f"[{r['source_branch']}]({repo}/tree/{quote(r['source_branch'], safe='/')})" if r['source_branch'] else 'ref not recorded'
+    revision = 'revision not recorded'
+    if r['sha']:
+        revision = f"`{r['sha']}`"
+        if r['dirty'] is False:
+            revision = f"[{r['sha']}]({repo}/commit/{r['sha']})"
+        elif r['dirty']:
+            revision += ' (base commit)'
+    tree = {True: 'tracked changes present', False: 'clean', None: 'tree state not recorded'}[r['dirty']]
+    who = f"{'GitHub actor' if r['actor_source'] == 'github' else 'Local user' if r['actor_source'] == 'local' else 'Initiator'}: `{r['actor']}`" if r['actor'] else 'Initiator: not recorded'
+    links = [f"[Site](https://{r['host']})"]
+    links += [f"[{label}]({r[key]})" for key, label in (('cloudflare_url', 'CF deployment'), ('run_url', 'Run logs')) if r[key]]
+    return (f"{emoji} **{r['deployment'].upper()} {r['mode']} {outcome}**\n\n"
+            f"Source: {source} · {revision} · {tree}\n\n"
+            f"{who} · attempt `{r['attempt']}`\n\n"
+            f"Serving verification: {'passed' if r['verified'] else 'not recorded'}. "
+            f"CF deployment: {r['cloudflare_deployment'] or 'not recorded'}.\n\n" + ' · '.join(links) + '\n')
+
+
+class NoRedirect(HTTPRedirectHandler):
+    def redirect_request(
+        self,
+        req: Request,
+        fp: object,
+        code: int,
+        msg: str,
+        headers: object,
+        newurl: str,
+    ) -> None:
+        return None
+
+
+def send(value: dict, env: dict) -> None:
+    require(env.get('DEPLOY_NOTIFICATIONS_ENABLED') == '1', 'Deploy notifications are disabled pending template/transport review')
+    hook = env.get('SLACK_DEPLOY_WEBHOOK', '')
+    require(fullmatch(r'https://hooks\.slack\.com/services/[A-Za-z0-9]+/[A-Za-z0-9]+/[A-Za-z0-9]+', hook) is not None,
+            'SLACK_DEPLOY_WEBHOOK must be a channel-scoped Slack incoming webhook')
+    from thrds.mrkdwn import to_slack
+
+    body = dumps({'text': to_slack(render(value)), 'unfurl_links': False, 'unfurl_media': False}).encode()
+    request = Request(hook, data=body, headers={'Content-Type': 'application/json'}, method='POST')
+    try:
+        with build_opener(NoRedirect()).open(request, timeout=15) as response:
+            require(response.status == 200 and response.read(1024).strip() == b'ok', 'Slack did not acknowledge the notification')
+    except HTTPError as error:
+        raise ClickException(f'Slack notification HTTP {error.code}; not retried') from None
+    except (URLError, OSError, TimeoutError):
+        raise ClickException('Slack notification transport failed; acceptance unknown, not retried') from None
+
+
+def load(path: Path) -> dict:
+    require(path.stat().st_size <= 262144, 'Receipt exceeds 256 KiB')
+    value = loads(path.read_text())
+    require(isinstance(value, dict), 'Receipt must be an object')
+    return receipt(value)
+
+
+@group()
+def main() -> None:
+    """Record, review and explicitly send site deployment notices. Rendering never posts."""
+
+
+@main.command('render')
+@argument('path', type=ClickPath(exists=True, path_type=Path))
+def render_cmd(path: Path) -> None:
+    print(render(load(path)), end='')
+
+
+@main.command('send')
+@option('-x', '--execute', is_flag=True, help='Send the reviewed template; also requires DEPLOY_NOTIFICATIONS_ENABLED=1')
+@argument('path', type=ClickPath(exists=True, path_type=Path))
+def send_cmd(execute: bool, path: Path) -> None:
+    value = load(path)
+    if execute:
+        send(value, dict(environ))
+        print('Deployment notification accepted.')
+    else:
+        print(render(value), end='')
+
+
+@main.command('record')
+@option('-c', '--config', 'config_path', type=ClickPath(exists=True, path_type=Path), required=True)
+@option('-d', '--deployment', help='Site slug (default: configured STORE, else Pages project)')
+@option('-e', '--mode', type=Choice(['dev', 'prod']), required=True)
+@option('-g', '--sha', required=True)
+@option('-l', '--upload-log', type=ClickPath(path_type=Path), required=True)
+@option('-o', '--output', type=ClickPath(path_type=Path), required=True)
+@option('-s', '--status', type=Choice(RESULTS), required=True)
+@option('-t', '--stage', type=Choice(STAGES), required=True)
+@option('-u', '--dirty', type=Choice(['true', 'false']), required=True)
+@option('-v', '--verified', is_flag=True)
+def record_cmd(
+    config_path: Path,
+    deployment: str | None,
+    mode: str,
+    sha: str,
+    upload_log: Path,
+    output: Path,
+    status: str,
+    stage: str,
+    dirty: str,
+    verified: bool,
+) -> None:
+    parsed = toml_loads(config_path.read_text())
+    var = parsed.get('vars', {}) if mode == 'prod' else parsed.get('env', {}).get('preview', {}).get('vars', parsed.get('vars', {}))
+    repo_url = https_url(var['REPO_URL'], 'REPO_URL')
+    require(urlsplit(repo_url).hostname == 'github.com', 'REPO_URL must name GitHub')
+    ref = environ.get('VITE_SOURCE_REF') or var.get('SOURCE_REF')
+    if not ref:
+        result = check_output(['git', 'rev-parse', '--abbrev-ref', 'HEAD'], cwd=config_path.resolve().parent, text=True).strip()
+        ref = None if result == 'HEAD' else result
+    urls = findall(r'Deployment complete![^\n]*(https://[a-z0-9]{8,32}\.[a-z0-9-]+\.pages\.dev)', upload_log.read_text()) if upload_log.exists() else []
+    cf_url = next((url for url in reversed(urls) if urlsplit(url).hostname.endswith('.' + parsed['name'] + '.pages.dev')), None)
+    actor = environ.get('GITHUB_ACTOR') or getuser()
+    r = receipt({
+        'notice_version': 1, 'deployment': deployment or var.get('STORE') or parsed['name'], 'mode': mode, 'status': status, 'stage': stage,
+        'sha': sha, 'source_branch': ref, 'repository': urlsplit(repo_url).path.strip('/'),
+        'host': var.get(f'{mode.upper()}_HOST', parsed['name'] + '.pages.dev'), 'verified': verified,
+        'dirty': dirty == 'true', 'actor': actor, 'actor_source': 'github' if environ.get('GITHUB_ACTOR') else 'local',
+        'attempt': str(uuid4()), 'cloudflare_deployment': urlsplit(cf_url).hostname.split('.')[0] if cf_url else None,
+        'cloudflare_url': cf_url, 'run_url': None,
+    })
+    output.write_text(dumps(r, indent=2) + '\n')
+
+
+if __name__ == '__main__':
+    main()

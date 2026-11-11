@@ -20,7 +20,7 @@ import { hasExtras } from '../_lib/extras.js'
 import { ATTEN_DEFAULT, buildView, FILTER_VIEW_V, LensUnavailable, MIN_AREA_DEFAULT, NotFound, QUANT, readRootAgg, readRootRows, scopedTag, type ViewNode } from '../_lib/view.js'
 import { hexNote, hexQuery, indexedGate, staticTag } from '../_lib/staticFilter.js'
 import { FilterRejected, indexedOnly, pathTerms, rejectBody, rejectQuery, rejectScope } from '../_lib/indexedOnly.js'
-import { cacheEnvTag, cacheKeyFor, cacheMatch, cacheStore, isPartial, keepFor, serverTiming, UPGRADE_DETAIL_GROUPS, UPGRADE_DETAILS_MS, UPGRADE_PHASE2_MS, UPGRADE_SEARCH_LIMITS, upgradePartial } from '../_lib/edgeCache.js'
+import { cacheEnvTag, cacheKeyFor, cacheMatch, cacheStore, cutReason, isPartial, keepFor, serverTiming, UPGRADE_DETAIL_GROUPS, UPGRADE_DETAILS_MS, UPGRADE_PHASE2_MS, UPGRADE_SEARCH_LIMITS, upgradePartial } from '../_lib/edgeCache.js'
 import type { SearchLimits } from '../_lib/search.js'
 import { LENS_PRIMARY_ONLY, storeKey, withStore } from '../_lib/stores.js'
 import { lensParam, ME_UNRESOLVED, resolveLens } from '../_lib/me.js'
@@ -242,12 +242,12 @@ async function subtreeGated(
         ...(keep !== true ? { budgetCut: true } : {}),
         tree: view.tree,
       })
-      return { body, keep }
+      return { body, keep, cut: cutReason(view) }
     }
     // A partial answer (phase 2 cut by its time budget) schedules the full one in the background, which
     // replaces it in the colo cache (`upgradePartial`): on the miss that produced it, and on a partial hit.
     const upgrade = (res: Response): Response => {
-      res.headers.set('x-cache-upgrade', upgradePartial(ctx.env, cacheKey, () => render({ phase2Ms: UPGRADE_PHASE2_MS, detailsWait: UPGRADE_DETAILS_MS, detailGroups: UPGRADE_DETAIL_GROUPS, searchLimits: UPGRADE_SEARCH_LIMITS }), ctx.waitUntil?.bind(ctx)))
+      res.headers.set('x-cache-upgrade', upgradePartial(ctx.env, cacheKey, trace => render({ phase2Ms: UPGRADE_PHASE2_MS, detailsWait: UPGRADE_DETAILS_MS, detailGroups: UPGRADE_DETAIL_GROUPS, searchLimits: UPGRADE_SEARCH_LIMITS, trace }), ctx.waitUntil?.bind(ctx)))
       return res
     }
     const early1 = looked && await looked()

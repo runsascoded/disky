@@ -352,9 +352,10 @@ export const runUrl = (siteUrl: string, runId: string): string => `${siteUrl}/st
 
 /** What a run left alone, as its `/staged` row says it; empty when nothing was. */
 function skipsLine(o?: RunOutcome): string {
-  if (!o?.skipped) return ''
+  const preserved = o?.preserved ? ` Preserved since staging: *${fmtBytes(o.preserved.bytes)}* / ${fmtN(o.preserved.objects)} newer or changed objects.` : ''
+  if (!o?.skipped) return preserved
   const notSwept = o.notSwept.length ? ` *Not swept:* ${o.notSwept.map(b => `\`${b}\``).join(', ')} (no object in them had a generation; their prefixes stay staged).` : ''
-  return ` Skipped, no generation: *${fmtBytes(o.skipped.bytes)}* / ${fmtN(o.skipped.objects)} objects left in place.${notSwept}`
+  return `${preserved} Skipped, no generation: *${fmtBytes(o.skipped.bytes)}* / ${fmtN(o.skipped.objects)} objects left in place.${notSwept}`
 }
 
 /** A run's thread reply: the actor by name, the run id linking to its row on
@@ -379,7 +380,9 @@ export function runEvent(r: RunRow, phase: 'dispatched' | 'finished' | 'failed',
   const skips = skipsLine(o.outcome)
   if (r.mode === 'dry') return `:test_tube: Dry-run ${id} finished: would delete *${fmtBytes(r.deleted_bytes)}* / ${fmtN(r.deleted_objects)} objects (gone since scan: ${fmtN(r.skipped_gone)}, overwritten: ${fmtN(r.skipped_overwritten)}).${skips}`
   if (o.outcome?.unread) return `:warning: Real deletion ${id} finished, totals unread: recorded *${fmtBytes(r.deleted_bytes)}* / ${fmtN(r.deleted_objects)} objects${undoNote(r, o.undoUnavailable)}.`
-  return `${skips ? ':warning:' : ':white_check_mark:'} Real deletion ${id} finished: ${o.outcome?.attempted ? 'attempted' : 'deleted'} *${fmtBytes(r.deleted_bytes)}* / ${fmtN(r.deleted_objects)} objects${undoNote(r, o.undoUnavailable)}.${skips}`
+  const undo = r.deleted_objects === 0 && r.deleted_bytes === 0 && o.outcome?.totals !== 'lower-bound' && o.outcome?.totals !== 'unread'
+    ? '; nothing to undo (no objects processed)' : undoNote(r, o.undoUnavailable)
+  return `${skips ? ':warning:' : ':white_check_mark:'} Real deletion ${id} finished: ${o.outcome?.attempted ? 'attempted' : 'deleted'} *${fmtBytes(r.deleted_bytes)}* / ${fmtN(r.deleted_objects)} objects${undo}.${skips}`
 }
 
 /** No claim that anything is deleted: an XML reply can't prove it, and a run with skips left objects under its prefixes. */

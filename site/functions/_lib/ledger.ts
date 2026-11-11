@@ -1,3 +1,4 @@
+import { readerMetadata } from './readerWorker.js'
 /** The live ownership ledger (assignments) and its head, straight from D1 — the
  * WAL every owner-aware read applies on top of the scan
  * (specs/done/view-serving.md §2). */
@@ -25,7 +26,7 @@ export async function loadLedger(env: Env): Promise<Ledger> {
 }
 
 async function loadRows(env: Env, head: number): Promise<Ledger> {
-  const ownerRows = await env.DB!.prepare(
+  const ownerRows = await readerMetadata(env)!.prepare(
     "SELECT o.prefix, COALESCE(o.kind, 'prefix') AS kind, o.owner, o.ts, a.actor AS who, a.id AS action_id " +
     'FROM owner_prefixes o JOIN actions a ON a.id = o.action_id WHERE o.tombstoned IS NULL',
   ).all<OwnerRow>()
@@ -37,8 +38,8 @@ async function loadRows(env: Env, head: number): Promise<Ledger> {
  * owner pools stay the scan's attribution. Checked once per isolate and database. */
 const ledgerTables = new WeakMap<object, Memo<boolean>>()
 export function hasLedger(env: Env): Promise<boolean> {
-  if (!env.DB || env.STORE_KEY) return Promise.resolve(false)
-  const db = env.DB
+  if (!readerMetadata(env) || env.STORE_KEY) return Promise.resolve(false)
+  const db = readerMetadata(env)!
   let has = ledgerTables.get(db)
   if (!has) ledgerTables.set(db, (has = new Memo('ledger-tables')))
   return has.get('', () => db.prepare("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table' AND name IN ('actions', 'owner_prefixes')")
@@ -51,8 +52,8 @@ export function hasLedger(env: Env): Promise<boolean> {
  * grow, so the sum strictly increases with every change and never revisits a
  * stale key (`owner_totals` drops bodies of lower heads). */
 export async function ledgerHead(env: Env): Promise<number> {
-  if (!env.DB) throw new Error('ledger backend not configured (DB)')
-  const row = await env.DB.prepare(
+  if (!readerMetadata(env)) throw new Error('ledger backend not configured (DB)')
+  const row = await readerMetadata(env)!.prepare(
     'SELECT (SELECT COALESCE(MAX(id), 0) FROM actions) + (SELECT COUNT(*) FROM owner_prefixes WHERE tombstoned IS NOT NULL) AS head',
   ).first<{ head: number }>()
   return row?.head ?? 0

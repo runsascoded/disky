@@ -1,0 +1,11 @@
+{
+  "contract": "joint-uc-stock-events-v1",
+  "complete": true,
+  "initial_state": "empty-before-first-scan",
+  "source": "synthetic:eligibility-census-adversarial-v1",
+  "scope": "b",
+  "scans": [0, 1, 2, 3],
+  "events": 7,
+  "paths": 2,
+  "sha256": "6ef1ec6175c7bcd286cbd4cbc03deaf77cdc3ae4f5335e7d66d357b0782e48e1"
+}

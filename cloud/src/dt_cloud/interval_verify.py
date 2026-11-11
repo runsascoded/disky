@@ -438,7 +438,7 @@ def generation_parity(con, scan_file: str, served: str, runs: list[str], ts: int
         GROUP BY depth, path HAVING bool_and(kind = 'file') AND count(*) = 1 AND any_value({own_identity}) IS NOT NULL"""
     n, eq = con.execute(f"""SELECT count(*), count(*) FILTER (WHERE l.{GENERATION} = o.{GENERATION})
         FROM ({own}) o LEFT JOIN ({live}) l USING (depth, path)""").fetchone()
-    return {"objects": n, "equal": eq}
+    return {"objects": n, "equal": eq, **({"column": "version"} if GENERATION == "version" else {})}
 
 
 def _footers(src, key: str, version: int) -> dict[str, Footer]:
