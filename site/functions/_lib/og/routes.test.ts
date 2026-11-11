@@ -45,6 +45,15 @@ describe('pageView: page URL → card kind, view params, title', () => {
       { kind: 'series', params: { path: 'marin-a', o: '*' }, title: 'marin-a · size over time · owner: owned' },
     ])
   })
+  it('`?v=` codes name the same views as the legacy `?section=` ids, and a spelled-out `?v=` id is read too', () => {
+    expect([pv('/bucket?d=26092812-26091700&v=d&dm=max'), pv('/bucket?v=o'), pv('/bucket?v=t&d=261002'), pv('/bucket?v=over-time'), pv('/bucket?v=o&section=diff')]).toEqual([
+      { kind: 'diff', params: { path: 'bucket', d: '26092812-26091700', dm: 'max' }, title: 'bucket · changes' },
+      { kind: 'series', params: { path: 'bucket' }, title: 'bucket · size over time' },
+      { kind: 'map', params: { path: 'bucket', d: '261002' }, title: 'bucket' },
+      { kind: 'series', params: { path: 'bucket' }, title: 'bucket · size over time' },
+      { kind: 'series', params: { path: 'bucket' }, title: 'bucket · size over time' },
+    ])
+  })
   it('a secondary store\'s over-time section carries its `store`', () => {
     expect(pageView(new URL('https://site.example.org/snapshots?section=over-time&d=261012'), 'CW — meta', [], 'meta'))
       .toEqual({ kind: 'series', params: { store: 'meta', path: 'snapshots', d: '261012' }, title: 'snapshots · size over time' })

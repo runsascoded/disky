@@ -13,20 +13,22 @@ describe('withoutOg: the address bar sheds the preview token, nothing else', () 
 })
 
 describe('shareUrl: the page link, with exactly the token asked for', () => {
-  it('promotes a section fragment into the server-visible `?section=` (as the page itself would); other fragments stay', () => {
+  it('promotes a section fragment, or a legacy `?section=`, into the server-visible `?v=` (as the page itself would); other fragments stay', () => {
     expect([
-      shareUrl('https://site.example.org/bucket?d=26092812-26091700&section=diff', { og: 'preview123' }),
+      shareUrl('https://site.example.org/bucket?d=26092812-26091700&v=d', { og: 'preview123' }),
       shareUrl('https://site.example.org/bucket?d=26092812-26091700#diff', { og: 'preview123' }),
       shareUrl('https://site.example.org/bucket?d=26092812-26091700#changes'),
-      shareUrl('https://site.example.org/bucket?section=diff#tree-map'),
-      shareUrl('https://site.example.org/bucket?section=diff#age'),
+      shareUrl('https://site.example.org/bucket?v=d#tree-map'),
+      shareUrl('https://site.example.org/bucket?v=d#age'),
+      shareUrl('https://site.example.org/bucket?d=26092812-26091700&section=over-time'),
       shareUrl('https://site.example.org/staged#batch-12'),
     ]).toEqual([
-      'https://site.example.org/bucket?d=26092812-26091700&section=diff&og=preview123',
-      'https://site.example.org/bucket?d=26092812-26091700&section=diff&og=preview123',
-      'https://site.example.org/bucket?d=26092812-26091700&section=diff',
-      'https://site.example.org/bucket?section=tree-map',
-      'https://site.example.org/bucket?section=diff#age',
+      'https://site.example.org/bucket?d=26092812-26091700&v=d&og=preview123',
+      'https://site.example.org/bucket?d=26092812-26091700&v=d&og=preview123',
+      'https://site.example.org/bucket?d=26092812-26091700&v=d',
+      'https://site.example.org/bucket?v=m',
+      'https://site.example.org/bucket?v=d#age',
+      'https://site.example.org/bucket?d=26092812-26091700&v=o',
       'https://site.example.org/staged#batch-12',
     ])
   })
