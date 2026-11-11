@@ -6,5 +6,6 @@ config:
   gcs-usage-gcp:fleetProject: hai-gcp-models
   gcs-usage-gcp:taskLogsBucket: _Default
   gcs-usage-gcp:taskLogsLocation: global
+  gcs-usage-gcp:alertChannel: projects/oa-internal-450019/notificationChannels/2552765494878318839
 secretsprovider: gcpkms://projects/oa-internal-450019/locations/global/keyRings/ops/cryptoKeys/pulumi
 encryptedkey: CiQAqKOWSKShoEUwrOJ2BSNi9qj8b+P8BHofoXrFk+/bRCHBNhISSQAw+4V0A9jZhGGTp8gpkeO/Cs1tb8rF7GklfN9lTqDXumYvjiR7SPSIdbPA3p6RiBFS0nY9khg+SRmBnEnxFA9+2Z/QPn9wK8Q=
