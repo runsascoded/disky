@@ -65,6 +65,8 @@ GCP_LOG_VIEW = "projects/oa-internal-450019/locations/global/buckets/_Default/vi
 BUCKET_REGIONS = '{"marin-us-east5":"us-east5","marin-us-central1":"us-central1","marin-us-central2":"us-central1","marin-eu-west4":"europe-west4","marin-us-west4":"us-west4","marin-us-east1":"us-east1"}'
 # Where a sweep cut spanning regions runs (a one-region cut runs in its own, per BUCKET_REGIONS).
 BATCH_REGION = "us-central1"
+# "Run a scan" on /scans (`/api/scan-runs/dispatch`): the daily scan's submitter, run as `GCP_SA_KEY`'s account
+SCAN_SUBMIT_JOB = "projects/oa-internal-450019/locations/us-central1/jobs/gcs-usage-snapshot-submit"
 ZSTD_WASM = "1"   # parquet pages decode in wasm; watch `zstd wasm: … fzstd from here on` and `exceededMemory`
 # Admin is the `admin_emails` table (and the break-glass secret `ADMIN_BOOTSTRAP`), not the staff domain.
 ADMIN_LIST = "1"
@@ -200,6 +202,7 @@ GCP_PROJECT = "oa-internal-450019"    # Batch dispatch (`_lib/gcp.ts`)
 BUCKET_REGIONS = '{"marin-us-east5":"us-east5","marin-us-central1":"us-central1","marin-us-central2":"us-central1","marin-eu-west4":"europe-west4","marin-us-west4":"us-west4","marin-us-east1":"us-east1"}'
 # Where a sweep cut spanning regions runs (a one-region cut runs in its own, per BUCKET_REGIONS).
 BATCH_REGION = "us-central1"
+SCAN_SUBMIT_JOB = "projects/oa-internal-450019/locations/us-central1/jobs/gcs-usage-snapshot-submit"
 ZSTD_WASM = "1"
 # Admin is the `admin_emails` table (and the break-glass secret `ADMIN_BOOTSTRAP`), not the staff domain.
 ADMIN_LIST = "1"

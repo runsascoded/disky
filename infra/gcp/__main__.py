@@ -38,7 +38,7 @@ dispatch = JobAccount(
     project=project,
     account_id="gcs-usage-dispatch",
     display_name="gcs-usage sweep dispatch",
-    description="Submits sweep-executor Batch jobs from the /sweep console; Batch-submit + actAs gcs-usage-job only",
+    description="Submits sweep-executor Batch jobs from the /sweep console, and runs the scan submitter from /scans; Batch-submit + actAs gcs-usage-job, run gcs-usage-snapshot-submit",
     roles=["roles/batch.jobsEditor"],
     acts_as_self=False,
     adopt=adopt,
@@ -145,6 +145,8 @@ snapshot_secret = Secrets(
 # transient failures for 30 min, and posts to #gcs-admin if it still can't. Scheduler posting the spec to Batch itself
 # (`BatchCron`) can do neither: one POST, no job id, so a 502 is a silent missed scan (2026-11-08) and a retry a possible
 # second one. The trigger keeps its name, adopted from its `BatchCron` (`cron_aliases`) and updated in place.
+# "Run a scan" on /scans runs the same job as the site's dispatch account (`/api/scan-runs/dispatch`), overriding only
+# `DT_TRIGGER` (`manual`: the script names the job for the second and records the scan as manual).
 DAILY = "gcs-usage-snapshot-daily"
 daily = BatchSubmitCron(
     DAILY,
@@ -159,6 +161,8 @@ daily = BatchSubmitCron(
     image=f"{region}-docker.pkg.dev/{project}/cloud-run-source-deploy/gcs-usage-snapshot:latest",
     env={"SLACK_ALERT_CHANNEL": "C0C579HNRFB"},  # #gcs-admin
     secret_env={"SLACK_BOT_TOKEN": "gcs-alert-slack-bot-token"},
+    overridable=["DT_TRIGGER"],
+    dispatchers={"gcs-usage-dispatch": dispatch.member},
     labels={"component": "scan-submit"},
     description="The daily scan: runs the submitter job, which names the day's Batch job, retries, and alerts",
     cron_aliases=[f"urn:pulumi:{STACK}::{pulumi.get_project()}::disky:gcp:BatchCron$gcp:cloudscheduler/job:Job::{DAILY}"],

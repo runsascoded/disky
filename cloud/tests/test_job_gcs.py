@@ -218,10 +218,11 @@ def test_cron_spec_survives_the_submitters_labelling():
     assert label_batch_spec(spec, "scan", {"DISKY_LABELS": env["DISKY_LABELS"]}) == spec
 
 
-def scan_submit(tmp_path: Path, dt_rc: int, dt_err: str) -> tuple:
+def scan_submit(tmp_path: Path, dt_rc: int, dt_err: str, spec: str = '{"labels": {"component": "scan"}}', **env_extra: str) -> tuple:
     """Run `job/scan-submit.sh` as its Cloud Run job does (`bash -c` its text) against fake `dt-cloud` (`dt_err` on
-    stderr, exit `dt_rc`), `disk-tree` and `date`; returns (exit code, stdout, dt-cloud's argv, the spec file it was
-    handed, disk-tree's argv or None, disk-tree's `$DISKY_NOTIFY` line or None)."""
+    stderr, exit `dt_rc`), `disk-tree` and `date` (2026-11-08 15:30:00 UTC), with `$BATCH_SPEC` = `spec` and `env_extra`
+    (a run's overrides); returns (exit code, stdout, dt-cloud's argv, the spec file it was handed, disk-tree's argv or
+    None, disk-tree's `$DISKY_NOTIFY` line or None)."""
     bin_, rec = tmp_path / "bin", tmp_path / "rec"
     bin_.mkdir()
     rec.mkdir()
@@ -230,12 +231,12 @@ def scan_submit(tmp_path: Path, dt_rc: int, dt_err: str) -> tuple:
         "dt-cloud": f'printf "%s\\0" "$@" > {rec}/dt; for a; do last=$a; done; cp "$last" {rec}/spec\n'
                     f'cat {tmp_path}/dt-err >&2\nif [ {dt_rc} -eq 0 ]; then echo gcs-usage-snapshot-20261108; fi\nexit {dt_rc}\n',
         "disk-tree": f'printf "%s\\0" "$@" > {rec}/notify; echo "DISKY_NOTIFY=$DISKY_NOTIFY" > {rec}/notify-env\n',
-        "date": "echo gcs-usage-snapshot-20261108\n",
+        "date": 'case "$*" in *%H*) echo gcs-usage-snapshot-20261108-153000 ;; *) echo gcs-usage-snapshot-20261108 ;; esac\n',
     }
     for name, body in fakes.items():
         (bin_ / name).write_text("#!/usr/bin/env bash\n" + body)
         (bin_ / name).chmod(0o755)
-    env = {"PATH": f"{bin_}:{environ['PATH']}", "BATCH_SPEC": '{"labels": {"component": "scan"}}', "CLOUD_RUN_EXECUTION": "gcs-usage-snapshot-submit-x7k2p"}
+    env = {"PATH": f"{bin_}:{environ['PATH']}", "BATCH_SPEC": spec, "CLOUD_RUN_EXECUTION": "gcs-usage-snapshot-submit-x7k2p", **env_extra}
     r = run(["bash", "-c", (ROOT_DIR / "job/scan-submit.sh").read_text()], env=env, capture_output=True, text=True)
 
     def recorded(name: str) -> str | None:
@@ -268,3 +269,50 @@ def test_scan_submit_posts_to_gcs_admin_when_the_submit_gives_up(tmp_path):
         "Re-run once Batch answers (a no-op if the job exists): "
         "`gcloud run jobs execute gcs-usage-snapshot-submit --region us-central1 --project oa-internal-450019`",
     ]
+
+
+#: A spec as the cron's carries its trigger: every task group's env, `DT_TRIGGER=schedule`.
+SCHEDULED = {"taskGroups": [{"taskSpec": {"environment": {"variables": {"DATA_BUCKET": "d", "DT_TRIGGER": "schedule"}}}}], "labels": {"component": "scan"}}
+
+
+@pytest.mark.parametrize("trigger", [{}, {"DT_TRIGGER": "schedule"}])
+def test_scan_submit_without_a_manual_trigger_is_the_cron_unchanged(tmp_path, trigger):
+    spec = json.dumps(SCHEDULED)
+    rc, _, dt, handed, notify, _ = scan_submit(tmp_path, 0, "", spec, **trigger)
+    assert (rc, dt[:-1], handed, notify) == (0, DT_ARGS, spec, None)
+
+
+def test_scan_submit_manual_names_the_second_and_marks_the_spec_manual(tmp_path):
+    rc, _, dt, handed, notify, _ = scan_submit(tmp_path, 0, "", json.dumps(SCHEDULED), DT_TRIGGER="manual")
+    assert (rc, dt[:-1], json.loads(handed), notify) == (
+        0,
+        ["batch", "submit", "-c", "scan", "-p", "oa-internal-450019", "-L", "us-central1", "-e", "-r", "1800", "gcs-usage-snapshot-20261108-153000"],
+        {"taskGroups": [{"taskSpec": {"environment": {"variables": {"DATA_BUCKET": "d", "DT_TRIGGER": "manual"}}}}], "labels": {"component": "scan"}},
+        None,
+    )
+
+
+def test_scan_submit_manual_alert_says_manual_and_points_at_the_site(tmp_path):
+    failed = "Batch job gcs-usage-snapshot-20261108-153000: submit failed 12 times over 1800s; the last: HTTP 502"
+    rc, _, _, _, notify, _ = scan_submit(tmp_path, 1, failed + "\n", json.dumps(SCHEDULED), DT_TRIGGER="manual")
+    logs = "https://console.cloud.google.com/run/jobs/executions/details/us-central1/gcs-usage-snapshot-submit-x7k2p/logs?project=oa-internal-450019"
+    assert (rc, notify) == (1, [
+        "notify", "-t", "gcs manual scan: not submitted", "-u", logs, "-l", "submitter logs",
+        f"The manual scan started from /scans didn't start: Batch job gcs-usage-snapshot-20261108-153000 was not created (exit 1). {failed}\n"
+        "Start it again from https://gcs.oa.dev/scans once Batch answers.",
+    ])
+
+
+@pytest.mark.parametrize("trigger, spec, stderr", [
+    ("cron", SCHEDULED, "DT_TRIGGER=cron: want schedule (the cron) or manual\n"),
+    ("manual", {"taskGroups": [{"taskSpec": {"environment": {"variables": {"DT_TRIGGER": "manual"}}}}]},
+     "BATCH_SPEC: want DT_TRIGGER=schedule in every task group's env, to make it manual\n"),
+])
+def test_scan_submit_refuses_an_unknown_trigger_or_a_spec_it_cant_mark(tmp_path, trigger, spec, stderr):
+    bin_ = tmp_path / "bin"
+    bin_.mkdir()
+    (bin_ / "dt-cloud").write_text("#!/usr/bin/env bash\necho submitted\n")
+    (bin_ / "dt-cloud").chmod(0o755)
+    env = {"PATH": f"{bin_}:{environ['PATH']}", "BATCH_SPEC": json.dumps(spec), "DT_TRIGGER": trigger}
+    r = run(["bash", "-c", (ROOT_DIR / "job/scan-submit.sh").read_text()], env=env, capture_output=True, text=True)
+    assert (r.returncode, r.stdout, r.stderr) == (2, "", stderr)
