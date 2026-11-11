@@ -2468,13 +2468,14 @@ def gen_scans(store, prefix: str) -> list[str]:
     return [s["id"] for s in store.read_json(f"{prefix}/scans.json")["scans"]] + run_scans(runs)
 
 
-def r2_wanted(bucket: str, store, gen_prefix: str, served: tuple[str, ...] = ("",)) -> list:
+def r2_wanted(bucket: str, store, gen_prefix: str, served: tuple[str, ...] = ("",), gcs_only: tuple[str, ...] = ()) -> list:
     """What the R2 copy of generation `gen_prefix` holds (the data bucket's objects): its base as `compact-r2` copied it
-    (everything outside its runs' and manifests' dirs), the newest manifest, and that manifest's runs' files under the
-    run-relative `served` prefixes, as `r2_publish` copies them (a run's other files, and runs no manifest lists any more,
-    stay on GCS only)."""
+    (everything outside its runs' and manifests' dirs and the generation-relative `gcs_only` prefixes, which appends
+    write on GCS alone: the interval store's parity markers), the newest manifest, and that manifest's runs' files under
+    the run-relative `served` prefixes, as `r2_publish` copies them (a run's other files, and runs no manifest lists any
+    more, stay on GCS only)."""
     newest, runs = store_newest_runs(store, gen_prefix)
-    skip = {f"{gen_prefix}/manifests/", *(f"{gen_prefix}/{r['key'].split('/', 1)[0]}/" for r in runs)}
+    skip = {f"{gen_prefix}/manifests/", *(f"{gen_prefix}/{g}" for g in gcs_only), *(f"{gen_prefix}/{r['key'].split('/', 1)[0]}/" for r in runs)}
     out = r2_objects(bucket, [f"{gen_prefix}/"], keep=lambda k: not k.startswith(tuple(skip)))
     if newest:
         out += r2_objects(bucket, [f"{gen_prefix}/{newest}"])
@@ -2483,8 +2484,8 @@ def r2_wanted(bucket: str, store, gen_prefix: str, served: tuple[str, ...] = (""
     return out
 
 
-def promote_gen(store, prefix: str, new: str, *, r2_bucket: str | None = None, served: tuple[str, ...] = ("",), carry: OwnerCarry | None = None,
-                log: Callable[[str], None] = err) -> dict:
+def promote_gen(store, prefix: str, new: str, *, r2_bucket: str | None = None, served: tuple[str, ...] = ("",), gcs_only: tuple[str, ...] = (),
+                carry: OwnerCarry | None = None, log: Callable[[str], None] = err) -> dict:
     """Candidate `new` (`compact_store(promote=False)`) made the successor of the generation it was compacted from and,
     when `CURRENT.json` named that one (or nothing), the current generation; with `r2_bucket` (the data bucket the R2
     copy mirrors), then the R2 copy's pointers (`r2_promote`). Refused, nothing moved: `new` not a whole candidate
@@ -2511,7 +2512,7 @@ def promote_gen(store, prefix: str, new: str, *, r2_bucket: str | None = None, s
     if lack := lacking():
         raise SystemExit(f"{new} lacks {len(lack)} scan{'s' * (len(lack) != 1)} {old} holds ({lack[0]}" + (f" … {lack[-1]}" if len(lack) > 1 else "")
                          + f"): append {'them' if len(lack) > 1 else 'it'} to {new} first")
-    if r2_bucket and (bad := r2_missing(r2_wanted(r2_bucket, store, new_prefix, served))):
+    if r2_bucket and (bad := r2_missing(r2_wanted(r2_bucket, store, new_prefix, served, gcs_only))):
         raise SystemExit(f"r2 {new_prefix}: {len(bad)} files not on R2 (e.g. {bad[0]}): copy the candidate there first")
     if carry is not None:
         carry.copy(old, new)

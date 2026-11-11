@@ -1405,6 +1405,9 @@ def compact_cmd(bucket, gen, ranges_gen, scratch, policy, read_from, grace_s, jo
 
 #: A run's files its R2 copy holds (run-relative prefixes, `r2_publish`): its served sorts, what the site reads.
 RUN_R2 = ("served/",)
+#: A generation's files appends write on GCS alone (generation-relative): the scans' parity markers (`verify/<id>.json`,
+#: `scan retire`'s gate), never read by the site.
+GCS_ONLY = ("verify/",)
 
 
 @cli.command("promote")
@@ -1417,7 +1420,7 @@ def promote_cmd(bucket, owner_carry, to_r2, gen) -> None:
     (when it named the source), then with `-r` the R2 copy's. Refused unless GEN holds every scan its source does."""
     if (b := gs_bucket(bucket)) is None:
         raise SystemExit(f"interval store: promote moves a GCS bucket's pointers; {bucket!r} is not one")
-    print(json.dumps(ar.promote_gen(Store(f"gs://{b}"), PREFIX, gen, r2_bucket=b if to_r2 else None, served=RUN_R2, carry=OwnerCarry() if owner_carry else None), indent=1))
+    print(json.dumps(ar.promote_gen(Store(f"gs://{b}"), PREFIX, gen, r2_bucket=b if to_r2 else None, served=RUN_R2, gcs_only=GCS_ONLY, carry=OwnerCarry() if owner_carry else None), indent=1))
 
 
 @cli.command("compact-r2")
