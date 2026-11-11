@@ -7,10 +7,10 @@
 set -euo pipefail
 
 PROJECT=oa-internal-450019
-REGION=us-central1
+REGION=us-east1  # the data bucket's region: its writes stay in-region
 SA=gcs-usage-job@$PROJECT.iam.gserviceaccount.com
 if [ -n "${PIN:-}" ]; then unset IMAGE PARALLEL; fi
-IMAGE=${IMAGE:-us-central1-docker.pkg.dev/$PROJECT/cloud-run-source-deploy/gcs-usage-snapshot:latest}
+IMAGE=${IMAGE:-us-east1-docker.pkg.dev/$PROJECT/gcs-usage/scan:latest}  # job/build.sh's us-east1 copy
 # One bucket at a time on a highmem-8 sustains ~100 MB/s (~360 GB/h), several times the heaviest delivery rate seen
 # (eu-west4's ~110 GB/h on 2026-10-15); `-P` is for catching up a backlog by hand (memory is N × 48GB).
 PARALLEL=${PARALLEL:-1}

@@ -14,7 +14,10 @@
 # a worktree's own `job/build.sh`: calling another checkout's from inside a
 # worktree is refused (it would image that other checkout).
 #
-# Env: PROJECT, IMAGE (override the tag, e.g. a throwaway tag to test a build),
+# `:latest` is also pushed to `MIRROR` (default the us-east1 copy, `gcs-usage/scan:latest`, which the jobs running
+# beside the data bucket pull: `access-submit.sh`); a build with `IMAGE` overridden pushes no copy unless `MIRROR` is set.
+#
+# Env: PROJECT, IMAGE (override the tag, e.g. a throwaway tag to test a build), MIRROR,
 # ALLOW_DIRTY=1 (build a tree with uncommitted changes to tracked files; stamped
 # dirty), ALLOW_OTHER_CHECKOUT=1 (build this script's checkout from another's cwd).
 set -euo pipefail
@@ -30,7 +33,11 @@ if caller_root=$(git -C "$caller" rev-parse --show-toplevel 2>/dev/null) && [ "$
 fi
 
 PROJECT=${PROJECT:-oa-internal-450019}
-IMAGE=${IMAGE:-us-central1-docker.pkg.dev/$PROJECT/cloud-run-source-deploy/gcs-usage-snapshot:latest}
+if [ -z "${IMAGE:-}" ]; then
+  IMAGE=us-central1-docker.pkg.dev/$PROJECT/cloud-run-source-deploy/gcs-usage-snapshot:latest
+  MIRROR=${MIRROR-us-east1-docker.pkg.dev/$PROJECT/gcs-usage/scan:latest}
+fi
+MIRROR=${MIRROR:-}
 
 sha=$(git rev-parse HEAD)
 branch=$(git rev-parse --abbrev-ref HEAD)
@@ -49,6 +56,7 @@ if [ -n "$dirty_paths" ]; then dirty=1; fi
     echo "$dirty_paths" | sed 's/^/    /'
   fi
   echo "  image:  $IMAGE"
+  if [ -n "$MIRROR" ]; then echo "  mirror: $MIRROR"; fi
   echo "================================================================"
 } >&2
 
@@ -59,4 +67,4 @@ fi
 
 echo "building $IMAGE (Cloud Build; context = $root, minus .gcloudignore)" >&2
 exec gcloud builds submit --project "$PROJECT" --config cloudbuild.yaml \
-  --substitutions "_IMAGE=$IMAGE,_GIT_SHA=$sha,_GIT_DIRTY=$dirty" .
+  --substitutions "_IMAGE=$IMAGE,_MIRROR=$MIRROR,_GIT_SHA=$sha,_GIT_DIRTY=$dirty" .

@@ -11,7 +11,7 @@ from pathlib import Path
 import pulumi
 import pulumi_gcp as gcp
 
-from gcp_jobs import Adopt, BatchCron, JobAccount, RunJobCron, Secrets, StorageBatchDelete, cost_labels, grant_bucket, labeled_provider
+from gcp_jobs import Adopt, BatchCron, DeploymentImages, JobAccount, RunJobCron, Secrets, StorageBatchDelete, cost_labels, grant_bucket, labeled_provider
 from task_logs import TaskLogBucket, TaskLogView
 
 cfg = pulumi.Config()
@@ -154,10 +154,14 @@ daily = BatchCron(
 
 # The access-log poller (specs/access-log-freshness.md §A): GCS delivers each hour's usage CSVs ~9–16 h late, so
 # ingest them hourly as they land instead of in the daily scan; the scan's `index` reads `access/agg` as it stands.
+# It runs in the data bucket's region (us-east1), whose writes (~35 GiB a day of `access/agg`) would otherwise cross
+# regions, and pulls the job image from that region's copy (`east_images`), which `job/build.sh` pushes beside `:latest`.
+east_images = DeploymentImages("gcs", project=project, region="us-east1", adopt=adopt)
+pulumi.export("image_us_east1", east_images.image)
 access_ingest = BatchCron(
     "gcs-access-ingest-hourly",
     project=project,
-    region=region,
+    region="us-east1",
     schedule="20 * * * *",
     submitter=job_dir / "access-submit.sh",
     sa_email=job.email,

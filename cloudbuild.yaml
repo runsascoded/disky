@@ -5,7 +5,9 @@
 #
 # `_GIT_SHA` / `_GIT_DIRTY` (from `job/build.sh`) stamp the image with its source
 # revision (Dockerfile `ARG`s → labels + env); a build without them is refused.
+# `_MIRROR` (optional): another repo's tag the same image is pushed to (`job/build.sh`: the us-east1 copy).
 substitutions:
+  _MIRROR: ""
   _GIT_SHA: ""
   _GIT_DIRTY: ""
 steps:
@@ -29,6 +31,10 @@ steps:
           --build-arg "DISKY_GIT_DIRTY=$_GIT_DIRTY" \
           --cache-from "$_IMAGE" \
           -t "$_IMAGE" .
+        if [ -n "$_MIRROR" ]; then
+          docker tag "$_IMAGE" "$_MIRROR"
+          docker push "$_MIRROR"
+        fi
 images: ["$_IMAGE"]
 options:
   machineType: E2_HIGHCPU_8
