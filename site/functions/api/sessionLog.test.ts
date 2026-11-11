@@ -591,9 +591,9 @@ describe('D1', () => {
           started_ms: NOW - 5000, last_ms: NOW - 1000, n_events: 3, n_errors: 1, n_batches: 2, first_url: '/', received_ts: NOW / 1000, grant_id: grantIds['ann@example.test'],
         },
         events: [
-          { t: NOW - 5000, k: 'start', u: '/', pid: 'pid-111111', seq: 0 },
-          { t: NOW - 3000, k: 'error', msg: 'x', pid: 'pid-222222', seq: 0 },
-          { t: NOW - 1000, k: 'nav', u: '/a', pid: 'pid-111111', seq: 0 },
+          { t: NOW - 5000, k: 'start', u: '/', pid: 'pid-111111', seq: 0, _received_ms: NOW },
+          { t: NOW - 3000, k: 'error', msg: 'x', pid: 'pid-222222', seq: 0, _received_ms: NOW },
+          { t: NOW - 1000, k: 'nav', u: '/a', pid: 'pid-111111', seq: 0, _received_ms: NOW },
         ],
       }])
     })
@@ -670,5 +670,5 @@ it('keeps cancelled API requests in the session while counting only real failure
   const response = await onRequest({ request: new Request(`${HOST}/api/session-log`, { method: 'POST', body: JSON.stringify({ sid: 'sid-cancel', pid: 'pid-cancel', seq: 0, build: 'b', events }) }), env } as never)
   expect(response.status).toBe(204)
   expect(raw.prepare('SELECT n_events, n_errors FROM session_log').all()).toEqual([{ n_events: 3, n_errors: 2 }])
-  expect((await d1SessionLogStore(db).sessionDetail('sid-cancel'))?.events).toEqual(events.map(event => ({ ...event, pid: 'pid-cancel', seq: 0 })))
+  expect((await d1SessionLogStore(db).sessionDetail('sid-cancel'))?.events).toEqual(events.map(event => ({ ...event, pid: 'pid-cancel', seq: 0, _received_ms: NOW })))
 })
