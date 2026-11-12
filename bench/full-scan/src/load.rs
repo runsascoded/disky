@@ -203,7 +203,7 @@ fn read_level(
     inp: &Input,
     rg: usize,
     d: u8,
-    prev: &IdMap<u128, u32>,
+    prev: &(Vec<u128>, u32),
     names: &Interner,
     owners: &Owners,
     ords: &HashMap<i64, u16>,
@@ -244,7 +244,8 @@ fn read_level(
             } else if parent_s == last_parent {
                 last_parent_id
             } else {
-                let id = *prev.get(&h128(parent_s.as_bytes())).ok_or_else(|| format!("{p}: its parent has no row"))?;
+                let ph = h128(parent_s.as_bytes());
+                let id = prev.0.binary_search(&ph).map_err(|_| format!("{p}: its parent has no row"))? as u32 + prev.1;
                 last_parent = parent_s.to_string();
                 last_parent_id = id;
                 id
@@ -290,6 +291,90 @@ fn read_level(
     Ok(out)
 }
 
+/// One chunk of a sorted level: its nodes (in order) and their versions.
+#[derive(Default)]
+struct Walk {
+    parent: Vec<u32>,
+    name: Vec<u32>,
+    n_ver: Vec<u16>,
+    hashes: Vec<u128>,
+    vers: Vec<Ver>,
+    cxs: Vec<(u64, Box<Complex>)>,
+    dir_vf: Vec<u16>,
+    dir_vt: Vec<u16>,
+    dir_size: Vec<u64>,
+    dir_files: Vec<u64>,
+    dir_read: u64,
+    file_read: u64,
+    combined: u64,
+}
+
+fn walk(recs: &mut [Rec], n_scans: u16) -> Result<Walk> {
+    let mut w = Walk::default();
+    let mut i = 0;
+    while i < recs.len() {
+        let h = recs[i].h;
+        w.parent.push(recs[i].parent);
+        w.name.push(recs[i].name);
+        w.hashes.push(h);
+        let mut k = 0u32;
+        let mut j = i;
+        // Directory versions: one structural row (`size`: its first version's index), its versions (combined,
+        // smallest `vt`) aside.
+        if !recs[j].file {
+            let vf = recs[j].vf;
+            let first = w.dir_vf.len();
+            while j < recs.len() && recs[j].h == h && !recs[j].file {
+                w.dir_read += 1;
+                let r = &recs[j];
+                let n = w.dir_vf.len();
+                if n > first && w.dir_vf[n - 1] == r.vf {
+                    w.dir_vt[n - 1] = w.dir_vt[n - 1].min(r.vt);
+                    w.combined += 1;
+                } else {
+                    w.dir_vf.push(r.vf);
+                    w.dir_vt.push(r.vt);
+                    w.dir_size.push(r.size);
+                    w.dir_files.push(r.files);
+                }
+                j += 1;
+            }
+            let nd = w.dir_vf.len() - first;
+            if nd > u16::MAX as usize {
+                return err("a directory with more versions than a u16 holds");
+            }
+            w.vers.push(Ver { size: first as u64, vf, vt: n_scans, owner: nd as u16, flags: 0 });
+            k += 1;
+        }
+        while j < recs.len() && recs[j].h == h {
+            w.file_read += 1;
+            let (vf, mut vt) = (recs[j].vf, recs[j].vt);
+            let mut z = j + 1;
+            while z < recs.len() && recs[z].h == h && recs[z].vf == vf {
+                vt = vt.min(recs[z].vt);
+                w.combined += 1;
+                w.file_read += 1;
+                z += 1;
+            }
+            let r = &mut recs[j];
+            let mut flags = FILE | (r.cls << CLS_SHIFT);
+            if let Some(cx) = r.cx.take() {
+                flags |= COMPLEX;
+                w.cxs.push((w.vers.len() as u64, cx));
+            }
+            w.vers.push(Ver { size: r.size, vf, vt, owner: r.owner, flags });
+            k += 1;
+            j = z;
+        }
+        if k > u16::MAX as u32 {
+            return err("a path with more versions than a u16 holds");
+        }
+        w.n_ver.push(k as u16);
+        i = j;
+    }
+    Ok(w)
+}
+
 fn rss_peak_gb() -> f64 {
     std::fs::read_to_string("/proc/self/status")
         .ok()
@@ -326,7 +411,8 @@ pub fn load(gen: &Generation) -> Result<Index> {
     let (mut dir_vf, mut dir_vt): (Vec<u16>, Vec<u16>) = (Vec::with_capacity(bound), Vec::with_capacity(bound));
     let (mut dir_size, mut dir_files): (Vec<u64>, Vec<u64>) = (Vec::with_capacity(bound), Vec::with_capacity(bound));
     let mut cxs: Vec<(u64, Box<Complex>)> = Vec::new();
-    let mut prev: IdMap<u128, u32> = IdMap::default();
+    // The previous level's paths: sorted hashes, and the first node id.
+    let mut prev: (Vec<u128>, u32) = (Vec::new(), 0);
     let mut d = 1u8;
     loop {
         let todo: Vec<(usize, usize)> = inputs
@@ -345,73 +431,51 @@ pub fn load(gen: &Generation) -> Result<Index> {
         }
         stats.versions_read += recs.len() as u64;
         recs.par_sort_unstable_by(|a, b| (a.h, a.file, a.vf).cmp(&(b.h, b.file, b.vf)));
-        let mut next: IdMap<u128, u32> = IdMap::with_capacity_and_hasher(recs.len(), Default::default());
-        let mut i = 0;
-        while i < recs.len() {
-            let h = recs[i].h;
-            let node = parent.len() as u32;
-            parent.push(recs[i].parent);
-            name.push(recs[i].name);
-            next.insert(h, node);
-            let mut k = 0u32;
-            let mut j = i;
-            // Directory versions: one structural row, its versions (combined, smallest `vt`) aside in `dvers`.
-            if !recs[j].file {
-                let vf = recs[j].vf;
-                let first = dir_vf.len();
-                while j < recs.len() && recs[j].h == h && !recs[j].file {
-                    stats.dir_versions_read += 1;
-                    let r = &recs[j];
-                    let n = dir_vf.len();
-                    if n > first && dir_vf[n - 1] == r.vf {
-                        dir_vt[n - 1] = dir_vt[n - 1].min(r.vt);
-                        stats.combined += 1;
-                    } else {
-                        dir_vf.push(r.vf);
-                        dir_vt.push(r.vt);
-                        dir_size.push(r.size);
-                        dir_files.push(r.files);
-                    }
-                    j += 1;
-                }
-                let nd = dir_vf.len() - first;
-                if nd > u16::MAX as usize {
-                    return err("a directory with more versions than a u16 holds");
-                }
-                vers.push(Ver { size: first as u64, vf, vt: n_scans, owner: nd as u16, flags: 0 });
-                k += 1;
+        // Walk the sorted level in chunks (cut where the path changes), each into its own nodes and versions, then
+        // append them in order: node ids stay in hash order, so the level's map is its sorted hashes.
+        let n = recs.len();
+        let step = (n / (rayon::current_num_threads() * 4)).max(1 << 16);
+        let mut cuts = vec![0usize];
+        let mut c = step;
+        while c < n {
+            while c < n && recs[c].h == recs[c - 1].h {
+                c += 1;
             }
-            while j < recs.len() && recs[j].h == h {
-                stats.file_versions_read += 1;
-                let r = &mut recs[j];
-                let mut vt = r.vt;
-                let vf = r.vf;
-                let mut z = j + 1;
-                while z < recs.len() && recs[z].h == h && recs[z].vf == vf {
-                    vt = vt.min(recs[z].vt);
-                    stats.combined += 1;
-                    stats.file_versions_read += 1;
-                    z += 1;
-                }
-                let r = &mut recs[j];
-                let mut flags = FILE | (r.cls << CLS_SHIFT);
-                if let Some(cx) = r.cx.take() {
-                    flags |= COMPLEX;
-                    cxs.push((vers.len() as u64, cx));
-                }
-                vers.push(Ver { size: r.size, vf, vt, owner: r.owner, flags });
-                k += 1;
-                j = z;
+            if c < n {
+                cuts.push(c);
             }
-            if k > u16::MAX as u32 {
-                return err("a path with more versions than a u16 holds");
-            }
-            n_ver.push(k as u16);
-            i = j;
+            c += step;
         }
+        cuts.push(n);
+        let mut slices: Vec<&mut [Rec]> = Vec::with_capacity(cuts.len());
+        let mut rest: &mut [Rec] = &mut recs[..];
+        for w in cuts.windows(2) {
+            let (head, tail) = rest.split_at_mut(w[1] - w[0]);
+            slices.push(head);
+            rest = tail;
+        }
+        let walked: Vec<Walk> = slices.into_par_iter().map(|sl| walk(sl, n_scans)).collect::<Result<_>>()?;
         drop(recs);
+        let mut hashes: Vec<u128> = Vec::with_capacity(walked.iter().map(|w| w.hashes.len()).sum());
+        for w in walked {
+            let (v0, d0) = (vers.len() as u64, dir_vf.len() as u64);
+            stats.dir_versions_read += w.dir_read;
+            stats.file_versions_read += w.file_read;
+            stats.combined += w.combined;
+            parent.extend_from_slice(&w.parent);
+            name.extend_from_slice(&w.name);
+            n_ver.extend_from_slice(&w.n_ver);
+            hashes.extend_from_slice(&w.hashes);
+            vers.extend(w.vers.iter().map(|v| if v.flags & FILE == 0 { Ver { size: v.size + d0, ..*v } } else { *v }));
+            cxs.extend(w.cxs.into_iter().map(|(i, c)| (i + v0, c)));
+            dir_vf.extend_from_slice(&w.dir_vf);
+            dir_vt.extend_from_slice(&w.dir_vt);
+            dir_size.extend_from_slice(&w.dir_size);
+            dir_files.extend_from_slice(&w.dir_files);
+        }
+        let base = level_start[level_start.len() - 1] as u32;
         level_start.push(parent.len());
-        prev = next;
+        prev = (hashes, base);
         stats.max_depth = d;
         if d == u8::MAX {
             break;
