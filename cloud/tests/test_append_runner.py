@@ -91,7 +91,7 @@ def test_r2_copy_copies_a_throttled_object_again_after_a_backoff(monkeypatch):
 
     monkeypatch.setattr(pub, "copy_one", copy)
     sleeps: list[float] = []
-    monkeypatch.setattr(pub.time, "sleep", sleeps.append)
+    monkeypatch.setattr(ar.time, "sleep", sleeps.append)
     logs: list[str] = []
     doc = ar.r2_copy("data", list(r2.gcs.values()), workers=1, log=logs.append)
     assert (r2.r2, sleeps, doc["copied"]) == (["a/b", "a/c"], [pub.R2_RETRY_S, 2 * pub.R2_RETRY_S], 2)
@@ -109,7 +109,7 @@ def test_r2_copy_raises_past_its_attempts_or_on_any_other_error(monkeypatch, msg
         raise RuntimeError(msg)
 
     monkeypatch.setattr(pub, "copy_one", copy)
-    monkeypatch.setattr(pub.time, "sleep", lambda s: None)
+    monkeypatch.setattr(ar.time, "sleep", lambda s: None)
     with pytest.raises(RuntimeError) as e:
         ar.r2_copy("data", list(r2.gcs.values()), workers=1, log=lambda m: None)
     assert (str(e.value), len(tries)) == (msg, attempts)
@@ -122,7 +122,7 @@ def test_batch_runner_polls_at_most_every_30s(monkeypatch):
     states = iter(["QUEUED", "RUNNING", "RUNNING", "RUNNING", "RUNNING", "SUCCEEDED"])
     monkeypatch.setattr(batch, "submit_job", lambda spec, name, region: None)
     monkeypatch.setattr(gcp, "batch_job", lambda name, project, region: {"status": {"state": next(states)}})
-    monkeypatch.setattr(pub.time, "sleep", sleeps.append)
+    monkeypatch.setattr(ar.time, "sleep", sleeps.append)
     ar.BatchRunner(ar.Profile(region="r", project="p"), lambda m: None)("j", {})
     assert sleeps == [10, 20, 30, 30, 30]
 
