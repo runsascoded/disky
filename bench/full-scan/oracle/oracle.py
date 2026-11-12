@@ -114,10 +114,10 @@ def answer(con, q: dict, scans: dict[str, int]) -> dict:
         ors = " OR ".join(f"path = {lit(s)} OR starts_with(path, {lit(s + '/')})" for s in q["staged"]) or "false"
         where.append(f"({ors})")
     owners, classes = q.get("owners"), q.get("classes")
+    lower = ", string_split(lower(path), '/') AS segs, lower(path) AS lp" if q.get("q") else ""
     ctes = [f"""live AS (
-        SELECT row_number() OVER () AS key, path, depth, size, c2, c3, c4, us,
-            (vf <= {ta} AND {ta} < vt) AS la, (vf <= {tb} AND {tb} < vt) AS lb,
-            string_split(lower(path), '/') AS segs, lower(path) AS lp
+        SELECT rowid AS key, path, depth, size, c2, c3, c4, us,
+            (vf <= {ta} AND {ta} < vt) AS la, (vf <= {tb} AND {tb} < vt) AS lb{lower}
         FROM f WHERE {' AND '.join(where)})"""]
     if owners:
         ctes.append(owner_cte(owners))
