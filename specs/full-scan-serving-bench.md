@@ -1,6 +1,6 @@
 # Full-scan serving: benchmark design A at fleet scale
 
-Status: spec, 2026-11-12. Ryan's go ("go", after the index-rethink discussion). Prototype on a side branch (`w/full-scan-bench`), measured on node `mgu`, never on the laptop. Nothing here touches a deployment.
+Status: prototype built and measured, 2026-11-12 (§ Results). Ryan's go ("go", after the index-rethink discussion). Prototype on a side branch (`w/full-scan-bench`), measured on the GCP VM `disky-full-scan-bench` (n2-highmem-16, us-east1-c, beside gcs's store), never on the laptop. Nothing here touches a deployment.
 
 ## Why
 
@@ -31,7 +31,9 @@ The answer decides where design A sits on the storage-vs-query-compute curve, be
 
 ## Corpus
 
-**gcs's interval store** (R2 `oa-gcs-usage-index`, `CURRENT.json`'s generation, base + runs), the v2 scans only (2026-09-30 on). Before 09-30, scans are dirs-only.
+**gcs's interval store** (`CURRENT.json`'s generation, base + runs), the v2 scans only (2026-09-30 on). Before 09-30, scans are dirs-only.
+
+Measured: generation `2026-10-09b.g3.c001` on GCS (`gs://oa-gcs-usage-dvx/interval-store/`, read in region from the bench VM, no egress), base of 132 scans + the newest manifest's two runs (`2026-11-12T0702.json`), 135 scans 2026-07-30 → 11-12T0702. Its `path` sort: 1,341,950,870 rows (25.2 GB) + 12.3M rows in the runs. `bench/full-scan/fetch-gen` copies only what the loader reads (24 GB in 30 s at ~790 MiB/s).
 
 At 10-09 it held:
 - 1,156,324,516 folded versions over 71 scans;
@@ -40,7 +42,7 @@ At 10-09 it held:
 
 Owner slices come from its `slices` sort.
 
-Reading it needs an R2 read credential for that bucket; see open question #18. Until then, develop against the r2 demo's store (`disk-tree-demo`), which is small and is ours on `cloud`.
+Read from GCS on a GCP VM in the bucket's region (Ryan, 2026-11-12), which settles open question #18 for this bench. Development ran on the repo's interval-store fixtures and on synthetic stores cut by the repo's own code (§ Results).
 
 ## The scanner (`bench/full-scan/`, Rust)
 
@@ -73,13 +75,40 @@ Semantics:
 
 **Parallelism:** split `D`'s row range into chunks across threads. Each chunk starts from its first row's ancestor chain, so the match stack is known without a scan from the root. The name match runs over the dictionary in parallel first, giving a bitset per term.
 
+### As built (`bench/full-scan/src/`)
+
+**Load** (`load.rs`). The served `path` sort is ordered `(depth, path, vf)`, so a subtree is a range per depth, not one range; the loader re-sorts into pre-order:
+1. **One depth at a time.** Level `d`'s rows come from the row groups whose `depth` statistics hold `d` (base and every listed run), decoded in parallel. Each row's parent is its path's prefix, looked up by 128-bit hash in level `d − 1`'s map; only two levels' maps are held, never the path strings. Names are interned into one dictionary.
+2. **`combineLive`.** A level's rows are sorted by `(path hash, kind, vf)`; rows of one version (base + a run's close record) become one, with the smallest `vt`. Object versions become rows. A directory's versions (rolled-up totals) are kept aside in `dir_*` columns, and the directory gets one structural row.
+3. **Pre-order.** Each level's nodes are ordered by `(parent's position, name + "/")` in byte order: segment by segment, so `a/b` and its subtree come before `a/b-c`. Subtree row counts are summed bottom-up, positions assigned top-down, every version scattered to its row; `end` is position + subtree − 1.
+4. **Checkpoints.** Every 4,096 rows, the row's ancestor chain (from parent links, before they're dropped), for the threads' chunk seeds and for paths.
+
+Columns: `name` u32, `depth` u8, `end` u32, `flags` u8 (object, another version of the previous row's path, class 1–4, complex), `size` u64, `vf`/`vt` u16 scan ordinals, `owner` u16, plus the directory versions (`dir_vf`, `dir_vt` u16, `dir_size`, `dir_files` u64) and a side table for the few objects whose owner or class bytes aren't one whole slice. The dictionary is one lowercase buffer (`\n` + each name + `\n`) with u64 offsets, plus the original spelling of names whose lowercase differs.
+
+Owners come from the `path` sort's `us` (the folded owner slices, `interval-store.md` §2.2: `''`, a name, or JSON `[["usr", bytes], …]`), not from joining the `slices` sort at load: for an object they carry the same slices, and `oracle/slices_check.py` checks the two agree per (bucket, owner) at a scan. gcs names its class columns `nearline_bytes` / `coldline_bytes` / `archive_bytes` (classes 2–4); the loader and the oracle take either spelling.
+
+**Query** (`query.rs`, `scan.rs`), as specified, with these exact rules (the oracle's too):
+- Bytes are object versions' (`kind = 'file'`) live at the scan; directory rows only give structure.
+- A name term is a lowercase substring of a segment; `^q`, `q$`, `^q$` anchor it to the segment (`\nq`, `q\n`, `\nq\n` in the buffer). A path term `a/b` holds when the lowercase path does (a small automaton per depth: ends-with, equals…, starts-with). A regex is searched in each lowercase segment. Up to 16 atoms; the expression is a lookup table over their bits.
+- An object's owner slices are its `us` (`''` → no owner; a name → all bytes; JSON → each entry plus the unnamed rest when positive); a class's slice is `c2..c4` where positive, class 1 the rest. A file counts when it holds a selected slice; its bytes are the selected slices'. Owners and classes together gate each other per file (a file with several of both is an error; gcs has none).
+- Node `x` is kept when nonempty and `max(bytes_a, bytes_b) · 10⁶ ≥ min_ppm · max(total_a, total_b)`; every kept node above the deepest level, and the folder, reports its rest (signed: directory totals that don't add up can leave a negative one).
+
+**The pass:** threads take chunks of the folder's rows (8 per thread, ≥ 64K rows). A chunk seeds its stack from the checkpoint before it, replayed to its first row: the search masks of every ancestor, and its open nodes in the depth window (those are partials). A new path at depth `d` pops the open nodes at depth ≥ `d` (each rolled into its parent, and emitted) and pushes itself if within the window; a live, passing object version adds to the deepest open node. A node wholly inside a chunk is emitted complete, and dropped there if it is under the threshold's lower bound: `min_ppm` × the bytes all chunks have summed so far, which only grows. Partials are summed across chunks. The loop is monomorphized over (search, diff, filters).
+
+**Two ways for an unfiltered view** (`q`, `U`, `C`, `L` all empty): the pass above, summing object versions; or `dirs: true`, reading each node's own row (a directory's rolled-up totals at the scan, an object's bytes) in a walk of the depth window only, which never reads below the deepest level. The bench runs every unfiltered view and diff both ways (`@dirs`); the oracle checks each against its own SQL.
+
 ## Oracle
 
-DuckDB over the same store's rows, on mgu, for every bench query: per-node sums by the same semantics, written as plain SQL with no shared code. Each answer must equal the oracle's exactly: same nodes, bytes and counts. A disagreement fails the run.
+DuckDB over the same store's rows, on the bench node, for every bench query: per-node sums by the same semantics, written as plain SQL with no shared code. Each answer must equal the oracle's exactly: same nodes, bytes and counts. A disagreement fails the run.
+
+Built: `bench/full-scan/oracle/oracle.py` (exit 1 on any difference). It combines the base's and the runs' rows itself (runs grouped by `(depth, path, vf)` to the smallest `vt`, then joined to the base), and answers a query by SQL over the object versions: each search atom over `string_split(lower(path), '/')` (a path term over `lower(path)`), owner slices parsed from `us` by `from_json`, class slices from the class columns, a node per ancestor prefix (`string_split(path, '/')[1:d]`), the threshold in `HAVING`, remainders in Python. The directory-total view (below) has its own SQL over every version's own row. `oracle/slices_check.py` checks the `us` the scanner reads against the `slices` sort.
 
 ## Bench
 
-Run on `mgu` (m6g.4xlarge: 16 vCPU, 64 GB). If the packed size leaves no room, ask before resizing.
+Run on the GCP VM `disky-full-scan-bench` (n2-highmem-16: 16 vCPU = 8 cores × 2 threads, x86, 125 GB; us-east1-c, spot), which reads gcs's store in region. `mgu` was planned but its AWS SSO session had expired, so development moved to the VM too.
+- Develop and tune on the VM.
+- Run the final recorded gcs bench as a Batch job via `dt-cloud batch submit -c full-scan-bench` (`bench/full-scan/batch/submit`: cost labels from `$DISKY_LABELS`, the region checked against the buckets, spot with retries, Batch's cleanup, repeatable; `batch/task.sh` is the task). It reruns the VM run's query file and requires every answer to equal the VM run's oracle-checked ones.
+- Each job's load time (copy, re-sort, pack) is reported as the restart cost a serving box would pay (`phases.jsonl`: `setup`, `copy`, `bench`, whose first line holds the load's own phases).
 
 For each query:
 - **Cold:** first touch after load. Page cache is irrelevant since everything is in RAM, but report it.

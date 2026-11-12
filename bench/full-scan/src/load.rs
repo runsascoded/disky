@@ -322,7 +322,9 @@ pub fn load(gen: &Generation) -> Result<Index> {
     let mut n_ver: Vec<u16> = Vec::with_capacity(bound);
     let mut level_start: Vec<usize> = vec![0, 0];
     let mut vers: Vec<Ver> = Vec::with_capacity(bound);
-    let mut dvers: Vec<(u16, u16, u64, u64)> = Vec::with_capacity(bound);
+    // Directory versions, as the index keeps them (no copy at the end).
+    let (mut dir_vf, mut dir_vt): (Vec<u16>, Vec<u16>) = (Vec::with_capacity(bound), Vec::with_capacity(bound));
+    let (mut dir_size, mut dir_files): (Vec<u64>, Vec<u64>) = (Vec::with_capacity(bound), Vec::with_capacity(bound));
     let mut cxs: Vec<(u64, Box<Complex>)> = Vec::new();
     let mut prev: IdMap<u128, u32> = IdMap::default();
     let mut d = 1u8;
@@ -356,20 +358,23 @@ pub fn load(gen: &Generation) -> Result<Index> {
             // Directory versions: one structural row, its versions (combined, smallest `vt`) aside in `dvers`.
             if !recs[j].file {
                 let vf = recs[j].vf;
-                let first = dvers.len();
+                let first = dir_vf.len();
                 while j < recs.len() && recs[j].h == h && !recs[j].file {
                     stats.dir_versions_read += 1;
                     let r = &recs[j];
-                    let n = dvers.len();
-                    if n > first && dvers[n - 1].0 == r.vf {
-                        dvers[n - 1].1 = dvers[n - 1].1.min(r.vt);
+                    let n = dir_vf.len();
+                    if n > first && dir_vf[n - 1] == r.vf {
+                        dir_vt[n - 1] = dir_vt[n - 1].min(r.vt);
                         stats.combined += 1;
                     } else {
-                        dvers.push((r.vf, r.vt, r.size, r.files));
+                        dir_vf.push(r.vf);
+                        dir_vt.push(r.vt);
+                        dir_size.push(r.size);
+                        dir_files.push(r.files);
                     }
                     j += 1;
                 }
-                let nd = dvers.len() - first;
+                let nd = dir_vf.len() - first;
                 if nd > u16::MAX as usize {
                     return err("a directory with more versions than a u16 holds");
                 }
@@ -459,11 +464,15 @@ pub fn load(gen: &Generation) -> Result<Index> {
         return err("more versions than a u32 row id holds");
     }
     // Rows ≤ versions read < 2^32, so a subtree's row count fits a u32.
-    let mut subtree: Vec<u32> = n_ver.iter().map(|&k| k as u32).collect();
-    for lv in (2..=levels).rev() {
-        for x in level_start[lv]..level_start[lv + 1] {
-            let p = parent[x] as usize;
-            subtree[p] += subtree[x];
+    let subtree: Vec<u32> = n_ver.par_iter().map(|&k| k as u32).collect();
+    {
+        // Bottom-up, a level at a time: each node adds into its parent (one level up, so reads and writes never meet).
+        let sub: &[AtomicU32] = unsafe { std::slice::from_raw_parts(subtree.as_ptr() as *const AtomicU32, subtree.len()) };
+        for lv in (2..=levels).rev() {
+            (level_start[lv]..level_start[lv + 1]).into_par_iter().for_each(|x| {
+                let v = sub[x].load(Ordering::Relaxed);
+                sub[parent[x] as usize].fetch_add(v, Ordering::Relaxed);
+            });
         }
     }
     let total: u64 = (level_start[1]..level_start[2]).map(|x| subtree[x] as u64).sum();
@@ -472,23 +481,47 @@ pub fn load(gen: &Generation) -> Result<Index> {
     }
     let mut pos = vec![0u32; nodes];
     for lv in 1..=levels {
-        let mut ids: Vec<u32> = (level_start[lv] as u32..level_start[lv + 1] as u32).collect();
-        let key = |x: u32| {
-            let p = parent[x as usize];
-            ((if p == NO_PARENT { 0 } else { pos[p as usize] as u64 + 1 }), slash_rank[name[x as usize] as usize])
-        };
-        ids.par_sort_unstable_by_key(|&x| key(x));
-        let mut cur = NO_PARENT - 1;
-        let mut off = 0u64;
-        for x in ids {
-            let p = parent[x as usize];
-            if p != cur {
-                cur = p;
-                off = if p == NO_PARENT { 0 } else { pos[p as usize] as u64 + n_ver[p as usize] as u64 };
+        // Sort the level by (parent's position + 1, name's rank in `name + "/"` order); the root's children have 0.
+        let mut keyed: Vec<(u64, u32)> = (level_start[lv] as u32..level_start[lv + 1] as u32)
+            .into_par_iter()
+            .map(|x| {
+                let p = parent[x as usize];
+                let hi = if p == NO_PARENT { 0 } else { pos[p as usize] as u64 + 1 };
+                ((hi << 32) | slash_rank[name[x as usize] as usize] as u64, x)
+            })
+            .collect();
+        keyed.par_sort_unstable();
+        // Positions: each parent's children follow its own rows, in order. Chunks start at a parent's first child, so
+        // each chunk's running offsets are its own.
+        let n = keyed.len();
+        let mut cuts = vec![0usize];
+        let step = (n / (rayon::current_num_threads() * 4)).max(1 << 16);
+        let mut c = step;
+        while c < n {
+            while c < n && keyed[c].0 >> 32 == keyed[c - 1].0 >> 32 {
+                c += 1;
             }
-            pos[x as usize] = off as u32;
-            off += subtree[x as usize] as u64;
+            if c < n {
+                cuts.push(c);
+            }
+            c += step;
         }
+        cuts.push(n);
+        let pw = Shared(pos.as_mut_ptr());
+        let pos_r: &[u32] = unsafe { std::slice::from_raw_parts(pos.as_ptr(), nodes) };
+        cuts.par_windows(2).for_each(|w| {
+            let (mut cur, mut off) = (u64::MAX, 0u64);
+            for &(k, x) in &keyed[w[0]..w[1]] {
+                let hi = k >> 32;
+                if hi != cur {
+                    cur = hi;
+                    off = if hi == 0 { 0 } else { pos_r[parent[x as usize] as usize] as u64 + n_ver[parent[x as usize] as usize] as u64 };
+                }
+                // Safety: each node is written once, by the chunk holding it; reads are of the level above.
+                unsafe { pw.write(x as usize, off as u32) };
+                off += subtree[x as usize] as u64;
+            }
+        });
     }
     drop(slash_rank);
     lap("order", &mut t, &mut stats);
@@ -614,12 +647,11 @@ pub fn load(gen: &Generation) -> Result<Index> {
     stats.complex_rows = complex_rows.len() as u64;
     stats.secs.push(("total".to_string(), t0.elapsed().as_secs_f64()));
     stats.peak_rss_gb = rss_peak_gb();
-    stats.dir_versions = dvers.len() as u64;
-    let dir_vf = dvers.iter().map(|d| d.0).collect();
-    let dir_vt = dvers.iter().map(|d| d.1).collect();
-    let dir_size = dvers.iter().map(|d| d.2).collect();
-    let dir_files = dvers.iter().map(|d| d.3).collect();
-    drop(dvers);
+    stats.dir_versions = dir_vf.len() as u64;
+    dir_vf.shrink_to_fit();
+    dir_vt.shrink_to_fit();
+    dir_size.shrink_to_fit();
+    dir_files.shrink_to_fit();
     Ok(Index {
         dir_vf,
         dir_vt,
