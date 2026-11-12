@@ -2,6 +2,29 @@
 
 Running record of disk-cleanup passes on this Mac. Newest first. Each entry: what was scanned (free space before/after), what was deleted, and the **measured** bytes freed (`reclaim`/`overcount`, not apparent size).
 
+## Ingest recovery (2026-11-11 → 11-12): failing Batch ingests, catch-up run
+
+- **Free space:** 32 G free on 11/11 (13 G on 11/07). Nothing deleted this pass.
+- **Why every ingest failed since ~10/18:**
+  - the meta/host scan heads refused unlabelled runs, so the profiles now set `DISKY_LABELS`;
+  - `static-names add` OOMed on the ~50-scan backlog, and the one end-of-run upload lost each attempt;
+  - `age-store` OOMed reading one scan's 8 pyramids.
+  - Fixed in 361c1ac45 (profiles, `static-names.mem: 9GB`, `age-store.mem: 6GB`, `aws/submit -t`) and rebuilt the image (32d10e93b).
+- **Run records:** stopped old-image job `3ee2172c`. `dt-cloud scan-run reconcile -b aws` closed 10 stale `running` rows in D1. Causes included a Spot interruption and `CannotPullContainerError` on the old digest.
+- **Catch-up job `889a6b5c`** (`aws/submit -t 28800`, capture `2026-11-11T23-12-22Z`): succeeded in 6.8 h.
+  - The path index, interval store and meta run are current through `2026-11-11T2312`.
+  - `history/m3-age` was built: 69 scans, all verified, 1.22 GB, `CURRENT`.
+  - `static-names` failed again. It appended 33 scans in 3.8 h, then OOMed on `2026-11-02T2311` (`run_rollups`, 8.3 GiB cap, `-p 8`: Fargate's `cpu.max` is `max`, so `nproc` = the host's 8 CPUs). The end-only upload lost everything again, and the store is still at `2026-10-18T1014`.
+- **Next:** `INGEST_PIPELINE=static-catchup` (db99486a2, needs an image rebuild) drains it in uploaded `add -t` chunks on a 4 vCPU / 30 GiB task. The shared fixes (upload per scan, threads on Fargate) are with root in `~/c/disky/specs/static-add-incremental-upload.md`.
+- **`/api/age-pyramid` timings** on scan `2026-11-11T2312`, `bin_budget=64`, two requests each:
+
+  | path | dev | prod |
+  |---|---|---|
+  | root | 6.4 / 3.9 s | 8.8 / 8.2 s |
+  | `Users/ryan` | 4.5 / 3.3 s | 8.8 / 8.2 s |
+  | `Users/ryan/c` | 2.0 / 1.6 s | 4.7 / 4.2 s |
+  | `Users/ryan/Library` | 2.6 / 2.5 s | 5.8 / 6.8 s |
+
 ## Pass (2026-11-09 evening): verified NAS email move and safe JCT cache GC
 
 - Ryan approved moving on the offload candidates, specifically the 380NWK email archive to NAS, and asked whether DVX can safely purge non-live JCT/CTBK blobs.
