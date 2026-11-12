@@ -24,7 +24,6 @@ A `full` preview is what the deployment's `dev.<host>` already is, for one PR: s
   "targets": {
     "main": {
       "provider": "pages",
-      "account_id": "<CF account ID>",
       "project": "your-existing-pages-project",
       "subdomain": "your-existing-pages-project.pages.dev",
       "working_directory": "../site",
@@ -37,6 +36,7 @@ A `full` preview is what the deployment's `dev.<host>` already is, for one PR: s
 
 Place this in the trusted repository as `.github/cf-preview.json`. Paths are relative to that file. The target key is the permitted PR base branch. Disky can use `gcs`, `cw`, `hf`, `r2`; a shared source PR must explicitly select a preview target rather than inherit an unrelated production config.
 
+- `account_id` (optional): the Cloudflare account. A public repository leaves it out and passes the `account-id` input instead (`${{ vars.CLOUDFLARE_ACCOUNT_ID }}` from the publish/retire environment); exactly one of the two must give it, 32 hex, or publish and retire refuse. Gate needs neither.
 - `project`: the deployment's **own** Pages project (the one `dev` and production deploy to).
 - `subdomain` (optional, default `<project>.pages.dev`): the project's `pages.dev` subdomain, which Cloudflare suffixes when the name was taken. Publish and retire refuse a project whose actual `subdomain` differs.
 - `protected_branches` (optional): branches beside `dev` and the production branch that a preview must never deploy to or delete from. `dev` is always protected.

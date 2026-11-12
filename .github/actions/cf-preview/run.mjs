@@ -107,7 +107,8 @@ export async function main() {
     : input('mode') ? { mode: input('mode'), source: 'gate' }
       : selectMode({ requested: request.mode, labels: pr.labels.map(label => label.name) })
   requireImplemented(selection.mode)
-  const plan = modePlan(config, target, request.number, sha, selection.mode)
+  const plan = modePlan(config, target, request.number, sha, selection.mode,
+    { account: input('account_id'), requireAccount: operation !== 'gate' })
   requireThat(!request.requestedSha || request.requestedSha === sha, 'Comment approval and requested SHA differ')
   const authorized = await authorize({ github, repository: plan.repository, target, number: request.number, sha,
     actor: request.actor, manual: request.manual, closed: operation === 'retire' })

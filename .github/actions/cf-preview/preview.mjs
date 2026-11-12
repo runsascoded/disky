@@ -11,20 +11,31 @@ export function requireThat(condition, message) {
   if (!condition) throw new Error(message)
 }
 
+/** The Cloudflare account: the target's `account_id` or the action's `account-id` input (a public repository keeps it
+ *  out of tracked config, `vars.CLOUDFLARE_ACCOUNT_ID`), exactly one of them, 32 hex. Gate needs none (null). */
+export function accountFor(selected, given, required = true) {
+  const sources = [selected.account_id, given].filter(value => value !== undefined && value !== null && value !== '')
+  if (!required && sources.length === 0) return null
+  requireThat(sources.length === 1, 'Account ID must come from exactly one of the target config and the account-id input')
+  requireThat(/^[a-f0-9]{32}$/.test(sources[0]), 'Invalid account ID')
+  return sources[0]
+}
+
 /** No credentials or source-controlled commands belong in this plan. Config is read from the trusted base checkout.
  *  Pages: the reserved branch `pr-N` of the deployment's own project, served at `pr-N.<project subdomain>`.
- *  Workers (no mode reaches it yet): a native Preview `prN` under the parent's custom domain. */
-export function previewPlan(config, target, number, sha) {
+ *  Workers (no mode reaches it yet): a native Preview `prN` under the parent's custom domain.
+ *  `account`: the `account-id` input; `requireAccount` false (gate) lets both sources be absent. */
+export function previewPlan(config, target, number, sha, { account: given = '', requireAccount = true } = {}) {
   requireThat(Number.isSafeInteger(number) && number > 0, 'Invalid PR number')
   requireThat(/^[0-9a-f]{40}$/.test(sha), 'Expected full head SHA')
   requireThat(/^[\w.-]+\/[\w.-]+$/.test(config.repository), 'Invalid repository')
   const selected = config.targets[target]
   requireThat(selected && ['pages', 'workers'].includes(selected.provider), 'Unknown preview target/provider')
-  requireThat(/^[a-f0-9]{32}$/.test(selected.account_id), 'Invalid account ID')
+  const account = accountFor(selected, given, requireAccount)
   requireThat(/^[a-z0-9][a-z0-9-]{0,45}$/.test(selected.project), 'Invalid project namespace')
   const base = {
     protocol: PROTOCOL, repository: config.repository, target, pr: number, sha,
-    provider: selected.provider, account: selected.account_id, project: selected.project,
+    provider: selected.provider, account, project: selected.project,
     owner: `${PROTOCOL}:${config.repository}#${number}:${selected.project}`,
   }
   if (selected.provider === 'pages') {
@@ -246,11 +257,11 @@ export function requireImplemented(mode) {
 }
 
 /** One mode's plan for one target, checked at gate: an implemented mode, a Pages target, an explicit revision probe. */
-export function modePlan(config, target, number, sha, mode) {
+export function modePlan(config, target, number, sha, mode, account = {}) {
   requireImplemented(mode)
   const selected = config.targets[target]
   requireThat(selected, 'Unknown preview target/provider')
   requireThat(selected.provider === 'pages', 'full mode is implemented for Pages targets only')
   revisionProbe(selected.verification)
-  return { ...previewPlan(config, target, number, sha), mode }
+  return { ...previewPlan(config, target, number, sha, account), mode }
 }
