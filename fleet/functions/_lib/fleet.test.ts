@@ -31,6 +31,9 @@ const ANSWERS = {
     runs: [
       runWire('m1', '2026-11-07', 'compact', 'succeeded', NOW - H, 600, 0.02, null, []),
       runWire('n1', '2026-11-07', 'scan', 'nop', NOW - 2 * H, 0, 0, null, []),
+      runWire('i1', '2026-11-07', 'access-ingest', 'succeeded', NOW - 3 * H, 30, 0, null, []),
+      runWire('p1', '2026-11-07', 'reproc', 'succeeded', NOW - 4 * H, 900, 0.03, null, []),
+      runWire('q1', '2026-11-07', 'phase-recovery', 'succeeded', NOW - 5 * H, 120, 0.01, null, []),
       runWire('r1', '2026-11-07', 'scan', 'succeeded', NOW - 7 * H, 7668, 0.5, null, [
         { phase: 'dups', outcome: 'failed', recovery: null, passing: null },
         { phase: 'probe', outcome: 'failed', recovery: { run_id: 'r0' }, passing: null },
