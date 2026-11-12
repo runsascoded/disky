@@ -98,16 +98,19 @@ pub fn plan(idx: &Index, pool: &rayon::ThreadPool) -> Result<(Vec<Query>, serde_
     owners.sort_by(|a, b| b.cmp(a));
     let cls_pick: Vec<u8> = (1..4u8).filter(|&k| cls[k as usize] > 0).map(|k| k + 1).collect();
 
-    // Rare terms: names of 8+ characters held by 20–1,000 live files, whose substring search stays ≤ 1,000 files.
-    let mut cands: Vec<(u128, u32)> = name_files
-        .iter()
-        .filter(|(&id, &c)| (20..=1000).contains(&c) && idx.dict.lower(id).len() >= 8)
-        .map(|(&id, _)| (h128(idx.dict.lower(id)), id))
+    // Rare terms: names of 8+ characters (files' or folders'), sampled by hash, whose search matches 1–1,000 live files.
+    let _ = &name_files;
+    let mut cands: Vec<(u128, u32)> = (0..idx.dict.len() as u32)
+        .filter(|&id| idx.dict.lower(id).len() >= 8)
+        .map(|id| (h128(idx.dict.lower(id)), id))
         .collect();
     cands.sort_unstable();
-    let mut rare = Vec::new();
-    for (_, id) in cands.iter().take(40) {
+    let mut rare: Vec<String> = Vec::new();
+    for (_, id) in cands.iter().take(200) {
         let term = String::from_utf8_lossy(idx.dict.lower(*id)).into_owned();
+        if rare.contains(&term) {
+            continue;
+        }
         let mut probe = q("probe", &[]);
         probe.scan = Some(newest.id.clone());
         probe.depth = 1;
