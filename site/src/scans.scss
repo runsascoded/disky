@@ -167,6 +167,14 @@
 .sr-issues { > div { margin-top: 6px; padding-left: 8px; border-left: 2px solid var(--ink-3);
     &.incomplete { border-color: var(--danger); } &.recovered { border-color: var(--grew); } } }
 .scans-page {
+  // the title, and "Run a scan" (admins) at its right
+  .sr-head { align-items: center; justify-content: space-between; }
+  .sr-run-scan {
+    font: inherit; font-size: 13px; color: var(--ink); background: var(--surface); border: 1px solid var(--line); border-radius: 6px;
+    padding: 4px 12px; cursor: pointer;
+    &:hover:not(:disabled) { border-color: var(--ink-3); }
+    &:disabled { opacity: 0.5; cursor: default; }
+  }
   .sr-kind { font-size: 12px; color: var(--ink-3); }
   .sr-live { display: block; font-size: 12px; color: var(--ink-2); white-space: nowrap; .sr-quiet { color: var(--danger); }
     &.inline { display: inline; font-size: inherit; } }
@@ -181,3 +189,5 @@
     table.runs { font-size: 13px; }
   }
 }
+// "Run a scan"'s confirm (`RunScan.tsx`; a portal-less fixed modal, outside `.scans-page`'s rules for buttons)
+.run-scan-modal .token-actions .run-scan-go { border-color: var(--s1); font-weight: 600; }

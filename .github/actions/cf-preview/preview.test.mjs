@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSyn
 import { resolve } from 'node:path'
 import { apiClient, eventRequest, revisionProbe, verifyRevision } from './run.mjs'
 import {
-  authorize, cfList, fullCwdCheck, modePlan, ownedPagesDeployments, previewPlan, publishFull, publishWorker, requireImplemented,
+  accountFor, authorize, cfList, fullCwdCheck, modePlan, ownedPagesDeployments, previewPlan, publishFull, publishWorker, requireImplemented,
   retireFull, retireWorker, selectMode, validateArtifact, workerConfig, wranglerUpload,
 } from './preview.mjs'
 
@@ -49,6 +49,22 @@ test('a full plan is the pr-N branch of the deployment’s own Pages project, at
   throws(() => previewPlan(config, 'prod', 12, sha), { message: 'Unknown preview target/provider' })
   throws(() => previewPlan({ ...config, targets: { main: { ...pagesTarget, subdomain: 'site.example.org' } } }, 'main', 12, sha), { message: 'Invalid Pages subdomain' })
   throws(() => previewPlan({ ...config, targets: { main: { ...pagesTarget, protected_branches: ['pr-12'] } } }, 'main', 12, sha), { message: 'Preview branch pr-12 is protected' })
+})
+
+test('the account comes from exactly one of the target config and the account-id input; gate may have neither', () => {
+  const bare = { provider: 'pages', project: 'site', verification }
+  const inputOnly = { repository: 'org/repo', targets: { main: bare } }
+  equal(modePlan(inputOnly, 'main', 12, sha, 'full', { account }), plan)
+  equal(modePlan(inputOnly, 'main', 12, sha, 'full', { account: '', requireAccount: false }), { ...plan, account: null })
+  equal(accountFor(pagesTarget, ''), account)
+  equal(accountFor(bare, account), account)
+  equal(accountFor(bare, '', false), null)
+  const both = 'Account ID must come from exactly one of the target config and the account-id input'
+  throws(() => modePlan(inputOnly, 'main', 12, sha, 'full'), { message: both })
+  throws(() => modePlan(config, 'main', 12, sha, 'full', { account }), { message: both })
+  throws(() => accountFor(pagesTarget, account, false), { message: both })
+  throws(() => accountFor(bare, 'A'.repeat(32)), { message: 'Invalid account ID' })
+  throws(() => accountFor({ ...bare, account_id: '1'.repeat(31) }, ''), { message: 'Invalid account ID' })
 })
 
 test('mode selection: an explicit /preview <mode> wins, else one preview:<mode> label, else full; only full is built, on Pages, with a probe', () => {

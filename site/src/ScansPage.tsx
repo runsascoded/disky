@@ -16,6 +16,7 @@ import { Tooltip } from './Tooltip'
 import { Explain } from './Help'
 import { axisTicks, inSpan, type RunSpan, runKindParam, runSpanParam, runStatusParam } from './runChart'
 import { fmtBytesPrecise, fmtN } from './types'
+import { RunScanButton } from './RunScan'
 import { useUnits } from './units'
 import { useIsAdmin, useStores } from './auth'
 import { HistoryAdmin } from './HistoryAdmin'
@@ -428,7 +429,10 @@ export function ScansPage() {
   return (
     <main className="staged-page scans-page">
       <SiteNav />
-      <h1>Scan runs</h1>
+      <div className="staged-head sr-head">
+        <h1>Scan runs</h1>
+        <RunScanButton block={q.data?.dispatch} runs={runs} queryKey={['scan-runs', store.key]} />
+      </div>
       <p className="sub">Each scan job's run: when it ran, how long each phase took, what it wrote, and how each structure changed against the previous scan; and the stores' maintenance jobs (<code>compact</code>, <code>merge</code>) beside the scan they follow. The stores they append to are on <Link to="/health">Health</Link>.</p>
       {canRetention && <div className="sr-retention-toggle"><button type="button" aria-expanded={retentionOpen} aria-controls="history" onClick={() => retentionOpen ? closeRetention() : setRetentionOpen(true)}>{retentionOpen ? 'Close retention controls' : 'Manage retained scans'}</button><span className="dim">{retentionOpen ? 'Review a proposal or choose scans on the existing chart and table.' : 'Preview policies and build new history versions.'}</span></div>}
       {retentionOn && <HistoryAdmin onPlanChange={onPlanChange} manualScans={manualScans} onManualScansChange={setManualScans}

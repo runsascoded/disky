@@ -241,6 +241,8 @@ const SHARED_ROUTES: Record<string, Case[]> = {
   'api/plans/scan-deletions.ts': [get('/api/plans/scan-deletions', 'viewer')],
   'api/prefixes.ts': [post('/api/prefixes', 'viewer')],
   'api/scan-runs/[[path]].ts': [get('/api/scan-runs', 'viewer')],
+  // "Run a scan": an admin starts the deployment's scan submitter (`_lib/scanDispatch.ts`).
+  'api/scan-runs/dispatch.ts': [post('/api/scan-runs/dispatch', 'admin')],
   'api/series.ts': [get('/api/series', 'viewer')],
   'api/session-log/[[path]].ts': [
     // The config says only whether logging is on (and purges only for a viewer); a batch is a viewer's, while it is on
