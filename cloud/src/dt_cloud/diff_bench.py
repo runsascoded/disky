@@ -32,7 +32,7 @@ from .diff_check import fetch
 
 QUANT = 128
 # The site's API cache version (`API_CV`, site/src/App.tsx): asked as the browser asks.
-CV = 5
+CV = 6
 
 
 @dataclass(frozen=True)

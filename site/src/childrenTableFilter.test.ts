@@ -53,8 +53,8 @@ const node: TreeNode = {
   ],
 }
 const items: CoverItem[] = [
-  { path: 'marin-eu-west4/tomat', kind: 'dir', b: 50, o: 2, roots: 1 },
-  ...[1, 2, 3].map(i => ({ path: `marin-us-central1/show/x${i}.mp3`, kind: 'file' as const, b: 100, o: 1, roots: 1 })),
+  { path: 'marin-eu-west4/tomat', kind: 'dir', bytes: 50, objects: 2, roots: 1 },
+  ...[1, 2, 3].map(i => ({ path: `marin-us-central1/show/x${i}.mp3`, kind: 'file' as const, bytes: 100, objects: 1, roots: 1 })),
 ]
 const files = [1, 2, 3].map(i => ({ key: `gs://marin-us-central1/show/x${i}.mp3`, kind: 'object' }))
 /** The filter's row source: `resolve` slices `items` to the row (recording each row asked for). */

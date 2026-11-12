@@ -62,7 +62,7 @@ function useScanFile<T>(name: string, asof: string | null) {
 /** Per-user owned bytes (assignments applied) from `/api/owners`, keyed by
  * canonical id. */
 function useOwned(asof: string | null): { data: Map<string, Owned> | null; error: Error | null } {
-  const q = useQuery<{ users: Record<string, Owned> }, Error>({
+  const q = useQuery<{ users: Record<string, { bytes: number; class_bytes: ClassMix }> }, Error>({
     queryKey: ['owners', asof],
     enabled: !!asof,
     staleTime: 30_000,
@@ -82,8 +82,8 @@ function useOwned(asof: string | null): { data: Map<string, Owned> | null; error
     for (const [u, o] of Object.entries(q.data.users)) {
       const id = canonId(u)
       const cur = m.get(id)
-      if (!cur) m.set(id, { b: o.b, mix: { ...o.mix } })
-      else { cur.b += o.b; for (const [c, b] of Object.entries(o.mix)) cur.mix[c] = (cur.mix[c] ?? 0) + b }
+      if (!cur) m.set(id, { b: o.bytes, mix: { ...o.class_bytes } })
+      else { cur.b += o.bytes; for (const [c, b] of Object.entries(o.class_bytes)) cur.mix[c] = (cur.mix[c] ?? 0) + b }
     }
     return m
   }, [q.data])

@@ -106,8 +106,8 @@ const sansFoldDetail = (n: ViewNode): ViewNode => {
 /** The view with its tier's phase-1 name dropped (`static+bysize` ~ `search+bysize`). */
 const sansP1 = (v: View) => ({ ...v, tier: v.tier.replace(/^(static|search)\+/, '+'), tree: sansFoldDetail(v.tree) })
 /** `matched` as brute force's `[path, bytes, objects]`, by path. */
-const matchedRows = (v: { matched?: { path: string; b: number; o: number }[] }) =>
-  (v.matched ?? []).map(m => [m.path, m.b, m.o]).sort((x, y) => (x[0] < y[0] ? -1 : 1))
+const matchedRows = (v: { matched?: { path: string; bytes: number; objects: number }[] }) =>
+  (v.matched ?? []).map(m => [m.path, m.bytes, m.objects]).sort((x, y) => (x[0] < y[0] ? -1 : 1))
 
 /** A tree as `[path, bytes, objects, ('m')?, ('f<n>')?]` rows, depth first (`(other)` under its parent). */
 const flatTree = (n: ViewNode, path = '', out: unknown[] = []): unknown[] => {
@@ -253,12 +253,13 @@ describe('matchLists: a response lists the tree\'s roots, then the heaviest, up 
   it('under the cap: all, with the count; over it: kept + heaviest, capped', () => {
     const m = (i: number) => ({ path: `p${String(i).padStart(5, '0')}`, b: 10_000 - i, o: 1 })
     const few = [m(0), m(1)]
-    expect(matchLists(few, new Map())).toEqual({ matches: ['p00000', 'p00001'], matched: few, matchCount: { n: 2, b: 19_999, o: 2 } })
+    const wire = (x: ReturnType<typeof m>) => ({ path: x.path, bytes: x.b, objects: x.o })
+    expect(matchLists(few, new Map())).toEqual({ matches: ['p00000', 'p00001'], matched: few.map(wire), matchCount: { count: 2, bytes: 19_999, objects: 2 } })
     const many = Array.from({ length: MATCH_LIST_CAP + 3 }, (_, i) => m(i))
     const got = matchLists(many, new Map([[m(MATCH_LIST_CAP + 2).path, 1]]))
     expect([got.matched!.length, got.matched!.at(-1), got.matched!.at(-2), got.matchCount, got.matchesCapped]).toEqual([
-      MATCH_LIST_CAP + 1, m(MATCH_LIST_CAP + 2), m(MATCH_LIST_CAP - 1),
-      { n: MATCH_LIST_CAP + 3, b: many.reduce((n, x) => n + x.b, 0), o: MATCH_LIST_CAP + 3 }, true,
+      MATCH_LIST_CAP + 1, wire(m(MATCH_LIST_CAP + 2)), wire(m(MATCH_LIST_CAP - 1)),
+      { count: MATCH_LIST_CAP + 3, bytes: many.reduce((n, x) => n + x.b, 0), objects: MATCH_LIST_CAP + 3 }, true,
     ])
   })
 })
@@ -313,7 +314,7 @@ describe('a path term ending in `/` (empty tail), flag unset: the thresholded wa
     ['the fixture\'s suffix index', () => staticStore()],
     ['an anchored source', () => ({ source: anchoredLike, scans: async () => [...DATES], gen: 'fixture' })],
   ]
-  const WALK = ['bysize+fine', { n: 500, b: 768000, o: 500 }, true, APPROX_UNINDEXED]
+  const WALK = ['bysize+fine', { count: 500, bytes: 768000, objects: 500 }, true, APPROX_UNINDEXED]
   for (const [what, st] of stores) {
     it(`${what}: \`fill/\`, \`^bk/fill/\` (the view and \`/api/subtree\`, first paint and full) vs brute force`, async () => {
       const got: unknown[] = []
@@ -341,12 +342,12 @@ describe('a path term ending in `/` (empty tail), flag unset: the thresholded wa
       const v = await buildView(env, { date: A, path: '', w: W, h: H, minArea: MIN_AREA, atten: ATTEN, query: parseIn('^bk/fil', plain)! })
       got.push([on, v.tier, v.matchCount, v.approximate, v.approximateReason])
     }
-    const whole = { n: 1, b: 1023750, o: 3000 }
+    const whole = { count: 1, bytes: 1023750, objects: 3000 }
     expect(got).toEqual([[true, 'static+path', whole, undefined, undefined], [false, 'search+path', whole, undefined, undefined]])
   })
   it('`fill$` (the folder): its bytes, exact, from the static source', async () => {
     const v = await buildView(envStatic(stores[1][1]()), { date: A, path: '', w: W, h: H, minArea: MIN_AREA, atten: ATTEN, query: parseIn('fill$', plain)! })
-    expect([v.tier, v.matchCount, v.approximate, matchedRows(v)]).toEqual(['static+path', { n: 1, b: 1023750, o: 3000 }, undefined, [['bk/fill', 1023750, 3000]]])
+    expect([v.tier, v.matchCount, v.approximate, matchedRows(v)]).toEqual(['static+path', { count: 1, bytes: 1023750, objects: 3000 }, undefined, [['bk/fill', 1023750, 3000]]])
   })
 })
 

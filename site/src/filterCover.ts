@@ -18,7 +18,7 @@ export interface FilterCover {
   q: string
   /** Sorted by path. */
   items: CoverItem[]
-  roots: { n: number; b: number; o: number }
+  roots: { count: number; bytes: number; objects: number }
   /** False: the matches here can't all be listed; `reason` says why in plain words, and nothing acts. */
   complete: boolean
   reason?: string
@@ -115,7 +115,7 @@ export function groupItems(items: readonly CoverItem[]): CoverGroup[] {
   const by = new Map<string, CoverItem[]>()
   for (const i of items) by.set(parentOf(i.path), [...(by.get(parentOf(i.path)) ?? []), i])
   return [...by.entries()]
-    .map(([parent, is]) => ({ parent, items: is, b: is.reduce((n, i) => n + i.b, 0), o: is.reduce((n, i) => n + i.o, 0) }))
+    .map(([parent, is]) => ({ parent, items: is, b: is.reduce((n, i) => n + i.bytes, 0), o: is.reduce((n, i) => n + i.objects, 0) }))
     .sort((x, y) => y.b - x.b || (x.parent < y.parent ? -1 : x.parent > y.parent ? 1 : 0))
 }
 

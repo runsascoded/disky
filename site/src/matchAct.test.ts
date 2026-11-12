@@ -5,8 +5,8 @@ import { actBlock, actController, noMatches, type ActDeps, type ActState, afterR
 
 // The action's state machine with its sends stubbed: each test records every state it passes through, and
 // every request it would send.
-const dir = (path: string) => ({ path, kind: 'dir' as const, b: 10, o: 2, roots: 1 })
-const file = (path: string) => ({ path, kind: 'file' as const, b: 1, o: 1, roots: 1 })
+const dir = (path: string) => ({ path, kind: 'dir' as const, bytes: 10, objects: 2, roots: 1 })
+const file = (path: string) => ({ path, kind: 'file' as const, bytes: 1, objects: 1, roots: 1 })
 const OVER = 'Too many matches to act on at once (70,390); narrow the search or open a folder below. Agents can bulk-assign via the API.'
 
 /** A controller over a recorded state cell; `resolve` and the sends are the test's. */
@@ -122,7 +122,7 @@ describe('not acted on: muted in place (never red), unless it failed', () => {
     expect([h.shape(), h.sent]).toEqual([['resolving', `muted: ${OVER}`], []])
   })
   it('nothing sendable (only unchecked matches; only whole buckets to stage): muted, saying why', async () => {
-    const unk = harness({ got: { items: [{ path: 'b/x', kind: null, b: 1, o: 1, roots: 1 }], complete: true } })
+    const unk = harness({ got: { items: [{ path: 'b/x', kind: null, bytes: 1, objects: 1, roots: 1 }], complete: true } })
     await unk.ctl.start({ kind: 'assign' })
     const bk = harness({ got: { items: [dir('tomatoes')], complete: true } })
     await bk.ctl.start({ kind: 'stage' })

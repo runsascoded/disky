@@ -3,7 +3,7 @@
  *
  *   GET /api/filter-cover?date=<scan>|d=<slug>&path=<P>&q=<filter>[&qs=<syntax>]
  *
- * → `{date, path, q, items: [{path, kind, b, o, roots}], roots: {n, b, o}, complete, reason?, looked, unchecked}`
+ * → `{date, path, q, items: [{path, kind, bytes, objects, roots}], roots: {count, bytes, objects}, complete, reason?, looked, unchecked}`
  *
  * `items` are sorted by path: a folder every object of which matches (`kind: 'dir'`, covering `roots` match
  * roots), or a match root itself (`dir`, `file`, or null when its kind couldn't be looked up — nothing acts
@@ -45,8 +45,8 @@ export function onRequestGet(ctx0: Ctx): Promise<Response> {
   return u ? unionCover(ctx0, u) : cover(ctx0)
 }
 
-type CoverItem = { path: string; kind: string | null; b: number; o: number; roots: number }
-type CoverBody = { date: string; path: string; q: string; items: CoverItem[]; roots: { n: number; b: number; o: number }; complete: boolean; reason?: string; looked: number; unchecked: number }
+type CoverItem = { path: string; kind: string | null; bytes: number; objects: number; roots: number }
+type CoverBody = { date: string; path: string; q: string; items: CoverItem[]; roots: { count: number; bytes: number; objects: number }; complete: boolean; reason?: string; looked: number; unchecked: number }
 
 /**
  * `/api/filter-cover` on a union view. The root: each ready member's own cover of its roots at its resolved scan
@@ -85,7 +85,7 @@ async function unionCover(ctx0: Ctx, view: UnionView): Promise<Response> {
     return jsonRes({
       date: resolved.date, path, q: url.searchParams.get('q') ?? '',
       items: bs.flatMap(b => b.items).sort((x, y) => (x.path < y.path ? -1 : x.path > y.path ? 1 : 0)),
-      roots: { n: sum(b => b.roots.n), b: sum(b => b.roots.b), o: sum(b => b.roots.o) },
+      roots: { count: sum(b => b.roots.count), bytes: sum(b => b.roots.bytes), objects: sum(b => b.roots.objects) },
       complete: bs.every(b => b.complete) && !refused.length,
       ...(reasons.length ? { reason: reasons.join(' · ') } : {}),
       looked: sum(b => b.looked), unchecked: sum(b => b.unchecked),
@@ -119,13 +119,13 @@ async function cover(ctx0: Ctx): Promise<Response> {
       if (!(t instanceof Map)) throw new Error(`filter-cover: ${path}'s totals unread (${t})`)
       const r = t.get(path)
       if (!r) throw new NotFound(path)
-      const body = { date, path, q: qRaw, items: [{ path, kind: r.kind, b: r.b, o: r.o, roots: 1 }], roots: { n: 1, b: r.b, o: r.o }, complete: true, looked: 1, unchecked: 0 }
+      const body = { date, path, q: qRaw, items: [{ path, kind: r.kind, bytes: r.b, objects: r.o, roots: 1 }], roots: { count: 1, bytes: r.b, objects: r.o }, complete: true, looked: 1, unchecked: 0 }
       return await cacheStore(ctx.env, cacheKey, JSON.stringify(body), { 'server-timing': st.header() }, ctx.waitUntil?.bind(ctx))
     }
 
     const found = await st.time('roots', allMatchRoots(ctx.env, { date, path, query }))
     const roots = found?.roots ?? []
-    const sum = { n: roots.length, b: roots.reduce((n, r) => n + r.b, 0), o: roots.reduce((n, r) => n + r.o, 0) }
+    const sum = { count: roots.length, bytes: roots.reduce((n, r) => n + r.b, 0), objects: roots.reduce((n, r) => n + r.o, 0) }
     const why = found?.rollup ? 'There are too many matches under this folder to list them. Open a folder below to act on its matches.'
       : found?.coverage.partial?.length ? `Not every match here could be listed (${found.coverage.partial.join('; ')}).`
       : found?.coverage.approximate?.length ? `Small matches may be missing here (${found.coverage.approximate.join('; ')}).`

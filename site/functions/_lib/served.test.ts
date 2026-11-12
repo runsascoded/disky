@@ -173,7 +173,7 @@ describe('D1', () => {
   /** The whole-bucket series: one point per scan, an unindexed one's from its meta. */
   async function series(w: World) {
     const r = await w.mods.series.onRequestGet({ request: new Request('http://localhost/api/series?path='), env: w.env })
-    return [r.status, ((await r.json()) as { points: { date: string; b: number }[] }).points.map(p => [p.date, p.b])]
+    return [r.status, ((await r.json()) as { points: { date: string; bytes: number }[] }).points.map(p => [p.date, p.bytes])]
   }
   const SERIES = [200, [[OLD, 777], [A, 37229948], [B, 37229948]]]
   /** What a series read asks the store for: the indexed scans' per-scan `path` sorts (this fixture has
@@ -239,8 +239,8 @@ describe('D1', () => {
       vi.stubGlobal('fetch', async (req: RequestInfo, init?: RequestInit) =>
         (typeof req === 'string' ? req : req.url).includes(dirOf(B)) ? new Response('boom', { status: 403 }) : pass(req, init))
       const r = await w.mods.series.onRequestGet({ request: new Request('http://localhost/api/series?path='), env: w.env })
-      const body = (await r.json()) as { points: { date: string; b: number }[]; failed?: string[] }
-      expect([r.status, r.headers.get('cache-control'), body.points.map(p => [p.date, p.b]), body.failed, puts]).toEqual([
+      const body = (await r.json()) as { points: { date: string; bytes: number }[]; failed?: string[] }
+      expect([r.status, r.headers.get('cache-control'), body.points.map(p => [p.date, p.bytes]), body.failed, puts]).toEqual([
         200, 'no-store', [[OLD, 777], [A, 37229948]], [B], [],
       ])
     })

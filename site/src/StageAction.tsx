@@ -13,7 +13,7 @@ import type { CoverItem } from './filterCover'
 import type { TreeNode } from './types'
 
 /** The unfiltered row is already an exact target; no match-list request is needed. */
-export const tableCoverItem = (node: TreeNode, path: string): CoverItem => ({ path, kind: node.kind ?? 'dir', b: node.bytes, o: node.objects, roots: 1 })
+export const tableCoverItem = (node: TreeNode, path: string): CoverItem => ({ path, kind: node.kind ?? 'dir', bytes: node.bytes, objects: node.objects, roots: 1 })
 
 export function PrefixStageAction({ item, scheme, fmtBytes, mark }: {
   item: CoverItem

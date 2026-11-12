@@ -87,7 +87,7 @@ describe('restrictTree / restrictSubtree / restrictDiff', () => {
     expect(restrictTree(ryan, 'Users/ryan', r).children![0].children![0]).toEqual({ name: '2025 tax returns', kind: 'dir', bytes: 100, objects: 3 })
   })
   it('only the tree is filtered: a name filter is refused before any body (`api/restrictedFilter.test.ts`), so nothing here filters search fields', () => {
-    const body = { path: 'Users/ryan/Downloads', tree: TREE, firstPaint: true, matches: ['kept'], matchCount: { n: 3, b: 70, o: 3 } }
+    const body = { path: 'Users/ryan/Downloads', tree: TREE, firstPaint: true, matches: ['kept'], matchCount: { count: 3, bytes: 70, objects: 3 } }
     expect(restrictSubtree(body, r)).toEqual({ ...body, tree: restrictTree(TREE, 'Users/ryan/Downloads', r) })
   })
   it('diff rows are relative to the diff’s path', () => {

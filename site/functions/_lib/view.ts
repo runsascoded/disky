@@ -191,6 +191,14 @@ export interface ViewOpts {
  *  its D1 span plans were the whole cost and drew nothing (gcs 10-09 `nemotron`: `read:0`, 48 of 48 late). */
 export interface Phase2Gate { dead: boolean }
 
+/** A match root as a response lists it (`matched`): its scoped bytes and objects (specs/descriptive-field-names.md §3d). */
+export interface MatchRoot { path: string; bytes: number; objects: number }
+/** Every match root's count and summed bytes / objects (`matchCount`). */
+export interface MatchCount { count: number; bytes: number; objects: number }
+/** The readers' own `{ path, b, o }` / `{ n, b, o }` as a response's. */
+const matchRootOf = (m: { path: string; b: number; o: number }): MatchRoot => ({ path: m.path, bytes: m.b, objects: m.o })
+export const matchCountOf = (c: { n: number; b: number; o: number }): MatchCount => ({ count: c.n, bytes: c.b, objects: c.o })
+
 export interface View {
   tree: ViewNode
   /** Which tier answered: a v1 generation's `coarse<E>` or `fine`
@@ -206,23 +214,23 @@ export interface View {
   matches?: string[]
   /** With `query`: each match root's scoped total (the series / subtitles),
    * net of its excluded descendants (NOT). */
-  matched?: { path: string; b: number; o: number }[]
+  matched?: MatchRoot[]
   /** With a NOT query: the outermost excluded paths under the match roots
    * (subtracted from their roots' totals, absent from the tree). */
   excluded?: string[]
   /** With `query`: every match root's count and summed bytes / objects — `matches` and `matched` list
    * at most `MATCH_LIST_CAP` of them (the tree's own roots always, then the heaviest), `matchesCapped`
    * when they leave some out. */
-  matchCount?: { n: number; b: number; o: number }
+  matchCount?: MatchCount
   matchesCapped?: true
   /** With `query`, a heavy literal under a heavy directory (`staticDrill.ts`): the view is P's rollup —
    * its children's matched totals (the `children` holding match roots on any scan, `kept` of them by name,
    * the rest in `(other)`), not its match roots. The tree's top-level cells are those children, the drawn ones
    * nested in turn (`rollupRead`: each one's own rollup or match roots, to `FILTER_SUBDIV_LEVELS` below P);
-   * `matched` lists only the match roots those answers name, so `matchesCapped` is set, and `matchCount.n` is `rows`, the root rows under P over every scan (an upper
+   * `matched` lists only the match roots those answers name, so `matchesCapped` is set, and `matchCount.count` is `rows`, the root rows under P over every scan (an upper
    * bound on this scan's; at the fleet root a long literal's alias entry, a 1–2 character one's counted from
    * the roots index). `bucketsOnly`: the fleet root from the catalog with no drilldown (`FILTER_STATIC_HEAVY`
-   * off) — bucket tiles, exact bytes and objects, `rows` null (so `matchCount.n` counts only the matched
+   * off) — bucket tiles, exact bytes and objects, `rows` null (so `matchCount.count` counts only the matched
    * buckets); a bucket's view is refused (`term-too-common`) — unless `scopedBelow` (`^q`'s starts-with catalog), where
    * a view below answers when the term's rows there are few enough. */
   rollup?: { children: number; kept: number; rows: number | null; bucketsOnly?: true; scopedBelow?: true }
@@ -2782,7 +2790,7 @@ export async function buildView(env0: Env, o: ViewOpts): Promise<View> {
     return node
   }
   const tree = build(path, v.rootAgg)
-  return { tree, tier: v.tier, index: v.idx.asOf != null ? `iv:${env.INTERVAL_STORE_GEN}` : v.idx.mode, threshold: v.threshold, nodes: kept.size, truncated: v.truncated, ...(v.matched ? { ...matchLists(v.matched, kept, v.matchTotal), ...(v.matchCount ? { matchCount: v.matchCount, matchesCapped: true as const } : {}) } : v.matches ? { matches: v.matches } : {}), ...(v.rollup ? { rollup: v.rollup } : {}), ...(v.excluded ? { excluded: v.excluded } : {}), ...(v.firstPaint ? { firstPaint: true } : {}), ...(v.interiors ? { interiors: v.interiors } : {}), ...(query ? coverageFields(cov) : {}) }
+  return { tree, tier: v.tier, index: v.idx.asOf != null ? `iv:${env.INTERVAL_STORE_GEN}` : v.idx.mode, threshold: v.threshold, nodes: kept.size, truncated: v.truncated, ...(v.matched ? { ...matchLists(v.matched, kept, v.matchTotal), ...(v.matchCount ? { matchCount: matchCountOf(v.matchCount), matchesCapped: true as const } : {}) } : v.matches ? { matches: v.matches } : {}), ...(v.rollup ? { rollup: v.rollup } : {}), ...(v.excluded ? { excluded: v.excluded } : {}), ...(v.firstPaint ? { firstPaint: true } : {}), ...(v.interiors ? { interiors: v.interiors } : {}), ...(query ? coverageFields(cov) : {}) }
 }
 
 /** The most match roots a response lists (`matches` / `matched`) beyond those the tree draws. */
@@ -2793,10 +2801,10 @@ export const MATCH_LIST_CAP = 200
 export function matchLists(matched: { path: string; b: number; o: number }[], kept: Map<string, unknown>, total?: { n: number; b: number; o: number }): Pick<View, 'matches' | 'matched' | 'matchCount' | 'matchesCapped'> {
   // `total`: the whole set's, when `matched` holds only the roots that can be listed (`foldPhase1`).
   const count = total ? { ...total } : { n: matched.length, b: matched.reduce((n, m) => n + m.b, 0), o: matched.reduce((n, m) => n + m.o, 0) }
-  if (count.n <= MATCH_LIST_CAP) return { matches: matched.map(m => m.path).sort(), matched, matchCount: count }
+  if (count.n <= MATCH_LIST_CAP) return { matches: matched.map(m => m.path).sort(), matched: matched.map(matchRootOf), matchCount: matchCountOf(count) }
   let room = MATCH_LIST_CAP
   const list = matched.filter(m => kept.has(m.path) || room-- > 0)
-  return { matches: list.map(m => m.path).sort(), matched: list, matchCount: count, matchesCapped: true }
+  return { matches: list.map(m => m.path).sort(), matched: list.map(matchRootOf), matchCount: matchCountOf(count), matchesCapped: true }
 }
 
 // --- the diff: two scans, one byte floor -----------------------------------
@@ -2934,8 +2942,8 @@ export interface Diff {
   /** …by time (`FILTER_WALK_MS`). */
   lookups_late?: true
   /** With `q=`: the union of both scans' match roots (capped like a view's, `matchLists`). */
-  matched?: { path: string; b: number; o: number }[]
-  matchCount?: { n: number; b: number; o: number }
+  matched?: MatchRoot[]
+  matchCount?: MatchCount
   matchesCapped?: true
   /** With `q=`: either side's phase 2 left roots undivided (`View.interiors`), summed over the sides that did. */
   interiors?: { read: number; skipped: number; reason: string; late?: number }
@@ -3136,7 +3144,7 @@ export async function buildDiff(env0: Env, o: DiffOpts): Promise<Diff> {
       const { matched, matchCount, matchesCapped } = matchLists([...matchedUnion].sort((x, y) => y.b - x.b || (x.path < y.path ? -1 : 1)), keptBoth, va?.matchTotal ?? vb?.matchTotal)
       // A rollup side lists only its kept children that are roots: its count is the rollup's bound.
       const roll = vb?.matchCount ?? va?.matchCount
-      return { matched: matched!.sort((x, y) => x.path < y.path ? -1 : 1), matchCount: roll ?? matchCount, ...(matchesCapped || roll ? { matchesCapped: true as const } : {}) }
+      return { matched: matched!.sort((x, y) => x.path < y.path ? -1 : 1), matchCount: roll ? matchCountOf(roll) : matchCount, ...(matchesCapped || roll ? { matchesCapped: true as const } : {}) }
     })() : {}),
     ...(va?.interiors || vb?.interiors ? { interiors: sumInteriors(va?.interiors, vb?.interiors) } : {}),
     ...(query ? coverageFields(cov) : {}),

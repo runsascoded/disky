@@ -95,7 +95,7 @@ describe('a filtered row: its label and its matches', () => {
     ])
   })
   it('a response\'s list is exact only uncapped and complete: capped, or unknown when partial, approximate, a rollup or a dir-only scan', () => {
-    const m = [{ path: 'a/tomat', b: 1, o: 1 }]
+    const m = [{ path: 'a/tomat', bytes: 1, objects: 1 }]
     expect([
       matchedListOf({ matched: m }),
       matchedListOf({ matched: m, matchesCapped: true }),
@@ -115,14 +115,14 @@ describe('a filtered row: its label and its matches', () => {
     const e5 = ['marin-us-east5/tomat', ...['t0_fsopt', 'flan_fsopt', 'flan_fsnoopt', 't0_fsnoopt', 't0_zsopt', 't0_zsnoopt', 'flan_zsopt', 'flan_zsnoopt'].map(f => `${P}${f}_part_00000.parquet`)]
     const root = {
       matched: [
-        { path: 'marin-eu-west4/tomat', b: 4543930137403, o: 420738 }, { path: e5[0], b: 2120947096049, o: 121162 },
-        { path: 'marin-us-central1/tomat', b: 486396327578, o: 19893 }, { path: 'marin-us-east1/tomat', b: 212692920492, o: 18791 },
+        { path: 'marin-eu-west4/tomat', bytes: 4543930137403, objects: 420738 }, { path: e5[0], bytes: 2120947096049, objects: 121162 },
+        { path: 'marin-us-central1/tomat', bytes: 486396327578, objects: 19893 }, { path: 'marin-us-east1/tomat', bytes: 212692920492, objects: 18791 },
         ...Array.from({ length: 193 }, (_, i) => ({ path: `marin-us-central1/podcast_audio/show/ep${i}_rotten_tomatoes.mp3`, b: 1000 - i, o: 1 })),
         ...e5.slice(1).map((path, i) => ({ path, b: 100 - i, o: 1 })),
       ],
-      matchCount: { n: 21735, b: 7396315609520, o: 603889 }, matchesCapped: true,
+      matchCount: { count: 21735, bytes: 7396315609520, objects: 603889 }, matchesCapped: true,
     }
-    const drilled = { matched: e5.map((path, i) => ({ path, b: 9 - i, o: 1 })), matchCount: { n: 9, b: 2121011255780, o: 121170 } }
+    const drilled = { matched: e5.map((path, i) => ({ path, bytes: 9 - i, objects: 1 })), matchCount: { count: 9, bytes: 2121011255780, objects: 121170 } }
     const atRoot = rowMatchesOf(root.matched, matchedListOf(root))
     const inE5 = rowMatchesOf(drilled.matched, matchedListOf(drilled))
     const e5Node = { name: 'marin-us-east5', children: [{ name: 'tomat', children: [{ name: 'results' }, { name: 'cache' }, { name: 'x' }] }] }
@@ -141,13 +141,13 @@ describe('a filtered row: its label and its matches', () => {
     ])
   })
   it('a row\'s matches are the items at or under it, never a sibling sharing its name as a prefix', () => {
-    const items = [{ path: 'b/x/tomat', kind: 'dir' as const, b: 1, o: 1, roots: 1 }, { path: 'b/xy/tomat', kind: 'dir' as const, b: 2, o: 1, roots: 1 }, { path: 'b/x', kind: 'dir' as const, b: 3, o: 1, roots: 1 }]
+    const items = [{ path: 'b/x/tomat', kind: 'dir' as const, bytes: 1, objects: 1, roots: 1 }, { path: 'b/xy/tomat', kind: 'dir' as const, bytes: 2, objects: 1, roots: 1 }, { path: 'b/x', kind: 'dir' as const, bytes: 3, objects: 1, roots: 1 }]
     expect(rowItems(items, 'b/x').map(i => i.path)).toEqual(['b/x/tomat', 'b/x'])
   })
 })
 
 describe('the cover is fetched on demand, and retried once on a 5xx', () => {
-  const COVER = { date: 'D', path: 'p', q: 'nemotron', items: [], roots: { n: 0, b: 0, o: 0 }, complete: true, looked: 0, unchecked: 0 }
+  const COVER = { date: 'D', path: 'p', q: 'nemotron', items: [], roots: { count: 0, bytes: 0, objects: 0 }, complete: true, looked: 0, unchecked: 0 }
   /** A fetcher answering `statuses` in turn (then 200 with `COVER`), recording each URL. */
   const fetcher = (statuses: number[]) => {
     const urls: string[] = []
@@ -208,8 +208,8 @@ describe('the cover is fetched on demand, and retried once on a 5xx', () => {
 describe('prefetch on intent: deduped, then the click reuses it', () => {
   const view = { date: 'D', path: '', q: 'tomat', qs: 'simple' }
   const cover = (path: string, items: FilterCover['items'], complete = true): FilterCover =>
-    ({ date: 'D', path, q: 'tomat', items, roots: { n: items.length, b: 0, o: 0 }, complete, looked: 0, unchecked: 0, ...(complete ? {} : { reason: 'Too many matches to act on at once (70,390); narrow the search or open a folder below. Agents can bulk-assign via the API.' }) })
-  const item = (path: string) => ({ path, kind: 'dir' as const, b: 1, o: 1, roots: 1 })
+    ({ date: 'D', path, q: 'tomat', items, roots: { count: items.length, bytes: 0, objects: 0 }, complete, looked: 0, unchecked: 0, ...(complete ? {} : { reason: 'Too many matches to act on at once (70,390); narrow the search or open a folder below. Agents can bulk-assign via the API.' }) })
+  const item = (path: string) => ({ path, kind: 'dir' as const, bytes: 1, objects: 1, roots: 1 })
   /** A slow fetcher (the hover's request is still in flight when the next intent lands), answering per path. */
   const fetcher = (byPath: Record<string, FilterCover>) => {
     const urls: string[] = []

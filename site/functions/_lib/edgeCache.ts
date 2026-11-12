@@ -61,8 +61,9 @@ export interface CacheEnv { CACHE_KV?: KVNamespace; CACHE_NS?: string; PROD_HOST
 // 12 (2026-11-12): map nodes carry descriptive keys (`name kind bytes objects mtime last_read owners class_bytes
 // children folded matched provenance store scan`; no `d`), specs/descriptive-field-names.md §3a. 13: diff rows and
 // totals (`path depth kind status bytes_before bytes_after objects_before objects_after expanded lookup`) and level
-// answers (§3b–c).
-export const CACHE_V = '13'
+// answers (§3b–c). 14: match lists (`matched` `{ path, bytes, objects }`, `matchCount` `{ count, bytes, objects }`), series
+// points, cover items and roots, name matches (§3d).
+export const CACHE_V = '14'
 
 /** The deployment environment a response-cache key belongs to: `''` is prod's (keys exactly as before the
  * tag existed — no one-time flush), anything else a separate keyspace. A Pages preview (the dev stack)

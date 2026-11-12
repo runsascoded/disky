@@ -318,7 +318,7 @@ describe('D1', () => {
       const d = await diffOf(envStatic(capped(1, asked)), 'bin', '')
       expect([...new Set(asked)]).toEqual([undefined])
       expect(d).toEqual(await unfoldedOf(envStatic(), 'bin', ''))
-      expect([d.rows.length, d.matchCount]).toEqual([9, { n: 12, b: 3156498, o: 12 }])
+      expect([d.rows.length, d.matchCount]).toEqual([9, { count: 12, bytes: 3156498, objects: 12 }])
     })
 
     it('`buildDiff` unfolded refuses `diff-too-broad` having read no answer, asking `HELD_BYTES`; a view of one side never asks', async () => {
@@ -393,7 +393,7 @@ describe('D1', () => {
       const v = await view(envStatic(), B, 'tomato-bk', 'tomato')
       const plain = await buildDiff(base, { from: A, to: B, path: 'tomato-bk', w: W, h: H, minArea: MIN_AREA, atten: ATTEN, top: 200 })
       expect([d.rows, d.bytes_before, d.bytes_after]).toEqual([plain.rows, plain.bytes_before, plain.bytes_after])
-      expect([v.matches, d.matched, d.matchCount]).toEqual([['tomato-bk'], [{ path: 'tomato-bk', b: d.bytes_after, o: d.objects_after }], { n: 1, b: d.bytes_after, o: d.objects_after }])
+      expect([v.matches, d.matched, d.matchCount]).toEqual([['tomato-bk'], [{ path: 'tomato-bk', bytes: d.bytes_after, objects: d.objects_after }], { count: 1, bytes: d.bytes_after, objects: d.objects_after }])
     })
 
     it('within the bound the diff is the one it was', async () => {
@@ -477,8 +477,8 @@ describe('D1', () => {
     return { ...(keep ? n : rest), ...(n.children ? { children: n.children.map(c => sansFoldDetail(c, keep && c.name !== '(other)')) } : {}) }
   }
   const sansP1 = (v: View) => ({ ...v, tier: v.tier.replace(/^(drill|search)\+/, '+'), tree: sansFoldDetail(v.tree) })
-  const matchedRows = (v: { matched?: { path: string; b: number; o: number }[] }) =>
-    (v.matched ?? []).map(m => [m.path, m.b, m.o]).sort((x, y) => (x[0] < y[0] ? -1 : 1))
+  const matchedRows = (v: { matched?: { path: string; bytes: number; objects: number }[] }) =>
+    (v.matched ?? []).map(m => [m.path, m.bytes, m.objects]).sort((x, y) => (x[0] < y[0] ? -1 : 1))
 
   describe('the map\'s views from the drilldown (`/api/subtree`)', () => {
     it('roots answers: the same view as the search sidecars\', and brute force\'s match roots', async () => {
@@ -522,7 +522,7 @@ describe('D1', () => {
           want.push([t, P, d, 'rollup', all[0], all[1],
             [...keptExp.map(([c, [b, o]]) => [c, b, o, ...(isRoot(c) ? ['m'] : [])]).sort((x, y) => (y[1] as number) - (x[1] as number)), ...(rest[0] > 0.5 ? [['(other)', rest[0], rest[1]]] : [])],
             keptExp.filter(([c]) => isRoot(c)).map(([c, [b, o]]) => [P === '' ? c : `${P}/${c}`, b, o]).sort((x, y) => ((x[0] as string) < (y[0] as string) ? -1 : 1)),
-            { n: a.rollup.rows ?? keptExp.filter(([c]) => isRoot(c)).length, b: all[0], o: all[1] }, true, { children: a.rollup.children, kept: a.rollup.kept, rows: a.rollup.rows }])
+            { count: a.rollup.rows ?? keptExp.filter(([c]) => isRoot(c)).length, bytes: all[0], objects: all[1] }, true, { children: a.rollup.children, kept: a.rollup.kept, rows: a.rollup.rows }])
         }
       }
       expect(got).toEqual(want)
@@ -577,7 +577,7 @@ describe('D1', () => {
         ['refused', 'scan-not-indexed'],
         ['refused', 'scan-not-indexed'],
         ['refused', 'scan-not-indexed'],
-        ['rollup', { n: 3000, b: total(exp[A]!)[0], o: total(exp[A]!)[1] }, null],
+        ['rollup', { count: 3000, bytes: total(exp[A]!)[0], objects: total(exp[A]!)[1] }, null],
       ])
     })
 
@@ -696,14 +696,14 @@ describe('D1', () => {
         want.push([t, d, 'rollup', b, o,
           cells.map(([c, cb, co]) => [c, cb, co, ...(c.toLowerCase().includes(t) ? ['m'] : [])]).sort((x, y) => (y[1] as number) - (x[1] as number)),
           roots.sort((x, y) => (x[0] < y[0] ? -1 : 1)),
-          { n: roots.length, b, o }, true, { children: buckets, kept: buckets, rows: null, bucketsOnly: true }, undefined, undefined])
+          { count: roots.length, bytes: b, objects: o }, true, { children: buckets, kept: buckets, rows: null, bucketsOnly: true }, undefined, undefined])
       }
       expect(got).toEqual(want)
       // Spelled out for one: `tomat` on B — three buckets, `tomato-bk` itself a match root.
       const v = await view(envStatic(noDrill()), B, '', 'tomat', { threshold: 0.5 })
       expect([top(v), v.matchCount, v.rollup]).toEqual([
         [['bk', 20127, 8], ['tomato-bk', 110, 2, 'm'], ['zz', 10, 1]],
-        { n: 1, b: 20247, o: 11 },
+        { count: 1, bytes: 20247, objects: 11 },
         { children: 3, kept: 3, rows: null, bucketsOnly: true },
       ])
     })
@@ -752,9 +752,9 @@ describe('D1', () => {
     it('with the drilldown (`FILTER_STATIC_HEAVY=1`), unchanged: the root from the catalog with its root count, rollups below', async () => {
       const at = async (P: string) => { const v = await view(envStatic(), A, P, '0', { threshold: 0.5 }); return [P, v.tier, v.matchCount, v.rollup] }
       expect(await Promise.all(['', 'bk', 'bk/fill'].map(at))).toEqual([
-        ['', 'rollup', { n: 3000, b: 1023750, o: 3000 }, { children: 1, kept: 1, rows: 3000 }],
-        ['bk', 'rollup', { n: 3000, b: 1023750, o: 3000 }, { children: 1, kept: 1, rows: 3000 }],
-        ['bk/fill', 'rollup', { n: 3000, b: 1023750, o: 3000 }, { children: 3000, kept: 3, rows: 3000 }],
+        ['', 'rollup', { count: 3000, bytes: 1023750, objects: 3000 }, { children: 1, kept: 1, rows: 3000 }],
+        ['bk', 'rollup', { count: 3000, bytes: 1023750, objects: 3000 }, { children: 1, kept: 1, rows: 3000 }],
+        ['bk/fill', 'rollup', { count: 3000, bytes: 1023750, objects: 3000 }, { children: 3000, kept: 3, rows: 3000 }],
       ])
     })
   })

@@ -114,11 +114,12 @@ def export_owners(get: Getter, a: ExportArgs) -> list[list[Any]]:
     body = get("/api/owners", {"date": date})
     rows = []
     for user, owned in body["users"].items():
-        mix = owned.get("mix") or {}
+        owned = api_names.owner(owned)
+        mix = owned.get("class_bytes") or {}
         unknown = sorted(set(mix) - set(CLASS_COLUMNS))
         if unknown:
             raise ExportError(f"/api/owners: user {user!r} has unknown storage class id(s) {unknown}")
-        rows.append([user, _int(owned["b"]), *(_int(mix.get(k, 0)) for k in CLASS_COLUMNS)])
+        rows.append([user, _int(owned["bytes"]), *(_int(mix.get(k, 0)) for k in CLASS_COLUMNS)])
     rows.sort(key=lambda r: (-r[1], r[0]))
     return rows
 

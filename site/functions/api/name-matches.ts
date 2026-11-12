@@ -3,7 +3,7 @@
  *
  *   GET /api/name-matches?date=<scan>|d=<slug>&q=<filter>[&qs=<syntax>][&path=<P>][&limit=<n>]
  *
- * → `{date, path, q, items: [{path, kind, b, o}], total, complete, reason?}`
+ * → `{date, path, q, items: [{path, kind, bytes, objects}], total, complete, reason?}`
  *
  * `items`: the `limit` (default 20, at most 100) largest match roots under `path` (default: the whole map), `kind`
  * `dir` / `file` (null when its lookup didn't fit the budget). `total`: every match root. `complete: false` (with
@@ -25,15 +25,15 @@ export const MATCHES_MAX = 100
 /** Row groups the results' kind lookups may read, per call and together. */
 export const MATCH_KIND_GROUPS = { call: 16, total: 32 }
 /** Bump on a change to the response's shape (the edge cache keys on it). */
-export const MATCHES_V = 1
+export const MATCHES_V = 2
 
-type Item = { path: string; kind: 'dir' | 'file' | null; b: number; o: number }
+type Item = { path: string; kind: 'dir' | 'file' | null; bytes: number; objects: number }
 type Body = { date: string; path: string; q: string; items: Item[]; total: number; complete: boolean; reason?: string }
 
 const jsonRes = (body: unknown, status: number) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
 const limitOf = (url: URL): number => Math.min(MATCHES_MAX, Math.max(1, Number(url.searchParams.get('limit')) || MATCHES_DEFAULT))
 /** Largest first; ties by path. */
-const bySize = <T extends { path: string; b: number }>(x: T, y: T) => y.b - x.b || (x.path < y.path ? -1 : x.path > y.path ? 1 : 0)
+const bySize = <T extends { path: string; bytes: number }>(x: T, y: T) => y.bytes - x.bytes || (x.path < y.path ? -1 : x.path > y.path ? 1 : 0)
 
 export function onRequestGet(ctx0: MatchCtx): Promise<Response> {
   const u = unionFor(ctx0.request, ctx0.env as Env)
@@ -101,11 +101,11 @@ async function matches(ctx0: MatchCtx): Promise<Response> {
       : found?.coverage.approximate?.length ? `Small matches may be missing (${found.coverage.approximate.join('; ')}).`
       : found?.coverage.dirsOnly?.length ? 'This scan lists folders only: file matches aren’t listed.'
       : null
-    const top = roots.map(r => ({ path: r.path, b: r.b, o: r.o })).sort(bySize).slice(0, limit)
+    const top = roots.map(r => ({ path: r.path, bytes: r.b, objects: r.o })).sort(bySize).slice(0, limit)
     const kinds = top.length ? await st.time('kinds', pathTotals(ctx.env, date, MATCH_KIND_GROUPS)(top.map(r => r.path))) : null
     const body: Body = {
       date, path, q: qRaw,
-      items: top.map(r => ({ path: r.path, kind: kinds instanceof Map ? kinds.get(r.path)?.kind ?? null : null, b: r.b, o: r.o })),
+      items: top.map(r => ({ path: r.path, kind: kinds instanceof Map ? kinds.get(r.path)?.kind ?? null : null, bytes: r.bytes, objects: r.objects })),
       total: roots.length,
       complete: !why,
       ...(why ? { reason: why } : {}),

@@ -31,8 +31,8 @@ export function actionTargets(items: readonly CoverItem[], scheme: string, actio
       t.items.push({ key: `${scheme}${i.path}/`, kind: 'prefix' })
       t.folders++
     }
-    t.b += i.b
-    t.o += i.o
+    t.b += i.bytes
+    t.o += i.objects
   }
   return t
 }

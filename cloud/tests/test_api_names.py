@@ -51,3 +51,9 @@ def test_diff_renames_a_short_body_and_its_rows():
              "objects_after": 2, "lookup": 2},
         ],
     }
+
+
+def test_owner_reads_either_spelling():
+    assert [api_names.owner({"b": 5, "mix": {"2": 5}}), api_names.owner({"b": 0}), api_names.owner({"bytes": 5, "class_bytes": {"2": 5}})] == [
+        {"bytes": 5, "class_bytes": {"2": 5}}, {"bytes": 0, "class_bytes": {}}, {"bytes": 5, "class_bytes": {"2": 5}},
+    ]

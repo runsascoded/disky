@@ -144,7 +144,7 @@ const SPANS: [string, number][] = [['1d', 1], ['3d', 3], ['7d', 7], ['14d', 14],
 // HTTP copy of a pre-deploy answer (they were kept a day until 2026-09-17,
 // five minutes since) is never replayed after a reader rule changes. Bump
 // with `CACHE_V` in functions/_lib/edgeCache.ts.
-const API_CV = '5'
+const API_CV = '6'
 // The section in view lives in the query (`?v=diff`, `encodeSection`), where a link preview's unfurler sees it; an
 // incoming `#diff` (or a retired `#changes`) is adopted into it, a legacy `?section=diff` rewritten (`main.tsx`). A
 // module constant: `useSectionSpy` re-resolves its mode, and re-binds its scroll listener, whenever this object's

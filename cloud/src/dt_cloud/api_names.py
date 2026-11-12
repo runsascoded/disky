@@ -50,3 +50,9 @@ def diff(body: dict) -> dict:
     out = {TOTALS.get(k, k): v for k, v in body.items()}
     out["rows"] = [{ROW.get(k, k): v for k, v in r.items()} for r in body.get("rows", [])]
     return out
+
+
+def owner(o: dict) -> dict:
+    """One user of an `/api/owners` body in the descriptive names (`bytes`, `class_bytes`), from the short ones (`b`, `mix`)
+    when it has them."""
+    return o if "bytes" in o else {"bytes": o.get("b", 0), "class_bytes": o.get("mix") or {}}

@@ -525,7 +525,7 @@ describe('filter no-match fallback on a v1 scan', () => {
   const base = { w: 1280, h: 800, minArea: 12, atten: 1, query: parseQuery('bk/b')! }
   it('reads the floor-free tier for a subtree within the cap', async () => {
     const v = await buildView(env, { ...base, date: V1, path: 'bk' })
-    expect([v.matches, v.matched]).toEqual([['bk/b'], [{ path: 'bk/b', b: 400, o: 1 }]])
+    expect([v.matches, v.matched]).toEqual([['bk/b'], [{ path: 'bk/b', bytes: 400, objects: 1 }]])
     expect([v.partial, v.approximate, v.approximateReason]).toEqual([undefined, true, 'this scan has no search index; small matches may be missing'])
   })
   it('skips that unprunable read past the cap: no matches instead of a Worker over its limits', async () => {

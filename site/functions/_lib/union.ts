@@ -30,7 +30,7 @@ import { ivRetry, pathScans, storeReady, withPathStore } from './index.js'
 import { indexedScan, noScan } from './scanArg.js'
 import { scanTimes } from './scanTimes.js'
 import { PRIMARY_STORE, StoreConfigError, storeConfigResponse, storeKey, type UnionView, unionViews, withStore } from './stores.js'
-import { readRootRows, type ViewNode } from './view.js'
+import { type MatchCount, type MatchRoot, readRootRows, type ViewNode } from './view.js'
 
 type Ctx = { request: Request; env: Env; waitUntil?: (p: Promise<unknown>) => void }
 
@@ -328,7 +328,6 @@ export const filteredVector = (r: Resolved, refused: readonly Refusal[]) => {
   return { ...v, sources: v.sources.map(s => { const x = refused.find(f => f.store === s.store); return x ? { ...s, refused: { code: x.code, error: x.error } } : s }) }
 }
 
-type Count = { n: number; b: number; o: number }
 type Interiors = { read: number; skipped: number; reason: string; late?: number }
 type RollupInfo = { children: number; kept: number; rows: number | null; bucketsOnly?: true; scopedBelow?: true }
 
@@ -336,8 +335,8 @@ type RollupInfo = { children: number; kept: number; rows: number | null; buckets
 export interface FilteredRoot {
   tree: ViewNode
   matches?: string[]
-  matched?: { path: string; b: number; o: number }[]
-  matchCount?: Count
+  matched?: MatchRoot[]
+  matchCount?: MatchCount
   matchesCapped?: true
   rollup?: RollupInfo
   excluded?: string[]
@@ -382,8 +381,8 @@ export function unionFilterFields(members: readonly { store: string; body: Omit<
   return {
     ...(hex ? { hexRuns: hex } : {}),
     matches: bodies.flatMap(b => b.matches ?? []).sort(),
-    matched: bodies.flatMap(b => b.matched ?? []).sort((x, y) => y.b - x.b || (x.path < y.path ? -1 : x.path > y.path ? 1 : 0)),
-    ...(counts.length ? { matchCount: { n: sumOf(counts, c => c.n), b: sumOf(counts, c => c.b), o: sumOf(counts, c => c.o) } } : {}),
+    matched: bodies.flatMap(b => b.matched ?? []).sort((x, y) => y.bytes - x.bytes || (x.path < y.path ? -1 : x.path > y.path ? 1 : 0)),
+    ...(counts.length ? { matchCount: { count: sumOf(counts, c => c.count), bytes: sumOf(counts, c => c.bytes), objects: sumOf(counts, c => c.objects) } } : {}),
     ...(bodies.some(b => b.matchesCapped) ? { matchesCapped: true as const } : {}),
     ...(rollups.length ? { rollup: {
       children: sumOf(rollups, r => r.children), kept: sumOf(rollups, r => r.kept),

@@ -632,7 +632,7 @@ describe('interval store g5: the requests after a cancelled read frozen at sever
 })
 
 describe('/api/series a window of scans at a time', () => {
-  type Body = { path: string; owner?: OwnerScope; lens?: string; chunks?: number; points: { date: string; b: number; o: number }[]; error?: string }
+  type Body = { path: string; owner?: OwnerScope; lens?: string; chunks?: number; points: { date: string; bytes: number; objects: number }[]; error?: string }
   const get = async (env: Env, q: string): Promise<{ status: number; body: Body }> => {
     const r = await seriesGet({ request: new Request(`http://localhost/api/series?${q}`), env } as never)
     return { status: r.status, body: await r.json() as Body }
