@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, 
 import { resolve } from 'node:path'
 import { apiClient, eventRequest, revisionProbe, verifyRevision } from './run.mjs'
 import {
-  accountFor, authorize, redactAccount, cfList, HELD_FUNCTIONS, withoutFunctions, fullCwdCheck, modePlan, ownedPagesDeployments, previewPlan, publishFull, publishWorker, requireImplemented,
+  accountFor, authorize, cfList, HELD_FUNCTIONS, withoutFunctions, fullCwdCheck, modePlan, ownedPagesDeployments, previewPlan, publishFull, publishWorker, requireImplemented,
   retireFull, retireWorker, selectMode, validateArtifact, workerConfig, wranglerUpload,
 } from './preview.mjs'
 
@@ -65,15 +65,6 @@ test('the account comes from exactly one of the target config and the account-id
   throws(() => accountFor(pagesTarget, account, false), { message: both })
   throws(() => accountFor(bare, 'A'.repeat(32)), { message: 'Invalid account ID' })
   throws(() => accountFor({ ...bare, account_id: '1'.repeat(31) }, ''), { message: 'Invalid account ID' })
-})
-
-test('a receipt names the account only as <account>: its field, API paths, error text; without an account it is unchanged', () => {
-  const receipt = { account, project: 'site', mutations: [{ method: 'DELETE', path: `${projectPath}/deployments/d1`, id: null }],
-    error: `404 on /accounts/${account}/pages`, removed_deployments: ['d1'] }
-  equal(redactAccount(receipt, account), { account: '<account>', project: 'site',
-    mutations: [{ method: 'DELETE', path: '/accounts/<account>/pages/projects/site/deployments/d1', id: null }],
-    error: '404 on /accounts/<account>/pages', removed_deployments: ['d1'] })
-  equal(redactAccount({ account: null, project: 'site' }, null), { account: null, project: 'site' })
 })
 
 test('mode selection: an explicit /preview <mode> wins, else one preview:<mode> label, else full; only full is built, on Pages, with a probe', () => {

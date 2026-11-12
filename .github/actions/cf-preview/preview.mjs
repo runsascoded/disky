@@ -12,20 +12,13 @@ export function requireThat(condition, message) {
 }
 
 /** The Cloudflare account: the target's `account_id` or the action's `account-id` input (a public repository keeps it
- *  out of tracked config: `secrets.CLOUDFLARE_ACCOUNT_ID`, masked in logs), exactly one of them, 32 hex. Gate needs none (null). */
+ *  out of tracked config, `vars.CLOUDFLARE_ACCOUNT_ID`), exactly one of them, 32 hex. Gate needs none (null). */
 export function accountFor(selected, given, required = true) {
   const sources = [selected.account_id, given].filter(value => value !== undefined && value !== null && value !== '')
   if (!required && sources.length === 0) return null
   requireThat(sources.length === 1, 'Account ID must come from exactly one of the target config and the account-id input')
   requireThat(/^[a-f0-9]{32}$/.test(sources[0]), 'Invalid account ID')
   return sources[0]
-}
-
-/** `value` with every occurrence of the account id written as `<account>`: what a receipt, a GitHub deployment's payload
- *  or a log line may carry in a public repository (a `vars.` value isn't masked, and API paths embed the id). */
-export function redactAccount(value, account) {
-  if (!account) return value
-  return JSON.parse(JSON.stringify(value).replaceAll(account, '<account>'))
 }
 
 /** No credentials or source-controlled commands belong in this plan. Config is read from the trusted base checkout.
