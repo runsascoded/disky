@@ -233,6 +233,8 @@ def seal(output: Path, plan_path: Path, source: Path) -> None:
     """Bind the upload to the checked config and the built artifact, without deployment secrets."""
     value = loads(plan_path.read_text())
     validate_source(source, value['sha'])
+    pending = sorted(path.name for path in (source / 'site/migrations').glob('*.sql'))
+    require(not pending, f'Pending D1 recipes: {", ".join(pending)}. Apply each to this deployment\'s databases (owner, with Ryan\'s go), `git rm` it, then release')
     config = source / 'site/wrangler.toml'
     parsed = toml_loads(config.read_text())
     require(parsed['name'] == value['project'], 'Pages project differs from the controller allowlist')

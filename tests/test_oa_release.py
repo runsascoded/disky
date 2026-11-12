@@ -152,6 +152,26 @@ def test_artifact_seal_and_tamper_refusal(tmp_path, monkeypatch):
     assert (result.exit_code, result.output, receipt.exists()) == (1, 'Error: Upload artifact/config changed\n', False)
 
 
+def test_seal_holds_a_release_while_a_d1_recipe_is_pending(tmp_path, monkeypatch):
+    monkeypatch.setattr(release, 'validate_source', lambda source, sha: None)
+    source = tmp_path / 'source'
+    site = source / 'site'
+    (site / 'migrations').mkdir(parents=True)
+    (site / 'migrations/b-tables.sql').write_text('ALTER TABLE t ADD COLUMN c TEXT;\n')
+    (site / 'migrations/a-index.sql').write_text('CREATE INDEX i ON t (c);\n')
+    (site / 'migrations/README.md').write_text('recipes\n')
+    (site / 'wrangler.toml').write_text('name="oa-hf-usage"\n[vars]\nDEV_HOST="dev.hf.oa.dev"\n')
+    setup_api(monkeypatch)
+    plan_path, seal_path = tmp_path / 'plan.json', tmp_path / 'seal.json'
+    plan_path.write_text(dumps(release.plan_release({'workflow_run': ci()}, 'workflow_run', REPO)))
+    result = CliRunner().invoke(release.main, ['seal', '-p', str(plan_path), '-o', str(seal_path), str(source)])
+    assert (result.exit_code, result.output, seal_path.exists()) == (
+        1,
+        "Error: Pending D1 recipes: a-index.sql, b-tables.sql. Apply each to this deployment's databases (owner, with Ryan's go), `git rm` it, then release\n",
+        False,
+    )
+
+
 def test_credential_inventory_never_returns_values_or_folds_source_up_into_next_line(tmp_path):
     path = tmp_path / '.envrc'
     path.write_text('source_up\nexport SLACK_BOT_TOKEN=do-not-output-one\nexport CF_ANALYTICS_TOKEN="do-not-output-two"\nsource_env other-secret-file\nexport OTHER_THING=do-not-output-three\n')
