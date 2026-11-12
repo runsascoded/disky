@@ -2,7 +2,7 @@
 
 **This branch deploys the public docs and staff-only fleet dashboard at [disky.oa.dev]. Each storage dashboard has its own deployment branch below.**
 
-[disky] maps where storage goes: scheduled scans of a store's buckets, then a treemap site with sizes over time, diffs between scans, owners and read recency. Open Athena runs four deployments, one per storage provider. Each has its own branch in this repo, and each branch merges the shared base, [`runsascoded/disky@cloud`][cloud].
+[disky] maps where storage goes: scheduled scans of a store's buckets, then a treemap site with sizes over time, diffs between scans, owners and read recency. Open Athena runs four deployments, one per storage provider. Each has its own branch in this repo, and each branch merges the shared base, this repo's [`cloud`][cloud] branch.
 
 <p>
 <a href="https://gcs.oa.dev"><img alt="gcs.oa.dev: the public preview (names and sizes omitted)" src="https://github.com/Open-Athena/disky/raw/gcs/site/public/og.jpg" width="49%"></a>
@@ -31,12 +31,12 @@ The sites are Open-Athena-gated. Each branch's README says how its scan runs, wh
 
 ## Elsewhere
 
-- **The shared base:** [`runsascoded/disky`][upstream], branch [`cloud`][cloud]: the scanning engine, the `dt-cloud` overlay, the site, and the specs.
-- **The public demo:** [r2.rbw.sh], built from the same base.
+- **The shared base:** branch [`cloud`][cloud]: the scanning engine, the `dt-cloud` overlay, the site, the fleet app, and the specs. Shared work lands there first; the deployment branches merge it.
+- **A self-hosted example:** [r2.rbw.sh], a public deployment over the author's own R2 buckets, run from [`runsascoded/disky`][rac] as anyone could: take `cloud`, configure it, host it.
 
-[disky]: https://github.com/runsascoded/disky
-[upstream]: https://github.com/runsascoded/disky
-[cloud]: https://github.com/runsascoded/disky/tree/cloud
+[disky]: https://github.com/Open-Athena/disky/tree/cloud
+[cloud]: https://github.com/Open-Athena/disky/tree/cloud
+[rac]: https://github.com/runsascoded/disky
 [`gcs`]: https://github.com/Open-Athena/disky/tree/gcs
 [`cw`]: https://github.com/Open-Athena/disky/tree/cw
 [`hf`]: https://github.com/Open-Athena/disky/tree/hf
