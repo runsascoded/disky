@@ -130,7 +130,7 @@ META_TREE_URL = "https://gcs.oa.dev/meta"   # /scans outputs link into this site
 # history on INDEX_R2 (`AGE_STORE_PREFIX`, the profile's `age-store` step; specs/age-store.md) for the scans it covers,
 # per-scan pyramids otherwise.
 STORES_EXTRA = "meta"
-STORES_JSON = '{"meta":{"path":"/meta","scope":"admin","vars":{"ROOT_LABEL":"Marin GCS disky metadata","SNAPSHOTS_SUBDIR":"meta","STORE_SCHEME":"gs://","STORE_BUCKETS":"oa-gcs-usage-dvx,oa-gcs-usage-index","STORE_PREFIXES":"meta-l2/,snapshots/meta/","STORE_BUCKET":"oa-gcs-usage-dvx","OBJECT_BUCKETS":"oa-gcs-usage-dvx","SERVED_R2":"1","ROOT_TITLE":"Data behind this site: scans, indexes and listings in oa-gcs-usage-dvx (GCS) and oa-gcs-usage-index (R2)","STATIC_GEN":"2026-10-18metab","FILTER_STATIC_HEAVY":"1","AGE_STORE_PREFIX":"history/meta-age"},"secrets":{"STORE_ACCESS_KEY_ID":"GCS_HMAC_KEY_ID","STORE_SECRET_ACCESS_KEY":"GCS_HMAC_SECRET"}}}'
+STORES_JSON = '{"meta":{"path":"/meta","scope":"admin","series_scope":"fleet","vars":{"ROOT_LABEL":"Marin GCS disky metadata","SNAPSHOTS_SUBDIR":"meta","STORE_SCHEME":"gs://","STORE_BUCKETS":"oa-gcs-usage-dvx,oa-gcs-usage-index","STORE_PREFIXES":"meta-l2/,snapshots/meta/","STORE_BUCKET":"oa-gcs-usage-dvx","OBJECT_BUCKETS":"oa-gcs-usage-dvx","SERVED_R2":"1","ROOT_TITLE":"Data behind this site: scans, indexes and listings in oa-gcs-usage-dvx (GCS) and oa-gcs-usage-index (R2)","STATIC_GEN":"2026-10-18metab","FILTER_STATIC_HEAVY":"1","AGE_STORE_PREFIX":"history/meta-age"},"secrets":{"STORE_ACCESS_KEY_ID":"GCS_HMAC_KEY_ID","STORE_SECRET_ACCESS_KEY":"GCS_HMAC_SECRET"}}}'
 
 # Secrets (set with `wrangler pages secret put <NAME> --project-name oa-gcs-usage`):
 #   SESSION_SECRET   — HMAC key for session cookies + IP hashing
@@ -186,7 +186,7 @@ META_TREE_URL = "https://dev.gcs.oa.dev/meta"   # /scans outputs link into this 
 # history on INDEX_R2 (`AGE_STORE_PREFIX`, the profile's `age-store` step; specs/age-store.md) for the scans it covers,
 # per-scan pyramids otherwise.
 STORES_EXTRA = "meta"
-STORES_JSON = '{"meta":{"path":"/meta","scope":"admin","vars":{"ROOT_LABEL":"Marin GCS disky metadata","SNAPSHOTS_SUBDIR":"meta","STORE_SCHEME":"gs://","STORE_BUCKETS":"oa-gcs-usage-dvx,oa-gcs-usage-index","STORE_PREFIXES":"meta-l2/,snapshots/meta/","STORE_BUCKET":"oa-gcs-usage-dvx","OBJECT_BUCKETS":"oa-gcs-usage-dvx","SERVED_R2":"1","ROOT_TITLE":"Data behind this site: scans, indexes and listings in oa-gcs-usage-dvx (GCS) and oa-gcs-usage-index (R2)","STATIC_GEN":"2026-10-18metab","FILTER_STATIC_HEAVY":"1","AGE_STORE_PREFIX":"history/meta-age"},"secrets":{"STORE_ACCESS_KEY_ID":"GCS_HMAC_KEY_ID","STORE_SECRET_ACCESS_KEY":"GCS_HMAC_SECRET"}}}'
+STORES_JSON = '{"meta":{"path":"/meta","scope":"admin","series_scope":"fleet","vars":{"ROOT_LABEL":"Marin GCS disky metadata","SNAPSHOTS_SUBDIR":"meta","STORE_SCHEME":"gs://","STORE_BUCKETS":"oa-gcs-usage-dvx,oa-gcs-usage-index","STORE_PREFIXES":"meta-l2/,snapshots/meta/","STORE_BUCKET":"oa-gcs-usage-dvx","OBJECT_BUCKETS":"oa-gcs-usage-dvx","SERVED_R2":"1","ROOT_TITLE":"Data behind this site: scans, indexes and listings in oa-gcs-usage-dvx (GCS) and oa-gcs-usage-index (R2)","STATIC_GEN":"2026-10-18metab","FILTER_STATIC_HEAVY":"1","AGE_STORE_PREFIX":"history/meta-age"},"secrets":{"STORE_ACCESS_KEY_ID":"GCS_HMAC_KEY_ID","STORE_SECRET_ACCESS_KEY":"GCS_HMAC_SECRET"}}}'
 STORE = "gcs"
 AUTH_MODE = "app"
 ROOT_LABEL = "Marin GCS (dev)"

@@ -45,6 +45,7 @@ export const KIND_DEFS: KindDef[] = [
   def('prefetch', 'client', 'Hover prefetches', ['prefetch', 'prefetches'], 'off'),
   def('viewport', 'client', 'Window size', ['resize', 'resizes'], 'off'),
   def('vis', 'client', 'Tab shown / hidden', ['visibility change', 'visibility changes'], 'off'),
+  def('life', 'client', 'Browser connectivity hints, lifecycle changes and long timer gaps', ['browser event', 'browser events'], 'off'),
 ]
 export const KIND_BY_NAME: Record<string, KindDef> = Object.fromEntries(KIND_DEFS.map(d => [d.kind, d]))
 

@@ -31,7 +31,7 @@ from urllib.request import Request, urlopen
 PUSHOVER_URL = 'https://api.pushover.net/1/messages.json'
 SLACK_URL = 'https://slack.com/api/chat.postMessage'
 # Discord's edge refuses urllib's default User-Agent (403, error 1010).
-USER_AGENT = 'disk-tree (https://github.com/runsascoded/disky, 1)'
+USER_AGENT = 'disk-tree (https://github.com/Open-Athena/disky, 1)'
 CHANNELS = ('pushover', 'discord', 'slack')
 # Discord message flag: no link previews.
 SUPPRESS_EMBEDS = 1 << 2
