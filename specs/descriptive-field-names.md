@@ -1,6 +1,6 @@
 # Descriptive field names: store columns, D1 and the site API
 
-**Status:** Phase 1 (inventory) done, 2026-11-12; Phase 2 awaiting the root's names. Owner: the root `disky` session (`cloud`). Implementation: a subagent on `w/field-names` in `wt/field-names`.
+**Status:** Phase 1 (inventory) and Phase 2 (site API renames) done on `w/field-names`, 2026-11-12, but for `/api/name-summary` (deferred, §Phase 2 Built). Phase 3 is a plan. Owner: the root `disky` session (`cloud`). Implementation: a subagent on `w/field-names` in `wt/field-names`.
 
 ## Why
 
@@ -27,9 +27,9 @@ Names that are already clear (`depth`, `path`, `size`, `mtime`, `n_files`, …) 
 
 ### Proposed renames at a glance
 
-- **Site API (Phase 2):** map node `n k b o t a us cb c f m pv src at` → `name kind bytes objects mtime last_read users class_bytes children folded matched provenance store scan`, and `d` (epoch day, always beside `t`) leaves the wire; diff row `p d k s a b oa ob x l` → `path depth kind status bytes_before bytes_after objects_before objects_after expanded lookup` (+ top-level `total_a/_b`, `objects_a/_b` → `bytes_before/_after`, `objects_before/_after`); the `{b, o}` pair → `{bytes, objects}` on series points, filter-cover items/roots, prefix stats, `/api/owners` users (`mix` → `class_bytes`), name-summary hot views.
-- **The one choice for the root:** `bytes`/`objects` (proposed: the UI's words, the spec's example, `/api/owners`'s top level) vs the store's `size`/`n_files`.
-- **Columnar:** measured before any code (below, §Phase 2): 10–20% fewer compressed bytes, no client-time win once decoded, and a decode step in every consumer (the server's union merge reads member bodies; six Python readers). Proposed: don't ship it.
+- **Site API (Phase 2):** map node `n k b o t a us cb c f m pv src at` → `name kind bytes objects mtime last_read owners class_bytes children folded matched provenance store scan`, and `d` (epoch day, always beside `t`) leaves the wire; diff row `p d k s a b oa ob x l` → `path depth kind status bytes_before bytes_after objects_before objects_after expanded lookup` (+ top-level `total_a/_b`, `objects_a/_b` → `bytes_before/_after`, `objects_before/_after`); the `{b, o}` pair → `{bytes, objects}` on series points, filter-cover items/roots, prefix stats, `/api/owners` users (`mix` → `class_bytes`), name-summary hot views.
+- **The one choice for the root:** `bytes`/`objects` (proposed: the UI's words, the spec's example, `/api/owners`'s top level) vs the store's `size`/`n_files`. The root picked `bytes`/`objects`.
+- **Columnar:** measured before any code (below, §Phase 2): 10–20% fewer compressed bytes, no client-time win once decoded, and a decode step in every consumer (the server's union merge reads member bodies; six Python readers). Proposed not to ship it; the root agreed: not shipped.
 - **Store (Phase 3, at a rebuild):** only the interval store's `path`-sort columns are safe from the rethink: `vf`/`vt` → `valid_from`/`valid_to`, `us` → `owner_slices`, `wts`/`wb` → `mtime_weighted_sum`/`mtime_weight_bytes`, `c2..c4` → class names via `CLASS_COLS`, `churn_cum`/`churn_end` → `cumulative_churn`/`…_at_end`; `scans.json`/manifest key collisions (`version`, `level`, `generation`). Everything else in 1a/1b is retire?; per-scan sorts and sidecars retire.
 - **D1 (Phase 3, recipes):** the footer tables (`index_row_groups`: `rg d_min p_min b_max u_min rg_json`, `index_schema`: `date gen dir version`) belong to the layout lean-scans retires: leave them. Worth recipes: `admin_edits`, `og_tokens`, `scan_runs`, `activity_*`, `deletion_progress` short names; `deletion_runs.head`/`exec_head` dropped. Auth-package and pyrmts tables stay.
 
@@ -50,7 +50,7 @@ Writers of every served column: py `interval_store.py` (`PV_SCHEMA`/`SV_SCHEMA`/
 
 | sort | name | meaning | proposed | extra readers | retire? |
 |---|---|---|---|---|---|
-| all (`path`, `bysize`, `reads`, `slices*`, `attribution`) | `vf` / `vt` | version valid from / to: scan epoch s, half-open; `vt` = 4291747200 while open | `valid_from` / `valid_to` (Open question) | + `interval_attribution.py`, `interval_churn.py`, `sweep_source.py`; `_lib/diffDescent.ts`, `diffLevel.ts`, `view.ts`, `ownerHist.ts`, `api/series.ts` | `path`: keep; others retire? |
+| all (`path`, `bysize`, `reads`, `slices*`, `attribution`) | `vf` / `vt` | version valid from / to: scan epoch s, half-open; `vt` = 4291747200 while open | `valid_from` / `valid_to` | + `interval_attribution.py`, `interval_churn.py`, `sweep_source.py`; `_lib/diffDescent.ts`, `diffLevel.ts`, `view.ts`, `ownerHist.ts`, `api/series.ts` | `path`: keep; others retire? |
 | `path`, `bysize` | `us` | owner slices in one string: `''`, an owner, or JSON `[["usr", bytes], …]` | `owner_slices` | `interval_churn.py`; TS `_lib/index.ts` only (decoded to `Row.us`) | as above |
 | `path`, `bysize`, `slices*` | `wts` | Σ mtime_mean · weight | `mtime_weighted_sum` | `_lib/view.ts`, `pathStore.test.ts` | as above |
 | same | `wb` | Σ weight bytes behind the mean | `mtime_weight_bytes` (the static index's `mtime_w`) | `_lib/view.ts` | as above |
@@ -179,7 +179,7 @@ Defined: server `site/functions/_lib/view.ts` (`ViewNode`, `nodeOf`, `display`, 
 | `d` | newest write, epoch **days** (`floor(t / 86400)`) | **drop** from the wire (always beside `t`); the client derives the day (`mtimeDay(n)`) where ~10 call sites read it. Alt: `mtime_day` | `ChildrenTable.tsx`, `PrefixTable.tsx`, `Treemap.tsx`, `readLens.ts`, `viewNums.ts`, `filterTree.ts`, `stagedTree.ts`, `AgeChart.tsx`, `ObjectPanel.tsx`; `interval_read.py` |
 | `t` | newest write's instant, epoch s | `mtime` (the store column it is the max of) | `Treemap.tsx`, `viewNums.ts`, `readLens.ts`; `interval_read.py` |
 | `a` | last read, epoch days (subtree max, access logs) | `last_read` (store column name) | `ChildrenTable.tsx`, `PrefixTable.tsx`, `Treemap.tsx`, `readLens.ts`, `ledgerOverlay.ts`, `stagedTree.ts`, `AgeChart.tsx`; `interval_read.py` |
-| `us` | `[user, bytes][]`, desc | `users` | `ChildrenTable.tsx`, `PrefixTable.tsx`, `OwnerBar.tsx`, `filterTree.ts`, `ledgerOverlay.ts`, `stagedTree.ts`, `StagedPage.tsx`, `Treemap.tsx`, `types.ts` (`userBytes`); server `_lib/owners.ts`, `ownerBands.ts`, `ownerHist.ts`, `prefixes.ts`, `stagedSlack.ts`, `og/data.ts`, `og/pages.ts`; `interval_read.py` |
+| `us` | `[owner, bytes][]`, desc | `owners` (the root's pick: the UI, `/api/owners` and the filters all say owner) | `ChildrenTable.tsx`, `PrefixTable.tsx`, `OwnerBar.tsx`, `filterTree.ts`, `ledgerOverlay.ts`, `stagedTree.ts`, `StagedPage.tsx`, `Treemap.tsx`, `types.ts` (`userBytes`); server `_lib/owners.ts`, `ownerBands.ts`, `ownerHist.ts`, `prefixes.ts`, `stagedSlack.ts`, `og/data.ts`, `og/pages.ts`; `interval_read.py` |
 | `cb` | non-Standard class → bytes (`"2"` NL, `"3"` CL, `"4"` AR) | `class_bytes` (as `meta.json`'s) | `DupsPage.tsx`, `stagedTree.ts`, `OwnerControls.tsx`, `Treemap.tsx`, `types.ts` (`classMix`); `interval_read.py`/`interval_verify.py` |
 | `c` | children | `children` | everything walking the tree; py `probe.py`, `digest_cw.py` |
 | `f` | an `(other)` fold: how many children it stands in for | `folded` | `Treemap.tsx` (dust density); `interval_verify.py` (`with_f`) |
@@ -241,6 +241,22 @@ Bodies that are D1 rows passed through (admin, runs, plans, staged, grants, acti
 - Python consumers of the API (probe, warm-cache, diff-bench, digest, …) change in the same commit.
 - `functions/gates.test.ts` and every API test assert the new shapes exactly.
 
+### Built (2026-11-12, `w/field-names`)
+
+Three `[cloud]` commits, each with its cache bumps (`CACHE_V` 12 → 13 → 14 in `edgeCache.ts`, the client's `API_CV` 4 → 5 → 6 and `diff_bench.CV` with it; `COVER_V` 8, `MATCHES_V` 2), server, client, Python readers and tests together:
+
+1. **Map nodes** (§3a): `/api/subtree`'s `tree` (`view.ts` `ViewNode`, now a precise interface; the union root's `store`/`scan`), `/api/prefixes`' stats (`PrefixStat` = a node's measures). `d` leaves the wire; the client takes the day from `mtime` (`types.ts` `mtimeDay`). The Python oracle (`interval_read.node`/`tree`/`flatten`, `interval_verify.compare`) emits the same names; `fixtures/iv/expected.json` regenerated on mgu with a new `iv/gen.py expected` mode (expectations only, the store's bytes untouched), checked equal to the old file under the rename (84 views, 468 tiles, each `mtime`'s day the old `d`).
+2. **Diff rows and levels** (§3b–c): rows `path depth kind status bytes_before bytes_after objects_before objects_after expanded lookup` (`capDiffRows` over `DiffSides`; the union merge's `src` → `store`), totals `bytes_before … objects_after`; level rows `name kind status` + sides, `other.count`, and the echoed `top_k` / `measure`.
+3. **The `{b, o}` pairs** (§3d): `matched` `{ path, bytes, objects }` and `matchCount` `{ count, bytes, objects }` (converted from the readers' own `{ path, b, o }` at `matchLists`), `/api/series` points and root traces (`wirePoint`), `/api/filter-cover` items and `roots`, `/api/name-matches` items, `/api/owners` users (`{ bytes, class_bytes }`, converted from the ledger's stored `{ b, mix }`).
+
+Internal shapes keep their short names where they never reach a body (the view reader's `Agg`, `RootRow`, the ledger's stored totals, the client's table rows): the rename is the wire's.
+
+**Dual-read follow-ups (remove once every deployment's site serves the descriptive names):**
+- `cloud/src/dt_cloud/api_names.py`: `node`/`tree` (read by `probe`, `warm`, `bench/score`, `sheet_mirror`, `diff_bench`), `diff` (`diff_check`, `diff_bench`), `owner` (`sheet_mirror`).
+- `fleet/functions/_lib/fleet.ts` `SeriesWire`: `bytes ?? b` from each deployment's `/api/series?store=meta`.
+
+**Not done:** `/api/name-summary` (the `/names` page's hot views: `root`, `buckets[]`, `delta` as `b`/`o`). Its `dated-name-summary-v1` contract is validated key-for-key on the client (`nameModel.ts` `weights`, `hotModel.ts`) with its own fixtures (`nameTestFixtures.ts`, `datedNameTestFixtures.ts`, ~200 uses across 16 files); renaming it is a contract change that should come with a `-v2` schema, as its own commit.
+
 ### Columnar experiment (measured 2026-11-12, before any code change)
 
 Real bodies from the r2 demo (`https://r2.rbw.sh/api/…`, scan `2026-11-12`; its nodes carry no `us`/`cb`, which gcs's do), each re-encoded three ways by `tmp/colbench/bench.mjs` (worktree-local, not committed): **short** (as served), **descriptive** (the same objects, keys renamed per §3a/3b, `d` dropped), **columnar** (descriptive names, one array per field; the tree flattened preorder with a `depth` column, an absent value `null`, an all-null column omitted). Sizes: raw, gzip-6, brotli-4 and brotli-11 (the edge's level is Cloudflare's choice; the two brotli levels bracket it). Time: median of 40 `JSON.parse` (+ for columnar, the decode back to the nested objects the client draws from) in Node 26 (V8, as Chrome), on an M-series laptop.
@@ -285,6 +301,8 @@ Real bodies from the r2 demo (`https://r2.rbw.sh/api/…`, scan `2026-11-12`; it
 
 ## Phase 3: store and D1 renames (ride a rebuild; never their own rebuild)
 
+Plan only (not started). Names from the inventory: the interval store's `path`-sort columns `vf`/`vt` → `valid_from`/`valid_to` (epoch seconds), `us` → `owner_slices`, `wts`/`wb` → `mtime_weighted_sum`/ `mtime_weight_bytes`, `c2..c4` → the deployment's class names through `CLASS_COLS`, `churn_cum`/`churn_end` → `cumulative_churn`/`cumulative_churn_at_end`, and the `scans.json`/manifest collisions (`version` → `listing_format`, a run's `level` → `counter_level`, …). Everything the inventory marks retire? waits for the rethink. D1: the footer tables stay (the layout lean-scans retires); recipes for the owned short names in §2.
+
 - **Store columns** change only in a generation that is being rebuilt anyway (the next compaction or backfill, as `c2..c4` did), with the reader accepting both spellings for exactly the generations still served, and that dual-read removed once no served generation has the old names. Each deployment's rebuild is its owner's.
 - **D1 column renames** are recipes (`site/migrations/<slug>.sql` + `schema.sql` regenerated, `ALTER TABLE … RENAME COLUMN`), applied by each deployment's owner with Ryan's go.
 - **The index rethink** (`specs/full-scan-serving-bench.md`, `wt/index-research`'s `fleet-index-research.md`) may replace the served layout. Don't rename columns of a layout the rethink is about to retire; the inventory marks which.
@@ -297,7 +315,9 @@ Real bodies from the r2 demo (`https://r2.rbw.sh/api/…`, scan `2026-11-12`; it
 
 ## Open
 
-- Whether `vf`/`vt` (valid from / valid to, scan ordinals) should become `valid_from`/`valid_to` or `from_scan`/`to_scan`.
-- `bytes`/`objects` (proposed for the API) or the store's `size`/`n_files`.
-- Columnar bodies: proposed not to ship (measurements above).
-- Python API readers dual-read (new name first, old fallback) until every deployment's site and job images carry the rename, then drop the fallback.
+Resolved (root, 2026-11-12): `vf`/`vt` are epoch seconds (a version's half-open `[valid_from, valid_to)`; open at 4291747200), not scan ordinals, and become `valid_from`/`valid_to` at Phase 3; the API says `bytes`/`objects`; a node's owner split is `owners`; columnar bodies don't ship; Python readers dual-read until every deployment carries the rename.
+
+Still open:
+- `/api/name-summary`'s weights (`root`, `buckets[]`, `delta`: `b`/`o`) — deferred, see §Phase 2 Built.
+- The short-name fallbacks' removal (§Phase 2 Built, follow-ups).
+- `iv/gen.py`'s full rebuild (`main`) fails on today's `write_served` (it selects `churn_cum`, which the fixture's ranges don't carry); `gen.py expected` regenerates `expected.json` alone and was used here.
