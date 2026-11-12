@@ -42,14 +42,14 @@ describe('large sets go in batches, never refused', () => {
 
 describe('a filtered row: its label and its matches', () => {
   it('a row holding one chain of single children shows the path down it, as its tile does', () => {
-    expect(chainOf({ n: 'marin-eu-west4', c: [{ n: 'tomat', c: [{ n: 'a' }, { n: 'b' }] }] })).toEqual({ label: 'marin-eu-west4/tomat', segs: ['marin-eu-west4', 'tomat'] })
-    expect(chainOf({ n: 'a', c: [{ n: 'b', c: [{ n: 'c', c: [{ n: 'd' }] }] }] })).toEqual({ label: 'a/…/d', segs: ['a', 'b', 'c', 'd'] })
-    expect(chainOf({ n: 'a', c: [{ n: '(other)' }] })).toEqual({ label: 'a', segs: ['a'] })
-    expect(chainOf({ n: 'a', c: [{ n: 'x' }, { n: 'y' }] })).toEqual({ label: 'a', segs: ['a'] })
+    expect(chainOf({ name: 'marin-eu-west4', children: [{ name: 'tomat', children: [{ name: 'a' }, { name: 'b' }] }] })).toEqual({ label: 'marin-eu-west4/tomat', segs: ['marin-eu-west4', 'tomat'] })
+    expect(chainOf({ name: 'a', children: [{ name: 'b', children: [{ name: 'c', children: [{ name: 'd' }] }] }] })).toEqual({ label: 'a/…/d', segs: ['a', 'b', 'c', 'd'] })
+    expect(chainOf({ name: 'a', children: [{ name: '(other)' }] })).toEqual({ label: 'a', segs: ['a'] })
+    expect(chainOf({ name: 'a', children: [{ name: 'x' }, { name: 'y' }] })).toEqual({ label: 'a', segs: ['a'] })
   })
   // gcs prod, `?f=tomat`: `marin-us-east5` drew one child (`tomat`), but held 9 match roots — `tomat/` and 8
   // `flan_*_rotten_tomatoes_*.parquet` files too small to draw. Its label named only `tomat`.
-  const east5 = { n: 'marin-us-east5', c: [{ n: 'tomat', c: [{ n: 'a' }, { n: 'b' }] }] }
+  const east5 = { name: 'marin-us-east5', children: [{ name: 'tomat', children: [{ name: 'a' }, { name: 'b' }] }] }
   const flan = Array.from({ length: 8 }, (_, i) => ({ path: `marin-us-east5/data/hrm_text_split/flan_direct/flan_${i}_rotten_tomatoes_part_00000.parquet` }))
   it('a row names the path to its match only when it holds exactly one (cut at the match); several: its name and how many; unknown: its name', () => {
     expect([
@@ -61,12 +61,12 @@ describe('a filtered row: its label and its matches', () => {
       rowLabel(east5, 'marin-us-east5', { n: 9, atLeast: true }),
       rowLabel(east5, 'marin-us-east5', { n: 1, atLeast: true }),
       // The drawn chain runs past the match (`tomat` drew one child): the label stops at the match.
-      rowLabel({ n: 'b', c: [{ n: 'tomat', c: [{ n: 'only' }] }] }, 'b', { n: 1, one: 'b/tomat' }),
+      rowLabel({ name: 'b', children: [{ name: 'tomat', children: [{ name: 'only' }] }] }, 'b', { n: 1, one: 'b/tomat' }),
       // The row is the match itself.
       rowLabel(east5, 'marin-us-east5', { n: 1, one: 'marin-us-east5' }),
       // One match the drawn chain doesn't reach (drawn elsewhere, or not at all): the name and the count.
       rowLabel(east5, 'marin-us-east5', { n: 1, one: flan[0].path }),
-      rowLabel({ n: 'a', c: [{ n: 'b', c: [{ n: 'c', c: [{ n: 'd' }] }] }] }, 'x/a', { n: 1, one: 'x/a/b/c/d' }),
+      rowLabel({ name: 'a', children: [{ name: 'b', children: [{ name: 'c', children: [{ name: 'd' }] }] }] }, 'x/a', { n: 1, one: 'x/a/b/c/d' }),
     ]).toEqual([
       { label: 'marin-us-east5/tomat', segs: ['marin-us-east5', 'tomat'] },
       { label: 'marin-us-east5', segs: ['marin-us-east5'], count: 9 },
@@ -125,13 +125,13 @@ describe('a filtered row: its label and its matches', () => {
     const drilled = { matched: e5.map((path, i) => ({ path, b: 9 - i, o: 1 })), matchCount: { n: 9, b: 2121011255780, o: 121170 } }
     const atRoot = rowMatchesOf(root.matched, matchedListOf(root))
     const inE5 = rowMatchesOf(drilled.matched, matchedListOf(drilled))
-    const e5Node = { n: 'marin-us-east5', c: [{ n: 'tomat', c: [{ n: 'results' }, { n: 'cache' }, { n: 'x' }] }] }
+    const e5Node = { name: 'marin-us-east5', children: [{ name: 'tomat', children: [{ name: 'results' }, { name: 'cache' }, { name: 'x' }] }] }
     expect([
       root.matched.length,
       rowLabel(e5Node, 'marin-us-east5', atRoot('marin-us-east5')),
-      rowLabel({ n: 'marin-eu-west4', c: [{ n: 'tomat' }] }, 'marin-eu-west4', atRoot('marin-eu-west4')),
-      rowLabel({ n: 'tomat', c: [{ n: 'results' }, { n: 'cache' }] }, 'marin-us-east5/tomat', inE5('marin-us-east5/tomat')),
-      rowLabel({ n: 'data', c: [{ n: 'hrm_text_split', c: [{ n: 'flan_direct' }] }] }, 'marin-us-east5/data', inE5('marin-us-east5/data')),
+      rowLabel({ name: 'marin-eu-west4', children: [{ name: 'tomat' }] }, 'marin-eu-west4', atRoot('marin-eu-west4')),
+      rowLabel({ name: 'tomat', children: [{ name: 'results' }, { name: 'cache' }] }, 'marin-us-east5/tomat', inE5('marin-us-east5/tomat')),
+      rowLabel({ name: 'data', children: [{ name: 'hrm_text_split', children: [{ name: 'flan_direct' }] }] }, 'marin-us-east5/data', inE5('marin-us-east5/data')),
     ]).toEqual([
       205,
       { label: 'marin-us-east5', segs: ['marin-us-east5'], count: 9, atLeast: true },

@@ -156,12 +156,12 @@ export function rowMatchesOf(matched: readonly { path: string }[] | undefined, l
  *  only ever comes from `m`: the drawn tree (`chainOf`) is capped by pixels, so a lone drawn child says
  *  nothing about what else matched. */
 export function rowLabel(node: ChainNode, row: string, m: RowMatches | null): { label: string; segs: string[]; count?: number; atLeast?: true } {
-  const own = { label: node.n, segs: [node.n] }
+  const own = { label: node.name, segs: [node.name] }
   if (!m || m.n === 0) return own
   if (m.atLeast) return m.n > 1 ? { ...own, count: m.n, atLeast: true } : own
   if (m.n === 1 && m.one != null) {
     if (m.one === row) return own
-    const segs = [node.n, ...m.one.slice(row.length + 1).split('/')]
+    const segs = [node.name, ...m.one.slice(row.length + 1).split('/')]
     const chain = chainOf(node).segs
     if (segs.every((s, i) => chain[i] === s)) return { label: segs.length > 3 ? `${segs[0]}/…/${segs[segs.length - 1]}` : segs.join('/'), segs }
   }
@@ -170,11 +170,11 @@ export function rowLabel(node: ChainNode, row: string, m: RowMatches | null): { 
 
 /** The drawn chain of single children below a node, as the treemap tile labels a collapsed chain (`a/b/c`, or
  *  `a/…/z` past three). Drawn only: a table row's label takes it only up to its one exact match (`rowLabel`). */
-export interface ChainNode { n: string; c?: ChainNode[] }
+export interface ChainNode { name: string; children?: ChainNode[] }
 export function chainOf(node: ChainNode): { label: string; segs: string[] } {
-  const segs = [node.n]
+  const segs = [node.name]
   let cur = node
-  while (cur.c?.length === 1 && !cur.c[0].n.startsWith('(')) { cur = cur.c[0]; segs.push(cur.n) }
+  while (cur.children?.length === 1 && !cur.children[0].name.startsWith('(')) { cur = cur.children[0]; segs.push(cur.name) }
   const label = segs.length > 3 ? `${segs[0]}/…/${segs[segs.length - 1]}` : segs.join('/')
   return { label, segs }
 }

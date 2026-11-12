@@ -466,15 +466,15 @@ describe('D1', () => {
   const view = (env: Env, date: string, path: string, t: string, extra: Partial<Parameters<typeof buildView>[1]> = {}) =>
     buildView(env, { date, path, w: W, h: H, minArea: MIN_AREA, atten: ATTEN, query: q(t), ...extra })
   /** The tree's top level: per child `[name, bytes, objects, m?]` (`(other)` included). */
-  const top = (v: View) => (v.tree.c ?? []).map(c => [c.n, c.b, c.o, ...(c.m ? ['m'] : [])])
+  const top = (v: View) => (v.tree.children ?? []).map(c => [c.name, c.bytes, c.objects, ...(c.matched ? ['m'] : [])])
   /** A tree whose synthesized nodes — `(other)` folds and the ancestors holding only match roots — carry no
    *  written-time / read-day / class mix: a static view looks up only its drawn roots' own rows, so an
    *  ancestor of roots under the pixel budget (`bin` at the root: 12 roots, 4 drawn) has bytes, objects and
    *  owners, not those (the search view knows every root's row). Match roots and their insides keep them. */
   const sansFoldDetail = (n: ViewNode, inRoot = false): ViewNode => {
-    const { d: _d, t: _t, a: _a, cb: _cb, ...rest } = n
-    const keep = inRoot || !!n.m
-    return { ...(keep ? n : rest), ...(n.c ? { c: n.c.map(c => sansFoldDetail(c, keep && c.n !== '(other)')) } : {}) } as ViewNode
+    const { mtime: _t, last_read: _a, class_bytes: _cb, ...rest } = n
+    const keep = inRoot || !!n.matched
+    return { ...(keep ? n : rest), ...(n.children ? { children: n.children.map(c => sansFoldDetail(c, keep && c.name !== '(other)')) } : {}) }
   }
   const sansP1 = (v: View) => ({ ...v, tier: v.tier.replace(/^(drill|search)\+/, '+'), tree: sansFoldDetail(v.tree) })
   const matchedRows = (v: { matched?: { path: string; b: number; o: number }[] }) =>
@@ -518,7 +518,7 @@ describe('D1', () => {
           const all = total(exp), k = total(Object.fromEntries(keptExp))
           const rest = [all[0] - k[0], all[1] - k[1]]
           const isRoot = (c: string) => c.toLowerCase().includes(t)
-          got.push([t, P, d, v.tier, v.tree.b, v.tree.o, top(v), matchedRows(v), v.matchCount, v.matchesCapped, v.rollup])
+          got.push([t, P, d, v.tier, v.tree.bytes, v.tree.objects, top(v), matchedRows(v), v.matchCount, v.matchesCapped, v.rollup])
           want.push([t, P, d, 'rollup', all[0], all[1],
             [...keptExp.map(([c, [b, o]]) => [c, b, o, ...(isRoot(c) ? ['m'] : [])]).sort((x, y) => (y[1] as number) - (x[1] as number)), ...(rest[0] > 0.5 ? [['(other)', rest[0], rest[1]]] : [])],
             keptExp.filter(([c]) => isRoot(c)).map(([c, [b, o]]) => [P === '' ? c : `${P}/${c}`, b, o]).sort((x, y) => ((x[0] as string) < (y[0] as string) ? -1 : 1)),
@@ -531,8 +531,8 @@ describe('D1', () => {
 
     it('a kept child that is a match root carries its own row\'s kind (a file under `bk/fill` for `0`: the K = 3 largest peaks, ties by name)', async () => {
       const v = await view(envStatic(), A, 'bk/fill', '0', { threshold: 0.5 })
-      expect(v.tree.c!.map(c => [c.n, c.k, c.b, c.o, c.m, c.f])).toEqual([
-        ['f00011', 'file', 2048, 1, 1, undefined], ['f00023', 'file', 2048, 1, 1, undefined], ['f00035', 'file', 2048, 1, 1, undefined],
+      expect(v.tree.children!.map(c => [c.name, c.kind, c.bytes, c.objects, c.matched, c.folded])).toEqual([
+        ['f00011', 'file', 2048, 1, true, undefined], ['f00023', 'file', 2048, 1, true, undefined], ['f00035', 'file', 2048, 1, true, undefined],
         // 3000 files of 1 << (i % 12) bytes: 250 × 4095.
         ['(other)', 'dir', 250 * 4095 - 3 * 2048, 2997, undefined, 2997],
       ])
@@ -685,7 +685,7 @@ describe('D1', () => {
       const want: unknown[] = []
       for (const t of MEMBERS) for (const d of DATES) {
         const v = await view(envStatic(noDrill()), d, '', t, { threshold: 0.5 })
-        got.push([t, d, v.tier, v.tree.b, v.tree.o, top(v), matchedRows(v), v.matchCount, v.matchesCapped, v.rollup, v.approximate, v.partial])
+        got.push([t, d, v.tier, v.tree.bytes, v.tree.objects, top(v), matchedRows(v), v.matchCount, v.matchesCapped, v.rollup, v.approximate, v.partial])
         const { member } = await catalog.lookup(t)
         const cells = Object.entries(catalogAnswer(member!, [d])[d]).map(([c, [b, o]]) => [c, Number(b), Number(o)] as [string, number, number])
         // The same cells as brute force from the objects.
@@ -710,7 +710,7 @@ describe('D1', () => {
 
     it('a one- or two-character literal no name holds: exactly zero at the root (no walk, no approximate flag)', async () => {
       const v = await view(envStatic(noDrill()), A, '', 'qq')
-      expect([v.tier, v.tree.b, v.tree.o, v.matched, v.approximate]).toEqual(['none', 0, 0, [], undefined])
+      expect([v.tier, v.tree.bytes, v.tree.objects, v.matched, v.approximate]).toEqual(['none', 0, 0, [], undefined])
     })
 
     it('below the root: `term-too-common`, never the walk — at every heavy path, both scans', async () => {
@@ -881,7 +881,7 @@ describe('D1', () => {
   }
 
   /** A view's tree as `bruteNest` spells it: per child `[name, bytes, objects, 'm'?, children?]`, by name. */
-  const shape = (n: ViewNode): unknown[] => (n.c ?? []).map(c => [c.n, c.b, c.o, ...(c.m ? ['m'] : []), ...(c.c?.length ? [shape(c)] : [])]).sort((x, y) => ((x[0] as string) < (y[0] as string) ? -1 : 1))
+  const shape = (n: ViewNode): unknown[] => (n.children ?? []).map(c => [c.name, c.bytes, c.objects, ...(c.matched ? ['m'] : []), ...(c.children?.length ? [shape(c)] : [])]).sort((x, y) => ((x[0] as string) < (y[0] as string) ? -1 : 1))
 
   describe('a heavy literal\'s rollup view nests (the drawn children answered in turn)', () => {
     beforeAll(loadScanRows)
@@ -902,7 +902,7 @@ describe('D1', () => {
         const b = await bruteNest(t, P, d, T)
         if (b.nested.size > 1) nestedAny++
         const [tb, to] = [...b.m].filter(([p]) => parent(p) === P).reduce((s, [, [x, y]]) => [s[0] + x, s[1] + y], [0, 0])
-        got.push([t, P, d, T, v.tier, v.tree.b, v.tree.o, shape(v.tree), matchedRows(v), v.interiors ?? null])
+        got.push([t, P, d, T, v.tier, v.tree.bytes, v.tree.objects, shape(v.tree), matchedRows(v), v.interiors ?? null])
         want.push([t, P, d, T, 'rollup', tb, to, b.tree, b.matched, null])
       }
       expect(got).toEqual(want)
@@ -911,19 +911,19 @@ describe('D1', () => {
 
     it('a drawn match root\'s inside is the unfiltered view of its path (every descendant matches), `FILTER_SUBDIV_LEVELS` deep', async () => {
       /** Every node under `n` but its `(other)` folds: `[path below n, bytes, objects, kind]`, depth first. */
-      const flat = (n: ViewNode, pre = ''): unknown[] => (n.c ?? []).filter(c => c.n !== '(other)')
-        .sort((x, y) => (x.n < y.n ? -1 : 1)).flatMap(c => [[`${pre}${c.n}`, c.b, c.o, c.k], ...flat(c, `${pre}${c.n}/`)])
+      const flat = (n: ViewNode, pre = ''): unknown[] => (n.children ?? []).filter(c => c.name !== '(other)')
+        .sort((x, y) => (x.name < y.name ? -1 : 1)).flatMap(c => [[`${pre}${c.name}`, c.bytes, c.objects, c.kind], ...flat(c, `${pre}${c.name}/`)])
       const got: unknown[] = []
       const want: unknown[] = []
       let inside = 0
       for (const [t, P] of await rollupViews()) for (const d of DATES) for (const T of [0.5, 40]) {
         const v = await view(envStatic(), d, P, t, { threshold: T })
         const roots: [string, ViewNode][] = []
-        const walk = (n: ViewNode, p: string) => { for (const c of n.c ?? []) { const cp = p === '' ? c.n : `${p}/${c.n}`; if (c.m) roots.push([cp, c]); else walk(c, cp) } }
+        const walk = (n: ViewNode, p: string) => { for (const c of n.children ?? []) { const cp = p === '' ? c.name : `${p}/${c.name}`; if (c.matched) roots.push([cp, c]); else walk(c, cp) } }
         walk(v.tree, P)
         for (const [R, n] of roots) {
           // The plain view's rule for subdividing a root: more than one object, a tile of at least 64² px.
-          const subdiv = n.o > 1 && n.b >= T * 4096 / MIN_AREA
+          const subdiv = n.objects > 1 && n.bytes >= T * 4096 / MIN_AREA
           const plain = subdiv ? flat((await buildView(base, { date: d, path: R, w: W, h: H, minArea: MIN_AREA, atten: ATTEN, threshold: T, maxDepth: 3 })).tree) : []
           if (plain.length) inside++
           got.push([t, P, d, T, R, flat(n)])
@@ -943,7 +943,7 @@ describe('D1', () => {
         // A root subdivides on a side whose view draws it with more than one object and a tile of at least 64² px.
         const subdiv = new Set<string>()
         for (const date of DATES) {
-          const walk = (n: ViewNode, p: string) => { for (const c of n.c ?? []) { const cp = p === '' ? c.n : `${p}/${c.n}`; if (c.m) { if (c.o > 1 && c.b >= T * 4096 / MIN_AREA) subdiv.add(cp) } else walk(c, cp) } }
+          const walk = (n: ViewNode, p: string) => { for (const c of n.children ?? []) { const cp = p === '' ? c.name : `${p}/${c.name}`; if (c.matched) { if (c.objects > 1 && c.bytes >= T * 4096 / MIN_AREA) subdiv.add(cp) } else walk(c, cp) } }
           walk((await view(envStatic(), date, P, t, { threshold: T })).tree, P)
         }
         const rel = (p: string) => P === '' ? p : p.slice(P.length + 1)
@@ -970,7 +970,7 @@ describe('D1', () => {
           ['fill', 1023750, 3000, [['(other)', 250 * 4095 - 3 * 2048, 2997], ['f00011', 2048, 1, 'm'], ['f00023', 2048, 1, 'm'], ['f00035', 2048, 1, 'm']]],
         ]],
       ])
-      expect(v.tree.c![0].c![0].c!.filter(c => c.m).map(c => c.k)).toEqual(['file', 'file', 'file'])
+      expect(v.tree.children![0].children![0].children!.filter(c => c.matched).map(c => c.kind)).toEqual(['file', 'file', 'file'])
     })
 
     it('`depth=N` caps the nest at P + N; the first paint and a floor read nest nothing', async () => {
@@ -1015,7 +1015,7 @@ describe('D1', () => {
     it('the time budget: a nest past it is `late` (kept briefly, upgraded), its totals still exact', async () => {
       const slow: HitSource = { hits: async (k, u) => u === '' || u === 'bk' ? drillSource(drillBlobs()).hits(k, u) : new Promise(r => setTimeout(() => r(drillSource(drillBlobs()).hits(k, u)), 200)) }
       const v = await view(envStatic(heavyStore(slow)), A, '', '0', { threshold: 0.5, phase2Ms: 50 })
-      expect([shape(v.tree), v.interiors, v.tree.b, v.tree.o]).toEqual([
+      expect([shape(v.tree), v.interiors, v.tree.bytes, v.tree.objects]).toEqual([
         [['bk', 1023750, 3000, [['fill', 1023750, 3000]]]],
         { read: 1, skipped: 1, reason: '1 past the time budget', late: 1 },
         1023750, 3000,
@@ -1191,7 +1191,7 @@ describe('D1', () => {
     it('the root view nests three levels, node for node = brute force; its match roots exact', async () => {
       const asked: string[] = []
       const v = await view(envStatic(heavyStore(source(0, asked))), A, '', 'bin', { threshold: 0.5 })
-      expect([v.tier, v.tree.b, v.tree.o, shape(v.tree), matchedRows(v), v.interiors ?? null, asked.sort()]).toEqual([
+      expect([v.tier, v.tree.bytes, v.tree.objects, shape(v.tree), matchedRows(v), v.interiors ?? null, asked.sort()]).toEqual([
         'rollup', ...sum(''), NESTED,
         OBJECTS.filter(([p]) => p.startsWith('b1/iris/')).map(([p, b]) => [p, b, 1]).sort((x, y) => (x[0] < y[0] ? -1 : 1)),
         null,

@@ -332,9 +332,9 @@ const PATHS = ['', 'bk', 'bk/m', 'bk/m/deep', 'bk/nest', 'bk/flat']
  *  per-scan reader takes the kind of whichever row it merged last (`file` here). Every other field of
  *  the tile is the same. */
 function storeKinds<T>(v: T): T {
-  type N = { n?: string; k?: string; c?: N[] }
-  const fix = (n: N): N => ({ ...n, ...(n.n === 'twin' ? { k: 'dir' } : {}), ...(n.c ? { c: n.c.map(fix) } : {}) })
-  return (v && typeof v === 'object' && 'n' in (v as object) ? fix(v as N) : v) as T
+  type N = { name?: string; kind?: string; children?: N[] }
+  const fix = (n: N): N => ({ ...n, ...(n.name === 'twin' ? { kind: 'dir' } : {}), ...(n.children ? { children: n.children.map(fix) } : {}) })
+  return (v && typeof v === 'object' && 'name' in (v as object) ? fix(v as N) : v) as T
 }
 const SCOPES: { lens?: { key: string }; owner?: OwnerScope }[] = [
   { lens: { key: 'alice' } }, { lens: { key: 'bob' } }, { lens: { key: 'carol' } },
@@ -438,9 +438,9 @@ for (const GEN of ['g2', 'g5'] as const) {
     let n0 = 0
     beforeAll(async () => { envs = await seed(ledger); n0 = r2Reads.length })
     const lens = { key: 'carol' }
-    type N = { n: string; k: string; b: number; o: number; c?: N[] }
-    const shape = (n: N): unknown => [n.n, n.k, n.b, n.o, ...(n.c ? [n.c.map(shape)] : [])]
-    const byName = (n: N): N => ({ ...n, ...(n.c ? { c: [...n.c].sort((x, y) => (x.n < y.n ? -1 : 1)).map(byName) } : {}) })
+    type N = { name: string; kind: string; bytes: number; objects: number; children?: N[] }
+    const shape = (n: N): unknown => [n.name, n.kind, n.bytes, n.objects, ...(n.children ? [n.children.map(shape)] : [])]
+    const byName = (n: N): N => ({ ...n, ...(n.children ? { children: [...n.children].sort((x, y) => (x.name < y.name ? -1 : 1)).map(byName) } : {}) })
     const tiles = FILES.map(([p, b]) => [p.split('/').pop(), 'file', b, 1]).sort((x, y) => (x[0]! < y[0]! ? -1 : 1))
 
     it('values an unread region once: its objects from the assignment, never added again to it or its ancestors', async () => {

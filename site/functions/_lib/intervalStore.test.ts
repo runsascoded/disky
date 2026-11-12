@@ -68,7 +68,7 @@ const failure = (p: Promise<unknown>): Promise<string | null> => p.then(() => nu
 function canon(n: ViewNode): string {
   const sorted = (v: unknown): unknown =>
     Array.isArray(v) ? v.map(sorted) : v && typeof v === 'object' ? Object.fromEntries(Object.keys(v).sort().map(k => [k, sorted((v as Record<string, unknown>)[k])])) : v
-  const { c: _c, ...rest } = n
+  const { children: _c, ...rest } = n
   return JSON.stringify(sorted(rest))
 }
 
@@ -79,14 +79,11 @@ function flatten(t: ViewNode): Tiles {
   const rec = (n: ViewNode, p: string) => {
     let k = p
     for (let i = 2; k in out; i++) k = `${p}#${i}`
-    // `t` (the newest write's instant) isn't in the Python reference's views: it must name the same day as `d`, then
-    // the rest is compared exactly.
-    const { c, t, ...rest } = n
-    if (t !== undefined) expect([k, Math.floor((t as number) / 86400)]).toEqual([k, rest.d])
-    const us = rest.us as [string, number][] | undefined
-    out[k] = { ...rest, ...(us ? { us: [...us].sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1)) } : {}) }
-    const kids = [...(c ?? [])].sort((a, b) => b.b - a.b || (a.n < b.n ? -1 : a.n > b.n ? 1 : 0) || (canon(a) < canon(b) ? -1 : canon(a) > canon(b) ? 1 : 0))
-    for (const k2 of kids) rec(k2, `${p}/${k2.n}`)
+    const { children, ...rest } = n
+    const owners = rest.owners
+    out[k] = { ...rest, ...(owners ? { owners: [...owners].sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1)) } : {}) }
+    const kids = [...(children ?? [])].sort((a, b) => b.bytes - a.bytes || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0) || (canon(a) < canon(b) ? -1 : canon(a) > canon(b) ? 1 : 0))
+    for (const k2 of kids) rec(k2, `${p}/${k2.name}`)
   }
   rec(t, '')
   return out
@@ -237,8 +234,8 @@ describe('interval store', () => {
       const v = await buildView(env, { date: c.date, path: c.path, w: c.w, h: c.h, minArea: 12, atten: 2, ...(c.depth != null ? { maxDepth: c.depth } : {}) })
       const got = flatten(v.tree)
       // A v1 scan never knew its directories' children: the reader's `(other)` count is what its read saw.
-      const want = Object.fromEntries(Object.entries(c.tiles).map(([k, n]) => [k, n.f === null ? Object.fromEntries(Object.entries(n).filter(([f]) => f !== 'f')) : n]))
-      if (c.v === 1) for (const n of Object.values(got)) delete n.f
+      const want = Object.fromEntries(Object.entries(c.tiles).map(([k, n]) => [k, n.folded === null ? Object.fromEntries(Object.entries(n).filter(([f]) => f !== 'folded')) : n]))
+      if (c.v === 1) for (const n of Object.values(got)) delete n.folded
       expect({ case: [c.date, c.path, c.w, c.h, c.depth], tiles: got }).toEqual({ case: [c.date, c.path, c.w, c.h, c.depth], tiles: want })
       expect([v.index, ['bysize', 'path'].includes(v.tier)]).toEqual(['iv:g1', true])
     }
@@ -251,8 +248,8 @@ describe('interval store', () => {
     for (const c of cases) {
       const v = await buildView(env, { date: c.date, path: c.path, w: c.w, h: c.h, minArea: 12, atten: 2, ivPlanRows: 0, ...(c.depth != null ? { maxDepth: c.depth } : {}) })
       const got = flatten(v.tree)
-      const want = Object.fromEntries(Object.entries(c.tiles).map(([k, n]) => [k, n.f === null ? Object.fromEntries(Object.entries(n).filter(([f]) => f !== 'f')) : n]))
-      if (c.v === 1) for (const n of Object.values(got)) delete n.f
+      const want = Object.fromEntries(Object.entries(c.tiles).map(([k, n]) => [k, n.folded === null ? Object.fromEntries(Object.entries(n).filter(([f]) => f !== 'folded')) : n]))
+      if (c.v === 1) for (const n of Object.values(got)) delete n.folded
       expect({ case: [c.date, c.path, c.w, c.h, c.depth], tiles: got }).toEqual({ case: [c.date, c.path, c.w, c.h, c.depth], tiles: want })
       const k = `${c.depth == null ? 'full' : 'band'} ${v.tier}`
       tiers[k] = (tiers[k] ?? 0) + 1
@@ -284,7 +281,7 @@ describe('interval store', () => {
           const trees = []
           for (const c of views) {
             const t = flatten((await view.buildView(e, { date: c.date, path: c.path, w: c.w, h: c.h, minArea: 12, atten: 2, ...(c.depth != null ? { maxDepth: c.depth } : {}) })).tree)
-            if (c.v === 1) for (const n of Object.values(t)) delete n.f
+            if (c.v === 1) for (const n of Object.values(t)) delete n.folded
             trees.push(t)
           }
           const ds = []
@@ -294,7 +291,7 @@ describe('interval store', () => {
         }
         const a = await isolate()
         const b = await isolate()
-        expect(a.trees).toEqual(views.map(c => Object.fromEntries(Object.entries(c.tiles).map(([k, n]) => [k, n.f === null ? Object.fromEntries(Object.entries(n).filter(([f]) => f !== 'f')) : n]))))
+        expect(a.trees).toEqual(views.map(c => Object.fromEntries(Object.entries(c.tiles).map(([k, n]) => [k, n.folded === null ? Object.fromEntries(Object.entries(n).filter(([f]) => f !== 'folded')) : n]))))
         expect(b.trees).toEqual(a.trees)
         expect([a.ds, b.ds]).toEqual([diffs, diffs])
         // The runs' small subtree reads now prefer the path sort after exact boundary pruning.
@@ -378,7 +375,7 @@ describe('interval store', () => {
     const d = await buildDiff(env, { from: '2026-08-04', to: '2026-08-05', path: 'b2/e', w: 8, h: 6, minArea: 12, atten: 2, top: 100 })
     const a = cases.find(c => c.date === '2026-08-04' && c.path === 'b2/e' && c.w === 8 && c.depth == null)!
     const b = cases.find(c => c.date === '2026-08-05' && c.path === 'b2/e' && c.w === 8 && c.depth == null)!
-    expect([d.total_a, d.total_b]).toEqual([a.tiles[''].b, b.tiles[''].b])
+    expect([d.total_a, d.total_b]).toEqual([a.tiles[''].bytes, b.tiles[''].bytes])
   })
 
   it('diffs a dir-only (v1) scan against a full (v2) one as the per-scan stores do: its objects fold into `(other)`', async () => {
@@ -467,16 +464,16 @@ describe('interval store: a heavy literal\'s match roots draw their insides', ()
   })
 
   /** Every node under `n` but its `(other)` folds: `[path below n, bytes, objects, kind]`, depth first. */
-  const flat = (n: ViewNode, pre = ''): unknown[] => (n.c ?? []).filter(c => c.n !== '(other)')
-    .sort((x, y) => (x.n < y.n ? -1 : 1)).flatMap(c => [[`${pre}${c.n}`, c.b, c.o, c.k], ...flat(c, `${pre}${c.n}/`)])
+  const flat = (n: ViewNode, pre = ''): unknown[] => (n.children ?? []).filter(c => c.name !== '(other)')
+    .sort((x, y) => (x.name < y.name ? -1 : 1)).flatMap(c => [[`${pre}${c.name}`, c.bytes, c.objects, c.kind], ...flat(c, `${pre}${c.name}/`)])
   /** A filtered view's drawn match roots: path → node. */
   const drawnRoots = (v: { tree: ViewNode }): Map<string, ViewNode> => {
     const out = new Map<string, ViewNode>()
-    const walk = (n: ViewNode, p: string) => { for (const c of n.c ?? []) { const cp = p === '' ? c.n : `${p}/${c.n}`; if (c.m) out.set(cp, c); else walk(c, cp) } }
+    const walk = (n: ViewNode, p: string) => { for (const c of n.children ?? []) { const cp = p === '' ? c.name : `${p}/${c.name}`; if (c.matched) out.set(cp, c); else walk(c, cp) } }
     walk(v.tree, '')
     return out
   }
-  const subdivides = (n: ViewNode) => n.o > 1 && n.b >= T * 4096 / MIN_AREA
+  const subdivides = (n: ViewNode) => n.objects > 1 && n.bytes >= T * 4096 / MIN_AREA
 
   it('the view: each drawn root it subdivides holds the unfiltered view of its path, `FILTER_SUBDIV_LEVELS` deep', async () => {
     const got: unknown[] = []
@@ -634,8 +631,8 @@ describe('interval store: base + runs', () => {
       for (const c of cases.filter(x => x.w === 30 && x.depth == null)) {
         const v = await buildView(at('g6', [], hide, { rev }), { date: c.date, path: c.path, w: c.w, h: c.h, minArea: 12, atten: 2 })
         const got = flatten(v.tree)
-        if (c.v === 1) for (const n of Object.values(got)) delete n.f
-        const want = Object.fromEntries(Object.entries(c.tiles).map(([k, n]) => [k, n.f === null ? Object.fromEntries(Object.entries(n).filter(([f]) => f !== 'f')) : n]))
+        if (c.v === 1) for (const n of Object.values(got)) delete n.folded
+        const want = Object.fromEntries(Object.entries(c.tiles).map(([k, n]) => [k, n.folded === null ? Object.fromEntries(Object.entries(n).filter(([f]) => f !== 'folded')) : n]))
         expect({ rev, case: [c.date, c.path], tiles: got }).toEqual({ rev, case: [c.date, c.path], tiles: want })
       }
     }
@@ -647,8 +644,8 @@ describe('interval store: base + runs', () => {
       for (const c of cases) {
         const v = await buildView(e, { date: c.date, path: c.path, w: c.w, h: c.h, minArea: 12, atten: 2, ...(c.depth != null ? { maxDepth: c.depth } : {}) })
         const got = flatten(v.tree)
-        const want = Object.fromEntries(Object.entries(c.tiles).map(([k, n]) => [k, n.f === null ? Object.fromEntries(Object.entries(n).filter(([f]) => f !== 'f')) : n]))
-        if (c.v === 1) for (const n of Object.values(got)) delete n.f
+        const want = Object.fromEntries(Object.entries(c.tiles).map(([k, n]) => [k, n.folded === null ? Object.fromEntries(Object.entries(n).filter(([f]) => f !== 'folded')) : n]))
+        if (c.v === 1) for (const n of Object.values(got)) delete n.folded
         expect({ case: [c.date, c.path, c.w, c.h, c.depth], tiles: got }).toEqual({ case: [c.date, c.path, c.w, c.h, c.depth], tiles: want })
         expect(v.index).toBe(`iv:${gen}`)
       }

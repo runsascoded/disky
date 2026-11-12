@@ -23,7 +23,7 @@ import { barControls } from '../../../src/pageBar.js'
 import { readState, readThrough } from '../../../src/readLens.js'
 import { applyLedger } from '../../../src/ledgerOverlay.js'
 import { ownerIndex } from '../../../src/ownerIndex.js'
-import { type ColorMode, type Meta, MODE_LABELS, type TreeNode, type UserInfo } from '../../../src/types.js'
+import { type ColorMode, type Meta, MODE_LABELS, mtimeDay, type TreeNode, type UserInfo } from '../../../src/types.js'
 import { type CardData, type CardTile, type LegendItem, fmtB } from './card.js'
 import type { OgTier } from './sign.js'
 
@@ -76,7 +76,7 @@ export async function deepestView<T>(plan: DepthPlan, read: (depth: number) => P
 /** A view that a deeper read could add cells to: some child of the view's children has children of
  * its own to draw (a level whose cells all fall under the threshold has no deeper cells either). */
 export const canDeepen = (tree: TreeNode, floor = OG_FLOOR_DEPTH): boolean => {
-  const at = (n: TreeNode, d: number): boolean => d === floor ? !n.n.startsWith('(') && n.k !== 'file' : (n.c ?? []).some(k => at(k, d + 1))
+  const at = (n: TreeNode, d: number): boolean => d === floor ? !n.name.startsWith('(') && n.kind !== 'file' : (n.children ?? []).some(k => at(k, d + 1))
   return at(tree, 0)
 }
 
@@ -136,10 +136,10 @@ export function ownerColors(users: UserInfo[]): (u: string | null) => string {
 /** A node's dominant owner: the top user slice, or null when the unowned
  * remainder outweighs it. */
 export function dominant(n: TreeNode): string | null {
-  const [top] = n.us ?? []
+  const [top] = n.owners ?? []
   if (!top) return null
-  const owned = (n.us ?? []).reduce((s, [, b]) => s + b, 0)
-  return top[1] >= n.b - owned ? top[0] : null
+  const owned = (n.owners ?? []).reduce((s, [, b]) => s + b, 0)
+  return top[1] >= n.bytes - owned ? top[0] : null
 }
 
 /** Tiles: the view's children (folds grey), each with its children nested to the view's depth. In
@@ -148,17 +148,18 @@ export function dominant(n: TreeNode): string | null {
  * bucket's view would otherwise be one hue; the lone dirs are a neutral frame); in `date`/`read` modes a
  * container is neutral and its leaves carry the scale. */
 export function tilesOf(tree: TreeNode, color: (u: string | null) => string, mode: ColorMode = 'user', access?: Meta['access']): CardTile[] {
-  const realKids = (n: TreeNode) => (n.c ?? []).filter(k => !k.n.startsWith('(')).sort((a, b) => b.b - a.b)
+  const realKids = (n: TreeNode) => (n.children ?? []).filter(k => !k.name.startsWith('(')).sort((a, b) => b.bytes - a.bytes)
   const ranks = new Map(realKids(tree).map((n, i) => [n, i]))
   // The date scale spans the drawn leaves only, not their unloaded descendants or containers' means
   // (the dashboard uses drawn leaves too).
   let lo = Infinity
   let hi = -Infinity
   const leaves = (n: TreeNode): void => {
-    for (const k of n.c ?? []) {
-      if (k.n.startsWith('(')) continue
-      if (k.c?.length) leaves(k)
-      else if (k.d != null) { lo = Math.min(lo, k.d); hi = Math.max(hi, k.d) }
+    for (const k of n.children ?? []) {
+      if (k.name.startsWith('(')) continue
+      const d = mtimeDay(k)
+      if (k.children?.length) leaves(k)
+      else if (d != null) { lo = Math.min(lo, d); hi = Math.max(hi, d) }
     }
   }
   leaves(tree)
@@ -167,12 +168,13 @@ export function tilesOf(tree: TreeNode, color: (u: string | null) => string, mod
     if (mode === 'tree') return slotColor(slot, i, count)
     if (mode === 'user') return color(dominant(n))
     if (container) return FRAME_COLOR
-    if (mode === 'date') return n.d != null && hi > lo ? dateColor((n.d - lo) / (hi - lo)) : '#5d5c55'
+    const d = mtimeDay(n)
+    if (mode === 'date') return d != null && hi > lo ? dateColor((d - lo) / (hi - lo)) : '#5d5c55'
     // The app's read lens (`readLens.ts`); its window runs to `access.through`'s day when the scan has it.
     if (!access) return '#6e332b'
     const thru = readThrough(access)
     // A card has no hatch and no `?rt=` (always the default tint): a `written` cell takes its write's age.
-    const rs = readState(n.a, true, { min: access.from, max: Math.max(access.to, thru?.day ?? access.to) }, { d: n.d, dir: n.k !== 'file' })
+    const rs = readState(n.last_read, true, { min: access.from, max: Math.max(access.to, thru?.day ?? access.to) }, { d, dir: n.kind !== 'file' })
     return rs.kind === 'read' || rs.kind === 'written' ? dateColor(rs.t) : '#6e332b'
   }
   /** `depth` 1 is the view's child; `slot`/`i`/`count` its tree-mode colour key. */
@@ -180,17 +182,17 @@ export function tilesOf(tree: TreeNode, color: (u: string | null) => string, mod
   let lone = 0
   if (mode === 'tree') for (let n = tree; realKids(n).length === 1 && realKids(realKids(n)[0]).length; n = realKids(n)[0]) lone++
   const tile = (n: TreeNode, depth: number, slot: number, i: number, count: number): CardTile => {
-    if (n.n.startsWith('(')) return { name: n.n, b: n.b, color: FOLD_COLOR }
-    if (!n.c?.length) return { name: n.n, b: n.b, color: fill(n, slot, i, count, false) }
+    if (n.name.startsWith('(')) return { name: n.name, b: n.bytes, color: FOLD_COLOR }
+    if (!n.children?.length) return { name: n.name, b: n.bytes, color: fill(n, slot, i, count, false) }
     const kids = realKids(n)
     const kidRanks = new Map(kids.map((k, j) => [k, j]))
-    if (depth <= lone) return { name: n.n, b: n.b, color: FRAME_COLOR, kids: n.c.map(k => tile(k, depth + 1, kidRanks.get(k) ?? 0, 0, 1)) }
+    if (depth <= lone) return { name: n.name, b: n.bytes, color: FRAME_COLOR, kids: n.children.map(k => tile(k, depth + 1, kidRanks.get(k) ?? 0, 0, 1)) }
     return {
-      name: n.n, b: n.b, color: fill(n, slot, i, count, true),
-      kids: n.c.map(k => depth === lone + 1 ? tile(k, depth + 1, slot, kidRanks.get(k) ?? 0, kids.length) : tile(k, depth + 1, slot, i, count)),
+      name: n.name, b: n.bytes, color: fill(n, slot, i, count, true),
+      kids: n.children.map(k => depth === lone + 1 ? tile(k, depth + 1, slot, kidRanks.get(k) ?? 0, kids.length) : tile(k, depth + 1, slot, i, count)),
     }
   }
-  return (tree.c ?? []).map(n => tile(n, 1, ranks.get(n) ?? 0, 0, 1))
+  return (tree.children ?? []).map(n => tile(n, 1, ranks.get(n) ?? 0, 0, 1))
 }
 
 /** Tree mode's keyed tiles: the top level, or the children of a lone top-level dir framed by `tilesOf`. */
@@ -201,10 +203,10 @@ export function slotTiles(tiles: CardTile[]): CardTile[] {
 
 /** The legend: the root's owners by bytes, then the unowned remainder. */
 export function legendOf(tree: TreeNode, color: (u: string | null) => string, name: (u: string) => string, max = 6): LegendItem[] {
-  const us = (tree.us ?? []).slice(0, max)
-  const owned = (tree.us ?? []).reduce((s, [, b]) => s + b, 0)
+  const us = (tree.owners ?? []).slice(0, max)
+  const owned = (tree.owners ?? []).reduce((s, [, b]) => s + b, 0)
   const items: LegendItem[] = us.map(([u, b]) => ({ label: name(u), color: color(u), b }))
-  if (tree.b - owned > 0) items.push({ label: 'unowned', color: UNOWNED_COLOR, b: tree.b - owned })
+  if (tree.bytes - owned > 0) items.push({ label: 'unowned', color: UNOWNED_COLOR, b: tree.bytes - owned })
   return items.sort((a, b) => b.b - a.b).slice(0, max)
 }
 
@@ -277,12 +279,12 @@ export async function mapCard(env: Env, site: Site, title: string, params: Recor
   return {
     ...base,
     subtitle,
-    total: `${fmtB(tree.b)} · ${fmtN(tree.o)} objects`,
+    total: `${fmtB(tree.bytes)} · ${fmtN(tree.objects)} objects`,
     tiles,
     depth,
     legend: mode === 'user' ? legendOf(tree, color, name) : mode === 'tree'
       ? slotTiles(tiles).filter(t => !t.name.startsWith('(')).sort((a, b) => b.b - a.b).slice(0, 6).map(t => ({ label: t.name, b: t.b, color: t.color }))
       : [],
-    ...(tree.b ? {} : { empty: query ? 'no matches' : 'empty' }),
+    ...(tree.bytes ? {} : { empty: query ? 'no matches' : 'empty' }),
   }
 }

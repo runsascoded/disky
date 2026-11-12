@@ -313,8 +313,8 @@ async function unionFilteredRoot(ctx0: SubtreeCtx, view: UnionView, resolved: Re
     refused.push(x)
   }
   if (!bodies.size && refused.length) return refusalResponse(refused[0])
-  const threshold = filterThreshold([...bodies.values()].reduce((n, b) => n + b.tree.b, 0), o.w, o.h, o.minArea)
-  const drawn = [...bodies.keys()].filter(i => bodies.get(i)!.tree.b > 0)
+  const threshold = filterThreshold([...bodies.values()].reduce((n, b) => n + b.tree.bytes, 0), o.w, o.h, o.minArea)
+  const drawn = [...bodies.keys()].filter(i => bodies.get(i)!.tree.bytes > 0)
   if (drawn.length > 1) {
     const again = await Promise.all(drawn.map(i => ask(ready[i], threshold)))
     const bad = again.find(r => !r.ok)

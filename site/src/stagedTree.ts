@@ -20,7 +20,7 @@ export function stagedTree(prefixes: string[], stats: Record<string, PrefixStat>
   const root: Mut = { n: rootName, c: new Map() }
   for (const p of prefixes) {
     const s = stats[p]
-    if (!s || s.b <= 0) continue
+    if (!s || s.bytes <= 0) continue
     let at = root
     for (const seg of prefixSegs(p)) {
       let next = at.c.get(seg)
@@ -32,24 +32,24 @@ export function stagedTree(prefixes: string[], stats: Record<string, PrefixStat>
   const build = (m: Mut): TreeNode => {
     if (m.leaf) {
       const s = m.leaf
-      return { n: m.n, k: 'dir', b: s.b, o: s.o, ...(s.d != null ? { d: s.d } : {}), ...(s.a != null ? { a: s.a } : {}), ...(s.us?.length ? { us: s.us } : {}), ...(s.cb ? { cb: s.cb } : {}) }
+      return { name: m.n, kind: 'dir', bytes: s.bytes, objects: s.objects, ...(s.mtime != null ? { mtime: s.mtime } : {}), ...(s.last_read != null ? { last_read: s.last_read } : {}), ...(s.owners?.length ? { owners: s.owners } : {}), ...(s.class_bytes ? { class_bytes: s.class_bytes } : {}) }
     }
-    const c = [...m.c.values()].map(build).sort((x, y) => y.b - x.b)
-    const b = c.reduce((t, k) => t + k.b, 0)
-    const o = c.reduce((t, k) => t + k.o, 0)
-    const ds = c.filter(k => k.d != null).map(k => k.d!)
-    const as = c.filter(k => k.a != null).map(k => k.a!)
+    const children = [...m.c.values()].map(build).sort((x, y) => y.bytes - x.bytes)
+    const bytes = children.reduce((t, k) => t + k.bytes, 0)
+    const objects = children.reduce((t, k) => t + k.objects, 0)
+    const ms = children.filter(k => k.mtime != null).map(k => k.mtime!)
+    const as = children.filter(k => k.last_read != null).map(k => k.last_read!)
     const us = new Map<string, number>()
-    for (const k of c) for (const [u, ub] of k.us ?? []) us.set(u, (us.get(u) ?? 0) + ub)
+    for (const k of children) for (const [u, ub] of k.owners ?? []) us.set(u, (us.get(u) ?? 0) + ub)
     const cb = new Map<string, number>()
-    for (const k of c) for (const [cl, v] of Object.entries(k.cb ?? {})) cb.set(cl, (cb.get(cl) ?? 0) + v)
+    for (const k of children) for (const [cl, v] of Object.entries(k.class_bytes ?? {})) cb.set(cl, (cb.get(cl) ?? 0) + v)
     return {
-      n: m.n, k: 'dir', b, o,
-      ...(ds.length ? { d: Math.max(...ds) } : {}),
-      ...(as.length ? { a: Math.max(...as) } : {}),
-      ...(us.size ? { us: [...us].sort((x, y) => y[1] - x[1]) } : {}),
-      ...(cb.size ? { cb: Object.fromEntries([...cb].sort((x, y) => y[1] - x[1])) } : {}),
-      c,
+      name: m.n, kind: 'dir', bytes, objects,
+      ...(ms.length ? { mtime: Math.max(...ms) } : {}),
+      ...(as.length ? { last_read: Math.max(...as) } : {}),
+      ...(us.size ? { owners: [...us].sort((x, y) => y[1] - x[1]) } : {}),
+      ...(cb.size ? { class_bytes: Object.fromEntries([...cb].sort((x, y) => y[1] - x[1])) } : {}),
+      children,
     }
   }
   return build(root)

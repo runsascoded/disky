@@ -100,8 +100,8 @@ const view = (env: Env, date: string, path: string, t: string, extra: Partial<Pa
  *  only the drawn roots' own rows, so a fold of static roots under a synthesized ancestor has bytes and
  *  objects, not those (the search view knows every root's row). */
 const sansFoldDetail = (n: ViewNode): ViewNode => {
-  const { d: _d, a: _a, cb: _cb, ...rest } = n
-  return { ...(n.n === '(other)' ? rest : n), ...(n.c ? { c: n.c.map(sansFoldDetail) } : {}) } as ViewNode
+  const { mtime: _t, last_read: _a, class_bytes: _cb, ...rest } = n
+  return { ...(n.name === '(other)' ? rest : n), ...(n.children ? { children: n.children.map(sansFoldDetail) } : {}) }
 }
 /** The view with its tier's phase-1 name dropped (`static+bysize` ~ `search+bysize`). */
 const sansP1 = (v: View) => ({ ...v, tier: v.tier.replace(/^(static|search)\+/, '+'), tree: sansFoldDetail(v.tree) })
@@ -111,8 +111,8 @@ const matchedRows = (v: { matched?: { path: string; b: number; o: number }[] }) 
 
 /** A tree as `[path, bytes, objects, ('m')?, ('f<n>')?]` rows, depth first (`(other)` under its parent). */
 const flatTree = (n: ViewNode, path = '', out: unknown[] = []): unknown[] => {
-  out.push([path || '/', n.b, n.o, ...(n.m ? ['m'] : []), ...(n.f != null ? [`f${n.f}`] : [])])
-  for (const c of n.c ?? []) flatTree(c, c.n === '(other)' ? `${path}/(other)` : path ? `${path}/${c.n}` : c.n, out)
+  out.push([path || '/', n.bytes, n.objects, ...(n.matched ? ['m'] : []), ...(n.folded != null ? [`f${n.folded}`] : [])])
+  for (const c of n.children ?? []) flatTree(c, c.name === '(other)' ? `${path}/(other)` : path ? `${path}/${c.name}` : c.name, out)
   return out
 }
 
@@ -169,8 +169,8 @@ describe('static filter: the treemap / table view (`/api/subtree`)', () => {
 
   it('a small canvas folds the roots under its threshold into `(other)` — the same as the search view', async () => {
     const flat = (n: ViewNode, path: string, out: unknown[] = []): unknown[] => {
-      out.push([path || '/', n.b, n.o, ...(n.m ? ['m'] : []), ...(n.f != null ? [`f${n.f}`] : [])])
-      for (const c of n.c ?? []) flat(c, c.n === '(other)' ? `${path}/(other)` : path ? `${path}/${c.n}` : c.n, out)
+      out.push([path || '/', n.bytes, n.objects, ...(n.matched ? ['m'] : []), ...(n.folded != null ? [`f${n.folded}`] : [])])
+      for (const c of n.children ?? []) flat(c, c.name === '(other)' ? `${path}/(other)` : path ? `${path}/${c.name}` : c.name, out)
       return out
     }
     const small = { w: 128, h: 128 }
@@ -185,20 +185,20 @@ describe('static filter: the treemap / table view (`/api/subtree`)', () => {
 
   it('a root holding one object is a leaf (nothing inside it is read)', async () => {
     const v = await view(envStatic(), B, 'bk', 'tomat')
-    const node = v.tree.c!.find(c => c.n === 'new-tomat')!
-    expect([node.b, node.o, node.k, node.m, node.c]).toEqual([400, 1, 'dir', 1, undefined])
+    const node = v.tree.children!.find(c => c.name === 'new-tomat')!
+    expect([node.bytes, node.objects, node.kind, node.matched, node.children]).toEqual([400, 1, 'dir', true, undefined])
   })
 
   it('the first paint: the match roots alone, exact, as leaves under their ancestors', async () => {
     const leaves = (n: ViewNode, path: string, out: [string, number, number][] = []): [string, number, number][] => {
-      if (n.m) { expect(n.c).toBeUndefined(); out.push([path, n.b, n.o]) }
-      for (const c of n.c ?? []) leaves(c, path ? `${path}/${c.n}` : c.n, out)
+      if (n.matched) { expect(n.children).toBeUndefined(); out.push([path, n.bytes, n.objects]) }
+      for (const c of n.children ?? []) leaves(c, path ? `${path}/${c.name}` : c.name, out)
       return out
     }
     for (const date of DATES) for (const root of ['', 'bk', 'bk/data']) {
       const v = await view(envStatic(), date, root, 'tomat', { firstPaint: true })
       const brute = expected.roots.tomat[root][date]!
-      expect([date, root, leaves(v.tree, root).sort((x, y) => (x[0] < y[0] ? -1 : 1)), v.tree.b, v.tier.split('+')[0]]).toEqual([date, root, brute, brute.reduce((n, x) => n + x[1], 0), 'static'])
+      expect([date, root, leaves(v.tree, root).sort((x, y) => (x[0] < y[0] ? -1 : 1)), v.tree.bytes, v.tier.split('+')[0]]).toEqual([date, root, brute, brute.reduce((n, x) => n + x[1], 0), 'static'])
     }
   })
 
@@ -396,8 +396,8 @@ describe('static filter: a bounded view — the canvas\'s tiles, exact totals', 
     for (const k of [1, 2, 4, 6, 10, 15, 22]) {
       const v = await view(envStatic(), A, '', 'tomat', { maxTiles: k })
       const drawn = byWeight(flatTree(v.tree))
-      expect([k, v.nodes, [...drawn].sort(), v.tree.b, v.tree.o, v.matchCount, v.matched])
-        .toEqual([k, k, order.slice(0, k).sort(), full.tree.b, full.tree.o, full.matchCount, full.matched])
+      expect([k, v.nodes, [...drawn].sort(), v.tree.bytes, v.tree.objects, v.matchCount, v.matched])
+        .toEqual([k, k, order.slice(0, k).sort(), full.tree.bytes, full.tree.objects, full.matchCount, full.matched])
     }
     expect(flatTree((await view(envStatic(), A, '', 'tomat', { maxTiles: 4 })).tree)).toEqual([
       ['/', 18047, 10],
@@ -440,7 +440,7 @@ describe('static filter: a bounded view — the canvas\'s tiles, exact totals', 
     const v = await view(envStatic(), A, '', 'tomat', { phase2Groups: 0 })
     expect(byRows).toEqual(v)
     const full = await view(envStatic(), A, '', 'tomat', { maxTiles: Infinity })
-    expect([v.interiors, v.tree.b, v.matchCount, v.matched]).toEqual([{ read: 0, skipped: 3, reason: '3 over the read budget' }, full.tree.b, full.matchCount, full.matched])
+    expect([v.interiors, v.tree.bytes, v.matchCount, v.matched]).toEqual([{ read: 0, skipped: 3, reason: '3 over the read budget' }, full.tree.bytes, full.matchCount, full.matched])
     expect(flatTree(v.tree)).toEqual(FULL.filter(r => !/^(bk\/data\/tomato|bk\/data\/raw\/tomat-1|tomato-bk)\//.test((r as [string])[0])))
   })
 })
@@ -499,9 +499,9 @@ describe('phase 2: the request\'s gate (`Phase2Gate`)', () => {
     const open = await run({ phase2Gate: { dead: false } })
     const shut = await run({ phase2Gate: { dead: true } })
     const full = await run({ maxTiles: Infinity })
-    expect([shut.v.interiors, shut.v.tree.b, shut.v.tree.o, shut.v.matchCount, shut.v.matched]).toEqual([
+    expect([shut.v.interiors, shut.v.tree.bytes, shut.v.tree.objects, shut.v.matchCount, shut.v.matched]).toEqual([
       { read: 0, skipped: 3, reason: '3 past the time budget', late: 3 },
-      full.v.tree.b, full.v.tree.o, full.v.matchCount, full.v.matched,
+      full.v.tree.bytes, full.v.tree.objects, full.v.matchCount, full.v.matched,
     ])
     expect(flatTree(shut.v.tree)).toEqual(flatTree(full.v.tree).filter(r => !whole.test((r as [string])[0])))
     // Only the root details' lookups query spans under a dead gate; an open one plans phase 2 as well.

@@ -272,9 +272,9 @@ describe('D1', () => {
       const w = await world(true)
       const v = await w.mods.view.buildView(w.env, { date: A, path: 'bk/nest', w: 800, h: 600, minArea: 0, atten: 1 })
       const pv: [string, unknown][] = []
-      const walk = (n: { n: string; pv?: unknown; c?: unknown[] }, p: string) => {
-        if (n.pv) pv.push([p, n.pv])
-        for (const c of (n.c ?? []) as { n: string }[]) walk(c as never, `${p}/${c.n}`)
+      const walk = (n: { name: string; provenance?: unknown; children?: unknown[] }, p: string) => {
+        if (n.provenance) pv.push([p, n.provenance])
+        for (const c of (n.children ?? []) as { name: string }[]) walk(c as never, `${p}/${c.name}`)
       }
       walk(v.tree as never, 'bk/nest')
       expect(pv).toEqual(EXPECTED_PV)

@@ -47,6 +47,8 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from typing import Callable
 
+from . import api_names
+
 UA = "dt-cloud-probe/1.0"  # a real UA — CF edge-blocks bot UAs (1010)
 MISS_TERM = "zz-probe-no-match-zz"
 CACHED = ("hit", "kv")  # `x-cache` values served without a read
@@ -130,11 +132,11 @@ def resolve_targets(fetch: Fetch, subdir: str = "", hit: str | None = None) -> T
     date, prev = scans[0], (scans[1] if len(scans) > 1 else None)
     W = "w=1408&h=896"
     root = json.loads(fetch(f"/api/subtree?date={date}&path=&depth=1&{W}").body)
-    bucket = max(root["tree"]["c"], key=lambda n: n["b"])["n"]
+    bucket = max(api_names.tree(root)["children"], key=lambda n: n["bytes"])["name"]
     if hit is None:
         b = json.loads(fetch(f"/api/subtree?date={date}&path={_q(bucket)}&depth=1&{W}").body)
-        named = [n for n in b["tree"].get("c", []) if not n["n"].startswith("(")]
-        hit = max(named, key=lambda n: n["b"])["n"]
+        named = [n for n in api_names.tree(b).get("children", []) if not n["name"].startswith("(")]
+        hit = max(named, key=lambda n: n["bytes"])["name"]
     return Targets(date, prev, bucket, hit)
 
 

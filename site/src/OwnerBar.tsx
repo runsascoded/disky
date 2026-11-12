@@ -10,7 +10,7 @@ import { useUnits } from './units'
 
 /** Who holds a node's bytes, sorted by share (the scan's attribution). */
 export const ownerShares = (node: TreeNode): [string, number][] =>
-  node.us && node.b > 0 ? [...node.us].sort((x, y) => y[1] - x[1]) : []
+  node.owners && node.bytes > 0 ? [...node.owners].sort((x, y) => y[1] - x[1]) : []
 
 const TOP = 8
 
@@ -35,7 +35,7 @@ export function OwnerBar({ node, userIdx, width = 110, note, onPickUser }: {
   if (shares.length === 0) return null
   const attributed = shares.reduce((s, [, b]) => s + b, 0)
   const color = (u: string) => (userIdx ? userColor(u, userIdx) : 'var(--ink-3)')
-  const pct = (b: number) => Math.round((100 * b) / node.b)
+  const pct = (b: number) => Math.round((100 * b) / node.bytes)
   const rows = all ? shares : shares.slice(0, TOP)
   const tip = (
     <span className="own-tip">
@@ -48,8 +48,8 @@ export function OwnerBar({ node, userIdx, width = 110, note, onPickUser }: {
         </div>
       ))}
       {shares.length > TOP && !all && <div className="more" onClick={() => setAll(true)}>… and {shares.length - TOP} more</div>}
-      {node.b > attributed && (
-        <div className="row"><i style={{ background: 'var(--t-unattr)' }} />unattributed<span className="n">{fmtBytes(node.b - attributed)} · {pct(node.b - attributed)}%</span></div>
+      {node.bytes > attributed && (
+        <div className="row"><i style={{ background: 'var(--t-unattr)' }} />unattributed<span className="n">{fmtBytes(node.bytes - attributed)} · {pct(node.bytes - attributed)}%</span></div>
       )}
       <div className="how">Attribution comes from paths, W&B run metadata and sidecar files; assigning overrides it.{onPickUser ? ' Click a person to show only their data.' : ''}</div>
     </span>
@@ -57,7 +57,7 @@ export function OwnerBar({ node, userIdx, width = 110, note, onPickUser }: {
   return (
     <Tooltip content={tip} pinnable>
       <span className="own-bar" style={{ width }} aria-label="ownership distribution">
-        {shares.map(([u, b]) => <i key={u} style={{ width: `${(100 * b) / node.b}%`, background: color(u) }} />)}
+        {shares.map(([u, b]) => <i key={u} style={{ width: `${(100 * b) / node.bytes}%`, background: color(u) }} />)}
       </span>
     </Tooltip>
   )
@@ -67,11 +67,11 @@ export function OwnerBar({ node, userIdx, width = 110, note, onPickUser }: {
 export function ClassBar({ node, width = 110 }: { node: TreeNode; width?: number }) {
   const mix = classMix(node)
   const rows = Object.entries(mix).filter(([, b]) => b > 0).sort((a, b) => +a[0] - +b[0])
-  if (!node.b || rows.length === 0) return null
+  if (!node.bytes || rows.length === 0) return null
   return (
     <Tooltip content={<ClassMixTip mix={mix} />} pinnable>
       <span className="own-bar class-bar" style={{ width }} aria-label="storage-class distribution">
-        {rows.map(([c, b]) => <i key={c} title={CLASS_NAMES[c]} style={{ width: `${(100 * b) / node.b}%`, background: CLASS_COLORS[c] ?? 'var(--other)' }} />)}
+        {rows.map(([c, b]) => <i key={c} title={CLASS_NAMES[c]} style={{ width: `${(100 * b) / node.bytes}%`, background: CLASS_COLORS[c] ?? 'var(--other)' }} />)}
       </span>
     </Tooltip>
   )

@@ -91,8 +91,8 @@ def test_cold_min_area():
 def test_resolve_targets():
     canned = {
         "/data/scans.json": ["2026-10-01", "2026-09-30", "2026-09-29"],
-        "/api/subtree?date=2026-10-01&path=&depth=1&w=1408&h=896": {"tree": {"c": [{"n": "bk-small", "b": 5}, {"n": "bk-big", "b": 9}]}},
-        "/api/subtree?date=2026-10-01&path=bk-big&depth=1&w=1408&h=896": {"tree": {"c": [{"n": "(other)", "b": 99}, {"n": "tmp", "b": 3}, {"n": "ckpt", "b": 7}]}},
+        "/api/subtree?date=2026-10-01&path=&depth=1&w=1408&h=896": {"tree": {"name": "all buckets", "children": [{"name": "bk-small", "bytes": 5}, {"name": "bk-big", "bytes": 9}]}},
+        "/api/subtree?date=2026-10-01&path=bk-big&depth=1&w=1408&h=896": {"tree": {"name": "bk-big", "children": [{"name": "(other)", "bytes": 99}, {"name": "tmp", "bytes": 3}, {"name": "ckpt", "bytes": 7}]}},
     }
     seen = []
 

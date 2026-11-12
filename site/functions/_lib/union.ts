@@ -261,7 +261,7 @@ export class UnionOverlap extends Error {}
 export type RootRow = { path: string; b: number; o: number; m?: number | null; k?: 'file' | 'dir' }
 
 /** The union's root from its members' root trees (each read under the union's threshold): every member's
- *  top-level nodes, tagged with its store (`src`) and scan (`at`), largest first; the members' `(other)`s
+ *  top-level nodes, tagged with its store (`store`) and scan (`scan`), largest first; the members' `(other)`s
  *  summed into one, last; the totals summed under `label`. A top-level name two members draw is a
  *  misconfigured union (`UnionOverlap`), never a sum.
  *
@@ -270,39 +270,39 @@ export type RootRow = { path: string; b: number; o: number; m?: number | null; k
  *  member's every root, however small against the union's total (the treemap may still dust it). */
 export function unionRoot(view: UnionView, label: string, members: readonly { store: string; date: string; tree: ViewNode; roots?: readonly RootRow[] | null }[]): ViewNode {
   const kids: ViewNode[] = []
-  const other: ViewNode = { n: '(other)', k: 'dir', b: 0, o: 0, f: 0 }
+  const other: ViewNode = { name: '(other)', kind: 'dir', bytes: 0, objects: 0, folded: 0 }
   const seen = new Map<string, string>()
   for (const m of members) {
-    for (const c of m.tree.c ?? []) {
-      if (c.n === '(other)') {
-        other.b += c.b; other.o += c.o; other.f = (other.f ?? 0) + (c.f ?? 0)
+    for (const c of m.tree.children ?? []) {
+      if (c.name === '(other)') {
+        other.bytes += c.bytes; other.objects += c.objects; other.folded = (other.folded ?? 0) + (c.folded ?? 0)
         continue
       }
-      const prev = seen.get(c.n)
-      if (prev) throw new UnionOverlap(`union view '${view.key}': root '${c.n}' is in stores ${prev}, ${m.store}`)
-      seen.set(c.n, m.store)
-      kids.push({ ...c, src: m.store, at: m.date })
+      const prev = seen.get(c.name)
+      if (prev) throw new UnionOverlap(`union view '${view.key}': root '${c.name}' is in stores ${prev}, ${m.store}`)
+      seen.set(c.name, m.store)
+      kids.push({ ...c, store: m.store, scan: m.date })
     }
-    const drawn = new Set((m.tree.c ?? []).map(c => c.n))
+    const drawn = new Set((m.tree.children ?? []).map(c => c.name))
     for (const r of m.roots ?? []) {
       if (drawn.has(r.path)) continue
       const prev = seen.get(r.path)
       if (prev) throw new UnionOverlap(`union view '${view.key}': root '${r.path}' is in stores ${prev}, ${m.store}`)
       seen.set(r.path, m.store)
-      kids.push({ n: r.path, k: r.k ?? 'dir', b: r.b, o: r.o, ...(r.m ? { d: Math.floor(r.m / 86400), t: r.m } : {}), src: m.store, at: m.date })
-      other.b -= r.b; other.o -= r.o
-      if (other.f !== undefined) other.f -= 1
+      kids.push({ name: r.path, kind: r.k ?? 'dir', bytes: r.b, objects: r.o, ...(r.m ? { mtime: r.m } : {}), store: m.store, scan: m.date })
+      other.bytes -= r.b; other.objects -= r.o
+      if (other.folded !== undefined) other.folded -= 1
     }
   }
-  if (other.f !== undefined && other.f <= 0) delete other.f
-  kids.sort((x, y) => y.b - x.b || (x.n < y.n ? -1 : x.n > y.n ? 1 : 0))
+  if (other.folded !== undefined && other.folded <= 0) delete other.folded
+  kids.sort((x, y) => y.bytes - x.bytes || (x.name < y.name ? -1 : x.name > y.name ? 1 : 0))
   // Lifted roots leave the fold what the threshold folded beside them (nothing, at a bucket root); never below zero.
-  other.b = Math.max(0, other.b); other.o = Math.max(0, other.o)
-  if (other.b > 0 || other.o > 0) kids.push(other)
+  other.bytes = Math.max(0, other.bytes); other.objects = Math.max(0, other.objects)
+  if (other.bytes > 0 || other.objects > 0) kids.push(other)
   return {
-    n: label, k: 'dir',
-    b: members.reduce((n, m) => n + m.tree.b, 0), o: members.reduce((n, m) => n + m.tree.o, 0),
-    ...(kids.length ? { c: kids } : {}),
+    name: label, kind: 'dir',
+    bytes: members.reduce((n, m) => n + m.tree.bytes, 0), objects: members.reduce((n, m) => n + m.tree.objects, 0),
+    ...(kids.length ? { children: kids } : {}),
   }
 }
 

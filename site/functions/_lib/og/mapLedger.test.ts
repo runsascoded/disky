@@ -18,16 +18,16 @@ vi.mock('../ownerTotals', () => ({ ownerAssignments: mocks.assignments }))
 vi.mock('../view', () => ({ buildView: mocks.tree, ATTEN_DEFAULT: 0.5, MIN_AREA_DEFAULT: 20, NotFound: class extends Error {} }))
 
 // `docs` at the depth cap (the root view's depth 2) comes back childless; the drill view draws `docs/sub`.
-const bucketA = (drill: boolean): TreeNode => ({ n: 'bkt-a', k: 'dir', b: 100, o: 10, us: [['ann', 60]], c: [
-  { n: 'ckpt', k: 'dir', b: 60, o: 6, us: [['ann', 60]] },
-  { n: 'docs', k: 'dir', b: 40, o: 4, ...(drill ? { c: [
-    { n: 'sub', k: 'dir', b: 30, o: 3 },
-    { n: '(other)', b: 10, o: 1, f: 2 },
+const bucketA = (drill: boolean): TreeNode => ({ name: 'bkt-a', kind: 'dir', bytes: 100, objects: 10, owners: [['ann', 60]], children: [
+  { name: 'ckpt', kind: 'dir', bytes: 60, objects: 6, owners: [['ann', 60]] },
+  { name: 'docs', kind: 'dir', bytes: 40, objects: 4, ...(drill ? { children: [
+    { name: 'sub', kind: 'dir', bytes: 30, objects: 3 },
+    { name: '(other)', bytes: 10, objects: 1, folded: 2 },
   ] } : {}) },
 ] })
-const rootTree = (): TreeNode => ({ n: 'all buckets', k: 'dir', b: 150, o: 15, us: [['ann', 60]], c: [
+const rootTree = (): TreeNode => ({ name: 'all buckets', kind: 'dir', bytes: 150, objects: 15, owners: [['ann', 60]], children: [
   bucketA(false),
-  { n: 'bkt-b', k: 'dir', b: 50, o: 5 },
+  { name: 'bkt-b', kind: 'dir', bytes: 50, objects: 5 },
 ] })
 
 const site = { name: 'Test storage', scheme: 'gs://' }

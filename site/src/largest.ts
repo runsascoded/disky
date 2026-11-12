@@ -37,15 +37,15 @@ export function useLargest(path: string, scan: string | null | undefined, n: num
 }
 
 /** A flat listing as table rows: each named by its path below `path` (the drilled dir; `''` = the store root), so a
- *  row's segments are the dir's plus its name split on `/`; `d` is the stamp's epoch day, `o` a folder's objects
+ *  row's segments are the dir's plus its name split on `/`; `mtime` is the stamp, `objects` a folder's objects
  *  (an object's 1). */
 export function flatRows(path: string, items: LargeItem[], kind: LargestKind): TreeNode[] {
   const cut = path ? path.length + 1 : 0
   return items.map(x => ({
-    n: x.path.slice(cut),
-    k: kind,
-    b: x.size,
-    o: x.n_files ?? 1,
-    ...(x.mtime ? { d: Math.floor(x.mtime / 86400) } : {}),  // an mtime of 0 is unknown
+    name: x.path.slice(cut),
+    kind,
+    bytes: x.size,
+    objects: x.n_files ?? 1,
+    ...(x.mtime ? { mtime: x.mtime } : {}),  // an mtime of 0 is unknown
   }))
 }

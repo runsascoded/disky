@@ -165,8 +165,8 @@ describe('D1', () => {
     }
     it('`*`, `?` and regex characters search those characters (nothing here holds them): an empty view, no refusal', async () => {
       const got = await Promise.all(['tom*t', 'tomat?', '(tomat)'].map(async q => {
-        const [status, j] = await body(`date=${A}&path=bk&q=${encodeURIComponent(q)}`) as [number, { tier: string; tree: { b: number }; matches: string[] }]
-        return [q, status, j.tier, j.tree.b, j.matches]
+        const [status, j] = await body(`date=${A}&path=bk&q=${encodeURIComponent(q)}`) as [number, { tier: string; tree: { bytes: number }; matches: string[] }]
+        return [q, status, j.tier, j.tree.bytes, j.matches]
       }))
       expect(got).toEqual([
         ['tom*t', 200, 'none', 0, []],
@@ -381,7 +381,7 @@ describe('D1', () => {
     })
     it('a view root holding a negative term matches nothing: an empty view, no refusal', async () => {
       const j = await (await subtree({ request: new Request(`http://localhost/api/x?date=${A}&path=bk/tmp&${enc('bin -tmp')}`), env: envOf(true) })).json() as Record<string, unknown>
-      expect([j.tier, (j.tree as { b: number }).b, j.matches]).toEqual(['none', 0, []])
+      expect([j.tier, (j.tree as { bytes: number }).bytes, j.matches]).toEqual(['none', 0, []])
     })
   })
 
@@ -424,8 +424,8 @@ describe('D1', () => {
     })
     it('subtree at the root: the bucket totals, exact, flagged `bucketsOnly`, no approximate note', async () => {
       const j = await body(subtree, `date=${A}&path=&q=0`, envOf(false, noDrill()))
-      const tree = j.tree as { b: number; o: number; c: { n: string; b: number; o: number }[] }
-      expect([tree.b, tree.o, tree.c.map(c => [c.n, c.b, c.o]), j.matchCount, j.rollup, j.approximate, j.approximateReason])
+      const tree = j.tree as { bytes: number; objects: number; children: { name: string; bytes: number; objects: number }[] }
+      expect([tree.bytes, tree.objects, tree.children.map(c => [c.name, c.bytes, c.objects]), j.matchCount, j.rollup, j.approximate, j.approximateReason])
         .toEqual([1023750, 3000, [['bk', 1023750, 3000]], { n: 0, b: 1023750, o: 3000 }, { children: 1, kept: 1, rows: null, bucketsOnly: true }, undefined, undefined])
     })
   })

@@ -124,14 +124,14 @@ const join = (a: string, b: string): string => (a ? (b ? `${a}/${b}` : a) : b)
  *  hidden dir keeps its own sizes but loses its children and child counts. */
 export function restrictTree(node: ViewNode, path: string, r: Restriction): ViewNode {
   if (isHideRoot(path, r)) {
-    const { c: _c, f: _f, nc: _nc, nd: _nd, ...leaf } = node
-    return leaf as ViewNode
+    const { children: _c, folded: _f, ...leaf } = node
+    return leaf
   }
-  if (!node.c) return node
-  const c = node.c
-    .filter(ch => !isHidden(join(path, ch.n), r))
-    .map(ch => restrictTree(ch, join(path, ch.n), r))
-  return { ...node, c }
+  if (!node.children) return node
+  const children = node.children
+    .filter(ch => !isHidden(join(path, ch.name), r))
+    .map(ch => restrictTree(ch, join(path, ch.name), r))
+  return { ...node, children }
 }
 
 /** A `/api/subtree` body for a restricted viewer. */

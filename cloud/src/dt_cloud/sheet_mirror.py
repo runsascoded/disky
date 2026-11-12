@@ -27,6 +27,7 @@ from typing import IO, Any, Protocol
 import yaml
 from click import ClickException
 
+from . import api_names
 from .site import SiteError
 
 # (endpoint path, query params) → decoded JSON. `dt-cloud export` binds it to
@@ -137,7 +138,7 @@ def prefix_bytes(get: Getter, date: str, prefix: str) -> int | str:
         if e.status == 404:
             return ""
         raise
-    return _int(body["tree"]["b"])
+    return _int(api_names.tree(body)["bytes"])
 
 
 def export_staged(get: Getter, a: ExportArgs) -> list[list[Any]]:

@@ -24,7 +24,7 @@ import { useStore, useStoreFetch } from './store'
 import { storeQuery } from './stores'
 import { Tooltip } from './Tooltip'
 import type { TreeNode } from './types'
-import { CLASS_NAMES, fmtN } from './types'
+import { CLASS_NAMES, fmtN, mtimeDay } from './types'
 import { useUnits } from './units'
 import { pathCopy, pathText } from './pathCrumbs'
 import { useObjectDismiss } from './useObjectDismiss'
@@ -186,8 +186,8 @@ export default function ObjectPanel({ segs, node, onClose }: {
         <CopyName text={pathCopy(store.scheme, segs)}><b className="obj-name">{segs[segs.length - 1]}</b></CopyName>
         <ExtLink link={store.externalLink?.(segs, false)} />
         <span className="obj-meta">
-          {node && <>{fmtBytes(node.b)}</>}
-          {node?.d != null && <> · {listingTime(store.scheme).label} {epochDaysToDate(node.d)}</>}
+          {node && <>{fmtBytes(node.bytes)}</>}
+          {mtimeDay(node) != null && <> · {listingTime(store.scheme).label} {epochDaysToDate(mtimeDay(node)!)}</>}
         </span>
         {dl && <a className="obj-dl" href={dl} download={segs[segs.length - 1]} target="_blank" rel="noreferrer">download</a>}
         <button type="button" className="obj-close" aria-label="Close the object (Esc)" onClick={onClose}>Close <span aria-hidden="true">×</span></button>

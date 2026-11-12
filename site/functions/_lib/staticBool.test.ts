@@ -291,8 +291,8 @@ describe('the budget: a combination past it declines (`too-broad`), never a gues
  *  ones it lists) with their count and totals, excluded paths, total. A view the query matches with nothing to
  *  exclude lists no `matched`: it is its own root. */
 function viewAsBrute(v: View, root: string): unknown {
-  const roots = v.matched ? v.matched.map(m => [m.path, m.b, m.o] as [string, number, number]).sort((x, y) => (x[0] < y[0] ? -1 : 1)) : v.tree.b || v.tree.o ? [[root, v.tree.b, v.tree.o] as [string, number, number]] : []
-  return { roots, count: v.matchCount ?? { n: roots.length, b: v.tree.b, o: v.tree.o }, excluded: v.excluded ?? [], total: [v.tree.b, v.tree.o] }
+  const roots = v.matched ? v.matched.map(m => [m.path, m.b, m.o] as [string, number, number]).sort((x, y) => (x[0] < y[0] ? -1 : 1)) : v.tree.bytes || v.tree.objects ? [[root, v.tree.bytes, v.tree.objects] as [string, number, number]] : []
+  return { roots, count: v.matchCount ?? { n: roots.length, b: v.tree.bytes, o: v.tree.objects }, excluded: v.excluded ?? [], total: [v.tree.bytes, v.tree.objects] }
 }
 /** Brute force as `v` shows it: nothing matched in bytes is an empty view (`readView`'s rule); a capped list keeps
  *  the roots `v` lists. */

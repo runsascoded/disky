@@ -15,7 +15,7 @@ export async function sizeAssignments(ctx: Ctx, events: ServerEvent[]): Promise<
   const at = await stagedStats((await withPathStore(ctx)).env, assigned.map(e => e.detail!.pattern as string)).catch(() => null)
   if (!at) return
   for (const e of assigned) {
-    const b = at.stats[e.detail!.pattern as string]?.b
+    const b = at.stats[e.detail!.pattern as string]?.bytes
     if (typeof b !== 'number') continue
     e.detail!.bytes = b
     e.line = e.line.replace(/^(`[^`]*`)/, `$1 (${fmtBytes(b)})`)

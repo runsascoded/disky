@@ -12,11 +12,11 @@ export function composeFederatedTrees(view: FederatedView, results: readonly Sou
   for (const s of view.sources) {
     const r = reads.get(s.source)
     if (s.state !== 'ready' || !s.scan || !r) { missing.push(s.source); continue }
-    if (r.digest !== s.scan.digest || r.tree.b !== s.scan.total_bytes || r.tree.o !== s.scan.total_objects) throw new Error('source tree does not match the pinned scan')
-    c.push({ ...r.tree, n: s.mount })
+    if (r.digest !== s.scan.digest || r.tree.bytes !== s.scan.total_bytes || r.tree.objects !== s.scan.total_objects) throw new Error('source tree does not match the pinned scan')
+    c.push({ ...r.tree, name: s.mount })
   }
-  c.sort((a, b) => b.b - a.b || a.n.localeCompare(b.n))
-  return { tree: { n: 'All projects', k: 'dir', b: c.reduce((v, n) => v + n.b, 0), o: c.reduce((v, n) => v + n.o, 0), c }, missing }
+  c.sort((a, b) => b.bytes - a.bytes || a.name.localeCompare(b.name))
+  return { tree: { name: 'All projects', kind: 'dir', bytes: c.reduce((v, n) => v + n.bytes, 0), objects: c.reduce((v, n) => v + n.objects, 0), children: c }, missing }
 }
 
 /** Existing age renderer consumes absolute epoch-day bins unchanged. Prefix

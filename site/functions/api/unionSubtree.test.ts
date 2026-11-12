@@ -11,7 +11,7 @@ vi.mock('@rdub/file-tree/stores/s3', async () => ({ S3Store: (await import('../_
 // shows side by side, each read at its own scan for the request's cutoff; a drill below the root is the
 // owning store's own answer. The deployment: `_lib/testUnion.ts`.
 
-type Node = { n: string; k: string; b: number; o: number; f?: number; c?: Node[]; src?: string; at?: string }
+type Node = { name: string; kind: string; bytes: number; objects: number; folded?: number; children?: Node[]; store?: string; scan?: string }
 type Body = { date: string; path: string; threshold: number; tree: Node; union?: unknown; nodes: number }
 
 describe('D1', () => {
@@ -33,7 +33,7 @@ describe('D1', () => {
     return JSON.parse(r.text) as Body
   }
   /** A node's top level as the union lists it. */
-  const top = (t: Node) => (t.c ?? []).map(({ n, b, o, src, at }) => ({ n, b, o, ...(src ? { src, at } : {}) }))
+  const top = (t: Node) => (t.children ?? []).map(({ name, bytes, objects, store, scan }) => ({ name, bytes, objects, ...(store ? { store, scan } : {}) }))
 
   it('no main view: a request without `store=` is the primary alone, exactly as a primary-only deployment answers it', async () => {
     const plain = await get(`date=${A}&path=`, {})
@@ -43,8 +43,8 @@ describe('D1', () => {
 
   it('the main view’s root: each store’s roots at its scan, tagged, under the deployment’s label and the union’s threshold', async () => {
     const [u, p, m] = await Promise.all([body(`date=${A}&path=`), body(`date=${A}&path=&store=primary`), body(`date=${A}&path=&store=meta`)])
-    const total = p.tree.b + m.tree.b
-    expect({ ...u, tree: { ...u.tree, c: top(u.tree) } }).toEqual({
+    const total = p.tree.bytes + m.tree.bytes
+    expect({ ...u, tree: { ...u.tree, children: top(u.tree) } }).toEqual({
       date: A, path: '', w: 1280, h: 768, minArea: 12, atten: 2,
       tier: 'bysize', index: 'd1',
       threshold: Math.round(total * 12 / (1280 * 768)),
@@ -52,17 +52,17 @@ describe('D1', () => {
       truncated: false,
       union: { view: 'all', at: '2026-10-01T00:01:00.000Z', sources: [{ store: 'primary', date: A }, { store: 'meta', date: A }] },
       tree: {
-        n: 'Fleet', k: 'dir', b: total, o: p.tree.o + m.tree.o,
-        c: [
-          ...top(p.tree).filter(c => c.n !== '(other)').map(c => ({ ...c, src: 'primary', at: A })),
-          ...top(m.tree).filter(c => c.n !== '(other)').map(c => ({ ...c, src: 'meta', at: A })),
-          { n: 'zz', b: 30, o: 2, src: 'primary', at: A },
-        ].sort((x, y) => y.b - x.b),
+        name: 'Fleet', kind: 'dir', bytes: total, objects: p.tree.objects + m.tree.objects,
+        children: [
+          ...top(p.tree).filter(c => c.name !== '(other)').map(c => ({ ...c, store: 'primary', scan: A })),
+          ...top(m.tree).filter(c => c.name !== '(other)').map(c => ({ ...c, store: 'meta', scan: A })),
+          { name: 'zz', bytes: 30, objects: 2, store: 'primary', scan: A },
+        ].sort((x, y) => y.bytes - x.bytes),
       },
     })
     // `zz` (30 bytes) is under the union's threshold: the treemap's read folds it, but the root lists every
     // store's every root (its bucket table), so it is out of the fold, with no `(other)` left.
-    expect(top(u.tree).map(c => [c.n, c.src, c.b])).toEqual([['bk', 'primary', 29339201], ['mb', 'meta', 6291556], ['zz', 'primary', 30]])
+    expect(top(u.tree).map(c => [c.name, c.store, c.bytes])).toEqual([['bk', 'primary', 29339201], ['mb', 'meta', 6291556], ['zz', 'primary', 30]])
   })
 
   it('`store=<view>` names the view whether or not it is main; `store=primary` is the primary alone', async () => {
@@ -85,7 +85,7 @@ describe('D1', () => {
   it('each store reads its latest scan through the cutoff: carried forward, or unknown before its first', async () => {
     // C: the primary's scan; meta's latest by then is B.
     const c = await body(`date=${C}&path=`)
-    expect([c.union, top(c.tree).map(n => [n.n, n.src, n.at])]).toEqual([
+    expect([c.union, top(c.tree).map(n => [n.name, n.store, n.scan])]).toEqual([
       { view: 'all', at: '2026-10-03T00:01:00.000Z', sources: [{ store: 'primary', date: C }, { store: 'meta', date: B }] },
       [['bk', 'primary', C], ['mb', 'meta', B]],
     ])
@@ -98,9 +98,9 @@ describe('D1', () => {
 
   it('a store with no scan by the cutoff is unknown: absent from the root, named with a null scan', async () => {
     const [u, p] = await Promise.all([body(`date=${Z}&path=`), body(`date=${Z}&path=&store=primary`)])
-    expect([u.union, u.tree.b, top(u.tree).map(n => [n.n, n.src, n.at])]).toEqual([
+    expect([u.union, u.tree.bytes, top(u.tree).map(n => [n.name, n.store, n.scan])]).toEqual([
       { view: 'all', at: '2026-09-30T00:01:00.000Z', sources: [{ store: 'primary', date: Z }, { store: 'meta', date: null }] },
-      p.tree.b,
+      p.tree.bytes,
       [['bk', 'primary', Z], ['zz', 'primary', Z]],
     ])
     expect(await get(`date=${Z}&path=mb`)).toEqual({ status: 404, text: 'path not found' })
@@ -120,7 +120,7 @@ describe('D1', () => {
     // Before meta's first scan: the primary's Z alone, meta named unknown; ISO and compact forms alike.
     for (const at of ['2026-09-30T12:00Z', '2026-09-30T12:00:00.000Z', '20260930T120000Z']) {
       const z = await body(`at=${at}&path=`)
-      expect([z.date, z.union, top(z.tree).map(n => [n.n, n.src, n.at])]).toEqual([
+      expect([z.date, z.union, top(z.tree).map(n => [n.name, n.store, n.scan])]).toEqual([
         Z,
         { view: 'all', at: '2026-09-30T12:00:00.000Z', sources: [{ store: 'primary', date: Z }, { store: 'meta', date: null }] },
         [['bk', 'primary', Z], ['zz', 'primary', Z]],
@@ -156,13 +156,13 @@ describe('D1', () => {
   })
 
   it('each member’s cache key carries its resolved scan, and the union root’s reads the shared threshold', async () => {
-    const thr = (await body(`date=${C}&path=`)).tree.b * 12 / (1280 * 768)
+    const thr = (await body(`date=${C}&path=`)).tree.bytes * 12 / (1280 * 768)
     puts.length = 0
     await body(`date=${C}&path=&depth=1`)
     const tail = (label: string) => `?w=1280&h=768&a=12&t=2&l=&o=&b=&D=1&cl=&x=0&F=1&qs=&q=&head=0&g=<g>&st=&rl=${label}&T=${thr}`
     expect(puts.map(k => decodeURIComponent(k).replace(/&g=[^&]+/, '&g=<g>')).sort()).toEqual([
-      `https://subtree.cache/v11/~localhost/${C}/${tail('Fleet')}`,
-      `https://subtree.cache/v11/~localhost/@meta/${B}/${tail('our storage')}`,
+      `https://subtree.cache/v12/~localhost/${C}/${tail('Fleet')}`,
+      `https://subtree.cache/v12/~localhost/@meta/${B}/${tail('our storage')}`,
     ])
   })
 })

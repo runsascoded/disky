@@ -299,7 +299,7 @@ def perscan_cost(footers: dict[str, Footer], version: int, path: str, thr: float
 
 
 def compare(got: dict | None, want: dict | None, *, with_f: bool) -> list[str]:
-    """Differences between two trees, flattened: every tile and `(other)`, every field (`f` only where
+    """Differences between two trees, flattened: every tile and `(other)`, every field (`folded` only where
     the scan knows its children: a v1 scan's `(other)` count is whatever its read happened to see)."""
     if got is None or want is None:
         return [] if got is None and want is None else [f"tree: {'missing' if got is None else 'present'} vs reference"]
@@ -311,7 +311,7 @@ def compare(got: dict | None, want: dict | None, *, with_f: bool) -> list[str]:
             continue
         a, b = dict(g[p]), dict(w[p])
         if not with_f:
-            a.pop("f", None); b.pop("f", None)
+            a.pop("folded", None); b.pop("folded", None)
         if a != b:
             out.append(f"{p}: {a} != {b}")
     return out

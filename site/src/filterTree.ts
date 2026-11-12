@@ -17,27 +17,27 @@ export type NodePred = (n: TreeNode) => boolean
 export { compileQuery, parseQuery } from '../functions/_lib/pathQuery'
 export { DEFAULT_SYNTAX, SYNTAXES, syntaxById } from '../functions/_lib/querySyntax'
 
-/** Re-aggregate a node's stats (b/o/tm/sh/us/d) from a filtered kid set. */
+/** Re-aggregate a node's stats (bytes, objects, owners, mtime) from a filtered kid set. */
 export function reaggregate(n: TreeNode, kids: TreeNode[]): TreeNode {
   const us: Record<string, number> = {}
-  let b = 0
-  let o = 0
-  let wd = 0
-  let wdb = 0
+  let bytes = 0
+  let objects = 0
+  let wm = 0
+  let wmb = 0
   for (const k of kids) {
-    b += k.b
-    o += k.o
-    for (const [u, ub] of k.us ?? []) us[u] = (us[u] ?? 0) + ub
-    if (k.d != null) {
-      wd += k.d * k.b
-      wdb += k.b
+    bytes += k.bytes
+    objects += k.objects
+    for (const [u, ub] of k.owners ?? []) us[u] = (us[u] ?? 0) + ub
+    if (k.mtime != null) {
+      wm += k.mtime * k.bytes
+      wmb += k.bytes
     }
   }
-  const out: TreeNode = { ...n, b, o, c: kids }
-  out.us = Object.keys(us).length
+  const out: TreeNode = { ...n, bytes, objects, children: kids }
+  out.owners = Object.keys(us).length
     ? (Object.entries(us).sort((a, c) => c[1] - a[1]) as [string, number][])
     : undefined
-  out.d = wdb ? Math.round(wd / wdb) : undefined
+  out.mtime = wmb ? Math.round(wm / wmb) : undefined
   return out
 }
 
@@ -50,14 +50,14 @@ export function reaggregate(n: TreeNode, kids: TreeNode[]): TreeNode {
  * the byte fraction (approximate). */
 export function filterTree(n: TreeNode, pred: NodePred): TreeNode | null {
   if (pred(n)) return n
-  const kids = (n.c ?? []).map(c => filterTree(c, pred)).filter((c): c is TreeNode => c != null)
+  const kids = (n.children ?? []).map(c => filterTree(c, pred)).filter((c): c is TreeNode => c != null)
   if (!kids.length) return null
   return reaggregate(n, kids)
 }
 
 /** Filter below the root by node predicate (root itself never matches). */
 export function applyNodeFilter(root: TreeNode, pred: NodePred): TreeNode {
-  const kids = (root.c ?? []).map(bucket => filterTree(bucket, pred)).filter((c): c is TreeNode => c != null)
+  const kids = (root.children ?? []).map(bucket => filterTree(bucket, pred)).filter((c): c is TreeNode => c != null)
   return reaggregate(root, kids)
 }
 
@@ -66,13 +66,13 @@ export function applyNodeFilter(root: TreeNode, pred: NodePred): TreeNode {
  * during the walk so the predicate sees the whole ancestry. */
 export function applyFilter(root: TreeNode, pred: NamePred): TreeNode {
   const walk = (n: TreeNode, path: string): TreeNode | null => {
-    if (!n.n.startsWith('(') && pred(path)) return n
-    const kids = (n.c ?? [])
-      .map(c => walk(c, c.n.startsWith('(') ? path : `${path}/${c.n}`))
+    if (!n.name.startsWith('(') && pred(path)) return n
+    const kids = (n.children ?? [])
+      .map(c => walk(c, c.name.startsWith('(') ? path : `${path}/${c.name}`))
       .filter((c): c is TreeNode => c != null)
     if (!kids.length) return null
     return reaggregate(n, kids)
   }
-  const kids = (root.c ?? []).map(b => walk(b, b.n)).filter((c): c is TreeNode => c != null)
+  const kids = (root.children ?? []).map(b => walk(b, b.name)).filter((c): c is TreeNode => c != null)
   return reaggregate(root, kids)
 }

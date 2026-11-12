@@ -19,7 +19,7 @@ import { OwnerControls } from './OwnerControls'
 import type { OwnerIndex } from './owners'
 import { ClassMixTip, Tooltip } from './Tooltip'
 import type { ColorMode, Pricing, TreeNode } from './types'
-import { CLASS_NAMES, classMix, fmtN, fmtUsd, ratePerByte, unownedBytes } from './types'
+import { CLASS_NAMES, classMix, fmtN, fmtUsd, mtimeDay, ratePerByte, unownedBytes } from './types'
 import { SettingsMenu, useBorderStep, useRenderer, useTiling, useTitleSpace } from './prefs'
 import { useStore } from './store'
 import { useUnits } from './units'
@@ -52,7 +52,7 @@ const LI_METRIC_CHIPS: [LiMetric, string, string][] = [
  * (renderTooltip is a plain function). */
 function PathBar({ path, scheme, onDrill }: { path: TreeNode[]; scheme: string; onDrill?: (p: TreeNode[]) => void }) {
   const [copied, setCopied] = useState(false)
-  const names = path.slice(1).map(n => n.n)
+  const names = path.slice(1).map(n => n.name)
   const uri = pathCopy(scheme, names)
   const crumbs = pathCrumbs(names)
   return (
@@ -121,12 +121,12 @@ export function legendGroups(names: string[]): { prefix: string; names: string[]
 
 /** Nesting levels of tiles a subtree renders as (see `viewLevels`). */
 function tileLevels(node: TreeNode): number {
-  const kids = node.c ?? []
+  const kids = node.children ?? []
   if (kids.length === 0) return 0
-  const real = kids.filter(c => !c.n.startsWith('('))
+  const real = kids.filter(c => !c.name.startsWith('('))
   if (real.length === 1 && kids.length === 1) return tileLevels(real[0])
   let deepest = 0
-  for (const k of kids) if (!k.n.startsWith('(')) deepest = Math.max(deepest, tileLevels(k))
+  for (const k of kids) if (!k.name.startsWith('(')) deepest = Math.max(deepest, tileLevels(k))
   return 1 + deepest
 }
 const rankCache = new WeakMap<TreeNode, Map<string, [number, number]>>()
@@ -134,8 +134,8 @@ const rankCache = new WeakMap<TreeNode, Map<string, [number, number]>>()
 function childRanks(node: TreeNode): Map<string, [number, number]> {
   let m = rankCache.get(node)
   if (!m) {
-    const kids = (node.c ?? []).filter(c => !c.n.startsWith('(')).sort((a, b) => b.b - a.b)
-    m = new Map(kids.map((c, i): [string, [number, number]] => [c.n, [i, kids.length]]))
+    const kids = (node.children ?? []).filter(c => !c.name.startsWith('(')).sort((a, b) => b.bytes - a.bytes)
+    m = new Map(kids.map((c, i): [string, [number, number]] => [c.name, [i, kids.length]]))
     rankCache.set(node, m)
   }
   return m
@@ -247,7 +247,7 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
   usePerfCommit('treemap')
   const time = listingTime(scheme)
   // ` · 12.34% of total`, or nothing for the whole total (`shareOfTotal`).
-  const share = (n: TreeNode) => { const s = shareOfTotal(n.b, root.b); return s ? ` · ${s}` : '' }
+  const share = (n: TreeNode) => { const s = shareOfTotal(n.bytes, root.bytes); return s ? ` · ${s}` : '' }
   const { fmtBytes, fmtBytesLike } = useUnits()
   const [liP, setLiP] = useUrlState('li', stringParam('s'))
   const liMetrics = useMemo(() => new Set([...(liP ?? 's')].filter((m): m is LiMetric => m === 's' || m === 'p' || m === 'c')), [liP])
@@ -272,11 +272,11 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
       const rootIdx = drillLen - 1
       const viewRoot = kidPath[rootIdx]
       const l1 = kidPath[rootIdx + 1]
-      if (!viewRoot || !l1 || l1.n.startsWith('(')) return null
-      const slot = childRanks(viewRoot).get(l1.n)?.[0]
+      if (!viewRoot || !l1 || l1.name.startsWith('(')) return null
+      const slot = childRanks(viewRoot).get(l1.name)?.[0]
       if (slot == null) return null
       const l2 = kidPath[rootIdx + 2]
-      const [i, n] = l2 && !l2.n.startsWith('(') ? childRanks(l1).get(l2.n) ?? [0, 1] : [0, 1]
+      const [i, n] = l2 && !l2.name.startsWith('(') ? childRanks(l1).get(l2.name) ?? [0, 1] : [0, 1]
       return { slot, i, n }
     },
     [drillLen],
@@ -285,35 +285,32 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
   const staged = useStagedIndex()
   const ringed = stagedRings ? staged : null
   const canStage = useCanStage()
-  const schemeOf = (path: TreeNode[]) => store.bucketSchemes?.[path[1]?.n] ?? scheme
-  const uriOf = (path: TreeNode[]) => schemeOf(path) + path.slice(1).map(n => n.n).join('/')
+  const schemeOf = (path: TreeNode[]) => store.bucketSchemes?.[path[1]?.name] ?? scheme
+  const uriOf = (path: TreeNode[]) => schemeOf(path) + path.slice(1).map(n => n.name).join('/')
   // a mixed-provider store's buckets title with their scheme (`r2://…`), so the map says which cloud each is on
   const bucketLabels = useMemo(() => {
     const bs = store.bucketSchemes
-    return bs ? new Map((root.c ?? []).filter(b => bs[b.n]).map(b => [b, bs[b.n] + b.n])) : null
+    return bs ? new Map((root.children ?? []).filter(b => bs[b.name]).map(b => [b, bs[b.name] + b.name])) : null
   }, [root, store.bucketSchemes])
 
-  // Fold merger: first-class TreeNode aggregating us/d so folded tiles keep
+  // Fold merger: first-class TreeNode aggregating owners/mtime so folded tiles keep
   // real tooltips (upstream calls this at every nesting level).
   const mergeSmall = useCallback((tiny: TreeNode[]): TreeNode => {
-    const b = tiny.reduce((s, it) => s + it.b, 0)
-    const o = tiny.reduce((s, it) => s + it.o, 0)
+    const bytes = tiny.reduce((s, it) => s + it.bytes, 0)
+    const objects = tiny.reduce((s, it) => s + it.objects, 0)
     const us: Record<string, number> = {}
-    let md = -1
     let mt = -1
     let ma = -1
     for (const it of tiny) {
-      for (const [u, ub] of it.us ?? []) us[u] = (us[u] ?? 0) + ub
-      if (it.d != null && it.d > md) md = it.d
-      if (it.t != null && it.t > mt) mt = it.t
-      if (it.a != null && it.a > ma) ma = it.a
+      for (const [u, ub] of it.owners ?? []) us[u] = (us[u] ?? 0) + ub
+      if (it.mtime != null && it.mtime > mt) mt = it.mtime
+      if (it.last_read != null && it.last_read > ma) ma = it.last_read
     }
-    const folded: TreeNode = { n: `(+${tiny.length})`, b, o }
-    if (md >= 0) folded.d = md
-    if (mt >= 0) folded.t = mt
-    if (ma >= 0) folded.a = ma
+    const folded: TreeNode = { name: `(+${tiny.length})`, bytes, objects }
+    if (mt >= 0) folded.mtime = mt
+    if (ma >= 0) folded.last_read = ma
     const topUs = Object.entries(us).sort((a, c) => c[1] - a[1]).slice(0, 5)
-    if (topUs.length) folded.us = topUs as [string, number][]
+    if (topUs.length) folded.owners = topUs as [string, number][]
     return folded
   }, [])
 
@@ -346,7 +343,8 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
       // Cold-class share of the cell (NL/CL/AR bytes over all bytes) — the
       // "shade by" micro axis, applied to whichever base color the primary
       // axis picks. Ink is chosen from the base so labels stay legible.
-      const cold = shade === 'class' && kid.b ? Object.values(kid.cb ?? {}).reduce((a, b) => a + b, 0) / kid.b : 0
+      const cold = shade === 'class' && kid.bytes ? Object.values(kid.class_bytes ?? {}).reduce((a, b) => a + b, 0) / kid.bytes : 0
+      const kidDay = mtimeDay(kid)
       if (mode === 'tree') {
         const s = slotOf(kidPath)
         const base = s ? slotColor(s.slot, s.i, s.n) : 'var(--other)'
@@ -357,15 +355,15 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
         bg = 'var(--panel)'
         ink = 'var(--ink)'
       } else if (mode === 'date') {
-        if (kid.d != null && dateRange && dateRange.max > dateRange.min) {
-          bg = dateColor(dateRange.t(kid.d))
+        if (kidDay != null && dateRange && dateRange.max > dateRange.min) {
+          bg = dateColor(dateRange.t(kidDay))
           ink = inkFor(bg)
         } else {
           bg = 'var(--other)'
           ink = 'var(--ink)'
         }
       } else if (mode === 'read') {
-        const rs = readState(kid.a, readLogged(kidPath[1]?.n), readRange, { d: kid.d, dir: kid.k !== 'file', tint: readTint })
+        const rs = readState(kid.last_read, readLogged(kidPath[1]?.name), readRange, { d: kidDay, dir: kid.kind !== 'file', tint: readTint })
         if (rs.kind === 'read') {
           bg = dateColor(rs.t)
           ink = inkFor(bg)
@@ -387,17 +385,17 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
         // user: a wholly-owned (~100%) cell takes its user's color; a mixed
         // cell renders its top users as proportional stripes (with a gray
         // remainder for unowned bytes) instead of one blob.
-        const [u, ub] = kid.us?.[0] ?? [null, 0]
-        if (ub >= 0.98 * kid.b) {
+        const [u, ub] = kid.owners?.[0] ?? [null, 0]
+        if (ub >= 0.98 * kid.bytes) {
           const base = userColor(u, userIdx)
           bg = coldShade(base, cold)
           ink = inkFor(base)
         } else {
-          const us = (kid.us ?? []).filter(([, b]) => b >= 0.06 * kid.b).slice(0, 4)
-          const rem = kid.b - us.reduce((s, [, b]) => s + b, 0)
-          if (us.length && (us.length > 1 || rem >= 0.06 * kid.b)) {
-            segments = us.map(([uu, b]) => ({ color: coldShade(userColor(uu, userIdx), cold), frac: b / kid.b }))
-            if (rem >= 0.06 * kid.b) segments.push({ color: userColor(null, userIdx), frac: rem / kid.b })
+          const us = (kid.owners ?? []).filter(([, b]) => b >= 0.06 * kid.bytes).slice(0, 4)
+          const rem = kid.bytes - us.reduce((s, [, b]) => s + b, 0)
+          if (us.length && (us.length > 1 || rem >= 0.06 * kid.bytes)) {
+            segments = us.map(([uu, b]) => ({ color: coldShade(userColor(uu, userIdx), cold), frac: b / kid.bytes }))
+            if (rem >= 0.06 * kid.bytes) segments.push({ color: userColor(null, userIdx), frac: rem / kid.bytes })
             bg = 'var(--panel)'
             ink = 'var(--ink)'
           } else if (us.length === 1) {
@@ -416,7 +414,7 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
       // class lens: hatch by colder-class (non-STANDARD) byte fraction — leaf
       // cells only (cells are semi-transparent, so a parent hatch would bleed
       // through all-STANDARD children)
-      const coldFrac = lens && !ctx.hasKids ? Object.values(kid.cb ?? {}).reduce((a, b) => a + b, 0) / kid.b : 0
+      const coldFrac = lens && !ctx.hasKids ? Object.values(kid.class_bytes ?? {}).reduce((a, b) => a + b, 0) / kid.bytes : 0
       const stripes: CellStyle['stripes'] = [
         ...(writtenHatch ? [45, 135].map(angle => ({ angle, color: 'rgb(0 0 0 / 0.3)', width: 1.5, period: 7 })) : []),
         ...(coldFrac > 0.01 ? [{ angle: 135, color: `rgb(120 170 255 / ${(0.18 + 0.5 * coldFrac).toFixed(2)})`, width: 4, period: 9 }] : []),
@@ -425,13 +423,13 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
       // (or, for the unowned pin, not majority-unowned) fade back
       let dim = false
       if (effHl && !ctx.hasKids) {
-        if (effHl.user) dim = (kid.us?.find(([u]) => u === effHl.user)?.[1] ?? 0) < 0.5 * kid.b
-        else if (effHl.unowned) dim = unownedBytes(kid) < 0.5 * kid.b
+        if (effHl.user) dim = (kid.owners?.find(([u]) => u === effHl.user)?.[1] ?? 0) < 0.5 * kid.bytes
+        else if (effHl.unowned) dim = unownedBytes(kid) < 0.5 * kid.bytes
       }
       if (effBand && !ctx.hasKids && !dim) {
         const v = effBand.axis === 'a'
-          ? (readRange ? readDay(kid.a, readLogged(kidPath[1]?.n), readRange.min, { d: kid.d, dir: kid.k !== 'file', tint: readTint }) : kid.a)
-          : kid.d
+          ? (readRange ? readDay(kid.last_read, readLogged(kidPath[1]?.name), readRange.min, { d: kidDay, dir: kid.kind !== 'file', tint: readTint }) : kid.last_read)
+          : kidDay
         dim = v == null || v < effBand.lo || v > effBand.hi
       }
       // Shared-edge stroke, per cell: each neighbor paints its own half of a
@@ -447,7 +445,7 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
         : bg.includes('gradient')
           ? undefined
           : `color-mix(in oklab, ${bg} ${depth === 1 ? 40 : 62}%, var(--surface))`
-      const dustCount = kid.n === '(other)' ? Math.max(1, kid.f ?? 1) : undefined
+      const dustCount = kid.name === '(other)' ? Math.max(1, kid.folded ?? 1) : undefined
       return { bg, ink, stripes, segments, edge, dustCount, opacity: dim ? 0.22 : undefined }
     },
     [mode, shade, slotOf, userIdx, dateRange, readRange, readThrough, readLogged, readTint, effHl, effBand, lens],
@@ -458,12 +456,12 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
   // what no person owns is the unowned pool. $ figures use class-aware
   // per-user rates when the snapshot carries them.
   const rollupFor = (node: TreeNode) => {
-    if (mode !== 'user' || !node.us) return []
+    if (mode !== 'user' || !node.owners) return []
     const userRate = (u: string) => pricing && (pricing.userRates?.[u] ?? pricing.blended)
-    const us = node.us
+    const us = node.owners
     const userTotal = us.reduce((s, [, b]) => s + b, 0)
-    const unattr = Math.max(0, node.b - userTotal)
-    const shown = us.filter(([, b], i) => i < 5 || (i < 12 && b >= 0.01 * node.b))
+    const unattr = Math.max(0, node.bytes - userTotal)
+    const shown = us.filter(([, b], i) => i < 5 || (i < 12 && b >= 0.01 * node.bytes))
     const otherUsers = userTotal - shown.reduce((s, [, b]) => s + b, 0)
     return [
       ...shown.map(([u, b]) => ({ k: u, b, col: userColor(u, userIdx), rate: userRate(u), mix: pricing?.userMix?.[u], hl: { user: u } as Highlight | undefined })),
@@ -475,7 +473,7 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
   // $/mo from the node's own storage-class mix at list price — the same
   // arithmetic as the Storage-classes table — not the store-wide blended
   // rate, which over-charged a Coldline-heavy directory by ~2×.
-  const estUsd = (n: TreeNode) => n.b * (n.cb ? ratePerByte(classMix(n)) : pricing?.blended ?? 0)
+  const estUsd = (n: TreeNode) => n.bytes * (n.class_bytes ? ratePerByte(classMix(n)) : pricing?.blended ?? 0)
   const drillPath = path ?? initialPath
   // Levels of tiles the view will draw (the loaded subtree is already
   // pixel-budgeted, so its depth ≈ what renders). Lone-child chains collapse
@@ -497,7 +495,7 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
     // owner rows) — render no rollup at all, so an empty
     // `.dt-treemap-rollup` div doesn't sit as a gap between the crumb bar and
     // the map.
-    const rollupRows = rollup.filter(r => r.b >= 0.001 * node.b)
+    const rollupRows = rollup.filter(r => r.b >= 0.001 * node.bytes)
     if (!hasPanel && rollupRows.length === 0) return null
     return (
       <>
@@ -508,7 +506,7 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
             {/* The folder itself, beside its owner: the same trash as its row one level up (never a whole bucket). */}
             <OwnerControls uri={uriOf(path)} idx={ownerIdx!} node={node} lensed={ownerLensed} userIdx={userIdx} onPickUser={onPickUser}
               stage={stageHere && store.staging && canStage
-                ? <PrefixStageAction item={tableCoverItem(node, path.slice(1).map(n => n.n).join('/'))} scheme={schemeOf(path)} fmtBytes={fmtBytes} mark={staged?.markOf(uriOf(path), true) ?? null} />
+                ? <PrefixStageAction item={tableCoverItem(node, path.slice(1).map(n => n.name).join('/'))} scheme={schemeOf(path)} fmtBytes={fmtBytes} mark={staged?.markOf(uriOf(path), true) ?? null} />
                 : null} />
             {keys}
           </div>
@@ -543,7 +541,7 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
             <span className="sw" style={{ background: r.col }} />
             {isUser ? <UserChip who={r.k} size={15} /> : r.k}
             {liMetrics.has('s') && <> <b>{fmtBytesLike(r.b, rollup[0]?.b ?? r.b)}</b></>}
-            {liMetrics.has('p') && <span className="pct">{((100 * r.b) / node.b).toFixed(1)}%</span>}
+            {liMetrics.has('p') && <span className="pct">{((100 * r.b) / node.bytes).toFixed(1)}%</span>}
             {r.rate != null && liMetrics.has('c') && (
               r.mix ? (
                 <Tooltip content={<ClassMixTip mix={scaleMix(r.mix, r.b)} note="assumes this slice mirrors the user's fleet-wide class mix — the table is that mix scaled to this view's bytes" />}>
@@ -683,19 +681,19 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
   const renderTooltip = (n: TreeNode, path: TreeNode[]) => {
     const userMode = mode === 'user'
     const mix = classMix(n)
-    const classes = n.cb && (
+    const classes = n.class_bytes && (
       <div className="classes-row">
         {Object.entries(mix).map(([c, b]) => (
           <span className="tt-cls" key={c}>
-            {CLASS_NAMES[c]} {((100 * b) / n.b).toFixed(0)}%
+            {CLASS_NAMES[c]} {((100 * b) / n.bytes).toFixed(0)}%
           </span>
         ))}
-        {pricing && <span className="usd">{fmtUsd(n.b * ratePerByte(mix))}/mo</span>}
+        {pricing && <span className="usd">{fmtUsd(n.bytes * ratePerByte(mix))}/mo</span>}
       </div>
     )
-    const users = n.us && n.us.length > 0 && (
+    const users = n.owners && n.owners.length > 0 && (
       <div className="users">
-        {n.us.map(([u, b]) => (
+        {n.owners.map(([u, b]) => (
           <div className="tt-user" key={u}>
             {userMode && <span className="sw" style={{ background: userColor(u, userIdx) }} />}
             <Avatar github={ghHandle(u)} name={shortName(u)} size={13} /> {shortName(u)} · {fmtBytes(b)}
@@ -709,24 +707,24 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
         {/* Under a union root: the root's store and that store's scan. */}
         <RootSourceLine node={path[1]} />
         <div className="nums">
-          {fmtBytes(n.b)} · {fmtN(n.o)} objects{share(n)}
+          {fmtBytes(n.bytes)} · {fmtN(n.objects)} objects{share(n)}
           {newestLabel(n) && <> · last {time.label} {newestLabel(n)}</>}
-          {n.a != null
-            ? <> · last read {epochDaysToDate(n.a)}</>
-            : readRange && !n.n.startsWith('(') && (readLogged(path[1]?.n)
+          {n.last_read != null
+            ? <> · last read {epochDaysToDate(n.last_read)}</>
+            : readRange && !n.name.startsWith('(') && (readLogged(path[1]?.name)
               ? <> · <span className="never-read">no observed reads since {epochDaysToDate(readRange.min)}</span></>
               : <> · reads not logged</>)}
-          {readRange && !n.n.startsWith('(') && readLogged(path[1]?.n) && readTint === 'hatch' && unreadSinceWrite(n.a, n.d, readRange.min, n.k !== 'file')
-            && <> · <span className="written-unread">{n.k === 'file' ? 'not read since its last write' : 'written since logging began'}{readThrough && writtenAfter(n.d, readThrough.day) ? ` (${readThroughText(readThrough).through})` : ''}</span></>}
+          {readRange && !n.name.startsWith('(') && readLogged(path[1]?.name) && readTint === 'hatch' && unreadSinceWrite(n.last_read, mtimeDay(n), readRange.min, n.kind !== 'file')
+            && <> · <span className="written-unread">{n.kind === 'file' ? 'not read since its last write' : 'written since logging began'}{readThrough && writtenAfter(mtimeDay(n), readThrough.day) ? ` (${readThroughText(readThrough).through})` : ''}</span></>}
         </div>
         {classes}
         {users}
         {/* interactive only when the tooltip is pinned; CSS hides it on hover */}
-        {ownerIdx && !n.n.startsWith('(') && <OwnerControls uri={uriOf(path)} idx={ownerIdx} node={n} lensed={ownerLensed} userIdx={userIdx} onPickUser={onPickUser} />}
+        {ownerIdx && !n.name.startsWith('(') && <OwnerControls uri={uriOf(path)} idx={ownerIdx} node={n} lensed={ownerLensed} userIdx={userIdx} onPickUser={onPickUser} />}
         {/* The passive preview says where the controls are: any cell, at any
             depth, assigns from its pinned box (the table below only lists the
             drilled node's children). Gone once pinned or hovered into. */}
-        {ownerIdx && !n.n.startsWith('(') && <div className="tt-hint tt-pin-hint">{cellAction(n, objects) === 'pin' ? 'click' : '⌥-click'} to pin · assign it here</div>}
+        {ownerIdx && !n.name.startsWith('(') && <div className="tt-hint tt-pin-hint">{cellAction(n, objects) === 'pin' ? 'click' : '⌥-click'} to pin · assign it here</div>}
       </>
     )
   }
@@ -737,16 +735,16 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
       initialPath={initialPath}
       path={path}
       onPathChange={onPathChange}
-      onCellHover={onBrush ? (n, p) => onBrush(n && p.length > (path?.length ?? 1) ? p[path?.length ?? 1].n : null) : undefined}
+      onCellHover={onBrush ? (n, p) => onBrush(n && p.length > (path?.length ?? 1) ? p[path?.length ?? 1].name : null) : undefined}
       // Brushing rings the table's hovered row; a cell the open plan holds itself (`useStagedIndex`, as the
       // table marks it) gets a thin inset ring in the deletion hue, its size and colour untouched.
       lens={brush || ringed?.size ? (kid, p, depth, _ctx, style) => {
-        if (brush && depth === 0 && kid.n === brush) return { ...style, ring: { color: 'var(--ink)', width: 2 } }
-        if (ringed?.size && !kid.n.startsWith('(') && ringed.isItem(uriOf(p[p.length - 1] === kid ? p : [...p, kid]), kid.k !== 'file')) return { ...style, ring: { color: 'var(--s3)', width: 3, inset: true } }
+        if (brush && depth === 0 && kid.name === brush) return { ...style, ring: { color: 'var(--ink)', width: 2 } }
+        if (ringed?.size && !kid.name.startsWith('(') && ringed.isItem(uriOf(p[p.length - 1] === kid ? p : [...p, kid]), kid.kind !== 'file')) return { ...style, ring: { color: 'var(--s3)', width: 3, inset: true } }
         return undefined
       } : undefined}
-      // `k` decides (`cellAction`): an object opens in the leaf viewer; a
-      // directory drills even when it arrived without `c` (its children fell
+      // `kind` decides (`cellAction`): an object opens in the leaf viewer; a
+      // directory drills even when it arrived without `children` (its children fell
       // below this view's pixel budget — the drill's own fetch brings them),
       // where the core would treat it as a leaf and pin its tip.
       onCellClick={(n, p, e) => {
@@ -755,9 +753,9 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
         if (act === 'drill' && onPathChange) { onPathChange(p); return true }
         return false
       }}
-      getSize={n => n.b}
-      getChildren={n => n.c}
-      getLabel={n => bucketLabels?.get(n) ?? n.n}
+      getSize={n => n.bytes}
+      getChildren={n => n.children}
+      getLabel={n => bucketLabels?.get(n) ?? n.name}
       getId={(_n, p) => uriOf(p)}
       formatSize={fmtBytes}
       collapseChains
@@ -801,9 +799,9 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
       // current view, so the panel never collapses to an empty stub.
       renderTipDefault={(n, p) => (
         <div className="tip-viewcard">
-          <div className="vc-scope">{p.length > 1 ? pathText(schemeOf(p), p.slice(1).map(x => x.n)) : n.n}</div>
+          <div className="vc-scope">{p.length > 1 ? pathText(schemeOf(p), p.slice(1).map(x => x.name)) : n.name}</div>
           <div className="nums">
-            {fmtBytes(n.b)} · {fmtN(n.o)} objects{share(n)}
+            {fmtBytes(n.bytes)} · {fmtN(n.objects)} objects{share(n)}
             {newestLabel(n) && <> · last {time.label} {newestLabel(n)}</>}
           </div>
           <div className="vc-hint">Hover a cell for its details · click one to open it.</div>
@@ -813,7 +811,7 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
       renderLegend={redact ? undefined : legend}
       renderCrumbSuffix={node => (
         <>
-          — {fmtBytes(node.b)} · {fmtN(node.o)} objects
+          — {fmtBytes(node.bytes)} · {fmtN(node.objects)} objects
           {pricing && <> · est. {fmtUsd(estUsd(node))}/mo</>}
         </>
       )}
@@ -822,7 +820,7 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
         ? undefined
         : node => (
           <div className="hint">
-            <span className="stats">{fmtBytes(node.b)} · {fmtN(node.o)} objects{pricing && <> · est. {fmtUsd(estUsd(node))}/mo</>}</span>
+            <span className="stats">{fmtBytes(node.bytes)} · {fmtN(node.objects)} objects{pricing && <> · est. {fmtUsd(estUsd(node))}/mo</>}</span>
             <Tooltip content={<>Click a directory to drill in · click an object to open it · ⌥-click any cell to pin its details · click the path above (or Backspace) to go up · small children fold into “(other)” · j/k select rows in the table below</>}>
               <span className="info" aria-label="how to use the map" tabIndex={0}>ⓘ</span>
             </Tooltip>

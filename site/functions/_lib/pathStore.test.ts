@@ -358,11 +358,11 @@ describe('the cold footer tier (`.groups.parquet`)', () => {
 
 describe('buildView on a store generation', () => {
   const base = { w: 1280, h: 800, minArea: 12, atten: 1 }
-  const node = (n: string, k: 'file' | 'dir', b: number, o: number, rest: Partial<ViewNode> = {}): ViewNode => ({ n, k, b, o, d: DAY, t: DAY * 86400, ...rest })
-  const flatKids = (): ViewNode[] => [...flatAt(15).map(p => node(p.split('/').pop()!, 'file', 32 * KiB, 1)), node('(other)', 'dir', 32767500 - 500 * 32 * KiB, 7500, { f: 7500 })]
-  const nestTree = (): ViewNode => node('nest', 'dir', 4456448, 5, { c: [
-    node('a', 'dir', 4456448, 5, { c: [
-      node('b', 'dir', 4 * MiB, 4, { c: ['c0', 'c1', 'c2', 'c3'].map(n => node(n, 'file', MiB, 1)) }),
+  const node = (name: string, kind: 'file' | 'dir', bytes: number, objects: number, rest: Partial<ViewNode> = {}): ViewNode => ({ name, kind, bytes, objects, mtime: DAY * 86400, ...rest })
+  const flatKids = (): ViewNode[] => [...flatAt(15).map(p => node(p.split('/').pop()!, 'file', 32 * KiB, 1)), node('(other)', 'dir', 32767500 - 500 * 32 * KiB, 7500, { folded: 7500 })]
+  const nestTree = (): ViewNode => node('nest', 'dir', 4456448, 5, { children: [
+    node('a', 'dir', 4456448, 5, { children: [
+      node('b', 'dir', 4 * MiB, 4, { children: ['c0', 'c1', 'c2', 'c3'].map(n => node(n, 'file', MiB, 1)) }),
       node('z', 'file', 256 * KiB, 1),
     ] }),
   ] })
@@ -371,9 +371,9 @@ describe('buildView on a store generation', () => {
     const v = await buildView(env, { ...base, date: V2, path: '', threshold: 32 * KiB, smallRows: 4096 })
     expect([v.tier, v.index, v.threshold, v.nodes, v.truncated]).toEqual(['bysize', 'd1', 32 * KiB, 510, false])
     // `small` (6000) and `empty.bin` fold under `bk`, but the fold's 6000 B is under the threshold: no `(other)` cell there.
-    expect(v.tree).toEqual(node('root', 'dir', 37229948, 8009, { c: [
-      node('bk', 'dir', 37229948, 8009, { c: [
-        node('flat', 'dir', 32767500, 8000, { c: flatKids() }),
+    expect(v.tree).toEqual(node('root', 'dir', 37229948, 8009, { children: [
+      node('bk', 'dir', 37229948, 8009, { children: [
+        node('flat', 'dir', 32767500, 8000, { children: flatKids() }),
         nestTree(),
       ] }),
     ] }))
@@ -381,7 +381,7 @@ describe('buildView on a store generation', () => {
 
   it('a view whose children are all under the threshold: the folder as one `(other)`, never an empty tree', async () => {
     const v = await buildView(env, { ...base, date: V2, path: 'bk/flat', threshold: 64 * KiB, smallRows: 4096 })
-    expect([v.nodes, v.tree]).toEqual([0, node('flat', 'dir', 32767500, 8000, { c: [node('(other)', 'dir', 32767500, 8000, { f: 8000 })] })])
+    expect([v.nodes, v.tree]).toEqual([0, node('flat', 'dir', 32767500, 8000, { children: [node('(other)', 'dir', 32767500, 8000, { folded: 8000 })] })])
   })
 
   it('ignores a coarse pointer an earlier v1 generation left on a store date', async () => {
@@ -440,8 +440,8 @@ describe('buildView on a store generation', () => {
     const pools = async (env: Env) => {
       const v = await buildView(env, { ...base, date: V2_LENS, path: P, owner: 'unowned', threshold: 1 })
       return {
-        unowned: [v.tree.b, v.tree.o],
-        kids: v.tree.c!.map(k => [k.n, k.b]),
+        unowned: [v.tree.bytes, v.tree.objects],
+        kids: v.tree.children!.map(k => [k.name, k.bytes]),
         agg: await Promise.all((['unowned', 'owned'] as const).map(async owner => {
           const a = (await readRootAgg(env, { date: V2_LENS, path: P, owner }))!
           return [a.b, a.o]
@@ -472,7 +472,7 @@ describe('buildView on a store generation', () => {
     for (const [e, date, tier, index] of [[env, V2, 'path', 'd1'], [env, V2_BLOB, 'bysize', 'blob'], [env, V2_PQ, 'bysize', 'pq'], [env, V2_PQ, 'path', 'pq'], [meta, V2, 'bysize', 'd1']] as const) {
       const v = await buildView(e, { ...base, date, path: '', threshold: 32 * KiB, smallRows: tier === 'path' ? 1e12 : 4096 })
       expect([v.tier, v.index, v.nodes]).toEqual([tier, index, 510])
-      expect(v.tree).toEqual({ ...want.tree, n: e === meta ? 'meta root' : 'root' })
+      expect(v.tree).toEqual({ ...want.tree, name: e === meta ? 'meta root' : 'root' })
     }
     expect(SMALL_SUBTREE_ROWS).toBe(0)
   })
@@ -480,33 +480,33 @@ describe('buildView on a store generation', () => {
   it('a flat directory: its objects are the children; a tiny one reads whichever sort holds fewer rows', async () => {
     const flat = await buildView(env, { ...base, date: V2, path: 'bk/flat', threshold: 32 * KiB, smallRows: 0 })
     expect([flat.tier, flat.nodes]).toEqual(['bysize', 500])
-    expect(flat.tree).toEqual(node('flat', 'dir', 32767500, 8000, { c: flatKids() }))
+    expect(flat.tree).toEqual(node('flat', 'dir', 32767500, 8000, { children: flatKids() }))
     const small = await buildView(env, { ...base, date: V2, path: 'bk/small', threshold: 1 })
     expect([small.tier, small.nodes]).toEqual(['bysize', 3])
-    expect(small.tree).toEqual(node('small', 'dir', 6000, 3, { c: [node('s2', 'file', 3000, 1), node('s1', 'file', 2000, 1), node('s0', 'file', 1000, 1)] }))
+    expect(small.tree).toEqual(node('small', 'dir', 6000, 3, { children: [node('s2', 'file', 3000, 1), node('s1', 'file', 2000, 1), node('s0', 'file', 1000, 1)] }))
   })
 
   it('attenuated (atten 2): a deeper row needs more bytes; a folded object leaves no `(other)` under the cell budget', async () => {
     const v = await buildView(env, { ...base, atten: 2, date: V2, path: 'bk/nest', threshold: 256 * KiB, smallRows: 0 })
     expect([v.tier, v.nodes]).toEqual(['bysize', 6])
-    expect(v.tree).toEqual(node('nest', 'dir', 4456448, 5, { c: [
-      node('a', 'dir', 4456448, 5, { c: [node('b', 'dir', 4 * MiB, 4, { c: ['c0', 'c1', 'c2', 'c3'].map(n => node(n, 'file', MiB, 1)) })] }),
+    expect(v.tree).toEqual(node('nest', 'dir', 4456448, 5, { children: [
+      node('a', 'dir', 4456448, 5, { children: [node('b', 'dir', 4 * MiB, 4, { children: ['c0', 'c1', 'c2', 'c3'].map(n => node(n, 'file', MiB, 1)) })] }),
     ] }))
   })
 
   it('a depth cap: rows at the cap come back childless, from the band read alone', async () => {
     const v = await buildView(env, { ...base, date: V2, path: '', threshold: 32 * KiB, maxDepth: 2, smallRows: 0 })
     expect([v.tier, v.nodes]).toEqual(['path', 3])
-    expect(v.tree).toEqual(node('root', 'dir', 37229948, 8009, { c: [
-      node('bk', 'dir', 37229948, 8009, { c: [node('flat', 'dir', 32767500, 8000), node('nest', 'dir', 4456448, 5)] }),
+    expect(v.tree).toEqual(node('root', 'dir', 37229948, 8009, { children: [
+      node('bk', 'dir', 37229948, 8009, { children: [node('flat', 'dir', 32767500, 8000), node('nest', 'dir', 4456448, 5)] }),
     ] }))
   })
 
   it('a v1 generation is unchanged: dirs only, every node `dir`, the fine tier; no date (v1 rows carry no newest stamp)', async () => {
     const v = await buildView(env, { ...base, date: V1, path: '', threshold: 1 })
     expect([v.tier, v.index, v.nodes]).toEqual(['fine', 'd1', 3])
-    const v1 = (n: string, b: number, o: number, rest: Partial<ViewNode> = {}): ViewNode => ({ n, k: 'dir', b, o, ...rest })
-    expect(v.tree).toEqual(v1('root', 700, 3, { c: [v1('bk', 700, 3, { c: [v1('b', 400, 1), v1('a', 300, 2)] })] }))
+    const v1 = (name: string, bytes: number, objects: number, rest: Partial<ViewNode> = {}): ViewNode => ({ name, kind: 'dir', bytes, objects, ...rest })
+    expect(v.tree).toEqual(v1('root', 700, 3, { children: [v1('bk', 700, 3, { children: [v1('b', 400, 1), v1('a', 300, 2)] })] }))
   })
 
   it('Server-Timing names the sort that answered', async () => {

@@ -62,10 +62,10 @@ describe('isHidden', () => {
   })
 })
 
-const leaf = (n: string, b: number): ViewNode => ({ n, k: 'file', b, o: 1 })
+const leaf = (name: string, bytes: number): ViewNode => ({ name, kind: 'file', bytes, objects: 1 })
 const TREE: ViewNode = {
-  n: 'Downloads', k: 'dir', b: 160, o: 5, f: 2, c: [
-    { n: '2025 tax returns', k: 'dir', b: 100, o: 3, f: 3, nc: 3, nd: 0, c: [leaf('1040.pdf', 60), leaf('W2.pdf', 30), leaf('1099.pdf', 10)] },
+  name: 'Downloads', kind: 'dir', bytes: 160, objects: 5, folded: 2, children: [
+    { name: '2025 tax returns', kind: 'dir', bytes: 100, objects: 3, folded: 3, children: [leaf('1040.pdf', 60), leaf('W2.pdf', 30), leaf('1099.pdf', 10)] },
     leaf('big.zip', 50),
     leaf('notes.txt', 10),
   ],
@@ -75,16 +75,16 @@ describe('restrictTree / restrictSubtree / restrictDiff', () => {
   const r = { hide: [HIDE] }
   it('a hidden dir keeps its sizes and loses its children and child counts', () => {
     expect(restrictTree(TREE, 'Users/ryan/Downloads', r)).toEqual({
-      n: 'Downloads', k: 'dir', b: 160, o: 5, f: 2, c: [
-        { n: '2025 tax returns', k: 'dir', b: 100, o: 3 },
+      name: 'Downloads', kind: 'dir', bytes: 160, objects: 5, folded: 2, children: [
+        { name: '2025 tax returns', kind: 'dir', bytes: 100, objects: 3 },
         leaf('big.zip', 50),
         leaf('notes.txt', 10),
       ],
     })
   })
   it('a tree rooted above: the hidden dir is a leaf wherever it sits', () => {
-    const ryan: ViewNode = { n: 'ryan', k: 'dir', b: 160, o: 5, c: [TREE] }
-    expect(restrictTree(ryan, 'Users/ryan', r).c![0].c![0]).toEqual({ n: '2025 tax returns', k: 'dir', b: 100, o: 3 })
+    const ryan: ViewNode = { name: 'ryan', kind: 'dir', bytes: 160, objects: 5, children: [TREE] }
+    expect(restrictTree(ryan, 'Users/ryan', r).children![0].children![0]).toEqual({ name: '2025 tax returns', kind: 'dir', bytes: 100, objects: 3 })
   })
   it('only the tree is filtered: a name filter is refused before any body (`api/restrictedFilter.test.ts`), so nothing here filters search fields', () => {
     const body = { path: 'Users/ryan/Downloads', tree: TREE, firstPaint: true, matches: ['kept'], matchCount: { n: 3, b: 70, o: 3 } }
@@ -101,7 +101,7 @@ describe('restrictTree / restrictSubtree / restrictDiff', () => {
   it('filterJson re-emits an OK body through the filter, keeps status/headers, passes errors through', async () => {
     const ok = new Response(JSON.stringify({ path: 'Users/ryan/Downloads', tree: TREE }), { headers: { 'content-type': 'application/json', 'cache-control': 'private, max-age=300' } })
     const out = await filterJson(ok, (b: Parameters<typeof restrictSubtree>[0]) => restrictSubtree(b, r))
-    expect([out.status, out.headers.get('cache-control'), ((await out.json()) as { tree: ViewNode }).tree.c![0]]).toEqual([200, 'private, max-age=300', { n: '2025 tax returns', k: 'dir', b: 100, o: 3 }])
+    expect([out.status, out.headers.get('cache-control'), ((await out.json()) as { tree: ViewNode }).tree.children![0]]).toEqual([200, 'private, max-age=300', { name: '2025 tax returns', kind: 'dir', bytes: 100, objects: 3 }])
     const bad = new Response('nope', { status: 503 })
     expect(await filterJson(bad, () => { throw new Error('not called') })).toBe(bad)
   })

@@ -30,11 +30,11 @@
   },
   "/api/subtree?date=2026-09-27&path=marin-us-east1/checkpoints/old-run&w=128&h=128&depth=1": {
     "date": "2026-09-27", "path": "marin-us-east1/checkpoints/old-run", "w": 128, "h": 128, "tier": "fine", "index": "d1", "nodes": 3, "truncated": false,
-    "tree": {"n": "old-run", "b": 734003200, "o": 12}
+    "tree": {"name": "old-run", "bytes": 734003200, "objects": 12}
   },
   "/api/subtree?date=2026-09-27&path=marin-us-central2/scratch/tmp&w=128&h=128&depth=1": {
     "date": "2026-09-27", "path": "marin-us-central2/scratch/tmp", "w": 128, "h": 128, "tier": "fine", "index": "d1", "nodes": 1, "truncated": false,
-    "tree": {"n": "tmp", "b": 1048576, "o": 3}
+    "tree": {"name": "tmp", "bytes": 1048576, "objects": 3}
   },
   "/api/subtree?date=2026-09-27&path=marin-us-central2/scratch/gone&w=128&h=128&depth=1": 404,
   "/api/sweep/jobs": {

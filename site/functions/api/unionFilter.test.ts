@@ -36,7 +36,7 @@ const META = { vars: { ROOT_LABEL: 'our storage', SNAPSHOTS_SUBDIR: 'meta', STOR
 const META_OWN = { ...META, vars: { ...META.vars, STATIC_GEN: 'gen-meta' } }
 const NOT_INDEXED = { code: 'scan-not-indexed', error: REJECT_MESSAGES['scan-not-indexed'] }
 
-type Node = { n: string; k: string; b: number; o: number; c?: Node[]; src?: string; at?: string; m?: number }
+type Node = { name: string; kind: string; bytes: number; objects: number; children?: Node[]; store?: string; scan?: string; matched?: true }
 type Body = Record<string, unknown> & { tree: Node; nodes: number; tier: string; index: string; matched?: unknown; matches?: unknown; matchCount?: unknown }
 
 describe('D1', () => {
@@ -72,7 +72,7 @@ describe('D1', () => {
     expect(status).toBe(200)
     return b as Body
   }
-  const top = (t: Node) => (t.c ?? []).map(c => ({ ...c, c: undefined }))
+  const top = (t: Node) => (t.children ?? []).map(c => ({ ...c, children: undefined }))
 
   it('a member without its own index refuses for its mount: the answer is the others’, partial, the refusal named', async () => {
     const env = envOf()
@@ -87,7 +87,7 @@ describe('D1', () => {
       matches: ['bk/ckpt'], matched: [{ path: 'bk/ckpt', b: 6000, o: 1 }], matchCount: { n: 1, b: 6000, o: 1 },
       firstPaint: true,
       partial: true, partialReason: `meta: ${REJECT_MESSAGES['scan-not-indexed']}`,
-      tree: { n: 'Fleet', k: 'dir', b: 6000, o: 1, c: (p.tree.c ?? []).map(c => ({ ...c, src: 'primary', at: A })) },
+      tree: { name: 'Fleet', kind: 'dir', bytes: 6000, objects: 1, children: (p.tree.children ?? []).map(c => ({ ...c, store: 'primary', scan: A })) },
     })
   })
 
@@ -98,7 +98,7 @@ describe('D1', () => {
     // Each member read under its own budget, then again under the union's.
     const T = String(filterThreshold(6000 + 4194304, 1280, 768, 12))
     expect(reads()).toEqual([['meta', null], ['meta', T], ['primary', null], ['primary', T]])
-    expect({ ...u, tree: { ...u.tree, c: top(u.tree) } }).toEqual({
+    expect({ ...u, tree: { ...u.tree, children: top(u.tree) } }).toEqual({
       date: A, path: '', w: 1280, h: 768, minArea: 12, atten: 2,
       tier: u.tier, index: u.index,
       threshold: Math.round(filterThreshold(6000 + 4194304, 1280, 768, 12)),
@@ -110,8 +110,8 @@ describe('D1', () => {
       matchCount: { n: 2, b: 4194304 + 6000, o: 2 },
       firstPaint: true,
       tree: {
-        n: 'Fleet', k: 'dir', b: 4194304 + 6000, o: 2,
-        c: [{ n: 'mb', k: 'dir', b: 4194304, o: 1, src: 'meta', at: A, c: undefined }, { n: 'bk', k: 'dir', b: 6000, o: 1, src: 'primary', at: A, c: undefined }],
+        name: 'Fleet', kind: 'dir', bytes: 4194304 + 6000, objects: 2,
+        children: [{ name: 'mb', kind: 'dir', bytes: 4194304, objects: 1, store: 'meta', scan: A, children: undefined }, { name: 'bk', kind: 'dir', bytes: 6000, objects: 1, store: 'primary', scan: A, children: undefined }],
       },
     })
     // A member with no match contributes nothing; no refusal, nothing partial.

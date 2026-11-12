@@ -49,8 +49,8 @@ describe('D1', () => {
   /** Meta's root total at a scan, as its own subtree says. */
   const meta = async (date: string) => {
     const r = await subtree({ request: new Request(`http://localhost/api/subtree?date=${date}&path=&store=meta`), env: deployment() })
-    const t = ((await r.json()) as { tree: { b: number; o: number } }).tree
-    return { b: t.b, o: t.o }
+    const t = ((await r.json()) as { tree: { bytes: number; objects: number } }).tree
+    return { b: t.bytes, o: t.objects }
   }
 
   it('without a main view, the diff is the primary’s alone, as before', async () => {

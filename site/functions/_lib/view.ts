@@ -40,7 +40,7 @@ import { hasLedger } from './ledger.js'
 import { ownerAssignments } from './ownerTotals.js'
 import { HELD_BYTES, hitsBytes, IsoMap, joinOf, shared } from './shared.js'
 import { storeKey } from './stores.js'
-import { extrasFor } from './extras.js'
+import { extrasFor, type Provenance } from './extras.js'
 import { loadRegistry } from './identity.js'
 import { UPGRADE_DETAIL_GROUPS } from './edgeCache.js'
 import { covers, declined, dirsOnlyOf, dirsOnlySplit, type Found, type Hit, type HitOpts, type Rollup, rollupAt, staticCompound, staticFilterStore, staticKey, staticLiteral } from './staticFilter.js'
@@ -79,10 +79,34 @@ export const IV_BAND_ROWS = 1 << 16
  * read in 5–8 s. */
 export const V1_FILTER_SCAN_OBJECTS = 500_000
 
-/** A node of the served tree. `k`: what the path is — an object (`file`) or
- * a directory; a v1 generation only has directories, and a fold (`(other)`)
- * is drawn as a branch. */
-export type ViewNode = { n: string; k: 'file' | 'dir'; b: number; o: number; c?: ViewNode[]; f?: number } & Record<string, unknown>
+/** A node of the served tree (`/api/subtree`'s `tree`; specs/descriptive-field-names.md §3a). `kind`: what the
+ * path is — an object (`file`) or a directory; a v1 generation only has directories, and a fold (`(other)`) is
+ * drawn as a branch. */
+export interface ViewNode {
+  name: string
+  kind: 'file' | 'dir'
+  /** Bytes and objects at or under the node. */
+  bytes: number
+  objects: number
+  /** The newest write at or under the node, epoch seconds (absent when no row has one). */
+  mtime?: number
+  /** The newest read at or under the node, epoch days (access logs). */
+  last_read?: number
+  /** Non-Standard storage class id → bytes, largest first; Standard is `bytes` less their sum. */
+  class_bytes?: Record<string, number>
+  /** `[owner, bytes]`, largest first; unowned is `bytes` less their sum. */
+  owners?: [string, number][]
+  children?: ViewNode[]
+  /** An `(other)` fold: how many children it stands in for. */
+  folded?: number
+  /** The node matches the name filter. */
+  matched?: true
+  /** The top owner's inferred attribution: `[source, evidence, prefix]` (`extras.ts`). */
+  provenance?: Provenance
+  /** A union view's root child: the store it belongs to, and that store's scan at the view's cutoff (`union.ts`). */
+  store?: string
+  scan?: string
+}
 
 export interface ViewOpts {
   date: string
@@ -355,22 +379,19 @@ function scale(a: Agg, frac: number): Agg {
   return out
 }
 
-function display(a: Agg): Record<string, unknown> {
-  const out: Record<string, unknown> = {}
+function display(a: Agg): Pick<ViewNode, 'mtime' | 'last_read' | 'class_bytes' | 'owners'> {
+  const out: Pick<ViewNode, 'mtime' | 'last_read' | 'class_bytes' | 'owners'> = {}
   // A folder's date is its newest write, not a byte-weighted mean: a mean of
   // half-July, half-September reads "August", a date nothing was written on.
   // An mtime of 0 is a listing's "unknown" (no object was written in 1970): no date, as for none.
-  if (a.m) {
-    out.d = Math.floor(a.m / 86400)
-    // …and that write's instant (epoch seconds): the map's "last created" reads it with a time of day.
-    out.t = a.m
-  }
-  if (a.a != null) out.a = a.a
+  // Epoch seconds: the client takes its day (`mtimeDay`) where it buckets by day.
+  if (a.m) out.mtime = a.m
+  if (a.a != null) out.last_read = a.a
   const desc = (m: Record<string, number>) =>
     Object.fromEntries(Object.entries(m).sort((x, y) => y[1] - x[1]))
-  if (Object.keys(a.cb).length) out.cb = desc(a.cb)
+  if (Object.keys(a.cb).length) out.class_bytes = desc(a.cb)
   if (Object.keys(a.ub).length) {
-    out.us = Object.entries(a.ub).sort((x, y) => y[1] - x[1]).map(([u, b]) => [u, b])
+    out.owners = Object.entries(a.ub).sort((x, y) => y[1] - x[1]).map(([u, b]) => [u, b])
   }
   return out
 }
@@ -2711,21 +2732,21 @@ export async function buildView(env0: Env, o: ViewOpts): Promise<View> {
   // The provenance sidecar, beside the read (its own `extras` term in the trace: the served seam's).
   const [v, ex] = await Promise.all([readView(env, o, cov), extrasFor(env, o.date, path).then(x => { o.trace?.('extras', performance.now() - t0); return x })])
   if (!v) {
-    return { tree: { n: rootName(path, env), k: 'dir', b: 0, o: 0 }, tier: 'none', index: 'none', threshold: 0, nodes: 0, truncated: false, ...(query ? { matches: [], matched: [], ...coverageFields(cov) } : {}) }
+    return { tree: { name: rootName(path, env), kind: 'dir', bytes: 0, objects: 0 }, tier: 'none', index: 'none', threshold: 0, nodes: 0, truncated: false, ...(query ? { matches: [], matched: [], ...coverageFields(cov) } : {}) }
   }
   const { kept, aggDepth, foldedOf, thrAt } = v
   const nodeOf = (name: string, a: Agg): ViewNode => ({
-    n: name,
-    k: a.kind ?? 'dir',
-    b: Math.round(a.b),
-    o: Math.round(a.o),
+    name,
+    kind: a.kind ?? 'dir',
+    bytes: Math.round(a.b),
+    objects: Math.round(a.o),
     ...display(a),
   })
   const kidsOf = kidsIndex(kept, path)
   const matched = v.matchSet ?? new Set(v.matches ?? [])
   const build = (p: string, a: Agg): ViewNode => {
     const node = nodeOf(p === path ? rootName(path, env) : p.split('/').pop()!, a)
-    if (matched.has(p)) node.m = 1
+    if (matched.has(p)) node.matched = true
     // Index extras: the top owner's provenance, when the scan's generation
     // carries the sidecar.
     if (ex) {
@@ -2733,30 +2754,30 @@ export async function buildView(env0: Env, o: ViewOpts): Promise<View> {
       let topB = 0
       for (const [u, b] of Object.entries(a.ub)) if (b > topB) { top = u; topB = b }
       const pv = top ? ex.provenance(p, top) : null
-      if (pv) node.pv = pv
+      if (pv) node.provenance = pv
     }
     const childPaths = kidsOf.get(p) ?? []
     if (!childPaths.length) {
       // The view's own folder with children but none over the threshold (a flat folder of many small objects) is
       // drawn as one `(other)`, never as nothing; a frontier node below it, or a root standing for no children (a
       // filter's lone remaining object), is a leaf cell.
-      const f = p === path && node.k === 'dir' ? a.nc ?? foldedOf.get(p) ?? 0 : 0
-      if (f > 0) node.c = [{ ...nodeOf('(other)', subtract(a, [])), f } as ViewNode]
+      const f = p === path && node.kind === 'dir' ? a.nc ?? foldedOf.get(p) ?? 0 : 0
+      if (f > 0) node.children = [{ ...nodeOf('(other)', subtract(a, [])), folded: f }]
       return node
     }
     const kids = childPaths
       .map(cp => build(cp, kept.get(cp)!))
       // bytes, then name: equal-sized siblings never take the order the store happened to read them in
-      .sort((x, y) => y.b - x.b || (x.n < y.n ? -1 : x.n > y.n ? 1 : 0))
+      .sort((x, y) => y.bytes - x.bytes || (x.name < y.name ? -1 : x.name > y.name ? 1 : 0))
     const kidAggs = childPaths.map(cp => kept.get(cp)!)
     const rest = subtract(a, kidAggs)
-    node.c = kids
+    node.children = kids
     if (rest.b > thrAt((aggDepth.get(childPaths[0]!) ?? dP + 1))) {
       // What the fold stands in for: every child not named — objects and
       // dirs — where the row says how many children there are; else the
       // sub-threshold children the read saw (a v1 tier holds dirs only).
       const f = a.nc != null ? Math.max(0, a.nc - childPaths.length) : foldedOf.get(p) ?? 0
-      node.c.push({ ...nodeOf('(other)', rest), f } as ViewNode)
+      node.children.push({ ...nodeOf('(other)', rest), folded: f })
     }
     return node
   }

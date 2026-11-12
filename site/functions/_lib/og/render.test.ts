@@ -82,12 +82,12 @@ describe('svgToPng', () => {
   it('renders each selected map palette through the real SVG and WASM pipeline', async () => {
     const { mkdir, writeFile } = await fsp()
     await mkdir('tmp', { recursive: true })
-    const tree: TreeNode = { n: 'demo', b: 100, o: 10, c: [
-      { n: 'checkpoints', b: 70, o: 7, c: [
-        { n: 'old', b: 40, o: 4, d: 20000, a: 20100, us: [['ann', 40]] },
-        { n: 'new', b: 30, o: 3, d: 20100 },
+    const tree: TreeNode = { name: 'demo', bytes: 100, objects: 10, children: [
+      { name: 'checkpoints', bytes: 70, objects: 7, children: [
+        { name: 'old', bytes: 40, objects: 4, mtime: 20000 * 86400, last_read: 20100, owners: [['ann', 40]] },
+        { name: 'new', bytes: 30, objects: 3, mtime: 20100 * 86400 },
       ] },
-      { n: 'data', b: 30, o: 3, d: 20050, a: 20090, us: [['ann', 30]] },
+      { name: 'data', bytes: 30, objects: 3, mtime: 20050 * 86400, last_read: 20090, owners: [['ann', 30]] },
     ] }
     const sizes: [number, number][] = []
     for (const mode of ['tree', 'date', 'read', 'user'] as const) {
