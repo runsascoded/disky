@@ -4,7 +4,7 @@ export const BUILD_SHA: string = import.meta.env.VITE_BUILD_SHA ?? ''
 export const BUILD_TIME: string = import.meta.env.VITE_BUILD_TIME ?? ''
 export const SOURCE_REF: string = import.meta.env.VITE_SOURCE_REF ?? ''
 export const BUILD_ENVIRONMENT: string = import.meta.env.VITE_BUILD_ENVIRONMENT ?? ''
-export const REPO_URL = import.meta.env.VITE_REPO_URL || 'https://github.com/runsascoded/disky'
+export const REPO_URL = import.meta.env.VITE_REPO_URL || 'https://github.com/Open-Athena/disky'
 
 /** GitHub's tree URL takes a ref (including slash-separated feature branches), while a commit link uses the repository base. */
 export function sourceUrl(repo: string, ref: string): string {

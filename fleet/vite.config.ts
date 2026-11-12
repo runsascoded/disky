@@ -46,7 +46,7 @@ function docs(): Plugin {
       if (s !== `\0${id}`) return null
       const pages = docPages()
       for (const p of pages) this.addWatchFile(resolve(REPO, p.path))
-      const repo = (process.env.FLEET_REPO ?? 'https://github.com/runsascoded/disky').replace(/\/+$/, '')
+      const repo = (process.env.FLEET_REPO ?? 'https://github.com/Open-Athena/disky').replace(/\/+$/, '')
       return `export const pages = ${JSON.stringify(pages)}\nexport const repo = ${JSON.stringify(repo)}\nexport const ref = ${JSON.stringify(process.env.FLEET_REF ?? 'cloud')}\n`
     },
   }
