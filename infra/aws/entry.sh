@@ -6,5 +6,7 @@ case ${INGEST_PIPELINE:-} in
   nf) exec bash /scan.sh "$@" ;;
   # one-off: the age pyramids of scans indexed before the pipeline built them (its argument is ignored)
   age-backfill) exec bash /age-backfill.sh ;;
+  # one-off: the static name index's backlog in persisted chunks (its argument is ignored)
+  static-catchup) exec bash /static-catchup.sh ;;
 esac
 exec /app/.venv/bin/dt-cloud scan-run supervise -- bash /ingest.sh "$@"

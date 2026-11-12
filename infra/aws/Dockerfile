@@ -31,8 +31,8 @@ RUN mkdir -p ui/dist && uv sync --frozen --no-dev --package dt-cloud
 # The pipeline's steps call `dt-cloud` / `disk-tree` bare.
 ENV PATH=/app/.venv/bin:$PATH
 # chmod: the source zip (Pulumi `AssetArchive`) doesn't carry file modes.
-COPY infra/aws/ingest.sh infra/aws/scan.sh infra/aws/entry.sh infra/aws/age-backfill.sh /
-RUN chmod 755 /ingest.sh /scan.sh /entry.sh /age-backfill.sh
+COPY infra/aws/ingest.sh infra/aws/scan.sh infra/aws/entry.sh infra/aws/age-backfill.sh infra/aws/static-catchup.sh /
+RUN chmod 755 /ingest.sh /scan.sh /entry.sh /age-backfill.sh /static-catchup.sh
 COPY job/nf ./job/nf
 COPY job/profiles ./job/profiles
 # The scan-run profile ingest.sh records with (`SCAN_RUNS_PROFILE`).
