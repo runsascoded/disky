@@ -19,7 +19,7 @@
  * With cookies blocked the `?sso=` marker alone stops the second attempt on the way back. A reload is then one more
  * bounce, never a loop.
  */
-import { clearCookie, type Gate, isSecureRequest, readCookie, sessionCookie } from '@open-athena/auth'
+import { clearCookie, type Gate, isSecureRequest, readCookie, sessionCookie, signSession, verifySession } from '@open-athena/auth'
 import { oidcCallback, type OidcOptions, oidcStart, redirectFromOrigin } from '@open-athena/auth/oidc'
 
 /** The vars that configure the broker: the issuer and a client (any unset = not configured). The preview pair is the
@@ -49,6 +49,9 @@ export interface OaLoginHost {
   preview?: boolean
   /** The nonce cookie's name (default `OA_NONCE_COOKIE`), e.g. a `__Host-` one on https. */
   nonceCookieName?: string
+  /** The adapter's account-hint cookie for broker sign-ins (e.g. `OA_HINT_COOKIE`): what `rememberAccount` reads the
+   *  address from, and the `login_hint` a later attempt sends. Default none. */
+  accountHintCookie?: string | false
 }
 
 export const OA_CALLBACK_PATH = '/auth/oa/callback'
@@ -57,8 +60,8 @@ export const OA_NONCE_COOKIE = 'oa_login_nonce'
 /** The adapter config for "Sign in with OA" (`/auth/oa` + its callback): OA's broker as the OIDC provider, or null where
  *  it isn't configured (no gate, or `OA_LOGIN_ISSUER` or the host's client id / secret unset).
  *  No `hd`: the broker admits only its Workspace; the gate's policy decides admission as for every other path. Its own
- *  nonce cookie (a Google round trip in another tab keeps its own) and no account-hint cookies (those name Google
- *  accounts for Google's chooser; the broker holds its own session).
+ *  nonce cookie (a Google round trip in another tab keeps its own) and its own account-hint cookie where the app names
+ *  one (`host.accountHintCookie`, never Google's: those feed Google's chooser), which `rememberAccount` reads.
  *
  *  On a preview host (`host.preview`) the client is the preview pair alone, with `redirectFromOrigin`: the broker checks
  *  the concrete callback against that client's one-label pattern. Without the pair it is null (no button, 404), never
@@ -77,8 +80,67 @@ export function oaLoginOptions(gate: Gate | null, env: OaLoginEnv, request: Requ
     ...client,
     provider: { authUrl: `${issuer}/oidc/authorize`, tokenUrl: `${issuer}/oidc/token`, jwksUrl: `${issuer}/oidc/jwks`, issuer, scope: 'openid email profile' },
     nonceCookieName: host.nonceCookieName ?? OA_NONCE_COOKIE,
-    accountHintCookie: false,
+    accountHintCookie: host.accountHintCookie ?? false,
   }
+}
+
+export const OA_HINT_COOKIE = 'oa_login_hint'
+export const OA_WHO_COOKIE = 'oa_login_who'
+/** The signed remembered account's subject prefix: never `e:`/`g:`, so the value is inert as a session. */
+const WHO_PREFIX = 'who:'
+
+/** `res` (a completed broker sign-in) plus a signed `whoCookie` naming the address the adapter just wrote to
+ *  `hintCookie`. The hint is client-controlled on later requests; this is what the wall trusts to show a name and face
+ *  ("Continue as …"), so only a browser that signed in as an address is shown that address's profile. Like Google's
+ *  hints it outlives sign-out: it says who was here last, never who is here. */
+export async function rememberAccount(
+  res: Response,
+  request: Request,
+  { hintCookie, whoCookie, secret }: { hintCookie: string, whoCookie: string, secret: string },
+): Promise<Response> {
+  const set = res.headers.getSetCookie().find(c => c.startsWith(`${hintCookie}=`))
+  const raw = set?.slice(hintCookie.length + 1).split(';')[0]
+  if (!raw) return res
+  let email: string
+  try { email = decodeURIComponent(raw).trim().toLowerCase() } catch { return res }
+  if (!email.includes('@')) return res
+  const value = await signSession(`${WHO_PREFIX}${email}`, secret, Date.now(), SIGNED_OUT_TTL_S)
+  return withCookie(res, sessionCookie(value, { name: whoCookie, ttlS: SIGNED_OUT_TTL_S, secure: isSecureRequest(request) }))
+}
+
+/** The address `rememberAccount` signed for this browser, or null (none, forged, expired). */
+export async function rememberedAccount(request: Request, whoCookie: string, secret: string): Promise<string | null> {
+  const raw = readCookie(request, whoCookie)
+  if (!raw) return null
+  const sub = await verifySession(raw, secret, Date.now())
+  return sub?.startsWith(WHO_PREFIX) ? sub.slice(WHO_PREFIX.length) : null
+}
+
+/** The addresses an adapter's account-hint cookie pair (`name`, `name_accounts`) remembers, newest first, as the
+ *  adapter reads them: presentation only, never an identity. */
+export function hintedAccounts(request: Request, name: string | false): string[] {
+  if (!name) return []
+  const out: string[] = []
+  const add = (v: unknown) => {
+    if (typeof v !== 'string') return
+    const email = v.trim().toLowerCase()
+    if (email.includes('@') && email.length <= 254 && !out.includes(email)) out.push(email)
+  }
+  const decode = (raw: string | null): unknown => {
+    if (!raw || raw.length > 3000) return null
+    try { return decodeURIComponent(raw) } catch { return null }
+  }
+  add(decode(readCookie(request, name)))
+  const list = decode(readCookie(request, `${name}_accounts`))
+  if (typeof list === 'string') {
+    try {
+      const parsed: unknown = JSON.parse(list)
+      if (Array.isArray(parsed)) parsed.forEach(add)
+    } catch {
+      // Malformed client-controlled history is an absent hint, not an error.
+    }
+  }
+  return out.slice(0, 5)
 }
 
 export const SKIP_COOKIE = 'oa_sso_skip'

@@ -888,7 +888,27 @@ button.linkish {
       &:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
     }
     // "Sign in with OA" (OA's broker): full width above the panel, the first affordance where it's configured.
-    .signin-oa { display: block; text-align: center; margin-bottom: 12px; }
+    .signin-oa {
+      display: flex; align-items: center; justify-content: center; gap: 10px; margin-bottom: 12px;
+      .oa-mark {
+        flex: none; display: grid; place-items: center; width: 26px; height: 26px; border-radius: 5px;
+        background: #fff; color: var(--s1); font-size: 11px; font-weight: 800; letter-spacing: 0.02em;
+      }
+    }
+    // A returning visitor's: Google's "Continue as" layout (face, name over address, the mark at the end).
+    .signin-oa-account {
+      padding: 7px 8px 7px 10px;
+      .oa-account { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; }
+      .oa-avatar {
+        flex: none; width: 28px; height: 28px; border-radius: 50%; object-fit: cover;
+        display: grid; place-items: center; background: rgba(255, 255, 255, 0.25); font-size: 14px;
+      }
+      .oa-who { flex: 1; min-width: 0; display: flex; flex-direction: column; line-height: 1.25; }
+      .oa-name { font-size: 14px; }
+      .oa-email { font-size: 12px; font-weight: 400; opacity: 0.85; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    }
+    // "Use a different account" where the OA button already covers every remembered Google account.
+    .signin-other { display: block; margin: -2px 0 8px; text-align: center; font-size: 13px; color: var(--ink-3); &:hover { color: var(--ink); } }
     // <SignInPanel>: Google button (`.signin`, primary), then an emailed-code
     // form and request-access for the non-Google tail. Left-aligned inputs,
     // full-width controls, an "or" divider between the affordances.
