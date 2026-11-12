@@ -121,6 +121,8 @@ dt-cloud static-names add -g GEN -L LAYOUT -s SCANS -o STORE  # Append every sca
                           # gets them only by a rebuild into a new GEN — `manifests/<id>.json`), then the binary counter's carries; a URL
                           # store's generation is mirrored into `-w`, new files go up data → `meta.json`s → manifests.
                           # Small deployments' path (the r2 demo's daily ingest); gcs/cw run the stages on Batch
+dt-cloud generation-gc -t KIND -o STORE -k PIN…  # Collect verified compaction predecessors: plans by default, `-x -s SCRATCH` executes
+                          # (protocol, receipts, grace and pins: `specs/done/generation-gc-and-r2-copy.md`)
 dt-cloud interval-store migrate-object-version -g OLD -O NEW -o STORE  # Adopt string object versions without raw listings:
                           # fold existing ranges/runs; native GCS generations become exact strings, unknowns stay NULL.
                           # `-R` names borrowed source ranges. Source and CURRENT stay unchanged pending verification/cutover.
@@ -266,6 +268,8 @@ then `git rm`'d. `dt-cloud d1-schema check -d <db> [-c <wrangler config>]` compa
 One gate (`_lib/auth.ts`, `@open-athena/auth` over D1): `identify` → `Identity` (`via: session | grant | public`), `requireViewer` / `requireStager` / `requireAdmin`.
 - `/auth/google` (+ `/callback`, `/onetap`) — Google OIDC → email session; `/auth/email/*` — emailed code / magic link → email session
 - `/auth/oa` (+ `/callback`, `/client`) — "Sign in with OA" through OA's broker (`OA_LOGIN_*`, `specs/oa-login-rp.md`; unset: 404, no button) → email session. Where configured, the middleware sends a person's unauthenticated page visit there once with `prompt=none` before the wall (`_lib/silentSignIn.ts`; never a crawler, `fetch`, `?key=`/`?og=` link or public deployment); `/api/auth/logout` suppresses that until they click it or complete any sign-in
+- **Preview hosts** (`isPreviewHost`: exactly one label under `PAGES_SUBDOMAIN`, the project's `pages.dev` subdomain: a PR's `pr-N`, the `dev` alias, a deployment hash; never a custom domain): OA sign-in only through the broker's preview client (`OA_LOGIN_PREVIEW_CLIENT_ID` / `_SECRET`, Preview environment only) with `redirectFromOrigin`, else none (404, no button; never the deployment's own client), and no silent `prompt=none` attempt
+- **`AUTH_HOST_COOKIES = "1"`** (default off; switching it signs everyone out once): on https, the session (+ its `_rs` handle), both nonces and the Google hint are `__Host-` named (`cookieNames`), so the gate reads only `__Host-oa_auth` there; `gateFor(env, request)` needs the request for it
 - `/api/auth/*` — the package's routes: `whoami`, `exchange` (`?key=` share link → grant session), `logout`, request-access, admin grant/request/log console
 - `/api/token` — a session's personal agent token (a non-expiring Bearer grant: the base scope + assign, never admin; grants can't mint one)
 - `/api/me` — the caller's canonical owner id (`_lib/me.ts`): what `user=me` / `lens=user:me` / `owner: '@me'` resolve to
@@ -282,6 +286,8 @@ One gate (`_lib/auth.ts`, `@open-athena/auth` over D1): `identify` → `Identity
 3. Set `ADMIN_LIST` and `ADMIN_BOOTSTRAP` on **every environment sharing that D1, at the same time**, prod and dev stack alike: a dev stack on prod's D1 with the list off lets every staff sign-in edit the list from dev.
 
 ## Development
+
+Shared work done on a deployment branch is its own commit, subject prefixed `[cloud]`, with no deployment defaults; send its sha to the root `disky` session when committed. Config and wiring are separate `[<deploy>]` commits. An unsent `[cloud]` commit is how a fix stays on one deployment.
 
 Deploy sites and build release images only from committed source. `scripts/require-clean` refuses staged, unstaged and nonignored untracked changes; there is no dirty-source override. `site/deploy` checks again after building and records the verified commit. A deployment's image build (gcs/cw `job/build.sh`) uploads a Git archive of that commit, so concurrent working-tree edits cannot enter the image. Read-only deployment status and dry runs remain available on a dirty tree.
 

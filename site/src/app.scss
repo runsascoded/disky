@@ -2671,8 +2671,10 @@ a.staged-chip {
     .obj-dl { font-size: 12.5px; }
     .ext-link { margin-left: -6px; }
     .obj-close {
-      margin-left: auto; border: none; background: none; color: var(--ink-2);
-      font-size: 20px; line-height: 1; cursor: pointer; padding: 0 2px;
+      margin-left: auto; display: inline-flex; align-items: center; gap: 6px;
+      border: 1px solid var(--line); border-radius: 4px; background: none; color: var(--ink-2);
+      font-size: 12.5px; line-height: 1.2; min-height: 30px; cursor: pointer; padding: 4px 8px;
+      span { font-size: 18px; line-height: 1; }
       &:hover { color: var(--ink); }
     }
   }

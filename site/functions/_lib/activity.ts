@@ -7,7 +7,7 @@
  */
 import type { D1Database } from '@cloudflare/workers-types'
 import { BATCH_GAP_S } from './batchGroups.js'
-import { slackApi, type SlackEnv, slackPeople, slackScopes } from './slack.js'
+import { slackApi, type SlackEnv, slackScopes, slackPeople } from './slack.js'
 import { dataUriImage, identiconPng, identiconSeed, publishAvatar } from './publicAvatar.js'
 import type { SlogBatch, SlogEvent } from './sessionLogShape.js'
 import {
@@ -111,7 +111,8 @@ export async function burstFor(
     ).bind(actor, ts - RESUME_S, ts, sid).first<{ id: number; last_ts: number }>()
     if (prior) {
       await extend(prior.id)
-      return { id: prior.id, resumed: ts - prior.last_ts }
+      const gap = ts - prior.last_ts
+      return { id: prior.id, ...(gap > gapS ? { resumed: gap } : {}) }
     }
   }
   const r = await db.prepare(
@@ -336,6 +337,19 @@ export async function senderOf(env: ActivityEnv, b: Pick<Burst, 'actor' | 'via' 
   }
 }
 
+/** Slack's own workspace photo takes precedence for an authenticated person's Slack posts. Grants retain their
+ *  explicit subject face: a grant label is not evidence that its holder owns a Slack account. */
+export async function slackSenderOf(env: ActivityEnv, b: Pick<Burst, 'actor' | 'via'>, fallback: Sender): Promise<Sender> {
+  if (b.via !== 'session') return fallback
+  const person = (await slackPeople(env, [b.actor]))[b.actor.toLowerCase()]
+  const image = person?.image
+  if (!image) return fallback
+  try {
+    if (new URL(image).protocol === 'https:') return { name: fallback.name, icon: image }
+  } catch { /* an unusable Slack photo falls back to the site's face */ }
+  return fallback
+}
+
 async function render(env: ActivityEnv, b: StoredBurst, conf: KindsConf, now: number): Promise<void> {
   const db = env.DB!
   await db.prepare('UPDATE activity_bursts SET rendered_ms = ?, dirty = 0 WHERE id = ?').bind(now, b.id).run()
@@ -353,13 +367,9 @@ async function render(env: ActivityEnv, b: StoredBurst, conf: KindsConf, now: nu
   const who = s.slack || s.discord ? await senderOf(env, b, now) : { name: '', icon: null }
   if (s.slack) {
     const channel = env.SLACK_ADMIN_CHANNEL!
-    // A burst posts as its user (`username` / `icon_url` overrides on the bot's own post), when the installed app may
-    // override the sender; otherwise the line itself says who. The face is the user's Slack profile image, else their
-    // published one (`senderOf`). The post is one line, everything else in the thread.
     const asUser = (await slackScopes(env)).has('chat:write.customize')
-    const person = asUser ? (await slackPeople(env, [b.actor]))[b.actor.toLowerCase()] : undefined
-    const icon = person?.image ?? who.icon
-    const sender = asUser ? { username: who.name, ...(icon ? { icon_url: icon } : {}) } : {}
+    const slackWho = asUser ? await slackSenderOf(env, b, who) : who
+    const sender = asUser ? { username: slackWho.name, ...(slackWho.icon ? { icon_url: slackWho.icon } : {}) } : {}
     const text = renderHeadline(b, { fmt: SLACK, conf, name: who.name }, asUser)
     const parent = await ensurePost(db, b.id, 'slack', 'parent', now,
       async () => (await slackApi(env, 'chat.postMessage', { channel, text, ...sender, unfurl_links: false, unfurl_media: false })).ts ?? null,

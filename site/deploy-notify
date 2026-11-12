@@ -3,17 +3,17 @@
 # requires-python = ">=3.11"
 # dependencies = ["click==8.3.0", "thrds @ https://github.com/Open-Athena/thrds/archive/6f207846b32012d6a1550011f95bc561caf8ff1c.tar.gz"]
 # ///
-"""Review a deployment receipt; send only with an explicit flag and reviewed channel capability."""
+"""Review a deployment receipt; send only with an explicit flag. Greens are run-length threaded, reds are top-level posts."""
 from getpass import getuser
+from collections.abc import Mapping
 from json import dumps, loads
 from os import environ
 from pathlib import Path
-from re import findall, fullmatch
+from re import findall, fullmatch, search
+from socket import setdefaulttimeout
 from subprocess import check_output
 from tomllib import loads as toml_loads
-from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlsplit
-from urllib.request import HTTPRedirectHandler, Request, build_opener
 from uuid import uuid4
 
 from click import Choice, ClickException, Path as ClickPath, argument, group, option
@@ -111,35 +111,61 @@ def render(value: dict) -> str:
             f"CF deployment: {r['cloudflare_deployment'] or 'not recorded'}.\n\n" + ' · '.join(links) + '\n')
 
 
-class NoRedirect(HTTPRedirectHandler):
-    def redirect_request(
-        self,
-        req: Request,
-        fp: object,
-        code: int,
-        msg: str,
-        headers: object,
-        newurl: str,
-    ) -> None:
-        return None
+# A notice's headline as Slack stores it (`render`'s bold line through `to_slack`): its deployment and outcome.
+HEADLINE = r'\*([A-Z0-9-]+) (?:dev|prod) deployment (succeeded|failed during [a-z]+|cancelled)\*'
+HISTORY = 100
 
 
-def send(value: dict, env: dict) -> None:
+def green_thread(
+    history: list[dict],
+    deployment: str,
+    bot: tuple[str, str | None],
+) -> str | None:
+    """The thread a green notice joins: the newest top-level notice for this deployment, if it is green.
+
+    Greens are run-length threaded (the first green after a red, or with none in the last `HISTORY` channel
+    messages, opens a thread; later greens reply in it); every red is its own top-level post, ending the run.
+    """
+    user_id, bot_id = bot
+    for message in history:
+        if message.get('user') != user_id and (bot_id is None or message.get('bot_id') != bot_id):
+            continue
+        match = search(HEADLINE, message.get('text') or '')
+        if match and match[1] == deployment.upper():
+            return message['ts'] if match[2] == 'succeeded' else None
+    return None
+
+
+def slack_client(
+    token: str,
+    channel: str,
+):
+    from thrds.slack import SlackClient
+
+    return SlackClient(token, channel)
+
+
+def send(value: dict, env: dict) -> str:
+    """Post the notice; a green one replies in the current green run's thread. Returns the thread it joined, if any."""
     require(env.get('DEPLOY_NOTIFICATIONS_ENABLED') == '1', 'Deploy notifications are disabled pending template/transport review')
-    hook = env.get('SLACK_DEPLOY_WEBHOOK', '')
-    require(fullmatch(r'https://hooks\.slack\.com/services/[A-Za-z0-9]+/[A-Za-z0-9]+/[A-Za-z0-9]+', hook) is not None,
-            'SLACK_DEPLOY_WEBHOOK must be a channel-scoped Slack incoming webhook')
-    from thrds.mrkdwn import to_slack
-
-    body = dumps({'text': to_slack(render(value)), 'unfurl_links': False, 'unfurl_media': False}).encode()
-    request = Request(hook, data=body, headers={'Content-Type': 'application/json'}, method='POST')
+    token = env.get('SLACK_DEPLOY_BOT_TOKEN', '')
+    require(fullmatch(r'xoxb-[A-Za-z0-9-]+', token) is not None, 'SLACK_DEPLOY_BOT_TOKEN must be a Slack bot token')
+    channel = env.get('SLACK_DEPLOY_CHANNEL', '')
+    require(fullmatch(r'[CG][A-Z0-9]{6,}', channel) is not None, 'SLACK_DEPLOY_CHANNEL must be a Slack channel ID')
+    r = receipt(value)
+    setdefaulttimeout(15)
+    client = slack_client(token, channel)
+    thread = None
+    if r['status'] == 'success':
+        try:
+            thread = green_thread(client.list_channel_history(channel, limit=HISTORY), r['deployment'], client.bot_ids)
+        except (RuntimeError, OSError, KeyError):
+            raise ClickException('Slack history lookup failed; nothing posted') from None
     try:
-        with build_opener(NoRedirect()).open(request, timeout=15) as response:
-            require(response.status == 200 and response.read(1024).strip() == b'ok', 'Slack did not acknowledge the notification')
-    except HTTPError as error:
-        raise ClickException(f'Slack notification HTTP {error.code}; not retried') from None
-    except (URLError, OSError, TimeoutError):
-        raise ClickException('Slack notification transport failed; acceptance unknown, not retried') from None
+        client.post(render(r), thread)
+    except (RuntimeError, OSError):
+        raise ClickException('Slack notification failed; acceptance unknown, not retried') from None
+    return thread
 
 
 def load(path: Path) -> dict:
@@ -147,6 +173,12 @@ def load(path: Path) -> dict:
     value = loads(path.read_text())
     require(isinstance(value, dict), 'Receipt must be an object')
     return receipt(value)
+
+
+def run_url(env: Mapping[str, str]) -> str | None:
+    """The GitHub Actions run that recorded the notice (`GITHUB_SERVER_URL`/`GITHUB_REPOSITORY`/`GITHUB_RUN_ID`), else None."""
+    server, repo, run = (env.get(k) for k in ('GITHUB_SERVER_URL', 'GITHUB_REPOSITORY', 'GITHUB_RUN_ID'))
+    return f'{server}/{repo}/actions/runs/{run}' if server and repo and run else None
 
 
 @group()
@@ -166,8 +198,8 @@ def render_cmd(path: Path) -> None:
 def send_cmd(execute: bool, path: Path) -> None:
     value = load(path)
     if execute:
-        send(value, dict(environ))
-        print('Deployment notification accepted.')
+        thread = send(value, dict(environ))
+        print(f'Deployment notification posted{f" in thread {thread}" if thread else ""}.')
     else:
         print(render(value), end='')
 
@@ -212,7 +244,7 @@ def record_cmd(
         'host': var.get(f'{mode.upper()}_HOST', parsed['name'] + '.pages.dev'), 'verified': verified,
         'dirty': dirty == 'true', 'actor': actor, 'actor_source': 'github' if environ.get('GITHUB_ACTOR') else 'local',
         'attempt': str(uuid4()), 'cloudflare_deployment': urlsplit(cf_url).hostname.split('.')[0] if cf_url else None,
-        'cloudflare_url': cf_url, 'run_url': None,
+        'cloudflare_url': cf_url, 'run_url': run_url(environ),
     })
     output.write_text(dumps(r, indent=2) + '\n')
 

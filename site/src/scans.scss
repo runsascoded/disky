@@ -62,11 +62,22 @@
     &.readout { .sr-phases-grid > span:not(.absent) { background: linear-gradient(to right, color-mix(in srgb, var(--fill, transparent) 40%, transparent) var(--pct, 0%), color-mix(in srgb, var(--ink) 6%, transparent) var(--pct, 0%)); }
       .absent { opacity: 0.35; } .failed .dur { color: var(--danger); } } }
   .sr-chart { margin-top: 8px; }
+  .sr-chart-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; padding-top: 10px;
+    h3 { margin: 0; padding: 0; }
+    .gran { font-size: 12px; }
+    .gran button { font-size: inherit; }
+  }
+  .sr-chart-head + p { font-size: 12px; margin: 5px 0; }
+  .sr-break-mark { stroke: var(--ink-2); stroke-width: 1.5; fill: none; pointer-events: none; }
+  .sr-cut-note { margin: 0 0 4px; font-size: 12px; color: var(--ink-2); }
+  .overview-help, .overview-help > .help-tgt { display: block; }
+  .overview-help { border-bottom: none; cursor: default; margin: 4px 0; }
   // the chart and its readout stay in view while the table scrolls under them (hovering a row far down still shows
   // its phases), where the viewport is tall enough to spare them
   @media (min-width: 641px) and (min-height: 760px) {
     .sr-chart { position: sticky; top: var(--topbar-h, 48px); z-index: var(--z-sticky); background: var(--surface); padding-bottom: 8px; border-bottom: 1px solid var(--line);
-      h3 { margin-top: 0; padding-top: 10px; } }
+      h3 { margin-top: 0; }
+      .sr-chart-head h3 { padding-top: 0; } }
   }
   .sr-svgwrap { position: relative; }
   .sr-svgtip { position: absolute; transform: translate(-50%, calc(-100% - 12px)); pointer-events: none; white-space: nowrap; z-index: var(--z-float); }

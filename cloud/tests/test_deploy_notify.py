@@ -6,7 +6,7 @@ import shutil
 import subprocess
 import sys
 from types import ModuleType
-from urllib.error import HTTPError, URLError
+from urllib.error import URLError
 from uuid import UUID
 
 from click import ClickException
@@ -19,7 +19,6 @@ N = ModuleType('deploy_notify')
 N.__file__ = str(ROOT / 'site/deploy-notify')
 SourceFileLoader(N.__name__, N.__file__).exec_module(N)
 SHA = 'b' * 40
-HOOK = 'https://hooks.slack.com/services/TTEST/BTEST/dummy'
 
 
 def doc(**changes):
@@ -104,38 +103,9 @@ def test_invalid_or_injectable_receipt_is_refused(changes, message):
     assert str(error.value) == message
 
 
-def test_cli_defaults_to_review_even_with_credentials_and_enabled_delivery(tmp_path, monkeypatch):
-    path = tmp_path / 'receipt.json'
-    path.write_text(dumps(doc()))
-    def unexpected(*args):
-        pytest.fail('review must not open a connection')
-    monkeypatch.setattr(N, 'build_opener', unexpected)
-    result = CliRunner().invoke(N.main, ['send', str(path)], env={'DEPLOY_NOTIFICATIONS_ENABLED': '1', 'SLACK_DEPLOY_WEBHOOK': HOOK})
-    assert (result.exit_code, result.output) == (0, SUCCESS)
-    result = CliRunner().invoke(N.main, ['send', '-x', str(path)], env={'DEPLOY_NOTIFICATIONS_ENABLED': '0', 'SLACK_DEPLOY_WEBHOOK': HOOK})
-    assert (result.exit_code, result.output) == (1, 'Error: Deploy notifications are disabled pending template/transport review\n')
-
-
-def test_webhook_payload_uses_thrds_formatting_and_cannot_select_a_channel(monkeypatch):
-    calls = []
-    class Response:
-        status = 200
-        def __enter__(self): return self
-        def __exit__(self, *args): pass
-        def read(self, size):
-            assert size == 1024
-            return b'ok'
-    class Opener:
-        def open(self, request, timeout):
-            calls.append((request.full_url, request.method, timeout, loads(request.data)))
-            return Response()
-    def opener(handler):
-        assert type(handler) is N.NoRedirect
-        return Opener()
-    monkeypatch.setattr(N, 'build_opener', opener)
-    N.send(doc(), {'DEPLOY_NOTIFICATIONS_ENABLED': '1', 'SLACK_DEPLOY_WEBHOOK': HOOK})
-    assert calls == [(HOOK, 'POST', 15, {
-        'text': f'''✅ *HF dev deployment succeeded*
+ENV = {'DEPLOY_NOTIFICATIONS_ENABLED': '1', 'SLACK_DEPLOY_BOT_TOKEN': 'xoxb-test-token', 'SLACK_DEPLOY_CHANNEL': 'C0TESTCHAN'}
+BOT = ('U0BOT', 'B0BOT')
+WIRE = f'''✅ *HF dev deployment succeeded*
 
 Source: <https://github.com/Open-Athena/disky/tree/hf|hf> · <https://github.com/Open-Athena/disky/commit/{SHA}|{SHA}> · clean
 
@@ -144,26 +114,116 @@ GitHub actor: `louisa` · attempt `123-1`
 Serving verification: passed. CF deployment: abcdef12.
 
 <https://dev.hf.oa.dev|Site> · <https://abcdef12.oa-hf-usage.pages.dev|CF deployment> · <https://github.com/Open-Athena/disky/actions/runs/123|Run logs>
-''',
-        'unfurl_links': False, 'unfurl_media': False,
-    })]
+'''
 
 
-@pytest.mark.parametrize('failure,message', [
-    (HTTPError(HOOK, 429, 'private', {}, None), 'Slack notification HTTP 429; not retried'),
-    (HTTPError(HOOK, 302, 'private', {}, None), 'Slack notification HTTP 302; not retried'),
-    (URLError(HOOK), 'Slack notification transport failed; acceptance unknown, not retried'),
+def notice(ts: str, headline: str, bot: str = 'B0BOT') -> dict:
+    return {'ts': ts, 'bot_id': bot, 'text': f':x: *{headline}*\n\nSource: …'}
+
+
+class FakeSlack:
+    def __init__(self, history=(), fail=None):
+        self.history, self.fail, self.calls = list(history), fail, []
+        self.bot_ids = BOT
+
+    def list_channel_history(self, channel, limit):
+        self.calls.append(('history', channel, limit))
+        return self.history
+
+    def post(self, content, thread_id=None):
+        self.calls.append(('post', content, thread_id))
+        if self.fail:
+            raise self.fail
+
+
+def fake(monkeypatch, slack):
+    made = []
+    def client(token, channel):
+        made.append((token, channel))
+        return slack
+    monkeypatch.setattr(N, 'slack_client', client)
+    return made
+
+
+def test_cli_defaults_to_review_even_with_credentials_and_enabled_delivery(tmp_path, monkeypatch):
+    path = tmp_path / 'receipt.json'
+    path.write_text(dumps(doc()))
+    def unexpected(*args):
+        pytest.fail('review must not open a connection')
+    monkeypatch.setattr(N, 'slack_client', unexpected)
+    result = CliRunner().invoke(N.main, ['send', str(path)], env=ENV)
+    assert (result.exit_code, result.output) == (0, SUCCESS)
+    result = CliRunner().invoke(N.main, ['send', '-x', str(path)], env={**ENV, 'DEPLOY_NOTIFICATIONS_ENABLED': '0'})
+    assert (result.exit_code, result.output) == (1, 'Error: Deploy notifications are disabled pending template/transport review\n')
+
+
+@pytest.mark.parametrize('history,thread', [
+    # The newest notice for this deployment is green: the run continues in its thread, across dev and prod.
+    ([notice('9.0', 'HF prod deployment succeeded'), notice('8.0', 'HF dev deployment failed during build')], '9.0'),
+    # A red ended the run (failure or cancellation): the next green opens a new one.
+    ([notice('9.0', 'HF dev deployment failed during upload'), notice('8.0', 'HF dev deployment succeeded')], None),
+    ([notice('9.0', 'HF prod deployment cancelled'), notice('8.0', 'HF dev deployment succeeded')], None),
+    # Another deployment's notices, another bot's posts and other messages don't count.
+    ([notice('9.5', 'GCS prod deployment failed during build'), notice('9.4', 'HF dev deployment failed during build', bot='B0OTHER'),
+      {'ts': '9.3', 'bot_id': 'B0BOT', 'text': 'Scan health: all green'}, notice('9.0', 'HF dev deployment succeeded')], '9.0'),
+    # No notice within the history window: a new thread.
+    ([], None),
 ])
-def test_uncertain_delivery_and_redirects_are_not_retried_or_leaked(monkeypatch, failure, message):
-    calls = []
-    class Opener:
-        def open(self, *args, **kwargs):
-            calls.append(1)
-            raise failure
-    monkeypatch.setattr(N, 'build_opener', lambda _: Opener())
+def test_greens_are_run_length_threaded(monkeypatch, history, thread):
+    slack = FakeSlack(history)
+    made = fake(monkeypatch, slack)
+    assert N.send(doc(), ENV) == thread
+    assert made == [('xoxb-test-token', 'C0TESTCHAN')]
+    assert slack.calls == [('history', 'C0TESTCHAN', 100), ('post', SUCCESS, thread)]
+
+
+@pytest.mark.parametrize('changes', [{'status': 'failure', 'stage': 'build', 'verified': False}, {'status': 'cancelled', 'verified': False}])
+def test_every_red_is_its_own_top_level_post(monkeypatch, changes):
+    slack = FakeSlack([notice('9.0', 'HF dev deployment succeeded')])
+    fake(monkeypatch, slack)
+    assert N.send(doc(**changes), ENV) is None
+    assert slack.calls == [('post', N.render(doc(**changes)), None)]
+
+
+def test_thrds_renders_the_wire_text():
+    from thrds.mrkdwn import to_slack
+    assert to_slack(SUCCESS) == WIRE
+    # What Slack stores is what the run lookup reads back.
+    assert N.green_thread([{'ts': '1.0', 'bot_id': 'B0BOT', 'text': WIRE}], 'hf', BOT) == '1.0'
+
+
+@pytest.mark.parametrize('env,message', [
+    ({'SLACK_DEPLOY_BOT_TOKEN': 'xoxp-user-token'}, 'SLACK_DEPLOY_BOT_TOKEN must be a Slack bot token'),
+    ({'SLACK_DEPLOY_BOT_TOKEN': ''}, 'SLACK_DEPLOY_BOT_TOKEN must be a Slack bot token'),
+    ({'SLACK_DEPLOY_CHANNEL': '#hf-admin'}, 'SLACK_DEPLOY_CHANNEL must be a Slack channel ID'),
+])
+def test_transport_configuration_is_checked_before_connecting(monkeypatch, env, message):
+    def unexpected(*args):
+        pytest.fail('a misconfigured send must not connect')
+    monkeypatch.setattr(N, 'slack_client', unexpected)
     with pytest.raises(ClickException) as error:
-        N.send(doc(), {'DEPLOY_NOTIFICATIONS_ENABLED': '1', 'SLACK_DEPLOY_WEBHOOK': HOOK})
-    assert (calls, str(error.value)) == ([1], message)
+        N.send(doc(), {**ENV, **env})
+    assert str(error.value) == message
+
+
+@pytest.mark.parametrize('failure', [RuntimeError('Slack API error: channel_not_found'), URLError('private')])
+def test_uncertain_delivery_is_not_retried_or_leaked(monkeypatch, failure):
+    slack = FakeSlack(fail=failure)
+    fake(monkeypatch, slack)
+    with pytest.raises(ClickException) as error:
+        N.send(doc(status='failure', stage='upload', verified=False), ENV)
+    assert (len(slack.calls), str(error.value)) == (1, 'Slack notification failed; acceptance unknown, not retried')
+
+
+def test_failed_history_lookup_posts_nothing(monkeypatch):
+    slack = FakeSlack()
+    def broken(channel, limit):
+        raise RuntimeError('Slack API error: missing_scope')
+    slack.list_channel_history = broken
+    fake(monkeypatch, slack)
+    with pytest.raises(ClickException) as error:
+        N.send(doc(), ENV)
+    assert (slack.calls, str(error.value)) == ([], 'Slack history lookup failed; nothing posted')
 
 
 def executable(path: Path, body: str):
@@ -226,5 +286,15 @@ if len(sys.argv) == 1: print('{SHA}')
         'cloudflare_deployment': expected[3],
         'cloudflare_url': 'https://abcdef12.demo-site.pages.dev' if expected[3] else None, 'run_url': None,
     }
-    assert result.stderr == ('Error: SLACK_DEPLOY_WEBHOOK must be a channel-scoped Slack incoming webhook\n'
+    assert result.stderr == ('Error: SLACK_DEPLOY_BOT_TOKEN must be a Slack bot token\n'
                              'WARN: deploy notification failed; original deployment exit status preserved\n' if enabled else '')
+
+
+@pytest.mark.parametrize('env, url', [
+    ({'GITHUB_SERVER_URL': 'https://github.com', 'GITHUB_REPOSITORY': 'Open-Athena/disky', 'GITHUB_RUN_ID': '123'},
+     'https://github.com/Open-Athena/disky/actions/runs/123'),
+    ({'GITHUB_SERVER_URL': 'https://github.com', 'GITHUB_REPOSITORY': 'Open-Athena/disky'}, None),
+    ({}, None),
+])
+def test_run_url_names_the_recording_actions_run(env, url):
+    assert N.run_url(env) == url

@@ -20,35 +20,63 @@
  * bounce, never a loop.
  */
 import { clearCookie, type Gate, isSecureRequest, readCookie, sessionCookie } from '@open-athena/auth'
-import { oidcCallback, type OidcOptions, oidcStart } from '@open-athena/auth/oidc'
+import { oidcCallback, type OidcOptions, oidcStart, redirectFromOrigin } from '@open-athena/auth/oidc'
 
-/** The vars that configure the broker; any unset = not configured. */
-export interface OaLoginEnv { OA_LOGIN_ISSUER?: string; OA_LOGIN_CLIENT_ID?: string; OA_LOGIN_CLIENT_SECRET?: string }
+/** The vars that configure the broker: the issuer and a client (any unset = not configured). The preview pair is the
+ *  deployment's preview client at the broker (`<client id>-preview`, its callback the one-label pattern
+ *  `https://*.<project subdomain>/auth/oa/callback`), set only in the Pages preview environment: the only client a
+ *  preview host (`OaLoginHost.preview`) uses. */
+export interface OaLoginEnv {
+  OA_LOGIN_ISSUER?: string
+  OA_LOGIN_CLIENT_ID?: string
+  OA_LOGIN_CLIENT_SECRET?: string
+  OA_LOGIN_PREVIEW_CLIENT_ID?: string
+  OA_LOGIN_PREVIEW_CLIENT_SECRET?: string
+}
 
 export interface OidcCfg {
   gate: Gate
   clientId: string
   clientSecret: string
-  redirectUri: string
+  redirectUri: OidcOptions['redirectUri']
 }
 
 export type OaLoginCfg = OidcCfg & Required<Pick<OidcOptions, 'provider' | 'nonceCookieName' | 'accountHintCookie'>>
 
+/** What the app knows about the request's host. This module doesn't classify hosts; the app does. */
+export interface OaLoginHost {
+  /** A PR preview's branch host: the preview client with a redirect on the request's own origin, or nothing. */
+  preview?: boolean
+  /** The nonce cookie's name (default `OA_NONCE_COOKIE`), e.g. a `__Host-` one on https. */
+  nonceCookieName?: string
+}
+
+export const OA_CALLBACK_PATH = '/auth/oa/callback'
+export const OA_NONCE_COOKIE = 'oa_login_nonce'
+
 /** The adapter config for "Sign in with OA" (`/auth/oa` + its callback): OA's broker as the OIDC provider, or null where
- *  it isn't configured (no gate, or any of `OA_LOGIN_ISSUER` / `OA_LOGIN_CLIENT_ID` / `OA_LOGIN_CLIENT_SECRET` unset).
+ *  it isn't configured (no gate, or `OA_LOGIN_ISSUER` or the host's client id / secret unset).
  *  No `hd`: the broker admits only its Workspace; the gate's policy decides admission as for every other path. Its own
  *  nonce cookie (a Google round trip in another tab keeps its own) and no account-hint cookies (those name Google
- *  accounts for Google's chooser; the broker holds its own session). */
-export function oaLoginOptions(gate: Gate | null, env: OaLoginEnv, request: Request): OaLoginCfg | null {
+ *  accounts for Google's chooser; the broker holds its own session).
+ *
+ *  On a preview host (`host.preview`) the client is the preview pair alone, with `redirectFromOrigin`: the broker checks
+ *  the concrete callback against that client's one-label pattern. Without the pair it is null (no button, 404), never
+ *  the deployment's own client. */
+export function oaLoginOptions(gate: Gate | null, env: OaLoginEnv, request: Request, host: OaLoginHost = {}): OaLoginCfg | null {
   const issuer = env.OA_LOGIN_ISSUER?.replace(/\/+$/, '')
-  if (!gate || !issuer || !env.OA_LOGIN_CLIENT_ID || !env.OA_LOGIN_CLIENT_SECRET) return null
+  if (!gate || !issuer) return null
+  const [clientId, clientSecret] = host.preview
+    ? [env.OA_LOGIN_PREVIEW_CLIENT_ID, env.OA_LOGIN_PREVIEW_CLIENT_SECRET]
+    : [env.OA_LOGIN_CLIENT_ID, env.OA_LOGIN_CLIENT_SECRET]
+  if (!clientId || !clientSecret) return null
+  const redirectUri = host.preview ? redirectFromOrigin(OA_CALLBACK_PATH) : `${new URL(request.url).origin}${OA_CALLBACK_PATH}`
+  const client = { clientId, clientSecret, redirectUri }
   return {
     gate,
-    clientId: env.OA_LOGIN_CLIENT_ID,
-    clientSecret: env.OA_LOGIN_CLIENT_SECRET,
-    redirectUri: `${new URL(request.url).origin}/auth/oa/callback`,
+    ...client,
     provider: { authUrl: `${issuer}/oidc/authorize`, tokenUrl: `${issuer}/oidc/token`, jwksUrl: `${issuer}/oidc/jwks`, issuer, scope: 'openid email profile' },
-    nonceCookieName: 'oa_login_nonce',
+    nonceCookieName: host.nonceCookieName ?? OA_NONCE_COOKIE,
     accountHintCookie: false,
   }
 }

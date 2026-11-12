@@ -3,8 +3,10 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } fr
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
-  MODES, PROTOCOL, authorize, modePlan, publishUi, requireImplemented, requireThat, retireUi, selectMode, uiSettings, wranglerUpload,
+  MODES, PROTOCOL, authorize, modePlan, publishFull, requireImplemented, requireThat, retireFull, revisionProbe, selectMode, wranglerUpload,
 } from './preview.mjs'
+
+export { revisionProbe }
 
 const input = name => process.env[`PREVIEW_${name.toUpperCase()}`] || ''
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
@@ -38,7 +40,7 @@ export function eventRequest(event, eventName, actor) {
   return { number: Number(event.pull_request?.number ?? event.inputs?.pr), mode, actor, manual: eventName === 'workflow_dispatch' }
 }
 
-const MODE_SUMMARY = { ui: 'this PR’s front end over production data, read-only' }
+const MODE_SUMMARY = { full: 'this PR’s full build on the deployment’s preview environment, the dev stack’s data and sign-in' }
 
 async function record(github, plan, receipt, state, runUrl) {
   const env = `preview/${plan.target}/pr-${plan.pr}`
@@ -70,27 +72,6 @@ async function comment(github, plan, receipt, runUrl) {
     : github('POST', `/repos/${plan.repository}/issues/${plan.pr}/comments`, { body })
 }
 
-export async function waitForHost(url, { fetcher = fetch, wait = sleep, attempts = 12 } = {}) {
-  for (let attempt = 0; attempt < attempts; attempt++) {
-    try {
-      const response = await fetcher(url, { method: 'HEAD', redirect: 'manual', signal: AbortSignal.timeout(10000) })
-      if (response.status >= 200 && response.status < 500) return response.status
-    } catch {
-      // A newly registered hostname can lack DNS/certificate propagation until the next bounded attempt.
-    }
-    if (attempt + 1 < attempts) await wait(10000)
-  }
-  throw new Error('Preview hostname did not become reachable with valid TLS within the bounded wait')
-}
-
-/** A reachable hostname can still route to production. Require the caller's built revision, without redirects. */
-export function revisionProbe(verification) {
-  requireThat(verification && typeof verification.path === 'string' && verification.path.startsWith('/')
-    && !verification.path.startsWith('//') && !verification.path.includes('\\'), 'An explicit same-origin revision verification path is required')
-  requireThat(!verification.header || /^[a-z0-9-]+$/i.test(verification.header), 'Invalid revision header')
-  return verification
-}
-
 export async function verifyRevision(origin, verification, sha, { fetcher = fetch, wait = sleep, attempts = 12 } = {}) {
   const { path, header } = revisionProbe(verification)
   const url = new URL(path, origin)
@@ -101,11 +82,11 @@ export async function verifyRevision(origin, verification, sha, { fetcher = fetc
       const value = header ? response.headers.get(header)?.trim().split(/\s+/)[0] : (await response.text()).trim()
       if ((response.status >= 200 && response.status < 300 || response.status >= 400 && response.status < 500) && value === sha) return response.status
     } catch {
-      // The domain may still be propagating. A bounded retry must still prove the captured revision.
+      // The branch alias may still be propagating. A bounded retry must still prove the captured revision.
     }
     if (attempt + 1 < attempts) await wait(10000)
   }
-  throw new Error('Preview hostname did not serve the captured full source SHA within the bounded wait')
+  throw new Error('Preview host did not serve the captured full source SHA within the bounded wait')
 }
 
 export async function main() {
@@ -120,9 +101,9 @@ export async function main() {
   const sha = input('sha') || request.requestedSha || pr.head.sha
   const operation = input('operation')
   requireThat(['gate', 'publish', 'retire'].includes(operation), 'Unknown preview operation')
-  // Retire removes every implemented mode's resources (today: `ui`), whatever the labels say now. Publish takes the
+  // Retire removes every implemented mode's resources (today: `full`'s), whatever the labels say now. Publish takes the
   // mode gate chose (`mode` input), so a label changed in between cannot switch it.
-  const selection = operation === 'retire' ? { mode: 'ui', source: 'retire' }
+  const selection = operation === 'retire' ? { mode: 'full', source: 'retire' }
     : input('mode') ? { mode: input('mode'), source: 'gate' }
       : selectMode({ requested: request.mode, labels: pr.labels.map(label => label.name) })
   requireImplemented(selection.mode)
@@ -138,9 +119,8 @@ export async function main() {
   output('url', `https://${plan.hostname}`)
   if (operation === 'gate') { console.log(JSON.stringify({ ...plan, mode_source: selection.source }, null, 2)); return }
   requireThat(input('deploy_token'), 'Missing provider deployment token')
-  requireThat(input('dns_token'), 'Pages custom hostnames need a separate DNS token')
-  const cfApi = apiClient('https://api.cloudflare.com/client/v4', path => path.startsWith('/zones/') ? input('dns_token') : input('deploy_token'))
-  const { target: selected, layer } = uiSettings(config.targets[target])
+  const cfApi = apiClient('https://api.cloudflare.com/client/v4', () => input('deploy_token'))
+  const selected = config.targets[target]
   const workDir = resolve(input('work_directory') || `${process.env.RUNNER_TEMP || 'tmp'}/cf-preview-${request.number}`)
   mkdirSync(workDir, { recursive: true })
   const receiptPath = joinReceipt(workDir)
@@ -159,18 +139,18 @@ export async function main() {
   let receipt
   try {
   if (operation === 'retire') {
-    receipt = await retireUi({ cf, plan })
+    receipt = await retireFull({ cf, plan })
   } else {
     requireThat(input('artifact'), 'Missing built artifact path')
     const artifact = resolve(input('artifact'))
     requireThat(existsSync(artifact), 'Missing built artifact')
     const cwd = resolve(dirname(configPath), selected.working_directory || '.')
-    const uploader = staging => wranglerUpload(selected.wrangler, { artifact: staging, cwd, token: input('deploy_token'), account: plan.account })
-    receipt = await publishUi({ cf, plan, layer, artifact, workDir, cwd, uploader })
+    const upload = wranglerUpload(selected.wrangler, { artifact, cwd, token: input('deploy_token'), account: plan.account })
+    receipt = await publishFull({ cf, plan, artifact, cwd, upload })
     // A pushed head during upload must not be advertised as the current PR preview.
     await authorize({ github, repository: plan.repository, target, number: request.number, sha,
       actor: request.actor, manual: request.manual })
-    receipt.tls_http_status = await verifyRevision(receipt.url, selected.verification, plan.sha)
+    receipt.http_status = await verifyRevision(receipt.url, selected.verification, plan.sha)
     receipt.verified_sha = plan.sha
   }
   } catch (error) {

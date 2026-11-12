@@ -43,7 +43,7 @@ export interface AdminGrant {
 }
 
 async function adminGrants(ctx: Ctx): Promise<AdminGrant[]> {
-  const gate = gateFor(ctx.env)
+  const gate = gateFor(ctx.env, ctx.request)
   if (!gate) return []
   const at = now()
   return (await gate.list({ includeRevoked: false }))

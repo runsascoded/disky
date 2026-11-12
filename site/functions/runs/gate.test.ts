@@ -3,7 +3,7 @@
 import { emailSub, sessionCookie, signSession } from '@open-athena/auth'
 import { describe, expect, it, vi } from 'vitest'
 import type { Env } from '../_lib/auth'
-import { sqliteD1 } from '../_lib/testD1'
+import { RUN_DIR, sqliteD1 } from '../_lib/testD1'
 
 vi.mock('../_lib/unfurl.js', () => ({
   unfurlShell: async (_ctx: unknown, meta: unknown) => new Response(JSON.stringify(meta)),
@@ -29,7 +29,7 @@ const { onRequest } = await import('./[[id]]')
 const { onRequestGet: ogGet } = await import('../og/[[path]]')
 
 const SECRET = 'test-session-secret-0123456789abcdef'
-const ORIGIN = 'https://gcs.example.org'
+const ORIGIN = 'https://site.example.org'
 const REAL = 'plan-1/20261104T125245Z'
 const UNKNOWN = 'nope/20260101T000000Z'
 const GENERIC = { title: 'Deletion run', desc: 'A deletion run. Sign in to see it.', image: `${ORIGIN}/og.jpg` }
@@ -37,8 +37,9 @@ const GENERIC = { title: 'Deletion run', desc: 'A deletion run. Sign in to see i
 async function world() {
   const { db, raw } = await sqliteD1()
   raw.prepare("INSERT INTO allowed_emails (email, who, ts) VALUES ('viewer@example.org', 'admin@example.org', 1)").run()
+  raw.prepare("INSERT INTO plans (id, name, state, created_by, created_ts) VALUES (1, 'Staged', 'open', 'a@example.org', 1)").run()
   raw.prepare(
-    "INSERT INTO deletion_runs (run_id, plan, scan, head, exec_head, actor, mode, started_ts, log_dir) VALUES (?, 'p', '2026-11-03T1622', 1, 1, 'a@example.org', 'real', 1793796765, 'gs://x/sweep/p/r')",
+    `INSERT INTO deletion_runs (run_id, plan_id, ${RUN_DIR}, scan, head, exec_head, actor, mode, started_ts, log_dir) VALUES (?, 1, 'p', '2026-11-03T1622', 1, 1, 'a@example.org', 'real', 1793796765, 'gs://x/sweep/p/r')`,
   ).run(REAL)
   const calls: string[] = []
   const spy = new Proxy(db, {
@@ -52,7 +53,7 @@ async function world() {
     },
   })
   const env = {
-    DB: spy, SESSION_SECRET: SECRET, BASE_SCOPE: 'gcs', STAFF_DOMAIN: 'openathena.ai', OG_CARDS: '1',
+    DB: spy, SESSION_SECRET: SECRET, BASE_SCOPE: 'base', STAFF_DOMAIN: 'staff.example.org', OG_CARDS: '1',
     ASSETS: { fetch: async () => new Response('', { status: 404 }) },
   } as unknown as Env & { ASSETS: { fetch: (r: Request) => Promise<Response> }; OG_CARDS: string }
   const cookie = sessionCookie(await signSession(emailSub('viewer@example.org'), SECRET, Date.now(), 3600), { name: 'oa_auth', ttlS: 3600, secure: true }).split(';')[0]

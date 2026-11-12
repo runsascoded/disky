@@ -428,7 +428,7 @@ class FakeS3:
 
 def test_unscanned():
     s3 = FakeS3({"scanned": 5, "empty": 0, "new": 3, "denied": PermissionError("no")})
-    assert S.unscanned(s3, {"scanned"}) == ["denied (check failed: ListObjectsV2: PermissionError: no)", "new"]
+    assert S.unscanned(s3, {"scanned"}) == S.BucketDiscovery(["new"], ["ListObjectsV2 denied: PermissionError: no"])
 
 
 def test_run_step_fake_fail_unknown(tmp_path, monkeypatch):
@@ -1004,7 +1004,7 @@ def test_interval_current_failure_records_failed_phase(tmp_path, env):
     ]
 
 
-def test_bucket_check_findings_and_failed_alert_are_not_recorded_done(tmp_path, env, monkeypatch):
+def test_bucket_check_findings_leave_notification_to_the_phase_alert(tmp_path, env, monkeypatch):
     env["SITE_URL"] = "https://site.test"
     c = ctx(tmp_path, env, Runner(tmp_path, fail=("disk-tree notify -t",)), sources=["s3://a"])
     c.run = Ends()
@@ -1013,11 +1013,28 @@ def test_bucket_check_findings_and_failed_alert_are_not_recorded_done(tmp_path, 
     S.bucket_check(c, None)
     assert c.run.calls == [
         ("begin", "bucket-check"),
-        ("end", "bucket-check", 1, True, "unscanned-bucket check: b new"),
+        ("end", "bucket-check", 1, True, "non-empty buckets outside the profile's sources: b new"),
     ]
-    assert c.sh_impl.calls == [
-        "disk-tree notify -t ⚠️ fix 2026-10-16T1200 -L scan https://site.test/scans/head -L all scans https://site.test/scans non-empty bucket(s) not in the profile's sources: `b new`",
+    assert c.sh_impl.calls == []
+
+
+def test_bucket_discovery_failure_is_not_a_nonempty_bucket(tmp_path, env, monkeypatch):
+    class BrokenListing:
+        def list_buckets(self):
+            raise RuntimeError("provider unavailable")
+
+    client = BrokenListing()
+    assert S.unscanned(client, {"a"}) == S.BucketDiscovery([], ["ListBuckets: RuntimeError: provider unavailable"])
+    c = ctx(tmp_path, env, Runner(tmp_path), sources=["s3://a"])
+    c.run = Ends()
+    monkeypatch.setattr(S, "s3_client", lambda endpoint: client)
+    S.bucket_check(c, None)
+    assert c.run.calls == [
+        ("begin", "bucket-check"),
+        ("end", "bucket-check", 1, True, "bucket discovery incomplete: ListBuckets: RuntimeError: provider unavailable"),
     ]
+    assert c.sh_impl.calls == []
+
 
 
 def test_optional_step_initialization_failure_fails_task(tmp_path, env, monkeypatch):
@@ -1382,6 +1399,18 @@ def test_store_gc_collects_the_interval_stores_lineage_on_each_copy(tmp_path, en
     assert x.sh_impl.calls == ["dt-cloud store-gc -t interval-store -l -x -o gs://iv"]
 
 
+def test_store_gc_coordinates_static_copies_and_declares_secondary_pins(tmp_path, env):
+    c = ctx(tmp_path, env, steps=['store-gc'], options={**NL_OPTS, 'store-gc': {
+        'store': 'r2://idx', 'copies': [], 'static_store': 'gs://data', 'static_copies': ['r2://idx'],
+        'static_gens': ['meta'], 'scratch': 'scratch', 'grace': 259200, 'execute': True,
+    }})
+    S.store_gc(c, None)
+    assert c.sh_impl.calls == [
+        'dt-cloud store-gc -t interval-store -l -G 259200 -x -o r2://idx',
+        'dt-cloud generation-gc -t static-names -o gs://data -k meta -c r2://idx -s scratch -G 259200 -x',
+    ]
+
+
 def test_retire_failure_warns_and_needs_its_keep(tmp_path, env):
     c = ctx(tmp_path, env, runner=Runner(tmp_path, fail=("dt-cloud scan retire",)), steps=["retire"],
             options={"list": {"import": True}, "static-names": {"gen": "s1", "store": "r2://idx"}, "digest": {"template": "t", "config": "c.yml"},
@@ -1410,7 +1439,7 @@ class AggRunner(Runner):
         self.empty = empty
 
     def __call__(self, argv, env, stdout=None, text=True):
-        if argv[:3] == ["dt-cloud", "access", "r2-agg"] and not self.empty:
+        if argv[:2] == ["dt-cloud", "access"] and argv[2] in ("r2-agg", "r2-sync") and not self.empty:
             out = Path(argv[argv.index("-o") + 1])
             out.parent.mkdir(parents=True, exist_ok=True)
             out.write_text(f"agg as of {argv[argv.index('-d') + 1]}")
@@ -1718,3 +1747,15 @@ def test_import_args_mem(tmp_path, env, monkeypatch):
     c = ctx(tmp_path, env, options={"list": {"import": True, "import_args": ["-e", "stream", "-j", "{nproc}", "-M", "{mem}"]},
                                     "static-names": {"profile": "sn.json"}, "digest": {"template": "t", "config": "c.yml"}})
     assert c.expand(c.opt("list", "import_args")) == ["-e", "stream", "-j", "4", "-M", "9GB"]
+
+
+def test_access_r2_checkpoint_is_explicit_and_runs_in_task_scratch(tmp_path, env):
+    c = ctx(tmp_path, env, AggRunner(tmp_path), steps=['access-r2'], options={
+        **R2_BASE, 'access-r2': {'state': 'r2://logs/state.json', 'checkpoint': 'gs://data/access/r2/closed.parquet',
+                               'verify': True, 'mem': '3GB', 'threads': 4},
+    })
+    S.access_r2(c, None)
+    assert c.sh_impl.calls == [
+        'dt-cloud access r2-sync -d 2026-10-16T1200 -o <tmp>/t/dt-scan/2026-10-16T1200/access-r2/agg.parquet -s r2://logs/state.json -c gs://data/access/r2/closed.parquet -w <tmp>/t/dt-scan/2026-10-16T1200/access-r2/checkpoint -M 3GB -p 4 -v',
+    ]
+    assert (tmp_path / 'data/access/r2/agg.parquet').read_text() == 'agg as of 2026-10-16T1200'

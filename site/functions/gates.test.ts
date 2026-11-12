@@ -290,8 +290,12 @@ const SHARED_ROUTES: Record<string, Case[]> = {
   'auth/oa/client.ts': [get('/auth/oa/client', 'public')],
   'data/[[path]].ts': [get('/data/scans.json', 'viewer'), get('/data/2026-10-01/meta.json', 'viewer')],
   // A card: its signature picks its tier (unsigned: the anonymous card), nothing signs in.
-  'og/[[path]].ts': [get('/og/map.png', 'public')],
+  // `/og/run.png` is a deletion run's count-only card, for a signed-in viewer only (`_lib/og/run.ts`).
+  'og/[[path]].ts': [get('/og/map.png', 'public'), get('/og/run.png?id=plan-1/20261104T125245Z', 'viewer')],
   'og/index.ts': [get('/og', 'public')],
+  // A deletion run's unfurl: the shell is public, but its stamp is the run's (state and object counts, no prefixes,
+  // sizes or names) only to a signed-in viewer; anyone else gets one fixed stamp, whether the id exists or not.
+  'runs/[[id]].ts': [get('/runs/plan-1/20261104T125245Z', 'public')],
   'slack/actions.ts': [post('/slack/actions', 'slack-signature', { SLACK_SIGNING_SECRET: 'slack-secret' }), post('/slack/actions', 'unconfigured')],
   'staged.ts': [get('/staged', 'public')],
   'user/[id].ts': [get('/user/ann', 'public')],
@@ -429,6 +433,9 @@ const SHARED_RESTRICTED: Record<string, Restricted> = {
   // A restricted link's `key=` never earns the full card (`og/tokens.ts`).
   'GET /og/map.png': 'anonymous',
   'GET /og': 'anonymous',
+  // A deletion run's unfurl and card: its state and counts, for a link's viewer; no prefixes, sizes or names.
+  'GET /runs/plan-1/20261104T125245Z': 'pathless',
+  'GET /og/run.png': 'pathless',
   'GET /staged': 'anonymous',
   'GET /user/ann': 'anonymous',
   'GET /users': 'anonymous',

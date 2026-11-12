@@ -179,7 +179,7 @@ const scaleMix = (mix: Record<string, number>, b: number): Record<string, number
   return tot ? Object.fromEntries(Object.entries(mix).map(([c, x]) => [c, (x * b) / tot])) : mix
 }
 
-export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRange, readThrough, readLogged = allLogged, readUnlogged = [], hl, onPickUser, onPickUnowned, onClearHl, pricing, lens, ownerLensed, scheme = 'gs://', redact, ownerIdx, initialPath, path, onPathChange, objects = false, onOpen, brush, onBrush, band, onBand, stagedRings = true, stageHere = false, mapOverlay }: {
+export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRange, readThrough, readLogged = allLogged, readUnlogged = [], hl, onPickUser, onPickUnowned, onClearHl, pricing, lens, ownerLensed, scheme = 'gs://', redact, ownerIdx, initialPath, path, onPathChange, objects = false, onOpen, brush, onBrush, band, onBand, stageHere = false, mapOverlay, stagedRings = true }: {
   /** Ring the open plan's staged items (off where every cell is one: /staged). */
   stagedRings?: boolean
   /** Offer the drilled folder's own trash in the owner panel: an unfiltered view (under a filter the bulk bar
@@ -282,9 +282,9 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
     [drillLen],
   )
 
-  const stagedAll = useStagedIndex()
+  const staged = useStagedIndex()
+  const ringed = stagedRings ? staged : null
   const canStage = useCanStage()
-  const staged = stagedRings ? stagedAll : null
   const schemeOf = (path: TreeNode[]) => store.bucketSchemes?.[path[1]?.n] ?? scheme
   const uriOf = (path: TreeNode[]) => schemeOf(path) + path.slice(1).map(n => n.n).join('/')
   // a mixed-provider store's buckets title with their scheme (`r2://…`), so the map says which cloud each is on
@@ -513,7 +513,7 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
             {/* The folder itself, beside its owner: the same trash as its row one level up (never a whole bucket). */}
             <OwnerControls uri={uriOf(path)} idx={ownerIdx!} node={node} lensed={ownerLensed} userIdx={userIdx} onPickUser={onPickUser}
               stage={stageHere && store.staging && canStage
-                ? <PrefixStageAction item={tableCoverItem(node, path.slice(1).map(n => n.n).join('/'))} scheme={schemeOf(path)} fmtBytes={fmtBytes} mark={stagedAll?.markOf(uriOf(path), true) ?? null} />
+                ? <PrefixStageAction item={tableCoverItem(node, path.slice(1).map(n => n.n).join('/'))} scheme={schemeOf(path)} fmtBytes={fmtBytes} mark={staged?.markOf(uriOf(path), true) ?? null} />
                 : null} />
             {keys}
           </div>
@@ -745,9 +745,9 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
       onCellHover={onBrush ? (n, p) => onBrush(n && p.length > (path?.length ?? 1) ? p[path?.length ?? 1].n : null) : undefined}
       // Brushing rings the table's hovered row; a cell the open plan holds itself (`useStagedIndex`, as the
       // table marks it) gets a thin inset ring in the deletion hue, its size and colour untouched.
-      lens={brush || staged?.size ? (kid, p, depth, _ctx, style) => {
+      lens={brush || ringed?.size ? (kid, p, depth, _ctx, style) => {
         if (brush && depth === 0 && kid.n === brush) return { ...style, ring: { color: 'var(--ink)', width: 2 } }
-        if (staged?.size && !kid.n.startsWith('(') && staged.isItem(uriOf(p[p.length - 1] === kid ? p : [...p, kid]), kid.k !== 'file')) return { ...style, ring: { color: 'var(--s3)', width: 3, inset: true } }
+        if (ringed?.size && !kid.n.startsWith('(') && ringed.isItem(uriOf(p[p.length - 1] === kid ? p : [...p, kid]), kid.k !== 'file')) return { ...style, ring: { color: 'var(--s3)', width: 3, inset: true } }
         return undefined
       } : undefined}
       // `k` decides (`cellAction`): an object opens in the leaf viewer; a

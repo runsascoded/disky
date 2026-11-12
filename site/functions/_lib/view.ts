@@ -30,7 +30,7 @@ import { readerMetadata } from './readerWorker.js'
  * `f = n_children(P) − kept` — objects and dirs alike.
  */
 import type { Env } from './auth.js'
-import { asOfScans, coarsenRects, coarsenSizeRects, folded, type IndexHandle, intervalsOn, isStore, ivHeldDates, ivLastRead, type Lens, openIndex, pathStoreKey, perScan, planRects, slices, planSizeRects, readAsks, readFits, readRects, readRows, readSizeRects, readSlicesByFolded, rowsClearFloors, type Rect, type Row, sizeVariant, type Span, TooWide, type Trace, withTrace, readPathHistoryRows } from './index.js'
+import { asOfScans, coarsenRects, coarsenSizeRects, folded, type IndexHandle, intervalsOn, isStore, ivHeldDates, ivLastRead, type Lens, openIndex, pathStoreKey, perScan, planRects, slices, planSizeRects, readAsks, readFits, readRects, readRows, readPathHistoryRows, readSizeRects, readSlicesByFolded, rowsClearFloors, type Rect, type Row, sizeVariant, type Span, TooWide, type Trace, withTrace } from './index.js'
 import { type FoldedLens, ownerLens, poolLens } from './owners.js'
 import { type ClassScope, classRow, nameFilter, type NamePred, ownerKey, ownerOk, type OwnerScope } from './scope.js'
 import { filterThreshold, looseThreshold, matchRoots, pickTier, rebasedThreshold, rootRects } from './filter.js'

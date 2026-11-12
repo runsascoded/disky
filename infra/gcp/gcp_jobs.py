@@ -828,7 +828,7 @@ class CronAlerts(ComponentResource):
             )],
             documentation=M.AlertPolicyDocumentationArgs(
                 mime_type="text/markdown",
-                content=(f"A run of the Cloud Run job `{job}` failed, so today's Batch job may not exist. Its logs say why; "
+                content=(f"A run of the Cloud Run job `{job}` failed, so this period's Batch job may not exist. Its logs say why; "
                          f"re-run it once fixed (a no-op if the job exists): `gcloud run jobs execute {job} --region <region> --project {project}`"),
             ),
             notification_channels=list(channels),
