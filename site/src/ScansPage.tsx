@@ -16,6 +16,7 @@ import { Tooltip } from './Tooltip'
 import { Explain } from './Help'
 import { axisTicks, inSpan, type RunSpan, runKindParam, runSpanParam, runStatusParam } from './runChart'
 import { fmtBytesPrecise, fmtN } from './types'
+import { RunScanButton } from './RunScan'
 import { useUnits } from './units'
 import { useStores } from './auth'
 import { DEFAULT_STORE, type Store } from './stores'
@@ -354,7 +355,10 @@ export function ScansPage() {
   return (
     <main className="staged-page scans-page">
       <SiteNav />
-      <h1>Scan runs</h1>
+      <div className="staged-head sr-head">
+        <h1>Scan runs</h1>
+        <RunScanButton block={q.data?.dispatch} runs={runs} queryKey={['scan-runs', store.key]} />
+      </div>
       <p className="sub">Each scan job's run: when it ran, how long each phase took, what it wrote, and how each structure changed against the previous scan; and the stores' maintenance jobs (<code>compact</code>, <code>merge</code>) beside the scan they follow. The stores they append to are on <Link to="/health">Health</Link>.</p>
       {q.isLoading ? <p>Loading runs…</p> : q.error ? <p className="err">{q.error.message}</p> : !q.data?.configured ? (
         <p className="dim">Scan runs aren't recorded on this deployment yet (its D1 has no <code>scan_runs</code> table: migration <code>scan_runs</code>, then <code>dt-cloud scan-run backfill</code>).</p>

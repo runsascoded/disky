@@ -1,12 +1,18 @@
 // `/api/db`: the registry's tables are offered only where this deployment's D1 has them — a schema without
-// `user_emails` / `actions` / `claims` (the test D1's) has them neither listed nor read (404, not a D1 error).
+// `user_emails` / `actions` / `claims` has them neither listed nor read (404, not a D1 error). The tests drop those three
+// first, so they hold on every deployment's schema (gcs's has them; cloud's doesn't).
 import { describe, expect, it } from 'vitest'
 import { onRequest } from './[[path]]'
 import { gateFor } from '../../_lib/auth'
+import { TABLES } from '../../_lib/tables'
 import { sqliteD1 } from '../../_lib/testD1'
+
+/** Registry tables some deployments' D1s lack: dropped here wherever the schema has them. */
+const DROPPED = ['user_emails', 'actions', 'claims']
 
 async function setup() {
   const { db, raw } = await sqliteD1()
+  for (const t of DROPPED) raw.exec(`DROP TABLE IF EXISTS ${t}`)
   const env = { DB: db, SESSION_SECRET: 's'.repeat(32), BASE_SCOPE: 'base' }
   const token = (await gateFor(env as never)!.mint({
     email: 'ops@example.test', scopes: ['*'], name: 'ops', createdBy: 'test', expiresAt: null, maxRedeems: null,
@@ -20,10 +26,12 @@ async function setup() {
 
 describe('/api/db', () => {
   it('lists only the registry tables the D1 has', async () => {
-    const { call } = await setup()
+    const { raw, call } = await setup()
     const [status, body] = await call('')
     expect(status).toBe(200)
-    expect((body as { tables: { name: string }[] }).tables.map(t => t.name)).toEqual(['allowed_emails', 'deletion_runs', 'deletion_bands', 'admin_emails', 'admin_edits'])
+    const present = new Set((raw.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as { name: string }[]).map(r => r.name))
+    expect((body as { tables: { name: string }[] }).tables.map(t => t.name)).toEqual(TABLES.map(t => t.name).filter(n => present.has(n)))
+    expect(DROPPED.filter(n => present.has(n))).toEqual([])
   })
 
   it('a registry table the D1 lacks is a 404 naming it; a present one reads', async () => {

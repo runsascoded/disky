@@ -1,6 +1,8 @@
 """`BatchSubmitCron`: Cloud Scheduler runs a Cloud Run job whose script submits the Batch spec (idempotently, with its
 own retries and alert), so the cron's call is retried too, the task is not, and the spec is the stack's rendering."""
 import json
+import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -67,3 +69,70 @@ def test_an_unlabelled_spec_is_refused_before_any_resource(tmp_path, monkeypatch
         cron(tmp_path, levels)
     assert str(e.value).split(" (")[0] == f"cron daily: its Batch job's {where} lack app, deployment, component"
     assert mocks.resources == {}
+
+
+def dispatchable(tmp_path: Path) -> BatchSubmitCron:
+    script = tmp_path / "job" / "scan-submit.sh"
+    sub = submitter(tmp_path, SPEC, ["job", "allocation"])
+    script.write_text('echo "ran as ${DT_TRIGGER:-schedule}"\n')
+    return BatchSubmitCron(
+        "daily", project="p", region="us-east1", job="daily-submit", trigger="daily", schedule="0 7 * * *",
+        submitter=sub, script=script, sa_email="job@p", image="img:latest", env={"SLACK_ALERT_CHANNEL": "C1"},
+        secret_env={"SLACK_BOT_TOKEN": "bot-token"}, overridable=["DT_TRIGGER"], dispatchers={"site": "serviceAccount:site@p"},
+        adopt=Adopt(False),
+    )
+
+
+def run_job(job: dict, **overrides: str) -> tuple[int, str, str]:
+    """The job's container command under its own env (plain values; secrets omitted) plus `overrides`, as a run with
+    `containerOverrides[].env` sees it."""
+    container = job["template"]["template"]["containers"][0]
+    env = {"PATH": os.environ["PATH"], **{e["name"]: e["value"] for e in container["envs"] if "value" in e}, **overrides}
+    r = subprocess.run(container["commands"], env=env, capture_output=True, text=True)
+    return r.returncode, r.stdout, r.stderr
+
+
+@pulumi.runtime.test
+def test_a_dispatcher_may_run_the_job_overriding_only_what_it_names(tmp_path, monkeypatch):
+    mocks = Mocks()
+    pulumi.runtime.set_mocks(mocks, project="test", stack="test", preview=False)
+    monkeypatch.setenv("DISKY_LABELS", "app=disky,deployment=gcs")
+    c = dispatchable(tmp_path)
+
+    def check(_):
+        typ, grant = mocks.resources["daily-submit-dispatch-site"]
+        assert (typ, grant["name"], grant["location"], grant["role"], grant["member"]) == (
+            "gcp:cloudrunv2/jobIamMember:JobIamMember", "daily-submit", "us-east1", "roles/run.jobsExecutorWithOverrides", "serviceAccount:site@p",
+        )
+        _, job = mocks.resources["daily-submit"]
+        refusal = "refused: ${var} is not the stack's value (a run may override only DT_TRIGGER)\n"
+        assert [
+            run_job(job),
+            run_job(job, DT_TRIGGER="manual"),
+            run_job(job, BATCH_SPEC="{}"),
+            run_job(job, SLACK_ALERT_CHANNEL="C2"),
+            run_job(job, DISKY_LABELS=""),
+        ] == [
+            (0, "ran as schedule\n", ""),
+            (0, "ran as manual\n", ""),
+            (2, "", refusal.replace("${var}", "$BATCH_SPEC")),
+            (2, "", refusal.replace("${var}", "$SLACK_ALERT_CHANNEL")),
+            (2, "", refusal.replace("${var}", "$DISKY_LABELS")),
+        ]
+
+    return c.cron.name.apply(check)
+
+
+@pulumi.runtime.test
+def test_without_dispatchers_the_job_is_granted_only_to_its_cron(tmp_path, monkeypatch):
+    """No `overridable`, no `dispatchers`: no grant beyond the cron's invoker, and the command is the script, unguarded
+    (as the first test asserts)."""
+    mocks = Mocks()
+    pulumi.runtime.set_mocks(mocks, project="test", stack="test", preview=False)
+    monkeypatch.setenv("DISKY_LABELS", "app=disky,deployment=gcs")
+    c = cron(tmp_path, ["job", "allocation"])
+
+    def check(_):
+        assert sorted(name for name, (typ, _) in mocks.resources.items() if typ == "gcp:cloudrunv2/jobIamMember:JobIamMember") == ["daily-submit-invoker"]
+
+    return c.cron.name.apply(check)

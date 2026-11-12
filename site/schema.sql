@@ -342,6 +342,18 @@ CREATE TABLE "pyramid_multiscans" (
   PRIMARY KEY (dataset, key)
 );
 
+CREATE TABLE scan_dispatch (
+  id         TEXT PRIMARY KEY,
+  ts         INTEGER NOT NULL,
+  who        TEXT NOT NULL,
+  job        TEXT NOT NULL,
+  state      TEXT NOT NULL CHECK (state IN ('claimed', 'dispatched', 'failed')),
+  execution  TEXT,
+  operation  TEXT,
+  error      TEXT,
+  updated_ts INTEGER NOT NULL
+);
+
 CREATE TABLE scan_runs (
   run_id       TEXT PRIMARY KEY,
   store        TEXT NOT NULL DEFAULT 'primary',
@@ -516,6 +528,8 @@ CREATE INDEX pending_auth_email ON pending_auth (email, created_at);
 CREATE INDEX pending_auth_ip ON pending_auth (ip_hash, created_at);
 
 CREATE UNIQUE INDEX pending_auth_token ON pending_auth (token_hash);
+
+CREATE INDEX scan_dispatch_ts ON scan_dispatch (ts);
 
 CREATE INDEX idx_scan_runs_parent ON scan_runs (parent);
 

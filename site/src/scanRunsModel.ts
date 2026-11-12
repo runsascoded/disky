@@ -489,6 +489,24 @@ export function manualScans(rows: readonly RunSummary[]): Set<string> {
   return new Set([...first].filter(([, r]) => r.trigger === 'manual').map(([scan]) => scan))
 }
 
+/** How long a scan of `rows`' store takes, for "Run a scan"'s confirm: the median of its `n` newest succeeded scan runs
+ *  (kind `scan`, its own runs, not a resume's sibling), in seconds; null when none has succeeded. */
+export function typicalScanSecs(rows: readonly RunSummary[], n = 7): number | null {
+  const secs = rows.filter(r => r.run.kind === 'scan' && !r.run.parent && r.run.status === 'succeeded' && r.secs != null)
+    .sort((a, b) => byRunTime(b.run, a.run)).slice(0, n).map(r => r.secs!).sort((a, b) => a - b)
+  if (!secs.length) return null
+  const mid = secs.length >> 1
+  return secs.length % 2 ? secs[mid] : (secs[mid - 1] + secs[mid]) / 2
+}
+
+/** "about N hours" (an hour or more), else "about N minutes": a duration read as an expectation, not a measurement. */
+export function aboutDur(secs: number): string {
+  const h = secs / 3600
+  if (h >= 1) { const r = Math.round(h * 2) / 2; return `about ${r} hour${r === 1 ? '' : 's'}` }
+  const m = Math.max(1, Math.round(secs / 60))
+  return `about ${m} minute${m === 1 ? '' : 's'}`
+}
+
 export function scanRunOf(rows: readonly RunSummary[], scan: string): ScanRun | undefined {
   const runs = rows.map(r => r.run).filter(r => r.scan === scan && !isMaintenance(r.kind))
   return runs.find(r => r.status === 'succeeded') ?? runs[0]

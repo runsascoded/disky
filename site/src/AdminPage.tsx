@@ -11,7 +11,7 @@ import { useDocTitle } from './title'
 import { PreviewLinks } from './PreviewLinks'
 import { SessionLogSwitch } from './SessionLogSwitch'
 import { ActivityKinds } from './ActivityKinds'
-import { SweepSoftDelete } from './SweepSoftDelete'
+import { SweepSoftDelete, SweepSoftDeleteUnused } from './SweepSoftDelete'
 import { NO_AUTOFILL } from './noAutofill'
 import { Paginated } from './Pager'
 import { Admins, AdminsRefusal } from './Admins'
@@ -640,7 +640,7 @@ export function AdminPage() {
       <PreviewLinks />
       <ActivityKinds />
       <SessionLogSwitch />
-      {CAPS.softDelete && <SweepSoftDelete />}
+      {CAPS.softDelete && (DEFAULT_STORE.staging ? <SweepSoftDelete /> : <SweepSoftDeleteUnused />)}
     </main>
   )
 }

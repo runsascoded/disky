@@ -105,3 +105,39 @@ def test_live_verification_error_does_not_dump_response_or_token(monkeypatch):
     with pytest.raises(ValueError) as exc:
         J.verify_identity("https://site.test", "test-token", "gcs:read")
     assert str(exc.value) == "job-token: live verification HTTP 403; content-type=text/html; cf-ray=test-ray"
+
+
+def test_series_scopes_join_the_grant_and_verify_exactly(monkeypatch):
+    """`-s fleet`: the grant's scopes are `gcs:read fleet`, and live verification wants exactly those, not admin."""
+    token = "test-token"
+    hashed = J.token_hash(token)
+    grant_id = J.token_hash(f"p/s/{hashed}")[:12]
+    expected = {"id": grant_id, "name": "fleet", "scopes": "gcs:read fleet", "revoked_at": None, "disabled_at": None, "expires_at": None}
+    sql = []
+    monkeypatch.setattr(J, "token_urlsafe", lambda n: token)
+    monkeypatch.setattr(J, "time", lambda: 123)
+    monkeypatch.setattr(J, "_creds", lambda: ("api", "account"))
+    monkeypatch.setattr(J, "run", lambda args, **kw: CompletedProcess(args, 0, stdout="[]", stderr=""))
+
+    def query(statement, account, api):
+        sql.append(statement)
+        return [expected] if len(sql) == 3 else []
+
+    monkeypatch.setattr(J, "_d1_query", query)
+    identities = []
+    monkeypatch.setattr(J, "urlopen", lambda request, timeout: identities.append(1) or BytesIO(dumps({"scopes": ["fleet", "gcs:read"], "admin": False}).encode()))
+    assert J.provision("p", "s", "fleet", "gcs:read", "https://site.test", series_scopes=("fleet",)) == grant_id
+    assert sql[1] == f'INSERT INTO grants (id, token_hash, name, note, subject_json, scopes, redeems, created_at, created_by, expiry_ends_sessions) VALUES (\'{grant_id}\', \'{hashed}\', \'fleet\', \'Read-only job grant\', \'{{"name": "fleet"}}\', \'gcs:read fleet\', 0, 123, \'job-token provisioning\', 1)'
+    assert identities == [1]
+    # a live identity missing the series scope is refused
+    monkeypatch.setattr(J, "urlopen", lambda request, timeout: BytesIO(dumps({"scopes": ["gcs:read"], "admin": False}).encode()))
+    with pytest.raises(ValueError) as exc:
+        J.verify_identity("https://site.test", "t", "gcs:read", ("fleet",))
+    assert str(exc.value) == "job-token: live identity does not have exactly the expected read-only scope"
+
+
+@pytest.mark.parametrize("series", [("admin",), ("Fleet",), ("a b",), ("gcs:write",)])
+def test_series_scopes_refuse_admin_and_non_names_before_external_actions(series):
+    with pytest.raises(ValueError) as exc:
+        J.provision("p", "s", "fleet", "gcs:read", series_scopes=series)
+    assert str(exc.value) == f"job-token: series scopes must be store `series_scope` names (not admin): {series[0]}"

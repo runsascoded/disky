@@ -62,9 +62,9 @@ describe('kinds', () => {
   it('maps session-log events to kinds; a failed request is an error, one the page cancelled is not', () => {
     const evs = [
       { k: 'start' }, { k: 'nav' }, { k: 'click' }, { k: 'console' }, { k: 'api', s: 200 }, { k: 'api', s: 502 },
-      { k: 'api', s: 0 }, { k: 'api', s: 0, err: 'abort' }, { k: 'dropped' },
+      { k: 'api', s: 0 }, { k: 'api', s: 0, err: 'abort' }, { k: 'life', s: 'gap' }, { k: 'dropped' },
     ] as const
-    expect(evs.map(e => clientKind(e as never))).toEqual(['view', 'nav', 'click', 'error', 'api', 'error', 'error', 'api', null])
+    expect(evs.map(e => clientKind(e as never))).toEqual(['view', 'nav', 'click', 'error', 'api', 'error', 'error', 'api', 'life', null])
   })
 
   it('says what the auth package\'s writes did', () => {
@@ -171,18 +171,20 @@ describe('bursts (pure)', () => {
     const events = [
       { t: 1000, k: 'start', u: '/' },
       { ...fail, t: 2000, u: '/api/a' },
-      { ...fail, t: 3000, u: '/api/b', online: false, visibility: 'visible' },
-      { ...fail, t: 4000, u: '/api/c', online: true, visibility: 'hidden' },
-      { ...fail, t: 5000, u: '/api/d', online: true, visibility: 'visible' },
+      { ...fail, t: 3000, u: '/api/b', on0: true, on: false, vis0: 'visible', vis: 'visible' },
+      { ...fail, t: 4000, u: '/api/c', on0: true, on: true, vis0: 'visible', vis: 'hidden' },
+      { ...fail, t: 5000, u: '/api/d', on0: true, on: true, vis0: 'visible', vis: 'visible' },
+      // An older client (auth before `on` / `vis`) sent `online` / `visibility`; still read.
+      { ...fail, t: 6000, u: '/api/e', online: false, visibility: 'visible' },
     ] as SlogEvent[]
     const tally = (receivedMs?: number) => {
       const { counts, errors } = tallyClient(events, mergeKinds([]), receivedMs)
       return { counts, errors: errors.map(e => e.line.split(' ')[1]) }
     }
     expect([tally(), tally(5000 + 60_000), tally(2000 + 60_001)]).toEqual([
-      { counts: { view: 1, api: 2, error: 2 }, errors: ['/api/a', '/api/d'] },
-      { counts: { view: 1, api: 3, error: 1 }, errors: ['/api/d'] },
-      { counts: { view: 1, api: 3, error: 1 }, errors: ['/api/d'] },
+      { counts: { view: 1, api: 3, error: 2 }, errors: ['/api/a', '/api/d'] },
+      { counts: { view: 1, api: 4, error: 1 }, errors: ['/api/d'] },
+      { counts: { view: 1, api: 4, error: 1 }, errors: ['/api/d'] },
     ])
   })
 

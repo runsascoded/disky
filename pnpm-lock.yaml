@@ -14,8 +14,8 @@ importers:
         specifier: workspace:*
         version: link:../packages/pages-kit
       '@open-athena/auth':
-        specifier: github:Open-Athena/auth#baf7314a61f04eb73c4ccc40a5b675a865d0357e
-        version: https://codeload.github.com/Open-Athena/auth/tar.gz/baf7314a61f04eb73c4ccc40a5b675a865d0357e(@cloudflare/workers-types@5.20261014.1)(@floating-ui/react@0.27.20(react-dom@19.2.8(react@19.2.8))(react@19.2.8))(@tanstack/react-query@5.101.4(react@19.2.8))(react-dom@19.2.8(react@19.2.8))(react@19.2.8)(vue@3.5.44(typescript@5.9.3))
+        specifier: github:Open-Athena/auth#cd858f749398a3b1a6990d590efcd0cf8238c7a9
+        version: https://codeload.github.com/Open-Athena/auth/tar.gz/cd858f749398a3b1a6990d590efcd0cf8238c7a9(@cloudflare/workers-types@5.20261014.1)(@floating-ui/react@0.27.20(react-dom@19.2.8(react@19.2.8))(react@19.2.8))(@tanstack/react-query@5.101.4(react@19.2.8))(react-dom@19.2.8(react@19.2.8))(react@19.2.8)(vue@3.5.44(typescript@5.9.3))
       '@resvg/resvg-wasm':
         specifier: ^2.6.2
         version: 2.6.2
@@ -93,8 +93,8 @@ importers:
   packages/pages-kit:
     dependencies:
       '@open-athena/auth':
-        specifier: github:Open-Athena/auth#baf7314a61f04eb73c4ccc40a5b675a865d0357e
-        version: https://codeload.github.com/Open-Athena/auth/tar.gz/baf7314a61f04eb73c4ccc40a5b675a865d0357e(@cloudflare/workers-types@5.20261014.1)(@floating-ui/react@0.27.20(react-dom@19.2.8(react@19.2.8))(react@19.2.8))(@tanstack/react-query@5.101.4(react@19.2.8))(react-dom@19.2.8(react@19.2.8))(react@19.2.8)(vue@3.5.44(typescript@5.9.3))
+        specifier: github:Open-Athena/auth#cd858f749398a3b1a6990d590efcd0cf8238c7a9
+        version: https://codeload.github.com/Open-Athena/auth/tar.gz/cd858f749398a3b1a6990d590efcd0cf8238c7a9(@cloudflare/workers-types@5.20261014.1)(@floating-ui/react@0.27.20(react-dom@19.2.8(react@19.2.8))(react@19.2.8))(@tanstack/react-query@5.101.4(react@19.2.8))(react-dom@19.2.8(react@19.2.8))(react@19.2.8)(vue@3.5.44(typescript@5.9.3))
       '@resvg/resvg-wasm':
         specifier: ^2.6.2
         version: 2.6.2
@@ -201,8 +201,8 @@ importers:
         specifier: ^0.27.20
         version: 0.27.20(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
       '@open-athena/auth':
-        specifier: github:Open-Athena/auth#baf7314a61f04eb73c4ccc40a5b675a865d0357e
-        version: https://codeload.github.com/Open-Athena/auth/tar.gz/baf7314a61f04eb73c4ccc40a5b675a865d0357e(@cloudflare/workers-types@5.20261014.1)(@floating-ui/react@0.27.20(react-dom@19.2.8(react@19.2.8))(react@19.2.8))(@tanstack/react-query@5.101.4(react@19.2.8))(react-dom@19.2.8(react@19.2.8))(react@19.2.8)(vue@3.5.44(typescript@5.9.3))
+        specifier: github:Open-Athena/auth#cd858f749398a3b1a6990d590efcd0cf8238c7a9
+        version: https://codeload.github.com/Open-Athena/auth/tar.gz/cd858f749398a3b1a6990d590efcd0cf8238c7a9(@cloudflare/workers-types@5.20261014.1)(@floating-ui/react@0.27.20(react-dom@19.2.8(react@19.2.8))(react@19.2.8))(@tanstack/react-query@5.101.4(react@19.2.8))(react-dom@19.2.8(react@19.2.8))(react@19.2.8)(vue@3.5.44(typescript@5.9.3))
       '@open-athena/treemap':
         specifier: workspace:*
         version: link:../packages/treemap
@@ -1458,9 +1458,9 @@ packages:
     cpu: [x64]
     os: [linux]
 
-  '@open-athena/auth@https://codeload.github.com/Open-Athena/auth/tar.gz/baf7314a61f04eb73c4ccc40a5b675a865d0357e':
-    resolution: {tarball: https://codeload.github.com/Open-Athena/auth/tar.gz/baf7314a61f04eb73c4ccc40a5b675a865d0357e}
-    version: 0.1.0-dist.c697ace
+  '@open-athena/auth@https://codeload.github.com/Open-Athena/auth/tar.gz/cd858f749398a3b1a6990d590efcd0cf8238c7a9':
+    resolution: {tarball: https://codeload.github.com/Open-Athena/auth/tar.gz/cd858f749398a3b1a6990d590efcd0cf8238c7a9}
+    version: 0.1.0-dist.e28704a
     peerDependencies:
       '@cloudflare/workers-types': '*'
       '@floating-ui/react': ^0.27.20
@@ -4498,7 +4498,7 @@ snapshots:
   '@napi-rs/lzma-linux-x64-gnu@1.5.1':
     optional: true
 
-  '@open-athena/auth@https://codeload.github.com/Open-Athena/auth/tar.gz/baf7314a61f04eb73c4ccc40a5b675a865d0357e(@cloudflare/workers-types@5.20261014.1)(@floating-ui/react@0.27.20(react-dom@19.2.8(react@19.2.8))(react@19.2.8))(@tanstack/react-query@5.101.4(react@19.2.8))(react-dom@19.2.8(react@19.2.8))(react@19.2.8)(vue@3.5.44(typescript@5.9.3))':
+  '@open-athena/auth@https://codeload.github.com/Open-Athena/auth/tar.gz/cd858f749398a3b1a6990d590efcd0cf8238c7a9(@cloudflare/workers-types@5.20261014.1)(@floating-ui/react@0.27.20(react-dom@19.2.8(react@19.2.8))(react@19.2.8))(@tanstack/react-query@5.101.4(react@19.2.8))(react-dom@19.2.8(react@19.2.8))(react@19.2.8)(vue@3.5.44(typescript@5.9.3))':
     optionalDependencies:
       '@cloudflare/workers-types': 5.20261014.1
       '@floating-ui/react': 0.27.20(react-dom@19.2.8(react@19.2.8))(react@19.2.8)

@@ -18,6 +18,7 @@
  * back-fills the colo cache. Values are small JSON (≤ ~350 KB); keys are the
  * SHA-256 of the cache key URL (KV keys are capped at 512 bytes). */
 
+import { isPreviewHost } from './previewHost.js'
 import { PRIMARY_STORE } from './stores.js'
 import { SEARCH_LIMITS, type SearchLimits } from './search.js'
 import { colo, isolatePut, IsoMap, IsoSet, type Trace } from './shared.js'
@@ -37,7 +38,7 @@ const PRIVATE = 'private, max-age=300'
 const PARTIAL_CLIENT = 'no-store'
 const JSON_HDR = { 'content-type': 'application/json; charset=utf-8' }
 
-export interface CacheEnv { CACHE_KV?: KVNamespace; CACHE_NS?: string; PROD_HOST?: string }
+export interface CacheEnv { CACHE_KV?: KVNamespace; CACHE_NS?: string; PROD_HOST?: string; PAGES_SUBDOMAIN?: string }
 
 // Bumped whenever a cached endpoint's answer for the same inputs changes
 // (a reader rule, a diff walk rule): a stale entry lives a day in the colo
@@ -65,10 +66,15 @@ export const CACHE_V = '11'
  * answer computed by dev's reader (new code, dev-only flags) was served on prod for up
  * to 30 days. `CACHE_NS`, when set, is the tag (`""` = prod's keys); else the request host, except
  * `PROD_HOST` itself — prod declares `PROD_HOST`, its preview env doesn't inherit `[vars]`, and a request to
- * the dev host (or a `*.pages.dev` alias) is never at the prod host. */
+ * the dev host (or a `*.pages.dev` alias) is never at the prod host. A preview host (`isPreviewHost`: a PR's
+ * `pr-N`, the `dev` alias, a deployment hash) is always its own host, before `CACHE_NS`: it shares the dev stack's
+ * environment (and so its `CACHE_NS`) but runs a PR's code, whose answers must never reach dev's keys, nor dev's it.
+ * Every computed answer's cache key carries this tag; only immutable store bytes (`index-blob`, `index-footer`, the
+ * static name index's) and per-origin, per-build keys (the OG cards) don't (`cacheKeys.test.ts`). */
 export function cacheEnvTag(env: CacheEnv, request: Request): string {
-  if (env.CACHE_NS != null) return env.CACHE_NS
   const host = new URL(request.url).host
+  if (isPreviewHost(env, request)) return host
+  if (env.CACHE_NS != null) return env.CACHE_NS
   return host === env.PROD_HOST ? '' : host
 }
 
