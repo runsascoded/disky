@@ -176,7 +176,7 @@ def finish(q: dict, tot: list[int], kept: dict) -> dict:
     return {"id": q["id"], "total": tot, "nodes": nodes, "rest": rest}
 
 
-def answer_dirs(con, q: dict, scans: dict[str, int]) -> dict:
+def answer_dirs(con, q: dict, scans: dict[str, int], files: list[str]) -> dict:
     """An unfiltered view from each path's own row (a directory's rolled-up totals, an object's bytes and 1) at the
     scan, over the depth window; the folder's total its own row's (the root's: its buckets')."""
     p = q.get("path", "")
@@ -188,9 +188,15 @@ def answer_dirs(con, q: dict, scans: dict[str, int]) -> dict:
                                       max({col}) FILTER (WHERE vf <= {t} AND {t} < vt AND kind = 'file'), 0)"""
     nf = "CASE WHEN kind = 'dir' THEN n_files ELSE 1 END"
     vals = f"{side(ta, 'size')}, {side(ta, nf)}, {side(tb, 'size')}, {side(tb, nf)}"
-    rows = con.execute(f"""SELECT path, depth, {vals} FROM a
-        WHERE ((depth BETWEEN {dp + 1} AND {dp + K} AND {under}) OR (depth = {dp} AND path = {lit(p)}))
-          AND ((vf <= {ta} AND {ta} < vt) OR (vf <= {tb} AND {tb} < vt))
+    # Only the window's depths are read (the sorts' `depth` statistics prune the rest); a version's rows across the
+    # base and runs are one, with the smallest `vt`.
+    window = f"((depth BETWEEN {dp + 1} AND {dp + K} AND {under}) OR (depth = {dp} AND path = {lit(p)}))"
+    src = "[" + ", ".join(lit(f) for f in files) + "]"
+    rows = con.execute(f"""WITH a AS (
+            SELECT depth, path, vf, min(vt) AS vt, any_value(kind) AS kind, any_value(size) AS size, any_value(n_files) AS n_files
+            FROM read_parquet({src}, union_by_name = true) WHERE {window} GROUP BY depth, path, vf)
+        SELECT path, depth, {vals} FROM a
+        WHERE (vf <= {ta} AND {ta} < vt) OR (vf <= {tb} AND {tb} < vt)
         GROUP BY path, depth""").fetchall()
     rows = [(r[0], r[1] - dp, [int(x) for x in r[2:]]) for r in rows]
     if p:
@@ -201,21 +207,6 @@ def answer_dirs(con, q: dict, scans: dict[str, int]) -> dict:
     thr = q["min_ppm"] * max(tot[0], tot[2])
     kept = {n: (k, v) for n, k, v in rows if k >= 1 and any(v) and max(v[0], v[2]) * 1_000_000 >= thr}
     return finish(q, tot, kept)
-
-
-def build_all_rows(con, files: list[str], cls: dict) -> None:
-    """Table `a`: every version (directories' too) with `n_files`, combined as `f`."""
-    cols = "depth, path, vf, vt, kind, size, n_files"
-    con.execute(f"CREATE TABLE b AS SELECT {cols} FROM read_parquet({lit(files[0])})")
-    runs = "[" + ", ".join(lit(f) for f in files[1:]) + "]"
-    con.execute(f"""CREATE TABLE r AS SELECT depth, path, vf, min(vt) AS vt, any_value(kind) AS kind, any_value(size) AS size,
-            any_value(n_files) AS n_files FROM read_parquet({runs}) GROUP BY depth, path, vf""" if files[1:] else
-                "CREATE TABLE r AS SELECT * FROM b LIMIT 0")
-    con.execute("""CREATE TABLE a AS
-        SELECT b.depth, b.path, b.vf, least(b.vt, coalesce(r.vt, b.vt)) AS vt, b.kind, b.size, b.n_files
-        FROM b LEFT JOIN r USING (depth, path, vf)
-        UNION ALL SELECT r.depth, r.path, r.vf, r.vt, r.kind, r.size, r.n_files FROM r ANTI JOIN b USING (depth, path, vf)""")
-    con.execute("DROP TABLE b; DROP TABLE r")
 
 
 @click.command()
@@ -237,8 +228,12 @@ def main(cache, only, memory, out, threads, tmp, gen, queries, answers):
     con = duckdb.connect(cache or ":memory:")
     con.execute(f"SET memory_limit = {lit(memory)}; SET threads = {threads}; SET temp_directory = {lit(tmp)}; SET preserve_insertion_order = false")
     t0 = monotonic()
+    qs = [json.loads(l) for l in Path(queries).read_text().splitlines() if l.strip()]
+    ids = set(only.split(",")) if only else None
+    # Object versions, combined, only when a query sums them (the directory-total view reads the sorts per query).
+    need_f = any(not q.get("dirs") for q in qs if not ids or q["id"] in ids)
     have = con.execute("SELECT count(*) FROM information_schema.tables WHERE table_name = 'f'").fetchone()[0]
-    if not have:
+    if need_f and not have:
         names = {r[0] for r in con.execute(f"DESCRIBE SELECT * FROM read_parquet({lit(files[0])})").fetchall()}
         # gcs names storage classes 2–4 by name.
         cls = {c: c if c in names else a for c, a in (("c2", "nearline_bytes"), ("c3", "coldline_bytes"), ("c4", "archive_bytes"))}
@@ -256,11 +251,10 @@ def main(cache, only, memory, out, threads, tmp, gen, queries, answers):
             FROM b LEFT JOIN r USING (depth, path, vf)
             UNION ALL SELECT r.path, r.depth, r.vf, r.vt, r.size, r.c2, r.c3, r.c4, r.us FROM r ANTI JOIN b USING (depth, path, vf)""")
         con.execute("DROP TABLE b; DROP TABLE r")
-    n = con.execute("SELECT count(*) FROM f").fetchone()[0]
-    err(f"oracle: {n:,} object versions from {len(files)} sorts, {len(scans)} scans ({monotonic() - t0:.1f}s)")
-    qs = [json.loads(l) for l in Path(queries).read_text().splitlines() if l.strip()]
+    if need_f:
+        n = con.execute("SELECT count(*) FROM f").fetchone()[0]
+        err(f"oracle: {n:,} object versions from {len(files)} sorts, {len(scans)} scans ({monotonic() - t0:.1f}s)")
     got = {a["id"]: a for a in (json.loads(l) for l in Path(answers).read_text().splitlines() if l.strip())}
-    ids = set(only.split(",")) if only else None
     bad = []
     outf = open(out, "w") if out else None
     for q in qs:
@@ -268,9 +262,7 @@ def main(cache, only, memory, out, threads, tmp, gen, queries, answers):
             continue
         t1 = monotonic()
         if q.get("dirs"):
-            if not con.execute("SELECT count(*) FROM information_schema.tables WHERE table_name = 'a'").fetchone()[0]:
-                build_all_rows(con, files, {})
-            want = answer_dirs(con, q, stamps)
+            want = answer_dirs(con, q, stamps, files)
         else:
             want = answer(con, q, stamps)
         have = got.get(q["id"])

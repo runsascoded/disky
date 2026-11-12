@@ -14,3 +14,4 @@ tail -1 "$d/bench.log" >&2
 log oracle; python oracle/oracle.py -m 100GB -t "$(nproc)" -T "$d/duck" -c "$d/oracle.duckdb" "$gen" "$d/queries.jsonl" "$d/answers.jsonl" \
   > "$d/oracle.json" 2> "$d/oracle.log" || true
 cat "$d/oracle.json" >&2
+rm -rf "$d/oracle.duckdb" "$d/oracle.duckdb.wal" "$d/duck"
