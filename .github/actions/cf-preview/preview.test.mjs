@@ -1,10 +1,10 @@
 import { test } from 'node:test'
 import { deepStrictEqual as equal, rejects, throws } from 'node:assert'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { apiClient, eventRequest, revisionProbe, verifyRevision } from './run.mjs'
 import {
-  accountFor, authorize, cfList, fullCwdCheck, modePlan, ownedPagesDeployments, previewPlan, publishFull, publishWorker, requireImplemented,
+  accountFor, authorize, cfList, HELD_FUNCTIONS, withoutFunctions, fullCwdCheck, modePlan, ownedPagesDeployments, previewPlan, publishFull, publishWorker, requireImplemented,
   retireFull, retireWorker, selectMode, validateArtifact, workerConfig, wranglerUpload,
 } from './preview.mjs'
 
@@ -183,6 +183,30 @@ test('the base branch’s Functions can never be deployed under the PR’s front
   rmSync(resolve(artifact, '_worker.js'))
   await rejects(publishFull({ cf: api.cf, plan, artifact, cwd, upload: api.upload }), { message: /^The deploy directory holds functions\// })
   equal(api.uploads, [])
+})
+
+test('Wrangler uploads with no functions/ in the deploy directory; it is restored after, success or failure', async t => {
+  const root = scratch(t, 'cf-preview-held')
+  const artifact = resolve(root, 'dist'), cwd = resolve(root, 'site')
+  for (const dir of [resolve(artifact, '_worker.js'), resolve(cwd, 'functions')]) mkdirSync(dir, { recursive: true })
+  writeFileSync(resolve(artifact, 'index.html'), '<html></html>')
+  writeFileSync(resolve(artifact, '_worker.js', 'index.js'), 'export default {}')
+  writeFileSync(resolve(cwd, 'functions', 'route.ts'), 'export const onRequest = () => null')
+  const seen = []
+  const api = pagesApi()
+  const upload = async argv => { seen.push(readdirSync(cwd).sort()); return api.upload(argv) }
+  equal((await publishFull({ cf: api.cf, plan, artifact, cwd, upload })).deployment_id, 'dep1')
+  equal([seen, readdirSync(cwd).sort(), readFileSync(resolve(cwd, 'functions', 'route.ts'), 'utf8')],
+    [[[HELD_FUNCTIONS]], ['functions'], 'export const onRequest = () => null'])
+
+  await rejects(withoutFunctions(cwd, async () => { throw new Error('upload failed') }), { message: 'upload failed' })
+  equal(readdirSync(cwd).sort(), ['functions'])
+  mkdirSync(resolve(cwd, HELD_FUNCTIONS))
+  await rejects(withoutFunctions(cwd, async () => 'ran'), { message: `${HELD_FUNCTIONS} already exists in the deploy directory; restore it to functions/ first` })
+  equal(readdirSync(cwd).sort(), [HELD_FUNCTIONS, 'functions'])
+  rmSync(resolve(cwd, HELD_FUNCTIONS), { recursive: true })
+  rmSync(resolve(cwd, 'functions'), { recursive: true })
+  equal([await withoutFunctions(cwd, async () => 'ran'), existsSync(resolve(cwd, 'functions'))], ['ran', false])
 })
 
 test('the trusted Wrangler runs as argv in the trusted directory, with the artifact after `pages deploy`', async t => {

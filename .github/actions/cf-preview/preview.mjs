@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process'
-import { existsSync, lstatSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, readdirSync, renameSync, writeFileSync } from 'node:fs'
 import { isAbsolute, join, resolve } from 'node:path'
 
 export const PROTOCOL = 'cf-preview-v1'
@@ -147,6 +147,24 @@ export function fullCwdCheck(cwd, artifact) {
     + '(`wrangler pages functions build functions --outdir <artifact>/_worker.js`)')
 }
 
+/** Where the deploy directory's `functions/` waits while Wrangler uploads (`withoutFunctions`). */
+export const HELD_FUNCTIONS = '.functions.cf-preview-held'
+
+/** Run `run` with the trusted deploy directory's `functions/` moved aside, restored after, success or not. `wrangler pages
+ *  deploy` bundles the CWD's `functions/` even when the artifact carries its own `_worker.js`: from a fresh base checkout it
+ *  fails (an ungenerated import, `./build.gen.js`), and otherwise it would ship the base branch's Functions. */
+export async function withoutFunctions(cwd, run) {
+  const dir = join(cwd, 'functions'), held = join(cwd, HELD_FUNCTIONS)
+  if (!existsSync(dir)) return run()
+  requireThat(!existsSync(held), `${HELD_FUNCTIONS} already exists in the deploy directory; restore it to functions/ first`)
+  renameSync(dir, held)
+  try {
+    return await run()
+  } finally {
+    renameSync(held, dir)
+  }
+}
+
 /** `full` publish: the PR's whole build as the `pr-N` branch of the deployment's own Pages project, so it runs on that
  *  project's preview environment (the dev stack's bindings and secrets), at `https://pr-N.<subdomain>`. */
 export async function publishFull({ cf, plan, artifact, cwd, upload }) {
@@ -155,8 +173,8 @@ export async function publishFull({ cf, plan, artifact, cwd, upload }) {
   fullCwdCheck(cwd, artifact)
   const project = await cf('GET', pagesProjectPath(plan))
   ownedPagesDeployments(plan, project, await pagesDeployments(cf, plan))
-  await upload(['pages', 'deploy', '--branch', plan.branch, '--project-name', plan.project,
-    '--commit-hash', plan.sha, '--commit-message', plan.owner, '--commit-dirty=false'])
+  await withoutFunctions(cwd, () => upload(['pages', 'deploy', '--branch', plan.branch, '--project-name', plan.project,
+    '--commit-hash', plan.sha, '--commit-message', plan.owner, '--commit-dirty=false']))
   const deployments = ownedPagesDeployments(plan, project, await pagesDeployments(cf, plan))
   const deployment = deployments.find(d => d.deployment_trigger.metadata.commit_hash === plan.sha)
   requireThat(deployment?.latest_stage.status === 'success', 'Preview deployment readback failed')
