@@ -381,6 +381,9 @@ fn run_dirs(idx: &Index, c: &Compiled, q: &Query, pool: &rayon::ThreadPool, t0: 
     });
     let visited: u64 = outs.iter().map(|o| o.1).sum();
     let mut outs: Vec<ChunkOut> = outs.into_iter().map(|o| o.0).collect();
+    if outs.is_empty() {
+        outs.push(ChunkOut::default());
+    }
     if c.dp > 0 {
         let g = idx.find(&c.path).unwrap();
         for o in outs.iter_mut() {
