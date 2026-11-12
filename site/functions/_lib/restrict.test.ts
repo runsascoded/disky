@@ -92,9 +92,9 @@ describe('restrictTree / restrictSubtree / restrictDiff', () => {
   })
   it('diff rows are relative to the diff’s path', () => {
     const rows = [
-      { p: '2025 tax returns', s: 'added' },
-      { p: '2025 tax returns/1040.pdf', s: 'added' },
-      { p: 'big.zip', s: 'changed' },
+      { path: '2025 tax returns', status: 'added' },
+      { path: '2025 tax returns/1040.pdf', status: 'added' },
+      { path: 'big.zip', status: 'changed' },
     ]
     expect(restrictDiff({ path: 'Users/ryan/Downloads', rows }, r).rows).toEqual([rows[0], rows[2]])
   })

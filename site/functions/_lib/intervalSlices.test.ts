@@ -399,7 +399,7 @@ for (const GEN of ['g2', 'g5'] as const) {
           const o = { ...base, from, to, path: '', top: 500, ...scope }
           // A lens with nothing on either side is a 404 from both.
           const shape = (d: Awaited<ReturnType<typeof buildDiff>> | string) => typeof d === 'string' ? d
-            : { rows: d.rows.map(r => r.p.split('/').pop() === 'twin' ? { ...r, k: 'dir' } : r), totals: [d.total_a, d.total_b, d.objects_a, d.objects_b] }
+            : { rows: d.rows.map(r => r.path.split('/').pop() === 'twin' ? { ...r, kind: 'dir' } : r), totals: [d.bytes_before, d.bytes_after, d.objects_before, d.objects_after] }
           // The store's read first: a per-scan diff that throws on one side leaves the other side's reads in flight.
           const [got, gets] = await perScanGets(() => buildDiff(ivg(), o).catch(e => `${(e as Error).name}: ${(e as Error).message}`))
           const want = await buildDiff(perScan, o).catch(e => `${(e as Error).name}: ${(e as Error).message}`)
@@ -479,7 +479,7 @@ for (const GEN of ['g2', 'g5'] as const) {
           for (const minArea of [12, 400]) {
             const o = { ...base, minArea, from, to, path, top: 500 }
             const shape = (d: Awaited<ReturnType<typeof buildDiff>> | string) => typeof d === 'string' ? d
-              : { rows: d.rows.map(r => r.p.split('/').pop() === 'twin' ? { ...r, k: 'dir' } : r), totals: [d.total_a, d.total_b, d.objects_a, d.objects_b], lookups: d.lookups }
+              : { rows: d.rows.map(r => r.path.split('/').pop() === 'twin' ? { ...r, kind: 'dir' } : r), totals: [d.bytes_before, d.bytes_after, d.objects_before, d.objects_after], lookups: d.lookups }
             const [got, gets] = await perScanGets(() => buildDiff(ivg(), o).catch(e => `${(e as Error).name}: ${(e as Error).message}`))
             const want = await buildDiff(perScan, o).catch(e => `${(e as Error).name}: ${(e as Error).message}`)
             expect({ o, got: shape(got), gets }).toEqual({ o, got: shape(want), gets: [] })
@@ -510,7 +510,7 @@ describe('interval store g5: a lens read joining a cancelled request\'s frozen r
     ['view', e => buildView(e, { ...base, date: S3, path: '', lens }), a => storeKinds((a as Awaited<ReturnType<typeof buildView>>).tree)],
     ['diff', e => buildDiff(e, { ...base, from: S1, to: S3, path: '', top: 500, lens }), a => {
       const d = a as Awaited<ReturnType<typeof buildDiff>>
-      return { rows: d.rows.map(r => r.p.split('/').pop() === 'twin' ? { ...r, k: 'dir' } : r), totals: [d.total_a, d.total_b, d.objects_a, d.objects_b] }
+      return { rows: d.rows.map(r => r.path.split('/').pop() === 'twin' ? { ...r, kind: 'dir' } : r), totals: [d.bytes_before, d.bytes_after, d.objects_before, d.objects_after] }
     }],
   ]
   const join0 = { ...IV_JOIN }
@@ -559,7 +559,7 @@ describe('interval store g5: the requests after a cancelled read frozen at sever
   const lens = { key: 'alice' }
   const view = (e: Env) => buildView(e, { ...base, date: S3, path: '', lens }).then(a => storeKinds(a.tree))
   const diff = (e: Env) => buildDiff(e, { ...base, from: S1, to: S3, path: '', top: 500, lens }).then(d => ({
-    rows: d.rows.map(r => r.p.split('/').pop() === 'twin' ? { ...r, k: 'dir' } : r), totals: [d.total_a, d.total_b, d.objects_a, d.objects_b],
+    rows: d.rows.map(r => r.path.split('/').pop() === 'twin' ? { ...r, kind: 'dir' } : r), totals: [d.bytes_before, d.bytes_after, d.objects_before, d.objects_after],
   }))
   /** A store whose first request freezes at two stages at once: its prefetch of the sibling sort's footers (the
    *  base's and the run's, `slices-bytotal`), and its read of the run's row group (`deltas/…/slices.parquet`). */

@@ -27,3 +27,27 @@ def test_node_renames_a_short_node_and_its_children():
 
 def test_tree_reads_a_body():
     assert api_names.tree({"tree": {"n": "r", "b": 1, "o": 1}}) == {"name": "r", "bytes": 1, "objects": 1}
+
+
+def test_diff_keeps_a_descriptive_body():
+    d = {"bytes_before": 1, "bytes_after": 2, "objects_before": 1, "objects_after": 1, "rows": [{"path": "m", "bytes_before": 1}]}
+    assert api_names.diff(d) is d
+
+
+def test_diff_renames_a_short_body_and_its_rows():
+    short = {
+        "prev": "A", "curr": "B", "total_a": 10, "total_b": 30, "objects_a": 1, "objects_b": 3, "tier": "descent",
+        "rows": [
+            {"p": "m", "d": 1, "k": "dir", "s": "changed", "a": 10, "b": 30, "oa": 1, "ob": 3, "x": True, "src": "gcs"},
+            {"p": "m/x", "d": 2, "k": "file", "s": "added", "a": 0, "b": 20, "oa": 0, "ob": 2, "l": 2},
+        ],
+    }
+    assert api_names.diff(short) == {
+        "prev": "A", "curr": "B", "bytes_before": 10, "bytes_after": 30, "objects_before": 1, "objects_after": 3, "tier": "descent",
+        "rows": [
+            {"path": "m", "depth": 1, "kind": "dir", "status": "changed", "bytes_before": 10, "bytes_after": 30, "objects_before": 1,
+             "objects_after": 3, "expanded": True, "store": "gcs"},
+            {"path": "m/x", "depth": 2, "kind": "file", "status": "added", "bytes_before": 0, "bytes_after": 20, "objects_before": 0,
+             "objects_after": 2, "lookup": 2},
+        ],
+    }

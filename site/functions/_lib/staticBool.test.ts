@@ -334,7 +334,7 @@ describe('the diff (`buildDiff`) of a compound query from the static index: each
       const d = await buildDiff(env, { from: A, to: B, path: root, w: W, h: H, minArea: MIN_AREA, atten: ATTEN, top: 10_000, query: q(t) })
       const [a, b] = SCANS.map(date => brute(objects[date], q(t), root).total)
       const shown = (x: [number, number]) => x[0] <= 0 ? [0, 0] : x
-      got.push([t, root, d.total_a, d.total_b, d.objects_a, d.objects_b, d.partial, d.approximate])
+      got.push([t, root, d.bytes_before, d.bytes_after, d.objects_before, d.objects_after, d.partial, d.approximate])
       want.push([t, root, shown(a)[0], shown(b)[0], shown(a)[1], shown(b)[1], undefined, undefined])
     }
     expect(got).toEqual(want)

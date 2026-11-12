@@ -161,7 +161,7 @@ describe('a level request\'s fixed phase', () => {
   it('answers as the levels read alone, cold and then from the edge, byte for byte', async () => {
     const [from, to] = ['2026-08-02', '2026-08-06']
     const built = await buildLevels(env, { from, to, dirs: [''], k: 32, m: 'churn' })
-    const want = JSON.stringify({ from, to, k: 32, m: 'churn', levels: [...built.values()] })
+    const want = JSON.stringify({ from, to, top_k: 32, measure: 'churn', levels: [...built.values()] })
     const cold = await ask(from, to)
     const warm = await ask(from, to)
     expect([cold.status, cold.headers.get('x-cache'), await cold.text(), warm.status, warm.headers.get('x-cache'), await warm.text()])
@@ -211,7 +211,7 @@ describe('a level request\'s fixed phase', () => {
     env = { ...env, INTERVAL_STORE_PREFIX: 'interval-store-level' } as Env
     const [from, to] = ['2026-08-02', '2026-08-06']
     const built = await buildLevels(env, { from, to, dirs: [''], k: 32, m: 'churn' })
-    const want = JSON.stringify({ from, to, k: 32, m: 'churn', levels: [...built.values()] })
+    const want = JSON.stringify({ from, to, top_k: 32, measure: 'churn', levels: [...built.values()] })
     await cold()
     timeline.length = 0
     calls.length = 0

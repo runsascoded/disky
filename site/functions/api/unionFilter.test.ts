@@ -147,10 +147,10 @@ describe('D1', () => {
     }
   })
 
-  type DiffBody = Body & { rows: { p: string; d: number }[]; total_a: number; total_b: number; objects_a: number; objects_b: number; expansions: number; lookups: number; threshold: number; matched: { path: string; b: number; o: number }[]; matchCount: { n: number; b: number; o: number } }
+  type DiffBody = Body & { rows: { path: string; depth: number }[]; bytes_before: number; bytes_after: number; objects_before: number; objects_after: number; expansions: number; lookups: number; threshold: number; matched: { path: string; b: number; o: number }[]; matchCount: { n: number; b: number; o: number } }
   /** A member's filtered diff's filter fields that the union root carries as they are (a partial reason is named). */
   const filterFieldsOf = (b: DiffBody) => Object.fromEntries(Object.entries(b).filter(([k]) => ['interiors', 'dirsOnly', 'matchesCapped', 'hexRuns'].includes(k)))
-  const tagged = (b: DiffBody, src: string) => b.rows.map(r => (r.d === 1 && r.p !== '(other)' ? { ...r, src } : r))
+  const tagged = (b: DiffBody, store: string) => b.rows.map(r => (r.depth === 1 && r.path !== '(other)' ? { ...r, store } : r))
 
   it('the root’s filtered diff: each member diffs its own scans with `q=`; an unchanged one adds its matches to both sides, no rows', async () => {
     // A→B: the primary didn't rescan (A at both cutoffs: unchanged), meta did (A→B).
@@ -161,10 +161,10 @@ describe('D1', () => {
     expect({ ...u, expansions: u.expansions >= m.expansions, lookups: u.lookups >= m.lookups }).toEqual({
       prev: A, curr: B, path: '', q: 'both',
       rows: tagged(m, 'meta'),
-      total_a: m.total_a + 6000, total_b: m.total_b + 6000, objects_a: m.objects_a + 1, objects_b: m.objects_b + 1,
+      bytes_before: m.bytes_before + 6000, bytes_after: m.bytes_after + 6000, objects_before: m.objects_before + 1, objects_after: m.objects_after + 1,
       expansions: true, lookups: true,
       truncated: false,
-      threshold: Math.round(filterThreshold(Math.max(m.total_a, m.total_b) + 6000, 1280, 768, 12)),
+      threshold: Math.round(filterThreshold(Math.max(m.bytes_before, m.bytes_after) + 6000, 1280, 768, 12)),
       tier: u.tier,
       lookups_capped: false,
       ...filterFieldsOf(m),
@@ -183,10 +183,10 @@ describe('D1', () => {
     expect(u).toEqual({
       prev: A, curr: C, path: '', q: 'both',
       rows: tagged(m, 'meta'),
-      total_a: m.total_a, total_b: m.total_b, objects_a: m.objects_a, objects_b: m.objects_b,
+      bytes_before: m.bytes_before, bytes_after: m.bytes_after, objects_before: m.objects_before, objects_after: m.objects_after,
       expansions: m.expansions, lookups: m.lookups,
       truncated: false,
-      threshold: Math.round(filterThreshold(Math.max(m.total_a, m.total_b), 1280, 768, 12)),
+      threshold: Math.round(filterThreshold(Math.max(m.bytes_before, m.bytes_after), 1280, 768, 12)),
       tier: m.tier,
       lookups_capped: false,
       ...filterFieldsOf(m),

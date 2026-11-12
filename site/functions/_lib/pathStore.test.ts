@@ -540,7 +540,8 @@ describe('filter no-match fallback on a v1 scan', () => {
 
 describe('buildDiff', () => {
   const base = { w: 1280, h: 800, minArea: 12, atten: 1, top: 500 }
-  const row = (p: string, d: number, k: DiffRow['k'], s: DiffRow['s'], a: number, b: number, oa: number, ob: number, x?: true): DiffRow => ({ p, d, k, s, a, b, oa, ob, ...(x ? { x } : {}) })
+  const row = (path: string, depth: number, kind: DiffRow['kind'], status: DiffRow['status'], bytes_before: number, bytes_after: number, objects_before: number, objects_after: number, expanded?: true): DiffRow =>
+    ({ path, depth, kind, status, bytes_before, bytes_after, objects_before, objects_after, ...(expanded ? { expanded } : {}) })
 
   it('objects are real rows: added under a path the older scan lacks, removed the other way', async () => {
     const added = await buildDiff(env, { ...base, from: V1, to: V2, path: 'bk/nest', threshold: 1 })
@@ -554,12 +555,12 @@ describe('buildDiff', () => {
         row('a/b/c3', 3, 'file', 'added', 0, MiB, 0, 1),
         row('a/z', 2, 'file', 'added', 0, 256 * KiB, 0, 1),
       ],
-      total_a: 0, total_b: 4456448, objects_a: 0, objects_b: 5, threshold: 1, tier: 'path',
+      bytes_before: 0, bytes_after: 4456448, objects_before: 0, objects_after: 5, threshold: 1, tier: 'path',
       expansions: 3, truncated: false, lookups: 0, lookups_capped: false,
     })
     const removed = await buildDiff(env, { ...base, from: V2, to: V2_BLOB, path: 'bk/small', threshold: 1 })
     expect(removed.rows).toEqual([])
-    expect([removed.total_a, removed.total_b, removed.tier]).toEqual([6000, 6000, 'bysize'])
+    expect([removed.bytes_before, removed.bytes_after, removed.tier]).toEqual([6000, 6000, 'bysize'])
     const gone = await buildDiff(env, { ...base, from: V2, to: V1, path: 'bk/small', threshold: 1 })
     expect(gone.rows).toEqual([
       row('s2', 1, 'file', 'removed', 3000, 0, 1, 0),
@@ -584,7 +585,7 @@ describe('buildDiff', () => {
         // `bk`'s one object no drawn child holds (a zero-byte one): its children and `(other)` sum to it.
         row('bk/(other)', 2, 'dir', 'added', 0, 0, 0, 1),
       ],
-      total_a: 700, total_b: 37229948, objects_a: 3, objects_b: 8009, threshold: 1, tier: 'path',
+      bytes_before: 700, bytes_after: 37229948, objects_before: 3, objects_after: 8009, threshold: 1, tier: 'path',
       // `bk`'s five one-sided children. `nest/a` and `nest/a/b` are under a path the v1 scan has no row for: unread.
       expansions: 4, truncated: false, lookups: 5, lookups_capped: false,
     })
@@ -593,7 +594,7 @@ describe('buildDiff', () => {
   it('a filter matching nothing on either side is an empty diff, not a 500', async () => {
     const d = await buildDiff(env, { ...base, from: V1, to: V2, path: 'bk', query: parseQuery('no-such-name')! })
     expect(d).toEqual({
-      rows: [], total_a: 0, total_b: 0, objects_a: 0, objects_b: 0, threshold: 0, tier: 'none', matched: [],
+      rows: [], bytes_before: 0, bytes_after: 0, objects_before: 0, objects_after: 0, threshold: 0, tier: 'none', matched: [],
       expansions: 0, truncated: false, lookups: 0, lookups_capped: false,
       // Neither side has a search index: "no matches" says it may miss small ones.
       approximate: true, approximateReason: 'this scan has no search index; small matches may be missing',

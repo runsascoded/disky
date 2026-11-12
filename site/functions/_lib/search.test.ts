@@ -314,7 +314,7 @@ describe('the filter view', () => {
     // The diff's first paint (`depth=1`), with and without sidecars on either side.
     for (const [from, to] of [[PLAIN, SEARCH], [PLAIN, PLAIN]]) {
       const d = await buildDiff(env, { ...base, from, to, top: 100, path: '', threshold: 0, depth: 1, query: parseQuery('ttl=')! })
-      expect([from, to, d.matched?.map(m => m.path), d.total_a, d.total_b, d.approximateReason]).toEqual([from, to, want, 7 * MiB, 7 * MiB, APPROX_NO_INDEX])
+      expect([from, to, d.matched?.map(m => m.path), d.bytes_before, d.bytes_after, d.approximateReason]).toEqual([from, to, want, 7 * MiB, 7 * MiB, APPROX_NO_INDEX])
     }
   })
 
@@ -378,7 +378,7 @@ describe('the filter view', () => {
     // The same generation on both sides: one finds its roots by index, the
     // other by the pre-index read; nothing differs.
     const d = await buildDiff(env, { ...base, from: PLAIN, to: SEARCH, top: 100, path: '', threshold: 0, query: parseQuery('ttl')! })
-    expect([d.rows, d.tier, d.total_a, d.total_b]).toEqual([[], 'search+path', 7352542, 7352542])
+    expect([d.rows, d.tier, d.bytes_before, d.bytes_after]).toEqual([[], 'search+path', 7352542, 7352542])
     // The sidecar-less side was read without the index: the diff says so.
     expect([d.partial, d.approximate, d.approximateReason]).toEqual([undefined, true, APPROX_NO_INDEX])
     expect(d.matched?.map(m => m.path)).toEqual(['bk/fill/zz-TTL-b', 'bk/fill/zz-ttl-a', 'bk/iris/TTL-misc', 'bk/tmp/ttl=14d', 'bk/tmp/ttl=7d', 'zz/Checkpoints/ttl'])
@@ -453,6 +453,6 @@ describe('NOT: excluded descendants leave their roots’ totals and the tree', (
 
   it('a filtered diff subtracts on both sides', async () => {
     const d = await buildDiff(env, { ...base, from: PLAIN, to: SEARCH, top: 100, path: '', query: parseQuery('tmp -ckpt')! })
-    expect([d.rows, d.total_a, d.total_b, d.matched]).toEqual([[], 6 * MiB, 6 * MiB, [{ path: 'bk/tmp', b: 6 * MiB, o: 3 }]])
+    expect([d.rows, d.bytes_before, d.bytes_after, d.matched]).toEqual([[], 6 * MiB, 6 * MiB, [{ path: 'bk/tmp', b: 6 * MiB, o: 3 }]])
   })
 })

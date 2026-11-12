@@ -4,14 +4,14 @@ import type { DiffData, DiffRow } from './diffModel'
 import { deltaPct, diffCellAction, diffTableRows, fmtPct, sortDiffRows } from './diffRows'
 import type { DiffTableRow } from './diffRows'
 
-const row = (p: string, s: DiffRow['s'], a: number, b: number, oa: number, ob: number, x?: true, k: DiffRow['k'] = 'dir'): DiffRow =>
-  ({ p, d: p.split('/').length, k, s, a, b, oa, ob, ...(x ? { x } : {}) })
+const row = (path: string, status: DiffRow['status'], bytes_before: number, bytes_after: number, objects_before: number, objects_after: number, expanded?: true, kind: DiffRow['kind'] = 'dir'): DiffRow =>
+  ({ path, depth: path.split('/').length, kind, status, bytes_before, bytes_after, objects_before, objects_after, ...(expanded ? { expanded } : {}) })
 
 const data = (rows: DiffRow[]): DiffData => ({
   prev: '2026-09-01', curr: '2026-09-02',
-  total_a: rows.filter(r => r.d === 1).reduce((s, r) => s + r.a, 0),
-  total_b: rows.filter(r => r.d === 1).reduce((s, r) => s + r.b, 0),
-  objects_a: 0, objects_b: 0, expansions: 0, truncated: false, threshold: 0, lookups: 0, lookups_capped: false,
+  bytes_before: rows.filter(r => r.depth === 1).reduce((s, r) => s + r.bytes_before, 0),
+  bytes_after: rows.filter(r => r.depth === 1).reduce((s, r) => s + r.bytes_after, 0),
+  objects_before: 0, objects_after: 0, expansions: 0, truncated: false, threshold: 0, lookups: 0, lookups_capped: false,
   rows,
 })
 

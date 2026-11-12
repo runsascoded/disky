@@ -392,8 +392,8 @@ describe('D1', () => {
       const d = await diffOf(envStatic(), 'tomato', 'tomato-bk')
       const v = await view(envStatic(), B, 'tomato-bk', 'tomato')
       const plain = await buildDiff(base, { from: A, to: B, path: 'tomato-bk', w: W, h: H, minArea: MIN_AREA, atten: ATTEN, top: 200 })
-      expect([d.rows, d.total_a, d.total_b]).toEqual([plain.rows, plain.total_a, plain.total_b])
-      expect([v.matches, d.matched, d.matchCount]).toEqual([['tomato-bk'], [{ path: 'tomato-bk', b: d.total_b, o: d.objects_b }], { n: 1, b: d.total_b, o: d.objects_b }])
+      expect([d.rows, d.bytes_before, d.bytes_after]).toEqual([plain.rows, plain.bytes_before, plain.bytes_after])
+      expect([v.matches, d.matched, d.matchCount]).toEqual([['tomato-bk'], [{ path: 'tomato-bk', b: d.bytes_after, o: d.objects_after }], { n: 1, b: d.bytes_after, o: d.objects_after }])
     })
 
     it('within the bound the diff is the one it was', async () => {
@@ -601,12 +601,12 @@ describe('D1', () => {
         const named = kept.filter(c => ea[c] || eb[c]).sort()
         const ka = total(Object.fromEntries(named.map(c => [c, ea[c] ?? [0, 0]]))), kb = total(Object.fromEntries(named.map(c => [c, eb[c] ?? [0, 0]])))
         const ta = total(ea), tb = total(eb)
-        const st = (x: [number, number] | undefined, y: [number, number] | undefined): DiffRow['s'] => !x ? 'added' : !y ? 'removed' : x[0] !== y[0] || x[1] !== y[1] ? 'changed' : 'unchanged'
+        const st = (x: [number, number] | undefined, y: [number, number] | undefined): DiffRow['status'] => !x ? 'added' : !y ? 'removed' : x[0] !== y[0] || x[1] !== y[1] ? 'changed' : 'unchanged'
         const rows: unknown[] = named.map(c => [c, st(ea[c], eb[c]), ea[c]?.[0] ?? 0, eb[c]?.[0] ?? 0, ea[c]?.[1] ?? 0, eb[c]?.[1] ?? 0])
         const ra: [number, number] = [ta[0] - ka[0], ta[1] - ka[1]], rb: [number, number] = [tb[0] - kb[0], tb[1] - kb[1]]
         if (ra[0] > 0 || rb[0] > 0) rows.push(['(other)', st(ra[0] > 0 ? ra : undefined, rb[0] > 0 ? rb : undefined), ra[0], rb[0], ra[0] > 0 ? ra[1] : 0, rb[0] > 0 ? rb[1] : 0])
         const sortRows = (rs: unknown[]) => (rs as [string][]).sort((x, y) => (x[0] < y[0] ? -1 : 1))
-        got.push([t, P, d.total_a, d.total_b, d.objects_a, d.objects_b, d.lookups, sortRows(d.rows.filter(r => r.s !== 'unchanged').map(r => [r.p, r.s, r.a, r.b, r.oa, r.ob]))])
+        got.push([t, P, d.bytes_before, d.bytes_after, d.objects_before, d.objects_after, d.lookups, sortRows(d.rows.filter(r => r.status !== 'unchanged').map(r => [r.path, r.status, r.bytes_before, r.bytes_after, r.objects_before, r.objects_after]))])
         want.push([t, P, ta[0], tb[0], ta[1], tb[1], 0, sortRows(rows.filter(r => (r as unknown[])[1] !== 'unchanged'))])
       }
       expect(got).toEqual(want)
@@ -949,10 +949,10 @@ describe('D1', () => {
         const rel = (p: string) => P === '' ? p : p.slice(P.length + 1)
         for (const m of d.matched ?? []) {
           const R = rel(m.path)
-          const under = d.rows.filter(r => r.p.startsWith(`${R}/`)).map(r => [r.p.slice(R.length + 1), r.s, r.a, r.b, r.oa, r.ob, !!r.x]).sort((x, y) => (x[0] < y[0] ? -1 : 1))
+          const under = d.rows.filter(r => r.path.startsWith(`${R}/`)).map(r => [r.path.slice(R.length + 1), r.status, r.bytes_before, r.bytes_after, r.objects_before, r.objects_after, !!r.expanded]).sort((x, y) => (x[0] < y[0] ? -1 : 1))
           const plain = subdiv.has(m.path)
             ? (await buildDiff(base, { from: A, to: B, path: m.path, w: W, h: H, minArea: MIN_AREA, atten: ATTEN, top: 10_000, threshold: T, depth: 3 })).rows
-              .map(r => [r.p, r.s, r.a, r.b, r.oa, r.ob, !!r.x]).sort((x, y) => (x[0] < y[0] ? -1 : 1))
+              .map(r => [r.path, r.status, r.bytes_before, r.bytes_after, r.objects_before, r.objects_after, !!r.expanded]).sort((x, y) => (x[0] < y[0] ? -1 : 1))
             : []
           if (plain.length) inside++
           got.push([t, P, T, m.path, under])
@@ -1034,7 +1034,7 @@ describe('D1', () => {
         const [sa, sb] = [await bruteNest(t, P, A, T, { force }), await bruteNest(t, P, B, T, { force })]
         const top = (s: typeof sa): [number, number] => [...s.m].filter(([p]) => parent(p) === P).reduce<[number, number]>((x, [, [b, o]]) => [x[0] + b, x[1] + o], [0, 0])
         const at = (s: typeof sa, p: string): [number, number] | null => (p === P ? top(s) : s.m.get(p)) ?? null
-        const st = (x: [number, number] | null, y: [number, number] | null): DiffRow['s'] => !x ? 'added' : !y ? 'removed' : x[0] !== y[0] || x[1] !== y[1] ? 'changed' : 'unchanged'
+        const st = (x: [number, number] | null, y: [number, number] | null): DiffRow['status'] => !x ? 'added' : !y ? 'removed' : x[0] !== y[0] || x[1] !== y[1] ? 'changed' : 'unchanged'
         const rows: unknown[][] = []
         const rel = (p: string) => P === '' ? p : p.slice(P.length + 1)
         // At or inside a match root a side's undrawn name is no known zero: it reads the side's read rows, else a
@@ -1063,7 +1063,7 @@ describe('D1', () => {
         walk(P)
         if (rows.some(r => (r[0] as string).includes('/'))) deep++
         const byPath = (rs: unknown[][]) => rs.sort((x, y) => ((x[0] as string) < (y[0] as string) ? -1 : 1))
-        got.push([t, P, T, d.total_a, d.total_b, d.objects_a, d.objects_b, d.lookups, byPath(d.rows.map(r => [r.p, r.s, r.a, r.b, r.oa, r.ob, !!r.x, ...(r.l ? [r.l] : [])]))])
+        got.push([t, P, T, d.bytes_before, d.bytes_after, d.objects_before, d.objects_after, d.lookups, byPath(d.rows.map(r => [r.path, r.status, r.bytes_before, r.bytes_after, r.objects_before, r.objects_after, !!r.expanded, ...(r.lookup ? [r.lookup] : [])]))])
         want.push([t, P, T, top(sa)[0], top(sb)[0], top(sa)[1], top(sb)[1], lookups, byPath(rows.filter(r => r[6] || r[1] !== 'unchanged'))])
       }
       expect(got).toEqual(want)
@@ -1087,7 +1087,7 @@ describe('D1', () => {
         },
       }
       const d = await buildDiff(envStatic(heavyStore(src)), { from: A, to: B, path: '', w: W, h: H, minArea: MIN_AREA, atten: ATTEN, top: 100, query: q('bin'), threshold: 10 })
-      expect([d.lookups, d.rows.map(r => [r.p, r.s, r.a, r.b, r.x ?? null, r.l ?? null])]).toEqual([0, [
+      expect([d.lookups, d.rows.map(r => [r.path, r.status, r.bytes_before, r.bytes_after, r.expanded ?? null, r.lookup ?? null])]).toEqual([0, [
         ['bk', 'changed', 5100, 6030, true, null],
         ['bk/s', 'changed', 5100, 6030, true, null],
         ['bk/s/y', 'changed', 100, 30, true, null],
@@ -1127,13 +1127,13 @@ describe('D1', () => {
           if (d.lookups_late) lateCases++
           // A view root the query matches is read whole, as the unfiltered diff reads it (its one match): not a forest.
           const roots = q(t)(P) ? [] : (d.matched ?? []).map(m => m.path)
-          const drawn = d.rows.filter(r => !r.p.endsWith('(other)')).map(r => [P === '' ? r.p : `${P}/${r.p}`, r] as const).filter(([p]) => roots.some(R => p.startsWith(`${R}/`)))
-          rows += drawn.length; looked += drawn.filter(([, r]) => r.l).length
-          if (d !== full) folded += full.rows.filter(r => !r.p.endsWith('(other)')).length - d.rows.filter(r => !r.p.endsWith('(other)')).length
+          const drawn = d.rows.filter(r => !r.path.endsWith('(other)')).map(r => [P === '' ? r.path : `${P}/${r.path}`, r] as const).filter(([p]) => roots.some(R => p.startsWith(`${R}/`)))
+          rows += drawn.length; looked += drawn.filter(([, r]) => r.lookup).length
+          if (d !== full) folded += full.rows.filter(r => !r.path.endsWith('(other)')).length - d.rows.filter(r => !r.path.endsWith('(other)')).length
           for (const [p, r] of drawn) {
             const [a, oa] = scanRows.get(A)!.get(p) ?? [0, 0], [b, ob] = scanRows.get(B)!.get(p) ?? [0, 0]
             const s = !a && !oa ? 'added' : !b && !ob ? 'removed' : a !== b || oa !== ob ? 'changed' : 'unchanged'
-            if (r.a !== a || r.b !== b || r.oa !== oa || r.ob !== ob || r.s !== s) bad.push([src, t, P, T, cut, r.p, [r.s, r.a, r.b, r.oa, r.ob], [s, a, b, oa, ob]])
+            if (r.bytes_before !== a || r.bytes_after !== b || r.objects_before !== oa || r.objects_after !== ob || r.status !== s) bad.push([src, t, P, T, cut, r.path, [r.status, r.bytes_before, r.bytes_after, r.objects_before, r.objects_after], [s, a, b, oa, ob]])
           }
         }
       }

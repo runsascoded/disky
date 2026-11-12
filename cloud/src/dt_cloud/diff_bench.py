@@ -32,7 +32,7 @@ from .diff_check import fetch
 
 QUANT = 128
 # The site's API cache version (`API_CV`, site/src/App.tsx): asked as the browser asks.
-CV = 4
+CV = 5
 
 
 @dataclass(frozen=True)
@@ -114,7 +114,7 @@ def answer_digest(route: str, body: dict) -> str:
     display name (`tree.name`: the host's `ROOT_LABEL`, "… (dev)" on a dev stack). Either host's short-named body
     (`api_names`) digests as its descriptive one."""
     tree = api_names.tree(body) if isinstance(body.get("tree"), dict) else body.get("tree")
-    keep = ({k: body.get(k) for k in ("total_a", "total_b", "objects_a", "objects_b", "rows")} if route == "/api/diff"
+    keep = ({k: api_names.diff(body).get(k) for k in ("bytes_before", "bytes_after", "objects_before", "objects_after", "rows")} if route == "/api/diff"
             else {"nodes": body.get("nodes"), "tree": {k: v for k, v in tree.items() if k != "name"} if isinstance(tree, dict) else tree})
     return hashlib.sha256(json.dumps(keep, sort_keys=True).encode()).hexdigest()[:12]
 

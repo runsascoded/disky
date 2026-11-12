@@ -68,9 +68,10 @@ def test_st_total():
 
 
 def test_answer_digest_ignores_the_readers_own_fields():
-    d = {"total_a": 1, "total_b": 2, "objects_a": 3, "objects_b": 4, "rows": [{"p": "m"}]}
+    d = {"bytes_before": 1, "bytes_after": 2, "objects_before": 3, "objects_after": 4, "rows": [{"path": "m"}]}
     assert answer_digest("/api/diff", {**d, "tier": "bysize", "lookups": 0}) == answer_digest("/api/diff", {**d, "tier": "descent"})
     assert answer_digest("/api/diff", d) != answer_digest("/api/diff", {**d, "rows": []})
+    assert answer_digest("/api/diff", {"total_a": 1, "total_b": 2, "objects_a": 3, "objects_b": 4, "rows": [{"p": "m"}]}) == answer_digest("/api/diff", d)
     v = {"nodes": 2, "tree": {"name": "Root", "bytes": 5, "children": [{"name": "m", "bytes": 5}]}}
     assert answer_digest("/api/subtree", {**v, "index": "g1"}) == answer_digest("/api/subtree", {**v, "index": "g2"})
     assert answer_digest("/api/subtree", v) == answer_digest("/api/subtree", {**v, "tree": {**v["tree"], "name": "Root (dev)"}})

@@ -533,7 +533,7 @@ describe('the diff shares one gate across its reads', () => {
       cut = await buildDiff(e, { from: A, to: B, path: '', w: W, h: H, minArea: MIN_AREA, atten: ATTEN, top: 500, query: q('tomat'), phase2Gate: gate })
     } finally { spy.slowMs = 0 }
     const full = await buildDiff(envStatic(), { from: A, to: B, path: '', w: W, h: H, minArea: MIN_AREA, atten: ATTEN, top: 500, query: q('tomat') })
-    expect([gate.dead, cut.interiors, full.interiors, cut.total_a, cut.total_b, cut.matchCount]).toEqual([true, { read: 0, skipped: 6, reason: '3 past the time budget', late: 6 }, undefined, full.total_a, full.total_b, full.matchCount])
+    expect([gate.dead, cut.interiors, full.interiors, cut.bytes_before, cut.bytes_after, cut.matchCount]).toEqual([true, { read: 0, skipped: 6, reason: '3 past the time budget', late: 6 }, undefined, full.bytes_before, full.bytes_after, full.matchCount])
   })
 })
 

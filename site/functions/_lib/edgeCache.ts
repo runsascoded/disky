@@ -59,8 +59,10 @@ export interface CacheEnv { CACHE_KV?: KVNamespace; CACHE_NS?: string; PROD_HOST
 // 11 (2026-11-06): a thresholded path-first read keeps no ended version (a rewritten object drew at the sum of its two
 // versions, a removed one could return), and a slice read for totals holds every slice of a path clearing its floor.
 // 12 (2026-11-12): map nodes carry descriptive keys (`name kind bytes objects mtime last_read owners class_bytes
-// children folded matched provenance store scan`; no `d`), specs/descriptive-field-names.md §3a.
-export const CACHE_V = '12'
+// children folded matched provenance store scan`; no `d`), specs/descriptive-field-names.md §3a. 13: diff rows and
+// totals (`path depth kind status bytes_before bytes_after objects_before objects_after expanded lookup`) and level
+// answers (§3b–c).
+export const CACHE_V = '13'
 
 /** The deployment environment a response-cache key belongs to: `''` is prod's (keys exactly as before the
  * tag existed — no one-time flush), anything else a separate keyspace. A Pages preview (the dev stack)

@@ -140,8 +140,8 @@ export function restrictSubtree<T extends { path: string; tree: ViewNode }>(body
 }
 
 /** A `/api/diff` body for a restricted viewer: rows are relative to `path`. */
-export function restrictDiff<T extends { path: string; rows: { p: string }[] }>(body: T, r: Restriction): T {
-  return { ...body, rows: body.rows.filter(row => !isHidden(join(norm(body.path), row.p), r)) }
+export function restrictDiff<T extends { path: string; rows: { path: string }[] }>(body: T, r: Restriction): T {
+  return { ...body, rows: body.rows.filter(row => !isHidden(join(norm(body.path), row.path), r)) }
 }
 
 /** A JSON response re-emitted through `fn` (same status and headers); a

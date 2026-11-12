@@ -2826,22 +2826,30 @@ export interface DiffOpts extends Omit<ViewOpts, 'date'> {
   descentBudgetRows?: number
 }
 
+/** A diff row (`/api/diff`'s `rows`; specs/descriptive-field-names.md §3b). */
 export interface DiffRow {
   /** Path relative to P (`(other)` = the fold under its parent). */
-  p: string
-  d: number
+  path: string
+  depth: number
   /** What the path is on whichever side has it; a fold is `dir`. */
-  k: 'file' | 'dir'
-  s: 'added' | 'removed' | 'changed' | 'unchanged'
-  a: number
-  b: number
-  oa: number
-  ob: number
-  /** Expanded: its own Δ is carried by its children. */
-  x?: true
-  /** Read by a point lookup on the side where it sat under the floor. */
-  l?: 1 | 2
+  kind: 'file' | 'dir'
+  status: 'added' | 'removed' | 'changed' | 'unchanged'
+  /** Bytes and objects at the earlier scan (`before`) and the later one (`after`). */
+  bytes_before: number
+  bytes_after: number
+  objects_before: number
+  objects_after: number
+  /** Its own Δ is carried by its children. */
+  expanded?: true
+  /** Read by a point lookup on the side (1 before, 2 after) where it sat under the floor. */
+  lookup?: 1 | 2
 }
+
+/** A row's (or a total's) two sides: its bytes and objects before and after. */
+export type DiffSides = Pick<DiffRow, 'bytes_before' | 'bytes_after' | 'objects_before' | 'objects_after'>
+const zeroSides = (): DiffSides => ({ bytes_before: 0, bytes_after: 0, objects_before: 0, objects_after: 0 })
+/** |Δ bytes| of a row: what the tail ranks by. */
+const absDelta = (r: DiffSides): number => Math.abs(r.bytes_after - r.bytes_before)
 
 /** A diff's rows cut to `top` (every reader's tail): every expanded row (the skeleton), then the changed leaf rows by
  *  |Δ|, at most `top` of them, and each expanded row's (and the root's, `root`: the diff's totals) `(other)` derived
@@ -2852,63 +2860,67 @@ export interface DiffRow {
  *  A scan's rows are hierarchical, so this is the walk's own `(other)` plus the cut leaves wherever the walk read them
  *  all. `additive` false (a filtered diff: a parent's totals are its matched bytes, not its children's sum): the walk's
  *  own `(other)` plus the cut leaves instead. */
-export function capDiffRows(rows: DiffRow[], top: number, root: { a: number; b: number; oa: number; ob: number }, additive = true): { rows: DiffRow[]; cut: boolean } {
-  const isOther = (r: DiffRow) => r.p === '(other)' || r.p.endsWith('/(other)')
+export function capDiffRows(rows: DiffRow[], top: number, root: DiffSides, additive = true): { rows: DiffRow[]; cut: boolean } {
+  const isOther = (r: DiffRow) => r.path === '(other)' || r.path.endsWith('/(other)')
   const parentOf = (p: string) => { const i = p.lastIndexOf('/'); return i < 0 ? '' : p.slice(0, i) }
-  const skeleton = rows.filter(r => r.x)
-  const leaves = rows.filter(r => !r.x && !isOther(r) && r.s !== 'unchanged').sort((r1, r2) => Math.abs(r2.b - r2.a) - Math.abs(r1.b - r1.a))
+  const skeleton = rows.filter(r => r.expanded)
+  const leaves = rows.filter(r => !r.expanded && !isOther(r) && r.status !== 'unchanged').sort((r1, r2) => absDelta(r2) - absDelta(r1))
   const kept = leaves.slice(0, top)
-  type T = { a: number; b: number; oa: number; ob: number }
-  const zero = (): T => ({ a: 0, b: 0, oa: 0, ob: 0 })
-  const add = (t: T, r: T) => { t.a += r.a; t.b += r.b; t.oa += r.oa; t.ob += r.ob }
+  const add = (t: DiffSides, r: DiffSides) => {
+    t.bytes_before += r.bytes_before; t.bytes_after += r.bytes_after; t.objects_before += r.objects_before; t.objects_after += r.objects_after
+  }
   // The walk's own `(other)`s, plus the leaves cut.
-  const fold = new Map<string, T>()
+  const fold = new Map<string, DiffSides>()
   for (const r of [...rows.filter(isOther), ...leaves.slice(top)]) {
-    const q = parentOf(r.p)
-    const t = fold.get(q) ?? zero()
+    const q = parentOf(r.path)
+    const t = fold.get(q) ?? zeroSides()
     add(t, r)
     fold.set(q, t)
   }
   // The invariant's: each expanded row less its drawn children (kept, or unchanged: filler).
-  const drawn = new Map<string, T>()
-  for (const r of [...skeleton, ...kept, ...rows.filter(r => !r.x && !isOther(r) && r.s === 'unchanged')]) {
-    const q = parentOf(r.p)
-    const t = drawn.get(q) ?? zero()
+  const drawn = new Map<string, DiffSides>()
+  for (const r of [...skeleton, ...kept, ...rows.filter(r => !r.expanded && !isOther(r) && r.status === 'unchanged')]) {
+    const q = parentOf(r.path)
+    const t = drawn.get(q) ?? zeroSides()
     add(t, r)
     drawn.set(q, t)
   }
   const others: DiffRow[] = []
   // Every expanded row and the root, and any other parent the walk gave an `(other)` (a filtered diff's match root).
   // The root only when it was expanded (a drawn child, or the walk's own `(other)`), as every other parent.
-  const pars: { p: string; d: number; a: number; b: number; oa: number; ob: number; own?: true }[] = [...(drawn.has('') || fold.has('') ? [{ p: '', d: 0, ...root }] : []), ...skeleton]
-  const known = new Set(pars.map(x => x.p))
+  const pars: (DiffSides & { path: string; depth: number; own?: true })[] = [...(drawn.has('') || fold.has('') ? [{ path: '', depth: 0, ...root }] : []), ...skeleton]
+  const known = new Set(pars.map(x => x.path))
   for (const r of rows.filter(isOther)) {
-    const q = parentOf(r.p)
-    if (!known.has(q)) { known.add(q); pars.push({ p: q, d: r.d - 1, a: 0, b: 0, oa: 0, ob: 0, own: true }) }
+    const q = parentOf(r.path)
+    if (!known.has(q)) { known.add(q); pars.push({ path: q, depth: r.depth - 1, ...zeroSides(), own: true }) }
   }
   for (const par of pars) {
-    const f = fold.get(par.p) ?? zero()
-    const t = drawn.get(par.p) ?? zero()
-    const o = additive && !par.own
-      ? { a: Math.max(0, par.a - t.a), b: Math.max(0, par.b - t.b), oa: Math.max(0, par.oa - t.oa), ob: Math.max(0, par.ob - t.ob) }
+    const f = fold.get(par.path) ?? zeroSides()
+    const t = drawn.get(par.path) ?? zeroSides()
+    const o: DiffSides = additive && !par.own
+      ? {
+        bytes_before: Math.max(0, par.bytes_before - t.bytes_before), bytes_after: Math.max(0, par.bytes_after - t.bytes_after),
+        objects_before: Math.max(0, par.objects_before - t.objects_before), objects_after: Math.max(0, par.objects_after - t.objects_after),
+      }
       : f
     // Zero-byte objects count too: an `(other)` of objects alone (no bytes either side) is kept when they differ.
-    const s: DiffRow['s'] = !o.a && !o.b
-      ? (o.oa === o.ob ? 'unchanged' : !o.oa ? 'added' : !o.ob ? 'removed' : 'changed')
-      : !o.a ? 'added' : !o.b ? 'removed' : o.a !== o.b || o.oa !== o.ob ? 'changed' : 'unchanged'
-    if (s === 'unchanged') continue
-    others.push({ p: par.p === '' ? '(other)' : `${par.p}/(other)`, d: par.d + 1, k: 'dir', s, ...o })
+    const status: DiffRow['status'] = !o.bytes_before && !o.bytes_after
+      ? (o.objects_before === o.objects_after ? 'unchanged' : !o.objects_before ? 'added' : !o.objects_after ? 'removed' : 'changed')
+      : !o.bytes_before ? 'added' : !o.bytes_after ? 'removed' : o.bytes_before !== o.bytes_after || o.objects_before !== o.objects_after ? 'changed' : 'unchanged'
+    if (status === 'unchanged') continue
+    others.push({ path: par.path === '' ? '(other)' : `${par.path}/(other)`, depth: par.depth + 1, kind: 'dir', status, ...o })
   }
-  const tail = [...kept, ...others].sort((r1, r2) => Math.abs(r2.b - r2.a) - Math.abs(r1.b - r1.a))
+  const tail = [...kept, ...others].sort((r1, r2) => absDelta(r2) - absDelta(r1))
   return { rows: [...skeleton, ...tail], cut: leaves.length > top }
 }
 
 export interface Diff {
   rows: DiffRow[]
-  total_a: number
-  total_b: number
-  objects_a: number
-  objects_b: number
+  /** The path's totals at either scan. */
+  bytes_before: number
+  bytes_after: number
+  objects_before: number
+  objects_after: number
   expansions: number
   truncated: boolean
   threshold: number
@@ -3094,7 +3106,7 @@ export async function buildDiff(env0: Env, o: DiffOpts): Promise<Diff> {
   // Nothing in scope on either side (a filter with no matches, an empty owner
   // pool): an empty diff, not a crash on the missing views.
   if (!va && !vb) {
-    return { rows: [], total_a: 0, total_b: 0, objects_a: 0, objects_b: 0, threshold: 0, tier: 'none', ...(query ? { matched: [], ...coverageFields(cov) } : {}), expansions: 0, truncated: false, lookups: 0, lookups_capped: false }
+    return { rows: [], bytes_before: 0, bytes_after: 0, objects_before: 0, objects_after: 0, threshold: 0, tier: 'none', ...(query ? { matched: [], ...coverageFields(cov) } : {}), expansions: 0, truncated: false, lookups: 0, lookups_capped: false }
   }
   // One side a v1 generation (dirs only), the other a store (objects too):
   // the objects have no counterpart to be compared with, so they fold into
@@ -3113,10 +3125,10 @@ export async function buildDiff(env0: Env, o: DiffOpts): Promise<Diff> {
   const matchedOf = (v: Read | null) => v?.matched ?? (v?.matches?.length === 1 && v.matches[0] === path ? [{ path, b: Math.round(v.rootAgg.b), o: Math.round(v.rootAgg.o) }] : [])
   const matchedUnion = query ? [...new Map([...matchedOf(va), ...matchedOf(vb)].map(m => [m.path, m])).values()].sort((x, y) => x.path < y.path ? -1 : 1) : undefined
   const totals = {
-    total_a: Math.round(va?.rootAgg.b ?? 0),
-    total_b: Math.round(vb?.rootAgg.b ?? 0),
-    objects_a: Math.round(va?.rootAgg.o ?? 0),
-    objects_b: Math.round(vb?.rootAgg.o ?? 0),
+    bytes_before: Math.round(va?.rootAgg.b ?? 0),
+    bytes_after: Math.round(vb?.rootAgg.b ?? 0),
+    objects_before: Math.round(va?.rootAgg.o ?? 0),
+    objects_after: Math.round(vb?.rootAgg.o ?? 0),
     threshold: (vb ?? va)!.threshold,
     tier: (vb ?? va)!.tier,
     ...(matchedUnion ? (() => {
@@ -3423,13 +3435,13 @@ export async function buildDiff(env0: Env, o: DiffOpts): Promise<Diff> {
   const rows: DiffRow[] = []
   let expansions = 0
   const rel = (p: string) => (path === '' ? p : p.slice(path.length + 1))
-  const status = (a: Agg | null, b: Agg | null): DiffRow['s'] =>
+  const status = (a: Agg | null, b: Agg | null): DiffRow['status'] =>
     !a ? 'added' : !b ? 'removed' : Math.round(a.b) !== Math.round(b.b) || Math.round(a.o) !== Math.round(b.o) ? 'changed' : 'unchanged'
   const emit = (p: string, d: number, a: Agg | null, b: Agg | null, x: boolean, l?: 1 | 2) => {
     rows.push({
-      p, d, k: a?.kind ?? b?.kind ?? 'dir', s: status(a, b),
-      a: Math.round(a?.b ?? 0), b: Math.round(b?.b ?? 0), oa: Math.round(a?.o ?? 0), ob: Math.round(b?.o ?? 0),
-      ...(x ? { x: true } : {}), ...(l ? { l } : {}),
+      path: p, depth: d, kind: a?.kind ?? b?.kind ?? 'dir', status: status(a, b),
+      bytes_before: Math.round(a?.b ?? 0), bytes_after: Math.round(b?.b ?? 0), objects_before: Math.round(a?.o ?? 0), objects_after: Math.round(b?.o ?? 0),
+      ...(x ? { expanded: true as const } : {}), ...(l ? { lookup: l } : {}),
     })
   }
   let level: Item[] = [{ p: path, d: dP, a: va?.rootAgg ?? null, b: vb?.rootAgg ?? null }]
@@ -3473,7 +3485,7 @@ export async function buildDiff(env0: Env, o: DiffOpts): Promise<Diff> {
   // the top-|Δ| changed frontier rows; unchanged frontier rows are inferred
   // as filler by the renderer.
   tr?.('walk', performance.now() - walkStart)
-  const capped0 = capDiffRows(rows, o.top, { a: totals.total_a, b: totals.total_b, oa: totals.objects_a, ob: totals.objects_b }, !query)
+  const capped0 = capDiffRows(rows, o.top, totals, !query)
   return {
     rows: capped0.rows,
     ...totals,
