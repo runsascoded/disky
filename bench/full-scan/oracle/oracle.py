@@ -190,7 +190,8 @@ def answer_dirs(con, q: dict, scans: dict[str, int], files: list[str]) -> dict:
     vals = f"{side(ta, 'size')}, {side(ta, nf)}, {side(tb, 'size')}, {side(tb, nf)}"
     # Only the window's depths are read (the sorts' `depth` statistics prune the rest); a version's rows across the
     # base and runs are one, with the smallest `vt`.
-    window = f"((depth BETWEEN {dp + 1} AND {dp + K} AND {under}) OR (depth = {dp} AND path = {lit(p)}))"
+    # The depth range alone first, so the sorts' `depth` statistics prune row groups.
+    window = f"depth BETWEEN {dp} AND {dp + K} AND ((depth > {dp} AND {under}) OR (depth = {dp} AND path = {lit(p)}))"
     src = "[" + ", ".join(lit(f) for f in files) + "]"
     rows = con.execute(f"""WITH a AS (
             SELECT depth, path, vf, min(vt) AS vt, any_value(kind) AS kind, any_value(size) AS size, any_value(n_files) AS n_files
