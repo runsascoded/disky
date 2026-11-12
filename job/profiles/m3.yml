@@ -45,7 +45,8 @@ options:
     age_pyramids: true
     annotate: [disk-tree, capture-meta, -c, "r2://disk-tree/snapshots/laptop/{scan}/meta.json", "{listing}/_SUCCESS.json", "{snap}/meta.json"]
   # the site's STATIC_GEN (site/wrangler.toml; the job env's, a test pins them equal)
-  static-names: {gen: "2026-10-15", mem: 5GB}
+  # 5GB ran out in the 11/02 scan's anchor rollups (RSS ~4.3 GiB above the DuckDB cap; 16 GiB task)
+  static-names: {gen: "2026-10-15", mem: 9GB}
   interval-store: {mem: 10GB}
   index-sync:
     variants: [path, bysize, age-pyramid-1h, age-pyramid-3h, age-pyramid-6h, age-pyramid-12h, age-pyramid-1d,
@@ -54,4 +55,5 @@ options:
   # Not `layer1`: the captures (`captures/m3/root/<stamp>/`) aren't keyed by scan id, and §3 keeps 30 days anyway.
   retire: {keep: 7, execute: true}
   # `gen` names the first generation only (the store's `interval-store/CURRENT.json` is followed after)
-  age-store: {store: "r2://disk-tree/history/m3-age", gen: 2026-11-03m3-age, keep: 2, execute: true}
+  # the default (sized for hf) ran out reading one scan's eight pyramids
+  age-store: {store: "r2://disk-tree/history/m3-age", gen: 2026-11-03m3-age, keep: 2, execute: true, mem: 6GB}

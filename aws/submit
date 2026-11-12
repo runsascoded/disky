@@ -52,9 +52,17 @@ def follow(batch, logs, job_id: str) -> int:
 @option('-c', '--vcpus', help="vCPUs for this job (a Fargate value: 0.25 … 16), overriding the job def's")
 @option('-e', '--env', 'envs', multiple=True, help='KEY=VALUE added to the job env; repeat')
 @option('-m', '--memory', type=int, help="Memory MiB for this job (valid for -c on Fargate), overriding the job def's")
+@option('-t', '--timeout', type=int, help="Attempt timeout in seconds for this job (e.g. a catch-up run), overriding the job def's")
 @option('-w', '--watch', is_flag=True, help='Follow the job log until it finishes')
 @argument('capture')
-def main(vcpus: str | None, envs: tuple[str, ...], memory: int | None, watch: bool, capture: str):
+def main(
+    vcpus: str | None,
+    envs: tuple[str, ...],
+    memory: int | None,
+    timeout: int | None,
+    watch: bool,
+    capture: str,
+):
     session = boto3.Session(region_name='us-east-1')
     batch = session.client('batch')
     name = f'ingest-{datetime.now(timezone.utc):%Y%m%d-%H%M%S}'
@@ -73,6 +81,7 @@ def main(vcpus: str | None, envs: tuple[str, ...], memory: int | None, watch: bo
         jobQueue=QUEUE,
         jobDefinition=JOB_DEF,
         containerOverrides=overrides,
+        **({'timeout': {'attemptDurationSeconds': timeout}} if timeout else {}),
     )['jobId']
     print(job_id, flush=True)
     if watch:
