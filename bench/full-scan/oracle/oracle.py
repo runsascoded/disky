@@ -136,7 +136,7 @@ def answer(con, q: dict, scans: dict[str, int]) -> dict:
         b = "size"
     srch = search_sql(q["q"]) if q.get("q") else "true"
     ctes.append(f"""m AS (
-        SELECT path, depth, la, lb, {own_cols}, {cls_sql} FROM live {join} WHERE {srch})""")
+        SELECT path, depth, la, lb, size, {own_cols}, {cls_sql} FROM live {join} WHERE {srch})""")
     ctes.append(f"""sel AS (SELECT path, depth, la, lb, ({b})::BIGINT AS b FROM m WHERE own_pass AND cls_pass)""")
     base = "WITH " + ",\n".join(ctes)
     tot = con.execute(f"""{base}
