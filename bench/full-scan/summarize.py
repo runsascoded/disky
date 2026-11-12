@@ -22,8 +22,9 @@ def ms(x: float) -> str:
 
 @click.command()
 @click.option("-k", "--kinds", is_flag=True, help="Also the per-kind latency table")
+@click.option("-q", "--queries", help="Also a per-query table of these ids (comma-separated), for the first store")
 @click.argument("files", nargs=-1)
-def main(kinds, files):
+def main(kinds, queries, files):
     loads, qs = {}, defaultdict(list)
     for f in files:
         for line in open(f):
@@ -57,6 +58,17 @@ def main(kinds, files):
                 w = [r["warm_median_ms"] for r in rs]
                 print(f"| {label} | {t} | {kind} | {len(rs)} | {ms(median(w))} / {ms(max(w))} ms | {ms(max(r['cold_ms'] for r in rs))} ms "
                       f"| {median(r['rows'] for r in rs):,.0f} |")
+    if queries:
+        label = next(iter(loads))
+        rs = {(r["id"], r["threads"]): r for r in qs[label]}
+        tmax = max(r["threads"] for r in qs[label])
+        print()
+        print(f"| Query ({label}) | Rows read | 1 thread: warm (cold) | {tmax} threads: warm (cold) | of which dictionary | Nodes |")
+        print("|---|---:|---:|---:|---:|---:|")
+        for i in queries.split(","):
+            a, b = rs[(i, 1)], rs[(i, tmax)]
+            print(f"| `{i}` | {b['rows']:,} | {ms(a['warm_median_ms'])} ({ms(a['cold_ms'])}) ms | {ms(b['warm_median_ms'])} ({ms(b['cold_ms'])}) ms "
+                  f"| {ms(b['warm_compile_median_ms'])} ms | {b['nodes']} |")
 
 
 if __name__ == "__main__":
