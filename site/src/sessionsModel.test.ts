@@ -8,6 +8,36 @@ const e = (dt: number, k: StoredEvent['k'], f: Record<string, unknown> = {}, pid
   ({ t: T + dt, k, pid, seq: 0, ...f }) as StoredEvent
 
 describe('session view model', () => {
+  it('shows failure context and a later successful repeat; a failure that ended offline or hidden is not an error', () => {
+    const events = [
+      e(0, 'life', { s: 'gap', ms: 48 * 60_000, on: true, vis: 'visible' }),
+      e(0, 'api', { id: 7, u: '/api/series?path=marin-na', s: 0, ms: 2490, wall: 2490, end: T + 2490, err: 'TypeError: Failed to fetch', on0: true, on: false, vis0: 'visible', vis: 'hidden', visMs: 0, gapMs: 48 * 60_000, gapAgo: 0 }),
+      e(4000, 'api', { id: 8, u: '/api/series?path=marin-na', s: 200, ms: 30, ray: '1234567890abcdef-EWR' }),
+      e(5000, 'api', { id: 9, u: '/api/other', s: 0, ms: 5, wall: 5, end: T + 5005, err: 'TypeError: Failed to fetch', on0: true, on: true, vis0: 'visible', vis: 'visible', visMs: 5000 }),
+    ]
+    expect(timeline(events).map(({ text, error, lane }) => ({ text, error, lane }))).toEqual([
+      { text: 'browser gap 48m 00s · online hint · visible', error: false, lane: 'page' },
+      { text: 'GET /api/series?path=marin-na → failed · 2490ms · TypeError: Failed to fetch · request #7 · online hint → offline hint · visible → hidden · 0ms since visible · timer gap 48m 00s, 0ms before request', error: false, lane: 'api' },
+      { text: 'GET /api/series?path=marin-na → 200 · 30ms · request #8 · Ray 1234567890abcdef-EWR · later success after request #7 (1s after failure)', error: false, lane: 'api' },
+      { text: 'GET /api/other → failed · 5ms · TypeError: Failed to fetch · request #9 · online hint · visible · 5s since visible', error: true, lane: 'error' },
+    ])
+  })
+
+  it.each([
+    { name: 'another page load', first: {}, later: {}, pid: 'p2' },
+    { name: 'a different query', first: {}, later: { u: '/api/a?path=b' } },
+    { name: 'a masked URL', first: { u: '/api/a?key=…' }, later: { u: '/api/a?key=…' } },
+    { name: 'a write', first: { m: 'POST' }, later: { m: 'POST' } },
+    { name: 'an earlier concurrent read', first: { end: T + 5000 }, later: {} },
+    { name: 'a cancelled read', first: { err: 'abort' }, later: {} },
+  ])('does not label $name as a successful repeat', ({ first, later, pid }: { first: Record<string, unknown>; later: { u?: string; m?: string }; pid?: string }) => {
+    const lines = timeline([
+      e(0, 'api', { id: 1, u: '/api/a?path=a', s: 0, ms: 10, end: T + 10, err: 'TypeError: Failed to fetch', ...first }),
+      e(1000, 'api', { id: 2, u: '/api/a?path=a', s: 200, ms: 20, ...later }, pid),
+    ])
+    expect(lines.at(-1)?.text).toEqual(`${later.m ?? 'GET'} ${later.u ?? '/api/a?path=a'} → 200 · 20ms · request #2`)
+  })
+
   it('renders each kind as a line, with the URL in effect per page load and errors flagged', () => {
     const events = [
       e(0, 'start', { u: '/?d=2026-10-10', ref: 'https://discord.com/channels' }),
