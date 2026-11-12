@@ -268,6 +268,10 @@ def test_workflow_guards_and_secret_boundaries():
         'Upload the sealed build to Cloudflare',
         'Verify CF readback and live build; record success',
     ]
+    notice = [step for key in jobs for step in jobs[key]['steps'] if 'SLACK_DEPLOY_BOT_TOKEN' in str(step)]
+    assert [(step['name'], step['if'], step['continue-on-error']) for step in notice] == [
+        ('Deploy notice', "always() && vars.DEPLOY_NOTIFICATIONS_ENABLED == '1'", 'true'),
+    ]
 
 
 @pytest.mark.parametrize(('head', 'dirty', 'message'), [

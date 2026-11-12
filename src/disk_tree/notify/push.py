@@ -111,14 +111,19 @@ def discord(n: Notice, env: Mapping[str, str], post: Post) -> None:
         raise RuntimeError(f'discord: HTTP {status}: {body[:200]}')
 
 
+def slack_text(n: Notice) -> str:
+    """The ``text`` :func:`slack` posts for ``n``: the title bold, the message, then the links."""
+    links = ([(n.url_title, n.url)] if n.url else []) + list(n.links)
+    link = '\n' + ' · '.join(f'<{url}|{label}>' if label else f'<{url}>' for label, url in links) if links else ''
+    return f'*{n.title}*\n{n.message}{link}'
+
+
 def slack(n: Notice, env: Mapping[str, str], post: Post) -> None:
     """``chat.postMessage``, top-level in ``SLACK_ALERT_CHANNEL``. Slack answers HTTP 200 with ``ok: false`` on
     most failures (``channel_not_found``, ``invalid_auth``), so the body decides."""
-    links = ([(n.url_title, n.url)] if n.url else []) + list(n.links)
-    link = '\n' + ' · '.join(f'<{url}|{label}>' if label else f'<{url}>' for label, url in links) if links else ''
     payload = {
         'channel': secret(env, 'SLACK_ALERT_CHANNEL'),
-        'text': f'*{n.title}*\n{n.message}{link}',
+        'text': slack_text(n),
         'unfurl_links': False,
         'unfurl_media': False,
     }

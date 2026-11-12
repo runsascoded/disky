@@ -44,7 +44,7 @@ const withCookie = (req: Request, pair: string): Request => {
 }
 
 export const onRequest = async (ctx: Ctx): Promise<Response> => {
-  const gate = gateFor(ctx.env)
+  const gate = gateFor(ctx.env, ctx.request)
   if (!gate) return new Response('auth backend not configured (DB / SESSION_SECRET)\n', { status: 503 })
   const handle = authRoutes(gate, {
     adminScope: ADMIN_SCOPE,

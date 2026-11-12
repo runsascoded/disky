@@ -76,6 +76,13 @@ BASE_SCOPE = "my"                           # the scope every viewer needs
 # GOOGLE_CLIENT_ID = "<id>.apps.googleusercontent.com"  # Google sign-in (with the secret below); unset = `/auth/google` 503s
 # OA_LOGIN_ISSUER = "https://login.oa.dev"   # "Sign in with OA" (OA's broker; with the client id + secret); one silent try before the wall; unset = no `/auth/oa`, no button, no try
 # OA_LOGIN_CLIENT_ID = "<client id at the broker>"
+# PAGES_SUBDOMAIN = "my-deployment.pages.dev"  # the project's pages.dev subdomain (its name, unless Cloudflare suffixed it): `<one label>.<it>` is a
+                                            # preview host (a PR's `pr-N`, the `dev` alias, a deployment hash), which signs in with OA's broker
+                                            # only through the preview client below, never silently; unset = no host is one
+# OA_LOGIN_PREVIEW_CLIENT_ID = "<client id>-preview"  # Pages *Preview* environment only (with its secret): the broker's preview client,
+                                            # callback `https://*.<PAGES_SUBDOMAIN>/auth/oa/callback`; unset there = no OA sign-in on preview hosts
+# AUTH_HOST_COOKIES = "1"                     # any value but "1" is off: on https, the session, nonce and Google-hint cookies are `__Host-` named
+                                            # (`__Host-oa_auth`, …). Switching it signs everyone out once (the old name's session is no longer read)
 # MAIL_FROM = "disk-tree <noreply@example.com>"  # emailed sign-in codes (with RESEND_API_KEY)
 
 # --- The index store (_lib/index.ts): any S3-compatible endpoint ---
@@ -181,6 +188,7 @@ ROOT_LABEL = "my buckets"                   # the store root's crumb label
 # secret SESSION_SECRET                     required wherever anyone signs in: signs session cookies and card URLs
 # secret GOOGLE_CLIENT_SECRET               Google sign-in (with GOOGLE_CLIENT_ID)
 # secret OA_LOGIN_CLIENT_SECRET             "Sign in with OA" (with OA_LOGIN_ISSUER + OA_LOGIN_CLIENT_ID)
+# secret OA_LOGIN_PREVIEW_CLIENT_SECRET     the preview client's (with OA_LOGIN_PREVIEW_CLIENT_ID): Preview environment only (`--env preview`)
 # secret RESEND_API_KEY                     emailed sign-in codes (with MAIL_FROM)
 # secret ADMIN_BOOTSTRAP                    with ADMIN_LIST: break-glass admin emails (a secret, so no address is tracked)
 # secret STORE_ACCESS_KEY_ID                the index store's key pair (read-only is enough)

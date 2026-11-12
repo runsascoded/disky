@@ -3910,6 +3910,10 @@ from .history_jobs import cli as _history  # noqa: E402
 
 main.add_command(_history)
 
+from .monitoring_relay import cli as _monitoring_relay  # noqa: E402
+
+main.add_command(_monitoring_relay)
+
 from .eligibility_census import eligibility_census_cmd as _eligibility_census  # noqa: E402
 
 main.add_command(_eligibility_census)

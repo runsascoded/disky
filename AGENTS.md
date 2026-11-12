@@ -208,6 +208,10 @@ dt-cloud soft-delete -b BUCKET… [-E ENDPOINT] [-o ROOT…] [-j]  # Each bucket
                           # `snapshots/soft-delete/` for each `gs://` and `s3://` source, and the site (whose own account can't read bucket
                           # metadata) reads the newest: a recorded undo on a bucket it shows off is "undo unavailable" (its control
                           # disabled, the route refusing), one on a bucket it doesn't name is "unverified". `sweep undo` asks GCS itself
+dt-cloud monitoring-relay serve [-c slack] [-p PORT]  # Cloud Monitoring incidents → `disk-tree notify` (specs/monitoring-relay.md):
+                          # a Pub/Sub push endpoint (infra `MonitoringRelay`'s Cloud Run service), each incident posted with the
+                          # deployment's own bot (policy, condition, opened/resolved, documentation, incident link); 204 once
+                          # posted, 500 to be redelivered. `render FILE` prints the text for a notification's JSON (`-s` posts it)
 dt-cloud diff-bench -a BEFORE -b AFTER [-S STORE] [-v DATE:PATH]… CASES  # The table a store-layout change ships with (no CURRENT move
                           # without it): the browser's diff + map requests (diff-check's CASES, `-v` views) on two hosts, each
                           # cold (`-n` random w×h cache buckets no page asks for) then warm (`-s`: also each diff's `summary=1`, which no page asks); per request kind, median cold
@@ -259,6 +263,8 @@ then `git rm`'d. `dt-cloud d1-schema check -d <db> [-c <wrangler config>]` compa
 One gate (`_lib/auth.ts`, `@open-athena/auth` over D1): `identify` → `Identity` (`via: session | grant | public`), `requireViewer` / `requireStager` / `requireAdmin`.
 - `/auth/google` (+ `/callback`, `/onetap`) — Google OIDC → email session; `/auth/email/*` — emailed code / magic link → email session
 - `/auth/oa` (+ `/callback`, `/client`) — "Sign in with OA" through OA's broker (`OA_LOGIN_*`, `specs/oa-login-rp.md`; unset: 404, no button) → email session. Where configured, the middleware sends a person's unauthenticated page visit there once with `prompt=none` before the wall (`_lib/silentSignIn.ts`; never a crawler, `fetch`, `?key=`/`?og=` link or public deployment); `/api/auth/logout` suppresses that until they click it or complete any sign-in
+- **Preview hosts** (`isPreviewHost`: exactly one label under `PAGES_SUBDOMAIN`, the project's `pages.dev` subdomain: a PR's `pr-N`, the `dev` alias, a deployment hash; never a custom domain): OA sign-in only through the broker's preview client (`OA_LOGIN_PREVIEW_CLIENT_ID` / `_SECRET`, Preview environment only) with `redirectFromOrigin`, else none (404, no button; never the deployment's own client), and no silent `prompt=none` attempt
+- **`AUTH_HOST_COOKIES = "1"`** (default off; switching it signs everyone out once): on https, the session (+ its `_rs` handle), both nonces and the Google hint are `__Host-` named (`cookieNames`), so the gate reads only `__Host-oa_auth` there; `gateFor(env, request)` needs the request for it
 - `/api/auth/*` — the package's routes: `whoami`, `exchange` (`?key=` share link → grant session), `logout`, request-access, admin grant/request/log console
 - `/api/token` — a session's personal agent token (a non-expiring Bearer grant, the base scope only; grants can't mint one)
 - `/api/admins` — the admins (`/admin`'s "Admins" section): every path to the `admin` scope (the list's rows with who added whom and when, the break-glass addresses, live admin-scope links, the staff domain where it is one), add / remove on the list, each logged to `admin_edits`; the last listed admin can't be removed
