@@ -102,6 +102,8 @@ EXECUTOR = "plan-sweep"
 # The Batch job account the sweep console dispatches as (`infra/gcp`: `cw-s3-job`;
 # `GCP_SA_KEY` is the `cw-s3-dispatch` key that may act as it).
 JOB_SA = "cw-s3-job@oa-internal-450019.iam.gserviceaccount.com"
+# "Run a scan" on /scans (`/api/scan-runs/dispatch`): the 6-hourly scan's submitter, run as `GCP_SA_KEY`'s account
+SCAN_SUBMIT_JOB = "projects/oa-internal-450019/locations/us-central1/jobs/cw-usage-snapshot-submit"
 # The Slack digest's channel (#cw-usage), the default `/admin/slack` re-applies to (`/api/digest-reapply`), and the CF
 # account its `-o` plot deploy targets (the scan job's `CLOUDFLARE_ACCOUNT_ID`).
 DIGEST_CHANNEL = "C0C1YR7D0KU"
@@ -252,6 +254,8 @@ EXECUTOR = "plan-sweep"
 # The Batch job account the sweep console dispatches as (`infra/gcp`: `cw-s3-job`;
 # `GCP_SA_KEY` is the `cw-s3-dispatch` key that may act as it).
 JOB_SA = "cw-s3-job@oa-internal-450019.iam.gserviceaccount.com"
+# "Run a scan" on /scans (`/api/scan-runs/dispatch`): the 6-hourly scan's submitter, run as `GCP_SA_KEY`'s account
+SCAN_SUBMIT_JOB = "projects/oa-internal-450019/locations/us-central1/jobs/cw-usage-snapshot-submit"
 # The Slack digest's channel (#cw-usage), the default `/admin/slack` re-applies to (`/api/digest-reapply`), and the CF
 # account its `-o` plot deploy targets (the scan job's `CLOUDFLARE_ACCOUNT_ID`).
 DIGEST_CHANNEL = "C0C1YR7D0KU"

@@ -123,6 +123,8 @@ ready = [job, secrets, *shared_ready, *isolation_ready]
 # submitted), retries transient failures for 30 min, and posts to #cw-s3-admin if it still can't. Scheduler posting the
 # spec to Batch itself (`BatchCron`) can do neither: one POST, no job id, so a 5xx is a silently missed scan and a retry
 # a possible second one. The trigger keeps its name, adopted from its `BatchCron` (`cron_aliases`) and updated in place.
+# "Run a scan" on /scans runs the same job as the site's dispatch account (`/api/scan-runs/dispatch`, `GCP_SA_KEY`),
+# overriding only `DT_TRIGGER` (`manual`: the script names the job for the second and records the scan as manual).
 SCAN = "cw-usage-snapshot"
 scan = BatchSubmitCron(
     SCAN,
@@ -137,6 +139,8 @@ scan = BatchSubmitCron(
     image=f"{region}-docker.pkg.dev/{project}/cw-s3-usage/scan:latest",
     env={"SLACK_ALERT_CHANNEL": "C0C53CPM886"},  # #cw-s3-admin
     secret_env={"SLACK_BOT_TOKEN": "cw-s3-slack-bot-token"},
+    overridable=["DT_TRIGGER"],
+    dispatchers={"cw-s3-dispatch": dispatch.member},
     labels={"component": "scan-submit"},
     description="The 6-hourly scan: runs the submitter job, which names the slot's Batch job, retries, and alerts",
     cron_aliases=[f"urn:pulumi:{STACK}::{pulumi.get_project()}::disky:gcp:BatchCron$gcp:cloudscheduler/job:Job::{SCAN}"],
