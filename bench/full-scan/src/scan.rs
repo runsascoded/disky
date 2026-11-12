@@ -408,6 +408,8 @@ fn assemble(idx: &Index, c: &Compiled, q: &Query, outs: Vec<ChunkOut>) -> Answer
     // Paths and remainders: kept nodes in row order; every kept node's ancestors in the window are kept too.
     struct Open {
         depth: u8,
+        /// The last row of its subtree.
+        last: usize,
         path: String,
         a: Acc,
         b: Acc,
@@ -416,7 +418,7 @@ fn assemble(idx: &Index, c: &Compiled, q: &Query, outs: Vec<ChunkOut>) -> Answer
     }
     let mut out_nodes = Vec::with_capacity(nodes.len());
     let mut rest = Vec::new();
-    let mut stack: Vec<Open> = vec![Open { depth: c.dp, path: c.path.clone(), a: ta, b: tb, kids_a: Acc::default(), kids_b: Acc::default() }];
+    let mut stack: Vec<Open> = vec![Open { depth: c.dp, last: usize::MAX, path: c.path.clone(), a: ta, b: tb, kids_a: Acc::default(), kids_b: Acc::default() }];
     let close = |o: Open, rest: &mut Vec<(String, i64, i64, i64, i64)>| {
         if o.depth < c.maxd {
             let d = |x: u64, y: u64| x as i64 - y as i64;
@@ -428,7 +430,7 @@ fn assemble(idx: &Index, c: &Compiled, q: &Query, outs: Vec<ChunkOut>) -> Answer
         }
     };
     for n in nodes {
-        while stack.last().unwrap().depth >= n.depth {
+        while stack.len() > 1 && (stack.last().unwrap().depth >= n.depth || stack.last().unwrap().last < n.row as usize) {
             let o = stack.pop().unwrap();
             close(o, &mut rest);
         }
@@ -444,7 +446,7 @@ fn assemble(idx: &Index, c: &Compiled, q: &Query, outs: Vec<ChunkOut>) -> Answer
             idx.path_of(n.row as usize)
         };
         out_nodes.push((path.clone(), n.a.bytes, n.a.files, n.b.bytes, n.b.files));
-        stack.push(Open { depth: n.depth, path, a: n.a, b: n.b, kids_a: Acc::default(), kids_b: Acc::default() });
+        stack.push(Open { depth: n.depth, last: idx.end[n.row as usize] as usize, path, a: n.a, b: n.b, kids_a: Acc::default(), kids_b: Acc::default() });
     }
     while let Some(o) = stack.pop() {
         close(o, &mut rest);
