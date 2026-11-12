@@ -139,6 +139,18 @@ snapshot_secret = Secrets(
     accessor_email=job.email_literal,
     adopt=adopt,
 )
+# The disky.oa.dev fleet dashboard's dedicated grant (`dt-cloud job-token -c gcs:read -s fleet`, specs/fleet-read-grants.md):
+# base read plus the meta store's `series_scope` (`fleet`: its root `/api/series` only). Root installs it as
+# `FLEET_TOKEN_GCS`; no job reads it, so no accessor.
+fleet_secret = Secrets(
+    "gcs-fleet-secret",
+    project=project,
+    secrets={"oa-gcs-fleet-token": {"app": "gcs-usage", "role": "fleet-read"}},
+    accessor=job.member,
+    accessor_email=job.email_literal,
+    adopt=Adopt(False),
+    grant_only=set(),
+)
 
 # The daily scan: Cloud Scheduler → the Cloud Run job `gcs-usage-snapshot-submit` → `job/scan-submit.sh`, which submits
 # `job/batch-submit.sh`'s PIN spec as `gcs-usage-snapshot-YYYYMMDD` (a 409 for that name = already submitted), retries
