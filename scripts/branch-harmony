@@ -1,0 +1,482 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = ["click", "pyyaml"]
+# ///
+"""Branch harmony audit (specs/branch-harmony-audit.md): each long-lived branch's own delta, lag, and its files' classes.
+
+For each lane (a child branch and its parent), at its tip or as of a time (`-a`):
+- own delta: `merge-base(child, parent)..child` (`-M`), code scope only, in lines and files, per surface;
+- lag: `merge-base..parent`, in commits, lines and the oldest unmerged commit's age;
+- each own-delta file's class: a rule from `scripts/branch-harmony.yml` (`intrinsic` / `accidental` / `mixed`, with a
+  reason), `lag` when the parent has the same blob (the next merge clears it), else `unclassified`; and its flags:
+  `parent-equal`, `cosmetic` (whitespace-only), `dup` (the same blob on ≥ 2 siblings, not the parent's), `shared`
+  (≥ 2 siblings edit it), `leak` (under a parity surface), `merge-only` (no non-merge commit since the merge-base
+  touches it: a merge's resolution made it).
+
+`-c` blames each lane's surviving leak lines to the commits that wrote them (what a pick would carry up); `-m` / `-p`
+add git-didi's merge-invariance and pick-fidelity checks since `-s`. Each run appends one JSON line per lane to `-o`
+(default `tmp/branch-harmony.jsonl`).
+"""
+import json
+import re
+import sys
+from collections import Counter, defaultdict
+from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
+from fnmatch import fnmatchcase
+from functools import partial
+from pathlib import Path
+from subprocess import run
+
+import yaml
+from click import argument, command, option
+
+err = partial(print, file=sys.stderr)
+
+ROOT = Path(__file__).resolve().parent.parent
+RULES = Path(__file__).resolve().parent / 'branch-harmony.yml'
+
+# lane → (child ref, parent lane); the parent lane's ref comes from `REFS` or its own lane entry
+LANES = {
+    'gcs': ('o/gcs', 'cloud'),
+    'cw': ('o/cw', 'cloud'),
+    'hf': ('o/hf', 'cloud'),
+    'r2': ('o/r2', 'cloud'),
+    'local': ('r/local', 'cloud'),
+    'm3': ('r/m3', 'local'),
+    'app': ('refs/heads/tauri-native-app', 'local'),
+}
+REFS = {'cloud': 'r/cloud'}
+
+# Same scope as `~/c/oa/disky-deep-dive/scripts/branch_similarity.py` (fnmatch: `*` also matches `/`), so the
+# 10-17 baseline compares a2a.
+EXCLUDE = [
+    'specs/*',
+    'screenshots/*',
+    '*/fixtures/*',
+    '*/vendor/*',
+    '*/dist/*',
+    'site/bench/baselines/*',
+    'static-names/*',
+    '*.lock', 'uv.lock', '*/uv.lock',
+    'pnpm-lock.yaml', '*/pnpm-lock.yaml',
+    'package-lock.json', '*/package-lock.json',
+]
+# `one-clone-layout.md`: own-delta files here are leaks (base-bound work, or a merge regression)
+PARITY = ['packages/*/src/*', 'src/disk_tree/*', 'cloud/src/*', 'site/src/*', 'site/functions/*']
+SURFACES = [
+    ('site/functions', 'site/functions/*'),
+    ('site/src', 'site/src/*'),
+    ('site/migrations', 'site/migrations/*'),
+    ('site/other', 'site/*'),
+    ('cloud/src', 'cloud/src/*'),
+    ('cloud/tests', 'cloud/tests/*'),
+    ('src/disk_tree', 'src/disk_tree/*'),
+    ('tests', 'tests/*'),
+    ('packages', 'packages/*'),
+    ('job', 'job/*'),
+    ('infra', 'infra/*'),
+    ('cf', 'cf/*'),
+    ('deploy', 'deploy/*'),
+    ('.github', '.github/*'),
+    ('scripts', 'scripts/*'),
+]
+
+
+def excluded(path: str) -> bool:
+    return any(fnmatchcase(path, p) for p in EXCLUDE)
+
+
+def surface(path: str) -> str:
+    for name, pat in SURFACES:
+        if fnmatchcase(path, pat):
+            return name
+    return 'other'
+
+
+def leak(path: str) -> bool:
+    return any(fnmatchcase(path, p) for p in PARITY)
+
+
+def git(*args: str, cwd: Path = ROOT) -> str:
+    return run(['git', *args], cwd=cwd, check=True, capture_output=True, text=True).stdout
+
+
+@dataclass
+class FileDelta:
+    path: str
+    add: int
+    dele: int
+    status: str  # A / M / D / R
+    old: str | None = None  # rename source
+    rule: str = 'unclassified'  # intrinsic / accidental / unclassified
+    reason: str = ''
+    flags: list[str] = field(default_factory=list)
+
+    @property
+    def lines(self) -> int:
+        return self.add + self.dele
+
+
+def numstat(a: str, b: str, cwd: Path = ROOT) -> list[FileDelta]:
+    """Code-scope files of `git diff -M a b`, binaries skipped; a rename counts when either side is in scope."""
+    st = {}
+    toks = git('diff', '--name-status', '-z', '-M', a, b, cwd=cwd).split('\0')
+    i = 0
+    while i < len(toks) - 1:
+        s = toks[i]
+        if s[0] in 'RC':
+            st[toks[i + 2]] = s[0]
+            i += 3
+        else:
+            st[toks[i + 1]] = s[0]
+            i += 2
+    out = []
+    toks = git('diff', '--numstat', '-z', '-M', a, b, cwd=cwd).split('\0')
+    i = 0
+    while i < len(toks) - 1:
+        add, dele, path = toks[i].split('\t', 2)
+        old = None
+        if path == '':
+            old, path = toks[i + 1], toks[i + 2]
+            i += 3
+        else:
+            i += 1
+        if add == '-':
+            continue
+        if excluded(path) and (old is None or excluded(old)):
+            continue
+        out.append(FileDelta(path=path, add=int(add), dele=int(dele), status=st.get(path, 'M'), old=old))
+    return out
+
+
+def tip(ref: str, at: str | None, cwd: Path = ROOT) -> str:
+    """`ref`'s tip, or its first-parent tip as of `at` (committer date)."""
+    if at is None:
+        return git('rev-parse', ref, cwd=cwd).strip()
+    out = git('rev-list', '-1', '--first-parent', f'--before={at}', ref, cwd=cwd).strip()
+    if not out:
+        raise ValueError(f'{ref} has no commit before {at}')
+    return out
+
+
+def blobs(commit: str, paths: list[str], cwd: Path = ROOT) -> dict[str, str]:
+    """Blob sha of each path at `commit` (absent paths omitted)."""
+    if not paths:
+        return {}
+    out = {}
+    for ln in git('ls-tree', '-z', commit, '--', *paths, cwd=cwd).split('\0'):
+        if ln:
+            meta, path = ln.split('\t', 1)
+            out[path] = meta.split()[2]
+    return out
+
+
+def cosmetic(mb: str, t: str, path: str, cwd: Path = ROOT) -> bool:
+    return git('diff', '-w', '--ignore-blank-lines', mb, t, '--', path, cwd=cwd).strip() == ''
+
+
+def merge_only(mb: str, t: str, paths: list[str], cwd: Path = ROOT) -> list[str]:
+    """Paths no non-merge commit in `mb..t` touches: their delta came from a merge's resolution."""
+    touched = set(git('log', '--no-merges', '--format=', '--name-only', f'{mb}..{t}', cwd=cwd).splitlines())
+    return [p for p in paths if p not in touched]
+
+
+SUBJECT_TAG = re.compile(r'^\[(cloud|base)\]')
+
+
+HUNK = re.compile(r'^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@', re.M)
+
+
+@dataclass
+class Pending:
+    """A commit whose lines survive in the own delta's parity-surface (leak) files: what a pick would carry up."""
+    sha: str
+    subject: str
+    kind: str  # `tagged` ([cloud]/[base] subject: meant for the parent), `untagged`, or `merge` (a merge's resolution)
+    lines: int  # its surviving added lines in those files
+    files: list[str]
+
+
+def added_ranges(mb: str, t: str, path: str, cwd: Path = ROOT) -> list[tuple[int, int]]:
+    """The tip-side line ranges `git diff -U0 mb t -- path` adds."""
+    out = []
+    for m in HUNK.finditer(git('diff', '-U0', mb, t, '--', path, cwd=cwd)):
+        start, n = int(m[1]), int(m[2] if m[2] is not None else 1)
+        if n:
+            out.append((start, start + n - 1))
+    return out
+
+
+def pending(ln: 'Lane', cwd: Path = ROOT) -> list[Pending]:
+    """Blame the own delta's added lines in its leak files (not `parent-equal`: the next merge clears those) back to
+    the commits that wrote them. Each such commit is pick material (or, for a merge, a resolution to review)."""
+    by: dict[str, Counter] = defaultdict(Counter)
+    for f in ln.files:
+        if 'leak' not in f.flags or 'parent-equal' in f.flags or f.status == 'D':
+            continue
+        ranges = added_ranges(ln.mb, ln.tip, f.path, cwd)
+        if not ranges:
+            continue
+        args = [x for a, b in ranges for x in ('-L', f'{a},{b}')]
+        for row in git('blame', '--porcelain', *args, ln.tip, '--', f.path, cwd=cwd).splitlines():
+            parts = row.split()
+            if len(parts) >= 3 and len(parts[0]) == 40 and parts[1].isdigit():
+                by[parts[0]][f.path] += 1
+    out = []
+    for h, files in by.items():
+        info = git('log', '-1', '--format=%P%x00%s', h, cwd=cwd).strip()
+        parents, subj = info.split('\0', 1)
+        kind = 'merge' if len(parents.split()) > 1 else 'tagged' if SUBJECT_TAG.match(subj) else 'untagged'
+        out.append(Pending(h, subj, kind, sum(files.values()), sorted(files)))
+    return sorted(out, key=lambda p: (-p.lines, p.sha))
+
+
+def load_rules(path: Path) -> list[dict]:
+    return yaml.safe_load(path.read_text())['rules'] if path.exists() else []
+
+
+def classify(f: FileDelta, lane: str, rules: list[dict]) -> tuple[str, str]:
+    """The first rule whose `paths` match (and whose `lanes`, if any, include `lane`)."""
+    for r in rules:
+        if 'lanes' in r and lane not in r['lanes']:
+            continue
+        if any(fnmatchcase(f.path, p) for p in r['paths']):
+            return r['class'], r['reason']
+    return 'unclassified', ''
+
+
+@dataclass
+class Lane:
+    name: str
+    ref: str
+    parent: str
+    tip: str
+    ptip: str
+    mb: str
+    files: list[FileDelta]
+    lag_commits: int
+    lag_lines: int
+    lag_oldest: str | None  # committer date of the oldest unmerged parent commit
+
+    @property
+    def add(self) -> int:
+        return sum(f.add for f in self.files)
+
+    @property
+    def dele(self) -> int:
+        return sum(f.dele for f in self.files)
+
+    def by(self, key) -> dict[str, int]:
+        c: Counter = Counter()
+        for f in self.files:
+            for k in key(f):
+                c[k] += f.lines
+        return dict(sorted(c.items()))
+
+    def record(self, at: str | None, run_at: str) -> dict:
+        return dict(
+            run_at=run_at, at=at, lane=self.name, ref=self.ref, parent=self.parent,
+            tip=self.tip, parent_tip=self.ptip, merge_base=self.mb,
+            own=dict(add=self.add, dele=self.dele, lines=self.add + self.dele, files=len(self.files)),
+            surfaces=self.by(lambda f: [surface(f.path)]),
+            classes=self.by(lambda f: [f.rule]),
+            flags=self.by(lambda f: f.flags),
+            lag=dict(commits=self.lag_commits, lines=self.lag_lines, oldest=self.lag_oldest),
+            files=[asdict(f) for f in self.files],
+        )
+
+
+def measure(
+    lanes: dict[str, tuple[str, str]],
+    refs: dict[str, str],
+    at: str | None,
+    rules: list[dict],
+    cwd: Path = ROOT,
+) -> list[Lane]:
+    def lane_ref(name: str) -> str:
+        return refs[name] if name in refs else lanes[name][0]
+
+    out = []
+    for name, (ref, parent) in lanes.items():
+        t = tip(ref, at, cwd)
+        pt = tip(lane_ref(parent), at, cwd)
+        mb = git('merge-base', t, pt, cwd=cwd).strip()
+        files = numstat(mb, t, cwd)
+        lag = git('rev-list', '--no-merges', '--reverse', f'{mb}..{pt}', cwd=cwd).split()
+        oldest = git('log', '-1', '--format=%cI', lag[0], cwd=cwd).strip() if lag else None
+        lag_lines = sum(f.lines for f in numstat(mb, pt, cwd))
+        out.append(Lane(name, ref, parent, t, pt, mb, files, len(lag), lag_lines, oldest))
+
+    # flags: parent-equal, cosmetic, leak, then dup / shared across siblings (same parent)
+    tips_blobs = {}
+    for ln in out:
+        paths = [f.path for f in ln.files]
+        mine = blobs(ln.tip, paths, cwd)
+        theirs = blobs(ln.ptip, paths, cwd)
+        tips_blobs[ln.name] = mine
+        for f in ln.files:
+            f.rule, f.reason = classify(f, ln.name, rules)
+            if f.path in mine and mine[f.path] == theirs.get(f.path):
+                f.flags.append('parent-equal')
+                f.rule, f.reason = 'lag', 'the parent has it byte-identical: the next merge clears it'
+            elif f.status == 'M' and cosmetic(ln.mb, ln.tip, f.path, cwd):
+                f.flags.append('cosmetic')
+            if leak(f.path):
+                f.flags.append('leak')
+        for path in merge_only(ln.mb, ln.tip, [f.path for f in ln.files], cwd):
+            next(f for f in ln.files if f.path == path).flags.append('merge-only')
+    by_parent = defaultdict(list)
+    for ln in out:
+        by_parent[ln.parent].append(ln)
+    for sibs in by_parent.values():
+        editors = defaultdict(list)
+        for ln in sibs:
+            for f in ln.files:
+                editors[f.path].append(ln)
+        for path, eds in editors.items():
+            if len(eds) < 2:
+                continue
+            groups = Counter(tips_blobs[ln.name].get(path) for ln in eds)
+            for ln in eds:
+                f = next(f for f in ln.files if f.path == path)
+                b = tips_blobs[ln.name].get(path)
+                if b is not None and groups[b] >= 2 and 'parent-equal' not in f.flags:
+                    f.flags.append('dup')
+                else:
+                    f.flags.append('shared')
+    return out
+
+
+def didi(args: list[str], cwd: Path = ROOT) -> list[dict]:
+    p = run(['git-didi', *args], cwd=cwd, capture_output=True, text=True)
+    if p.returncode not in (0, 1):
+        raise RuntimeError(f'git-didi {" ".join(args)}: {p.stderr}')
+    return json.loads(p.stdout) if p.stdout.strip() else []
+
+
+def merges_since(ln: Lane, since: str, cwd: Path = ROOT) -> list[str]:
+    """First-parent merges on the lane whose 2nd parent is on its parent branch."""
+    out = []
+    for row in git('log', '--first-parent', '--merges', f'--since={since}', '--format=%H %P', ln.tip, cwd=cwd).splitlines():
+        h, _p1, p2, *_ = row.split()
+        if run(['git', 'merge-base', '--is-ancestor', p2, ln.ptip], cwd=cwd).returncode == 0:
+            out.append(h)
+    return out
+
+
+def kfmt(n: int) -> str:
+    return f'{n / 1000:.1f}k' if n >= 1000 else str(n)
+
+
+def summary(lanes: list[Lane], now: datetime) -> list[str]:
+    out = [f'{"lane":<6} {"own +/−":>13} {"lines":>7} {"files":>5}  {"intrinsic":>9} {"accidental":>10} {"mixed":>5} {"lag":>4} {"unclass":>7}  '
+           f'{"lag":>4} {"lag lines":>9} {"oldest":>6}  flags']
+    for ln in lanes:
+        c = ln.by(lambda f: [f.rule])
+        flags = ln.by(lambda f: f.flags)
+        age = ''
+        if ln.lag_oldest:
+            age = f'{(now - datetime.fromisoformat(ln.lag_oldest)).total_seconds() / 86400:.1f}d'
+        out.append(
+            f'{ln.name:<6} {f"+{ln.add} −{ln.dele}":>13} {ln.add + ln.dele:>7} {len(ln.files):>5}  '
+            f'{c.get("intrinsic", 0):>9} {c.get("accidental", 0):>10} {c.get("mixed", 0):>5} {c.get("lag", 0):>4} {c.get("unclassified", 0):>7}  '
+            f'{ln.lag_commits:>4} {ln.lag_lines:>9} {age:>6}  '
+            + ' '.join(f'{k}={v}' for k, v in flags.items())
+        )
+    return out
+
+
+@command()
+@option('-a', '--at', default=None, help='Measure as of this time (first-parent tips before it), e.g. "2026-10-18 00:00"')
+@option('-c', '--commits', is_flag=True, help="Blame each lane's surviving leak-file lines to the commits that wrote them")
+@option('-f', '--files', 'show_files', is_flag=True, help='List each own-delta file: lines, class, flags, reason')
+@option('-l', '--lane', 'lane_args', multiple=True, help='Override/add a lane: NAME=REF:PARENT (repeatable)')
+@option('-m', '--merges', is_flag=True, help='Also check merge invariance (`git-didi merge -n lines`) of parent merges since -s')
+@option('-o', '--out', default=str(ROOT / 'tmp/branch-harmony.jsonl'), show_default=True, help='JSONL to append to')
+@option('-O', '--no-out', is_flag=True, help="Don't append JSONL")
+@option('-p', '--picks', is_flag=True, help='Also check pick fidelity (`git-didi picks -n lines`) since -s')
+@option('-r', '--ref', 'ref_args', multiple=True, help='Override a ref: NAME=REF (e.g. cloud=refs/heads/cloud)')
+@option('-R', '--rules', default=str(RULES), show_default=True, help='Classification rules (YAML)')
+@option('-s', '--since', default='7 days ago', show_default=True, help='Window for -m / -p')
+@argument('names', nargs=-1)
+def main(
+    at: str | None,
+    commits: bool,
+    show_files: bool,
+    lane_args: tuple[str, ...],
+    merges: bool,
+    out: str,
+    no_out: bool,
+    picks: bool,
+    ref_args: tuple[str, ...],
+    rules: str,
+    since: str,
+    names: tuple[str, ...],
+):
+    """Measure the lanes NAMES (default: all)."""
+    lanes = dict(LANES)
+    for a in lane_args:
+        name, rest = a.split('=', 1)
+        ref, parent = rest.rsplit(':', 1)
+        lanes[name] = (ref, parent)
+    refs = dict(REFS)
+    for a in ref_args:
+        name, ref = a.split('=', 1)
+        if name in lanes:
+            lanes[name] = (ref, lanes[name][1])
+        else:
+            refs[name] = ref
+    measured = measure(lanes, refs, at, load_rules(Path(rules)))
+    if names:
+        measured = [ln for ln in measured if ln.name in names]
+    now = datetime.now(timezone.utc) if at is None else datetime.fromisoformat(at).astimezone()
+    print(f'# own delta = merge-base..child (code scope); lag = merge-base..parent{f"; as of {at}" if at else ""}')
+    for line in summary(measured, now):
+        print(line)
+    run_at = datetime.now(timezone.utc).isoformat(timespec='seconds')
+    records = []
+    for ln in measured:
+        rec = ln.record(at, run_at)
+        if show_files:
+            print(f'\n## {ln.name} ({ln.ref} vs {ln.parent}, mb {ln.mb[:9]})')
+            for f in sorted(ln.files, key=lambda f: (-f.lines, f.path)):
+                print(f'  {f.lines:>6} {f.status} {f.rule:<12} {",".join(f.flags) or "-":<22} {f.path}  {f.reason}')
+        if commits:
+            ps = pending(ln)
+            rec['pending'] = [asdict(p) for p in ps]
+            print(f'\n## {ln.name}: commits whose lines survive in its leak files ({sum(p.lines for p in ps)} lines)')
+            for p in ps:
+                print(f'  {p.lines:>5} {p.sha[:9]} {p.kind:<8} {p.subject[:110]}')
+        if merges:
+            ms = merges_since(ln, since)
+            res = didi(['merge', '-j', '-n', 'lines', *ms]) if ms else []
+            rec['merges'] = [
+                dict(merge=m['label'].split()[0], ok=m['ok'],
+                     differs=sorted(f['path'] for f in m['files'] if f['status'] == 'differs'))
+                for m in res
+            ]
+            bad = [m for m in rec['merges'] if not m['ok']]
+            print(f'{ln.name}: {len(res)} parent merges since {since}, {len(bad)} change the own delta')
+            for m in bad:
+                print(f'  {m["merge"]}: differs {", ".join(m["differs"])}')
+        records.append(rec)
+    if picks:
+        refs_all = sorted({ln.tip for ln in measured} | {measured[0].ptip} if measured else set())
+        res = didi(['picks', '-j', '-n', 'lines', '-s', since, *refs_all])
+        cls = Counter(p['class'] for p in res)
+        print(f'picks since {since}: ' + ', '.join(f'{k} {v}' for k, v in sorted(cls.items())))
+        for p in res:
+            if p['class'] not in ('equal', 'missing') and not p['class'].startswith('equal@'):
+                print(f'  {p["commit"][:9]} {p["class"]}: {p["subject"][:100]}')
+    if not no_out:
+        Path(out).parent.mkdir(parents=True, exist_ok=True)
+        with open(out, 'a') as fd:
+            for rec in records:
+                fd.write(json.dumps(rec) + '\n')
+        err(f'appended {len(records)} records to {out}')
+
+
+if __name__ == '__main__':
+    main()
