@@ -3,7 +3,8 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } fr
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
-  MODES, PROTOCOL, authorize, modePlan, publishFull, requireImplemented, requireThat, retireFull, revisionProbe, selectMode, wranglerUpload,
+  MODES, PROTOCOL, authorize, modePlan, publishFull, redactAccount, requireImplemented, requireThat, retireFull, revisionProbe, selectMode,
+  wranglerUpload,
 } from './preview.mjs'
 
 export { revisionProbe }
@@ -109,6 +110,10 @@ export async function main() {
   requireImplemented(selection.mode)
   const plan = modePlan(config, target, request.number, sha, selection.mode,
     { account: input('account_id'), requireAccount: operation !== 'gate' })
+  // The account id is kept out of every log line, receipt and GitHub deployment (a public repository shows all three):
+  // masked in the runner's output, and written as `<account>` (`redactAccount`).
+  if (plan.account) console.log(`::add-mask::${plan.account}`)
+  const shown = value => redactAccount(value, plan.account)
   requireThat(!request.requestedSha || request.requestedSha === sha, 'Comment approval and requested SHA differ')
   const authorized = await authorize({ github, repository: plan.repository, target, number: request.number, sha,
     actor: request.actor, manual: request.manual, closed: operation === 'retire' })
@@ -118,7 +123,7 @@ export async function main() {
   output('sha', plan.sha); output('pr', plan.pr); output('target', target); output('mode', plan.mode)
   if (authorized.base.sha) output('base_sha', authorized.base.sha)
   output('url', `https://${plan.hostname}`)
-  if (operation === 'gate') { console.log(JSON.stringify({ ...plan, mode_source: selection.source }, null, 2)); return }
+  if (operation === 'gate') { console.log(JSON.stringify(shown({ ...plan, mode_source: selection.source }), null, 2)); return }
   requireThat(input('deploy_token'), 'Missing provider deployment token')
   const cfApi = apiClient('https://api.cloudflare.com/client/v4', () => input('deploy_token'))
   const selected = config.targets[target]
@@ -126,7 +131,7 @@ export async function main() {
   mkdirSync(workDir, { recursive: true })
   const receiptPath = joinReceipt(workDir)
   const progress = { ...plan, operation, status: 'in_progress', mutations: [] }
-  const checkpoint = () => writeFileSync(receiptPath, `${JSON.stringify(progress, null, 2)}\n`)
+  const checkpoint = () => writeFileSync(receiptPath, `${JSON.stringify(shown(progress), null, 2)}\n`)
   checkpoint()
   output('receipt', receiptPath)
   const cf = async (method, path, body, options) => {
@@ -160,6 +165,7 @@ export async function main() {
     checkpoint()
     throw error
   }
+  receipt = shown(receipt)
   writeFileSync(receiptPath, `${JSON.stringify(receipt, null, 2)}\n`)
   output('receipt', receiptPath)
   const runUrl = `https://github.com/${plan.repository}/actions/runs/${process.env.GITHUB_RUN_ID}`

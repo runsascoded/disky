@@ -19,7 +19,7 @@ inputs:
     description: Scoped job token; publish needs deployments and PR comments write
     required: true
   account-id:
-    description: Cloudflare account ID (publish/retire), e.g. `vars.CLOUDFLARE_ACCOUNT_ID`, when the target config omits `account_id`; exactly one may give it
+    description: Cloudflare account ID (publish/retire), e.g. `secrets.CLOUDFLARE_ACCOUNT_ID` (a secret, so the logged step env masks it), when the target config omits `account_id`; exactly one may give it
   deploy-token:
     description: Pages deployment token for the deployment's project; never provide to the build job
   work-directory:

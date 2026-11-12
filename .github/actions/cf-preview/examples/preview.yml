@@ -113,7 +113,7 @@ jobs:
           mode: ${{ needs.gate.outputs.mode }}
           artifact: ${{ runner.temp }}/preview-artifact
           github-token: ${{ github.token }}
-          account-id: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          account-id: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           deploy-token: ${{ secrets.CF_PREVIEW_DEPLOY_TOKEN }}
       - uses: actions/upload-artifact@v4
         if: always()
@@ -140,7 +140,7 @@ jobs:
           operation: retire
           config: .github/cf-preview.json
           github-token: ${{ github.token }}
-          account-id: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          account-id: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           deploy-token: ${{ secrets.CF_PREVIEW_DEPLOY_TOKEN }}
       - uses: actions/upload-artifact@v4
         if: always()
