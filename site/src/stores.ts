@@ -98,6 +98,9 @@ export interface Store {
    *  default; what a bare `lifecycle.json` `Rules[]` from before the
    *  multi-bucket scan belongs to). */
   buckets: string[]
+  /** One line on what each of `buckets` is (whose data, what writes it), where a name doesn't say: `/admin`'s
+   *  soft-delete table shows it beside the bucket. Unset = no column. */
+  bucketNotes?: Record<string, string>
   /** The sibling deployments (each its own host): the omnibar and site menu open this page on each (`peerUrl`).
    * May list this deployment too (one shared family list); its own prod host is skipped. */
   peers?: Peer[]
