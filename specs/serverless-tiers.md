@@ -254,7 +254,7 @@ Each phase is its own go.
 3. **Waking the VM:** who may (any viewer, staff, admins), a daily wake or cost budget, always-on hours, and spot with an on-demand fallback or spot only?
 4. **Pages Functions' CPU limit** for the slow lane (the Workers Standard usage model's is configurable; Pages may differ). If it's 30 s, T_slow fits; if lower, the slow lane needs a dedicated Worker.
 5. **Fan-out:** may a slow query split D's rows over service-bound Workers (each its own isolate and CPU)? That would move cw's filtered root from VM to slow.
-6. **Overlay time semantics:** "live, at query time" for a historical scan S means today's claims and plan items applied to S's tree. Is that the intent for history and diffs too, or should a historical view apply the overlay as of S's timestamp (possible, since it's append-only and timestamped)?
+6. **Overlay time semantics (decided 2026-11-12):** a historical scan or diff applies today's claims and plan items to S's tree. The overlay stays append-only and timestamped, so an as-of-S view remains possible later.
 7. **L as a map axis:** a staged-only view (the map of what's staged under D, at a plan revision) has no route today. Is it wanted as a first-class view, or are rings plus `/staged` enough?
 8. **Language growth:** with lanes, path terms, short anchors and `x/` stop being refusals and become priced queries (a too-common tail goes VM). Un-park them in the language version, or keep [search-future.md]'s order? Regex: VM-only in a later language version, or a non-goal still?
 9. **cw:** VM mode there too, or only fan-out and indexes?
