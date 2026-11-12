@@ -1,5 +1,5 @@
 // "Run a scan" in /scans' header (admins, where the deployment has it): a confirm, then `POST
-// /api/scan-runs/dispatch`, which starts the scan through the daily cron's submitter as a manual run. The button is
+// /api/scan-runs/dispatch`, which starts the scan through the scheduled scan's submitter as a manual run. The button is
 // disabled while a scan runs or an earlier dispatch hasn't recorded its run (`/api/scan-runs`' `dispatch`), and while
 // its own request is in flight; the server refuses the same cases, so two clicks or two admins start one scan.
 import { useEffect, useState } from 'react'
@@ -36,7 +36,7 @@ export function RunScanButton({ block, runs, queryKey }: { block: DispatchBlock 
   const why = blockedBy(block)
   const button = <button type="button" className="sr-run-scan" disabled={!!why} onClick={() => setOpen(true)}>Run a scan</button>
   return <>
-    <Tooltip content={why ?? 'Start a scan now, as the daily one runs (recorded as manual).'}>{why ? <span>{button}</span> : button}</Tooltip>
+    <Tooltip content={why ?? 'Start a scan now, as the scheduled ones run (recorded as manual).'}>{why ? <span>{button}</span> : button}</Tooltip>
     {open && <RunScanDialog runs={runs} queryKey={queryKey} onClose={() => setOpen(false)} />}
   </>
 }
@@ -66,7 +66,7 @@ function RunScanDialog({ runs, queryKey, onClose }: { runs: readonly RunSummary[
           <div className="token-actions"><button type="button" onClick={onClose} autoFocus>Close</button></div>
         </> : <>
           <p>Starts a manual scan now{secs != null && <> ({aboutDur(secs)})</>}; it appears below as running.</p>
-          <p className="token-muted token-small">It runs as the daily scan does, through the same submitter, and is recorded as manual. The daily scan still runs at its usual time.</p>
+          <p className="token-muted token-small">It runs as the scheduled scan does, through the same submitter, and is recorded as manual. Scheduled scans still run at their usual times.</p>
           {go.isError && <p className="token-err">{go.error.message}</p>}
           <div className="token-actions">
             <button type="button" className="run-scan-go" disabled={go.isPending} onClick={() => go.mutate()} autoFocus>{go.isPending ? 'Starting…' : 'Start scan'}</button>
