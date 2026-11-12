@@ -1,0 +1,184 @@
+# PR previews (`.github/actions/cf-preview`, `full` mode) for the deploy branches in `PREVIEW_BASES` below. GitHub runs
+# `pull_request_target` (and `issue_comment`, `workflow_dispatch`) from the default branch only, so this one caller
+# serves every deployment. `route` resolves the PR's base; the base branch's own `.github/cf-preview.json`, read from
+# the base sha (trusted, never the PR's), names its target, and publish/retire run in that target's
+# `<base>-preview` environment (its Pages token and `vars.CLOUDFLARE_ACCOUNT_ID`). A PR into any other branch is skipped.
+# Requests: a write+ author's PR events (automatic), `/preview [<mode>] [<full-head-sha>]` by a write+ collaborator
+# (an outside author's head, approved), or a dispatch. Approving a head runs its server code against the dev stack's data.
+name: PR preview
+on:
+  pull_request_target:
+    branches: [hf]
+    types: [opened, reopened, synchronize, ready_for_review, labeled, unlabeled, closed]
+  issue_comment:
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      pr:
+        required: true
+        type: string
+      mode:
+        description: full | stack | pipeline; empty = the PR's preview:<mode> label, else full
+        required: false
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: cf-preview-${{ github.event.pull_request.number || github.event.issue.number || inputs.pr }}
+  cancel-in-progress: false
+jobs:
+  route:
+    if: >-
+      (github.event_name != 'pull_request_target' ||
+        !contains(fromJSON('["labeled","unlabeled"]'), github.event.action) || startsWith(github.event.label.name, 'preview:')) &&
+      (github.event_name != 'issue_comment' || (github.event.issue.pull_request && startsWith(github.event.comment.body, '/preview')))
+    runs-on: ubuntu-latest
+    outputs:
+      ok: ${{ steps.route.outputs.ok }}
+      target: ${{ steps.route.outputs.target }}
+      base_sha: ${{ steps.route.outputs.base_sha }}
+      closed: ${{ steps.route.outputs.closed }}
+    steps:
+      - id: route
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PREVIEW_BASES: '["hf"]'
+          PR: ${{ github.event.pull_request.number || github.event.issue.number || inputs.pr }}
+          ACTION: ${{ github.event.action }}
+        run: |
+          set -euo pipefail
+          [[ "$PR" =~ ^[1-9][0-9]*$ ]] || { echo "::error::invalid PR number"; exit 1; }
+          # The PR as it is now (a comment or dispatch carries no base); base ref/sha are the repository's, not the PR's.
+          gh api "repos/$GITHUB_REPOSITORY/pulls/$PR" --jq '[.base.ref, .base.sha] | @tsv' > pr.tsv
+          IFS=$'\t' read -r base base_sha < pr.tsv
+          if ! jq -e --arg b "$base" 'index($b) != null' <<< "$PREVIEW_BASES" > /dev/null; then
+            echo "PR #$PR targets $base, which has no previews"; echo ok=false >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          { echo ok=true; echo "target=$base"; echo "base_sha=$base_sha"
+            # The event, not the PR's state now: a close is retired even if the PR was reopened since (that reopen publishes after).
+            echo "closed=$([ "$GITHUB_EVENT_NAME" = pull_request_target ] && [ "$ACTION" = closed ] && echo true || echo false)"
+          } >> "$GITHUB_OUTPUT"
+  gate:
+    needs: route
+    if: needs.route.outputs.ok == 'true' && needs.route.outputs.closed != 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.gate.outputs.sha }}
+      base_sha: ${{ steps.gate.outputs.base_sha }}
+      mode: ${{ steps.gate.outputs.mode }}
+      url: ${{ steps.gate.outputs.url }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.route.outputs.base_sha }}
+          persist-credentials: false
+      - id: gate
+        uses: Open-Athena/disky/.github/actions/cf-preview@435f099c190f3fee139383e94db5283f7c666130
+        with:
+          operation: gate
+          config: .github/cf-preview.json
+          target: ${{ needs.route.outputs.target }}
+          github-token: ${{ github.token }}
+  build:
+    needs: gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.gate.outputs.sha }}
+          persist-credentials: false
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      # The PR's Functions are compiled here, into the artifact (`dist/_worker.js`), so the credentialed publisher never
+      # builds PR source. `VITE_BUILD_SHA` is what the publish probe reads back (`x-disky-build` on `/api/health`).
+      - name: Frozen build and tests, no credentials
+        working-directory: site
+        env:
+          PREVIEW_URL: ${{ needs.gate.outputs.url }}
+          VITE_BUILD_SHA: ${{ needs.gate.outputs.sha }}
+          CLOUDFLARE_ENV: preview
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build
+          pnpm exec wrangler pages functions build functions --outdir dist/_worker.js
+          pnpm test
+      - uses: actions/upload-artifact@v4
+        with:
+          name: preview-${{ needs.gate.outputs.sha }}
+          path: site/dist
+          include-hidden-files: true
+  publish:
+    needs: [route, gate, build]
+    runs-on: ubuntu-latest
+    environment: ${{ needs.route.outputs.target }}-preview
+    permissions:
+      contents: read
+      deployments: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.gate.outputs.base_sha }}
+          persist-credentials: false
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      # The base checkout's `site/` is where the trusted Wrangler runs: its `wrangler.toml` `[env.preview]` is the
+      # deployment's preview environment, as on `dev`.
+      - name: Install trusted deployment tools
+        run: pnpm install --frozen-lockfile
+      - uses: actions/download-artifact@v4
+        with:
+          name: preview-${{ needs.gate.outputs.sha }}
+          path: ${{ runner.temp }}/preview-artifact
+      - id: preview
+        uses: Open-Athena/disky/.github/actions/cf-preview@435f099c190f3fee139383e94db5283f7c666130
+        with:
+          operation: publish
+          config: .github/cf-preview.json
+          target: ${{ needs.route.outputs.target }}
+          sha: ${{ needs.gate.outputs.sha }}
+          mode: ${{ needs.gate.outputs.mode }}
+          artifact: ${{ runner.temp }}/preview-artifact
+          github-token: ${{ github.token }}
+          account-id: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          deploy-token: ${{ secrets.CF_PAGES_DEPLOY_TOKEN }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: preview-receipt-${{ github.run_id }}
+          path: ${{ steps.preview.outputs.receipt }}
+          retention-days: 90
+  # A retargeted PR is retired only under its final base; a preview under an earlier base stays until its own retire.
+  retire:
+    needs: route
+    if: needs.route.outputs.ok == 'true' && needs.route.outputs.closed == 'true'
+    runs-on: ubuntu-latest
+    environment: ${{ needs.route.outputs.target }}-preview
+    permissions:
+      contents: read
+      deployments: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.route.outputs.base_sha }}
+          persist-credentials: false
+      - id: retire
+        uses: Open-Athena/disky/.github/actions/cf-preview@435f099c190f3fee139383e94db5283f7c666130
+        with:
+          operation: retire
+          config: .github/cf-preview.json
+          target: ${{ needs.route.outputs.target }}
+          github-token: ${{ github.token }}
+          account-id: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          deploy-token: ${{ secrets.CF_PAGES_DEPLOY_TOKEN }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: retire-receipt-${{ github.run_id }}
+          path: ${{ steps.retire.outputs.receipt }}
+          retention-days: 90
