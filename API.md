@@ -99,10 +99,6 @@ WHERE depth = 2 GROUP BY path ORDER BY bytes DESC LIMIT 20;
 
 `POST /api/activity/render?burst=ID&burst=ID` regenerates the selected activity summaries in their configured Slack/Discord sinks; `?since=YYYY-MM-DD` selects groups active since that date. An optional JSON body `{ "reason": "make visited-page links clickable" }` records the purpose (trimmed to 240 characters). The audit event retains unique requested and rendered IDs, the date selection and purpose. Slack/Discord show requested/rendered/skipped counts and links to up to five rendered groups; repeated refresh lines count requests explicitly. Skipped groups are missing or have no reported event kinds. The returned `rendered` IDs name processed groups, not delivery receipts from Slack/Discord. Existing events that recorded only a count cannot recover their original targets.
 
-### Temporary session-monitor API (operator only)
-
-`POST /api/session-monitor` runs the time-boxed GCS aggregate checker; `?dry=1` reads counts without state writes or notifications. It requires the dedicated `gcs:session-monitor:read` grant, not a normal viewer or admin token. That grant has no access to raw session logs, ordinary viewer data or app mutations. Production notifications are capped at three attempts per UTC day, at least an hour apart; preview refuses notification sends. The checker and its grant expire at 2026-10-21T00:00:00Z. It also does nothing when logging is off. This is a recorded-client-event checker, not a full visitor count or uptime guarantee.
-
 ## 3. Recipes
 
 `bash` + `curl` + `jq`. Run the setup once; every recipe after it assumes it.

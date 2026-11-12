@@ -3755,10 +3755,6 @@ from .job_token import cli as _job_token  # noqa: E402
 
 main.add_command(_job_token)
 
-from .session_monitor import cli as _session_monitor  # noqa: E402
-
-main.add_command(_session_monitor)
-
 from .d1_schema import cli as _d1_schema  # noqa: E402
 
 main.add_command(_d1_schema)

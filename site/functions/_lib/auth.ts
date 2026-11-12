@@ -32,8 +32,6 @@ import type { AnalyticsEngineDataset, D1Database, KVNamespace, R2Bucket } from '
 import { grantCaller, meterOf } from './usage.js'
 
 export interface Env {
-  /** Temporary aggregate session monitor; preview is dry-run only. */
-  SESSION_MONITOR?: string
   DB?: D1Database
   SESSION_SECRET?: string
   /** OIDC (our own Google client) — the ZT-free sign-in path. Set as Pages
