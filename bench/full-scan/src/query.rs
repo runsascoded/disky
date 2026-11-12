@@ -63,6 +63,10 @@ pub struct Query {
     pub staged: Option<Vec<String>>,
     pub depth: u8,
     pub min_ppm: u64,
+    /// Answer an unfiltered view from directories' rolled-up rows (each node's own row at the scan) instead of summing
+    /// object versions: a walk of the depth window only.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub dirs: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
 }
@@ -99,6 +103,7 @@ pub struct Compiled {
     pub classes: Option<u8>,
     /// Merged `[first, last]` row spans of the staged prefixes.
     pub staged: Option<Vec<(u32, u32)>>,
+    pub dirs: bool,
 }
 
 impl Compiled {
@@ -267,7 +272,11 @@ pub fn compile(idx: &Index, q: &Query, parts: usize) -> Result<Compiled> {
         }
         out
     });
+    if q.dirs && (q.q.is_some() || q.owners.is_some() || q.classes.is_some() || q.staged.is_some()) {
+        return err(format!("{}: directory totals answer only unfiltered views", q.id));
+    }
     Ok(Compiled {
+        dirs: q.dirs,
         sa,
         sb,
         dp,

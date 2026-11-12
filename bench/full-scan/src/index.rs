@@ -40,6 +40,8 @@ pub struct LoadStats {
     pub rows: u64,
     pub file_rows: u64,
     pub dir_rows: u64,
+    /// Directory versions kept (for the directory-total view), after combining.
+    pub dir_versions: u64,
     pub complex_rows: u64,
     pub names: u64,
     pub owners: u64,
@@ -55,11 +57,17 @@ pub struct Index {
     /// The last row of the path's subtree (inclusive), on every row of the path.
     pub end: Vec<u32>,
     pub flags: Vec<u8>,
+    /// An object version's bytes. On a directory's row: its first version's index in `dir_*` (`owner`: their count).
     pub size: Vec<u64>,
     /// Scan ordinals: live at scan `s` iff `vf ≤ s < vt`; `vt` = `scans.len()` while open.
     pub vf: Vec<u16>,
     pub vt: Vec<u16>,
     pub owner: Vec<u16>,
+    /// Directory versions (rolled-up totals), each directory's together by `vf`: what the directory-total view reads.
+    pub dir_vf: Vec<u16>,
+    pub dir_vt: Vec<u16>,
+    pub dir_size: Vec<u64>,
+    pub dir_files: Vec<u64>,
     pub complex_rows: Vec<u32>,
     pub complex: Vec<Complex>,
     /// Owner names by id; id 0 is `""`, no owner named.
@@ -98,6 +106,7 @@ impl Index {
             ("owner".to_string(), n * 2),
             ("complex".to_string(), cx),
             ("dict".to_string(), self.dict.bytes()),
+            ("dir versions".to_string(), self.dir_vf.len() as u64 * 20),
             ("checkpoints".to_string(), (self.ck_off.len() * 8 + self.ck_rows.len() * 4) as u64),
         ];
         let total = columns.iter().map(|c| c.1).sum();
@@ -178,6 +187,23 @@ impl Index {
             hi = self.end[g] as usize + 1;
         }
         found
+    }
+
+    /// A path's `(bytes, files)` at scan `s` from its own rows: a live directory version's totals, else a live object
+    /// version's bytes and 1; None when nothing of it is live.
+    pub fn row_total(&self, g: usize, s: u16) -> Option<(u64, u64)> {
+        let mut r = g;
+        if self.flags[g] & FILE == 0 {
+            let (o, k) = (self.size[g] as usize, self.owner[g] as usize);
+            for i in o..o + k {
+                if self.dir_vf[i] <= s && s < self.dir_vt[i] {
+                    return Some((self.dir_size[i], self.dir_files[i]));
+                }
+            }
+            r += 1;
+        }
+        let e = self.group_end(g);
+        (r..e).find(|&x| self.flags[x] & FILE != 0 && self.vf[x] <= s && s < self.vt[x]).map(|x| (self.size[x], 1))
     }
 
     pub fn complex_of(&self, r: usize) -> &Complex {

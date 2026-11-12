@@ -152,12 +152,19 @@ def answer(con, q: dict, scans: dict[str, int]) -> dict:
         FROM nodes GROUP BY node, k
         HAVING greatest(coalesce(sum(b) FILTER (WHERE la), 0), coalesce(sum(b) FILTER (WHERE lb), 0))::HUGEINT * 1000000
                >= {q['min_ppm']}::HUGEINT * {max(tot[0], tot[2])}""").fetchall()
-    kept = {r[0]: (r[1], [int(x) for x in r[2:]]) for r in rows}
+    return finish(q, tot, {r[0]: (r[1], [int(x) for x in r[2:]]) for r in rows})
+
+
+def finish(q: dict, tot: list[int], kept: dict) -> dict:
+    """The answer from the kept nodes (`{path: (relative depth, [bytes a, files a, bytes b, files b])}`)."""
+    p, K = q.get("path", ""), q["depth"]
     nodes = sorted([n, *v[1]] for n, v in kept.items())
     # Each kept node above the deepest level, and the folder itself: what its kept children leave.
     kids: dict[str, list[int]] = {}
     for n, (k, v) in kept.items():
         par = n.rsplit("/", 1)[0] if k > 1 else p
+        if par != p and par not in kept:
+            continue
         acc = kids.setdefault(par, [0, 0, 0, 0])
         for i in range(4):
             acc[i] += v[i]
@@ -170,6 +177,48 @@ def answer(con, q: dict, scans: dict[str, int]) -> dict:
                 rest.append([n, *r])
     rest.sort()
     return {"id": q["id"], "total": tot, "nodes": nodes, "rest": rest}
+
+
+def answer_dirs(con, q: dict, scans: dict[str, int]) -> dict:
+    """An unfiltered view from each path's own row (a directory's rolled-up totals, an object's bytes and 1) at the
+    scan, over the depth window; the folder's total its own row's (the root's: its buckets')."""
+    p = q.get("path", "")
+    dp = 0 if p == "" else p.count("/") + 1
+    K = q["depth"]
+    ta, tb = (scans[q["scan"]], -1) if "scan" in q else (scans[q["from"]], scans[q["to"]])
+    under = f"starts_with(path, {lit(p + '/')})" if p else "true"
+    side = lambda t, col: f"""coalesce(max({col}) FILTER (WHERE vf <= {t} AND {t} < vt AND kind = 'dir'),
+                                      max({col}) FILTER (WHERE vf <= {t} AND {t} < vt AND kind = 'file'), 0)"""
+    nf = "CASE WHEN kind = 'dir' THEN n_files ELSE 1 END"
+    vals = f"{side(ta, 'size')}, {side(ta, nf)}, {side(tb, 'size')}, {side(tb, nf)}"
+    rows = con.execute(f"""SELECT path, depth, {vals} FROM a
+        WHERE ((depth BETWEEN {dp + 1} AND {dp + K} AND {under}) OR (depth = {dp} AND path = {lit(p)}))
+          AND ((vf <= {ta} AND {ta} < vt) OR (vf <= {tb} AND {tb} < vt))
+        GROUP BY path, depth""").fetchall()
+    rows = [(r[0], r[1] - dp, [int(x) for x in r[2:]]) for r in rows]
+    if p:
+        own = [v for n, k, v in rows if k == 0]
+        tot = own[0] if own else [0, 0, 0, 0]
+    else:
+        tot = [sum(v[i] for _, k, v in rows if k == 1) for i in range(4)]
+    thr = q["min_ppm"] * max(tot[0], tot[2])
+    kept = {n: (k, v) for n, k, v in rows if k >= 1 and any(v) and max(v[0], v[2]) * 1_000_000 >= thr}
+    return finish(q, tot, kept)
+
+
+def build_all_rows(con, files: list[str], cls: dict) -> None:
+    """Table `a`: every version (directories' too) with `n_files`, combined as `f`."""
+    cols = "depth, path, vf, vt, kind, size, n_files"
+    con.execute(f"CREATE TABLE b AS SELECT {cols} FROM read_parquet({lit(files[0])})")
+    runs = "[" + ", ".join(lit(f) for f in files[1:]) + "]"
+    con.execute(f"""CREATE TABLE r AS SELECT depth, path, vf, min(vt) AS vt, any_value(kind) AS kind, any_value(size) AS size,
+            any_value(n_files) AS n_files FROM read_parquet({runs}) GROUP BY depth, path, vf""" if files[1:] else
+                "CREATE TABLE r AS SELECT * FROM b LIMIT 0")
+    con.execute("""CREATE TABLE a AS
+        SELECT b.depth, b.path, b.vf, least(b.vt, coalesce(r.vt, b.vt)) AS vt, b.kind, b.size, b.n_files
+        FROM b LEFT JOIN r USING (depth, path, vf)
+        UNION ALL SELECT r.depth, r.path, r.vf, r.vt, r.kind, r.size, r.n_files FROM r ANTI JOIN b USING (depth, path, vf)""")
+    con.execute("DROP TABLE b; DROP TABLE r")
 
 
 @click.command()
@@ -221,7 +270,12 @@ def main(cache, only, memory, out, threads, tmp, gen, queries, answers):
         if ids and q["id"] not in ids:
             continue
         t1 = monotonic()
-        want = answer(con, q, stamps)
+        if q.get("dirs"):
+            if not con.execute("SELECT count(*) FROM information_schema.tables WHERE table_name = 'a'").fetchone()[0]:
+                build_all_rows(con, files, {})
+            want = answer_dirs(con, q, stamps)
+        else:
+            want = answer(con, q, stamps)
         have = got.get(q["id"])
         ok = have == want
         if outf:

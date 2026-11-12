@@ -26,6 +26,7 @@ fn q(id: &str, tags: &[&str]) -> Query {
         staged: None,
         depth: DEPTH,
         min_ppm: PPM,
+        dirs: false,
         tags: tags.iter().map(|s| s.to_string()).collect(),
     }
 }
@@ -280,6 +281,19 @@ pub fn plan(idx: &Index, pool: &rayon::ThreadPool) -> Result<(Vec<Query>, serde_
     for (i, b) in buckets.iter().enumerate().skip(1) {
         qs.push(diff(&format!("diff-day-bucket{i}"), b, &prev.id, &["diff", "bucket"]));
     }
+    // Every unfiltered view and diff again from directories' rolled-up rows (`@dirs`).
+    let twins: Vec<Query> = qs
+        .iter()
+        .filter(|x| x.q.is_none() && x.owners.is_none() && x.classes.is_none() && x.staged.is_none())
+        .map(|x| {
+            let mut y = x.clone();
+            y.id = format!("{}@dirs", x.id);
+            y.dirs = true;
+            y.tags.push("dirs".to_string());
+            y
+        })
+        .collect();
+    qs.extend(twins);
     let meta = serde_json::json!({
         "newest": newest.id, "prev": prev.id, "month": month.id, "buckets": buckets, "d3": d3, "d6": d6,
         "rare": rare, "common": common, "owners": owners.iter().take(4).map(|o| &o.1).collect::<Vec<_>>(),
@@ -353,6 +367,9 @@ pub fn exhaustive(idx: &Index) -> Vec<Query> {
             base.to = to.clone();
             base.path = folder.clone();
             variants.push(base.clone());
+            let mut x = base.clone();
+            x.dirs = true;
+            variants.push(x);
             let k = ti * 7 + fi;
             if !terms.is_empty() {
                 let mut x = base.clone();

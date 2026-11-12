@@ -308,6 +308,9 @@ pub fn run(idx: &Index, q: &Query, pool: &rayon::ThreadPool) -> Result<(Answer, 
     let threads = pool.current_num_threads();
     let c = pool.install(|| compile(idx, q, threads))?;
     let compile_ms = t0.elapsed().as_secs_f64() * 1e3;
+    if c.dirs {
+        return Ok(run_dirs(idx, &c, q, t0, compile_ms));
+    }
     let t1 = Instant::now();
     let len = c.hi.saturating_sub(c.lo);
     let step = (len.div_ceil(threads * 8)).max(1 << 16);
@@ -332,6 +335,50 @@ pub fn run(idx: &Index, q: &Query, pool: &rayon::ThreadPool) -> Result<(Answer, 
         chunks: spans.len() as u64,
     };
     Ok((answer, timing))
+}
+
+/// The directory-total view: walk the depth window's paths (descending into a directory only above the deepest level),
+/// each node's totals its own row's at the scan; the folder's total its own row's (the fleet root's: its buckets').
+fn run_dirs(idx: &Index, c: &Compiled, q: &Query, t0: Instant, compile_ms: f64) -> (Answer, Timing) {
+    let t1 = Instant::now();
+    let val = |g: usize, s: Option<u16>| -> Acc {
+        s.and_then(|s| idx.row_total(g, s)).map_or(Acc::default(), |(bytes, files)| Acc { bytes, files })
+    };
+    let mut out = ChunkOut::default();
+    let mut visited = 0u64;
+    let mut r = c.lo;
+    while r < c.hi {
+        visited += 1;
+        let d = idx.depth[r];
+        let (a, b) = (val(r, Some(c.sa)), val(r, c.sb));
+        if a.nonzero() || b.nonzero() {
+            out.done.push(NodeOut { row: r as u32, depth: d, a, b });
+        }
+        if d == c.dp + 1 && c.dp == 0 {
+            out.a.add(a);
+            out.b.add(b);
+        }
+        r = if d < c.maxd && idx.flags[r] & FILE == 0 { idx.group_end(r) } else { idx.end[r] as usize + 1 };
+    }
+    if c.dp > 0 {
+        let g = idx.find(&c.path).unwrap();
+        out.a = val(g, Some(c.sa));
+        out.b = val(g, c.sb);
+    }
+    let pass_ms = t1.elapsed().as_secs_f64() * 1e3;
+    let t2 = Instant::now();
+    let answer = assemble(idx, c, q, vec![out]);
+    let assemble_ms = t2.elapsed().as_secs_f64() * 1e3;
+    let timing = Timing {
+        compile_ms,
+        pass_ms,
+        assemble_ms,
+        total_ms: t0.elapsed().as_secs_f64() * 1e3,
+        rows: visited,
+        bytes: visited * (1 + 1 + 4 + 8 + 2) + 20 * visited,
+        chunks: 1,
+    };
+    (answer, timing)
 }
 
 fn assemble(idx: &Index, c: &Compiled, q: &Query, outs: Vec<ChunkOut>) -> Answer {
@@ -384,10 +431,16 @@ fn assemble(idx: &Index, c: &Compiled, q: &Query, outs: Vec<ChunkOut>) -> Answer
             close(o, &mut rest);
         }
         let parent = stack.last_mut().unwrap();
-        parent.kids_a.add(n.a);
-        parent.kids_b.add(n.b);
-        let name = idx.dict.orig(idx.name[n.row as usize]);
-        let path = if parent.path.is_empty() { name.to_string() } else { format!("{}/{}", parent.path, name) };
+        // With directory totals a child can outweigh its parent (a store whose rows don't add up), so a kept node's
+        // parent may not be kept: its rest then isn't charged, and its path comes from the index.
+        let path = if parent.depth + 1 == n.depth {
+            parent.kids_a.add(n.a);
+            parent.kids_b.add(n.b);
+            let name = idx.dict.orig(idx.name[n.row as usize]);
+            if parent.path.is_empty() { name.to_string() } else { format!("{}/{}", parent.path, name) }
+        } else {
+            idx.path_of(n.row as usize)
+        };
         out_nodes.push((path.clone(), n.a.bytes, n.a.files, n.b.bytes, n.b.files));
         stack.push(Open { depth: n.depth, path, a: n.a, b: n.b, kids_a: Acc::default(), kids_b: Acc::default() });
     }

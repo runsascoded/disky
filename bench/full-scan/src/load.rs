@@ -25,7 +25,7 @@ use crate::index::{Complex, Index, LoadStats, CK, CLS_SHIFT, COMPLEX, CONT, FILE
 use crate::store::{Generation, OPEN};
 use crate::util::{err, h128, ints, IdMap, Result, Shared, Strs};
 
-const COLS: [&str; 10] = ["depth", "path", "vf", "vt", "kind", "size", "c2", "c3", "c4", "us"];
+const COLS: [&str; 11] = ["depth", "path", "vf", "vt", "kind", "size", "c2", "c3", "c4", "us", "n_files"];
 /// Class columns as a deployment names them (gcs: storage classes 2–4 are nearline, coldline, archive).
 fn aliases(c: &str) -> &'static [&'static str] {
     match c {
@@ -58,6 +58,8 @@ struct Rec {
     cls: u8,
     owner: u16,
     size: u64,
+    /// A directory version's `n_files`.
+    files: u64,
     cx: Option<Box<Complex>>,
 }
 
@@ -224,6 +226,7 @@ fn read_level(
         let (path, kind, us) = (Strs::of(&path)?, Strs::of(&kind)?, Strs::of(&us)?);
         let (vf, vt, size) = (ints(&col("vf"))?, ints(&col("vt"))?, ints(&col("size"))?);
         let (c2, c3, c4) = (ints(&col("c2"))?, ints(&col("c3"))?, ints(&col("c4"))?);
+        let n_files = ints(&col("n_files"))?;
         let ord = |t: i64| -> Result<u16> {
             ords.get(&t).copied().ok_or_else(|| format!("{}: stamp {t} is no scan's", inp.path.display()).into())
         };
@@ -263,8 +266,11 @@ fn read_level(
                 "dir" => false,
                 k => return err(format!("{p}: kind {k:?}")),
             };
-            let mut r = Rec { h: h128(p.as_bytes()), parent, name: name_id, vf: ord(vf[i])?, vt: ord(vt[i])?, file, cls: 0, owner: 0, size: 0, cx: None };
-            if file {
+            let mut r = Rec { h: h128(p.as_bytes()), parent, name: name_id, vf: ord(vf[i])?, vt: ord(vt[i])?, file, cls: 0, owner: 0, size: 0, files: 0, cx: None };
+            if !file {
+                r.size = size[i].max(0) as u64;
+                r.files = n_files[i].max(0) as u64;
+            } else {
                 let sz = size[i].max(0) as u64;
                 r.size = sz;
                 let os = owner_slices(us.get(i), sz, owners)?;
@@ -313,6 +319,7 @@ pub fn load(gen: &Generation) -> Result<Index> {
     let mut n_ver: Vec<u16> = Vec::new();
     let mut level_start: Vec<usize> = vec![0, 0];
     let mut vers: Vec<Ver> = Vec::new();
+    let mut dvers: Vec<(u16, u16, u64, u64)> = Vec::new();
     let mut cxs: Vec<(u64, Box<Complex>)> = Vec::new();
     let mut prev: IdMap<u128, u32> = IdMap::default();
     let mut d = 1u8;
@@ -343,14 +350,27 @@ pub fn load(gen: &Generation) -> Result<Index> {
             next.insert(h, node);
             let mut k = 0u32;
             let mut j = i;
-            // Directory versions: one structural row.
+            // Directory versions: one structural row, its versions (combined, smallest `vt`) aside in `dvers`.
             if !recs[j].file {
                 let vf = recs[j].vf;
+                let first = dvers.len();
                 while j < recs.len() && recs[j].h == h && !recs[j].file {
                     stats.dir_versions_read += 1;
+                    let r = &recs[j];
+                    let n = dvers.len();
+                    if n > first && dvers[n - 1].0 == r.vf {
+                        dvers[n - 1].1 = dvers[n - 1].1.min(r.vt);
+                        stats.combined += 1;
+                    } else {
+                        dvers.push((r.vf, r.vt, r.size, r.files));
+                    }
                     j += 1;
                 }
-                vers.push(Ver { size: 0, vf, vt: n_scans, owner: 0, flags: 0 });
+                let nd = dvers.len() - first;
+                if nd > u16::MAX as usize {
+                    return err("a directory with more versions than a u16 holds");
+                }
+                vers.push(Ver { size: first as u64, vf, vt: n_scans, owner: nd as u16, flags: 0 });
                 k += 1;
             }
             while j < recs.len() && recs[j].h == h {
@@ -523,7 +543,7 @@ pub fn load(gen: &Generation) -> Result<Index> {
                         ptrs.4.write(row, ver.size);
                         ptrs.5.write(row, ver.vf);
                         ptrs.6.write(row, ver.vt);
-                        ptrs.7.write(row, oremap[ver.owner as usize]);
+                        ptrs.7.write(row, if flags & FILE != 0 { oremap[ver.owner as usize] } else { ver.owner });
                     }
                 }
                 let mut c = p.div_ceil(CK) * CK;
@@ -586,7 +606,17 @@ pub fn load(gen: &Generation) -> Result<Index> {
     stats.complex_rows = complex_rows.len() as u64;
     stats.secs.push(("total".to_string(), t0.elapsed().as_secs_f64()));
     stats.peak_rss_gb = rss_peak_gb();
+    stats.dir_versions = dvers.len() as u64;
+    let dir_vf = dvers.iter().map(|d| d.0).collect();
+    let dir_vt = dvers.iter().map(|d| d.1).collect();
+    let dir_size = dvers.iter().map(|d| d.2).collect();
+    let dir_files = dvers.iter().map(|d| d.3).collect();
+    drop(dvers);
     Ok(Index {
+        dir_vf,
+        dir_vt,
+        dir_size,
+        dir_files,
         scans: gen.scans.clone(),
         name: c_name,
         depth: c_depth,
