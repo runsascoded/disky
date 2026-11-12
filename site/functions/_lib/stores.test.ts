@@ -53,6 +53,20 @@ describe('secondaryStores', () => {
     expect(err({ meta: { vars: { BASE_SCOPE: 'admin' } } })).toBe("STORES_JSON.meta.vars: unknown var 'BASE_SCOPE'")
     expect(err([])).toBe('STORES_JSON: want an object of store configs')
   })
+  it('`series_scope`: a scope name beside the store\'s `scope`, set on its overlay as `STORE_SERIES_SCOPE`', () => {
+    const err = (json: unknown) => {
+      try { secondaryStores({ STORES_JSON: JSON.stringify(json) } as Env) } catch (e) { return (e as Error).message }
+      return null
+    }
+    const bad = 'STORES_JSON.logs.series_scope: want a scope name (not admin)'
+    expect(['', 'Totals', 'a b', 'admin', '*', 7].map(series_scope => err({ logs: { scope: 'admin', series_scope } })))
+      .toEqual([bad, bad, bad, bad, bad, bad])
+    expect(err({ logs: { series_scope: 'totals' } })).toBe('STORES_JSON.logs.series_scope: only meaningful beside a scope (without one every viewer reads the store)')
+    const cfg = { scope: 'admin', series_scope: 'totals' }
+    const env = { STORES_JSON: JSON.stringify({ logs: cfg }) } as Env
+    const overlay = storeEnv(env, 'logs', secondaryStores(env).logs)
+    expect([overlay.STORE_SCOPE, overlay.STORE_SERIES_SCOPE, storeEnv(env, 'logs', { scope: 'admin' }).STORE_SERIES_SCOPE]).toEqual(['admin', 'totals', undefined])
+  })
   it('`path`: the store\'s page path, a trailing `/` dropped; stores without one have no page path', () => {
     const env = { STORES_JSON: JSON.stringify({ meta: { ...META, path: '/meta/' }, nas: { path: '/nas/tv', vars: { STORE_ROOT: 'mnt/user' } }, scratch: {} }) } as Env
     expect([secondaryStores(env), storePaths(env)]).toEqual([

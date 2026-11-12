@@ -16,8 +16,8 @@
  * filled in from the snapshot dir: the chart keeps any history that never
  * got (or lost) its tiers, rather than showing a gap.
  */
-import { hiddenNotFound, isHidden, restrictedScopeRefused, restrictedSearchRefused, restrictionFor, scopeReachesHidden } from '../_lib/restrict.js'
-import { type Ctx, type Identity, json, requireScope, requireViewer } from '../_lib/auth.js'
+import { hiddenNotFound, isHidden, restrictedScopeRefused, restrictedSearchRefused, restrictionAnyStore, restrictionFor, scopeReachesHidden } from '../_lib/restrict.js'
+import { baseReadScope, baseScope, type Ctx, type Identity, identify, json, requireScope, requireViewer } from '../_lib/auth.js'
 import { snapshotsPrefix, traceJoins } from '../_lib/shared.js'
 import { ivRefusal, ivRetry, type Lens, pathGens, withPathStore, pathScans, servedStore, storeReady } from '../_lib/index.js'
 import { hasLedger, ledgerHead } from '../_lib/ledger.js'
@@ -157,7 +157,24 @@ async function seriesOf(ctx0: SeriesCtx): Promise<Response> {
   // `store=<key>`: a secondary store's env overlay (none = the primary, as is).
   const ctx1 = withStore(ctx0)
   if (ctx1 instanceof Response) return ctx1
-  return seriesRead(await withPathStore(ctx1), requireViewer)
+  return seriesRead(await withPathStore(ctx1), summaryGate)
+}
+
+/** The only params a store's `series_scope` reads with: the store's root, unscoped (`STORES_JSON` `series_scope`). */
+const SUMMARY_PARAMS = new Set(['store'])
+
+/** `requireViewer`, and where it refuses a store's extra `scope`: its `series_scope` admits the store's root-level
+ * series alone. The caller must be a signed-in identity (a session or grant, never public or anonymous) holding the
+ * deployment's viewer scope (or its read tier) and the series scope, with no path restriction on any store, asking
+ * for nothing but `store=` (no `path`, `paths`, `lens`, `o`, `cl`, `q`, `split`, `chunk`, …). */
+export async function summaryGate(ctx: SeriesCtx): Promise<Identity | Response> {
+  const refused = await requireViewer(ctx)
+  const scope = ctx.env.STORE_SERIES_SCOPE
+  if (!(refused instanceof Response) || refused.status !== 403 || !scope) return refused
+  if ([...new URL(ctx.request.url).searchParams.keys()].some(k => !SUMMARY_PARAMS.has(k))) return refused
+  const id = await identify(ctx)
+  const has = (sc: string) => !!id && (id.scopes.includes(sc) || id.scopes.includes('*'))
+  return id && id.via !== 'public' && !restrictionAnyStore(id) && (has(baseScope(ctx.env)) || has(baseReadScope(ctx.env))) && has(scope) ? id : refused
 }
 
 /** The series for `ctx` as `seriesOf` overlays it (its store's env, `withPathStore`'s path store). `gate` answers

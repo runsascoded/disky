@@ -21,7 +21,7 @@
  * `api/restrictedFilter.test.ts`, `api/diff/level.test.ts`, `_lib/dataProxy.test.ts`).
  *
  * Not covered here: `PUBLIC_READ` deployments (anonymous passes the viewer gates), a secondary store's extra scope
- * (`STORE_SCOPE`), and a grant holding `admin` beside a hide scope. Such a grant isn't modelled as restricted because
+ * (`STORE_SCOPE`; its `series_scope` has its own table, at the end), and a grant holding `admin` beside a hide scope. Such a grant isn't modelled as restricted because
  * no hide scope confines it: it can mint itself an unrestricted link (`LINK_GATES`), and `gateFor`'s store refuses one
  * with `ADMIN_LIST` on. The filters do still apply to it where they run; they just aren't what this audit relies on.
  */
@@ -755,5 +755,73 @@ describe.each(MODES)('$name', mode => {
       : `${restricted.did}, the open link ${open.did}`
     const declared = RESTRICTED[linkKey(c)]
     expect(got, `${c.method} ${c.path} (${file})`).toEqual(declared === undefined ? 'undeclared' : declared === 'blocked' ? 'blocked' : 'as the open link')
+  })
+})
+
+// ---- a store's `series_scope` --------------------------------------------------------------------------------------
+
+/** A secondary store behind an extra `scope`, with a `series_scope`: the scope name is config, never a constant. */
+const SUMMARY_STORE = {
+  STORES_JSON: JSON.stringify({ logs: {
+    scope: 'admin', series_scope: 'totals',
+    vars: { SNAPSHOTS_SUBDIR: 'logs', STORE_BUCKET: 'logs-bucket', STORE_ACCESS_KEY_ID: 'key', STORE_SECRET_ACCESS_KEY: 'secret' },
+  } }),
+}
+const SUMMARY_CALLERS = ['anonymous', 'viewer', 'totals + read', 'totals + base', 'totals alone', 'totals + read, path-restricted', 'admin grant'] as const
+type SummaryCaller = typeof SUMMARY_CALLERS[number]
+/** Each request, and what each caller gets from it (in `SUMMARY_CALLERS` order). */
+const SUMMARY_EXPECT: [string, string, readonly Outcome[]][] = [
+  //                                                 anon  viewer  +read  +base  alone  +read,   admin
+  //                                                                                    restricted
+  ['api/series.ts', '/api/series?store=logs',          [401, 403,    P,     P,     403,   403,     P]],
+  ['api/series.ts', '/api/series?store=logs&path=a',   [401, 403,    403,   403,   403,   403,     P]],
+  ['api/series.ts', '/api/series?store=logs&paths=a',  [401, 403,    403,   403,   403,   403,     P]],
+  ['api/series.ts', '/api/series?store=logs&lens=user:a', [401, 403, 403,   403,   403,   403,     P]],
+  ['api/series.ts', '/api/series?store=logs&o=owned',  [401, 403,    403,   403,   403,   403,     P]],
+  ['api/series.ts', '/api/series?store=logs&cl=1',     [401, 403,    403,   403,   403,   403,     P]],
+  ['api/series.ts', '/api/series?store=logs&q=a',      [401, 403,    403,   403,   403,   403,     P]],
+  ['api/series.ts', '/api/series?store=logs&split=roots', [401, 403, 403,   403,   403,   403,     P]],
+  ['api/series.ts', '/api/series?store=logs&chunk=0',  [401, 403,    403,   403,   403,   403,     P]],
+  // The store's other routes stay behind its `scope`.
+  ['api/subtree.ts', `/api/subtree?store=logs&${AT}`,  [401, 403,    403,   403,   403,   403,     P]],
+  // The primary: the viewer scope, as ever (a path restriction is the middleware's and the reader's, not this gate's).
+  ['api/series.ts', '/api/series',                     [401, P,      P,     P,     403,   P,       P]],
+]
+
+describe("a store's `series_scope`: its root-level `/api/series` and nothing else of it", () => {
+  let w: World
+  let headers: Record<SummaryCaller, Record<string, string>>
+  beforeAll(async () => {
+    w = await world(MODES[0])
+    const mint = async (scopes: string[]) => {
+      const { token } = await gateFor({ ...w.env, ADMIN_LIST: undefined })!.mint({ email: null, scopes, name: 'totals', createdBy: 'test', expiresAt: null, maxRedeems: null })
+      return { authorization: `Bearer ${token}` }
+    }
+    headers = {
+      'anonymous': {},
+      'viewer': w.headers.viewer,
+      'totals + read': await mint(['gcs:read', 'totals']),
+      'totals + base': await mint(['gcs', 'totals']),
+      'totals alone': await mint(['totals']),
+      'totals + read, path-restricted': await mint(['gcs:read', 'totals', hideScope('gcs', HIDDEN)]),
+      'admin grant': w.headers['admin grant'],
+    }
+  })
+
+  it.each(SUMMARY_EXPECT.map(([file, path, outcomes]) => ({ file, path, outcomes })))('GET $path', async ({ file, path, outcomes }) => {
+    const mod = MODULES[file]
+    const c: Case = { method: 'GET', path, gate: 'viewer', env: SUMMARY_STORE }
+    const got: Outcome[] = []
+    for (const who of SUMMARY_CALLERS) {
+      const { did } = await answer(w, mod[handlerFor(mod, 'GET')] as Handler, file, c, headers[who], who)
+      got.push(did === '401' ? 401 : did === '403' ? 403 : P)
+    }
+    const by = (vs: readonly Outcome[]) => Object.fromEntries(SUMMARY_CALLERS.map((who, i) => [who, vs[i]]))
+    expect(by(got)).toEqual(by(outcomes))
+  })
+
+  it('an agent token can\'t mint a grant carrying it', async () => {
+    const res = await mintAs(w, 'agent token', ['gcs:read', 'totals'])
+    expect(res.status).toBe(403)
   })
 })
