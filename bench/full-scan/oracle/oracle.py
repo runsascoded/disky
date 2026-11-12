@@ -193,12 +193,23 @@ def main(cache, only, memory, out, threads, tmp, gen, queries, answers):
     t0 = monotonic()
     have = con.execute("SELECT count(*) FROM information_schema.tables WHERE table_name = 'f'").fetchone()[0]
     if not have:
-        src = "[" + ", ".join(lit(f) for f in files) + "]"
-        con.execute(f"""CREATE TABLE f AS
-            SELECT path, any_value(depth) AS depth, vf, min(vt) AS vt, any_value(size) AS size, any_value(c2) AS c2,
-                   any_value(c3) AS c3, any_value(c4) AS c4, any_value(us) AS us
-            FROM read_parquet({src}, union_by_name = true)
-            GROUP BY depth, path, vf HAVING any_value(kind) = 'file'""")
+        names = {r[0] for r in con.execute(f"DESCRIBE SELECT * FROM read_parquet({lit(files[0])})").fetchall()}
+        # gcs names storage classes 2–4 by name.
+        cls = {c: c if c in names else a for c, a in (("c2", "nearline_bytes"), ("c3", "coldline_bytes"), ("c4", "archive_bytes"))}
+        cols = f"depth, path, vf, vt, size, {cls['c2']} AS c2, {cls['c3']} AS c3, {cls['c4']} AS c4, us"
+        # A version is one `(depth, path, vf)`: the base holds each once; a run may repeat it (a close record, or a
+        # merged run's copy), so the runs' rows are combined first (smallest `vt`), then joined to the base's.
+        con.execute(f"CREATE TABLE b AS SELECT {cols} FROM read_parquet({lit(files[0])}) WHERE kind = 'file'")
+        runs = "[" + ", ".join(lit(f) for f in files[1:]) + "]"
+        con.execute(f"""CREATE TABLE r AS SELECT depth, path, vf, min(vt) AS vt, any_value(size) AS size, any_value(c2) AS c2,
+                any_value(c3) AS c3, any_value(c4) AS c4, any_value(us) AS us
+            FROM (SELECT {cols} FROM read_parquet({runs}) WHERE kind = 'file') GROUP BY depth, path, vf""" if files[1:] else
+            "CREATE TABLE r AS SELECT * FROM b LIMIT 0")
+        con.execute("""CREATE TABLE f AS
+            SELECT b.path, b.depth, b.vf, least(b.vt, coalesce(r.vt, b.vt)) AS vt, b.size, b.c2, b.c3, b.c4, b.us
+            FROM b LEFT JOIN r USING (depth, path, vf)
+            UNION ALL SELECT r.path, r.depth, r.vf, r.vt, r.size, r.c2, r.c3, r.c4, r.us FROM r ANTI JOIN b USING (depth, path, vf)""")
+        con.execute("DROP TABLE b; DROP TABLE r")
     n = con.execute("SELECT count(*) FROM f").fetchone()[0]
     err(f"oracle: {n:,} object versions from {len(files)} sorts, {len(scans)} scans ({monotonic() - t0:.1f}s)")
     qs = [json.loads(l) for l in Path(queries).read_text().splitlines() if l.strip()]

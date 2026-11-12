@@ -26,6 +26,15 @@ use crate::store::{Generation, OPEN};
 use crate::util::{err, h128, ints, IdMap, Result, Shared, Strs};
 
 const COLS: [&str; 10] = ["depth", "path", "vf", "vt", "kind", "size", "c2", "c3", "c4", "us"];
+/// Class columns as a deployment names them (gcs: storage classes 2–4 are nearline, coldline, archive).
+fn aliases(c: &str) -> &'static [&'static str] {
+    match c {
+        "c2" => &["nearline_bytes"],
+        "c3" => &["coldline_bytes"],
+        "c4" => &["archive_bytes"],
+        _ => &[],
+    }
+}
 const NO_PARENT: u32 = u32::MAX;
 
 struct Input {
@@ -33,6 +42,8 @@ struct Input {
     meta: ArrowReaderMetadata,
     /// Projection indices of `COLS` in the file's root columns.
     proj: Vec<usize>,
+    /// The file's name for each of `COLS`.
+    names: Vec<String>,
     /// `(row group, depth min, depth max)`.
     groups: Vec<(usize, u8, u8)>,
 }
@@ -122,8 +133,12 @@ fn open_input(path: PathBuf) -> Result<Input> {
     let meta = ArrowReaderMetadata::load(&f, ArrowReaderOptions::new())?;
     let schema = meta.schema().clone();
     let mut proj = Vec::new();
+    let mut names = Vec::new();
     for c in COLS {
-        proj.push(schema.index_of(c).map_err(|_| format!("{}: no column `{c}`", path.display()))?);
+        let found = std::iter::once(c).chain(aliases(c).iter().copied()).find(|n| schema.index_of(n).is_ok());
+        let n = found.ok_or_else(|| format!("{}: no column `{c}`", path.display()))?;
+        proj.push(schema.index_of(n)?);
+        names.push(n.to_string());
     }
     let md = meta.metadata().clone();
     let leaf = md.file_metadata().schema_descr().columns().iter().position(|c| c.name() == "depth").ok_or("no depth leaf")?;
@@ -133,7 +148,7 @@ fn open_input(path: PathBuf) -> Result<Input> {
             (g, lo, hi)
         })
         .collect();
-    Ok(Input { path, meta, proj, groups })
+    Ok(Input { path, meta, proj, names, groups })
 }
 
 /// Owner slices of a file version (`interval_store.us_sql_from_raw`'s `us`): `''` → unnamed; a name → that owner; JSON
@@ -200,7 +215,10 @@ fn read_level(
     let (mut last_parent, mut last_parent_id): (String, u32) = (String::new(), NO_PARENT);
     for batch in reader {
         let batch: RecordBatch = batch?;
-        let col = |name: &str| batch.column(batch.schema().index_of(name).unwrap()).clone();
+        let col = |name: &str| {
+            let n = &inp.names[COLS.iter().position(|c| *c == name).unwrap()];
+            batch.column(batch.schema().index_of(n).unwrap()).clone()
+        };
         let (depth, path, kind, us) = (col("depth"), col("path"), col("kind"), col("us"));
         let depth = ints(&depth)?;
         let (path, kind, us) = (Strs::of(&path)?, Strs::of(&kind)?, Strs::of(&us)?);
