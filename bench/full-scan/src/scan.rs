@@ -65,7 +65,8 @@ pub struct Answer {
     pub id: String,
     pub total: [u64; 4],
     pub nodes: Vec<(String, u64, u64, u64, u64)>,
-    pub rest: Vec<(String, u64, u64, u64, u64)>,
+    /// Signed: from directory totals a store whose rows don't add up can leave a negative rest.
+    pub rest: Vec<(String, i64, i64, i64, i64)>,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -416,10 +417,11 @@ fn assemble(idx: &Index, c: &Compiled, q: &Query, outs: Vec<ChunkOut>) -> Answer
     let mut out_nodes = Vec::with_capacity(nodes.len());
     let mut rest = Vec::new();
     let mut stack: Vec<Open> = vec![Open { depth: c.dp, path: c.path.clone(), a: ta, b: tb, kids_a: Acc::default(), kids_b: Acc::default() }];
-    let close = |o: Open, rest: &mut Vec<(String, u64, u64, u64, u64)>| {
+    let close = |o: Open, rest: &mut Vec<(String, i64, i64, i64, i64)>| {
         if o.depth < c.maxd {
-            let (ra, rb) = (o.a.bytes - o.kids_a.bytes, o.b.bytes - o.kids_b.bytes);
-            let (fa, fb) = (o.a.files - o.kids_a.files, o.b.files - o.kids_b.files);
+            let d = |x: u64, y: u64| x as i64 - y as i64;
+            let (ra, rb) = (d(o.a.bytes, o.kids_a.bytes), d(o.b.bytes, o.kids_b.bytes));
+            let (fa, fb) = (d(o.a.files, o.kids_a.files), d(o.b.files, o.kids_b.files));
             if ra != 0 || rb != 0 || fa != 0 || fb != 0 {
                 rest.push((o.path, ra, fa, rb, fb));
             }
