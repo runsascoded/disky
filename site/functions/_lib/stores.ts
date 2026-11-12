@@ -22,6 +22,13 @@
  *     "secrets": {"STORE_ACCESS_KEY_ID": "STORE_META_ACCESS_KEY_ID", "STORE_SECRET_ACCESS_KEY": "STORE_META_SECRET_ACCESS_KEY"}
  *   }}
  *
+ * `series_scope` admits a grant holding it (beside the deployment's viewer scope) to the store's root-level
+ * `/api/series` alone, without `scope`: a store's byte totals over time, for a summary reader (a dashboard's
+ * token), never its paths, names, scoped series or other routes. Not a public, anonymous or path-restricted
+ * caller's (`api/series.ts` `summaryGate`):
+ *
+ *   STORES_JSON = {"meta": {"scope": "admin", "series_scope": "totals", …}}
+ *
  * `secrets` maps a per-store var to the NAME of a Pages secret holding its
  * value, so no secret sits in the (public) `wrangler.toml`.
  *
@@ -121,11 +128,14 @@ export interface StoreConfig {
   vars?: Partial<Record<StoreVar, string>>
   /** Per-store var → name of the secret (env binding) holding its value. */
   secrets?: Partial<Record<StoreVar, string>>
+  /** A scope that reads only the store's root-level `/api/series` (see the module comment). */
+  series_scope?: string
   /** The store's page path (`/meta`): the URL prefix its pages live under (normalized: no trailing `/`). */
   path?: string
 }
 
 const KEY_RE = /^[a-z0-9][a-z0-9-]*$/
+const SERIES_SCOPE_RE = /^[a-z0-9][a-z0-9_-]*$/
 
 export class StoreConfigError extends Error {}
 
@@ -187,9 +197,11 @@ function parseStores(env: Env): { stores: Record<string, StoreConfig>; views: Re
       unions[key] = cfg as Record<string, unknown>
       continue
     }
-    const { scope, vars, secrets, path, ...rest } = cfg as Record<string, unknown>
+    const { scope, series_scope: seriesScope, vars, secrets, path, ...rest } = cfg as Record<string, unknown>
     if (Object.keys(rest).length) throw new StoreConfigError(`STORES_JSON.${key}: unknown field(s) ${Object.keys(rest).join(', ')}`)
     if (scope !== undefined && typeof scope !== 'string') throw new StoreConfigError(`STORES_JSON.${key}.scope: want a string`)
+    if (seriesScope !== undefined && (typeof seriesScope !== 'string' || !SERIES_SCOPE_RE.test(seriesScope) || seriesScope === 'admin')) throw new StoreConfigError(`STORES_JSON.${key}.series_scope: want a scope name (not admin)`)
+    if (seriesScope !== undefined && !scope) throw new StoreConfigError(`STORES_JSON.${key}.series_scope: only meaningful beside a scope (without one every viewer reads the store)`)
     const page = typeof path === 'string' ? path.replace(/(.)\/$/, '$1') : path
     if (page !== undefined && (typeof page !== 'string' || !PATH_RE.test(page) || page.split('/').some(s => s === '.' || s === '..'))) throw new StoreConfigError(`STORES_JSON.${key}.path: want a page path like '/${key}' (not '/')`)
     const taken = Object.entries(stores).find(([, c]) => c.path === page)
@@ -266,6 +278,7 @@ export function storeEnv(env: Env, key: string, cfg: StoreConfig): Env {
   }
   out.STORE_KEY = key
   if (cfg.scope) out.STORE_SCOPE = cfg.scope
+  if (cfg.series_scope) out.STORE_SERIES_SCOPE = cfg.series_scope
   return out as Env
 }
 

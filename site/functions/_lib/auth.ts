@@ -202,6 +202,9 @@ export interface Env {
   /** Set only on a secondary store's overlay: a scope its viewers need on top
    *  of the deployment's viewer scope (`requireViewer`). */
   STORE_SCOPE?: string
+  /** Set only on a secondary store's overlay with a `series_scope` (`STORES_JSON`): a scope that, with the
+   *  deployment's viewer scope, reads that store's root-level `/api/series` and nothing else of it (`api/series.ts`). */
+  STORE_SERIES_SCOPE?: string
   /** The footer LRU's budget (`_lib/footerCache.ts`, specs/done/footer-lru.md): the most
    *  `index_row_groups` rows its hot entries hold (default 1,000,000)… */
   FOOTER_CACHE_MAX_ROWS?: string
