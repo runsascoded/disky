@@ -204,4 +204,5 @@ ROOT_LABEL = "my buckets"                   # the store root's crumb label
 # dev DEV_EMAIL                             local dev only (`.dev.vars`): the identity localhost acts as
 # overlay STORE_KEY                         set by STORES_JSON's per-store overlay, never directly
 # overlay STORE_SCOPE
+# overlay STORE_SERIES_SCOPE                set by STORES_JSON's `series_scope` (`_lib/stores.ts`), never directly
 # overlay HISTORY_VERSION_CACHE              one request's captured history pointer/version; never deployment configuration
