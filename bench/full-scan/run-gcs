@@ -8,8 +8,6 @@ d=$work/$label
 mkdir -p "$d"
 log() { echo "[$(date +%T)] $label: $*" >&2; }
 cargo build -q --release
-log load; /usr/bin/time -f "%e s, %M KB" ./target/release/fsb load "$gen" > "$d/load.json" 2> "$d/load.log"; cat "$d/load.log" >&2
-[ -f "$d/queries.jsonl" ] || { log plan; ./target/release/fsb plan "$gen" -o "$d/queries.jsonl" 2>&1 | tail -1 | tee "$d/plan.log" >&2; }
 log bench; /usr/bin/time -f "%e s, %M KB" ./target/release/fsb bench "$gen" "$d/queries.jsonl" -t "1,$(nproc)" -r 5 -l "$label" \
   -o "$d/results.jsonl" -a "$d/answers.jsonl" 2> "$d/bench.log"
 tail -1 "$d/bench.log" >&2

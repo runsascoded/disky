@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # One synthetic scale end to end on a bench node: `fsb synth` → the repo's cut (`oracle/synth_store.py`) → `fsb plan`
-# → `fsb bench` (1 and all threads, cold + warm ×5) → the DuckDB oracle over every query. Run from the repo's venv.
+# → `fsb bench` (which plans the queries) (1 and all threads, cold + warm ×5) → the DuckDB oracle over every query. Run from the repo's venv.
 #   run-synth SCALE LABEL [WORK]     (WORK default ~/work)
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -15,7 +15,6 @@ if [ ! -f "$d/gen/scans.json" ]; then
   log cut; /usr/bin/time -f "%e s, %M KB" python oracle/synth_store.py -m 80GB "$d/stage" "$d/gen" 2>&1 | tail -4 | tee "$d/cut.log" >&2
   du -sb "$d/gen/served" "$d/gen/deltas" | tee -a "$d/cut.log" >&2
 fi
-log plan; ./target/release/fsb plan "$d/gen" -o "$d/queries.jsonl" 2>&1 | tail -1 | tee "$d/plan.log" >&2
 log bench; /usr/bin/time -f "%e s, %M KB" ./target/release/fsb bench "$d/gen" "$d/queries.jsonl" -t "1,$(nproc)" -r 5 -l "$label" \
   -o "$d/results.jsonl" -a "$d/answers.jsonl" 2> "$d/bench.log"
 tail -1 "$d/bench.log" >&2

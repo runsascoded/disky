@@ -314,12 +314,15 @@ pub fn load(gen: &Generation) -> Result<Index> {
     let owners = Owners(Mutex::new(HashMap::from([(String::new(), 0u16)])));
 
     // Nodes (level by level) and their versions, in node order.
-    let mut parent: Vec<u32> = Vec::new();
-    let mut name: Vec<u32> = Vec::new();
-    let mut n_ver: Vec<u16> = Vec::new();
+    // Capacities at their upper bound (every row a node / a version): pages never written stay unresident, and no
+    // doubling realloc copies a multi-GB vector mid-load.
+    let bound: usize = inputs.iter().map(|i| i.meta.metadata().file_metadata().num_rows() as usize).sum();
+    let mut parent: Vec<u32> = Vec::with_capacity(bound);
+    let mut name: Vec<u32> = Vec::with_capacity(bound);
+    let mut n_ver: Vec<u16> = Vec::with_capacity(bound);
     let mut level_start: Vec<usize> = vec![0, 0];
-    let mut vers: Vec<Ver> = Vec::new();
-    let mut dvers: Vec<(u16, u16, u64, u64)> = Vec::new();
+    let mut vers: Vec<Ver> = Vec::with_capacity(bound);
+    let mut dvers: Vec<(u16, u16, u64, u64)> = Vec::with_capacity(bound);
     let mut cxs: Vec<(u64, Box<Complex>)> = Vec::new();
     let mut prev: IdMap<u128, u32> = IdMap::default();
     let mut d = 1u8;
@@ -340,7 +343,7 @@ pub fn load(gen: &Generation) -> Result<Index> {
         }
         stats.versions_read += recs.len() as u64;
         recs.par_sort_unstable_by(|a, b| (a.h, a.file, a.vf).cmp(&(b.h, b.file, b.vf)));
-        let mut next: IdMap<u128, u32> = IdMap::with_capacity_and_hasher(recs.len() / 2, Default::default());
+        let mut next: IdMap<u128, u32> = IdMap::with_capacity_and_hasher(recs.len(), Default::default());
         let mut i = 0;
         while i < recs.len() {
             let h = recs[i].h;
@@ -421,18 +424,19 @@ pub fn load(gen: &Generation) -> Result<Index> {
     for (f, &tmp) in order.iter().enumerate() {
         final_id[tmp as usize] = f as u32;
     }
-    let sorted: Vec<Box<str>> = order.iter().map(|&tmp| raw[tmp as usize].clone()).collect();
-    drop(raw);
-    let mut by_slash: Vec<u32> = (0..sorted.len() as u32).collect();
-    by_slash.par_sort_unstable_by(|&a, &b| cmp_slash(sorted[a as usize].as_bytes(), sorted[b as usize].as_bytes()));
-    let mut slash_rank = vec![0u32; sorted.len()];
+    // Names by final id, borrowed (no copies).
+    let sorted = |f: u32| raw[order[f as usize] as usize].as_bytes();
+    let mut by_slash: Vec<u32> = (0..raw.len() as u32).collect();
+    by_slash.par_sort_unstable_by(|&a, &b| cmp_slash(sorted(a), sorted(b)));
+    let mut slash_rank = vec![0u32; raw.len()];
     for (r, &id) in by_slash.iter().enumerate() {
         slash_rank[id as usize] = r as u32;
     }
     drop(by_slash);
-    let dict = Dict::build(&sorted);
-    stats.names = sorted.len() as u64;
-    drop(sorted);
+    let dict = Dict::build_iter(order.iter().map(|&tmp| &*raw[tmp as usize]), raw.len());
+    stats.names = raw.len() as u64;
+    drop(order);
+    drop(raw);
     name.par_iter_mut().for_each(|x| *x = final_id[*x as usize]);
     drop(final_id);
 
@@ -451,14 +455,18 @@ pub fn load(gen: &Generation) -> Result<Index> {
     // Depth-first positions: subtree sizes bottom-up, then each level ordered by (parent's position, name + "/").
     let nodes = parent.len();
     let levels = level_start.len() - 2;
-    let mut subtree: Vec<u64> = n_ver.iter().map(|&k| k as u64).collect();
+    if stats.versions_read >= u32::MAX as u64 {
+        return err("more versions than a u32 row id holds");
+    }
+    // Rows ≤ versions read < 2^32, so a subtree's row count fits a u32.
+    let mut subtree: Vec<u32> = n_ver.iter().map(|&k| k as u32).collect();
     for lv in (2..=levels).rev() {
         for x in level_start[lv]..level_start[lv + 1] {
             let p = parent[x] as usize;
             subtree[p] += subtree[x];
         }
     }
-    let total: u64 = (level_start[1]..level_start[2]).map(|x| subtree[x]).sum();
+    let total: u64 = (level_start[1]..level_start[2]).map(|x| subtree[x] as u64).sum();
     if total >= u32::MAX as u64 {
         return err("more rows than a u32 row id holds");
     }
@@ -479,7 +487,7 @@ pub fn load(gen: &Generation) -> Result<Index> {
                 off = if p == NO_PARENT { 0 } else { pos[p as usize] as u64 + n_ver[p as usize] as u64 };
             }
             pos[x as usize] = off as u32;
-            off += subtree[x as usize];
+            off += subtree[x as usize] as u64;
         }
     }
     drop(slash_rank);
@@ -522,7 +530,7 @@ pub fn load(gen: &Generation) -> Result<Index> {
             let mut cks = Vec::new();
             for x in xs {
                 let p = pos[x] as usize;
-                let e = (p as u64 + subtree[x] - 1) as u32;
+                let e = (p as u64 + subtree[x] as u64 - 1) as u32;
                 let k = n_ver[x] as usize;
                 for v in 0..k {
                     let vi = first_ver[x] as usize + v;

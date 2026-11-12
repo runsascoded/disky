@@ -6,6 +6,7 @@
 //! fsb run GEN QUERIES -o ANSWERS [-t N]                answer each query (JSONL)
 //! fsb bench GEN QUERIES -o RESULTS -a ANSWERS [-t 1,16] [-r 5] [-l LABEL]
 //!                                                      cold + warm runs per thread count, answers checked equal
+//!                                                      (QUERIES planned first when it doesn't exist)
 //! fsb synth -o STAGE [-S 30] [-R 2] [-x SCALE] [-s SEED]  a synthetic fleet's history (`oracle/synth_store.py` cuts it)
 //! ```
 
@@ -121,6 +122,15 @@ fn main() -> Result<()> {
             let t0 = Instant::now();
             let idx = load_gen(&a.pos[1])?;
             let load_s = t0.elapsed().as_secs_f64();
+            // No query file yet: plan one from this load (one load per store, not two).
+            if !std::path::Path::new(&a.pos[2]).exists() {
+                let (qs, meta) = plan(&idx, &pool(num_cpus())?)?;
+                let mut f = File::create(&a.pos[2])?;
+                for q in &qs {
+                    writeln!(f, "{}", serde_json::to_string(q)?)?;
+                }
+                eprintln!("plan: {} queries; {}", qs.len(), meta);
+            }
             let qs = read_queries(&a.pos[2])?;
             let label = a.opts.get("l").cloned().unwrap_or_default();
             let reps: usize = a.opts.get("r").map(|r| r.parse().unwrap()).unwrap_or(5);

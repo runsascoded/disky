@@ -74,16 +74,21 @@ pub fn lower_of(name: &str) -> String {
 impl Dict {
     /// From the distinct names, sorted by their bytes.
     pub fn build(names: &[Box<str>]) -> Dict {
-        let mut lower = Vec::with_capacity(names.iter().map(|n| n.len() + 1).sum::<usize>() + 1);
-        let mut offs = Vec::with_capacity(names.len() + 1);
+        Dict::build_iter(names.iter().map(|n| &**n), names.len())
+    }
+
+    /// From `n` distinct names, in byte order.
+    pub fn build_iter<'a>(names: impl Iterator<Item = &'a str>, n: usize) -> Dict {
+        let mut lower = Vec::new();
+        let mut offs = Vec::with_capacity(n + 1);
         let (mut patch_ids, mut patch_offs, mut patch_buf) = (Vec::new(), vec![0u64], Vec::new());
         lower.push(b'\n');
-        for (i, n) in names.iter().enumerate() {
+        for (i, n) in names.enumerate() {
             offs.push(lower.len() as u64);
             let l = lower_of(n);
             lower.extend_from_slice(l.as_bytes());
             lower.push(b'\n');
-            if l.as_str() != &**n {
+            if l.as_str() != n {
                 patch_ids.push(i as u32);
                 patch_buf.extend_from_slice(n.as_bytes());
                 patch_offs.push(patch_buf.len() as u64);
