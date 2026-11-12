@@ -18,6 +18,9 @@ from urllib.request import Request, urlopen
 
 from click import Choice, ClickException, Path as ClickPath, argument, group, option
 
+#: The live checks' own agent: Cloudflare's bot rules answer Python's default `Python-urllib/…` with a 403 and no app headers.
+LIVE_HEADERS = {'User-Agent': 'disky-oa-release/1'}
+
 
 CONFIG = Path(__file__).resolve().parents[1] / 'deploy/oa/sites.json'
 PROTOCOL = 'disky-pages-v1'
@@ -292,7 +295,7 @@ def finish(failed: bool, receipt_path: Path) -> None:
     require(metadata['commit_hash'] == receipt['sha'] and not metadata.get('commit_dirty')
             and deployment['latest_stage']['status'] == 'success', 'Cloudflare is not serving the clean requested revision')
     for attempt in range(12):
-        req = Request(f'https://{receipt["host"]}/api/health?release-check={environ["GITHUB_RUN_ID"]}-{attempt}')
+        req = Request(f'https://{receipt["host"]}/api/health?release-check={environ["GITHUB_RUN_ID"]}-{attempt}', headers=LIVE_HEADERS)
         try:
             response = urlopen(req, timeout=20)
         except HTTPError as error:
@@ -307,7 +310,7 @@ def finish(failed: bool, receipt_path: Path) -> None:
     else:
         raise ClickException('Live host did not return the requested build header')
     for asset, digest in receipt['entry_assets'].items():
-        with urlopen(f'https://{receipt["host"]}/{asset}', timeout=30) as response:
+        with urlopen(Request(f'https://{receipt["host"]}/{asset}', headers=LIVE_HEADERS), timeout=30) as response:
             require(sha256(response.read()).hexdigest() == digest, f'Live entry asset differs: {asset}')
     receipt['cloudflare_deployment'] = deployment['id']
     receipt['cloudflare_url'] = deployment['url']

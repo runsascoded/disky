@@ -223,7 +223,10 @@ def test_success_requires_live_build_and_exact_entry_asset(tmp_path, monkeypatch
     calls = []
     monkeypatch.setattr(release, 'api', lambda path, body=None: calls.append((path, body)))
 
+    agents = []
+
     def urlopen(request, timeout):
+        agents.append(request.get_header('User-agent'))
         response = BytesIO(b'wrong' if wrong_asset else b'42')
         response.headers = {'x-disky-build': f'{SHA} 2026-11-10T12:34:56Z'}
         return response
@@ -235,6 +238,7 @@ def test_success_requires_live_build_and_exact_entry_asset(tmp_path, monkeypatch
         assert loads(path.read_text()) == receipt
     else:
         assert result.exit_code == 0
+        assert agents == ['disky-oa-release/1', 'disky-oa-release/1']
         expected = {**receipt, 'cloudflare_deployment': 'cf73', 'cloudflare_url': 'https://cf73.oa-hf-usage.pages.dev'}
         assert loads(result.output) == expected
         assert loads(path.read_text()) == expected
