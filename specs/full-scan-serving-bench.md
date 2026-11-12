@@ -132,6 +132,22 @@ The query set (≥ 60), drawn from real usage where we have it (`warm-cache`'s v
 
 Output: `bench/full-scan/results/<date>.jsonl` (one line per query and run) and a summary table in this spec.
 
+## Results (2026-11-12)
+
+Raw lines: `bench/full-scan/results/2026-11-12.jsonl` (one per store load and per query × thread count: cold, the five warm runs, rows, bytes touched, nodes, totals). Tables below come from `bench/full-scan/summarize.py`.
+
+### Verified against the oracle
+
+<!-- RESULTS:VERIFIED -->
+
+### gcs
+
+<!-- RESULTS:GCS -->
+
+### Synthetic scaling
+
+<!-- RESULTS:SYNTH -->
+
 ## Cost model (filled from the bench)
 
 - **Resident bytes:** for gcs alone, and projected for OA's fleets together (gcs, cw, hf, r2) from their stores' version counts.

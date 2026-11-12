@@ -68,24 +68,21 @@ def search_sql(e: dict) -> str:
     return f"len(list_filter(segs, s -> {pred.format(lit(body))})) > 0"
 
 
-def owner_cte(sel: dict) -> str:
-    """Per live file (`key`): its owner slices (`''` → unnamed; a name → all bytes; JSON → each entry, clamped at 0,
-    plus the unnamed rest when positive), and the selected ones' bytes."""
+def owner_cols(sel: dict) -> str:
+    """Per live file: its owner slices (`''` → unnamed; a name → all bytes; JSON `j` → each entry, clamped at 0, plus
+    the unnamed rest when positive): the selected ones' bytes, whether it holds one, and how many it has."""
     (mode, names), = sel.items()
     inlist = "[" + ", ".join(lit(n) for n in names) + "]::VARCHAR[]"
-    test = f"list_contains({inlist}, u)" if mode == "in" else f"NOT list_contains({inlist}, u)"
-    return f"""js AS (
-        SELECT key, size, us, CASE WHEN starts_with(us, '[') THEN from_json(us, '[["VARCHAR"]]') END AS j FROM live),
-    sl AS (
-        SELECT key, '' AS u, size AS b FROM js WHERE us = ''
-        UNION ALL SELECT key, us, size FROM js WHERE us <> '' AND NOT starts_with(us, '[')
-        UNION ALL SELECT key, e[1], greatest(e[2]::BIGINT, 0) FROM (SELECT key, unnest(j) AS e FROM js WHERE j IS NOT NULL)
-        UNION ALL SELECT key, '', size - n FROM (
-            SELECT key, size, list_sum(list_transform(j, e -> greatest(e[2]::BIGINT, 0))) AS n FROM js WHERE j IS NOT NULL) WHERE size > n),
-    own AS (
-        SELECT key, coalesce(sum(b) FILTER (WHERE {test}), 0)::BIGINT AS own_sel, count(*) FILTER (WHERE {test}) > 0 AS own_pass,
-            count(*) AS n_own
-        FROM sl GROUP BY key)"""
+    t = (lambda x: f"list_contains({inlist}, {x})") if mode == "in" else (lambda x: f"NOT list_contains({inlist}, {x})")
+    none = "true" if (("" in names) == (mode == "in")) else "false"
+    rest = "(size - list_sum(list_transform(j, e -> greatest(e[2]::BIGINT, 0))))"
+    return f"""CASE WHEN us = '' THEN CASE WHEN {none} THEN size ELSE 0 END
+                WHEN j IS NULL THEN CASE WHEN {t('us')} THEN size ELSE 0 END
+                ELSE coalesce(list_sum(list_transform(list_filter(j, e -> {t('e[1]')}), e -> greatest(e[2]::BIGINT, 0))), 0)
+                     + CASE WHEN {rest} > 0 AND {none} THEN {rest} ELSE 0 END END::BIGINT AS own_sel,
+           CASE WHEN us = '' THEN {none} WHEN j IS NULL THEN {t('us')}
+                ELSE len(list_filter(j, e -> {t('e[1]')})) > 0 OR ({rest} > 0 AND {none}) END AS own_pass,
+           CASE WHEN j IS NULL THEN 1 ELSE len(j) + ({rest} > 0)::INT END AS n_own"""
 
 
 def class_cols(cls: list[int]) -> str:
@@ -115,15 +112,15 @@ def answer(con, q: dict, scans: dict[str, int]) -> dict:
         where.append(f"({ors})")
     owners, classes = q.get("owners"), q.get("classes")
     lower = ", string_split(lower(path), '/') AS segs, lower(path) AS lp" if q.get("q") else ""
+    if q.get("owners"):
+        lower += """, CASE WHEN starts_with(us, '[') THEN from_json(us, '[["VARCHAR"]]') END AS j"""
     ctes = [f"""live AS (
         SELECT rowid AS key, path, depth, size, c2, c3, c4, us,
             (vf <= {ta} AND {ta} < vt) AS la, (vf <= {tb} AND {tb} < vt) AS lb{lower}
         FROM f WHERE {' AND '.join(where)})"""]
-    if owners:
-        ctes.append(owner_cte(owners))
     cls_sql = class_cols(classes) if classes else "size::BIGINT AS cls_sel, true AS cls_pass, 1 AS n_cls"
-    join = "LEFT JOIN own USING (key)" if owners else ""
-    own_cols = "own_sel, own_pass, n_own" if owners else "size::BIGINT AS own_sel, true AS own_pass, 1 AS n_own"
+    join = ""
+    own_cols = owner_cols(owners) if owners else "size::BIGINT AS own_sel, true AS own_pass, 1 AS n_own"
     if owners and classes:
         b = """CASE WHEN n_cls = 1 THEN CASE WHEN cls_pass THEN own_sel ELSE 0 END
                     WHEN n_own = 1 THEN CASE WHEN own_pass THEN cls_sel ELSE 0 END
