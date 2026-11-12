@@ -296,9 +296,46 @@ def test_source_checkout_must_be_clean_and_exact(monkeypatch, head, dirty, messa
         assert release.validate_source(Path('source'), SHA) is None
 
 
+def setup_expected(target: str, enabled: str, targets: str) -> dict:
+    return {
+        'repository': REPO,
+        'operator_policy': 'Existing repository write/maintain/admin; explicit production dispatch, self-approval allowed; no added merge-review requirement',
+        'environments': [{
+            'name': f'{target}-{mode}',
+            'settings': {'wait_timer': 0, 'prevent_self_review': False, 'reviewers': [],
+                         'deployment_branch_policy': {'protected_branches': False, 'custom_branch_policies': True}},
+            'branch_policy': {'name': 'front-door', 'type': 'branch'},
+            'variables': {'CLOUDFLARE_ACCOUNT_ID': '74981a43be0de7712369306c7b19133d'},
+            'secret_names': ['CF_PAGES_DEPLOY_TOKEN'],
+        } for mode in ['dev', 'prod']],
+        'repository_variables': {'OA_SITE_RELEASE_ENABLED': enabled, 'OA_SITE_RELEASE_TARGETS': targets},
+        'production_action': 'Manual promotion of a successful exact-SHA dev deployment',
+        'preview_data_policy': 'Unchanged; per-PR preview activation is separate',
+    }
+
+
+def test_setup_plan_adds_to_live_targets_and_keeps_live_enabled(tmp_path):
+    output = tmp_path / 'setup.json'
+    result = CliRunner().invoke(release.main, ['setup-plan', '-e', 'true', '-l', '["hf"]', '-t', 'r2', '-o', str(output)])
+    assert result.exit_code == 0
+    assert loads(result.output) == loads(output.read_text()) == setup_expected('r2', 'true', '["hf","r2"]')
+
+
+def test_setup_plan_for_a_live_target_changes_no_repository_variable(tmp_path):
+    output = tmp_path / 'setup.json'
+    result = CliRunner().invoke(release.main, ['setup-plan', '-e', 'true', '-l', '["hf","r2"]', '-t', 'hf', '-o', str(output)])
+    assert result.exit_code == 0
+    assert loads(output.read_text())['repository_variables'] == {'OA_SITE_RELEASE_ENABLED': 'true', 'OA_SITE_RELEASE_TARGETS': '["hf","r2"]'}
+
+
+def test_setup_plan_refuses_unknown_live_targets(tmp_path):
+    result = CliRunner().invoke(release.main, ['setup-plan', '-e', 'false', '-l', '["hf","nope"]', '-t', 'r2', '-o', str(tmp_path / 'setup.json')])
+    assert (result.exit_code, result.output.splitlines()[-1]) == (1, 'Error: Unknown OA deployment')
+
+
 def test_setup_plan_is_scoped_and_disabled_without_extra_approval_clicks(tmp_path):
     output = tmp_path / 'setup.json'
-    result = CliRunner().invoke(release.main, ['setup-plan', '-t', 'hf', '-o', str(output)])
+    result = CliRunner().invoke(release.main, ['setup-plan', '-e', 'false', '-l', '[]', '-t', 'hf', '-o', str(output)])
     assert result.exit_code == 0
     expected = {
         'repository': REPO,
