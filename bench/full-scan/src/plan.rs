@@ -75,8 +75,14 @@ pub fn plan(idx: &Index, pool: &rayon::ThreadPool) -> Result<(Vec<Query>, serde_
         }
         out
     };
-    let d3 = pick(&dirs_at(idx, 3));
-    let d6 = pick(&dirs_at(idx, 6));
+    // Folders holding a live object at the newest scan.
+    let live = |v: Vec<(usize, usize)>| -> Vec<(usize, usize)> {
+        v.into_iter()
+            .filter(|&(_, g)| (g..=idx.end[g] as usize).any(|r| idx.flags[r] & FILE != 0 && idx.vf[r] <= s_new && s_new < idx.vt[r]))
+            .collect()
+    };
+    let d3 = pick(&live(dirs_at(idx, 3)));
+    let d6 = pick(&live(dirs_at(idx, 6)));
     let d4 = dirs_at(idx, 4);
     let mut staged_rows: Vec<usize> = d4.iter().map(|x| x.1).collect();
     staged_rows.sort_unstable();
@@ -194,8 +200,8 @@ pub fn plan(idx: &Index, pool: &rayon::ThreadPool) -> Result<(Vec<Query>, serde_
     qs.push(search("anchor-start", "", t("^step-"), &["search", "anchor"]));
     qs.push(search("anchor-end", "", t(".json$"), &["search", "anchor"]));
     qs.push(search("anchor-exact", "", t("^zarr.json$"), &["search", "anchor"]));
-    qs.push(search("regex", "", Expr::Re(r"^step-0*[0-9]*5$".to_string()), &["search", "regex"]));
-    qs.push(search("regex-d3", &d30, Expr::Re(r"^shard_0+[1-3]".to_string()), &["search", "regex"]));
+    qs.push(search("regex", "", Expr::Re(r"^step-0+[0-9]*5000$".to_string()), &["search", "regex"]));
+    qs.push(search("regex-bucket0", &b0, Expr::Re(r"^shard_0+[1-3]".to_string()), &["search", "regex"]));
     qs.push(search("path-term", "", Expr::P("c/0/0".to_string()), &["search", "path"]));
     qs.push(search("path-term-anchored", "", Expr::P("^checkpoints/run-".to_string()), &["search", "path"]));
     let mut x = search("search-diff-month", "", t(c0), &["search", "diff"]);
