@@ -99,7 +99,7 @@ fn main() -> Result<()> {
         "plan" => {
             let idx = load_gen(&a.pos[1])?;
             let p = pool(threads(num_cpus()))?;
-            let (qs, meta) = plan(&idx, &p)?;
+            let (qs, meta) = if a.opts.contains_key("x") { (full_scan::plan::exhaustive(&idx), json!({})) } else { plan(&idx, &p)? };
             let mut f = File::create(a.opts.get("o").ok_or("-o QUERIES")?)?;
             for q in &qs {
                 writeln!(f, "{}", serde_json::to_string(q)?)?;

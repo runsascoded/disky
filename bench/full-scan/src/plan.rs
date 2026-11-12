@@ -278,3 +278,98 @@ pub fn plan(idx: &Index, pool: &rayon::ThreadPool) -> Result<(Vec<Query>, serde_
     });
     Ok((qs, meta))
 }
+
+/// An exhaustive mix for small stores (the fixtures): every scan and consecutive diff, every folder (up to 24), each
+/// filter alone and in combinations, at several depths and thresholds.
+pub fn exhaustive(idx: &Index) -> Vec<Query> {
+    let mut folders = vec![String::new()];
+    let mut r = 0;
+    while r < idx.n() && folders.len() < 24 {
+        if idx.flags[r] & FILE == 0 && idx.flags[r] & crate::index::CONT == 0 {
+            folders.push(idx.path_of(r));
+        }
+        r += 1;
+    }
+    let names: Vec<String> = (0..idx.dict.len() as u32).map(|i| String::from_utf8_lossy(idx.dict.lower(i)).into_owned()).collect();
+    let mut terms: Vec<Expr> = Vec::new();
+    for (i, n) in names.iter().enumerate().step_by((names.len() / 4).max(1)).take(4) {
+        let short: String = n.chars().take(2).collect();
+        terms.push(t(&short));
+        terms.push(t(&format!("^{n}")));
+        terms.push(t(&format!("{}$", n.chars().skip(1).collect::<String>())));
+        terms.push(Expr::Re(format!("^{}", regex::escape(&short))));
+        if i % 2 == 0 {
+            terms.push(t(&format!("^{n}$")));
+        }
+    }
+    // Path terms from real two- and three-segment spans.
+    for f in folders.iter().filter(|f| f.matches('/').count() >= 1).take(3) {
+        let segs: Vec<&str> = f.split('/').collect();
+        let k = segs.len();
+        terms.push(Expr::P(format!("{}/{}", &segs[k - 2][segs[k - 2].len().saturating_sub(1)..], &segs[k - 1][..1.min(segs[k - 1].len())])));
+        terms.push(Expr::P(format!("^{}/{}$", segs[k - 2], segs[k - 1])));
+    }
+    if terms.len() >= 2 {
+        let (a, b) = (terms[0].clone(), terms[1].clone());
+        terms.push(Expr::And(vec![a.clone(), b.clone()]));
+        terms.push(Expr::Or(vec![a.clone(), b.clone()]));
+        terms.push(Expr::Not(Box::new(a.clone())));
+        terms.push(Expr::And(vec![Expr::Or(vec![a.clone(), terms[2].clone()]), Expr::Not(Box::new(b))]));
+    }
+    let owners: Vec<OwnerSel> = {
+        let mut v: Vec<OwnerSel> = idx.owners.iter().map(|o| OwnerSel::In(vec![o.clone()])).collect();
+        v.push(OwnerSel::NotIn(vec![String::new()]));
+        if idx.owners.len() > 1 {
+            v.push(OwnerSel::NotIn(vec![idx.owners[1].clone()]));
+        }
+        v
+    };
+    let staged: Vec<String> = folders.iter().skip(1).step_by(3).take(3).cloned().collect();
+    let mut times: Vec<(Option<String>, Option<String>, Option<String>)> = idx.scans.iter().map(|s| (Some(s.id.clone()), None, None)).collect();
+    for w in idx.scans.windows(2) {
+        times.push((None, Some(w[0].id.clone()), Some(w[1].id.clone())));
+    }
+    if idx.scans.len() > 2 {
+        times.push((None, Some(idx.scans[0].id.clone()), Some(idx.scans[idx.scans.len() - 1].id.clone())));
+    }
+    let mut qs = Vec::new();
+    let mut i = 0usize;
+    for (ti, (scan, from, to)) in times.iter().enumerate() {
+        for (fi, folder) in folders.iter().enumerate() {
+            // Filters rotate across (time, folder) cells so every one meets every time and folder shape.
+            let mut variants: Vec<Query> = Vec::new();
+            let mut base = q("", &[]);
+            base.scan = scan.clone();
+            base.from = from.clone();
+            base.to = to.clone();
+            base.path = folder.clone();
+            variants.push(base.clone());
+            let k = ti * 7 + fi;
+            if !terms.is_empty() {
+                let mut x = base.clone();
+                x.q = Some(terms[k % terms.len()].clone());
+                variants.push(x);
+            }
+            let mut x = base.clone();
+            x.owners = Some(owners[k % owners.len()].clone());
+            variants.push(x);
+            let mut x = base.clone();
+            x.classes = Some(vec![1 + (k % 4) as u8, 1 + ((k + 2) % 4) as u8]);
+            variants.push(x);
+            let mut x = base.clone();
+            x.staged = Some(staged.clone());
+            if !terms.is_empty() {
+                x.q = Some(terms[(k + 3) % terms.len()].clone());
+            }
+            variants.push(x);
+            for mut v in variants {
+                v.depth = 1 + (i % 3) as u8;
+                v.min_ppm = [0, 0, 1000, 200_000][i % 4];
+                v.id = format!("x{i:04}");
+                i += 1;
+                qs.push(v);
+            }
+        }
+    }
+    qs
+}
