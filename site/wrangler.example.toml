@@ -113,6 +113,7 @@ ROOT_LABEL = "my buckets"                   # the store root's crumb label
 
 # --- Plans and deletion (_lib/plans.ts, _lib/dispatch.ts) ---
 # STORE_SCHEME = "s3://"                      # the URI scheme staged prefixes carry
+# STORE_SERIES_SCOPE = "fleet"               # set per store from `STORES_JSON` `series_scope`: a grant holding it (with base read) reads that store's root `/api/series` only
 # STORE_BUCKETS = "my-bucket,my-other-bucket"  # comma-separated scanned buckets, first = primary
 # STORE_ROOT = "my-bucket"                    # the store's mount (`Store.root`), `/`-separated: its page URLs leave it out (`/dir`, not `/my-bucket/dir`); the server's cards read it
 # STAGING = "1"                               # any value: viewers stage deletions into a shared open plan
