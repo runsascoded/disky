@@ -206,7 +206,11 @@ impl Dict {
         let ids: Vec<Vec<u32>> = self
             .pieces(parts * 4)
             .into_par_iter()
-            .map(|(a, b)| (a..b).filter(|&i| re.is_match(self.lower(i as u32))).map(|i| i as u32).collect())
+            .map(|(a, b)| {
+                // A clone per piece: its own match cache, no contention on the shared one's pool.
+                let re = re.clone();
+                (a..b).filter(|&i| re.is_match(self.lower(i as u32))).map(|i| i as u32).collect()
+            })
             .collect();
         let mut bs = Bitset::new(self.len());
         for v in ids {

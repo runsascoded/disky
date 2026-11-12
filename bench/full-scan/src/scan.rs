@@ -310,7 +310,7 @@ pub fn run(idx: &Index, q: &Query, pool: &rayon::ThreadPool) -> Result<(Answer, 
     let c = pool.install(|| compile(idx, q, threads))?;
     let compile_ms = t0.elapsed().as_secs_f64() * 1e3;
     if c.dirs {
-        return Ok(run_dirs(idx, &c, q, t0, compile_ms));
+        return Ok(run_dirs(idx, &c, q, pool, t0, compile_ms));
     }
     let t1 = Instant::now();
     let len = c.hi.saturating_sub(c.lo);
@@ -340,35 +340,60 @@ pub fn run(idx: &Index, q: &Query, pool: &rayon::ThreadPool) -> Result<(Answer, 
 
 /// The directory-total view: walk the depth window's paths (descending into a directory only above the deepest level),
 /// each node's totals its own row's at the scan; the folder's total its own row's (the fleet root's: its buckets').
-fn run_dirs(idx: &Index, c: &Compiled, q: &Query, t0: Instant, compile_ms: f64) -> (Answer, Timing) {
+fn run_dirs(idx: &Index, c: &Compiled, q: &Query, pool: &rayon::ThreadPool, t0: Instant, compile_ms: f64) -> (Answer, Timing) {
     let t1 = Instant::now();
     let val = |g: usize, s: Option<u16>| -> Acc {
         s.and_then(|s| idx.row_total(g, s)).map_or(Acc::default(), |(bytes, files)| Acc { bytes, files })
     };
-    let mut out = ChunkOut::default();
-    let mut visited = 0u64;
-    let mut r = c.lo;
-    while r < c.hi {
-        visited += 1;
-        let d = idx.depth[r];
-        let (a, b) = (val(r, Some(c.sa)), val(r, c.sb));
-        if a.nonzero() || b.nonzero() {
-            out.done.push(NodeOut { row: r as u32, depth: d, a, b });
-        }
-        if d == c.dp + 1 && c.dp == 0 {
-            out.a.add(a);
-            out.b.add(b);
-        }
-        r = if d < c.maxd && idx.flags[r] & FILE == 0 { idx.group_end(r) } else { idx.end[r] as usize + 1 };
-    }
+    // The window's nodes are exactly the paths at depth ≤ maxd under the folder, so the folder's rows split into
+    // chunks: a chunk steps to its first such path, then jumps over every subtree below the window.
+    let threads = pool.current_num_threads();
+    let len = c.hi.saturating_sub(c.lo);
+    let step = (len.div_ceil(threads * 8)).max(1 << 16);
+    let spans: Vec<(usize, usize)> = (c.lo..c.hi).step_by(step.max(1)).map(|a| (a, (a + step).min(c.hi))).collect();
+    let outs: Vec<(ChunkOut, u64)> = pool.install(|| {
+        spans
+            .par_iter()
+            .map(|&(lo, hi)| {
+                let mut out = ChunkOut::default();
+                let mut visited = 0u64;
+                let mut r = lo;
+                while r < hi {
+                    let d = idx.depth[r];
+                    if d > c.maxd || idx.flags[r] & CONT != 0 {
+                        r += 1;
+                        continue;
+                    }
+                    visited += 1;
+                    let (a, b) = (val(r, Some(c.sa)), val(r, c.sb));
+                    if a.nonzero() || b.nonzero() {
+                        out.done.push(NodeOut { row: r as u32, depth: d, a, b });
+                    }
+                    if c.dp == 0 && d == 1 {
+                        out.a.add(a);
+                        out.b.add(b);
+                    }
+                    r = if d < c.maxd && idx.flags[r] & FILE == 0 { r + 1 } else { idx.end[r] as usize + 1 };
+                }
+                (out, visited)
+            })
+            .collect()
+    });
+    let visited: u64 = outs.iter().map(|o| o.1).sum();
+    let mut outs: Vec<ChunkOut> = outs.into_iter().map(|o| o.0).collect();
     if c.dp > 0 {
         let g = idx.find(&c.path).unwrap();
-        out.a = val(g, Some(c.sa));
-        out.b = val(g, c.sb);
+        for o in outs.iter_mut() {
+            o.a = Acc::default();
+            o.b = Acc::default();
+        }
+        outs[0].a = val(g, Some(c.sa));
+        outs[0].b = val(g, c.sb);
     }
     let pass_ms = t1.elapsed().as_secs_f64() * 1e3;
     let t2 = Instant::now();
-    let answer = assemble(idx, c, q, vec![out]);
+    let chunks = outs.len() as u64;
+    let answer = assemble(idx, c, q, outs);
     let assemble_ms = t2.elapsed().as_secs_f64() * 1e3;
     let timing = Timing {
         compile_ms,
@@ -377,7 +402,7 @@ fn run_dirs(idx: &Index, c: &Compiled, q: &Query, t0: Instant, compile_ms: f64) 
         total_ms: t0.elapsed().as_secs_f64() * 1e3,
         rows: visited,
         bytes: visited * (1 + 1 + 4 + 8 + 2) + 20 * visited,
-        chunks: 1,
+        chunks,
     };
     (answer, timing)
 }
