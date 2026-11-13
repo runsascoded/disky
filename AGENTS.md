@@ -482,6 +482,12 @@ refused unless `-D`. A benchmark on a throwaway tag: `job/build.sh -t
 bench-<sha7>`, then the job runs `dt-cloud image-sha -e <sha>` (or the
 harness's `-E <sha>`) before measuring.
 
+The primary repository's cleanup (`job/image-cleanup.json`, scoped to the
+`gcs-usage-snapshot` package): `latest` and `pin-*` tags kept, the newest 10
+builds kept, anything else (bench, race, candidate tags included) deleted after
+30 days, untagged after 14. A config that pins a digest (`SWEEP_IMAGE`,
+`job/static-names.env`) tags it `pin-<what>` first, or the cleanup deletes it.
+
 #### Dev workflow
 
 - `site/dev` — Vite on **:3253** + `wrangler pages dev` on **:3254** (a stale

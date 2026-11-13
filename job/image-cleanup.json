@@ -1,0 +1,17 @@
+[
+ {
+  "name": "gcs-usage-snapshot-keep-pins",
+  "action": {"type": "Keep"},
+  "condition": {"tagState": "tagged", "packageNamePrefixes": ["gcs-usage-snapshot"], "tagPrefixes": ["latest", "pin-"]}
+ },
+ {
+  "name": "gcs-usage-snapshot-keep-recent",
+  "action": {"type": "Keep"},
+  "mostRecentVersions": {"packageNamePrefixes": ["gcs-usage-snapshot"], "keepCount": 10}
+ },
+ {
+  "name": "gcs-usage-snapshot-delete-old",
+  "action": {"type": "Delete"},
+  "condition": {"tagState": "any", "packageNamePrefixes": ["gcs-usage-snapshot"], "olderThan": "30d"}
+ }
+]
