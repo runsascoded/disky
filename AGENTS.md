@@ -485,7 +485,9 @@ harness's `-E <sha>`) before measuring.
 The primary repository's cleanup (`job/image-cleanup.json`, scoped to the
 `gcs-usage-snapshot` package): `latest` and `pin-*` tags kept, the newest 10
 builds kept, anything else (bench, race, candidate tags included) deleted after
-30 days, untagged after 14. A config that pins a digest (`SWEEP_IMAGE`,
+30 days, untagged after 14; applied with `gcloud artifacts repositories
+set-cleanup-policies cloud-run-source-deploy --policy job/image-cleanup.json`,
+which replaces the repository's whole set (the file is all of it). A config that pins a digest (`SWEEP_IMAGE`,
 `job/static-names.env`) tags it `pin-<what>` first, or the cleanup deletes it.
 
 #### Dev workflow
