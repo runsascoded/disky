@@ -151,7 +151,8 @@ STORES_JSON = '{"meta":{"path":"/meta","scope":"admin","series_scope":"fleet","v
 # and differs only where a line says so. Secrets are per-environment too:
 # `wrangler pages secret put <NAME> --project-name oa-gcs-usage --env preview`
 # (SESSION_SECRET, GOOGLE_CLIENT_*, RESEND_API_KEY/MAIL_FROM, GCS_HMAC_* are set
-# there; `GCP_SA_KEY` is not — no sweep dispatch from dev). Google sign-in on
+# there; so is `GCP_SA_KEY` since 2026-11-13, a key of its own, for "Run a scan", while
+# `SWEEP_DISPATCH = "0"` keeps sweeps and undos from dispatching here). Google sign-in on
 # dev needs `https://dev.gcs.oa.dev` (+ `/auth/google/callback`) registered on
 # the OAuth client (done 2026-09-28); the emailed code works regardless.
 # ---------------------------------------------------------------------------
@@ -163,6 +164,7 @@ database_id = "e52398b7-5538-4bc4-83db-3355a1b5ef9a"
 [env.preview.vars]
 REPO_URL = "https://github.com/Open-Athena/disky"
 SOURCE_REF = "gcs"
+SWEEP_DISPATCH = "0"   # shared prod data: no sweep or undo starts from dev, though GCP_SA_KEY (for "Run a scan") is set
 OWNER_HISTORY_BATCH = "1"   # scoped series in bounded windows (`seriesRead`); dev only until measured
 OA_LOGIN_ISSUER = "https://login.oa.dev"   # "Sign in with OA" (specs/oa-login-rp.md): OA's broker; dev first
 OA_LOGIN_CLIENT_ID = "disky-gcs-dev"       # registered at the broker with callback https://dev.gcs.oa.dev/auth/oa/callback; secret OA_LOGIN_CLIENT_SECRET (preview env)
