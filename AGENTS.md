@@ -166,7 +166,7 @@ dt-cloud static-names build -g GEN -L LAYOUT -s SCANS -o STORE -x off|MIN,TAIL  
 dt-cloud static-names add -g GEN -L LAYOUT -s SCANS -o STORE  # Append every scan after GEN's newest as a run (append, shards,
                           # catalog delta, drill run, + `names/`/`anchors/` when GEN's base has them — an anchorless GEN
                           # gets them only by a rebuild into a new GEN — `manifests/<id>.json`), then the binary counter's carries; a URL
-                          # store's generation is mirrored into `-w`, new files go up data → `meta.json`s → manifests.
+                          # store's generation is mirrored into `-w`, new files go up data → `meta.json`s → manifests after each scan (and its carries): a failure loses only that scan.
                           # Small deployments' path (the r2 demo's daily ingest); gcs/cw run the stages on Batch
 dt-cloud generation-gc -t KIND -o STORE -k PIN…  # Collect verified compaction predecessors: plans by default, `-x -s SCRATCH` executes
                           # (protocol, receipts, grace and pins: `specs/done/generation-gc-and-r2-copy.md`)
@@ -233,11 +233,19 @@ dt-cloud interval-store level-sim GEN REQUESTS  # `readLevel`'s two waves priced
                           # `-s 256,512,1024` (+ `-F` sidecar row-group sizes): a table per mode, today / held page indexes (cold,
                           # colo warm, warm) / the sort cut in small groups with no page index, from the real file's page indexes
 dt-cloud image-sha [-e SHA [-a]] [-j]  # The running image's source revision (`image_sha.py`): `$DISKY_GIT_SHA` /
-                          # `$DISKY_GIT_DIRTY`, which a deployment's image build stamps (gcs: `job/build.sh` → Dockerfile
+                          # `$DISKY_GIT_DIRTY`, which the image build stamps (`dt-cloud image build` → `job/Dockerfile`
                           # `ARG`/`ENV` + OCI labels `org.opencontainers.image.revision`, `disky.dirty`). Prints `<sha>`,
                           # `<sha> dirty` or `unstamped`; `-e` exits 1 unless the image is that sha (or a ≥7-char prefix),
                           # clean (`-a` accepts dirty) and stamped. Job entrypoints (`scan head`/`step`, the
                           # `interval-store` stage tasks) log it
+dt-cloud image build -c job/build.json [-m candidate|live] [-t TAG] [-D] [-a K=V]  # The scan job image (`image_build.py`,
+                          # specs/job-consolidation.md §5; `job/build.sh` runs it with the deployment's `job/build.json`):
+                          # this checkout's commit, stamped, `git archive`d by the config's `context` pathspecs, built by
+                          # Cloud Build from `job/Dockerfile` (`build_args`: `SITE`, `APT_PACKAGES`, `UV_SYNC_ARGS`,
+                          # `ENTRYPOINT`) to an immutable candidate tag (the sha's first 12; dirty `-D`: `-dirty-<time>`) in
+                          # `repository` + `mirrors`; prints `<repository>@<digest>` each. `live` mode then promotes.
+                          # `image promote TAG [-x DIGEST]`: `live_tags` moved to TAG's digest in each repository, then the
+                          # config's `repoint` Cloud Run jobs / services updated to the first live tag
 dt-cloud batch submit -c COMPONENT [-L REGION] [-b BUCKET]… [-X] [-t] [-e] [-r SECONDS] JOB_ID SPEC  # The shell's Batch submit, through `batch.submit_job` (the
                           # one place a job is created): labelled from `$DISKY_LABELS` + `-c` on the job and its allocation policy
                           # (`cost_labels.py`), in `-L`, else `$BATCH_REGION`. There is no default region (`deploy.batch_region`): neither

@@ -16,9 +16,18 @@ export type ExecEnv = NotifyEnv & BatchEnv & {
    *  the dispatcher behind `GCP_SA_KEY` must be able to act as it). */
   JOB_SA?: string
   EXECUTOR?: string
+  /** `"0"`: this environment never starts a sweep or an undo, whatever credentials it holds (a dev stack on
+   *  production's data whose `GCP_SA_KEY` is there for "Run a scan"). Unset: dispatch as configured. */
+  SWEEP_DISPATCH?: string
   STORE_SCHEME?: string
   STORE_BUCKETS?: string
 }
+
+/** The refusal where `SWEEP_DISPATCH` is `"0"`. */
+export const SWEEPS_OFF = 'sweeps are not dispatched from this environment (SWEEP_DISPATCH = "0")'
+
+/** Whether `env` refuses every sweep and undo dispatch. */
+export const sweepsOff = (env: { SWEEP_DISPATCH?: string }): boolean => env.SWEEP_DISPATCH === '0'
 
 /** What a dispatch selected, by the sizes its page showed at the scan. Display only (a run's row until its manifest
  *  says, Slack's dispatched line): client-sent, and nothing about what a run deletes reads it. */

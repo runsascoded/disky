@@ -15,7 +15,7 @@
  * scan is reused when there is one, else the run builds its own manifest.
  */
 import type { D1Database } from '@cloudflare/workers-types'
-import { type DispatchErr, type DispatchReq, type ExecEnv, type Executor, type Expected, refuse } from './dispatch.js'
+import { type DispatchErr, type DispatchReq, type ExecEnv, type Executor, type Expected, refuse, sweepsOff, SWEEPS_OFF } from './dispatch.js'
 import { NotInPlan, planDigest, planRuns, realRun, type RunRow } from './plans.js'
 
 import { announceFinished, notifyPlan } from './stagedSlack.js'
@@ -74,6 +74,7 @@ export async function dispatchPlan(
   executors: Record<ExecutorKind, Executor> = EXECUTORS,
 ): Promise<DispatchResult> {
   if (!env.DB) return refuse(503, 'plans store not configured (no D1 binding)')
+  if (sweepsOff(env)) return refuse(403, SWEEPS_OFF)
   // Each executor checks its own credentials in `prepare` (the GCP ones need
   // `GCP_SA_KEY`; `laptop` needs a live drainer).
   const ex = executors[kind]

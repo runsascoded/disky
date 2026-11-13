@@ -4,6 +4,7 @@ import react from '@vitejs/plugin-react'
 import { defineConfig, type Plugin } from 'vite'
 import { devChildrenActions } from './devChildrenActions'
 import { writeBuildId } from './scripts/build-id.mjs'
+import { parsePeers } from './src/peers'
 
 // Ports: `devPort` in package.json (vite), `PORT` env overrides (a second dev
 // stack, or when another worktree already holds 3263); wrangler pages dev (the
@@ -90,8 +91,9 @@ function wranglerVars(env = process.env.CLOUDFLARE_ENV): Record<string, string> 
   for (const raw of readFileSync(file, 'utf8').split('\n')) {
     const line = raw.replace(/#.*$/, '').trim()
     if (line.startsWith('[')) { inVars = sections.has(line); continue }
-    const m = inVars ? /^([A-Z_][A-Z0-9_]*)\s*=\s*"([^"]*)"$/.exec(line) : null
-    if (m) vars[m[1]] = m[2]
+    // a basic string (`"…"`, no escapes) or a literal one (`'…'`: what a JSON value like `PEERS` uses)
+    const m = inVars ? /^([A-Z_][A-Z0-9_]*)\s*=\s*(?:"([^"]*)"|'([^']*)')$/.exec(line) : null
+    if (m) vars[m[1]] = m[2] ?? m[3]
   }
   return vars
 }
@@ -121,6 +123,10 @@ const MARK = process.env.VITE_MARK ?? VARS.MARK ?? ''
 // The duplicate-candidate report (`DUPS = "1"` under [vars]): the `/dups` page, its ☰ / omnibar links; the Functions'
 // `/api/dups` reads the same var. Unset = no page.
 const DUPS = process.env.VITE_DUPS ?? VARS.DUPS ?? ''
+// The sibling deployments the omnibar and site menu link (`PEERS` under [vars]: a JSON array of `Peer`s in a TOML
+// literal string, `PEERS = '[{"label": "…", "prod": "…", …}]'`; `src/peers.ts`). Checked here, so a malformed list
+// fails the build. Unset = no peers.
+const PEERS = parsePeers(process.env.VITE_PEERS ?? VARS.PEERS)
 
 // The favicon + apple-touch icon: the deployment's mark, else its label.
 const markIcons: Plugin = {
@@ -162,6 +168,7 @@ export default defineConfig({
     'import.meta.env.VITE_REPO_URL': JSON.stringify(REPO_URL),
     'import.meta.env.VITE_MARK': JSON.stringify(MARK),
     'import.meta.env.VITE_DUPS': JSON.stringify(DUPS),
+    'import.meta.env.VITE_PEERS': JSON.stringify(JSON.stringify(PEERS)),
     'import.meta.env.VITE_BUILD_SHA': JSON.stringify(BUILD_ID.sha),
     'import.meta.env.VITE_BUILD_TIME': JSON.stringify(BUILD_ID.time),
     'import.meta.env.VITE_SOURCE_REF': JSON.stringify(BUILD_ID.ref),
