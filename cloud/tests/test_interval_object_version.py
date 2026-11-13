@@ -57,10 +57,12 @@ def test_etag_only_changes_survive_build_append_merge_and_compaction(tmp_path: P
 
 
 @pytest.mark.parametrize("legacy", [None, 9007199254740993])
-def test_adopting_shared_versions_preserves_unknowns_and_opens_at_first_observation(tmp_path: Path, legacy) -> None:
+@pytest.mark.parametrize('with_level', [False, True], ids=['without-level', 'backfilled-level'])
+def test_adopting_shared_versions_preserves_unknowns_and_opens_at_first_observation(tmp_path: Path, legacy, with_level) -> None:
     from dt_cloud import interval_export as ie
     from dt_cloud.interval_identity import migrate
     from dt_cloud.blobstore import Store
+    from dt_cloud import interval_level as lv
 
     source, store = tmp_path / "source", tmp_path / "store"
     dates = ["2026-10-01", "2026-10-02"]
@@ -78,9 +80,19 @@ def test_adopting_shared_versions_preserves_unknowns_and_opens_at_first_observat
     result = CliRunner().invoke(il.build_cmd, ["-g", "old", *common, "-k", "1", "-t", dates[0]], catch_exceptions=False)
     assert result.exit_code == 0, result.output
     data = Store(str(store))
+    if with_level:
+        assert json.loads((store / 'interval-store/old/scans.json').read_text()).get('level', False) is False
+        lv.backfill(data, 'old', tmp_path / 'backfill-level', threads=1, mem='2GB', rg_rows=4)
     pointer = data.read_bytes("interval-store/CURRENT.json")
     migrate(data, "old", "converted", tmp_path / "migrate", threads=1, mem="2GB", rg_rows=4)
     assert data.read_bytes("interval-store/CURRENT.json") == pointer
+    target_level = store / 'interval-store/converted/served/level.parquet'
+    assert target_level.is_file() is with_level
+    if with_level:
+        original = pq.read_table(store / 'interval-store/old/served/level.parquet')
+        actual = pq.read_table(target_level)
+        assert actual.schema.remove_metadata() == original.schema.remove_metadata()
+        assert actual.to_pylist() == original.to_pylist()
     result = CliRunner().invoke(il.add_cmd, ["-g", "converted", *common, "-C", "none"], catch_exceptions=False)
     assert result.exit_code == 0, result.output
     expected = None if legacy is None else str(legacy)

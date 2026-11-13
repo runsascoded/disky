@@ -12,7 +12,7 @@ from . import interval_store as ist
 from . import tree_mem as tm
 from .append_runner import latest_key
 from .blobstore import Store, mirror, upload_new
-from .interval_local import publish_order, publish_tier
+from .interval_local import publish_order, publish_tier, reads
 from .static_local import _check_gen, workdir
 
 RECORD = 'object-version-migration.json'
@@ -29,7 +29,7 @@ def migrate(store: Store, gen: str, target: str, work: Path, *, ranges_gen: str 
     if store.listing(prefix):
         raise ValueError(f"{prefix}: refusing to overwrite a generation")
     source = work / "source"
-    mirror(store, source_prefix, source, keep=lambda key: not key.startswith(("served/", "rd/", "digest/", "sv-digest/", "verify/")))
+    mirror(store, source_prefix, source, keep=reads)
     if not (source / "scans.json").exists():
         raise ValueError(f"{source_prefix}: missing scans.json")
     if not (source / "ranges.json").exists():
