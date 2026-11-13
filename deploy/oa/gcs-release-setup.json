@@ -48,8 +48,8 @@
     }
   ],
   "repository_variables": {
-    "OA_SITE_RELEASE_ENABLED": "false",
-    "OA_SITE_RELEASE_TARGETS": "[\"gcs\"]"
+    "OA_SITE_RELEASE_ENABLED": "true",
+    "OA_SITE_RELEASE_TARGETS": "[\"hf\",\"gcs\"]"
   },
   "production_action": "Manual promotion of a successful exact-SHA dev deployment",
   "preview_data_policy": "Unchanged; per-PR preview activation is separate"
