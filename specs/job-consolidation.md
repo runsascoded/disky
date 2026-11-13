@@ -73,3 +73,12 @@ Every OA deployment (gcs, cw, hf, r2) makes the same switch:
 3. Delete `site/src/oaPeers.ts`.
 
 The list is still written four times, once per deployment's config: a peer added or renamed is a one-line config change on each branch, with no code change and no merge conflict.
+
+## 4. `infra/cf/run`
+
+On `cloud`: `infra/cf/run`, cw's and hf's byte-identical wrapper (`pulumi -C infra/cf` with `$CF_IAC_TOKEN`, trimmed, as `CLOUDFLARE_API_TOKEN`). Generic as it was: no config.
+
+| Deployment | Add | Delete |
+| --- | --- | --- |
+| cw, hf | nothing | `infra/cf/run` (identical: the merge takes `cloud`'s) |
+| gcs, r2 | nothing (available if they want it; needs `CF_IAC_TOKEN` in their environment) | nothing |
