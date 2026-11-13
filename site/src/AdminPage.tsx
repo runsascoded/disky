@@ -15,6 +15,7 @@ import { SweepSoftDelete } from './SweepSoftDelete'
 import { NO_AUTOFILL } from './noAutofill'
 import { Paginated } from './Pager'
 import { Admins, AdminsRefusal } from './Admins'
+import { useHistoryConfigured } from './HistoryAdmin'
 
 // Share-link console (admins only; the backend enforces the `admin` scope on
 // every /api/auth/grants route — this page just renders the 403 politely).
@@ -308,6 +309,7 @@ const loadDraft = (): Partial<Draft> => {
 export function AdminPage() {
   useDocTitle('Admin')
   const qc = useQueryClient()
+  const historyOn = useHistoryConfigured(true)
   const [searchParams, setSearchParams] = useSearchParams()
   const showRevoked = searchParams.get('revoked') === '1'
   const toggleRevoked = (on: boolean) =>
@@ -636,10 +638,10 @@ export function AdminPage() {
         </tbody>
       </table>
       </div>}</Paginated>
-      <section id="history">
+      {historyOn && <section id="history">
         <h2>Scan history</h2>
         <p><Link to="/scans#history">Review scan retention on Scan runs</Link>: compare proposals with the timeline and choose scans to retain.</p>
-      </section>
+      </section>}
       <Admins />
       <PreviewLinks />
       <ActivityKinds />
