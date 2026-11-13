@@ -16,6 +16,26 @@ on:
         type: string
 
 jobs:
+  r2-collector:
+    if: github.event_name != 'workflow_dispatch'
+    name: R2 access collector (typecheck + test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --dir infra/cf/r2-access typecheck
+      - run: pnpm --dir infra/cf/r2-access test
+      - run: pnpm --dir infra/cf/r2-access build
+      - uses: astral-sh/setup-uv@v4
+      - run: uv sync --frozen --all-packages --all-extras --all-groups
+      - run: uv run --no-sync pytest infra/tests/test_r2_access_stack.py -v
+
   test:
     if: github.event_name != 'workflow_dispatch'
     name: Test

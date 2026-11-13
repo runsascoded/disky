@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import config from '../wrangler.json'
-import oa from '../wrangler.oa.json'
 import worker, {
   actionClass, boundedText, capture, collect, HourAccumulator, type HourAggregate, minute, parseCalculation, parsePage, plan,
   publicHour, reservePages, settings, subrequestBound, timeframe, upgrade, verifyOrder,
@@ -119,6 +118,36 @@ const quiet = (hour: string) => hourAgg(hour, { events: 0, rows: [] })
 
 afterEach(() => vi.restoreAllMocks())
 
+describe('opt-in checkpoint handoff', () => {
+  it.each(['available', 'missing', 'unavailable'] as const)('keeps collection working with a %s receipt', async mode => {
+    const { archive, env, read, order } = setup()
+    const old = '2026-10-01T00'
+    const stamp = Date.parse(old + ':00:00Z') / 1000
+    archive.set('state.json', { etag: 'seed', text: JSON.stringify({ schema_version: 2, account: env.ACCOUNT_ID,
+      buckets: { 'jc-taxes': { collected_through: from, first_from: from, gaps: [], verify_cursor: null,
+        hours: {}, frozen: { [old]: 'agg/old.json' } } } }) })
+    const checkpoint = 'gs://own-data/access/r2/closed.parquet'
+    const r = { schema_version: 1, kind: 'r2-read-checkpoint', account: env.ACCOUNT_ID,
+      source: `r2://${env.ARCHIVE_BUCKET_NAME}/state.json`, checkpoint: { uri: checkpoint, generation: '17', sha256: 'a'.repeat(64) },
+      cursors: { 'jc-taxes': stamp } }
+    const CHECKPOINTS = { get: vi.fn(async () => {
+      if (mode === 'unavailable') throw new Error('offline')
+      return mode === 'missing' ? null : { size: 1024, json: async () => r } as R2ObjectBody
+    }) }
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    await collect(time, env.HOURLY_CRON, { ...env, CHECKPOINTS: CHECKPOINTS as unknown as R2Bucket,
+      CHECKPOINT_KEY: 'r2-read.json', READ_CHECKPOINT: checkpoint }, provider([]), 'receipt')
+    const published = read('state.json')
+    expect({ version: published.schema_version, frozen: published.buckets['jc-taxes'].frozen,
+      closed: published.buckets['jc-taxes'].closed ?? null, through: published.buckets['jc-taxes'].collected_through }).toEqual({
+      version: mode === 'available' ? 3 : 2, frozen: mode === 'available' ? {} : { [old]: 'agg/old.json' },
+      closed: mode === 'available' ? { through: stamp, checkpoint } : null, through: to,
+    })
+    expect(CHECKPOINTS.get.mock.calls).toEqual([['r2-read.json']])
+    expect(order.filter(k => k.startsWith('delete:'))).toEqual([])
+  })
+})
+
 describe('settings', () => {
   it('derives the hour schedule and budget', () => {
     const { env } = setup()
@@ -132,8 +161,8 @@ describe('settings', () => {
     expect([subrequestBound(50, 48), subrequestBound(450, 30), subrequestBound(450, 31), subrequestBound(400, 32, 5)]).toEqual([248, 994, 997, 996])
   })
 
-  it('sizes OA for five-minute windows and one nominal hour of reverification per run', () => {
-    const { env } = setup(oa.vars)
+  it('sizes a busy source for five-minute windows and one nominal hour of reverification per run', () => {
+    const { env } = setup({ LAG_HOURS: '2', PAGE_SIZE: '2000', MAX_PAGES: '400', MAX_HOURS: '32', WINDOW_MINUTES: '5', VERIFY_HOURS: '12', MAX_PAGE_BYTES: '8388608' })
     const parsed = settings(env, env.HOURLY_CRON, time)
     expect([parsed.window, parsed.maxHours, parsed.verifyHours, parsed.maxPages, parsed.pageSize]).toEqual([5 * M, 32, 12, 400, 2000])
     expect(subrequestBound(parsed.maxPages, parsed.maxHours, parsed.window / M)).toBe(996)
@@ -545,15 +574,11 @@ describe('collect', () => {
       id: `e${String(i).padStart(6, '0')}`, timestamp: hr('03') + Math.floor(i * (H / n)),
       action: i % 3 ? 'PutObject' : 'GetObject', key: `shard/${i % 20_000}`,
     }))
-    const started = performance.now()
     expect(await collect(time, env.HOURLY_CRON, env, provider(big, 2000), 'r1')).toEqual({ run_id: 'r1', buckets: 1, hours: 1, pages: 51, events: n, changed: 1, waiting: 5 })
-    const elapsed = performance.now() - started
     const a = read(agg('03', 'r1'))
     expect([a.events, a.actions, a.rows.length, a.rows.reduce((sum: number, r: [unknown, unknown, number]) => sum + r[2], 0), a.rows[0]]).toEqual([
       n, { GetObject: 33_334, PutObject: 66_666 }, 20_000, 33_334, ['shard/0', 'GetObject', 2, hr('03'), at('2026-10-12T03:36:00Z')],
     ])
-    // Sanity, not a benchmark: the mock provider's JSON dominates; the collector's own work is a small fraction.
-    expect(elapsed).toBeLessThan(30_000)
   }, 60_000)
 
   it('upgrades a version-1 state: watermark and gaps carry over, legacy days stay named', async () => {

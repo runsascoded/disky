@@ -691,6 +691,7 @@ def test_r2_parse_sums_disjoint_hourly_and_adaptive_windows_once(tmp_path: Path)
 
 @pytest.mark.parametrize('state, message', [
     ({'schema_version': 1, 'buckets': {}}, 'r2 state: unknown schema_version 1'),
+    ({'schema_version': 3, 'buckets': {}}, 'r2 state: compacted history requires its durable read checkpoint'),
     (_r2_state(b={'hours': {}, 'legacy_days': {'2026-10-10': 'agg/b/2026-10-10/r.json'}}),
      "r2 state: b has version-1 per-day aggregates (legacy_days), which this parser doesn't read"),
 ])

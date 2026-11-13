@@ -9,7 +9,7 @@ import pytest
 from click.testing import CliRunner
 
 from dt_cloud.cli import main
-from dt_cloud.r2_checkpoint import META, parity, sync
+from dt_cloud.r2_checkpoint import META, parity, receipt, sync
 
 UTC = timezone.utc
 CUT = datetime(2026, 11, 8, tzinfo=UTC)
@@ -226,3 +226,73 @@ def test_gcs_checkpoint_publication_is_conditional(tmp_path: Path, monkeypatch) 
         with pytest.raises(ValueError, match='^checkpoint changed concurrently$'):
             publish(candidate)
     assert calls == [('read', 17), ('write', 17, b'new')]
+
+
+def test_compacted_history_uses_checkpoint_and_keeps_new_windows_exact(tmp_path: Path) -> None:
+    from disk_tree.access.parsers.r2 import state_aggs
+
+    root = tmp_path / 'archive'
+    old = hour(root, 'b1', CUT - timedelta(days=10), [('hot', 'GetObject', 3)])
+    recent = hour(root, 'b1', CUT - timedelta(hours=3), [('hot', 'GetObject', 5)])
+    src = state(root, {'b1': [old]}, {'b1': [recent]})
+    checkpoint, out = str(tmp_path / 'closed.parquet'), tmp_path / 'out.parquet'
+    sync(src, checkpoint, CUT, out, tmp_path / 'one', verify=True)
+    expected = totals(out)
+    doc = json.loads(Path(src).read_text())
+    doc['schema_version'] = 3
+    doc['buckets']['b1']['closed'] = {'through': (CUT - timedelta(days=10)).timestamp(), 'checkpoint': checkpoint}
+    doc['buckets']['b1']['frozen'] = {}
+    Path(src).write_text(json.dumps(doc))
+    (root / old[1]).unlink()
+    result = sync(src, checkpoint, CUT, out, tmp_path / 'two')
+    assert (result['downloaded'], result['new_frozen'], result['closed_rows']) == (1, 0, 1)
+    assert totals(out) == expected
+    with pytest.raises(ValueError, match='^r2 state: compacted history requires its durable read checkpoint$'):
+        state_aggs(doc, CUT)
+    with pytest.raises(ValueError, match='^read checkpoint: full-history verification requires original, uncompacted state$'):
+        sync(src, checkpoint, CUT, out, tmp_path / 'verify', verify=True)
+
+
+@pytest.mark.parametrize('change', ['missing', 'ahead', 'other'])
+def test_compacted_state_refuses_missing_lagging_or_other_checkpoint(tmp_path: Path, change: str) -> None:
+    root = tmp_path / 'archive'
+    old = hour(root, 'b1', CUT - timedelta(days=10), [('hot', 'GetObject', 3)])
+    src = state(root, {'b1': [old]}, {})
+    checkpoint, out = tmp_path / 'closed.parquet', tmp_path / 'out.parquet'
+    sync(src, str(checkpoint), CUT, out, tmp_path / 'one', verify=True)
+    expected = out.read_bytes()
+    doc = json.loads(Path(src).read_text())
+    doc['schema_version'] = 3
+    doc['buckets']['b1'].update(frozen={}, closed={
+        'through': (CUT - timedelta(days=9 if change == 'ahead' else 10)).timestamp(),
+        'checkpoint': str(tmp_path / 'other.parquet') if change == 'other' else str(checkpoint),
+    })
+    Path(src).write_text(json.dumps(doc))
+    if change == 'missing':
+        checkpoint.unlink()
+    with pytest.raises(ValueError, match='^r2 state: b1 compacted history is ahead of or differs from the read checkpoint$'):
+        sync(src, str(checkpoint), CUT, out, tmp_path / 'two')
+    assert out.read_bytes() == expected
+
+
+def test_receipt_requires_verified_bootstrap_and_survives_steady_update(tmp_path: Path) -> None:
+    from hashlib import sha256
+
+    root = tmp_path / 'archive'
+    old = hour(root, 'b1', CUT - timedelta(days=10), [('hot', 'GetObject', 3)])
+    src = state(root, {'b1': [old]}, {})
+    checkpoint, out = tmp_path / 'closed.parquet', tmp_path / 'out.parquet'
+    sync(src, str(checkpoint), CUT, out, tmp_path / 'one')
+    with pytest.raises(ValueError, match='^read checkpoint receipt requires a passing full-history bootstrap comparison$'):
+        receipt(str(checkpoint), tmp_path / 'unverified')
+    sync(src, str(checkpoint), CUT, out, tmp_path / 'two', verify=True)
+    sync(src, str(checkpoint), CUT, out, tmp_path / 'three')
+    expected = {'schema_version': 1, 'kind': 'r2-read-checkpoint', 'source': src, 'account': 'account',
+                'checkpoint': {'uri': str(checkpoint), 'generation': None, 'sha256': sha256(checkpoint.read_bytes()).hexdigest()},
+                'cursors': {'b1': (CUT - timedelta(days=10)).timestamp()}}
+    assert receipt(str(checkpoint), tmp_path / 'receipt') == expected
+    destination = tmp_path / 'receipt.json'
+    result = CliRunner().invoke(main, ['access', 'r2-receipt', '-c', str(checkpoint), '-o', str(destination), '-w', str(tmp_path / 'cli')])
+    assert result.exit_code == 0, result.exception
+    assert json.loads(destination.read_text()) == expected
+    assert json.loads(result.stdout) == {'out': str(destination), 'cursors': expected['cursors'], 'generation': None}
