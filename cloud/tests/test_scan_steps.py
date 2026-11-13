@@ -1780,6 +1780,23 @@ def test_mem_budget(tmp_path, monkeypatch, files, want):
     assert S.mem_budget(tmp_path) == want
 
 
+def test_mem_budget_follows_dt_mem(tmp_path, monkeypatch):
+    """`$DT_MEM` stands in for the machine's RAM (Fargate's microVM reports more than the task has), still capped by a
+    lower cgroup limit; a bad value is the step's failure."""
+    monkeypatch.setattr(os, "sysconf", lambda k: {"SC_PAGE_SIZE": 4096, "SC_PHYS_PAGES": 64 * 2**30 // 4096}[k])
+    (tmp_path / "memory.max").write_text("max\n")
+
+    def ctx_with(**env: str) -> S.Ctx:
+        c = S.Ctx.__new__(S.Ctx)
+        c.env = {"DT_CGROUP": str(tmp_path), **env}
+        return c
+
+    assert [ctx_with().mem, ctx_with(DT_MEM="16GiB").mem, S.mem_budget(tmp_path, env={"DT_MEM": "14GiB"})] == ["38GB", "9GB", "8GB"]
+    with pytest.raises(S.StepFailed) as e:
+        ctx_with(DT_MEM="lots").mem
+    assert (e.value.rc, str(e.value)) == (2, "$DT_MEM='lots': not a memory size (e.g. 16GiB)")
+
+
 def test_import_args_mem(tmp_path, env, monkeypatch):
     """`{mem}` in `import_args` is the task machine's DuckDB budget (a profile shared by machines of every size)."""
     monkeypatch.setattr(S.Ctx, "nproc", property(lambda self: 4))

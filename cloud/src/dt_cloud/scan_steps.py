@@ -69,6 +69,7 @@ from disk_tree.env import name as env_name
 from .heartbeat import Tail, run_teed, set_stage
 from .index_parts import PART_JSON, Part, part_ids, split_parts
 from .scan_profile import ScanProfile
+from .task_size import NPROC_ENV, task_cpus, task_ram
 
 
 def err(*a: object) -> None:
@@ -185,9 +186,6 @@ class _Printer:
         return []
 
 
-#: The task's CPU count, set by a job definition whose container can't read it (`Ctx.nproc`): Fargate's `cpu.max` reads
-#: `max` (the quota is the microVM's, not the cgroup's) while its affinity lists the host's CPUs.
-NPROC_ENV = "DT_NPROC"
 
 
 def cpu_quota(cgroup: Path) -> int | None:
@@ -211,10 +209,10 @@ def cpu_quota(cgroup: Path) -> int | None:
 MEM_SHARE = 0.6
 
 
-def mem_budget(cgroup: Path, share: float = MEM_SHARE) -> str:
-    """`share` of the task's memory as a DuckDB size (`"38GB"`): the machine's RAM, or the cgroup's limit when lower
-    (v2 `memory.max`, v1 `memory.limit_in_bytes`; v1's unlimited is ≥ 2^60)."""
-    total = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+def mem_budget(cgroup: Path, share: float = MEM_SHARE, env: Mapping[str, str] | None = None) -> str:
+    """`share` of the task's memory as a DuckDB size (`"38GB"`): `$DT_MEM` or the machine's RAM (`task_size.task_ram`),
+    or the cgroup's limit when lower (v2 `memory.max`, v1 `memory.limit_in_bytes`; v1's unlimited is ≥ 2^60)."""
+    total = task_ram(env)
     for f in ("memory.max", "memory/memory.limit_in_bytes"):
         try:
             limit = int((cgroup / f).read_text())
@@ -331,17 +329,21 @@ class Ctx:
     def nproc(self) -> int:
         """The task's CPUs: `$DT_NPROC` when set (`NPROC_ENV`), else the CPUs it may run on, capped by its cgroup's quota
         (`cpu_quota`). What `{nproc}` fills and the steps size their threads by."""
-        if v := (self.env.get(NPROC_ENV) or "").strip():
-            if not v.isdigit() or int(v) < 1:
-                raise StepFailed(2, f"${NPROC_ENV}={v!r}: not a positive integer")
-            return int(v)
+        if (self.env.get(NPROC_ENV) or "").strip():
+            try:
+                return task_cpus(self.env)
+            except ValueError as e:
+                raise StepFailed(2, str(e)) from None
         cpus = len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else os.cpu_count() or 1
         quota = cpu_quota(Path(self.env.get("DT_CGROUP") or "/sys/fs/cgroup"))
         return min(cpus, quota) if quota else cpus
 
     @property
     def mem(self) -> str:
-        return mem_budget(Path(self.env.get("DT_CGROUP") or "/sys/fs/cgroup"))
+        try:
+            return mem_budget(Path(self.env.get("DT_CGROUP") or "/sys/fs/cgroup"), env=self.env)
+        except ValueError as e:
+            raise StepFailed(2, str(e)) from None
 
     def fill_env(self, template: str) -> str:
         """`template` with each `{env:NAME}` filled from the task's env (a step fails on an unset one)."""

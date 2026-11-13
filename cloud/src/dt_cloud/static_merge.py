@@ -49,6 +49,7 @@ from .maint_runs import NULL, Recorder, from_env
 from .static_names import PREFIX, connect, err, q
 from .static_profile import data_bucket, scratch_bucket
 from .resource_monitor import monitor_resources, resource_stage
+from .task_size import task_cpus, task_ram
 
 #: The fraction of the machine's memory the concurrent tier merges' DuckDB limits sum to.
 MEM_FRACTION = 0.75
@@ -99,7 +100,7 @@ def tier_resources(tiers: list[str], ram: int, cpus: int, concurrent: bool) -> d
 
 
 def _machine() -> tuple[int, int]:
-    return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES"), os.cpu_count() or 1
+    return task_ram(), task_cpus()
 
 
 @monitor_resources(prefix="MERGE_RESOURCE")
@@ -1096,7 +1097,7 @@ def write_shard_cmd(checkpoint, index, jobs, plan, tmp, code) -> None:
     listing = ck.store.listing(ck.key("measured"))
     fetch_files(ck, {k: work / "in" / k for k in need}, listing, "write-shard: sorted ranges", label="write-shard")
     out = work / "out"
-    pool = ProcessPoolExecutor(jobs or os.cpu_count() or 1, mp_context=get_context("spawn"), initializer=sd._writer_init)
+    pool = ProcessPoolExecutor(jobs or task_cpus(), mp_context=get_context("spawn"), initializer=sd._writer_init)
     with pool:
         futs = {pool.submit(sd._write_chunk_file, [(work / "in" / k, a, b) for k, a, b in f["spans"]], sr.ROOT_SCHEMA, f["lo"], f["hi"], out,
                             f["name"], "path", ["q", "usr"], rg): u for u, f in files.items()}
