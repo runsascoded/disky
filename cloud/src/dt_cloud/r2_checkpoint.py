@@ -74,7 +74,8 @@ def publish_receipt(doc: dict, destination: str) -> None:
     from urllib.parse import urlparse
     import boto3
     from botocore.exceptions import ClientError
-    from disk_tree.blobfs import bucket_profile, r2_endpoint
+    from disk_tree.blobfs import r2_endpoint
+    from .secrets import env_secret
 
     url = urlparse(destination)
     key = url.path.lstrip('/')
@@ -87,7 +88,10 @@ def publish_receipt(doc: dict, destination: str) -> None:
     generation = doc['checkpoint']['generation']
     if not isinstance(generation, str) or not generation.isdecimal():
         raise ValueError('receipt publication requires a durable GCS checkpoint generation')
-    client = boto3.Session(profile_name=bucket_profile(url.netloc)).client('s3', endpoint_url=endpoint, region_name='auto')
+    access, secret = env_secret('RECEIPT_ACCESS_KEY_ID'), env_secret('RECEIPT_SECRET_ACCESS_KEY')
+    if not access or not secret:
+        raise ValueError('receipt publication requires its dedicated RECEIPT_ACCESS_KEY_ID and RECEIPT_SECRET_ACCESS_KEY')
+    client = boto3.Session(aws_access_key_id=access, aws_secret_access_key=secret).client('s3', endpoint_url=endpoint, region_name='auto')
     target = {'Bucket': url.netloc, 'Key': key}
 
     def body(response: dict) -> bytes:

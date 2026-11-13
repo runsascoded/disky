@@ -618,7 +618,7 @@ def _receipt_check(p: ScanProfile) -> list[str]:
     return [f'options.access-r2-receipt.{key}: required' for key in ('checkpoint', 'publish') if not o.get(key)]
 
 
-@step('access-r2-receipt', core=False, stage='pre', soft=True, options={'checkpoint': str, 'publish': str},
+@step('access-r2-receipt', core=False, stage='pre', soft=True, options={'checkpoint': str, 'publish': str, 'endpoint': str},
       requires=_receipt_check, side=True, converges=True, leaves='collector checkpoint receipt behind')
 def access_r2_receipt(ctx: Ctx, arg: str | None) -> None:
     """Publish a verified durable checkpoint receipt with this step's own bucket-scoped writer credential.
@@ -626,9 +626,11 @@ def access_r2_receipt(ctx: Ctx, arg: str | None) -> None:
     if ctx.reproc:
         return
     work = ctx.work / 'access-r2-receipt'
+    endpoint = ctx.opt('access-r2-receipt', 'endpoint') or ctx.env.get('R2_ENDPOINT')
     with ctx.phase('access-r2-receipt'):
         ctx.sh(['dt-cloud', 'access', 'r2-receipt', '-c', ctx.opt('access-r2-receipt', 'checkpoint'),
                 '-o', work / 'receipt.json', '-p', ctx.opt('access-r2-receipt', 'publish'), '-w', work / 'readback'],
+               env={env_name('R2_ENDPOINT_URL'): str(endpoint)} if endpoint else None,
                fatal=False, warn='checkpoint receipt publication failed (collector keeps its history)')
 
 

@@ -310,7 +310,12 @@ def test_receipt_publication_is_monotonic_conditional_and_read_back(monkeypatch,
 
     client = boto3.client('s3', endpoint_url='https://receipt.example.org', region_name='auto',
                           aws_access_key_id='fixture', aws_secret_access_key='fixture')
-    monkeypatch.setattr(boto3, 'Session', lambda **_: SimpleNamespace(client=lambda *args, **kw: client))
+    monkeypatch.setenv('RECEIPT_ACCESS_KEY_ID', 'receipt-fixture')
+    monkeypatch.setenv('RECEIPT_SECRET_ACCESS_KEY', 'receipt-secret-fixture')
+    def session(**kwargs):
+        assert kwargs == {'aws_access_key_id': 'receipt-fixture', 'aws_secret_access_key': 'receipt-secret-fixture'}
+        return SimpleNamespace(client=lambda *args, **kw: client)
+    monkeypatch.setattr(boto3, 'Session', session)
     monkeypatch.setattr(blobfs, 'r2_endpoint', lambda _: 'https://receipt.example.org')
     monkeypatch.setattr(blobfs, 'bucket_profile', lambda _: None)
     doc = {'schema_version': 1, 'kind': 'r2-read-checkpoint', 'account': 'own', 'source': 'r2://archive/state.json',
@@ -343,3 +348,15 @@ def test_receipt_publication_is_monotonic_conditional_and_read_back(monkeypatch,
         else:
             assert publish_receipt(doc, 'r2://own-receipts/r2-read.json') is None
         stub.assert_no_pending_responses()
+
+
+def test_receipt_publication_never_falls_back_to_an_ambient_writer(monkeypatch) -> None:
+    from disk_tree import blobfs
+
+    monkeypatch.setattr(blobfs, 'r2_endpoint', lambda _: 'https://receipt.example.org')
+    monkeypatch.delenv('RECEIPT_ACCESS_KEY_ID', raising=False)
+    monkeypatch.delenv('RECEIPT_SECRET_ACCESS_KEY', raising=False)
+    monkeypatch.setenv('AWS_ACCESS_KEY_ID', 'unrelated-index-writer')
+    monkeypatch.setenv('AWS_SECRET_ACCESS_KEY', 'unrelated-secret')
+    with pytest.raises(ValueError, match='^receipt publication requires its dedicated RECEIPT_ACCESS_KEY_ID and RECEIPT_SECRET_ACCESS_KEY$'):
+        publish_receipt({'checkpoint': {'generation': '18'}}, 'r2://own-receipts/r2-read.json')
