@@ -29,6 +29,13 @@ def test_browser_url_encodes_as_the_page_does():
     assert browser_url(r) == f"/api/subtree?cv={CV}&date=2026-09-15T1201&path=b%20k%2Fa%3D1%2Fit's%20(x)!~*-_.&w=1152&h=307&depth=1"
 
 
+def test_stable_reader_mode_is_explicit_in_requests_and_report_names():
+    assert requests_for([{'from': 'f', 'to': 't', 'path': 'm'}], [], 1152, 307, mode='max') == [
+        Req('diff f→t /m dm=max', 'diff:d1', '/api/diff', {'cv': CV, 'from': 'f', 'to': 't', 'path': 'm', 'w': 1152, 'h': 307, 'dm': 'max', 'depth': 1}),
+        Req('diff f→t /m dm=max', 'diff:full', '/api/diff', {'cv': CV, 'from': 'f', 'to': 't', 'path': 'm', 'w': 1152, 'h': 307, 'dm': 'max'}),
+    ]
+
+
 def test_a_secondary_stores_requests_name_it():
     assert requests_for([{"from": "f", "to": "t", "path": "m"}], ["d:"], 640, 307, "meta") == [
         Req("diff f→t /m", "diff:d1", "/api/diff", {"cv": CV, "store": "meta", "from": "f", "to": "t", "path": "m", "w": 640, "h": 307, "dm": "delta", "depth": 1}),
@@ -172,6 +179,13 @@ def test_command_times_the_summary_with_s(monkeypatch):
         (host, "/api/diff", 1152, None, None, 1, phase)
         for hosts in (("a", "b"), ("b", "a")) for phase in ("cold", "warm") for host in hosts
     ]
+
+
+def test_command_selects_the_stable_reader(monkeypatch):
+    h = Hosts(100)
+    result = run(monkeypatch, h, '-m', 'max', '-w', '1152', CASES)
+    assert result.exit_code == 0, result.output
+    assert [call[4] for call in h.calls] == ['max'] * 16
 
 
 def test_command_slower_b_exits_2(monkeypatch):
