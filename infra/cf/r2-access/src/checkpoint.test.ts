@@ -22,12 +22,14 @@ describe('durable checkpoint receipts', () => {
   it('compacts only frozen windows covered by the receipt and records omitted history', () => {
     const buckets = { b: { frozen: { '2026-10-12T07': 'a', '2026-10-12T08:00': 'b', '2026-10-12T08:05': 'c' } },
       noProof: { frozen: { '2026-10-12T07': 'd' } },
+      constructor: { frozen: { '2026-10-12T07': 'unproved' } },
       legacy: { frozen: { '2026-10-12T07': 'e' }, legacy_days: { '2026-10-01': 'old-day' } } }
     const r = checkpointReceipt(valid(), 'own', source, checkpoint)!
     r.cursors.legacy = cursor
     expect(compactHistory(buckets, r)).toBe(2)
     expect(buckets).toEqual({ b: { frozen: { '2026-10-12T08:05': 'c' }, closed: { through: cursor, checkpoint } },
       noProof: { frozen: { '2026-10-12T07': 'd' } },
+      constructor: { frozen: { '2026-10-12T07': 'unproved' } },
       legacy: { frozen: { '2026-10-12T07': 'e' }, legacy_days: { '2026-10-01': 'old-day' } } })
   })
 
