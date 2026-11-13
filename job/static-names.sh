@@ -140,7 +140,7 @@ stage-src) stage_src ;;
 resume-after)
   WAIT_JOB=${2:?JOB}
   export SCAN_ID=${3:?SCAN}
-  : "${IMAGE:?no image: set the profile's image, or IMAGE}"
+  : "${IMAGE:?no image: set image in the profile, or IMAGE}"
   wait_arg=$(printf '%q' "$WAIT_JOB")
   scan_arg=$(printf '%q' "$SCAN_ID")
   image_arg=$(printf '%q' "$IMAGE")
@@ -188,7 +188,7 @@ run)
   KIND=${2:?KIND}
   TASKS=${3:?TASKS}
   shift 3
-  : "${IMAGE:?no image: set the profile's image, or IMAGE}"
+  : "${IMAGE:?no image: set image in the profile, or IMAGE}"
   JOB_ID=${JOB_ID:-sn-$KIND-$(date -u +%Y%m%d-%H%M%S)}
   CPU=$(( ${MACHINE##*-} * 1000 ))
   MEM_MIB=$(( ${MACHINE##*-} * 7700 ))
