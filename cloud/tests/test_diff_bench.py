@@ -201,3 +201,21 @@ def test_command_refuses_one_host(monkeypatch):
     monkeypatch.setenv("SITE_TOKEN", "t")
     r = CliRunner().invoke(diff_bench.diff_bench_cmd, ["-a", "x", "-b", "x", "[]"])
     assert (r.exit_code, r.output) == (1, "A and B share an edge cache: B's cold reads would be A's warm ones\n")
+
+
+def test_command_does_not_hide_first_request_failures_with_retries(monkeypatch, tmp_path):
+    import csv
+
+    attempts = []
+
+    def fetch(host, q, token, retries=6, route='/api/diff'):
+        attempts.append(retries)
+        return (503, 'not ready', 0.01, '', '-') if retries == 1 else (200, {}, 0.01, '', '-')
+
+    report = tmp_path / 'samples.tsv'
+    result = run(monkeypatch, fetch, '-w', '1152', '-v', 'd:', '-o', str(report))
+    assert result.exit_code == 1, result.output
+    assert attempts == [1] * 8
+    with report.open() as f:
+        assert [int(row['status']) for row in csv.DictReader(f, delimiter='\t')] == [503] * 8
+    assert result.stdout.splitlines()[-1] == '8 errors, 0 disagreeing answers, 4 cold samples the edge answered (dropped)'

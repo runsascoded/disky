@@ -210,7 +210,7 @@ def diff_bench_cmd(host_a, host_b, height, buckets, out, alpha, summary, store, 
             i += 1
             for phase in ("cold", "warm"):
                 for host in hosts:
-                    status, body, secs, st, cache = fetch(host, r.q, token, route=r.route)
+                    status, body, secs, st, cache = fetch(host, r.q, token, retries=1, route=r.route)
                     s = Sample(r.name, r.kind, w, h, host, phase, status, secs, st_total(st), cache,
                                answer_digest(r.route, body) if status == 200 and isinstance(body, dict) else str(body)[:80])
                     samples.append(s)
