@@ -138,11 +138,31 @@ Raw lines: `bench/full-scan/results/2026-11-12.jsonl` (one per store load and pe
 
 ### Verified against the oracle
 
-<!-- RESULTS:VERIFIED -->
+Every answer the scanner gave equals the oracle's exactly (`oracle/oracle.py`; nodes, bytes, file counts, remainders):
+- **gcs:** 96 / 96 queries (the 69 of the mix plus 27 `@dirs` twins), 0 different. The oracle combined 717,920,013 object versions itself, the scanner's object-row count to the version.
+- **Fixtures:** all nine interval-store generations (`site/functions/_lib/fixtures/iv/interval-store/g1`–`g9`: base-only, base + runs, merged-run revisions, unowned, JSON owner slices, inconsistent directory totals), 9,504 queries from `fsb plan -x` (every scan and consecutive diff × every folder × each filter, at depths 1–3 and four thresholds, 1,584 of them `@dirs`), 0 different (`tests/test_fixtures.py`, `check-fixtures`).
+- **Synthetic:** every scale's mix (below).
+- Each answer also equals itself across thread counts (1 and 16) and across the five warm runs (`fsb bench` fails otherwise).
+- On gcs every unfiltered view's two answers (object sums, directory rows) are equal too: 27 / 27 pairs (`oracle/dirs_vs_files.py`), so gcs's directory totals add up exactly at these scans.
 
 ### gcs
 
-<!-- RESULTS:GCS -->
+Generation `2026-10-09b.g3.c001` + 2 runs, 135 scans; on the n2-highmem-16 VM (8 cores × 2 threads, x86). Queries at the newest scan (`2026-11-12T0702`) unless named; "a month back" is `2026-10-13T0702`; diffs are one day (`2026-11-11T2052` →) and a month. `depth` 3 below the folder, `min_ppm` 500 (each node ≥ 0.05% of the view).
+
+**Load (the restart cost).** 1,354,236,524 version rows read (base 1,341,950,870 + runs 12,285,654), 6,034,826 of them another tier's copy of a version (`combineLive`). Packed: 967,126,225 rows = 717,920,013 object versions + 249,206,212 directories (holding 630,281,685 directory versions aside), 948,770,533 paths, 172,027,281 distinct names, 40 owners, 0 objects with more than one owner or class slice. Copy from GCS 30 s; load 359 s (read and combine the levels 228 s, dictionary 64 s, pre-order 28 s, scatter 39 s); peak RSS 110 GB (the load's working set, not the index's; it fits the 125 GB VM with little to spare, so the loader's peak is what sizes a loading box today). The first, serial version of the pre-order took 280 s of a 786 s load.
+
+<!-- RESULTS:GCS-LOAD-TABLE -->
+
+<!-- RESULTS:GCS-QUERY-TABLE -->
+
+<!-- RESULTS:GCS-KIND-TABLE -->
+
+What it shows:
+- **A plain view of the whole fleet reads ~1B rows in under half a second on 16 threads**: the root at the newest scan 3.2 s on one thread (≈ 305M rows/s/thread, ~4 GB/s of the 14 bytes/row it reads), 0.45 s on 16 (7× on 8 cores). Any scan costs the same (a month back: 0.45 s), and a diff 20% more (0.55 s), because a version's liveness is two u16 compares whatever the scan.
+- **Filters cost per row**: an owner, class or staged scope 0.55–0.8 s at the root on 16 threads. A search 1.2 s: a dictionary scan (93 ms on 16 threads over 10 GB of names) and a bitset lookup per path, which misses cache (172M names, a 21 MB bitset per atom); two atoms 1.4 s, a path term 2.2 s, a regex 3.7 s in the first run (its dictionary pass didn't scale: one shared regex across threads; fixed in `dict.rs`, see the rerun's table).
+- **Folders scale with their rows**: a bucket 10–170 ms, a depth-3 folder 140 ms, a depth-6 one 10 ms on 16 threads. The cost is the folder's rows, not the answer's nodes.
+- **The directory-total view is 30× faster where it applies**: the root 14 ms (it visits the 292K paths of the depth window, not 967M rows), a diff 18 ms, and equal to the object sums on every gcs view. It is bound by the window's paths: a window holding a flat directory of 31M objects (`bucket3@dirs`) or six levels of the fleet (`root-depth6@dirs`, 254M paths) took 1.1 s and 10 s in the first run's serial walk; the walk now runs in chunks (rerun's table).
+- **Against the spec's targets on the gcs root** (p50 ≤ 0.5 s, max ≤ 2 s): plain views and diffs meet them on 16 threads (0.45 / 0.55 s; 14 / 18 ms read from directory rows). Searches and scoped views don't yet: p50 over the whole mix ~0.6 s at the root, search ~1.2–2.2 s.
 
 ### Synthetic scaling
 
@@ -157,6 +177,14 @@ Raw lines: `bench/full-scan/results/2026-11-12.jsonl` (one per store load and pe
 - Its monthly cost at list price, on-demand, committed and spot.
 - **Spot needs a fallback** while preempted: the Worker's current reads.
 - **Lambda fan-out:** shards of 250 MB in path order; the root's shard count; cold load time measured from S3 on one shard; warm scan time per shard; cost per root query.
+
+Filled (2026-11-12), from gcs's measured load:
+- **Resident bytes, gcs:** 48.3 GB for 1.35B version rows (967M packed rows). Of it, 23.2 GB is what a pass reads (24 B/row: `name` 4, `depth` 1, `end` 4, `flags` 1, `size` 8, `vf`/`vt` 4, `owner` 2), 12.5 GB the name dictionary (172M names), 12.6 GB the directory versions only the directory-total view reads. Without that view: 35.7 GB. Per object version, 67 B all in (50 B without directory versions).
+- **OA's fleets together:** not measured; cw's, hf's and r2's stores' version counts are needed (the packed size is ~36 B per version row read, ~50 B per packed row with the directory view).
+- **Machine:** the index fits a 64 GB box, but the loader as built peaks at 110 GB, so today a box that loads in place needs ~128 GB (n2-highmem-16, the bench VM); a 64 GB server would load a packed file written elsewhere (not built). Threads: the gcs root's plain view meets p50 ≤ 0.5 s at 8 cores / 16 threads (0.45 s); scaling was ~7× from 1 to 16 threads, so 4 cores would be ~0.9 s. From directory rows, plain views are milliseconds on any of these. Search and scoped views need more (1.2–2.2 s at the root on 16 threads).
+- **Monthly cost:** not looked up here. For orientation only: n2-highmem-16 lists at roughly $0.95/h on demand (≈ $690/month), spot a fraction of that; check current list, committed-use and spot prices before deciding.
+- **Spot fallback:** unchanged (the Worker's current reads); the restart cost is the copy (30 s) plus the load (6 min).
+- **Lambda fan-out:** not measured.
 
 ## Not in scope
 

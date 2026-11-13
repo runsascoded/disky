@@ -358,6 +358,21 @@ fn run_dirs(idx: &Index, c: &Compiled, q: &Query, pool: &rayon::ThreadPool, t0: 
                 let mut out = ChunkOut::default();
                 let mut visited = 0u64;
                 let mut r = lo;
+                // A chunk starting inside a window node's subtree below the window (or inside its versions) skips
+                // past it at once: its ancestor chain says which.
+                if lo > c.lo {
+                    for &g in &idx.chain(lo) {
+                        let g = g as usize;
+                        let d = idx.depth[g];
+                        if d > c.dp && (d == c.maxd || idx.flags[g] & FILE != 0) {
+                            r = idx.end[g] as usize + 1;
+                            break;
+                        }
+                        if d > c.dp && idx.group_end(g) > r {
+                            r = idx.group_end(g);
+                        }
+                    }
+                }
                 while r < hi {
                     let d = idx.depth[r];
                     if d > c.maxd || idx.flags[r] & CONT != 0 {
