@@ -1068,19 +1068,13 @@ describe('D1', () => {
         const inMatch = (p: string) => { for (let a = p; a.length > P.length; a = parent(a)) { if (q(t)(a)) return true; if (a === '') break } return false }
         const inRoots = (s: typeof sa, c: string) => [...s.roots].some(r => c.startsWith(`${r}/`))
         let lookups = 0
-        // …and none under a path a lookup found the scan has no row for: no row for the name either.
-        const gone = new Map([[sa, new Set<string>()], [sb, new Set<string>()]])
         const walk = (p: string, l?: 1 | 2) => {
           const x = at(sa, p), y = at(sb, p)
           const names = [...new Set([...sa.kept, ...sb.kept])].filter(c => parent(c) === p).sort()
           const expand = !!(x || y) && st(x, y) !== 'unchanged' && names.length > 0
           if (p !== P) rows.push([rel(p), st(x, y), x?.[0] ?? 0, y?.[0] ?? 0, x?.[1] ?? 0, y?.[1] ?? 0, expand, ...(l ? [l] : [])])
           if (!expand) return
-          for (const s of [sa, sb]) for (const c of names.filter(c => !s.kept.has(c) && !s.read.has(c) && inRoots(s, c))) {
-            if (gone.get(s)!.has(p)) { gone.get(s)!.add(c); continue }
-            lookups++
-            if (!scanRows.get(s === sa ? A : B)!.has(c)) gone.get(s)!.add(c)
-          }
+          for (const s of [sa, sb]) lookups += names.filter(c => !s.kept.has(c) && !s.read.has(c) && inRoots(s, c)).length
           for (const c of names) walk(c, at(sa, c) && !sa.kept.has(c) && inMatch(p) ? 1 : at(sb, c) && !sb.kept.has(c) && inMatch(p) ? 2 : undefined)
           const sum = (s: typeof sa) => names.reduce<[number, number]>((r, c) => { const v = at(s, c); return v ? [r[0] + v[0], r[1] + v[1]] : r }, [0, 0])
           const ra: [number, number] = [(x?.[0] ?? 0) - sum(sa)[0], (x?.[1] ?? 0) - sum(sa)[1]], rb: [number, number] = [(y?.[0] ?? 0) - sum(sb)[0], (y?.[1] ?? 0) - sum(sb)[1]]
