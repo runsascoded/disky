@@ -71,10 +71,11 @@ export function AuthGate({ children }: { children: ReactNode }) {
 // cookies Google sign-ins leave, up to five, surviving sign-out) gets a row per
 // remembered account instead (`RememberedAccount`): the redirect flow
 // (`/auth/google?account=<it>`) with `login_hint`, which skips the chooser, plus
-// "Use another Google account" for it. Google's prompt with auto-select signs a
-// returning visitor in with no click at all, once their account has granted
-// this client through the button or prompt. Where Google's script can't load,
-// the button degrades to the plain redirect.
+// "Use another Google account" for it. No auto-surfacing prompt: Google's button
+// already names the account ("Continue as <you>", one click), and the prompt
+// beside it opened Chrome's account chooser over the wall wherever the browser
+// holds more than one Google account (auto-select needs exactly one). Where
+// Google's script can't load, the button degrades to the plain redirect.
 // With OA's broker configured, the middleware has already tried it silently by the time
 // this shows (`functions/_lib/silentSignIn.ts`): the wall is what's left when that fails.
 // Its button names the account this browser last signed in as through it ("Continue as <name>", face and address,
@@ -147,7 +148,6 @@ function LoginWall({ next, error }: { next?: string; error?: string }) {
               nonceEndpoint: '/auth/google/onetap/nonce',
               verifyEndpoint: '/auth/google/onetap',
               onDenied,
-              prompt: { autoSelect: true },
               className: 'signin-onetap',
               // GSI takes a fixed pixel width (≤ 400): fill the card's inner
               // width (440 max − 2×32 padding), less on a narrow phone.
