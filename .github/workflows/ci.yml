@@ -33,8 +33,8 @@ jobs:
       - run: pnpm --dir infra/cf/r2-access test
       - run: pnpm --dir infra/cf/r2-access build
       - uses: astral-sh/setup-uv@v4
-      - run: uv sync --frozen --all-packages --all-extras --all-groups
-      - run: uv run --no-sync pytest infra/tests/test_r2_access_stack.py -v
+      - run: uv sync --project infra --frozen --group test --python 3.12
+      - run: uv run --project infra --no-sync pytest infra/tests/test_r2_access_stack.py -v
 
   test:
     if: github.event_name != 'workflow_dispatch'
