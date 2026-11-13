@@ -25,7 +25,7 @@ vi.mock('./prefixes.js', async orig => ({
     if (prefixes.length > MAX_PREFIXES) throw new Error(`lookup too wide: ${prefixes.length} prefixes`)
     lookups.push(prefixes.length)
     const stats: Record<string, PrefixStat> = {}
-    for (const p of prefixes) if (!p.includes('/empty/')) stats[p] = { b: TiB, o: 10, us: [['ann-bee', TiB]] }
+    for (const p of prefixes) if (!p.includes('/empty/')) stats[p] = { bytes: TiB, objects: 10, owners: [['ann-bee', TiB]] }
     return { stats, groups: 1 }
   },
 }))

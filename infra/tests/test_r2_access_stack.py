@@ -82,6 +82,9 @@ def test_private_stack_and_explicit_cron_enablement(enabled: bool):
     ({"enabled": True}, "Install the runtime secret first, then set secretReady before enabling cron"),
     ({"retentionDays": 0}, "retentionDays must be between 7 and 90"),
     ({"retentionDays": 91}, "retentionDays must be between 7 and 90"),
+    ({"checkpointBucket": "own-receipts"}, "checkpointBucket and readCheckpoint must be enabled together"),
+    ({"checkpointBucket": "disky-r2-access-logs", "readCheckpoint": "gs://own/closed"}, "Checkpoint receipts require their own private bucket and a gs:// checkpoint"),
+    ({"checkpointBucket": "own-receipts", "readCheckpoint": "https://other/closed"}, "Checkpoint receipts require their own private bucket and a gs:// checkpoint"),
 ])
 def test_invalid_config_fails_before_registration(config: dict, message: str) -> None:
     with pytest.raises(pulumi.RunError) as error:
@@ -97,3 +100,22 @@ def test_retired_daily_replay_config_refuses(tmp_path: Path, retired: str) -> No
     with pytest.raises(pulumi.RunError) as error:
         stack({"workerConfig": str(legacy)})
     assert str(error.value) == "DAILY_CRON/REPLAY_HOURS are retired: one hourly cron, RETENTION_HOURS + VERIFY_HOURS re-verify"
+
+
+@pulumi.runtime.test
+def test_optional_receipt_bucket_is_private_and_isolated():
+    mocks, program = stack({"checkpointBucket": "own-receipts", "readCheckpoint": "gs://own-data/access/closed.parquet"})
+
+    def check(_: object) -> None:
+        assert mocks.resources['checkpoints'] == {'accountId': DEFINITION['account_id'], 'name': 'own-receipts',
+                                                   'location': 'enam', 'storageClass': 'Standard'}
+        assert mocks.resources['checkpoints-private'] == {'accountId': DEFINITION['account_id'], 'bucketName': 'own-receipts', 'enabled': False}
+        bindings = mocks.resources['collector']['bindings']
+        assert [b for b in bindings if b['name'] == 'CHECKPOINTS'] == [{'name': 'CHECKPOINTS', 'type': 'r2_bucket', 'bucketName': 'own-receipts'}]
+        assert [b for b in bindings if b['name'] in ('CHECKPOINT_KEY', 'READ_CHECKPOINT')] == [
+            {'name': 'CHECKPOINT_KEY', 'type': 'plain_text', 'text': 'r2-read.json'},
+            {'name': 'READ_CHECKPOINT', 'type': 'plain_text', 'text': 'gs://own-data/access/closed.parquet'},
+        ]
+        assert mocks.resources['collector-cron']['schedules'] == []
+
+    return pulumi.Output.all(program['schedules'].id).apply(check)

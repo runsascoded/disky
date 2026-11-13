@@ -7,4 +7,7 @@
 ```bash
 cd infra/cf
 pulumi preview -s <stack>   # read-only; `up` is a human's call
+infra/cf/run preview -s <stack>   # the same, as the IaC token: `$CF_IAC_TOKEN` (trimmed) as `CLOUDFLARE_API_TOKEN`
 ```
+
+`run` is `pulumi -C infra/cf "$@"` with the Cloudflare token swapped: a deployment's direnv usually exports a D1/Pages job token as `CLOUDFLARE_API_TOKEN`, which can't manage the stack, so `run` takes `CF_IAC_TOKEN` instead (and refuses to start without it).

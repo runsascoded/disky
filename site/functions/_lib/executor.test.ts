@@ -84,6 +84,18 @@ describe('executorOf — the deployment\'s `EXECUTOR`', () => {
 })
 
 describe('dispatchPlan — executor selection', () => {
+  it('`SWEEP_DISPATCH = "0"` refuses every dispatch, dry or real, before any executor runs', async () => {
+    const s = await setup({ SWEEP_DISPATCH: '0' })
+    const on = await setup({ SWEEP_DISPATCH: '1' })
+    const refused = { ok: false, status: 403, error: 'sweep and job dispatch is off in this environment (SWEEP_DISPATCH = "0")' }
+    expect([
+      await dispatchPlan(s.env, req({ date: '2026-09-28T1201' }), 'plan-sweep', s.executors),
+      await dispatchPlan(s.env, req({ mode: 'real' }), 'sweep', s.executors),
+      s.calls,
+      (await dispatchPlan(on.env, req({ date: '2026-09-28T1201' }), 'plan-sweep', on.executors)).ok,
+    ]).toEqual([refused, refused, [], true])
+  })
+
   it('uses `EXECUTOR` unless the caller names its executor (an HTTP route does)', async () => {
     const s = await setup({ EXECUTOR: 'sweep' })
     await dispatchPlan(s.env, req({ date: '2026-09-28' }), undefined, s.executors)

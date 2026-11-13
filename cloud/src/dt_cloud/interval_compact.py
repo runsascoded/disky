@@ -469,7 +469,7 @@ def fold_gen(gen_dir: Path, out: Path, work: Path, *, gen: str, runs: list[dict]
     err(f"fold {gen}: {k} ranges, {sum(rows.values()):,} rows in {monotonic() - t_all:.0f}s; cutting the served sorts")
     if progress is not None:
         progress(f"{k} ranges, {sum(rows.values()):,} rows in {monotonic() - t_all:.0f}s", "sorts")
-    sorts, stats = ist.cut_gen(con, out, doc, rg_rows=rg_rows, jobs=jobs, paths=paths, tree=tree)
+    sorts, stats = ist.cut_gen(con, out, doc, rg_rows=rg_rows, jobs=jobs, paths=None if doc.get("history") else paths, tree=tree)
     err(f"fold {gen}: served sorts cut in {monotonic() - t0:.0f}s")
     (out / "scans.json").write_text(json.dumps(doc, indent=1) + "\n")
     return doc, rows, sorts, stats

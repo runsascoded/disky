@@ -87,7 +87,7 @@ import { perf } from './perf'
 import { useDocTitle } from './title'
 import { TypedPrefixModal } from './TypedPrefix'
 import type { AgeRow, ColorMode, Meta, Pricing, Rules, TreeNode } from './types'
-import { CLASS_COLORS, CLASS_NAMES, CLASS_PRICE_US, MODE_KEYWORDS, MODE_LABELS, classMix, fmtN, fmtUsd, ratePerByte } from './types'
+import { CLASS_COLORS, CLASS_NAMES, CLASS_PRICE_US, MODE_KEYWORDS, MODE_LABELS, classMix, fmtN, fmtUsd, mtimeDay, ratePerByte } from './types'
 import { SiteKbd } from './SiteKbd'
 import { useUnits } from './units'
 // The leaf viewer (file-tree's renderers, hyparquet…): its own chunk, fetched
@@ -144,7 +144,7 @@ const SPANS: [string, number][] = [['1d', 1], ['3d', 3], ['7d', 7], ['14d', 14],
 // HTTP copy of a pre-deploy answer (they were kept a day until 2026-09-17,
 // five minutes since) is never replayed after a reader rule changes. Bump
 // with `CACHE_V` in functions/_lib/edgeCache.ts.
-const API_CV = '3'
+const API_CV = '6'
 // The section in view lives in the query (`?v=diff`, `encodeSection`), where a link preview's unfurler sees it; an
 // incoming `#diff` (or a retired `#changes`) is adopted into it, a legacy `?section=diff` rewritten (`main.tsx`). A
 // module constant: `useSectionSpy` re-resolves its mode, and re-binds its scroll listener, whenever this object's
@@ -716,7 +716,7 @@ function AppContent() {
     if (!fq) return undefined
     const d = subtreeQs[subtreeQs.length - 1]?.data ?? coarseQs[coarseQs.length - 1]?.data ?? subtreeQs[0]?.data
     const r = (d as { rollup?: { bucketsOnly?: true; scopedBelow?: true } } | undefined)?.rollup
-    return d && { partialReason: d.partialReason, approximateReason: d.approximateReason, bucketsOnly: r?.bucketsOnly ? (r.scopedBelow ? 'scoped' as const : true) : false, dirsOnly: !!(d as { dirsOnly?: true }).dirsOnly, hexRuns: d.hexRuns }
+    return d && { partialReason: d.partialReason, approximateReason: d.approximateReason, ownerDetailsMissing: !!d.tree.unknown_owner_bytes, bucketsOnly: r?.bucketsOnly ? (r.scopedBelow ? 'scoped' as const : true) : false, dirsOnly: !!(d as { dirsOnly?: true }).dirsOnly, hexRuns: d.hexRuns }
   }, [fq, subStamp]) // eslint-disable-line react-hooks/exhaustive-deps
   const meta: Meta | null = metaQ.data ?? null
   const scanRun = useScanRunOf(store, asof)
@@ -967,7 +967,7 @@ function AppContent() {
   // where, then whose, then which names.
   // At the store root the scope is its buckets, counted (`2 buckets`) — the
   // path bar already says where the page is.
-  const rootScope = mapTree?.c?.length ? `${mapTree.c.length} bucket${mapTree.c.length === 1 ? '' : 's'}` : store.rootLabel
+  const rootScope = mapTree?.children?.length ? `${mapTree.children.length} bucket${mapTree.children.length === 1 ? '' : 's'}` : store.rootLabel
   const scopeParts: string[] = [
     drillPath || rootScope,
     ...(ownerUser ? [`${shortName(ownerUser)}’s files${assigner ? `, assigned by ${shortName(assigner)}` : ''}`]
@@ -989,23 +989,23 @@ function AppContent() {
     const path = [mapTree]
     let cur: TreeNode = mapTree
     for (const s of drillPath.split('/').filter(Boolean)) {
-      const next = cur.c?.find(c => c.n === s)
+      const next = cur.children?.find(c => c.name === s)
       if (!next) break
       path.push(next)
       cur = next
     }
     // A store with one bucket (CoreWeave today) opens inside it — the bucket
     // level is a single full-width box otherwise.
-    if (path.length === 1 && mapTree.c?.length === 1) return [mapTree, mapTree.c[0]]
+    if (path.length === 1 && mapTree.children?.length === 1) return [mapTree, mapTree.children[0]]
     return path
   }, [mapTree, drillPath])
   // The table's path segments, stable while `mapPath` is (a fresh array per
   // render defeated every memo keyed on it).
-  const tblSegs = useMemo(() => mapPath?.slice(1).map(n => n.n) ?? [], [mapPath])
+  const tblSegs = useMemo(() => mapPath?.slice(1).map(n => n.name) ?? [], [mapPath])
   // The view's uncovered top-level cells (the legends' "not logged" list): the root's children at the
   // root, else the drilled bucket alone.
   const readUnlogged = useMemo(() => !meta?.access?.buckets || !mapPath ? []
-    : unloggedOf(mapPath.length > 1 ? [mapPath[1].n] : (mapPath[0].c ?? []).map(n => n.n), readLoggedOf),
+    : unloggedOf(mapPath.length > 1 ? [mapPath[1].name] : (mapPath[0].children ?? []).map(n => n.name), readLoggedOf),
   [meta, mapPath, readLoggedOf])
   // Each table row's listed match roots: from the table's own path's response (full, else its first paint) —
   // exact when its `matched` list is every root, a lower bound when it is capped, unknown otherwise.
@@ -1016,7 +1016,7 @@ function AppContent() {
     const d = i < 0 ? undefined : (subtreeQs[i]?.data ?? coarseQs[i]?.data) as (MatchFields & { matchesCapped?: boolean; partialReason?: string; approximateReason?: string; rollup?: unknown }) | undefined
     return rowMatchesOf(d?.matched, matchedListOf(d))
   }, [fq, subStamp, tblPath, subtreePaths]) // eslint-disable-line react-hooks/exhaustive-deps
-  const onMapPath = (p: TreeNode[]) => drillTo(p.slice(1).map(n => n.n))
+  const onMapPath = (p: TreeNode[]) => drillTo(p.slice(1).map(n => n.name))
   // Worklist rows / children table → drill the map to a prefix (the new path
   // starts at the top, where the map is).
   const openPath = (segs: string[]) => drillTo(segs)
@@ -1113,12 +1113,13 @@ function AppContent() {
     const ds: [number, number][] = []
     const as: [number, number][] = []
     const walk = (n: TreeNode) => {
-      if (!n.c) {
-        if (n.d != null) ds.push([n.d, n.b])
-        const t = readRange ? readDay(n.a, true, readRange.min, { d: n.d, dir: n.k !== 'file', tint: readTint }) : null
-        if (t != null) as.push([t, n.b])
+      if (!n.children) {
+        const d = mtimeDay(n)
+        if (d != null) ds.push([d, n.bytes])
+        const t = readRange ? readDay(n.last_read, true, readRange.min, { d, dir: n.kind !== 'file', tint: readTint }) : null
+        if (t != null) as.push([t, n.bytes])
       }
-      n.c?.forEach(walk)
+      n.children?.forEach(walk)
     }
     if (mapTree) walk(mapTree)
     let min = Infinity
@@ -1136,10 +1137,10 @@ function AppContent() {
   const catOrder = useMemo(() => {
     if (!mapTree) return []
     const catBytes = new Map<string, number>()
-    for (const bucket of mapTree.c ?? [])
-      for (const d of bucket.c ?? []) {
-        const k = d.n.startsWith('(') ? '(other)' : d.n
-        catBytes.set(k, (catBytes.get(k) ?? 0) + d.b)
+    for (const bucket of mapTree.children ?? [])
+      for (const d of bucket.children ?? []) {
+        const k = d.name.startsWith('(') ? '(other)' : d.name
+        catBytes.set(k, (catBytes.get(k) ?? 0) + d.bytes)
       }
     return [...catBytes.entries()].sort((a, b) => b[1] - a[1]).map(([k]) => k).filter(k => k !== '(other)')
   }, [mapTree])
@@ -1175,7 +1176,7 @@ function AppContent() {
   // bucket with nothing in scope is absent from it, and is "no matches", not
   // a 404. Display thresholds can also omit configured small buckets.
   const seg0 = drillPath.split('/')[0]
-  if (!scopeQs && baseTree?.c && seg0 && !knownBucket(seg0, store, baseTree.c)) {
+  if (!scopeQs && baseTree?.children && seg0 && !knownBucket(seg0, store, baseTree.children)) {
     return (
       <main>
         <SiteNav />
@@ -1264,8 +1265,8 @@ function AppContent() {
   const crumbCopy = pathCopy(pathScheme, segs, true)
   // The deepest crumb's page at the provider (`Store.externalLink`), as an icon right after its name.
   const atRoot = segs.length <= storeRoot.length
-  const ext = <ExtLink link={store.externalLink?.(segs, here?.k !== 'file')} />
-  const rootCrumb = <RootCrumb treeName={mapTree?.n} rootLabel={rootLabel} rootTitle={rootTitle} scopeWord={store.rootLabel} here={atRoot} onClick={() => drillTo(storeRoot)} />
+  const ext = <ExtLink link={store.externalLink?.(segs, here?.kind !== 'file')} />
+  const rootCrumb = <RootCrumb treeName={mapTree?.name} rootLabel={rootLabel} rootTitle={rootTitle} scopeWord={store.rootLabel} here={atRoot} onClick={() => drillTo(storeRoot)} />
   const crumbs = (
     <span className="tb-path" aria-label="Drilled path">
       {atRoot ? <span>{rootCrumb}{ext}</span> : rootCrumb}
@@ -1390,7 +1391,7 @@ function AppContent() {
             {indexedOnly
               ? <QueryHelpTip syntaxes={[syntax]} active={syntax} />
               : <QueryHelpTip syntaxes={SYNTAXES} active={syntax} onPick={id => setQsP(id === storeSyntax.id ? undefined : id)} />}
-            <FilterNote error={fErr} matched={fq && fHere ? matchedNote(fHere.b, !!graftPath, fmtBytes) : null} coverage={fCoverage}>
+            <FilterNote error={fErr} matched={fq && fHere ? matchedNote(fHere.bytes, !!graftPath, fmtBytes) : null} coverage={fCoverage}>
               {fq && !fErr && <UnionRefusals union={(subtreeQs[0]?.data ?? coarseQs[0]?.data)?.union} />}
               <Explain text="Clear the path filter"><button type="button" onClick={() => { setFqDraft(null); setFq(undefined) }}>✕</button></Explain>
             </FilterNote>
@@ -1449,11 +1450,11 @@ function AppContent() {
           {effMode === 'read' && readThru && <ReadThroughBanner through={readThru} />}
           {/* The spine stops above a level that didn't load: which, and why, over the ancestor the map draws instead. */}
           {levelFail && mapPath && (
-            <LevelFailure path={levelFail.path} err={levelFail.err} onRetry={retryMap} shown={mapPath.slice(1).map(n => n.n).join('/') || store.rootLabel} />
+            <LevelFailure path={levelFail.path} err={levelFail.err} onRetry={retryMap} shown={mapPath.slice(1).map(n => n.name).join('/') || store.rootLabel} />
           )}
           <div id="tree-map" className={[
             'busy-host',
-            !objects && mapPath && mapPath.length > 1 && !mapPath[mapPath.length - 1].c?.length && subtreeQs[subtreeQs.length - 1]?.data ? 'leaf' : '',
+            !objects && mapPath && mapPath.length > 1 && !mapPath[mapPath.length - 1].children?.length && subtreeQs[subtreeQs.length - 1]?.data ? 'leaf' : '',
             mapStale ? 'stale' : '',
           ].filter(Boolean).join(' ')} aria-busy={mapBusy || undefined}><Treemap
             key={store.key}
@@ -1478,7 +1479,7 @@ function AppContent() {
             path={mapPath}
             onPathChange={onMapPath}
             objects={objects}
-            onOpen={p => openObject(p.slice(1).map(n => n.n))}
+            onOpen={p => openObject(p.slice(1).map(n => n.name))}
             brush={brush}
             onBrush={setBrush}
             band={band}
@@ -1490,23 +1491,23 @@ function AppContent() {
           {/* A drilled directory with nothing drawable under it: the scope came
               up empty, or (a v1 scan) it holds only objects or directories
               under this view's floor. Say so rather than show a blank canvas. */}
-          {mapPath && mapPath.length > 1 && !mapPath[mapPath.length - 1].c?.length && subtreeQs[subtreeQs.length - 1]?.data && (
-            mapPath[mapPath.length - 1].b === 0 && ownerMode !== 'all' ? (
+          {mapPath && mapPath.length > 1 && !mapPath[mapPath.length - 1].children?.length && subtreeQs[subtreeQs.length - 1]?.data && (
+            mapPath[mapPath.length - 1].bytes === 0 && ownerMode !== 'all' ? (
               // The scope, not the directory, is what's empty here: say whose
               // filter came up dry rather than describe a 0-byte directory.
               <p className="hint leaf-note">
                 {ownerMode === 'user' && ownerUser
-                  ? <><b>{shortName(ownerUser)}</b> owns nothing under <code>{mapPath[mapPath.length - 1].n}</code> in this scan</>
+                  ? <><b>{shortName(ownerUser)}</b> owns nothing under <code>{mapPath[mapPath.length - 1].name}</code> in this scan</>
                   : ownerMode === 'unowned'
-                    ? <>Nothing under <code>{mapPath[mapPath.length - 1].n}</code> is unowned in this scan</>
+                    ? <>Nothing under <code>{mapPath[mapPath.length - 1].name}</code> is unowned in this scan</>
                     : ownerMode === 'owned'
-                      ? <>Nothing under <code>{mapPath[mapPath.length - 1].n}</code> is owned in this scan</>
-                      : <>Nothing under <code>{mapPath[mapPath.length - 1].n}</code> is owned by anyone else in this scan</>}
+                      ? <>Nothing under <code>{mapPath[mapPath.length - 1].name}</code> is owned in this scan</>
+                      : <>Nothing under <code>{mapPath[mapPath.length - 1].name}</code> is owned by anyone else in this scan</>}
                 {' '}— widen the scope in the bar above, or press Backspace to go up.
               </p>
             ) : !objects && (
               <p className="hint leaf-note">
-                <code>{mapPath[mapPath.length - 1].n}</code> holds {fmtN(mapPath[mapPath.length - 1].o)} objects and no directory of{' '}
+                <code>{mapPath[mapPath.length - 1].name}</code> holds {fmtN(mapPath[mapPath.length - 1].objects)} objects and no directory of{' '}
                 {fmtBytes(subtreeQs[subtreeQs.length - 1]!.data!.threshold ?? 0)} or more. This scan was indexed before objects were
                 listed — pick a newer scan to see them, or press Backspace to go up.
               </p>
@@ -1517,7 +1518,7 @@ function AppContent() {
             <Suspense fallback={<Loading label="Loading the viewer…" />}>
               <ObjectPanel
                 segs={[...segs, openP]}
-                node={mapPath.length - 1 === segs.length ? mapPath[mapPath.length - 1].c?.find(c => c.n === openP) : undefined}
+                node={mapPath.length - 1 === segs.length ? mapPath[mapPath.length - 1].children?.find(c => c.name === openP) : undefined}
                 onClose={() => setOpenP(undefined)}
               />
             </Suspense>
@@ -1550,7 +1551,7 @@ function AppContent() {
           {blindShown(!!fq) && (
             <PageFacts
               mix={meta && store.prices && mapPath ? classMix(mapPath[mapPath.length - 1]) : undefined}
-              scope={mapPath && mapPath.length > 1 ? mapPath.slice(1).map(n => n.n).join('/') : store.rootLabel}
+              scope={mapPath && mapPath.length > 1 ? mapPath.slice(1).map(n => n.name).join('/') : store.rootLabel}
               tree={hasAttr ? mapTree ?? undefined : undefined}
             />
           )}

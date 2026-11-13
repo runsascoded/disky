@@ -185,15 +185,16 @@ export default function TokenModal({ onClose }: { onClose: () => void }) {
             </div>
             <p className="token-muted token-small">Then, in your agent’s environment:</p>
             {/* Safe to paste whole: the read runs, and the write stops in the shell until PREFIX is set (an
-                example path would be sent as-is). */}
-            <pre className="token-recipe">{`export GCS_USAGE_TOKEN=${phase.token}
+                example path would be sent as-is). The assign step only where there is ownership to assign
+                (`/api/actions` is a 404 elsewhere). */}
+            <pre className="token-recipe">{`export SITE_TOKEN=${phase.token}
 # check it: who the token acts as
-curl -sS -H "Authorization: Bearer $GCS_USAGE_TOKEN" ${location.origin}/api/me
-# assign a prefix to yourself: set PREFIX to one you own, e.g. ${store.scheme}${store.buckets[0] ?? 'my-bucket'}/…/
-curl -sS -H "Authorization: Bearer $GCS_USAGE_TOKEN" -H 'content-type: application/json' \\
+curl -sS -H "Authorization: Bearer $SITE_TOKEN" ${location.origin}/api/me
+${store.owners ? `# assign a prefix to yourself: set PREFIX to one you own, e.g. ${store.scheme}${store.buckets[0] ?? 'my-bucket'}/…/
+curl -sS -H "Authorization: Bearer $SITE_TOKEN" -H 'content-type: application/json' \\
   -d "{\\"pattern\\": \\"\${PREFIX:?set PREFIX to a prefix you own}\\", \\"owner\\": \\"@me\\"}" \\
   ${location.origin}/api/actions
-# more: ${location.origin}/llms.txt`}</pre>
+` : ''}# more: ${location.origin}/llms.txt`}</pre>
             <div className="token-actions">
               <button type="button" onClick={() => void loadStatus()}>Done</button>
             </div>

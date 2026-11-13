@@ -16,9 +16,22 @@ export type ExecEnv = NotifyEnv & BatchEnv & {
    *  the dispatcher behind `GCP_SA_KEY` must be able to act as it). */
   JOB_SA?: string
   EXECUTOR?: string
+  /** `"0"`: this environment never acts on a sweep's jobs or data, nor on the real digest, whatever credentials it holds
+   *  (a dev stack on production's data whose `GCP_SA_KEY` is there for "Run a scan"): no sweep, undo or purge dispatch
+   *  (`dispatchPlan`, `undoSweepRun`, `/api/plan-sweep/undo` and `/purge`), no stop (`/api/plan-sweep/stop`'s cancel,
+   *  `/api/sweep/stop`'s STOP file) and no digest re-apply (`POST /api/digest-reapply`), each a 403 after its auth gate.
+   *  Reads (job lists, logs, run files) stay open, but the job lists (`/api/sweep/jobs`, `/api/plan-sweep/jobs`) don't
+   *  record finished runs in D1 or announce them in Slack: production does that on its next read. Unset: dispatch as configured. */
+  SWEEP_DISPATCH?: string
   STORE_SCHEME?: string
   STORE_BUCKETS?: string
 }
+
+/** The refusal where `SWEEP_DISPATCH` is `"0"`. */
+export const SWEEPS_OFF = 'sweep and job dispatch is off in this environment (SWEEP_DISPATCH = "0")'
+
+/** Whether `env` refuses every sweep, undo and purge dispatch, sweep stop and digest re-apply. */
+export const sweepsOff = (env: { SWEEP_DISPATCH?: string }): boolean => env.SWEEP_DISPATCH === '0'
 
 /** What a dispatch selected, by the sizes its page showed at the scan. Display only (a run's row until its manifest
  *  says, Slack's dispatched line): client-sent, and nothing about what a run deletes reads it. */

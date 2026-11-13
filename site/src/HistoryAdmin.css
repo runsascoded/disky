@@ -1,0 +1,47 @@
+.history-admin { margin-block: 2rem; }
+.history-admin > p, .history-preview > .hint { max-width: 80ch; }
+.history-admin .hint { color: var(--ink-2); font-size: .9em; }
+.history-admin .err { color: var(--danger); }
+.history-admin button { font: inherit; padding: 4px 9px; background: var(--panel); color: var(--ink); border: 1px solid var(--line); border-radius: 5px; cursor: pointer; }
+.history-admin button:disabled { opacity: .45; cursor: default; }
+.history-admin input[type=number], .history-admin textarea { font: inherit; padding: 4px 6px; background: var(--surface); color: var(--ink); border: 1px solid var(--line); border-radius: 4px; box-sizing: border-box; }
+.history-admin input[type=radio] { accent-color: var(--s1); }
+.history-admin fieldset { border: 1px solid var(--line); padding: 1rem 1.25rem; max-width: 58rem; }
+.history-policy { display: flex; align-items: baseline; gap: .6rem; margin-block: .75rem; cursor: pointer; }
+.history-policy > span { display: grid; gap: .2rem; }
+.history-policy > span > span { color: var(--ink-2); max-width: 70ch; }
+.history-setting { display: flex; align-items: center; flex-wrap: wrap; gap: .5rem; margin-block: .65rem; }
+.history-setting input { width: 7rem; }
+.history-settings { padding-inline-start: 1.6rem; }
+.history-pins { display: grid; gap: .5rem; margin-top: 1.25rem; max-width: 36rem; }
+.history-pins textarea { resize: vertical; min-height: 4.5rem; }
+.history-counts { display: flex; flex-wrap: wrap; gap: .4rem 1.5rem; }
+.history-table-scroll { max-width: 100%; overflow: auto; }
+.history-admin table { width: max-content; min-width: min(100%, 42rem); border-collapse: collapse; }
+.history-admin th, .history-admin td { padding: .4rem .7rem; text-align: left; border-block-end: 1px solid var(--line); }
+.history-removals td:nth-child(n+4), .history-removals th:nth-child(n+4) { text-align: right; font-variant-numeric: tabular-nums; }
+.history-preview details { margin-block: .75rem; }
+.history-admin pre { overflow: auto; max-height: 22rem; }
+.history-jobs { margin-block-start: 1.75rem; }
+.history-job-list > .history-jobs { margin-block-start: 0; }
+.history-jobs-heading { display: flex; align-items: center; gap: 1rem; }
+.history-job { border-block-start: 1px solid var(--line); padding-block: .8rem; }
+.history-job > summary { cursor: pointer; }
+.history-job > summary > span { margin-inline-end: 1rem; }
+.history-job-body { padding-inline-start: 1.25rem; }
+.history-state { color: var(--ink-2); }
+.history-state.failed, .history-state.dispatch-unknown { color: var(--danger); }
+.history-state.planned, .history-state.ready { color: var(--ink); }
+.history-build-action { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem 1rem; }
+.history-manual-actions, .history-proposal-active { display: flex; align-items: center; flex-wrap: wrap; gap: .5rem 1rem; }
+.history-proposal-active { max-width: 80ch; font-size: .9em; }
+.history-estimate { max-width: 80ch; padding-inline-start: 1rem; border-inline-start: 2px solid var(--s1); margin-block: 1rem; }
+.history-estimate h4 { margin-block: .5rem; }
+.history-admin tr:focus-visible { outline: 2px solid var(--s1); outline-offset: -2px; }
+.history-adopt-confirm { border: 1px solid var(--line); padding: 1rem 1.25rem; max-width: 58rem; margin-block: 1rem; }
+.history-pages { display: flex; gap: .75rem; margin-block-start: 1rem; }
+@media (max-width: 600px) {
+  .history-admin fieldset { padding: .8rem; }
+  .history-job > summary > span { display: inline-block; margin-block: .2rem; }
+  .history-job-body { padding-inline-start: 0; }
+}

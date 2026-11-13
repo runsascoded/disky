@@ -253,7 +253,7 @@ describe('names and sizes (plain text, never a mention)', () => {
     ])
   })
   it('sizeOf: totals over every prefix, absent or no bytes and no objects = empty (zero-byte objects are not), owners by attributed bytes', () => {
-    const at = { scan: 'S', stats: { 'gs://b/a/': { b: 5, o: 2, us: [['u1', 3], ['u2', 2]] as [string, number][] }, 'gs://b/c/': { b: 4, o: 1, us: [['u2', 4]] as [string, number][] }, 'gs://b/z/': { b: 0, o: 0 }, 'gs://b/zb/': { b: 0, o: 3 } } }
+    const at = { scan: 'S', stats: { 'gs://b/a/': { bytes: 5, objects: 2, owners: [['u1', 3], ['u2', 2]] as [string, number][] }, 'gs://b/c/': { bytes: 4, objects: 1, owners: [['u2', 4]] as [string, number][] }, 'gs://b/z/': { bytes: 0, objects: 0 }, 'gs://b/zb/': { bytes: 0, objects: 3 } } }
     expect(sizeOf(at, ['gs://b/a/', 'gs://b/c/', 'gs://b/z/', 'gs://b/zb/', 'gs://b/gone/'], u => u.toUpperCase(), 1)).toEqual({ scan: 'S', b: 9, o: 6, empty: 2, owners: [{ label: 'U2', b: 6 }] })
   })
   it('queuedOf: the title counts prefixes, batches and stagers over what is neither deleted nor empty at the scan (`countedItems`)', () => {
@@ -263,7 +263,7 @@ describe('names and sizes (plain text, never a mention)', () => {
       { prefix: 'gs://b/e2/', added_by: 'bo', batch_id: 2 },
       { prefix: 'gs://b/legacy/', added_by: 'cy', batch_id: null },
     ]
-    const stats = { 'gs://b/a/': { b: 1, o: 1 }, 'gs://b/legacy/': { b: 1, o: 1 } }
+    const stats = { 'gs://b/a/': { bytes: 1, objects: 1 }, 'gs://b/legacy/': { bytes: 1, objects: 1 } }
     expect([queuedOf(countedItems(live, new Set(), null)), queuedOf(countedItems(live, new Set(), stats)), queuedOf(countedItems(live, new Set(['gs://b/legacy/']), stats))]).toEqual([
       { items: 4, batches: 2, stagers: ['ann', 'bo', 'cy'] },
       { items: 2, batches: 1, stagers: ['ann', 'cy'] },
@@ -274,7 +274,7 @@ describe('names and sizes (plain text, never a mention)', () => {
 
 describe('stage replies: compact, phone-width', () => {
   const T = 2 ** 40
-  const stats = (sizes: Record<string, number>) => Object.fromEntries(Object.entries(sizes).map(([p, b]) => [p, { b, o: b / T * 10 }]))
+  const stats = (sizes: Record<string, number>) => Object.fromEntries(Object.entries(sizes).map(([p, b]) => [p, { bytes: b, objects: b / T * 10 }]))
   // Every prefix in batch 1 unless `batchOf` says otherwise.
   const reply = (o: Partial<Parameters<typeof stageReply>[0]>) => stageReply({ planId: 1, replyId: 3, by: 'Ann Bee', batches: 1, prefixes: [], stats: null, note: null, siteUrl: 'https://s', ...o, batchOf: { ...Object.fromEntries((o.prefixes ?? []).map(p => [p, 1])), ...o.batchOf } })
   const lines = (m: { blocks: unknown[] }) => (m.blocks[0] as { text: { text: string } }).text.text.split('\n')
@@ -299,7 +299,7 @@ describe('stage replies: compact, phone-width', () => {
     ])
   })
   it('counts the batches still holding a path: the title those holding what it shows, the reject those it unstages', () => {
-    const T1 = { b: T, o: 10 }
+    const T1 = { bytes: T, objects: 10 }
     // Batches 1–3 covered: 1 holds a sized path, 2 one empty at the scan, 3 nothing (absorbed by a later stage).
     const m = reply({ prefixes: ['gs://b/x/', 'gs://b/y/'], batches: 3, batchOf: { 'gs://b/x/': 1, 'gs://b/y/': 2 }, stats: { 'gs://b/x/': T1 } })
     expect([m.text, lines(m), buttons(m)]).toEqual([
@@ -311,13 +311,13 @@ describe('stage replies: compact, phone-width', () => {
   it('long paths keep the bucket and the last two folders', () => {
     expect([shortPath('gs://marin-us-central2/checkpoints/some-team/llama-8b-tootsie-run-42/step-12000/'), shortPath('gs://b/short/path/')])
       .toEqual(['marin-us-central2/…/llama-8b-tootsie-run-42/step-12000/', 'b/short/path/'])
-    expect(topFolders(['gs://b/x/'], { 'gs://b/x/': { b: 0, o: 0 } })).toBe('`b/x/` 0 B')
+    expect(topFolders(['gs://b/x/'], { 'gs://b/x/': { bytes: 0, objects: 0 } })).toBe('`b/x/` 0 B')
   })
   it('sibling paths under a shared folder: the folder once, then each from there, so long run names still tell them apart', () => {
     const iso = 'gs://marin-us-central2/checkpoints/isoflop'
     const r1 = `${iso}/isoflop-9e+19-d2048-L21-B32-nemo-wider-depth-adapt/checkpoints`
     const r2 = `${iso}/isoflop-3e+19-d1792-L18-B16-nemo-wider-depth-adapt/checkpoints`
-    const st = { [`${r1}/step-10000/`]: { b: 2 ** 40, o: 1 }, [`${r2}/step-10000/`]: { b: 2 ** 41, o: 1 } }
+    const st = { [`${r1}/step-10000/`]: { bytes: 2 ** 40, objects: 1 }, [`${r2}/step-10000/`]: { bytes: 2 ** 41, objects: 1 } }
     expect(topFolders([`${r1}/step-10000/`, `${r2}/step-10000/`], st)).toBe(
       'in `marin-us-central2/checkpoints/isoflop/`: `isoflop-3e+19-d1792-L18-…er-depth-adapt/…/step-10000/` 2.0 TiB, `isoflop-9e+19-d2048-L21-…er-depth-adapt/…/step-10000/` 1.0 TiB')
   })

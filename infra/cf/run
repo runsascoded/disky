@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Pulumi needs the IaC token, not the ambient D1/Pages job token.
+set -euo pipefail
+{ set +x; } 2>/dev/null
+iac_token=${CF_IAC_TOKEN:?Run under direnv with CF_IAC_TOKEN set}
+iac_token=${iac_token#"${iac_token%%[![:space:]]*}"}
+iac_token=${iac_token%"${iac_token##*[![:space:]]}"}
+if [ -z "$iac_token" ]; then
+  echo "CF_IAC_TOKEN is empty after trimming" >&2
+  exit 1
+fi
+export CLOUDFLARE_API_TOKEN=$iac_token
+unset iac_token
+exec pulumi -C "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" "$@"

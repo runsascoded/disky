@@ -119,7 +119,7 @@ dt-cloud static-names build -g GEN -L LAYOUT -s SCANS -o STORE -x off|MIN,TAIL  
 dt-cloud static-names add -g GEN -L LAYOUT -s SCANS -o STORE  # Append every scan after GEN's newest as a run (append, shards,
                           # catalog delta, drill run, + `names/`/`anchors/` when GEN's base has them — an anchorless GEN
                           # gets them only by a rebuild into a new GEN — `manifests/<id>.json`), then the binary counter's carries; a URL
-                          # store's generation is mirrored into `-w`, new files go up data → `meta.json`s → manifests.
+                          # store's generation is mirrored into `-w`, new files go up data → `meta.json`s → manifests after each scan (and its carries): a failure loses only that scan.
                           # Small deployments' path (the r2 demo's daily ingest); gcs/cw run the stages on Batch
 dt-cloud generation-gc -t KIND -o STORE -k PIN…  # Collect verified compaction predecessors: plans by default, `-x -s SCRATCH` executes
                           # (protocol, receipts, grace and pins: `specs/done/generation-gc-and-r2-copy.md`)
@@ -185,12 +185,23 @@ dt-cloud interval-store level-sim GEN REQUESTS  # `readLevel`'s two waves priced
                           # only sidecars and the kept groups' page indexes (cached under `-c`); gets and bytes match live `lv-*` spans exactly
                           # `-s 256,512,1024` (+ `-F` sidecar row-group sizes): a table per mode, today / held page indexes (cold,
                           # colo warm, warm) / the sort cut in small groups with no page index, from the real file's page indexes
+dt-cloud history run -i JOB_ID -r SERVING_STORE -w WORK  # One `/api/admin/history` job (`history_jobs.py`, spec `scan-thinning.md`): a
+                          # thinning preview (scores, protections, the removal sequence) or a candidate build (fresh interval + static
+                          # generations over the retained scans, verified, an immutable `history/versions/<id>.json`). Never moves a CURRENT
 dt-cloud image-sha [-e SHA [-a]] [-j]  # The running image's source revision (`image_sha.py`): `$DISKY_GIT_SHA` /
-                          # `$DISKY_GIT_DIRTY`, which a deployment's image build stamps (gcs: `job/build.sh` → Dockerfile
+                          # `$DISKY_GIT_DIRTY`, which the image build stamps (`dt-cloud image build` → `job/Dockerfile`
                           # `ARG`/`ENV` + OCI labels `org.opencontainers.image.revision`, `disky.dirty`). Prints `<sha>`,
                           # `<sha> dirty` or `unstamped`; `-e` exits 1 unless the image is that sha (or a ≥7-char prefix),
                           # clean (`-a` accepts dirty) and stamped. Job entrypoints (`scan head`/`step`, the
                           # `interval-store` stage tasks) log it
+dt-cloud image build -c job/build.json [-m candidate|live] [-t TAG] [-D] [-a K=V]  # The scan job image (`image_build.py`,
+                          # specs/job-consolidation.md §5; `job/build.sh` runs it with the deployment's `job/build.json`):
+                          # this checkout's commit, stamped, `git archive`d by the config's `context` pathspecs, built by
+                          # Cloud Build from `job/Dockerfile` (`build_args`: `SITE`, `APT_PACKAGES`, `UV_SYNC_ARGS`,
+                          # `ENTRYPOINT`) to an immutable candidate tag (the sha's first 12; dirty `-D`: `-dirty-<time>`) in
+                          # `repository` + `mirrors`; prints `<repository>@<digest>` each. `live` mode then promotes.
+                          # `image promote TAG [-x DIGEST]`: `live_tags` moved to TAG's digest in each repository, then the
+                          # config's `repoint` Cloud Run jobs / services updated to the first live tag
 dt-cloud batch submit -c COMPONENT [-L REGION] [-b BUCKET]… [-X] [-t] [-e] [-r SECONDS] JOB_ID SPEC  # The shell's Batch submit, through `batch.submit_job` (the
                           # one place a job is created): labelled from `$DISKY_LABELS` + `-c` on the job and its allocation policy
                           # (`cost_labels.py`), in `-L`, else `$BATCH_REGION`. There is no default region (`deploy.batch_region`): neither
@@ -266,12 +277,13 @@ then `git rm`'d. `dt-cloud d1-schema check -d <db> [-c <wrangler config>]` compa
 
 One gate (`_lib/auth.ts`, `@open-athena/auth` over D1): `identify` → `Identity` (`via: session | grant | public`), `requireViewer` / `requireStager` / `requireAdmin`.
 - `/auth/google` (+ `/callback`, `/onetap`) — Google OIDC → email session; `/auth/email/*` — emailed code / magic link → email session
-- `/auth/oa` (+ `/callback`, `/client`) — "Sign in with OA" through OA's broker (`OA_LOGIN_*`, `specs/oa-login-rp.md`; unset: 404, no button) → email session. Where configured, the middleware sends a person's unauthenticated page visit there once with `prompt=none` before the wall (`_lib/silentSignIn.ts`; never a crawler, `fetch`, `?key=`/`?og=` link or public deployment); `/api/auth/logout` suppresses that until they click it or complete any sign-in
+- `/auth/oa` (+ `/callback`, `/client`) — "Sign in with OA" through OA's broker (`OA_LOGIN_*`, `specs/oa-login-rp.md`; unset: 404, no button) → email session. Where configured, the middleware sends a person's unauthenticated page visit there once with `prompt=none` before the wall (`_lib/silentSignIn.ts`; never a crawler, `fetch`, `?key=`/`?og=` link or public deployment); `/api/auth/logout` suppresses that until they click it or complete any sign-in. A completed one leaves a signed `oa_login_who` cookie (`rememberAccount`, outliving sign-out like Google's hints): `/auth/oa/client` returns that account with its profile's name and face, and the wall's button becomes "Continue as <them>"; when it covers every Google account remembered here, Google's slot shrinks to "Use a different account" (Google's chooser)
 - **Preview hosts** (`isPreviewHost`: exactly one label under `PAGES_SUBDOMAIN`, the project's `pages.dev` subdomain: a PR's `pr-N`, the `dev` alias, a deployment hash; never a custom domain): OA sign-in only through the broker's preview client (`OA_LOGIN_PREVIEW_CLIENT_ID` / `_SECRET`, Preview environment only) with `redirectFromOrigin`, else none (404, no button; never the deployment's own client), and no silent `prompt=none` attempt
 - **`AUTH_HOST_COOKIES = "1"`** (default off; switching it signs everyone out once): on https, the session (+ its `_rs` handle), both nonces and the Google hint are `__Host-` named (`cookieNames`), so the gate reads only `__Host-oa_auth` there; `gateFor(env, request)` needs the request for it
 - `/api/auth/*` — the package's routes: `whoami`, `exchange` (`?key=` share link → grant session), `logout`, request-access, admin grant/request/log console
 - `/api/token` — a session's personal agent token (a non-expiring Bearer grant, the base scope only; grants can't mint one)
 - `/api/admins` — the admins (`/admin`'s "Admins" section): every path to the `admin` scope (the list's rows with who added whom and when, the break-glass addresses, live admin-scope links, the staff domain where it is one), add / remove on the list, each logged to `admin_edits`; the last listed admin can't be removed
+- `/api/admin/history` (+ `/history-adopt`) — admin only: scan-history thinning (`specs/scan-thinning.md`, `/scans#history`). `history` lists the preview/build jobs under `history/jobs/` and POSTs a new one to Batch (`dt-cloud history run`); dispatch needs every `HISTORY_*` job var + `GCP_SA_KEY`, `JOB_SA`, `GCP_PROJECT` (else 503, and GET says `enabled: false`). `history-adopt` CAS-moves this environment's reader pointer (`HISTORY_CURRENT_KEY`; unset: GET `enabled: false`, POST 503) to a verified immutable `history/versions/<id>.json`. With `HISTORY_CURRENT_KEY` unset, readers never read history (`_lib/historyVersion.ts`)
 - `/a/<sha256>.<ext>` — **public, no gate**: an activity post's sender face (`_lib/publicAvatar.ts`), only bytes a Slack / Discord post stored in `public_avatars`, named by their own SHA-256 (a profile's or grant's face, else an identicon seeded by an HMAC of the actor under `SESSION_SECRET`); anything else 404s
 
 **A store's `series_scope`** (`STORES_JSON`, `_lib/stores.ts`): a grant holding it beside the viewer scope reads that store's root-level `/api/series` (only `store=`; no `path`, `lens`, `o`, `cl`, `q`, …) and nothing else of a store its `scope` closes; never a public, anonymous or path-restricted caller (`api/series.ts` `summaryGate`, its table in `functions/gates.test.ts`). A summary reader's token (a fleet dashboard's) is base read + that scope.

@@ -20,7 +20,7 @@ import { PrefixStageAction, tableCoverItem, useStagedIndex } from './StageAction
 import { actionItem, rowTarget } from './objects'
 import { idleLabel, idleness, readThrough } from './readLens'
 import type { Meta, TreeNode } from './types'
-import { fmtN } from './types'
+import { fmtN, mtimeDay } from './types'
 import { useUnits } from './units'
 import { usePerfCommit } from './perf'
 import { pathText } from './pathCrumbs'
@@ -120,7 +120,7 @@ export function ChildrenTable({ node, segs, scheme, bucketSchemes, scan, flatOk 
   const moreFlat = flat && !!lq.data?.more
   const canGrow = moreFlat && !lq.data?.capped && listed.length === lq.data?.n && listed.length < LARGEST_MAX
   // A row's segments from the root: a flat row's name is its path below the node.
-  const segsOf = (k: TreeNode) => (flat ? [...segs, ...k.n.split('/')] : [...segs, k.n])
+  const segsOf = (k: TreeNode) => (flat ? [...segs, ...k.name.split('/')] : [...segs, k.name])
   // A staging store (`Store.staging`): full viewers — not read-only guest
   // links — select + trash (stage for deletion; an admin approves later).
   // Owner assignment (`Store.owners`) is any signed-in viewer's, alongside. Both are the
@@ -143,14 +143,14 @@ export function ChildrenTable({ node, segs, scheme, bucketSchemes, scan, flatOk 
   const [memo, setMemo] = useState('')
 
   const kids = useMemo(() => {
-    const ks = (flat ? listed : node.c ?? []).slice()
+    const ks = (flat ? listed : node.children ?? []).slice()
     const dir = sort.asc ? 1 : -1
     const val = (n: TreeNode): number | string =>
-      sort.k === 'n' ? n.n
-      : sort.k === 'b' ? n.b
-      : sort.k === 'o' ? n.o
-      : sort.k === 'a' ? n.a ?? -Infinity
-      : n.d ?? -Infinity
+      sort.k === 'n' ? n.name
+      : sort.k === 'b' ? n.bytes
+      : sort.k === 'o' ? n.objects
+      : sort.k === 'a' ? n.last_read ?? -Infinity
+      : n.mtime ?? -Infinity
     return ks.sort((a, b) => {
       const va = val(a)
       const vb = val(b)
@@ -161,14 +161,14 @@ export function ChildrenTable({ node, segs, scheme, bucketSchemes, scan, flatOk 
   // Columns the data can't fill are left out (no access logs → no `read`; no
   // attribution and no ledger → no `owner(s)`): a store without those axes
   // shouldn't read as a table of dashes.
-  const hasRead = kids.some(k => k.a != null)
-  const hasOwners = (!!ownerIdx && store.owners) || kids.some(k => k.us?.length)
+  const hasRead = kids.some(k => k.last_read != null)
+  const hasOwners = (!!ownerIdx && store.owners) || kids.some(k => k.owners?.length || k.unknown_owner_bytes)
 
   // Created-month ink: an age gradient over the listed rows' range, so a
   // column of "May / Jun / Apr" also reads at a glance as older ↔ newer.
   // The map's scale (`?ts=`) over the rows' own days.
   const [dateScale] = useDateScale()
-  const ds = useMemo(() => kids.flatMap(k => (k.d != null ? [[k.d, k.b] as const] : [])), [kids])
+  const ds = useMemo(() => kids.flatMap(k => { const d = mtimeDay(k); return d != null ? [[d, k.bytes] as const] : [] }), [kids])
   const [dMin, dMax] = ds.length ? [Math.min(...ds.map(([d]) => d)), Math.max(...ds.map(([d]) => d))] : [0, 0]
   const ageInk = useMemo(() => dateInk(ds, dateScale), [ds, dateScale])
 
@@ -190,7 +190,7 @@ export function ChildrenTable({ node, segs, scheme, bucketSchemes, scan, flatOk 
   // Rows select (click / shift / ⌘, checkboxes, j/k) into one set keyed by
   // uri; the bar above the table stages or assigns the whole selection at once.
   // Under a filter a row stands for its matches (resolved on the click), never its whole prefix.
-  const acts = (k: TreeNode) => !k.n.startsWith('(')
+  const acts = (k: TreeNode) => !k.name.startsWith('(')
   const selectable = useMemo(() => shown.filter(acts), [shown])
   const sel = useRowSelection(selectable, uriOfKid)
   useRowSelectionKeys(sel, 'tbl', 'Children table')
@@ -211,7 +211,7 @@ export function ChildrenTable({ node, segs, scheme, bucketSchemes, scan, flatOk 
     return () => document.removeEventListener('mousedown', onDown)
   }, [selCount, clearSel])
   // What each selected row acts on: an object's key, a directory's prefix.
-  const kindOf = new Map(kids.map(k => [uriOfKid(k), k.k]))
+  const kindOf = new Map(kids.map(k => [uriOfKid(k), k.kind]))
   const selKids = kids.filter(k => sel.selected.has(uriOfKid(k)))
   // Unfiltered: each selected row's own prefix. Under a filter: the selected rows' matches, resolved on the click.
   const selAssign = [...sel.selected].map(u => actionItem(u, kindOf.get(u)))
@@ -224,24 +224,24 @@ export function ChildrenTable({ node, segs, scheme, bucketSchemes, scan, flatOk 
   }, `${filter?.key ?? sendDeps.asOf?.()}|${path}`)
   const selFocus = useKeepFocus(selAct.state.s)
   const [hovered, setHovered] = useState<string | null>(null)
-  const selBytes = selKids.reduce((s, k) => s + k.b, 0)
+  const selBytes = selKids.reduce((s, k) => s + k.bytes, 0)
   // Everything a row derives from the tree and the ledger — owner shares and
   // the resolved assignment — computed once per page of rows × ledger, so a
   // selection change (which re-renders the table) rebuilds only the JSX.
   const rowData = useMemo(() => shown.map(k => {
-    const synthetic = k.n.startsWith('(')
+    const synthetic = k.name.startsWith('(')
     const kidSegs = segsOf(k)
     const uri = schemeOf(kidSegs) + kidSegs.join('/')
-    const cl = ownerIdx && !synthetic ? ownerIdx.assignmentOf(uri, k.k === 'file' ? 'object' : 'prefix') : null
+    const cl = ownerIdx && !synthetic ? ownerIdx.assignmentOf(uri, k.kind === 'file' ? 'object' : 'prefix') : null
     // Under a filter a row holding exactly one match shows (and opens) the path down to it, as its treemap
     // tile does (`marin-eu-west4/tomat`); one holding several says how many (`marin-us-east5 · 9 matches`).
     const lab = filter && !synthetic ? rowLabel(k, kidSegs.join('/'), rowMatches?.(kidSegs.join('/')) ?? null) : null
     let end: TreeNode = k
-    for (const _ of lab?.segs.slice(1) ?? []) end = end.c![0]
-    const to = lab && lab.segs.length > 1 ? rowTarget([...segs, ...lab.segs.slice(0, -1)], end.n, end.k, false) : rowTarget(kidSegs.slice(0, -1), kidSegs[kidSegs.length - 1], k.k, synthetic)
-    const label = lab?.label ?? k.n
+    for (const _ of lab?.segs.slice(1) ?? []) end = end.children![0]
+    const to = lab && lab.segs.length > 1 ? rowTarget([...segs, ...lab.segs.slice(0, -1)], end.name, end.kind, false) : rowTarget(kidSegs.slice(0, -1), kidSegs[kidSegs.length - 1], k.kind, synthetic)
+    const label = lab?.label ?? k.name
     const fullSegs = lab ? [...segs, ...lab.segs] : kidSegs
-    const mark = staged && !synthetic ? staged.markOf(uri, k.k !== 'file') : null
+    const mark = staged && !synthetic ? staged.markOf(uri, k.kind !== 'file') : null
     return { k, synthetic, kidSegs, fullSegs, label, count: lab?.count, atLeast: !!lab?.atLeast, uri, to, shares: ownerShares(k), cl, si: selectable.indexOf(k), mark }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }), [shown, path, scheme, bucketSchemes, ownerIdx, selectable, filter, rowMatches, staged, flat])
@@ -253,7 +253,7 @@ export function ChildrenTable({ node, segs, scheme, bucketSchemes, scan, flatOk 
   // part lines up down the page; the year column only exists when a listed
   // row is outside the current year.
   const createdParts = (d: number) => epochDaysToMonthShort(d).split(' ')
-  const hasYr = shown.some(k => k.d != null && createdParts(k.d).length > 1)
+  const hasYr = shown.some(k => mtimeDay(k) != null && createdParts(mtimeDay(k)!).length > 1)
   // Under a filter the selection's trash / assign resolve the selected rows' matches on the click, then turn
   // into the action's progress and accepted state (which outlives the selection it cleared).
   const selBar = showSel && (sel.selected.size > 0 || selAct.state.s !== 'idle') && (
@@ -319,7 +319,7 @@ export function ChildrenTable({ node, segs, scheme, bucketSchemes, scan, flatOk 
       : !lq.data || lq.isPlaceholderData ? <Loading label={`Listing the largest ${what}…`} />
       : <p className="loading">No {what} below {where}.</p>
   )
-  const total = kids.reduce((s, k) => s + k.b, 0)
+  const total = kids.reduce((s, k) => s + k.bytes, 0)
   // Folders nest (one listed inside another), so their bytes don't add up: no total there.
   const showTotal = mode !== 'folders'
   return (
@@ -360,22 +360,22 @@ export function ChildrenTable({ node, segs, scheme, bucketSchemes, scan, flatOk 
         </thead>
         <tbody>
           {rowData.map(({ k, synthetic, kidSegs, fullSegs, label, count, atLeast, uri, to, shares, cl, si, mark }) => {
-            const rowItem = actionItem(uri, k.k)
+            const rowItem = actionItem(uri, k.kind)
             // A row's hover is intent to act on it (under a filter: its matches are fetched after a short dwell).
             // A flat row brushes the node's child it sits in.
-            const child = flat ? k.n.split('/')[0] : k.n
-            const enter = () => { onBrush?.(child); if (filter) setHovered(k.n) }
-            const leave = () => { onBrush?.(null); if (filter) setHovered(h => (h === k.n ? null : h)) }
+            const child = flat ? k.name.split('/')[0] : k.name
+            const enter = () => { onBrush?.(child); if (filter) setHovered(k.name) }
+            const leave = () => { onBrush?.(null); if (filter) setHovered(h => (h === k.name ? null : h)) }
             return (
-              <tr key={k.n} ref={si >= 0 ? sel.rowRef(si) : undefined} {...(si >= 0 && showSel ? sel.rowProps(si) : {})}
+              <tr key={k.name} ref={si >= 0 ? sel.rowRef(si) : undefined} {...(si >= 0 && showSel ? sel.rowProps(si) : {})}
                 {...((onBrush || filter) && !synthetic ? { onMouseEnter: enter, onMouseLeave: leave } : {})}
-                data-brushed={(!flat && brush === k.n) || undefined}
+                data-brushed={(!flat && brush === k.name) || undefined}
                 className={mark && mark.as !== 'inside' ? 'staged' : undefined}>
                 {showSel && <td className="col-sel" onClick={e => { e.stopPropagation(); if (si >= 0 && !(e.target as HTMLElement).closest('input')) sel.toggle(si) }}>{si >= 0 && <input type="checkbox" aria-label={`select ${label}`} checked={sel.isSelected(k)} onChange={() => sel.toggle(si)} />}</td>}
                 <td className="prefix">
                   {(() => {
                     // at a mixed-provider store's root, each bucket row says which cloud it's on
-                    const rootScheme = bucketSchemes && segs.length === 0 && bucketSchemes[k.n] && <span className="scheme">{bucketSchemes[k.n]}</span>
+                    const rootScheme = bucketSchemes && segs.length === 0 && bucketSchemes[k.name] && <span className="scheme">{bucketSchemes[k.name]}</span>
                     const name = to ? (
                       <a role="link" tabIndex={0}
                         onClick={() => (to.kind === 'open' ? onOpenObject : onOpen)(to.segs)}
@@ -384,7 +384,7 @@ export function ChildrenTable({ node, segs, scheme, bucketSchemes, scan, flatOk 
                       </a>
                     ) : <span>{rootScheme}{elideMid(label, NAME_MAX)}</span>
                     // A flat row: its folder part below the node, muted, drills there; the last segment opens the row.
-                    const rel = flat ? k.n.split('/') : []
+                    const rel = flat ? k.name.split('/') : []
                     const relDir = rel.slice(0, -1)
                     const base = rel[rel.length - 1]
                     const flatName = flat && to && (
@@ -411,31 +411,32 @@ export function ChildrenTable({ node, segs, scheme, bucketSchemes, scan, flatOk 
                       ? <Tooltip content={<code className="elide-full">{pathText(schemeOf(fullSegs), fullSegs)}</code>} placement="right">{name}</Tooltip>
                       : name
                     const inside = mark?.as === 'inside' && <Tooltip content={`${mark.n.toLocaleString('en-US')} staged ${mark.n === 1 ? 'item' : 'items'} inside: review them at /staged`}><a className="row-n staged-n" href="/staged"> · {mark.n.toLocaleString('en-US')} staged</a></Tooltip>
-                    // A union root's row: its store's mark, that store's scan in its tip (`src`/`at`).
+                    // A union root's row: its store's mark, that store's scan in its tip (`store`/`scan`).
                     const src = <RootSourceTag node={k} />
                     return count ? <>{cell}{src}<span className="row-n"> · {count.toLocaleString('en-US')}{atLeast ? '+' : ''} {count === 1 && !atLeast ? 'match' : 'matches'}</span>{inside}</> : <>{cell}{src}{inside}</>
                   })()}
                 </td>
-                <td className="num">{fmtBytes(k.b)}</td>
-                <td className="num">{node.b ? ((100 * k.b) / node.b).toFixed(1) : 0}%</td>
-                {mode !== 'files' && <td className="num">{fmtN(k.o)}</td>}
-                {k.d != null ? (() => {
-                  const [mon, yr] = createdParts(k.d)
+                <td className="num">{fmtBytes(k.bytes)}</td>
+                <td className="num">{node.bytes ? ((100 * k.bytes) / node.bytes).toFixed(1) : 0}%</td>
+                {mode !== 'files' && <td className="num">{fmtN(k.objects)}</td>}
+                {mtimeDay(k) != null ? (() => {
+                  const day = mtimeDay(k)!
+                  const [mon, yr] = createdParts(day)
                   return <>
-                    <td className="created sw"><i style={{ background: ageInk(k.d) }} /></td>
+                    <td className="created sw"><i style={{ background: ageInk(day) }} /></td>
                     <td className="created mon">{mon}</td>
                     {hasYr && <td className="created yr">{yr ?? ''}</td>}
                   </>
                 })() : <td className="created none num" colSpan={hasYr ? 3 : 2}>—</td>}
                 {hasRead && (() => {
-                  const logged = !readLogged || readLogged(segs[0] ?? k.n.split('/')[0])
-                  const idle = idleness(k.a, k.d, access, logged)
+                  const logged = !readLogged || readLogged(segs[0] ?? k.name.split('/')[0])
+                  const idle = idleness(k.last_read, mtimeDay(k), access, logged)
                   const thru = idle && readThrough(access)
                   const idleTip = idle && thru ? (idle.idle
                     ? ` · ${idleLabel(idle)}: no read or write since, counted from the logs' end (${thru.label})`
                     : ` · written on or after the logs' end (${thru.label}): reads since are not delivered yet, so not idle`) : ''
-                  return <td title={(k.a != null ? 'most recent GET/HEAD/LIST under this prefix (access logs)' : !logged ? 'no access logs cover this bucket' : 'no observed reads since logging began') + idleTip}>
-                    {k.a != null ? epochDaysToDate(k.a) : !logged ? 'not logged' : idle && !idle.idle ? <span className="dim">{idleLabel(idle)}</span> : '—'}
+                  return <td title={(k.last_read != null ? 'most recent GET/HEAD/LIST under this prefix (access logs)' : !logged ? 'no access logs cover this bucket' : 'no observed reads since logging began') + idleTip}>
+                    {k.last_read != null ? epochDaysToDate(k.last_read) : !logged ? 'not logged' : idle && !idle.idle ? <span className="dim">{idleLabel(idle)}</span> : '—'}
                   </td>
                 })()}
                 {/* An assignee, or a single attributed owner, by name; a mix
@@ -443,17 +444,17 @@ export function ChildrenTable({ node, segs, scheme, bucketSchemes, scan, flatOk 
                 {hasOwners && (
                 <td className="owners">
                   {cl ? <OwnerFactChip who={cl.who} assigned={{ by: cl.by, ts: cl.ts, memo: cl.memo }} />
-                    : shares.length === 1 && shares[0][1] >= 0.98 * k.b ? <OwnerFactChip who={shares[0][0]} inferred={k.pv ?? null} />
+                    : shares.length === 1 && shares[0][1] >= 0.98 * k.bytes ? <OwnerFactChip who={shares[0][0]} inferred={k.provenance ?? null} />
                     // Picking a person from a ROW's bar means "this directory,
                     // theirs only": drill into the row, then apply the lens.
-                    : shares.length ? <OwnerBar node={k} userIdx={userIdx} width={70} onPickUser={onPickUser && to?.kind === 'drill' ? u => { onOpen(kidSegs); onPickUser(u) } : undefined} />
+                    : shares.length || k.unknown_owner_bytes ? <OwnerBar node={k} userIdx={userIdx} width={70} onPickUser={onPickUser && to?.kind === 'drill' ? u => { onOpen(kidSegs); onPickUser(u) } : undefined} />
                     : <span className="none">—</span>}
                 </td>
                 )}
                 {showSel && (
                   <td className="actions">
                     {!synthetic && filter && (
-                      <RowActs key={filter.key} path={kidSegs.join('/')} src={filter} intent={hovered === k.n} scheme={schemeOf(kidSegs)}
+                      <RowActs key={filter.key} path={kidSegs.join('/')} src={filter} intent={hovered === k.name} scheme={schemeOf(kidSegs)}
                         canTrash={canTrash} assigning={assigning} fmtBytes={fmtBytes} />
                     )}
                     {!synthetic && !filter && (
@@ -475,11 +476,11 @@ export function ChildrenTable({ node, segs, scheme, bucketSchemes, scan, flatOk 
           <tr className="total-row">
             {showSel && <td />}
             <td>{flat
-              ? <>{showTotal ? 'total ' : ''}({kids.length.toLocaleString('en-US')}{moreFlat ? '+' : ''} {kids.length === 1 ? what.slice(0, -1) : what}{moreFlat && kids.length ? `; more below ${fmtBytes(Math.min(...kids.map(k => k.b)))}` : ''})</>
-              : <>total{kids.length !== (node.c ?? []).length ? ` (${kids.length} shown)` : ''}</>}</td>
+              ? <>{showTotal ? 'total ' : ''}({kids.length.toLocaleString('en-US')}{moreFlat ? '+' : ''} {kids.length === 1 ? what.slice(0, -1) : what}{moreFlat && kids.length ? `; more below ${fmtBytes(Math.min(...kids.map(k => k.bytes)))}` : ''})</>
+              : <>total{kids.length !== (node.children ?? []).length ? ` (${kids.length} shown)` : ''}</>}</td>
             <td className="num">{showTotal && fmtBytes(total)}</td>
-            <td className="num">{showTotal && <>{node.b ? ((100 * total) / node.b).toFixed(1) : 0}%</>}</td>
-            {mode !== 'files' && <td className="num">{showTotal && kids.reduce((s, k) => s + k.o, 0).toLocaleString('en-US')}</td>}
+            <td className="num">{showTotal && <>{node.bytes ? ((100 * total) / node.bytes).toFixed(1) : 0}%</>}</td>
+            {mode !== 'files' && <td className="num">{showTotal && kids.reduce((s, k) => s + k.objects, 0).toLocaleString('en-US')}</td>}
             <td colSpan={(hasYr ? 3 : 2) + (hasRead ? 1 : 0) + (hasOwners ? 1 : 0) + (showSel ? 1 : 0)} />
           </tr>
         </tfoot>

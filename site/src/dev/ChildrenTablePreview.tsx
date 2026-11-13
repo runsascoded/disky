@@ -5,10 +5,10 @@ import { DEFAULT_STORE } from '../stores'
 import type { TreeNode } from '../types'
 
 const GiB = 1024 ** 3
-const node: TreeNode = { n: 'demo', b: 600 * GiB, o: 6, k: 'dir', c: [
-  { n: 'alpha', b: 300 * GiB, o: 3, k: 'dir' },
-  { n: 'beta', b: 200 * GiB, o: 2, k: 'dir' },
-  { n: 'gamma.bin', b: 100 * GiB, o: 1, k: 'file' },
+const node: TreeNode = { name: 'demo', bytes: 600 * GiB, objects: 6, kind: 'dir', children: [
+  { name: 'alpha', bytes: 300 * GiB, objects: 3, kind: 'dir' },
+  { name: 'beta', bytes: 200 * GiB, objects: 2, kind: 'dir' },
+  { name: 'gamma.bin', bytes: 100 * GiB, objects: 1, kind: 'file' },
 ] }
 const store = { ...DEFAULT_STORE, staging: true, owners: false }
 

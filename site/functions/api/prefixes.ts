@@ -1,9 +1,9 @@
 /**
  * POST /api/prefixes  { date, prefixes: [...] }
- *   → { date, stats: { <prefix>: { b, o, d?, a?, us?, cb? } }, groups }
+ *   → { date, stats: { <prefix>: { bytes, objects, mtime?, last_read?, owners?, class_bytes? } }, groups }
  *
  * Any list of up to `MAX_PREFIXES` prefixes at one scan, with what a table
- * row shows (bytes, objects, created / last-read days, owner shares, class
+ * row shows (bytes, objects, newest write, last read, owner shares, class
  * mix), in one batched index read (`_lib/prefixes.ts`) — `/staged`'s items,
  * the action log's prefixes. A prefix gone by that scan is absent from
  * `stats`.

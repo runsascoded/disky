@@ -174,7 +174,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: if [ -f receipt.json ]; then control/scripts/oa-release finish -f receipt.json; fi
-      # Slack notice (`site/deploy-notify`: greens threaded per deployment, reds top-level), only where the environment
+      # Slack notice (`site/deploy-notify`: run-length threaded per deployment, greens with greens, reds with reds), only where the environment
       # sets `DEPLOY_NOTIFICATIONS_ENABLED=1` with its bot token and channel. A notice failure never fails the release.
       - name: Deploy notice
         if: always() && vars.DEPLOY_NOTIFICATIONS_ENABLED == '1'

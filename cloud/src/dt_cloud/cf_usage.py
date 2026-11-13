@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import re
 import sys
 import tomllib
 from collections import defaultdict
@@ -30,7 +31,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
-from click import Choice, Path as ClickPath, UsageError, command, option
+from click import Choice, IntRange, Path as ClickPath, UsageError, command, option
 
 from .secrets import env_secret
 
@@ -344,6 +345,27 @@ AE_SUMS = {"requests": "1", "wall_ms": "double2", "r2_reads": "double3", "r2_byt
            "d1_rows_read": "double6", "kv_reads": "double7", "d1_rows_written": "double8"}
 
 
+def generation_sql(
+    dataset: str,
+    since: dt.datetime,
+    until: dt.datetime,
+    host: str = "prod",
+) -> str:
+    """Last observed static selections and storage-read attempts, including today's points. Not a reader lease census."""
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z_0-9]*", dataset) or host not in ("prod", "dev", "all"):
+        raise ValueError("invalid Analytics Engine dataset or host")
+    stamp = lambda value: value.astimezone(dt.timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    where = f"timestamp >= toDateTime('{stamp(since)}') AND timestamp < toDateTime('{stamp(until)}')"
+    if host != "all":
+        where += f" AND blob8 = '{host}'"
+    return (
+        "SELECT blob9 AS selected, blob10 AS reads, blob11 AS build, blob8 AS host, "
+        "MAX(timestamp) AS last_seen, SUM(_sample_interval) AS requests "
+        f"FROM {dataset} WHERE {where} AND (blob9 != '' OR blob10 != '') "
+        "GROUP BY selected, reads, build, host ORDER BY last_seen DESC LIMIT 1001 FORMAT JSON"
+    )
+
+
 def ae_sql(dataset: str, since: dt.date, until: dt.date, by: tuple[str, ...], host: str | None = "prod") -> str:
     """The SQL summing the usage points per day and `by` dimensions, sample-weighted; `host` (`prod` / `dev`)
     keeps one host's points, `None` both."""
@@ -567,6 +589,40 @@ def write_snapshots(r: Report, todo: dict[str, list[str]], top: int = SNAPSHOT_T
             store.write_text(f"{d}.json", json.dumps(snapshot(r, d, top), indent=1) + "\n")
             written.append(store.uri(f"{d}.json"))
     return written
+
+
+@command("cf-generations")
+@option("-a", "--account", default=None, help="Cloudflare account id (default from environment or config)")
+@option("-c", "--config", type=ClickPath(dir_okay=False, exists=True, path_type=Path), default=Path("site/wrangler.toml"), help="The deployment's wrangler config")
+@option("-H", "--host", type=Choice(["prod", "dev", "all"]), default="prod", help="Which host's points to read")
+@option("-h", "--hours", type=IntRange(1, 2160), default=24, help="Trailing UTC hours, including today")
+def generations_cli(
+    account: str | None,
+    config: Path,
+    host: str,
+    hours: int,
+) -> None:
+    """Observed static index generations and last-seen times (JSON). Uses $CF_ANALYTICS_TOKEN; read-only.
+
+    Only instrumented Functions requests appear. Sampling, older deployments, jobs and direct storage readers
+    mean absence is not proof that an old generation is unused. No alerts or client upgrade instructions.
+    """
+    token = env_secret(TOKEN_ENV)
+    if not token:
+        raise UsageError(f"set ${TOKEN_ENV}: a Cloudflare API token with Account Analytics: Read on the account")
+    dep = load_deployment(config, account)
+    if not dep.dataset:
+        raise UsageError("no analytics_engine_datasets in the wrangler config")
+    until = dt.datetime.now(dt.timezone.utc)
+    since = until - dt.timedelta(hours=hours)
+    sql = generation_sql(dep.dataset, since, until, host)
+    rows = http_fetch(f"https://api.cloudflare.com/client/v4/accounts/{dep.account}/analytics_engine/sql", token, sql.encode(), "text/plain").get("data") or []
+    if len(rows) > 1000:
+        raise UsageError("more than 1000 generation groups; narrow -h (no partial report emitted)")
+    print(json.dumps({
+        "since": since.isoformat(), "until": until.isoformat(), "host": host, "rows": rows,
+        "coverage": "instrumented Functions requests only; sampled observations, not proof of zero old readers",
+    }, indent=2))
 
 
 @command("cf-usage")

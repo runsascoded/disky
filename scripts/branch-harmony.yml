@@ -1,0 +1,202 @@
+# `scripts/branch-harmony`'s classification of own-delta files (spec `specs/branch-harmony-audit.md` §Classification).
+# First match wins: `lanes` (optional) scopes a rule; `paths` are fnmatch globs (`*` also matches `/`).
+# `class`: `intrinsic` (keep: config, migrations, deployment glue, store-intrinsic code), `accidental` (should not
+# differ: the reason names the move and its owner), or `mixed` (one file holding both; the reason says which part
+# moves). A file the parent already has byte-identical is `lag` whatever the rules say: the next merge clears it.
+# Reviewed 2026-11-12 against: gcs o/gcs 072530ad5, cw o/cw ea07bac73, hf o/hf babe96ddc, r2 o/r2 738a5c6e4,
+# local r/local 8b9ee4d5f, m3 r/m3 32d10e93b, app tauri-native-app 76f1f572f, cloud d3c0c4afb.
+rules:
+  # ---- accidental: shared across siblings (duplicates, holds, identical edits) ----
+  - paths: [site/src/oaPeers.ts]
+    class: accidental
+    reason: "dup: byte-identical on gcs/cw/hf/r2, absent from cloud, edited 4x for one change (4e24e505f/45f8a6f25/c62d0efb2/6e9cb1738) -> config: a `PEERS_JSON` var each wrangler.toml sets, read by cloud's `peers`"
+  - paths: [site/functions/_lib/diffLookups.test.ts, site/functions/api/diff.ts, site/functions/api/me.test.ts, site/functions/api/scopedKey.test.ts]
+    lanes: [gcs, cw]
+    class: accidental
+    reason: "hold: gcs a12a3bd02 + cw 410f0338e revert cloud's diff lookups (dd6b0650, 4bc60b3c, e7c3ba97, 196896c5) pending a 2.7x diff-body measurement -> root: measure, then keep (gcs/cw drop the revert) or revert on cloud; meanwhile a cloud flag (`DIFF_LOOKUPS=v1`) instead of a code revert"
+  - paths: [site/functions/_lib/pathStore.test.ts, site/functions/_lib/staticDrill.test.ts]
+    lanes: [cw]
+    class: accidental
+    reason: "hold: cw 410f0338e's diff-lookups revert (as gcs) -> as the revert"
+  - paths: [job/gen-delta-arrows.py, job/gen-arrow-avatars.py, job/icons/_headers, job/rerg]
+    lanes: [gcs, cw]
+    class: accidental
+    reason: "dup: same file on gcs and cw (rerg: 4 lines apart), absent from cloud, flagged 10-10 and 10-17 -> pick to cloud `job/` (rerg's account/region as args), both drop theirs"
+  - paths: [infra/cf/run]
+    lanes: [cw, hf]
+    class: accidental
+    reason: "dup: byte-identical on cw and hf, absent from cloud -> pick to cloud `infra/cf/run`"
+  - paths: [job/static-names.sh]
+    lanes: [gcs, cw]
+    class: accidental
+    reason: "near-dup: one launcher on gcs and cw (120 of ~190 lines apart), the per-deployment part already in `job/static-names.json` -> one cloud launcher reading the profile; both drop theirs"
+  - paths: [Dockerfile, cloudbuild.yaml, job/build.sh, job/Dockerfile, job/cloudbuild.yaml]
+    lanes: [gcs, cw, hf, r2]
+    class: accidental
+    reason: "near-dup glue: four copies of the job image build; image-sha stamping landed 4x (gcs 7987fc159, cw 6e1dbb777, hf 74b3b7ac1, r2 2b978ee2d), pages-kit copy 2x -> a cloud `job/build.sh` + `job/Dockerfile` parameterized by an image env file each deployment keeps"
+  - paths: [site/wrangler.example.toml]
+    lanes: [gcs, cw]
+    class: accidental
+    reason: "template drift: cloud's documented example edited on a deployment (gcs 040b32571 merge leftover; cw 50ce9fcec history vars + overlay notes) -> cw's lines ride the history pick; gcs drops its 2 lines"
+
+  # ---- accidental: gcs ----
+  - paths: [cloud/src/dt_cloud/session_monitor.py, cloud/tests/test_session_monitor.py, site/functions/_lib/sessionMonitor.ts, site/functions/_lib/sessionMonitor.test.ts, site/functions/api/session-monitor.ts, job/session-monitor.json]
+    lanes: [gcs]
+    class: accidental
+    reason: "expired: ae64382ba's temporary session-log monitor, ended 2026-10-20/21 -> gcs drops it (and its lines in cli.py, job_token.py, auth.ts, wrangler.toml, gatesDeployment.ts)"
+  - paths: [site/functions/_lib/gatesDeployment.ts]
+    lanes: [gcs]
+    class: accidental
+    reason: "stale copy: rows for /auth/oa*, /runs/<id>, /og/run.png that cloud's gates.test.ts now has, plus the expired session monitor -> gcs drops them; the file returns to cloud's empty table"
+  - paths: [site/functions/_lib/foldRoots.test.ts, site/functions/_lib/staticFilter.test.ts, site/src/App.tsx, site/src/ChildrenTable.tsx, site/src/FilterNote.tsx, site/src/OwnerBar.tsx, site/src/OwnerControls.tsx, site/src/Treemap.tsx, site/src/filterTree.ts, site/src/types.ts, site/src/ledgerOverlay.ts, site/src/ledgerOverlay.test.ts, site/src/ownershipCoverage.test.ts, site/src/filterNote.test.ts, site/functions/_lib/union.ts, site/functions/_lib/union.test.ts, site/functions/_lib/og/data.ts, site/functions/_lib/og/data.test.ts, site/src/app.scss]
+    lanes: [gcs]
+    class: accidental
+    reason: "shared fix on gcs only: a6e393415 'Preserve rich static views and missing filtered diff ancestors', c1f9b17d1 'Preserve unavailable ownership in unions and share cards', 2331cd82c, f2d638e2d (untagged, 11-10) -> pick to cloud"
+  - paths: [site/functions/_lib/view.ts, site/functions/_lib/index.ts]
+    lanes: [gcs]
+    class: accidental
+    reason: "a6e393415 (rich static views) + 552411a40 (generation diagnostics) + the a12a3bd02 lookups hold -> pick the first two to cloud; the hold as above"
+  - paths: [site/functions/_lib/staticDrill.test.ts, site/functions/_lib/pathStore.test.ts]
+    lanes: [gcs]
+    class: accidental
+    reason: "a6e393415/2331cd82c test cases + the a12a3bd02 hold -> as those"
+  - paths: [cloud/src/dt_cloud/cf_usage.py, cloud/tests/test_cf_usage.py, site/functions/_lib/usage.ts, site/functions/_lib/usage.test.ts, site/functions/_lib/staticGen.test.ts, site/functions/_middleware.ts]
+    lanes: [gcs]
+    class: accidental
+    reason: "shared feature on gcs only: 552411a40 'Record selected and read static generations in request diagnostics' (untagged, 11-10) -> pick to cloud"
+  - paths: [site/src/ScansPage.tsx, site/src/runChart.ts, site/src/runChart.test.ts, site/src/scans.scss]
+    lanes: [gcs]
+    class: accidental
+    reason: "shared UI on gcs only: 74bfa26d5 'Compact /scans rows and expose job-type filters and output sizes', b2abddfa7 (untagged, 11-10), + f809c64ed's access-ingest rows -> pick to cloud"
+  - paths: [cloud/src/dt_cloud/scan_runs.py, cloud/src/dt_cloud/scan_runs_backfill.py, cloud/tests/test_scan_runs.py, site/functions/_lib/health.ts, site/functions/_lib/health.test.ts, site/functions/_lib/scanRuns.ts, site/src/scanRunsModel.ts, site/functions/_lib/accessIngestRuns.test.ts]
+    lanes: [gcs]
+    class: accidental
+    reason: "generic seam in a gcs feature: f809c64ed's `JobKind.single_phase`/`nop_marker` and standalone-run rows are profile-driven -> pick the mechanism to cloud, gcs keeps only `job/scan-runs.json`'s access-ingest entry"
+  - paths: [cloud/src/dt_cloud/owner_carry.py, cloud/tests/test_owner_carry.py, cloud/src/dt_cloud/append_runner.py, cloud/src/dt_cloud/interval_append.py, cloud/src/dt_cloud/static_profile.py, site/functions/_lib/intervalSlices.test.ts]
+    lanes: [gcs]
+    class: accidental
+    reason: "cloud feature's fix on gcs only: 4c49983d2 carries cloud's `owner_prefix_aggs` across a compaction (opt-in `owner_carry`) -> pick to cloud (opt-in stays per profile)"
+  - paths: [site/functions/_lib/activity.ts, site/functions/_lib/activityShape.ts, site/src/ActivityPage.tsx]
+    lanes: [gcs]
+    class: accidental
+    reason: "merge residue: `StoredBurst` moved to activityShape.ts on gcs only (a7243fb7c/7cbc17a16 resolutions) -> pick the move to cloud or take cloud's"
+  - paths: [site/e2e/guest-chip.spec.ts]
+    lanes: [gcs]
+    class: accidental
+    reason: "cosmetic: a spec path comment (`specs/done/`) fixed on gcs only -> pick"
+  - paths: [scripts/spec-audit.py, tests/test_spec_audit.py]
+    lanes: [gcs]
+    class: accidental
+    reason: "generic repo tool on gcs only -> pick to cloud `scripts/`"
+  - paths: [cloud/src/dt_cloud/interval_store.py]
+    lanes: [gcs]
+    class: mixed
+    reason: "`CLASS_COLS` named for GCS classes is intrinsic (standalone); `_cut`'s per-sort worker split is shared perf code -> pick that hunk"
+  - paths: [cloud/src/dt_cloud/cli.py]
+    lanes: [gcs]
+    class: accidental
+    reason: "registrations for the expired session monitor (drop) and 552411a40's `cf-generations` (pick)"
+  - paths: [site/functions/_lib/auth.ts]
+    lanes: [gcs]
+    class: accidental
+    reason: "the expired session monitor's `Env` lines -> drop with it"
+  - paths: [site/wrangler.toml]
+    lanes: [gcs]
+    class: intrinsic
+    reason: "gcs config (its `MONITOR_*` vars go with the session monitor)"
+
+  # ---- accidental: cw ----
+  - paths: [cloud/src/dt_cloud/history_jobs.py, cloud/src/dt_cloud/history_verify.py, cloud/src/dt_cloud/scan_thinning.py, cloud/src/dt_cloud/static_thinning.py, cloud/src/dt_cloud/interval_thinning.py, cloud/tests/test_history_jobs.py, cloud/tests/test_history_verify.py, cloud/tests/test_scan_thinning.py, cloud/tests/test_static_thinning.py, cloud/tests/test_interval_thinning.py, site/functions/_lib/history*.ts, site/functions/api/admin/history*.ts, site/src/HistoryAdmin*, site/src/scanRetention*.ts, site/src/ScansPage.tsx, site/src/scans.scss, site/src/AdminPage.tsx, site/functions/_lib/index.ts, site/functions/_lib/auth.ts, site/functions/_lib/usage.ts, site/functions/_lib/usage.test.ts, site/functions/_middleware.ts, site/functions/gates.test.ts, cloud/src/dt_cloud/static_local.py, cloud/src/dt_cloud/interval_compact.py, cloud/src/dt_cloud/cli.py]
+    lanes: [cw]
+    class: accidental
+    reason: "tagged, unpicked: b4338a37a '[cloud] Checkpoint immutable scan-history thinning and admin review' + 50ce9fcec '[cloud] Register history routes' (11-10) -> root picks to cloud; cw merges back"
+  - paths: [site/functions/_lib/view.ts]
+    lanes: [cw]
+    class: accidental
+    reason: "hold: 410f0338e's diff-lookups revert (as gcs)"
+  - paths: [prompt.txt]
+    lanes: [cw]
+    class: accidental
+    reason: "junk: a pasted chat prompt at the repo root -> cw drops it"
+  - paths: [cloud/tests/test_append_runner.py, tests/test_clean_release.py, .gcloudignore, site/functions/_lib/hostRedirect.ts]
+    lanes: [cw]
+    class: accidental
+    reason: "shared fixes on cw only: test monkeypatch target (`pub.time`), require-clean image half (89889995e), pages-kit in `.gcloudignore`, a `specs/done/` comment -> pick to cloud"
+
+  # ---- accidental: hf ----
+  # (none beyond the shared rules above)
+
+  # ---- accidental: r2 ----
+  - paths: [site/src/AuthGate.tsx, packages/pages-kit/src/oa.ts, site/functions/auth/oa.test.ts, site/functions/auth/oa/client.ts, site/functions/auth/oa/callback.ts, site/functions/_lib/auth.ts, site/functions/_lib/oidc.ts, site/src/app.scss, site/functions/_lib/previewSignIn.test.ts, site/functions/_lib/silentSignIn.test.ts, AGENTS.md]
+    lanes: [r2]
+    class: accidental
+    reason: "tagged, unpicked (today): 0a30c225a '[cloud] Sign-in wall: Continue as <you>' + 738a5c6e4 '[cloud] Cookie-name tests' -> root picks to cloud"
+  - paths: [cloud/src/dt_cloud/r2_checkpoint.py, cloud/tests/test_r2_checkpoint.py, cloud/src/dt_cloud/scan_steps.py, cloud/tests/test_scan_steps.py, site/src/scanSteps.json, src/disk_tree/access/parsers/r2.py, tests/test_access.py, cloud/src/dt_cloud/cli.py, infra/cf/r2-access/src/*, infra/cf/r2-access/__main__.py, infra/cf/r2-access/vitest.config.js, infra/tests/test_r2_access_stack.py]
+    lanes: [r2]
+    class: accidental
+    reason: "cloud component developed on r2 only: R2 access-lens checkpoint receipts (58a965038, 165de5db8, ae50fe500; untagged, 11-07) on cloud's `r2_checkpoint` / r2-access worker -> pick to cloud"
+  - paths: [site/src/nameModel.ts, site/functions/_lib/staticCatalog.test.ts, cloud/src/dt_cloud/diff_bench.py, cloud/tests/test_diff_bench.py, cloud/src/dt_cloud/interval_identity.py, cloud/tests/test_interval_object_version.py, cloud/src/dt_cloud/scan_runs_backfill.py, cloud/tests/test_scan_runs.py, site/functions/_lib/build.ts, infra/pyproject.toml]
+    lanes: [r2]
+    class: accidental
+    reason: "shared fixes on r2 only (untagged): name-summary ids (a3a6cb118, 4bb7b119d), diff-bench (27c5c8752, d288b8c4b), version migration (7eced62e3, 4aca2324f), microsecond stamps (7018a840d, 10-13), build.ts doc, infra test group -> pick to cloud"
+  - paths: [infra/cf/stack/__main__.py]
+    lanes: [r2]
+    class: accidental
+    reason: "shared CF stack program edited with r2/OA specifics (OA source-bucket list, `oa-r2-usage` token names, icons project) -> move into r2's own `infra/cf/r2_stack.py` (as cw_stack.py / hf_stack.py), generic parts (RO tokens, D1 publisher, icons) to cloud's program behind config"
+  - paths: [.github/workflows/ci.yml]
+    lanes: [r2]
+    class: mixed
+    reason: "`r2-collector` tests cloud's r2-access worker -> pick to cloud; the `job` tests job (r2's `job/tests`) stays"
+
+  # ---- accidental: local / m3 ----
+  - paths: [site/functions/_lib/staticFilter.test.ts]
+    lanes: [local]
+    class: accidental
+    reason: "cosmetic: a blank line lost in a merge resolution -> take cloud's"
+
+  # ---- intrinsic ----
+  - paths: [site/wrangler.toml, site/wrangler.dev.toml, site/deploy.env, site/index.html, site/package.json, site/public/*, .github/cf-preview.json, site/scrns.config.ts, site/sheet-mirror.yml, site/deploy-m3, site/vite.config.ts]
+    class: intrinsic
+    reason: "deployment config (one-clone-layout's intrinsic list: wrangler, index.html, devPort, preview target)"
+  - paths: [site/schema.sql, site/migrations/*]
+    class: intrinsic
+    reason: "the branch's D1: its own tables, and applied recipes `git rm`'d per the D1 workflow"
+  - paths: [infra/*, cf/*, aws/*, .dvc/*, .dvcignore, .gcloudignore, deploy/*]
+    class: intrinsic
+    reason: "the deployment's own IaC, secrets wiring and release config"
+  - paths: [job/*]
+    class: intrinsic
+    reason: "the deployment's scan pipeline glue: profiles, submitters, digest/static-names config, lifecycle snapshots"
+  - paths: [README.md, AGENTS.md, API.md, docs/*, log.md]
+    class: intrinsic
+    reason: "the deployment's docs"
+  - paths: [site/src/stores/*, site/src/consoleLink.test.ts, site/src/hubLink.test.ts, site/src/classStrip.test.ts]
+    class: intrinsic
+    reason: "the store's own entry (labels, links, peers, About), as `stores/<name>.tsx`"
+  - paths: [cloud/tests/golden/generation-off.json, cloud/tests/test_interval_store.py, cloud/tests/test_static_names.py, cloud/tests/test_interval_append.py, site/functions/_lib/prefixes.ts, site/functions/_lib/prefixes.test.ts, site/functions/_lib/scope.ts, site/functions/_lib/ownerBands.ts, site/functions/_lib/ownerHist.ts, site/functions/_lib/ownerTotals.ts, site/functions/api/unionSubtree.test.ts, site/functions/api/indexedOnly.test.ts, site/functions/_lib/intervalSlices.test.ts, site/functions/_lib/pathStore.test.ts, site/functions/_lib/view.ts, site/functions/_lib/index.ts, site/src/App.tsx, site/src/types.ts, cloud/src/dt_cloud/interval_store.py, cloud/src/dt_cloud/interval_export.py, cloud/src/dt_cloud/interval_verify.py, cloud/src/dt_cloud/static_names.py]
+    lanes: [hf]
+    class: intrinsic
+    reason: "store-intrinsic: hf's classes in its own terms (`private_bytes` / `git_bytes`, b8281f611) and their goldens"
+  - paths: [cloud/tests/test_deploy_notify.py, site/deploy-notify]
+    lanes: [hf]
+    class: intrinsic
+    reason: "hf's deploy-notice config"
+  - paths: [cloud/tests/golden/generation-off.json]
+    lanes: [gcs]
+    class: intrinsic
+    reason: "store-intrinsic: gcs's named class columns (`nearline_bytes` ...) change the golden's digests"
+  - paths: [cloud/tests/test_job_gcs.py, cloud/tests/test_access_run_job.py, cloud/tests/test_gcs_scan_id.py, cloud/tests/test_gcs_publication.py, cloud/tests/test_cw_*.py, cloud/tests/test_digest_cw_config.py, cloud/tests/test_scan_runs_cw_config.py, cloud/tests/test_scan_runs_backfill_m3.py, job/tests/*]
+    class: intrinsic
+    reason: "tests of the deployment's own job glue and config"
+  - paths: [site/src/RunScan.tsx]
+    lanes: [cw]
+    class: intrinsic
+    reason: "lag (the parent has it byte-identical)"
+  - paths: ['*']
+    lanes: [local, app]
+    class: intrinsic
+    reason: "the laptop line: capture / APFS / drainer / laptop routes / the macOS app, which cloud doesn't carry (branches-carry-exactly-their-code)"
+  - paths: ['*']
+    lanes: [m3]
+    class: intrinsic
+    reason: "the laptop deployment: owners stripped (64a076ed8), AWS ingest stack, scan-durations UI, its Pulumi state (public by design)"

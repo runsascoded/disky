@@ -51,8 +51,31 @@ export const runSpanParam: Param<RunSpan | null> = {
     return a != null && b != null && a < b ? [a, b] : null
   },
 }
-/** /scans' kind filter (`?k=<kind>`: `scan`, `merge`, …); absent: every kind. */
+/** /scans' kinds: comma-separated includes and `!kind` excludes; absent = all, `!` = none. */
 export const runKindParam: Param<string> = { encode: k => k || undefined, decode: s => s ?? '' }
+export const runKindTokens = (filter: string): string[] => filter.split(',').filter(Boolean)
+export const runFilterKinds = (filter: string): string[] => runKindTokens(filter).map(k => k.replace(/^!/, '')).filter(Boolean)
+export function runKindMatches(filter: string, kind: string): boolean {
+  const tokens = runKindTokens(filter)
+  const includes = tokens.filter(k => !k.startsWith('!'))
+  return filter !== '!' && (!includes.length || includes.includes(kind)) && !tokens.includes(`!${kind}`)
+}
+/** Preserve a whitelist's scope, or an all-types filter's exclusions (including types not loaded yet). */
+export function includeRunKind(filter: string, kind: string, include: boolean): string {
+  const tokens = runKindTokens(filter)
+  const includes = tokens.filter(k => !k.startsWith('!'))
+  if (includes.length || filter === '!') {
+    const selected = new Set(includes.filter(k => runKindMatches(filter, k)))
+    if (include) selected.add(kind)
+    else selected.delete(kind)
+    return [...selected].sort().join(',') || '!'
+  }
+  const hidden = new Set(tokens)
+  if (include) hidden.delete(`!${kind}`)
+  else hidden.add(`!${kind}`)
+  return [...hidden].sort().join(',')
+}
+export const runKindLabel = (kind: string): string => kind === 'access-ingest' ? 'Access logs (AL)' : kind === 'scan' ? 'Scan' : kind
 /** /scans' status filter (`?st=<key>`, a `STATUS_FILTERS` key); absent, or a key it doesn't have: every status. */
 export const runStatusParam: Param<string> = enumParam<string>('', ['', ...STATUS_FILTERS.map(f => f.key)])
 /** Whether a run started in the window (its `[from, to]` minutes, inclusive: the stamps drop seconds). */

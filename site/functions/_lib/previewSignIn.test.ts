@@ -160,8 +160,8 @@ describe('no silent sign-in on a preview host', () => {
 })
 
 describe('`AUTH_HOST_COOKIES`: `__Host-` cookie names on https', () => {
-  const PLAIN = { session: 'oa_auth', googleNonce: 'oa_oidc', oaNonce: 'oa_login_nonce', accountHint: 'oa_google_hint' }
-  const HOST = { session: '__Host-oa_auth', googleNonce: '__Host-oa_oidc', oaNonce: '__Host-oa_login_nonce', accountHint: '__Host-oa_google_hint' }
+  const PLAIN = { session: 'oa_auth', googleNonce: 'oa_oidc', oaNonce: 'oa_login_nonce', accountHint: 'oa_google_hint', oaHint: 'oa_login_hint', oaWho: 'oa_login_who' }
+  const HOST = { session: '__Host-oa_auth', googleNonce: '__Host-oa_oidc', oaNonce: '__Host-oa_login_nonce', accountHint: '__Host-oa_google_hint', oaHint: '__Host-oa_login_hint', oaWho: '__Host-oa_login_who' }
 
   it('names per flag, scheme and host; a preview host keeps no account hint', async () => {
     const got = []
@@ -171,13 +171,13 @@ describe('`AUTH_HOST_COOKIES`: `__Host-` cookie names on https', () => {
     expect(got).toEqual([
       [undefined, `${PROD}/`, PLAIN],
       [undefined, 'http://m3:3253/', PLAIN],
-      [undefined, `${PREVIEW}/`, { ...PLAIN, accountHint: false }],
+      [undefined, `${PREVIEW}/`, { ...PLAIN, accountHint: false, oaHint: false, oaWho: false }],
       ['1', `${PROD}/`, HOST],
       ['1', 'http://m3:3253/', PLAIN],
-      ['1', `${PREVIEW}/`, { ...HOST, accountHint: false }],
+      ['1', `${PREVIEW}/`, { ...HOST, accountHint: false, oaHint: false, oaWho: false }],
       ['0', `${PROD}/`, PLAIN],
       ['0', 'http://m3:3253/', PLAIN],
-      ['0', `${PREVIEW}/`, { ...PLAIN, accountHint: false }],
+      ['0', `${PREVIEW}/`, { ...PLAIN, accountHint: false, oaHint: false, oaWho: false }],
     ])
   })
 

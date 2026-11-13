@@ -7,6 +7,7 @@ import { Omnibar, ShortcutsModal, SpeedDial, useActions, type SpeedDialAction } 
 import { SpeedDialTip } from './Tooltip'
 import { useRegistry } from './identities'
 import { hostPair, otherHostUrl, peerUrl, urlLabel, type Peer } from './hosts'
+import { parsePeers } from './peers'
 import { useHelpPref, useScrollSpyPref } from './prefs'
 import { useStore } from './store'
 import { DEFAULT_STORE, DUPS, STORES } from './stores'
@@ -22,8 +23,8 @@ import { useShare } from './sharePreview'
 export { REPO_URL } from './build'
 import { SOURCE_URL } from './build'
 const HOSTS = hostPair(import.meta.env.VITE_PROD_HOST, import.meta.env.VITE_DEV_HOST)
-/** The other deployments: the family list less this one. */
-export const PEERS: Peer[] = (STORES[0]?.peers ?? []).filter(p => p.prod !== import.meta.env.VITE_PROD_HOST)
+/** The other deployments: the family list (the store's `peers`, else the build's `PEERS` var) less this one. */
+export const PEERS: Peer[] = (STORES[0]?.peers ?? parsePeers(import.meta.env.VITE_PEERS)).filter(p => p.prod !== import.meta.env.VITE_PROD_HOST)
 /** This page on a peer, from the current location. */
 export const peerHref = (p: Peer, href: string) => peerUrl(href, p, new URL(href).hostname === HOSTS?.dev)
 /** The characters an omnibar row shows before clipping its label's end. */

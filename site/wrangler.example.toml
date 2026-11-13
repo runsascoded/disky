@@ -62,6 +62,9 @@ AUTH_MODE = "app"                           # `app` (the app's own sign-in) | `p
 # CACHE_NS = ""                               # response-cache env tag (`_lib/edgeCache.ts`): unset = the request host,
 #                                             #   except PROD_HOST (prod's keys); set "" on a prod with no PROD_HOST
 # REPO_URL = "https://github.com/me/my-fork"  # the "Source on GitHub" link; unset = this repo
+# PEERS = '[{"label": "Other usage", "prod": "other.example.com", "dev": "dev.other.example.com", "meta": true}]'
+#                                             # sibling deployments the omnibar / site menu link (src/peers.ts): a JSON
+#                                             #   array in a TOML literal string; may list this one; unset = none
 # MARK = "gcs"                                # favicon/badge: a `public/icons/` key (gcs cw r2 s3 hf nas macos local); unset = ROOT_LABEL's initials
 
 # --- Who may see it (_lib/auth.ts) ---
@@ -123,12 +126,20 @@ ROOT_LABEL = "my buckets"                   # the store root's crumb label
 # DIGEST_REAPPLY = '{"template":"…","config":"job/digest.yml","root":"snapshots/…","env_script":"job/…-env.sh","r2_bucket":"…","secrets":{"SITE_TOKEN":"…"}}'  # `/admin/slack`'s re-apply job; unset: it answers 503
 # GCP_PROJECT = "my-project"                  # the GCP project the Batch jobs, secrets and logs live in; unset = GCP_SA_KEY's project_id
 # SCAN_SUBMIT_JOB = "projects/my-project/locations/us-east1/jobs/my-scan-submit"  # /scans' "Run a scan" (admins): runs this Cloud Run job (a `BatchSubmitCron`'s submitter) as GCP_SA_KEY with DT_TRIGGER=manual; unset: no button, the route answers 503
+# SWEEP_DISPATCH = "0"                        # no sweep / undo / purge dispatch, sweep stop or digest re-apply from this env whatever its GCP_SA_KEY, and its job lists don't record or announce finished runs (a dev stack on prod data that holds the key for "Run a scan"); unset = dispatch as configured
 # META_TREE_URL = "https://other.example/meta"  # /scans links each scan output to its dir in the `/meta` store tree (the deployments' own data bucket); unset = no tree links
 # GCP_LOG_VIEW = "projects/my-project/locations/global/buckets/_Default/views/sweep-task-logs"  # IaC-managed task-log-only view; grant the site view-scoped logging.viewAccessor
 # BATCH_REGION = "us-east1"                    # the deployment's Batch region, beside its data bucket (no default): `plan-sweep` needs it; `sweep` when a cut isn't in one BUCKET_REGIONS region
 # BUCKET_REGIONS = '{"my-bucket": "us-east1"}'  # a one-region bucket cut runs its job there, beside the data; unset = BATCH_REGION
 # DATA_BUCKET = "my-data"                      # the bucket a run's plan.json, manifest and logs land in (dispatch requires it)
 # SWEEP_IMAGE = "<region>-docker.pkg.dev/<project>/<repo>/<image>:<tag>"  # the executor's image (dispatch requires it)
+# History retention is opt-in: jobs build immutable candidates; adoption is a separate environment CAS.
+# HISTORY_CURRENT_KEY = "history/environments/dev/CURRENT.json"  # unset: follow the scan pipeline's writer generations
+# HISTORY_IMAGE = "<region>-docker.pkg.dev/<project>/<repo>/<image>@sha256:<digest>"  # pinned history worker image
+# HISTORY_DATA_STORE = "gs://my-data-bucket"  # source generations, beside the Batch workers
+# HISTORY_SERVING_STORE = "r2://my-index-bucket"  # immutable candidate artifacts and environment pointers
+# HISTORY_REGION = "us-east1"                 # beside HISTORY_DATA_STORE; no default
+# HISTORY_SECRETS = '{"R2_ENDPOINT":"my-r2-endpoint","R2_ACCESS_KEY_ID":"my-r2-key","R2_SECRET_ACCESS_KEY":"my-r2-secret"}'  # env variable -> Secret Manager name, never values
 # SWEEP_REVIEW_STORE = "r2://<index-bucket>"  # historical review inputs after per-scan retirement (`sweep`: the `as_of` hold store; unset = gs://$DATA_BUCKET)
 # SWEEP_REVIEW_SECRETS = '{"R2_ENDPOINT":"<endpoint-secret>","R2_ACCESS_KEY_ID":"<key-secret>","R2_SECRET_ACCESS_KEY":"<secret-secret>"}'
 # SWEEP_PACING = "guided"                    # per-bucket feedback; adaptive is a faster probe, enable after a controlled benchmark
@@ -161,6 +172,8 @@ ROOT_LABEL = "my buckets"                   # the store root's crumb label
 # INTERVAL_STORE_REV = "2"                  # with PATH_STORE: bump when the generation's files are rewritten in place (re-keys the caches)
 # ZSTD_WASM = "1"                       # parquet pages decode in zstd's own wasm decoder rather than `fzstd` (`_lib/zstd.ts`): about half the CPU of a cold read, 4 MiB of isolate memory (specs/latency-observability.md)
 # DIFF_DESCENT = "1"                     # with PATH_STORE: Δ-mode diffs (`dm=delta`, unscoped) by lazy descent over the interval store (`_lib/diffDescent.ts`; its planner hands busy, broad paths to the as-of walk); no index beyond the store's
+# DIFF_LOOKUP_CAP = "0"                # a diff's point lookups (names one scan drew, read on the other; default 240): `0` reads none, folding
+                                        # them into `(other)` on both sides (`lookups_capped`, said under the map); a lower count bounds a diff's cost
 # OWNER_HISTORY_BATCH = "1"                # prototype (specs/root-owner-history.md; off): a fleet-root owner series from one bounded interval-store version read, the canonical per-scan reader as fallback
 # FOOTER_CACHE_MAX_ROWS = "1000000"        # the footer LRU's budget (`_lib/footerCache.ts`, specs/done/footer-lru.md): the most `index_row_groups` rows its hot entries keep; evicted by `POST /api/footer-cache` / `dt-cloud footer-evict`. Default 1,000,000
 # FOOTER_CACHE_MAX_BYTES = "1000000000"    # …and a byte cap over them (text columns + 64 B per row); unset = none
@@ -199,3 +212,4 @@ ROOT_LABEL = "my buckets"                   # the store root's crumb label
 # overlay STORE_KEY                         set by STORES_JSON's per-store overlay, never directly
 # overlay STORE_SCOPE
 # overlay STORE_SERIES_SCOPE
+# overlay HISTORY_VERSION_CACHE              one request's captured history pointer/version; never deployment configuration

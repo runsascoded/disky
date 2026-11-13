@@ -36,7 +36,7 @@ const META = { vars: { ROOT_LABEL: 'our storage', SNAPSHOTS_SUBDIR: 'meta', STOR
 const META_OWN = { ...META, vars: { ...META.vars, STATIC_GEN: 'gen-meta' } }
 const NOT_INDEXED = { code: 'scan-not-indexed', error: REJECT_MESSAGES['scan-not-indexed'] }
 
-type Node = { n: string; k: string; b: number; o: number; c?: Node[]; src?: string; at?: string; m?: number }
+type Node = { name: string; kind: string; bytes: number; objects: number; children?: Node[]; store?: string; scan?: string; matched?: true }
 type Body = Record<string, unknown> & { tree: Node; nodes: number; tier: string; index: string; matched?: unknown; matches?: unknown; matchCount?: unknown }
 
 describe('D1', () => {
@@ -72,7 +72,7 @@ describe('D1', () => {
     expect(status).toBe(200)
     return b as Body
   }
-  const top = (t: Node) => (t.c ?? []).map(c => ({ ...c, c: undefined }))
+  const top = (t: Node) => (t.children ?? []).map(c => ({ ...c, children: undefined }))
 
   it('a member without its own index refuses for its mount: the answer is the others’, partial, the refusal named', async () => {
     const env = envOf()
@@ -84,10 +84,10 @@ describe('D1', () => {
       nodes: p.nodes, truncated: false,
       union: { view: 'all', at: '2026-10-01T00:01:00.000Z', sources: [{ store: 'primary', date: A }, { store: 'meta', date: A, refused: NOT_INDEXED }] },
       q: 'ckpt',
-      matches: ['bk/ckpt'], matched: [{ path: 'bk/ckpt', b: 6000, o: 1 }], matchCount: { n: 1, b: 6000, o: 1 },
+      matches: ['bk/ckpt'], matched: [{ path: 'bk/ckpt', bytes: 6000, objects: 1 }], matchCount: { count: 1, bytes: 6000, objects: 1 },
       firstPaint: true,
       partial: true, partialReason: `meta: ${REJECT_MESSAGES['scan-not-indexed']}`,
-      tree: { n: 'Fleet', k: 'dir', b: 6000, o: 1, c: (p.tree.c ?? []).map(c => ({ ...c, src: 'primary', at: A })) },
+      tree: { name: 'Fleet', kind: 'dir', bytes: 6000, objects: 1, children: (p.tree.children ?? []).map(c => ({ ...c, store: 'primary', scan: A })) },
     })
   })
 
@@ -98,7 +98,7 @@ describe('D1', () => {
     // Each member read under its own budget, then again under the union's.
     const T = String(filterThreshold(6000 + 4194304, 1280, 768, 12))
     expect(reads()).toEqual([['meta', null], ['meta', T], ['primary', null], ['primary', T]])
-    expect({ ...u, tree: { ...u.tree, c: top(u.tree) } }).toEqual({
+    expect({ ...u, tree: { ...u.tree, children: top(u.tree) } }).toEqual({
       date: A, path: '', w: 1280, h: 768, minArea: 12, atten: 2,
       tier: u.tier, index: u.index,
       threshold: Math.round(filterThreshold(6000 + 4194304, 1280, 768, 12)),
@@ -106,18 +106,18 @@ describe('D1', () => {
       union: { view: 'all', at: '2026-10-01T00:01:00.000Z', sources: [{ store: 'primary', date: A }, { store: 'meta', date: A }] },
       q: 'both',
       matches: ['bk/ckpt', 'mb/scans'],
-      matched: [{ path: 'mb/scans', b: 4194304, o: 1 }, { path: 'bk/ckpt', b: 6000, o: 1 }],
-      matchCount: { n: 2, b: 4194304 + 6000, o: 2 },
+      matched: [{ path: 'mb/scans', bytes: 4194304, objects: 1 }, { path: 'bk/ckpt', bytes: 6000, objects: 1 }],
+      matchCount: { count: 2, bytes: 4194304 + 6000, objects: 2 },
       firstPaint: true,
       tree: {
-        n: 'Fleet', k: 'dir', b: 4194304 + 6000, o: 2,
-        c: [{ n: 'mb', k: 'dir', b: 4194304, o: 1, src: 'meta', at: A, c: undefined }, { n: 'bk', k: 'dir', b: 6000, o: 1, src: 'primary', at: A, c: undefined }],
+        name: 'Fleet', kind: 'dir', bytes: 4194304 + 6000, objects: 2,
+        children: [{ name: 'mb', kind: 'dir', bytes: 4194304, objects: 1, store: 'meta', scan: A, children: undefined }, { name: 'bk', kind: 'dir', bytes: 6000, objects: 1, store: 'primary', scan: A, children: undefined }],
       },
     })
     // A member with no match contributes nothing; no refusal, nothing partial.
     const only = await body(subtree, env, `date=${A}&path=&q=ckpt`)
     expect([only.matched, only.matchCount, only.partial, (only.union as { sources: unknown }).sources])
-      .toEqual([[{ path: 'bk/ckpt', b: 6000, o: 1 }], { n: 1, b: 6000, o: 1 }, undefined, [{ store: 'primary', date: A }, { store: 'meta', date: A }]])
+      .toEqual([[{ path: 'bk/ckpt', bytes: 6000, objects: 1 }], { count: 1, bytes: 6000, objects: 1 }, undefined, [{ store: 'primary', date: A }, { store: 'meta', date: A }]])
   })
 
   it('every member refusing: the first refusal, as its member gave it', async () => {
@@ -147,10 +147,10 @@ describe('D1', () => {
     }
   })
 
-  type DiffBody = Body & { rows: { p: string; d: number }[]; total_a: number; total_b: number; objects_a: number; objects_b: number; expansions: number; lookups: number; threshold: number; matched: { path: string; b: number; o: number }[]; matchCount: { n: number; b: number; o: number } }
+  type DiffBody = Body & { rows: { path: string; depth: number }[]; bytes_before: number; bytes_after: number; objects_before: number; objects_after: number; expansions: number; lookups: number; threshold: number; matched: { path: string; bytes: number; objects: number }[]; matchCount: { count: number; bytes: number; objects: number } }
   /** A member's filtered diff's filter fields that the union root carries as they are (a partial reason is named). */
   const filterFieldsOf = (b: DiffBody) => Object.fromEntries(Object.entries(b).filter(([k]) => ['interiors', 'dirsOnly', 'matchesCapped', 'hexRuns'].includes(k)))
-  const tagged = (b: DiffBody, src: string) => b.rows.map(r => (r.d === 1 && r.p !== '(other)' ? { ...r, src } : r))
+  const tagged = (b: DiffBody, store: string) => b.rows.map(r => (r.depth === 1 && r.path !== '(other)' ? { ...r, store } : r))
 
   it('the root’s filtered diff: each member diffs its own scans with `q=`; an unchanged one adds its matches to both sides, no rows', async () => {
     // A→B: the primary didn't rescan (A at both cutoffs: unchanged), meta did (A→B).
@@ -161,16 +161,16 @@ describe('D1', () => {
     expect({ ...u, expansions: u.expansions >= m.expansions, lookups: u.lookups >= m.lookups }).toEqual({
       prev: A, curr: B, path: '', q: 'both',
       rows: tagged(m, 'meta'),
-      total_a: m.total_a + 6000, total_b: m.total_b + 6000, objects_a: m.objects_a + 1, objects_b: m.objects_b + 1,
+      bytes_before: m.bytes_before + 6000, bytes_after: m.bytes_after + 6000, objects_before: m.objects_before + 1, objects_after: m.objects_after + 1,
       expansions: true, lookups: true,
       truncated: false,
-      threshold: Math.round(filterThreshold(Math.max(m.total_a, m.total_b) + 6000, 1280, 768, 12)),
+      threshold: Math.round(filterThreshold(Math.max(m.bytes_before, m.bytes_after) + 6000, 1280, 768, 12)),
       tier: u.tier,
       lookups_capped: false,
       ...filterFieldsOf(m),
       matches: [],
-      matched: [{ path: 'bk/ckpt', b: 6000, o: 1 }, ...m.matched].sort((x, y) => y.b - x.b),
-      matchCount: { n: m.matchCount.n + 1, b: m.matchCount.b + 6000, o: m.matchCount.o + 1 },
+      matched: [{ path: 'bk/ckpt', bytes: 6000, objects: 1 }, ...m.matched].sort((x, y) => y.bytes - x.bytes),
+      matchCount: { count: m.matchCount.count + 1, bytes: m.matchCount.bytes + 6000, objects: m.matchCount.objects + 1 },
       union: { view: 'all', sources: [{ store: 'primary', from: A, to: A, change: 'unchanged' }, { store: 'meta', from: A, to: B, change: 'changed' }] },
     })
   })
@@ -183,10 +183,10 @@ describe('D1', () => {
     expect(u).toEqual({
       prev: A, curr: C, path: '', q: 'both',
       rows: tagged(m, 'meta'),
-      total_a: m.total_a, total_b: m.total_b, objects_a: m.objects_a, objects_b: m.objects_b,
+      bytes_before: m.bytes_before, bytes_after: m.bytes_after, objects_before: m.objects_before, objects_after: m.objects_after,
       expansions: m.expansions, lookups: m.lookups,
       truncated: false,
-      threshold: Math.round(filterThreshold(Math.max(m.total_a, m.total_b), 1280, 768, 12)),
+      threshold: Math.round(filterThreshold(Math.max(m.bytes_before, m.bytes_after), 1280, 768, 12)),
       tier: m.tier,
       lookups_capped: false,
       ...filterFieldsOf(m),
@@ -211,7 +211,7 @@ describe('D1', () => {
     expect(await body(filterCover, own, `date=${A}&path=&q=both`)).toEqual({
       date: A, path: '', q: 'both',
       items: [...(p.items as unknown[]), ...(m.items as unknown[])],
-      roots: { n: 2, b: 4194304 + 6000, o: 2 },
+      roots: { count: 2, bytes: 4194304 + 6000, objects: 2 },
       complete: true,
       looked: (p.looked as number) + (m.looked as number), unchecked: 0,
       union: { view: 'all', at: '2026-10-01T00:01:00.000Z', sources: [{ store: 'primary', date: A }, { store: 'meta', date: A }] },
@@ -219,7 +219,7 @@ describe('D1', () => {
     expect(await body(filterCover, bare, `date=${A}&path=&q=ckpt`)).toEqual({
       date: A, path: '', q: 'ckpt',
       items: (await body(filterCover, bare, `date=${A}&path=&q=ckpt&store=primary`)).items,
-      roots: { n: 1, b: 6000, o: 1 },
+      roots: { count: 1, bytes: 6000, objects: 1 },
       complete: false, reason: `meta: ${REJECT_MESSAGES['scan-not-indexed']}`,
       looked: p.looked, unchecked: 0,
       union: { view: 'all', at: '2026-10-01T00:01:00.000Z', sources: [{ store: 'primary', date: A }, { store: 'meta', date: A, refused: NOT_INDEXED }] },

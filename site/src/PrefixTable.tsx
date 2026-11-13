@@ -11,7 +11,7 @@ import { elideMid, copyText } from './CopyName'
 import { OwnerFactChip } from './OwnerFactChip'
 import { OwnerBar, ownerShares } from './OwnerBar'
 import { useUnits } from './units'
-import { fmtN, type TreeNode } from './types'
+import { fmtN, mtimeDay, type TreeNode } from './types'
 import { dateInk, useDateScale } from './dateScale'
 import type { OwnerIndex } from './owners'
 import type { UserIndexEntry } from './colors'
@@ -77,7 +77,7 @@ export function PrefixTable<R extends PrefixRow>({ rows, sort, onSort, shareOf, 
   const time = listingTime(useStore().scheme)
   // Created ink across the listed rows' range, as the map's table does.
   const [dateScale] = useDateScale()
-  const ink = dateInk(rows.flatMap(r => (r.stat?.d != null ? [[r.stat.d, r.stat.b] as const] : [])), dateScale)
+  const ink = dateInk(rows.flatMap(r => { const d = mtimeDay(r.stat); return d != null ? [[d, r.stat!.bytes] as const] : [] }), dateScale)
   const th = (k: PrefixSortKey, label: string, num = true) => (
     <th key={k} className={(num ? 'num ' : '') + 'sortable' + (sort.k === k ? ' on' : '')} title="sort" onClick={() => onSort(k)}>
       {label}{sort.k === k ? (sort.asc ? ' ▲' : ' ▼') : ''}
@@ -103,7 +103,8 @@ export function PrefixTable<R extends PrefixRow>({ rows, sort, onSort, shareOf, 
         {rows.map((r, i) => {
           const s = r.stat
           const cl = ownerIdx?.count ? ownerIdx.assignmentOf(r.name) : null
-          const node: TreeNode | null = s ? { n: r.name, b: s.b, o: s.o, ...(s.us ? { us: s.us } : {}) } : null
+          const node: TreeNode | null = s ? { name: r.name, bytes: s.bytes, objects: s.objects, ...(s.owners ? { owners: s.owners } : {}) } : null
+          const day = mtimeDay(s)
           const shares = node ? ownerShares(node) : []
           const none = loading ? '…' : <span className="dim">{emptyLabel}</span>
           return (
@@ -115,17 +116,17 @@ export function PrefixTable<R extends PrefixRow>({ rows, sort, onSort, shareOf, 
                 </Tooltip>
                 <Tooltip content="Copy full prefix"><button type="button" className="prefix-copy" aria-label={`Copy ${r.name}`} onClick={() => void copyText(r.name)}>⧉</button></Tooltip>
               </span></td>
-              <td className="num">{s ? fmtBytes(s.b) : none}</td>
-              {shareOf != null && <td className="num">{s && shareOf > 0 ? `${((100 * s.b) / shareOf).toFixed(1)}%` : ''}</td>}
-              <td className="num">{s ? fmtN(s.o) : ''}</td>
+              <td className="num">{s ? fmtBytes(s.bytes) : none}</td>
+              {shareOf != null && <td className="num">{s && shareOf > 0 ? `${((100 * s.bytes) / shareOf).toFixed(1)}%` : ''}</td>}
+              <td className="num">{s ? fmtN(s.objects) : ''}</td>
               <td className="owners">
                 {cl ? <OwnerFactChip who={cl.who} assigned={{ by: cl.by, ts: cl.ts, memo: cl.memo }} />
-                  : node && shares.length === 1 && shares[0][1] >= 0.98 * node.b ? <OwnerFactChip who={shares[0][0]} />
+                  : node && shares.length === 1 && shares[0][1] >= 0.98 * node.bytes ? <OwnerFactChip who={shares[0][0]} />
                   : node && shares.length ? <OwnerBar node={node} userIdx={userIdx} width={70} />
                   : <span className="dim">—</span>}
               </td>
-              <td className="created"><TimeCell day ts={s?.d != null ? s.d * 86400 : undefined} ink={s?.d != null ? ink(s.d) : undefined} /></td>
-              <td className="read"><TimeCell day ts={s?.a != null ? s.a * 86400 : undefined} /></td>
+              <td className="created"><TimeCell day ts={day != null ? day * 86400 : undefined} ink={day != null ? ink(day) : undefined} /></td>
+              <td className="read"><TimeCell day ts={s?.last_read != null ? s.last_read * 86400 : undefined} /></td>
               {extra.map(c => <td key={c.key} className={c.className}>{c.cell(r)}</td>)}
               {trail && <td className="actions">{trail(r, i)}</td>}
             </tr>

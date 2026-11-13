@@ -11,11 +11,13 @@
  * `target`: `thread` | `op` | `YYYY-MM-DD` | `YYYY-MM-DD..YYYY-MM-DD` (days of `month`). `channel` defaults to
  * `DIGEST_CHANNEL` (the deployment's digest channel); another (a DM, to try a format first) is any Slack channel id.
  *
- * `DIGEST_REAPPLY` (JSON, `ReapplyConfig`) names what's the deployment's: unset, a POST answers 503. */
+ * `DIGEST_REAPPLY` (JSON, `ReapplyConfig`) names what's the deployment's: unset, a POST answers 503. Where `SWEEP_DISPATCH`
+ * is `"0"` a POST answers 403 (`sweepsOff`): the job edits the real digest; the GETs only read. */
 import type { D1Database } from '@cloudflare/workers-types'
 import { type Ctx, json, requireAdmin } from '../_lib/auth.js'
 import { batchConfig, type BatchEnv, notConfigured } from '../_lib/batchConfig.js'
 import { jobStamp, secretRef, submitBatch, sweepBatchSpec } from '../_lib/cwBatch.js'
+import { sweepsOff, SWEEPS_OFF } from '../_lib/dispatch.js'
 import { batchJobsUrl, gcpToken } from '../_lib/gcp.js'
 import { parseParams } from '../../src/digest/codec.js'
 import { QUOTA_MARKS } from './digest-settings.js'
@@ -114,6 +116,7 @@ const row = (r: Record<string, unknown>): ReapplyRun => ({ ...(r as unknown as R
 export const onRequestPost = async (ctx: Ctx): Promise<Response> => {
   const id = await requireAdmin(ctx)
   if (id instanceof Response) return id
+  if (sweepsOff(ctx.env)) return json({ error: SWEEPS_OFF }, 403)
   const env = ctx.env as unknown as Env
   if (!env.DB) return json({ error: 'not configured (no D1 binding)' }, 503)
   if (!env.GCP_SA_KEY || !env.JOB_SA) return json({ error: 'not configured (GCP_SA_KEY / JOB_SA)' }, 503)

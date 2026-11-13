@@ -33,7 +33,7 @@ import { ownerShares } from './OwnerBar'
 import { encodeSort, filterStaged, parseSort } from './stagedFilter'
 import { PrefixTable, TimeCell } from './PrefixTable'
 import { useUnits } from './units'
-import { fmtBytesPrecise, fmtN, type Meta, type TreeNode } from './types'
+import { fmtBytesPrecise, fmtN, type Meta, mtimeDay, type TreeNode } from './types'
 import { DEFAULT_STORE } from './stores'
 import { buildUserIndex } from './colors'
 import { useCanStage, useIdent } from './auth'
@@ -167,7 +167,7 @@ function ConfirmList({ rows, fmtBytes }: { rows: Row[]; fmtBytes: (b: number) =>
         <Tooltip content="Copy every path, one per line, to review elsewhere"><button type="button" onClick={copy}>{copied ? 'copied ✓' : 'copy all'}</button></Tooltip>
       </div>
       <ul className="dispatch-confirm-list" aria-label="To be deleted">
-        {page.map(r => <li key={r.prefix}><code>{r.prefix}</code>{r.stat && <span className="dim"> · {fmtBytes(r.stat.b)}</span>}</li>)}
+        {page.map(r => <li key={r.prefix}><code>{r.prefix}</code>{r.stat && <span className="dim"> · {fmtBytes(r.stat.bytes)}</span>}</li>)}
       </ul>
     </>}</Paginated>
   )
@@ -283,7 +283,7 @@ export function StagedPage() {
   const thru = useMemo(() => readThrough(access), [access])
   const idleOf = useMemo(() => {
     const logged = readLogged(access)
-    return (r: { prefix: string, stat?: PrefixStat }) => r.stat ? idleness(r.stat.a, r.stat.d, access, logged(prefixBucket(r.prefix))) : null
+    return (r: { prefix: string, stat?: PrefixStat }) => r.stat ? idleness(r.stat.last_read, mtimeDay(r.stat), access, logged(prefixBucket(r.prefix))) : null
   }, [access])
   const ownerIdx = useOwnerIndex(useOwners(!!store.owners).data)
   const error = unstage.error ?? runAction.error ?? staged.error ?? statsQ.error ?? deletionsQ.error ?? history.error
@@ -302,7 +302,7 @@ export function StagedPage() {
   // the scan's attribution — what the owner(s) column shows) and its stager.
   const filtered = useMemo(() => filterStaged(rows, q, r => {
     const cl = ownerIdx.count ? ownerIdx.assignmentOf(r.prefix, r.kind) : null
-    const owners = cl ? [cl.who] : r.stat ? ownerShares({ n: r.name, b: r.stat.b, o: r.stat.o, ...(r.stat.us ? { us: r.stat.us } : {}) }).map(([u]) => u) : []
+    const owners = cl ? [cl.who] : r.stat ? ownerShares({ name: r.name, bytes: r.stat.bytes, objects: r.stat.objects, ...(r.stat.owners ? { owners: r.stat.owners } : {}) }).map(([u]) => u) : []
     return { prefix: r.prefix, owners, stagedBy: r.added_by }
   }, searchName), [rows, q, ownerIdx])
   const shownRows = filtered.rows
@@ -424,8 +424,8 @@ export function StagedPage() {
       const bkt = prefixToPath(r.prefix).split('/')[0]
       const e = m.get(bkt) ?? { n: 0, b: 0, o: 0 }
       e.n++
-      e.b += r.stat?.b ?? 0
-      e.o += r.stat?.o ?? 0
+      e.b += r.stat?.bytes ?? 0
+      e.o += r.stat?.objects ?? 0
       m.set(bkt, e)
     }
     return m
@@ -437,9 +437,9 @@ export function StagedPage() {
   // a real run once deleted a prefix the person had unchecked). An object item goes as `=<key>`.
   const runRows = activeRows.filter(r => sel.selected.has(r.prefix) && onBuckets.includes(prefixToPath(r.prefix).split('/')[0]))
   const runItems = runRows.map(r => (r.kind === 'object' ? `=${r.prefix}` : r.prefix))
-  const runTotal = runRows.reduce((t, r) => t + (r.stat?.b ?? 0), 0)
+  const runTotal = runRows.reduce((t, r) => t + (r.stat?.bytes ?? 0), 0)
   // What the run's row says until its manifest does: display only, nothing a run deletes reads it.
-  const expected = stats ? { bytes: runTotal, objects: runRows.reduce((t, r) => t + (r.stat?.o ?? 0), 0) } : undefined
+  const expected = stats ? { bytes: runTotal, objects: runRows.reduce((t, r) => t + (r.stat?.objects ?? 0), 0) } : undefined
   // Which path a real run takes (gcs): reuse a dry run of exactly these items at this scan, or a fresh manifest.
   const digestQ = useQuery({
     queryKey: ['items-digest', runItems],
@@ -453,7 +453,7 @@ export function StagedPage() {
   // millions of planned objects needs the big machine (gcs only).
   const machine = CAPS.bucketCut ? machineFor(Math.max(0, ...onBuckets.map(b => perBucket.get(b)!.o))) : undefined
 
-  const total = (rs: Row[]) => rs.reduce((t, r) => ({ b: t.b + (r.stat?.b ?? 0), o: t.o + (r.stat?.o ?? 0), gone: t.gone + (stats && !r.stat ? 1 : 0) }), { b: 0, o: 0, gone: 0 })
+  const total = (rs: Row[]) => rs.reduce((t, r) => ({ b: t.b + (r.stat?.bytes ?? 0), o: t.o + (r.stat?.objects ?? 0), gone: t.gone + (stats && !r.stat ? 1 : 0) }), { b: 0, o: 0, gone: 0 })
   const activeShownRows = shownRows.filter(r => activePrefixes.has(r.prefix))
   const all = total(activeShownRows)
   const everything = total(activeRows)

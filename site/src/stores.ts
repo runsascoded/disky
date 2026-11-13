@@ -102,7 +102,8 @@ export interface Store {
    *  soft-delete table shows it beside the bucket. Unset = no column. */
   bucketNotes?: Record<string, string>
   /** The sibling deployments (each its own host): the omnibar and site menu open this page on each (`peerUrl`).
-   * May list this deployment too (one shared family list); its own prod host is skipped. */
+   * May list this deployment too (one shared family list); its own prod host is skipped. Unset: the build's `PEERS`
+   * var (wrangler `[vars]`, `src/peers.ts`), which is where a deployment's list belongs. */
   peers?: Peer[]
   /** Fresher bucket totals than the scans (a provider's metrics dashboard): the ☰ menu links it, and so does the
    *  size-over-time chart, whose newest point is the newest scan's. Unset = no link. */
@@ -189,8 +190,8 @@ export const DEFAULT_STORE = STORES[0]
 export const DUPS: boolean = import.meta.env.VITE_DUPS === '1'
 
 /** Display thresholds can hide real small buckets; they do not invalidate routes. */
-export function knownBucket(name: string, store: Store, visible: { n: string }[]): boolean {
-  return store.buckets.includes(name) || visible.some(row => row.n === name)
+export function knownBucket(name: string, store: Store, visible: { name: string }[]): boolean {
+  return store.buckets.includes(name) || visible.some(row => row.name === name)
 }
 
 export const storeDefaultColor = (store: Pick<Store, 'owners' | 'defaultColor'>): ColorMode =>

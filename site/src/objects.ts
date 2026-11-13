@@ -21,10 +21,10 @@ export const listsObjects = (tier: string | undefined): boolean =>
 
 /** The fields a click decision reads off a treemap node. */
 export interface CellNode {
-  n: string
-  k?: 'file' | 'dir'
-  o: number
-  c?: unknown[]
+  name: string
+  kind?: 'file' | 'dir'
+  objects: number
+  children?: unknown[]
 }
 
 /** What a click on a cell does:
@@ -38,9 +38,9 @@ export interface CellNode {
 export type CellAction = 'open' | 'drill' | 'pin'
 
 export function cellAction(n: CellNode, objects: boolean, alt = false): CellAction {
-  if (alt || isFold(n.n)) return 'pin'
-  if (n.k === 'file') return 'open'
-  if (!objects && !n.c?.length && n.o <= 1) return 'pin'
+  if (alt || isFold(n.name)) return 'pin'
+  if (n.kind === 'file') return 'open'
+  if (!objects && !n.children?.length && n.objects <= 1) return 'pin'
   return 'drill'
 }
 

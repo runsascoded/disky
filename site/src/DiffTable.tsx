@@ -45,7 +45,7 @@ export function DiffTable({ model, scheme, segs, onDrill, onOpen }: {
   // Depth-1 rows (objects or directories) the map left undrawn (weight 0: unchanged, in Δ mode).
   const unlisted = useMemo(() => {
     const listed = new Set(rows.map(r => r.key))
-    return data.rows.filter(r => r.d === 1 && !listed.has(r.p)).length
+    return data.rows.filter(r => r.depth === 1 && !listed.has(r.path)).length
   }, [rows, data])
   useEffect(() => setPage(0), [root, sort])
 

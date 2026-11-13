@@ -12,11 +12,11 @@ beforeEach(() => mocks.scans.mockResolvedValue({ results: ['2026-09-17T0000', '2
 
 describe('D1', () => {
   const syntheticDiff: Diff = {
-    total_a: 100, total_b: 110, objects_a: 10, objects_b: 11, expansions: 0,
+    bytes_before: 100, bytes_after: 110, objects_before: 10, objects_after: 11, expansions: 0,
     truncated: false, threshold: 1, tier: 'path', lookups: 0, lookups_capped: false,
     rows: [
-      { p: 'grew', d: 1, k: 'dir', s: 'changed', a: 40, b: 70, oa: 4, ob: 7 },
-      { p: 'shrank', d: 1, k: 'dir', s: 'changed', a: 60, b: 40, oa: 6, ob: 4 },
+      { path: 'grew', depth: 1, kind: 'dir', status: 'changed', bytes_before: 40, bytes_after: 70, objects_before: 4, objects_after: 7 },
+      { path: 'shrank', depth: 1, kind: 'dir', status: 'changed', bytes_before: 60, bytes_after: 40, objects_before: 6, objects_after: 4 },
     ],
   }
 

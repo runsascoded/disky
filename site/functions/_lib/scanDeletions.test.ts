@@ -44,7 +44,7 @@ describe('scanDeletions', () => {
   })
 
   describe('what each kind of run takes off an item every one of whose objects it recorded', () => {
-    const stat = { b: 50, o: 6 }
+    const stat = { bytes: 50, objects: 6 }
     const left = async (id: string) => withoutDeleted({ [`gs://b/${id}/`]: stat }, await scanDeletions((await bandsDb()).db, SCAN))
     it('a clean run: all of it, so the item is empty at the scan', async () => {
       expect(await left('done')).toEqual({})
@@ -64,7 +64,7 @@ describe('scanDeletions', () => {
   })
 
   describe('beside a run that is not counted, a counted one', () => {
-    const P = 'gs://b/x/', stat = { b: 100, o: 10, us: [['ann', 100]] }
+    const P = 'gs://b/x/', stat = { bytes: 100, objects: 10, owners: [['ann', 100]] }
     async function resumed(rest: { bytes: number; objects: number; gone: number }) {
       const { db, raw } = await bandsDb()
       const run = raw.prepare(`INSERT INTO deletion_runs (run_id, ${RUN_DIR}, scan, head, exec_head, actor, mode, started_ts, finished_ts, plan_digest, log_dir, plan_id) VALUES (?, 'p', ?, 0, 0, 'ann', 'real', 100, 200, ?, 'd', 1)`)
@@ -83,7 +83,7 @@ describe('scanDeletions', () => {
 
   describe('a run as its reflection leaves it', () => {
     const CFG = { dataBucket: 'my-data' }
-    const P = 'gs://b/x/', stat = { b: 50, o: 5 }
+    const P = 'gs://b/x/', stat = { bytes: 50, objects: 5 }
     const job = (id: string, state: string): SweepBatchJob => ({
       name: `projects/p/locations/us-central1/jobs/${id}`, uid: id, createTime: '2026-11-04T12:00:00Z', updateTime: '2026-11-04T12:30:00Z', region: 'us-central1',
       status: { state }, taskGroups: [{ taskSpec: { environment: { variables: { SWEEP_DATE: SCAN, PLAN_DIGEST: 'D', PLAN_ID: '1' } } } }],

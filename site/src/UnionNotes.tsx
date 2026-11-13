@@ -7,7 +7,7 @@ import { missingSources, refusedSources, rootSource, seriesMissing, useUnionMark
 
 /** A union root child's store mark, its tooltip that store's scan ("Index · scan 10/14 6:02a"). Nothing for any
  *  other node. */
-export function RootSourceTag({ node }: { node: { src?: string; at?: string } }) {
+export function RootSourceTag({ node }: { node: { store?: string; scan?: string } }) {
   const s = rootSource(node, useUnionMarks())
   if (!s) return null
   const text = `${s.mark.label} · scan ${fmtScan(s.at)}`
@@ -15,7 +15,7 @@ export function RootSourceTag({ node }: { node: { src?: string; at?: string } })
 }
 
 /** The same, inside the map's hover box: icon, label and scan in one line. */
-export function RootSourceLine({ node }: { node?: { src?: string; at?: string } }) {
+export function RootSourceLine({ node }: { node?: { store?: string; scan?: string } }) {
   const s = rootSource(node ?? {}, useUnionMarks())
   if (!s) return null
   return <div className="tt-src"><SourceMark mark={s.mark} inline /> · scan {fmtScan(s.at)}</div>
