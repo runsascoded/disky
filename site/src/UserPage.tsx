@@ -62,7 +62,7 @@ function useScanFile<T>(name: string, asof: string | null) {
 /** Per-user owned bytes (assignments applied) from `/api/owners`, keyed by
  * canonical id. */
 function useOwned(asof: string | null): { data: Map<string, Owned> | null; error: Error | null } {
-  const q = useQuery<{ users: Record<string, Owned> }, Error>({
+  const q = useQuery<{ users: Record<string, { bytes: number; class_bytes: ClassMix }> }, Error>({
     queryKey: ['owners', asof],
     enabled: !!asof,
     staleTime: 30_000,
@@ -82,8 +82,8 @@ function useOwned(asof: string | null): { data: Map<string, Owned> | null; error
     for (const [u, o] of Object.entries(q.data.users)) {
       const id = canonId(u)
       const cur = m.get(id)
-      if (!cur) m.set(id, { b: o.b, mix: { ...o.mix } })
-      else { cur.b += o.b; for (const [c, b] of Object.entries(o.mix)) cur.mix[c] = (cur.mix[c] ?? 0) + b }
+      if (!cur) m.set(id, { b: o.bytes, mix: { ...o.class_bytes } })
+      else { cur.b += o.bytes; for (const [c, b] of Object.entries(o.class_bytes)) cur.mix[c] = (cur.mix[c] ?? 0) + b }
     }
     return m
   }, [q.data])
@@ -471,7 +471,7 @@ export function UserPage() {
       return r.json()
     },
   })
-  const scopedTree = mapQ.data?.tree && mapQ.data.tree.b > 0 ? mapQ.data.tree : null
+  const scopedTree = mapQ.data?.tree && mapQ.data.tree.bytes > 0 ? mapQ.data.tree : null
   const owned = estate?.bytes ?? 0
   const mix = estate?.mix && Object.keys(estate.mix).length ? estate.mix : metaQ.data?.user_class_bytes?.[id]
   const assignments = useMemo(() => [...(estate?.assignments ?? [])].sort((a, b) => b.bytes - a.bytes), [estate])
@@ -482,7 +482,7 @@ export function UserPage() {
     const path = [scopedTree]
     let cur: TreeNode = scopedTree
     for (const s of (pP ?? '').split('/').filter(Boolean)) {
-      const next = cur.c?.find(c => c.n === s)
+      const next = cur.children?.find(c => c.name === s)
       if (!next) break
       path.push(next)
       cur = next
@@ -521,7 +521,7 @@ export function UserPage() {
       {owned > 0 && (
         <>
           {mapQ.isPending && !!asof && <Skeleton height={320} className="user-mini-map" label="loading map…" />}
-          {scopedTree && scopedTree.b > 0 && (
+          {scopedTree && scopedTree.bytes > 0 && (
             <div className="user-mini-map">
               <UserTreemap
                 root={scopedTree}
@@ -530,7 +530,7 @@ export function UserPage() {
                 dateRange={null}
                 scheme={store.scheme}
                 path={mapPath}
-                onPathChange={pth => setPP(pth.slice(1).map(n => n.n).join('/') || undefined)}
+                onPathChange={pth => setPP(pth.slice(1).map(n => n.name).join('/') || undefined)}
               />
             </div>
           )}

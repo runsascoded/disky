@@ -1380,7 +1380,7 @@ def _summary(doc: dict) -> dict:
 @cli.command("compact")
 @stage_options
 @ar.compact_options
-@option("-O", "--owner-carry", is_flag=True, help="gcs: carry the priced owner rows to the new generation (`owner_carry`; D1 checked before the fold)")
+@option("-O", "--owner-carry", is_flag=True, help="Carry the priced owner rows to the new generation (`owner_carry`; D1 checked before the fold)")
 @option("-w", "--rg-rows", "rg_rows", default=ist.SERVED_RG, type=IntRange(min=1), help="Rows per served row group (the compacted generation's)")
 def compact_cmd(bucket, gen, ranges_gen, scratch, policy, read_from, grace_s, jobs, force, mount, mem, promote, threads, to_r2, tmp, owner_carry, rg_rows) -> None:
     """The compaction stage (`append_runner.run_compaction` with `interval_compact`): when the policy fires (or `-K`),
@@ -1414,7 +1414,7 @@ GCS_ONLY = ("verify/",)
 
 @cli.command("promote")
 @option("-b", "--bucket", required=True, help="The store: a bucket name (gs://) or URL")
-@option("-O", "--owner-carry", is_flag=True, help="gcs: carry the priced owner rows to GEN first (`owner_carry`; needs the D1 env)")
+@option("-O", "--owner-carry", is_flag=True, help="Carry the priced owner rows to GEN first (`owner_carry`; needs the D1 env)")
 @option("-r", "--r2", "to_r2", is_flag=True, help="Then the R2 copy's pointers (the candidate must be on R2 already: `compact -N --r2`)")
 @argument("gen")
 def promote_cmd(bucket, owner_carry, to_r2, gen) -> None:
@@ -1422,7 +1422,8 @@ def promote_cmd(bucket, owner_carry, to_r2, gen) -> None:
     (when it named the source), then with `-r` the R2 copy's. Refused unless GEN holds every scan its source does."""
     if (b := gs_bucket(bucket)) is None:
         raise SystemExit(f"interval store: promote moves a GCS bucket's pointers; {bucket!r} is not one")
-    print(json.dumps(ar.promote_gen(Store(f"gs://{b}"), PREFIX, gen, r2_bucket=b if to_r2 else None, served=RUN_R2, gcs_only=GCS_ONLY, carry=OwnerCarry() if owner_carry else None), indent=1))
+    print(json.dumps(ar.promote_gen(Store(f"gs://{b}"), PREFIX, gen, r2_bucket=b if to_r2 else None, served=RUN_R2, gcs_only=GCS_ONLY,
+                                    carry=OwnerCarry() if owner_carry else None), indent=1))
 
 
 @cli.command("compact-r2")

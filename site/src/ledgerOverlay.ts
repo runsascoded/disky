@@ -65,31 +65,31 @@ export function applyLedger(root: TreeNode, idx: OwnerIndex, scheme: string, can
     if (unknown) add(v, UNKNOWN, unknown)
     return v
   }
-  const split = (n: TreeNode): Vec => scanVec(n.us ?? [], n.b, n.ou)
+  const split = (n: TreeNode): Vec => scanVec(n.owners ?? [], n.bytes, n.unknown_owner_bytes)
   const addAll = (v: Vec, w: Vec, sign: 1 | -1) => { for (const [k, b] of w) add(v, k, sign * b) }
-  const top = (us: TreeNode['us']) => (us?.length ? canon(us[0][0]) : null)
+  const top = (us: TreeNode['owners']) => (us?.length ? canon(us[0][0]) : null)
   const withUs = (n: TreeNode, v: Vec, cov: string | null, c?: TreeNode[]): TreeNode => {
     const us = [...v.entries()]
       .filter(([k, b]) => k !== UNOWNED && k !== UNKNOWN && b > 0.5)
       .sort((x, y) => y[1] - x[1] || (x[0] < y[0] ? -1 : x[0] > y[0] ? 1 : 0))
-    const { us: _us, ou: _ou, pv, c: _c, ...rest } = n
+    const { owners: _owners, unknown_owner_bytes: _unknown, provenance, children: _c, ...rest } = n
     // Provenance explains the scan's top owner: gone once an assignment
     // covers the node or moves its top owner.
-    const keepPv = pv && cov == null && top(us) === top(n.us)
+    const keepPv = provenance && cov == null && top(us) === top(n.owners)
     const unknown = Math.max(0, v.get(UNKNOWN) ?? 0)
-    return { ...rest, ...(us.length ? { us } : {}), ...(unknown > 0.5 ? { ou: unknown } : {}), ...(keepPv ? { pv } : {}), ...(c ? { c } : {}) }
+    return { ...rest, ...(us.length ? { owners: us } : {}), ...(unknown > 0.5 ? { unknown_owner_bytes: unknown } : {}), ...(keepPv ? { provenance } : {}), ...(c ? { children: c } : {}) }
   }
   // `segs` = the node's path below the root; null = a fold (no path of its
   // own), which inherits `inherited` — its parent's assignee.
   const rec = (n: TreeNode, segs: string[] | null, inherited: string | null): TreeNode => {
     const isRoot = segs?.length === 0
     const uri = segs && !isRoot ? scheme + segs.join('/') : null
-    const who = uri ? idx.assignmentOf(uri, n.k === 'file' ? 'object' : 'prefix')?.who : segs ? null : inherited
+    const who = uri ? idx.assignmentOf(uri, n.kind === 'file' ? 'object' : 'prefix')?.who : segs ? null : inherited
     const cov = who == null ? null : canon(who)
     if (cov == null && !isRoot && (!uri || !touched.has(uri + '/'))) return n
-    const kids = n.c ?? []
-    if (!kids.length) return cov == null ? n : withUs(n, new Map([[cov, n.b]]), cov)
-    const next = kids.map(k => rec(k, segs && !k.n.startsWith('(') ? [...segs, k.n] : null, cov))
+    const kids = n.children ?? []
+    if (!kids.length) return cov == null ? n : withUs(n, new Map([[cov, n.bytes]]), cov)
+    const next = kids.map(k => rec(k, segs && !k.name.startsWith('(') ? [...segs, k.name] : null, cov))
     const v = split(n)
     let changed = false
     next.forEach((k, i) => {
@@ -99,7 +99,7 @@ export function applyLedger(root: TreeNode, idx: OwnerIndex, scheme: string, can
       addAll(v, split(kids[i]), -1)
     })
     // Bytes no drawn child accounts for are the assignee's too.
-    const rest = n.b - kids.reduce((s, k) => s + k.b, 0)
+    const rest = n.bytes - kids.reduce((s, k) => s + k.bytes, 0)
     if (cov != null && rest > 0.5) {
       const res = split(n)
       for (const k of kids) addAll(res, split(k), -1)
@@ -193,7 +193,7 @@ function exact(root: TreeNode, idx: OwnerIndex, scheme: string, canon: (u: strin
   const folderVec = (n: TreeNode, f: string, cov: string | null): Vec => {
     const under = tops(f)
     const v: Vec = new Map()
-    if (cov != null) add(v, cov, n.b - under.reduce((s, k) => s + sizeOf(k).b, 0))
+    if (cov != null) add(v, cov, n.bytes - under.reduce((s, k) => s + sizeOf(k).b, 0))
     else {
       addAll(v, split(n), 1)
       for (const k of under) addAll(v, scanOf(k), -1)
@@ -207,19 +207,19 @@ function exact(root: TreeNode, idx: OwnerIndex, scheme: string, canon: (u: strin
   }
   // `uri` = the node's path (a folder's without its `/`); the root's is the scheme's prefix (`gs://`, or a drill's `gs://b/x/`).
   const rec = (n: TreeNode, uri: string, isRoot: boolean): { node: TreeNode; vec: Vec } => {
-    const file = n.k === 'file'
+    const file = n.kind === 'file'
     const f = isRoot ? uri : uri + '/'
     const cov = isRoot && !f.slice(f.indexOf('://') + 3) ? null : assignee(file ? uri : f)
     if (!isRoot && cov == null && (file || !touched.has(f))) return { node: n, vec: split(n) }
-    const vec = file ? new Map([[cov!, n.b]]) : folderVec(n, f, cov)
-    const kids = n.c ?? []
+    const vec = file ? new Map([[cov!, n.bytes]]) : folderVec(n, f, cov)
+    const kids = n.children ?? []
     if (!kids.length) return { node: same(vec, split(n)) ? n : withUs(n, vec, cov), vec }
-    const drawn = kids.map(k => (k.n.startsWith('(') ? null : rec(k, f + k.n, false)))
+    const drawn = kids.map(k => (k.name.startsWith('(') ? null : rec(k, f + k.name, false)))
     // The fold's share of what no drawn child holds (that, less any bytes the view drew nowhere), in its mix.
     const rest: Vec = new Map(vec)
     for (const d of drawn) if (d) addAll(rest, d.vec, -1)
     const restB = [...rest.values()].reduce((s, b) => s + Math.max(0, b), 0)
-    const foldVec = (k: TreeNode): Vec => new Map([...rest].filter(([, b]) => b > 0).map(([u, b]) => [u, restB > 0 ? b * k.b / restB : 0]))
+    const foldVec = (k: TreeNode): Vec => new Map([...rest].filter(([, b]) => b > 0).map(([u, b]) => [u, restB > 0 ? b * k.bytes / restB : 0]))
     const next = kids.map((k, i) => {
       if (drawn[i]) return drawn[i].node
       const fv = foldVec(k)

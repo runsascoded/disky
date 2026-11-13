@@ -79,7 +79,7 @@ describe('a read of row groups the colo holds', () => {
     expect([returned > 0, taken]).toEqual([true, returned])
     release()
     const view = await read
-    expect(view.tree.b).toBeGreaterThan(0)
+    expect(view.tree.bytes).toBeGreaterThan(0)
     expect(taken).toBe(returned)
   })
 })

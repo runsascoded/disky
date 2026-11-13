@@ -165,8 +165,8 @@ describe('D1', () => {
     }
     it('`*`, `?` and regex characters search those characters (nothing here holds them): an empty view, no refusal', async () => {
       const got = await Promise.all(['tom*t', 'tomat?', '(tomat)'].map(async q => {
-        const [status, j] = await body(`date=${A}&path=bk&q=${encodeURIComponent(q)}`) as [number, { tier: string; tree: { b: number }; matches: string[] }]
-        return [q, status, j.tier, j.tree.b, j.matches]
+        const [status, j] = await body(`date=${A}&path=bk&q=${encodeURIComponent(q)}`) as [number, { tier: string; tree: { bytes: number }; matches: string[] }]
+        return [q, status, j.tier, j.tree.bytes, j.matches]
       }))
       expect(got).toEqual([
         ['tom*t', 200, 'none', 0, []],
@@ -202,8 +202,8 @@ describe('D1', () => {
       for (const [o] of POOLS) for (const t of ['tomat', 'tomat -bin']) cases.push([o, t, 'bk'])
       const got = await Promise.all(cases.map(async ([o, t, root]) => {
         const r = await series({ request: new Request(`http://localhost/api/series?path=${root}&o=${o}&${enc(t)}`), env: envOf(true) })
-        const j = await r.json() as { points: { date: string; b: number; o: number }[] }
-        return [r.status, j.points.map(p => [p.date, p.b, p.o])]
+        const j = await r.json() as { points: { date: string; bytes: number; objects: number }[] }
+        return [r.status, j.points.map(p => [p.date, p.bytes, p.objects])]
       }))
       expect(got).toEqual(cases.map(([o, t, root]) => [200, SCANS.map(d => [d, ...brute(fixtureObjects(d), parseQuery(t)!, root, POOLS.find(p => p[0] === o)![1]).total])]))
     })
@@ -327,8 +327,8 @@ describe('D1', () => {
     const enc = (t: string) => `q=${encodeURIComponent(t)}`
     const points = async (qs: string, env: Env) => {
       const r = await series({ request: new Request(`http://localhost/api/series?${qs}`), env })
-      const j = await r.json() as { points?: { date: string; b: number; o: number }[]; unindexed?: string[]; error?: string; code?: string }
-      return [r.status, j.points ? j.points.map(p => [p.date, p.b, p.o]) : j]
+      const j = await r.json() as { points?: { date: string; bytes: number; objects: number }[]; unindexed?: string[]; error?: string; code?: string }
+      return [r.status, j.points ? j.points.map(p => [p.date, p.bytes, p.objects]) : j]
     }
     /** Brute force's matched total per scan (`testBrute.ts`). */
     const bruteSeries = (t: string, root: string) => SCANS.map(d => [d, ...brute(fixtureObjects(d), parseQuery(t)!, root).total])
@@ -381,7 +381,7 @@ describe('D1', () => {
     })
     it('a view root holding a negative term matches nothing: an empty view, no refusal', async () => {
       const j = await (await subtree({ request: new Request(`http://localhost/api/x?date=${A}&path=bk/tmp&${enc('bin -tmp')}`), env: envOf(true) })).json() as Record<string, unknown>
-      expect([j.tier, (j.tree as { b: number }).b, j.matches]).toEqual(['none', 0, []])
+      expect([j.tier, (j.tree as { bytes: number }).bytes, j.matches]).toEqual(['none', 0, []])
     })
   })
 
@@ -424,9 +424,9 @@ describe('D1', () => {
     })
     it('subtree at the root: the bucket totals, exact, flagged `bucketsOnly`, no approximate note', async () => {
       const j = await body(subtree, `date=${A}&path=&q=0`, envOf(false, noDrill()))
-      const tree = j.tree as { b: number; o: number; c: { n: string; b: number; o: number }[] }
-      expect([tree.b, tree.o, tree.c.map(c => [c.n, c.b, c.o]), j.matchCount, j.rollup, j.approximate, j.approximateReason])
-        .toEqual([1023750, 3000, [['bk', 1023750, 3000]], { n: 0, b: 1023750, o: 3000 }, { children: 1, kept: 1, rows: null, bucketsOnly: true }, undefined, undefined])
+      const tree = j.tree as { bytes: number; objects: number; children: { name: string; bytes: number; objects: number }[] }
+      expect([tree.bytes, tree.objects, tree.children.map(c => [c.name, c.bytes, c.objects]), j.matchCount, j.rollup, j.approximate, j.approximateReason])
+        .toEqual([1023750, 3000, [['bk', 1023750, 3000]], { count: 0, bytes: 1023750, objects: 3000 }, { children: 1, kept: 1, rows: null, bucketsOnly: true }, undefined, undefined])
     })
   })
 
@@ -464,7 +464,7 @@ describe('D1', () => {
     it.each([[true], [false]])('the series (flag %s): uncovered and dir-only scans are gaps, named', async flag => {
       const got = async (qs: string, s: StaticFilterStore) => {
         const r = await series({ request: new Request(`http://localhost/api/series?${qs}`), env: envOf(flag, s) })
-        const j = await r.json() as { points: { date: string; b: number }[]; unindexed?: string[] }
+        const j = await r.json() as { points: { date: string; bytes: number }[]; unindexed?: string[] }
         return [r.status, j.points.map(p => p.date), j.unindexed ?? null]
       }
       expect(await Promise.all([
@@ -512,7 +512,7 @@ describe('D1', () => {
     })
     it('a light `q$` answers from the light index, exactly (no approximate note)', async () => {
       const j = await (await subtree({ request: new Request(`http://localhost/api/x?date=${A}&path=bk&${q('mato$')}`), env: envOf(false, anchorless()) })).json() as Record<string, unknown>
-      expect([j.approximate, j.approximateReason, (j.matchCount as { n: number }).n > 0]).toEqual([undefined, undefined, true])
+      expect([j.approximate, j.approximateReason, (j.matchCount as { count: number }).count > 0]).toEqual([undefined, undefined, true])
     })
     it('mutation: without the anchorless check, `^q` falls through to the path-store walk (the bug) and is answered', async () => {
       const spy = vi.spyOn(AnchoredSource.prototype as unknown as { anchorless(): Promise<boolean> }, 'anchorless').mockResolvedValue(false)
@@ -563,7 +563,7 @@ describe('D1', () => {
         coverOf(`date=${A}&path=bk&q=tomat`, newer()),
       ])).toEqual([
         refusal('scan-not-indexed'),
-        [200, [A, { n: 5, b: 17927, o: 7 }]],
+        [200, [A, { count: 5, bytes: 17927, objects: 7 }]],
       ])
     })
 
@@ -643,8 +643,8 @@ describe('D1', () => {
     const v1 = (dirOnly: string[]): StaticFilterStore => { const s = store([A, B], [A, B], dirOnly); return { ...s, source: asV1(s.source) } }
     const view = async (qs: string, env: Env) => {
       const r = await subtree({ request: new Request(`http://localhost/api/x?${qs}`), env })
-      const j = await r.json() as { matched: { path: string; b: number; o: number }[]; dirsOnly?: true; approximate?: true; partial?: true }
-      return [r.status, j.matched.map(m => [m.path, m.b, m.o]), j.dirsOnly ?? null, j.approximate ?? null, j.partial ?? null]
+      const j = await r.json() as { matched: { path: string; bytes: number; objects: number }[]; dirsOnly?: true; approximate?: true; partial?: true }
+      return [r.status, j.matched.map(m => [m.path, m.bytes, m.objects]), j.dirsOnly ?? null, j.approximate ?? null, j.partial ?? null]
     }
 
     it.each([[true], [false]])('a folder-name literal (flag %s): the folders that match, exact, flagged `dirsOnly`; the full scan unflagged', async flag => {

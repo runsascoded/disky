@@ -100,19 +100,19 @@ const view = (env: Env, date: string, path: string, t: string, extra: Partial<Pa
  *  only the drawn roots' own rows, so a fold of static roots under a synthesized ancestor has bytes and
  *  objects, not those (the search view knows every root's row). */
 const sansFoldDetail = (n: ViewNode): ViewNode => {
-  const { d: _d, a: _a, cb: _cb, ...rest } = n
-  return { ...(n.n === '(other)' ? rest : n), ...(n.c ? { c: n.c.map(sansFoldDetail) } : {}) } as ViewNode
+  const { mtime: _t, last_read: _a, class_bytes: _cb, ...rest } = n
+  return { ...(n.name === '(other)' ? rest : n), ...(n.children ? { children: n.children.map(sansFoldDetail) } : {}) }
 }
 /** The view with its tier's phase-1 name dropped (`static+bysize` ~ `search+bysize`). */
 const sansP1 = (v: View) => ({ ...v, tier: v.tier.replace(/^(static|search)\+/, '+'), tree: sansFoldDetail(v.tree) })
 /** `matched` as brute force's `[path, bytes, objects]`, by path. */
-const matchedRows = (v: { matched?: { path: string; b: number; o: number }[] }) =>
-  (v.matched ?? []).map(m => [m.path, m.b, m.o]).sort((x, y) => (x[0] < y[0] ? -1 : 1))
+const matchedRows = (v: { matched?: { path: string; bytes: number; objects: number }[] }) =>
+  (v.matched ?? []).map(m => [m.path, m.bytes, m.objects]).sort((x, y) => (x[0] < y[0] ? -1 : 1))
 
 /** A tree as `[path, bytes, objects, ('m')?, ('f<n>')?]` rows, depth first (`(other)` under its parent). */
 const flatTree = (n: ViewNode, path = '', out: unknown[] = []): unknown[] => {
-  out.push([path || '/', n.b, n.o, ...(n.m ? ['m'] : []), ...(n.f != null ? [`f${n.f}`] : [])])
-  for (const c of n.c ?? []) flatTree(c, c.n === '(other)' ? `${path}/(other)` : path ? `${path}/${c.n}` : c.n, out)
+  out.push([path || '/', n.bytes, n.objects, ...(n.matched ? ['m'] : []), ...(n.folded != null ? [`f${n.folded}`] : [])])
+  for (const c of n.children ?? []) flatTree(c, c.name === '(other)' ? `${path}/(other)` : path ? `${path}/${c.name}` : c.name, out)
   return out
 }
 
@@ -169,8 +169,8 @@ describe('static filter: the treemap / table view (`/api/subtree`)', () => {
 
   it('a small canvas folds the roots under its threshold into `(other)` — the same as the search view', async () => {
     const flat = (n: ViewNode, path: string, out: unknown[] = []): unknown[] => {
-      out.push([path || '/', n.b, n.o, ...(n.m ? ['m'] : []), ...(n.f != null ? [`f${n.f}`] : [])])
-      for (const c of n.c ?? []) flat(c, c.n === '(other)' ? `${path}/(other)` : path ? `${path}/${c.n}` : c.n, out)
+      out.push([path || '/', n.bytes, n.objects, ...(n.matched ? ['m'] : []), ...(n.folded != null ? [`f${n.folded}`] : [])])
+      for (const c of n.children ?? []) flat(c, c.name === '(other)' ? `${path}/(other)` : path ? `${path}/${c.name}` : c.name, out)
       return out
     }
     const small = { w: 128, h: 128 }
@@ -185,20 +185,20 @@ describe('static filter: the treemap / table view (`/api/subtree`)', () => {
 
   it('a root holding one object is a leaf (nothing inside it is read)', async () => {
     const v = await view(envStatic(), B, 'bk', 'tomat')
-    const node = v.tree.c!.find(c => c.n === 'new-tomat')!
-    expect([node.b, node.o, node.k, node.m, node.c]).toEqual([400, 1, 'dir', 1, undefined])
+    const node = v.tree.children!.find(c => c.name === 'new-tomat')!
+    expect([node.bytes, node.objects, node.kind, node.matched, node.children]).toEqual([400, 1, 'dir', true, undefined])
   })
 
   it('the first paint: the match roots alone, exact, as leaves under their ancestors', async () => {
     const leaves = (n: ViewNode, path: string, out: [string, number, number][] = []): [string, number, number][] => {
-      if (n.m) { expect(n.c).toBeUndefined(); out.push([path, n.b, n.o]) }
-      for (const c of n.c ?? []) leaves(c, path ? `${path}/${c.n}` : c.n, out)
+      if (n.matched) { expect(n.children).toBeUndefined(); out.push([path, n.bytes, n.objects]) }
+      for (const c of n.children ?? []) leaves(c, path ? `${path}/${c.name}` : c.name, out)
       return out
     }
     for (const date of DATES) for (const root of ['', 'bk', 'bk/data']) {
       const v = await view(envStatic(), date, root, 'tomat', { firstPaint: true })
       const brute = expected.roots.tomat[root][date]!
-      expect([date, root, leaves(v.tree, root).sort((x, y) => (x[0] < y[0] ? -1 : 1)), v.tree.b, v.tier.split('+')[0]]).toEqual([date, root, brute, brute.reduce((n, x) => n + x[1], 0), 'static'])
+      expect([date, root, leaves(v.tree, root).sort((x, y) => (x[0] < y[0] ? -1 : 1)), v.tree.bytes, v.tier.split('+')[0]]).toEqual([date, root, brute, brute.reduce((n, x) => n + x[1], 0), 'static'])
     }
   })
 
@@ -223,8 +223,8 @@ describe('static filter: the diff view (`/api/diff`)', () => {
       from: A, to: B, path: '', w: W, h: H, minArea: MIN_AREA, atten: ATTEN, top: 200,
       threshold: 100, query: q('safetensors'),
     })
-    expect(d.rows.filter(r => r.p === 'bk/p').map(({ p, a, b, oa, ob, s }) => ({ p, a, b, oa, ob, s }))).toEqual([
-      { p: 'bk/p', a: before, b: 1000, oa: 1, ob: 1, s: 'changed' },
+    expect(d.rows.filter(r => r.path === 'bk/p').map(({ path, bytes_before, bytes_after, objects_before, objects_after, status }) => ({ path, bytes_before, bytes_after, objects_before, objects_after, status }))).toEqual([
+      { path: 'bk/p', bytes_before: before, bytes_after: 1000, objects_before: 1, objects_after: 1, status: 'changed' },
     ])
   })
 
@@ -270,12 +270,13 @@ describe('matchLists: a response lists the tree\'s roots, then the heaviest, up 
   it('under the cap: all, with the count; over it: kept + heaviest, capped', () => {
     const m = (i: number) => ({ path: `p${String(i).padStart(5, '0')}`, b: 10_000 - i, o: 1 })
     const few = [m(0), m(1)]
-    expect(matchLists(few, new Map())).toEqual({ matches: ['p00000', 'p00001'], matched: few, matchCount: { n: 2, b: 19_999, o: 2 } })
+    const wire = (x: ReturnType<typeof m>) => ({ path: x.path, bytes: x.b, objects: x.o })
+    expect(matchLists(few, new Map())).toEqual({ matches: ['p00000', 'p00001'], matched: few.map(wire), matchCount: { count: 2, bytes: 19_999, objects: 2 } })
     const many = Array.from({ length: MATCH_LIST_CAP + 3 }, (_, i) => m(i))
     const got = matchLists(many, new Map([[m(MATCH_LIST_CAP + 2).path, 1]]))
     expect([got.matched!.length, got.matched!.at(-1), got.matched!.at(-2), got.matchCount, got.matchesCapped]).toEqual([
-      MATCH_LIST_CAP + 1, m(MATCH_LIST_CAP + 2), m(MATCH_LIST_CAP - 1),
-      { n: MATCH_LIST_CAP + 3, b: many.reduce((n, x) => n + x.b, 0), o: MATCH_LIST_CAP + 3 }, true,
+      MATCH_LIST_CAP + 1, wire(m(MATCH_LIST_CAP + 2)), wire(m(MATCH_LIST_CAP - 1)),
+      { count: MATCH_LIST_CAP + 3, bytes: many.reduce((n, x) => n + x.b, 0), objects: MATCH_LIST_CAP + 3 }, true,
     ])
   })
 })
@@ -330,7 +331,7 @@ describe('a path term ending in `/` (empty tail), flag unset: the thresholded wa
     ['the fixture\'s suffix index', () => staticStore()],
     ['an anchored source', () => ({ source: anchoredLike, scans: async () => [...DATES], gen: 'fixture' })],
   ]
-  const WALK = ['bysize+fine', { n: 500, b: 768000, o: 500 }, true, APPROX_UNINDEXED]
+  const WALK = ['bysize+fine', { count: 500, bytes: 768000, objects: 500 }, true, APPROX_UNINDEXED]
   for (const [what, st] of stores) {
     it(`${what}: \`fill/\`, \`^bk/fill/\` (the view and \`/api/subtree\`, first paint and full) vs brute force`, async () => {
       const got: unknown[] = []
@@ -358,12 +359,12 @@ describe('a path term ending in `/` (empty tail), flag unset: the thresholded wa
       const v = await buildView(env, { date: A, path: '', w: W, h: H, minArea: MIN_AREA, atten: ATTEN, query: parseIn('^bk/fil', plain)! })
       got.push([on, v.tier, v.matchCount, v.approximate, v.approximateReason])
     }
-    const whole = { n: 1, b: 1023750, o: 3000 }
+    const whole = { count: 1, bytes: 1023750, objects: 3000 }
     expect(got).toEqual([[true, 'static+path', whole, undefined, undefined], [false, 'search+path', whole, undefined, undefined]])
   })
   it('`fill$` (the folder): its bytes, exact, from the static source', async () => {
     const v = await buildView(envStatic(stores[1][1]()), { date: A, path: '', w: W, h: H, minArea: MIN_AREA, atten: ATTEN, query: parseIn('fill$', plain)! })
-    expect([v.tier, v.matchCount, v.approximate, matchedRows(v)]).toEqual(['static+path', { n: 1, b: 1023750, o: 3000 }, undefined, [['bk/fill', 1023750, 3000]]])
+    expect([v.tier, v.matchCount, v.approximate, matchedRows(v)]).toEqual(['static+path', { count: 1, bytes: 1023750, objects: 3000 }, undefined, [['bk/fill', 1023750, 3000]]])
   })
 })
 
@@ -413,8 +414,8 @@ describe('static filter: a bounded view — the canvas\'s tiles, exact totals', 
     for (const k of [1, 2, 4, 6, 10, 15, 22]) {
       const v = await view(envStatic(), A, '', 'tomat', { maxTiles: k })
       const drawn = byWeight(flatTree(v.tree))
-      expect([k, v.nodes, [...drawn].sort(), v.tree.b, v.tree.o, v.matchCount, v.matched])
-        .toEqual([k, k, order.slice(0, k).sort(), full.tree.b, full.tree.o, full.matchCount, full.matched])
+      expect([k, v.nodes, [...drawn].sort(), v.tree.bytes, v.tree.objects, v.matchCount, v.matched])
+        .toEqual([k, k, order.slice(0, k).sort(), full.tree.bytes, full.tree.objects, full.matchCount, full.matched])
     }
     expect(flatTree((await view(envStatic(), A, '', 'tomat', { maxTiles: 4 })).tree)).toEqual([
       ['/', 18047, 10],
@@ -457,7 +458,7 @@ describe('static filter: a bounded view — the canvas\'s tiles, exact totals', 
     const v = await view(envStatic(), A, '', 'tomat', { phase2Groups: 0 })
     expect(byRows).toEqual(v)
     const full = await view(envStatic(), A, '', 'tomat', { maxTiles: Infinity })
-    expect([v.interiors, v.tree.b, v.matchCount, v.matched]).toEqual([{ read: 0, skipped: 3, reason: '3 over the read budget' }, full.tree.b, full.matchCount, full.matched])
+    expect([v.interiors, v.tree.bytes, v.matchCount, v.matched]).toEqual([{ read: 0, skipped: 3, reason: '3 over the read budget' }, full.tree.bytes, full.matchCount, full.matched])
     expect(flatTree(v.tree)).toEqual(FULL.filter(r => !/^(bk\/data\/tomato|bk\/data\/raw\/tomat-1|tomato-bk)\//.test((r as [string])[0])))
   })
 })
@@ -516,9 +517,9 @@ describe('phase 2: the request\'s gate (`Phase2Gate`)', () => {
     const open = await run({ phase2Gate: { dead: false } })
     const shut = await run({ phase2Gate: { dead: true } })
     const full = await run({ maxTiles: Infinity })
-    expect([shut.v.interiors, shut.v.tree.b, shut.v.tree.o, shut.v.matchCount, shut.v.matched]).toEqual([
+    expect([shut.v.interiors, shut.v.tree.bytes, shut.v.tree.objects, shut.v.matchCount, shut.v.matched]).toEqual([
       { read: 0, skipped: 3, reason: '3 past the time budget', late: 3 },
-      full.v.tree.b, full.v.tree.o, full.v.matchCount, full.v.matched,
+      full.v.tree.bytes, full.v.tree.objects, full.v.matchCount, full.v.matched,
     ])
     expect(flatTree(shut.v.tree)).toEqual(flatTree(full.v.tree).filter(r => !whole.test((r as [string])[0])))
     // Only the root details' lookups query spans under a dead gate; an open one plans phase 2 as well.
@@ -550,7 +551,7 @@ describe('the diff shares one gate across its reads', () => {
       cut = await buildDiff(e, { from: A, to: B, path: '', w: W, h: H, minArea: MIN_AREA, atten: ATTEN, top: 500, query: q('tomat'), phase2Gate: gate })
     } finally { spy.slowMs = 0 }
     const full = await buildDiff(envStatic(), { from: A, to: B, path: '', w: W, h: H, minArea: MIN_AREA, atten: ATTEN, top: 500, query: q('tomat') })
-    expect([gate.dead, cut.interiors, full.interiors, cut.total_a, cut.total_b, cut.matchCount]).toEqual([true, { read: 0, skipped: 6, reason: '3 past the time budget', late: 6 }, undefined, full.total_a, full.total_b, full.matchCount])
+    expect([gate.dead, cut.interiors, full.interiors, cut.bytes_before, cut.bytes_after, cut.matchCount]).toEqual([true, { read: 0, skipped: 6, reason: '3 past the time budget', late: 6 }, undefined, full.bytes_before, full.bytes_after, full.matchCount])
   })
 })
 

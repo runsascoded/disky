@@ -16,17 +16,24 @@ vi.mock('@rdub/file-tree/stores/s3', async () => ({ S3Store: (await import('./te
 
 type Want = { from: string; to: string; path: string; a: number; b: number; oa: number; ob: number; churn: number; rows: { p: string; k: 'file' | 'dir'; a: number; b: number; oa: number; ob: number; churn: number }[] }
 
-/** The oracle's answer in the level's shape: rows by name under the path, each with its status. */
-function wanted(w: Want): Pick<Level, 'path' | 'a' | 'b' | 'oa' | 'ob' | 'churn' | 'rows' | 'unchanged'> {
+/** The oracle's answer (the fixture's `a`/`b`/`oa`/`ob`) in the level's shape: rows by name under the path, each with
+ *  its status. */
+function wanted(w: Want): Pick<Level, 'path' | 'bytes_before' | 'bytes_after' | 'objects_before' | 'objects_after' | 'churn' | 'rows' | 'unchanged'> {
   const rows = w.rows.map(({ p, k, a, b, oa, ob, churn }): LevelRow => ({
-    p: w.path ? p.slice(w.path.length + 1) : p, k, a, b, oa, ob, churn,
-    s: !oa && !ob ? 'changed' : !oa ? 'added' : !ob ? 'removed' : 'changed',
+    name: w.path ? p.slice(w.path.length + 1) : p, kind: k, bytes_before: a, bytes_after: b, objects_before: oa, objects_after: ob, churn,
+    status: !oa && !ob ? 'changed' : !oa ? 'added' : !ob ? 'removed' : 'changed',
   }))
-  const sum = (f: 'a' | 'b' | 'oa' | 'ob') => rows.reduce((n, r) => n + r[f], 0)
-  return { path: w.path, a: w.a, b: w.b, oa: w.oa, ob: w.ob, churn: w.churn, rows: byName(rows), unchanged: { a: w.a - sum('a'), b: w.b - sum('b'), oa: w.oa - sum('oa'), ob: w.ob - sum('ob') } }
+  const sum = (f: 'bytes_before' | 'bytes_after' | 'objects_before' | 'objects_after') => rows.reduce((n, r) => n + r[f], 0)
+  return {
+    path: w.path, bytes_before: w.a, bytes_after: w.b, objects_before: w.oa, objects_after: w.ob, churn: w.churn, rows: byName(rows),
+    unchanged: { bytes_before: w.a - sum('bytes_before'), bytes_after: w.b - sum('bytes_after'), objects_before: w.oa - sum('objects_before'), objects_after: w.ob - sum('objects_after') },
+  }
 }
-const byName = (rows: LevelRow[]): LevelRow[] => [...rows].sort((x, y) => (x.p < y.p ? -1 : 1))
-const shape = (l: Level) => ({ path: l.path, a: l.a, b: l.b, oa: l.oa, ob: l.ob, churn: l.churn, rows: byName(l.rows), unchanged: l.unchanged })
+const byName = (rows: LevelRow[]): LevelRow[] => [...rows].sort((x, y) => (x.name < y.name ? -1 : 1))
+const shape = (l: Level) => ({
+  path: l.path, bytes_before: l.bytes_before, bytes_after: l.bytes_after, objects_before: l.objects_before, objects_after: l.objects_after, churn: l.churn,
+  rows: byName(l.rows), unchanged: l.unchanged,
+})
 
 let env: Env
 let reads: string[]
@@ -76,16 +83,17 @@ describe('level diffs', () => {
   })
 
   it('folds the children past K into `other`, ranked by the measure', () => {
-    const own = { a: 100, b: 100, oa: 10, ob: 10, churn: 60 }
-    const kid = (p: string, a: number, b: number, churn: number) => ({ p: `d/${p}`, k: 'file' as const, s: 'changed' as const, a, b, oa: 1, ob: 1, churn })
+    const own = { bytes_before: 100, bytes_after: 100, objects_before: 10, objects_after: 10, churn: 60 }
+    const kid = (p: string, a: number, b: number, churn: number) =>
+      ({ path: `d/${p}`, kind: 'file' as const, status: 'changed' as const, bytes_before: a, bytes_after: b, objects_before: 1, objects_after: 1, churn })
     const kids = [kid('x', 10, 10, 30), kid('y', 10, 30, 20), kid('z', 5, 0, 5), kid('w', 7, 7, 0)]
     const byChurn = levelOf('d', own, kids, 2, 'churn')
-    expect([byChurn.rows.map(r => r.p), byChurn.other, byChurn.unchanged]).toEqual([
+    expect([byChurn.rows.map(r => r.name), byChurn.other, byChurn.unchanged]).toEqual([
       ['x', 'y'],
-      { n: 1, a: 5, b: 0, oa: 1, ob: 1, churn: 5 },
-      { a: 75, b: 60, oa: 7, ob: 7 },
+      { count: 1, bytes_before: 5, bytes_after: 0, objects_before: 1, objects_after: 1, churn: 5 },
+      { bytes_before: 75, bytes_after: 60, objects_before: 7, objects_after: 7 },
     ])
-    expect(levelOf('d', own, kids, 2, 'net').rows.map(r => r.p)).toEqual(['y', 'z'])
+    expect(levelOf('d', own, kids, 2, 'net').rows.map(r => r.name)).toEqual(['y', 'z'])
     expect([levelK(1), levelK(5), levelK(100), levelK(1e6)]).toEqual([4, 8, 128, 512])
   })
 
@@ -107,7 +115,7 @@ describe('level diffs', () => {
     }
     expect(got).toEqual(want)
     // Both roots changed in some range (a real merge), and K = 1 cut one of them into `other`.
-    expect(want.some(l => l.other?.n === 1)).toBe(true)
+    expect(want.some(l => l.other?.count === 1)).toBe(true)
     // Below the root, a directory's answer is its own store's.
     for (const c of cases.filter(x => x.path.startsWith('b1/'))) {
       const o = { from: c.from, to: c.to, dirs: [c.path], k: 512, m: 'churn' as const, chain: false }
@@ -116,9 +124,13 @@ describe('level diffs', () => {
   })
 
   it('merges by the measure, ranking and cutting as `levelOf` does', () => {
-    const kid = (p: string, a: number, b: number, churn: number) => ({ p, k: 'dir' as const, s: 'changed' as const, a, b, oa: 1, ob: 1, churn })
+    const kid = (path: string, a: number, b: number, churn: number) =>
+      ({ path, kind: 'dir' as const, status: 'changed' as const, bytes_before: a, bytes_after: b, objects_before: 1, objects_after: 1, churn })
     const kids = [kid('x', 10, 10, 30), kid('y', 10, 30, 20), kid('z', 5, 0, 5), kid('w', 7, 7, 0), kid('v', 1, 2, 1)]
-    const sum = (ks: typeof kids, extra: number) => ({ a: ks.reduce((n, c) => n + c.a, extra), b: ks.reduce((n, c) => n + c.b, extra), oa: ks.length + extra, ob: ks.length + extra, churn: ks.reduce((n, c) => n + c.churn, 0) })
+    const sum = (ks: typeof kids, extra: number) => ({
+      bytes_before: ks.reduce((n, c) => n + c.bytes_before, extra), bytes_after: ks.reduce((n, c) => n + c.bytes_after, extra),
+      objects_before: ks.length + extra, objects_after: ks.length + extra, churn: ks.reduce((n, c) => n + c.churn, 0),
+    })
     const [m1, m2] = [[kids[0], kids[2], kids[4]], [kids[1], kids[3]]]
     for (const m of ['churn', 'net'] as const) {
       for (const k of [1, 2, 3, 8]) {
@@ -637,8 +649,8 @@ describe('level diffs', () => {
           const path = await answer(lv, '2026-08-04', '2026-08-05', 'b1/x', { level: null })
           expect(l).toEqual(path.l)
           expect(index).toBe(1)
-          expect([l.a, l.b, l.oa, l.ob, l.churn]).toEqual([100, 47, 4, 5, 67])
-          expect(l.rows.filter(r => r.p === '')).toEqual([{ p: '', k: 'dir', a: 0, b: 7, oa: 0, ob: 1, churn: 7, s: 'added' }])
+          expect([l.bytes_before, l.bytes_after, l.objects_before, l.objects_after, l.churn]).toEqual([100, 47, 4, 5, 67])
+          expect(l.rows.filter(r => r.name === '')).toEqual([{ name: '', kind: 'dir', bytes_before: 0, bytes_after: 7, objects_before: 0, objects_after: 1, churn: 7, status: 'added' }])
         })
 
         it('where it doesn\'t, the level index still answers, as the `path` sort does', async () => {
@@ -658,7 +670,7 @@ describe('level diffs', () => {
           const lv = await oddEnv('interval-store-placeholder')
           const { l, index } = await answer(lv, '2026-08-04', '2026-08-05', 'b1/x')
           expect(index).toBe(1)
-          expect(l.rows.filter(r => r.p === '')).toEqual([{ p: '', k: 'file', a: 0, b: 0, oa: 0, ob: 1, churn: 0, s: 'added' }])
+          expect(l.rows.filter(r => r.name === '')).toEqual([{ name: '', kind: 'file', bytes_before: 0, bytes_after: 0, objects_before: 0, objects_after: 1, churn: 0, status: 'added' }])
         })
 
         it('one gaining bytes, and one in the base, the same', async () => {
@@ -666,8 +678,8 @@ describe('level diffs', () => {
           const grown = await answer(lv, '2026-08-05', '2026-08-06', 'b1/x')
           const based = await answer(lv, '2026-08-02', '2026-08-03', 'b2/q')
           expect([grown.index, based.index]).toEqual([1, 1])
-          expect(grown.l.rows.filter(r => r.p === '')).toEqual([{ p: '', k: 'file', a: 0, b: 3, oa: 1, ob: 1, churn: 3, s: 'changed' }])
-          expect(based.l.rows.filter(r => r.p === '')).toEqual([{ p: '', k: 'file', a: 0, b: 0, oa: 0, ob: 1, churn: 0, s: 'added' }])
+          expect(grown.l.rows.filter(r => r.name === '')).toEqual([{ name: '', kind: 'file', bytes_before: 0, bytes_after: 3, objects_before: 1, objects_after: 1, churn: 3, status: 'changed' }])
+          expect(based.l.rows.filter(r => r.name === '')).toEqual([{ name: '', kind: 'file', bytes_before: 0, bytes_after: 0, objects_before: 0, objects_after: 1, churn: 0, status: 'added' }])
         })
 
         it('every directory over every window: what the `path` sort answers, from the level index', async () => {
@@ -685,7 +697,7 @@ describe('level diffs', () => {
         it('the root\'s child \'\' (a key with a leading slash), its own `/` and `/lead` below it', async () => {
           const lv = await oddEnv('interval-store-placeholder')
           const root = await pair(lv, '2026-08-04', '2026-08-05', '')
-          expect(root.same.rows.filter(r => r.p === '')).toEqual([{ p: '', k: 'dir', a: 0, b: 11, oa: 0, ob: 2, churn: 11, s: 'added' }])
+          expect(root.same.rows.filter(r => r.name === '')).toEqual([{ name: '', kind: 'dir', bytes_before: 0, bytes_after: 11, objects_before: 0, objects_after: 2, churn: 11, status: 'added' }])
           expect(root.same).toEqual(root.want)
         })
       })

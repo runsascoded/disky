@@ -12,8 +12,8 @@ vi.mock('@rdub/file-tree/stores/s3', async () => ({ S3Store: (await import('../_
 // store with no scan by a cutoff is unknown — left out, never added or deleted. The deployment
 // (`_lib/testUnion.ts`): the primary scans at Z, A, C; meta at A, B.
 
-type Row = { p: string; d: number; k: string; s: string; a: number; b: number; oa: number; ob: number; src?: string }
-type Body = { prev: string; curr: string; rows: Row[]; total_a: number; total_b: number; objects_a: number; objects_b: number; threshold: number; union?: { view: string; sources: unknown[] } }
+type Row = { path: string; depth: number; kind: string; status: string; bytes_before: number; bytes_after: number; objects_before: number; objects_after: number; store?: string }
+type Body = { prev: string; curr: string; rows: Row[]; bytes_before: number; bytes_after: number; objects_before: number; objects_after: number; threshold: number; union?: { view: string; sources: unknown[] } }
 
 describe('D1', () => {
   let deployment: (views?: Record<string, unknown>) => Env
@@ -32,25 +32,25 @@ describe('D1', () => {
     expect([r.status, r.status === 200 ? '' : r.text]).toEqual([200, ''])
     return JSON.parse(r.text) as Body
   }
-  const roots = (b: Body) => b.rows.filter(r => r.d === 1).map(r => [r.p, r.src ?? null, r.s])
+  const roots = (b: Body) => b.rows.filter(r => r.depth === 1).map(r => [r.path, r.store ?? null, r.status])
   const totals = (bs: Body[]) => ({
-    total_a: bs.reduce((n, b) => n + b.total_a, 0), total_b: bs.reduce((n, b) => n + b.total_b, 0),
-    objects_a: bs.reduce((n, b) => n + b.objects_a, 0), objects_b: bs.reduce((n, b) => n + b.objects_b, 0),
+    bytes_before: bs.reduce((n, b) => n + b.bytes_before, 0), bytes_after: bs.reduce((n, b) => n + b.bytes_after, 0),
+    objects_before: bs.reduce((n, b) => n + b.objects_before, 0), objects_after: bs.reduce((n, b) => n + b.objects_after, 0),
   })
   /** A member's depth-1 names tagged with its store, as the union lists them; the members' `(other)`s are one row. */
   const tagged = (b: Body, store: string) => roots(b).filter(([n]) => n !== '(other)').map(([n, , s]) => [n, store, s])
   const others = (bs: Body[]) => {
-    const o = bs.flatMap(b => b.rows.filter(r => r.d === 1 && r.p === '(other)'))
+    const o = bs.flatMap(b => b.rows.filter(r => r.depth === 1 && r.path === '(other)'))
     if (!o.length) return []
-    const sum = (k: 'a' | 'b' | 'oa' | 'ob') => o.reduce((n, r) => n + r[k], 0)
-    return [['(other)', null, sum('a') === sum('b') && sum('oa') === sum('ob') ? 'unchanged' : 'changed']]
+    const sum = (k: 'bytes_before' | 'bytes_after' | 'objects_before' | 'objects_after') => o.reduce((n, r) => n + r[k], 0)
+    return [['(other)', null, sum('bytes_before') === sum('bytes_after') && sum('objects_before') === sum('objects_after') ? 'unchanged' : 'changed']]
   }
-  const pick = (b: Body) => ({ total_a: b.total_a, total_b: b.total_b, objects_a: b.objects_a, objects_b: b.objects_b })
+  const pick = (b: Body) => ({ bytes_before: b.bytes_before, bytes_after: b.bytes_after, objects_before: b.objects_before, objects_after: b.objects_after })
   /** Meta's root total at a scan, as its own subtree says. */
   const meta = async (date: string) => {
     const r = await subtree({ request: new Request(`http://localhost/api/subtree?date=${date}&path=&store=meta`), env: deployment() })
-    const t = ((await r.json()) as { tree: { b: number; o: number } }).tree
-    return { b: t.b, o: t.o }
+    const t = ((await r.json()) as { tree: { bytes: number; objects: number } }).tree
+    return { b: t.bytes, o: t.objects }
   }
 
   it('without a main view, the diff is the primary’s alone, as before', async () => {
@@ -65,7 +65,7 @@ describe('D1', () => {
     }
     const root = await names(`from=${A}&to=${C}&path=`)
     expect(root).toEqual(['union', 'union-ctxs', 'union-gate', 'union-obs', 'union-cutoff', 'union-roots', 'members'])
-    const drill = await names(`from=${A}&to=${C}&path=${(await body(`from=${A}&to=${C}&path=`)).rows.find(r => r.d === 1 && r.src === 'primary')!.p}`)
+    const drill = await names(`from=${A}&to=${C}&path=${(await body(`from=${A}&to=${C}&path=`)).rows.find(r => r.depth === 1 && r.store === 'primary')!.path}`)
     expect([drill.slice(0, 6), drill.length > 6]).toEqual([['union', 'union-ctxs', 'union-gate', 'union-obs', 'union-cutoff', 'union-member'], true])
   })
 
@@ -110,7 +110,7 @@ describe('D1', () => {
       { view: 'all', sources: [{ store: 'primary', from: A, to: C, change: 'changed' }, { store: 'meta', from: A, to: B, change: 'changed' }] },
       [...tagged(p, 'primary'), ...tagged(m, 'meta'), ...others([p, m])],
       totals([p, m]),
-      Math.round(Math.max(p.total_a + m.total_a, p.total_b + m.total_b) * 12 / (1280 * 768)),
+      Math.round(Math.max(p.bytes_before + m.bytes_before, p.bytes_after + m.bytes_after) * 12 / (1280 * 768)),
     ])
     // The primary's `bk` changed at C, and its 30-byte `zz` went under the floor (the root's `(other)`, the members'
     // summed into one untagged row); meta's content didn't move: no rows.
@@ -123,7 +123,7 @@ describe('D1', () => {
     expect([u.union, roots(u), pick(u)]).toEqual([
       { view: 'all', sources: [{ store: 'primary', from: A, to: C, change: 'changed' }, { store: 'meta', from: B, to: B, change: 'unchanged' }] },
       [...tagged(p, 'primary'), ...others([p])],
-      { total_a: p.total_a + mb.b, total_b: p.total_b + mb.b, objects_a: p.objects_a + mb.o, objects_b: p.objects_b + mb.o },
+      { bytes_before: p.bytes_before + mb.b, bytes_after: p.bytes_after + mb.b, objects_before: p.objects_before + mb.o, objects_after: p.objects_after + mb.o },
     ])
   })
 
@@ -147,7 +147,7 @@ describe('D1', () => {
     // B → C under `mb`: meta didn't rescan — its one scan against itself: equal totals, nothing moved.
     const same = await body(`from=${B}&to=${C}&path=mb`)
     const mb = await meta(B)
-    expect([same.prev, same.curr, pick(same), same.rows]).toEqual([B, B, { total_a: mb.b, total_b: mb.b, objects_a: mb.o, objects_b: mb.o }, []])
+    expect([same.prev, same.curr, pick(same), same.rows]).toEqual([B, B, { bytes_before: mb.b, bytes_after: mb.b, objects_before: mb.o, objects_after: mb.o }, []])
     expect(await get(`from=${A}&to=${C}&path=nope`)).toEqual({ status: 404, text: 'path not found in either scan' })
   })
 
@@ -172,30 +172,31 @@ describe('D1', () => {
 
 describe('unionDiffRows', () => {
   const view = { key: 'all', members: ['primary', 'meta'], main: true, sources: {} }
-  const row = (p: string, d: number, a: number, b: number, s = a === b ? 'unchanged' : 'changed') => ({ p, d, k: 'dir' as const, s: s as 'changed', a, b, oa: 1, ob: 1 })
+  const row = (path: string, depth: number, a: number, b: number, s = a === b ? 'unchanged' : 'changed') =>
+    ({ path, depth, kind: 'dir' as const, status: s as 'changed', bytes_before: a, bytes_after: b, objects_before: 1, objects_after: 1 })
   it('tags depth-1 rows, keeps deeper ones, sums the `(other)` folds (restating their status)', () => {
     expect(unionDiffRows(view, [
       { store: 'primary', rows: [row('a', 1, 5, 9), row('a/x', 2, 5, 9), row('(other)', 1, 2, 3)] },
       { store: 'meta', rows: [row('m', 1, 4, 4), row('(other)', 1, 3, 2)] },
     ])).toEqual([
-      { ...row('a', 1, 5, 9), src: 'primary' },
+      { ...row('a', 1, 5, 9), store: 'primary' },
       row('a/x', 2, 5, 9),
-      { ...row('m', 1, 4, 4), src: 'meta' },
-      { ...row('(other)', 1, 5, 5), oa: 2, ob: 2, s: 'unchanged' },
+      { ...row('m', 1, 4, 4), store: 'meta' },
+      { ...row('(other)', 1, 5, 5), objects_before: 2, objects_after: 2, status: 'unchanged' },
     ])
   })
   it('with members\' totals, `(other)` is each one\'s totals less its drawn depth-1 rows: a member that drew nothing still adds up', () => {
     const got = unionDiffRows(view, [
-      { store: 'primary', rows: [row('a', 1, 5, 9), row('a/x', 2, 5, 9), row('(other)', 1, 2, 1)], total: { a: 7, b: 10, oa: 2, ob: 2 } },
-      { store: 'meta', rows: [], total: { a: 40, b: 65, oa: 3, ob: 5 } },
+      { store: 'primary', rows: [row('a', 1, 5, 9), row('a/x', 2, 5, 9), row('(other)', 1, 2, 1)], total: { bytes_before: 7, bytes_after: 10, objects_before: 2, objects_after: 2 } },
+      { store: 'meta', rows: [], total: { bytes_before: 40, bytes_after: 65, objects_before: 3, objects_after: 5 } },
     ])
     expect(got).toEqual([
-      { ...row('a', 1, 5, 9), src: 'primary' },
+      { ...row('a', 1, 5, 9), store: 'primary' },
       row('a/x', 2, 5, 9),
-      { p: '(other)', d: 1, k: 'dir', s: 'changed', a: 2 + 40, b: 1 + 65, oa: 1 + 3, ob: 1 + 5 },
+      { path: '(other)', depth: 1, kind: 'dir', status: 'changed', bytes_before: 2 + 40, bytes_after: 1 + 65, objects_before: 1 + 3, objects_after: 1 + 5 },
     ])
-    const d1 = got.filter(r => r.d === 1)
-    expect([d1.reduce((n, r) => n + r.b - r.a, 0), d1.reduce((n, r) => n + r.ob - r.oa, 0)]).toEqual([(10 + 65) - (7 + 40), (2 + 5) - (2 + 3)])
+    const d1 = got.filter(r => r.depth === 1)
+    expect([d1.reduce((n, r) => n + r.bytes_after - r.bytes_before, 0), d1.reduce((n, r) => n + r.objects_after - r.objects_before, 0)]).toEqual([(10 + 65) - (7 + 40), (2 + 5) - (2 + 3)])
   })
   it('refuses a depth-1 name two stores draw', () => {
     expect(() => unionDiffRows(view, [{ store: 'primary', rows: [row('a', 1, 1, 1)] }, { store: 'meta', rows: [row('a', 1, 1, 1)] }])).toThrow("union view 'all': root 'a' is in stores primary, meta")

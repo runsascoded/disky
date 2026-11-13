@@ -2161,8 +2161,8 @@ def prune_predecessors(store, prefix: str, gen: str, *, now: float, grace_s: flo
                        retire: Callable[[str], int] | None = None, log: Callable[[str], None] = err) -> list[dict]:
     """Each generation `gen` was compacted from (its `compaction.json`'s `from`, and theirs while unpruned), deleted from
     `store` once its successor's `compaction.json` is `grace_s` old — but for its `successor.json` — unless the pointer
-    names it. One record per predecessor still holding files: `{gen, objects, bytes, age_s, deleted}`. `retire` (gcs's
-    `owner_carry`): called with each generation about to go, first, so a failure leaves its files for the next prune to
+    names it. One record per predecessor still holding files: `{gen, objects, bytes, age_s, deleted}`. `retire`
+    (`owner_carry`): called with each generation about to go, first, so a failure leaves its files for the next prune to
     find (`owner_rows`: what it deleted)."""
     # The chain first (a pruned generation's `compaction.json` goes with it), newest first, to the first pruned one.
     found = []
@@ -2303,7 +2303,7 @@ def compact_store(store, c: Compactor, gen: str, gen_dir: Path, work: Path, *, p
     `rec`: the run's record (`maint_runs`): phases `fold` (the interval store's then `sorts`: the fold's `progress`
     hook moves it on), `upload`, `pointer`, `r2`, each with its note (rows, files, GiB, seconds, work-disk / RSS peaks).
 
-    `carry` (gcs's `owner_carry`, not a candidate's): the priced owner rows copied to the new generation's tag in the
+    `carry` (`owner_carry`, not a candidate's): the priced owner rows copied to the new generation's tag in the
     `pointer` phase, after the check and before `successor.json` (a failure raises: nothing moved), and again best effort
     once the R2 pointer has moved (`summary["owner_carry"]`)."""
     from .blobstore import upload_new
@@ -2478,7 +2478,7 @@ def promote_gen(store, prefix: str, new: str, *, r2_bucket: str | None = None, s
     copy mirrors), then the R2 copy's pointers (`r2_promote`). Refused, nothing moved: `new` not a whole candidate
     (`candidate.json`, `compaction.json`), its source already compacted, `new` lacking a scan its source holds (append
     those to `new` first), or R2 lacking a file of `new` (`r2_wanted`: of runs appended since, the `served` files). A scan appended to the source as its successor record is
-    written: the record removed again, refused. `carry` (gcs's `owner_carry`): its row check first, the priced owner rows
+    written: the record removed again, refused. `carry` (`owner_carry`): its row check first, the priced owner rows
     copied to `new`'s tag before the successor record (a failure raises: nothing moved), and again best effort once the
     pointers have moved. Returns `{from, gen, current}`."""
     new_prefix = f"{prefix}/{new}"
@@ -2551,7 +2551,7 @@ def compact_generation(store, c: Compactor, gen: str, mount: Path, work: Path, *
     `compact_store`'s, then `prune`; finished `nop` when not due, `failed` (re-raised) on any raise, else
     `succeeded`.
 
-    `carry` (gcs's `owner_carry`): checks D1 once the fold is due, before it starts; `compact_store` copies the rows, and
+    `carry` (`owner_carry`): checks D1 once the fold is due, before it starts; `compact_store` copies the rows, and
     the `prune` phase deletes a retired generation's."""
     from .maint_runs import NULL, gib, phase
 

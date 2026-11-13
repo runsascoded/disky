@@ -27,11 +27,12 @@ from pathlib import Path
 
 from click import FloatRange, IntRange, argument, command, option
 
+from . import api_names
 from .diff_check import fetch
 
 QUANT = 128
 # The site's API cache version (`API_CV`, site/src/App.tsx): asked as the browser asks.
-CV = 3
+CV = 6
 
 
 @dataclass(frozen=True)
@@ -110,10 +111,11 @@ def browser_url(r: Req) -> str:
 def answer_digest(route: str, body: dict) -> str:
     """What both hosts must answer alike: a diff's totals and drawn rows, a view's drawn nodes and tree. Not the
     reader's own fields (`tier`, `index`, `lookups`, `budgetCut`), which a layout change may move, nor the root's
-    display name (`tree.n`: the host's `ROOT_LABEL`, "… (dev)" on a dev stack)."""
-    tree = body.get("tree")
-    keep = ({k: body.get(k) for k in ("total_a", "total_b", "objects_a", "objects_b", "rows")} if route == "/api/diff"
-            else {"nodes": body.get("nodes"), "tree": {k: v for k, v in tree.items() if k != "n"} if isinstance(tree, dict) else tree})
+    display name (`tree.name`: the host's `ROOT_LABEL`, "… (dev)" on a dev stack). Either host's short-named body
+    (`api_names`) digests as its descriptive one."""
+    tree = api_names.tree(body) if isinstance(body.get("tree"), dict) else body.get("tree")
+    keep = ({k: api_names.diff(body).get(k) for k in ("bytes_before", "bytes_after", "objects_before", "objects_after", "rows")} if route == "/api/diff"
+            else {"nodes": body.get("nodes"), "tree": {k: v for k, v in tree.items() if k != "name"} if isinstance(tree, dict) else tree})
     return hashlib.sha256(json.dumps(keep, sort_keys=True).encode()).hexdigest()[:12]
 
 

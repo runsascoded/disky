@@ -6,11 +6,20 @@ from dt_cloud.diff_check import bad_sums, check, timing
 
 
 def row(p, d, s, a, b, oa, ob, x=False, k="dir"):
-    return {"p": p, "d": d, "k": k, "s": s, "a": a, "b": b, "oa": oa, "ob": ob, **({"x": True} if x else {})}
+    return {"path": p, "depth": d, "kind": k, "status": s, "bytes_before": a, "bytes_after": b, "objects_before": oa, "objects_after": ob,
+            **({"expanded": True} if x else {})}
 
 
 def diff(rows, tier="descent", threshold=10, ta=100, tb=150, oa=10, ob=12):
-    return {"rows": rows, "total_a": ta, "total_b": tb, "objects_a": oa, "objects_b": ob, "tier": tier, "threshold": threshold}
+    return {"rows": rows, "bytes_before": ta, "bytes_after": tb, "objects_before": oa, "objects_after": ob, "tier": tier, "threshold": threshold}
+
+
+def short(d):
+    """`d` as a site not yet redeployed serves it (the short names, `api_names`)."""
+    keys = {"path": "p", "depth": "d", "kind": "k", "status": "s", "bytes_before": "a", "bytes_after": "b", "objects_before": "oa",
+            "objects_after": "ob", "expanded": "x"}
+    totals = {"bytes_before": "total_a", "bytes_after": "total_b", "objects_before": "objects_a", "objects_after": "objects_b"}
+    return {**{totals.get(k, k): v for k, v in d.items() if k != "rows"}, "rows": [{keys[k]: v for k, v in r.items()} for r in d["rows"]]}
 
 
 A = diff([row("m", 1, "changed", 60, 100, 6, 8, x=True), row("m/x", 2, "added", 0, 40, 0, 2), row("n", 1, "changed", 40, 50, 4, 4),
@@ -45,3 +54,8 @@ def test_a_row_b_cut_into_its_parents_other_is_excused_when_b_is_truncated():
     b = diff([row("m", 1, "changed", 60, 100, 6, 8, x=True), row("m/(other)", 2, "changed", 60, 100, 6, 8), row("n", 1, "changed", 40, 50, 4, 4)])
     assert check(A, {**b, "truncated": True}, "descent")["missed"] == []
     assert check(A, {**b, "truncated": False}, "descent")["missed"] == ["m/x"]
+
+
+def test_a_short_named_body_reads_as_its_descriptive_one():
+    b = diff([row("m", 1, "changed", 60, 100, 6, 8, x=True), row("n", 1, "changed", 40, 51, 4, 4)], tier="bysize")
+    assert check(short(A), short(b), "descent") == check(A, b, "descent")

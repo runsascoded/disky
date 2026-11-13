@@ -33,7 +33,7 @@ const META_INDEX = stub('gen-meta', [A], { index: [hit('mb/index', 2097152)] })
 
 const META = { vars: { ROOT_LABEL: 'our storage', SNAPSHOTS_SUBDIR: 'meta', STORE_PREFIXES: 'meta-l2/,snapshots/meta/', STORE_BUCKET: 'meta-data' }, secrets: { STORE_ACCESS_KEY_ID: 'STORE_META_ID', STORE_SECRET_ACCESS_KEY: 'STORE_META_ID' } }
 
-type Body = { q?: string; matches?: string[]; matched?: { path: string; b: number; o: number }[]; matchCount?: { n: number; b: number; o: number }; tree: { b: number } }
+type Body = { q?: string; matches?: string[]; matched?: { path: string; bytes: number; objects: number }[]; matchCount?: { count: number; bytes: number; objects: number }; tree: { bytes: number } }
 
 describe('D1', () => {
   let deployment: (views?: Record<string, unknown>) => Env
@@ -59,7 +59,7 @@ describe('D1', () => {
   const matchesOf = ([status, b]: [number, unknown]) => [status, (b as Body).matched, (b as Body).matchCount]
 
   it('the primary answers from its own index, as before', async () => {
-    expect(matchesOf(await get(envOf(), 'path=&q=ckpt'))).toEqual([200, [{ path: 'bk/ckpt', b: 6000, o: 1 }], { n: 1, b: 6000, o: 1 }])
+    expect(matchesOf(await get(envOf(), 'path=&q=ckpt'))).toEqual([200, [{ path: 'bk/ckpt', bytes: 6000, objects: 1 }], { count: 1, bytes: 6000, objects: 1 }])
   })
 
   it('a secondary store without its own index is `scan-not-indexed` — never the primary’s matches on a coinciding scan id', async () => {
@@ -72,7 +72,7 @@ describe('D1', () => {
   it('a secondary store with its own `STATIC_GEN` answers from its own index only', async () => {
     const env = envOf({ ...META, vars: { ...META.vars, STATIC_GEN: 'gen-meta' } }, { meta: META_INDEX })
     expect([matchesOf(await get(env, 'store=meta&path=&q=index')), matchesOf(await get(env, 'store=meta&path=&q=ckpt'))]).toEqual([
-      [200, [{ path: 'mb/index', b: 2097152, o: 1 }], { n: 1, b: 2097152, o: 1 }],
+      [200, [{ path: 'mb/index', bytes: 2097152, objects: 1 }], { count: 1, bytes: 2097152, objects: 1 }],
       [200, [], undefined],
     ])
   })

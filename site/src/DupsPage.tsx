@@ -56,7 +56,7 @@ const fmtIdle = (d: number | null): string => (d == null ? '—' : d < 60 ? `${d
 
 /** A copy's storage-class mix as a thin bar (its tip: the bytes and list prices per class). */
 function ClassBar({ c }: { c: DupCopy }) {
-  const mix = classMix({ b: c.size, cb: c.cb })
+  const mix = classMix({ bytes: c.size, class_bytes: c.cb })
   const rows = Object.entries(mix).filter(([, b]) => b > 0).sort((a, b) => b[1] - a[1])
   return (
     <Tooltip content={<ClassMixTip mix={mix} />}>

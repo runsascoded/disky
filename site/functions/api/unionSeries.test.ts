@@ -11,7 +11,7 @@ vi.mock('@rdub/file-tree/stores/s3', async () => ({ S3Store: (await import('../_
 // missing (the total partial), never zero. The deployment (`_lib/testUnion.ts`): the primary scans at Z, A, C;
 // meta at A, B.
 
-type Pt = { date: string; b: number; o: number; missing?: string[] }
+type Pt = { date: string; bytes: number; objects: number; missing?: string[] }
 type Body = { path: string; points: Pt[]; roots?: { path: string; points: Pt[] }[]; union?: unknown }
 
 describe('D1', () => {
@@ -39,12 +39,12 @@ describe('D1', () => {
   it('the root: one step per union event, each store’s latest point carried, a store before its first named missing', async () => {
     const [u, p, m] = await Promise.all([body('path='), body('path=&store=primary'), body('path=&store=meta')])
     const at = (b: Body, d: string) => b.points.find(x => x.date === d)!
-    const sum = (x: Pt, y: Pt) => ({ b: x.b + y.b, o: x.o + y.o })
+    const sum = (x: Pt, y: Pt) => ({ bytes: x.bytes + y.bytes, objects: x.objects + y.objects })
     expect([p.points.map(x => x.date), m.points.map(x => x.date)]).toEqual([[Z, A, C], [A, B]])
     expect(u).toEqual({
       path: '',
       points: [
-        { date: Z, b: at(p, Z).b, o: at(p, Z).o, missing: ['meta'] },
+        { date: Z, bytes: at(p, Z).bytes, objects: at(p, Z).objects, missing: ['meta'] },
         { date: A, ...sum(at(p, A), at(m, A)) },
         { date: B, ...sum(at(p, A), at(m, B)) },
         { date: C, ...sum(at(p, C), at(m, B)) },
@@ -56,7 +56,7 @@ describe('D1', () => {
   it('`split=roots`: every store’s roots, each at its store’s carried point, a root starting at its store’s first scan', async () => {
     const [u, p, m] = await Promise.all([body('path=&split=roots'), body('path=&split=roots&store=primary'), body('path=&split=roots&store=meta')])
     const trace = (b: Body, root: string) => b.roots!.find(r => r.path === root)!.points
-    const pt = (date: string, r: Pt) => ({ date, b: r.b, o: r.o })
+    const pt = (date: string, r: Pt) => ({ date, bytes: r.bytes, objects: r.objects })
     const [bk, zz, mb] = [trace(p, 'bk'), trace(p, 'zz'), trace(m, 'mb')]
     // The primary's `zz` is gone at C; its `bk` changed. Meta's `mb` carries A, then B.
     expect([bk.map(x => x.date), zz.map(x => x.date), mb.map(x => x.date)]).toEqual([[Z, A, C], [Z, A], [A, B]])
@@ -65,11 +65,11 @@ describe('D1', () => {
       { path: 'zz', points: [pt(Z, zz[0]), pt(A, zz[1]), pt(B, zz[1])] },
       { path: 'mb', points: [pt(A, mb[0]), pt(B, mb[1]), pt(C, mb[1])] },
     ])
-    expect(u.points.map(x => [x.date, x.b, x.missing ?? null])).toEqual([
-      [Z, bk[0].b + zz[0].b, ['meta']],
-      [A, bk[1].b + zz[1].b + mb[0].b, null],
-      [B, bk[1].b + zz[1].b + mb[1].b, null],
-      [C, bk[2].b + mb[1].b, null],
+    expect(u.points.map(x => [x.date, x.bytes, x.missing ?? null])).toEqual([
+      [Z, bk[0].bytes + zz[0].bytes, ['meta']],
+      [A, bk[1].bytes + zz[1].bytes + mb[0].bytes, null],
+      [B, bk[1].bytes + zz[1].bytes + mb[1].bytes, null],
+      [C, bk[2].bytes + mb[1].bytes, null],
     ])
   })
 

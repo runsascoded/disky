@@ -33,9 +33,9 @@ async function storeEnv(): Promise<Env> {
 
 /** Each node's named children, as (bytes, name) pairs in the order the view gives them. */
 const orders = (n: ViewNode, out: [number, string][][] = []): [number, string][][] => {
-  const kids = (n.c ?? []).filter(c => c.n !== '(other)')
-  if (kids.length > 1) out.push(kids.map(c => [c.b, c.n]))
-  for (const c of n.c ?? []) orders(c, out)
+  const kids = (n.children ?? []).filter(c => c.name !== '(other)')
+  if (kids.length > 1) out.push(kids.map(c => [c.bytes, c.name]))
+  for (const c of n.children ?? []) orders(c, out)
   return out
 }
 const canonical = (xs: [number, string][]) => [...xs].sort((x, y) => y[0] - x[0] || (x[1] < y[1] ? -1 : x[1] > y[1] ? 1 : 0))

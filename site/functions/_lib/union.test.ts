@@ -113,34 +113,34 @@ describe('memberRequest', () => {
 
 describe('unionRoot', () => {
   it('preserves known and unavailable owner bytes in combined roots and their folds', () => {
-    const tree = { n: 'root', k: 'dir' as const, b: 100, o: 2, us: [['alice', 30]], ou: 50, c: [{ n: '(other)', k: 'dir' as const, b: 100, o: 2, us: [['alice', 30]], ou: 50 }] }
-    const second = { n: 'second', k: 'dir' as const, b: 50, o: 1, us: [['alice', 10]], ou: 25, c: [{ n: '(other)', k: 'dir' as const, b: 50, o: 1, us: [['alice', 10]], ou: 25 }] }
+    const tree: ViewNode = { name: 'root', kind: 'dir', bytes: 100, objects: 2, owners: [['alice', 30]], unknown_owner_bytes: 50, children: [{ name: '(other)', kind: 'dir' as const, bytes: 100, objects: 2, owners: [['alice', 30]], unknown_owner_bytes: 50 }] }
+    const second: ViewNode = { name: 'second', kind: 'dir', bytes: 50, objects: 1, owners: [['alice', 10]], unknown_owner_bytes: 25, children: [{ name: '(other)', kind: 'dir' as const, bytes: 50, objects: 1, owners: [['alice', 10]], unknown_owner_bytes: 25 }] }
     expect(unionRoot(view, 'Fleet', [{ store: 'primary', date: 'A', tree }, { store: 'meta', date: 'B', tree: second }])).toEqual({
-      n: 'Fleet', k: 'dir', b: 150, o: 3, us: [['alice', 40]], ou: 75,
-      c: [{ n: '(other)', k: 'dir', b: 150, o: 3, us: [['alice', 40]], ou: 75 }],
+      name: 'Fleet', kind: 'dir', bytes: 150, objects: 3, owners: [['alice', 40]], unknown_owner_bytes: 75,
+      children: [{ name: '(other)', kind: 'dir', bytes: 150, objects: 3, owners: [['alice', 40]], unknown_owner_bytes: 75 }],
     })
   })
 
   const view = { key: 'all', members: ['primary', 'meta'], main: true, sources: {} }
-  const leaf = (n: string, b: number, o = 1): ViewNode => ({ n, k: 'dir', b, o })
+  const leaf = (name: string, bytes: number, objects = 1): ViewNode => ({ name, kind: 'dir', bytes, objects })
   it('tags each member’s roots, sorts them, sums the `(other)`s (last) and the totals', () => {
-    const primary = { ...leaf('primary root', 1000, 10), c: [leaf('a', 600, 5), leaf('b', 300, 4), { ...leaf('(other)', 100, 1), f: 3 }] }
-    const meta = { ...leaf('meta root', 450, 6), c: [leaf('m', 400, 5), { ...leaf('(other)', 50, 1), f: 2 }] }
+    const primary = { ...leaf('primary root', 1000, 10), children: [leaf('a', 600, 5), leaf('b', 300, 4), { ...leaf('(other)', 100, 1), folded: 3 }] }
+    const meta = { ...leaf('meta root', 450, 6), children: [leaf('m', 400, 5), { ...leaf('(other)', 50, 1), folded: 2 }] }
     expect(unionRoot(view, 'Fleet', [{ store: 'primary', date: 'A', tree: primary }, { store: 'meta', date: 'B', tree: meta }])).toEqual({
-      n: 'Fleet', k: 'dir', b: 1450, o: 16,
-      c: [
-        { ...leaf('a', 600, 5), src: 'primary', at: 'A' },
-        { ...leaf('m', 400, 5), src: 'meta', at: 'B' },
-        { ...leaf('b', 300, 4), src: 'primary', at: 'A' },
-        { n: '(other)', k: 'dir', b: 150, o: 2, f: 5 },
+      name: 'Fleet', kind: 'dir', bytes: 1450, objects: 16,
+      children: [
+        { ...leaf('a', 600, 5), store: 'primary', scan: 'A' },
+        { ...leaf('m', 400, 5), store: 'meta', scan: 'B' },
+        { ...leaf('b', 300, 4), store: 'primary', scan: 'A' },
+        { name: '(other)', kind: 'dir', bytes: 150, objects: 2, folded: 5 },
       ],
     })
   })
   it('with each member’s root rows, every root the threshold folded is listed too, out of its `(other)`', () => {
     // r2's shape: the primary's three buckets drawn, meta's two (1.9 GB, 1.5 GB) and a 23 MB one under the
     // union's ~2.2 GB threshold — all three folded into meta's `(other)`.
-    const primary = { ...leaf('primary root', 1_000_000_000_000, 30), c: [leaf('ctbk', 900_000_000_000, 10), leaf('crashes', 90_000_000_000, 10), leaf('jc-taxes', 10_000_000_000, 10)] }
-    const meta = { ...leaf('meta root', 3_423_000_000, 7), c: [{ ...leaf('(other)', 3_423_000_000, 7), f: 3 }] }
+    const primary = { ...leaf('primary root', 1_000_000_000_000, 30), children: [leaf('ctbk', 900_000_000_000, 10), leaf('crashes', 90_000_000_000, 10), leaf('jc-taxes', 10_000_000_000, 10)] }
+    const meta = { ...leaf('meta root', 3_423_000_000, 7), children: [{ ...leaf('(other)', 3_423_000_000, 7), folded: 3 }] }
     const metaRows = [
       { path: 'oa-r2-usage-index', b: 1_900_000_000, o: 4, m: 86400 * 20000 + 5, k: 'dir' as const },
       { path: 'disk-tree-demo', b: 1_500_000_000, o: 2, m: null, k: 'dir' as const },
@@ -151,28 +151,28 @@ describe('unionRoot', () => {
       { store: 'primary', date: 'A', tree: primary, roots: primaryRows },
       { store: 'meta', date: 'A', tree: meta, roots: metaRows },
     ])).toEqual({
-      n: 'Fleet', k: 'dir', b: 1003_423_000_000, o: 37,
-      c: [
-        { ...leaf('ctbk', 900_000_000_000, 10), src: 'primary', at: 'A' },
-        { ...leaf('crashes', 90_000_000_000, 10), src: 'primary', at: 'A' },
-        { ...leaf('jc-taxes', 10_000_000_000, 10), src: 'primary', at: 'A' },
-        { n: 'oa-r2-usage-index', k: 'dir', b: 1_900_000_000, o: 4, d: 20000, t: 86400 * 20000 + 5, src: 'meta', at: 'A' },
-        { n: 'disk-tree-demo', k: 'dir', b: 1_500_000_000, o: 2, src: 'meta', at: 'A' },
-        { n: 'tiny', k: 'dir', b: 23_000_000, o: 1, src: 'meta', at: 'A' },
+      name: 'Fleet', kind: 'dir', bytes: 1003_423_000_000, objects: 37,
+      children: [
+        { ...leaf('ctbk', 900_000_000_000, 10), store: 'primary', scan: 'A' },
+        { ...leaf('crashes', 90_000_000_000, 10), store: 'primary', scan: 'A' },
+        { ...leaf('jc-taxes', 10_000_000_000, 10), store: 'primary', scan: 'A' },
+        { name: 'oa-r2-usage-index', kind: 'dir', bytes: 1_900_000_000, objects: 4, mtime: 86400 * 20000 + 5, store: 'meta', scan: 'A' },
+        { name: 'disk-tree-demo', kind: 'dir', bytes: 1_500_000_000, objects: 2, store: 'meta', scan: 'A' },
+        { name: 'tiny', kind: 'dir', bytes: 23_000_000, objects: 1, store: 'meta', scan: 'A' },
       ],
     })
   })
   it('a lifted root another member draws is still an overlap', () => {
     const f = () => unionRoot(view, 'Fleet', [
-      { store: 'primary', date: 'A', tree: { ...leaf('p', 5), c: [leaf('x', 5)] } },
-      { store: 'meta', date: 'A', tree: { ...leaf('m', 1), c: [{ ...leaf('(other)', 1), f: 1 }] }, roots: [{ path: 'x', b: 1, o: 1 }] },
+      { store: 'primary', date: 'A', tree: { ...leaf('p', 5), children: [leaf('x', 5)] } },
+      { store: 'meta', date: 'A', tree: { ...leaf('m', 1), children: [{ ...leaf('(other)', 1), folded: 1 }] }, roots: [{ path: 'x', b: 1, o: 1 }] },
     ])
     expect(f).toThrow(new UnionOverlap("union view 'all': root 'x' is in stores primary, meta"))
   })
   it('empty members: a childless root; a root two members draw is refused', () => {
     expect(unionRoot(view, 'Fleet', [{ store: 'primary', date: 'A', tree: leaf('p', 0, 0) }, { store: 'meta', date: 'A', tree: leaf('m', 0, 0) }]))
-      .toEqual({ n: 'Fleet', k: 'dir', b: 0, o: 0 })
-    const f = () => unionRoot(view, 'Fleet', [{ store: 'primary', date: 'A', tree: { ...leaf('p', 5), c: [leaf('x', 5)] } }, { store: 'meta', date: 'A', tree: { ...leaf('m', 5), c: [leaf('x', 5)] } }])
+      .toEqual({ name: 'Fleet', kind: 'dir', bytes: 0, objects: 0 })
+    const f = () => unionRoot(view, 'Fleet', [{ store: 'primary', date: 'A', tree: { ...leaf('p', 5), children: [leaf('x', 5)] } }, { store: 'meta', date: 'A', tree: { ...leaf('m', 5), children: [leaf('x', 5)] } }])
     expect(f).toThrow(new UnionOverlap("union view 'all': root 'x' is in stores primary, meta"))
   })
 })

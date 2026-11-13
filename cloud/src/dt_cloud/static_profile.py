@@ -113,7 +113,7 @@ class Profile:
     #: (`maint_runs`): `{"CLOUDFLARE_API_TOKEN": <the D1 token's secret>}`, with the submitter's `$D1_DB_ID` and
     #: `$CLOUDFLARE_ACCOUNT_ID` passed through (`append_runner.Runner.record_env`). Empty: the jobs run unrecorded.
     record_secrets: Mapping[str, str] = field(default_factory=dict)
-    #: gcs's interval store: a compaction carries the priced owner rows to its new generation (`owner_carry`; `compact -O`),
+    #: The interval store: a compaction carries the priced owner rows to its new generation (`owner_carry`; `compact -O`),
     #: which needs `record_secrets` and the submitter's D1 env. Off: nothing changes.
     owner_carry: bool = False
 

@@ -1,23 +1,38 @@
+/** A map node, as `/api/subtree` serves it (`functions/_lib/view.ts` `ViewNode`; specs/descriptive-field-names.md §3a). */
 export interface TreeNode {
-  n: string
+  name: string
   /** What the path is: an object (`file`) or a directory. A scan indexed
    * before the path store (specs/done/path-store.md) holds directories only; a
-   * fold (`(other)`) is drawn as a branch. Absent from older cached responses. */
-  k?: 'file' | 'dir'
-  b: number
-  o: number
-  d?: number                   // newest listing date at or under the node, epoch days (GCS: created; S3/R2/local: modified)
-  t?: number                   // …that newest listing time's instant, epoch seconds (absent from older cached responses)
-  a?: number                   // last-read epoch day (access logs; MAX over the whole subtree)
-  us?: [string, number][]      // top users -> bytes
-  ou?: number                 // bytes whose ownership was not read; distinct from known unowned bytes
-  cb?: Record<string, number>  // non-STANDARD class -> bytes ("2" NL, "3" CL, "4" AR); STANDARD = b - sum
-  c?: TreeNode[]
-  f?: number                   // an `(other)` fold: how many children it stands in for (drives the dust hatch density)
-  pv?: Provenance              // provenance of the top owner's inferred attribution (absent when assigned, or no extras for the scan)
-  src?: string                 // a union view's root child: the store it belongs to (`functions/_lib/union.ts`)
-  at?: string                  // …and that store's scan id at the view's cutoff (its own, not the page's as-of)
+   * fold (`(other)`) is drawn as a branch. */
+  kind?: 'file' | 'dir'
+  bytes: number
+  objects: number
+  /** The newest write at or under the node, epoch seconds (GCS: created; S3/R2/local: modified). Its day: `mtimeDay`. */
+  mtime?: number
+  /** The newest read at or under the node, epoch days (access logs; MAX over the whole subtree). */
+  last_read?: number
+  /** Top owners → bytes, largest first. */
+  owners?: [string, number][]
+  /** Bytes whose ownership was not read (a rollup's unexpanded cells); distinct from known unowned bytes. */
+  unknown_owner_bytes?: number
+  /** Non-Standard class → bytes (`"2"` NL, `"3"` CL, `"4"` AR); Standard = `bytes` − their sum. */
+  class_bytes?: Record<string, number>
+  children?: TreeNode[]
+  /** An `(other)` fold: how many children it stands in for (drives the dust hatch density). */
+  folded?: number
+  /** The node matches the name filter. */
+  matched?: true
+  /** Provenance of the top owner's inferred attribution (absent when assigned, or no extras for the scan). */
+  provenance?: Provenance
+  /** A union view's root child: the store it belongs to (`functions/_lib/union.ts`)… */
+  store?: string
+  /** …and that store's scan id at the view's cutoff (its own, not the page's as-of). */
+  scan?: string
 }
+
+/** A node's newest write as an epoch day (what day-bucketed colours, tables and lenses read). */
+export const mtimeDay = (n: { mtime?: number } | null | undefined): number | undefined =>
+  n?.mtime != null ? Math.floor(n.mtime / 86400) : undefined
 
 /** Where an inferred owner came from: the pipeline signal that attributed
  * `prefix` (an ancestor-or-self of the node) to the user, and its evidence
@@ -35,10 +50,10 @@ export const SOURCE_LABELS: Record<string, string> = {
   'iris-path': 'an iris job path',
 }
 
-/** Full class mix of a node: cb plus the implied STANDARD remainder. */
-export const classMix = (n: Pick<TreeNode, 'b' | 'cb'>): Record<string, number> => {
-  const cold = Object.values(n.cb ?? {}).reduce((a, b) => a + b, 0)
-  return { ...(n.b > cold && { 1: n.b - cold }), ...n.cb }
+/** Full class mix of a node: `class_bytes` plus the implied STANDARD remainder. */
+export const classMix = (n: Pick<TreeNode, 'bytes' | 'class_bytes'>): Record<string, number> => {
+  const cold = Object.values(n.class_bytes ?? {}).reduce((a, b) => a + b, 0)
+  return { ...(n.bytes > cold && { 1: n.bytes - cold }), ...n.class_bytes }
 }
 
 export interface UserInfo {
@@ -46,17 +61,18 @@ export interface UserInfo {
   b: number  // total attributed bytes
 }
 
-/** Bytes some person owns under a node (Σ of its user slices). */
-export const userBytes = (n: Pick<TreeNode, 'us'>): number => (n.us ?? []).reduce((s, [, b]) => s + b, 0)
+/** Bytes some person owns under a node (Σ of its owner slices). */
+export const userBytes = (n: Pick<TreeNode, 'owners'>): number => (n.owners ?? []).reduce((s, [, b]) => s + b, 0)
 /** Bytes nobody owns under a node — the unowned pool. Ownership has one
  * axis (a person or nobody); there is no group facet. */
-export const unownedBytes = (n: Pick<TreeNode, 'b' | 'us' | 'ou'>): number => Math.max(0, n.b - userBytes(n) - (n.ou ?? 0))
+export const unownedBytes = (n: Pick<TreeNode, 'bytes' | 'owners' | 'unknown_owner_bytes'>): number =>
+  Math.max(0, n.bytes - userBytes(n) - (n.unknown_owner_bytes ?? 0))
 
 export interface AgeRow {
   d: number   // listing day, epoch days (GCS: created; S3/R2/local: modified)
   d1?: string // top-level dir (whole-fleet age.json only; the per-path `age` index omits it — specs/done/age-index.md)
   u?: string  // owning user
-  a?: number  // last-read epoch day of the row's dir (access logs; subtree MAX, like TreeNode.a); absent = no read observed
+  a?: number  // last-read epoch day of the row's dir (access logs; subtree MAX, like TreeNode.last_read); absent = no read observed
   b: number
   o: number
 }

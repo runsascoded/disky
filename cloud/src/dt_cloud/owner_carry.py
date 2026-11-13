@@ -1,11 +1,11 @@
-"""gcs: `owner_prefix_aggs` carried across an interval-store compaction.
+"""`owner_prefix_aggs` carried across an interval-store compaction.
 
 A scan's priced owner prefixes are keyed by the generation's tag (`site/functions/_lib/ownerTotals.ts` `indexTag`), so
 `CURRENT.json` moving to a compaction's new generation would send every scoped series back to first-time pricing. A body
 holds a scan's own numbers (`{v, buckets, asked, aggs}`: no stamps, group references or versions), and a compaction
 answers every scan as its source does, so the rows are copied to the new tag before anything points at it.
 
-Opt-in: `owner_carry` in `job/interval-store.json` (`compact -O`), `promote -O`. When it runs:
+Opt-in: `owner_carry` in the deployment's interval profile (`$INTERVAL_STORE_PROFILE`; `compact -O`), `promote -O`. When it runs:
 
 - `preflight`, before the fold: an unreachable D1, or a generation with no rows under the tag this module writes, stops
   the job then, not hours in.
@@ -37,7 +37,7 @@ RETIRE_ROWS = 32
 
 def tag(gen: str) -> str:
     """What the site's `indexTag` writes for an owner read of `gen`: mode `pq`, `iv:<gen>`, sliced. A generation re-cut in
-    place (`INTERVAL_STORE_REV`, `@<rev>` after the name; gcs sets none) is another tag, which `preflight` refuses."""
+    place (`INTERVAL_STORE_REV`, `@<rev>` after the name) is another tag, which `preflight` refuses."""
     return f"pq:iv:{gen}:s"
 
 

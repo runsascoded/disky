@@ -10,7 +10,7 @@ import { useUnits } from './units'
 
 /** Who holds a node's bytes, sorted by share (the scan's attribution). */
 export const ownerShares = (node: TreeNode): [string, number][] =>
-  node.us && node.b > 0 ? [...node.us].sort((x, y) => y[1] - x[1]) : []
+  node.owners && node.bytes > 0 ? [...node.owners].sort((x, y) => y[1] - x[1]) : []
 
 const TOP = 8
 
@@ -32,10 +32,10 @@ export function OwnerBar({ node, userIdx, width = 110, note, onPickUser }: {
   const { fmtBytes } = useUnits()
   const [all, setAll] = useState(false)
   const shares = ownerShares(node)
-  if (shares.length === 0 && !node.ou) return null
+  if (shares.length === 0 && !node.unknown_owner_bytes) return null
   const unowned = unownedBytes(node)
   const color = (u: string) => (userIdx ? userColor(u, userIdx) : 'var(--ink-3)')
-  const pct = (b: number) => Math.round((100 * b) / node.b)
+  const pct = (b: number) => Math.round((100 * b) / node.bytes)
   const rows = all ? shares : shares.slice(0, TOP)
   const tip = (
     <span className="own-tip">
@@ -51,15 +51,15 @@ export function OwnerBar({ node, userIdx, width = 110, note, onPickUser }: {
       {unowned > 0 && (
         <div className="row"><i style={{ background: 'var(--t-unattr)' }} />unattributed<span className="n">{fmtBytes(unowned)} · {pct(unowned)}%</span></div>
       )}
-      {node.ou ? <div className="row"><i style={{ background: 'var(--other)' }} />owner detail unavailable<span className="n">{fmtBytes(node.ou)} · {pct(node.ou)}%</span></div> : null}
+      {node.unknown_owner_bytes ? <div className="row"><i style={{ background: 'var(--other)' }} />owner detail unavailable<span className="n">{fmtBytes(node.unknown_owner_bytes)} · {pct(node.unknown_owner_bytes)}%</span></div> : null}
       <div className="how">Attribution comes from paths, W&B run metadata and sidecar files; assigning overrides it.{onPickUser ? ' Click a person to show only their data.' : ''}</div>
     </span>
   )
   return (
     <Tooltip content={tip} pinnable>
       <span className="own-bar" style={{ width }} aria-label="ownership distribution">
-        {shares.map(([u, b]) => <i key={u} style={{ width: `${(100 * b) / node.b}%`, background: color(u) }} />)}
-        {node.ou ? <i style={{ width: `${(100 * node.ou) / node.b}%`, background: 'var(--other)' }} /> : null}
+        {shares.map(([u, b]) => <i key={u} style={{ width: `${(100 * b) / node.bytes}%`, background: color(u) }} />)}
+        {node.unknown_owner_bytes ? <i style={{ width: `${(100 * node.unknown_owner_bytes) / node.bytes}%`, background: 'var(--other)' }} /> : null}
       </span>
     </Tooltip>
   )
@@ -69,11 +69,11 @@ export function OwnerBar({ node, userIdx, width = 110, note, onPickUser }: {
 export function ClassBar({ node, width = 110 }: { node: TreeNode; width?: number }) {
   const mix = classMix(node)
   const rows = Object.entries(mix).filter(([, b]) => b > 0).sort((a, b) => +a[0] - +b[0])
-  if (!node.b || rows.length === 0) return null
+  if (!node.bytes || rows.length === 0) return null
   return (
     <Tooltip content={<ClassMixTip mix={mix} />} pinnable>
       <span className="own-bar class-bar" style={{ width }} aria-label="storage-class distribution">
-        {rows.map(([c, b]) => <i key={c} title={CLASS_NAMES[c]} style={{ width: `${(100 * b) / node.b}%`, background: CLASS_COLORS[c] ?? 'var(--other)' }} />)}
+        {rows.map(([c, b]) => <i key={c} title={CLASS_NAMES[c]} style={{ width: `${(100 * b) / node.bytes}%`, background: CLASS_COLORS[c] ?? 'var(--other)' }} />)}
       </span>
     </Tooltip>
   )

@@ -323,7 +323,7 @@ describe('owner prefix history', () => {
 })
 
 describe('owner totals on a generation the rows were carried to (`owner_carry.py`)', () => {
-  // Past `HIST_PRICE_MAX`, as gcs's ledger: a fold prices per scan, from `owner_prefix_aggs`. The 65 others aren't in the store.
+  // Past `HIST_PRICE_MAX`, as a big ledger: a fold prices per scan, from `owner_prefix_aggs`. The 65 others aren't in the store.
   const others = Array.from({ length: 65 }, (_, i) => i + 10)
   const LEDGER = `
     INSERT INTO actions (id, actor, ts, scan, pattern, set_owner, owner) VALUES
@@ -396,9 +396,9 @@ const PATHS = ['', 'bk', 'bk/m', 'bk/m/deep', 'bk/nest', 'bk/flat']
  *  per-scan reader takes the kind of whichever row it merged last (`file` here). Every other field of
  *  the tile is the same. */
 function storeKinds<T>(v: T): T {
-  type N = { n?: string; k?: string; c?: N[] }
-  const fix = (n: N): N => ({ ...n, ...(n.n === 'twin' ? { k: 'dir' } : {}), ...(n.c ? { c: n.c.map(fix) } : {}) })
-  return (v && typeof v === 'object' && 'n' in (v as object) ? fix(v as N) : v) as T
+  type N = { name?: string; kind?: string; children?: N[] }
+  const fix = (n: N): N => ({ ...n, ...(n.name === 'twin' ? { kind: 'dir' } : {}), ...(n.children ? { children: n.children.map(fix) } : {}) })
+  return (v && typeof v === 'object' && 'name' in (v as object) ? fix(v as N) : v) as T
 }
 const SCOPES: { lens?: { key: string }; owner?: OwnerScope }[] = [
   { lens: { key: 'alice' } }, { lens: { key: 'bob' } }, { lens: { key: 'carol' } },
@@ -463,7 +463,7 @@ for (const GEN of ['g2', 'g5'] as const) {
           const o = { ...base, from, to, path: '', top: 500, ...scope }
           // A lens with nothing on either side is a 404 from both.
           const shape = (d: Awaited<ReturnType<typeof buildDiff>> | string) => typeof d === 'string' ? d
-            : { rows: d.rows.map(r => r.p.split('/').pop() === 'twin' ? { ...r, k: 'dir' } : r), totals: [d.total_a, d.total_b, d.objects_a, d.objects_b] }
+            : { rows: d.rows.map(r => r.path.split('/').pop() === 'twin' ? { ...r, kind: 'dir' } : r), totals: [d.bytes_before, d.bytes_after, d.objects_before, d.objects_after] }
           // The store's read first: a per-scan diff that throws on one side leaves the other side's reads in flight.
           const [got, gets] = await perScanGets(() => buildDiff(ivg(), o).catch(e => `${(e as Error).name}: ${(e as Error).message}`))
           const want = await buildDiff(perScan, o).catch(e => `${(e as Error).name}: ${(e as Error).message}`)
@@ -502,9 +502,9 @@ for (const GEN of ['g2', 'g5'] as const) {
     let n0 = 0
     beforeAll(async () => { envs = await seed(ledger); n0 = r2Reads.length })
     const lens = { key: 'carol' }
-    type N = { n: string; k: string; b: number; o: number; c?: N[] }
-    const shape = (n: N): unknown => [n.n, n.k, n.b, n.o, ...(n.c ? [n.c.map(shape)] : [])]
-    const byName = (n: N): N => ({ ...n, ...(n.c ? { c: [...n.c].sort((x, y) => (x.n < y.n ? -1 : 1)).map(byName) } : {}) })
+    type N = { name: string; kind: string; bytes: number; objects: number; children?: N[] }
+    const shape = (n: N): unknown => [n.name, n.kind, n.bytes, n.objects, ...(n.children ? [n.children.map(shape)] : [])]
+    const byName = (n: N): N => ({ ...n, ...(n.children ? { children: [...n.children].sort((x, y) => (x.name < y.name ? -1 : 1)).map(byName) } : {}) })
     const tiles = FILES.map(([p, b]) => [p.split('/').pop(), 'file', b, 1]).sort((x, y) => (x[0]! < y[0]! ? -1 : 1))
 
     it('values an unread region once: its objects from the assignment, never added again to it or its ancestors', async () => {
@@ -543,7 +543,7 @@ for (const GEN of ['g2', 'g5'] as const) {
           for (const minArea of [12, 400]) {
             const o = { ...base, minArea, from, to, path, top: 500 }
             const shape = (d: Awaited<ReturnType<typeof buildDiff>> | string) => typeof d === 'string' ? d
-              : { rows: d.rows.map(r => r.p.split('/').pop() === 'twin' ? { ...r, k: 'dir' } : r), totals: [d.total_a, d.total_b, d.objects_a, d.objects_b], lookups: d.lookups }
+              : { rows: d.rows.map(r => r.path.split('/').pop() === 'twin' ? { ...r, kind: 'dir' } : r), totals: [d.bytes_before, d.bytes_after, d.objects_before, d.objects_after], lookups: d.lookups }
             const [got, gets] = await perScanGets(() => buildDiff(ivg(), o).catch(e => `${(e as Error).name}: ${(e as Error).message}`))
             const want = await buildDiff(perScan, o).catch(e => `${(e as Error).name}: ${(e as Error).message}`)
             expect({ o, got: shape(got), gets }).toEqual({ o, got: shape(want), gets: [] })
@@ -574,7 +574,7 @@ describe('interval store g5: a lens read joining a cancelled request\'s frozen r
     ['view', e => buildView(e, { ...base, date: S3, path: '', lens }), a => storeKinds((a as Awaited<ReturnType<typeof buildView>>).tree)],
     ['diff', e => buildDiff(e, { ...base, from: S1, to: S3, path: '', top: 500, lens }), a => {
       const d = a as Awaited<ReturnType<typeof buildDiff>>
-      return { rows: d.rows.map(r => r.p.split('/').pop() === 'twin' ? { ...r, k: 'dir' } : r), totals: [d.total_a, d.total_b, d.objects_a, d.objects_b] }
+      return { rows: d.rows.map(r => r.path.split('/').pop() === 'twin' ? { ...r, kind: 'dir' } : r), totals: [d.bytes_before, d.bytes_after, d.objects_before, d.objects_after] }
     }],
   ]
   const join0 = { ...IV_JOIN }
@@ -623,7 +623,7 @@ describe('interval store g5: the requests after a cancelled read frozen at sever
   const lens = { key: 'alice' }
   const view = (e: Env) => buildView(e, { ...base, date: S3, path: '', lens }).then(a => storeKinds(a.tree))
   const diff = (e: Env) => buildDiff(e, { ...base, from: S1, to: S3, path: '', top: 500, lens }).then(d => ({
-    rows: d.rows.map(r => r.p.split('/').pop() === 'twin' ? { ...r, k: 'dir' } : r), totals: [d.total_a, d.total_b, d.objects_a, d.objects_b],
+    rows: d.rows.map(r => r.path.split('/').pop() === 'twin' ? { ...r, kind: 'dir' } : r), totals: [d.bytes_before, d.bytes_after, d.objects_before, d.objects_after],
   }))
   /** A store whose first request freezes at two stages at once: its prefetch of the sibling sort's footers (the
    *  base's and the run's, `slices-bytotal`), and its read of the run's row group (`deltas/…/slices.parquet`). */
@@ -696,7 +696,7 @@ describe('interval store g5: the requests after a cancelled read frozen at sever
 })
 
 describe('/api/series a window of scans at a time', () => {
-  type Body = { path: string; owner?: OwnerScope; lens?: string; chunks?: number; points: { date: string; b: number; o: number }[]; error?: string }
+  type Body = { path: string; owner?: OwnerScope; lens?: string; chunks?: number; points: { date: string; bytes: number; objects: number }[]; error?: string }
   const get = async (env: Env, q: string): Promise<{ status: number; body: Body }> => {
     const r = await seriesGet({ request: new Request(`http://localhost/api/series?${q}`), env } as never)
     return { status: r.status, body: await r.json() as Body }

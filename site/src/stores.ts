@@ -190,8 +190,8 @@ export const DEFAULT_STORE = STORES[0]
 export const DUPS: boolean = import.meta.env.VITE_DUPS === '1'
 
 /** Display thresholds can hide real small buckets; they do not invalidate routes. */
-export function knownBucket(name: string, store: Store, visible: { n: string }[]): boolean {
-  return store.buckets.includes(name) || visible.some(row => row.n === name)
+export function knownBucket(name: string, store: Store, visible: { name: string }[]): boolean {
+  return store.buckets.includes(name) || visible.some(row => row.name === name)
 }
 
 export const storeDefaultColor = (store: Pick<Store, 'owners' | 'defaultColor'>): ColorMode =>

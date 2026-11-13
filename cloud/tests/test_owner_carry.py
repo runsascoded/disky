@@ -1,4 +1,4 @@
-"""gcs's owner-price carry (`owner_carry`): `owner_prefix_aggs` rows copied to a compaction's new generation before anything
+"""The owner-price carry (`owner_carry`): `owner_prefix_aggs` rows copied to a compaction's new generation before anything
 points at it, so `CURRENT` moving doesn't send every scoped series back to first-time pricing. A sqlite stand-in for D1
 (`d1_db`, the branch's `schema.sql`) behind `index_footer._d1_query`; compactions are real folds of the small store world."""
 from __future__ import annotations
@@ -344,11 +344,15 @@ def test_without_the_setting_the_job_and_the_generation_are_what_they_were(d1, t
     d1.seed(OLD, SCANS[:2])
     carried_dir, carried = _world(tmp_path / "carried")
     ar.run_compaction(carried, ic.compactor(RG), "g", carried_dir, tmp_path / "carried" / "w", carry=carry(), **KW)
-    # A scan's entry names its source's path, under each world's own `tmp_path`.
+    # A scan's entry names its source's path, under each world's own `tmp_path`; a served sort's sidecar records its
+    # wall time (`s`), compared without it.
     gen_of = lambda d: d / ist.PREFIX / "g.c001"  # noqa: E731
-    # `served/<sort>.json` and `stats.json` record each cut's seconds; every data file and group index must match.
-    bytes_of = lambda d: {k: v for k, v in ar.md5s(gen_of(d)).items() if k != "scans.json" and not re.fullmatch(r"served/[^/]+\.json", k)}  # noqa: E731
+    timed = lambda k: k.startswith("served/") and k.endswith(".json")  # noqa: E731
+    bytes_of = lambda d: {k: v for k, v in ar.md5s(gen_of(d)).items() if k != "scans.json" and not timed(k)}  # noqa: E731
+    sidecars = lambda d: {k: {f: x for f, x in json.loads((gen_of(d) / k).read_text()).items() if f != "s"}  # noqa: E731
+                          for k in ar.md5s(gen_of(d)) if timed(k)}
     assert bytes_of(carried_dir) == bytes_of(plain_dir)
+    assert sidecars(carried_dir) == sidecars(plain_dir)
     assert (gen_of(carried_dir) / "scans.json").read_text().replace("/carried/", "/plain/") == (gen_of(plain_dir) / "scans.json").read_text()
 
 

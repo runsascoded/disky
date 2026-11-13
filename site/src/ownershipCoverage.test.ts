@@ -4,23 +4,23 @@ import { reaggregate } from './filterTree'
 
 describe('ownership coverage', () => {
   it('recomputes unavailable ownership from the retained children', () => {
-    const known = { n: 'known', b: 30, o: 1, us: [['alice', 20] as [string, number]] }
-    const unknown = { n: 'unknown', b: 70, o: 1, ou: 50 }
+    const known = { name: 'known', bytes: 30, objects: 1, owners: [['alice', 20] as [string, number]] }
+    const unknown = { name: 'unknown', bytes: 70, objects: 1, unknown_owner_bytes: 50 }
     expect([
-      reaggregate({ n: 'root', b: 100, o: 2, ou: 80 }, [known]),
-      reaggregate({ n: 'root', b: 100, o: 2, ou: 80 }, [unknown]),
+      reaggregate({ name: 'root', bytes: 100, objects: 2, unknown_owner_bytes: 80 }, [known]),
+      reaggregate({ name: 'root', bytes: 100, objects: 2, unknown_owner_bytes: 80 }, [unknown]),
     ]).toEqual([
-      { n: 'root', b: 30, o: 1, us: [['alice', 20]], d: undefined, c: [known] },
-      { n: 'root', b: 70, o: 1, ou: 50, us: undefined, d: undefined, c: [unknown] },
+      { name: 'root', bytes: 30, objects: 1, owners: [['alice', 20]], mtime: undefined, children: [known] },
+      { name: 'root', bytes: 70, objects: 1, unknown_owner_bytes: 50, owners: undefined, mtime: undefined, children: [unknown] },
     ])
   })
 
   it('distinguishes unknown bytes from known unowned bytes, including a partly attributed rollup', () => {
     expect([
-      unownedBytes({ b: 100 }),
-      unownedBytes({ b: 100, ou: 100 }),
-      unownedBytes({ b: 100, us: [['alice', 30]], ou: 50 }),
-      unownedBytes({ b: 100, us: [['alice', 100]] }),
+      unownedBytes({ bytes: 100 }),
+      unownedBytes({ bytes: 100, unknown_owner_bytes: 100 }),
+      unownedBytes({ bytes: 100, owners: [['alice', 30]], unknown_owner_bytes: 50 }),
+      unownedBytes({ bytes: 100, owners: [['alice', 100]] }),
     ]).toEqual([100, 0, 20, 0])
   })
 })

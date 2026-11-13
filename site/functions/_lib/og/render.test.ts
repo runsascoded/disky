@@ -50,11 +50,11 @@ describe('svgToPng', () => {
   it('renders a synthetic growth/shrink comparison through the real card renderer', async () => {
     const { mkdir, writeFile } = await fsp()
     const data = diffCardData({ name: 'CW diff demo (synthetic)', scheme: 's3://' }, 'checkpoints · changes', { path: 'checkpoints' }, 'full', '2026-09-17T0000', '2026-09-28T1200', {
-      total_a: 100 * T, total_b: 110 * T, objects_a: 10, objects_b: 11, expansions: 0,
+      bytes_before: 100 * T, bytes_after: 110 * T, objects_before: 10, objects_after: 11, expansions: 0,
       truncated: false, threshold: 1, tier: 'path', lookups: 0, lookups_capped: false,
       rows: [
-        { p: 'new-training', d: 1, k: 'dir', s: 'changed', a: 40 * T, b: 70 * T, oa: 4, ob: 7 },
-        { p: 'old-checkpoints', d: 1, k: 'dir', s: 'changed', a: 60 * T, b: 40 * T, oa: 6, ob: 4 },
+        { path: 'new-training', depth: 1, kind: 'dir', status: 'changed', bytes_before: 40 * T, bytes_after: 70 * T, objects_before: 4, objects_after: 7 },
+        { path: 'old-checkpoints', depth: 1, kind: 'dir', status: 'changed', bytes_before: 60 * T, bytes_after: 40 * T, objects_before: 6, objects_after: 4 },
       ],
     })
     const png = svgToPng(cardSvg(data), fonts)
@@ -82,12 +82,12 @@ describe('svgToPng', () => {
   it('renders each selected map palette through the real SVG and WASM pipeline', async () => {
     const { mkdir, writeFile } = await fsp()
     await mkdir('tmp', { recursive: true })
-    const tree: TreeNode = { n: 'demo', b: 100, o: 10, c: [
-      { n: 'checkpoints', b: 70, o: 7, c: [
-        { n: 'old', b: 40, o: 4, d: 20000, a: 20100, us: [['ann', 40]] },
-        { n: 'new', b: 30, o: 3, d: 20100 },
+    const tree: TreeNode = { name: 'demo', bytes: 100, objects: 10, children: [
+      { name: 'checkpoints', bytes: 70, objects: 7, children: [
+        { name: 'old', bytes: 40, objects: 4, mtime: 20000 * 86400, last_read: 20100, owners: [['ann', 40]] },
+        { name: 'new', bytes: 30, objects: 3, mtime: 20100 * 86400 },
       ] },
-      { n: 'data', b: 30, o: 3, d: 20050, a: 20090, us: [['ann', 30]] },
+      { name: 'data', bytes: 30, objects: 3, mtime: 20050 * 86400, last_read: 20090, owners: [['ann', 30]] },
     ] }
     const sizes: [number, number][] = []
     for (const mode of ['tree', 'date', 'read', 'user'] as const) {

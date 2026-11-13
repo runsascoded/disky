@@ -91,7 +91,7 @@ describe('LoadFailure', () => {
 
 describe('mapSlot: the asked-for view\'s failure outranks a held tree', () => {
   it('tree → map; failed → failed (held or not); loading → the held tree, else the skeleton', () => {
-    const tree = { n: 'root' }, held = { n: 'previous' }, err = apiError(500, INCIDENT)
+    const tree = { name: 'root' }, held = { name: 'previous' }, err = apiError(500, INCIDENT)
     expect([
       mapSlot(tree, held, null), mapSlot(tree, held, err),
       mapSlot(null, held, err), mapSlot(null, null, err),
