@@ -7,6 +7,7 @@ import type { D1Database } from "@cloudflare/workers-types"
 import { type Ctx, type Env as AuthEnv, json, requireAdmin } from "../../_lib/auth.js"
 import { batchConfig, type BatchEnv, notConfigured } from "../../_lib/batchConfig.js"
 import { jobStamp, runMountPath, submitBatch, sweepBatchSpec } from "../../_lib/cwBatch.js"
+import { sweepsOff, SWEEPS_OFF } from "../../_lib/dispatch.js"
 import { gcpToken } from "../../_lib/gcp.js"
 import { auditRunControl, NO_SHAPE, prefixShape } from "../../_lib/plans.js"
 
@@ -25,6 +26,7 @@ interface RunRow {
 export const onRequestPost = async (ctx: Ctx & { env: Env }): Promise<Response> => {
   const gated = await requireAdmin(ctx)
   if (gated instanceof Response) return gated
+  if (sweepsOff(ctx.env)) return json({ error: SWEEPS_OFF }, 403)
   if (!ctx.env.DB) return json({ error: "not configured (no D1 binding)" }, 503)
   if (!ctx.env.GCP_SA_KEY) return json({ error: "not configured (no GCP_SA_KEY)" }, 503)
   if (!ctx.env.JOB_SA) return json({ error: "not configured (no JOB_SA)" }, 503)

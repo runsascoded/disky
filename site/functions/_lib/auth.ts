@@ -201,7 +201,7 @@ export interface Env {
   SNAPSHOTS_SUBDIR?: string
   /** Dedicated SA key (Batch submit + actAs the job SA) for the sweep dispatch bridge. */
   GCP_SA_KEY?: string
-  /** `"0"`: no sweep or undo dispatch from this environment (`_lib/dispatch.ts` `sweepsOff`). */
+  /** `"0"`: no sweep, undo or purge dispatch, sweep stop or digest re-apply from this environment (`_lib/dispatch.ts` `sweepsOff`). */
   SWEEP_DISPATCH?: string
   /** The service account dispatched Batch jobs run as (a `[vars]` entry). */
   JOB_SA?: string
