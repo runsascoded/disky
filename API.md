@@ -13,15 +13,15 @@ Every write is authenticated as **you** by a personal bearer token.
 - **Browser:** sign in at <https://gcs.oa.dev> with your `@openathena.ai` (or whitelisted) email, then open the avatar menu (top-right) → **Agent / CLI Token…** to mint (or rotate) it.
 - **API:** `POST /api/token` from a signed-in browser session mints (or rotates) it; the raw token is shown **once**. `GET /api/token` reports status (never the token); `DELETE /api/token` revokes it.
 
-**If you're an agent and have no token, ask your human for one** — e.g. *"Please open https://gcs.oa.dev, click your avatar (top-right) → Agent / CLI Token…, mint a token, and paste it here (or export it as `GCS_USAGE_TOKEN`)."* If they can't sign in, they request access from the sign-in page. Never ask for their password or a browser session cookie; the token is the only credential an agent needs, and they can revoke it from the same menu.
+**If you're an agent and have no token, ask your human for one** — e.g. *"Please open https://gcs.oa.dev, click your avatar (top-right) → Agent / CLI Token…, mint a token, and paste it here (or export it as `SITE_TOKEN`)."* If they can't sign in, they request access from the sign-in page. Never ask for their password or a browser session cookie; the token is the only credential an agent needs, and they can revoke it from the same menu.
 
 The token carries the `gcs` and `gcs:assign` scopes (least privilege: it can read, stage and assign, not administer). Revoking it is instant. Share links (guest access) can't assign.
 
 Automated readers can instead use an independently revocable `gcs:read` grant: reads only, no staging, assigning or administration. The daily snapshot job uses a dedicated Secret Manager credential, separate from the sheet mirror; operators provision it with `dt-cloud job-token` as described in [GCS operations][operations]. Do not reuse a personal write-capable token for a read-only job.
 
 ```bash
-export GCS_USAGE_TOKEN=…                  # the token you copied
-export GCS_USAGE_URL=https://gcs.oa.dev   # the site
+export SITE_TOKEN=…                  # the token you copied
+export SITE_URL=https://gcs.oa.dev   # the site
 ```
 
 Directory prefixes are `gs://marin-<bucket>/<dir>/…/` (trailing slash), in one of the six `marin-*` buckets. An exact object path has no appended slash and carries `kind: 'object'` in supported write operations. The read APIs' `path=` is the same path without scheme or trailing slash (`marin-us-east5/checkpoints`; empty = all buckets).
@@ -30,7 +30,7 @@ Directory prefixes are `gs://marin-<bucket>/<dir>/…/` (trailing slash), in one
 
 ## 2. HTTP API
 
-All under `$GCS_USAGE_URL`. Reads are open to any signed-in viewer; writes need `Authorization: Bearer $GCS_USAGE_TOKEN`. A scan's id is `YYYY-MM-DD`, or `YYYY-MM-DDTHHMM` when a day has more than one scan; `GET /data/scans.json` lists them, newest first. `date=` (and `/api/diff`'s `from=`/`to=`) take an exact scan id from that list; an id naming no indexed scan is a `404`. Where a route takes `date=`, `d=<slug>` instead names the latest indexed scan matching it: `261009` a day, `26100912` an hour, `2610091236` a minute (`/api/diff` takes exact ids only); a slug matching nothing is a `404`, never the nearest scan.
+All under `$SITE_URL`. Reads are open to any signed-in viewer; writes need `Authorization: Bearer $SITE_TOKEN`. A scan's id is `YYYY-MM-DD`, or `YYYY-MM-DDTHHMM` when a day has more than one scan; `GET /data/scans.json` lists them, newest first. `date=` (and `/api/diff`'s `from=`/`to=`) take an exact scan id from that list; an id naming no indexed scan is a `404`. Where a route takes `date=`, `d=<slug>` instead names the latest indexed scan matching it: `261009` a day, `26100912` an hour, `2610091236` a minute (`/api/diff` takes exact ids only); a slug matching nothing is a `404`, never the nearest scan.
 
 ### Identity
 
@@ -96,8 +96,8 @@ Human-facing pages, same data: [`/staged`](https://gcs.oa.dev/staged) is the del
 `bash` + `curl` + `jq`. Run the setup once; every recipe after it assumes it.
 
 ```bash
-gu() { curl -sS --fail-with-body -H "Authorization: Bearer $GCS_USAGE_TOKEN" "$@"; }
-DATE=$(gu "$GCS_USAGE_URL/data/scans.json" | jq -r '.[0]')   # the latest scan
+gu() { curl -sS --fail-with-body -H "Authorization: Bearer $SITE_TOKEN" "$@"; }
+DATE=$(gu "$SITE_URL/data/scans.json" | jq -r '.[0]')   # the latest scan
 # A subtree's nodes as rows with full paths (folds dropped), biggest first: jq -f rows.jq
 cat > rows.jq <<'EOF'
 def rows($p): (.children // [])[] | select(.folded == null)
@@ -110,30 +110,30 @@ EOF
 **Who am I / my owner id**
 
 ```bash
-gu "$GCS_USAGE_URL/api/me" | jq '{ email, user, scopes }'
+gu "$SITE_URL/api/me" | jq '{ email, user, scopes }'
 ```
 
 **My estate, and my biggest paths**
 
 ```bash
 # Owned bytes + class mix, and the prefixes assigned to you, biggest first
-gu "$GCS_USAGE_URL/api/estate?date=$DATE&user=me" \
+gu "$SITE_URL/api/estate?date=$DATE&user=me" \
   | jq '{ user, bytes, objects, mix, assignments: (.assignments | sort_by(-.bytes)) }'
 # Your bytes (assigned or inferred) two levels deep under a path; drill by changing `path`
-gu "$GCS_USAGE_URL/api/subtree?date=$DATE&path=&lens=user:me&depth=2&w=4096&h=4096" | jq -f rows.jq
+gu "$SITE_URL/api/subtree?date=$DATE&path=&lens=user:me&depth=2&w=4096&h=4096" | jq -f rows.jq
 ```
 
 **The biggest unowned paths under a prefix**
 
 ```bash
 # bare `o` = the unowned pool (`o=*` = the owned pool)
-gu "$GCS_USAGE_URL/api/subtree?date=$DATE&path=marin-us-east5/checkpoints&o&depth=2&w=4096&h=4096" | jq -f rows.jq
+gu "$SITE_URL/api/subtree?date=$DATE&path=marin-us-east5/checkpoints&o&depth=2&w=4096&h=4096" | jq -f rows.jq
 ```
 
 **Stage prefixes for deletion, with a note**
 
 ```bash
-gu -X POST "$GCS_USAGE_URL/api/plans/stage" -H 'Content-Type: application/json' \
+gu -X POST "$SITE_URL/api/plans/stage" -H 'Content-Type: application/json' \
   -d '{"prefixes":["gs://marin-us-east5/scratch/old-run/","gs://marin-us-central2/tmp/2025/"],"note":"superseded by run 42"}' \
   | jq '{ plan_id, staged, covered, absorbed, gone }'
 ```
@@ -141,18 +141,18 @@ gu -X POST "$GCS_USAGE_URL/api/plans/stage" -H 'Content-Type: application/json' 
 **Unstage**
 
 ```bash
-PLAN=$(gu "$GCS_USAGE_URL/api/plans/staged" | jq -r '.plan.id')
-gu "$GCS_USAGE_URL/api/plans/staged" | jq -r '.items[] | [.prefix, .added_by, .note] | @tsv'   # what's staged
-gu -X DELETE "$GCS_USAGE_URL/api/plans/$PLAN/items" -H 'Content-Type: application/json' \
+PLAN=$(gu "$SITE_URL/api/plans/staged" | jq -r '.plan.id')
+gu "$SITE_URL/api/plans/staged" | jq -r '.items[] | [.prefix, .added_by, .note] | @tsv'   # what's staged
+gu -X DELETE "$SITE_URL/api/plans/$PLAN/items" -H 'Content-Type: application/json' \
   -d '{"prefixes":["gs://marin-us-east5/scratch/old-run/"]}'
 ```
 
 **Assign: to me, to someone, or clear**
 
 ```bash
-assign() { gu -X POST "$GCS_USAGE_URL/api/actions" -H 'Content-Type: application/json' -d "$1"; }
+assign() { gu -X POST "$SITE_URL/api/actions" -H 'Content-Type: application/json' -d "$1"; }
 assign '{"pattern":"gs://marin-us-east5/checkpoints/my-run/","owner":"@me","memo":"my sweep"}'
-gu "$GCS_USAGE_URL/api/owners?date=$DATE" | jq -r '.users | keys[]'   # the user ids
+gu "$SITE_URL/api/owners?date=$DATE" | jq -r '.users | keys[]'   # the user ids
 assign '{"pattern":"gs://marin-us-east5/checkpoints/their-run/","owner":"<id>","memo":"their W&B run"}'
 assign '{"pattern":"gs://marin-us-east5/checkpoints/shared/","owner":null,"memo":"shared, no single owner"}'
 ```
@@ -162,8 +162,8 @@ The newest assignment on a prefix or any ancestor wins, so assigning (or clearin
 **What did run X delete?**
 
 ```bash
-gu "$GCS_USAGE_URL/api/plans/staged" | jq -r '.runs[] | select(.mode == "real") | [.run_id, .deleted_bytes, ((.undo_deadline | numbers | todate) // "-")] | @tsv'
-gu -G "$GCS_USAGE_URL/api/plans/run" --data-urlencode "id=<run_id>" \
+gu "$SITE_URL/api/plans/staged" | jq -r '.runs[] | select(.mode == "real") | [.run_id, .deleted_bytes, ((.undo_deadline | numbers | todate) // "-")] | @tsv'
+gu -G "$SITE_URL/api/plans/run" --data-urlencode "id=<run_id>" \
   | jq -r '.bands[] | [.prefix, .bytes, .objects, .undone_objects] | @tsv'
 ```
 
@@ -171,8 +171,8 @@ gu -G "$GCS_USAGE_URL/api/plans/run" --data-urlencode "id=<run_id>" \
 
 ```bash
 P=gs://marin-us-east5/checkpoints/my-run/
-for r in $(gu "$GCS_USAGE_URL/api/plans/staged" | jq -r '.runs[] | select(.mode == "real") | .run_id'); do
-  gu -G "$GCS_USAGE_URL/api/plans/run" --data-urlencode "id=$r" | jq -r --arg p "$P" \
+for r in $(gu "$SITE_URL/api/plans/staged" | jq -r '.runs[] | select(.mode == "real") | .run_id'); do
+  gu -G "$SITE_URL/api/plans/run" --data-urlencode "id=$r" | jq -r --arg p "$P" \
     '.run as $run | .bands[] | .prefix as $b | select(($b | startswith($p)) or ($p | startswith($b)))
      | [$run.run_id, $b, .bytes, (($run.undo_deadline | numbers | todate) // "-")] | @tsv'
 done
