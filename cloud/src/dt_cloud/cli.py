@@ -751,6 +751,26 @@ def probe_report(last: int, prefix: str) -> None:
         print(f"{label:{width}}  " + "  ".join(f"{x if x is not None else '-':>10}" for x in xs) + f"  {int(median(got)) if got else '-':>7}")
 
 
+@main.command("session-latency")
+@option("-c", "--config", default=None, type=Path, help="The site's wrangler config (default: `site/wrangler.toml`)")
+@option("-d", "--d1", "d1", required=True, help="The deployment's D1 (read-only `wrangler d1 execute --remote`, run from site/)")
+@option("-n", "--days", default=7, type=int, help="The window: batches received in the last N days (default 7)")
+@option("-r", "--route", default=None, help="One route (`/api/series`): its numbers per UTC day instead of every route's")
+def session_latency(config: Path | None, d1: str, days: int, route: str | None) -> None:
+    """What people waited for the API: the session log's answered requests (browser wall ms, `@open-athena/auth`'s
+    `api` events), per route (count, p50, p90, max; most requested first) or, with `-r`, that route per day."""
+    from .d1_schema import site_dir
+    from .session_latency import fetch_batches, render, samples, table
+
+    ss = samples(fetch_batches(d1, days, config=config, site=site_dir()))
+    if route:
+        ss = [s for s in ss if s.route == route]
+    if not ss:
+        raise SystemExit(f"session-latency: no answered requests{f' to {route}' if route else ''} in the last {days} days")
+    for line in render(table(ss, by="day" if route else "route"), "day" if route else "route"):
+        print(line)
+
+
 @main.command("bench-truth")
 @option("-a", "--append", is_flag=True, help="Add to (or replace queries in) an existing truth set at `-o` instead of rewriting its summary")
 @option("-c", "--check", multiple=True, help="Also compute these query ids by a full `path` scan and compare (repeatable)")
