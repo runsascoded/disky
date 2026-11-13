@@ -27,7 +27,7 @@ interface Store {
 
 /** Wrap `win.fetch` so a response naming another API shape reloads the page, once per shape per tab session. Storage
  *  that throws (a private window) means no reload rather than a loop. */
-export function watchApiShape(win: Win = window, store: Store | null = safeSession()): void {
+export function watchApiShape(win: Win = globalThis as unknown as Win, store: Store | null = safeSession()): void {
   const inner = win.fetch.bind(win)
   win.fetch = async (...args: Parameters<typeof fetch>) => {
     const res = await inner(...args)
@@ -47,7 +47,7 @@ export function watchApiShape(win: Win = window, store: Store | null = safeSessi
 
 function safeSession(): Store | null {
   try {
-    return typeof sessionStorage === 'undefined' ? null : sessionStorage
+    return (globalThis as { sessionStorage?: Store }).sessionStorage ?? null
   } catch {
     return null
   }
