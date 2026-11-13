@@ -856,15 +856,16 @@ def test_hf_list_then_index(tmp_path, env, monkeypatch):
     ]
 
 
-@pytest.mark.parametrize("has_gen, has_successor, pointer, sub", [
-    (True, False, None, ["add"]),
-    (False, False, None, ["build"]),
-    (False, True, "static-names/main-CURRENT.json", ["add"]),
+@pytest.mark.parametrize("has_gen, has_successor, pointer, sub, threads", [
+    (True, False, None, ["add"], None),
+    (False, False, None, ["build"], None),
+    (False, True, "static-names/main-CURRENT.json", ["add"], None),
+    (True, False, None, ["add"], 2),
 ])
-def test_static_names_one_machine(tmp_path, env, monkeypatch, has_gen, has_successor, pointer, sub):
+def test_static_names_one_machine(tmp_path, env, monkeypatch, has_gen, has_successor, pointer, sub, threads):
     """`options.static-names.gen`: `static-names add` in the task, the scans into R2's generation; `build` (+
     `build_args`) when R2 has none. On a local data dir (this one's), which holds only this scan, the scans are read
-    from R2 itself, where publish-r2 put this one first."""
+    from R2 itself, where publish-r2 put this one first. DuckDB's threads (`-p`): `threads`, else `Ctx.nproc`."""
     monkeypatch.setattr(S.Ctx, "nproc", property(lambda self: 4))
     asked = []
     monkeypatch.setattr(S.Ctx, "store_has", lambda self, root, key: asked.append((root, key)) or (has_gen if key.endswith("scans.json") else has_successor))
@@ -872,6 +873,8 @@ def test_static_names_one_machine(tmp_path, env, monkeypatch, has_gen, has_succe
     profile = hf_profile()
     if pointer:
         profile["options"]["static-names"]["current_key"] = pointer
+    if threads:
+        profile["options"]["static-names"]["threads"] = threads
     c = ctx(tmp_path, env, **profile)
     S.static_names(c, None)
     w = "<tmp>/t/dt-scan/2026-10-16T1200"
@@ -880,7 +883,7 @@ def test_static_names_one_machine(tmp_path, env, monkeypatch, has_gen, has_succe
     current = f" -u {pointer}" if pointer else ""
     assert (asked, c.sh_impl.calls) == ([("r2://r2b", key) for key in keys], [" ".join([
         "dt-cloud static-names", *sub, "-g 2026-10-15hf -L listing/{id}/index/{gen}/path-index.parquet -s r2://r2b",
-        f"-o r2://r2b -w {w}/static-names -p 4{current} -M 8GB", *tail])])
+        f"-o r2://r2b -w {w}/static-names -p {threads or 4}{current} -M 8GB", *tail])])
 
 
 def test_static_names_profile_checks():
@@ -893,9 +896,10 @@ def test_static_names_profile_checks():
             parse({"deployment": "fix", "executor": {"kind": "local"}, "work": "/w", "data": "/d",
                    **d, "options": {**d["options"], "static-names": opts}})
         return str(e.value)
-    assert [problems(o) for o in ({"gen": "g", "profile": "p.json"}, {"profile": "p.json", "mem": "8GB"}, {})] == [
+    assert [problems(o) for o in ({"gen": "g", "profile": "p.json"}, {"profile": "p.json", "mem": "8GB"}, {"profile": "p.json", "threads": 2}, {})] == [
         "profile: options.static-names.profile: not with gen (the one-machine path)",
         "profile: options.static-names.mem: only with gen (the one-machine path)",
+        "profile: options.static-names.threads: only with gen (the one-machine path)",
         "profile: options.static-names.profile: required (the deployment's static-names profile; or env STATIC_NAMES_PROFILE, "
         "or gen: the one-machine path, or skip: [static-names])",
     ]
@@ -1504,6 +1508,24 @@ def test_nproc_is_capped_by_the_cgroup_quota(tmp_path, monkeypatch) -> None:
     free = S.Ctx.__new__(S.Ctx)
     free.env = {"DT_CGROUP": str(tmp_path / "absent")}
     assert [capped.nproc, free.nproc] == [2, 8]
+
+
+def test_nproc_env_overrides_affinity_and_quota(tmp_path, monkeypatch) -> None:
+    """`$DT_NPROC` wins over the affinity and the quota (Fargate: `cpu.max` reads `max`, the affinity lists the host's
+    CPUs); anything but a positive integer is the step's failure."""
+    (tmp_path / "cpu.max").write_text("max 100000\n")
+    monkeypatch.setattr(S.os, "sched_getaffinity", lambda _: set(range(8)), raising=False)
+
+    def ctx_with(**env: str) -> S.Ctx:
+        c = S.Ctx.__new__(S.Ctx)
+        c.env = {"DT_CGROUP": str(tmp_path), **env}
+        return c
+
+    assert [ctx_with().nproc, ctx_with(DT_NPROC="2").nproc, ctx_with(DT_NPROC=" 3\n").nproc, ctx_with(DT_NPROC="").nproc] == [8, 2, 3, 8]
+    for bad in ("0", "two", "-1", "1.5"):
+        with pytest.raises(S.StepFailed) as e:
+            ctx_with(DT_NPROC=bad).nproc
+        assert (e.value.rc, str(e.value)) == (2, f"$DT_NPROC={bad!r}: not a positive integer")
 
 
 def test_path_index_reproc_rebuilds_a_missing_listing_from_the_layer_2(tmp_path, env, monkeypatch):

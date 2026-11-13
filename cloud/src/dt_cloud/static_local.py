@@ -981,8 +981,10 @@ def publish_current(store: Store, gen: str, key: str | None) -> None:
 @option("-w", "--work", help="Local work dir (default: a temporary one, removed after); a URL store's generation is mirrored into it")
 def add_cmd(chunk_rows, compact, read_from, gen, grace_s, compact_now, layouts, mem, prune_dry_run, no_merge, store_root, threads, scans_root, through, current_key, work) -> None:
     """Append every scan after the generation's newest (base + runs), oldest first, each as a run published by its
-    manifest; then the binary counter's due carries. The generation's files are never rewritten; new ones go to the store
-    data first, `meta.json`s next, manifests last. Then, the publish done, the runs a carry folded are deleted from the
+    manifest, then the binary counter's carries due at that point. The generation's files are never rewritten; new ones
+    go to the store after each scan's append and again after its carries (data first, `meta.json`s next, manifests last:
+    the commit point), so a failure on a scan leaves every scan before it in the store, and the next `add` resumes after
+    the newest manifest. Then, the publishes done, the runs a carry folded are deleted from the
     store, kept while a manifest superseded less than `-G` s ago lists them (`append_runner.prune_folded`; a folded run's `cdelta/` and `scans.json` stay: later
     appends refold them). When the compaction policy (`-C`) fires or `-K` forces it, the base and every run fold into a new
     generation (`static_compact`: `<gen>.c<NNN>`, a rebuild's bytes), published, then pointed to (`successor.json`, and
@@ -1009,11 +1011,24 @@ def add_cmd(chunk_rows, compact, read_from, gen, grace_s, compact_now, layouts, 
         scans = find_scans(scans_root, list(layouts), w / "scans", start=have[-1], through=through)
         pending = [s for s in scans["scans"] if s["id"] > have[-1]]
         con = sn.connect(threads, mem, w / "duckdb")
-        added = [append_scan(con, gen_dir, s, scans["mount"], w, gen=gen, rule=rule, threads=threads, mem=mem, compact_level=compact.carry_level)
-                 for s in pending]
-        merged = None if no_merge or not pending else merge_due(gen_dir, w, gen=gen, rule=rule, compact_level=compact.carry_level)
-        uploaded = upload_new(store, gen_dir, prefix, before)
-        prune = prune_folded(GenStore(store, prefix), now=now(), grace_s=grace_s, retain=FOLDED_RETAIN, dry_run=prune_dry_run, log=err)
+        uploaded: list[str] = []
+
+        def publish() -> None:
+            """What's new in the mirror up to the store (its manifests last: the commit point), then known to be there."""
+            new = upload_new(store, gen_dir, prefix, before)
+            before.update({f"{prefix}/{k}": (gen_dir / k).stat().st_size for k in new})
+            uploaded.extend(new)
+
+        added, merges = [], []
+        for s in pending:
+            # each scan is in the store before the next starts: a failure later loses only the scan it was on
+            added.append(append_scan(con, gen_dir, s, scans["mount"], w, gen=gen, rule=rule, threads=threads, mem=mem, compact_level=compact.carry_level))
+            publish()
+            if not no_merge:
+                merges.append(merge_due(gen_dir, w, gen=gen, rule=rule, compact_level=compact.carry_level))
+                publish()
+        merged = None if no_merge or not pending else merges
+        prune =prune_folded(GenStore(store, prefix), now=now(), grace_s=grace_s, retain=FOLDED_RETAIN, dry_run=prune_dry_run, log=err)
         if not prune_dry_run:
             rm_local(gen_dir, prune["keys"])  # the mirror too: a later `add` over this work dir must not upload them again
         compacted = None
