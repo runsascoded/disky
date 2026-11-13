@@ -113,8 +113,8 @@ describe('every page route of the app has its own card or none, never a folder c
       '/admin/usage': 'admin', '/admin/slack': 'admin', '/admin/cost/:cloud': 'admin', '/admin/sessions/:sid': 'admin',
       '/files/*': 'files', '/scans': 'scans', '/scans/*': 'scan', '/health': 'health', '/names': 'names', '/dups': 'dups',
       '/sweep': 'staged', '/hot': 'names', '/marks': 'map', '/mark': 'map',
-      // the dev previews, the OG render pages, a redirect to a map, a redirect to the root, and `functions/runs`' own stamp
-      '/dev/federated-scans': null, '/dev/children-table': null, '/dev/scan-durations': null, '/users/og': null, '/user/:id/og': null, '/meta/*': null, '/users/*': null, '/runs/*': null,
+      // the dev previews, a redirect to a map, a redirect to the root (m3 has no owner pages), and `functions/runs`' own stamp
+      '/dev/federated-scans': null, '/dev/children-table': null, '/dev/scan-durations': null, '/meta/*': null, '/users/*': null, '/runs/*': null,
     })
   })
 })

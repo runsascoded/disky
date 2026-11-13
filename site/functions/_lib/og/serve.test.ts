@@ -401,9 +401,6 @@ describe('a page\'s anonymous preview, from the URL alone', () => {
     ['/?section=over-time', 'size over time · CW storage', SIGN_IN, 'map'],
     ['/nonexistent-page', 'nonexistent-page · CW storage', SIGN_IN, 'map'],
     ['/staged?q=private', 'Staged for deletion · CW storage', 'Prefixes staged for deletion, for review. Sign in to see them.', 'staged'],
-    ['/users?d=261101', 'Users · CW storage', 'Who owns what across the scanned buckets. Sign in to see it.', 'users'],
-    ['/user/alan-turing', 'alan-turing · CW storage', 'One user’s storage: what they own, and what was assigned to them. Sign in to see it.', 'user'],
-    ['/assignments', 'Assignments · CW storage', 'Who assigned what to whom. Sign in to see it.', 'assignments'],
     ['/scans', 'Scan runs · CW storage', 'What each scan job did: status, phases and timing.', 'scans'],
     ['/scans/', 'Scan runs · CW storage', 'What each scan job did: status, phases and timing.', 'scans'],
     ['/scans/2026-11-03T1622', 'Scan 2026-11-03T1622 · CW storage', 'One scan job: status, phases and timing.', 'scan'],
@@ -429,6 +426,8 @@ describe('a page\'s anonymous preview, from the URL alone', () => {
 
   it('a page no route names, and a page whose own Function stamps it, keep what they have', async () => {
     expect(await inOrder(['/runs/plan/stamp', '/runs', '/privacy/x', '/users/og', '/user/alice/og', '/api/x', '/about'], p => preview(p))).toEqual([null, null, null, null, null, null, null])
+    // m3 has no owner pages (`/users` redirects home): none of them unfurls as a card.
+    expect(await inOrder(['/users?d=261101', '/user/alan-turing', '/assignments'], p => preview(p))).toEqual([null, null, null])
   })
 
   it('a long URL path is cut to its tail; its mount is left out; a secondary store\'s pages name that store', async () => {
@@ -518,7 +517,7 @@ describe('a page\'s anonymous preview, from the URL alone', () => {
     expect(await at('/og/scans.png?policy=generic&r=8', 'full')).toEqual([200, 'generic', 'public, max-age=86400'])
     expect(await at('/og/hot.png', 'generic')).toEqual([404, null, null])
     expect(await at('/og/constructor.png', 'generic')).toEqual([404, null, null])
-    await at('/og/users.png?policy=shape&r=8', 'shape')
+    await at('/og/staged.png?policy=shape&r=8', 'shape')
     expect(mocks.data.mock.calls.length).toBe(1)
   })
 })
@@ -653,9 +652,9 @@ describe('a secondary store\'s pages unfurl as that store (`STORES_JSON` `path`)
 
   it('an image naming no such store, or a store on a kind it has no page of, is not a card', async () => {
     const statuses: number[] = []
-    for (const p of ['/og/map.png?store=nope', '/og/map.png?store=constructor', '/og/staged.png?store=meta', '/og/users.png?store=meta']) {
+    for (const p of ['/og/map.png?store=nope', '/og/map.png?store=constructor', '/og/staged.png?store=meta']) {
       statuses.push((await serveCard({ request: request(p), env: deployment({ OG_ANONYMOUS: 'shape' }) })).status)
     }
-    expect([statuses, mocks.data.mock.calls, mocks.scan.mock.calls]).toEqual([[404, 404, 404, 404], [], []])
+    expect([statuses, mocks.data.mock.calls, mocks.scan.mock.calls]).toEqual([[404, 404, 404], [], []])
   })
 })

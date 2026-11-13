@@ -48,8 +48,6 @@ type Gate =
   | 'viewer'
   /** `requireStager`, or a check of the bare base scope: a read-only link can't. */
   | 'stager'
-  /** `requireAssigner` (the assign scope, or admin), then an email on the identity (the ledger's actor). */
-  | 'assigner'
   /** The `admin` scope: `requireAdmin`, `requireScope(ADMIN_SCOPE)`, the auth package's admin routes. */
   | 'admin'
   /** An email session only: no grant, whatever its scopes or email. */
@@ -86,7 +84,6 @@ const EXPECT: Record<Gate, readonly [Cell, Cell, Cell, Cell, Cell, Cell, Cell]> 
   'signed-in':          [401,       P,         P,      P,      P,      P,     P],
   'viewer':             [401,       P,         P,      P,      P,      P,     P],
   'stager':             [401,       403,       P,      P,      P,      P,     P],
-  'assigner':           [401,       403,       P,      P,      P,      403,   P],
   'admin':              [401,       403,       403,    STAFF,  P,      P,     403],
   'session':            [401,       403,       P,      P,      P,      403,   403],
   'session-or-admin':   [401,       403,       P,      P,      P,      P,     403],
@@ -143,13 +140,11 @@ const MAIL = { RESEND_API_KEY: 'resend-key', MAIL_FROM: 'Disky <disky@example.or
 const SHARED_ROUTES: Record<string, Case[]> = {
   // An activity post's sender face, named by its own SHA-256.
   'a/[[path]].ts': [get('/a/0000.png', 'public')],
-  'api/actions.ts': [get('/api/actions', 'viewer'), post('/api/actions', 'assigner')],
   'api/activity/[[path]].ts': [get('/api/activity/kinds', 'admin'), put('/api/activity/kinds/assign', 'admin'), post('/api/activity/render', 'admin')],
   'api/admin/r2-probe.ts': [get('/api/admin/r2-probe', 'admin')],
   'api/admins.ts': [get('/api/admins', 'admin'), post('/api/admins', 'admin'), patch('/api/admins', 'admin'), del('/api/admins', 'admin')],
   'api/age-pyramid.ts': [get(`/api/age-pyramid?${AT}`, 'viewer')],
   'api/annotations.ts': [get('/api/annotations', 'viewer'), post('/api/annotations', 'admin'), patch('/api/annotations', 'admin'), del('/api/annotations?id=1', 'admin')],
-  'api/assignments.ts': [get(`/api/assignments?${AT}`, 'viewer')],
   // `@open-athena/auth`'s `authRoutes`.
   'api/auth/[[path]].ts': [
     get('/api/auth/whoami', 'signed-in'),
@@ -193,7 +188,6 @@ const SHARED_ROUTES: Record<string, Case[]> = {
   'api/digest-reapply.ts': [post('/api/digest-reapply', 'admin'), get('/api/digest-reapply', 'admin')],
   'api/digest-settings.ts': [get('/api/digest-settings', 'viewer'), put('/api/digest-settings', 'admin')],
   'api/dups.ts': [get(`/api/dups?${AT}`, 'viewer', { DUPS: '1' }), get(`/api/dups?${AT}`, 'unconfigured')],
-  'api/estate.ts': [get(`/api/estate?${AT}`, 'viewer')],
   // Deployment config only.
   'api/filter-caps.ts': [get('/api/filter-caps', 'public')],
   'api/filter-cover.ts': [get(`/api/filter-cover?${AT}&q=abc`, 'viewer')],
@@ -206,8 +200,6 @@ const SHARED_ROUTES: Record<string, Case[]> = {
   'api/name-summary-registry.ts': [get('/api/name-summary-registry', 'viewer'), post('/api/name-summary-registry', 'viewer')],
   'api/name-summary.ts': [get('/api/name-summary', 'viewer'), post('/api/name-summary', 'viewer')],
   'api/og/[[path]].ts': [post('/api/og/mint', 'stager'), del('/api/og/tokens/none', 'stager'), get('/api/og/tokens', 'admin')],
-  'api/owner-prices.ts': [post('/api/owner-prices', 'admin')],
-  'api/owners.ts': [get(`/api/owners?${AT}`, 'viewer')],
   'api/path-index.ts': [get(`/api/path-index?${AT}`, 'viewer')],
   'api/plan-sweep/dispatch.ts': [post('/api/plan-sweep/dispatch', 'admin')],
   'api/plan-sweep/jobs.ts': [get('/api/plan-sweep/jobs', 'viewer')],
@@ -272,7 +264,6 @@ const SHARED_ROUTES: Record<string, Case[]> = {
   'api/usage.ts': [get('/api/usage', 'admin')],
   'api/whoami.ts': [get('/api/whoami', 'email')],
   // Page unfurls: a title and a description for a crawler (`/staged`: the open plan's item count), no names or sizes.
-  'assignments.ts': [get('/assignments', 'public')],
   // Sign-in itself: dormant (503) until the deployment has its mail sender / its Google client.
   'auth/email/[[path]].ts': [
     post('/auth/email/start', 'public', MAIL),
@@ -301,8 +292,6 @@ const SHARED_ROUTES: Record<string, Case[]> = {
   'runs/[[id]].ts': [get('/runs/plan-1/20261104T125245Z', 'public')],
   'slack/actions.ts': [post('/slack/actions', 'slack-signature', { SLACK_SIGNING_SECRET: 'slack-secret' }), post('/slack/actions', 'unconfigured')],
   'staged.ts': [get('/staged', 'public')],
-  'user/[id].ts': [get('/user/ann', 'public')],
-  'users.ts': [get('/users', 'public')],
   'v1/files/[[path]].ts': [get('/v1/files/list?prefix=snapshots/', 'viewer')],
   // Scanned objects: a member, never a read-only guest.
   'v1/objects/[[path]].ts': [get('/v1/objects/data-bucket/get?path=x', 'stager', { OBJECT_BUCKETS: 'data-bucket' })],
@@ -330,7 +319,7 @@ type Restricted =
  *  holding it can mint itself an unrestricted link, so no hide scope confines it) and an email session's. `email`: a
  *  link naming an address (this audit's links name none, so the case only says it is declared). `unconfigured` answers
  *  everyone alike, before any gate; `slack-signature` and `google-credential` read no site identity. */
-const LINK_GATES: ReadonlySet<Gate> = new Set<Gate>(['public', 'signed-in', 'viewer', 'stager', 'assigner', 'email', 'named-grant'])
+const LINK_GATES: ReadonlySet<Gate> = new Set<Gate>(['public', 'signed-in', 'viewer', 'stager', 'email', 'named-grant'])
 
 /** A case's key in `RESTRICTED`: its method and path, without the query. */
 const linkKey = (c: Case): string => `${c.method} ${c.path.split('?')[0]}`
@@ -338,13 +327,10 @@ const linkKey = (c: Case): string => `${c.method} ${c.path.split('?')[0]}`
 const SHARED_RESTRICTED: Record<string, Restricted> = {
   'GET /a/0000.png': 'anonymous',
   // The ledger: D1-held prefixes, unfiltered.
-  'GET /api/actions': 'blocked',
-  'POST /api/actions': 'blocked',
   // A hidden path, and a hidden dir itself (its pyramid breaks its contents down), are a 404.
   'GET /api/age-pyramid': 'filtered',
   // No note pinned strictly below a hidden path.
   'GET /api/annotations': 'filtered',
-  'GET /api/assignments': 'blocked',
   // The caller's own session, profile and face; the access-request flow.
   'GET /api/auth/whoami': 'pathless',
   'POST /api/auth/exchange': 'pathless',
@@ -368,7 +354,6 @@ const SHARED_RESTRICTED: Record<string, Restricted> = {
   'GET /api/digest-settings': 'pathless',
   // By the route: its groups name paths in every bucket.
   'GET /api/dups': 'blocked',
-  'GET /api/estate': 'blocked',
   'GET /api/filter-caps': 'pathless',
   'GET /api/filter-cover': 'blocked',
   'GET /api/filter-scans': 'pathless',
@@ -382,7 +367,6 @@ const SHARED_RESTRICTED: Record<string, Restricted> = {
   'POST /api/name-summary': 'blocked',
   'POST /api/og/mint': 'blocked',
   'DELETE /api/og/tokens/none': 'blocked',
-  'GET /api/owners': 'blocked',
   'GET /api/path-index': 'blocked',
   'GET /api/plan-sweep/jobs': 'blocked',
   'GET /api/plans': 'blocked',
@@ -417,7 +401,6 @@ const SHARED_RESTRICTED: Record<string, Restricted> = {
   'GET /api/sweep/soft-delete': 'blocked',
   'GET /api/union-scans': 'pathless',
   'GET /api/whoami': 'pathless',
-  'GET /assignments': 'anonymous',
   'POST /auth/email/start': 'anonymous',
   'POST /auth/email/code': 'anonymous',
   'GET /auth/email/verify': 'anonymous',
@@ -440,8 +423,6 @@ const SHARED_RESTRICTED: Record<string, Restricted> = {
   'GET /runs/plan-1/20261104T125245Z': 'pathless',
   'GET /og/run.png': 'pathless',
   'GET /staged': 'anonymous',
-  'GET /user/ann': 'anonymous',
-  'GET /users': 'anonymous',
   'GET /v1/files/list': 'blocked',
   'GET /v1/objects/data-bucket/get': 'blocked',
 }

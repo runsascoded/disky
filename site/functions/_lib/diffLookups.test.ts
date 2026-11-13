@@ -1,6 +1,6 @@
 import { beforeAll, describe, expect, it, vi } from 'vitest'
 import type { Env } from './auth'
-import { sqliteD1, type Sqlite, withLedger } from './testD1'
+import { sqliteD1, type Sqlite } from './testD1'
 import { type D1Variant, readJson, seedGeneration } from './testStore'
 import { buildDiff, type Diff, type DiffRow } from './view'
 
@@ -153,46 +153,5 @@ describe('a diff\'s lookups', () => {
     // Six: the level-by-level walk spent them on `del`'s subtree (13 names one scan drew) and folded the rest.
     expect(await buildDiff(env, { ...base, from: A, to: B, lookupCap: 6 })).toEqual(WHOLE)
     expect(await buildDiff(env, { ...base, from: A, to: B, lookupCap: 1e9 })).toEqual(WHOLE)
-  })
-})
-
-// Under a user's lens a lookup reads that user's rows (here the `path` sort filtered to her: the fixture attributes
-// nothing to anyone), so "no row" is her absence at the path, not the path's: what the ledger assigns her under it is
-// still hers. Carol is assigned `keep/` and the object `shrink/a`: her view draws `shrink` and `shrink/a` on A (100
-// MiB), and on B (8 MiB) folds them under the floor.
-describe('a lens diff\'s lookups', () => {
-  const LA = '2026-10-01T0001'
-  const LB = '2026-10-02T0001'
-  const lens = { key: 'carol' }
-  let lensEnv: Env
-  beforeAll(async () => {
-    lensEnv = await seeded(LA, LB, raw => {
-      withLedger(raw)
-      const assigned: [string, string][] = [['s3://bk/keep/', 'NULL'], ['s3://bk/shrink/a', "'object'"]]
-      raw.exec(assigned.map(([prefix, kind], i) =>
-        `INSERT INTO actions (id, actor, ts, scan, pattern, set_owner, owner, kind) VALUES (${i + 1}, 'ann', 1, '${LA}', '${prefix}', 1, 'carol', ${kind});` +
-        `INSERT INTO owner_prefixes (action_id, prefix, owner, ts, kind) VALUES (${i + 1}, '${prefix}', 'carol', 1, ${kind});`).join('\n'))
-    })
-  })
-
-  it('a path the lens holds no row of is not absent: an assignment under it is read, and drawn with its size', async () => {
-    const inferred: number[] = []
-    const d = await buildDiff(lensEnv, { ...base, from: LA, to: LB, lens, trace: (n, v) => { if (n === 'inferred') inferred.push(v) } })
-    // B's lookup of `shrink` finds no row of carol's, and its total isn't read (no assignment covers `shrink`): that
-    // is not `shrink`'s absence, so `shrink/a` is read there — its total, as her assignment covers it. Taken as
-    // absence, `shrink/a` was inferred removed (100 → 0 MiB, one lookup) where she holds 8 MiB.
-    // (Only `shrink/a`'s row: `shrink`'s own is that lookup's answer, as before this walk.)
-    expect({ rows: d.rows.filter(r => r.p === 'shrink/a'), lookups: d.lookups, inferred }).toEqual({
-      rows: [row('shrink/a', 2, 'file', 'changed', 100, 8, 1, 1, { l: 2 })], lookups: 2, inferred: [],
-    })
-  })
-
-  it('a row group whose metadata is missing fails a lens diff too (its lookups read per name)', async () => {
-    let walking = false
-    const restore = withoutGroupJson(lensEnv, LB, 'path', () => walking)
-    const got = await buildDiff(lensEnv, { ...base, from: LA, to: LB, lens, trace: n => { if (n === 'rounds') walking = true } })
-      .then(d => d.rows.filter(r => r.p === 'shrink/a'), err => `${(err as Error).name}: ${(err as Error).message}`)
-      .finally(restore)
-    expect(got).toEqual(`GroupUnread: row group 0 of ${LB}'s \`path\` sort has no metadata: its rows were not read`)
   })
 })
