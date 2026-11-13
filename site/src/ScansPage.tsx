@@ -15,9 +15,10 @@ import { useDocTitle } from './title'
 import { SiteKbd } from './SiteKbd'
 import { Tooltip } from './Tooltip'
 import { Explain } from './Help'
-import { axisTicks, includeRunKind, inSpan, runFilterKinds, runKindLabel, runKindMatches, type RunSpan, runKindParam, runSpanParam, runStatusParam } from './runChart'
-import { fmtBytesPrecise, fmtN } from './types'
 import { RunScanButton } from './RunScan'
+import { axisTicks, includeRunKind, inSpan, runFilterKinds, runKindLabel, runKindMatches, type RunSpan, runKindParam, runSpanParam, runStatusParam } from './runChart'
+import { fmtBytesPrecise, fmtN, type Meta } from './types'
+import { readThrough } from './readLens'
 import { useUnits } from './units'
 import { useIsAdmin, useStores } from './auth'
 import { HistoryAdmin, useHistoryConfigured } from './HistoryAdmin'
@@ -26,7 +27,7 @@ import { DEFAULT_STORE, type Store } from './stores'
 import { useStore } from './store'
 import { useMinSlug } from './scan'
 import {
-  batchHref, isLost, isMaintenance, liveness, logsHref, maintStore, mapHref, metaHref, type OutputDelta, phaseOrder, processingSecs, type PhaseSpan, type RunSummary, type ScanRun,
+  batchHref, isLost, isMaintenance, isScanProducer, liveness, logsHref, maintStore, mapHref, metaHref, type OutputDelta, phaseOrder, processingSecs, type PhaseSpan, type RunSummary, type ScanRun,
   type ScanRunPhase, type PhaseIssue, type PhaseRecovery, BEHIND, issueLeaves, issueState, issueWhat, overlappingFailures, phaseFill, phaseOutcome, runOutcome, runOutcomeLine, runTasks,
   type RunTask, STATUS_FILTERS, statusMatches, taskLogsHref,
 } from './scanRunsModel'
@@ -49,6 +50,16 @@ const useScanRun = (id: string, store: Store) => useQuery<DetailResponse, Error>
   queryKey: ['scan-run', store.key, id], queryFn: () => getJson(scanRunsApi(store, id)),
   refetchInterval: q => (q.state.data?.run.status === 'running' || q.state.data?.phase_issues?.some(i => !i.recovery) ? 30_000 : false), staleTime: 15_000,
 })
+
+function ScanAccessInput({ scan, store }: { scan: string; store: Store }) {
+  const q = useQuery<Meta, Error>({
+    queryKey: ['meta', store.key, scan], queryFn: () => getJson(`${store.base}/${scan}/meta.json`), staleTime: Infinity,
+  })
+  const through = q.data && readThrough(q.data.access)
+  return <p className="sub">Access-log input: {q.isLoading ? 'loading…' : q.error ? 'metadata unavailable' : through
+    ? <Tooltip content="The newest access timestamp observed in this scan’s input. It does not establish complete log delivery through that hour. Subsequent ingests do not rewrite this scan’s read data."><span>newest observed access {through.label}</span></Tooltip>
+    : 'not recorded in this scan'}{' · '}<Link to={`${scansHref(store)}?k=access-ingest`}>hourly ingest runs</Link></p>
+}
 
 /** The store this page shows (the route's: `/scans` the primary's, `<store path>/scans` a secondary's) and its run links. */
 function useScansStore(): { store: Store; scanHref: (id?: string) => string } {
@@ -430,6 +441,7 @@ export function ScansPage() {
     ])),
   })
   const filtered = runs.filter(r => runKindMatches(kind, r.run.kind) && statusMatches(status, runOutcome(r.run, r.phase_issues)))
+  const visiblePhases = new Set(filtered.flatMap(r => r.spans.map(s => s.phase)))
   const shown = filtered.filter(r => inSpan(span, r.run.started_ts))
   const spanScans = retentionReady ? retentionSpanScans(filtered, span, retention) : []
   const availableCount = [...retention.values()].filter(s => s.available).length
@@ -466,7 +478,7 @@ export function ScansPage() {
         <section className="sr-chart" id="sr-retention-chart">
           <ScanDurationChart runs={filtered} color={color} onPick={id => nav(scanHref(id))} win={span} onWin={setSpan} hover={hover}
             retention={retentionOn ? { scans: retention, selected: selectedScans, hoverScan: activeScan, manual: selectionMode, ready: retentionReady, toggle: toggleScan, hover: setHoverScan } : undefined} />
-          <Legend order={order} color={color} run={hover.id ? runs.find(r => r.run.run_id === hover.id) : undefined} />
+          <Legend order={order.filter(p => visiblePhases.has(p))} color={color} run={hover.id ? runs.find(r => r.run.run_id === hover.id) : undefined} />
           {retentionOn && <div className="sr-retention-legend" aria-live="polite">
             <span><i className="sr-retention-key remove">×</i> proposed removal</span><span><i className="sr-retention-key retain" /> retained</span><span><i className="sr-retention-key selected" /> manual selection ({manualScans.length})</span>
             <span>{availableCount} {reviewedPlan ? 'reviewed' : sourceRoster ? 'current source' : 'published in loaded history'} scans · {protectedCount} protected</span>
@@ -480,7 +492,7 @@ export function ScansPage() {
           <table className="runs sr-runs">
             <thead><tr>
               {retentionOn && <><th className="sr-retention-cell">History</th><th className="sr-retention-loss"><Tooltip content="Maximum object-state changes in either neighboring interval: a heuristic for information loss. Read and owner metadata changes are excluded.">Change score</Tooltip></th></>}
-              <th><Tooltip content="When the scan started, in your time zone; hover for its id.">scan</Tooltip></th><th>job type</th><th>status</th>
+              <th><Tooltip content="When the run started, in your time zone; hover for its id.">run</Tooltip></th><th>job type</th><th>status</th>
               <th className="num"><Tooltip content="Processing time after the queue, with total elapsed time below. Without queue timing, the total is shown.">duration</Tooltip></th><th className="hide-md">phases</th>
               <th className="num"><Tooltip content="Total recorded size of generated scan files: listings, indexes, snapshots, etc. Open the run for the breakdown. This is not the size of the storage being scanned, bytes transferred, or all retained indexes.">output files</Tooltip></th>
               <th className="num"><Tooltip content="Change in those generated files' recorded sizes, each compared with the newest earlier scan recording the same structure. This is not a change in the storage being scanned or additional storage retained.">output Δ</Tooltip></th>
@@ -495,11 +507,11 @@ export function ScansPage() {
                 const selected = !!decision && selectedScans.has(r.scan)
                 const historyLabel = retentionLabel(decision, selected)
                 const brushed = hover.id === r.run_id || (retentionOn && !!decision && activeScan === r.scan)
-                const map = r.status === 'succeeded' && !maint ? mapHref(r.scan, store.path, slug) : null
+                const map = r.status === 'succeeded' && isScanProducer(r.kind) ? mapHref(r.scan, store.path, slug) : null
                 const live = liveness(r, s.spans, now)
                 const processing = processingSecs(s.secs, s.spans)
                 return (
-                  <tr key={r.run_id} data-scan={r.scan} className={[kindClass(r.kind), r.status === 'failed' && 'failed', brushed && 'brushed', retentionOn && selected && 'retention-selected', retentionOn && decision?.proposal === 'remove' && 'retention-remove', retentionOn && decision?.proposal === 'retain' && 'retention-retain'].filter(Boolean).join(' ')}
+                  <tr key={r.run_id} data-scan={r.scan} className={[kindClass(r.kind), r.status === 'failed' && 'failed', brushed && 'brushed', retentionOn && selected && 'retention-selected', retentionOn && decision?.proposal === 'remove' && 'retention-remove', retentionOn && decision?.proposal === 'retain' && 'retention-retain'].filter(Boolean).join(' ') || undefined}
                     onPointerEnter={() => { hover.enter(r.run_id); if (retentionOn && decision) setHoverScan(r.scan) }} onPointerLeave={() => { hover.leave(); if (retentionOn) setHoverScan(null) }}>
                     {retentionOn && <td className="sr-retention-cell"><Tooltip content={<>{historyLabel}{decision?.score != null && <><br />Removal score: {decision.score.toLocaleString()} changed objects (before {decision.left?.toLocaleString() ?? '—'}, after {decision.right?.toLocaleString() ?? '—'}).</>}{!selectionMode && <><br />Choose Manual selection above to edit.</>}</>}>
                       <label><input type="checkbox" aria-label={`Select scan ${r.scan} for removal`} checked={selected} disabled={!selectionMode || !retentionReady || !retentionRunSelectable(r, retention)} onChange={() => toggleScan(r.scan)} onFocus={() => setHoverScan(r.scan)} onBlur={() => setHoverScan(null)} />
@@ -843,11 +855,14 @@ export function ScanRunPage() {
   const color = colorer(order.length ? order : (q.data?.spans ?? []).map(s => s.phase))
   const d = q.data
   const downstream = d?.downstream.filter(r => r.kind !== 'phase-recovery') ?? []
-  const scanRun = (scan: string | null) => scan ? list.data?.runs.find(s => s.run.scan === scan && s.run.kind === 'scan' && s.run.status === 'succeeded') ?? list.data?.runs.find(s => s.run.scan === scan) : undefined
+  const scanRun = (scan: string | null) => {
+    const peers = list.data?.runs.filter(s => s.run.scan === scan && (d?.run.kind === 'access-ingest' ? s.run.kind === 'access-ingest' : isScanProducer(s.run.kind))) ?? []
+    return peers.find(s => s.run.status === 'succeeded') ?? peers[0]
+  }
   const prev = scanRun(d?.prev_scan ?? null), next = scanRun(d?.next_scan ?? null)
   const r = d?.run
   const kinds = new Set(list.data?.runs.map(s => s.run.kind))
-  const map = r && r.status === 'succeeded' && !isMaintenance(r.kind) ? mapHref(r.scan, store.path, slug) : null
+  const map = r && r.status === 'succeeded' && isScanProducer(r.kind) ? mapHref(r.scan, store.path, slug) : null
   const liveDetail = d && r ? liveness(r, d.spans, Math.floor(Date.now() / 1000)) : null
   const tasks = useMemo(() => runTasks(d?.phases ?? []), [d])
   const brush = useBrush()
@@ -858,7 +873,8 @@ export function ScanRunPage() {
       <SiteNav />
       <p className="sr-crumbs"><Link to={scanHref()}>Scan runs</Link>{prev && <> · <Link to={scanHref(prev.run.run_id)}>‹ {prev.run.scan}</Link></>}{next && <> · <Link to={scanHref(next.run.run_id)}>{next.run.scan} ›</Link></>}</p>
       {q.isLoading ? <p>Loading run…</p> : q.error ? <p className="err">{q.error.message}</p> : d && r && <>
-        <h1><code>{r.scan}</code>{(kinds.size > 1 || isMaintenance(r.kind)) && <> <span className="dim"><KindLabel run={r} /></span></>}</h1>
+        <h1><code>{r.scan}</code>{(kinds.size > 1 || !isScanProducer(r.kind)) && <> <span className="dim"><KindLabel run={r} /></span></>}</h1>
+        {r.kind === 'access-ingest' && <p className="sub">An independent hourly access-log ingest. It updates the aggregates used by future scans; it does not publish a snapshot or change an existing scan’s recorded read data.</p>}
         {isMaintenance(r.kind) && <p className="sub">{r.kind === 'compact' ? 'A compaction' : r.kind === 'race' ? 'A race of a compaction (built beside it; published only if a compaction adopts it)' : 'A merge of deferred carries'} of <code>{r.gen ?? '?'}</code>, its own Batch job; <code>{r.scan}</code> is the newest scan it {r.kind === 'merge' ? 'carries' : 'folds'}{d.siblings.length > 0 && <> (<Link to={scanHref(d.siblings[d.siblings.length - 1].run_id)}>its scan run</Link>)</>}.</p>}
         <p className="sub">
           <Status run={r} failedAt={d.failed_at} issues={d.phase_issues} lost={liveDetail?.lost} runHref={scanHref} />{liveDetail && <Live live={liveDetail} inline />} · {fmtRunTime(r.started_ts)} → {r.finished_ts ? fmtRunTime(r.finished_ts) : '…'}
@@ -870,11 +886,12 @@ export function ScanRunPage() {
           {map && <> · <Link to={map}>map at this scan</Link></>}
           {' · '}<Links run={r} links={d} />
         </p>
+        {r.status === 'succeeded' && isScanProducer(r.kind) && kinds.has('access-ingest') && <ScanAccessInput scan={r.scan} store={store} />}
         {r.status === 'failed' && <div className="sr-failure"><b>Failed {d.failed_at ? (d.failed_at.startsWith('after') ? d.failed_at : `in ${d.failed_at}`) : ''}</b>{r.error && <div><code>{r.error}</code></div>}</div>}
         {d.phase_issues?.map(i => <div className={`sr-failure ${issueState(i)}`} key={i.phase}>
           {i.outcome === BEHIND
             ? <><b>{i.phase}: search doesn't cover this scan yet.</b> {sentence(i.reason ?? '')} The data is published.</>
-            : <><b>{i.phase}</b> {stop(issueWhat(i))}{i.detail && <> {sentence(i.detail)}</>}{issueLeaves(i) && <> {sentence(issueLeaves(i)!)}</>}</>}
+            : <><b>{i.phase}</b> {stop(issueWhat(i))}{i.detail && <> {sentence(i.detail)}</>}{r.kind !== 'access-ingest' && issueLeaves(i) && <> {sentence(issueLeaves(i)!)}</>}</>}
           {' '}<IssueStanding issue={i} runHref={scanHref} />
         </div>)}
         {r.kind === 'phase-recovery' && r.parent && <p className="sub">Phase recovery for <Link to={scanHref(r.parent)}>the original scan run</Link>. This attempt has its own clock; it does not replace the original timings.</p>}
@@ -908,7 +925,7 @@ export function ScanRunPage() {
             {a.phases.map(p => p.note && <p className="dim" key={p.phase}>{p.note}</p>)}
           </div>)}
         </>}
-        {(!isMaintenance(r.kind) || d.outputs.length > 0) && <>
+        {(isScanProducer(r.kind) || d.outputs.length > 0) && <>
           <h3>Outputs</h3>
           <OutputsTable outputs={d.outputs} meta={d.meta} />
         </>}

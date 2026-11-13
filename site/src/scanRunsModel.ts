@@ -76,6 +76,9 @@ export interface OutputDelta extends ScanRunOutput {
 export const MAINT_KINDS = ['compact', 'race', 'merge'] as const
 export const isMaintenance = (kind: string): boolean => (MAINT_KINDS as readonly string[]).includes(kind)
 
+/** Independent pollers are runs, but never published snapshots or scan-freshness evidence. */
+export const isScanProducer = (kind: string): boolean => !isMaintenance(kind) && kind !== 'access-ingest'
+
 /** A maintenance run's store (`interval-store`, `static-names`): its `gen`'s first segment; null for a scan's run. */
 export const maintStore = (run: Pick<ScanRun, 'kind' | 'gen'>): string | null =>
   isMaintenance(run.kind) && run.gen?.includes('/') ? run.gen.split('/')[0] : null
