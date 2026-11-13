@@ -30,7 +30,7 @@ Directory prefixes are `gs://marin-<bucket>/<dir>/…/` (trailing slash), in one
 
 ## 2. HTTP API
 
-All under `$GCS_USAGE_URL`. Reads are open to any signed-in viewer; writes need `Authorization: Bearer $GCS_USAGE_TOKEN`. A scan's id is `YYYY-MM-DD`, or `YYYY-MM-DDTHHMM` when a day has more than one scan; `GET /data/scans.json` lists them, newest first. `date=` (and `/api/diff`'s `from=`/`to=`) take an exact scan id from that list; an id naming no indexed scan is a `404`.
+All under `$GCS_USAGE_URL`. Reads are open to any signed-in viewer; writes need `Authorization: Bearer $GCS_USAGE_TOKEN`. A scan's id is `YYYY-MM-DD`, or `YYYY-MM-DDTHHMM` when a day has more than one scan; `GET /data/scans.json` lists them, newest first. `date=` (and `/api/diff`'s `from=`/`to=`) take an exact scan id from that list; an id naming no indexed scan is a `404`. Where a route takes `date=`, `d=<slug>` instead names the latest indexed scan matching it: `261009` a day, `26100912` an hour, `2610091236` a minute (`/api/diff` takes exact ids only); a slug matching nothing is a `404`, never the nearest scan.
 
 ### Identity
 
