@@ -2211,6 +2211,9 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); opacity: 1; }
 
 .filterbox {
   display: inline-flex;
+  flex-wrap: wrap;
+  max-width: 100%;
+  min-width: 0;
   gap: 6px;
   align-items: center;
   margin-left: 8px;
@@ -2240,9 +2243,11 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); opacity: 1; }
     font-size: 12px;
     color: var(--ink-2);
     display: inline-flex;
+    flex-wrap: wrap;
+    max-width: 100%;
     gap: 4px;
     align-items: center;
-    white-space: nowrap;
+    white-space: normal;
     button { background: none; border: none; color: var(--ink-2); cursor: pointer; padding: 0 2px; }
     &.ferr { color: #d33; white-space: normal; }
   }

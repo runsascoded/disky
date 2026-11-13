@@ -486,6 +486,7 @@ export interface RunSummary {
 export function manualScans(rows: readonly RunSummary[]): Set<string> {
   const first = new Map<string, ScanRun>()
   for (const { run } of rows) {
+    if (!isScanProducer(run.kind)) continue
     const f = first.get(run.scan)
     if (!f || (run.started_ts ?? Infinity) < (f.started_ts ?? Infinity)) first.set(run.scan, run)
   }
@@ -511,7 +512,7 @@ export function aboutDur(secs: number): string {
 }
 
 export function scanRunOf(rows: readonly RunSummary[], scan: string): ScanRun | undefined {
-  const runs = rows.map(r => r.run).filter(r => r.scan === scan && !isMaintenance(r.kind))
+  const runs = rows.map(r => r.run).filter(r => r.scan === scan && isScanProducer(r.kind))
   return runs.find(r => r.status === 'succeeded') ?? runs[0]
 }
 
