@@ -30,6 +30,17 @@ def kind(tags: list[str]) -> str:
     return "/".join(tags[:2])
 
 
+def read_bytes(r: dict) -> float:
+    """A query line's bytes read. `Touched::bytes` charges an owner scope's rows 3 bytes (`owner` + `cls`); the
+    branchless path reads `cls` only under a class scope too, so an owner-only scope's rows are 2: corrected here."""
+    b = r["bytes"]
+    t = r.get("touched") or {}
+    # (Under a search a row's scope goes through the per-row check, which reads `cls`: 3 bytes there.)
+    if "owner" in r["tags"] and "class" not in r["tags"] and "search" not in r["tags"]:
+        b -= t.get("filtered", 0)
+    return b
+
+
 @click.group()
 def cli():
     pass
@@ -83,7 +94,12 @@ def threads(baseline, queries, files):
     base = {}
     if baseline:
         base = {r["id"]: r for r in lines(baseline) if r["kind"] == "query" and r["threads"] == 16}
-    labels = sorted({r["label"] for r in rs}, key=lambda l: (l.startswith("full"), int(l.rsplit("t", 1)[1])))
+    def order(l: str):
+        # `slim-t8`, `slim-t8-cores`, `full-t16`: the index, then the thread count, then any variant.
+        t, _, variant = l.rsplit("-t", 1)[1].partition("-")
+        return l.startswith("full"), int(t), variant
+
+    labels = sorted({r["label"] for r in rs}, key=order)
     by = defaultdict(dict)
     for r in rs:
         by[r["id"]][r["label"]] = r
@@ -101,7 +117,7 @@ def threads(baseline, queries, files):
             cells = [ms(by[i][l]["warm_median_ms"]) if l in by[i] else "–" for l in labels]
             if base:
                 cells.append(ms(base[i]["warm_median_ms"]) if i in base else "–")
-            print(f"| {i} | " + " | ".join(cells) + f" | {gb(by[i][sl]['bytes'])} |")
+            print(f"| {i} | " + " | ".join(cells) + f" | {gb(read_bytes(by[i][sl]))} |")
         return
     print("Warm median per query, then the median (max) over a kind's queries, ms:")
     print()
@@ -116,7 +132,7 @@ def threads(baseline, queries, files):
             v = [base[i]["warm_median_ms"] for i in ids if i in base]
             cells.append(f"{ms(median(v))} ({ms(max(v))})" if v else "–")
         sl = next(l for l in labels if l.startswith("slim"))
-        rd = median(by[i][sl]["bytes"] for i in ids if sl in by[i])
+        rd = median(read_bytes(by[i][sl]) for i in ids if sl in by[i])
         print(f"| {k} | {len(ids)} | " + " | ".join(cells) + f" | {gb(rd)} |")
 
 
