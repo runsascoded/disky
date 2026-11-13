@@ -59,3 +59,17 @@ Behaviour changes, each deliberate:
 | hf, r2 | nothing (they build search in-job: `static-names add`) | nothing |
 
 Both profiles (`job/static-names.json`) already carry every field above; no edit. `DATA_BUCKET` / `STATIC_NAMES_SCRATCH` / `R2_BUCKET` / `SA` env overrides on cw become the profile's own env vars (`STATIC_NAMES_BUCKET`, `STATIC_NAMES_SCRATCH`, `R2_BUCKET`, `STATIC_NAMES_SA`) or `SA`.
+
+## 3. `site/src/oaPeers.ts` → the `PEERS` var
+
+On `cloud`: `site/src/peers.ts` (`parsePeers`, tested) reads the deployment's `PEERS` var, a JSON array of `Peer`s in a TOML literal string under `[vars]`, at build time (`vite.config.ts`, which now reads `'…'` literal strings as well as `"…"` ones). A malformed list fails the build, naming the entry. The site's peers are the store's `peers` when set, else `PEERS`; unset, none (the generic default). `wrangler.example.toml` documents it.
+
+Every OA deployment (gcs, cw, hf, r2) makes the same switch:
+1. Add to `site/wrangler.toml` `[vars]` (the list may name the deployment itself; its own prod host is skipped):
+   ```toml
+   PEERS = '[{"label": "GCS usage", "prod": "gcs.oa.dev", "dev": "dev.gcs.oa.dev", "owners": true, "staging": true, "meta": true}, {"label": "CoreWeave usage", "prod": "cw.oa.dev", "dev": "dev.cw.oa.dev", "staging": true, "meta": true}, {"label": "Hugging Face usage", "prod": "hf.oa.dev", "dev": "dev.hf.oa.dev", "meta": true}, {"label": "R2 usage", "prod": "r2.oa.dev", "dev": "dev.r2.oa.dev", "meta": true}]'
+   ```
+2. Drop `peers: OA_PEERS` and the `import { OA_PEERS } from '../oaPeers'` from its store (`site/src/stores/gcs.tsx`, `cw.tsx`, `hf.tsx`, `oa-r2.ts`).
+3. Delete `site/src/oaPeers.ts`.
+
+The list is still written four times, once per deployment's config: a peer added or renamed is a one-line config change on each branch, with no code change and no merge conflict.
