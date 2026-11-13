@@ -80,7 +80,7 @@ describe('POST /api/app-link — mint', () => {
     const rows = (await grants(s.db)) as { email: string; scopes: string }[]
     expect(rows.map(r => [r.email, r.scopes]).sort()).toEqual([
       [OPS, 'cw cw:assign admin'],
-      [STAFF, 'gcs cw admin requests cw:assign'],
+      [STAFF, 'gcs cw admin cw:assign'],
       [VIEWER, 'cw cw:assign'],
     ])
   })
