@@ -141,7 +141,8 @@ Raw lines: `bench/full-scan/results/2026-11-12.jsonl` (one per store load and pe
 Every answer the scanner gave equals the oracle's exactly (`oracle/oracle.py`; nodes, bytes, file counts, remainders):
 - **gcs:** 96 / 96 queries (the 69 of the mix plus 27 `@dirs` twins), 0 different. The oracle combined 717,920,013 object versions itself, the scanner's object-row count to the version.
 - **Fixtures:** all nine interval-store generations (`site/functions/_lib/fixtures/iv/interval-store/g1`–`g9`: base-only, base + runs, merged-run revisions, unowned, JSON owner slices, inconsistent directory totals), 9,504 queries from `fsb plan -x` (every scan and consecutive diff × every folder × each filter, at depths 1–3 and four thresholds, 1,584 of them `@dirs`), 0 different (`tests/test_fixtures.py`, `check-fixtures`).
-- **Synthetic:** every scale's mix (below).
+- **Synthetic:** 98 / 98 at each scale (x450, x900, x1800; below), and 71 / 71 at two small ones during development. The oracle caught a generator bug: at x900, two runs drew the same random name, so the base held 549 duplicate `(depth, path, vf)` rows, which the scanner combined as `combineLive` does and the oracle (trusting the base to hold each version once) counted twice. Names now carry a counter; the rerun has none.
+- **Reruns:** the gcs mix on the final code (the faster loader) gave the oracle-checked answers exactly, 96 / 96; so did the `@dirs` queries after the walk's last change (27 / 27) and x450's mix (98 / 98).
 - Each answer also equals itself across thread counts (1 and 16) and across the five warm runs (`fsb bench` fails otherwise).
 - **Owners:** the `us` the scanner reads equals gcs's `slices` sort on objects: per (bucket, owner), bytes and objects, at the newest scan (133 cells) and a month back (121 cells), base + runs combined on each side (`oracle/slices_check.py`).
 - On gcs every unfiltered view's two answers (object sums, directory rows) are equal too: 27 / 27 pairs (`oracle/dirs_vs_files.py`), so gcs's directory totals add up exactly at these scans.
@@ -152,22 +153,86 @@ Generation `2026-10-09b.g3.c001` + 2 runs, 135 scans; on the n2-highmem-16 VM (8
 
 **Load (the restart cost).** 1,354,236,524 version rows read (base 1,341,950,870 + runs 12,285,654), 6,034,826 of them another tier's copy of a version (`combineLive`). Packed: 967,126,225 rows = 717,920,013 object versions + 249,206,212 directories (holding 630,281,685 directory versions aside), 948,770,533 paths, 172,027,281 distinct names, 40 owners, 0 objects with more than one owner or class slice. Copy from GCS 30 s; load 359 s (read and combine the levels 228 s, dictionary 64 s, pre-order 28 s, scatter 39 s); peak RSS 110 GB (the load's working set, not the index's; it fits the 125 GB VM with little to spare, so the loader's peak is what sizes a loading box today). The first, serial version of the pre-order took 280 s of a 786 s load.
 
-<!-- RESULTS:GCS-LOAD-TABLE -->
+| Store | Versions read | Rows (objects / dirs) | Resident | B / object version | Load | Root rows/s/thread | Root 1 thread | Root 16 threads | All queries, 16 threads: p50 / p90 / max |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| gcs | 1,354,236,524 | 967,126,225 (717,920,013 / 249,206,212) | 48.29 GB | 67.3 | 360 s | 300M | 3,220 ms | 453 ms | 211 / 1,243 / 2,201 ms |
 
-<!-- RESULTS:GCS-QUERY-TABLE -->
+Selected queries (all 96: `results/2026-11-12.jsonl`; the timing lines: `results/gcs-bench-2026-11-12.txt`). "Of which dictionary" is the search's dictionary pass (and the path lookups) inside the 16-thread time.
 
-<!-- RESULTS:GCS-KIND-TABLE -->
+| Query (gcs) | Rows read | 1 thread: warm (cold) | 16 threads: warm (cold) | of which dictionary | Nodes |
+|---|---:|---:|---:|---:|---:|
+| `root` | 967,126,225 | 3,220 (3,228) ms | 453 (456) ms | 0.0 ms | 290 |
+| `root@dirs` | 292,096 | 9.8 (11.6) ms | 1.5 (2.2) ms | 0.0 ms | 290 |
+| `root-depth6` | 967,126,225 | 4,045 (4,066) ms | 593 (597) ms | 0.1 ms | 939 |
+| `root-depth6@dirs` | 254,491,097 | 3,536 (3,563) ms | 470 (515) ms | 0.0 ms | 939 |
+| `bucket0` | 372,104,748 | 1,207 (1,208) ms | 180 (174) ms | 0.1 ms | 372 |
+| `bucket0@dirs` | 1,749,369 | 26.1 (26.9) ms | 9.3 (9.6) ms | 0.1 ms | 372 |
+| `bucket3@dirs` | 31,212,875 | 275 (274) ms | 49.9 (49.6) ms | 0.1 ms | 353 |
+| `d3-0` | 312,386,455 | 973 (974) ms | 146 (140) ms | 0.1 ms | 286 |
+| `d6-0` | 4,194,340 | 35.7 (36.2) ms | 11.1 (11.0) ms | 0.5 ms | 9 |
+| `root-month` | 967,126,225 | 3,210 (3,208) ms | 451 (438) ms | 0.0 ms | 401 |
+| `diff-day-root` | 967,126,225 | 3,550 (3,577) ms | 551 (541) ms | 0.0 ms | 287 |
+| `diff-day-root@dirs` | 292,096 | 18.0 (14.7) ms | 2.7 (2.6) ms | 0.0 ms | 287 |
+| `diff-month-root` | 967,126,225 | 3,618 (3,617) ms | 555 (539) ms | 0.0 ms | 425 |
+| `rare0` | 967,126,225 | 8,391 (8,028) ms | 1,177 (1,165) ms | 90.7 ms | 3 |
+| `common-zarr.json` | 967,126,225 | 8,374 (8,446) ms | 1,220 (1,187) ms | 89.4 ms | 28 |
+| `and` | 967,126,225 | 9,996 (9,760) ms | 1,338 (1,316) ms | 175 ms | 14 |
+| `or` | 967,126,225 | 10,314 (10,110) ms | 1,378 (1,401) ms | 166 ms | 59 |
+| `not` | 967,126,225 | 9,001 (9,085) ms | 1,313 (1,333) ms | 86.4 ms | 293 |
+| `and-not` | 967,126,225 | 10,052 (10,260) ms | 1,364 (1,373) ms | 178 ms | 223 |
+| `anchor-exact` | 967,126,225 | 8,222 (8,422) ms | 1,199 (1,194) ms | 88.4 ms | 28 |
+| `regex` | 967,126,225 | 10,293 (10,480) ms | 1,510 (1,520) ms | 424 ms | 3 |
+| `path-term` | 967,126,225 | 14,221 (15,285) ms | 2,201 (2,167) ms | 297 ms | 13 |
+| `search-diff-month` | 967,126,225 | 9,318 (9,592) ms | 1,313 (1,314) ms | 83.8 ms | 44 |
+| `owner-one` | 967,126,225 | 4,234 (4,228) ms | 626 (616) ms | 0.0 ms | 30 |
+| `owned` | 967,126,225 | 4,300 (4,310) ms | 645 (630) ms | 0.0 ms | 212 |
+| `unowned` | 967,126,225 | 5,145 (5,155) ms | 783 (784) ms | 0.0 ms | 255 |
+| `all-but-two` | 967,126,225 | 5,191 (5,231) ms | 796 (785) ms | 0.0 ms | 288 |
+| `owned-search` | 967,126,225 | 9,071 (9,329) ms | 1,236 (1,231) ms | 86.7 ms | 16 |
+| `class-one` | 967,126,225 | 3,991 (3,983) ms | 625 (618) ms | 0.0 ms | 216 |
+| `class-owner` | 967,126,225 | 4,217 (4,230) ms | 620 (626) ms | 0.0 ms | 16 |
+| `staged` | 967,126,225 | 3,730 (3,745) ms | 553 (558) ms | 4.0 ms | 27 |
+| `staged-diff-month` | 967,126,225 | 4,644 (4,659) ms | 712 (713) ms | 4.1 ms | 30 |
+
+By kind (the planner's first tag; "folder" and "diff" include their `@dirs` twins):
+
+| Store | Threads | Kind | Queries | Warm median (p50 / max) | Cold (max) | Rows |
+|---|---:|---|---:|---:|---:|---:|
+| gcs | 1 | class | 5 | 4,217 / 9,158 ms | 9,461 ms | 967,126,225 |
+| gcs | 1 | diff | 26 | 54.6 / 3,618 ms | 3,617 ms | 4,056,743 |
+| gcs | 1 | folder | 28 | 40.2 / 4,045 ms | 4,066 ms | 4,056,743 |
+| gcs | 1 | owner | 8 | 4,722 / 9,071 ms | 9,329 ms | 967,126,225 |
+| gcs | 1 | search | 25 | 8,382 / 14,221 ms | 15,285 ms | 967,126,225 |
+| gcs | 1 | staged | 4 | 4,188 / 9,127 ms | 9,324 ms | 967,126,225 |
+| gcs | 16 | class | 5 | 625 / 1,243 ms | 1,263 ms | 967,126,225 |
+| gcs | 16 | diff | 26 | 16.1 / 555 ms | 541 ms | 4,056,743 |
+| gcs | 16 | folder | 28 | 12.5 / 593 ms | 597 ms | 4,056,743 |
+| gcs | 16 | owner | 8 | 707 / 1,236 ms | 1,231 ms | 967,126,225 |
+| gcs | 16 | search | 25 | 1,192 / 2,201 ms | 2,167 ms | 967,126,225 |
+| gcs | 16 | staged | 4 | 634 / 1,231 ms | 1,232 ms | 967,126,225 |
 
 What it shows:
-- **A plain view of the whole fleet reads ~1B rows in under half a second on 16 threads**: the root at the newest scan 3.2 s on one thread (≈ 305M rows/s/thread, ~4 GB/s of the 14 bytes/row it reads), 0.45 s on 16 (7× on 8 cores). Any scan costs the same (a month back: 0.45 s), and a diff 20% more (0.55 s), because a version's liveness is two u16 compares whatever the scan.
-- **Filters cost per row**: an owner, class or staged scope 0.55–0.8 s at the root on 16 threads. A search 1.2 s: a dictionary scan (93 ms on 16 threads over 10 GB of names) and a bitset lookup per path, which misses cache (172M names, a 21 MB bitset per atom); two atoms 1.4 s, a path term 2.2 s, a regex 3.7 s in the first run (its dictionary pass didn't scale: one shared regex across threads; fixed in `dict.rs`, see the rerun's table).
-- **Folders scale with their rows**: a bucket 10–170 ms, a depth-3 folder 140 ms, a depth-6 one 10 ms on 16 threads. The cost is the folder's rows, not the answer's nodes.
-- **The directory-total view is 30× faster where it applies**: the root 14 ms (it visits the 292K paths of the depth window, not 967M rows), a diff 18 ms, and equal to the object sums on every gcs view. It is bound by the window's paths: a window holding a flat directory of 31M objects (`bucket3@dirs`) or six levels of the fleet (`root-depth6@dirs`, 254M paths) took 1.1 s and 10 s in the first run's serial walk; the walk now runs in chunks (rerun's table).
-- **Against the spec's targets on the gcs root** (p50 ≤ 0.5 s, max ≤ 2 s): plain views and diffs meet them on 16 threads (0.45 / 0.55 s; 14 / 18 ms read from directory rows). Searches and scoped views don't yet: p50 over the whole mix ~0.6 s at the root, search ~1.2–2.2 s.
+- **A plain view of the whole fleet reads ~1B rows in under half a second on 16 threads**: the root at the newest scan 3.2 s on one thread (300M rows/s/thread, ~4 GB/s of the 14 bytes/row it reads), 0.45 s on 16 (7× on 8 cores). Any scan costs the same (a month back: 0.45 s), and a diff ~20% more (0.55 s): a version's liveness is two u16 compares whatever the scan.
+- **Filters cost per row**: an owner, class or staged scope 0.55–0.8 s at the root on 16 threads. A search ~1.2 s: a dictionary pass (~90 ms on 16 threads over 10 GB of names) and a bitset lookup per path, which misses cache (172M names: a 21 MB bitset per atom); two atoms ~1.35 s, a regex 1.5 s (its dictionary pass 0.42 s), a path term 2.2 s (three bitsets and an automaton step per path). The first run's regex took 3.7 s: one regex shared across threads serialized its dictionary pass (a clone per piece now).
+- **Folders scale with their rows**: a bucket 10–180 ms, a depth-3 folder 146 ms, a depth-6 one 11 ms on 16 threads. The cost is the folder's rows, not the answer's nodes.
+- **From directory rows, unfiltered views take milliseconds**: the root 1.5 ms on 16 threads (it visits the 292K paths of the depth window, not 967M rows), a one-day diff 2.7 ms, a bucket ≤ 50 ms, and every answer equals the object sums. The cost is the window's paths: six levels of the fleet (`root-depth6@dirs`, 254M paths) take 470 ms, as much as summing the objects. (The first run's serial walk took 14 ms, 1.1 s and 10 s for the root, `bucket3`'s 31M-object flat directory and `root-depth6`; it now runs in chunks that skip subtrees below the window through the checkpointed ancestor chains, and emits only nodes over the threshold.)
+- **Against the spec's targets on the gcs root** (p50 ≤ 0.5 s, max ≤ 2 s), 16 threads: plain views and diffs meet them (0.45 / 0.55 s summing objects; 1.5 / 2.7 ms from directory rows). Over the whole mix p50 is 0.21 s and p90 1.24 s, but scoped views (0.55–0.8 s) miss the p50 target at the root and the path term (2.2 s) misses the max; searches are 1.2–1.5 s.
+- **Cold ≈ warm**: everything is in RAM after the load, so a first query costs what a repeat does (the cold column).
 
 ### Synthetic scaling
 
-<!-- RESULTS:SYNTH -->
+`fsb synth` (`synth.rs`) generates a fleet's history over 30 daily scans (2026-10-01 → 10-30) in the folded path versions' shape; `oracle/synth_store.py` cuts it with the repo's own code: the base's `pvl` range files into the served `path` sort by `interval_store.cut_gen` (dyadic segments, 8K-row groups, `.groups.parquet`), the last two scans as runs by `write_served`, a manifest per run. Shape: six buckets of checkpoints (runs → steps → zarr-v3 tensor trees: `zarr.json` beside `c/i/j/k` chunk paths, so many single-object dirs), tokenized datasets (flat dirs of `.npy` shards), raw ingest (a new day dir per scan), users' dirs (notebooks, `node_modules`, mixed-case names), logs rewritten while active, scratch churn; 8 owners by run / user; a nearline lifecycle rule (a new version per object at its transition), an archive bucket; step retention ("keep the last 3"), a sweep scan. Churn is ~2–3% of objects per scan. Each scale's mix is 98 queries (71 + 27 `@dirs`).
+
+| Store | Versions read | Rows (objects / dirs) | Resident | B / object version | Load | Root rows/s/thread | Root 1 thread | Root 16 threads | All queries, 16 threads: p50 / p90 / max |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| x450 | 46,847,025 | 44,940,531 (28,247,985 / 16,692,546) | 1.46 GB | 51.6 | 13 s | 227M | 198 ms | 23.2 ms | 5.5 / 55.5 / 91.4 ms |
+| x900 | 93,385,359 | 89,490,923 (56,218,084 / 33,272,839) | 2.91 GB | 51.7 | 26 s | 229M | 390 ms | 45.8 ms | 9.9 / 113 / 178 ms |
+| x1800 | 187,102,692 | 179,223,945 (112,837,981 / 66,385,964) | 5.82 GB | 51.6 | 53 s | 230M | 781 ms | 89.2 ms | 18.4 / 219 / 348 ms |
+| gcs | 1,354,236,524 | 967,126,225 (717,920,013 / 249,206,212) | 48.29 GB | 67.3 | 360 s | 300M | 3,220 ms | 453 ms | 211 / 1,243 / 2,201 ms |
+
+- **Linear in rows:** root time, load and resident size each double with the store (x450 → x900 → x1800: 23 → 46 → 89 ms on 16 threads; 13 → 26 → 53 s to load). Rows/s/thread is flat at ~230M; 16 threads are ~8.8× one (8 cores).
+- **Synthetic vs gcs:** synthetic stores pack at 32 B/row against gcs's 50: the synthetic fleets hold 0.4–1.8M distinct names, gcs 172M (12.5 GB of dictionary), and gcs keeps 630M directory versions aside (12.6 GB). gcs's rows scan faster (300M rows/s/thread against 230M): it has fewer directory rows per object (26% of rows against 37%), and a directory row costs a stack push where an object row costs an add.
+- **Extrapolation, checked:** from the synthetic ladder alone (230M rows/s/thread, 8.8× on 16 threads), gcs's 967M rows predict 4.2 s on one thread and 0.48 s on 16; measured: 3.2 s and 0.45 s. The brief's 1.16e9 versions, at gcs's 0.71 packed rows per version read, are ~830M rows: **an extrapolation**, ~0.39 s for the root on 16 threads.
 
 ## Cost model (filled from the bench)
 
@@ -195,4 +260,8 @@ Filled (2026-11-12), from gcs's measured load:
 
 ## Open
 
-- #18 (`open-questions.md`): the R2 read credential for gcs's store, or the store copied to S3 by gcs's session.
+- #18 (`open-questions.md`): settled for this bench by reading gcs's store on a GCP VM in its region.
+- The loader's 110 GB peak: a load that writes the packed columns to a file once (and a server that maps it) would serve from a 64 GB box; not built.
+- Search cost: a bitset lookup per path misses cache; renumbering names so a folder's names sit together, or a per-folder name filter, would cut it. Not tried.
+- The recorded Batch run (`batch/submit`) is written, not submitted: it waits for a go, and for the output bucket the job may write to.
+- Lambda fan-out and OA's fleets together: not measured.
