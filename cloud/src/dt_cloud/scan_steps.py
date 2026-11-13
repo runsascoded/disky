@@ -613,6 +613,25 @@ def access_r2(ctx: Ctx, arg: str | None) -> None:
         tmp.replace(key)
 
 
+def _receipt_check(p: ScanProfile) -> list[str]:
+    o = p.opts('access-r2-receipt')
+    return [f'options.access-r2-receipt.{key}: required' for key in ('checkpoint', 'publish') if not o.get(key)]
+
+
+@step('access-r2-receipt', core=False, stage='pre', soft=True, options={'checkpoint': str, 'publish': str},
+      requires=_receipt_check, side=True, converges=True, leaves='collector checkpoint receipt behind')
+def access_r2_receipt(ctx: Ctx, arg: str | None) -> None:
+    """Publish a verified durable checkpoint receipt with this step's own bucket-scoped writer credential.
+    Runs after access-r2; a failed sync can only yield an older durable receipt, never unpublished history."""
+    if ctx.reproc:
+        return
+    work = ctx.work / 'access-r2-receipt'
+    with ctx.phase('access-r2-receipt'):
+        ctx.sh(['dt-cloud', 'access', 'r2-receipt', '-c', ctx.opt('access-r2-receipt', 'checkpoint'),
+                '-o', work / 'receipt.json', '-p', ctx.opt('access-r2-receipt', 'publish'), '-w', work / 'readback'],
+               fatal=False, warn='checkpoint receipt publication failed (collector keeps its history)')
+
+
 def s3_client(endpoint: str | None):
     """A virtual-hosted client (CAIOS rejects path-style object calls, `PathStyleRequestNotAllowed`)."""
     import boto3

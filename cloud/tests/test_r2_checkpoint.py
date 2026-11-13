@@ -9,7 +9,7 @@ import pytest
 from click.testing import CliRunner
 
 from dt_cloud.cli import main
-from dt_cloud.r2_checkpoint import META, parity, receipt, sync
+from dt_cloud.r2_checkpoint import META, parity, publish_receipt, receipt, sync
 
 UTC = timezone.utc
 CUT = datetime(2026, 11, 8, tzinfo=UTC)
@@ -296,3 +296,50 @@ def test_receipt_requires_verified_bootstrap_and_survives_steady_update(tmp_path
     assert result.exit_code == 0, result.exception
     assert json.loads(destination.read_text()) == expected
     assert json.loads(result.stdout) == {'out': str(destination), 'cursors': expected['cursors'], 'generation': None}
+
+
+@pytest.mark.parametrize('mode', ['create', 'advance', 'behind', 'conflict'])
+def test_receipt_publication_is_monotonic_conditional_and_read_back(monkeypatch, mode: str) -> None:
+    from io import BytesIO
+    from types import SimpleNamespace
+    import boto3
+    from botocore.exceptions import ClientError
+    from botocore.response import StreamingBody
+    from botocore.stub import Stubber
+    from disk_tree import blobfs
+
+    client = boto3.client('s3', endpoint_url='https://receipt.example.org', region_name='auto',
+                          aws_access_key_id='fixture', aws_secret_access_key='fixture')
+    monkeypatch.setattr(boto3, 'Session', lambda **_: SimpleNamespace(client=lambda *args, **kw: client))
+    monkeypatch.setattr(blobfs, 'r2_endpoint', lambda _: 'https://receipt.example.org')
+    monkeypatch.setattr(blobfs, 'bucket_profile', lambda _: None)
+    doc = {'schema_version': 1, 'kind': 'r2-read-checkpoint', 'account': 'own', 'source': 'r2://archive/state.json',
+           'checkpoint': {'uri': 'gs://own/closed.parquet', 'generation': '18', 'sha256': 'a' * 64}, 'cursors': {'b': 200}}
+    old = {**doc, 'checkpoint': {**doc['checkpoint'], 'generation': '17'}, 'cursors': {'b': 300 if mode == 'behind' else 100}}
+    data = (json.dumps(doc, sort_keys=True) + '\n').encode()
+    target = {'Bucket': 'own-receipts', 'Key': 'r2-read.json'}
+    def response(value: bytes, etag: str) -> dict:
+        return {'Body': StreamingBody(BytesIO(value), len(value)), 'ETag': etag}
+    with Stubber(client) as stub:
+        condition = {'IfNoneMatch': '*'} if mode == 'create' else {'IfMatch': '"old"'}
+        if mode == 'create':
+            stub.add_client_error('get_object', service_error_code='NoSuchKey', http_status_code=404, expected_params=target)
+        else:
+            stub.add_response('get_object', response(json.dumps(old).encode(), '"old"'), target)
+        if mode != 'behind':
+            put = {**target, 'Body': data, 'ContentType': 'application/json', **condition}
+            if mode == 'conflict':
+                stub.add_client_error('put_object', service_error_code='PreconditionFailed', http_status_code=412, expected_params=put)
+            else:
+                stub.add_response('put_object', {'ETag': '"new"'}, put)
+                stub.add_response('get_object', response(data, '"new"'), {**target, 'IfMatch': '"new"'})
+        if mode == 'behind':
+            with pytest.raises(ValueError, match='^receipt would move backwards or change its source/checkpoint$'):
+                publish_receipt(doc, 'r2://own-receipts/r2-read.json')
+        elif mode == 'conflict':
+            with pytest.raises(ClientError) as error:
+                publish_receipt(doc, 'r2://own-receipts/r2-read.json')
+            assert error.value.response['Error']['Code'] == 'PreconditionFailed'
+        else:
+            assert publish_receipt(doc, 'r2://own-receipts/r2-read.json') is None
+        stub.assert_no_pending_responses()

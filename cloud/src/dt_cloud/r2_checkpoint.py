@@ -48,7 +48,11 @@ def receipt(checkpoint: str, work: Path) -> dict:
         return receipt_body(checkpoint, local, generation)
 
 
-def receipt_body(uri: str, local: Path, generation: str | None) -> dict:
+def receipt_body(
+    uri: str,
+    local: Path,
+    generation: str | None,
+) -> dict:
     from hashlib import file_digest
     import math
     import pyarrow.parquet as pq
@@ -65,14 +69,72 @@ def receipt_body(uri: str, local: Path, generation: str | None) -> dict:
             'checkpoint': {'uri': uri, 'generation': generation, 'sha256': digest}, 'cursors': cursors}
 
 
+def publish_receipt(doc: dict, destination: str) -> None:
+    """One small R2 receipt, with monotonic cursors and an atomic ETag precondition. No credential is broadened."""
+    from urllib.parse import urlparse
+    import boto3
+    from botocore.exceptions import ClientError
+    from disk_tree.blobfs import bucket_profile, r2_endpoint
+
+    url = urlparse(destination)
+    key = url.path.lstrip('/')
+    if (url.scheme != 'r2' or not url.netloc or url.query or url.fragment or not key
+            or any(p in ('', '.', '..') for p in key.split('/'))):
+        raise ValueError('receipt publication requires an exact r2://bucket/key')
+    endpoint = r2_endpoint(url.netloc)
+    if not endpoint:
+        raise ValueError('receipt publication requires the receipt bucket R2 endpoint')
+    generation = doc['checkpoint']['generation']
+    if not isinstance(generation, str) or not generation.isdecimal():
+        raise ValueError('receipt publication requires a durable GCS checkpoint generation')
+    client = boto3.Session(profile_name=bucket_profile(url.netloc)).client('s3', endpoint_url=endpoint, region_name='auto')
+    target = {'Bucket': url.netloc, 'Key': key}
+
+    def body(response: dict) -> bytes:
+        with response['Body'] as stream:
+            value = stream.read(65_537)
+        if len(value) > 65_536:
+            raise ValueError('receipt exceeds 64 KiB')
+        return value
+
+    try:
+        previous = client.get_object(**target)
+    except ClientError as error:
+        if error.response['Error']['Code'] not in ('NoSuchKey', '404'):
+            raise
+        condition = {'IfNoneMatch': '*'}
+    else:
+        old = json.loads(body(previous))
+        if (any(old.get(k) != doc[k] for k in ('schema_version', 'kind', 'source', 'account'))
+                or old['checkpoint']['uri'] != doc['checkpoint']['uri']
+                or int(old['checkpoint']['generation']) > int(generation)
+                or any(v > doc['cursors'].get(b, float('-inf')) for b, v in old['cursors'].items())):
+            raise ValueError('receipt would move backwards or change its source/checkpoint')
+        condition = {'IfMatch': previous['ETag']}
+    data = (json.dumps(doc, sort_keys=True) + '\n').encode()
+    if len(data) > 65_536:
+        raise ValueError('receipt exceeds 64 KiB')
+    result = client.put_object(**target, Body=data, ContentType='application/json', **condition)
+    if body(client.get_object(**target, IfMatch=result['ETag'])) != data:
+        raise ValueError('published receipt readback differs')
+
+
 @command('r2-receipt')
 @option('-c', '--checkpoint', required=True, help='Durable gs:// or local closed-history checkpoint to read back')
 @option('-o', '--out', required=True, type=Path, help='Local receipt for review; no transport or collector change')
+@option('-p', '--publish', help='Opt-in exact r2://bucket/key; uses only the explicitly supplied receipt writer credential')
 @option('-w', '--work', required=True, type=Path, help='Scratch directory for the revision-pinned read')
-def receipt_cmd(checkpoint: str, out: Path, work: Path) -> None:
+def receipt_cmd(
+    checkpoint: str,
+    out: Path,
+    publish: str | None,
+    work: Path,
+) -> None:
     """Prepare a collector receipt from a verified durable checkpoint. Deletes nothing."""
     doc = receipt(checkpoint, work)
     Store(str(out.parent)).write_text(out.name, json.dumps(doc, sort_keys=True) + '\n')
+    if publish:
+        publish_receipt(doc, publish)
     print(json.dumps({'out': str(out), 'cursors': doc['cursors'], 'generation': doc['checkpoint']['generation']}, sort_keys=True))
 
 
