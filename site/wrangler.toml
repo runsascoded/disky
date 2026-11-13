@@ -55,6 +55,7 @@ MARK = "gcs"                    # favicon + apple-touch icon: `public/icons/gcs*
 OG_CARDS = "1"                  # dynamic share cards for every page (specs/done/dogi.md)
 BASE_SCOPE = "gcs"              # the viewer scope this deployment grants (`_lib/auth.ts`)
 AUTH_HOST_COOKIES = "1"   # on https the session, its handle, both nonces and the Google hint are `__Host-` named; switched on 2026-11-13 (signed everyone out once)
+DIFF_LOOKUP_CAP = "0"   # diffs read no point lookups: one-sided names stay in `(other)`, as before cloud's lookups (`a12a3bd02`); open question #24 (lookups or a bounded budget)
 JOB_SA = "gcs-usage-job@oa-internal-450019.iam.gserviceaccount.com"  # the account sweep-dispatched Batch jobs run as (`_lib/planDispatch.ts`)
 # Deployment resources (specs/oa-decoupling.md): `cloud` carries no defaults for these.
 STORE_BUCKET = "oa-gcs-usage-dvx"     # the path store's bucket (`_lib/index.ts`)
@@ -168,6 +169,7 @@ REPO_URL = "https://github.com/Open-Athena/disky"
 SOURCE_REF = "gcs"
 SWEEP_DISPATCH = "0"   # shared prod data: no sweep or undo starts from dev, though GCP_SA_KEY (for "Run a scan") is set
 AUTH_HOST_COOKIES = "1"   # on https the session, its handle, both nonces and the Google hint are `__Host-` named; switched on 2026-11-13 (signed everyone out once)
+DIFF_LOOKUP_CAP = "0"   # diffs read no point lookups: one-sided names stay in `(other)`, as before cloud's lookups (`a12a3bd02`); open question #24 (lookups or a bounded budget)
 OWNER_HISTORY_BATCH = "1"   # scoped series in bounded windows (`seriesRead`); dev only until measured
 OA_LOGIN_ISSUER = "https://login.oa.dev"   # "Sign in with OA" (specs/oa-login-rp.md): OA's broker; dev first
 OA_LOGIN_CLIENT_ID = "disky-gcs-dev"       # registered at the broker with callback https://dev.gcs.oa.dev/auth/oa/callback; secret OA_LOGIN_CLIENT_SECRET (preview env)
