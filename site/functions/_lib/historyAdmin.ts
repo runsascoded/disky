@@ -7,6 +7,7 @@ import { labelBatchSpec, parseLabels } from './costLabels.js'
 import { isScanId } from '../../src/scanSlug.js'
 
 export interface HistoryEnv extends Env, BatchEnv {
+  HISTORY_CURRENT_KEY?: string
   HISTORY_IMAGE?: string
   HISTORY_DATA_STORE?: string
   HISTORY_SERVING_STORE?: string
@@ -274,6 +275,11 @@ interface HistoryConfig {
   servingStore: string
   secrets: Record<string, string>
 }
+
+/** The deployment uses scan history at all: any `HISTORY_*` var is set (the version pointer, or the job config).
+ * Unset, the site shows no history controls and the routes read nothing. */
+export const HISTORY_VARS = ['HISTORY_CURRENT_KEY', 'HISTORY_IMAGE', 'HISTORY_DATA_STORE', 'HISTORY_SERVING_STORE', 'HISTORY_REGION', 'HISTORY_SECRETS'] as const
+export const historyConfigured = (env: HistoryEnv): boolean => HISTORY_VARS.some(key => !!env[key]?.trim())
 
 export function historyConfig(env: HistoryEnv): HistoryConfig | { reason: string } {
   for (const key of ['GCP_SA_KEY', 'JOB_SA', 'GCP_PROJECT', 'HISTORY_IMAGE', 'HISTORY_DATA_STORE', 'HISTORY_SERVING_STORE', 'HISTORY_REGION', 'HISTORY_SECRETS'] as const) {

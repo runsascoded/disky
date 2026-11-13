@@ -9,6 +9,7 @@ import './HistoryAdmin.css'
 
 const ENDPOINT = '/api/admin/history'
 const KEY = ['admin', 'history'] as const
+const CONFIGURED_KEY = ['admin', 'history-configured'] as const
 const ADOPT_ENDPOINT = '/api/admin/history-adopt'
 const ADOPT_KEY = ['admin', 'history-pointer'] as const
 const ACTIVE = new Set(['queued', 'running', 'planning', 'building', 'verifying'])
@@ -141,6 +142,12 @@ async function call<T>(url: string, init?: RequestInit): Promise<T> {
   const body = await r.json() as T & { error?: string }
   if (!r.ok) throw new Error(body.error ?? `History request failed (${r.status})`)
   return body
+}
+
+/** Whether this deployment uses scan history (any `HISTORY_*` var): admins see its controls only then. */
+export function useHistoryConfigured(admin: boolean): boolean {
+  const q = useQuery<{ configured: boolean }, Error>({ queryKey: CONFIGURED_KEY, queryFn: () => call(`${ENDPOINT}?configured`), enabled: admin, staleTime: Infinity })
+  return admin && q.data?.configured === true
 }
 
 export function HistoryAdmin({ onPlanChange, manualScans, onManualScansChange, spanScans = [], onHoverScan, onSelectionModeChange, onSourceChange, jobsTarget }: HistoryAdminProps = {}) {

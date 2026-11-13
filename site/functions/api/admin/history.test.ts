@@ -58,12 +58,32 @@ describe('/api/admin/history', () => {
     f.env.GCP_SA_KEY = undefined
     const get = await onRequestGet(f.ctx()), post = await onRequestPost(f.ctx({ action: 'plan' }))
     expect([get.status, get.headers.get('cache-control'), await get.json(), post.status, await post.json()]).toEqual([
-      200, 'no-store', { enabled: false, reason: 'History jobs are not configured (GCP_SA_KEY unset)', source_scans: [A, B, C], required_pins: [A], jobs: [] },
+      200, 'no-store', { configured: true, enabled: false, reason: 'History jobs are not configured (GCP_SA_KEY unset)', source_scans: [A, B, C], required_pins: [A], jobs: [] },
       503, { error: 'History jobs are not configured (GCP_SA_KEY unset)' },
     ])
     expect(f.writes).toEqual([])
     expect(vi.mocked(historySourceScans).mock.calls).toEqual([[f.env]])
     expect(vi.mocked(gcpToken).mock.calls).toEqual([])
+  })
+
+  it('reads nothing, and says so, on a deployment without history', async () => {
+    const f = setup()
+    for (const key of ['HISTORY_IMAGE', 'HISTORY_DATA_STORE', 'HISTORY_SERVING_STORE', 'HISTORY_REGION', 'HISTORY_SECRETS'] as const) f.env[key] = undefined
+    const get = await onRequestGet(f.ctx()), probe = await onRequestGet({ env: f.env, request: new Request('http://localhost/api/admin/history?configured') })
+    expect([get.status, await get.json(), probe.status, await probe.json()]).toEqual([
+      200, { configured: false, enabled: false, reason: 'Scan history is not configured', jobs: [] },
+      200, { configured: false, enabled: false, reason: 'Scan history is not configured', jobs: [] },
+    ])
+    expect([f.bucket.list.mock.calls, f.bucket.get.mock.calls, vi.mocked(f.env.DB!.prepare).mock.calls, vi.mocked(historySourceScans).mock.calls]).toEqual([[], [], [], []])
+  })
+
+  it('answers the configured probe alone: a version pointer is enough', async () => {
+    const f = setup()
+    for (const key of ['HISTORY_IMAGE', 'HISTORY_DATA_STORE', 'HISTORY_SERVING_STORE', 'HISTORY_REGION', 'HISTORY_SECRETS'] as const) f.env[key] = undefined
+    f.env.HISTORY_CURRENT_KEY = 'history/environments/dev/CURRENT.json'
+    const probe = await onRequestGet({ env: f.env, request: new Request('http://localhost/api/admin/history?configured') })
+    expect([probe.status, await probe.json()]).toEqual([200, { configured: true }])
+    expect([f.bucket.list.mock.calls, vi.mocked(historySourceScans).mock.calls]).toEqual([[], []])
   })
 
   it('records an immutable review request and queued status before submitting one Batch job', async () => {

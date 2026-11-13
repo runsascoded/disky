@@ -3,7 +3,7 @@ import { submitBatch } from '../../_lib/cwBatch.js'
 import { batchJobsUrl, gcpToken } from '../../_lib/gcp.js'
 import { historySourceScans } from '../../_lib/historySource.js'
 import {
-  checkedHistoryPlan, historyBatchSpec, historyConfig, HistoryError, type HistoryEnv, type HistoryRequest,
+  checkedHistoryPlan, historyBatchSpec, historyConfig, historyConfigured, HistoryError, type HistoryEnv, type HistoryRequest,
   historyJobId, historyJobs, historyJson, historyKey, historyRequestBody, type HistoryStatus, parseHistoryAction, reconcileHistoryJobs, requiredHistoryPins, unfinishedHistoryJob,
 } from '../../_lib/historyAdmin.js'
 
@@ -14,8 +14,13 @@ const JSON_OPTIONS = { httpMetadata: { contentType: 'application/json' } }
 export const onRequestGet = async (ctx: HistoryCtx): Promise<Response> => {
   const id = await requireAdmin(ctx)
   if (id instanceof Response) return id
+  // `?configured`: only whether the deployment uses history (the admin pages' controls show on it)
+  const configured = historyConfigured(ctx.env)
+  if (!configured || new URL(ctx.request.url).searchParams.has('configured')) {
+    return json(configured ? { configured } : { configured, enabled: false, reason: 'Scan history is not configured', jobs: [] }, 200, NO_STORE)
+  }
   const cfg = historyConfig(ctx.env)
-  if (!ctx.env.INDEX_R2) return json({ enabled: false, reason: 'History jobs require INDEX_R2', jobs: [] }, 200, NO_STORE)
+  if (!ctx.env.INDEX_R2) return json({ configured, enabled: false, reason: 'History jobs require INDEX_R2', jobs: [] }, 200, NO_STORE)
   try {
     const [jobs, source_scans, required_pins] = await Promise.all([
       historyJobs(ctx.env.INDEX_R2, new URL(ctx.request.url).searchParams.get('cursor') ?? undefined),
@@ -32,7 +37,7 @@ export const onRequestGet = async (ctx: HistoryCtx): Promise<Response> => {
         return body.status.state
       })
     }
-    return json({ enabled: !('reason' in cfg), ...('reason' in cfg ? { reason: cfg.reason } : {}), source_scans, required_pins, ...jobs }, 200, NO_STORE)
+    return json({ configured, enabled: !('reason' in cfg), ...('reason' in cfg ? { reason: cfg.reason } : {}), source_scans, required_pins, ...jobs }, 200, NO_STORE)
   } catch (e) {
     if (e instanceof HistoryError) return json({ error: e.message }, e.status, NO_STORE)
     throw e

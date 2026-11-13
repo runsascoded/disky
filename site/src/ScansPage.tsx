@@ -19,7 +19,7 @@ import { fmtBytesPrecise, fmtN } from './types'
 import { RunScanButton } from './RunScan'
 import { useUnits } from './units'
 import { useIsAdmin, useStores } from './auth'
-import { HistoryAdmin } from './HistoryAdmin'
+import { HistoryAdmin, useHistoryConfigured } from './HistoryAdmin'
 import { retentionLabel, retentionRunSelectable, retentionScans, retentionSpanScans, toggleRetentionScan, type RetentionPlan, type RetentionScan, type RetentionSource } from './scanRetention'
 import { DEFAULT_STORE, type Store } from './stores'
 import { useStore } from './store'
@@ -355,7 +355,7 @@ export function ScansPage() {
   const { store, scanHref } = useScansStore()
   const { hash } = useLocation()
   const q = useScanRuns(store)
-  const admin = useIsAdmin(), canRetention = admin && store.key === DEFAULT_STORE.key
+  const admin = useIsAdmin(), canRetention = useHistoryConfigured(admin && store.key === DEFAULT_STORE.key)
   const [retentionOpen, setRetentionOpen] = useState(hash === '#history')
   const [reviewedPlan, setReviewedPlan] = useState<RetentionPlan | null>(null)
   const [jobsTarget, setJobsTarget] = useState<HTMLDivElement | null>(null)
