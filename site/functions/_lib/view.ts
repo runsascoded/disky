@@ -3068,6 +3068,16 @@ export interface Diff {
  *  only where more names than this crossed the floor or came and went under directories both scans hold (a subtree
  *  that came or went whole is one); then the lightest stay folded (`lookups_capped`). */
 export const LOOKUP_CAP = 240
+/** The deployment's lookup budget: `DIFF_LOOKUP_CAP` (a count ≥ 0), unset `LOOKUP_CAP`. `0` reads no point lookups:
+ *  every name one side drew that the other didn't folds into its parent's `(other)` on both sides (`lookups_capped`),
+ *  so a diff costs only its two views. Anything else set is an error, not a default. */
+export function lookupCapOf(env: { DIFF_LOOKUP_CAP?: string }): number {
+  const v = env.DIFF_LOOKUP_CAP?.trim()
+  if (!v) return LOOKUP_CAP
+  const n = Number(v)
+  if (!Number.isInteger(n) || n < 0) throw new Error(`DIFF_LOOKUP_CAP = "${v}": not a count`)
+  return n
+}
 /** The walk's answer version, in the diff's edge-cache key (`&wv=`, `api/diff.ts`): bumped when the same inputs answer
  *  differently, so a deploy never serves an earlier walk's cached body (`CACHE_V` would move every view's key too).
  *  2 (2026-11-05): no lookups under a path a scan has no row for, and the budget spent heaviest first: before, a
@@ -3231,7 +3241,7 @@ export async function buildDiff(env0: Env, o: DiffOpts): Promise<Diff> {
   // A filtered diff's lookups stop after `FILTER_WALK_MS` as they do past `LOOKUP_CAP` (`lookups_capped`).
   let late = false
   let lookupsOff = false
-  const lookupCap = o.lookupCap ?? LOOKUP_CAP
+  const lookupCap = o.lookupCap ?? lookupCapOf(env0)
   const walkMs = o.walkMs ?? FILTER_WALK_MS
   const walkOver = () => (late ||= !!query && performance.now() - walkStart > walkMs)
   // A side whose view root the query matches read it whole (no forest): that root is its one match, at its total.

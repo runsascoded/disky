@@ -159,6 +159,8 @@ export interface Env {
   /** `1`: Δ-mode diffs (`dm=delta`, unscoped) by lazy descent over the interval store (`_lib/diffDescent.ts`; its
    *  planner hands busy, broad paths to the as-of walk). Needs no index beyond the store's. */
   DIFF_DESCENT?: string
+  /** A diff's point-lookup budget (`_lib/view.ts` `lookupCapOf`): a count, `0` none; unset `LOOKUP_CAP`. */
+  DIFF_LOOKUP_CAP?: string
   /** `1`: a lens, owner or class scoped series reads `SERIES_CHUNK` scans a request, the client filling the rest
    *  (`/api/series`' `chunks`, `readPathHistory`). Off until measured on dev (specs/root-owner-history.md). */
   OWNER_HISTORY_BATCH?: string
