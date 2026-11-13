@@ -142,7 +142,7 @@ describe('interval store g7: no owner axis', () => {
     for (const [from, to] of [[S1, S2], [S2, S3], [S1, S3]]) {
       for (const scope of SCOPES) {
         const o = { ...base, from, to, path: '', top: 500, ...scope }
-        const shape = (d: Awaited<ReturnType<typeof buildDiff>> | string) => typeof d === 'string' ? d : { rows: d.rows, totals: [d.total_a, d.total_b, d.objects_a, d.objects_b] }
+        const shape = (d: Awaited<ReturnType<typeof buildDiff>> | string) => typeof d === 'string' ? d : { rows: d.rows, totals: [d.bytes_before, d.bytes_after, d.objects_before, d.objects_after] }
         const [got, gets] = await perScanGets(() => buildDiff(envs.iv, o).catch(err))
         const want = await buildDiff(envs.perScan, o).catch(err)
         expect({ o, got: shape(got), gets }).toEqual({ o, got: shape(want), gets: [] })

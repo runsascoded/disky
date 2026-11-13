@@ -15,7 +15,7 @@ const thrown = (f: () => unknown): string | null => {
 
 it('accepts small configured buckets and runtime additions, but rejects unknown routes', () => {
   const store = { ...TEST_REGISTRY[0], buckets: ['large', 'tiny'] }
-  expect(['large', 'tiny', 'new-bucket', 'typo'].map(name => knownBucket(name, store, [{ n: 'large' }, { n: 'new-bucket' }])))
+  expect(['large', 'tiny', 'new-bucket', 'typo'].map(name => knownBucket(name, store, [{ name: 'large' }, { name: 'new-bucket' }])))
     .toEqual([true, true, true, false])
 })
 

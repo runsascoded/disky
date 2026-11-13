@@ -687,6 +687,7 @@ def test_soft_steps_classification():
         "bucket-check": "side",
         "access-ingest": "converges",
         "access-r2": "converges",
+        "access-r2-receipt": "side converges",
         "static-names": "converges",
         "publish-r2": "",
         "interval-store": "converges",
@@ -708,6 +709,23 @@ def test_soft_steps_classification():
         "gcp-cost": "side",
         "soft-delete": "side",
     }
+
+
+def test_receipt_step_uses_a_durable_checkpoint_and_separate_writer_binding(tmp_path, env):
+    from disk_tree.env import name as env_name
+
+    env.update(R2_ENDPOINT='https://index.example.org')
+    opts = {**NL_OPTS, 'access-r2': {'state': 'r2://archive/state.json'},
+            'access-r2-receipt': {'checkpoint': 'gs://data/closed.parquet', 'publish': 'r2://receipts/r2-read.json',
+                                  'endpoint': 'https://receipts.example.org',
+                                  'secrets': {'RECEIPT_ACCESS_KEY_ID': 'receipt-writer'}}}
+    c = ctx(tmp_path, env, steps=['access-r2-receipt'], secrets={'AWS_ACCESS_KEY_ID': 'source-reader'}, options=opts)
+    assert c.profile.secrets_for('access-r2')['AWS_ACCESS_KEY_ID'] == 'source-reader'
+    assert c.profile.secrets_for('access-r2-receipt')['RECEIPT_ACCESS_KEY_ID'] == 'receipt-writer'
+    S.access_r2_receipt(c, None)
+    work = '<tmp>/t/dt-scan/2026-10-16T1200/access-r2-receipt'
+    assert c.sh_impl.calls == [f'dt-cloud access r2-receipt -c gs://data/closed.parquet -o {work}/receipt.json -p r2://receipts/r2-read.json -w {work}/readback']
+    assert c.sh_impl.envs[-1][env_name('R2_ENDPOINT_URL')] == 'https://receipts.example.org'
 
 
 def test_the_sites_step_table_is_the_registrys():

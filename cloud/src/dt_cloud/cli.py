@@ -3886,9 +3886,10 @@ from .scan_retire import retire_cmd as _scan_retire  # noqa: E402
 _scan.add_command(_scan_retire)
 
 
-from .cf_usage import cli as _cf_usage  # noqa: E402
+from .cf_usage import cli as _cf_usage, generations_cli as _cf_generations  # noqa: E402
 
 main.add_command(_cf_usage)
+main.add_command(_cf_generations)
 
 from .deploy_cost import cost_cmd as _deploy_cost  # noqa: E402
 
@@ -3922,10 +3923,11 @@ from .eligibility_census import eligibility_census_cmd as _eligibility_census  #
 
 main.add_command(_eligibility_census)
 
-from .r2_checkpoint import sync_cmd as _r2_sync  # noqa: E402
+from .r2_checkpoint import receipt_cmd as _r2_receipt, sync_cmd as _r2_sync  # noqa: E402
 from .age_bench import age_bench_cmd as _age_bench  # noqa: E402
 
 access.add_command(_r2_sync)
+access.add_command(_r2_receipt)
 main.add_command(_age_bench)
 
 from .history_jobs import cli as _history  # noqa: E402

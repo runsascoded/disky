@@ -54,10 +54,10 @@ it.each([{ groups: 1, rows: 700_001 }, { groups: 251, rows: 1 }])('uses the path
   expect({ tier: view.tier, tree: view.tree }).toEqual({
     tier: 'path',
     tree: {
-      n: 'e', k: 'dir', b: 20, o: 3, a: 6, t: 7, d: 0, cb: cb[''], us: [['alice', 10]],
-      c: [
-        { n: 'd.json', k: 'file', b: 20, o: 1, a: 6, t: 7, d: 0, cb: cb['/d.json'] },
-        { n: 'e', k: 'dir', b: 10, o: 1, a: 5, t: 7, d: 0, cb: cb['/e'] },
+      name: 'e', kind: 'dir', bytes: 20, objects: 3, last_read: 6, mtime: 7, class_bytes: cb[''], owners: [['alice', 10]],
+      children: [
+        { name: 'd.json', kind: 'file', bytes: 20, objects: 1, last_read: 6, mtime: 7, class_bytes: cb['/d.json'] },
+        { name: 'e', kind: 'dir', bytes: 10, objects: 1, last_read: 5, mtime: 7, class_bytes: cb['/e'] },
       ],
     },
   })

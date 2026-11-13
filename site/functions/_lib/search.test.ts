@@ -285,9 +285,9 @@ describe('the filter view', () => {
   it('the `regex` syntax end to end: the full-path regex, never from the index', async () => {
     const o = { ...base, path: 'bk', threshold: 0 }
     const v = await buildView(env, { ...o, date: SEARCH, query: parseQuery('^bk/tmp/ttl=\\d+d$', regex)! })
-    expect([v.matches, v.matched, v.tree.b, v.tier.split('+')[0]]).toEqual([
+    expect([v.matches, v.matched, v.tree.bytes, v.tier.split('+')[0]]).toEqual([
       ['bk/tmp/ttl=14d', 'bk/tmp/ttl=7d'],
-      [{ path: 'bk/tmp/ttl=14d', b: 5 * MiB, o: 2 }, { path: 'bk/tmp/ttl=7d', b: 2 * MiB, o: 1 }],
+      [{ path: 'bk/tmp/ttl=14d', bytes: 5 * MiB, objects: 2 }, { path: 'bk/tmp/ttl=7d', bytes: 2 * MiB, objects: 1 }],
       7 * MiB,
       'path',
     ])
@@ -309,12 +309,12 @@ describe('the filter view', () => {
     expect(want).toEqual(['bk/tmp/ttl=14d', 'bk/tmp/ttl=7d'])
     for (const date of [SEARCH, PLAIN]) {
       const v = await buildView(env, { ...base, date, path: '', threshold: 0, maxDepth: 1, query: parseQuery('ttl=')! })
-      expect([date, v.matches, v.matched?.map(m => m.b), v.tree.b, coverage(v)]).toEqual([date, want, [5 * MiB, 2 * MiB], 7 * MiB, date === PLAIN ? { approximate: APPROX_NO_INDEX } : {}])
+      expect([date, v.matches, v.matched?.map(m => m.bytes), v.tree.bytes, coverage(v)]).toEqual([date, want, [5 * MiB, 2 * MiB], 7 * MiB, date === PLAIN ? { approximate: APPROX_NO_INDEX } : {}])
     }
     // The diff's first paint (`depth=1`), with and without sidecars on either side.
     for (const [from, to] of [[PLAIN, SEARCH], [PLAIN, PLAIN]]) {
       const d = await buildDiff(env, { ...base, from, to, top: 100, path: '', threshold: 0, depth: 1, query: parseQuery('ttl=')! })
-      expect([from, to, d.matched?.map(m => m.path), d.total_a, d.total_b, d.approximateReason]).toEqual([from, to, want, 7 * MiB, 7 * MiB, APPROX_NO_INDEX])
+      expect([from, to, d.matched?.map(m => m.path), d.bytes_before, d.bytes_after, d.approximateReason]).toEqual([from, to, want, 7 * MiB, 7 * MiB, APPROX_NO_INDEX])
     }
   })
 
@@ -348,18 +348,18 @@ describe('the filter view', () => {
   it('finds a match below the pixel budget the pre-index read can’t see', async () => {
     const o = { ...base, path: '', query: parseQuery('notes')! }
     const [a, b] = await Promise.all([buildView(env, { ...o, date: SEARCH }), buildView(env, { ...o, date: PLAIN })])
-    expect([a.matches, a.matched, a.tree.b]).toEqual([['bk/iris/notes.txt'], [{ path: 'bk/iris/notes.txt', b: 50, o: 1 }], 50])
-    expect([b.matches, b.tree.b]).toEqual([[], 0])
+    expect([a.matches, a.matched, a.tree.bytes]).toEqual([['bk/iris/notes.txt'], [{ path: 'bk/iris/notes.txt', bytes: 50, objects: 1 }], 50])
+    expect([b.matches, b.tree.bytes]).toEqual([[], 0])
   })
 
   it('`matched` is heaviest first', async () => {
     const v = await buildView(env, { ...base, date: SEARCH, path: '', query: parseQuery('safetensors|ttl=')! })
     expect(v.matched).toEqual([
-      { path: 'bk/models/llama/model-00001-of-00002.safetensors', b: 8 * MiB, o: 1 },
-      { path: 'bk/models/llama/model-00002-of-00002.safetensors', b: 8 * MiB, o: 1 },
-      { path: 'bk/tmp/ttl=14d', b: 5 * MiB, o: 2 },
-      { path: 'bk/tmp/ttl=7d', b: 2 * MiB, o: 1 },
-      { path: 'bk/models/tiny.safetensors', b: 10, o: 1 },
+      { path: 'bk/models/llama/model-00001-of-00002.safetensors', bytes: 8 * MiB, objects: 1 },
+      { path: 'bk/models/llama/model-00002-of-00002.safetensors', bytes: 8 * MiB, objects: 1 },
+      { path: 'bk/tmp/ttl=14d', bytes: 5 * MiB, objects: 2 },
+      { path: 'bk/tmp/ttl=7d', bytes: 2 * MiB, objects: 1 },
+      { path: 'bk/models/tiny.safetensors', bytes: 10, objects: 1 },
     ])
   })
 
@@ -378,7 +378,7 @@ describe('the filter view', () => {
     // The same generation on both sides: one finds its roots by index, the
     // other by the pre-index read; nothing differs.
     const d = await buildDiff(env, { ...base, from: PLAIN, to: SEARCH, top: 100, path: '', threshold: 0, query: parseQuery('ttl')! })
-    expect([d.rows, d.tier, d.total_a, d.total_b]).toEqual([[], 'search+path', 7352542, 7352542])
+    expect([d.rows, d.tier, d.bytes_before, d.bytes_after]).toEqual([[], 'search+path', 7352542, 7352542])
     // The sidecar-less side was read without the index: the diff says so.
     expect([d.partial, d.approximate, d.approximateReason]).toEqual([undefined, true, APPROX_NO_INDEX])
     expect(d.matched?.map(m => m.path)).toEqual(['bk/fill/zz-TTL-b', 'bk/fill/zz-ttl-a', 'bk/iris/TTL-misc', 'bk/tmp/ttl=14d', 'bk/tmp/ttl=7d', 'zz/Checkpoints/ttl'])
@@ -386,10 +386,10 @@ describe('the filter view', () => {
 })
 
 /** A view tree as `[path, bytes]` rows, depth first (folds as `…/(other)`). */
-function flat(n: { n: string; b: number; c?: unknown[] }, at = ''): [string, number][] {
+function flat(n: { name: string; bytes: number; children?: unknown[] }, at = ''): [string, number][] {
   const p = at === '' ? '' : at
-  const out: [string, number][] = [[p, n.b]]
-  for (const c of (n.c ?? []) as { n: string; b: number; c?: unknown[] }[]) out.push(...flat(c, p ? `${p}/${c.n}` : c.n))
+  const out: [string, number][] = [[p, n.bytes]]
+  for (const c of (n.children ?? []) as { name: string; bytes: number; children?: unknown[] }[]) out.push(...flat(c, p ? `${p}/${c.name}` : c.name))
   return out
 }
 
@@ -398,7 +398,7 @@ describe('NOT: excluded descendants leave their roots’ totals and the tree', (
   it('subtracts the outermost excluded paths: `tmp -ckpt`', async () => {
     const v = await buildView(env, { ...base, date: SEARCH, path: '', query: parseQuery('tmp -ckpt')! })
     // bk/tmp holds 10 MiB; its `run-a/ckpt` (4 MiB, one object) is excluded.
-    expect([v.matches, v.matched, v.excluded, v.tree.b, v.tier]).toEqual([['bk/tmp'], [{ path: 'bk/tmp', b: 6 * MiB, o: 3 }], ['bk/tmp/ttl=14d/run-a/ckpt'], 6 * MiB, 'search+path'])
+    expect([v.matches, v.matched, v.excluded, v.tree.bytes, v.tier]).toEqual([['bk/tmp'], [{ path: 'bk/tmp', bytes: 6 * MiB, objects: 3 }], ['bk/tmp/ttl=14d/run-a/ckpt'], 6 * MiB, 'search+path'])
     expect(flat(v.tree)).toEqual([
       ['', 6 * MiB], ['bk', 6 * MiB], ['bk/tmp', 6 * MiB],
       ['bk/tmp/scratch', 3 * MiB], ['bk/tmp/scratch/q.bin', 3 * MiB],
@@ -411,7 +411,7 @@ describe('NOT: excluded descendants leave their roots’ totals and the tree', (
     const v = await buildView(env, { ...base, date: SEARCH, path: 'bk', query: parseQuery('-fill -models')! })
     const all = await allRows(PLAIN)
     const size = (p: string) => all.filter(r => r.path === p).reduce((n, r) => n + r.size, 0)
-    expect([v.matches, v.excluded, v.tree.b]).toEqual([['bk'], ['bk/fill', 'bk/models'], size('bk') - size('bk/fill') - size('bk/models')])
+    expect([v.matches, v.excluded, v.tree.bytes]).toEqual([['bk'], ['bk/fill', 'bk/models'], size('bk') - size('bk/fill') - size('bk/models')])
   })
 
   it('only negatives at the store root: the root is the match root, and still loses its exclusions', async () => {
@@ -419,7 +419,7 @@ describe('NOT: excluded descendants leave their roots’ totals and the tree', (
     const all = await allRows(PLAIN)
     const size = (p: string) => all.filter(r => r.path === p).reduce((n, r) => n + r.size, 0)
     const total = all.filter(r => r.depth === 1).reduce((n, r) => n + r.size, 0)
-    expect([v.matches, v.excluded, v.tree.b]).toEqual([[''], ['bk/fill', 'bk/models'], total - size('bk/fill') - size('bk/models')])
+    expect([v.matches, v.excluded, v.tree.bytes]).toEqual([[''], ['bk/fill', 'bk/models'], total - size('bk/fill') - size('bk/models')])
   })
 
   it('the index and the pre-index read agree (threshold 0)', async () => {
@@ -446,13 +446,13 @@ describe('NOT: excluded descendants leave their roots’ totals and the tree', (
     const size = (p: string) => all.filter(r => r.path === p).reduce((n, r) => n + r.size, 0)
     const o = { w: 1280, h: 800, minArea: 12, atten: 1, path: '', query: parseQuery('bk -notes')! }
     const [a, b] = await Promise.all([buildView(env, { ...o, date: SEARCH }), buildView(env, { ...o, date: PLAIN })])
-    expect([a.excluded, a.tree.b]).toEqual([['bk/iris/notes.txt'], size('bk') - 50])
-    expect([b.excluded, b.tree.b]).toEqual([['bk/iris/notes.txt'], size('bk') - 50])
+    expect([a.excluded, a.tree.bytes]).toEqual([['bk/iris/notes.txt'], size('bk') - 50])
+    expect([b.excluded, b.tree.bytes]).toEqual([['bk/iris/notes.txt'], size('bk') - 50])
     expect([coverage(a), coverage(b)]).toEqual([{}, { approximate: APPROX_NO_INDEX }])
   })
 
   it('a filtered diff subtracts on both sides', async () => {
     const d = await buildDiff(env, { ...base, from: PLAIN, to: SEARCH, top: 100, path: '', query: parseQuery('tmp -ckpt')! })
-    expect([d.rows, d.total_a, d.total_b, d.matched]).toEqual([[], 6 * MiB, 6 * MiB, [{ path: 'bk/tmp', b: 6 * MiB, o: 3 }]])
+    expect([d.rows, d.bytes_before, d.bytes_after, d.matched]).toEqual([[], 6 * MiB, 6 * MiB, [{ path: 'bk/tmp', bytes: 6 * MiB, objects: 3 }]])
   })
 })

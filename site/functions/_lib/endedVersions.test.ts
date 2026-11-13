@@ -52,7 +52,7 @@ const slice = (r: Row) => `${r.path} ${r.usr ?? '-'} ${r.size}`
 const folded = (date: string): Promise<IndexHandle> => openIndex(asOfScans(store, [date]), date, 'path')
 const sliced = (date: string): Promise<IndexHandle> => openIndex(slices(asOfScans(store, [date])), date, 'path')
 /** A view's tiles, `path bytes objects`. */
-const tiles = (n: ViewNode, at = ''): string[] => [`${at}${n.n} ${n.b} ${n.o}`, ...(n.c ?? []).flatMap(c => tiles(c, `${at}${n.n}/`))]
+const tiles = (n: ViewNode, at = ''): string[] => [`${at}${n.name} ${n.bytes} ${n.objects}`, ...(n.children ?? []).flatMap(c => tiles(c, `${at}${n.name}/`))]
 
 beforeAll(() => {
   ;(globalThis as unknown as { caches: unknown }).caches = { default: { match: async () => undefined, put: async () => {} } }

@@ -12,7 +12,7 @@ from . import interval_store as ist
 from . import tree_mem as tm
 from .append_runner import latest_key
 from .blobstore import Store, mirror, upload_new
-from .interval_local import publish_order, publish_tier
+from .interval_local import publish_order, publish_tier, reads
 from .static_local import _check_gen, workdir
 
 RECORD = 'object-version-migration.json'
@@ -29,7 +29,7 @@ def migrate(store: Store, gen: str, target: str, work: Path, *, ranges_gen: str 
     if store.listing(prefix):
         raise ValueError(f"{prefix}: refusing to overwrite a generation")
     source = work / "source"
-    mirror(store, source_prefix, source, keep=lambda key: not key.startswith(("served/", "rd/", "digest/", "sv-digest/", "verify/")))
+    mirror(store, source_prefix, source, keep=reads)
     if not (source / "scans.json").exists():
         raise ValueError(f"{source_prefix}: missing scans.json")
     if not (source / "ranges.json").exists():
@@ -42,6 +42,12 @@ def migrate(store: Store, gen: str, target: str, work: Path, *, ranges_gen: str 
         raise ValueError(f"{source_prefix}: already carries opaque object versions")
     manifest = latest_key([p.relative_to(source).as_posix() for p in (source / "manifests").glob("*.json")])
     runs = json.loads((source / manifest).read_text())["runs"] if manifest else []
+    from .interval_level import LEVEL_DOC, leveled, record_level
+
+    if not leveled(base, source) and any((source / r['key'] / LEVEL_DOC).is_file() for r in runs):
+        # A legacy base may lack the optional sort while its newer runs have it.
+        # The fold rebuilds it over the complete history in the new generation.
+        (source / 'scans.json').write_text(json.dumps(record_level(base)) + '\n')
     out = work / "output"
     doc, rows, _, _ = ic.fold_gen(source, out, work / "fold", gen=gen, runs=runs, threads=threads, mem=mem,
                                  rg_rows=rg_rows, identity=ist.OBJECT_VERSION_FIELD)

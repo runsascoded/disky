@@ -59,10 +59,10 @@ describe('union picker sources', () => {
 describe('union answers on the page', () => {
   it('a root’s store and scan (`src`/`at`); a node without them has none; an unlisted store is its key', () => {
     expect([
-      rootSource({ src: 'meta', at: '2026-10-14' }, marks),
-      rootSource({ src: 'primary', at: '2026-10-14' }, marks),
+      rootSource({ store: 'meta', scan: '2026-10-14' }, marks),
+      rootSource({ store: 'primary', scan: '2026-10-14' }, marks),
       rootSource({}, marks),
-      rootSource({ src: 'other', at: '2026-10-14' }, marks),
+      rootSource({ store: 'other', scan: '2026-10-14' }, marks),
     ]).toEqual([
       { mark: { source: 'meta', label: 'Index', icon: '/icons/meta.svg' }, at: '2026-10-14' },
       { mark: { source: 'primary', label: 'Public R2 buckets' }, at: '2026-10-14' },
@@ -96,13 +96,13 @@ describe('union answers on the page', () => {
 // series and the diff asked the union ROOT with `q=` (a 400: "drill into one store"; the chart: "fewer than two
 // scans hold this path"); they must ask the lone root's path, which its member answers.
 describe('the series and diff path under a filtered union root', () => {
-  const one = { c: [{ n: 'marin-na' }] }
-  const two = { c: [{ n: 'marin-na' }, { n: 'mb' }] }
+  const one = { children: [{ name: 'marin-na' }] }
+  const two = { children: [{ name: 'marin-na' }, { name: 'mb' }] }
   it('the lone root the map opens: its path; several roots, or none: the root; not loaded: wait', () => {
     expect([
       scopedPath('', { union: true, filtered: true, tree: one }),
       scopedPath('', { union: true, filtered: true, tree: two }),
-      scopedPath('', { union: true, filtered: true, tree: { c: [] } }),
+      scopedPath('', { union: true, filtered: true, tree: { children: [] } }),
       scopedPath('', { union: true, filtered: true, tree: undefined }),
     ]).toEqual(['marin-na', '', '', undefined])
   })

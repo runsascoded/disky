@@ -7,6 +7,7 @@
 import type { D1Database } from '@cloudflare/workers-types'
 import { ADMIN_SCOPE, type Env as AuthEnv, json, requireScope } from '../../_lib/auth.js'
 import { batchConfig, type BatchEnv, notConfigured } from '../../_lib/batchConfig.js'
+import { sweepsOff, SWEEPS_OFF } from '../../_lib/dispatch.js'
 import { gcpToken } from '../../_lib/gcp.js'
 import { auditRunControl } from '../../_lib/plans.js'
 
@@ -15,6 +16,7 @@ type Env = AuthEnv & BatchEnv & { DB?: D1Database }
 export const onRequestPost = async (ctx: { request: Request; env: Env }): Promise<Response> => {
   const gated = await requireScope(ctx, ADMIN_SCOPE)
   if (gated instanceof Response) return gated
+  if (sweepsOff(ctx.env)) return json({ error: SWEEPS_OFF }, 403)
   if (!ctx.env.GCP_SA_KEY) return json({ error: 'stop not configured (no GCP_SA_KEY)' }, 503)
   const cfg = batchConfig(ctx.env, ['DATA_BUCKET'])
   if ('missing' in cfg) return json({ error: notConfigured('stop', cfg.missing) }, 503)

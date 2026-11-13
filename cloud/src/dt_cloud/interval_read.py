@@ -154,7 +154,7 @@ class Agg:
     o: int = 0
     wts: float = 0.0
     wb: int = 0
-    m: int | None = None  # newest stamp at or under the path (epoch s) — the node's `d`
+    m: int | None = None  # newest stamp at or under the path (epoch s) — the node's `mtime`
     a: int | None = None
     cb: dict[str, int] = field(default_factory=dict)
     ub: dict[str, int] = field(default_factory=dict)
@@ -199,21 +199,22 @@ def subtract(parent: Agg, kids: list[Agg]) -> Agg:
 
 
 def node(name: str, a: Agg) -> dict:
-    n = {"n": name, "k": a.kind or "dir", "b": a.b, "o": a.o}
-    if a.m is not None:
-        n["d"] = a.m // 86400  # newest write, not the byte-weighted mean (site `view.ts` `display`)
+    """A map node in the site's wire names (`view.ts` `ViewNode`, specs/descriptive-field-names.md §3a)."""
+    n = {"name": name, "kind": a.kind or "dir", "bytes": a.b, "objects": a.o}
+    if a.m:
+        n["mtime"] = a.m  # newest write (epoch s), not the byte-weighted mean; 0 is a listing's unknown (`view.ts` `display`)
     if a.a is not None:
-        n["a"] = a.a
+        n["last_read"] = a.a
     if a.cb:
-        n["cb"] = dict(sorted(a.cb.items(), key=lambda x: -x[1]))
+        n["class_bytes"] = dict(sorted(a.cb.items(), key=lambda x: -x[1]))
     if a.ub:
-        n["us"] = sorted(([u, b] for u, b in a.ub.items()), key=lambda x: (-x[1], x[0]))  # ties by name (the reader keeps row order)
+        n["owners"] = sorted(([u, b] for u, b in a.ub.items()), key=lambda x: (-x[1], x[0]))  # ties by name (the reader keeps row order)
     return n
 
 
 def tree(path: str, root: Agg, kept: dict[str, Agg], thr_at, root_name: str = "all buckets") -> dict:
     """`buildView`'s tree over the kept tiles: children by bytes, then `(other)` when the rest clears
-    the first child's depth's threshold, `f` = the parent's children not drawn (where it knows them)."""
+    the first child's depth's threshold, `folded` = the parent's children not drawn (where it knows them)."""
     kids: dict[str, list[str]] = {}
     for p in kept:
         par = parent_of(p)
@@ -224,12 +225,12 @@ def tree(path: str, root: Agg, kept: dict[str, Agg], thr_at, root_name: str = "a
         cps = kids.get(p, [])
         if not cps:
             return n
-        n["c"] = sorted((build(cp, kept[cp]) for cp in cps), key=lambda x: -x["b"])
+        n["children"] = sorted((build(cp, kept[cp]) for cp in cps), key=lambda x: -x["bytes"])
         rest = subtract(a, [kept[cp] for cp in cps])
         if rest.b > thr_at(depth_of(cps[0])):
             o = node("(other)", rest)
-            o["f"] = max(0, a.nc - len(cps)) if a.nc is not None else None
-            n["c"].append(o)
+            o["folded"] = max(0, a.nc - len(cps)) if a.nc is not None else None
+            n["children"].append(o)
         return n
 
     return build(path, root)
@@ -238,7 +239,7 @@ def tree(path: str, root: Agg, kept: dict[str, Agg], thr_at, root_name: str = "a
 def canon(n: dict) -> str:
     """A node without its children as canonical JSON (sorted keys, compact): what orders siblings that tie
     on bytes and name (`intervalStore.test.ts` `canon` is the same)."""
-    return json.dumps({k: v for k, v in n.items() if k != "c"}, sort_keys=True, separators=(",", ":"))
+    return json.dumps({k: v for k, v in n.items() if k != "children"}, sort_keys=True, separators=(",", ":"))
 
 
 def flatten(t: dict) -> dict[str, dict]:
@@ -252,9 +253,9 @@ def flatten(t: dict) -> dict[str, dict]:
         while k in out:
             i += 1
             k = f"{p}#{i}"
-        out[k] = {x: v for x, v in n.items() if x != "c"}
-        for c in sorted(n.get("c", []), key=lambda c: (-c["b"], c["n"], canon(c))):
-            rec(c, f"{p}/{c['n']}")
+        out[k] = {x: v for x, v in n.items() if x != "children"}
+        for c in sorted(n.get("children", []), key=lambda c: (-c["bytes"], c["name"], canon(c))):
+            rec(c, f"{p}/{c['name']}")
 
     rec(t, "")
     return out

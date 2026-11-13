@@ -112,7 +112,7 @@ def test_every_canonical_table_preserves_all_values_and_owner_keys(tmp_path):
     values = {
         "depth": 2, "path": "b/x", "vf": 10, "vt": OPEN, "kind": "file", "size": 3,
         "n_files": 1, "n_children": 0, "n_desc": 0, "mtime": 17, "wts": 17.125, "wb": 1,
-        "c2": 0, "c3": 0, "c4": 0, "us": "[]", "last_read": 9, "usr": None, "tot": 3,
+        **{c: 0 for c in ist.CLS}, "us": "[]", "last_read": 9, "usr": None, "tot": 3,
         "user": None, "source": "manual", "evidence": "review", "version": '"etag"',
     }
     expected = {}

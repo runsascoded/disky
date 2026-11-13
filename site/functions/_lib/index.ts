@@ -43,6 +43,7 @@ import { newestManifest } from './manifests.js'
 import { colo, inFlight, IsoMap, IsoSet, join, JOIN, type Join, Memo, registerIsolate, reqOf, scopeOf, shared, STALLED, track } from './shared.js'
 import { d1Variant, isPrimary, PRIMARY_STORE, storeKey } from './stores.js'
 import { compressors } from './zstd.js'
+import { currentMeter } from './usage.js'
 
 /** A leaf of the stored parquet schema (`index_schema.schema_json`). */
 export interface SchemaElement { type: string; name: string; repetition_type: string; converted_type?: string }
@@ -112,6 +113,8 @@ export type FileSlice = { byteLength: number; slice: (s: number, e?: number) => 
  * (`withTrace`), never on the shared handle. */
 export type Trace = (name: string, ms: number, desc?: string) => void
 export const withTrace = <H extends IndexHandle>(h: H, trace?: Trace): H => (trace ? { ...h, trace } : h)
+/** `h` reading whole (`IndexHandle.whole`), on a copy. */
+export const readWhole = <H extends IndexHandle>(h: H): H => ({ ...h, whole: true })
 const now = () => performance.now()
 
 /** A bound on the distinct footer groups a plan reads (`IndexHandle.footerBudget`), across its tiers and rect batches. */
@@ -153,6 +156,10 @@ interface D1Handle {
   /** The distinct footer groups a plan over this handle (and its runs, sharing one) may read at most (`pqGroups`; past
    *  it, `TooWide`): a plan started beside the request's gate (`planLevel`) is bounded by it, whatever the rects. */
   footerBudget?: FooterBudget
+  /** Every row group a read of this handle selects must be read: one the footer returns no metadata for throws
+   *  (`GroupUnread`), where a read otherwise answers without its rows. For a read whose "no row" is taken as the
+   *  path's absence (a diff's lookups, `readWhole`); set on a per-request copy, as `trace`. */
+  whole?: true
   /** Where the handle's own files are read from, when not the deployment's store (the interval
    *  store on `INDEX_R2`). */
   src?: ByteStore
@@ -622,8 +629,12 @@ export type StaticGenEnv = { STATIC_GEN?: string; STATIC_CURRENT_KEY?: string; I
  *  without a pointer (an unset `STATIC_GEN` reads as it always has). */
 export async function withStaticGen<E extends StaticGenEnv>(env: E): Promise<E> {
   env = await withHistoryVersion(env)
-  if (env.STATIC_GEN?.trim()) return env
+  if (env.STATIC_GEN?.trim()) {
+    currentMeter()?.staticGen.add(env.STORE_KEY || 'primary', env.STATIC_GEN.trim())
+    return env
+  }
   const gen = await staticCurrentGen(env)
+  if (gen) currentMeter()?.staticGen.add(env.STORE_KEY || 'primary', gen)
   return gen ? { ...env, STATIC_GEN: gen } : env
 }
 
@@ -2388,6 +2399,25 @@ async function selectSpans1(h: IndexHandle, rects: Rect[], cap = 4000, bMin = 0,
   return res.results.map(r => ({ rg: r.rg, dMin: num(r.d_min), dMax: num(r.d_max), pMin: r.p_min, pMax: r.p_max, bMax: num(r.b_max), rowStart: num(r.row_start), rowEnd: num(r.row_end) }))
 }
 
+/** A row group a read selected that the footer returned no metadata for: its rows were not read. (D1's rows for the
+ *  scan deleted between the span query and the metadata's, a footer file short of a group.) */
+export class GroupUnread extends Error {
+  constructor(h: IndexHandle, rg: number) {
+    super(`row group ${rg} of ${h.date}'s \`${h.variant}\` sort has no metadata: its rows were not read`)
+    this.name = 'GroupUnread'
+  }
+}
+
+/** `spans`' groups of tier `t` with their metadata, in order. A group without is left out, and the read answers
+ *  without its rows, unless it reads whole (`must`, `IndexHandle.whole`): then it throws. */
+function withJson(t: IndexHandle, spans: Span[], jsons: Map<number, string>, must?: boolean): { rg: number; json: string }[] {
+  return spans.flatMap(s => {
+    const json = jsons.get(s.rg)
+    if (!json && must) throw new GroupUnread(t, s.rg)
+    return json ? [{ rg: s.rg, json }] : []
+  })
+}
+
 /** Fetch stored metadata JSON for a set of row groups. */
 async function fetchGroupJson(h: IndexHandle, rgs: number[]): Promise<Map<number, string>> {
   const out = new Map<number, string>()
@@ -2574,7 +2604,7 @@ async function decodeSpans(h: IndexHandle, kept: Span[], keep: (r: Row) => boole
       const mine = kept.filter(s => (s.tier ?? 0) === i)
       if (!mine.length) return []
       const jsons = await fetchGroupJson(t, mine.map(s => s.rg))
-      return (await readGroupsCached(t, mine.flatMap(s => { const json = jsons.get(s.rg); return json ? [{ rg: s.rg, json }] : [] }), rows => rows.filter(keep), stop, true, pre)).flat()
+      return (await readGroupsCached(t, withJson(t, mine, jsons, h.whole), rows => rows.filter(keep), stop, true, pre)).flat()
     })))
     h.trace?.('groups', now() - t0, h.variant)
     const all = got.flat()
@@ -2585,7 +2615,7 @@ async function decodeSpans(h: IndexHandle, kept: Span[], keep: (r: Row) => boole
   h.trace?.('rgjson', now() - t0)
   h.trace?.('ngroups', kept.length)
   t0 = now()
-  const perGroup = await readGroupsCached(h, kept.flatMap(s => { const json = jsons.get(s.rg); return json ? [{ rg: s.rg, json }] : [] }), rows => rows.filter(keep), stop, versions, pre)
+  const perGroup = await readGroupsCached(h, withJson(h, kept, jsons, h.whole), rows => rows.filter(keep), stop, versions, pre)
   h.trace?.('groups', now() - t0, h.variant)
   const rows = perGroup.flat()
   h.trace?.('held', rows.length)
@@ -3988,29 +4018,23 @@ export async function readAsks(
     const got = await Promise.all(tiersOf(h).map((_, i) => onTier(h, i, async t => {
       const mine = spans.filter(s => (s.tier ?? 0) === i)
       if (!mine.length) return []
-      const jsons = await fetchGroupJson(t, mine.map(s => s.rg))
+      const withMeta = withJson(t, mine, await fetchGroupJson(t, mine.map(s => s.rg)), h.whole)
       const per = columns
-        ? await mapLimit(mine, GROUP_READS, async s => {
-          const j = jsons.get(s.rg)
-          return j ? (await readGroupVersions(t, j, columns)).filter(keep) : []
-        })
-        : await readGroupsCached(t, mine.flatMap(s => { const json = jsons.get(s.rg); return json ? [{ rg: s.rg, json }] : [] }), rows => rows.filter(keep), stop, true, pre)
+        ? await mapLimit(withMeta, GROUP_READS, async g => (await readGroupVersions(t, g.json, columns)).filter(keep))
+        : await readGroupsCached(t, withMeta, rows => rows.filter(keep), stop, true, pre)
       return per.flat()
     })))
     h.trace?.('groups', now() - t0)
     return { rows: versions ? combineVersions(got.flat()) : combineLive(h, got.flat()), groups: spans.length }
   }
-  const jsons = await fetchGroupJson(h, spans.map(s => s.rg))
+  const withMeta = withJson(h, spans, await fetchGroupJson(h, spans.map(s => s.rg)), h.whole)
   h.trace?.('rgjson', now() - t0)
   h.trace?.('ngroups', spans.length)
   t0 = now()
   // a column subset (the totals manifest) bypasses the cache: cached rows are whole
   const perGroup = columns
-    ? await mapLimit(spans, GROUP_READS, async s => {
-      const j = jsons.get(s.rg)
-      return j ? (await (versions ? readGroupVersions : readGroup)(h, j, columns)).filter(keep) : []
-    })
-    : await readGroupsCached(h, spans.flatMap(s => { const json = jsons.get(s.rg); return json ? [{ rg: s.rg, json }] : [] }), rows => rows.filter(keep), stop, versions, pre)
+    ? await mapLimit(withMeta, GROUP_READS, async g => (await (versions ? readGroupVersions : readGroup)(h, g.json, columns)).filter(keep))
+    : await readGroupsCached(h, withMeta, rows => rows.filter(keep), stop, versions, pre)
   h.trace?.('groups', now() - t0)
   return { rows: perGroup.flat(), groups: spans.length }
 }

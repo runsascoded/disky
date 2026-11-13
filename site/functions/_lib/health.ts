@@ -4,7 +4,7 @@
 // deployment doesn't configure (`INTERVAL_STORE_GEN`, `STATIC_GEN`, the `INDEX_R2` binding) is left out.
 import type { D1Database } from '@cloudflare/workers-types'
 import { COMPACT_LEVEL, type HealthDoc, healthDoc, type HealthRun, type MergeRecord, type StackRun, type StaticTiers, type StoreRead } from '../../src/healthModel.js'
-import { isMaintenance } from '../../src/scanRunsModel.js'
+import { isScanProducer } from '../../src/scanRunsModel.js'
 import { newestManifest } from './manifests.js'
 import { loadScanRuns } from './scanRuns.js'
 import { staticGen, staticPrefix } from './staticNames.js'
@@ -120,7 +120,7 @@ export async function health(env: Env & { DB?: D1Database }, now: number): Promi
     readStatic(env),
     db ? pathScans(env, false).then(r => r.results.map(x => x.date), () => [] as string[]) : Promise.resolve([] as string[]),
     // scan jobs only: a running compaction or merge names the scan it follows, which isn't a scan in flight
-    db ? loadScanRuns(db, storeKey(env)).then(r => (r?.runs ?? []).filter(j => !isMaintenance(j.kind)), () => []) : Promise.resolve([]),
+    db ? loadScanRuns(db, storeKey(env)).then(r => (r?.runs ?? []).filter(j => isScanProducer(j.kind)), () => []) : Promise.resolve([]),
   ])
   return healthDoc([iv, st].filter((x): x is StoreRead => x !== null), perScan, jobs, now)
 }

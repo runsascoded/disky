@@ -5,6 +5,7 @@
  */
 import { EventIds } from './event-ids'
 import { hashJson, putJson } from './json-stream'
+import { checkpointReceipt, compactHistory, type ClosedHistory } from './checkpoint'
 
 const HOUR = 3_600_000
 // Leave three minutes of the cron's 15-minute wall limit for the last response, finalization and state publish.
@@ -16,6 +17,10 @@ type Archive = Pick<Env['ARCHIVE'], 'put' | 'get' | 'delete'>
 type CollectorEnv = Omit<Env, 'ARCHIVE' | 'PUBLIC' | 'PUBLIC_BUCKETS' | 'PUBLIC_PREFIX' | 'EXCLUDED_ACCESS_KEY_IDS'> & {
   ARCHIVE: Archive
   WINDOW_MINUTES?: string
+  /** Optional dedicated receipt bucket; the collector only reads one configured key. Disabled by default. */
+  CHECKPOINTS?: Pick<Env['ARCHIVE'], 'get'>
+  CHECKPOINT_KEY?: string
+  READ_CHECKPOINT?: string
   /** Optional: where the derived, public per-hour read files go (`PUBLIC_BUCKETS` names which sources). */
   PUBLIC?: Pick<Env['ARCHIVE'], 'put'>
   PUBLIC_BUCKETS?: string
@@ -74,7 +79,8 @@ export function settings(env: CollectorEnv, cron: string, scheduledTime: number)
   const windowMinutes = integer(env.WINDOW_MINUTES ?? '60', 1, 60)
   if (60 % windowMinutes) throw new CollectionError('invalid_config')
   if (lag + retention > 166 || lookback > retention || overlap > retention || verifyHours > maxHours) throw new CollectionError('invalid_config')
-  if (subrequestBound(maxPages, maxHours, windowMinutes) > SUBREQUEST_LIMIT) throw new CollectionError('invalid_config')
+  if (subrequestBound(maxPages, maxHours, windowMinutes) + (env.CHECKPOINTS ? 2 : 0) > SUBREQUEST_LIMIT) throw new CollectionError('invalid_config')
+  if (!!env.CHECKPOINTS !== !!env.CHECKPOINT_KEY || !!env.CHECKPOINTS !== !!env.READ_CHECKPOINT) throw new CollectionError('invalid_config')
   if (!Number.isSafeInteger(scheduledTime) || scheduledTime < 0) throw new CollectionError('invalid_config')
   const to = Math.floor(scheduledTime / HOUR) * HOUR - lag * HOUR
   return {
@@ -352,12 +358,13 @@ export interface BucketState {
   hours: Record<string, HourEntry>
   /** `YYYY-MM-DDTHH` → aggregate key, for hours past retention (never re-drained again). */
   frozen: Record<string, string>
+  closed?: ClosedHistory
   /** Version-1 per-day aggregates (`agg/<bucket>/<day>/<run>.json`), kept reachable after the upgrade. */
   legacy_days?: Record<string, string>
 }
 
 export interface State {
-  schema_version: 2
+  schema_version: 2 | 3
   account: string
   scheduled_time: number
   run_id: string
@@ -373,7 +380,7 @@ interface LegacyState {
 /** A version-1 state (per-day aggregates, a watermark) becomes version 2: the watermark and gaps carry over, and the
  * hours it covered get per-hour aggregates as the round-robin re-verify reaches them. */
 export function upgrade(state: State | LegacyState): Record<string, BucketState> {
-  if (state.schema_version === 2) return state.buckets
+  if (state.schema_version !== 1) return state.buckets
   return Object.fromEntries(Object.entries(state.buckets).map(([bucket, b]) => [bucket, {
     collected_through: b.collected_through, first_from: b.first_from, gaps: b.gaps, verify_cursor: null,
     hours: {}, frozen: {}, ...Object.keys(b.days).length ? { legacy_days: b.days } : {},
@@ -473,8 +480,12 @@ export async function collect(
   if (!/^[a-zA-Z0-9-]+$/.test(runId)) throw new CollectionError('invalid_run_id')
   const prefix = `runs/${scheduledTime}/${runId}`
   const loaded = await readJson<State | LegacyState>(env.ARCHIVE, STATE_KEY)
-  if (loaded && ((loaded.value.schema_version !== 1 && loaded.value.schema_version !== 2) || loaded.value.account !== env.ACCOUNT_ID)) throw new CollectionError('invalid_state')
+  if (loaded && (![1, 2, 3].includes(loaded.value.schema_version) || loaded.value.account !== env.ACCOUNT_ID)) throw new CollectionError('invalid_state')
   const previous = loaded ? upgrade(loaded.value) : {}
+  const closed = Object.values(previous).flatMap(b => b.closed ? [b.closed] : [])
+  if ((loaded?.value.schema_version === 3 && !closed.length)
+      || closed.some(c => !Number.isSafeInteger(c.through) || c.through < 0 || !/^gs:\/\/.+\/.+/.test(c.checkpoint))
+      || (loaded?.value.schema_version === 2 && closed.length)) throw new CollectionError('invalid_state')
   const query = async (body: object) => {
     const response = await fetchImpl(`https://api.cloudflare.com/client/v4/accounts/${env.ACCOUNT_ID}/workers/observability/telemetry/query`, {
       method: 'POST', headers: { authorization: `Bearer ${env.CF_OBSERVABILITY_TOKEN}`, 'content-type': 'application/json' },
@@ -573,6 +584,7 @@ export async function collect(
       gaps: [...prior?.gaps ?? [], ...planned.gap ? [planned.gap] : []],
       verify_cursor: prior?.verify_cursor ?? null,
       hours: { ...prior?.hours }, frozen: { ...prior?.frozen },
+      ...prior?.closed ? { closed: { ...prior.closed } } : {},
       ...config.window < HOUR ? { window_from: prior?.window_from ?? planned.from, window_ms: config.window } : {},
       ...prior?.legacy_days ? { legacy_days: prior.legacy_days } : {},
     }
@@ -629,7 +641,33 @@ export async function collect(
     run.state.frozen = sorted(run.state.frozen)
     buckets[run.bucket] = run.state
   }
-  const state: State = { schema_version: 2, account: env.ACCOUNT_ID, scheduled_time: scheduledTime, run_id: runId, buckets: sorted(buckets) }
+  // A missing, malformed or unavailable receipt stops compaction, while ordinary collection still publishes.
+  // Dropped references are represented explicitly; legacy consumers reject schema 3 instead of undercounting.
+  if (env.CHECKPOINTS) {
+    try {
+      const saved = await env.CHECKPOINTS.get(env.CHECKPOINT_KEY!)
+      if (saved && saved.size <= 65_536) {
+        const receipt = checkpointReceipt(await saved.json(), env.ACCOUNT_ID, `r2://${env.ARCHIVE_BUCKET_NAME}/${STATE_KEY}`, env.READ_CHECKPOINT!)
+        if (receipt) {
+          const before = structuredClone(buckets)
+          if (compactHistory(buckets, receipt)) {
+            // This bounded grace copy expires under the existing runs/ lifecycle. No aggregate keys are removed.
+            try {
+              await env.ARCHIVE.put(`${prefix}/state-before-checkpoint.json`, JSON.stringify({
+                schema_version: Object.values(before).some(b => b.closed) ? 3 : 2,
+                account: env.ACCOUNT_ID, scheduled_time: scheduledTime, run_id: runId, buckets: before,
+              }), { httpMetadata: { contentType: 'application/json' } })
+            } catch {
+              Object.assign(buckets, before)
+              console.warn(JSON.stringify({ message: 'r2-access rollback snapshot unavailable; history kept' }))
+            }
+          }
+        }
+      }
+    } catch { console.warn(JSON.stringify({ message: 'r2-access receipt unavailable; history kept' })) }
+  }
+  const state: State = { schema_version: Object.values(buckets).some(b => b.closed) ? 3 : 2,
+    account: env.ACCOUNT_ID, scheduled_time: scheduledTime, run_id: runId, buckets: sorted(buckets) }
   // The publish point: aggregates above are immutable new keys, unreachable
   // until this single object names them. A null result is a failed precondition.
   const published = await env.ARCHIVE.put(STATE_KEY, JSON.stringify(state), {

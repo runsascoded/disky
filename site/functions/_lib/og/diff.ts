@@ -54,7 +54,7 @@ export function diffCardData(
   return {
     tier, site: site.name, title,
     subtitle: `${from} → ${to} · area ${mode === 'max' ? 'max size' : '|Δ|'}${caution}`,
-    total: `${fmtB(diff.total_a)} → ${fmtB(diff.total_b)} · net ${fmtChange(diff.total_b - diff.total_a)}`,
+    total: `${fmtB(diff.bytes_before)} → ${fmtB(diff.bytes_after)} · net ${fmtChange(diff.bytes_after - diff.bytes_before)}`,
     tiles: cells.map(tile),
     empty: 'no changes',
   }

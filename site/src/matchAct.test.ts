@@ -5,8 +5,8 @@ import { actBlock, actController, noMatches, type ActDeps, type ActState, afterR
 
 // The action's state machine with its sends stubbed: each test records every state it passes through, and
 // every request it would send.
-const dir = (path: string) => ({ path, kind: 'dir' as const, b: 10, o: 2, roots: 1 })
-const file = (path: string) => ({ path, kind: 'file' as const, b: 1, o: 1, roots: 1 })
+const dir = (path: string) => ({ path, kind: 'dir' as const, bytes: 10, objects: 2, roots: 1 })
+const file = (path: string) => ({ path, kind: 'file' as const, bytes: 1, objects: 1, roots: 1 })
 const OVER = 'Too many matches to act on at once (70,390); narrow the search or open a folder below. Agents can bulk-assign via the API.'
 
 /** A controller over a recorded state cell; `resolve` and the sends are the test's. */
@@ -122,7 +122,7 @@ describe('not acted on: muted in place (never red), unless it failed', () => {
     expect([h.shape(), h.sent]).toEqual([['resolving', `muted: ${OVER}`], []])
   })
   it('nothing sendable (only unchecked matches; only whole buckets to stage): muted, saying why', async () => {
-    const unk = harness({ got: { items: [{ path: 'b/x', kind: null, b: 1, o: 1, roots: 1 }], complete: true } })
+    const unk = harness({ got: { items: [{ path: 'b/x', kind: null, bytes: 1, objects: 1, roots: 1 }], complete: true } })
     await unk.ctl.start({ kind: 'assign' })
     const bk = harness({ got: { items: [dir('tomatoes')], complete: true } })
     await bk.ctl.start({ kind: 'stage' })
@@ -201,13 +201,13 @@ describe('actBlock: which filtered views offer no action on their matches', () =
 describe('noMatches: a filtered root with nothing under it', () => {
   it('empty (no bytes, objects or children): true; not loaded, or any bytes, objects (zero-byte files) or children: false', () => {
     expect([
-      noMatches({ b: 0, o: 0 }),
-      noMatches({ b: 0, o: 0, c: [] }),
+      noMatches({ bytes: 0, objects: 0 }),
+      noMatches({ bytes: 0, objects: 0, children: [] }),
       noMatches(null),
       noMatches(undefined),
-      noMatches({ b: 5, o: 1 }),
-      noMatches({ b: 0, o: 2 }),
-      noMatches({ b: 0, o: 0, c: [{}] }),
+      noMatches({ bytes: 5, objects: 1 }),
+      noMatches({ bytes: 0, objects: 2 }),
+      noMatches({ bytes: 0, objects: 0, children: [{}] }),
     ]).toEqual([true, true, false, false, false, false, false])
   })
 })

@@ -35,7 +35,7 @@ import { XRangeControls } from './XRangeControls'
 // precomputed per prefix and nothing is floored.
 
 interface Pt { x: number; y: number; y0?: number }
-interface Series { path: string; chunks?: number; failed?: string[]; points: { date: string; b: number; o: number; missing?: string[] }[]; unindexed?: string[]; roots?: { path: string; points: { date: string; b: number; o: number }[] }[] }
+interface Series { path: string; chunks?: number; failed?: string[]; points: { date: string; bytes: number; objects: number; missing?: string[] }[]; unindexed?: string[]; roots?: { path: string; points: { date: string; bytes: number; objects: number }[] }[] }
 
 // Default prominence-suppression radius for the local-extrema callouts, in days
 // (≈6 scans at the 12-hourly cadence): peaks/dips within this of a more
@@ -167,7 +167,7 @@ export function SizeOverTime({ scans, times, fmt = fmtScan, prefix, user, pool, 
   refused?: unknown
   /** The page filter's match roots: the series is their sum per scan. */
   paths?: string[]
-  /** The match roots' exact count (`matchCount.n`): more than `SERIES_MAX_PATHS` asks with the query alone. */
+  /** The match roots' exact count (`matchCount.count`): more than `SERIES_MAX_PATHS` asks with the query alone. */
   pathsTotal?: number
   /** The filter's view was a rollup (a heavy literal): `paths` lists only some match roots, so the series
    * is asked for the query alone (the server sums the rollup per scan). */
@@ -281,11 +281,11 @@ export function SizeOverTime({ scans, times, fmt = fmtScan, prefix, user, pool, 
   // Every scan's point (the overview strip draws them all), and the displayed range over them (`resolveXDomain`:
   // null = all). The cut applies to every trace, so the stack, the total, the y-fit, the callouts and the notes
   // all follow the visible window.
-  const fullTotal = useMemo(() => (seriesQ.data?.points ?? []).map(p => ({ x: xOfScan(p.date, times), y: p.b })).sort((a, b) => a.x - b.x), [seriesQ.data, times])
+  const fullTotal = useMemo(() => (seriesQ.data?.points ?? []).map(p => ({ x: xOfScan(p.date, times), y: p.bytes })).sort((a, b) => a.x - b.x), [seriesQ.data, times])
   const xRange = useMemo(() => resolveXDomain(xDomain, fullTotal.map(p => p.x), id => xOfScan(id, times)), [xDomain, fullTotal, times])
   // The diff window in x (shaded on the chart and the strip; callouts mark its ends).
   const winX = useMemo(() => (win ? [xOfScan(win[0], times), xOfScan(win[1], times)] as [number, number] : undefined), [win, times])
-  const toPts = (points: { date: string; b: number }[]): Pt[] => points.map(p => ({ x: xOfScan(p.date, times), y: p.b })).filter(p => inXDomain(xRange, p.x)).sort((a, b) => a.x - b.x)
+  const toPts = (points: { date: string; bytes: number }[]): Pt[] => points.map(p => ({ x: xOfScan(p.date, times), y: p.bytes })).filter(p => inXDomain(xRange, p.x)).sort((a, b) => a.x - b.x)
   const total = useMemo(() => toPts(seriesQ.data?.points ?? []), [seriesQ.data, xRange, times])
   // Scans the answer doesn't cover (a filter's static index): gaps in the line, with a muted note — never zeros.
   const gaps = useMemo(
@@ -312,7 +312,7 @@ export function SizeOverTime({ scans, times, fmt = fmtScan, prefix, user, pool, 
     const rs = seriesQ.data?.roots ?? []
     if (rs.length < 2) return []
     const end = rs.reduce((m, r) => { const d = r.points[r.points.length - 1]?.date; return d && d > m ? d : m }, '')
-    const latest = (r: { points: { date: string; b: number }[] }) => { const p = r.points[r.points.length - 1]; return p?.date === end ? p.b : -1 }
+    const latest = (r: { points: { date: string; bytes: number }[] }) => { const p = r.points[r.points.length - 1]; return p?.date === end ? p.bytes : -1 }
     const bySize = [...rs].sort((a, b) => latest(b) - latest(a))
     const slot = new Map(bySize.map((r, i) => [r.path, i]))
     return rs.map(r => ({ key: r.path, color: slotColor(slot.get(r.path)!), points: toPts(r.points) }))

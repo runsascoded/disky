@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest'
 import { graftSpine, levelAsk, levelError, levelTree, nodeAt, spineFailure, spinePaths, spineReady, spineStop } from './spine'
 import type { TreeNode } from './types'
 
-const dir = (n: string, b: number, c?: TreeNode[]): TreeNode => ({ n, k: 'dir', b, o: b, ...(c ? { c } : {}) })
+const dir = (name: string, bytes: number, children?: TreeNode[]): TreeNode => ({ name, kind: 'dir', bytes, objects: bytes, ...(children ? { children } : {}) })
 
 describe('spinePaths', () => {
   it('the root, then each prefix of the drilled path', () => {
@@ -74,7 +74,7 @@ const SCAN = dir('all', 150, [
 function answer(path: string, shallow: boolean): TreeNode {
   const t = nodeAt(SCAN, path.split('/').filter(Boolean))
   if (!t) throw new Error('404: path not found')
-  return shallow ? { ...t, c: t.c?.map(k => dir(k.n, k.b)) } : t
+  return shallow ? { ...t, children: t.children?.map(k => dir(k.name, k.bytes)) } : t
 }
 
 // A page's subtree requests as TSQ sends them, wired as `App.tsx` wires them: one observer per level and read,
@@ -282,8 +282,8 @@ describe('a path the scan holds asks no ancestor\'s full view, in whatever order
 describe('graftSpine: the drawn tree from the levels\' answers', () => {
   // The fleet: bk (100) = a (60) + c (30) + 10 folded; a = x (40) + y (15) + 5 folded; x = p (30) + q (10).
   const root1 = dir('all', 150, [dir('bk', 100), dir('zz', 50)])
-  const bk1 = dir('bk', 100, [dir('a', 60), dir('c', 30), { ...dir('(other)', 10), f: 3 }])
-  const a1 = dir('a', 60, [dir('x', 40), dir('y', 15), { ...dir('(other)', 5), f: 2 }])
+  const bk1 = dir('bk', 100, [dir('a', 60), dir('c', 30), { ...dir('(other)', 10), folded: 3 }])
+  const a1 = dir('a', 60, [dir('x', 40), dir('y', 15), { ...dir('(other)', 5), folded: 2 }])
   const xFull = dir('x', 40, [dir('p', 30, [dir('p1', 20), dir('p2', 10)]), dir('q', 10)])
   const paths = spinePaths('bk/a/x')
   const shallow = (tree: TreeNode) => ({ tree, shallow: true })
@@ -295,10 +295,10 @@ describe('graftSpine: the drawn tree from the levels\' answers', () => {
           dir('a', 60, [
             dir('x', 40, [dir('p', 30, [dir('p1', 20), dir('p2', 10)]), dir('q', 10)]),
             dir('y', 15),
-            { ...dir('(other)', 5), f: 2 },
+            { ...dir('(other)', 5), folded: 2 },
           ]),
           dir('c', 30),
-          { ...dir('(other)', 10), f: 3 },
+          { ...dir('(other)', 10), folded: 3 },
         ]),
         dir('zz', 50),
       ]),
@@ -306,9 +306,9 @@ describe('graftSpine: the drawn tree from the levels\' answers', () => {
   })
   it('a spine segment under its parent\'s fold is taken from its own answer, and the fold shaved by it', () => {
     // `a`'s one level folds `x` away (its budget didn't draw it): `x` comes from its own answer's root.
-    const aFolded = dir('a', 60, [dir('y', 15), { ...dir('(other)', 45), f: 3 }])
+    const aFolded = dir('a', 60, [dir('y', 15), { ...dir('(other)', 45), folded: 3 }])
     expect(nodeAt(graftSpine(paths, [shallow(root1), shallow(bk1), shallow(aFolded), { tree: xFull, shallow: false }])!, ['bk', 'a'])).toEqual(
-      dir('a', 60, [dir('y', 15), { ...dir('(other)', 5), f: 3 }, xFull]),
+      dir('a', 60, [dir('y', 15), { ...dir('(other)', 5), folded: 3 }, xFull]),
     )
   })
   it('a held full ancestor keeps the depth it drew under the next level\'s shallow answer', () => {
@@ -415,7 +415,7 @@ describe('spineFailure: the failed level that keeps the map off the drilled path
     expect(drawn([root, bk, null, null, c], [undefined, undefined, E500, E500, undefined])).toEqual(['bk/a', { path: 'bk/a', err: E500, bare: true }])
   })
   it('a failed ancestor its parent folded into "(other)": the spine stops above it', () => {
-    const bkFolded = dir('bk', 100, [dir('z', 10), { ...dir('(other)', 90), f: 4 }])
+    const bkFolded = dir('bk', 100, [dir('z', 10), { ...dir('(other)', 90), folded: 4 }])
     expect(drawn([root, bkFolded, null, b, c], [undefined, undefined, E500, undefined, undefined])).toEqual(['bk', { path: 'bk/a', err: E500, bare: false }])
   })
   it('the drilled level failed: its node is on the spine with nothing under it (bare)', () => {

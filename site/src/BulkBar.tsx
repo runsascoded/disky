@@ -85,7 +85,7 @@ export function BulkBar({ cover, loading, onIntent, resolve, resetKey, scheme, q
     </span>
   )
   const idle = act.state.s === 'idle'
-  const keptB = kept.reduce((n, i) => n + i.b, 0)
+  const keptB = kept.reduce((n, i) => n + i.bytes, 0)
   const startAssign = () => {
     const v = assign.trim()
     const owner = v ? (allUsers().find(u => u.name.toLowerCase() === v.toLowerCase())?.id ?? v) : '@me'
@@ -93,11 +93,11 @@ export function BulkBar({ cover, loading, onIntent, resolve, resetKey, scheme, q
   }
   const startStage = () => void act.start({ kind: 'stage', memo })
   const summary = !cover ? (loading ? <Loading label="Listing the matches…" /> : null)
-    : !cover.roots.n ? <span className="bb-scope">no matches to act on</span>
-    : !cover.complete ? <span className="bb-scope">{plural(cover.roots.n, 'match', 'matches')} · {fmtBytes(cover.roots.b)}</span>
+    : !cover.roots.count ? <span className="bb-scope">no matches to act on</span>
+    : !cover.complete ? <span className="bb-scope">{plural(cover.roots.count, 'match', 'matches')} · {fmtBytes(cover.roots.bytes)}</span>
     : <>
       <span className="bb-scope">
-        {plural(cover.roots.n, 'match', 'matches')} → {itemsText(kept)}{kept.length < items.length ? ` (${(items.length - kept.length).toLocaleString('en-US')} unticked)` : ''} · {fmtBytes(keptB)}
+        {plural(cover.roots.count, 'match', 'matches')} → {itemsText(kept)}{kept.length < items.length ? ` (${(items.length - kept.length).toLocaleString('en-US')} unticked)` : ''} · {fmtBytes(keptB)}
       </span>
       <details className="bb-review">
         <summary>review</summary>
@@ -158,7 +158,7 @@ function ReviewGroup({ parent, items, b, dropped, toggle, fmtBytes }: {
             <label className="bb-row">
               <input type="checkbox" checked={!dropped.has(i.path)} onChange={() => toggle([i.path], !dropped.has(i.path))} />
               <code>{i.path.slice(parent ? parent.length + 1 : 0)}{i.kind === 'dir' ? '/' : ''}</code>
-              <span className="bb-n">{i.kind === 'dir' ? `${plural(i.o, 'file')} · ` : i.kind === null ? 'unchecked · ' : ''}{fmtBytes(i.b)}</span>
+              <span className="bb-n">{i.kind === 'dir' ? `${plural(i.objects, 'file')} · ` : i.kind === null ? 'unchecked · ' : ''}{fmtBytes(i.bytes)}</span>
             </label>
           </li>
         ))}

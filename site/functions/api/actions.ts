@@ -147,7 +147,7 @@ export const onRequest = async (ctx: Ctx): Promise<Response> => {
       const keys = [...new Set(check.map(p => p.pattern))]
       for (let i = 0; i < keys.length; i += MAX_PREFIXES) {
         const { stats } = await prefixesAt(penv, newest, keys.slice(i, i + MAX_PREFIXES))
-        for (const [k, st] of Object.entries(stats)) if (st.b > 0 || st.o > 0) held.add(k)
+        for (const [k, st] of Object.entries(stats)) if (st.bytes > 0 || st.objects > 0) held.add(k)
       }
       const missing = keys.filter(k => !held.has(k))
       if (missing.length) {

@@ -142,9 +142,9 @@ describe('D1', () => {
       const view = await buildView(env, { date: DATE, path: 'bk/m', w: 64, h: 64, minArea: 12, atten: 1, threshold: 512 * KiB })
       const tiles: Record<string, number> = {}
       const walk = (n: ViewNode, at: string) => {
-        for (const c of n.c ?? []) {
-          const p = `${at}/${c.n}`
-          if (!c.n.startsWith('(')) tiles[p] = c.b
+        for (const c of n.children ?? []) {
+          const p = `${at}/${c.name}`
+          if (!c.name.startsWith('(')) tiles[p] = c.bytes
           walk(c, p)
         }
       }

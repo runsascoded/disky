@@ -9,26 +9,27 @@ export const isSynthetic = (n: Pick<DiffNode, 'label' | 'status'>): boolean => n
 // `/api/diff` row (functions/_lib/view.ts `DiffRow`): p=path (relative to
 // the diffed root) d=depth k=kind s=status a/b=bytes oa/ob=objects
 // x=expanded l=read by a point lookup on side 1|2.
+/** A diff row as `/api/diff` serves it (`functions/_lib/view.ts` `DiffRow`; specs/descriptive-field-names.md §3b). */
 export interface DiffRow {
-  p: string
-  d: number
-  k: 'file' | 'dir'
-  s: 'added' | 'removed' | 'changed' | 'unchanged'
-  a: number
-  b: number
-  oa: number
-  ob: number
-  x?: boolean
-  l?: 1 | 2
+  path: string
+  depth: number
+  kind: 'file' | 'dir'
+  status: 'added' | 'removed' | 'changed' | 'unchanged'
+  bytes_before: number
+  bytes_after: number
+  objects_before: number
+  objects_after: number
+  expanded?: boolean
+  lookup?: 1 | 2
 }
 
 export interface DiffData {
   prev: string | null
   curr: string | null
-  total_a: number
-  total_b: number
-  objects_a: number
-  objects_b: number
+  bytes_before: number
+  bytes_after: number
+  objects_before: number
+  objects_after: number
   expansions: number
   truncated: boolean
   /** The shared byte floor both scans were read at. */
@@ -66,7 +67,7 @@ export interface DiffNode {
    * it): start − removed + added = end. A frontier row is all one or the other. */
   added: number
   removed: number
-  status: DiffRow['s'] | 'filler' | 'root'
+  status: DiffRow['status'] | 'filler' | 'root'
   size_old: number
   size_new: number
   n_desc_delta: number
@@ -120,27 +121,27 @@ export function buildTree(data: DiffData, areaMode: AreaMode, atRoot: boolean): 
     ;(parent.children ??= []).push(node)
   }
 
-  const rows = [...data.rows].sort((a, b) => a.d - b.d || a.p.localeCompare(b.p))
+  const rows = [...data.rows].sort((a, b) => a.depth - b.depth || a.path.localeCompare(b.path))
   for (const r of rows) {
     attach({
-      key: r.p,
-      label: r.p.split('/').pop() || r.p,
-      k: r.k,
+      key: r.path,
+      label: r.path.split('/').pop() || r.path,
+      k: r.kind,
       weight: 0,
-      delta: r.b - r.a,
-      added: r.x ? 0 : max(0, r.b - r.a),
-      removed: r.x ? 0 : max(0, r.a - r.b),
-      status: r.s,
-      size_old: r.a,
-      size_new: r.b,
-      n_desc_delta: r.ob - r.oa,
-      n_old: r.oa,
-      n_new: r.ob,
-      n_added: r.x ? 0 : max(0, r.ob - r.oa),
-      n_removed: r.x ? 0 : max(0, r.oa - r.ob),
-      ...(atRoot && r.d === 1 && r.s === 'added' ? { first: true } : {}),
-      lookup: r.l,
-    }, r.p)
+      delta: r.bytes_after - r.bytes_before,
+      added: r.expanded ? 0 : max(0, r.bytes_after - r.bytes_before),
+      removed: r.expanded ? 0 : max(0, r.bytes_before - r.bytes_after),
+      status: r.status,
+      size_old: r.bytes_before,
+      size_new: r.bytes_after,
+      n_desc_delta: r.objects_after - r.objects_before,
+      n_old: r.objects_before,
+      n_new: r.objects_after,
+      n_added: r.expanded ? 0 : max(0, r.objects_after - r.objects_before),
+      n_removed: r.expanded ? 0 : max(0, r.objects_before - r.objects_after),
+      ...(atRoot && r.depth === 1 && r.status === 'added' ? { first: true } : {}),
+      lookup: r.lookup,
+    }, r.path)
   }
 
   const finalize = (node: DiffNode): number => {

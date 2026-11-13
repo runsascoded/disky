@@ -8,7 +8,9 @@ per `(date, path, w, h, depth)` the view computed from that scan's own rows by t
 (`interval_verify.Scan.view`), flattened (`interval_read.flatten`). The generator asserts the Python
 interval reader returns the same trees.
 
-    cloud/.venv-or-root/bin/python site/functions/_lib/fixtures/iv/gen.py [g2 | g7 | g8 | g9 | tiered]
+    cloud/.venv-or-root/bin/python site/functions/_lib/fixtures/iv/gen.py [g2 | g7 | g8 | g9 | tiered | expected]
+
+`expected`: `expected.json` alone, from the listings (the store's bytes untouched).
 
 `tiered`: the base + per-scan runs generations (`interval_append`): `g3` / `g4` / `g6` over `g1`'s scans (runs unmerged /
 merged pairwise as the old inline publish did / merged by the deferred carries, a revision manifest listing the merged
@@ -32,17 +34,13 @@ PATHS = ["", "b1", "b2", "b1/gof", "b2/e"]
 SIZES = [(8, 6), (30, 30)]
 
 
-def main() -> None:
-    from dt_cloud import interval_read as ir
-    from dt_cloud import interval_store as ist
+def _listings(work: Path) -> list[dict]:
+    """The six scans' per-scan listings under `work` (`test_interval_store.py`'s generator, seed 11)."""
     from dt_cloud import static_names as sn
-    from dt_cloud.interval_verify import Scan
 
     spec = importlib.util.spec_from_file_location("tis", ROOT / "cloud/tests/test_interval_store.py")
     t = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(t)
-
-    work = HERE / "work"
     shutil.rmtree(work, ignore_errors=True)
     rng = random.Random(11)
     paths = t._universe(rng)
@@ -53,6 +51,49 @@ def main() -> None:
         (work / key).parent.mkdir(parents=True, exist_ok=True)
         t._write(t._scan_rows(rng, paths, j), work / key, v)
         scans.append({"id": d, "src": key, "ts": sn.scan_epoch(d), "version": v})
+    return scans
+
+
+def _expected(scans: list[dict], work: Path, store=None) -> list[dict]:
+    """Every case's view from its scan's own rows (`interval_verify.Scan.view`), flattened; with `store`, asserting the
+    interval reader draws the same tree."""
+    from dt_cloud import interval_read as ir
+    from dt_cloud.interval_verify import Scan, compare
+
+    expected = []
+    for s in scans:
+        scan = Scan(duckdb.connect(), str(work / s["src"]), s["version"], s["src"])
+        for p in PATHS:
+            for w, h in SIZES:
+                for md in (None, 1):
+                    want = scan.view(p, w, h, max_depth=md)
+                    if store is not None:
+                        got = store.view(s["ts"], p, w, h, max_depth=md)
+                        assert compare(got["tree"], want["tree"], with_f=True) == [], (s["id"], p, w, h, md)
+                    if want["tree"] is None:
+                        continue
+                    expected.append({"date": s["id"], "path": p, "w": w, "h": h, "depth": md, "v": s["version"], "tiles": ir.flatten(want["tree"])})
+    return expected
+
+
+def _write_expected(expected: list[dict]) -> None:
+    (HERE / "expected.json").write_text(json.dumps(expected, indent=1, sort_keys=True) + "\n")
+
+
+def expected_gen() -> None:
+    """`expected.json` alone, from the listings: the store under `interval-store/` is left as it is (a change to the
+    reference's view, e.g. its field names, rewrites the expectations, never the store's bytes)."""
+    work = HERE / "work"
+    _write_expected(_expected(_listings(work), work))
+    shutil.rmtree(work)
+
+
+def main() -> None:
+    from dt_cloud import interval_read as ir
+    from dt_cloud import interval_store as ist
+
+    work = HERE / "work"
+    scans = _listings(work)
     doc = {"bucket": "b", "scans": scans}
     ranges = {"k": 3, "ranges": [{"i": 0, "lo": [0, ""], "hi": [2, "b1/gof"]}, {"i": 1, "lo": [2, "b1/gof"], "hi": [3, ""]}, {"i": 2, "lo": [3, ""], "hi": None}]}
     con = duckdb.connect()
@@ -69,22 +110,8 @@ def main() -> None:
         ist.write_served(con, f"read_parquet('{work}/out/{sub}/r*.parquet')", sort, out / "served" / f"{sort}.parquet", schema,
                          page_rows=ist.served_page_rows(sort), rg_rows=4, stamps=[x["ts"] for x in scans])
     (out / "scans.json").write_text(json.dumps({"scans": [{"id": s["id"], "ts": s["ts"]} for s in scans]}, indent=1) + "\n")
-    store = ir.Store(out / "served")
-    expected = []
-    for s in scans:
-        scan = Scan(duckdb.connect(), str(work / s["src"]), s["version"], s["src"])
-        for p in PATHS:
-            for w, h in SIZES:
-                for md in (None, 1):
-                    want = scan.view(p, w, h, max_depth=md)
-                    got = store.view(s["ts"], p, w, h, max_depth=md)
-                    from dt_cloud.interval_verify import compare
-
-                    assert compare(got["tree"], want["tree"], with_f=True) == [], (s["id"], p, w, h, md)
-                    if want["tree"] is None:
-                        continue
-                    expected.append({"date": s["id"], "path": p, "w": w, "h": h, "depth": md, "v": s["version"], "tiles": ir.flatten(want["tree"])})
-    (HERE / "expected.json").write_text(json.dumps(expected, indent=1, sort_keys=True) + "\n")
+    expected = _expected(scans, work, ir.Store(out / "served"))
+    _write_expected(expected)
     shutil.rmtree(work)
     print(f"{len(expected)} views; files: {sorted(p.name for p in (out / 'served').iterdir())}", file=sys.stderr)
     slices_gen()
@@ -364,4 +391,4 @@ def closed_gen() -> None:
 
 
 if __name__ == "__main__":
-    {"g2": slices_gen, "g7": unowned_gen, "g8": stale_gen, "g9": closed_gen, "tiered": tiered}.get(sys.argv[1] if sys.argv[1:] else "", main)()
+    {"g2": slices_gen, "g7": unowned_gen, "g8": stale_gen, "g9": closed_gen, "tiered": tiered, "expected": expected_gen}.get(sys.argv[1] if sys.argv[1:] else "", main)()

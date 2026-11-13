@@ -5,7 +5,7 @@
  *
  *  `p` (repeated, at most `LEVEL_DIRS`): the directories, usually one depth's; `''` (a bare `p=`) is the root. `k`: the
  *  children drawn per directory (snapped to a power of two, `levelK`); `m`: what ranks and sizes them. Answers
- *  `{ from, to, k, m, levels: Level[] }`, the asked directories' and those their single-changed-directory chains lead
+ *  `{ from, to, top_k, measure, levels: Level[] }`, the asked directories' and those their single-changed-directory chains lead
  *  into (`Level.next`). Each directory's answer is its own edge-cache entry (keyed by the store generation, both
  *  scans, the directory, `k` and `m`, never the canvas), so a later batch, view or drill reuses it; only the misses
  *  are read, together. `nc=<nonce>` (a benchmark's cold read) joins that key for an admin only: anyone else's request
@@ -175,7 +175,7 @@ async function levelsOf(ctx0: Ctx, member?: MemberLevel): Promise<Response> {
       // A chain can walk into a hidden dir before its levels are dropped: the ones it left unread are named here.
       const later = more.filter(p => !shut(p))
       const tooWide = wide.filter(p => !shut(p))
-      const body = JSON.stringify({ from, to, k, m, levels, ...(later.length ? { more: later } : {}), ...(tooWide.length ? { wide: tooWide } : {}) })
+      const body = JSON.stringify({ from, to, top_k: k, measure: m, levels, ...(later.length ? { more: later } : {}), ...(tooWide.length ? { wide: tooWide } : {}) })
       await syncClock()
       st.lap('encode')
       return new Response(body, {
@@ -199,7 +199,7 @@ async function levelsOf(ctx0: Ctx, member?: MemberLevel): Promise<Response> {
 /** Whether `a` and `b` hold the same directories. */
 const sameSet = (a: string[], b: string[]): boolean => a.length === b.length && a.every(x => b.includes(x))
 
-type LevelBody = { from: string; to: string; k: number; m: Measure; levels: Level[]; more?: string[]; wide?: string[] }
+type LevelBody = { from: string; to: string; top_k: number; measure: Measure; levels: Level[]; more?: string[]; wide?: string[] }
 
 /** `/api/diff/level` on a union view (see the module doc). */
 async function unionLevels(ctx0: Ctx, view: UnionView): Promise<Response> {
@@ -259,7 +259,7 @@ async function unionLevels(ctx0: Ctx, view: UnionView): Promise<Response> {
         // An unchanged member: its root total on both sides, nothing changed (whatever store it is).
         const r = await readRootAgg(p.env, { date: p.from!, path: '' })
         if (!r) return new Response(`its root at ${p.from} has no total (an indexed scan with no root rows)`, { status: 500 })
-        const t = { a: r.b, b: r.b, oa: r.o, ob: r.o }
+        const t = { bytes_before: r.b, bytes_after: r.b, objects_before: r.o, objects_after: r.o }
         return { path: '', ...t, churn: 0, rows: [], other: null, unchanged: t }
       }))
       const bad = roots.findIndex(r => r instanceof Response)
@@ -275,7 +275,7 @@ async function unionLevels(ctx0: Ctx, view: UnionView): Promise<Response> {
       const chained = new Map(ok.flatMap(r => ('levels' in r ? r.levels.filter(l => l.path !== '').map(l => [l.path, l] as const) : [])))
       for (let n = root.next; n && !out.has(n) && chained.has(n); n = chained.get(n)!.next) out.set(n, chained.get(n)!)
     }
-    return new Response(JSON.stringify({ from: cf.date, to: ct.date, k, m, levels: [...out.values()], ...(more.length ? { more } : {}), ...(wide.length ? { wide } : {}), union: { view: view.key, sources } }), {
+    return new Response(JSON.stringify({ from: cf.date, to: ct.date, top_k: k, measure: m, levels: [...out.values()], ...(more.length ? { more } : {}), ...(wide.length ? { wide } : {}), union: { view: view.key, sources } }), {
       headers: { 'content-type': 'application/json', 'cache-control': 'private, max-age=300' },
     })
   } catch (e) {

@@ -15,6 +15,22 @@ const fold = (hits: Hit[], o: { date?: string; other?: string; T?: number; last?
   foldRoots('b', hits, { date: o.date ?? B, other: o.other, thrAt: thrAt(o.T ?? 100), last: o.last ?? Infinity, isRoot })
 
 describe('foldRoots', () => {
+  it('preserves live owner slices for retained nodes and the complete answered directory without holding discarded nodes', () => {
+    const f = fold([
+      hit('b/x/ckpt-1', 400, A, B, 'old'),
+      hit('b/x/ckpt-1', 300, B, undefined, 'alice'),
+      hit('b/x/ckpt-1', 200, B, undefined, 'bob'),
+      hit('b/tiny/ckpt-2', 1, B, undefined, 'alice'),
+    ])
+    expect(f).toEqual({
+      nodes: [
+        { p: 'b/x/ckpt-1', d: 3, isDir: false, b: 500, n: 2, ub: { alice: 300, bob: 200 } },
+        { p: 'b/x', d: 2, isDir: true, b: 500, n: 2, ub: { alice: 300, bob: 200 } },
+        { p: 'b/tiny/ckpt-2', d: 3, isDir: false, b: 1, n: 1, ub: { alice: 1 } },
+      ],
+      kids: new Map([['b/x', 1], ['b', 2]]), owners: { alice: 301, bob: 200 },
+    })
+  })
   it('keeps the drawable nodes and the heaviest other roots, sums every other node away, and counts the kids of drawable nodes', () => {
     const hits = [
       hit('b/x/y/ckpt-1', 500),
@@ -92,6 +108,17 @@ describe('tooBroadToDiff', () => {
 })
 
 describe('nestRollup over a roots answer', () => {
+  it('propagates a fetched roots answer’s owners into the rollup ancestors without changing their exact totals', async () => {
+    const result = (await nestRollup({
+      date: B, path: '', dP: 0, rollup: { dir: '', kept: 1, rows: 2, children: 1, cells: [{ kind: 1, child: 'b', vf: ms(A), b: 501n, o: 3n }] },
+      isRoot, threshold: 100, w: 1792, h: 1088, minArea: 12, atten: 2, ms: 10_000, force: new Set(['b']),
+      fetch: async () => ({ hits: [hit('b/x/ckpt-1', 300, B, undefined, 'alice'), hit('b/x/ckpt-1', 200, B, undefined, 'bob'), hit('b/tiny/ckpt-2', 1, B, undefined, 'alice')], io: {} }),
+    }))!
+    expect([result.total.ub, result.exact.get('b')!.ub, result.exact.get('b/x')!.ub, result.exact.get('b/x/ckpt-1')!.ub]).toEqual([
+      { alice: 301, bob: 200 }, { alice: 301, bob: 200 }, { alice: 300, bob: 200 }, { alice: 300, bob: 200 },
+    ])
+    expect([result.total.b, result.total.o, result.exact.bo('b')]).toEqual([501, 3, { b: 501, o: 3 }])
+  })
   const rollup = { dir: '', kept: 1, rows: 1, children: 1, cells: [{ kind: 1 as const, child: 'b', vf: ms(A), b: 6000n, o: 5001n }] }
   const light = Array.from({ length: 5000 }, (_, i) => hit(`b/d${i % 50}/e${i}/ckpt-${i}`, 1))
   const hits = [hit('b/big/ckpt', 1000), ...light]
