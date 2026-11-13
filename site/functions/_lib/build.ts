@@ -8,7 +8,7 @@ export { BUILD }
 
 export const BUILD_HEADER = 'x-disky-build'
 
-/** The header's value: `<sha> <iso time>`, e.g. `8199b3c0ab 2026-10-15T23:59:01Z`. */
+/** The header's value: `<sha> <iso time>`, e.g. `8199b3c0ab5d2e0f61c9a4b7e3d18f20c6a9b5e7 2026-10-15T23:59:01Z` (the full sha, `scripts/build-id.mjs`). */
 export const buildId = (b: { sha: string; time: string } = BUILD): string => `${b.sha} ${b.time}`
 
 /** `res` with the build header set: in place, or on a copy when its headers are immutable (a `fetch` or Cache API
