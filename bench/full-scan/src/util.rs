@@ -112,6 +112,11 @@ unsafe impl<T> Send for Shared<T> {}
 unsafe impl<T> Sync for Shared<T> {}
 
 impl<T> Shared<T> {
+    /// The pointer (a method, so a closure captures the whole `Shared`, not its non-`Send` field).
+    pub fn ptr(&self) -> *mut T {
+        self.0
+    }
+
     /// # Safety
     /// No two threads write the same index, and nothing reads it meanwhile.
     pub unsafe fn write(&self, i: usize, v: T) {

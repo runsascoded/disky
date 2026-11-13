@@ -80,7 +80,7 @@ pub struct Index {
     pub ck_rows: Col<u32>,
     pub stats: LoadStats,
     /// The pack file the columns map, when opened from one (`pack.rs`).
-    pub map: Option<std::sync::Arc<memmap2::Mmap>>,
+    pub map: Option<std::sync::Arc<crate::pack::Backing>>,
 }
 
 #[derive(Serialize)]

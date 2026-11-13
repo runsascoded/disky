@@ -215,8 +215,51 @@ struct Ctx<'a> {
     gb: AtomicU64,
 }
 
+/// Object row `r`'s `cont` bit.
+#[inline(always)]
+fn cont_bit(cont: &[u64], r: usize) -> bool {
+    unsafe { *cont.get_unchecked(r >> 6) >> (r & 63) & 1 != 0 }
+}
+
+/// The columns a chunk reads, as plain slices (no per-access `Col` dispatch in the loops).
+#[derive(Clone, Copy)]
+struct Cols<'a> {
+    vf: &'a [u16],
+    vt: &'a [u16],
+    size: &'a [u64],
+    name: &'a [u32],
+    owner: &'a [u16],
+    cls: &'a [u8],
+    cont: &'a [u64],
+    ddepth: &'a [u8],
+    dname: &'a [u32],
+    dlo: &'a [u32],
+    dhi: &'a [u32],
+    dend: &'a [u32],
+}
+
+impl<'a> Cols<'a> {
+    fn of(ix: &'a SlimIndex) -> Cols<'a> {
+        Cols {
+            vf: &ix.vf,
+            vt: &ix.vt,
+            size: &ix.size,
+            name: &ix.name,
+            owner: &ix.owner,
+            cls: &ix.cls,
+            cont: &ix.cont,
+            ddepth: &ix.ddepth,
+            dname: &ix.dname,
+            dlo: &ix.dlo,
+            dhi: &ix.dhi,
+            dend: &ix.dend,
+        }
+    }
+}
+
 struct Chunk<'a, const SEARCH: bool, const DIFF: bool, const FILT: bool> {
     ctx: &'a Ctx<'a>,
+    k: Cols<'a>,
     lo: usize,
     hi: usize,
     st: Vec<Frame>,
@@ -258,7 +301,7 @@ fn sum_live2(vf: &[u16], vt: &[u16], size: &[u64], s: u16, s2: u16) -> (Acc, Acc
 }
 
 impl<'a, const SEARCH: bool, const DIFF: bool, const FILT: bool> Chunk<'a, SEARCH, DIFF, FILT> {
-    #[inline]
+    #[inline(always)]
     fn atom_bits(&mut self, id: u32, d: usize) {
         let s: &Search = self.ctx.c.search.as_ref().unwrap();
         let mut m = self.mask[d - 1];
@@ -297,11 +340,12 @@ impl<'a, const SEARCH: bool, const DIFF: bool, const FILT: bool> Chunk<'a, SEARC
                 return (0, 0);
             }
         }
-        let f = ix.cls[r];
+        let k = self.k;
+        let f = k.cls[r];
         if f & COMPLEX == 0 {
-            let own = c.owners.as_ref().map_or(true, |o| o[ix.owner[r] as usize]);
+            let own = c.owners.as_ref().map_or(true, |o| o[k.owner[r] as usize]);
             let cls = c.classes.map_or(true, |m| m >> ((f >> CLS_SHIFT) & 3) & 1 != 0);
-            return if own && cls { (ix.size[r], 1) } else { (0, 0) };
+            return if own && cls { (k.size[r], 1) } else { (0, 0) };
         }
         let cx = ix.complex_of(r);
         let (own_sel, own_pass) = match &c.owners {
@@ -354,16 +398,16 @@ impl<'a, const SEARCH: bool, const DIFF: bool, const FILT: bool> Chunk<'a, SEARC
     /// Rows `[a, b)` summed into frame `t`; `row_search`: each row's own name decides (the rows are direct children of
     /// the top frame, at depth `d`).
     fn flat(&mut self, t: usize, a: usize, b: usize, row_search: bool, d: usize) {
-        let ix = self.ctx.ix;
+        let k = self.k;
         let c = self.ctx.c;
         let (sa, sb) = (c.sa, c.sb.unwrap_or(0));
         let n = (b - a) as u64;
         self.out.t.rows += n;
         if !FILT && !row_search {
             let (x, y) = if DIFF {
-                sum_live2(&ix.vf[a..b], &ix.vt[a..b], &ix.size[a..b], sa, sb)
+                sum_live2(&k.vf[a..b], &k.vt[a..b], &k.size[a..b], sa, sb)
             } else {
-                (sum_live(&ix.vf[a..b], &ix.vt[a..b], &ix.size[a..b], sa), Acc::default())
+                (sum_live(&k.vf[a..b], &k.vt[a..b], &k.size[a..b], sa), Acc::default())
             };
             self.st[t].a.add(x);
             self.run_a += x.bytes;
@@ -384,14 +428,14 @@ impl<'a, const SEARCH: bool, const DIFF: bool, const FILT: bool> Chunk<'a, SEARC
         let mut pass = true;
         let (mut x, mut y) = (Acc::default(), Acc::default());
         for r in a..b {
-            if row_search && (r == a || !ix.is_cont(r)) {
-                self.atom_bits(ix.name[r], d);
+            if row_search && (r == a || !cont_bit(k.cont, r)) {
+                self.atom_bits(k.name[r], d);
                 pass = lut[self.mask[d] as usize];
             }
             if row_search && !pass {
                 continue;
             }
-            let (f0, t0) = (ix.vf[r], ix.vt[r]);
+            let (f0, t0) = (k.vf[r], k.vt[r]);
             let la = f0 <= sa && sa < t0;
             let lbv = DIFF && f0 <= sb && sb < t0;
             if !(la || lbv) {
@@ -404,7 +448,7 @@ impl<'a, const SEARCH: bool, const DIFF: bool, const FILT: bool> Chunk<'a, SEARC
                 }
                 v
             } else {
-                (ix.size[r], 1)
+                (k.size[r], 1)
             };
             if la {
                 x.bytes += bytes;
@@ -424,9 +468,127 @@ impl<'a, const SEARCH: bool, const DIFF: bool, const FILT: bool> Chunk<'a, SEARC
         self.publish((b - a) as u64);
     }
 
+    /// A search below the window: frame `ti` (at the deepest level or below, undecided) from object row `o` to `e`, the
+    /// directories from `j` on. One loop over objects and directories with per-depth bounds instead of frames, every
+    /// passing row summed into the window node; a directory whose atoms decide the expression is summed flat or skipped
+    /// whole. Returns where it stopped: `(o, j)`.
+    fn deep(&mut self, ti: usize, mut o: usize, e: usize, mut j: usize) -> (usize, usize) {
+        let k = self.k;
+        let ix = self.ctx.ix;
+        let c = self.ctx.c;
+        let (sa, sb) = (c.sa, c.sb.unwrap_or(0));
+        let nd = k.ddepth.len();
+        let t = self.target(ti);
+        let d0 = self.st[ti].depth as usize;
+        let lut: &[bool] = &c.search.as_ref().unwrap().lut;
+        let mut hi_at = [0usize; 257];
+        let mut cur = d0;
+        let (mut x, mut y) = (Acc::default(), Acc::default());
+        let (mut rows, mut dirs) = (0u64, 0u64);
+        loop {
+            while cur > d0 && hi_at[cur] <= o {
+                cur -= 1;
+            }
+            let bound = if cur > d0 { hi_at[cur].min(e) } else { e };
+            let next = if j < nd && (k.dlo[j] as usize) < bound { k.dlo[j] as usize } else { bound };
+            // `cur`'s direct objects.
+            let dd = cur + 1;
+            let mut pass = false;
+            for r in o..next {
+                if r == o || !cont_bit(k.cont, r) {
+                    self.atom_bits(k.name[r], dd);
+                    pass = lut[self.mask[dd] as usize];
+                }
+                if !pass {
+                    continue;
+                }
+                let (f0, t0) = (k.vf[r], k.vt[r]);
+                let la = f0 <= sa && sa < t0;
+                let lbv = DIFF && f0 <= sb && sb < t0;
+                if !(la || lbv) {
+                    continue;
+                }
+                let (bytes, cnt) = if FILT {
+                    let v = self.filtered(r);
+                    if v.1 == 0 {
+                        continue;
+                    }
+                    v
+                } else {
+                    (k.size[r], 1)
+                };
+                if la {
+                    x.bytes += bytes;
+                    x.files += cnt;
+                }
+                if lbv {
+                    y.bytes += bytes;
+                    y.files += cnt;
+                }
+            }
+            rows += (next - o) as u64;
+            o = next;
+            if o >= e {
+                break;
+            }
+            if o == bound {
+                continue;
+            }
+            // Enter directory `j`, a child of `cur`.
+            let dj = cur + 1;
+            self.atom_bits(k.dname[j], dj);
+            dirs += 1;
+            let jhi = k.dhi[j] as usize;
+            match c.dec[self.mask[dj] as usize] {
+                NO => {
+                    let z = jhi.min(e);
+                    self.out.t.skipped += (z - o) as u64;
+                    o = z;
+                    j = k.dend[j] as usize + 1;
+                }
+                YES => {
+                    let z = jhi.min(e);
+                    self.flat(t, o, z, false, 0);
+                    o = z;
+                    j = k.dend[j] as usize + 1;
+                }
+                _ => {
+                    if !ix.dself.is_empty() {
+                        // Its own versions: the directory's path's atoms decide them.
+                        let z = ix.own_end(j).min(e);
+                        if z > o {
+                            if lut[self.mask[dj] as usize] {
+                                self.flat(t, o, z, false, 0);
+                            }
+                            o = z;
+                        }
+                    }
+                    cur = dj;
+                    hi_at[dj] = jhi;
+                    j += 1;
+                }
+            }
+        }
+        self.out.t.rows += rows;
+        self.out.t.named += rows;
+        if FILT {
+            self.out.t.filtered += rows;
+        }
+        self.out.t.dirs += dirs;
+        self.st[t].a.add(x);
+        self.run_a += x.bytes;
+        if DIFF {
+            self.st[t].b.add(y);
+            self.run_b += y.bytes;
+        }
+        self.publish(rows);
+        (o, j)
+    }
+
     /// Rows `[a, b)`: direct children of frame `ti` at a depth in the window, each object path a node.
     fn obj_nodes(&mut self, ti: usize, a: usize, b: usize) {
         let ix = self.ctx.ix;
+        let k = self.k;
         let c = self.ctx.c;
         let (sa, sb) = (c.sa, c.sb.unwrap_or(0));
         let d = self.st[ti].depth as usize + 1;
@@ -442,14 +604,14 @@ impl<'a, const SEARCH: bool, const DIFF: bool, const FILT: bool> Chunk<'a, SEARC
         }
         let mut r = a;
         while r < b {
-            let start = if r == self.lo && ix.is_cont(r) { ix.obj_rows(r).0 } else { r };
+            let start = if r == self.lo && cont_bit(k.cont, r) { ix.obj_rows(r).0 } else { r };
             let mut e = r + 1;
-            while e < b && ix.is_cont(e) {
+            while e < b && cont_bit(k.cont, e) {
                 e += 1;
             }
-            let continues = e == self.hi && e < ix.n_o() && ix.is_cont(e);
+            let continues = e == self.hi && e < k.vf.len() && cont_bit(k.cont, e);
             let pass = if need_search {
-                self.atom_bits(ix.name[r], d);
+                self.atom_bits(k.name[r], d);
                 c.search.as_ref().unwrap().lut[self.mask[d] as usize]
             } else {
                 true
@@ -457,7 +619,7 @@ impl<'a, const SEARCH: bool, const DIFF: bool, const FILT: bool> Chunk<'a, SEARC
             let (mut x, mut y) = (Acc::default(), Acc::default());
             if pass {
                 for v in r..e {
-                    let (f0, t0) = (ix.vf[v], ix.vt[v]);
+                    let (f0, t0) = (k.vf[v], k.vt[v]);
                     let la = f0 <= sa && sa < t0;
                     let lbv = DIFF && f0 <= sb && sb < t0;
                     if !(la || lbv) {
@@ -470,7 +632,7 @@ impl<'a, const SEARCH: bool, const DIFF: bool, const FILT: bool> Chunk<'a, SEARC
                         }
                         q
                     } else {
-                        (ix.size[v], 1)
+                        (k.size[v], 1)
                     };
                     if la {
                         x.bytes += bytes;
@@ -497,9 +659,11 @@ impl<'a, const SEARCH: bool, const DIFF: bool, const FILT: bool> Chunk<'a, SEARC
                     self.run_b += y.bytes;
                 }
             }
+            // The lower bound moves within a run too: a flat directory's millions of small objects are dropped
+            // here, not handed to the assembly.
+            self.publish((e - r) as u64);
             r = e;
         }
-        self.publish((b - a) as u64);
     }
 
     fn pop(&mut self) {
@@ -534,16 +698,16 @@ impl<'a, const SEARCH: bool, const DIFF: bool, const FILT: bool> Chunk<'a, SEARC
 
     /// Push directory `j` (a child of the top frame).
     fn push(&mut self, j: usize, partial: bool) {
-        let ix = self.ctx.ix;
-        let d = ix.ddepth[j];
+        let k = self.k;
+        let d = k.ddepth[j];
         let parent_dec = self.st.last().unwrap().dec;
         let mut dec = parent_dec;
         if SEARCH && parent_dec == UNDECIDED {
-            self.atom_bits(ix.dname[j], d as usize);
+            self.atom_bits(k.dname[j], d as usize);
             dec = self.ctx.c.dec[self.mask[d as usize] as usize];
         }
         self.out.t.dirs += 1;
-        self.st.push(Frame { node: j as u64, depth: d, dhi: ix.dhi[j], dend: ix.dend[j], dec, partial, a: Acc::default(), b: Acc::default() });
+        self.st.push(Frame { node: j as u64, depth: d, dhi: k.dhi[j], dend: k.dend[j], dec, partial, a: Acc::default(), b: Acc::default() });
     }
 
     /// Whether frame `ti` sums its rows flat (`Some(true)`), skips them (`Some(false)`), or is walked (`None`).
@@ -583,6 +747,11 @@ impl<'a, const SEARCH: bool, const DIFF: bool, const FILT: bool> Chunk<'a, SEARC
             }
             self.push(g as usize, true);
         }
+        // The threshold's lower bound as other chunks have already published it.
+        if c.min_ppm > 0 {
+            let g = self.ctx.ga.load(Ordering::Relaxed).max(self.ctx.gb.load(Ordering::Relaxed));
+            self.lb = c.min_ppm as u128 * g as u128;
+        }
         let mut o = lo;
         // The chunk may start inside the deepest open directory's own versions.
         let ti = self.st.len() - 1;
@@ -614,7 +783,15 @@ impl<'a, const SEARCH: bool, const DIFF: bool, const FILT: bool> Chunk<'a, SEARC
                 }
                 break;
             }
-            let t = if j < nd && (ix.dlo[j] as usize) < hi { ix.dlo[j] as usize } else { hi };
+            if SEARCH && ti > 0 && self.st[ti].depth >= c.maxd {
+                (o, j) = self.deep(ti, o, dhi.min(hi), j);
+                if o == dhi {
+                    self.pop();
+                    continue;
+                }
+                break;
+            }
+            let t = if j < nd && (self.k.dlo[j] as usize) < hi { self.k.dlo[j] as usize } else { hi };
             let e = t.min(dhi);
             if e > o {
                 let d = self.st[ti].depth;
@@ -635,7 +812,7 @@ impl<'a, const SEARCH: bool, const DIFF: bool, const FILT: bool> Chunk<'a, SEARC
             }
             self.push(j, false);
             let ti = self.st.len() - 1;
-            if self.mode(ti).is_none() {
+            if !ix.dself.is_empty() && self.mode(ti).is_none() {
                 let e = ix.own_end(j).min(hi);
                 if e > o {
                     self.own(ti, o, e);
@@ -664,6 +841,7 @@ impl Ctx<'_> {
                 let n_path = self.c.search.as_ref().map_or(0, |s| s.path_atoms.len());
                 Chunk::<$s, $d, $f> {
                     ctx: self,
+                    k: Cols::of(self.ix),
                     lo,
                     hi,
                     st: Vec::with_capacity(64),

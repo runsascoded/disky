@@ -13,7 +13,8 @@
 //!                                                      cold + warm runs per thread count, answers checked equal
 //!                                                      (QUERIES planned first when it doesn't exist); `-A`: each
 //!                                                      answer equal to REF's (exit 1 after the run if not); `-p N`:
-//!                                                      fault a pack file in on N threads before the first query.
+//!                                                      fault a pack file in on N threads before the first query;
+//!                                                      `-m N`: read it into huge-page memory on N threads instead.
 //!                                                      Each run's storage reads and major faults are recorded.
 //! fsb synth -o STAGE [-S 30] [-R 2] [-x SCALE] [-s SEED]  a synthetic fleet's history (`oracle/synth_store.py` cuts it)
 //! ```
@@ -117,8 +118,9 @@ impl Engine {
     }
 }
 
-/// SRC: a generation dir (loaded), or a pack file (mapped; `prefault` threads fault it all in first).
-fn open_src(src: &str, prefault: Option<usize>) -> Result<(Engine, serde_json::Value)> {
+/// SRC: a generation dir (loaded), or a pack file: mapped (`prefault` threads fault it all in first), or with `mem`
+/// threads read into huge-page-backed memory.
+fn open_src(src: &str, prefault: Option<usize>, mem: Option<usize>) -> Result<(Engine, serde_json::Value)> {
     let path = PathBuf::from(src);
     let p0 = pack::proc();
     let t0 = Instant::now();
@@ -127,7 +129,10 @@ fn open_src(src: &str, prefault: Option<usize>) -> Result<(Engine, serde_json::V
         let s = t0.elapsed().as_secs_f64();
         return Ok((Engine::Full(idx), json!({"src": "store", "load_s": s, "proc": pack::proc()})));
     }
-    let p = Pack::open(&path)?;
+    let p = match mem {
+        Some(n) => Pack::read(&path, n)?,
+        None => Pack::open(&path)?,
+    };
     let open_s = t0.elapsed().as_secs_f64();
     let fault_s = match prefault {
         Some(n) => Some(p.prefault(n)?),
@@ -143,7 +148,7 @@ fn open_src(src: &str, prefault: Option<usize>) -> Result<(Engine, serde_json::V
     let mb = p.len() as f64 / 1048576.0;
     let info = json!({
         "src": "pack", "kind": p.kind, "file_bytes": p.len(), "open_s": open_s, "prefault_s": fault_s,
-        "prefault_mib_s": fault_s.map(|f| mb / f), "load_s": load_s, "read_bytes": p1.read_bytes - p0.read_bytes,
+        "prefault_mib_s": fault_s.map(|f| mb / f), "mem": mem.is_some(), "mem_mib_s": mem.map(|_| mb / open_s), "load_s": load_s, "read_bytes": p1.read_bytes - p0.read_bytes,
         "majflt": p1.majflt - p0.majflt, "proc": p1,
     });
     eprintln!("open {src}: {}", info);
@@ -175,7 +180,7 @@ fn main() -> Result<()> {
             println!("{}", json!({"bytes": n, "write_s": t.elapsed().as_secs_f64(), "load": idx.stats, "proc": pack::proc()}));
         }
         "slim" => {
-            let (e, _) = open_src(&a.pos[1], None)?;
+            let (e, _) = open_src(&a.pos[1], None, None)?;
             let Engine::Full(idx) = e else { return err("slim: SRC must be a store or a full pack") };
             let t = Instant::now();
             let ix = SlimIndex::from_index(&idx)?;
@@ -186,7 +191,7 @@ fn main() -> Result<()> {
             println!("{}", json!({"bytes": n, "build_s": build_s, "write_s": t.elapsed().as_secs_f64(), "stats": ix.stats, "columns": ix.column_bytes(), "proc": pack::proc()}));
         }
         "plan" => {
-            let (e, _) = open_src(&a.pos[1], None)?;
+            let (e, _) = open_src(&a.pos[1], None, None)?;
             let Engine::Full(idx) = e else { return err("plan: needs the full index") };
             let p = pool(threads(num_cpus()))?;
             let (qs, meta) = if a.opts.contains_key("x") { (full_scan::plan::exhaustive(&idx), json!({})) } else { plan(&idx, &p)? };
@@ -197,7 +202,7 @@ fn main() -> Result<()> {
             eprintln!("plan: {} queries; {}", qs.len(), meta);
         }
         "run" => {
-            let (e, _) = open_src(&a.pos[1], None)?;
+            let (e, _) = open_src(&a.pos[1], None, None)?;
             let qs = read_queries(&a.pos[2])?;
             let p = pool(threads(num_cpus()))?;
             let mut f = File::create(a.opts.get("o").ok_or("-o ANSWERS")?)?;
@@ -209,7 +214,8 @@ fn main() -> Result<()> {
         }
         "bench" => {
             let prefault = a.opts.get("p").map(|x| x.parse().unwrap());
-            let (e, open) = open_src(&a.pos[1], prefault)?;
+            let mem = a.opts.get("m").map(|x| x.parse().unwrap());
+            let (e, open) = open_src(&a.pos[1], prefault, mem)?;
             // No query file yet: plan one from this load (one load per store, not two).
             if !std::path::Path::new(&a.pos[2]).exists() {
                 let Engine::Full(idx) = &e else { return err("bench: planning needs the full index") };

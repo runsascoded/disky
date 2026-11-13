@@ -98,9 +98,64 @@ impl<'a> Writer<'a> {
     }
 }
 
-/// A mapped pack file.
+/// A pack's bytes: the file mapped (served from the page cache), or read into anonymous memory backed by transparent
+/// huge pages (`MADV_HUGEPAGE`: 2 MiB TLB entries, and no page cache to evict).
+pub enum Backing {
+    Map(Mmap),
+    Mem(Vec<u64>, usize),
+}
+
+impl Backing {
+    pub fn as_ptr(&self) -> *const u8 {
+        match self {
+            Backing::Map(m) => m.as_ptr(),
+            Backing::Mem(v, _) => v.as_ptr() as *const u8,
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        match self {
+            Backing::Map(m) => m.len(),
+            Backing::Mem(_, n) => *n,
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    pub fn bytes(&self) -> &[u8] {
+        unsafe { std::slice::from_raw_parts(self.as_ptr(), self.len()) }
+    }
+}
+
+/// Read `path` into huge-page-backed anonymous memory with `threads` parallel reads of 64 MiB.
+fn read_mem(path: &Path, threads: usize) -> Result<Backing> {
+    use std::os::unix::fs::FileExt;
+    let f = File::open(path)?;
+    let n = f.metadata()?.len() as usize;
+    let words = n.div_ceil(8);
+    let mut v: Vec<u64> = Vec::with_capacity(words);
+    unsafe {
+        libc::madvise(v.as_mut_ptr() as *mut libc::c_void, words * 8, libc::MADV_HUGEPAGE);
+        v.set_len(words);
+    }
+    let base = crate::util::Shared(v.as_mut_ptr() as *mut u8);
+    let piece = 64usize << 20;
+    let pool = rayon::ThreadPoolBuilder::new().num_threads(threads).build()?;
+    pool.install(|| {
+        (0..n.div_ceil(piece)).into_par_iter().try_for_each(|i| -> std::io::Result<()> {
+            let (a, b) = (i * piece, ((i + 1) * piece).min(n));
+            let buf = unsafe { std::slice::from_raw_parts_mut(base.ptr().add(a), b - a) };
+            f.read_exact_at(buf, a as u64)
+        })
+    })?;
+    Ok(Backing::Mem(v, n))
+}
+
+/// A pack file, mapped or read into memory.
 pub struct Pack {
-    pub map: Arc<Mmap>,
+    pub map: Arc<Backing>,
     pub kind: String,
     pub meta: Value,
     secs: HashMap<String, (String, u64, usize)>,
@@ -109,12 +164,22 @@ pub struct Pack {
 impl Pack {
     pub fn open(path: &Path) -> Result<Pack> {
         let f = File::open(path)?;
-        let map = unsafe { Mmap::map(&f)? };
-        if map.len() < 16 || &map[..8] != MAGIC {
+        Pack::from(Backing::Map(unsafe { Mmap::map(&f)? }), path)
+    }
+
+    /// Read the whole file into huge-page-backed memory on `threads` threads (`MADV_HUGEPAGE`).
+    pub fn read(path: &Path, threads: usize) -> Result<Pack> {
+        Pack::from(read_mem(path, threads)?, path)
+    }
+
+    fn from(map: Backing, path: &Path) -> Result<Pack> {
+        let map_len = map.len();
+        let bytes = map.bytes();
+        if map_len < 16 || &bytes[..8] != MAGIC {
             return err(format!("{}: not a pack file", path.display()));
         }
-        let hl = u64::from_le_bytes(map[8..16].try_into().unwrap()) as usize;
-        let h: Value = serde_json::from_slice(&map[16..16 + hl])?;
+        let hl = u64::from_le_bytes(bytes[8..16].try_into().unwrap()) as usize;
+        let h: Value = serde_json::from_slice(&bytes[16..16 + hl])?;
         if h["version"].as_u64() != Some(VERSION) {
             return err(format!("{}: pack version {}, this reader reads {VERSION}", path.display(), h["version"]));
         }
@@ -129,7 +194,7 @@ impl Pack {
                 "u64" => 8,
                 e => return err(format!("pack: element type {e}")),
             };
-            if off % ALIGN != 0 || off as usize + len * size > map.len() {
+            if off % ALIGN != 0 || off as usize + len * size > map_len {
                 return err(format!("{}: section {name} out of the file", path.display()));
             }
             secs.insert(name, (elem, off, len));
@@ -312,8 +377,8 @@ pub fn read_index(p: &Pack) -> Result<Index> {
     })
 }
 
-/// Process counters (Linux): bytes this process read from storage, major faults, seconds since it started, VmRSS and
-/// VmHWM in GB. Zeros elsewhere.
+/// Process counters (Linux): bytes this process read from storage, major faults, seconds since it started, VmRSS,
+/// VmHWM and RssAnon (memory not backed by a file: a mapped pack's pages count in VmRSS, not here) in GB. Zeros elsewhere.
 #[derive(Clone, Copy, Debug, Default, serde::Serialize)]
 pub struct Proc {
     pub read_bytes: u64,
@@ -321,6 +386,7 @@ pub struct Proc {
     pub since_start_s: f64,
     pub rss_gb: f64,
     pub hwm_gb: f64,
+    pub anon_gb: f64,
 }
 
 pub fn proc() -> Proc {
@@ -342,6 +408,7 @@ pub fn proc() -> Proc {
         let kb = |k: &str| s.lines().find_map(|l| l.strip_prefix(k)?.split_whitespace().next()?.parse::<f64>().ok()).unwrap_or(0.0);
         p.rss_gb = kb("VmRSS:") / 1048576.0;
         p.hwm_gb = kb("VmHWM:") / 1048576.0;
+        p.anon_gb = kb("RssAnon:") / 1048576.0;
     }
     p
 }

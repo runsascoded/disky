@@ -53,7 +53,7 @@ pub struct SlimIndex {
     /// Directories whose own path also has object versions (sorted).
     pub dself: Col<u32>,
     pub stats: Value,
-    pub map: Option<std::sync::Arc<memmap2::Mmap>>,
+    pub map: Option<std::sync::Arc<crate::pack::Backing>>,
 }
 
 impl SlimIndex {

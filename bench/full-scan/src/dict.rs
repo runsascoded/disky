@@ -27,29 +27,39 @@ pub struct Dict {
     pub patch_buf: Col<u8>,
 }
 
+/// Matching name ids: one bit per id, and a summary bit per 64-id word that has any set. A lookup reads the summary
+/// first (`n / 4096` bytes: it stays in cache), so ids in empty words (most, for a selective term) never touch the
+/// word array.
 #[derive(Clone)]
-pub struct Bitset(pub Vec<u64>);
+pub struct Bitset {
+    pub words: Vec<u64>,
+    pub sum: Vec<u64>,
+}
 
 impl Bitset {
     pub fn new(n: usize) -> Bitset {
-        Bitset(vec![0; n.div_ceil(64)])
+        let w = n.div_ceil(64);
+        Bitset { words: vec![0; w], sum: vec![0; w.div_ceil(64)] }
     }
     pub fn full(n: usize) -> Bitset {
-        let mut b = Bitset(vec![!0; n.div_ceil(64)]);
-        if n % 64 != 0 {
-            *b.0.last_mut().unwrap() = (1u64 << (n % 64)) - 1;
+        let mut b = Bitset::new(n);
+        for i in 0..n as u32 {
+            b.set(i);
         }
         b
     }
     #[inline(always)]
     pub fn get(&self, i: u32) -> bool {
-        unsafe { (*self.0.get_unchecked((i >> 6) as usize) >> (i & 63)) & 1 != 0 }
+        let w = (i >> 6) as usize;
+        unsafe { (*self.sum.get_unchecked(w >> 6) >> (w & 63)) & 1 != 0 && (*self.words.get_unchecked(w) >> (i & 63)) & 1 != 0 }
     }
     pub fn set(&mut self, i: u32) {
-        self.0[(i >> 6) as usize] |= 1 << (i & 63);
+        let w = (i >> 6) as usize;
+        self.words[w] |= 1 << (i & 63);
+        self.sum[w >> 6] |= 1 << (w & 63);
     }
     pub fn count(&self) -> u64 {
-        self.0.iter().map(|w| w.count_ones() as u64).sum()
+        self.words.iter().map(|w| w.count_ones() as u64).sum()
     }
 }
 
