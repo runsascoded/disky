@@ -74,7 +74,10 @@ def main(
     if any(len(p) != 2 for p in pairs):
         raise SystemExit(f'-e takes KEY=VALUE: {envs}')
     # A hand submit is a `manual` run (`/scans`' trigger) unless `-e DT_TRIGGER=…` says otherwise.
-    env = {'DT_TRIGGER': 'manual', **dict(pairs)}
+    # Fargate's cgroup can't tell the task its vCPUs (`cpu.max` reads `max`), so a resized job's thread
+    # count follows `-c` through `$DT_NPROC` (the job def sets it for its own vCPUs).
+    nproc = {'DT_NPROC': str(max(1, int(float(vcpus))))} if vcpus else {}
+    env = {'DT_TRIGGER': 'manual', **nproc, **dict(pairs)}
     overrides['environment'] = [{'name': k, 'value': v} for k, v in env.items()]
     job_id = batch.submit_job(
         jobName=name,

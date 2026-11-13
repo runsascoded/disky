@@ -43,6 +43,9 @@ config:
     # ARM64): the profile prices that machine.
     SCAN_RUNS_PROFILE: /app/infra/aws/scan-runs.json
     INGEST_MACHINE: fargate-arm64-2vcpu-16gib
+    # Threads for every step (`Ctx.nproc`): Fargate's cgroup reads `cpu.max` = `max`, so without this the steps
+    # see the host's 8 CPUs and run DuckDB at `-p 8` on this 2-vCPU task. Keep it equal to vcpu above.
+    DT_NPROC: "2"
     INGEST_SPOT: "1"
     # The static name index's generation: the site's STATIC_GEN (site/wrangler.toml); ingest.sh builds
     # it on its first run, then appends each laptop scan.
