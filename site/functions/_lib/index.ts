@@ -37,6 +37,7 @@ import { R2Store } from '@rdub/file-tree/stores/r2'
 import { S3Store } from '@rdub/file-tree/stores/s3'
 import { type ColumnIndex, type FileMetaData, parquetMetadata, parquetMetadataAsync, parquetRead, parquetReadObjects, readColumnIndex, readOffsetIndex, type RowGroup } from 'hyparquet'
 import type { Env } from './auth.js'
+import { assertHistoryScan, historyVersion, withHistoryVersion } from './historyVersion.js'
 import { FILL_MAX_ROWS, type FooterRow, noteAccess, probe, queueFill, trusted, wantsFill } from './footerCache.js'
 import { newestManifest } from './manifests.js'
 import { colo, inFlight, IsoMap, IsoSet, join, JOIN, type Join, Memo, registerIsolate, reqOf, scopeOf, shared, STALLED, track } from './shared.js'
@@ -425,6 +426,8 @@ const ivKeyed = (st: IvState, dates: string[]): Set<string> => new Set(dates.fil
  *  every scan its current generation holds (`storeHeldScans`), so a scan the job appended without per-scan pointers
  *  (or whose pointers `scan retire -P` dropped) is listed (specs/lean-scans.md §1.4, S1). */
 export async function pathScans(env: Env, order: boolean): Promise<{ results: { date: string }[] }> {
+  const release = await historyVersion(env)
+  if (release) return { results: release.retained.map(date => ({ date })) }
   const [d1, held] = await Promise.all([
     isPrimary(env)
       ? readerMetadata(env)!.prepare("SELECT DISTINCT date FROM index_schema WHERE variant = 'path'").all<{ date: string }>()
@@ -488,6 +491,8 @@ const handles = new IsoMap<string, Promise<IndexHandle>>('handles')
 const handleAt = new IsoMap<string, number>('handleAt')
 
 export async function openIndex(env: Env, date: string, variant = 'path'): Promise<IndexHandle> {
+  env = await withHistoryVersion(env)
+  await assertHistoryScan(env, date)
   if (!intervalsOn(env)) return openPerScan(env, date, variant)
   const h = await openInterval(env, date, variant)
   if (h) return h
@@ -567,11 +572,20 @@ export const intervalsOn = (env: Env): boolean => env.PATH_STORE === 'intervals'
 export async function withPathStore<C extends { request: Request; env: Env }>(ctx: C): Promise<C> {
   const w = (ctx as { waitUntil?: unknown }).waitUntil
   const out = (e: Env): C => (e === ctx.env ? ctx : { ...ctx, env: e, ...(typeof w === 'function' ? { waitUntil: w.bind(ctx) } : {}) })
-  const store = ctx.env.PATH_STORE === 'opt-in' || ctx.env.PATH_STORE === 'intervals'
+  const history = await withHistoryVersion(ctx.env)
+  if (await historyVersion(history)) {
+    const sp = new URL(ctx.request.url).searchParams
+    for (const key of ['date', 'from', 'to']) {
+      const date = sp.get(key)
+      if (date) await assertHistoryScan(history, date)
+    }
+    return out(history)
+  }
+  const store = history.PATH_STORE === 'opt-in' || history.PATH_STORE === 'intervals'
   const ps = new URL(ctx.request.url).searchParams.get('ps')
-  const on = store && ps !== 'scan' && (ctx.env.PATH_STORE === 'intervals' || ps === 'iv')
+  const on = store && ps !== 'scan' && (history.PATH_STORE === 'intervals' || ps === 'iv')
   // The two pointers at once (neither reads what the other sets): a cold isolate's two colo lookups overlap.
-  const [env, gen] = await Promise.all([withStaticGen(ctx.env), on ? ivGen(ctx.env) : Promise.resolve(ctx.env.INTERVAL_STORE_GEN)])
+  const [env, gen] = await Promise.all([withStaticGen(history), on ? ivGen(history) : Promise.resolve(history.INTERVAL_STORE_GEN)])
   if (!store) return out(env)
   return out({ ...env, PATH_STORE: on ? 'intervals' : undefined, INTERVAL_STORE_GEN: gen ?? undefined })
 }
@@ -585,6 +599,8 @@ export const STATIC_CURRENT = 'static-names/CURRENT.json'
 /** `env`'s interval-store generation: `INTERVAL_STORE_GEN` when set (a pin), else `IV_CURRENT`'s (`currentGen`): null
  *  without a pointer object, an `IvStoreUnavailable` when its read fails and the isolate holds no earlier one. */
 export async function ivGen(env: Env): Promise<string | null> {
+  const release = await historyVersion(env)
+  if (release) return release.interval_gen
   return env.INTERVAL_STORE_GEN?.trim() || currentGen(env, `${ivPrefix(env)}/CURRENT.json`, 'current', true)
 }
 
@@ -592,6 +608,8 @@ export async function ivGen(env: Env): Promise<string | null> {
  *  reading the index (`FILTER_STATIC` / `NAME_SUMMARY_STATIC`), `STATIC_CURRENT`'s (`currentGen`). A secondary store's
  *  is its own config's alone (`stores.ts`), never the primary's pointer: null without one. */
 export async function staticCurrentGen(env: StaticGenEnv): Promise<string | null> {
+  const release = await historyVersion(env as Env)
+  if (release) return release.static_gen
   const pin = env.STATIC_GEN?.trim()
   if (pin) return pin
   const e = env as unknown as Env
@@ -604,6 +622,7 @@ export type StaticGenEnv = { STATIC_GEN?: string; STATIC_CURRENT_KEY?: string; I
 /** `env` with its static name index generation fixed (`staticCurrentGen`) for the request: unchanged when pinned or
  *  without a pointer (an unset `STATIC_GEN` reads as it always has). */
 export async function withStaticGen<E extends StaticGenEnv>(env: E): Promise<E> {
+  env = await withHistoryVersion(env)
   if (env.STATIC_GEN?.trim()) {
     currentMeter()?.staticGen.add(env.STORE_KEY || 'primary', env.STATIC_GEN.trim())
     return env

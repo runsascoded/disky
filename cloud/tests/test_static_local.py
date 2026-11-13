@@ -492,6 +492,44 @@ def test_add_with_nothing_pending_is_a_nop(appended):
     assert _files(appended["gen"]) == before
 
 
+def _manifests(gen: Path) -> list[str]:
+    d = gen / "manifests"
+    return sorted(p.name for p in d.iterdir()) if d.exists() else []
+
+
+def test_add_publishes_each_scan_before_the_next(fixture, tmp_path, monkeypatch):  # noqa: F811
+    """Three scans pending, the second's `append_scan` raising: the first is already in the store (its manifest the
+    newest), so the next `add` (a fresh work dir, as the next job's) appends only the other two, its carry with them."""
+    root, scans, _ = fixture
+    ids = scan_ids(scans)
+    a, b, c = ids[-3:]
+    store = tmp_path / "store"
+    with _small_groups():
+        _build(root, scans, store, tmp_path / "work-build", through=ids[-4])
+    gen = store / sn.PREFIX / "g"
+    real, calls = sl.append_scan, []
+
+    def flaky(con, gen_dir, scan, *args, **kw):
+        calls.append(scan["id"])
+        if len(calls) == 2:
+            raise RuntimeError(f"append {scan['id']}: out of memory")
+        return real(con, gen_dir, scan, *args, **kw)
+
+    with monkeypatch.context() as m:
+        m.setattr(sl, "append_scan", flaky)
+        res = CliRunner().invoke(sl.add_cmd, ["-g", "g", "-L", _layout(scans), "-s", str(root), "-o", str(store), "-w", str(tmp_path / "work-1"),
+                                              "-p", "2", "-M", "1GB"])
+    assert (res.exit_code, type(res.exception), str(res.exception), calls) == (1, RuntimeError, f"append {b}: out of memory", [a, b])
+    assert _manifests(gen) == [f"{a}.json"]
+    assert sorted(p.name for p in (gen / "deltas").iterdir()) == [sa.run_key(a, a).removeprefix("deltas/")]
+    out = _add(root, scans, store, tmp_path / "work-2")
+    assert (out["after"], [x["scan"] for x in out["added"]]) == (a, [b, c])
+    assert [[x["output"] for x in m["merged"]] for m in out["merge"]] == [[sa.run_key(a, b)], []]
+    assert _manifests(gen) == [f"{a}.json", f"{b}.json", f"{b}.m001.json", f"{c}.json"]
+    newest = json.loads((gen / "manifests" / f"{c}.json").read_text())
+    assert [(r["key"], r["level"], r["scans"]) for r in newest["runs"]] == [(sa.run_key(a, b), 1, [a, b]), (sa.run_key(c, c), 0, [c])]
+
+
 def test_add_prunes_the_folded_runs_after_the_grace(appended, tmp_path):
     """Four scans appended one `add` at a time (one work dir throughout), as if `AGE` s apart (each `add` first ages the
     store's manifests by that much, rather than sleeping), the grace `-G 600`: the 2nd's carry folds the first two runs

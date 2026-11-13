@@ -127,13 +127,20 @@ ROOT_LABEL = "my buckets"                   # the store root's crumb label
 # DIGEST_REAPPLY = '{"template":"…","config":"job/digest.yml","root":"snapshots/…","env_script":"job/…-env.sh","r2_bucket":"…","secrets":{"SITE_TOKEN":"…"}}'  # `/admin/slack`'s re-apply job; unset: it answers 503
 # GCP_PROJECT = "my-project"                  # the GCP project the Batch jobs, secrets and logs live in; unset = GCP_SA_KEY's project_id
 # SCAN_SUBMIT_JOB = "projects/my-project/locations/us-east1/jobs/my-scan-submit"  # /scans' "Run a scan" (admins): runs this Cloud Run job (a `BatchSubmitCron`'s submitter) as GCP_SA_KEY with DT_TRIGGER=manual; unset: no button, the route answers 503
-# SWEEP_DISPATCH = "0"                        # no sweep or undo dispatch from this env whatever its GCP_SA_KEY (a dev stack on prod data that holds the key for "Run a scan"); unset = dispatch as configured
+# SWEEP_DISPATCH = "0"                        # no sweep / undo / purge dispatch, sweep stop or digest re-apply from this env whatever its GCP_SA_KEY (a dev stack on prod data that holds the key for "Run a scan"); unset = dispatch as configured
 # META_TREE_URL = "https://other.example/meta"  # /scans links each scan output to its dir in the `/meta` store tree (the deployments' own data bucket); unset = no tree links
 # GCP_LOG_VIEW = "projects/my-project/locations/global/buckets/_Default/views/sweep-task-logs"  # IaC-managed task-log-only view; grant the site view-scoped logging.viewAccessor
 # BATCH_REGION = "us-east1"                    # the deployment's Batch region, beside its data bucket (no default): `plan-sweep` needs it; `sweep` when a cut isn't in one BUCKET_REGIONS region
 # BUCKET_REGIONS = '{"my-bucket": "us-east1"}'  # a one-region bucket cut runs its job there, beside the data; unset = BATCH_REGION
 # DATA_BUCKET = "my-data"                      # the bucket a run's plan.json, manifest and logs land in (dispatch requires it)
 # SWEEP_IMAGE = "<region>-docker.pkg.dev/<project>/<repo>/<image>:<tag>"  # the executor's image (dispatch requires it)
+# History retention is opt-in: jobs build immutable candidates; adoption is a separate environment CAS.
+# HISTORY_CURRENT_KEY = "history/environments/dev/CURRENT.json"  # unset: follow the scan pipeline's writer generations
+# HISTORY_IMAGE = "<region>-docker.pkg.dev/<project>/<repo>/<image>@sha256:<digest>"  # pinned history worker image
+# HISTORY_DATA_STORE = "gs://my-data-bucket"  # source generations, beside the Batch workers
+# HISTORY_SERVING_STORE = "r2://my-index-bucket"  # immutable candidate artifacts and environment pointers
+# HISTORY_REGION = "us-east1"                 # beside HISTORY_DATA_STORE; no default
+# HISTORY_SECRETS = '{"R2_ENDPOINT":"my-r2-endpoint","R2_ACCESS_KEY_ID":"my-r2-key","R2_SECRET_ACCESS_KEY":"my-r2-secret"}'  # env variable -> Secret Manager name, never values
 # SWEEP_REVIEW_STORE = "r2://<index-bucket>"  # historical review inputs after per-scan retirement (`sweep`: the `as_of` hold store; unset = gs://$DATA_BUCKET)
 # SWEEP_REVIEW_SECRETS = '{"R2_ENDPOINT":"<endpoint-secret>","R2_ACCESS_KEY_ID":"<key-secret>","R2_SECRET_ACCESS_KEY":"<secret-secret>"}'
 # SWEEP_PACING = "guided"                    # per-bucket feedback; adaptive is a faster probe, enable after a controlled benchmark
@@ -204,3 +211,4 @@ ROOT_LABEL = "my buckets"                   # the store root's crumb label
 # overlay STORE_KEY                         set by STORES_JSON's per-store overlay, never directly
 # overlay STORE_SCOPE
 # overlay STORE_SERIES_SCOPE
+# overlay HISTORY_VERSION_CACHE              one request's captured history pointer/version; never deployment configuration

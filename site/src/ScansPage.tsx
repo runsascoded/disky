@@ -20,7 +20,9 @@ import { axisTicks, includeRunKind, inSpan, runFilterKinds, runKindLabel, runKin
 import { fmtBytesPrecise, fmtN, type Meta } from './types'
 import { readThrough } from './readLens'
 import { useUnits } from './units'
-import { useStores } from './auth'
+import { useIsAdmin, useStores } from './auth'
+import { HistoryAdmin, useHistoryConfigured } from './HistoryAdmin'
+import { retentionLabel, retentionRunSelectable, retentionScans, retentionSpanScans, toggleRetentionScan, type RetentionPlan, type RetentionScan, type RetentionSource } from './scanRetention'
 import { DEFAULT_STORE, type Store } from './stores'
 import { useStore } from './store'
 import { useMinSlug } from './scan'
@@ -141,18 +143,29 @@ type HoverRun = ReturnType<typeof useHoverRun>
 /** Below this many px a press is a click (opens the run), not a drag. */
 const DRAG_PX = 4
 
+interface RetentionBrush {
+  scans: ReadonlyMap<string, RetentionScan>
+  selected: ReadonlySet<string>
+  hoverScan: string | null
+  manual: boolean
+  ready: boolean
+  toggle: (scan: string) => void
+  hover: (scan: string | null) => void
+}
+
 /** Duration per run over time, stacked by phase; a failed run in the danger ink. Dragging across it picks a window
  * (`win`; the runs outside it dim); hovering a bar brushes its table row (`hover`). */
 interface DurationProps {
   runs: RunSummary[]; color: (p: string) => string; onPick: (id: string) => void
   win: RunSpan | null; onWin: (w: RunSpan | null) => void; hover: HoverRun
+  retention?: RetentionBrush
 }
 
 // Match the minute precision of the shared range URL, including retries of the same capture.
 const runX = (ts: number) => Math.floor(ts / 60) * 60
 const rangeId = (x: number) => new Date(x).toISOString().slice(0, 16).replace(':', '')
 
-function DurationStrip({ runs, color, onPick, win, onWin, hover, range, autoBreak }: DurationProps & {
+function DurationStrip({ runs, color, onPick, win, onWin, hover, retention, range, autoBreak }: DurationProps & {
   range: readonly [number, number] | null; autoBreak: boolean
 }) {
   const [ref, W] = useWidth<HTMLDivElement>()
@@ -218,7 +231,7 @@ function DurationStrip({ runs, color, onPick, win, onWin, hover, range, autoBrea
   const band = drag ? [Math.min(...drag), Math.max(...drag)] : win ? [x(win[0]), x(win[1])] : null
   return (
     <div className="sr-svgwrap" ref={ref}>
-      <svg className={`sr-strip${drag ? ' dragging' : ''}`} width={W} height={H} viewBox={`0 0 ${W} ${H}`} role="img" aria-label={`Run duration over time, by phase; drag to pick a window${cut ? `; y-axis break omits ${cut[0]} to ${cut[1]} hours` : ''}`}
+      <svg className={`sr-strip${drag ? ' dragging' : ''}`} width={W} height={H} viewBox={`0 0 ${W} ${H}`} role="group" aria-label={`Run duration over time, by phase; drag to pick a window${cut ? `; y-axis break omits ${cut[0]} to ${cut[1]} hours` : ''}`}
         onPointerDown={onDown} style={{ touchAction: 'pan-y', userSelect: 'none' }}>
         {band && band[1] >= L && band[0] <= W - R && <rect className="sr-band" x={Math.max(L, band[0])} y={T} width={Math.max(1, Math.min(W - R, band[1]) - Math.max(L, band[0]))} height={H - T - B} />}
         {ticks.map(h => <g key={h}><line className="grid" x1={L} x2={W - R} y1={y(h)} y2={y(h)} /><text className="tick sr-y-tick" x={L - 6} y={y(h) + 4} textAnchor="end">{h}h</text></g>)}
@@ -232,11 +245,28 @@ function DurationStrip({ runs, color, onPick, win, onWin, hover, range, autoBrea
           const main = p.spans.filter(s => s.lane === 0)
           const id = p.run.run_id
           const out = !drag && !inSpan(win, p.run.started_ts)
+          const decision = retention && p.run.kind === 'scan' && !p.run.parent ? retention.scans.get(p.run.scan) : undefined
+          const selected = !!decision && !!retention?.selected.has(p.run.scan)
+          const brushed = hover.id === id || (!!decision && retention?.hoverScan === p.run.scan)
+          const selecting = !!retention?.manual && !!decision
+          const selectable = !!retention?.ready && retentionRunSelectable(p.run, retention.scans)
+          const pick = () => {
+            if (dragged.current) return
+            if (selecting) { if (selectable) retention!.toggle(p.run.scan) }
+            else onPick(id)
+          }
+          const marked = selected || decision?.proposal === 'remove'
+          const top = Math.max(T + 5, y(p.secs! / 3600) - 4)
           return (
-            <g key={id} className={`sr-col${failed ? ' failed' : ''}${lost ? ' lost' : ''}${hover.id === id ? ' brushed' : hover.id || out ? ' dimmed' : ''}`}
-              onClick={() => { if (!dragged.current) onPick(id) }} role="link" tabIndex={0} aria-label={`${p.run.scan} ${p.run.kind} run`}
-              onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onPick(id) } }}
-              onPointerMove={() => { if (!drag) hover.enter(id) }} onPointerLeave={hover.leave}>
+            <g key={id} className={`sr-col${failed ? ' failed' : ''}${lost ? ' lost' : ''}${brushed ? ' brushed' : hover.id || retention?.hoverScan || out ? ' dimmed' : ''}${selected ? ' retention-selected' : ''}${decision?.proposal ? ` retention-${decision.proposal}` : ''}${decision?.protected ? ' retention-protected' : ''}`}
+              onClick={pick} role={selecting ? 'checkbox' : 'link'} tabIndex={0}
+              aria-checked={selecting ? selected : undefined} aria-disabled={selecting && !selectable ? true : undefined}
+              aria-label={`${p.run.scan} ${p.run.kind} run${decision ? ` · ${retentionLabel(decision, selected)}` : ''}`}
+              onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); pick() } }}
+              onFocus={() => { hover.enter(id); if (decision) retention?.hover(p.run.scan) }}
+              onBlur={() => { hover.leave(); retention?.hover(null) }}
+              onPointerMove={() => { if (!drag) { hover.enter(id); if (decision) retention?.hover(p.run.scan) } }}
+              onPointerLeave={() => { hover.leave(); retention?.hover(null) }}>
               <rect className="sr-col-hit" x={lo} y={T} width={Math.max(0, hi - lo)} height={H - T - B} />
               {durationSegments(0, p.secs! / 3600, cut).map(([a, b], i) => <rect key={`total-${i}`} className="sr-col-total" x={cx} y={y(b)} width={bw} height={Math.max(1, y(a) - y(b))} />)}
               {!failed && main.flatMap(s => durationSegments(s.start / 3600, s.end / 3600, cut).map(([a, b], i) => (
@@ -244,6 +274,9 @@ function DurationStrip({ runs, color, onPick, win, onWin, hover, range, autoBrea
               )))}
               {!failed && overlappingFailures(p.spans).flatMap(s => durationSegments(s.start / 3600, s.end / 3600, cut).map(([a, b], i) => <rect key={`failed-${s.phase}-${i}`} x={cx + bw * 0.6} y={y(b)} width={Math.max(1, bw * 0.4)} height={Math.max(0.5, y(a) - y(b))} style={{ fill: 'var(--danger)' }} />))}
               {cut && p.secs! / 3600 >= cut[1] && <path className="sr-break-mark" d={`M${cx - 1},${gapY + 5} l${bw + 2},-4 M${cx - 1},${gapY - 1} l${bw + 2},-4`} />}
+              {decision?.proposal === 'retain' && <rect className="sr-retention-outline" x={cx - 1} y={y(p.secs! / 3600) - 1} width={bw + 2} height={Math.max(2, y(0) - y(p.secs! / 3600) + 2)} />}
+              {marked && <path className="sr-retention-cross" d={`M${cx + bw / 2 - 3},${top - 3}l6,6m0,-6l-6,6`} />}
+              {selected && <rect className="sr-retention-selection" x={cx - 1.5} y={H - B - 3} width={bw + 3} height={3} />}
             </g>
           )
         })}
@@ -332,7 +365,25 @@ function Links({ run, links }: { run: ScanRun; links: Links }) {
 
 export function ScansPage() {
   const { store, scanHref } = useScansStore()
+  const { hash } = useLocation()
   const q = useScanRuns(store)
+  const admin = useIsAdmin(), canRetention = useHistoryConfigured(admin && store.key === DEFAULT_STORE.key)
+  const [retentionOpen, setRetentionOpen] = useState(hash === '#history')
+  const [reviewedPlan, setReviewedPlan] = useState<RetentionPlan | null>(null)
+  const [jobsTarget, setJobsTarget] = useState<HTMLDivElement | null>(null)
+  const [sourceRoster, setSourceRoster] = useState<RetentionSource | null>(null)
+  const [manualScans, setManualScans] = useState<string[]>([])
+  const [selectionMode, setSelectionMode] = useState(false)
+  const [hoverScan, setHoverScan] = useState<string | null>(null)
+  const onSourceChange = useCallback((scans: string[], pins: string[]) => {
+    const next = { scans: [...new Set(scans)].sort(), pinned: [...new Set(pins)].sort() }
+    setSourceRoster(previous => previous && previous.scans.length === next.scans.length && previous.pinned.length === next.pinned.length
+      && previous.scans.every((scan, i) => scan === next.scans[i]) && previous.pinned.every((scan, i) => scan === next.pinned[i]) ? previous : next)
+  }, [])
+  const onPlanChange = useCallback((plan: RetentionPlan | null) => {
+    setReviewedPlan(plan)
+    if (plan) window.requestAnimationFrame(() => document.getElementById('sr-retention-chart')?.scrollIntoView({ block: 'nearest' }))
+  }, [])
   const slug = useMinSlug(store)
   const nav = useNavigate()
   const { bytes, delta } = useBytes(true)
@@ -356,6 +407,26 @@ export function ScansPage() {
   }, [span, setSpan])
   useDocTitle('Scans')
   const runs = q.data?.runs ?? []
+  const retentionOn = canRetention && retentionOpen
+  const retentionReady = sourceRoster !== null || reviewedPlan !== null
+  const retention = useMemo(() => retentionScans(runs, retentionOn ? reviewedPlan : null, sourceRoster), [runs, retentionOn, reviewedPlan, sourceRoster])
+  const selectedScans = useMemo(() => new Set(manualScans), [manualScans])
+  const activeScan = retentionOn ? hoverScan ?? runs.find(r => r.run.run_id === hover.id)?.run.scan ?? null : null
+  const toggleScan = (scan: string) => { if (retentionReady) setManualScans(ids => toggleRetentionScan(ids, scan, retention)) }
+  const closeRetention = () => { setRetentionOpen(false); setSelectionMode(false); setHoverScan(null); setReviewedPlan(null); setManualScans([]) }
+  useEffect(() => { if (canRetention && hash === '#history') setRetentionOpen(true) }, [canRetention, hash])
+  useEffect(() => {
+    if (!retentionOpen || hash !== '#history') return
+    const frame = window.requestAnimationFrame(() => document.getElementById('history')?.scrollIntoView({ block: 'start' }))
+    return () => window.cancelAnimationFrame(frame)
+  }, [retentionOpen, hash])
+  useEffect(() => {
+    if (!retentionOn || !retentionReady) return
+    setManualScans(ids => {
+      const next = ids.filter(scan => { const state = retention.get(scan); return state?.available && !state.protected })
+      return next.length === ids.length ? ids : next
+    })
+  }, [retention, retentionOn, retentionReady])
   const now = Math.floor(Date.now() / 1000)
   const order = useMemo(() => phaseOrder(runs.flatMap(r => r.spans.map((s, i) => ({ phase: s.phase, seq: i })))), [runs])
   const color = colorer(order)
@@ -372,6 +443,9 @@ export function ScansPage() {
   const filtered = runs.filter(r => runKindMatches(kind, r.run.kind) && statusMatches(status, runOutcome(r.run, r.phase_issues)))
   const visiblePhases = new Set(filtered.flatMap(r => r.spans.map(s => s.phase)))
   const shown = filtered.filter(r => inSpan(span, r.run.started_ts))
+  const spanScans = retentionReady ? retentionSpanScans(filtered, span, retention) : []
+  const availableCount = [...retention.values()].filter(s => s.available).length
+  const protectedCount = [...retention.values()].filter(s => s.protected).length
   const paged = usePaged(shown, DEFAULT_SIZES, [page, setPage])
   return (
     <main className="staged-page scans-page">
@@ -381,6 +455,9 @@ export function ScansPage() {
         <RunScanButton block={q.data?.dispatch} runs={runs} queryKey={['scan-runs', store.key]} />
       </div>
       <p className="sub">Scans, access-log ingests and maintenance jobs: timing, status and compute estimates. Output size measures the generated scan files (listings, indexes, snapshots); its change compares those files with earlier scans. The stores they append to are on <Link to="/health">Health</Link>.</p>
+      {canRetention && <div className="sr-retention-toggle"><button type="button" aria-expanded={retentionOpen} aria-controls="history" onClick={() => retentionOpen ? closeRetention() : setRetentionOpen(true)}>{retentionOpen ? 'Close retention controls' : 'Manage retained scans'}</button><span className="dim">{retentionOpen ? 'Review a proposal or choose scans on the existing chart and table.' : 'Preview policies and build new history versions.'}</span></div>}
+      {retentionOn && <HistoryAdmin onPlanChange={onPlanChange} manualScans={manualScans} onManualScansChange={setManualScans}
+        spanScans={spanScans} onHoverScan={setHoverScan} onSelectionModeChange={setSelectionMode} onSourceChange={onSourceChange} jobsTarget={jobsTarget} />}
       {q.isLoading ? <p>Loading runs…</p> : q.error ? <p className="err">{q.error.message}</p> : !q.data?.configured ? (
         <p className="dim">Scan runs aren't recorded on this deployment yet (its D1 has no <code>scan_runs</code> table: migration <code>scan_runs</code>, then <code>dt-cloud scan-run backfill</code>).</p>
       ) : (<>
@@ -398,13 +475,23 @@ export function ScansPage() {
             ? <Tooltip content="The runs that started in the window dragged on the chart. Esc clears it."><button type="button" className="sr-span" onClick={() => setSpan(null)}>{fmtRunTime(span[0])} → {fmtRunTime(span[1])} ✕</button></Tooltip>
             : <span className="dim hide-md">Drag across the chart to pick a window.</span>}
         </div>
-        <section className="sr-chart">
-          <ScanDurationChart runs={filtered} color={color} onPick={id => nav(scanHref(id))} win={span} onWin={setSpan} hover={hover} />
+        <section className="sr-chart" id="sr-retention-chart">
+          <ScanDurationChart runs={filtered} color={color} onPick={id => nav(scanHref(id))} win={span} onWin={setSpan} hover={hover}
+            retention={retentionOn ? { scans: retention, selected: selectedScans, hoverScan: activeScan, manual: selectionMode, ready: retentionReady, toggle: toggleScan, hover: setHoverScan } : undefined} />
           <Legend order={order.filter(p => visiblePhases.has(p))} color={color} run={hover.id ? runs.find(r => r.run.run_id === hover.id) : undefined} />
+          {retentionOn && <div className="sr-retention-legend" aria-live="polite">
+            <span><i className="sr-retention-key remove">×</i> proposed removal</span><span><i className="sr-retention-key retain" /> retained</span><span><i className="sr-retention-key selected" /> manual selection ({manualScans.length})</span>
+            <span>{availableCount} {reviewedPlan ? 'reviewed' : sourceRoster ? 'current source' : 'published in loaded history'} scans · {protectedCount} protected</span>
+            <p>{selectionMode ? 'Click a bar or check a row to choose a scan for removal. Retries share one selection. Dragging still filters the time window; “Use brushed scans” explicitly selects its eligible scans.' : 'Choose Manual selection above to enable the checkboxes and select scans on this chart. Bars otherwise open their run.'}</p>
+            {!retentionReady && <p>Selection requires the current writer roster or a reviewed preview. Policy controls remain editable while that metadata loads.</p>}
+            <p>First/latest scans and known pins are protected. Eligibility follows stored source history, independently of the run’s outcome; maintenance jobs are excluded. The preview checks the full source roster and operational pins; the chart and table show loaded run history.</p>
+            {reviewedPlan && <button type="button" onClick={() => setReviewedPlan(null)}>Clear proposal markings</button>}
+          </div>}
         </section>
         <div className="runs-wrap">
           <table className="runs sr-runs">
             <thead><tr>
+              {retentionOn && <><th className="sr-retention-cell">History</th><th className="sr-retention-loss"><Tooltip content="Maximum object-state changes in either neighboring interval: a heuristic for information loss. Read and owner metadata changes are excluded.">Change score</Tooltip></th></>}
               <th><Tooltip content="When the run started, in your time zone; hover for its id.">run</Tooltip></th><th>job type</th><th>status</th>
               <th className="num">duration</th><th className="hide-md">phases</th>
               <th className="num"><Tooltip content="Total recorded size of generated scan files: listings, indexes, snapshots, etc. Open the run for the breakdown. This is not the size of the storage being scanned, bytes transferred, or all retained indexes.">output files</Tooltip></th>
@@ -415,12 +502,22 @@ export function ScansPage() {
             <tbody>
               {paged.rows.map(s => {
                 const r = s.run
+                const maint = isMaintenance(r.kind)
+                const decision = r.kind === 'scan' && !r.parent ? retention.get(r.scan) : undefined
+                const selected = !!decision && selectedScans.has(r.scan)
+                const historyLabel = retentionLabel(decision, selected)
+                const brushed = hover.id === r.run_id || (retentionOn && !!decision && activeScan === r.scan)
                 const map = r.status === 'succeeded' && isScanProducer(r.kind) ? mapHref(r.scan, store.path, slug) : null
                 const live = liveness(r, s.spans, now)
                 const processing = processingSecs(s.secs, s.spans)
                 return (
-                  <tr key={r.run_id} className={[kindClass(r.kind), r.status === 'failed' && 'failed', hover.id === r.run_id && 'brushed'].filter(Boolean).join(' ')}
-                    onPointerEnter={() => hover.enter(r.run_id)} onPointerLeave={hover.leave}>
+                  <tr key={r.run_id} data-scan={r.scan} className={[kindClass(r.kind), r.status === 'failed' && 'failed', brushed && 'brushed', retentionOn && selected && 'retention-selected', retentionOn && decision?.proposal === 'remove' && 'retention-remove', retentionOn && decision?.proposal === 'retain' && 'retention-retain'].filter(Boolean).join(' ') || undefined}
+                    onPointerEnter={() => { hover.enter(r.run_id); if (retentionOn && decision) setHoverScan(r.scan) }} onPointerLeave={() => { hover.leave(); if (retentionOn) setHoverScan(null) }}>
+                    {retentionOn && <td className="sr-retention-cell"><Tooltip content={<>{historyLabel}{decision?.score != null && <><br />Removal score: {decision.score.toLocaleString()} changed objects (before {decision.left?.toLocaleString() ?? '—'}, after {decision.right?.toLocaleString() ?? '—'}).</>}{!selectionMode && <><br />Choose Manual selection above to edit.</>}</>}>
+                      <label><input type="checkbox" aria-label={`Select scan ${r.scan} for removal`} checked={selected} disabled={!selectionMode || !retentionReady || !retentionRunSelectable(r, retention)} onChange={() => toggleScan(r.scan)} onFocus={() => setHoverScan(r.scan)} onBlur={() => setHoverScan(null)} />
+                        <span className={`sr-retention-label${decision?.proposal === 'remove' ? ' remove' : ''}`}>{maint ? 'Maintenance' : !decision?.available ? 'Not in source history' : historyLabel}</span>
+                      </label></Tooltip></td>}
+                    {retentionOn && <td className="sr-retention-loss">{decision?.score != null ? <><strong>{decision.score.toLocaleString()} changes</strong><small>{decision.left?.toLocaleString() ?? '—'} before / {decision.right?.toLocaleString() ?? '—'} after</small></> : <span className="dim">{decision?.protected ? 'Protected' : decision?.available ? 'Awaiting preview' : '—'}</span>}{decision?.protected && <small>{decision.reasons.join(' · ')}</small>}</td>}
                     <td className="nb"><RunWhen ts={r.started_ts} scan={r.scan} href={scanHref(r.run_id)} />
                       {r.trigger === 'manual' && <> <Tooltip content="Started by hand (a submit or a resume), not by the schedule."><span className="dim">manual</span></Tooltip></>}
                     </td>
@@ -443,6 +540,7 @@ export function ScansPage() {
         </div>
         <Pager paged={paged} label="Scan runs" />
       </>)}
+      {retentionOn && <div className="sr-history-jobs" ref={setJobsTarget} />}
       <SiteKbd />
     </main>
   )

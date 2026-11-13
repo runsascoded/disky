@@ -3925,5 +3925,9 @@ from .age_bench import age_bench_cmd as _age_bench  # noqa: E402
 access.add_command(_r2_sync)
 main.add_command(_age_bench)
 
+from .history_jobs import cli as _history  # noqa: E402
+
+main.add_command(_history)
+
 if __name__ == "__main__":
     main()
