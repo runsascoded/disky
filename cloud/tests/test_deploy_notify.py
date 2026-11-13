@@ -177,19 +177,33 @@ def test_greens_are_run_length_threaded(monkeypatch, history, thread):
     assert slack.calls == [('history', 'C0TESTCHAN', 100), ('post', SUCCESS, thread)]
 
 
-@pytest.mark.parametrize('changes', [{'status': 'failure', 'stage': 'build', 'verified': False}, {'status': 'cancelled', 'verified': False}])
-def test_every_red_is_its_own_top_level_post(monkeypatch, changes):
-    slack = FakeSlack([notice('9.0', 'HF dev deployment succeeded')])
+RED = {'status': 'failure', 'stage': 'upload', 'verified': False}
+
+
+@pytest.mark.parametrize('changes', [RED, {'status': 'failure', 'stage': 'build', 'verified': False}, {'status': 'cancelled', 'verified': False}])
+@pytest.mark.parametrize('history,thread', [
+    # The newest notice for this deployment is red (a failure or a cancellation): the red run continues in its thread.
+    ([notice('9.0', 'HF dev deployment failed during upload'), notice('8.0', 'HF dev deployment succeeded')], '9.0'),
+    ([notice('9.0', 'HF prod deployment cancelled'), notice('8.0', 'HF dev deployment succeeded')], '9.0'),
+    # A green ended the red run: this red opens a new one.
+    ([notice('9.0', 'HF dev deployment succeeded'), notice('8.0', 'HF dev deployment failed during upload')], None),
+    # Another deployment's red doesn't count.
+    ([notice('9.5', 'GCS dev deployment failed during upload'), notice('9.0', 'HF dev deployment succeeded')], None),
+    # No notice within the history window: a new thread.
+    ([], None),
+])
+def test_reds_are_run_length_threaded(monkeypatch, changes, history, thread):
+    slack = FakeSlack(history)
     fake(monkeypatch, slack)
-    assert N.send(doc(**changes), ENV) is None
-    assert slack.calls == [('post', N.render(doc(**changes)), None)]
+    assert N.send(doc(**changes), ENV) == thread
+    assert slack.calls == [('history', 'C0TESTCHAN', 100), ('post', N.render(doc(**changes)), thread)]
 
 
 def test_thrds_renders_the_wire_text():
     from thrds.mrkdwn import to_slack
     assert to_slack(SUCCESS) == WIRE
     # What Slack stores is what the run lookup reads back.
-    assert N.green_thread([{'ts': '1.0', 'bot_id': 'B0BOT', 'text': WIRE}], 'hf', BOT) == '1.0'
+    assert N.run_thread([{'ts': '1.0', 'bot_id': 'B0BOT', 'text': WIRE}], 'hf', True, BOT) == '1.0'
 
 
 @pytest.mark.parametrize('env,message', [
@@ -212,7 +226,7 @@ def test_uncertain_delivery_is_not_retried_or_leaked(monkeypatch, failure):
     fake(monkeypatch, slack)
     with pytest.raises(ClickException) as error:
         N.send(doc(status='failure', stage='upload', verified=False), ENV)
-    assert (len(slack.calls), str(error.value)) == (1, 'Slack notification failed; acceptance unknown, not retried')
+    assert (len(slack.calls), str(error.value)) == (2, 'Slack notification failed; acceptance unknown, not retried')
 
 
 def test_failed_history_lookup_posts_nothing(monkeypatch):
