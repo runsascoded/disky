@@ -131,8 +131,8 @@ const CONSOLIDATED_CATALOG_SOURCE = "the consolidated catalog: every scan's regi
  *  (`plan: 'catalog'`); every other literal from the suffix postings, at most V rows (`bounded-name-postings`). */
 export const STATIC_SOURCE = 'static suffix postings on R2, one ranged read by the Worker; directory rollups are atomic'
 export const STATIC_CATALOG_SOURCE = 'the static catalog on R2: per-bucket running totals precomputed for every scan of the generation, one ranged read by the Worker'
-/** A static index generation's name (`2026-10-05`, `2026-10-09cw`): a generation, not a scan. */
-const STATIC_GENERATION = /^[0-9a-z][0-9a-z-]*$/
+/** A static index generation's name, including native compaction successors (`2026-10-15b.c001`). */
+const STATIC_GENERATION = /^[0-9a-z][0-9a-z-]*(?:\.[0-9a-z][0-9a-z-]*)*$/
 function staticIdentity(value: unknown) {
   const body = record(value)
   if (!keys(body, ['kind', 'generation', 'max_rows']) || body.kind !== 'static-names-v1' || typeof body.generation !== 'string' || !STATIC_GENERATION.test(body.generation) || integer(body.max_rows) < 1) fail()
