@@ -108,3 +108,40 @@ def test_adopting_shared_versions_preserves_unknowns_and_opens_at_first_observat
     assert pq.read_table(exported / "path-index.parquet").select(["path", "version"]).to_pylist() == [
         {"path": "b", "version": None}, {"path": "b/f", "version": expected},
     ]
+
+
+def test_migration_preserves_level_support_present_only_on_newer_runs(tmp_path: Path) -> None:
+    from dt_cloud.blobstore import Store
+    from dt_cloud.interval_identity import migrate
+    from dt_cloud import interval_level as lv
+    from dt_cloud import interval_export as ie
+
+    source, root = tmp_path / 'source', tmp_path / 'store'
+    dates = ['2026-10-01', '2026-10-02']
+    for date, size in zip(dates, [7, 8]):
+        path = source / 'index' / date / 'path-index.parquet'
+        path.parent.mkdir(parents=True)
+        pq.write_table(pa.table({'path': ['b', 'b/f'], 'depth': [1, 2], 'kind': ['dir', 'file'],
+                                 'size': [size, size], 'n_files': [1, 1], 'n_children': [1, 0],
+                                 'n_desc': [1, 0], 'mtime': [100, 100]}), path)
+    common = ['-g', 'old', '-L', 'index/{id}/path-index.parquet', '-s', str(source), '-o', str(root), '-r', '4', '-p', '1', '-M', '2GB']
+    result = CliRunner().invoke(il.build_cmd, [*common, '-k', '1', '-t', dates[0]], catch_exceptions=False)
+    assert result.exit_code == 0, result.output
+    result = CliRunner().invoke(il.add_cmd, [*common, '-C', 'none', '-N'], catch_exceptions=False)
+    assert result.exit_code == 0, result.output
+    store = Store(str(root))
+    lv.backfill(store, 'old', tmp_path / 'level', threads=1, mem='2GB', rg_rows=4, runs_only=True)
+    assert (root / 'interval-store/old/served/level.json').is_file() is False
+    assert [p.relative_to(root).as_posix() for p in sorted(root.glob('interval-store/old/deltas/*/served/level.json'))] == [
+        'interval-store/old/deltas/2026-10-02/served/level.json',
+    ]
+    pointer = store.read_bytes('interval-store/CURRENT.json')
+    migrate(store, 'old', 'converted', tmp_path / 'migrate', threads=1, mem='2GB', rg_rows=4)
+    assert store.read_bytes('interval-store/CURRENT.json') == pointer
+    assert json.loads((root / 'interval-store/converted/scans.json').read_text())['level'] is True
+    assert (root / 'interval-store/converted/served/level.parquet').is_file() is True
+    out = tmp_path / 'export'
+    ie.export_scan(str(root), dates[1], str(out), gen='converted', tiers=('path',), threads=1, mem='2GB')
+    assert pq.read_table(out / 'path-index.parquet').select(['path', 'size']).to_pylist() == [
+        {'path': 'b', 'size': 8}, {'path': 'b/f', 'size': 8},
+    ]
