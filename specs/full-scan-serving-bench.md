@@ -143,6 +143,7 @@ Every answer the scanner gave equals the oracle's exactly (`oracle/oracle.py`; n
 - **Fixtures:** all nine interval-store generations (`site/functions/_lib/fixtures/iv/interval-store/g1`–`g9`: base-only, base + runs, merged-run revisions, unowned, JSON owner slices, inconsistent directory totals), 9,504 queries from `fsb plan -x` (every scan and consecutive diff × every folder × each filter, at depths 1–3 and four thresholds, 1,584 of them `@dirs`), 0 different (`tests/test_fixtures.py`, `check-fixtures`).
 - **Synthetic:** every scale's mix (below).
 - Each answer also equals itself across thread counts (1 and 16) and across the five warm runs (`fsb bench` fails otherwise).
+- **Owners:** the `us` the scanner reads equals gcs's `slices` sort on objects: per (bucket, owner), bytes and objects, at the newest scan (133 cells) and a month back (121 cells), base + runs combined on each side (`oracle/slices_check.py`).
 - On gcs every unfiltered view's two answers (object sums, directory rows) are equal too: 27 / 27 pairs (`oracle/dirs_vs_files.py`), so gcs's directory totals add up exactly at these scans.
 
 ### gcs

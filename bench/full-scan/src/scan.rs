@@ -345,6 +345,22 @@ fn run_dirs(idx: &Index, c: &Compiled, q: &Query, pool: &rayon::ThreadPool, t0: 
     let val = |g: usize, s: Option<u16>| -> Acc {
         s.and_then(|s| idx.row_total(g, s)).map_or(Acc::default(), |(bytes, files)| Acc { bytes, files })
     };
+    // The view's totals first (the folder's own row; the root's: its buckets'), so nodes under the threshold are never
+    // emitted.
+    let (ta, tb) = if c.dp > 0 {
+        let g = idx.find(&c.path).unwrap();
+        (val(g, Some(c.sa)), val(g, c.sb))
+    } else {
+        let (mut ta, mut tb) = (Acc::default(), Acc::default());
+        let mut r = c.lo;
+        while r < c.hi {
+            ta.add(val(r, Some(c.sa)));
+            tb.add(val(r, c.sb));
+            r = idx.end[r] as usize + 1;
+        }
+        (ta, tb)
+    };
+    let thr = c.min_ppm as u128 * ta.bytes.max(tb.bytes) as u128;
     // The window's nodes are exactly the paths at depth ≤ maxd under the folder, so the folder's rows split into
     // chunks: a chunk steps to its first such path, then jumps over every subtree below the window.
     let threads = pool.current_num_threads();
@@ -381,12 +397,8 @@ fn run_dirs(idx: &Index, c: &Compiled, q: &Query, pool: &rayon::ThreadPool, t0: 
                     }
                     visited += 1;
                     let (a, b) = (val(r, Some(c.sa)), val(r, c.sb));
-                    if a.nonzero() || b.nonzero() {
+                    if (a.nonzero() || b.nonzero()) && (a.bytes.max(b.bytes) as u128) * 1_000_000 >= thr {
                         out.done.push(NodeOut { row: r as u32, depth: d, a, b });
-                    }
-                    if c.dp == 0 && d == 1 {
-                        out.a.add(a);
-                        out.b.add(b);
                     }
                     r = if d < c.maxd && idx.flags[r] & FILE == 0 { r + 1 } else { idx.end[r] as usize + 1 };
                 }
@@ -399,15 +411,8 @@ fn run_dirs(idx: &Index, c: &Compiled, q: &Query, pool: &rayon::ThreadPool, t0: 
     if outs.is_empty() {
         outs.push(ChunkOut::default());
     }
-    if c.dp > 0 {
-        let g = idx.find(&c.path).unwrap();
-        for o in outs.iter_mut() {
-            o.a = Acc::default();
-            o.b = Acc::default();
-        }
-        outs[0].a = val(g, Some(c.sa));
-        outs[0].b = val(g, c.sb);
-    }
+    outs[0].a = ta;
+    outs[0].b = tb;
     let pass_ms = t1.elapsed().as_secs_f64() * 1e3;
     let t2 = Instant::now();
     let chunks = outs.len() as u64;
