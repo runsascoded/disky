@@ -165,7 +165,7 @@ def test_all_six_interval_tables_compare_complete_real_schemas(tmp_path):
     source, candidate = tmp_path / "source", tmp_path / "candidate"
     values = {
         **_row(), "kind": "file", "n_files": 1, "n_children": 0, "n_desc": 0,
-        "mtime": 17, "wb": 1, "c2": 0, "c3": 0, "c4": 0, "us": "[]", "usr": None,
+        "mtime": 17, "wb": 1, **{c: 0 for c in ist.CLS}, "us": "[]", "usr": None,
         "tot": 1, "user": None, "source": "manual", "evidence": "review",
     }
     expected = {}
