@@ -12,7 +12,7 @@
 // undone nothing, and only the job knows what it restored. While the job is
 // live the page says so from the job itself (`runControls`' `undoing`).
 import { batchConfig, notConfigured } from './batchConfig.js'
-import { type DispatchErr, type ExecEnv, refuse } from './dispatch.js'
+import { type DispatchErr, type ExecEnv, refuse, sweepsOff, SWEEPS_OFF } from './dispatch.js'
 import { batchRegionFor, gcpToken } from './gcp.js'
 import { auditRunControl } from './plans.js'
 import { runBuckets, runUndoNow } from './softDeleteNow.js'
@@ -63,6 +63,7 @@ export async function undoSweepRun(
   { bulk = false }: { bulk?: boolean } = {},
 ): Promise<UndoOk | DispatchErr> {
   if (!env.DB) return refuse(503, 'undo not configured (no D1 binding)')
+  if (sweepsOff(env)) return refuse(403, SWEEPS_OFF)
   if (!env.GCP_SA_KEY) return refuse(503, 'undo not configured (GCP_SA_KEY secret missing)')
   if (!env.JOB_SA) return refuse(503, 'undo not configured (JOB_SA var missing)')
   const cfg = batchConfig(env, ['GCP_PROJECT', 'DATA_BUCKET', 'SWEEP_IMAGE', 'CF_ACCOUNT_ID', 'D1_DB_ID'])
