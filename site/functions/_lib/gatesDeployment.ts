@@ -27,8 +27,8 @@ const STAFF = { listOn: 403, listOff: 'pass' } as const
  * listed, listed admin, admin grant, agent token). Each must be some route's. A share link's scopes reach none of them.
  */
 export const DEPLOYMENT_GATES: Record<string, readonly [DeploymentCell, DeploymentCell, DeploymentCell, DeploymentCell, DeploymentCell, DeploymentCell, DeploymentCell]> = {
-  // An admin's email session: no grant, whatever its scopes (`_lib/devices.ts`). On `/api/hosts/<id>`, the host's own
-  // device token passes too; none of the audit's identities holds one.
+  // An admin's email session: no grant, whatever its scopes (`_lib/devices.ts`, `_lib/laptopFiles.ts`). On
+  // `/api/hosts/<id>`, the host's own device token passes too; none of the audit's identities holds one.
   'admin-session': [401, 403, 403, STAFF, 'pass', 403, 403],
 }
 
@@ -54,7 +54,8 @@ export const DEPLOYMENT_ROUTES: Record<string, DeploymentCase[]> = {
   // The link's token is the credential; a dead or missing one redirects to `/signin`.
   'auth/app-link.ts': [{ method: 'GET', path: '/auth/app-link', gate: 'public' }],
   'v1/laptop-files/[[path]].ts': [
-    { method: 'GET', path: '/v1/laptop-files/get?path=a', gate: 'admin' },
+    // `requireAdmin`, then `serveLaptopFile` refuses any grant: an admin's session only.
+    { method: 'GET', path: '/v1/laptop-files/get?path=a', gate: 'admin-session' },
     // A secondary store (the NAS) stays metadata-only: no file bytes, for anyone.
     { method: 'GET', path: '/v1/laptop-files/get?store=nas&path=a', gate: 'unconfigured' },
   ],
