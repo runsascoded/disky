@@ -60,7 +60,7 @@ def test_scenarios():
             f"/api/subtree?{W}&date=2026-10-01&path=bk-a",
             f"/api/diff?{W}&{D}&path=bk-a&dm=delta&depth=1",
             f"/api/diff?{W}&{D}&path=bk-a&dm=delta",
-            "/api/series?path=bk-a&split=roots",
+            "/api/series?path=bk-a",
         ],
         "filter-hit": [
             f"/api/subtree?{W}&date=2026-10-01&path=&q=ckpt",
@@ -100,7 +100,7 @@ def test_scenarios_cold_and_single_scan():
     assert s["bucket"] == [
         f"/api/subtree?cv={CV}&w=1408&h=896&minArea=12.000042&date=2026-10-01&path=bk%2Fx&depth=1",
         f"/api/subtree?cv={CV}&w=1408&h=896&minArea=12.000042&date=2026-10-01&path=bk%2Fx",
-        "/api/series?path=bk%2Fx&split=roots",
+        "/api/series?path=bk%2Fx",
     ]
     assert s["filter-hit"] == [
         f"/api/subtree?cv={CV}&w=1408&h=896&minArea=12.000042&date=2026-10-01&path=&q=a%20b",
