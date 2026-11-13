@@ -158,9 +158,9 @@ def _q(s: str) -> str:
 def scenarios(t: Targets, cold: str = "") -> dict[str, list[str]]:
     """Each page view's requests, as `site/src/App.tsx` issues them (the
     depth-1 first paint, the full tree, the diff's first paint and full walk
-    in the default Δ mode, the size-over-time series split by root), on the
-    browser's default canvas, plus the 7d and 30d diff chips at the root when
-    the scans reach back that far. ``cold`` is a `minArea` (see
+    in the default Δ mode, the size-over-time series, split by root at the
+    root), on the browser's default canvas, plus the 7d and 30d diff chips at
+    the root when the scans reach back that far. ``cold`` is a `minArea` (see
     `cold_min_area`) that keys subtree and diff reads past the edge cache."""
     W = f"cv={CV}&w=1408&h=896" + (f"&minArea={cold}" if cold else "")
     def page(path: str, scope: str = "") -> list[str]:
@@ -181,7 +181,8 @@ def scenarios(t: Targets, cold: str = "") -> dict[str, list[str]]:
         ]
         if t.prev:
             reqs += diff(t.prev, p)
-        reqs.append(f"/api/series?path={p}&split=roots")
+        # The page splits the series by root at the unscoped store root only (the API refuses it anywhere else).
+        reqs.append(f"/api/series?path={p}" + ("&split=roots" if not path else ""))
         return reqs
 
     def diff(start: str, p: str) -> list[str]:
