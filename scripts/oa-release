@@ -18,6 +18,9 @@ from urllib.request import Request, urlopen
 
 from click import Choice, ClickException, Path as ClickPath, argument, group, option
 
+#: The live checks' own agent: Cloudflare's bot rules answer Python's default `Python-urllib/…` with a 403 and no app headers.
+LIVE_HEADERS = {'User-Agent': 'disky-oa-release/1'}
+
 
 CONFIG = Path(__file__).resolve().parents[1] / 'deploy/oa/sites.json'
 PROTOCOL = 'disky-pages-v1'
@@ -141,10 +144,19 @@ def main() -> None:
     """Plan, fingerprint and record a release; never apply schemas or infrastructure."""
 
 
-def setup_plan(targets: tuple[str, ...]) -> dict:
+def setup_plan(
+    targets: tuple[str, ...],
+    live_targets: tuple[str, ...] = (),
+    live_enabled: str = 'false',
+) -> dict:
+    """The plan for TARGETS' environments. `OA_SITE_RELEASE_{ENABLED,TARGETS}` are repository-wide, so the plan keeps
+    the live values (`live_enabled`, `live_targets`) and only adds TARGETS to the live list: adding a deployment never
+    drops another or switches releases on or off."""
     config = loads(CONFIG.read_text())
     require(bool(targets) and len(set(targets)) == len(targets), 'Select distinct deployment targets')
-    require(all(target in config['sites'] for target in targets), 'Unknown OA deployment')
+    require(all(target in config['sites'] for target in (*targets, *live_targets)), 'Unknown OA deployment')
+    require(len(set(live_targets)) == len(live_targets), 'Live targets must be distinct')
+    merged = [*live_targets, *(target for target in targets if target not in live_targets)]
     return {
         'repository': config['repository'],
         'operator_policy': 'Existing repository write/maintain/admin; explicit production dispatch, self-approval allowed; no added merge-review requirement',
@@ -159,18 +171,22 @@ def setup_plan(targets: tuple[str, ...]) -> dict:
             }
             for target in targets for mode in ['dev', 'prod']
         ],
-        'repository_variables': {'OA_SITE_RELEASE_ENABLED': 'false', 'OA_SITE_RELEASE_TARGETS': dumps(list(targets), separators=(',', ':'))},
+        'repository_variables': {'OA_SITE_RELEASE_ENABLED': live_enabled, 'OA_SITE_RELEASE_TARGETS': dumps(merged, separators=(',', ':'))},
         'production_action': 'Manual promotion of a successful exact-SHA dev deployment',
         'preview_data_policy': 'Unchanged; per-PR preview activation is separate',
     }
 
 
 @main.command('setup-plan')
+@option('-e', '--live-enabled', type=Choice(['true', 'false']), required=True, help='The live `OA_SITE_RELEASE_ENABLED` (`gh variable get OA_SITE_RELEASE_ENABLED`); the plan keeps it')
+@option('-l', '--live-targets', required=True, help='The live `OA_SITE_RELEASE_TARGETS` JSON array (`gh variable get OA_SITE_RELEASE_TARGETS`; `[]` if unset); the plan adds to it')
 @option('-o', '--output', type=ClickPath(path_type=Path), required=True)
 @option('-t', '--target', 'targets', type=Choice(['gcs', 'cw', 'hf', 'r2']), multiple=True, required=True)
-def setup(output: Path, targets: tuple[str, ...]) -> None:
+def setup(live_enabled: str, live_targets: str, output: Path, targets: tuple[str, ...]) -> None:
     """Write the exact environment/settings plan for review. No APIs or writes outside OUTPUT."""
-    value = setup_plan(targets)
+    live = loads(live_targets)
+    require(isinstance(live, list) and all(isinstance(target, str) for target in live), 'Live targets must be a JSON array of names')
+    value = setup_plan(targets, tuple(live), live_enabled)
     output.write_text(dumps(value, indent=2) + '\n')
     print(dumps(value, indent=2))
 
@@ -217,6 +233,8 @@ def seal(output: Path, plan_path: Path, source: Path) -> None:
     """Bind the upload to the checked config and the built artifact, without deployment secrets."""
     value = loads(plan_path.read_text())
     validate_source(source, value['sha'])
+    pending = sorted(path.name for path in (source / 'site/migrations').glob('*.sql'))
+    require(not pending, f'Pending D1 recipes: {", ".join(pending)}. Apply each to this deployment\'s databases (owner, with Ryan\'s go), `git rm` it, then release')
     config = source / 'site/wrangler.toml'
     parsed = toml_loads(config.read_text())
     require(parsed['name'] == value['project'], 'Pages project differs from the controller allowlist')
@@ -292,7 +310,7 @@ def finish(failed: bool, receipt_path: Path) -> None:
     require(metadata['commit_hash'] == receipt['sha'] and not metadata.get('commit_dirty')
             and deployment['latest_stage']['status'] == 'success', 'Cloudflare is not serving the clean requested revision')
     for attempt in range(12):
-        req = Request(f'https://{receipt["host"]}/api/health?release-check={environ["GITHUB_RUN_ID"]}-{attempt}')
+        req = Request(f'https://{receipt["host"]}/api/health?release-check={environ["GITHUB_RUN_ID"]}-{attempt}', headers=LIVE_HEADERS)
         try:
             response = urlopen(req, timeout=20)
         except HTTPError as error:
@@ -307,7 +325,7 @@ def finish(failed: bool, receipt_path: Path) -> None:
     else:
         raise ClickException('Live host did not return the requested build header')
     for asset, digest in receipt['entry_assets'].items():
-        with urlopen(f'https://{receipt["host"]}/{asset}', timeout=30) as response:
+        with urlopen(Request(f'https://{receipt["host"]}/{asset}', headers=LIVE_HEADERS), timeout=30) as response:
             require(sha256(response.read()).hexdigest() == digest, f'Live entry asset differs: {asset}')
     receipt['cloudflare_deployment'] = deployment['id']
     receipt['cloudflare_url'] = deployment['url']

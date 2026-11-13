@@ -1,0 +1,34 @@
+{
+ "project": "oa-internal-450019",
+ "repository": "us-central1-docker.pkg.dev/oa-internal-450019/cw-s3-usage/scan",
+ "mode": "live",
+ "live_tags": [
+  "latest"
+ ],
+ "cache": true,
+ "allow_dirty": false,
+ "build_args": {
+  "SITE": "build",
+  "APT_PACKAGES": "time git",
+  "UV_SYNC_ARGS": "--extra overtime",
+  "ENTRYPOINT": "dt-cloud scan-run supervise -- bash job/cw-run.sh"
+ },
+ "context": [
+  "pyproject.toml",
+  "README.md",
+  "uv.lock",
+  "src",
+  "cloud/pyproject.toml",
+  "cloud/src",
+  "job",
+  "site",
+  "packages",
+  "pnpm-workspace.yaml",
+  "package.json",
+  "pnpm-lock.yaml"
+ ],
+ "cloudbuild": {
+  "machine_type": "E2_HIGHCPU_8",
+  "timeout": "1800s"
+ }
+}

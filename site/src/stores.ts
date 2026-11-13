@@ -98,8 +98,12 @@ export interface Store {
    *  default; what a bare `lifecycle.json` `Rules[]` from before the
    *  multi-bucket scan belongs to). */
   buckets: string[]
+  /** One line on what each of `buckets` is (whose data, what writes it), where a name doesn't say: `/admin`'s
+   *  soft-delete table shows it beside the bucket. Unset = no column. */
+  bucketNotes?: Record<string, string>
   /** The sibling deployments (each its own host): the omnibar and site menu open this page on each (`peerUrl`).
-   * May list this deployment too (one shared family list); its own prod host is skipped. */
+   * May list this deployment too (one shared family list); its own prod host is skipped. Unset: the build's `PEERS`
+   * var (wrangler `[vars]`, `src/peers.ts`), which is where a deployment's list belongs. */
   peers?: Peer[]
   /** Fresher bucket totals than the scans (a provider's metrics dashboard): the ☰ menu links it, and so does the
    *  size-over-time chart, whose newest point is the newest scan's. Unset = no link. */

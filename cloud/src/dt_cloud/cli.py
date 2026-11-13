@@ -3910,6 +3910,10 @@ from .history_jobs import cli as _history  # noqa: E402
 
 main.add_command(_history)
 
+from .image_build import cli as _image_build  # noqa: E402
+
+main.add_command(_image_build)
+
 from .monitoring_relay import cli as _monitoring_relay  # noqa: E402
 
 main.add_command(_monitoring_relay)

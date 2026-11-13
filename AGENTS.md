@@ -186,12 +186,20 @@ dt-cloud interval-store level-sim GEN REQUESTS  # `readLevel`'s two waves priced
                           # `-s 256,512,1024` (+ `-F` sidecar row-group sizes): a table per mode, today / held page indexes (cold,
                           # colo warm, warm) / the sort cut in small groups with no page index, from the real file's page indexes
 dt-cloud image-sha [-e SHA [-a]] [-j]  # The running image's source revision (`image_sha.py`): `$DISKY_GIT_SHA` /
-                          # `$DISKY_GIT_DIRTY`, which a deployment's image build stamps (gcs: `job/build.sh` → Dockerfile
+                          # `$DISKY_GIT_DIRTY`, which the image build stamps (`dt-cloud image build` → `job/Dockerfile`
                           # `ARG`/`ENV` + OCI labels `org.opencontainers.image.revision`, `disky.dirty`). Prints `<sha>`,
                           # `<sha> dirty` or `unstamped`; `-e` exits 1 unless the image is that sha (or a ≥7-char prefix),
                           # clean (`-a` accepts dirty) and stamped. Job entrypoints (`scan head`/`step`, the
                           # `interval-store` stage tasks) log it
-dt-cloud batch submit -c COMPONENT [-L REGION] [-b BUCKET]… [-X] JOB_ID SPEC  # The shell's Batch submit, through `batch.submit_job` (the
+dt-cloud image build -c job/build.json [-m candidate|live] [-t TAG] [-D] [-a K=V]  # The scan job image (`image_build.py`,
+                          # specs/job-consolidation.md §5; `job/build.sh` runs it with the deployment's `job/build.json`):
+                          # this checkout's commit, stamped, `git archive`d by the config's `context` pathspecs, built by
+                          # Cloud Build from `job/Dockerfile` (`build_args`: `SITE`, `APT_PACKAGES`, `UV_SYNC_ARGS`,
+                          # `ENTRYPOINT`) to an immutable candidate tag (the sha's first 12; dirty `-D`: `-dirty-<time>`) in
+                          # `repository` + `mirrors`; prints `<repository>@<digest>` each. `live` mode then promotes.
+                          # `image promote TAG [-x DIGEST]`: `live_tags` moved to TAG's digest in each repository, then the
+                          # config's `repoint` Cloud Run jobs / services updated to the first live tag
+dt-cloud batch submit -c COMPONENT [-L REGION] [-b BUCKET]… [-X] [-t] [-e] [-r SECONDS] JOB_ID SPEC  # The shell's Batch submit, through `batch.submit_job` (the
                           # one place a job is created): labelled from `$DISKY_LABELS` + `-c` on the job and its allocation policy
                           # (`cost_labels.py`), in `-L`, else `$BATCH_REGION`. There is no default region (`deploy.batch_region`): neither
                           # set is an error, here and in `job status|logs|watch|metrics`, `batch-cancel` (`-r`), `sweep sync-progress`,
@@ -262,7 +270,7 @@ then `git rm`'d. `dt-cloud d1-schema check -d <db> [-c <wrangler config>]` compa
 
 One gate (`_lib/auth.ts`, `@open-athena/auth` over D1): `identify` → `Identity` (`via: session | grant | public`), `requireViewer` / `requireStager` / `requireAdmin`.
 - `/auth/google` (+ `/callback`, `/onetap`) — Google OIDC → email session; `/auth/email/*` — emailed code / magic link → email session
-- `/auth/oa` (+ `/callback`, `/client`) — "Sign in with OA" through OA's broker (`OA_LOGIN_*`, `specs/oa-login-rp.md`; unset: 404, no button) → email session. Where configured, the middleware sends a person's unauthenticated page visit there once with `prompt=none` before the wall (`_lib/silentSignIn.ts`; never a crawler, `fetch`, `?key=`/`?og=` link or public deployment); `/api/auth/logout` suppresses that until they click it or complete any sign-in
+- `/auth/oa` (+ `/callback`, `/client`) — "Sign in with OA" through OA's broker (`OA_LOGIN_*`, `specs/oa-login-rp.md`; unset: 404, no button) → email session. Where configured, the middleware sends a person's unauthenticated page visit there once with `prompt=none` before the wall (`_lib/silentSignIn.ts`; never a crawler, `fetch`, `?key=`/`?og=` link or public deployment); `/api/auth/logout` suppresses that until they click it or complete any sign-in. A completed one leaves a signed `oa_login_who` cookie (`rememberAccount`, outliving sign-out like Google's hints): `/auth/oa/client` returns that account with its profile's name and face, and the wall's button becomes "Continue as <them>"; when it covers every Google account remembered here, Google's slot shrinks to "Use a different account" (Google's chooser)
 - **Preview hosts** (`isPreviewHost`: exactly one label under `PAGES_SUBDOMAIN`, the project's `pages.dev` subdomain: a PR's `pr-N`, the `dev` alias, a deployment hash; never a custom domain): OA sign-in only through the broker's preview client (`OA_LOGIN_PREVIEW_CLIENT_ID` / `_SECRET`, Preview environment only) with `redirectFromOrigin`, else none (404, no button; never the deployment's own client), and no silent `prompt=none` attempt
 - **`AUTH_HOST_COOKIES = "1"`** (default off; switching it signs everyone out once): on https, the session (+ its `_rs` handle), both nonces and the Google hint are `__Host-` named (`cookieNames`), so the gate reads only `__Host-oa_auth` there; `gateFor(env, request)` needs the request for it
 - `/api/auth/*` — the package's routes: `whoami`, `exchange` (`?key=` share link → grant session), `logout`, request-access, admin grant/request/log console
@@ -374,7 +382,7 @@ The repo is **public**: no emails or other PII in tracked files or commit messag
 ### Layout (cw's own)
 
 - `job/profiles/`: the scans as Nextflow profiles (`dt-cloud scan head <profile>`): `cw.yml` (the CoreWeave buckets, its Batch spec from `cw-batch-submit.sh`; `PIN=1 DRY=1` prints it; the 6-hourly cron runs `cw-scan-submit.sh` in a Cloud Run job, which submits it as `cw-usage-snapshot-YYYYMMDD-HH` with retries and an alert) and `cw-meta.yml` (the `meta` store: the data + R2 serving buckets, `cw-meta-submit.sh`, the `cw-meta-snapshot` cron).
-- `job/cw-*`: the one-VM scan driver (`cw-run.sh`, `NF=0`) and the one-shots (`cw-reindex*`, `cw-overtime*`, `cw-publish-submit.sh`, `cw-recompress-submit.sh`, `cw-interval-submit.sh`: the interval store's base `build`, catch-up `add` and parity `verify` on Batch). `job/build.sh` builds the `:latest` image (`JOB=cw-run.sh`). `job/batch-submit.sh` is gcs's submitter, kept until the ops scheduler program takes a checkout per cron.
+- `job/cw-*`: the one-VM scan driver (`cw-run.sh`, `NF=0`) and the one-shots (`cw-reindex*`, `cw-overtime*`, `cw-publish-submit.sh`, `cw-recompress-submit.sh`, `cw-interval-submit.sh`: the interval store's base `build`, catch-up `add` and parity `verify` on Batch). `job/build.sh` builds the scan image from `job/build.json` (`dt-cloud image build`, specs/job-consolidation.md §5): a live build moves `:latest`; `-m candidate` builds the immutable `<sha12>` tag only, then `job/build.sh promote <tag> -x <digest>`; another entrypoint is `-t TAG -a 'ENTRYPOINT=dt-cloud scan-run supervise -- bash job/<script>'`. `job/static-names.env` holds the static-names launcher's `DISKY_LABELS`; `rerg` has no cw config (`job/rerg.env`) since cw doesn't use it. `job/batch-submit.sh` is gcs's submitter, kept until the ops scheduler program takes a checkout per cron.
 - `job/icons/arrows/` + `gen-{arrow-avatars,delta-arrows}.py`: the digest's trend-arrow avatars (hosted on `oa-cw-s3-usage-icons.pages.dev`); `job/icons-cw/` is where `cw-digest` renders OP plots before deploying them to that project's `cw` branch. `job/slack/`: the CoreWeave Usage Bot manifest.
 - `job/digest.yml`: the monthly Slack thread's config (`dt-cloud digest -T cw -C job/digest.yml -m YYYY-MM -c <channel>`, `-n` dry run; `cw-digest` = `digest -T cw`); the engine + `cw` template are `cloud`'s `digest.py` / `digest_cw.py`. `cloud/tests/test_digest_cw_config.py` pins the file to the `cw` preset.
 - `site/wrangler.toml`: the cw store's config (`STORE = "cw"`, `AUTH_MODE = "app"`, `STORE_BUCKETS`, `SNAPSHOTS_SUBDIR = "cw"`, the meta store, the plan-sweep executor). `[env.preview]` is the dev stack.

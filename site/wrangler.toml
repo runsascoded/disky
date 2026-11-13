@@ -41,6 +41,8 @@ STORE = "cw"                    # the store this build serves (`src/stores.ts`)
 MARK = "cw"                     # favicon/badge: the CoreWeave mark (`public/icons/cw*`; the build injects the links)
 PROD_HOST = "cw.oa.dev"         # `g d` toggles with DEV_HOST (src/hosts.ts)
 DEV_HOST = "dev.cw.oa.dev"
+# The OA sites the omnibar and menu link (`src/peers.ts`; read at build time, so [vars] serves the dev stack too; its own prod host is skipped)
+PEERS = '[{"label": "GCS usage", "prod": "gcs.oa.dev", "dev": "dev.gcs.oa.dev", "owners": true, "staging": true, "meta": true}, {"label": "CoreWeave usage", "prod": "cw.oa.dev", "dev": "dev.cw.oa.dev", "staging": true, "meta": true}, {"label": "Hugging Face usage", "prod": "hf.oa.dev", "dev": "dev.hf.oa.dev", "meta": true}, {"label": "R2 usage", "prod": "r2.oa.dev", "dev": "dev.r2.oa.dev", "meta": true}]'
 # The rename (specs/done/rename-cw.md): the old hosts stay attached and 301 GETs here (`_lib/hostRedirect.ts`)
 HOST_REDIRECTS = "cw-s3.oa.dev=cw.oa.dev,dev.cw-s3.oa.dev=dev.cw.oa.dev"
 AUTH_MODE = "app"                # own sign-in: Google OIDC + emailed codes (specs/done/oidc-cutover-cw.md P4, 2026-09-28)

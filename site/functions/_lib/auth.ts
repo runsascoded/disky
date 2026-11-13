@@ -26,7 +26,7 @@
  */
 import { type Auth, createGate, DEFAULT_COOKIE_NAME, type Gate, type Grant, type GrantPatch, type GrantStore, hasScope, isSecureRequest, parseScopes, readCookie, type Subject, verifySessionClaims } from '@open-athena/auth'
 import { DEFAULT_ACCOUNT_HINT_COOKIE } from '@open-athena/auth/oidc'
-import { OA_NONCE_COOKIE } from '@disk-tree/pages-kit/oa'
+import { OA_HINT_COOKIE, OA_NONCE_COOKIE, OA_WHO_COOKIE } from '@disk-tree/pages-kit/oa'
 import { d1AuditSink, d1GrantStore, d1ProfileStore, d1RequestStore } from '@open-athena/auth/d1'
 import type { AnalyticsEngineDataset, D1Database, KVNamespace, R2Bucket } from '@cloudflare/workers-types'
 import { isPreviewHost } from './previewHost.js'
@@ -201,6 +201,8 @@ export interface Env {
   SNAPSHOTS_SUBDIR?: string
   /** Dedicated SA key (Batch submit + actAs the job SA) for the sweep dispatch bridge. */
   GCP_SA_KEY?: string
+  /** `"0"`: no sweep or undo dispatch from this environment (`_lib/dispatch.ts` `sweepsOff`). */
+  SWEEP_DISPATCH?: string
   /** The service account dispatched Batch jobs run as (a `[vars]` entry). */
   JOB_SA?: string
   /** Secondary stores served beside the primary (`_lib/stores.ts`,
@@ -493,6 +495,10 @@ export interface CookieNames {
   oaNonce: string
   /** Google's remembered accounts (`<name>` + `<name>_accounts`); `false` on a preview host, which keeps none. */
   accountHint: string | false
+  /** The broker's remembered account (the adapter's hint pair) and its signed copy (`rememberAccount`), which the wall
+   *  trusts to show a name and face; `false` on a preview host, as Google's. */
+  oaHint: string | false
+  oaWho: string | false
 }
 
 const HOST_PREFIX = '__Host-'
@@ -508,6 +514,8 @@ export function cookieNames(env: Env, request: Request): CookieNames {
     googleNonce: prefix + GOOGLE_NONCE_COOKIE,
     oaNonce: prefix + OA_NONCE_COOKIE,
     accountHint: isPreviewHost(env, request) ? false : prefix + DEFAULT_ACCOUNT_HINT_COOKIE,
+    oaHint: isPreviewHost(env, request) ? false : prefix + OA_HINT_COOKIE,
+    oaWho: isPreviewHost(env, request) ? false : prefix + OA_WHO_COOKIE,
   }
 }
 

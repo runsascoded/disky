@@ -5,8 +5,8 @@ import { type BucketSoftDelete, confirmUndoTerms, DEFAULT_MIN_SOFT_DELETE_DAYS, 
 
 // `/admin`'s sweep soft-delete minimum (`functions/_lib/sweepSettings.ts`): the narrowest retention a real run accepts, read at
 // dispatch; what each bucket has is the job's newest reading (`/api/sweep/soft-delete`, the scan step `soft-delete`), as old
-// as the last scan that ran the step, since the site's own account can't read bucket metadata. A bucket with no reading is
-// unknown, and is shown so.
+// as the last scan that ran the step, since the site's own account can't read bucket metadata. A bucket no reading names is
+// shown "not read". A deployment that doesn't stage deletions (`Store.staging` off) gets one line instead: no run reads it.
 
 const ENDPOINT = '/api/sweep/settings'
 
@@ -50,7 +50,7 @@ export function useSoftDeleteNow(enabled: boolean): BucketSoftDelete | null | un
   return !enabled ? undefined : q.isError ? null : q.data
 }
 
-/** What a bucket's row says: `on`, `off`, or `unknown` (no reading names it). */
+/** What a bucket's row says: `on`, `off`, or `unknown` (no reading names it; shown "not read"). */
 export const bucketState = (bucket: string, known: BucketSoftDelete | null | undefined): 'on' | 'off' | 'unknown' =>
   known && Object.hasOwn(known.off, bucket) ? known.off[bucket] ? 'off' : 'on' : 'unknown'
 
@@ -75,8 +75,10 @@ export interface SweepSoftDeleteViewProps {
   onUnderstood: (b: boolean) => void
   onSave: () => void
   buckets: BucketSoftDelete | null | undefined
-  /** The buckets a sweep acts on (the store's): each gets a row, `unknown` where no reading names it. */
+  /** The buckets a sweep acts on (the store's): each gets a row, "not read" where no reading names it. */
   swept: readonly string[]
+  /** One line on what each bucket is (`Store.bucketNotes`): a column when any bucket has one. */
+  notes?: Readonly<Record<string, string>>
   /** The executor's minimum with no row. */
   defaultMin?: number
   busy: boolean
@@ -84,7 +86,8 @@ export interface SweepSoftDeleteViewProps {
 }
 
 /** The editor, as markup (pure: `SweepSoftDelete` wires it to the API). */
-export function SweepSoftDeleteView({ answer, draft, onDraft, understood, onUnderstood, onSave, buckets, swept, defaultMin = DEFAULT_MIN_SOFT_DELETE_DAYS, busy, error }: SweepSoftDeleteViewProps) {
+export function SweepSoftDeleteView({ answer, draft, onDraft, understood, onUnderstood, onSave, buckets, swept, notes, defaultMin = DEFAULT_MIN_SOFT_DELETE_DAYS, busy, error }: SweepSoftDeleteViewProps) {
+  const noted = !!notes && swept.some(b => Object.hasOwn(notes, b))
   const n = Number(draft)
   const valid = draft.trim() !== '' && Number.isInteger(n) && n >= 0 && n <= MAX_MIN_SOFT_DELETE_DAYS
   const warning = valid ? minimumWarning(n) : null
@@ -121,11 +124,17 @@ export function SweepSoftDeleteView({ answer, draft, onDraft, understood, onUnde
             ? `What each bucket a sweep acts on has, as the job read it at ${buckets.asOf} (its soft-delete step, after a scan); a run measures its buckets itself when it starts:`
             : 'No reading of the buckets\' soft delete (the job\'s soft-delete step writes one after a scan), so this site can\'t say what a past run\'s undo has to work with; a run measures its buckets itself when it starts:'}</p>
           <table className="sweep-soft-delete-buckets">
-            <thead><tr><th>bucket</th><th>soft delete</th></tr></thead>
+            <thead><tr><th>bucket</th>{noted && <th>what it is</th>}<th>soft delete</th></tr></thead>
             <tbody>
               {[...swept].sort((a, b) => a.localeCompare(b)).map(bucket => {
                 const state = bucketState(bucket, buckets)
-                return <tr key={bucket}><td><code>{bucket}</code></td><td className={state === 'off' ? 'warn' : state === 'unknown' ? 'dim' : undefined}>{state}</td></tr>
+                return (
+                  <tr key={bucket}>
+                    <td><code>{bucket}</code></td>
+                    {noted && <td className="dim">{notes && Object.hasOwn(notes, bucket) ? notes[bucket] : ''}</td>}
+                    <td className={state === 'off' ? 'warn' : state === 'unknown' ? 'dim' : undefined}>{state === 'unknown' ? 'not read' : state}</td>
+                  </tr>
+                )
               })}
             </tbody>
           </table>
@@ -143,6 +152,16 @@ export function UndoTerms({ buckets, min }: { buckets: readonly string[]; min: R
     : min.isError ? 'Could not read this deployment\'s soft-delete minimum: treat these deletes as permanent.'
     : 'Checking what undo this run would have…'
   return <p className={/^(Recoverable|Checking)/.test(text) ? 'dispatch-path' : 'dispatch-path staged-err'} role="note">{text}</p>
+}
+
+/** `/admin`'s section on a deployment that doesn't stage deletions: nothing dispatches a run, so nothing reads a minimum. */
+export function SweepSoftDeleteUnused() {
+  return (
+    <section className="sweep-soft-delete">
+      <h2>Sweep soft-delete minimum</h2>
+      <p className="dim">Not used here: this deployment doesn't stage or delete anything (no trash gesture, no <code>/staged</code> runs), so no sweep reads a minimum.</p>
+    </section>
+  )
 }
 
 /** `/admin`'s section. */
@@ -179,6 +198,7 @@ export function SweepSoftDelete() {
       onSave={() => save.mutate(Number(draft))}
       buckets={buckets.data}
       swept={DEFAULT_STORE.buckets}
+      notes={DEFAULT_STORE.bucketNotes}
       defaultMin={defaultMinSoftDeleteDays(DEFAULT_STORE.executor)}
       busy={save.isPending}
       error={save.error?.message ?? null}

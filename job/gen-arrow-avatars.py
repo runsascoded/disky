@@ -10,8 +10,9 @@ intensity) encode magnitude. Used as the per-message `icon_url` — legible at
 Slack's ~40px avatar size, where a transparent glyph reads as noise.
 
 STATIC assets: rendered once and hosted (job/icons/arrows/ → the
-gcs-usage-icons Pages project); the digest references them by URL, it never
-re-renders them per run. Regenerate + redeploy only to restyle the arrows."""
+deployment's icons Pages project, `digest.yml` `icons_base`); the digest
+references them by URL, it never re-renders them per run. Regenerate +
+redeploy only to restyle the arrows."""
 from PIL import Image, ImageDraw
 
 GREY = (110, 118, 129)

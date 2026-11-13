@@ -62,6 +62,9 @@ AUTH_MODE = "app"                           # `app` (the app's own sign-in) | `p
 # CACHE_NS = ""                               # response-cache env tag (`_lib/edgeCache.ts`): unset = the request host,
 #                                             #   except PROD_HOST (prod's keys); set "" on a prod with no PROD_HOST
 # REPO_URL = "https://github.com/me/my-fork"  # the "Source on GitHub" link; unset = this repo
+# PEERS = '[{"label": "Other usage", "prod": "other.example.com", "dev": "dev.other.example.com", "meta": true}]'
+#                                             # sibling deployments the omnibar / site menu link (src/peers.ts): a JSON
+#                                             #   array in a TOML literal string; may list this one; unset = none
 # MARK = "gcs"                                # favicon/badge: a `public/icons/` key (gcs cw r2 s3 hf nas macos local); unset = ROOT_LABEL's initials
 
 # --- Who may see it (_lib/auth.ts) ---
@@ -123,6 +126,7 @@ ROOT_LABEL = "my buckets"                   # the store root's crumb label
 # DIGEST_REAPPLY = '{"template":"…","config":"job/digest.yml","root":"snapshots/…","env_script":"job/…-env.sh","r2_bucket":"…","secrets":{"SITE_TOKEN":"…"}}'  # `/admin/slack`'s re-apply job; unset: it answers 503
 # GCP_PROJECT = "my-project"                  # the GCP project the Batch jobs, secrets and logs live in; unset = GCP_SA_KEY's project_id
 # SCAN_SUBMIT_JOB = "projects/my-project/locations/us-east1/jobs/my-scan-submit"  # /scans' "Run a scan" (admins): runs this Cloud Run job (a `BatchSubmitCron`'s submitter) as GCP_SA_KEY with DT_TRIGGER=manual; unset: no button, the route answers 503
+# SWEEP_DISPATCH = "0"                        # no sweep or undo dispatch from this env whatever its GCP_SA_KEY (a dev stack on prod data that holds the key for "Run a scan"); unset = dispatch as configured
 # META_TREE_URL = "https://other.example/meta"  # /scans links each scan output to its dir in the `/meta` store tree (the deployments' own data bucket); unset = no tree links
 # GCP_LOG_VIEW = "projects/my-project/locations/global/buckets/_Default/views/sweep-task-logs"  # IaC-managed task-log-only view; grant the site view-scoped logging.viewAccessor
 # BATCH_REGION = "us-east1"                    # the deployment's Batch region, beside its data bucket (no default): `plan-sweep` needs it; `sweep` when a cut isn't in one BUCKET_REGIONS region

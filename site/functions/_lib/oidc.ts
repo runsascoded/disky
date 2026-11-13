@@ -35,5 +35,9 @@ export function oidcConfig(env: Env, request: Request): GoogleCfg | null {
  *  `OA_LOGIN_ISSUER` or the host's client unset). A preview host (`isPreviewHost`) uses the preview client
  *  (`OA_LOGIN_PREVIEW_CLIENT_ID` / `_SECRET`) and a redirect on its own origin, or nothing: never the deployment's own
  *  client. Shared with `fleet/` (`@disk-tree/pages-kit/oa`). */
-export const oaLoginConfig = (env: Env, request: Request): OaLoginCfg | null =>
-  oaLoginOptions(gateFor(env, request), env, request, { preview: isPreviewHost(env, request), nonceCookieName: cookieNames(env, request).oaNonce })
+export function oaLoginConfig(env: Env, request: Request): OaLoginCfg | null {
+  const names = cookieNames(env, request)
+  return oaLoginOptions(gateFor(env, request), env, request, {
+    preview: isPreviewHost(env, request), nonceCookieName: names.oaNonce, accountHintCookie: names.oaHint,
+  })
+}

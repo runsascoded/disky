@@ -1,6 +1,5 @@
-"""A release uses a clean commit, including nonignored untracked source."""
+"""A release uses a clean commit, including nonignored untracked source. (A deployment's image build, `job/build.sh`, gates the same way on its own branch.)"""
 
-import json
 import os
 from pathlib import Path
 import shutil
@@ -25,13 +24,13 @@ def repo(tmp_path: Path) -> Path:
     git(tmp_path, 'config', 'core.hooksPath', '/dev/null')
     git(tmp_path, 'config', 'core.excludesFile', '/dev/null')
     (tmp_path / '.git/info/exclude').write_text('scratch/\ntmp/\n')
-    for name in ('scripts/require-clean', 'site/deploy', 'site/toml-check', 'job/build.sh', 'cloudbuild.yaml'):
+    for name in ('scripts/require-clean', 'site/deploy', 'site/toml-check'):
         target = tmp_path / name
         target.parent.mkdir(exist_ok=True)
         shutil.copy(ROOT / name, target)
     (tmp_path / 'site/wrangler.toml').write_text('name = "release-test"\n[vars]\n')
     (tmp_path / 'source.txt').write_text('committed\n')
-    git(tmp_path, 'add', 'scripts', 'site', 'job', 'cloudbuild.yaml', 'source.txt')
+    git(tmp_path, 'add', 'scripts', 'site', 'source.txt')
     git(tmp_path, 'commit', '-qm', 'Fixture')
     return tmp_path
 
@@ -55,7 +54,7 @@ def test_refuse_every_kind_of_uncommitted_source(repo: Path, kind: str, status: 
         (repo / 'source.txt').write_text('edited\n')
         if kind == 'staged':
             git(repo, 'add', 'source.txt')
-    for script, args in [('scripts/require-clean', ()), ('site/deploy', ('-P',)), ('job/build.sh', ())]:
+    for script, args in [('scripts/require-clean', ()), ('site/deploy', ('-P',))]:
         result = invoke(repo, script, *args, env={'ALLOW_DIRTY': '1'})
         assert (result.returncode, result.stdout, result.stderr) == (1, '', REFUSAL + status + '\n')
 
@@ -83,28 +82,3 @@ def test_site_refuses_edits_during_build_before_publication(repo: Path):
     assert (fake_bin / 'calls').read_text() == 'build\n'
     assert git(repo, 'branch', '--list', 'release-test-prod') == ''
 
-
-def test_image_upload_is_frozen_to_the_commit(repo: Path):
-    fake_bin = repo / 'scratch'
-    fake_bin.mkdir()
-    gcloud = fake_bin / 'gcloud'
-    gcloud.write_text(
-        '#!/usr/bin/env python3\n'
-        'import json, pathlib, sys\n'
-        'pathlib.Path("source.txt").write_text("concurrent edit\\n")\n'
-        'source = pathlib.Path(sys.argv[-1])\n'
-        'print(json.dumps({"source": (source / "source.txt").read_text(), '
-        '"substitutions": sys.argv[sys.argv.index("--substitutions") + 1]}))\n'
-    )
-    gcloud.chmod(0o755)
-    sha = git(repo, 'rev-parse', 'HEAD')
-    result = invoke(repo, 'job/build.sh', env={
-        'PATH': str(fake_bin) + os.pathsep + os.environ['PATH'],
-        'PROJECT': 'test-project', 'IMAGE': 'example.test/image:candidate', 'JOB': 'cw-run.sh',
-    })
-    assert result.returncode == 0, result.stderr
-    assert json.loads(result.stdout) == {
-        'source': 'committed\n',
-        'substitutions': f'_IMAGE=example.test/image:candidate,_JOB=cw-run.sh,_GIT_SHA={sha},_GIT_DIRTY=0',
-    }
-    assert sorted((repo / 'tmp').iterdir()) == []

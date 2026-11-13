@@ -23,14 +23,24 @@ function useGoogleClient() {
   })
 }
 
-/** Whether "Sign in with OA" (OA's broker, specs/oa-login-rp.md) is configured here: the wall then offers it first. */
+/** What `/auth/oa/client` says: whether "Sign in with OA" (OA's broker, specs/oa-login-rp.md) is configured here (the
+ *  wall then offers it first), the account this browser last signed in as through it, and the Google accounts it
+ *  remembers. */
+interface OaClient {
+  enabled: boolean
+  account?: OaAccount
+  google: string[]
+}
+interface OaAccount { email: string, name?: string, avatar?: string }
+
 function useOaLogin() {
   return useQuery({
     queryKey: ['oa-login'],
-    queryFn: async (): Promise<boolean> => {
+    queryFn: async (): Promise<OaClient> => {
       const r = await fetch('/auth/oa/client', { credentials: 'include' })
-      if (!r.ok) return false
-      return ((await r.json()) as { enabled?: boolean }).enabled === true
+      if (!r.ok) return { enabled: false, google: [] }
+      const body = (await r.json()) as Partial<OaClient>
+      return { enabled: body.enabled === true, account: body.account, google: body.google ?? [] }
     },
     staleTime: Infinity,
     retry: false,
@@ -67,6 +77,11 @@ export function AuthGate({ children }: { children: ReactNode }) {
 // the button degrades to the plain redirect.
 // With OA's broker configured, the middleware has already tried it silently by the time
 // this shows (`functions/_lib/silentSignIn.ts`): the wall is what's left when that fails.
+// Its button names the account this browser last signed in as through it ("Continue as <name>", face and address,
+// from `/auth/oa/client`'s signed `account`). When that's also every Google account remembered here, a Google
+// button would only sign the same person in a second way: the Google slot gives way to "Use a different account"
+// (Google's chooser, `?account=choose`), which reaches any other account, OA's or not. A Google account remembered
+// beside it keeps its row.
 // The request-access form + how-to prose fold behind a disclosure — they're the
 // tail for people the policy doesn't yet admit (not staff, not a viewer
 // domain, no `allowed_emails` row), not the wall itself — and unfold on a
@@ -89,7 +104,13 @@ function LoginWall({ next, error }: { next?: string; error?: string }) {
   const googleUrl = next ? `/auth/google?next=${encodeURIComponent(next)}` : '/auth/google'
   const oa = useOaLogin()
   // Inside <Gate> (no `next`), back to the page the wall stands in for.
-  const oaUrl = `/auth/oa?next=${encodeURIComponent(next ?? window.location.pathname + window.location.search)}`
+  const back = encodeURIComponent(next ?? window.location.pathname + window.location.search)
+  const oaUrl = `/auth/oa?next=${back}`
+  const oaOn = oa.data?.enabled === true
+  const account = oaOn ? oa.data?.account : undefined
+  // The OA button already signs in every Google account remembered here: Google's slot is only "a different account".
+  const googleRedundant = !!account && (oa.data?.google ?? []).every(e => e === account.email)
+  const emailAuth = storeEmailAuth(DEFAULT_STORE)
   // A verified-but-not-allowed address from the in-page button: land on the
   // same `?denied=` the redirect flow bounces to, so the wall unfolds
   // request-access pre-filled with it.
@@ -105,18 +126,23 @@ function LoginWall({ next, error }: { next?: string; error?: string }) {
         <p>{DEFAULT_STORE.desc}</p>
         <p className="restrict">{wall.restrict}</p>
         {error && <p className="signin-error" role="alert">{error}</p>}
-        {/* Wait for the client id (one small request) rather than flash the
-            redirect button and swap it for Google's. */}
-        {oa.data && (
-          <a className="signin signin-oa" href={oaUrl}>Sign in with OA</a>
+        {oaOn && (
+          <a className={account ? 'signin signin-oa signin-oa-account' : 'signin signin-oa'} href={oaUrl}>
+            {account ? <OaContinueAs account={account} /> : <><OaMark /><span>Sign in with OA</span></>}
+          </a>
         )}
-        {google.isFetched && (
+        {googleRedundant && clientId && (
+          <a className="signin-switch signin-other" href={`/auth/google?account=choose&next=${back}`}>Use a different account</a>
+        )}
+        {/* Wait for the client id (one small request) rather than flash the redirect button and swap it for Google's,
+            and for `/auth/oa/client`, which may drop Google's slot. */}
+        {google.isFetched && !oa.isLoading && (!googleRedundant || emailAuth) && (
           <SignInPanel
             title={null}   // the card's own <h1> + `restrict` line already say what this is
-            googleUrl={clientId ? googleUrl : undefined}
+            googleUrl={clientId && !googleRedundant ? googleUrl : undefined}
             withNext={!next}
             continueAs={email => <RememberedAccount email={email} />}
-            oneTap={clientId ? {
+            oneTap={clientId && !googleRedundant ? {
               clientId,
               nonceEndpoint: '/auth/google/onetap/nonce',
               verifyEndpoint: '/auth/google/onetap',
@@ -127,7 +153,7 @@ function LoginWall({ next, error }: { next?: string; error?: string }) {
               // width (440 max − 2×32 padding), less on a narrow phone.
               buttonOptions: { theme: 'filled_blue', size: 'large', text: 'continue_with', shape: 'rectangular', width: Math.min(376, Math.max(240, window.innerWidth - 112)) },
             } : undefined}
-            emailAuth={storeEmailAuth(DEFAULT_STORE)}
+            emailAuth={emailAuth}
             onSignedIn={() => { forget(); if (next) navigate(next, { replace: true }) }}
             classNames={{ root: 'signin-panel', googleButton: 'signin', switchAccount: 'signin-switch', divider: 'signin-or' }}
           />
@@ -141,6 +167,31 @@ function LoginWall({ next, error }: { next?: string; error?: string }) {
         </details>
       </div>
     </div>
+  )
+}
+
+/** OA's mark on the broker's button: a monogram, as Google's button carries Google's. */
+function OaMark() {
+  return <span className="oa-mark" aria-hidden="true">OA</span>
+}
+
+/** The broker's button for a returning visitor, laid out as Google's own "Continue as": their face (or initial),
+ *  "Continue as <first name>" over the address, OA's mark. A hint, never an identity: the click still signs in at the
+ *  broker, as whoever it holds. */
+function OaContinueAs({ account }: { account: OaAccount }) {
+  const { email, name, avatar } = account
+  const first = name?.trim().split(/\s+/)[0]
+  return (
+    <span className="oa-account">
+      {avatar
+        ? <img className="oa-avatar" src={avatar} alt="" referrerPolicy="no-referrer" />
+        : <span className="oa-avatar" aria-hidden="true">{(name ?? email).charAt(0).toUpperCase()}</span>}
+      <span className="oa-who">
+        <span className="oa-name">Continue as {first ?? email}</span>
+        {first && <span className="oa-email">{email}</span>}
+      </span>
+      <OaMark />
+    </span>
   )
 }
 

@@ -3,7 +3,7 @@
 # requires-python = ">=3.11"
 # dependencies = ["click", "pillow"]
 # ///
-"""Directional Δ-arrow emojis for the daily digest (specs: #gcs-usage workshop).
+"""Directional Δ-arrow emojis for the usage digest.
 
 A sweep of arrows encoding each day's size delta: signed angle a ∈ [-85°, +85°]
 in math convention (0° = due E = flat/no change), negative = pointing S-ward =

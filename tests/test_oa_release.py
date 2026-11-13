@@ -152,6 +152,26 @@ def test_artifact_seal_and_tamper_refusal(tmp_path, monkeypatch):
     assert (result.exit_code, result.output, receipt.exists()) == (1, 'Error: Upload artifact/config changed\n', False)
 
 
+def test_seal_holds_a_release_while_a_d1_recipe_is_pending(tmp_path, monkeypatch):
+    monkeypatch.setattr(release, 'validate_source', lambda source, sha: None)
+    source = tmp_path / 'source'
+    site = source / 'site'
+    (site / 'migrations').mkdir(parents=True)
+    (site / 'migrations/b-tables.sql').write_text('ALTER TABLE t ADD COLUMN c TEXT;\n')
+    (site / 'migrations/a-index.sql').write_text('CREATE INDEX i ON t (c);\n')
+    (site / 'migrations/README.md').write_text('recipes\n')
+    (site / 'wrangler.toml').write_text('name="oa-hf-usage"\n[vars]\nDEV_HOST="dev.hf.oa.dev"\n')
+    setup_api(monkeypatch)
+    plan_path, seal_path = tmp_path / 'plan.json', tmp_path / 'seal.json'
+    plan_path.write_text(dumps(release.plan_release({'workflow_run': ci()}, 'workflow_run', REPO)))
+    result = CliRunner().invoke(release.main, ['seal', '-p', str(plan_path), '-o', str(seal_path), str(source)])
+    assert (result.exit_code, result.output, seal_path.exists()) == (
+        1,
+        "Error: Pending D1 recipes: a-index.sql, b-tables.sql. Apply each to this deployment's databases (owner, with Ryan's go), `git rm` it, then release\n",
+        False,
+    )
+
+
 def test_credential_inventory_never_returns_values_or_folds_source_up_into_next_line(tmp_path):
     path = tmp_path / '.envrc'
     path.write_text('source_up\nexport SLACK_BOT_TOKEN=do-not-output-one\nexport CF_ANALYTICS_TOKEN="do-not-output-two"\nsource_env other-secret-file\nexport OTHER_THING=do-not-output-three\n')
@@ -223,7 +243,10 @@ def test_success_requires_live_build_and_exact_entry_asset(tmp_path, monkeypatch
     calls = []
     monkeypatch.setattr(release, 'api', lambda path, body=None: calls.append((path, body)))
 
+    agents = []
+
     def urlopen(request, timeout):
+        agents.append(request.get_header('User-agent'))
         response = BytesIO(b'wrong' if wrong_asset else b'42')
         response.headers = {'x-disky-build': f'{SHA} 2026-11-10T12:34:56Z'}
         return response
@@ -235,6 +258,7 @@ def test_success_requires_live_build_and_exact_entry_asset(tmp_path, monkeypatch
         assert loads(path.read_text()) == receipt
     else:
         assert result.exit_code == 0
+        assert agents == ['disky-oa-release/1', 'disky-oa-release/1']
         expected = {**receipt, 'cloudflare_deployment': 'cf73', 'cloudflare_url': 'https://cf73.oa-hf-usage.pages.dev'}
         assert loads(result.output) == expected
         assert loads(path.read_text()) == expected
@@ -292,9 +316,46 @@ def test_source_checkout_must_be_clean_and_exact(monkeypatch, head, dirty, messa
         assert release.validate_source(Path('source'), SHA) is None
 
 
+def setup_expected(target: str, enabled: str, targets: str) -> dict:
+    return {
+        'repository': REPO,
+        'operator_policy': 'Existing repository write/maintain/admin; explicit production dispatch, self-approval allowed; no added merge-review requirement',
+        'environments': [{
+            'name': f'{target}-{mode}',
+            'settings': {'wait_timer': 0, 'prevent_self_review': False, 'reviewers': [],
+                         'deployment_branch_policy': {'protected_branches': False, 'custom_branch_policies': True}},
+            'branch_policy': {'name': 'front-door', 'type': 'branch'},
+            'variables': {'CLOUDFLARE_ACCOUNT_ID': '74981a43be0de7712369306c7b19133d'},
+            'secret_names': ['CF_PAGES_DEPLOY_TOKEN'],
+        } for mode in ['dev', 'prod']],
+        'repository_variables': {'OA_SITE_RELEASE_ENABLED': enabled, 'OA_SITE_RELEASE_TARGETS': targets},
+        'production_action': 'Manual promotion of a successful exact-SHA dev deployment',
+        'preview_data_policy': 'Unchanged; per-PR preview activation is separate',
+    }
+
+
+def test_setup_plan_adds_to_live_targets_and_keeps_live_enabled(tmp_path):
+    output = tmp_path / 'setup.json'
+    result = CliRunner().invoke(release.main, ['setup-plan', '-e', 'true', '-l', '["hf"]', '-t', 'r2', '-o', str(output)])
+    assert result.exit_code == 0
+    assert loads(result.output) == loads(output.read_text()) == setup_expected('r2', 'true', '["hf","r2"]')
+
+
+def test_setup_plan_for_a_live_target_changes_no_repository_variable(tmp_path):
+    output = tmp_path / 'setup.json'
+    result = CliRunner().invoke(release.main, ['setup-plan', '-e', 'true', '-l', '["hf","r2"]', '-t', 'hf', '-o', str(output)])
+    assert result.exit_code == 0
+    assert loads(output.read_text())['repository_variables'] == {'OA_SITE_RELEASE_ENABLED': 'true', 'OA_SITE_RELEASE_TARGETS': '["hf","r2"]'}
+
+
+def test_setup_plan_refuses_unknown_live_targets(tmp_path):
+    result = CliRunner().invoke(release.main, ['setup-plan', '-e', 'false', '-l', '["hf","nope"]', '-t', 'r2', '-o', str(tmp_path / 'setup.json')])
+    assert (result.exit_code, result.output.splitlines()[-1]) == (1, 'Error: Unknown OA deployment')
+
+
 def test_setup_plan_is_scoped_and_disabled_without_extra_approval_clicks(tmp_path):
     output = tmp_path / 'setup.json'
-    result = CliRunner().invoke(release.main, ['setup-plan', '-t', 'hf', '-o', str(output)])
+    result = CliRunner().invoke(release.main, ['setup-plan', '-e', 'false', '-l', '[]', '-t', 'hf', '-o', str(output)])
     assert result.exit_code == 0
     expected = {
         'repository': REPO,

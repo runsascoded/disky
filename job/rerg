@@ -1,23 +1,37 @@
 #!/usr/bin/env bash
-# Rewrite the row groups of parquet files in the scan store, in place, where
-# the data lives: a GCP Batch task in us-east1 (the bucket's region) runs
-# `pqtk re-rg`; the laptop only lists, submits, and polls. Originals are kept
-# beside the rewrites as `<name>.bak` unless -i.
+# Rewrite the row groups of parquet files in a deployment's scan store, in place, where the data lives: a GCP Batch
+# task in the bucket's region runs `pqtk re-rg`; the laptop only lists, submits, and polls. Originals are kept beside
+# the rewrites as `<name>.bak` unless -i.
 #
-#   job/rerg 'gs://oa-gcs-usage-dvx/sweep/runs/<run>/would-delete/*.parquet'
-#   job/rerg -r 25000 'gs://oa-gcs-usage-dvx/listing/2026-08-01/*/*.parquet'
+#   job/rerg 'gs://<data bucket>/sweep/runs/<run>/would-delete/*.parquet'
+#   job/rerg -r 25000 'gs://<data bucket>/listing/<date>/*/*.parquet'
 #
-# Options: -r ROWS (rows per group, default 65536), -i (no .bak), -k SUFFIX
-# (backup suffix, default .bak), -m MACHINE (default n2-standard-4).
+# Options: -r ROWS (rows per group, default 65536), -i (no .bak), -k SUFFIX (backup suffix, default .bak),
+# -m MACHINE (default n2-standard-4).
+#
+# Config (the deployment's, no defaults): `job/rerg.env` beside this script (or the file `$RERG_ENV` names), sourced,
+# or the same variables in the environment:
+#   RERG_PROJECT  the GCP project the Batch job runs in
+#   RERG_REGION   its region (the bucket's)
+#   RERG_IMAGE    the pqtk image
+#   RERG_SA       the task's service account (reads and writes the bucket)
+#   RERG_STAGING  a gs:// prefix pqtk stages its task inputs under
+#   RERG_GCLOUD_ACCOUNT  (optional) the gcloud account pqtk shells out as, when the active one can't reach the bucket
+# PQTK: the pqtk binary (default ~/c/pqtk/.venv/bin/pqtk).
 set -euo pipefail
-PROJECT=oa-internal-450019
-REGION=us-east1
-IMAGE=us-central1-docker.pkg.dev/$PROJECT/cloud-run-source-deploy/pqtk:latest
-SA=gcs-usage-job@$PROJECT.iam.gserviceaccount.com
-STAGING=gs://oa-gcs-usage-dvx/pqtk
+env_file=${RERG_ENV:-$(dirname "$0")/rerg.env}
+if [ -f "$env_file" ]; then
+  # shellcheck disable=SC1090
+  . "$env_file"
+elif [ -n "${RERG_ENV:-}" ]; then
+  echo "RERG_ENV=$RERG_ENV: no such file" >&2
+  exit 2
+fi
+: "${RERG_PROJECT:?set RERG_PROJECT (job/rerg.env)}" "${RERG_REGION:?set RERG_REGION (job/rerg.env)}"
+: "${RERG_IMAGE:?set RERG_IMAGE (job/rerg.env)}" "${RERG_SA:?set RERG_SA (job/rerg.env)}" "${RERG_STAGING:?set RERG_STAGING (job/rerg.env)}"
 PQTK=${PQTK:-$HOME/c/pqtk/.venv/bin/pqtk}
-# pqtk shells out to gcloud; the active gcloud account is personal, so pin OA.
-export CLOUDSDK_CORE_ACCOUNT=ryan.williams@openathena.ai
+# pqtk shells out to gcloud: pin the account that can reach the bucket, if the active one can't.
+[ -z "${RERG_GCLOUD_ACCOUNT:-}" ] || export CLOUDSDK_CORE_ACCOUNT=$RERG_GCLOUD_ACCOUNT
 
 rows=65536 mode=(-k .bak) machine=n2-standard-4
 while getopts "r:ik:m:" o; do
@@ -30,9 +44,9 @@ while getopts "r:ik:m:" o; do
   esac
 done
 shift $((OPTIND - 1))
-[ $# -ge 1 ] || { sed -n '2,12p' "$0" >&2; exit 2; }
+[ $# -ge 1 ] || { sed -n '2,10p' "$0" >&2; exit 2; }
 
 for glob in "$@"; do
   "$PQTK" re-rg "$glob" "${mode[@]}" -r "$rows" --runner gcp-batch \
-    --project "$PROJECT" --region "$REGION" --image "$IMAGE" --sa "$SA" --staging "$STAGING" --machine "$machine"
+    --project "$RERG_PROJECT" --region "$RERG_REGION" --image "$RERG_IMAGE" --sa "$RERG_SA" --staging "$RERG_STAGING" --machine "$machine"
 done

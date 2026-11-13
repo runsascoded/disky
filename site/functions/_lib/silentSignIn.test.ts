@@ -239,7 +239,7 @@ describe('the broker\'s answer', () => {
       const cb = await callbackAt(env, `code=c&state=${encodeURIComponent(state)}`, `oa_sso_skip=attempt; ${nonce}`)
       const set = cb.headers.getSetCookie()
       const session = set.find(c => c.startsWith('oa_auth='))!.split(';')[0]
-      expect([cb.status, cb.headers.get('location'), set.map(c => c.split('=')[0]), set.at(-1)]).toEqual([302, '/scans?a=1', ['oa_auth', 'oa_login_nonce', 'oa_sso_skip'], CLEARED])
+      expect([cb.status, cb.headers.get('location'), set.map(c => c.split('=')[0]), set.at(-1)]).toEqual([302, '/scans?a=1', ['oa_auth', 'oa_login_nonce', 'oa_login_hint', 'oa_login_hint_accounts', 'oa_login_who', 'oa_sso_skip'], CLEARED])
       expect(outcome(await visit(env, '/scans?a=1', { ...NAV, cookie: session }))).toEqual(WALL)
     })
     it('a person the gate doesn\'t admit lands on the wall\'s request-access form, and stays there', async () => {
