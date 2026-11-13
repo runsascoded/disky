@@ -19,6 +19,7 @@ config:
     - infra/aws/scan.sh
     - infra/aws/entry.sh
     - infra/aws/age-backfill.sh
+    - infra/aws/static-catchup.sh
     - infra/aws/scan-runs.json
     - job/nf
     - job/profiles
