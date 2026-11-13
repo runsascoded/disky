@@ -287,7 +287,7 @@ def test_record():
     now = dt.datetime(2026, 10, 2, 1, 2, 3, tzinfo=dt.timezone.utc)
     assert record("https://x.test", T, r, now) == {
         "ts": "2026-10-02T01:02:03Z", "base": "https://x.test",
-        "date": "2026-10-01", "prev": "2026-09-30", "bucket": "bk-a", "hit": "ckpt",
+        "date": "2026-10-01", "prev": "2026-09-30", "bucket": "bk-a", "hit": "ckpt", "week": None, "month": None,
         "results": [{"scenario": "one", "path": "/a", "status": 200, "ms": 5, "bytes": 2, "cache": None, "server_ms": None, "server_timing": None, "error": None, "skip": None, "indexed": None}],
         "summary": {"passed": 1, "skipped": 0, "failed": 0, "lag": 0, "refused_indexed": 0, "line": "1 passed, 0 skipped, 0 failed"},
     }
@@ -352,7 +352,7 @@ def test_exact_request_cli_skips_discovery_and_records_details(monkeypatch):
     rec = json.loads(result.stdout)
     assert dt.datetime.strptime(rec.pop("ts"), "%Y-%m-%dT%H:%M:%SZ").tzinfo is None
     assert rec == {
-        "base": "https://gcs.test", "date": "2026-10-13T1300", "prev": None, "bucket": "", "hit": "", "cold": True,
+        "base": "https://gcs.test", "date": "2026-10-13T1300", "prev": None, "bucket": "", "hit": "", "week": None, "month": None, "cold": True,
         "results": [{"scenario": "requests", "path": path, "status": 200, "ms": 12, "bytes": 2, "cache": "miss", "server_ms": 10, "server_timing": timing, "error": None, "skip": None, "indexed": None} for path in calls],
         "summary": {"passed": 2, "skipped": 0, "failed": 0, "lag": 0, "refused_indexed": 0, "line": "2 passed, 0 skipped, 0 failed"},
     }
