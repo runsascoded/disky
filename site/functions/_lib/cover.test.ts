@@ -56,7 +56,7 @@ function bruteCover(s: Store, q: string, view: string, minDepth: number): CoverI
     && (depthOf(p) >= floor || inRoot(p)))
   const outer = exact.filter(p => !exact.some(a => a !== p && under(p, a)))
   return outer.sort().map(p => ({
-    path: p, kind: t.get(p)!.kind, b: t.get(p)!.b, o: t.get(p)!.o,
+    path: p, kind: t.get(p)!.kind, bytes: t.get(p)!.b, objects: t.get(p)!.o,
     roots: roots.filter(r => under(r.path, p)).length,
   }))
 }
