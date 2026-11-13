@@ -3363,7 +3363,9 @@ export async function buildDiff(env0: Env, o: DiffOpts): Promise<Diff> {
       const want = new Set(part.map(q => `${q.d}\0${q.cp}`))
       let got: Row[]
       try {
-        got = (await readAsks(await fine(date), part.map(q => ({ depth: q.d, path: q.cp, ...(q.vtLe != null ? { vtLe: q.vtLe } : {}), ...(q.vfGe != null ? { vfGe: q.vfGe } : {}) })), r => want.has(`${r.depth}\0${r.path}`), { maxGroups: 120, stop: () => lookupsOff })).rows
+        // `points`: a round's names lie at many depths and all over the tree (heaviest first, not a level's siblings),
+        // so each is selected by its own (depth, path), never by the span between a depth's first name and its last.
+        got = (await readAsks(await fine(date), part.map(q => ({ depth: q.d, path: q.cp, ...(q.vtLe != null ? { vtLe: q.vtLe } : {}), ...(q.vfGe != null ? { vfGe: q.vfGe } : {}) })), r => want.has(`${r.depth}\0${r.path}`), { maxGroups: 120, stop: () => lookupsOff, points: true })).rows
       } catch (e) {
         if (!/too wide/.test(String((e as Error).message ?? e))) throw e
         return false
