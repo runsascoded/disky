@@ -27,7 +27,7 @@
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { ADMIN_GRANT_REFUSED, type Env, gateFor, identify } from './_lib/auth'
-import { DEPLOYMENT_RESTRICTED, DEPLOYMENT_ROUTES } from './_lib/gatesDeployment'
+import { DEPLOYMENT_GATES, DEPLOYMENT_RESTRICTED, DEPLOYMENT_ROUTES } from './_lib/gatesDeployment'
 import { hideScope, restrictGate } from './_lib/restrict'
 import { sqliteD1, withAdminEmails, withLedger } from './_lib/testD1'
 
@@ -118,6 +118,9 @@ interface Case {
   gate: Gate
   /** Vars and bindings on top of the world's env: what the deployment needs for the route to take this branch. */
   env?: Vars | ((w: World) => Vars)
+  /** A same-origin browser request (`Origin` = the audit's, `Sec-Fetch-Site: same-origin`): for a route that refuses
+   *  a cross-site request before any gate. */
+  sameOrigin?: boolean
 }
 
 const route = (method: Case['method']) => (path: string, gate: Gate, env?: Case['env']): Case => ({ method, path, gate, ...(env ? { env } : {}) })
@@ -581,7 +584,11 @@ async function answer(w: World, run: Handler, file: string, c: Case, headers: Re
   const bodied = c.method !== 'GET'
   const request = new Request(`${ORIGIN}${c.path}`, {
     method: c.method,
-    headers: { ...headers, ...(bodied ? { 'content-type': 'application/json' } : {}) },
+    headers: {
+      ...headers,
+      ...(c.sameOrigin ? { origin: ORIGIN, 'sec-fetch-site': 'same-origin' } : {}),
+      ...(bodied ? { 'content-type': 'application/json' } : {}),
+    },
     ...(bodied ? { body: '{}' } : {}),
   })
   const ctx = {
@@ -628,7 +635,11 @@ const editScopes = (w: World, who: Who, id: string, scopes: string[]): Promise<R
   env: w.env,
 }) as Promise<Response>
 
-const expected = (gate: Gate, mode: Mode): Outcome[] => EXPECT[gate].map(cell => (typeof cell === 'object' ? (mode.listOn ? cell.listOn : cell.listOff) : cell))
+/** Every gate's row: the shared vocabulary, and the gates only this deployment's routes sit behind
+ *  (`_lib/gatesDeployment.ts`; a shared gate's row can't be redefined there). */
+const GATES: Record<string, readonly Cell[]> = { ...(DEPLOYMENT_GATES as Record<string, readonly Cell[]>), ...EXPECT }
+
+const expected = (gate: Gate, mode: Mode): Outcome[] => GATES[gate].map(cell => (typeof cell === 'object' ? (mode.listOn ? cell.listOn : cell.listOff) : cell))
 const byIdentity = <T>(vs: T[]): Record<string, T> => Object.fromEntries(IDENTITIES.map((who, i) => [who, vs[i]]))
 
 // ---- the audit -----------------------------------------------------------------------------------------------------
@@ -661,7 +672,7 @@ describe('every route declares its gate', () => {
     expect(elsewhere).toEqual([])
   })
   it('every gate in the vocabulary is some route\'s', () => {
-    expect([...new Set(Object.values(ROUTES).flatMap(cases => cases.map(c => c.gate)))].sort()).toEqual(Object.keys(EXPECT).sort())
+    expect([...new Set(Object.values(ROUTES).flatMap(cases => cases.map(c => c.gate)))].sort()).toEqual(Object.keys(GATES).sort())
   })
   it('the cases a share link\'s scopes reach are exactly the ones `RESTRICTED` answers for a path-restricted link', () => {
     const reachable = [...new Set(Object.values(ROUTES).flatMap(cases => cases.filter(c => LINK_GATES.has(c.gate)).map(linkKey)))].sort()
