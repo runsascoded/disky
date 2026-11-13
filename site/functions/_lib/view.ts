@@ -3293,7 +3293,6 @@ export async function buildDiff(env0: Env, o: DiffOpts): Promise<Diff> {
   }
   // A lookup's answer: the path's total on that side, null for none there, undefined for unanswered (a budget).
   const lookup = async (date: string, v: Read, p: string, depth: number): Promise<Agg | null | undefined> => {
-    if (!inQuery(p, v)) return null
     if (lookups >= lookupCap || walkOver()) { capped = true; return undefined }
     lookups++
     const rows = await readRows(await fine(date), depth, depth, p, p, undefined, lens)
@@ -3326,9 +3325,14 @@ export async function buildDiff(env0: Env, o: DiffOpts): Promise<Diff> {
   const lookupMany = async (date: string, v: Read, items: { cp: string; d: number; other?: Agg }[]): Promise<Map<string, Agg | null>> => {
     const out = new Map<string, Agg | null>()
     const todo: { cp: string; d: number; vtLe?: number; vfGe?: number }[] = []
+    const missing = items.filter(q => !inQuery(q.cp, v))
+    const matched = missing.length ? v.matchedTotals?.(missing.map(q => q.cp)) : undefined
     const D = sameStore ? v.idx.asOf! : null
     for (const q of items) {
-      if (!inQuery(q.cp, v)) { out.set(q.cp, null); continue }
+      if (!inQuery(q.cp, v)) {
+        if (matched?.has(q.cp)) { out.set(q.cp, matched.get(q.cp)!); continue }
+        if (!matched) { out.set(q.cp, null); continue }
+      }
       const w = D != null ? q.other?.ver : null
       if (!w) { todo.push(q); continue }
       if (w.vf <= D! && D! < w.vt) { out.set(q.cp, q.other!); continue }
