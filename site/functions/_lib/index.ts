@@ -2399,6 +2399,19 @@ async function selectSpans1(h: IndexHandle, rects: Rect[], cap = 4000, bMin = 0,
   return res.results.map(r => ({ rg: r.rg, dMin: num(r.d_min), dMax: num(r.d_max), pMin: r.p_min, pMax: r.p_max, bMax: num(r.b_max), rowStart: num(r.row_start), rowEnd: num(r.row_end) }))
 }
 
+/** `selectSpans1` for exact points (`readAsks`' `points`), on a footer-held tier: the groups, and the footer groups
+ *  decoded to find them, that may hold one of `pts` — never every group between two of them, as the rectangle over
+ *  their `[min, max]` path selects (on an interval store, each segment's groups straddling the depth there). */
+async function selectPoints1(h: IndexHandle, pts: PointSet, cap: number): Promise<Span[]> {
+  if (h.mode === 'd1') throw new Error('point spans read a footer, not D1')
+  const exact = h.mode === 'pq' && h.asOf != null
+  const pass = (g: Parameters<typeof groupMatches>[0]) => pts.mayHold(g, exact)
+  const near = exact && h.variant === 'path' ? (g: BlobGroup, prev?: BlobGroup, next?: BlobGroup) => neighboursHold(g, prev, next, (d, lo, hi) => pts.within(d, lo, hi)) : undefined
+  const out = h.mode === 'blob' ? h.groups.filter(pass) : await pqGroups(h, pass, near, cap)
+  if (out.length > cap) throw new TooWide(`query too wide: >${cap} row groups (drill deeper or raise minArea)`)
+  return out
+}
+
 /** A row group a read selected that the footer returned no metadata for: its rows were not read. (D1's rows for the
  *  scan deleted between the span query and the metadata's, a footer file short of a group.) */
 export class GroupUnread extends Error {
@@ -3586,16 +3599,64 @@ export function sizeNeighbours(g: SizeGroup, prev: SizeGroup | undefined, next: 
  *  Groups without `seg` (an older footer) are kept. */
 type PathGroup = Pick<BlobGroup, 'dMin' | 'dMax' | 'pMin' | 'pMax' | 'seg'>
 export function pathNeighbours(g: PathGroup, prev: PathGroup | undefined, next: PathGroup | undefined, rects: Rect[]): boolean {
+  return neighboursHold(g, prev, next, (d, lo, hi) => rects.some(r => d >= r.dLo && d <= r.dHi && hi >= r.pLo && lo <= r.pHi))
+}
+
+/** `pathNeighbours`' test, `hit(d, lo, hi)`: whether what is read can have a row of depth `d` with its path in
+ *  `[lo, hi]`, the group's paths of that depth as its neighbours bound them. */
+function neighboursHold(g: PathGroup, prev: PathGroup | undefined, next: PathGroup | undefined, hit: (d: number, lo: string, hi: string) => boolean): boolean {
   if (g.seg == null || g.dMin === g.dMax) return true
   const whole = (n: PathGroup | undefined, d: number) => n != null && n.seg === g.seg && n.dMin === d && n.dMax === d
-  for (const r of rects) {
-    for (let d = Math.max(r.dLo, g.dMin); d <= Math.min(r.dHi, g.dMax); d++) {
-      const lo = d === g.dMin && whole(prev, d) && prev!.pMax > g.pMin ? prev!.pMax : g.pMin
-      const hi = d === g.dMax && whole(next, d) && next!.pMin < g.pMax ? next!.pMin : g.pMax
-      if (hi >= r.pLo && lo <= r.pHi) return true
-    }
+  for (let d = g.dMin; d <= g.dMax; d++) {
+    const lo = d === g.dMin && whole(prev, d) && prev!.pMax > g.pMin ? prev!.pMax : g.pMin
+    const hi = d === g.dMax && whole(next, d) && next!.pMin < g.pMax ? next!.pMin : g.pMax
+    if (hit(d, lo, hi)) return true
   }
   return false
+}
+
+/** Exact `(depth, path)` points (`readAsks`' `points`), indexed by depth so a group's bounds are tested in
+ *  O(depths · log n), not once per point: the test `groupMatches` makes of their rectangles (no lens, no byte floor),
+ *  with `exact` (an interval store's true path bounds, `selectSpans1`) the path test at every depth too. */
+export class PointSet {
+  private readonly at = new Map<number, string[]>()
+  readonly depths: number[]
+  constructor(points: { depth: number; path: string }[]) {
+    for (const p of points) {
+      const l = this.at.get(p.depth)
+      if (l) l.push(p.path)
+      else this.at.set(p.depth, [p.path])
+    }
+    // The default sort is by UTF-16 code units, as `<` compares the bounds.
+    for (const l of this.at.values()) l.sort()
+    this.depths = [...this.at.keys()].sort((a, b) => a - b)
+  }
+
+  /** Whether a point of depth `d` has its path in `[lo, hi]`. */
+  within(d: number, lo: string, hi: string): boolean {
+    const l = this.at.get(d)
+    if (!l) return false
+    let i = 0
+    let j = l.length
+    while (i < j) {
+      const m = (i + j) >> 1
+      if (l[m] < lo) i = m + 1
+      else j = m
+    }
+    return i < l.length && l[i] <= hi
+  }
+
+  /** Whether a group (or a footer group) with these bounds may hold a point. */
+  mayHold(g: { dMin: number; dMax: number; pMin: string; pMax: string }, exact: boolean): boolean {
+    for (const d of this.depths) {
+      if (d < g.dMin) continue
+      if (d > g.dMax) return false
+      // A group spanning depths orders paths per depth: its min/max bound them only where they are exact.
+      if (!exact && g.dMin !== g.dMax) return true
+      if (this.within(d, g.pMin, g.pMax)) return true
+    }
+    return false
+  }
 }
 
 /** Candidate row groups of the `bysize` sort for a set of path ranges at
@@ -3944,14 +4005,56 @@ function pointsPre(asks: Ask[]): Pre | undefined {
   return (depth, path) => !!at.get(depth)?.has(path)
 }
 
+type PointAsk = Ask & { path: string }
+
+/** `groupMayHold` of any of many point asks (`readAsks`' `points`): each depth's asks sorted by path, so a group of
+ *  one depth tests only the asks within its path range. */
+function pointsMayHold(asks: PointAsk[]): (g: Span & { vfMax?: number; vtMin?: number }) => boolean {
+  const at = new Map<number, PointAsk[]>()
+  for (const a of asks) {
+    const l = at.get(a.depth)
+    if (l) l.push(a)
+    else at.set(a.depth, [a])
+  }
+  for (const l of at.values()) l.sort((x, y) => (x.path < y.path ? -1 : x.path > y.path ? 1 : 0))
+  const inWindow = (g: { vfMax?: number; vtMin?: number }, a: Ask) =>
+    !(a.vtLe != null && g.vtMin != null && g.vtMin > a.vtLe) && !(a.vfGe != null && g.vfMax != null && g.vfMax < a.vfGe)
+  return g => {
+    for (let d = g.dMin; d <= g.dMax; d++) {
+      const l = at.get(d)
+      if (!l) continue
+      if (g.dMin !== g.dMax) {
+        if (l.some(a => inWindow(g, a))) return true
+        continue
+      }
+      let i = 0
+      let j = l.length
+      while (i < j) {
+        const m = (i + j) >> 1
+        if (l[m].path < g.pMin) i = m + 1
+        else j = m
+      }
+      for (; i < l.length && l[i].path <= g.pMax; i++) if (inWindow(g, l[i])) return true
+    }
+    return false
+  }
+}
+
 /** Point lookups: exact `(depth, path)` rows or `(depth, under-prefix)`
  * ranges, many at once (the totals manifest's ~8k prefixes) — `keep` is the
- * caller's exact test over the rows of the candidate groups. */
+ * caller's exact test over the rows of the candidate groups.
+ *
+ * `points`: asks that are all exact paths, on a footer-held handle (not D1), are selected by the points themselves,
+ * every depth in one selection (`selectPoints1`): only the groups — and the footer groups decoded to find them — that
+ * may hold one. A read whose asks are scattered over depths and buckets (a diff's lookups) otherwise selects, per
+ * depth, every group between its first ask and its last: their footer groups decoded, and on an interval store each
+ * segment's groups straddling the depth there read, though none holds an ask. The groups read are a subset of that
+ * plan's (the same test after a tighter selection), the rows the same; past its cap it is that plan. */
 export async function readAsks(
   h: IndexHandle,
   asks: Ask[],
   keep: (r: Row) => boolean,
-  { columns, maxGroups = 60, spanCap = 4000, stop, rememberWide, versions = false, pre: pre0, lens }: { columns?: string[]; maxGroups?: number; spanCap?: number; stop?: () => boolean; rememberWide?: boolean; versions?: boolean; pre?: Pre; lens?: Lens } = {},
+  { columns, maxGroups = 60, spanCap = 4000, stop, rememberWide, versions = false, pre: pre0, lens, points = false }: { columns?: string[]; maxGroups?: number; spanCap?: number; stop?: () => boolean; rememberWide?: boolean; versions?: boolean; pre?: Pre; lens?: Lens; points?: boolean } = {},
 ): Promise<{ rows: Row[]; groups: number }> {
   const pre = pre0 ?? pointsPre(asks)
   // `rememberWide`: a lookup this isolate already found too wide (same generation, asks and budget) throws
@@ -3981,6 +4084,22 @@ export async function readAsks(
   const over = () => found.size > maxGroups
   let cut = false
   let t0 = now()
+  const pointAsks = points && h.mode !== 'd1' && !lens && asks.every(a => 'path' in a) ? asks as PointAsk[] : null
+  if (pointAsks?.length) {
+    h.trace?.('askspan', 1)
+    try {
+      const pts = new PointSet(pointAsks)
+      const holds = pointsMayHold(pointAsks)
+      // `spanCap`, not a rectangle's `4n + 16`: a point is a candidate in each segment live at the scan (the open
+      // versions, a dyadic block a level), ~8–16 groups a point before `groupMayHold`; `maxGroups` bounds the read.
+      const cand = await overTiers(h, t => selectPoints1(t, pts, spanCap))
+      for (const s of cand) if (holds(s)) found.set(spanKey(s), s)
+      parts = []
+    } catch (e) {
+      if (!(e instanceof TooWide)) throw e
+      found.clear()
+    }
+  }
   while (parts.length && !over()) {
     const next: typeof parts = []
     await mapLimit(parts, SPAN_QUERIES, async ({ depth, asks: part }) => {
