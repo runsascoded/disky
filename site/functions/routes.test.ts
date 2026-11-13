@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { excludedFromFunctions, FUNCTIONS_EXCLUDED } from './_lib/routes'
 import { BUILD, buildId } from './_lib/build'
+import { API_SHAPE } from '../src/apiShape'
 import { cacheKeyFor, cacheMatch, cacheStore } from './_lib/edgeCache'
 
 // The stamp itself (wasm-backed) is out of scope: any call to it fails the test.
@@ -57,7 +58,7 @@ describe('an `/assets/` miss is a no-store 404, never the SPA shell', () => {
       const res = await run('https://gcs.example.test/assets/index-NOPE.js', html(), method)
       expect([res.status, [...res.headers], await res.text()]).toEqual([
         404,
-        [['cache-control', 'no-store'], ['content-type', 'text/plain; charset=utf-8'], ['x-disky-build', buildId()]],
+        [['cache-control', 'no-store'], ['content-type', 'text/plain; charset=utf-8'], ['x-disky-api', String(API_SHAPE)], ['x-disky-build', buildId()]],
         'asset not found\n',
       ])
     }

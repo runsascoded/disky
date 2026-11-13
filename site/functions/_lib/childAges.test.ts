@@ -24,15 +24,15 @@ beforeAll(async () => {
   env = { DB: db, ROOT_LABEL: 'root', GCS_HMAC_KEY_ID: 'k', GCS_HMAC_SECRET: 's' } as Env
 })
 
-/** The per-scan view of `path`, one level deep: its top node and children carry the `age_b*` columns (`ag`). */
+/** The per-scan view of `path`, one level deep: its top node and children carry the `age_b*` columns (`age_bytes`). */
 const perScanView = async (path: string): Promise<ViewNode> =>
   (await buildView(env, { date: DATE, path, w: 4000, h: 4000, minArea: 1, atten: 1, threshold: 1, maxDepth: 1 })).tree
 
-/** A node and its children's bars, `[name, ag]`. */
-const bars = (t: ViewNode) => [[t.n, t.ag], ...(t.c ?? []).map(k => [k.n, k.ag])]
+/** A node and its children's bars, `[name, age_bytes]`. */
+const bars = (t: ViewNode) => [[t.name, t.age_bytes], ...(t.children ?? []).map(k => [k.name, k.age_bytes])]
 
-/** `t` as the interval store answers it: no `ag` anywhere. */
-const unaged = (t: ViewNode): ViewNode => ({ ...t, ag: undefined, c: t.c?.map(k => ({ ...k, ag: undefined })) })
+/** `t` as the interval store answers it: no `age_bytes` anywhere. */
+const unaged = (t: ViewNode): ViewNode => ({ ...t, age_bytes: undefined, children: t.children?.map(k => ({ ...k, age_bytes: undefined })) })
 
 describe('bucketOf', () => {
   it('buckets by `AGE_EDGES_DAYS`, a future day the newest, as `age_bucket_sql`', () => {
@@ -63,13 +63,13 @@ describe('withChildAges', () => {
 
   it('splits each edge on the right side (created hours within the UTC day, one future stamp)', async () => {
     const got = await withChildAges(env, DATE, 'bk', unaged(await perScanView('bk')))
-    expect(got.c!.find(k => k.n === 'mixed')!.ag).toEqual([
+    expect(got.children!.find(k => k.name === 'mixed')!.age_bytes).toEqual([
       1000 + 777, 1001 + 1006, 1007 + 1029, 1030 + 1090, 1091 + 1364, 1365 + 2094, 2095 + 5000,
     ])
   })
 
   it('folds `(other)` as the node less its kept children, and leaves a child without strata bare', async () => {
-    const node = (n: string, b: number, c?: ViewNode[]): ViewNode => ({ n, k: 'dir', b, o: 1, ...(c ? { c } : {}) })
+    const node = (name: string, bytes: number, children?: ViewNode[]): ViewNode => ({ name, kind: 'dir', bytes, objects: 1, ...(children ? { children } : {}) })
     // `(other)` holds `deep` and `new`: their per-scan columns summed.
     const got = await withChildAges(env, DATE, 'bk', node('bk', 64116, [node('mixed', 20949), node('old', 30999), node('(other)', 12168)]))
     expect(bars(got)).toEqual([
@@ -83,7 +83,7 @@ describe('withChildAges', () => {
   })
 
   it('is the tree unchanged for a scan without a pyramid', async () => {
-    const t: ViewNode = { n: 'bk', k: 'dir', b: 1, o: 1, c: [{ n: 'mixed', k: 'dir', b: 1, o: 1 }] }
+    const t: ViewNode = { name: 'bk', kind: 'dir', bytes: 1, objects: 1, children: [{ name: 'mixed', kind: 'dir', bytes: 1, objects: 1 }] }
     expect(await withChildAges(env, '2026-10-17T2207', 'bk', t)).toBe(t)
     expect(await datedAges(env, '2026-10-17T2207', 'bk')).toBe(null)
   })

@@ -14,12 +14,12 @@ const day = (d: number, h = 0) => Date.UTC(2026, 9, d, h)
 
 const data: DiffData = {
   prev: '2026-09-30T1200', curr: '2026-10-14T1200',
-  total_a: 800 * T, total_b: 830 * T, objects_a: 10, objects_b: 12, expansions: 0,
+  bytes_before: 800 * T, bytes_after: 830 * T, objects_before: 10, objects_after: 12, expansions: 0,
   truncated: false, threshold: 1, lookups: 0, lookups_capped: false,
   rows: [
-    { p: 'checkpoints', d: 1, k: 'dir', s: 'changed', a: 500 * T, b: 560 * T, oa: 5, ob: 7 },
-    { p: 'checkpoints/run-a', d: 2, k: 'dir', s: 'added', a: 0, b: 60 * T, oa: 0, ob: 2 },
-    { p: 'scratch', d: 1, k: 'dir', s: 'changed', a: 300 * T, b: 270 * T, oa: 5, ob: 5 },
+    { path: 'checkpoints', depth: 1, kind: 'dir', status: 'changed', bytes_before: 500 * T, bytes_after: 560 * T, objects_before: 5, objects_after: 7 },
+    { path: 'checkpoints/run-a', depth: 2, kind: 'dir', status: 'added', bytes_before: 0, bytes_after: 60 * T, objects_before: 0, objects_after: 2 },
+    { path: 'scratch', depth: 1, kind: 'dir', status: 'changed', bytes_before: 300 * T, bytes_after: 270 * T, objects_before: 5, objects_after: 5 },
   ],
 }
 

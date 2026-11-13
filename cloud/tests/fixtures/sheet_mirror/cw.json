@@ -12,7 +12,7 @@
   },
   "/api/subtree?date=2026-09-27&path=marin-us-east-02a/tmp&w=128&h=128&depth=1": {
     "date": "2026-09-27", "path": "marin-us-east-02a/tmp", "w": 128, "h": 128, "tier": "fine", "index": "d1", "nodes": 1, "truncated": false,
-    "tree": {"n": "tmp", "b": 2000000, "o": 40}
+    "tree": {"name": "tmp", "bytes": 2000000, "objects": 40}
   },
   "/api/plan-sweep/jobs": {
     "configured": true,

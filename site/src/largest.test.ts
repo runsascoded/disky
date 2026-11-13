@@ -7,11 +7,11 @@ describe('flatRows', () => {
       { path: 'Users/ryan/Downloads/a/big.iso', size: 4096, mtime: 86400 * 20000 + 5 },
       { path: 'Users/ryan/big.iso', size: 1024, mtime: null },
     ], 'file')).toEqual([
-      { n: 'Downloads/a/big.iso', k: 'file', b: 4096, o: 1, d: 20000 },
-      { n: 'big.iso', k: 'file', b: 1024, o: 1 },
+      { name: 'Downloads/a/big.iso', kind: 'file', bytes: 4096, objects: 1, mtime: 86400 * 20000 + 5 },
+      { name: 'big.iso', kind: 'file', bytes: 1024, objects: 1 },
     ])
     expect(flatRows('', [{ path: 'Users/ryan', size: 5120, mtime: 86400 * 20001, n_files: 2 }], 'dir')).toEqual([
-      { n: 'Users/ryan', k: 'dir', b: 5120, o: 2, d: 20001 },
+      { name: 'Users/ryan', kind: 'dir', bytes: 5120, objects: 2, mtime: 20001 * 86400 },
     ])
   })
 })

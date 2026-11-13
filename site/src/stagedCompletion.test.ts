@@ -7,11 +7,11 @@ const deleted: PrefixExecution = { kind: 'recorded', runId: 'run', objects: 5, b
 it('distinguishes recorded deletions, empty scans, and files still present at the selected scan', () => {
   expect([
     stagedState(undefined, true, deleted),
-    stagedState({ b: 0, o: 0 }, true, deleted),
+    stagedState({ bytes: 0, objects: 0 }, true, deleted),
     stagedState(undefined, true, null),
-    stagedState({ b: 50, o: 5 }, true, deleted),
-    stagedState({ b: 50, o: 5 }, true, null),
-    stagedState({ b: 0, o: 5 }, true, null),
+    stagedState({ bytes: 50, objects: 5 }, true, deleted),
+    stagedState({ bytes: 50, objects: 5 }, true, null),
+    stagedState({ bytes: 0, objects: 5 }, true, null),
     stagedState(undefined, false, null),
     stagedState(undefined, false, deleted),
   ]).toEqual(['deleted', 'deleted', 'empty', 'recorded', 'pending', 'pending', 'unknown', 'recorded'])
@@ -44,12 +44,12 @@ it('folds settled batches by default without losing explicit expansion, permalin
 
 it('skips absent and zero-byte treemaps but preserves populated maps', () => {
   expect(stagedMapTree(['gs://b/a/'], {}, 'staged')).toBeNull()
-  expect(stagedMapTree(['gs://b/a/'], { 'gs://b/a/': { b: 0, o: 5 } }, 'staged')).toBeNull()
-  expect(stagedMapTree(['gs://b/a/'], { 'gs://b/a/': { b: 50, o: 5 } }, 'staged')).toEqual({ n: 'staged', k: 'dir', b: 50, o: 5, c: [{ n: 'b', k: 'dir', b: 50, o: 5, c: [{ n: 'a', k: 'dir', b: 50, o: 5 }] }] })
+  expect(stagedMapTree(['gs://b/a/'], { 'gs://b/a/': { bytes: 0, objects: 5 } }, 'staged')).toBeNull()
+  expect(stagedMapTree(['gs://b/a/'], { 'gs://b/a/': { bytes: 50, objects: 5 } }, 'staged')).toEqual({ name: 'staged', kind: 'dir', bytes: 50, objects: 5, children: [{ name: 'b', kind: 'dir', bytes: 50, objects: 5, children: [{ name: 'a', kind: 'dir', bytes: 50, objects: 5 }] }] })
 })
 
 it('keeps the plan items the newest scan still holds, and every item until sizes are known', () => {
   const items = [{ prefix: 'gs://b/gone/' }, { prefix: 'gs://b/zero/' }, { prefix: 'gs://b/here/' }]
-  expect(liveStagedItems(items, { 'gs://b/zero/': { b: 0, o: 0 }, 'gs://b/here/': { b: 50, o: 5 } })).toEqual([{ prefix: 'gs://b/here/' }])
+  expect(liveStagedItems(items, { 'gs://b/zero/': { bytes: 0, objects: 0 }, 'gs://b/here/': { bytes: 50, objects: 5 } })).toEqual([{ prefix: 'gs://b/here/' }])
   expect(liveStagedItems(items, undefined)).toEqual(items)
 })

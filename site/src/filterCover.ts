@@ -18,7 +18,7 @@ export interface FilterCover {
   q: string
   /** Sorted by path. */
   items: CoverItem[]
-  roots: { n: number; b: number; o: number }
+  roots: { count: number; bytes: number; objects: number }
   /** False: the matches here can't all be listed; `reason` says why in plain words, and nothing acts. */
   complete: boolean
   reason?: string
@@ -115,7 +115,7 @@ export function groupItems(items: readonly CoverItem[]): CoverGroup[] {
   const by = new Map<string, CoverItem[]>()
   for (const i of items) by.set(parentOf(i.path), [...(by.get(parentOf(i.path)) ?? []), i])
   return [...by.entries()]
-    .map(([parent, is]) => ({ parent, items: is, b: is.reduce((n, i) => n + i.b, 0), o: is.reduce((n, i) => n + i.o, 0) }))
+    .map(([parent, is]) => ({ parent, items: is, b: is.reduce((n, i) => n + i.bytes, 0), o: is.reduce((n, i) => n + i.objects, 0) }))
     .sort((x, y) => y.b - x.b || (x.parent < y.parent ? -1 : x.parent > y.parent ? 1 : 0))
 }
 
@@ -156,12 +156,12 @@ export function rowMatchesOf(matched: readonly { path: string }[] | undefined, l
  *  only ever comes from `m`: the drawn tree (`chainOf`) is capped by pixels, so a lone drawn child says
  *  nothing about what else matched. */
 export function rowLabel(node: ChainNode, row: string, m: RowMatches | null): { label: string; segs: string[]; count?: number; atLeast?: true } {
-  const own = { label: node.n, segs: [node.n] }
+  const own = { label: node.name, segs: [node.name] }
   if (!m || m.n === 0) return own
   if (m.atLeast) return m.n > 1 ? { ...own, count: m.n, atLeast: true } : own
   if (m.n === 1 && m.one != null) {
     if (m.one === row) return own
-    const segs = [node.n, ...m.one.slice(row.length + 1).split('/')]
+    const segs = [node.name, ...m.one.slice(row.length + 1).split('/')]
     const chain = chainOf(node).segs
     if (segs.every((s, i) => chain[i] === s)) return { label: segs.length > 3 ? `${segs[0]}/…/${segs[segs.length - 1]}` : segs.join('/'), segs }
   }
@@ -170,11 +170,11 @@ export function rowLabel(node: ChainNode, row: string, m: RowMatches | null): { 
 
 /** The drawn chain of single children below a node, as the treemap tile labels a collapsed chain (`a/b/c`, or
  *  `a/…/z` past three). Drawn only: a table row's label takes it only up to its one exact match (`rowLabel`). */
-export interface ChainNode { n: string; c?: ChainNode[] }
+export interface ChainNode { name: string; children?: ChainNode[] }
 export function chainOf(node: ChainNode): { label: string; segs: string[] } {
-  const segs = [node.n]
+  const segs = [node.name]
   let cur = node
-  while (cur.c?.length === 1 && !cur.c[0].n.startsWith('(')) { cur = cur.c[0]; segs.push(cur.n) }
+  while (cur.children?.length === 1 && !cur.children[0].name.startsWith('(')) { cur = cur.children[0]; segs.push(cur.name) }
   const label = segs.length > 3 ? `${segs[0]}/…/${segs[segs.length - 1]}` : segs.join('/')
   return { label, segs }
 }

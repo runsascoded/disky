@@ -145,6 +145,8 @@ const SHARED_ROUTES: Record<string, Case[]> = {
   'a/[[path]].ts': [get('/a/0000.png', 'public')],
   'api/actions.ts': [get('/api/actions', 'viewer'), post('/api/actions', 'assigner')],
   'api/activity/[[path]].ts': [get('/api/activity/kinds', 'admin'), put('/api/activity/kinds/assign', 'admin'), post('/api/activity/render', 'admin')],
+  'api/admin/history.ts': [get('/api/admin/history', 'admin'), post('/api/admin/history', 'admin')],
+  'api/admin/history-adopt.ts': [get('/api/admin/history-adopt', 'admin'), post('/api/admin/history-adopt', 'admin')],
   'api/admin/r2-probe.ts': [get('/api/admin/r2-probe', 'admin')],
   'api/admins.ts': [get('/api/admins', 'admin'), post('/api/admins', 'admin'), patch('/api/admins', 'admin'), del('/api/admins', 'admin')],
   'api/age-pyramid.ts': [get(`/api/age-pyramid?${AT}`, 'viewer')],
@@ -668,6 +670,9 @@ describe('every route declares its gate', () => {
       .filter(c => servedBy(c.path) !== file)
       .map(c => `${c.method} ${c.path}: declared under ${file}, served by ${servedBy(c.path)}`))
     expect(elsewhere).toEqual([])
+  })
+  it('a deployment\'s gates never redefine a shared gate (the merge would silently keep the shared row)', () => {
+    expect(Object.keys(DEPLOYMENT_GATES).filter(g => g in EXPECT)).toEqual([])
   })
   it('every gate in the vocabulary is some route\'s', () => {
     expect([...new Set(Object.values(ROUTES).flatMap(cases => cases.map(c => c.gate)))].sort()).toEqual(Object.keys(GATES).sort())

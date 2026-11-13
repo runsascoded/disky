@@ -25,7 +25,7 @@ async function fixture(page: Page, initialReady = false) {
       plan: { id: 1, name: 'Staged', state: 'open', created_by: 'dev@example.test', created_ts: NOW - 100 },
       items: [{ prefix: PREFIX, kind: 'prefix', note: null, added_by: 'dev@example.test', added_ts: NOW - 100, batch_id: null, as_of: '2026-11-10T1200' }], batches: [], runs,
     } })
-    if (path === '/api/prefixes') return route.fulfill({ json: { stats: { [PREFIX]: { b: 100000000, o: 20 } } } })
+    if (path === '/api/prefixes') return route.fulfill({ json: { stats: { [PREFIX]: { bytes: 100000000, objects: 20 } } } })
     if (path === '/api/plans/prefix-history') return route.fulfill({ json: { bands: [] } })
     if (path === '/api/plan-sweep/dispatch') {
       dispatches.push(route.request().postDataJSON())

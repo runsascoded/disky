@@ -62,7 +62,7 @@ const RUNS: Record<string, unknown[]> = {
 }
 
 const series = (start: number, growth: number) =>
-  ({ points: [9, 8, 7, 6, 5, 4, 3, 2, 1, 0].map(k => ({ date: scanId(day0 - k * DAY), b: Math.round(start * growth ** (9 - k)), o: 1000 + k })) })
+  ({ points: [9, 8, 7, 6, 5, 4, 3, 2, 1, 0].map(k => ({ date: scanId(day0 - k * DAY), bytes: Math.round(start * growth ** (9 - k)), objects: 1000 + k })) })
 
 const META: Record<string, unknown> = {
   hf: series(450e6, 1.078),

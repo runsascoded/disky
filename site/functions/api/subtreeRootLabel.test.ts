@@ -31,7 +31,7 @@ describe('D1', () => {
 
   const rootName = async (label: string, path: string) => {
     const r = await subtree({ request: new Request(`http://localhost/api/subtree?date=${A}&path=${path}`), env: { ...base, ROOT_LABEL: label } })
-    return ((await r.json()) as { tree: { n: string } }).tree.n
+    return ((await r.json()) as { tree: { name: string } }).tree.name
   }
 
   describe('the root label is part of the cached answer', () => {

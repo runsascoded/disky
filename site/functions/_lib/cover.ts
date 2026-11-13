@@ -28,8 +28,9 @@ export interface CoverItem {
   path: string
   /** `file`: an object key; `dir`: a folder prefix; null: unknown (a one-object root the lookup couldn't place). */
   kind: Kind | null
-  b: number
-  o: number
+  /** Matched bytes and objects under it (specs/descriptive-field-names.md §3d). */
+  bytes: number
+  objects: number
   /** Match roots it covers (1 for a root itself). */
   roots: number
 }
@@ -44,7 +45,7 @@ export interface Cover {
 
 /** `/api/filter-cover`'s version: in its cache key, and the client's `cv=` (a browser's private copy
  *  must not outlive a change either). Bumped when an answer would change. */
-export const COVER_V = 7
+export const COVER_V = 8
 
 /** Why a cover over the item cap (`/api/filter-cover` `COVER_ITEMS_MAX`) isn't offered (shown muted, on the disabled actions). */
 export const overCapReason = (n: number, atLeast = false): string =>
@@ -130,11 +131,11 @@ export async function coverSet(
     const f = outermostFull(r.path)
     if (f) {
       const it = items.get(f)
-      if (it) { it.b += r.b; it.o += r.o; it.roots++ } else items.set(f, { path: f, kind: 'dir', b: r.b, o: r.o, roots: 1 })
+      if (it) { it.bytes += r.b; it.objects += r.o; it.roots++ } else items.set(f, { path: f, kind: 'dir', bytes: r.b, objects: r.o, roots: 1 })
       continue
     }
     const kind: Kind | null = r.o > 1 ? 'dir' : kinds.get(r.path)?.kind ?? null
-    items.set(r.path, { path: r.path, kind, b: r.b, o: r.o, roots: 1 })
+    items.set(r.path, { path: r.path, kind, bytes: r.b, objects: r.o, roots: 1 })
   }
   return { items: [...items.values()].sort((x, y) => (x.path < y.path ? -1 : x.path > y.path ? 1 : 0)), looked, unchecked }
 }

@@ -31,7 +31,7 @@ import { type Hit, scanAt } from '../_lib/staticNames.js'
 import { type OverTime, overTimePoint, readOverTime } from '../_lib/overTime.js'
 import { parsePaths } from '../_lib/filter.js'
 import { SERIES_CHUNK, SERIES_MAX_PATHS } from '../_lib/seriesLimits.js'
-import { metaRoots, rootPoints, type RootRow, type RootTrace } from '../_lib/series.js'
+import { metaRoots, rootPoints, type RootRow, type SeriesPoint, type SeriesTrace, wirePoint, wireTraces } from '../_lib/series.js'
 import { cutoffOf, latestCutoff, memberOf, memberRequest, membersAt, namesCutoff, openUnion, unionFor } from '../_lib/union.js'
 import type { UnionView } from '../_lib/stores.js'
 import { scanTimes } from '../_lib/scanTimes.js'
@@ -118,14 +118,14 @@ async function unionSeries(ctx0: SeriesCtx, view: UnionView): Promise<Response> 
   const reads = await Promise.all(view.members.map(s => seriesOf({ ...ctx0, request: memberRequest(ctx0.request, s) })))
   const bad = reads.find(r => !r.ok)
   if (bad) return bad
-  const bodies = await Promise.all(reads.map(r => r.json() as Promise<{ points: { date: string; b: number; o: number }[]; roots?: RootTrace[]; failed?: string[] }>))
+  const bodies = await Promise.all(reads.map(r => r.json() as Promise<{ points: SeriesPoint[]; roots?: SeriesTrace[]; failed?: string[] }>))
   const traces = await Promise.all(bodies.map(async (body, i) => {
     const env = un.ctxs[i].env
     const times = await scanTimes(env, body.points.map(p => p.date))
     const rows = new Map<string, RootRow[]>()
     for (const t of body.roots ?? []) for (const p of t.points) {
       const r = rows.get(p.date) ?? []
-      r.push({ path: t.path, b: p.b, o: p.o })
+      r.push({ path: t.path, b: p.bytes, o: p.objects })
       rows.set(p.date, r)
     }
     return { source: view.members[i], points: body.points.map(p => ({ at: new Date(scanInstant(p.date, times)).toISOString(), value: { ...p, rows: rows.get(p.date) ?? [] } })) }
@@ -138,12 +138,12 @@ async function unionSeries(ctx0: SeriesCtx, view: UnionView): Promise<Response> 
     const date = values.find((v, i) => v && traces[i].points.some(p => p.at === at && p.value === v))!.date
     const missing = view.members.filter((_, i) => !values[i])
     if (split) byDate.set(date, values.flatMap(v => v?.rows ?? []))
-    return { date, b: values.reduce((n, v) => n + (v?.b ?? 0), 0), o: values.reduce((n, v) => n + (v?.o ?? 0), 0), ...(missing.length ? { missing } : {}) }
+    return wirePoint({ date, b: values.reduce((n, v) => n + (v?.bytes ?? 0), 0), o: values.reduce((n, v) => n + (v?.objects ?? 0), 0), ...(missing.length ? { missing } : {}) })
   })
   const failed = bodies.flatMap(b => b.failed ?? []).sort()
   const body = JSON.stringify({
     path, points,
-    ...(split ? { roots: rootPoints(byDate) } : {}),
+    ...(split ? { roots: wireTraces(rootPoints(byDate)) } : {}),
     ...(failed.length ? { failed } : {}),
     union: { view: view.key, sources: view.members.map((store, i) => ({ store, from: bodies[i].points[0]?.date ?? null })) },
   })
@@ -411,7 +411,7 @@ export async function seriesRead(ctx: SeriesCtx, gate: (ctx: SeriesCtx) => Promi
     for (const g of got) if (g) points.push(g)
   }
   points.sort((a, b) => a.date.localeCompare(b.date))
-  const body = JSON.stringify({ path, ...(chunked && chunkRaw == null ? { chunks: nChunks } : {}), ...(qp.query ? hexNote(hx.hexRuns, qp.query.ast) : {}), ...(unindexed.length ? { unindexed: unindexed.sort() } : {}), ...(paths.length ? { paths } : {}), ...(lens ? { lens: lensTag } : {}), ...(owner ? { owner } : {}), points, ...(split ? { roots: rootPoints(rootsByDate) } : {}), ...(failed.length ? { failed: failed.sort() } : {}) })
+  const body = JSON.stringify({ path, ...(chunked && chunkRaw == null ? { chunks: nChunks } : {}), ...(qp.query ? hexNote(hx.hexRuns, qp.query.ast) : {}), ...(unindexed.length ? { unindexed: unindexed.sort() } : {}), ...(paths.length ? { paths } : {}), ...(lens ? { lens: lensTag } : {}), ...(owner ? { owner } : {}), points: points.map(wirePoint), ...(split ? { roots: wireTraces(rootPoints(rootsByDate)) } : {}), ...(failed.length ? { failed: failed.sort() } : {}) })
   // A series missing points to errors is served (gaps beat no chart) but never cached: the next request retries them.
   if (failed.length) return new Response(body, { headers: { 'content-type': 'application/json', 'cache-control': 'no-store', 'server-timing': st.header() } })
   return cacheStore(env, cacheKey, body, { 'server-timing': st.header() }, ctx.waitUntil?.bind(ctx))

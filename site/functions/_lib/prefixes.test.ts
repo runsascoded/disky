@@ -18,19 +18,19 @@ describe('foldPrefixes: index rows → one stat per staged prefix', () => {
       row('b/x/deeper', 'ann', 50, 1),
     ]
     expect(foldPrefixes(['gs://b/x/', 'gs://b/y', 'gs://b/gone/'], rows)).toEqual({
-      'gs://b/x/': { b: 1000, o: 6, d: 200, a: 9, us: [['ann', 300], ['bob', 100]], cb: { 3: 300, 4: 50 } },
-      'gs://b/y': { b: 5, o: 1 },
+      'gs://b/x/': { bytes: 1000, objects: 6, mtime: 200 * day + 5, last_read: 9, owners: [['ann', 300], ['bob', 100]], class_bytes: { 3: 300, 4: 50 } },
+      'gs://b/y': { bytes: 5, objects: 1 },
     })
   })
 
   it('the same path asked twice (with and without the slash) answers both', () => {
     expect(foldPrefixes(['gs://b/x/', 'gs://b/x'], [row('b/x', null, 1, 1)])).toEqual({
-      'gs://b/x/': { b: 1, o: 1 },
-      'gs://b/x': { b: 1, o: 1 },
+      'gs://b/x/': { bytes: 1, objects: 1 },
+      'gs://b/x': { bytes: 1, objects: 1 },
     })
   })
 
   it('an mtime of 0 (a listing\'s unknown) gives no date, as none does', () => {
-    expect(foldPrefixes(['gs://b/x'], [row('b/x', null, 7, 1, { mt: 0 })])).toEqual({ 'gs://b/x': { b: 7, o: 1 } })
+    expect(foldPrefixes(['gs://b/x'], [row('b/x', null, 7, 1, { mt: 0 })])).toEqual({ 'gs://b/x': { bytes: 7, objects: 1 } })
   })
 })

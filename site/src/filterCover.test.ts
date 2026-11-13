@@ -42,14 +42,14 @@ describe('large sets go in batches, never refused', () => {
 
 describe('a filtered row: its label and its matches', () => {
   it('a row holding one chain of single children shows the path down it, as its tile does', () => {
-    expect(chainOf({ n: 'marin-eu-west4', c: [{ n: 'tomat', c: [{ n: 'a' }, { n: 'b' }] }] })).toEqual({ label: 'marin-eu-west4/tomat', segs: ['marin-eu-west4', 'tomat'] })
-    expect(chainOf({ n: 'a', c: [{ n: 'b', c: [{ n: 'c', c: [{ n: 'd' }] }] }] })).toEqual({ label: 'a/…/d', segs: ['a', 'b', 'c', 'd'] })
-    expect(chainOf({ n: 'a', c: [{ n: '(other)' }] })).toEqual({ label: 'a', segs: ['a'] })
-    expect(chainOf({ n: 'a', c: [{ n: 'x' }, { n: 'y' }] })).toEqual({ label: 'a', segs: ['a'] })
+    expect(chainOf({ name: 'marin-eu-west4', children: [{ name: 'tomat', children: [{ name: 'a' }, { name: 'b' }] }] })).toEqual({ label: 'marin-eu-west4/tomat', segs: ['marin-eu-west4', 'tomat'] })
+    expect(chainOf({ name: 'a', children: [{ name: 'b', children: [{ name: 'c', children: [{ name: 'd' }] }] }] })).toEqual({ label: 'a/…/d', segs: ['a', 'b', 'c', 'd'] })
+    expect(chainOf({ name: 'a', children: [{ name: '(other)' }] })).toEqual({ label: 'a', segs: ['a'] })
+    expect(chainOf({ name: 'a', children: [{ name: 'x' }, { name: 'y' }] })).toEqual({ label: 'a', segs: ['a'] })
   })
   // gcs prod, `?f=tomat`: `marin-us-east5` drew one child (`tomat`), but held 9 match roots — `tomat/` and 8
   // `flan_*_rotten_tomatoes_*.parquet` files too small to draw. Its label named only `tomat`.
-  const east5 = { n: 'marin-us-east5', c: [{ n: 'tomat', c: [{ n: 'a' }, { n: 'b' }] }] }
+  const east5 = { name: 'marin-us-east5', children: [{ name: 'tomat', children: [{ name: 'a' }, { name: 'b' }] }] }
   const flan = Array.from({ length: 8 }, (_, i) => ({ path: `marin-us-east5/data/hrm_text_split/flan_direct/flan_${i}_rotten_tomatoes_part_00000.parquet` }))
   it('a row names the path to its match only when it holds exactly one (cut at the match); several: its name and how many; unknown: its name', () => {
     expect([
@@ -61,12 +61,12 @@ describe('a filtered row: its label and its matches', () => {
       rowLabel(east5, 'marin-us-east5', { n: 9, atLeast: true }),
       rowLabel(east5, 'marin-us-east5', { n: 1, atLeast: true }),
       // The drawn chain runs past the match (`tomat` drew one child): the label stops at the match.
-      rowLabel({ n: 'b', c: [{ n: 'tomat', c: [{ n: 'only' }] }] }, 'b', { n: 1, one: 'b/tomat' }),
+      rowLabel({ name: 'b', children: [{ name: 'tomat', children: [{ name: 'only' }] }] }, 'b', { n: 1, one: 'b/tomat' }),
       // The row is the match itself.
       rowLabel(east5, 'marin-us-east5', { n: 1, one: 'marin-us-east5' }),
       // One match the drawn chain doesn't reach (drawn elsewhere, or not at all): the name and the count.
       rowLabel(east5, 'marin-us-east5', { n: 1, one: flan[0].path }),
-      rowLabel({ n: 'a', c: [{ n: 'b', c: [{ n: 'c', c: [{ n: 'd' }] }] }] }, 'x/a', { n: 1, one: 'x/a/b/c/d' }),
+      rowLabel({ name: 'a', children: [{ name: 'b', children: [{ name: 'c', children: [{ name: 'd' }] }] }] }, 'x/a', { n: 1, one: 'x/a/b/c/d' }),
     ]).toEqual([
       { label: 'marin-us-east5/tomat', segs: ['marin-us-east5', 'tomat'] },
       { label: 'marin-us-east5', segs: ['marin-us-east5'], count: 9 },
@@ -95,7 +95,7 @@ describe('a filtered row: its label and its matches', () => {
     ])
   })
   it('a response\'s list is exact only uncapped and complete: capped, or unknown when partial, approximate, a rollup or a dir-only scan', () => {
-    const m = [{ path: 'a/tomat', b: 1, o: 1 }]
+    const m = [{ path: 'a/tomat', bytes: 1, objects: 1 }]
     expect([
       matchedListOf({ matched: m }),
       matchedListOf({ matched: m, matchesCapped: true }),
@@ -115,23 +115,23 @@ describe('a filtered row: its label and its matches', () => {
     const e5 = ['marin-us-east5/tomat', ...['t0_fsopt', 'flan_fsopt', 'flan_fsnoopt', 't0_fsnoopt', 't0_zsopt', 't0_zsnoopt', 'flan_zsopt', 'flan_zsnoopt'].map(f => `${P}${f}_part_00000.parquet`)]
     const root = {
       matched: [
-        { path: 'marin-eu-west4/tomat', b: 4543930137403, o: 420738 }, { path: e5[0], b: 2120947096049, o: 121162 },
-        { path: 'marin-us-central1/tomat', b: 486396327578, o: 19893 }, { path: 'marin-us-east1/tomat', b: 212692920492, o: 18791 },
+        { path: 'marin-eu-west4/tomat', bytes: 4543930137403, objects: 420738 }, { path: e5[0], bytes: 2120947096049, objects: 121162 },
+        { path: 'marin-us-central1/tomat', bytes: 486396327578, objects: 19893 }, { path: 'marin-us-east1/tomat', bytes: 212692920492, objects: 18791 },
         ...Array.from({ length: 193 }, (_, i) => ({ path: `marin-us-central1/podcast_audio/show/ep${i}_rotten_tomatoes.mp3`, b: 1000 - i, o: 1 })),
         ...e5.slice(1).map((path, i) => ({ path, b: 100 - i, o: 1 })),
       ],
-      matchCount: { n: 21735, b: 7396315609520, o: 603889 }, matchesCapped: true,
+      matchCount: { count: 21735, bytes: 7396315609520, objects: 603889 }, matchesCapped: true,
     }
-    const drilled = { matched: e5.map((path, i) => ({ path, b: 9 - i, o: 1 })), matchCount: { n: 9, b: 2121011255780, o: 121170 } }
+    const drilled = { matched: e5.map((path, i) => ({ path, bytes: 9 - i, objects: 1 })), matchCount: { count: 9, bytes: 2121011255780, objects: 121170 } }
     const atRoot = rowMatchesOf(root.matched, matchedListOf(root))
     const inE5 = rowMatchesOf(drilled.matched, matchedListOf(drilled))
-    const e5Node = { n: 'marin-us-east5', c: [{ n: 'tomat', c: [{ n: 'results' }, { n: 'cache' }, { n: 'x' }] }] }
+    const e5Node = { name: 'marin-us-east5', children: [{ name: 'tomat', children: [{ name: 'results' }, { name: 'cache' }, { name: 'x' }] }] }
     expect([
       root.matched.length,
       rowLabel(e5Node, 'marin-us-east5', atRoot('marin-us-east5')),
-      rowLabel({ n: 'marin-eu-west4', c: [{ n: 'tomat' }] }, 'marin-eu-west4', atRoot('marin-eu-west4')),
-      rowLabel({ n: 'tomat', c: [{ n: 'results' }, { n: 'cache' }] }, 'marin-us-east5/tomat', inE5('marin-us-east5/tomat')),
-      rowLabel({ n: 'data', c: [{ n: 'hrm_text_split', c: [{ n: 'flan_direct' }] }] }, 'marin-us-east5/data', inE5('marin-us-east5/data')),
+      rowLabel({ name: 'marin-eu-west4', children: [{ name: 'tomat' }] }, 'marin-eu-west4', atRoot('marin-eu-west4')),
+      rowLabel({ name: 'tomat', children: [{ name: 'results' }, { name: 'cache' }] }, 'marin-us-east5/tomat', inE5('marin-us-east5/tomat')),
+      rowLabel({ name: 'data', children: [{ name: 'hrm_text_split', children: [{ name: 'flan_direct' }] }] }, 'marin-us-east5/data', inE5('marin-us-east5/data')),
     ]).toEqual([
       205,
       { label: 'marin-us-east5', segs: ['marin-us-east5'], count: 9, atLeast: true },
@@ -141,13 +141,13 @@ describe('a filtered row: its label and its matches', () => {
     ])
   })
   it('a row\'s matches are the items at or under it, never a sibling sharing its name as a prefix', () => {
-    const items = [{ path: 'b/x/tomat', kind: 'dir' as const, b: 1, o: 1, roots: 1 }, { path: 'b/xy/tomat', kind: 'dir' as const, b: 2, o: 1, roots: 1 }, { path: 'b/x', kind: 'dir' as const, b: 3, o: 1, roots: 1 }]
+    const items = [{ path: 'b/x/tomat', kind: 'dir' as const, bytes: 1, objects: 1, roots: 1 }, { path: 'b/xy/tomat', kind: 'dir' as const, bytes: 2, objects: 1, roots: 1 }, { path: 'b/x', kind: 'dir' as const, bytes: 3, objects: 1, roots: 1 }]
     expect(rowItems(items, 'b/x').map(i => i.path)).toEqual(['b/x/tomat', 'b/x'])
   })
 })
 
 describe('the cover is fetched on demand, and retried once on a 5xx', () => {
-  const COVER = { date: 'D', path: 'p', q: 'nemotron', items: [], roots: { n: 0, b: 0, o: 0 }, complete: true, looked: 0, unchecked: 0 }
+  const COVER = { date: 'D', path: 'p', q: 'nemotron', items: [], roots: { count: 0, bytes: 0, objects: 0 }, complete: true, looked: 0, unchecked: 0 }
   /** A fetcher answering `statuses` in turn (then 200 with `COVER`), recording each URL. */
   const fetcher = (statuses: number[]) => {
     const urls: string[] = []
@@ -208,8 +208,8 @@ describe('the cover is fetched on demand, and retried once on a 5xx', () => {
 describe('prefetch on intent: deduped, then the click reuses it', () => {
   const view = { date: 'D', path: '', q: 'tomat', qs: 'simple' }
   const cover = (path: string, items: FilterCover['items'], complete = true): FilterCover =>
-    ({ date: 'D', path, q: 'tomat', items, roots: { n: items.length, b: 0, o: 0 }, complete, looked: 0, unchecked: 0, ...(complete ? {} : { reason: 'Too many matches to act on at once (70,390); narrow the search or open a folder below. Agents can bulk-assign via the API.' }) })
-  const item = (path: string) => ({ path, kind: 'dir' as const, b: 1, o: 1, roots: 1 })
+    ({ date: 'D', path, q: 'tomat', items, roots: { count: items.length, bytes: 0, objects: 0 }, complete, looked: 0, unchecked: 0, ...(complete ? {} : { reason: 'Too many matches to act on at once (70,390); narrow the search or open a folder below. Agents can bulk-assign via the API.' }) })
+  const item = (path: string) => ({ path, kind: 'dir' as const, bytes: 1, objects: 1, roots: 1 })
   /** A slow fetcher (the hover's request is still in flight when the next intent lands), answering per path. */
   const fetcher = (byPath: Record<string, FilterCover>) => {
     const urls: string[] = []

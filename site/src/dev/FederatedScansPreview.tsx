@@ -39,9 +39,9 @@ export default function FederatedScansPreview() {
   catch { return <main className="federated-preview"><h1>Independent scans, one view</h1><p role="alert">Invalid cutoff URL. Use valid UTC instants for at, before and after.</p><a href="/dev/federated-scans">Reset development fixture</a></main> }
   const view = resolveFederation(catalogs, values.at)
   const { tree, missing } = composeFederatedTrees(view, view.sources.flatMap(s => s.scan ? [{ source: s.source, digest: s.scan.digest,
-    tree: { n: s.source, k: 'dir' as const, b: s.scan.total_bytes, o: s.scan.total_objects, c: [
-      { n: 'archive', k: 'dir' as const, b: Math.floor(s.scan.total_bytes * .7), o: s.scan.total_objects - 2 },
-      { n: 'recent', k: 'dir' as const, b: s.scan.total_bytes - Math.floor(s.scan.total_bytes * .7), o: 2 },
+    tree: { name: s.source, kind: 'dir' as const, bytes: s.scan.total_bytes, objects: s.scan.total_objects, children: [
+      { name: 'archive', kind: 'dir' as const, bytes: Math.floor(s.scan.total_bytes * .7), objects: s.scan.total_objects - 2 },
+      { name: 'recent', kind: 'dir' as const, bytes: s.scan.total_bytes - Math.floor(s.scan.total_bytes * .7), objects: 2 },
     ] },
   }] : []))
   const deltas = federatedDeltas(resolveFederation(catalogs, values.before), resolveFederation(catalogs, values.after))
@@ -54,12 +54,12 @@ export default function FederatedScansPreview() {
     <p>Development fixture — fictional sizes and schedules, not a live R2 inventory. Each project keeps its own scans; the cutoff selects its latest completed observation.</p>
     <div className="fp-main-controls">{(['at', 'before', 'after'] as const).map(key => <FederatedScanPicker key={key} sources={catalogs} value={values[key]} now={now}
       label={key === 'at' ? 'As of' : key === 'before' ? 'Compare from' : 'Compare to'} onChange={at => setParams(p => { const next = new URLSearchParams(p); next.set(key, at); return next })} />)}</div>
-    <div className="fp-preview-totals">{fmtBytes(tree.b)} · {tree.o.toLocaleString()} objects{missing.length > 0 && <span role="status"> · Partial coverage: no earlier scan for {missing.join(', ')}</span>}</div>
+    <div className="fp-preview-totals">{fmtBytes(tree.bytes)} · {tree.objects.toLocaleString()} objects{missing.length > 0 && <span role="status"> · Partial coverage: no earlier scan for {missing.join(', ')}</span>}</div>
     <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', marginBlock: 12 }}>
       <TitleSpaceToggle checked={reclaimTitleSpace} onChange={setReclaimTitleSpace} />
       <label>Renderer <select value={renderer} onChange={e => setRenderer(e.target.value as 'dom' | 'canvas')}><option value="dom">DOM</option><option value="canvas">Canvas</option></select></label>
     </div>
-    <div style={{ height: 320 }}><Treemap<TreeNode> root={tree} getChildren={n => n.c} getLabel={n => n.n} getSize={n => n.b} formatSize={fmtBytes} collapseChains renderer={renderer} reclaimTitleSpace={reclaimTitleSpace} branchOutline="color-mix(in oklab, var(--ink) 30%, transparent)" /></div>
+    <div style={{ height: 320 }}><Treemap<TreeNode> root={tree} getChildren={n => n.children} getLabel={n => n.name} getSize={n => n.bytes} formatSize={fmtBytes} collapseChains renderer={renderer} reclaimTitleSpace={reclaimTitleSpace} branchOutline="color-mix(in oklab, var(--ink) 30%, transparent)" /></div>
     <h2>Diff</h2>
     {values.before > values.after && <p role="status">Reverse comparison: changes are “to” minus “from”.</p>}
     <table className="fp-preview-table"><thead><tr><th>Project</th><th>Bytes change</th><th>Objects change</th></tr></thead>

@@ -8,42 +8,49 @@ from math import isnan
 from click.testing import CliRunner
 
 from dt_cloud import diff_bench
-from dt_cloud.diff_bench import Req, Sample, answer_digest, browser_url, random_buckets, requests_for, sign_test, st_total, summarize
+from dt_cloud.diff_bench import CV, Req, Sample, answer_digest, browser_url, random_buckets, requests_for, sign_test, st_total, summarize
 
 
 def test_requests_are_the_browsers_mix():
     assert requests_for([{"from": "f", "to": "t", "path": "m"}], ["d:", "d:m"], 1152, 307) == [
-        Req("diff f→t /m", "diff:d1", "/api/diff", {"cv": 3, "from": "f", "to": "t", "path": "m", "w": 1152, "h": 307, "dm": "delta", "depth": 1}),
-        Req("diff f→t /m", "diff:full", "/api/diff", {"cv": 3, "from": "f", "to": "t", "path": "m", "w": 1152, "h": 307, "dm": "delta"}),
-        Req("subtree d /", "subtree:d1", "/api/subtree", {"cv": 3, "date": "d", "path": "", "w": 1152, "h": 307, "depth": 1}),
-        Req("subtree d /", "subtree:full", "/api/subtree", {"cv": 3, "date": "d", "path": "", "w": 1152, "h": 307}),
-        Req("subtree d /m", "subtree:d1", "/api/subtree", {"cv": 3, "date": "d", "path": "m", "w": 1152, "h": 307, "depth": 1}),
-        Req("subtree d /m", "subtree:full", "/api/subtree", {"cv": 3, "date": "d", "path": "m", "w": 1152, "h": 307}),
+        Req("diff f→t /m", "diff:d1", "/api/diff", {"cv": CV, "from": "f", "to": "t", "path": "m", "w": 1152, "h": 307, "dm": "delta", "depth": 1}),
+        Req("diff f→t /m", "diff:full", "/api/diff", {"cv": CV, "from": "f", "to": "t", "path": "m", "w": 1152, "h": 307, "dm": "delta"}),
+        Req("subtree d /", "subtree:d1", "/api/subtree", {"cv": CV, "date": "d", "path": "", "w": 1152, "h": 307, "depth": 1}),
+        Req("subtree d /", "subtree:full", "/api/subtree", {"cv": CV, "date": "d", "path": "", "w": 1152, "h": 307}),
+        Req("subtree d /m", "subtree:d1", "/api/subtree", {"cv": CV, "date": "d", "path": "m", "w": 1152, "h": 307, "depth": 1}),
+        Req("subtree d /m", "subtree:full", "/api/subtree", {"cv": CV, "date": "d", "path": "m", "w": 1152, "h": 307}),
     ]
 
 
 def test_browser_url_encodes_as_the_page_does():
     """`encodeURIComponent`'s escapes, in the request's parameter order: `/` and `=` escaped, a space as `%20`, its
     unreserved marks (`-_.!~*'()`) as they are."""
-    r = Req("subtree d /m", "subtree:d1", "/api/subtree", {"cv": 3, "date": "2026-09-15T1201", "path": "b k/a=1/it's (x)!~*-_.", "w": 1152, "h": 307, "depth": 1})
-    assert browser_url(r) == "/api/subtree?cv=3&date=2026-09-15T1201&path=b%20k%2Fa%3D1%2Fit's%20(x)!~*-_.&w=1152&h=307&depth=1"
+    r = Req("subtree d /m", "subtree:d1", "/api/subtree", {"cv": CV, "date": "2026-09-15T1201", "path": "b k/a=1/it's (x)!~*-_.", "w": 1152, "h": 307, "depth": 1})
+    assert browser_url(r) == f"/api/subtree?cv={CV}&date=2026-09-15T1201&path=b%20k%2Fa%3D1%2Fit's%20(x)!~*-_.&w=1152&h=307&depth=1"
+
+
+def test_stable_reader_mode_is_explicit_in_requests_and_report_names():
+    assert requests_for([{'from': 'f', 'to': 't', 'path': 'm'}], [], 1152, 307, mode='max') == [
+        Req('diff f→t /m dm=max', 'diff:d1', '/api/diff', {'cv': CV, 'from': 'f', 'to': 't', 'path': 'm', 'w': 1152, 'h': 307, 'dm': 'max', 'depth': 1}),
+        Req('diff f→t /m dm=max', 'diff:full', '/api/diff', {'cv': CV, 'from': 'f', 'to': 't', 'path': 'm', 'w': 1152, 'h': 307, 'dm': 'max'}),
+    ]
 
 
 def test_a_secondary_stores_requests_name_it():
     assert requests_for([{"from": "f", "to": "t", "path": "m"}], ["d:"], 640, 307, "meta") == [
-        Req("diff f→t /m", "diff:d1", "/api/diff", {"cv": 3, "store": "meta", "from": "f", "to": "t", "path": "m", "w": 640, "h": 307, "dm": "delta", "depth": 1}),
-        Req("diff f→t /m", "diff:full", "/api/diff", {"cv": 3, "store": "meta", "from": "f", "to": "t", "path": "m", "w": 640, "h": 307, "dm": "delta"}),
-        Req("subtree d /", "subtree:d1", "/api/subtree", {"cv": 3, "store": "meta", "date": "d", "path": "", "w": 640, "h": 307, "depth": 1}),
-        Req("subtree d /", "subtree:full", "/api/subtree", {"cv": 3, "store": "meta", "date": "d", "path": "", "w": 640, "h": 307}),
+        Req("diff f→t /m", "diff:d1", "/api/diff", {"cv": CV, "store": "meta", "from": "f", "to": "t", "path": "m", "w": 640, "h": 307, "dm": "delta", "depth": 1}),
+        Req("diff f→t /m", "diff:full", "/api/diff", {"cv": CV, "store": "meta", "from": "f", "to": "t", "path": "m", "w": 640, "h": 307, "dm": "delta"}),
+        Req("subtree d /", "subtree:d1", "/api/subtree", {"cv": CV, "store": "meta", "date": "d", "path": "", "w": 640, "h": 307, "depth": 1}),
+        Req("subtree d /", "subtree:full", "/api/subtree", {"cv": CV, "store": "meta", "date": "d", "path": "", "w": 640, "h": 307}),
     ]
 
 
 def test_a_diffs_summary_is_asked_only_on_request():
     """`summary=1` (a diff's totals alone) is an API request no page makes: off the browser's mix, on with `summary`."""
     assert requests_for([{"from": "f", "to": "t", "path": "m"}], [], 1152, 307, summary=True) == [
-        Req("diff f→t /m", "diff:d1", "/api/diff", {"cv": 3, "from": "f", "to": "t", "path": "m", "w": 1152, "h": 307, "dm": "delta", "depth": 1}),
-        Req("diff f→t /m", "diff:full", "/api/diff", {"cv": 3, "from": "f", "to": "t", "path": "m", "w": 1152, "h": 307, "dm": "delta"}),
-        Req("diff f→t /m", "diff:summary", "/api/diff", {"cv": 3, "from": "f", "to": "t", "path": "m", "w": 1152, "h": 307, "summary": 1}),
+        Req("diff f→t /m", "diff:d1", "/api/diff", {"cv": CV, "from": "f", "to": "t", "path": "m", "w": 1152, "h": 307, "dm": "delta", "depth": 1}),
+        Req("diff f→t /m", "diff:full", "/api/diff", {"cv": CV, "from": "f", "to": "t", "path": "m", "w": 1152, "h": 307, "dm": "delta"}),
+        Req("diff f→t /m", "diff:summary", "/api/diff", {"cv": CV, "from": "f", "to": "t", "path": "m", "w": 1152, "h": 307, "summary": 1}),
     ]
 
 
@@ -68,13 +75,16 @@ def test_st_total():
 
 
 def test_answer_digest_ignores_the_readers_own_fields():
-    d = {"total_a": 1, "total_b": 2, "objects_a": 3, "objects_b": 4, "rows": [{"p": "m"}]}
+    d = {"bytes_before": 1, "bytes_after": 2, "objects_before": 3, "objects_after": 4, "rows": [{"path": "m"}]}
     assert answer_digest("/api/diff", {**d, "tier": "bysize", "lookups": 0}) == answer_digest("/api/diff", {**d, "tier": "descent"})
     assert answer_digest("/api/diff", d) != answer_digest("/api/diff", {**d, "rows": []})
-    v = {"nodes": 2, "tree": {"n": "Root", "s": 5, "c": [{"n": "m", "s": 5}]}}
+    assert answer_digest("/api/diff", {"total_a": 1, "total_b": 2, "objects_a": 3, "objects_b": 4, "rows": [{"p": "m"}]}) == answer_digest("/api/diff", d)
+    v = {"nodes": 2, "tree": {"name": "Root", "bytes": 5, "children": [{"name": "m", "bytes": 5}]}}
     assert answer_digest("/api/subtree", {**v, "index": "g1"}) == answer_digest("/api/subtree", {**v, "index": "g2"})
-    assert answer_digest("/api/subtree", v) == answer_digest("/api/subtree", {**v, "tree": {**v["tree"], "n": "Root (dev)"}})
-    assert answer_digest("/api/subtree", v) != answer_digest("/api/subtree", {**v, "tree": {**v["tree"], "c": [{"n": "m", "s": 4}]}})
+    assert answer_digest("/api/subtree", v) == answer_digest("/api/subtree", {**v, "tree": {**v["tree"], "name": "Root (dev)"}})
+    assert answer_digest("/api/subtree", v) != answer_digest("/api/subtree", {**v, "tree": {**v["tree"], "children": [{"name": "m", "bytes": 4}]}})
+    # A host still serving the short names (`api_names`) digests as its descriptive answer.
+    assert answer_digest("/api/subtree", {"nodes": 2, "tree": {"n": "Root", "b": 5, "c": [{"n": "m", "b": 5}]}}) == answer_digest("/api/subtree", v)
 
 
 def sample(kind, w, host, phase, total, cache="miss", digest="x", wall=0.2):
@@ -171,6 +181,13 @@ def test_command_times_the_summary_with_s(monkeypatch):
     ]
 
 
+def test_command_selects_the_stable_reader(monkeypatch):
+    h = Hosts(100)
+    result = run(monkeypatch, h, '-m', 'max', '-w', '1152', CASES)
+    assert result.exit_code == 0, result.output
+    assert [call[4] for call in h.calls] == ['max'] * 16
+
+
 def test_command_slower_b_exits_2(monkeypatch):
     r = run(monkeypatch, Hosts(130), "-w", "1152,1280,1408", "-p", "0.2", "-s", CASES)
     assert r.exit_code == 2, r.output
@@ -198,3 +215,21 @@ def test_command_refuses_one_host(monkeypatch):
     monkeypatch.setenv("SITE_TOKEN", "t")
     r = CliRunner().invoke(diff_bench.diff_bench_cmd, ["-a", "x", "-b", "x", "[]"])
     assert (r.exit_code, r.output) == (1, "A and B share an edge cache: B's cold reads would be A's warm ones\n")
+
+
+def test_command_does_not_hide_first_request_failures_with_retries(monkeypatch, tmp_path):
+    import csv
+
+    attempts = []
+
+    def fetch(host, q, token, retries=6, route='/api/diff'):
+        attempts.append(retries)
+        return (503, 'not ready', 0.01, '', '-') if retries == 1 else (200, {}, 0.01, '', '-')
+
+    report = tmp_path / 'samples.tsv'
+    result = run(monkeypatch, fetch, '-w', '1152', '-v', 'd:', '-o', str(report))
+    assert result.exit_code == 1, result.output
+    assert attempts == [1] * 8
+    with report.open() as f:
+        assert [int(row['status']) for row in csv.DictReader(f, delimiter='\t')] == [503] * 8
+    assert result.stdout.splitlines()[-1] == '8 errors, 0 disagreeing answers, 4 cold samples the edge answered (dropped)'

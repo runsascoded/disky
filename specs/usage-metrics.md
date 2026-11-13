@@ -57,6 +57,10 @@ Requests come from browsers (sessions), share links, agent and CLI tokens, the j
    | `blob5` status class | `2xx`, `3xx`, `4xx`, `5xx` |
    | `blob6` cache | `edge-hit` / `kv-hit` / `miss` / `none` |
    | `blob7` store | `primary` / a `STORES_JSON` key |
+   | `blob8` host | `prod` / `dev` |
+   | `blob9` selected static generations | sorted comma-separated URI-encoded `store=generation` labels, selected before response-cache lookup; union members kept separately |
+   | `blob10` static R2 read attempts | sorted comma-separated URI-encoded generations from actual GET/HEAD keys, including misses; empty on fully cached responses; source cache and CURRENT objects excluded |
+   | `blob11` server build | the full source SHA, to distinguish deployments |
    | `double1` | 1 (the count) |
    | `double2` | wall ms |
    | `double3` | R2 GETs made |
@@ -74,6 +78,8 @@ Requests come from browsers (sessions), share links, agent and CLI tokens, the j
 - **`dt-cloud cf-usage [-d DAYS] [-j]`.** Pulls (1) for the account, filtered to the deployment's script/buckets/database/namespaces from its wrangler config, and (2) through the Analytics Engine SQL API. Prints a per-day table: billed units and list-price $, then the attribution by caller and by route.
   - Needs a CF API token with Account Analytics: Read. The existing `CLOUDFLARE_API_TOKEN` doesn't cover it (GraphQL: "not authorized for that account"), so a new read-only token is needed, as `$CF_ANALYTICS_TOKEN`. It is a secret and goes through the user.
   - Prices live in one table in code: R2 Class A/B, storage, D1 rows read/written, Functions requests/CPU, KV.
+- **`dt-cloud cf-generations [-h HOURS] [-H prod|dev|all]`.** Read-only JSON of selected static generations, actual R2 read attempts, server build, weighted requests and last observed timestamp, including today's points. Uses the same config and analytics token as `cf-usage`; no new binding, alert or additional per-request point. Each generation field keeps at most eight labels of 256 encoded bytes, with explicit `(overflow)`; cached diagnostics are replaced after cache lookup. Responses expose `x-disky-static-gen` and `x-disky-static-reads` for debugging, with the same meaning. These are observations, not a zero-reader proof: pre-instrumentation deployments, sampled-out requests, direct storage readers and Batch jobs are outside this view.
+- **Generation transitions:** browsers send scan IDs and queries, not physical static generations. The server resolves `CURRENT.json` per request (with bounded pointer caches); explicit `STATIC_GEN` operator pins stay pinned. There is no client-upgrade response instruction to act on. Batch jobs separately follow predecessor `successor.json` records; retain that small forwarding chain when retiring old payloads until all configured starting generations have moved.
 - **The daily job** runs it after `digest` and stores `snapshots/usage/<date>.json`, so `/admin/usage` reads a file, not a live API call per view. The same token is needed as a job secret.
 - **`/admin/usage`** (admin):
   - totals vs the plan's included amounts and the overage $;

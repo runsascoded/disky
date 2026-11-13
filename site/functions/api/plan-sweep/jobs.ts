@@ -4,7 +4,9 @@
 // also reflects finished runs into D1 (`_lib/runReflect.ts`) and posts each
 // newly finished run's result to its plan's Slack thread
 // (specs/done/staged-slack.md) — the Batch job's exit trap calls this with the
-// job's read grant, so that happens as the run ends.
+// job's read grant, so that happens as the run ends. Where `SWEEP_DISPATCH` is
+// `"0"` (`sweepsOff`: a dev stack on production's D1) it only lists: production
+// records and announces on its next read.
 import type { D1Database } from "@cloudflare/workers-types"
 import { type Ctx, type Env as AuthEnv, json, requireViewer } from "../../_lib/auth.js"
 import { batchConfig, type BatchEnv, notConfigured } from "../../_lib/batchConfig.js"
@@ -14,7 +16,7 @@ import { NO_SHAPE, prefixShape, settleOpenPlan } from "../../_lib/plans.js"
 import { jobIdOf, listBatchJobs, reflectRuns, sweepJobs } from "../../_lib/runReflect.js"
 import { announceFinished, type NotifyEnv } from "../../_lib/stagedSlack.js"
 import { withPathStore } from "../../_lib/index.js"
-import { expectedOfVars } from "../../_lib/dispatch.js"
+import { expectedOfVars, sweepsOff } from "../../_lib/dispatch.js"
 
 type Env = AuthEnv & NotifyEnv & BatchEnv & { DB?: D1Database; STORE_SCHEME?: string; STORE_BUCKETS?: string }
 
@@ -34,7 +36,7 @@ export const onRequestGet = async (ctx: Ctx & { env: Env; waitUntil?: (p: Promis
     return json({ error: jobs.error }, 500)
   }
   const db = ctx.env.DB
-  if (db) {
+  if (db && !sweepsOff(ctx.env)) {
     const finished = await reflectRuns(cfg, db, token, jobs, shape.buckets[0])
     await settleOpenPlan(db, sweepJobs(jobs).filter(j => j.status?.state === 'SUCCEEDED').map(jobIdOf))
     if (finished.length) {

@@ -16,13 +16,26 @@ from dt_cloud.scan_runs import (
     measure_after,
     parse_profile, record, record_sql, recovery_record, write_all,
 )
-from dt_cloud.scan_runs_backfill import classify, failure_of, log_filter, phases_of, reconstruct, task_lines
+from dt_cloud.scan_runs_backfill import classify, failure_of, log_filter, owner_of_gen, phases_of, reconstruct, task_lines
 
 DDL = table_ddl(scan_runs.TABLES)  # the tables as `site/schema.sql` has them
 
 
 def ts(s: str) -> int:
     return int(dt.datetime.fromisoformat(s).replace(tzinfo=dt.timezone.utc).timestamp())
+
+
+@pytest.mark.parametrize("gen", ["20261013T071607Z", "20261013T071607992442Z"])
+def test_generation_stamp_with_optional_microseconds_belongs_to_exact_run(gen: str) -> None:
+    first = Run("first", "2026-10-13T0221", "scan", "succeeded", started_ts=ts("2026-10-13T02:21:00"), finished_ts=ts("2026-10-13T02:33:00"))
+    second = Run("second", "2026-10-13T0716", "scan", "succeeded", started_ts=ts("2026-10-13T07:16:00"), finished_ts=ts("2026-10-13T07:26:00"))
+    assert owner_of_gen(gen, [first, second]) == second
+
+
+@pytest.mark.parametrize("gen", ["20261013T07160Z", "20261013T07160799Z", "20261013T0716079924420Z", "20261013T121607992442Z"])
+def test_invalid_or_unowned_generation_has_no_run(gen: str) -> None:
+    run = Run("second", "2026-10-13T0716", "scan", "succeeded", started_ts=ts("2026-10-13T07:16:00"), finished_ts=ts("2026-10-13T07:26:00"))
+    assert owner_of_gen(gen, [run]) is None
 
 
 def test_fill_static_gen_follows_the_profile_file_and_its_env_override(monkeypatch, tmp_path):

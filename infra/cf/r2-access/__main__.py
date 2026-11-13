@@ -17,11 +17,21 @@ config = pulumi.Config()
 worker_config = Path(config.get("workerConfig") or here / "wrangler.json")
 definition = json.loads(worker_config.read_text())
 account = definition["account_id"]
-variables = definition["vars"]
+variables = dict(definition["vars"])
 buckets = {b["binding"]: b["bucket_name"] for b in definition["r2_buckets"]}
 bucket_name = buckets["ARCHIVE"]
 # Optional: an existing bucket (not managed here) that receives the derived, public read-recency files.
 public_bucket = buckets.get("PUBLIC")
+checkpoint_bucket = config.get("checkpointBucket")
+read_checkpoint = config.get("readCheckpoint")
+if bool(checkpoint_bucket) != bool(read_checkpoint):
+    raise pulumi.RunError("checkpointBucket and readCheckpoint must be enabled together")
+if checkpoint_bucket:
+    if (not re.fullmatch(r"[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]", checkpoint_bucket)
+            or checkpoint_bucket in {bucket_name, public_bucket, *json.loads(variables["SOURCE_BUCKETS"])}
+            or not re.fullmatch(r"gs://[^/]+/[^\s]+", read_checkpoint)):
+        raise pulumi.RunError("Checkpoint receipts require their own private bucket and a gs:// checkpoint")
+    variables.update(CHECKPOINT_KEY="r2-read.json", READ_CHECKPOINT=read_checkpoint)
 enabled = config.get_bool("enabled") or False
 configured_retention = config.get_int("retentionDays")
 retention = 30 if configured_retention is None else configured_retention
@@ -61,6 +71,10 @@ private_archive = cf.R2ManagedDomain(
     bucket_name=archive.name,
     enabled=False,
 )
+receipts = cf.R2Bucket("checkpoints", account_id=account, name=checkpoint_bucket, location="enam",
+                       storage_class="Standard", opts=pulumi.ResourceOptions(protect=True)) if checkpoint_bucket else None
+receipts_private = cf.R2ManagedDomain("checkpoints-private", account_id=account, bucket_name=receipts.name,
+                                    enabled=False) if receipts else None
 lifecycle = cf.R2BucketLifecycle(
     "archive-retention",
     account_id=account,
@@ -80,13 +94,14 @@ collector = cf.WorkersScript(
     compatibility_flags=definition["compatibility_flags"],
     bindings=[
         {"name": "ARCHIVE", "type": "r2_bucket", "bucket_name": archive.name},
+        *([{"name": "CHECKPOINTS", "type": "r2_bucket", "bucket_name": receipts.name}] if receipts else []),
         *([{"name": "PUBLIC", "type": "r2_bucket", "bucket_name": public_bucket}] if public_bucket else []),
         *[{"name": key, "type": "plain_text", "text": value} for key, value in sorted(variables.items())],
     ],
     keep_bindings=["secret_text"],
     observability=definition["observability"],
     limits=definition["limits"],
-    opts=pulumi.ResourceOptions(depends_on=[private_archive, lifecycle]),
+    opts=pulumi.ResourceOptions(depends_on=[private_archive, lifecycle, *([receipts_private] if receipts_private else [])]),
 )
 private_worker = cf.WorkersScriptSubdomain(
     "collector-private",

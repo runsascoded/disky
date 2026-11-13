@@ -2,7 +2,7 @@ import { beforeAll, describe, expect, it, vi } from 'vitest'
 import type { Env } from './auth'
 import { sqliteD1, type Sqlite, withLedger } from './testD1'
 import { type D1Variant, readJson, seedGeneration } from './testStore'
-import { buildDiff, type Diff, type DiffRow } from './view'
+import { buildDiff, type Diff, type DiffRow, LOOKUP_CAP, lookupCapOf } from './view'
 
 vi.mock('@rdub/file-tree/stores/s3', async () => ({ S3Store: (await import('./testStore')).S3Store }))
 
@@ -50,9 +50,9 @@ const withoutGroupJson = (env: Env, date: string, variant: string, on: () => boo
   return () => { db.prepare = prepare }
 }
 
-const row = (p: string, d: number, k: DiffRow['k'], s: DiffRow['s'], a: number, b: number, oa: number, ob: number, more: Pick<DiffRow, 'x' | 'l'> = {}): DiffRow =>
-  ({ p, d, k, s, a: a * MiB, b: b * MiB, oa, ob, ...more })
-const x = { x: true } as const
+const row = (path: string, depth: number, kind: DiffRow['kind'], status: DiffRow['status'], a: number, b: number, objects_before: number, objects_after: number, more: Pick<DiffRow, 'expanded' | 'lookup'> = {}): DiffRow =>
+  ({ path, depth, kind, status, bytes_before: a * MiB, bytes_after: b * MiB, objects_before, objects_after, ...more })
+const x = { expanded: true } as const
 
 /** `del`'s subtree as A drew it, every name absent on B. */
 const DEL_BELOW = [
@@ -66,8 +66,8 @@ const WHOLE: Diff = {
   rows: [
     row('deep', 1, 'dir', 'changed', 600, 200, 2, 1, x),
     row('del', 1, 'dir', 'removed', 896, 0, 4, 0, x),
-    // B holds `shrink` under the floor: read there (`l: 2`), and its names read too.
-    row('shrink', 1, 'dir', 'changed', 200, 8, 2, 1, { ...x, l: 2 }),
+    // B holds `shrink` under the floor: read there (`lookup: 2`), and its names read too.
+    row('shrink', 1, 'dir', 'changed', 200, 8, 2, 1, { ...x, lookup: 2 }),
     row('deep/d1', 2, 'dir', 'changed', 600, 200, 2, 1, x),
     row('del/x', 2, 'dir', 'removed', 768, 0, 3, 0, x),
     row('del/x/p', 3, 'dir', 'removed', 512, 0, 2, 0, x),
@@ -75,10 +75,10 @@ const WHOLE: Diff = {
     row('deep/d1/big', 3, 'file', 'removed', 400, 0, 1, 0),
     ...DEL_BELOW,
     row('shrink/b', 2, 'file', 'removed', 100, 0, 1, 0),
-    row('shrink/a', 2, 'file', 'changed', 100, 8, 1, 1, { l: 2 }),
+    row('shrink/a', 2, 'file', 'changed', 100, 8, 1, 1, { lookup: 2 }),
     row('new1', 1, 'file', 'added', 0, 64, 0, 1),
   ],
-  total_a: 1997 * MiB, total_b: 573 * MiB, objects_a: 10, objects_b: 5, threshold: 16 * MiB, tier: 'path',
+  bytes_before: 1997 * MiB, bytes_after: 573 * MiB, objects_before: 10, objects_after: 5, threshold: 16 * MiB, tier: 'path',
   expansions: 8, truncated: false,
   // `del`, `shrink`, `new1` and `deep/d1/big` (their parents are on both scans), then `shrink/{a,b}` (B holds
   // `shrink`). Nothing under `del`: B has no row for it, so none for what is under it.
@@ -88,8 +88,8 @@ const WHOLE: Diff = {
 /** `d` with its scans swapped (B → A). */
 const swapped = (d: Diff): Diff => ({
   ...d,
-  rows: d.rows.map(r => ({ ...r, a: r.b, b: r.a, oa: r.ob, ob: r.oa, s: r.s === 'added' ? 'removed' : r.s === 'removed' ? 'added' : r.s, ...(r.l ? { l: r.l === 1 ? 2 : 1 } : {}) } as DiffRow)),
-  total_a: d.total_b, total_b: d.total_a, objects_a: d.objects_b, objects_b: d.objects_a,
+  rows: d.rows.map(r => ({ ...r, bytes_before: r.bytes_after, bytes_after: r.bytes_before, objects_before: r.objects_after, objects_after: r.objects_before, status: r.status === 'added' ? 'removed' : r.status === 'removed' ? 'added' : r.status, ...(r.lookup ? { lookup: r.lookup === 1 ? 2 : 1 } : {}) } as DiffRow)),
+  bytes_before: d.bytes_after, bytes_after: d.bytes_before, objects_before: d.objects_after, objects_after: d.objects_before,
 })
 
 const base = { path: 'bk', w: 1280, h: 800, minArea: 12, atten: 2, top: 500, threshold: 16 * MiB }
@@ -110,10 +110,10 @@ describe('a diff\'s lookups', () => {
 
   it('a directory under the floor is not absent: its names are read, and drawn with what they hold', async () => {
     const d = await buildDiff(env, { ...base, from: A, to: B })
-    expect(d.rows.filter(r => r.p.startsWith('shrink'))).toEqual([
-      row('shrink', 1, 'dir', 'changed', 200, 8, 2, 1, { ...x, l: 2 }),
+    expect(d.rows.filter(r => r.path.startsWith('shrink'))).toEqual([
+      row('shrink', 1, 'dir', 'changed', 200, 8, 2, 1, { ...x, lookup: 2 }),
       row('shrink/b', 2, 'file', 'removed', 100, 0, 1, 0),
-      row('shrink/a', 2, 'file', 'changed', 100, 8, 1, 1, { l: 2 }),
+      row('shrink/a', 2, 'file', 'changed', 100, 8, 1, 1, { lookup: 2 }),
     ])
   })
 
@@ -144,7 +144,7 @@ describe('a diff\'s lookups', () => {
     let walking = false
     const restore = withoutGroupJson(env, B, 'path', () => walking)
     const got = await buildDiff(env, { ...base, from: A, to: B, trace: n => { if (n === 'rounds') walking = true } })
-      .then(d => d.rows.filter(r => r.p.startsWith('shrink')), err => `${(err as Error).name}: ${(err as Error).message}`)
+      .then(d => d.rows.filter(r => r.path.startsWith('shrink')), err => `${(err as Error).name}: ${(err as Error).message}`)
       .finally(restore)
     expect(got).toEqual(`GroupUnread: row group 0 of ${B}'s \`path\` sort has no metadata: its rows were not read`)
   })
@@ -153,6 +153,21 @@ describe('a diff\'s lookups', () => {
     // Six: the level-by-level walk spent them on `del`'s subtree (13 names one scan drew) and folded the rest.
     expect(await buildDiff(env, { ...base, from: A, to: B, lookupCap: 6 })).toEqual(WHOLE)
     expect(await buildDiff(env, { ...base, from: A, to: B, lookupCap: 1e9 })).toEqual(WHOLE)
+  })
+
+  it('`DIFF_LOOKUP_CAP` is the deployment\'s budget: `0` reads none, a count spends that many, as `lookupCap` does', async () => {
+    for (const cap of [0, 2]) {
+      expect(await buildDiff({ ...env, DIFF_LOOKUP_CAP: String(cap) }, { ...base, from: A, to: B }))
+        .toEqual(await buildDiff(env, { ...base, from: A, to: B, lookupCap: cap }))
+    }
+    const none = await buildDiff({ ...env, DIFF_LOOKUP_CAP: '0' }, { ...base, from: A, to: B })
+    expect([none.lookups, none.lookups_capped, none.bytes_before, none.bytes_after]).toEqual([0, true, WHOLE.bytes_before, WHOLE.bytes_after])
+  })
+
+  it('`lookupCapOf`: unset or blank is `LOOKUP_CAP`, a count is itself, anything else throws', () => {
+    expect([lookupCapOf({}), lookupCapOf({ DIFF_LOOKUP_CAP: ' ' }), lookupCapOf({ DIFF_LOOKUP_CAP: '0' }), lookupCapOf({ DIFF_LOOKUP_CAP: '12' })])
+      .toEqual([LOOKUP_CAP, LOOKUP_CAP, 0, 12])
+    for (const bad of ['-1', '1.5', 'x']) expect(() => lookupCapOf({ DIFF_LOOKUP_CAP: bad })).toThrow(`DIFF_LOOKUP_CAP = "${bad}": not a count`)
   })
 })
 
@@ -182,8 +197,8 @@ describe('a lens diff\'s lookups', () => {
     // is not `shrink`'s absence, so `shrink/a` is read there — its total, as her assignment covers it. Taken as
     // absence, `shrink/a` was inferred removed (100 → 0 MiB, one lookup) where she holds 8 MiB.
     // (Only `shrink/a`'s row: `shrink`'s own is that lookup's answer, as before this walk.)
-    expect({ rows: d.rows.filter(r => r.p === 'shrink/a'), lookups: d.lookups, inferred }).toEqual({
-      rows: [row('shrink/a', 2, 'file', 'changed', 100, 8, 1, 1, { l: 2 })], lookups: 2, inferred: [],
+    expect({ rows: d.rows.filter(r => r.path === 'shrink/a'), lookups: d.lookups, inferred }).toEqual({
+      rows: [row('shrink/a', 2, 'file', 'changed', 100, 8, 1, 1, { lookup: 2 })], lookups: 2, inferred: [],
     })
   })
 
@@ -191,7 +206,7 @@ describe('a lens diff\'s lookups', () => {
     let walking = false
     const restore = withoutGroupJson(lensEnv, LB, 'path', () => walking)
     const got = await buildDiff(lensEnv, { ...base, from: LA, to: LB, lens, trace: n => { if (n === 'rounds') walking = true } })
-      .then(d => d.rows.filter(r => r.p === 'shrink/a'), err => `${(err as Error).name}: ${(err as Error).message}`)
+      .then(d => d.rows.filter(r => r.path === 'shrink/a'), err => `${(err as Error).name}: ${(err as Error).message}`)
       .finally(restore)
     expect(got).toEqual(`GroupUnread: row group 0 of ${LB}'s \`path\` sort has no metadata: its rows were not read`)
   })

@@ -6,12 +6,12 @@
   "path": "",
   "tiles": {
    "": {
-    "a": 6,
-    "b": 20,
-    "k": "dir",
-    "n": "all buckets",
-    "o": 3,
-    "us": [
+    "bytes": 20,
+    "kind": "dir",
+    "last_read": 6,
+    "name": "all buckets",
+    "objects": 3,
+    "owners": [
      [
       "bob",
       10
@@ -23,12 +23,12 @@
     ]
    },
    "/b1": {
-    "a": 6,
-    "b": 10,
-    "k": "dir",
-    "n": "b1",
-    "o": 2,
-    "us": [
+    "bytes": 10,
+    "kind": "dir",
+    "last_read": 6,
+    "name": "b1",
+    "objects": 2,
+    "owners": [
      [
       "bob",
       10
@@ -40,12 +40,12 @@
     ]
    },
    "/b1/d": {
-    "a": 5,
-    "b": 20,
-    "k": "dir",
-    "n": "d",
-    "o": 3,
-    "us": [
+    "bytes": 20,
+    "kind": "dir",
+    "last_read": 5,
+    "name": "d",
+    "objects": 3,
+    "owners": [
      [
       "alice",
       10
@@ -57,52 +57,52 @@
     ]
    },
    "/b1/d/e": {
-    "a": 5,
-    "b": 20,
-    "k": "dir",
-    "n": "e",
-    "o": 2
+    "bytes": 20,
+    "kind": "dir",
+    "last_read": 5,
+    "name": "e",
+    "objects": 2
    },
    "/b1/d/f.bin": {
-    "b": 20,
-    "k": "dir",
-    "n": "f.bin",
-    "o": 2
+    "bytes": 20,
+    "kind": "dir",
+    "name": "f.bin",
+    "objects": 2
    },
    "/b1/gof": {
-    "a": 5,
-    "b": 10,
-    "k": "dir",
-    "n": "gof",
-    "o": 1
+    "bytes": 10,
+    "kind": "dir",
+    "last_read": 5,
+    "name": "gof",
+    "objects": 1
    },
    "/b2": {
-    "a": 5,
-    "b": 10,
-    "k": "dir",
-    "n": "b2",
-    "o": 1
+    "bytes": 10,
+    "kind": "dir",
+    "last_read": 5,
+    "name": "b2",
+    "objects": 1
    },
    "/b2/e": {
-    "b": 20,
-    "k": "dir",
-    "n": "e",
-    "o": 1
+    "bytes": 20,
+    "kind": "dir",
+    "name": "e",
+    "objects": 1
    },
    "/b2/e/e": {
-    "a": 5,
-    "b": 20,
-    "k": "dir",
-    "n": "e",
-    "o": 1
+    "bytes": 20,
+    "kind": "dir",
+    "last_read": 5,
+    "name": "e",
+    "objects": 1
    },
    "/c": {
-    "a": 5,
-    "b": 20,
-    "k": "dir",
-    "n": "c",
-    "o": 3,
-    "us": [
+    "bytes": 20,
+    "kind": "dir",
+    "last_read": 5,
+    "name": "c",
+    "objects": 3,
+    "owners": [
      [
       "alice",
       10
@@ -120,12 +120,12 @@
   "path": "",
   "tiles": {
    "": {
-    "a": 6,
-    "b": 20,
-    "k": "dir",
-    "n": "all buckets",
-    "o": 3,
-    "us": [
+    "bytes": 20,
+    "kind": "dir",
+    "last_read": 6,
+    "name": "all buckets",
+    "objects": 3,
+    "owners": [
      [
       "bob",
       10
@@ -137,12 +137,12 @@
     ]
    },
    "/b1": {
-    "a": 6,
-    "b": 10,
-    "k": "dir",
-    "n": "b1",
-    "o": 2,
-    "us": [
+    "bytes": 10,
+    "kind": "dir",
+    "last_read": 6,
+    "name": "b1",
+    "objects": 2,
+    "owners": [
      [
       "bob",
       10
@@ -154,11 +154,11 @@
     ]
    },
    "/b2": {
-    "a": 5,
-    "b": 10,
-    "k": "dir",
-    "n": "b2",
-    "o": 1
+    "bytes": 10,
+    "kind": "dir",
+    "last_read": 5,
+    "name": "b2",
+    "objects": 1
    }
   },
   "v": 1,
@@ -171,12 +171,12 @@
   "path": "",
   "tiles": {
    "": {
-    "a": 6,
-    "b": 20,
-    "k": "dir",
-    "n": "all buckets",
-    "o": 3,
-    "us": [
+    "bytes": 20,
+    "kind": "dir",
+    "last_read": 6,
+    "name": "all buckets",
+    "objects": 3,
+    "owners": [
      [
       "bob",
       10
@@ -188,12 +188,12 @@
     ]
    },
    "/b1": {
-    "a": 6,
-    "b": 10,
-    "k": "dir",
-    "n": "b1",
-    "o": 2,
-    "us": [
+    "bytes": 10,
+    "kind": "dir",
+    "last_read": 6,
+    "name": "b1",
+    "objects": 2,
+    "owners": [
      [
       "bob",
       10
@@ -205,12 +205,12 @@
     ]
    },
    "/b1/d": {
-    "a": 5,
-    "b": 20,
-    "k": "dir",
-    "n": "d",
-    "o": 3,
-    "us": [
+    "bytes": 20,
+    "kind": "dir",
+    "last_read": 5,
+    "name": "d",
+    "objects": 3,
+    "owners": [
      [
       "alice",
       10
@@ -222,19 +222,19 @@
     ]
    },
    "/b1/d/a.txt": {
-    "a": 6,
-    "b": 10,
-    "k": "dir",
-    "n": "a.txt",
-    "o": 2
+    "bytes": 10,
+    "kind": "dir",
+    "last_read": 6,
+    "name": "a.txt",
+    "objects": 2
    },
    "/b1/d/b.pq": {
-    "a": 5,
-    "b": 10,
-    "k": "dir",
-    "n": "b.pq",
-    "o": 1,
-    "us": [
+    "bytes": 10,
+    "kind": "dir",
+    "last_read": 5,
+    "name": "b.pq",
+    "objects": 1,
+    "owners": [
      [
       "alice",
       10
@@ -242,32 +242,32 @@
     ]
    },
    "/b1/d/e": {
-    "a": 5,
-    "b": 20,
-    "k": "dir",
-    "n": "e",
-    "o": 2
+    "bytes": 20,
+    "kind": "dir",
+    "last_read": 5,
+    "name": "e",
+    "objects": 2
    },
    "/b1/d/f.bin": {
-    "b": 20,
-    "k": "dir",
-    "n": "f.bin",
-    "o": 2
+    "bytes": 20,
+    "kind": "dir",
+    "name": "f.bin",
+    "objects": 2
    },
    "/b1/gof": {
-    "a": 5,
-    "b": 10,
-    "k": "dir",
-    "n": "gof",
-    "o": 1
+    "bytes": 10,
+    "kind": "dir",
+    "last_read": 5,
+    "name": "gof",
+    "objects": 1
    },
    "/b1/gof/b.pq": {
-    "a": 5,
-    "b": 10,
-    "k": "dir",
-    "n": "b.pq",
-    "o": 1,
-    "us": [
+    "bytes": 10,
+    "kind": "dir",
+    "last_read": 5,
+    "name": "b.pq",
+    "objects": 1,
+    "owners": [
      [
       "alice",
       10
@@ -275,31 +275,31 @@
     ]
    },
    "/b1/gof/e": {
-    "a": 5,
-    "b": 10,
-    "k": "dir",
-    "n": "e",
-    "o": 1
+    "bytes": 10,
+    "kind": "dir",
+    "last_read": 5,
+    "name": "e",
+    "objects": 1
    },
    "/b2": {
-    "a": 5,
-    "b": 10,
-    "k": "dir",
-    "n": "b2",
-    "o": 1
+    "bytes": 10,
+    "kind": "dir",
+    "last_read": 5,
+    "name": "b2",
+    "objects": 1
    },
    "/b2/e": {
-    "b": 20,
-    "k": "dir",
-    "n": "e",
-    "o": 1
+    "bytes": 20,
+    "kind": "dir",
+    "name": "e",
+    "objects": 1
    },
    "/b2/e/b.pq": {
-    "b": 10,
-    "k": "dir",
-    "n": "b.pq",
-    "o": 2,
-    "us": [
+    "bytes": 10,
+    "kind": "dir",
+    "name": "b.pq",
+    "objects": 2,
+    "owners": [
      [
       "alice",
       10
@@ -307,26 +307,26 @@
     ]
    },
    "/b2/e/d.json": {
-    "a": 6,
-    "b": 10,
-    "k": "dir",
-    "n": "d.json",
-    "o": 1
+    "bytes": 10,
+    "kind": "dir",
+    "last_read": 6,
+    "name": "d.json",
+    "objects": 1
    },
    "/b2/e/e": {
-    "a": 5,
-    "b": 20,
-    "k": "dir",
-    "n": "e",
-    "o": 1
+    "bytes": 20,
+    "kind": "dir",
+    "last_read": 5,
+    "name": "e",
+    "objects": 1
    },
    "/c": {
-    "a": 5,
-    "b": 20,
-    "k": "dir",
-    "n": "c",
-    "o": 3,
-    "us": [
+    "bytes": 20,
+    "kind": "dir",
+    "last_read": 5,
+    "name": "c",
+    "objects": 3,
+    "owners": [
      [
       "alice",
       10
@@ -334,11 +334,11 @@
     ]
    },
    "/d.json": {
-    "a": 6,
-    "b": 10,
-    "k": "dir",
-    "n": "d.json",
-    "o": 1
+    "bytes": 10,
+    "kind": "dir",
+    "last_read": 6,
+    "name": "d.json",
+    "objects": 1
    }
   },
   "v": 1,
@@ -351,12 +351,12 @@
   "path": "",
   "tiles": {
    "": {
-    "a": 6,
-    "b": 20,
-    "k": "dir",
-    "n": "all buckets",
-    "o": 3,
-    "us": [
+    "bytes": 20,
+    "kind": "dir",
+    "last_read": 6,
+    "name": "all buckets",
+    "objects": 3,
+    "owners": [
      [
       "bob",
       10
@@ -368,12 +368,12 @@
     ]
    },
    "/b1": {
-    "a": 6,
-    "b": 10,
-    "k": "dir",
-    "n": "b1",
-    "o": 2,
-    "us": [
+    "bytes": 10,
+    "kind": "dir",
+    "last_read": 6,
+    "name": "b1",
+    "objects": 2,
+    "owners": [
      [
       "bob",
       10
@@ -385,11 +385,11 @@
     ]
    },
    "/b2": {
-    "a": 5,
-    "b": 10,
-    "k": "dir",
-    "n": "b2",
-    "o": 1
+    "bytes": 10,
+    "kind": "dir",
+    "last_read": 5,
+    "name": "b2",
+    "objects": 1
    }
   },
   "v": 1,
@@ -402,12 +402,12 @@
   "path": "b1",
   "tiles": {
    "": {
-    "a": 6,
-    "b": 10,
-    "k": "dir",
-    "n": "b1",
-    "o": 2,
-    "us": [
+    "bytes": 10,
+    "kind": "dir",
+    "last_read": 6,
+    "name": "b1",
+    "objects": 2,
+    "owners": [
      [
       "bob",
       10
@@ -419,12 +419,12 @@
     ]
    },
    "/d": {
-    "a": 5,
-    "b": 20,
-    "k": "dir",
-    "n": "d",
-    "o": 3,
-    "us": [
+    "bytes": 20,
+    "kind": "dir",
+    "last_read": 5,
+    "name": "d",
+    "objects": 3,
+    "owners": [
      [
       "alice",
       10
@@ -436,19 +436,19 @@
     ]
    },
    "/d/a.txt": {
-    "a": 6,
-    "b": 10,
-    "k": "dir",
-    "n": "a.txt",
-    "o": 2
+    "bytes": 10,
+    "kind": "dir",
+    "last_read": 6,
+    "name": "a.txt",
+    "objects": 2
    },
    "/d/b.pq": {
-    "a": 5,
-    "b": 10,
-    "k": "dir",
-    "n": "b.pq",
-    "o": 1,
-    "us": [
+    "bytes": 10,
+    "kind": "dir",
+    "last_read": 5,
+    "name": "b.pq",
+    "objects": 1,
+    "owners": [
      [
       "alice",
       10
@@ -456,32 +456,32 @@
     ]
    },
    "/d/e": {
-    "a": 5,
-    "b": 20,
-    "k": "dir",
-    "n": "e",
-    "o": 2
+    "bytes": 20,
+    "kind": "dir",
+    "last_read": 5,
+    "name": "e",
+    "objects": 2
    },
    "/d/f.bin": {
-    "b": 20,
-    "k": "dir",
-    "n": "f.bin",
-    "o": 2
+    "bytes": 20,
+    "kind": "dir",
+    "name": "f.bin",
+    "objects": 2
    },
    "/gof": {
-    "a": 5,
-    "b": 10,
-    "k": "dir",
-    "n": "gof",
-    "o": 1
+    "bytes": 10,
+    "kind": "dir",
+    "last_read": 5,
+    "name": "gof",
+    "objects": 1
    },
    "/gof/b.pq": {
-    "a": 5,
-    "b": 10,
-    "k": "dir",
-    "n": "b.pq",
-    "o": 1,
-    "us": [
+    "bytes": 10,
+    "kind": "dir",
+    "last_read": 5,
+    "name": "b.pq",
+    "objects": 1,
+    "owners": [
      [
       "alice",
       10
@@ -489,11 +489,11 @@
     ]
    },
    "/gof/e": {
-    "a": 5,
-    "b": 10,
-    "k": "dir",
-    "n": "e",
-    "o": 1
+    "bytes": 10,
+    "kind": "dir",
+    "last_read": 5,
+    "name": "e",
+    "objects": 1
    }
   },
   "v": 1,
@@ -506,12 +506,12 @@
   "path": "b1",
   "tiles": {
    "": {
-    "a": 6,
-    "b": 10,
-    "k": "dir",
-    "n": "b1",
-    "o": 2,
-    "us": [
+    "bytes": 10,
+    "kind": "dir",
+    "last_read": 6,
+    "name": "b1",
+    "objects": 2,
+    "owners": [
      [
       "bob",
       10
@@ -523,12 +523,12 @@
     ]
    },
    "/d": {
-    "a": 5,
-    "b": 20,
-    "k": "dir",
-    "n": "d",
-    "o": 3,
-    "us": [
+    "bytes": 20,
+    "kind": "dir",
+    "last_read": 5,
+    "name": "d",
+    "objects": 3,
+    "owners": [
      [
       "alice",
       10
@@ -540,11 +540,11 @@
     ]
    },
    "/gof": {
-    "a": 5,
-    "b": 10,
-    "k": "dir",
-    "n": "gof",
-    "o": 1
+    "bytes": 10,
+    "kind": "dir",
+    "last_read": 5,
+    "name": "gof",
+    "objects": 1
    }
   },
   "v": 1,
@@ -557,12 +557,12 @@
   "path": "b1",
   "tiles": {
    "": {
-    "a": 6,
-    "b": 10,
-    "k": "dir",
-    "n": "b1",
-    "o": 2,
-    "us": [
+    "bytes": 10,
+    "kind": "dir",
+    "last_read": 6,
+    "name": "b1",
+    "objects": 2,
+    "owners": [
      [
       "bob",
       10
@@ -574,12 +574,12 @@
     ]
    },
    "/d": {
-    "a": 5,
-    "b": 20,
-    "k": "dir",
-    "n": "d",
-    "o": 3,
-    "us": [
+    "bytes": 20,
+    "kind": "dir",
+    "last_read": 5,
+    "name": "d",
+    "objects": 3,
+    "owners": [
      [
       "alice",
       10
@@ -591,19 +591,19 @@
     ]
    },
    "/d/a.txt": {
-    "a": 6,
-    "b": 10,
-    "k": "dir",
-    "n": "a.txt",
-    "o": 2
+    "bytes": 10,
+    "kind": "dir",
+    "last_read": 6,
+    "name": "a.txt",
+    "objects": 2
    },
    "/d/b.pq": {
-    "a": 5,
-    "b": 10,
-    "k": "dir",
-    "n": "b.pq",
-    "o": 1,
-    "us": [
+    "bytes": 10,
+    "kind": "dir",
+    "last_read": 5,
+    "name": "b.pq",
+    "objects": 1,
+    "owners": [
      [
       "alice",
       10
@@ -611,32 +611,32 @@
     ]
    },
    "/d/e": {
-    "a": 5,
-    "b": 20,
-    "k": "dir",
-    "n": "e",
-    "o": 2
+    "bytes": 20,
+    "kind": "dir",
+    "last_read": 5,
+    "name": "e",
+    "objects": 2
    },
    "/d/f.bin": {
-    "b": 20,
-    "k": "dir",
-    "n": "f.bin",
-    "o": 2
+    "bytes": 20,
+    "kind": "dir",
+    "name": "f.bin",
+    "objects": 2
    },
    "/gof": {
-    "a": 5,
-    "b": 10,
-    "k": "dir",
-    "n": "gof",
-    "o": 1
+    "bytes": 10,
+    "kind": "dir",
+    "last_read": 5,
+    "name": "gof",
+    "objects": 1
    },
    "/gof/b.pq": {
-    "a": 5,
-    "b": 10,
-    "k": "dir",
-    "n": "b.pq",
-    "o": 1,
-    "us": [
+    "bytes": 10,
+    "kind": "dir",
+    "last_read": 5,
+    "name": "b.pq",
+    "objects": 1,
+    "owners": [
      [
       "alice",
       10
@@ -644,11 +644,11 @@
     ]
    },
    "/gof/e": {
-    "a": 5,
-    "b": 10,
-    "k": "dir",
-    "n": "e",
-    "o": 1
+    "bytes": 10,
+    "kind": "dir",
+    "last_read": 5,
+    "name": "e",
+    "objects": 1
    }
   },
   "v": 1,
@@ -661,12 +661,12 @@
   "path": "b1",
   "tiles": {
    "": {
-    "a": 6,
-    "b": 10,
-    "k": "dir",
-    "n": "b1",
-    "o": 2,
-    "us": [
+    "bytes": 10,
+    "kind": "dir",
+    "last_read": 6,
+    "name": "b1",
+    "objects": 2,
+    "owners": [
      [
       "bob",
       10
@@ -678,12 +678,12 @@
     ]
    },
    "/d": {
-    "a": 5,
-    "b": 20,
-    "k": "dir",
-    "n": "d",
-    "o": 3,
-    "us": [
+    "bytes": 20,
+    "kind": "dir",
+    "last_read": 5,
+    "name": "d",
+    "objects": 3,
+    "owners": [
      [
       "alice",
       10
@@ -695,11 +695,11 @@
     ]
    },
    "/gof": {
-    "a": 5,
-    "b": 10,
-    "k": "dir",
-    "n": "gof",
-    "o": 1
+    "bytes": 10,
+    "kind": "dir",
+    "last_read": 5,
+    "name": "gof",
+    "objects": 1
    }
   },
   "v": 1,
@@ -712,19 +712,19 @@
   "path": "b2",
   "tiles": {
    "": {
-    "a": 5,
-    "b": 10,
-    "k": "dir",
-    "n": "b2",
-    "o": 1
+    "bytes": 10,
+    "kind": "dir",
+    "last_read": 5,
+    "name": "b2",
+    "objects": 1
    },
    "/c": {
-    "a": 5,
-    "b": 20,
-    "k": "dir",
-    "n": "c",
-    "o": 3,
-    "us": [
+    "bytes": 20,
+    "kind": "dir",
+    "last_read": 5,
+    "name": "c",
+    "objects": 3,
+    "owners": [
      [
       "alice",
       10
@@ -732,24 +732,24 @@
     ]
    },
    "/d.json": {
-    "a": 6,
-    "b": 10,
-    "k": "dir",
-    "n": "d.json",
-    "o": 1
+    "bytes": 10,
+    "kind": "dir",
+    "last_read": 6,
+    "name": "d.json",
+    "objects": 1
    },
    "/e": {
-    "b": 20,
-    "k": "dir",
-    "n": "e",
-    "o": 1
+    "bytes": 20,
+    "kind": "dir",
+    "name": "e",
+    "objects": 1
    },
    "/e/b.pq": {
-    "b": 10,
-    "k": "dir",
-    "n": "b.pq",
-    "o": 2,
-    "us": [
+    "bytes": 10,
+    "kind": "dir",
+    "name": "b.pq",
+    "objects": 2,
+    "owners": [
      [
       "alice",
       10
@@ -757,18 +757,18 @@
     ]
    },
    "/e/d.json": {
-    "a": 6,
-    "b": 10,
-    "k": "dir",
-    "n": "d.json",
-    "o": 1
+    "bytes": 10,
+    "kind": "dir",
+    "last_read": 6,
+    "name": "d.json",
+    "objects": 1
    },
    "/e/e": {
-    "a": 5,
-    "b": 20,
-    "k": "dir",
-    "n": "e",
-    "o": 1
+    "bytes": 20,
+    "kind": "dir",
+    "last_read": 5,
+    "name": "e",
+    "objects": 1
    }
   },
   "v": 1,
@@ -781,17 +781,17 @@
   "path": "b2",
   "tiles": {
    "": {
-    "a": 5,
-    "b": 10,
-    "k": "dir",
-    "n": "b2",
-    "o": 1
+    "bytes": 10,
+    "kind": "dir",
+    "last_read": 5,
+    "name": "b2",
+    "objects": 1
    },
    "/e": {
-    "b": 20,
-    "k": "dir",
-    "n": "e",
-    "o": 1
+    "bytes": 20,
+    "kind": "dir",
+    "name": "e",
+    "objects": 1
    }
   },
   "v": 1,
@@ -804,19 +804,19 @@
   "path": "b2",
   "tiles": {
    "": {
-    "a": 5,
-    "b": 10,
-    "k": "dir",
-    "n": "b2",
-    "o": 1
+    "bytes": 10,
+    "kind": "dir",
+    "last_read": 5,
+    "name": "b2",
+    "objects": 1
    },
    "/c": {
-    "a": 5,
-    "b": 20,
-    "k": "dir",
-    "n": "c",
-    "o": 3,
-    "us": [
+    "bytes": 20,
+    "kind": "dir",
+    "last_read": 5,
+    "name": "c",
+    "objects": 3,
+    "owners": [
      [
       "alice",
       10
@@ -824,24 +824,24 @@
     ]
    },
    "/d.json": {
-    "a": 6,
-    "b": 10,
-    "k": "dir",
-    "n": "d.json",
-    "o": 1
+    "bytes": 10,
+    "kind": "dir",
+    "last_read": 6,
+    "name": "d.json",
+    "objects": 1
    },
    "/e": {
-    "b": 20,
-    "k": "dir",
-    "n": "e",
-    "o": 1
+    "bytes": 20,
+    "kind": "dir",
+    "name": "e",
+    "objects": 1
    },
    "/e/b.pq": {
-    "b": 10,
-    "k": "dir",
-    "n": "b.pq",
-    "o": 2,
-    "us": [
+    "bytes": 10,
+    "kind": "dir",
+    "name": "b.pq",
+    "objects": 2,
+    "owners": [
      [
       "alice",
       10
@@ -849,18 +849,18 @@
     ]
    },
    "/e/d.json": {
-    "a": 6,
-    "b": 10,
-    "k": "dir",
-    "n": "d.json",
-    "o": 1
+    "bytes": 10,
+    "kind": "dir",
+    "last_read": 6,
+    "name": "d.json",
+    "objects": 1
    },
    "/e/e": {
-    "a": 5,
-    "b": 20,
-    "k": "dir",
-    "n": "e",
-    "o": 1
+    "bytes": 20,
+    "kind": "dir",
+    "last_read": 5,
+    "name": "e",
+    "objects": 1
    }
   },
   "v": 1,
@@ -873,17 +873,17 @@
   "path": "b2",
   "tiles": {
    "": {
-    "a": 5,
-    "b": 10,
-    "k": "dir",
-    "n": "b2",
-    "o": 1
+    "bytes": 10,
+    "kind": "dir",
+    "last_read": 5,
+    "name": "b2",
+    "objects": 1
    },
    "/e": {
-    "b": 20,
-    "k": "dir",
-    "n": "e",
-    "o": 1
+    "bytes": 20,
+    "kind": "dir",
+    "name": "e",
+    "objects": 1
    }
   },
   "v": 1,
@@ -896,19 +896,19 @@
   "path": "b1/gof",
   "tiles": {
    "": {
-    "a": 5,
-    "b": 10,
-    "k": "dir",
-    "n": "gof",
-    "o": 1
+    "bytes": 10,
+    "kind": "dir",
+    "last_read": 5,
+    "name": "gof",
+    "objects": 1
    },
    "/b.pq": {
-    "a": 5,
-    "b": 10,
-    "k": "dir",
-    "n": "b.pq",
-    "o": 1,
-    "us": [
+    "bytes": 10,
+    "kind": "dir",
+    "last_read": 5,
+    "name": "b.pq",
+    "objects": 1,
+    "owners": [
      [
       "alice",
       10
@@ -916,11 +916,11 @@
     ]
    },
    "/e": {
-    "a": 5,
-    "b": 10,
-    "k": "dir",
-    "n": "e",
-    "o": 1
+    "bytes": 10,
+    "kind": "dir",
+    "last_read": 5,
+    "name": "e",
+    "objects": 1
    }
   },
   "v": 1,
@@ -933,19 +933,19 @@
   "path": "b1/gof",
   "tiles": {
    "": {
-    "a": 5,
-    "b": 10,
-    "k": "dir",
-    "n": "gof",
-    "o": 1
+    "bytes": 10,
+    "kind": "dir",
+    "last_read": 5,
+    "name": "gof",
+    "objects": 1
    },
    "/b.pq": {
-    "a": 5,
-    "b": 10,
-    "k": "dir",
-    "n": "b.pq",
-    "o": 1,
-    "us": [
+    "bytes": 10,
+    "kind": "dir",
+    "last_read": 5,
+    "name": "b.pq",
+    "objects": 1,
+    "owners": [
      [
       "alice",
       10
@@ -953,11 +953,11 @@
     ]
    },
    "/e": {
-    "a": 5,
-    "b": 10,
-    "k": "dir",
-    "n": "e",
-    "o": 1
+    "bytes": 10,
+    "kind": "dir",
+    "last_read": 5,
+    "name": "e",
+    "objects": 1
    }
   },
   "v": 1,
@@ -970,19 +970,19 @@
   "path": "b1/gof",
   "tiles": {
    "": {
-    "a": 5,
-    "b": 10,
-    "k": "dir",
-    "n": "gof",
-    "o": 1
+    "bytes": 10,
+    "kind": "dir",
+    "last_read": 5,
+    "name": "gof",
+    "objects": 1
    },
    "/b.pq": {
-    "a": 5,
-    "b": 10,
-    "k": "dir",
-    "n": "b.pq",
-    "o": 1,
-    "us": [
+    "bytes": 10,
+    "kind": "dir",
+    "last_read": 5,
+    "name": "b.pq",
+    "objects": 1,
+    "owners": [
      [
       "alice",
       10
@@ -990,11 +990,11 @@
     ]
    },
    "/e": {
-    "a": 5,
-    "b": 10,
-    "k": "dir",
-    "n": "e",
-    "o": 1
+    "bytes": 10,
+    "kind": "dir",
+    "last_read": 5,
+    "name": "e",
+    "objects": 1
    }
   },
   "v": 1,
@@ -1007,19 +1007,19 @@
   "path": "b1/gof",
   "tiles": {
    "": {
-    "a": 5,
-    "b": 10,
-    "k": "dir",
-    "n": "gof",
-    "o": 1
+    "bytes": 10,
+    "kind": "dir",
+    "last_read": 5,
+    "name": "gof",
+    "objects": 1
    },
    "/b.pq": {
-    "a": 5,
-    "b": 10,
-    "k": "dir",
-    "n": "b.pq",
-    "o": 1,
-    "us": [
+    "bytes": 10,
+    "kind": "dir",
+    "last_read": 5,
+    "name": "b.pq",
+    "objects": 1,
+    "owners": [
      [
       "alice",
       10
@@ -1027,11 +1027,11 @@
     ]
    },
    "/e": {
-    "a": 5,
-    "b": 10,
-    "k": "dir",
-    "n": "e",
-    "o": 1
+    "bytes": 10,
+    "kind": "dir",
+    "last_read": 5,
+    "name": "e",
+    "objects": 1
    }
   },
   "v": 1,
@@ -1044,17 +1044,17 @@
   "path": "b2/e",
   "tiles": {
    "": {
-    "b": 20,
-    "k": "dir",
-    "n": "e",
-    "o": 1
+    "bytes": 20,
+    "kind": "dir",
+    "name": "e",
+    "objects": 1
    },
    "/b.pq": {
-    "b": 10,
-    "k": "dir",
-    "n": "b.pq",
-    "o": 2,
-    "us": [
+    "bytes": 10,
+    "kind": "dir",
+    "name": "b.pq",
+    "objects": 2,
+    "owners": [
      [
       "alice",
       10
@@ -1062,18 +1062,18 @@
     ]
    },
    "/d.json": {
-    "a": 6,
-    "b": 10,
-    "k": "dir",
-    "n": "d.json",
-    "o": 1
+    "bytes": 10,
+    "kind": "dir",
+    "last_read": 6,
+    "name": "d.json",
+    "objects": 1
    },
    "/e": {
-    "a": 5,
-    "b": 20,
-    "k": "dir",
-    "n": "e",
-    "o": 1
+    "bytes": 20,
+    "kind": "dir",
+    "last_read": 5,
+    "name": "e",
+    "objects": 1
    }
   },
   "v": 1,
@@ -1086,17 +1086,17 @@
   "path": "b2/e",
   "tiles": {
    "": {
-    "b": 20,
-    "k": "dir",
-    "n": "e",
-    "o": 1
+    "bytes": 20,
+    "kind": "dir",
+    "name": "e",
+    "objects": 1
    },
    "/b.pq": {
-    "b": 10,
-    "k": "dir",
-    "n": "b.pq",
-    "o": 2,
-    "us": [
+    "bytes": 10,
+    "kind": "dir",
+    "name": "b.pq",
+    "objects": 2,
+    "owners": [
      [
       "alice",
       10
@@ -1104,18 +1104,18 @@
     ]
    },
    "/d.json": {
-    "a": 6,
-    "b": 10,
-    "k": "dir",
-    "n": "d.json",
-    "o": 1
+    "bytes": 10,
+    "kind": "dir",
+    "last_read": 6,
+    "name": "d.json",
+    "objects": 1
    },
    "/e": {
-    "a": 5,
-    "b": 20,
-    "k": "dir",
-    "n": "e",
-    "o": 1
+    "bytes": 20,
+    "kind": "dir",
+    "last_read": 5,
+    "name": "e",
+    "objects": 1
    }
   },
   "v": 1,
@@ -1128,17 +1128,17 @@
   "path": "b2/e",
   "tiles": {
    "": {
-    "b": 20,
-    "k": "dir",
-    "n": "e",
-    "o": 1
+    "bytes": 20,
+    "kind": "dir",
+    "name": "e",
+    "objects": 1
    },
    "/b.pq": {
-    "b": 10,
-    "k": "dir",
-    "n": "b.pq",
-    "o": 2,
-    "us": [
+    "bytes": 10,
+    "kind": "dir",
+    "name": "b.pq",
+    "objects": 2,
+    "owners": [
      [
       "alice",
       10
@@ -1146,18 +1146,18 @@
     ]
    },
    "/d.json": {
-    "a": 6,
-    "b": 10,
-    "k": "dir",
-    "n": "d.json",
-    "o": 1
+    "bytes": 10,
+    "kind": "dir",
+    "last_read": 6,
+    "name": "d.json",
+    "objects": 1
    },
    "/e": {
-    "a": 5,
-    "b": 20,
-    "k": "dir",
-    "n": "e",
-    "o": 1
+    "bytes": 20,
+    "kind": "dir",
+    "last_read": 5,
+    "name": "e",
+    "objects": 1
    }
   },
   "v": 1,
@@ -1170,17 +1170,17 @@
   "path": "b2/e",
   "tiles": {
    "": {
-    "b": 20,
-    "k": "dir",
-    "n": "e",
-    "o": 1
+    "bytes": 20,
+    "kind": "dir",
+    "name": "e",
+    "objects": 1
    },
    "/b.pq": {
-    "b": 10,
-    "k": "dir",
-    "n": "b.pq",
-    "o": 2,
-    "us": [
+    "bytes": 10,
+    "kind": "dir",
+    "name": "b.pq",
+    "objects": 2,
+    "owners": [
      [
       "alice",
       10
@@ -1188,18 +1188,18 @@
     ]
    },
    "/d.json": {
-    "a": 6,
-    "b": 10,
-    "k": "dir",
-    "n": "d.json",
-    "o": 1
+    "bytes": 10,
+    "kind": "dir",
+    "last_read": 6,
+    "name": "d.json",
+    "objects": 1
    },
    "/e": {
-    "a": 5,
-    "b": 20,
-    "k": "dir",
-    "n": "e",
-    "o": 1
+    "bytes": 20,
+    "kind": "dir",
+    "last_read": 5,
+    "name": "e",
+    "objects": 1
    }
   },
   "v": 1,
@@ -1212,37 +1212,37 @@
   "path": "b1/gof",
   "tiles": {
    "": {
-    "b": 20,
-    "k": "dir",
-    "n": "gof",
-    "o": 1
+    "bytes": 20,
+    "kind": "dir",
+    "name": "gof",
+    "objects": 1
    },
    "/b.pq": {
-    "a": 6,
-    "b": 10,
-    "k": "dir",
-    "n": "b.pq",
-    "o": 1
+    "bytes": 10,
+    "kind": "dir",
+    "last_read": 6,
+    "name": "b.pq",
+    "objects": 1
    },
    "/d.json": {
-    "a": 6,
-    "b": 20,
-    "k": "dir",
-    "n": "d.json",
-    "o": 1
+    "bytes": 20,
+    "kind": "dir",
+    "last_read": 6,
+    "name": "d.json",
+    "objects": 1
    },
    "/e": {
-    "b": 10,
-    "k": "dir",
-    "n": "e",
-    "o": 1
+    "bytes": 10,
+    "kind": "dir",
+    "name": "e",
+    "objects": 1
    },
    "/f.bin": {
-    "a": 5,
-    "b": 10,
-    "k": "dir",
-    "n": "f.bin",
-    "o": 2
+    "bytes": 10,
+    "kind": "dir",
+    "last_read": 5,
+    "name": "f.bin",
+    "objects": 2
    }
   },
   "v": 1,
@@ -1255,37 +1255,37 @@
   "path": "b1/gof",
   "tiles": {
    "": {
-    "b": 20,
-    "k": "dir",
-    "n": "gof",
-    "o": 1
+    "bytes": 20,
+    "kind": "dir",
+    "name": "gof",
+    "objects": 1
    },
    "/b.pq": {
-    "a": 6,
-    "b": 10,
-    "k": "dir",
-    "n": "b.pq",
-    "o": 1
+    "bytes": 10,
+    "kind": "dir",
+    "last_read": 6,
+    "name": "b.pq",
+    "objects": 1
    },
    "/d.json": {
-    "a": 6,
-    "b": 20,
-    "k": "dir",
-    "n": "d.json",
-    "o": 1
+    "bytes": 20,
+    "kind": "dir",
+    "last_read": 6,
+    "name": "d.json",
+    "objects": 1
    },
    "/e": {
-    "b": 10,
-    "k": "dir",
-    "n": "e",
-    "o": 1
+    "bytes": 10,
+    "kind": "dir",
+    "name": "e",
+    "objects": 1
    },
    "/f.bin": {
-    "a": 5,
-    "b": 10,
-    "k": "dir",
-    "n": "f.bin",
-    "o": 2
+    "bytes": 10,
+    "kind": "dir",
+    "last_read": 5,
+    "name": "f.bin",
+    "objects": 2
    }
   },
   "v": 1,
@@ -1298,37 +1298,37 @@
   "path": "b1/gof",
   "tiles": {
    "": {
-    "b": 20,
-    "k": "dir",
-    "n": "gof",
-    "o": 1
+    "bytes": 20,
+    "kind": "dir",
+    "name": "gof",
+    "objects": 1
    },
    "/b.pq": {
-    "a": 6,
-    "b": 10,
-    "k": "dir",
-    "n": "b.pq",
-    "o": 1
+    "bytes": 10,
+    "kind": "dir",
+    "last_read": 6,
+    "name": "b.pq",
+    "objects": 1
    },
    "/d.json": {
-    "a": 6,
-    "b": 20,
-    "k": "dir",
-    "n": "d.json",
-    "o": 1
+    "bytes": 20,
+    "kind": "dir",
+    "last_read": 6,
+    "name": "d.json",
+    "objects": 1
    },
    "/e": {
-    "b": 10,
-    "k": "dir",
-    "n": "e",
-    "o": 1
+    "bytes": 10,
+    "kind": "dir",
+    "name": "e",
+    "objects": 1
    },
    "/f.bin": {
-    "a": 5,
-    "b": 10,
-    "k": "dir",
-    "n": "f.bin",
-    "o": 2
+    "bytes": 10,
+    "kind": "dir",
+    "last_read": 5,
+    "name": "f.bin",
+    "objects": 2
    }
   },
   "v": 1,
@@ -1341,37 +1341,37 @@
   "path": "b1/gof",
   "tiles": {
    "": {
-    "b": 20,
-    "k": "dir",
-    "n": "gof",
-    "o": 1
+    "bytes": 20,
+    "kind": "dir",
+    "name": "gof",
+    "objects": 1
    },
    "/b.pq": {
-    "a": 6,
-    "b": 10,
-    "k": "dir",
-    "n": "b.pq",
-    "o": 1
+    "bytes": 10,
+    "kind": "dir",
+    "last_read": 6,
+    "name": "b.pq",
+    "objects": 1
    },
    "/d.json": {
-    "a": 6,
-    "b": 20,
-    "k": "dir",
-    "n": "d.json",
-    "o": 1
+    "bytes": 20,
+    "kind": "dir",
+    "last_read": 6,
+    "name": "d.json",
+    "objects": 1
    },
    "/e": {
-    "b": 10,
-    "k": "dir",
-    "n": "e",
-    "o": 1
+    "bytes": 10,
+    "kind": "dir",
+    "name": "e",
+    "objects": 1
    },
    "/f.bin": {
-    "a": 5,
-    "b": 10,
-    "k": "dir",
-    "n": "f.bin",
-    "o": 2
+    "bytes": 10,
+    "kind": "dir",
+    "last_read": 5,
+    "name": "f.bin",
+    "objects": 2
    }
   },
   "v": 1,
@@ -1384,19 +1384,19 @@
   "path": "b2/e",
   "tiles": {
    "": {
-    "a": 5,
-    "b": 10,
-    "k": "dir",
-    "n": "e",
-    "o": 1
+    "bytes": 10,
+    "kind": "dir",
+    "last_read": 5,
+    "name": "e",
+    "objects": 1
    },
    "/a.txt": {
-    "a": 5,
-    "b": 10,
-    "k": "dir",
-    "n": "a.txt",
-    "o": 2,
-    "us": [
+    "bytes": 10,
+    "kind": "dir",
+    "last_read": 5,
+    "name": "a.txt",
+    "objects": 2,
+    "owners": [
      [
       "alice",
       10
@@ -1404,19 +1404,19 @@
     ]
    },
    "/d.json": {
-    "a": 5,
-    "b": 10,
-    "k": "dir",
-    "n": "d.json",
-    "o": 1
+    "bytes": 10,
+    "kind": "dir",
+    "last_read": 5,
+    "name": "d.json",
+    "objects": 1
    },
    "/e": {
-    "a": 6,
-    "b": 20,
-    "k": "dir",
-    "n": "e",
-    "o": 2,
-    "us": [
+    "bytes": 20,
+    "kind": "dir",
+    "last_read": 6,
+    "name": "e",
+    "objects": 2,
+    "owners": [
      [
       "alice",
       10
@@ -1434,19 +1434,19 @@
   "path": "b2/e",
   "tiles": {
    "": {
-    "a": 5,
-    "b": 10,
-    "k": "dir",
-    "n": "e",
-    "o": 1
+    "bytes": 10,
+    "kind": "dir",
+    "last_read": 5,
+    "name": "e",
+    "objects": 1
    },
    "/a.txt": {
-    "a": 5,
-    "b": 10,
-    "k": "dir",
-    "n": "a.txt",
-    "o": 2,
-    "us": [
+    "bytes": 10,
+    "kind": "dir",
+    "last_read": 5,
+    "name": "a.txt",
+    "objects": 2,
+    "owners": [
      [
       "alice",
       10
@@ -1454,19 +1454,19 @@
     ]
    },
    "/d.json": {
-    "a": 5,
-    "b": 10,
-    "k": "dir",
-    "n": "d.json",
-    "o": 1
+    "bytes": 10,
+    "kind": "dir",
+    "last_read": 5,
+    "name": "d.json",
+    "objects": 1
    },
    "/e": {
-    "a": 6,
-    "b": 20,
-    "k": "dir",
-    "n": "e",
-    "o": 2,
-    "us": [
+    "bytes": 20,
+    "kind": "dir",
+    "last_read": 6,
+    "name": "e",
+    "objects": 2,
+    "owners": [
      [
       "alice",
       10
@@ -1484,19 +1484,19 @@
   "path": "b2/e",
   "tiles": {
    "": {
-    "a": 5,
-    "b": 10,
-    "k": "dir",
-    "n": "e",
-    "o": 1
+    "bytes": 10,
+    "kind": "dir",
+    "last_read": 5,
+    "name": "e",
+    "objects": 1
    },
    "/a.txt": {
-    "a": 5,
-    "b": 10,
-    "k": "dir",
-    "n": "a.txt",
-    "o": 2,
-    "us": [
+    "bytes": 10,
+    "kind": "dir",
+    "last_read": 5,
+    "name": "a.txt",
+    "objects": 2,
+    "owners": [
      [
       "alice",
       10
@@ -1504,19 +1504,19 @@
     ]
    },
    "/d.json": {
-    "a": 5,
-    "b": 10,
-    "k": "dir",
-    "n": "d.json",
-    "o": 1
+    "bytes": 10,
+    "kind": "dir",
+    "last_read": 5,
+    "name": "d.json",
+    "objects": 1
    },
    "/e": {
-    "a": 6,
-    "b": 20,
-    "k": "dir",
-    "n": "e",
-    "o": 2,
-    "us": [
+    "bytes": 20,
+    "kind": "dir",
+    "last_read": 6,
+    "name": "e",
+    "objects": 2,
+    "owners": [
      [
       "alice",
       10
@@ -1534,19 +1534,19 @@
   "path": "b2/e",
   "tiles": {
    "": {
-    "a": 5,
-    "b": 10,
-    "k": "dir",
-    "n": "e",
-    "o": 1
+    "bytes": 10,
+    "kind": "dir",
+    "last_read": 5,
+    "name": "e",
+    "objects": 1
    },
    "/a.txt": {
-    "a": 5,
-    "b": 10,
-    "k": "dir",
-    "n": "a.txt",
-    "o": 2,
-    "us": [
+    "bytes": 10,
+    "kind": "dir",
+    "last_read": 5,
+    "name": "a.txt",
+    "objects": 2,
+    "owners": [
      [
       "alice",
       10
@@ -1554,19 +1554,19 @@
     ]
    },
    "/d.json": {
-    "a": 5,
-    "b": 10,
-    "k": "dir",
-    "n": "d.json",
-    "o": 1
+    "bytes": 10,
+    "kind": "dir",
+    "last_read": 5,
+    "name": "d.json",
+    "objects": 1
    },
    "/e": {
-    "a": 6,
-    "b": 20,
-    "k": "dir",
-    "n": "e",
-    "o": 2,
-    "us": [
+    "bytes": 20,
+    "kind": "dir",
+    "last_read": 6,
+    "name": "e",
+    "objects": 2,
+    "owners": [
      [
       "alice",
       10
@@ -1584,17 +1584,17 @@
   "path": "b1/gof",
   "tiles": {
    "": {
-    "b": 10,
-    "k": "dir",
-    "n": "gof",
-    "o": 1
+    "bytes": 10,
+    "kind": "dir",
+    "name": "gof",
+    "objects": 1
    },
    "/b.pq": {
-    "b": 10,
-    "k": "dir",
-    "n": "b.pq",
-    "o": 1,
-    "us": [
+    "bytes": 10,
+    "kind": "dir",
+    "name": "b.pq",
+    "objects": 1,
+    "owners": [
      [
       "alice",
       10
@@ -1602,12 +1602,12 @@
     ]
    },
    "/d.json": {
-    "a": 5,
-    "b": 10,
-    "k": "dir",
-    "n": "d.json",
-    "o": 2,
-    "us": [
+    "bytes": 10,
+    "kind": "dir",
+    "last_read": 5,
+    "name": "d.json",
+    "objects": 2,
+    "owners": [
      [
       "alice",
       10
@@ -1615,17 +1615,17 @@
     ]
    },
    "/e": {
-    "a": 5,
-    "b": 10,
-    "k": "dir",
-    "n": "e",
-    "o": 1
+    "bytes": 10,
+    "kind": "dir",
+    "last_read": 5,
+    "name": "e",
+    "objects": 1
    },
    "/f.bin": {
-    "b": 10,
-    "k": "dir",
-    "n": "f.bin",
-    "o": 1
+    "bytes": 10,
+    "kind": "dir",
+    "name": "f.bin",
+    "objects": 1
    }
   },
   "v": 1,
@@ -1638,17 +1638,17 @@
   "path": "b1/gof",
   "tiles": {
    "": {
-    "b": 10,
-    "k": "dir",
-    "n": "gof",
-    "o": 1
+    "bytes": 10,
+    "kind": "dir",
+    "name": "gof",
+    "objects": 1
    },
    "/b.pq": {
-    "b": 10,
-    "k": "dir",
-    "n": "b.pq",
-    "o": 1,
-    "us": [
+    "bytes": 10,
+    "kind": "dir",
+    "name": "b.pq",
+    "objects": 1,
+    "owners": [
      [
       "alice",
       10
@@ -1656,12 +1656,12 @@
     ]
    },
    "/d.json": {
-    "a": 5,
-    "b": 10,
-    "k": "dir",
-    "n": "d.json",
-    "o": 2,
-    "us": [
+    "bytes": 10,
+    "kind": "dir",
+    "last_read": 5,
+    "name": "d.json",
+    "objects": 2,
+    "owners": [
      [
       "alice",
       10
@@ -1669,17 +1669,17 @@
     ]
    },
    "/e": {
-    "a": 5,
-    "b": 10,
-    "k": "dir",
-    "n": "e",
-    "o": 1
+    "bytes": 10,
+    "kind": "dir",
+    "last_read": 5,
+    "name": "e",
+    "objects": 1
    },
    "/f.bin": {
-    "b": 10,
-    "k": "dir",
-    "n": "f.bin",
-    "o": 1
+    "bytes": 10,
+    "kind": "dir",
+    "name": "f.bin",
+    "objects": 1
    }
   },
   "v": 1,
@@ -1692,17 +1692,17 @@
   "path": "b1/gof",
   "tiles": {
    "": {
-    "b": 10,
-    "k": "dir",
-    "n": "gof",
-    "o": 1
+    "bytes": 10,
+    "kind": "dir",
+    "name": "gof",
+    "objects": 1
    },
    "/b.pq": {
-    "b": 10,
-    "k": "dir",
-    "n": "b.pq",
-    "o": 1,
-    "us": [
+    "bytes": 10,
+    "kind": "dir",
+    "name": "b.pq",
+    "objects": 1,
+    "owners": [
      [
       "alice",
       10
@@ -1710,12 +1710,12 @@
     ]
    },
    "/d.json": {
-    "a": 5,
-    "b": 10,
-    "k": "dir",
-    "n": "d.json",
-    "o": 2,
-    "us": [
+    "bytes": 10,
+    "kind": "dir",
+    "last_read": 5,
+    "name": "d.json",
+    "objects": 2,
+    "owners": [
      [
       "alice",
       10
@@ -1723,17 +1723,17 @@
     ]
    },
    "/e": {
-    "a": 5,
-    "b": 10,
-    "k": "dir",
-    "n": "e",
-    "o": 1
+    "bytes": 10,
+    "kind": "dir",
+    "last_read": 5,
+    "name": "e",
+    "objects": 1
    },
    "/f.bin": {
-    "b": 10,
-    "k": "dir",
-    "n": "f.bin",
-    "o": 1
+    "bytes": 10,
+    "kind": "dir",
+    "name": "f.bin",
+    "objects": 1
    }
   },
   "v": 1,
@@ -1746,17 +1746,17 @@
   "path": "b1/gof",
   "tiles": {
    "": {
-    "b": 10,
-    "k": "dir",
-    "n": "gof",
-    "o": 1
+    "bytes": 10,
+    "kind": "dir",
+    "name": "gof",
+    "objects": 1
    },
    "/b.pq": {
-    "b": 10,
-    "k": "dir",
-    "n": "b.pq",
-    "o": 1,
-    "us": [
+    "bytes": 10,
+    "kind": "dir",
+    "name": "b.pq",
+    "objects": 1,
+    "owners": [
      [
       "alice",
       10
@@ -1764,12 +1764,12 @@
     ]
    },
    "/d.json": {
-    "a": 5,
-    "b": 10,
-    "k": "dir",
-    "n": "d.json",
-    "o": 2,
-    "us": [
+    "bytes": 10,
+    "kind": "dir",
+    "last_read": 5,
+    "name": "d.json",
+    "objects": 2,
+    "owners": [
      [
       "alice",
       10
@@ -1777,17 +1777,17 @@
     ]
    },
    "/e": {
-    "a": 5,
-    "b": 10,
-    "k": "dir",
-    "n": "e",
-    "o": 1
+    "bytes": 10,
+    "kind": "dir",
+    "last_read": 5,
+    "name": "e",
+    "objects": 1
    },
    "/f.bin": {
-    "b": 10,
-    "k": "dir",
-    "n": "f.bin",
-    "o": 1
+    "bytes": 10,
+    "kind": "dir",
+    "name": "f.bin",
+    "objects": 1
    }
   },
   "v": 1,
@@ -1800,12 +1800,12 @@
   "path": "b2/e",
   "tiles": {
    "": {
-    "a": 5,
-    "b": 20,
-    "k": "dir",
-    "n": "e",
-    "o": 1,
-    "us": [
+    "bytes": 20,
+    "kind": "dir",
+    "last_read": 5,
+    "name": "e",
+    "objects": 1,
+    "owners": [
      [
       "alice",
       20
@@ -1813,25 +1813,25 @@
     ]
    },
    "/a.txt": {
-    "b": 20,
-    "k": "dir",
-    "n": "a.txt",
-    "o": 2
+    "bytes": 20,
+    "kind": "dir",
+    "name": "a.txt",
+    "objects": 2
    },
    "/b.pq": {
-    "a": 6,
-    "b": 20,
-    "k": "dir",
-    "n": "b.pq",
-    "o": 1
+    "bytes": 20,
+    "kind": "dir",
+    "last_read": 6,
+    "name": "b.pq",
+    "objects": 1
    },
    "/d.json": {
-    "a": 5,
-    "b": 10,
-    "k": "dir",
-    "n": "d.json",
-    "o": 2,
-    "us": [
+    "bytes": 10,
+    "kind": "dir",
+    "last_read": 5,
+    "name": "d.json",
+    "objects": 2,
+    "owners": [
      [
       "alice",
       10
@@ -1839,74 +1839,12 @@
     ]
    },
    "/e": {
-    "a": 5,
-    "b": 20,
-    "k": "dir",
-    "n": "e",
-    "o": 1,
-    "us": [
-     [
-      "alice",
-      20
-     ]
-    ]
-   }
-  },
-  "v": 1,
-  "w": 8
- },
- {
-  "date": "2026-08-02",
-  "depth": 1,
-  "h": 6,
-  "path": "b2/e",
-  "tiles": {
-   "": {
-    "a": 5,
-    "b": 20,
-    "k": "dir",
-    "n": "e",
-    "o": 1,
-    "us": [
-     [
-      "alice",
-      20
-     ]
-    ]
-   },
-   "/a.txt": {
-    "b": 20,
-    "k": "dir",
-    "n": "a.txt",
-    "o": 2
-   },
-   "/b.pq": {
-    "a": 6,
-    "b": 20,
-    "k": "dir",
-    "n": "b.pq",
-    "o": 1
-   },
-   "/d.json": {
-    "a": 5,
-    "b": 10,
-    "k": "dir",
-    "n": "d.json",
-    "o": 2,
-    "us": [
-     [
-      "alice",
-      10
-     ]
-    ]
-   },
-   "/e": {
-    "a": 5,
-    "b": 20,
-    "k": "dir",
-    "n": "e",
-    "o": 1,
-    "us": [
+    "bytes": 20,
+    "kind": "dir",
+    "last_read": 5,
+    "name": "e",
+    "objects": 1,
+    "owners": [
      [
       "alice",
       20
@@ -1919,17 +1857,17 @@
  },
  {
   "date": "2026-08-02",
-  "depth": null,
-  "h": 30,
+  "depth": 1,
+  "h": 6,
   "path": "b2/e",
   "tiles": {
    "": {
-    "a": 5,
-    "b": 20,
-    "k": "dir",
-    "n": "e",
-    "o": 1,
-    "us": [
+    "bytes": 20,
+    "kind": "dir",
+    "last_read": 5,
+    "name": "e",
+    "objects": 1,
+    "owners": [
      [
       "alice",
       20
@@ -1937,25 +1875,25 @@
     ]
    },
    "/a.txt": {
-    "b": 20,
-    "k": "dir",
-    "n": "a.txt",
-    "o": 2
+    "bytes": 20,
+    "kind": "dir",
+    "name": "a.txt",
+    "objects": 2
    },
    "/b.pq": {
-    "a": 6,
-    "b": 20,
-    "k": "dir",
-    "n": "b.pq",
-    "o": 1
+    "bytes": 20,
+    "kind": "dir",
+    "last_read": 6,
+    "name": "b.pq",
+    "objects": 1
    },
    "/d.json": {
-    "a": 5,
-    "b": 10,
-    "k": "dir",
-    "n": "d.json",
-    "o": 2,
-    "us": [
+    "bytes": 10,
+    "kind": "dir",
+    "last_read": 5,
+    "name": "d.json",
+    "objects": 2,
+    "owners": [
      [
       "alice",
       10
@@ -1963,12 +1901,74 @@
     ]
    },
    "/e": {
-    "a": 5,
-    "b": 20,
-    "k": "dir",
-    "n": "e",
-    "o": 1,
-    "us": [
+    "bytes": 20,
+    "kind": "dir",
+    "last_read": 5,
+    "name": "e",
+    "objects": 1,
+    "owners": [
+     [
+      "alice",
+      20
+     ]
+    ]
+   }
+  },
+  "v": 1,
+  "w": 8
+ },
+ {
+  "date": "2026-08-02",
+  "depth": null,
+  "h": 30,
+  "path": "b2/e",
+  "tiles": {
+   "": {
+    "bytes": 20,
+    "kind": "dir",
+    "last_read": 5,
+    "name": "e",
+    "objects": 1,
+    "owners": [
+     [
+      "alice",
+      20
+     ]
+    ]
+   },
+   "/a.txt": {
+    "bytes": 20,
+    "kind": "dir",
+    "name": "a.txt",
+    "objects": 2
+   },
+   "/b.pq": {
+    "bytes": 20,
+    "kind": "dir",
+    "last_read": 6,
+    "name": "b.pq",
+    "objects": 1
+   },
+   "/d.json": {
+    "bytes": 10,
+    "kind": "dir",
+    "last_read": 5,
+    "name": "d.json",
+    "objects": 2,
+    "owners": [
+     [
+      "alice",
+      10
+     ]
+    ]
+   },
+   "/e": {
+    "bytes": 20,
+    "kind": "dir",
+    "last_read": 5,
+    "name": "e",
+    "objects": 1,
+    "owners": [
      [
       "alice",
       20
@@ -1986,12 +1986,12 @@
   "path": "b2/e",
   "tiles": {
    "": {
-    "a": 5,
-    "b": 20,
-    "k": "dir",
-    "n": "e",
-    "o": 1,
-    "us": [
+    "bytes": 20,
+    "kind": "dir",
+    "last_read": 5,
+    "name": "e",
+    "objects": 1,
+    "owners": [
      [
       "alice",
       20
@@ -1999,25 +1999,25 @@
     ]
    },
    "/a.txt": {
-    "b": 20,
-    "k": "dir",
-    "n": "a.txt",
-    "o": 2
+    "bytes": 20,
+    "kind": "dir",
+    "name": "a.txt",
+    "objects": 2
    },
    "/b.pq": {
-    "a": 6,
-    "b": 20,
-    "k": "dir",
-    "n": "b.pq",
-    "o": 1
+    "bytes": 20,
+    "kind": "dir",
+    "last_read": 6,
+    "name": "b.pq",
+    "objects": 1
    },
    "/d.json": {
-    "a": 5,
-    "b": 10,
-    "k": "dir",
-    "n": "d.json",
-    "o": 2,
-    "us": [
+    "bytes": 10,
+    "kind": "dir",
+    "last_read": 5,
+    "name": "d.json",
+    "objects": 2,
+    "owners": [
      [
       "alice",
       10
@@ -2025,12 +2025,12 @@
     ]
    },
    "/e": {
-    "a": 5,
-    "b": 20,
-    "k": "dir",
-    "n": "e",
-    "o": 1,
-    "us": [
+    "bytes": 20,
+    "kind": "dir",
+    "last_read": 5,
+    "name": "e",
+    "objects": 1,
+    "owners": [
      [
       "alice",
       20
@@ -2048,35 +2048,35 @@
   "path": "",
   "tiles": {
    "": {
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "dir",
-    "n": "all buckets",
-    "o": 1
+    "kind": "dir",
+    "mtime": 7,
+    "name": "all buckets",
+    "objects": 1
    },
    "/b1": {
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "dir",
-    "n": "b1",
-    "o": 1
+    "kind": "dir",
+    "mtime": 7,
+    "name": "b1",
+    "objects": 1
    },
    "/b1/d": {
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "dir",
-    "n": "d",
-    "o": 2,
-    "us": [
+    "kind": "dir",
+    "mtime": 7,
+    "name": "d",
+    "objects": 2,
+    "owners": [
      [
       "alice",
       10
@@ -2084,16 +2084,16 @@
     ]
    },
    "/b1/d/a.txt": {
-    "a": 6,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "file",
-    "n": "a.txt",
-    "o": 1,
-    "us": [
+    "kind": "file",
+    "last_read": 6,
+    "mtime": 7,
+    "name": "a.txt",
+    "objects": 1,
+    "owners": [
      [
       "alice",
       10
@@ -2101,16 +2101,16 @@
     ]
    },
    "/b1/d/b.pq": {
-    "a": 5,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "file",
-    "n": "b.pq",
-    "o": 1,
-    "us": [
+    "kind": "file",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "b.pq",
+    "objects": 1,
+    "owners": [
      [
       "alice",
       10
@@ -2118,16 +2118,16 @@
     ]
    },
    "/b1/d/e": {
-    "a": 6,
-    "b": 20,
-    "cb": {
+    "bytes": 20,
+    "class_bytes": {
      "4": 2
     },
-    "d": 0,
-    "k": "dir",
-    "n": "e",
-    "o": 1,
-    "us": [
+    "kind": "dir",
+    "last_read": 6,
+    "mtime": 7,
+    "name": "e",
+    "objects": 1,
+    "owners": [
      [
       "alice",
       20
@@ -2135,27 +2135,27 @@
     ]
    },
    "/b1/d/f.bin": {
-    "a": 5,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "file",
-    "n": "f.bin",
-    "o": 1
+    "kind": "file",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "f.bin",
+    "objects": 1
    },
    "/d.json": {
-    "a": 5,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "file",
-    "n": "d.json",
-    "o": 1,
-    "us": [
+    "kind": "file",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "d.json",
+    "objects": 1,
+    "owners": [
      [
       "alice",
       10
@@ -2163,16 +2163,16 @@
     ]
    },
    "/e": {
-    "a": 6,
-    "b": 20,
-    "cb": {
+    "bytes": 20,
+    "class_bytes": {
      "4": 2
     },
-    "d": 0,
-    "k": "dir",
-    "n": "e",
-    "o": 3,
-    "us": [
+    "kind": "dir",
+    "last_read": 6,
+    "mtime": 7,
+    "name": "e",
+    "objects": 3,
+    "owners": [
      [
       "alice",
       10
@@ -2180,49 +2180,49 @@
     ]
    },
    "/e#2": {
-    "a": 5,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "dir",
-    "n": "e",
-    "o": 1
+    "kind": "dir",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "e",
+    "objects": 1
    },
    "/e/d.json": {
-    "a": 6,
-    "b": 20,
-    "cb": {
+    "bytes": 20,
+    "class_bytes": {
      "4": 2
     },
-    "d": 0,
-    "k": "file",
-    "n": "d.json",
-    "o": 1
+    "kind": "file",
+    "last_read": 6,
+    "mtime": 7,
+    "name": "d.json",
+    "objects": 1
    },
    "/e/e": {
-    "a": 5,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "dir",
-    "n": "e",
-    "o": 1
+    "kind": "dir",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "e",
+    "objects": 1
    },
    "/f": {
-    "a": 5,
-    "b": 30,
-    "cb": {
+    "bytes": 30,
+    "class_bytes": {
      "4": 3
     },
-    "d": 0,
-    "k": "dir",
-    "n": "f",
-    "o": 2,
-    "us": [
+    "kind": "dir",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "f",
+    "objects": 2,
+    "owners": [
      [
       "alice",
       20
@@ -2230,26 +2230,26 @@
     ]
    },
    "/f/a.txt": {
-    "b": 20,
-    "cb": {
+    "bytes": 20,
+    "class_bytes": {
      "4": 2
     },
-    "d": 0,
-    "k": "file",
-    "n": "a.txt",
-    "o": 1
+    "kind": "file",
+    "mtime": 7,
+    "name": "a.txt",
+    "objects": 1
    },
    "/f/d.json": {
-    "a": 5,
-    "b": 20,
-    "cb": {
+    "bytes": 20,
+    "class_bytes": {
      "4": 2
     },
-    "d": 0,
-    "k": "file",
-    "n": "d.json",
-    "o": 1,
-    "us": [
+    "kind": "file",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "d.json",
+    "objects": 1,
+    "owners": [
      [
       "alice",
       20
@@ -2267,24 +2267,24 @@
   "path": "",
   "tiles": {
    "": {
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "dir",
-    "n": "all buckets",
-    "o": 1
+    "kind": "dir",
+    "mtime": 7,
+    "name": "all buckets",
+    "objects": 1
    },
    "/b1": {
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "dir",
-    "n": "b1",
-    "o": 1
+    "kind": "dir",
+    "mtime": 7,
+    "name": "b1",
+    "objects": 1
    }
   },
   "v": 2,
@@ -2297,35 +2297,35 @@
   "path": "",
   "tiles": {
    "": {
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "dir",
-    "n": "all buckets",
-    "o": 1
+    "kind": "dir",
+    "mtime": 7,
+    "name": "all buckets",
+    "objects": 1
    },
    "/b1": {
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "dir",
-    "n": "b1",
-    "o": 1
+    "kind": "dir",
+    "mtime": 7,
+    "name": "b1",
+    "objects": 1
    },
    "/b1/d": {
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "dir",
-    "n": "d",
-    "o": 2,
-    "us": [
+    "kind": "dir",
+    "mtime": 7,
+    "name": "d",
+    "objects": 2,
+    "owners": [
      [
       "alice",
       10
@@ -2333,16 +2333,16 @@
     ]
    },
    "/b1/d/a.txt": {
-    "a": 6,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "file",
-    "n": "a.txt",
-    "o": 1,
-    "us": [
+    "kind": "file",
+    "last_read": 6,
+    "mtime": 7,
+    "name": "a.txt",
+    "objects": 1,
+    "owners": [
      [
       "alice",
       10
@@ -2350,16 +2350,16 @@
     ]
    },
    "/b1/d/b.pq": {
-    "a": 5,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "file",
-    "n": "b.pq",
-    "o": 1,
-    "us": [
+    "kind": "file",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "b.pq",
+    "objects": 1,
+    "owners": [
      [
       "alice",
       10
@@ -2367,16 +2367,16 @@
     ]
    },
    "/b1/d/e": {
-    "a": 6,
-    "b": 20,
-    "cb": {
+    "bytes": 20,
+    "class_bytes": {
      "4": 2
     },
-    "d": 0,
-    "k": "dir",
-    "n": "e",
-    "o": 1,
-    "us": [
+    "kind": "dir",
+    "last_read": 6,
+    "mtime": 7,
+    "name": "e",
+    "objects": 1,
+    "owners": [
      [
       "alice",
       20
@@ -2384,27 +2384,27 @@
     ]
    },
    "/b1/d/f.bin": {
-    "a": 5,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "file",
-    "n": "f.bin",
-    "o": 1
+    "kind": "file",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "f.bin",
+    "objects": 1
    },
    "/d.json": {
-    "a": 5,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "file",
-    "n": "d.json",
-    "o": 1,
-    "us": [
+    "kind": "file",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "d.json",
+    "objects": 1,
+    "owners": [
      [
       "alice",
       10
@@ -2412,16 +2412,16 @@
     ]
    },
    "/e": {
-    "a": 6,
-    "b": 20,
-    "cb": {
+    "bytes": 20,
+    "class_bytes": {
      "4": 2
     },
-    "d": 0,
-    "k": "dir",
-    "n": "e",
-    "o": 3,
-    "us": [
+    "kind": "dir",
+    "last_read": 6,
+    "mtime": 7,
+    "name": "e",
+    "objects": 3,
+    "owners": [
      [
       "alice",
       10
@@ -2429,49 +2429,49 @@
     ]
    },
    "/e#2": {
-    "a": 5,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "dir",
-    "n": "e",
-    "o": 1
+    "kind": "dir",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "e",
+    "objects": 1
    },
    "/e/d.json": {
-    "a": 6,
-    "b": 20,
-    "cb": {
+    "bytes": 20,
+    "class_bytes": {
      "4": 2
     },
-    "d": 0,
-    "k": "file",
-    "n": "d.json",
-    "o": 1
+    "kind": "file",
+    "last_read": 6,
+    "mtime": 7,
+    "name": "d.json",
+    "objects": 1
    },
    "/e/e": {
-    "a": 5,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "dir",
-    "n": "e",
-    "o": 1
+    "kind": "dir",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "e",
+    "objects": 1
    },
    "/f": {
-    "a": 5,
-    "b": 30,
-    "cb": {
+    "bytes": 30,
+    "class_bytes": {
      "4": 3
     },
-    "d": 0,
-    "k": "dir",
-    "n": "f",
-    "o": 2,
-    "us": [
+    "kind": "dir",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "f",
+    "objects": 2,
+    "owners": [
      [
       "alice",
       20
@@ -2479,26 +2479,26 @@
     ]
    },
    "/f/a.txt": {
-    "b": 20,
-    "cb": {
+    "bytes": 20,
+    "class_bytes": {
      "4": 2
     },
-    "d": 0,
-    "k": "file",
-    "n": "a.txt",
-    "o": 1
+    "kind": "file",
+    "mtime": 7,
+    "name": "a.txt",
+    "objects": 1
    },
    "/f/d.json": {
-    "a": 5,
-    "b": 20,
-    "cb": {
+    "bytes": 20,
+    "class_bytes": {
      "4": 2
     },
-    "d": 0,
-    "k": "file",
-    "n": "d.json",
-    "o": 1,
-    "us": [
+    "kind": "file",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "d.json",
+    "objects": 1,
+    "owners": [
      [
       "alice",
       20
@@ -2516,24 +2516,24 @@
   "path": "",
   "tiles": {
    "": {
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "dir",
-    "n": "all buckets",
-    "o": 1
+    "kind": "dir",
+    "mtime": 7,
+    "name": "all buckets",
+    "objects": 1
    },
    "/b1": {
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "dir",
-    "n": "b1",
-    "o": 1
+    "kind": "dir",
+    "mtime": 7,
+    "name": "b1",
+    "objects": 1
    }
   },
   "v": 2,
@@ -2546,25 +2546,25 @@
   "path": "b1",
   "tiles": {
    "": {
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "dir",
-    "n": "b1",
-    "o": 1
+    "kind": "dir",
+    "mtime": 7,
+    "name": "b1",
+    "objects": 1
    },
    "/d": {
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "dir",
-    "n": "d",
-    "o": 2,
-    "us": [
+    "kind": "dir",
+    "mtime": 7,
+    "name": "d",
+    "objects": 2,
+    "owners": [
      [
       "alice",
       10
@@ -2572,16 +2572,16 @@
     ]
    },
    "/d.json": {
-    "a": 5,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "file",
-    "n": "d.json",
-    "o": 1,
-    "us": [
+    "kind": "file",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "d.json",
+    "objects": 1,
+    "owners": [
      [
       "alice",
       10
@@ -2589,16 +2589,16 @@
     ]
    },
    "/d/a.txt": {
-    "a": 6,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "file",
-    "n": "a.txt",
-    "o": 1,
-    "us": [
+    "kind": "file",
+    "last_read": 6,
+    "mtime": 7,
+    "name": "a.txt",
+    "objects": 1,
+    "owners": [
      [
       "alice",
       10
@@ -2606,16 +2606,16 @@
     ]
    },
    "/d/b.pq": {
-    "a": 5,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "file",
-    "n": "b.pq",
-    "o": 1,
-    "us": [
+    "kind": "file",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "b.pq",
+    "objects": 1,
+    "owners": [
      [
       "alice",
       10
@@ -2623,16 +2623,16 @@
     ]
    },
    "/d/e": {
-    "a": 6,
-    "b": 20,
-    "cb": {
+    "bytes": 20,
+    "class_bytes": {
      "4": 2
     },
-    "d": 0,
-    "k": "dir",
-    "n": "e",
-    "o": 1,
-    "us": [
+    "kind": "dir",
+    "last_read": 6,
+    "mtime": 7,
+    "name": "e",
+    "objects": 1,
+    "owners": [
      [
       "alice",
       20
@@ -2640,26 +2640,26 @@
     ]
    },
    "/d/f.bin": {
-    "a": 5,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "file",
-    "n": "f.bin",
-    "o": 1
+    "kind": "file",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "f.bin",
+    "objects": 1
    },
    "/e": {
-    "a": 5,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "dir",
-    "n": "e",
-    "o": 1
+    "kind": "dir",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "e",
+    "objects": 1
    }
   },
   "v": 2,
@@ -2672,25 +2672,25 @@
   "path": "b1",
   "tiles": {
    "": {
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "dir",
-    "n": "b1",
-    "o": 1
+    "kind": "dir",
+    "mtime": 7,
+    "name": "b1",
+    "objects": 1
    },
    "/d": {
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "dir",
-    "n": "d",
-    "o": 2,
-    "us": [
+    "kind": "dir",
+    "mtime": 7,
+    "name": "d",
+    "objects": 2,
+    "owners": [
      [
       "alice",
       10
@@ -2708,25 +2708,25 @@
   "path": "b1",
   "tiles": {
    "": {
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "dir",
-    "n": "b1",
-    "o": 1
+    "kind": "dir",
+    "mtime": 7,
+    "name": "b1",
+    "objects": 1
    },
    "/d": {
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "dir",
-    "n": "d",
-    "o": 2,
-    "us": [
+    "kind": "dir",
+    "mtime": 7,
+    "name": "d",
+    "objects": 2,
+    "owners": [
      [
       "alice",
       10
@@ -2734,16 +2734,16 @@
     ]
    },
    "/d.json": {
-    "a": 5,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "file",
-    "n": "d.json",
-    "o": 1,
-    "us": [
+    "kind": "file",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "d.json",
+    "objects": 1,
+    "owners": [
      [
       "alice",
       10
@@ -2751,16 +2751,16 @@
     ]
    },
    "/d/a.txt": {
-    "a": 6,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "file",
-    "n": "a.txt",
-    "o": 1,
-    "us": [
+    "kind": "file",
+    "last_read": 6,
+    "mtime": 7,
+    "name": "a.txt",
+    "objects": 1,
+    "owners": [
      [
       "alice",
       10
@@ -2768,16 +2768,16 @@
     ]
    },
    "/d/b.pq": {
-    "a": 5,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "file",
-    "n": "b.pq",
-    "o": 1,
-    "us": [
+    "kind": "file",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "b.pq",
+    "objects": 1,
+    "owners": [
      [
       "alice",
       10
@@ -2785,16 +2785,16 @@
     ]
    },
    "/d/e": {
-    "a": 6,
-    "b": 20,
-    "cb": {
+    "bytes": 20,
+    "class_bytes": {
      "4": 2
     },
-    "d": 0,
-    "k": "dir",
-    "n": "e",
-    "o": 1,
-    "us": [
+    "kind": "dir",
+    "last_read": 6,
+    "mtime": 7,
+    "name": "e",
+    "objects": 1,
+    "owners": [
      [
       "alice",
       20
@@ -2802,26 +2802,26 @@
     ]
    },
    "/d/f.bin": {
-    "a": 5,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "file",
-    "n": "f.bin",
-    "o": 1
+    "kind": "file",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "f.bin",
+    "objects": 1
    },
    "/e": {
-    "a": 5,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "dir",
-    "n": "e",
-    "o": 1
+    "kind": "dir",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "e",
+    "objects": 1
    }
   },
   "v": 2,
@@ -2834,25 +2834,25 @@
   "path": "b1",
   "tiles": {
    "": {
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "dir",
-    "n": "b1",
-    "o": 1
+    "kind": "dir",
+    "mtime": 7,
+    "name": "b1",
+    "objects": 1
    },
    "/d": {
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "dir",
-    "n": "d",
-    "o": 2,
-    "us": [
+    "kind": "dir",
+    "mtime": 7,
+    "name": "d",
+    "objects": 2,
+    "owners": [
      [
       "alice",
       10
@@ -2870,16 +2870,16 @@
   "path": "b2/e",
   "tiles": {
    "": {
-    "a": 6,
-    "b": 20,
-    "cb": {
+    "bytes": 20,
+    "class_bytes": {
      "4": 2
     },
-    "d": 0,
-    "k": "dir",
-    "n": "e",
-    "o": 3,
-    "us": [
+    "kind": "dir",
+    "last_read": 6,
+    "mtime": 7,
+    "name": "e",
+    "objects": 3,
+    "owners": [
      [
       "alice",
       10
@@ -2887,26 +2887,26 @@
     ]
    },
    "/d.json": {
-    "a": 6,
-    "b": 20,
-    "cb": {
+    "bytes": 20,
+    "class_bytes": {
      "4": 2
     },
-    "d": 0,
-    "k": "file",
-    "n": "d.json",
-    "o": 1
+    "kind": "file",
+    "last_read": 6,
+    "mtime": 7,
+    "name": "d.json",
+    "objects": 1
    },
    "/e": {
-    "a": 5,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "dir",
-    "n": "e",
-    "o": 1
+    "kind": "dir",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "e",
+    "objects": 1
    }
   },
   "v": 2,
@@ -2919,16 +2919,16 @@
   "path": "b2/e",
   "tiles": {
    "": {
-    "a": 6,
-    "b": 20,
-    "cb": {
+    "bytes": 20,
+    "class_bytes": {
      "4": 2
     },
-    "d": 0,
-    "k": "dir",
-    "n": "e",
-    "o": 3,
-    "us": [
+    "kind": "dir",
+    "last_read": 6,
+    "mtime": 7,
+    "name": "e",
+    "objects": 3,
+    "owners": [
      [
       "alice",
       10
@@ -2936,26 +2936,26 @@
     ]
    },
    "/d.json": {
-    "a": 6,
-    "b": 20,
-    "cb": {
+    "bytes": 20,
+    "class_bytes": {
      "4": 2
     },
-    "d": 0,
-    "k": "file",
-    "n": "d.json",
-    "o": 1
+    "kind": "file",
+    "last_read": 6,
+    "mtime": 7,
+    "name": "d.json",
+    "objects": 1
    },
    "/e": {
-    "a": 5,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "dir",
-    "n": "e",
-    "o": 1
+    "kind": "dir",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "e",
+    "objects": 1
    }
   },
   "v": 2,
@@ -2968,16 +2968,16 @@
   "path": "b2/e",
   "tiles": {
    "": {
-    "a": 6,
-    "b": 20,
-    "cb": {
+    "bytes": 20,
+    "class_bytes": {
      "4": 2
     },
-    "d": 0,
-    "k": "dir",
-    "n": "e",
-    "o": 3,
-    "us": [
+    "kind": "dir",
+    "last_read": 6,
+    "mtime": 7,
+    "name": "e",
+    "objects": 3,
+    "owners": [
      [
       "alice",
       10
@@ -2985,26 +2985,26 @@
     ]
    },
    "/d.json": {
-    "a": 6,
-    "b": 20,
-    "cb": {
+    "bytes": 20,
+    "class_bytes": {
      "4": 2
     },
-    "d": 0,
-    "k": "file",
-    "n": "d.json",
-    "o": 1
+    "kind": "file",
+    "last_read": 6,
+    "mtime": 7,
+    "name": "d.json",
+    "objects": 1
    },
    "/e": {
-    "a": 5,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "dir",
-    "n": "e",
-    "o": 1
+    "kind": "dir",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "e",
+    "objects": 1
    }
   },
   "v": 2,
@@ -3017,16 +3017,16 @@
   "path": "b2/e",
   "tiles": {
    "": {
-    "a": 6,
-    "b": 20,
-    "cb": {
+    "bytes": 20,
+    "class_bytes": {
      "4": 2
     },
-    "d": 0,
-    "k": "dir",
-    "n": "e",
-    "o": 3,
-    "us": [
+    "kind": "dir",
+    "last_read": 6,
+    "mtime": 7,
+    "name": "e",
+    "objects": 3,
+    "owners": [
      [
       "alice",
       10
@@ -3034,26 +3034,26 @@
     ]
    },
    "/d.json": {
-    "a": 6,
-    "b": 20,
-    "cb": {
+    "bytes": 20,
+    "class_bytes": {
      "4": 2
     },
-    "d": 0,
-    "k": "file",
-    "n": "d.json",
-    "o": 1
+    "kind": "file",
+    "last_read": 6,
+    "mtime": 7,
+    "name": "d.json",
+    "objects": 1
    },
    "/e": {
-    "a": 5,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "dir",
-    "n": "e",
-    "o": 1
+    "kind": "dir",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "e",
+    "objects": 1
    }
   },
   "v": 2,
@@ -3066,16 +3066,16 @@
   "path": "",
   "tiles": {
    "": {
-    "a": 5,
-    "b": 30,
-    "cb": {
+    "bytes": 30,
+    "class_bytes": {
      "4": 3
     },
-    "d": 0,
-    "k": "dir",
-    "n": "all buckets",
-    "o": 5,
-    "us": [
+    "kind": "dir",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "all buckets",
+    "objects": 5,
+    "owners": [
      [
       "bob",
       30
@@ -3087,16 +3087,16 @@
     ]
    },
    "/b1": {
-    "a": 5,
-    "b": 20,
-    "cb": {
+    "bytes": 20,
+    "class_bytes": {
      "4": 2
     },
-    "d": 0,
-    "k": "dir",
-    "n": "b1",
-    "o": 3,
-    "us": [
+    "kind": "dir",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "b1",
+    "objects": 3,
+    "owners": [
      [
       "bob",
       20
@@ -3108,16 +3108,16 @@
     ]
    },
    "/b1/d": {
-    "a": 6,
-    "b": 20,
-    "cb": {
+    "bytes": 20,
+    "class_bytes": {
      "4": 2
     },
-    "d": 0,
-    "k": "dir",
-    "n": "d",
-    "o": 2,
-    "us": [
+    "kind": "dir",
+    "last_read": 6,
+    "mtime": 7,
+    "name": "d",
+    "objects": 2,
+    "owners": [
      [
       "alice",
       10
@@ -3125,16 +3125,16 @@
     ]
    },
    "/b1/gof": {
-    "a": 5,
-    "b": 20,
-    "cb": {
+    "bytes": 20,
+    "class_bytes": {
      "4": 2
     },
-    "d": 0,
-    "k": "dir",
-    "n": "gof",
-    "o": 2,
-    "us": [
+    "kind": "dir",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "gof",
+    "objects": 2,
+    "owners": [
      [
       "alice",
       10
@@ -3146,16 +3146,16 @@
     ]
    },
    "/b2": {
-    "a": 5,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "dir",
-    "n": "b2",
-    "o": 2,
-    "us": [
+    "kind": "dir",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "b2",
+    "objects": 2,
+    "owners": [
      [
       "bob",
       10
@@ -3177,16 +3177,16 @@
   "path": "",
   "tiles": {
    "": {
-    "a": 5,
-    "b": 30,
-    "cb": {
+    "bytes": 30,
+    "class_bytes": {
      "4": 3
     },
-    "d": 0,
-    "k": "dir",
-    "n": "all buckets",
-    "o": 5,
-    "us": [
+    "kind": "dir",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "all buckets",
+    "objects": 5,
+    "owners": [
      [
       "bob",
       30
@@ -3198,16 +3198,16 @@
     ]
    },
    "/b1": {
-    "a": 5,
-    "b": 20,
-    "cb": {
+    "bytes": 20,
+    "class_bytes": {
      "4": 2
     },
-    "d": 0,
-    "k": "dir",
-    "n": "b1",
-    "o": 3,
-    "us": [
+    "kind": "dir",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "b1",
+    "objects": 3,
+    "owners": [
      [
       "bob",
       20
@@ -3219,16 +3219,16 @@
     ]
    },
    "/b2": {
-    "a": 5,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "dir",
-    "n": "b2",
-    "o": 2,
-    "us": [
+    "kind": "dir",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "b2",
+    "objects": 2,
+    "owners": [
      [
       "bob",
       10
@@ -3250,16 +3250,16 @@
   "path": "",
   "tiles": {
    "": {
-    "a": 5,
-    "b": 30,
-    "cb": {
+    "bytes": 30,
+    "class_bytes": {
      "4": 3
     },
-    "d": 0,
-    "k": "dir",
-    "n": "all buckets",
-    "o": 5,
-    "us": [
+    "kind": "dir",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "all buckets",
+    "objects": 5,
+    "owners": [
      [
       "bob",
       30
@@ -3271,16 +3271,16 @@
     ]
    },
    "/b1": {
-    "a": 5,
-    "b": 20,
-    "cb": {
+    "bytes": 20,
+    "class_bytes": {
      "4": 2
     },
-    "d": 0,
-    "k": "dir",
-    "n": "b1",
-    "o": 3,
-    "us": [
+    "kind": "dir",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "b1",
+    "objects": 3,
+    "owners": [
      [
       "bob",
       20
@@ -3292,16 +3292,16 @@
     ]
    },
    "/b1/d": {
-    "a": 6,
-    "b": 20,
-    "cb": {
+    "bytes": 20,
+    "class_bytes": {
      "4": 2
     },
-    "d": 0,
-    "k": "dir",
-    "n": "d",
-    "o": 2,
-    "us": [
+    "kind": "dir",
+    "last_read": 6,
+    "mtime": 7,
+    "name": "d",
+    "objects": 2,
+    "owners": [
      [
       "alice",
       10
@@ -3309,27 +3309,27 @@
     ]
    },
    "/b1/d/a.txt": {
-    "a": 5,
-    "b": 20,
-    "cb": {
+    "bytes": 20,
+    "class_bytes": {
      "4": 2
     },
-    "d": 0,
-    "k": "file",
-    "n": "a.txt",
-    "o": 1
+    "kind": "file",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "a.txt",
+    "objects": 1
    },
    "/b1/d/e": {
-    "a": 5,
-    "b": 20,
-    "cb": {
+    "bytes": 20,
+    "class_bytes": {
      "4": 2
     },
-    "d": 0,
-    "k": "dir",
-    "n": "e",
-    "o": 2,
-    "us": [
+    "kind": "dir",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "e",
+    "objects": 2,
+    "owners": [
      [
       "alice",
       10
@@ -3337,15 +3337,15 @@
     ]
    },
    "/b1/d/f.bin": {
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "file",
-    "n": "f.bin",
-    "o": 1,
-    "us": [
+    "kind": "file",
+    "mtime": 7,
+    "name": "f.bin",
+    "objects": 1,
+    "owners": [
      [
       "alice",
       10
@@ -3353,16 +3353,16 @@
     ]
    },
    "/b1/gof": {
-    "a": 5,
-    "b": 20,
-    "cb": {
+    "bytes": 20,
+    "class_bytes": {
      "4": 2
     },
-    "d": 0,
-    "k": "dir",
-    "n": "gof",
-    "o": 2,
-    "us": [
+    "kind": "dir",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "gof",
+    "objects": 2,
+    "owners": [
      [
       "alice",
       10
@@ -3374,58 +3374,58 @@
     ]
    },
    "/b1/gof/b.pq": {
-    "a": 6,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "file",
-    "n": "b.pq",
-    "o": 1
+    "kind": "file",
+    "last_read": 6,
+    "mtime": 7,
+    "name": "b.pq",
+    "objects": 1
    },
    "/b1/gof/d.json": {
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "file",
-    "n": "d.json",
-    "o": 2
+    "kind": "file",
+    "mtime": 7,
+    "name": "d.json",
+    "objects": 2
    },
    "/b1/gof/e": {
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "dir",
-    "n": "e",
-    "o": 2
+    "kind": "dir",
+    "mtime": 7,
+    "name": "e",
+    "objects": 2
    },
    "/b1/gof/f.bin": {
-    "a": 5,
-    "b": 20,
-    "cb": {
+    "bytes": 20,
+    "class_bytes": {
      "4": 2
     },
-    "d": 0,
-    "k": "file",
-    "n": "f.bin",
-    "o": 1
+    "kind": "file",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "f.bin",
+    "objects": 1
    },
    "/b2": {
-    "a": 5,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "dir",
-    "n": "b2",
-    "o": 2,
-    "us": [
+    "kind": "dir",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "b2",
+    "objects": 2,
+    "owners": [
      [
       "bob",
       10
@@ -3437,16 +3437,16 @@
     ]
    },
    "/b2/e": {
-    "a": 6,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "dir",
-    "n": "e",
-    "o": 3,
-    "us": [
+    "kind": "dir",
+    "last_read": 6,
+    "mtime": 7,
+    "name": "e",
+    "objects": 3,
+    "owners": [
      [
       "alice",
       0
@@ -3454,26 +3454,26 @@
     ]
    },
    "/b2/e/a.txt": {
-    "a": 5,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "file",
-    "n": "a.txt",
-    "o": 1
+    "kind": "file",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "a.txt",
+    "objects": 1
    },
    "/b2/e/d.json": {
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "file",
-    "n": "d.json",
-    "o": 1,
-    "us": [
+    "kind": "file",
+    "mtime": 7,
+    "name": "d.json",
+    "objects": 1,
+    "owners": [
      [
       "alice",
       10
@@ -3481,15 +3481,15 @@
     ]
    },
    "/b2/e/e": {
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "dir",
-    "n": "e",
-    "o": 1,
-    "us": [
+    "kind": "dir",
+    "mtime": 7,
+    "name": "e",
+    "objects": 1,
+    "owners": [
      [
       "alice",
       10
@@ -3497,16 +3497,16 @@
     ]
    },
    "/b2/f": {
-    "a": 6,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "dir",
-    "n": "f",
-    "o": 2,
-    "us": [
+    "kind": "dir",
+    "last_read": 6,
+    "mtime": 7,
+    "name": "f",
+    "objects": 2,
+    "owners": [
      [
       "alice",
       0
@@ -3514,16 +3514,16 @@
     ]
    },
    "/b2/f/a.txt": {
-    "a": 5,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "file",
-    "n": "a.txt",
-    "o": 1,
-    "us": [
+    "kind": "file",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "a.txt",
+    "objects": 1,
+    "owners": [
      [
       "alice",
       10
@@ -3531,16 +3531,16 @@
     ]
    },
    "/b2/f/c": {
-    "a": 6,
-    "b": 20,
-    "cb": {
+    "bytes": 20,
+    "class_bytes": {
      "4": 2
     },
-    "d": 0,
-    "k": "dir",
-    "n": "c",
-    "o": 2,
-    "us": [
+    "kind": "dir",
+    "last_read": 6,
+    "mtime": 7,
+    "name": "c",
+    "objects": 2,
+    "owners": [
      [
       "alice",
       10
@@ -3552,16 +3552,16 @@
     ]
    },
    "/b2/f/d.json": {
-    "a": 5,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "file",
-    "n": "d.json",
-    "o": 2,
-    "us": [
+    "kind": "file",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "d.json",
+    "objects": 2,
+    "owners": [
      [
       "alice",
       10
@@ -3579,16 +3579,16 @@
   "path": "",
   "tiles": {
    "": {
-    "a": 5,
-    "b": 30,
-    "cb": {
+    "bytes": 30,
+    "class_bytes": {
      "4": 3
     },
-    "d": 0,
-    "k": "dir",
-    "n": "all buckets",
-    "o": 5,
-    "us": [
+    "kind": "dir",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "all buckets",
+    "objects": 5,
+    "owners": [
      [
       "bob",
       30
@@ -3600,16 +3600,16 @@
     ]
    },
    "/b1": {
-    "a": 5,
-    "b": 20,
-    "cb": {
+    "bytes": 20,
+    "class_bytes": {
      "4": 2
     },
-    "d": 0,
-    "k": "dir",
-    "n": "b1",
-    "o": 3,
-    "us": [
+    "kind": "dir",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "b1",
+    "objects": 3,
+    "owners": [
      [
       "bob",
       20
@@ -3621,16 +3621,16 @@
     ]
    },
    "/b2": {
-    "a": 5,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "dir",
-    "n": "b2",
-    "o": 2,
-    "us": [
+    "kind": "dir",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "b2",
+    "objects": 2,
+    "owners": [
      [
       "bob",
       10
@@ -3652,16 +3652,16 @@
   "path": "b1",
   "tiles": {
    "": {
-    "a": 5,
-    "b": 20,
-    "cb": {
+    "bytes": 20,
+    "class_bytes": {
      "4": 2
     },
-    "d": 0,
-    "k": "dir",
-    "n": "b1",
-    "o": 3,
-    "us": [
+    "kind": "dir",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "b1",
+    "objects": 3,
+    "owners": [
      [
       "bob",
       20
@@ -3673,16 +3673,16 @@
     ]
    },
    "/d": {
-    "a": 6,
-    "b": 20,
-    "cb": {
+    "bytes": 20,
+    "class_bytes": {
      "4": 2
     },
-    "d": 0,
-    "k": "dir",
-    "n": "d",
-    "o": 2,
-    "us": [
+    "kind": "dir",
+    "last_read": 6,
+    "mtime": 7,
+    "name": "d",
+    "objects": 2,
+    "owners": [
      [
       "alice",
       10
@@ -3690,27 +3690,27 @@
     ]
    },
    "/d/a.txt": {
-    "a": 5,
-    "b": 20,
-    "cb": {
+    "bytes": 20,
+    "class_bytes": {
      "4": 2
     },
-    "d": 0,
-    "k": "file",
-    "n": "a.txt",
-    "o": 1
+    "kind": "file",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "a.txt",
+    "objects": 1
    },
    "/d/e": {
-    "a": 5,
-    "b": 20,
-    "cb": {
+    "bytes": 20,
+    "class_bytes": {
      "4": 2
     },
-    "d": 0,
-    "k": "dir",
-    "n": "e",
-    "o": 2,
-    "us": [
+    "kind": "dir",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "e",
+    "objects": 2,
+    "owners": [
      [
       "alice",
       10
@@ -3718,15 +3718,15 @@
     ]
    },
    "/d/f.bin": {
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "file",
-    "n": "f.bin",
-    "o": 1,
-    "us": [
+    "kind": "file",
+    "mtime": 7,
+    "name": "f.bin",
+    "objects": 1,
+    "owners": [
      [
       "alice",
       10
@@ -3734,16 +3734,16 @@
     ]
    },
    "/gof": {
-    "a": 5,
-    "b": 20,
-    "cb": {
+    "bytes": 20,
+    "class_bytes": {
      "4": 2
     },
-    "d": 0,
-    "k": "dir",
-    "n": "gof",
-    "o": 2,
-    "us": [
+    "kind": "dir",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "gof",
+    "objects": 2,
+    "owners": [
      [
       "alice",
       10
@@ -3755,46 +3755,46 @@
     ]
    },
    "/gof/b.pq": {
-    "a": 6,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "file",
-    "n": "b.pq",
-    "o": 1
+    "kind": "file",
+    "last_read": 6,
+    "mtime": 7,
+    "name": "b.pq",
+    "objects": 1
    },
    "/gof/d.json": {
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "file",
-    "n": "d.json",
-    "o": 2
+    "kind": "file",
+    "mtime": 7,
+    "name": "d.json",
+    "objects": 2
    },
    "/gof/e": {
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "dir",
-    "n": "e",
-    "o": 2
+    "kind": "dir",
+    "mtime": 7,
+    "name": "e",
+    "objects": 2
    },
    "/gof/f.bin": {
-    "a": 5,
-    "b": 20,
-    "cb": {
+    "bytes": 20,
+    "class_bytes": {
      "4": 2
     },
-    "d": 0,
-    "k": "file",
-    "n": "f.bin",
-    "o": 1
+    "kind": "file",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "f.bin",
+    "objects": 1
    }
   },
   "v": 2,
@@ -3807,16 +3807,16 @@
   "path": "b1",
   "tiles": {
    "": {
-    "a": 5,
-    "b": 20,
-    "cb": {
+    "bytes": 20,
+    "class_bytes": {
      "4": 2
     },
-    "d": 0,
-    "k": "dir",
-    "n": "b1",
-    "o": 3,
-    "us": [
+    "kind": "dir",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "b1",
+    "objects": 3,
+    "owners": [
      [
       "bob",
       20
@@ -3828,16 +3828,16 @@
     ]
    },
    "/d": {
-    "a": 6,
-    "b": 20,
-    "cb": {
+    "bytes": 20,
+    "class_bytes": {
      "4": 2
     },
-    "d": 0,
-    "k": "dir",
-    "n": "d",
-    "o": 2,
-    "us": [
+    "kind": "dir",
+    "last_read": 6,
+    "mtime": 7,
+    "name": "d",
+    "objects": 2,
+    "owners": [
      [
       "alice",
       10
@@ -3845,16 +3845,16 @@
     ]
    },
    "/gof": {
-    "a": 5,
-    "b": 20,
-    "cb": {
+    "bytes": 20,
+    "class_bytes": {
      "4": 2
     },
-    "d": 0,
-    "k": "dir",
-    "n": "gof",
-    "o": 2,
-    "us": [
+    "kind": "dir",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "gof",
+    "objects": 2,
+    "owners": [
      [
       "alice",
       10
@@ -3876,16 +3876,16 @@
   "path": "b1",
   "tiles": {
    "": {
-    "a": 5,
-    "b": 20,
-    "cb": {
+    "bytes": 20,
+    "class_bytes": {
      "4": 2
     },
-    "d": 0,
-    "k": "dir",
-    "n": "b1",
-    "o": 3,
-    "us": [
+    "kind": "dir",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "b1",
+    "objects": 3,
+    "owners": [
      [
       "bob",
       20
@@ -3897,16 +3897,16 @@
     ]
    },
    "/d": {
-    "a": 6,
-    "b": 20,
-    "cb": {
+    "bytes": 20,
+    "class_bytes": {
      "4": 2
     },
-    "d": 0,
-    "k": "dir",
-    "n": "d",
-    "o": 2,
-    "us": [
+    "kind": "dir",
+    "last_read": 6,
+    "mtime": 7,
+    "name": "d",
+    "objects": 2,
+    "owners": [
      [
       "alice",
       10
@@ -3914,27 +3914,27 @@
     ]
    },
    "/d/a.txt": {
-    "a": 5,
-    "b": 20,
-    "cb": {
+    "bytes": 20,
+    "class_bytes": {
      "4": 2
     },
-    "d": 0,
-    "k": "file",
-    "n": "a.txt",
-    "o": 1
+    "kind": "file",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "a.txt",
+    "objects": 1
    },
    "/d/e": {
-    "a": 5,
-    "b": 20,
-    "cb": {
+    "bytes": 20,
+    "class_bytes": {
      "4": 2
     },
-    "d": 0,
-    "k": "dir",
-    "n": "e",
-    "o": 2,
-    "us": [
+    "kind": "dir",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "e",
+    "objects": 2,
+    "owners": [
      [
       "alice",
       10
@@ -3942,15 +3942,15 @@
     ]
    },
    "/d/f.bin": {
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "file",
-    "n": "f.bin",
-    "o": 1,
-    "us": [
+    "kind": "file",
+    "mtime": 7,
+    "name": "f.bin",
+    "objects": 1,
+    "owners": [
      [
       "alice",
       10
@@ -3958,16 +3958,16 @@
     ]
    },
    "/gof": {
-    "a": 5,
-    "b": 20,
-    "cb": {
+    "bytes": 20,
+    "class_bytes": {
      "4": 2
     },
-    "d": 0,
-    "k": "dir",
-    "n": "gof",
-    "o": 2,
-    "us": [
+    "kind": "dir",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "gof",
+    "objects": 2,
+    "owners": [
      [
       "alice",
       10
@@ -3979,46 +3979,46 @@
     ]
    },
    "/gof/b.pq": {
-    "a": 6,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "file",
-    "n": "b.pq",
-    "o": 1
+    "kind": "file",
+    "last_read": 6,
+    "mtime": 7,
+    "name": "b.pq",
+    "objects": 1
    },
    "/gof/d.json": {
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "file",
-    "n": "d.json",
-    "o": 2
+    "kind": "file",
+    "mtime": 7,
+    "name": "d.json",
+    "objects": 2
    },
    "/gof/e": {
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "dir",
-    "n": "e",
-    "o": 2
+    "kind": "dir",
+    "mtime": 7,
+    "name": "e",
+    "objects": 2
    },
    "/gof/f.bin": {
-    "a": 5,
-    "b": 20,
-    "cb": {
+    "bytes": 20,
+    "class_bytes": {
      "4": 2
     },
-    "d": 0,
-    "k": "file",
-    "n": "f.bin",
-    "o": 1
+    "kind": "file",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "f.bin",
+    "objects": 1
    }
   },
   "v": 2,
@@ -4031,16 +4031,16 @@
   "path": "b1",
   "tiles": {
    "": {
-    "a": 5,
-    "b": 20,
-    "cb": {
+    "bytes": 20,
+    "class_bytes": {
      "4": 2
     },
-    "d": 0,
-    "k": "dir",
-    "n": "b1",
-    "o": 3,
-    "us": [
+    "kind": "dir",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "b1",
+    "objects": 3,
+    "owners": [
      [
       "bob",
       20
@@ -4052,16 +4052,16 @@
     ]
    },
    "/d": {
-    "a": 6,
-    "b": 20,
-    "cb": {
+    "bytes": 20,
+    "class_bytes": {
      "4": 2
     },
-    "d": 0,
-    "k": "dir",
-    "n": "d",
-    "o": 2,
-    "us": [
+    "kind": "dir",
+    "last_read": 6,
+    "mtime": 7,
+    "name": "d",
+    "objects": 2,
+    "owners": [
      [
       "alice",
       10
@@ -4069,16 +4069,16 @@
     ]
    },
    "/gof": {
-    "a": 5,
-    "b": 20,
-    "cb": {
+    "bytes": 20,
+    "class_bytes": {
      "4": 2
     },
-    "d": 0,
-    "k": "dir",
-    "n": "gof",
-    "o": 2,
-    "us": [
+    "kind": "dir",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "gof",
+    "objects": 2,
+    "owners": [
      [
       "alice",
       10
@@ -4100,16 +4100,16 @@
   "path": "b2",
   "tiles": {
    "": {
-    "a": 5,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "dir",
-    "n": "b2",
-    "o": 2,
-    "us": [
+    "kind": "dir",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "b2",
+    "objects": 2,
+    "owners": [
      [
       "bob",
       10
@@ -4121,16 +4121,16 @@
     ]
    },
    "/e": {
-    "a": 6,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "dir",
-    "n": "e",
-    "o": 3,
-    "us": [
+    "kind": "dir",
+    "last_read": 6,
+    "mtime": 7,
+    "name": "e",
+    "objects": 3,
+    "owners": [
      [
       "alice",
       0
@@ -4138,26 +4138,26 @@
     ]
    },
    "/e/a.txt": {
-    "a": 5,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "file",
-    "n": "a.txt",
-    "o": 1
+    "kind": "file",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "a.txt",
+    "objects": 1
    },
    "/e/d.json": {
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "file",
-    "n": "d.json",
-    "o": 1,
-    "us": [
+    "kind": "file",
+    "mtime": 7,
+    "name": "d.json",
+    "objects": 1,
+    "owners": [
      [
       "alice",
       10
@@ -4165,15 +4165,15 @@
     ]
    },
    "/e/e": {
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "dir",
-    "n": "e",
-    "o": 1,
-    "us": [
+    "kind": "dir",
+    "mtime": 7,
+    "name": "e",
+    "objects": 1,
+    "owners": [
      [
       "alice",
       10
@@ -4181,16 +4181,16 @@
     ]
    },
    "/f": {
-    "a": 6,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "dir",
-    "n": "f",
-    "o": 2,
-    "us": [
+    "kind": "dir",
+    "last_read": 6,
+    "mtime": 7,
+    "name": "f",
+    "objects": 2,
+    "owners": [
      [
       "alice",
       0
@@ -4198,16 +4198,16 @@
     ]
    },
    "/f/a.txt": {
-    "a": 5,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "file",
-    "n": "a.txt",
-    "o": 1,
-    "us": [
+    "kind": "file",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "a.txt",
+    "objects": 1,
+    "owners": [
      [
       "alice",
       10
@@ -4215,16 +4215,16 @@
     ]
    },
    "/f/c": {
-    "a": 6,
-    "b": 20,
-    "cb": {
+    "bytes": 20,
+    "class_bytes": {
      "4": 2
     },
-    "d": 0,
-    "k": "dir",
-    "n": "c",
-    "o": 2,
-    "us": [
+    "kind": "dir",
+    "last_read": 6,
+    "mtime": 7,
+    "name": "c",
+    "objects": 2,
+    "owners": [
      [
       "alice",
       10
@@ -4236,16 +4236,16 @@
     ]
    },
    "/f/d.json": {
-    "a": 5,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "file",
-    "n": "d.json",
-    "o": 2,
-    "us": [
+    "kind": "file",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "d.json",
+    "objects": 2,
+    "owners": [
      [
       "alice",
       10
@@ -4263,16 +4263,16 @@
   "path": "b2",
   "tiles": {
    "": {
-    "a": 5,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "dir",
-    "n": "b2",
-    "o": 2,
-    "us": [
+    "kind": "dir",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "b2",
+    "objects": 2,
+    "owners": [
      [
       "bob",
       10
@@ -4284,16 +4284,16 @@
     ]
    },
    "/e": {
-    "a": 6,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "dir",
-    "n": "e",
-    "o": 3,
-    "us": [
+    "kind": "dir",
+    "last_read": 6,
+    "mtime": 7,
+    "name": "e",
+    "objects": 3,
+    "owners": [
      [
       "alice",
       0
@@ -4301,16 +4301,16 @@
     ]
    },
    "/f": {
-    "a": 6,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "dir",
-    "n": "f",
-    "o": 2,
-    "us": [
+    "kind": "dir",
+    "last_read": 6,
+    "mtime": 7,
+    "name": "f",
+    "objects": 2,
+    "owners": [
      [
       "alice",
       0
@@ -4328,16 +4328,16 @@
   "path": "b2",
   "tiles": {
    "": {
-    "a": 5,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "dir",
-    "n": "b2",
-    "o": 2,
-    "us": [
+    "kind": "dir",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "b2",
+    "objects": 2,
+    "owners": [
      [
       "bob",
       10
@@ -4349,16 +4349,16 @@
     ]
    },
    "/e": {
-    "a": 6,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "dir",
-    "n": "e",
-    "o": 3,
-    "us": [
+    "kind": "dir",
+    "last_read": 6,
+    "mtime": 7,
+    "name": "e",
+    "objects": 3,
+    "owners": [
      [
       "alice",
       0
@@ -4366,26 +4366,26 @@
     ]
    },
    "/e/a.txt": {
-    "a": 5,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "file",
-    "n": "a.txt",
-    "o": 1
+    "kind": "file",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "a.txt",
+    "objects": 1
    },
    "/e/d.json": {
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "file",
-    "n": "d.json",
-    "o": 1,
-    "us": [
+    "kind": "file",
+    "mtime": 7,
+    "name": "d.json",
+    "objects": 1,
+    "owners": [
      [
       "alice",
       10
@@ -4393,15 +4393,15 @@
     ]
    },
    "/e/e": {
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "dir",
-    "n": "e",
-    "o": 1,
-    "us": [
+    "kind": "dir",
+    "mtime": 7,
+    "name": "e",
+    "objects": 1,
+    "owners": [
      [
       "alice",
       10
@@ -4409,16 +4409,16 @@
     ]
    },
    "/f": {
-    "a": 6,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "dir",
-    "n": "f",
-    "o": 2,
-    "us": [
+    "kind": "dir",
+    "last_read": 6,
+    "mtime": 7,
+    "name": "f",
+    "objects": 2,
+    "owners": [
      [
       "alice",
       0
@@ -4426,16 +4426,16 @@
     ]
    },
    "/f/a.txt": {
-    "a": 5,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "file",
-    "n": "a.txt",
-    "o": 1,
-    "us": [
+    "kind": "file",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "a.txt",
+    "objects": 1,
+    "owners": [
      [
       "alice",
       10
@@ -4443,16 +4443,16 @@
     ]
    },
    "/f/c": {
-    "a": 6,
-    "b": 20,
-    "cb": {
+    "bytes": 20,
+    "class_bytes": {
      "4": 2
     },
-    "d": 0,
-    "k": "dir",
-    "n": "c",
-    "o": 2,
-    "us": [
+    "kind": "dir",
+    "last_read": 6,
+    "mtime": 7,
+    "name": "c",
+    "objects": 2,
+    "owners": [
      [
       "alice",
       10
@@ -4464,16 +4464,16 @@
     ]
    },
    "/f/d.json": {
-    "a": 5,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "file",
-    "n": "d.json",
-    "o": 2,
-    "us": [
+    "kind": "file",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "d.json",
+    "objects": 2,
+    "owners": [
      [
       "alice",
       10
@@ -4491,16 +4491,16 @@
   "path": "b2",
   "tiles": {
    "": {
-    "a": 5,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "dir",
-    "n": "b2",
-    "o": 2,
-    "us": [
+    "kind": "dir",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "b2",
+    "objects": 2,
+    "owners": [
      [
       "bob",
       10
@@ -4512,16 +4512,16 @@
     ]
    },
    "/e": {
-    "a": 6,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "dir",
-    "n": "e",
-    "o": 3,
-    "us": [
+    "kind": "dir",
+    "last_read": 6,
+    "mtime": 7,
+    "name": "e",
+    "objects": 3,
+    "owners": [
      [
       "alice",
       0
@@ -4529,16 +4529,16 @@
     ]
    },
    "/f": {
-    "a": 6,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "dir",
-    "n": "f",
-    "o": 2,
-    "us": [
+    "kind": "dir",
+    "last_read": 6,
+    "mtime": 7,
+    "name": "f",
+    "objects": 2,
+    "owners": [
      [
       "alice",
       0
@@ -4556,16 +4556,16 @@
   "path": "b1/gof",
   "tiles": {
    "": {
-    "a": 5,
-    "b": 20,
-    "cb": {
+    "bytes": 20,
+    "class_bytes": {
      "4": 2
     },
-    "d": 0,
-    "k": "dir",
-    "n": "gof",
-    "o": 2,
-    "us": [
+    "kind": "dir",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "gof",
+    "objects": 2,
+    "owners": [
      [
       "alice",
       10
@@ -4577,46 +4577,46 @@
     ]
    },
    "/b.pq": {
-    "a": 6,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "file",
-    "n": "b.pq",
-    "o": 1
+    "kind": "file",
+    "last_read": 6,
+    "mtime": 7,
+    "name": "b.pq",
+    "objects": 1
    },
    "/d.json": {
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "file",
-    "n": "d.json",
-    "o": 2
+    "kind": "file",
+    "mtime": 7,
+    "name": "d.json",
+    "objects": 2
    },
    "/e": {
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "dir",
-    "n": "e",
-    "o": 2
+    "kind": "dir",
+    "mtime": 7,
+    "name": "e",
+    "objects": 2
    },
    "/f.bin": {
-    "a": 5,
-    "b": 20,
-    "cb": {
+    "bytes": 20,
+    "class_bytes": {
      "4": 2
     },
-    "d": 0,
-    "k": "file",
-    "n": "f.bin",
-    "o": 1
+    "kind": "file",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "f.bin",
+    "objects": 1
    }
   },
   "v": 2,
@@ -4629,16 +4629,16 @@
   "path": "b1/gof",
   "tiles": {
    "": {
-    "a": 5,
-    "b": 20,
-    "cb": {
+    "bytes": 20,
+    "class_bytes": {
      "4": 2
     },
-    "d": 0,
-    "k": "dir",
-    "n": "gof",
-    "o": 2,
-    "us": [
+    "kind": "dir",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "gof",
+    "objects": 2,
+    "owners": [
      [
       "alice",
       10
@@ -4650,46 +4650,46 @@
     ]
    },
    "/b.pq": {
-    "a": 6,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "file",
-    "n": "b.pq",
-    "o": 1
+    "kind": "file",
+    "last_read": 6,
+    "mtime": 7,
+    "name": "b.pq",
+    "objects": 1
    },
    "/d.json": {
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "file",
-    "n": "d.json",
-    "o": 2
+    "kind": "file",
+    "mtime": 7,
+    "name": "d.json",
+    "objects": 2
    },
    "/e": {
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "dir",
-    "n": "e",
-    "o": 2
+    "kind": "dir",
+    "mtime": 7,
+    "name": "e",
+    "objects": 2
    },
    "/f.bin": {
-    "a": 5,
-    "b": 20,
-    "cb": {
+    "bytes": 20,
+    "class_bytes": {
      "4": 2
     },
-    "d": 0,
-    "k": "file",
-    "n": "f.bin",
-    "o": 1
+    "kind": "file",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "f.bin",
+    "objects": 1
    }
   },
   "v": 2,
@@ -4702,16 +4702,16 @@
   "path": "b1/gof",
   "tiles": {
    "": {
-    "a": 5,
-    "b": 20,
-    "cb": {
+    "bytes": 20,
+    "class_bytes": {
      "4": 2
     },
-    "d": 0,
-    "k": "dir",
-    "n": "gof",
-    "o": 2,
-    "us": [
+    "kind": "dir",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "gof",
+    "objects": 2,
+    "owners": [
      [
       "alice",
       10
@@ -4723,46 +4723,46 @@
     ]
    },
    "/b.pq": {
-    "a": 6,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "file",
-    "n": "b.pq",
-    "o": 1
+    "kind": "file",
+    "last_read": 6,
+    "mtime": 7,
+    "name": "b.pq",
+    "objects": 1
    },
    "/d.json": {
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "file",
-    "n": "d.json",
-    "o": 2
+    "kind": "file",
+    "mtime": 7,
+    "name": "d.json",
+    "objects": 2
    },
    "/e": {
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "dir",
-    "n": "e",
-    "o": 2
+    "kind": "dir",
+    "mtime": 7,
+    "name": "e",
+    "objects": 2
    },
    "/f.bin": {
-    "a": 5,
-    "b": 20,
-    "cb": {
+    "bytes": 20,
+    "class_bytes": {
      "4": 2
     },
-    "d": 0,
-    "k": "file",
-    "n": "f.bin",
-    "o": 1
+    "kind": "file",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "f.bin",
+    "objects": 1
    }
   },
   "v": 2,
@@ -4775,16 +4775,16 @@
   "path": "b1/gof",
   "tiles": {
    "": {
-    "a": 5,
-    "b": 20,
-    "cb": {
+    "bytes": 20,
+    "class_bytes": {
      "4": 2
     },
-    "d": 0,
-    "k": "dir",
-    "n": "gof",
-    "o": 2,
-    "us": [
+    "kind": "dir",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "gof",
+    "objects": 2,
+    "owners": [
      [
       "alice",
       10
@@ -4796,46 +4796,46 @@
     ]
    },
    "/b.pq": {
-    "a": 6,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "file",
-    "n": "b.pq",
-    "o": 1
+    "kind": "file",
+    "last_read": 6,
+    "mtime": 7,
+    "name": "b.pq",
+    "objects": 1
    },
    "/d.json": {
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "file",
-    "n": "d.json",
-    "o": 2
+    "kind": "file",
+    "mtime": 7,
+    "name": "d.json",
+    "objects": 2
    },
    "/e": {
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "dir",
-    "n": "e",
-    "o": 2
+    "kind": "dir",
+    "mtime": 7,
+    "name": "e",
+    "objects": 2
    },
    "/f.bin": {
-    "a": 5,
-    "b": 20,
-    "cb": {
+    "bytes": 20,
+    "class_bytes": {
      "4": 2
     },
-    "d": 0,
-    "k": "file",
-    "n": "f.bin",
-    "o": 1
+    "kind": "file",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "f.bin",
+    "objects": 1
    }
   },
   "v": 2,
@@ -4848,16 +4848,16 @@
   "path": "b2/e",
   "tiles": {
    "": {
-    "a": 6,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "dir",
-    "n": "e",
-    "o": 3,
-    "us": [
+    "kind": "dir",
+    "last_read": 6,
+    "mtime": 7,
+    "name": "e",
+    "objects": 3,
+    "owners": [
      [
       "alice",
       0
@@ -4865,26 +4865,26 @@
     ]
    },
    "/a.txt": {
-    "a": 5,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "file",
-    "n": "a.txt",
-    "o": 1
+    "kind": "file",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "a.txt",
+    "objects": 1
    },
    "/d.json": {
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "file",
-    "n": "d.json",
-    "o": 1,
-    "us": [
+    "kind": "file",
+    "mtime": 7,
+    "name": "d.json",
+    "objects": 1,
+    "owners": [
      [
       "alice",
       10
@@ -4892,15 +4892,15 @@
     ]
    },
    "/e": {
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "dir",
-    "n": "e",
-    "o": 1,
-    "us": [
+    "kind": "dir",
+    "mtime": 7,
+    "name": "e",
+    "objects": 1,
+    "owners": [
      [
       "alice",
       10
@@ -4918,16 +4918,16 @@
   "path": "b2/e",
   "tiles": {
    "": {
-    "a": 6,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "dir",
-    "n": "e",
-    "o": 3,
-    "us": [
+    "kind": "dir",
+    "last_read": 6,
+    "mtime": 7,
+    "name": "e",
+    "objects": 3,
+    "owners": [
      [
       "alice",
       0
@@ -4935,26 +4935,26 @@
     ]
    },
    "/a.txt": {
-    "a": 5,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "file",
-    "n": "a.txt",
-    "o": 1
+    "kind": "file",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "a.txt",
+    "objects": 1
    },
    "/d.json": {
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "file",
-    "n": "d.json",
-    "o": 1,
-    "us": [
+    "kind": "file",
+    "mtime": 7,
+    "name": "d.json",
+    "objects": 1,
+    "owners": [
      [
       "alice",
       10
@@ -4962,15 +4962,15 @@
     ]
    },
    "/e": {
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "dir",
-    "n": "e",
-    "o": 1,
-    "us": [
+    "kind": "dir",
+    "mtime": 7,
+    "name": "e",
+    "objects": 1,
+    "owners": [
      [
       "alice",
       10
@@ -4988,16 +4988,16 @@
   "path": "b2/e",
   "tiles": {
    "": {
-    "a": 6,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "dir",
-    "n": "e",
-    "o": 3,
-    "us": [
+    "kind": "dir",
+    "last_read": 6,
+    "mtime": 7,
+    "name": "e",
+    "objects": 3,
+    "owners": [
      [
       "alice",
       0
@@ -5005,26 +5005,26 @@
     ]
    },
    "/a.txt": {
-    "a": 5,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "file",
-    "n": "a.txt",
-    "o": 1
+    "kind": "file",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "a.txt",
+    "objects": 1
    },
    "/d.json": {
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "file",
-    "n": "d.json",
-    "o": 1,
-    "us": [
+    "kind": "file",
+    "mtime": 7,
+    "name": "d.json",
+    "objects": 1,
+    "owners": [
      [
       "alice",
       10
@@ -5032,15 +5032,15 @@
     ]
    },
    "/e": {
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "dir",
-    "n": "e",
-    "o": 1,
-    "us": [
+    "kind": "dir",
+    "mtime": 7,
+    "name": "e",
+    "objects": 1,
+    "owners": [
      [
       "alice",
       10
@@ -5058,16 +5058,16 @@
   "path": "b2/e",
   "tiles": {
    "": {
-    "a": 6,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "dir",
-    "n": "e",
-    "o": 3,
-    "us": [
+    "kind": "dir",
+    "last_read": 6,
+    "mtime": 7,
+    "name": "e",
+    "objects": 3,
+    "owners": [
      [
       "alice",
       0
@@ -5075,26 +5075,26 @@
     ]
    },
    "/a.txt": {
-    "a": 5,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "file",
-    "n": "a.txt",
-    "o": 1
+    "kind": "file",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "a.txt",
+    "objects": 1
    },
    "/d.json": {
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "file",
-    "n": "d.json",
-    "o": 1,
-    "us": [
+    "kind": "file",
+    "mtime": 7,
+    "name": "d.json",
+    "objects": 1,
+    "owners": [
      [
       "alice",
       10
@@ -5102,15 +5102,15 @@
     ]
    },
    "/e": {
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "dir",
-    "n": "e",
-    "o": 1,
-    "us": [
+    "kind": "dir",
+    "mtime": 7,
+    "name": "e",
+    "objects": 1,
+    "owners": [
      [
       "alice",
       10
@@ -5128,71 +5128,71 @@
   "path": "",
   "tiles": {
    "": {
-    "a": 5,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "dir",
-    "n": "all buckets",
-    "o": 2
+    "kind": "dir",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "all buckets",
+    "objects": 2
    },
    "/b1": {
-    "a": 5,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "dir",
-    "n": "b1",
-    "o": 1
+    "kind": "dir",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "b1",
+    "objects": 1
    },
    "/b1/d": {
-    "a": 5,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "dir",
-    "n": "d",
-    "o": 1
+    "kind": "dir",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "d",
+    "objects": 1
    },
    "/b1/d/a.txt": {
-    "a": 5,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "file",
-    "n": "a.txt",
-    "o": 2
+    "kind": "file",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "a.txt",
+    "objects": 2
    },
    "/b1/d/b.pq": {
-    "a": 5,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "file",
-    "n": "b.pq",
-    "o": 1
+    "kind": "file",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "b.pq",
+    "objects": 1
    },
    "/b1/d/e": {
-    "a": 5,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "dir",
-    "n": "e",
-    "o": 1,
-    "us": [
+    "kind": "dir",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "e",
+    "objects": 1,
+    "owners": [
      [
       "alice",
       10
@@ -5200,27 +5200,27 @@
     ]
    },
    "/b1/gof": {
-    "a": 5,
-    "b": 20,
-    "cb": {
+    "bytes": 20,
+    "class_bytes": {
      "4": 2
     },
-    "d": 0,
-    "k": "dir",
-    "n": "gof",
-    "o": 1
+    "kind": "dir",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "gof",
+    "objects": 1
    },
    "/b1/gof/b.pq": {
-    "a": 6,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "file",
-    "n": "b.pq",
-    "o": 1,
-    "us": [
+    "kind": "file",
+    "last_read": 6,
+    "mtime": 7,
+    "name": "b.pq",
+    "objects": 1,
+    "owners": [
      [
       "alice",
       10
@@ -5228,48 +5228,48 @@
     ]
    },
    "/b1/gof/d.json": {
-    "a": 5,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "file",
-    "n": "d.json",
-    "o": 2
+    "kind": "file",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "d.json",
+    "objects": 2
    },
    "/b1/gof/e": {
-    "a": 5,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "dir",
-    "n": "e",
-    "o": 1
+    "kind": "dir",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "e",
+    "objects": 1
    },
    "/b1/gof/f.bin": {
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "file",
-    "n": "f.bin",
-    "o": 1
+    "kind": "file",
+    "mtime": 7,
+    "name": "f.bin",
+    "objects": 1
    },
    "/c": {
-    "a": 6,
-    "b": 20,
-    "cb": {
+    "bytes": 20,
+    "class_bytes": {
      "4": 2
     },
-    "d": 0,
-    "k": "dir",
-    "n": "c",
-    "o": 2,
-    "us": [
+    "kind": "dir",
+    "last_read": 6,
+    "mtime": 7,
+    "name": "c",
+    "objects": 2,
+    "owners": [
      [
       "alice",
       10
@@ -5277,15 +5277,15 @@
     ]
    },
    "/d.json": {
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "file",
-    "n": "d.json",
-    "o": 1,
-    "us": [
+    "kind": "file",
+    "mtime": 7,
+    "name": "d.json",
+    "objects": 1,
+    "owners": [
      [
       "alice",
       10
@@ -5293,37 +5293,37 @@
     ]
    },
    "/e": {
-    "a": 5,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "dir",
-    "n": "e",
-    "o": 2
+    "kind": "dir",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "e",
+    "objects": 2
    },
    "/e/a.txt": {
-    "b": 20,
-    "cb": {
+    "bytes": 20,
+    "class_bytes": {
      "4": 2
     },
-    "d": 0,
-    "k": "file",
-    "n": "a.txt",
-    "o": 1
+    "kind": "file",
+    "mtime": 7,
+    "name": "a.txt",
+    "objects": 1
    },
    "/e/b.pq": {
-    "a": 5,
-    "b": 20,
-    "cb": {
+    "bytes": 20,
+    "class_bytes": {
      "4": 2
     },
-    "d": 0,
-    "k": "file",
-    "n": "b.pq",
-    "o": 2,
-    "us": [
+    "kind": "file",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "b.pq",
+    "objects": 2,
+    "owners": [
      [
       "alice",
       20
@@ -5331,25 +5331,25 @@
     ]
    },
    "/e/d.json": {
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "file",
-    "n": "d.json",
-    "o": 1
+    "kind": "file",
+    "mtime": 7,
+    "name": "d.json",
+    "objects": 1
    },
    "/e/e": {
-    "a": 6,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "dir",
-    "n": "e",
-    "o": 1
+    "kind": "dir",
+    "last_read": 6,
+    "mtime": 7,
+    "name": "e",
+    "objects": 1
    }
   },
   "v": 2,
@@ -5362,26 +5362,26 @@
   "path": "",
   "tiles": {
    "": {
-    "a": 5,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "dir",
-    "n": "all buckets",
-    "o": 2
+    "kind": "dir",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "all buckets",
+    "objects": 2
    },
    "/b1": {
-    "a": 5,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "dir",
-    "n": "b1",
-    "o": 1
+    "kind": "dir",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "b1",
+    "objects": 1
    }
   },
   "v": 2,
@@ -5394,71 +5394,71 @@
   "path": "",
   "tiles": {
    "": {
-    "a": 5,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "dir",
-    "n": "all buckets",
-    "o": 2
+    "kind": "dir",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "all buckets",
+    "objects": 2
    },
    "/b1": {
-    "a": 5,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "dir",
-    "n": "b1",
-    "o": 1
+    "kind": "dir",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "b1",
+    "objects": 1
    },
    "/b1/d": {
-    "a": 5,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "dir",
-    "n": "d",
-    "o": 1
+    "kind": "dir",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "d",
+    "objects": 1
    },
    "/b1/d/a.txt": {
-    "a": 5,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "file",
-    "n": "a.txt",
-    "o": 2
+    "kind": "file",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "a.txt",
+    "objects": 2
    },
    "/b1/d/b.pq": {
-    "a": 5,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "file",
-    "n": "b.pq",
-    "o": 1
+    "kind": "file",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "b.pq",
+    "objects": 1
    },
    "/b1/d/e": {
-    "a": 5,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "dir",
-    "n": "e",
-    "o": 1,
-    "us": [
+    "kind": "dir",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "e",
+    "objects": 1,
+    "owners": [
      [
       "alice",
       10
@@ -5466,27 +5466,27 @@
     ]
    },
    "/b1/gof": {
-    "a": 5,
-    "b": 20,
-    "cb": {
+    "bytes": 20,
+    "class_bytes": {
      "4": 2
     },
-    "d": 0,
-    "k": "dir",
-    "n": "gof",
-    "o": 1
+    "kind": "dir",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "gof",
+    "objects": 1
    },
    "/b1/gof/b.pq": {
-    "a": 6,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "file",
-    "n": "b.pq",
-    "o": 1,
-    "us": [
+    "kind": "file",
+    "last_read": 6,
+    "mtime": 7,
+    "name": "b.pq",
+    "objects": 1,
+    "owners": [
      [
       "alice",
       10
@@ -5494,48 +5494,48 @@
     ]
    },
    "/b1/gof/d.json": {
-    "a": 5,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "file",
-    "n": "d.json",
-    "o": 2
+    "kind": "file",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "d.json",
+    "objects": 2
    },
    "/b1/gof/e": {
-    "a": 5,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "dir",
-    "n": "e",
-    "o": 1
+    "kind": "dir",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "e",
+    "objects": 1
    },
    "/b1/gof/f.bin": {
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "file",
-    "n": "f.bin",
-    "o": 1
+    "kind": "file",
+    "mtime": 7,
+    "name": "f.bin",
+    "objects": 1
    },
    "/c": {
-    "a": 6,
-    "b": 20,
-    "cb": {
+    "bytes": 20,
+    "class_bytes": {
      "4": 2
     },
-    "d": 0,
-    "k": "dir",
-    "n": "c",
-    "o": 2,
-    "us": [
+    "kind": "dir",
+    "last_read": 6,
+    "mtime": 7,
+    "name": "c",
+    "objects": 2,
+    "owners": [
      [
       "alice",
       10
@@ -5543,15 +5543,15 @@
     ]
    },
    "/d.json": {
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "file",
-    "n": "d.json",
-    "o": 1,
-    "us": [
+    "kind": "file",
+    "mtime": 7,
+    "name": "d.json",
+    "objects": 1,
+    "owners": [
      [
       "alice",
       10
@@ -5559,37 +5559,37 @@
     ]
    },
    "/e": {
-    "a": 5,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "dir",
-    "n": "e",
-    "o": 2
+    "kind": "dir",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "e",
+    "objects": 2
    },
    "/e/a.txt": {
-    "b": 20,
-    "cb": {
+    "bytes": 20,
+    "class_bytes": {
      "4": 2
     },
-    "d": 0,
-    "k": "file",
-    "n": "a.txt",
-    "o": 1
+    "kind": "file",
+    "mtime": 7,
+    "name": "a.txt",
+    "objects": 1
    },
    "/e/b.pq": {
-    "a": 5,
-    "b": 20,
-    "cb": {
+    "bytes": 20,
+    "class_bytes": {
      "4": 2
     },
-    "d": 0,
-    "k": "file",
-    "n": "b.pq",
-    "o": 2,
-    "us": [
+    "kind": "file",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "b.pq",
+    "objects": 2,
+    "owners": [
      [
       "alice",
       20
@@ -5597,25 +5597,25 @@
     ]
    },
    "/e/d.json": {
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "file",
-    "n": "d.json",
-    "o": 1
+    "kind": "file",
+    "mtime": 7,
+    "name": "d.json",
+    "objects": 1
    },
    "/e/e": {
-    "a": 6,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "dir",
-    "n": "e",
-    "o": 1
+    "kind": "dir",
+    "last_read": 6,
+    "mtime": 7,
+    "name": "e",
+    "objects": 1
    }
   },
   "v": 2,
@@ -5628,26 +5628,26 @@
   "path": "",
   "tiles": {
    "": {
-    "a": 5,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "dir",
-    "n": "all buckets",
-    "o": 2
+    "kind": "dir",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "all buckets",
+    "objects": 2
    },
    "/b1": {
-    "a": 5,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "dir",
-    "n": "b1",
-    "o": 1
+    "kind": "dir",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "b1",
+    "objects": 1
    }
   },
   "v": 2,
@@ -5660,60 +5660,60 @@
   "path": "b1",
   "tiles": {
    "": {
-    "a": 5,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "dir",
-    "n": "b1",
-    "o": 1
+    "kind": "dir",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "b1",
+    "objects": 1
    },
    "/d": {
-    "a": 5,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "dir",
-    "n": "d",
-    "o": 1
+    "kind": "dir",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "d",
+    "objects": 1
    },
    "/d/a.txt": {
-    "a": 5,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "file",
-    "n": "a.txt",
-    "o": 2
+    "kind": "file",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "a.txt",
+    "objects": 2
    },
    "/d/b.pq": {
-    "a": 5,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "file",
-    "n": "b.pq",
-    "o": 1
+    "kind": "file",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "b.pq",
+    "objects": 1
    },
    "/d/e": {
-    "a": 5,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "dir",
-    "n": "e",
-    "o": 1,
-    "us": [
+    "kind": "dir",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "e",
+    "objects": 1,
+    "owners": [
      [
       "alice",
       10
@@ -5721,27 +5721,27 @@
     ]
    },
    "/gof": {
-    "a": 5,
-    "b": 20,
-    "cb": {
+    "bytes": 20,
+    "class_bytes": {
      "4": 2
     },
-    "d": 0,
-    "k": "dir",
-    "n": "gof",
-    "o": 1
+    "kind": "dir",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "gof",
+    "objects": 1
    },
    "/gof/b.pq": {
-    "a": 6,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "file",
-    "n": "b.pq",
-    "o": 1,
-    "us": [
+    "kind": "file",
+    "last_read": 6,
+    "mtime": 7,
+    "name": "b.pq",
+    "objects": 1,
+    "owners": [
      [
       "alice",
       10
@@ -5749,36 +5749,36 @@
     ]
    },
    "/gof/d.json": {
-    "a": 5,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "file",
-    "n": "d.json",
-    "o": 2
+    "kind": "file",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "d.json",
+    "objects": 2
    },
    "/gof/e": {
-    "a": 5,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "dir",
-    "n": "e",
-    "o": 1
+    "kind": "dir",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "e",
+    "objects": 1
    },
    "/gof/f.bin": {
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "file",
-    "n": "f.bin",
-    "o": 1
+    "kind": "file",
+    "mtime": 7,
+    "name": "f.bin",
+    "objects": 1
    }
   },
   "v": 2,
@@ -5791,37 +5791,37 @@
   "path": "b1",
   "tiles": {
    "": {
-    "a": 5,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "dir",
-    "n": "b1",
-    "o": 1
+    "kind": "dir",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "b1",
+    "objects": 1
    },
    "/d": {
-    "a": 5,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "dir",
-    "n": "d",
-    "o": 1
+    "kind": "dir",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "d",
+    "objects": 1
    },
    "/gof": {
-    "a": 5,
-    "b": 20,
-    "cb": {
+    "bytes": 20,
+    "class_bytes": {
      "4": 2
     },
-    "d": 0,
-    "k": "dir",
-    "n": "gof",
-    "o": 1
+    "kind": "dir",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "gof",
+    "objects": 1
    }
   },
   "v": 2,
@@ -5834,60 +5834,60 @@
   "path": "b1",
   "tiles": {
    "": {
-    "a": 5,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "dir",
-    "n": "b1",
-    "o": 1
+    "kind": "dir",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "b1",
+    "objects": 1
    },
    "/d": {
-    "a": 5,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "dir",
-    "n": "d",
-    "o": 1
+    "kind": "dir",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "d",
+    "objects": 1
    },
    "/d/a.txt": {
-    "a": 5,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "file",
-    "n": "a.txt",
-    "o": 2
+    "kind": "file",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "a.txt",
+    "objects": 2
    },
    "/d/b.pq": {
-    "a": 5,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "file",
-    "n": "b.pq",
-    "o": 1
+    "kind": "file",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "b.pq",
+    "objects": 1
    },
    "/d/e": {
-    "a": 5,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "dir",
-    "n": "e",
-    "o": 1,
-    "us": [
+    "kind": "dir",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "e",
+    "objects": 1,
+    "owners": [
      [
       "alice",
       10
@@ -5895,27 +5895,27 @@
     ]
    },
    "/gof": {
-    "a": 5,
-    "b": 20,
-    "cb": {
+    "bytes": 20,
+    "class_bytes": {
      "4": 2
     },
-    "d": 0,
-    "k": "dir",
-    "n": "gof",
-    "o": 1
+    "kind": "dir",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "gof",
+    "objects": 1
    },
    "/gof/b.pq": {
-    "a": 6,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "file",
-    "n": "b.pq",
-    "o": 1,
-    "us": [
+    "kind": "file",
+    "last_read": 6,
+    "mtime": 7,
+    "name": "b.pq",
+    "objects": 1,
+    "owners": [
      [
       "alice",
       10
@@ -5923,36 +5923,36 @@
     ]
    },
    "/gof/d.json": {
-    "a": 5,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "file",
-    "n": "d.json",
-    "o": 2
+    "kind": "file",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "d.json",
+    "objects": 2
    },
    "/gof/e": {
-    "a": 5,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "dir",
-    "n": "e",
-    "o": 1
+    "kind": "dir",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "e",
+    "objects": 1
    },
    "/gof/f.bin": {
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "file",
-    "n": "f.bin",
-    "o": 1
+    "kind": "file",
+    "mtime": 7,
+    "name": "f.bin",
+    "objects": 1
    }
   },
   "v": 2,
@@ -5965,37 +5965,37 @@
   "path": "b1",
   "tiles": {
    "": {
-    "a": 5,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "dir",
-    "n": "b1",
-    "o": 1
+    "kind": "dir",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "b1",
+    "objects": 1
    },
    "/d": {
-    "a": 5,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "dir",
-    "n": "d",
-    "o": 1
+    "kind": "dir",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "d",
+    "objects": 1
    },
    "/gof": {
-    "a": 5,
-    "b": 20,
-    "cb": {
+    "bytes": 20,
+    "class_bytes": {
      "4": 2
     },
-    "d": 0,
-    "k": "dir",
-    "n": "gof",
-    "o": 1
+    "kind": "dir",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "gof",
+    "objects": 1
    }
   },
   "v": 2,
@@ -6008,27 +6008,27 @@
   "path": "b1/gof",
   "tiles": {
    "": {
-    "a": 5,
-    "b": 20,
-    "cb": {
+    "bytes": 20,
+    "class_bytes": {
      "4": 2
     },
-    "d": 0,
-    "k": "dir",
-    "n": "gof",
-    "o": 1
+    "kind": "dir",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "gof",
+    "objects": 1
    },
    "/b.pq": {
-    "a": 6,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "file",
-    "n": "b.pq",
-    "o": 1,
-    "us": [
+    "kind": "file",
+    "last_read": 6,
+    "mtime": 7,
+    "name": "b.pq",
+    "objects": 1,
+    "owners": [
      [
       "alice",
       10
@@ -6036,36 +6036,36 @@
     ]
    },
    "/d.json": {
-    "a": 5,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "file",
-    "n": "d.json",
-    "o": 2
+    "kind": "file",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "d.json",
+    "objects": 2
    },
    "/e": {
-    "a": 5,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "dir",
-    "n": "e",
-    "o": 1
+    "kind": "dir",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "e",
+    "objects": 1
    },
    "/f.bin": {
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "file",
-    "n": "f.bin",
-    "o": 1
+    "kind": "file",
+    "mtime": 7,
+    "name": "f.bin",
+    "objects": 1
    }
   },
   "v": 2,
@@ -6078,27 +6078,27 @@
   "path": "b1/gof",
   "tiles": {
    "": {
-    "a": 5,
-    "b": 20,
-    "cb": {
+    "bytes": 20,
+    "class_bytes": {
      "4": 2
     },
-    "d": 0,
-    "k": "dir",
-    "n": "gof",
-    "o": 1
+    "kind": "dir",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "gof",
+    "objects": 1
    },
    "/b.pq": {
-    "a": 6,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "file",
-    "n": "b.pq",
-    "o": 1,
-    "us": [
+    "kind": "file",
+    "last_read": 6,
+    "mtime": 7,
+    "name": "b.pq",
+    "objects": 1,
+    "owners": [
      [
       "alice",
       10
@@ -6106,36 +6106,36 @@
     ]
    },
    "/d.json": {
-    "a": 5,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "file",
-    "n": "d.json",
-    "o": 2
+    "kind": "file",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "d.json",
+    "objects": 2
    },
    "/e": {
-    "a": 5,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "dir",
-    "n": "e",
-    "o": 1
+    "kind": "dir",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "e",
+    "objects": 1
    },
    "/f.bin": {
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "file",
-    "n": "f.bin",
-    "o": 1
+    "kind": "file",
+    "mtime": 7,
+    "name": "f.bin",
+    "objects": 1
    }
   },
   "v": 2,
@@ -6148,27 +6148,27 @@
   "path": "b1/gof",
   "tiles": {
    "": {
-    "a": 5,
-    "b": 20,
-    "cb": {
+    "bytes": 20,
+    "class_bytes": {
      "4": 2
     },
-    "d": 0,
-    "k": "dir",
-    "n": "gof",
-    "o": 1
+    "kind": "dir",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "gof",
+    "objects": 1
    },
    "/b.pq": {
-    "a": 6,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "file",
-    "n": "b.pq",
-    "o": 1,
-    "us": [
+    "kind": "file",
+    "last_read": 6,
+    "mtime": 7,
+    "name": "b.pq",
+    "objects": 1,
+    "owners": [
      [
       "alice",
       10
@@ -6176,36 +6176,36 @@
     ]
    },
    "/d.json": {
-    "a": 5,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "file",
-    "n": "d.json",
-    "o": 2
+    "kind": "file",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "d.json",
+    "objects": 2
    },
    "/e": {
-    "a": 5,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "dir",
-    "n": "e",
-    "o": 1
+    "kind": "dir",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "e",
+    "objects": 1
    },
    "/f.bin": {
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "file",
-    "n": "f.bin",
-    "o": 1
+    "kind": "file",
+    "mtime": 7,
+    "name": "f.bin",
+    "objects": 1
    }
   },
   "v": 2,
@@ -6218,27 +6218,27 @@
   "path": "b1/gof",
   "tiles": {
    "": {
-    "a": 5,
-    "b": 20,
-    "cb": {
+    "bytes": 20,
+    "class_bytes": {
      "4": 2
     },
-    "d": 0,
-    "k": "dir",
-    "n": "gof",
-    "o": 1
+    "kind": "dir",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "gof",
+    "objects": 1
    },
    "/b.pq": {
-    "a": 6,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "file",
-    "n": "b.pq",
-    "o": 1,
-    "us": [
+    "kind": "file",
+    "last_read": 6,
+    "mtime": 7,
+    "name": "b.pq",
+    "objects": 1,
+    "owners": [
      [
       "alice",
       10
@@ -6246,36 +6246,36 @@
     ]
    },
    "/d.json": {
-    "a": 5,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "file",
-    "n": "d.json",
-    "o": 2
+    "kind": "file",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "d.json",
+    "objects": 2
    },
    "/e": {
-    "a": 5,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "dir",
-    "n": "e",
-    "o": 1
+    "kind": "dir",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "e",
+    "objects": 1
    },
    "/f.bin": {
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "file",
-    "n": "f.bin",
-    "o": 1
+    "kind": "file",
+    "mtime": 7,
+    "name": "f.bin",
+    "objects": 1
    }
   },
   "v": 2,
@@ -6288,37 +6288,37 @@
   "path": "b2/e",
   "tiles": {
    "": {
-    "a": 5,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "dir",
-    "n": "e",
-    "o": 2
+    "kind": "dir",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "e",
+    "objects": 2
    },
    "/a.txt": {
-    "b": 20,
-    "cb": {
+    "bytes": 20,
+    "class_bytes": {
      "4": 2
     },
-    "d": 0,
-    "k": "file",
-    "n": "a.txt",
-    "o": 1
+    "kind": "file",
+    "mtime": 7,
+    "name": "a.txt",
+    "objects": 1
    },
    "/b.pq": {
-    "a": 5,
-    "b": 20,
-    "cb": {
+    "bytes": 20,
+    "class_bytes": {
      "4": 2
     },
-    "d": 0,
-    "k": "file",
-    "n": "b.pq",
-    "o": 2,
-    "us": [
+    "kind": "file",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "b.pq",
+    "objects": 2,
+    "owners": [
      [
       "alice",
       20
@@ -6326,25 +6326,25 @@
     ]
    },
    "/d.json": {
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "file",
-    "n": "d.json",
-    "o": 1
+    "kind": "file",
+    "mtime": 7,
+    "name": "d.json",
+    "objects": 1
    },
    "/e": {
-    "a": 6,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "dir",
-    "n": "e",
-    "o": 1
+    "kind": "dir",
+    "last_read": 6,
+    "mtime": 7,
+    "name": "e",
+    "objects": 1
    }
   },
   "v": 2,
@@ -6357,37 +6357,37 @@
   "path": "b2/e",
   "tiles": {
    "": {
-    "a": 5,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "dir",
-    "n": "e",
-    "o": 2
+    "kind": "dir",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "e",
+    "objects": 2
    },
    "/a.txt": {
-    "b": 20,
-    "cb": {
+    "bytes": 20,
+    "class_bytes": {
      "4": 2
     },
-    "d": 0,
-    "k": "file",
-    "n": "a.txt",
-    "o": 1
+    "kind": "file",
+    "mtime": 7,
+    "name": "a.txt",
+    "objects": 1
    },
    "/b.pq": {
-    "a": 5,
-    "b": 20,
-    "cb": {
+    "bytes": 20,
+    "class_bytes": {
      "4": 2
     },
-    "d": 0,
-    "k": "file",
-    "n": "b.pq",
-    "o": 2,
-    "us": [
+    "kind": "file",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "b.pq",
+    "objects": 2,
+    "owners": [
      [
       "alice",
       20
@@ -6395,25 +6395,25 @@
     ]
    },
    "/d.json": {
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "file",
-    "n": "d.json",
-    "o": 1
+    "kind": "file",
+    "mtime": 7,
+    "name": "d.json",
+    "objects": 1
    },
    "/e": {
-    "a": 6,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "dir",
-    "n": "e",
-    "o": 1
+    "kind": "dir",
+    "last_read": 6,
+    "mtime": 7,
+    "name": "e",
+    "objects": 1
    }
   },
   "v": 2,
@@ -6426,37 +6426,37 @@
   "path": "b2/e",
   "tiles": {
    "": {
-    "a": 5,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "dir",
-    "n": "e",
-    "o": 2
+    "kind": "dir",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "e",
+    "objects": 2
    },
    "/a.txt": {
-    "b": 20,
-    "cb": {
+    "bytes": 20,
+    "class_bytes": {
      "4": 2
     },
-    "d": 0,
-    "k": "file",
-    "n": "a.txt",
-    "o": 1
+    "kind": "file",
+    "mtime": 7,
+    "name": "a.txt",
+    "objects": 1
    },
    "/b.pq": {
-    "a": 5,
-    "b": 20,
-    "cb": {
+    "bytes": 20,
+    "class_bytes": {
      "4": 2
     },
-    "d": 0,
-    "k": "file",
-    "n": "b.pq",
-    "o": 2,
-    "us": [
+    "kind": "file",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "b.pq",
+    "objects": 2,
+    "owners": [
      [
       "alice",
       20
@@ -6464,25 +6464,25 @@
     ]
    },
    "/d.json": {
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "file",
-    "n": "d.json",
-    "o": 1
+    "kind": "file",
+    "mtime": 7,
+    "name": "d.json",
+    "objects": 1
    },
    "/e": {
-    "a": 6,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "dir",
-    "n": "e",
-    "o": 1
+    "kind": "dir",
+    "last_read": 6,
+    "mtime": 7,
+    "name": "e",
+    "objects": 1
    }
   },
   "v": 2,
@@ -6495,37 +6495,37 @@
   "path": "b2/e",
   "tiles": {
    "": {
-    "a": 5,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "dir",
-    "n": "e",
-    "o": 2
+    "kind": "dir",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "e",
+    "objects": 2
    },
    "/a.txt": {
-    "b": 20,
-    "cb": {
+    "bytes": 20,
+    "class_bytes": {
      "4": 2
     },
-    "d": 0,
-    "k": "file",
-    "n": "a.txt",
-    "o": 1
+    "kind": "file",
+    "mtime": 7,
+    "name": "a.txt",
+    "objects": 1
    },
    "/b.pq": {
-    "a": 5,
-    "b": 20,
-    "cb": {
+    "bytes": 20,
+    "class_bytes": {
      "4": 2
     },
-    "d": 0,
-    "k": "file",
-    "n": "b.pq",
-    "o": 2,
-    "us": [
+    "kind": "file",
+    "last_read": 5,
+    "mtime": 7,
+    "name": "b.pq",
+    "objects": 2,
+    "owners": [
      [
       "alice",
       20
@@ -6533,25 +6533,25 @@
     ]
    },
    "/d.json": {
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "file",
-    "n": "d.json",
-    "o": 1
+    "kind": "file",
+    "mtime": 7,
+    "name": "d.json",
+    "objects": 1
    },
    "/e": {
-    "a": 6,
-    "b": 10,
-    "cb": {
+    "bytes": 10,
+    "class_bytes": {
      "4": 1
     },
-    "d": 0,
-    "k": "dir",
-    "n": "e",
-    "o": 1
+    "kind": "dir",
+    "last_read": 6,
+    "mtime": 7,
+    "name": "e",
+    "objects": 1
    }
   },
   "v": 2,

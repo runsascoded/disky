@@ -2,6 +2,7 @@
   "bucket-check": {"leaves": "a bucket outside the profile's sources may hold storage the site doesn't count", "side": true, "converges": false, "checks": false},
   "access-ingest": {"leaves": "this scan's read recency misses the newest access logs", "side": false, "converges": true, "checks": false},
   "access-r2": {"leaves": "this scan's read recency is as of the previous aggregate", "side": false, "converges": true, "checks": false},
+  "access-r2-receipt": {"leaves": "collector checkpoint receipt behind", "side": true, "converges": true, "checks": false},
   "static-names": {"leaves": "search doesn't cover this scan", "side": false, "converges": true, "checks": false},
   "publish-r2": {"leaves": "the scan's served files aren't all on R2", "side": false, "converges": false, "checks": false},
   "interval-store": {"leaves": "the interval store doesn't hold this scan", "side": false, "converges": true, "checks": false},

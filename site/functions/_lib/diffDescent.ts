@@ -174,10 +174,11 @@ export async function buildDiffDescent(env0: Env, o: DescentOpts): Promise<Diff>
   let expansions = 0
   let levels = 0
   const rel = (p: string) => (path === '' ? p : p.slice(path.length + 1))
-  const status = (a: Side, b: Side): DiffRow['s'] =>
+  const status = (a: Side, b: Side): DiffRow['status'] =>
     !a ? 'added' : !b ? 'removed' : Math.round(a.b) !== Math.round(b.b) || Math.round(a.o) !== Math.round(b.o) ? 'changed' : 'unchanged'
   const emit = (p: string, d: number, k1: 'file' | 'dir', a: Side, b: Side, x: boolean) => rows.push({
-    p, d, k: k1, s: status(a, b), a: Math.round(a?.b ?? 0), b: Math.round(b?.b ?? 0), oa: Math.round(a?.o ?? 0), ob: Math.round(b?.o ?? 0), ...(x ? { x: true } : {}),
+    path: p, depth: d, kind: k1, status: status(a, b), bytes_before: Math.round(a?.b ?? 0), bytes_after: Math.round(b?.b ?? 0), objects_before: Math.round(a?.o ?? 0), objects_after: Math.round(b?.o ?? 0),
+    ...(x ? { expanded: true as const } : {}),
   })
   type Item = { p: string; d: number; k: 'file' | 'dir'; a: Side; b: Side }
   // Best first: each round expands the frontier's largest |Δ| first (at most `ROUND_PARENTS`), until the changed rows
@@ -261,13 +262,11 @@ export async function buildDiffDescent(env0: Env, o: DescentOpts): Promise<Diff>
   const skipped = frontier.filter(expandable).length
   for (const it of frontier) if (it.p !== path) emit(rel(it.p), it.d - dP, it.k, it.a, it.b, false)
   o.trace?.('descent-rows', rowsRead, `${rowsRead} rows read`)
-  const cut = capDiffRows(rows, o.top, { a: Math.round(ra?.b ?? 0), b: Math.round(rb?.b ?? 0), oa: Math.round(ra?.o ?? 0), ob: Math.round(rb?.o ?? 0) })
+  const totals = { bytes_before: Math.round(ra?.b ?? 0), bytes_after: Math.round(rb?.b ?? 0), objects_before: Math.round(ra?.o ?? 0), objects_after: Math.round(rb?.o ?? 0) }
+  const cut = capDiffRows(rows, o.top, totals)
   return {
     rows: cut.rows,
-    total_a: Math.round(ra?.b ?? 0),
-    total_b: Math.round(rb?.b ?? 0),
-    objects_a: Math.round(ra?.o ?? 0),
-    objects_b: Math.round(rb?.o ?? 0),
+    ...totals,
     threshold: floor,
     tier: 'descent',
     expansions,

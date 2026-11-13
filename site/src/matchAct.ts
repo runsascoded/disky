@@ -54,8 +54,8 @@ export function actBlock(v: ActView): string | null {
 
 /** Whether a filtered view's (drilled) root holds no matches at all — no bytes, no objects, no children; not
  *  yet loaded (null) is not "none". */
-export const noMatches = (root: { b: number; o: number; c?: unknown[] } | null | undefined): boolean =>
-  !!root && root.b <= 0 && !root.o && !root.c?.length
+export const noMatches = (root: { bytes: number; objects: number; children?: unknown[] } | null | undefined): boolean =>
+  !!root && root.bytes <= 0 && !root.objects && !root.children?.length
 
 /** `actBlock`'s reason for a view with no matches. */
 export const NO_MATCHES_REASON = 'Nothing matches this term here, so there is nothing to act on. Widen the term, or drill out.'

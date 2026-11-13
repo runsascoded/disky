@@ -8,12 +8,13 @@ import { seriesRead } from '../../api/series.js'
 import { slotColor } from '../../../src/colors.js'
 import { scanCmp, scanInstant, type ScanTimes } from '../../../src/scanSlug.js'
 import { stackSeries } from '../../../src/series.js'
+import type { SeriesPoint } from '../series.js'
 import { type CardData, type Chart, fmtB, type LegendItem } from './card.js'
 import { resolveScan, type Site } from './data.js'
 import { fmtChange } from './diff.js'
 import type { OgTier } from './sign.js'
 
-type Point = { date: string; b: number; o: number }
+type Point = SeriesPoint
 /** `/api/series`'s body, as the card reads it. */
 export interface SeriesBody { points: Point[]; roots?: { path: string; points: Point[] }[] }
 
@@ -51,19 +52,19 @@ export function seriesCardData(
   publicLabels = false,
 ): CardData {
   const upTo = (ps: Point[]) => ps.filter(p => scanCmp(p.date, scan, times) <= 0)
-  const xy = (ps: Point[]) => ps.map(p => ({ x: scanInstant(p.date, times), y: p.b })).sort((a, b) => a.x - b.x)
+  const xy = (ps: Point[]) => ps.map(p => ({ x: scanInstant(p.date, times), y: p.bytes })).sort((a, b) => a.x - b.x)
   const points = upTo(body.points)
   const base = { tier, site: site.name, title, tiles: [], ...(publicLabels ? { publicLabels: true } : {}) }
-  if (points.length < 2) return { ...base, subtitle: '', total: points.length ? `${fmtB(points[0].b)} · ${fmtN(points[0].o)} objects` : '', empty: 'not enough scans yet' }
+  if (points.length < 2) return { ...base, subtitle: '', total: points.length ? `${fmtB(points[0].bytes)} · ${fmtN(points[0].objects)} objects` : '', empty: 'not enough scans yet' }
   const total = xy(points)
   const [first, last] = [points[0], points[points.length - 1]]
   const [x0, x1] = [total[0].x, total[total.length - 1].x]
-  const subtitle = `${ymd(x0)} → ${ymd(x1)} · ${fmtN(points.length)} scans · ${fmtChange(last.b - first.b)}`
-  const footer = `${fmtB(last.b)} · ${fmtN(last.o)} objects`
+  const subtitle = `${ymd(x0)} → ${ymd(x1)} · ${fmtN(points.length)} scans · ${fmtChange(last.bytes - first.bytes)}`
+  const footer = `${fmtB(last.bytes)} · ${fmtN(last.objects)} objects`
   if (total.every(p => p.y === 0)) return { ...base, subtitle, total: footer, empty: 'nothing here in any scan' }
   // The store root's buckets, as the page stacks them: slot by size at the latest scan (largest = slot 0).
   const roots = (body.roots ?? []).map(r => ({ path: r.path, points: upTo(r.points) })).filter(r => r.points.length)
-  const latest = (r: { points: Point[] }) => { const p = r.points[r.points.length - 1]; return p.date === last.date ? p.b : -1 }
+  const latest = (r: { points: Point[] }) => { const p = r.points[r.points.length - 1]; return p.date === last.date ? p.bytes : -1 }
   const bySize = roots.length > 1 ? [...roots].sort((a, b) => latest(b) - latest(a)) : []
   const slot = new Map(bySize.map((r, i) => [r.path, i]))
   const bands = bySize.length ? stackSeries(roots.map(r => ({ key: r.path, points: xy(r.points) }))) : []

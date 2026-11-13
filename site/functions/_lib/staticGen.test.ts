@@ -6,6 +6,7 @@ import { fixture } from './testStore.js'
 import { storeEnv, withStore } from './stores.js'
 import { IV_STATE_TTL, withPathStore } from './index.js'
 import type { Env } from './auth.js'
+import { Meter, metered } from './usage.js'
 
 // The generation is required deployment config (`STATIC_GEN`): every read of a deployment's static name index is under its own
 // `static-names/<gen>/` in `INDEX_R2`, and the responses name it. The bucket here holds `fixtures/static-runs/` (a base
@@ -210,4 +211,20 @@ describe('static-names/CURRENT.json', () => {
     // …and the primary, in the same isolate, follows it
     expect([(await seen(env)).STATIC_GEN, reads(log)]).toEqual([GEN, 1])
   })
+  it('meters CURRENT selection and a secondary pin independently, including a held pointer', async () => {
+    vi.spyOn(Date, 'now').mockImplementation(() => Date.UTC(2038, 0, 1))
+    const log: string[] = []
+    const env = { FILTER_STATIC: '1', INDEX_R2: pointed(log, { gen: GEN }), STORES_JSON }
+    const meters = [new Meter(), new Meter()]
+    for (const meter of meters) await metered(meter, {}, async () => {
+      await seen(env)
+      await seen(env, '&store=meta')
+    })
+    expect(meters.map(m => m.staticGen.value())).toEqual([
+      'meta=2026-10-14-meta,primary=2026-10-09cw',
+      'meta=2026-10-14-meta,primary=2026-10-09cw',
+    ])
+    expect(reads(log)).toEqual(1)
+  })
+
 })

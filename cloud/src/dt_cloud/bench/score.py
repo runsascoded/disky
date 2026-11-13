@@ -31,6 +31,7 @@ import urllib.parse
 from dataclasses import asdict, dataclass
 from typing import Protocol
 
+from .. import api_names
 from ..probe import Fetch, cold_min_area
 from .queryset import Case
 
@@ -115,14 +116,14 @@ class SubtreeEngine:
 def parse_subtree(body: bytes, view: str, status: int, ms: int, server_ms: int | None, size: int, cache: str | None, url: str) -> Answer:
     """A `/api/subtree` filter response → the engine's answer. Without
     `matches` the query matched the view root itself (the plain view
-    answers): one root, the view; the tree root's `b` / `o` are the totals
+    answers): one root, the view; the tree root's `bytes` / `objects` are the totals
     (net of exclusions when there are any) either way."""
     d = json.loads(body)
     roots = d["matches"] if "matches" in d else [view]
     roots_truncated = bool(d.get("matchesTruncated"))
     reasons = " · ".join(x for x in (d.get("partialReason"), d.get("approximateReason")) if x) or None
     return Answer(
-        status, ms, server_ms, size, roots, int(d["tree"]["b"]), int(d["tree"]["o"]),
+        status, ms, server_ms, size, roots, int(api_names.tree(d)["bytes"]), int(api_names.tree(d)["objects"]),
         partial=bool(d.get("partial")), approximate=bool(d.get("approximate")), reason=reasons,
         truncated=bool(d.get("truncated")), tier=d.get("tier"), cache=cache, url=url,
         n_roots=int(d["matchesTotal"]) if roots_truncated else None, roots_truncated=roots_truncated,

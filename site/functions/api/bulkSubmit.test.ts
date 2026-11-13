@@ -93,7 +93,7 @@ describe('a click on the matches → confirm → batches → accepted, against a
     }, () => cur)
     return { ctl, states, sent, db }
   }
-  const dirs = Array.from({ length: 1100 }, (_, i) => ({ path: `${B}/d${String(i).padStart(4, '0')}/tomat`, kind: 'dir' as const, b: 10, o: 1, roots: 1 }))
+  const dirs = Array.from({ length: 1100 }, (_, i) => ({ path: `${B}/d${String(i).padStart(4, '0')}/tomat`, kind: 'dir' as const, bytes: 10, objects: 1, roots: 1 }))
 
   it('stage 1,100 folders: asks, sends 3 POSTs + a merge, lands as one batch; undo takes them back', async () => {
     const h = await harness(dirs, false)
@@ -119,7 +119,7 @@ describe('a click on the matches → confirm → batches → accepted, against a
   })
 
   it('assign 120 lone files: asks (over the confirm threshold), one POST, one exact-object ledger row each', async () => {
-    const files = Array.from({ length: 120 }, (_, i) => ({ path: `${B}/show/clip${String(i).padStart(3, '0')}.mp3`, kind: 'file' as const, b: 1, o: 1, roots: 1 }))
+    const files = Array.from({ length: 120 }, (_, i) => ({ path: `${B}/show/clip${String(i).padStart(3, '0')}.mp3`, kind: 'file' as const, bytes: 1, objects: 1, roots: 1 }))
     const h = await harness(files, true)
     await h.ctl.start({ kind: 'assign', owner: 'ann', who: 'ann', memo: "bulk filter:'clip'" })
     await h.ctl.confirm()

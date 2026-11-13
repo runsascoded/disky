@@ -73,7 +73,8 @@ interface BurstRow {
   id: number; actor: string; via: string; origin: string; first_ts: number; last_ts: number
   counts: string; pages: string; trail: string; sids: string; rendered_ms: number | null; dirty: number
 }
-export type StoredBurst = Burst & { rendered_ms: number | null; dirty: boolean }
+import type { StoredBurst } from './activityShape.js'
+export type { StoredBurst }
 
 const parse = (r: BurstRow): StoredBurst => ({
   id: r.id, actor: r.actor, via: r.via, origin: r.origin, first_ts: r.first_ts, last_ts: r.last_ts,

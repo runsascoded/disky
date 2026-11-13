@@ -92,12 +92,12 @@ INSERT INTO scan_runs (run_id, scan, kind, parent, status, started_ts, finished_
       expect(doc.coverage.find(c => c.scan === D('07'))!.cells).toEqual({ path: 'pending', interval: 'pending', light: 'pending', drill: 'pending', anchors: 'pending', r2: 'na' })
     })
 
-    it('a running compaction is not a scan in flight (its `scan` names the scan it follows)', async () => {
+    it.each(['compact', 'access-ingest'])('a running %s is not a scan in flight', async kind => {
       const { db, raw } = await sqliteD1()
       raw.exec(SEED)
       raw.exec(`UPDATE scan_runs SET status = 'succeeded', finished_ts = 2000 WHERE run_id = 'r7';
         INSERT INTO scan_runs (run_id, scan, kind, parent, status, started_ts, finished_ts, gen, source, updated_ts, store)
-          VALUES ('iv', '${D('07')}', 'compact', NULL, 'running', 3000, NULL, 'interval-store/iv1', 'job', 3000, 'primary');`)
+          VALUES ('iv', '${D('07')}', '${kind}', NULL, 'running', 3000, NULL, 'interval-store/iv1', 'job', 3000, 'primary');`)
       const { doc } = await get({ DB: db })
       expect([doc.scans, doc.unserved, doc.coverage.find(c => c.scan === D('07'))?.cells ?? null]).toEqual([['01', '02', '03', '04', '05'].map(D), ['06', '07'].map(D), null])
     })

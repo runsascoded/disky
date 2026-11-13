@@ -24,12 +24,12 @@ def test_nearest_prior_resolves_like_the_site():
 def test_plan_one_width():
     assert W.plan("2026-09-15", DATES, widths=(1280,), spans=(1, 7), paths=("",)) == [
         "/api/series?path=&split=roots",
-        "/api/subtree?cv=3&date=2026-09-15&path=&w=1280&h=768&depth=1",
-        "/api/subtree?cv=3&date=2026-09-15&path=&w=1280&h=768",
-        "/api/diff?cv=3&from=2026-09-14&to=2026-09-15&path=&w=1280&h=768&dm=delta&depth=1",
-        "/api/diff?cv=3&from=2026-09-14&to=2026-09-15&path=&w=1280&h=768&dm=delta",
-        "/api/diff?cv=3&from=2026-09-08&to=2026-09-15&path=&w=1280&h=768&dm=delta&depth=1",
-        "/api/diff?cv=3&from=2026-09-08&to=2026-09-15&path=&w=1280&h=768&dm=delta",
+        "/api/subtree?cv=6&date=2026-09-15&path=&w=1280&h=768&depth=1",
+        "/api/subtree?cv=6&date=2026-09-15&path=&w=1280&h=768",
+        "/api/diff?cv=6&from=2026-09-14&to=2026-09-15&path=&w=1280&h=768&dm=delta&depth=1",
+        "/api/diff?cv=6&from=2026-09-14&to=2026-09-15&path=&w=1280&h=768&dm=delta",
+        "/api/diff?cv=6&from=2026-09-08&to=2026-09-15&path=&w=1280&h=768&dm=delta&depth=1",
+        "/api/diff?cv=6&from=2026-09-08&to=2026-09-15&path=&w=1280&h=768&dm=delta",
     ]
 
 
@@ -62,10 +62,10 @@ def test_the_warmed_urls_are_the_pages():
         "dmMode": "delta",
     })
     urls = [
-        "/api/diff?cv=3&from=2026-09-14&to=2026-09-15&path=ctbk%2Fgbfs%2Fagg%3D1m&w=1536&h=922&dm=delta",
-        "/api/diff?cv=3&from=2026-09-14&to=2026-09-15&path=ctbk%2Fgbfs%2Fagg%3D1m&w=1536&h=922&dm=delta&depth=1",
-        "/api/subtree?cv=3&date=2026-09-15&path=ctbk%2Fgbfs%2Fagg%3D1m&w=1536&h=922",
-        "/api/subtree?cv=3&date=2026-09-15&path=ctbk%2Fgbfs%2Fagg%3D1m&w=1536&h=922&depth=1",
+        "/api/diff?cv=6&from=2026-09-14&to=2026-09-15&path=ctbk%2Fgbfs%2Fagg%3D1m&w=1536&h=922&dm=delta",
+        "/api/diff?cv=6&from=2026-09-14&to=2026-09-15&path=ctbk%2Fgbfs%2Fagg%3D1m&w=1536&h=922&dm=delta&depth=1",
+        "/api/subtree?cv=6&date=2026-09-15&path=ctbk%2Fgbfs%2Fagg%3D1m&w=1536&h=922",
+        "/api/subtree?cv=6&date=2026-09-15&path=ctbk%2Fgbfs%2Fagg%3D1m&w=1536&h=922&depth=1",
     ]
     warmed = W.plan("2026-09-15", ["2026-09-14", "2026-09-15"], ("ctbk/gbfs/agg=1m",), widths=(1536,), spans=())
     assert (sorted(page), warmed[0], sorted(warmed[1:])) == (urls, "/api/series?path=ctbk%2Fgbfs%2Fagg%3D1m", urls)
@@ -83,10 +83,10 @@ def test_plan_dedupes_pairs_and_counts():
     assert len(paths) == len(TOP) + len(W.WIDTHS) * len(TOP) * (2 + 2 * 5)
     assert paths[:2] == ["/api/series?path=&split=roots", "/api/series?path=b1"]
     n = len(TOP)
-    assert paths[n] == "/api/subtree?cv=3&date=2026-09-15&path=&w=512&h=307&depth=1"
-    assert paths[n + 1] == "/api/subtree?cv=3&date=2026-09-15&path=&w=512&h=307"
-    assert paths[n + 12] == "/api/subtree?cv=3&date=2026-09-15&path=b1&w=512&h=307&depth=1"
-    assert paths[-1] == "/api/diff?cv=3&from=2026-08-16&to=2026-09-15&path=b3&w=1920&h=1152&dm=delta"
+    assert paths[n] == "/api/subtree?cv=6&date=2026-09-15&path=&w=512&h=307&depth=1"
+    assert paths[n + 1] == "/api/subtree?cv=6&date=2026-09-15&path=&w=512&h=307"
+    assert paths[n + 12] == "/api/subtree?cv=6&date=2026-09-15&path=b1&w=512&h=307&depth=1"
+    assert paths[-1] == "/api/diff?cv=6&from=2026-08-16&to=2026-09-15&path=b3&w=1920&h=1152&dm=delta"
 
 
 def test_paths_from_warm_paths_else_the_sites_root_view(monkeypatch):
@@ -95,8 +95,8 @@ def test_paths_from_warm_paths_else_the_sites_root_view(monkeypatch):
     monkeypatch.delenv("WARM_PATHS")
     assert W.env_paths() is None
     # the root view's children, folds left out
-    assert W.root_children({"tree": {"n": "all buckets", "c": [{"n": "b1"}, {"n": "b2"}, {"n": "(other)"}]}}) == ("", "b1", "b2")
-    assert W.root_children({"tree": {"n": "all buckets"}}) == ("",)
+    assert W.root_children({"tree": {"name": "all buckets", "children": [{"name": "b1"}, {"name": "b2"}, {"name": "(other)"}]}}) == ("", "b1", "b2")
+    assert W.root_children({"tree": {"name": "all buckets"}}) == ("",)
 
 
 # Sub-daily scan ids (`YYYY-MM-DDTHHMM`, the CoreWeave job): spans resolve on
@@ -118,14 +118,14 @@ def test_subdaily_nearest_prior():
 def test_subdaily_plan_one_width():
     assert W.plan("2026-09-15T1201", SUBDAILY, widths=(1280,), spans=(1, 7), paths=("",)) == [
         "/api/series?path=&split=roots",
-        "/api/subtree?cv=3&date=2026-09-15T1201&path=&w=1280&h=768&depth=1",
-        "/api/subtree?cv=3&date=2026-09-15T1201&path=&w=1280&h=768",
-        "/api/diff?cv=3&from=2026-09-15T0001&to=2026-09-15T1201&path=&w=1280&h=768&dm=delta&depth=1",
-        "/api/diff?cv=3&from=2026-09-15T0001&to=2026-09-15T1201&path=&w=1280&h=768&dm=delta",
-        "/api/diff?cv=3&from=2026-09-14T1201&to=2026-09-15T1201&path=&w=1280&h=768&dm=delta&depth=1",
-        "/api/diff?cv=3&from=2026-09-14T1201&to=2026-09-15T1201&path=&w=1280&h=768&dm=delta",
-        "/api/diff?cv=3&from=2026-09-08T1201&to=2026-09-15T1201&path=&w=1280&h=768&dm=delta&depth=1",
-        "/api/diff?cv=3&from=2026-09-08T1201&to=2026-09-15T1201&path=&w=1280&h=768&dm=delta",
+        "/api/subtree?cv=6&date=2026-09-15T1201&path=&w=1280&h=768&depth=1",
+        "/api/subtree?cv=6&date=2026-09-15T1201&path=&w=1280&h=768",
+        "/api/diff?cv=6&from=2026-09-15T0001&to=2026-09-15T1201&path=&w=1280&h=768&dm=delta&depth=1",
+        "/api/diff?cv=6&from=2026-09-15T0001&to=2026-09-15T1201&path=&w=1280&h=768&dm=delta",
+        "/api/diff?cv=6&from=2026-09-14T1201&to=2026-09-15T1201&path=&w=1280&h=768&dm=delta&depth=1",
+        "/api/diff?cv=6&from=2026-09-14T1201&to=2026-09-15T1201&path=&w=1280&h=768&dm=delta",
+        "/api/diff?cv=6&from=2026-09-08T1201&to=2026-09-15T1201&path=&w=1280&h=768&dm=delta&depth=1",
+        "/api/diff?cv=6&from=2026-09-08T1201&to=2026-09-15T1201&path=&w=1280&h=768&dm=delta",
     ]
 
 
@@ -148,7 +148,7 @@ def test_top_paths_sends_a_user_agent(monkeypatch):
 
     def urlopen(req, timeout):
         sent.append((req.full_url, dict(req.header_items())))
-        return io.BytesIO(json.dumps({"tree": {"n": "", "c": [{"n": "buckets"}, {"n": "models"}]}}).encode())
+        return io.BytesIO(json.dumps({"tree": {"name": "", "children": [{"name": "buckets"}, {"name": "models"}]}}).encode())
 
     monkeypatch.setattr(W.urllib.request, "urlopen", urlopen)
     assert W.top_paths("https://x.test/", {"Authorization": "Bearer t"}, "2026-10-16T0801") == ("", "buckets", "models")

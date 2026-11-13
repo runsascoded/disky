@@ -196,7 +196,7 @@ export const onRequest = async (ctx0: Ctx & { env: Env; waitUntil?: Bg }): Promi
       const held = new Set<string>()
       for (let i = 0; i < keys.length; i += MAX_PREFIXES) {
         const { stats } = await prefixesAt(ctx.env, newest, keys.slice(i, i + MAX_PREFIXES))
-        for (const [k, s] of Object.entries(stats)) if (s.b > 0 || s.o > 0) held.add(k)
+        for (const [k, s] of Object.entries(stats)) if (s.bytes > 0 || s.objects > 0) held.add(k)
       }
       return held
     } : undefined

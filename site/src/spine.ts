@@ -39,7 +39,7 @@ export function levelTree(o: { full?: TreeNode | null; shallow?: TreeNode | null
   if (o.full) return o.full
   const s = o.shallow ?? null
   if (o.deepest || !o.filtered) return s
-  return s && s.c?.some(k => k.n === o.next && k.c?.length) ? s : null
+  return s && s.children?.some(k => k.name === o.next && k.children?.length) ? s : null
 }
 
 /** One level's answer, as the graft takes it: `shallow` when it is the `depth=1` stand-in. */
@@ -55,13 +55,13 @@ function graftAt(t: TreeNode, segs: string[], sub: TreeNode, shallow: boolean): 
     // tree already carries for this node: a drill into a tile the parent
     // drew to depth would otherwise flatten it to one level until the
     // full subtree lands (seconds, on a cold path).
-    if (i === segs.length && shallow && n.c?.some(k => k.c?.length)) return n
+    if (i === segs.length && shallow && n.children?.some(k => k.children?.length)) return n
     // Keep own totals; adopt the finer children — and the response root's
-    // provenance (`pv`), which a parent-level view may have skipped.
-    if (i === segs.length) return { ...n, c: sub.c, ...(sub.pv ? { pv: sub.pv } : {}) }
+    // provenance (`provenance`), which a parent-level view may have skipped.
+    if (i === segs.length) return { ...n, children: sub.children, ...(sub.provenance ? { provenance: sub.provenance } : {}) }
     const seg = segs[i]
-    const kids = n.c ?? []
-    if (kids.some(k => k.n === seg)) return { ...n, c: kids.map(k => (k.n === seg ? rec(k, i + 1) : k)) }
+    const kids = n.children ?? []
+    if (kids.some(k => k.name === seg)) return { ...n, children: kids.map(k => (k.name === seg ? rec(k, i + 1) : k)) }
     // The spine segment fell below this level's pixel budget (it's inside
     // "(other)"): synthesize it from its own subtree response — the
     // response root carries the real totals — and shave those bytes off
@@ -69,8 +69,8 @@ function graftAt(t: TreeNode, segs: string[], sub: TreeNode, shallow: boolean): 
     // own level's graft to land.
     if (i !== segs.length - 1) return n
     const c = kids.map(k =>
-      k.n === '(other)' ? { ...k, b: Math.max(0, k.b - sub.b), o: Math.max(0, k.o - sub.o) } : k)
-    return { ...n, c: [...c, { ...sub, n: seg }] }
+      k.name === '(other)' ? { ...k, bytes: Math.max(0, k.bytes - sub.bytes), objects: Math.max(0, k.objects - sub.objects) } : k)
+    return { ...n, children: [...c, { ...sub, name: seg }] }
   }
   return rec(t, 0)
 }
@@ -91,7 +91,7 @@ export function graftSpine(paths: string[], levels: (Level | null)[]): TreeNode 
 export function nodeAt(tree: TreeNode, segs: string[]): TreeNode | null {
   let cur = tree
   for (const s of segs) {
-    const next = cur.c?.find(c => c.n === s)
+    const next = cur.children?.find(c => c.name === s)
     if (!next) return null
     cur = next
   }
@@ -109,7 +109,7 @@ export function nodeAt(tree: TreeNode, segs: string[]): TreeNode | null {
 export function spineReady(tree: TreeNode, graftPath: string, loading: boolean[]): boolean {
   const at = nodeAt(tree, graftPath.split('/').filter(Boolean))
   if (!at) return !loading.some(Boolean)
-  return !!at.c?.length || !loading[loading.length - 1]
+  return !!at.children?.length || !loading[loading.length - 1]
 }
 
 /**
@@ -126,8 +126,8 @@ export function spineStop(tree: TreeNode | null, paths: string[], loading: boole
   const segs = paths[paths.length - 1].split('/').filter(Boolean)
   let cur = tree
   for (let i = 0; i < segs.length; i++) {
-    const next = cur.c?.find(c => c.n === segs[i])
-    if (!next) return answered[i] && cur.c?.length ? i : null
+    const next = cur.children?.find(c => c.name === segs[i])
+    if (!next) return answered[i] && cur.children?.length ? i : null
     cur = next
   }
   return null
@@ -163,9 +163,9 @@ export function spineFailure(tree: TreeNode, paths: string[], errs: (Error | und
   let cur = tree
   // Level `i` answers the path of `i` segments, whose node is `cur`.
   for (let i = 0; ; i++) {
-    if (!cur.c?.length && errs[i]) return failed(i, true)
+    if (!cur.children?.length && errs[i]) return failed(i, true)
     if (i === segs.length) return null
-    const next = cur.c?.find(c => c.n === segs[i])
+    const next = cur.children?.find(c => c.name === segs[i])
     if (!next) return failed(i + 1, false)
     cur = next
   }

@@ -2020,7 +2020,7 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); opacity: 1; }
       // ramp both read against the row — the swatch was invisible at each end.
       i { display: inline-block; width: 8px; height: 8px; border-radius: 50%; box-shadow: 0 0 0 1px color-mix(in srgb, var(--ink) 35%, transparent); }
     }
-    // Bytes by age (`TreeNode.ag`): one stacked bar per row, newest (yellow) →
+    // Bytes by age (`TreeNode.age_bytes`): one stacked bar per row, newest (yellow) →
     // oldest (purple), widths ∝ bytes.
     td.created.agebar {
       .bar { display: inline-flex; width: 64px; height: 9px; border-radius: 2px; overflow: hidden; vertical-align: middle; box-shadow: 0 0 0 1px color-mix(in srgb, var(--ink) 25%, transparent); }
@@ -2238,6 +2238,9 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); opacity: 1; }
 
 .filterbox {
   display: inline-flex;
+  flex-wrap: wrap;
+  max-width: 100%;
+  min-width: 0;
   gap: 6px;
   align-items: center;
   margin-left: 8px;
@@ -2267,9 +2270,11 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); opacity: 1; }
     font-size: 12px;
     color: var(--ink-2);
     display: inline-flex;
+    flex-wrap: wrap;
+    max-width: 100%;
     gap: 4px;
     align-items: center;
-    white-space: nowrap;
+    white-space: normal;
     button { background: none; border: none; color: var(--ink-2); cursor: pointer; padding: 0 2px; }
     &.ferr { color: #d33; white-space: normal; }
   }

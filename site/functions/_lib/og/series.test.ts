@@ -23,13 +23,13 @@ const at = (id: string) => Date.UTC(+id.slice(0, 4), +id.slice(5, 7) - 1, +id.sl
 const A = [100, 110, 120, 130, 140, 150]
 const B = [null, 20, 25, 35, 40, 45]
 const rootsBody: SeriesBody = {
-  points: SCANS.map((date, i) => ({ date, b: (A[i] + (B[i] ?? 0)) * T, o: 1000 * (i + 1) })),
+  points: SCANS.map((date, i) => ({ date, bytes: (A[i] + (B[i] ?? 0)) * T, objects: 1000 * (i + 1) })),
   roots: [
-    { path: 'a', points: SCANS.map((date, i) => ({ date, b: A[i] * T, o: 600 * (i + 1) })) },
-    { path: 'b', points: SCANS.flatMap((date, i) => B[i] == null ? [] : [{ date, b: B[i]! * T, o: 400 * (i + 1) }]) },
+    { path: 'a', points: SCANS.map((date, i) => ({ date, bytes: A[i] * T, objects: 600 * (i + 1) })) },
+    { path: 'b', points: SCANS.flatMap((date, i) => B[i] == null ? [] : [{ date, bytes: B[i]! * T, objects: 400 * (i + 1) }]) },
   ],
 }
-const pathBody: SeriesBody = { points: SCANS.map((date, i) => ({ date, b: A[i] * T, o: 600 * (i + 1) })) }
+const pathBody: SeriesBody = { points: SCANS.map((date, i) => ({ date, bytes: A[i] * T, objects: 600 * (i + 1) })) }
 /** The chart without its label function (compared on its own). */
 const shape = (d: CardData) => d.chart ? { ...d, chart: { ...d.chart, fmtX: undefined } } : d
 const textNodes = (svg: string) => [...svg.matchAll(/<text\b[^>]*>(.*?)<\/text>/g)].map(m => m[1])
@@ -94,15 +94,15 @@ describe('seriesCardData', () => {
   it('too few scans, or nothing in any, is said instead of a chart', () => {
     expect([
       seriesCardData(SITE, 't', 'full', { points: pathBody.points.slice(0, 1) }, {}, SCANS[5]),
-      seriesCardData(SITE, 't', 'full', { points: SCANS.map(date => ({ date, b: 0, o: 0 })) }, {}, SCANS[5]),
+      seriesCardData(SITE, 't', 'full', { points: SCANS.map(date => ({ date, bytes: 0, objects: 0 })) }, {}, SCANS[5]),
     ]).toEqual([
       { tier: 'full', site: 'marin GCS', title: 't', tiles: [], subtitle: '', total: '100 TiB · 600 objects', empty: 'not enough scans yet' },
       { tier: 'full', site: 'marin GCS', title: 't', tiles: [], subtitle: '2026-06-01 → 2026-10-12 · 6 scans · +0 B', total: '0 B · 0 objects', empty: 'nothing here in any scan' },
     ])
   })
   it('a span under two days labels its axis with times; over a year, with months', () => {
-    const short = seriesCardData(SITE, 't', 'full', { points: [{ date: '2026-10-12T0100', b: T, o: 1 }, { date: '2026-10-12T1300', b: 2 * T, o: 2 }] }, {}, '2026-10-12T1300')
-    const long = seriesCardData(SITE, 't', 'full', { points: [{ date: '2025-01-15T0000', b: T, o: 1 }, { date: '2026-10-12T0000', b: 2 * T, o: 2 }] }, {}, '2026-10-12T0000')
+    const short = seriesCardData(SITE, 't', 'full', { points: [{ date: '2026-10-12T0100', bytes: T, objects: 1 }, { date: '2026-10-12T1300', bytes: 2 * T, objects: 2 }] }, {}, '2026-10-12T1300')
+    const long = seriesCardData(SITE, 't', 'full', { points: [{ date: '2025-01-15T0000', bytes: T, objects: 1 }, { date: '2026-10-12T0000', bytes: 2 * T, objects: 2 }] }, {}, '2026-10-12T0000')
     expect([short.chart!.fmtX(Date.UTC(2026, 9, 12, 13)), long.chart!.fmtX(Date.UTC(2025, 0, 15))]).toEqual(['Oct 12 13:00', 'Jan ’25'])
   })
 })

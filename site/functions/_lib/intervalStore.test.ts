@@ -68,7 +68,7 @@ const failure = (p: Promise<unknown>): Promise<string | null> => p.then(() => nu
 function canon(n: ViewNode): string {
   const sorted = (v: unknown): unknown =>
     Array.isArray(v) ? v.map(sorted) : v && typeof v === 'object' ? Object.fromEntries(Object.keys(v).sort().map(k => [k, sorted((v as Record<string, unknown>)[k])])) : v
-  const { c: _c, ...rest } = n
+  const { children: _c, ...rest } = n
   return JSON.stringify(sorted(rest))
 }
 
@@ -79,14 +79,11 @@ function flatten(t: ViewNode): Tiles {
   const rec = (n: ViewNode, p: string) => {
     let k = p
     for (let i = 2; k in out; i++) k = `${p}#${i}`
-    // `t` (the newest write's instant) isn't in the Python reference's views: it must name the same day as `d`, then
-    // the rest is compared exactly.
-    const { c, t, ...rest } = n
-    if (t !== undefined) expect([k, Math.floor((t as number) / 86400)]).toEqual([k, rest.d])
-    const us = rest.us as [string, number][] | undefined
-    out[k] = { ...rest, ...(us ? { us: [...us].sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1)) } : {}) }
-    const kids = [...(c ?? [])].sort((a, b) => b.b - a.b || (a.n < b.n ? -1 : a.n > b.n ? 1 : 0) || (canon(a) < canon(b) ? -1 : canon(a) > canon(b) ? 1 : 0))
-    for (const k2 of kids) rec(k2, `${p}/${k2.n}`)
+    const { children, ...rest } = n
+    const owners = rest.owners
+    out[k] = { ...rest, ...(owners ? { owners: [...owners].sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1)) } : {}) }
+    const kids = [...(children ?? [])].sort((a, b) => b.bytes - a.bytes || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0) || (canon(a) < canon(b) ? -1 : canon(a) > canon(b) ? 1 : 0))
+    for (const k2 of kids) rec(k2, `${p}/${k2.name}`)
   }
   rec(t, '')
   return out
@@ -237,8 +234,8 @@ describe('interval store', () => {
       const v = await buildView(env, { date: c.date, path: c.path, w: c.w, h: c.h, minArea: 12, atten: 2, ...(c.depth != null ? { maxDepth: c.depth } : {}) })
       const got = flatten(v.tree)
       // A v1 scan never knew its directories' children: the reader's `(other)` count is what its read saw.
-      const want = Object.fromEntries(Object.entries(c.tiles).map(([k, n]) => [k, n.f === null ? Object.fromEntries(Object.entries(n).filter(([f]) => f !== 'f')) : n]))
-      if (c.v === 1) for (const n of Object.values(got)) delete n.f
+      const want = Object.fromEntries(Object.entries(c.tiles).map(([k, n]) => [k, n.folded === null ? Object.fromEntries(Object.entries(n).filter(([f]) => f !== 'folded')) : n]))
+      if (c.v === 1) for (const n of Object.values(got)) delete n.folded
       expect({ case: [c.date, c.path, c.w, c.h, c.depth], tiles: got }).toEqual({ case: [c.date, c.path, c.w, c.h, c.depth], tiles: want })
       expect([v.index, ['bysize', 'path'].includes(v.tier)]).toEqual(['iv:g1', true])
     }
@@ -251,8 +248,8 @@ describe('interval store', () => {
     for (const c of cases) {
       const v = await buildView(env, { date: c.date, path: c.path, w: c.w, h: c.h, minArea: 12, atten: 2, ivPlanRows: 0, ...(c.depth != null ? { maxDepth: c.depth } : {}) })
       const got = flatten(v.tree)
-      const want = Object.fromEntries(Object.entries(c.tiles).map(([k, n]) => [k, n.f === null ? Object.fromEntries(Object.entries(n).filter(([f]) => f !== 'f')) : n]))
-      if (c.v === 1) for (const n of Object.values(got)) delete n.f
+      const want = Object.fromEntries(Object.entries(c.tiles).map(([k, n]) => [k, n.folded === null ? Object.fromEntries(Object.entries(n).filter(([f]) => f !== 'folded')) : n]))
+      if (c.v === 1) for (const n of Object.values(got)) delete n.folded
       expect({ case: [c.date, c.path, c.w, c.h, c.depth], tiles: got }).toEqual({ case: [c.date, c.path, c.w, c.h, c.depth], tiles: want })
       const k = `${c.depth == null ? 'full' : 'band'} ${v.tier}`
       tiers[k] = (tiers[k] ?? 0) + 1
@@ -267,7 +264,7 @@ describe('interval store', () => {
       const pairs = dates.slice(1).map((d, i) => [dates[i], d])
       const diffOf = async (b: typeof buildDiff, e: Env, [from, to]: string[]) => {
         const d = await b(e, { from, to, path: '', w: 8, h: 6, minArea: 12, atten: 2, top: 100 })
-        return { rows: d.rows, totals: [d.total_a, d.total_b, d.objects_a, d.objects_b] }
+        return { rows: d.rows, totals: [d.bytes_before, d.bytes_after, d.objects_before, d.objects_after] }
       }
       const diffs = await Promise.all(pairs.map(p => diffOf(buildDiff, env, p)))
       const m = new Map<string, Response>()
@@ -284,7 +281,7 @@ describe('interval store', () => {
           const trees = []
           for (const c of views) {
             const t = flatten((await view.buildView(e, { date: c.date, path: c.path, w: c.w, h: c.h, minArea: 12, atten: 2, ...(c.depth != null ? { maxDepth: c.depth } : {}) })).tree)
-            if (c.v === 1) for (const n of Object.values(t)) delete n.f
+            if (c.v === 1) for (const n of Object.values(t)) delete n.folded
             trees.push(t)
           }
           const ds = []
@@ -294,7 +291,7 @@ describe('interval store', () => {
         }
         const a = await isolate()
         const b = await isolate()
-        expect(a.trees).toEqual(views.map(c => Object.fromEntries(Object.entries(c.tiles).map(([k, n]) => [k, n.f === null ? Object.fromEntries(Object.entries(n).filter(([f]) => f !== 'f')) : n]))))
+        expect(a.trees).toEqual(views.map(c => Object.fromEntries(Object.entries(c.tiles).map(([k, n]) => [k, n.folded === null ? Object.fromEntries(Object.entries(n).filter(([f]) => f !== 'folded')) : n]))))
         expect(b.trees).toEqual(a.trees)
         expect([a.ds, b.ds]).toEqual([diffs, diffs])
         // The runs' small subtree reads now prefer the path sort after exact boundary pruning.
@@ -378,7 +375,7 @@ describe('interval store', () => {
     const d = await buildDiff(env, { from: '2026-08-04', to: '2026-08-05', path: 'b2/e', w: 8, h: 6, minArea: 12, atten: 2, top: 100 })
     const a = cases.find(c => c.date === '2026-08-04' && c.path === 'b2/e' && c.w === 8 && c.depth == null)!
     const b = cases.find(c => c.date === '2026-08-05' && c.path === 'b2/e' && c.w === 8 && c.depth == null)!
-    expect([d.total_a, d.total_b]).toEqual([a.tiles[''].b, b.tiles[''].b])
+    expect([d.bytes_before, d.bytes_after]).toEqual([a.tiles[''].bytes, b.tiles[''].bytes])
   })
 
   it('diffs a dir-only (v1) scan against a full (v2) one as the per-scan stores do: its objects fold into `(other)`', async () => {
@@ -398,12 +395,12 @@ describe('interval store', () => {
         for (const path of ['', 'b1', 'b2/e']) {
           const d = await buildDiff(env, { from, to, path, w: 8, h: 6, minArea: 12, atten: 2, top: 100 })
           // A side without P (the fixture's paths come and go) draws the other alone, objects too, as per-scan.
-          if (!d.total_a || !d.total_b) continue
+          if (!d.bytes_before || !d.bytes_after) continue
           pairs++
           // An object read as added (or removed) across the cutover: the dir-only side never had it. (The fixture's v1
           // scans hold rows at paths its v2 scans have objects at, as no real v1 index does: those compare.)
-          const thin = V[from] === 1 ? 'a' : 'b'
-          const files = d.rows.filter(r => r.k === 'file' && !r[thin] && !r[thin === 'a' ? 'oa' : 'ob']).map(r => r.p)
+          const thin = V[from] === 1 ? 'bytes_before' : 'bytes_after'
+          const files = d.rows.filter(r => r.kind === 'file' && !r[thin] && !r[thin === 'bytes_before' ? 'objects_before' : 'objects_after']).map(r => r.path)
           if (files.length) got.push({ pair: `${from}→${to}`, path, files })
         }
       }
@@ -467,16 +464,16 @@ describe('interval store: a heavy literal\'s match roots draw their insides', ()
   })
 
   /** Every node under `n` but its `(other)` folds: `[path below n, bytes, objects, kind]`, depth first. */
-  const flat = (n: ViewNode, pre = ''): unknown[] => (n.c ?? []).filter(c => c.n !== '(other)')
-    .sort((x, y) => (x.n < y.n ? -1 : 1)).flatMap(c => [[`${pre}${c.n}`, c.b, c.o, c.k], ...flat(c, `${pre}${c.n}/`)])
+  const flat = (n: ViewNode, pre = ''): unknown[] => (n.children ?? []).filter(c => c.name !== '(other)')
+    .sort((x, y) => (x.name < y.name ? -1 : 1)).flatMap(c => [[`${pre}${c.name}`, c.bytes, c.objects, c.kind], ...flat(c, `${pre}${c.name}/`)])
   /** A filtered view's drawn match roots: path → node. */
   const drawnRoots = (v: { tree: ViewNode }): Map<string, ViewNode> => {
     const out = new Map<string, ViewNode>()
-    const walk = (n: ViewNode, p: string) => { for (const c of n.c ?? []) { const cp = p === '' ? c.n : `${p}/${c.n}`; if (c.m) out.set(cp, c); else walk(c, cp) } }
+    const walk = (n: ViewNode, p: string) => { for (const c of n.children ?? []) { const cp = p === '' ? c.name : `${p}/${c.name}`; if (c.matched) out.set(cp, c); else walk(c, cp) } }
     walk(v.tree, '')
     return out
   }
-  const subdivides = (n: ViewNode) => n.o > 1 && n.b >= T * 4096 / MIN_AREA
+  const subdivides = (n: ViewNode) => n.objects > 1 && n.bytes >= T * 4096 / MIN_AREA
 
   it('the view: each drawn root it subdivides holds the unfiltered view of its path, `FILTER_SUBDIV_LEVELS` deep', async () => {
     const got: unknown[] = []
@@ -506,10 +503,10 @@ describe('interval store: a heavy literal\'s match roots draw their insides', ()
       for (const date of [from, to]) {
         for (const [R, n] of drawnRoots(await buildView(envS, { date, path: '', w: W, h: H, minArea: MIN_AREA, atten: ATTEN, threshold: T, query: parseQuery(lit)! }))) if (subdivides(n)) subdiv.add(R)
       }
-      const rows = (rs: { p: string; s: string; a: number; b: number; oa: number; ob: number; x?: boolean }[]) => rs.map(r => [r.p, r.s, r.a, r.b, r.oa, r.ob, !!r.x]).sort((x, y) => ((x[0] as string) < (y[0] as string) ? -1 : 1))
+      const rows = (rs: { path: string; status: string; bytes_before: number; bytes_after: number; objects_before: number; objects_after: number; expanded?: boolean }[]) => rs.map(r => [r.path, r.status, r.bytes_before, r.bytes_after, r.objects_before, r.objects_after, !!r.expanded]).sort((x, y) => ((x[0] as string) < (y[0] as string) ? -1 : 1))
       for (const m of d.matched ?? []) {
         const R = m.path
-        const under = rows(d.rows.filter(r => r.p.startsWith(`${R}/`)).map(r => ({ ...r, p: r.p.slice(R.length + 1) })))
+        const under = rows(d.rows.filter(r => r.path.startsWith(`${R}/`)).map(r => ({ ...r, path: r.path.slice(R.length + 1) })))
         const plain = subdiv.has(R) ? rows((await buildDiff(env, { from, to, path: R, w: W, h: H, minArea: MIN_AREA, atten: ATTEN, top: 10_000, threshold: T, depth: 3 })).rows) : []
         if (plain.length) inside++
         got.push([lit, from, to, d.tier, R, under])
@@ -533,12 +530,12 @@ describe('interval store: a heavy literal\'s match roots draw their insides', ()
       for (const cut of [{}, { lookupCap: 0 }, { walkMs: 0 }]) {
         const d = Object.keys(cut).length ? await buildDiff(envS, { ...o, ...cut }) : full
         const roots = (d.matched ?? []).map(m => m.path).filter(R => scans.get(from)!.get(R)?.[0] && scans.get(to)!.get(R)?.[0])
-        const drawn = d.rows.filter(r => !r.p.endsWith('(other)')).map(r => [P === '' ? r.p : `${P}/${r.p}`, r] as const).filter(([p]) => roots.some(R => p.startsWith(`${R}/`)))
+        const drawn = d.rows.filter(r => !r.path.endsWith('(other)')).map(r => [P === '' ? r.path : `${P}/${r.path}`, r] as const).filter(([p]) => roots.some(R => p.startsWith(`${R}/`)))
         rows += drawn.length
-        if (d !== full) folded += full.rows.filter(r => !r.p.endsWith('(other)')).length - d.rows.filter(r => !r.p.endsWith('(other)')).length
+        if (d !== full) folded += full.rows.filter(r => !r.path.endsWith('(other)')).length - d.rows.filter(r => !r.path.endsWith('(other)')).length
         for (const [p, r] of drawn) {
           const [a, oa] = scans.get(from)!.get(p) ?? [0, 0], [b, ob] = scans.get(to)!.get(p) ?? [0, 0]
-          if (r.a !== a || r.b !== b || r.oa !== oa || r.ob !== ob) bad.push([lit, from, to, T2, P, cut, r.p, [r.a, r.b, r.oa, r.ob], [a, b, oa, ob]])
+          if (r.bytes_before !== a || r.bytes_after !== b || r.objects_before !== oa || r.objects_after !== ob) bad.push([lit, from, to, T2, P, cut, r.path, [r.bytes_before, r.bytes_after, r.objects_before, r.objects_after], [a, b, oa, ob]])
         }
       }
     }
@@ -634,8 +631,8 @@ describe('interval store: base + runs', () => {
       for (const c of cases.filter(x => x.w === 30 && x.depth == null)) {
         const v = await buildView(at('g6', [], hide, { rev }), { date: c.date, path: c.path, w: c.w, h: c.h, minArea: 12, atten: 2 })
         const got = flatten(v.tree)
-        if (c.v === 1) for (const n of Object.values(got)) delete n.f
-        const want = Object.fromEntries(Object.entries(c.tiles).map(([k, n]) => [k, n.f === null ? Object.fromEntries(Object.entries(n).filter(([f]) => f !== 'f')) : n]))
+        if (c.v === 1) for (const n of Object.values(got)) delete n.folded
+        const want = Object.fromEntries(Object.entries(c.tiles).map(([k, n]) => [k, n.folded === null ? Object.fromEntries(Object.entries(n).filter(([f]) => f !== 'folded')) : n]))
         expect({ rev, case: [c.date, c.path], tiles: got }).toEqual({ rev, case: [c.date, c.path], tiles: want })
       }
     }
@@ -647,8 +644,8 @@ describe('interval store: base + runs', () => {
       for (const c of cases) {
         const v = await buildView(e, { date: c.date, path: c.path, w: c.w, h: c.h, minArea: 12, atten: 2, ...(c.depth != null ? { maxDepth: c.depth } : {}) })
         const got = flatten(v.tree)
-        const want = Object.fromEntries(Object.entries(c.tiles).map(([k, n]) => [k, n.f === null ? Object.fromEntries(Object.entries(n).filter(([f]) => f !== 'f')) : n]))
-        if (c.v === 1) for (const n of Object.values(got)) delete n.f
+        const want = Object.fromEntries(Object.entries(c.tiles).map(([k, n]) => [k, n.folded === null ? Object.fromEntries(Object.entries(n).filter(([f]) => f !== 'folded')) : n]))
+        if (c.v === 1) for (const n of Object.values(got)) delete n.folded
         expect({ case: [c.date, c.path, c.w, c.h, c.depth], tiles: got }).toEqual({ case: [c.date, c.path, c.w, c.h, c.depth], tiles: want })
         expect(v.index).toBe(`iv:${gen}`)
       }
@@ -661,7 +658,7 @@ describe('interval store: base + runs', () => {
           if (from === to) continue
           for (const path of ['', 'b1', 'b2/e']) {
             const o = { from, to, path, w: 8, h: 6, minArea: 12, atten: 2, top: 100 }
-            const shape = (d: Awaited<ReturnType<typeof buildDiff>> | string) => typeof d === 'string' ? d : { rows: d.rows, totals: [d.total_a, d.total_b, d.objects_a, d.objects_b] }
+            const shape = (d: Awaited<ReturnType<typeof buildDiff>> | string) => typeof d === 'string' ? d : { rows: d.rows, totals: [d.bytes_before, d.bytes_after, d.objects_before, d.objects_after] }
             const got = await buildDiff(at(gen), o).catch(e => `${(e as Error).name}: ${(e as Error).message}`)
             const want = await buildDiff(env, o).catch(e => `${(e as Error).name}: ${(e as Error).message}`)
             expect({ o, d: shape(got) }).toEqual({ o, d: shape(want) })
@@ -936,8 +933,8 @@ describe('interval store: base + runs', () => {
 // path's descendants exist only with it); `g1`'s synthetic scans are not.
 describe('Δ diffs by descent', () => {
   const DATES = ['2026-09-30T0007', '2026-09-30T0008', '2026-09-30T0009']
-  type R = { p: string; d: number; k: string; s: string; a: number; b: number; oa: number; ob: number; x?: true }
-  const key = (r: R) => `${r.p}|${r.s}|${r.a}|${r.b}|${r.oa}|${r.ob}|${r.k}`
+  type R = { path: string; depth: number; kind: string; status: string; bytes_before: number; bytes_after: number; objects_before: number; objects_after: number; expanded?: true }
+  const key = (r: R) => `${r.path}|${r.status}|${r.bytes_before}|${r.bytes_after}|${r.objects_before}|${r.objects_after}|${r.kind}`
   const at = (gen: string, rs: string[], hide?: (k: string) => boolean) => ({ ...env, INTERVAL_STORE_GEN: gen, INDEX_R2: r2(rs, hide) }) as Env
   /** Every directory down to depth 2 on any of the scans (and the root). */
   const dirsOf = async (gen: string, depth = 2, dates = DATES): Promise<string[]> => {
@@ -958,11 +955,11 @@ describe('Δ diffs by descent', () => {
         if (!d) continue
         if (d.truncated) cut++
         const rows = d.rows as R[]
-        for (const top of [{ p: '', a: d.total_a, b: d.total_b, oa: d.objects_a, ob: d.objects_b }, ...rows.filter(r => r.x)]) {
-          const kids = rows.filter(r => parentOf(r.p) === top.p && r.p !== top.p)
+        for (const top of [{ path: '', bytes_before: d.bytes_before, bytes_after: d.bytes_after, objects_before: d.objects_before, objects_after: d.objects_after }, ...rows.filter(r => r.expanded)]) {
+          const kids = rows.filter(r => parentOf(r.path) === top.path && r.path !== top.path)
           if (!kids.length) continue
           const sum = (f: (r: R) => number) => kids.reduce((s, r) => s + f(r), 0)
-          expect([gen, path, descent, top.p, sum(r => r.b - r.a), sum(r => r.ob - r.oa)]).toEqual([gen, path, descent, top.p, top.b - top.a, top.ob - top.oa])
+          expect([gen, path, descent, top.path, sum(r => r.bytes_after - r.bytes_before), sum(r => r.objects_after - r.objects_before)]).toEqual([gen, path, descent, top.path, top.bytes_after - top.bytes_before, top.objects_after - top.objects_before])
         }
       }
     }
@@ -982,23 +979,23 @@ describe('Δ diffs by descent', () => {
         }
         expect(got.tier).toBe('descent')
         const want = await buildDiff(at(gen, []), { ...o, top: 1e6, threshold: Math.max(0.5, got.threshold * 0.999), lookupCap: 1e9 })
-        expect([got.total_a, got.total_b, got.objects_a, got.objects_b]).toEqual([want.total_a, want.total_b, want.objects_a, want.objects_b])
-        const ch = (r: R) => r.s !== 'unchanged' && !r.p.endsWith('(other)')
-        let wantBy = new Map((want.rows as R[]).filter(ch).map(r => [r.p, key(r)]))
+        expect([got.bytes_before, got.bytes_after, got.objects_before, got.objects_after]).toEqual([want.bytes_before, want.bytes_after, want.objects_before, want.objects_after])
+        const ch = (r: R) => r.status !== 'unchanged' && !r.path.endsWith('(other)')
+        let wantBy = new Map((want.rows as R[]).filter(ch).map(r => [r.path, key(r)]))
         // A row the walk at the final floor doesn't name (the descent read P's children at a lower first-level floor):
         // compared with the walk at a floor under every row.
-        if ((got.rows as R[]).some(r => ch(r) && !wantBy.has(r.p))) {
+        if ((got.rows as R[]).some(r => ch(r) && !wantBy.has(r.path))) {
           const fine = await buildDiff(at(gen, []), { ...o, top: 1e6, threshold: 0.5, lookupCap: 1e9 })
-          wantBy = new Map((fine.rows as R[]).filter(ch).map(r => [r.p, key(r)]))
+          wantBy = new Map((fine.rows as R[]).filter(ch).map(r => [r.path, key(r)]))
         }
-        const bad = (got.rows as R[]).filter(ch).map(r => [r.p, key(r), wantBy.get(r.p) ?? null]).filter(([, a, b]) => a !== b)
+        const bad = (got.rows as R[]).filter(ch).map(r => [r.path, key(r), wantBy.get(r.path) ?? null]).filter(([, a, b]) => a !== b)
         expect([gen, DATES[i], DATES[j], path, w, top, bad]).toEqual([gen, DATES[i], DATES[j], path, w, top, []])
         const rows = got.rows as R[]
-        for (const t of [{ p: '', a: got.total_a, b: got.total_b, oa: got.objects_a, ob: got.objects_b }, ...rows.filter(r => r.x)]) {
-          const kids = rows.filter(r => parentOf(r.p) === t.p && r.p !== t.p)
+        for (const t of [{ path: '', bytes_before: got.bytes_before, bytes_after: got.bytes_after, objects_before: got.objects_before, objects_after: got.objects_after }, ...rows.filter(r => r.expanded)]) {
+          const kids = rows.filter(r => parentOf(r.path) === t.path && r.path !== t.path)
           if (!kids.length) continue
           const sum = (f: (r: R) => number) => kids.reduce((x, r) => x + f(r), 0)
-          expect([gen, path, top, t.p, sum(r => r.b - r.a), sum(r => r.ob - r.oa)]).toEqual([gen, path, top, t.p, t.b - t.a, t.ob - t.oa])
+          expect([gen, path, top, t.path, sum(r => r.bytes_after - r.bytes_before), sum(r => r.objects_after - r.objects_before)]).toEqual([gen, path, top, t.path, t.bytes_after - t.bytes_before, t.objects_after - t.objects_before])
         }
         compared++
       }
@@ -1013,10 +1010,10 @@ describe('Δ diffs by descent', () => {
         const o = { from: DATES[0], to: DATES[2], path: '', w: 1280, h: 768, minArea: 12, atten: 2, top: 1e6, threshold: T }
         const got = await buildDiff(at(gen, []), { ...o, descent: true, noHandOff: true })
         const want = await buildDiff(at(gen, []), { ...o, lookupCap: 1e9 })
-        const ch = (r: R) => r.s !== 'unchanged' && !r.p.endsWith('(other)')
-        const wantBy = new Map((want.rows as R[]).filter(ch).map(r => [r.p, key(r)]))
-        expect([gen, T, got.tier, got.threshold, got.total_b - got.total_a, (got.rows as R[]).filter(ch).map(r => [r.p, key(r), wantBy.get(r.p) ?? null]).filter(([, a, b]) => a !== b)])
-          .toEqual([gen, T, 'descent', T, want.total_b - want.total_a, []])
+        const ch = (r: R) => r.status !== 'unchanged' && !r.path.endsWith('(other)')
+        const wantBy = new Map((want.rows as R[]).filter(ch).map(r => [r.path, key(r)]))
+        expect([gen, T, got.tier, got.threshold, got.bytes_after - got.bytes_before, (got.rows as R[]).filter(ch).map(r => [r.path, key(r), wantBy.get(r.path) ?? null]).filter(([, a, b]) => a !== b)])
+          .toEqual([gen, T, 'descent', T, want.bytes_after - want.bytes_before, []])
         compared++
       }
     }
@@ -1028,10 +1025,10 @@ describe('Δ diffs by descent', () => {
     const cut = await buildDiff(at('g2', []), { from: DATES[0], to: DATES[1], path: 'bk', w: 1280, h: 768, minArea: 12, atten: 2, top: 5, descent: true, noHandOff: true })
     expect([full.expansions_skipped, full.truncated, cut.truncated, (cut.expansions_skipped ?? 0) > 0 || cut.expansions < full.expansions]).toEqual([undefined, false, true, true])
     const rows = cut.rows as R[]
-    for (const t of [{ p: '', a: cut.total_a, b: cut.total_b, oa: cut.objects_a, ob: cut.objects_b }, ...rows.filter(r => r.x)]) {
-      const kids = rows.filter(r => parentOf(r.p) === t.p && r.p !== t.p)
+    for (const t of [{ path: '', bytes_before: cut.bytes_before, bytes_after: cut.bytes_after, objects_before: cut.objects_before, objects_after: cut.objects_after }, ...rows.filter(r => r.expanded)]) {
+      const kids = rows.filter(r => parentOf(r.path) === t.path && r.path !== t.path)
       if (!kids.length) continue
-      expect([t.p, kids.reduce((x, r) => x + r.b - r.a, 0), kids.reduce((x, r) => x + r.ob - r.oa, 0)]).toEqual([t.p, t.b - t.a, t.ob - t.oa])
+      expect([t.path, kids.reduce((x, r) => x + r.bytes_after - r.bytes_before, 0), kids.reduce((x, r) => x + r.objects_after - r.objects_before, 0)]).toEqual([t.path, t.bytes_after - t.bytes_before, t.objects_after - t.objects_before])
     }
   })
 
@@ -1085,11 +1082,11 @@ describe('Δ diffs by descent', () => {
     for (const [gen, dates] of [['g2', DATES], ['g7', DATES], ['g1', G1]] as const) for (const path of await dirsOf(gen, 3, [...dates])) for (let i = 0; i + 1 < dates.length; i++) {
       const [from, to] = [dates[i], dates[i + 1]]
       const plain = await buildDiff(at(gen, []), { from, to, path, w: 30, h: 30, minArea: 12, atten: 2, top: 1e6, threshold: 0.5, lookupCap: 1e9 }).catch(() => null)
-      if (!plain || plain.rows.some(r => r.s !== 'unchanged') || plain.total_a !== plain.total_b || plain.objects_a !== plain.objects_b) continue
+      if (!plain || plain.rows.some(r => r.status !== 'unchanged') || plain.bytes_before !== plain.bytes_after || plain.objects_before !== plain.objects_after) continue
       const levels: string[] = []
       const d = await buildDiff(at(gen, []), { from, to, path, w: 30, h: 30, minArea: 12, atten: 2, top: 1e6, descent: true, noHandOff: true, trace: n => { if (/^L\d+$/.test(n)) levels.push(n) } })
       found++
-      expect([gen, path, d.rows.filter(r => r.s !== 'unchanged'), levels]).toEqual([gen, path, [], []])
+      expect([gen, path, d.rows.filter(r => r.status !== 'unchanged'), levels]).toEqual([gen, path, [], []])
     }
     expect(found).toBeGreaterThan(0)
   }, 120_000)

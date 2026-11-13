@@ -3,7 +3,7 @@
 // the map there (a file opens in the leaf viewer); a "Filter map by …" row sets `?f=` instead.
 import { useOmnibarEndpoint, type EndpointResponse, type OmnibarEntry } from 'use-kbd'
 
-export interface NameMatch { path: string; kind: 'dir' | 'file' | null; b: number; o: number }
+export interface NameMatch { path: string; kind: 'dir' | 'file' | null; bytes: number; objects: number }
 export interface NameMatches { date: string; path: string; q: string; items: NameMatch[]; total: number; complete: boolean; reason?: string }
 
 /** The scan the omnibar searches: the map's, unless the static name index doesn't cover it yet (a just-published
@@ -36,7 +36,7 @@ export function matchEntries(body: NameMatches, o: { go: (m: NameMatch) => void;
   const out: OmnibarEntry[] = body.items.map(m => ({
     id: `match:${m.path}`,
     label: matchLabel(m.path),
-    description: `${m.kind === 'file' ? 'file' : 'folder'} · ${o.size(m.b)}${m.kind !== 'file' && m.o > 1 ? ` · ${m.o.toLocaleString()} objects` : ''}${o.scanNote ? ` · ${o.scanNote}` : ''}`,
+    description: `${m.kind === 'file' ? 'file' : 'folder'} · ${o.size(m.bytes)}${m.kind !== 'file' && m.objects > 1 ? ` · ${m.objects.toLocaleString()} objects` : ''}${o.scanNote ? ` · ${o.scanNote}` : ''}`,
     keywords: [m.path],
     handler: () => o.go(m),
   }))

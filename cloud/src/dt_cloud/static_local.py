@@ -234,12 +234,15 @@ def find_scans(root: str, layouts: list[str], local: Path, *, start: str | None 
 
 def build_gen(scans: dict, mount: str, gen_dir: Path, work: Path, *, gen: str, rule, k: int = RANGES, shard_rows: int = SHARD_ROWS,
               max_rows: int = MAX_ROWS, R: int = R_ROWS, K: int = K_KEPT, floor: int = FLOOR, chunk_rows: int = CHUNK_ROWS, threads: int = 4,
-              mem: str = "4GB", with_anchors: bool = True, ranges: dict | None = None) -> dict:
+              mem: str = "4GB", with_anchors: bool = True, ranges: dict | None = None, canonical_ready: bool = False) -> dict:
     """A base generation over `scans` (`scans.json`'s doc; their files under `mount`) in `gen_dir`, every stage in turn:
     ranges → coalesced versions → suffix map → shards → sidecar → census → members → cells → short literals → catalog
     → drill → anchored search (`with_anchors`: `names/` + `anchors/`). `ranges`: these key ranges (a `ranges.json`)
     instead of planning `k` (a compaction's reference: the rebuild over its base's ranges). Returns a summary (rows, files, and per stage its
-    seconds, peak work-disk GiB and peak RSS GiB so far)."""
+    seconds, peak work-disk GiB and peak RSS GiB so far). `canonical_ready`: the supplied ranges' `cintervals/` and
+    `chist/` already exist in `gen_dir`; rebuild only their derived artifacts, without reading raw scan sources."""
+    if canonical_ready and ranges is None:
+        raise ValueError("canonical_ready requires explicit ranges")
     t0, times, peaks = monotonic(), {}, {}
     gen_dir.mkdir(parents=True, exist_ok=True)
     work.mkdir(parents=True, exist_ok=True)
@@ -271,7 +274,13 @@ def build_gen(scans: dict, mount: str, gen_dir: Path, work: Path, *, gen: str, r
     (gen_dir / "ranges.json").write_text(json.dumps(ranges, indent=1) + "\n")
     names = [f"r{r['i']:04d}" for r in ranges["ranges"]]
     for r in ranges["ranges"]:
-        sn.build_range(doc, ranges, r["i"], gen_dir, mount=mount, threads=threads, mem=mem, tmp=tmp, con=con, coalesced=True, rule=rule)
+        if canonical_ready:
+            for sub in ("cintervals", "chist"):
+                path = gen_dir / sub / f"r{r['i']:04d}.parquet"
+                if not path.is_file():
+                    raise FileNotFoundError(f"canonical_ready: missing {path}")
+        else:
+            sn.build_range(doc, ranges, r["i"], gen_dir, mount=mount, threads=threads, mem=mem, tmp=tmp, con=con, coalesced=True, rule=rule)
     t = done("intervals", t)
     plan = sn.plan_shards(sorted((gen_dir / "chist").glob("*.parquet")), shard_rows, 1)
     (gen_dir / "shards.json").write_text(json.dumps(plan, indent=1) + "\n")

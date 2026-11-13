@@ -33,13 +33,13 @@ export function OwnerControls({ uri, idx, node, lensed, userIdx, onPickUser, sta
     return null
   }
   // A file's panel assigns that exact object; a folder's, its `/` prefix (specs/done/file-assign.md).
-  const item = actionItem(uri.replace(/\/$/, ''), node?.k === 'file' ? 'file' : 'dir')
+  const item = actionItem(uri.replace(/\/$/, ''), node?.kind === 'file' ? 'file' : 'dir')
   const cl = idx.assignmentOf(item.key, item.kind)
   // Ownership: the assignment if there is one; otherwise the scan's
   // attribution — one person by name, a mix as a bar (OwnerBar).
-  const shares = ownerShares(node ?? { n: '', b: 0, o: 0 } as TreeNode)
-  const soleOwner = !cl && shares.length > 0 && shares[0][1] >= 0.98 * node!.b ? shares[0][0] : null
-  const mixed = !cl && !soleOwner && shares.length > 0
+  const shares = ownerShares(node ?? { name: '', bytes: 0, objects: 0 })
+  const soleOwner = !cl && shares.length > 0 && shares[0][1] >= 0.98 * node!.bytes ? shares[0][0] : null
+  const mixed = !cl && !soleOwner && (shares.length > 0 || !!node?.unknown_owner_bytes)
   return (
     <div className="owner-controls" onClick={e => e.stopPropagation()}>
       <span className="owner">
@@ -47,7 +47,7 @@ export function OwnerControls({ uri, idx, node, lensed, userIdx, onPickUser, sta
         {cl
           ? <><OwnerFactChip who={cl.who} assigned={{ by: cl.by, ts: cl.ts, memo: cl.memo }} /><span className="prov">assigned {fmtDate(cl.ts)}</span></>
           : soleOwner
-            ? <OwnerFactChip who={soleOwner} inferred={node?.pv ?? null} />
+            ? <OwnerFactChip who={soleOwner} inferred={node?.provenance ?? null} />
             : mixed
               ? <OwnerBar node={node!} userIdx={userIdx} onPickUser={onPickUser} note="Nobody has assigned this prefix. The scan attributes its bytes to:" />
               // The lens keeps only one person's bytes: with none here, the
@@ -55,7 +55,7 @@ export function OwnerControls({ uri, idx, node, lensed, userIdx, onPickUser, sta
               : <span className="none" title={lensed ? 'the owner filter hides other people\'s bytes here' : undefined}>—</span>}
         {canAssign && <AssignSelect items={item} assigned={cl?.who ?? null} />}
         {stage}
-        {node && node.cb && Object.values(node.cb).some(b => b > 0) && (
+        {node && node.class_bytes && Object.values(node.class_bytes).some(b => b > 0) && (
           <span className="classes">
             <span className="lbl">class</span>
             <ClassBar node={node} />

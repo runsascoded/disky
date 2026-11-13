@@ -9,7 +9,7 @@ import pytest
 from click.testing import CliRunner
 
 from dt_cloud.cli import main
-from dt_cloud.r2_checkpoint import META, parity, sync
+from dt_cloud.r2_checkpoint import META, parity, publish_receipt, receipt, sync
 
 UTC = timezone.utc
 CUT = datetime(2026, 11, 8, tzinfo=UTC)
@@ -226,3 +226,137 @@ def test_gcs_checkpoint_publication_is_conditional(tmp_path: Path, monkeypatch) 
         with pytest.raises(ValueError, match='^checkpoint changed concurrently$'):
             publish(candidate)
     assert calls == [('read', 17), ('write', 17, b'new')]
+
+
+def test_compacted_history_uses_checkpoint_and_keeps_new_windows_exact(tmp_path: Path) -> None:
+    from disk_tree.access.parsers.r2 import state_aggs
+
+    root = tmp_path / 'archive'
+    old = hour(root, 'b1', CUT - timedelta(days=10), [('hot', 'GetObject', 3)])
+    recent = hour(root, 'b1', CUT - timedelta(hours=3), [('hot', 'GetObject', 5)])
+    src = state(root, {'b1': [old]}, {'b1': [recent]})
+    checkpoint, out = str(tmp_path / 'closed.parquet'), tmp_path / 'out.parquet'
+    sync(src, checkpoint, CUT, out, tmp_path / 'one', verify=True)
+    expected = totals(out)
+    doc = json.loads(Path(src).read_text())
+    doc['schema_version'] = 3
+    doc['buckets']['b1']['closed'] = {'through': (CUT - timedelta(days=10)).timestamp(), 'checkpoint': checkpoint}
+    doc['buckets']['b1']['frozen'] = {}
+    Path(src).write_text(json.dumps(doc))
+    (root / old[1]).unlink()
+    result = sync(src, checkpoint, CUT, out, tmp_path / 'two')
+    assert (result['downloaded'], result['new_frozen'], result['closed_rows']) == (1, 0, 1)
+    assert totals(out) == expected
+    with pytest.raises(ValueError, match='^r2 state: compacted history requires its durable read checkpoint$'):
+        state_aggs(doc, CUT)
+    with pytest.raises(ValueError, match='^read checkpoint: full-history verification requires original, uncompacted state$'):
+        sync(src, checkpoint, CUT, out, tmp_path / 'verify', verify=True)
+
+
+@pytest.mark.parametrize('change', ['missing', 'ahead', 'other'])
+def test_compacted_state_refuses_missing_lagging_or_other_checkpoint(tmp_path: Path, change: str) -> None:
+    root = tmp_path / 'archive'
+    old = hour(root, 'b1', CUT - timedelta(days=10), [('hot', 'GetObject', 3)])
+    src = state(root, {'b1': [old]}, {})
+    checkpoint, out = tmp_path / 'closed.parquet', tmp_path / 'out.parquet'
+    sync(src, str(checkpoint), CUT, out, tmp_path / 'one', verify=True)
+    expected = out.read_bytes()
+    doc = json.loads(Path(src).read_text())
+    doc['schema_version'] = 3
+    doc['buckets']['b1'].update(frozen={}, closed={
+        'through': (CUT - timedelta(days=9 if change == 'ahead' else 10)).timestamp(),
+        'checkpoint': str(tmp_path / 'other.parquet') if change == 'other' else str(checkpoint),
+    })
+    Path(src).write_text(json.dumps(doc))
+    if change == 'missing':
+        checkpoint.unlink()
+    with pytest.raises(ValueError, match='^r2 state: b1 compacted history is ahead of or differs from the read checkpoint$'):
+        sync(src, str(checkpoint), CUT, out, tmp_path / 'two')
+    assert out.read_bytes() == expected
+
+
+def test_receipt_requires_verified_bootstrap_and_survives_steady_update(tmp_path: Path) -> None:
+    from hashlib import sha256
+
+    root = tmp_path / 'archive'
+    old = hour(root, 'b1', CUT - timedelta(days=10), [('hot', 'GetObject', 3)])
+    src = state(root, {'b1': [old]}, {})
+    checkpoint, out = tmp_path / 'closed.parquet', tmp_path / 'out.parquet'
+    sync(src, str(checkpoint), CUT, out, tmp_path / 'one')
+    with pytest.raises(ValueError, match='^read checkpoint receipt requires a passing full-history bootstrap comparison$'):
+        receipt(str(checkpoint), tmp_path / 'unverified')
+    sync(src, str(checkpoint), CUT, out, tmp_path / 'two', verify=True)
+    sync(src, str(checkpoint), CUT, out, tmp_path / 'three')
+    expected = {'schema_version': 1, 'kind': 'r2-read-checkpoint', 'source': src, 'account': 'account',
+                'checkpoint': {'uri': str(checkpoint), 'generation': None, 'sha256': sha256(checkpoint.read_bytes()).hexdigest()},
+                'cursors': {'b1': (CUT - timedelta(days=10)).timestamp()}}
+    assert receipt(str(checkpoint), tmp_path / 'receipt') == expected
+    destination = tmp_path / 'receipt.json'
+    result = CliRunner().invoke(main, ['access', 'r2-receipt', '-c', str(checkpoint), '-o', str(destination), '-w', str(tmp_path / 'cli')])
+    assert result.exit_code == 0, result.exception
+    assert json.loads(destination.read_text()) == expected
+    assert json.loads(result.stdout) == {'out': str(destination), 'cursors': expected['cursors'], 'generation': None}
+
+
+@pytest.mark.parametrize('mode', ['create', 'advance', 'behind', 'conflict'])
+def test_receipt_publication_is_monotonic_conditional_and_read_back(monkeypatch, mode: str) -> None:
+    from io import BytesIO
+    from types import SimpleNamespace
+    import boto3
+    from botocore.exceptions import ClientError
+    from botocore.response import StreamingBody
+    from botocore.stub import Stubber
+    from disk_tree import blobfs
+
+    client = boto3.client('s3', endpoint_url='https://receipt.example.org', region_name='auto',
+                          aws_access_key_id='fixture', aws_secret_access_key='fixture')
+    monkeypatch.setenv('RECEIPT_ACCESS_KEY_ID', 'receipt-fixture')
+    monkeypatch.setenv('RECEIPT_SECRET_ACCESS_KEY', 'receipt-secret-fixture')
+    def session(**kwargs):
+        assert kwargs == {'aws_access_key_id': 'receipt-fixture', 'aws_secret_access_key': 'receipt-secret-fixture'}
+        return SimpleNamespace(client=lambda *args, **kw: client)
+    monkeypatch.setattr(boto3, 'Session', session)
+    monkeypatch.setattr(blobfs, 'r2_endpoint', lambda _: 'https://receipt.example.org')
+    monkeypatch.setattr(blobfs, 'bucket_profile', lambda _: None)
+    doc = {'schema_version': 1, 'kind': 'r2-read-checkpoint', 'account': 'own', 'source': 'r2://archive/state.json',
+           'checkpoint': {'uri': 'gs://own/closed.parquet', 'generation': '18', 'sha256': 'a' * 64}, 'cursors': {'b': 200}}
+    old = {**doc, 'checkpoint': {**doc['checkpoint'], 'generation': '17'}, 'cursors': {'b': 300 if mode == 'behind' else 100}}
+    data = (json.dumps(doc, sort_keys=True) + '\n').encode()
+    target = {'Bucket': 'own-receipts', 'Key': 'r2-read.json'}
+    def response(value: bytes, etag: str) -> dict:
+        return {'Body': StreamingBody(BytesIO(value), len(value)), 'ETag': etag}
+    with Stubber(client) as stub:
+        condition = {'IfNoneMatch': '*'} if mode == 'create' else {'IfMatch': '"old"'}
+        if mode == 'create':
+            stub.add_client_error('get_object', service_error_code='NoSuchKey', http_status_code=404, expected_params=target)
+        else:
+            stub.add_response('get_object', response(json.dumps(old).encode(), '"old"'), target)
+        if mode != 'behind':
+            put = {**target, 'Body': data, 'ContentType': 'application/json', **condition}
+            if mode == 'conflict':
+                stub.add_client_error('put_object', service_error_code='PreconditionFailed', http_status_code=412, expected_params=put)
+            else:
+                stub.add_response('put_object', {'ETag': '"new"'}, put)
+                stub.add_response('get_object', response(data, '"new"'), {**target, 'IfMatch': '"new"'})
+        if mode == 'behind':
+            with pytest.raises(ValueError, match='^receipt would move backwards or change its source/checkpoint$'):
+                publish_receipt(doc, 'r2://own-receipts/r2-read.json')
+        elif mode == 'conflict':
+            with pytest.raises(ClientError) as error:
+                publish_receipt(doc, 'r2://own-receipts/r2-read.json')
+            assert error.value.response['Error']['Code'] == 'PreconditionFailed'
+        else:
+            assert publish_receipt(doc, 'r2://own-receipts/r2-read.json') is None
+        stub.assert_no_pending_responses()
+
+
+def test_receipt_publication_never_falls_back_to_an_ambient_writer(monkeypatch) -> None:
+    from disk_tree import blobfs
+
+    monkeypatch.setattr(blobfs, 'r2_endpoint', lambda _: 'https://receipt.example.org')
+    monkeypatch.delenv('RECEIPT_ACCESS_KEY_ID', raising=False)
+    monkeypatch.delenv('RECEIPT_SECRET_ACCESS_KEY', raising=False)
+    monkeypatch.setenv('AWS_ACCESS_KEY_ID', 'unrelated-index-writer')
+    monkeypatch.setenv('AWS_SECRET_ACCESS_KEY', 'unrelated-secret')
+    with pytest.raises(ValueError, match='^receipt publication requires its dedicated RECEIPT_ACCESS_KEY_ID and RECEIPT_SECRET_ACCESS_KEY$'):
+        publish_receipt({'checkpoint': {'generation': '18'}}, 'r2://own-receipts/r2-read.json')

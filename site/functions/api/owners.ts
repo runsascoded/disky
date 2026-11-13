@@ -3,8 +3,8 @@
  *
  * Per-user owned bytes for a scan — the ownership ledger folded server-side
  * against the floor-free path index (`_lib/ownerTotals.ts`): what `/users`
- * ranks and prices. `{ scan, head, bytes, objects, users: { <id>: { b, mix } } }`
- * (`mix` = class id → bytes, so each user's estate prices like the scan's
+ * ranks and prices. `{ scan, head, bytes, objects, users: { <id>: { bytes, class_bytes } } }`
+ * (`class_bytes` = class id → bytes, so each user's estate prices like the scan's
  * attribution does); the per-assignment rows stay on `/api/estate`.
  */
 import { type Ctx, json, requireViewer } from '../_lib/auth.js'
@@ -33,7 +33,9 @@ export const onRequestGet = async (ctx0: Ctx): Promise<Response> => {
   const date = scan
   try {
     const t = await ownerTotals(env, date)
-    return json({ scan: t.scan, head: t.head, bytes: t.bytes, objects: t.objects, users: t.users, computed: t.computed }, 200, { 'cache-control': 'private, no-store' })
+    // The ledger's own `{ b, mix }` (`owner_totals.body`) in the response's names (specs/descriptive-field-names.md §3d).
+    const users = Object.fromEntries(Object.entries(t.users).map(([u, v]) => [u, { bytes: v.b, class_bytes: v.mix }]))
+    return json({ scan: t.scan, head: t.head, bytes: t.bytes, objects: t.objects, users, computed: t.computed }, 200, { 'cache-control': 'private, no-store' })
   } catch (e) {
     const refused = ivRefusal(e)
     if (refused) return refused
