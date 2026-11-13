@@ -15,6 +15,7 @@ const READERS = /from ['"](?:\.\.\/)+_lib\/(?:view|ownerTotals|prefixes|stagedSl
 /** Routes that read the index without `withPathStore`, on purpose. */
 const EXCEPTIONS: Record<string, string> = {
   'api/age-pyramid.ts': 'age pyramids: the age store first (`readAgePoint`), else their own per-scan variants, which no interval store holds',
+  'api/executor-status.ts': 'reads no index: `_lib/executor.js` only for `executorOf`, then the laptop agent\'s D1 status',
 }
 
 /** The Functions' route files (relative to `functions/`): every `.ts` but `_lib/` and tests. */
