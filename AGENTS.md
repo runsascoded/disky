@@ -119,7 +119,7 @@ dt-cloud static-names build -g GEN -L LAYOUT -s SCANS -o STORE -x off|MIN,TAIL  
 dt-cloud static-names add -g GEN -L LAYOUT -s SCANS -o STORE  # Append every scan after GEN's newest as a run (append, shards,
                           # catalog delta, drill run, + `names/`/`anchors/` when GEN's base has them — an anchorless GEN
                           # gets them only by a rebuild into a new GEN — `manifests/<id>.json`), then the binary counter's carries; a URL
-                          # store's generation is mirrored into `-w`, new files go up data → `meta.json`s → manifests.
+                          # store's generation is mirrored into `-w`, new files go up data → `meta.json`s → manifests after each scan (and its carries): a failure loses only that scan.
                           # Small deployments' path (the r2 demo's daily ingest); gcs/cw run the stages on Batch
 dt-cloud generation-gc -t KIND -o STORE -k PIN…  # Collect verified compaction predecessors: plans by default, `-x -s SCRATCH` executes
                           # (protocol, receipts, grace and pins: `specs/done/generation-gc-and-r2-copy.md`)
