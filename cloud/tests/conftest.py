@@ -1,7 +1,8 @@
 """Every test runs as a deployment with a neutral data bucket and site
 (`dt_cloud.deploy`): dt-cloud has no default of its own. A test of the unset
 case removes them with `monkeypatch.delenv`. The layer-2 template and the
-static-names profile start unset. Cost labels are required (specs/done/cost-labels-required.md):
+static-names profile start unset. The Batch region is a neutral one too (`BATCH_REGION=my-region`: no default
+either), with no cross-region override. Cost labels are required (specs/done/cost-labels-required.md):
 every test runs as deployment `test` (`DISKY_LABELS=app=disky,deployment=test`), never the shell's;
 a test of the missing case removes or replaces it.
 
@@ -10,6 +11,7 @@ schema (`site/schema.sql`), foreign keys ON (as D1 enforces them).
 
 The engine's root (`$DISKY_ROOT`) is a throwaway dir, set before anything imports `disk_tree` (its `config` binds
 paths at import), so no test records a Scan or writes a blob in the user's `~/.config/disk-tree`."""
+import datetime as dt
 import sqlite3
 from os import environ
 from pathlib import Path
@@ -89,13 +91,43 @@ def _deployment_env(monkeypatch):
     monkeypatch.setenv("DATA_BUCKET", "my-data")
     monkeypatch.setenv("SITE_URL", "https://site.example.org")
     monkeypatch.setenv("DISKY_LABELS", "app=disky,deployment=test")
+    monkeypatch.setenv("BATCH_REGION", "my-region")
     # Deployment config the generic code requires (no defaults): unset unless a test sets it.
-    for v in ("LAYER2_PREFIX", "STATIC_NAMES_PROFILE", "STATIC_NAMES_GEN", "SCAN_RUN_ID", "SCAN_ID"):
+    for v in ("LAYER2_PREFIX", "STATIC_NAMES_PROFILE", "STATIC_NAMES_GEN", "SCAN_RUN_ID", "SCAN_ID", "BATCH_CROSS_REGION", "LISTING_REGIONS"):
         monkeypatch.delenv(v, raising=False)
     # the cw digest's scan triggers come from the site (`/api/scan-runs`): none recorded, unless a test says otherwise
     from dt_cloud import digest_cw
 
     monkeypatch.setattr(digest_cw, "site_triggers", lambda cfg: {})
+    # …and its live settings (`/api/digest-settings`): none, so the config file's stand
+    from dt_cloud import digest
+
+    monkeypatch.setattr(digest, "live_settings", lambda cfg: None)
+
+
+def fake_site_render(cfg, rows: dict, month, plot_url=None, prev_url=None) -> dict:
+    """A stand-in for the site's OP render (`POST /api/digest-op`; the site's renderer has its own goldens,
+    `site/src/digest/parity.test.ts`): a line naming what it was asked to render, the previous thread and plot lines
+    as the OP carries them, and a plot request naming the same."""
+    last = rows["rows"][-1]
+    upto = last.get("scan") or last["date"]
+    lines = [f"<site OP: {cfg.template} {month:%Y-%m}, {len(rows['rows'])} scans to {upto}, params {cfg.params or '-'}>"]
+    if prev_url:
+        lines += ["", f"[← {month.replace(day=1) - dt.timedelta(days=1):%B}]({prev_url})"]
+    if plot_url is not None:
+        lines += ["", f"![{cfg.title} — {month:%B %Y}]({plot_url})"]
+    return {"text": "\n".join(lines), "image": {"site_image": cfg.template, "month": f"{month:%Y-%m}", "to": upto}}
+
+
+@pytest.fixture(autouse=True)
+def _site_render(request, monkeypatch):
+    """The OP is the site's to render: tests get `fake_site_render`, unless marked `real_site_render`."""
+    if request.node.get_closest_marker("real_site_render"):
+        return
+    from dt_cloud import digest, digest_cw, digest_gcs
+
+    for m in (digest, digest_cw, digest_gcs):
+        monkeypatch.setattr(m, "site_render", fake_site_render)
 
 
 @pytest.fixture

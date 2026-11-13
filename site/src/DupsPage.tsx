@@ -17,6 +17,7 @@ import { setCurrentScan } from './owners'
 import { DEFAULT_STORE } from './stores'
 import { getJson } from './scanRunsUi'
 import { CLASS_COLORS, CLASS_NAMES, classMix, fmtN } from './types'
+import { Pager, usePaged } from './Pager'
 import {
   type DupCopy, type DupGroup, type DupsResponse, type DupsSort, groupIdle, idleDays, pairMatrix, SORTS, sortGroups, stageBlock,
   stageItems, suggested, type Tier, today,
@@ -188,6 +189,7 @@ export function DupsPage() {
   const data = dq.data
   const day = today()
   const groups = useMemo(() => (data ? sortGroups(data.groups, sort, day) : []), [data, sort, day])
+  const paged = usePaged(groups)
   const [open, setOpen] = useState<Set<string>>(new Set())
   // The admin's changes to the suggested selection, by path (true: checked). Only an opened (reviewed) group's
   // copies are ever staged: a closed group's suggestion is shown as a count, never selected.
@@ -253,7 +255,7 @@ export function DupsPage() {
               <tr><th /><th>shared path</th><th>tier</th><th className="num">size</th><th className="num">copies</th><th className="num">reclaimable</th><th className="num">idle</th>{admin && <th className="num">to stage</th>}</tr>
             </thead>
             <tbody>
-              {groups.map(g => {
+              {paged.rows.map(g => {
                 const isOpen = open.has(g.group)
                 const flip = () => setOpen(s => { const n = new Set(s); if (n.has(g.group)) n.delete(g.group); else n.add(g.group); return n })
                 const nChecked = g.items.filter(c => checked.has(c.path)).length
@@ -278,6 +280,7 @@ export function DupsPage() {
             </tbody>
           </table>
         </div>
+        <Pager paged={paged} label="Duplicate groups" />
         {!groups.length && <p className="dim">No groups match.</p>}
         {data.more && <p className="dim">Showing the first {fmtN(groups.length)} groups; narrow the filters to see others.</p>}
       </>)}

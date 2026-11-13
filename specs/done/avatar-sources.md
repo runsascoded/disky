@@ -18,7 +18,7 @@ users:
     team: oa
     aliases: [wheld]
     github: WillHeld          # → github.com/WillHeld.png
-    google: will@openathena.ai # → Gravatar / Directory pfp
+    google: will@example.test # → Gravatar / Directory pfp
     discord: "1093…"          # Discord user id → cdn.discordapp.com/avatars/…
 ```
 

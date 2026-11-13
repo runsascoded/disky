@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { auditRunControl, bucketOf, canonicalPrefix, covers, emptiedBatches, mergeBatches, planBucket, planDetail, planDigest, PlanSpansBuckets, planStaging, prefixShape, realGate, relPrefix, type RunRow, stageItems, uncovered } from './plans'
+import { auditRunControl, bucketOf, canonicalPrefix, covers, emptiedBatches, mergeBatches, planBucket, planDetail, planDigest, PlanSpansBuckets, planStaging, prefixShape, relPrefix, type RunRow, stageItems, uncovered } from './plans'
 import { type Sqlite, sqliteD1 } from './testD1'
 
 // An S3 deployment scanning two buckets, the first its primary.
@@ -134,29 +134,6 @@ describe('planDigest — sha-256 of the sorted prefixes joined by `\\n`, first 1
       planDigest(['s3://b/x/']),
       planDigest([]),
     ])).toEqual(['ec4acfe3116b50a3', 'ec4acfe3116b50a3', '979e77d52f39c350', 'e3b0c44298fc1c14'])
-  })
-})
-
-describe('realGate', () => {
-  const run = (o: Partial<RunRow>): RunRow => ({
-    run_id: 'cw-sweep-dry-1', mode: 'dry', scan: '2026-09-28T1201', actor: 'ann@openathena.ai', started_ts: 100,
-    finished_ts: 200, deleted_bytes: 2 * 1024 ** 4, deleted_objects: 1234, skipped_gone: 0, skipped_overwritten: 0,
-    plan_digest: 'D1', undo_deadline: null, ...o,
-  })
-  it('needs a finished dry-run of exactly the current set, and nothing in flight', () => {
-    const dry = run({})
-    expect(realGate([], 'D1', 0)).toEqual({ ok: false, reason: 'the plan is empty' })
-    expect(realGate([], 'D1', 3)).toEqual({ ok: false, reason: 'no dry-run of this plan yet' })
-    expect(realGate([dry], 'D2', 3)).toEqual({ ok: false, reason: 'the plan changed since the last dry-run; dry-run it again' })
-    expect(realGate([run({ finished_ts: null })], 'D1', 3)).toEqual({ ok: false, reason: 'a dry run is in progress (cw-sweep-dry-1)' })
-    expect(realGate([dry], 'D1', 3)).toEqual({ ok: true, dry })
-    // the newest matching dry-run wins
-    const newer = run({ run_id: 'cw-sweep-dry-2', started_ts: 300, finished_ts: 400, deleted_bytes: 5 })
-    expect(realGate([dry, newer], 'D1', 3)).toEqual({ ok: true, dry: newer })
-  })
-  it('a dry-run without a digest (NULL, or the empty one: ended without a result) never opens it', () => {
-    expect(realGate([run({ plan_digest: null })], 'D1', 3)).toEqual({ ok: false, reason: 'the plan changed since the last dry-run; dry-run it again' })
-    expect(realGate([run({ plan_digest: '' })], '', 3)).toEqual({ ok: false, reason: 'the plan changed since the last dry-run; dry-run it again' })
   })
 })
 

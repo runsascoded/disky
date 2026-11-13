@@ -54,6 +54,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
+      - name: Verify committed source
+        run: scripts/require-clean
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
@@ -83,9 +85,10 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
           cd site
+          git diff --exit-code HEAD
           # Pages rejects a custom config path (-c); swap the target config in as wrangler.toml.
           cp "${{ steps.t.outputs.config }}" wrangler.toml
-          pnpm exec wrangler pages deploy dist --project-name "${{ steps.t.outputs.project }}" --branch "${{ steps.t.outputs.branch }}" --commit-dirty=true
+          pnpm exec wrangler pages deploy dist --project-name "${{ steps.t.outputs.project }}" --branch "${{ steps.t.outputs.branch }}" --commit-hash "${{ github.event.workflow_run.head_sha }}" --commit-dirty=false
       - name: Smoke test (served + index reads)
         run: |
           set -euo pipefail

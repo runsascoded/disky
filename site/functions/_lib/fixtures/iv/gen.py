@@ -8,7 +8,7 @@ per `(date, path, w, h, depth)` the view computed from that scan's own rows by t
 (`interval_verify.Scan.view`), flattened (`interval_read.flatten`). The generator asserts the Python
 interval reader returns the same trees.
 
-    cloud/.venv-or-root/bin/python site/functions/_lib/fixtures/iv/gen.py [g2 | g7 | tiered]
+    cloud/.venv-or-root/bin/python site/functions/_lib/fixtures/iv/gen.py [g2 | g7 | g8 | g9 | tiered]
 
 `tiered`: the base + per-scan runs generations (`interval_append`): `g3` / `g4` / `g6` over `g1`'s scans (runs unmerged /
 merged pairwise as the old inline publish did / merged by the deferred carries, a revision manifest listing the merged
@@ -66,8 +66,8 @@ def main() -> None:
         if not (work / "out" / sub).is_dir():  # a sort this fixture's ranges don't build (`slices`: `g2`)
             continue
         schema = ist.SUB_SCHEMA[sub]
-        ist.write_served(con, f"read_parquet('{work}/out/{sub}/r*.parquet')", sort, out / "served" / f"{sort}.parquet", schema, rg_rows=4,
-                         stamps=[x["ts"] for x in scans])
+        ist.write_served(con, f"read_parquet('{work}/out/{sub}/r*.parquet')", sort, out / "served" / f"{sort}.parquet", schema,
+                         page_rows=ist.served_page_rows(sort), rg_rows=4, stamps=[x["ts"] for x in scans])
     (out / "scans.json").write_text(json.dumps({"scans": [{"id": s["id"], "ts": s["ts"]} for s in scans]}, indent=1) + "\n")
     store = ir.Store(out / "served")
     expected = []
@@ -128,7 +128,7 @@ def tiered_gens(mount: Path, work: Path, scans: list[dict], n_base: int, ranges:
         for sort in ia.run_sorts():
             sub, _, _ = ist.SORTS[sort]
             ist.write_served(con, f"read_parquet('{base}/{sub}/r*.parquet')", sort, out / "served" / f"{sort}.parquet", ist.SUB_SCHEMA[sub],
-                             rg_rows=rg_rows, stamps=[x["ts"] for x in scans[:n_base]])
+                             page_rows=ist.served_page_rows(sort), rg_rows=rg_rows, stamps=[x["ts"] for x in scans[:n_base]])
         (out / "scans.json").write_text(json.dumps({"scans": [{"id": x["id"], "ts": x["ts"]} for x in scans[:n_base]]}, indent=1) + "\n")
         if mode == "deferred":
             # The bucket as the append writes it: each scan's run (deltas, cut, `meta.json`), published, then the merge stage.
@@ -214,7 +214,7 @@ def slices_gen() -> None:
         if sort in ("reads", ist.ATTRIBUTION):
             continue
         ist.write_served(con, f"read_parquet('{work}/out/{sub}/r*.parquet')", sort, out / "served" / f"{sort}.parquet", ist.SUB_SCHEMA[sub],
-                         rg_rows=256, stamps=[x["ts"] for x in scans])
+                         page_rows=ist.served_page_rows(sort), rg_rows=256, stamps=[x["ts"] for x in scans])
     (out / "scans.json").write_text(json.dumps({"scans": [{"id": x["id"], "ts": x["ts"]} for x in scans]}, indent=1) + "\n")
     shutil.rmtree(work)
     print(f"{G2}: {sorted(p.name for p in (out / 'served').iterdir())}", file=sys.stderr)
@@ -274,5 +274,94 @@ def tiered() -> None:
     shutil.rmtree(work)
 
 
+#: `g8`: a base scan and one run in 4-row groups, over owner slices, where `grow`'s total crosses a read's floor between
+#: them (256,000 → 4,450,304 bytes) — for `sliceTotals.test.ts`. In the base's `slices-bytotal` its old slices follow
+#: `big`'s 8 MiB rows: `grow`'s unowned and alice's share a group with them (`b_max` 8 MiB), bob's starts the next
+#: (`b_max` 256,000). In the run's, the close records of alice's and bob's are a group of their own (`b_max` 256,000).
+#: So a read of the run's scan at a floor between the two totals plans the base group holding alice's old slice and not
+#: the run group that closes it: the row is told ended only by its own `tot`.
+G8 = "g8"
+G8_SCANS = ["2026-09-30T0007", "2026-09-30T0008"]
+KiB, MiB = 1 << 10, 1 << 20
+G8_OWNERS = {"big/a": "alice", "big/b": "bob", "grow/a": "alice", "grow/b": "bob"}
+G8_BASE = [("big/a/f0", 8 * MiB), ("big/b/f0", 8 * MiB), ("grow/a/f0", 100 * KiB), ("grow/b/f0", 100 * KiB), ("grow/u0", 50 * KiB)]
+G8_ROWS = [G8_BASE, [*G8_BASE, ("grow/a/f1", 4 * MiB)]]
+
+
+def _owned_pair(gen: str, dates: list[str], listings: list[list[tuple[str, int]]], owners: dict[str, str], work: Path):
+    """A base scan and one run of bucket `bk` in 4-row groups, over owner slices → `interval-store/<gen>`. Returns the
+    generation's dir and `groups(file, *cols)`: a served sort's row groups, each its rows' `cols` joined by `|`."""
+    from datetime import datetime, timezone
+
+    import pandas as pd
+
+    import dt_cloud.index as ix
+    from disk_tree.find.aggregate_duckdb import aggregate_listing_to_parquet
+    from disk_tree.listing import prepare_listing
+    from dt_cloud import static_names as sn
+
+    shutil.rmtree(work, ignore_errors=True)
+    work.mkdir()
+    created = datetime(2026, 9, 1, tzinfo=timezone.utc)
+    labels = work / "labels.parquet"
+    pd.DataFrame({"prefix": list(owners), "usr": list(owners.values())}).to_parquet(labels)
+    scans = []
+    for d, rows in zip(dates, listings):
+        listing, l2 = work / f"{d}.listing.parquet", work / f"{d}.l2.parquet"
+        pd.DataFrame({"bucket": ["bk"] * len(rows), "name": [n for n, _ in rows], "size_bytes": [b for _, b in rows], "created": [created] * len(rows),
+                      "storage_class_id": [1] * len(rows)}).to_parquet(listing)
+        con = duckdb.connect()
+        aggregate_listing_to_parquet(prepare_listing(con, (str(listing),)), bucket="bk", scheme="s3", out_parquet=str(l2), con=con, mean_mtime=True,
+                                     label=str(labels), label_cols=("usr",))
+        ix.write_index([("bk", str(l2))], str(work / "mount" / d), mem="1GB", threads=1, row_group_rows=2048)
+        scans.append({"id": d, "src": f"{d}/path-index.parquet", "ts": sn.scan_epoch(d), "version": 2})
+    tiered_gens(work / "mount", work / "tiered", scans, 1, {"k": 1, "ranges": [{"i": 0, "lo": [0, ""], "hi": None}]}, rg_rows=4, gens={gen: "unmerged"})
+    out = HERE / "interval-store" / gen
+    con = duckdb.connect()
+
+    def groups(f: str, *cols: str) -> list[list[str]]:
+        key = " || '|' || ".join(cols)
+        return [r[0] for r in con.execute(
+            f"SELECT list({key} ORDER BY file_row_number) FROM read_parquet('{out / f}', file_row_number = true) "
+            "GROUP BY file_row_number // 4 ORDER BY min(file_row_number)").fetchall()]
+
+    return out, groups
+
+
+def _done(gen: str, out: Path, work: Path) -> None:
+    shutil.rmtree(work)
+    print(f"{gen}: {sorted(str(p.relative_to(out)) for p in out.rglob('*') if p.is_file())}", file=sys.stderr)
+
+
+def stale_gen() -> None:
+    work = HERE / "work8"
+    out, groups = _owned_pair(G8, G8_SCANS, G8_ROWS, G8_OWNERS, work)
+    cols = ("path", "coalesce(usr, '')", "tot")
+    base, run = groups("served/slices-bytotal.parquet", *cols), groups(f"deltas/{G8_SCANS[1]}/served/slices-bytotal.parquet", *cols)
+    # The geometry the test stands on (above): a change to the cut that moves it fails here, not silently in the test.
+    assert base[2] == ["bk/big/b|bob|8388608", "bk/big/b/f0|bob|8388608", "bk/grow||256000", "bk/grow|alice|256000"], base
+    assert run[3] == ["bk/grow|alice|256000", "bk/grow|bob|256000", "bk/grow/a|alice|102400"], run
+    _done(G8, out, work)
+
+
+#: `g9`: a base scan and one run in 4-row groups, over owner slices, for `endedVersions.test.ts`. The run rewrites one
+#: small object into a big one (`grow/a/f0`, 100 KiB → 4 MiB) and removes another (`grow/b/f0`). In the base's sorts the
+#: old rows share groups with `big`'s 8 MiB objects; in the run's, their close records are in groups of light rows.
+G9 = "g9"
+G9_SCANS = ["2026-09-30T0009", "2026-09-30T0010"]
+G9_BASE = [("big/a/f0", 8 * MiB), ("big/b/f0", 8 * MiB), ("grow/a/f0", 100 * KiB), ("grow/b/f0", 100 * KiB), ("grow/u0", 50 * KiB)]
+G9_ROWS = [G9_BASE, [("big/a/f0", 8 * MiB), ("big/b/f0", 8 * MiB), ("grow/a/f0", 4 * MiB), ("grow/u0", 50 * KiB)]]
+
+
+def closed_gen() -> None:
+    work = HERE / "work9"
+    out, groups = _owned_pair(G9, G9_SCANS, G9_ROWS, G8_OWNERS, work)
+    for f in ("served/path.parquet", f"deltas/{G9_SCANS[1]}/served/path.parquet"):
+        print(f, groups(f, "path", "size", "vt"), file=sys.stderr)
+    for f in ("served/slices.parquet", f"deltas/{G9_SCANS[1]}/served/slices.parquet"):
+        print(f, groups(f, "path", "coalesce(usr, '')", "size", "vt"), file=sys.stderr)
+    _done(G9, out, work)
+
+
 if __name__ == "__main__":
-    {"g2": slices_gen, "g7": unowned_gen, "tiered": tiered}.get(sys.argv[1] if sys.argv[1:] else "", main)()
+    {"g2": slices_gen, "g7": unowned_gen, "g8": stale_gen, "g9": closed_gen, "tiered": tiered}.get(sys.argv[1] if sys.argv[1:] else "", main)()

@@ -35,9 +35,12 @@ const post = async (body: unknown, token: string | null = viewer) => {
 const request = (f: Fixture, params?: string) => ({ month: f.month, rows: f.rows, cfg: f.cfg, params, plot_url: f.plot_url, prev_url: f.prev_url })
 
 describe('/api/digest-op', () => {
-  it("renders every parity fixture byte for byte as the Python job did, under the default params", async () => {
+  it('renders every parity fixture byte for byte, under the default params', async () => {
     const names = (await (await fsp()).readdir(DIR)).filter(n => n.endsWith('.json')).sort()
-    expect(names.length).toBe(7)
+    expect(names).toEqual([
+      'cw-first.json', 'cw-noquota.json', 'cw-sep.json', 'cw-tb.json', 'cw-two-weeks.json', 'cw6-oct.json', 'gcs-aug-discord.json',
+      'gcs-aug.json', 'gcs-first.json',
+    ])
     for (const n of names) {
       const f = await fixture(n)
       expect([n, ...(await post(request(f)))]).toEqual([n, 200, { text: f.op, image: f.image }])

@@ -20,21 +20,25 @@ import { RunArtifacts, RunPlan } from './RunArtifacts'
 import { RunBands } from './RunBands'
 import { RunChecks } from './RunChecks'
 import { runHref } from './runHistory'
-import { conservativeDeadline } from './prefixExecution'
+import { bucketOfPrefix, conservativeDeadline } from './prefixExecution'
 import { percentOf } from './runChart'
-import { selectRuns } from './runTable'
+import { askedRunsPage, autoRunsPage, runsPage, runsWindow, selectRuns } from './runTable'
+import { RUNS_PAGE_SIZES as PAGE_SIZES, runsPageParam, runsSizeParam } from './stagedParams'
 import { fmtN } from './types'
 import { Loading } from './Busy'
 import { DEFAULT_STORE } from './stores'
 import { CAPS, type RunAction, useRunAnalytics, useRunDetail, useRunFiles } from './plans'
 import { ReviewPreservation } from './RunPreservation'
 import {
-  type Check, commonBucketPrefix, type DeletionRun, elapsed, elapsedDetails, type ExecJob, fmtDur, type LogSummaryFile, loggedOf, logSubdir,
+  ATTEMPTED, attemptOnly, LOWER_BOUND, NOT_OBSERVABLE, totalsLowerBound, UNDO_CAVEAT, UNDO_LOG_ONLY,
+  type Check, commonBucketPrefix, deletedBuckets, type DeletionRun, elapsed, elapsedDetails, type ExecJob, fmtDur, type LogSummaryFile, loggedOf, logSubdir,
   type PlanSummaryFile, plannedOf, progressEstimate, type ProgressFile, runControls, runFileHref, runFilesRel, runLabel, type RunView, sumProgress, type Tally,
-  verifyRun, viewBuckets, viewLive, viewState, joinRuns, runErrors,
+  expectedOf, undoStatus, verifyRun, viewBuckets, viewLive, viewState, joinRuns, runErrors,
 } from './runs'
+import { RecoveryUnavailable, RecoveryUnseen, UndoBy, UndoControl, UndoLine } from './RunUndo'
+import { runHasNoUndo, runNoUndoText, runUndoUnavailable, runUndoUnseen, UNDO_UNSEEN_WHO, undoUnseenText } from './softDelete'
+import { useSoftDeleteNow } from './SweepSoftDelete'
 
-const PAGE_SIZES = [20, 50, Infinity]
 const utc = (ts: number): string => new Date(ts * 1000).toISOString().slice(0, 16).replace('T', ' ')
 const BUCKET_PREFIX = commonBucketPrefix(DEFAULT_STORE.buckets)
 const shortBucket = (b: string): string => (BUCKET_PREFIX && b.startsWith(BUCKET_PREFIX) ? b.slice(BUCKET_PREFIX.length) : b)
@@ -62,7 +66,7 @@ const dirOf = (v: RunView): string | null => {
   return d ? runFilesRel(d) : null
 }
 
-export function RunsSection({ runs, jobs, configured, jobsError, admin, busy, act, fmtBytes, refreshing }: {
+export function RunsSection({ runs, jobs, configured, jobsError, admin, busy, act, fmtBytes, refreshing, placed = false }: {
   runs: DeletionRun[]
   jobs: ExecJob[]
   configured: boolean
@@ -72,6 +76,9 @@ export function RunsSection({ runs, jobs, configured, jobsError, admin, busy, ac
   act: (a: RunAction) => void
   fmtBytes: (b: number) => string
   refreshing: boolean
+  /** The page arrived at a section its URL names: a run the URL also holds open opens, without the page scrolling
+   *  to it. */
+  placed?: boolean
 }) {
   const views = useMemo(() => joinRuns(runs, jobs), [runs, jobs])
   // What each run planned (`plan-summary.json`, absent until its manifest
@@ -82,6 +89,10 @@ export function RunsSection({ runs, jobs, configured, jobsError, admin, busy, ac
   const planned = new Map<string, { file: PlanSummaryFile; tally: Tally }>()
   planRels.forEach((rel, i) => { const f = planQs[i]?.data; if (f) planned.set(rel, { file: f, tally: plannedOf(f) }) })
   const planOf = (v: RunView) => { const d = dirOf(v); return d ? planned.get(`${d}plan-summary.json`) : undefined }
+  // A real run that ended unsuccessfully: does its run dir hold a final summary, or are its totals a lower bound?
+  const closedRels = views.flatMap(v => { const d = dirOf(v); return d && v.run?.mode === 'real' && v.run.finished_ts && v.run.plan_digest === '' ? [{ view: v, rel: `${d}deleted-summary.json` }] : [] })
+  const closedQs = useRunFiles<LogSummaryFile>(closedRels.map(c => c.rel), false)
+  const lowerBound = new Set(closedRels.flatMap(({ view }, i) => view.run && totalsLowerBound(view.run, closedQs[i]?.data) ? [view.key] : []))
   const progTargets = views.filter(viewLive).flatMap(v => {
     const d = dirOf(v)
     if (!d) return []
@@ -92,8 +103,9 @@ export function RunsSection({ runs, jobs, configured, jobsError, admin, busy, ac
   const progress = new Map<string, ProgressFile[]>()
   progTargets.forEach((t, i) => { const p = progQs[i]?.data; if (p) progress.set(t.key, [...(progress.get(t.key) ?? []), p]) })
 
-  const [pageSize, setPageSize] = useState(PAGE_SIZES[0])
-  const [page, setPage] = useState(0)
+  // The table's view is the URL's (`urlParams.ts`): filters, sort, page and size, and the open run.
+  const [pageSize, setPageSize] = useUrlState('rn', runsSizeParam)
+  const [pageP, setPageP] = useUrlState('rp', runsPageParam)
   const [userFilter, setUserFilter] = useUrlState('ru', stringParam(''))
   const [modeFilter, setModeFilter] = useUrlState('rm', stringParam(''))
   const [stateFilter, setStateFilter] = useUrlState('rs', stringParam(''))
@@ -105,42 +117,55 @@ export function RunsSection({ runs, jobs, configured, jobsError, admin, busy, ac
     const ps = progress.get(v.key), p = ps ? sumProgress(ps) : null
     const deleted = v.run?.finished_ts ? v.run.deleted_objects : p?.deletes
     const secs = elapsed(v, now)
-    return [v.key, { planned: planOf(v)?.tally.objects, deleted, bytes: v.run?.finished_ts ? v.run.deleted_bytes : p?.bytes, rate: deleted != null && secs != null && secs > 0 ? deleted / secs : undefined }]
+    return [v.key, { planned: planOf(v)?.tally.objects ?? expectedOf(v)?.objects, deleted, bytes: v.run?.finished_ts ? v.run.deleted_bytes : p?.bytes, rate: deleted != null && secs != null && secs > 0 ? deleted / secs : undefined }]
   }))
   const filtered = selectRuns(views, { user: userFilter ?? '', mode: modeFilter ?? '', state: stateFilter ?? '', query: queryFilter ?? '', sort: sort ?? 'started', ascending: direction === 'asc' }, metrics, now)
-  const pages = Math.max(1, Math.ceil(filtered.length / pageSize))
-  const pg = Math.min(page, pages - 1)
-  const shown = filtered.slice(pg * pageSize, (pg + 1) * pageSize)
-  const [stopping, setStopping] = useState<ReadonlySet<string>>(new Set())
-  const cols = 17
-  const sortButton = (key: string, label: string) => <button type="button" className="run-sort" onClick={() => { setSort(key); setDirection(sort === key && direction === 'desc' ? 'asc' : 'desc'); setPage(0) }}>{label}{sort === key ? direction === 'asc' ? ' ▴' : ' ▾' : ''}</button>
-
-  // `?run=<id>` (a run id, or its Batch job's): page to that row, open its
-  // detail, scroll to it — once, when it first appears.
+  // `?run=<id>` (a run id, or its Batch job's): the table opens on that row's page, with its detail open.
   const [runP, setRunP] = useUrlState('run', stringParam())
-  const landed = useRef<string | null>(null)
   const target = runP ? filtered.findIndex(v => v.key === runP || v.job?.job_id === runP) : -1
+  const pages = Math.max(1, Math.ceil(filtered.length / pageSize))
+  const pg = runsPage(pageP, target, pageSize, filtered.length)
+  const setPage = (p: number) => setPageP(askedRunsPage(p, target, pageSize))
+  // A changed filter or sort starts on the first page: said outright while a run is open, whose page is the default.
+  const firstPage = () => setPageP(runP ? 0 : null)
+  // A page spelled out that is the one the table opens on anyway leaves the URL (once the open run is listed).
   useEffect(() => {
-    if (!runP) { landed.current = null; return }
+    if (pageP != null && (!runP || target >= 0) && pageP === autoRunsPage(target, pageSize)) setPageP(null)
+  }, [pageP, runP, target, pageSize]) // eslint-disable-line react-hooks/exhaustive-deps
+  const [from, to] = runsWindow(pg, pageSize, filtered.length)
+  const shown = filtered.slice(from, to)
+  const [stopping, setStopping] = useState<ReadonlySet<string>>(new Set())
+  // What the buckets' soft delete is now: a recorded undo on one that is off can't be done (its control is disabled, with why),
+  // and one on a bucket nothing says of is stated as depending on it.
+  const softDelete = useSoftDeleteNow(CAPS.softDelete)
+  const cols = 17
+  const sortButton = (key: string, label: string) => <button type="button" className="run-sort" onClick={() => { setSort(key); setDirection(sort === key && direction === 'desc' ? 'asc' : 'desc'); firstPage() }}>{label}{sort === key ? direction === 'asc' ? ' ▴' : ' ▾' : ''}</button>
+
+  // Scroll to the open run's row, once, when it first appears: not on a page that arrived at a section (`placed`),
+  // where the run the URL holds open is part of the view restored, not where it scrolls to.
+  const landed = useRef<string | null>(null)
+  const skip = useRef(placed)
+  useEffect(() => {
+    if (!runP) { landed.current = null; skip.current = false; return }
     if (target < 0 || landed.current === runP) return
     landed.current = runP ?? null
     const v = filtered[target]
-    setPage(Math.floor(target / pageSize))
+    if (skip.current) { skip.current = false; return }
     requestAnimationFrame(() => document.getElementById(rowId(v.key))?.scrollIntoView({ block: 'center' }))
-  }, [target, runP, filtered, pageSize])
+  }, [target, runP, filtered])
 
   if (!views.length) return null
   return (
-    <section id="runs">
+    <section id="runs" data-section="runs">
       <h3>Runs ({views.length}){refreshing && <Loading label="Refreshing runs…" />}</h3>
       {!configured && <p className="dim">Dispatch isn't configured on this deployment (no executor credentials): only recorded runs are listed, without live state.</p>}
       {jobsError && <p className="err">Batch jobs: {jobsError.message}</p>}
       <div className="run-filters">
-        <input aria-label="Filter runs" placeholder="filter runs…" value={queryFilter} onChange={e => { setQueryFilter(e.target.value); setPage(0) }} />
-        <select aria-label="Filter runs by user" value={userFilter} onChange={e => { setUserFilter(e.target.value); setPage(0) }}><option value="">all users</option>{[...new Set(views.map(v => v.run?.actor ?? v.job?.by ?? '').filter(Boolean))].sort().map(u => <option key={u}>{u}</option>)}</select>
-        <select aria-label="Filter run mode" value={modeFilter} onChange={e => { setModeFilter(e.target.value); setPage(0) }}><option value="">real + dry</option><option value="real">real only</option><option value="dry">dry only</option></select>
-        <select aria-label="Filter run state" value={stateFilter} onChange={e => { setStateFilter(e.target.value); setPage(0) }}><option value="">all states</option>{[...new Set(views.map(viewState))].sort().map(s => <option key={s} value={s}>{s.toLowerCase()}</option>)}</select>
-        <label>sort <select aria-label="Sort runs" value={sort} onChange={e => { setSort(e.target.value); setPage(0) }}>{['started', 'by', 'mode', 'planned', 'deleted', 'bytes', 'state', 'rate', 'elapsed', 'gone', 'overwritten', 'drift', 'undo', 'buckets'].map(s => <option key={s}>{s}</option>)}</select></label>
+        <input aria-label="Filter runs" placeholder="filter runs…" value={queryFilter} onChange={e => { setQueryFilter(e.target.value); firstPage() }} />
+        <select aria-label="Filter runs by user" value={userFilter} onChange={e => { setUserFilter(e.target.value); firstPage() }}><option value="">all users</option>{[...new Set(views.map(v => v.run?.actor ?? v.job?.by ?? '').filter(Boolean))].sort().map(u => <option key={u}>{u}</option>)}</select>
+        <select aria-label="Filter run mode" value={modeFilter} onChange={e => { setModeFilter(e.target.value); firstPage() }}><option value="">real + dry</option><option value="real">real only</option><option value="dry">dry only</option></select>
+        <select aria-label="Filter run state" value={stateFilter} onChange={e => { setStateFilter(e.target.value); firstPage() }}><option value="">all states</option>{[...new Set(views.map(viewState))].sort().map(s => <option key={s} value={s}>{s.toLowerCase()}</option>)}</select>
+        <label>sort <select aria-label="Sort runs" value={sort} onChange={e => { setSort(e.target.value); firstPage() }}>{['started', 'by', 'mode', 'planned', 'deleted', 'bytes', 'state', 'rate', 'elapsed', 'gone', 'overwritten', 'drift', 'undo', 'buckets'].map(s => <option key={s}>{s}</option>)}</select></label>
         <button type="button" onClick={() => setDirection(direction === 'asc' ? 'desc' : 'asc')}>{direction === 'asc' ? 'ascending' : 'descending'}</button>
         <span className="dim">{filtered.length} / {views.length}</span>
       </div>
@@ -151,10 +176,10 @@ export function RunsSection({ runs, jobs, configured, jobsError, admin, busy, ac
             <tr>
               <th /><th>{sortButton('started', 'run')}</th><th>{sortButton('by', 'by')}</th><th>{sortButton('mode', 'mode')}</th>
               <th className="num"><Tooltip content="What the manifest found. Click to sort by planned object count; byte sorting is available in the sort menu.">{sortButton('planned', 'planned')}</Tooltip></th>
-              <th className="num"><Tooltip content="Real runs: actual deletions. Dry runs: predictions only; nothing is deleted. Click to sort by object count.">{sortButton('deleted', 'deleted / would delete')}</Tooltip></th>
+              <th className="num"><Tooltip content="Real runs: deletes attempted and acknowledged on XML runs (GCS acknowledges every generation it is sent), actual deletions on older JSON and listing runs. Dry runs: predictions only; nothing is deleted. Click to sort by object count.">{sortButton('deleted', 'deleted / would delete')}</Tooltip></th>
               <th>{sortButton('state', 'state')}</th><th><Tooltip content="Sparkline: interval rate over the last hour. Text: average over the run's entire elapsed time, including startup and pauses.">{sortButton('rate', 'rate / history')}</Tooltip></th><th className="num">{sortButton('elapsed', 'elapsed')}</th>
-              <th className="num"><Tooltip content="Planned keys already gone when the run re-listed.">{sortButton('gone', 'gone')}</Tooltip></th>
-              <th className="num"><Tooltip content="Planned keys rewritten since the scan (a new generation): left alone.">{sortButton('overwritten', 'overwritten')}</Tooltip></th>
+              <th className="num"><Tooltip content="Planned keys already gone when the run reached them. Listing and older JSON runs only: an XML run can't observe this, and shows —.">{sortButton('gone', 'gone')}</Tooltip></th>
+              <th className="num"><Tooltip content="Planned keys rewritten since the scan (a new generation): left alone. Listing and older JSON runs only: an XML run can't observe this, and shows — (it deletes only named generations, so a new one survives either way).">{sortButton('overwritten', 'overwritten')}</Tooltip></th>
               <th className="num"><Tooltip content="Preserved objects outside the reviewed manifest. Older directory executors report directory counts.">{sortButton('drift', 'outside review')}</Tooltip></th>
               <th>{sortButton('started', 'started')}</th>
               <th><Tooltip content="Recorded run-level undo deadline. GCS retention starts separately at each object's deletion; this is not an object-level recovery guarantee.">{sortButton('undo', 'undo by')}</Tooltip></th>
@@ -168,8 +193,15 @@ export function RunsSection({ runs, jobs, configured, jobsError, admin, busy, ac
               const mode = r?.mode ?? (job?.mode === 'real' ? 'real' : 'dry')
               const state = viewState(v)
               const live = viewLive(v)
-              const ctl = runControls(v, CAPS, admin, now)
+              const deleted = deletedBuckets(v, Object.keys(planOf(v)?.file.buckets ?? {}))
+              const unavailable = r ? runUndoUnavailable(r, deleted, softDelete, now) : null
+              const unseen = r ? runUndoUnseen(r, deleted, softDelete, now) : null
+              const ctl = runControls(v, CAPS, admin, now, unavailable)
               const plan = planOf(v)?.tally
+              const expected = expectedOf(v)
+              const attempted = attemptOnly(planOf(v)?.file)
+              const skips = planOf(v)?.file.skipped_no_generation
+              const preserved = planOf(v)?.file.total?.skipped_after_as_of
               const prog = progress.get(v.key)
               const p = prog ? sumProgress(prog) : null
               const estimate = prog ? progressEstimate(prog, plan?.objects, now) : null
@@ -179,7 +211,8 @@ export function RunsSection({ runs, jobs, configured, jobsError, admin, busy, ac
               const actor = r?.actor ?? job?.by ?? ''
               const dir = dirOf(v)
               const isOpen = v.key === filtered[target]?.key
-              const toggle = () => setRunP(isOpen ? undefined : v.key)
+              // The page stays put: closing the run the table paged to says the page outright; an opened run's page is this one.
+              const toggle = () => { setRunP(isOpen ? undefined : v.key); setPageP(isOpen && pg > 0 ? pg : null) }
               const failed = state === 'FAILED' || state === 'COMPLETED_WITH_ERRORS'
               const laptop = r?.log_dir === 'laptop'
               const errors = runErrors(r)
@@ -191,12 +224,16 @@ export function RunsSection({ runs, jobs, configured, jobsError, admin, busy, ac
                     <td className="rid"><RunId id={r?.run_id ?? jobId} href={r ? runHref(r.run_id) : undefined} /></td>
                     <td>{actor && <UserChip who={actor} size={16} />}</td>
                     <td><span className={`tag ${mode}`}>{mode === 'real' ? 'REAL' : 'DR'}</span></td>
-                    <td className="num nb">{plan ? <>{fmtBytes(plan.bytes)} <span className="dim">· {fmtN(plan.objects)}</span></> : <span className="dim">—</span>}</td>
+                    <td className="num nb">{plan ? <>{fmtBytes(plan.bytes)} <span className="dim">· {fmtN(plan.objects)}</span></> : expected ? (
+                      <Tooltip content="What was selected at dispatch, at the sizes /staged showed. This run's manifest replaces it with what it found.">
+                        <span className="run-expected"><span className="tag">expected</span> {fmtBytes(expected.bytes)} <span className="dim">· {fmtN(expected.objects)}</span></span>
+                      </Tooltip>
+                    ) : <span className="dim">—</span>}</td>
                     <td className="num nb">
                       {r?.finished_ts ? (
                         <>
-                          <Tooltip content={mode === 'dry' ? 'Dry run only: no objects were deleted.' : laptop ? 'Moved to Trash on the laptop. Space is freed when Trash is emptied.' : 'Objects deleted by this real run.'}>
-                            <RunOutcome mode={mode}>{laptop && mode === 'real' && <>moved to Trash </>}{fmtBytes(r.deleted_bytes)} <span className="dim">· {fmtN(r.deleted_objects)}</span></RunOutcome>
+                          <Tooltip content={mode === 'dry' ? 'Dry run only: no objects were deleted.' : laptop ? 'Moved to Trash on the laptop. Space is freed when Trash is emptied.' : `${attempted ? ATTEMPTED : 'Objects deleted by this real run.'}${lowerBound.has(v.key) ? ` ${LOWER_BOUND}` : ''}`}>
+                            <RunOutcome mode={mode}>{lowerBound.has(v.key) && '≥ '}{laptop && mode === 'real' && <>moved to Trash </>}{fmtBytes(r.deleted_bytes)} <span className="dim">· {fmtN(r.deleted_objects)}</span></RunOutcome>
                           </Tooltip>
                           {r.freed_bytes != null && (
                             <Tooltip content={<>What deleting this set would <b>actually</b> free, measured on the laptop: bytes it shares with a clone or hardlink outside the set (e.g. a <code>.venv</code>’s files cloned from <code>~/.cache/uv</code>) stay on disk. The size before it counts every path in full.</>}>
@@ -227,25 +264,22 @@ export function RunsSection({ runs, jobs, configured, jobsError, admin, busy, ac
                       </Tooltip>
                       {!!errors.length && <details className="why"><summary>{errors.length} {errors.length === 1 ? 'issue' : 'issues'}</summary>{errors.map(([path, message]) => <div key={path}><code>{path}</code>: {message}</div>)}</details>}
                       {state === 'CANCELLED' && <Tooltip content="A STOP request was recorded. Batch may report this clean interruption as FAILED (exit 130); acknowledged deletions remain logged."><span className="dim"> · intentional stop</span></Tooltip>}
-                      {failed && job?.last_event && <details className="why"><summary>why</summary><div>{job.last_event}</div></details>}
+                      {failed && (job?.failure || job?.last_event) && <details className="why"><summary>why</summary>{job.failure && <div>{job.failure}</div>}{job.last_event && <div className={job.failure ? 'dim' : undefined}>{job.last_event}</div>}</details>}
+                      {skips && skips.whole_buckets.length > 0 && <Tooltip content={<>Nothing was deleted in {skips.whole_buckets.map(shortBucket).join(', ')}: none of its objects had a generation in the scan's listing. Its prefixes stay staged.</>}><span className="tag not-swept">{skips.whole_buckets.length} {skips.whole_buckets.length === 1 ? 'bucket' : 'buckets'} not swept</span></Tooltip>}
+                      {skips && skips.objects > 0 && <Tooltip content={`${fmtBytes(skips.bytes)} in objects the scan's listing has no generation for. Left in place, and logged per object as skipped_no_generation; not counted in deleted.`}><span className="tag">{fmtN(skips.objects)} skipped: no generation</span></Tooltip>}
+                      {preserved && preserved.objects > 0 && <Tooltip content={`${fmtBytes(preserved.bytes)} in versions new or changed since staging. Preserved by the original review cutoff.`}><span className="tag">{fmtN(preserved.objects)} newer/changed preserved</span></Tooltip>}
                       {ctl.undoing && <span className="tag">undoing</span>}
                       {r?.undo_state === 'full' && <span className="tag">undone</span>}
-                      {r?.undo_state === 'partial' && !ctl.undoing && <Tooltip content="An undo ran (or was dispatched) but not every deleted object is live again; undo again to retry the rest."><span className="tag">partly undone</span></Tooltip>}
+                      {r?.undo_state === 'partial' && !ctl.undoing && <Tooltip content="Some of what this run deleted is live again, not all of it: an undo restored part, or found it live. Undo again to retry the rest."><span className="tag">partly undone</span></Tooltip>}
                       {r?.purge_state === 'done' && <span className="tag">purged</span>}
                     </td>
                     <td>{CAPS.runFiles && r && <RunProgress id={r.run_id} live={live} compact fmtBytes={fmtBytes} lifetime={secs != null ? { objects: r.finished_ts ? r.deleted_objects : p?.deletes ?? 0, seconds: secs } : undefined} />}</td>
                     <td className="num"><Tooltip cell content={<>{elapsedDetails(v).map(line => <div key={line}>{line}</div>)}</>}><span>{secs == null ? <span className="dim">—</span> : fmtDur(secs)}</span></Tooltip></td>
-                    <td className="num">{r?.finished_ts ? fmtN(r.skipped_gone) : p ? fmtN(p.gone) : <span className="dim">—</span>}</td>
-                    <td className="num">{r?.finished_ts ? fmtN(r.skipped_overwritten ?? 0) : <span className="dim">—</span>}</td>
+                    <td className="num">{attempted && !r?.skipped_gone ? <Tooltip content={NOT_OBSERVABLE}><span className="dim">—</span></Tooltip> : r?.finished_ts ? fmtN(r.skipped_gone) : p ? fmtN(p.gone) : <span className="dim">—</span>}</td>
+                    <td className="num">{attempted && !r?.skipped_overwritten ? <Tooltip content={NOT_OBSERVABLE}><span className="dim">—</span></Tooltip> : r?.finished_ts ? fmtN(r.skipped_overwritten ?? 0) : <span className="dim">—</span>}</td>
                     <td className="num">{r?.finished_ts ? fmtN((r.drift_dirs ?? 0) + (r.ledger_drift_dirs ?? 0)) : <span className="dim">—</span>}</td>
                     <td><TimeCell ts={startedTs ?? undefined} /></td>
-                    <td className="nb">
-                      {mode === 'real' && r?.undo_deadline ? (
-                        <Tooltip content={`${utc(r.undo_deadline)} UTC`}>
-                          <span className={now >= r.undo_deadline ? 'dim' : undefined}>{now >= r.undo_deadline ? 'closed' : fmtDur(r.undo_deadline - now)}</span>
-                        </Tooltip>
-                      ) : <span className="dim">—</span>}
-                    </td>
+                    <td className="nb"><UndoBy status={undoStatus(r, now, unavailable, unseen)} now={now} /></td>
                     <td className="nb links">
                       {r && <Link to={runHref(r.run_id)}>details</Link>}
                       {CAPS.runFiles && r && dir && <> · <Link to={runHref(r.run_id, 'plan')}>plan</Link></>}
@@ -264,10 +298,9 @@ export function RunsSection({ runs, jobs, configured, jobsError, admin, busy, ac
                           <button type="button" disabled={busy || stopping.has(jobId)} onClick={() => { setStopping(s => new Set([...s, jobId])); act({ action: 'stop', job_id: jobId }) }}>{stopping.has(jobId) ? 'stopping' : 'stop'}</button>
                         </Tooltip>
                       )}
-                      {ctl.undo && r && (
-                        <Tooltip content={`Restore what this run deleted (a Batch job; until ${r.undo_deadline ? `${utc(r.undo_deadline)} UTC` : 'its window closes'}).`}>
-                          <button type="button" disabled={busy} onClick={() => act({ action: 'undo', run_id: r.run_id })}>undo</button>
-                        </Tooltip>
+                      {(ctl.undo || ctl.undoOff) && r && (
+                        <UndoControl off={ctl.undoOff} busy={busy} onUndo={() => act({ action: 'undo', run_id: r.run_id })}
+                          tip={`Restore what this run deleted (a Batch job; until ${r.undo_deadline ? `${utc(r.undo_deadline)} UTC` : 'its window closes'}).${unseen ? ` ${undoUnseenText(unseen)[0].toUpperCase()}${undoUnseenText(unseen).slice(1)}. ${UNDO_UNSEEN_WHO}` : ''}${attempted ? ` ${UNDO_CAVEAT}` : ''}${lowerBound.has(v.key) ? ` ${UNDO_LOG_ONLY}` : ''}`} />
                       )}
                       {ctl.purge && r && (
                         <Tooltip content="Permanently drop this run's deleted versions (irreversible; the undo window has closed).">
@@ -288,17 +321,17 @@ export function RunsSection({ runs, jobs, configured, jobsError, admin, busy, ac
       {filtered.length > PAGE_SIZES[0] && (
         <div className="pg runs-pg">
           <button type="button" disabled={pg === 0} onClick={() => setPage(pg - 1)} aria-label="previous runs">‹</button>
-          <span>{pg * pageSize + 1}–{Math.min(filtered.length, (pg + 1) * pageSize)} of {filtered.length}</span>
+          <span>{from + 1}–{to} of {filtered.length}</span>
           <button type="button" disabled={pg >= pages - 1} onClick={() => setPage(pg + 1)} aria-label="next runs">›</button>
           <span className="dim">per page</span>
-          {PAGE_SIZES.map(n => <button key={n} type="button" className={n === pageSize ? 'on' : undefined} onClick={() => { setPageSize(n); setPage(0) }}>{n === Infinity ? 'all' : n}</button>)}
+          {PAGE_SIZES.map(n => <button key={n} type="button" className={n === pageSize ? 'on' : undefined} onClick={() => { setPageSize(n); firstPage() }}>{n === Infinity ? 'all' : n}</button>)}
         </div>
       )}
     </section>
   )
 }
 
-const DECISION_ORDER = ['delete', 'skipped_gone', 'skipped_overwritten', 'delete_failed']
+const DECISION_ORDER = ['delete', 'skipped_no_generation', 'skipped_gone', 'skipped_overwritten', 'delete_failed']
 
 /** A run's detail: D1 totals + undo window, what it planned, what it logged
  * (per bucket), the checks between them, and its bands. */
@@ -316,30 +349,43 @@ export function RunDetail({ run, live, progress, dir, planned, fmtBytes, now }: 
   const logRel = dir && run.finished_ts ? [`${dir}${logSubdir(run.mode)}-summary.json`] : []
   const [logQ] = useRunFiles<LogSummaryFile>(logRel, false)
   const log = logQ?.data ?? null
+  const lower = totalsLowerBound(run, logQ?.data)
   const logged = log ? loggedOf(log) : null
+  const nothingProcessed = !live && !!log && !lower && run.deleted_bytes === 0 && run.deleted_objects === 0
   const plan = planned ? plannedOf(planned) : null
+  const attempted = attemptOnly(planned)
+  const skips = planned?.skipped_no_generation
   const checks: Check[] = run.finished_ts ? verifyRun(detail.data?.run ?? run, plan, logged) : []
   const r = detail.data?.run ?? run
   const bands = detail.data?.bands ?? []
   const review = analytics.data?.review
   const breakdown = analytics.data?.result?.preserved_breakdown
   const decisionKeys = logged ? [...DECISION_ORDER.filter(k => k in logged.decisions), ...Object.keys(logged.decisions).filter(k => !DECISION_ORDER.includes(k)).sort()] : []
+  // The buckets it deleted from: its cut, else the ones its bands name (as the undo route reads them), else its plan summary's.
+  const bandBuckets = [...new Set(bands.map(b => bucketOfPrefix(b.prefix)))]
+  const buckets = deletedBuckets({ key: r.run_id, run: r, ops: [] }, bandBuckets.length ? bandBuckets : Object.keys(planned?.buckets ?? {}))
+  const softDelete = useSoftDeleteNow(CAPS.softDelete)
+  const unavailable = runUndoUnavailable(r, buckets, softDelete, now)
+  const unseen = runUndoUnseen(r, buckets, softDelete, now)
 
   return (
     <div className="run-detail">
       {CAPS.runFiles && <RunProgress id={run.run_id} live={live} fmtBytes={fmtBytes} planned={planned} />}
       <dl className="rd-totals">
-        {live ? <div><dt>live progress</dt><dd>{progress ? <>{fmtBytes(progress.bytes)} · {fmtN(progress.deletes)} {r.mode === 'real' ? 'deleted' : 'would delete'} · {fmtN(progress.gone)} gone</> : 'waiting for progress'}<span className="dim"> · final totals recorded when the run ends</span></dd></div>
-          : <div><dt>final totals</dt><dd>{fmtBytes(r.deleted_bytes)} · {fmtN(r.deleted_objects)} {r.mode === 'real' ? r.log_dir === 'laptop' ? 'moved to Trash' : 'deleted' : 'would delete'} · {fmtN(r.skipped_gone)} already gone · {fmtN(r.skipped_overwritten ?? 0)} replaced objects preserved</dd></div>}
+        {live ? <div><dt>live progress</dt><dd>{progress ? <>{fmtBytes(progress.bytes)} · {fmtN(progress.deletes)} {r.mode === 'dry' ? 'would delete' : attempted ? 'acknowledged' : 'deleted'}{!attempted && <> · {fmtN(progress.gone)} gone</>}</> : 'waiting for progress'}<span className="dim"> · final totals recorded when the run ends</span></dd></div>
+          : <div><dt>{lower ? 'totals so far' : 'final totals'}</dt><dd>{lower && 'at least '}{fmtBytes(r.deleted_bytes)} · {fmtN(r.deleted_objects)} {r.mode === 'dry' ? 'would delete' : attempted ? 'attempted and acknowledged' : r.log_dir === 'laptop' ? 'moved to Trash' : 'deleted'}{attempted ? <span className="dim"> · {NOT_OBSERVABLE}</span> : <> · {fmtN(r.skipped_gone)} already gone · {fmtN(r.skipped_overwritten ?? 0)} replaced objects preserved</>}{lower && <span className="dim"> · {LOWER_BOUND}</span>}</dd></div>}
         {r.log_dir === 'laptop' && r.finished_ts && <div><dt>cleanup result</dt><dd>{r.execution_errors_json == null ? 'Per-path errors were not recorded by this older agent; completion alone does not confirm every path succeeded.' : runErrors(r).length ? `${runErrors(r).length} path issue(s); see the run row for details.` : 'Completed without recorded path errors.'}</dd></div>}
+        {skips && <div><dt>skipped: no generation</dt><dd>{fmtBytes(skips.bytes)} · {fmtN(skips.objects)} objects left in place, logged per object{skips.whole_buckets.length > 0 && <> · <b className="err">not swept: {skips.whole_buckets.join(', ')}</b> (none of its objects had a generation; its prefixes stay staged)</>}</dd></div>}
+        {planned?.total?.skipped_after_as_of && <div><dt>preserved since staging</dt><dd>{fmtBytes(planned.total.skipped_after_as_of.bytes)} · {fmtN(planned.total.skipped_after_as_of.objects)} newer or changed objects, outside the original review</dd></div>}
         <div><dt>elapsed</dt><dd>{fmtDur((r.finished_ts ?? now) - r.started_ts)}</dd></div>
         {review && <div><dt>reviewed manifest</dt><dd>{fmtN(review.objects)} objects · {fmtBytes(review.bytes)}</dd></div>}
         {review && Object.keys(review.as_of ?? {}).length > 0 && <div><dt>review cutoffs</dt><dd>{[...new Set(Object.values(review.as_of))].sort().join(' · ')}</dd></div>}
         {analytics.data?.result && <div><dt>failed deletions</dt><dd>{analytics.data.result.delete_failed == null ? 'not recorded' : fmtN(analytics.data.result.delete_failed)}</dd></div>}
         <div><dt>scan</dt><dd>{r.scan ?? '—'}{r.plan_digest ? <> · items <code>{r.plan_digest}</code></> : null}</dd></div>
+        {r.min_soft_delete_days != null && <div><dt>soft-delete minimum</dt><dd>{r.min_soft_delete_days}d{r.soft_delete_days != null && <> · narrowest bucket {r.soft_delete_days}d</>}</dd></div>}
         {r.mode === 'real' && !CAPS.undoUnwindowed && <div><dt>undo</dt><dd>
-          {r.undo_deadline ? <>recorded run deadline {utc(r.undo_deadline)} UTC {now < r.undo_deadline ? <span className="dim">(in {fmtDur(r.undo_deadline - now)})</span> : <span className="dim">(closed)</span>}</> : live ? 'recovery after stop and drain; final deadline not recorded yet' : 'no window recorded'}
-          {' · '}state <b>{r.undo_state}</b>{r.purge_state && r.purge_state !== 'none' && <> · purge <b>{r.purge_state}</b></>}
+          {nothingProcessed ? 'nothing to undo (no objects processed)' : <UndoLine status={undoStatus(r, now, unavailable, unseen)} now={now} live={live} />}
+          {' · '}state <b>{r.undo_state}</b>{r.purge_state && r.purge_state !== 'none' && <> · purge <b>{r.purge_state}</b></>}{lower && <span className="dim"> · {UNDO_LOG_ONLY}</span>}
         </dd></div>}
         {r.log_dir && <div><dt>run dir</dt><dd><code>{r.log_dir}</code></dd></div>}
       </dl>
@@ -348,7 +394,7 @@ export function RunDetail({ run, live, progress, dir, planned, fmtBytes, now }: 
       <section className="rd-preserved">
         <h4>Preserved objects</h4>
         {detail.isLoading ? <Loading label="Loading preserved-object counts…" /> : detail.error ? <p className="err">{detail.error.message}</p> : <>
-          {bands.length > 0 ? <p><b>{fmtN(bands.reduce((n, b) => n + b.drift_new_objects, 0))}</b> outside the reviewed manifest · <b>{fmtN(bands.reduce((n, b) => n + b.overwritten, 0))}</b> replaced objects.</p> : <p>No per-prefix preservation counts recorded.</p>}
+          {attempted ? <p>Only named generations were sent, so a newer generation or a key written since the scan survives. This run can't count them: {NOT_OBSERVABLE}</p> : bands.length > 0 ? <p><b>{fmtN(bands.reduce((n, b) => n + b.drift_new_objects, 0))}</b> outside the reviewed manifest · <b>{fmtN(bands.reduce((n, b) => n + b.overwritten, 0))}</b> replaced objects.</p> : <p>No per-prefix preservation counts recorded.</p>}
           {breakdown ? <dl className="rd-totals">
             <div><dt>new since review</dt><dd>{fmtN(breakdown.new_since_review)}</dd></div>
             <div><dt>changed since review</dt><dd>{fmtN(breakdown.changed_since_review)}</dd></div>
@@ -363,9 +409,13 @@ export function RunDetail({ run, live, progress, dir, planned, fmtBytes, now }: 
       {planned && dir && <RunBucketProgress planned={planned} dir={dir} live={live} log={log} fmtBytes={fmtBytes} dry={r.mode === 'dry'} bands={bands} />}
       {r.mode === 'real' && <section id="recovery" className="rd-recovery">
         <h4>Recovery</h4>
-        {CAPS.undoUnwindowed ? <p>Recovery depends on the bucket’s versioning and retention settings. This deletion may be permanent; a recorded run deadline does not guarantee recovery.</p> : <>
+        {nothingProcessed ? <p>Nothing to undo: this completed run processed no objects.</p> : CAPS.undoUnwindowed ? <p>{runHasNoUndo(r) ? runNoUndoText(r) : 'Recovery depends on the bucket’s versioning and retention settings. This deletion may be permanent; a recorded run deadline does not guarantee recovery.'}</p> : runHasNoUndo(r) ? <>
+        <p>{runNoUndoText(r)} A bucket that retained its soft deletes (per bucket, below) can still be restored from the CLI.</p>
+        <code>dt-cloud sweep undo -b BUCKET {r.run_id}</code>
+        </> : unavailable ? <RecoveryUnavailable unavailable={unavailable} buckets={buckets} runId={r.run_id} /> : <>
         <p>{live ? 'Stop and drain this run before restoring. Its committed decision logs retain exact generations; a restore during deletion could be deleted again.' : 'The web undo control restores the entire run. The CLI can restrict recovery to a selected prefix.'}</p>
-        <p className="dim">Retention starts separately when each object is deleted, not at run completion. Empty at a scan does not establish that this run deleted it.{conservativeDeadline(r) != null && <> Conservative cutoff for this run: {utc(conservativeDeadline(r)!)} UTC. Later deletions may remain recoverable longer; the stored run deadline is not an object-level guarantee.</>}</p>
+        <p className="dim">Retention starts separately when each object is deleted, not at run completion. Empty at a scan does not establish that this run deleted it.{conservativeDeadline(r) != null && <> Conservative cutoff for this run: {utc(conservativeDeadline(r)!)} UTC. Later deletions may remain recoverable longer; the stored run deadline is not an object-level guarantee.</>}{attempted && <> Undo restores every logged generation. {UNDO_CAVEAT}</>}</p>
+        {unseen && <RecoveryUnseen unseen={unseen} />}
         <code>dt-cloud sweep undo -p gs://BUCKET/PREFIX/ {r.run_id}</code>
         </>}
       </section>}
@@ -396,6 +446,7 @@ export function RunDetail({ run, live, progress, dir, planned, fmtBytes, now }: 
                         {s.soft_delete_days != null && <>soft delete {Math.round(s.soft_delete_days)}d</>}
                         {s.interrupted && <> · stopped with {fmtN(s.interrupted.roots_skipped)} of {fmtN(s.interrupted.roots)} roots not started</>}
                         {s.missing_perms?.length ? <> · missing {s.missing_perms.join(', ')}</> : null}
+                        {s.skipped_no_generation && <> · {fmtBytes(s.skipped_no_generation.bytes)} skipped: no generation{s.skipped_no_generation.whole_bucket && <> · <b className="err">not swept</b></>}</>}
                       </td>
                     </tr>
                   ))}
@@ -413,7 +464,7 @@ export function RunDetail({ run, live, progress, dir, planned, fmtBytes, now }: 
 
       <h4>Prefixes ({bands.length})</h4>
       {detail.isLoading ? <Loading label="Loading prefix outcomes…" /> : detail.error ? <p className="err">{detail.error.message}</p> : !bands.length ? <p className="dim">{run.finished_ts ? 'No per-prefix outcomes recorded.' : 'Recorded when the run ends.'}</p> : (
-        <RunBands bands={bands} id={r.run_id} fmtBytes={fmtBytes} analysis={analytics.data?.analysis} />
+        <RunBands bands={bands} id={r.run_id} fmtBytes={fmtBytes} analysis={analytics.data?.analysis} attempted={attempted} />
       )}
     </div>
   )

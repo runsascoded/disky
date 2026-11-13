@@ -379,6 +379,11 @@ describe('buildView on a store generation', () => {
     ] }))
   })
 
+  it('a view whose children are all under the threshold: the folder as one `(other)`, never an empty tree', async () => {
+    const v = await buildView(env, { ...base, date: V2, path: 'bk/flat', threshold: 64 * KiB, smallRows: 4096 })
+    expect([v.nodes, v.tree]).toEqual([0, node('flat', 'dir', 32767500, 8000, { c: [node('(other)', 'dir', 32767500, 8000, { f: 8000 })] })])
+  })
+
   it('ignores a coarse pointer an earlier v1 generation left on a store date', async () => {
     const want = await buildView(env, { ...base, date: V2, path: '', threshold: 32 * KiB, smallRows: 4096 })
     const v = await buildView(env, { ...base, date: V2_STALE, path: '', threshold: 32 * KiB, smallRows: 4096 })
@@ -444,7 +449,14 @@ describe('buildView on a store generation', () => {
       }
     }
     // No ledger tables (cw's D1): the scan's attribution.
-    expect(await pools(await envWith(null))).toEqual({ unowned: [6000, 3], kids: [['s2', 3000], ['s1', 2000], ['s0', 1000]], agg: [[6000, 3], [0, 0]] })
+    const none = await envWith(null)
+    expect(await pools(none)).toEqual({ unowned: [6000, 3], kids: [['s2', 3000], ['s1', 2000], ['s0', 1000]], agg: [[6000, 3], [0, 0]] })
+    // …and a user lens is the scan's attribution too, the same rows the sort holds for them, not a missing-table error.
+    const alice = { key: 'alice' }
+    const rows = await readRects(await openIndex(none, V2_LENS, 'path'), [{ dLo: 1, dHi: 1e9, pLo: 'bk/nest', pHi: 'bk/nest\uffff' }], undefined, alice)
+    const own = rows.find(r => r.path === 'bk/nest')!
+    const agg = (await readRootAgg(none, { date: V2_LENS, path: 'bk/nest', lens: alice }))!
+    expect([agg.b, agg.o]).toEqual([own.size, own.n_files])
     // A ledger assigning `small/s2` (3000 B, unowned in the scan) to carol.
     const assigned = [{ prefix: 'gs://bk/small/s2', owner: 'carol', ts: 1, action_id: 1, bytes: 3000, objects: 1, us: {} }]
     const env = await envWith(`
@@ -573,7 +585,8 @@ describe('buildDiff', () => {
         row('bk/(other)', 2, 'dir', 'added', 0, 0, 0, 1),
       ],
       total_a: 700, total_b: 37229948, objects_a: 3, objects_b: 8009, threshold: 1, tier: 'path',
-      expansions: 4, truncated: false, lookups: 7, lookups_capped: false,
+      // `bk`'s five one-sided children. `nest/a` and `nest/a/b` are under a path the v1 scan has no row for: unread.
+      expansions: 4, truncated: false, lookups: 5, lookups_capped: false,
     })
   })
 

@@ -7,15 +7,30 @@ sizes) from `cloud/tests/test_interval_churn.py`'s generator, under `interval-st
 computed from the scans' files alone: each child that changed (its range churn, bytes and objects at both scans), and
 the path's own.
 
-With `PAGES` (an int), the same store cut in `PAGES`-row data pages with a page index, under `interval-store-p<PAGES>/`
-(2b.1's page reads; `diffLevel.test.ts` checks both answer `expected.json`). `interval-store/` was cut before served
-sorts carried a page index, and stays so: the reader's whole-group path for older generations.
+With `PAGES` (an int), the same store as the cut wrote it from 2b.1 until pages went back to the level sort alone
+(`interval_store.served_page_rows`): every sort in `PAGES`-row data pages with a page index, under
+`interval-store-p<PAGES>/`. Runs cut in that time hold such files until a carry or a compaction rewrites them, so
+`diffLevel.test.ts` checks that both stores answer `expected.json`, and tiers of both kinds side by side. `interval-store/`
+has no page index: what the cut writes for every sort but `level`.
 
 With `ROOT` (a top-level name, `b1` or `b2`), a store of only the files under it, under `interval-store-<ROOT>/`, and no
 `expected.json`: two of them, one per root, are a union view's members (`unionLevel.test.ts`), whose union answers as
 the whole store does.
 
-    cloud/.venv-or-root/bin/python site/functions/_lib/fixtures/iv-churn/gen.py [PAGES | ROOT]
+With `level`, the same store built with the level sort (`build -l`; its runs carry it), that sort in 2-row pages, under
+`interval-store-level/` (`/api/diff/level`'s level index, specs/diff-progressive.md §3b); `expected.json` is checked, not
+rewritten.
+
+With `slash`, that store under `interval-store-slash/`, plus one key with a doubled slash from scan `SLASH_FROM` on,
+`SLASH_KEY`: as `path-index` lists it, a directory `b1/x/` under `b1/x` (name '', as `b1/x`'s own rows are). No
+`expected.json`: `diffLevel.test.ts` compares it with the store's own `path` sort.
+
+With `placeholder`, that store under `interval-store-placeholder/`, plus `placeholders(j)`: objects named for a directory
+(`a/`, nearly all of them size 0, in the base and in runs, one that gains bytes and one that goes away), several slashes in a
+row, a key that is both an object and a folder's prefix, and leading slashes (a directory '' at depth 1). Also no
+`expected.json`: the same comparison.
+
+    cloud/.venv-or-root/bin/python site/functions/_lib/fixtures/iv-churn/gen.py [PAGES | ROOT | level | slash | placeholder]
 """
 from __future__ import annotations
 
@@ -33,6 +48,20 @@ ROOT = HERE.parents[4]
 LAYOUT = "listing/{id}/path-index.parquet"
 BASE = 4
 PATHS = ["", "b1", "b1/x", "b1/x/y", "b2", "b2/z"]
+SLASH_KEY = "b1/x//k.bin"
+SLASH_FROM = 5
+
+
+def placeholders(j: int) -> dict[str, int]:
+    """Scan `j`'s odd keys (3 the base's last, 4 to 6 the runs'), all from the churn base on."""
+    return {
+        **({"b2/q/": 0} if j >= 3 else {}),  # in the base: an object `b2/q/` and the directory `b2/q` above it
+        **({"b1/x/": 0 if j < 6 else 3} if j >= 5 else {}),  # in a run; gains bytes in the next
+        **({"b1/x/y/": 0} if j == 5 else {}),  # appears, then goes away
+        **({"b2/z///": 0, "b2/z/": 0} if j >= 5 else {}),  # `b2/z/` both an object and the prefix of `b2/z///`
+        **({"b1/w///k.bin": 7} if j >= 5 else {}),  # `b1/w/` and `b1/w//`, directories
+        **({"/lead/k.bin": 9, "//k.bin": 2} if j >= 5 else {}),  # '' (depth 1), `/`, `/lead`
+    }
 
 
 def _load(name: str):
@@ -43,13 +72,16 @@ def _load(name: str):
     return m
 
 
-def main(pages: int | None = None, root: str | None = None) -> None:
+def main(pages: int | None = None, root: str | None = None, with_level: bool = False, slash: bool = False, placeholder: bool = False) -> None:
     from dt_cloud import interval_local as il
     from dt_cloud import interval_store as ist
     from dt_cloud import static_names as sn
 
     if pages:
         ist.SERVED_PAGE_ROWS = pages
+        if not with_level:
+            # 2b.1's writer: every sort paged, not the level sort alone.
+            ist.served_page_rows = lambda sort: ist.SERVED_PAGE_ROWS
 
     t = _load("test_interval_churn")
     work = HERE / "work"
@@ -61,23 +93,28 @@ def main(pages: int | None = None, root: str | None = None) -> None:
         fs = t._files(rng, j)
         if root:
             fs = {f: b for f, b in fs.items() if f.startswith(f"{root}/")}
+        if slash and j >= SLASH_FROM:
+            fs[SLASH_KEY] = 7
+        if placeholder:
+            fs.update(placeholders(j))
         key = LAYOUT.replace("{id}", d)
         (work / "scans" / key).parent.mkdir(parents=True, exist_ok=True)
         t._write(t._rows(fs, v), work / "scans" / key, v)
         scans.append({"id": d, "ts": sn.scan_epoch(d)})
         files.append(fs)
     common = ["-g", "g", "-L", LAYOUT, "-s", str(work / "scans"), "-o", str(work / "store"), "-r", "4", "-p", "2", "-M", "1GB"]
-    for cmd, extra in [(il.build_cmd, ["-w", str(work / "build"), "-k", "3", "-t", t.DATES[BASE - 1]]), (il.add_cmd, ["-w", str(work / "add")])]:
+    build = ["-w", str(work / "build"), "-k", "3", "-t", t.DATES[BASE - 1], *(["-l"] if with_level else [])]
+    for cmd, extra in [(il.build_cmd, build), (il.add_cmd, ["-w", str(work / "add")])]:
         res = CliRunner().invoke(cmd, [*common, *extra], catch_exceptions=False)
         assert res.exit_code == 0, res.output
-    out = HERE / (f"interval-store-p{pages}" if pages else f"interval-store-{root}" if root else "interval-store")
+    out = HERE / ("interval-store-placeholder" if placeholder else "interval-store-slash" if slash else "interval-store-level" if with_level else f"interval-store-p{pages}" if pages else f"interval-store-{root}" if root else "interval-store")
     shutil.rmtree(out, ignore_errors=True)
     # What the Worker reads: the served sorts, `scans.json`, the manifests and the runs' `meta.json` / `scans.json`.
     shutil.copytree(work / "store" / ist.PREFIX / "g", out / "g", ignore=shutil.ignore_patterns("verify", "state", "lease", "pv", "pvl", "rd", "ranges", "digest"))
     for f in [out / "g" / "scans.json", *(out / "g" / "deltas").glob("*/scans.json")]:
         doc = json.loads(f.read_text())
         f.write_text(json.dumps({**doc, "bucket": "b"}, indent=1) + "\n")
-    if root:
+    if root or slash or placeholder:
         shutil.rmtree(work)
         return
     expected = []
@@ -88,7 +125,11 @@ def main(pages: int | None = None, root: str | None = None) -> None:
                 a = level(files, i, j, p)
                 if a is not None:
                     expected.append({"from": scans[i]["id"], "to": scans[j]["id"], **a})
-    (HERE / "expected.json").write_text(json.dumps(expected, indent=1, sort_keys=True) + "\n")
+    text = json.dumps(expected, indent=1, sort_keys=True) + "\n"
+    if with_level:
+        assert (HERE / "expected.json").read_text() == text, "the level fixture's scans differ from expected.json's"
+    else:
+        (HERE / "expected.json").write_text(text)
     shutil.rmtree(work)
     print(f"{len(expected)} level answers", file=sys.stderr)
 
@@ -139,4 +180,11 @@ def level(files: list[dict[str, int]], i: int, j: int, p: str) -> dict | None:
 
 if __name__ == "__main__":
     arg = sys.argv[1] if len(sys.argv) > 1 else None
-    main(int(arg) if arg and arg.isdigit() else None, arg if arg and not arg.isdigit() else None)
+    if arg == "level":
+        main(2, with_level=True)
+    elif arg == "slash":
+        main(2, with_level=True, slash=True)
+    elif arg == "placeholder":
+        main(2, with_level=True, placeholder=True)
+    else:
+        main(int(arg) if arg and arg.isdigit() else None, arg if arg and not arg.isdigit() else None)

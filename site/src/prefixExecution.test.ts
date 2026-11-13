@@ -1,10 +1,16 @@
-import { expect, it } from 'vitest'
-import { conservativeDeadline, prefixExecution, type PrefixBandRecord } from './prefixExecution'
+import { describe, expect, it } from 'vitest'
+import { bucketOfPrefix, conservativeDeadline, inRunItems, liveTargetOf, prefixExecution, type PrefixBandRecord } from './prefixExecution'
 import type { ProgressFile } from './runs'
 
 const prefix = 'gs://b/a/'
 const record: PrefixBandRecord = { prefix, run_id: 'real', started_ts: 100, finished_ts: 200, undo_deadline: 800, undo_state: 'none', bytes: 50, objects: 5, gone: 0, overwritten: 0, drift_new_objects: 0, undone_objects: 0 }
 const progress: ProgressFile = { roots: 1, roots_done: 0, decisions: { delete: 10 }, delete_bytes: 100, started: '2026-10-05T00:00:00Z', updated: '2026-10-05T00:00:30Z', done: false }
+
+it('a finished run with no window says so, a running one has not said yet', () => {
+  const noWindow = { ...record, undo_deadline: null }
+  expect(prefixExecution(prefix, [noWindow], undefined, 300)).toEqual({ kind: 'recorded', runId: 'real', objects: 5, bytes: 50, preserved: 0, undone: 0, deadline: null, expired: false, noUndo: true })
+  expect(prefixExecution(prefix, [{ ...noWindow, finished_ts: null }], undefined, 300)).toEqual({ kind: 'recorded', runId: 'real', objects: 5, bytes: 50, preserved: 0, undone: 0, deadline: null, expired: false })
+})
 
 it('does not mistake bucket progress for exact prefix counts or subtract it from a scan', () => {
   expect(prefixExecution(prefix, [], { runId: 'live', progress }, 300)).toEqual({ kind: 'live-bucket', runId: 'live', done: false })
@@ -24,5 +30,93 @@ it('links recorded outcomes with conservative retention, excluding other prefixe
 it('explains preserved changed/new objects even when the run deleted none of a prefix', () => {
   expect(prefixExecution(prefix, [{ ...record, objects: 0, bytes: 0, drift_new_objects: 9, overwritten: 1 }], undefined, 300)).toEqual({
     kind: 'recorded', runId: 'real', objects: 0, bytes: 0, preserved: 10, undone: 0, deadline: 700, expired: false,
+  })
+})
+
+describe('a row\'s live run: the run\'s own item set, not its bucket', () => {
+  const items = { sweep: ['gs://b/a/', 'gs://b/c/d/'], objects: ['gs://b/e/key'] }
+  it('a real `plan.json`: `sweep` holds full URIs, so its items are in the run and a prefix staged after it is not', () => {
+    const plan = {
+      plan_id: 1, name: 'Staged', sweep: ['gs://b1/data/', 'gs://b2/ckpt/step-1/'], buckets: ['b1', 'b2'],
+      as_of: { 'gs://b1/data/': '2026-11-03T1622', 'gs://b2/ckpt/step-1/': '2026-11-02T0701' },
+    }
+    const targets = [{ bucket: 'b2', run: { started_ts: 100 }, items: plan }]
+    expect(['gs://b2/ckpt/step-1/', 'gs://b2/ckpt/step-1/x/', 'gs://b2/ckpt/later/', 'gs://b1/data/'].map(p => liveTargetOf(p, 50, targets))).toEqual([0, 0, -1, -1])
+  })
+  it('inRunItems: an item, or under one; an unread plan says no', () => {
+    expect([
+      inRunItems('gs://b/a/', items),
+      inRunItems('gs://b/a/x/', items),
+      inRunItems('gs://b/e/key', items),
+      inRunItems('gs://b/ab/', items),
+      inRunItems('gs://b/c/', items),
+      inRunItems('gs://b/e/key2', items),
+      inRunItems('gs://b/a/', null),
+      inRunItems('gs://b/a/', undefined),
+      inRunItems('gs://b/a/', {}),
+    ]).toEqual([true, true, true, false, false, false, false, false, false])
+  })
+  const target = (bucket: string, started_ts: number, plan?: { sweep?: string[]; objects?: string[] } | null) => ({ bucket, run: { started_ts }, items: plan })
+  it('liveTargetOf: a prefix staged after the dry run, in the bucket of a live run without it, has none', () => {
+    const targets = [target('b', 200, items)]
+    expect(liveTargetOf('gs://b/a/', 100, targets)).toBe(0)
+    expect(liveTargetOf('gs://b/later/', 100, targets)).toBe(-1)
+  })
+  it('liveTargetOf: another bucket\'s run, a run older than the stage, or a plan not read yet: none', () => {
+    expect(liveTargetOf('gs://b2/a/', 100, [target('b', 200, { sweep: ['gs://b2/a/'] })])).toBe(-1)
+    expect(liveTargetOf('gs://b/a/', 300, [target('b', 200, items)])).toBe(-1)
+    expect(liveTargetOf('gs://b/a/', 100, [target('b', 200, undefined)])).toBe(-1)
+    expect(liveTargetOf('gs://b/a/', 100, [target('b', 200, null)])).toBe(-1)
+  })
+  it('liveTargetOf: of two live runs in a bucket, the one holding it', () => {
+    expect(liveTargetOf('gs://b/z/', 100, [target('b', 200, items), target('b', 250, { sweep: ['gs://b/z/'] })])).toBe(1)
+  })
+  it('a row outside the run reads as not running', () => {
+    const ix = liveTargetOf('gs://b/later/', 100, [target('b', 200, items)])
+    expect(ix).toBe(-1)
+    expect(prefixExecution('gs://b/later/', [], undefined, 300)).toBeNull()
+  })
+})
+
+describe('a recorded deletion whose bucket has soft delete off now', () => {
+  const recorded = { kind: 'recorded', runId: 'real', objects: 5, bytes: 50, preserved: 0, undone: 0, deadline: 700, expired: false }
+  const known = (off: boolean) => ({ asOf: '2026-11-05', off: { b: off, other: true } })
+  it('says undo is unavailable, by the prefix\'s own bucket and the snapshot\'s date', () => {
+    expect(prefixExecution(prefix, [record], undefined, 300, known(true))).toEqual({ ...recorded, unavailable: { buckets: ['b'], asOf: '2026-11-05' } })
+  })
+  it('its bucket on, or a site that wasn\'t asked (another executor, a reading still loading): the window as recorded', () => {
+    expect([
+      prefixExecution(prefix, [record], undefined, 300, known(false)),
+      prefixExecution(prefix, [record], undefined, 300),
+    ]).toEqual([recorded, recorded])
+  })
+  it('a bucket the reading does not name, or no reading: the window stands, marked as one this site can\'t vouch for', () => {
+    expect([
+      prefixExecution(prefix, [record], undefined, 300, { asOf: '2026-11-05', off: { other: true } }),
+      prefixExecution(prefix, [record], undefined, 300, null),
+    ]).toEqual([{ ...recorded, unseen: { unseen: ['b'] } }, { ...recorded, unseen: { unseen: ['b'] } }])
+  })
+  it('a window already elapsed, or never recorded, has no undo left to lose', () => {
+    expect([
+      prefixExecution(prefix, [record], undefined, 700, known(true)),
+      prefixExecution(prefix, [{ ...record, undo_deadline: null }], undefined, 300, known(true)),
+      prefixExecution(prefix, [record], undefined, 700, null),
+    ]).toEqual([{ ...recorded, expired: true }, { ...recorded, deadline: null, noUndo: true }, { ...recorded, expired: true }])
+  })
+  it('a band already restored has no undo left to lose either: nothing "unavailable", nothing unverified', () => {
+    const restored = { ...record, undone_objects: 5, undo_state: 'partial' }
+    expect([
+      prefixExecution(prefix, [restored], undefined, 300, known(true)),
+      prefixExecution(prefix, [restored], undefined, 300, null),
+      // Its run fully undone: every object is live again, whatever the band's own count (it leaves out the ones an undo found live).
+      prefixExecution(prefix, [{ ...record, undone_objects: 3, undo_state: 'full' }], undefined, 300, known(true)),
+    ]).toEqual([{ ...recorded, undone: 5 }, { ...recorded, undone: 5 }, { ...recorded, undone: 3 }])
+  })
+  it('a band partly restored still has the rest to lose', () => {
+    expect(prefixExecution(prefix, [{ ...record, undone_objects: 3, undo_state: 'partial' }], undefined, 300, known(true)))
+      .toEqual({ ...recorded, undone: 3, unavailable: { buckets: ['b'], asOf: '2026-11-05' } })
+  })
+  it('bucketOfPrefix', () => {
+    expect([bucketOfPrefix('gs://b/a/'), bucketOfPrefix('s3://bkt/k'), bucketOfPrefix('b/a/')]).toEqual(['b', 'bkt', 'b'])
   })
 })

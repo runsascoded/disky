@@ -1,0 +1,46 @@
+# Shared site deployment notifications
+
+Requested November 10: notify each deployment's admin channel when a site deployment succeeds, fails or is cancelled. HF routes to #hf-admin; GCS, CW and R2 use their corresponding channels. Louisa's deployment rehearsal should have the same visibility as other operators' releases.
+
+## Current state
+
+The existing manual `site/deploy` and proposed GitHub release controller have no deployment notification integration. A read-only Slack search found no deploy notices in #hf-admin. The shared helper and manual integration below are implemented for review; delivery is disabled. No Slack message, webhook, policy or CI secret has been created or enabled.
+
+Root owns GitHub controller integration. HF owns the shared `site/deploy-notify` helper, manual integration, examples and tests, and supplies one coherent shared commit. The release owner has acknowledged this split; do not add an independent second notifier to the controller.
+
+## Common receipt and interface
+
+`site/deploy-notify record` records a manual attempt. `render RECEIPT` prints its Markdown review copy. `send RECEIPT` also only renders; posting requires both `send --execute RECEIPT` and `DEPLOY_NOTIFICATIONS_ENABLED=1`, plus `SLACK_DEPLOY_BOT_TOKEN` and `SLACK_DEPLOY_CHANNEL` (the channel's ID). Example receipts live in `site/fixtures/deploy-notices/`. The unposted editable Slack drafts are under `slck/deploy-notices/`, one per example; apply any reviewed edits to the renderer before enabling it.
+
+The receipt deliberately overlaps the controller's existing plan/receipt fields: `notice_version: 1`, `deployment` (falls back to `source_branch`), `mode: dev|prod`, `status: success|failure|cancelled`, `stage: build|upload|verify|finish`, `sha` (full forty characters or null), `source_branch`, `repository` (`owner/name`), `host`, `verified` (boolean), `dirty` (boolean or null), `actor`, `actor_source: local|github`, `attempt`, `cloudflare_deployment`, `cloudflare_url`, and `run_url`. Missing revision, initiator, Cloudflare receipt or verification stays explicitly unrecorded. A build failure can be reported before any Cloudflare deployment exists. The receipt may contain other controller fields, but only the explicit display allowlist reaches Slack; no account identifiers, credential fields, arbitrary stderr or provider response bodies are rendered.
+
+Manual `site/deploy` captures the source revision/tree state, installs its EXIT handler before building, and writes an attempt receipt under `tmp/` (`DEPLOY_NOTICE_RECEIPT` overrides the path). It records the actual build/upload/finish result and any deployment URL printed by Wrangler. The site slug comes from `STORE`, else the Pages project. A local username is labelled as such; it is not an authenticated assertion that a particular staff member deployed. Manual upload notices conservatively leave serving verification unrecorded; the existing entry-asset content-type checks do not establish exact build/data parity. The original deploy exit status is preserved even if receipt generation or notification delivery fails. Help, status and dry runs send nothing and write no notice receipt.
+
+The controller should generate the same compact receipt from its trusted plan and actual job outcome, including a failure before `begin` or upload. Set `verified: true` only after its Cloudflare source/build/entry-asset checks succeed. Supply `GITHUB_ACTOR` as the actor and the workflow attempt identity. Run the notifier once in a separate final job, outside the Pages-upload credential step, with only its channel-scoped notification capability. A workflow retry is another labelled attempt; do not blindly rerun a send whose acceptance is unknown.
+
+## Transport and review gate
+
+Threading contract (Ryan, November 11): greens are run-length threaded, reds are not. Each deployment's consecutive successful deploys, dev and prod alike, share one thread: the first green after a red (or with no notice of that deployment's in the channel's last 100 top-level messages) is a top-level post, and each later green replies in its thread. Every failure or cancellation is its own top-level post, which ends the run; the next green opens a new thread.
+
+A webhook can't do this (it returns no message `ts` and can't read the channel), so the transport is the deployment's Slack bot through `thrds`'s `SlackClient` (`chat:write`, plus `channels:history`/`groups:history` to find the run; the HF Usage Bot has both). Before a green post, `send` reads the channel's newest 100 top-level messages and takes the newest of this bot's notices for this deployment, recognized by its bold headline (`*HF dev deployment succeeded*`); if that notice is green, the post replies in its thread. The state lives in the channel itself, so manual and CI deploys continue one run without a store. Unfurls are off. Keep the token out of receipts, source, arguments and logs; no GCP credential, D1 token or Pages upload token is needed by the sender.
+
+The sender uses a fifteen-second socket timeout and never retries an uncertain send (a `thrds` 429 retry is safe: Slack refused it). A failed history lookup posts nothing. Acceptance may be unknown after a timeout; the error stays explicit without printing the token or response body. Manual notification failures emit a warning and preserve the deployment's result. The CI notification job should expose delivery failure separately from the already-recorded release result.
+
+Ryan approved the example copy with the threading contract above (November 11). To activate: give the sender the bot token and channel ID (`SLACK_DEPLOY_BOT_TOKEN` from the deployment's Slack bot secret, `SLACK_DEPLOY_CHANNEL`), wire the separate controller notification job, and enable the flag. Verify one real notice and independently read it back, checking project, environment, exact source, initiator provenance, links and threading. Do not describe notifications as live before that check.
+
+## Cloudflare-native comparison
+
+[Cloudflare Pages project alerts] support deployment started/succeeded/failed events filtered by project and environment. They can cover deployment paths outside our helper/controller, including dashboard operations. [Cloudflare webhook destinations] can deliver alerts to Slack. Native alerts use provider-controlled copy and need separate account notification configuration; the local `CLOUDFLARE_API_TOKEN` returned HTTP 403 when reading alert policies, so existing native policy coverage remains unverified.
+
+The reviewed receipt-based path additionally covers build failures before Cloudflare receives an upload and distinguishes upload completion from serving verification. Its initial scope is the shared manual helper and the release controller, across all configured sites and both environments. Direct Wrangler/dashboard operations bypass that integration. If those paths must be included, choose native event delivery or a shared event reconciler explicitly; do not enable native and helper/CI terminal messages for the same event and call the duplicates coverage. No native alert policy was changed during this work.
+
+## Verification
+
+Targeted remote tests cover exact Markdown and Slack payloads, private-field omission, explicit opt-in, nullable pre-upload evidence, invalid/injectable inputs, channel-scoped transport, bounded/no-redirect delivery and no retry after uncertain sends. A subprocess harness exercises real manual EXIT handling with fake build/upload commands: build failure, cancellation, upload failure, success and notification failure preserve the original exit code and record the exact outcome. Broader source/build identity, Functions route, deploy dry-run and status checks accompany the shared identity adoption.
+
+[Cloudflare Pages project alerts]: https://developers.cloudflare.com/notifications/notification-available/#pages
+[Cloudflare webhook destinations]: https://developers.cloudflare.com/notifications/get-started/configure-webhooks/
+
+## Source validation checkpoint
+
+HF adopted shared source/build identity commits `563e914c2` and `c8c12a0c9` as `15172842c` and `1946f8b3d`, and configures `SOURCE_REF=hf` in production and preview. On the existing remote dev node, all 33 notifier cases and 23 existing deploy/status cases passed; 19 build/Functions route cases and two native Node build-identity cases passed, as did both TypeScript projects and the production frontend build. Final notifier snapshot `e86ae02a5602` includes dirty-build truthfulness and refusal to treat an old URL in a failed upload log as a new deployment receipt. Exact run logs remain under `tmp/remote-test-*` and `tmp/hf-deploy-source-build-check.log`. Browser verification was attempted at `http://localhost:13264/` over public demo data, but the browser access host is unavailable; no rendered HF UI verification is claimed here.

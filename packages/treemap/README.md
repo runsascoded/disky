@@ -95,6 +95,7 @@ const root: Node = {
   renderTooltip={(n, path) => <>{n.name}<br/>{n.size} B</>}
   renderLegend={(current, path) => …}
   renderRollup={(current, path) => …}
+  mapOverlay={busy ? <BusyPill /> : null}  // laid over the map box itself, clear of the bar / rollup / footer
   onCellClick={(n, path, e) => { /* return true to skip built-in drill/pin */ }}
   onCellHover={(n, path) => { /* outward hover signal for external brushing */ }}
   onPathChange={path => console.log(path.map(n => n.name).join('/'))}

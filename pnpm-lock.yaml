@@ -8,6 +8,58 @@ importers:
 
   .: {}
 
+  fleet:
+    dependencies:
+      '@disk-tree/pages-kit':
+        specifier: workspace:*
+        version: link:../packages/pages-kit
+      '@open-athena/auth':
+        specifier: github:Open-Athena/auth#cd858f749398a3b1a6990d590efcd0cf8238c7a9
+        version: https://codeload.github.com/Open-Athena/auth/tar.gz/cd858f749398a3b1a6990d590efcd0cf8238c7a9(@cloudflare/workers-types@5.20261014.1)(@floating-ui/react@0.27.20(react-dom@19.2.8(react@19.2.8))(react@19.2.8))(@tanstack/react-query@5.101.4(react@19.2.8))(react-dom@19.2.8(react@19.2.8))(react@19.2.8)(vue@3.5.44(typescript@5.9.3))
+      '@resvg/resvg-wasm':
+        specifier: ^2.6.2
+        version: 2.6.2
+      '@tanstack/react-query':
+        specifier: ^5.101.4
+        version: 5.101.4(react@19.2.8)
+      marked:
+        specifier: ^15.0.12
+        version: 15.0.12
+      react:
+        specifier: ^19.1.0
+        version: 19.2.8
+      react-dom:
+        specifier: ^19.1.0
+        version: 19.2.8(react@19.2.8)
+    devDependencies:
+      '@cloudflare/workers-types':
+        specifier: ^5.20261013.1
+        version: 5.20261014.1
+      '@types/node':
+        specifier: 24.13.3
+        version: 24.13.3
+      '@types/react':
+        specifier: ^19.1.0
+        version: 19.2.18
+      '@types/react-dom':
+        specifier: ^19.1.0
+        version: 19.2.4(@types/react@19.2.18)
+      '@vitejs/plugin-react':
+        specifier: ^4.5.0
+        version: 4.7.0(vite@7.3.6(@types/node@24.13.3)(sass@1.102.0)(yaml@2.9.1))
+      typescript:
+        specifier: ^5.8.0
+        version: 5.9.3
+      vite:
+        specifier: ^7.0.0
+        version: 7.3.6(@types/node@24.13.3)(sass@1.102.0)(yaml@2.9.1)
+      vitest:
+        specifier: ^4.1.11
+        version: 4.1.11(@types/node@24.13.3)(jsdom@25.0.1)(vite@7.3.6(@types/node@24.13.3)(sass@1.102.0)(yaml@2.9.1))
+      wrangler:
+        specifier: 4.150.0
+        version: 4.150.0(@cloudflare/workers-types@5.20261014.1)(@types/node@24.13.3)
+
   infra/cf/capture-trigger:
     dependencies:
       aws4fetch:
@@ -25,7 +77,7 @@ importers:
         version: 2.1.9(@types/node@24.13.3)(jsdom@25.0.1)(sass@1.102.0)
       wrangler:
         specifier: ^4.0.0
-        version: 4.147.0(@cloudflare/workers-types@4.20260702.1)(@types/node@24.13.3)
+        version: 4.150.0(@cloudflare/workers-types@4.20260702.1)(@types/node@24.13.3)
 
   infra/cf/cron-dispatch:
     devDependencies:
@@ -56,6 +108,22 @@ importers:
       wrangler:
         specifier: 4.147.0
         version: 4.147.0(@cloudflare/workers-types@5.20261012.1)(@types/node@24.13.3)
+
+  packages/pages-kit:
+    dependencies:
+      '@open-athena/auth':
+        specifier: github:Open-Athena/auth#cd858f749398a3b1a6990d590efcd0cf8238c7a9
+        version: https://codeload.github.com/Open-Athena/auth/tar.gz/cd858f749398a3b1a6990d590efcd0cf8238c7a9(@cloudflare/workers-types@5.20261014.1)(@floating-ui/react@0.27.20(react-dom@19.2.8(react@19.2.8))(react@19.2.8))(@tanstack/react-query@5.101.4(react@19.2.8))(react-dom@19.2.8(react@19.2.8))(react@19.2.8)(vue@3.5.44(typescript@5.9.3))
+      '@resvg/resvg-wasm':
+        specifier: ^2.6.2
+        version: 2.6.2
+    devDependencies:
+      '@cloudflare/workers-types':
+        specifier: ^5.20261013.1
+        version: 5.20261014.1
+      typescript:
+        specifier: ^5.8.0
+        version: 5.9.3
 
   packages/react:
     dependencies:
@@ -142,6 +210,9 @@ importers:
 
   site:
     dependencies:
+      '@disk-tree/pages-kit':
+        specifier: workspace:*
+        version: link:../packages/pages-kit
       '@disk-tree/react':
         specifier: workspace:*
         version: link:../packages/react
@@ -149,8 +220,8 @@ importers:
         specifier: ^0.27.20
         version: 0.27.20(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
       '@open-athena/auth':
-        specifier: github:Open-Athena/auth#d87ade68aa5aa9bedb80d1833381bff4c0c0416e
-        version: https://codeload.github.com/Open-Athena/auth/tar.gz/d87ade68aa5aa9bedb80d1833381bff4c0c0416e(@cloudflare/workers-types@5.20261014.1)(@tanstack/react-query@5.101.4(react@19.2.8))(react@19.2.8)
+        specifier: github:Open-Athena/auth#cd858f749398a3b1a6990d590efcd0cf8238c7a9
+        version: https://codeload.github.com/Open-Athena/auth/tar.gz/cd858f749398a3b1a6990d590efcd0cf8238c7a9(@cloudflare/workers-types@5.20261014.1)(@floating-ui/react@0.27.20(react-dom@19.2.8(react@19.2.8))(react@19.2.8))(@tanstack/react-query@5.101.4(react@19.2.8))(react-dom@19.2.8(react@19.2.8))(react@19.2.8)(vue@3.5.44(typescript@5.9.3))
       '@open-athena/treemap':
         specifier: workspace:*
         version: link:../packages/treemap
@@ -183,7 +254,7 @@ importers:
         version: https://codeload.github.com/runsascoded/pyrmts/tar.gz/ad35ff808beb8bbbe8d4fb7dddb894de4421bb62#path:/js/packages/pyrmts-cfw(react@19.2.8)
       pyrmts-react:
         specifier: github:runsascoded/pyrmts#ad35ff808beb8bbbe8d4fb7dddb894de4421bb62&path:/js/packages/pyrmts-react
-        version: https://codeload.github.com/runsascoded/pyrmts/tar.gz/ad35ff808beb8bbbe8d4fb7dddb894de4421bb62#path:/js/packages/pyrmts-react(@floating-ui/react@0.27.20(react-dom@19.2.8(react@19.2.8))(react@19.2.8))(react@19.2.8)(use-kbd@https://codeload.github.com/runsascoded/use-kbd/tar.gz/9db5013f5e4034a14530dff37f1c015dc37c8c77(cmdk@1.1.1(@types/react-dom@19.2.4(@types/react@19.2.18))(@types/react@19.2.18)(react-dom@19.2.8(react@19.2.8))(react@19.2.8))(react-dom@19.2.8(react@19.2.8))(react@19.2.8))
+        version: https://codeload.github.com/runsascoded/pyrmts/tar.gz/ad35ff808beb8bbbe8d4fb7dddb894de4421bb62#path:/js/packages/pyrmts-react(@floating-ui/react@0.27.20(react-dom@19.2.8(react@19.2.8))(react@19.2.8))(react@19.2.8)(use-kbd@https://codeload.github.com/runsascoded/use-kbd/tar.gz/01b12cb918f9132793d5dc686b627a333550c9d0(cmdk@1.1.1(@types/react-dom@19.2.4(@types/react@19.2.18))(@types/react@19.2.18)(react-dom@19.2.8(react@19.2.8))(react@19.2.8))(react-dom@19.2.8(react@19.2.8))(react@19.2.8))
       react:
         specifier: ^19.1.0
         version: 19.2.8
@@ -197,8 +268,8 @@ importers:
         specifier: ^6.30.6
         version: 6.30.6(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
       use-kbd:
-        specifier: https://github.com/runsascoded/use-kbd#9db5013f5e4034a14530dff37f1c015dc37c8c77
-        version: https://codeload.github.com/runsascoded/use-kbd/tar.gz/9db5013f5e4034a14530dff37f1c015dc37c8c77(cmdk@1.1.1(@types/react-dom@19.2.4(@types/react@19.2.18))(@types/react@19.2.18)(react-dom@19.2.8(react@19.2.8))(react@19.2.8))(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
+        specifier: https://github.com/runsascoded/use-kbd#01b12cb918f9132793d5dc686b627a333550c9d0
+        version: https://codeload.github.com/runsascoded/use-kbd/tar.gz/01b12cb918f9132793d5dc686b627a333550c9d0(cmdk@1.1.1(@types/react-dom@19.2.4(@types/react@19.2.18))(@types/react@19.2.18)(react-dom@19.2.8(react@19.2.8))(react@19.2.8))(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
       use-prms:
         specifier: https://github.com/runsascoded/use-prms#bb731063bf4202c0501e9c3d6fdada0817f699a4
         version: https://codeload.github.com/runsascoded/use-prms/tar.gz/bb731063bf4202c0501e9c3d6fdada0817f699a4(react@19.2.8)(vue@3.5.44(typescript@5.9.3))
@@ -221,6 +292,12 @@ importers:
       '@vitejs/plugin-react':
         specifier: ^4.5.0
         version: 4.7.0(vite@7.3.6(@types/node@24.13.3)(sass@1.102.0)(yaml@2.9.1))
+      esbuild:
+        specifier: 0.28.2
+        version: 0.28.2
+      miniflare:
+        specifier: 5.20261006.2-beta
+        version: 5.20261006.2-beta(@types/node@24.13.3)
       puppeteer:
         specifier: ^25.4.0
         version: 25.11.0(yauzl@2.10.0)
@@ -1400,19 +1477,28 @@ packages:
     cpu: [x64]
     os: [linux]
 
-  '@open-athena/auth@https://codeload.github.com/Open-Athena/auth/tar.gz/d87ade68aa5aa9bedb80d1833381bff4c0c0416e':
-    resolution: {tarball: https://codeload.github.com/Open-Athena/auth/tar.gz/d87ade68aa5aa9bedb80d1833381bff4c0c0416e}
-    version: 0.1.0-dist.1eb5b23
+  '@open-athena/auth@https://codeload.github.com/Open-Athena/auth/tar.gz/cd858f749398a3b1a6990d590efcd0cf8238c7a9':
+    resolution: {tarball: https://codeload.github.com/Open-Athena/auth/tar.gz/cd858f749398a3b1a6990d590efcd0cf8238c7a9}
+    version: 0.1.0-dist.e28704a
     peerDependencies:
       '@cloudflare/workers-types': '*'
+      '@floating-ui/react': ^0.27.20
       '@tanstack/react-query': ^5.0.0
       react: ^18.0.0 || ^19.0.0
+      react-dom: ^18.0.0 || ^19.0.0
+      vue: ^3.5.0
     peerDependenciesMeta:
       '@cloudflare/workers-types':
+        optional: true
+      '@floating-ui/react':
         optional: true
       '@tanstack/react-query':
         optional: true
       react:
+        optional: true
+      react-dom:
+        optional: true
+      vue:
         optional: true
 
   '@parcel/watcher-android-arm64@2.6.0':
@@ -2617,6 +2703,11 @@ packages:
   markdown-table@3.0.4:
     resolution: {integrity: sha512-wiYz4+JrLyb/DqW2hkFJxP7Vd7JuTDm77fvbM8VfEQdmSMqcImWeeRbHwZjBjIFki/VaMK2BhFi7oUUZeM5bqw==}
 
+  marked@15.0.12:
+    resolution: {integrity: sha512-8dD6FusOQSrpv9Z1rdNMdlSgQOIP880DHqnohobOmYLElGEqAL/JvxvuxZO16r4HtjTlfPRDC1hbvxC9dPN2nA==}
+    engines: {node: '>= 18'}
+    hasBin: true
+
   math-intrinsics@1.1.0:
     resolution: {integrity: sha512-/IXtbwEk5HTPyEwyKX6hGkYXxM9nbj64B+ilVJnC/R6B0pH5G4V3b0pVbL7DBj4tkhBAppbQUlf6F6Xl9LHu1g==}
     engines: {node: '>= 0.4'}
@@ -3321,9 +3412,9 @@ packages:
       '@types/react':
         optional: true
 
-  use-kbd@https://codeload.github.com/runsascoded/use-kbd/tar.gz/9db5013f5e4034a14530dff37f1c015dc37c8c77:
-    resolution: {tarball: https://codeload.github.com/runsascoded/use-kbd/tar.gz/9db5013f5e4034a14530dff37f1c015dc37c8c77}
-    version: 0.13.0-dist.f20b8ce
+  use-kbd@https://codeload.github.com/runsascoded/use-kbd/tar.gz/01b12cb918f9132793d5dc686b627a333550c9d0:
+    resolution: {tarball: https://codeload.github.com/runsascoded/use-kbd/tar.gz/01b12cb918f9132793d5dc686b627a333550c9d0}
+    version: 0.13.0-dist.f73eee9
     peerDependencies:
       cmdk: '>=1.0.0'
       react: '>=18.0.0'
@@ -4426,11 +4517,14 @@ snapshots:
   '@napi-rs/lzma-linux-x64-gnu@1.5.1':
     optional: true
 
-  '@open-athena/auth@https://codeload.github.com/Open-Athena/auth/tar.gz/d87ade68aa5aa9bedb80d1833381bff4c0c0416e(@cloudflare/workers-types@5.20261014.1)(@tanstack/react-query@5.101.4(react@19.2.8))(react@19.2.8)':
+  '@open-athena/auth@https://codeload.github.com/Open-Athena/auth/tar.gz/cd858f749398a3b1a6990d590efcd0cf8238c7a9(@cloudflare/workers-types@5.20261014.1)(@floating-ui/react@0.27.20(react-dom@19.2.8(react@19.2.8))(react@19.2.8))(@tanstack/react-query@5.101.4(react@19.2.8))(react-dom@19.2.8(react@19.2.8))(react@19.2.8)(vue@3.5.44(typescript@5.9.3))':
     optionalDependencies:
       '@cloudflare/workers-types': 5.20261014.1
+      '@floating-ui/react': 0.27.20(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
       '@tanstack/react-query': 5.101.4(react@19.2.8)
       react: 19.2.8
+      react-dom: 19.2.8(react@19.2.8)
+      vue: 3.5.44(typescript@5.9.3)
 
   '@parcel/watcher-android-arm64@2.6.0':
     optional: true
@@ -5624,6 +5718,8 @@ snapshots:
 
   markdown-table@3.0.4: {}
 
+  marked@15.0.12: {}
+
   math-intrinsics@1.1.0: {}
 
   mdast-util-find-and-replace@3.0.2:
@@ -6148,13 +6244,13 @@ snapshots:
     transitivePeerDependencies:
       - react
 
-  pyrmts-react@https://codeload.github.com/runsascoded/pyrmts/tar.gz/ad35ff808beb8bbbe8d4fb7dddb894de4421bb62#path:/js/packages/pyrmts-react(@floating-ui/react@0.27.20(react-dom@19.2.8(react@19.2.8))(react@19.2.8))(react@19.2.8)(use-kbd@https://codeload.github.com/runsascoded/use-kbd/tar.gz/9db5013f5e4034a14530dff37f1c015dc37c8c77(cmdk@1.1.1(@types/react-dom@19.2.4(@types/react@19.2.18))(@types/react@19.2.18)(react-dom@19.2.8(react@19.2.8))(react@19.2.8))(react-dom@19.2.8(react@19.2.8))(react@19.2.8)):
+  pyrmts-react@https://codeload.github.com/runsascoded/pyrmts/tar.gz/ad35ff808beb8bbbe8d4fb7dddb894de4421bb62#path:/js/packages/pyrmts-react(@floating-ui/react@0.27.20(react-dom@19.2.8(react@19.2.8))(react@19.2.8))(react@19.2.8)(use-kbd@https://codeload.github.com/runsascoded/use-kbd/tar.gz/01b12cb918f9132793d5dc686b627a333550c9d0(cmdk@1.1.1(@types/react-dom@19.2.4(@types/react@19.2.18))(@types/react@19.2.18)(react-dom@19.2.8(react@19.2.8))(react@19.2.8))(react-dom@19.2.8(react@19.2.8))(react@19.2.8)):
     dependencies:
       '@floating-ui/react': 0.27.20(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
       pyrmts: https://codeload.github.com/runsascoded/pyrmts/tar.gz/01cb9739acd3c91f705f32b3c20f14da3f465396#path:/js/packages/pyrmts(react@19.2.8)
       react: 19.2.8
     optionalDependencies:
-      use-kbd: https://codeload.github.com/runsascoded/use-kbd/tar.gz/9db5013f5e4034a14530dff37f1c015dc37c8c77(cmdk@1.1.1(@types/react-dom@19.2.4(@types/react@19.2.18))(@types/react@19.2.18)(react-dom@19.2.8(react@19.2.8))(react@19.2.8))(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
+      use-kbd: https://codeload.github.com/runsascoded/use-kbd/tar.gz/01b12cb918f9132793d5dc686b627a333550c9d0(cmdk@1.1.1(@types/react-dom@19.2.4(@types/react@19.2.18))(@types/react@19.2.18)(react-dom@19.2.8(react@19.2.8))(react@19.2.8))(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
 
   pyrmts@https://codeload.github.com/runsascoded/pyrmts/tar.gz/01cb9739acd3c91f705f32b3c20f14da3f465396#path:/js/packages/pyrmts(react@19.2.8):
     dependencies:
@@ -6629,7 +6725,7 @@ snapshots:
     optionalDependencies:
       '@types/react': 19.2.18
 
-  use-kbd@https://codeload.github.com/runsascoded/use-kbd/tar.gz/9db5013f5e4034a14530dff37f1c015dc37c8c77(cmdk@1.1.1(@types/react-dom@19.2.4(@types/react@19.2.18))(@types/react@19.2.18)(react-dom@19.2.8(react@19.2.8))(react@19.2.8))(react-dom@19.2.8(react@19.2.8))(react@19.2.8):
+  use-kbd@https://codeload.github.com/runsascoded/use-kbd/tar.gz/01b12cb918f9132793d5dc686b627a333550c9d0(cmdk@1.1.1(@types/react-dom@19.2.4(@types/react@19.2.18))(@types/react@19.2.18)(react-dom@19.2.8(react@19.2.8))(react@19.2.8))(react-dom@19.2.8(react@19.2.8))(react@19.2.8):
     dependencies:
       cmdk: 1.1.1(@types/react-dom@19.2.4(@types/react@19.2.18))(@types/react@19.2.18)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
       react: 19.2.8
@@ -6679,7 +6775,7 @@ snapshots:
   vite@5.4.21(@types/node@24.13.3)(sass@1.102.0):
     dependencies:
       esbuild: 0.21.5
-      postcss: 8.5.25
+      postcss: 8.5.31
       rollup: 4.62.4
     optionalDependencies:
       '@types/node': 24.13.3
@@ -6854,6 +6950,24 @@ snapshots:
       workerd: 1.20261001.1
     optionalDependencies:
       '@cloudflare/workers-types': 5.20261012.1
+      fsevents: 2.3.3
+    transitivePeerDependencies:
+      - '@types/node'
+      - bufferutil
+      - utf-8-validate
+
+  wrangler@4.150.0(@cloudflare/workers-types@4.20260702.1)(@types/node@24.13.3):
+    dependencies:
+      '@cloudflare/kv-asset-handler': 0.5.0
+      '@cloudflare/unenv-preset': 2.16.2(unenv@2.0.0-rc.24)(workerd@1.20261006.1)
+      blake3-wasm: 2.1.5
+      esbuild: 0.28.2
+      miniflare: 5.20261006.2-beta(@types/node@24.13.3)
+      path-to-regexp: 6.3.0
+      unenv: 2.0.0-rc.24
+      workerd: 1.20261006.1
+    optionalDependencies:
+      '@cloudflare/workers-types': 4.20260702.1
       fsevents: 2.3.3
     transitivePeerDependencies:
       - '@types/node'

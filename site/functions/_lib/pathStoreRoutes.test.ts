@@ -10,7 +10,7 @@ const { readdirSync, readFileSync } = (await import(/* @vite-ignore */ 'node:' +
   readFileSync(p: string, enc: 'utf8'): string
 }
 const ROOT = new URL('..', (import.meta as unknown as { url: string }).url).pathname
-const READERS = /from ['"](?:\.\.\/)+_lib\/(?:view|ownerTotals|prefixes|stagedSlack|overTime|activitySize)\.js['"]|\bopenIndex\b/
+const READERS = /from ['"](?:\.\.\/)+_lib\/(?:view|ownerTotals|prefixes|stagedSlack|executor|overTime|activitySize)\.js['"]|\bopenIndex\b/
 
 /** Routes that read the index without `withPathStore`, on purpose. */
 const EXCEPTIONS: Record<string, string> = {

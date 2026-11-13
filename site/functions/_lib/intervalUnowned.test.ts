@@ -4,7 +4,7 @@ import { openIndex, slices } from './index'
 import type { OwnerScope } from './scope'
 import { sqliteD1, withLedger } from './testD1'
 import { type D1Variant, fixture, getsOf, readJson, seedGeneration } from './testStore'
-import { buildDiff, buildView, readRootAgg, readRootHistory } from './view'
+import { buildDiff, buildView, readRootAgg, readPathHistory } from './view'
 
 vi.mock('@rdub/file-tree/stores/s3', async () => ({ S3Store: (await import('./testStore')).S3Store }))
 
@@ -134,7 +134,7 @@ describe('interval store g7: no owner axis', () => {
         }
         want.push([date, await readRootAgg(envs.iv, { date, path: '', ...scope })])
       }
-      expect([...(await readRootHistory(envs.iv, [S1, S2, S3], scope))!]).toEqual(want)
+      expect([...(await readPathHistory(envs.iv, [S1, S2, S3], '', scope))!]).toEqual(want)
     }
   })
 

@@ -7,7 +7,7 @@ import { fmtN } from './types'
 import type { RunAnalytics, RunBand } from './plans'
 import { SkippedCounts } from './SkippedCounts'
 
-export function RunBands({ bands, id, fmtBytes, analysis }: { bands: RunBand[]; id: string; fmtBytes: (b: number) => string; analysis?: RunAnalytics['analysis'] }) {
+export function RunBands({ bands, id, fmtBytes, analysis, attempted }: { bands: RunBand[]; id: string; fmtBytes: (b: number) => string; analysis?: RunAnalytics['analysis']; attempted?: boolean }) {
   const catalog = useMemo(() => memoryTable([
     { name: 'prefix', kind: 'string' },
     ...['bytes', 'objects', 'gone', 'skipped', 'undone'].map(name => ({ name, kind: 'number' as const })),
@@ -19,7 +19,7 @@ export function RunBands({ bands, id, fmtBytes, analysis }: { bands: RunBand[]; 
       elide={{ tooltip: ({ node, text }) => <Tooltip content={text}>{node}</Tooltip> }}
       renderCell={({ column, value, row }) => column.name === 'prefix'
         ? <CopyName text={String(value)}><code>{elideMid(String(value), 100, 24)}</code></CopyName>
-        : column.name === 'skipped' ? <SkippedCounts band={byPrefix.get(String(row.prefix))!} analysis={analysis} />
+        : column.name === 'skipped' ? <SkippedCounts band={byPrefix.get(String(row.prefix))!} analysis={analysis} attempted={attempted} />
           : column.name === 'bytes' ? fmtBytes(Number(value)) : fmtN(Number(value))}
     />
   </div>

@@ -18,8 +18,10 @@
  * back-fills the colo cache. Values are small JSON (≤ ~350 KB); keys are the
  * SHA-256 of the cache key URL (KV keys are capped at 512 bytes). */
 
+import { isPreviewHost } from './previewHost.js'
 import { PRIMARY_STORE } from './stores.js'
 import { SEARCH_LIMITS, type SearchLimits } from './search.js'
+import { colo, isolatePut, IsoMap, IsoSet, type Trace } from './shared.js'
 import { currentMeter } from './usage.js'
 
 const TTL = 86400
@@ -36,7 +38,7 @@ const PRIVATE = 'private, max-age=300'
 const PARTIAL_CLIENT = 'no-store'
 const JSON_HDR = { 'content-type': 'application/json; charset=utf-8' }
 
-export interface CacheEnv { CACHE_KV?: KVNamespace; CACHE_NS?: string; PROD_HOST?: string }
+export interface CacheEnv { CACHE_KV?: KVNamespace; CACHE_NS?: string; PROD_HOST?: string; PAGES_SUBDOMAIN?: string }
 
 // Bumped whenever a cached endpoint's answer for the same inputs changes
 // (a reader rule, a diff walk rule): a stale entry lives a day in the colo
@@ -54,7 +56,9 @@ export interface CacheEnv { CACHE_KV?: KVNamespace; CACHE_NS?: string; PROD_HOST
 // that drew nothing at the union's threshold was missing from the root, its Δ in no row).
 // 10 (2026-11-02): a view whose children are all under its threshold is one `(other)` (a flat folder of many small
 // objects answered an empty tree, and the map drew nothing).
-export const CACHE_V = '10'
+// 11 (2026-11-06): a thresholded path-first read keeps no ended version (a rewritten object drew at the sum of its two
+// versions, a removed one could return), and a slice read for totals holds every slice of a path clearing its floor.
+export const CACHE_V = '11'
 
 /** The deployment environment a response-cache key belongs to: `''` is prod's (keys exactly as before the
  * tag existed — no one-time flush), anything else a separate keyspace. A Pages preview (the dev stack)
@@ -62,10 +66,15 @@ export const CACHE_V = '10'
  * answer computed by dev's reader (new code, dev-only flags) was served on prod for up
  * to 30 days. `CACHE_NS`, when set, is the tag (`""` = prod's keys); else the request host, except
  * `PROD_HOST` itself — prod declares `PROD_HOST`, its preview env doesn't inherit `[vars]`, and a request to
- * the dev host (or a `*.pages.dev` alias) is never at the prod host. */
+ * the dev host (or a `*.pages.dev` alias) is never at the prod host. A preview host (`isPreviewHost`: a PR's
+ * `pr-N`, the `dev` alias, a deployment hash) is always its own host, before `CACHE_NS`: it shares the dev stack's
+ * environment (and so its `CACHE_NS`) but runs a PR's code, whose answers must never reach dev's keys, nor dev's it.
+ * Every computed answer's cache key carries this tag; only immutable store bytes (`index-blob`, `index-footer`, the
+ * static name index's) and per-origin, per-build keys (the OG cards) don't (`cacheKeys.test.ts`). */
 export function cacheEnvTag(env: CacheEnv, request: Request): string {
-  if (env.CACHE_NS != null) return env.CACHE_NS
   const host = new URL(request.url).host
+  if (isPreviewHost(env, request)) return host
+  if (env.CACHE_NS != null) return env.CACHE_NS
   return host === env.PROD_HOST ? '' : host
 }
 
@@ -79,8 +88,6 @@ export function cacheKeyFor(kind: string, tag: string, parts: string, store?: st
   const s = store && store !== PRIMARY_STORE ? `@${store}/` : ''
   return new Request(`https://${kind}.cache/v${CACHE_V}/${e}${s}${parts}`)
 }
-
-const colo = () => (caches as unknown as { default: Cache }).default
 
 async function kvKey(key: Request): Promise<string> {
   const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(key.url))
@@ -126,6 +133,13 @@ export type Keep = boolean | { partialTtl: number }
  *  else all. A read budget's cut is deterministic, so kept like a whole answer. */
 export const keepFor = (a: { interiors?: { late?: number }; searchLate?: true; detailsLate?: true; lookups_late?: true }): Keep => a.interiors?.late || a.searchLate || a.detailsLate || a.lookups_late ? { partialTtl: PARTIAL_TTL } : true
 
+/** Which time budgets cut an answer (`keepFor`'s causes, `+`-joined: `phase2`, `search`, `details`, `lookups`), or
+ *  `null` for a whole one: what an upgrade's `cut` line names. */
+export function cutReason(a: { interiors?: { late?: number }; searchLate?: true; detailsLate?: true; lookups_late?: true }): string | null {
+  const r = [a.interiors?.late ? 'phase2' : '', a.searchLate ? 'search' : '', a.detailsLate ? 'details' : '', a.lookups_late ? 'lookups' : ''].filter(Boolean)
+  return r.length ? r.join('+') : null
+}
+
 /** Store `body` (already-serialized JSON) per `keep` and return the client response. With ``waitUntil``
  * (the Pages `EventContext`'s) the writes run after the response is sent — a KV put is hundreds of ms the
  * viewer needn't wait for; without it they complete first. A partial answer's client copy says so
@@ -145,7 +159,7 @@ export async function cacheStore(env: CacheEnv, key: Request, body: string, head
       return
     }
     const ps: Promise<unknown>[] = [colo().put(key, publicRes(body))]
-    if (env.CACHE_KV) ps.push(env.CACHE_KV.put(await kvKey(key), body, { expirationTtl: KV_TTL }))
+    if (env.CACHE_KV) { const kv = env.CACHE_KV; const k = await kvKey(key); ps.push(isolatePut(() => kv.put(k, body, { expirationTtl: KV_TTL }))) }
     await Promise.all(ps)
   }
   let stored = partial != null ? `partial;ttl=${partial}` : 'deferred'
@@ -179,20 +193,37 @@ export const UPGRADE_WALK_MS = 5_000
 /** Per isolate: keys with a background full run in flight (one each: concurrent partial hits don't
  *  stampede), and keys whose run was cut short too — not retried until the partial they'd replace expires
  *  (`PARTIAL_TTL`), so a heavy key doesn't re-run every hit. */
-const upgrading = new Set<string>()
-const gaveUp = new Map<string, number>()
+const upgrading = new IsoSet<string>('edge-upgrading')
+const gaveUp = new IsoMap<string, number>('edge-gave-up')
 
 /** What `upgradePartial` did: `scheduled`, or why not. */
 export type Upgrade = 'scheduled' | 'no-waituntil' | 'in-flight' | 'gave-up'
 
+/** A background run's result: the body, what to keep, and (cut short) which budgets cut it (`cutReason`). */
+export type UpgradeRun = { body: string; keep: Keep; cut?: string | null }
+
+/** Where an upgrade's lines go (tests swap it). */
+export const upgradeLog = { line: (s: string): void => console.log(s) }
+
+/** One upgrade event as a line a tail can count: `upgrade: <key> <event> <reason> <ms> <groups>`, five fields after the
+ *  colon, none with spaces. `started` when the run begins; then exactly one of `done` (whole, stored), `cut` (a budget cut
+ *  it again: the reason names which), `failed` (it threw: the reason is the message). A `started` with no end line is a
+ *  run the isolate didn't survive (`exceededMemory`, a CPU or wall kill). `ms`: since the start; `groups`: row groups the
+ *  run decoded (its trace's `group` calls). */
+export function upgradeLine(key: string, ev: 'started' | 'done' | 'cut' | 'failed', reason: string, ms: number, groups: number): string {
+  const tok = (x: string) => x.replace(/\s+/g, '_').slice(0, 160) || '-'
+  return `upgrade: ${tok(key.replace(/^https:\/\//, ''))} ${ev} ${tok(reason)} ${Math.round(ms)} ${groups}`
+}
+
 /** After serving a partial answer (budget-cut: the miss that produced it, or a partial hit), compute the full
  *  one in the background (`waitUntil`) with `compute` (the endpoint's build at `UPGRADE_PHASE2_MS`). A whole
  *  answer replaces the colo entry, at the normal TTL (and goes to KV, as any whole answer does); one cut
- *  short again leaves the partial as it is. `done` (tests) settles with the run. */
+ *  short again leaves the partial as it is. Every run logs its start and its end (`upgradeLine`); `compute` gets the
+ *  trace that counts its decoded groups. */
 export function upgradePartial(
   env: CacheEnv,
   key: Request,
-  compute: () => Promise<{ body: string; keep: Keep }>,
+  compute: (trace: Trace) => Promise<UpgradeRun>,
   waitUntil: ((p: Promise<unknown>) => void) | undefined,
   now = Date.now(),
 ): Upgrade {
@@ -205,13 +236,24 @@ export function upgradePartial(
     gaveUp.delete(k)
   }
   upgrading.add(k)
+  let groups = 0
+  const trace: Trace = name => { if (name === 'group') groups++ }
+  const t0 = performance.now()
+  const log = (ev: 'started' | 'done' | 'cut' | 'failed', reason: string) => upgradeLog.line(upgradeLine(k, ev, reason, performance.now() - t0, groups))
+  log('started', '-')
   waitUntil((async () => {
     try {
-      const { body, keep } = await compute()
-      if (keep === true) await cacheStore(env, key, body)
-      else gaveUp.set(k, now + PARTIAL_TTL * 1000)
-    } catch {
+      const { body, keep, cut } = await compute(trace)
+      if (keep === true) {
+        await cacheStore(env, key, body)
+        log('done', '-')
+      } else {
+        gaveUp.set(k, now + PARTIAL_TTL * 1000)
+        log('cut', cut ?? 'budget')
+      }
+    } catch (e) {
       gaveUp.set(k, now + PARTIAL_TTL * 1000)
+      log('failed', (e as Error)?.message ?? String(e))
     } finally {
       upgrading.delete(k)
     }
@@ -226,14 +268,19 @@ export const resetUpgrades = (): void => { upgrading.clear(); gaveUp.clear() }
 export const isPartial = (r: Response): boolean => r.headers.has('x-cache-partial')
 
 /** A `Trace` sink plus its `Server-Timing` rendering (`fetch;dur=812,…`;
- * counts ride as `dur` too — DevTools shows them the same way). */
-export function serverTiming(): { trace: (name: string, ms: number, desc?: string) => void; time: <T>(name: string, p: Promise<T>) => Promise<T>; header: () => string } {
+ * counts ride as `dur` too — DevTools shows them the same way). `mark(name)`: the
+ * time from the sink's creation (the request's start) to now, once — the first
+ * call sticks (`fixed`: the request's fixed phase, up to its first data read). */
+export function serverTiming(): { trace: (name: string, ms: number, desc?: string) => void; time: <T>(name: string, p: Promise<T>) => Promise<T>; mark: (name: string) => void; lap: (name: string) => void; header: () => string } {
   const t: Record<string, number> = {}
   // A phase's `desc`: the distinct labels its calls carried (the index sort
   // that answered a read — `bysize`, `path`, …), in first-seen order, so a
   // request that read both says `bysize+path`.
   const d: Record<string, string[]> = {}
   const t0 = performance.now()
+  // `lap`: the request's critical path as consecutive phases (`ph-<name>`, time since the previous lap), so they sum to
+  // `total` by construction, whatever overlapped; the header's `ph-rest` is what follows the last lap.
+  let last: number | null = null
   const trace = (name: string, ms: number, desc?: string) => {
     t[name] = (t[name] ?? 0) + ms
     if (desc && !(d[name] ??= []).includes(desc)) d[name].push(desc)
@@ -241,7 +288,16 @@ export function serverTiming(): { trace: (name: string, ms: number, desc?: strin
   return {
     trace,
     time: async (name, p) => { const s = performance.now(); try { return await p } finally { trace(name, performance.now() - s) } },
-    header: () => [...Object.entries(t), ['total', performance.now() - t0] as [string, number]]
-      .map(([k, v]) => `${k};dur=${Math.round(v)}${d[k] ? `;desc="${d[k].join('+')}"` : ''}`).join(', '),
+    mark: name => { if (!(name in t)) t[name] = performance.now() - t0 },
+    lap: name => {
+      const n = performance.now()
+      trace(`ph-${name}`, n - (last ?? t0))
+      last = n
+    },
+    header: () => {
+      const n = performance.now()
+      return [...Object.entries(t), ...(last == null ? [] : [['ph-rest', n - last] as [string, number]]), ['total', n - t0] as [string, number]]
+        .map(([k, v]) => `${k};dur=${Math.round(v)}${d[k] ? `;desc="${d[k].join('+')}"` : ''}`).join(', ')
+    },
   }
 }

@@ -112,6 +112,25 @@ export function withLedger(raw: Sqlite): void {
   raw.exec(LEDGER_DDL)
 }
 
+/** The admin list's table (`admin_emails`), for tests of the code that reads or writes it, on a branch whose schema
+ * doesn't carry it yet: created as `cloud`'s schema has it. */
+export function withAdminEmails(raw: Sqlite): void {
+  if (tables(raw).includes('admin_emails')) return
+  raw.exec('CREATE TABLE admin_emails (email TEXT PRIMARY KEY, note TEXT, who TEXT NOT NULL, ts INTEGER NOT NULL, github TEXT)')
+}
+
+/** "Run a scan"'s table (`scan_dispatch`, `_lib/scanDispatch.ts`), for its tests on a branch whose schema doesn't
+ * carry it yet: created as the recipe (`migrations/scan-dispatch.sql`) makes it. */
+export const SCAN_DISPATCH_DDL = `
+  CREATE TABLE scan_dispatch (id TEXT PRIMARY KEY, ts INTEGER NOT NULL, who TEXT NOT NULL, job TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('claimed', 'dispatched', 'failed')), execution TEXT, operation TEXT, error TEXT, updated_ts INTEGER NOT NULL);
+  CREATE INDEX scan_dispatch_ts ON scan_dispatch (ts);
+`
+export function withScanDispatch(raw: Sqlite): void {
+  if (tables(raw).includes('scan_dispatch')) return
+  raw.exec(SCAN_DISPATCH_DDL)
+}
+
 /** No ownership ledger, for tests of a deployment without one (cw's schema),
  * whichever branch's schema the database was built from. */
 export function withoutLedger(raw: Sqlite): void {

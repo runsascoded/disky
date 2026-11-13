@@ -28,6 +28,7 @@ export type FilterRejectCode =
   | 'anchor-not-indexed'
   | 'scan-dirs-only'
   | 'too-broad'
+  | 'diff-too-broad'
 
 export interface FilterReject { code: FilterRejectCode; message: string }
 
@@ -44,6 +45,7 @@ export const REJECT_MESSAGES: Record<FilterRejectCode, string> = {
   'anchor-too-short': 'An anchored term needs at least 3 characters before “$” (add the dot: “.gz$”) and 2 after “^”.',
   'anchor-not-indexed': 'Starts-with (^), ends-with ($) and “/” search isn’t indexed on this deployment yet; search for a plain substring instead.',
   'too-broad': 'These terms match too much here to combine exactly; open a folder, or make a term more specific.',
+  'diff-too-broad': 'This term matches too much here to compare two scans; open a folder, or make the term more specific.',
   'scan-dirs-only': 'One of these scans lists folders only (files aren’t searchable on it), so a search can’t be compared across the two; compare two scans that both list files.',
 }
 

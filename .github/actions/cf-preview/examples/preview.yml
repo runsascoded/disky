@@ -1,0 +1,150 @@
+# Copy into a caller only after policy/config review and pin ACTION_SHA below.
+# This example targets main. Disky's default-branch controller needs its own four-target routing wrapper.
+# Mode: `/preview <mode>` (this run), else a `preview:<mode>` label, else `full`: the PR's whole build (front end +
+# Functions) as the `pr-N` branch of the deployment's own Pages project, so it runs on that project's preview
+# environment (the dev stack's bindings and secrets) at https://pr-N.<project>.pages.dev. Only `full` is implemented;
+# `stack` and `pipeline` are refused at the gate. Approving a head runs its server code against the dev stack's data.
+name: PR preview
+on:
+  pull_request_target:
+    branches: [main]
+    types: [opened, reopened, synchronize, ready_for_review, labeled, unlabeled, closed]
+  issue_comment:
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      pr:
+        required: true
+        type: string
+      mode:
+        description: full | stack | pipeline; empty = the PR's preview:<mode> label, else full
+        required: false
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: cf-preview-${{ github.event.pull_request.number || github.event.issue.number || inputs.pr }}
+  cancel-in-progress: false
+jobs:
+  gate:
+    if: >-
+      github.event.action != 'closed' &&
+      (!contains(fromJSON('["labeled","unlabeled"]'), github.event.action) || startsWith(github.event.label.name, 'preview:')) &&
+      (github.event_name != 'issue_comment' || (github.event.issue.pull_request && startsWith(github.event.comment.body, '/preview')))
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.gate.outputs.sha }}
+      base_sha: ${{ steps.gate.outputs.base_sha }}
+      mode: ${{ steps.gate.outputs.mode }}
+      url: ${{ steps.gate.outputs.url }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha || github.sha }}
+          persist-credentials: false
+      - id: gate
+        uses: Open-Athena/disky/.github/actions/cf-preview@ACTION_SHA
+        with:
+          operation: gate
+          config: .github/cf-preview.json
+          github-token: ${{ github.token }}
+  build:
+    needs: gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.gate.outputs.sha }}
+          persist-credentials: false
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      # The PR's Functions are compiled here, into the artifact (`dist/_worker.js`), so the credentialed publisher never
+      # builds PR source, and the base checkout's `functions/` can't stand in for them. `VITE_BUILD_SHA` is what the
+      # publish probe reads back (`x-disky-build` on `/api/health`).
+      - name: Caller-specific frozen build and tests
+        working-directory: site
+        env:
+          PREVIEW_URL: ${{ needs.gate.outputs.url }}
+          VITE_BUILD_SHA: ${{ needs.gate.outputs.sha }}
+          CLOUDFLARE_ENV: preview
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build
+          pnpm exec wrangler pages functions build functions --outdir dist/_worker.js
+          pnpm test
+      - uses: actions/upload-artifact@v4
+        with:
+          name: preview-${{ needs.gate.outputs.sha }}
+          path: site/dist
+          include-hidden-files: true
+  publish:
+    needs: [gate, build]
+    runs-on: ubuntu-latest
+    environment: preview
+    permissions:
+      contents: read
+      deployments: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.gate.outputs.base_sha }}
+          persist-credentials: false
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      # The base checkout's `site/` is where the trusted Wrangler runs (the target's `working_directory`): its
+      # `wrangler.toml` `[env.preview]` is the deployment's preview environment, as on `dev`.
+      - name: Install trusted deployment tools
+        run: pnpm install --frozen-lockfile
+      - uses: actions/download-artifact@v4
+        with:
+          name: preview-${{ needs.gate.outputs.sha }}
+          path: ${{ runner.temp }}/preview-artifact
+      - id: preview
+        uses: Open-Athena/disky/.github/actions/cf-preview@ACTION_SHA
+        with:
+          operation: publish
+          config: .github/cf-preview.json
+          sha: ${{ needs.gate.outputs.sha }}
+          mode: ${{ needs.gate.outputs.mode }}
+          artifact: ${{ runner.temp }}/preview-artifact
+          github-token: ${{ github.token }}
+          account-id: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          deploy-token: ${{ secrets.CF_PREVIEW_DEPLOY_TOKEN }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: preview-receipt-${{ github.run_id }}
+          path: ${{ steps.preview.outputs.receipt }}
+          retention-days: 90
+  retire:
+    if: github.event.action == 'closed'
+    runs-on: ubuntu-latest
+    environment: preview
+    permissions:
+      contents: read
+      deployments: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          persist-credentials: false
+      - id: retire
+        uses: Open-Athena/disky/.github/actions/cf-preview@ACTION_SHA
+        with:
+          operation: retire
+          config: .github/cf-preview.json
+          github-token: ${{ github.token }}
+          account-id: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          deploy-token: ${{ secrets.CF_PREVIEW_DEPLOY_TOKEN }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: retire-receipt-${{ github.run_id }}
+          path: ${{ steps.retire.outputs.receipt }}
+          retention-days: 90

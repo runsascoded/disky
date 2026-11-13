@@ -34,11 +34,12 @@ import mimetypes
 import re
 import os
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 
 if TYPE_CHECKING:
 
@@ -293,7 +294,7 @@ def head_dest(s3: "S3Client", bucket: str, key: str) -> Dest | None:
         raise
 
 
-def copy_one(src_bucket: str, s3: "S3Client", bucket: str, obj: Obj) -> None:
+def copy_one(src_bucket: str, s3: "S3Client", bucket: str, obj: Obj, *, dest_key: str | None = None) -> None:
     """One object → R2, stamping its md5: streamed from GCS (no local spool), or uploaded from a local dir."""
     extra: dict[str, Any] = {"Metadata": {MD5_META: obj.md5} if obj.md5 else {}}
     if obj.content_type:
@@ -301,15 +302,44 @@ def copy_one(src_bucket: str, s3: "S3Client", bucket: str, obj: Obj) -> None:
     from boto3.s3.transfer import TransferConfig
 
     cfg = TransferConfig(max_concurrency=R2_PART_CONCURRENCY)
+    key = obj.key if dest_key is None else dest_key
     root = local_root(src_bucket)
     if root is not None:
-        s3.upload_file(str(root / obj.key), bucket, obj.key, ExtraArgs=extra, Config=cfg)
+        s3.upload_file(str(root / obj.key), bucket, key, ExtraArgs=extra, Config=cfg)
         return
     from google.cloud import storage
 
     blob = storage.Client().bucket(src_bucket).blob(obj.key)
     with blob.open("rb") as f:
-        s3.upload_fileobj(f, bucket, obj.key, ExtraArgs=extra, Config=cfg)
+        s3.upload_fileobj(f, bucket, key, ExtraArgs=extra, Config=cfg)
+
+
+#: Attempts at one object's copy (`copy_retrying`) R2 throttled past botocore's own retries, backing off `R2_RETRY_S · 2^n`
+#: (cw's level-5 compaction's copy, 2026-10-29, and its `2026-11-04T1802` scan's publish each died on one throttled part).
+R2_ATTEMPTS = 5
+R2_RETRY_S = 15.0
+#: The error codes R2 throttles with (`ServiceUnavailable: Reduce your concurrent request rate for the same object`).
+R2_THROTTLED = ("ServiceUnavailable", "SlowDown", "TooManyRequests")
+_R2_THROTTLED_RE = re.compile(r"\((?:" + "|".join(R2_THROTTLED) + r")\)")
+
+
+def r2_throttled(e: BaseException) -> bool:
+    """R2 throttled the request: botocore's `ClientError` (`(<code>)` in its message) or boto3's `S3UploadFailedError`
+    wrapping one (a multipart upload's failed part)."""
+    return bool(_R2_THROTTLED_RE.search(str(e)))
+
+
+def copy_retrying(src_bucket: str, s3: "S3Client", bucket: str, obj: Obj, *, log: Callable[[str], None] = err) -> None:
+    """`copy_one`, the whole object again when R2 throttles it (at most `R2_ATTEMPTS` times); any other failure raises."""
+    for n in range(R2_ATTEMPTS):
+        try:
+            copy_one(src_bucket, s3, bucket, obj)
+            return
+        except Exception as e:
+            if not r2_throttled(e) or n == R2_ATTEMPTS - 1:
+                raise
+            log(f"  ↻ {obj.key}: R2 throttled ({e}); again in {R2_RETRY_S * 2 ** n:.0f}s")
+            time.sleep(R2_RETRY_S * 2 ** n)
 
 
 def publish(
@@ -368,7 +398,7 @@ def publish(
         return report
 
     def do_copy(obj: Obj) -> Obj:
-        copy_one(src_bucket, s3, bucket, obj)
+        copy_retrying(src_bucket, s3, bucket, obj)
         err(f"  → {obj.key} ({obj.size:,} B)")
         return obj
 

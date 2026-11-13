@@ -1,6 +1,15 @@
 # Progressive diffs: one directory level per request, bounded by construction
 
-**Status:** step 1 (`churn_cum` / `churn_end` on the folded path versions: build, append, carries, compaction, `backfill-churn`) built 2026-11-01, branch `churn-cum`; step 2 (`/api/diff/level`, `_lib/diffLevel.ts`) built 2026-11-02, branch `diff-level`; step 2b (bounded level reads, §3b): exact only; 2b.1 page-level reads built and measured live (slower than the walk: round trips, not decode), held page indexes + one limiter done; next the dedicated `level` index (batched per depth, opt-in) and the fixed-overhead cuts, against Ryan's bar (first paint ≤ ½ the walk cold, full expansion ≤ the walk cold, nothing unbounded); the dyadic churn index for wide directories (2b.2); banded layouts rejected; on dev only. Step 3 (the client) waits on 2b. Shared (`[cloud]`). Replaces the lazy descent's planner and budgets (`specs/diff-from-changes.md` revision 3: `DESCENT_MAX_EXPANDABLE`, `DESCENT_BUDGET_MS`, `DESCENT_BUDGET_ROWS`, `HandOff`), which were tuned per deployment rather than derived.
+**Paused 2026-11-05 (Ryan):** the level work is an optimization, and the basic full map has to serve at acceptable latency first. Next is churn on the as-of walk (`dm=churn`, branch `w/diff-churn-walk`). What's on `cloud` stays: `build -l` and `backfill-level` are opt-in. Measured so far: churn levels without the index are slower than the walk; with it, the first level beat ½ the walk in 12 of 12 multi-level cases and full expansion matched the walk in 1 of 12. The index Ryan expects, a churn-descending dyadic sort read in one request like `bysize`, is 2b.2's shape and hasn't been built.
+
+**Left open by the pause (recorded, not fixed):**
+- **The leveled setup was never raced.** The combined race (`w/level-cut-race`) ran `cut -a` on `g3.c`, which cut no `level` sort and paged `path`, so its peak isn't that of a generation with `level` and an unpaged `path`. A follow-up `level` cut was cancelled in its sort. 4-vs-1-worker identity on that code and the `a/` duplicate key count weren't run either.
+- **`cut -s level` is refused on every generation,** with a misleading "names no owner": `_cut`'s check is `served_sorts(has_slices, True)`, which never passes `has_level`. On `cloud` too, from reading the code.
+- **`cut -a` skips `level` on a backfilled generation:** `_cut` calls `served_sorts(has_slices, attributed(doc))` without `has_level`, and `cut_gen` reads `leveled(scans)`, the `scans.json` flag, while `backfill-level` writes only `served/level.json`. On `cloud` too, from reading the code; not run there.
+- **Pages on `level` only (2026-11-05).** The cut pages the `level` sort alone now (`interval_store.served_page_rows`); every other sort, `path` included, is written with the published settings again: no page index, no `path` statistics, parquet's default pages. Files cut paged since 2b.1 read beside them (a reader decides per group) and go as carries and compactions rewrite them; no re-cut. In that race `bysize`, `slices`, `slices-bytotal`, `slices-bysize-user`, `reads` and `attribution`, written with published settings, are byte-identical to published `g3.c`, sidecars included. That doesn't cover `path`: the race paged it, so an unpaged `path` wasn't compared against published there, only on fixtures (`golden/generation-off.json` is back to its digests from before 2b.1, `path` included).
+- **Memory plan:** the race came in under budget, but no planned term matched its gauge at the peak. `Budget.cut` still has no footer term, and `group_meta` overcharges unpaged sorts 2–3×.
+
+**Status:** step 1 (`churn_cum` / `churn_end` on the folded path versions: build, append, carries, compaction, `backfill-churn`) built 2026-11-01, branch `churn-cum`; step 2 (`/api/diff/level`, `_lib/diffLevel.ts`) built 2026-11-02, branch `diff-level`; step 2b (bounded level reads, §3b): exact only; 2b.1 page-level reads built and measured live (slower than the walk: round trips, not decode), held page indexes + one limiter done; next the dedicated `level` index (batched per depth, opt-in) and the fixed-overhead cuts, against the bar below (first paint ≤ ½ the walk cold, full expansion ≤ the walk cold, nothing unbounded); the dyadic churn index for wide directories (2b.2); banded layouts rejected; on dev only. Step 3 (the client) waits on 2b. Shared (`[cloud]`). Replaces the lazy descent's planner and budgets (`specs/diff-from-changes.md` revision 3: `DESCENT_MAX_EXPANDABLE`, `DESCENT_BUDGET_MS`, `DESCENT_BUDGET_ROWS`, `HandOff`), which were tuned per deployment rather than derived.
 
 ## Goal
 
@@ -40,7 +49,7 @@ The fix is structural: **don't chain levels inside a request.** Let the client d
 
 ### 2. The client: progressive descent
 
-- On a diff view, request `level(P)` and draw it at once (one round of reads). Above it, the summary (`summary=1`, totals only) already lands first.
+- On a diff view, request `level(P)` and draw it at once (one round of reads). (The page no longer asks `summary=1`; the totals above it come with the pair's `depth=1` diff.)
 - Then request `level(child)` **in parallel** for each drawn child whose cell is big enough to show its children (cell area ≥ a minimum legible area), largest first, at most M requests in flight. Draw each into its cell as it arrives. Recurse until no cell is big enough.
 - The design has one knob per level: K (children drawn per directory) and the minimum cell area. Both are display choices, set from the canvas, not from data.
 - Time to first paint = one level request. Time to complete = depth × one level request, but every intermediate state is a correct, summing map (each unexpanded cell is drawn as a leaf at its own size).
@@ -132,15 +141,27 @@ So the cost is whole-group decode × the number of time segments the range overl
 
 **2b.1 measured live (cw, paged generation `c003h`, 2026-11-03): slower than the walk.** Cold level requests (median of 3) vs the walk: day 02a 853 vs 429 ms; day rno2a 648 vs 765; day 02a/marin/grug 2939 vs 497; week 02a 2013 vs 1117; week rno2a 2116 vs 926; week grug 2430 vs 575. Rows decoded were small (3K–23K, ~25× fewer than whole groups); the cost is round trips. Per-wave Server-Timing (`pjson` / `pindex` / `pdata`: ms, `-gets`, `-bytes`) on cw dev, cold grug: the page-index wave 59–62 GETs (~100 KB each) and the page-data wave 50–59 GETs (~230 KB), each ⌈gets / RUN_READS⌉ ≈ 9–11 rounds at ~100–250 ms a round; everything before the first data GET (auth, scan, generation, cache and footer lookups, plan) 150–280 ms. The GET count is set by the time segments a range overlaps (~50 a week), which page size doesn't change.
 
-**The bar (Ryan, 2026-11-03: first paint + robustness).** One batched level request per depth (all of that depth's dirs in one request), and, cold, on cw's and gcs's diff-check cases on dev, with the cost model predicting each case before it is measured: the first level ≤ ½ the walk's cold time for the same view; the full expansion ≤ the walk's cold time; no 413, no 1102, no case unbounded by construction. Cost model: a batch costs fixed (everything before the first data GET) + waves × ⌈Σ runs / RUN_READS⌉ round trips + rows · c_decode, runs = the separate byte regions its dirs' rows occupy; a full expansion is depth × that.
+**The bar (2026-11-03: first paint + robustness; root's proposal, which Ryan picked as an option. The ½ was in the option's wording, not a number he set).** One batched level request per depth (all of that depth's dirs in one request), and, cold, on cw's and gcs's diff-check cases on dev, with the cost model predicting each case before it is measured: the first level ≤ ½ the walk's cold time for the same view; the full expansion ≤ the walk's cold time; no 413, no 1102, no case unbounded by construction. Cost model: a batch costs fixed (everything before the first data GET) + waves × ⌈Σ runs / RUN_READS⌉ round trips + rows · c_decode, runs = the separate byte regions its dirs' rows occupy; a full expansion is depth × that.
 
 **Done: fewer waves, no barrier** (`[cloud] Paged range reads: page indexes held per isolate and colo, one GetRounds limiter, no barrier between waves`). The group metadata was already held by planning (0 GETs); page indexes are now held per isolate and in the colo cache beside it, so a request whose groups' indexes are held reads in 2 waves (plan → data, ⌈g / RUN_READS⌉ rounds for g groups); one `GetRounds` limiter caps every GET of a request; a group's pages are fetched as soon as its index arrives. Effect (cw's per-round cost): day cases (g ≈ 12–20) reach ~120–240 ms of rounds when held; week cases (g ≈ 50–77) stay ~540–780 ms, so under the seg-major layout weeks can't meet the bar.
+
+**Bound: a request's level reads charge one byte budget (2026-11-04).** Week-long batches died live as `exceededMemory` (an uncatchable 1102): 352K decoded rows passed, ~550K didn't, under the old per-read `LEVEL_MAX_ROWS` = 700K. A decoded row measures 264 B of V8 heap. `readLevel` now charges each read, before fetching, `rows × (264 + the group's compressed bytes a row)` against `LEVEL_BUDGET` (¾ of the isolate's 128 MiB), summed over the request's rounds, so it bounds decoding CPU too. What doesn't fit stays out of the answer: `more` (ask again) or `wide` (too wide alone); a request of one too-wide directory is a 413. Requests in an isolate share its memory, so charges also go on one module-level ledger (`chargeLevel`, released when the request has its answers, expiring in case a cancelled request never does): past it a read is `more`, not a crash. A read falling back to the `path` sort is charged too; a generation with no level sort reads as before.
 
 **Next: the level index (a dedicated index for this one query shape).** A served sort `level`, one row per child version transition, keyed `(parent depth, parent path, b, child)`: b = the transition's scan stamp (a version's `vf`; a `vt` no later version continues from is a deletion); columns: the child's size, objects and the response's class/owner columns, its previous size/objects, kind, `churn_cum`, and `churn_prev` (the child's `churn_cum` at its previous transition, so a range's churn = last `churn_cum` − first `churn_prev`, from in-range rows only). A batch (P₁…Pₖ, (D1, D2]) is, per file (the base + the runs the binary counter keeps, ≤ ⌊log₂ N⌋ + 1), one contiguous key range per Pᵢ by construction, merged into GET runs where adjacent: runs ≤ files touched × k, rows decoded = the Pᵢ's children's transitions in the range + ≤ 2 partial pages per (file, Pᵢ), i.e. O(changes), independent of history length and of segments. Simulated on gcs's 804 level requests (gcs's run set: base + a 16-scan and an 8-scan run): files touched p50/max 1/2; rows decoded ≤ 550 / 1,039 / 1,333 / 275,791 (p50 / p90 / p99 / max; today's paged layout 2,304 / 11,478 / 13,568 / 286,422); 2 rounds per request (today 4–16). The max is the week-wide 274,767-change directory: O(changes), and 2b.2's case. Storage ≈ one row per path version + deletion (≈ the `pv` range files' rows), about one more served sort. Built behind an opt-in (`scans.json` `"level": true`, `interval-store backfill-level` additive beside the served sorts, no pointer move), carried by runs and compaction; `/api/diff/level` reads it when the generation has it, else the paged path; a fetch-count test pins rounds = 2 and runs = files touched (× dirs, merged where adjacent). Then benchmarked on dev against the bar before any deployment opts in. `churn_prev` also gives 2b.2's dyadic churn index its per-block deltas from the same rows.
 
 **Next: the fixed overhead.** The 150–280 ms before the first data GET is sequential today (path store → auth → scans → generations → cache match → footer docs → plan). The independent lookups start together with auth (nothing is returned before auth succeeds), the immutable/versioned ones are held per isolate under their existing keys and TTLs, and Server-Timing reports `fixed` (request start → first data GET). The walk and `/api/subtree` take the same lookups, so prod's existing views get it too; benchmarked on dev against today's code before it ships.
 
 **Rejected: banded and chunked layouts.** Re-ordering the served sorts key-major within B coarse time bands (or dyadic levels below K0 merged into 2^K0-scan chunks) cut the simulated rounds to the 2-wave floor today, but they are tuning knobs: B / K0 fit one deployment and one history length and drift out of tune as either changes (a single closed band's runs grow with history), so they were dropped for dedicated indexes, each fast for its one query shape by construction.
+
+**Step 2b.3: the level index (built 2026-11-03, branch `w/level-index`; not yet cut on any deployment).** A served sort `level` made for the level request, so a directory's range is one key range per file instead of one per time segment (`interval_level.py`).
+- **Rows.** One per child version *transition*, key `(depth, path, ts, name)`: the parent's depth and path, the transition's scan stamp, the child's name. A `pvl` piece opens one at its `vf` (appeared, or replaces the piece ending there), and a piece whose `vt` no later piece continues closes one there. Columns: `op` (0 appeared, 1 changed, 2 went away), `kind` / `kind_prev`, `size` / `n_files` (after; 0 for a closing), `size_prev` / `n_files_prev` (before; 0 when absent), `churn_cum` (after: the piece's, or the closed one's `churn_end`), `churn_prev` (at the previous transition: the replaced piece's `churn_cum`, or for an appearance `churn_cum − size`). A piece moving none of those (a `last_read`/`mtime` split) is no transition. A directory's own transitions (and every closing) are also written under the path itself, `name` '' (first at its stamp), so its own change rides in its range. A child whose last segment is empty (a path `a/`: an object so named, or the directory of a key `a//b`, which `path-index` keeps as listed) is named `/`, which no real name can be: a path is exactly its parent and name, so the key is unique, and `name` '' is only ever a path's own row. The reader maps `/` back (`levelChild`: `a/` under `a`, and under the root the `''` of depth 1 a key's leading `/` makes). 8K-row groups, 256-row pages, page index on `depth, path, ts`; the sidecar's `vf_*`/`vt_*` are the groups' `ts` bounds.
+- **Answer.** Per child, over its rows in `(D1, D2]`: values at D1 = the first's `*_prev` (absent if `op` 0), at D2 = the last's (absent if `op` 2), churn = last `churn_cum` − first `churn_prev`. Only in-range rows; no lookup outside. The root and a directory with no own row in the range read their totals as before (`readRootAgg`). A directory whose own rows show a file on some side falls back to the `path` read (exactness: a file's changes have no own rows).
+- **Files.** Each file holds the transitions at its own scans (the base's; a run's from its deltas: versions it opened, `op` 1, and its close records), so a request reads only the base and the runs holding a scan in `(D1, D2]`, with no cross-tier combine. Base + runs (merged or not) hold a fresh build's transitions exactly once (`test_interval_level.py`).
+- **Opt-in.** `interval-store build -l` (`"level": true` in `scans.json`), or `interval-store backfill-level -g GEN -o STORE` on a generation with churn: writes `served/level.{parquet,groups.parquet,json}` into it and into each listed run, nothing else (not `scans.json`, not `CURRENT.json`), byte-identical to a `-l` build's. A generation has the sort by its flag or its `served/level.json`; its appends (local and staged `publish`), carries and compactions (and `backfill-generation`'s fold) then cut it. Without the opt-in no served byte changes. The cut is `write_served`'s bounded parallel cut: segmented by the generation's key ranges over the parent key, and (its `(depth, path)` being its rows' parents') a `MERGE_KEYS` sort, so a segment spanning several runs is cut in key-range pieces over its full key `(depth, path, ts, name)`, sorted in parallel, under the same memory budget (`plan_cut`, charging its rows: `interval_level.rows_bound`, one aggregate over `pvl`'s `kind` and `vt`).
+- **Reader.** `openIvLevel`: every touched tier must have the sort, else `/api/diff/level` reads as before. `readLevel` plans all the batch's directories together: per file, the groups (sidecar) and pages (page index) meeting any directory's key range; then two waves over all files, page indexes then pages, each wave's byte spans merged into runs (`planRuns`) and every run on one `RUN_READS` limiter. Server-Timing `lv-index` / `lv-data` (`-gets`, `-rounds`, `-bytes`), `lv-groups`, `lv-pages`, `lv-rows`. `ph-*` (`api/diff/level.ts`'s doc): the critical path as consecutive phases summing to `total`, with a timer-tick clock sync after the read's CPU stretches. A group's page index is held (`levelPageIxs`): its thrift per isolate (`levelIxCache`, an LRU of its own, least recently used out past 8 MB, parsed per read), per colo (the same bytes), and shared while in flight (`lv-index-{held,colo,joined,miss}`), so a held group leaves the index wave. `interval-store level-sim` prices the waves offline over the real sort (its gets and bytes equal the live spans): widening `RUN_GAP` doesn't pay, a read's spans being tens of KiB apart within a segment and far beyond any budget between segments and key regions; the time is in the index wave (over half) and chain links (over a third). `level-sim -s` also prices the sort cut in small row groups with no page index (no index wave; the group's bounds in the sidecar) against held indexes, on gcs's 18 diff cases: warm or over a warm colo they tie (3% less predicted R2, and at 1,024 rows 30% more rows decoded); only in a colo that never read those groups do small groups win, by the index wave (cold first level 605 → 400 ms p50; full expansion ~35% less). For that: a 5× sidecar at 1,024 rows (16× at 256), whose own footer an isolate can't parse at 512 rows or under at 512-row footer groups (×8.3 in heap), and a wider footer group outgrows the footer LRU; up to 30× a request's groups. Dropped: the sort stays 8K rows with its page index.
+- **Cost model.** A batch (one request per depth, all of that depth's directories) costs its footers (isolate/colo cached) plus `2 × ⌈Σ_dirs Σ_files runs / RUN_READS⌉` round trips, runs ≤ files touched × dirs and fewer where directories' ranges sit within `RUN_GAP` (siblings do); decode = the kept pages' rows. A full client expansion is depth × that.
+- **Evidence (fixture `iv-churn/interval-store-level/`, 4-row groups, 2-row pages).** All 60 `(from, to, dir)` answers equal the files-only oracle via the index; batches equal singles; chains. Fetch count, 08-02 → 08-06 (base + 2 runs touched), for `b1` alone and for the batch `b1, b2, b1/x`: exactly 3 runs in the page-index wave then 3 in the page wave (one per file, the batch's ranges merged), 1 round each, no other data object read.
+- **Next.** Cut it on a dev generation (`backfill-level`), then `level_check.py` cold/warm against the bar above.
 
 **Step 2b.2: wide directories (dyadic churn index, exact).** A directory with ~10⁵–10⁶ changed children in the range is still unbounded under 2b.1 (its rows themselves are that many). For those only:
 - **Index.** Number the scan transitions `1..S`; a block at level `L` is `[b·2^L + 1, (b+1)·2^L]`. For every block at every level, and every directory `P`, one row `(L, b, P, child, churn, net)` per child of `P` with churn > 0 in the block (`churn` = Δ`churn_cum` across the block; `net` = Δsize; both additive over disjoint blocks), sorted `(L, b, depth(P), P, churn desc, child)`. A full segment tree (not the binary counter): an append writes level 0 plus each level whose block it completes; a compaction rewrites it (a fresh build's bytes); the backfill builds it from `churn_cum` at each scan boundary. ≤ E · (⌈log₂ S⌉ + 1) rows, E = changed paths summed over transitions. **Measure E and the real total on `.c` before building it.**
@@ -153,6 +174,27 @@ So the cost is whole-group decode × the number of time segments the range overl
 **Tests.** (i) 2b.1: over `fixtures/iv-churn` cut with small pages, every level response is byte-identical to step 2's, and the decoder's page counters show only rect pages decoded; (ii) the parallel cut's file is byte-identical to the serial cut's at the same page size; (iii) 2b.2: the dyadic decomposition and per-block sums equal per-transition churn sums for every child and range; every child with oracle churn ≥ τ is a cell, with exact values, and Σ cells + other = C; (iv) a 1M-child synthetic directory, all children changed across many scans, reads ≤ m runs and ≤ |X| + m index rows plus |X| point reads, whatever the range length; (v) a batch with one failing directory answers the others.
 
 **Before any comparison with prod:** `.c` stops at its backfill's scans; later dailies append to g3 only. Append them to `.c` (`interval-store add -g 2026-10-09b.g3.c -C none`, so `CURRENT.json` doesn't move), or let the next compaction carry churn.
+
+### 3c. Parked: Arrow IPC run spools (2026-11-05)
+
+`cut -a` at 4 sorts × 4 workers went past its budget because of the run spools' parsed parquet footers (`RunSpool.md`), which `Budget.cut` doesn't charge, while it overcharges writers' metadata; the two nearly cancelled. Spooling in IPC (lz4, no dictionaries) removes that term. Not landed: it changes disk use on jobs not in question, and the priority is serving latency. The real cut that needs it is its test.
+
+One `bysize` cut per format, same VM and plan, harness `scripts/ipc_bench.py` (on branch `w/ipc-spools-parked`, not `cloud`) patching the spool seams at runtime:
+
+| IPC vs parquet | |
+|---|---|
+| Footer memory, all runs held | ÷462 (43 B a batch against ~19.8 KB) |
+| Tree peak, pieces stage | ÷3.6 |
+| Sort (runs + pieces), wall | −28% |
+| Read per piece, p50 | −38% |
+| Run spools on disk | +15.5% |
+| Piece spools on disk | +26% |
+| Peak disk for the sort | +15% |
+| Served `bysize.parquet` and `.groups.parquet` | md5-identical |
+
+**Caveats.** One run per format, one sort, no repeat. IPC ran first, on pinned vCPUs, so the time saved may be partly less contention. No whole `cut -a` has run on IPC; its memory and disk there are modelled. `slices-bytotal`, `slices-bysize-user` and `level` weren't run.
+
+**For the real change.** IPC's footer has no row counts and batches aren't uniform, so counts must be kept (a sidecar, or passed in `pieces`). mmap is out: it inflates the PSS `TreeWatch` measures, and was slower. The piece threads shared one reader, which held over this run's rows but which pyarrow's docs don't promise; opening per span costs ~42% on read-only replay. `Budget.cut` needs its footer term either way, batches × bytes a batch.
 
 ### 4. What goes away
 
@@ -168,6 +210,80 @@ The lazy descent's planner, ms and row budgets, `HandOff`, `DESCENT_V`, and `DIF
 
 1. On gcs, cw, hf and r2: for each diff-check case, the level requests the progressive client would issue (count, depth), and each one's decoded groups and rows, computed offline from footers (`tiers plan`-style). That gives a projected first paint and full-map time per case, against the walk's measured wall and `cpuTime`.
 2. Churn rows' size per scan on gcs (the busiest), to confirm O(changes × depth) in practice.
+
+## Render test of the walk's lookup fix (2026-11-06)
+
+`dd6b0650`, `4bc60b3c`, `e7c3ba97`, `196896c5` (no lookups under a path a scan doesn't hold, the budget spent heaviest first) are on `cloud` and reverted on gcs and cw. This is what they buy on the map and what they cost. Old: gcs's build. With: the same plus the fix. Same requests, Δ mode, on preview deployments with prod's flags. 147 diffs (root and 6 buckets; 1, 7 and 14 days, across and away from a large delete; three canvases) for the bodies, 69 of which differ; the cold table's requests are a subset.
+
+**Decision.** The fix stays reverted until the walk is down. Lookup caps are out: they trade accuracy without getting back to old.
+
+### What the extra rows do
+
+The with body has 61,516 nodes old doesn't. 25% of them (15,623) are drawn in Δ mode (a cell ≥ 12 px², or a chain label), and those hold 62% of the real |Δ| measured against the with body's frontier. 14% of |Δ| sits in the drawn extras' own cells; the rest rolls up into cells above them.
+
+**Why most aren't drawn.** They are not unchanged rows let through by a size-vs-|Δ| mismatch: 3 of the 61,516 have |Δ| = 0 and 82% are `removed`. They go undrawn because of the treemap's nesting gate (`w > 90 && h > 44`, `packages/treemap/src/layout.ts`): 74% are under a cell too small to nest. They are real change the canvas has no room to show at that level.
+
+**On the map.** On the larger delete-spanning diffs (57 with over 500 rows), `(other)` goes from about 90% of |Δ| to 20–30%, and a median 33% of the map's area differs. Rows ×2.3, cells ×1.5. Old's totals aren't wrong: nearly every extra (61,510) hangs under a directory old also expands, so old holds that |Δ| in the right parent's `(other)`. What it loses is the names, and the map's shape.
+
+### Which way the baseline leans
+
+"Real |Δ|" is against a body that is itself cut: over the 69 differing diffs, 27 have `lookups_capped: true`, 30 are `truncated`, and `(other)` is 2–45% of the body's |Δ| (median 21%; 20–40% where the fix matters). So neither 62% nor the `(other)` shares are the truth. Which way each is wrong:
+
+- **Rows it does name aren't overstated.** A name the budget leaves unread is never drawn one-sided (it stays in `(other)` on both sides); a named row's two sizes are read, or known absent from a read that found no row. So the capped body's named |Δ| is exact.
+- **The total can only be low.** Refining a frontier row can only raise Σ|Δ| (|x + y| ≤ |x| + |y|), and it can't pass what `(other)` itself holds: pooled, the total is at most 1.20× the capped one (the median diff 1.09×).
+- **So 62% is a lower bound on what old leaves unnamed.** What old names is fixed, so the share it leaves unnamed only grows with the total, and against the capped total it is already (extras + `(other)`) / total: a median 88%. 62% counts only the part the capped body could name.
+- **62% as the extras' own share is not a bound.** If the total grew and nothing new were named, it would fall, to 52% pooled at the limit; if all of `(other)` were named it would reach 90%.
+- **Old's `(other)` (90%) is a lower bound too**, for the same reason. **With's (20–30%) is what that build leaves**, not a floor for the walk.
+
+Measured rather than bounded: the same requests with the budget lifted, so `lookups_capped` is false. One sample each.
+
+| Request | Lookups | Rows | `(other)` | Extras' share | Total vs capped |
+|---|---|---|---|---|---|
+| 1d root | 240 → 292 | 1,694 → 1,696 | 24.7% → 24.7% | 72.2% → 72.2% | ×1.000 |
+| 7d root | 240 → 544 | 1,844 → 1,945 | 30.4% → 29.7% | 63.6% → 64.4% | ×1.001 |
+| 14d root | 240 → 587 | 1,919 → 2,028 | 32.7% → 32.2% | 62.6% → 63.3% | ×1.003 |
+| 14d bucket | 240 → 871 | 1,392 → 2,107 | 16.7% → 12.8% | 73.6% → 77.7% | ×1.010 |
+
+So the lean is the expected way and small: the budget moves these shares by 0–4 points. The `(other)` left is not unread lookups. Every one of these bodies is still `truncated` (500 leaves), and a name under both scans' floors stays folded whatever the budget. Past the budget's reach the lean is unmeasured: no body here is free of truncation or floors, so the total could still be low by up to the bound above.
+
+### Rendering isn't the cost
+
+Body → cells is 7–15 ms. The cost is reads (colo-cold wall in seconds, row groups read, `walk` in ms; medians, n = 3, the with 14d and 7d roots over their 2 samples that weren't killed):
+
+| Request | Old wall | With wall | Old groups | With groups | Old walk | With walk |
+|---|---|---|---|---|---|---|
+| 14d root | 7.9 | 28.1 | 88 | 356 | 1,926 | 23,516 |
+| 7d root | 8.3 | 36.1 | 86 | 252 | 1,152 | 30,034 |
+| 1d root | 4.2 | 16.1 | 64 | 130 | 332 | 11,442 |
+| 14d bucket | 10.5 | 22.4 | 144 | 294 | 3,210 | 14,649 |
+| 1d bucket | 11.7 | 9.5 | 119 | 133 | 699 | 4,099 |
+| 14d, before the delete, root | 24.8 | 15.8 | 200 | 134 | 19,304 | 10,344 |
+
+`exceededCpu` over the cold samples: 2 of 19 with (both roots, a 503 at 32.5 s of CPU), 0 of 18 old. Over the three requests also sampled colo-warm (n = 4): old 1.5–2.8 s, with 3.4–15.1 s. Where nothing large was deleted the fix reads less than old: its lookups skip what a read has already found absent.
+
+### Levers
+
+Colo-cold wall in seconds / groups, n = 3–4, on three requests, and what each body does to the with body's map (the median share of map area that moves, rows kept):
+
+| Lever | 14d root | 1d root | 14d bucket | Area moved | Rows kept |
+|---|---|---|---|---|---|
+| Old | 7.9 / 88 | 4.2 / 64 | 10.5 / 144 | 33% | |
+| With | 28.1 / 356 | 16.1 / 130 | 22.4 / 294 | | |
+| With, at the map's real canvas | 23.0 / 318 | 13.3 / 97 | 30.1 / 279 | 4.7% | 68% |
+| With, no expansion below the nesting gate | 15.6 / 275 | 6.7 / 85 | 28.8 / 279 | 4.5% | 39% |
+| Both | 16.3 / 191 | 6.8 / 74 | 24.5 / 250 | 7.9% | 38% |
+| Lookup cap 120 | 28.2 / 314 | 12.2 / 113 | 20.4 / 253 | 4.9% | 95% |
+| Lookup cap 60 | 19.3 / 203 | 7.9 / 84 | 20.4 / 261 | 9.5% | 87% |
+
+None gets back to old. The gate was a probe's overlay, deciding from a lower bound on the diff's movement, not a candidate reviewed for correctness. Caps lose accuracy (a tenth of the map at 60) and still cost 2–4× old; lifting the budget entirely cost no more than 240 in the warm samples above (9.6–12.4 s against 11.7–12.9 s on the 14d root, few samples).
+
+**A lossless body cut.** Dropping what a walk can tell is below the nesting gate keeps about 40% of the rows (median 39.95%) and 42% of the bytes, with no change to the drawn map, over those 57 diffs. It needs a wire field: a closed directory has to carry its movement (`ma` / `mr`), since its added and removed bytes can no longer be read from rows under it. It is computed from the finished body, so it shrinks the response, not the walk.
+
+**The canvas.** The map is 1152×360 at 1280, 1536 and 1920 wide, 327×360 on a phone. The page asks for `w × 0.6w` (`site/src/App.tsx`), so a wider window reads more for the same map: at 1920, 1.39× the rows and 1.17× the cells of 1280. This affects every full map, with or without the fix.
+
+### Limits
+
+gcs only. Colo-cold samples: fresh response and decoded-group keys, with footers still in the colo; isolates not controlled. n = 3–4 per request and lever, medians with no significance test, and walls vary widely between samples of one request. Bodies are one sample each. The levers' body comparisons are 3 requests (6 for the real canvas). All on one snapshot of the store (2026-11-06), whose run count sets how much a read touches.
 
 ## Open questions
 

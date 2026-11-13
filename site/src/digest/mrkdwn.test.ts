@@ -22,4 +22,19 @@ describe('the OP markdown, tokenized', () => {
       { t: 'emoji', name: 'large_orange_circle', char: '🟠' }, { t: 'text', s: ' main 86.8% · ' }, { t: 'emoji', name: 'large_green_circle', char: '🟢' }, { t: 'text', s: ' z 4% · :tada:' },
     ])
   })
+  it("`runway-hue`'s marks: the workspace's :runway-1: … :runway-8:, by their circle colors", () => {
+    expect(tokenize('*Quotas:* :runway-8: main 86.8% · :runway-1: hot 99.5% · :runway-9: x')).toEqual([
+      { t: 'bold', s: 'Quotas:' }, { t: 'text', s: ' ' }, { t: 'hue', name: 'runway-8', shape: 'circle', n: 8, color: '#1e8e4a' }, { t: 'text', s: ' main 86.8% · ' },
+      { t: 'hue', name: 'runway-1', shape: 'circle', n: 1, color: '#e01e1e' }, { t: 'text', s: ' hot 99.5% · :runway-9: x' },
+    ])
+  })
+  it(':runway-<shape>-N: for each shape, by the same colors; another name or step stays text', () => {
+    expect(tokenize(':runway-square-1: :runway-diamond-3: :runway-triangle-5: :runway-star-8:').filter(k => k.t === 'hue')).toEqual([
+      { t: 'hue', name: 'runway-square-1', shape: 'square', n: 1, color: '#e01e1e' },
+      { t: 'hue', name: 'runway-diamond-3', shape: 'diamond', n: 3, color: '#f27c00' },
+      { t: 'hue', name: 'runway-triangle-5', shape: 'triangle', n: 5, color: '#ddc800' },
+      { t: 'hue', name: 'runway-star-8', shape: 'star', n: 8, color: '#1e8e4a' },
+    ])
+    expect(tokenize(':runway-hexagon-3: :runway-star-9: :runway-circle-1:')).toEqual([{ t: 'text', s: ':runway-hexagon-3: :runway-star-9: :runway-circle-1:' }])
+  })
 })

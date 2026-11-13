@@ -76,6 +76,18 @@ export function mark(key, { theme = 'dark', bleed = false, ring = null } = {}) {
   return svg(`<defs>${S3G}</defs><rect width="512" height="512" rx="${bleed ? 0 : 112}" fill="${T.ground}"/>${tilesSvg(64, 64, 384, 384, T.tiles, 14, 16)}${S.glyph()}${edge}`)
 }
 
+// The fleet bot's mark (`#disky-admin`): disky's teal tile with a status pulse, beside one tile per deployment, in each
+// store's color. Five tiles, not `LAYOUT`'s six: the fifth would be a deployment that doesn't exist.
+const FLEET_LAYOUT = [[0, 0, .58, .62], [.58, 0, .42, .36], [.58, .36, .42, .30], [.58, .66, .42, .34], [0, .62, .58, .38]]
+const FLEET_TILES = ['#14B8A6', '#FFD21E', '#4C5FF0', '#EA4335', '#F38020'] // disky, hf, cw, gcs, r2
+export const fleetMark = ({ bleed = false } = {}) => {
+  const x0 = 64, y0 = 64, side = 384, gap = 14
+  const tiles = FLEET_LAYOUT.map(([x, y, w, h], i) =>
+    `<rect x="${(x0 + x * side + gap / 2).toFixed(1)}" y="${(y0 + y * side + gap / 2).toFixed(1)}" width="${(w * side - gap).toFixed(1)}" height="${(h * side - gap).toFixed(1)}" rx="16" fill="${FLEET_TILES[i]}"/>`).join('')
+  const pulse = '<path d="M100 185 H136 L155 136 L180 232 L200 172 L212 185 H251" fill="none" stroke="#0D1117" stroke-width="17" stroke-linecap="round" stroke-linejoin="round"/>'
+  return svg(`<rect width="512" height="512" rx="${bleed ? 0 : 112}" fill="#0D1117"/>${tiles}${pulse}`)
+}
+
 // The fallback for a deployment with no mark: its label's first one or two characters on disky's dark square.
 export function labelMark(label) {
   const text = [...(label || 'd').trim()].slice(0, 2).join('')

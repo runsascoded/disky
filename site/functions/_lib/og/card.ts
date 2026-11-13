@@ -11,6 +11,9 @@
 import { squarify } from '@open-athena/treemap/squarify'
 import { parseColor } from '@open-athena/treemap/parseColor'
 import { unitTicks } from '../../../src/series.js'
+import { esc, fmtB, fmtSI } from '@disk-tree/pages-kit/og/text'
+
+export { esc, fmtB, fmtSI }
 
 export const CARD_W = 1200
 export const CARD_H = 630
@@ -71,31 +74,10 @@ export interface Grid {
   cells: [number, number, number][]
 }
 
-const BG = '#16181d'
-const INK = '#f4f4f5'
-const MUTED = '#9aa0aa'
+export const BG = '#16181d'
+export const INK = '#f4f4f5'
+export const MUTED = '#9aa0aa'
 const FONT = 'Inter'
-
-export function esc(s: string): string {
-  return s.replace(/[<>&"']/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;', "'": '&#39;' })[c]!)
-}
-
-/** Binary bytes, 3 significant figures: `51.1 TiB`. */
-export function fmtB(n: number): string {
-  return fmtUnits(n, 1024, ['B', 'KiB', 'MiB', 'GiB', 'TiB', 'PiB', 'EiB'])
-}
-
-/** `fmtB` in decimal units (`15.4 TB`): a store billed in TB, as Hugging Face's digest. */
-export function fmtSI(n: number): string {
-  return fmtUnits(n, 1000, ['B', 'KB', 'MB', 'GB', 'TB', 'PB', 'EB'])
-}
-
-function fmtUnits(n: number, base: number, u: string[]): string {
-  let i = 0
-  let v = n
-  while (v >= base && i < u.length - 1) { v /= base; i++ }
-  return i === 0 ? `${v} B` : `${v >= 100 ? v.toFixed(0) : v >= 10 ? v.toFixed(1) : v.toFixed(2)} ${u[i]}`
-}
 
 /** Clip `s` to roughly `px` of width at `size` px Inter (~0.55em per glyph). */
 export function clip(s: string, px: number, size: number): string {
@@ -122,9 +104,9 @@ export function svgColor(color: string): string {
   return a === 1 ? `rgb(${r},${g},${b})` : `rgba(${r},${g},${b},${a})`
 }
 
-const r1 = (n: number) => Math.round(n * 10) / 10
+export const r1 = (n: number) => Math.round(n * 10) / 10
 
-function text(x: number, y: number, s: string, size: number, opts: { fill?: string; weight?: number; anchor?: string } = {}): string {
+export function text(x: number, y: number, s: string, size: number, opts: { fill?: string; weight?: number; anchor?: string } = {}): string {
   return `<text x="${r1(x)}" y="${r1(y)}" font-family="${FONT}" font-size="${size}" font-weight="${opts.weight ?? 400}" fill="${opts.fill ?? INK}"${opts.anchor ? ` text-anchor="${opts.anchor}"` : ''}>${esc(s)}</text>`
 }
 
@@ -154,7 +136,7 @@ function gridSvg(g: Grid, full: boolean, x: number, y: number, w: number, h: num
 
 /** The single trace's colour: the page's `--s1` (dark theme). */
 export const SERIES_COLOR = '#3987e5'
-const GRID_LINE = '#2a2d35'
+export const GRID_LINE = '#2a2d35'
 
 /** Evenly spaced x ticks over `[x0, x1]`, `n` of them (the ends included). */
 const xTicks = (x0: number, x1: number, n: number): number[] => x1 > x0 ? Array.from({ length: n }, (_, i) => x0 + (x1 - x0) * i / (n - 1)) : [x0]

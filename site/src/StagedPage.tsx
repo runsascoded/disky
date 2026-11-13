@@ -14,12 +14,19 @@
 // logs, and the run controls the executor offers (`CAPS`); `?run=<id>` opens
 // one (the Slack thread links there). A gesture whose prefixes all went (absorbed by a later
 // ancestor, taken back) folds to one line.
-import { Fragment, type ReactNode, useEffect, useMemo, useState } from 'react'
+//
+// The view is the URL's (`stagedParams.ts`, `urlParams.ts`): the filter, sort and scan, which batches are open, each
+// table's page, the section in view. So a link, a reload and Back land on the same view. What a deletion acts on is
+// never there: the checked rows, the armed confirm and the bucket cut are set by hand, on the page, every time. The
+// scan (`?d=`) decides which rows can be checked and what the confirm totals, so a page sized at any scan but the
+// newest, which a run reads, dispatches nothing (`sizedAtOldScan`).
+import { Fragment, type ReactNode, useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { boolParam, stringParam, useUrlState } from 'use-prms'
 import { SiteNav } from './SiteNav'
 import { SiteKbd } from './SiteKbd'
 import { Tooltip } from './Tooltip'
+import { UndoTerms, useSoftDeleteNow, useSweepSettings } from './SweepSoftDelete'
 import { Treemap } from './Treemap'
 import { UserChip, canonId, shortName } from './UserChip'
 import { ownerShares } from './OwnerBar'
@@ -33,24 +40,32 @@ import { useCanStage, useIdent } from './auth'
 import { applyLedger } from './ledgerOverlay'
 import { useOwnerIndex, useOwners } from './owners'
 import { useRowSelection, useRowSelectionKeys } from './rowSelection'
-import { CAPS, useDispatch, useExecJobs, usePrefixHistory, useRunAction, useRunFiles, useStagedPlan, useUnstage } from './plans'
+import { CAPS, useDispatch, useExecJobs, usePrefixHistory, useRunAction, useRunFiles, useScanDeletions, useStagedPlan, useUnstage } from './plans'
 import { CleanupAgentStatus, useCleanupAgent } from './CleanupAgentStatus'
 import { dispatchFailure } from './dispatchStatus'
 import type { EmptiedBatch, StagedItem } from './plans'
-import { joinRuns, LIVE_STATES, runFilesRel, viewBuckets, viewLive, type ProgressFile } from './runs'
+import { addBatchDeletion } from './batchDeletion'
+import { itemsDigest, joinRuns, LIVE_STATES, reusableDryRun, runFilesRel, viewBuckets, viewLive, type ProgressFile } from './runs'
 import { PrefixRecovery } from './PrefixRecovery'
-import { prefixExecution } from './prefixExecution'
-import type { PrefixExecution } from './prefixExecution'
+import { liveTargetOf, prefixExecution } from './prefixExecution'
+import type { PrefixExecution, RunItems } from './prefixExecution'
 import { RunsSection } from './StagedRuns'
 import { idleLabel, idleness, idleSortKey, prefixBucket, readLogged, readThrough } from './readLens'
 import { type PrefixSortKey, type PrefixStat, relAgo, sortPrefixRows, usePrefixes } from './prefixes'
 import { batchCompletion, batchIsCollapsed, isCurrentlyStaged, stagedMapTree, stagedState, type StagedState } from './stagedCompletion'
 import { batchAnchor } from './runHistory'
 import { batchLeads, coalesceBatches, idRanges } from '../functions/_lib/batchGroups'
-import { useLocation, useNavigationType } from 'react-router-dom'
+import { useLocation, useNavigate, useNavigationType } from 'react-router-dom'
 import { useSectionSpy, type SectionMode } from 'use-prms/sections'
 import { machineFor } from '../functions/_lib/sweepMachines'
+import { useDocTitle } from './title'
 import { Loading, Skeleton } from './Busy'
+import { copyText } from './CopyName'
+import { Paginated, Pager, pageOfIndex, usePaged } from './Pager'
+import { pickedScan, pickedSlug, sizedAtOldScan, sizedScan, withoutDeleted } from './stagedScan'
+import { adoptSection, dropSection, EARLIER_KEY, foldAll, foldOverride, foldsParam, pagesParam, sectionOfHash, setFold, settledParam, settleFolds } from './stagedParams'
+import { decodeSection, encodeSection, SECTION_KEY } from './homeSections'
+import { useScrollSpyPref } from './prefs'
 
 const iso = (ts: number): string => new Date(ts * 1000).toISOString()
 const store = DEFAULT_STORE
@@ -61,11 +76,16 @@ const prefixToPath = (prefix: string): string => {
   return m ? m[1] : prefix
 }
 
+// The section in view lives in the query (`?v=batch-12`, `?v=runs`: `encodeSection`), as on the map: beside the rest of
+// the view, where a reload, a copied link and the server (a sign-in bounce, a link preview) all see it. A `#batch-12`
+// fragment is a link *to* a batch (its permalink, a Slack thread's, the staged card's): the page adopts it into the
+// param itself (`adoptSection`; the spy can't, as the sections aren't known until the batches load) and reveals the
+// batch. Module constants: `useSectionSpy` re-resolves its mode, and reads its sections, by these objects' identity.
+const SECTION_MODE: SectionMode = { kind: 'param', key: SECTION_KEY, encode: encodeSection, decode: decodeSection, adoptFragment: false }
+// Found in the document, so always in page order: live batches, the completed ones' page while their fold is open
+// (folded, they have no position to compare), then the runs.
+const SECTIONS = { selector: '.staged-batches > [data-section], .staged-settled[open] > [data-section], #runs[data-section]' }
 /** Rows per batch page; the flat (filtered or ungrouped) table pages longer. */
-// The batch in view stays in the fragment (`#batch-12`): its permalinks are plain `#` links, the linked batch opens
-// from the router's `hash`, and `?s=` is the table's sort. Its link preview is the page's (no per-batch card).
-// A module constant: `useSectionSpy` re-resolves its mode whenever this object's identity changes.
-const SECTION_MODE: SectionMode = { kind: 'fragment' }
 const PAGE = 20
 const FLAT_PAGE = 50
 
@@ -116,7 +136,7 @@ function SessionLink({ g }: { g: Group }) {
 
 /** An emptied gesture's fate, as one line: what absorbed it, what was taken
  * back, what was already covered. */
-function EmptiedLine({ e, batches }: { e: EmptiedBatch; batches: Map<number, { created_by: string; created_ts: number }> }) {
+function EmptiedLine({ e, batches, fmtBytes }: { e: EmptiedBatch; batches: Map<number, { created_by: string; created_ts: number }>; fmtBytes: (b: number) => string }) {
   const n = (k: number) => `${k} ${k === 1 ? 'prefix' : 'prefixes'}`
   const parts: ReactNode[] = e.absorbed.map(a => {
     const into = batches.get(a.into)
@@ -127,13 +147,48 @@ function EmptiedLine({ e, batches }: { e: EmptiedBatch; batches: Map<number, { c
     )
   })
   if (e.deleted) parts.push(<Tooltip key="d" content="The reviewed snapshot was processed successfully. Newer objects were left alone and require a separate staging review."><span>{n(e.deleted)} completed</span></Tooltip>)
+  if (e.deletion) parts.push(<Tooltip key="size" content={`Recorded processing totals from the real runs that completed ${e.deletion.prefixes} of ${e.deleted} prefixes. Generation-specific acknowledgements can include versions already gone, so these totals do not prove reclaimed storage. Earlier attempts and missing bands are excluded; later restores do not change these counts.`}>
+    <span>{e.deletion.prefixes < e.deleted && 'at least '}{fmtBytes(e.deletion.bytes)} · {fmtN(e.deletion.objects)} {e.deletion.objects === 1 ? 'object' : 'objects'} processed{e.deletion.prefixes < e.deleted && ' (partial history)'}</span>
+  </Tooltip>)
+  else if (e.deleted) parts.push(<span key="size">deletion size unavailable</span>)
   if (e.unstaged) parts.push(<span key="u">{n(e.unstaged)} unstaged</span>)
   if (e.covered) parts.push(<span key="c">{n(e.covered)} already covered by a staged ancestor</span>)
   if (!parts.length) parts.push(<span key="none">nothing new (already staged)</span>)
   return <span className="emptied-fate">{parts.map((p, i) => <Fragment key={i}>{i > 0 && ' · '}{p}</Fragment>)}</span>
 }
 
+/** The paths a real delete takes, every one reviewable: page through, or copy the whole list out. */
+const CONFIRM_SIZES = [50, 200, 500]
+function ConfirmList({ rows, fmtBytes }: { rows: Row[]; fmtBytes: (b: number) => string }) {
+  const [copied, setCopied] = useState(false)
+  const copy = () => void copyText(rows.map(r => r.prefix).join('\n')).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1200) })
+  return (
+    <Paginated rows={rows} sizes={CONFIRM_SIZES} label="Paths to be deleted">{page => <>
+      <div className="dispatch-confirm-head">
+        <span className="dim">To be deleted: {fmtN(rows.length)} {rows.length === 1 ? 'path' : 'paths'}</span>
+        <Tooltip content="Copy every path, one per line, to review elsewhere"><button type="button" onClick={copy}>{copied ? 'copied ✓' : 'copy all'}</button></Tooltip>
+      </div>
+      <ul className="dispatch-confirm-list" aria-label="To be deleted">
+        {page.map(r => <li key={r.prefix}><code>{r.prefix}</code>{r.stat && <span className="dim"> · {fmtBytes(r.stat.b)}</span>}</li>)}
+      </ul>
+    </>}</Paginated>
+  )
+}
+
+/** A run control (dry-run, real delete): offered, or shown unavailable with why (`off`: `sizedAtOldScan`), and then with
+ *  no handler at all. `aria-disabled`, not `disabled`, as `UndoControl`: a disabled button takes no pointer or focus
+ *  events, so its tip could never open; this one opens on hover and focus, and a tap pins it. */
+function RunButton({ off, className, disabled, onClick, children }: { off: string | null; className: string; disabled: boolean; onClick: () => void; children: ReactNode }) {
+  return off
+    ? <Tooltip pinnable content={off}><button type="button" className={className} aria-disabled="true">{children}</button></Tooltip>
+    : <button type="button" className={className} disabled={disabled} onClick={onClick}>{children}</button>
+}
+
+const SETTLED_SIZES = [20]
+const SCANS_POLL_MS = 60_000
+
 export function StagedPage() {
+  useDocTitle('Staged')
   const { fmtBytes, units, suffixB } = useUnits()
   const ident = useIdent()
   const admin = useIsAdmin()
@@ -172,28 +227,53 @@ export function StagedPage() {
     || views.some(v => viewLive(v) || v.ops.some(o => LIVE_STATES.has(o.state)) || (v.run && !v.run.finished_ts && !v.job))
   useEffect(() => setLive(anyLive), [anyLive])
   const history = usePrefixHistory(plan?.id ?? null, anyLive)
-  const progressTargets = views.filter(v => v.run?.mode === 'real' && v.run.plan_id === plan?.id && !v.run.finished_ts && (!v.job || viewLive(v)) && v.run.log_dir)
-    .flatMap(v => viewBuckets(v).map(bucket => ({ bucket, run: v.run!, rel: `${runFilesRel(v.run!.log_dir!)}progress/${bucket}.json` })))
+  const liveRuns = views.filter(v => v.run?.mode === 'real' && v.run.plan_id === plan?.id && !v.run.finished_ts && (!v.job || viewLive(v)) && v.run.log_dir)
+  // Each live run's pinned item set: a row is in a run by this, not by sharing its bucket.
+  const liveItemsQs = useRunFiles<RunItems>(liveRuns.map(v => `${runFilesRel(v.run!.log_dir!)}plan.json`), false)
+  const progressTargets = liveRuns.flatMap((v, i) => viewBuckets(v).map(bucket => ({ bucket, run: v.run!, items: liveItemsQs[i]?.data, rel: `${runFilesRel(v.run!.log_dir!)}progress/${bucket}.json` })))
   const progressQs = useRunFiles<ProgressFile>(progressTargets.map(t => t.rel), anyLive)
+  // What the buckets' soft delete is now: a recorded deletion on one that is off reads "undo unavailable".
+  const softDelete = useSoftDeleteNow(CAPS.softDelete)
   const rowExecution = (r: Row) => {
-    const bucket = prefixToPath(r.prefix).split('/')[0]
-    const ix = progressTargets.findIndex(t => t.bucket === bucket && t.run.started_ts >= r.added_ts)
+    const ix = liveTargetOf(r.prefix, r.added_ts, progressTargets)
     const progress = ix >= 0 ? progressQs[ix]?.data : null
-    return prefixExecution(r.prefix, history.data?.bands ?? [], progress ? { runId: progressTargets[ix].run.run_id, progress } : undefined, Date.now() / 1000)
+    return prefixExecution(r.prefix, history.data?.bands ?? [], progress ? { runId: progressTargets[ix].run.run_id, progress } : undefined, Date.now() / 1000, softDelete)
   }
 
   const runAction = useRunAction()
   const busy = unstage.isPending || dispatch.isPending || runAction.isPending
 
   // The scan everything on the page is sized at — and the one a dispatch reads.
-  const [scans, setScans] = useState<string[]>([])
-  const [date, setDate] = useState('')
-  useEffect(() => {
-    void fetch(`${store.base}/scans.json`, { credentials: 'include' }).then(r => r.json()).then((s: string[]) => { setScans(s); setDate(s[0] ?? '') }).catch(() => {})
-  }, [])
+  // A tab stays open across scans, and a dispatch reads the newest: the list refetches, and `date` follows it unless a scan was picked.
+  const scansQ = useQuery<string[]>({
+    queryKey: ['staged-scans', store.key],
+    queryFn: async () => {
+      const r = await fetch(`${store.base}/scans.json`, { credentials: 'include' })
+      if (!r.ok) throw new Error(`scans: ${r.status}`)
+      return await r.json() as string[]
+    },
+    refetchInterval: SCANS_POLL_MS,
+    refetchOnWindowFocus: true,
+    staleTime: SCANS_POLL_MS / 2,
+  })
+  const scans = useMemo(() => scansQ.data ?? [], [scansQ.data])
+  // A scan picked in the menu is in the URL (`?d=`, a history entry as on the map); the newest, which the page
+  // follows, is not.
+  const [dP, setD] = useUrlState('d', stringParam(), true)
+  const date = sizedScan(scans, pickedScan(dP, scans))
+  // the newest scan: each item is held to the one it was staged at (`as_of`), so the run lists from the newest and
+  // deletes only what that staging scan saw
+  const runScan = scans[0] ?? ''
+  // Sized at any other scan, the page dispatches nothing, dry or real: the rows that can be checked, the buckets, the
+  // machine, the confirm's total and the run row's expected size would all be read at a scan the run doesn't read, and
+  // a link can carry the pick. Why, as the run controls say it; null at the newest.
+  const noRun = sizedAtOldScan(date, runScan)
   const prefixes = useMemo(() => items.map(it => it.prefix), [items])
   const statsQ = usePrefixes(date, prefixes)
-  const stats = statsQ.data
+  // Less what a run on this scan has since deleted, as the Slack card counts it.
+  const deletionsQ = useScanDeletions(date, anyLive)
+  const stats = useMemo(() => statsQ.data && deletionsQ.data ? withoutDeleted(statsQ.data, deletionsQ.data.bands) : undefined, [statsQ.data, deletionsQ.data])
+  const sizing = statsQ.isLoading || deletionsQ.isLoading
   const metaQ = useQuery<Meta>({
     queryKey: ['meta', store.key, date],
     queryFn: () => fetch(`${store.base}/${date}/meta.json`).then(r => r.json() as Promise<Meta>),
@@ -211,7 +291,7 @@ export function StagedPage() {
     return (r: { prefix: string, stat?: PrefixStat }) => r.stat ? idleness(r.stat.a, r.stat.d, access, logged(prefixBucket(r.prefix))) : null
   }, [access])
   const ownerIdx = useOwnerIndex(useOwners(!!store.owners).data)
-  const error = unstage.error ?? runAction.error ?? staged.error ?? statsQ.error ?? history.error
+  const error = unstage.error ?? runAction.error ?? staged.error ?? statsQ.error ?? deletionsQ.error ?? history.error
 
   const rows: Row[] = useMemo(() => items.map(it => ({ ...it, name: it.prefix, to: `/${prefixToPath(it.prefix)}`, stat: stats?.[it.prefix] })), [items, stats])
   // The view lives in the URL, so a link carries it: `?q=hedy|grace&s=-b`
@@ -251,10 +331,10 @@ export function StagedPage() {
     for (const e of emptied) {
       const k = lead(e.id)
       if (byBatch.has(k)) continue
-      const g = gone.get(k) ?? { ...(batchById.get(k) ?? e), id: k, prefixes: [], staged: 0, covered: 0, absorbed: [], unstaged: 0, deleted: 0 }
+      const g = gone.get(k) ?? { ...(batchById.get(k) ?? e), id: k, prefixes: [], staged: 0, covered: 0, absorbed: [], unstaged: 0, deleted: 0, deletion: undefined }
       const absorbed = new Map(g.absorbed.map(a => [a.into, a.n]))
       for (const a of e.absorbed) if (lead(a.into) !== k) absorbed.set(lead(a.into), (absorbed.get(lead(a.into)) ?? 0) + a.n)
-      gone.set(k, { ...g, prefixes: [...new Set([...g.prefixes, ...(e.prefixes ?? [])])].sort(), staged: g.staged + e.staged, covered: g.covered + e.covered, unstaged: g.unstaged + e.unstaged, deleted: g.deleted + e.deleted, absorbed: [...absorbed].map(([into, n]) => ({ into, n })) })
+      gone.set(k, { ...g, prefixes: [...new Set([...g.prefixes, ...(e.prefixes ?? [])])].sort(), staged: g.staged + e.staged, covered: g.covered + e.covered, unstaged: g.unstaged + e.unstaged, deleted: g.deleted + e.deleted, deletion: addBatchDeletion(g.deletion, e.deletion), absorbed: [...absorbed].map(([into, n]) => ({ into, n })) })
     }
     const ids = (id: number | null) => id == null ? [] : membersOf.get(id) ?? [id]
     return [...[...byBatch.entries()]
@@ -270,30 +350,50 @@ export function StagedPage() {
   const completion = new Map(groups.map(g => [String(g.id ?? 'none'), batchCompletion(g.rows.map(r => outcomes.get(r.prefix)!.state))]))
   const activeRows = rows.filter(r => isCurrentlyStaged(outcomes.get(r.prefix)!.state))
   const activePrefixes = new Set(activeRows.map(r => r.prefix))
-  // Defaults follow completion, while explicit open/closed choices survive polling.
-  const [folds, setFolds] = useState<Record<string, boolean>>({})
-  const [pages, setPages] = useState<Record<string, number>>({})
+  // Which batches are open (`?x=`), each table's page (`?pg=`) and the completed batches' fold (`?done`) are the
+  // URL's. A batch's default follows its completion; a choice made here outlives polling, a reload and a shared link.
+  const [folds, setFolds] = useUrlState('x', foldsParam)
+  const [pages, setPages] = useUrlState('pg', pagesParam)
+  const [settledP, setSettledP] = useUrlState('done', settledParam)
+  const foldsKey = foldsParam.encode(folds)
   const location = useLocation()
+  const navigate = useNavigate()
   const navType = useNavigationType()
-  const { hash } = location
+  // A `#batch-12` link (a permalink, a Slack thread's): into `?v=batch-12`, with the batch to reveal once it has loaded.
+  const [reveal, setReveal] = useState<number | null>(null)
   useEffect(() => {
-    if (!/^#batch-\d+$/.test(hash)) return
-    setFlat(false)
-    setQ(undefined)
-    // Any member's permalink opens its session.
-    const key = String(lead(Number(hash.slice('#batch-'.length))))
-    setFolds(f => ({ ...f, [key]: false }))
-  }, [hash, batches.length, leadOf, setFlat, setQ]) // eslint-disable-line react-hooks/exhaustive-deps
-  const gkey = (g: Group) => String(g.id ?? 'none')
+    const to = sectionOfHash(location.hash)
+    if (!to) return
+    setReveal(to.batch)
+    // The address bar's query, not the router's: use-prms and the spy write it without the router seeing.
+    navigate({ pathname: location.pathname, search: adoptSection(window.location.search, to) }, { replace: true })
+  }, [location.hash]) // eslint-disable-line react-hooks/exhaustive-deps
+  const gkey = (g: Group) => String(g.id ?? EARLIER_KEY)
+  const isSettled = (g: Group) => !!g.emptied || completion.get(gkey(g))!.settled
   const defaultFoldKey = groups.map(g => `${gkey(g)}:${completion.get(gkey(g))!.settled}`).join(',')
-  const linked = (g: Group) => g.ids.some(id => hash === `#${batchAnchor(id)}`) || hash === `#${batchAnchor(g.id)}`
-  const collapsed = useMemo(() => new Set(groups.filter(g => batchIsCollapsed(!!g.emptied || completion.get(gkey(g))!.settled, folds[gkey(g)], linked(g), flat)).map(gkey)), [groups, defaultFoldKey, folds, hash, flat]) // eslint-disable-line react-hooks/exhaustive-deps
+  // Any member's permalink opens its session.
+  const linked = (g: Group) => reveal != null && (g.id === reveal || g.ids.includes(reveal))
+  const collapsed = useMemo(() => new Set(groups.filter(g => batchIsCollapsed(isSettled(g), foldOverride(folds, gkey(g)), linked(g), flat)).map(gkey)), [groups, defaultFoldKey, foldsKey, reveal, flat]) // eslint-disable-line react-hooks/exhaustive-deps
+  // A fold, written against the batches' defaults: a view that matches them all leaves the URL.
+  const writeFolds = (f: typeof folds) => setFolds(settleFolds(f, groups.map(g => [gkey(g), isSettled(g)])))
+  const fold = (g: Group, shut: boolean) => writeFolds(setFold(folds, gkey(g), shut, isSettled(g)))
   // Batches with nothing left staged (all deleted, empty at scan, or absorbed
   // by a later batch) fold into one <details> below the live ones.
   const settled = flat ? [] : groups.filter(g => g.emptied || !g.rows.some(r => activePrefixes.has(r.prefix)))
   const liveGroups = groups.filter(g => !settled.includes(g))
-  const [settledOpen, setSettledOpen] = useState(false)
-  useEffect(() => { if (settled.some(linked)) setSettledOpen(true) }, [hash, settled.length]) // eslint-disable-line react-hooks/exhaustive-deps
+  const settledOpen = settledP != null
+  const settledPaged = usePaged(settled, SETTLED_SIZES, [settledP ?? 0, setSettledP])
+  // The linked batch, shown: its fold opened (unless the link itself says otherwise) and, among the completed
+  // ones, their fold opened on its page. Once, when it has loaded; after that the view is the reader's.
+  useEffect(() => {
+    if (reveal == null || flat) return
+    const g = groups.find(linked)
+    if (!g) return
+    if (foldOverride(folds, gkey(g)) === undefined && isSettled(g)) fold(g, false)
+    const i = settled.indexOf(g)
+    if (i >= 0) setSettledP(pageOfIndex(i, settledPaged.size))
+    setReveal(null)
+  }, [reveal, groups, flat]) // eslint-disable-line react-hooks/exhaustive-deps
   const foldable = groups
   const pageSize = flat ? FLAT_PAGE : PAGE
   const pageOf = (g: Group) => Math.min(pages[gkey(g)] ?? 0, Math.max(0, Math.ceil(g.rows.length / pageSize) - 1))
@@ -312,10 +412,16 @@ export function StagedPage() {
   const [armed, setArmed] = useState(false)
   // a changed selection disarms: the confirm names exactly what goes
   useEffect(() => setArmed(false), [plan?.id, items.length, selected.join('\n')])
+  // The confirm names a total at a scan, and the run reads the newest: either moving disarms it.
+  useEffect(() => setArmed(false), [runScan, date])
+  // The armed confirm, shown: never at an older scan, the render before that disarm lands included.
+  const confirming = armed && !noRun
+  // What the armed confirm states, and what it sends: dispatch refuses a lower minimum than this.
+  const softDeleteMin = useSweepSettings(confirming && CAPS.softDelete)
 
   // A dispatch may be cut to some of the plan's buckets (`CAPS.bucketCut`):
   // unchecked buckets stay out of the run. The cut's prefixes are what its
-  // digest names, so a real run needs a dry run of the same cut.
+  // digest names, so a real run reuses only a dry run of the same cut.
   const [bucketsOff, setBucketsOff] = useState<ReadonlySet<string>>(new Set())
   const perBucket = useMemo(() => {
     const m = new Map<string, { n: number; b: number; o: number }>()
@@ -337,9 +443,17 @@ export function StagedPage() {
   const runRows = activeRows.filter(r => sel.selected.has(r.prefix) && onBuckets.includes(prefixToPath(r.prefix).split('/')[0]))
   const runItems = runRows.map(r => (r.kind === 'object' ? `=${r.prefix}` : r.prefix))
   const runTotal = runRows.reduce((t, r) => t + (r.stat?.b ?? 0), 0)
-  // the newest scan: each item is held to the one it was staged at (`as_of`), so the run lists from the newest and
-  // deletes only what that staging scan saw
-  const runScan = scans[0] ?? ''
+  // What the run's row says until its manifest does: display only, nothing a run deletes reads it.
+  const expected = stats ? { bytes: runTotal, objects: runRows.reduce((t, r) => t + (r.stat?.o ?? 0), 0) } : undefined
+  // Which path a real run takes (gcs): reuse a dry run of exactly these items at this scan, or a fresh manifest.
+  const digestQ = useQuery({
+    queryKey: ['items-digest', runItems],
+    queryFn: () => itemsDigest(runItems),
+    enabled: confirming && DEFAULT_STORE.executor === 'sweep' && runItems.length > 0,
+    staleTime: Infinity,
+    retry: false,
+  })
+  const reused = digestQ.data && plan ? reusableDryRun(runs, plan.id, digestQ.data, runScan) : null
   // The executor holds a bucket's manifest in memory: a bucket with tens of
   // millions of planned objects needs the big machine (gcs only).
   const machine = CAPS.bucketCut ? machineFor(Math.max(0, ...onBuckets.map(b => perBucket.get(b)!.o))) : undefined
@@ -348,7 +462,7 @@ export function StagedPage() {
   const activeShownRows = shownRows.filter(r => activePrefixes.has(r.prefix))
   const all = total(activeShownRows)
   const everything = total(activeRows)
-  const selRows = rows.filter(r => sel.selected.has(r.prefix))
+  const selRows = activeRows.filter(r => sel.selected.has(r.prefix))
   const selTotal = total(selRows)
 
   const overlay = (t: TreeNode) => (ownerIdx.count ? applyLedger(t, ownerIdx, store.scheme) : t)
@@ -363,13 +477,23 @@ export function StagedPage() {
     return t ? overlay(t) : null
   }, [selKey, stats, ownerIdx]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  const sizesNote = !date ? null : statsQ.isLoading ? 'sizing…' : stats ? null : 'sizes unavailable'
-  const loadingContents = items.length > 0 && (!date || statsQ.isLoading || history.isLoading || progressQs.some(query => query.isLoading))
-  // A batch permalink scrolls its session in, following it while the map and sizes land above it; scrolling
-  // names the session in view in the hash. A member batch's link lands on its session.
-  const sessionAnchors = useMemo(() => groups.filter(g => g.id != null && g.id > 0).map(g => batchAnchor(g.id)), [groups])
+  const sizesNote = !date ? null : sizing ? 'sizing…' : stats ? null : 'sizes unavailable'
+  const loadingContents = items.length > 0 && (!date || sizing || history.isLoading || progressQs.some(query => query.isLoading))
+  // A link to a section scrolls it in, following it while the map and sizes land above it; scrolling names the
+  // section in view in `?section=` (unless the reader turned the spy off). A member batch's link lands on its session.
   const memberAnchors = useMemo(() => Object.fromEntries([...leadOf].filter(([id, l]) => id !== l).map(([id, l]) => [batchAnchor(id), batchAnchor(l)])), [leadOf])
-  useSectionSpy({ sections: sessionAnchors, nav: { location, navType }, deps: [batches.length, loadingContents, stats], aliases: memberAnchors, mode: SECTION_MODE })
+  const [spy] = useScrollSpyPref()
+  useSectionSpy({ sections: SECTIONS, nav: { location, navType }, deps: [batches.length, loadingContents, stats, foldsKey, settledP], aliases: memberAnchors, mode: SECTION_MODE, write: spy === 'on' ? 'replace' : 'off' })
+  // Turned off: the section it last wrote leaves the URL (as on the map), so a copied link doesn't open at one no
+  // longer in view.
+  const spyWas = useRef(spy)
+  useEffect(() => {
+    const search = dropSection(window.location.search)
+    if (spyWas.current === 'on' && spy === 'off' && search !== window.location.search) navigate({ pathname: location.pathname, search }, { replace: true })
+    spyWas.current = spy
+  }, [spy]) // eslint-disable-line react-hooks/exhaustive-deps
+  // The page arrived at a section: a run the link also holds open is part of that view, not where to scroll.
+  const [arrived] = useState(() => !!sectionOfHash(window.location.hash) || new URLSearchParams(window.location.search).has(SECTION_KEY))
 
   const renderGroup = (g: Group) => {
     const k = gkey(g)
@@ -378,31 +502,33 @@ export function StagedPage() {
     const t = total(g.rows)
     const pg = pageOf(g)
     const np = Math.max(1, Math.ceil(g.rows.length / pageSize))
-    const setPg = (p: number) => setPages(ps => ({ ...ps, [k]: p }))
+    const setPg = (p: number) => setPages({ ...pages, [k]: p })
+    // A session the spy names and a link lands on: not the flat table, nor the items from before batches.
+    const section = g.id != null && g.id > 0 ? batchAnchor(g.id) : undefined
     const shown = g.rows.slice(pg * pageSize, (pg + 1) * pageSize)
     // Every page of the batch, open or folded.
     const batchKeys = g.rows.filter(r => activePrefixes.has(r.prefix)).map(r => r.prefix)
     if (g.emptied) return (
-      <section key={k} id={batchAnchor(g.id)} className={`stage-batch emptied${open ? '' : ' folded'}`}>
+      <section key={k} id={batchAnchor(g.id)} data-section={section} className={`stage-batch emptied${open ? '' : ' folded'}`}>
         <div className="batch-head">
           <button type="button" className="fold" aria-expanded={open} aria-label={open ? 'collapse completed batch' : 'expand completed batch'}
-            onClick={() => setFolds(f => ({ ...f, [k]: open }))}><Tri open={open} /></button>
+            onClick={() => fold(g, open)}><Tri open={open} /></button>
           <UserChip who={g.emptied.created_by} size={18} /> staged <Tooltip content={iso(g.emptied.created_ts)}><span>{relAgo(g.emptied.created_ts)}</span></Tooltip>
-          <span className="dim">· <EmptiedLine e={g.emptied} batches={batchById} /></span>
+          <span className="dim">· <EmptiedLine e={g.emptied} batches={batchById} fmtBytes={fmtBytes} /></span>
           <SessionLink g={g} />
           {g.emptied.note && <i className="memo">{g.emptied.note}</i>}
         </div>
-        {open && (g.emptied.prefixes.length ? <ul className="batch-prefix-history" aria-label="Originally staged prefixes">
-          {g.emptied.prefixes.map(prefix => <li key={prefix}><a href={`/${prefixToPath(prefix)}`}><code>{prefix}</code></a></li>)}
-        </ul> : <p className="dim">Original prefix list unavailable in this batch’s audit history.</p>)}
+        {open && (g.emptied.prefixes.length ? <Paginated rows={g.emptied.prefixes} label="Originally staged prefixes" held={[pages[k] ?? 0, setPg]}>{page => <ul className="batch-prefix-history" aria-label="Originally staged prefixes">
+          {page.map(prefix => <li key={prefix}><a href={`/${prefixToPath(prefix)}`}><code>{prefix}</code></a></li>)}
+        </ul>}</Paginated> : <p className="dim">Original prefix list unavailable in this batch’s audit history.</p>)}
       </section>
     )
     return (
-      <section key={k} id={batchAnchor(g.id)} className={`stage-batch${open ? '' : ' folded'}${status.settled && status.deleted > 0 ? ' completed' : ''}`}>
+      <section key={k} id={batchAnchor(g.id)} data-section={section} className={`stage-batch${open ? '' : ' folded'}${status.settled && status.deleted > 0 ? ' completed' : ''}`}>
         {g.id !== -1 && <div className="batch-head">
           {batchKeys.length > 0 && <KeysCheckbox sel={sel} keys={batchKeys} label={`select all ${batchKeys.length} in batch ${g.id ?? 'earlier'}`} />}
           <button type="button" className="fold" aria-expanded={open} aria-label={open ? 'collapse batch' : 'expand batch'}
-            onClick={() => setFolds(f => ({ ...f, [k]: open }))}><Tri open={open} /></button>
+            onClick={() => fold(g, open)}><Tri open={open} /></button>
           {(status.deleted > 0 || status.empty === g.rows.length) && <span className={`staged-status ${status.deleted > 0 ? 'deleted' : 'empty'}`}>{status.settled && status.deleted > 0 ? '✓ Deleted' : status.deleted > 0 ? `${status.deleted} deleted` : 'Empty at scan'}</span>}
           {g.batch
             ? <><UserChip who={g.batch.created_by} size={18} /> staged <Tooltip content={iso(g.batch.created_ts)}><span>{relAgo(g.batch.created_ts)}</span></Tooltip></>
@@ -420,7 +546,7 @@ export function StagedPage() {
               shareOf={all.b}
               userIdx={userIdx}
               ownerIdx={ownerIdx}
-              loading={statsQ.isLoading}
+              loading={sizing}
               extra={[...(thru ? [{
                 key: 'idle', label: 'idle', className: 'nb idle', sort: (r: Row) => idleSortKey(idleOf(r)),
                 cell: (r: Row) => (i => i == null ? <span className="dim">—</span>
@@ -469,7 +595,7 @@ export function StagedPage() {
       <p className="sub">
         Files are not deleted until an admin dispatches a deletion job. Stage prefixes
         from a directory’s table (the trash icon); a memo travels with each gesture.
-        {admin ? ` A dry run previews what would be deleted and is optional.${laptop ? ' A real run moves paths to the laptop’s Trash for 7 days.' : DEFAULT_STORE.executor === 'plan-sweep' ? ' A real deletion may be permanent; recovery is not guaranteed.' : ' A real run deletes recoverably.'}` : ' An admin reviews and dispatches from here.'}
+        {admin ? ` A dry run previews what would be deleted and is optional.${laptop ? ' A real run moves paths to the laptop’s Trash for 7 days.' : DEFAULT_STORE.executor === 'plan-sweep' ? ' A real deletion may be permanent; recovery is not guaranteed.' : ' A real run\'s undo terms are stated before you confirm it.'}` : ' An admin reviews and dispatches from here.'}
       </p>
       {error && <p className="staged-err" role="alert">{error.message}</p>}
       {plan?.note && <p className="plan-note">{plan.note}</p>}
@@ -485,8 +611,8 @@ export function StagedPage() {
               {activeRows.length === 0 ? 'Nothing is staged.' : <>{activeShownRows.length !== activeRows.length && <>{activeShownRows.length} of </>}{activeRows.length} staged {activeRows.length === 1 ? 'path' : 'paths'}</>}
               {stats && <> · {fmtBytes(everything.b)} · {fmtN(everything.o)} objects</>}
             </h2>
-            {activeRows.length > 0 && <label className="scan-pick">sized at scan <select value={date} onChange={e => setDate(e.target.value)} aria-label="scan">{scans.map(s => <option key={s}>{s}</option>)}</select>
-              {statsQ.isLoading ? <Loading label="Sizing prefixes…" /> : sizesNote && <span className="dim"> {sizesNote}</span>}
+            {activeRows.length > 0 && <label className="scan-pick">sized at scan <select value={date} onChange={e => setD(pickedSlug(e.target.value, scans))} aria-label="scan">{scans.map(s => <option key={s}>{s}</option>)}</select>
+              {sizing ? <Loading label="Sizing prefixes…" /> : sizesNote && <span className="dim"> {sizesNote}</span>}
               {all.gone > 0 && <Tooltip content="Staged prefixes with nothing under them at this scan (already deleted, or never there)."><span className="dim"> · {all.gone} empty</span></Tooltip>}
             </label>}
           </div>
@@ -497,21 +623,21 @@ export function StagedPage() {
             <section className="staged-map">
               <h3>{q.trim() ? <>staged, matching “{q.trim()}”</> : 'everything staged'}</h3>
               <div className="map-box">
-                <Treemap key={`all:${date}`} root={tree} mode="user" userIdx={userIdx} dateRange={null} scheme={store.scheme} />
+                <Treemap key={`all:${date}`} root={tree} stagedRings={false} mode="user" userIdx={userIdx} dateRange={null} scheme={store.scheme} />
               </div>
             </section>
             {selTree && (
               <section className="staged-map">
                 <h3>selected · {selected.length} · {fmtBytes(selTotal.b)}</h3>
                 <div className="map-box">
-                  <Treemap key={`sel:${date}:${selKey}`} root={selTree} mode="user" userIdx={userIdx} dateRange={null} scheme={store.scheme} />
+                  <Treemap key={`sel:${date}:${selKey}`} root={selTree} stagedRings={false} mode="user" userIdx={userIdx} dateRange={null} scheme={store.scheme} />
                 </div>
               </section>
             )}
           </div> : stats ? <section className="staged-no-map" aria-live="polite">
             <h3>{activeShownRows.length ? 'No sized rectangles to draw' : 'Nothing is staged.'}</h3>
             {activeShownRows.length > 0 && <p>{fmtN(all.o)} zero-byte objects at scan {date}.</p>}
-          </section> : statsQ.isLoading ? <Skeleton height={180} label="Sizing staged prefixes…" /> : activeRows.length > 0 ? <p className="dim">{sizesNote ?? 'No size data available.'}</p> : null}
+          </section> : sizing ? <Skeleton height={180} label="Sizing staged prefixes…" /> : activeRows.length > 0 ? <p className="dim">{sizesNote ?? 'No size data available.'}</p> : null}
 
           <div className="staged-filter">
             <input type="search" value={q} onChange={e => setQ(e.target.value || undefined)} placeholder={activeRows.length ? 'filter: hedy|grace, isoflop -nemotron, owner:will, staged-by:david' : 'filter batch history…'}
@@ -524,22 +650,23 @@ export function StagedPage() {
 
           <div className="staged-batches">
             <div className="staged-actions">
-              {activeShownRows.length > 0 && <label className="sel-all"><KeysCheckbox sel={sel} keys={shownPrefixes} label={q.trim() ? 'select all matching' : 'select all'} /> {sel.selected.size ? `${sel.selected.size} selected · ${fmtBytes(selTotal.b)}` : 'select'}</label>}
+              {activeShownRows.length > 0 && <label className="sel-all"><KeysCheckbox sel={sel} keys={shownPrefixes} label={q.trim() ? 'select all matching' : 'select all'} /> {selected.length ? `${selected.length} selected · ${fmtBytes(selTotal.b)}` : 'select'}</label>}
               {sel.selected.size > 0 && <button type="button" onClick={sel.clear}>deselect</button>}
               {removable.length > 0 && (
                 <button type="button" disabled={busy} onClick={() => unstage.mutate(removable, { onSuccess: () => sel.clear() })}>unstage {removable.length}</button>
               )}
               {!flat && <span className="fold-all">
-                <button type="button" disabled={foldable.every(g => !collapsed.has(gkey(g)))} onClick={() => { setSettledOpen(true); setFolds(Object.fromEntries(groups.map(g => [gkey(g), false]))) }} aria-label="expand all batches"><Tri open /> all</button>
-                <button type="button" disabled={foldable.every(g => collapsed.has(gkey(g)))} onClick={() => setFolds(Object.fromEntries(groups.map(g => [gkey(g), true])))} aria-label="collapse all batches"><Tri /> all</button>
+                <button type="button" disabled={foldable.every(g => !collapsed.has(gkey(g)))} onClick={() => { if (!settledOpen) setSettledP(0); writeFolds(foldAll(false)) }} aria-label="expand all batches"><Tri open /> all</button>
+                <button type="button" disabled={foldable.every(g => collapsed.has(gkey(g)))} onClick={() => writeFolds(foldAll(true))} aria-label="collapse all batches"><Tri /> all</button>
               </span>}
             </div>
 
             {liveGroups.map(renderGroup)}
             {settled.length > 0 && (
-              <details className="staged-settled" open={settledOpen} onToggle={e => setSettledOpen((e.target as HTMLDetailsElement).open)}>
+              <details className="staged-settled" open={settledOpen} onToggle={e => { const { open } = e.target as HTMLDetailsElement; if (open !== settledOpen) setSettledP(open ? 0 : null) }}>
                 <summary className="dim">{settled.length} completed or no longer staged {settled.length === 1 ? 'batch' : 'batches'}</summary>
-                {settled.map(renderGroup)}
+                {settledPaged.rows.map(renderGroup)}
+                <Pager paged={settledPaged} label="Completed batches" />
               </details>
             )}
           </div>
@@ -560,31 +687,37 @@ export function StagedPage() {
                       </label>
                     )
                   })}
-                  {cut && <p className="dim">Only the checked buckets are listed and swept; a real run needs a dry run of the same cut.</p>}
+                  {cut && <p className="dim">Only the checked buckets are read and swept.</p>}
                 </details>
               )}
               <div className="dispatch-btns">
-                <button type="button" className="dry" disabled={busy || agentOffline || !runScan || !runItems.length} onClick={() => dispatch.mutate({ mode: 'dry', date: runScan, items: runItems, buckets: cut, machine })}>
+                <RunButton off={noRun} className="dry" disabled={busy || agentOffline || !runScan || !runItems.length} onClick={() => dispatch.mutate({ mode: 'dry', date: runScan, sized: date, items: runItems, buckets: cut, machine, expected })}>
                   dry-run {runItems.length ? <>{runItems.length} selected</> : <>(check rows)</>}
-                </button>
-                {!armed
-                  ? <button type="button" className="danger" disabled={busy || agentOffline || !runScan || !runItems.length} onClick={() => setArmed(true)}>real delete{runItems.length ? <> {runItems.length} selected…</> : <> (check rows)</>}</button>
+                </RunButton>
+                {!confirming
+                  ? <RunButton off={noRun} className="danger" disabled={busy || agentOffline || !runScan || !runItems.length} onClick={() => setArmed(true)}>real delete{runItems.length ? <> {runItems.length} selected…</> : <> (check rows)</>}</RunButton>
                   : <>
-                      <button type="button" className="danger armed" disabled={busy || agentOffline} onClick={() => dispatch.mutate({ mode: 'real', date: runScan, items: runItems, buckets: cut, machine }, { onSuccess: () => setArmed(false) })}>
+                      <button type="button" className="danger armed" disabled={busy || agentOffline} onClick={() => dispatch.mutate({ mode: 'real', date: runScan, sized: date, items: runItems, buckets: cut, machine, shownMinSoftDeleteDays: softDeleteMin.data?.min_soft_delete_days, expected }, { onSuccess: () => setArmed(false) })}>
                         confirm REAL delete of {runItems.length} {runItems.length === 1 ? 'prefix' : 'prefixes'}{stats && <> · {fmtBytes(runTotal)}</>}
                       </button>
                       <button type="button" onClick={() => setArmed(false)}>cancel</button>
                     </>}
               </div>
-              {armed && (
-                <ul className="dispatch-confirm-list" aria-label="To be deleted">
-                  {runRows.map(r => <li key={r.prefix}><code>{r.prefix}</code>{r.stat && <span className="dim"> · {fmtBytes(r.stat.b)}</span>}</li>)}
-                </ul>
+              {confirming && DEFAULT_STORE.executor === 'sweep' && (
+                <p className="dispatch-path" role="note">
+                  {!digestQ.data
+                    ? digestQ.isError ? 'Could not work out whether a dry run will be reused (this page needs a secure context).' : 'Checking for a dry run of exactly this selection…'
+                    : reused
+                      ? <>Reuses dry run <code>{reused.run_id}</code> (this selection, scan <code>{runScan}</code>): deletes the generations it reviewed, and skips any directory it reported as drift.</>
+                      : <>No dry run of exactly this selection at scan <code>{runScan}</code>: deletes from a fresh manifest, with no dry run. A directory that gained new writes since the scan still has its older staged files deleted, and the new files survive; a dry run would report that directory as drift instead.</>}
+                </p>
               )}
+              {confirming && CAPS.softDelete && <UndoTerms min={softDeleteMin} buckets={[...new Set(runRows.map(r => prefixToPath(r.prefix).split('/')[0]))]} />}
+              {confirming && <ConfirmList rows={runRows} fmtBytes={fmtBytes} />}
               {dispatch.error && <p className="staged-err" role="alert">{dispatchFailure(dispatch.error)}</p>}
               {pendingJob && (
                 <p className="dispatch-pending">
-                  Request accepted · <code>{pendingJob}</code> · {(pendingState ?? 'submitted').toLowerCase()}. Completion has not been confirmed. Its run appears below {CAPS.startHint}.
+                  Request accepted · <code>{pendingJob}</code> · {(pendingState ?? 'submitted').toLowerCase()}{dispatch.variables?.expected && <> · expected {fmtBytes(dispatch.variables.expected.bytes)} · {fmtN(dispatch.variables.expected.objects)} objects</>}. Completion has not been confirmed. Its run appears below {CAPS.startHint}.
                 </p>
               )}
               <p className="dispatch-note dim">{laptop ? 'A real run moves the checked paths and their current contents to Trash on the laptop, retained for 7 days. Sizes are estimates from the scan; space is freed when Trash is emptied. A dry run previews sizes without moving files.' : <>A run acts on the checked rows only. Each is read at the scan it was staged at: objects written since are left alone (re-stage to include them), and anything rewritten since is skipped. A real run doesn't need a dry run first.{machine && <> Runs on <code>{machine}</code>.</>}</>}</p>
@@ -603,6 +736,7 @@ export function StagedPage() {
         act={a => runAction.mutate(a)}
         fmtBytes={b => fmtBytesPrecise(b, units, suffixB)}
         refreshing={staged.isFetching || jobs.isFetching}
+        placed={arrived}
       />
       <SiteKbd />
     </main>

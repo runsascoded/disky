@@ -328,6 +328,55 @@ def test_r2_agg_cli_reads_the_hours_the_state_names(tmp_path: Path, monkeypatch)
     ]
 
 
+def _state(*keys: str) -> bytes:
+    return json.dumps({"schema_version": 2, "buckets": {"b1": {"hours": {
+        f"2026-07-19T{i:02}": {"agg": key} for i, key in enumerate(keys)
+    }}}}).encode()
+
+
+def test_r2_state_inputs_follows_an_aggregate_superseded_under_the_read(tmp_path: Path):
+    """The collector publishes a state, then deletes what it superseded: a reader of the old state finds a key gone,
+    re-reads, and fetches only the replacement. The result is the newer state's aggregates, nothing of the old one's."""
+    from dt_cloud.cli import r2_state_inputs
+
+    archive = {"agg/h00-r1.json": b"h00", "agg/h01-r2.json": b"h01 new"}
+    states = [_state("agg/h00-r1.json", "agg/h01-r1.json"), _state("agg/h00-r1.json", "agg/h01-r2.json")]
+    reads = []
+
+    def read(path: str) -> bytes:
+        name = Path(path).name
+        reads.append(name)
+        if name == "state.json":
+            return states.pop(0)
+        key = f"agg/{name}"
+        if key not in archive:
+            raise FileNotFoundError(path)
+        return archive[key]
+
+    out = r2_state_inputs(str(tmp_path / "state.json"), dt.datetime(2026, 7, 20, tzinfo=dt.timezone.utc), tmp_path / "stage", read)
+    assert out == [str(tmp_path / "stage/agg/h00-r1.json"), str(tmp_path / "stage/agg/h01-r2.json")]
+    assert [Path(p).read_bytes() for p in out] == [b"h00", b"h01 new"]
+    assert sorted(reads) == ["h00-r1.json", "h01-r1.json", "h01-r2.json", "state.json", "state.json"]
+
+
+def test_r2_state_inputs_refuses_an_aggregate_that_stays_missing(tmp_path: Path):
+    """A key every state keeps naming is a broken archive, not a race: bounded re-reads, then the error."""
+    from dt_cloud.cli import R2_STATE_READS, r2_state_inputs
+
+    reads = []
+
+    def read(path: str) -> bytes:
+        reads.append(Path(path).name)
+        if path.endswith("state.json"):
+            return _state("agg/h00-r1.json")
+        raise FileNotFoundError(path)
+
+    with pytest.raises(FileNotFoundError) as e:
+        r2_state_inputs(str(tmp_path / "state.json"), dt.datetime(2026, 7, 20, tzinfo=dt.timezone.utc), tmp_path / "stage", read)
+    assert str(e.value) == f"r2-agg: 1 aggregate(s) {tmp_path}/state.json still names are missing after {R2_STATE_READS} reads (first: agg/h00-r1.json)"
+    assert reads == ["state.json", "h00-r1.json"] * R2_STATE_READS
+
+
 def test_r2_agg_cli_takes_the_state_or_inputs(tmp_path: Path):
     for args in ([], ["-s", str(tmp_path / "state.json"), str(tmp_path / "x.json")]):
         result = CliRunner().invoke(main, ["access", "r2-agg", "-d", "2026-07-20", "-o", str(tmp_path / "agg.parquet"), *args])
@@ -833,3 +882,59 @@ def test_generation_is_opt_in(tmp_path: Path, listing: str):
     assert sorted(_rows(bysize, ["path", "kind", "generation"]), key=str) == sorted(want, key=str)
     assert list(pd.read_parquet(off).columns) == STORE_COLS
     assert list(pd.read_parquet(off.with_name("path-index-bysize.parquet")).columns) == [*STORE_COLS, "tot"]
+
+
+@pytest.mark.parametrize('native', [False, True], ids=['opaque-etags', 'exact-gcs-generations'])
+def test_object_versions_reach_both_path_index_sorts(tmp_path: Path, listing: str, native: bool):
+    """Opt-in string identities survive direct indexing; unknown tokens and directory tokens stay NULL."""
+    df = pd.read_parquet(listing)
+    tokens = ['9007199254740993', '9007199254740995', None, '9007199254740997'] if native else ['"a-multipart-2"', '"b"', None, '"c"']
+    if native:
+        df['generation'] = pd.Series([9007199254740993, 9007199254740995, None, 9007199254740997], dtype='Int64')
+    else:
+        df['version'] = tokens
+    source = tmp_path / 'version-listing.parquet'
+    df.to_parquet(source)
+    path = tmp_path / 'version/path-index.parquet'
+    result = CliRunner().invoke(main, ['path-index', '-V', '-U', '-d', '2026-07-20', '-l', str(source),
+                                      '-o', str(tmp_path / 'snap'), '-P', str(path)], catch_exceptions=False)
+    assert result.exit_code == 0, result.output
+    want = [
+        ('b1', 'dir', None), ('b1/datasets', 'dir', None), ('b1/top.bin', 'file', tokens[3]), ('b1/users', 'dir', None),
+        ('b1/datasets/raw', 'dir', None), ('b1/users/rw', 'dir', None),
+        ('b1/datasets/raw/part0', 'file', tokens[2]), ('b1/users/rw/ckpt', 'dir', None),
+        ('b1/users/rw/ckpt/model.bin', 'file', tokens[0]), ('b1/users/rw/ckpt/opt.bin', 'file', tokens[1]),
+    ]
+    for filename, extra in [('path-index.parquet', []), ('path-index-bysize.parquet', ['tot'])]:
+        frame = pd.read_parquet(path.with_name(filename))
+        assert list(frame.columns) == [*STORE_COLS, 'version', *extra]
+        assert sorted(_rows(frame, ['path', 'kind', 'version'])) == sorted(want)
+
+
+def test_r2_read_checkpoint_preserves_index_and_observation_window(tmp_path: Path, listing: str, attribution: str) -> None:
+    """A hot key's old read cannot disappear from the observed window when its closed rows coalesce."""
+    from dt_cloud.r2_checkpoint import sync
+
+    archive = tmp_path / 'archive'
+    old = _r2_agg_file(archive, TS['d0702'], 'unsampled', [('users/rw/ckpt/x', 'GetObject', 2)])
+    recent = _r2_agg_file(archive, TS['d0703'], 'sampled', [('users/rw/ckpt/x', 'GetObject', 3)])
+    state = archive / 'state.json'
+    state.write_text(json.dumps({'schema_version': 2, 'account': 'a', 'buckets': {'b1': {
+        'frozen': {'2026-07-02T00': old, '2026-07-03T00': recent}, 'hours': {},
+    }}}))
+    summary, full = tmp_path / 'summary.parquet', tmp_path / 'full.parquet'
+    sync(str(state), str(tmp_path / 'closed.parquet'), dt.datetime(2026, 7, 20, tzinfo=dt.timezone.utc), summary, tmp_path / 'sync', verify=True)
+    result = CliRunner().invoke(main, ['access', 'r2-agg', '-d', '2026-07-20', '-o', str(full), '-s', str(state)])
+    assert result.exit_code == 0, result.exception
+    identities = tmp_path / 'identities.yaml'
+    identities.write_text(IDENTITIES_YAML)
+    answers = []
+    for label, source in [('full', full), ('summary', summary)]:
+        index = tmp_path / label / 'path-index.parquet'
+        meta = write_path_index((listing,), tmp_path / label, '2026-07-20', (attribution,), identities,
+                                access=(str(source),), path_index=index)
+        answers.append((meta['access'], _rows(pd.read_parquet(index), STORE_COLS)))
+    assert answers[0] == answers[1]
+    assert answers[0][0] == {'from': epoch_day(TS['d0702']), 'to': epoch_day(TS['d0703']), 'through': '2026-07-03T00:00Z', 'buckets': ['b1']}
+    with pytest.raises(ValueError, match='^read summary closes history before .*; use the historical scan.s interval store or original access inputs$'):
+        write_path_index((listing,), tmp_path / 'too-old', '2026-07-03', access=(str(summary),))

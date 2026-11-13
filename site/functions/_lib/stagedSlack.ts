@@ -7,14 +7,18 @@
  * `COALESCE_S` of their reply's last update edit that one reply in place. A ✅
  * on the parent (or an emptied queue) moves the plan to a new thread on the
  * next event. Automatic posts name people in plain text, never by mention.
- * The pure parts (`renderParent`, `stageReply`, the event texts; the gate is
- * `plans.realGate`) are what the unit tests pin; the rest is Slack + D1 I/O,
+ * The pure parts (`renderParent`, `stageReply`, the event texts) are what the
+ * unit tests pin; the rest is Slack + D1 I/O,
  * best-effort — a Slack failure never fails the gesture that caused it.
  */
 import type { D1Database } from '@cloudflare/workers-types'
-import { type FinishedRun, type Gate, planDigest, planItemLines, planRuns, realGate, type RunRow, unstageDeleted } from './plans.js'
-import { slackApi, slackReady, type SlackEnv } from './slack.js'
+import type { RunOutcome } from '../../src/runs.js'
+import { type FinishedRun, openPlanId, planDigest, planItemLines, planRuns, type RunRow, scanDeletions, unstageDeleted } from './plans.js'
+import { withoutDeleted } from '../../src/stagedScan.js'
+import { slackApi, slackPeople, type SlackPerson, slackReady, type SlackEnv, type SlackResult } from './slack.js'
 import type { Env } from './auth.js'
+import { runHasNoUndo, runPromisedNothing, undoneText, type UndoUnavailable, undoUnavailableText } from '../../src/softDelete.js'
+import { runUndoNow } from './softDeleteNow.js'
 import { pathScans, storeReady } from './index.js'
 import { MAX_PREFIXES, type PrefixStat, prefixesAt } from './prefixes.js'
 import { expDay, IMAGE_TTL_DAYS, imagePath, ogKey } from './og/sign.js'
@@ -24,6 +28,7 @@ import { canonId, loadRegistry } from './identity.js'
 import type { Registry } from '../../src/identityRegistry.js'
 import { BATCH_GAP_S } from './batchGroups.js'
 import { Memo, reqOf } from './shared.js'
+import { lastRunOutcome } from './sweepOutcome.js'
 
 export type { RunRow }
 
@@ -35,6 +40,8 @@ export const fmtBytes = (n: number): string => {
   return `${i ? v.toFixed(1) : v} ${u[i]}`
 }
 const fmtN = (n: number): string => n.toLocaleString('en-US')
+/** A count at a glance: `33.9M`, exact below a million. */
+const fmtCount = (n: number): string => n < 1e6 ? fmtN(n) : n < 1e9 ? `${(n / 1e6).toFixed(1)}M` : `${(n / 1e9).toFixed(1)}B`
 const utc = (ts: number): string => new Date(ts * 1000).toISOString().slice(0, 16).replace('T', ' ') + 'Z'
 const plural = (n: number, one: string, many = `${one}s`): string => `${fmtN(n)} ${n === 1 ? one : many}`
 
@@ -50,7 +57,7 @@ export interface ParentView {
   stagers: string[]
   runs: RunRow[]
   digest: string
-  /** Offer the dispatch buttons (the deployment's executor is wired for Slack). */
+  /** Offer Dry-run and the link to delete (the deployment's executor is wired). */
   actions: boolean
   closed: boolean
   names?: Names
@@ -59,8 +66,18 @@ export interface ParentView {
   /** The plan's share card (a signed, full-tier `/og/staged.png` URL). */
   image?: string
   /** What is still queued: the items no real run has deleted (the title and
-   *  "staged by"; the gate and the confirm stay on the whole plan). */
+   *  "staged by"). */
   queued?: { items: number; batches: number; stagers: string[] }
+  /** Unix seconds: whether a real run is still undoable (default: now). */
+  now?: number
+  /** What the last real run's run dir says of its totals (`lastRunOutcome`); absent or null: nothing to add. */
+  lastOutcome?: RunOutcome | null
+  /** The last real run's recorded undo can't be done now: soft delete is off on a bucket it deleted from (`runUndoNow`). Absent
+   *  or null: not known off. */
+  undoUnavailable?: UndoUnavailable | null
+  /** Nothing says whether its buckets' soft delete is still on (no reading, or none of a bucket of it): the deadline is
+   *  stated as depending on it. Absent: every bucket of it is on as of the reading, or an executor that needs none. */
+  undoUnseen?: boolean
 }
 
 /** A staged set at one scan: totals and its largest owners (by display name). */
@@ -80,67 +97,103 @@ const who = (email: string, names?: Names): string => names?.[email.toLowerCase(
  *  absent from the lookup): `/staged`'s "Empty at scan". Not counted as staged. */
 export const emptyAt = (st: PrefixStat | undefined): boolean => !st || (!st.b && !st.o)
 
-/** `51.0 TiB · 179,327,698 objects at scan 2026-10-02 · owners: Grace Hopper 16.0 TiB, hedy 6.0 TiB`,
- *  and, on a line of its own, how many staged prefixes were empty at the scan. */
-export function sizeLine(z: Sized): string {
-  const owners = z.owners.length ? ` · owners: ${z.owners.map(o => `${o.label} ${fmtBytes(o.b)}`).join(', ')}` : ''
-  const empty = z.empty ? `\n+${plural(z.empty, 'staged prefix', 'staged prefixes')} empty at scan, not counted` : ''
-  return `*${fmtBytes(z.b)}* · ${fmtN(z.o)} objects at scan ${z.scan}${owners}${empty}`
+/** The queue's total, as the parent's first line states it: `4,886 prefixes · 51.0 TiB · 179.3M objects* at scan 2026-10-02`
+ *  (unsized: the prefixes alone). */
+export const totalLine = (items: number, z?: Sized): string => {
+  const prefixes = plural(items, 'prefix', 'prefixes')
+  return z ? `*${prefixes} · ${fmtBytes(z.b)} · ${fmtCount(z.o)} objects* at scan ${z.scan}` : `*${prefixes}*`
+}
+
+/** The lines under the total: the largest owners only when they hold most of it (a few names beside a mostly unowned
+ *  total say nothing), and how many staged prefixes were empty at the scan. */
+export function sizeNotes(z: Sized): string[] {
+  const named = z.owners.reduce((n, o) => n + o.b, 0)
+  return [
+    ...(z.owners.length && 2 * named >= z.b ? [`owners: ${z.owners.map(o => `${o.label} ${fmtBytes(o.b)}`).join(', ')}`] : []),
+    ...(z.empty ? [`+${plural(z.empty, 'staged prefix', 'staged prefixes')} empty at scan, not counted`] : []),
+  ]
+}
+
+/** The plan's newest real run. */
+const lastRealRun = (runs: readonly RunRow[]): RunRow | undefined => [...runs].filter(r => r.mode === 'real').sort((a, b) => b.started_ts - a.started_ts)[0]
+
+/** What a real run's event says of undo: that it was undone (nothing is left to qualify), or its window (or, `unavailable`, that
+ * soft delete is off now where it deleted; after a partial undo, the rest's), that it has none, or (no record either way) nothing. */
+const undoNote = (r: RunRow, unavailable?: UndoUnavailable | null): string => {
+  const undone = undoneText(r)
+  const since = undone ? `; since ${undone}` : ''
+  if (r.undo_state === 'full') return since
+  return since + (r.undo_deadline ? unavailable ? `; ${undoUnavailableText(unavailable)}` : `${since ? ', the rest' : ';'} undoable until ${utc(r.undo_deadline)} (www)`
+    : runPromisedNothing(r) && r.mode === 'real' ? '; no undo promised (no soft-delete minimum)'
+    : runHasNoUndo(r) ? '; no undo (soft delete off)' : '')
+}
+
+/** …and the parent's line for its last real run, inside the window it recorded (`deadline`). */
+const undoClause = (r: RunRow, deadline: number, v: Pick<ParentView, 'undoUnavailable' | 'undoUnseen'>): string => {
+  const undone = undoneText(r)
+  const since = undone ? `, since ${undone}` : ''
+  if (r.undo_state === 'full') return since
+  return since + (v.undoUnavailable ? `; ${undoUnavailableText(v.undoUnavailable)}`
+    : `${since ? '; the rest' : ','} undoable until ${utc(deadline)}${v.undoUnseen ? ' if the buckets\' soft delete is still on (this site can\'t see it)' : ''}`)
 }
 
 /** The thread's parent message: `{ text, blocks }` for chat.postMessage / chat.update. */
 export function renderParent(v: ParentView): { text: string; blocks: unknown[] } {
   const q = v.queued ?? { items: v.items, batches: v.batches, stagers: v.stagers }
-  const title = v.closed
-    ? `*Staged plan #${v.planId}* (closed)`
-    : `*Staged for deletion* · plan #${v.planId} · ${fmtN(q.items)} ${q.items === 1 ? 'prefix' : 'prefixes'} in ${q.batches} ${q.batches === 1 ? 'batch' : 'batches'}`
-  const by = (q.stagers.length ? `staged by ${q.stagers.map(e => who(e, v.names)).join(', ')}` : 'nothing staged')
-    + (v.size ? `\n${sizeLine(v.size)}` : '')
-  const gate = realGate(v.runs, v.digest, v.items)
+  const title = v.closed ? `*Staged plan #${v.planId}* (closed)` : `*Staged for deletion* · plan #${v.planId}`
+  const by = q.stagers.length ? `staged by ${q.stagers.map(e => who(e, v.names)).join(', ')}` : 'nothing staged'
+  const head = [`${title}: ${totalLine(q.items, v.size)}`, ...(v.size ? sizeNotes(v.size) : []), by]
+  const now = v.now ?? Math.floor(Date.now() / 1000)
+  // Only what bears on the current set: a dry-run of a set since changed, or a real run past its undo window, is history (the thread and www keep it).
   const latestDry = [...v.runs].filter(r => r.mode === 'dry').sort((a, b) => b.started_ts - a.started_ts)[0]
-  let dryLine: string
-  if (!latestDry) dryLine = 'No dry-run yet.'
-  else if (latestDry.finished_ts == null) dryLine = `Dry-run running (${who(latestDry.actor, v.names)}, scan ${latestDry.scan}).`
-  else if (latestDry.plan_digest === '') dryLine = `Latest dry-run (\`${latestDry.run_id}\`) ended without a result.`
-  else {
-    const res = `would delete *${fmtBytes(latestDry.deleted_bytes)}* / ${fmtN(latestDry.deleted_objects)} objects (scan ${latestDry.scan})`
-    dryLine = latestDry.plan_digest === v.digest
-      ? `Latest dry-run ${res} — matches the current plan.`
-      : `Latest dry-run ${res} — *stale*: the plan changed since.`
-  }
-  const lastReal = [...v.runs].filter(r => r.mode === 'real').sort((a, b) => b.started_ts - a.started_ts)[0]
-  const realLine = lastReal
-    ? lastReal.finished_ts == null
-      ? `\nReal run in progress (${who(lastReal.actor, v.names)}).`
-      : `\nLast real run deleted ${fmtBytes(lastReal.deleted_bytes)} / ${fmtN(lastReal.deleted_objects)} objects${lastReal.undo_deadline ? `, undoable until ${utc(lastReal.undo_deadline)}` : ''}.`
-    : ''
+  const dryLine = !latestDry ? null
+    : latestDry.finished_ts == null ? `Dry-run running (${who(latestDry.actor, v.names)}, scan ${latestDry.scan}).`
+    : latestDry.plan_digest === '' ? `Latest dry-run (\`${latestDry.run_id}\`) ended without a result.`
+    : latestDry.plan_digest === v.digest ? `Latest dry-run would delete *${fmtBytes(latestDry.deleted_bytes)}* / ${fmtN(latestDry.deleted_objects)} objects (scan ${latestDry.scan}) — matches the current plan.`
+    : null
+  const lastReal = lastRealRun(v.runs)
+  const realLine = !lastReal ? null
+    : lastReal.finished_ts == null ? `Real run in progress (${who(lastReal.actor, v.names)}).`
+    : lastReal.undo_deadline != null && lastReal.undo_deadline > now ? `Last real run ${v.lastOutcome?.unread ? 'recorded' : v.lastOutcome?.attempted ? 'attempted' : 'deleted'} ${v.lastOutcome?.totals === 'lower-bound' ? 'at least ' : ''}${fmtBytes(lastReal.deleted_bytes)} / ${fmtN(lastReal.deleted_objects)} objects${undoClause(lastReal, lastReal.undo_deadline, v)}.${skipsLine(v.lastOutcome ?? undefined)}`
+    : null
   const buttons: unknown[] = [
     { type: 'button', action_id: 'staged_open', text: { type: 'plain_text', text: 'Open in www' }, url: `${v.siteUrl}/staged` },
   ]
   if (v.actions && !v.closed && v.items) {
     buttons.push({ type: 'button', action_id: 'staged_dry', value: String(v.planId), text: { type: 'plain_text', text: 'Dry-run' } })
-    if (gate.ok) {
-      buttons.push({
-        type: 'button', action_id: 'staged_real', value: `${v.planId}:${v.digest}`, style: 'danger',
-        text: { type: 'plain_text', text: 'Delete for real…' },
-        confirm: {
-          title: { type: 'plain_text', text: 'Really delete?' },
-          text: { type: 'mrkdwn', text: `Deletes the ${fmtN(v.items)} staged ${v.items === 1 ? 'prefix' : 'prefixes'}: ${fmtBytes(gate.dry.deleted_bytes)} / ${fmtN(gate.dry.deleted_objects)} objects per the dry-run on scan ${gate.dry.scan}. Recoverable for 7 days (undo in www).` },
-          confirm: { type: 'plain_text', text: 'Delete' },
-          deny: { type: 'plain_text', text: 'Cancel' },
-          style: 'danger',
-        },
-      })
-    }
+    // A link: a real delete needs a site session, and no dry run (`plans.realRun`). Its own `action_id`: Slack refuses two alike in a block.
+    buttons.push({ type: 'button', action_id: 'staged_delete_link', text: { type: 'plain_text', text: 'Delete for real…' }, url: `${v.siteUrl}/staged` })
   }
-  const hint = v.actions && !v.closed && v.items && !gate.ok ? `\n_Delete for real_ appears after a finished dry-run of the current set (${gate.reason}).` : ''
+  const status = [dryLine, realLine].filter(Boolean).join('\n')
   const blocks = [
-    { type: 'section', text: { type: 'mrkdwn', text: `${title}\n${by}` } },
-    { type: 'section', text: { type: 'mrkdwn', text: `${dryLine}${realLine}${hint}` } },
+    { type: 'section', text: { type: 'mrkdwn', text: head.join('\n') } },
+    // Slack refuses a section with no text.
+    ...(status ? [{ type: 'section', text: { type: 'mrkdwn', text: status } }] : []),
     { type: 'actions', elements: buttons },
     ...(v.image && v.items ? [{ type: 'image', image_url: v.image, alt_text: `Plan #${v.planId}: the staged prefixes as a treemap, coloured by owner` }] : []),
   ]
   return { text: `Staged for deletion: plan #${v.planId}, ${plural(q.items, 'prefix', 'prefixes')}`, blocks }
+}
+
+type ParentMessage = ReturnType<typeof renderParent>
+
+/** Post (`ts` null) or update the parent, what it says landing even when its card can't: Slack fetches an image block's
+ *  URL during the call and refuses the whole message (`invalid_blocks`) when that fails or outlasts its wait, as a new
+ *  card's cold render over a large plan can. Then the text goes without the card, the card is rendered (its colo copy is
+ *  what Slack's next fetch reads), and the card is put back. */
+export async function sendParent(env: SlackEnv, channel: string, ts: string | null, parent: ParentMessage): Promise<SlackResult> {
+  const send = (at: string | null, m: ParentMessage): Promise<SlackResult> => at
+    ? slackApi(env, 'chat.update', { channel, ts: at, ...m })
+    : slackApi(env, 'chat.postMessage', { channel, ...m, ...PLAN_SENDER, unfurl_links: false })
+  const got = await send(ts, parent)
+  const image = (parent.blocks as { type: string; image_url?: string }[]).find(b => b.type === 'image')?.image_url
+  if (got.ok || got.error !== 'invalid_blocks' || !image) return got
+  const bare = await send(ts, { ...parent, blocks: (parent.blocks as { type: string }[]).filter(b => b.type !== 'image') })
+  const at = ts ?? bare.ts
+  if (!bare.ok || !at) return bare
+  const rendered = await fetch(image).then(r => r.arrayBuffer().then(() => r.ok)).catch(() => false)
+  if (rendered) await send(at, parent)
+  return bare
 }
 
 /** The old parent once its plan moved to a new thread (`link`: the new parent). */
@@ -297,16 +350,43 @@ export function stageReply(v: ReplyView): { text: string; blocks: unknown[] } {
  *  (the run id, or its Batch job's id before the executor records it). */
 export const runUrl = (siteUrl: string, runId: string): string => `${siteUrl}/staged?run=${encodeURIComponent(runId)}`
 
+/** What a run left alone, as its `/staged` row says it; empty when nothing was. */
+function skipsLine(o?: RunOutcome): string {
+  const preserved = o?.preserved ? ` Preserved since staging: *${fmtBytes(o.preserved.bytes)}* / ${fmtN(o.preserved.objects)} newer or changed objects.` : ''
+  if (!o?.skipped) return preserved
+  const notSwept = o.notSwept.length ? ` *Not swept:* ${o.notSwept.map(b => `\`${b}\``).join(', ')} (no object in them had a generation; their prefixes stay staged).` : ''
+  return `${preserved} Skipped, no generation: *${fmtBytes(o.skipped.bytes)}* / ${fmtN(o.skipped.objects)} objects left in place.${notSwept}`
+}
+
 /** A run's thread reply: the actor by name, the run id linking to its row on
  *  `/staged`. */
-export function runEvent(r: RunRow, phase: 'dispatched' | 'finished' | 'failed', o: { via?: string | null; names?: Names; siteUrl?: string } = {}): string {
+export function runEvent(r: RunRow, phase: 'dispatched' | 'finished' | 'failed', o: { via?: string | null; names?: Names; siteUrl?: string; reason?: string; outcome?: RunOutcome; expected?: { bytes: number; objects: number }; undoUnavailable?: UndoUnavailable | null } = {}): string {
   const kind = r.mode === 'dry' ? 'Dry-run' : '*Real deletion*'
   const id = o.siteUrl ? `<${runUrl(o.siteUrl, r.run_id)}|${r.run_id}>` : `\`${r.run_id}\``
-  if (phase === 'dispatched') return `${r.mode === 'dry' ? ':test_tube:' : ':rotating_light:'} ${kind} dispatched by ${who(r.actor, o.names)}${o.via ? ` via ${o.via}` : ''} on scan ${r.scan} (${id})`
+  if (phase === 'dispatched') return `${r.mode === 'dry' ? ':test_tube:' : ':rotating_light:'} ${kind} dispatched by ${who(r.actor, o.names)}${o.via ? ` via ${o.via}` : ''} on scan ${r.scan} (${id})${o.expected ? `: expected ${fmtBytes(o.expected.bytes)} / ${fmtN(o.expected.objects)} objects` : ''}`
+  if (phase === 'failed' && o.outcome?.totals) {
+    const verb = o.outcome.attempted ? 'attempted' : 'deleted'
+    const size = `*${fmtBytes(r.deleted_bytes)}* / ${fmtN(r.deleted_objects)} objects`
+    const until = undoNote(r, o.undoUnavailable)
+    const why = o.reason ? ` (\`${o.reason.replace(/`/g, "'").replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')}\`)` : ''
+    if (o.outcome.totals === 'exact') return `:warning: ${kind} ${id} ended unsuccessfully${why}: ${verb} ${size}${until}.${skipsLine(o.outcome)}`
+    const said = o.outcome.totals === 'lower-bound'
+      ? `: ${verb} at least ${size}, from its progress files, which can lag what it did`
+      : `, and what it wrote couldn't be read, so it may have deleted more than its recorded ${size}`
+    return `:warning: ${kind} ${id} ended before recording its end${why}${said}${until}.${runHasNoUndo(r) || (r.undo_deadline && o.undoUnavailable) ? '' : ' Undo restores only what its log names.'}`
+  }
+  if (phase === 'failed' && o.reason) return `:x: ${kind} ${id} ended without a result: \`${o.reason.replace(/`/g, "'").replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')}\``
   if (phase === 'failed') return `:x: ${kind} ${id} ended without a result (its Batch job stopped before the run summary); check its logs in www.`
-  if (r.mode === 'dry') return `:test_tube: Dry-run ${id} finished: would delete *${fmtBytes(r.deleted_bytes)}* / ${fmtN(r.deleted_objects)} objects (gone since scan: ${fmtN(r.skipped_gone)}, overwritten: ${fmtN(r.skipped_overwritten)}).`
-  return `:white_check_mark: Real deletion ${id} finished: deleted *${fmtBytes(r.deleted_bytes)}* / ${fmtN(r.deleted_objects)} objects${r.undo_deadline ? `; undoable until ${utc(r.undo_deadline)} (www)` : ''}.`
+  const skips = skipsLine(o.outcome)
+  if (r.mode === 'dry') return `:test_tube: Dry-run ${id} finished: would delete *${fmtBytes(r.deleted_bytes)}* / ${fmtN(r.deleted_objects)} objects (gone since scan: ${fmtN(r.skipped_gone)}, overwritten: ${fmtN(r.skipped_overwritten)}).${skips}`
+  if (o.outcome?.unread) return `:warning: Real deletion ${id} finished, totals unread: recorded *${fmtBytes(r.deleted_bytes)}* / ${fmtN(r.deleted_objects)} objects${undoNote(r, o.undoUnavailable)}.`
+  const undo = r.deleted_objects === 0 && r.deleted_bytes === 0 && o.outcome?.totals !== 'lower-bound' && o.outcome?.totals !== 'unread'
+    ? '; nothing to undo (no objects processed)' : undoNote(r, o.undoUnavailable)
+  return `${skips ? ':warning:' : ':white_check_mark:'} Real deletion ${id} finished: ${o.outcome?.attempted ? 'attempted' : 'deleted'} *${fmtBytes(r.deleted_bytes)}* / ${fmtN(r.deleted_objects)} objects${undo}.${skips}`
 }
+
+/** No claim that anything is deleted: an XML reply can't prove it, and a run with skips left objects under its prefixes. */
+export const QUEUE_EMPTIED = ':checkered_flag: Queue emptied: nothing staged here is left to delete (each prefix had a real run recorded, or was empty at the scan).'
 
 /** Was the queue empty before this stage? Every item other than the ones just
  *  staged (`fresh`) is either deleted by a real run (`deleted`) or holds no
@@ -321,7 +401,7 @@ export function queueWasEmpty(items: readonly string[], fresh: ReadonlySet<strin
 
 /** `GCP_SA_KEY` = the deployment can dispatch (either executor), so the
  * parent message offers the dispatch buttons. */
-export type NotifyEnv = SlackEnv & { GCP_SA_KEY?: string }
+export type NotifyEnv = SlackEnv & { GCP_SA_KEY?: string; EXECUTOR?: string }
 
 /** A stager's stages within this many seconds of their reply's last update
  *  edit that reply instead of posting a new one. */
@@ -362,30 +442,7 @@ export async function stagedImageVersion(env: Env, digest: string): Promise<stri
 export interface StageArgs { stage: { planId: number; batchId: number; by: string; prefixes: string[]; covered: number; note: string | null; siteUrl: string } }
 /** A run's reply, rendered here so it can carry its actor's name (and, for a
  *  dispatch, post as them). */
-export interface RunArgs { run: RunRow; phase: 'dispatched' | 'finished' | 'failed'; via?: string | null }
-
-/** A workspace member, as `users.lookupByEmail` returns them. */
-export interface SlackPerson { name: string | null; image: string | null }
-
-// email → member (or null: not in the workspace), per isolate; a lookup pending in another request is joined (`shared.ts`).
-const personMemo = new Memo<SlackPerson | null>('slack-person')
-
-/** Workspace members for `emails` (`users.lookupByEmail`; the bot has
- *  `users:read.email`). Unknown emails are left out. */
-export async function slackPeople(env: SlackEnv, emails: readonly string[]): Promise<Record<string, SlackPerson>> {
-  const out: Record<string, SlackPerson> = {}
-  await Promise.all([...new Set(emails.map(e => e.toLowerCase()))].map(async e => {
-    const v = await personMemo.get(e, () => (async () => {
-        if (!env.SLACK_BOT_TOKEN) return null
-        const r = await fetch(`https://slack.com/api/users.lookupByEmail?email=${encodeURIComponent(e)}`, { headers: { authorization: `Bearer ${env.SLACK_BOT_TOKEN}` } })
-        const j = (await r.json().catch(() => null)) as { ok?: boolean; user?: { id?: string; deleted?: boolean; real_name?: string; profile?: { real_name?: string; image_192?: string } } } | null
-        const u = j?.ok ? j.user : undefined
-        return u?.id && !u.deleted ? { name: u.profile?.real_name || u.real_name || null, image: u.profile?.image_192 ?? null } : null
-      })().catch(() => null), reqOf(env))
-    if (v) out[e] = v
-  }))
-  return out
-}
+export interface RunArgs { run: RunRow; phase: 'dispatched' | 'finished' | 'failed'; via?: string | null; reason?: string; outcome?: RunOutcome; expected?: { bytes: number; objects: number } }
 
 /** How automatic posts name `emails`: their Slack names where the workspace
  *  knows them (callers fall back to the local part). */
@@ -397,6 +454,8 @@ export async function slackNames(env: SlackEnv, emails: readonly string[]): Prom
 /** Who a message posts as (`username` / `icon_*`; honoured only with the
  *  `chat:write.customize` scope, ignored otherwise). The thread's parent is
  *  the plan itself; an event posts as the person who did it. */
+export { slackPeople, type SlackPerson }
+
 export interface Sender { username: string; icon_url?: string; icon_emoji?: string }
 /** `email` as the deployment's registry knows them (the site's own name and GitHub avatar), for someone the Slack
  *  workspace doesn't (a sign-in email outside it). */
@@ -417,7 +476,7 @@ export interface ScanStats { scan: string; stats: Record<string, PrefixStat> }
  *  row groups) and looked up `MAX_PREFIXES` at a time, as `/staged` chunks its
  *  `POST /api/prefixes`. Null when the index isn't readable here; a failed
  *  lookup throws (an unsized prefix is never counted as empty). */
-export async function stagedStats(env: Env, prefixes: readonly string[]): Promise<ScanStats | null> {
+export async function stagedStats(env: Env, prefixes: readonly string[], db: D1Database | null = null): Promise<ScanStats | null> {
   if (!prefixes.length || !storeReady(env)) return null
   const scans = (await pathScans(env, true)).results
   const scan = scans[scans.length - 1]?.date
@@ -425,7 +484,8 @@ export async function stagedStats(env: Env, prefixes: readonly string[]): Promis
   const sorted = [...new Set(prefixes)].sort()
   const stats: Record<string, PrefixStat> = {}
   for (let i = 0; i < sorted.length; i += MAX_PREFIXES) Object.assign(stats, (await prefixesAt(env, scan, sorted.slice(i, i + MAX_PREFIXES))).stats)
-  return { scan, stats }
+  // Given the plan's D1: a queue's sizes, less what's been deleted since this scan (an activity row's are the scan's own).
+  return { scan, stats: db ? withoutDeleted(stats, await scanDeletions(db, scan)) : stats }
 }
 
 /** `prefixes`' totals and top owners (by attributed bytes) from `at`. */
@@ -624,41 +684,53 @@ async function announceStage(env: SlackEnv, db: D1Database, o: { channel: string
   }
 }
 
+/** A cost bound on how many times one notify re-renders a thread, not something correctness rests on: a change it misses has its own notify, which sends later and checks again. */
+const SETTLE_ROUNDS = 3
+
 /** Re-render the plan's parent message (posting it first if the plan has
  * none) and, with `event`, reply in its thread. Before replying, a thread
  * whose parent carries a ✅ (or a stage into an emptied queue) moves the plan
  * to a new thread: a new parent, a pointer in the old thread, and the old
  * parent marked done. A thread in another channel than `SLACK_ADMIN_CHANNEL`
  * is left alone and a new one starts there. Best-effort; never throws. */
-export async function notifyPlan(env: NotifyEnv, db: D1Database, planId: number, siteUrl: string, ev?: Event | StageArgs | RunArgs, opts: { now?: number } = {}): Promise<void> {
+export async function notifyPlan(env: NotifyEnv, db: D1Database, planId: number, siteUrl: string, ev?: Event | StageArgs | RunArgs, opts: { now?: number; quiet?: boolean } = {}): Promise<void> {
   if (!slackReady(env)) return
   const now = opts.now ?? Math.floor(Date.now() / 1000)
   try {
     const v = await loadView(db, planId, siteUrl, !!env.GCP_SA_KEY)
     if (!v) return
     const full = env as NotifyEnv & Env
-    const queued = v.prefixes.filter(p => !v.deleted.has(p))
     const stage = ev && 'stage' in ev ? ev.stage : null
     const runEv = ev && 'run' in ev ? ev : null
     const said = ev && !('stage' in ev) && !('run' in ev) ? ev as Event : null
     const by = stage?.by ?? (runEv?.phase === 'dispatched' ? runEv.run.actor : said?.by?.email ?? null)
-    const [at, reg, people] = await Promise.all([
-      stagedStats(full, queued).catch(e => { console.log(`staged slack sizing failed for plan ${planId}: ${(e as Error).message}`); return null }),
-      loadRegistry(full).catch(() => ({}) as Awaited<ReturnType<typeof loadRegistry>>),
-      slackPeople(env, [...v.stagers, ...v.runs.map(r => r.actor), ...(by ? [by] : [])]),
-    ])
-    // The workspace's members first; anyone it doesn't know (a sign-in email outside it), as the site names them.
-    for (const e of [...v.stagers, ...v.runs.map(r => r.actor), ...(by ? [by] : [])]) {
-      const k = e.toLowerCase()
-      const r = people[k] ? undefined : registryPerson(reg, e)
-      if (r) people[k] = r
+    const render = async (v: NonNullable<Awaited<ReturnType<typeof loadView>>>) => {
+      const queued = v.prefixes.filter(p => !v.deleted.has(p))
+      const [at, reg, people] = await Promise.all([
+        stagedStats(full, queued, db).catch(e => { console.log(`staged slack sizing failed for plan ${planId}: ${(e as Error).message}`); return null }),
+        loadRegistry(full).catch(() => ({}) as Awaited<ReturnType<typeof loadRegistry>>),
+        slackPeople(env, [...v.stagers, ...v.runs.map(r => r.actor), ...(by ? [by] : [])]),
+      ])
+      // The workspace's members first; anyone it doesn't know (a sign-in email outside it), as the site names them.
+      for (const e of [...v.stagers, ...v.runs.map(r => r.actor), ...(by ? [by] : [])]) {
+        const k = e.toLowerCase()
+        const r = people[k] ? undefined : registryPerson(reg, e)
+        if (r) people[k] = r
+      }
+      const names: Names = Object.fromEntries(Object.entries(people).flatMap(([e, p]) => p.name ? [[e, p.name]] : []))
+      const size = at ? sizeOf(at, queued, u => reg[u]?.name ?? u) : undefined
+      // Sized, prefixes empty at the scan leave the title's counts (the size line names them apart).
+      const last = lastRealRun(v.runs)
+      const lastOutcome = last?.finished_ts ? await lastRunOutcome(full)?.(last) : null
+      const undo = last?.finished_ts ? await runUndoNow(full, db, last, now) : null
+      const parent = renderParent({ ...v, lastOutcome, undoUnavailable: undo?.unavailable, undoUnseen: !!undo?.unseen, now, queued: queuedOf(countedItems(v.live, v.deleted, at?.stats ?? null)), names, size, image: await stagedCardUrl(env, db, siteUrl, v.digest) ?? undefined })
+      return { at, people, names, parent }
     }
-    const names: Names = Object.fromEntries(Object.entries(people).flatMap(([e, p]) => p.name ? [[e, p.name]] : []))
-    const size = at ? sizeOf(at, queued, u => reg[u]?.name ?? u) : undefined
-    // Sized, prefixes empty at the scan leave the title's counts (the size line names them apart).
-    const parent = renderParent({ ...v, queued: queuedOf(countedItems(v.live, v.deleted, at?.stats ?? null)), names, size, image: await stagedCardUrl(env, db, siteUrl, v.digest) ?? undefined })
+    const { at, people, names, parent } = await render(v)
+    // A run's own end: what it measured stands, unless the reading already shows soft delete off where it deleted.
+    const runUndo = runEv && runEv.phase !== 'dispatched' && runEv.run.mode === 'real' ? await runUndoNow(full, db, runEv.run, now) : null
     const event: Event | undefined = runEv
-      ? { text: runEvent(runEv.run, runEv.phase, { via: runEv.via, names, siteUrl }), ...(by ? { sender: personSender(by, people[by.toLowerCase()], 'dispatched') } : {}) }
+      ? { text: runEvent(runEv.run, runEv.phase, { via: runEv.via, names, siteUrl, reason: runEv.reason, outcome: runEv.outcome, expected: runEv.expected, undoUnavailable: runUndo?.unavailable }), ...(by ? { sender: personSender(by, people[by.toLowerCase()], 'dispatched') } : {}) }
       : said ? { ...said, text: typeof said.text === 'function' ? said.text(who(said.by?.email ?? '', names)) : said.text, ...(said.by ? { sender: personSender(said.by.email, people[said.by.email.toLowerCase()], said.by.verb) } : {}) }
       : undefined
     const channel = env.SLACK_ADMIN_CHANNEL!
@@ -672,7 +744,7 @@ export async function notifyPlan(env: NotifyEnv, db: D1Database, planId: number,
     let ended = ''
     if (ts && ev) {
       const stats = at ? Object.fromEntries(Object.entries(at.stats).map(([p, s]) => [p, s.b])) : null
-      if (stage && queueWasEmpty(v.prefixes, new Set(stage.prefixes), v.deleted, stats)) ended = ':checkered_flag: Queue emptied: everything staged here is deleted (or was already empty).'
+      if (stage && queueWasEmpty(v.prefixes, new Set(stage.prefixes), v.deleted, stats)) ended = QUEUE_EMPTIED
       else if (await parentDone(env, channel, ts)) ended = ':white_check_mark: Marked done.'
       if (ended) {
         const d = await detach(db, planId, ts)
@@ -680,7 +752,7 @@ export async function notifyPlan(env: NotifyEnv, db: D1Database, planId: number,
       }
     }
     if (!ts) {
-      const p = await slackApi(env, 'chat.postMessage', { channel, ...parent, ...PLAN_SENDER, unfurl_links: false })
+      const p = await sendParent(env, channel, null, parent)
       if (!p.ok || !p.ts) return
       // Two concurrent first events would each post a parent: the claim is
       // the tiebreak, and the loser deletes its own.
@@ -691,10 +763,10 @@ export async function notifyPlan(env: NotifyEnv, db: D1Database, planId: number,
         const row = await db.prepare('SELECT slack_channel, slack_ts FROM plans WHERE id = ?').bind(planId).first<{ slack_channel: string; slack_ts: string }>()
         if (!row?.slack_ts || row.slack_channel !== channel) return
         ts = row.slack_ts
-        await slackApi(env, 'chat.update', { channel, ts, ...parent })
+        await sendParent(env, channel, ts, parent)
       }
     } else {
-      await slackApi(env, 'chat.update', { channel, ts, ...parent })
+      await sendParent(env, channel, ts, parent)
     }
     if (old) {
       const pl = await slackApi(env, 'chat.getPermalink', { channel, message_ts: ts })
@@ -713,8 +785,22 @@ export async function notifyPlan(env: NotifyEnv, db: D1Database, planId: number,
     }
     // Batches no reply shows (their own notify died) are announced now, by
     // whichever notify runs next, each in its stager's reply.
-    for (const s of await unshownStagers(db, planId, now)) {
+    if (!opts.quiet) for (const s of await unshownStagers(db, planId, now)) {
       await announceStage(env, db, { channel, thread: ts, stager: s, now, ctx, sender: personSender(s, people[s.toLowerCase()], 'staged') })
+    }
+    // Stages landing together have notifies that interleave, and whichever sends last wins whatever it rendered. So each
+    // checks after sending: if the queue has moved on it renders again, and the last sender can't leave a stale thread.
+    let shown = v.digest
+    for (let i = 0; i < SETTLE_ROUNDS; i++) {
+      const now2 = await loadView(db, planId, siteUrl, !!env.GCP_SA_KEY)
+      if (!now2 || now2.digest === shown || now2.slack_ts !== ts) break
+      shown = now2.digest
+      const again = await render(now2)
+      await sendParent(env, channel, ts, again.parent)
+      if (stage) await announceStage(env, db, {
+        channel, thread: ts, stager: stage.by, now, ctx: { planId, siteUrl, names: again.names, stats: again.at?.stats ?? null },
+        sender: personSender(stage.by, again.people[stage.by.toLowerCase()], 'staged'),
+      })
     }
   } catch (e) {
     console.log(`staged slack notify failed for plan ${planId}: ${(e as Error).message}`)
@@ -739,7 +825,7 @@ export async function updateReplies(env: NotifyEnv, db: D1Database, planId: numb
   const items = (await db.prepare('SELECT prefix, added_by FROM plan_items WHERE plan_id = ?').bind(planId).all<{ prefix: string; added_by: string }>()).results
   const batchBy = (await db.prepare('SELECT created_by FROM stage_batches WHERE plan_id = ?').bind(planId).all<{ created_by: string }>()).results.map(b => b.created_by)
   const [at, names] = await Promise.all([
-    stagedStats(env as NotifyEnv & Env, items.map(i => i.prefix)).catch(() => null),
+    stagedStats(env as NotifyEnv & Env, items.map(i => i.prefix), db).catch(() => null),
     slackNames(env, [...new Set(batchBy)]),
   ])
   const ctx: ReplyCtx = { planId, siteUrl, names, stats: at?.stats ?? null }
@@ -772,21 +858,27 @@ export async function refreshThread(env: NotifyEnv, db: D1Database, planId: numb
   return { ...out, ...await updateReplies(env, db, planId, siteUrl, { legacy: replies }) }
 }
 
+/** A new scan has landed, and only an event re-renders the card: the job's post-scan ping (`dt-cloud staged-card`) brings the
+ *  open plan's card up to it. An edit in place and nothing else: no card without a thread yet, none in another channel, no
+ *  reply for a batch a died notify left unshown. Says whether it edited. */
+export async function refreshStagedCard(env: NotifyEnv, db: D1Database, siteUrl: string): Promise<boolean> {
+  if (!slackReady(env)) return false
+  const id = await openPlanId(db)
+  if (id == null) return false
+  const plan = await db.prepare('SELECT slack_ts, slack_channel FROM plans WHERE id = ?').bind(id).first<{ slack_ts: string | null; slack_channel: string | null }>()
+  if (!plan?.slack_ts || plan.slack_channel !== env.SLACK_ADMIN_CHANNEL) return false
+  await notifyPlan(env, db, id, siteUrl, undefined, { quiet: true })
+  return true
+}
+
 /** Announce runs that just finished (an executor's reflection) in their
  * plans' threads: the totals, or that the run ended without a result. */
 export async function announceFinished(env: NotifyEnv, db: D1Database, runs: readonly FinishedRun[], siteUrl: string): Promise<void> {
-  for (const { run_id, ok } of runs) {
+  for (const { run_id, ok, reason, outcome } of runs) {
     const r = await db.prepare('SELECT * FROM deletion_runs WHERE run_id = ?').bind(run_id).first<RunRow & { plan_id: number | null }>()
     if (r?.plan_id == null) continue
     // What the run deleted leaves the queue before the thread re-renders.
     if (ok) await unstageDeleted(db, r.plan_id, [run_id])
-    await notifyPlan(env, db, r.plan_id, siteUrl, { run: r, phase: ok ? 'finished' : 'failed' })
+    await notifyPlan(env, db, r.plan_id, siteUrl, { run: r, phase: ok ? 'finished' : 'failed', reason, outcome })
   }
-}
-
-/** The plan's current real-deletion gate (fresh from D1), for `/slack/actions`. */
-export async function planGate(db: D1Database, planId: number): Promise<{ gate: Gate; digest: string; items: number; closed: boolean } | null> {
-  const v = await loadView(db, planId, '', false)
-  if (!v) return null
-  return { gate: realGate(v.runs, v.digest, v.items), digest: v.digest, items: v.items, closed: v.closed }
 }

@@ -7,9 +7,14 @@ several seconds; it was 20 s before the batched lookups). So the daily job,
 once the scan is servable, replays the requests the home page makes for its
 default views — the size-over-time series per path (width-independent; a new
 scan is a new cache key, so its first viewer otherwise pays the over-time
-reads), then one subtree + the diff span chips (1d/3d/7d/14d/30d, plus the
-plain previous-scan pair) each with its `summary=1` twin — at the canvas
-widths common laptops and phones produce. The cache keys include the pixel
+reads), then each path's subtree, one level deep (`depth=1`: the view's first
+paint, and all a page drilled below the path asks of it) and in full, + the
+diff span chips (1d/3d/7d/14d/30d, plus the plain previous-scan pair), each
+pair's first paint (`depth=1`) and its full walk — at the canvas widths common
+laptops and phones produce. The subtree and diff requests are the page-request
+model's (`diff_bench.requests_for`, the browser's mix), sent as the page sends
+them (`browser_url`): the same parameters (`cv`, `dm=delta`, `depth=1`), so
+the same cache keys. The cache keys include the pixel
 budget: the client snaps its window up to the nearest of these WIDTHS
 (`site/src/canvas.ts` `canvasWidth`; past the widest, the 128-px step) and
 sends `h = round(0.6 w)`, so every window up to 1920 px lands on a warmed key.
@@ -28,6 +33,8 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from http.client import HTTPException
 
+from .diff_bench import browser_url, requests_for, uri_component
+
 WIDTHS = (512, 1280, 1536, 1792, 1920)
 SPANS = (1, 3, 7, 14, 30)
 # Every request carries it: Cloudflare bans urllib's default User-Agent (error 1010, a 403)
@@ -35,6 +42,10 @@ UA = "gcs-usage-warm/1.0"
 #: Refetches after a transport error before a request fails: a body cut short of its Content-Length (the site's Worker
 #: cut off mid-response) or a dropped connection (cw's 10-23T1801 warm-up: 989/990, one `RemoteDisconnected`).
 TRANSPORT_RETRIES = 2
+#: Refetches after a 5xx, `SERVER_RETRY_S · 2^n` apart: a cold `/api/series?split=roots` under the warm-up's own
+#: concurrency answered 503 after 40–47 s on three of cw's scans (11-03, 11-04), and 200 in 8 s alone.
+SERVER_RETRIES = 2
+SERVER_RETRY_S = 15.0
 
 
 def env_paths() -> tuple[str, ...] | None:
@@ -88,14 +99,17 @@ def nearest_prior(dates: list[str], date: str, days: int) -> str | None:
 def series_url(path: str) -> str:
     """The size-over-time request `SizeOverTime.tsx` makes for an unscoped
     ``path``: the store root asks for one trace per root (`split=roots`)."""
-    return "/api/series?path=&split=roots" if path == "" else f"/api/series?path={path}"
+    return "/api/series?path=&split=roots" if path == "" else f"/api/series?path={uri_component(path)}"
 
 
 def plan(date: str, dates: list[str], paths: tuple[str, ...], widths: tuple[int, ...] = WIDTHS, spans: tuple[int, ...] = SPANS) -> list[str]:
     """The request paths (no host) to replay for ``date``, deduplicated: each
-    path's series first, then, in the order the page issues them, per width
-    the root's subtree and each diff pair's summary + full rows, then the same
-    for each bucket drill."""
+    path's series first, then, per width, the root's subtree (its one level:
+    the first paint, and what every drilled page asks of an ancestor,
+    `site/src/spine.ts`; then its full view) and each diff pair (its first
+    paint, `depth=1`, then its full walk), then the same for each bucket
+    drill: the page's own requests for those views (`requests_for`), as it
+    sends them. Not a pair's `summary=1` (its totals alone): no page asks it."""
     earlier = [d for d in dates if d < date]
     pairs: list[str] = []
     if earlier:
@@ -108,11 +122,8 @@ def plan(date: str, dates: list[str], paths: tuple[str, ...], widths: tuple[int,
     for w in widths:
         h = round(w * 0.6)
         for path in paths:
-            out.append(f"/api/subtree?date={date}&path={path}&w={w}&h={h}")
-            for p in pairs:
-                base = f"/api/diff?from={p}&to={date}&path={path}&w={w}&h={h}"
-                out.append(base + "&summary=1")
-                out.append(base)
+            reqs = requests_for([], [f"{date}:{path}"], w, h) + requests_for([{"from": p, "to": date, "path": path} for p in pairs], [], w, h)
+            out += [browser_url(r) for r in reqs]
     return out
 
 
@@ -124,7 +135,8 @@ def warm(url: str, headers: dict[str, str], paths: list[str], jobs: int = 4, tim
     def one(path: str) -> tuple[str, int, float, str]:
         req = urllib.request.Request(url.rstrip("/") + path, headers={**headers, "User-Agent": UA})
         t0 = time.time()
-        for _ in range(TRANSPORT_RETRIES + 1):
+        transport_tries = server_tries = 0
+        while True:
             try:
                 with urllib.request.urlopen(req, timeout=timeout) as r:
                     r.read()
@@ -132,9 +144,17 @@ def warm(url: str, headers: dict[str, str], paths: list[str], jobs: int = 4, tim
                 break
             except urllib.error.HTTPError as e:
                 status, tier = e.code, ""
-                break
+                if status < 500 or server_tries == SERVER_RETRIES:
+                    break
+                body = e.read(200).decode("utf-8", "replace").replace("\n", " ")
+                print(f"warm: {status} {time.time() - t0:5.1f}s again {path}: {body}", file=sys.stderr)
+                time.sleep(SERVER_RETRY_S * 2 ** server_tries)
+                server_tries += 1
             except (HTTPException, OSError) as e:  # `IncompleteRead`, `RemoteDisconnected`, resets, `URLError`, timeouts
                 status, tier = 0, type(e).__name__
+                if transport_tries == TRANSPORT_RETRIES:
+                    break
+                transport_tries += 1
             except Exception as e:  # noqa: BLE001 — a warm-up must never fail the job; the miss is just cold for the first viewer
                 status, tier = 0, type(e).__name__
                 break

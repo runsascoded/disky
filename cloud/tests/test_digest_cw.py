@@ -8,8 +8,8 @@ Hand-built series (12-hourly, 00:00Z / 12:00Z): a lead day Mon 8/31 (700,
 705 TiB) then Tue 9/1 (710, 713) and Wed 9/2 (712, 715) — one ISO week, so
 the bullet label is unambiguous. Quota (main) = 910 TiB."""
 import datetime as dt
-import re
 import json
+import re
 from dataclasses import replace
 from datetime import date
 from pathlib import Path
@@ -42,6 +42,8 @@ def redo_replies(root, m, token, channel, variant="sender", client=None, reply_h
 
 TIB = 1024**4
 UTC = dt.timezone.utc
+# the real `live_settings`, before conftest's autouse stub replaces the module's (tests never reach a live site)
+LIVE_SETTINGS = E.live_settings
 SITE = "https://cw.example.org"
 AV = "https://icons.example.org/arrows/av_deg"
 SEP = date(2026, 9, 1)
@@ -121,8 +123,8 @@ def test_bucket_path_site_root():
 
 
 def test_units_tb():
-    # `units: TB` (a store billed in decimal TB, as Hugging Face): every size the digest renders is TB (10**12) —
-    # rows, headline, weekly bullets, the reply and its tail (`T free`), the image body's points and `units`
+    # `units: TB` (a store billed in decimal TB, as Hugging Face): every size the job renders is TB (10**12) —
+    # the rows, the reply and its tail (`T free`); the OP's are the site's (the `cw-tb` parity fixture)
     TB = 10**12
     cfg = E.config_from_dict({"template": "cw", "title": "HF usage", "site_url": SITE, "icons_base": "https://icons.example.org",
                               "primary": "org", "units": "TB", "buckets": {
@@ -133,27 +135,10 @@ def test_units_tb():
     rows = D.rows_from_meta([("2026-09-30T0800", meta(15.0)), ("2026-10-01T0800", meta(15.5)), ("2026-10-02T0800", meta(15.4))], "org", unit=TB)
     assert [r.tb for r in rows] == [15.0, 15.5, 15.4]
     month, oct1 = D.Month(lead=rows[:1], rows=rows[1:]), date(2026, 10, 1)
-    assert D.op_body(month, oct1, None, cfg).split("\n") == [
-        f":arrow_deg50: **+0.4 TB** [month-to-date]({SITE}/?d=261002-2d#over-time) · 15 TB · 6.1% of 253 TB public · [dashboard]({SITE}/)",
-        "_as of 10/2 08:00Z_",
-        "",
-        "*Weekly summaries*",
-        f":arrow_deg30: [wk of 9/28]({SITE}/?d=261002-2d#over-time) _(partial)_: **+0.4 TB** → 15 TB · 6.1% of 253 TB public",
-    ]
     assert [D.reply(d, "sender", cfg) for d in D.day_rows(month, "sender", 0)] == [
         E.Reply("10/1 — 16 TB (+0.5, 3.3%)", f"6.1% of 253T (237.5 T free) [↗︎]({SITE}/?d=261001-1d#over-time)", icon_url="https://icons.example.org/arrows/av_deg60.png?v=4"),
         E.Reply("10/2 — 15 TB (−0.1, 0.6%)", f"6.1% of 253T (237.6 T free) [↗︎]({SITE}/?d=261002-1d#over-time)", icon_url="https://icons.example.org/arrows/av_deg-40.png?v=4"),
     ]
-    assert D.image_body(month, oct1, cfg) == {
-        "title": "HF usage — October 2026",
-        "note": "cw.example.org · TB",
-        "month": "2026-10",
-        "from": "2026-09-03",
-        "points": [{"scan": s, "bytes": b * TB // 10} for s, b in (("2026-09-30T0800", 150), ("2026-10-01T0800", 155), ("2026-10-02T0800", 154))],
-        "units": "TB",
-        "quota": {"bytes": 253 * TB, "name": "253 TB public"},
-        "diff": {"from": "2026-09-30T0800", "to": "2026-10-02T0800", "path": "org", "title": "What changed in org — 9/30 → 10/2"},
-    }
     with pytest.raises(ValueError) as e:
         E.config_from_dict({"template": "cw", "units": "Ti"})
     assert str(e.value) == "digest config units: 'Ti' is not one of ('TiB', 'TB')"
@@ -162,8 +147,7 @@ def test_units_tb():
 def test_class_scoped_quotas():
     # a quota per billed storage class (Hugging Face: public 1 vs 253 TB, private 5 vs 5.1 TB; unbilled git 6 in
     # neither): `quota` as a list, each `classes`-scoped, over the meta's `class_bytes` (JSON keys are strings). The
-    # headline and the deltas stay the total; each `% of` clause counts its own classes; the plot's line is the
-    # first quota's classes
+    # deltas stay the total; each `% of` clause counts its own classes
     TB = 10**12
     cfg = E.config_from_dict({"template": "cw", "title": "HF usage", "site_url": SITE, "icons_base": "https://icons.example.org",
                               "primary": "org", "units": "TB", "buckets": {"org": {"label": "org", "path": "", "quota": [
@@ -182,22 +166,14 @@ def test_class_scoped_quotas():
     rows = D.rows_from_meta([("2026-09-30T0800", meta(15.0, 0.02, 0.005)), ("2026-10-01T0800", meta(15.5, 0.5, 0.005))], "org", unit=TB)
     assert [(r.tb, r.classes) for r in rows] == [(15.0, {1: 15.0, 5: 0.02, 6: 0.005}), (16.0, {1: 15.5, 5: 0.5, 6: 0.005})]
     month, oct1 = D.Month(lead=rows[:1], rows=rows[1:]), date(2026, 10, 1)
-    assert D.op_body(month, oct1, None, cfg).split("\n") == [
-        f":arrow_deg70: **+1.0 TB** [month-to-date]({SITE}/?d=261001-1d#over-time) · 16 TB · 6.1% of 253 TB public · 9.8% of 5.1 TB private · [dashboard]({SITE}/)",
-        "_as of 10/1 08:00Z_",
-        "",
-        "*Weekly summaries*",
-        f":arrow_deg50: [wk of 9/28]({SITE}/?d=261001-1d#over-time) _(partial)_: **+1.0 TB** → 16 TB · 6.1% of 253 TB public · 9.8% of 5.1 TB private",
-    ]
     assert [D.reply(d, "sender", cfg) for d in D.day_rows(month, "sender", 0)] == [
         E.Reply("10/1 — 16 TB (+1.0, 6.7%)", f"6.1% of 253T public (237.5 T free), 9.8% of 5.1T private (4.6 T free) [↗︎]({SITE}/?d=261001-1d#over-time)",
                 icon_url="https://icons.example.org/arrows/av_deg70.png?v=4"),
     ]
-    assert D.image_body(month, oct1, cfg)["points"] == [{"scan": "2026-09-30T0800", "bytes": 15 * TB}, {"scan": "2026-10-01T0800", "bytes": 15_500_000_000_000}]
     # a class-scoped quota over a meta without `class_bytes` refuses rather than counting every byte
     bare = D.rows_from_meta([("2026-10-01T0800", {"total_bytes": TB, "total_objects": 1})], "org", unit=TB)
     with pytest.raises(ValueError) as e:
-        D.op_body(D.Month(lead=[], rows=bare), oct1, None, cfg)
+        D.reply(D.day_rows(D.Month(lead=[], rows=bare), "sender", 0)[0], "sender", cfg)
     assert str(e.value) == "quota '253 TB public' counts storage classes [1], but the scan's meta.json has no class_bytes"
 
 
@@ -220,6 +196,17 @@ def test_tail_zone_shared_quota():
         f" · [hot]({u('hot-data')}) 82 + [side]({u('side-data')}) 3 Ti: 85.0% of 100Ti (15.0 Ti free)"
         f" · [more-data]({u('more-data')}): 2 Ti"
     )
+
+
+def test_total_headline_sums_every_bucket():
+    """`total_headline`: the sender name's size and change are every bucket's; a bucket with no earlier scan adds to
+    the size, not the change. The default stays the primary's."""
+    day = D.DayRow(
+        date="2026-09-23", scan="2026-09-23T1201", tb=800.0, dtb=-10.0, hours=24.0, since=None,
+        extra={"hot-data": 100.0, "side-data": 50.0}, dextra={"hot-data": 30.0, "side-data": None},
+    )
+    names = [D.reply(day, "sender", replace(CFG, total_headline=t)).username for t in (False, True)]
+    assert names == ["9/23 — 800 TiB (−10.0, 1.2%)", "9/23 — 950 TiB (+20.0, 2.2%)"]
 
 
 def test_tail_circles_fullest_first():
@@ -276,6 +263,80 @@ def test_runway_rules():
     assert texts == [", +4.1 Ti/d, ≈8d to full", ", +30.0 Ti/d, ≈<1d to full", ", +1.0 Ti/d, ≈60d to full", "", "", ""]
 
 
+def test_runway_hue_steps():
+    """`quota_marks: runway-hue` (specs/digest-runway-marks.md §3): `:runway-N:`, N one more than the cut points
+    (1.8, 3, 6, 10, 19, 33, 60 days) the runway reaches; over quota 1, not filling 8; ≥ 95% full never calmer than 3."""
+    days = [0.0, 1.79, 1.8, 2.9, 3.0, 5.9, 6.0, 9.9, 10.0, 18.9, 19.0, 32.9, 33.0, 59.9, 60.0, D.math.inf]
+    assert [D._runway_hue(D.Runway(d, 1.0), 50.0) for d in days] == [
+        ":runway-1:", ":runway-1:", ":runway-2:", ":runway-2:", ":runway-3:", ":runway-3:", ":runway-4:", ":runway-4:",
+        ":runway-5:", ":runway-5:", ":runway-6:", ":runway-6:", ":runway-7:", ":runway-7:", ":runway-8:", ":runway-8:"]
+    assert [D._runway_hue(D.Runway(d, 1.0), fill) for d, fill in [(D.math.inf, 94.9), (D.math.inf, 95.0), (2.0, 99.0), (0.0, 101.0)]] == [
+        ":runway-8:", ":runway-3:", ":runway-2:", ":runway-1:"]
+
+
+@pytest.mark.parametrize("shape", ["square", "diamond", "triangle", "star"])
+def test_runway_hue_shape_marks_each_step(shape: str):
+    """A shape names its own emoji at the same step as the circle: `:runway-<shape>-N:`, thresholds unchanged."""
+    days = [0.0, 1.8, 3.0, 6.0, 10.0, 19.0, 33.0, 60.0]
+    assert [D._runway_hue(D.Runway(d, 1.0), 50.0, shape) for d in days] == [f":runway-{shape}-{n}:" for n in range(1, 9)]
+    assert D._runway_hue(D.Runway(D.math.inf, 0.0), 95.0, shape) == f":runway-{shape}-3:"
+
+
+@pytest.mark.parametrize(("r", "fill", "mark"), [
+    (D.Runway(5.0, 2.0, 100.0), 50.0, ":pool-chip-3-60:"),
+    (D.Runway(float("inf"), -1.0, 100.0), 50.0, ":pool-chip-8--50:"),
+    (D.Runway(float("inf"), None, 100.0), 50.0, ":pool-chip-8-0:"),
+    (D.Runway(100.0, 0.5, 100.0), 99.0, ":pool-chip-3-40:"),
+    (D.Runway(0.0, 1.0, 0.0), 100.0, ":pool-chip-1-0:"),
+])
+def test_pool_chip_is_the_runway_color_and_the_weekly_rate(r, fill: float, mark: str):
+    assert D._pool_chip(r, fill) == mark
+
+
+def test_runway_hue_circle_is_the_plain_mark():
+    r = D.Runway(3.0, 1.0)
+    assert (D._runway_hue(r, 50.0), D._runway_hue(r, 50.0, "circle")) == (":runway-3:", ":runway-3:")
+
+
+def test_tail_runway_hue_shapes():
+    """Each pool's mark in its own shape: a zone's one mark, a bucket with none a circle; `runway` ignores shapes."""
+    z8 = E.Quota(100 * TIB, "100 TiB", "100Ti")
+    cfg = replace(CFG, quota_marks="runway-hue", buckets={
+        **CFG.buckets,
+        "hot-data": E.Bucket("hot", z8, "z8", shape="square"),
+        "side-data": E.Bucket("side", z8, "z8", shape="square"),
+        "cold-data": E.Bucket("cold", z8, shape="triangle"),
+    })
+    now = {"hot-data": 82.0, "more-data": 1.9, "side-data": 3.0, "cold-data": 12.4}
+    day = D.DayRow(date="2026-09-23", scan="2026-09-23T1201", tb=825.9, dtb=1.0, hours=24.0, since=None, extra=now,
+                   hist=(_hist_scan("2026-09-23T1201", 825.9, now),))
+    marks = lambda c: [x.split(" ")[0] for x in D._tail(day, c).split(" · ")]  # noqa: E731
+    more = f"[more-data]({SITE}/more-data?d=2609231201#over-time):"
+    assert marks(cfg) == [":runway-8:", ":runway-square-8:", more, ":runway-triangle-8:"]
+    assert marks(replace(cfg, quota_marks="runway")) == [D.GREEN_MARK, D.GREEN_MARK, more, D.GREEN_MARK]
+
+
+def test_shape_config():
+    b = E.config_from_dict({"template": "cw", "buckets": {
+        "a": {"label": "a"},
+        "b": {"shape": "circle"},
+        "c": {"shape": "star", "quota": {"bytes": "1 PB", "name": "1 PB"}},
+        "d": {"shape": "square", "zone": "z"},
+        "e": {"shape": "square", "zone": "z"},
+    }}).buckets
+    assert {k: v.shape for k, v in b.items()} == {"a": "circle", "b": "circle", "c": "star", "d": "square", "e": "square"}
+
+
+def test_cfg_json_carries_only_a_shape_that_isnt_the_circle():
+    # absent for a circle: a config without shapes sends the site exactly what it always has
+    cfg = replace(CFG, buckets={"a": E.Bucket("a"), "b": E.Bucket("b", shape="circle"), "c": E.Bucket("c", shape="star")})
+    assert E.cfg_json(cfg)["buckets"] == {
+        "a": {"label": "a", "path": None, "zone": None, "quotas": []},
+        "b": {"label": "b", "path": None, "zone": None, "quotas": []},
+        "c": {"label": "c", "path": None, "zone": None, "quotas": [], "shape": "star"},
+    }
+
+
 def _hist_scan(scan: str, tb: float, extra: dict[str, float]) -> "D.Scan":
     return D.Scan(scan=scan, tb=tb, objs=0, dtb=None, dobjs=None, hours=None, extra=extra)
 
@@ -315,6 +376,13 @@ def test_tail_runway_fixed_order():
     # no history (a store's first day): nothing is filling, so only the 95% floor and an overage can mark it hot
     assert D._tail(replace(day, hist=()), cfg).split(" · ") == [
         f":large_green_circle: {main}", f":large_green_circle: {zone}", more, f":large_green_circle: [cold]({u('cold-data')}): 12%"]
+    # `runway-hue`: the same order, rate text and runways, each as its `:runway-N:` step
+    assert D._tail(day, replace(cfg, quota_marks="runway-hue")).split(" · ") == [
+        f":runway-8: {main}",
+        f":runway-2: {zone}, +5.6 Ti/d, ≈3d to full",
+        more,
+        f":runway-4: [cold]({u('cold-data')}): 12%, +10.0 Ti/d, ≈9d to full",
+    ]
     # `circles` is unchanged by the history: fullest first, by fill
     assert D._tail(day, replace(cfg, quota_marks="circles")).split(" · ") == [
         f":red_circle: {main}", f":large_orange_circle: {zone}", f":large_green_circle: [cold]({u('cold-data')}): 12%", more]
@@ -348,7 +416,7 @@ def test_runway_reaches_before_the_month():
 def test_quota_marks_must_be_known():
     with pytest.raises(ValueError) as e:
         E.config_from_dict({"template": "cw", "quota_marks": "squares"})
-    assert str(e.value) == "digest config quota_marks: 'squares' is not one of ('warning', 'circles', 'runway')"
+    assert str(e.value) == "digest config quota_marks: 'squares' is not one of ('warning', 'circles', 'runway', 'runway-hue', 'arrow-chip')"
 
 
 def _meta2(primary_tib: float, hero_tib: float, objs: int = 1_000_000) -> dict:
@@ -389,13 +457,6 @@ def test_rows_from_meta_buckets_switch():
         f"[main]({SITE}/main-data?d=260902-12h#over-time): 78.2% of 1P (198.0 Ti free) · "
         f"[hot]({SITE}/hot-data?d=260902-12h#over-time): 90.8% of 100Ti (9.2 Ti free)",
         icon_url=f"{AV}-30.png?v=4",
-    )
-    # the OP headline carries the clause too, Δ vs the month's base scan; each
-    # bucket, the primary's total included, linked (as in the replies) over the
-    # same month-to-date span
-    assert D.op_body(month, SEP, None, CFG).split("\n")[0] == (
-        f":arrow_deg30: **+2.0 TiB** [month-to-date]({SITE}/?d=260902-1d#over-time) · [main]({SITE}/main-data?d=260902-1d#over-time) 712 TiB · 78.2% of 1 PB · "
-        f"[hot]({SITE}/hot-data?d=260902-1d#over-time) 91 TiB · [dashboard]({SITE}/)"
     )
 
 
@@ -563,6 +624,11 @@ buckets:
         {"buckets": {"a": {"zone": "z", "quota": {"bytes": "1 PB", "name": "1 PB"}}, "b": {"zone": "z"}}},
         "digest config buckets.b: zone 'z' quota differs from buckets.a's",
     ),
+    (
+        {"buckets": {"a": {"zone": "z", "shape": "square"}, "b": {"zone": "z"}}},
+        "digest config buckets.b: zone 'z' shape differs from buckets.a's",
+    ),
+    ({"buckets": {"b": {"shape": "hexagon"}}}, "digest config buckets.b.shape: 'hexagon' is not one of ('circle', 'square', 'diamond', 'triangle', 'star')"),
     ({"buckets": ["b"]}, "digest config buckets: expected a mapping, got list"),
     ({"buckets": {"b": {"quota": {"bytes": "lots", "name": "x"}}}}, "not a size: 'lots'"),
     ({"buckets": {"b": {"quota": []}}}, "digest config buckets.b.quota: an empty list"),
@@ -597,47 +663,13 @@ def test_config_file_invalid(tmp_path: Path):
 
 def test_no_quota():
     # no quota on the primary (or any bucket): the `% of quota` clauses drop out, the tail shows raw TiB (one bucket,
-    # so unlabeled, the over-time link a trailing ↗)
+    # so unlabeled, the over-time link a trailing ↗); the OP's: the `cw-noquota` parity fixture
     from dataclasses import replace
 
     cfg = replace(CFG, buckets={})
-    assert D.op_body(MONTH, SEP, None, cfg).split("\n") == [
-        f":arrow_deg40: **+10.0 TiB** [month-to-date]({SITE}/?d=26090212-2d#over-time) · **+15.0 TiB** [since 8/31]({SITE}/?d=26090212-2d12h#over-time) · 715 TiB · [dashboard]({SITE}/)",
-        "_as of 9/2 12:00Z_",
-        "",
-        "*Weekly summaries*",
-        f":arrow_deg30: [wk of 8/31]({SITE}/?d=26090212-2d12h#over-time) _(partial)_: **+15.0 TiB** → 715 TiB",
-    ]
     assert D.reply(D.day_rows(MONTH, "sender", 12)[0], "sender", cfg).body == f"713 Ti [↗︎]({SITE}/main-data?d=26090112-1d#over-time)"
 
 
-def test_op_body():
-    # month-to-date +10.0 on 705 over 2 days → 1.42%·3.5 = 5.0%/wk → deg40;
-    # nothing before 8/31 (a store younger than the window): the look-back figure and the (partial) week run from
-    # its first scan, 8/31 00:00 (700): +15.0 → 2.1% → deg30, linked over 8/31 00:00 → 9/2 12:00 = 2d12h
-    assert D.op_body(MONTH, SEP, "https://x/p.png", CFG).split("\n") == [
-        f":arrow_deg40: **+10.0 TiB** [month-to-date]({SITE}/?d=26090212-2d#over-time) · **+15.0 TiB** [since 8/31]({SITE}/?d=26090212-2d12h#over-time) · 715 TiB · 78.6% of 1 PB · [dashboard]({SITE}/)",
-        "_as of 9/2 12:00Z_",
-        "",
-        "*Weekly summaries*",
-        f":arrow_deg30: [wk of 8/31]({SITE}/?d=26090212-2d12h#over-time) _(partial)_: **+15.0 TiB** → 715 TiB · 78.6% of 1 PB",
-        "",
-        "![S3 usage — September 2026](https://x/p.png)",
-    ]
-    assert D.op_body(MONTH, SEP, None, CFG).split("\n")[-1].startswith(":arrow_deg30: [wk of 8/31]")
-
-
-def test_op_body_two_weeks():
-    # a completed week (Sunday scanned) is not partial, Δ from the store's first scan (8/31 00:00: none before the
-    # week); the next week's bullet is Δ vs that week's end
-    metas = LEAD + [(f"2026-09-{d:02d}T{h}", _meta(700 + i)) for i, (d, h) in enumerate(((d, h) for d in range(1, 8) for h in ("0000", "1200")), start=1)]
-    rows = D.rows_from_meta(metas, P)
-    month = D.Month(lead=rows[:2], rows=rows[2:])
-    bullets = D.op_body(month, SEP, None, CFG).split("\n")[4:]
-    assert bullets == [
-        f":arrow_deg30: [wk of 8/31]({SITE}/?d=26090612-6d12h#over-time): **+12.0 TiB** → 712 TiB · 78.2% of 1 PB",
-        f":arrow_deg0: [wk of 9/7]({SITE}/?d=26090712-1d#over-time) _(partial)_: **+2.0 TiB** → 714 TiB · 78.5% of 1 PB",
-    ]
 
 
 def test_reply_sender_variant():
@@ -709,31 +741,6 @@ def _daily(root: Path, first: date, last: date, tib) -> None:
 
 NOV = date(2026, 11, 1)
 
-
-def test_op_body_on_the_first(tmp_path: Path):
-    # 9/1, a day into the month: the window reaches back to 8/3 (its look-back from 8/2's scan, 30 days), its weeks
-    # from 8/3's (baselined on 8/2's scan); the four that ended in August are marked so; the headline puts the last 30
-    # days beside the one-day month-to-date; the OP links August's thread
-    root = tmp_path / "snapshots" / "cw"
-    _daily(root, date(2026, 7, 27), SEP, lambda i: 700 + i)
-    month = D.load_month(str(root), SEP, P)
-    assert D.op_body(month, SEP, None, CFG, "https://slack.example.org/archives/C1/p1").split("\n") == [
-        f":arrow_deg20: **+1.0 TiB** [month-to-date]({SITE}/?d=260901-1d#over-time) · **+30.0 TiB** [last 30d]({SITE}/?d=260901-30d#over-time) · 736 TiB · 80.9% of 1 PB · [dashboard]({SITE}/)",
-        "_as of 9/1 08:00Z_",
-        "",
-        "*Weekly summaries*",
-        f":arrow_deg20: [wk of 8/3]({SITE}/?d=260809-7d#over-time) (Aug): **+7.0 TiB** → 713 TiB · 78.4% of 1 PB",
-        f":arrow_deg20: [wk of 8/10]({SITE}/?d=260816-7d#over-time) (Aug): **+7.0 TiB** → 720 TiB · 79.1% of 1 PB",
-        f":arrow_deg20: [wk of 8/17]({SITE}/?d=260823-7d#over-time) (Aug): **+7.0 TiB** → 727 TiB · 79.9% of 1 PB",
-        f":arrow_deg20: [wk of 8/24]({SITE}/?d=260830-7d#over-time) (Aug): **+7.0 TiB** → 734 TiB · 80.7% of 1 PB",
-        f":arrow_deg0: [wk of 8/31]({SITE}/?d=260901-2d#over-time) _(partial)_: **+2.0 TiB** → 736 TiB · 80.9% of 1 PB",
-        "",
-        "[← August](https://slack.example.org/archives/C1/p1)",
-    ]
-    # the plot and its diff map: from the last scan before the window (8/2) on, the month shaded after 8/3
-    body = D.image_body(month, SEP, CFG)
-    assert (body["from"], body["points"][0]["scan"], body["points"][-1]["scan"], len(body["points"])) == ("2026-08-03", "2026-08-02T0800", "2026-09-01T0800", 31)
-    assert body["diff"] == {"from": "2026-08-02T0800", "to": "2026-09-01T0800", "path": P, "title": f"What changed in {P} — 8/2 → 9/1"}
 
 
 def test_converge_links_the_previous_months_thread(tmp_path: Path):
@@ -823,7 +830,10 @@ def test_post_digest_sender_variant(tmp_path: Path):
     plot = state["plot_name"]
     assert plot.startswith("plot-") and plot.endswith(".png")
     assert [_post(c) for c in fake.calls] == [("post", None, "S3 usage — September 2026", None, ":calendar:")]
-    assert fake.calls[0][1].startswith(":arrow_deg") and f"https://cw.icons.example.org/{plot}?v=" in fake.calls[0][1]
+    head, _, plot_line = fake.calls[0][1].split("\n")
+    assert (head, re.sub(r"\?v=\d+", "?v=<ts>", plot_line)) == (
+        "<site OP: cw 2026-09, 1 scans to 2026-09-01T0000, params ->", f"![S3 usage — September 2026](https://cw.icons.example.org/{plot}?v=<ts>)",
+    )
     assert state == {"plot_name": plot, "variant": "sender", "op_ts": "m1", "posted": {}}
 
     # 9/1 12:00 lands: OP refreshed + the day's reply (headline as sender, arrow avatar)
@@ -868,6 +878,103 @@ def test_post_digest_edit_replies(tmp_path: Path):
     fake.calls.clear()
     post_digest(str(root), SEP, "xoxb", "C1", "sender", client=fake)
     assert [_post(c) for c in fake.calls] == [("edit", "m1")]
+
+
+def test_apply_slack_reapplies_only_the_selected_messages(tmp_path: Path):
+    """`apply_slack` (`digest -d/-y/-o`): exactly the selected, already-posted messages are edited to their current
+    rendering; no post, no other edit, no provisional or alert handling; a day without a reply is skipped; `dry_run`
+    edits nothing and returns the same changes."""
+    root = tmp_path / "snapshots" / "cw"
+    _publish(root, LEAD + SEPT)
+    fake = _FakeSlack()
+    state = post_digest(str(root), SEP, "xoxb", "C1", "sender", client=fake)
+    assert (state["op_ts"], state["posted"]) == ("m1", {"2026-09-01": {"ts": "m2", "scan": "2026-09-01T1200"}, "2026-09-02": {"ts": "m3", "scan": "2026-09-02T1200"}})
+    u = lambda d: f"{SITE}/main-data?d={d}#over-time"  # noqa: E731
+    sep1 = E.Change("2026-09-01", "m2", f"[main]({u('26090112-1d')}): 78.4% of 1P (197.0 Ti free)")
+    sep2 = E.Change("2026-09-02", "m3", f"[main]({u('26090212-1d')}): 78.6% of 1P (195.0 Ti free)")
+
+    fake.calls.clear()
+    assert E.apply_slack(_tpl(), str(root), SEP, fake, "C1", "sender", days=["2026-09-01", "2026-09-02", "2026-09-30"], dry_run=True) == [sep1, sep2]
+    assert fake.calls == []
+
+    assert E.apply_slack(_tpl(), str(root), SEP, fake, "C1", "sender", days=E.day_range("2026-09-02..2026-09-02")) == [sep2]
+    assert fake.calls == [("edit", "m3", sep2.body)]
+
+    fake.calls.clear()
+    norm = lambda t: re.sub(r"\?v=\d+", "?v=<ts>", t)  # noqa: E731
+    [op] = E.apply_slack(_tpl(), str(root), SEP, fake, "C1", "sender", op=True)
+    assert (op.what, op.ts, [c[:2] for c in fake.calls]) == ("op", "m1", [("edit", "m1")])
+    assert norm(fake.calls[0][2]) == norm(op.body)
+    assert norm(op.body) == norm(E.apply_slack(_tpl(), str(root), SEP, fake, "C1", "sender", op=True, dry_run=True)[0].body)
+    assert json.loads((tmp_path / "digest" / "cw" / "C1" / "sender" / "2026-09.json").read_text())["posted"] == state["posted"]
+
+
+def test_day_range():
+    assert [E.day_range("2026-11-01"), E.day_range("2026-10-31..2026-11-02")] == [["2026-11-01"], ["2026-10-31", "2026-11-01", "2026-11-02"]]
+    with pytest.raises(ValueError) as e:
+        E.day_range("2026-11-02..2026-11-01")
+    assert str(e.value) == "day range '2026-11-02..2026-11-01': 2026-11-01 is before 2026-11-02"
+
+
+def test_digest_cli_reply_selector_dry_run(tmp_path: Path, monkeypatch):
+    """`digest -y A..B -n`: lists each selected reply's ts and new body, and edits nothing."""
+    import thrds.slack
+    from click.testing import CliRunner
+
+    from dt_cloud import cli
+
+    root = tmp_path / "snapshots" / "cw"
+    _publish(root, LEAD + SEPT)
+    post_digest(str(root), SEP, "xoxb", "C1", "sender", client=_FakeSlack())
+    fake = _FakeSlack()
+    monkeypatch.setattr(thrds.slack, "SlackClient", lambda token, channel: fake)
+    cfg = config_file(replace(CFG, root=str(root)), tmp_path / "digest.yml")
+    r = CliRunner().invoke(cli.main, ["digest", "-T", "cw", "-C", str(cfg), "-r", str(root), "-m", "2026-09", "-c", "C1", "-t", "xoxb",
+                                      "-y", "2026-09-01..2026-09-02", "-n"])
+    assert r.exit_code == 0, r.output
+    u = lambda d: f"{SITE}/main-data?d={d}#over-time"  # noqa: E731
+    assert r.stdout.split("\n") == [
+        "digest 2026-09 in C1 (sender): 2 to edit; dry-run, nothing edited",
+        "  2026-09-01  ts=m2",
+        f"    [main]({u('26090112-1d')}): 78.4% of 1P (197.0 Ti free)",
+        "  2026-09-02  ts=m3",
+        f"    [main]({u('26090212-1d')}): 78.6% of 1P (195.0 Ti free)",
+        "",
+    ]
+    assert fake.calls == []
+    bad = CliRunner().invoke(cli.main, ["digest", "-T", "cw", "-C", str(cfg), "-r", str(root), "-m", "2026-09", "-c", "C1", "-t", "xoxb", "-d", "2026-09-01", "-E"])
+    assert (bad.exit_code, bad.output.strip().split("\n")[-1]) == (
+        2, "Error: -o/--op, -d/--reply and -y/--replies re-apply Slack messages on their own (not with -E, -R or -P discord)")
+
+
+def test_live_settings_override_the_file(monkeypatch):
+    """The site's live settings (`GET /api/digest-settings?template=cw`, edited on /admin/slack) replace the file's
+    `params` and `quota_marks`; no row, no token or an unreachable site leave the file's; a bad value raises."""
+    from dt_cloud import site
+    from dt_cloud.digest import with_settings
+
+    calls: list = []
+    rows = {"cw": {"params": "qh,pp", "quota_marks": "runway-hue", "updated_by": "admin", "updated_at": 1}}
+
+    def get_json(url, token, path, params=None, timeout=30):
+        calls.append((url, token, path, params))
+        if url == "https://down.example.org":
+            raise site.SiteError("HTTP 503: unavailable", 503)
+        return {"settings": rows.get(params["template"])}
+
+    monkeypatch.setattr(site, "get_json", get_json)
+    cfg = replace(CFG, params="qr,pp", quota_marks="runway")
+    monkeypatch.setenv("SITE_TOKEN", "tok")
+    got = with_settings(cfg, LIVE_SETTINGS(cfg))
+    assert (got.params, got.quota_marks, calls) == ("qh,pp", "runway-hue", [(SITE, "tok", "/api/digest-settings", {"template": "cw"})])
+    rows.clear()
+    assert with_settings(cfg, LIVE_SETTINGS(cfg)) == cfg
+    assert LIVE_SETTINGS(replace(cfg, site_url="https://down.example.org")) is None
+    monkeypatch.delenv("SITE_TOKEN")
+    assert (LIVE_SETTINGS(cfg), len(calls)) == (None, 3)
+    with pytest.raises(ValueError) as e:
+        with_settings(cfg, {"params": "", "quota_marks": "squares"})
+    assert str(e.value) == "digest settings quota_marks: 'squares' is not one of ('warning', 'circles', 'runway', 'runway-hue', 'arrow-chip')"
 
 
 def test_quota_alert_is_broadcast_while_over_and_deleted_once_under(tmp_path: Path):
@@ -1121,40 +1228,6 @@ def test_cli_cw_digest_binds_cw_template(tmp_path: Path, monkeypatch):
     assert callable(kw["deploy_plot"])
 
 
-def test_image_body():
-    # the site draws the OP image: every scan in the window (from 8/4, 30 days to 9/2: all of these), the primary's
-    # quota, the window's diff (from its baseline: a store younger than it, its first scan)
-    assert D.image_body(MONTH, SEP, CFG) == {
-        "title": "S3 usage — September 2026",
-        "note": "cw.example.org · TiB",
-        "month": "2026-09",
-        "from": "2026-08-04",
-        "points": [
-            {"scan": "2026-08-31T0000", "bytes": 700 * TIB},
-            {"scan": "2026-08-31T1200", "bytes": 705 * TIB},
-            {"scan": "2026-09-01T0000", "bytes": 710 * TIB},
-            {"scan": "2026-09-01T1200", "bytes": 713 * TIB},
-            {"scan": "2026-09-02T0000", "bytes": 712 * TIB},
-            {"scan": "2026-09-02T1200", "bytes": 715 * TIB},
-        ],
-        "units": "TiB",
-        "quota": {"bytes": 910 * TIB, "name": "1 PB"},
-        "diff": {"from": "2026-08-31T0000", "to": "2026-09-02T1200", "path": "main-data", "title": "What changed in main-data — 8/31 → 9/2"},
-    }
-
-
-def test_image_body_first_scan():
-    # a month whose only scan is its first (no lead-in): one point, no diff
-    one = D.Month(lead=[], rows=MONTH.rows[:1])
-    assert D.image_body(one, SEP, CFG) == {
-        "title": "S3 usage — September 2026",
-        "note": "cw.example.org · TiB",
-        "month": "2026-09",
-        "from": "2026-08-03",
-        "points": [{"scan": "2026-09-01T0000", "bytes": 710 * TIB}],
-        "units": "TiB",
-        "quota": {"bytes": 910 * TIB, "name": "1 PB"},
-    }
 
 
 def test_render_plot_posts_to_site(monkeypatch, tmp_path: Path):
@@ -1164,7 +1237,8 @@ def test_render_plot_posts_to_site(monkeypatch, tmp_path: Path):
     monkeypatch.setenv("SITE_TOKEN", "tok")
     monkeypatch.setattr(site, "post_json", lambda url, token, path, body, timeout=120: calls.append((url, token, path, body)) or b"\x89PNG")
     D.Cw(CFG).render_plot(MONTH, SEP, tmp_path / "op.png")
-    assert calls == [(SITE, "tok", "/api/digest-image", D.image_body(MONTH, SEP, CFG))]
+    # the request is the site's (`POST /api/digest-op`'s `image`; conftest's stand-in here)
+    assert calls == [(SITE, "tok", "/api/digest-image", {"site_image": "cw", "month": "2026-09", "to": "2026-09-02T1200"})]
     assert (tmp_path / "op.png").read_bytes() == b"\x89PNG"
 
 

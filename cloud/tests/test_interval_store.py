@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import random
+import re
 from pathlib import Path
 
 import duckdb
@@ -253,7 +254,7 @@ def served(built, tmp_path_factory):
     con = duckdb.connect()
     for sort, (sub, _, _) in ((s, ist.SORTS[s]) for s in ist.served_sorts(True)):
         schema = ist.SUB_SCHEMA[sub]
-        ist.write_served(con, f"read_parquet('{out}/{sub}/r*.parquet')", sort, dst / f"{sort}.parquet", schema, rg_rows=4,
+        ist.write_served(con, f"read_parquet('{out}/{sub}/r*.parquet')", sort, dst / f"{sort}.parquet", schema, page_rows=ist.served_page_rows(sort), rg_rows=4,
                          stamps=[x["ts"] for x in scans["scans"]])
     return dst
 
@@ -401,3 +402,90 @@ def test_a_scans_rows_say_its_format(built, served):
     # Every view each scan has (the fixture's paths come and go; a scan without P has no view of it).
     got = [(s["id"], sorted({v["objects"] for v in (store.view(s["ts"], p, 30, 30) for p in paths) if v["tree"] is not None})) for s, _ in sc]
     assert got == [(s["id"], [scan.v == 2]) for s, scan in sc]
+
+
+class _Spy:
+    """A connection, its statements kept."""
+
+    def __init__(self, con):
+        self.con, self.sql = con, []
+
+    def execute(self, sql: str):
+        self.sql.append(sql)
+        return self.con.execute(sql)
+
+
+def _global_stats(con, root: str, scans: dict) -> dict:
+    """`churn_stats` as one global `count(DISTINCT …)` over every path (what it was, what a machine of a billion paths
+    couldn't hold): the reference its per-range counts must equal, byte for byte."""
+    ids = {s["ts"]: s["id"] for s in scans["scans"]}
+    pv, rd = f"read_parquet('{root}/pv/r*.parquet')", f"read_parquet('{root}/rd/r*.parquet')"
+    per = {i: {"id": i, "opened": 0, "closed": 0, "reads_opened": 0, "reads_closed": 0} for i in ids.values()}
+    for col, key, src in (("vf", "opened", pv), ("vt", "closed", pv), ("vf", "reads_opened", rd), ("vt", "reads_closed", rd)):
+        for t, n in con.execute(f"SELECT {col}, count(*) FROM {src} WHERE {col} <> {ist.OPEN} GROUP BY {col}").fetchall():
+            per[ids[t]][key] = n
+    kinds = {k: {"versions": n, "open": o, "paths": p} for k, n, o, p in con.execute(
+        f"SELECT kind, count(*), count(*) FILTER (WHERE vt = {ist.OPEN}), count(DISTINCT path) FROM {pv} GROUP BY kind ORDER BY kind").fetchall()}
+    tot = con.execute(f"SELECT count(*), count(*) FILTER (WHERE vt = {ist.OPEN}), count(DISTINCT (depth, path)) FROM {pv}").fetchone()
+    rtot = con.execute(f"SELECT count(*), count(*) FILTER (WHERE vt = {ist.OPEN}) FROM {rd}").fetchone()
+    return {"versions": tot[0], "open": tot[1], "paths": tot[2], "reads": rtot[0], "reads_open": rtot[1], "kinds": kinds,
+            "scans": [per[s["id"]] for s in scans["scans"]]}
+
+
+def _stats_json(stats: dict) -> str:
+    return json.dumps(stats, indent=1) + "\n"
+
+
+def test_churn_stats_counts_a_range_at_a_time_as_the_global_query_did(tmp_path):
+    """Boundaries cut through what the prefix inversion puts on both sides of one (`a/b` sorts below `a/b-c`, its object
+    `a/b/c.txt` a depth on), a path's versions and a kind that flips, each row placed by the real `range_preds`: no key
+    is in two files, the distinct-path counts are the global query's, and each counts one file."""
+    t1, t2 = 100, 200
+    OPEN = ist.OPEN
+    rows = [
+        (0, "", "dir", t1, t2), (0, "", "dir", t2, OPEN),
+        (1, "a", "dir", t1, OPEN),
+        (2, "a/b", "dir", t1, t2), (2, "a/b", "dir", t2, OPEN),
+        (2, "a/b-c", "file", t2, OPEN),
+        (2, "a/x", "file", t1, t2), (2, "a/x", "dir", t2, OPEN),
+        (3, "a/b/c.txt", "file", t1, OPEN),
+        (3, "a/b/d", "file", t1, t2), (3, "a/b/d", "file", t2, OPEN),
+    ]
+    ranges = [{"lo": [0, ""], "hi": [2, "a/b-c"]}, {"lo": [2, "a/b-c"], "hi": [3, "a/b/d"]}, {"lo": [3, "a/b/d"], "hi": [3, "zz"]}, {"lo": [3, "zz"], "hi": None}]
+    con = duckdb.connect()
+    t = pa.table(dict(zip(("depth", "path", "kind", "vf", "vt"), zip(*rows))))
+    t = t.cast(pa.schema([("depth", pa.uint8()), ("path", pa.string()), ("kind", pa.string()), ("vf", pa.int64()), ("vt", pa.int64())]))
+    con.register("t", t)
+    (tmp_path / "pv").mkdir()
+    (tmp_path / "rd").mkdir()
+    held = []
+    for i, r in enumerate(ranges):
+        sql = " UNION ALL ".join(f"SELECT * FROM t WHERE {p}" for p in sn.range_preds(r))
+        part = con.execute(f"{sql} ORDER BY depth, path, vf").to_arrow_table()
+        pq.write_table(part, tmp_path / "pv" / f"r{i:04d}.parquet")
+        pq.write_table(pa.table({"vf": pa.array([t1], pa.int64()), "vt": pa.array([OPEN], pa.int64())}), tmp_path / "rd" / f"r{i:04d}.parquet")
+        held.append(sorted(set(zip(part["depth"].to_pylist(), part["path"].to_pylist()))))
+    assert held == [
+        [(0, ""), (1, "a"), (2, "a/b")],
+        [(2, "a/b-c"), (2, "a/x"), (3, "a/b/c.txt")],
+        [(3, "a/b/d")],
+        [],
+    ]
+    scans = {"scans": [{"id": "s1", "ts": t1}, {"id": "s2", "ts": t2}]}
+    spy = _Spy(con)
+    got = ist.churn_stats(spy, str(tmp_path), scans)
+    assert got["kinds"] == {
+        "dir": {"versions": 6, "open": 4, "paths": 4},
+        "file": {"versions": 5, "open": 3, "paths": 4},
+    }
+    assert (got["paths"], got["versions"], got["open"]) == (7, 11, 7)
+    assert _stats_json(got) == _stats_json(_global_stats(con, str(tmp_path), scans))
+    # One file a statement, all of them, in order; no other statement holds a distinct path.
+    assert [re.findall(r"read_parquet\('([^']*)'\)", s) for s in spy.sql if "DISTINCT" in s] == [[str(tmp_path / "pv" / f"r{i:04d}.parquet")] for i in range(4)]
+
+
+def test_churn_stats_on_built_ranges_is_the_global_querys(built):
+    """The same over a real build's range files and bounds (`b1/gof`'s prefix-siblings around the cut)."""
+    out, scans, *_ = built
+    con = duckdb.connect()
+    assert _stats_json(ist.churn_stats(con, str(out), scans)) == _stats_json(_global_stats(con, str(out), scans))

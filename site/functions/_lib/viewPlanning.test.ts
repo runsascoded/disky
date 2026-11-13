@@ -1,7 +1,7 @@
 import { beforeEach, expect, it, vi } from 'vitest'
 import type { Env } from './auth'
 import type { Span } from './index'
-import { fixture } from './testStore'
+import { fixture, ivClassBytes } from './testStore'
 import { sqliteD1 } from './testD1'
 import { buildView } from './view'
 
@@ -50,13 +50,14 @@ it.each([{ groups: 1, rows: 700_001 }, { groups: 251, rows: 1 }])('uses the path
   const { db } = await sqliteD1()
   const env = { DB: db, PATH_STORE: 'intervals', INTERVAL_STORE_GEN: 'g1', INDEX_R2: bucket } as Env
   const view = await buildView(env, { date: '2026-08-03', path: 'b2/e', w: 8, h: 6, minArea: 12, atten: 2, ivPlanRows: 0 })
+  const cb = await ivClassBytes('2026-08-03', 'b2/e', 8)
   expect({ tier: view.tier, tree: view.tree }).toEqual({
     tier: 'path',
     tree: {
-      n: 'e', k: 'dir', b: 20, o: 3, a: 6, t: 7, d: 0, cb: { '4': 2 }, us: [['alice', 10]],
+      n: 'e', k: 'dir', b: 20, o: 3, a: 6, t: 7, d: 0, cb: cb[''], us: [['alice', 10]],
       c: [
-        { n: 'd.json', k: 'file', b: 20, o: 1, a: 6, t: 7, d: 0, cb: { '4': 2 } },
-        { n: 'e', k: 'dir', b: 10, o: 1, a: 5, t: 7, d: 0, cb: { '4': 1 } },
+        { n: 'd.json', k: 'file', b: 20, o: 1, a: 6, t: 7, d: 0, cb: cb['/d.json'] },
+        { n: 'e', k: 'dir', b: 10, o: 1, a: 5, t: 7, d: 0, cb: cb['/e'] },
       ],
     },
   })

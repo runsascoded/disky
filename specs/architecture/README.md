@@ -20,6 +20,10 @@ There is no server on the query path. Every deployment is the same shape: Batch 
 
 What is still open for exact `?f=` at any drill and date (compaction of the static index's runs, compound and scoped queries, heavy anchored terms below the root) is tracked in [index-landscape] and [search-extensions].
 
+## Portable executor work
+
+The verified local correctness harness extracts explicit object, metadata-SQL and cache adapters around the existing map/diff reader. It passed 143 complete semantic response comparisons between an ordinary Node process and real local workerd/R2/D1 over immutable synthetic capsules, with no production routing change. Implementation and commands are in the [executor harness]; [executor results] records the synthetic timings, separate sampling profiles and limits. Hosted transports, pinned real-data benchmarks and capability-based routing are subsequent phases of [backend executors].
+
 ## Retired: the ClickHouse query box (2026-10-03 → 10-10)
 
 For one week a ClickHouse VM behind a tunnel served name search and history experiments. It was exact and fast on retrieval, but broad aggregation stayed slow and it needed an always-on server; the static R2 index replaced it, and the VM, its code and its DNS were removed on 2026-10-10 (code at tag `ch-store-final`). See the [post-mortem][postmortem], the [retirement runbook][retirement], the [designs that were tried][clickhouse], the [consolidated name index][mega-index], the [short-query catalog][short-query] and the [experiment journal][journal].
@@ -32,8 +36,12 @@ For one week a ClickHouse VM behind a tunnel served name search and history expe
 [path-store]: ../done/path-store.md
 [search-extensions]: ../search-extensions.md
 [postmortem]: ../done/ch-postmortem.md
-[retirement]: ../ch-store-retirement.md
+[retirement]: ../done/ch-store-retirement.md
 [clickhouse]: ../done/architecture/clickhouse.md
 [mega-index]: ../done/architecture/mega-index.md
 [short-query]: ../done/architecture/short-query-index.md
 [journal]: ../done/ch-store.md
+
+[executor harness]: ../../site/executor/README.md
+[backend executors]: ../backend-executors.md
+[executor results]: ../../site/executor/results.md

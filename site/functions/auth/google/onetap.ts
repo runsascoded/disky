@@ -7,13 +7,13 @@
  * pre-filled with it.
  */
 import { googleOneTapVerify } from '@open-athena/auth/oidc'
-import { type Ctx, gateFor } from '../../_lib/auth.js'
+import { cookieNames, type Ctx, gateFor } from '../../_lib/auth.js'
 import { markDevSession } from '../../_lib/devsession.js'
 
 export const onRequestPost = async (ctx: Ctx): Promise<Response> => {
-  const gate = gateFor(ctx.env)
+  const gate = gateFor(ctx.env, ctx.request)
   const clientId = ctx.env.GOOGLE_CLIENT_ID
   if (!gate || !clientId) return new Response('Google sign-in not configured\n', { status: 503 })
-  const res = await googleOneTapVerify({ gate, clientId })({ request: ctx.request })
+  const res = await googleOneTapVerify({ gate, clientId, accountHintCookie: cookieNames(ctx.env, ctx.request).accountHint })({ request: ctx.request })
   return markDevSession(res, ctx.env)
 }

@@ -140,13 +140,15 @@ def task_cmd(dry_run: bool, stage: str, scan: str) -> None:
     from requests import HTTPError
 
     from .batch import submit_job, wait_jobs
-    from .gcp import REGION, batch_job, batch_jobs, gcp_project
+    from .deploy import batch_region
+    from .gcp import batch_job, batch_jobs, gcp_project
     from .static_names import err
 
     uid = os.environ.get("BATCH_JOB_UID")
     if not uid:
         raise ValueError("scan task requires BATCH_JOB_UID inside its controller")
-    roots = [j for j in batch_jobs(gcp_project(), REGION) if j.get("uid") == uid]
+    region = batch_region()  # the controller's own: its job is found there, and its workers run there
+    roots = [j for j in batch_jobs(gcp_project(), region) if j.get("uid") == uid]
     if len(roots) != 1:
         raise ValueError(f"expected one Batch controller for {uid!r}; found {len(roots)}")
     root = roots[0]
@@ -156,16 +158,16 @@ def task_cmd(dry_run: bool, stage: str, scan: str) -> None:
         print(json.dumps({"job": name, "shape": SHAPES[stage], "labels": spec["labels"]}, sort_keys=True))
         return
     try:
-        existing = batch_job(name, region=REGION)
+        existing = batch_job(name, region=region)
     except HTTPError as error:
         if error.response.status_code != 404:
             raise
-        submit_job(spec, name, REGION)
-        err(f"scan task submitted: {name} [{REGION}]")
+        submit_job(spec, name, region)
+        err(f"scan task submitted: {name} [{region}]")
     else:
         if not compatible(existing, spec):
             raise ValueError(f"{name}: existing task differs from the requested immutable configuration")
-        err(f"scan task resumed: {name} [{REGION}]")
-    states = wait_jobs([(name, REGION)], interval=15, log=err)
+        err(f"scan task resumed: {name} [{region}]")
+    states = wait_jobs([(name, region)], interval=15, log=err)
     if states[name] != "SUCCEEDED":
         raise SystemExit(f"{name}: {states[name]}")

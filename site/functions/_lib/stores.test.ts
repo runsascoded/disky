@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import type { Env } from './auth'
 import { requireViewer } from './auth'
 import { cacheKeyFor } from './edgeCache'
@@ -52,6 +52,20 @@ describe('secondaryStores', () => {
     expect(err({ meta: { bucket: 'x' } })).toBe('STORES_JSON.meta: unknown field(s) bucket')
     expect(err({ meta: { vars: { BASE_SCOPE: 'admin' } } })).toBe("STORES_JSON.meta.vars: unknown var 'BASE_SCOPE'")
     expect(err([])).toBe('STORES_JSON: want an object of store configs')
+  })
+  it('`series_scope`: a scope name beside the store\'s `scope`, set on its overlay as `STORE_SERIES_SCOPE`', () => {
+    const err = (json: unknown) => {
+      try { secondaryStores({ STORES_JSON: JSON.stringify(json) } as Env) } catch (e) { return (e as Error).message }
+      return null
+    }
+    const bad = 'STORES_JSON.logs.series_scope: want a scope name (not admin)'
+    expect(['', 'Totals', 'a b', 'admin', '*', 7].map(series_scope => err({ logs: { scope: 'admin', series_scope } })))
+      .toEqual([bad, bad, bad, bad, bad, bad])
+    expect(err({ logs: { series_scope: 'totals' } })).toBe('STORES_JSON.logs.series_scope: only meaningful beside a scope (without one every viewer reads the store)')
+    const cfg = { scope: 'admin', series_scope: 'totals' }
+    const env = { STORES_JSON: JSON.stringify({ logs: cfg }) } as Env
+    const overlay = storeEnv(env, 'logs', secondaryStores(env).logs)
+    expect([overlay.STORE_SCOPE, overlay.STORE_SERIES_SCOPE, storeEnv(env, 'logs', { scope: 'admin' }).STORE_SERIES_SCOPE]).toEqual(['admin', 'totals', undefined])
   })
   it('`path`: the store\'s page path, a trailing `/` dropped; stores without one have no page path', () => {
     const env = { STORES_JSON: JSON.stringify({ meta: { ...META, path: '/meta/' }, nas: { path: '/nas/tv', vars: { STORE_ROOT: 'mnt/user' } }, scratch: {} }) } as Env
@@ -174,7 +188,12 @@ describe('withStore', () => {
     expect(await res('store=Me%2Fta')).toEqual([400, '{"error":"bad store"}\n'])
     // an inherited property of the parsed object is no store
     expect(await res('store=constructor')).toEqual([404, '{"error":"unknown store \'constructor\'"}\n'])
-    expect(await res('store=meta', { STORES_JSON: '{' } as Env)).toEqual([500, `{"error":"STORES_JSON: ${(() => { try { JSON.parse('{') } catch (e) { return (e as Error).message } })()}"}\n`])
+    // Before the gate: a config that doesn't parse says so and no more (JSON.parse's message quotes a fragment of the config).
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const SECRETISH = '{"meta": {"vars": {"STORE_BUCKET": "a-private-bucket-name"'
+    expect(await res('store=meta', { STORES_JSON: SECRETISH } as Env)).toEqual([500, '{"error":"store configuration error"}\n'])
+    expect(log.mock.calls).toEqual([[`STORES_JSON: ${(() => { try { JSON.parse(SECRETISH) } catch (e) { return (e as Error).message } })()}`]])
+    log.mockRestore()
   })
   it('primaryOnly: null for the primary, a 404 for another store', async () => {
     expect(primaryOnly({ request: req('date=2026-09-01') })).toBe(null)
@@ -185,9 +204,9 @@ describe('withStore', () => {
 
 describe('cache keys', () => {
   it('the primary’s are unchanged; a secondary store’s get an `@<store>/` segment', () => {
-    expect(cacheKeyFor('series', '', 'a%2Fb?P=').url).toBe('https://series.cache/v10/a%2Fb?P=')
-    expect(cacheKeyFor('series', '', 'a%2Fb?P=', 'primary').url).toBe('https://series.cache/v10/a%2Fb?P=')
-    expect(cacheKeyFor('series', '', 'a%2Fb?P=', 'meta').url).toBe('https://series.cache/v10/@meta/a%2Fb?P=')
+    expect(cacheKeyFor('series', '', 'a%2Fb?P=').url).toBe('https://series.cache/v11/a%2Fb?P=')
+    expect(cacheKeyFor('series', '', 'a%2Fb?P=', 'primary').url).toBe('https://series.cache/v11/a%2Fb?P=')
+    expect(cacheKeyFor('series', '', 'a%2Fb?P=', 'meta').url).toBe('https://series.cache/v11/@meta/a%2Fb?P=')
   })
   it('over-time manifest datasets: `over-time` for the primary, `<store>:over-time` else', () => {
     expect([overTimeDataset(PRIMARY), overTimeDataset(storeEnv(PRIMARY, 'meta', META))]).toEqual(['over-time', 'meta:over-time'])
@@ -260,6 +279,6 @@ describe('handlers', () => {
     expect([r.status, await r.text()]).toEqual([401, '{"error":"unauthenticated"}\n'])
     // Localhost dev holds every scope, `admin` included.
     const dev = await requireViewer({ request: new Request('http://localhost/api/subtree?store=meta'), env: storeEnv(PRIMARY, 'meta', META) })
-    expect(dev).toEqual({ email: 'dev@example.test', name: null, scopes: ['gcs', 'cw', 'admin', 'requests', 'cw:assign'], admin: true, via: 'session', subject: null })
+    expect(dev).toEqual({ email: 'dev@example.test', name: null, scopes: ['gcs', 'cw', 'admin', 'cw:assign'], admin: true, via: 'session', subject: null })
   })
 })

@@ -4,6 +4,8 @@
 
 const { abs, max } = Math
 
+export const isSynthetic = (n: Pick<DiffNode, 'label' | 'status'>): boolean => n.status === 'filler' || n.label === '(other)'
+
 // `/api/diff` row (functions/_lib/view.ts `DiffRow`): p=path (relative to
 // the diffed root) d=depth k=kind s=status a/b=bytes oa/ob=objects
 // x=expanded l=read by a point lookup on side 1|2.
@@ -45,6 +47,10 @@ export interface DiffData {
   /** With `q=`: phase 2 stopped by its time budget; the whole diff is computing at the edge (`budgetCut.ts`). */
   budgetCut?: true
 }
+
+/** The diff header's label while the pair's full walk aligns: `pair` (`11/4 → 11/5`) until the map draws its first
+ *  paint (`firstPaint`: this pair's `depth=1` diff, which carries the totals), then the rows that are still to come. */
+export const diffLoadingLabel = (firstPaint: boolean, pair: string): string => firstPaint ? 'Aligning the rows…' : `Aligning ${pair}…`
 
 export type AreaMode = 'max' | 'delta'
 

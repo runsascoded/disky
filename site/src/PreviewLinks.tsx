@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
 import { Link } from 'react-router-dom'
 import { copyText } from './CopyName'
+import { Paginated } from './Pager'
 
 interface TokenRow {
   id: number
@@ -71,11 +72,11 @@ export function PreviewLinks() {
         Links minted with “Copy link with preview”: their unfurl card shows the full view (labels, sizes, owners) for that exact page and params.
         Plain links follow this site's anonymous preview policy and carry no detailed-preview token. Copy a live one to share it again; revoke to send a view back to the anonymous card.
       </p>
-      <div className="table-scroll">
+      <Paginated rows={rows} label="Preview links">{page => <div className="table-scroll">
         <table className="grants">
           <thead><tr><th>page</th><th>minted by</th><th>when</th><th>until</th><th /></tr></thead>
           <tbody>
-            {rows.map(r => (
+            {page.map(r => (
               <tr key={r.id} className={r.revoked_ts ? 'revoked' : undefined}>
                 <td><Link to={r.page}>{r.page}</Link></td>
                 <td>{r.minted_by}</td>
@@ -94,7 +95,7 @@ export function PreviewLinks() {
             {!rows.length && !q.isPending && <tr><td colSpan={5}><em>none minted yet</em></td></tr>}
           </tbody>
         </table>
-      </div>
+      </div>}</Paginated>
     </section>
   )
 }

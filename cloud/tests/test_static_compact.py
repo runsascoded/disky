@@ -162,6 +162,25 @@ def test_incremental_measure_is_the_rebuilds(world, tmp_path, store, gen):
     assert got == want
 
 
+def test_the_floor_crossers_counted_on_worker_processes_measure_the_same(world, tmp_path, monkeypatch):
+    """`base_counts_parallel` (crossers cut in sorted shares, counted on spawned processes against the tier's own files) writes
+    the measurement the in-process count does, md5 for md5."""
+    root = world["a_store"]
+    rec = json.loads((root / "g.c001" / ar.COMPACTION).read_text())
+    base = root / rec["from"]
+    tiers = [sd.Tier(base / "drill", "base"), *(sd.Tier(base / k / "drill", k) for k in rec["runs"])]
+    docs = {}
+    for name, least in (("here", 10**9), ("procs", 1)):
+        monkeypatch.setattr(sme, "PARALLEL_MIN", least)
+        con = sn.connect(2, "1GB", tmp_path / f"duckdb-{name}")
+        docs[name] = sme.incremental_measure(con, tiers, base / "roots-measure", str(root / "g.c001" / "catalog" / "members.parquet"),
+                                             tmp_path / name, floor=tiers[0].meta.get("floor", sl.FLOOR), log=lambda s: None, jobs=2)
+    assert [d["base_counted"] for d in docs["procs"].values()] == [d["base_counted"] for d in docs["here"].values()]
+    assert sum(d["base_counted"] for d in docs["procs"].values()) > 0
+    assert _md5s(tmp_path / "procs") == _md5s(tmp_path / "here")
+    assert sorted(p.name for p in (tmp_path / "procs").iterdir()) == ["dirs", "short"]
+
+
 def test_compactions_measure_and_roll_up_incrementally(world):
     """specs/static-incremental-compaction.md step 4: every fixture run counts only new roots (`dcount: fresh`), so each
     compaction above (whose bytes `test_compacted_generation_is_the_rebuild` checks) took its measurement and rollups from

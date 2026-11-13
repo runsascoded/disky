@@ -5,6 +5,7 @@
 // `build` (`{ sha, time }`, `_lib/build.ts`): the build serving this response, added as it is served (never cached).
 import { type Env, json, requireViewer } from '../_lib/auth.js'
 import { BUILD } from '../_lib/build.js'
+import { cacheEnvTag } from '../_lib/edgeCache.js'
 import { health } from '../_lib/health.js'
 import { ivGen, withStaticGen } from '../_lib/index.js'
 import { storeKey, withStore } from '../_lib/stores.js'
@@ -26,7 +27,9 @@ export const onRequestGet = async (ctx0: { request: Request; env: Env; waitUntil
   const headers = { 'cache-control': 'private, max-age=30' }
   const fresh = new URL(ctx.request.url).searchParams.has('fresh')
   const generation = `${env.INTERVAL_STORE_PREFIX ? `${env.INTERVAL_STORE_PREFIX}:` : ''}${env.INTERVAL_STORE_GEN ?? '-'}`
-  const key = new Request(`https://health.cache/${encodeURIComponent(storeKey(env))}/${encodeURIComponent(generation)}/${encodeURIComponent(env.STATIC_GEN ?? '-')}`)
+  // Its deployment environment's (`cacheEnvTag`; prod's keys unchanged): a PR preview's document is its own.
+  const tag = cacheEnvTag(env, ctx.request)
+  const key = new Request(`https://health.cache/${tag ? `~${encodeURIComponent(tag)}/` : ''}${encodeURIComponent(storeKey(env))}/${encodeURIComponent(generation)}/${encodeURIComponent(env.STATIC_GEN ?? '-')}`)
   const cache = colo()
   if (cache && !fresh) {
     const hit = await cache.match(key)

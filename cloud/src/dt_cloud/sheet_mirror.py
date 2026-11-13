@@ -450,7 +450,7 @@ class Gcp:
     project: str
     service_account: str
     job: str
-    region: str = "us-central1"
+    region: str = ""
     image: str = ""
     trigger: str = ""
 
@@ -592,7 +592,7 @@ def load_config(text: str, env: Mapping[str, str] | None = None) -> MirrorConfig
             project=_str(g, "project", "gcp"),
             service_account=_str(g, "service_account", "gcp"),
             job=_str(g, "job", "gcp"),
-            region=_str(g, "region", "gcp", required=False) or "us-central1",
+            region=_str(g, "region", "gcp", required=False),
             image=_str(g, "image", "gcp", required=False),
             trigger=_str(g, "trigger", "gcp", required=False),
         )
@@ -639,8 +639,10 @@ def env_lines(cfg: MirrorConfig) -> list[str]:
     """The deploy-side variables (``KEY=<quoted>``, one per line) that
     ``build.sh`` / ``deploy.sh`` ``eval``. Needs the config's ``gcp`` block."""
     if cfg.gcp is None:
-        raise ConfigError("sheet-mirror.yml: `gcp` (project, service_account, job[, region, image, trigger]) is required to build/deploy")
+        raise ConfigError("sheet-mirror.yml: `gcp` (project, service_account, job, region[, image, trigger]) is required to build/deploy")
     g = cfg.gcp
+    if not g.region:
+        raise ConfigError("sheet-mirror.yml: `gcp.region` is required to build/deploy")
     return [
         _assign([(k, v)])
         for k, v in (

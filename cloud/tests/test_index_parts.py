@@ -140,6 +140,7 @@ SPLITS = {"bk-big": BIG_SPLIT}
 
 @pytest.mark.parametrize("kw", [
     pytest.param(dict(row_group_rows=2048, user_sort_tiers=("bysize",), generation=True), id="gcs-shape"),
+    pytest.param(dict(row_group_rows=2048, object_version=True), id="opaque-version-shape"),
     pytest.param(dict(row_group_rows=2048), id="both-user-copies"),
     pytest.param(dict(row_group_rows=2048, path_only=True), id="path-only"),
     pytest.param(dict(row_group_rows=8192, search=True), id="8k-search"),

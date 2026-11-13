@@ -32,3 +32,31 @@ export function fixtureR2(dir: string, reads: string[]): R2Bucket {
   const head = async (key: string) => ((await nodeFs()).existsSync(path(key)) ? { key } : null)
   return { get, list, head } as unknown as R2Bucket
 }
+
+/** An `R2Bucket`'s `list` / `get` over a map of key → text, enough for `R2Store` (pages of 2 keys, so listings page). A key
+ *  in `broken` fails its `get`. */
+export function fakeR2(files: Record<string, string>, broken: readonly string[] = []) {
+  return {
+    async list({ prefix, cursor, limit }: { prefix: string; cursor?: string; limit: number }) {
+      const keys = Object.keys(files).filter(k => k.startsWith(prefix)).sort()
+      const at = cursor ? Number(cursor) : 0
+      const page = keys.slice(at, at + Math.min(limit, 2))
+      const more = at + page.length < keys.length
+      return {
+        objects: page.map(key => ({ key, size: files[key].length, uploaded: new Date(0) })),
+        delimitedPrefixes: [], truncated: more, cursor: more ? String(at + page.length) : undefined,
+      }
+    },
+    async get(key: string) {
+      if (broken.includes(key)) throw new Error(`r2 get failed: ${key}`)
+      const v = files[key]
+      return v === undefined ? null : { size: v.length, arrayBuffer: async () => new TextEncoder().encode(v).buffer }
+    },
+  }
+}
+
+/** The job's soft-delete reading for a day (`snapshots/soft-delete/<date>.json`, read at 07:12:03Z): `{ bucket: off }`, an
+ *  on bucket retaining 7 days. */
+export const softDeleteDoc = (date: string, off: Record<string, boolean>, version = 1): string => JSON.stringify({
+  version, date, as_of: `${date}T07:12:03Z`, buckets: Object.fromEntries(Object.entries(off).map(([bucket, isOff]) => [bucket, { retention_seconds: isOff ? 0 : 604800 }])),
+})

@@ -4,27 +4,36 @@
 // writes, and the stores' maintenance jobs (compactions, merges: `dt_cloud.maint_runs`)
 // in the same table. DIY SVG: a duration strip over all runs, a phase bar per row,
 // and a phase timeline per run.
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent, type ReactNode, type RefObject } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent, type ReactNode, type RefObject } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Link, Navigate, useLocation, useNavigate, useParams } from 'react-router-dom'
-import { useUrlState } from 'use-prms'
+import { stringParam, useUrlState } from 'use-prms'
+import { TS_PAD, XOverview } from '@disk-tree/react'
 import { SiteNav } from './SiteNav'
 import { useDocTitle } from './title'
 import { SiteKbd } from './SiteKbd'
 import { Tooltip } from './Tooltip'
-import { axisTicks, inSpan, type RunSpan, runSpanParam } from './runChart'
+import { Explain } from './Help'
+import { axisTicks, inSpan, type RunSpan, runKindParam, runSpanParam, runStatusParam } from './runChart'
 import { fmtBytesPrecise, fmtN } from './types'
+import { RunScanButton } from './RunScan'
 import { useUnits } from './units'
 import { useStores } from './auth'
 import { DEFAULT_STORE, type Store } from './stores'
 import { useStore } from './store'
 import { useMinSlug } from './scan'
 import {
-  batchHref, isLost, isMaintenance, liveness, logsHref, maintStore, mapHref, metaHref, type OutputDelta, phaseOrder, type PhaseSpan, type RunSummary, type ScanRun,
-  type ScanRunPhase, type PhaseIssue, type PhaseRecovery, BEHIND, overlappingFailures, phaseFill, phaseOutcome, runOutcome, runOutcomeLine, runTasks, type RunTask, taskLogsHref,
+  batchHref, isLost, isMaintenance, liveness, logsHref, maintStore, mapHref, metaHref, type OutputDelta, phaseOrder, processingSecs, type PhaseSpan, type RunSummary, type ScanRun,
+  type ScanRunPhase, type PhaseIssue, type PhaseRecovery, BEHIND, issueLeaves, issueState, issueWhat, overlappingFailures, phaseFill, phaseOutcome, runOutcome, runOutcomeLine, runTasks,
+  type RunTask, STATUS_FILTERS, statusMatches, taskLogsHref,
 } from './scanRunsModel'
-import { colorer, fmtDur, fmtRunTime, getJson, type Links, PhaseBar, QUIET_TIP, runDay, RunWhen, scanRunsApi, scansHref, scansStore, Status, useScanRuns } from './scanRunsUi'
+import { colorer, fmtDur, fmtRunTime, getJson, IssueStanding, type Links, PhaseBar, QUIET_TIP, runDay, RunWhen, scanRunsApi, scansHref, scansStore, Status, useScanRuns } from './scanRunsUi'
 import { brushRole, dagNodes, processOf, type DagNode, type Hl, type RunDagRow } from './runDag'
+import { DEFAULT_SIZES, pageParam, Pager, usePaged } from './Pager'
+import { durationAxis, durationSegments } from './durationAxis'
+import { XRangeControls } from './XRangeControls'
+import { brushDomain, fitToWindow, fmtXr, inXDomain, parseXr, resolveXDomain, spanDomain, type XDomain } from './xDomain'
+import { scanTime } from './scanSlug'
 import './scans.scss'
 
 type DetailResponse = Links & {
@@ -98,6 +107,10 @@ const usd = (x: number | null | undefined) => (x == null ? '—' : `$${x < 10 ? 
 
 const deltaClass = (d: number | null | undefined) => (d == null || d === 0 ? 'dim' : d > 0 ? 'grew' : 'shrank')
 
+/** A clause closed with a full stop (unless it ends in one), and as a sentence of its own: its first letter capitalized too. */
+const stop = (s: string): string => (!s || /[.!?]$/.test(s) ? s : `${s}.`)
+const sentence = (s: string): string => stop(s && `${s[0].toUpperCase()}${s.slice(1)}`)
+
 /** Brushing between the strip's bars and the table's rows: the hovered run, kept `LINGER_MS` past the pointer leaving
  * its mark (the gaps between bars don't flash every other bar back on). */
 function useHoverRun() {
@@ -118,29 +131,39 @@ const DRAG_PX = 4
 
 /** Duration per run over time, stacked by phase; a failed run in the danger ink. Dragging across it picks a window
  * (`win`; the runs outside it dim); hovering a bar brushes its table row (`hover`). */
-function DurationStrip({ runs, color, onPick, win, onWin, hover }: {
+interface DurationProps {
   runs: RunSummary[]; color: (p: string) => string; onPick: (id: string) => void
   win: RunSpan | null; onWin: (w: RunSpan | null) => void; hover: HoverRun
+}
+
+// Match the minute precision of the shared range URL, including retries of the same capture.
+const runX = (ts: number) => Math.floor(ts / 60) * 60
+const rangeId = (x: number) => new Date(x).toISOString().slice(0, 16).replace(':', '')
+
+function DurationStrip({ runs, color, onPick, win, onWin, hover, range, autoBreak }: DurationProps & {
+  range: readonly [number, number] | null; autoBreak: boolean
 }) {
   const [ref, W] = useWidth<HTMLDivElement>()
   const [drag, setDrag] = useState<[number, number] | null>(null)
   const dragged = useRef(false)
-  const pts = runs.filter(r => r.secs != null && r.run.started_ts != null)
-  if (pts.length < 2) return null
+  const pts = runs.filter(r => r.secs != null && r.run.started_ts != null && inXDomain(range, runX(r.run.started_ts) * 1000))
+  if (!pts.length) return <p className="dim">No runs in this range.</p>
   const now = Math.floor(Date.now() / 1000)
-  const H = W < 500 ? 150 : 190, L = 36, R = 6, T = 8, B = 20
-  const t0 = Math.min(...pts.map(p => p.run.started_ts!)), t1 = Math.max(...pts.map(p => p.run.started_ts!))
+  const H = W < 500 ? 180 : 220, L = TS_PAD.left, R = TS_PAD.right, T = 8, B = 20
+  const t0 = Math.min(...pts.map(p => runX(p.run.started_ts!))), t1 = Math.max(...pts.map(p => runX(p.run.started_ts!)))
   const span = Math.max(3600, t1 - t0)
-  const hours = Math.max(...pts.map(p => p.secs!)) / 3600
-  const ticks = axisTicks(hours)
-  const top = ticks[ticks.length - 1] || 1
+  const { ticks, top, cut } = durationAxis(pts.map(p => p.secs! / 3600), autoBreak, pts.flatMap(p => p.spans.flatMap(s => [s.start / 3600, s.end / 3600])))
+  const gap = cut ? 16 : 0
+  const visible = top - (cut ? cut[1] - cut[0] : 0)
+  const unit = (H - T - B - gap) / visible
   const x = (t: number) => L + ((t - t0) / span) * (W - L - R)
-  const y = (h: number) => H - B - (h / top) * (H - T - B)
+  const y = (h: number) => H - B - (h - (cut && h >= cut[1] ? cut[1] - cut[0] : 0)) * unit - (cut && h >= cut[1] ? gap : 0)
+  const gapY = cut ? y(cut[0]) - gap / 2 : 0
   const bw = Math.max(1.5, Math.min(14, ((W - L - R) / pts.length) * 0.7))
   // Runs aren't evenly spaced (a daily cadence, then 6-hourly, plus hand submits), so each bar narrows to fit between
   // its neighbors, and its hover target runs from the midpoint with the one before to the midpoint with the one after:
   // fixed-width targets overlapped where runs are dense, and the later-drawn bar took its neighbor's edge.
-  const byX = [...pts].sort((a, b) => a.run.started_ts! - b.run.started_ts!), xs = byX.map(p => x(p.run.started_ts!))
+  const byX = [...pts].sort((a, b) => a.run.started_ts! - b.run.started_ts!), xs = byX.map(p => x(runX(p.run.started_ts!)))
   const cols = new Map(byX.map((p, i) => {
     const c = xs[i]
     const prev = i > 0 ? xs[i - 1] : -Infinity, next = i < xs.length - 1 ? xs[i + 1] : Infinity
@@ -183,10 +206,10 @@ function DurationStrip({ runs, color, onPick, win, onWin, hover }: {
   const band = drag ? [Math.min(...drag), Math.max(...drag)] : win ? [x(win[0]), x(win[1])] : null
   return (
     <div className="sr-svgwrap" ref={ref}>
-      <svg className={`sr-strip${drag ? ' dragging' : ''}`} width={W} height={H} viewBox={`0 0 ${W} ${H}`} role="img" aria-label="Run duration over time, by phase; drag to pick a window"
+      <svg className={`sr-strip${drag ? ' dragging' : ''}`} width={W} height={H} viewBox={`0 0 ${W} ${H}`} role="img" aria-label={`Run duration over time, by phase; drag to pick a window${cut ? `; y-axis break omits ${cut[0]} to ${cut[1]} hours` : ''}`}
         onPointerDown={onDown} style={{ touchAction: 'pan-y', userSelect: 'none' }}>
-        {band && <rect className="sr-band" x={Math.max(L, band[0])} y={T} width={Math.max(1, Math.min(W - R, band[1]) - Math.max(L, band[0]))} height={H - T - B} />}
-        {ticks.map(h => <g key={h}><line className="grid" x1={L} x2={W - R} y1={y(h)} y2={y(h)} /><text className="tick" x={L - 6} y={y(h) + 4} textAnchor="end">{h}h</text></g>)}
+        {band && band[1] >= L && band[0] <= W - R && <rect className="sr-band" x={Math.max(L, band[0])} y={T} width={Math.max(1, Math.min(W - R, band[1]) - Math.max(L, band[0]))} height={H - T - B} />}
+        {ticks.map(h => <g key={h}><line className="grid" x1={L} x2={W - R} y1={y(h)} y2={y(h)} /><text className="tick sr-y-tick" x={L - 6} y={y(h) + 4} textAnchor="end">{h}h</text></g>)}
         {days.filter((_, i) => i % labelEvery === 0).map(d => {
           const t = Date.parse(`${d}T00:00:00`) / 1000
           return <text key={d} className="tick" x={Math.min(W - R - 16, Math.max(L + 16, x(t)))} y={H - 6} textAnchor="middle">{d.slice(5)}</text>
@@ -199,21 +222,55 @@ function DurationStrip({ runs, color, onPick, win, onWin, hover }: {
           const out = !drag && !inSpan(win, p.run.started_ts)
           return (
             <g key={id} className={`sr-col${failed ? ' failed' : ''}${lost ? ' lost' : ''}${hover.id === id ? ' brushed' : hover.id || out ? ' dimmed' : ''}`}
-              onClick={() => { if (!dragged.current) onPick(id) }} role="link" aria-label={`${p.run.scan} ${p.run.kind} run`}
+              onClick={() => { if (!dragged.current) onPick(id) }} role="link" tabIndex={0} aria-label={`${p.run.scan} ${p.run.kind} run`}
+              onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onPick(id) } }}
               onPointerMove={() => { if (!drag) hover.enter(id) }} onPointerLeave={hover.leave}>
               <rect className="sr-col-hit" x={lo} y={T} width={Math.max(0, hi - lo)} height={H - T - B} />
-              <rect className="sr-col-total" x={cx} y={y(p.secs! / 3600)} width={bw} height={Math.max(1, y(0) - y(p.secs! / 3600))} />
-              {!failed && main.map(s => (
-                <rect key={s.phase} x={cx} y={y(s.end / 3600)} width={bw} height={Math.max(0.5, y(s.start / 3600) - y(s.end / 3600))} style={{ fill: phaseFill(s, color) }} />
-              ))}
-              {!failed && overlappingFailures(p.spans).map(s => <rect key={`failed-${s.phase}`} x={cx + bw * 0.6} y={y(s.end / 3600)} width={Math.max(1, bw * 0.4)} height={Math.max(0.5, y(s.start / 3600) - y(s.end / 3600))} style={{ fill: 'var(--danger)' }} />)}
+              {durationSegments(0, p.secs! / 3600, cut).map(([a, b], i) => <rect key={`total-${i}`} className="sr-col-total" x={cx} y={y(b)} width={bw} height={Math.max(1, y(a) - y(b))} />)}
+              {!failed && main.flatMap(s => durationSegments(s.start / 3600, s.end / 3600, cut).map(([a, b], i) => (
+                <rect key={`${s.phase}-${i}`} x={cx} y={y(b)} width={bw} height={Math.max(0.5, y(a) - y(b))} style={{ fill: phaseFill(s, color) }} />
+              )))}
+              {!failed && overlappingFailures(p.spans).flatMap(s => durationSegments(s.start / 3600, s.end / 3600, cut).map(([a, b], i) => <rect key={`failed-${s.phase}-${i}`} x={cx + bw * 0.6} y={y(b)} width={Math.max(1, bw * 0.4)} height={Math.max(0.5, y(a) - y(b))} style={{ fill: 'var(--danger)' }} />))}
+              {cut && p.secs! / 3600 >= cut[1] && <path className="sr-break-mark" d={`M${cx - 1},${gapY + 5} l${bw + 2},-4 M${cx - 1},${gapY - 1} l${bw + 2},-4`} />}
             </g>
           )
         })}
         <line className="axis" x1={L} x2={W - R} y1={y(0)} y2={y(0)} />
+        {cut && <path className="sr-break-mark" d={`M${L - 4},${gapY + 5} l8,-4 M${L - 4},${gapY - 1} l8,-4`} />}
       </svg>
+      {cut && <p className="sr-cut-note">Y-axis break: {cut[0]}–{cut[1]}h omitted. Bar heights use the same scale on both sides.</p>}
     </div>
   )
+}
+
+/** The homepage's range controls and overview over the run chart; zoom never changes the row-selection window. */
+export function ScanDurationChart(props: DurationProps) {
+  const [xr, setXr] = useUrlState('xr', stringParam())
+  const [yb, setYb] = useUrlState('yb', stringParam())
+  const domain = parseXr(xr)
+  const setDomain = (d: XDomain) => setXr(fmtXr(d))
+  const points = props.runs.filter(r => r.run.started_ts != null && r.secs != null).map(r => ({ x: runX(r.run.started_ts!) * 1000, y: r.secs! }))
+  const xs = [...new Set(points.map(p => p.x))]
+  const range = resolveXDomain(domain, xs, scanTime)
+  const window = props.win ? [props.win[0] * 1000, props.win[1] * 1000] as const : undefined
+  const fit = window ? { onClick: () => setDomain(spanDomain(fitToWindow(window, xs), rangeId)), label: 'zoom to selected runs', description: 'Zoom to the selected runs, with one run of context on each side' } : undefined
+  return <>
+    <div className="sr-chart-head">
+      <h3>End-to-end duration by run</h3>
+      <XRangeControls domain={domain} set={setDomain} fit={fit} />
+      <span className="gran" role="group" aria-label="Y-axis scale">
+        <span className="lbl">y-axis</span>
+        <Tooltip content="Collapse a large empty interval automatically, with a visible axis break. Run ends and phase transitions stay visible."><button type="button" aria-pressed={yb !== '0'} className={yb !== '0' ? 'on' : ''} onClick={() => setYb(undefined)}>auto break</button></Tooltip>
+        <Tooltip content="Show the full linear scale, including empty ranges."><button type="button" aria-pressed={yb === '0'} className={yb === '0' ? 'on' : ''} onClick={() => setYb('0')}>full</button></Tooltip>
+      </span>
+    </div>
+    <p className="dim">Includes capture and queue wait. The table shows processing time separately when the queue timing is recorded.</p>
+    <DurationStrip {...props} range={range} autoBreak={yb !== '0'} />
+    {xs.length > 2 && <Explain className="overview-help" text="Every run: drag this strip to zoom the chart; double-click to show all dates. Dragging the chart above selects table rows.">
+      <XOverview points={points} domain={range} window={window} label="Scan runs: drag to zoom, double-click for all dates"
+        onDomain={(a, b) => { const d = brushDomain(a, b, xs, rangeId); if (d) setDomain(d) }} onReset={() => setDomain({ kind: 'all' })} />
+    </Explain>}
+  </>
 }
 
 /** The phase legend, and the hovered run's readout (a bar's or a table row's): each phase's time in it, beside its
@@ -267,9 +324,16 @@ export function ScansPage() {
   const slug = useMinSlug(store)
   const nav = useNavigate()
   const { bytes, delta } = useBytes()
-  const [kind, setKind] = useState('')
-  const [status, setStatus] = useState('')
-  const [span, setSpan] = useUrlState('w', runSpanParam)
+  // The view's state is the URL's (defaults absent), so a filtered list can be linked and survives a reload. A filter
+  // or a window is a history entry (Back undoes it, to the page it was picked on) and starts on the first page;
+  // turning a page is not one.
+  const [kind, setKindP] = useUrlState('k', runKindParam, true)
+  const [status, setStatusP] = useUrlState('st', runStatusParam, true)
+  const [span, setSpanP] = useUrlState('w', runSpanParam, true)
+  const [page, setPage] = useUrlState('pg', pageParam)
+  const first = useCallback(<T,>(set: (v: T) => void) => (v: T) => { set(v); if (page) setPage(0) }, [page, setPage])
+  const setKind = first(setKindP), setStatus = first(setStatusP)
+  const setSpan = useMemo(() => first(setSpanP), [first, setSpanP])
   const hover = useHoverRun()
   const stores = useStores()
   useEffect(() => {
@@ -283,25 +347,29 @@ export function ScansPage() {
   const now = Math.floor(Date.now() / 1000)
   const order = useMemo(() => phaseOrder(runs.flatMap(r => r.spans.map((s, i) => ({ phase: s.phase, seq: i })))), [runs])
   const color = colorer(order)
-  const kinds = [...new Set(runs.map(r => r.run.kind))].sort()
-  const filtered = runs.filter(r => (!kind || r.run.kind === kind) && (!status || runOutcome(r.run, r.phase_issues) === status))
+  // the runs' kinds, and the URL's own when no run has it (a stale link shows what it filters by)
+  const kinds = [...new Set([...runs.map(r => r.run.kind), ...(kind ? [kind] : [])])].sort()
+  const filtered = runs.filter(r => (!kind || r.run.kind === kind) && statusMatches(status, runOutcome(r.run, r.phase_issues)))
   const shown = filtered.filter(r => inSpan(span, r.run.started_ts))
+  const paged = usePaged(shown, DEFAULT_SIZES, [page, setPage])
   return (
     <main className="staged-page scans-page">
       <SiteNav />
-      <h1>Scan runs</h1>
+      <div className="staged-head sr-head">
+        <h1>Scan runs</h1>
+        <RunScanButton block={q.data?.dispatch} runs={runs} queryKey={['scan-runs', store.key]} />
+      </div>
       <p className="sub">Each scan job's run: when it ran, how long each phase took, what it wrote, and how each structure changed against the previous scan; and the stores' maintenance jobs (<code>compact</code>, <code>merge</code>) beside the scan they follow. The stores they append to are on <Link to="/health">Health</Link>.</p>
       {q.isLoading ? <p>Loading runs…</p> : q.error ? <p className="err">{q.error.message}</p> : !q.data?.configured ? (
         <p className="dim">Scan runs aren't recorded on this deployment yet (its D1 has no <code>scan_runs</code> table: migration <code>scan_runs</code>, then <code>dt-cloud scan-run backfill</code>).</p>
       ) : (<>
         <section className="sr-chart">
-          <h3>Duration by run</h3>
-          <DurationStrip runs={filtered} color={color} onPick={id => nav(scanHref(id))} win={span} onWin={setSpan} hover={hover} />
+          <ScanDurationChart runs={filtered} color={color} onPick={id => nav(scanHref(id))} win={span} onWin={setSpan} hover={hover} />
           <Legend order={order} color={color} run={hover.id ? runs.find(r => r.run.run_id === hover.id) : undefined} />
         </section>
         <div className="run-filters">
           {kinds.length > 1 && <select aria-label="Filter by kind" value={kind} onChange={e => setKind(e.target.value)}><option value="">all kinds</option>{kinds.map(k => <option key={k}>{k}</option>)}</select>}
-          <select aria-label="Filter by status" value={status} onChange={e => setStatus(e.target.value)}><option value="">all statuses</option>{['succeeded', 'partial', 'search behind', 'recovered', 'failed', 'running', 'no-op'].map(s => <option key={s} value={s}>{s}</option>)}</select>
+          <select aria-label="Filter by status" value={status} onChange={e => setStatus(e.target.value)}><option value="">all statuses</option>{STATUS_FILTERS.map(f => <option key={f.key} value={f.key}>{f.label}</option>)}</select>
           <span className="dim">{shown.length} / {runs.length} runs</span>
           {span
             ? <Tooltip content="The runs that started in the window dragged on the chart. Esc clears it."><button type="button" className="sr-span" onClick={() => setSpan(null)}>{fmtRunTime(span[0])} → {fmtRunTime(span[1])} ✕</button></Tooltip>
@@ -311,26 +379,30 @@ export function ScansPage() {
           <table className="runs sr-runs">
             <thead><tr>
               <th><Tooltip content="When the scan started, in your time zone; hover for its id.">scan</Tooltip></th><th>status</th>
-              <th className="num">duration</th><th className="hide-md">phases</th>
+              <th className="num"><Tooltip content="Processing time after the queue, with total elapsed time below. Without queue timing, the total is shown.">duration</Tooltip></th><th className="hide-md">phases</th>
               <th className="num"><Tooltip content="Bytes of the run's top-level outputs (listing, index, snapshot, …).">wrote</Tooltip></th>
               <th className="num"><Tooltip content="Against the previous scan's same structures. Green grew, red shrank.">Δ prev</Tooltip></th>
               <th className="num"><Tooltip content="Compute estimate: the machine's list $/h × run hours × tasks, including the run's downstream jobs (listing fan-out).">cost</Tooltip></th>
               <th className="hide-md">links</th>
             </tr></thead>
             <tbody>
-              {shown.map(s => {
+              {paged.rows.map(s => {
                 const r = s.run
                 const maint = isMaintenance(r.kind)
                 const map = r.status === 'succeeded' && !maint ? mapHref(r.scan, store.path, slug) : null
                 const live = liveness(r, s.spans, now)
+                const processing = processingSecs(s.secs, s.spans)
                 return (
                   <tr key={r.run_id} className={[r.status === 'failed' && 'failed', hover.id === r.run_id && 'brushed'].filter(Boolean).join(' ') || undefined}
                     onPointerEnter={() => hover.enter(r.run_id)} onPointerLeave={hover.leave}>
                     <td className="nb"><RunWhen ts={r.started_ts} scan={r.scan} href={scanHref(r.run_id)} />
                       {r.trigger === 'manual' && <> <Tooltip content="Started by hand (a submit or a resume), not by the schedule."><span className="dim">manual</span></Tooltip></>}
                       {(kinds.length > 1 || s.downstream > 0) && <div className="sr-kind">{kinds.length > 1 && <KindLabel run={r} />}{s.downstream > 0 && <Tooltip content={`${s.downstream} downstream job${s.downstream > 1 ? 's' : ''} (listing fan-out, …)`}><span>{kinds.length > 1 ? ' + ' : '+ '}{s.downstream} job{s.downstream > 1 ? 's' : ''}</span></Tooltip>}</div>}</td>
-                    <td><Status cell run={r} failedAt={s.failed_at} issues={s.phase_issues} lost={live?.lost} />{live && <Live live={live} />}</td>
-                    <td className="num nb">{s.secs == null ? <span className="dim">—</span> : fmtDur(s.secs)}</td>
+                    <td><Status cell run={r} failedAt={s.failed_at} issues={s.phase_issues} lost={live?.lost} runHref={scanHref} />{live && <Live live={live} />}</td>
+                    <td className="num nb">{s.secs == null ? <span className="dim">—</span> : processing == null ? fmtDur(s.secs) : <>
+                      <span>{fmtDur(processing)} processing</span>
+                      <div className="sr-kind dim">{fmtDur(s.secs)} incl. wait</div>
+                    </>}</td>
                     <td className="hide-md"><PhaseBar cell spans={s.spans} secs={s.secs} color={color} width={130} /></td>
                     <td className="num nb">{bytes(s.out_bytes)}</td>
                     <td className={`num nb ${deltaClass(s.delta_bytes)}`}>{delta(s.delta_bytes)}</td>
@@ -342,6 +414,7 @@ export function ScansPage() {
             </tbody>
           </table>
         </div>
+        <Pager paged={paged} label="Scan runs" />
       </>)}
       <SiteKbd />
     </main>
@@ -486,6 +559,7 @@ function RunDag({ nodes, edges, brush }: { nodes: DagNode[]; edges: [string, str
 /** The pinned step's drawer: each of its tasks (a fan-out's member by its tag), the machine it ran on, its phases,
  * timing and logs. */
 function StepDrawer({ node, run, project, onClose }: { node: DagNode; run: ScanRun; project: string | null; onClose: () => void }) {
+  const paged = usePaged(node.tasks)
   const t0 = run.started_ts
   const now = Math.floor(Date.now() / 1000)
   return (
@@ -499,7 +573,7 @@ function StepDrawer({ node, run, project, onClose }: { node: DagNode; run: ScanR
           <thead><tr>
             {node.tasks.some(t => t.tag) && <th>task</th>}<th>phases</th><th>machine</th><th className="num">start</th><th className="num">duration</th><th>logs</th>
           </tr></thead>
-          <tbody>{node.tasks.map(t => {
+          <tbody>{paged.rows.map(t => {
             const end = t.end ?? (t.status === 'running' ? now : null)
             return (
               <tr key={t.task}>
@@ -514,21 +588,23 @@ function StepDrawer({ node, run, project, onClose }: { node: DagNode; run: ScanR
           })}</tbody>
         </table>
       </div>
+      <Pager paged={paged} label="Step tasks" />
     </div>
   )
 }
 
 /** A Nextflow run's step tasks: each its own Batch job, with its machine, phases and logs. */
 function TasksTable({ tasks, run, project }: { tasks: RunTask[]; run: ScanRun; project: string | null }) {
+  const paged = usePaged(tasks)
   const t0 = run.started_ts
-  return (
+  return (<>
     <div className="runs-wrap">
       <table className="runs sr-tasks">
         <thead><tr>
           <th>phases</th><th>machine</th><th className="num">start</th><th className="num">duration</th>
           <th><Tooltip content="Nextflow deletes a task's Batch job when it finishes (its logs stay), so the job links only while it runs.">Batch job</Tooltip></th><th>logs</th>
         </tr></thead>
-        <tbody>{tasks.map(t => {
+        <tbody>{paged.rows.map(t => {
           const live = t.status === 'running' && project && run.region ? batchHref(project, run.region, t.job_name) : null
           const end = t.end ?? (t.status === 'running' ? Math.floor(Date.now() / 1000) : null)
           return (
@@ -544,7 +620,8 @@ function TasksTable({ tasks, run, project }: { tasks: RunTask[]; run: ScanRun; p
         })}</tbody>
       </table>
     </div>
-  )
+    <Pager paged={paged} label="Tasks" />
+  </>)
 }
 
 function OutputsTable({ outputs, meta }: { outputs: OutputDelta[]; meta: string | null }) {
@@ -669,7 +746,7 @@ export function ScanRunPage() {
         <h1><code>{r.scan}</code>{(kinds.size > 1 || isMaintenance(r.kind)) && <> <span className="dim"><KindLabel run={r} /></span></>}</h1>
         {isMaintenance(r.kind) && <p className="sub">{r.kind === 'compact' ? 'A compaction' : r.kind === 'race' ? 'A race of a compaction (built beside it; published only if a compaction adopts it)' : 'A merge of deferred carries'} of <code>{r.gen ?? '?'}</code>, its own Batch job; <code>{r.scan}</code> is the newest scan it {r.kind === 'merge' ? 'carries' : 'folds'}{d.siblings.length > 0 && <> (<Link to={scanHref(d.siblings[d.siblings.length - 1].run_id)}>its scan run</Link>)</>}.</p>}
         <p className="sub">
-          <Status run={r} failedAt={d.failed_at} issues={d.phase_issues} lost={liveDetail?.lost} />{liveDetail && <Live live={liveDetail} inline />} · {fmtRunTime(r.started_ts)} → {r.finished_ts ? fmtRunTime(r.finished_ts) : '…'}
+          <Status run={r} failedAt={d.failed_at} issues={d.phase_issues} lost={liveDetail?.lost} runHref={scanHref} />{liveDetail && <Live live={liveDetail} inline />} · {fmtRunTime(r.started_ts)} → {r.finished_ts ? fmtRunTime(r.finished_ts) : '…'}
           {d.secs != null && <> · {fmtDur(d.secs)}</>}
           {tasks.length
             ? <> · <Tooltip content="A Nextflow run: a head job on this machine runs the pipeline, and each step runs as its own Batch job on a machine sized for it (Tasks below)."><span>Nextflow · {tasks.length} tasks{r.machine && <span className="dim"> + {r.machine} head</span>}</span></Tooltip></>
@@ -679,14 +756,11 @@ export function ScanRunPage() {
           {' · '}<Links run={r} links={d} />
         </p>
         {r.status === 'failed' && <div className="sr-failure"><b>Failed {d.failed_at ? (d.failed_at.startsWith('after') ? d.failed_at : `in ${d.failed_at}`) : ''}</b>{r.error && <div><code>{r.error}</code></div>}</div>}
-        {d.phase_issues?.map(i => i.outcome === BEHIND ? <div className="sr-failure recovered" key={i.phase}>
-          <b>{i.phase}: search doesn't cover this scan yet.</b> {i.reason}. The data is published; search catches up when the static name index appends this scan.
-        </div> : i.reason ? <div className={`sr-failure${i.recovery ? ' recovered' : ''}`} key={i.phase}>
-          <b>{i.phase} {i.reason}</b>{' '}
-          {i.recovery ? <>Done by <Link to={scanHref(i.recovery.run_id)}>a subsequent attempt</Link> at {fmtRunTime(i.recovery.finished_ts)}.</> : 'The run is partial until it is done; a later step that depends on it says so instead of failing.'}
-        </div> : <div className={`sr-failure${i.recovery ? ' recovered' : ''}`} key={i.phase}>
-          <b>{i.phase}: {i.outcome} {i.attempts ?? 1}x.</b>{i.detail && <> {i.detail}.</>}{' '}
-          {i.recovery ? <>Done by <Link to={scanHref(i.recovery.run_id)}>a later attempt</Link> at {fmtRunTime(i.recovery.finished_ts)}.</> : 'The data is published; this phase\'s work is not.'}
+        {d.phase_issues?.map(i => <div className={`sr-failure ${issueState(i)}`} key={i.phase}>
+          {i.outcome === BEHIND
+            ? <><b>{i.phase}: search doesn't cover this scan yet.</b> {sentence(i.reason ?? '')} The data is published.</>
+            : <><b>{i.phase}</b> {stop(issueWhat(i))}{i.detail && <> {sentence(i.detail)}</>}{issueLeaves(i) && <> {sentence(issueLeaves(i)!)}</>}</>}
+          {' '}<IssueStanding issue={i} runHref={scanHref} />
         </div>)}
         {r.kind === 'phase-recovery' && r.parent && <p className="sub">Phase recovery for <Link to={scanHref(r.parent)}>the original scan run</Link>. This attempt has its own clock; it does not replace the original timings.</p>}
         <dl className="sr-facts">

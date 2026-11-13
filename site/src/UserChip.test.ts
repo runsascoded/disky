@@ -33,15 +33,15 @@ describe('no registry (a store that publishes no rules)', () => {
 describe("the signed-in user's own photo", () => {
   const PIC = 'https://lh3.googleusercontent.com/a/pic'
   it("is their chips' avatar, matched by canonical id, and no one else's", () => {
-    const me = { email: 'ryan@runsascoded.com', avatar: PIC }
+    const me = { email: 'alice@lab.example.test', avatar: PIC }
     expect([
-      selfAvatar('ryan@runsascoded.com', me),
-      selfAvatar('Ryan@RunsAsCoded.com', me),
-      selfAvatar('ryan', me),
+      selfAvatar('alice@lab.example.test', me),
+      selfAvatar('Alice@Lab.Example.test', me),
+      selfAvatar('alice', me),
       selfAvatar('jane@example.org', me),
-      selfAvatar('ryan', { email: 'ryan@runsascoded.com' }),
-      selfAvatar('ryan', { ...me, guest: true }),
-      selfAvatar('ryan', null),
+      selfAvatar('alice', { email: 'alice@lab.example.test' }),
+      selfAvatar('alice', { ...me, guest: true }),
+      selfAvatar('alice', null),
     ]).toEqual([PIC, PIC, PIC, undefined, undefined, undefined, undefined])
   })
 })

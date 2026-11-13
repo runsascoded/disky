@@ -1,0 +1,252 @@
+{
+ "cfg": {
+  "template": "cw",
+  "title": "S3 usage",
+  "site_url": "https://cw.example.org",
+  "host": "cw.example.org",
+  "unit": {
+   "name": "TiB",
+   "bytes": 1099511627776,
+   "short": "Ti"
+  },
+  "primary": "main-data",
+  "buckets": {
+   "main-data": {
+    "label": "main",
+    "path": null,
+    "zone": null,
+    "quotas": [
+     {
+      "bytes": 1000555581276160,
+      "name": "1 PB",
+      "short": "1P",
+      "classes": []
+     }
+    ]
+   },
+   "hot-data": {
+    "label": "hot",
+    "path": null,
+    "zone": null,
+    "quotas": [
+     {
+      "bytes": 109951162777600,
+      "name": "100 TiB",
+      "short": "100Ti",
+      "classes": []
+     }
+    ]
+   }
+  },
+  "prices": {},
+  "icons_base": "https://icons.example.org"
+ },
+ "month": "2026-09",
+ "plot_url": null,
+ "prev_url": null,
+ "rows": {
+  "template": "cw",
+  "closed": false,
+  "pre": [],
+  "lead": [
+   {
+    "scan": "2026-08-31T0000",
+    "slug": "26083100",
+    "tb": 700.0,
+    "extra": {},
+    "classes": {}
+   },
+   {
+    "scan": "2026-08-31T1200",
+    "slug": "26083112",
+    "tb": 705.0,
+    "extra": {},
+    "classes": {}
+   }
+  ],
+  "rows": [
+   {
+    "scan": "2026-09-01T0000",
+    "slug": "26090100",
+    "tb": 701.0,
+    "extra": {},
+    "classes": {}
+   },
+   {
+    "scan": "2026-09-01T1200",
+    "slug": "26090112",
+    "tb": 702.0,
+    "extra": {},
+    "classes": {}
+   },
+   {
+    "scan": "2026-09-02T0000",
+    "slug": "26090200",
+    "tb": 703.0,
+    "extra": {},
+    "classes": {}
+   },
+   {
+    "scan": "2026-09-02T1200",
+    "slug": "26090212",
+    "tb": 704.0,
+    "extra": {},
+    "classes": {}
+   },
+   {
+    "scan": "2026-09-03T0000",
+    "slug": "26090300",
+    "tb": 705.0,
+    "extra": {},
+    "classes": {}
+   },
+   {
+    "scan": "2026-09-03T1200",
+    "slug": "26090312",
+    "tb": 706.0,
+    "extra": {},
+    "classes": {}
+   },
+   {
+    "scan": "2026-09-04T0000",
+    "slug": "26090400",
+    "tb": 707.0,
+    "extra": {},
+    "classes": {}
+   },
+   {
+    "scan": "2026-09-04T1200",
+    "slug": "26090412",
+    "tb": 708.0,
+    "extra": {},
+    "classes": {}
+   },
+   {
+    "scan": "2026-09-05T0000",
+    "slug": "26090500",
+    "tb": 709.0,
+    "extra": {},
+    "classes": {}
+   },
+   {
+    "scan": "2026-09-05T1200",
+    "slug": "26090512",
+    "tb": 710.0,
+    "extra": {},
+    "classes": {}
+   },
+   {
+    "scan": "2026-09-06T0000",
+    "slug": "26090600",
+    "tb": 711.0,
+    "extra": {},
+    "classes": {}
+   },
+   {
+    "scan": "2026-09-06T1200",
+    "slug": "26090612",
+    "tb": 712.0,
+    "extra": {},
+    "classes": {}
+   },
+   {
+    "scan": "2026-09-07T0000",
+    "slug": "26090700",
+    "tb": 713.0,
+    "extra": {},
+    "classes": {}
+   },
+   {
+    "scan": "2026-09-07T1200",
+    "slug": "26090712",
+    "tb": 714.0,
+    "extra": {},
+    "classes": {}
+   }
+  ]
+ },
+ "op": ":arrow_deg20: **+9.0 TiB** [month-to-date](https://cw.example.org/?d=26090712-7d#over-time) · **+14.0 TiB** [since 8/31](https://cw.example.org/?d=26090712-7d12h#over-time) · 714 TiB · 78.5% of 1 PB · [dashboard](https://cw.example.org/)\n_as of 9/7 12:00Z_\n\n*Weekly summaries*\n:arrow_deg30: [wk of 8/31](https://cw.example.org/?d=26090612-6d12h#over-time): **+12.0 TiB** → 712 TiB · 78.2% of 1 PB\n:arrow_deg0: [wk of 9/7](https://cw.example.org/?d=26090712-1d#over-time) _(partial)_: **+2.0 TiB** → 714 TiB · 78.5% of 1 PB",
+ "image": {
+  "title": "S3 usage — September 2026",
+  "note": "cw.example.org · TiB",
+  "month": "2026-09",
+  "from": "2026-08-09",
+  "points": [
+   {
+    "scan": "2026-08-31T0000",
+    "bytes": 769658139443200
+   },
+   {
+    "scan": "2026-08-31T1200",
+    "bytes": 775155697582080
+   },
+   {
+    "scan": "2026-09-01T0000",
+    "bytes": 770757651070976
+   },
+   {
+    "scan": "2026-09-01T1200",
+    "bytes": 771857162698752
+   },
+   {
+    "scan": "2026-09-02T0000",
+    "bytes": 772956674326528
+   },
+   {
+    "scan": "2026-09-02T1200",
+    "bytes": 774056185954304
+   },
+   {
+    "scan": "2026-09-03T0000",
+    "bytes": 775155697582080
+   },
+   {
+    "scan": "2026-09-03T1200",
+    "bytes": 776255209209856
+   },
+   {
+    "scan": "2026-09-04T0000",
+    "bytes": 777354720837632
+   },
+   {
+    "scan": "2026-09-04T1200",
+    "bytes": 778454232465408
+   },
+   {
+    "scan": "2026-09-05T0000",
+    "bytes": 779553744093184
+   },
+   {
+    "scan": "2026-09-05T1200",
+    "bytes": 780653255720960
+   },
+   {
+    "scan": "2026-09-06T0000",
+    "bytes": 781752767348736
+   },
+   {
+    "scan": "2026-09-06T1200",
+    "bytes": 782852278976512
+   },
+   {
+    "scan": "2026-09-07T0000",
+    "bytes": 783951790604288
+   },
+   {
+    "scan": "2026-09-07T1200",
+    "bytes": 785051302232064
+   }
+  ],
+  "units": "TiB",
+  "quota": {
+   "bytes": 1000555581276160,
+   "name": "1 PB"
+  },
+  "diff": {
+   "from": "2026-08-31T0000",
+   "to": "2026-09-07T1200",
+   "path": "main-data",
+   "title": "What changed in main-data — 8/31 → 9/7"
+  }
+ }
+}

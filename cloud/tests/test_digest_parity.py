@@ -1,12 +1,13 @@
-"""The site's OP renderer (`site/src/digest`) against the job's: each case here renders a month's OP text and plot
-request in Python and pins them, with the rows and config they came from, as a JSON fixture under
-`tests/fixtures/digest/parity/` (`DT_UPDATE_GOLDEN=1` rewrites). `site/src/digest/parity.test.ts` renders each
-fixture's rows in TS and asserts the same text and request, byte for byte (specs/slack-preview-page.md, phase 1)."""
+"""The digest OP's goldens (specs/slack-preview-page.md): each case's JSON fixture under
+`tests/fixtures/digest/parity/` holds what the job sends the site's renderer for a month (`cfg`, `rows`, the plot
+and previous-thread urls), pinned here (`DT_UPDATE_GOLDEN=1` rewrites those fields), and the OP text and plot request
+the renderer must answer, pinned by `site/src/digest/parity.test.ts` (byte for byte)."""
 from __future__ import annotations
 
 import datetime as dt
 import json
 import os
+import re
 from dataclasses import replace
 from datetime import date
 from pathlib import Path
@@ -16,7 +17,7 @@ import pytest
 from dt_cloud import digest as E
 from dt_cloud import digest_cw as DC
 
-from digest_examples import CW_EXAMPLE, GCS_EXAMPLE
+from digest_examples import CW_EXAMPLE, GCS_EXAMPLE, config_file
 from test_digest_golden import CW6_SCANS, cw_root, gcs_root
 
 TIB = 1024**4
@@ -53,6 +54,21 @@ def _tb_meta(i: int) -> dict:
             "class_bytes": {"1": round(pub * 10**12), "5": round(priv * 10**12), "6": round(git * 10**12)}}
 
 
+def _cw_flat(tib: float) -> dict:
+    return {"total_bytes": round(tib * TIB), "total_objects": 1_000_000, "class_bytes": {}}
+
+
+def _publish(root: Path, dated_meta) -> None:
+    for scan, m in dated_meta:
+        (root / scan).mkdir(parents=True, exist_ok=True)
+        (root / scan / "meta.json").write_text(json.dumps(m))
+
+
+#: A lead day (Mon 8/31: 700, 705 TiB), then 9/1 (710, 713) and 9/2 (712, 715), 12-hourly: one ISO week.
+CW_LEAD = [("2026-08-31T0000", _cw_flat(700)), ("2026-08-31T1200", _cw_flat(705))]
+CW_SEPT = [("2026-09-01T0000", _cw_flat(710)), ("2026-09-01T1200", _cw_flat(713)), ("2026-09-02T0000", _cw_flat(712)), ("2026-09-02T1200", _cw_flat(715))]
+
+
 def _case(name: str, tmp_path: Path):
     """``(config, snapshot root, month, plot url, prev url)`` for case ``name``."""
     if name == "gcs-aug":
@@ -70,6 +86,17 @@ def _case(name: str, tmp_path: Path):
         root = tmp_path / "snapshots" / "cw"
         _daily(root, date(2026, 7, 27), date(2026, 9, 1), lambda i: {"total_bytes": (700 + i) * TIB, "total_objects": 1, "class_bytes": {}})
         return CW_EXAMPLE, root, date(2026, 9, 1), PLOT, PREV
+    if name == "cw-noquota":
+        # no quota on any bucket: no `% of` clauses, one bucket's raw TiB
+        root = tmp_path / "snapshots" / "cw"
+        _publish(root, CW_LEAD + CW_SEPT)
+        return replace(CW_EXAMPLE, buckets={}), root, date(2026, 9, 1), PLOT, None
+    if name == "cw-two-weeks":
+        # a completed week (Sunday scanned) is not partial; the next week's bullet is Δ vs that week's end
+        root = tmp_path / "snapshots" / "cw"
+        scans = [(f"2026-09-{d:02d}T{h}", _cw_flat(700 + i)) for i, (d, h) in enumerate(((d, h) for d in range(1, 8) for h in ("0000", "1200")), start=1)]
+        _publish(root, CW_LEAD + scans)
+        return CW_EXAMPLE, root, date(2026, 9, 1), None, None
     if name == "cw-tb":
         root = tmp_path / "snapshots" / "hf"
         _daily(root, date(2026, 9, 20), date(2026, 10, 9), _tb_meta)
@@ -77,24 +104,21 @@ def _case(name: str, tmp_path: Path):
     raise ValueError(name)
 
 
-CASES = ["gcs-aug", "gcs-aug-discord", "gcs-first", "cw-sep", "cw6-oct", "cw-first", "cw-tb"]
+CASES = ["gcs-aug", "gcs-aug-discord", "gcs-first", "cw-sep", "cw6-oct", "cw-first", "cw-noquota", "cw-two-weeks", "cw-tb"]
 
 
 @pytest.mark.parametrize("name", CASES)
 def test_parity_fixture(name: str, tmp_path: Path):
+    # the job's side of the fixture: what it sends the site for the case (the answer, `op` / `image`, is the site's)
     cfg, root, month, plot_url, prev_url = _case(name, tmp_path)
     tpl = E.template(cfg)
     data = tpl.load(str(root), month)
-    actual = {
-        "cfg": E.cfg_json(cfg), "month": f"{month:%Y-%m}", "plot_url": plot_url, "prev_url": prev_url,
-        "rows": tpl.rows_json(data), "op": tpl.op_body(data, month, plot_url, prev_url), "image": tpl.image_request(data, month),
-    }
     path = PARITY / f"{name}.json"
-    text = json.dumps(actual, indent=1, ensure_ascii=False) + "\n"
+    fx = json.loads(path.read_text())
+    actual = {"cfg": E.cfg_json(cfg), "month": f"{month:%Y-%m}", "plot_url": plot_url, "prev_url": prev_url, "rows": tpl.rows_json(data)}
     if os.environ.get("DT_UPDATE_GOLDEN"):
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(text)
-    assert text == path.read_text()
+        path.write_text(json.dumps({**fx, **actual}, indent=1, ensure_ascii=False) + "\n")
+    assert {k: fx[k] for k in actual} == json.loads(json.dumps(actual))
 
 
 def test_preview_bundle_is_the_parity_shape():
@@ -105,7 +129,7 @@ def test_preview_bundle_is_the_parity_shape():
     b = E.preview_bundle(tpl, data, date(2026, 9, 1), op="op", plot_url=PLOT, prev_url=None, channel="C1", variant="sender",
                          op_ts="m1", permalink="https://slack.example.org/p1")
     assert sorted(b) == ["cfg", "channel", "image", "month", "op", "op_ts", "params", "permalink", "plot_url", "posted_at",
-                         "prev_url", "replies", "rows", "variant", "version"]
+                         "prev_url", "replies", "reply", "rows", "variant", "version"]
     assert (b["version"], b["month"], b["rows"]["template"], b["image"]["month"], b["params"]) == (1, "2026-09", "cw", "2026-09", "")
 
 
@@ -130,9 +154,55 @@ def test_converge_writes_the_preview_bundle(tmp_path: Path):
     assert not (tmp_path / "bare" / "served").exists()
 
 
+def _no_slack(*a, **kw):
+    raise AssertionError("a preview-only run touched Slack")
+
+
+def test_preview_only_writes_the_bundle_and_nothing_else(tmp_path: Path, monkeypatch):
+    # the CLI: no Slack client is made (none could be: no token), the replies render under `-q`, the file's other marks
+    # untouched; the bundle says it was never posted; nothing else lands in the snapshots root (no converge state)
+    import yaml
+    from click.testing import CliRunner
+    from thrds import slack
+
+    from dt_cloud.cli import main
+
+    monkeypatch.setattr(slack, "SlackClient", _no_slack)
+    monkeypatch.delenv("SLACK_BOT_TOKEN", raising=False)
+    monkeypatch.delenv("SLACK_CHANNEL", raising=False)
+    root = cw_root(tmp_path)
+    before = sorted(p for p in root.parent.rglob("*"))
+    served = tmp_path / "served"
+    config = config_file(CW_EXAMPLE, tmp_path / "digest.yml")
+    d = yaml.safe_load(config.read_text())
+    d["preview"] = f"{served}/{{channel}}/{{variant}}"
+    d["buckets"]["hot-data"]["shape"] = "star"
+    config.write_text(yaml.safe_dump(d))
+    res = CliRunner().invoke(main, ["digest", "-T", "cw", "-C", str(config), "-L", "-r", str(root), "-m", "2026-09", "-W", "shapes-preview", "-q", "runway-hue"], catch_exceptions=False)
+    assert res.exit_code == 0
+    assert sorted(str(p.relative_to(served)) for p in served.rglob("*.json")) == ["shapes-preview/sender/2026-09.json"]
+    assert sorted(p for p in root.parent.rglob("*")) == before
+    b = json.loads((served / "shapes-preview" / "sender" / "2026-09.json").read_text())
+    assert (b["channel"], b["op_ts"], b["permalink"], b["plot_url"], b["prev_url"]) == ("shapes-preview", None, None, None, None)
+    assert {k: v.get("shape") for k, v in b["cfg"]["buckets"].items()} == {"main-data": None, "hot-data": "star"}
+    # each reply's marks, their steps dropped: the plain circle and the star
+    assert {re.sub(r"-[1-8]:", ":", m) for r in b["replies"] for m in re.findall(r":runway-[a-z0-9-]+:", r["body"])} == {":runway:", ":runway-star:"}
+
+
+@pytest.mark.parametrize("key", ["C0C1YR7D0KU", "D0CE8QE83EH", "a/b", ""])
+def test_preview_only_refuses_a_channel_id(key: str, tmp_path: Path):
+    # a real channel's bundle is the page's record of what its thread shows
+    cfg = replace(CW_EXAMPLE, preview=str(tmp_path / "served" / "{channel}" / "{variant}"))
+    with pytest.raises(SystemExit) as e:
+        E.preview_only(E.template(cfg), str(cw_root(tmp_path)), date(2026, 9, 1), key)
+    assert str(e.value) == f"digest: preview key {key!r}: a lowercase slug, never a channel id"
+    assert not (tmp_path / "served").exists()
+
+
+@pytest.mark.real_site_render
 @pytest.mark.parametrize("name", ["cw-sep", "gcs-aug"])
 def test_site_renderer_posts_the_rows_and_uses_the_answer(name: str, tmp_path: Path, monkeypatch):
-    """`renderer: site` (phase 2): the OP text and plot request come from `POST /api/digest-op`, sent exactly the
+    """The OP text and plot request come from `POST /api/digest-op`, sent exactly the
     parity fixture's request under the config's params; the site's answer here is the fixture's own (what
     `digest-op.test.ts` asserts the site returns for it)."""
     from dt_cloud import site
@@ -147,7 +217,7 @@ def test_site_renderer_posts_the_rows_and_uses_the_answer(name: str, tmp_path: P
 
     monkeypatch.setattr(site, "post_json", post_json)
     monkeypatch.setenv("SITE_TOKEN", "tok")
-    tpl = E.template(replace(cfg, renderer="site", params="qc"))
+    tpl = E.template(replace(cfg, params="qc"))
     data = tpl.load(str(root), month)
     assert (tpl.op_body(data, month, plot_url, prev_url), tpl.image_request(data, month)) == (fx["op"], fx["image"])
     req = {"month": fx["month"], "rows": fx["rows"], "cfg": fx["cfg"], "params": "qc"}
@@ -158,15 +228,12 @@ def test_site_renderer_posts_the_rows_and_uses_the_answer(name: str, tmp_path: P
     monkeypatch.delenv("SITE_TOKEN")
     with pytest.raises(SystemExit) as e:
         tpl.op_body(data, month, plot_url, prev_url)
-    assert str(e.value) == "digest: `renderer: site` needs the site token ($SITE_TOKEN)"
+    assert str(e.value) == "digest: the OP is rendered by the site, which needs the site token ($SITE_TOKEN)"
 
 
-def test_renderer_config():
-    assert (E.config_from_dict({"template": "cw"}).renderer, E.config_from_dict({"template": "cw", "renderer": "site", "params": "qc,pp"}).params) == (
-        "local", "qc,pp")
+def test_params_config():
+    assert (E.config_from_dict({"template": "cw"}).params, E.config_from_dict({"template": "cw", "params": "qc,pp"}).params) == ("", "qc,pp")
+    # `renderer` is gone (the site is the only one): a config still naming it is refused, as any unknown key
     with pytest.raises(ValueError) as e:
-        E.config_from_dict({"template": "cw", "renderer": "ts"})
-    assert str(e.value) == "digest config renderer: 'ts' is not one of ('local', 'site')"
-    with pytest.raises(ValueError) as e:
-        E.config_from_dict({"template": "cw", "params": "qc"})
-    assert str(e.value) == "digest config params: 'qc' needs `renderer: site` (the local renderer has no params)"
+        E.config_from_dict({"template": "cw", "renderer": "site"})
+    assert str(e.value) == "unknown digest config keys: ['renderer']"

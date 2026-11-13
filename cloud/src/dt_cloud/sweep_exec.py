@@ -21,7 +21,7 @@ import threading
 import time
 from bisect import bisect_right
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 
@@ -250,6 +250,26 @@ def split_listing_roots(
     return sorted(roots, key=root_count, reverse=True)
 
 
+#: The narrowest soft-delete retention a real run accepts when nothing says otherwise: what `sweep execute*` default to, and
+#: what the site dispatches when `sweep_settings` has no row (`site/src/softDelete.ts`).
+MIN_SOFT_DELETE_DAYS = 7
+
+
+def undo_deadline_of(finished_ts: int, soft_delete_days: int) -> int | None:
+    """A real run's recorded undo deadline: its end plus the narrowest retention measured on its buckets. None at 0: soft delete
+    is off on a bucket it touched, so there's no window to record (`deletion_runs.soft_delete_days` = 0 says why)."""
+    return finished_ts + soft_delete_days * 86400 if soft_delete_days > 0 else None
+
+
+def narrowest_retention(entries: Iterable[dict]) -> int | None:
+    """The narrowest soft-delete retention a run's undo rests on, over its per-bucket summary entries: only the buckets it may have
+    deleted from, since a bucket of skips has nothing to restore (a delete with no answer, or a bucket cut short, may have). With
+    none of those, every bucket measured; None if none was."""
+    measured = [entry for entry in entries if "soft_delete_days" in entry]
+    deleting = [entry for entry in measured if entry.get("decisions", {}).get("delete") or entry.get("failed_dirs") or entry.get("interrupted") or entry.get("error")]
+    return min((int(entry["soft_delete_days"]) for entry in deleting or measured), default=None)
+
+
 def execute_plan(
     plan_dir: str,
     for_real: bool = False,
@@ -258,7 +278,7 @@ def execute_plan(
     workers: int = 0,
     delete_workers: int = 32,
     max_root_objects: int = 250_000,  # a listing root bigger than this splits into its children (one listing thread per root)
-    min_soft_delete_days: int = 7,
+    min_soft_delete_days: int = MIN_SOFT_DELETE_DAYS,
     client=None,
     stop: threading.Event | None = None,  # set → roots not yet started are skipped; the log and summary still land (`interrupted`)
     profile_dir: str | None = None,
@@ -285,7 +305,7 @@ def execute_plan(
     band_of = band_namer(approved, approved_objects)
 
     mode = "deleted" if for_real else "would-delete"
-    summary: dict = {"plan": plan_dir, "for_real": for_real, "drift": drift, "buckets": {}}
+    summary: dict = {"plan": plan_dir, "for_real": for_real, "drift": drift, "min_soft_delete_days": min_soft_delete_days, "buckets": {}}
     # Deletes run on their own pool, fed by every listing root: a batch of 100
     # is ~1–2 s of sequential server work, so a lopsided root (east5's
     # largest held 31% of the objects) no longer serializes a third of the run
@@ -738,6 +758,11 @@ BULK_SAMPLE = 20  # fallback dirs named in the summary
 #: GCS glob metacharacters: a dir containing one can't be matched literally by
 #: `<dir>/**`, so it always takes the per-object path.
 GLOB_META = frozenset("*?[]{}\\,")
+#: Per-object restores between two reports to `undo_run`'s `progress`: the most a killed per-object undo can have restored
+#: and not said. (A bulk undo's bucket is reported once its operations are verified.)
+UNDO_PROGRESS_ROWS = 10_000
+#: The decisions that leave a deleted name live.
+LIVE_AGAIN = ("restored", "bulk_restored", "already_live")
 
 
 def _rfc3339(ts: int) -> str:
@@ -840,9 +865,11 @@ def undo_run(
     window: tuple[int, int] | None = None,
     bulk_ops: int = 4,
     globs_per_op: int = BULK_GLOBS_PER_OP,
+    progress: Callable[[dict[str, Counter]], None] | None = None,
 ) -> dict:
     """Restore what a real run deleted: every `decision == 'delete'` row of its
-    `deleted/<bucket>.parquet` logs (optionally only under `prefixes`,
+    `deleted/` logs (no final summary needed: a killed run's parts are enough,
+    `log_partial` in the summary; optionally only under `prefixes`,
     `gs://bucket/dir/` or bare `bucket/dir/`), via the GCS soft-delete
     restore of exactly the logged generation. `if_generation_match=0` makes it
     safe to re-run and safe against rewrites: a name that is live again is
@@ -852,6 +879,17 @@ def undo_run(
     beside the run's own logs; returns the summary. `deadline` (the run's
     `undo_deadline`) refuses a late undo up front — GCS would just answer 404
     per object, slowly.
+
+    `progress` is told what has settled as it settles (`{band: decisions}`: every
+    `UNDO_PROGRESS_ROWS` per-object restores, and a bucket's bulk rows once
+    verified), so a caller's record (`UndoRecord`) holds what was restored even
+    if this never returns. Nothing is reported before a restore has an answer,
+    or on a dry run.
+
+    On an XML run a logged `delete` means the generation was attempted, not that
+    this run removed it (GCS replies `Deleted` either way), so undo can also bring
+    back an object someone else deleted after the scan; with no later write at that
+    name, `if_generation_match=0` doesn't stop it.
 
     `bulk=True` restores whole directories with `objects.bulkRestore` instead,
     provably touching only logged objects:
@@ -890,6 +928,7 @@ def undo_run(
     import fsspec
     import pandas as pd
     import pyarrow as pa
+    import pyarrow.compute as pc
     import pyarrow.parquet as pq
 
     now = now or int(dt.datetime.now(dt.timezone.utc).timestamp())
@@ -899,19 +938,42 @@ def undo_run(
             f"(soft-delete retention elapsed) — nothing can be restored"
         )
     fs, ppath = fsspec.core.url_to_fs(log_dir)
-    with fs.open(f"{ppath}/deleted-summary.json") as fh:
-        dsum = json.load(fh)
-    if not dsum.get("for_real"):
-        raise SystemExit(f"{log_dir} is a dry run — it deleted nothing")
     with fs.open(f"{ppath}/plan-summary.json") as fh:
         plan = json.load(fh)
+    # A killed run, or one whose executor died before its summary, leaves none: its log may be missing parts.
+    log_partial = not fs.exists(f"{ppath}/deleted-summary.json")
+    if log_partial:
+        if plan.get("diagnostic"):
+            raise SystemExit(f"{log_dir} is a dry run — it deleted nothing")
+        if not fs.glob(f"{ppath}/deleted/**"):
+            raise SystemExit(f"{log_dir} has no deleted-summary.json and no deleted/ log: nothing names what it deleted")
+        err(
+            f"{log_dir}: no deleted-summary.json, so its log may be partial: this restores only the generations it names. One in a part "
+            "that never uploaded stays deleted (-B won't reach it): restore it by hand, or, while this scan is still the newest, undo a re-dispatch of the same items, whose log names it. After a newer scan no manifest names it, and by hand is the only way."
+        )
+        logged_buckets = list(plan["buckets"])
+    else:
+        with fs.open(f"{ppath}/deleted-summary.json") as fh:
+            dsum = json.load(fh)
+        if not dsum.get("for_real"):
+            raise SystemExit(f"{log_dir} is a dry run — it deleted nothing")
+        logged_buckets = list(dsum["buckets"])
     approved = tuple(plan.get("approved") or ())
     if client is None:
         from google.cloud import storage
         client = storage.Client()
     from google.api_core.exceptions import NotFound, PreconditionFailed
 
-    buckets = [b for b in dsum["buckets"] if not only_buckets or b in only_buckets]
+    buckets = [b for b in logged_buckets if not only_buckets or b in only_buckets]
+    # GCS refuses to restore from a bucket whose soft delete is off now (400 "Soft delete policy is required"), whatever
+    # it retained when the run deleted: refused up front, by name, not once per object.
+    off = [b for b in buckets if _soft_delete_off(client, b)]
+    if off:
+        on = [b for b in buckets if b not in off]
+        raise SystemExit(
+            f"undo unavailable: soft delete is off on {', '.join(off)} (GCS, now): it restores nothing from a bucket with no soft-delete policy"
+            + (f". The run's other buckets still have one: -b {' -b '.join(on)}" if on else "")
+        )
     windows: dict[str, tuple[int, int]] = {}
     if bulk:
         for bucket in buckets:
@@ -946,13 +1008,13 @@ def undo_run(
         ("name", pa.string()), ("size_bytes", pa.int64()), ("generation", pa.int64()),
         ("new_generation", pa.int64()), ("decision", pa.string()), ("error", pa.string()), ("dir", pa.string()),
     ])
-    summary: dict = {"log_dir": log_dir, "stamp": stamp, "dry_run": dry_run, "prefixes": list(prefixes), "bulk": bulk, "buckets": {}}
+    summary: dict = {"log_dir": log_dir, "stamp": stamp, "dry_run": dry_run, "prefixes": list(prefixes), "bulk": bulk, "buckets": {}, **({"log_partial": True} if log_partial else {})}
     for bucket in buckets:
         log = read_log(fs, ppath, "deleted", bucket)
         if log is None:
             continue
-        t = log.select(["name", "size_bytes", "generation", "decision", "dir"]).to_pandas()
-        t = t[t["decision"] == "delete"]
+        # Filtered before pandas: a skipped row's null would turn every generation into a float.
+        t = log.select(["name", "size_bytes", "generation", "decision", "dir"]).filter(pc.equal(log["decision"], "delete")).to_pandas()
         t = t[[wanted(bucket, n) for n in t["name"]]]
         todo = list(t[["name", "size_bytes", "generation", "dir"]].itertuples(index=False, name=None))
         err(f"{bucket}: {len(todo):,} deleted object(s) to restore{' (dry run)' if dry_run else ''}{' (bulk)' if bulk else ''}")
@@ -976,12 +1038,21 @@ def undo_run(
             except Exception as e:  # keep going: the log names every failure, the summary counts them
                 return {**base(row), "decision": "failed", "error": f"{type(e).__name__}: {e}"[:500]}
 
+        def settled(done: list[dict]) -> None:
+            if progress is None or dry_run or not done:
+                return
+            by_band: dict[str, Counter] = {}
+            for r in done:
+                by_band.setdefault(band_of(bucket, r["dir"], r["name"]), Counter())[r["decision"]] += 1
+            progress(by_band)
+
         rows: list[dict] = []
         bulk_info = None
         if bulk:
             per_object, rows, bulk_info = _undo_bulk(
                 client, bucket, todo, windows[bucket], dry_run, workers, bulk_ops, globs_per_op, base,
             )
+            settled(rows)
             if bulk_info["ops"]:
                 bpath = f"{ppath}/restored/{bucket}-{stamp}-bulk.json"
                 fs.makedirs(bpath.rsplit("/", 1)[0], exist_ok=True)
@@ -989,7 +1060,10 @@ def undo_run(
                     json.dump(bulk_info["ops"], fh, indent=2)
             todo = per_object
         with ThreadPoolExecutor(max_workers=workers) as pool:
-            rows.extend(pool.map(one, todo))
+            for i in range(0, len(todo), UNDO_PROGRESS_ROWS):
+                part = list(pool.map(one, todo[i:i + UNDO_PROGRESS_ROWS]))
+                rows.extend(part)
+                settled(part)
         counts: Counter = Counter(r["decision"] for r in rows)
         bands: dict[str, Counter] = {}
         restored_b = 0
@@ -1128,30 +1202,61 @@ def _undo_bulk(
     return per_object, rows, info
 
 
-def record_undo(run_id: str, summary: dict, deleted_objects: int) -> str:
-    """Persist an undo to D1: `deletion_runs.undo_state` ('full' when every
-    object the run deleted is live again — restored now (per object or in
-    bulk) or already — else 'partial') and `deletion_bands.undone_objects`
-    per band."""
-    from .index_footer import _creds, _d1_query, _q
+class UndoRecord:
+    """An undo's record in D1, written as the undo goes (`undo_run`'s `progress`), so a run's row says only what an undo
+    has seen: `deletion_bands.undone_objects` per band as restores settle, and `deletion_runs.undo_state` `partial` from
+    the first deleted name found live again. `finish` settles the state: `full` when every object the run deleted is
+    live again (restored now, per object or in bulk, or already), `partial` when some are, and as it was when none is.
 
-    tok, acct = _creds()
-    live = sum(
-        sum(b["decisions"].get(k, 0) for k in ("restored", "bulk_restored", "already_live"))
-        for b in summary["buckets"].values()
-    )
-    state = "full" if deleted_objects and live >= deleted_objects else "partial"
-    stmts = [f"UPDATE deletion_runs SET undo_state = {_q(state)} WHERE run_id = {_q(run_id)}"]
-    for b in summary["buckets"].values():
-        for prefix, c in b["bands"].items():
-            undone = c.get("restored", 0) + c.get("bulk_restored", 0)
-            if undone:
-                stmts.append(
-                    f"UPDATE deletion_bands SET undone_objects = undone_objects + {int(undone)} "
-                    f"WHERE run_id = {_q(run_id)} AND prefix = {_q(prefix)}"
-                )
-    _d1_query("; ".join(stmts), acct, tok)
-    return state
+    Nothing is written before a restore has an answer, so an undo refused up front, or dead before its first restore,
+    leaves the row untouched; one that dies part way leaves `partial` and the counts it had reported. Those are a lower
+    bound: short by the per-object restores in flight (at most `UNDO_PROGRESS_ROWS`), and by a bucket's bulk operations
+    if it died before verifying them. The names are live either way, and the next undo finds them so (`already_live`,
+    which `undone_objects` doesn't count). `full` is never taken back to `partial`: an undo of some buckets or prefixes
+    covers less than the run. A write D1 refuses is kept, and goes with the next report."""
+
+    def __init__(self, run_id: str) -> None:
+        self.run_id = run_id
+        #: Deleted names found live again so far.
+        self.live = 0
+        #: Restores not yet written, by band.
+        self.pending: Counter = Counter()
+        #: Has `partial` been written?
+        self.marked = False
+
+    def __call__(self, bands: dict[str, Counter]) -> None:
+        for prefix, c in bands.items():
+            self.live += sum(c.get(k, 0) for k in LIVE_AGAIN)
+            self.pending[prefix] += c.get("restored", 0) + c.get("bulk_restored", 0)
+        try:
+            self._write("partial" if self.live and not self.marked else None)
+        except Exception as e:  # the restores stand; so does what is still to be said of them
+            err(f"WARN: undo progress not recorded ({e}); it goes with the next report")
+
+    def _write(self, state: str | None) -> None:
+        from .index_footer import _creds, _d1_query, _q
+
+        stmts = []
+        if state:
+            stmts.append(f"UPDATE deletion_runs SET undo_state = {_q(state)} WHERE run_id = {_q(self.run_id)}" + ("" if state == "full" else " AND undo_state != 'full'"))
+        stmts += [
+            f"UPDATE deletion_bands SET undone_objects = undone_objects + {int(n)} WHERE run_id = {_q(self.run_id)} AND prefix = {_q(prefix)}"
+            for prefix, n in self.pending.items() if n
+        ]
+        if not stmts:
+            return
+        tok, acct = _creds()
+        _d1_query("; ".join(stmts), acct, tok)
+        self.pending.clear()
+        self.marked = self.marked or state is not None
+
+    def finish(self, summary: dict, deleted_objects: int) -> str | None:
+        """Settle the state once the undo has run to its end; returns it (None: nothing is live again, and the row's
+        state stays as it was)."""
+        # A partial log can't say everything is back, however many of its rows are.
+        state = "full" if deleted_objects and self.live >= deleted_objects and not summary.get("log_partial") else "partial" if self.live else None
+        self._write(state)
+        return state
 
 
 def run_id_for(plan: dict, started_ts: int) -> str:
@@ -1164,21 +1269,35 @@ def run_id_for(plan: dict, started_ts: int) -> str:
 # `deletion_runs.head` / `exec_head` recorded a ledger position a plan-first
 # run doesn't have (it reads no ledger); both are written as 0. Likewise
 # `ledger_drift_dirs`: nothing re-classifies the manifest.
-def record_run_start(plan: dict, plan_dir: str, actor: str, started_ts: int, for_real: bool, buckets: tuple[str, ...] = ()) -> str:
+def record_run_start(
+    plan: dict,
+    plan_dir: str,
+    actor: str,
+    started_ts: int,
+    for_real: bool,
+    buckets: tuple[str, ...] = (),
+    min_soft_delete_days: int = MIN_SOFT_DELETE_DAYS,
+    soft_delete_days: int | None = None,
+) -> str:
     """Insert the run's D1 row as soon as it starts (`finished_ts` NULL, zero
-    totals) so the console lists it while it runs; `record_run` fills it in.
-    `buckets` = the `-b` cut (empty = every bucket in the plan → NULL)."""
+    totals) so the console lists it while it runs; `record_run` fills it in. A
+    real run doesn't start without it (`cli._start_recorded`).
+    `buckets` = the `-b` cut, else every bucket in the plan: what undo reads, since a run's bands can leave a bucket out.
+    `min_soft_delete_days` = the minimum the run runs under, `soft_delete_days` = the narrowest retention its preflight measured
+    (None: not yet, `sweep execute` measures bucket by bucket): what closes a killed run's undo window (`sweepReflect`)."""
     from .index_footer import _creds, _d1_query, _q
 
     run_id = run_id_for(plan, started_ts)
+    touched = tuple(buckets) or tuple(plan.get("buckets") or ())
     tok, acct = _creds()
     _d1_query(
         "INSERT INTO deletion_runs (run_id, plan, scan, head, exec_head, actor, mode, started_ts, finished_ts, "
         "deleted_bytes, deleted_objects, skipped_gone, skipped_overwritten, drift_dirs, ledger_drift_dirs, "
-        "undo_deadline, log_dir, buckets, plan_id) VALUES ("
+        "undo_deadline, log_dir, buckets, plan_id, min_soft_delete_days, soft_delete_days) VALUES ("
         f"{_q(run_id)}, {_q(plan_dir)}, {_q(plan['date'])}, 0, 0, {_q(actor)}, "
         f"{_q('real' if for_real else 'dry')}, {started_ts}, NULL, 0, 0, 0, 0, 0, 0, NULL, {_q(plan_dir)}, "
-        f"{_q(','.join(sorted(buckets))) if buckets else 'NULL'}, {int(plan['plan_id'])})",
+        f"{_q(','.join(sorted(touched))) if touched else 'NULL'}, {int(plan['plan_id'])}, {int(min_soft_delete_days)}, "
+        f"{'NULL' if soft_delete_days is None else int(soft_delete_days)})",
         acct, tok,
     )
     return run_id
@@ -1190,7 +1309,8 @@ def record_run(
     actor: str,
     started_ts: int,
     finished_ts: int,
-    soft_delete_days: int = 7,
+    soft_delete_days: int = MIN_SOFT_DELETE_DAYS,
+    min_soft_delete_days: int = MIN_SOFT_DELETE_DAYS,
 ) -> str:
     """Persist the run + per-band rows to D1 (migration 0015) — deletions as
     first-class records the site can surface per path. Returns the run_id.
@@ -1208,20 +1328,22 @@ def record_run(
         tot["skipped_gone"] += d.get("skipped_gone", 0)
         tot["skipped_overwritten"] += d.get("skipped_overwritten", 0)
         tot["drift_dirs"] += len(b.get("drift_dirs", []))
-    undo = f"{finished_ts + soft_delete_days * 86400}" if mode == "real" else "NULL"
+    deadline = undo_deadline_of(finished_ts, soft_delete_days) if mode == "real" else None
+    undo = "NULL" if deadline is None else str(deadline)
     tok, acct = _creds()
     _d1_query(
         "INSERT INTO deletion_runs (run_id, plan, scan, head, exec_head, actor, mode, started_ts, finished_ts, "
         "deleted_bytes, deleted_objects, skipped_gone, skipped_overwritten, drift_dirs, ledger_drift_dirs, "
-        "undo_deadline, log_dir, plan_id) VALUES ("
+        "undo_deadline, log_dir, plan_id, min_soft_delete_days, soft_delete_days) VALUES ("
         f"{_q(run_id)}, {_q(summary['plan'])}, {_q(plan['date'])}, 0, 0, {_q(actor)}, "
         f"{_q(mode)}, {started_ts}, {finished_ts}, {tot['deleted_bytes']}, {tot['deleted_objects']}, "
         f"{tot['skipped_gone']}, {tot['skipped_overwritten']}, {tot['drift_dirs']}, 0, "
-        f"{undo}, {_q(summary['plan'])}, {int(plan['plan_id'])}) "
+        f"{undo}, {_q(summary['plan'])}, {int(plan['plan_id'])}, {int(min_soft_delete_days)}, {int(soft_delete_days)}) "
         "ON CONFLICT (run_id) DO UPDATE SET finished_ts = excluded.finished_ts, deleted_bytes = excluded.deleted_bytes, "
         "deleted_objects = excluded.deleted_objects, skipped_gone = excluded.skipped_gone, "
         "skipped_overwritten = excluded.skipped_overwritten, drift_dirs = excluded.drift_dirs, "
-        "ledger_drift_dirs = excluded.ledger_drift_dirs, undo_deadline = excluded.undo_deadline",
+        "ledger_drift_dirs = excluded.ledger_drift_dirs, undo_deadline = excluded.undo_deadline, "
+        "min_soft_delete_days = excluded.min_soft_delete_days, soft_delete_days = excluded.soft_delete_days",
         acct, tok,
     )
     record_bands(run_id, summary)
@@ -1237,7 +1359,10 @@ BAND_ROWS_PER_STATEMENT = 200
 def record_bands(run_id: str, summary: dict) -> int:
     """Write the summary's per-prefix bands for `run_id` to D1, in statements
     of `BAND_ROWS_PER_STATEMENT` rows. Idempotent: a band already recorded is
-    left as it is (keeping its `undone_objects`). Returns the bands sent."""
+    left as it is (keeping its `undone_objects`). A band with any null-generation skip is left out, whatever else of it
+    was deleted: `unstageDeleted` unstages any item with a band on a succeeded run, and this one isn't swept, so it stays
+    staged until a clean run writes its band. So bands undercount a run with skips: its totals and `deleted/` log are what
+    to trust. Returns the bands sent."""
     from .index_footer import _creds, _d1_query, _q
 
     rows = [
@@ -1245,6 +1370,7 @@ def record_bands(run_id: str, summary: dict) -> int:
         f"{c.get('gone', 0)}, {c.get('overwritten', 0)}, {c.get('drift_new_objects', 0)}, 0)"
         for b in summary["buckets"].values()
         for prefix, c in (b.get("bands") or {}).items()
+        if not c.get("no_generation")
     ]
     if not rows:
         return 0
@@ -1271,6 +1397,18 @@ def _missing_perms(bkt) -> list[str]:
     testIamPermissions with the granted subset; no permission is needed to ask)."""
     granted = set(bkt.test_iam_permissions(list(REAL_PERMS)))
     return [p for p in REAL_PERMS if p not in granted]
+
+
+def _soft_delete_off(client, bucket: str) -> bool:
+    """Is `bucket`'s soft delete off now? False when the caller can't read the bucket (`storage.buckets.get`: a real run's
+    account has it, someone restoring by hand may not): nothing says, so the restores go ahead and GCS answers each."""
+    from google.api_core.exceptions import Forbidden
+
+    try:
+        return _soft_delete_days(client, bucket) == 0
+    except Forbidden as e:
+        err(f"WARN: {bucket}: can't read its soft-delete policy ({e}); restoring without that check")
+        return False
 
 
 def _soft_delete_days(client, bucket: str) -> float:

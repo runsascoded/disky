@@ -723,6 +723,22 @@ describe('<Treemap>', () => {
     )
     expect(screen.getByText('rollup:root')).toBeInTheDocument()
   })
+
+  it('renders mapOverlay inside the map box: over the cells, clear of the bar, the rollup and the footer', () => {
+    const { container } = render(
+      <Treemap
+        root={tree}
+        {...accessors}
+        renderLegend={() => <span>legend</span>}
+        renderRollup={() => <span>rollup</span>}
+        renderFooter={() => <span>footer</span>}
+        mapOverlay={<span className="ov">filling in…</span>}
+      />,
+    )
+    expect([...container.querySelectorAll('.ov')].map(el => [el.textContent, el.parentElement?.className])).toEqual([['filling in…', 'dt-treemap-map']])
+    // The map box is the overlay's positioning context.
+    expect((container.querySelector('.dt-treemap-map') as HTMLElement).style.position).toBe('relative')
+  })
 })
 
 /**
@@ -1010,6 +1026,27 @@ describe('<Treemap> depth fade', () => {
 })
 
 describe('<Treemap renderer>', () => {
+  it('preserves per-cell React labels when switching from DOM to canvas', () => {
+    const restore = withLayout()
+    try {
+      const props = { root: tree, ...accessors, minCellArea: null, renderCellExtra: (n: Node) => n.n === 'bar' ? <span data-testid="band-label">bar-extra</span> : null }
+      const { container, rerender } = render(<Treemap {...props} />)
+      expect([...container.querySelectorAll('[data-testid="band-label"]')].map(el => el.textContent)).toEqual(['bar-extra'])
+      rerender(<Treemap {...props} renderer="canvas" />)
+      expect([...container.querySelectorAll('.dt-treemap-canvas-extra')].map(el => el.textContent)).toEqual(['bar-extra'])
+    } finally { restore() }
+  })
+  it('paints consumer-provided remainder grids on real cells and honors dustTexture', () => {
+    const restore = withLayout()
+    try {
+      const props = { root: tree, ...accessors, minCellArea: null, colorForCell: (n: Node) => n.n === 'bar' ? { dustCount: 125 } : {} }
+      const { container, rerender } = render(<Treemap {...props} />)
+      expect([...container.querySelectorAll('canvas')].map(el => el.closest('.dt-treemap-cell')?.querySelector('.dt-treemap-lbl')?.childNodes[0]?.textContent)).toEqual(['bar'])
+      rerender(<Treemap {...props} dustTexture={false} />)
+      expect(container.querySelectorAll('.dt-treemap-cell canvas').length).toBe(0)
+    } finally { restore() }
+  })
+
   it("default 'dom' renders DOM cells and no canvas", () => {
     const restore = withLayout()
     try {

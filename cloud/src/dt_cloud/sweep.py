@@ -29,6 +29,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -327,6 +328,25 @@ def _write_log(path: Path, rows: list[tuple]) -> None:
     pq.write_table(tbl, path)
 
 
+def _run_retention_days(client: "S3Client", bucket: str, for_real: bool, min_days: int) -> int | None:
+    """What `bucket` retains in days (`soft_delete.retention_days`), held to `min_days` on a real run. None: unreadable, a
+    legitimate state only where nothing is required (a store or key that doesn't offer versioning reads)."""
+    from botocore.exceptions import ClientError
+
+    from .soft_delete import read_s3_bucket, retention_days, retention_seconds
+
+    try:
+        days = retention_days(retention_seconds(read_s3_bucket(client, bucket)))
+    except ClientError as e:
+        if for_real and min_days > 0:
+            raise SweepError(f"not deleting: can't read {bucket}'s retention, and this deployment requires at least {min_days} days ({e})") from e
+        print(f"{bucket}: retention not readable, none recorded ({e})", file=sys.stderr)
+        return None
+    if for_real and days < min_days:
+        raise SweepError(f"not deleting: {bucket} retains deleted data for {days} days, and this deployment requires at least {min_days}")
+    return days
+
+
 def execute_plan(
     run_dir: str,
     *,
@@ -334,14 +354,18 @@ def execute_plan(
     client: "S3Client | None" = None,
     delete_workers: int = 16,
     mtime_tol: int = 1,
+    min_soft_delete_days: int = 0,
 ) -> dict:
     """Execute the manifest under `run_dir` against CoreWeave S3 (boto3).
 
     Lists each curated root, merge-checks every live object against the reviewed
     manifest, and deletes only the reviewed keys whose (size, mtime) still match
     — new keys since the scan are left alone (drift), changed ones skipped
-    (overwritten), vanished ones noted (gone). Bucket versioning is not required
-    or queried: a real deletion may be permanent. A dry run touches nothing.
+    (overwritten), vanished ones noted (gone). A dry run touches nothing.
+
+    `min_soft_delete_days` (`/admin`'s minimum): above 0, a real run refuses a bucket retaining less, or one it can't read.
+    At 0 nothing is required of the bucket and a real deletion may be permanent: a key that can't read its versioning still
+    deletes, and the run records no retention. The summary carries both.
 
     Writes a decision-log parquet + `<deleted|would-delete>-summary.json` under
     `run_dir` and returns the summary. Does NOT write D1 — the Functions layer
@@ -356,6 +380,7 @@ def execute_plan(
     roots = listing_roots(plan_summary)
 
     client = client or s3_client()
+    soft_delete_days = _run_retention_days(client, bucket, for_real, min_soft_delete_days)
 
     manifest_path = run / "manifest" / f"{bucket}.parquet"
     from botocore.exceptions import ClientError
@@ -478,6 +503,8 @@ def execute_plan(
         "bucket": bucket,
         "mode": "real" if for_real else "dry",
         "versioning_guard": False,
+        "min_soft_delete_days": min_soft_delete_days,
+        "soft_delete_days": soft_delete_days,
         **counters,
         "preserved_breakdown": preservation,
         "bands": [{"prefix": b, **v} for b, v in sorted(bands.items())],
@@ -529,7 +556,12 @@ def _list_versions(client: "S3Client", bucket: str, prefix: str):
 def undo_run(run_dir: str, *, client: "S3Client | None" = None,
              prefixes: list[str] | None = None, dry_run: bool = False) -> dict:
     """Undo a real run: remove the delete markers it wrote, so the prior version
-    is current again (CAIOS's recoverable-delete). Must run before `purge`."""
+    is current again. Only a bucket that kept the prior version can give it back: on
+    an unversioned one the logged key has no marker and no version (`unrecoverable`).
+    Must run before `purge`.
+
+    `undo-summary.json` is rewritten after every batch, so a job that dies partway
+    still says what it restored; `restored` then lags by at most the batch it died in."""
     run = Path(run_dir)
     plan_summary = json.loads((run / "plan-summary.json").read_text())
     bucket = plan_summary["bucket"]
@@ -541,16 +573,33 @@ def undo_run(run_dir: str, *, client: "S3Client | None" = None,
         keys = {k for k in keys if any(k.startswith(p) for p in prefixes)}
 
     to_restore: list[tuple[str, str]] = []  # (key, delete-marker versionId)
+    live: set[str] = set()
     for root in roots:
         for page in _list_versions(client, bucket, root):
             for dm in page.get("DeleteMarkers", []):
                 if dm.get("IsLatest") and dm["Key"] in keys:
                     to_restore.append((dm["Key"], dm["VersionId"]))
+            for v in page.get("Versions", []):
+                if v.get("IsLatest") and v["Key"] in keys:
+                    live.add(v["Key"])
 
-    counters = {"restored": 0, "restore_failed": 0, "skipped": len(keys) - len({k for k, _ in to_restore})}
+    counters = {
+        "restored": 0,
+        "restore_failed": 0,
+        "already_live": len(live),
+        "unrecoverable": len(keys - live - {k for k, _ in to_restore}),
+    }
+
+    def write_summary() -> dict:
+        summary = {"mode": "undo", "bucket": bucket, "dry_run": dry_run,
+                   "candidates": len(keys), **counters, "finished_ts": int(time.time())}
+        (run / "undo-summary.json").write_text(json.dumps(summary, indent=2) + "\n")
+        return summary
+
     if dry_run:
         counters["restored"] = len(to_restore)
     else:
+        write_summary()
         for batch in _chunks(to_restore, DELETE_BATCH):
             resp = client.delete_objects(
                 Bucket=bucket, Delete={"Objects": [{"Key": k, "VersionId": v} for k, v in batch], "Quiet": True}
@@ -558,17 +607,17 @@ def undo_run(run_dir: str, *, client: "S3Client | None" = None,
             errs = {e["Key"] for e in resp.get("Errors", [])}
             for k, _v in batch:
                 counters["restore_failed" if k in errs else "restored"] += 1
+            write_summary()
 
-    summary = {"mode": "undo", "bucket": bucket, "dry_run": dry_run,
-               "candidates": len(keys), **counters, "finished_ts": int(time.time())}
-    (run / "undo-summary.json").write_text(json.dumps(summary, indent=2) + "\n")
-    return summary
+    return write_summary()
 
 
 def purge_run(run_dir: str, *, client: "S3Client | None" = None, dry_run: bool = False) -> dict:
-    """Permanently drop every version of a real run's deleted keys — the second,
+    """Permanently drop the versions a real run's delete left behind — the second,
     irreversible stage that actually reclaims space (after the undo hold). Removes
-    both the delete markers and the shadowed noncurrent data versions."""
+    the delete markers and the data versions they shadow, only for a logged key that
+    is still deleted: one whose newest version is data (a partial undo restored it, or
+    someone wrote it since) is live and left whole (`skipped_live`)."""
     run = Path(run_dir)
     plan_summary = json.loads((run / "plan-summary.json").read_text())
     bucket = plan_summary["bucket"]
@@ -577,16 +626,20 @@ def purge_run(run_dir: str, *, client: "S3Client | None" = None, dry_run: bool =
 
     keys = set(_deleted_keys(run, bucket))
     victims: list[tuple[str, str, int]] = []  # (key, versionId, size) for every version of a deleted key
+    live: set[str] = set()
     for root in roots:
         for page in _list_versions(client, bucket, root):
             for v in page.get("Versions", []):
                 if v["Key"] in keys:
                     victims.append((v["Key"], v["VersionId"], int(v.get("Size", 0))))
+                    if v.get("IsLatest"):
+                        live.add(v["Key"])
             for dm in page.get("DeleteMarkers", []):
                 if dm["Key"] in keys:
                     victims.append((dm["Key"], dm["VersionId"], 0))
+    victims = [x for x in victims if x[0] not in live]
 
-    counters = {"purged_versions": 0, "purge_failed": 0, "purged_bytes": 0}
+    counters = {"purged_versions": 0, "purge_failed": 0, "purged_bytes": 0, "skipped_live": len(live)}
     if dry_run:
         counters["purged_versions"] = len(victims)
         counters["purged_bytes"] = sum(sz for _k, _v, sz in victims)

@@ -11,23 +11,23 @@
  * edge cache accordingly. w/h arrive quantized-up to 128px so resizes mostly
  * re-hit the cache.
  */
-import { filterJson, hiddenNotFound, isHidden, restrictionFor, restrictSubtree } from '../_lib/restrict.js'
-import { type Env, type Identity, requireViewer } from '../_lib/auth.js'
+import { filterJson, hiddenNotFound, isHidden, restrictedScopeRefused, restrictedSearchRefused, restrictionFor, restrictSubtree, scopeReachesHidden } from '../_lib/restrict.js'
+import { type Env, type Identity, presentsCredentials, requireViewer } from '../_lib/auth.js'
 import { intervalsOn, ivRefusal, ivRetry, pathGens, withPathStore, storeReady, type Lens } from '../_lib/index.js'
 import { withChildAges } from '../_lib/childAges.js'
 import { hasLedger, ledgerHead } from '../_lib/ledger.js'
 import { parseOwner, queryParam, QueryError, classKey, parseClasses } from '../_lib/scope.js'
 import { hasExtras } from '../_lib/extras.js'
-import { ATTEN_DEFAULT, buildView, FILTER_VIEW_V, LensUnavailable, MIN_AREA_DEFAULT, NotFound, QUANT, readRootAgg, readRootRows, type ViewNode } from '../_lib/view.js'
+import { ATTEN_DEFAULT, buildView, FILTER_VIEW_V, LensUnavailable, MIN_AREA_DEFAULT, NotFound, QUANT, readRootAgg, readRootRows, scopedTag, type ViewNode } from '../_lib/view.js'
 import { hexNote, hexQuery, indexedGate, staticTag } from '../_lib/staticFilter.js'
 import { FilterRejected, indexedOnly, pathTerms, rejectBody, rejectQuery, rejectScope } from '../_lib/indexedOnly.js'
-import { cacheEnvTag, cacheKeyFor, cacheMatch, cacheStore, isPartial, keepFor, serverTiming, UPGRADE_DETAIL_GROUPS, UPGRADE_DETAILS_MS, UPGRADE_PHASE2_MS, UPGRADE_SEARCH_LIMITS, upgradePartial } from '../_lib/edgeCache.js'
+import { cacheEnvTag, cacheKeyFor, cacheMatch, cacheStore, cutReason, isPartial, keepFor, serverTiming, UPGRADE_DETAIL_GROUPS, UPGRADE_DETAILS_MS, UPGRADE_PHASE2_MS, UPGRADE_SEARCH_LIMITS, upgradePartial } from '../_lib/edgeCache.js'
 import type { SearchLimits } from '../_lib/search.js'
 import { LENS_PRIMARY_ONLY, storeKey, withStore } from '../_lib/stores.js'
 import { lensParam, ME_UNRESOLVED, resolveLens } from '../_lib/me.js'
 import { isScanId } from '../../src/scanSlug.js'
 import { indexedScan, noScan, scanArg } from '../_lib/scanArg.js'
-import { traceJoins } from '../_lib/shared.js'
+import { ahead, loadScopes, traceJoins } from '../_lib/shared.js'
 import { type FilteredRoot, filteredVector, type Member, memberOf, memberRequest, type Refusal, refusalOf, refusalResponse, type Resolved, resolveUnion, UnionOverlap, unionFiltered, unionFor, unionRoot, vectorOf } from '../_lib/union.js'
 import { filterThreshold } from '../_lib/filter.js'
 import type { UnionView } from '../_lib/stores.js'
@@ -57,23 +57,23 @@ interface MemberRead {
 }
 
 async function subtree(ctx0: SubtreeCtx, gate: boolean, member?: MemberRead): Promise<Response> {
+  const st = serverTiming()
   // `store=<key>`: a secondary store's env overlay (none = the primary, as is).
   const ctx1 = withStore(ctx0)
   if (ctx1 instanceof Response) return ctx1
   const ctx = await withPathStore(ctx1)
-  const st = serverTiming()
   traceJoins(ctx.env, st.trace)
   if (!storeReady(ctx.env)) {
     return new Response('subtree API not configured (missing index store creds)', { status: 503 })
   }
   const url = new URL(ctx.request.url)
-  let date = url.searchParams.get('date') ?? ''
+  const date0 = url.searchParams.get('date') ?? ''
   const path = (url.searchParams.get('path') ?? '').replace(/\/+$/, '')
   const w = Math.ceil((Number(url.searchParams.get('w')) || 1280) / QUANT) * QUANT
   const h = Math.ceil((Number(url.searchParams.get('h')) || 800) / QUANT) * QUANT
   const minArea = Number(url.searchParams.get('minArea')) || MIN_AREA_DEFAULT
   const atten = Number(url.searchParams.get('atten')) || ATTEN_DEFAULT
-  if (!isScanId(date) && !url.searchParams.has('d')) return new Response('bad date', { status: 400 })
+  if (!isScanId(date0) && !url.searchParams.has('d')) return new Response('bad date', { status: 400 })
   if (path.includes('..') || path.startsWith('/')) return new Response('bad path', { status: 400 })
 
   // Optional lens: `lens=user:<id>` — a treemap of that user's bytes, read
@@ -108,22 +108,79 @@ async function subtree(ctx0: SubtreeCtx, gate: boolean, member?: MemberRead): Pr
     if (e instanceof QueryError) return new Response(`bad query: ${e.message}`, { status: 400 })
     throw e
   }
-  let query = qp.query
+  const query = qp.query
   // An indexed-only deployment: what the static index answers, no user lens or class scope (`_lib/indexedOnly.ts`), before auth or any read.
   const refused = query && indexedOnly(ctx.env) ? rejectQuery(qRaw, pathTerms(ctx.env)) ?? rejectScope(!!(lens || classes)) : null
   if (refused) return new Response(rejectBody(refused), { status: 400, headers: { 'content-type': 'application/json' } })
 
-  // Data is gated (store-specific scope), like /data/*.
-  let id: Identity | null = member?.id ?? null
-  if (gate && !member) {
-    const gated = await st.time('auth', requireViewer(ctx as never))
-    if (gated instanceof Response) return gated
-    id = gated
+  // Data is gated (store-specific scope), like /data/*. The gate runs beside what the answer needs whoever asks
+  // (`shared.ahead`: started now for a request that may pass it, used only once it has).
+  const gating = gate && !member
+  const gated = gating ? st.time('auth', requireViewer(ctx as never)) : Promise.resolve(member?.id ?? null)
+  gated.catch(() => {})
+  await loadScopes()
+  const early = ahead(ctx.env, !gating || await presentsCredentials(ctx as never))
+  try {
+    return await subtreeGated(ctx, st, early, gated, { date0, path, w, h, minArea, atten, lens, rawOwner, owner, by, depth, classes, qRaw, full, qp, query, member })
+  } finally {
+    early.done()
   }
-  // A path-restricted link (specs/path-scopes.md): a hidden path is absent,
+}
+
+/** `subtree` past its parameters: the gate, the scan's checks, the cache lookup and the build. */
+async function subtreeGated(
+  ctx: SubtreeCtx,
+  st: ReturnType<typeof serverTiming>,
+  early: ReturnType<typeof ahead>,
+  gated: Promise<Identity | null | Response>,
+  o: { date0: string; path: string; w: number; h: number; minArea: number; atten: number; lens?: Lens; rawOwner: string | null; owner: ReturnType<typeof parseOwner>; by?: string; depth?: number; classes: ReturnType<typeof parseClasses>; qRaw: string; full: boolean; qp: ReturnType<typeof queryParam>; query: ReturnType<typeof queryParam>['query']; member?: MemberRead },
+): Promise<Response> {
+  const { path, w, h, minArea, atten, rawOwner, owner, by, depth, classes, qRaw, full, qp, member } = o
+  let { lens, query } = o
+  let date = o.date0
+  const url = new URL(ctx.request.url)
+  // The scan (a `d=<slug>` resolved; a miss is the `Response` answered once the gate passes), and its pre-steps that
+  // don't depend on who asks: the cache key's extras flag and generation, and whether it is indexed.
+  const dated = early.later(async (): Promise<string | Response> => (url.searchParams.has('date') ? date : scanArg(ctx.env, url.searchParams)))
+  const facts = early.later(async () => {
+    const d = await dated()
+    return d instanceof Response ? null : Promise.all([hasExtras(ctx.env, d), pathGens(ctx.env, [d]), indexedScan(ctx.env, d, true)])
+  })
+  const keyOf = (date: string, head: number, xtra: boolean, g: string, lensTag: string) => cacheKeyFor('subtree', cacheEnvTag(ctx.env, ctx.request),
+    `${date}/${encodeURIComponent(path)}?w=${w}&h=${h}&a=${minArea}&t=${atten}&l=${lensTag}` +
+      `&o=${rawOwner ?? ''}&b=${by ?? ''}&D=${depth ?? ''}&cl=${classKey(classes)}&x=${xtra ? 1 : 0}&F=${query && !full ? 0 : 1}&qs=${query ? qp.syntax : ''}&q=${encodeURIComponent(query ? qRaw : '')}&head=${head}&g=${g}&st=${staticTag(ctx.env, query)}${query ? `&fv=${FILTER_VIEW_V}` : ''}` +
+      // A scoped read's answer version, where the view is one (absent otherwise, so no other key moves).
+      scopedTag(ctx.env, { lens, owner, classes, by, query }) +
+      // The root's answer carries the deployment's `ROOT_LABEL` (kept in the key: dropping it would flush prod's root entries).
+      (path === '' ? `&rl=${encodeURIComponent(ctx.env.ROOT_LABEL ?? '')}` : '') +
+      // A union root's member read: the union's threshold (absent otherwise, so no other key moves).
+      (member?.threshold !== undefined ? `&T=${member.threshold}` : ''),
+    storeKey(ctx.env),
+  )
+  // Unscoped and unfiltered (the map's views): the key is the gate's to none of (no lens, ledger head or name rule),
+  // so its lookup starts beside the gate too.
+  const plain = !lens && !owner && !query
+  const looked = plain ? early.later(async () => {
+    const f = await facts()
+    const d = await dated()
+    if (!f || d instanceof Response || !f[2]) return null
+    const key = keyOf(d, 0, f[0], f[1], lensParam(undefined))
+    return { key, hit: await st.time('match', cacheMatch(ctx.env, key)) }
+  }) : null
+
+  const g0 = await gated
+  if (g0 instanceof Response) return g0
+  early.commit()
+  const id: Identity | null = g0
+  // A path-restricted link (`_lib/restrict.ts`): a hidden path is absent,
   // and every body (cached or fresh) is filtered on the way out.
   const restriction = restrictionFor(id, ctx.env)
   if (restriction && isHidden(path, restriction)) return hiddenNotFound()
+  // A name filter's tree sums every match, hidden ones too, and a sum can't be filtered on the way out: answered, it
+  // would let the link probe a hidden dir's contents by name.
+  if (restriction && query) return restrictedSearchRefused()
+  // An owner, class or lens scope at or above a hidden dir: its sums break down what's hidden, the same way.
+  if (restriction && (lens || owner || classes) && scopeReachesHidden(path, restriction)) return restrictedScopeRefused()
   const out = (res: Response | Promise<Response>) =>
     restriction ? Promise.resolve(res).then(r => filterJson(r, (b: Parameters<typeof restrictSubtree>[0]) => restrictSubtree(b, restriction))) : res
 
@@ -144,24 +201,17 @@ async function subtree(ctx0: SubtreeCtx, gate: boolean, member?: MemberRead): Pr
     // `date` is checked alongside the other pre-steps. A miss is a 404, never
     // another scan.
     if (!url.searchParams.has('date')) {
-      const scan = await scanArg(ctx.env, url.searchParams)
+      const scan = await dated()
       if (scan instanceof Response) return scan
       date = scan
     }
     // The static index's hex-run rule: substrings match where they `occur` under it, static or not (`hexRuns.ts`).
     const hx = await hexQuery(ctx.env, query)
     query = hx.query
-    const [head, xtra, g, indexed] = await st.time('pre', Promise.all([lens && ctx.env.DB || owner && await hasLedger(ctx.env) ? ledgerHead(ctx.env) : Promise.resolve(0), hasExtras(ctx.env, date), pathGens(ctx.env, [date]), indexedScan(ctx.env, date, true)]))
+    const facts1 = (): Promise<[boolean, string, string | null]> => facts().then(f => f ?? Promise.all([hasExtras(ctx.env, date), pathGens(ctx.env, [date]), indexedScan(ctx.env, date, true)]))
+    const [head, [xtra, g, indexed]] = await st.time('pre', Promise.all([(lens || owner) && await hasLedger(ctx.env) ? ledgerHead(ctx.env) : Promise.resolve(0), facts1()]))
     if (!indexed) return noScan('date', date)
-    const cacheKey = cacheKeyFor('subtree', cacheEnvTag(ctx.env, ctx.request),
-      `${date}/${encodeURIComponent(path)}?w=${w}&h=${h}&a=${minArea}&t=${atten}&l=${lensTag}` +
-        `&o=${rawOwner ?? ''}&b=${by ?? ''}&D=${depth ?? ''}&cl=${classKey(classes)}&x=${xtra ? 1 : 0}&F=${query && !full ? 0 : 1}&qs=${query ? qp.syntax : ''}&q=${encodeURIComponent(query ? qRaw : '')}&head=${head}&g=${g}&st=${staticTag(ctx.env, query)}${query ? `&fv=${FILTER_VIEW_V}` : ''}` +
-        // The root's answer carries the deployment's `ROOT_LABEL` (kept in the key: dropping it would flush prod's root entries).
-        (path === '' ? `&rl=${encodeURIComponent(ctx.env.ROOT_LABEL ?? '')}` : '') +
-        // A union root's member read: the union's threshold (absent otherwise, so no other key moves).
-        (member?.threshold !== undefined ? `&T=${member.threshold}` : ''),
-      storeKey(ctx.env),
-    )
+    const cacheKey = keyOf(date, head, xtra, g, lensTag)
     // …and a scan the static index covers for this literal (else `scan-not-indexed`, not a path-store scan).
     if (query && indexedOnly(ctx.env)) {
       const r = await st.time('indexed', indexedGate(ctx.env, query.ast, path, [date], { firstPaint: !full }))
@@ -193,17 +243,19 @@ async function subtree(ctx0: SubtreeCtx, gate: boolean, member?: MemberRead): Pr
         ...(keep !== true ? { budgetCut: true } : {}),
         tree: intervalsOn(ctx.env) && !lens && !owner && !classes && !query ? await withChildAges(ctx.env, date, path, view.tree) : view.tree,
       })
-      return { body, keep }
+      return { body, keep, cut: cutReason(view) }
     }
     // A partial answer (phase 2 cut by its time budget) schedules the full one in the background, which
     // replaces it in the colo cache (`upgradePartial`): on the miss that produced it, and on a partial hit.
     const upgrade = (res: Response): Response => {
-      res.headers.set('x-cache-upgrade', upgradePartial(ctx.env, cacheKey, () => render({ phase2Ms: UPGRADE_PHASE2_MS, detailsWait: UPGRADE_DETAILS_MS, detailGroups: UPGRADE_DETAIL_GROUPS, searchLimits: UPGRADE_SEARCH_LIMITS }), ctx.waitUntil?.bind(ctx)))
+      res.headers.set('x-cache-upgrade', upgradePartial(ctx.env, cacheKey, trace => render({ phase2Ms: UPGRADE_PHASE2_MS, detailsWait: UPGRADE_DETAILS_MS, detailGroups: UPGRADE_DETAIL_GROUPS, searchLimits: UPGRADE_SEARCH_LIMITS, trace }), ctx.waitUntil?.bind(ctx)))
       return res
     }
-    const hit = await st.time('match', cacheMatch(ctx.env, cacheKey))
+    const early1 = looked && await looked()
+    const hit = early1 && early1.key.url === cacheKey.url ? early1.hit : await st.time('match', cacheMatch(ctx.env, cacheKey))
     if (hit) return out(isPartial(hit) ? upgrade(hit) : hit)
 
+    st.mark('fixed')
     const { body, keep } = await render({ trace: st.trace })
     // A phase 2 cut short by its time budget: kept briefly (`keepFor`), so a retry or a second viewer isn't
     // another full recompute; its totals and match counts are exact, only the drawn interiors partial.
@@ -218,7 +270,7 @@ async function subtree(ctx0: SubtreeCtx, gate: boolean, member?: MemberRead): Pr
     // the client falls back instead of retrying forever.
     if (e instanceof LensUnavailable) return new Response('lens index not available for this scan', { status: 409 })
     const msg = String((e as Error).message ?? e)
-    if (msg.startsWith('query too wide')) return new Response(msg, { status: 413 })
+    if (/^(query|lookup) too wide/.test(msg)) return new Response(msg, { status: 413 })
     if (/D1_ERROR|internal error/i.test(msg)) return new Response(`index backend unavailable, retry: ${msg}`, { status: 503, headers: { 'retry-after': '5' } })
     return new Response(`subtree failed: ${msg}`, { status: 500 })
   }

@@ -15,10 +15,21 @@
  * row gets the deployment's base scope — email sessions re-derive that from
  * `scopesFor` on every request, so removal bites instantly. Grant sessions
  * carry the scopes they were minted with (normally just the base scope).
+ *
+ * Admin is the `admin` scope, and one function says which email holds it:
+ * `isAdmin`. With `ADMIN_LIST` it is the deployment's explicit list (an
+ * `admin_emails` row, or the break-glass `ADMIN_BOOTSTRAP`) and the staff
+ * domain alone is not; without it, staff are admins. The only other admin is
+ * a grant minted with the scope (by an admin: `POST /api/auth/grants`), which
+ * `ADMIN_LIST` refuses to mint or edit in (`grantStore`); one already live keeps
+ * working.
  */
-import { type Auth, createGate, type Gate, hasScope, type Subject } from '@open-athena/auth'
+import { type Auth, createGate, DEFAULT_COOKIE_NAME, type Gate, type Grant, type GrantPatch, type GrantStore, hasScope, isSecureRequest, parseScopes, readCookie, type Subject, verifySessionClaims } from '@open-athena/auth'
+import { DEFAULT_ACCOUNT_HINT_COOKIE } from '@open-athena/auth/oidc'
+import { OA_HINT_COOKIE, OA_NONCE_COOKIE, OA_WHO_COOKIE } from '@disk-tree/pages-kit/oa'
 import { d1AuditSink, d1GrantStore, d1ProfileStore, d1RequestStore } from '@open-athena/auth/d1'
 import type { AnalyticsEngineDataset, D1Database, KVNamespace, R2Bucket } from '@cloudflare/workers-types'
+import { isPreviewHost } from './previewHost.js'
 import { grantCaller, meterOf } from './usage.js'
 
 export interface Env {
@@ -27,6 +38,22 @@ export interface Env {
   /** OIDC (our own Google client) — the ZT-free sign-in path. Set as Pages
    *  secrets; see specs/done/oidc-cutover-cw.md. Absent → `/auth/google` 503s. */
   GOOGLE_CLIENT_ID?: string
+  /** "Sign in with OA" (specs/oa-login-rp.md): OA's broker as an OIDC provider (`https://login.oa.dev`), this
+   *  deployment's client there, and its secret. Any unset: no `/auth/oa`, no button. */
+  OA_LOGIN_ISSUER?: string
+  OA_LOGIN_CLIENT_ID?: string
+  OA_LOGIN_CLIENT_SECRET?: string
+  /** The deployment's preview client at the broker (`<client id>-preview`), set only in the Pages preview environment:
+   *  the only client a preview host (`isPreviewHost`) signs in with. Unset there: no `/auth/oa`, no button. */
+  OA_LOGIN_PREVIEW_CLIENT_ID?: string
+  OA_LOGIN_PREVIEW_CLIENT_SECRET?: string
+  /** The Pages project's `pages.dev` subdomain (`<project>.pages.dev`; Cloudflare suffixes the name when it was taken),
+   *  which makes `<one label>.<it>` a preview host (`isPreviewHost`): a PR's `pr-N` branch, the `dev` alias, a deployment
+   *  hash. Unset: no host is one. */
+  PAGES_SUBDOMAIN?: string
+  /** `1`: on https, the session, nonce and account-hint cookies are `__Host-` named (`cookieNames`). Turning it on (or
+   *  off) signs everyone out once: the old name's session is no longer read. */
+  AUTH_HOST_COOKIES?: string
   GOOGLE_CLIENT_SECRET?: string
   /** Email-code fallback (ZT One-Time-PIN replacement) — Resend sender + `from`
    *  address (`Name <addr@verified-domain>`). Absent → `/auth/email/*` 503s. */
@@ -38,8 +65,17 @@ export interface Env {
    *  (cw-s3: `coreweave.com`). Unset = allowlist only. */
   VIEWER_DOMAINS?: string
   /** Set where the `admin_emails` table exists (cw-s3; `site/schema.sql`):
-   *  its rows get `admin` on top of the base scope. Unset (gcs) = staff only. */
+   *  its rows get `admin` on top of the base scope, beside the staff domain. Unset = staff only.
+   *  (`ADMIN_LIST` reads the table whether or not this is set.) */
   ADMIN_EMAILS?: string
+  /** `1`: admin is the deployment's explicit list and nothing else: an `admin_emails` row (edited on `/admin`,
+   *  `/api/admins`) or the break-glass `ADMIN_BOOTSTRAP`. Staff keep every other scope; the domain alone is not
+   *  admin. A listed address is admitted to sign in by the list itself. Unset: staff are admins (`isAdmin`). */
+  ADMIN_LIST?: string
+  /** With `ADMIN_LIST`: comma-separated emails that are admins whatever the list holds (break-glass: an empty or
+   *  missing table, or a list nobody on it can use). Named addresses, never a domain; shown on `/admin` as their own
+   *  path, not removable there. Set it as a secret, so the address stays out of the repo. Without `ADMIN_LIST`, unused. */
+  ADMIN_BOOTSTRAP?: string
   /** Local dev only (`.dev.vars`): email the localhost dev identity acts as.
    *  Matters when the D1 binding is remote (writes land in the real ledger). */
   DEV_EMAIL?: string
@@ -114,8 +150,8 @@ export interface Env {
   /** `1`: Δ-mode diffs (`dm=delta`, unscoped) by lazy descent over the interval store (`_lib/diffDescent.ts`; its
    *  planner hands busy, broad paths to the as-of walk). Needs no index beyond the store's. */
   DIFF_DESCENT?: string
-  /** `1`: the fleet-root owner series reads one bounded interval-store version range (`readRootHistory`),
-   *  the canonical reader as fallback. A prototype, off (specs/root-owner-history.md). */
+  /** `1`: a lens, owner or class scoped series reads `SERIES_CHUNK` scans a request, the client filling the rest
+   *  (`/api/series`' `chunks`, `readPathHistory`). Off until measured on dev (specs/root-owner-history.md). */
   OWNER_HISTORY_BATCH?: string
   /** The interval store generation (`interval-store/<gen>/` on `INDEX_R2`), a pin; unset: the store's current one,
    *  `interval-store/CURRENT.json` (`index.ts` `ivGen`), which a compaction moves. */
@@ -167,6 +203,9 @@ export interface Env {
   /** Set only on a secondary store's overlay: a scope its viewers need on top
    *  of the deployment's viewer scope (`requireViewer`). */
   STORE_SCOPE?: string
+  /** Set only on a secondary store's overlay with a `series_scope` (`STORES_JSON`): a scope that, with the
+   *  deployment's viewer scope, reads that store's root-level `/api/series` and nothing else of it (`api/series.ts`). */
+  STORE_SERIES_SCOPE?: string
   /** The footer LRU's budget (`_lib/footerCache.ts`, specs/done/footer-lru.md): the most
    *  `index_row_groups` rows its hot entries hold (default 1,000,000)… */
   FOOTER_CACHE_MAX_ROWS?: string
@@ -197,7 +236,6 @@ export interface Ctx {
 export const GCS_SCOPE = 'gcs'
 export const CW_SCOPE = 'cw'
 export const ADMIN_SCOPE = 'admin'
-export const REQUESTS_SCOPE = 'requests'
 
 /** The deployment's base scope: what `requireViewer` asks for. */
 export const baseScope = (env: Env): string => env.BASE_SCOPE ?? GCS_SCOPE
@@ -221,20 +259,98 @@ const isStaff = (env: Env, email: string): boolean => {
 const viewerDomains = (env: Env): string[] =>
   (env.VIEWER_DOMAINS ?? '').split(',').map(d => d.trim().toLowerCase()).filter(Boolean)
 
-/** Rows of the deployment's `admin_emails` table (where it exists — `ADMIN_EMAILS`)
- *  rank as admins on top of whatever the policy admits them to. */
+/** Whether admin is the explicit list alone (`ADMIN_LIST`). */
+export const adminListOn = (env: Env): boolean => !!env.ADMIN_LIST
+
+/** The break-glass admins (`ADMIN_BOOTSTRAP`), lower-cased; none unless the list is on. */
+export const bootstrapAdmins = (env: Env): string[] =>
+  adminListOn(env) ? (env.ADMIN_BOOTSTRAP ?? '').split(',').map(e => e.trim().toLowerCase()).filter(e => e.includes('@')) : []
+
+/** Whether this deployment reads `admin_emails` at all: the list is on, or `ADMIN_EMAILS` says the table exists. */
+const readsAdminTable = (env: Env): boolean => !!env.DB && (adminListOn(env) || !!env.ADMIN_EMAILS)
+
+const noAdminTable = (e: unknown): boolean => /no such table: admin_emails/.test(String((e as Error)?.message ?? e))
+
+/** Whether `email` (lower-cased) has an `admin_emails` row. With the list on, a database that hasn't the table yet
+ *  (its recipe unapplied) has no rows: sign-in must not break on it, and nobody becomes an admin by it. */
 async function adminRow(env: Env, email: string): Promise<boolean> {
-  if (!env.DB || !env.ADMIN_EMAILS) return false
-  const row = await env.DB.prepare('SELECT email FROM admin_emails WHERE email = ?').bind(email).first()
-  return !!row
+  if (!readsAdminTable(env)) return false
+  try {
+    return !!(await env.DB!.prepare('SELECT email FROM admin_emails WHERE email = ?').bind(email).first())
+  } catch (e) {
+    if (!adminListOn(env) || !noAdminTable(e)) throw e
+    console.warn('ADMIN_LIST is on and `admin_emails` does not exist: nobody is an admin by the list')
+    return false
+  }
+}
+
+/** One `admin_emails` row: who is listed, with who added them and when, and their GitHub handle where known (what
+ *  `dt-cloud admins check` compares with a GitHub org's owners). */
+export interface AdminRow { email: string; note: string | null; who: string; ts: number; github: string | null }
+
+/** The deployment's email admins, as `/admin` shows them (`/api/admins`): the rule in force (`list`, else the staff
+ *  domain), the table's state and rows, the break-glass addresses, and `none`: the list is on and names nobody, so
+ *  no sign-in is an admin until `ADMIN_BOOTSTRAP` names one (or a row is written to the database). */
+export interface AdminRoster {
+  list: boolean
+  staffDomain: string | null
+  table: 'ok' | 'missing' | 'unused'
+  rows: AdminRow[]
+  /** Whether the table has its `github` column; without it (the `admin-list` recipe unapplied) rows read `github: null`
+   *  and `/api/admins` adds, removes and edits notes, but stores no handle. */
+  handles: boolean
+  bootstrap: string[]
+  none: boolean
+}
+
+/** How long a database seen without `admin_emails.github` is taken to still lack it, so the recipe's arrival is seen
+ *  with no deploy. */
+const NO_GITHUB_MS = 60_000
+/** Per isolate and D1 binding: when the list's read last found no `github` column. No `PRAGMA`: the read a request
+ *  makes anyway is the probe, so a database with the column pays nothing, and one without pays one failed statement a
+ *  minute. (A binding object not reused across requests only loses the memo: that request's read fails once more.) */
+const noGithubAt = new WeakMap<object, number>()
+
+export async function adminRoster(env: Env): Promise<AdminRoster> {
+  const list = adminListOn(env)
+  const bootstrap = bootstrapAdmins(env)
+  const staffDomain = list ? null : env.STAFF_DOMAIN?.trim().toLowerCase() || null
+  let table: AdminRoster['table'] = 'unused'
+  let rows: AdminRow[] = []
+  let handles = false
+  if (readsAdminTable(env)) {
+    const db = env.DB!
+    const read = (cols: string) => db.prepare(`SELECT ${cols} FROM admin_emails ORDER BY email`).all<AdminRow>()
+    const readOld = async () => (await read('email, note, who, ts')).results.map(r => ({ ...r, github: null }))
+    const missed = noGithubAt.get(db)
+    try {
+      if (missed !== undefined && Date.now() - missed < NO_GITHUB_MS) rows = await readOld()
+      else {
+        rows = (await read('email, note, who, ts, github')).results
+        handles = true
+      }
+      table = 'ok'
+    } catch (e) {
+      // A table from before the `github` column (the `admin-list` recipe unapplied): the same admins, no handles.
+      if (/no such column: github/.test(String((e as Error)?.message ?? e))) {
+        noGithubAt.set(db, Date.now())
+        rows = await readOld()
+        table = 'ok'
+      } else if (noAdminTable(e)) table = 'missing'
+      else throw e
+    }
+  }
+  return { list, staffDomain, table, rows, handles, bootstrap, none: list && !rows.length && !bootstrap.length }
 }
 
 /**
  * Email → scopes: the in-app policy that the Access policy used to be. Staff
- * get everything; a viewer domain (`VIEWER_DOMAINS`) or a D1 `allowed_emails`
+ * get everything (`admin` only where `isAdmin` says so: always, unless
+ * `ADMIN_LIST`); a viewer domain (`VIEWER_DOMAINS`) or a D1 `allowed_emails`
  * row (the app-owned allowlist — see /admin/db) gets the base scope + assign
  * (a `read_only` row: the read-only tier alone), plus
- * `admin` for an `admin_emails` row. Email sessions re-derive scopes here on
+ * `admin` for an admin (`isAdmin`); with `ADMIN_LIST`, a listed address is
+ * admitted by the list itself. Email sessions re-derive scopes here on
  * every request, so removing a row de-authorizes existing sessions on their
  * next request. If the DB isn't bound (local dev), non-staff fall back to
  * allowed — local dev has no gate to enforce.
@@ -255,21 +371,163 @@ export async function allowedRow(db: D1Database, email: string): Promise<{ read_
 
 export const scopesFor = (env: Env) => async (raw: string): Promise<string[] | null> => {
   const email = raw.toLowerCase()
-  const base = baseScope(env)
-  if (isStaff(env, email)) return allScopes(env)
-  if (!env.DB) return [base, baseAssignScope(env)]
+  const viewer = [baseScope(env), baseAssignScope(env)]
+  if (isStaff(env, email)) return (await isAdmin(env, email)) ? allScopes(env) : allScopes(env).filter(s => s !== ADMIN_SCOPE)
+  if (!env.DB) return adminListOn(env) && (await isAdmin(env, email)) ? [...viewer, ADMIN_SCOPE] : viewer
   const byDomain = viewerDomains(env).some(d => email.endsWith(`@${d}`))
   const row = byDomain ? null : await allowedRow(env.DB, email)
-  if (!byDomain && !row) return null
-  if (await adminRow(env, email)) return [base, baseAssignScope(env), ADMIN_SCOPE]
+  // The list admits whom it names: an admin who couldn't sign in would be no admin.
+  if (!byDomain && !row) return adminListOn(env) && (await isAdmin(env, email)) ? [...viewer, ADMIN_SCOPE] : null
+  if (await isAdmin(env, email)) return [...viewer, ADMIN_SCOPE]
   // A `read_only` row is the read-only viewer tier (what a read-only share link carries).
-  return row?.read_only ? [baseReadScope(env)] : [base, baseAssignScope(env)]
+  return row?.read_only ? [baseReadScope(env)] : viewer
 }
 
-export function gateFor(env: Env): Gate | null {
+export const ADMIN_GRANT_REFUSED = 'with `ADMIN_LIST` on, a grant can\'t carry `admin` or `*`: add the person to the admin list instead'
+export const ADMIN_ROTATE_REFUSED = 'with `ADMIN_LIST` on, an admin grant can\'t be re-keyed: revoke it, and add the person to the admin list instead'
+export const ADMIN_WIDEN_REFUSED = 'with `ADMIN_LIST` on, an admin grant can only lose access: it can\'t be re-enabled, or given new scopes, a later expiry, a higher redemption cap or sessions that outlive its expiry. Add the person to the admin list instead'
+
+export const GRANT_TERMS_REFUSED = 'a grant\'s `expiresAt`, `maxRedeems` and `sessionTtlS` are numbers or null'
+
+/** A write `grantStore` refused; its message is the answer (`/api/auth/*`: a 403). */
+export class AdminGrantRefused extends Error {}
+
+/** A grant's terms `grantStore` refused as malformed; its message is the answer (`/api/auth/*`: a 400). */
+export class BadGrantTerms extends Error {}
+
+/** Refuse a term that isn't a number or null. The package's routes store what they're given: a `PATCH`'s `expiresAt` as
+ *  is, a mint's `expiresInS` added to the clock (`'x'` concatenates). A stored string compares as never reached, so that
+ *  link would outlive any expiry it was given (and an expired one would revive). */
+function checkTerms(terms: { expiresAt?: unknown; maxRedeems?: unknown; sessionTtlS?: unknown }): void {
+  const ok = (v: unknown) => v === null || v === undefined || (typeof v === 'number' && Number.isFinite(v))
+  if (![terms.expiresAt, terms.maxRedeems, terms.sessionTtlS].every(ok)) throw new BadGrantTerms(GRANT_TERMS_REFUSED)
+}
+
+/** The scopes as the `grants` column will read back: it splits on spaces and commas, so `gcs admin` is two. */
+const carriesAdmin = (scopes: unknown): boolean => parseScopes(String(scopes)).some(s => s === ADMIN_SCOPE || s === '*')
+
+/** Whether `next` loosens a limit that `null` lifts (an expiry, a redemption cap). What isn't a number loosens: a stored
+ *  string compares as never reached. */
+const loosens = (cur: number | null, next: unknown): boolean => {
+  if (next === null || next === undefined) return cur !== null
+  return typeof next !== 'number' || !Number.isFinite(next) || (cur !== null && next > cur)
+}
+
+/** Whether `scopes` names one `grant` doesn't hold: `*` holds them all. Read as `carriesAdmin` reads them. */
+const gainsScope = (grant: Grant, scopes: unknown): boolean =>
+  !grant.scopes.includes('*') && parseScopes(String(scopes)).some(s => !grant.scopes.includes(s))
+
+/** Whether `patch` gives `grant` anything back: what ended it (an expiry, an exhausted cap) reopens, or a scope it didn't
+ *  hold arrives. `sessionTtlS` isn't here: it reopens nothing, and applies only to later redemptions. */
+const widens = (grant: Grant, patch: GrantPatch): boolean =>
+  ('expiresAt' in patch && loosens(grant.expiresAt, patch.expiresAt))
+  || ('maxRedeems' in patch && loosens(grant.maxRedeems, patch.maxRedeems))
+  // Sessions that outlive the expiry: an expired grant's come back (`sessionValid`).
+  || ('expiryEndsSessions' in patch && grant.expiryEndsSessions && !patch.expiryEndsSessions)
+  || ('scopes' in patch && gainsScope(grant, patch.scopes))
+
+/**
+ * The gate's grant store. Every grant's terms are numbers or null (`checkTerms`). With `ADMIN_LIST` no new credential carries `admin` or `*`: a grant minted with one would be an
+ * admin whatever the list says, and could edit it. Here rather than in the routes because every path to a grant ends
+ * here, the package's included (`POST /api/auth/grants`, its `PATCH`, a request's approval, `/api/token`). Reads are untouched, so a
+ * grant already holding the scope still authenticates, stays on `/admin`, and can be revoked.
+ *
+ * - `insert`: refused, except the grant the package mints by itself for an address the policy admits
+ *   (`POST /api/auth/request`, `createdBy: 'policy'`), whose asker can't be told no: it goes in without the scope.
+ * - `rotate`: refused for an admin grant: re-keying hands out a new secret carrying the scope.
+ * - `update`, `setDisabled`: an admin grant can lose access but not regain it (`widens`; re-enabling): an expired or
+ *   disabled one is an admin again otherwise. Shortening an expiry and disabling pass. Neither touches `revoked_at`, and
+ *   the store's `setDisabled` refuses a revoked grant, so a revoke stays revoked.
+ * - `update`'s `scopes` (`PATCH /api/auth/grants/<id>`): what `insert` refuses, on any grant, an admin one keeping its
+ *   own included. An admin grant can drop to scopes it held (`widens`), and is then no admin.
+ */
+function grantStore(env: Env): GrantStore {
+  const d1 = d1GrantStore(env.DB!)
+  const store: GrantStore = {
+    ...d1,
+    async insert(grant, tokenHash) {
+      checkTerms(grant)
+      return d1.insert(grant, tokenHash)
+    },
+    async update(id, patch) {
+      checkTerms(patch)
+      return d1.update(id, patch)
+    },
+  }
+  if (!adminListOn(env)) return store
+  return {
+    ...store,
+    async insert(grant, tokenHash) {
+      if (!carriesAdmin(grant.scopes)) return store.insert(grant, tokenHash)
+      if (grant.createdBy !== 'policy') throw new AdminGrantRefused(ADMIN_GRANT_REFUSED)
+      return store.insert({ ...grant, scopes: parseScopes(String(grant.scopes)).filter(s => !carriesAdmin(s)) }, tokenHash)
+    },
+    async rotate(id, newTokenHash, sessionsInvalidBefore) {
+      const grant = await store.byId(id)
+      if (grant && carriesAdmin(grant.scopes)) throw new AdminGrantRefused(ADMIN_ROTATE_REFUSED)
+      return store.rotate(id, newTokenHash, sessionsInvalidBefore)
+    },
+    async update(id, patch) {
+      if ('scopes' in patch && carriesAdmin(patch.scopes)) throw new AdminGrantRefused(ADMIN_GRANT_REFUSED)
+      const grant = await store.byId(id)
+      if (grant && carriesAdmin(grant.scopes) && widens(grant, patch)) throw new AdminGrantRefused(ADMIN_WIDEN_REFUSED)
+      return store.update(id, patch)
+    },
+    async setDisabled(id, nowS) {
+      if (nowS === null) {
+        const grant = await store.byId(id)
+        if (grant && grant.disabledAt !== null && carriesAdmin(grant.scopes)) throw new AdminGrantRefused(ADMIN_WIDEN_REFUSED)
+      }
+      return store.setDisabled(id, nowS)
+    },
+  }
+}
+
+export { isPreviewHost }
+
+/** The auth cookies' names on this request. */
+export interface CookieNames {
+  /** The gate's session cookie (its retained-session handle follows as `<name>_rs`). */
+  session: string
+  /** The Google round trip's nonce. */
+  googleNonce: string
+  /** The broker round trip's nonce (its own: a Google round trip in another tab keeps its own). */
+  oaNonce: string
+  /** Google's remembered accounts (`<name>` + `<name>_accounts`); `false` on a preview host, which keeps none. */
+  accountHint: string | false
+  /** The broker's remembered account (the adapter's hint pair) and its signed copy (`rememberAccount`), which the wall
+   *  trusts to show a name and face; `false` on a preview host, as Google's. */
+  oaHint: string | false
+  oaWho: string | false
+}
+
+const HOST_PREFIX = '__Host-'
+/** The package's nonce cookie for `oidcStart` / `oidcCallback` (not exported). */
+const GOOGLE_NONCE_COOKIE = 'oa_oidc'
+
+/** The auth cookies' names: the package's defaults, `__Host-` prefixed where `AUTH_HOST_COOKIES` is on and the request is
+ *  https (the prefix needs `Secure`; their other attributes, `Path=/` and no `Domain`, already qualify). */
+export function cookieNames(env: Env, request: Request): CookieNames {
+  const prefix = env.AUTH_HOST_COOKIES === '1' && isSecureRequest(request) ? HOST_PREFIX : ''
+  return {
+    session: prefix + DEFAULT_COOKIE_NAME,
+    googleNonce: prefix + GOOGLE_NONCE_COOKIE,
+    oaNonce: prefix + OA_NONCE_COOKIE,
+    accountHint: isPreviewHost(env, request) ? false : prefix + DEFAULT_ACCOUNT_HINT_COOKIE,
+    oaHint: isPreviewHost(env, request) ? false : prefix + OA_HINT_COOKIE,
+    oaWho: isPreviewHost(env, request) ? false : prefix + OA_WHO_COOKIE,
+  }
+}
+
+/** The session cookie the gate reads on `request` (`presentsCredentials` verifies it). */
+export const sessionCookieName = (env: Env, request: Request): string => cookieNames(env, request).session
+
+/** The gate, its session cookie named for `request` (`cookieNames`). Without one (a test minting grants, or reading
+ *  only Bearer tokens), the package's default name. */
+export function gateFor(env: Env, request?: Request): Gate | null {
   if (!env.DB || !env.SESSION_SECRET) return null
   return createGate({
-    store: d1GrantStore(env.DB),
+    store: grantStore(env),
     requests: d1RequestStore(env.DB),
     audit: d1AuditSink(env.DB),
     // The name + face Google verified at sign-in (seeded by default),
@@ -277,6 +535,7 @@ export function gateFor(env: Env): Gate | null {
     profiles: d1ProfileStore(env.DB),
     secret: env.SESSION_SECRET,
     policy: scopesFor(env),
+    cookieName: request ? sessionCookieName(env, request) : DEFAULT_COOKIE_NAME,
   })
 }
 
@@ -291,26 +550,36 @@ export interface Identity {
   via: 'session' | 'grant' | 'public'
   /** The gate's subject (profile name + inlined avatar), for the header chip. */
   subject: Subject | null
+  /** The grant's id, for grant sessions (an activity actor names an unnamed grant by it). */
+  grantId?: string
 }
 const withAdmin = (id: Omit<Identity, 'admin'>): Identity => ({ ...id, admin: id.scopes.includes(ADMIN_SCOPE) || id.scopes.includes('*') })
 
-/** Staff (by domain) or an `admin_emails` row (the deployment's own admin
- *  list, `admin_emails` in `site/schema.sql`, where `ADMIN_EMAILS` says it exists). */
-export async function isAdmin(env: Env, email: string): Promise<boolean> {
-  if (isStaff(env, email)) return true
-  return adminRow(env, email.toLowerCase())
+/**
+ * Whether `email` is an admin of this deployment: the one answer every email identity's admin comes from (`scopesFor`
+ * puts the `admin` scope on a session by it, so `requireAdmin`, `Identity.admin`, whoami and the client follow; a
+ * Slack click asks it directly, `slack/actions.ts`). Where admins come from is this function's alone to change.
+ *
+ * - `ADMIN_LIST`: the explicit list (an `admin_emails` row) or the break-glass `ADMIN_BOOTSTRAP`. Never the staff
+ *   domain, and never a fallback to it: an empty or missing list means no admins (`adminRoster().none`).
+ * - otherwise: the staff domain, or an `admin_emails` row where `ADMIN_EMAILS` says the table exists.
+ */
+export async function isAdmin(env: Env, raw: string): Promise<boolean> {
+  const email = raw.toLowerCase()
+  if (adminListOn(env)) return bootstrapAdmins(env).includes(email) || adminRow(env, email)
+  return isStaff(env, email) || adminRow(env, email)
 }
 
 function authIdentity(auth: Auth): Identity {
   if (auth.kind === 'sso') return withAdmin({ email: auth.email, name: null, scopes: auth.scopes, via: 'session', subject: auth.subject })
-  return withAdmin({ email: auth.grant.email ?? null, name: auth.grant.name ?? null, scopes: auth.scopes, via: 'grant', subject: auth.grant.subject })
+  return withAdmin({ email: auth.grant.email ?? null, name: auth.grant.name ?? null, scopes: auth.scopes, via: 'grant', subject: auth.grant.subject, grantId: auth.grant.id })
 }
 
 /** All app scopes (staff, and the local-dev identity so `/data` etc. work
  *  without a minted session): the deployment's base scope — which a store
  *  other than gcs/cw (e.g. `laptop`) names itself — plus the fixed ones. */
 const allScopes = (env: Env): string[] =>
-  [...new Set([GCS_SCOPE, CW_SCOPE, ADMIN_SCOPE, REQUESTS_SCOPE, baseScope(env), baseAssignScope(env)])]
+  [...new Set([GCS_SCOPE, CW_SCOPE, ADMIN_SCOPE, baseScope(env), baseAssignScope(env)])]
 
 /** Per request and env: its identity lookup (a D1 read for a session or a grant), so the middleware's gate
  *  (`restrictGate`) and the route, handed the same Request and env, share one. The env is part of the key: the identity
@@ -340,7 +609,7 @@ async function identifyOnce(ctx: Ctx): Promise<Identity | null> {
     meterOf(ctx)?.identified('session', 'session')
     return withAdmin({ email: ctx.env.DEV_EMAIL ?? 'dev@example.test', name: null, scopes: allScopes(ctx.env), via: 'session', subject: null })
   }
-  const gate = gateFor(ctx.env)
+  const gate = gateFor(ctx.env, ctx.request)
   if (!gate) return null
   const auth = await gate.authenticate(ctx.request)
   if (!auth) return null
@@ -351,6 +620,24 @@ async function identifyOnce(ctx: Ctx): Promise<Identity | null> {
     else { const c = grantCaller(ctx.request, auth.grant); m.identified(c.via, c.caller) }
   }
   return authIdentity(auth)
+}
+
+/** Whether a request may pass the gate before it is asked: a public deployment, local dev, or a session cookie
+ *  (`sessionCookieName`) that verifies — the package's `verifySessionClaims` (its HMAC signature under the gate's
+ *  `SESSION_SECRET`, `crypto.subtle`, no I/O) with its expiry not past. Nothing else starts what a route starts beside
+ *  its gate (`shared.ahead`), which then waits for it: no credential, other cookies, a forged, malformed or expired
+ *  session, a `Basic` header — and a `Bearer` token or `?key=` link, which only the gate's D1 lookup can check (agent and
+ *  API calls, not the browser's latency-sensitive path; the gate reads a presented token first, so a cookie beside one
+ *  isn't the credential). Only a session minted under the secret can make a refused request cost more than the gate's
+ *  own reads (`AHEAD_COST`, `GATE_COST`). */
+export async function presentsCredentials(ctx: Ctx): Promise<boolean> {
+  const url = new URL(ctx.request.url)
+  if (ctx.env.PUBLIC_READ || url.hostname === 'localhost' || url.hostname === '127.0.0.1') return true
+  if (/^Bearer (.+)$/.test(ctx.request.headers.get('authorization') ?? '') || url.searchParams.get('key')) return false
+  const cookie = readCookie(ctx.request, sessionCookieName(ctx.env, ctx.request))
+  // No gate (`gateFor`), no pass.
+  if (!cookie || !ctx.env.DB || !ctx.env.SESSION_SECRET) return false
+  return (await verifySessionClaims(cookie, ctx.env.SESSION_SECRET, Date.now())) !== null
 }
 
 /** Gate a handler on a scope; 401/403 as JSON. */

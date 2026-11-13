@@ -204,11 +204,12 @@ def test_warm_cache_lists_the_scans_under_the_root(monkeypatch, archive):
     assert r.exit_code == 0, r.output
     assert r.output.splitlines() == [
         "/api/series?path=b1",
-        "/api/subtree?date=2026-09-15&path=b1&w=1280&h=768",
-        "/api/diff?from=2026-09-14&to=2026-09-15&path=b1&w=1280&h=768&summary=1",
-        "/api/diff?from=2026-09-14&to=2026-09-15&path=b1&w=1280&h=768",
-        "/api/diff?from=2026-09-13&to=2026-09-15&path=b1&w=1280&h=768&summary=1",
-        "/api/diff?from=2026-09-13&to=2026-09-15&path=b1&w=1280&h=768",
+        "/api/subtree?cv=3&date=2026-09-15&path=b1&w=1280&h=768&depth=1",
+        "/api/subtree?cv=3&date=2026-09-15&path=b1&w=1280&h=768",
+        "/api/diff?cv=3&from=2026-09-14&to=2026-09-15&path=b1&w=1280&h=768&dm=delta&depth=1",
+        "/api/diff?cv=3&from=2026-09-14&to=2026-09-15&path=b1&w=1280&h=768&dm=delta",
+        "/api/diff?cv=3&from=2026-09-13&to=2026-09-15&path=b1&w=1280&h=768&dm=delta&depth=1",
+        "/api/diff?cv=3&from=2026-09-13&to=2026-09-15&path=b1&w=1280&h=768&dm=delta",
     ]
 
 

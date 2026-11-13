@@ -1,3 +1,4 @@
+import { readerMetadata } from './readerWorker.js'
 /** One view = "path + scan + scope + pixel budget", answered from the index
  * tiers (specs/done/view-serving.md §1–2). Shared by `/api/subtree` (the map),
  * `/api/todo` (the review backlog) and anything else that wants a folded tree.
@@ -29,7 +30,7 @@
  * `f = n_children(P) − kept` — objects and dirs alike.
  */
 import type { Env } from './auth.js'
-import { asOfScans, folded, type IndexHandle, isStore, ivHeldDates, ivLastRead, type Lens, openIndex, pathStoreKey, perScan, planRects, slices, planSizeRects, readAsks, readFits, readRects, readRows, readRootHistoryRows, readSizeRects, type Rect, type Row, sizeVariant, type Span, TooWide, type Trace, withTrace } from './index.js'
+import { asOfScans, coarsenRects, coarsenSizeRects, folded, type IndexHandle, intervalsOn, isStore, ivHeldDates, ivLastRead, type Lens, openIndex, pathStoreKey, perScan, planRects, slices, planSizeRects, readAsks, readFits, readRects, readRows, readPathHistoryRows, readSizeRects, readSlicesByFolded, rowsClearFloors, readWhole, type Rect, type Row, sizeVariant, type Span, TooWide, type Trace, withTrace } from './index.js'
 import { type FoldedLens, ownerLens, poolLens } from './owners.js'
 import { type ClassScope, classRow, nameFilter, type NamePred, ownerKey, ownerOk, type OwnerScope } from './scope.js'
 import { filterThreshold, looseThreshold, matchRoots, pickTier, rebasedThreshold, rootRects } from './filter.js'
@@ -37,7 +38,7 @@ import { type SearchFound, type SearchLimits, searchRoots } from './search.js'
 import { planNegative, planPositive } from './searchQuery.js'
 import { hasLedger } from './ledger.js'
 import { ownerAssignments } from './ownerTotals.js'
-import { joinOf, shared } from './shared.js'
+import { HELD_BYTES, hitsBytes, IsoMap, joinOf, shared } from './shared.js'
 import { storeKey } from './stores.js'
 import { extrasFor } from './extras.js'
 import { loadRegistry } from './identity.js'
@@ -144,11 +145,21 @@ export interface ViewOpts {
   phase2Ms?: number
   /** With `query`: the request's phase-2 gate (`Phase2Gate`), shared by every read of one request. */
   phase2Gate?: Phase2Gate
+  /** One side of an unfiltered diff: its planned floor → the floor both sides read at (`floorMeeting`). */
+  meetFloor?: (floor: number) => Promise<number>
   /** A heavy literal's rollup view (`rollupRead`): paths to nest whatever their bytes and the read budget — the
    *  ones a diff's other side answered (`Read.nested`), so both sides know the same paths whole. */
   nestForce?: Set<string>
   /** …and the most answers it nests (default `FILTER_NEST_READS`). */
   nestReads?: number
+  /** One side of a filtered diff: the other side's scan, read at the same threshold (`foldRoots`). */
+  otherScan?: string
+  /** …and the diff's `to` scan: its value is the one a root live on both lists (`foldPhase1`'s match list). */
+  diffTo?: string
+  /** Phase 1 unfolded: every match root and ancestor held (`Phase1Memo`), and a diff whose answer is past what an
+   *  isolate holds refused as before (`tooBroadToDiff`). The cover (`allMatchRoots`) lists every root; tests compare
+   *  the fold against it. */
+  unfolded?: boolean
 }
 
 /** One request's phase 2 across its reads (a diff's two sides, its re-read at the shared floor): once a round
@@ -374,7 +385,7 @@ function display(a: Agg): Record<string, unknown> {
  * A miss is remembered for as long as a handle is (`openIndex`'s TTL): a
  * store generation has no coarse tiers and a v1 one no `bysize`, so every
  * view of it would otherwise re-ask D1 for the tiers it will never have. */
-const missing = new Map<string, number>()
+const missing = new IsoMap<string, number>('missing')
 const MISS_TTL = 60_000
 async function tryOpen(env: Env, date: string, variant: string): Promise<IndexHandle | null> {
   // Keyed by path store too: the interval store's read of a held v1 date finds no coarse tier (its
@@ -437,8 +448,9 @@ async function readSubtree(
 }
 
 /** `readSubtree`'s plan, before any group is fetched: the sort it would read, how many row groups and
- *  rows that read decodes, and the read itself — so a caller can hold reads to a group budget. */
-interface SubtreePlan { variant: string; groups: number; rows: number; read: (stop?: () => boolean) => Promise<Row[]> }
+ *  rows that read decodes, and the read itself — so a caller can hold reads to a group budget. `raise`: the factor
+ *  on `thrAt` the read applies, past 1 only when `planSubtree`'s `coarser` cut a plan down to the read budget. */
+interface SubtreePlan { variant: string; groups: number; rows: number; raise: number; read: (stop?: () => boolean) => Promise<Row[]> }
 
 async function planSubtree(
   env: Env,
@@ -452,10 +464,36 @@ async function planSubtree(
   tr?: Trace,
   pathOnly = false,
   ivPlanRows = IV_PATH_PLAN_ROWS,
+  coarser = false,
 ): Promise<SubtreePlan> {
   const held = (plan: Span[]) => plan.reduce((n, x) => n + (x.rowEnd - x.rowStart), 0)
-  const of = (variant: string, plan: Span[], read: SubtreePlan['read']): SubtreePlan => ({ variant, groups: plan.length, rows: held(plan), read })
+  const of = (variant: string, plan: Span[], read: SubtreePlan['read'], raise = 1): SubtreePlan => ({ variant, groups: plan.length, rows: held(plan), raise, read })
   const fromPath = (plan: Span[]) => of(pathIdx.variant, plan, stop => readRects(pathIdx, rects, thrAt, lens, plan, stop))
+  // `coarser` (a view's own read, whose floor its caller takes back from `raise`): no sort's plan fits the read
+  // budget, so read the one that fits at the lower floor, at that floor. A cut of plans already in hand: no I/O.
+  const coarsened = async (pp: Span[] | null, size?: { sized: IndexHandle; sh: IndexHandle; sp: Span[] }): Promise<SubtreePlan | null> => {
+    if (!coarser) return null
+    const cs = size ? await coarsenSizeRects(size.sh, size.sp, rects, thrAt) : null
+    const cp = pp && rowsClearFloors(pathIdx, lens) ? coarsenRects(pp, rects, thrAt) : null
+    const at = (f: number) => (d: number) => f * thrAt(d)
+    if (size && cs && (!cp || cs.raise <= cp.raise)) return of(size.sized.variant, cs.spans, stop => readSizeRects(size.sh, rects, at(cs.raise), lens, cs.spans, stop), cs.raise)
+    return cp ? of(pathIdx.variant, cp.spans, stop => readRects(pathIdx, rects, at(cp.raise), lens, cp.spans, stop), cp.raise) : null
+  }
+  // A slice sort read for totals, neither of whose sorts fits the budget at this floor: the folded sort says which paths
+  // clear it, and a lookup reads their slices (`readSlicesByFolded`), before any floor is raised.
+  const viaFolded = async (): Promise<SubtreePlan | null> => {
+    if (pathIdx.asOf == null || rowsClearFloors(pathIdx, lens)) return null
+    const fh = withTrace(await openIndex(folded(env), date, 'path'), tr)
+    const fp = await planRects(fh, rects, thrAt).catch(e => { if (e instanceof TooWide) return null; throw e })
+    if (!fp) return null
+    if (readFits(fp)) return of(pathIdx.variant, fp, stop => readSlicesByFolded(pathIdx, fh, rects, thrAt, fp, stop))
+    // Past the budget, at the lowest floor that fits it: a drill's folded groups step finely where a size sort's buckets
+    // don't (a broad view's the other way: the caller takes whichever floor is lower).
+    const cut = coarser ? coarsenRects(fp, rects, thrAt) : null
+    if (!cut) return null
+    const raised = (d: number) => cut.raise * thrAt(d)
+    return of(pathIdx.variant, cut.spans, stop => readSlicesByFolded(pathIdx, fh, rects, raised, cut.spans, stop), cut.raise)
+  }
   // A store generation: plan the read on both sorts (span queries only, no
   // decode) and decode whichever holds fewer rows. The cost of a `path` read
   // is ~one group per depth of the subtree, of a `bysize` read ~one group per
@@ -472,8 +510,12 @@ async function planSubtree(
   // (per tier), where `bysize` reads a group per size bucket of every segment (gcs `marin-us-central2`
   // at depth 1: 3 groups against 24). Taken when it holds at most `IV_BAND_ROWS`; past that (a flat
   // directory's children) the size sort is planned too and the one holding fewer rows read.
+  // A slice sort read for totals plans every group of its rects (`rowsClearFloors`): a big subtree's would decode every
+  // footer group of the sort to find it can't be read, so past a depth band that plan isn't made.
   if (!pathOnly && pathIdx.asOf != null && (nDesc == null || nDesc > ivPlanRows)) {
-    let pp = !lens && rects.every(q => q.dHi < 1e9) ? await planRects(pathIdx, rects, thrAt) : null
+    const whole = !rowsClearFloors(pathIdx, lens)
+    const fits = (p: Span[] | null) => !!p && readFits(p)
+    let pp = !lens && rects.every(q => q.dHi < 1e9) ? await planRects(pathIdx, rects, thrAt).catch(e => { if (whole && e instanceof TooWide) return null; throw e }) : null
     if (pp && held(pp) <= IV_BAND_ROWS) return fromPath(pp)
     const sized = (lens ? await tryOpen(env, date, 'bysize-user') : null) ?? await tryOpen(env, date, 'bysize')
     if (sized) {
@@ -481,7 +523,14 @@ async function planSubtree(
       const sp = await planSizeRects(sh, rects, thrAt, lens)
       // A tiny subtree can have an unknown row count and a low byte floor: the size sort's
       // boundary groups then exceed the decode budget though its path range fits easily.
-      if (!readFits(sp) && !pp) pp = await planRects(pathIdx, rects, thrAt, lens)
+      if (!readFits(sp) && !pp && !whole) pp = await planRects(pathIdx, rects, thrAt, lens)
+      if (!readFits(sp) && !fits(pp)) {
+        const via = await viaFolded()
+        if (via?.raise === 1) return via
+        const cut = await coarsened(pp, { sized, sh, sp })
+        if (via && (!cut || via.raise < cut.raise)) return via
+        if (cut) return cut
+      }
       if (pp && (held(pp) < held(sp) || !readFits(sp) && readFits(pp))) return fromPath(pp)
       return of(sized.variant, sp, stop => readSizeRects(sh, rects, thrAt, lens, sp, stop))
     }
@@ -493,11 +542,22 @@ async function planSubtree(
     if (sized) {
       const sh = withTrace(sized, tr)
       const [pp, sp] = await Promise.all([planRects(pathIdx, rects, thrAt, lens), planSizeRects(sh, rects, thrAt, lens)])
+      if (!readFits(sp) && !readFits(pp)) {
+        const via = await viaFolded()
+        if (via?.raise === 1) return via
+        const cut = await coarsened(pp, { sized, sh, sp })
+        if (via && (!cut || via.raise < cut.raise)) return via
+        if (cut) return cut
+      }
       if (held(sp) < held(pp)) return of(sized.variant, sp, stop => readSizeRects(sh, rects, thrAt, lens, sp, stop))
       return of(pathIdx.variant, pp, stop => readRects(pathIdx, rects, thrAt, lens, pp, stop))
     }
   }
   const pp = await planRects(pathIdx, rects, thrAt, lens)
+  if (!readFits(pp)) {
+    const cut = await coarsened(pp)
+    if (cut) return cut
+  }
   return of(pathIdx.variant, pp, stop => readRects(pathIdx, rects, thrAt, lens, pp, stop))
 }
 
@@ -540,7 +600,6 @@ export async function readRootRows(env: Env, date: string): Promise<{ path: stri
 }
 
 export async function readRootAgg(env0: Env, o: { date: string; path: string; lens?: Lens; owner?: OwnerScope; by?: string; classes?: ClassScope }, historyRows?: Row[]): Promise<{ b: number; o: number } | null> {
-  if (historyRows && o.path) throw new Error('history rows are for the fleet root only')
   const env = sliced(env0, o)
   const { date, path, lens, owner, classes } = o
   const dP = path === '' ? 0 : path.split('/').length
@@ -590,34 +649,38 @@ export async function readRootAgg(env0: Env, o: { date: string; path: string; le
   return { b: agg.b, o: agg.o }
 }
 
-/** Held dates' root totals from one version read, with the canonical per-date
- * ledger fold. No new index, inferred object counts, or snapshot-only owners. */
-export async function readRootHistory(env: Env, dates: string[], scope: { lens?: Lens; owner?: OwnerScope }): Promise<Map<string, { b: number; o: number } | null> | null> {
-  const rows = await readRootHistoryRows(env, dates, scope.lens)
+/** Held dates' totals of a path from one version read, with the canonical per-date ledger fold. No new index, inferred
+ * object counts, or snapshot-only owners. A pool's rows hold every owner, so its fold's total is theirs; a lens's hold
+ * only its user's, whose total a covering assignment below the root wants too: root only. */
+export async function readPathHistory(env: Env, dates: string[], path: string, scope: { lens?: Lens; owner?: OwnerScope }): Promise<Map<string, { b: number; o: number } | null> | null> {
+  if (scope.lens && path) throw new Error('a lens history is for the fleet root only')
+  const rows = await readPathHistoryRows(env, dates, path, scope.lens)
   if (!rows) return null
   const out = new Map<string, { b: number; o: number } | null>()
   const held = [...rows.keys()]
   for (let i = 0; i < held.length; i += 12) {
-    const points = await Promise.all(held.slice(i, i + 12).map(async date => [date, await readRootAgg(env, { date, path: '', ...scope }, rows.get(date)!)] as const))
+    const points = await Promise.all(held.slice(i, i + 12).map(async date => [date, await readRootAgg(env, { date, path, ...scope }, rows.get(date)!)] as const))
     for (const [date, point] of points) out.set(date, point)
   }
   return out
 }
 
 /** The owner lens for a scan: the live assignments folded against it (cached per
- * (scan, ledger head) by the totals machinery) — null when nothing is assigned. */
-const assignerMemo = new Map<string, Promise<Map<string, string>>>()
+ * (scan, ledger head) by the totals machinery) — null when nothing is assigned, or the deployment keeps no ledger
+ * (a lens is then the scan's attribution, as `poolLensFor`'s pools are). */
+const assignerMemo = new IsoMap<string, Promise<Map<string, string>>>('assignerMemo')
 /** email → canonical user id (`user_emails`), memoized per isolate — to match
  * an assignment's assigner (`actions.actor`, an email) against a `by=` (canonical). */
 async function assignerMap(env: Env): Promise<Map<string, string>> {
   return shared(assignerMemo, 'ue', async () => {
     const m = new Map<string, string>()
-    const ue = await env.DB!.prepare('SELECT email, user FROM user_emails').all<{ email: string; user: string }>()
+    const ue = await readerMetadata(env)!.prepare('SELECT email, user FROM user_emails').all<{ email: string; user: string }>()
     for (const r of ue.results) m.set(r.email.toLowerCase(), r.user)
     return m
   }, 10_000, joinOf(env, 'assigners'))
 }
 async function ownerLensFor(env: Env, date: string, lens: Lens, by?: string): Promise<FoldedLens | null> {
+  if (!(await hasLedger(env))) return null
   let assignments = await ownerAssignments(env, date)
   if (by) {
     const emap = await assignerMap(env)
@@ -690,6 +753,9 @@ interface Read {
   matched?: { path: string; b: number; o: number }[]
   /** A rollup read: the match count (a bound) and the rollup's shape (`View.rollup`). */
   matchCount?: { n: number; b: number; o: number }
+  /** A folded diff side (`foldPhase1`): the match count over both scans' roots, as the diff lists them (each root at
+   *  its `to` total where live there, else its `from` one), exact — `matched` lists only what `matchLists` can show. */
+  matchTotal?: { n: number; b: number; o: number }
   rollup?: { children: number; kept: number; rows: number | null; bucketsOnly?: true; scopedBelow?: true }
   /** A rollup read: every known node's exact matched total on this scan, drawn or not — a diff takes a name
    * one side didn't draw from here instead of a point lookup, absent = zero under a parent `complete` says
@@ -801,8 +867,10 @@ async function readView(env: Env, o: ViewOpts, cov: Coverage = {}): Promise<Read
   // Nothing in scope under P: an empty view, not a zero threshold that would
   // keep every row the tier holds.
   if (rootAgg.b <= 0) return null
-  const threshold = o.threshold ?? (rootAgg.b * minArea) / (w * h)
-  const thrAt = (depth: number) => threshold * atten ** Math.max(0, depth - dP - 1)
+  const asked = o.threshold ?? (rootAgg.b * minArea) / (w * h)
+  // Past `asked` only when the read budget raises it (`setFloor`).
+  let threshold = asked
+  let thrAt = (depth: number) => asked * atten ** Math.max(0, depth - dP - 1)
 
   // The coarsest tier whose floor the UNSCOPED query can't see below. A
   // narrow scope lowers the node threshold (its root is smaller), but the
@@ -953,7 +1021,13 @@ async function readView(env: Env, o: ViewOpts, cov: Coverage = {}): Promise<Read
       if (sfs && !skey && staticLiteral(pq, pathTerms(env))) throw new FilterRejected(reject('scan-not-indexed'))
       // A dir-only (v1) scan's index never saw a file: whatever answers, its matches are its folders'.
       if (skey && (await dirsOnlyOf(sfs, [date])).length) noteCoverage(cov, 'dirsOnly', DIRS_ONLY)
-      const raw = skey ? await sfs!.source.hits(skey, path, { firstPaint: o.firstPaint }) : null
+      // A read whose phase 1 folds (`foldPhase1`: no owner scope, pool or exclusions) holds what it (a diff side: either
+      // side) can draw, whatever the answer's size: a view is a diff with no other scan. Any other diff asks the source
+      // to say, before it reads them, that the two sides' memos won't fit (`tooBroadToDiff`).
+      const folds = !o.unfolded && !owner && !negP && !pl
+      const ask: HitOpts = { firstPaint: o.firstPaint, ...(o.otherScan && !folds ? { maxBytes: HELD_BYTES } : {}) }
+      const raw = skey ? await sfs!.source.hits(skey, path, ask) : null
+      if (ask.over) throw new FilterRejected(reject(ask.overScans!.includes(date) ? 'diff-too-broad' : 'scan-not-indexed'))
       let shits = raw
       // An answer that doesn't cover the scan — a heavy literal past the drill base (a run with no live `drill/` cuts
       // the drill's stack: that run's scans and every later one's), a light read over a stack cut mid-read, the
@@ -983,12 +1057,46 @@ async function readView(env: Env, o: ViewOpts, cov: Coverage = {}): Promise<Read
         staticRoots = true
       }
       if (shits) {
+        // A diff side's fold reads the other scan's bytes from this answer: one that doesn't cover it can't.
+        const fold = folds && (!o.otherScan || covers(shits, [o.otherScan]))
+        if (o.otherScan && !fold && tooBroadToDiff(shits.hits!)) throw new FilterRejected(reject('diff-too-broad'))
         // Per isolate: the same held hits, scan and owner scope aggregate the same (a view's first paint,
         // its full read, a diff's sides and floors, other canvases).
         const memoKey = `${path}\0${date}\0${owner ? ownerKey(owner) : ''}`
         let byHits = staticPhase1.get(shits.hits!)
         if (!byHits) staticPhase1.set(shits.hits!, (byHits = new Map()))
-        let m = byHits.get(memoKey)
+        p1Tier = shits.io.from === 'drill' ? 'drill' : 'static'
+        staticRoots = true
+        if (fold) {
+          // The roots' total first (the floor pass needs no more), then the fold at the threshold this read draws at.
+          let tot = foldTotals.get(shits.hits!)?.get(memoKey)
+          if (!tot) {
+            tot = rootsTotal(shits.hits!, date)
+            let byKey = foldTotals.get(shits.hits!)
+            if (!byKey) foldTotals.set(shits.hits!, (byKey = new Map()))
+            byKey.set(memoKey, tot)
+            if (byKey.size > 8) byKey.delete(byKey.keys().next().value!)
+          }
+          if (tot.b <= 0) return null
+          const T = o.threshold ?? filterThreshold(tot.b, w, h, minArea)
+          if (o.floorOnly) return { rootAll, rootAgg: { ...tot, cb: { ...tot.cb }, ub: { ...tot.ub } }, kept: new Map(), aggDepth: new Map(), foldedOf: new Map(), threshold: T, thrAt: rebasedThreshold(T, atten, dP), tier: p1Tier, idx, truncated: false, ownerLens: ol, scoped }
+          const fo: FoldOpts = { date, other: o.otherScan ?? date, to: o.diffTo ?? date, T, atten, budget: o.maxTiles ?? tileBudget(w, h), maxDepth, subdivMin: T * (FILTER_SUBDIV_AREA / minArea) }
+          const foldKey = `${memoKey}\0${fo.other}\0${fo.to}\0${T}\0${fo.budget}\0${maxDepth ?? ''}\0${atten}\0${fo.subdivMin}`
+          let fm = byHits.get(foldKey)
+          if (!fm) {
+            const tf = performance.now()
+            fm = foldPhase1(path, dP, shits.hits!, fo)
+            byHits.set(foldKey, fm)
+            if (byHits.size > 8) byHits.delete(byHits.keys().next().value!)
+            // The forest's nodes held to draw (of all its nodes), and its roots held to list (of all its roots).
+            const F = fm.forest!
+            tr?.('fold', performance.now() - tf, `${F.nb.size} of ${F.nodes} nodes, ${F.matched.length} of ${F.nRoots} roots`)
+          }
+          p1 = fm.p1
+          roots = fm.roots
+          memo = fm
+        }
+        let m = fold ? memo : byHits.get(memoKey)
         if (!m) {
           const agg = aggregateHits(shits.hits!)
           m = { p1: agg, roots: [...agg.depth.keys()].sort() }
@@ -998,8 +1106,6 @@ async function readView(env: Env, o: ViewOpts, cov: Coverage = {}): Promise<Read
         p1 = m.p1
         roots = m.roots
         memo = m
-        p1Tier = shits.io.from === 'drill' ? 'drill' : 'static'
-        staticRoots = true
       }
       const plan = !shits && !sb && store && pq ? planPositive(pq) : null
       const searched = plan ? await searchRoots(perScan(env), searchIdx!, query, plan, path, o.searchLimits, `pos:${JSON.stringify(pq)}`) : null
@@ -1039,7 +1145,8 @@ async function readView(env: Env, o: ViewOpts, cov: Coverage = {}): Promise<Read
       }
     }
     tr?.('match', performance.now() - t0)
-    if (!roots.length) return null
+    // A folded diff side may hold no root (none drawable, none listed) and still have matches: its `(other)`s.
+    if (!roots.length && !memo?.forest?.nRoots) return null
     // Unscoped, nothing to exclude: the forest's budget-free part is the isolate's (`Phase1Memo`).
     const lean = memo && !owner && !negP && !pl ? (memo.forest ??= buildForest(memo, path, dP), memo) : null
     const rootSet = lean ? (lean.rootSet ??= new Set(roots)) : new Set(roots)
@@ -1212,7 +1319,16 @@ async function readView(env: Env, o: ViewOpts, cov: Coverage = {}): Promise<Read
       const aggsF = new Map<string, Agg>()
       for (const [p, b] of F.nb) if (b >= thrTop(F.depth.get(p)!)) aggsF.set(p, rootSet.has(p) ? rootAggOf.get(p)! : F.sums.get(p)!)
       const foldedF = new Map<string, number>()
-      for (const p of F.nb.keys()) {
+      if (F.kids) {
+        // A folded forest (`foldPhase1`) holds only some of its nodes: a drawn node's (and P's) folded children are its
+        // children less its drawn ones.
+        const drawnKids = new Map<string, number>()
+        for (const p of aggsF.keys()) { const par = parentOf(p); drawnKids.set(par, (drawnKids.get(par) ?? 0) + 1) }
+        for (const par of [path, ...aggsF.keys()]) {
+          const f = (F.kids.get(par) ?? 0) - (drawnKids.get(par) ?? 0)
+          if (f > 0) foldedF.set(par, f)
+        }
+      } else for (const p of F.nb.keys()) {
         if (aggsF.has(p)) continue
         const par = parentOf(p)
         if (par === path || aggsF.has(par)) foldedF.set(par, (foldedF.get(par) ?? 0) + 1)
@@ -1319,11 +1435,12 @@ async function readView(env: Env, o: ViewOpts, cov: Coverage = {}): Promise<Read
     }
     return {
       rootAll, rootAgg: matchedAgg, kept: aggsF, aggDepth: depthF, foldedOf: foldedF, threshold: T, thrAt: loose,
-      tier: `${p1Tier}+${tierName}`, idx: regionIdx, truncated: searchCut || roots.length > HARD_CAP,
+      tier: `${p1Tier}+${tierName}`, idx: regionIdx, truncated: searchCut || (lean?.forest?.nRoots ?? roots.length) > HARD_CAP,
       matches: sortedOnce(roots),
       // Heaviest first (ties by path): the list a bulk action and the series read.
       matched: lean ? lean.forest!.matched.slice() : roots.map(r => ({ path: r, b: Math.round(rootNet.get(r)!.b), o: Math.round(rootNet.get(r)!.o) })).sort((x, y) => y.b - x.b || (x.path < y.path ? -1 : x.path > y.path ? 1 : 0)),
       matchSet: rootSet,
+      ...(lean?.forest?.union ? { matchTotal: lean.forest.union } : {}),
       ...(excl.size ? { excluded: [...excl.keys()].sort(), excl } : {}),
       ...(o.firstPaint ? { firstPaint: true } : {}), ...(interiors ? { interiors } : {}), ownerLens: ol, scoped,
     }
@@ -1337,11 +1454,6 @@ async function readView(env: Env, o: ViewOpts, cov: Coverage = {}): Promise<Read
   // query (a lens's assignments fold filters these rows): matches are found at
   // every depth.
   t0 = performance.now()
-  const sub = await readSubtree(env, date, idx, [{ dLo: dP + 1, dHi: maxDepth != null && !query ? dP + maxDepth : 1e9, pLo, pHi }], thrAt, lens, nDesc, smallRows, tr, ivPlanRows)
-  const rows = sub.rows
-  tr?.('rows', performance.now() - t0, sub.variant)
-  // A store generation names the sort that answered; a v1 one its tier.
-  const tierName = isStore(idx) ? sub.variant : pick.name
   // The lens's assigned regions from the by-path tier (their own rows and
   // everything under them): every path there whose U-share can clear the
   // threshold is present, since all ≥ U's share. P itself as a region means
@@ -1352,9 +1464,40 @@ async function readView(env: Env, o: ViewOpts, cov: Coverage = {}): Promise<Read
   // On the interval store the regions' totals come from the folded `bysize` sort: one row per path with its
   // exact total, every path over the threshold and no other. (A path-first read over the slices' dyadic
   // segments selects a run per depth per segment: a big user's root regions went past `decodeSpans`' cap.)
+  const allSized = regionRects.length && pick.all!.asOf != null ? withTrace(await openIndex(folded(env), date, 'bysize'), tr) : null
+  const setFloor = (floor: number) => {
+    threshold = floor
+    thrAt = depth => floor * atten ** Math.max(0, depth - dP - 1)
+  }
+  // A plan past the read budget is read at the lowest floor that fits it (`coarsen`), and that is this view's floor:
+  // a big canvas gets what a smaller one does, `(other)` holding the rest, its totals exact. Not with a query: a
+  // coarser read hides matches, so that refusal stands. The regions' plan can raise it further: the subtree's read,
+  // planned at the lower floor, is then a superset the kept test below cuts.
+  const planReads = async (coarser: boolean) => {
+    const sub = await planSubtree(env, date, idx, [{ dLo: dP + 1, dHi: maxDepth != null && !query ? dP + maxDepth : 1e9, pLo, pHi }], thrAt, lens, nDesc, smallRows, tr, false, ivPlanRows, coarser)
+    if (sub.raise !== 1) setFloor(threshold * sub.raise)
+    if (!regionRects.length) return { sub, regionSpans: [] as Span[] }
+    const plan = allSized ? await planSizeRects(allSized, regionRects, thrAt) : await planRects(pick.all!, regionRects, thrAt)
+    const cut = !coarser || readFits(plan) ? null : allSized ? await coarsenSizeRects(allSized, plan, regionRects, thrAt) : coarsenRects(plan, regionRects, thrAt)
+    if (cut) setFloor(threshold * cut.raise)
+    return { sub, regionSpans: cut?.spans ?? plan }
+  }
+  let { sub, regionSpans } = await planReads(!query)
+  // A diff's sides settle on one floor before either decodes a group (`floorMeeting`); the larger floor's plans are
+  // within this side's, so they fit.
+  const agreed = o.meetFloor ? await o.meetFloor(threshold) : threshold
+  if (agreed > threshold) {
+    setFloor(agreed)
+    ;({ sub, regionSpans } = await planReads(false))
+  }
+  if (threshold !== asked) tr?.('raise', threshold / asked)
+  const rows = await sub.read()
+  tr?.('rows', performance.now() - t0, sub.variant)
+  // A store generation names the sort that answered; a v1 one its tier.
+  const tierName = isStore(idx) ? sub.variant : pick.name
   const allRows = !regionRects.length ? []
-    : pick.all!.asOf != null ? await readSizeRects(withTrace(await openIndex(folded(env), date, 'bysize'), tr), regionRects, thrAt)
-    : await readRects(pick.all!, regionRects, thrAt)
+    : allSized ? await readSizeRects(allSized, regionRects, thrAt, undefined, regionSpans)
+    : await readRects(pick.all!, regionRects, thrAt, undefined, regionSpans)
   let aggs = new Map<string, Agg>() // the scoped aggregate per path
   const aggDepth = new Map<string, number>()
   const foldedOf = new Map<string, number>()
@@ -1626,9 +1769,9 @@ async function readInteriors(env: Env, x: {
 
 /** A heavy literal's rollup at P nested on `date` (`rollupRead`, which draws it): every node known exactly, the
  *  paths answered, and what the budgets left unread. Null: nothing under P on `date`. */
-/** A nest's node totals: every node known on `date`, its matched bytes and objects (exact), a full `Agg` built only
+/** A nest's node totals: every node it keeps on `date`, its matched bytes and objects (exact), a full `Agg` built only
  *  for the nodes asked for (`get`: the drawn ones, a diff's lookups). A match-roots answer's forest is its every root
- *  and every ancestor between it and the answered path (gcs's fleet-root `q=tokenizer`: ~250K nodes), and an `Agg`
+ *  and every ancestor between it and the answered path (gcs's fleet-root `q=tokenizer`: ~250K nodes; `foldRoots` keeps few), and an `Agg`
  *  each (two maps and nine fields) was ~460 B in Node (`bench/view-mem.ts`): 112 MB for nodes no view drew. Here a
  *  node not asked for is its two numbers and its kind; `bo` reads them without building one. */
 export class Totals extends Map<string, Agg> {
@@ -1682,12 +1825,12 @@ export class Totals extends Map<string, Agg> {
 }
 
 export interface Nest {
-  /** Every node known on `date`: its matched bytes and objects (exact), and its depth. */
+  /** The nodes a view can use on `date` (a rollup's kept children, `foldRoots`' of a forest): matched bytes and objects (exact), and depth. */
   exact: Totals
   depthOf: Map<string, number>
-  /** Per answered path, its children with matches on `date` (a rollup's by name; a forest's every one). */
+  /** Per answered path, its children with matches on `date` (a rollup's by name; a forest's that a view can use). */
   kidsOf: Map<string, string[]>
-  /** A rollup's children holding roots on any scan (its fold count). */
+  /** Their number: a rollup's children holding roots on any scan, a forest's on `date` (its fold count). */
   rollupKids: Map<string, number>
   /** The paths answered by their match roots (their forests are whole). */
   rootsDirs: Set<string>
@@ -1718,11 +1861,95 @@ export interface NestOpts {
   fetch?: (p: string, opts: HitOpts) => Promise<Found | null>
   /** Paths to nest whatever their bytes and the budgets (`ViewOpts.nestForce`). */
   force?: Set<string>
+  /** The diff's other scan (`foldRoots`). */
+  other?: string
   /** Answers (default `FILTER_NEST_READS`), decoded rows (default `FILTER_PHASE2_ROWS`), ms. */
   reads?: number
   rows?: number
   ms: number
   trace?: Trace
+}
+
+/** The nodes `foldRoots` keeps of a roots answer's forest, each at its total on the scan read, and per directory drawable
+ *  on that scan its children there, drawn or not (`kids`: its child list's fold count). */
+export interface FoldedRoots {
+  nodes: { p: string; d: number; isDir: boolean; b: number; n: number }[]
+  kids: Map<string, number>
+}
+
+/** A match-roots answer under `dir` on `date`, folded to the nodes a view can use, whatever the number of roots: a forest
+ *  is its every root and every ancestor between it and `dir` (gcs's fleet-root `q=checkpoint`: ~258K nodes, for ~1.5K
+ *  drawn), and a diff's two sides held one each, past the isolate's memory (1102). Every node is summed here, then let go
+ *  but for:
+ *  - a node drawable on `date` or on `other`, a diff's other scan, read at the same threshold: this side's row for what
+ *    that side draws (an answer spans every scan, so both are summed from the one list);
+ *  - the `MATCH_LIST_CAP` heaviest roots neither scan can draw, by the value the diff's match list ranks them on (the newer
+ *    scan's, else the older's): that list's overflow, beyond the roots the tree draws.
+ *  Nodes come in the order the hits first show them on `date`. A node live on `other` alone is not this side's. */
+export function foldRoots(dir: string, hits: Hit[], o: { date: string; other?: string; thrAt: (d: number) => number; last: number; isRoot: (p: string) => boolean }): FoldedRoots {
+  const D = scanAt(o.date)
+  const E = o.other == null ? null : scanAt(o.other)
+  const at = new Map<string, number>()
+  const paths: string[] = [], depths: number[] = [], parents: number[] = []
+  // Per node: bytes and objects on `date`, bytes on `other`, where it is live (1: `date`, 2: `other`), and whether it
+  // first showed on `date` as a directory.
+  const bs: number[] = [], ns: number[] = [], eb: number[] = [], live: number[] = [], isDir: number[] = []
+  const order: number[] = []
+  const nodeOf = (p: string, d: number): number => {
+    let i = at.get(p)
+    if (i == null) {
+      i = paths.length
+      at.set(p, i); paths.push(p); depths.push(d); parents.push(-1)
+      bs.push(0); ns.push(0); eb.push(0); live.push(0); isDir.push(0)
+    }
+    return i
+  }
+  const add = (i: number, onD: boolean, onE: boolean, asDir: boolean, size: number, n: number): void => {
+    if (onD) {
+      if (!(live[i] & 1)) { live[i] |= 1; isDir[i] = asDir ? 1 : 0; order.push(i) }
+      bs[i] += size; ns[i] += n
+    }
+    if (onE) { live[i] |= 2; eb[i] += size }
+  }
+  for (const h of hits) {
+    const onD = h.vf <= D && D < h.vt
+    const onE = E != null && h.vf <= E && E < h.vt
+    if (!onD && !onE) continue
+    const size = Number(h.size), n = Number(h.n)
+    let child = nodeOf(h.path, h.depth)
+    add(child, onD, onE, false, size, n)
+    for (let q = parentOf(h.path), d = h.depth - 1; q !== dir && q !== ''; q = parentOf(q), d--) {
+      const i = nodeOf(q, d)
+      parents[child] = i
+      add(i, onD, onE, true, size, n)
+      child = i
+    }
+  }
+  // Drawable on a scan: under a drawable parent (`dir` is), within `last`, over its level's threshold.
+  const drawable = (vals: number[]) => {
+    const state = new Int8Array(paths.length) // 0 unknown, 1 yes, 2 no
+    const can = (i: number): boolean => {
+      if (i < 0) return true
+      if (!state[i]) state[i] = can(parents[i]) && depths[i] <= o.last && vals[i] >= o.thrAt(depths[i]) ? 1 : 2
+      return state[i] === 1
+    }
+    return can
+  }
+  const canD = drawable(bs), canE = E == null ? () => false : drawable(eb)
+  const newerIsD = E == null || D >= E
+  const ranked = (i: number): number => (live[i] & (newerIsD ? 1 : 2)) ? (newerIsD ? bs[i] : eb[i]) : (newerIsD ? eb[i] : bs[i])
+  const spare: number[] = []
+  for (let i = 0; i < paths.length; i++) if (!canD(i) && !canE(i) && o.isRoot(paths[i])) spare.push(i)
+  spare.sort((x, y) => ranked(y) - ranked(x) || (paths[x] < paths[y] ? -1 : paths[x] > paths[y] ? 1 : 0))
+  const listed = new Set(spare.slice(0, MATCH_LIST_CAP))
+  const nodes: FoldedRoots['nodes'] = []
+  const kids = new Map<string, number>()
+  for (const i of order) {
+    const par = parents[i]
+    if (canD(par)) { const k = par < 0 ? dir : paths[par]; kids.set(k, (kids.get(k) ?? 0) + 1) }
+    if (canD(i) || canE(i) || listed.has(i)) nodes.push({ p: paths[i], d: depths[i], isDir: !!isDir[i], b: bs[i], n: ns[i] })
+  }
+  return { nodes, kids }
 }
 
 export async function nestRollup(o: NestOpts): Promise<Nest | null> {
@@ -1731,8 +1958,9 @@ export async function nestRollup(o: NestOpts): Promise<Nest | null> {
   /** Every node known on `date`, its matched bytes and objects (exact), and its depth. */
   const exact = new Totals()
   const depthOf = new Map<string, number>()
-  /** Per answered path, its children with matches on `date` (a rollup's by name; a forest's every one); a
-   *  rollup's children holding roots on any scan (its fold count); the paths answered by match roots. */
+  /** Per answered path, its children with matches on `date` (a rollup's by name; a forest's that a view can use); their
+   *  number (its fold count: a rollup's children holding roots on any scan, a forest's on `date`); the paths answered by
+   *  match roots. */
   const kidsOf = new Map<string, string[]>()
   const rollupKids = new Map<string, number>()
   const rootsDirs = new Set<string>()
@@ -1753,39 +1981,20 @@ export async function nestRollup(o: NestOpts): Promise<Nest | null> {
     rollupKids.set(dir, r.children)
     return tot
   }
-  /** `dir`'s match roots live on `date`, and every ancestor between `dir` and them (their sums, held as numbers,
-   *  `Totals`). Children are listed (`kidsOf`) only under the nodes a view can draw — `dir`, and below it each node
-   *  over its level's threshold within `maxDepth` under a drawable parent, `draw`'s own test, so every drawn node's
-   *  list (and fold count) is whole; the rest of the forest is never walked. */
-  const addRoots = (dir: string, hits: Hit[]) => {
+  /** `dir`'s match roots: the nodes a view can use of their forest, every other one summed and let go (`foldRoots`).
+   *  Children are listed (`kidsOf`, kept ones) and counted (`rollupKids`) under the nodes a view can draw on `date`, so
+   *  every drawn node's list and fold count are whole. */
+  const fold = (dir: string, hits: Hit[]): FoldedRoots => foldRoots(dir, hits, { date, other: o.other, thrAt, last: maxDepth != null ? dP + maxDepth : Infinity, isRoot })
+  const addRoots = (dir: string, { nodes, kids }: FoldedRoots) => {
     rootsDirs.add(dir)
-    const D = scanAt(date)
-    const fresh: string[] = []
-    const node = (p: string, d: number, dir_: boolean, size: number, n: number): void => {
-      if (exact.has(p)) { exact.grow(p, size, n); return }
-      exact.addLite(p, size, n, dir_); depthOf.set(p, d); fresh.push(p)
+    for (const [k, n] of kids) {
+      rollupKids.set(k, n)
+      if (!kidsOf.has(k)) kidsOf.set(k, [])
     }
-    for (const hh of hits) {
-      if (!(hh.vf <= D && D < hh.vt)) continue
-      const size = Number(hh.size), n = Number(hh.n)
-      node(hh.path, hh.depth, false, size, n)
-      for (let q = parentOf(hh.path), d = hh.depth - 1; q !== dir && q !== ''; q = parentOf(q), d--) node(q, d, true, size, n)
-    }
-    const drawable = new Map<string, boolean>([[dir, true]])
-    const canDraw = (p: string): boolean => {
-      let v = drawable.get(p)
-      if (v == null) {
-        const d = depthOf.get(p)!
-        v = canDraw(parentOf(p)) && !(maxDepth != null && d > dP + maxDepth) && exact.bo(p).b >= thrAt(d)
-        drawable.set(p, v)
-      }
-      return v
-    }
-    for (const p of fresh) {
-      const par = parentOf(p)
-      if (!canDraw(par)) continue
-      const ks = kidsOf.get(par)
-      if (ks) ks.push(p); else kidsOf.set(par, [p])
+    for (const { p, d, isDir, b, n } of nodes) {
+      if (exact.has(p)) exact.grow(p, b, n)
+      else { exact.addLite(p, b, n, isDir); depthOf.set(p, d) }
+      kidsOf.get(parentOf(p))?.push(p)
     }
     if (!kidsOf.has(dir)) kidsOf.set(dir, [])
   }
@@ -1825,7 +2034,8 @@ export async function nestRollup(o: NestOpts): Promise<Nest | null> {
           else if (reads < (o.reads ?? FILTER_NEST_READS)) { take.push(p); reads++ }
           else skipped.budget++
         }
-        const got = new Map<string, Found | null>()
+        // Each answer folded as it lands, not held to the level's end: a level's answers' hits are up to phase 2's rows.
+        const got = new Map<string, { rollup?: Rollup; roots?: FoldedRoots } | null>()
         let i = 0
         const worker = async () => {
           while (i < take.length) {
@@ -1839,18 +2049,18 @@ export async function nestRollup(o: NestOpts): Promise<Nest | null> {
             if (ho.over) { skipped.budget++; continue }
             // A roots answer costs its roots (decoded once, its forest built per view); a rollup its few cells.
             if (r?.hits) rowsLeft -= r.hits.length
-            got.set(p, r)
+            // Declined (the path holds the literal under the hex-run rule) or not exact on this scan: one tile.
+            got.set(p, r && covers(r, [date]) ? { rollup: r.rollup, roots: r.hits && fold(p, r.hits) } : null)
           }
         }
         await Promise.all(Array.from({ length: Math.min(NEST_PAR, take.length) }, worker))
         const next: string[] = []
         for (const p of take) {
-          const f = got.get(p)
-          // Declined (the path holds the literal under the hex-run rule) or not exact on this scan: one tile.
-          if (!f || !covers(f, [date])) continue
+          const a = got.get(p)
+          if (!a) continue
           fetched.add(p)
-          if (f.rollup) next.push(...(addRollup(p, f.rollup, depthOf.get(p)!), kidsOf.get(p)!.filter(wants)))
-          else addRoots(p, f.hits)
+          if (a.rollup) next.push(...(addRollup(p, a.rollup, depthOf.get(p)!), kidsOf.get(p)!.filter(wants)))
+          else addRoots(p, a.roots!)
         }
         frontier = next
       }
@@ -1904,7 +2114,7 @@ async function rollupRead(env: Env, o: ViewOpts, rollup: Rollup, x: {
   const ms = o.phase2Ms ?? (Number(env.FILTER_PHASE2_MS) || FILTER_PHASE2_MS)
   const nest = await nestRollup({
     date, path, dP, rollup, isRoot, threshold: o.threshold, w, h, minArea, atten, maxDepth,
-    fetch: o.firstPaint || o.floorOnly ? undefined : x.fetch, force: o.nestForce, reads: o.nestReads, rows: o.phase2Rows,
+    fetch: o.firstPaint || o.floorOnly ? undefined : x.fetch, force: o.nestForce, other: o.otherScan, reads: o.nestReads, rows: o.phase2Rows,
     ms, trace: tr,
   })
   if (!nest) return null
@@ -2126,6 +2336,14 @@ const REGION_READS = 24
  *  literal is held) → per scan and owner scope, its aggregates and sorted roots. Read-only once built. */
 const staticPhase1 = new WeakMap<Hit[], Map<string, Phase1Memo>>()
 
+/** Paths ordered as each one with a `/` appended orders: a path just before its descendants, which follow it in one run
+ *  (`a/b` < `a/b/c` < `a/b.x`; plain string order puts `a/b.x` between them). No string is made. */
+export function dirOrder(a: string, b: string): number {
+  if (a === b) return 0
+  if (a < b) return b.length > a.length && b.charCodeAt(a.length) < 47 && b.startsWith(a) ? 1 : -1
+  return a.length > b.length && a.charCodeAt(b.length) < 47 && a.startsWith(b) ? -1 : 1
+}
+
 /** A static literal's phase 1, held per isolate, and (unscoped, nothing excluded) everything about its
  *  forest that the pixel budget doesn't decide, built on first use: its roots as a set, every forest node's
  *  depth and bytes (roots and their ancestors under P), each ancestor's aggregate and the roots' total, and
@@ -2135,7 +2353,229 @@ interface Phase1Memo {
   p1: { all: Map<string, Agg>; mine: Map<string, Agg>; depth: Map<string, number> }
   roots: string[]
   rootSet?: Set<string>
-  forest?: { depth: Map<string, number>; nb: Map<string, number>; sums: Map<string, Agg>; total: Agg; matched: { path: string; b: number; o: number }[] }
+  forest?: {
+    depth: Map<string, number>; nb: Map<string, number>; sums: Map<string, Agg>; total: Agg; matched: { path: string; b: number; o: number }[]
+    /** A folded forest (`foldPhase1`): per node it holds that may be drawn (and P), its children on the scan, held or not. */
+    kids?: Map<string, number>
+    /** …the scan's match roots, held or not; and the diff's count over both scans (`Read.matchTotal`). */
+    nRoots?: number
+    /** …and its nodes (roots and their ancestors under P on either scan), held or not. */
+    nodes?: number
+    union?: { n: number; b: number; o: number }
+  }
+}
+
+/** Per held hits array, per `Phase1Memo` key: the scan's match roots' total (bytes, objects, owners), all a folded diff
+ *  side's floor pass reads (`foldPhase1`). */
+const foldTotals = new WeakMap<Hit[], Map<string, Agg>>()
+
+/** The match roots' total on `date`: bytes, objects and owners, as `buildForest` sums them. */
+function rootsTotal(hits: Hit[], date: string): Agg {
+  const D = scanAt(date)
+  const t = newAgg()
+  for (const h of hits) {
+    if (!(h.vf <= D && D < h.vt)) continue
+    const size = Number(h.size)
+    t.b += size; t.o += Number(h.n)
+    if (h.usr) t.ub[h.usr] = (t.ub[h.usr] ?? 0) + size
+  }
+  return t
+}
+
+export interface FoldOpts {
+  date: string
+  /** The diff's other scan, and its `to` (`date` or `other`); a view's: `date`, both. */
+  other: string
+  to: string
+  /** The threshold this side draws at (the diff's shared floor), attenuated per level below P by `atten`. */
+  T: number
+  atten: number
+  /** The canvas's tile budget (`tileBudget`, `ViewOpts.maxTiles`). */
+  budget: number
+  maxDepth?: number
+  /** Phase 2's subdivision floor, bytes (`FILTER_SUBDIV_AREA`). */
+  subdivMin: number
+}
+
+/** A diff side's phase 1 (`Phase1Memo`, its forest built) from a match-roots answer spanning both scans, holding only
+ *  what the lean path can use, so that its every result is the unfolded memo's at any number of roots. A view is the
+ *  same with no other scan (`other` = `to` = `date`): one scan's criteria, half the bound below.
+ *  Held:
+ *  - per scan, the `budget` heaviest forest nodes over their level's threshold, ranked as `capTiles` ranks them (bytes,
+ *    then shallowest, then path). `capTiles` draws at most that many and ranks an ancestor ahead of its descendants, so
+ *    no other node is drawn on that scan, whatever phase 2 adds; the rest are counted (`kids`) into their parents'
+ *    `(other)`. This side holds its own scan's, and the roots among the other's (a lookup's `inQuery`, the match list);
+ *  - per scan, the drawn roots phase 2 reads (`REGION_READS` heaviest subdividable) and looks up (`ROOT_DETAILS`);
+ *  - the `MATCH_LIST_CAP` heaviest roots neither holds, ranked as the diff's match list ranks them (`to` bytes where
+ *    live there, else `from` ones): both sides list the same roots, each at its own value where live.
+ *  An `Agg` (owners too) only per node held: at most 2·`budget` + 2·(`REGION_READS` + `ROOT_DETAILS`) + `MATCH_LIST_CAP`
+ *  (`budget` = w·h / `TILE_AREA`), whatever the answer. Every node's numbers are summed in a first pass over the hits
+ *  and let go after the second. */
+export function foldPhase1(path: string, dP: number, hits: Hit[], o: FoldOpts): Phase1Memo {
+  const D = scanAt(o.date), E = scanAt(o.other)
+  // A diff side's other scan has numbers of its own; a view's `other` is its `date`, so it has none.
+  const two = o.other !== o.date
+  // The hits live on either scan, in `dirOrder`: a path just before its descendants, which follow it in one run.
+  const on = new Uint8Array(hits.length)
+  let nLive = 0
+  for (let k = 0; k < hits.length; k++) {
+    const h = hits[k]
+    if ((on[k] = (h.vf <= D && D < h.vt ? 1 : 0) | (h.vf <= E && E < h.vt ? 2 : 0))) nLive++
+  }
+  const order = new Int32Array(nLive)
+  for (let k = 0, j = 0; k < hits.length; k++) if (on[k]) order[j++] = k
+  order.sort((x, y) => dirOrder(hits[x].path, hits[y].path))
+  // Two walks over that order, each with a stack of the open nodes (the previous root and its ancestors under P): the
+  // first counts the nodes, the second fills columns of exactly that many. A node is a prefix of a hit's path (`src`,
+  // `plen`): no string is made for an ancestor until it is compared or held. A parent is made before its children.
+  const stackLen: number[] = [], stackNode: number[] = []
+  let N = 0
+  let src = new Int32Array(0), plen = src, depths = src, parents = src, hitNode = src
+  let bytes0 = new Float64Array(0), objs0 = bytes0, bytes1 = bytes0, objs1 = bytes0
+  let live = new Uint8Array(0), isRoot = live
+  for (const fill of [false, true]) {
+    if (fill) {
+      src = new Int32Array(N); plen = new Int32Array(N); depths = new Int32Array(N); parents = new Int32Array(N).fill(-1)
+      hitNode = new Int32Array(hits.length).fill(-1)
+      bytes0 = new Float64Array(N); objs0 = new Float64Array(N)
+      bytes1 = two ? new Float64Array(N) : bytes0; objs1 = two ? new Float64Array(N) : objs0
+      live = new Uint8Array(N); isRoot = new Uint8Array(N)
+    }
+    let n = 0, sp = 0, prev = '', i = -1
+    for (let j = 0; j < nLive; j++) {
+      const k = order[j], p = hits[k].path
+      // Another version of the last root's path: the same node.
+      if (j === 0 || p !== prev) {
+        // Close what isn't an ancestor of `p`: a stacked prefix of `prev` is one where `p` shares it and goes on with a `/`.
+        const m = Math.min(prev.length, p.length)
+        let L = 0
+        while (L < m && prev.charCodeAt(L) === p.charCodeAt(L)) L++
+        while (sp > 0 && (stackLen[sp - 1] > L || p.charCodeAt(stackLen[sp - 1]) !== 47)) sp--
+        const top = sp
+        for (let s = p.indexOf('/', (sp > 0 ? stackLen[sp - 1] : path.length) + 1); s !== -1; s = p.indexOf('/', s + 1)) {
+          stackLen[sp] = s; stackNode[sp] = n++; sp++
+        }
+        stackLen[sp] = p.length; stackNode[sp] = n++; sp++
+        i = stackNode[sp - 1]
+        if (fill) {
+          // The root, and the ancestors made for it, top down: each the child of the one above.
+          const d = hits[k].depth
+          for (let x = top; x < sp; x++) {
+            const node = stackNode[x]
+            src[node] = k; plen[node] = stackLen[x]; depths[node] = d - (sp - 1 - x)
+            if (x > 0) parents[node] = stackNode[x - 1]
+          }
+          isRoot[i] = 1
+        }
+        prev = p
+      }
+      if (!fill) continue
+      hitNode[k] = i
+      const h = hits[k], size = Number(h.size), cnt = Number(h.n), b = on[k]
+      live[i] |= b
+      if (b & 1) { bytes0[i] += size; objs0[i] += cnt }
+      if (two && (b & 2)) { bytes1[i] += size; objs1[i] += cnt }
+    }
+    N = n
+  }
+  // A node's path: a root's is its hit's; an ancestor's is cut on first use, and kept.
+  const cut = new Map<number, string>()
+  const paths = (i: number): string => {
+    const s = hits[src[i]].path
+    if (plen[i] === s.length) return s
+    let q = cut.get(i)
+    if (q === undefined) cut.set(i, (q = s.slice(0, plen[i])))
+    return q
+  }
+  // Bottom-up: each node's numbers into its parent's, children first (made after their parent, so in reverse order).
+  // Whole bytes and objects summed below 2^53 (the fleet's totals are) are exact in any order.
+  for (let i = N - 1; i >= 0; i--) {
+    const p = parents[i]
+    if (p < 0) continue
+    live[p] |= live[i]
+    bytes0[p] += bytes0[i]; objs0[p] += objs0[i]
+    if (two) { bytes1[p] += bytes1[i]; objs1[p] += objs1[i] }
+  }
+  const bytes: [Float64Array, Float64Array] = [bytes0, bytes1], objs: [Float64Array, Float64Array] = [objs0, objs1]
+  const thr = (d: number) => o.T * o.atten ** Math.max(0, d - dP - 1)
+  const byPath = (x: number, y: number) => { const a = paths(x), b = paths(y); return a < b ? -1 : a > b ? 1 : 0 }
+  // Picked: bit 1 by `date`'s criteria, bit 2 by `other`'s.
+  const picked = new Uint8Array(N)
+  // A view (no other scan): its one scan's criteria.
+  for (const s of o.other === o.date ? [0] as const : [0, 1] as const) {
+    const b = bytes[s], ob = objs[s], bit = 1 << s
+    const over: number[] = []
+    for (let i = 0; i < N; i++) if ((live[i] & bit) && b[i] >= thr(depths[i])) over.push(i)
+    over.sort((x, y) => b[y] - b[x] || depths[x] - depths[y] || byPath(x, y))
+    for (let k = 0; k < over.length && k < o.budget; k++) picked[over[k]] |= bit
+    // `readView`'s `heaviest` over its drawn roots: the details' and phase 2's.
+    const drawn = over.filter(i => isRoot[i]).sort((x, y) => b[y] - b[x] || byPath(x, y))
+    const shown = drawn.filter(i => o.maxDepth == null || depths[i] <= dP + o.maxDepth)
+    const read = drawn.filter(i => ob[i] > 1 && b[i] >= o.subdivMin && (o.maxDepth == null || depths[i] < dP + o.maxDepth))
+    for (const i of shown.slice(0, ROOT_DETAILS)) picked[i] |= bit
+    for (const i of read.slice(0, REGION_READS)) picked[i] |= bit
+  }
+  // Held on this side: live on `date`, and picked by its criteria, or a root picked by either's.
+  const held = (i: number) => (live[i] & 1) !== 0 && ((picked[i] & 1) !== 0 || (isRoot[i] === 1 && picked[i] !== 0))
+  // The diff's match list: every root at its `to` value where live there, else its `from` one (rounded, as listed).
+  const toS = o.to === o.date ? 0 : 1, toBit = 1 << toS
+  const listB = (i: number) => Math.round(bytes[live[i] & toBit ? toS : 1 - toS][i])
+  const listO = (i: number) => Math.round(objs[live[i] & toBit ? toS : 1 - toS][i])
+  const union = { n: 0, b: 0, o: 0 }
+  let nRoots = 0
+  const spare: number[] = []
+  for (let i = 0; i < N; i++) {
+    if (!isRoot[i]) continue
+    union.n++; union.b += listB(i); union.o += listO(i)
+    if (live[i] & 1) nRoots++
+    if (!picked[i]) spare.push(i)
+  }
+  spare.sort((x, y) => listB(y) - listB(x) || byPath(x, y))
+  const listed = spare.slice(0, MATCH_LIST_CAP).filter(i => live[i] & 1)
+  // Each held node's aggregate: every hit live on `date` summed into the held nodes at and above it.
+  const aggOf = new Map<number, Agg>()
+  for (let i = 0; i < N; i++) if (held(i)) aggOf.set(i, newAgg())
+  for (let k = 0; k < hits.length; k++) {
+    const h = hits[k]
+    if (hitNode[k] < 0 || !(h.vf <= D && D < h.vt)) continue
+    const size = Number(h.size), n = Number(h.n)
+    for (let j = hitNode[k]; j >= 0; j = parents[j]) {
+      const a = aggOf.get(j)
+      if (a) { a.b += size; a.o += n; if (h.usr) a.ub[h.usr] = (a.ub[h.usr] ?? 0) + size }
+    }
+  }
+  // In `buildForest`'s order: the held roots by path, then the held ancestors as a walk up from each root (by path)
+  // first meets them.
+  const liveRoots: number[] = []
+  for (let i = 0; i < N; i++) if (isRoot[i] && (live[i] & 1)) liveRoots.push(i)
+  liveRoots.sort(byPath)
+  const mine = new Map<string, Agg>(), rdepth = new Map<string, number>(), roots: string[] = []
+  const depth = new Map<string, number>(), nb = new Map<string, number>(), sums = new Map<string, Agg>()
+  for (const i of liveRoots) {
+    if (!held(i)) continue
+    const p = paths(i)
+    roots.push(p); mine.set(p, aggOf.get(i)!); rdepth.set(p, depths[i]); depth.set(p, depths[i]); nb.set(p, bytes[0][i])
+  }
+  const seen = new Uint8Array(N)
+  for (const r of liveRoots) {
+    for (let j = parents[r]; j >= 0 && !seen[j]; j = parents[j]) {
+      seen[j] = 1
+      if (held(j)) { const p = paths(j); depth.set(p, depths[j]); nb.set(p, bytes[0][j]); sums.set(p, aggOf.get(j)!) }
+    }
+  }
+  // Children on `date` per held node (and P): a drawn one folds these less its drawn ones.
+  const kids = new Map<string, number>()
+  for (let i = 0; i < N; i++) {
+    if (!(live[i] & 1)) continue
+    const par = parents[i]
+    if (par >= 0 && !held(par)) continue
+    const k = par < 0 ? path : paths(par)
+    kids.set(k, (kids.get(k) ?? 0) + 1)
+  }
+  const matched = [...roots.map(p => ({ path: p, b: Math.round(mine.get(p)!.b), o: Math.round(mine.get(p)!.o) })), ...listed.map(i => ({ path: paths(i), b: Math.round(bytes[0][i]), o: Math.round(objs[0][i]) }))]
+    .sort((x, y) => y.b - x.b || (x.path < y.path ? -1 : x.path > y.path ? 1 : 0))
+  const total = rootsTotal(hits, o.date)
+  return { p1: { all: mine, mine, depth: rdepth }, roots, forest: { depth, nb, sums, total, matched, kids, nRoots, union, nodes: N } }
 }
 
 /** A map read through to `base` where it holds no entry of its own (writes stay here). */
@@ -2153,6 +2593,11 @@ function addAgg(into: Agg, from: Agg): void {
   for (const k in from.cb) into.cb[k] = (into.cb[k] ?? 0) + from.cb[k]
   for (const k in from.ub) into.ub[k] = (into.ub[k] ?? 0) + from.ub[k]
 }
+
+/** A diff's two sides each build `Phase1Memo` from a match-roots answer, beside the answer itself. Past what an isolate
+ *  holds of answers at all (`HELD_BYTES`), that doesn't fit one (gcs: `checkpoint` under a bucket, 99K roots: 1102 on every
+ *  read), so the diff is refused, whatever its canvas; a view reads one side, and fits. */
+export const tooBroadToDiff = (hits: readonly { path: string }[]): boolean => hitsBytes(hits) > HELD_BYTES
 
 /** The memo's forest (`Phase1Memo.forest`) under `path` (depth `dP`). */
 function buildForest(m: Phase1Memo, path: string, dP: number): NonNullable<Phase1Memo['forest']> {
@@ -2249,6 +2694,20 @@ const rootName = (path: string, env?: Env) => (path === '' ? env?.ROOT_LABEL ?? 
 /** A read scoped by owner or class needs owner-slice rows: the interval store's slice sorts (`slices`). */
 const sliced = (env: Env, o: { lens?: Lens; owner?: OwnerScope; classes?: ClassScope; by?: string }): Env => (o.lens || o.owner || o.classes || o.by ? slices(env) : env)
 
+/** A scoped read's answer version, in the view's and the diff's edge-cache keys (`&sv=`, `api/subtree.ts`, `api/diff.ts`)
+ *  only where the answer is one (`scopedRead`): bumped when the same inputs answer differently there, so a deploy never
+ *  serves an earlier scoped read's cached body, and no other key moves (`CACHE_V` would move every plain view's too).
+ *  1 (2026-11-06): a read of the total-keyed slice sort tests each row's own `tot` (`readSizeRects`): before, a
+ *  path's ended slices could be counted beside its current ones. */
+export const SCOPED_V = 1
+/** Whether a view or a diff reads the interval store's total-keyed slice sort with no lens (`readSizeRects`' `tot`
+ *  test): an owner pool or a class scope (a `by=` without its lens reads the same rows), and a filter under a lens,
+ *  whose match reads pass none (`readView`'s phases 1 and 2). A lens alone reads per slice, as does a per-scan store. */
+export const scopedRead = (env: Env, o: { lens?: unknown; owner?: unknown; classes?: unknown; by?: unknown; query?: unknown }): boolean =>
+  intervalsOn(env) && (o.lens ? !!o.query : !!(o.owner || o.classes || o.by))
+/** `SCOPED_V`'s term of a cache key: empty for a request that isn't a `scopedRead`, whose key is then what it was. */
+export const scopedTag = (env: Env, o: Parameters<typeof scopedRead>[1]): string => (scopedRead(env, o) ? `&sv=${SCOPED_V}` : '')
+
 export async function buildView(env0: Env, o: ViewOpts): Promise<View> {
   const env = sliced(asOfScans(env0, [o.date]), o)
   const { path, query } = o
@@ -2293,7 +2752,8 @@ export async function buildView(env0: Env, o: ViewOpts): Promise<View> {
     }
     const kids = childPaths
       .map(cp => build(cp, kept.get(cp)!))
-      .sort((x, y) => y.b - x.b)
+      // bytes, then name: equal-sized siblings never take the order the store happened to read them in
+      .sort((x, y) => y.b - x.b || (x.n < y.n ? -1 : x.n > y.n ? 1 : 0))
     const kidAggs = childPaths.map(cp => kept.get(cp)!)
     const rest = subtract(a, kidAggs)
     node.c = kids
@@ -2307,7 +2767,7 @@ export async function buildView(env0: Env, o: ViewOpts): Promise<View> {
     return node
   }
   const tree = build(path, v.rootAgg)
-  return { tree, tier: v.tier, index: v.idx.asOf != null ? `iv:${env.INTERVAL_STORE_GEN}` : v.idx.mode, threshold: v.threshold, nodes: kept.size, truncated: v.truncated, ...(v.matched ? { ...matchLists(v.matched, kept), ...(v.matchCount ? { matchCount: v.matchCount, matchesCapped: true as const } : {}) } : v.matches ? { matches: v.matches } : {}), ...(v.rollup ? { rollup: v.rollup } : {}), ...(v.excluded ? { excluded: v.excluded } : {}), ...(v.firstPaint ? { firstPaint: true } : {}), ...(v.interiors ? { interiors: v.interiors } : {}), ...(query ? coverageFields(cov) : {}) }
+  return { tree, tier: v.tier, index: v.idx.asOf != null ? `iv:${env.INTERVAL_STORE_GEN}` : v.idx.mode, threshold: v.threshold, nodes: kept.size, truncated: v.truncated, ...(v.matched ? { ...matchLists(v.matched, kept, v.matchTotal), ...(v.matchCount ? { matchCount: v.matchCount, matchesCapped: true as const } : {}) } : v.matches ? { matches: v.matches } : {}), ...(v.rollup ? { rollup: v.rollup } : {}), ...(v.excluded ? { excluded: v.excluded } : {}), ...(v.firstPaint ? { firstPaint: true } : {}), ...(v.interiors ? { interiors: v.interiors } : {}), ...(query ? coverageFields(cov) : {}) }
 }
 
 /** The most match roots a response lists (`matches` / `matched`) beyond those the tree draws. */
@@ -2315,9 +2775,10 @@ export const MATCH_LIST_CAP = 200
 
 /** A response's match lists: every root the tree keeps, then the heaviest others up to
  * `MATCH_LIST_CAP`, and the whole set's count and totals. */
-export function matchLists(matched: { path: string; b: number; o: number }[], kept: Map<string, unknown>): Pick<View, 'matches' | 'matched' | 'matchCount' | 'matchesCapped'> {
-  const count = { n: matched.length, b: matched.reduce((n, m) => n + m.b, 0), o: matched.reduce((n, m) => n + m.o, 0) }
-  if (matched.length <= MATCH_LIST_CAP) return { matches: matched.map(m => m.path).sort(), matched, matchCount: count }
+export function matchLists(matched: { path: string; b: number; o: number }[], kept: Map<string, unknown>, total?: { n: number; b: number; o: number }): Pick<View, 'matches' | 'matched' | 'matchCount' | 'matchesCapped'> {
+  // `total`: the whole set's, when `matched` holds only the roots that can be listed (`foldPhase1`).
+  const count = total ? { ...total } : { n: matched.length, b: matched.reduce((n, m) => n + m.b, 0), o: matched.reduce((n, m) => n + m.o, 0) }
+  if (count.n <= MATCH_LIST_CAP) return { matches: matched.map(m => m.path).sort(), matched, matchCount: count }
   let room = MATCH_LIST_CAP
   const list = matched.filter(m => kept.has(m.path) || room-- > 0)
   return { matches: list.map(m => m.path).sort(), matched: list, matchCount: count, matchesCapped: true }
@@ -2441,7 +2902,7 @@ export interface Diff {
   /** Directories a budgeted reader (the descent, at `top`) left unexpanded, each drawn as a leaf: cut, not complete. */
   expansions_skipped?: number
   /** The lookup budget ran out: names one side drew that the other side's lookup didn't answer are folded into
-   *  their parent's `(other)` on both sides (never drawn one-sided at 0). */
+   *  their parent's `(other)` on both sides (never drawn one-sided at 0): the lightest of them (`LOOKUP_CAP`). */
   lookups_capped: boolean
   /** …by time (`FILTER_WALK_MS`). */
   lookups_late?: true
@@ -2463,8 +2924,16 @@ export interface Diff {
   searchLate?: true
 }
 
+/** The names a diff's walk reads on the scan that didn't draw them, at most: its reads past the two views. It binds
+ *  only where more names than this crossed the floor or came and went under directories both scans hold (a subtree
+ *  that came or went whole is one); then the lightest stay folded (`lookups_capped`). */
 export const LOOKUP_CAP = 240
-/** A filtered diff's one-sided lookups run this long, at most (each level's are one batched read a side). */
+/** The walk's answer version, in the diff's edge-cache key (`&wv=`, `api/diff.ts`): bumped when the same inputs answer
+ *  differently, so a deploy never serves an earlier walk's cached body (`CACHE_V` would move every view's key too).
+ *  2 (2026-11-05): no lookups under a path a scan has no row for, and the budget spent heaviest first: before, a
+ *  deleted subtree's names spent it level by level, and what else changed stayed in `(other)`. */
+export const WALK_V = 2
+/** A filtered diff's one-sided lookups run this long, at most (each round's are one batched read a side). */
 export const FILTER_WALK_MS = 800
 /** …and its two sides' phase 2 this long (each; they run at once). */
 export const FILTER_DIFF_PHASE2_MS = 900
@@ -2482,6 +2951,27 @@ function sumInteriors(a?: View['interiors'], b?: View['interiors']): NonNullable
  *  same test a view's `(other)` count makes (`f`). */
 const listsObjects = (v: Read): boolean => isStore(v.idx) && (v.idx.asOf == null || v.rootAll.nd != null)
 
+/** `sides` reads settling on one floor, before any of them decodes: each side's meeting, called with its floor (again:
+ *  a no-op), resolves once all have met, to the largest. A side with none to bring (nothing in scope, a failure) meets
+ *  at 0. */
+function floorMeeting(sides: number): () => (floor: number) => Promise<number> {
+  let left = sides
+  let top = 0
+  let done!: (floor: number) => void
+  const agreed = new Promise<number>(resolve => { done = resolve })
+  return () => {
+    let met = false
+    return floor => {
+      if (!met) {
+        met = true
+        top = Math.max(top, floor)
+        if (--left === 0) done(top)
+      }
+      return agreed
+    }
+  }
+}
+
 /** What changed under P between two scans (specs/done/view-serving.md §2):
  * both sides are read from their index tiers at ONE absolute byte floor —
  * the larger side's pixel-budget threshold — so a directory is named on both
@@ -2490,7 +2980,11 @@ const listsObjects = (v: Read): boolean => isStore(v.idx) && (v.idx.asOf == null
  * reading as −81 / +141 Ti of churn). A name that clears the floor on one
  * side only is read point-blank from the other side's floor-free tier: if
  * it exists there it shows with its real size (it crossed the floor), else
- * it was added / removed. A name whose lookup the budget leaves unanswered
+ * it was added / removed. Under a path that side has no row for, a name
+ * has none either (a scan's rows are ancestor-closed), so it is absent
+ * there without a read: a subtree that came or went whole costs one lookup,
+ * at its top. The rest are read heaviest first, in rounds that aren't
+ * level-bound. A name whose lookup the budget leaves unanswered
  * (`LOOKUP_CAP`, a filtered diff's `FILTER_WALK_MS`) has an unknown other
  * side, not a zero: it isn't drawn, and stays in `(other)` on both sides.
  * `(other)` is parent − Σ named on each side, so its Δ is the sub-floor
@@ -2543,25 +3037,31 @@ export async function buildDiff(env0: Env, o: DiffOpts): Promise<Diff> {
   // Every read of this diff shares one phase-2 gate: a side whose round read nothing in time stops the
   // re-read at the shared floor from paying its budget again.
   const gate: Phase2Gate = o.phase2Gate ?? { dead: false }
+  // Each side knows the other's scan, so it keeps what that side draws (`foldRoots`), when both sides exist.
+  const otherOf = (date: string): { otherScan?: string; diffTo?: string } => ra && rb ? { otherScan: date === from ? to : from, diffTo: to } : {}
   if (query && ra && rb && !o.summary && o.threshold == null) {
     const [ta, tb] = await Promise.all([
-      readView(env, { ...o, date: from, maxDepth: 0, floorOnly: true }, {}),
-      readView(env, { ...o, date: to, maxDepth: 0, floorOnly: true }, {}),
+      readView(env, { ...o, date: from, maxDepth: 0, floorOnly: true, ...otherOf(from) }, {}),
+      readView(env, { ...o, date: to, maxDepth: 0, floorOnly: true, ...otherOf(to) }, {}),
     ])
     if (ta && tb) floor = Math.max(ta.threshold, tb.threshold)
     tr?.('floors', performance.now() - t0)
   }
-  const sideOpts = (date: string): ViewOpts => ({ ...o, date, ...wait, phase2Gate: gate, ...(query ? floor != null ? { threshold: floor } : {} : { threshold }), ...cap })
-  let [va, vb] = await Promise.all([
-    ra ? readView(env, sideOpts(from), cov) : null,
-    rb ? readView(env, sideOpts(to), cov) : null,
-  ])
+  const sideOpts = (date: string): ViewOpts => ({ ...o, date, ...wait, phase2Gate: gate, ...(query ? floor != null ? { threshold: floor } : {} : { threshold }), ...otherOf(date), ...cap })
+  // Unfiltered, the sides share `threshold`, unless the read budget raises one's (`coarsen`): then both read at the
+  // larger, or a name read on one side and folded on the other reads as churn.
+  const floors = query ? null : floorMeeting(Number(!!ra) + Number(!!rb))
+  const side = (date: string) => {
+    const meetFloor = floors?.()
+    return readView(env, { ...sideOpts(date), ...(meetFloor ? { meetFloor } : {}) }, cov).finally(() => meetFloor?.(0))
+  }
+  let [va, vb] = await Promise.all([ra ? side(from) : null, rb ? side(to) : null])
   // Without the pre-pass (a summary, or one side without matches then), a side whose floor differs is
   // re-read at the larger.
   if (query && va && vb && va.threshold !== vb.threshold) {
     const shared = Math.max(va.threshold, vb.threshold)
-    if (va.threshold < shared) va = await readView(env, { ...o, date: from, threshold: shared, phase2Gate: gate, ...cap }, cov)
-    else vb = await readView(env, { ...o, date: to, threshold: shared, phase2Gate: gate, ...cap }, cov)
+    if (va.threshold < shared) va = await readView(env, { ...o, date: from, threshold: shared, phase2Gate: gate, ...otherOf(from), ...cap }, cov)
+    else vb = await readView(env, { ...o, date: to, threshold: shared, phase2Gate: gate, ...otherOf(to), ...cap }, cov)
   }
   // A heavy literal's rollup sides nest by their own bytes: each side is read again nesting every path either
   // answered (`nestForce`; the answers span both scans and are held, so the second read is the first's), and a
@@ -2594,17 +3094,19 @@ export async function buildDiff(env0: Env, o: DiffOpts): Promise<Diff> {
   const lookupCap = o.lookupCap ?? LOOKUP_CAP
   const walkMs = o.walkMs ?? FILTER_WALK_MS
   const walkOver = () => (late ||= !!query && performance.now() - walkStart > walkMs)
-  const matchedUnion = query ? [...new Map([...(va?.matched ?? []), ...(vb?.matched ?? [])].map(m => [m.path, m])).values()].sort((x, y) => x.path < y.path ? -1 : 1) : undefined
+  // A side whose view root the query matches read it whole (no forest): that root is its one match, at its total.
+  const matchedOf = (v: Read | null) => v?.matched ?? (v?.matches?.length === 1 && v.matches[0] === path ? [{ path, b: Math.round(v.rootAgg.b), o: Math.round(v.rootAgg.o) }] : [])
+  const matchedUnion = query ? [...new Map([...matchedOf(va), ...matchedOf(vb)].map(m => [m.path, m])).values()].sort((x, y) => x.path < y.path ? -1 : 1) : undefined
   const totals = {
     total_a: Math.round(va?.rootAgg.b ?? 0),
     total_b: Math.round(vb?.rootAgg.b ?? 0),
     objects_a: Math.round(va?.rootAgg.o ?? 0),
     objects_b: Math.round(vb?.rootAgg.o ?? 0),
-    threshold: query ? ((vb ?? va)!.threshold) : threshold,
+    threshold: (vb ?? va)!.threshold,
     tier: (vb ?? va)!.tier,
     ...(matchedUnion ? (() => {
       const keptBoth = new Map([...(va?.kept ?? []), ...(vb?.kept ?? [])])
-      const { matched, matchCount, matchesCapped } = matchLists([...matchedUnion].sort((x, y) => y.b - x.b || (x.path < y.path ? -1 : 1)), keptBoth)
+      const { matched, matchCount, matchesCapped } = matchLists([...matchedUnion].sort((x, y) => y.b - x.b || (x.path < y.path ? -1 : 1)), keptBoth, va?.matchTotal ?? vb?.matchTotal)
       // A rollup side lists only its kept children that are roots: its count is the rollup's bound.
       const roll = vb?.matchCount ?? va?.matchCount
       return { matched: matched!.sort((x, y) => x.path < y.path ? -1 : 1), matchCount: roll ?? matchCount, ...(matchesCapped || roll ? { matchesCapped: true as const } : {}) }
@@ -2616,17 +3118,19 @@ export async function buildDiff(env0: Env, o: DiffOpts): Promise<Diff> {
   const kidsA = va ? kidsIndex(va.kept, path) : new Map<string, string[]>()
   const kidsB = vb ? kidsIndex(vb.kept, path) : new Map<string, string[]>()
 
-  // Point lookups on the floor-free tier, memoized per side.
+  // Point lookups on the floor-free tier, memoized per side. They read whole (`readWhole`): a lookup that finds no
+  // row answers "absent" for the path and everything under it (`gone`), so a row group it selected and could not
+  // read fails the diff (`GroupUnread`) — left out, as other reads leave it, it would draw what is there as removed.
   const fineOf = new Map<string, Promise<IndexHandle>>()
   const fine = (date: string) => {
     let h = fineOf.get(date)
-    if (!h) fineOf.set(date, (h = (lens ? lensSort(env, date) : Promise.resolve('path')).then(s => openFine(env, date, s, lens)).then(x => withTrace(x, tr))))
+    if (!h) fineOf.set(date, (h = (lens ? lensSort(env, date) : Promise.resolve('path')).then(s => openFine(env, date, s, lens)).then(x => readWhole(withTrace(x, tr)))))
     return h
   }
   const fineAllOf = new Map<string, Promise<IndexHandle>>()
   const fineAll = (date: string) => {
     let h = fineAllOf.get(date)
-    if (!h) fineAllOf.set(date, (h = openFine(env, date, 'path')))
+    if (!h) fineAllOf.set(date, (h = openFine(env, date, 'path').then(readWhole)))
     return h
   }
   let lookups = 0
@@ -2651,15 +3155,29 @@ export async function buildDiff(env0: Env, o: DiffOpts): Promise<Diff> {
     out.kind = a.kind
     return out
   }
+  // What a scan is known not to hold: a path its by-path sort has no row for. A scan's rows are ancestor-closed (a
+  // row for every path with anything at or under it), so nothing under such a path has a row there either: a lookup
+  // of it could only answer "none", and none is made (`free`). Only a read that found no row says so — a name under
+  // the floor, outside the filter or scoped to no bytes is not known absent, and what is under it is still read.
+  // Read by `free` alone, in a round. A read the walk's timer stops (`stop`, `lookupsOff`) returns short of rows and
+  // may add paths here it never read, but no round follows it: the timer sets `late` with `lookupsOff`, its round's
+  // answers are dropped (`none`), and the next finds no room (`walkOver`).
+  const gone = [new Set<string>(), new Set<string>()] as const
+  type SideNo = 1 | 2
+  const sideOf = (side: SideNo) => (side === 1 ? { v: va!, date: from } : { v: vb!, date: to })
   // A lookup's answer: the path's total on that side, null for none there, undefined for unanswered (a budget).
-  const lookup = async (date: string, v: Read, p: string, depth: number): Promise<Agg | null | undefined> => {
-    if (!inQuery(p, v)) return null
+  const lookup = async (side: SideNo, p: string, depth: number): Promise<Agg | null | undefined> => {
+    const { v, date } = sideOf(side)
     if (lookups >= lookupCap || walkOver()) { capped = true; return undefined }
     lookups++
     const rows = await readRows(await fine(date), depth, depth, p, p, undefined, lens)
     const needTot = !!v.ownerLens?.needsTotal(p)
     const allRows = needTot ? await readRows(await fineAll(date), depth, depth, p, p) : rows
-    if (!rows.length && !allRows.length) return null
+    if (!rows.length && !allRows.length) {
+      // A lens's sort holds U's rows alone: none there is U's absence, and the path's only where its total was read too.
+      if (!lens || needTot) gone[side - 1].add(p)
+      return null
+    }
     const all = newAgg()
     const mine = newAgg()
     for (const r of allRows) merge(all, classRow(r, o.classes))
@@ -2668,14 +3186,102 @@ export async function buildDiff(env0: Env, o: DiffOpts): Promise<Diff> {
     return a.b > 0 ? a : null
   }
 
-  // One side's lookups for a whole level in one read: `readAsks` turns the
-  // level's (depth, path) asks into a few span queries + one round of group
-  // reads, where the per-ask `lookup` cost two D1 queries and a range read
-  // each, eight at a time — 150 lookups was ~20 s of a 7-day root diff
-  // (2026-09-15). Lens views keep the per-ask path: the user-keyed index's
-  // group stats only hold inside a single-user group, which `readAsks`'s
-  // per-depth rectangles don't model. A batch too wide for the reader's group
-  // cap falls back to per-ask reads rather than failing the diff.
+  /** A name one scan drew, to be read on the other (`side`), under `par`. `w`: its bytes where it was drawn — what
+   *  stays in `(other)` on both scans if it goes unread. `vtLe` / `vfGe`: the version it can be (`free`). `below`:
+   *  the names its drawn side holds under it (bytes, levels down), each read too if this one is found (`belowOf`). */
+  interface Ask { cp: string; d: number; side: SideNo; par: string; other?: Agg; w: number; vtLe?: number; vfGe?: number; below?: { w: number; k: number }[] }
+  const PAR = 8
+  // One side's lookups of a round in one read: `readAsks` turns the (depth, path) asks into a few span queries + one
+  // round of group reads, where the per-ask `lookup` cost two D1 queries and a range read each, eight at a time — 150
+  // lookups was ~20 s of a 7-day root diff (2026-09-15). Lens views keep the per-ask path: the user-keyed index's
+  // group stats only hold inside a single-user group, which `readAsks`'s per-depth rectangles don't model. A round
+  // too wide for the reader's group cap is read a depth at a time (what a level-by-level walk read), and a depth still
+  // too wide per ask, rather than failing the diff. A name left out of the answer went unread (`lookup`'s budgets).
+  const readSide = async (side: SideNo, items: Ask[]): Promise<Map<string, Agg | null>> => {
+    const { v, date } = sideOf(side)
+    const out = new Map<string, Agg | null>()
+    const perAsk = async (qs: Ask[]) => {
+      for (let i = 0; i < qs.length; i += PAR) {
+        const chunk = qs.slice(i, i + PAR)
+        const got = await Promise.all(chunk.map(q => lookup(side, q.cp, q.d)))
+        chunk.forEach((q, j) => { if (got[j] !== undefined) out.set(q.cp, got[j]) })
+      }
+    }
+    if (lens) { await perAsk(items); return out }
+    /** `part` in one read; false when it is too wide for one. */
+    const batch = async (part: Ask[]): Promise<boolean> => {
+      const want = new Set(part.map(q => `${q.d}\0${q.cp}`))
+      let got: Row[]
+      try {
+        got = (await readAsks(await fine(date), part.map(q => ({ depth: q.d, path: q.cp, ...(q.vtLe != null ? { vtLe: q.vtLe } : {}), ...(q.vfGe != null ? { vfGe: q.vfGe } : {}) })), r => want.has(`${r.depth}\0${r.path}`), { maxGroups: 120, stop: () => lookupsOff })).rows
+      } catch (e) {
+        if (!/too wide/.test(String((e as Error).message ?? e))) throw e
+        return false
+      }
+      lookups += part.length
+      const byPath = new Map<string, { all: Agg; mine: Agg }>()
+      for (const r of got) {
+        let e = byPath.get(r.path)
+        if (!e) byPath.set(r.path, (e = { all: newAgg(), mine: newAgg() }))
+        const cr = classRow(r, o.classes)
+        merge(e.all, cr)
+        if (ownerOk(r.usr, owner)) merge(e.mine, cr)
+      }
+      for (const q of part) {
+        const e = byPath.get(q.cp)
+        // No row: the scan doesn't hold the path, nor anything under it (`gone`).
+        if (!e) { gone[side - 1].add(q.cp); out.set(q.cp, null); continue }
+        const a = net(v, q.cp, v.scoped(q.cp, e.all, e.mine))
+        out.set(q.cp, a.b > 0 ? a : null)
+      }
+      return true
+    }
+    if (await batch(items)) return out
+    const byDepth = new Map<number, Ask[]>()
+    for (const q of items) {
+      const l = byDepth.get(q.d)
+      if (l) l.push(q)
+      else byDepth.set(q.d, [q])
+    }
+    // `Server-Timing`: `bydepth` counts the depths read in place of a round's one read, `perask` the names read singly.
+    for (const part of byDepth.values()) {
+      if (byDepth.size > 1 && await batch(part)) { tr?.('bydepth', 1); continue }
+      tr?.('perask', part.length)
+      await perAsk(part)
+    }
+    return out
+  }
+
+  // The walk, twice over the same plan: `settle` and the rounds below find what each name one scan drew is on the
+  // other; then the rows are emitted level by level from those answers, with no read.
+  interface Item { p: string; d: number; a: Agg | null; b: Agg | null; l?: 1 | 2 }
+  /** Whether `it` expands, and the names under it then. */
+  const planOf = (it: Item): { expand: boolean; names: string[] } => {
+    const { p, a, b } = it
+    const ka = kidsA.get(p) ?? []
+    const kb = kidsB.get(p) ?? []
+    // Both sides present, something named under it on either side, and
+    // the totals differ: the children carry the Δ. One-sided subtrees ride
+    // whole on their own row; a byte-identical subtree is one unchanged
+    // row (the renderer infers it as filler), not a walk of its skeleton.
+    const same = !!(a && b && Math.round(a.b) === Math.round(b.b) && Math.round(a.o) === Math.round(b.o))
+    // A one-sided node (a bucket the older scan never covered, a directory
+    // that appeared or vanished) expands too: its children all read as
+    // added / removed, but they still say WHAT arrived — a leaf tile
+    // saying `84 Ti first scanned` says nothing about its shape.
+    const expand = !!((a || b) && !same && (ka.length || kb.length)) && (o.depth == null || it.d - dP < o.depth)
+    return { expand, names: expand ? [...new Set([...ka, ...kb])].sort() : [] }
+  }
+  /** The lookup `cp` (under `it`) needs: on the side that didn't draw it, unless that side knows it anyway (a rollup's
+   *  `exact` / `complete`). A name is drawn on one side at least, so there is one at most. */
+  const askOf = (it: Item, cp: string): Ask | null => {
+    for (const [side, v, drew] of [[1, va, vb], [2, vb, va]] as const) {
+      if (!v || v.kept.has(cp) || v.exact?.has(cp) || v.complete?.(it.p)) continue
+      const other = drew?.kept.get(cp)
+      return { cp, d: it.d + 1, side, par: it.p, w: other?.b ?? 0, ...(other ? { other } : {}) }
+    }
+    return null
+  }
   // Both sides read as of their scans from one interval store, unscoped and unfiltered: a path's row is
   // one version, and its versions never overlap. So a name one side lacks is the other side's very row
   // when that version is live at this side's scan (no read), and otherwise a version that closed by the
@@ -2683,57 +3289,121 @@ export async function buildDiff(env0: Env, o: DiffOpts): Promise<Diff> {
   // outside that window are never read. (Unbounded, 10-08 → 10-09 at the root reads 12 groups to find
   // 17 added names absent, none of them holding an answer.)
   const sameStore = !!(va && vb && va.idx.asOf != null && vb.idx.asOf != null && va.idx.gen === vb.idx.gen && !query && !lens && !owner && !o.classes && !o.by)
-  const lookupMany = async (date: string, v: Read, items: { cp: string; d: number; other?: Agg }[]): Promise<Map<string, Agg | null>> => {
-    const out = new Map<string, Agg | null>()
-    const todo: { cp: string; d: number; vtLe?: number; vfGe?: number }[] = []
-    const D = sameStore ? v.idx.asOf! : null
-    for (const q of items) {
-      if (!inQuery(q.cp, v)) { out.set(q.cp, null); continue }
-      const w = D != null ? q.other?.ver : null
-      if (!w) { todo.push(q); continue }
-      if (w.vf <= D! && D! < w.vt) { out.set(q.cp, q.other!); continue }
-      todo.push(D! < w.vf ? { cp: q.cp, d: q.d, vtLe: w.vf } : { cp: q.cp, d: q.d, vfGe: w.vt })
+  const found = new Map<string, Agg | null>() // `${side}:${cp}`: an answered lookup (null: none there)
+  let inferred = 0
+  /** `q` answered without a read, where what is known says it (true: `found` holds the answer). */
+  const free = (q: Ask): boolean => {
+    const { v } = sideOf(q.side)
+    const key = `${q.side}:${q.cp}`
+    // Under a path that side has no row for (`gone`): none for this name either.
+    if (gone[q.side - 1].has(q.par)) {
+      gone[q.side - 1].add(q.cp)
+      found.set(key, null)
+      inferred++
+      return true
     }
-    const perAsk = async (qs: { cp: string; d: number }[]) => {
-      for (let i = 0; i < qs.length; i += PAR) {
-        const chunk = qs.slice(i, i + PAR)
-        const got = await Promise.all(chunk.map(q => lookup(date, v, q.cp, q.d)))
-        chunk.forEach((q, j) => { if (got[j] !== undefined) out.set(q.cp, got[j]) })
+    if (!inQuery(q.cp, v)) { found.set(key, null); return true }
+    const w = sameStore ? q.other?.ver : null
+    if (!w) return false
+    const D = v.idx.asOf!
+    if (w.vf <= D && D < w.vt) { found.set(key, q.other!); return true }
+    if (D < w.vf) q.vtLe = w.vf
+    else q.vfGe = w.vt
+    return false
+  }
+  const childOf = (p: string, cp: string, d: number): Item => {
+    const ca = va?.kept.get(cp) ?? va?.exact?.get(cp) ?? found.get(`1:${cp}`) ?? null
+    const cb = vb?.kept.get(cp) ?? vb?.exact?.get(cp) ?? found.get(`2:${cp}`) ?? null
+    const lk: 1 | 2 | undefined = ca && !va!.kept.has(cp) && !va!.complete?.(p) ? 1 : cb && !vb!.kept.has(cp) && !vb!.complete?.(p) ? 2 : undefined
+    return { p: cp, d, a: ca, b: cb, ...(lk ? { l: lk } : {}) }
+  }
+  // The lookups still to make: names whose parent's sides are known. Not level-bound: a name one scan drew under a
+  // directory both drew is asked in the first round, whatever its depth.
+  let pending: Ask[] = []
+  /** Plans `top` and everything under it whose sides are known without a read; the names that need one go to `pending`. */
+  const settle = (top: Item) => {
+    const stack = [top]
+    for (let it: Item | undefined; (it = stack.pop()); ) {
+      const { names } = planOf(it)
+      for (const cp of names) {
+        const q = askOf(it, cp)
+        if (q && !free(q)) pending.push(q)
+        else stack.push(childOf(it.p, cp, it.d + 1))
       }
     }
-    if (lens || !todo.length) { await perAsk(todo); return out }
-    const room = walkOver() ? 0 : Math.max(0, lookupCap - lookups)
-    const take = todo.slice(0, room)
-    // Past the budget a name is left unanswered (absent from `out`): the walk folds it, it doesn't read as zero.
-    if (todo.length > room) capped = true
-    if (!take.length) return out
-    const want = new Map(take.map(q => [`${q.d}\0${q.cp}`, q]))
-    let got: Row[]
-    try {
-      got = (await readAsks(await fine(date), take.map(q => ({ depth: q.d, path: q.cp, ...(q.vtLe != null ? { vtLe: q.vtLe } : {}), ...(q.vfGe != null ? { vfGe: q.vfGe } : {}) })), r => want.has(`${r.depth}\0${r.path}`), { maxGroups: 120, stop: () => lookupsOff })).rows
-    } catch (e) {
-      if (!/too wide/.test(String((e as Error).message ?? e))) throw e
-      tr?.('perask', take.length)
-      await perAsk(take)
-      return out
-    }
-    lookups += take.length
-    const byPath = new Map<string, { all: Agg; mine: Agg }>()
-    for (const r of got) {
-      let e = byPath.get(r.path)
-      if (!e) byPath.set(r.path, (e = { all: newAgg(), mine: newAgg() }))
-      const cr = classRow(r, o.classes)
-      merge(e.all, cr)
-      if (ownerOk(r.usr, owner)) merge(e.mine, cr)
-    }
-    for (const q of take) {
-      const e = byPath.get(q.cp)
-      if (!e) { out.set(q.cp, null); continue }
-      const a = net(v, q.cp, v.scoped(q.cp, e.all, e.mine))
-      out.set(q.cp, a.b > 0 ? a : null)
-    }
-    return out
   }
+  const belowOf = (q: Ask): NonNullable<Ask['below']> => {
+    if (q.below) return q.below
+    const kids = q.side === 1 ? kidsB : kidsA
+    const drew = (q.side === 1 ? vb : va)!.kept
+    const out: NonNullable<Ask['below']> = []
+    const stack: [string, number][] = [[q.cp, 0]]
+    for (let x: [string, number] | undefined; (x = stack.pop()); ) {
+      for (const c of kids.get(x[0]) ?? []) {
+        out.push({ w: drew.get(c)!.b, k: x[1] + 1 })
+        stack.push([c, x[1] + 1])
+      }
+    }
+    return (q.below = out)
+  }
+  /** The round's lookups, `room` at most: every pending name that fits the budget even if all that may still need a
+   *  read did — the pending names and, for each, the names its drawn side holds under it (read if it is found, never
+   *  if it is absent) down to what the `after` rounds still to come can reach. A name under another is no heavier
+   *  than it, so the heaviest candidate is always a pending one; a name passed over now waits, and is asked once the
+   *  heavier candidates are read or known absent. So whatever the budget leaves unread is no heavier than anything it
+   *  read. */
+  const heaviest = (room: number, after: number): Ask[] => {
+    const ws: number[] = []
+    for (const q of pending) {
+      ws.push(q.w)
+      const reach = Math.min(after, o.depth != null ? dP + o.depth - q.d : Infinity)
+      if (reach > 0) for (const x of belowOf(q)) if (x.k <= reach) ws.push(x.w)
+    }
+    if (ws.length <= room) return pending
+    const cut = ws.sort((x, y) => y - x)[room - 1]!
+    const byWeight = [...pending].sort((x, y) => y.w - x.w || (x.cp < y.cp ? -1 : 1))
+    const fit = byWeight.filter(q => q.w >= cut).slice(0, room)
+    // (None fits only if a name outweighs the one it is under, which a scan's totals never do: the heaviest then.)
+    return fit.length ? fit : byWeight.slice(0, room)
+  }
+  settle({ p: path, d: dP, a: va?.rootAgg ?? null, b: vb?.rootAgg ?? null })
+  // A round per level of names at most, as a level-by-level walk made (it needs no more when the budget fits).
+  let levels = 0
+  for (const v of [va, vb]) if (v) for (const p of v.kept.keys()) levels = Math.max(levels, p.split('/').length - dP)
+  for (let round = 0; pending.length && round < levels; round++) {
+    const room = walkOver() ? 0 : lookupCap - lookups
+    if (room <= 0) break
+    const take = heaviest(room, levels - round - 1)
+    const taken = new Set(take)
+    pending = pending.filter(q => !taken.has(q))
+    tr?.('rounds', 1)
+    const sideAsks = (side: SideNo) => take.filter(q => q.side === side)
+    const reads = Promise.all([
+      sideAsks(1).length ? readSide(1, sideAsks(1)) : new Map<string, Agg | null>(),
+      sideAsks(2).length ? readSide(2, sideAsks(2)) : new Map<string, Agg | null>(),
+    ])
+    // A filtered diff's round waits for its lookups until `FILTER_WALK_MS` is spent, no longer: the names
+    // still unanswered are folded, as past `LOOKUP_CAP` (`lookups_capped`, `lookups_late`).
+    const left = query ? walkMs - (performance.now() - walkStart) : Infinity
+    let timer: ReturnType<typeof setTimeout> | null = null
+    const none = [new Map<string, Agg | null>(), new Map<string, Agg | null>()] as const
+    const got = left === Infinity ? await reads : await Promise.race([
+      reads,
+      new Promise<typeof none>(r => { timer = setTimeout(() => { late = true; capped = true; lookupsOff = true; r(none) }, Math.max(0, left)) }),
+    ])
+    if (timer != null) clearTimeout(timer)
+    reads.catch(() => {})
+    for (const q of take) {
+      const answer = got[q.side - 1].get(q.cp)
+      // Unanswered (`lookup`'s budgets, the round's time): the name is folded, as one never asked.
+      if (answer === undefined) { capped = true; continue }
+      found.set(`${q.side}:${q.cp}`, answer)
+      settle(childOf(q.par, q.cp, q.d))
+    }
+  }
+  // Names the budget (`lookupCap`, the rounds, a filtered diff's time) never reached.
+  if (pending.length) capped = true
+  if (inferred) tr?.('inferred', inferred)
 
   const rows: DiffRow[] = []
   let expansions = 0
@@ -2747,60 +3417,11 @@ export async function buildDiff(env0: Env, o: DiffOpts): Promise<Diff> {
       ...(x ? { x: true } : {}), ...(l ? { l } : {}),
     })
   }
-  // Level by level, so a level's point lookups run in parallel (each is a
-  // D1 span query + a row-group read; in series they dominated the walk).
-  interface Item { p: string; d: number; a: Agg | null; b: Agg | null; l?: 1 | 2 }
   let level: Item[] = [{ p: path, d: dP, a: va?.rootAgg ?? null, b: vb?.rootAgg ?? null }]
-  const PAR = 8
   while (level.length) {
     const next: Item[] = []
-    // Expansion decisions and the names under each expanded node.
-    const plans = level.map(it => {
-      const { p, a, b } = it
-      const ka = kidsA.get(p) ?? []
-      const kb = kidsB.get(p) ?? []
-      // Both sides present, something named under it on either side, and
-      // the totals differ: the children carry the Δ. One-sided subtrees ride
-      // whole on their own row; a byte-identical subtree is one unchanged
-      // row (the renderer infers it as filler), not a walk of its skeleton.
-      const same = !!(a && b && Math.round(a.b) === Math.round(b.b) && Math.round(a.o) === Math.round(b.o))
-      // A one-sided node (a bucket the older scan never covered, a directory
-      // that appeared or vanished) expands too: its children all read as
-      // added / removed, but they still say WHAT arrived — a leaf tile
-      // saying `84 Ti first scanned` says nothing about its shape.
-      const expand = !!((a || b) && !same && (ka.length || kb.length)) && (o.depth == null || it.d - dP < o.depth)
-      const names = expand ? [...new Set([...ka, ...kb])].sort() : []
-      return { it, expand, names }
-    })
-    // The names one side lacks, looked up on that side — in parallel.
-    const asks: { cp: string; d: number; side: 1 | 2; v: Read; date: string; other?: Agg }[] = []
-    for (const { it, names } of plans) {
-      for (const cp of names) {
-        if (va && !va.kept.has(cp) && !va.exact?.has(cp) && !va.complete?.(it.p)) asks.push({ cp, d: it.d + 1, side: 1, v: va, date: from, other: vb?.kept.get(cp) })
-        if (vb && !vb.kept.has(cp) && !vb.exact?.has(cp) && !vb.complete?.(it.p)) asks.push({ cp, d: it.d + 1, side: 2, v: vb, date: to, other: va?.kept.get(cp) })
-      }
-    }
-    const found = new Map<string, Agg | null>() // `${side}:${cp}`
-    const asked = new Set(asks.map(q => `${q.side}:${q.cp}`))
-    const sideAsks = (side: 1 | 2) => asks.filter(q => q.side === side)
-    const level2 = Promise.all([
-      va && sideAsks(1).length ? lookupMany(from, va, sideAsks(1)) : new Map<string, Agg | null>(),
-      vb && sideAsks(2).length ? lookupMany(to, vb, sideAsks(2)) : new Map<string, Agg | null>(),
-    ])
-    // A filtered diff's level waits for its lookups until `FILTER_WALK_MS` is spent, no longer: the names
-    // still unanswered are folded, as past `LOOKUP_CAP` (`lookups_capped`, `lookups_late`).
-    const left = query ? walkMs - (performance.now() - walkStart) : Infinity
-    let timer: ReturnType<typeof setTimeout> | null = null
-    const none = [new Map<string, Agg | null>(), new Map<string, Agg | null>()] as const
-    const [gotA, gotB] = left === Infinity ? await level2 : await Promise.race([
-      level2,
-      new Promise<typeof none>(r => { timer = setTimeout(() => { if (asks.length) { late = true; capped = true; lookupsOff = true } r(none) }, Math.max(0, left)) }),
-    ])
-    if (timer != null) clearTimeout(timer)
-    level2.catch(() => {})
-    for (const [cp, agg] of gotA) found.set(`1:${cp}`, agg)
-    for (const [cp, agg] of gotB) found.set(`2:${cp}`, agg)
-    for (const { it, expand, names } of plans) {
+    for (const it of level) {
+      const { expand, names } = planOf(it)
       const { p, d, a, b } = it
       if (p !== path) emit(rel(p), d - dP, a, b, expand, it.l)
       if (!expand) continue
@@ -2809,13 +3430,12 @@ export async function buildDiff(env0: Env, o: DiffOpts): Promise<Diff> {
       for (const cp of names) {
         // A name one side drew whose lookup on the other went unanswered (`lookupCap`, the walk's time): its other
         // side is unknown, not zero — it stays in the parent's `(other)` on both sides, which is exact by subtraction.
-        if (asked.has(`1:${cp}`) && !found.has(`1:${cp}`) || asked.has(`2:${cp}`) && !found.has(`2:${cp}`)) continue
-        const ca = va?.kept.get(cp) ?? va?.exact?.get(cp) ?? found.get(`1:${cp}`) ?? null
-        const cb = vb?.kept.get(cp) ?? vb?.exact?.get(cp) ?? found.get(`2:${cp}`) ?? null
-        const lk: 1 | 2 | undefined = ca && !va!.kept.has(cp) && !va!.complete?.(p) ? 1 : cb && !vb!.kept.has(cp) && !vb!.complete?.(p) ? 2 : undefined
-        if (ca) { sum.a.b += ca.b; sum.a.o += ca.o }
-        if (cb) { sum.b.b += cb.b; sum.b.o += cb.o }
-        next.push({ p: cp, d: d + 1, a: ca, b: cb, ...(lk ? { l: lk } : {}) })
+        const q = askOf(it, cp)
+        if (q && !found.has(`${q.side}:${cp}`)) { capped = true; continue }
+        const c = childOf(p, cp, d + 1)
+        if (c.a) { sum.a.b += c.a.b; sum.a.o += c.a.o }
+        if (c.b) { sum.b.b += c.b.b; sum.b.o += c.b.o }
+        next.push(c)
       }
       // A one-sided parent has no residual on its missing side.
       const restA = newAgg()
@@ -2879,7 +3499,7 @@ async function openFine(env: Env, date: string, sort: string, lens?: Lens): Prom
  *  index's roots are held per isolate. */
 export async function allMatchRoots(env: Env, o: { date: string; path: string; query: NamePred }): Promise<{ roots: { path: string; b: number; o: number }[]; coverage: Coverage; rollup: boolean } | null> {
   const cov: Coverage = {}
-  const v = await readView(env, { date: o.date, path: o.path, query: o.query, w: 1280, h: 800, minArea: MIN_AREA_DEFAULT, atten: ATTEN_DEFAULT, maxDepth: 0, firstPaint: true }, cov)
+  const v = await readView(env, { date: o.date, path: o.path, query: o.query, w: 1280, h: 800, minArea: MIN_AREA_DEFAULT, atten: ATTEN_DEFAULT, maxDepth: 0, firstPaint: true, unfolded: true }, cov)
   if (!v) return v === null && (cov.partial || cov.approximate || cov.dirsOnly) ? { roots: [], coverage: cov, rollup: false } : null
   return { roots: (v.matched ?? []).slice().sort((x, y) => (x.path < y.path ? -1 : x.path > y.path ? 1 : 0)), coverage: cov, rollup: !!v.rollup }
 }

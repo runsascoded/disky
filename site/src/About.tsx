@@ -26,7 +26,7 @@ export function AboutModal({ onClose }: { onClose: () => void }) {
         <p>
           The trash icon on a table row stages that prefix (select several rows to stage them together, with
           a note). Staged prefixes collect on <Link to="/staged" onClick={onClose}>/staged</Link>, where an
-          admin reviews and runs them; deletes are recoverable for a while. You can withdraw anything you
+          admin reviews and runs them; a delete can be undone only while its bucket retains it, and not at all with soft delete off (each run's page says). You can withdraw anything you
           staged until it runs.
         </p>
         </>}

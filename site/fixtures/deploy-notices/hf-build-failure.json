@@ -1,0 +1,19 @@
+{
+  "notice_version": 1,
+  "deployment": "hf",
+  "mode": "dev",
+  "status": "failure",
+  "stage": "build",
+  "sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "source_branch": "hf",
+  "repository": "Open-Athena/disky",
+  "host": "dev.hf.oa.dev",
+  "verified": false,
+  "dirty": false,
+  "actor": "operator",
+  "actor_source": "github",
+  "attempt": "example-not-a-release",
+  "cloudflare_deployment": null,
+  "cloudflare_url": null,
+  "run_url": "https://github.com/Open-Athena/disky/actions/runs/123"
+}

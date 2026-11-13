@@ -1,3 +1,5 @@
+import { Memo, reqOf } from './shared.js'
+
 /**
  * Slack Web API + request verification for the staged-deletion review loop
  * (specs/done/staged-slack.md). Pure fetch — no SDK. The bot token is the
@@ -26,7 +28,7 @@ export async function slackApi(env: SlackEnv, method: string, body: Record<strin
       body: JSON.stringify(body),
     })
     const j = (await r.json().catch(() => ({ ok: false, error: `http ${r.status}` }))) as SlackResult
-    if (!j.ok) console.log(`slack ${method} failed: ${j.error}`)
+    if (!j.ok) console.log(`slack ${method} failed: ${j.error}${j.response_metadata ? ` ${JSON.stringify(j.response_metadata)}` : ''}`)
     return j
   } catch (e) {
     console.log(`slack ${method} threw: ${(e as Error).message}`)
@@ -83,4 +85,39 @@ export async function verifySlackSignature(
   let diff = 0
   for (let i = 0; i < want.length; i++) diff |= want.charCodeAt(i) ^ signature.charCodeAt(i)
   return diff === 0
+}
+
+/** A workspace member, as `users.lookupByEmail` returns them. */
+export interface SlackPerson { name: string | null; image: string | null }
+
+const personMemo = new Memo<{ value: SlackPerson | null; expires: number; cache: boolean }>('slack-person', 512)
+export const resetSlackPeople = (): void => personMemo.clear()
+
+/** Workspace members for `emails`. Scope the cache to the bot, refresh photos hourly, and retry transient failures
+ *  on the next lookup. Missing users are cached briefly; no token never populates the cache. */
+export async function slackPeople(env: SlackEnv, emails: readonly string[]): Promise<Record<string, SlackPerson>> {
+  const token = env.SLACK_BOT_TOKEN
+  if (!token) return {}
+  const bot = hex(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(token)))
+  const out: Record<string, SlackPerson> = {}
+  await Promise.all([...new Set(emails.map(e => e.trim().toLowerCase()))].map(async e => {
+    const key = `${bot}:${e}`
+    const cached = personMemo.peek(key)
+    if (cached && cached.expires <= Date.now()) personMemo.delete(key)
+    const v = await personMemo.get(key, async () => {
+      try {
+        const r = await fetch(`https://slack.com/api/users.lookupByEmail?email=${encodeURIComponent(e)}`, {
+          headers: { authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(3000),
+        })
+        const j = await r.json() as { ok?: boolean; error?: string; user?: { id?: string; deleted?: boolean; real_name?: string; profile?: { real_name?: string; image_192?: string } } }
+        const u = r.ok && j.ok ? j.user : undefined
+        const value = u?.id && !u.deleted ? { name: u.profile?.real_name || u.real_name || null, image: u.profile?.image_192 ?? null } : null
+        return { value, expires: Date.now() + (value ? 3600000 : 60000), cache: !!value || (r.ok && (j.error === 'users_not_found' || !!u?.deleted)) }
+      } catch {
+        return { value: null, expires: 0, cache: false }
+      }
+    }, reqOf(env), result => result.cache)
+    if (v.value) out[e] = v.value
+  }))
+  return out
 }

@@ -21,13 +21,15 @@
  * Nothing here names a deployment or a store: the config drives it. A
  * deployment without a union view never reaches this module.
  */
+import { cacheEnvTag } from './edgeCache.js'
+import { colo as coloCache, isolateWrite, IsoMap } from './shared.js'
 import { decodeScan, isScanId, scanInstant } from '../../src/scanSlug.js'
 import { compareScans, latestObserved, type Observation, parseCutoff } from '../../src/federatedScans.js'
 import { type Env, json, type Identity, requireViewer } from './auth.js'
 import { ivRetry, pathScans, storeReady, withPathStore } from './index.js'
 import { indexedScan, noScan } from './scanArg.js'
 import { scanTimes } from './scanTimes.js'
-import { PRIMARY_STORE, StoreConfigError, storeKey, type UnionView, unionViews, withStore } from './stores.js'
+import { PRIMARY_STORE, StoreConfigError, storeConfigResponse, storeKey, type UnionView, unionViews, withStore } from './stores.js'
 import { readRootRows, type ViewNode } from './view.js'
 
 type Ctx = { request: Request; env: Env; waitUntil?: (p: Promise<unknown>) => void }
@@ -41,7 +43,7 @@ export function unionFor(request: Request, env: Env): UnionView | null | Respons
   try {
     views = unionViews(env)
   } catch (e) {
-    if (e instanceof StoreConfigError) return json({ error: e.message }, 500)
+    if (e instanceof StoreConfigError) return storeConfigResponse(e)
     throw e
   }
   const raw = new URL(request.url).searchParams.get('store')
@@ -107,7 +109,7 @@ const iso = (ms: number): string => new Date(ms).toISOString()
 export const OBSERVATIONS_TTL = 60_000
 
 /** Per isolate, per D1 binding (a deployment) and store: the observations, in flight or settled, and when asked; behind
- *  it the colo's copy (the Cache API, `max-age` `OBSERVATIONS_TTL`, keyed by deployment host and store), so a request on
+ *  it the colo's copy (the Cache API, `max-age` `OBSERVATIONS_TTL`, keyed by deployment host, cache environment (`cacheEnvTag`) and store), so a request on
  *  another isolate in the colo reads it there instead of D1. A lag of up to twice the TTL (colo, then isolate). */
 const observed = new WeakMap<object, Map<string, { at: number; obs: Promise<Observation[]> }>>()
 
@@ -115,17 +117,20 @@ const observed = new WeakMap<object, Map<string, { at: number; obs: Promise<Obse
  * own instant (`scanInstant`: a timed id's minute, a date-only id's recorded
  * start, else its midnight). One D1 query for the ids, one for the starts;
  * reused for `OBSERVATIONS_TTL` (a failed read isn't). */
-function observations(env: Env): Promise<Observation[]> {
+function observations(env: Env, request: Request): Promise<Observation[]> {
   const db = env.DB as unknown as object
   let byStore = observed.get(db)
-  if (!byStore) observed.set(db, byStore = new Map())
+  if (!byStore) {
+    const b = byStore = new IsoMap('union-observed')
+    isolateWrite(() => { observed.set(db, b) })
+  }
   const key = storeKey(env)
   const hit = byStore.get(key)
   if (hit && Date.now() - hit.at < OBSERVATIONS_TTL) return hit.obs
   const obs = (async () => {
     // Then the colo's copy, so any isolate there reuses it (r2: one client's requests land on different isolates).
-    const colo = typeof caches === 'undefined' ? null : (caches as unknown as { default: Cache }).default
-    const ck = new Request(`https://union-observations.cache/${encodeURIComponent(env.PROD_HOST ?? '-')}/${encodeURIComponent(key)}`)
+    const colo = typeof caches === 'undefined' ? null : coloCache()
+    const ck = new Request(`https://union-observations.cache/${encodeURIComponent(env.PROD_HOST ?? '-')}/~${encodeURIComponent(cacheEnvTag(env, request))}/${encodeURIComponent(key)}`)
     const hit = await colo?.match(ck)
     if (hit) return await hit.json<Observation[]>()
     const dates = (await pathScans(env, true)).results.map(r => r.date)
@@ -173,7 +178,7 @@ export async function openUnion(ctx: Ctx, view: UnionView, gate: boolean): Promi
   const timing = { ctxs: t1 - t0, gate: 0, obs: 0 }
   const [gates, obs] = await Promise.all([
     (gate ? Promise.all(ctxs.map(c => requireViewer(c as never))) : Promise.resolve([])).finally(() => { timing.gate = performance.now() - t1 }),
-    Promise.all(ctxs.map(c => observations(c.env))).finally(() => { timing.obs = performance.now() - t1 }),
+    Promise.all(ctxs.map(c => observations(c.env, c.request))).finally(() => { timing.obs = performance.now() - t1 }),
   ])
   const refused = gates.find(g => g instanceof Response)
   if (refused) return refused as Response
