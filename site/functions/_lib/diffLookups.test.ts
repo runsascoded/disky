@@ -2,7 +2,7 @@ import { beforeAll, describe, expect, it, vi } from 'vitest'
 import type { Env } from './auth'
 import { sqliteD1, type Sqlite, withLedger } from './testD1'
 import { type D1Variant, readJson, seedGeneration } from './testStore'
-import { buildDiff, type Diff, type DiffRow } from './view'
+import { buildDiff, type Diff, type DiffRow, LOOKUP_CAP, lookupCapOf } from './view'
 
 vi.mock('@rdub/file-tree/stores/s3', async () => ({ S3Store: (await import('./testStore')).S3Store }))
 
@@ -153,6 +153,21 @@ describe('a diff\'s lookups', () => {
     // Six: the level-by-level walk spent them on `del`'s subtree (13 names one scan drew) and folded the rest.
     expect(await buildDiff(env, { ...base, from: A, to: B, lookupCap: 6 })).toEqual(WHOLE)
     expect(await buildDiff(env, { ...base, from: A, to: B, lookupCap: 1e9 })).toEqual(WHOLE)
+  })
+
+  it('`DIFF_LOOKUP_CAP` is the deployment\'s budget: `0` reads none, a count spends that many, as `lookupCap` does', async () => {
+    for (const cap of [0, 2]) {
+      expect(await buildDiff({ ...env, DIFF_LOOKUP_CAP: String(cap) }, { ...base, from: A, to: B }))
+        .toEqual(await buildDiff(env, { ...base, from: A, to: B, lookupCap: cap }))
+    }
+    const none = await buildDiff({ ...env, DIFF_LOOKUP_CAP: '0' }, { ...base, from: A, to: B })
+    expect([none.lookups, none.lookups_capped, none.bytes_before, none.bytes_after]).toEqual([0, true, WHOLE.bytes_before, WHOLE.bytes_after])
+  })
+
+  it('`lookupCapOf`: unset or blank is `LOOKUP_CAP`, a count is itself, anything else throws', () => {
+    expect([lookupCapOf({}), lookupCapOf({ DIFF_LOOKUP_CAP: ' ' }), lookupCapOf({ DIFF_LOOKUP_CAP: '0' }), lookupCapOf({ DIFF_LOOKUP_CAP: '12' })])
+      .toEqual([LOOKUP_CAP, LOOKUP_CAP, 0, 12])
+    for (const bad of ['-1', '1.5', 'x']) expect(() => lookupCapOf({ DIFF_LOOKUP_CAP: bad })).toThrow(`DIFF_LOOKUP_CAP = "${bad}": not a count`)
   })
 })
 
