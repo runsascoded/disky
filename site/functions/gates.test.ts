@@ -671,6 +671,9 @@ describe('every route declares its gate', () => {
       .map(c => `${c.method} ${c.path}: declared under ${file}, served by ${servedBy(c.path)}`))
     expect(elsewhere).toEqual([])
   })
+  it('a deployment\'s gates never redefine a shared gate (the merge would silently keep the shared row)', () => {
+    expect(Object.keys(DEPLOYMENT_GATES).filter(g => g in EXPECT)).toEqual([])
+  })
   it('every gate in the vocabulary is some route\'s', () => {
     expect([...new Set(Object.values(ROUTES).flatMap(cases => cases.map(c => c.gate)))].sort()).toEqual(Object.keys(GATES).sort())
   })
