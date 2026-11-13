@@ -2,6 +2,15 @@
  *  Functions answer with (`x-disky-build`), so a report can name the deploy both sides came from. */
 export const BUILD_SHA: string = import.meta.env.VITE_BUILD_SHA ?? ''
 export const BUILD_TIME: string = import.meta.env.VITE_BUILD_TIME ?? ''
+export const SOURCE_REF: string = import.meta.env.VITE_SOURCE_REF ?? ''
+export const BUILD_ENVIRONMENT: string = import.meta.env.VITE_BUILD_ENVIRONMENT ?? ''
+export const REPO_URL = import.meta.env.VITE_REPO_URL || 'https://github.com/Open-Athena/disky'
+
+/** GitHub's tree URL takes a ref (including slash-separated feature branches), while a commit link uses the repository base. */
+export function sourceUrl(repo: string, ref: string): string {
+  return `${repo.replace(/\/+$/, '')}${ref ? `/tree/${ref.split('/').map(encodeURIComponent).join('/')}` : ''}`
+}
+export const SOURCE_URL = sourceUrl(REPO_URL, SOURCE_REF)
 
 /** The ☰ menu's build line: the short sha (`-dirty` kept), the time as `YYYY-MM-DD HH:MM UTC`, and the commit's page
  *  under `repo` (none for a dirty or unknown build: it names no pushed commit). Null with no build id. */

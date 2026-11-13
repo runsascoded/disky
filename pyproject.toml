@@ -3,7 +3,7 @@ name = "disk-tree"
 version = "0.1.0"
 description = "Disk/Cloud space usage analyzer"
 readme = "README.md"
-authors = [{name = "Ryan Williams", email = "ryan@runsascoded.com"}]
+authors = [{name = "Ryan Williams"}]
 license = {text = "Apache License 2.0"}
 requires-python = ">=3.11"
 

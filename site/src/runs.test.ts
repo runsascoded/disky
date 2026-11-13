@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest'
+import { planDigest, realRun, type RunRow } from '../functions/_lib/plans'
 import {
-  commonBucketPrefix, type DeletionRun, EXEC_CAPS, elapsed, elapsedDetails, type ExecJob, fmtDur, joinRuns, loggedOf, plannedOf, runControls,
-  progressEstimate, type ProgressFile, runDirHref, runFileHref, runFilesRel, runJobId, runLabel, sumProgress, verifyRun, viewBuckets, viewState, viewLive, runErrors,
+  attemptOnly, itemsDigest, reusableDryRun, totalsLowerBound,
+  commonBucketPrefix, deletedBuckets, type DeletionRun, EXEC_CAPS, elapsed, elapsedDetails, type ExecJob, fmtDur, expectedOf, joinRuns, loggedOf, plannedOf, runControls,
+  progressEstimate, type ProgressFile, runDirHref, runFileHref, runFilesRel, runJobId, runLabel, sumProgress, undoStatus, verifyRun, viewBuckets, viewState, viewLive, runErrors,
 } from './runs'
 
 const GCS_JOB = 'gcs-sweep-real-20260928-120000z'
@@ -34,6 +36,19 @@ describe('runJobId — the Batch job behind a run', () => {
       runJobId({ run_id: GCS_RUN, log_dir: 'gs://data/sweep/2026-09-27-p3/' }),
       runJobId({ run_id: GCS_RUN }),
     ]).toEqual([GCS_JOB, 'cw-sweep-dry-20260928-120000z', GCS_RUN, GCS_RUN])
+  })
+})
+
+describe('expectedOf — the selection total a live run shows until its manifest says', () => {
+  const expected = { bytes: 137_000, objects: 754 }
+  it('a live job has it; a finished one, or one dispatched without a total, has none', () => {
+    expect([
+      expectedOf({ key: 'a', job: job({ job_id: 'a', state: 'RUNNING', expected }), ops: [] }),
+      expectedOf({ key: 'b', job: job({ job_id: 'b', state: 'QUEUED', expected }), ops: [] }),
+      expectedOf({ key: 'c', job: job({ job_id: 'c', state: 'FAILED', expected }), ops: [] }),
+      expectedOf({ key: 'd', job: job({ job_id: 'd', state: 'RUNNING' }), ops: [] }),
+      expectedOf({ key: 'e', run: run(), ops: [] }),
+    ]).toEqual([expected, expected, null, null, null])
   })
 })
 
@@ -182,17 +197,39 @@ describe('verifyRun — log against D1, planned against decided', () => {
   })
 })
 
+describe('totalsLowerBound — a real run closed with no final summary in its run dir', () => {
+  const killed = run({ mode: 'real', finished_ts: 2000, plan_digest: '' })
+  it('only once the file is known to be absent, on a finished real run that reviewed nothing', () => {
+    expect([
+      totalsLowerBound(killed, null),
+      totalsLowerBound(killed, undefined),
+      totalsLowerBound(killed, { for_real: true, buckets: {} }),
+      totalsLowerBound({ ...killed, mode: 'dry' }, null),
+      totalsLowerBound({ ...killed, finished_ts: null }, null),
+      totalsLowerBound({ ...killed, plan_digest: 'D' }, null),
+    ]).toEqual([true, false, false, false, false, false])
+  })
+})
+
 describe('runControls — per executor capabilities', () => {
   const view = (r: DeletionRun, j?: Partial<ExecJob>, ops: ExecJob[] = []) => ({ key: r.run_id, run: r, ...(j ? { job: job({ job_id: GCS_JOB, ...j }) } : {}), ops })
   const gcs = EXEC_CAPS.sweep
   const cw = EXEC_CAPS['plan-sweep']
+  it('a run with soft delete off offers no undo, on gcs or to an admin', () => {
+    const off = run({ mode: 'real', finished_ts: 2000, undo_deadline: null, undo_state: 'none', soft_delete_days: 0 })
+    expect(runControls(view(off), gcs, true, 2500)).toEqual({ stop: false, undo: false, purge: false, undoing: false, undoOff: 'No undo: a bucket in this run had soft delete off, so what it deleted there is gone for good.' })
+  })
+  it('a run closed from what it wrote offers undo: its window is set', () => {
+    const killed = run({ mode: 'real', finished_ts: 2000, plan_digest: '', undo_deadline: 3000, undo_state: 'none' })
+    expect(runControls(view(killed, { state: 'FAILED' }), gcs, true, 2500)).toEqual({ stop: false, undo: true, purge: false, undoing: false, undoOff: null })
+  })
   it('a live run: stop (admins only)', () => {
     expect([
       runControls(view(run({ finished_ts: null }), { state: 'RUNNING' }), gcs, true, 2000),
       runControls(view(run({ finished_ts: null }), { state: 'RUNNING' }), gcs, false, 2000),
     ]).toEqual([
-      { stop: true, undo: false, purge: false, undoing: false },
-      { stop: false, undo: false, purge: false, undoing: false },
+      { stop: true, undo: false, purge: false, undoing: false, undoOff: null },
+      { stop: false, undo: false, purge: false, undoing: false, undoOff: null },
     ])
   })
   it('undo inside the window; not once it closed, once undone, while an undo runs, or for a dry run', () => {
@@ -203,7 +240,7 @@ describe('runControls — per executor capabilities', () => {
       runControls(view(run({ undo_state: 'full' })), gcs, true, 2000).undo,
       runControls(view(run(), undefined, [undoJob]), gcs, true, 2000),
       runControls(view(run({ mode: 'dry' })), gcs, true, 2000).undo,
-    ]).toEqual([true, false, false, { stop: false, undo: false, purge: false, undoing: true }, false])
+    ]).toEqual([true, false, false, { stop: false, undo: false, purge: false, undoing: true, undoOff: 'An undo of this run is in progress.' }, false])
   })
   it('no recorded window: cw offers undo, gcs doesn\'t; purge only where the executor has it, after the window', () => {
     expect([
@@ -213,5 +250,137 @@ describe('runControls — per executor capabilities', () => {
       runControls(view(run({ purge_state: 'pending' })), cw, true, 8999).purge,
       runControls(view(run({ purge_state: 'pending' })), gcs, true, 9000).purge,
     ]).toEqual([true, false, true, false, false])
+  })
+})
+
+describe('attemptOnly — runs whose deleted count means attempted', () => {
+  it('both generation executors on XML; a JSON one and a listing run keep their counts', () => {
+    expect([
+      attemptOnly({ contract: 'manifest-delete-generations', backend: 'xml' }),
+      attemptOnly({ contract: 'reviewed-delete-generations' }),
+      attemptOnly({ contract: 'reviewed-delete-generations', backend: 'json' }),
+      attemptOnly({}),
+      attemptOnly(null),
+    ]).toEqual([true, true, false, false, false])
+  })
+})
+
+describe('reusableDryRun — which path the confirm names', () => {
+  const dryDir = (stamp: string) => `gs://data/sweep/runs/gcs-sweep-dry-${stamp}z`
+  const dry = (o: Partial<DeletionRun>): DeletionRun => run({ mode: 'dry', plan_digest: 'D', log_dir: dryDir('20260928-120000'), ...o })
+  const a = dry({ run_id: 'a', started_ts: 100 })
+  const b = dry({ run_id: 'b', started_ts: 200, log_dir: dryDir('20260928-130000') })
+  it('the newest dry run of exactly these items at this scan, on this plan', () => {
+    const scan = '2026-09-27'
+    expect(reusableDryRun([a, b], 3, 'D', scan)?.run_id).toBe('b')
+    expect([
+      reusableDryRun([a], 3, 'other digest', scan),
+      reusableDryRun([a], 3, 'D', 'another scan'),
+      reusableDryRun([a], 4, 'D', scan),
+      reusableDryRun([{ ...a, mode: 'real' }], 3, 'D', scan),
+      reusableDryRun([{ ...a, plan_digest: '' }], 3, 'D', scan),
+      reusableDryRun([], 3, 'D', scan),
+    ]).toEqual([null, null, null, null, null, null])
+  })
+  it('a newest dry run whose dir dispatch wouldn\'t reuse means a fresh manifest, not an older one', () => {
+    expect(reusableDryRun([a, { ...b, log_dir: 'gs://data/elsewhere' }], 3, 'D', '2026-09-27')).toBe(null)
+  })
+  it('picks what dispatch\'s `realRun` picks', () => {
+    const runs = [a, b, dry({ run_id: 'c', started_ts: 300, scan: 'another scan' }), dry({ run_id: 'd', started_ts: 400, plan_digest: 'E' })]
+    const server = realRun(runs as unknown as RunRow[], 'D', 1, '2026-09-27')
+    expect([server.ok && server.reviewed?.run_id, reusableDryRun(runs, 3, 'D', '2026-09-27')?.run_id]).toEqual(['b', 'b'])
+  })
+  it('digests the items as `planDigest` does', async () => {
+    const lines = ['gs://b/z/', '=gs://b/a.bin', 'gs://b/a/']
+    expect(await itemsDigest(lines)).toBe(await planDigest(lines))
+  })
+})
+
+describe('an undo a run recorded, where soft delete is off now', () => {
+  const view = (r: DeletionRun, j?: Partial<ExecJob>) => ({ key: r.run_id, run: r, ...(j ? { job: job({ job_id: GCS_JOB, ...j }) } : {}), ops: [] })
+  const off = { buckets: ['b1'], asOf: '2026-11-05' }
+  it('the undo control is not offered; with the buckets on, or no snapshot, it is', () => {
+    expect([
+      runControls(view(run()), EXEC_CAPS.sweep, true, 2000, off),
+      runControls(view(run()), EXEC_CAPS.sweep, true, 2000, null),
+      runControls(view(run()), EXEC_CAPS.sweep, true, 2000),
+    ]).toEqual([
+      { stop: false, undo: false, purge: false, undoing: false, undoOff: 'Undo unavailable: soft delete is off on b1 (as of 2026-11-05). Undo restores from what the bucket keeps after a delete, so its soft delete (versioning, on S3) has to be on.' },
+      { stop: false, undo: true, purge: false, undoing: false, undoOff: null },
+      { stop: false, undo: true, purge: false, undoing: false, undoOff: null },
+    ])
+  })
+  it('every unavailable undo behaves one way: the control stays, disabled, with its reason; no control where none is expected', () => {
+    const why = (r: DeletionRun, caps = EXEC_CAPS.sweep, admin = true, now = 2000, ops: ExecJob[] = []) => {
+      const c = runControls({ ...view(r), ops }, caps, admin, now, null)
+      return [c.undo, c.undoOff]
+    }
+    expect([
+      why(run(), EXEC_CAPS.sweep, true, 9000),
+      why(run({ undo_state: 'full' })),
+      why(run({ undo_deadline: null, soft_delete_days: 0 })),
+      why(run({ undo_deadline: null, soft_delete_days: null, min_soft_delete_days: 0 })),
+      why(run({ undo_deadline: null })),
+      why(run(), EXEC_CAPS.sweep, true, 2000, [job({ job_id: 'gcs-undo-x', op: 'undo', target: GCS_RUN, state: 'RUNNING' })]),
+      why(run({ undo_state: 'partial' })),
+      // cw: no recorded window is still an undo; a closed one isn't
+      why(run({ undo_deadline: null }), EXEC_CAPS['plan-sweep']),
+      why(run(), EXEC_CAPS['plan-sweep'], true, 9000),
+      // not expected at all: a dry run, a run still going, a viewer
+      why(run({ mode: 'dry' })),
+      why(run({ finished_ts: null })),
+      why(run(), EXEC_CAPS.sweep, false),
+    ]).toEqual([
+      [false, 'Undo window closed 1970-01-01 02:30 UTC.'],
+      [false, 'Already undone.'],
+      [false, 'No undo: a bucket in this run had soft delete off, so what it deleted there is gone for good.'],
+      [false, 'No undo promised: this run required no soft delete and recorded no retention, so treat its deletes as permanent.'],
+      [false, 'This run recorded no undo window.'],
+      [false, 'An undo of this run is in progress.'],
+      [true, null],
+      [true, null],
+      [false, 'Undo window closed 1970-01-01 02:30 UTC.'],
+      [false, null],
+      [false, null],
+      [false, null],
+    ])
+  })
+  it('only the `sweep` executor restores from soft delete: `plan-sweep` reads no snapshot', () => {
+    expect([EXEC_CAPS.sweep.softDelete, EXEC_CAPS['plan-sweep'].softDelete]).toEqual([true, true])
+  })
+  it('undoStatus: what a run\'s row says of its undo', () => {
+    expect([
+      undoStatus(run(), 2000, off),
+      undoStatus(run(), 2000, null),
+      undoStatus(run(), 9000, off),
+      undoStatus(run({ undo_deadline: null, soft_delete_days: 0 }), 2000, off),
+      undoStatus(run({ undo_deadline: null, soft_delete_days: null, min_soft_delete_days: 0 }), 2000, null),
+      undoStatus(run({ undo_deadline: null }), 2000, off),
+      undoStatus(run({ mode: 'dry', undo_deadline: null }), 2000, null),
+      undoStatus(undefined, 2000, null),
+      undoStatus(run(), 2000, null, { unseen: ['b1'] }),
+      undoStatus(run(), 2000, off, { unseen: ['b2'] }),
+      undoStatus(run(), 9000, null, { unseen: ['b1'] }),
+    ]).toEqual([
+      { kind: 'unavailable', unavailable: off, deadline: 9000 },
+      { kind: 'open', deadline: 9000 },
+      { kind: 'closed', deadline: 9000 },
+      { kind: 'none', why: 'No undo: a bucket in this run had soft delete off, so what it deleted there is gone for good.' },
+      { kind: 'none', why: 'No undo promised: this run required no soft delete and recorded no retention, so treat its deletes as permanent.' },
+      { kind: 'unrecorded' },
+      { kind: 'unrecorded' },
+      { kind: 'unrecorded' },
+      { kind: 'open', deadline: 9000, unseen: { unseen: ['b1'] } },
+      { kind: 'unavailable', unavailable: off, deadline: 9000 },
+      { kind: 'closed', deadline: 9000 },
+    ])
+  })
+  it('deletedBuckets: the run\'s recorded cut, else its job\'s, else what the caller knows (its bands, its plan summary)', () => {
+    expect([
+      deletedBuckets(view(run({ buckets: 'b2, b1' })), ['x']),
+      deletedBuckets(view(run({ buckets: null }), { buckets: ['b3'] }), ['x']),
+      deletedBuckets(view(run({ buckets: null })), ['x', 'y']),
+      deletedBuckets(view(run({ buckets: null }))),
+    ]).toEqual([['b2', 'b1'], ['b3'], ['x', 'y'], []])
   })
 })

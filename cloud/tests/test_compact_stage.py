@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -320,6 +321,27 @@ def test_promote_wants_the_scans_appended_since_the_fold(tmp_path):
     assert ar.current(store, ist.PREFIX) == "g"
     assert ar.promote_gen(store, ist.PREFIX, "g.c001", log=lambda m: None) == {"from": "g", "gen": "g.c001", "current": True}
     assert ar.gen_scans(store, f"{ist.PREFIX}/g.c001")[-1] == DATES[4]
+
+
+def test_promote_checks_r2_for_what_the_appends_copied(tmp_path, monkeypatch):
+    """Promote's R2 check (`r2_wanted`) asks for the candidate's base as `compact-r2` copied it, the newest manifest, and
+    of each run appended since only its served files (`r2_publish`'s copy), never the run's other files nor the parity
+    markers appends write on GCS alone (`verify/`)."""
+    world, store_dir, store, _ = _candidate(tmp_path)
+    add(world, store_dir, tmp_path / "wc", "-g", "g.c001", "-t", DATES[4], "-C", "none")
+    keys = sorted(str(f.relative_to(store_dir)) for f in store_dir.rglob("*") if f.is_file())
+    monkeypatch.setattr(ar, "r2_objects", lambda bucket, prefixes, keep=lambda k: True: [
+        SimpleNamespace(key=k) for k in keys if k.startswith(tuple(prefixes)) and keep(k)])
+    gp = f"{ist.PREFIX}/g.c001"
+    newest, runs = ar.store_newest_runs(store, gp)
+    run = f"{gp}/{runs[0]['key']}/"
+    assert ([r["scans"] for r in runs], newest) == ([[DATES[4]]], f"manifests/{DATES[4]}.json")
+    unserved = [k for k in keys if k.startswith(run) and not k.startswith(f"{run}served/")]
+    assert unserved != []
+    assert [k for k in keys if k.startswith(f"{gp}/verify/")] != []
+    base = [k for k in keys if k.startswith(f"{gp}/") and not k.startswith((f"{gp}/manifests/", f"{gp}/deltas/", f"{gp}/verify/"))]
+    assert sorted(o.key for o in ar.r2_wanted("b", store, gp, ("served/",), ("verify/",))) == sorted(
+        [*base, f"{gp}/{newest}", *(k for k in keys if k.startswith(f"{run}served/"))])
 
 
 def test_a_promoting_compaction_refuses_a_candidate(tmp_path):

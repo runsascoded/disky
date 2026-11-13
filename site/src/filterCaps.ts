@@ -42,7 +42,9 @@ export const indexedSyntax = (paths: boolean): QuerySyntax => INDEXED[paths ? 1 
 
 /** The refusal codes an API answers a filter with (`functions/_lib/indexedOnly.ts`): a reason to show
  *  inline, never a failure to retry. */
-const REFUSAL = /^(?:unsupported-[a-z-]+|scan-not-indexed|term-too-common|owner-too-common|anchor-not-indexed|too-broad)$/
+const REFUSAL = /^(?:unsupported-[a-z-]+|scan-not-indexed|term-too-common|owner-too-common|anchor-not-indexed|too-broad|diff-too-broad)$/
+/** A path-restricted link's refusals (`functions/_lib/restrict.ts`; 403s): the same, a reason with no retry. */
+const RESTRICTED_REFUSAL = /^restricted-(?:search|scope)$/
 
 /** A failed API response: `message` as `apiErrorMessage` words it; `refusal` the structured
  *  `{ error, code }` body's reason when its code is a filter refusal (`REFUSAL`); `status` the HTTP status. */
@@ -55,13 +57,20 @@ export function apiError(status: number, text: string): ApiError {
   let refusal: ApiError['refusal']
   try {
     const j = JSON.parse(text) as { error?: unknown; code?: unknown }
-    if (status === 400 && typeof j.error === 'string' && typeof j.code === 'string' && REFUSAL.test(j.code)) refusal = { code: j.code, reason: j.error }
+    if (typeof j.error === 'string' && typeof j.code === 'string' && ((status === 400 && REFUSAL.test(j.code)) || (status === 403 && RESTRICTED_REFUSAL.test(j.code)))) refusal = { code: j.code, reason: j.error }
   } catch { /* not JSON */ }
   return new ApiError(apiErrorMessage(status, text), refusal, status)
 }
 
 /** An error's filter refusal (a reason to state inline, with no retry or status), else null. */
 export const refusalOf = (e: unknown): { code: string; reason: string } | null => (e instanceof ApiError && e.refusal) || null
+
+/** What a failed view says under the filter box: a query the server refused (`400: bad query: …`), or search being
+ *  refused to this link; a failure that isn't the query's says nothing there. */
+export function filterBoxError(e: Error | undefined): string | undefined {
+  const r = refusalOf(e)
+  return r?.code === 'restricted-search' ? r.reason : /^400: bad query: (.*)/s.exec(e?.message ?? '')?.[1]
+}
 
 /** How a failed load reads inline: a filter refusal's reason, or the failure's message — with a retry when it may
  *  pass next time (a 5xx, or no response at all), never for a 4xx (the same request fails the same way). */
@@ -80,7 +89,17 @@ export function apiErrorMessage(status: number, text: string): string {
     const j = JSON.parse(text) as { error?: unknown; code?: unknown }
     if (status === 400 && typeof j.error === 'string' && typeof j.code === 'string') return `400: bad query: ${j.error}`
   } catch { /* not JSON */ }
-  return `${status}: ${text.slice(0, 120)}`
+  return `${status}: ${plainText(text).slice(0, 120)}`
+}
+
+/** A failure body as words: Cloudflare's own pages (an HTML document, or a bare `error code: N`) by what they
+ *  mean, never their markup. 1102: the Worker ran out of its CPU or memory on this request. */
+export function plainText(text: string): string {
+  const code = /error code:\s*(\d+)/i.exec(text)?.[1]
+  if (code === '1102') return 'this view needs more work than one request can do — drill in, or narrow the scope'
+  if (!/^\s*<(?:!doctype|html)/i.test(text)) return text
+  const title = /<title>([^<]*)<\/title>/i.exec(text)?.[1]?.trim()
+  return code ? `the server failed (Cloudflare error ${code})` : title || 'the server failed'
 }
 
 /** The scans the static name index covers in this subtree's store (`/api/filter-scans`), when `enabled`:

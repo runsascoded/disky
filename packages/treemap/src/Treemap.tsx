@@ -3,6 +3,7 @@ import type { CSSProperties, ReactNode } from 'react'
 import { candidates, type CellText, fitCandidate, inlineRoom } from './cellText'
 import { CONTAINER_BG, contrastEdge, DEFAULT_PALETTE, slotColor } from './colors'
 import { DustHatch } from './DustHatch'
+import { bandRects, dustInk, stripeBackground } from './cellPaint'
 import type { FoldedNode, LayoutConfig } from './layout'
 import { cellStroke, flattenPlaced, isFolded, layoutCells, layoutChildren } from './layout'
 import { colorResolver } from './cssColor'
@@ -159,6 +160,12 @@ export interface TreemapProps<T> {
   renderCrumbSuffix?: (n: T, path: T[]) => ReactNode
   /** Row rendered below the map (e.g. a usage-hint footer). */
   renderFooter?: (n: T, path: T[]) => ReactNode
+  /**
+   * Content laid over the map box itself (e.g. a "refreshing" marker in a corner): rendered inside
+   * `.dt-treemap-map`, which is `position: relative`, after the cells. Position it absolutely; it is
+   * clear of the bar, the rollup and the footer at every width, and goes fullscreen with the map.
+   */
+  mapOverlay?: ReactNode
   /**
    * Right side of the cell size line — e.g. "$1.2/mo". Rendered inline with
    * the size when the cell is big enough to fit a subtitle; `dims` is the
@@ -523,6 +530,7 @@ export function Treemap<T>({
   renderLegend,
   renderCrumbSuffix,
   renderFooter,
+  mapOverlay,
   renderCellSubtitle,
   onCellClick,
   cellHref,
@@ -1183,8 +1191,8 @@ export function Treemap<T>({
             // An inset `ring` is a box-shadow on the cell box, under this layer: leave it bare too, or it
             // would only show as far as the shared edge (and not at all in gaps mode).
             inset: Math.max(shared ? edge : 0, ring?.inset ? ring.width : 0),
-            background: style.bg,
-            ...(style.hatch && { backgroundImage: style.hatch }),
+            background: style.bands?.length ? undefined : style.bg,
+            ...((style.hatch || style.stripes) && { backgroundImage: style.hatch ?? stripeBackground(style.stripes) }),
             // Dashed frame marks the dust tile as not-a-real-cell.
             ...(foldedNode && dustTexture && Math.min(r.w, r.h) >= 8 && {
               border: '1px dashed var(--dt-treemap-folded-edge, rgba(150, 150, 165, 0.55))',
@@ -1194,12 +1202,13 @@ export function Treemap<T>({
             pointerEvents: 'none',
           }}
         >
+        {bandRects(style.bands, boxH).map((b, i) => <div key={i} style={{ position: 'absolute', left: 0, right: 0, top: b.top, height: b.height, background: b.color }} />)}
         {/* Dust hatch: the folded "(other)" tail, drawn as rules that tighten
             toward the lower-right, density scaled by the folded count — a
             texture distinct from real cells. Hit-detection (above) maps a
             hover back to a specific folded item. */}
-        {foldedNode && dustTexture && Math.min(r.w, r.h) >= 6 && (
-          <DustHatch w={boxW} h={boxH} count={foldedNode.count} />
+        {(foldedNode || style.dustCount !== undefined) && dustTexture && Math.min(r.w, r.h) >= 6 && (
+          <DustHatch w={boxW} h={boxH} count={foldedNode?.count ?? style.dustCount!} color={foldedNode ? undefined : dustInk(style, fadeAt(depth))} />
         )}
         {/* Makeup stripes: a leaf/fold cell with a mixed composition renders
             proportional inset slices (longer axis) instead of one dominant
@@ -1569,6 +1578,7 @@ export function Treemap<T>({
                 a11yMinSide={a11yMinSide}
                 pinnedKey={pinnedTip?.key ?? null}
                 canvasRef={exportable ? canvasElRef : undefined}
+                renderCellExtra={renderCellExtra}
                 onHover={(hit: CanvasHit<T>, x, y) => activateHover(hit.node, hit.path, hit.key, x, y)}
                 onClick={(hit: CanvasHit<T>, e) =>
                   hit.foldChild
@@ -1603,6 +1613,7 @@ export function Treemap<T>({
             {renderLoading ? renderLoading(node, path) : 'Loading…'}
           </div>
         ) : null}
+        {mapOverlay}
       </div>
       {(() => {
         const f = renderFooter?.(node, path)

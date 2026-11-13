@@ -1,20 +1,24 @@
 /**
  * POST /slack/actions — Slack interactivity for the staged-deletion thread
- * (specs/done/staged-slack.md). Buttons on the plan's parent message: Dry-run,
- * Delete for real; on each stage reply: Reject (every batch the reply covers —
- * a coalesced reply covers a stager's recent batches; per-batch rejection is
- * www's). ("Open in www" is a URL
- * button; Slack still calls here, and it's acked.)
+ * (specs/done/staged-slack.md). Buttons on the plan's parent message: Dry-run;
+ * on each stage reply: Reject (every batch the reply covers — a coalesced reply
+ * covers a stager's recent batches; per-batch rejection is www's). ("Open in
+ * www" and "Delete for real…" are URL buttons; Slack still calls here, and
+ * they're acked.)
+ *
+ * A real delete is never started from here: it needs a site session, on
+ * `/staged`. A click on the dispatching "Delete for real…" still sitting in old
+ * messages (`staged_real`) is answered with a link there, before anything else.
  *
  * Authority is the site's, not Slack's: the request is verified with the
  * app's signing secret, the clicking user is mapped to their email
- * (`users.info`), and the same rules as www apply — dispatch needs `admin`
- * (staff domain or an `admin_emails` row); rejecting needs admin or being the one
- * who staged the batches. Dispatch goes through the deployment's
- * executor (`EXECUTOR`, `_lib/executor.ts`) — the same code path as /staged,
- * so a real deletion needs a finished dry-run of exactly the current item
- * set and runs against that dry-run's scan. Slack wants an answer within 3 s,
- * so this acks at once and does the work after the response; outcomes go to
+ * (`users.info`), and the same rules as www apply — a dry run needs an admin
+ * (`isAdmin` of that email: the admin list where `ADMIN_LIST`, else the staff
+ * domain or an `admin_emails` row); rejecting needs an admin or being the one
+ * who staged the batches. The email is the Slack profile's, so whoever controls
+ * a workspace account carrying a listed address acts as that admin here. A dry run goes through the deployment's
+ * executor (`EXECUTOR`, `_lib/executor.ts`) — the same code path as /staged.
+ * Slack wants an answer within 3 s, so this acks at once and does the work after the response; outcomes go to
  * the thread (everyone) or back to the clicker ephemerally (refusals, errors).
  * Unconfigured (no signing secret or D1) it answers 503 and does nothing.
  */
@@ -23,7 +27,7 @@ import { dispatchPlan, type ExecEnv, executorOf, notifyDispatched } from '../_li
 import { pathScans, withPathStore } from '../_lib/index.js'
 import { audit } from '../_lib/plans.js'
 import { slackUserEmail, verifySlackSignature } from '../_lib/slack.js'
-import { notifyPlan, planGate, slackNames, updateReplies } from '../_lib/stagedSlack.js'
+import { notifyPlan, slackNames, updateReplies } from '../_lib/stagedSlack.js'
 
 type Env = AuthEnv & ExecEnv
 interface PagesCtx { request: Request; env: Env; waitUntil: (p: Promise<unknown>) => void }
@@ -84,30 +88,18 @@ async function handle(env: Env, p: BlockActions, siteUrl: string): Promise<void>
     return
   }
 
-  if (a.action_id !== 'staged_dry' && a.action_id !== 'staged_real') return
+  if (a.action_id !== 'staged_dry') return
   if (!env.GCP_SA_KEY) return tell(p.response_url, 'Dispatch is not configured for this deployment; use www.')
   if (!admin) return tell(p.response_url, 'Only admins can dispatch runs.')
   const kind = executorOf(env)
-  const [planId, clickedDigest] = (a.value ?? '').split(':')
-  const id = Number(planId)
+  const id = Number(a.value ?? '')
   if (!Number.isInteger(id)) return tell(p.response_url, 'Bad button value.')
-  const g = await planGate(db, id)
-  if (!g) return tell(p.response_url, 'That plan no longer exists.')
-  if (g.closed) return tell(p.response_url, 'That plan is closed.')
-
-  let mode: 'dry' | 'real'
-  let date: string | undefined
-  if (a.action_id === 'staged_dry') {
-    mode = 'dry'
-    date = (await latestScan(env)) ?? undefined
-    if (!date) return tell(p.response_url, 'No indexed scan to run against.')
-  } else {
-    mode = 'real'
-    // The gate itself (and the dry-run's scan) is the executor seam's; this
-    // only refuses a button drawn for an older item set.
-    if (clickedDigest !== g.digest) return tell(p.response_url, 'Not deleting: the plan changed after that button was drawn. Check the updated message.')
-  }
-  const r = await dispatchPlan(env, { planId: id, mode, date, actor: email, siteUrl }, kind)
+  const plan = await db.prepare('SELECT state FROM plans WHERE id = ?').bind(id).first<{ state: string }>()
+  if (!plan) return tell(p.response_url, 'That plan no longer exists.')
+  if (plan.state !== 'open') return tell(p.response_url, 'That plan is closed.')
+  const date = await latestScan(env)
+  if (!date) return tell(p.response_url, 'No indexed scan to run against.')
+  const r = await dispatchPlan(env, { planId: id, mode: 'dry', date, actor: email, siteUrl }, kind)
   if (!r.ok) return tell(p.response_url, `Dispatch refused: ${r.error}`)
   await notifyDispatched(env, r, 'Slack', siteUrl)
 }
@@ -122,8 +114,13 @@ export const onRequestPost = async (ctx: PagesCtx): Promise<Response> => {
   let p: BlockActions
   try { p = JSON.parse(raw ?? '') as BlockActions } catch { return new Response('bad payload', { status: 400 }) }
   if (p.type !== 'block_actions' || !p.actions?.length) return new Response('', { status: 200 })
-  if (p.actions[0].action_id === 'staged_open') return new Response('', { status: 200 })
+  const clicked = p.actions[0].action_id
+  if (clicked === 'staged_open' || clicked === 'staged_delete_link') return new Response('', { status: 200 })
   const siteUrl = new URL(request.url).origin
+  if (clicked === 'staged_real') {
+    ctx.waitUntil(tell(p.response_url, `Slack no longer starts deletes, and this click deleted nothing. To delete, use <${siteUrl}/staged|the staged page>.`))
+    return new Response('', { status: 200 })
+  }
   // Sized from the interval store for the dates it holds (`withPathStore`), as the plans routes size them.
   ctx.waitUntil(withPathStore(ctx).then(c => handle(c.env, p, siteUrl)).catch(e => tell(p.response_url, `Something went wrong: ${(e as Error).message}`)))
   return new Response('', { status: 200 })

@@ -30,7 +30,7 @@ export async function stagedCard(env: Env, site: Site, title: string, params: Re
   const plan = await openPlanId(env.DB).catch(() => null)
   const rows = plan == null ? [] : (await env.DB.prepare("SELECT prefix, COALESCE(kind, 'prefix') AS kind, added_by FROM plan_items WHERE plan_id = ?").bind(plan).all<{ prefix: string; kind: 'prefix' | 'object'; added_by: string }>()).results
   // Every prefix, sized at the latest scan (as the Slack parent's totals are).
-  const at = rows.length ? await stagedStats(env, rows.map(r => r.prefix)) : null
+  const at = rows.length ? await stagedStats(env, rows.map(r => r.prefix), env.DB) : null
   if (!rows.length || !at) return { ...base, subtitle: plan == null ? '' : `plan #${plan}`, total: '', empty: 'nothing staged' }
   const { scan: date, stats } = at
   const [reg, deleted] = await Promise.all([regOf(env), deletedItems(env.DB, plan!)])

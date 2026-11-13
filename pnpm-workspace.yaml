@@ -1,5 +1,6 @@
 packages:
   - "site"
+  - "fleet"
   - "packages/*"
   - "infra/cf/capture-trigger"
   - "infra/cf/cron-dispatch"

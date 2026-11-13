@@ -9,13 +9,16 @@ import {
   rerender, THROTTLE_MS, type Wait, writeKind,
 } from './activity'
 import {
-  addTrail, authLine, type Burst, clientKind, DISCORD, emptyTrail, highlights, joins, keptEvents, mergeKinds, pageLines,
+  activityEventLine, activityRefreshLine, addTrail, authLine, type Burst, clientKind, DISCORD, emptyTrail, highlights, joins, keptEvents, mergeKinds, pageLines,
   renderDetails, renderDiscord, renderHeadline, renderLines, renderSummary, senderName, type ServerEvent, serverKind, sessionLinks, SLACK, tallyClient,
 } from './activityShape'
 import { captureWrite, noteActivity } from './activityHook'
-import { ingest } from './sessionLog'
-import { resetSlackScopes } from './slack'
+import { d1SessionLogStore } from '@open-athena/auth/session-log/d1'
+import type { SessionLogWho, SlogBatch } from '@open-athena/auth/session-log'
+const ingest = (db: D1Database, who: SessionLogWho, ua: string | null, batch: SlogBatch, now: number) => d1SessionLogStore(db).ingest(who, ua, batch, now)
+import { resetSlackScopes, resetSlackPeople } from './slack'
 import type { SlogEvent } from './sessionLogShape'
+import { onRequest as activityRoute } from '../api/activity/[[path]]'
 
 const NOW = Date.UTC(2026, 9, 21, 15, 0, 0)  // 2026-10-21T15:00Z
 const S = Math.floor(NOW / 1000)
@@ -35,8 +38,14 @@ describe('kinds', () => {
       ['POST /api/auth/grants', 'access'],
       ['POST /api/og/mint', 'access'],
       ['PATCH /api/db/allowed_emails', 'admin'],
+      ['POST /api/admins', 'admin'],
+      ['DELETE /api/admins', 'admin'],
       ['PUT /api/session-log/switch', 'admin'],
       ['PUT /api/activity/kinds/view', 'admin'],
+      ['PUT /api/digest-settings', 'admin'],
+      ['PUT /api/sweep/settings', 'admin'],
+      ['POST /api/digest-op', 'digest'],
+      ['POST /api/digest-image', '-'],
       ['POST /api/owner-prices', 'write'],
       ['GET /api/actions', '-'],
       ['POST /api/session-log', '-'],
@@ -53,9 +62,9 @@ describe('kinds', () => {
   it('maps session-log events to kinds; a failed request is an error, one the page cancelled is not', () => {
     const evs = [
       { k: 'start' }, { k: 'nav' }, { k: 'click' }, { k: 'console' }, { k: 'api', s: 200 }, { k: 'api', s: 502 },
-      { k: 'api', s: 0 }, { k: 'api', s: 0, err: 'abort' }, { k: 'dropped' },
+      { k: 'api', s: 0 }, { k: 'api', s: 0, err: 'abort' }, { k: 'life', s: 'gap' }, { k: 'dropped' },
     ] as const
-    expect(evs.map(e => clientKind(e as never))).toEqual(['view', 'nav', 'click', 'error', 'api', 'error', 'error', 'api', null])
+    expect(evs.map(e => clientKind(e as never))).toEqual(['view', 'nav', 'click', 'error', 'api', 'error', 'error', 'api', 'life', null])
   })
 
   it('says what the auth package\'s writes did', () => {
@@ -64,14 +73,14 @@ describe('kinds', () => {
       authLine('POST', '/api/auth/grants/g1/revoke'),
       authLine('PATCH', '/api/auth/grants/g1'),
       authLine('POST', '/api/auth/requests/r9/approve'),
-      authLine('DELETE', '/api/auth/allowed/bob%40x.edu'),
+      authLine('DELETE', '/api/auth/allowed/bob%40example.test'),
       authLine('POST', '/api/auth/allowed/sync'),
     ]).toEqual([
       'minted a grant',
       'revoked grant g1',
       'edited grant g1',
       'approved access request r9',
-      'removed bob@x.edu from the sign-in allowlist',
+      'removed bob@example.test from the sign-in allowlist',
       'synced the sign-in allowlist',
     ])
   })
@@ -90,6 +99,42 @@ describe('kinds', () => {
 })
 
 describe('bursts (pure)', () => {
+  it('a refresh names its purpose, scope, selected/rendered/skipped counts and linked targets', () => {
+    const detail = { action: 'activity-render' as const, requested: [7, 8, 9], rendered: [7, 9], since: '2026-10-24', reason: 'make <Pages> clickable' }
+    expect(activityRefreshLine(detail, SLACK, ORIGIN)).toBe(
+      `refreshed 2 activity summaries (3 requested, 1 skipped) · active since 2026-10-24 · reason: make &lt;Pages&gt; clickable · summaries: <${ORIGIN}/admin/activity?burst=7|#7>, <${ORIGIN}/admin/activity?burst=9|#9>`,
+    )
+    expect(activityEventLine({ line: 'stored plain line', route: '/api/activity/render', detail }, DISCORD, ORIGIN)).toBe(
+      `refreshed 2 activity summaries (3 requested, 1 skipped) · active since 2026-10-24 · reason: make <Pages> clickable · summaries: [#7](<${ORIGIN}/admin/activity?burst=7>), [#9](<${ORIGIN}/admin/activity?burst=9>)`,
+    )
+    expect(activityRefreshLine({ action: 'activity-render', requested: [1], rendered: [] })).toBe(
+      'refreshed 0 activity summaries (1 requested, 1 skipped) · display refresh of existing activity posts',
+    )
+  })
+
+  it('old refreshes explain the operation and repeated admin lines count requests, not target summaries', () => {
+    const e = { ts: S, line: 're-rendered 9 activity bursts', route: '/api/activity/render' }
+    const line = activityEventLine(e, SLACK, ORIGIN)
+    expect(renderLines('admin', [{ ...e, line }, { ...e, ts: S + 30, line }], SLACK).split('\n')).toEqual([
+      '*2 admin actions*',
+      '• 15:00 refreshed 9 existing activity summaries (display refresh; target IDs were not recorded) (2 requests)',
+    ])
+    expect(activityEventLine({ line: 're-rendered 9 activity bursts', route: '/api/other' }, SLACK, ORIGIN)).toBe('re-rendered 9 activity bursts')
+  })
+
+  it('limits refresh target links to five while retaining full requested/rendered counts', () => {
+    expect(activityRefreshLine({ action: 'activity-render', requested: [1, 2, 3, 4, 5, 6, 7], rendered: [1, 2, 3, 4, 5, 6] }, SLACK, ORIGIN)).toBe(
+      `refreshed 6 activity summaries (7 requested, 1 skipped) · display refresh of existing activity posts · summaries: <${ORIGIN}/admin/activity?burst=1|#1>, <${ORIGIN}/admin/activity?burst=2|#2>, <${ORIGIN}/admin/activity?burst=3|#3>, <${ORIGIN}/admin/activity?burst=4|#4>, <${ORIGIN}/admin/activity?burst=5|#5>, +1 more`,
+    )
+  })
+
+  it('repeated non-refresh admin lines count actions rather than requests', () => {
+    expect(renderLines('admin', [
+      { ts: S, route: '/api/db/flags', line: 'updated flag' },
+      { ts: S + 30, route: '/api/db/flags', line: 'updated flag' },
+    ], SLACK).split('\n')).toEqual(['*2 admin actions*', '• 15:00 updated flag (2 actions)'])
+  })
+
   it('joins within the gap, either side', () => {
     expect([joins(null, 100, 900), joins({ last_ts: 100 }, 1000, 900), joins({ last_ts: 100 }, 1001, 900), joins({ last_ts: 1000 }, 50, 900)])
       .toEqual([false, true, false, false])
@@ -121,6 +166,28 @@ describe('bursts (pure)', () => {
     ])
   })
 
+  it('a failed fetch no one saw fail (a hidden tab, offline, or delivered over a minute late) counts as a request, not an error', () => {
+    const fail = { k: 'api', s: 0, ms: 1215, err: 'TypeError: Failed to fetch' }
+    const events = [
+      { t: 1000, k: 'start', u: '/' },
+      { ...fail, t: 2000, u: '/api/a' },
+      { ...fail, t: 3000, u: '/api/b', on0: true, on: false, vis0: 'visible', vis: 'visible' },
+      { ...fail, t: 4000, u: '/api/c', on0: true, on: true, vis0: 'visible', vis: 'hidden' },
+      { ...fail, t: 5000, u: '/api/d', on0: true, on: true, vis0: 'visible', vis: 'visible' },
+      // An older client (auth before `on` / `vis`) sent `online` / `visibility`; still read.
+      { ...fail, t: 6000, u: '/api/e', online: false, visibility: 'visible' },
+    ] as SlogEvent[]
+    const tally = (receivedMs?: number) => {
+      const { counts, errors } = tallyClient(events, mergeKinds([]), receivedMs)
+      return { counts, errors: errors.map(e => e.line.split(' ')[1]) }
+    }
+    expect([tally(), tally(5000 + 60_000), tally(2000 + 60_001)]).toEqual([
+      { counts: { view: 1, api: 3, error: 2 }, errors: ['/api/a', '/api/d'] },
+      { counts: { view: 1, api: 4, error: 1 }, errors: ['/api/d'] },
+      { counts: { view: 1, api: 4, error: 1 }, errors: ['/api/d'] },
+    ])
+  })
+
   it('keeps a trail: repeats of the previous path fold in, the latest stops kept', () => {
     const t = addTrail(emptyTrail(), ['/', '/', '/a', '/'])
     expect(t).toEqual({ n: 3, last: [['/', 2], ['/a', 1], ['/', 1]] })
@@ -147,7 +214,7 @@ describe('rendering', () => {
       '3 assignments · 4 page loads · 9 URL changes',
       'Largest assignment: `gs://b/y/` (2.0 PiB) → bob',
       'Owners: bob, cleared',
-      'Pages: `/` ×3 → `/users`',
+      `Pages: <${ORIGIN}/|/> ×3 → <${ORIGIN}/users|/users>`,
       `<${ORIGIN}/admin/activity?burst=7|activity> · <${ORIGIN}/admin/sessions/sid-aaaaaaaaaa|session sid-aaaa>`,
     ])
   })
@@ -155,14 +222,24 @@ describe('rendering', () => {
   it("Slack's post is one line (sent as the user when signed in, else naming who and how); the rest is its first reply", () => {
     const o = { fmt: SLACK, conf, highlights: highlights(events) }
     const act = `<${ORIGIN}/admin/activity?burst=7|activity>`
-    expect([renderHeadline(burst, o, true), renderHeadline({ ...burst, via: 'grant' }, o, false)]).toEqual([
+    const job = { ...burst, actor: 'grant:cw-scan-job', via: 'grant' }
+    expect([
+      renderHeadline(burst, o, true),
+      renderHeadline({ ...burst, via: 'grant' }, o, false),
+      renderHeadline(job, o, true),
+      renderHeadline(job, o, false),
+      renderHeadline({ ...job, actor: 'grant:2EjUTg692KMP' }, { ...o, name: 'grant 2EjU' }, false),
+    ]).toEqual([
       `3 assignments · 4 page loads · 9 URL changes · 2026-10-21 14:20–15:00Z · ${act}`,
       `*ann* (agent token / share link) · 3 assignments · 4 page loads · 9 URL changes · 2026-10-21 14:20–15:00Z · ${act}`,
+      `agent token / share link · 3 assignments · 4 page loads · 9 URL changes · 2026-10-21 14:20–15:00Z · ${act}`,
+      `*cw-scan-job* (agent token / share link) · 3 assignments · 4 page loads · 9 URL changes · 2026-10-21 14:20–15:00Z · ${act}`,
+      `*grant 2EjU* (agent token / share link) · 3 assignments · 4 page loads · 9 URL changes · 2026-10-21 14:20–15:00Z · ${act}`,
     ])
     expect(renderDetails(burst, o).split('\n')).toEqual([
       'Largest assignment: `gs://b/y/` (2.0 PiB) → bob',
       'Owners: bob, cleared',
-      'Pages: `/` ×3 → `/users`',
+      `Pages: <${ORIGIN}/|/> ×3 → <${ORIGIN}/users|/users>`,
       `<${ORIGIN}/admin/sessions/sid-aaaaaaaaaa|session sid-aaaa>`,
     ])
     expect(renderDetails({ ...burst, pages: {}, trail: emptyTrail(), sids: [] }, { ...o, highlights: {} })).toBe('')
@@ -174,8 +251,10 @@ describe('rendering', () => {
       ...burst, pages: { '/': 9, '/a': 4, '/b': 2 }, trail: { n: 14, last: [['/a', 1], ['/', 2]] },
       sids: ['s1aaaaaa', 's2aaaaaa', 's3aaaaaa', 's4aaaaaa'],
     }
-    expect(pageLines(long, SLACK, 2)).toEqual(['Pages (14 stops): `/` ×9, `/a` ×4', 'Last 2: `/a` → `/` ×2'])
-    expect(pageLines({ pages: { '/': 2 }, trail: emptyTrail() }, SLACK, 2)).toEqual(['Pages: `/` ×2'])
+    expect(pageLines(long, SLACK, 2)).toEqual([`Pages (14 stops): <${ORIGIN}/|/> ×9, <${ORIGIN}/a|/a> ×4`, `Last 2: <${ORIGIN}/a|/a> → <${ORIGIN}/|/> ×2`])
+    expect(pageLines({ origin: ORIGIN, pages: { '/': 2 }, trail: emptyTrail() }, SLACK, 2)).toEqual([`Pages: <${ORIGIN}/|/> ×2`])
+    expect(pageLines({ origin: '', pages: { '/a b': 1 }, trail: emptyTrail() }, DISCORD, 2)).toEqual(['Pages: `/a b`'])
+    expect(pageLines({ origin: ORIGIN, pages: { '/x': 1 }, trail: emptyTrail() }, DISCORD, 2)).toEqual([`Pages: [/x](<${ORIGIN}/x>)`])
     expect(sessionLinks(long, SLACK)).toEqual([`<${ORIGIN}/admin/sessions?u=ann%40example.test|4 sessions>`])
   })
 
@@ -213,11 +292,13 @@ describe('rendering', () => {
 /** A stubbed `fetch`: Slack posts get ts `1.00000N`, Discord posts id `dN`; every call is recorded. */
 /** Slack (and Discord) as fetch: posts get sequential ids; `auth.test` answers with `scopes` (the installed app's) and
  *  isn't logged. */
-function stubFetch(fail = false, scopes = 'chat:write,chat:write.customize') {
+function stubFetch(fail = false, scopes = 'chat:write,chat:write.customize', photo: string | null = null) {
   const calls: { url: string; method: string; body: Record<string, unknown> }[] = []
   let n = 0
   resetSlackScopes()
+  resetSlackPeople()
   vi.stubGlobal('fetch', vi.fn(async (url: string, init: RequestInit) => {
+    if (url.includes('/users.lookupByEmail?')) return new Response(JSON.stringify(photo ? { ok: true, user: { id: 'U1', profile: { image_192: photo } } } : { ok: false, error: 'users_not_found' }))
     if (url.endsWith('auth.test')) return new Response(JSON.stringify({ ok: true }), { headers: { 'x-oauth-scopes': scopes } })
     const body = JSON.parse(String(init.body ?? '{}'))
     calls.push({ url, method: init.method ?? 'GET', body })
@@ -278,6 +359,21 @@ describe('D1 and sinks', () => {
     ])
   })
 
+  it('does not report a second resumption when another batch already extended the burst', async () => {
+    const { db, raw, env, wait } = await setup()
+    await feed(env, wait, 'sid-resume-race', [{ t: NOW, k: 'start', u: '/' }] as SlogEvent[], NOW)
+    const later = S + 2 * 3600
+    const prepare = db.prepare.bind(db)
+    const intercept = vi.spyOn(db, 'prepare').mockImplementation(sql => {
+      if (sql.includes('EXISTS (SELECT 1 FROM json_each(sids)')) raw.prepare('UPDATE activity_bursts SET last_ts = ? WHERE id = 1').run(later)
+      return prepare(sql)
+    })
+    try {
+      expect(await burstFor(db, who.actor, who.via, ORIGIN, later, undefined, 'sid-resume-race')).toEqual({ id: 1 })
+      expect((await loadBurst(db, 1))!.last_ts).toBe(later)
+    } finally { intercept.mockRestore() }
+  })
+
   it('a tab back after the gap continues its own burst and thread; another tab opens a new one', async () => {
     const calls = stubFetch()
     const { db, env, wait } = await setup({ SLACK_BOT_TOKEN: 'xoxb', SLACK_ADMIN_CHANNEL: 'C1' })
@@ -299,10 +395,10 @@ describe('D1 and sinks', () => {
     // One parent (+ its details reply), posted once; each resumption re-renders them and the one `resume` reply.
     expect(calls.filter(c => c.url.endsWith('chat.postMessage')).map(c => [c.body.thread_ts ?? null, String(c.body.text).split('\n')[0]])).toEqual([
       [null, `1 page load · 2026-10-21 15:00Z · <${ORIGIN}/admin/activity?burst=1|activity>`],
-      ['1.000001', 'Pages: `/`'],
+      ['1.000001', `Pages: <${ORIGIN}/|/>`],
       ['1.000001', '*1 resumption*'],
       [null, `1 page load · 2026-10-21 21:17Z · <${ORIGIN}/admin/activity?burst=2|activity>`],
-      ['1.000004', 'Pages: `/`'],
+      ['1.000004', `Pages: <${ORIGIN}/|/>`],
     ])
     expect(String(calls.filter(c => c.url.endsWith('chat.update')).at(-1)!.body.text).split('\n')).toEqual([
       '*2 resumptions*',
@@ -326,8 +422,20 @@ describe('D1 and sinks', () => {
     const link = `<${ORIGIN}/admin/sessions/sid-aaaaaa?show=errors|15:00>`
     expect(calls.map(c => [c.body.thread_ts ?? null, c.body.username ?? null, String(c.body.text).split('\n')])).toEqual([
       [null, 'Ann Lee', [`1 page load · 3 errors · 2026-10-21 15:00Z · <${ORIGIN}/admin/activity?burst=1|activity>`]],
-      ['1.000001', 'Ann Lee', ['Pages: `/admin`', `<${ORIGIN}/admin/sessions/sid-aaaaaa|session sid-aaaa>`]],
-      ['1.000001', null, ['*3 errors*', `• ${link} GET /api/auth/whoami → failed · 3300ms · TypeError: Failed to fetch on \`/admin\` ×2`, `• ${link} console.error: a&lt;b on \`/admin\``]],
+      ['1.000001', 'Ann Lee', [`Pages: <${ORIGIN}/admin|/admin>`, `<${ORIGIN}/admin/sessions/sid-aaaaaa|session sid-aaaa>`]],
+      ['1.000001', 'Ann Lee', ['*3 errors*', `• ${link} GET /api/auth/whoami → failed · 3300ms · TypeError: Failed to fetch on \`/admin\` ×2`, `• ${link} console.error: a&lt;b on \`/admin\``]],
+    ])
+  })
+
+  it('uses Slack photos on the parent and replies, keeping Discord on the site fallback', async () => {
+    const photo = 'https://avatars.slack-edge.com/ann.png'
+    const calls = stubFetch(false, 'chat:write,chat:write.customize', photo)
+    const { env, wait } = await setup({ SLACK_BOT_TOKEN: 'xoxb', SLACK_ADMIN_CHANNEL: 'C1', DISCORD_ADMIN_WEBHOOK: 'https://discord.example.test/hook' })
+    await feed(env, wait, 'sid-slack-photo', [{ t: NOW, k: 'start', u: '/' }] as SlogEvent[], NOW)
+    expect(calls.map(c => ({ url: c.url, username: c.body.username, icon: c.body.icon_url ?? c.body.avatar_url ?? null }))).toEqual([
+      { url: 'https://slack.com/api/chat.postMessage', username: 'ann', icon: photo },
+      { url: 'https://slack.com/api/chat.postMessage', username: 'ann', icon: photo },
+      { url: 'https://discord.example.test/hook?wait=true', username: 'ann', icon: null },
     ])
   })
 
@@ -337,7 +445,7 @@ describe('D1 and sinks', () => {
     await feed(env, wait, 'sid-aaaaaa', [{ t: NOW, k: 'start', u: '/' }] as SlogEvent[], NOW)
     expect(calls.map(c => [c.body.thread_ts ?? null, c.body.username ?? null, String(c.body.text).split('\n')[0]])).toEqual([
       [null, null, `*ann* (browser) · 1 page load · 2026-10-21 15:00Z · <${ORIGIN}/admin/activity?burst=1|activity>`],
-      ['1.000001', null, 'Pages: `/`'],
+      ['1.000001', null, `Pages: <${ORIGIN}/|/>`],
     ])
   })
 
@@ -355,9 +463,9 @@ describe('D1 and sinks', () => {
     expect(await rerender(env, [1, 7])).toEqual([1])
     expect(calls.map(c => [c.url.replace('https://slack.com/api/', ''), c.body.thread_ts ?? c.body.ts ?? null, String(c.body.text).split('\n')[0]])).toEqual([
       ['chat.postMessage', null, `1 page load · 2026-10-21 15:00Z · <${ORIGIN}/admin/activity?burst=1|activity>`],
-      ['chat.postMessage', '1.000001', 'Pages: `/scans`'],
+      ['chat.postMessage', '1.000001', `Pages: <${ORIGIN}/scans|/scans>`],
       ['chat.update', '1.000001', `1 page load · 2026-10-21 15:00Z · <${ORIGIN}/admin/activity?burst=1|activity>`],
-      ['chat.update', '1.000002', 'Pages: `/scans`'],
+      ['chat.update', '1.000002', `Pages: <${ORIGIN}/scans|/scans>`],
       ['chat.postMessage', '1.000001', '*1 error*'],
     ])
   })
@@ -402,9 +510,9 @@ describe('D1 and sinks', () => {
     await Promise.all(pending)
     expect(calls.map(c => [c.url.replace('https://slack.com/api/', ''), String(c.body.text).split('\n')[0]])).toEqual([
       ['chat.postMessage', `1 page load · 2026-10-21 15:00Z · <${ORIGIN}/admin/activity?burst=1|activity>`],
-      ['chat.postMessage', 'Pages: `/`'],
+      ['chat.postMessage', `Pages: <${ORIGIN}/|/>`],
       ['chat.update', `2 page loads · 2026-10-21 15:00–15:00Z · <${ORIGIN}/admin/activity?burst=1|activity>`],
-      ['chat.update', 'Pages: `/` ×2'],
+      ['chat.update', `Pages: <${ORIGIN}/|/> ×2`],
     ])
     expect((await loadBurst(db, 1))!.dirty).toBe(false)
   })
@@ -451,11 +559,57 @@ describe('D1 and sinks', () => {
     const data: Record<string, unknown> = {}
     noteActivity({ data }, { line: 'added a note on 2026-10-20: "x"', note: 4 })
     await captureWrite({ request: req('/api/annotations', { at: '2026-10-20', text: 'x' }), env: full, data } as never, 'note', null, wait, NOW)
-    const plain = req('/api/auth/grants', { email: 'bob@x.edu', scopes: ['gcs'], days: 7 })
+    const plain = req('/api/auth/grants', { email: 'bob@example.test', scopes: ['gcs'], days: 7 })
     await captureWrite({ request: plain, env: full } as never, 'access', plain.clone().text(), wait, NOW + 1000)
     expect((await eventsOf(db, 1)).map(e => [e.kind, e.actor, e.via, e.line, e.detail])).toEqual([
       ['note', 'ann@example.test', 'grant', 'added a note on 2026-10-20: "x"', { note: 4 }],
       ['access', 'ann@example.test', 'grant', 'minted a grant', { body: { email: 'string', scopes: 1, days: 'number' } }],
     ])
+  })
+
+  it('the admin refresh route records exact unique targets, skipped ids and an optional purpose', async () => {
+    const { env, wait } = await setup()
+    await recordServer(env, who, [assign(S, 'gs://b/x/')], wait, NOW)
+    const full = { ...env, SESSION_SECRET: 's'.repeat(32), BASE_SCOPE: 'gcs' }
+    const { token } = await gateFor(full as never)!.mint({ email: 'ann@example.test', scopes: ['gcs', 'admin'], name: 'ann', createdBy: 't', expiresAt: null, maxRedeems: null })
+    const data: Record<string, unknown> = {}
+    const response = await activityRoute({ env: full, data, params: { path: ['render'] }, request: new Request(`${ORIGIN}/api/activity/render?burst=1&burst=99&burst=1`, {
+      method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body: JSON.stringify({ reason: '  make Pages\nclickable  ' }),
+    }) } as never)
+    expect([response.status, await response.json(), data.activity]).toEqual([200, { rendered: [1] }, [{
+      line: 'refreshed 1 activity summary (2 requested, 1 skipped) · reason: make Pages clickable · summaries: #1',
+      action: 'activity-render', requested: [1, 99], rendered: [1], reason: 'make Pages clickable',
+    }]])
+  })
+
+  it('Slack receives one linked refresh entry in the existing burst thread', async () => {
+    const calls = stubFetch()
+    const { env, wait } = await setup({ SLACK_BOT_TOKEN: 'xoxb', SLACK_ADMIN_CHANNEL: 'C1' })
+    const detail = { action: 'activity-render' as const, requested: [7, 8], rendered: [7], reason: 'make Pages clickable' }
+    await recordServer(env, who, [{ ts: S, kind: 'admin', actor: who.actor, via: who.via, method: 'POST', route: '/api/activity/render',
+      line: activityRefreshLine(detail), detail,
+    }], wait, NOW)
+    expect(calls.map(c => [c.url.split('/').pop(), c.body.thread_ts ?? null, c.body.text])).toEqual([
+      ['chat.postMessage', null, `1 admin action · 2026-10-21 15:00Z · <${ORIGIN}/admin/activity?burst=1|activity>`],
+      ['chat.postMessage', '1.000001', `*1 admin action*\n• 15:00 refreshed 1 activity summary (2 requested, 1 skipped) · reason: make Pages clickable · summaries: <${ORIGIN}/admin/activity?burst=7|#7>`],
+    ])
+  })
+
+  it('rejects a malformed refresh purpose before rendering or recording any summary', async () => {
+    const calls = stubFetch()
+    const { env, wait } = await setup({ SLACK_BOT_TOKEN: 'xoxb', SLACK_ADMIN_CHANNEL: 'C1' })
+    await recordServer(env, who, [assign(S, 'gs://b/x/')], wait, NOW)
+    calls.length = 0
+    const full = { ...env, SESSION_SECRET: 's'.repeat(32), BASE_SCOPE: 'gcs' }
+    const { token } = await gateFor(full as never)!.mint({ email: 'ann@example.test', scopes: ['gcs', 'admin'], name: 'ann', createdBy: 't', expiresAt: null, maxRedeems: null })
+    for (const body of ['{', JSON.stringify({ reason: ['wrong'] })]) {
+      const data: Record<string, unknown> = {}
+      const response = await activityRoute({ env: full, data, params: { path: ['render'] }, request: new Request(`${ORIGIN}/api/activity/render?burst=1`, {
+        method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body,
+      }) } as never)
+      expect([response.status, await response.json(), data, calls]).toEqual([
+        400, { error: body === '{' ? 'body is not JSON' : 'reason must be a string' }, {}, [],
+      ])
+    }
   })
 })

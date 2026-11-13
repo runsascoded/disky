@@ -1,11 +1,12 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import type { Env } from './auth'
-import { IV_JOIN, openIndex, readRootHistoryRows, slices } from './index'
+import { IV_JOIN, openIndex, readPathHistoryRows, slices } from './index'
 import { type Req, reqOf, withReq } from './shared'
 import type { OwnerScope } from './scope'
 import { sqliteD1, withLedger } from './testD1'
 import { type D1Variant, fixture, getsOf, readJson, seedGeneration } from './testStore'
-import { buildDiff, buildView, readRootAgg, readRootHistory } from './view'
+import { buildDiff, buildView, readRootAgg, readPathHistory } from './view'
+import { onRequestGet as seriesGet } from '../api/series'
 
 vi.mock('@rdub/file-tree/stores/s3', async () => ({ S3Store: (await import('./testStore')).S3Store }))
 
@@ -75,18 +76,20 @@ beforeAll(async () => {
   ;({ perScan, iv } = await seed())
 })
 
-describe('batched root owner history', () => {
+vi.mock('./seriesLimits', async orig => ({ ...await orig<typeof import('./seriesLimits')>(), SERIES_CHUNK: 2 }))
+
+describe('batched owner history', () => {
   const dates = [S1, S2, S3]
   it('combines base/run close records before selecting dates and leaves uncovered dates out', async () => {
     const runEnv = { ...iv, INTERVAL_STORE_GEN: 'g5' } as Env
-    const held = await readRootHistoryRows(runEnv, ['2026-01-01', ...dates])
+    const held = await readPathHistoryRows(runEnv, ['2026-01-01', ...dates], '')
     expect([...held!.keys()]).toEqual(dates)
     for (const scope of [{ lens: { key: 'alice' } }, { owner: 'unowned' as const }]) {
       const want = []
       for (const date of dates) want.push([date, await readRootAgg(runEnv, { date, path: '', ...scope })])
-      expect([...(await readRootHistory(runEnv, dates, scope))!]).toEqual(want)
+      expect([...(await readPathHistory(runEnv, dates, '', scope))!]).toEqual(want)
     }
-    expect(await readRootHistoryRows(iv, ['2026-01-01'])).toBeNull()
+    expect(await readPathHistoryRows(iv, ['2026-01-01'], '')).toBeNull()
   })
   it('matches canonical bytes and objects for every user and owner pool', async () => {
     for (const scope of [
@@ -95,9 +98,33 @@ describe('batched root owner history', () => {
     ]) {
       const want = []
       for (const date of dates) want.push([date, await readRootAgg(iv, { date, path: '', ...scope })])
-      expect([...(await readRootHistory(iv, dates, scope))!]).toEqual(want)
+      expect([...(await readPathHistory(iv, dates, '', scope))!]).toEqual(want)
     }
-    expect(await readRootHistory(perScan, dates, { owner: 'unowned' })).toBeNull()
+    expect(await readPathHistory(perScan, dates, '', { owner: 'unowned' })).toBeNull()
+  })
+})
+
+const POOLS: OwnerScope[] = ['owned', 'unowned', { not: ['alice'] }]
+
+describe('a drilled owner pool\'s history', () => {
+  const dates = [S1, S2, S3]
+  /** Every point of the path's pool from per-scan reads, the canonical answer. */
+  const perDate = async (env: Env, path: string, owner: OwnerScope) => {
+    const want = []
+    for (const date of dates) want.push([date, await readRootAgg(env, { date, path, owner })])
+    return want
+  }
+  const PATHS = ['bk', 'bk/flat', 'bk/nest', 'bk/m', 'bk/nest/d0', 'nonesuch/x']
+  it('matches the per-scan reads at every depth, base and runs', async () => {
+    for (const env of [iv, { ...iv, INTERVAL_STORE_GEN: 'g5' } as Env]) {
+      for (const path of PATHS) for (const owner of POOLS) {
+        expect({ path, owner, got: [...(await readPathHistory(env, dates, path, { owner }))!] }).toEqual({ path, owner, got: await perDate(env, path, owner) })
+      }
+    }
+  })
+  it('has a point only where the path is, and refuses a lens below the root', async () => {
+    expect([...(await readPathHistory(iv, dates, 'nonesuch/x', { owner: 'unowned' }))!]).toEqual(dates.map(d => [d, null]))
+    await expect(readPathHistory(iv, dates, 'bk', { lens: { key: 'alice' } })).rejects.toThrow('a lens history is for the fleet root only')
   })
 })
 
@@ -356,4 +383,38 @@ describe('interval store g5: the requests after a cancelled read frozen at sever
     const [gotC, msC] = await timed(diff(c))
     expect([gotB, gotC, reqOf(b)!.waited, reqOf(c)!.waited, msB < BOUND, msC < BOUND]).toEqual([wantView, wantDiff, 0, 0, true, true])
   }, 30_000)
+})
+
+describe('/api/series a window of scans at a time', () => {
+  type Body = { path: string; owner?: OwnerScope; lens?: string; chunks?: number; points: { date: string; b: number; o: number }[]; error?: string }
+  const get = async (env: Env, q: string): Promise<{ status: number; body: Body }> => {
+    const r = await seriesGet({ request: new Request(`http://localhost/api/series?${q}`), env } as never)
+    return { status: r.status, body: await r.json() as Body }
+  }
+  const on = () => ({ ...iv, OWNER_HISTORY_BATCH: '1', STORE_BUCKET: 'b' }) as Env
+  const off = () => ({ ...iv, STORE_BUCKET: 'b' }) as Env
+  it('is every scan as one answer with the switch off, `chunk` ignored', async () => {
+    const whole = await get(off(), 'path=&o=unowned')
+    expect([whole.status, whole.body.chunks, whole.body.points.map(p => p.date)]).toEqual([200, undefined, [S1, S2, S3]])
+    expect(await get(off(), 'path=&o=unowned&chunk=0')).toEqual(whole)
+  })
+  it('answers the newest window and how many there are, and the windows concatenate to the whole', async () => {
+    for (const q of ['path=bk/flat&o=unowned', 'path=&o=unowned', 'path=&o=owned', 'path=bk/nest&o=!alice', 'path=bk/flat&lens=user:alice', 'path=&lens=user:alice']) {
+      const whole = await get(off(), q)
+      expect(whole.status).toBe(200)
+      expect(await get(on(), q)).toEqual({ status: 200, body: { ...whole.body, chunks: 2, points: whole.body.points.filter(p => p.date === S3) } })
+      expect(await get(on(), `${q}&chunk=1`)).toEqual({ status: 200, body: { ...whole.body, points: whole.body.points.filter(p => p.date === S3) } })
+      expect(await get(on(), `${q}&chunk=0`)).toEqual({ status: 200, body: { ...whole.body, points: whole.body.points.filter(p => p.date !== S3) } })
+    }
+  })
+  it('names a chunk out of range or malformed', async () => {
+    for (const c of ['2', '-1', 'x']) {
+      expect(await get(on(), `path=bk/flat&o=unowned&chunk=${c}`)).toEqual({ status: 400, body: { error: 'bad chunk (want 0..1)' } })
+    }
+  })
+  it('leaves an unscoped series whole', async () => {
+    const whole = await get(off(), 'path=bk/flat')
+    expect(await get(on(), 'path=bk/flat')).toEqual(whole)
+    expect(whole.body.points.map(p => p.date)).toEqual([S2])
+  })
 })

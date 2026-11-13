@@ -3,7 +3,7 @@
  * session-log events are which kind, bursts, and the Slack / Discord renderings. No Workers or DOM types; the D1 and
  * sink I/O is `activity.ts`.
  */
-import { benignError, isErrorEvent, isFailedApi, type SlogEvent, summarize, TRUNC } from './sessionLogShape.js'
+import { benignError, isErrorEvent, isFailedApi, offlineFailure, type SlogEvent, summarize, TRUNC } from './sessionLogShape.js'
 
 export const NOTIFY = ['off', 'count', 'line'] as const
 export type Notify = typeof NOTIFY[number]
@@ -29,9 +29,10 @@ export const KIND_DEFS: KindDef[] = [
   def('stage', 'server', 'Staged-deletion edits (each plan has its own thread)', ['staging edit', 'staging edits'], 'count'),
   def('deletion', 'server', 'Deletion runs dispatched, stopped, undone or purged', ['deletion action', 'deletion actions'], 'line'),
   def('access', 'server', 'Grants, share links, access requests, the sign-in allowlist', ['access change', 'access changes'], 'line'),
-  def('admin', 'server', 'Admin console edits and site settings', ['admin edit', 'admin edits'], 'line'),
+  def('admin', 'server', 'Admin console actions and site settings', ['admin action', 'admin actions'], 'line'),
   def('token', 'server', 'Agent / CLI token minted', ['token', 'tokens'], 'line'),
   def('profile', 'server', 'Profile name or avatar', ['profile edit', 'profile edits'], 'count'),
+  def('digest', 'server', "The Slack digest job's own syncs (the OP's state, its plot)", ['digest sync', 'digest syncs'], 'off'),
   def('write', 'server', 'Any other change', ['other change', 'other changes'], 'count'),
   def('view', 'client', 'Page loads', ['page load', 'page loads'], 'count'),
   def('nav', 'client', 'URL changes: routes, drills, query params, the section in view', ['URL change', 'URL changes'], 'count'),
@@ -44,6 +45,7 @@ export const KIND_DEFS: KindDef[] = [
   def('prefetch', 'client', 'Hover prefetches', ['prefetch', 'prefetches'], 'off'),
   def('viewport', 'client', 'Window size', ['resize', 'resizes'], 'off'),
   def('vis', 'client', 'Tab shown / hidden', ['visibility change', 'visibility changes'], 'off'),
+  def('life', 'client', 'Browser connectivity hints, lifecycle changes and long timer gaps', ['browser event', 'browser events'], 'off'),
 ]
 export const KIND_BY_NAME: Record<string, KindDef> = Object.fromEntries(KIND_DEFS.map(d => [d.kind, d]))
 
@@ -75,11 +77,13 @@ export function serverKind(method: string, path: string): string | null {
   if (path === '/api/actions') return 'assign'
   if (path === '/api/annotations') return 'note'
   if (path.startsWith('/api/plans')) return 'stage'
+  if (path === '/api/sweep/settings') return 'admin'
   if (/^\/api\/(plan-)?sweep\//.test(path)) return 'deletion'
   if (path === '/api/token') return 'token'
   if (path === '/api/auth/profile' || path === '/api/auth/avatar') return 'profile'
   if (path.startsWith('/api/auth/') || path.startsWith('/api/og/')) return 'access'
-  if (path.startsWith('/api/db') || path === '/api/session-log/switch' || path.startsWith('/api/activity/')) return 'admin'
+  if (path === '/api/digest-op') return 'digest'
+  if (path.startsWith('/api/db') || path === '/api/admins' || path === '/api/session-log/switch' || path.startsWith('/api/activity/') || path === '/api/digest-settings') return 'admin'
   return 'write'
 }
 
@@ -138,6 +142,42 @@ export interface Detail {
   [k: string]: unknown
 }
 
+/** A manual refresh of existing activity summaries. Targets are kept even when their counts happen to agree. */
+export interface ActivityRefresh {
+  action: 'activity-render'
+  requested: number[]
+  rendered: number[]
+  since?: string
+  reason?: string
+}
+
+export function activityRefreshLine(d: ActivityRefresh, fmt?: Fmt, origin = ''): string {
+  const esc = fmt?.esc ?? ((s: string) => s)
+  const rendered = new Set(d.rendered)
+  const skipped = d.requested.filter(id => !rendered.has(id)).length
+  const line = `refreshed ${d.rendered.length} activity ${d.rendered.length === 1 ? 'summary' : 'summaries'} (${d.requested.length} requested, ${skipped} skipped)`
+  const scope = d.since ? `active since ${esc(d.since)}` : ''
+  const reason = d.reason ? `reason: ${esc(d.reason)}` : 'display refresh of existing activity posts'
+  const targets = d.rendered.slice(0, 5).map(id => fmt && origin
+    ? fmt.link(`${origin}/admin/activity?burst=${id}`, `#${id}`)
+    : `#${id}`)
+  if (d.rendered.length > targets.length) targets.push(`+${d.rendered.length - targets.length} more`)
+  return [line, scope, reason, ...(targets.length ? [`summaries: ${targets.join(', ')}`] : [])].filter(Boolean).join(' · ')
+}
+
+/** A recorded refresh's targets as links; older events only kept the count. */
+export function activityEventLine(e: Pick<ServerEvent, 'line' | 'route' | 'detail'>, fmt: Fmt, origin: string): string {
+  const d = e.detail
+  const ids = (v: unknown): v is number[] => Array.isArray(v) && v.every(id => Number.isSafeInteger(id) && id > 0)
+  if (d?.action === 'activity-render' && ids(d.requested) && ids(d.rendered)) {
+    return activityRefreshLine({ action: 'activity-render', requested: d.requested, rendered: d.rendered,
+      ...(typeof d.since === 'string' ? { since: d.since } : {}), ...(typeof d.reason === 'string' ? { reason: d.reason } : {}),
+    }, fmt, origin)
+  }
+  const old = e.route === '/api/activity/render' && /^re-rendered (\d+) activity bursts?$/.exec(e.line)
+  return old ? `refreshed ${old[1]} existing activity summaries (display refresh; target IDs were not recorded)` : e.line
+}
+
 /** One actor's activity: no gap over `gapS` between events. */
 export interface Burst {
   id: number
@@ -187,8 +227,9 @@ export function addPages(pages: Record<string, number>, more: Record<string, num
 export interface ClientError { ts: number; line: string; page: string | null }
 
 /** A batch's client events, per kind (the recorded kinds only), the paths viewed (by count, and in order), and its
- *  errors (when `error` is recorded). An error's page is the latest `view` / `nav` before it in the batch. */
-export function tallyClient(events: readonly SlogEvent[], conf: KindsConf): {
+ *  errors (when `error` is recorded). An error's page is the latest `view` / `nav` before it in the batch;
+ *  the auth package's `offlineFailure`s count as requests (`receivedMs`: when the batch arrived). */
+export function tallyClient(events: readonly SlogEvent[], conf: KindsConf, receivedMs?: number): {
   counts: Record<string, number>; pages: Record<string, number>; trail: string[]; errors: ClientError[]
 } {
   const counts: Record<string, number> = {}
@@ -197,7 +238,7 @@ export function tallyClient(events: readonly SlogEvent[], conf: KindsConf): {
   const errors: ClientError[] = []
   let page: string | null = null
   for (const e of events) {
-    const k = clientKind(e)
+    const k = offlineFailure(e, receivedMs) ? 'api' : clientKind(e)
     if ((e.k === 'start' || e.k === 'nav') && typeof e.u === 'string') page = pathOf(e.u)
     if (!k || !conf[k]?.log || (k === 'error' && benignError(e.msg))) continue
     counts[k] = (counts[k] ?? 0) + 1
@@ -273,7 +314,9 @@ export const fmtBytes = (n: number): string => {
 }
 
 /** How a burst names its actor: the email's local part, else the grant's name as given. */
-export const actorName = (actor: string): string => actor.includes('@') ? actor.replace(/@.*$/, '') : actor
+/** A burst actor's short name: an email's local part, a grant's label (`grant:<name>`, or `grant:<id>` unnamed). */
+export const actorName = (actor: string): string =>
+  actor.startsWith('grant:') ? actor.slice('grant:'.length) : actor.includes('@') ? actor.replace(/@.*$/, '') : actor
 
 /** `n noun(s)` for a kind. */
 export const countText = (kind: string, n: number): string => {
@@ -317,6 +360,8 @@ export interface SummaryOpts {
   highlights: Highlights
   /** `/admin/activity?burst=<id>` etc. are built from the burst's origin. */
   topPages?: number
+  /** Who the burst is, as resolved for its sender (a profile's or grant's name); default `actorName(actor)`. */
+  name?: string
 }
 
 const via = (v: string): string => v === 'grant' ? 'agent token / share link' : v === 'public' ? 'signed out' : 'browser'
@@ -331,15 +376,16 @@ const activityLink = (b: Pick<Burst, 'origin' | 'id'>, fmt: Fmt): string => fmt.
 export function renderSummary(b: Burst, o: SummaryOpts): string {
   const { fmt, conf } = o
   const counts = countsText(b, conf)
-  const lines = [`${fmt.bold(actorName(b.actor))} (${via(b.via)}) · ${spanText(b)}`, ...(counts.length ? [counts.join(' · ')] : [])]
+  const lines = [`${fmt.bold(o.name ?? actorName(b.actor))} (${via(b.via)}) · ${spanText(b)}`, ...(counts.length ? [counts.join(' · ')] : [])]
   return [...lines, ...detailLines(b, o, [activityLink(b, fmt)])].join('\n')
 }
 
-/** A burst's Slack post, one line: the counts, when, the activity link; signed in (`via` session) the post is sent
- *  as the user (`sender`), so the line leaves out who; otherwise it leads with who and how. */
-export function renderHeadline(b: Burst, o: Pick<SummaryOpts, 'fmt' | 'conf'>, asUser: boolean): string {
+/** A burst's Slack post, one line: the counts, when, the activity link. Sent as its actor (`asUser`: their name and
+ *  face as the sender) the line leaves out who, keeping how for a grant (`agent token / share link`); otherwise it
+ *  leads with who and how. */
+export function renderHeadline(b: Burst, o: Pick<SummaryOpts, 'fmt' | 'conf' | 'name'>, asUser: boolean): string {
   const { fmt, conf } = o
-  const who = asUser ? [] : [`${fmt.bold(actorName(b.actor))} (${via(b.via)})`]
+  const who = asUser ? (b.via === 'session' ? [] : [via(b.via)]) : [`${fmt.bold(o.name ?? actorName(b.actor))} (${via(b.via)})`]
   return [...who, ...countsText(b, conf), spanText(b), activityLink(b, fmt)].join(' · ')
 }
 
@@ -362,14 +408,16 @@ function detailLines(b: Burst, o: SummaryOpts, lead: string[]): string[] {
 /** Who a signed-in burst's Slack post is sent as: the profile's name, else the email's local part. */
 export const senderName = (actor: string, profileName: string | null | undefined): string => profileName?.trim() || actorName(actor)
 
-const stop = (fmt: Fmt, [p, n]: [string, number]): string => `${fmt.code(p)}${n > 1 ? ` ×${n}` : ''}`
+/** A visited path, linked to that page on the burst's site (code-formatted when the burst has no origin). */
+const stop = (fmt: Fmt, origin: string, [p, n]: [string, number]): string =>
+  `${origin ? fmt.link(`${origin}${p}`, p) : fmt.code(p)}${n > 1 ? ` ×${n}` : ''}`
 
 /** Where the burst went: up to `TRAIL_KEEP` stops, in order; past that, the most-viewed `top` paths, then the last
  *  `TRAIL_KEEP` stops. A burst from before trails were kept lists its most-viewed paths. */
-export function pageLines(b: Pick<Burst, 'pages' | 'trail'>, fmt: Fmt, top: number): string[] {
-  const hist = (n: number) => Object.entries(b.pages).slice(0, n).map(e => stop(fmt, e)).join(', ')
+export function pageLines(b: Pick<Burst, 'origin' | 'pages' | 'trail'>, fmt: Fmt, top: number): string[] {
+  const hist = (n: number) => Object.entries(b.pages).slice(0, n).map(e => stop(fmt, b.origin, e)).join(', ')
   if (!b.trail.n) return Object.keys(b.pages).length ? [`Pages: ${hist(top)}`] : []
-  const path = b.trail.last.map(e => stop(fmt, e)).join(' → ')
+  const path = b.trail.last.map(e => stop(fmt, b.origin, e)).join(' → ')
   if (b.trail.n <= b.trail.last.length) return [`Pages: ${path}`]
   return [`Pages (${fmtN(b.trail.n)} stops): ${hist(top)}`, `Last ${b.trail.last.length}: ${path}`]
 }
@@ -393,17 +441,17 @@ export const MAX_LINES = 30
 
 /** A `line` kind's list: a header, then one line per distinct line (oldest first; repeats folded in as `×N`, from
  *  the first's time), cut at `max`. An event's `href` (an error's session) links its time. */
-export function renderLines(kind: string, events: readonly (Pick<ServerEvent, 'ts' | 'line'> & { href?: string })[], fmt: Fmt, max = MAX_LINES): string {
-  const groups = new Map<string, { ts: number; href?: string; n: number }>()
+export function renderLines(kind: string, events: readonly (Pick<ServerEvent, 'ts' | 'line'> & { href?: string; route?: string })[], fmt: Fmt, max = MAX_LINES): string {
+  const groups = new Map<string, { ts: number; href?: string; n: number; requests: boolean }>()
   for (const e of events) {
     const g = groups.get(e.line)
-    if (g) g.n++
-    else groups.set(e.line, { ts: e.ts, href: e.href, n: 1 })
+    if (g) { g.n++; g.requests &&= e.route === '/api/activity/render' }
+    else groups.set(e.line, { ts: e.ts, href: e.href, n: 1, requests: e.route === '/api/activity/render' })
   }
   const all = [...groups]
   const out = [
     fmt.bold(countText(kind, events.length)),
-    ...all.slice(0, max).map(([line, g]) => `• ${g.href ? fmt.link(g.href, hm(g.ts)) : hm(g.ts)} ${line}${g.n > 1 ? ` ×${fmtN(g.n)}` : ''}`),
+    ...all.slice(0, max).map(([line, g]) => `• ${g.href ? fmt.link(g.href, hm(g.ts)) : hm(g.ts)} ${line}${g.n > 1 ? (kind === 'admin' ? ` (${fmtN(g.n)} ${g.requests ? 'requests' : 'actions'})` : ` ×${fmtN(g.n)}`) : ''}`),
   ]
   if (all.length > max) out.push(`+${fmtN(all.length - max)} more`)
   return out.join('\n')

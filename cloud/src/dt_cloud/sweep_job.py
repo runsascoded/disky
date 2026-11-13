@@ -22,6 +22,7 @@ def reviewed_job_spec(
     bucket_workers: int = 6,
     exclude_runs: tuple[str, ...] = (),
     pacing: str = "guided",
+    min_soft_delete_days: int | None = None,
 ) -> dict:
     """Reuse deployment credentials/resources, not an old job's identity."""
     import re
@@ -32,6 +33,9 @@ def reviewed_job_spec(
         raise ValueError("invalid reviewed deletion workers/rate")
     task = template["taskGroups"][0]["taskSpec"]
     environment = deepcopy(task["environment"])
+    # The template's dispatch's selection (`site/functions/_lib/dispatch.ts`, display only), not this run's.
+    for key in ("EXPECTED_BYTES", "EXPECTED_OBJECTS"):
+        environment["variables"].pop(key, None)
     for key in ("DATA_BUCKET", "PLAN_ID", "PLAN_DIGEST", "D1_DB_ID", "SITE_URL"):
         if not environment["variables"].get(key):
             raise ValueError(f"reviewed job template lacks {key}")
@@ -40,6 +44,8 @@ def reviewed_job_spec(
         command.extend(["-x", run])
     for bucket in buckets:
         command.extend(["-b", bucket])
+    if min_soft_delete_days is not None:
+        command.extend(["-s", str(min_soft_delete_days)])
     if for_real:
         command.append("--for-real")
     command.append(source)

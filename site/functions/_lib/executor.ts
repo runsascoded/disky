@@ -15,7 +15,7 @@
  * scan is reused when there is one, else the run builds its own manifest.
  */
 import type { D1Database } from '@cloudflare/workers-types'
-import { type DispatchErr, type DispatchReq, type ExecEnv, type Executor, refuse } from './dispatch.js'
+import { type DispatchErr, type DispatchReq, type ExecEnv, type Executor, type Expected, refuse, sweepsOff, SWEEPS_OFF } from './dispatch.js'
 import { NotInPlan, planDigest, planRuns, realRun, type RunRow } from './plans.js'
 
 import { announceFinished, notifyPlan } from './stagedSlack.js'
@@ -54,6 +54,8 @@ export interface DispatchOk {
   actor: string
   /** `planDigest` of the item set the run acts on. */
   digest: string
+  /** What the dispatcher selected, display only. */
+  expected?: Expected
   /** Executor-specific response fields (`run`, `plan`, `region`, `buckets`). */
   extra: Record<string, unknown>
 }
@@ -72,6 +74,7 @@ export async function dispatchPlan(
   executors: Record<ExecutorKind, Executor> = EXECUTORS,
 ): Promise<DispatchResult> {
   if (!env.DB) return refuse(503, 'plans store not configured (no D1 binding)')
+  if (sweepsOff(env)) return refuse(403, SWEEPS_OFF)
   // Each executor checks its own credentials in `prepare` (the GCP ones need
   // `GCP_SA_KEY`; `laptop` needs a live drainer).
   const ex = executors[kind]
@@ -103,7 +106,7 @@ export async function dispatchPlan(
 
   const launched = await prep.launch(date, digest, reviewed)
   if ('ok' in launched) return launched
-  return { ok: true, job_id: launched.job_id, plan_id: req.planId, mode: req.mode, date, actor: req.actor, digest, extra: launched.extra }
+  return { ok: true, job_id: launched.job_id, plan_id: req.planId, mode: req.mode, date, actor: req.actor, digest, ...(req.expected ? { expected: req.expected } : {}), extra: launched.extra }
 }
 
 /** Announce a dispatch in the plan's thread (`via`: www / Slack). */
@@ -113,7 +116,7 @@ export async function notifyDispatched(env: ExecEnv, r: DispatchOk, via: string,
     run_id: r.job_id, mode: r.mode, scan: r.date, actor: r.actor, started_ts: 0, finished_ts: null,
     deleted_bytes: 0, deleted_objects: 0, skipped_gone: 0, skipped_overwritten: 0, plan_digest: r.digest,
   }
-  await notifyPlan(env, env.DB, r.plan_id, siteUrl, { run: row, phase: 'dispatched', via })
+  await notifyPlan(env, env.DB, r.plan_id, siteUrl, { run: row, phase: 'dispatched', via, expected: r.expected })
 }
 
 /** An HTTP route's JSON for a dispatch result (the shape /staged reads). */

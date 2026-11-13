@@ -62,6 +62,9 @@ AUTH_MODE = "app"                           # `app` (the app's own sign-in) | `p
 # CACHE_NS = ""                               # response-cache env tag (`_lib/edgeCache.ts`): unset = the request host,
 #                                             #   except PROD_HOST (prod's keys); set "" on a prod with no PROD_HOST
 # REPO_URL = "https://github.com/me/my-fork"  # the "Source on GitHub" link; unset = this repo
+# PEERS = '[{"label": "Other usage", "prod": "other.example.com", "dev": "dev.other.example.com", "meta": true}]'
+#                                             # sibling deployments the omnibar / site menu link (src/peers.ts): a JSON
+#                                             #   array in a TOML literal string; may list this one; unset = none
 # MARK = "gcs"                                # favicon/badge: a `public/icons/` key (gcs cw r2 s3 hf nas macos local); unset = ROOT_LABEL's initials
 
 # --- Who may see it (_lib/auth.ts) ---
@@ -69,8 +72,20 @@ BASE_SCOPE = "my"                           # the scope every viewer needs
 # PUBLIC_READ = "1"                           # any value: grant the base scope anonymously (reads open, writes closed)
 # STAFF_DOMAIN = "example.com"              # this email domain is staff: every scope; unset = no staff domain
 # VIEWER_DOMAINS = "partner.example"          # comma-separated email domains admitted with no allowlist row
-# ADMIN_EMAILS = "1"                          # any value: `admin_emails` rows get admin (the table must exist)
+# ADMIN_EMAILS = "1"                          # any value: `admin_emails` rows get admin (the table must exist), beside the staff domain
+# ADMIN_LIST = "1"                            # any value: admin is the explicit list alone (`admin_emails` rows, edited on /admin);
+                                            # staff keep every other scope. An empty or missing list = no admins (never a fallback to staff).
+                                            # Break-glass: the secret `ADMIN_BOOTSTRAP` (comma-separated emails, admins whatever the list holds)
 # GOOGLE_CLIENT_ID = "<id>.apps.googleusercontent.com"  # Google sign-in (with the secret below); unset = `/auth/google` 503s
+# OA_LOGIN_ISSUER = "https://login.oa.dev"   # "Sign in with OA" (OA's broker; with the client id + secret); one silent try before the wall; unset = no `/auth/oa`, no button, no try
+# OA_LOGIN_CLIENT_ID = "<client id at the broker>"
+# PAGES_SUBDOMAIN = "my-deployment.pages.dev"  # the project's pages.dev subdomain (its name, unless Cloudflare suffixed it): `<one label>.<it>` is a
+                                            # preview host (a PR's `pr-N`, the `dev` alias, a deployment hash), which signs in with OA's broker
+                                            # only through the preview client below, never silently; unset = no host is one
+# OA_LOGIN_PREVIEW_CLIENT_ID = "<client id>-preview"  # Pages *Preview* environment only (with its secret): the broker's preview client,
+                                            # callback `https://*.<PAGES_SUBDOMAIN>/auth/oa/callback`; unset there = no OA sign-in on preview hosts
+# AUTH_HOST_COOKIES = "1"                     # any value but "1" is off: on https, the session, nonce and Google-hint cookies are `__Host-` named
+                                            # (`__Host-oa_auth`, …). Switching it signs everyone out once (the old name's session is no longer read)
 # MAIL_FROM = "disk-tree <noreply@example.com>"  # emailed sign-in codes (with RESEND_API_KEY)
 
 # --- The index store (_lib/index.ts): any S3-compatible endpoint ---
@@ -107,14 +122,18 @@ ROOT_LABEL = "my buckets"                   # the store root's crumb label
 # DUPS = "1"                                  # the duplicate-candidate report: `/api/dups` + the `/dups` page, over the `dups` scan step's `dups.{json,parquet}` beside each scan's index
 # EXECUTOR = "plan-sweep"                     # `plan-sweep` (default) | `sweep`
 # JOB_SA = "<job>@<project>.iam.gserviceaccount.com"  # the service account dispatched Batch jobs run as (with GCP_SA_KEY)
+# DIGEST_CHANNEL = "C0123456789"               # the Slack digest's channel: /admin/slack's re-apply default (/api/digest-reapply)
+# DIGEST_REAPPLY = '{"template":"…","config":"job/digest.yml","root":"snapshots/…","env_script":"job/…-env.sh","r2_bucket":"…","secrets":{"SITE_TOKEN":"…"}}'  # `/admin/slack`'s re-apply job; unset: it answers 503
 # GCP_PROJECT = "my-project"                  # the GCP project the Batch jobs, secrets and logs live in; unset = GCP_SA_KEY's project_id
+# SCAN_SUBMIT_JOB = "projects/my-project/locations/us-east1/jobs/my-scan-submit"  # /scans' "Run a scan" (admins): runs this Cloud Run job (a `BatchSubmitCron`'s submitter) as GCP_SA_KEY with DT_TRIGGER=manual; unset: no button, the route answers 503
+# SWEEP_DISPATCH = "0"                        # no sweep or undo dispatch from this env whatever its GCP_SA_KEY (a dev stack on prod data that holds the key for "Run a scan"); unset = dispatch as configured
 # META_TREE_URL = "https://other.example/meta"  # /scans links each scan output to its dir in the `/meta` store tree (the deployments' own data bucket); unset = no tree links
 # GCP_LOG_VIEW = "projects/my-project/locations/global/buckets/_Default/views/sweep-task-logs"  # IaC-managed task-log-only view; grant the site view-scoped logging.viewAccessor
-# BATCH_REGION = "us-central1"                 # the default Batch region (the default)
+# BATCH_REGION = "us-east1"                    # the deployment's Batch region, beside its data bucket (no default): `plan-sweep` needs it; `sweep` when a cut isn't in one BUCKET_REGIONS region
 # BUCKET_REGIONS = '{"my-bucket": "us-east1"}'  # a one-region bucket cut runs its job there, beside the data; unset = BATCH_REGION
 # DATA_BUCKET = "my-data"                      # the bucket a run's plan.json, manifest and logs land in (dispatch requires it)
 # SWEEP_IMAGE = "<region>-docker.pkg.dev/<project>/<repo>/<image>:<tag>"  # the executor's image (dispatch requires it)
-# SWEEP_REVIEW_STORE = "r2://<index-bucket>"  # historical review inputs after per-scan retirement
+# SWEEP_REVIEW_STORE = "r2://<index-bucket>"  # historical review inputs after per-scan retirement (`sweep`: the `as_of` hold store; unset = gs://$DATA_BUCKET)
 # SWEEP_REVIEW_SECRETS = '{"R2_ENDPOINT":"<endpoint-secret>","R2_ACCESS_KEY_ID":"<key-secret>","R2_SECRET_ACCESS_KEY":"<secret-secret>"}'
 # SWEEP_PACING = "guided"                    # per-bucket feedback; adaptive is a faster probe, enable after a controlled benchmark
 # CF_ACCOUNT_ID = "<cf-account-id>"            # `sweep`: the Cloudflare account its runs are recorded to (D1)
@@ -123,6 +142,7 @@ ROOT_LABEL = "my buckets"                   # the store root's crumb label
 # SWEEP_S3_ENDPOINT = "https://s3.example.com"  # `plan-sweep`: the S3 endpoint its runs delete through
 # DISKY_LABELS = "app=disky,deployment=<name>"  # cost-attribution labels on the executor jobs' VMs + disks (each adds `component`); unset = none
 # SLACK_ADMIN_CHANNEL = "C0123456789"          # channel id staged-plan threads post to (with SLACK_BOT_TOKEN); unset = no Slack
+# STAGED_CARD_GRANT = "<grant id>"             # the job grant whose post-scan `staged-card` step re-renders the staged card; prod's env only, never a dev stack sharing its channel; unset = no such route
 
 # --- Link previews (specs/done/dogi.md) ---
 # --- Name search: the static name index on INDEX_R2; private viewer gate ---
@@ -143,6 +163,7 @@ ROOT_LABEL = "my buckets"                   # the store root's crumb label
 # INTERVAL_STORE_PREFIX = "history/meta/interval-store"  # independent history namespace; defaults to interval-store
 # AGE_STORE_PREFIX = "history/meta-age"    # verified age-cell history under <prefix>/interval-store; uncovered scans keep per-scan readers
 # INTERVAL_STORE_REV = "2"                  # with PATH_STORE: bump when the generation's files are rewritten in place (re-keys the caches)
+# ZSTD_WASM = "1"                       # parquet pages decode in zstd's own wasm decoder rather than `fzstd` (`_lib/zstd.ts`): about half the CPU of a cold read, 4 MiB of isolate memory (specs/latency-observability.md)
 # DIFF_DESCENT = "1"                     # with PATH_STORE: Δ-mode diffs (`dm=delta`, unscoped) by lazy descent over the interval store (`_lib/diffDescent.ts`; its planner hands busy, broad paths to the as-of walk); no index beyond the store's
 # OWNER_HISTORY_BATCH = "1"                # prototype (specs/root-owner-history.md; off): a fleet-root owner series from one bounded interval-store version read, the canonical per-scan reader as fallback
 # FOOTER_CACHE_MAX_ROWS = "1000000"        # the footer LRU's budget (`_lib/footerCache.ts`, specs/done/footer-lru.md): the most `index_row_groups` rows its hot entries keep; evicted by `POST /api/footer-cache` / `dt-cloud footer-evict`. Default 1,000,000
@@ -168,7 +189,10 @@ ROOT_LABEL = "my buckets"                   # the store root's crumb label
 # Secrets — `wrangler pages secret put`, never in this file:
 # secret SESSION_SECRET                     required wherever anyone signs in: signs session cookies and card URLs
 # secret GOOGLE_CLIENT_SECRET               Google sign-in (with GOOGLE_CLIENT_ID)
+# secret OA_LOGIN_CLIENT_SECRET             "Sign in with OA" (with OA_LOGIN_ISSUER + OA_LOGIN_CLIENT_ID)
+# secret OA_LOGIN_PREVIEW_CLIENT_SECRET     the preview client's (with OA_LOGIN_PREVIEW_CLIENT_ID): Preview environment only (`--env preview`)
 # secret RESEND_API_KEY                     emailed sign-in codes (with MAIL_FROM)
+# secret ADMIN_BOOTSTRAP                    with ADMIN_LIST: break-glass admin emails (a secret, so no address is tracked)
 # secret STORE_ACCESS_KEY_ID                the index store's key pair (read-only is enough)
 # secret STORE_SECRET_ACCESS_KEY
 # secret GCS_HMAC_KEY_ID                    GCS stores only (STORE_ENDPOINT unset): an HMAC key pair
@@ -184,3 +208,4 @@ ROOT_LABEL = "my buckets"                   # the store root's crumb label
 # dev DEV_EMAIL                             local dev only (`.dev.vars`): the identity localhost acts as
 # overlay STORE_KEY                         set by STORES_JSON's per-store overlay, never directly
 # overlay STORE_SCOPE
+# overlay STORE_SERIES_SCOPE

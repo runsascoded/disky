@@ -2,6 +2,7 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
+from google.api_core.exceptions import BadRequest
 
 from dt_cloud.sweep_recovery import recovery_sample
 
@@ -20,3 +21,20 @@ def test_bounded_read_only_soft_deleted_sample():
 def test_invalid_requests_never_reach_storage(prefix, limit):
     with pytest.raises(ValueError):
         recovery_sample(prefix, limit, client=object())
+
+
+def refusing(message: str) -> SimpleNamespace:
+    def listing(bucket, **kwargs):
+        raise BadRequest(message)
+    return SimpleNamespace(list_blobs=listing)
+
+
+def test_a_bucket_with_soft_delete_off_says_so():
+    result = recovery_sample("gs://b/a/", client=refusing("Soft delete policy is required"))
+    assert result == {"prefix": "gs://b/a/", "limit": 1, "samples": [], "complete_inventory": False, "soft_delete_off": True}
+
+
+def test_any_other_bad_request_still_raises():
+    with pytest.raises(BadRequest) as raised:
+        recovery_sample("gs://b/a/", client=refusing("Invalid argument"))
+    assert raised.value.message == "Invalid argument"

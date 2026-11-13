@@ -4,6 +4,7 @@ import type { Env } from '../_lib/auth'
 import { sqliteD1 } from '../_lib/testD1'
 import { ownerIdFor, resolveUser } from '../_lib/me'
 import { CACHE_V } from '../_lib/edgeCache'
+import { WALK_V } from '../_lib/view'
 
 // `me` resolution (`_lib/me.ts`) and its cache keys: a `lens=user:me` read
 // must key the shared edge cache on the caller's resolved id — the same key
@@ -88,7 +89,7 @@ describe('D1', () => {
       expect([r.status, r.headers.get('cache-control'), await r.json()]).toEqual([200, 'private, no-store', {
         email: 'alan@example.test',
         user: 'alan-turing',
-        scopes: ['gcs', 'cw', 'admin', 'requests', 'gcs:assign'],
+        scopes: ['gcs', 'cw', 'admin', 'gcs:assign'],
         admin: true,
         via: 'session',
       }])
@@ -111,14 +112,14 @@ describe('D1', () => {
       const alan = await envAs('alan@example.test')
       await diff(at(alan, `${D}&lens=user:me`))
       await diff(at(alan, `${D}&lens=user:alan-turing`))
-      const key = `https://diff.cache/v${CACHE_V}/2026-09-01/2026-10-01/marin-a?w=1280&h=896&a=12&t=2&n=500&l=user:alan-turing&o=&cl=&qs=&q=&head=0&s=0&D=&g=g1&st=`
+      const key = `https://diff.cache/v${CACHE_V}/2026-09-01/2026-10-01/marin-a?w=1280&h=896&a=12&t=2&n=500&l=user:alan-turing&o=&cl=&qs=&q=&head=0&s=0&D=&g=g1&st=&wv=${WALK_V}`
       expect(keys).toEqual([key, key])
     })
     it('/api/series', async () => {
       const alan = await envAs('alan@example.test')
       await series(at(alan, `${T}&lens=user:me`))
       await series(at(alan, `${T}&lens=user:alan-turing`))
-      const key = `https://series.cache/v${CACHE_V}/marin-a?P=&l=user:alan-turing&o=&cl=&s=&qs=&q=&st=&d=2026-10-01&x=&head=0&g=g1&oh=0`
+      const key = `https://series.cache/v${CACHE_V}/marin-a?P=&l=user:alan-turing&o=&cl=&s=&qs=&q=&st=&d=2026-10-01&x=&head=0&g=g1&ch=`
       expect(keys).toEqual([key, key])
     })
     it('`me` with nobody to resolve (an identity-less cache warm) is a 400, never a cache read', async () => {

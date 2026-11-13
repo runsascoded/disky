@@ -1,8 +1,8 @@
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
-import { apiError } from './filterCaps'
-import { LoadFailure, mapSlot } from './LoadFailure'
+import { apiError, filterBoxError } from './filterCaps'
+import { LevelFailure, LoadFailure, mapSlot } from './LoadFailure'
 
 // A failed map, diff or series load, stated inline (`LoadFailure`), and the map slot's precedence (`mapSlot`): the
 // gcs incident (2026-10-09) was a 500 on every heavy literal, drawn as a held gray map under "loading view…" for
@@ -12,6 +12,45 @@ const INCIDENT = 'subtree failed: static names: static-names/2026-10-08c/deltas/
 const render = (err: unknown, what = 'view', as?: 'p' | 'span', className?: string) =>
   renderToStaticMarkup(createElement(LoadFailure, { err, what, onRetry: () => {}, ...(as ? { as } : {}), ...(className ? { className } : {}) }))
 const RETRY = '<button type="button" class="linkish">retry</button>'
+
+// A path-restricted link's refusals, with the bodies the routes answer them with (`functions/api/restrictedFilter.test.ts`
+// pins the same ones; a test here can't import a Function, `tsc -b` would take in its Workers types): the reason, no
+// status or JSON, no retry. What `App.tsx` draws in the map's slot (`viewErr`), the diff's line and the chart's.
+describe('a path-restricted link\'s refused search or scope', () => {
+  const SEARCH = '<p class="loading filter-refused" role="status">search isn’t available on this link</p>'
+  const SCOPE = '<p class="loading filter-refused" role="status">this owner, class or user view isn’t available here on this link</p>'
+  const restrictedSearch = apiError(403, '{"error":"search isn’t available on this link","code":"restricted-search"}\n')
+  const restrictedScope = apiError(403, '{"error":"this owner, class or user view isn’t available here on this link","code":"restricted-scope"}\n')
+  const blocked = apiError(403, '{"error":"forbidden for a path-restricted link"}\n')
+
+  it('in the map\'s slot', () => {
+    expect([render(restrictedSearch), render(restrictedScope)]).toEqual([SEARCH, SCOPE])
+  })
+  it('in the diff\'s line, and at a drilled level', () => {
+    const err = restrictedSearch
+    expect([
+      render(err, 'diff 10/8 → 10/9', 'span', 'tab-note'),
+      renderToStaticMarkup(createElement(LevelFailure, { path: 'a/b', err, onRetry: () => {} })),
+    ]).toEqual([
+      '<span class="tab-note filter-refused" role="status">search isn’t available on this link</span>',
+      '<p class="level-failed filter-refused" role="status"><code>a/b</code>: search isn’t available on this link</p>',
+    ])
+  })
+  it('the search refusal is also the filter box\'s note; a scope refusal, with no filter to blame, isn\'t', () => {
+    expect([filterBoxError(restrictedSearch), filterBoxError(restrictedScope)]).toEqual(['search isn’t available on this link', undefined])
+  })
+  it('a route it can\'t use at all stays a plain 403', () => {
+    expect([render(blocked), filterBoxError(blocked)]).toEqual(['<p class="loading load-failed" role="alert">view failed: 403: {&quot;error&quot;:&quot;forbidden for a path-restricted link&quot;}\n</p>', undefined])
+  })
+  it('the box\'s other server errors, as they were', () => {
+    expect([
+      filterBoxError(apiError(400, JSON.stringify({ error: 'bad regex', code: 'invalid-regex' }))),
+      filterBoxError(apiError(400, 'plain')),
+      filterBoxError(apiError(500, 'boom')),
+      filterBoxError(undefined),
+    ]).toEqual(['bad regex', undefined, undefined, undefined])
+  })
+})
 
 describe('LoadFailure', () => {
   it('the incident\'s 500: what failed, the server\'s message (its first 120 characters), a retry', () => {
@@ -58,5 +97,37 @@ describe('mapSlot: the asked-for view\'s failure outranks a held tree', () => {
       mapSlot(null, held, err), mapSlot(null, null, err),
       mapSlot(null, held, null), mapSlot(null, null, null),
     ]).toEqual(['map', 'map', 'failed', 'failed', 'held', 'skeleton'])
+  })
+})
+
+describe('LevelFailure: a level of the drilled path that didn\'t load', () => {
+  const level = (err: unknown, shown: string | null = 'bk/a') =>
+    renderToStaticMarkup(createElement(LevelFailure, { path: 'bk/a/b', err, onRetry: () => {}, ...(shown ? { shown } : {}) }))
+
+  it('a 5xx or no response: which level, the server\'s message, what the map shows instead, a retry', () => {
+    expect([level(apiError(500, 'subtree failed: boom')), level(new TypeError('Failed to fetch'))]).toEqual([
+      `<p class="level-failed load-failed" role="alert">couldn’t load <code>bk/a/b</code>: 500: subtree failed: boom · showing <code>bk/a</code> ${RETRY}</p>`,
+      `<p class="level-failed load-failed" role="alert">couldn’t load <code>bk/a/b</code>: Failed to fetch · showing <code>bk/a</code> ${RETRY}</p>`,
+    ])
+  })
+
+  it('a path the scan doesn\'t hold (404) reads as that: no retry, the same request answers the same', () => {
+    expect(level(apiError(404, 'path not found'))).toEqual(
+      '<p class="level-failed" role="status"><code>bk/a/b</code> isn’t in this scan · showing <code>bk/a</code></p>',
+    )
+  })
+
+  it('any other 4xx keeps its message and offers no retry; a filter refusal keeps its reason', () => {
+    const refused = JSON.stringify({ error: 'This term is too common to search below the root.', code: 'term-too-common' })
+    expect([level(apiError(413, 'view too wide')), level(apiError(400, refused))]).toEqual([
+      '<p class="level-failed load-failed" role="alert">couldn’t load <code>bk/a/b</code>: 413: view too wide · showing <code>bk/a</code></p>',
+      '<p class="level-failed filter-refused" role="status"><code>bk/a/b</code>: This term is too common to search below the root. · showing <code>bk/a</code></p>',
+    ])
+  })
+
+  it('in the map\'s place (all it has is the failed level\'s own node, empty): nothing is named as shown', () => {
+    expect(level(apiError(503, 'index backend unavailable'), null)).toEqual(
+      `<p class="level-failed load-failed" role="alert">couldn’t load <code>bk/a/b</code>: 503: index backend unavailable ${RETRY}</p>`,
+    )
   })
 })

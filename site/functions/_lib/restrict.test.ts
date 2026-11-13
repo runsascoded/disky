@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import type { Env, Identity } from './auth'
 import { gateFor } from './auth'
 import { shareKeyGrant } from './og/tokens'
-import { blockedForRestricted, dataAllowed, filterJson, hideScope, isHidden, restrictDiff, restrictGate, restrictionFor, restrictSubtree, restrictTree } from './restrict'
+import { blockedForRestricted, dataAllowed, filterJson, hideScope, isHidden, restrictDiff, restrictGate, restrictionAnyStore, restrictionFor, restrictSubtree, restrictTree } from './restrict'
 import { storeEnv } from './stores'
 import { sqliteD1 } from './testD1'
 import type { ViewNode } from './view'
@@ -42,6 +42,17 @@ describe('restrictionFor', () => {
   })
 })
 
+describe('restrictionAnyStore', () => {
+  it('a grant’s hide prefixes on every store, as one restriction; none for an unrestricted grant or an email session', () => {
+    expect([
+      restrictionAnyStore(id('grant', ['laptop', hideScope('laptop', HIDE), 'nas:hide:mnt/user/backups', `nas:hide:/${encodeURI(HIDE)}/`])),
+      restrictionAnyStore(id('grant', ['laptop', 'laptop:read'])),
+      restrictionAnyStore(id('session', ['laptop', 'nas:hide:mnt/user/backups'])),
+      restrictionAnyStore(null),
+    ]).toEqual([{ hide: [HIDE, 'mnt/user/backups'] }, null, null, null])
+  })
+})
+
 describe('isHidden', () => {
   const r = { hide: [HIDE] }
   it('strictly below a hidden dir only: the dir itself, siblings and name-prefix lookalikes stay visible', () => {
@@ -75,23 +86,9 @@ describe('restrictTree / restrictSubtree / restrictDiff', () => {
     const ryan: ViewNode = { n: 'ryan', k: 'dir', b: 160, o: 5, c: [TREE] }
     expect(restrictTree(ryan, 'Users/ryan', r).c![0].c![0]).toEqual({ n: '2025 tax returns', k: 'dir', b: 100, o: 3 })
   })
-  it('search fields drop hidden paths', () => {
-    const body = {
-      path: 'Users/ryan/Downloads', tree: TREE, q: 'pdf',
-      matches: [`${HIDE}/1040.pdf`, 'Users/ryan/Downloads/notes.txt'],
-      matched: [{ path: `${HIDE}/1040.pdf`, b: 60, o: 1 }, { path: 'Users/ryan/Downloads/notes.txt', b: 10, o: 1 }],
-      excluded: [`${HIDE}/W2.pdf`],
-    }
-    const out = restrictSubtree(body, r)
-    expect([out.matches, out.matched, out.excluded]).toEqual([
-      ['Users/ryan/Downloads/notes.txt'],
-      [{ path: 'Users/ryan/Downloads/notes.txt', b: 10, o: 1 }],
-      [],
-    ])
-  })
-  it('search totals that count hidden hits (`matchCount`) are dropped; the rest of the body is kept as is', () => {
-    const body = { path: 'Users/ryan/Downloads', tree: TREE, q: 'pdf', matches: [], matched: [], matchCount: { n: 3, b: 70, o: 3 }, firstPaint: true }
-    expect(restrictSubtree(body, r)).toEqual({ path: 'Users/ryan/Downloads', tree: restrictTree(TREE, 'Users/ryan/Downloads', r), q: 'pdf', matches: [], matched: [], firstPaint: true })
+  it('only the tree is filtered: a name filter is refused before any body (`api/restrictedFilter.test.ts`), so nothing here filters search fields', () => {
+    const body = { path: 'Users/ryan/Downloads', tree: TREE, firstPaint: true, matches: ['kept'], matchCount: { n: 3, b: 70, o: 3 } }
+    expect(restrictSubtree(body, r)).toEqual({ ...body, tree: restrictTree(TREE, 'Users/ryan/Downloads', r) })
   })
   it('diff rows are relative to the diff’s path', () => {
     const rows = [
@@ -121,6 +118,9 @@ describe('blockedForRestricted', () => {
       false, false, false, false,
       false, false, false, false, false, false,
     ])
+  })
+  it('blocks the digest’s image (it draws a diff of whatever path its caller names); its text and settings name no path', () => {
+    expect(['/api/digest-image', '/api/digest-op', '/api/digest-settings', '/api/digest-images'].map(blockedForRestricted)).toEqual([true, false, false, false])
   })
   it('raw-bytes and D1-list routes, by path segment', () => {
     expect([
@@ -179,6 +179,15 @@ describe('D1', () => {
       }))
       expect(got).toEqual(urls.map(() => [403, '{"error":"forbidden for a path-restricted link"}\n']))
       expect(await Promise.all(urls.map(u => restrictGate(bearer(u, open.key), open.env)))).toEqual(urls.map(() => null))
+    })
+    it('the digest’s image is refused to a restricted link (its `diff` would draw a hidden path’s children), and to it alone', async () => {
+      const restricted = await linkEnv(scopes)
+      const open = await linkEnv(['laptop'])
+      const post = (key: string) => bearer('/api/digest-image', key, { method: 'POST', body: JSON.stringify({ diff: { from: '2026-10-08', to: '2026-10-09', path: HIDE, title: 't' } }) })
+      const refused = await restrictGate(post(restricted.key), restricted.env)
+      expect([refused && [refused.status, await refused.text()], await restrictGate(post(open.key), open.env)]).toEqual([
+        [403, '{"error":"forbidden for a path-restricted link"}\n'], null,
+      ])
     })
     it('`/data`: a restricted link is refused lifecycle.json and other snapshot files, before any store read', async () => {
       const { env, key } = await linkEnv(scopes)

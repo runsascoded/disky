@@ -4,6 +4,9 @@
 // Batch executor consumes. D1 CRUD + snapshot + the admin-edit audit trail
 // live here; the HTTP surface is api/plans/[[path]].ts.
 import type { D1Database } from "@cloudflare/workers-types"
+import type { RunOutcome } from "../../src/runs.js"
+import type { ScanDeletion } from "../../src/stagedScan.js"
+import { addBatchDeletion, type BatchDeletion } from "../../src/batchDeletion.js"
 
 // A plan prefix stored as `<scheme><bucket>/<path>/` (the deployment's
 // `STORE_SCHEME`: `s3://`, `gs://`, `file:///`); normalized to a relative key
@@ -331,16 +334,24 @@ export interface EmptiedBatch extends StageBatchRow {
   unstaged: number
   /** Taken out by the real run that deleted them (`unstageDeleted`). */
   deleted: number
+  deletion?: BatchDeletion
 }
+
+interface CompletionBand { run_id: string; prefix: string; bytes: number; objects: number }
 
 /** The plan's emptied stage batches, by replaying its `plan_items` audit trail
  * (pure): who held each prefix, and which gesture took it away. */
-export function emptiedBatches(batches: readonly StageBatchRow[], items: readonly PlanItemRow[], edits: readonly PlanEdit[]): EmptiedBatch[] {
+export function emptiedBatches(batches: readonly StageBatchRow[], items: readonly PlanItemRow[], edits: readonly PlanEdit[], bands: readonly CompletionBand[] = []): EmptiedBatch[] {
   const live = new Set(items.map(i => i.batch_id))
+  const completionBands = new Map<string, Map<string, CompletionBand>>()
+  for (const band of bands) {
+    if (!completionBands.has(band.run_id)) completionBands.set(band.run_id, new Map())
+    completionBands.get(band.run_id)!.set(band.prefix, band)
+  }
   const parse = (s: string | null): Record<string, unknown> => { try { return (s ? JSON.parse(s) : {}) as Record<string, unknown> } catch { return {} } }
   const strs = (v: unknown): string[] => Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : []
   const owner = new Map<string, number | null>()
-  const fate = new Map<number, { prefixes: Set<string>; staged: number; covered: number; absorbed: Map<number, number>; unstaged: number; deleted: number }>()
+  const fate = new Map<number, { prefixes: Set<string>; staged: number; covered: number; absorbed: Map<number, number>; unstaged: number; deleted: number; deletion?: BatchDeletion }>()
   const of = (b: number) => { let f = fate.get(b); if (!f) fate.set(b, f = { prefixes: new Set(), staged: 0, covered: 0, absorbed: new Map(), unstaged: 0, deleted: 0 }); return f }
   for (const e of edits) {
     const o = parse(e.old_json)
@@ -371,6 +382,7 @@ export function emptiedBatches(batches: readonly StageBatchRow[], items: readonl
         const t = of(into)
         for (const p of f.prefixes) t.prefixes.add(p)
         t.staged += f.staged; t.covered += f.covered; t.unstaged += f.unstaged; t.deleted += f.deleted
+        t.deletion = addBatchDeletion(t.deletion, f.deletion)
         for (const [k, v] of f.absorbed) t.absorbed.set(k, (t.absorbed.get(k) ?? 0) + v)
         fate.delete(b)
       }
@@ -386,14 +398,21 @@ export function emptiedBatches(batches: readonly StageBatchRow[], items: readonl
       const byRun = typeof o.deleted_by === 'string'
       for (const p of strs(o.prefixes)) {
         const was = owner.get(p)
-        if (was != null) { if (byRun) of(was).deleted++; else of(was).unstaged++ }
+        if (was != null) {
+          const f = of(was)
+          if (byRun) {
+            f.deleted++
+            const band = completionBands.get(String(o.deleted_by))?.get(p)
+            if (band) f.deletion = addBatchDeletion(f.deletion, { bytes: band.bytes, objects: band.objects, prefixes: 1 })
+          } else f.unstaged++
+        }
         owner.delete(p)
       }
     }
   }
   return batches.filter(b => !live.has(b.id)).map(b => {
     const f = of(b.id)
-    return { ...b, prefixes: [...f.prefixes].sort(), staged: f.staged, covered: f.covered, absorbed: [...f.absorbed].map(([into, n]) => ({ into, n })).sort((x, y) => x.into - y.into), unstaged: f.unstaged, deleted: f.deleted }
+    return { ...b, prefixes: [...f.prefixes].sort(), staged: f.staged, covered: f.covered, absorbed: [...f.absorbed].map(([into, n]) => ({ into, n })).sort((x, y) => x.into - y.into), unstaged: f.unstaged, deleted: f.deleted, ...(f.deletion ? { deletion: f.deletion } : {}) }
   })
 }
 
@@ -420,8 +439,13 @@ export async function planDetail(db: D1Database, id: number, staging: boolean): 
   const editsQ = staging
     ? db.prepare("SELECT action, old_json, new_json FROM admin_edits WHERE tbl = 'plan_items' AND pk = ? ORDER BY id").bind(String(id)).all<PlanEdit>()
     : Promise.resolve({ results: [] as PlanEdit[] })
-  const [items, batches, runs, edits] = await Promise.all([itemsQ, batchesQ, runsQ, editsQ])
-  return { plan, items: items.results, batches: batches.results, emptied: emptiedBatches(batches.results, items.results, edits.results), runs: runs.results }
+  const bandsQ = staging
+    ? db.prepare(`SELECT b.run_id, b.prefix, b.bytes, b.objects FROM deletion_bands b
+        JOIN deletion_runs r ON r.run_id = b.run_id
+        WHERE r.plan_id = ? AND r.mode = 'real' AND r.finished_ts IS NOT NULL`).bind(id).all<CompletionBand>()
+    : Promise.resolve({ results: [] as CompletionBand[] })
+  const [items, batches, runs, edits, bands] = await Promise.all([itemsQ, batchesQ, runsQ, editsQ, bandsQ])
+  return { plan, items: items.results, batches: batches.results, emptied: emptiedBatches(batches.results, items.results, edits.results, bands.results), runs: runs.results }
 }
 
 /** One run's D1 record and its per-band rows (largest first) — the run detail
@@ -431,6 +455,26 @@ export async function runDetail(db: D1Database, runId: string): Promise<{ run: R
   if (!run) return null
   const bands = await db.prepare('SELECT prefix, bytes, objects, gone, overwritten, drift_new_objects, undone_objects FROM deletion_bands WHERE run_id = ? ORDER BY bytes DESC, prefix').bind(runId).all<Record<string, unknown>>()
   return { run, bands: bands.results }
+}
+
+/** What real runs on exactly `scan` recorded on each prefix, band by band, not undone: what `scan`'s sizes are out of date by
+ *  (`withoutDeleted`, which can take an item out of `/staged`'s selection, so this errs toward counting nothing).
+ *  A band's amounts count only from a run that ended with a result: finished, with a non-empty `plan_digest`. A reflection
+ *  writes the digest once Batch says the job SUCCEEDED (`sweepReflect`; `runReflect` also wants every delete answered) and `''`
+ *  on any other end; a run by hand has none (NULL), and nothing says how it ended. An executor that recorded an unanswered
+ *  delete (`failed_dirs`), a bucket's error or a stop exits nonzero after writing its bands, so its job is FAILED and its
+ *  digest `''`. That end is all D1 has of it: a band carries no failed count (`record_bands` drops the summary's). Its
+ *  `objects` never include an unanswered delete, but such a run is not counted at all.
+ *  Any other real run's band comes back with its prefix and no amounts: how much of the prefix that run deleted isn't known,
+ *  so a counted run's band beside it (a resume that deleted only the rest) states no remainder either. */
+export async function scanDeletions(db: D1Database, scan: string): Promise<ScanDeletion[]> {
+  const { results } = await db.prepare(`
+    SELECT b.prefix, b.bytes, b.objects, b.gone, (r.finished_ts IS NOT NULL AND COALESCE(r.plan_digest, '') != '') AS counted
+    FROM deletion_bands b JOIN deletion_runs r ON r.run_id = b.run_id
+    WHERE r.scan = ? AND r.mode = 'real' AND COALESCE(b.undone_objects, 0) = 0
+    ORDER BY b.prefix, r.run_id
+  `).bind(scan).all<ScanDeletion & { counted: number }>()
+  return results.map(({ counted, ...band }) => counted ? band : { prefix: band.prefix, bytes: 0, objects: 0, gone: 0 })
 }
 
 /** The shared open plan trash gestures land in (the newest open one), or null. */
@@ -653,28 +697,13 @@ export interface RunRow {
   skipped_overwritten: number
   plan_digest: string | null
   undo_deadline?: number | null
+  /** `none`, or what an undo has restored of it: `partial`, `full` (`sweep_exec.UndoRecord`). */
+  undo_state?: string
+  /** The narrowest retention measured on its buckets. 0: no undo (`runHasNoUndo`). */
+  soft_delete_days?: number | null
+  /** The minimum it ran under. */
+  min_soft_delete_days?: number | null
   log_dir?: string | null
-}
-
-export type Gate =
-  | { ok: true; dry: RunRow }
-  | { ok: false; reason: string }
-
-/** May the item set with digest `digest` (`items` prefixes) be really deleted
- * now? Yes only after a *finished* dry-run of exactly this set, and with no
- * run of the plan in flight. `runs` are the plan's, any order. A run with no
- * digest (NULL: from before digests, or not yet reflected) or the empty one
- * (it ended without a result) never opens the gate. */
-export function realGate(runs: readonly RunRow[], digest: string, items: number): Gate {
-  if (!items) return { ok: false, reason: "the plan is empty" }
-  const live = runs.find(r => r.finished_ts == null)
-  if (live) return { ok: false, reason: `a ${live.mode} run is in progress (${live.run_id})` }
-  const dry = [...runs].filter(r => r.mode === "dry" && !!r.plan_digest && r.plan_digest === digest).sort((a, b) => b.started_ts - a.started_ts)[0]
-  if (!dry) {
-    const any = runs.some(r => r.mode === "dry")
-    return { ok: false, reason: any ? "the plan changed since the last dry-run; dry-run it again" : "no dry-run of this plan yet" }
-  }
-  return { ok: true, dry }
 }
 
 export type RealRun =
@@ -684,8 +713,9 @@ export type RealRun =
 /** How a real run of the item set `digest` (`items` of them) at scan `date` goes (specs/done/delete-what-you-see.md): never
  * while a run of the plan is in flight; no prior dry run required — the run's own manifest (each item held to its
  * staging scan, generation-pinned deletes) is the safety. `reviewed`: the newest finished dry run of exactly this set
- * at that scan, whose manifest the run may reuse (none: the run lists afresh). `date` absent: that dry run's scan,
- * and one is then required. */
+ * at that scan, whose decisions the run may reuse (none: the run builds its own manifest and, on gcs, deletes that
+ * manifest's generations with no relist, so it has no whole-dir drift skip; a key written beside a manifest key survives
+ * because only named generations are deleted). `date` absent: that dry run's scan, and one is then required. */
 export function realRun(runs: readonly RunRow[], digest: string, items: number, date?: string): RealRun {
   if (!items) return { ok: false, reason: "nothing selected" }
   const live = runs.find(r => r.finished_ts == null)
@@ -698,8 +728,10 @@ export function realRun(runs: readonly RunRow[], digest: string, items: number, 
 }
 
 /** A run an executor's reflection just closed: `ok` = with its result
- * (totals); not ok = it ended without one (its Batch job stopped first). */
-export interface FinishedRun { run_id: string; ok: boolean }
+ * (totals); not ok = it ended without one (its Batch job stopped first), and
+ * `reason` is why, when the failed step recorded it. `outcome`: what its
+ * totals don't say, when the run's files were read and have something to add. */
+export interface FinishedRun { run_id: string; ok: boolean; reason?: string; outcome?: RunOutcome }
 
 /** A plan's runs, as the gate reads them. */
 export async function planRuns(db: D1Database, planId: number): Promise<RunRow[]> {

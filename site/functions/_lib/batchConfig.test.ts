@@ -16,13 +16,13 @@ import { sqliteD1 } from './testD1'
 
 describe('D1', () => {
   describe('batchConfig', () => {
-    it('reads every key; the project falls back to the SA key\'s, the region to the default', () => {
+    it('reads every key; the project falls back to the SA key\'s, the region to nothing', () => {
       expect(batchConfig({
         GCP_SA_KEY: JSON.stringify({ project_id: 'key-project' }), DATA_BUCKET: 'my-data', SWEEP_IMAGE: 'img:1',
         CF_ACCOUNT_ID: 'acct', SWEEP_S3_ENDPOINT: 'https://s3.example.com', BUCKET_REGIONS: '{"b1":"us-east1","b2":"europe-west4"}',
         D1_DB_ID: 'd1-id', D1_DB_NAME: 'my-db', DISKY_LABELS: 'app=disky,deployment=d',
       }, ['GCP_PROJECT', 'DATA_BUCKET'])).toEqual({
-        project: 'key-project', region: 'us-central1', bucketRegions: { b1: 'us-east1', b2: 'europe-west4' },
+        project: 'key-project', region: '', bucketRegions: { b1: 'us-east1', b2: 'europe-west4' },
         dataBucket: 'my-data', image: 'img:1', cfAccountId: 'acct', s3Endpoint: 'https://s3.example.com',
         d1DbId: 'd1-id', d1DbName: 'my-db', labels: { app: 'disky', deployment: 'd' },
       })
@@ -35,17 +35,28 @@ describe('D1', () => {
       expect(batchConfig({ GCP_PROJECT: 'p' }, ['GCP_PROJECT', 'DATA_BUCKET', 'SWEEP_IMAGE'])).toEqual({ missing: 'DATA_BUCKET' })
       expect(batchConfig({ GCP_PROJECT: 'p', DATA_BUCKET: 'd' }, ['SWEEP_IMAGE', 'CF_ACCOUNT_ID'])).toEqual({ missing: 'SWEEP_IMAGE' })
     })
-    it('a one-region cut runs there; a mixed or unmapped cut in the default; the regions to list', () => {
-      const cfg = batchConfig({ GCP_PROJECT: 'p', BUCKET_REGIONS: '{"b1":"us-east1","b2":"europe-west4","b3":"us-east1"}' }, []) as never
-      expect([batchRegionFor(cfg, ['b1']), batchRegionFor(cfg, ['b1', 'b3']), batchRegionFor(cfg, ['b1', 'b2']), batchRegionFor(cfg, ['zz'])])
-        .toEqual(['us-east1', 'us-east1', 'us-central1', 'us-central1'])
-      expect(batchRegions(cfg)).toEqual(['us-central1', 'us-east1', 'europe-west4'])
+    it('the region has no default: a route that needs it is told it is unset', () => {
+      expect(batchConfig({ GCP_PROJECT: 'p' }, ['GCP_PROJECT', 'BATCH_REGION'])).toEqual({ missing: 'BATCH_REGION' })
+      expect(batchConfig({ GCP_PROJECT: 'p', BATCH_REGION: '' }, ['GCP_PROJECT', 'BATCH_REGION', 'DATA_BUCKET'])).toEqual({ missing: 'BATCH_REGION' })
+      expect(batchConfig({ GCP_PROJECT: 'p', BATCH_REGION: 'us-east5' }, ['GCP_PROJECT', 'BATCH_REGION', 'DATA_BUCKET'])).toEqual({ missing: 'DATA_BUCKET' })
+    })
+    it('a one-region cut runs there; a mixed or unmapped cut in the deployment\'s region; the regions to list', () => {
+      const regions = '{"b1":"us-east1","b2":"europe-west4","b3":"us-east1"}'
+      const cuts = [['b1'], ['b1', 'b3'], ['b1', 'b2'], ['zz']]
+      const cfg = batchConfig({ GCP_PROJECT: 'p', BATCH_REGION: 'us-west4', BUCKET_REGIONS: regions }, []) as never
+      expect(cuts.map(c => batchRegionFor(cfg, c))).toEqual(['us-east1', 'us-east1', 'us-west4', 'us-west4'])
+      expect(batchRegions(cfg)).toEqual(['us-west4', 'us-east1', 'europe-west4'])
+      // no BATCH_REGION: a cut in no one region has nowhere to run ('', which its caller refuses), and nothing extra is listed
+      const bare = batchConfig({ GCP_PROJECT: 'p', BUCKET_REGIONS: regions }, []) as never
+      expect(cuts.map(c => batchRegionFor(bare, c))).toEqual(['us-east1', 'us-east1', '', ''])
+      expect(batchRegions(bare)).toEqual(['us-east1', 'europe-west4'])
+      expect(batchRegions(batchConfig({ GCP_PROJECT: 'p' }, []) as never)).toEqual([])
     })
   })
 
   // Every key a route needs, set; each case drops one.
   const FULL = {
-    GCP_SA_KEY: '{}', JOB_SA: 'job@my-project.iam.gserviceaccount.com', GCP_PROJECT: 'my-project', DATA_BUCKET: 'my-data',
+    GCP_SA_KEY: '{}', JOB_SA: 'job@my-project.iam.gserviceaccount.com', GCP_PROJECT: 'my-project', BATCH_REGION: 'my-region', DATA_BUCKET: 'my-data',
     SWEEP_IMAGE: 'img:1', CF_ACCOUNT_ID: 'acct', SWEEP_S3_ENDPOINT: 'https://s3.example.com',
     D1_DB_ID: 'd1-id', D1_DB_NAME: 'my-db',
     STORE_SCHEME: 's3://', STORE_BUCKETS: 'b1,b2',
@@ -70,6 +81,12 @@ describe('D1', () => {
         pdPurge({ request: post('/api/plan-sweep/purge', { run_id: 'x' }), env: await without('GCP_PROJECT') } as never).then(answer),
         pdStop({ request: post('/api/plan-sweep/stop', { job_id: 'x' }), env: await without('GCP_PROJECT') } as never).then(answer),
         pdJobs({ request: new Request('http://localhost/api/plan-sweep/jobs'), env: await without('DATA_BUCKET') } as never).then(answer),
+        // every plan-sweep job runs, and is listed and cancelled, in the deployment's region: unset, nothing is submitted
+        pdDispatch({ request: post('/api/plan-sweep/dispatch', dispatch), env: await without('BATCH_REGION') } as never).then(answer),
+        pdUndo({ request: post('/api/plan-sweep/undo', { run_id: 'x' }), env: await without('BATCH_REGION') } as never).then(answer),
+        pdPurge({ request: post('/api/plan-sweep/purge', { run_id: 'x' }), env: await without('BATCH_REGION') } as never).then(answer),
+        pdStop({ request: post('/api/plan-sweep/stop', { job_id: 'x' }), env: await without('BATCH_REGION') } as never).then(answer),
+        pdJobs({ request: new Request('http://localhost/api/plan-sweep/jobs'), env: await without('BATCH_REGION') } as never).then(answer),
       ])).toEqual([
         [503, 'dispatch not configured (DATA_BUCKET unset)'],
         [503, 'dispatch not configured (SWEEP_S3_ENDPOINT unset)'],
@@ -78,6 +95,11 @@ describe('D1', () => {
         [503, 'purge not configured (GCP_PROJECT unset)'],
         [503, 'stop not configured (GCP_PROJECT unset)'],
         [503, 'jobs not configured (DATA_BUCKET unset)'],
+        [503, 'dispatch not configured (BATCH_REGION unset)'],
+        [503, 'undo not configured (BATCH_REGION unset)'],
+        [503, 'purge not configured (BATCH_REGION unset)'],
+        [503, 'stop not configured (BATCH_REGION unset)'],
+        [503, 'jobs not configured (BATCH_REGION unset)'],
       ])
     })
     it('sweep (the multi-bucket executor)', async () => {

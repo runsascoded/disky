@@ -137,6 +137,8 @@ def aggregate_access_leaf(
     leaf_sql: str,
     out_parquet: str,
     as_of: "str | datetime | None" = None,
+    *,
+    read_summary: bool = False,
 ) -> dict:
     """Aggregate pre-aggregated leaf rows → layer-2a parquet (same tree, same columns, + ``sampled``).
 
@@ -149,8 +151,13 @@ def aggregate_access_leaf(
 
     The caller applies its as-of cut (``as_of`` is recorded in the parquet metadata only). ``rows_in`` is the
     requests counted (Σ ``n_ops``), comparable with :func:`aggregate_access`'s rows.
+
+    ``read_summary`` is the R2 checkpoint's explicit compact format: closed windows share a per-key row; ``first_ts``
+    preserves observation bounds and ``history_before`` refuses historical cuts the summary no longer answers.
+    Recent windows retain their own rows. This format serves the read lens, not an hourly traffic series.
     """
     con.execute("SET TimeZone = 'UTC'")
+    history = ', MIN(first_ts) AS first_ts, MAX(history_before) AS history_before' if read_summary else ''
     con.execute(f"""
         CREATE OR REPLACE TABLE access_leaf AS
         SELECT
@@ -162,14 +169,14 @@ def aggregate_access_leaf(
             SUM(bytes_in)::BIGINT AS bytes_in,
             SUM(n_requesters)::BIGINT AS n_requesters,
             MAX(last_ts) AS last_ts,
-            bool_or(sampled) AS sampled
+            bool_or(sampled) AS sampled{history}
         FROM {leaf_sql}
         GROUP BY 1, 2, 3, 4
     """)
     n_ops = scalar(con, "SELECT COALESCE(SUM(n_ops), 0) FROM access_leaf")
     if n_ops == 0:
         raise ValueError("no access rows in input")
-    stats = _rollup(con, out_parquet, as_of, sampled=True)
+    stats = _rollup(con, out_parquet, as_of, sampled=True, read_summary=read_summary)
     return {'rows_in': int(n_ops), **stats}
 
 
@@ -178,11 +185,15 @@ def _rollup(
     out_parquet: str,
     as_of: "str | datetime | None",
     sampled: bool = False,
+    read_summary: bool = False,
 ) -> dict:
     """``access_leaf`` → every ancestor level → ``out_parquet``. ``sampled`` adds the boolean column (absent from
     request-log sources, whose output stays byte-identical)."""
     extra = ', sampled' if sampled else ''
     extra_agg = ', bool_or(sampled) AS sampled' if sampled else ''
+    if read_summary:
+        extra += ', first_ts, history_before'
+        extra_agg += ', MIN(first_ts) AS first_ts, MAX(history_before) AS history_before'
     # Bottom-up parent synthesis. Group current level's rows by parent path
     # (+ bucket + hour + op) to produce the next level, until nothing left.
     con.execute("CREATE OR REPLACE TABLE level_cur AS SELECT * FROM access_leaf")
@@ -257,7 +268,7 @@ def _rollup(
         UPDATE access_agg SET parent = '.' WHERE parent = '' AND path != '.'
     """)
 
-    kv = {'grain': GRAIN}
+    kv = {'grain': 'read-summary' if read_summary else GRAIN}
     if as_of is not None:
         kv['as_of'] = as_of_utc(as_of).isoformat()
     kv_sql = ', '.join(f"'{k}': '{v}'" for k, v in kv.items())

@@ -1,9 +1,4 @@
-:arrow_deg40: **+149.0 TiB** month-to-date · [dashboard](https://site.example.org/)
-
-*Weekly summaries*
-:arrow_deg0: [wk of 7/27](https://site.example.org/?d=260802-2d#over-time) — **3,010 TiB** (+10.0, 0.3%) · $19,272/mo (+$103)
-:arrow_deg30: [wk of 8/3](https://site.example.org/?d=260809-7d#over-time) — **3,100 TiB** (+90.0, 3.0%) · $20,951/mo (+$1,679)
-:arrow_deg30: [wk of 8/10](https://site.example.org/?d=260811-2d#over-time) _(partial)_ — **3,149 TiB** (+49.0, 1.6%) · $20,372/mo (−$579)
+<site OP: gcs 2026-08, 10 scans to 2026-08-11, params ->
 
 [← July](<prev-thread>)
 

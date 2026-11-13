@@ -16,12 +16,15 @@
     "test:e2e": "playwright test",
     "test:e2e:list": "playwright test --list",
     "bench": "node bench/bench.ts",
-    "bench:diff": "node bench/diff.ts"
+    "bench:diff": "node bench/diff.ts",
+    "executor:build": "esbuild executor/cli.ts --bundle --platform=node --format=esm --outfile=../tmp/executor/cli.mjs",
+    "executor:parity": "esbuild executor/parity.ts --bundle --platform=node --format=esm --packages=external --outfile=tmp/executor/parity.mjs && node tmp/executor/parity.mjs"
   },
   "dependencies": {
+    "@disk-tree/pages-kit": "workspace:*",
     "@disk-tree/react": "workspace:*",
     "@floating-ui/react": "^0.27.20",
-    "@open-athena/auth": "github:Open-Athena/auth#d87ade68aa5aa9bedb80d1833381bff4c0c0416e",
+    "@open-athena/auth": "github:Open-Athena/auth#cd858f749398a3b1a6990d590efcd0cf8238c7a9",
     "@rdub/file-tree": "https://github.com/runsascoded/file-tree#9d9bd749469aa4ae76b860ea9a403c3ab18df80b",
     "@open-athena/treemap": "workspace:*",
     "@rdub/treemap": "workspace:@open-athena/treemap@*",
@@ -37,7 +40,7 @@
     "react-dom": "^19.1.0",
     "react-icons": "^5.7.0",
     "react-router-dom": "^6.30.6",
-    "use-kbd": "https://github.com/runsascoded/use-kbd#9db5013f5e4034a14530dff37f1c015dc37c8c77",
+    "use-kbd": "https://github.com/runsascoded/use-kbd#01b12cb918f9132793d5dc686b627a333550c9d0",
     "use-prms": "https://github.com/runsascoded/use-prms#bb731063bf4202c0501e9c3d6fdada0817f699a4"
   },
   "devDependencies": {
@@ -53,7 +56,9 @@
     "typescript": "^5.8.0",
     "vite": "^7.0.0",
     "vitest": "^4.1.11",
-    "wrangler": "4.150.0"
+    "wrangler": "4.150.0",
+    "esbuild": "0.28.2",
+    "miniflare": "5.20261006.2-beta"
   },
   "pnpm": {
     "onlyBuiltDependencies": [

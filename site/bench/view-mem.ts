@@ -5,7 +5,7 @@
 //   esbuild bench/view-mem.ts --bundle --platform=node --format=esm --outfile=OUT.mjs
 //   node --expose-gc OUT.mjs --vars vars.json [--var K=V]… [--snap MB] [--out FILE] URL…
 //
-// URL: a full `https://<host>/api/subtree?…` (the host only keys caches), or `/api/diff?…`: the diff route, gated — on
+// URL: a full `https://<host>/api/subtree?…` (the host only keys caches), or `/api/diff?…` / `/api/series?…`: that route, gated — on
 // `http://localhost/…` the dev identity passes it (`auth.ts` `identify`); elsewhere `$SITE_TOKEN`, if set, as a Bearer. `--vars`: the deployment's `[vars]` as
 // JSON; `--var K=V` overrides one (`K=` drops it). Bindings from the environment, read-only:
 //   INDEX_R2  ← R2_ENDPOINT, R2_BUCKET, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY (the S3 API, SigV4)
@@ -21,6 +21,7 @@ import { readFileSync, writeFileSync } from 'node:fs'
 import { writeHeapSnapshot } from 'node:v8'
 import { warmSubtree } from '../functions/api/subtree.js'
 import { onRequestGet as diffGet } from '../functions/api/diff.js'
+import { onRequestGet as seriesGet } from '../functions/api/series.js'
 
 const err = (...a: unknown[]) => console.error(...a)
 
@@ -221,8 +222,9 @@ async function main(): Promise<void> {
     let error: string | undefined
     try {
       const waitUntil = (p: Promise<unknown>) => { pending.push(p) }
-      const res = new URL(url).pathname === '/api/diff'
-        ? await diffGet({ request: new Request(url, { headers: { 'user-agent': 'dt-cloud-probe/1', ...(process.env.SITE_TOKEN ? { authorization: `Bearer ${process.env.SITE_TOKEN}` } : {}) } }), env, waitUntil } as never)
+      const route = { '/api/diff': diffGet, '/api/series': seriesGet }[new URL(url).pathname]
+      const res = route
+        ? await route({ request: new Request(url, { headers: { 'user-agent': 'dt-cloud-probe/1', ...(process.env.SITE_TOKEN ? { authorization: `Bearer ${process.env.SITE_TOKEN}` } : {}) } }), env, waitUntil } as never)
         : await warmSubtree(env as never, url, waitUntil)
       status = res.status
       timing = res.headers.get('server-timing') ?? ''

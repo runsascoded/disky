@@ -379,6 +379,11 @@ describe('buildView on a store generation', () => {
     ] }))
   })
 
+  it('a view whose children are all under the threshold: the folder as one `(other)`, never an empty tree', async () => {
+    const v = await buildView(env, { ...base, date: V2, path: 'bk/flat', threshold: 64 * KiB, smallRows: 4096 })
+    expect([v.nodes, v.tree]).toEqual([0, node('flat', 'dir', 32767500, 8000, { c: [node('(other)', 'dir', 32767500, 8000, { f: 8000 })] })])
+  })
+
   it('ignores a coarse pointer an earlier v1 generation left on a store date', async () => {
     const want = await buildView(env, { ...base, date: V2, path: '', threshold: 32 * KiB, smallRows: 4096 })
     const v = await buildView(env, { ...base, date: V2_STALE, path: '', threshold: 32 * KiB, smallRows: 4096 })
@@ -538,7 +543,8 @@ describe('buildDiff', () => {
         row('bk/(other)', 2, 'dir', 'added', 0, 0, 0, 1),
       ],
       total_a: 700, total_b: 37229948, objects_a: 3, objects_b: 8009, threshold: 1, tier: 'path',
-      expansions: 4, truncated: false, lookups: 7, lookups_capped: false,
+      // `bk`'s five one-sided children. `nest/a` and `nest/a/b` are under a path the v1 scan has no row for: unread.
+      expansions: 4, truncated: false, lookups: 5, lookups_capped: false,
     })
   })
 

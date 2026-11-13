@@ -1,4 +1,4 @@
-# disk-tree
+# disky
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="site/public/icons/banner-dark.svg">

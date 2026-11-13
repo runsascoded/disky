@@ -14,6 +14,7 @@ import { NO_SHAPE, prefixShape, settleOpenPlan } from "../../_lib/plans.js"
 import { jobIdOf, listBatchJobs, reflectRuns, sweepJobs } from "../../_lib/runReflect.js"
 import { announceFinished, type NotifyEnv } from "../../_lib/stagedSlack.js"
 import { withPathStore } from "../../_lib/index.js"
+import { expectedOfVars } from "../../_lib/dispatch.js"
 
 type Env = AuthEnv & NotifyEnv & BatchEnv & { DB?: D1Database; STORE_SCHEME?: string; STORE_BUCKETS?: string }
 
@@ -21,7 +22,7 @@ export const onRequestGet = async (ctx: Ctx & { env: Env; waitUntil?: (p: Promis
   const gated = await requireViewer(ctx)
   if (gated instanceof Response) return gated
   if (!ctx.env.GCP_SA_KEY) return json({ jobs: [], configured: false })
-  const cfg = batchConfig(ctx.env, ["GCP_PROJECT", "DATA_BUCKET"])
+  const cfg = batchConfig(ctx.env, ["GCP_PROJECT", "BATCH_REGION", "DATA_BUCKET"])
   if ("missing" in cfg) return json({ error: notConfigured("jobs", cfg.missing) }, 503)
   const shape = prefixShape(ctx.env)
   if (!shape) return json({ error: `jobs ${NO_SHAPE}` }, 503)
@@ -53,6 +54,7 @@ export const onRequestGet = async (ctx: Ctx & { env: Env; waitUntil?: (p: Promis
     const ev = j.status?.statusEvents ?? []
     const dur = j.status?.runDuration
     const op = vars.OP === "undo" || vars.OP === "purge" ? vars.OP : "sweep"
+    const expected = expectedOfVars(vars)
     return {
       job_id: jobId,
       op,
@@ -67,6 +69,7 @@ export const onRequestGet = async (ctx: Ctx & { env: Env; waitUntil?: (p: Promis
       run: runGsPath(cfg, jobId),
       last_event: ev.length ? ev[ev.length - 1].description ?? null : null,
       logs: batchLogsUrl(cfg.project, j.uid, j.createTime),
+      ...(expected ? { expected } : {}),
     }
   })
   return json({ jobs: out, configured: true, region: cfg.region }, 200, { "cache-control": "private, max-age=10" })

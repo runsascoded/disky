@@ -1,5 +1,7 @@
 # Federated scans — portable per-location scans, a union reader, an embeddable viz
 
+On the shelf by Ryan's decision, 2026-11-08. Retain the existing implementation and design; no further federation work is selected.
+
 Status: **first shared implementation slice** (2026-10-13). Ryan confirmed project-owned scans/infra and a read-only aggregate dashboard, including Awair. The pure catalog/resolver/pin/diff model, tree/age/history adapters and reusable cutoff picker are implemented and tested on root. A development-only fixture at `/dev/federated-scans` exercises the picker three times over an unchanged treemap renderer. Live remote-source fetching, producer exports and production integration are not implemented yet. The Disky-owned daily union scan remains a migration bridge, not the target model.
 
 ## The idea

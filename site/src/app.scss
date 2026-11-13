@@ -666,6 +666,14 @@ h2 { font-size: 17px; font-weight: 650; margin: 0 0 4px; }
   p + p { margin-top: 0.6em; }
 }
 .loading { color: var(--ink-3); }
+// An action inside a sentence (a failed load's "retry", `LoadFailure.tsx`): the sentence's own type, underlined as
+// the app's other in-text actions are (the path crumbs), in the page's ink so it reads against a muted or red line.
+button.linkish {
+  background: none; border: none; padding: 0; font: inherit; color: var(--ink); cursor: pointer;
+  text-decoration: underline; text-decoration-color: var(--ink-3); text-underline-offset: 3px;
+  &:hover { text-decoration-color: var(--ink); }
+  &:focus-visible { outline: 2px solid var(--s1); outline-offset: 2px; border-radius: 2px; }
+}
 
 // Cross-site link (prod hosts are one-store-each; see App's `crossSite`).
 .crosslink {
@@ -900,6 +908,28 @@ h2 { font-size: 17px; font-weight: 650; margin: 0 0 4px; }
     // Inside the macOS app: Google sign-in goes to the default browser.
     .signin-browser { display: block; text-align: center; }
     .signin-browser + .signin-how { margin: 8px 0 18px; text-align: center; }
+    // "Sign in with OA" (OA's broker): full width above the panel, the first affordance where it's configured.
+    .signin-oa {
+      display: flex; align-items: center; justify-content: center; gap: 10px; margin-bottom: 12px;
+      .oa-mark {
+        flex: none; display: grid; place-items: center; width: 26px; height: 26px; border-radius: 5px;
+        background: #fff; color: var(--s1); font-size: 11px; font-weight: 800; letter-spacing: 0.02em;
+      }
+    }
+    // A returning visitor's: Google's "Continue as" layout (face, name over address, the mark at the end).
+    .signin-oa-account {
+      padding: 7px 8px 7px 10px;
+      .oa-account { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; }
+      .oa-avatar {
+        flex: none; width: 28px; height: 28px; border-radius: 50%; object-fit: cover;
+        display: grid; place-items: center; background: rgba(255, 255, 255, 0.25); font-size: 14px;
+      }
+      .oa-who { flex: 1; min-width: 0; display: flex; flex-direction: column; line-height: 1.25; }
+      .oa-name { font-size: 14px; }
+      .oa-email { font-size: 12px; font-weight: 400; opacity: 0.85; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    }
+    // "Use a different account" where the OA button already covers every remembered Google account.
+    .signin-other { display: block; margin: -2px 0 8px; text-align: center; font-size: 13px; color: var(--ink-3); &:hover { color: var(--ink); } }
     // <SignInPanel>: Google button (`.signin`, primary), then an emailed-code
     // form and request-access for the non-Google tail. Left-aligned inputs,
     // full-width controls, an "or" divider between the affordances.
@@ -1602,6 +1632,35 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); opacity: 1; }
 
   h1 { margin-bottom: 8px; }
 
+  .sweep-soft-delete {
+    margin-top: 24px;
+    .status { font-weight: 600; }
+    form { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+    input[type='number'] { width: 5em; }
+    .warn { color: var(--danger); font-weight: 600; }
+    .sweep-soft-delete-buckets { margin-top: 4px; td, th { padding: 2px 16px 2px 0; text-align: left; } }
+  }
+
+  .admins {
+    margin-top: 24px;
+    .admins-add { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin-top: 10px; }
+    .admins-add input[type='email'] { min-width: min(280px, 100%); }
+    .admins-add input:not([type='email']) { width: 13em; }
+    .admin-via { border-bottom: 1px dotted var(--ink-3); cursor: help; white-space: nowrap; }
+    .via-break-glass, .via-link, .via-staff-domain { color: var(--ink-2); font-style: italic; }
+    .dim { color: var(--ink-3); }
+    .err { color: var(--danger); }
+  }
+  // The admin list names nobody: said to an admin above the table, and to everyone else in place of the console.
+  .admins-notice {
+    margin: 12px 0;
+    padding: 10px 12px;
+    border: 1px solid var(--danger);
+    border-radius: 6px;
+    color: var(--danger);
+    font-weight: 600;
+  }
+
   .session-log-switch {
     margin-top: 24px;
     .status { font-weight: 600; }
@@ -1737,7 +1796,7 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); opacity: 1; }
     input { margin: 0; }
   }
 
-  // The "Hide" paths (specs/path-scopes.md): one per line, monospace like paths elsewhere.
+  // The "Hide" paths (`_lib/restrict.ts`): one per line, monospace like paths elsewhere.
   textarea.hide-paths {
     font: 12.5px var(--mono, ui-monospace, monospace); padding: 4px 7px; min-width: 22em;
     background: var(--surface); color: var(--ink); border: 1px solid var(--line); border-radius: 6px; resize: vertical;
@@ -2107,6 +2166,13 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); opacity: 1; }
   // (or clears) this slot instead of pushing the rest of the page up and down.
   min-height: 30px;
   .sel-bar { margin-left: 0; box-shadow: 0 6px 18px rgb(0 0 0 / 0.25); pointer-events: auto; }
+}
+// The app's pager strip (`Pager.tsx`), wherever a list has one; a table's own header pagers restyle it.
+.pg {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin: 6px 0; font-size: 13px; font-variant-numeric: tabular-nums;
+  > span { padding: 0 6px; color: var(--ink-2); }
+  button { font: inherit; line-height: 1.4; background: var(--panel); color: var(--ink); border: 1px solid var(--line); border-radius: 5px; padding: 0 8px; cursor: pointer; &:disabled { opacity: 0.4; cursor: default; } }
+  select.psize { margin-left: 8px; font: inherit; font-size: 12px; background: var(--panel); color: var(--ink-2); border: 1px solid var(--line); border-radius: 4px; padding: 1px 4px; }
 }
 .children-tbl .pager {
   display: flex; align-items: center; flex-wrap: wrap; gap: 4px 10px; margin: 6px 0; font-size: 12px; color: var(--ink-2);
@@ -2618,6 +2684,12 @@ a.staged-chip {
 // to decide when a deep link has landed.
 :root { --anchor-gap: 16px; }
 #tree-map, #tbl, #over-time, #diff, #mtime, #dispatch, #runs { scroll-margin-top: calc(var(--topbar-h, 48px) + var(--anchor-gap)); }
+// A level of the drilled path that didn't load (`LevelFailure`): one line over the map drawn without it.
+.level-failed {
+  margin: 0 0 -10px; font-size: 13px; color: var(--ink-2);
+  code { color: var(--ink); }
+  &.load-failed { color: var(--danger); }
+}
 .leaf-note { margin: -8px 0 4px; color: var(--ink-2); code { color: var(--ink); } }
 // Nothing drawable under the drilled node: the canvas folds away (the owner
 // panel / rollup above it stay).
@@ -2641,8 +2713,10 @@ a.staged-chip {
     .obj-dl { font-size: 12.5px; }
     .ext-link { margin-left: -6px; }
     .obj-close {
-      margin-left: auto; border: none; background: none; color: var(--ink-2);
-      font-size: 20px; line-height: 1; cursor: pointer; padding: 0 2px;
+      margin-left: auto; display: inline-flex; align-items: center; gap: 6px;
+      border: 1px solid var(--line); border-radius: 4px; background: none; color: var(--ink-2);
+      font-size: 12.5px; line-height: 1.2; min-height: 30px; cursor: pointer; padding: 4px 8px;
+      span { font-size: 18px; line-height: 1; }
       &:hover { color: var(--ink); }
     }
   }
@@ -2936,6 +3010,7 @@ kbd { font: inherit; font-size: 11px; padding: 0 4px; border: 1px solid var(--li
     &.disconnected { border-color: var(--danger); .dot { background: var(--danger); } }
     p { margin: 5px 0 0; }
   }
+  .dispatch-path { margin: 0; font-size: 13px; color: var(--danger); }
   .dispatch-btns { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
   .dispatch button, .staged-actions button, table.runs button {
     font: inherit; font-size: 13px; padding: 3px 12px; cursor: pointer;
@@ -2946,6 +3021,8 @@ kbd { font: inherit; font-size: 11px; padding: 0 4px; border: 1px solid var(--li
     &.danger { border-color: var(--danger); color: var(--danger); font-weight: 650; }
     &.danger.armed { background: var(--danger); color: #fff; }
   }
+  // A run control shown but unavailable (`RunButton`: sized at an older scan): `aria-disabled`, so its tip still opens.
+  .dispatch button[aria-disabled="true"] { opacity: 0.45; cursor: help; &:not(.danger):hover { border-color: var(--line); } }
   .close-plan button, .run-detail button.more, .runs-pg button {
     font: inherit; font-size: 13px; padding: 3px 12px; cursor: pointer;
     background: var(--panel); color: var(--ink); border: 1px solid var(--line); border-radius: 6px;
@@ -2968,11 +3045,15 @@ kbd { font: inherit; font-size: 11px; padding: 0 4px; border: 1px solid var(--li
   .stage-batch.emptied .batch-head { opacity: 0.8; }
   .batch-prefix-history { margin: 8px 0 12px 28px; padding-left: 16px; li { margin: 5px 0; overflow-wrap: anywhere; } }
   .runs-pg { flex-wrap: wrap; }
+  .dispatch-confirm-head { display: flex; align-items: center; gap: 10px; margin-top: 8px; }
+  .dispatch-confirm-list { margin: 6px 0; padding-left: 18px; li { margin: 3px 0; overflow-wrap: anywhere; } }
+  .run-expected .tag { margin-left: 0; }
   table.runs {
     th.num, td.num { text-align: right; font-variant-numeric: tabular-nums; }
     td.nb, td.num { white-space: nowrap; }
     .tag.real { margin-left: 0; color: #d6b65a; border-color: #d6b65a; font-weight: 650; }
     .tag.dry { margin-left: 0; color: var(--ink-3); border-color: var(--line); }
+    .tag.not-swept { color: var(--danger); border-color: var(--danger); font-weight: 650; }
     tr.cancelled > td { background: color-mix(in srgb, var(--ink-3) 6%, transparent); }
     .run-sort { color: inherit; font: inherit; font-weight: inherit; padding: 0; border: 0; background: none; cursor: pointer; }
     .run-outcome .prediction-label { display: block; color: var(--ink-2); font-size: .9em; font-weight: 600; }
@@ -2980,6 +3061,8 @@ kbd { font: inherit; font-size: 11px; padding: 0 4px; border: 1px solid var(--li
     .prog progress { width: 64px; height: 8px; vertical-align: middle; }
     .prog-estimate { display: block; font-size: .9em; }
     td.actions { white-space: nowrap; > * + * { margin-left: 6px; } }
+    // A control shown but unavailable (`UndoControl`): `aria-disabled`, so its tip still opens (hover, focus, a tap pins it).
+    button[aria-disabled="true"] { opacity: 0.45; cursor: help; &:hover { border-color: var(--line); } }
     tr.live td.rid { font-weight: 600; }
     tr.run-detail-row > td { background: var(--panel); padding: 8px 12px 12px; }
     tr.run.linked > td { background: color-mix(in srgb, var(--accent, #4a9eff) 14%, transparent); }
@@ -3246,3 +3329,13 @@ a.sec-anchor {
   &:hover, &:focus-visible { text-decoration: underline; text-decoration-color: var(--ink-3); }
   &:hover::after { content: ' #'; color: var(--ink-3); font-weight: normal; }
 }
+
+.diff-remainder {
+  font-size: 0.8rem;
+  p { margin: 4px 0; color: var(--ink-2); white-space: normal; }
+  button { padding: 2px 7px; cursor: pointer; }
+  span { margin-left: 8px; color: var(--ink-2); white-space: normal; }
+}
+.diff-tm .dt-treemap-tip.dock:has(.diff-remainder) { height: auto; min-height: var(--dt-dock-h); }
+
+.diff-tm .dt-treemap-cell { cursor: pointer !important; }

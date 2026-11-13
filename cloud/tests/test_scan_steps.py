@@ -198,6 +198,23 @@ def test_static_names_failure_records_failed_phase_and_the_run_goes_on(tmp_path,
     assert c.sh_impl.calls == ["dt-cloud static-names runs add -c 2026-10-16T1200", "dt-cloud static-names runs lag 2026-10-16T1200"]
 
 
+PASSED_OVER = "passed over: the store's append order is past this scan, or its path sort isn't published; no later run appends it"
+
+
+def test_static_names_not_next_is_passed_over(tmp_path, env, monkeypatch):
+    """Exit 3: the append refused the scan (a newer one is already in, or its path sort isn't published), and no later
+    run's append takes it. The phase fails with a `passed over:` clause, which /scans never reads as recovered."""
+    c = ctx(tmp_path, env, runner=Runner(tmp_path, codes={"dt-cloud static-names runs": 3}))
+    phases = []
+    c.run.begin = lambda name: phases.append(("begin", name))
+    c.run.end = lambda name, rc=0, **kw: phases.append(("end", name, rc, kw))
+    monkeypatch.setattr(S, "load_profile_env", lambda *a: c.profile)
+    monkeypatch.setattr(S, "make_ctx", lambda *a: c)
+    assert S.run_step("static-names", None, env) == 0
+    assert phases == [("begin", "static-names"), ("end", "static-names", 3, {
+        "warn": True, "msg": "static-names runs add failed for 2026-10-16T1200", "note": PASSED_OVER})]
+
+
 def test_static_names_busy_is_not_a_failure(tmp_path, env, monkeypatch):
     """Exit 4: another coordinator holds the store's lease (a catch-up, or an earlier scan's run) and appends this scan."""
     c = ctx(tmp_path, env, runner=Runner(tmp_path, codes={"dt-cloud static-names runs": 4}))
@@ -411,7 +428,7 @@ class FakeS3:
 
 def test_unscanned():
     s3 = FakeS3({"scanned": 5, "empty": 0, "new": 3, "denied": PermissionError("no")})
-    assert S.unscanned(s3, {"scanned"}) == ["denied (check failed: ListObjectsV2: PermissionError: no)", "new"]
+    assert S.unscanned(s3, {"scanned"}) == S.BucketDiscovery(["new"], ["ListObjectsV2 denied: PermissionError: no"])
 
 
 def test_run_step_fake_fail_unknown(tmp_path, monkeypatch):
@@ -621,6 +638,87 @@ def test_a_hard_failure_fails_a_soft_step(tmp_path, monkeypatch):
     assert S.run_step("boom", None, env) == 3
 
 
+def test_soft_steps_declare_what_a_failure_leaves_and_hard_steps_nothing():
+    """A soft step's failure leaves the run succeeded, so /scans has to say what's short: every soft step says it
+    (`leaves`), and only a soft step can (a hard step's failure fails the run)."""
+    assert [n for n, s in S.STEPS.items() if s.soft and not s.leaves] == []
+    assert [n for n, s in S.STEPS.items() if not s.soft and (s.leaves or s.side or s.converges or s.checks)] == []
+
+
+def test_step_refuses_a_soft_step_without_leaves_and_failure_fields_on_a_hard_one(monkeypatch):
+    monkeypatch.setattr(S, "STEPS", {})
+
+    def declare(**kw):
+        with pytest.raises(ValueError) as e:
+            S.step("x", **kw)(lambda ctx, arg: None)
+        return str(e.value)
+
+    hard = "step x: `leaves` / `side` / `converges` / `checks` describe a soft step's failure (a hard step's fails the run)"
+    assert [declare(soft=True), declare(leaves="nothing"), declare(side=True), declare(converges=True), declare(checks=True),
+            declare(soft=True, side=True), declare(soft=True, leaves="nothing", checks=True, converges=True)] == [
+        "step x: a soft step says what its failure leaves short (`leaves`)",
+        hard,
+        hard,
+        hard,
+        hard,
+        "step x: a soft step says what its failure leaves short (`leaves`)",
+        "step x: a check does no work for a later run to do (`checks` with `converges`)",
+    ]
+    assert S.STEPS == {}
+
+
+def test_failure_table_rows():
+    """The kinds /scans tells apart: a side step nothing redoes, a side step a later run converges, a serving step (the
+    scan is short until a later run appends it), and a check (nothing redoes it; a later run's passes or doesn't)."""
+    table = S.failure_table()
+    assert list(table) == [n for n, s in S.STEPS.items() if s.soft]
+    assert {k: table[k] for k in ("warm-cache", "digest", "interval-store", "probe")} == {
+        "warm-cache": {"leaves": "cache not pre-warmed: this scan's first views load cold", "side": True, "converges": False, "checks": False},
+        "digest": {"leaves": "usage digest not posted", "side": True, "converges": True, "checks": False},
+        "interval-store": {"leaves": "the interval store doesn't hold this scan", "side": False, "converges": True, "checks": False},
+        "probe": {"leaves": "the serving probe failed: some of this scan's views may not load", "side": False, "converges": False, "checks": True},
+    }
+
+
+def test_soft_steps_classification():
+    """Every soft step's failure class, in registry order: `side` (the scan's data and serving are whole without it),
+    `converges` (a later run's same step does this run's work too), `checks` (a check: nothing redoes it)."""
+    assert {n: " ".join(k for k in ("side", "converges", "checks") if f[k]) for n, f in S.failure_table().items()} == {
+        "bucket-check": "side",
+        "access-ingest": "converges",
+        "access-r2": "converges",
+        "static-names": "converges",
+        "publish-r2": "",
+        "interval-store": "converges",
+        "index-rows": "",
+        "index-sync": "",
+        "over-time": "side converges",
+        "index-gc": "side converges",
+        "dups": "side",
+        "age-store": "converges",
+        "retire": "side converges",
+        "store-gc": "side converges",
+        "non-live": "side",
+        "healthcheck": "checks",
+        "warm-cache": "side",
+        "probe": "checks",
+        "staged-card": "side converges",
+        "digest": "side converges",
+        "cf-usage": "side converges",
+        "gcp-cost": "side",
+        "soft-delete": "side",
+    }
+
+
+def test_the_sites_step_table_is_the_registrys():
+    """`site/src/scanSteps.json` (what /scans classifies a failed phase by) is `dt-cloud scan steps`' output, byte for
+    byte: regenerate it with `dt-cloud scan steps > site/src/scanSteps.json` after changing a step's failure fields."""
+    out = CliRunner().invoke(main, ["scan", "steps"])
+    assert (out.exit_code, out.stdout) == (0, S.failure_json())
+    assert (Path(__file__).parents[2] / "site" / "src" / "scanSteps.json").read_text() == S.failure_json()
+    assert json.loads(S.failure_json()) == S.failure_table()
+
+
 def test_interval_store_staged_append(tmp_path, env, monkeypatch):
     from dt_cloud import scan_runs
 
@@ -636,6 +734,53 @@ def test_interval_store_staged_append(tmp_path, env, monkeypatch):
     S.interval_store(c, None)
     assert ran == [(["dt-cloud", "interval-store", "append", "-c", "-w", "1800", "2026-10-16T1200"], 3600.0,
                     "/app/job/interval-store.json", "img@sha256:abc")]
+
+
+def test_interval_store_busy_is_a_skip(tmp_path, env, monkeypatch):
+    """Exit 4: another coordinator holds the store's lease, and this run appended nothing. The phase is done with a
+    skip clause, so /scans reads the scan short until an append holds it, and never takes this run's step for one that
+    did an earlier run's work."""
+    from dt_cloud import scan_runs
+
+    monkeypatch.setattr(scan_runs, "run_grouped", lambda cmd, timeout, grace, **kw: scan_runs.Ran(4, False, None))
+    c = gcs_ctx(tmp_path, env, monkeypatch, **{"interval-store": {"profile": "/app/job/interval-store.json"}})
+    phases = []
+    c.run.begin = lambda name: phases.append(("begin", name))
+    c.run.end = lambda name, rc=0, **kw: phases.append(("end", name, rc, kw))
+    S.interval_store(c, None)
+    note = "skipped (busy): another coordinator holds the interval store's lease; this scan comes with its append or the next run"
+    assert phases == [("begin", "interval-store"), ("end", "interval-store", 0, {"note": note})]
+    assert scan_runs.phase_skip(note) == note
+
+
+def test_interval_store_not_next_is_passed_over(tmp_path, env, monkeypatch):
+    """Exit 3: the staged append refused the scan, as static-names' does: failed, with the `passed over:` clause."""
+    from dt_cloud import scan_runs
+
+    monkeypatch.setattr(scan_runs, "run_grouped", lambda cmd, timeout, grace, **kw: scan_runs.Ran(3, False, None))
+    c = gcs_ctx(tmp_path, env, monkeypatch, **{"interval-store": {"profile": "/app/job/interval-store.json"}})
+    phases = []
+    c.run.begin = lambda name: phases.append(("begin", name))
+    c.run.end = lambda name, rc=0, **kw: phases.append(("end", name, rc, kw))
+    S.interval_store(c, None)
+    assert phases == [("begin", "interval-store"), ("end", "interval-store", 3, {
+        "warn": True, "msg": "the scan reads per-scan: the store's append passed it over", "note": PASSED_OVER, "timed_out": None, "terminated": None})]
+
+
+@pytest.mark.parametrize(("rc", "opts", "published"), [
+    (1, {"publish_on_failure": True}, ["dt-cloud publish-r2 -a 2026-10-16T1200"]),
+    (0, {"publish_on_failure": True}, []),
+    (1, {}, []),
+])
+def test_interval_store_failure_publishes_the_scans_sorts_when_asked(tmp_path, env, monkeypatch, rc, opts, published):
+    from dt_cloud import scan_runs
+
+    monkeypatch.setattr(scan_runs, "run_grouped", lambda cmd, timeout, grace, **kw: scan_runs.Ran(rc, False, None))
+    env["R2_ARCHIVE"] = "r2://idx"
+    c = gcs_ctx(tmp_path, dict(env), monkeypatch, **{"interval-store": opts})
+    c.sh_impl = Runner(tmp_path, stdout={"dt-cloud interval-store current": "g1\n"})
+    S.interval_store(c, None)
+    assert [x for x in c.sh_impl.calls if x.startswith("dt-cloud publish-r2")] == published
 
 
 def test_interval_store_adds_from_the_store_or_the_data_store(tmp_path, env, monkeypatch):
@@ -711,15 +856,16 @@ def test_hf_list_then_index(tmp_path, env, monkeypatch):
     ]
 
 
-@pytest.mark.parametrize("has_gen, has_successor, pointer, sub", [
-    (True, False, None, ["add"]),
-    (False, False, None, ["build"]),
-    (False, True, "static-names/main-CURRENT.json", ["add"]),
+@pytest.mark.parametrize("has_gen, has_successor, pointer, sub, threads", [
+    (True, False, None, ["add"], None),
+    (False, False, None, ["build"], None),
+    (False, True, "static-names/main-CURRENT.json", ["add"], None),
+    (True, False, None, ["add"], 2),
 ])
-def test_static_names_one_machine(tmp_path, env, monkeypatch, has_gen, has_successor, pointer, sub):
+def test_static_names_one_machine(tmp_path, env, monkeypatch, has_gen, has_successor, pointer, sub, threads):
     """`options.static-names.gen`: `static-names add` in the task, the scans into R2's generation; `build` (+
     `build_args`) when R2 has none. On a local data dir (this one's), which holds only this scan, the scans are read
-    from R2 itself, where publish-r2 put this one first."""
+    from R2 itself, where publish-r2 put this one first. DuckDB's threads (`-p`): `threads`, else `Ctx.nproc`."""
     monkeypatch.setattr(S.Ctx, "nproc", property(lambda self: 4))
     asked = []
     monkeypatch.setattr(S.Ctx, "store_has", lambda self, root, key: asked.append((root, key)) or (has_gen if key.endswith("scans.json") else has_successor))
@@ -727,6 +873,8 @@ def test_static_names_one_machine(tmp_path, env, monkeypatch, has_gen, has_succe
     profile = hf_profile()
     if pointer:
         profile["options"]["static-names"]["current_key"] = pointer
+    if threads:
+        profile["options"]["static-names"]["threads"] = threads
     c = ctx(tmp_path, env, **profile)
     S.static_names(c, None)
     w = "<tmp>/t/dt-scan/2026-10-16T1200"
@@ -735,7 +883,7 @@ def test_static_names_one_machine(tmp_path, env, monkeypatch, has_gen, has_succe
     current = f" -u {pointer}" if pointer else ""
     assert (asked, c.sh_impl.calls) == ([("r2://r2b", key) for key in keys], [" ".join([
         "dt-cloud static-names", *sub, "-g 2026-10-15hf -L listing/{id}/index/{gen}/path-index.parquet -s r2://r2b",
-        f"-o r2://r2b -w {w}/static-names -p 4{current} -M 8GB", *tail])])
+        f"-o r2://r2b -w {w}/static-names -p {threads or 4}{current} -M 8GB", *tail])])
 
 
 def test_static_names_profile_checks():
@@ -748,9 +896,10 @@ def test_static_names_profile_checks():
             parse({"deployment": "fix", "executor": {"kind": "local"}, "work": "/w", "data": "/d",
                    **d, "options": {**d["options"], "static-names": opts}})
         return str(e.value)
-    assert [problems(o) for o in ({"gen": "g", "profile": "p.json"}, {"profile": "p.json", "mem": "8GB"}, {})] == [
+    assert [problems(o) for o in ({"gen": "g", "profile": "p.json"}, {"profile": "p.json", "mem": "8GB"}, {"profile": "p.json", "threads": 2}, {})] == [
         "profile: options.static-names.profile: not with gen (the one-machine path)",
         "profile: options.static-names.mem: only with gen (the one-machine path)",
+        "profile: options.static-names.threads: only with gen (the one-machine path)",
         "profile: options.static-names.profile: required (the deployment's static-names profile; or env STATIC_NAMES_PROFILE, "
         "or gen: the one-machine path, or skip: [static-names])",
     ]
@@ -798,6 +947,7 @@ class Ends:
     ("warm_cache", "dt-cloud warm-cache -d", "cache warm-up failed for 2026-10-16T1200"),
     ("probe", "dt-cloud probe -c", "serving probe failed for 2026-10-16T1200 (an HTTP or transport error; data is fine)"),
     ("healthcheck", "dt-cloud healthcheck -d", "the live site's health check failed for 2026-10-16T1200 (data is fine; serving may be degraded)"),
+    ("staged_card", "dt-cloud staged-card", "staged card refresh failed for 2026-10-16T1200 (it stays at the scan before)"),
     ("index_gc", "dt-cloud index-gc -R", "index-gc -F failed (superseded generations stay until the next run)"),
     ("over_time", "dt-cloud over-time-groups -g", "over-time groups failed (the series uses its configured path store)"),
 ])
@@ -808,6 +958,15 @@ def test_optional_command_failure_records_a_failed_phase(tmp_path, env, name, pr
     getattr(S, name)(c, None)
     phase = name.replace("_", "-")
     assert c.run.calls == [("begin", phase), ("end", phase, 1, True, message)]
+
+
+def test_staged_card_pings_the_site_only_with_its_token(tmp_path, env):
+    c = ctx(tmp_path, env)
+    S.staged_card(c, None)
+    assert c.sh_impl.calls == []
+    c.env.update(SITE_TOKEN="t", SITE_URL="https://site.example.org")
+    S.staged_card(c, None)
+    assert c.sh_impl.calls == ["dt-cloud staged-card"]
 
 
 @pytest.mark.parametrize("name,prefix,warn", [
@@ -849,7 +1008,7 @@ def test_interval_current_failure_records_failed_phase(tmp_path, env):
     ]
 
 
-def test_bucket_check_findings_and_failed_alert_are_not_recorded_done(tmp_path, env, monkeypatch):
+def test_bucket_check_findings_leave_notification_to_the_phase_alert(tmp_path, env, monkeypatch):
     env["SITE_URL"] = "https://site.test"
     c = ctx(tmp_path, env, Runner(tmp_path, fail=("disk-tree notify -t",)), sources=["s3://a"])
     c.run = Ends()
@@ -858,11 +1017,28 @@ def test_bucket_check_findings_and_failed_alert_are_not_recorded_done(tmp_path, 
     S.bucket_check(c, None)
     assert c.run.calls == [
         ("begin", "bucket-check"),
-        ("end", "bucket-check", 1, True, "unscanned-bucket check: b new"),
+        ("end", "bucket-check", 1, True, "non-empty buckets outside the profile's sources: b new"),
     ]
-    assert c.sh_impl.calls == [
-        "disk-tree notify -t ⚠️ fix 2026-10-16T1200 -L scan https://site.test/scans/head -L all scans https://site.test/scans non-empty bucket(s) not in the profile's sources: `b new`",
+    assert c.sh_impl.calls == []
+
+
+def test_bucket_discovery_failure_is_not_a_nonempty_bucket(tmp_path, env, monkeypatch):
+    class BrokenListing:
+        def list_buckets(self):
+            raise RuntimeError("provider unavailable")
+
+    client = BrokenListing()
+    assert S.unscanned(client, {"a"}) == S.BucketDiscovery([], ["ListBuckets: RuntimeError: provider unavailable"])
+    c = ctx(tmp_path, env, Runner(tmp_path), sources=["s3://a"])
+    c.run = Ends()
+    monkeypatch.setattr(S, "s3_client", lambda endpoint: client)
+    S.bucket_check(c, None)
+    assert c.run.calls == [
+        ("begin", "bucket-check"),
+        ("end", "bucket-check", 1, True, "bucket discovery incomplete: ListBuckets: RuntimeError: provider unavailable"),
     ]
+    assert c.sh_impl.calls == []
+
 
 
 def test_optional_step_initialization_failure_fails_task(tmp_path, env, monkeypatch):
@@ -1069,8 +1245,7 @@ def test_retire_local_data_retires_the_archive(tmp_path, env):
 
 
 def test_age_store_local_data_reads_the_archive(tmp_path, env):
-    """A local data store (m3's: the task's ephemeral disk, R2 the store of record) holds only this scan's pyramid: the
-    history's inputs and the retirement root are the archive's."""
+    """Local task scratch holds only this scan; history inputs and retirement use the archive."""
     env.update(R2_ARCHIVE="r2://idx")
     opts = {**NL_OPTS, "age-store": {"store": "r2://idx/history/age", "gen": "a1", "execute": True}}
     c = ctx(tmp_path, env, steps=["age-store"], options=opts)
@@ -1080,6 +1255,7 @@ def test_age_store_local_data_reads_the_archive(tmp_path, env):
         f"dt-cloud age-store -g a1 -L l2/{{id}}/index/{{gen}}/age-pyramid-1h.parquet -o r2://idx/history/age -s r2://idx -T {c.profile.store} -t 2026-10-16T1200 -w {w} -k 2 -r r2://idx -x",
         "dt-cloud store-gc -t interval-store -l -x -o r2://idx/history/age",
     ]
+
 
 NL_OPTS = {"list": {"import": True}, "static-names": {"gen": "s1"}, "digest": {"template": "t", "config": "c.yml"}}
 
@@ -1227,6 +1403,18 @@ def test_store_gc_collects_the_interval_stores_lineage_on_each_copy(tmp_path, en
     assert x.sh_impl.calls == ["dt-cloud store-gc -t interval-store -l -x -o gs://iv"]
 
 
+def test_store_gc_coordinates_static_copies_and_declares_secondary_pins(tmp_path, env):
+    c = ctx(tmp_path, env, steps=['store-gc'], options={**NL_OPTS, 'store-gc': {
+        'store': 'r2://idx', 'copies': [], 'static_store': 'gs://data', 'static_copies': ['r2://idx'],
+        'static_gens': ['meta'], 'scratch': 'scratch', 'grace': 259200, 'execute': True,
+    }})
+    S.store_gc(c, None)
+    assert c.sh_impl.calls == [
+        'dt-cloud store-gc -t interval-store -l -G 259200 -x -o r2://idx',
+        'dt-cloud generation-gc -t static-names -o gs://data -k meta -c r2://idx -s scratch -G 259200 -x',
+    ]
+
+
 def test_retire_failure_warns_and_needs_its_keep(tmp_path, env):
     c = ctx(tmp_path, env, runner=Runner(tmp_path, fail=("dt-cloud scan retire",)), steps=["retire"],
             options={"list": {"import": True}, "static-names": {"gen": "s1", "store": "r2://idx"}, "digest": {"template": "t", "config": "c.yml"},
@@ -1255,7 +1443,7 @@ class AggRunner(Runner):
         self.empty = empty
 
     def __call__(self, argv, env, stdout=None, text=True):
-        if argv[:3] == ["dt-cloud", "access", "r2-agg"] and not self.empty:
+        if argv[:2] == ["dt-cloud", "access"] and argv[2] in ("r2-agg", "r2-sync") and not self.empty:
             out = Path(argv[argv.index("-o") + 1])
             out.parent.mkdir(parents=True, exist_ok=True)
             out.write_text(f"agg as of {argv[argv.index('-d') + 1]}")
@@ -1320,6 +1508,24 @@ def test_nproc_is_capped_by_the_cgroup_quota(tmp_path, monkeypatch) -> None:
     free = S.Ctx.__new__(S.Ctx)
     free.env = {"DT_CGROUP": str(tmp_path / "absent")}
     assert [capped.nproc, free.nproc] == [2, 8]
+
+
+def test_nproc_env_overrides_affinity_and_quota(tmp_path, monkeypatch) -> None:
+    """`$DT_NPROC` wins over the affinity and the quota (Fargate: `cpu.max` reads `max`, the affinity lists the host's
+    CPUs); anything but a positive integer is the step's failure."""
+    (tmp_path / "cpu.max").write_text("max 100000\n")
+    monkeypatch.setattr(S.os, "sched_getaffinity", lambda _: set(range(8)), raising=False)
+
+    def ctx_with(**env: str) -> S.Ctx:
+        c = S.Ctx.__new__(S.Ctx)
+        c.env = {"DT_CGROUP": str(tmp_path), **env}
+        return c
+
+    assert [ctx_with().nproc, ctx_with(DT_NPROC="2").nproc, ctx_with(DT_NPROC=" 3\n").nproc, ctx_with(DT_NPROC="").nproc] == [8, 2, 3, 8]
+    for bad in ("0", "two", "-1", "1.5"):
+        with pytest.raises(S.StepFailed) as e:
+            ctx_with(DT_NPROC=bad).nproc
+        assert (e.value.rc, str(e.value)) == (2, f"$DT_NPROC={bad!r}: not a positive integer")
 
 
 def test_path_index_reproc_rebuilds_a_missing_listing_from_the_layer_2(tmp_path, env, monkeypatch):
@@ -1467,6 +1673,36 @@ def test_cf_usage_failure_fails_its_phase_not_the_run(tmp_path, env):
     )
 
 
+def test_soft_delete_reads_each_gcs_source_to_the_data_store_and_r2(tmp_path, env):
+    """`soft-delete` (listed in `steps`): `dt-cloud soft-delete` over every `gs://` and `s3://` source's bucket (or
+    `options.soft-delete.buckets`), the day's document under `snapshots/soft-delete/` in the data store and the R2
+    archive; no such bucket, or REPROC: nothing run."""
+    sources = ["gs://g1", "gcs://g2", {"uri": "s3://a", "endpoint": "https://s3.example.org"}]
+    c = ctx(tmp_path, env, steps=["soft-delete"], sources=sources)
+    S.soft_delete(c, None)
+    assert c.sh_impl.calls == ["dt-cloud soft-delete -b g1 -b g2 -b s3://a -E https://s3.example.org -o <tmp>/data/snapshots/soft-delete"]
+    r2 = {**env, "R2_ENDPOINT": "https://r2.example.org", "R2_BUCKET": "r2b", "R2_ACCESS_KEY_ID": "k", "R2_SECRET_ACCESS_KEY": "s"}
+    c = ctx(tmp_path, r2, steps=["soft-delete"], sources=sources, options={
+        "soft-delete": {"buckets": ["x", "y"]},
+        "list": {"import": True}, "static-names": {"profile": "sn.json"}, "digest": {"template": "t", "config": "c.yml"},
+    })
+    S.soft_delete(c, None)
+    assert c.sh_impl.calls == ["dt-cloud soft-delete -b x -b y -E https://s3.example.org -o <tmp>/data/snapshots/soft-delete -o r2://r2b/snapshots/soft-delete"]
+    for none in (ctx(tmp_path, env, steps=["soft-delete"], sources=[{"uri": "r2://r", "endpoint": "https://r2.example.org"}]), ctx(tmp_path, {**env, "REPROC": "1"}, steps=["soft-delete"], sources=sources)):
+        S.soft_delete(none, None)
+        assert none.sh_impl.calls == []
+
+
+def test_soft_delete_failure_fails_its_phase_not_the_run(tmp_path, env):
+    c = ctx(tmp_path, env, steps=["soft-delete"], sources=["gs://g1"], runner=Runner(tmp_path, fail=("dt-cloud soft-delete -b",)))
+    c.run = Ends()
+    S.soft_delete(c, None)
+    assert (c.run.calls, c.sh_impl.calls) == (
+        [("begin", "soft-delete"), ("end", "soft-delete", 1, True, "soft-delete reading failed (the scan's outputs stand; the site keeps the last one, dated)")],
+        ["dt-cloud soft-delete -b g1 -o <tmp>/data/snapshots/soft-delete"],
+    )
+
+
 def test_gcp_cost_skipped_without_anything_to_measure(tmp_path, env):
     c = ctx(tmp_path, env)
     S.gcp_cost(c, None)
@@ -1533,3 +1769,15 @@ def test_import_args_mem(tmp_path, env, monkeypatch):
     c = ctx(tmp_path, env, options={"list": {"import": True, "import_args": ["-e", "stream", "-j", "{nproc}", "-M", "{mem}"]},
                                     "static-names": {"profile": "sn.json"}, "digest": {"template": "t", "config": "c.yml"}})
     assert c.expand(c.opt("list", "import_args")) == ["-e", "stream", "-j", "4", "-M", "9GB"]
+
+
+def test_access_r2_checkpoint_is_explicit_and_runs_in_task_scratch(tmp_path, env):
+    c = ctx(tmp_path, env, AggRunner(tmp_path), steps=['access-r2'], options={
+        **R2_BASE, 'access-r2': {'state': 'r2://logs/state.json', 'checkpoint': 'gs://data/access/r2/closed.parquet',
+                               'verify': True, 'mem': '3GB', 'threads': 4},
+    })
+    S.access_r2(c, None)
+    assert c.sh_impl.calls == [
+        'dt-cloud access r2-sync -d 2026-10-16T1200 -o <tmp>/t/dt-scan/2026-10-16T1200/access-r2/agg.parquet -s r2://logs/state.json -c gs://data/access/r2/closed.parquet -w <tmp>/t/dt-scan/2026-10-16T1200/access-r2/checkpoint -M 3GB -p 4 -v',
+    ]
+    assert (tmp_path / 'data/access/r2/agg.parquet').read_text() == 'agg as of 2026-10-16T1200'

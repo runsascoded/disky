@@ -2,7 +2,8 @@
 // paths. Everything deployment-specific comes from the batch config
 // (`batchConfig.ts`: image, data bucket, S3 endpoint, project, region); the
 // GCP auth lives in `gcp.ts`. A plan-sweep run deletes from one bucket, so it
-// always runs in the default Batch region.
+// always runs in the deployment's Batch region (`BATCH_REGION`), which its
+// callers require: the job mounts the data bucket, so that is its region.
 import type { BatchConfig } from "./batchConfig.js"
 import { labelBatchSpec } from "./costLabels.js"
 import { batchJobsUrl } from "./gcp.js"

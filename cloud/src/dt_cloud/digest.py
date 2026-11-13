@@ -20,8 +20,8 @@ neither intrinsic to one store:
   (free)` clauses when quotas are configured, a quota sparkline + diff
   treemap plot.
 
-A template is a small object (`load`, `op_body`, `units`, `provisional`,
-`render_plot`); this module holds everything else: arrow math, formatters,
+A template is a small object (`load`, `rows_json`, `units`, `provisional`,
+`render_plot`; its OP is the site's, `site_render`); this module holds everything else: arrow math, formatters,
 scan ids and `?d=` link tokens, Discord emoji, snapshot listing, state IO,
 plot hosting (`wrangler pages deploy`), and the converge shells
 (`converge_slack`, `converge_slack_now`, `converge_discord`,
@@ -34,7 +34,7 @@ import json
 import re
 import secrets
 import sys
-from collections.abc import Iterable
+from collections.abc import Collection, Iterable
 from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
 from typing import Any, Protocol
@@ -97,13 +97,16 @@ class Bucket:
     site's; ``""``: the site root, a single-bucket store served there).
     ``more``: further quotas, each beside ``quota`` wherever it renders (YAML:
     ``quota`` as a list), e.g. a private allowance beside a public one; the
-    plot draws ``quota`` only."""
+    plot draws ``quota`` only. ``shape`` (`QUOTA_SHAPES`): the bucket's mark under
+    `quota_marks: runway-hue`, its color still the runway. A zone is one pool with
+    one mark, so its buckets must state the same shape, as they do its quota."""
 
     label: str | None = None
     quota: Quota | None = None
     zone: str | None = None
     path: str | None = None
     more: tuple[Quota, ...] = ()
+    shape: str = "circle"
 
     @property
     def quotas(self) -> tuple[Quota, ...]:
@@ -139,10 +142,10 @@ class DigestConfig:
     marks each `:red_circle:` at or over ``mark_pct`` (``alert_pct``, else 90), `:large_orange_circle:` within 10
     points below, `:large_yellow_circle:` within 40, `:large_green_circle:` under that (specs/digest-quota-pressure.md);
     `runway` keeps config order and marks each by how soon it fills at its fastest recent growth (`digest_cw._runway_mark`,
-    specs/digest-runway-marks.md). ``renderer``: who renders the OP's text and plot request,
-    `local` (this package's `op_body` / `image_body`) or `site` (`POST /api/digest-op`, the renderer `/admin/slack`
-    previews with; specs/slack-preview-page.md phase 2) under ``params`` (the site's `src/digest/codec` string,
-    `''`: the defaults, which render `local`'s bytes). ``preview``: where each Slack converge writes the month's preview bundle
+    specs/digest-runway-marks.md); `runway-hue` the same with `:runway-1:` (red) … `:runway-8:` (green)
+    workspace emoji, `:runway-<shape>-N:` for a bucket with a ``shape`` (`digest_cw._runway_hue`). The OP's text and plot request are the site's (`POST /api/digest-op`,
+    the renderer `/admin/slack` previews with; specs/slack-preview-page.md), under ``params`` (the site's
+    `src/digest/codec` string, `''`: the defaults). ``preview``: where each Slack converge writes the month's preview bundle
     (`preview_bundle`, for the site's `/admin/slack-preview`), a dir or URL template (``{channel}``,
     ``{variant}``) in the deployment's served store; None: none written."""
 
@@ -163,12 +166,15 @@ class DigestConfig:
     reply_hour: int = 12
     provisional: bool = False
     primary: str | None = None
+    # cw: a reply's headline totals every bucket the scan has, not the primary's alone
+    total_headline: bool = False
+    # cw: a reply's pools each on their own line, not ` · `-joined
+    reply_lines: bool = False
     buckets: dict[str, Bucket] = field(default_factory=dict)
     prices: dict[str, float] = field(default_factory=dict)
     units: str = "TiB"
     alert_pct: float | None = None
     quota_marks: str = "warning"
-    renderer: str = "local"
     params: str = ""
     preview: str | None = None
 
@@ -259,15 +265,16 @@ def parse_bytes(v: int | str) -> int:
 
 
 TEMPLATES = ("gcs", "cw")
-QUOTA_MARKS = ("warning", "circles", "runway")
-RENDERERS = ("local", "site")
+QUOTA_MARKS = ("warning", "circles", "runway", "runway-hue", "arrow-chip")
+#: A bucket's `runway-hue` mark (`Bucket.shape`); the site's `digest/mrkdwn.ts` draws each.
+QUOTA_SHAPES = ("circle", "square", "diamond", "triangle", "star")
 # the scalar fields' accepted YAML types (`buckets` / `prices` are parsed below)
 _SCALAR_TYPES: dict[str, tuple[type, ...]] = {
     "template": (str,), "title": (str,), "site_url": (str,), "root": (str,), "state": (str,),
     "discord_state": (str,), "discord_webhook_env": (str, type(None)), "icons_base": (str,),
     "icons_dir": (str,), "op_icon": (str,), "plot_project": (str,), "plot_branch": (str,), "plot_base": (str,),
     "variant": (str,), "reply_hour": (int,), "provisional": (bool,), "primary": (str, type(None)),
-    "units": (str,), "alert_pct": (int, float, type(None)), "quota_marks": (str,), "renderer": (str,), "params": (str,),
+    "units": (str,), "alert_pct": (int, float, type(None)), "quota_marks": (str,), "params": (str,),
     "preview": (str, type(None)),
 }
 
@@ -288,19 +295,22 @@ def _keys(where: str, d: Any, allowed: set[str], required: set[str] = frozenset(
 
 
 def _bucket(name: str, b: dict | None) -> Bucket:
-    b = _keys(f"buckets.{name}", b or {}, {"label", "quota", "zone", "path"})
+    b = _keys(f"buckets.{name}", b or {}, {"label", "quota", "zone", "path", "shape"})
     for k in ("label", "zone", "path"):
         if b.get(k) is not None and not isinstance(b[k], str):
             raise ValueError(f"digest config buckets.{name}.{k}: expected a string, got {b[k]!r}")
+    shape = b.get("shape", "circle")
+    if shape not in QUOTA_SHAPES:
+        raise ValueError(f"digest config buckets.{name}.shape: {shape!r} is not one of {QUOTA_SHAPES}")
     q = b.get("quota")
     if q is None:
-        return Bucket(b.get("label"), zone=b.get("zone"), path=b.get("path"))
+        return Bucket(b.get("label"), zone=b.get("zone"), path=b.get("path"), shape=shape)
     qs = [_quota(f"buckets.{name}.quota[{i}]", x) for i, x in enumerate(q)] if isinstance(q, list) else [_quota(f"buckets.{name}.quota", q)]
     if not qs:
         raise ValueError(f"digest config buckets.{name}.quota: an empty list")
     if b.get("zone") is not None and (len(qs) > 1 or qs[0].classes):
         raise ValueError(f"digest config buckets.{name}: a zone's quota is one quota over every class")
-    return Bucket(b.get("label"), qs[0], b.get("zone"), b.get("path"), tuple(qs[1:]))
+    return Bucket(b.get("label"), qs[0], b.get("zone"), b.get("path"), tuple(qs[1:]), shape)
 
 
 def _quota(where: str, q: Any) -> Quota:
@@ -312,20 +322,22 @@ def _quota(where: str, q: Any) -> Quota:
 
 
 def _check_zones(buckets: dict[str, Bucket]) -> None:
-    """Buckets sharing a ``zone`` share its quota, so they must state the same one."""
-    seen: dict[str, tuple[str, Quota | None]] = {}
+    """Buckets sharing a ``zone`` share its quota and its mark, so they must state the same ones."""
+    seen: dict[str, tuple[str, Quota | None, str]] = {}
     for name, b in buckets.items():
         if b.zone is None:
             continue
-        first, q = seen.setdefault(b.zone, (name, b.quota))
+        first, q, shape = seen.setdefault(b.zone, (name, b.quota, b.shape))
         if q != b.quota:
             raise ValueError(f"digest config buckets.{name}: zone {b.zone!r} quota differs from buckets.{first}'s")
+        if shape != b.shape:
+            raise ValueError(f"digest config buckets.{name}: zone {b.zone!r} shape differs from buckets.{first}'s")
 
 
 def config_from_dict(d: dict, base: DigestConfig | None = None) -> DigestConfig:
     """A config from a parsed YAML/JSON mapping, overlaid on ``base`` (default:
     the preset its ``template`` names). ``buckets`` map names to ``{label,
-    quota: {bytes, name, short, classes}, zone, path}`` (``quota`` may be a list) (``bytes`` may be `910 TiB`), ``prices``
+    quota: {bytes, name, short, classes}, zone, path, shape}`` (``quota`` may be a list) (``bytes`` may be `910 TiB`), ``prices``
     storage-class ids to $/GiB-month. Validated: unknown keys (at any level),
     a wrong-typed value, an unknown template or ``units``, or an out-of-range
     ``reply_hour`` raise ``ValueError``."""
@@ -345,8 +357,6 @@ def config_from_dict(d: dict, base: DigestConfig | None = None) -> DigestConfig:
         raise ValueError(f"digest config alert_pct: {d['alert_pct']} is not a percent (0–100]")
     if "quota_marks" in d and d["quota_marks"] not in QUOTA_MARKS:
         raise ValueError(f"digest config quota_marks: {d['quota_marks']!r} is not one of {QUOTA_MARKS}")
-    if "renderer" in d and d["renderer"] not in RENDERERS:
-        raise ValueError(f"digest config renderer: {d['renderer']!r} is not one of {RENDERERS}")
     if not 0 <= d.get("reply_hour", 0) <= 23:
         raise ValueError(f"digest config reply_hour: {d['reply_hour']} is not a UTC hour (0–23)")
     base = base or PRESETS[d["template"]]
@@ -358,10 +368,7 @@ def config_from_dict(d: dict, base: DigestConfig | None = None) -> DigestConfig:
         if bad := {k: v for k, v in prices.items() if not isinstance(v, (int, float)) or isinstance(v, bool)}:
             raise ValueError(f"digest config prices: expected numbers, got {bad}")
         d["prices"] = {str(k): float(v) for k, v in prices.items()}
-    cfg = replace(base, **d)
-    if cfg.params and cfg.renderer != "site":
-        raise ValueError(f"digest config params: {cfg.params!r} needs `renderer: site` (the local renderer has no params)")
-    return cfg
+    return replace(base, **d)
 
 
 def load_config(template: str, path: str | Path | None = None) -> DigestConfig:
@@ -371,6 +378,40 @@ def load_config(template: str, path: str | Path | None = None) -> DigestConfig:
     import yaml
 
     return config_from_dict({"template": template, **_mapping(str(path), yaml.safe_load(Path(path).read_text()) or {})})
+
+
+#: The site's live digest settings (`GET /api/digest-settings`; specs/digest-runway-marks.md §4).
+SETTINGS_PATH = "/api/digest-settings"
+
+
+def with_settings(cfg: DigestConfig, settings: dict | None) -> DigestConfig:
+    """``cfg`` under the site's live settings row (``{params, quota_marks, …}``; None: no row, the file's values
+    stand), validated as the config file's own values are."""
+    if settings is None:
+        return cfg
+    marks, params = settings["quota_marks"], settings["params"]
+    if marks not in QUOTA_MARKS:
+        raise ValueError(f"digest settings quota_marks: {marks!r} is not one of {QUOTA_MARKS}")
+    return replace(cfg, quota_marks=marks, params=params)
+
+
+def live_settings(cfg: DigestConfig) -> dict | None:
+    """The site's live settings row for ``cfg.template`` (the admin page's `/admin/slack` edits), or None: no row, no
+    `site_url` or no `$SITE_TOKEN`, or the site unreachable (warned: the config file's values are the fallback, and a
+    digest in the old format beats none)."""
+    from .deploy import site_token
+    from .site import SiteError, get_json
+
+    token = site_token()
+    if not (cfg.site_url and token):
+        return None
+    try:
+        doc = get_json(cfg.site_url, token, SETTINGS_PATH, {"template": cfg.template})
+    except SiteError as e:
+        print(f"digest: no live settings from {cfg.site_url}{SETTINGS_PATH} ({e}); using the config file's", file=sys.stderr)
+        return None
+    assert isinstance(doc, dict)
+    return doc["settings"]
 
 
 # ---- pure helpers ---------------------------------------------------------------
@@ -461,15 +502,6 @@ def prior_month(month: dt.date) -> dt.date:
     return (month.replace(day=1) - dt.timedelta(days=1)).replace(day=1)
 
 
-def window_label(start: dt.date, since: str) -> str:
-    """The OP's look-back figure's label: `last 30d` from the last scan before ``start`` (the window's first day),
-    else `since M/D` (``since``: the scan it starts from; a store with less history than the window)."""
-    return f"last {WINDOW_DAYS}d" if since[:10] < start.isoformat() else f"since {_md(since)}"
-
-
-def prev_month_link(month: dt.date, url: str | None) -> list[str]:
-    """The OP's link to the previous month's thread (`[← October](url)`), as lines; none without one."""
-    return [f"[← {prior_month(month):%B}]({url})"] if url else []
 
 
 #: The quota alert reply's sender icon (`converge_slack`).
@@ -547,6 +579,7 @@ class Template(Protocol):
     def op_body(self, data: Any, month: dt.date, plot_url: str | None, prev_url: str | None = None) -> str: ...
     def image_request(self, data: Any, month: dt.date) -> dict: ...
     def rows_json(self, data: Any) -> dict: ...
+    def reply_json(self, data: Any) -> dict | None: ...
     def units(self, data: Any, variant: str, platform: str = "slack") -> list[Unit]: ...
     def provisional(self, data: Any, variant: str) -> Unit | None: ...
     def alert(self, data: Any) -> str | None: ...
@@ -631,14 +664,15 @@ PREVIEW_VERSION = 1
 
 def cfg_json(cfg: DigestConfig) -> dict:
     """The config fields the OP renders from (the site's `DigestCfg`): title, site, units, the primary and each
-    bucket's label, path and quotas, prices."""
+    bucket's label, path, quotas and shape (absent: a circle), prices."""
     u = cfg.unit
     return {
         "template": cfg.template, "title": cfg.title, "site_url": cfg.site_url, "host": cfg.host,
         "unit": {"name": u.name, "bytes": u.bytes, "short": u.short}, "primary": cfg.primary,
         "buckets": {
             name: {"label": b.label, "path": b.path, "zone": b.zone,
-                   "quotas": [{"bytes": q.bytes, "name": q.name, "short": q.short, "classes": list(q.classes)} for q in b.quotas]}
+                   "quotas": [{"bytes": q.bytes, "name": q.name, "short": q.short, "classes": list(q.classes)} for q in b.quotas],
+                   **({} if b.shape == "circle" else {"shape": b.shape})}
             for name, b in cfg.buckets.items()
         },
         "prices": dict(cfg.prices), "icons_base": cfg.icons_base,
@@ -646,15 +680,15 @@ def cfg_json(cfg: DigestConfig) -> dict:
 
 
 def site_render(cfg: DigestConfig, rows: dict, month: dt.date, plot_url: str | None = None, prev_url: str | None = None) -> dict:
-    """`POST /api/digest-op` (``cfg.renderer == "site"``): the month's OP ``text`` and plot ``image`` request, rendered
-    by the site from ``rows`` (`Template.rows_json`) under ``cfg.params``, as the job (`$SITE_TOKEN`; required: the
-    OP has no other renderer then)."""
+    """`POST /api/digest-op`: the month's OP ``text`` and plot ``image`` request, rendered by the site from ``rows``
+    (`Template.rows_json`) under ``cfg.params``, as the job (`$SITE_TOKEN`; required: the site is the OP's only
+    renderer)."""
     from .deploy import site_token
     from .site import post_json
 
     token = site_token()
     if not token:
-        raise SystemExit("digest: `renderer: site` needs the site token ($SITE_TOKEN)")
+        raise SystemExit("digest: the OP is rendered by the site, which needs the site token ($SITE_TOKEN)")
     body = {"month": f"{month:%Y-%m}", "rows": rows, "cfg": cfg_json(cfg), "params": cfg.params,
             "plot_url": plot_url, "prev_url": prev_url}
     return json.loads(post_json(cfg.site_url, token, "/api/digest-op", body))
@@ -664,14 +698,41 @@ def preview_bundle(tpl: Template, data: Any, month: dt.date, *, op: str, plot_ur
                    channel: str, variant: str, op_ts: str | None = None, permalink: str | None = None) -> dict:
     """The month's OP as posted, with what it was rendered from (specs/slack-preview-page.md): the config's display
     fields, the window's rows (`Template.rows_json`), the OP text and the plot's `/api/digest-image` request, the
-    replies (`replies_json`), and the thread. The site re-renders the rows under other params beside it."""
+    replies (`replies_json`) and what they were rendered under (`Template.reply_json`), and the thread. The site re-renders the rows under other params beside it."""
     return {
         "version": PREVIEW_VERSION, "month": f"{month:%Y-%m}", "channel": channel, "variant": variant,
         "posted_at": dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "op_ts": op_ts, "permalink": permalink, "plot_url": plot_url, "prev_url": prev_url,
         "cfg": cfg_json(tpl.cfg), "rows": tpl.rows_json(data), "params": tpl.cfg.params, "op": op,
-        "image": tpl.image_request(data, month), "replies": replies_json(tpl, data, variant),
+        "image": tpl.image_request(data, month), "replies": replies_json(tpl, data, variant), "reply": tpl.reply_json(data),
     }
+
+
+def _write_preview(cfg: DigestConfig, bundle: dict) -> str:
+    """``bundle`` at its key under ``cfg.preview``; returns where."""
+    from disk_tree import blobfs
+
+    out = f"{cfg.need('preview').format(channel=bundle['channel'], variant=bundle['variant']).rstrip('/')}/{bundle['month']}.json"
+    if not blobfs.is_url(out):
+        Path(out).parent.mkdir(parents=True, exist_ok=True)
+    blobfs.write_text(out, json.dumps(bundle, indent=1))
+    _err(f"digest: preview bundle → {out}")
+    return out
+
+
+def preview_only(tpl: Template, root: str, month: dt.date, key: str, variant: str | None = None) -> str:
+    """Only the month's preview bundle, under the channel key ``key``, for `/admin/slack`'s thread selector: a look at
+    a config or renderer change before anything is posted. No Slack client exists here and no plot is hosted (the OP has
+    no image line, `op_ts` and `permalink` are None: the page reads that as never posted). ``key`` is a lowercase slug,
+    which no Slack channel id is, so a run can't replace the bundle of a channel's real thread. Returns where."""
+    if not re.fullmatch(r"[a-z][a-z0-9-]*", key):
+        raise SystemExit(f"digest: preview key {key!r}: a lowercase slug, never a channel id")
+    variant = variant or tpl.variants[0]
+    data = tpl.load(root, month)
+    if not data:
+        raise SystemExit(f"digest: no scans for {month:%Y-%m}")
+    return _write_preview(tpl.cfg, preview_bundle(tpl, data, month, op=tpl.op_body(data, month, None), plot_url=None, prev_url=None,
+                                                  channel=key, variant=variant))
 
 
 def replies_json(tpl: Template, data: Any, variant: str) -> list[dict]:
@@ -760,6 +821,36 @@ def _ts(rec: str | dict) -> str:
     return rec["ts"] if isinstance(rec, dict) else rec
 
 
+def _op_render(tpl: Template, data, root: str, month: dt.date, state: dict, client, channel: str, variant: str, icons_dir,
+               deploy_plot) -> tuple[str, str, str | None]:
+    """The OP's body, plot URL and previous-month link: renders + hosts the plot (``icons_dir``; ``deploy_plot(local,
+    basename)`` publishes it and returns the host serving it, None → ``cfg.plot_base``), recording its name in
+    ``state["plot_name"]``. Without ``icons_dir`` nothing is rendered: the URL names the state's plot on ``plot_base``."""
+    cfg = tpl.cfg
+    plot_name = state.get("plot_name") or f"plot-{secrets.token_hex(16)}.png"
+    base = cfg.need("plot_base")
+    if icons_dir is not None:
+        local = Path(icons_dir) / plot_name
+        tpl.render_plot(data, month, local, root)
+        if deploy_plot is not None:
+            # the deployment-specific host serves the just-uploaded plot
+            # immediately (no alias propagation race → no invalid_blocks)
+            dep = deploy_plot(local, plot_name)
+            if dep:
+                base = dep
+    plot_url = f"{base}/{plot_name}?v={int(dt.datetime.now(dt.timezone.utc).timestamp())}"
+    state["plot_name"] = plot_name
+    # A just-deployed Pages asset isn't instantly served at an alias; if we post
+    # before it propagates, Slack's image-block validation 500s the whole message
+    # with `invalid_blocks`. Poll until the URL is live (or give up + warn).
+    if icons_dir is not None and deploy_plot is not None:
+        _wait_reachable(plot_url)
+    # the previous month's thread, linked from the OP (its converge state, same channel and variant)
+    prev_op = load_state(state_path(root, prior_month(month), cfg.state.format(channel=channel, variant=variant))).get("op_ts")
+    prev_url = client.permalink(prev_op) if prev_op else None
+    return tpl.op_body(data, month, plot_url, prev_url), plot_url, prev_url
+
+
 def converge_slack(tpl: Template, root: str, month: dt.date, client, channel: str, variant: str | None = None, *, icons_dir=None, deploy_plot=None, reply_delay: float = 0.0, edit_replies: bool = False) -> dict:
     """Converge the month's Slack thread: render+host the plot, post/edit the
     OP, then per reply unit post it if none exists — or, on an edited variant,
@@ -789,31 +880,9 @@ def converge_slack(tpl: Template, root: str, month: dt.date, client, channel: st
     path = state_path(root, month, cfg.state.format(channel=channel, variant=variant))
     state = load_state(path)
 
-    plot_name = state.get("plot_name") or f"plot-{secrets.token_hex(16)}.png"
-    base = cfg.need("plot_base")
-    if icons_dir is not None:
-        local = Path(icons_dir) / plot_name
-        tpl.render_plot(data, month, local, root)
-        if deploy_plot is not None:
-            # the deployment-specific host serves the just-uploaded plot
-            # immediately (no alias propagation race → no invalid_blocks)
-            dep = deploy_plot(local, plot_name)
-            if dep:
-                base = dep
-    plot_url = f"{base}/{plot_name}?v={int(dt.datetime.now(dt.timezone.utc).timestamp())}"
-    state["plot_name"] = plot_name
+    body, plot_url, prev_url = _op_render(tpl, data, root, month, state, client, channel, variant, icons_dir, deploy_plot)
     if len(tpl.variants) > 1:
         state["variant"] = variant
-    # A just-deployed Pages asset isn't instantly served at an alias; if we post
-    # before it propagates, Slack's image-block validation 500s the whole message
-    # with `invalid_blocks`. Poll until the URL is live (or give up + warn).
-    if icons_dir is not None and deploy_plot is not None:
-        _wait_reachable(plot_url)
-
-    # the previous month's thread, linked from the OP (its converge state, same channel and variant)
-    prev_op = load_state(state_path(root, prior_month(month), cfg.state.format(channel=channel, variant=variant))).get("op_ts")
-    prev_url = client.permalink(prev_op) if prev_op else None
-    body = tpl.op_body(data, month, plot_url, prev_url)
     op_ts = state.get("op_ts")
     if op_ts:
         client.edit(op_ts, body)
@@ -823,15 +892,8 @@ def converge_slack(tpl: Template, root: str, month: dt.date, client, channel: st
         state["op_ts"] = op_ts
         _err(f"digest: posted OP {op_ts}")
     if cfg.preview:
-        from disk_tree import blobfs
-
-        out = f"{cfg.preview.format(channel=channel, variant=variant).rstrip('/')}/{month:%Y-%m}.json"
-        bundle = preview_bundle(tpl, data, month, op=body, plot_url=plot_url, prev_url=prev_url, channel=channel,
-                                variant=variant, op_ts=op_ts, permalink=client.permalink(op_ts))
-        if not blobfs.is_url(out):
-            Path(out).parent.mkdir(parents=True, exist_ok=True)
-        blobfs.write_text(out, json.dumps(bundle, indent=1))
-        _err(f"digest: preview bundle → {out}")
+        _write_preview(cfg, preview_bundle(tpl, data, month, op=body, plot_url=plot_url, prev_url=prev_url, channel=channel,
+                                           variant=variant, op_ts=op_ts, permalink=client.permalink(op_ts)))
 
     posted = state.setdefault("posted", {})
     new = 0
@@ -906,6 +968,65 @@ def converge_slack(tpl: Template, root: str, month: dt.date, client, channel: st
     save_state(path, state)
     return state
 
+
+
+@dataclass(frozen=True)
+class Change:
+    """One message ``apply_slack`` re-renders: ``what`` (`op`, or the reply's UTC day), its ``ts``, the new ``body``."""
+    what: str
+    ts: str
+    body: str
+
+
+def apply_slack(tpl: Template, root: str, month: dt.date, client, channel: str, variant: str | None = None, *, op: bool = False,
+                days: Collection[str] = (), icons_dir=None, deploy_plot=None, dry_run: bool = False) -> list[Change]:
+    """Re-apply exactly the selected, already-posted messages of the month's thread to their current rendering: the
+    OP (``op``: its plot re-rendered and hosted too) and the replies of ``days`` (UTC dates; a sender-variant reply
+    keeps its name and avatar). Nothing else is touched: no new reply, no provisional reply, no alert, no plot unless
+    ``op``. A selected day without a posted reply is skipped (and logged). ``dry_run``: render and return the changes,
+    edit nothing, host nothing, save no state. Returns the changes, in thread order."""
+    cfg = tpl.cfg
+    variant = variant or tpl.variants[0]
+    data = tpl.load(root, month)
+    if not data:
+        raise SystemExit(f"digest: no scans for {month:%Y-%m}")
+    path = state_path(root, month, cfg.state.format(channel=channel, variant=variant))
+    state = load_state(path)
+    out: list[Change] = []
+    if op:
+        if not state.get("op_ts"):
+            raise SystemExit(f"digest: {month:%Y-%m} has no OP in {channel} yet (converge posts it)")
+        body, _, _ = _op_render(tpl, data, root, month, state, client, channel, variant,
+                                None if dry_run else icons_dir, None if dry_run else deploy_plot)
+        out.append(Change("op", state["op_ts"], body))
+    want = set(days)
+    posted = state.get("posted", {})
+    units = {u.key: u for u in tpl.units(data, variant)}
+    for day in sorted(want):
+        u, have = units.get(day), posted.get(day)
+        if u is None or have is None:
+            _err(f"digest: {day}: no posted reply in {month:%Y-%m}'s thread; skipped")
+            continue
+        out.append(Change(day, _ts(have), u.reply.body))
+    if dry_run:
+        return out
+    for c in out:
+        client.edit(c.ts, c.body)
+        if c.what != "op" and isinstance(posted[c.what], dict):
+            posted[c.what]["scan"] = units[c.what].scan
+        _err(f"digest: edited {'OP' if c.what == 'op' else 'reply ' + c.what} {c.ts}")
+    if out:
+        save_state(path, state)
+    return out
+
+
+def day_range(spec: str) -> list[str]:
+    """`A..B` (inclusive ISO dates) → every UTC date in it, or a single `A`."""
+    a, sep, b = spec.partition("..")
+    lo, hi = dt.date.fromisoformat(a), dt.date.fromisoformat(b if sep else a)
+    if hi < lo:
+        raise ValueError(f"day range {spec!r}: {hi} is before {lo}")
+    return [(lo + dt.timedelta(days=i)).isoformat() for i in range((hi - lo).days + 1)]
 
 def converge_slack_now(tpl: Template, root: str, month: dt.date, client, channel: str, variant: str | None = None, **kw) -> dict:
     """The scheduled run's converge: ``month``'s thread (the current one),

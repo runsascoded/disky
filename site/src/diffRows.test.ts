@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { buildTree } from './diffModel'
+import { buildTree, diffLoadingLabel } from './diffModel'
 import type { DiffData, DiffRow } from './diffModel'
 import { deltaPct, diffCellAction, diffTableRows, fmtPct, sortDiffRows } from './diffRows'
 import type { DiffTableRow } from './diffRows'
@@ -83,7 +83,7 @@ describe('diffTableRows', () => {
 })
 
 describe('diffCellAction', () => {
-  it('`k` decides: an object opens, a directory drills (enumerated below or not); root, fold, filler and ⌥-click pin', () => {
+  it('`k` decides: an object opens, a directory drills (enumerated below or not); remainders inspect their parent; root and ⌥-click pin', () => {
     // `ckpt`'s one enumerated child leaves 10 MB unexplained: an `(unchanged)` filler.
     const { cells } = buildTree(data([
       row('ckpt', 'changed', 10_000_000, 13_000_000, 10, 11, true),
@@ -94,10 +94,10 @@ describe('diffCellAction', () => {
     const all = [...cells, ...cells.flatMap(c => c.children ?? [])]
     expect(all.map(n => [n.key, diffCellAction(n), diffCellAction(n, true)])).toEqual([
       ['ckpt', 'drill', 'pin'],
-      ['(other)', 'pin', 'pin'],
+      ['(other)', 'remainder', 'pin'],
       ['logs', 'drill', 'pin'],
       ['ckpt/model.safetensors', 'open', 'pin'],
-      ['ckpt/__unchanged__', 'pin', 'pin'],
+      ['ckpt/__unchanged__', 'remainder', 'pin'],
     ])
     expect(diffCellAction({ k: 'dir', status: 'root', label: 'ctbk' })).toBe('pin')
   })
@@ -143,5 +143,11 @@ describe('deltaPct / fmtPct', () => {
     expect(fmtPct(0.0123)).toBe('+1.23%')
     expect(fmtPct(12.345)).toBe('+1.2k%')
     expect(fmtPct(0)).toBe('+0.00%')
+  })
+})
+
+describe('diffLoadingLabel: the diff header while the full walk aligns', () => {
+  it('names the pair until its first paint (`depth=1`) is on the map, then says the rows are what\'s left', () => {
+    expect([diffLoadingLabel(false, '11/4 → 11/5'), diffLoadingLabel(true, '11/4 → 11/5')]).toEqual(['Aligning 11/4 → 11/5…', 'Aligning the rows…'])
   })
 })

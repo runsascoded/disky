@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+from collections import Counter
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 
 import pandas as pd
 import pyarrow as pa
@@ -472,9 +474,18 @@ class _UndoHandle:
 @dataclass
 class _UndoClient:
     handle: _UndoHandle
+    #: Buckets whose soft delete is off now, and ones the caller can't read (`storage.buckets.get`); the rest retain 7 days.
+    off: tuple[str, ...] = ()
+    unreadable: tuple[str, ...] = ()
 
     def bucket(self, name):
         return self.handle
+
+    def get_bucket(self, name):
+        from google.api_core.exceptions import Forbidden
+        if name in self.unreadable:
+            raise Forbidden(f"no storage.buckets.get on {name}")
+        return SimpleNamespace(soft_delete_policy=None if name in self.off else SimpleNamespace(retention_duration_seconds=7 * 86400))
 
 
 def _real_run_dir(tmp_path, for_real=True):
@@ -522,14 +533,25 @@ def test_undo_restores_logged_generations_and_classifies_outcomes(tmp_path):
     assert json.loads((d / f"undo-{s['stamp']}-summary.json").read_text())["buckets"] == s["buckets"]
 
 
+def test_undo_reports_what_settled_every_so_many_restores(tmp_path, monkeypatch):
+    """`progress` hears each `UNDO_PROGRESS_ROWS` restores by band, as they settle: what a record written along the way
+    (`UndoRecord`) can say if the undo never returns."""
+    from dt_cloud import sweep_exec
+    monkeypatch.setattr(sweep_exec, "UNDO_PROGRESS_ROWS", 3)
+    reports: list = []
+    sweep_exec.undo_run(str(_real_run_dir(tmp_path)), client=_UndoClient(_UndoHandle(live={"a/y"})), workers=2, now=1_800_000_000, progress=reports.append)
+    assert reports == [{"gs://b1/a/": {"restored": 2, "already_live": 1}}, {"gs://b1/b/": {"restored": 1}}]
+
+
 def test_undo_prefix_filter_and_dry_run(tmp_path):
     """`prefixes` narrows to gs://bucket/dir/ (bare form accepted); a dry run
     logs `would_restore` and calls nothing."""
     from dt_cloud.sweep_exec import undo_run
     d = _real_run_dir(tmp_path)
     h = _UndoHandle()
-    s = undo_run(str(d), client=_UndoClient(h), prefixes=("b1/b/",), dry_run=True, now=1_800_000_000)
-    assert h.calls == []
+    reports: list = []
+    s = undo_run(str(d), client=_UndoClient(h), prefixes=("b1/b/",), dry_run=True, now=1_800_000_000, progress=reports.append)
+    assert (h.calls, reports) == ([], [])
     assert _restored_rows(d) == [("b/w", 14, 0, "would_restore", None)]
     assert s["buckets"]["b1"]["decisions"] == {"would_restore": 1}
 
@@ -543,6 +565,48 @@ def test_undo_refuses_dry_runs_and_closed_windows(tmp_path):
     d = _real_run_dir(tmp_path / "real")
     with pytest.raises(SystemExit, match="undo window closed"):
         undo_run(str(d), client=_UndoClient(_UndoHandle()), deadline=1_700_000_000, now=1_800_000_000)
+
+
+def _two_bucket_run_dir(tmp_path):
+    d = _real_run_dir(tmp_path)
+    (d / "deleted-summary.json").write_text(json.dumps({"plan": str(d), "for_real": True, "buckets": {"b1": {}, "b2": {}}}))
+    pd.DataFrame([{"name": "c/u", "size_bytes": 5, "generation": 21, "decision": "delete", "dir": "c"}]).to_parquet(d / "deleted" / "b2.parquet")
+    return d
+
+
+def test_undo_refuses_a_bucket_whose_soft_delete_is_off_now(tmp_path):
+    """GCS restores nothing from a bucket with no soft-delete policy, whatever it retained when the run deleted: the
+    undo asks GCS and refuses up front, naming the buckets (and the run's others, for `-b`); nothing is restored."""
+    import pytest
+    from dt_cloud.sweep_exec import undo_run
+    d = _two_bucket_run_dir(tmp_path)
+    h = _UndoHandle()
+    reports: list = []
+    with pytest.raises(SystemExit) as one:
+        undo_run(str(d), client=_UndoClient(h, off=("b1",)), now=1_800_000_000, progress=reports.append)
+    with pytest.raises(SystemExit) as both:
+        undo_run(str(d), client=_UndoClient(h, off=("b1", "b2")), now=1_800_000_000, dry_run=True)
+    assert [str(one.value), str(both.value), h.calls, reports, sorted(p.name for p in d.iterdir())] == [
+        "undo unavailable: soft delete is off on b1 (GCS, now): it restores nothing from a bucket with no soft-delete policy. "
+        "The run's other buckets still have one: -b b2",
+        "undo unavailable: soft delete is off on b1, b2 (GCS, now): it restores nothing from a bucket with no soft-delete policy",
+        [],
+        [],
+        ["deleted", "deleted-summary.json", "plan-summary.json"],
+    ]
+
+
+def test_undo_restores_the_buckets_named_that_still_have_soft_delete(tmp_path):
+    """`-b` cuts the run to buckets GCS still restores from; a bucket the caller can't read the policy of is restored
+    without that check (GCS answers each object)."""
+    from dt_cloud.sweep_exec import undo_run
+    d = _two_bucket_run_dir(tmp_path)
+    h = _UndoHandle()
+    s = undo_run(str(d), client=_UndoClient(h, off=("b1",)), only_buckets=("b2",), workers=1, now=1_800_000_000)
+    assert (h.calls, {b: v["decisions"] for b, v in s["buckets"].items()}) == ([("c/u", 21, 0)], {"b2": {"restored": 1}})
+    h2 = _UndoHandle()
+    s2 = undo_run(str(d), client=_UndoClient(h2, unreadable=("b1", "b2")), only_buckets=("b2",), workers=1, now=1_800_000_001)
+    assert (h2.calls, {b: v["decisions"] for b, v in s2["buckets"].items()}) == ([("c/u", 21, 0)], {"b2": {"restored": 1}})
 
 
 # ---- bulk undo: `bulkRestore` per logged dir, gated by an exactness precheck ----
@@ -604,6 +668,9 @@ class _BulkClient:
     def bucket(self, name):
         return self.handle
 
+    def get_bucket(self, name):
+        return SimpleNamespace(soft_delete_policy=SimpleNamespace(retention_duration_seconds=7 * 86400))
+
     def list_blobs(self, bucket, prefix="", soft_deleted=False, fields=None):
         self.listings.append((bucket, prefix, soft_deleted))
         if soft_deleted:
@@ -634,7 +701,13 @@ def test_undo_bulk_restores_clean_dirs_and_falls_back_on_unlogged(tmp_path, monk
     monkeypatch.setattr(se, "_sleep", lambda _s: None)
     d = _real_run_dir(tmp_path)
     h, c = _bulk_fixture()
-    s = se.undo_run(str(d), client=c, workers=2, now=NOW, bulk=True, window=(W0, W1))
+    reports: list = []
+    s = se.undo_run(str(d), client=c, workers=2, now=NOW, bulk=True, window=(W0, W1), progress=reports.append)
+    # What it tells a record as it goes: the bulk rows once verified, then the per-object rest.
+    assert reports == [
+        {"gs://b1/a/": {"bulk_restored": 1, "already_live": 1}},
+        {"gs://b1/a/": {"unrestorable": 1}, "gs://b1/b/": {"restored": 1}},
+    ]
     body = {"matchGlobs": ["a/**"], "softDeletedAfterTime": AFTER, "softDeletedBeforeTime": BEFORE, "allowOverwrite": False}
     assert c._connection.requests == [
         ("POST", "/b/b1/o/bulkRestore", body),
@@ -740,3 +813,76 @@ def test_cover_dirs_and_failed_bulk_op():
     assert se.run_bulk_op(client, "b1", body) == {
         "operation": None, "globs": 1, "succeeded": 0, "skipped": 0, "failed": 0, "error": "RuntimeError: 403 bulkRestore denied",
     }
+
+
+def _killed_run_dir(tmp_path, plan_summary=None, log=True):
+    """What a killed real run leaves: `plan-summary.json` and the parts that uploaded; no `deleted-summary.json`."""
+    d = tmp_path / "run"
+    d.mkdir()
+    (d / "plan-summary.json").write_text(json.dumps(plan_summary or {"date": "2026-09-01", "plan_id": 12, "approved": ["gs://b1/a/", "gs://b2/c/"], "buckets": {"b1": {}, "b2": {}}, "diagnostic": False}))
+    if log:
+        (d / "deleted" / "b1").mkdir(parents=True)
+        pd.DataFrame([
+            {"name": "a/x", "size_bytes": 10, "generation": 11, "decision": "delete", "dir": "a"},
+            {"name": "a/y", "size_bytes": 20, "generation": 12, "decision": "delete", "dir": "a"},
+        ]).to_parquet(d / "deleted" / "b1" / "part-00000.parquet")
+    return d
+
+
+def test_undo_of_a_killed_run_restores_what_its_log_names_and_says_the_log_may_be_partial(tmp_path, monkeypatch):
+    from dt_cloud import sweep_exec
+    from dt_cloud.sweep_exec import undo_run
+    d = _killed_run_dir(tmp_path)
+    h = _UndoHandle()
+    said = []
+    monkeypatch.setattr(sweep_exec, "err", lambda text, **_: said.append(text))
+    s = undo_run(str(d), client=_UndoClient(h), workers=1, deadline=None, now=1_800_000_000)
+    assert h.calls == [("a/x", 11, 0), ("a/y", 12, 0)]
+    assert s["log_partial"] is True
+    assert s["buckets"] == {"b1": {
+        "decisions": {"restored": 2},
+        "restored_bytes": 30,
+        "bands": {"gs://b1/a/": {"restored": 2, "bytes": 30}},
+    }}
+    assert said == [
+        f"{d}: no deleted-summary.json, so its log may be partial: this restores only the generations it names. One in a part that never uploaded stays deleted (-B won't reach it): restore it by hand, or, while this scan is still the newest, undo a re-dispatch of the same items, whose log names it. After a newer scan no manifest names it, and by hand is the only way.",
+        "b1: 2 deleted object(s) to restore",
+        "  b1: 2 restored (0.00 TB restored)",
+    ]
+
+
+def test_undo_of_a_finished_run_doesnt_call_its_log_partial(tmp_path):
+    from dt_cloud.sweep_exec import undo_run
+    assert "log_partial" not in undo_run(str(_real_run_dir(tmp_path)), client=_UndoClient(_UndoHandle()), workers=1, now=1_800_000_000)
+
+
+def test_undo_with_no_summary_refuses_a_dry_run_and_a_run_that_logged_nothing(tmp_path):
+    import pytest
+    from dt_cloud.sweep_exec import undo_run
+    (tmp_path / "dry").mkdir()
+    d = _killed_run_dir(tmp_path / "dry", {"approved": [], "buckets": {"b1": {}}, "diagnostic": True})
+    with pytest.raises(SystemExit) as dry:
+        undo_run(str(d), client=_UndoClient(_UndoHandle()), now=1_800_000_000)
+    assert dry.value.code == f"{d} is a dry run — it deleted nothing"
+    (tmp_path / "none").mkdir()
+    d = _killed_run_dir(tmp_path / "none", log=False)
+    with pytest.raises(SystemExit) as nothing:
+        undo_run(str(d), client=_UndoClient(_UndoHandle()), now=1_800_000_000)
+    assert nothing.value.code == f"{d} has no deleted-summary.json and no deleted/ log: nothing names what it deleted"
+
+
+def test_an_undo_record_never_calls_a_partial_log_fully_undone(monkeypatch):
+    import dt_cloud.index_footer as footer
+    from dt_cloud.sweep_exec import UndoRecord
+    sent = []
+    monkeypatch.setattr(footer, "_creds", lambda: ("tok", "acct"))
+    monkeypatch.setattr(footer, "_d1_query", lambda sql, acct, tok: sent.append(sql))
+
+    def settled(summary: dict) -> str | None:
+        record = UndoRecord("r")
+        record({"gs://b1/a/": Counter(already_live=2)})
+        return record.finish(summary, 2)
+
+    assert [settled({}), settled({"log_partial": True})] == ["full", "partial"]
+    marked = "UPDATE deletion_runs SET undo_state = 'partial' WHERE run_id = 'r' AND undo_state != 'full'"
+    assert sent == [marked, "UPDATE deletion_runs SET undo_state = 'full' WHERE run_id = 'r'", marked, marked]

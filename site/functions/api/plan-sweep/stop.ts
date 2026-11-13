@@ -20,7 +20,7 @@ export const onRequestPost = async (ctx: Ctx & { env: Env }): Promise<Response> 
   const gated = await requireAdmin(ctx)
   if (gated instanceof Response) return gated
   if (!ctx.env.GCP_SA_KEY) return json({ error: "stop not configured (no GCP_SA_KEY)" }, 503)
-  const cfg = batchConfig(ctx.env, ["GCP_PROJECT"])
+  const cfg = batchConfig(ctx.env, ["GCP_PROJECT", "BATCH_REGION"])
   if ("missing" in cfg) return json({ error: notConfigured("stop", cfg.missing) }, 503)
 
   const body = (await ctx.request.json().catch(() => null)) as { job_id?: string } | null

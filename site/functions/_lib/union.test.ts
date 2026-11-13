@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import type { Env } from './auth'
 import { secondaryStores, unionViews } from './stores'
 import { memberRequest, unionFor, unionRoot, UnionOverlap } from './union'
@@ -89,9 +89,12 @@ describe('unionFor', () => {
     expect([unionFor(req('date=x'), named), unionFor(req('store=all'), named)]).toEqual([null, { ...view, main: false }])
     expect(unionFor(req(''), {} as Env)).toBe(null)
   })
-  it('a malformed config is a 500', async () => {
+  it('a malformed config is a 500 that quotes nothing of it; the detail goes to the log', async () => {
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {})
     const r = unionFor(req(''), env({ all: { union: ['primary', 'nope'] } })) as Response
-    expect([r.status, await r.text()]).toEqual([500, '{"error":"STORES_JSON.all.union: \'nope\' is not a store (want \'primary\' or a store key)"}\n'])
+    expect([r.status, await r.text()]).toEqual([500, '{"error":"store configuration error"}\n'])
+    expect(log.mock.calls).toEqual([["STORES_JSON.all.union: 'nope' is not a store (want 'primary' or a store key)"]])
+    log.mockRestore()
   })
 })
 

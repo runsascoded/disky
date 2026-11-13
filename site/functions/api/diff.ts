@@ -12,21 +12,21 @@
  * immutable per (from, to, path, budget, scope) plus the ledger head under a
  * user lens, and edge-cached accordingly.
  */
-import { filterJson, hiddenNotFound, isHidden, restrictDiff, restrictionFor } from '../_lib/restrict.js'
-import { type Env, type Identity, json, requireViewer } from '../_lib/auth.js'
+import { filterJson, hiddenNotFound, isHidden, restrictDiff, restrictedScopeRefused, restrictedSearchRefused, restrictionFor, scopeReachesHidden } from '../_lib/restrict.js'
+import { type Env, type Identity, json, presentsCredentials, requireViewer } from '../_lib/auth.js'
 import { DESCENT_V } from '../_lib/diffDescent.js'
 import { DiffUnavailable, intervalsOn, ivRefusal, ivRetry, pathGens, withPathStore, storeReady, type Lens } from '../_lib/index.js'
 import { classKey, parseClasses, parseOwner, queryParam, QueryError } from '../_lib/scope.js'
-import { ATTEN_DEFAULT, buildDiff, type DiffRow, FILTER_VIEW_V, LensUnavailable, MIN_AREA_DEFAULT, NotFound, QUANT, readRootAgg } from '../_lib/view.js'
+import { ATTEN_DEFAULT, buildDiff, type DiffRow, FILTER_VIEW_V, LensUnavailable, MIN_AREA_DEFAULT, NotFound, QUANT, readRootAgg, scopedTag, WALK_V } from '../_lib/view.js'
 import { hexNote, hexQuery, indexedGate, staticTag } from '../_lib/staticFilter.js'
 import { FilterRejected, indexedOnly, pathTerms, rejectBody, rejectQuery, rejectScope } from '../_lib/indexedOnly.js'
-import { cacheEnvTag, cacheKeyFor, cacheMatch, cacheStore, isPartial, keepFor, serverTiming, UPGRADE_PHASE2_MS, UPGRADE_SEARCH_LIMITS, UPGRADE_WALK_MS, upgradePartial } from '../_lib/edgeCache.js'
+import { cacheEnvTag, cacheKeyFor, cacheMatch, cacheStore, cutReason, isPartial, keepFor, serverTiming, UPGRADE_PHASE2_MS, UPGRADE_SEARCH_LIMITS, UPGRADE_WALK_MS, upgradePartial } from '../_lib/edgeCache.js'
 import type { SearchLimits } from '../_lib/search.js'
 import { LENS_PRIMARY_ONLY, storeKey, withStore } from '../_lib/stores.js'
 import { lensParam, ME_UNRESOLVED, resolveLens } from '../_lib/me.js'
 import { isScanId } from '../../src/scanSlug.js'
 import { scanArg } from '../_lib/scanArg.js'
-import { traceJoins } from '../_lib/shared.js'
+import { ahead, HELD_BYTES, loadScopes, traceJoins } from '../_lib/shared.js'
 import { cutoffOf, type FilteredRoot, memberOf, memberRequest, membersAt, openUnion, type Refusal, refusalOf, refusalResponse, type Union, UnionOverlap, unionFilterFields, unionFor } from '../_lib/union.js'
 import { filterThreshold } from '../_lib/filter.js'
 import type { UnionView } from '../_lib/stores.js'
@@ -50,11 +50,11 @@ interface MemberDiff {
 }
 
 async function diffOf(ctx0: DiffCtx, member?: MemberDiff): Promise<Response> {
+  const st = serverTiming()
   // `store=<key>`: a secondary store's env overlay (none = the primary, as is).
   const ctx1 = withStore(ctx0)
   if (ctx1 instanceof Response) return ctx1
   const ctx = await withPathStore(ctx1)
-  const st = serverTiming()
   traceJoins(ctx.env, st.trace)
   if (!storeReady(ctx.env)) {
     return new Response('diff API not configured (missing index store creds)', { status: 503 })
@@ -103,16 +103,68 @@ async function diffOf(ctx0: DiffCtx, member?: MemberDiff): Promise<Response> {
   const refused = query && indexedOnly(ctx.env) ? rejectQuery(qRaw, pathTerms(ctx.env)) ?? rejectScope(!!(lens || classes)) : null
   if (refused) return new Response(rejectBody(refused), { status: 400, headers: { 'content-type': 'application/json' } })
 
-  const gated = member ? member.id : await st.time('auth', requireViewer(ctx as never))
+  // The gate, beside what the answer needs whoever asks (`shared.ahead`: started now for a request that may pass it,
+  // used only once it has): both scans' checks, the cache key's generations and, unscoped, the cache lookup.
+  const gate = member ? Promise.resolve(member.id) : st.time('auth', requireViewer(ctx as never))
+  gate.catch(() => {})
+  await loadScopes()
+  const early = ahead(ctx.env, !!member || await presentsCredentials(ctx as never))
+  try {
+    return await diffGated(ctx, st, early, gate, { from, to, path, w, h, minArea, atten, top, summary, depth, lens, rawOwner, owner, classes, qRaw, qp, query, member })
+  } finally {
+    early.done()
+  }
+}
+
+/** `diffOf` past its parameters: the gate, the scans' checks, the cache lookup and the build. */
+async function diffGated(
+  ctx: DiffCtx,
+  st: ReturnType<typeof serverTiming>,
+  early: ReturnType<typeof ahead>,
+  gate: Promise<Identity | null | Response>,
+  o: { from: string; to: string; path: string; w: number; h: number; minArea: number; atten: number; top: number; summary: boolean; depth?: number; lens?: Lens; rawOwner: string | null; owner: ReturnType<typeof parseOwner>; classes: ReturnType<typeof parseClasses>; qRaw: string; qp: ReturnType<typeof queryParam>; query: ReturnType<typeof queryParam>['query']; member?: MemberDiff },
+): Promise<Response> {
+  const { from, to, path, w, h, minArea, atten, top, summary, depth, rawOwner, owner, classes, qRaw, qp, member } = o
+  let { lens, query } = o
+  const url = new URL(ctx.request.url)
+  const scans = early.later(() => Promise.all(['from', 'to'].map(key => scanArg(ctx.env, url.searchParams, key))))
+  const gens = early.later(() => pathGens(ctx.env, [from, to]))
+  const descentOf = (lensOn: boolean) => url.searchParams.get('dm') === 'delta' && intervalsOn(ctx.env) && !lensOn && !owner && !query && !classes && !summary && atten >= 1
+  const keyOf = (head: number, g: string, lensTag: string, descent: boolean) => cacheKeyFor('diff', cacheEnvTag(ctx.env, ctx.request),
+    `${from}/${to}/${encodeURIComponent(path)}?w=${w}&h=${h}&a=${minArea}&t=${atten}&n=${top}&l=${lensTag}` +
+      `&o=${rawOwner ?? ''}&cl=${classKey(classes)}&qs=${query ? qp.syntax : ''}&q=${encodeURIComponent(query ? qRaw : '')}&head=${head}&s=${summary ? 1 : 0}&D=${depth ?? ''}&g=${g}&st=${staticTag(ctx.env, query)}${query ? `&fv=${FILTER_VIEW_V}` : ''}` +
+      // The walk's answer version (a summary has no walk: its key stays).
+      (summary ? '' : `&wv=${WALK_V}`) +
+      // A scoped read's answer version, where the diff is one (absent otherwise, so no other key moves).
+      scopedTag(ctx.env, { lens, owner, classes, query }) +
+      // A union root's member diff: the union's threshold (absent otherwise, so no other key moves).
+      (member?.threshold !== undefined ? `&T=${member.threshold}` : '') + (descent && ctx.env.DIFF_DESCENT === '1' ? `&dm=d${DESCENT_V}` : ''),
+    storeKey(ctx.env),
+  )
+  // Unscoped and unfiltered (the map's diffs): the key is the gate's to none of (no lens, ledger head or name rule), so
+  // its lookup starts beside the gate too.
+  const plain = !lens && !owner && !query
+  const early1 = plain ? early.later(async () => {
+    const g = await gens()
+    const key = keyOf(0, g, lensParam(undefined), descentOf(false))
+    return { key, hit: await st.time('match', cacheMatch(ctx.env, key)) }
+  }) : null
+
+  const gated = await gate
   if (gated instanceof Response) return gated
-  // A path-restricted link (specs/path-scopes.md): a hidden path is absent,
+  early.commit()
+  // A path-restricted link (`_lib/restrict.ts`): a hidden path is absent,
   // and every body (cached or fresh) is filtered on the way out.
   const restriction = restrictionFor(gated, ctx.env)
   if (restriction && isHidden(path, restriction)) return hiddenNotFound()
+  // A name filter's totals sum every match, hidden ones too (`/api/subtree`'s refusal).
+  if (restriction && qp.query) return restrictedSearchRefused()
+  // An owner, class or lens scope at or above a hidden dir: `/api/subtree`'s refusal.
+  if (restriction && (lens || owner || classes) && scopeReachesHidden(path, restriction)) return restrictedScopeRefused()
   const out = (res: Response | Promise<Response>) =>
     restriction ? Promise.resolve(res).then(r => filterJson(r, (b: Parameters<typeof restrictDiff>[0]) => restrictDiff(b, restriction))) : res
   // Both ends must be indexed scans: a miss is a 404, never another scan.
-  const miss = (await Promise.all(['from', 'to'].map(key => scanArg(ctx.env, url.searchParams, key)))).find(r => r instanceof Response)
+  const miss = (await scans()).find(r => r instanceof Response)
   if (miss) return miss
 
   // One guard over the D1 pre-step, the cache match and the build (see
@@ -126,22 +178,16 @@ async function diffOf(ctx0: DiffCtx, member?: MemberDiff): Promise<Response> {
     // The static index's hex-run rule: substrings match where they `occur` under it, static or not (`hexRuns.ts`).
     const hx = await hexQuery(ctx.env, query)
     query = hx.query
-    const [head, g] = await st.time('pre', Promise.all([Promise.resolve(0), pathGens(ctx.env, [from, to])]))
+    const [head, g] = await st.time('pre', Promise.all([Promise.resolve(0), gens()]))
     // Δ mode from the transitions (specs/diff-from-changes.md): asked for explicitly (`dm=delta`: a client that doesn't
     // say draws max(old, new) areas from these rows too), unscoped, on a deployment whose store has them.
     // `atten ≥ 1`: a parent's floor is then at most its children's, so a changed child's parent (as big) is read too.
-    const deltaOk = url.searchParams.get('dm') === 'delta' && intervalsOn(ctx.env) && !lens && !owner && !query && !classes && !summary && atten >= 1
+    const deltaOk = descentOf(!!lens)
     const descent = deltaOk && ctx.env.DIFF_DESCENT === '1'
-    const cacheKey = cacheKeyFor('diff', cacheEnvTag(ctx.env, ctx.request),
-      `${from}/${to}/${encodeURIComponent(path)}?w=${w}&h=${h}&a=${minArea}&t=${atten}&n=${top}&l=${lensTag}` +
-        `&o=${rawOwner ?? ''}&cl=${classKey(classes)}&qs=${query ? qp.syntax : ''}&q=${encodeURIComponent(query ? qRaw : '')}&head=${head}&s=${summary ? 1 : 0}&D=${depth ?? ''}&g=${g}&st=${staticTag(ctx.env, query)}${query ? `&fv=${FILTER_VIEW_V}` : ''}` +
-        // A union root's member diff: the union's threshold (absent otherwise, so no other key moves).
-        (member?.threshold !== undefined ? `&T=${member.threshold}` : '') + (descent ? `&dm=d${DESCENT_V}` : ''),
-      storeKey(ctx.env),
-    )
+    const cacheKey = keyOf(head, g, lensTag, deltaOk)
     // …and both scans covered by the static index for this literal (else `scan-not-indexed`).
     if (query && indexedOnly(ctx.env)) {
-      const r = await st.time('indexed', indexedGate(ctx.env, query.ast, path, [from, to]))
+      const r = await st.time('indexed', indexedGate(ctx.env, query.ast, path, [from, to], { maxBytes: HELD_BYTES }))
       if (r) return new Response(rejectBody(r), { status: 400, headers: { 'content-type': 'application/json' } })
     }
     // The worker's answer: the diff's JSON and what to keep of it — `phase2Ms` (a background full run's) over
@@ -161,16 +207,18 @@ async function diffOf(ctx0: DiffCtx, member?: MemberDiff): Promise<Response> {
         threshold: Math.round(diff.threshold),
         ...(keep !== true ? { budgetCut: true } : {}),
       })
-      return { body, keep }
+      return { body, keep, cut: cutReason(diff) }
     }
     // A partial answer schedules the full one in the background (`upgradePartial`, as subtree.ts).
     const upgrade = (res: Response): Response => {
-      res.headers.set('x-cache-upgrade', upgradePartial(ctx.env, cacheKey, () => render({ phase2Ms: UPGRADE_PHASE2_MS, searchLimits: UPGRADE_SEARCH_LIMITS, walkMs: UPGRADE_WALK_MS }), ctx.waitUntil?.bind(ctx)))
+      res.headers.set('x-cache-upgrade', upgradePartial(ctx.env, cacheKey, trace => render({ phase2Ms: UPGRADE_PHASE2_MS, searchLimits: UPGRADE_SEARCH_LIMITS, walkMs: UPGRADE_WALK_MS, trace }), ctx.waitUntil?.bind(ctx)))
       return res
     }
-    const hit = await st.time('match', cacheMatch(ctx.env, cacheKey))
+    const looked = early1 && await early1()
+    const hit = looked && looked.key.url === cacheKey.url ? looked.hit : await st.time('match', cacheMatch(ctx.env, cacheKey))
     if (hit) return out(isPartial(hit) ? upgrade(hit) : hit)
 
+    st.mark('fixed')
     const { body, keep } = await render({ trace: st.trace })
     // A phase 2 cut short by its time budget: kept briefly (`keepFor`, as subtree.ts).
     const res = await cacheStore(ctx.env, cacheKey, body, { 'server-timing': st.header() }, ctx.waitUntil?.bind(ctx), keep)
@@ -183,7 +231,7 @@ async function diffOf(ctx0: DiffCtx, member?: MemberDiff): Promise<Response> {
     if (e instanceof LensUnavailable) return new Response('lens index not available for a scan', { status: 409 })
     if (e instanceof DiffUnavailable) return new Response(e.message, { status: 409 })
     const msg = String((e as Error).message ?? e)
-    if (msg.startsWith('query too wide')) return new Response(msg, { status: 413 })
+    if (/^(query|lookup) too wide/.test(msg)) return new Response(msg, { status: 413 })
     if (/D1_ERROR|internal error/i.test(msg)) return new Response(`index backend unavailable, retry: ${msg}`, { status: 503, headers: { 'retry-after': '5' } })
     return new Response(`diff failed: ${msg}`, { status: 500 })
   }

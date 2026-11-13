@@ -1,3 +1,6 @@
+import { readerObjects } from './readerWorker.js'
+import type { ReaderCache, ReaderObjects } from './readerRuntime.js'
+import { colo } from './shared.js'
 /** The map's name filter from the static name index on R2 (specs/architecture/static-name-search.md): a
  *  single-literal `?f=` query's match roots, exact on every scan of the generation, without walking the
  *  per-scan path store for them (`FILTER_STATIC=1` with the `INDEX_R2` binding).
@@ -75,7 +78,12 @@ export interface HitOpts {
   /** A nested read's budget (`view.ts` `nestRollup`): a source whose answer would be more than this many match
    *  roots — bounded so from its index before a read, or held with that many — declines (null) and sets `over`. */
   maxRows?: number
+  /** A diff's refusal (`view.ts` `tooBroadToDiff`): a source that can tell, before reading it, that the answer's
+   *  `hitsBytes` are past this declines (null) and sets `over` and `overScans`. One that can't just answers. */
+  maxBytes?: number
   over?: boolean
+  /** With `over` from `maxBytes`: the scans the answer would have covered (`covers`). */
+  overScans?: string[]
 }
 
 /** Every read's `req`: the request reading (`reqOf(env)`): what it joins of other requests' reads, and owns of its own
@@ -217,7 +225,7 @@ export async function catalogRoot(catalog: CatalogLookup, key: string, req?: Req
 export interface HitCache { get(key: string): Promise<Hit[] | null>; put(key: string, hits: Hit[]): Promise<void> }
 
 /** Hits as columns of JSON (sizes as decimal strings: a bucket's bytes pass 2^53). */
-export function cacheHits(cache: Cache, prefix: string, version = 'hits-v1'): HitCache {
+export function cacheHits(cache: ReaderCache, prefix: string, version = 'hits-v1'): HitCache {
   const url = (key: string) => `https://static-filter.invalid/${prefix}/${version}/${encodeURIComponent(key)}.json`
   return {
     async get(key) {
@@ -238,7 +246,7 @@ export type StaticFilterEnv = { FILTER_STATIC?: string; FILTER_STATIC_HEAVY?: st
 /** The drilldown over a bucket's generation: the base `drill/` and its `runs`' (`staticDrill.ts`), with the fleet
  *  root from `opts.catalog` (default: the base catalog); `cached`: its indexes in `cache` under `prefix` (the
  *  generation's `staticPrefix`). */
-export function drillSource(blobs: Blobs, cached?: { cache: Cache; prefix: string }, opts: { runs?: (req?: Req) => Promise<string[]>; catalog?: CatalogLookup } = {}): DrillSource {
+export function drillSource(blobs: Blobs, cached?: { cache: ReaderCache; prefix: string }, opts: { runs?: (req?: Req) => Promise<string[]>; catalog?: CatalogLookup } = {}): DrillSource {
   const { cache, prefix } = cached ?? {}
   const pre = (dir: string | null) => `${prefix}/${dir ? `${dir}/` : ''}${DRILL_DIR}`
   const catalog = opts.catalog ?? new StaticCatalog(blobs, cache ? cacheIndexes(cache, prefix!, 'catalog-v1') : undefined)
@@ -271,38 +279,38 @@ export const UNINDEXED: StaticFilterStore = {
 }
 
 /** The isolate's static filter stores, by generation and knobs (stores sharing a generation may differ in them). */
-const held = new Map<string, { r2: R2Bucket; store: StaticFilterStore }>()
+const held = new Map<string, { r2: ReaderObjects; store: StaticFilterStore }>()
 /** The isolate's static filter store over the bound bucket; null when the static filter is off. A secondary store
  *  reads its own generation only (`STATIC_GEN` from its `STORES_JSON` vars), none = `UNINDEXED`. A test injects
  *  its own (`injectedStores`). */
 export function staticFilterStore(env: StaticFilterEnv): StaticFilterStore | null {
-  const on = env.FILTER_STATIC === '1' && !!env.INDEX_R2
+  const on = env.FILTER_STATIC === '1' && !!readerObjects(env)
   if (on && env.STORE_KEY !== undefined && !env.STATIC_GEN?.trim()) return UNINDEXED
   const injected = injectedStores.get(env)
   if (injected) return boundTo(injected, reqOf(env))
-  if (!on || !env.INDEX_R2) return null
+  if (!on || !readerObjects(env)) return null
   const gen = staticGen(env), pre = staticPrefix(gen)
   const slot = `${gen}|${env.FILTER_STATIC_HEAVY === '1' ? 'h' : ''}|${env.FILTER_STATIC_ANCHORS === '0' ? '' : 'a'}`
-  if (held.get(slot)?.r2 !== env.INDEX_R2) {
+  if (held.get(slot)?.r2 !== readerObjects(env)) {
     // The base generation plus its runs (`staticRuns.ts`): each tier's indexes cached under its own prefix.
     const tierPre = (dir: string | null) => dir ? `${pre}/${dir}` : pre
-    const t = tiers(r2Blobs(env.INDEX_R2, pre), { indexCache: dir => cacheIndexes(caches.default, tierPre(dir)), catalogCache: dir => cacheIndexes(caches.default, tierPre(dir), 'catalog-v1') })
+    const t = tiers(r2Blobs(readerObjects(env)!, pre), { indexCache: dir => cacheIndexes(colo(), tierPre(dir)), catalogCache: dir => cacheIndexes(colo(), tierPre(dir), 'catalog-v1') })
     // Heavy literals (`FILTER_STATIC_HEAVY=1`): the drilldown over the base and the runs (the fleet root from the tiers' catalog).
     const runs = async (req?: Req) => (await t.tiers.state(req)).tiers.flatMap(x => x.dir ? [x.dir] : [])
-    const heavy = env.FILTER_STATIC_HEAVY === '1' ? drillSource(r2Blobs(env.INDEX_R2, pre), { cache: caches.default, prefix: pre }, { runs, catalog: t.catalog }) : null
+    const heavy = env.FILTER_STATIC_HEAVY === '1' ? drillSource(r2Blobs(readerObjects(env)!, pre), { cache: colo(), prefix: pre }, { runs, catalog: t.catalog }) : null
     // Without it, a heavy literal's fleet root from the catalog's buckets (`catalogRoot`).
     // Anchored terms (`^q`, `q$`, `^q$`; `staticAnchors.ts`): on unless `FILTER_STATIC_ANCHORS=0`; a generation
     // without `anchors/meta.json` declines them.
     const sub = (dir: string | null, s: string) => `${tierPre(dir)}/${s}`
-    const anchored = env.FILTER_STATIC_ANCHORS === '0' ? null : new AnchoredSource(t.tiers, r2Blobs(env.INDEX_R2, pre), {
-      cache: cacheHits(caches.default, pre, 'anchored-hits-v1'),
+    const anchored = env.FILTER_STATIC_ANCHORS === '0' ? null : new AnchoredSource(t.tiers, r2Blobs(readerObjects(env)!, pre), {
+      cache: cacheHits(colo(), pre, 'anchored-hits-v1'),
       caches: {
-        index: (dir, s) => cacheIndexes(caches.default, sub(dir, s)),
-        keys: (dir, s) => cacheIndexes(caches.default, sub(dir, s), 'keys-v1'),
-        top: dir => cacheIndexes(caches.default, sub(dir, 'anchors'), 'top-v1'),
+        index: (dir, s) => cacheIndexes(colo(), sub(dir, s)),
+        keys: (dir, s) => cacheIndexes(colo(), sub(dir, s), 'keys-v1'),
+        top: dir => cacheIndexes(colo(), sub(dir, 'anchors'), 'top-v1'),
       },
     })
-    held.set(slot, { r2: env.INDEX_R2, store: { source: new SuffixHits(t.names, { cache: cacheHits(caches.default, pre), heavy, catalog: heavy ? null : t.catalog, anchored }), scans: t.scans, dirOnly: t.dirOnly, gen: `${gen}${heavy ? '+drill' : ''}`, hexRuns: req => t.names.hexRuns(req) } })
+    held.set(slot, { r2: readerObjects(env)!, store: { source: new SuffixHits(t.names, { cache: cacheHits(colo(), pre), heavy, catalog: heavy ? null : t.catalog, anchored }), scans: t.scans, dirOnly: t.dirOnly, gen: `${gen}${heavy ? '+drill' : ''}`, hexRuns: req => t.names.hexRuns(req) } })
   }
   return boundTo(held.get(slot)!.store, reqOf(env))
 }
@@ -485,7 +493,7 @@ export async function staticCompound(s: StaticFilterStore, plan: BoolPlan, path:
  *  across a dir-only and a full scan, `scan-dirs-only`: `dirsOnlySplit`); a dir-only scan alone passes, its
  *  view flagged `dirsOnly`. A view root
  *  the literal matches is the plain view (nothing to search). The answer is held per isolate, so the view's
- *  own read reuses it. */
+ *  own read reuses it; one past what an isolate holds isn't, so a diff, which refuses those, passes `maxBytes`. */
 export async function indexedGate(env: StaticFilterEnv, ast: QueryAst | undefined, path: string, dates: string[], opts?: HitOpts): Promise<FilterReject | null> {
   const paths = pathTerms(env)
   const key = staticLiteral(ast, paths)
@@ -513,5 +521,8 @@ export async function indexedGate(env: StaticFilterEnv, ast: QueryAst | undefine
   const split = await dirsOnlySplit(s, ast, path, dates, paths)
   if (split) return split
   const found = await s!.source.hits(key, path, opts)
-  return found && covers(found, dates) ? null : declined(s, skey, found)
+  // Past a diff's `maxBytes`, unread: the coverage test as for the answer it stands for (`buildDiff` refuses it, once it
+  // knows both sides exist).
+  const seen: Found | null = opts?.over ? { hits: [], io: {}, scans: opts.overScans } : found
+  return seen && covers(seen, dates) ? null : declined(s, skey, seen)
 }

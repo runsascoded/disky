@@ -196,3 +196,33 @@ export function seriesGaps(
   ].filter(Boolean)
   return { xs, note: notes.join(' · ') }
 }
+
+/** A scoped `/api/series` answer: the fields a window of scans fills in. */
+export interface SeriesWindow { points: { date: string }[]; chunks?: number; unindexed?: string[]; failed?: string[] }
+
+/** The whole series from its newest window (`first`, which says how many there are in `chunks`) and the others (`read`),
+ *  newest first, `width` at a time: `onWindow` gets the series so far after each, sorted by scan, so the chart fills
+ *  backwards from today. A request reads a bounded number of scans (`SERIES_CHUNK`), and a window's answer is cached
+ *  on its own. A failed window rejects; re-reading the rest is cached. */
+export async function fillSeriesWindows<S extends SeriesWindow>(first: S, read: (i: number) => Promise<S>, onWindow: (s: S) => void, width = 2): Promise<S> {
+  const n = first.chunks ?? 1
+  const got: S[] = [first]
+  const merged = (): S => {
+    const { chunks: _, ...base } = first
+    const names = (k: 'unindexed' | 'failed') => {
+      const all = got.flatMap(g => g[k] ?? []).sort()
+      return all.length ? { [k]: all } : {}
+    }
+    return { ...base, points: got.flatMap(g => g.points).sort((a, b) => a.date.localeCompare(b.date)), ...names('unindexed'), ...names('failed') } as unknown as S
+  }
+  let next = n - 2
+  const worker = async () => {
+    while (next >= 0) {
+      const i = next--
+      got.push(await read(i))
+      onWindow(merged())
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(width, Math.max(0, n - 1)) }, worker))
+  return merged()
+}

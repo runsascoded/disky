@@ -1,0 +1,19 @@
+{
+  "notice_version": 1,
+  "deployment": "hf",
+  "mode": "dev",
+  "status": "success",
+  "stage": "finish",
+  "sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "source_branch": "hf",
+  "repository": "Open-Athena/disky",
+  "host": "dev.hf.oa.dev",
+  "verified": false,
+  "dirty": false,
+  "actor": "operator",
+  "actor_source": "local",
+  "attempt": "example-not-a-release",
+  "cloudflare_deployment": "abcdef12",
+  "cloudflare_url": "https://abcdef12.oa-hf-usage.pages.dev",
+  "run_url": null
+}

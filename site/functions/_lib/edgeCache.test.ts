@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from 'vitest'
-import { CACHE_V, cacheEnvTag, cacheKeyFor, cacheMatch, cacheStore, keepFor, PARTIAL_TTL, resetUpgrades, upgradePartial } from './edgeCache'
+import { CACHE_V, cacheEnvTag, cacheKeyFor, cacheMatch, cacheStore, cutReason, keepFor, PARTIAL_TTL, resetUpgrades, upgradeLog, upgradePartial } from './edgeCache'
 
 // `cacheStore` keeps an answer in the colo cache and KV; a budget-cut answer (a filter view whose phase 2 its
 // time budget cut short) in the colo cache only, for `PARTIAL_TTL` seconds; `false`: served, not kept.
@@ -125,6 +125,38 @@ describe('upgradePartial', () => {
     ])
   })
 
+  it('every run logs its start and exactly one end: done, cut (which budgets) or failed (the message), with its decoded groups', async () => {
+    const { env, bg, waitUntil } = setup()
+    const lines: string[] = []
+    const prev = upgradeLog.line
+    upgradeLog.line = s => { lines.push(s) }
+    try {
+      const k2 = cacheKeyFor('subtree', '', 'd/p?q=cut'), k3 = cacheKeyFor('subtree', '', 'd/p?q=boom')
+      upgradePartial(env, key, async trace => { trace('group', 3); trace('fetch', 9); trace('group', 4); return { body: FULL, keep: true } }, waitUntil)
+      upgradePartial(env, k2, async trace => { trace('group', 1); return { body: PARTIAL, keep: keepFor({ interiors: { late: 1 }, searchLate: true }), cut: cutReason({ interiors: { late: 1 }, searchLate: true }) } }, waitUntil)
+      upgradePartial(env, k3, async trace => { trace('group', 1); throw new Error('Memory limit would be exceeded') }, waitUntil)
+      // Skipped (in flight): no line.
+      upgradePartial(env, key, async () => ({ body: FULL, keep: true }), waitUntil)
+      await Promise.all(bg)
+    } finally { upgradeLog.line = prev }
+    // The ends settle in whatever order their awaits do: sorted.
+    expect(lines.map(l => l.replace(/ \d+ (\d+)$/, ' <ms> $1')).sort()).toEqual([
+      `upgrade: subtree.cache/v${CACHE_V}/d/p?q=boom failed Memory_limit_would_be_exceeded <ms> 1`,
+      `upgrade: subtree.cache/v${CACHE_V}/d/p?q=boom started - <ms> 0`,
+      `upgrade: subtree.cache/v${CACHE_V}/d/p?q=cut cut phase2+search <ms> 1`,
+      `upgrade: subtree.cache/v${CACHE_V}/d/p?q=cut started - <ms> 0`,
+      `upgrade: subtree.cache/v${CACHE_V}/d/p?q=heavy done - <ms> 2`,
+      `upgrade: subtree.cache/v${CACHE_V}/d/p?q=heavy started - <ms> 0`,
+    ])
+  })
+
+  it('`cutReason`: each budget that cut an answer, or null for a whole one', () => {
+    expect([
+      cutReason({}), cutReason({ interiors: { late: 0 } }), cutReason({ interiors: { late: 2 } }), cutReason({ detailsLate: true }),
+      cutReason({ lookups_late: true, searchLate: true }), cutReason({ interiors: { late: 1 }, searchLate: true, detailsLate: true, lookups_late: true }),
+    ]).toEqual([null, null, 'phase2', 'details', 'search+lookups', 'phase2+search+details+lookups'])
+  })
+
   it('a background run that throws: the partial stays, no unhandled rejection, treated as cut short', async () => {
     const { env, bg, waitUntil, entry } = setup()
     await cacheStore(env, key, PARTIAL, {}, undefined, keepFor({ interiors: { late: 2 } }))
@@ -174,6 +206,41 @@ describe('the deployment-environment tag', () => {
       `https://subtree.cache/v${CACHE_V}/~dev.gcs.oa.dev/d/p?w=1`,
       `https://subtree.cache/v${CACHE_V}/~dev.gcs.oa.dev/@meta/d/p?w=1`,
       `https://subtree.cache/v${CACHE_V}/~a%2Fb/d/p?w=1`,
+    ])
+  })
+
+  // A PR preview (`pr-N.<project>.pages.dev`) runs in the dev stack's environment, `CACHE_NS` included, but its own code.
+  const HF_PREVIEW = { PROD_HOST: 'hf.oa.dev', CACHE_NS: 'dev.hf.oa.dev', PAGES_SUBDOMAIN: 'oa-hf-usage.pages.dev' }
+  it('`cacheEnvTag`: a preview host (one label under `PAGES_SUBDOMAIN`) is itself, before `CACHE_NS`; dev\'s custom host keeps it', () => {
+    expect([
+      'dev.hf.oa.dev', 'pr-12.oa-hf-usage.pages.dev', 'pr-13.oa-hf-usage.pages.dev', 'dev.oa-hf-usage.pages.dev',
+      'oa-hf-usage.pages.dev', 'a.b.oa-hf-usage.pages.dev', 'pr-12.oa-hf-usage.pages.dev.evil.com',
+    ].map(h => cacheEnvTag(HF_PREVIEW, req(h)))).toEqual([
+      'dev.hf.oa.dev', 'pr-12.oa-hf-usage.pages.dev', 'pr-13.oa-hf-usage.pages.dev', 'dev.oa-hf-usage.pages.dev',
+      'dev.hf.oa.dev', 'dev.hf.oa.dev', 'dev.hf.oa.dev',
+    ])
+    expect(cacheEnvTag({ CACHE_NS: 'dev.hf.oa.dev' }, req('pr-12.oa-hf-usage.pages.dev'))).toEqual('dev.hf.oa.dev')
+  })
+
+  it('a preview host never reads or writes dev\'s keys, nor another preview\'s (colo and KV)', async () => {
+    const colo = new Map<string, Response>()
+    const kv = new Map<string, string>()
+    ;(globalThis as unknown as { caches: unknown }).caches = { default: {
+      match: async (k: Request) => colo.get(k.url)?.clone(),
+      put: async (k: Request, r: Response) => { colo.set(k.url, r) },
+    } }
+    const env = { ...HF_PREVIEW, CACHE_KV: { get: async (k: string) => kv.get(k) ?? null, put: async (k: string, v: string) => { kv.set(k, v) } } as unknown as KVNamespace }
+    const key = (host: string) => cacheKeyFor('subtree', cacheEnvTag(env, req(host)), 'd/p?w=1')
+    await cacheStore(env, key('dev.hf.oa.dev'), '{"dev":1}')
+    const previewMiss = await cacheMatch(env, key('pr-12.oa-hf-usage.pages.dev'))
+    await cacheStore(env, key('pr-12.oa-hf-usage.pages.dev'), '{"pr":12}')
+    colo.clear()
+    const otherMiss = await cacheMatch(env, key('pr-13.oa-hf-usage.pages.dev'))
+    const devHit = await cacheMatch(env, key('dev.hf.oa.dev'))
+    const prHit = await cacheMatch(env, key('pr-12.oa-hf-usage.pages.dev'))
+    expect([previewMiss, otherMiss, await devHit!.text(), await prHit!.text(), [...kv.keys()].sort()]).toEqual([
+      null, null, '{"dev":1}', '{"pr":12}',
+      [await sha(`https://subtree.cache/v${CACHE_V}/~dev.hf.oa.dev/d/p?w=1`), await sha(`https://subtree.cache/v${CACHE_V}/~pr-12.oa-hf-usage.pages.dev/d/p?w=1`)].sort(),
     ])
   })
 

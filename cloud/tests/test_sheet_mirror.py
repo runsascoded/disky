@@ -414,6 +414,7 @@ gcp:
   project: my-project
   service_account: job@my-project.iam.gserviceaccount.com
   job: usage-sheet-mirror
+  region: us-east1
 mirrors:
   - sheet: SHEET_A
     tab: Storage by user
@@ -454,11 +455,11 @@ def test_env_lines():
         "TOKEN_SECRET=usage-sheet-token",
         "SCHEDULE='5 * * * *'",
         "PROJECT=my-project",
-        "REGION=us-central1",
+        "REGION=us-east1",
         "SA=job@my-project.iam.gserviceaccount.com",
         "JOB=usage-sheet-mirror",
         "TRIGGER=usage-sheet-mirror-trigger",
-        "IMAGE=us-central1-docker.pkg.dev/my-project/cloud-run-source-deploy/usage-sheet-mirror:latest",
+        "IMAGE=us-east1-docker.pkg.dev/my-project/cloud-run-source-deploy/usage-sheet-mirror:latest",
     ]
 
 
@@ -567,3 +568,13 @@ def test_cli_render_substitutes():
     r = CliRunner(env={"SHEET_ID": "real-id"}).invoke(main, ["sheet-mirror", "render", "-"], input=ENV_CONFIG)
     assert r.exit_code == 0, r.output
     assert [m.sheet for m in load_config(r.output, env={}).mirrors] == ["real-id", "SHEET_A"]
+
+
+def test_gcp_block_names_its_region():
+    """No deployment's region is a default here: without `gcp.region`, building or deploying the mirror is an error
+    (reading the config to run it needs no region)."""
+    config = load_config(CONFIG.replace("  region: us-east1\n", ""))
+    assert config.gcp.region == ""
+    with pytest.raises(ConfigError) as e:
+        env_lines(config)
+    assert str(e.value) == "sheet-mirror.yml: `gcp.region` is required to build/deploy"

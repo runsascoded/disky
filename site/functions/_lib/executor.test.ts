@@ -61,16 +61,16 @@ function fake(kind: ExecutorKind, db: D1Database, calls: string[]): Executor & {
 
 async function setup(env: Partial<ExecEnv> = {}) {
   const { db } = await sqliteD1()
-  await db.prepare("INSERT INTO plans (id, name, state, created_by, created_ts) VALUES (1, 'Staged', 'open', 'ann@openathena.ai', 1)").run()
+  await db.prepare("INSERT INTO plans (id, name, state, created_by, created_ts) VALUES (1, 'Staged', 'open', 'ann@staff.example.test', 1)").run()
   for (const p of [A, B]) {
-    await db.prepare("INSERT INTO plan_items (plan_id, prefix, added_by, added_ts) VALUES (1, ?, 'ann@openathena.ai', 1)").bind(p).run()
+    await db.prepare("INSERT INTO plan_items (plan_id, prefix, added_by, added_ts) VALUES (1, ?, 'ann@staff.example.test', 1)").bind(p).run()
   }
   const calls: string[] = []
   const executors = { 'plan-sweep': fake('plan-sweep', db, calls), sweep: fake('sweep', db, calls), laptop: EXECUTORS.laptop }
   return { db, calls, executors, env: { DB: db, GCP_SA_KEY: 'test', JOB_SA: 'job@test.iam.gserviceaccount.com', ...env } as ExecEnv }
 }
 
-const req = (o: Partial<DispatchReq>): DispatchReq => ({ planId: 1, mode: 'dry', actor: 'bo@openathena.ai', siteUrl: 'https://site.test', ...o })
+const req = (o: Partial<DispatchReq>): DispatchReq => ({ planId: 1, mode: 'dry', actor: 'bo@staff.example.test', siteUrl: 'https://site.test', ...o })
 
 describe('executorOf — the deployment\'s `EXECUTOR`', () => {
   it('defaults to plan-sweep, accepts sweep, throws on anything else', () => {
@@ -84,6 +84,18 @@ describe('executorOf — the deployment\'s `EXECUTOR`', () => {
 })
 
 describe('dispatchPlan — executor selection', () => {
+  it('`SWEEP_DISPATCH = "0"` refuses every dispatch, dry or real, before any executor runs', async () => {
+    const s = await setup({ SWEEP_DISPATCH: '0' })
+    const on = await setup({ SWEEP_DISPATCH: '1' })
+    const refused = { ok: false, status: 403, error: 'sweeps are not dispatched from this environment (SWEEP_DISPATCH = "0")' }
+    expect([
+      await dispatchPlan(s.env, req({ date: '2026-09-28T1201' }), 'plan-sweep', s.executors),
+      await dispatchPlan(s.env, req({ mode: 'real' }), 'sweep', s.executors),
+      s.calls,
+      (await dispatchPlan(on.env, req({ date: '2026-09-28T1201' }), 'plan-sweep', on.executors)).ok,
+    ]).toEqual([refused, refused, [], true])
+  })
+
   it('uses `EXECUTOR` unless the caller names its executor (an HTTP route does)', async () => {
     const s = await setup({ EXECUTOR: 'sweep' })
     await dispatchPlan(s.env, req({ date: '2026-09-28' }), undefined, s.executors)
@@ -134,7 +146,7 @@ describe('dispatchPlan — a real run (specs/done/delete-what-you-see.md)', () =
     ex.finish.set('plan-sweep-dry-1', true)
     // the dry run of this set: its scan, its manifest
     expect(await real()).toEqual({
-      ok: true, job_id: 'plan-sweep-real-2', plan_id: 1, mode: 'real', date: '2026-09-27T0000', actor: 'bo@openathena.ai',
+      ok: true, job_id: 'plan-sweep-real-2', plan_id: 1, mode: 'real', date: '2026-09-27T0000', actor: 'bo@staff.example.test',
       digest: DIGEST_AB, extra: { run: 'gs://runs/plan-sweep-real-2' },
     })
     ex.finish.set('plan-sweep-real-2', true)
@@ -147,15 +159,15 @@ describe('dispatchPlan — a real run (specs/done/delete-what-you-see.md)', () =
     ], [null, 'plan-sweep-dry-1', null]])
   })
 
-  it('acts on exactly the selected rows: a dry run of every item, one unchecked, real → the other two only, listed afresh', async () => {
+  it('acts on exactly the selected rows: a dry run of every item, one unchecked, real → the other two only, from their own manifest', async () => {
     const s = await setup()
-    await s.db.prepare("INSERT INTO plan_items (plan_id, prefix, added_by, added_ts) VALUES (1, ?, 'cy@openathena.ai', 2)").bind(C).run()
+    await s.db.prepare("INSERT INTO plan_items (plan_id, prefix, added_by, added_ts) VALUES (1, ?, 'cy@staff.example.test', 2)").bind(C).run()
     const ex = s.executors.sweep
     await dispatchPlan(s.env, req({ date: '2026-09-28' }), 'sweep', s.executors)
     ex.finish.set('sweep-dry-1', true)
     const r = await dispatchPlan(s.env, req({ mode: 'real', date: '2026-09-28', items: [A, B] }), 'sweep', s.executors)
     expect([r, ex.acted, ex.reviewed.map(x => x?.run_id ?? null)]).toEqual([
-      { ok: true, job_id: 'sweep-real-2', plan_id: 1, mode: 'real', date: '2026-09-28', actor: 'bo@openathena.ai', digest: DIGEST_AB, extra: { run: 'gs://runs/sweep-real-2' } },
+      { ok: true, job_id: 'sweep-real-2', plan_id: 1, mode: 'real', date: '2026-09-28', actor: 'bo@staff.example.test', digest: DIGEST_AB, extra: { run: 'gs://runs/sweep-real-2' } },
       [[A, B, C], [A, B]],
       // the dry run covered C too: its manifest isn't this run's
       [null, null],

@@ -3,8 +3,9 @@
  * rendered by the FE's generic `DbTable`). Adding an editable/viewable table
  * to the admin dashboard = adding an entry here — no new endpoints or UI.
  *
- * `readScope` / `writeScope` gate access per table: 'gcs' read = visible to
- * every signed-in viewer (the shareable-RO case, e.g. the email whitelist);
+ * `readScope` / `writeScope` gate access per table: 'base' read = visible to
+ * every holder of the deployment's base scope (`baseScope`; the shareable-RO
+ * case, e.g. the email whitelist);
  * 'admin' = staff console only; writeScope null = read-only (logs).
  */
 export interface ColumnSpec {
@@ -24,7 +25,7 @@ export interface TableSpec {
   /** Single-column TEXT primary key. */
   pk: string
   columns: ColumnSpec[]
-  readScope: 'gcs' | 'admin'
+  readScope: 'base' | 'admin'
   writeScope: 'admin' | null
   orderBy: string
   /** One-line description shown in the dashboard. */
@@ -49,7 +50,7 @@ export const TABLES: TableSpec[] = [
       { name: 'who', type: 'text', server: 'who' },
       { name: 'ts', type: 'int', server: 'now' },
     ],
-    readScope: 'gcs',
+    readScope: 'base',
     writeScope: 'admin',
     orderBy: 'email',
     normalize: (col, v) => (col === 'email' ? v.trim().toLowerCase() : v),
@@ -65,7 +66,7 @@ export const TABLES: TableSpec[] = [
       { name: 'who', type: 'text', server: 'who' },
       { name: 'ts', type: 'int', server: 'now' },
     ],
-    readScope: 'gcs',
+    readScope: 'base',
     writeScope: 'admin',
     orderBy: 'user, email',
     normalize: (col, v) => (col === 'email' ? v.trim().toLowerCase() : col === 'user' ? v.trim().toLowerCase() : v),
@@ -88,7 +89,7 @@ export const TABLES: TableSpec[] = [
       { name: 'owner', type: 'text' },
       { name: 'memo', type: 'text' },
     ],
-    readScope: 'gcs',
+    readScope: 'base',
     writeScope: null,
     orderBy: 'id DESC',
   },
@@ -130,7 +131,7 @@ export const TABLES: TableSpec[] = [
       { name: 'log_dir', type: 'text' },
       { name: 'buckets', type: 'text' },
     ],
-    readScope: 'gcs',
+    readScope: 'base',
     writeScope: null,
     orderBy: 'started_ts DESC',
   },
@@ -148,25 +149,42 @@ export const TABLES: TableSpec[] = [
       { name: 'drift_new_objects', type: 'int' },
       { name: 'undone_objects', type: 'int' },
     ],
-    readScope: 'gcs',
+    readScope: 'base',
     writeScope: null,
     orderBy: 'run_id DESC, bytes DESC',
   },
   {
     name: 'admin_emails',
     pk: 'email',
-    desc: 'Admin allowlist: non-staff emails that may assign owners and dispatch deletes (`admin` scope on top of viewing). Takes effect on the next request.',
+    desc: 'The admin list: emails with the `admin` scope (dispatching deletes, minting links, this console). Edited on /admin (`/api/admins`, which also shows GitHub handles and keeps the last admin); read-only here. Takes effect on the next request.',
     columns: [
-      { name: 'email', type: 'text', required: true },
-      { name: 'note', type: 'text', editable: true },
-      { name: 'who', type: 'text', server: 'who' },
-      { name: 'ts', type: 'int', server: 'now' },
+      { name: 'email', type: 'text' },
+      { name: 'note', type: 'text' },
+      { name: 'who', type: 'text' },
+      { name: 'ts', type: 'int' },
     ],
     readScope: 'admin',
-    writeScope: 'admin',
+    writeScope: null,
     orderBy: 'email',
-    normalize: (col, v) => (col === 'email' ? v.trim().toLowerCase() : v),
-    validate: (col, v) => (col === 'email' && !EMAIL_RE.test(v) ? 'not an email address' : null),
+  },
+  {
+    name: 'scan_dispatch',
+    pk: 'id',
+    desc: '"Run a scan" on /scans: each dispatch, who started it and when, then its Cloud Run execution or why it failed (`/api/scan-runs/dispatch`). Read-only.',
+    columns: [
+      { name: 'id', type: 'text' },
+      { name: 'ts', type: 'int' },
+      { name: 'who', type: 'text' },
+      { name: 'state', type: 'text' },
+      { name: 'execution', type: 'text' },
+      { name: 'error', type: 'text' },
+      { name: 'updated_ts', type: 'int' },
+      { name: 'job', type: 'text' },
+      { name: 'operation', type: 'text' },
+    ],
+    readScope: 'admin',
+    writeScope: null,
+    orderBy: 'ts DESC',
   },
   {
     name: 'admin_edits',

@@ -1,0 +1,111 @@
+{
+ "cfg": {
+  "template": "cw",
+  "title": "S3 usage",
+  "site_url": "https://cw.example.org",
+  "host": "cw.example.org",
+  "unit": {
+   "name": "TiB",
+   "bytes": 1099511627776,
+   "short": "Ti"
+  },
+  "primary": "main-data",
+  "buckets": {},
+  "prices": {},
+  "icons_base": "https://icons.example.org"
+ },
+ "month": "2026-09",
+ "plot_url": "<plot-url>",
+ "prev_url": null,
+ "rows": {
+  "template": "cw",
+  "closed": false,
+  "pre": [],
+  "lead": [
+   {
+    "scan": "2026-08-31T0000",
+    "slug": "26083100",
+    "tb": 700.0,
+    "extra": {},
+    "classes": {}
+   },
+   {
+    "scan": "2026-08-31T1200",
+    "slug": "26083112",
+    "tb": 705.0,
+    "extra": {},
+    "classes": {}
+   }
+  ],
+  "rows": [
+   {
+    "scan": "2026-09-01T0000",
+    "slug": "26090100",
+    "tb": 710.0,
+    "extra": {},
+    "classes": {}
+   },
+   {
+    "scan": "2026-09-01T1200",
+    "slug": "26090112",
+    "tb": 713.0,
+    "extra": {},
+    "classes": {}
+   },
+   {
+    "scan": "2026-09-02T0000",
+    "slug": "26090200",
+    "tb": 712.0,
+    "extra": {},
+    "classes": {}
+   },
+   {
+    "scan": "2026-09-02T1200",
+    "slug": "26090212",
+    "tb": 715.0,
+    "extra": {},
+    "classes": {}
+   }
+  ]
+ },
+ "op": ":arrow_deg40: **+10.0 TiB** [month-to-date](https://cw.example.org/?d=26090212-2d#over-time) · **+15.0 TiB** [since 8/31](https://cw.example.org/?d=26090212-2d12h#over-time) · 715 TiB · [dashboard](https://cw.example.org/)\n_as of 9/2 12:00Z_\n\n*Weekly summaries*\n:arrow_deg30: [wk of 8/31](https://cw.example.org/?d=26090212-2d12h#over-time) _(partial)_: **+15.0 TiB** → 715 TiB\n\n![S3 usage — September 2026](<plot-url>)",
+ "image": {
+  "title": "S3 usage — September 2026",
+  "note": "cw.example.org · TiB",
+  "month": "2026-09",
+  "from": "2026-08-04",
+  "points": [
+   {
+    "scan": "2026-08-31T0000",
+    "bytes": 769658139443200
+   },
+   {
+    "scan": "2026-08-31T1200",
+    "bytes": 775155697582080
+   },
+   {
+    "scan": "2026-09-01T0000",
+    "bytes": 780653255720960
+   },
+   {
+    "scan": "2026-09-01T1200",
+    "bytes": 783951790604288
+   },
+   {
+    "scan": "2026-09-02T0000",
+    "bytes": 782852278976512
+   },
+   {
+    "scan": "2026-09-02T1200",
+    "bytes": 786150813859840
+   }
+  ],
+  "units": "TiB",
+  "diff": {
+   "from": "2026-08-31T0000",
+   "to": "2026-09-02T1200",
+   "path": "main-data",
+   "title": "What changed in main-data — 8/31 → 9/2"
+  }
+ }
+}

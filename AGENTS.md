@@ -204,6 +204,12 @@ dt-cloud dups -o OUT INDEX  # A scan's duplicate-candidate groups (specs/dups.md
                           # crc32c (`exact`; a differing `moved` copy dropped), `-g N` crc32c spot checks on GCS (groups `-l` left
                           # unsettled) → `dups.parquet` + `dups.json`
                           # (the `dups` scan step writes them beside the index; `/api/dups` + `/dups` read them, `DUPS=1`)
+dt-cloud admins check -d DB -o ORG [-c CONFIG] [-j] [-x HANDLE]…  # A deployment's admin list (`admin_emails.github`: the handles recorded
+                          # on `/admin`) against a GitHub org's owners (`gh api orgs/ORG/members?role=admin`; run as an org
+                          # member): who is an owner but not an admin, and the reverse; rows without a handle are counted.
+                          # Read-only (handles only, `wrangler d1 execute --remote`), never a sync; exit 1 on drift, 3 when the comparison
+                          # isn't available (no `github` column or no table: the recipe unapplied). `-x`: a
+                          # difference that is meant (an owner left off the list), reported on its own line, not drift
 dt-cloud interval-store append [-c] [-n] SCAN_ID  # Append one scan to the interval store as a run beside its
                           # base generation (spec `interval-store.md` §2.7; profile `-P`/$INTERVAL_STORE_PROFILE):
                           # prepare → ranges (Batch) → publish (cut, binary-counter merges, manifest) → R2 → prune,
@@ -221,8 +227,10 @@ dt-cloud static-names build -g GEN -L LAYOUT -s SCANS -o STORE -x off|MIN,TAIL  
 dt-cloud static-names add -g GEN -L LAYOUT -s SCANS -o STORE  # Append every scan after GEN's newest as a run (append, shards,
                           # catalog delta, drill run, + `names/`/`anchors/` when GEN's base has them — an anchorless GEN
                           # gets them only by a rebuild into a new GEN — `manifests/<id>.json`), then the binary counter's carries; a URL
-                          # store's generation is mirrored into `-w`, new files go up data → `meta.json`s → manifests.
+                          # store's generation is mirrored into `-w`, new files go up data → `meta.json`s → manifests after each scan (and its carries): a failure loses only that scan.
                           # Small deployments' path (the r2 demo's daily ingest); gcs/cw run the stages on Batch
+dt-cloud generation-gc -t KIND -o STORE -k PIN…  # Collect verified compaction predecessors: plans by default, `-x -s SCRATCH` executes
+                          # (protocol, receipts, grace and pins: `specs/done/generation-gc-and-r2-copy.md`)
 dt-cloud interval-store migrate-object-version -g OLD -O NEW -o STORE  # Adopt string object versions without raw listings:
                           # fold existing ranges/runs; native GCS generations become exact strings, unknowns stay NULL.
                           # `-R` names borrowed source ranges. Source and CURRENT stay unchanged pending verification/cutover.
@@ -253,6 +261,11 @@ dt-cloud interval-store backfill-churn -O NEW -o STORE [-g GEN]  # GEN (base + r
                           # file's |Δsize| rolled up to its ancestors, counted after the last v1 → v2 scan) and `churn_end` (at
                           # `vt`, closed pieces), `"churn": true` in `scans.json`; a fresh `build`'s bytes. New builds (`churn`
                           # after `fold`), appends and compactions carry it; source and `CURRENT.json` untouched
+dt-cloud interval-store backfill-level -g GEN -o STORE  # The level index (specs/diff-progressive.md §3b, what
+                          # `/api/diff/level` reads): one row per child version transition keyed `(parent depth, parent
+                          # path, ts, name)`, cut into GEN's `served/level.*` and each listed run's, nothing else written
+                          # (not `scans.json`, not `CURRENT.json`); needs churn. Appends, carries and compactions then carry
+                          # it. New builds opt in with `build -l` (`"level": true`); without either, no served byte changes
 dt-cloud interval-store backfill-generation -O NEW -o STORE -s ROOT -l TEMPLATE  # A generation folded into NEW (a dir or
                           # URL store; never over one) whose object versions carry their GCS `generation`, read once from
                           # the raw listings (`{id}` templates under ROOT): each version the first listed within it, earlier
@@ -262,9 +275,66 @@ dt-cloud interval-store backfill-generation -O NEW -o STORE -s ROOT -l TEMPLATE 
                           # from the scans whose listings have them all: gcs's depth-2/3 objects had none before 2026-10-22)
                           # `-j N` (also `add`'s compaction; `build`'s cut): N key ranges, then N served sorts, at a time on
                           # cursors of one DuckDB database (`-p`/`-M` shared; each ends in a serial pyarrow writer), same bytes
-dt-cloud diff-bench -a BEFORE -b AFTER [-v DATE:PATH]… CASES  # The table a store-layout change ships with (no CURRENT move
+dt-cloud interval-store layout-sim GEN REQUESTS  # `/api/diff/level` reads of a generation's served sort (`-s`, default
+                          # `path`; GEN a dir or `gs://`/`s3://`/`r2://` URL through `blobstore.Store`) simulated offline
+                          # (specs/diff-progressive.md §3b): per `{path, from, to}` request, rows decoded and GET runs for
+                          # today's kept groups, `-p` page sizes within them, `-b` band counts (`(band, depth, path, vf)`),
+                          # and `-l` a dedicated level sort: one row per child version transition, keyed `(parent depth,
+                          # parent path, b, child)`, one file per base / newest-manifest run (`-f N`: N even files), one
+                          # run a file touched; `-C` its size over the whole generation (transitions, estimated bytes).
+                          # Runs merge as the site's `planRuns` (`RUN_GAP`/`RUN_BYTES`/`RUN_READS`
+                          # mirror `site/functions/_lib/index.ts`) at the sort's bytes/row; row groups cached under `-c`
+                          # (`depth, path, vf, vt`), `-t` fetches over one footer, `-j` processes. JSONL out, p50/p90/p99/max
+                          # summary (rows, runs, GET rounds at 2 and 3 waves) to stderr
+dt-cloud interval-store level-sim GEN REQUESTS  # `readLevel`'s two waves priced over GEN's real `level` sort: per `{from, to, dirs}`
+                          # read (one line per chain round) the groups, pages and page-index spans as the reader plans them, each wave's
+                          # gets, rounds, bytes and predicted time (`-T` first byte, `-R` throughput, 6 slots) under `-g` gaps × `-C` caps,
+                          # `-b` `fit:B` (closes gaps while a round is saved within B fetched bytes), and `whole` (no index wave). Fetches
+                          # only sidecars and the kept groups' page indexes (cached under `-c`); gets and bytes match live `lv-*` spans exactly
+                          # `-s 256,512,1024` (+ `-F` sidecar row-group sizes): a table per mode, today / held page indexes (cold,
+                          # colo warm, warm) / the sort cut in small groups with no page index, from the real file's page indexes
+dt-cloud image-sha [-e SHA [-a]] [-j]  # The running image's source revision (`image_sha.py`): `$DISKY_GIT_SHA` /
+                          # `$DISKY_GIT_DIRTY`, which the image build stamps (`dt-cloud image build` → `job/Dockerfile`
+                          # `ARG`/`ENV` + OCI labels `org.opencontainers.image.revision`, `disky.dirty`). Prints `<sha>`,
+                          # `<sha> dirty` or `unstamped`; `-e` exits 1 unless the image is that sha (or a ≥7-char prefix),
+                          # clean (`-a` accepts dirty) and stamped. Job entrypoints (`scan head`/`step`, the
+                          # `interval-store` stage tasks) log it
+dt-cloud image build -c job/build.json [-m candidate|live] [-t TAG] [-D] [-a K=V]  # The scan job image (`image_build.py`,
+                          # specs/job-consolidation.md §5; `job/build.sh` runs it with the deployment's `job/build.json`):
+                          # this checkout's commit, stamped, `git archive`d by the config's `context` pathspecs, built by
+                          # Cloud Build from `job/Dockerfile` (`build_args`: `SITE`, `APT_PACKAGES`, `UV_SYNC_ARGS`,
+                          # `ENTRYPOINT`) to an immutable candidate tag (the sha's first 12; dirty `-D`: `-dirty-<time>`) in
+                          # `repository` + `mirrors`; prints `<repository>@<digest>` each. `live` mode then promotes.
+                          # `image promote TAG [-x DIGEST]`: `live_tags` moved to TAG's digest in each repository, then the
+                          # config's `repoint` Cloud Run jobs / services updated to the first live tag
+dt-cloud batch submit -c COMPONENT [-L REGION] [-b BUCKET]… [-X] [-t] [-e] [-r SECONDS] JOB_ID SPEC  # The shell's Batch submit, through `batch.submit_job` (the
+                          # one place a job is created): labelled from `$DISKY_LABELS` + `-c` on the job and its allocation policy
+                          # (`cost_labels.py`), in `-L`, else `$BATCH_REGION`. There is no default region (`deploy.batch_region`): neither
+                          # set is an error, here and in `job status|logs|watch|metrics`, `batch-cancel` (`-r`), `sweep sync-progress`,
+                          # `scan-run task`, and `job submit-listing` for a bucket `$LISTING_REGIONS` doesn't name. A job whose VMs
+                          # (`allocationPolicy.location.allowedLocations`, else the region) run outside the location of a bucket it
+                          # mounts (gcsfuse volumes) or names (`-b`) is refused (`batch.check_region`: one `buckets.get` per bucket
+                          # per process; a multi-region bucket takes its continent's regions, a dual-region its two) unless
+                          # `-X/--cross-region` (`job submit-listing -X` too; `$BATCH_CROSS_REGION=1` for the submitters with no flag:
+                          # the static-names / interval-store runners, `scan-run task`). A bucket whose location can't be read is
+                          # noted on stderr and not checked; a bucket reached only by URL and not named isn't seen.
+                          # Idempotent (a scheduled submit): `-t` JOB_ID is a strftime template over UTC now (`scan-%Y%m%d`: one
+                          # job per period, `batch.job_id_at`, checked against Batch's id rule), `-e` a 409 for that id counts as
+                          # submitted, `-r` retries 429/5xx/connection failures (5 s doubling to 300 s) for that long, then exit 1
+                          # (`SubmitFailed`); `-r` needs `-e`, since only the id makes a retry after a lost answer safe
+dt-cloud soft-delete -b BUCKET… [-E ENDPOINT] [-o ROOT…] [-j]  # Each bucket's soft-delete retention now (`soft_delete.py`): GCS's (`NAME`, read with
+                          # `storage.buckets.get`, and GCS restores nothing from a bucket whose policy is off), or an S3-style store's (`s3://NAME`:
+                          # versioning plus the narrowest noncurrent rule; null = kept until purged). What a sweep's undo has to work with. `-o`: the day's `<ROOT>/<date>.json`; the opt-in scan step `soft-delete` writes it under
+                          # `snapshots/soft-delete/` for each `gs://` and `s3://` source, and the site (whose own account can't read bucket
+                          # metadata) reads the newest: a recorded undo on a bucket it shows off is "undo unavailable" (its control
+                          # disabled, the route refusing), one on a bucket it doesn't name is "unverified". `sweep undo` asks GCS itself
+dt-cloud monitoring-relay serve [-c slack] [-p PORT]  # Cloud Monitoring incidents → `disk-tree notify` (specs/monitoring-relay.md):
+                          # a Pub/Sub push endpoint (infra `MonitoringRelay`'s Cloud Run service), each incident posted with the
+                          # deployment's own bot (policy, condition, opened/resolved, documentation, incident link); 204 once
+                          # posted, 500 to be redelivered. `render FILE` prints the text for a notification's JSON (`-s` posts it)
+dt-cloud diff-bench -a BEFORE -b AFTER [-S STORE] [-v DATE:PATH]… CASES  # The table a store-layout change ships with (no CURRENT move
                           # without it): the browser's diff + map requests (diff-check's CASES, `-v` views) on two hosts, each
-                          # cold (`-n` random w×h cache buckets no page asks for) then warm; per request kind, median cold
+                          # cold (`-n` random w×h cache buckets no page asks for) then warm (`-s`: also each diff's `summary=1`, which no page asks); per request kind, median cold
                           # `Server-Timing` total, the paired Δ (B − A), B-slower count + sign-test p; answers must agree
                           # (totals, rows, nodes). Same reader flags on both (`DIFF_DESCENT` moves the tier). Exit 1 on an error
                           # or a disagreement, 2 if B is slower (p < `-p`); `-o` every sample as TSV
@@ -328,6 +398,8 @@ disk-tree dispatch [PLAN] # Execute a plan (id/name; default the open `Staged` p
                           # (`chat`/`undo`/`database_id` + secret ENV VAR NAMES); needs `notify` for chat
 ```
 
+**What `batch.check_region` can't see:** it reads a spec's gcsfuse mounts and the buckets `-b`/`buckets=` name, at `batch.submit_job`, so a job's region is checked only that far. A bucket the job reaches only by URL (a `gs://` path in its script or args, not mounted or named) isn't seen; name it. Nor is any job that doesn't go through `submit_job`: Nextflow's tasks (its `google-batch` executor posts them), the site's REST submits (`_lib/sweepDispatch.ts`, `_lib/cwBatch.ts`), `BatchCron` bodies (Cloud Scheduler posts them; `BatchCron` checks only their labels), and raw `gcloud batch jobs submit`. Those keep a job beside its buckets by configuration alone.
+
 ### Site (`site/`) and widget packages
 
 `site/` is the hosted/serverless app: Vite + React + TypeScript, with Pages Functions over R2 / GCS +
@@ -340,6 +412,8 @@ from two workspace packages:
   consumer (e.g. file-tree) pins this.
 - **`@disk-tree/react`** (`packages/react/`) — `<TimeSeries>`/`<BytesOverTime>` built on the core
   (which it re-exports for back-compat).
+
+Digest and publish knobs: `dt-cloud digest -W KEY` writes only a month's preview bundle (`/admin/slack`), posting nothing. `/api/digest-reapply` re-applies the digest to chosen messages from `/admin/slack`, as a Batch job named by the `DIGEST_REAPPLY` var (unset: 503). `options.interval-store.publish_on_failure`: a failed append copies the scan's whole served set to R2, for a site that reads only R2 under `publish-r2 -S`.
 
 ### D1 schema (`site/schema.sql`)
 
@@ -357,11 +431,31 @@ then `git rm`'d. `dt-cloud d1-schema check -d <db> [-c <wrangler config>]` compa
 
 One gate (`_lib/auth.ts`, `@open-athena/auth` over D1): `identify` → `Identity` (`via: session | grant | public`), `requireViewer` / `requireStager` / `requireAdmin`.
 - `/auth/google` (+ `/callback`, `/onetap`) — Google OIDC → email session; `/auth/email/*` — emailed code / magic link → email session
+- `/auth/oa` (+ `/callback`, `/client`) — "Sign in with OA" through OA's broker (`OA_LOGIN_*`, `specs/oa-login-rp.md`; unset: 404, no button) → email session. Where configured, the middleware sends a person's unauthenticated page visit there once with `prompt=none` before the wall (`_lib/silentSignIn.ts`; never a crawler, `fetch`, `?key=`/`?og=` link or public deployment); `/api/auth/logout` suppresses that until they click it or complete any sign-in. A completed one leaves a signed `oa_login_who` cookie (`rememberAccount`, outliving sign-out like Google's hints): `/auth/oa/client` returns that account with its profile's name and face, and the wall's button becomes "Continue as <them>"; when it covers every Google account remembered here, Google's slot shrinks to "Use a different account" (Google's chooser)
+- **Preview hosts** (`isPreviewHost`: exactly one label under `PAGES_SUBDOMAIN`, the project's `pages.dev` subdomain: a PR's `pr-N`, the `dev` alias, a deployment hash; never a custom domain): OA sign-in only through the broker's preview client (`OA_LOGIN_PREVIEW_CLIENT_ID` / `_SECRET`, Preview environment only) with `redirectFromOrigin`, else none (404, no button; never the deployment's own client), and no silent `prompt=none` attempt
+- **`AUTH_HOST_COOKIES = "1"`** (default off; switching it signs everyone out once): on https, the session (+ its `_rs` handle), both nonces and the Google hint are `__Host-` named (`cookieNames`), so the gate reads only `__Host-oa_auth` there; `gateFor(env, request)` needs the request for it
 - `/api/auth/*` — the package's routes: `whoami`, `exchange` (`?key=` share link → grant session), `logout`, request-access, admin grant/request/log console
 - `/api/token` — a session's personal agent token (a non-expiring Bearer grant, the base scope only; grants can't mint one)
 - `POST /api/app-link` → `GET /auth/app-link?token=` — the macOS app's sign-in hand-off ("Open in disky" in the user menu): a session mints a single-use, 60 s grant for its own email + scopes (same-origin POST only); the app's webview redeems it into an ordinary email session and the grant is revoked. Contract: `specs/app-link.md`
+- `/api/admins` — the admins (`/admin`'s "Admins" section): every path to the `admin` scope (the list's rows with who added whom and when, the break-glass addresses, live admin-scope links, the staff domain where it is one), add / remove on the list, each logged to `admin_edits`; the last listed admin can't be removed
+- `/a/<sha256>.<ext>` — **public, no gate**: an activity post's sender face (`_lib/publicAvatar.ts`), only bytes a Slack / Discord post stored in `public_avatars`, named by their own SHA-256 (a profile's or grant's face, else an identicon seeded by an HMAC of the actor under `SESSION_SECRET`); anything else 404s
+
+**A store's `series_scope`** (`STORES_JSON`, `_lib/stores.ts`): a grant holding it beside the viewer scope reads that store's root-level `/api/series` (only `store=`; no `path`, `lens`, `o`, `cl`, `q`, …) and nothing else of a store its `scope` closes; never a public, anonymous or path-restricted caller (`api/series.ts` `summaryGate`, its table in `functions/gates.test.ts`). A summary reader's token (a fleet dashboard's) is base read + that scope.
+
+**A path-restricted link** (a grant carrying `<tag>:hide:<prefix>`, `_lib/restrict.ts`): every route it can reach says what it gets in `functions/gates.test.ts` `RESTRICTED`. Blocked (`RESTRICTED_BLOCKED`, or by the route): whatever can't be filtered, including a name filter (`q=` on `/api/subtree`, `/api/diff`, `/api/series`: its sums count hidden hits) and an owner, class or lens scope at or above a hidden dir (`o=`, `cl=`, `lens=` on the same three: its sums break down what's hidden; under one is a 404, as unscoped). Filtered: the plain views, `/api/annotations`, `/data/rules.json`.
+
+**Who is an admin:** one function, `isAdmin(env, email)` (`_lib/auth.ts`); `scopesFor` puts the `admin` scope on a session by it, so `requireAdmin`, `Identity.admin`, whoami and the client's admin UI follow, and a Slack Dry-run or Reject click (`slack/actions.ts`) asks it of the clicker's Slack profile email. A real delete never starts from Slack: the card's "Delete for real…" is a link to `/staged`, on every deployment, and a click on the old dispatching button gets an ephemeral link there. With `ADMIN_LIST = "1"` an admin is an `admin_emails` row or a break-glass address (the secret `ADMIN_BOOTSTRAP`) and nothing else: staff keep every other scope, an empty or missing list means no admins (never a fallback to the domain; `/admin` says so), and a listed address is admitted by the list. A row may carry the person's GitHub handle (`github`), so the list can be checked against a GitHub org's owners (`dt-cloud admins check`). Unset, the staff domain is admin (plus `admin_emails` rows where `ADMIN_EMAILS`). The only other admin is a grant holding the scope (`admin` or `*`), which only an admin could mint, and which with `ADMIN_LIST` nobody can: the gate's store (`grantStore`) refuses to insert one, whichever path asks (`POST /api/auth/grants`, a request's approval: 403), or to re-key one (`/rotate`), or to give one back access (a later or cleared expiry, a higher cap, sessions that outlive the expiry, re-enabling: 403; shortening and disabling pass); the grant the package mints by itself for an address the policy admits (`POST /api/auth/request`) goes in without the scope. A live admin grant keeps working under the list, stays on `/admin`, and can be revoked. Agent tokens never carry it. `functions/gates.test.ts` enumerates every Functions route and asserts its gate per identity: a new route needs a row there.
+
+**Rolling out `ADMIN_LIST`:** merging changes nothing while it's unset, and `/api/admins` edits the list from the merge on, recipe applied or not (without `site/migrations/admin-list.sql` it stores no GitHub handles). To turn it on:
+1. Apply the recipe, seed the list on `/admin`, and check it (`dt-cloud admins check`).
+2. List the live admin grants (`/admin`'s Admins section, "link" rows; `created_by = 'policy'` rows are ones the package minted for a request, whose token nobody was given) and have them revoked. Each is an admin whatever the list says.
+3. Set `ADMIN_LIST` and `ADMIN_BOOTSTRAP` on **every environment sharing that D1, at the same time**, prod and dev stack alike: a dev stack on prod's D1 with the list off lets every staff sign-in edit the list from dev.
 
 ## Development
+
+Shared work done on a deployment branch is its own commit, subject prefixed `[cloud]`, with no deployment defaults; send its sha to the root `disky` session when committed. Config and wiring are separate `[<deploy>]` commits. An unsent `[cloud]` commit is how a fix stays on one deployment.
+
+Deploy sites and build release images only from committed source. `scripts/require-clean` refuses staged, unstaged and nonignored untracked changes; there is no dirty-source override. `site/deploy` checks again after building and records the verified commit. A deployment's image build (gcs/cw `job/build.sh`) uploads a Git archive of that commit, so concurrent working-tree edits cannot enter the image. Read-only deployment status and dry runs remain available on a dirty tree.
 
 During ongoing implementation, treat a concrete bug report about the code we own as an implied request to fix it: reproduce, implement, verify, and coordinate the deployment handoff without requiring a second prompt. Honor explicitly read-only requests. Code-fix authority does not imply unrelated infrastructure applies, permission changes, or another session's live cutover. Report separately what is fixed locally and what is actually deployed.
 
@@ -438,7 +532,7 @@ Every deployment (gcs, cw-s3, r2, hf, the r2 demo, …) ships the current full f
 - **Hosts:** prod and a dev stack: `dev.<host>` (a `branchAliases` CNAME onto the Pages branch `dev`), wrangler's `[env.preview]` with prod's bindings, preview-env secrets, every origin + callback (prod, dev, the `pages.dev` alias, localhost) on the Google OAuth client.
 - **Auth:** app sign-in (Google OIDC + emailed codes), staff domain, admin console, personal agent tokens.
 - **Serving:** the interval store as the Map's path store (`PATH_STORE = "intervals"`, following `interval-store/CURRENT.json`, once `interval-store verify` / a `ps=iv` parity check passes on the first scans); search from the prebuilt static name index only (`FILTER_STATIC`, `NAME_SUMMARY_STATIC`, `FILTER_STATIC_HEAVY`, `FILTER_INDEXED_ONLY = "1"`), no per-scan search sidecars. Per-scan `path`/`bysize` sorts are on their way out (`specs/lean-scans.md`).
-- **Job:** `scan-run supervise` (phases, alerts, `/scans` records, cost labels), `DT_TRIGGER` (`schedule` in the cron body, `manual` from hand submits; with migration `scan-run-trigger`): the run's and the scan's trigger (`/scans`, the digest's reply scan), `index-gc`, cache warm-up (`warm-cache`) and the serving probe (`probe -c`) after each scan, the Slack digest thread.
+- **Job:** `scan-run supervise` (phases, alerts, `/scans` records, cost labels), `DT_TRIGGER` (`schedule` in the cron body, `manual` from hand submits; with migration `scan-run-trigger`): the run's and the scan's trigger (`/scans`, the digest's reply scan), `index-gc`, cache warm-up (`warm-cache`) and the serving probe (`probe -c`) after each scan, the Slack digest thread, and on a staging deployment the `staged-card` step (`dt-cloud staged-card`; the site's prod env names the job's grant in `STAGED_CARD_GRANT`, its dev stack does not).
 - **Meta:** the "data behind this site" store (`STORES_JSON` `meta`) with its own static index.
 
 A deployment's spec lists the baseline items it doesn't have yet as gaps, and those gaps are open work, not follow-ups to propose.

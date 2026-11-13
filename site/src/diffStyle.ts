@@ -2,7 +2,7 @@
 // (`DiffTreemap.tsx`) and the server-drawn digest image (`functions/_lib/og/
 // digestCard.ts`) paint a change the same way.
 import { divergingColor, divergingInk } from '@open-athena/treemap/divergingColor'
-import { buildTree, type AreaMode, type DiffData, type DiffNode } from './diffModel'
+import { buildTree, isSynthetic, type AreaMode, type DiffData, type DiffNode } from './diffModel'
 
 const { abs, max, min, sign } = Math
 
@@ -17,10 +17,10 @@ export const deltaColor = (t: number) => divergingColor(-t)
 // blue box sitting under green children.
 export const FIRST_SCANNED = 'var(--s1)'
 
-export interface DiffCellStyle { bg: string; ink: string; edge?: string }
+export interface DiffCellStyle { bg: string; ink: string; edge?: string; dustCount?: number; bands?: { color: string; frac: number }[] }
 
 /** One cell's fill and ink. */
-export function diffCellStyle(n: DiffNode, areaMode: AreaMode): DiffCellStyle {
+function baseCellStyle(n: DiffNode, areaMode: AreaMode): DiffCellStyle {
   // First-scanned: the bucket and its whole subtree read blue. A container
   // gets a neutral fill with a blue frame (the borders draw it), so its blue
   // children aren't sitting inside a blue block; a leaf takes the blue fill.
@@ -39,10 +39,10 @@ export function diffCellStyle(n: DiffNode, areaMode: AreaMode): DiffCellStyle {
     }
     const f = n.weight === 0 ? 0 : min(1, abs(n.delta) / n.weight)
     if (f === 0) return { bg: UNCHANGED_GREY, ink: divergingInk(0) }
-    const pct = `${(f * 100).toFixed(2)}%`
     const band = deltaColor(sign(n.delta))
     return {
-      bg: `linear-gradient(to top, ${band} ${pct}, ${UNCHANGED_GREY} ${pct})`,
+      bg: UNCHANGED_GREY,
+      bands: [{ color: UNCHANGED_GREY, frac: 1 - f }, { color: band, frac: f }],
       ink: divergingInk(f > 0.85 ? 1 : 0),
     }
   }
@@ -53,6 +53,13 @@ export function diffCellStyle(n: DiffNode, areaMode: AreaMode): DiffCellStyle {
   const base = max(n.size_old, n.size_new)
   const t = base === 0 ? 0 : n.delta / base
   return { bg: deltaColor(t), ink: divergingInk(t) }
+}
+
+/** Object counts are known on both sides; use their larger count as a visual density hint, without claiming a
+ *  count of direct child folders or an exact size distribution. Unchanged filler has no reliable object count. */
+export function diffCellStyle(n: DiffNode, areaMode: AreaMode): DiffCellStyle {
+  const style = baseCellStyle(n, areaMode)
+  return isSynthetic(n) && n.status !== 'filler' ? { ...style, dustCount: Math.max(1, n.n_old, n.n_new) } : style
 }
 
 /** The diff's tree under one synthetic root labelled `label`, in `mode`

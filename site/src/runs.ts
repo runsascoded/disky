@@ -3,6 +3,7 @@
 // (`plan-summary.json`, `progress/<bucket>.json`, `<mode>-summary.json`),
 // the checks a run's detail shows, and which controls a run offers under
 // the deployment's executor capabilities. Nothing here names a deployment.
+import { runHasNoUndo, runNoUndoText, UNDO_UNAVAILABLE_WHY, type UndoUnavailable, undoUnavailableText, type UndoUnseen } from './softDelete'
 
 /** A deletion run as the deployment's executor records it (`deletion_runs`;
  * cw's and gcs's rows share these columns). */
@@ -21,6 +22,10 @@ export interface DeletionRun {
   drift_dirs?: number
   ledger_drift_dirs?: number
   undo_deadline: number | null
+  /** The minimum this run ran under, and the narrowest retention measured on its buckets (0: no undo). Null, or absent on a D1
+   * from before the columns: not recorded (that image required 7 days). */
+  min_soft_delete_days?: number | null
+  soft_delete_days?: number | null
   undo_state: string
   purge_state?: string
   log_dir?: string
@@ -53,7 +58,11 @@ export interface ExecJob {
   bucket_region?: string | null
   logs?: string
   last_event?: string | null
+  /** Why the step failed, from its own `failure.json` (gcs): what Batch's "exit code 1" event can't say. */
+  failure?: string | null
   stop_requested?: boolean
+  /** What was selected at dispatch, by the sizes the page showed: display only. */
+  expected?: { bytes: number; objects: number }
   /** The job's run dir (gcs: `plan`; cw: `run`), `gs://<bucket>/…`. */
   plan?: string
   run?: string
@@ -70,6 +79,9 @@ export interface ExecCaps {
   /** Undo is offered for a finished real run that recorded no window (cw:
    *  its route allows it); gcs requires the recorded window. */
   undoUnwindowed: boolean
+  /** Undo restores from what the buckets keep after a delete, so a recorded undo is unavailable where that is off now; the page
+   *  reads what the buckets have (`useBucketSoftDelete`). */
+  softDelete: boolean
   /** A real run's deleted versions can be purged once its window closes. */
   purge: boolean
   /** A dispatch may name a subset of the plan's buckets. */
@@ -86,21 +98,21 @@ export const EXEC_CAPS: Record<'plan-sweep' | 'sweep' | 'laptop', ExecCaps> = {
   // bucket, which its `/v1/files` (the R2 index store) doesn't serve.
   'plan-sweep': {
     stop: true, stopHint: 'Cancel the Batch job: deletes already made may be permanent; a re-dispatch re-lists and skips missing objects.',
-    undo: true, undoUnwindowed: true, purge: true, bucketCut: false, runFiles: false,
+    undo: true, undoUnwindowed: true, softDelete: true, purge: true, bucketCut: false, runFiles: false,
     startHint: 'once the job starts (a few minutes while Batch brings up the VM)',
   },
   // gcs: a plan may span buckets; soft delete expires deleted generations on
   // its own (nothing to purge); its files proxy serves the data bucket.
   sweep: {
     stop: true, stopHint: 'Request a clean stop: in-flight work drains and is logged; remaining work is left for a re-run.',
-    undo: true, undoUnwindowed: false, purge: false, bucketCut: true, runFiles: true,
+    undo: true, undoUnwindowed: false, softDelete: true, purge: false, bucketCut: true, runFiles: true,
     startHint: 'once the job starts (a few minutes while Batch brings up the VM)',
   },
   // m3: the drainer pulls a dispatched run from D1 and trashes on the laptop;
   // no Batch job to stop, and undo is the Trash, not a site action.
   laptop: {
     stop: false, stopHint: '',
-    undo: false, undoUnwindowed: false, purge: false, bucketCut: false, runFiles: false,
+    undo: false, undoUnwindowed: false, softDelete: false, purge: false, bucketCut: false, runFiles: false,
     startHint: 'when the drainer picks it up (its next poll: 30 s, up to 2½ min while idle)',
   },
 }
@@ -158,6 +170,9 @@ export const viewState = (v: RunView): string => {
 
 export const viewLive = (v: RunView): boolean => LIVE_STATES.has(viewState(v)) || viewState(v) === 'PENDING'
 
+/** A live run's selection total: what its row shows until the manifest says what it found. */
+export const expectedOf = (v: RunView): NonNullable<ExecJob['expected']> | null => (viewLive(v) ? v.job?.expected ?? null : null)
+
 /** Seconds a run took (or has taken, while live). */
 export function elapsed(v: RunView, now: number): number | null {
   if (v.job?.run_secs != null) return v.job.run_secs
@@ -210,6 +225,13 @@ export function runLabel(id: string): string {
 export const viewBuckets = (v: RunView): string[] =>
   v.run?.buckets ? v.run.buckets.split(',').map(b => b.trim()).filter(Boolean) : v.job?.buckets ?? []
 
+/** The buckets a run deleted from, as far as the page knows: its recorded cut (else its job's), else `others` (the buckets its
+ * bands name, or its plan summary's). Empty: unknown, so nothing is claimed of them. */
+export const deletedBuckets = (v: RunView, others: readonly string[] = []): string[] => {
+  const cut = viewBuckets(v)
+  return cut.length ? cut : [...others]
+}
+
 /** The longest `<word>-` prefix every bucket shares (`marin-us-east1`,
  * `marin-eu-west4` → `marin-`), for compact bucket names; '' when none. */
 export function commonBucketPrefix(buckets: readonly string[]): string {
@@ -241,9 +263,59 @@ export interface Tally { bytes: number; objects: number }
 export interface PlanSummaryFile {
   date?: string
   plan_id?: number
-  buckets: Record<string, { objects?: number; dirs?: number; eligible?: Tally; outside_bands?: Tally }>
-  total?: { eligible?: Tally; outside_bands?: Tally }
+  /** What a generation-pinned executor (`execute-reviewed`, `execute-manifest`) writes; a listing run has none. */
+  contract?: string
+  backend?: 'xml' | 'json'
+  buckets: Record<string, { objects?: number; dirs?: number; eligible?: Tally; outside_bands?: Tally; skipped_no_generation?: BucketSkips }>
+  total?: { eligible?: Tally; outside_bands?: Tally; skipped_after_as_of?: Tally }
+  skipped_no_generation?: Tally & { whole_buckets: string[] }
 }
+
+/** A bucket's rows with no generation: logged, not deleted. `whole_bucket`: every row of it, so it wasn't swept at all. */
+export interface BucketSkips extends Tally { whole_bucket: boolean }
+
+/** Did this run's deletes go through the XML multi-delete? GCS replies `Deleted` there whatever an item names (the live
+ * generation, one already gone, an overwritten one, a wrong one, a key that never existed), so its `deleted` count means
+ * attempted and acknowledged, and gone / overwritten aren't observable. Listing runs, and older JSON ones, did observe them. */
+export const attemptOnly = (s: Pick<PlanSummaryFile, 'contract' | 'backend'> | null | undefined): boolean =>
+  !!s?.contract?.endsWith('-delete-generations') && s.backend !== 'json'
+
+/** What a run's finished message says beyond its D1 totals. */
+export interface RunOutcome {
+  /** `attemptOnly`: its `deleted` count is what was attempted and acknowledged. */
+  attempted: boolean
+  /** Objects left in place for want of a generation (null: none). */
+  skipped: Tally | null
+  /** Buckets none of whose objects had one, so not swept at all. */
+  notSwept: string[]
+  /** Current versions outside the staging cutoff, left untouched. */
+  preserved?: Tally
+  /** Its `plan-summary.json` couldn't be read, so the other fields say nothing. */
+  unread?: boolean
+  /** A real run closed from what it wrote, with no end record (`sweepTotals.ts`): how far its D1 totals go. */
+  totals?: 'lower-bound' | 'exact' | 'unread'
+}
+
+/** Null: nothing to say, the run reads as it always did. */
+export function runOutcome(s: PlanSummaryFile): RunOutcome | null {
+  const attempted = attemptOnly(s)
+  const skips = s.skipped_no_generation
+  const skipped = skips && skips.objects > 0 ? { bytes: skips.bytes, objects: skips.objects } : null
+  const preserved = s.total?.skipped_after_as_of
+  return attempted || skipped || preserved?.objects ? { attempted, skipped, notSwept: skipped ? skips!.whole_buckets : [], ...(preserved?.objects ? { preserved } : {}) } : null
+}
+
+export const NOT_OBSERVABLE = 'Not observable on this run: an XML multi-delete acknowledges every generation it is sent, so a key already gone or overwritten reads the same as one it deleted.'
+export const ATTEMPTED = 'Generation deletes attempted and acknowledged. An XML multi-delete acknowledges every generation it is sent, so this is what was requested, not proof each object was there to delete.'
+export const UNDO_CAVEAT = 'Its log can\'t tell an object this run deleted from one someone else deleted after the scan, so undo can bring those back too.'
+
+export const LOWER_BOUND = 'A lower bound: the run ended before recording its end, so these totals are its progress files\', which can lag what it did.'
+export const UNDO_LOG_ONLY = 'Undo restores only what its log names. A generation in a log part that never uploaded stays deleted unless restored by hand; `sweep undo -B` won\'t reach it either.'
+
+/** A real run closed with no final summary (`sweepTotals.ts`): `deleted-summary.json` is known absent (null, not `undefined`:
+ * still loading, or a run dir this deployment can't read). A failed job whose summary exists has exact totals. */
+export const totalsLowerBound = (r: Pick<DeletionRun, 'mode' | 'finished_ts' | 'plan_digest'>, summary: LogSummaryFile | null | undefined): boolean =>
+  r.mode === 'real' && !!r.finished_ts && r.plan_digest === '' && summary === null
 
 /** What the manifest planned to delete: its total eligible, else the sum of
  * the buckets'. */
@@ -313,6 +385,7 @@ export interface LogSummaryFile {
     soft_delete_days?: number
     missing_perms?: string[]
     interrupted?: { roots_skipped: number; roots: number }
+    skipped_no_generation?: BucketSkips
   }>
 }
 
@@ -354,15 +427,67 @@ export function verifyRun(run: DeletionRun, planned: Tally | null, logged: Logge
   return checks
 }
 
-/** The run controls a viewer gets at `now`. */
-export function runControls(v: RunView, caps: ExecCaps, admin: boolean, now: number): { stop: boolean; undo: boolean; purge: boolean; undoing: boolean } {
+/** `2026-11-10 12:00`, UTC. */
+export const utcMinute = (ts: number): string => new Date(ts * 1000).toISOString().slice(0, 16).replace('T', ' ')
+
+/** What a run's row says of its undo. `none`: its own record says it has none (`why`). `unavailable`: it recorded a window,
+ * still open, but soft delete is off now on a bucket it deleted from. `open` with `unseen`: nothing here says whether soft
+ * delete is still on where it deleted, so its deadline stands unverified. `unrecorded`: a dry run, a run still going, or a
+ * real run that recorded no window. */
+export type UndoStatus =
+  | { kind: 'none'; why: string }
+  | { kind: 'unavailable'; unavailable: UndoUnavailable; deadline: number }
+  | { kind: 'open'; deadline: number; unseen?: UndoUnseen }
+  | { kind: 'closed'; deadline: number }
+  | { kind: 'unrecorded' }
+
+/** `unavailable`, `unseen`: `runUndoUnavailable`'s and `runUndoUnseen`'s answers for this run. */
+export function undoStatus(r: DeletionRun | undefined, now: number, unavailable: UndoUnavailable | null, unseen: UndoUnseen | null = null): UndoStatus {
+  if (!r || r.mode !== 'real') return { kind: 'unrecorded' }
+  if (runHasNoUndo(r)) return { kind: 'none', why: runNoUndoText(r) }
+  if (r.undo_deadline == null) return { kind: 'unrecorded' }
+  if (now >= r.undo_deadline) return { kind: 'closed', deadline: r.undo_deadline }
+  if (unavailable) return { kind: 'unavailable', unavailable, deadline: r.undo_deadline }
+  return { kind: 'open', deadline: r.undo_deadline, ...(unseen ? { unseen } : {}) }
+}
+
+/** The run controls a viewer gets at `now`. `undoOff`: the undo control is shown, disabled, with this reason (a finished real
+ * run, to an admin, where the executor has an undo, but this run's can't be done); null with `undo` false: no control (a dry
+ * or live run, a viewer). `unavailable`: `runUndoUnavailable`'s answer for the run. */
+export interface RunControls { stop: boolean; undo: boolean; purge: boolean; undoing: boolean; undoOff: string | null }
+
+export function runControls(v: RunView, caps: ExecCaps, admin: boolean, now: number, unavailable: UndoUnavailable | null = null): RunControls {
   const r = v.run
   const undoing = v.ops.some(o => o.op === 'undo' && LIVE_STATES.has(o.state))
   const purging = v.ops.some(o => o.op === 'purge' && LIVE_STATES.has(o.state))
   const stop = caps.stop && admin && viewLive(v) && !!v.job
-  if (!r || !admin || r.mode !== 'real' || !r.finished_ts) return { stop, undo: false, purge: false, undoing }
-  const inWindow = r.undo_deadline != null ? now < r.undo_deadline : caps.undoUnwindowed
-  const undo = caps.undo && r.undo_state !== 'full' && inWindow && !undoing
+  if (!r || !admin || r.mode !== 'real' || !r.finished_ts) return { stop, undo: false, purge: false, undoing, undoOff: null }
+  const text = unavailable && undoUnavailableText(unavailable)
+  const undoOff = !caps.undo ? null
+    : undoing ? 'An undo of this run is in progress.'
+    : r.undo_state === 'full' ? 'Already undone.'
+    : runHasNoUndo(r) ? runNoUndoText(r)
+    : r.undo_deadline == null ? caps.undoUnwindowed ? null : 'This run recorded no undo window.'
+    : now >= r.undo_deadline ? `Undo window closed ${utcMinute(r.undo_deadline)} UTC.`
+    : text ? `${text[0].toUpperCase()}${text.slice(1)}. ${UNDO_UNAVAILABLE_WHY}`
+    : null
   const purge = caps.purge && r.purge_state === 'pending' && r.undo_state !== 'full' && (r.undo_deadline == null || now >= r.undo_deadline) && !purging && !undoing
-  return { stop, undo, purge, undoing }
+  return { stop, undo: caps.undo && !undoOff, purge, undoing, undoOff }
+}
+
+/** A run's item set as `functions/_lib/plans.ts`'s `planDigest` names it: sha-256 of the sorted lines, first 16 hex. */
+export async function itemsDigest(lines: readonly string[]): Promise<string> {
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode([...lines].sort().join('\n')))
+  return [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, '0')).join('').slice(0, 16)
+}
+
+const REUSABLE_DIR = /^gs:\/\/[^/]+\/sweep\/runs\/gcs-sweep-dry-[0-9]{8}-[0-9]{6}z$/
+
+/** The dry run a real run of these items at `scan` would reuse, or null: it deletes from a fresh manifest. What dispatch decides
+ * (`functions/_lib/plans.ts`'s `realRun`, then `sweepDispatch`'s check of its run dir), from the runs the page already has. */
+export function reusableDryRun(runs: readonly DeletionRun[], planId: number, digest: string, scan: string): DeletionRun | null {
+  const newest = runs
+    .filter(r => r.plan_id === planId && r.mode === 'dry' && !!r.plan_digest && r.plan_digest === digest && r.scan === scan)
+    .sort((a, b) => b.started_ts - a.started_ts)[0]
+  return newest?.log_dir && REUSABLE_DIR.test(newest.log_dir) ? newest : null
 }

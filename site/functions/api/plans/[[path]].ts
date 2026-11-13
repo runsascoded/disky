@@ -23,12 +23,17 @@ import { type Ctx, type Env as AuthEnv, json, requireAdmin, requireStager, requi
 import { audit, canonicalPrefix, mergeBatches, NO_SHAPE, openPlanId, planDetail, type PlanRow, type PrefixShape, prefixShape, runDetail, stageItems } from "../../_lib/plans.js"
 import { pathScans, storeReady, withPathStore } from "../../_lib/index.js"
 import { MAX_PREFIXES, prefixesAt } from "../../_lib/prefixes.js"
-import { notifyPlan, refreshThread, type NotifyEnv } from "../../_lib/stagedSlack.js"
+import { notifyPlan, refreshStagedCard, refreshThread, type NotifyEnv } from "../../_lib/stagedSlack.js"
 import { batchConfig, type BatchEnv } from "../../_lib/batchConfig.js"
 import { gcpToken } from "../../_lib/gcp.js"
 import { readRunJson } from "../../_lib/runReflect.js"
 
-type Env = AuthEnv & NotifyEnv & BatchEnv & { DB?: D1Database }
+type Env = AuthEnv & NotifyEnv & BatchEnv & {
+  DB?: D1Database
+  /** The job grant whose post-scan ping re-renders the staged card (`/api/plans/staged/card`); unset, there's no such route.
+   *  Only the stack that owns the card sets it: a dev stack sharing its D1 and channel must not. */
+  STAGED_CARD_GRANT?: string
+}
 type Bg = (p: Promise<unknown>) => void
 
 const now = (): number => Math.floor(Date.now() / 1000)
@@ -148,6 +153,15 @@ export const onRequest = async (ctx0: Ctx & { env: Env; waitUntil?: Bg }): Promi
   if (segs.length === 1 && segs[0] === "staged" && method === "GET") {
     const gated = await requireViewer(ctx)
     return gated instanceof Response ? gated : getStaged(db, staging)
+  }
+
+  // /api/plans/staged/card — the job's post-scan ping: writes to Slack, so one named grant, never a viewer.
+  if (segs.length === 2 && segs[0] === "staged" && segs[1] === "card" && method === "POST") {
+    if (!ctx.env.STAGED_CARD_GRANT) return json({ error: "no staged-card grant on this deployment" }, 404)
+    const gated = await requireViewer(ctx)
+    if (gated instanceof Response) return gated
+    if (gated.via !== "grant" || gated.grantId !== ctx.env.STAGED_CARD_GRANT) return json({ error: "forbidden" }, 403)
+    return json({ refreshed: await refreshStagedCard(ctx.env as NotifyEnv, db, new URL(ctx.request.url).origin) })
   }
 
   // /api/plans/stage — the opt-in trash proposal, on deployments that stage.

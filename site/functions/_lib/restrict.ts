@@ -1,5 +1,5 @@
 /**
- * Path scopes (specs/path-scopes.md): a share link whose grant carries
+ * Path scopes: a share link whose grant carries
  * `<tag>:hide:<prefix>` sees `<prefix>` as one cell (its own row, with its
  * aggregate size) and nothing strictly below it.
  *
@@ -30,11 +30,13 @@ export const isPathScope = (scope: string): boolean => /^[a-z0-9-]+:hide:/.test(
 /** Routes a path-restricted link can't use at all (`_middleware.ts`): raw
  *  bucket bytes, D1-held path lists, and answers naming paths that no route
  *  filters (name search summaries and covers, the static-index bench, the
- *  append stores' health, scan-run outputs). */
+ *  append stores' health, scan-run outputs, the digest's image: a drawn diff
+ *  of whatever path its caller names). */
 export const RESTRICTED_BLOCKED = [
   '/api/path-index', '/v1', '/api/plans', '/api/actions', '/api/db', '/api/owners',
   '/api/estate', '/api/assignments', '/api/sweep', '/api/plan-sweep', '/api/og',
   '/api/name-summary', '/api/name-summary-registry', '/api/static-bench', '/api/filter-cover', '/api/name-matches', '/api/health', '/api/scan-runs',
+  '/api/digest-image',
 ]
 
 export const blockedForRestricted = (pathname: string): boolean =>
@@ -50,7 +52,7 @@ export async function restrictGate(request: Request, env: Env): Promise<Response
 
 /** Whether a restricted viewer may read snapshot file `key` (`/data`, a key
  *  under the store's `own` snapshot dir; `rules.json`, the identity roster, is
- *  checked by the caller): a scan's `meta.json` (totals, owners, classes), and
+ *  the caller's to filter: `restrictRules`): a scan's `meta.json` (totals, owners, classes), and
  *  its whole-fleet `age.json` (rows per top-level dir) unless a hide prefix is
  *  itself top-level — its row would break down what the link hides. Anything
  *  else a scan publishes (`lifecycle.json`'s rule prefixes, and whatever a job
@@ -60,6 +62,13 @@ export function dataAllowed(key: string, own: string, r: Restriction): boolean {
   if (file === 'meta.json') return true
   if (file === 'age.json') return !r.hide.some(h => !h.includes('/'))
   return false
+}
+
+/** `rules.json` for a restricted viewer: the roster (`users`) whole, and the attribution rules (`prefix_owners`:
+ *  a prefix URI, its owner, a note) without those for a prefix strictly below a hidden dir. */
+export function restrictRules<T extends { prefix_owners?: { prefix: string }[] }>(rules: T, r: Restriction): T {
+  if (!Array.isArray(rules.prefix_owners)) return rules
+  return { ...rules, prefix_owners: rules.prefix_owners.filter(row => !isHidden(row.prefix.replace(/^[a-z0-9]+:\/\/\/*/, ''), r)) }
 }
 
 /** A prefix as a scope carries it: auth stores a grant's scopes space- and
@@ -83,6 +92,14 @@ export function restrictionFor(id: Identity | null, env: Env): Restriction | nul
   return hide.length ? { hide } : null
 }
 
+/** Every hide prefix a grant carries, whatever store it names, as one restriction; null without any. For an answer
+ *  that isn't one store's (a union view's notes: a path there is some member's): over-hiding is the safe side. */
+export function restrictionAnyStore(id: Identity | null): Restriction | null {
+  if (!id || id.via !== 'grant') return null
+  const hide = [...new Set(id.scopes.filter(isPathScope).map(s => norm(decodePrefix(s.slice(s.indexOf(':hide:') + ':hide:'.length)))).filter(Boolean))]
+  return hide.length ? { hide } : null
+}
+
 /** Whether `path` (store-relative) is strictly below a hidden dir. */
 export const isHidden = (path: string, r: Restriction): boolean => {
   const p = norm(path)
@@ -91,6 +108,15 @@ export const isHidden = (path: string, r: Restriction): boolean => {
 
 /** Whether `path` is a hidden dir itself (shown, but as a leaf). */
 export const isHideRoot = (path: string, r: Restriction): boolean => r.hide.includes(norm(path))
+
+/** Whether a read of `path` under an owner, class or lens scope would break down what `r` hides: `path` is a hidden dir
+ *  or above one. Its hidden cell would be the scope's share of the dir's contents, and its total, less its visible
+ *  children's, the same; a sum can't be filtered on the way out, so the routes refuse it (`restrictedScopeRefused`). An
+ *  unscoped total reveals only the dir's size, which the link shows. */
+export const scopeReachesHidden = (path: string, r: Restriction): boolean => {
+  const p = norm(path)
+  return r.hide.some(h => !p || h === p || h.startsWith(`${p}/`))
+}
 
 const join = (a: string, b: string): string => (a ? (b ? `${a}/${b}` : a) : b)
 
@@ -108,28 +134,14 @@ export function restrictTree(node: ViewNode, path: string, r: Restriction): View
   return { ...node, c }
 }
 
-/** The search fields of a subtree/diff body (`matches`, `matched`,
- *  `excluded`), hidden paths removed. */
-function restrictSearch<T extends object>(body: T, r: Restriction): T {
-  const b = body as Record<string, unknown>
-  const out: Record<string, unknown> = { ...b }
-  if (Array.isArray(b.matches)) out.matches = (b.matches as string[]).filter(p => !isHidden(p, r))
-  if (Array.isArray(b.matched)) out.matched = (b.matched as { path: string }[]).filter(m => !isHidden(m.path, r))
-  if (Array.isArray(b.excluded)) out.excluded = (b.excluded as string[]).filter(p => !isHidden(p, r))
-  // The search's exact totals (`matchCount`: every match, beyond the listed ones) count hidden hits and
-  // can't be recounted from the body: dropped, as on a view without them.
-  delete out.matchCount
-  return out as T
-}
-
 /** A `/api/subtree` body for a restricted viewer. */
 export function restrictSubtree<T extends { path: string; tree: ViewNode }>(body: T, r: Restriction): T {
-  return restrictSearch({ ...body, tree: restrictTree(body.tree, body.path, r) }, r)
+  return { ...body, tree: restrictTree(body.tree, body.path, r) }
 }
 
 /** A `/api/diff` body for a restricted viewer: rows are relative to `path`. */
 export function restrictDiff<T extends { path: string; rows: { p: string }[] }>(body: T, r: Restriction): T {
-  return restrictSearch({ ...body, rows: body.rows.filter(row => !isHidden(join(norm(body.path), row.p), r)) }, r)
+  return { ...body, rows: body.rows.filter(row => !isHidden(join(norm(body.path), row.p), r)) }
 }
 
 /** A JSON response re-emitted through `fn` (same status and headers); a
@@ -146,6 +158,15 @@ const plain = (msg: string, status: number): Response => new Response(msg, { sta
 
 /** 404 for a request naming a hidden path (as if it didn't exist). */
 export const hiddenNotFound = (): Response => plain('path not found', 404)
+
+const refused = (error: string, code: string): Response =>
+  new Response(JSON.stringify({ error, code }) + '\n', { status: 403, headers: { 'content-type': 'application/json; charset=utf-8' } })
+
+/** 403 for a name filter: its sums count hidden hits. Its `code` is a refusal the client states as its reason (`filterCaps.ts`). */
+export const restrictedSearchRefused = (): Response => refused('search isn’t available on this link', 'restricted-search')
+
+/** 403 for an owner, class or lens scope at or above a hidden dir (`scopeReachesHidden`); a refusal, as above. */
+export const restrictedScopeRefused = (): Response => refused('this owner, class or user view isn’t available here on this link', 'restricted-scope')
 
 /** 403 for a route a restricted link can't use (raw bytes, D1 path lists). */
 export const restrictedForbidden = (): Response =>

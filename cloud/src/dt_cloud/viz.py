@@ -141,20 +141,25 @@ def dir_exprs(age_cols: tuple[str, ...] = ()) -> dict[str, str]:
         "sum_storage_class_id_4": "coalesce(p.c4, 0)::BIGINT",
         **{c: f"coalesce(p.{c}, 0)::BIGINT" for c in age_cols},
         GENERATION: "NULL::BIGINT",
+        "version": "NULL::VARCHAR",
     }
 
 
-def store_columns_for(generation: bool, age_cols: tuple[str, ...] = ()) -> list[str]:
-    """The store's columns (`STORE_L2_SHAPE`'s, the `age_cols` strata, + `generation` last with `-G`)."""
+def store_columns_for(generation: bool, object_version: bool = False, age_cols: tuple[str, ...] = ()) -> list[str]:
+    """The store columns (`STORE_L2_SHAPE`'s, the `age_cols` strata), with opt-in numeric and/or opaque object
+    identities last."""
     from .index import GENERATION
 
-    return [*store_columns([([*STORE_L2_SHAPE[0], *age_cols], STORE_L2_SHAPE[1])]), *([GENERATION] if generation else [])]
+    return [
+        *store_columns([([*STORE_L2_SHAPE[0], *age_cols], STORE_L2_SHAPE[1])]),
+        *([GENERATION] if generation else []), *(['version'] if object_version else []),
+    ]
 
 
-def store_select(generation: bool, age_cols: tuple[str, ...] = ()) -> str:
+def store_select(generation: bool, object_version: bool = False, age_cols: tuple[str, ...] = ()) -> str:
     """The SELECT list of a store dir row (`dir_exprs`) in the store's column order."""
     exprs = dir_exprs(age_cols)
-    return ", ".join(f"{exprs[c]} AS {c}" for c in store_columns_for(generation, age_cols))
+    return ", ".join(f"{exprs[c]} AS {c}" for c in store_columns_for(generation, object_version, age_cols))
 
 
 def _write_store(
@@ -172,6 +177,7 @@ def _write_store(
     age_cols: tuple[str, ...] = (),
     search: bool = False,
     generation: bool = False,
+    object_version: bool = False,
     path_only: bool = False,
     groups: bool = True,
     roots: tuple[Path, str] | None = None,
@@ -224,7 +230,7 @@ def _write_store(
             """
         )
     _rss("dstruct")
-    columns = store_columns_for(generation, age_cols)
+    columns = store_columns_for(generation, object_version, age_cols)
     # An object is attributed to its dir's owner (the same deepest-prefix join
     # `dir_attr` resolved per dir; a leaf needs no explosion). The access log is
     # per dir, so `last_read` is NULL on object rows.
@@ -240,6 +246,7 @@ def _write_store(
         **{f"sum_storage_class_id_{c}": f"(CASE WHEN x.storage_class_id = {c} THEN x.size_bytes ELSE 0 END)::BIGINT" for c in (2, 3, 4)},
         **{c: f"(CASE WHEN x.created IS NOT NULL AND {age_bucket_sql('x.created', str(asof_day))} = {i} THEN x.size_bytes ELSE 0 END)::BIGINT" for i, c in enumerate(age_cols)},
         GENERATION: f"x.{GENERATION}::BIGINT",
+        "version": "x.version::VARCHAR",
     }
     sel = lambda exprs: ", ".join(f"{exprs[c]} AS {c}" for c in columns)  # noqa: E731
     store = path_index.with_name(STORE_L2)
@@ -306,6 +313,7 @@ def write_path_index(
     user_sort_tiers: tuple[str, ...] | None = None,
     search: bool = False,
     generation: bool = False,
+    object_version: bool = False,
     path_only: bool = False,
     part: "Part | None" = None,
 ) -> dict:
@@ -326,7 +334,8 @@ def write_path_index(
     ``search`` writes the search sidecars beside the `path` sort
     (specs/done/path-store-search.md). ``generation`` (`path-index -G`, gcs) adds
     each object's `generation` from the listing as the store's last column
-    (NULL on dirs); off, the sorts have no such column. ``path_only``
+    (NULL on dirs); off, the sorts have no such column. ``object_version`` (`-V`) carries the normalized listing's
+    opaque string `version` instead (ETag or an exact decimal native generation), also NULL on dirs. ``path_only``
     (`path-index -O`, specs/lean-scans.md §1.1 step 2) cuts the `path` sort
     alone: no `bysize`, no `-by-user` copies, no `.groups.*` sidecars, no
     search sidecars — the input the interval store and the static name index
@@ -541,6 +550,12 @@ def write_path_index(
         # column a part has.
         acc = f"read_parquet({globs}, union_by_name = true)"
         have = {r[0] for r in con.execute(f"DESCRIBE SELECT * FROM {acc}").fetchall()}
+        if 'history_before' in have:
+            closed = con.execute(f"SELECT MAX(history_before) AT TIME ZONE 'UTC' FROM {acc}").fetchone()[0]
+            if closed is not None:
+                closed = closed.replace(tzinfo=dt.timezone.utc)
+            if closed is not None and dt.datetime.combine(dt.date.fromisoformat(asof[:10]), dt.time(), dt.timezone.utc) < closed:
+                raise ValueError(f"read summary closes history before {closed.isoformat()}; use the historical scan's interval store or original access inputs")
         day_of = [f"CAST({c} AS DATE)" for c in ("day", "hour") if c in have]
         if not day_of:
             raise ValueError(f"access aggregates have neither `day` nor `hour`: {sorted(have)}")
@@ -557,8 +572,9 @@ def write_path_index(
             GROUP BY 1, 2
             """
         )
+        first = 'COALESCE(first_ts, last_ts)' if 'first_ts' in have else 'last_ts'
         lo, hi, hr = con.execute(
-            f"SELECT CAST(floor(epoch(MIN(last_ts)) / 86400) AS INTEGER), "
+            f"SELECT CAST(floor(epoch(MIN({first})) / 86400) AS INTEGER), "
             f"CAST(floor(epoch(MAX(last_ts)) / 86400) AS INTEGER), "
             f"CAST(floor(epoch(MAX(last_ts)) / 3600) AS BIGINT) FROM {acc} "
             f"WHERE {day} < DATE '{asof}'"
@@ -643,7 +659,8 @@ def write_path_index(
 
         pdir = path_index.parent
         sorts = _write_store(con, src, path_index, attr=attr, fp_dir=fp_dir, maxseg=maxseg, user_sorts=user_sorts, row_group_rows=row_group_rows,
-                             user_sort_tiers=user_sort_tiers, asof_day=asof_day, age_cols=age_cols, search=search, generation=generation, path_only=path_only,
+                             user_sort_tiers=user_sort_tiers, asof_day=asof_day, age_cols=age_cols, search=search, generation=generation,
+                             object_version=object_version, path_only=path_only,
                              groups=part is None, roots=(pdir / ROOTS, part.id) if part else None)
         _rss("store")
         if part is not None:

@@ -4,15 +4,19 @@ import { AvatarField } from '@open-athena/auth/react'
 import { Loading } from './Busy'
 import { Link, useSearchParams } from 'react-router-dom'
 import { SiteNav } from './SiteNav'
+import { CAPS } from './plans'
 import { DEFAULT_STORE, STORES } from './stores'
 import { hideScopes } from './hideScopes'
 import { useDocTitle } from './title'
 import { PreviewLinks } from './PreviewLinks'
 import { SessionLogSwitch } from './SessionLogSwitch'
 import { ActivityKinds } from './ActivityKinds'
+import { SweepSoftDelete, SweepSoftDeleteUnused } from './SweepSoftDelete'
 import { NO_AUTOFILL } from './noAutofill'
+import { Paginated } from './Pager'
+import { Admins, AdminsRefusal } from './Admins'
 
-// Share-link console (staff-only; the backend enforces the `admin` scope on
+// Share-link console (admins only; the backend enforces the `admin` scope on
 // every /api/auth/grants route — this page just renders the 403 politely).
 // Mint a link, copy it exactly once (the raw token is never shown again), and
 // revoke it to kill every session it ever minted, instantly.
@@ -288,7 +292,7 @@ interface Draft {
   avatar: string | null
   access: Access
   days: string
-  /** Paths the link hides, one per line (specs/path-scopes.md). */
+  /** Paths the link hides, one per line (`_lib/restrict.ts`). */
   hide?: string
   /** Pre-`access` drafts. */
   readOnly?: boolean
@@ -345,7 +349,7 @@ export function AdminPage() {
     retry: false,
     queryFn: async () => {
       const r = await fetch('/api/auth/grants', { credentials: 'include' })
-      if (r.status === 401 || r.status === 403) throw new Error('staff only')
+      if (r.status === 401 || r.status === 403) throw new Error('admins only')
       if (!r.ok) throw new Error(`grants: ${r.status}`)
       return r.json()
     },
@@ -382,15 +386,15 @@ export function AdminPage() {
         throw new Error(body?.detail ? `${body.error ?? 'create failed'}: ${body.detail}` : `create failed: ${r.status}`)
       }
       const out = await r.json() as { grant: Grant; token: string; allowed?: Allowed }
-      // Admin: the account's `admin_emails` row (409 = already one). The link
-      // stands either way; a failure here is reported beside it.
+      // Admin: the account joins the admin list (`POST /api/admins`; 409 = already
+      // on it). The link stands either way; a failure here is reported beside it.
       let admin: AdminResult | null = null
       if (effAccess === 'admin') {
-        const a = await fetch('/api/db/admin_emails', {
+        const a = await fetch('/api/admins', {
           method: 'POST',
           credentials: 'include',
           headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ values: { email: email.trim(), note: memo.trim() ? `with link "${memo.trim()}"` : 'with a share link' } }),
+          body: JSON.stringify({ email: email.trim(), note: memo.trim() ? `with link "${memo.trim()}"` : 'with a share link' }),
         })
         admin = a.ok ? 'added' : a.status === 409 ? 'already' : { error: `admin: ${a.status}` }
       }
@@ -409,6 +413,7 @@ export function AdminPage() {
         // ignore
       }
       void qc.invalidateQueries({ queryKey: ['auth', 'grants'] })
+      void qc.invalidateQueries({ queryKey: ['admins'] })
     },
   })
 
@@ -437,7 +442,8 @@ export function AdminPage() {
       const r = await fetch(`/api/auth/grants/${id}/revoke`, { method: 'POST', credentials: 'include' })
       if (!r.ok) throw new Error(`revoke failed: ${r.status}`)
     },
-    onSuccess: () => void qc.invalidateQueries({ queryKey: ['auth', 'grants'] }),
+    // A revoked admin link leaves the Admins table too.
+    onSuccess: () => { void qc.invalidateQueries({ queryKey: ['auth', 'grants'] }); void qc.invalidateQueries({ queryKey: ['admins'] }) },
   })
 
   // Rotate = re-key a (leaked) link: new token, same grant — subject/scopes/
@@ -451,7 +457,11 @@ export function AdminPage() {
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ endSessions: false }),
       })
-      if (!r.ok) throw new Error(`rotate failed: ${r.status}`)
+      if (!r.ok) {
+        // With `ADMIN_LIST`, an admin link can't be re-keyed: the answer says what to do instead.
+        const b = await r.json().catch(() => null) as { error?: string } | null
+        throw new Error(b?.error ?? `rotate failed: ${r.status}`)
+      }
       return r.json() as Promise<{ id: string; token: string }>
     },
     onSuccess: ({ token }) => {
@@ -465,7 +475,7 @@ export function AdminPage() {
       <main className="admin-page">
         <SiteNav />
         <h1>Share links</h1>
-        <p>{grantsQ.error.message === 'staff only' ? 'This console is staff-only.' : grantsQ.error.message}</p>
+        {grantsQ.error.message === 'admins only' ? <AdminsRefusal /> : <p>{grantsQ.error.message}</p>}
       </main>
     )
   }
@@ -574,7 +584,8 @@ export function AdminPage() {
           show revoked <span className="dim">({revokedCount})</span>
         </label>
       )}
-      <div className="table-scroll">
+      {rotate.error && <p className="err" role="alert">{rotate.error.message}</p>}
+      <Paginated rows={shown} label="Share links">{page => <div className="table-scroll">
       <table className="grants">
         <thead>
           <tr>
@@ -582,7 +593,7 @@ export function AdminPage() {
           </tr>
         </thead>
         <tbody>
-          {shown.map(g => (
+          {page.map(g => (
             <Fragment key={g.id}>
             <tr className={g.revokedAt ? 'revoked' : ''}>
               <td className="memo"><MemoCell grant={g} onSave={note => editGrant.mutate({ id: g.id, edit: { note } })} saving={editGrant.isPending} /></td>
@@ -624,10 +635,12 @@ export function AdminPage() {
           )}
         </tbody>
       </table>
-      </div>
+      </div>}</Paginated>
+      <Admins />
       <PreviewLinks />
       <ActivityKinds />
       <SessionLogSwitch />
+      {CAPS.softDelete && (DEFAULT_STORE.staging ? <SweepSoftDelete /> : <SweepSoftDeleteUnused />)}
     </main>
   )
 }

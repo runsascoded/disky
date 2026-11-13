@@ -16,11 +16,13 @@ ones, and deletes the rest whose newest write is older than the grace (a reader 
   its `successor.json` (the forwarding record) in both stores.
 
 A dry run (the default) prints what would go; `-x` deletes. Each line: the generation, objects, bytes, newest write, and
-`delete` / `kept (…)`."""
+`delete` / `kept (…)`. Directories without a root `scans.json` generation marker stay held: source caches and
+unfinished builds are not made deletion candidates by their age or name."""
 from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
+from pathlib import Path
 
 from click import Choice, IntRange, command, option
 
@@ -36,7 +38,7 @@ GRACE_S = 3 * 86400
 
 
 def gen_dirs(store: Store, prefix: str) -> dict[str, dict[str, int]]:
-    """`{gen: {key: size}}` of every generation dir under `prefix/` (one listing of the prefix)."""
+    """`{directory: {key: size}}` under `prefix/`; the planner distinguishes marked generations from other data."""
     out: dict[str, dict[str, int]] = {}
     for k, n in store.listing(prefix).items():
         parts = k.split("/")
@@ -47,8 +49,9 @@ def gen_dirs(store: Store, prefix: str) -> dict[str, dict[str, int]]:
 
 def plan(store: Store, kind: str, keep: list[str], *, lineage_only: bool, grace_s: float, now: float) -> list[dict]:
     """One record per generation of `kind` in `store`: `{gen, objects, bytes, newest, action, reason}`."""
-    from .scan_retire import lineage
+    from .scan_retire import lineage, lineage_record
 
+    cutovers = {}
     if kind == "static-names":
         if not keep:
             raise SystemExit("-t static-names: name every live generation with -k (the job can't see which each site reads)")
@@ -65,7 +68,11 @@ def plan(store: Store, kind: str, keep: list[str], *, lineage_only: bool, grace_
             raise SystemExit(f"{store.root}/{prefix}: no current generation ({how}): nothing is known to be live")
         newest = ic.chain(store, cur)[-1]
         protected = {*ic.chain(store, cur), *keep}
-        line = set(lineage(store, newest)) - {newest}
+        parents = lineage(store, newest)
+        line = set(parents) - {newest}
+        for child, parent in zip(parents, parents[1:]):
+            key = lineage_record(store, child)
+            cutovers[parent] = store.mtimes(f'{prefix}/{child}').get(key, now)
         cur = newest
     out = []
     for g, files in sorted(gen_dirs(store, prefix).items()):
@@ -73,10 +80,12 @@ def plan(store: Store, kind: str, keep: list[str], *, lineage_only: bool, grace_
         files = {k: n for k, n in files.items() if k != f"{prefix}/{g}/{ar.SUCCESSOR}"}
         if not files:
             continue
-        mt = max(store.mtimes(f"{prefix}/{g}").values())
+        mt = max(*store.mtimes(f"{prefix}/{g}").values(), cutovers.get(g, 0))
         rec = {"gen": g, "objects": len(files), "bytes": sum(files.values()),
                "newest": datetime.fromtimestamp(mt, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), "lineage": g in line}
-        if g in protected:
+        if f"{prefix}/{g}/scans.json" not in files:
+            rec.update(action="keep", reason="not a published generation (missing root scans.json)")
+        elif g in protected:
             rec.update(action="keep", reason="current" if g == cur or (kind == "interval-store" and g not in keep) else "kept (-k)")
         elif lineage_only and g not in line:
             rec.update(action="keep", reason="not in the current generation's lineage (-l)")
@@ -90,14 +99,24 @@ def plan(store: Store, kind: str, keep: list[str], *, lineage_only: bool, grace_
 
 
 def run(store: Store, kind: str, keep: list[str], *, lineage_only: bool = False, grace_s: float = GRACE_S, now: float,
-        execute: bool = False) -> list[dict]:
-    recs = plan(store, kind, keep, lineage_only=lineage_only, grace_s=grace_s, now=now)
+        execute: bool = False, review: Path | None = None) -> list[dict]:
     cur = ic.chain(store, ic.resolve(store)[0])[-1] if kind == "interval-store" else None
+    recs = plan(store, kind, keep, lineage_only=lineage_only, grace_s=grace_s, now=now)
+    if review is not None:
+        from .delete_review import validate
+
+        files = {key: store.size(key) for r in recs if r['action'] == 'delete' for key in r['_files']}
+        validate(review, store.root, files)
     for r in recs:
         files = r.pop("_files")
         if r["action"] == "delete" and execute:
             if r["lineage"]:
+                if ic.chain(store, ic.resolve(store)[0])[-1] != cur:
+                    raise RuntimeError('interval-store: current changed during GC; stopped before deleting ' + r['gen'])
                 r["markers"] = ic.carry_markers(store, r["gen"], cur)
+                forwarding = f'{ist.PREFIX}/{r["gen"]}/{ar.SUCCESSOR}'
+                if not store.exists(forwarding):
+                    store.write_text(forwarding, json.dumps({'gen': cur}) + '\n')
             r["deleted"] = store.delete(files)
         err(f"{kind}/{r['gen']}: {r['objects']:,} objects, {r['bytes']:,} B, newest {r['newest']}: "
             + (("deleted" if execute else "would delete") if r["action"] == "delete" else f"kept ({r['reason']})"))
@@ -109,14 +128,16 @@ def run(store: Store, kind: str, keep: list[str], *, lineage_only: bool = False,
 @option("-k", "--keep", multiple=True, help="A generation to keep whatever else holds (repeat): every one a site reads (`STATIC_GEN`, a pinned `INTERVAL_STORE_GEN`)")
 @option("-l", "--lineage-only", is_flag=True, help="interval-store: only what the current generation was compacted or backfilled from (the scan step's mode)")
 @option("-o", "--out", "store_root", required=True, help="The store: a dir or URL (where `interval-store/` / `static-names/` live)")
+@option("-r", "--review", help="Require exact keys and sizes from a reviewed JSON manifest before deleting")
 @option("-t", "--kind", type=Choice(["interval-store", "static-names"]), required=True, help="Which generations")
 @option("-x", "--execute", is_flag=True, help="Delete (default: a dry run)")
-def store_gc_cmd(grace_s, keep, lineage_only, store_root, kind, execute) -> None:
+def store_gc_cmd(grace_s, keep, lineage_only, store_root, review, kind, execute) -> None:
     """Delete superseded generations of a store's interval store or static name index, past a grace (a dry run unless
     -x). Prints a JSON summary."""
     import time
 
     if lineage_only and kind != "interval-store":
         raise SystemExit("-l: interval-store only")
-    recs = run(Store(store_url(store_root)), kind, list(keep), lineage_only=lineage_only, grace_s=grace_s, now=time.time(), execute=execute)
+    recs = run(Store(store_url(store_root)), kind, list(keep), lineage_only=lineage_only, grace_s=grace_s, now=time.time(), execute=execute,
+               review=Path(review) if review else None)
     print(json.dumps({"kind": kind, "execute": execute, "generations": recs}, indent=1))

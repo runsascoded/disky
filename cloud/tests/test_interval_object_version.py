@@ -12,7 +12,7 @@ from dt_cloud import interval_compact as ic
 from dt_cloud import interval_local as il
 from dt_cloud import interval_store as ist
 from dt_cloud import static_names as sn
-from test_interval_generation import _newest_runs
+from test_interval_generation import _newest_runs, _oracle_identities
 
 
 def test_etag_only_changes_survive_build_append_merge_and_compaction(tmp_path: Path) -> None:
@@ -27,7 +27,7 @@ def test_etag_only_changes_survive_build_append_merge_and_compaction(tmp_path: P
             "mtime": [100, 100], "version": pa.array([None, token], pa.string()),
         }), path)
     common = ["-g", "g", "-L", "index/{id}/path-index.parquet", "-s", str(source), "-o", str(store),
-              "-w", str(work), "-r", "4", "-p", "1", "-M", "512MB"]
+              "-w", str(work), "-r", "4", "-p", "1", "-M", "2GB"]
     result = CliRunner().invoke(il.build_cmd, [*common, "-k", "1", "-t", dates[1]], catch_exceptions=False)
     assert result.exit_code == 0, result.output
     gen = store / "interval-store/g"
@@ -36,15 +36,24 @@ def test_etag_only_changes_survive_build_append_merge_and_compaction(tmp_path: P
     assert result.exit_code == 0, result.output
     runs = _newest_runs(gen)
     assert [p.name for p in runs] == [f"{dates[2]}_{dates[3]}"]
+    assert [json.loads((gen / 'verify' / f'{date}.json').read_text())['generation'] for date in dates[2:]] == [
+        {'objects': 1, 'equal': 1, 'column': 'version'}, {'objects': 1, 'equal': 1, 'column': 'version'},
+    ]
     compacted = tmp_path / "compacted"
     ic.compact_gen(gen, compacted, tmp_path / "compact-work", gen="g", new_gen="g.c001", level=None,
-                   rg_rows=4, threads=1, mem="512MB")
+                   rg_rows=4, threads=1, mem="2GB")
     rows = duckdb.connect().execute(
         f"SELECT vf, vt, version FROM read_parquet('{compacted}/pvl/*.parquet') WHERE kind = 'file' ORDER BY vf"
     ).fetchall()
     ts = [sn.scan_epoch(d) for d in dates]
     assert rows == [(ts[0], ts[1], '"a"'), (ts[1], ts[3], '"b"'), (ts[3], sn.OPEN, '"c"')]
     assert pq.read_schema(compacted / "served/path.parquet").field("version") == ist.OBJECT_VERSION_FIELD
+    from dt_cloud.interval_verify import generation_parity
+
+    with duckdb.connect() as con:
+        assert generation_parity(con, str(source / f'index/{dates[0]}/path-index.parquet'), str(compacted / 'served'), [], ts[0]) == {
+            'objects': 1, 'equal': 1, 'column': 'version',
+        }
 
 
 @pytest.mark.parametrize("legacy", [None, 9007199254740993])
@@ -65,20 +74,25 @@ def test_adopting_shared_versions_preserves_unknowns_and_opens_at_first_observat
         elif i == 1:
             table = table.append_column("version", pa.array([None, '"first-seen"'], pa.string()))
         pq.write_table(table, file)
-    common = ["-L", "index/{id}/path-index.parquet", "-s", str(source), "-o", str(store), "-r", "4", "-p", "1", "-M", "512MB"]
+    common = ["-L", "index/{id}/path-index.parquet", "-s", str(source), "-o", str(store), "-r", "4", "-p", "1", "-M", "2GB"]
     result = CliRunner().invoke(il.build_cmd, ["-g", "old", *common, "-k", "1", "-t", dates[0]], catch_exceptions=False)
     assert result.exit_code == 0, result.output
     data = Store(str(store))
     pointer = data.read_bytes("interval-store/CURRENT.json")
-    migrate(data, "old", "converted", tmp_path / "migrate", threads=1, mem="512MB", rg_rows=4)
+    migrate(data, "old", "converted", tmp_path / "migrate", threads=1, mem="2GB", rg_rows=4)
     assert data.read_bytes("interval-store/CURRENT.json") == pointer
     result = CliRunner().invoke(il.add_cmd, ["-g", "converted", *common, "-C", "none"], catch_exceptions=False)
     assert result.exit_code == 0, result.output
     expected = None if legacy is None else str(legacy)
     identities = [ie.object_identities(str(store), date, "b", [""], gen="converted").select(["name", "version"]).to_pylist() for date in dates]
     assert identities == [[{"name": "f", "version": expected}], [{"name": "f", "version": '"first-seen"'}]]
+    # String versions: the bounded read still equals the unbounded one, schema included.
+    for date in dates:
+        got, want = (f(str(store), date, "b", [""], gen="converted") for f in (ie.object_identities, _oracle_identities))
+        assert got.schema == want.schema and got.schema.field("version").type == pa.string()
+        assert got.to_pylist() == want.to_pylist()
     exported = tmp_path / "exported"
-    ie.export_scan(str(store), dates[0], str(exported), gen="converted", tiers=("path",), threads=1, mem="512MB")
+    ie.export_scan(str(store), dates[0], str(exported), gen="converted", tiers=("path",), threads=1, mem="2GB")
     assert pq.read_table(exported / "path-index.parquet").select(["path", "version"]).to_pylist() == [
         {"path": "b", "version": None}, {"path": "b/f", "version": expected},
     ]

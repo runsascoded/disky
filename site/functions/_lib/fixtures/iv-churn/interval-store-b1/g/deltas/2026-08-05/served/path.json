@@ -1,1 +1,1 @@
-{"bytes": 10890, "groups": 4, "groups_bytes": 5322, "rows": 13, "s": 0.0, "segments": {"hist": {"groups": 2, "rows": 7}, "open": {"groups": 2, "rows": 6}}, "sort": "path"}
+{"bytes": 9581, "groups": 4, "groups_bytes": 5071, "rows": 13, "s": 0.0, "segments": {"hist": {"groups": 2, "rows": 7}, "open": {"groups": 2, "rows": 6}}, "sort": "path"}

@@ -1,6 +1,5 @@
 /** The `gcs` digest template's OP: its text and its storage-class plot's `/api/digest-image` request, from the
- * month's per-day rows (`cloud/src/dt_cloud/digest_gcs.py`'s `op_body` / `image_body`, ported byte for byte:
- * `./parity.test.ts`). Pure; DOM-free. */
+ * month's per-day rows (the job sends them: `Gcs.rows_json`; goldens: `./parity.test.ts`). Pure; DOM-free. */
 import { encodeScan, scanTime } from '../scanSlug'
 import { deg, type DigestCfg, type DigestParams, type OpLinks, pct, prevMonthLink, span, tb, usd, weekOf, windowLabel, windowStart } from './common'
 import { addDays, dayOf, grouped, iso, md, mon3, monthYear, pyRound } from './pyfmt'

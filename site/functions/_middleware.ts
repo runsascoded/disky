@@ -12,8 +12,11 @@ import { restrictGate } from './_lib/restrict.js'
 import { footerCacheDrain } from './_lib/footerCache.js'
 import { hostsScript, loadHosts, pageHosts } from './_lib/hosts.js'
 import type { Env } from './_lib/auth.js'
-import { coloPutsSettled } from './_lib/index.js'
+import { coloPutsSettled, ivRefusal } from './_lib/index.js'
+import ZSTD_MODULE from './_lib/vendor/zstd.wasm'
+import { zstdUse, type ZstdEnv } from './_lib/zstd.js'
 import { anonymousPage, stampPage, type OgEnv } from './_lib/og/serve.js'
+import { clearedOnSignIn, silentAttempt } from './_lib/silentSignIn.js'
 import { captureWrite, readBody } from './_lib/activityHook.js'
 import { sizeAssignments } from './_lib/activitySize.js'
 import { serverKind } from './_lib/activityShape.js'
@@ -56,9 +59,10 @@ export const assetMiss = (): Response => new Response('asset not found\n', {
   headers: { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' },
 })
 
-type MiddlewareCtx = { request: Request; env: OgEnv & UsageEnv; next: () => Promise<Response>; waitUntil?: (p: Promise<unknown>) => void; data?: Record<string, unknown> }
+type MiddlewareCtx = { request: Request; env: OgEnv & UsageEnv & ZstdEnv; next: () => Promise<Response>; waitUntil?: (p: Promise<unknown>) => void; data?: Record<string, unknown> }
 
 export const onRequest = async (ctx: MiddlewareCtx): Promise<Response> => {
+  zstdUse(ctx.env.ZSTD_WASM === '1' ? ZSTD_MODULE : null)
   const m = new Meter()
   // What `serve` leaves running past the response (the colo puts, the footer LRU's writes): the point waits for it,
   // so its reads are counted.
@@ -89,9 +93,16 @@ async function serve(ctx: MiddlewareCtx): Promise<Response> {
   const blocked = await restrictGate(ctx.request, ctx.env as never)
   let t = mark('mw-gate', t0)
   if (blocked) return withMiddlewareTiming(blocked, [...phases, ['mw', Date.now() - t0]], nth)
+  // No session, on a deployment with OA's broker: one silent try before the wall (specs/oa-login-rp.md phase 2).
+  const silent = await silentAttempt(ctx)
+  if (silent) return silent
   const url = new URL(ctx.request.url)
   if (ctx.request.method === 'GET') {
-    const anonymous = await anonymousPage(ctx.env, url)
+    // An unfurl detail must never break the page: on a failure, the page as its route serves it.
+    const anonymous = await anonymousPage(ctx.env, url).catch((e: Error) => {
+      console.log(`og anonymous page failed: ${e.message}`)
+      return null
+    })
     t = mark('mw-anon', t)
     if (anonymous) return withHosts(ctx, withMiddlewareTiming(anonymous, [...phases, ['mw', Date.now() - t0]], nth))
   }
@@ -99,7 +110,17 @@ async function serve(ctx: MiddlewareCtx): Promise<Response> {
   // consumes it, and it is recorded once the route answers 2xx.
   const activityKind = serverKind(ctx.request.method, url.pathname)
   const body = activityKind ? readBody(ctx.request) : null
-  const res0 = await ctx.next()
+  let res0: Response
+  try {
+    res0 = await ctx.next()
+  } catch (e) {
+    // An interval-store refusal a route let escape (`withPathStore`'s pointer read runs before most routes' own
+    // handling): its 503 + `Retry-After`, not the runtime's bare 500. Anything else stays thrown.
+    const refusal = ivRefusal(e)
+    if (!refusal) throw e
+    res0 = refusal
+  }
+  res0 = clearedOnSignIn(ctx.request, ctx.env, res0)
   mark('mw-next', t)
   // Server-Timing on API answers only (pages and assets keep their headers as Pages sent them).
   const res = url.pathname.startsWith('/api/') ? withMiddlewareTiming(res0, [...phases, ['mw', Date.now() - t0]], nth) : res0

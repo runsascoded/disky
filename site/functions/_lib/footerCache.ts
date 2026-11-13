@@ -24,6 +24,7 @@
  * runs exactly the pre-LRU query and queues nothing.
  */
 import type { Env } from './auth.js'
+import { isolateWrite, IsoMap, registerIsolate } from './shared.js'
 import { isPrimary, storeKey } from './stores.js'
 
 /** A fill claim older than this is abandoned (its isolate died): the next miss takes it over. */
@@ -74,6 +75,22 @@ export interface Probe {
 
 /** DBs found without `footer_cache` (→ when): asked again after a minute, so a migration is picked up. */
 const absent = new WeakMap<object, number>()
+/** The DBs `absent` and `accessDays` have held (weakly), for `registerIsolate`'s snapshot. */
+const dbsSeen = new Set<WeakRef<object>>()
+const seen = (db: object): void => { dbsSeen.add(new WeakRef(db)) }
+/** The registry's entry for `absent` and `accessDays` (held here: the registry's reference is weak). */
+export const footerCacheHeld = registerIsolate({
+  name: 'footer-cache-dbs',
+  entries: () => [...dbsSeen].flatMap((r): [unknown, unknown][] => {
+    const db = r.deref()
+    if (!db) return []
+    return [
+      ...(absent.has(db) ? [[db, `absent:${absent.get(db)}`] as [unknown, unknown]] : []),
+      ...[...accessDays.get(db) ?? []].map(([k, d]): [unknown, unknown] => [db, `access:${k}:${d}`]),
+    ]
+  }),
+  clear: () => { for (const r of dbsSeen) { const db = r.deref(); if (db) { absent.delete(db); accessDays.delete(db) } } dbsSeen.clear() },
+})
 const ABSENT_TTL = 60_000
 const isAbsent = (e: unknown): boolean => /no such table: footer_cache/.test((e as Error)?.message ?? '')
 
@@ -88,11 +105,11 @@ export async function probe(env: Env, k: Key): Promise<Probe | null> {
       'SELECT (SELECT 1 FROM index_row_groups WHERE date = ? AND variant = ? AND gen = ? LIMIT 1) AS x, c.state, c.started_ts, c.last_access_day ' +
       'FROM (SELECT 1) LEFT JOIN footer_cache c ON c.date = ? AND c.variant = ? AND c.gen = ?',
     ).bind(k.date, k.variant, k.gen, k.date, k.variant, k.gen).first<{ x: number | null; state: State | null; started_ts: number | null; last_access_day: number | null }>()
-    absent.delete(db)
+    isolateWrite(() => { absent.delete(db) })
     return { any: !!r?.x, state: r?.state ?? null, startedTs: r?.started_ts ?? null, lastAccessDay: r?.last_access_day ?? null }
   } catch (e) {
     if (!isAbsent(e)) throw e
-    absent.set(db, Date.now())
+    isolateWrite(() => { seen(db); absent.set(db, Date.now()) })
     return null
   }
 }
@@ -107,9 +124,10 @@ export const wantsFill = (p: Probe, nowMs = Date.now()): boolean =>
 
 // --- the background queue ----------------------------------------------------------------------
 
-const queued = new Map<string, () => Promise<unknown>>()
+const queued = new IsoMap<string, () => Promise<unknown>>('footer-queued')
 const running = new Set<string>()
 
+/** Queue a footer-cache write (a scope's lands at its commit: `shared.Scope`). */
 function enqueue(id: string, task: () => Promise<unknown>): void {
   if (running.has(id) || queued.has(id)) return
   queued.set(id, task)
@@ -139,12 +157,14 @@ const accessDays = new WeakMap<object, Map<string, number>>()
  *  value and the one this isolate last wrote. */
 export function noteAccess(env: Env, k: Key, stored: number | null, nowMs = Date.now()): void {
   const db = env.DB!
-  let m = accessDays.get(db)
-  if (!m) accessDays.set(db, (m = new Map()))
   const ks = keyStr(k)
   const today = day(nowMs)
-  if (Math.max(stored ?? 0, m.get(ks) ?? 0) >= today) return
-  m.set(ks, today)
+  if (Math.max(stored ?? 0, accessDays.get(db)?.get(ks) ?? 0) >= today) return
+  isolateWrite(() => {
+    let m = accessDays.get(db)
+    if (!m) { seen(db); accessDays.set(db, (m = new Map())) }
+    m.set(ks, today)
+  })
   enqueue(`access\u0000${ks}`, () => db.prepare('UPDATE footer_cache SET last_access_day = ? WHERE date = ? AND variant = ? AND gen = ? AND last_access_day < ?')
     .bind(today, k.date, k.variant, k.gen, today).run())
 }

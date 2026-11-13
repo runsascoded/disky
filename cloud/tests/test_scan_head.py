@@ -353,6 +353,20 @@ def test_head_takes_cost_labels_from_the_profiles_env(tmp_path):
         {"app": "disky", "deployment": "fix", "component": "scan", "scan_id": "2026-10-16t1200"}, "app=disky,deployment=fix")
 
 
+def test_a_tasks_labels_are_the_heads_on_its_job_and_its_allocation():
+    """Nextflow builds each task's Batch job, so no spec of ours is asserted: `base.config` hands nf-google the head's
+    `params.labels` (above) + the session + the step as `process.resourceLabels`, which the pinned plugin puts on the
+    job's `labels` and on its `allocationPolicy.labels` (1.29.1's `GoogleBatchTaskHandler` calls `putAllLabels` on both
+    builders). A plugin bump re-checks that before this pin moves."""
+    base = (Path(__file__).parents[2] / "job" / "nf" / "base.config").read_text()
+    assert H.NF_GOOGLE == "nf-google@1.29.1"
+    assert [ln.strip() for ln in base.splitlines() if ln.strip().startswith(("params.labels", "resourceLabels"))] == [
+        "params.labels = [:]",
+        "resourceLabels = { params.labels + (params.session ? ['nf-session': params.session] : [:]) "
+        "+ [step: task.process.toLowerCase().replaceAll(/[^a-z0-9_-]/, '-').take(63)] }",
+    ]
+
+
 def test_head_records_into_the_profiles_database_and_store(tmp_path, monkeypatch):
     """`head()` with `D1_DB_ID` (and `SCAN_RUNS_PROFILE`) only in the profile's `env` (cw's first prod run on the generic
     head: its own start / finish found no database), and a non-primary `store`: both writes go to the profile's D1, the
@@ -510,6 +524,40 @@ def test_publish_reports(tmp_path):
     assert sorted(p.relative_to(work).as_posix() for p in work.rglob("*") if p.is_file()) == [
         "runs/2026-10-16T1200/dag.mmd", "runs/2026-10-16T1200/trace.tsv"]
     assert (work / "runs/2026-10-16T1200/dag.mmd").read_text() == "flowchart TB\n"
+
+
+def test_head_publishes_independent_failed_and_resumed_ownership_receipts(tmp_path, monkeypatch):
+    from uuid import UUID
+
+    prof, launch, work = tmp_path / 'profile.yml', tmp_path / 'launch', tmp_path / 'nf'
+    attempts = iter([UUID(int=1), UUID(int=2), UUID(int=3)])
+    monkeypatch.setattr(H.uuid, 'uuid4', lambda: next(attempts))
+    codes = iter([1, 0, 0])
+    task_dir = work / 'work' / 'ab' / ('c' * 30)
+
+    def popen(argv, **kwargs):
+        code = next(codes)
+        (launch / 'trace.tsv').write_text('task_id\thash\tnative_id\tname\tstatus\texit\tworkdir\n'
+                                          f'1\tab/cccccc\t-\tindex\t{"FAILED" if code else "CACHED"}\t{code}\t{task_dir}\n')
+        return SimpleNamespace(pid=0, wait=lambda timeout: code)
+
+    monkeypatch.setattr(H.subprocess, 'Popen', popen)
+    for store, run in [('primary', 'run-1'), ('meta', 'run-1'), ('primary', 'run-2')]:
+        prof.write_text(f'deployment: fix\nstore: {store}\nexecutor: {{kind: local}}\nwork: {work}\ndata: {tmp_path}/data\n'
+                        "layout: {layer2: 'l2/{scan}/', snapshots: ''}\nsources: [s3://a]\n"
+                        'skip: [static-names, digest, interval-store, warm-cache, probe]\noptions: {list: {import: true}}\n')
+        env = {**LABELS, 'DT_RUN_ID': run, 'SNAP_ID': '2026-11-09T1200', 'GEN': 'g1', 'DT_RECORD': 'off'}
+        assert H.head(prof, tmp_path / 'nf-dir', launch, env=env) == (1 if (store, run) == ('primary', 'run-1') else 0)
+    receipts = [json.loads(p.read_text()) for p in sorted((work / 'ownership').rglob('receipt.json'))]
+    assert [(d['identity']['store'], d['identity']['run_id'], d['identity']['head_attempt'], d['outcome']['status'],
+             d['trace']['state'], d['trace']['tasks'][0]['cached']) for d in receipts] == [
+        ('meta', 'run-1', '00000000-0000-0000-0000-000000000002', 'succeeded', 'observed', True),
+        ('primary', 'run-1', '00000000-0000-0000-0000-000000000001', 'failed', 'observed', False),
+        ('primary', 'run-2', '00000000-0000-0000-0000-000000000003', 'succeeded', 'observed', True),
+    ]
+    assert [d['trace']['workdirs'][0]['uri'] for d in receipts] == [str(task_dir)] * 3
+    assert [d['deletion_authorized'] for d in receipts] == [False, False, False]
+    assert sorted(p.name for p in (work / 'runs/2026-11-09T1200').iterdir()) == ['trace.tsv']
 
 
 def test_echo_task_logs(tmp_path):

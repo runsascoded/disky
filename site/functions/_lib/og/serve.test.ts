@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { cardSvg, type CardData } from './card'
 import { expDay, imagePath, ogKey } from './sign'
 import { anonymousPage, pageOf, serveCard, siteOf, stampPage, type OgEnv } from './serve'
-import { anonymousPolicy, genericTitle } from './policy'
+import { anonymousPolicy } from './policy'
 import { fullTier, mint } from './tokens'
 import { EPOCH } from './sign'
 import { BUILD } from '../build'
@@ -95,7 +95,6 @@ describe('restricted anonymous OG responses', () => {
   })
   it.each([
     '/og/map.png?path=secret/path&f=private&d=missing',
-    '/og/staged.png?q=private',
     '/og/diff.png?path=secret&d=missing&sig=bad',
     '/og/series.png?path=secret&d=missing&sig=bad',
     '/og/series.png?path=secret/path&f=private',
@@ -107,6 +106,21 @@ describe('restricted anonymous OG responses', () => {
       .toEqual({ status: 200, tier: 'anon', cache: 'no-store' })
     expect(textNodes(await response.text())).toEqual(['CW storage', 'Private storage dashboard', '', 'Sign in to explore storage', ''])
     expect([mocks.data.mock.calls, mocks.scan.mock.calls, mocks.head.mock.calls, mocks.warm.mock.calls, waitUntil.mock.calls, mocks.diff.mock.calls, mocks.pair.mock.calls, mocks.series.mock.calls]).toEqual([[], [], [], [], [], [], [], []])
+  })
+
+  it('`/staged`, anonymous: names the page, with no data read and no `q`, in its own cached card', async () => {
+    const response = await serveCard({ request: request('/og/staged.png?q=private&policy=generic&r=8'), env: env() })
+    expect([textNodes(await response.text()), response.headers.get('cache-control'), mocks.match.mock.calls.map(call => call[0].url), mocks.data.mock.calls, mocks.head.mock.calls]).toEqual([
+      ['CW storage', 'Staged for deletion', '', 'Sign in to review', ''],
+      'public, max-age=86400',
+      [`https://cw.example/og/staged.png?policy=generic&r=8&bld=${BUILD.sha}`],
+      [], [],
+    ])
+    await stampPage(env({ OG_CARDS: '1' }), new URL('https://cw.example/staged?q=private'), new Response('shell'))
+    expect(mocks.stamp.mock.calls[0][1]).toEqual({
+      title: 'Staged for deletion · CW storage', desc: 'Prefixes staged for deletion, for review. Sign in to see them.',
+      image: 'https://cw.example/og/staged.png?policy=generic&r=8', imageType: 'image/png', page: 'https://cw.example/staged',
+    })
   })
 
   it('the size-over-time section: a full card pins the scan and describes the span; the image re-checks the original view and draws the chart', async () => {
@@ -145,7 +159,7 @@ describe('restricted anonymous OG responses', () => {
   it('the size-over-time section, anonymous: generic page meta and the generic card, with no series read', async () => {
     await stampPage(env({ OG_CARDS: '1' }), new URL('https://cw.example/secret/path?section=over-time'), new Response('shell'))
     expect(mocks.stamp.mock.calls.map(call => call[1])).toEqual([{
-      title: 'disky — CW storage', desc: 'Private storage dashboard. Sign in to explore storage.',
+      title: 'secret/path · size over time · CW storage', desc: 'Private storage dashboard. Sign in to explore storage.',
       image: 'https://cw.example/og/map.png?policy=generic&r=8', imageType: 'image/png', page: 'https://cw.example/secret/path',
     }])
     const assets = vi.fn(async (_request: Request) => new Response('safe shell'))
@@ -162,7 +176,7 @@ describe('restricted anonymous OG responses', () => {
       await fullTier(db, 'series', { path: 'bucket', d: '261012' }, 'TokSerAAAA', NOW),
       await fullTier(db, 'map', { path: 'bucket', d: '261012', c: 'age' }, 'TokSerAAAA', NOW),
       await fullTier(db, 'diff', { path: 'bucket', d: '261012', c: 'age' }, 'TokSerAAAA', NOW),
-    ]).toEqual(['https://cw.example/bucket?d=261012&section=over-time&c=age&og=TokSerAAAA', { day: 304 }, null, null])
+    ]).toEqual(['https://cw.example/bucket?d=261012&c=age&v=time&og=TokSerAAAA', { day: 304 }, null, null])
   })
 
   // The map and diff URLs below are what the code before the series card stamped for these pages (run against it):
@@ -205,7 +219,7 @@ describe('restricted anonymous OG responses', () => {
   it('anonymous HTML is generic even when dynamic metadata is disabled', async () => {
     await stampPage(env(), new URL('https://cw.example/secret/path?f=private'), new Response('shell'))
     expect(mocks.stamp.mock.calls.map(call => call[1])).toEqual([{
-      title: 'disky — CW storage', desc: 'Private storage dashboard. Sign in to explore storage.',
+      title: 'secret/path · CW storage', desc: 'Private storage dashboard. Sign in to explore storage.',
       image: 'https://cw.example/og/map.png?policy=generic&r=8', imageType: 'image/png', page: 'https://cw.example/secret/path',
     }])
     expect([mocks.data.mock.calls, mocks.scan.mock.calls, mocks.head.mock.calls]).toEqual([[], [], []])
@@ -360,10 +374,152 @@ describe('restricted anonymous OG responses', () => {
   })
 })
 
-describe('genericTitle', () => {
-  it('prefixes disky unless the label names it already', () => {
-    expect([genericTitle('CW storage'), genericTitle(undefined), genericTitle('m3 disky metadata'), genericTitle('Disky demo'), genericTitle('diskyard')])
-      .toEqual(['disky — CW storage', 'disky — storage', 'm3 disky metadata', 'Disky demo', 'disky — diskyard'])
+describe('a page\'s anonymous preview, from the URL alone', () => {
+  const SIGN_IN = 'Private storage dashboard. Sign in to explore storage.'
+  const preview = async (path: string, extra: Partial<OgEnv> = {}) => {
+    mocks.stamp.mockClear()
+    await stampPage(env({ OG_CARDS: '1', ...extra }), new URL(`https://cw.example${path}`), new Response('shell'))
+    const meta = mocks.stamp.mock.calls[0]?.[1] as { title: string; desc: string; image: string } | undefined
+    return meta ? { title: meta.title, desc: meta.desc, image: meta.image.replace('https://cw.example', '') } : null
+  }
+  const img = (kind: string) => `/og/${kind}.png?policy=generic&r=8`
+  /** One at a time: `preview` reads the one stamp mock. */
+  const inOrder = async <T, R>(xs: T[], f: (x: T) => Promise<R>): Promise<R[]> => {
+    const out: R[] = []
+    for (const x of xs) out.push(await f(x))
+    return out
+  }
+
+  it.each([
+    ['/', 'CW storage', SIGN_IN, 'map'],
+    ['/?d=2026-11-01', 'CW storage', SIGN_IN, 'map'],
+    ['/marin-a', 'marin-a · CW storage', SIGN_IN, 'map'],
+    ['/marin-a/checkpoints', 'marin-a/checkpoints · CW storage', SIGN_IN, 'map'],
+    ['/marin-a/run%20one?d=261101', 'marin-a/run one · CW storage', SIGN_IN, 'map'],
+    ['/marin-a?f=private&o=alice&c=age', 'marin-a · CW storage', SIGN_IN, 'map'],
+    ['/marin-a?section=diff&d=261101-261001', 'marin-a · changes · CW storage', SIGN_IN, 'map'],
+    ['/?section=over-time', 'size over time · CW storage', SIGN_IN, 'map'],
+    ['/nonexistent-page', 'nonexistent-page · CW storage', SIGN_IN, 'map'],
+    ['/staged?q=private', 'Staged for deletion · CW storage', 'Prefixes staged for deletion, for review. Sign in to see them.', 'staged'],
+    ['/users?d=261101', 'Users · CW storage', 'Who owns what across the scanned buckets. Sign in to see it.', 'users'],
+    ['/user/alan-turing', 'alan-turing · CW storage', 'One user’s storage: what they own, and what was assigned to them. Sign in to see it.', 'user'],
+    ['/assignments', 'Assignments · CW storage', 'Who assigned what to whom. Sign in to see it.', 'assignments'],
+    ['/scans', 'Scan runs · CW storage', 'What each scan job did: status, phases and timing.', 'scans'],
+    ['/scans/', 'Scan runs · CW storage', 'What each scan job did: status, phases and timing.', 'scans'],
+    ['/scans/2026-11-03T1622', 'Scan 2026-11-03T1622 · CW storage', 'One scan job: status, phases and timing.', 'scan'],
+    ['/scans/2026-10-15T1515-p1%2F20261019T003432Z', 'Scan 2026-10-15T1515-p1/20261019T003432Z · CW storage', 'One scan job: status, phases and timing.', 'scan'],
+    ['/scans/%3Cscript%3E', 'Scan run · CW storage', 'One scan job: status, phases and timing.', 'scan'],
+    ['/dups', 'Duplicates · CW storage', 'Candidates for the same data held in more than one place.', 'dups'],
+    ['/names', 'Name search · CW storage', 'Find paths by name across the scanned buckets.', 'names'],
+    ['/hot', 'Name search · CW storage', 'Find paths by name across the scanned buckets.', 'names'],
+    ['/health', 'Health · CW storage', 'Whether the scans and indexes behind this site are current.', 'health'],
+    ['/files/', 'Object · CW storage', 'A link to one object in storage.', 'files'],
+    ['/files/private/key', 'Object · CW storage', 'A link to one object in storage.', 'files'],
+    ['/admin', 'Admin · CW storage', 'Site administration.', 'admin'],
+    ['/admin/usage', 'Admin · CW storage', 'Site administration.', 'admin'],
+    ['/privacy', 'Privacy · CW storage', 'What this site collects, what it doesn’t, and how to have it removed.', 'privacy'],
+    ['/signin', 'Sign in · CW storage', 'Sign in to explore storage.', 'signin'],
+    ['/sweep', 'Staged for deletion · CW storage', 'Prefixes staged for deletion, for review. Sign in to see them.', 'staged'],
+    ['/mark', 'CW storage', SIGN_IN, 'map'],
+    ['/marks', 'CW storage', SIGN_IN, 'map'],
+  ])('%s', async (path, title, desc, kind) => {
+    expect(await preview(path)).toEqual({ title, desc, image: img(kind) })
+    expect([mocks.data.mock.calls, mocks.scan.mock.calls, mocks.head.mock.calls, mocks.series.mock.calls, mocks.diff.mock.calls]).toEqual([[], [], [], [], []])
+  })
+
+  it('a page no route names, and a page whose own Function stamps it, keep what they have', async () => {
+    expect(await inOrder(['/runs/plan/stamp', '/runs', '/privacy/x', '/users/og', '/user/alice/og', '/api/x', '/about'], p => preview(p))).toEqual([null, null, null, null, null, null, null])
+  })
+
+  it('a long URL path is cut to its tail; its mount is left out; a secondary store\'s pages name that store', async () => {
+    const STORES_JSON = JSON.stringify({ meta: { path: '/meta', vars: { ROOT_LABEL: 'CW — meta' } } })
+    expect((await preview(`/${'a'.repeat(90)}/${'b'.repeat(20)}`))?.title).toBe(`…${'a'.repeat(79)}/${'b'.repeat(20)} · CW storage`)
+    expect((await preview('/models/m', { STORE_ROOT: 'open-athena' }))?.title).toBe('models/m · CW storage')
+    expect((await preview('/', { STORE_ROOT: 'open-athena' }))?.title).toBe('CW storage')
+    expect((await preview('/meta/snapshots', { STORES_JSON } as Partial<OgEnv>))?.title).toBe('snapshots · CW — meta')
+    expect((await preview('/meta/scans', { STORES_JSON } as Partial<OgEnv>))?.title).toBe('Scan runs · CW — meta')
+    expect((await preview('/meta/files/x', { STORES_JSON } as Partial<OgEnv>))?.title).toBe('Object · CW — meta')
+    expect(await preview('/meta/dups', { STORES_JSON } as Partial<OgEnv>)).toEqual({ title: 'dups · CW — meta', desc: SIGN_IN, image: img('map') })
+  })
+
+  it('every policy names an app page; only `generic`\'s retired routes say what their target says', async () => {
+    const table = await inOrder(['shape', 'full'].flatMap(p => ['/scans', '/signin', '/sweep', '/mark'].map(path => [p, path])), async ([p, path]) => [p, path, (await preview(path, { OG_ANONYMOUS: p } as Partial<OgEnv>))?.title ?? null])
+    expect(table).toEqual([
+      ['shape', '/scans', 'Scan runs · CW storage'], ['shape', '/signin', 'Sign in · CW storage'], ['shape', '/sweep', null], ['shape', '/mark', null],
+      ['full', '/scans', 'Scan runs · CW storage'], ['full', '/signin', 'Sign in · CW storage'], ['full', '/sweep', null], ['full', '/mark', null],
+    ])
+  })
+
+  describe('a scan run\'s state, from its row by id', () => {
+    const scanEnv = async () => {
+      const { db } = await sqliteD1()
+      const add = (id: string, store: string, status: string, started: number | null, finished: number | null) =>
+        db.prepare("INSERT INTO scan_runs (run_id, store, scan, kind, status, started_ts, finished_ts, source, updated_ts) VALUES (?, ?, 'scan-private', 'scan', ?, ?, ?, 'job', 1)").bind(id, store, status, started, finished).run()
+      await add('ok', 'primary', 'succeeded', 1793000000, 1793003600)
+      await add('live', 'primary', 'running', 1793000000, null)
+      await add('bad', 'primary', 'failed', 1793000000, 1793003600)
+      await add('none', 'primary', 'nop', null, null)
+      await add('metas', 'meta', 'succeeded', 1793000000, 1793003600)
+      return { DB: db } as Partial<OgEnv>
+    }
+    it('state and time only, in the store the page is of', async () => {
+      const e = { ...await scanEnv(), STORES_JSON: JSON.stringify({ meta: { path: '/meta', vars: { ROOT_LABEL: 'CW — meta' } } }) } as Partial<OgEnv>
+      const out = await inOrder(['/scans/ok', '/scans/live', '/scans/bad', '/scans/none', '/scans/missing', '/scans/metas', '/meta/scans/metas', '/meta/scans/ok'], async p => {
+        const m = await preview(p, e)
+        return [m?.title, m?.desc]
+      })
+      expect(out).toEqual([
+        ['Scan ok · CW storage', 'Succeeded · finished 2026-10-26 08:33 UTC'],
+        ['Scan live · CW storage', 'Running · started 2026-10-26 07:33 UTC'],
+        ['Scan bad · CW storage', 'Failed · finished 2026-10-26 08:33 UTC'],
+        ['Scan none · CW storage', 'No-op'],
+        ['Scan missing · CW storage', 'One scan job: status, phases and timing.'],
+        ['Scan metas · CW storage', 'One scan job: status, phases and timing.'],
+        ['Scan metas · CW — meta', 'Succeeded · finished 2026-10-26 08:33 UTC'],
+        ['Scan ok · CW — meta', 'One scan job: status, phases and timing.'],
+      ])
+    })
+    it('an id not shaped like one is never looked up; no table is the fixed description', async () => {
+      const prepare = vi.fn(() => { throw new Error('no such table: scan_runs') })
+      const e = { DB: { prepare } } as unknown as Partial<OgEnv>
+      expect((await preview('/scans/x%27%20OR%201', e))?.title).toBe('Scan run · CW storage')
+      expect(prepare.mock.calls).toEqual([])
+      expect(await preview('/scans/ok', e)).toEqual({ title: 'Scan ok · CW storage', desc: 'One scan job: status, phases and timing.', image: img('scan') })
+      expect(prepare.mock.calls.length).toBe(1)
+    })
+  })
+
+  it.each([
+    ['/og/users.png', 'Users', 'Sign in to see who owns what'],
+    ['/og/user.png?id=private', 'User', 'Sign in to see their storage'],
+    ['/og/assignments.png', 'Assignments', 'Sign in to see assignments'],
+    ['/og/users.png?d=missing&sig=bad', 'Users', 'Sign in to see who owns what'],
+    ['/og/scans.png', 'Scan runs', 'What each scan job did: status, phases and timing.'],
+    ['/og/scan.png?id=private', 'Scan run', 'One scan job: status, phases and timing.'],
+    ['/og/dups.png', 'Duplicates', 'Candidates for the same data held in more than one place.'],
+    ['/og/names.png', 'Name search', 'Find paths by name across the scanned buckets.'],
+    ['/og/health.png', 'Health', 'Whether the scans and indexes behind this site are current.'],
+    ['/og/files.png', 'Object', 'A link to one object in storage.'],
+    ['/og/admin.png', 'Admin', 'Site administration.'],
+    ['/og/privacy.png', 'Privacy', 'What this site collects, what it doesn’t, and how to have it removed.'],
+    ['/og/signin.png', 'Sign in', 'Sign in to explore storage.'],
+  ])('the card %s names its page, with no data read', async (path, title, line) => {
+    const response = await serveCard({ request: request(path), env: env() })
+    expect([response.status, response.headers.get('x-og-tier'), textNodes((await response.text()).replaceAll('&#8217;', '’'))]).toEqual([200, 'anon', ['CW storage', title, '', line, '']])
+    expect([mocks.data.mock.calls, mocks.scan.mock.calls, mocks.head.mock.calls, mocks.warm.mock.calls]).toEqual([[], [], [], []])
+  })
+
+  it('an app page\'s card is that same generic card under every policy; a card kind\'s stays its policy\'s; no other name is a card', async () => {
+    const at = async (path: string, policy: string) => {
+      const r = await serveCard({ request: request(path), env: env({ OG_ANONYMOUS: policy } as Partial<OgEnv>) })
+      return [r.status, r.headers.get('x-og-policy'), r.headers.get('cache-control')]
+    }
+    expect(await at('/og/scans.png?policy=generic&r=8', 'shape')).toEqual([200, 'generic', 'public, max-age=86400'])
+    expect(await at('/og/scans.png?policy=generic&r=8', 'full')).toEqual([200, 'generic', 'public, max-age=86400'])
+    expect(await at('/og/hot.png', 'generic')).toEqual([404, null, null])
+    expect(await at('/og/constructor.png', 'generic')).toEqual([404, null, null])
+    await at('/og/users.png?policy=shape&r=8', 'shape')
+    expect(mocks.data.mock.calls.length).toBe(1)
   })
 })
 
@@ -470,7 +626,7 @@ describe('a secondary store\'s pages unfurl as that store (`STORES_JSON` `path`)
     const open = deployment({ OG_ANONYMOUS: 'full' })
     await stampPage(open, new URL('https://cw.example/staff/secret'), new Response('shell'))
     expect(mocks.stamp.mock.calls.map(call => call[1])).toEqual([{
-      title: 'disky — staff only', desc: 'Private storage dashboard. Sign in to explore storage.',
+      title: 'secret · staff only', desc: 'Private storage dashboard. Sign in to explore storage.',
       image: 'https://cw.example/og/map.png?policy=generic&r=8', imageType: 'image/png', page: 'https://cw.example/staff/secret',
     }])
     const response = await serveCard({ request: request('/og/map.png?store=staff&path=secret&policy=full&r=8'), env: open })
@@ -491,7 +647,7 @@ describe('a secondary store\'s pages unfurl as that store (`STORES_JSON` `path`)
       await fullTier(db, 'diff', { store: 'meta', path: 'snapshots', d: '261012' }, 'TokMetaAAA', NOW),
       await fullTier(db, 'diff', { path: 'cw-root/snapshots', d: '261012' }, 'TokMetaAAA', NOW),
       await fullTier(db, 'diff', { path: 'snapshots', d: '261012' }, 'TokMetaAAA', NOW),
-    ]).toEqual(['https://cw.example/meta/snapshots?d=261012&section=diff&og=TokMetaAAA', { day: 304 }, null, null])
+    ]).toEqual(['https://cw.example/meta/snapshots?d=261012&v=diff&og=TokMetaAAA', { day: 304 }, null, null])
     expect([pageOf(dep, new URL('https://cw.example/staff/x'))?.env.STORE_SCOPE, pageOf(dep, new URL('https://cw.example/meta/x'))?.env.STORE_SCOPE]).toEqual(['admin', undefined])
   })
 

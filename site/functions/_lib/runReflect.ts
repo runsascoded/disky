@@ -11,8 +11,8 @@ import type { D1Database } from "@cloudflare/workers-types"
 import type { BatchConfig } from "./batchConfig.js"
 import { batchJobsUrl } from "./gcp.js"
 import type { FinishedRun } from "./plans.js"
+import { NO_EXPIRY_DAYS } from "../../src/softDelete.js"
 
-const HOLD_SECS = 7 * 24 * 3600 // undo window before purge (matches gcs's ≥7d soft-delete)
 export const TERMINAL = new Set(["SUCCEEDED", "FAILED", "CANCELLED"])
 
 export interface BatchJob {
@@ -33,6 +33,9 @@ export interface RunSummary {
   skipped_overwritten: number
   drift_new: number
   delete_failed: number
+  /** What `plan-sweep execute` required, and measured on its bucket (null: unreadable). Absent: a job from before they were recorded. */
+  min_soft_delete_days?: number
+  soft_delete_days?: number | null
   preserved_breakdown?: { new_since_review: number; changed_since_review: number; new_since_scan: number; unclassified: number }
   finished_ts: number
   bands: { prefix: string; bytes: number; objects: number; gone: number; overwritten: number; drift_new: number }[]
@@ -53,18 +56,42 @@ async function readSummary(cfg: BatchConfig, token: string, jobId: string, mode:
   return readRunJson<RunSummary>(cfg, token, jobId, `${dir}-summary.json`)
 }
 
+/** `undo-summary.json`: the undo job rewrites it as it goes, so it says what a job that died had restored. */
+export interface UndoSummary {
+  dry_run: boolean
+  restored: number
+  restore_failed: number
+  unrecoverable: number
+  finished_ts: number
+}
+
+/** A run's `undo_state` from its newest undo job, once that ended: `full` when the job succeeded with every logged key live
+ *  again, `partial` when it restored anything short of that, else unchanged. A summary older than the job is an earlier
+ *  undo's, and a job that died before writing one reports nothing. */
+async function settleUndo(cfg: BatchConfig, db: D1Database, token: string, j: BatchJob, target: string): Promise<void> {
+  const row = await db.prepare("SELECT undo_state FROM deletion_runs WHERE run_id = ?").bind(target).first<{ undo_state: string }>()
+  if (!row || row.undo_state === 'full') return
+  const s = await readRunJson<UndoSummary>(cfg, token, target, 'undo-summary.json')
+  if (!s || s.dry_run || s.finished_ts * 1000 < Date.parse(j.createTime)) return
+  const state = j.status?.state === 'SUCCEEDED' && !s.restore_failed && !s.unrecoverable ? 'full' : s.restored ? 'partial' : null
+  if (state) await db.prepare("UPDATE deletion_runs SET undo_state = ? WHERE run_id = ?").bind(state, target).run()
+}
+
 async function reflect(db: D1Database, jobId: string, mode: string, s: RunSummary, primary: string): Promise<void> {
   const real = mode === "real"
-  const undoDeadline = real ? s.finished_ts + HOLD_SECS : null
-  const purgeState = real && s.deleted_objects > 0 ? "pending" : "none"
+  // A bucket that retained nothing has no undo and nothing to purge; one that keeps deleted data until purged has no deadline.
+  const days = real ? s.soft_delete_days ?? 0 : 0
+  const undoDeadline = days > 0 && days < NO_EXPIRY_DAYS ? s.finished_ts + days * 86400 : null
+  const purgeState = days > 0 && s.deleted_objects > 0 ? "pending" : "none"
   await db.prepare(`
     UPDATE deletion_runs SET
       finished_ts = ?, deleted_bytes = ?, deleted_objects = ?, skipped_gone = ?,
-      skipped_overwritten = ?, drift_dirs = ?, undo_deadline = ?, purge_state = ?
+      skipped_overwritten = ?, drift_dirs = ?, undo_deadline = ?, purge_state = ?,
+      min_soft_delete_days = COALESCE(?, min_soft_delete_days), soft_delete_days = ?
     WHERE run_id = ? AND finished_ts IS NULL
   `).bind(
     s.finished_ts, s.deleted_bytes, s.deleted_objects, s.skipped_gone,
-    s.skipped_overwritten, s.drift_new, undoDeadline, purgeState, jobId,
+    s.skipped_overwritten, s.drift_new, undoDeadline, purgeState, s.min_soft_delete_days ?? null, s.soft_delete_days ?? null, jobId,
   ).run()
   for (const b of s.bands ?? []) {
     await db.prepare(`
@@ -117,15 +144,19 @@ export async function reflectRuns(cfg: BatchConfig, db: D1Database, token: strin
     }
   }
   // Reflect terminal undo/purge ops onto their target run (state guards keep it
-  // idempotent). TARGET_RUN + OP are in the op job's env.
+  // idempotent). TARGET_RUN + OP are in the op job's env. `jobs` is newest first; only a
+  // run's newest undo counts, since each rewrites the same summary.
+  const undoSeen = new Set<string>()
   for (const j of jobs) {
-    if (!/\/jobs\/cw-(undo|purge)-/.test(j.name) || j.status?.state !== "SUCCEEDED") continue
+    if (!/\/jobs\/cw-(undo|purge)-/.test(j.name)) continue
     const vars = j.taskGroups?.[0]?.taskSpec?.environment?.variables ?? {}
     const target = vars.TARGET_RUN
     if (!target) continue
     if (vars.OP === "undo") {
-      await db.prepare("UPDATE deletion_runs SET undo_state = 'full' WHERE run_id = ? AND undo_state = 'partial'").bind(target).run()
-    } else if (vars.OP === "purge") {
+      if (undoSeen.has(target)) continue
+      undoSeen.add(target)
+      if (TERMINAL.has(j.status?.state ?? "")) await settleUndo(cfg, db, token, j, target)
+    } else if (vars.OP === "purge" && j.status?.state === "SUCCEEDED") {
       await db.prepare("UPDATE deletion_runs SET purge_state = 'done' WHERE run_id = ? AND purge_state = 'pending'").bind(target).run()
     }
   }

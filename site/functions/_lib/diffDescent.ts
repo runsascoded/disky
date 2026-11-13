@@ -140,7 +140,13 @@ export async function buildDiffDescent(env0: Env, o: DescentOpts): Promise<Diff>
     const depthOf = new Map(parents.map(x => [x.p, x.d + 1]))
     const rects = parents.map(x => childRect(x.p, x.d + 1))
     const over = (r: Row) => r.size >= thrAt(r.depth)
-    const [rowsA, rowsB] = await Promise.all([readRects(hA, rects, thrAt), readRects(hB, rects, thrAt)])
+    // A level past the read budget is the walk's to answer: its floor can rise (`coarsen`), a level's can't.
+    const wide = (e: unknown): never => {
+      if (o.noHandOff || !String((e as Error).message).startsWith('query too wide')) throw e
+      o.trace?.('handoff', performance.now() - tStart, 'work: a level too wide to read')
+      throw new HandOff('work', rowsRead)
+    }
+    const [rowsA, rowsB] = await Promise.all([readRects(hA, rects, thrAt), readRects(hB, rects, thrAt)]).catch(wide)
     spend(rowsA.length + rowsB.length)
     const A = bySide(rowsA.filter(over))
     const B = bySide(rowsB.filter(over))

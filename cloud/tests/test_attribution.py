@@ -43,7 +43,7 @@ def test_sanitize_username_matches_rigging_rules():
     # Must stay in lockstep with rigging.provenance.username_segment in
     # marin-community/marin — that function generates the `users/<seg>/`
     # prefixes this repo attributes.
-    assert sanitize_username("Russell.Power@gmail.com") == "russell-power"
+    assert sanitize_username("Alice.Example@example.test") == "alice-example"
     assert sanitize_username("ryan.williams") == "ryan-williams"
     assert sanitize_username("rw") == "rw"
     with pytest.raises(RuntimeError):

@@ -1,0 +1,208 @@
+# Install on the OA default branch (`front-door`). Disabled until environments, tokens and pilot review are ready.
+name: OA site release
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [gcs, cw, hf, r2]
+  workflow_dispatch:
+    inputs:
+      deployment:
+        type: choice
+        options: [gcs, cw, hf, r2]
+        required: true
+      sha:
+        description: Full source SHA already verified on dev
+        required: true
+      dev_deployment:
+        description: Successful GitHub dev deployment ID for that SHA
+        required: true
+permissions:
+  contents: read
+  actions: read
+jobs:
+  plan:
+    if: >-
+      github.repository == 'Open-Athena/disky' && vars.OA_SITE_RELEASE_ENABLED == 'true'
+      && github.ref == 'refs/heads/front-door'
+      && contains(fromJSON(vars.OA_SITE_RELEASE_TARGETS || '[]'), github.event.workflow_run.head_branch || inputs.deployment)
+      && (github.event_name == 'workflow_dispatch' ||
+          (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'))
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.plan.outputs.sha }}
+      source_branch: ${{ steps.plan.outputs.source_branch }}
+      environment: ${{ steps.plan.outputs.environment }}
+      mode: ${{ steps.plan.outputs.mode }}
+      host: ${{ steps.plan.outputs.host }}
+      project: ${{ steps.plan.outputs.project }}
+      pages_branch: ${{ steps.plan.outputs.pages_branch }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v6
+      - id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/oa-release plan -e "$GITHUB_EVENT_PATH" -n "$GITHUB_EVENT_NAME" -r "$GITHUB_REPOSITORY" -o plan.json
+  build:
+    needs: plan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: control
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          path: source
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v6
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: source/package.json
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: source/pnpm-lock.yaml
+      - run: pnpm --dir source install --frozen-lockfile
+      - name: Revalidate and build without deployment credentials
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VITE_BUILD_SHA: ${{ needs.plan.outputs.sha }}
+          VITE_SOURCE_REF: ${{ needs.plan.outputs.source_branch }}
+          VITE_REPO_URL: https://github.com/Open-Athena/disky
+          VITE_BUILD_ENVIRONMENT: ${{ needs.plan.outputs.mode }}
+          RELEASE_MODE: ${{ needs.plan.outputs.mode }}
+        run: |
+          control/scripts/oa-release plan -e "$GITHUB_EVENT_PATH" -n "$GITHUB_EVENT_NAME" -r "$GITHUB_REPOSITORY" -o plan.json
+          cd source/site
+          ./toml-check wrangler.toml
+          if [ "$RELEASE_MODE" = dev ]; then export CLOUDFLARE_ENV=preview; fi
+          pnpm build
+          pnpm exec wrangler pages functions build functions --outdir dist/_worker.js
+      - name: Seal config and artifact
+        run: control/scripts/oa-release seal -p plan.json -o seal.json source
+      - uses: actions/upload-artifact@v4
+        with:
+          name: oa-site-${{ needs.plan.outputs.environment }}-${{ needs.plan.outputs.sha }}
+          include-hidden-files: true
+          overwrite: true
+          retention-days: 30
+          path: |
+            source/site/dist
+            seal.json
+  release:
+    needs: [plan, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+      deployments: write
+    environment:
+      name: ${{ needs.plan.outputs.environment }}
+      # Required reviewers/secrets still apply. The explicit deployment below records the source SHA,
+      # rather than workflow_run/dispatch's controller SHA. Custom protection Apps are not supported.
+      deployment: false
+    concurrency:
+      group: oa-site-${{ needs.plan.outputs.environment }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: control
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          path: source
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v6
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: source/package.json
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: source/pnpm-lock.yaml
+      - run: pnpm --dir source install --frozen-lockfile
+      - uses: actions/download-artifact@v4
+        with:
+          name: oa-site-${{ needs.plan.outputs.environment }}-${{ needs.plan.outputs.sha }}
+      - name: Recheck approved revision and start exact-SHA deployment record
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_PAGES_DEPLOY_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          control/scripts/oa-release plan -e "$GITHUB_EVENT_PATH" -n "$GITHUB_EVENT_NAME" -r "$GITHUB_REPOSITORY" -o plan.json
+          control/scripts/oa-release begin -p plan.json -s seal.json -o receipt.json source
+      - name: Upload the sealed build to Cloudflare
+        id: upload
+        working-directory: source/site
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_PAGES_DEPLOY_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          PROJECT: ${{ needs.plan.outputs.project }}
+          PAGES_BRANCH: ${{ needs.plan.outputs.pages_branch }}
+          SOURCE_SHA: ${{ needs.plan.outputs.sha }}
+        # Wrangler bundles the CWD's `functions/` (over the artifact's sealed `dist/_worker.js`), and this fresh checkout has
+        # no generated `functions/_lib/build.gen.ts`: hold `functions/` aside for the upload, so the sealed bundle ships.
+        run: |
+          set -o pipefail
+          mv functions "$RUNNER_TEMP/functions.held"
+          rc=0
+          pnpm exec wrangler pages deploy dist --project-name "$PROJECT" --branch "$PAGES_BRANCH" --commit-hash "$SOURCE_SHA" --commit-dirty=false 2>&1 | tee "$RUNNER_TEMP/upload.log" || rc=$?
+          mv "$RUNNER_TEMP/functions.held" functions
+          exit $rc
+      - name: Verify CF readback and live build; record success
+        id: verify
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_PAGES_DEPLOY_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+        run: control/scripts/oa-release finish receipt.json
+      - name: Record failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: if [ -f receipt.json ]; then control/scripts/oa-release finish -f receipt.json; fi
+      # Slack notice (`site/deploy-notify`: greens threaded per deployment, reds top-level), only where the environment
+      # sets `DEPLOY_NOTIFICATIONS_ENABLED=1` with its bot token and channel. A notice failure never fails the release.
+      - name: Deploy notice
+        if: always() && vars.DEPLOY_NOTIFICATIONS_ENABLED == '1'
+        continue-on-error: true
+        env:
+          DEPLOY_NOTIFICATIONS_ENABLED: ${{ vars.DEPLOY_NOTIFICATIONS_ENABLED }}
+          SLACK_DEPLOY_BOT_TOKEN: ${{ secrets.SLACK_DEPLOY_BOT_TOKEN }}
+          SLACK_DEPLOY_CHANNEL: ${{ vars.SLACK_DEPLOY_CHANNEL }}
+          VITE_SOURCE_REF: ${{ needs.plan.outputs.source_branch }}
+          MODE: ${{ needs.plan.outputs.mode }}
+          SOURCE_SHA: ${{ needs.plan.outputs.sha }}
+          JOB_STATUS: ${{ job.status }}
+          UPLOAD: ${{ steps.upload.outcome }}
+          VERIFY: ${{ steps.verify.outcome }}
+        run: |
+          case "$JOB_STATUS" in success) status=success ;; cancelled) status=cancelled ;; *) status=failure ;; esac
+          if [ "$UPLOAD" != success ]; then stage=upload; elif [ "$VERIFY" != success ]; then stage=verify; else stage=finish; fi
+          verified=(); [ "$VERIFY" = success ] && verified=(-v)
+          control/site/deploy-notify record -c source/site/wrangler.toml -e "$MODE" -g "$SOURCE_SHA" -l "$RUNNER_TEMP/upload.log" \
+            -o notice.json -s "$status" -t "$stage" -u false "${verified[@]}"
+          control/site/deploy-notify send -x notice.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: oa-release-receipt-${{ needs.plan.outputs.environment }}-${{ github.run_attempt }}
+          path: |
+            plan.json
+            seal.json
+            receipt.json
+            notice.json
+          retention-days: 90

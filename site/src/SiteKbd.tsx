@@ -6,6 +6,7 @@ import { queryStrategy } from 'use-prms'
 import { Omnibar, ShortcutsModal, SpeedDial, useActions, type SpeedDialAction } from 'use-kbd'
 import { SpeedDialTip } from './Tooltip'
 import { hostPair, otherHostUrl, peerUrl, urlLabel, type Peer } from './hosts'
+import { parsePeers } from './peers'
 import { useHelpPref, useScrollSpyPref } from './prefs'
 import { useStore } from './store'
 import { DEFAULT_STORE, DUPS, STORES } from './stores'
@@ -18,10 +19,11 @@ import { useShare } from './sharePreview'
 
 /** The source link (SpeedDial, omnibar, user menu): the deployment's
  * `REPO_URL` (wrangler `[vars]`, read at build time), else this repo. */
-export const REPO_URL = import.meta.env.VITE_REPO_URL || 'https://github.com/runsascoded/disky'
+export { REPO_URL } from './build'
+import { SOURCE_URL } from './build'
 const HOSTS = hostPair(import.meta.env.VITE_PROD_HOST, import.meta.env.VITE_DEV_HOST)
-/** The other deployments: the family list less this one. */
-export const PEERS: Peer[] = (STORES[0]?.peers ?? []).filter(p => p.prod !== import.meta.env.VITE_PROD_HOST)
+/** The other deployments: the family list (the store's `peers`, else the build's `PEERS` var) less this one. */
+export const PEERS: Peer[] = (STORES[0]?.peers ?? parsePeers(import.meta.env.VITE_PEERS)).filter(p => p.prod !== import.meta.env.VITE_PROD_HOST)
 /** This page on a peer, from the current location. */
 export const peerHref = (p: Peer, href: string) => peerUrl(href, p, new URL(href).hostname === HOSTS?.dev)
 /** The characters an omnibar row shows before clipping its label's end. */
@@ -98,7 +100,7 @@ export function SiteKbd({ extra = [], placeholder }: {
       handler: toggleHelp,
     },
     'spy:toggle': {
-      label: `Section spy (?section= in the URL while scrolling): ${spy} (toggle)`,
+      label: `Section spy (?v= in the URL while scrolling): ${spy} (toggle)`,
       description: 'Names the section in view (tree-map, tbl, over-time, diff, mtime) in the URL as you scroll, so a copied link opens there and unfurls with that section\'s card.',
       group: 'View',
       keywords: ['section', 'spy', 'scroll', 'url', 'param'],
@@ -107,27 +109,28 @@ export function SiteKbd({ extra = [], placeholder }: {
     ...Object.fromEntries(
       PAGES.map(([to, label]) => [
         `page:${to}`,
-        { ...pageAction(to, label), handler: () => navigate(to) },
+        { ...pageAction(to, label), href: to, handler: () => navigate(to) },
       ]),
     ),
     ...Object.fromEntries(
       stores.filter(s => s.key !== store.key).map(s => [
         `store:${s.key}`,
-        { label: `${s.label} store (${s.path})`, group: 'Pages', handler: () => navigate(s.path) },
+        { label: `${s.label} store (${s.path})`, group: 'Pages', href: s.path, handler: () => navigate(s.path) },
       ]),
     ),
     ...Object.fromEntries(
       PEERS.map(p => [
         `peer:${p.prod}`,
-        { label: toUrl('This page on ', peerHref(p, href)), group: 'Pages', keywords: [p.label, p.prod.split('.')[0]], handler: () => location.assign(peerHref(p, location.href)) },
+        { label: toUrl('This page on ', peerHref(p, href)), group: 'Pages', keywords: [p.label, p.prod.split('.')[0]], href: peerHref(p, href), handler: () => location.assign(peerHref(p, location.href)) },
       ]),
     ),
-    'page:github': { label: 'Source on GitHub ↗', group: 'Pages', handler: () => window.open(REPO_URL, '_blank', 'noreferrer') },
+    'page:github': { label: 'Source on GitHub ↗', group: 'Pages', href: SOURCE_URL, handler: () => window.open(SOURCE_URL, '_blank', 'noreferrer') },
     ...(HOSTS ? {
       'host:toggle': {
         label: toUrl(`This page on ${location.hostname === HOSTS.dev ? 'prod' : 'dev'}: `, otherHostUrl(href, HOSTS)),
         group: 'Pages',
         defaultBindings: ['g d'],
+        href: otherHostUrl(href, HOSTS),
         handler: () => location.assign(otherHostUrl(location.href, HOSTS)),
       },
       'host:toggle-tab': {
@@ -159,7 +162,7 @@ export function SiteKbd({ extra = [], placeholder }: {
   return (
     <>
       <SpeedDial TooltipRenderer={SpeedDialTip} actions={[
-        { key: 'github', label: 'GitHub', icon: <FaGithub />, href: REPO_URL },
+        { key: 'github', label: 'GitHub', icon: <FaGithub />, href: SOURCE_URL },
         ...extra,
         { key: 'help', label: `Help line: ${help}`, icon: <MdHelpOutline />, onClick: toggleHelp },
         { key: 'params', label: 'URL params', icon: <MdLink />, onClick: () => openDialog('params') },

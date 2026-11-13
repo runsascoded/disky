@@ -2,12 +2,12 @@
  * params the card is drawn from (and that a view token is minted over), and
  * the unfurl's title. Pure: no env, no I/O. */
 import { mountedSegs, urlSegsOf } from '../../../src/pathCrumbs.js'
-import { SECTION_KEY } from '../../../src/homeSections.js'
+import { sectionParam } from '../../../src/homeSections.js'
 import { canonicalSel } from '../../../src/scanSlug.js'
 
 export type OgKind = 'map' | 'diff' | 'series' | 'staged' | 'users' | 'user' | 'assignments'
 
-/** The home sections with a card of their own (`?section=<id>`), by kind: the diff, and size over time. */
+/** The home sections with a card of their own (`?v=diff`, `?v=time`), by kind: the diff, and size over time. */
 export const KIND_SECTION: Partial<Record<OgKind, string>> = { diff: 'diff', series: 'over-time' }
 
 export interface PageView {
@@ -23,9 +23,12 @@ export interface PageView {
  * in `src/Root.tsx` is one of these or a card kind (`routes.test.ts` checks): an
  * app page read as a folder drew an empty map of a path named `scans`, `meta`, …. */
 const NOT_MAP = new Set([
-  'api', 'auth', 'data', 'v1', 'og', 'slack', 'assets', '_fonts', 'files', 'admin', 'about', 'help', 'privacy', 'token', 'login',
+  'a', 'api', 'auth', 'data', 'v1', 'og', 'slack', 'assets', '_fonts', 'files', 'admin', 'about', 'help', 'privacy', 'token', 'login',
   'signin', 'dev', 'meta', 'runs', 'scans', 'health', 'names', 'dups', 'sweep', 'hot', 'marks', 'mark',
 ])
+
+/** The section a map page's view is of, in words. */
+const SECTION_WORDS: Partial<Record<OgKind, string>> = { diff: 'changes', series: 'size over time' }
 
 /** Map params a card depends on: the scan (`d`), the filter (`f`, `qs`), the
  * owner lens or pool (`o`, `by`), the colour axis (`c`) and classes (`cl`). */
@@ -93,15 +96,52 @@ export function pageView(url: URL, site: string, root: readonly string[] = [], s
 function mapView(segs: string[], sp: URLSearchParams, site: string, root: readonly string[], lead: Record<string, string>): PageView {
   const tree = mountedSegs(root, segs)
   const path = tree.join('/')
-  const section = sp.get(SECTION_KEY)
+  const section = sectionParam(sp)
   const params: Record<string, string> = { ...lead, ...(path ? { path } : {}), ...pick(sp, section === KIND_SECTION.series ? SERIES_KEYS : MAP_KEYS) }
   const where = urlSegsOf(root, tree).join('/') || site
   const extras = [params.f ? `filter: ${params.f}` : null, params.o !== undefined ? `owner: ${params.o === '' ? 'unowned' : params.o === '*' ? 'owned' : params.o}` : null].filter(Boolean)
-  // The section in view (`?section=`: the home page's scroll-spy writes it, and share links carry it).
+  // The section in view (`?v=`, or a legacy `?section=`: the home page's scroll-spy writes it, share links carry it).
   if (section === KIND_SECTION.diff) {
     const dm = sp.get('dm')
-    return { kind: 'diff', params: { ...params, ...(dm === 'max' ? { dm } : {}) }, title: [where, 'changes', ...extras].join(' · ') }
+    return { kind: 'diff', params: { ...params, ...(dm === 'max' ? { dm } : {}) }, title: [where, SECTION_WORDS.diff, ...extras].join(' · ') }
   }
-  if (section === KIND_SECTION.series) return { kind: 'series', params, title: [where, 'size over time', ...extras].join(' · ') }
+  if (section === KIND_SECTION.series) return { kind: 'series', params, title: [where, SECTION_WORDS.series, ...extras].join(' · ') }
   return { kind: 'map', params, title: [where, ...extras].join(' · ') }
+}
+
+/** What an anonymous unfurl calls a page when its URL names it: a map page's path below the mount (and its section), a
+ * user's id. Null: nothing in the URL, so the page's name in `policy.ts`, or the site alone at a map's root. Never the
+ * URL's filter or lens (`f`, `o`), as `/staged` never echoes its `q`. */
+export function urlName(pv: PageView, root: readonly string[] = []): string | null {
+  if (pv.kind === 'user') return pv.params.id
+  if (pv.kind !== 'map' && pv.kind !== 'diff' && pv.kind !== 'series') return null
+  const where = urlSegsOf(root, pv.params.path?.split('/') ?? []).join('/')
+  return [where, SECTION_WORDS[pv.kind]].filter(Boolean).join(' · ') || null
+}
+
+/** The primary's pages with no card kind and one path shape, by first segment: the `policy.ts` page each is, or leads
+ * to (`src/Root.tsx`'s retired routes: `/hot`, `/sweep`, `/mark`, `/marks`). */
+const SHELL_PAGES: Record<string, string> = {
+  dups: 'dups', names: 'names', health: 'health', privacy: 'privacy', signin: 'signin',
+  hot: 'names', sweep: 'staged', mark: 'map', marks: 'map',
+}
+
+/** The named page a pathname with no `pageView` is, or null (API routes, assets, `/runs`' own Function, a path no route
+ * of `src/Root.tsx` names). `inStore`: a pathname below a secondary store's path, whose other pages are its map.
+ * `id`: `/scans/<id>`'s, decoded and unvalidated. */
+export function shellPage(pathname: string, inStore = false): { page: string; id?: string } | null {
+  const segs = pathname.split('/').filter(Boolean)
+  const head = segs[0] ?? ''
+  if (head === 'scans') {
+    if (segs.length === 1) return { page: 'scans' }
+    try {
+      return { page: 'scan', id: decodeURIComponent(segs.slice(1).join('/')) }
+    } catch {
+      return { page: 'scan' }
+    }
+  }
+  if (head === 'files') return { page: 'files' }
+  if (inStore) return null
+  if (head === 'admin') return { page: 'admin' }
+  return segs.length === 1 && Object.hasOwn(SHELL_PAGES, head) ? { page: SHELL_PAGES[head] } : null
 }

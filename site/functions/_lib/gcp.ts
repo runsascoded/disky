@@ -16,15 +16,17 @@ export const batchLogsUrl = (project: string, uid: string, created: string): str
   return `https://console.cloud.google.com/logs/query;query=${encodeURIComponent(query).replace(/\(/g, '%28').replace(/\)/g, '%29')}?project=${encodeURIComponent(project)}`
 }
 /** Where a sweep job runs: the one region its bucket cut lives in
- * (`BUCKET_REGIONS`), else the default (an uncut run touches several regions;
- * nowhere is right for all). A sweep executor runs beside its bucket: every
- * listing page and every delete sub-request is a round trip to it. */
+ * (`BUCKET_REGIONS`), else the deployment's (`BATCH_REGION`: an uncut run
+ * touches several regions; nowhere is right for all), else '' (neither names
+ * one: the caller refuses; there is no default). A sweep executor runs beside
+ * its bucket: every listing page and every delete sub-request is a round trip
+ * to it. */
 export const batchRegionFor = (cfg: BatchConfig, buckets: readonly string[]): string => {
   const regions = new Set(buckets.map(b => cfg.bucketRegions[b]).filter(Boolean))
   return regions.size === 1 ? [...regions][0] : cfg.region
 }
 /** Every region a sweep job may have been dispatched to. */
-export const batchRegions = (cfg: BatchConfig): string[] => [...new Set([cfg.region, ...Object.values(cfg.bucketRegions)])]
+export const batchRegions = (cfg: BatchConfig): string[] => [...new Set([cfg.region, ...Object.values(cfg.bucketRegions)])].filter(Boolean)
 
 const b64url = (buf: ArrayBuffer | Uint8Array): string => {
   const bytes = buf instanceof Uint8Array ? buf : new Uint8Array(buf)

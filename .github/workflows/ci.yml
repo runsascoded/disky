@@ -8,9 +8,16 @@ on:
   push:
     branches-ignore: ['dist/**', '*-prod', '*-dev']
   pull_request:
+  workflow_dispatch:
+    inputs:
+      cloud_tests:
+        description: 'Space-separated cloud pytest paths or node IDs (focused checks only; no full-suite pass cache)'
+        required: true
+        type: string
 
 jobs:
   test:
+    if: github.event_name != 'workflow_dispatch'
     name: Test
     runs-on: ubuntu-latest
     strategy:
@@ -25,7 +32,7 @@ jobs:
       # blob ids of the engine's sources, tests and pins.
       - name: Test inputs key
         id: key
-        run: echo "key=engine-${{ matrix.python-version }}-$(git ls-tree -r HEAD -- src tests pyproject.toml uv.lock | sha256sum | cut -c1-32)" >> "$GITHUB_OUTPUT"
+        run: echo "key=engine-${{ matrix.python-version }}-$(git ls-tree -r HEAD -- src tests scripts deploy/oa .github/workflows/oa-release.yml pyproject.toml uv.lock | sha256sum | cut -c1-32)" >> "$GITHUB_OUTPUT"
 
       - name: Already passed?
         id: passed
@@ -62,7 +69,19 @@ jobs:
           path: .tests-passed
           key: ${{ steps.key.outputs.key }}
 
+  release-build-id:
+    if: github.event_name != 'workflow_dispatch'
+    name: Release and preview tooling
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: node --test site/scripts/build-id.test.mjs .github/actions/cf-preview/preview.test.mjs
+
   typecheck:
+    if: github.event_name != 'workflow_dispatch'
     name: Type Check
     runs-on: ubuntu-latest
     steps:
@@ -81,6 +100,7 @@ jobs:
         run: uv run mypy src/disk_tree --ignore-missing-imports
 
   treemap-widget:
+    if: github.event_name != 'workflow_dispatch'
     name: "@open-athena/treemap (typecheck + test)"
     runs-on: ubuntu-latest
     steps:
@@ -106,6 +126,7 @@ jobs:
         run: cd packages/treemap && pnpm test
 
   react-widgets:
+    if: github.event_name != 'workflow_dispatch'
     name: "@disk-tree/react (typecheck + test)"
     runs-on: ubuntu-latest
     steps:
@@ -131,6 +152,7 @@ jobs:
         run: cd packages/react && pnpm test
 
   dt-cloud-test:
+    if: github.event_name != 'workflow_dispatch'
     name: dt-cloud tests (${{ matrix.python-version }}, ${{ matrix.shard.name }})
     runs-on: ubuntu-latest
     strategy:
@@ -207,6 +229,7 @@ jobs:
           key: ${{ steps.key.outputs.key }}
 
   site:
+    if: github.event_name != 'workflow_dispatch'
     name: Site typecheck, build + tests
     runs-on: ubuntu-latest
     env:
@@ -226,6 +249,24 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      # Wrangler ignores a `wrangler*.toml` that doesn't parse and deploys the old settings: every one in the
+      # tree (the demo's here, a deployment's `wrangler.toml` on its branch) must parse.
+      - name: wrangler*.toml parse
+        run: site/toml-check site/wrangler*.toml
+
+      # `site/deploy` is never executed otherwise; its own checks (config parse, project name, `STATIC_GEN`,
+      # host) broke a deploy twice. `--dry-run` runs them with no credentials, network, build or push. `cloud`
+      # checks the r2 demo's configs and the example; a deployment branch has a `site/wrangler.toml` (and its
+      # `deploy.env`), which the last line then checks as a real deploy would read them.
+      - name: site/deploy --dry-run
+        run: |
+          cd site
+          for c in wrangler.example.toml wrangler.r2.toml wrangler.r2-dev.toml; do
+            ./deploy --dry-run -P --config "$c"
+          done
+          ./deploy --dry-run -P --dev --config wrangler.r2.toml
+          if [ -f wrangler.toml ]; then ./deploy --dry-run -P; ./deploy --dry-run -P --dev; fi
+
       # `pnpm build` = `tsc -b && vite build`: typechecks the SPA and the
       # Functions, then bundles.
       - name: Build site (typecheck + bundle)
@@ -233,3 +274,66 @@ jobs:
 
       - name: Site tests
         run: cd site && timeout 900 pnpm vitest run --testTimeout=20000
+
+  fleet:
+    if: github.event_name != 'workflow_dispatch'
+    name: Fleet app typecheck, build + tests
+    runs-on: ubuntu-latest
+    env:
+      PUPPETEER_SKIP_DOWNLOAD: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        # pnpm version comes from root package.json's `packageManager` field.
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # The example here; the deploying branch's `fleet/wrangler.toml` too, where it has one.
+      - name: wrangler*.toml parse
+        run: site/toml-check fleet/wrangler*.toml
+
+      # What `site/` and `fleet/` share (`packages/pages-kit`), checked on its own.
+      - name: "@disk-tree/pages-kit typecheck"
+        run: cd packages/pages-kit && pnpm typecheck
+
+      # `pnpm build` = `tsc -p . && tsc -p functions && vite build`: the page, the Functions (and their specs), then
+      # the bundle.
+      - name: Build (typecheck + bundle)
+        run: cd fleet && pnpm build
+
+      - name: Tests
+        run: cd fleet && pnpm test
+
+  focused-cloud-test:
+    if: github.event_name == 'workflow_dispatch'
+    name: Focused cloud tests (${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.12', '3.13']
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@v4
+      - run: uv python install '${{ matrix.python-version }}'
+      - run: uv sync --frozen --all-packages --all-extras --all-groups
+      - name: Run selected tests
+        working-directory: cloud
+        env:
+          CLOUD_TESTS: ${{ inputs.cloud_tests }}
+        run: |
+          read -r -a selected <<< "$CLOUD_TESTS"
+          test "${#selected[@]}" -gt 0
+          uv run --no-sync pytest "${selected[@]}" -v --durations=10

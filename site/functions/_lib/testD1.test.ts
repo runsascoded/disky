@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { RUN_DIR, SCHEMA, type Sqlite, sqliteD1, withLedger, withoutLedger } from './testD1'
+import { RUN_DIR, SCHEMA, type Sqlite, sqliteD1, withLedger, withoutLedger, withScanDispatch } from './testD1'
 
 interface NodeFs { readFileSync(file: URL, encoding: 'utf8'): string }
 const NODE_FS = 'node:fs'
@@ -43,5 +43,19 @@ describe('sqliteD1: the branch’s schema (`site/schema.sql`)', () => {
     const none = ledger()
     withLedger(raw)
     expect([none, ledger()]).toEqual([[], ['actions', 'claims', 'owner_prefixes', 'owner_totals']])
+  })
+
+  /** `scan_dispatch`'s shape: columns (type, not null, default, pk) and indexes. */
+  const dispatchShape = (raw: Sqlite) => ({
+    cols: raw.prepare(`SELECT name, type, "notnull", dflt_value, pk FROM pragma_table_info('scan_dispatch')`).all().map(r => ({ ...r })),
+    idx: raw.prepare(`SELECT name, sql FROM sqlite_master WHERE type = 'index' AND tbl_name = 'scan_dispatch' AND sql IS NOT NULL`).all()
+      .map(r => ({ name: r.name, sql: String(r.sql).replace(/\s+/g, ' ') })),
+  })
+
+  it.skipIf(!TABLES.includes('scan_dispatch'))('`withScanDispatch` builds `scan_dispatch` as the schema has it (where it does)', async () => {
+    const [{ raw: schema }, { raw: built }] = await Promise.all([sqliteD1(), sqliteD1()])
+    built.exec('DROP TABLE scan_dispatch')
+    withScanDispatch(built)
+    expect(dispatchShape(built)).toEqual(dispatchShape(schema))
   })
 })

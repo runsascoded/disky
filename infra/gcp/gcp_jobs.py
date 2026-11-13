@@ -24,6 +24,7 @@ component takes `existing=` (the resource is live, import it) and the stack's
 """
 
 import base64
+import hashlib
 import json
 import os
 import re
@@ -69,6 +70,21 @@ def cost_labels(environ: dict[str, str] | None = None) -> dict[str, str]:
     if LABELS_ENV not in env:
         raise ValueError(f"${LABELS_ENV} is unset: set it (e.g. app=disky,deployment=<stack>), or to '' to manage no labels")
     return parse_labels(env[LABELS_ENV])
+
+
+def check_cron_labels(spec: dict, labels: dict[str, str], name: str) -> None:
+    """Refuse a cron's Batch job `spec` unless its `labels` and its `allocationPolicy.labels` both carry the stack's cost
+    `labels` (as valued) and a `component`.
+
+    Cloud Scheduler posts the body straight to Batch, past `dt-cloud`'s own check (`batch.submit_job`), and Batch puts only
+    `allocationPolicy.labels` on the VMs and disks a job creates: a body labelled on the job alone runs, and bills
+    unlabelled. A stack with no labels (`$DISKY_LABELS` empty or unset) checks nothing."""
+    if not labels:
+        return
+    for where, got in (("labels", spec.get("labels") or {}), ("allocationPolicy.labels", (spec.get("allocationPolicy") or {}).get("labels") or {})):
+        if missing := [k for k, v in labels.items() if got.get(k) != v] + ([] if got.get("component") else ["component"]):
+            raise ValueError(f"cron {name}: its Batch job's {where} lack {', '.join(missing)} (the stack's ${LABELS_ENV} + a component go on "
+                             "the job's `labels` and on `allocationPolicy.labels`: its VMs and disks bill under the latter)")
 
 
 def labeled_provider(name: str, *, project: str, region: str, labels: dict[str, str]) -> gcp.Provider:
@@ -461,6 +477,23 @@ RETRY = gcp.cloudscheduler.JobRetryConfigArgs(
     max_backoff_duration="3600s",
     max_doublings=5,
 )
+# A cron whose target is safe to repeat (`BatchSubmitCron`: a second run of the submitter meets the period's job and
+# stops): a failed or timed-out call is retried, 30 s doubling to 5 min, within 30 min of the scheduled time.
+IDEMPOTENT_RETRY = gcp.cloudscheduler.JobRetryConfigArgs(
+    retry_count=5,
+    max_retry_duration="1800s",
+    min_backoff_duration="30s",
+    max_backoff_duration="300s",
+    max_doublings=4,
+)
+
+
+def checked_spec(submitter: Path, name: str) -> dict:
+    """`submitter_spec(submitter)`, refused (`check_cron_labels`) unless its job and allocation policy carry the stack's
+    cost labels: a cron's job reaches Batch with what the stack rendered, so the check is here, before any resource."""
+    spec = submitter_spec(submitter)
+    check_cron_labels(spec, parse_labels(os.environ.get(LABELS_ENV, "")), name)
+    return spec
 
 
 def _cron(
@@ -478,6 +511,8 @@ def _cron(
     existing: bool,
     parent: pulumi.Resource,
     depends_on: list[pulumi.Resource] | None = None,
+    retry: gcp.cloudscheduler.JobRetryConfigArgs = RETRY,
+    aliases: Sequence[pulumi.Input[str] | pulumi.Alias] = (),
 ) -> gcp.cloudscheduler.Job:
     return gcp.cloudscheduler.Job(
         name,
@@ -495,8 +530,8 @@ def _cron(
             body=body,
             oauth_token=gcp.cloudscheduler.JobHttpTargetOauthTokenArgs(service_account_email=sa_email, scope=SCOPE),
         ),
-        retry_config=RETRY,
-        opts=adopt.opts(existing, f"projects/{project}/locations/{region}/jobs/{name}", parent=parent, depends_on=depends_on),
+        retry_config=retry,
+        opts=adopt.opts(existing, f"projects/{project}/locations/{region}/jobs/{name}", parent=parent, depends_on=depends_on, aliases=list(aliases)),
     )
 
 
@@ -506,7 +541,8 @@ class BatchCron(ComponentResource):
     The body is `submitter_spec(submitter)`, so the job spec has one source of
     truth: the deployment's tracked `job/*-submit.sh`. The cron calls Batch as
     `sa_email`, which the spec's own `allocationPolicy.serviceAccount` should
-    match.
+    match. A body whose job or allocation policy lacks the stack's cost labels
+    is refused (`check_cron_labels`), before any resource is declared.
     """
 
     def __init__(
@@ -525,8 +561,9 @@ class BatchCron(ComponentResource):
         depends_on: list[pulumi.Resource] | None = None,
         opts: ResourceOptions | None = None,
     ):
+        spec = checked_spec(submitter, name)
         super().__init__("disky:gcp:BatchCron", name, None, opts)
-        self.spec = submitter_spec(submitter)
+        self.spec = spec
         self.job = _cron(
             name,
             project=project,
@@ -549,10 +586,15 @@ class RunJobCron(ComponentResource):
     """A Cloud Run job and the Cloud Scheduler cron that runs it, both as `sa`.
 
     Pulumi owns the job's shell (account, limits, the secret env it reads, its
-    `labels` on top of the provider's defaults); the image and plain env are a
-    deploy's (`gcloud run jobs update`), so they are `ignore_changes`, as
-    `wrangler` owns a Pages deploy's contents under `cf/`.
+    `labels` on top of the provider's defaults, its `command`/`args` when given);
+    the image and plain env are a deploy's (`gcloud run jobs update`), so they
+    are `ignore_changes`, as `wrangler` owns a Pages deploy's contents under
+    `cf/`. Given `env`, the plain env is the stack's instead (no longer ignored).
+    `retry`: the cron's (default `RETRY`: none); `cron_aliases`: the cron's
+    former URNs, for a cron moving here from another component.
     """
+
+    TYPE = "disky:gcp:RunJobCron"
 
     def __init__(
         self,
@@ -572,11 +614,17 @@ class RunJobCron(ComponentResource):
         time_zone: str = "Etc/UTC",
         trigger: str | None = None,
         labels: dict[str, str] | None = None,
+        command: list[str] | None = None,
+        args: list[str] | None = None,
+        env: dict[str, str] | None = None,
+        retry: gcp.cloudscheduler.JobRetryConfigArgs = RETRY,
+        description: str | None = None,
+        cron_aliases: Sequence[pulumi.Input[str] | pulumi.Alias] = (),
         adopt: Adopt,
         existing: bool = False,
         opts: ResourceOptions | None = None,
     ):
-        super().__init__("disky:gcp:RunJobCron", name, None, opts)
+        super().__init__(self.TYPE, name, None, opts)
         job_path = f"projects/{project}/locations/{region}/jobs/{job}"
         self.job = gcp.cloudrunv2.Job(
             job,
@@ -593,8 +641,13 @@ class RunJobCron(ComponentResource):
                     containers=[
                         gcp.cloudrunv2.JobTemplateTemplateContainerArgs(
                             image=image,
+                            commands=command,
+                            args=args,
                             resources=gcp.cloudrunv2.JobTemplateTemplateContainerResourcesArgs(limits={"cpu": cpu, "memory": memory}),
                             envs=[
+                                gcp.cloudrunv2.JobTemplateTemplateContainerEnvArgs(name=var, value=value)
+                                for var, value in (env or {}).items()
+                            ] + [
                                 gcp.cloudrunv2.JobTemplateTemplateContainerEnvArgs(
                                     name=var,
                                     value_source=gcp.cloudrunv2.JobTemplateTemplateContainerEnvValueSourceArgs(
@@ -611,7 +664,8 @@ class RunJobCron(ComponentResource):
                 existing,
                 job_path,
                 parent=self,
-                ignore_changes=["template.template.containers[0].image", "template.template.containers[0].envs", "client", "clientVersion", "annotations", "launchStage"],
+                ignore_changes=["template.template.containers[0].image", *([] if env is not None else ["template.template.containers[0].envs"]),
+                                "client", "clientVersion", "annotations", "launchStage"],
             ),
         )
         invoker = "roles/run.invoker"
@@ -633,10 +687,345 @@ class RunJobCron(ComponentResource):
             body=None,
             sa_email=sa_email,
             time_zone=time_zone,
-            description=None,
+            description=description,
             adopt=adopt,
             existing=existing,
             parent=self,
             depends_on=[self.job],
+            retry=retry,
+            aliases=cron_aliases,
         )
         self.register_outputs({"job": self.job.name, "cron": self.cron.name})
+
+
+#: Where `BatchSubmitCron` hands its script the Batch job's spec (JSON).
+SPEC_ENV = "BATCH_SPEC"
+#: The role a `BatchSubmitCron` dispatcher holds on its Cloud Run job: run it, with overrides (`run.jobs.run`,
+#: `run.jobs.runWithOverrides`, `run.executions.cancel`), nothing else; the narrowest predefined role that can override.
+RUN_WITH_OVERRIDES = "roles/run.jobsExecutorWithOverrides"
+
+
+def env_guard(env: dict[str, str], overridable: Sequence[str]) -> str:
+    """Bash that refuses to go on unless each of `env`'s variables (the plain env the stack sets on the job) not named in
+    `overridable` still holds the stack's value, compared by SHA-256 (`$BATCH_SPEC` is kilobytes): a run with
+    overrides (Cloud Run's `containerOverrides[].env`, which no IAM condition can narrow to some variables) may change
+    those, and only those. Exits 2 naming the variable. Secret-sourced variables aren't pinned (their values aren't the
+    stack's to know)."""
+    allowed = ", ".join(overridable) or "none"
+    lines = [
+        f"# The stack's env, pinned (`BatchSubmitCron`): a run may override only {allowed}.",
+        '_pin() { [ "${!1+set}" = set ] && [ "$(printf %s "${!1}" | sha256sum | cut -d" " -f1)" = "$2" ] || '
+        f"{{ echo \"refused: \\$$1 is not the stack's value (a run may override only {allowed})\" >&2; exit 2; }}; }}",
+        *(f"_pin {var} {hashlib.sha256(value.encode()).hexdigest()}" for var, value in sorted(env.items()) if var not in overridable),
+        "unset -f _pin",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+class BatchSubmitCron(RunJobCron):
+    """A cron that submits a Batch job through a Cloud Run job, which retries and alerts, instead of Cloud Scheduler
+    posting the body to Batch once (`BatchCron`), where a 5xx is a silently missed run and a retried POST a possible
+    second job.
+
+    The spec is `checked_spec(submitter)` as `BatchCron`'s (rendered and label-checked at `up`), handed to the job as
+    `$BATCH_SPEC` beside `env`; the job runs `script` (a deployment's tracked shell script, its text passed as `bash -c`,
+    so the job runs what the stack previewed, whatever the image's checkout). The script owns the submit: an
+    idempotent one (`dt-cloud batch submit -t -e -r`: the job named for its period, a 409 counted as submitted, transient
+    failures retried for a bounded window) and an alert if that still fails. Because a repeat is harmless, the cron
+    retries its own call (`IDEMPOTENT_RETRY`), and the Cloud Run task is not retried (`max_retries=0`: the script's own
+    window is the retry, and a second attempt would alert twice). `timeout` must outlast the script's window.
+
+    A run by hand (e.g. a site's "run a scan now"): `dispatchers` (`{name: member}`) each get `RUN_WITH_OVERRIDES` on
+    this one job, and `overridable` names the env variables such a run may set (`containerOverrides[].env`), which the
+    script reads to vary its run (its job id, its trigger). With either, the script is prefixed by `env_guard`: every
+    other plain variable the stack sets, the spec included, must still be the stack's, so an override can vary the run
+    only as the script allows, never swap the spec. Not a boundary against the dispatcher itself (it could set a
+    variable the stack doesn't, e.g. `BASH_ENV`): grant it only to an account already trusted to submit the job's Batch
+    work as its account.
+    """
+
+    TYPE = "disky:gcp:BatchSubmitCron"
+
+    def __init__(
+        self,
+        name: str,
+        *,
+        submitter: Path,
+        script: Path,
+        env: dict[str, str] | None = None,
+        overridable: Sequence[str] = (),
+        dispatchers: dict[str, pulumi.Input[str]] | None = None,
+        memory: str = "1Gi",
+        timeout: str = "2400s",
+        retry: gcp.cloudscheduler.JobRetryConfigArgs = IDEMPOTENT_RETRY,
+        **kw,
+    ):
+        self.spec = checked_spec(submitter, name)
+        labels_env = {LABELS_ENV: os.environ[LABELS_ENV]} if LABELS_ENV in os.environ else {}
+        job_env = {SPEC_ENV: json.dumps(self.spec, sort_keys=True), **labels_env, **(env or {})}
+        guard = env_guard(job_env, overridable) if overridable or dispatchers else ""
+        super().__init__(
+            name,
+            command=["bash", "-c", guard + script.read_text()],
+            env=job_env,
+            memory=memory,
+            timeout=timeout,
+            max_retries=0,
+            retry=retry,
+            **kw,
+        )
+        job = kw["job"]
+        for who, member in (dispatchers or {}).items():
+            gcp.cloudrunv2.JobIamMember(
+                f"{job}-dispatch-{who}",
+                project=kw["project"],
+                location=kw["region"],
+                name=job,
+                role=RUN_WITH_OVERRIDES,
+                member=member,
+                opts=ResourceOptions(parent=self, depends_on=[self.job]),
+            )
+
+
+class CronAlerts(ComponentResource):
+    """The backstop for a `BatchSubmitCron`'s failures its own script can't report, as Cloud Monitoring alert policies
+    to `channels`, event-driven, no time windows. A channel is a notification channel's id
+    (`projects/<project>/notificationChannels/<n>`): a `MonitoringRelay`'s `.channel` (the deployment's own bot, all in
+    the stack), or one made by hand in the console (e.g. Monitoring's Slack app, whose OAuth the stack can't do).
+
+    - `<job> failed`: a Cloud Run execution of `job` ended failed (`run.googleapis.com/job/completed_execution_count`,
+      `result="failed"`): the container never started, ran out of memory, hit its timeout, or the script exited
+      nonzero (which also posts its own, fuller alert).
+    - `<trigger> couldn't start the job`: Cloud Scheduler logged a failed attempt to run it (its call to the job's
+      `:run`; it retries per its retry config, so each failed attempt is one log entry), at most one notification an hour.
+
+    Not covered: a trigger paused or deleted produces no event at all."""
+
+    TYPE = "disky:gcp:CronAlerts"
+
+    def __init__(self, name: str, *, project: str, job: str, trigger: str, channels: Sequence[pulumi.Input[str]], opts: ResourceOptions | None = None):
+        if not channels:
+            raise ValueError(f"CronAlerts {name}: no notification channels (policies nobody is told of)")
+        super().__init__(self.TYPE, name, None, opts)
+        M = gcp.monitoring
+        child = ResourceOptions(parent=self)
+        self.failed = M.AlertPolicy(
+            f"{name}-failed",
+            project=project,
+            display_name=f"{job} failed",
+            combiner="OR",
+            conditions=[M.AlertPolicyConditionArgs(
+                display_name="a failed execution",
+                condition_threshold=M.AlertPolicyConditionConditionThresholdArgs(
+                    filter=(f'resource.type = "cloud_run_job" AND resource.labels.job_name = "{job}" AND '
+                            'metric.type = "run.googleapis.com/job/completed_execution_count" AND metric.labels.result = "failed"'),
+                    comparison="COMPARISON_GT",
+                    threshold_value=0,
+                    duration="0s",
+                    aggregations=[M.AlertPolicyConditionConditionThresholdAggregationArgs(alignment_period="300s", per_series_aligner="ALIGN_DELTA")],
+                    trigger=M.AlertPolicyConditionConditionThresholdTriggerArgs(count=1),
+                ),
+            )],
+            documentation=M.AlertPolicyDocumentationArgs(
+                mime_type="text/markdown",
+                content=(f"A run of the Cloud Run job `{job}` failed, so this period's Batch job may not exist. Its logs say why; "
+                         f"re-run it once fixed (a no-op if the job exists): `gcloud run jobs execute {job} --region <region> --project {project}`"),
+            ),
+            notification_channels=list(channels),
+            opts=child,
+        )
+        self.unstarted = M.AlertPolicy(
+            f"{name}-unstarted",
+            project=project,
+            display_name=f"{trigger} couldn't start {job}",
+            combiner="OR",
+            conditions=[M.AlertPolicyConditionArgs(
+                display_name="a failed Scheduler attempt",
+                condition_matched_log=M.AlertPolicyConditionConditionMatchedLogArgs(
+                    filter=f'resource.type = "cloud_scheduler_job" AND resource.labels.job_id = "{trigger}" AND severity >= ERROR',
+                ),
+            )],
+            alert_strategy=M.AlertPolicyAlertStrategyArgs(
+                notification_rate_limit=M.AlertPolicyAlertStrategyNotificationRateLimitArgs(period="3600s"),
+                auto_close="1800s",
+            ),
+            documentation=M.AlertPolicyDocumentationArgs(
+                mime_type="text/markdown",
+                content=f"Cloud Scheduler `{trigger}` failed to run the Cloud Run job `{job}` (after its retries, one entry each attempt).",
+            ),
+            notification_channels=list(channels),
+            opts=child,
+        )
+        self.register_outputs({})
+
+
+#: Who publishes a Pub/Sub notification channel's messages: the project's Monitoring notification service agent, made
+#: when the project's first Pub/Sub channel is (so its grant on the topic follows the channel).
+MONITORING_AGENT = "service-{number}@gcp-sa-monitoring-notification.iam.gserviceaccount.com"
+
+
+class MonitoringRelay(ComponentResource):
+    """Cloud Monitoring alerts to the deployment's own alert channel (its Slack bot, through `disk-tree notify`), with
+    no console step: a Pub/Sub notification channel on a topic, and a push subscription delivering each incident to a
+    Cloud Run service that runs `dt-cloud monitoring-relay serve` from the deployment's `image` (spec
+    specs/monitoring-relay.md). `.channel` is the notification channel, for `CronAlerts` or any alert policy.
+
+    - the topic, published to by the Monitoring notification agent (`MONITORING_AGENT`, granted once the channel exists);
+    - the service, as its own account (`account_id`), which reads `secret_env`'s secrets (e.g. the bot token) and
+      nothing else; `env` beside them (e.g. `SLACK_ALERT_CHANNEL`); scaled to zero between alerts, one instance at most;
+    - the push, authenticated by an OIDC token as that same account (`run.invoker` on the service, which Cloud Run
+      checks: the service admits no one else), minted by the Pub/Sub service agent (`serviceAccountTokenCreator` on
+      the account). Undelivered (no channel took it: 500), a message is retried, 10 s backing off to 10 min, for a day.
+
+    The image is the stack's as given: Cloud Run pins the digest `:latest` meant when the revision was made, so a
+    rebuilt image reaches the relay by a new revision (`gcloud run deploy <name> --image <image>`), not by `up` alone."""
+
+    TYPE = "disky:gcp:MonitoringRelay"
+
+    def __init__(
+        self,
+        name: str,
+        *,
+        project: str,
+        region: str,
+        image: pulumi.Input[str],
+        account_id: str,
+        secret_env: dict[str, str],
+        env: dict[str, str] | None = None,
+        channels: str = "slack",
+        memory: str = "1Gi",
+        labels: dict[str, str] | None = None,
+        display_name: str | None = None,
+        opts: ResourceOptions | None = None,
+    ):
+        super().__init__(self.TYPE, name, None, opts)
+        child = ResourceOptions(parent=self)
+        labels = {"component": "alert-relay", **(labels or {})}
+        api = gcp.projects.Service(
+            f"{name}-pubsub-api",
+            project=project,
+            service="pubsub.googleapis.com",
+            disable_on_destroy=False,
+            deletion_policy="ABANDON",
+            opts=child,
+        )
+        pubsub_agent = gcp.projects.ServiceIdentity(
+            f"{name}-pubsub-agent",
+            project=project,
+            service="pubsub.googleapis.com",
+            opts=ResourceOptions(parent=self, depends_on=[api]),
+        )
+        self.topic = gcp.pubsub.Topic(name, project=project, name=name, labels=labels, opts=ResourceOptions(parent=self, depends_on=[api]))
+        self.account = gcp.serviceaccount.Account(
+            f"{name}-sa",
+            project=project,
+            account_id=account_id,
+            display_name=f"{name}: Monitoring incidents to the deployment's alert channel",
+            opts=child,
+        )
+        member = sa_member(self.account.email)
+        grants = [
+            gcp.secretmanager.SecretIamMember(
+                f"{name}-{sid}-accessor",
+                project=project,
+                secret_id=sid,
+                role="roles/secretmanager.secretAccessor",
+                member=member,
+                opts=child,
+            )
+            for sid in sorted(set(secret_env.values()))
+        ]
+        self.service = gcp.cloudrunv2.Service(
+            name,
+            project=project,
+            location=region,
+            name=name,
+            deletion_protection=False,
+            ingress="INGRESS_TRAFFIC_ALL",
+            labels=labels,
+            template=gcp.cloudrunv2.ServiceTemplateArgs(
+                service_account=self.account.email,
+                timeout="60s",
+                scaling=gcp.cloudrunv2.ServiceTemplateScalingArgs(min_instance_count=0, max_instance_count=1),
+                containers=[gcp.cloudrunv2.ServiceTemplateContainerArgs(
+                    image=image,
+                    commands=["dt-cloud", "monitoring-relay", "serve", "-c", channels],
+                    resources=gcp.cloudrunv2.ServiceTemplateContainerResourcesArgs(
+                        limits={"cpu": "1000m", "memory": memory}, cpu_idle=True, startup_cpu_boost=True,
+                    ),
+                    envs=[
+                        gcp.cloudrunv2.ServiceTemplateContainerEnvArgs(name=var, value=value)
+                        for var, value in (env or {}).items()
+                    ] + [
+                        gcp.cloudrunv2.ServiceTemplateContainerEnvArgs(
+                            name=var,
+                            value_source=gcp.cloudrunv2.ServiceTemplateContainerEnvValueSourceArgs(
+                                secret_key_ref=gcp.cloudrunv2.ServiceTemplateContainerEnvValueSourceSecretKeyRefArgs(secret=sid, version="latest"),
+                            ),
+                        )
+                        for var, sid in secret_env.items()
+                    ],
+                )],
+            ),
+            opts=ResourceOptions(parent=self, depends_on=grants, ignore_changes=["client", "clientVersion"]),
+        )
+        invoker = gcp.cloudrunv2.ServiceIamMember(
+            f"{name}-invoker",
+            project=project,
+            location=region,
+            name=self.service.name,
+            role="roles/run.invoker",
+            member=member,
+            opts=child,
+        )
+        token = gcp.serviceaccount.IAMMember(
+            f"{name}-pubsub-token",
+            service_account_id=self.account.name,
+            role="roles/iam.serviceAccountTokenCreator",
+            member=pubsub_agent.member,
+            opts=child,
+        )
+        self.subscription = gcp.pubsub.Subscription(
+            name,
+            project=project,
+            name=name,
+            topic=self.topic.id,
+            labels=labels,
+            ack_deadline_seconds=60,
+            message_retention_duration="86400s",
+            retry_policy=gcp.pubsub.SubscriptionRetryPolicyArgs(minimum_backoff="10s", maximum_backoff="600s"),
+            expiration_policy=gcp.pubsub.SubscriptionExpirationPolicyArgs(ttl=""),
+            push_config=gcp.pubsub.SubscriptionPushConfigArgs(
+                push_endpoint=self.service.uri,
+                oidc_token=gcp.pubsub.SubscriptionPushConfigOidcTokenArgs(service_account_email=self.account.email, audience=self.service.uri),
+            ),
+            opts=ResourceOptions(parent=self, depends_on=[invoker, token]),
+        )
+        self.notification_channel = gcp.monitoring.NotificationChannel(
+            name,
+            project=project,
+            type="pubsub",
+            display_name=display_name or f"{name} (Pub/Sub, relayed to {channels})",
+            labels={"topic": self.topic.id},
+            opts=ResourceOptions(parent=self, depends_on=[self.subscription]),
+        )
+        # Monitoring's notification agent (`MONITORING_AGENT`) isn't made by the project's first Pub/Sub channel (gcs,
+        # 2026-11-11: the grant below failed, "does not exist"): created explicitly, as the Pub/Sub agent is.
+        monitoring_agent = gcp.projects.ServiceIdentity(
+            f"{name}-monitoring-agent",
+            project=project,
+            service="monitoring.googleapis.com",
+            opts=child,
+        )
+        number = gcp.organizations.get_project_output(project_id=project).number
+        gcp.pubsub.TopicIAMMember(
+            f"{name}-monitoring-publisher",
+            project=project,
+            topic=self.topic.name,
+            role="roles/pubsub.publisher",
+            member=number.apply(lambda n: "serviceAccount:" + MONITORING_AGENT.format(number=n)),
+            opts=ResourceOptions(parent=self, depends_on=[self.notification_channel, monitoring_agent]),
+        )
+        self.channel: pulumi.Output[str] = self.notification_channel.name
+        self.register_outputs({"channel": self.channel, "topic": self.topic.id, "service": self.service.uri})
+

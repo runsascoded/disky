@@ -35,8 +35,10 @@ from . import heartbeat as hb
 from . import interval_compact as ic
 from . import interval_store as ist
 from . import static_names as sn
+from . import tree_mem as tm
 from .append_runner import LocalRunStore, latest_key
 from .blobstore import Store, mirror, upload_new
+from .interval_level import LEVEL_DOC
 from .static_local import _check_gen, workdir
 from .static_names import err, q
 
@@ -227,13 +229,13 @@ def filler(index: str, ranges: dict, counts: dict[str, int]) -> ic.Fill:
 
 def mirror_source(store: Store, gen: str, new_gen: str, work: Path, ranges_gen: str | None = None) -> Path:
     """Generation `gen` of `store` mirrored into `work/store/` for a fold into `new_gen` (refused when `new_gen` exists:
-    a generation is never rewritten), but for what no fold reads (`UNREAD`). A staged build's generation may borrow its
+    a generation is never rewritten), but for what no fold reads (`UNREAD`; the level sort's record is kept). A staged build's generation may borrow its
     key ranges and base range files from `ranges_gen`: those are mirrored in beside its own. Returns its dir."""
     prefix, new_prefix = f"{PREFIX}/{gen}", f"{PREFIX}/{new_gen}"
     if store.listing(new_prefix):
         raise SystemExit(f"{store.root}/{new_prefix}/ exists: a generation is never rewritten")
     gen_dir = work / "store" / prefix
-    before = mirror(store, prefix, gen_dir, keep=lambda rel: not rel.startswith(UNREAD))
+    before = mirror(store, prefix, gen_dir, keep=lambda rel: rel == LEVEL_DOC or not rel.startswith(UNREAD))
     if f"{prefix}/scans.json" not in before:
         raise SystemExit(f"{store.root}/{prefix}/scans.json: no such generation")
     if ranges_gen and ranges_gen != gen:
@@ -270,8 +272,9 @@ def backfill(store: Store, gen: str, new_gen: str, listing_root: str, template: 
     newest = latest_key(lstore.keys("manifests/"))
     runs = lstore.read_json(newest)["runs"] if newest else []
     scans = [*base["scans"], *ic.run_scans(gen_dir, gen, runs)]
-    con = sn.connect(threads, mem, work / "duckdb")
+    con = sn.connect(threads, tm.stage_mem(tm.Budget.measure(sn.mem_bytes(mem)), f"backfill {gen}"), work / "duckdb")
     idx = gen_index(con, Store(listing_root), template, scans, work, since=since, stall_s=stall_s)
+    con.close()  # the fold opens its own, its budget measured with what this process then holds
     if not idx["scans"]:
         raise SystemExit(f"no listing under {listing_root} matching {template!r} has a `{ist.GENERATION}` column")
     ranges = json.loads((gen_dir / "ranges.json").read_text())
@@ -299,7 +302,7 @@ def _publish_order(keys: list[str]) -> list[str]:
 @option("-g", "--gen", help="The source generation (default: the store's current, followed to its newest successor); never rewritten")
 @option("-j", "--jobs", default=1, type=IntRange(min=1), help="Key ranges, then served sorts, folded this many at a time, on cursors of one DuckDB database (-p threads and -M memory shared): each ends in a serial parquet writer. The output's bytes don't depend on it")
 @option("-l", "--listing", "template", required=True, help="Key template of a scan's raw listing shards under -s: `{id}` the scan id, globs allowed (e.g. `listing/{id}/*/*.parquet`)")
-@option("-M", "--mem", default="4GB", help="DuckDB memory limit")
+@option("-M", "--mem", default="4GB", help="Memory budget of the whole process tree (`tree_mem`): DuckDB gets what this process, the cut's workers and the Arrow buffers leave")
 @option("-N", "--nulls", is_flag=True, help="GEN already carries `generation`: fill only its object versions whose `generation` is NULL (a repair: e.g. objects a lister recorded without one), each from the first listing within it that has one")
 @option("-o", "--out", "store_root", required=True, help="The store: a dir or URL (`r2://bucket[/prefix]`, `s3://…`, `gs://…`), the readers' INDEX_R2 root")
 @option("-O", "--to-gen", required=True, help="The new generation: `<store>/interval-store/TO_GEN/` (must not exist)")
@@ -324,7 +327,7 @@ def backfill_cmd(gen, jobs, template, mem, nulls, store_root, to_gen, threads, r
         if gen is None:
             raise SystemExit(f"{store.root}/{PREFIX}: no current generation ({how}): name one with -g")
     gen = ic.chain(store, gen)[-1]
-    with workdir(work) as w:
+    with tm.watch(mem, f"backfill-generation {gen}"), workdir(work) as w:
         print(json.dumps(backfill(store, gen, to_gen, listing_root, template, w, ranges_gen=ranges_gen, since=since, nulls=nulls, stall_s=stall_s, rg_rows=rg_rows,
                                     threads=threads, mem=mem, jobs=jobs), indent=1))
 
