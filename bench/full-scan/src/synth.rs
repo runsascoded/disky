@@ -243,6 +243,8 @@ pub struct Synth {
     stage: PathBuf,
     pub versions: u64,
     pub file_versions: u64,
+    /// A counter in generated names, so no two runs, datasets or log dirs share a path.
+    uid: u64,
 }
 
 fn ts(i: usize) -> i64 {
@@ -276,6 +278,11 @@ impl Synth {
     }
     fn p(&mut self, p: f64) -> bool {
         (self.rand() >> 11) as f64 / (1u64 << 53) as f64 <= p
+    }
+    /// A random-looking suffix that is unique in this fleet.
+    fn uniq(&mut self) -> String {
+        self.uid += 1;
+        format!("{}{:05x}", self.hex(3), self.uid)
     }
     fn hex(&mut self, n: usize) -> String {
         let v = self.rand();
@@ -449,7 +456,7 @@ impl Synth {
         for r in 0..runs {
             let owner = if self.p(0.1) { 0 } else { 1 + self.below(8) as u8 };
             let model = ["llama", "olmo", "tootsie", "marin", "gemma"][self.below(5) as usize];
-            let name = format!("run-{model}-{}m-{}", [150, 300, 600, 1400, 8000][r % 5], self.hex(6));
+            let name = format!("run-{model}-{}m-{}", [150, 300, 600, 1400, 8000][r % 5], self.uniq());
             let start = self.born(0.6);
             let steps = 4 + self.below(14) as usize;
             let every = 1 + self.below(3) as usize;
@@ -503,7 +510,7 @@ impl Synth {
         let sets = self.n(3.0);
         for _ in 0..sets {
             let words = ["fineweb", "dclm", "starcoder", "arxiv", "wiki", "xylophone", "pubmed", "stackexchange"];
-            let name = format!("{}-{}", words[self.below(words.len() as u64) as usize], self.hex(6));
+            let name = format!("{}-{}", words[self.below(words.len() as u64) as usize], self.uniq());
             let born = self.born(0.8);
             let owner = if self.p(0.5) { 0 } else { 1 + self.below(8) as u8 };
             let shards = 50 + self.below(600) as usize;
@@ -621,7 +628,7 @@ impl Synth {
             let born = self.born(0.5);
             let active = 1 + self.below(8) as usize;
             let owner = 1 + self.below(8) as u8;
-            let name = format!("run-{}", self.hex(8));
+            let name = format!("run-{}", self.uniq());
             self.dir(p, &name, d, acc, |me, p, d, acc| {
                 for h in 0..1 + me.below(4) {
                     // Rewritten every scan while active, then left alone.
@@ -664,7 +671,7 @@ impl Synth {
         std::fs::create_dir_all(stage.join("base"))?;
         std::fs::create_dir_all(stage.join("runs"))?;
         let k = scans - runs - 1;
-        let mut me = Synth { s: scans, k, scale, rng: seed, base: BTreeMap::new(), runs: Vec::new(), stage: stage.to_path_buf(), versions: 0, file_versions: 0 };
+        let mut me = Synth { s: scans, k, scale, rng: seed, base: BTreeMap::new(), runs: Vec::new(), stage: stage.to_path_buf(), versions: 0, file_versions: 0, uid: 0 };
         for i in 0..scans {
             me.runs.push(if i > k { Some(Out::new(&stage.join(format!("runs/{}.parquet", date(ts(i)))))?) } else { None });
         }
