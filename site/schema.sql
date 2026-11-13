@@ -463,19 +463,6 @@ CREATE TABLE session_log_switch (
   ts          INTEGER NOT NULL
 );
 
-CREATE TABLE session_monitor (
-  id INTEGER PRIMARY KEY CHECK (id = 1),
-  version INTEGER NOT NULL DEFAULT 0,
-  lease_until INTEGER NOT NULL DEFAULT 0,
-  checked_s INTEGER NOT NULL DEFAULT 0,
-  signal_s INTEGER NOT NULL DEFAULT 0,
-  alert_s INTEGER NOT NULL DEFAULT 0,
-  day TEXT NOT NULL DEFAULT '',
-  attempts INTEGER NOT NULL DEFAULT 0,
-  thread_ts TEXT,
-  delivery TEXT NOT NULL DEFAULT 'none'
-);
-
 CREATE TABLE stage_replies (
   id         INTEGER PRIMARY KEY AUTOINCREMENT,
   plan_id    INTEGER NOT NULL REFERENCES plans(id),
