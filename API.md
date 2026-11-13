@@ -68,7 +68,7 @@ Deleted objects stay recoverable for as long as their bucket retains soft delete
 
 | Method & path | Purpose |
 |---|---|
-| `GET /api/owners?date=<scan>` | Per-user owned bytes + storage-class mix for a scan (what `/users` ranks): `{ scan, head, bytes, objects, users: { <id>: { b, mix } } }`. |
+| `GET /api/owners?date=<scan>` | Per-user owned bytes + storage-class mix for a scan (what `/users` ranks): `{ scan, head, bytes, objects, users: { <id>: { bytes, class_bytes } } }`. |
 | `GET /api/estate?date=<scan>&user=<id \| me>` | One user's estate: `{ user, date, head, bytes, objects, mix, assignments }`; `assignments` are their live assignments, each `{ prefix, ts, bytes, objects }`. |
 | `GET /api/assignments?date=<scan>` | The assigner × assignee matrix (who assigned what to whom, in bytes). |
 | `GET /api/actions` | The live ownership ledger: `{ owners: [...] }`, every expanded prefix (`prefix, owner, ts, who, memo, action_id`). `?log=1` is every action, newest first, with its status. |
@@ -79,8 +79,8 @@ Deleted objects stay recoverable for as long as their bucket retains soft delete
 | Method & path | Purpose |
 |---|---|
 | `GET /data/scans.json`, `/data/<scan>/{tree,age,meta}.json`, `/data/rules.json` | The published per-scan artifacts the UI renders (scans.json = the scan ids, newest first; tree = size-floored rollup; meta = totals + per-user/class bytes). |
-| `GET /api/subtree?date=&path=&w=&h=` | Pixel-budget subtree of any path: `{ tree, … }`, UI-shaped nodes `{ n, k, b, o, d, a, us, ou, cb, c }` (`n` = the name segment, `b` bytes, `o` objects, `us` = known owners `[[id, bytes], …]`, `ou` = bytes whose ownership was not read, zero when absent, `c` children; known unowned = `max(0, b − Σ us − ou)`). A bounded heavy-query rollup can return exact bytes/object totals while leaving ownership unavailable; do not classify `ou` as unowned. Folded to what a w×h canvas can draw (a fold is an `(other)` node with `f`). Scopes: `lens=user:<id \| me>` (one owner's bytes), bare `o` (the unowned pool), `o=*` (the owned pool), `depth=N` (levels below `path`). |
-| `GET /api/diff?from=&to=&path=` | What changed under a path between two scans; same scopes. |
+| `GET /api/subtree?date=&path=&w=&h=` | Pixel-budget subtree of any path: `{ tree, … }`, nodes `{ name, kind, bytes, objects, mtime, last_read, owners, unknown_owner_bytes, class_bytes, children }` (`name` = the path segment, `mtime` the newest write (epoch s), `last_read` the newest read (epoch day), `owners` = known owners `[[id, bytes], …]`, `unknown_owner_bytes` = bytes whose ownership was not read, zero when absent, `class_bytes` = non-Standard storage class → bytes; known unowned = `max(0, bytes − Σ owners − unknown_owner_bytes)`). A bounded heavy-query rollup can return exact bytes/object totals while leaving ownership unavailable; do not classify `unknown_owner_bytes` as unowned. Folded to what a w×h canvas can draw (a fold is an `(other)` node with `folded`, the children it stands in for). Scopes: `lens=user:<id \| me>` (one owner's bytes), bare `o` (the unowned pool), `o=*` (the owned pool), `depth=N` (levels below `path`). |
+| `GET /api/diff?from=&to=&path=` | What changed under a path between two scans; same scopes: `{ prev, curr, bytes_before, bytes_after, objects_before, objects_after, rows, … }`, each row `{ path, depth, kind, status, bytes_before, bytes_after, objects_before, objects_after }` (`status` `added` \| `removed` \| `changed`; `path` relative to the request's). |
 | `GET /api/series?path=` | Bytes under a path per scan; same scopes. A scoped series may come in windows of scans: a body with `chunks: n` holds only the newest; `&chunk=i` (0 ≤ i < n, oldest first) reads each of the others. |
 | `GET/HEAD /api/path-index?date=` | The **floor-free** path index behind `/api/subtree`, as raw parquet with HTTP Range support: bring your own query engine (see below). One row per rolled-up path × owner slice: `(path, depth, usr, b, o, wts, wb, c2, c3, c4, a)`, sorted `(depth, path)`; `usr` NULL = unowned. |
 | `GET /v1/files/<path>` | Raw scan-store proxy (range-supporting) over `listing/` + `snapshots/`: the per-object listing parquets, `dir-cache/`, the index tiers (`index/<gen>/path-index*.parquet`; older scans have them at `listing/<date>/` directly), and published snapshot JSONs, addressed by bucket path. |
@@ -108,9 +108,9 @@ gu() { curl -sS --fail-with-body -H "Authorization: Bearer $GCS_USAGE_TOKEN" "$@
 DATE=$(gu "$GCS_USAGE_URL/data/scans.json" | jq -r '.[0]')   # the latest scan
 # A subtree's nodes as rows with full paths (folds dropped), biggest first: jq -f rows.jq
 cat > rows.jq <<'EOF'
-def rows($p): (.c // [])[] | select(.f == null)
-  | (if $p == "" then .n else "\($p)/\(.n)" end) as $q
-  | ({ path: $q, gb: (.b / 1e9 * 10 | round / 10), objects: .o, owners: (.us // []) }, rows($q));
+def rows($p): (.children // [])[] | select(.folded == null)
+  | (if $p == "" then .name else "\($p)/\(.name)" end) as $q
+  | ({ path: $q, gb: (.bytes / 1e9 * 10 | round / 10), objects: .objects, owners: (.owners // []) }, rows($q));
 [.path as $p | .tree | rows($p)] | sort_by(-.gb) | .[:30][]
 EOF
 ```
