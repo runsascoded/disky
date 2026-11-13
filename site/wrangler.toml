@@ -201,6 +201,8 @@ database_name = "oa-cw-s3-usage-db"   # the SAME ledger as prod (marks made on d
 database_id = "7f1e1326-b879-4ecd-8621-846621c24f36"
 
 [env.preview.vars]
+# Experiment: cloud's diff walk (+ `efdc41b56`) under a lookup budget of 32
+DIFF_LOOKUP_CAP = "32"
 PROD_HOST = "cw.oa.dev"
 DEV_HOST = "dev.cw.oa.dev"
 REPO_URL = "https://github.com/Open-Athena/marin-gcs-usage"
