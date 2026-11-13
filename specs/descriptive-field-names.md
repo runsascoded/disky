@@ -181,6 +181,7 @@ Defined: server `site/functions/_lib/view.ts` (`ViewNode`, `nodeOf`, `display`, 
 | `a` | last read, epoch days (subtree max, access logs) | `last_read` (store column name) | `ChildrenTable.tsx`, `PrefixTable.tsx`, `Treemap.tsx`, `readLens.ts`, `ledgerOverlay.ts`, `stagedTree.ts`, `AgeChart.tsx`; `interval_read.py` |
 | `us` | `[owner, bytes][]`, desc | `owners` (the root's pick: the UI, `/api/owners` and the filters all say owner) | `ChildrenTable.tsx`, `PrefixTable.tsx`, `OwnerBar.tsx`, `filterTree.ts`, `ledgerOverlay.ts`, `stagedTree.ts`, `StagedPage.tsx`, `Treemap.tsx`, `types.ts` (`userBytes`); server `_lib/owners.ts`, `ownerBands.ts`, `ownerHist.ts`, `prefixes.ts`, `stagedSlack.ts`, `og/data.ts`, `og/pages.ts`; `interval_read.py` |
 | `cb` | non-Standard class → bytes (`"2"` NL, `"3"` CL, `"4"` AR) | `class_bytes` (as `meta.json`'s) | `DupsPage.tsx`, `stagedTree.ts`, `OwnerControls.tsx`, `Treemap.tsx`, `types.ts` (`classMix`); `interval_read.py`/`interval_verify.py` |
+| `ou` (gcs, picked 2026-11-13) | bytes whose ownership was never read (a static drill without owner slices, an unread union member) | `unknown_owner_bytes` | `staticDrill.ts`, `union.ts`, `og/data.ts`, `OwnerBar.tsx` |
 | `c` | children | `children` | everything walking the tree; py `probe.py`, `digest_cw.py` |
 | `f` | an `(other)` fold: how many children it stands in for | `folded` | `Treemap.tsx` (dust density); `interval_verify.py` (`with_f`) |
 | `m` | `1`: the node matches the name filter | `matched` (boolean) | `filterTree.ts`, `Treemap.tsx` |
