@@ -4,7 +4,8 @@
 # whose aggregation/access workers retain the known-good memory limits.
 #
 # Env overrides: SNAP_ID (a scan id, e.g. a sub-daily `YYYY-MM-DDTHHMM` for an extra scan) or
-# SNAPSHOT_DATE (legacy explicit day override; default is a UTC timestamp inside run.sh), IMAGE,
+# SNAPSHOT_DATE (legacy explicit day override; default is a UTC timestamp inside run.sh), IMAGE (+ DT_SCAN_IMAGE: the
+# Nextflow head's step tasks on that image too, not the profile's `:latest`; a candidate smoke sets both to its digest),
 # DUCKDB_MEM (default 100GB, split controller 8GB), DUCKDB_THREADS (16, split 4), SNAP_PATH,
 # LISTING_MACHINE/PROCS/WORKERS (DIY fan-out sizing) — forwarded when set.
 set -euo pipefail
@@ -105,7 +106,7 @@ if not pin:  # one-off overrides forwarded only for manual submits, never the cr
     for k in ["SPLIT_COMPUTE", "SCAN_RUN_ID", "SNAP_ID", "GEN", "DT_JOB_START", "SNAPSHOT_DATE", "SNAP_PATH", "INDEX_PATH", "SCRATCH", "REPROC", "SWEEP", "SWEEP_PLAN", "SWEEP_DATE", "SWEEP_BUCKETS", "USER",
               "SWEEP_BENCHMARK_PLAN", "SWEEP_BENCHMARK_BUCKET", "SWEEP_BENCHMARK_WORKERS", "SWEEP_BENCHMARK_ROOTS", "SWEEP_BENCHMARK_RESULTS_PER_ROOT", "SWEEP_BENCHMARK_OUT",
               "ACCESS_ONLY", "SKIP_ACCESS", "ACCESS_ARGS", "GATE", "GATE_K", "GATE_P", "GATE_THREADS", "GATE_HIST",
-              "LISTING_MACHINE", "LISTING_PROCS", "LISTING_WORKERS",
+              "LISTING_MACHINE", "LISTING_PROCS", "LISTING_WORKERS", "DT_SCAN_IMAGE",
               "GCS_ALERT_CEILING_TB", "GCS_ALERT_SPIKE_PCT", "INDEX_RETAIN", "PATH_INDEX_RG_ROWS", "PATH_INDEX_USER_SORT_TIERS", "PATH_INDEX_SEARCH"]:  # SLACK_WEBHOOK is a secretVariable (see below)
         if k in os.environ:
             v[k] = os.environ[k]

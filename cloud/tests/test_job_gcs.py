@@ -41,6 +41,16 @@ def test_manual_labels_and_cron_spec_are_not_frozen_to_a_run(monkeypatch):
     )
 
 
+@pytest.mark.parametrize("pin, expected", [("", "registry@sha256:candidate"), ("1", None)])
+def test_manual_submit_runs_step_tasks_on_its_image(monkeypatch, pin, expected):
+    # A candidate smoke: the head forwards `DT_SCAN_IMAGE`, so every step task runs the candidate; the cron spec never does
+    for k, v in {"DISKY_LABELS": "app=disky,deployment=gcs", "DRY": "1", "PIN": pin, "DT_SCAN_IMAGE": "registry@sha256:candidate"}.items():
+        monkeypatch.setenv(k, v)
+    script = Path(__file__).parents[2] / "job/batch-submit.sh"
+    spec = json.loads(run(["bash", str(script)], check=True, capture_output=True, text=True).stdout)
+    assert spec["taskGroups"][0]["taskSpec"]["environment"]["variables"].get("DT_SCAN_IMAGE") == expected
+
+
 @pytest.mark.parametrize("context, expected", [
     ({"BATCH_JOB_UID": "daily-root-uid"}, "daily-root-uid"),
     ({"BATCH_JOB_UID": "child-uid", "SCAN_RUN_ID": "original-root-uid"}, "original-root-uid"),
