@@ -148,14 +148,31 @@ def parse(
     """)
 
 
-def state_aggs(state: dict, before: "datetime | None" = None) -> list[str]:
+def state_aggs(
+    state: dict,
+    before: "datetime | None" = None,
+    *,
+    closed_cursors: dict[str, float] | None = None,
+    checkpoint: str | None = None,
+) -> list[str]:
     """The current aggregate key of every hour the archive's ``state.json`` names (``hours[*].agg`` within
     retention, ``frozen`` past it), across its buckets, sorted; with ``before``, only hours starting before it. The
     state is the only source: a listing of ``agg/`` also holds superseded versions until the collector deletes
     them. Refuses a state version it doesn't know and version-1 per-day aggregates (``legacy_days``, a different
     shape)."""
-    if state.get('schema_version') != 2:
+    if state.get('schema_version') not in (2, 3):
         raise ValueError(f"r2 state: unknown schema_version {state.get('schema_version')!r}")
+    if state['schema_version'] == 3:
+        if closed_cursors is None:
+            raise ValueError('r2 state: compacted history requires its durable read checkpoint')
+        for bucket, value in state['buckets'].items():
+            closed = value.get('closed')
+            if closed is None:
+                continue
+            if (not isinstance(closed, dict) or closed.get('checkpoint') != checkpoint
+                    or type(closed.get('through')) not in (int, float)
+                    or not 0 <= closed['through'] <= closed_cursors.get(bucket, float('-inf'))):
+                raise ValueError(f'r2 state: {bucket} compacted history is ahead of or differs from the read checkpoint')
     out = []
     for bucket, b in sorted(state['buckets'].items()):
         if b.get('legacy_days'):

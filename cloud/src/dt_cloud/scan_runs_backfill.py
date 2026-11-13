@@ -21,7 +21,7 @@ from dataclasses import replace
 from .scan_id import is_scan_id
 from .scan_runs import ALL, JobKind, ObjectStore, Output, Phase, Profile, Record, Run, _epoch, job_fields, measure_after, phase_status
 
-GEN_STAMP = re.compile(r"(\d{8}T\d{6}Z)")
+GEN_STAMP = re.compile(r"(\d{8}T\d{6})(?:\d{6})?Z")
 BATCH_STATES = {"SUCCEEDED": "succeeded", "FAILED": "failed", "CANCELLED": "failed", "RUNNING": "running",
                 "SCHEDULED": "running", "QUEUED": "running"}
 
@@ -179,7 +179,7 @@ def owner_of_gen(gen: str, runs: Sequence[Run]) -> Run | None:
     m = GEN_STAMP.search(gen)
     if not m:
         return None
-    t = int(dt.datetime.strptime(m.group(1), "%Y%m%dT%H%M%SZ").replace(tzinfo=dt.timezone.utc).timestamp())
+    t = int(dt.datetime.strptime(m.group(1), "%Y%m%dT%H%M%S").replace(tzinfo=dt.timezone.utc).timestamp())
     for r in runs:
         if r.started_ts and r.started_ts - 600 <= t <= (r.finished_ts or 2**62):
             return r

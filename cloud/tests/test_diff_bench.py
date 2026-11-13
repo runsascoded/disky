@@ -29,6 +29,13 @@ def test_browser_url_encodes_as_the_page_does():
     assert browser_url(r) == f"/api/subtree?cv={CV}&date=2026-09-15T1201&path=b%20k%2Fa%3D1%2Fit's%20(x)!~*-_.&w=1152&h=307&depth=1"
 
 
+def test_stable_reader_mode_is_explicit_in_requests_and_report_names():
+    assert requests_for([{'from': 'f', 'to': 't', 'path': 'm'}], [], 1152, 307, mode='max') == [
+        Req('diff f→t /m dm=max', 'diff:d1', '/api/diff', {'cv': CV, 'from': 'f', 'to': 't', 'path': 'm', 'w': 1152, 'h': 307, 'dm': 'max', 'depth': 1}),
+        Req('diff f→t /m dm=max', 'diff:full', '/api/diff', {'cv': CV, 'from': 'f', 'to': 't', 'path': 'm', 'w': 1152, 'h': 307, 'dm': 'max'}),
+    ]
+
+
 def test_a_secondary_stores_requests_name_it():
     assert requests_for([{"from": "f", "to": "t", "path": "m"}], ["d:"], 640, 307, "meta") == [
         Req("diff f→t /m", "diff:d1", "/api/diff", {"cv": CV, "store": "meta", "from": "f", "to": "t", "path": "m", "w": 640, "h": 307, "dm": "delta", "depth": 1}),
@@ -174,6 +181,13 @@ def test_command_times_the_summary_with_s(monkeypatch):
     ]
 
 
+def test_command_selects_the_stable_reader(monkeypatch):
+    h = Hosts(100)
+    result = run(monkeypatch, h, '-m', 'max', '-w', '1152', CASES)
+    assert result.exit_code == 0, result.output
+    assert [call[4] for call in h.calls] == ['max'] * 16
+
+
 def test_command_slower_b_exits_2(monkeypatch):
     r = run(monkeypatch, Hosts(130), "-w", "1152,1280,1408", "-p", "0.2", "-s", CASES)
     assert r.exit_code == 2, r.output
@@ -201,3 +215,21 @@ def test_command_refuses_one_host(monkeypatch):
     monkeypatch.setenv("SITE_TOKEN", "t")
     r = CliRunner().invoke(diff_bench.diff_bench_cmd, ["-a", "x", "-b", "x", "[]"])
     assert (r.exit_code, r.output) == (1, "A and B share an edge cache: B's cold reads would be A's warm ones\n")
+
+
+def test_command_does_not_hide_first_request_failures_with_retries(monkeypatch, tmp_path):
+    import csv
+
+    attempts = []
+
+    def fetch(host, q, token, retries=6, route='/api/diff'):
+        attempts.append(retries)
+        return (503, 'not ready', 0.01, '', '-') if retries == 1 else (200, {}, 0.01, '', '-')
+
+    report = tmp_path / 'samples.tsv'
+    result = run(monkeypatch, fetch, '-w', '1152', '-v', 'd:', '-o', str(report))
+    assert result.exit_code == 1, result.output
+    assert attempts == [1] * 8
+    with report.open() as f:
+        assert [int(row['status']) for row in csv.DictReader(f, delimiter='\t')] == [503] * 8
+    assert result.stdout.splitlines()[-1] == '8 errors, 0 disagreeing answers, 4 cold samples the edge answered (dropped)'

@@ -493,7 +493,7 @@ export function ScansPage() {
             <thead><tr>
               {retentionOn && <><th className="sr-retention-cell">History</th><th className="sr-retention-loss"><Tooltip content="Maximum object-state changes in either neighboring interval: a heuristic for information loss. Read and owner metadata changes are excluded.">Change score</Tooltip></th></>}
               <th><Tooltip content="When the run started, in your time zone; hover for its id.">run</Tooltip></th><th>job type</th><th>status</th>
-              <th className="num">duration</th><th className="hide-md">phases</th>
+              <th className="num"><Tooltip content="Processing time after the queue, with total elapsed time below. Without queue timing, the total is shown.">duration</Tooltip></th><th className="hide-md">phases</th>
               <th className="num"><Tooltip content="Total recorded size of generated scan files: listings, indexes, snapshots, etc. Open the run for the breakdown. This is not the size of the storage being scanned, bytes transferred, or all retained indexes.">output files</Tooltip></th>
               <th className="num"><Tooltip content="Change in those generated files' recorded sizes, each compared with the newest earlier scan recording the same structure. This is not a change in the storage being scanned or additional storage retained.">output Δ</Tooltip></th>
               <th className="num"><Tooltip content="Compute estimate: the machine's list $/h × run hours × tasks, including the run's downstream jobs (listing fan-out).">cost</Tooltip></th>

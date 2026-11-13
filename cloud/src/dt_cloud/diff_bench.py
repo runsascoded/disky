@@ -25,7 +25,7 @@ from dataclasses import asdict, dataclass
 from math import comb
 from pathlib import Path
 
-from click import FloatRange, IntRange, argument, command, option
+from click import Choice, FloatRange, IntRange, argument, command, option
 
 from . import api_names
 from .diff_check import fetch
@@ -71,6 +71,7 @@ def requests_for(
     h: int,
     store: str | None = None,
     summary: bool = False,
+    mode: str = 'delta',
 ) -> list[Req]:
     """The browser's requests for each diff case (`{from, to, path[, q]}`) and map view (`DATE:PATH[:Q]`) at one canvas
     (`q`: a name filter, as `?f=` sends it); `store`:
@@ -82,9 +83,9 @@ def requests_for(
         p = c.get("path", "")
         q = {"q": c["q"]} if c.get("q") else {}
         base = {"cv": CV, **st, "from": c["from"], "to": c["to"], "path": p, **q, "w": w, "h": h}
-        name = f"diff {c['from']}→{c['to']} /{p}" + (f" q={c['q']}" if q else "")
-        out += [Req(name, "diff:d1", "/api/diff", {**base, "dm": "delta", "depth": 1}),
-                Req(name, "diff:full", "/api/diff", {**base, "dm": "delta"})]
+        name = f"diff {c['from']}→{c['to']} /{p}" + (f" q={c['q']}" if q else "") + (f' dm={mode}' if mode != 'delta' else '')
+        out += [Req(name, "diff:d1", "/api/diff", {**base, "dm": mode, "depth": 1}),
+                Req(name, "diff:full", "/api/diff", {**base, "dm": mode})]
         if summary:
             out.append(Req(name, "diff:summary", "/api/diff", {**base, "summary": 1}))
     for v in views:
@@ -186,6 +187,7 @@ def table(kinds: list[Kind]) -> list[str]:
 @option("-a", "--host-a", required=True, help="The before host (e.g. dev pinned to the current generation via `INTERVAL_STORE_GEN`)")
 @option("-b", "--host-b", required=True, help="The after host (e.g. dev pinned to the new generation); not A: one host shares one cache")
 @option("-H", "--height", type=IntRange(min=1), help="Canvas height with `-w` (default: each bucket's own, drawn with its width)")
+@option('-m', '--mode', type=Choice(['delta', 'max']), default='delta', help='Diff request mode: delta follows the configured descent pilot; max uses the stable as-of reader')
 @option("-n", "--buckets", default=2, type=IntRange(min=1), help="Cold canvas buckets: random w×h, w in [640, 2048], h in (w, 4096] (128 px apart)")
 @option("-o", "--out", type=Path, help="Every sample as TSV")
 @option("-p", "--alpha", default=0.05, type=FloatRange(0, 1), help="Sign-test level at which a kind slower on B fails (exit 2)")
@@ -194,7 +196,7 @@ def table(kinds: list[Kind]) -> list[str]:
 @option("-v", "--view", "views", multiple=True, help="A map view `DATE:PATH` (`2026-10-24T0801:` is the root), repeatable")
 @option("-w", "--widths", help="Comma-separated canvas widths instead of `-n` random buckets (at `-H`, default 307)")
 @argument("cases", required=False)
-def diff_bench_cmd(host_a, host_b, height, buckets, out, alpha, summary, store, views, widths, cases) -> None:
+def diff_bench_cmd(host_a, host_b, height, mode, buckets, out, alpha, summary, store, views, widths, cases) -> None:
     """Time CASES (diff-check's `{from, to, path}` list, inline or a file) and `-v` views on A and B, as a page asks
     them; `$SITE_TOKEN` authenticates."""
     if host_a == host_b:
@@ -205,12 +207,12 @@ def diff_bench_cmd(host_a, host_b, height, buckets, out, alpha, summary, store, 
     samples: list[Sample] = []
     i = 0
     for w, h in canvases:
-        for r in requests_for(cs, list(views), w, h, store, summary):
+        for r in requests_for(cs, list(views), w, h, store, summary, mode):
             hosts = (host_a, host_b) if i % 2 == 0 else (host_b, host_a)
             i += 1
             for phase in ("cold", "warm"):
                 for host in hosts:
-                    status, body, secs, st, cache = fetch(host, r.q, token, route=r.route)
+                    status, body, secs, st, cache = fetch(host, r.q, token, retries=1, route=r.route)
                     s = Sample(r.name, r.kind, w, h, host, phase, status, secs, st_total(st), cache,
                                answer_digest(r.route, body) if status == 200 and isinstance(body, dict) else str(body)[:80])
                     samples.append(s)
