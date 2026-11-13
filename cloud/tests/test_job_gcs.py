@@ -54,12 +54,18 @@ def test_job_start_derives_or_preserves_root_identity(context, expected):
 
 def test_recovery_controller_waits_for_success_and_pins_child_image():
     root = Path(__file__).resolve().parents[2]
-    result = run(["bash", "job/static-names.sh", "resume-after", "drill-job", "2026-10-12T1042"], cwd=root, env={
+    env = {
         "PATH": environ["PATH"], "DRY": "1", "IMAGE": "registry@sha256:test", "DISKY_LABELS": "app=disky,deployment=gcs",
-    }, capture_output=True, text=True)
+        "CLOUDFLARE_ACCOUNT_ID": "74981a43be0de7712369306c7b19133d",
+    }
+    result = run(["bash", "job/static-names.sh", "resume-after", "drill-job", "2026-10-12T1042"], cwd=root, env=env, capture_output=True, text=True)
     assert (result.returncode, result.stderr) == (0, "")
     spec = loads(result.stdout)
     task = spec["taskGroups"][0]["taskSpec"]
+    # The task reads the checkout's resolved profile (inline), not its image's copy
+    profile = run(["dt-cloud", "static-names", "profile"], cwd=root, env={**env, "STATIC_NAMES_PROFILE": "job/static-names.json"}, check=True, capture_output=True, text=True).stdout
+    variables = task["environment"]["variables"]
+    assert loads(variables.pop("STATIC_NAMES_PROFILE")) == loads(profile)
     assert task["environment"] == {"variables": {
         "DISKY_LABELS": "app=disky,deployment=gcs",
         "GCP_PROJECT": "oa-internal-450019",
@@ -67,7 +73,7 @@ def test_recovery_controller_waits_for_success_and_pins_child_image():
         "R2_ENDPOINT": "https://74981a43be0de7712369306c7b19133d.r2.cloudflarestorage.com",
         "SCAN_ID": "2026-10-12T1042",
     }}
-    assert task["runnables"][0]["container"]["commands"] == ["-c", "set -euo pipefail; BATCH_REGION=us-east1 dt-cloud job watch -L -i 30 drill-job && cd /app && STATIC_NAMES_PROFILE=job/static-names.json STATIC_NAMES_IMAGE=registry@sha256:test STATIC_NAMES_SPOT=0 dt-cloud static-names runs add -c -M 2026-10-12T1042"]
+    assert task["runnables"][0]["container"]["commands"] == ["-c", "set -euo pipefail; BATCH_REGION=us-east1 dt-cloud job watch -L -i 30 drill-job && cd /app && STATIC_NAMES_IMAGE=registry@sha256:test STATIC_NAMES_SPOT=0 dt-cloud static-names runs add -c -M 2026-10-12T1042"]
     assert (task["maxRetryCount"], spec["allocationPolicy"]["instances"][0]["policy"]["machineType"], spec["allocationPolicy"]["instances"][0]["policy"]["provisioningModel"]) == (0, "n2-highmem-4", "STANDARD")
     labels = {"app": "disky", "deployment": "gcs", "component": "static-names", "scan_id": "2026-10-12t1042"}
     assert (spec["labels"], spec["allocationPolicy"]["labels"]) == ({"purpose": "static-names", "stage": "resume", **labels}, labels)
