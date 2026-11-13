@@ -512,7 +512,7 @@ describe('D1', () => {
     })
     it('a light `q$` answers from the light index, exactly (no approximate note)', async () => {
       const j = await (await subtree({ request: new Request(`http://localhost/api/x?date=${A}&path=bk&${q('mato$')}`), env: envOf(false, anchorless()) })).json() as Record<string, unknown>
-      expect([j.approximate, j.approximateReason, (j.matchCount as { n: number }).n > 0]).toEqual([undefined, undefined, true])
+      expect([j.approximate, j.approximateReason, (j.matchCount as { count: number }).count > 0]).toEqual([undefined, undefined, true])
     })
     it('mutation: without the anchorless check, `^q` falls through to the path-store walk (the bug) and is answered', async () => {
       const spy = vi.spyOn(AnchoredSource.prototype as unknown as { anchorless(): Promise<boolean> }, 'anchorless').mockResolvedValue(false)
