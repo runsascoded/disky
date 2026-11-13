@@ -185,6 +185,11 @@ class _Printer:
         return []
 
 
+#: The task's CPU count, set by a job definition whose container can't read it (`Ctx.nproc`): Fargate's `cpu.max` reads
+#: `max` (the quota is the microVM's, not the cgroup's) while its affinity lists the host's CPUs.
+NPROC_ENV = "DT_NPROC"
+
+
 def cpu_quota(cgroup: Path) -> int | None:
     """The CPUs a cgroup's quota allows, rounded up (v2 `cpu.max`, else v1 `cpu.cfs_quota_us` / `cpu.cfs_period_us`);
     None without one. A container's affinity can list the host's CPUs (Fargate: 4 on a 1-vCPU task), and threads past
@@ -324,6 +329,12 @@ class Ctx:
 
     @property
     def nproc(self) -> int:
+        """The task's CPUs: `$DT_NPROC` when set (`NPROC_ENV`), else the CPUs it may run on, capped by its cgroup's quota
+        (`cpu_quota`). What `{nproc}` fills and the steps size their threads by."""
+        if v := (self.env.get(NPROC_ENV) or "").strip():
+            if not v.isdigit() or int(v) < 1:
+                raise StepFailed(2, f"${NPROC_ENV}={v!r}: not a positive integer")
+            return int(v)
         cpus = len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else os.cpu_count() or 1
         quota = cpu_quota(Path(self.env.get("DT_CGROUP") or "/sys/fs/cgroup"))
         return min(cpus, quota) if quota else cpus
@@ -1053,7 +1064,7 @@ def _static_check(p: ScanProfile) -> list[str]:
     o = p.opts("static-names")
     if o.get("gen"):
         return [f"options.static-names.{k}: not with gen (the one-machine path)" for k in ("profile", "merge", "compact_cmd") if k in o]
-    problems = [f"options.static-names.{k}: only with gen (the one-machine path)" for k in ("store", "mem", "build_args", "current_key") if k in o]
+    problems = [f"options.static-names.{k}: only with gen (the one-machine path)" for k in ("store", "mem", "threads", "build_args", "current_key") if k in o]
     if o.get("compact_cmd") and o.get("merge") is False:
         problems.append("options.static-names.compact_cmd: only with the merge stage on (`merge: false` defers the compaction to nothing)")
     if not o.get("profile") and not p.env.get("STATIC_NAMES_PROFILE"):
@@ -1062,8 +1073,8 @@ def _static_check(p: ScanProfile) -> list[str]:
     return problems
 
 
-@step("static-names", stage="serve", soft=True, options={"profile": str, "gen": str, "store": str, "mem": str, "build_args": list, "current_key": str,
-                                                          "merge": bool, "compact_cmd": list},
+@step("static-names", stage="serve", soft=True, options={"profile": str, "gen": str, "store": str, "mem": str, "threads": int, "build_args": list,
+                                                          "current_key": str, "merge": bool, "compact_cmd": list},
       requires=_static_check,
       converges=True, leaves="search doesn't cover this scan")
 def static_names(ctx: Ctx, arg: str | None) -> None:
@@ -1075,6 +1086,8 @@ def static_names(ctx: Ctx, arg: str | None) -> None:
     `options.static-names.gen`: the one-machine path instead, for a small deployment (`static-names add` in this task:
     every scan in the data store after the generation's newest, read at the layer-2 layout's `path` sorts, appended to
     the generation in `store`, default `$R2_ARCHIVE`); `build` (+ `build_args`) when the store has no such generation.
+    `mem` is its DuckDB memory limit (`-M`), `threads` its DuckDB threads (`-p`; default `Ctx.nproc`, which `$DT_NPROC`
+    sets where the cgroup can't say).
 
     `options.static-names.compact_cmd` (argv): a due compaction is deferred (`runs add -D`) to this command, run here only
     when one was (a coordinator job of its own: the fold takes hours); `merge: false` instead skips the merge stage."""
@@ -1090,7 +1103,8 @@ def static_names(ctx: Ctx, arg: str | None) -> None:
         layout = ctx.profile.layout.layer2.replace("{scan}", "{id}") + "index/{gen}/path-index.parquet"
         # a local data dir holds only this scan, so the store (where publish-r2 put it, before this step) is the source
         source = ctx.data_uri if urlparse(ctx.profile.data).scheme else store
-        args = ["-g", gen, "-L", layout, "-s", source, "-o", store, "-w", ctx.work / "static-names", "-p", ctx.nproc,
+        args = ["-g", gen, "-L", layout, "-s", source, "-o", store, "-w", ctx.work / "static-names",
+                "-p", ctx.opt("static-names", "threads") or ctx.nproc,
                 *(["-u", ctx.opt("static-names", "current_key")] if ctx.opt("static-names", "current_key") else []),
                 *(["-M", ctx.opt("static-names", "mem")] if ctx.opt("static-names", "mem") else [])]
         with ctx.phase("static-names", note="overlapped"):
