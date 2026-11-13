@@ -75,8 +75,9 @@ def cold(files):
 
 @cli.command()
 @click.option("-b", "--baseline", help="The first run's results (full index from the store), for its 16-thread column")
+@click.option("-q", "--queries", help="Instead of kinds, a row per query of these ids (comma-separated)")
 @click.argument("files", nargs=-1)
-def threads(baseline, files):
+def threads(baseline, queries, files):
     """Warm median latency by query kind and thread count; bytes each kind reads."""
     rs = [r for r in lines(*files) if r["kind"] == "query"]
     base = {}
@@ -90,6 +91,18 @@ def threads(baseline, files):
     for qid, d in by.items():
         kinds[kind(next(iter(d.values()))["tags"])].append(qid)
     cols = labels + (["first run, full, 16 threads"] if base else [])
+    if queries:
+        sl = next(l for l in labels if l.startswith("slim"))
+        print("Warm median, ms:")
+        print()
+        print("| Query | " + " | ".join(cols) + " | Slim reads GB |")
+        print("|---|" + "---:|" * (len(cols) + 1))
+        for i in queries.split(","):
+            cells = [ms(by[i][l]["warm_median_ms"]) if l in by[i] else "–" for l in labels]
+            if base:
+                cells.append(ms(base[i]["warm_median_ms"]) if i in base else "–")
+            print(f"| {i} | " + " | ".join(cells) + f" | {gb(by[i][sl]['bytes'])} |")
+        return
     print("Warm median per query, then the median (max) over a kind's queries, ms:")
     print()
     print("| Kind | Queries | " + " | ".join(cols) + " | Slim reads (GB / query, median) |")

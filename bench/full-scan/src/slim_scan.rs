@@ -61,6 +61,8 @@ pub struct SCompiled {
     pub search: Option<Search>,
     pub dec: Vec<u8>,
     pub owners: Option<Vec<bool>>,
+    /// `owners` as 0 / 1 bytes, for the branchless filtered sum.
+    pub own_u8: Option<Vec<u8>>,
     pub classes: Option<u8>,
     /// Merged `[a, b)` object-row spans of the staged prefixes.
     pub staged: Option<Vec<(u32, u32)>>,
@@ -136,6 +138,7 @@ pub fn compile(ix: &SlimIndex, q: &Query, parts: usize) -> Result<SCompiled> {
         search,
         dec,
         owners: q.owners.as_ref().map(|sel| compile_owners(&ix.owners, sel)),
+        own_u8: q.owners.as_ref().map(|sel| compile_owners(&ix.owners, sel).iter().map(|&b| b as u8).collect()),
         classes: q.classes.as_ref().map(|v| compile_classes(v)).transpose()?,
         staged,
     })
@@ -164,9 +167,9 @@ struct NodeOut {
 /// What a pass read.
 #[derive(Clone, Copy, Default, Debug, Serialize)]
 pub struct Touched {
-    /// Object rows summed (each reads `vf`, `vt`, `size`).
+    /// Object rows whose `vf`, `vt`, `size` were read (under a search, only rows of matching paths).
     pub rows: u64,
-    /// Of those, rows that also read `name` (a search below the window, or object nodes under a search).
+    /// Rows whose `name` a search read (every row it walked).
     pub named: u64,
     /// Rows that also read the filter columns (`owner` + `cls` for an owner scope, `cls` for a class scope).
     pub filtered: u64,
@@ -286,6 +289,32 @@ fn sum_live(vf: &[u16], vt: &[u16], size: &[u64], s: u16) -> Acc {
     Acc { bytes: b, files: n }
 }
 
+/// `sum_live`(`2`) under an owner and / or class scope, for rows whose slices are whole (no complex row in the range):
+/// a row counts when live and its owner's byte in `own` (when given) and its class's bit in `cm` (when given) are set.
+#[inline(never)]
+fn sum_filt<const DIFF: bool, const OWN: bool, const CLS: bool>(k: &Cols, a: usize, b: usize, own: &[u8], cm: u8, s: u16, s2: u16) -> (Acc, Acc) {
+    let (mut x, mut y) = (Acc::default(), Acc::default());
+    for r in a..b {
+        let (f, t, z) = (k.vf[r], k.vt[r], k.size[r]);
+        let mut ok = 1u64;
+        if OWN {
+            ok &= own[k.owner[r] as usize] as u64;
+        }
+        if CLS {
+            ok &= ((cm >> ((k.cls[r] >> CLS_SHIFT) & 3)) & 1) as u64;
+        }
+        let l = ((f <= s) & (s < t)) as u64 & ok;
+        x.bytes += z & l.wrapping_neg();
+        x.files += l;
+        if DIFF {
+            let l2 = ((f <= s2) & (s2 < t)) as u64 & ok;
+            y.bytes += z & l2.wrapping_neg();
+            y.files += l2;
+        }
+    }
+    (x, y)
+}
+
 #[inline(never)]
 fn sum_live2(vf: &[u16], vt: &[u16], size: &[u64], s: u16, s2: u16) -> (Acc, Acc) {
     let (mut b, mut n, mut b2, mut n2) = (0u64, 0u64, 0u64, 0u64);
@@ -402,7 +431,9 @@ impl<'a, const SEARCH: bool, const DIFF: bool, const FILT: bool> Chunk<'a, SEARC
         let c = self.ctx.c;
         let (sa, sb) = (c.sa, c.sb.unwrap_or(0));
         let n = (b - a) as u64;
-        self.out.t.rows += n;
+        if !row_search {
+            self.out.t.rows += n;
+        }
         if !FILT && !row_search {
             let (x, y) = if DIFF {
                 sum_live2(&k.vf[a..b], &k.vt[a..b], &k.size[a..b], sa, sb)
@@ -418,8 +449,54 @@ impl<'a, const SEARCH: bool, const DIFF: bool, const FILT: bool> Chunk<'a, SEARC
             self.publish((b - a) as u64);
             return;
         }
-        if FILT {
+        if FILT && !row_search {
             self.out.t.filtered += n;
+        }
+        let ix = self.ctx.ix;
+        let cx = ix.complex_rows.partition_point(|&r| (r as usize) < a);
+        if FILT && !row_search && !(cx < ix.complex_rows.len() && (ix.complex_rows[cx] as usize) < b) {
+            // Every row a whole slice: branchless, a staged scope as the row spans it keeps.
+            let own: &[u8] = c.own_u8.as_deref().unwrap_or(&[]);
+            let cm = c.classes.unwrap_or(0);
+            let sum = |lo: usize, hi: usize| -> (Acc, Acc) {
+                match (c.owners.is_some(), c.classes.is_some()) {
+                    (true, true) => sum_filt::<DIFF, true, true>(&k, lo, hi, own, cm, sa, sb),
+                    (true, false) => sum_filt::<DIFF, true, false>(&k, lo, hi, own, cm, sa, sb),
+                    (false, true) => sum_filt::<DIFF, false, true>(&k, lo, hi, own, cm, sa, sb),
+                    (false, false) => sum_filt::<DIFF, false, false>(&k, lo, hi, own, cm, sa, sb),
+                }
+            };
+            let (mut x, mut y) = (Acc::default(), Acc::default());
+            match &c.staged {
+                None => {
+                    let (p, q) = sum(a, b);
+                    x.add(p);
+                    y.add(q);
+                }
+                Some(st) => {
+                    // Only the spans' rows are read.
+                    self.out.t.rows -= n;
+                    self.out.t.filtered -= n;
+                    let mut i = st.partition_point(|s| (s.1 as usize) <= a);
+                    while i < st.len() && (st[i].0 as usize) < b {
+                        let (lo, hi) = ((st[i].0 as usize).max(a), (st[i].1 as usize).min(b));
+                        self.out.t.rows += (hi - lo) as u64;
+                        self.out.t.filtered += (hi - lo) as u64;
+                        let (p, q) = sum(lo, hi);
+                        x.add(p);
+                        y.add(q);
+                        i += 1;
+                    }
+                }
+            }
+            self.st[t].a.add(x);
+            self.run_a += x.bytes;
+            if DIFF {
+                self.st[t].b.add(y);
+                self.run_b += y.bytes;
+            }
+            self.publish(n);
+            return;
         }
         if row_search {
             self.out.t.named += n;
@@ -434,6 +511,12 @@ impl<'a, const SEARCH: bool, const DIFF: bool, const FILT: bool> Chunk<'a, SEARC
             }
             if row_search && !pass {
                 continue;
+            }
+            if row_search {
+                self.out.t.rows += 1;
+                if FILT {
+                    self.out.t.filtered += 1;
+                }
             }
             let (f0, t0) = (k.vf[r], k.vt[r]);
             let la = f0 <= sa && sa < t0;
@@ -484,7 +567,7 @@ impl<'a, const SEARCH: bool, const DIFF: bool, const FILT: bool> Chunk<'a, SEARC
         let mut hi_at = [0usize; 257];
         let mut cur = d0;
         let (mut x, mut y) = (Acc::default(), Acc::default());
-        let (mut rows, mut dirs) = (0u64, 0u64);
+        let (mut rows, mut dirs, mut passed) = (0u64, 0u64, 0u64);
         loop {
             while cur > d0 && hi_at[cur] <= o {
                 cur -= 1;
@@ -502,6 +585,7 @@ impl<'a, const SEARCH: bool, const DIFF: bool, const FILT: bool> Chunk<'a, SEARC
                 if !pass {
                     continue;
                 }
+                passed += 1;
                 let (f0, t0) = (k.vf[r], k.vt[r]);
                 let la = f0 <= sa && sa < t0;
                 let lbv = DIFF && f0 <= sb && sb < t0;
@@ -569,10 +653,10 @@ impl<'a, const SEARCH: bool, const DIFF: bool, const FILT: bool> Chunk<'a, SEARC
                 }
             }
         }
-        self.out.t.rows += rows;
+        self.out.t.rows += passed;
         self.out.t.named += rows;
         if FILT {
-            self.out.t.filtered += rows;
+            self.out.t.filtered += passed;
         }
         self.out.t.dirs += dirs;
         self.st[t].a.add(x);
