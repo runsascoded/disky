@@ -14,7 +14,9 @@ arrow-array = "60"
 arrow-schema = "60"
 parquet = { version = "60", default-features = false, features = ["arrow", "zstd", "lz4", "snap"] }
 rayon = "1.10"
+libc = "0.2"
 memchr = "2.7"
+memmap2 = "0.9"
 regex = "1.11"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

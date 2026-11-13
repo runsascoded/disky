@@ -375,7 +375,7 @@ fn walk(recs: &mut [Rec], n_scans: u16) -> Result<Walk> {
     Ok(w)
 }
 
-fn rss_peak_gb() -> f64 {
+pub fn rss_peak_gb() -> f64 {
     std::fs::read_to_string("/proc/self/status")
         .ok()
         .and_then(|s| s.lines().find(|l| l.starts_with("VmHWM:")).and_then(|l| l.split_whitespace().nth(1)?.parse::<f64>().ok()))
@@ -717,25 +717,26 @@ pub fn load(gen: &Generation) -> Result<Index> {
     dir_size.shrink_to_fit();
     dir_files.shrink_to_fit();
     Ok(Index {
-        dir_vf,
-        dir_vt,
-        dir_size,
-        dir_files,
+        dir_vf: dir_vf.into(),
+        dir_vt: dir_vt.into(),
+        dir_size: dir_size.into(),
+        dir_files: dir_files.into(),
         scans: gen.scans.clone(),
-        name: c_name,
-        depth: c_depth,
-        end: c_end,
-        flags: c_flags,
-        size: c_size,
-        vf: c_vf,
-        vt: c_vt,
-        owner: c_owner,
-        complex_rows,
+        name: c_name.into(),
+        depth: c_depth.into(),
+        end: c_end.into(),
+        flags: c_flags.into(),
+        size: c_size.into(),
+        vf: c_vf.into(),
+        vt: c_vt.into(),
+        owner: c_owner.into(),
+        complex_rows: complex_rows.into(),
         complex,
         owners: owner_names,
         dict,
-        ck_off,
-        ck_rows,
+        ck_off: ck_off.into(),
+        ck_rows: ck_rows.into(),
         stats,
+        map: None,
     })
 }

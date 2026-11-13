@@ -11,7 +11,7 @@ use crate::util::{err, Result};
 /// A version's `vt` while it is open (2106-01-01 UTC), as `static_names.OPEN`.
 pub const OPEN: i64 = 4_291_747_200;
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, serde::Deserialize)]
 pub struct ScanInfo {
     pub id: String,
     pub ts: i64,

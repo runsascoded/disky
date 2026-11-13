@@ -7,6 +7,8 @@ use std::cmp::Ordering;
 
 use rayon::prelude::*;
 
+use crate::col::Col;
+
 /// A predicate on one (lowercase) name.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Pat {
@@ -17,12 +19,12 @@ pub enum Pat {
 }
 
 pub struct Dict {
-    pub lower: Vec<u8>,
+    pub lower: Col<u8>,
     /// `n + 1` offsets: entry `i` is `lower[offs[i] .. offs[i + 1] - 1]`.
-    pub offs: Vec<u64>,
-    pub patch_ids: Vec<u32>,
-    pub patch_offs: Vec<u64>,
-    pub patch_buf: Vec<u8>,
+    pub offs: Col<u64>,
+    pub patch_ids: Col<u32>,
+    pub patch_offs: Col<u64>,
+    pub patch_buf: Col<u8>,
 }
 
 #[derive(Clone)]
@@ -95,7 +97,7 @@ impl Dict {
             }
         }
         offs.push(lower.len() as u64);
-        Dict { lower, offs, patch_ids, patch_offs, patch_buf }
+        Dict { lower: lower.into(), offs: offs.into(), patch_ids: patch_ids.into(), patch_offs: patch_offs.into(), patch_buf: patch_buf.into() }
     }
 
     pub fn len(&self) -> usize {

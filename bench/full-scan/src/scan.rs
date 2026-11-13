@@ -60,7 +60,7 @@ struct ChunkOut {
 }
 
 /// The answer: paths with `[bytes, files]` at `a` (the scan, or a diff's `from`) and `b` (a diff's `to`; 0 for a view).
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct Answer {
     pub id: String,
     pub total: [u64; 4],

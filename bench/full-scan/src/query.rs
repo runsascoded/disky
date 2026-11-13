@@ -20,7 +20,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::dict::{lower_of, Bitset, Pat};
+use crate::dict::{lower_of, Bitset, Dict, Pat};
 use crate::index::Index;
 use crate::util::{err, Result};
 
@@ -153,6 +153,97 @@ pub fn name_pat(t: &str) -> Pat {
     }
 }
 
+/// A search expression's atoms matched against the dictionary (`parts` parallel pieces) and its truth table.
+pub fn compile_search(dict: &Dict, e: &Expr, parts: usize) -> Result<Search> {
+    let mut ls = Vec::new();
+    leaves(e, &mut ls);
+    if ls.len() > 16 {
+        return err("more than 16 search atoms");
+    }
+    let mut name_atoms = Vec::new();
+    let mut path_atoms = Vec::new();
+    let mut dict_bytes = 0u64;
+    for (bit, leaf) in ls.iter().enumerate() {
+        let bit = bit as u32;
+        match leaf {
+            Expr::T(t) => {
+                name_atoms.push((bit, dict.bitset(&name_pat(t), parts)));
+                dict_bytes += dict.lower.len() as u64;
+            }
+            Expr::Re(r) => {
+                let re = regex::bytes::Regex::new(r)?;
+                name_atoms.push((bit, dict.regex_bitset(&re, parts)));
+                dict_bytes += dict.lower.len() as u64;
+            }
+            Expr::P(p) => {
+                let l = lower_of(p);
+                let (s, a) = match l.strip_prefix('^') {
+                    Some(r) => (r, true),
+                    None => (l.as_str(), false),
+                };
+                let (s, z) = match s.strip_suffix('$') {
+                    Some(r) => (r, true),
+                    None => (s, false),
+                };
+                let segs: Vec<&str> = s.split('/').collect();
+                if segs.len() < 2 {
+                    // No `/`: a name term.
+                    name_atoms.push((bit, dict.bitset(&name_pat(p), parts)));
+                    dict_bytes += dict.lower.len() as u64;
+                    continue;
+                }
+                let k = segs.len();
+                let pats: Vec<Pat> = segs
+                    .iter()
+                    .enumerate()
+                    .map(|(j, s)| {
+                        let s = s.to_string();
+                        if j == 0 && j == k - 1 {
+                            unreachable!()
+                        } else if j == 0 {
+                            if a { Pat::Equals(s) } else { Pat::Ends(s) }
+                        } else if j == k - 1 {
+                            if z { Pat::Equals(s) } else { Pat::Starts(s) }
+                        } else {
+                            Pat::Equals(s)
+                        }
+                    })
+                    .collect();
+                let parts_bs = pats.iter().map(|p| dict.bitset(p, parts)).collect();
+                dict_bytes += dict.lower.len() as u64 * k as u64;
+                path_atoms.push(PathAtom { bit, parts: parts_bs });
+            }
+            _ => unreachable!(),
+        }
+    }
+    if path_atoms.iter().any(|a| a.parts.len() > 32) {
+        return err("a path term of more than 32 segments");
+    }
+    let lut = (0..1u32 << ls.len()).map(|m| eval(e, m, &mut 0)).collect();
+    Ok(Search { name_atoms, path_atoms, lut, dict_bytes })
+}
+
+/// Per owner id, whether the selection keeps it.
+pub fn compile_owners(owners: &[String], sel: &OwnerSel) -> Vec<bool> {
+    let (names, keep) = match sel {
+        OwnerSel::In(v) => (v, true),
+        OwnerSel::NotIn(v) => (v, false),
+    };
+    owners.iter().map(|o| names.contains(o) == keep).collect()
+}
+
+/// Bit k−1 for class k.
+pub fn compile_classes(v: &[u8]) -> Result<u8> {
+    let mut m = 0u8;
+    for &k in v {
+        if !(1..=4).contains(&k) {
+            return err(format!("class {k}: classes are 1..4"));
+        }
+        m |= 1 << (k - 1);
+    }
+    Ok(m)
+}
+
 pub fn compile(idx: &Index, q: &Query, parts: usize) -> Result<Compiled> {
     let scan = |id: &str| idx.scan(id).ok_or_else(|| format!("no scan {id}"));
     let (sa, sb) = match (&q.scan, &q.from, &q.to) {
@@ -169,97 +260,9 @@ pub fn compile(idx: &Index, q: &Query, parts: usize) -> Result<Compiled> {
         let g = idx.find(&q.path).ok_or_else(|| format!("{}: no path {}", q.id, q.path))?;
         (idx.depth[g], idx.group_end(g), idx.end[g] as usize + 1)
     };
-    let search = match &q.q {
-        None => None,
-        Some(e) => {
-            let mut ls = Vec::new();
-            leaves(e, &mut ls);
-            if ls.len() > 16 {
-                return err("more than 16 search atoms");
-            }
-            let mut name_atoms = Vec::new();
-            let mut path_atoms = Vec::new();
-            let mut dict_bytes = 0u64;
-            for (bit, leaf) in ls.iter().enumerate() {
-                let bit = bit as u32;
-                match leaf {
-                    Expr::T(t) => {
-                        name_atoms.push((bit, idx.dict.bitset(&name_pat(t), parts)));
-                        dict_bytes += idx.dict.lower.len() as u64;
-                    }
-                    Expr::Re(r) => {
-                        let re = regex::bytes::Regex::new(r)?;
-                        name_atoms.push((bit, idx.dict.regex_bitset(&re, parts)));
-                        dict_bytes += idx.dict.lower.len() as u64;
-                    }
-                    Expr::P(p) => {
-                        let l = lower_of(p);
-                        let (s, a) = match l.strip_prefix('^') {
-                            Some(r) => (r, true),
-                            None => (l.as_str(), false),
-                        };
-                        let (s, z) = match s.strip_suffix('$') {
-                            Some(r) => (r, true),
-                            None => (s, false),
-                        };
-                        let segs: Vec<&str> = s.split('/').collect();
-                        if segs.len() < 2 {
-                            // No `/`: a name term.
-                            name_atoms.push((bit, idx.dict.bitset(&name_pat(p), parts)));
-                            dict_bytes += idx.dict.lower.len() as u64;
-                            continue;
-                        }
-                        let k = segs.len();
-                        let pats: Vec<Pat> = segs
-                            .iter()
-                            .enumerate()
-                            .map(|(j, s)| {
-                                let s = s.to_string();
-                                if j == 0 && j == k - 1 {
-                                    unreachable!()
-                                } else if j == 0 {
-                                    if a { Pat::Equals(s) } else { Pat::Ends(s) }
-                                } else if j == k - 1 {
-                                    if z { Pat::Equals(s) } else { Pat::Starts(s) }
-                                } else {
-                                    Pat::Equals(s)
-                                }
-                            })
-                            .collect();
-                        let parts_bs = pats.iter().map(|p| idx.dict.bitset(p, parts)).collect();
-                        dict_bytes += idx.dict.lower.len() as u64 * k as u64;
-                        path_atoms.push(PathAtom { bit, parts: parts_bs });
-                    }
-                    _ => unreachable!(),
-                }
-            }
-            if path_atoms.iter().any(|a| a.parts.len() > 32) {
-                return err("a path term of more than 32 segments");
-            }
-            let lut = (0..1u32 << ls.len()).map(|m| eval(e, m, &mut 0)).collect();
-            Some(Search { name_atoms, path_atoms, lut, dict_bytes })
-        }
-    };
-    let owners = q.owners.as_ref().map(|sel| {
-        let (names, keep) = match sel {
-            OwnerSel::In(v) => (v, true),
-            OwnerSel::NotIn(v) => (v, false),
-        };
-        idx.owners.iter().map(|o| names.contains(o) == keep).collect()
-    });
-    let classes = match &q.classes {
-        None => None,
-        Some(v) => {
-            let mut m = 0u8;
-            for &k in v {
-                if !(1..=4).contains(&k) {
-                    return err(format!("class {k}: classes are 1..4"));
-                }
-                m |= 1 << (k - 1);
-            }
-            Some(m)
-        }
-    };
+    let search = q.q.as_ref().map(|e| compile_search(&idx.dict, e, parts)).transpose()?;
+    let owners = q.owners.as_ref().map(|sel| compile_owners(&idx.owners, sel));
+    let classes = q.classes.as_ref().map(|v| compile_classes(v)).transpose()?;
     let staged = q.staged.as_ref().map(|ps| {
         let mut iv: Vec<(u32, u32)> = ps.iter().filter_map(|p| idx.find(p)).map(|g| (g as u32, idx.end[g])).collect();
         iv.sort_unstable();

@@ -1,8 +1,9 @@
 //! The packed index: one row per object version and one structural row per directory, in depth-first path order
 //! (each path directly before its subtree; a path's versions together, by `vf`), as columns.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
+use crate::col::Col;
 use crate::dict::Dict;
 use crate::store::ScanInfo;
 
@@ -28,7 +29,8 @@ pub struct Complex {
     pub cls: [u64; 4],
 }
 
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct LoadStats {
     pub files: usize,
     pub versions_read: u64,
@@ -52,31 +54,33 @@ pub struct LoadStats {
 
 pub struct Index {
     pub scans: Vec<ScanInfo>,
-    pub name: Vec<u32>,
-    pub depth: Vec<u8>,
+    pub name: Col<u32>,
+    pub depth: Col<u8>,
     /// The last row of the path's subtree (inclusive), on every row of the path.
-    pub end: Vec<u32>,
-    pub flags: Vec<u8>,
+    pub end: Col<u32>,
+    pub flags: Col<u8>,
     /// An object version's bytes. On a directory's row: its first version's index in `dir_*` (`owner`: their count).
-    pub size: Vec<u64>,
+    pub size: Col<u64>,
     /// Scan ordinals: live at scan `s` iff `vf ≤ s < vt`; `vt` = `scans.len()` while open.
-    pub vf: Vec<u16>,
-    pub vt: Vec<u16>,
-    pub owner: Vec<u16>,
+    pub vf: Col<u16>,
+    pub vt: Col<u16>,
+    pub owner: Col<u16>,
     /// Directory versions (rolled-up totals), each directory's together by `vf`: what the directory-total view reads.
-    pub dir_vf: Vec<u16>,
-    pub dir_vt: Vec<u16>,
-    pub dir_size: Vec<u64>,
-    pub dir_files: Vec<u64>,
-    pub complex_rows: Vec<u32>,
+    pub dir_vf: Col<u16>,
+    pub dir_vt: Col<u16>,
+    pub dir_size: Col<u64>,
+    pub dir_files: Col<u64>,
+    pub complex_rows: Col<u32>,
     pub complex: Vec<Complex>,
     /// Owner names by id; id 0 is `""`, no owner named.
     pub owners: Vec<String>,
     pub dict: Dict,
     /// Checkpoint `c / CK`'s ancestor chain (group starts before row `c` whose subtree holds it), by depth.
-    pub ck_off: Vec<u64>,
-    pub ck_rows: Vec<u32>,
+    pub ck_off: Col<u64>,
+    pub ck_rows: Col<u32>,
     pub stats: LoadStats,
+    /// The pack file the columns map, when opened from one (`pack.rs`).
+    pub map: Option<std::sync::Arc<memmap2::Mmap>>,
 }
 
 #[derive(Serialize)]
