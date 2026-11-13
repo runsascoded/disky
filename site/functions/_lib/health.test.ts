@@ -144,7 +144,7 @@ INSERT INTO scan_runs (run_id, scan, kind, parent, status, started_ts, finished_
       try {
         const { doc } = await get({ FILTER_STATIC: '1', INDEX_R2: r2({ ...OBJECTS, 'static-names/CURRENT.json': { gen: 'sn1' } }) })
         expect([doc.stores.map(s => [s.kind, s.gen, s.base]), [...held.keys()].filter(k => k.startsWith('https://health.cache/'))])
-          .toEqual([[['static', 'sn1', ['01', '02'].map(D)]], ['https://health.cache/primary/-/sn1']])
+          .toEqual([[['static', 'sn1', ['01', '02'].map(D)]], ['https://health.cache/~localhost/primary/-/sn1']])
         // no pointer: no static store, as unpinned before (the colo's copy of the old pointer expired with the isolate's)
         held.clear()
         spy.mockImplementation(() => Date.UTC(2030, 0, 1) + IV_STATE_TTL)

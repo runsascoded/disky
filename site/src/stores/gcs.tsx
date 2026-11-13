@@ -1,6 +1,5 @@
 // gcs.oa.dev's store (oa-decoupling step 6): its registry entry, contact and About text.
 import type { ExternalLink, Store } from '../stores'
-import { OA_PEERS } from '../oaPeers'
 
 const CONSOLE = 'https://console.cloud.google.com/storage/browser'
 const enc = (segs: string[]) => segs.map(encodeURIComponent).join('/')
@@ -32,7 +31,6 @@ const store: Store = {
   executor: 'sweep',
   lifecycle: { tracked: 'job/lifecycle/', rules: 'gcs', grouped: true, recordedFrom: '2026-09-16' },
   buckets: ['marin-us-central2', 'marin-us-central1', 'marin-us-east1', 'marin-us-east5', 'marin-us-west4', 'marin-eu-west4'],
-  peers: OA_PEERS,
   externalLink: consoleLink,
   rootLabel: 'all buckets',
   objectsNote: 'GCS objects are written by the training jobs and rarely rewritten in place, so created is the object’s upload time; the read axis adds when it was last read.',

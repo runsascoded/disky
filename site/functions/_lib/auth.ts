@@ -26,9 +26,10 @@
  */
 import { type Auth, createGate, DEFAULT_COOKIE_NAME, type Gate, type Grant, type GrantPatch, type GrantStore, hasScope, isSecureRequest, parseScopes, readCookie, type Subject, verifySessionClaims } from '@open-athena/auth'
 import { DEFAULT_ACCOUNT_HINT_COOKIE } from '@open-athena/auth/oidc'
-import { OA_NONCE_COOKIE } from '@disk-tree/pages-kit/oa'
+import { OA_HINT_COOKIE, OA_NONCE_COOKIE, OA_WHO_COOKIE } from '@disk-tree/pages-kit/oa'
 import { d1AuditSink, d1GrantStore, d1ProfileStore, d1RequestStore } from '@open-athena/auth/d1'
 import type { AnalyticsEngineDataset, D1Database, KVNamespace, R2Bucket } from '@cloudflare/workers-types'
+import { isPreviewHost } from './previewHost.js'
 import { grantCaller, meterOf } from './usage.js'
 
 export interface Env {
@@ -473,16 +474,7 @@ function grantStore(env: Env): GrantStore {
   }
 }
 
-/** Whether `request` came to a preview host: one DNS label under the project's `pages.dev` subdomain (`PAGES_SUBDOMAIN`,
- *  from config, never the request), as a PR's `pr-N` branch, the `dev` alias or a deployment hash. A custom domain
- *  (prod, `dev.<host>`) never is, nor the subdomain itself, nor anything deeper or longer. Such a host serves code no
- *  one reviewed for production: it signs in only through the broker's preview client, never silently. */
-export function isPreviewHost(env: Env, request: Request): boolean {
-  const sub = env.PAGES_SUBDOMAIN?.toLowerCase()
-  if (!sub || !/^[a-z0-9-]+\.pages\.dev$/.test(sub)) return false
-  const host = new URL(request.url).hostname
-  return host.endsWith(`.${sub}`) && /^[a-z0-9-]+$/.test(host.slice(0, -sub.length - 1))
-}
+export { isPreviewHost }
 
 /** The auth cookies' names on this request. */
 export interface CookieNames {
@@ -494,6 +486,10 @@ export interface CookieNames {
   oaNonce: string
   /** Google's remembered accounts (`<name>` + `<name>_accounts`); `false` on a preview host, which keeps none. */
   accountHint: string | false
+  /** The broker's remembered account (the adapter's hint pair) and its signed copy (`rememberAccount`), which the wall
+   *  trusts to show a name and face; `false` on a preview host, as Google's. */
+  oaHint: string | false
+  oaWho: string | false
 }
 
 const HOST_PREFIX = '__Host-'
@@ -509,6 +505,8 @@ export function cookieNames(env: Env, request: Request): CookieNames {
     googleNonce: prefix + GOOGLE_NONCE_COOKIE,
     oaNonce: prefix + OA_NONCE_COOKIE,
     accountHint: isPreviewHost(env, request) ? false : prefix + DEFAULT_ACCOUNT_HINT_COOKIE,
+    oaHint: isPreviewHost(env, request) ? false : prefix + OA_HINT_COOKIE,
+    oaWho: isPreviewHost(env, request) ? false : prefix + OA_WHO_COOKIE,
   }
 }
 

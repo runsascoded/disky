@@ -1,10 +1,10 @@
 import { test } from 'node:test'
 import { deepStrictEqual as equal, rejects, throws } from 'node:assert'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { apiClient, eventRequest, revisionProbe, verifyRevision } from './run.mjs'
 import {
-  authorize, cfList, fullCwdCheck, modePlan, ownedPagesDeployments, previewPlan, publishFull, publishWorker, requireImplemented,
+  accountFor, authorize, cfList, HELD_FUNCTIONS, withoutFunctions, fullCwdCheck, modePlan, ownedPagesDeployments, previewPlan, publishFull, publishWorker, requireImplemented,
   retireFull, retireWorker, selectMode, validateArtifact, workerConfig, wranglerUpload,
 } from './preview.mjs'
 
@@ -49,6 +49,22 @@ test('a full plan is the pr-N branch of the deployment’s own Pages project, at
   throws(() => previewPlan(config, 'prod', 12, sha), { message: 'Unknown preview target/provider' })
   throws(() => previewPlan({ ...config, targets: { main: { ...pagesTarget, subdomain: 'site.example.org' } } }, 'main', 12, sha), { message: 'Invalid Pages subdomain' })
   throws(() => previewPlan({ ...config, targets: { main: { ...pagesTarget, protected_branches: ['pr-12'] } } }, 'main', 12, sha), { message: 'Preview branch pr-12 is protected' })
+})
+
+test('the account comes from exactly one of the target config and the account-id input; gate may have neither', () => {
+  const bare = { provider: 'pages', project: 'site', verification }
+  const inputOnly = { repository: 'org/repo', targets: { main: bare } }
+  equal(modePlan(inputOnly, 'main', 12, sha, 'full', { account }), plan)
+  equal(modePlan(inputOnly, 'main', 12, sha, 'full', { account: '', requireAccount: false }), { ...plan, account: null })
+  equal(accountFor(pagesTarget, ''), account)
+  equal(accountFor(bare, account), account)
+  equal(accountFor(bare, '', false), null)
+  const both = 'Account ID must come from exactly one of the target config and the account-id input'
+  throws(() => modePlan(inputOnly, 'main', 12, sha, 'full'), { message: both })
+  throws(() => modePlan(config, 'main', 12, sha, 'full', { account }), { message: both })
+  throws(() => accountFor(pagesTarget, account, false), { message: both })
+  throws(() => accountFor(bare, 'A'.repeat(32)), { message: 'Invalid account ID' })
+  throws(() => accountFor({ ...bare, account_id: '1'.repeat(31) }, ''), { message: 'Invalid account ID' })
 })
 
 test('mode selection: an explicit /preview <mode> wins, else one preview:<mode> label, else full; only full is built, on Pages, with a probe', () => {
@@ -167,6 +183,30 @@ test('the base branch’s Functions can never be deployed under the PR’s front
   rmSync(resolve(artifact, '_worker.js'))
   await rejects(publishFull({ cf: api.cf, plan, artifact, cwd, upload: api.upload }), { message: /^The deploy directory holds functions\// })
   equal(api.uploads, [])
+})
+
+test('Wrangler uploads with no functions/ in the deploy directory; it is restored after, success or failure', async t => {
+  const root = scratch(t, 'cf-preview-held')
+  const artifact = resolve(root, 'dist'), cwd = resolve(root, 'site')
+  for (const dir of [resolve(artifact, '_worker.js'), resolve(cwd, 'functions')]) mkdirSync(dir, { recursive: true })
+  writeFileSync(resolve(artifact, 'index.html'), '<html></html>')
+  writeFileSync(resolve(artifact, '_worker.js', 'index.js'), 'export default {}')
+  writeFileSync(resolve(cwd, 'functions', 'route.ts'), 'export const onRequest = () => null')
+  const seen = []
+  const api = pagesApi()
+  const upload = async argv => { seen.push(readdirSync(cwd).sort()); return api.upload(argv) }
+  equal((await publishFull({ cf: api.cf, plan, artifact, cwd, upload })).deployment_id, 'dep1')
+  equal([seen, readdirSync(cwd).sort(), readFileSync(resolve(cwd, 'functions', 'route.ts'), 'utf8')],
+    [[[HELD_FUNCTIONS]], ['functions'], 'export const onRequest = () => null'])
+
+  await rejects(withoutFunctions(cwd, async () => { throw new Error('upload failed') }), { message: 'upload failed' })
+  equal(readdirSync(cwd).sort(), ['functions'])
+  mkdirSync(resolve(cwd, HELD_FUNCTIONS))
+  await rejects(withoutFunctions(cwd, async () => 'ran'), { message: `${HELD_FUNCTIONS} already exists in the deploy directory; restore it to functions/ first` })
+  equal(readdirSync(cwd).sort(), [HELD_FUNCTIONS, 'functions'])
+  rmSync(resolve(cwd, HELD_FUNCTIONS), { recursive: true })
+  rmSync(resolve(cwd, 'functions'), { recursive: true })
+  equal([await withoutFunctions(cwd, async () => 'ran'), existsSync(resolve(cwd, 'functions'))], ['ran', false])
 })
 
 test('the trusted Wrangler runs as argv in the trusted directory, with the artifact after `pages deploy`', async t => {

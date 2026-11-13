@@ -48,6 +48,7 @@ SERVED_R2 = "1"   # snapshot JSONs (meta/age/lifecycle/rules) + extras read from
 STORE = "gcs"                   # the store this build serves (`src/stores.ts` registry key; vite.config.ts)
 PROD_HOST = "gcs.oa.dev"        # `g d` toggles with DEV_HOST (src/hosts.ts)
 DEV_HOST = "dev.gcs.oa.dev"
+PEERS = '[{"label": "GCS usage", "prod": "gcs.oa.dev", "dev": "dev.gcs.oa.dev", "owners": true, "staging": true, "meta": true}, {"label": "CoreWeave usage", "prod": "cw.oa.dev", "dev": "dev.cw.oa.dev", "staging": true, "meta": true}, {"label": "Hugging Face usage", "prod": "hf.oa.dev", "dev": "dev.hf.oa.dev", "meta": true}, {"label": "R2 usage", "prod": "r2.oa.dev", "dev": "dev.r2.oa.dev", "meta": true}]'   # the OA sibling deployments the omnibar + site menu link (src/peers.ts); this host is skipped
 AUTH_MODE = "app"               # the client's whoami source: the app session, no edge gate (vite.config.ts)
 ROOT_LABEL = "Marin GCS"        # the store root's crumb label (`_lib/view.ts`)
 MARK = "gcs"                    # favicon + apple-touch icon: `public/icons/gcs*` (vite.config.ts injects the links)

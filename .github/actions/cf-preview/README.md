@@ -24,7 +24,6 @@ A `full` preview is what the deployment's `dev.<host>` already is, for one PR: s
   "targets": {
     "main": {
       "provider": "pages",
-      "account_id": "<CF account ID>",
       "project": "your-existing-pages-project",
       "subdomain": "your-existing-pages-project.pages.dev",
       "working_directory": "../site",
@@ -37,10 +36,11 @@ A `full` preview is what the deployment's `dev.<host>` already is, for one PR: s
 
 Place this in the trusted repository as `.github/cf-preview.json`. Paths are relative to that file. The target key is the permitted PR base branch. Disky can use `gcs`, `cw`, `hf`, `r2`; a shared source PR must explicitly select a preview target rather than inherit an unrelated production config.
 
+- `account_id` (optional): the Cloudflare account. A public repository leaves it out and passes the `account-id` input instead (`${{ vars.CLOUDFLARE_ACCOUNT_ID }}` from the publish/retire environment); exactly one of the two must give it, 32 hex, or publish and retire refuse. Gate needs neither.
 - `project`: the deployment's **own** Pages project (the one `dev` and production deploy to).
 - `subdomain` (optional, default `<project>.pages.dev`): the project's `pages.dev` subdomain, which Cloudflare suffixes when the name was taken. Publish and retire refuse a project whose actual `subdomain` differs.
 - `protected_branches` (optional): branches beside `dev` and the production branch that a preview must never deploy to or delete from. `dev` is always protected.
-- `working_directory`: where the trusted Wrangler runs, in the base checkout. Its `wrangler.toml` (if any) is the deployment's own, so `[env.preview]` applies exactly as on `dev`. If it holds `functions/`, the artifact must carry the PR's compiled Functions as `_worker.js` (`wrangler pages functions build functions --outdir dist/_worker.js` in the build job); otherwise publish refuses, since Wrangler would deploy the base branch's Functions under the PR's front end.
+- `working_directory`: where the trusted Wrangler runs, in the base checkout. Its `wrangler.toml` (if any) is the deployment's own, so `[env.preview]` applies exactly as on `dev`. If it holds `functions/`, the artifact must carry the PR's compiled Functions as `_worker.js` (`wrangler pages functions build functions --outdir dist/_worker.js` in the build job); otherwise publish refuses, since Wrangler would deploy the base branch's Functions under the PR's front end. Publish also moves that `functions/` aside (to `.functions.cf-preview-held`) for the upload and restores it after: `wrangler pages deploy` bundles the CWD's `functions/` even beside an artifact's `_worker.js`, which fails from a fresh checkout (ungenerated imports) or would ship the base branch's Functions.
 - `verification`: required. The probe runs on `https://pr-N.<subdomain>` and must read the captured full SHA, from the body or (with `header`) the header's first token; Disky's Functions stamp `x-disky-build: <sha> <time>` on every response, from `VITE_BUILD_SHA` at build time.
 
 Workers targets are refused for `full`: a Worker has no preview environment carrying the dev stack's bindings, so a native Preview's bindings would have to be pointed at production by hand, a different trust decision. The native Workers Previews adapter (`publishWorker`, `wrangler preview --ignore-base-config`, Wrangler ≥ 4.135.0) stays in `preview.mjs` as `stack`'s candidate provider.

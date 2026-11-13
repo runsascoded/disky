@@ -186,12 +186,20 @@ dt-cloud interval-store level-sim GEN REQUESTS  # `readLevel`'s two waves priced
                           # `-s 256,512,1024` (+ `-F` sidecar row-group sizes): a table per mode, today / held page indexes (cold,
                           # colo warm, warm) / the sort cut in small groups with no page index, from the real file's page indexes
 dt-cloud image-sha [-e SHA [-a]] [-j]  # The running image's source revision (`image_sha.py`): `$DISKY_GIT_SHA` /
-                          # `$DISKY_GIT_DIRTY`, which a deployment's image build stamps (gcs: `job/build.sh` → Dockerfile
+                          # `$DISKY_GIT_DIRTY`, which the image build stamps (`dt-cloud image build` → `job/Dockerfile`
                           # `ARG`/`ENV` + OCI labels `org.opencontainers.image.revision`, `disky.dirty`). Prints `<sha>`,
                           # `<sha> dirty` or `unstamped`; `-e` exits 1 unless the image is that sha (or a ≥7-char prefix),
                           # clean (`-a` accepts dirty) and stamped. Benchmark harnesses (`interval-store cut`, `layout-sim`)
                           # log the stamp at start and take `-E/--expect-sha` (+ `--allow-dirty`): refuse to start on any
                           # other image. Job entrypoints (`scan head`/`step`, the `interval-store` stage tasks) log it
+dt-cloud image build -c job/build.json [-m candidate|live] [-t TAG] [-D] [-a K=V]  # The scan job image (`image_build.py`,
+                          # specs/job-consolidation.md §5; `job/build.sh` runs it with the deployment's `job/build.json`):
+                          # this checkout's commit, stamped, `git archive`d by the config's `context` pathspecs, built by
+                          # Cloud Build from `job/Dockerfile` (`build_args`: `SITE`, `APT_PACKAGES`, `UV_SYNC_ARGS`,
+                          # `ENTRYPOINT`) to an immutable candidate tag (the sha's first 12; dirty `-D`: `-dirty-<time>`) in
+                          # `repository` + `mirrors`; prints `<repository>@<digest>` each. `live` mode then promotes.
+                          # `image promote TAG [-x DIGEST]`: `live_tags` moved to TAG's digest in each repository, then the
+                          # config's `repoint` Cloud Run jobs / services updated to the first live tag
 dt-cloud batch submit -c COMPONENT [-L REGION] [-b BUCKET]… [-X] [-t] [-e] [-r SECONDS] JOB_ID SPEC  # The shell's Batch submit, through `batch.submit_job` (the
                           # one place a job is created): labelled from `$DISKY_LABELS` + `-c` on the job and its allocation policy
                           # (`cost_labels.py`), in `-L`, else `$BATCH_REGION`. There is no default region (`deploy.batch_region`): neither
@@ -267,7 +275,7 @@ then `git rm`'d. `dt-cloud d1-schema check -d <db> [-c <wrangler config>]` compa
 
 One gate (`_lib/auth.ts`, `@open-athena/auth` over D1): `identify` → `Identity` (`via: session | grant | public`), `requireViewer` / `requireStager` / `requireAdmin`.
 - `/auth/google` (+ `/callback`, `/onetap`) — Google OIDC → email session; `/auth/email/*` — emailed code / magic link → email session
-- `/auth/oa` (+ `/callback`, `/client`) — "Sign in with OA" through OA's broker (`OA_LOGIN_*`, `specs/oa-login-rp.md`; unset: 404, no button) → email session. Where configured, the middleware sends a person's unauthenticated page visit there once with `prompt=none` before the wall (`_lib/silentSignIn.ts`; never a crawler, `fetch`, `?key=`/`?og=` link or public deployment); `/api/auth/logout` suppresses that until they click it or complete any sign-in
+- `/auth/oa` (+ `/callback`, `/client`) — "Sign in with OA" through OA's broker (`OA_LOGIN_*`, `specs/oa-login-rp.md`; unset: 404, no button) → email session. Where configured, the middleware sends a person's unauthenticated page visit there once with `prompt=none` before the wall (`_lib/silentSignIn.ts`; never a crawler, `fetch`, `?key=`/`?og=` link or public deployment); `/api/auth/logout` suppresses that until they click it or complete any sign-in. A completed one leaves a signed `oa_login_who` cookie (`rememberAccount`, outliving sign-out like Google's hints): `/auth/oa/client` returns that account with its profile's name and face, and the wall's button becomes "Continue as <them>"; when it covers every Google account remembered here, Google's slot shrinks to "Use a different account" (Google's chooser)
 - **Preview hosts** (`isPreviewHost`: exactly one label under `PAGES_SUBDOMAIN`, the project's `pages.dev` subdomain: a PR's `pr-N`, the `dev` alias, a deployment hash; never a custom domain): OA sign-in only through the broker's preview client (`OA_LOGIN_PREVIEW_CLIENT_ID` / `_SECRET`, Preview environment only) with `redirectFromOrigin`, else none (404, no button; never the deployment's own client), and no silent `prompt=none` attempt
 - **`AUTH_HOST_COOKIES = "1"`** (default off; switching it signs everyone out once): on https, the session (+ its `_rs` handle), both nonces and the Google hint are `__Host-` named (`cookieNames`), so the gate reads only `__Host-oa_auth` there; `gateFor(env, request)` needs the request for it
 - `/api/auth/*` — the package's routes: `whoami`, `exchange` (`?key=` share link → grant session), `logout`, request-access, admin grant/request/log console
@@ -457,12 +465,18 @@ start a second scan that day; transient failures retry for 30 min, then it
 posts to #gcs-admin. The Batch job runs the `:latest` image built from this
 branch. A rebuild is how `job/` or pipeline changes reach prod.
 
-`build.sh` images the checkout it lives in, stamped with its `git rev-parse HEAD`
-and dirty state (`dt-cloud image-sha` reads it back). From a worktree, run that
-worktree's own `job/build.sh` (another checkout's is refused); a dirty tree is
-refused unless `ALLOW_DIRTY=1`. A benchmark on a throwaway tag:
-`IMAGE=…:bench-<sha7> job/build.sh`, then the job runs
-`dt-cloud image-sha -e <sha>` (or the harness's `-E <sha>`) before measuring.
+`build.sh` is cloud's `dt-cloud image build` over gcs's `job/build.json`: it
+images the checkout it lives in (a `git archive` of its commit), stamped with
+the sha and dirty state (`dt-cloud image-sha` reads it back), tagged `<sha12>`
+in both repositories (the us-central1 primary and the us-east1 mirror). gcs's
+`mode` is `live`, so a bare `job/build.sh` also moves `:latest` and re-points
+`gcs-usage-snapshot-submit` + `gcs-alert-relay`; `job/build.sh -m candidate`
+does neither (prints the digests), and `job/build.sh promote <tag> -x <digest>`
+makes a verified candidate live. From a worktree, run that worktree's own
+`job/build.sh` (another checkout's is refused); uncommitted tracked changes are
+refused unless `-D`. A benchmark on a throwaway tag: `job/build.sh -t
+bench-<sha7>`, then the job runs `dt-cloud image-sha -e <sha>` (or the
+harness's `-E <sha>`) before measuring.
 
 #### Dev workflow
 

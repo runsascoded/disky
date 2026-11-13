@@ -36,17 +36,24 @@ describe('the editor', () => {
     expect([warning(up), saveDisabled(up)]).toEqual([null, false])
   })
   it.each(['', '-1', '91', '1.5'])('refuses to save %j', draft => expect(saveDisabled(view({ draft }))).toBe(true))
-  const rows = (html: string) => [...html.matchAll(/<tr><td><code>([^<]+)<\/code><\/td><td(?: class="(warn|dim)")?>([^<]+)<\/td><\/tr>/g)].map(m => [m[1], m[3], m[2] ?? null])
+  const rows = (html: string) => [...html.matchAll(/<tr><td><code>([^<]+)<\/code><\/td>(?:<td class="dim">([^<]*)<\/td>)?<td(?: class="(warn|dim)")?>([^<]+)<\/td><\/tr>/g)]
+    .map(m => m[2] === undefined ? [m[1], m[4], m[3] ?? null] : [m[1], m[2], m[4], m[3] ?? null])
   const note = (html: string) => /<p class="dim">([^<]*)<\/p>/.exec(html)?.[1]?.replace(/&#x27;/g, "'") ?? null
-  it('lists the buckets a sweep acts on, by name: what the reading says of each, unknown where it says nothing', () => {
+  it('lists the buckets a sweep acts on, by name: what the reading says of each, "not read" where it says nothing', () => {
     const html = view({ swept: ['c-new', 'b-on', 'a-off'], buckets: { asOf: '2026-11-05 07:12Z', off: { 'b-on': false, 'a-off': true, 'not-swept': true } } })
-    expect(rows(html)).toEqual([['a-off', 'off', 'warn'], ['b-on', 'on', null], ['c-new', 'unknown', 'dim']])
+    expect(rows(html)).toEqual([['a-off', 'off', 'warn'], ['b-on', 'on', null], ['c-new', 'not read', 'dim']])
     expect(note(html)).toBe('What each bucket a sweep acts on has, as the job read it at 2026-11-05 07:12Z (its soft-delete step, after a scan); a run measures its buckets itself when it starts:')
   })
-  it('no reading: every bucket unknown, and says what that means', () => {
+  it('no reading: every bucket "not read", and says what that means', () => {
     const html = view({ swept: ['b', 'a'], buckets: null })
-    expect(rows(html)).toEqual([['a', 'unknown', 'dim'], ['b', 'unknown', 'dim']])
+    expect(rows(html)).toEqual([['a', 'not read', 'dim'], ['b', 'not read', 'dim']])
     expect(note(html)).toBe("No reading of the buckets' soft delete (the job's soft-delete step writes one after a scan), so this site can't say what a past run's undo has to work with; a run measures its buckets itself when it starts:")
+  })
+  it('a "what it is" column when any swept bucket has a note, blank for one without', () => {
+    const html = view({ swept: ['b', 'a'], buckets: null, notes: { a: 'raw training data', other: 'not swept' } })
+    expect(/<th>what it is<\/th>/.test(html)).toBe(true)
+    expect(rows(html)).toEqual([['a', 'raw training data', 'not read', 'dim'], ['b', '', 'not read', 'dim']])
+    expect(/<th>what it is<\/th>/.test(view({ swept: ['b'], buckets: null, notes: { other: 'not swept' } }))).toBe(false)
   })
   it('no table for a store with no buckets', () => {
     expect(/<table/.test(view({ swept: [], buckets: { asOf: 'x', off: { a: true } } }))).toBe(false)

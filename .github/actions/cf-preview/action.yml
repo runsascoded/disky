@@ -18,6 +18,8 @@ inputs:
   github-token:
     description: Scoped job token; publish needs deployments and PR comments write
     required: true
+  account-id:
+    description: Cloudflare account ID (publish/retire), e.g. `vars.CLOUDFLARE_ACCOUNT_ID`, when the target config omits `account_id`; exactly one may give it
   deploy-token:
     description: Pages deployment token for the deployment's project; never provide to the build job
   work-directory:
@@ -61,6 +63,7 @@ runs:
         PREVIEW_SHA: ${{ inputs.sha }}
         PREVIEW_MODE: ${{ inputs.mode }}
         PREVIEW_GITHUB_TOKEN: ${{ inputs.github-token }}
+        PREVIEW_ACCOUNT_ID: ${{ inputs.account-id }}
         PREVIEW_DEPLOY_TOKEN: ${{ inputs.deploy-token }}
         PREVIEW_WORK_DIRECTORY: ${{ inputs.work-directory }}
       run: node "$ACTION_PATH/run.mjs"

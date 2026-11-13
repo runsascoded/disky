@@ -153,9 +153,15 @@ jobs:
           PROJECT: ${{ needs.plan.outputs.project }}
           PAGES_BRANCH: ${{ needs.plan.outputs.pages_branch }}
           SOURCE_SHA: ${{ needs.plan.outputs.sha }}
+        # Wrangler bundles the CWD's `functions/` (over the artifact's sealed `dist/_worker.js`), and this fresh checkout has
+        # no generated `functions/_lib/build.gen.ts`: hold `functions/` aside for the upload, so the sealed bundle ships.
         run: |
           set -o pipefail
-          pnpm exec wrangler pages deploy dist --project-name "$PROJECT" --branch "$PAGES_BRANCH" --commit-hash "$SOURCE_SHA" --commit-dirty=false 2>&1 | tee "$RUNNER_TEMP/upload.log"
+          mv functions "$RUNNER_TEMP/functions.held"
+          rc=0
+          pnpm exec wrangler pages deploy dist --project-name "$PROJECT" --branch "$PAGES_BRANCH" --commit-hash "$SOURCE_SHA" --commit-dirty=false 2>&1 | tee "$RUNNER_TEMP/upload.log" || rc=$?
+          mv "$RUNNER_TEMP/functions.held" functions
+          exit $rc
       - name: Verify CF readback and live build; record success
         id: verify
         env:

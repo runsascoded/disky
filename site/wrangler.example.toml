@@ -63,6 +63,9 @@ AUTH_MODE = "app"                           # `app` (the app's own sign-in) | `p
 # CACHE_NS = ""                               # response-cache env tag (`_lib/edgeCache.ts`): unset = the request host,
 #                                             #   except PROD_HOST (prod's keys); set "" on a prod with no PROD_HOST
 # REPO_URL = "https://github.com/me/my-fork"  # the "Source on GitHub" link; unset = this repo
+# PEERS = '[{"label": "Other usage", "prod": "other.example.com", "dev": "dev.other.example.com", "meta": true}]'
+#                                             # sibling deployments the omnibar / site menu link (src/peers.ts): a JSON
+#                                             #   array in a TOML literal string; may list this one; unset = none
 # MARK = "gcs"                                # favicon/badge: a `public/icons/` key (gcs cw r2 s3 hf nas macos local); unset = ROOT_LABEL's initials
 
 # --- Who may see it (_lib/auth.ts) ---
@@ -114,7 +117,6 @@ ROOT_LABEL = "my buckets"                   # the store root's crumb label
 
 # --- Plans and deletion (_lib/plans.ts, _lib/dispatch.ts) ---
 # STORE_SCHEME = "s3://"                      # the URI scheme staged prefixes carry
-# STORE_SERIES_SCOPE = "fleet"               # set per store from `STORES_JSON` `series_scope`: a grant holding it (with base read) reads that store's root `/api/series` only
 # STORE_BUCKETS = "my-bucket,my-other-bucket"  # comma-separated scanned buckets, first = primary
 # STORE_ROOT = "my-bucket"                    # the store's mount (`Store.root`), `/`-separated: its page URLs leave it out (`/dir`, not `/my-bucket/dir`); the server's cards read it
 # STAGING = "1"                               # any value: viewers stage deletions into a shared open plan
@@ -201,3 +203,4 @@ ROOT_LABEL = "my buckets"                   # the store root's crumb label
 # dev DEV_EMAIL                             local dev only (`.dev.vars`): the identity localhost acts as
 # overlay STORE_KEY                         set by STORES_JSON's per-store overlay, never directly
 # overlay STORE_SCOPE
+# overlay STORE_SERIES_SCOPE

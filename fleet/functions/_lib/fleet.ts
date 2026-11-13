@@ -54,8 +54,10 @@ interface SeriesWire { points: { date: string; b: number }[] }
 export const DEFAULT_RUNS = 14
 /** How far back `FleetMeta.daily` reaches. */
 export const META_DAYS = 30
-/** Maintenance runs' kinds (`site/src/scanRunsModel.ts` `MAINT_KINDS`): a store's compaction, race or merge, not a scan. */
-const MAINT_KINDS = new Set(['compact', 'race', 'merge'])
+/** The scan job's own runs (`kind = 'scan'`, `dt-cloud scan-run`'s default). A deployment's other runs are listed beside them
+ *  on its `/scans` but aren't new scans here: maintenance (`compact`, `race`, `merge`), the access-log ingest, re-runs over an
+ *  existing scan's outputs (`reproc`) and phase recoveries. */
+const SCAN_KIND = 'scan'
 /** A deployment that doesn't answer within this is an error, not a stalled document. */
 export const FETCH_TIMEOUT_MS = 20_000
 const DAY = 86400
@@ -112,7 +114,7 @@ export async function readDeployment(d: Deployment, env: Env, now: number, nRuns
     }, e => { out.errors.health = why(e) }),
     getJson<RunsWire>(f, `${d.url}/api/scan-runs`, token).then(r => {
       if (!r.configured) { out.errors.runs = 'scan runs are not set up'; return }
-      out.runs = r.runs.filter(s => !MAINT_KINDS.has(s.run.kind) && s.run.status !== 'nop').slice(0, nRuns).map(fleetRun)
+      out.runs = r.runs.filter(s => s.run.kind === SCAN_KIND && s.run.status !== 'nop').slice(0, nRuns).map(fleetRun)
       out.last = out.runs[0] ?? null
     }, e => { out.errors.runs = why(e) }),
     getJson<SeriesWire>(f, `${d.url}/api/series?store=meta`, token).then(s => {
