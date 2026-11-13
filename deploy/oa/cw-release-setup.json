@@ -1,0 +1,56 @@
+{
+  "repository": "Open-Athena/disky",
+  "operator_policy": "Existing repository write/maintain/admin; explicit production dispatch, self-approval allowed; no added merge-review requirement",
+  "environments": [
+    {
+      "name": "cw-dev",
+      "settings": {
+        "wait_timer": 0,
+        "prevent_self_review": false,
+        "reviewers": [],
+        "deployment_branch_policy": {
+          "protected_branches": false,
+          "custom_branch_policies": true
+        }
+      },
+      "branch_policy": {
+        "name": "front-door",
+        "type": "branch"
+      },
+      "variables": {
+        "CLOUDFLARE_ACCOUNT_ID": "74981a43be0de7712369306c7b19133d"
+      },
+      "secret_names": [
+        "CF_PAGES_DEPLOY_TOKEN"
+      ]
+    },
+    {
+      "name": "cw-prod",
+      "settings": {
+        "wait_timer": 0,
+        "prevent_self_review": false,
+        "reviewers": [],
+        "deployment_branch_policy": {
+          "protected_branches": false,
+          "custom_branch_policies": true
+        }
+      },
+      "branch_policy": {
+        "name": "front-door",
+        "type": "branch"
+      },
+      "variables": {
+        "CLOUDFLARE_ACCOUNT_ID": "74981a43be0de7712369306c7b19133d"
+      },
+      "secret_names": [
+        "CF_PAGES_DEPLOY_TOKEN"
+      ]
+    }
+  ],
+  "repository_variables": {
+    "OA_SITE_RELEASE_ENABLED": "true",
+    "OA_SITE_RELEASE_TARGETS": "[\"hf\",\"cw\"]"
+  },
+  "production_action": "Manual promotion of a successful exact-SHA dev deployment",
+  "preview_data_policy": "Unchanged; per-PR preview activation is separate"
+}
