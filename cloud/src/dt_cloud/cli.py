@@ -3906,6 +3906,10 @@ from .image_sha import image_sha_cmd as _image_sha  # noqa: E402
 
 main.add_command(_image_sha)
 
+from .image_build import cli as _image_build  # noqa: E402
+
+main.add_command(_image_build)
+
 from .monitoring_relay import cli as _monitoring_relay  # noqa: E402
 
 main.add_command(_monitoring_relay)
