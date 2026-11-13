@@ -12,9 +12,10 @@
 // ended before recording one) and posts each newly finished run's
 // result to its plan's Slack thread (specs/done/staged-slack.md). The Batch job's
 // exit trap calls this with the job's read grant, so that happens as the run
-// ends.
+// ends. Where `SWEEP_DISPATCH` is `"0"` (`sweepsOff`: a dev stack on production's
+// D1) it only lists: production records and announces on its next read.
 import { type Env as AuthEnv, json, requireViewer } from '../../_lib/auth.js'
-import { type ExecEnv, type Expected, expectedOfVars } from '../../_lib/dispatch.js'
+import { type ExecEnv, type Expected, expectedOfVars, sweepsOff } from '../../_lib/dispatch.js'
 import { type BatchConfig, batchConfig, notConfigured } from '../../_lib/batchConfig.js'
 import { batchLogsUrl, gcpToken } from '../../_lib/gcp.js'
 import { runDir } from '../../_lib/sweepDispatch.js'
@@ -108,7 +109,7 @@ export const onRequestGet = async (ctx: { request: Request; env: Env; waitUntil?
 
   const reason = failureReader(ctx.env)
   const db = ctx.env.DB
-  if (db) {
+  if (db && !sweepsOff(ctx.env)) {
     const finished = await reflectSweepRuns(cfg, db, jobs, undefined, reason, undefined, outcomeReader(ctx.env), totalsReader(ctx.env))
     await settleSweepJobs(cfg, db, jobs)
     if (finished.length) {
