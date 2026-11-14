@@ -1880,29 +1880,57 @@ def soft_delete(ctx: Ctx, arg: str | None) -> None:
                fatal=False, warn="soft-delete reading failed (the scan's outputs stand; the site keeps the last one, dated)")
 
 
-@step("vm-pack", core=False, soft=True, options={"store": str, "keep": int},
-      requires=primary_only("vm-pack", "a pack is the primary interval store's"),
+def _vm_pack_check(p: ScanProfile) -> list[str]:
+    from .vm_pack import batch_problems
+
+    batch = p.opts("vm-pack").get("batch")
+    return primary_only("vm-pack", "a pack is the primary interval store's")(p) + ([] if batch is None else batch_problems(batch))
+
+
+@step("vm-pack", core=False, soft=True, options={"store": str, "keep": int, "batch": dict},
+      requires=_vm_pack_check,
       side=True, converges=True, leaves="VM mode's pack not written: the VM serves the previous one until a later run writes it")
 def vm_pack(ctx: Ctx, arg: str | None) -> None:
     """VM mode's pack (specs/vm-mode.md §6): `dt-cloud vm-pack build` over the interval store's current generation and
     newest manifest, published beside it under `vm-pack/` (the pack, then `vm-pack/CURRENT.json`). The store is
-    `options.vm-pack.store`, else the interval store's (`options.interval-store.store`, else `R2_ARCHIVE`). Needs `fsb`
-    in the image (`$FSB` or PATH): without it the step is skipped, said in its note. Post stage, after the append;
-    idempotent (a pointer already naming the generation and manifest is a no-op), so a later run catches up. Its loader
-    holds the store's rows in RAM once (gcs: 117 GB peak), so a deployment listing it sizes its `post` machine for that.
-    Not core: a deployment opts in (`steps`)."""
+    `options.vm-pack.store`, else the interval store's (`options.interval-store.store`, else `R2_ARCHIVE`). Post stage,
+    after the append; idempotent (a pointer already naming the generation and manifest is a no-op), so a later run
+    catches up. Not core: a deployment opts in (`steps`).
+
+    `options.vm-pack.batch` (a mapping, possibly empty): the build runs as a Batch job of its own (`vm-pack submit`), not
+    in this task: its loader holds the store's rows in RAM once (gcs: 117 GB), so it gets its own machine (default a spot
+    n2-highmem-16) instead of sizing the scan's. The mapping's keys (`vm_pack.BATCH_KEYS`) are `submit`'s options:
+    `image` (default `$JOB_IMAGE`, this task's), `service_account` (`$JOB_SA`), `region` (`$BATCH_REGION`; the store
+    bucket's region is checked against it), `project`, `machine`, `spot`, `ssd_gb`, `memory_mib`, `env`, `secrets`
+    (`{VAR: secret}`, a non-GCS store's credentials), `cross_region`. Submitted, not waited on: the step's success is
+    the submit's, never the job's (a failed job leaves the previous pack, and the next scan's job writes the newest).
+    Without `batch`, the build runs here (a small deployment's: no Batch, little memory).
+
+    Needs `fsb` in the image that builds (`$FSB` or PATH; `job/Dockerfile` `FSB=build`): this one when building here or
+    when the job runs this task's image; without it the step is skipped, said in its note."""
     if ctx.reproc:
         err("REPROC: not writing a VM pack")
         return
     store = ctx.opt("vm-pack", "store") or ctx.opt("interval-store", "store") or ctx.env.get("R2_ARCHIVE")
+    batch = ctx.opt("vm-pack", "batch")
+    keep = str(ctx.opt("vm-pack", "keep", 2))
     with ctx.phase("vm-pack"):
         if not store:
             ctx.skip("unconfigured", "no store (options.vm-pack.store, options.interval-store.store or R2_ARCHIVE)")
             return
-        if not (ctx.env.get("FSB") or shutil.which("fsb", path=ctx.env.get("PATH"))):
+        if batch is not None and not (batch.get("image") or ctx.env.get("JOB_IMAGE")):
+            ctx.skip("unconfigured", "no image for the vm-pack job (options.vm-pack.batch.image or JOB_IMAGE)")
+            return
+        if not (batch or {}).get("image") and not (ctx.env.get("FSB") or shutil.which("fsb", path=ctx.env.get("PATH"))):
             ctx.skip("unconfigured", "no fsb in this image ($FSB or PATH)")
             return
-        ctx.sh(["dt-cloud", "vm-pack", "build", "-o", store, "-w", str(ctx.work / "vm-pack"), "-k", str(ctx.opt("vm-pack", "keep", 2))],
+        if batch is not None:
+            from .vm_pack import submit_args
+
+            ctx.sh(["dt-cloud", "vm-pack", "submit", "-o", store, "-k", keep, *submit_args(batch)],
+                   fatal=False, warn=f"VM pack job not submitted for {ctx.scan} (the VM keeps serving the previous pack)")
+            return
+        ctx.sh(["dt-cloud", "vm-pack", "build", "-o", store, "-w", str(ctx.work / "vm-pack"), "-k", keep],
                fatal=False, warn=f"VM pack not written for {ctx.scan} (the VM keeps serving the previous pack)")
 
 

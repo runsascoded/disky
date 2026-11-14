@@ -8,14 +8,14 @@ Status: phase 1 built, tested and measured on `w/vm-mode`, 2026-11-14 (§ 11); n
 - **Tenants** are deployments. One process serves several, each with its own key, pack and pins; a tenant is added, replaced (a new pack after a scan) or dropped without a restart (§ 5).
 - **The cell rule** is the one in [serverless-tiers.md] §7 item 1: a node is drawn when its bytes are at least `min_share` of the view's total, `min_share = 2^-share_log2` from the viewport, rounded down to a power of 2. The request carries it; the Worker and `vmd` apply the same integer test (§ 2).
 - **Shards and merge are separate layers** (§ 3). A pack splits into N path-range shards, each answering on its own with partial rollups; the merge sums them by path and applies the global cell cut. One `vmd` runs every shard in-process; a fan-out over serverless functions (Cloud Run beside GCS, Lambda beside S3) would run one shard per function behind a merging caller. N = 1 and N > 1 give identical answers (tested).
-- **The pack writer** is a scan step (`vm-pack`) after the interval store's append: it mirrors the current generation's newest manifest, writes the slim pack, and publishes it next to the store under `vm-pack/` with a pointer (§ 6).
+- **The pack writer** is a scan step (`vm-pack`) after the interval store's append: it mirrors the current generation's newest manifest, writes the slim pack, and publishes it next to the store under `vm-pack/` with a pointer; a large deployment's step submits it as a Batch job of its own (a spot n2-highmem-16 by default) and doesn't wait (§ 6).
 - **Parity:** the DuckDB oracle (`bench/full-scan/oracle/oracle.py`, no shared code) checks `vmd`'s answers on the repo's fixtures (14,976 answers through HTTP, every shard layout) and on gcs (134 / 134 against the bench's oracle-checked answers); a comparison with the live Worker on real gcs requests is written and waits for a read grant (§ 8, § 10 item 3).
 
 ## 1. Scope
 
 In phase 1 (this branch):
 1. `vmd`: the HTTP server, multi-tenant, signed requests and responses, shards + merge, the cell rule, the answer shape (§ 2–5).
-2. The pack writer: `fsb pack-slim` (store → slim pack without the full pack), `dt-cloud vm-pack build` (mirror, write, publish), and the `vm-pack` scan step (§ 6).
+2. The pack writer: `fsb pack-slim` (store → slim pack without the full pack), `dt-cloud vm-pack build` (mirror, write, publish), `dt-cloud vm-pack submit` (the writer as its own Batch job), the `vm-pack` scan step, and `fsb` in the job image behind a build arg (§ 6).
 3. The Worker adapter, `site/functions/_lib/vmAdapter.ts`: request from a parsed view, response to `/api/subtree`'s and `/api/diff`'s bodies; pure and unit-tested, not called by any route (§ 7).
 4. Parity: the oracle on the cell rule; fixtures through `vmd` at N = 1 and N = 4; gcs against the oracle and against the live Worker (§ 8).
 5. Measurements on the bench VM: per-query latency at 16 threads with two deployments' packs loaded together, RSS, cold start (§ 11).
@@ -182,28 +182,62 @@ The search language is the site's, and which backend answers never changes what 
 
 - One process, one thread pool for every tenant's passes (a request uses all threads; concurrent requests share them). Each tenant's pack is memory-mapped; the page cache holds the pages its queries touch (gcs: 24 GB of its 30.3 GB; [full-scan-serving-bench.md] § Page-cache serving).
 - **Hot swap:** a watcher re-reads the config and stats each tenant's pack file(s) every `watch_s` (default 5 s). A tenant whose pack file changed (length, mtime: a new pack is written beside the old and renamed over it, or the config names a new file) is mapped anew (header + columns, ~1 ms) and prefaulted on a background thread; its state is `loading` until then, while the old pack keeps answering requests pinned to it. The swap is an `Arc` exchange; the old map is dropped when its last request finishes. Added tenants load; removed tenants stop answering (`404`). A deployment moves onto or off the shared VM by editing the config: no restart, no other tenant disturbed.
-- **Memory:** gcs 32.4 GB (slim pack + `dever`, 138 scans), cw about the same (its store holds about as many versions, 1.16e9), hf / r2 / the r2 demo / m3 each well under 1 GB. Two gcs-sized tenants and the small ones: 69 GB of pages measured (§ 11.3); an n2-highmem-16 (128 GB) holds every tenant's pages hot with room for page-cache churn, and the slim pack's measured 32 GB-per-tenant working set means even both large tenants' searches stay resident (§ 11). A process or container per deployment on the same VM is equally supported (one tenant per config); the shared process is the default because one thread pool uses the cores better than two pools fighting.
+- **Memory:** gcs 32.4 GB (slim pack + `dever`, 138 scans, 720M object versions). cw's is about 4–5 GB, estimated, not measured: its bucket `marin-us-east-02a` holds 92.8M objects / 960 TB ([cw adaptive-listing]) and its store 93.2M coalesced versions ([cw-static-names]), roughly 1/8 of gcs's versions (its longer paths, mean 172 characters to gcs's 119, cost a little more per version); cw has no owner axis (every `usr` empty), and does have staging. hf / r2 / the r2 demo / m3 each well under 1 GB. Two gcs-sized tenants and the small ones: 69 GB of pages measured (§ 11.3), a worst case for a second large deployment; an n2-highmem-16 (128 GB) holds every tenant's pages hot with room for page-cache churn, and the slim pack's measured 32 GB-per-tenant working set means even two gcs-sized tenants' searches stay resident (§ 11). A process or container per deployment on the same VM is equally supported (one tenant per config); the shared process is the default because one thread pool uses the cores better than two pools fighting.
 - **Status object:** `vmd` writes `GET /v1/status`'s content per tenant; the serving deployment's publisher (out of scope) copies it to the store the Worker reads ([serverless-tiers.md] §5.2: `{state, generation, manifest, loaded_at}`).
 
 ## 6. The pack writer
 
 ### 6.1 `fsb pack-slim GEN -o FILE`
 
-The store → slim pack in one process: the loader (§ As built in [full-scan-serving-bench.md]), then the slim index, written without the full pack (saves the full pack's 237 s write and its 48 GB). The loader's peak is unchanged (110 GB for gcs), so gcs's writer runs on a 128 GB machine; cw likewise; the small deployments on anything.
+The store → slim pack in one process: the loader (§ As built in [full-scan-serving-bench.md]), then the slim index, written without the full pack (saves the full pack's 237 s write and its 48 GB). The loader's peak is unchanged (117 GB for gcs, § 11.3), so gcs's writer runs on a 128 GB machine; cw's, at ~1/8 of gcs's versions, should peak near 15 GB (an estimate: not run); the small deployments on anything.
 
 ### 6.2 `dt-cloud vm-pack build -o STORE [-w WORK] [--fsb PATH]`
 
 1. Read `<STORE>/interval-store/CURRENT.json` and the generation's newest manifest (as `fetch-gen` / the site's `newestManifest` choose it).
 2. Skip when `<STORE>/vm-pack/CURRENT.json` already names this generation and manifest (idempotent: a rerun or a later scan's catch-up does nothing twice).
 3. Mirror what `fsb` reads (`scans.json`, the manifest, the base's and each listed run's `served/path.parquet`) into `WORK`, through `blobstore.Store` (gs://, s3://, r2://, a dir).
-4. Run `fsb pack-slim`, then upload `vm-pack/<gen>/<manifest stem>.fsb` and, last, `vm-pack/CURRENT.json` = `{gen, manifest, key, bytes, sha256, scans, written}`.
+4. Run `fsb pack-slim`, then upload `vm-pack/<gen>/<manifest stem>.fsb` and, last, `vm-pack/CURRENT.json` = `{gen, manifest, key, bytes, sha256, scans, written}`. Before the pointer, the store's newest is read again: when another manifest (or generation) landed while this one was packed (two scans' jobs overlapping), the pack stays written but the pointer and pruning are left to the newer job (`"superseded": true`), so a late job never moves the pointer back. (A read-then-write, not a compare-and-swap: two jobs finishing within the same second could still race; the next scan's job repairs it.)
 5. Keep the previous pack (the VM may still serve it); `--keep N` (default 2) deletes older ones under `vm-pack/`.
 
-`fsb` comes from `--fsb`, `$FSB`, or `PATH`; the job image gains it in a Rust build stage when a deployment turns the step on (§ 9).
+`fsb` comes from `--fsb`, `$FSB`, or `PATH`; the job image carries it when built with `FSB=build` (§ 6.4).
 
-### 6.3 The `vm-pack` scan step
+### 6.3 The `vm-pack` scan step and its Batch job
 
-A soft step, stage `serve`, after `interval-store` (`cloud/src/dt_cloud/scan_steps.py`): `dt-cloud vm-pack build -o <store>` with the interval store's own `store` option (or `R2_ARCHIVE`). Off unless a deployment's profile lists it. It never fails the scan: a failure leaves the VM on the previous pack, and the next scan's run catches up (`converges`). Options: `store`, `timeout`, `keep`. Memory: on a machine of the profile's `post` shape; gcs's (e2-highmem-16, 128 GB) covers its 110 GB loader peak.
+A soft step after `interval-store` (`cloud/src/dt_cloud/scan_steps.py`), over `options.vm-pack.store`, else the interval store's own `store` option, else `R2_ARCHIVE`. Off unless a deployment's profile lists it (`steps`). It never fails the scan: a failure leaves the VM on the previous pack, and the next scan's run catches up (`converges`). Options: `store`, `keep`, `batch`.
+
+**With `batch` (Ryan, 2026-11-14, "sg go": § 10 item 4)**, the step submits the writer as a Batch job of its own and returns: `dt-cloud vm-pack submit -o <store> -k <keep> …` (`vm_pack.submit`):
+- Nothing is submitted when `vm-pack/CURRENT.json` already names the store's current generation and newest manifest.
+- One job per pack: its id is `vm-pack-<deployment>-<gen>-<manifest stem>` (`job_id`: lowercased to Batch's rule; past 63 characters cut, with 8 hex of the whole id's sha256), so a resubmit for the same pack (a resumed run, a retried step) meets the job already there: a 409, counted as submitted (`exists_ok`). Rate limits and 5xx are retried for 5 minutes (`retry_for`).
+- Through `batch.submit_job`: cost-labelled `app` / `deployment` from `$DISKY_LABELS`, `component=vm-pack`, and the scan's `scan_id` / `scan_run` (`label_batch_spec`); a `gs://` store's bucket region is checked against the job's (`check_region`) unless `cross_region`.
+- The job: `bash -c 'dt-cloud image-sha >&2; exec dt-cloud vm-pack build -o <store> -w /stage/vm-pack -k <keep>'` in the image, one task, default a **spot n2-highmem-16** (`machine`, `spot`), 7,700 MiB per vCPU for a highmem machine (3,700 standard, 900 highcpu; another family names `memory_mib`), a 375 GB local SSD for the work dir (`ssd_gb`; 0: the 100 GB boot disk, `/tmp/vm-pack`), 2 retries when spot (a preemption; a rerun after the pack is published is a no-op), 4 h cap.
+- **Not waited on.** The step's outcome is the submit's, never the job's: a failed job leaves the VM on the previous pack, and the next scan's job writes the newest (the job builds the store's newest manifest when it starts, not the one it was submitted for, and leaves the pointer alone when a newer one landed meanwhile: § 6.2 step 4). A failed job's id is taken until Batch deletes it, so that same pack isn't retried automatically; the next scan's is a new id. By hand: `dt-cloud vm-pack submit` again after `gcloud batch jobs delete <id>`, or `vm-pack build` anywhere with the memory.
+- `batch`'s keys (`vm_pack.BATCH_KEYS`, checked when the profile is read) are `submit`'s options: `image` (default `$JOB_IMAGE`, the scan task's own: then `fsb` must be in it, and the step checks), `service_account` (`$JOB_SA`), `region` (`$BATCH_REGION`; put it beside the store), `project` (`$GCP_PROJECT`), `machine`, `spot`, `ssd_gb`, `memory_mib`, `env` (`{VAR: value}`), `secrets` (`{VAR: secret name}` from the project's Secret Manager, or a `projects/…` path), `cross_region`. A store outside GCS needs its credentials and endpoint in `env` / `secrets`; nothing is copied from the scan task's environment but `$DISKY_LABELS` / `$SCAN_ID` / `$SCAN_RUN_ID`.
+
+**Without `batch`**, the step builds in its own task (`dt-cloud vm-pack build -w <work>/vm-pack`): for a small deployment, whose pack takes little memory and which may have no Batch (the r2 demo's GHA ingest). Needs `fsb` in the task's image; skipped (said in the note) without it.
+
+An example profile fragment (generic: each deployment names its own region, store and machine):
+
+```yaml
+steps: [vm-pack]
+options:
+  vm-pack:
+    keep: 2
+    batch:
+      region: <the store bucket's region>
+      # machine: n2-highmem-16   # the default; cw's ~4–5 GB pack would fit an n2-highmem-4
+      # env / secrets: a non-GCS store's endpoint and credentials
+```
+
+### 6.4 `fsb` in the job image
+
+`job/Dockerfile`'s build arg `FSB` (Ryan, 2026-11-14, "behind an arg sg": § 10 item 6): `build` adds a stage on `rust:1.91-slim-bookworm` that compiles `bench/full-scan` (`cargo build --release --locked --bin fsb`, debug info off) and copies `fsb` to `/usr/local/bin/fsb`; `none` (the default) leaves it out, so no deployment's image changes until it opts in. A deployment turns it on in its own `job/build.json`:
+
+```json
+{"build_args": {"FSB": "build", "…": "…"},
+ "context": ["…", "bench/full-scan/Cargo.toml", "bench/full-scan/Cargo.lock", "bench/full-scan/src"]}
+```
+
+(`context` only when the config narrows it; the default `.` holds them.) The bookworm build stage keeps the binary's glibc floor at 2.36, below the final `python:3.12-slim` image's.
 
 ## 7. The Worker side (adapter only)
 
@@ -238,7 +272,7 @@ For all nine interval-store fixture generations, the exhaustive query mix with c
 ## 9. Labels and cost
 
 - The serving VM (out of scope here) carries `app=disky`, `deployment=shared`, `component=vm-mode` (multi-tenant; per-tenant cost is split by pack bytes in the digest, later). A per-deployment VM carries that deployment.
-- `vm-pack` runs inside the scan's own task, so its cost is the scan's (`component` of that task); if it moves to its own Batch job it goes through `batch.submit_job` with `component=vm-pack` and the bucket-region check, in the store's region.
+- `vm-pack` with `options.vm-pack.batch` is its own Batch job (§ 6.3), through `batch.submit_job`: `component=vm-pack` beside the deployment's `app` / `deployment` and the scan's `scan_id` / `scan_run`, on the job and its allocation policy, with the bucket-region check, in the store's region. Without `batch` it runs inside the scan's task and its cost is the scan's.
 - The bench VM used for phase 1's measurements carries `app=disky, deployment=gcs, component=full-scan-bench, purpose=bench`, and is stopped when idle.
 - Standing cost: n2-highmem-16 on-demand ~$690/month at list price, spot a fraction (check current prices before the infra go); a 200 GB pd-balanced disk for packs (~$20/month) or local NVMe for the 4–10 s cold start ([full-scan-serving-bench.md] cold-start table).
 
@@ -247,9 +281,10 @@ For all nine interval-store fixture generations, the exhaustive query mix with c
 1. **Attenuation. Decided (Ryan, 2026-11-14: "ok sg"): keep halving, `atten_log2 = 1`.** Today's Worker halves the share per level below the folder's children (`atten = 2`); decision 1 named a share of the total only. Without halving nothing bounds the window but a cap, and the pure share draws more, smaller cells for the same screen: measured at the gcs root, a phone's rule with halving (16 levels) 0.21 s and 1,519 cells, the pure share capped at 8 levels 0.41 s and 12,079 cells (§ 11.3). Done: the default in `vmd` (`cell.rs` `ATTEN_LOG2`, an absent `atten_log2`), the oracle, and the adapter (`atten` defaults to `ATTEN_DEFAULT`, always sent); `atten_log2: 0` stays available by name.
 2. **`(other)` visibility. Decided (Ryan, 2026-11-14: "sg"): always returned, exactly when nonzero; the renderer may skip labelling tiny ones.** The Worker hides an `(other)` under its threshold; `vmd` returns the exact rest (Ryan: "exact `(other)` per parent") whatever its size (§ 2.2), and the adapter passes it through. Whether to label a tiny one is the renderer's, in the wiring phase. Summary statistics beside it (e.g. how much of the view is in `(other)`s) are under discussion, not built.
 3. **A read grant for real-data Worker parity.** `worker_parity.py` needs to call `gcs.oa.dev` from the bench VM. Options: let it read the scan job's grant (`gcs-snapshot-site-token`, read-only) from Secret Manager there, or mint a personal agent token (`/api/token`) for it. Recommendation: a dedicated read grant for VM-mode checks (it becomes the shadow-parity job's later).
-4. **The pack writer's memory.** `fsb pack-slim` peaks at 117 GB on gcs (the loader holds every version row once, as the bench's did). gcs's `post` machine (e2-highmem-16, 128 GB) fits it with ~10 GB to spare; cw's would need the same. Recommendation: run `vm-pack` as its own Batch job on an n2-highmem-16 (spot, in the store's region, `component=vm-pack`) rather than inside `post`, until the loader streams levels to disk.
-5. **cw's pack on a GCP box.** cw's store is on CoreWeave object storage; a shared VM in GCP would pull a ~30 GB pack per cw scan across clouds (egress on CoreWeave's side, ingress free), or cw's `vm-pack` writes it there and the VM pulls it. Alternatives: a second, CoreWeave-side `vmd` for cw (same binary, its own tenant config), or a shared box placed where the larger daily transfer is cheaper. Not decided here; the multi-tenant design works either way.
-6. **`fsb` in the job image.** The step needs `fsb`; `job/Dockerfile` would gain a Rust build stage (`cargo build --release --bin fsb` over `bench/full-scan`, ~1 min, +~10 MB). Not done here: it changes every deployment's image build. Recommendation: a build arg that adds it, on for gcs and cw first.
+4. **The pack writer's memory. Decided (Ryan, 2026-11-14: "sg go"): `vm-pack` runs as its own Batch job on an n2-highmem-16 (spot, in the store's region, `component=vm-pack`), not inside `post`.** `fsb pack-slim` peaks at 117 GB on gcs (the loader holds every version row once, as the bench's did); gcs's `post` machine (e2-highmem-16, 128 GB) would have fit it with ~10 GB to spare. cw's, at ~1/8 of gcs's versions, should need ~15 GB (estimated). Done (§ 6.3): `options.vm-pack.batch` makes the step submit the job (`dt-cloud vm-pack submit`, one id per pack, labels from `$DISKY_LABELS`, the region check) and return without waiting; nothing fails the scan. Opt-in per deployment; no deployment's profile is changed here. A later lever: the loader streaming levels to disk, which would let the writer back onto a smaller machine.
+5. **cw's pack on a GCP box.** cw's store is on CoreWeave object storage; a shared VM in GCP would pull cw's pack (~4–5 GB, estimated from its 93.2M coalesced versions, [cw-static-names]) per cw scan across clouds (egress on CoreWeave's side, ingress free), or cw's `vm-pack` job writes it there and the VM pulls it. A cw `vm-pack` job on GCP Batch would itself read cw's `path` sorts across clouds; cw's own store being smaller, the transfer is smaller than first estimated. Alternatives: a second, CoreWeave-side `vmd` for cw (same binary, its own tenant config), or a shared box placed where the larger daily transfer is cheaper. Not decided here; the multi-tenant design works either way.
+6. **`fsb` in the job image. Decided (Ryan, 2026-11-14: "behind an arg sg").** Done (§ 6.4): `job/Dockerfile`'s `FSB` build arg, `none` by default; a deployment sets `"FSB": "build"` in its own `job/build.json`'s `build_args` (gcs and cw in their own sessions). No deployment's build config is changed here.
+7. **Where the crate lives.** `bench/full-scan/` is now production code (the pack writer in the job image, the server `vmd`) beside its bench drivers and results. Proposal: when the site is wired (the server's first live use), move the crate to `vm/` (or `engine/`) at the repo root, keeping `src/`, `tests/`, `oracle/` and the `check-*` drivers there, and leave `bench/full-scan/` the bench's (its `run-*` drivers, `results/`, the summaries, `batch/`), pointing at the crate by path. Not moved now: it would touch the Dockerfile's `COPY`s, every driver's `cargo build` and the specs' paths in one go, for no behaviour change while nothing serves from it; a deployment turning `FSB` on names the paths in its `context` once (§ 6.4), and the move would rename them.
 
 ## 11. As built and measured
 
@@ -259,7 +294,8 @@ The engine and the server are `bench/full-scan/` (the crate graduates to its own
 - `src/cell.rs` the cell rule; `src/shard.rs` / `src/merge.rs` the two layers; `src/slim_scan.rs` the pass (`shard_pass`, `run_sharded`); `src/slim.rs` the slim index (+ `slice`: physical shards; `dever`: § 11.4); `src/serve.rs` + `src/bin/vmd.rs` the server.
 - `fsb pack-slim`, `fsb shard`, `fsb plan -c` (the exhaustive mix plus cell-rule twins).
 - `check-vmd` (+ `oracle/vmd_check.py`), `run-vmd` + `vmd_bench.py` + `vmd_summary.py` (the measurements), `vmd_client.py` (the signed client), `worker_parity.py` (§ 11.3).
-- `cloud/src/dt_cloud/vm_pack.py` (`dt-cloud vm-pack build|current`), the `vm-pack` step (`scan_steps.py`), tests `cloud/tests/test_vm_pack.py` + `test_scan_steps.py`.
+- `cloud/src/dt_cloud/vm_pack.py` (`dt-cloud vm-pack build|submit|current`: `job_id`, `job_spec`, `submit`), the `vm-pack` step (`scan_steps.py`, `options.vm-pack.batch`), tests `cloud/tests/test_vm_pack.py` + `test_scan_steps.py`.
+- `job/Dockerfile`'s `FSB` build arg (the `fsb-build` stage).
 - `site/functions/_lib/vmAdapter.ts` (+ `.test.ts`).
 
 ### 11.2 Parity
@@ -276,7 +312,7 @@ The engine and the server are `bench/full-scan/` (the crate graduates to its own
 
 `disky-full-scan-bench`: n2-highmem-16 (8 cores × 2 threads, 125 GB), us-east1-c, spot, a 200 GB pd-balanced boot disk (196 MiB/s). gcs's store: generation `2026-10-09b.g3.c001` with the `2026-11-13T1734.m001` manifest (138 scans), read in region. Every latency is a client's wall time over HTTP to `vmd` on the same VM (signing and JSON included), 16 threads. Drivers: `run-vmd`, `vmd_bench.py`; raw lines `bench/full-scan/results/2026-11-14-vmd/` (the query files stay on the bench node: they name gcs's paths); tables from `vmd_summary.py` (`summary.md` there). The three-tenant cold start's 312 s is from its run log (its JSONL stops before the line).
 
-**Tenants.** "Two deployments" is gcs's pack plus a second gcs-sized pack (a copy of gcs's, standing in for cw, whose store holds about as many versions and isn't readable from GCP without egress), plus the synthetic x1800 fleet (113M object versions, 3.8 GB pack) as a small third. All three mapped in one `vmd`.
+**Tenants.** "Two deployments" is gcs's pack plus a second gcs-sized pack (a copy of gcs's): a worst case for a second large deployment, not cw's size. cw's store holds ~93.2M coalesced versions ([cw-static-names]; its bucket 92.8M objects, [cw adaptive-listing]), about 1/8 of gcs's, so its pack should be ~4–5 GB, near the x1800 tenant's; it isn't readable from GCP without egress, so it wasn't loaded. Plus the synthetic x1800 fleet (113M object versions, 3.8 GB pack) as a small third. All three mapped in one `vmd`.
 
 **The pack writer** (`fsb pack-slim`, the store → the slim pack): 553 s (load 363 s, build 24 s, write 160 s to pd-balanced); peak RSS 117 GB (the loader's, as the bench's); the pack 32.37 GB (30.41 GB of columns + 1.95 GB of `dever`), 720,399,014 object versions, 244M directories, 172M names. x1800: 50 s, 3.8 GB.
 
@@ -380,3 +416,5 @@ Tighter bounds would prune more, at more pack bytes: the maximum over scans of t
 [serverless-tiers.md]: serverless-tiers.md
 [static-hex-runs]: done/static-hex-runs.md
 [interval-store.md]: interval-store.md
+[cw adaptive-listing]: https://github.com/Open-Athena/disky/blob/cw/specs/done/adaptive-listing.md
+[cw-static-names]: https://github.com/Open-Athena/disky/blob/cw/specs/cw-static-names.md
