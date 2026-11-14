@@ -253,6 +253,7 @@ struct Cols<'a> {
     dlo: &'a [u32],
     dhi: &'a [u32],
     dend: &'a [u32],
+    dever: &'a [u64],
 }
 
 impl<'a> Cols<'a> {
@@ -270,6 +271,7 @@ impl<'a> Cols<'a> {
             dlo: &ix.dlo,
             dhi: &ix.dhi,
             dend: &ix.dend,
+            dever: &ix.dever,
         }
     }
 }
@@ -773,6 +775,89 @@ impl<'a, const SEARCH: bool, const DIFF: bool, const FILT: bool> Chunk<'a, SEARC
         }
     }
 
+    /// `obj_nodes` for a plain view or diff (no filter, no search left to decide), in one tight loop: each path's live
+    /// versions summed, the nonempty ones counted, and a node emitted only for a path at least `Cut::min_bytes` (against
+    /// the running total, per block of 64K rows). A path split at the chunk's edge goes through `obj_nodes`. Same nodes,
+    /// sums and counts as `obj_nodes`.
+    fn obj_nodes_fast(&mut self, ti: usize, a: usize, b: usize) {
+        let k = self.k;
+        let n = k.vf.len();
+        // The chunk's first path, when it started before the chunk (or in the previous shard).
+        let mut x0 = a;
+        if a == self.lo && cont_bit(k.cont, a) {
+            x0 += 1;
+            while x0 < b && cont_bit(k.cont, x0) {
+                x0 += 1;
+            }
+            self.obj_nodes(ti, a, x0);
+        }
+        // The chunk's last path, when it continues past the chunk (or into the next shard).
+        let mut x1 = b;
+        if x1 > x0 && b == self.hi && ((b < n && cont_bit(k.cont, b)) || (b == n && self.edge_last)) {
+            x1 -= 1;
+            while x1 > x0 && cont_bit(k.cont, x1) {
+                x1 -= 1;
+            }
+        }
+        let c = self.ctx.c;
+        let (sa, sb) = (c.sa, c.sb.unwrap_or(0));
+        let d = self.st[ti].depth + 1;
+        let nn = (x1 - x0) as u64;
+        self.out.t.rows += nn;
+        self.out.t.cont += nn;
+        let mut x = x0;
+        while x < x1 {
+            let mut y = (x + (1 << 16)).min(x1);
+            while y < x1 && cont_bit(k.cont, y) {
+                y += 1;
+            }
+            let tmin = c.cut.min_bytes(d, self.gtot);
+            let (mut ta, mut tb) = (Acc::default(), Acc::default());
+            let mut cnt = 0u64;
+            let mut r = x;
+            while r < y {
+                let s = r;
+                let (mut u, mut v) = (Acc::default(), Acc::default());
+                loop {
+                    let (f0, t0, z) = (k.vf[r], k.vt[r], k.size[r]);
+                    let la = ((f0 <= sa) & (sa < t0)) as u64;
+                    u.bytes += z & la.wrapping_neg();
+                    u.files += la;
+                    if DIFF {
+                        let lb = ((f0 <= sb) & (sb < t0)) as u64;
+                        v.bytes += z & lb.wrapping_neg();
+                        v.files += lb;
+                    }
+                    r += 1;
+                    if r >= y || !cont_bit(k.cont, r) {
+                        break;
+                    }
+                }
+                if u.files | v.files != 0 {
+                    cnt += 1;
+                    ta.add(u);
+                    tb.add(v);
+                    if u.bytes.max(v.bytes) >= tmin {
+                        self.out.done.push(NodeOut { key: OBJ | s as u64, depth: d, matched: SEARCH, kids: 0, a: u, b: v });
+                    }
+                }
+            }
+            let f = &mut self.st[ti];
+            f.kids += cnt;
+            f.a.add(ta);
+            self.run_a += ta.bytes;
+            if DIFF {
+                f.b.add(tb);
+                self.run_b += tb.bytes;
+            }
+            self.publish((y - x) as u64);
+            x = y;
+        }
+        if x1 < b {
+            self.obj_nodes(ti, x1, b);
+        }
+    }
+
     fn pop(&mut self) {
         let f = self.st.pop().unwrap();
         if f.depth > self.ctx.c.maxd {
@@ -833,7 +918,35 @@ impl<'a, const SEARCH: bool, const DIFF: bool, const FILT: bool> Chunk<'a, SEARC
         if ti > 0 && f.depth >= self.ctx.c.maxd && (!SEARCH || f.dec == YES) {
             return Some(true);
         }
+        // A staged scope: a directory none of whose rows is staged contributes nothing.
+        if ti > 0 && FILT && !self.staged_in(f.node as usize) {
+            return Some(false);
+        }
+        // A directory that can't be drawn (`pruned`) is summed flat, unless a search is undecided under it (then
+        // `deep` sums its matches, as below the window).
+        if self.pruned(ti) && (!SEARCH || f.dec == YES) {
+            return Some(true);
+        }
         None
+    }
+
+    /// Whether frame `ti`'s directory can't be drawn, nor anything under it: every version's bytes under it together
+    /// (`dever`, an upper bound on its bytes at any scan, under any filter or search) is under what its depth needs
+    /// against the running total.
+    #[inline]
+    fn pruned(&self, ti: usize) -> bool {
+        let dever = self.k.dever;
+        let f = &self.st[ti];
+        ti > 0 && !dever.is_empty() && prune() && dever[f.node as usize] < self.ctx.c.cut.min_bytes(f.depth, self.gtot)
+    }
+
+    /// Whether directory `j`'s rows meet a staged span (always, without a staged scope).
+    #[inline]
+    fn staged_in(&self, j: usize) -> bool {
+        let Some(st) = &self.ctx.c.staged else { return true };
+        let (a, b) = (self.k.dlo[j], self.k.dhi[j]);
+        let i = st.partition_point(|s| s.1 <= a);
+        i < st.len() && st[i].0 < b
     }
 
     fn run(mut self) -> ChunkOut {
@@ -895,7 +1008,7 @@ impl<'a, const SEARCH: bool, const DIFF: bool, const FILT: bool> Chunk<'a, SEARC
                 }
                 break;
             }
-            if SEARCH && ti > 0 && self.st[ti].depth >= c.maxd {
+            if SEARCH && ti > 0 && (self.st[ti].depth >= c.maxd || self.pruned(ti)) {
                 (o, j) = self.deep(ti, o, dhi.min(hi), j);
                 if o == dhi {
                     self.pop();
@@ -908,7 +1021,11 @@ impl<'a, const SEARCH: bool, const DIFF: bool, const FILT: bool> Chunk<'a, SEARC
             if e > o {
                 let d = self.st[ti].depth;
                 if d < c.maxd {
-                    self.obj_nodes(ti, o, e);
+                    if !FILT && (!SEARCH || self.st[ti].dec == YES) {
+                        self.obj_nodes_fast(ti, o, e);
+                    } else {
+                        self.obj_nodes(ti, o, e);
+                    }
                 } else {
                     let tg = self.target(ti);
                     self.flat(tg, o, e, SEARCH, d as usize + 1);
@@ -985,6 +1102,12 @@ impl Ctx<'_> {
             (true, true, true) => go!(true, true, true),
         }
     }
+}
+
+/// Whether the `dever` bound prunes (`$FSB_NO_PRUNE` set: never, to check its answers against the walk's).
+fn prune() -> bool {
+    static P: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *P.get_or_init(|| std::env::var_os("FSB_NO_PRUNE").is_none())
 }
 
 /// The smallest chunk, in object rows: 64K, or `$FSB_CHUNK_MIN` (tests set it tiny, to put chunk edges everywhere).
@@ -1116,12 +1239,13 @@ fn shard_answer(ix: &SlimIndex, c: &SCompiled, range: (usize, usize), floor: Flo
     let total = ta.bytes.max(tb.bytes);
     nodes.retain(|n| {
         let x = n.a.bytes.max(n.b.bytes);
-        split.contains(&n.key)
-            || match floor {
-                Floor::All => true,
-                Floor::Local => c.cut.keep(x, n.depth, total),
-                Floor::Total(t) => c.cut.keep(x, n.depth, t),
-            }
+        match floor {
+            Floor::Totals => false,
+            Floor::All => true,
+            _ if split.contains(&n.key) => true,
+            Floor::Local => c.cut.keep(x, n.depth, total),
+            Floor::Total(t) => c.cut.keep(x, n.depth, t),
+        }
     });
     // Pre-order: a directory at its first object row, before that row; nested directories by id.
     let pos = |k: u64| -> (u64, u8, u64) {

@@ -52,6 +52,10 @@ pub struct SlimIndex {
     pub dck: Col<u32>,
     /// Directories whose own path also has object versions (sorted).
     pub dself: Col<u32>,
+    /// Per directory, the bytes of every object version under it, whatever its scan: an upper bound on its bytes at
+    /// any scan under any filter, which lets a pass sum a directory that can't be drawn flat (`slim_scan`'s `mode`).
+    /// Empty in packs written before it (no pruning).
+    pub dever: Col<u64>,
     pub stats: Value,
     pub map: Option<std::sync::Arc<crate::pack::Backing>>,
     /// A physical shard's edges (`slice`); `None` for a whole pack.
@@ -324,6 +328,7 @@ impl SlimIndex {
         if dck_off.len() != nd.div_ceil(CKD) + 1 {
             return err(format!("{} directory checkpoints for {nd} directories", dck_off.len() - 1));
         }
+        let dever = ever(&size, &dlo, &dhi);
         let secs = t0.elapsed().as_secs_f64();
         let stats = json!({"rows": o, "dirs": nd, "dirs_with_own_versions": dself.len(), "dirs_dropped": idx.stats.dir_rows as usize - nd, "build_s": secs});
         Ok(SlimIndex {
@@ -353,6 +358,7 @@ impl SlimIndex {
             dck_off: dck_off.into(),
             dck: dck.into(),
             dself: dself.into(),
+            dever: dever.into(),
             stats,
             map: None,
             edge: None,
@@ -373,6 +379,9 @@ impl SlimIndex {
         w.add("dck_off", &self.dck_off);
         w.add("dck", &self.dck);
         w.add("dself", &self.dself);
+        if !self.dever.is_empty() {
+            w.add("dever", &self.dever);
+        }
         w.add("name", &self.name);
         w.add("dname", &self.dname);
         w.add("owner", &self.owner);
@@ -415,6 +424,7 @@ impl SlimIndex {
             dck_off: p.col("dck_off")?,
             dck: p.col("dck")?,
             dself: p.col("dself")?,
+            dever: if p.has("dever") { p.col("dever")? } else { Col::default() },
             map: Some(p.map.clone()),
             edge: match p.meta.get("edge") {
                 None => None,
@@ -435,6 +445,19 @@ impl SlimIndex {
         let i = self.complex_rows.binary_search(&(r as u32)).expect("a COMPLEX row without its slices");
         &self.complex[i]
     }
+}
+
+/// Per directory, the sum of `size` over its rows `[dlo, dhi)` (a prefix sum over the rows).
+fn ever(size: &[u64], dlo: &[u32], dhi: &[u32]) -> Vec<u64> {
+    use rayon::prelude::*;
+    let mut cum = Vec::with_capacity(size.len() + 1);
+    cum.push(0u64);
+    let mut t = 0u64;
+    for &z in size {
+        t += z;
+        cum.push(t);
+    }
+    dlo.par_iter().zip(dhi.par_iter()).map(|(&a, &b)| cum[b as usize] - cum[a as usize]).collect()
 }
 
 /// A physical shard's edges (`SlimIndex::slice`, specs/vm-mode.md §3.1): where its rows sit in the whole pack, and
@@ -548,6 +571,8 @@ impl SlimIndex {
             dck_off: dck_off.into(),
             dck: dck.into(),
             dself: dself.into(),
+            // The whole pack's bound: an open directory's rows reach past this shard.
+            dever: if self.dever.is_empty() { Col::default() } else { dirs.iter().map(|&g| self.dever[g as usize]).collect::<Vec<_>>().into() },
             stats,
             map: None,
             edge: Some(Edge { shard, of, lo: lo as u64, hi: hi as u64, open: open.into(), first_cont, last_cont }),

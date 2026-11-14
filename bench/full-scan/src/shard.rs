@@ -1,6 +1,6 @@
 //! The shard layer (specs/vm-mode.md §3.1): a shard answers a view over its own range of a pack's object rows with a
 //! partial answer, which the merge layer (`merge.rs`) sums by path and cuts. The partial answer is plain data (JSON),
-//! so a shard may run in the merging process (`slim_scan::run_sharded`) or behind HTTP (`vmd --role shard`).
+//! so a shard may run in the merging process (`slim_scan::run_sharded`) or behind HTTP (`vmd`'s `/v1/shard`).
 //!
 //! A shard is logical (a row range of a mapped pack) or physical (`fsb shard`: a self-contained slim pack holding one
 //! row range, with the directories its rows sit under, its own sub-dictionary and its open edges; `slim::Edge`).
@@ -16,7 +16,9 @@ pub enum Floor {
     /// One round: drop a whole node the cut fails against the shard's own total. The view's total is at least the
     /// shard's, so this keeps a superset of what the merge draws.
     Local,
-    /// The second of two rounds: the view's total, from a first round of totals.
+    /// The first of two rounds: the shard's totals alone (no nodes).
+    Totals,
+    /// The second of two rounds: the view's total, from the first round's.
     Total(u64),
     /// Every node (tests).
     All,

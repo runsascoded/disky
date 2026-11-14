@@ -35,11 +35,10 @@ echo "$conf]}" > "$out/vmd.json"
 pid=$!
 trap 'kill $pid 2>/dev/null' EXIT
 until curl -sf "http://127.0.0.1:$port/healthz" > /dev/null; do sleep 0.2; done
-sleep 2
 rc=0
 for g in "$fx"/g*; do
   n=$(basename "$g")
-  if r=$(python3 oracle/vmd_check.py -u "http://127.0.0.1:$port" -k VMD_KEY_CHECK -t "$n-1" -t "$n-4" -t "$n-p3" -t "$n-p7" \
+  if r=$(python3 oracle/vmd_check.py -a -u "http://127.0.0.1:$port" -k VMD_KEY_CHECK -t "$n-1" -t "$n-4" -t "$n-p3" -t "$n-p7" \
       -o "$out/$n.a.jsonl" -Q "$out/$n.qa.jsonl" "$out/$n.q.jsonl" 2> "$out/$n.check.log"); then
     if o=$(uv run -q --script oracle/oracle.py -m 4GB -t 4 -T "$out/duck" "$g" "$out/$n.qa.jsonl" "$out/$n.a.jsonl" 2> "$out/$n.oracle.log"); then
       echo "$n vmd $r; oracle $o"
@@ -50,4 +49,11 @@ for g in "$fx"/g*; do
     echo "$n vmd $r (see $out/$n.check.log)"; rc=1
   fi
 done
+# Today's Worker: every view `intervalStore.test.ts` requires of `buildView` over g1 (`expected.json`), its drawn tiles
+# against vmd's sums.
+if r=$(python3 oracle/worker_fixture_parity.py -u "http://127.0.0.1:$port" -k VMD_KEY_CHECK -t g1-1 "$fx/../expected.json" 2> "$out/worker.log"); then
+  echo "worker (g1, expected.json) $r"
+else
+  echo "worker (g1, expected.json) $r (see $out/worker.log)"; rc=1
+fi
 exit $rc

@@ -332,11 +332,8 @@ impl Server {
         let conf = Conf::read(&conf_path)?;
         let threads = conf.threads.unwrap_or_else(|| std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1));
         let pool = rayon::ThreadPoolBuilder::new().num_threads(threads).build()?;
-        let s = Arc::new(Server { conf_path, tenants: RwLock::new(HashMap::new()), pool, threads });
-        for t in &conf.tenants {
-            s.load(t.clone());
-        }
-        Ok(s)
+        // Tenants load once the server listens (`run`): each `loading` (503) until its pack is mapped and faulted in.
+        Ok(Arc::new(Server { conf_path, tenants: RwLock::new(HashMap::new()), pool, threads }))
     }
 
     /// Map tenant `t`'s pack(s) and swap them in; errors are kept for `status`.
@@ -391,6 +388,8 @@ impl Server {
                 }
             };
             if changed {
+                // Marked before the thread starts, so the next pass never loads it twice.
+                self.tenants.write().unwrap().entry(t.name.clone()).or_default().loading = true;
                 let me = self.clone();
                 std::thread::spawn(move || me.load(t));
             }
@@ -401,6 +400,7 @@ impl Server {
         let conf = Conf::read(&self.conf_path)?;
         let http = Arc::new(tiny_http::Server::http(&conf.listen).map_err(|e| e.to_string())?);
         eprintln!("vmd: listening on {} ({} threads)", conf.listen, self.threads);
+        self.watch_once();
         {
             let me = self.clone();
             let every = Duration::from_secs(conf.watch_s.max(1));
@@ -463,6 +463,7 @@ impl Server {
         let r = match (method, path) {
             ("GET", "/v1/status") => self.status(tenant),
             ("POST", "/v1/view") | ("POST", "/v1/shard") => self.view(tenant, body, path == "/v1/shard"),
+            ("POST", "/v1/merge") => merge_req(tenant, body),
             _ => error(404, "not-found", path),
         };
         (r, Some(key))
@@ -541,6 +542,7 @@ impl Server {
             (true, _) => return error(400, "bad-request", format!("`shard`: 0..{}", l.shards)),
             (false, _) => (0..l.shards).collect(),
         };
+        let mut shared = None;
         for i in which {
             let (ix, range) = if l.parts.len() > 1 {
                 (&l.parts[i], (0, l.parts[i].n_o()))
@@ -548,12 +550,16 @@ impl Server {
                 let n = l.parts[0].n_o();
                 (&l.parts[0], (n * i / l.shards, n * (i + 1) / l.shards))
             };
-            let c = match self.pool.install(|| compile(ix, &query, self.threads)) {
-                Ok(c) => c,
-                Err(e) => return error(400, "bad-request", e.to_string()),
-            };
+            // Logical shards share one pack: its query (the search's dictionary pass, the staged spans) once.
+            if l.parts.len() > 1 || shared.is_none() {
+                shared = Some(match self.pool.install(|| compile(ix, &query, self.threads)) {
+                    Ok(c) => c,
+                    Err(e) => return error(400, "bad-request", e.to_string()),
+                });
+            }
+            let c = shared.as_ref().unwrap();
             let floor = if one_shard { rq.floor.unwrap_or(Floor::Local) } else { Floor::Local };
-            match shard_pass(ix, &c, range, floor, &self.pool, &ga, &gb) {
+            match shard_pass(ix, c, range, floor, &self.pool, &ga, &gb) {
                 Ok((a, t, _)) => {
                     touched.add(&t);
                     answers.push(a);
@@ -596,6 +602,41 @@ impl Server {
         b["tree"] = serde_json::to_value(&tree.root).unwrap();
         reply(200, b)
     }
+}
+
+/// `/v1/merge`'s body: shards' partial answers (from `/v1/shard`, any number of machines) and the view they answer.
+#[derive(Deserialize)]
+pub struct MergeReq {
+    pub answers: Vec<ShardAnswer>,
+    #[serde(default)]
+    pub path: String,
+    pub cell: Cell,
+    #[serde(default)]
+    pub diff: bool,
+    #[serde(default)]
+    pub flat: bool,
+}
+
+/// The merge layer behind HTTP (specs/vm-mode.md §3.2): what a merging caller runs over its shards' answers. Needs no
+/// pack: the folder's depth is its path's.
+fn merge_req(tenant: &str, body: &[u8]) -> Reply {
+    let rq: MergeReq = match serde_json::from_slice(body) {
+        Ok(r) => r,
+        Err(e) => return error(400, "bad-request", e.to_string()),
+    };
+    let path = rq.path.trim_end_matches('/').to_string();
+    let dp = if path.is_empty() { 0 } else { path.split('/').count() as u8 };
+    let cut = match rq.cell.cut(dp) {
+        Ok(c) => c,
+        Err(e) => return error(400, "bad-request", e.to_string()),
+    };
+    let tree = merge(rq.answers, &cut, &path, rq.diff);
+    let mut b = json!({"v": 1, "tenant": tenant, "path": path, "nodes": tree.nodes, "total": tree.total});
+    if rq.flat {
+        b["answer"] = serde_json::to_value(tree.answer("")).unwrap();
+    }
+    b["tree"] = serde_json::to_value(&tree.root).unwrap();
+    reply(200, b)
 }
 
 fn merge_obj(b: &mut Value, from: &Value) {

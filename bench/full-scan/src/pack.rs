@@ -213,6 +213,11 @@ impl Pack {
         Ok(Col::Map(unsafe { self.map.as_ptr().add(*off as usize) } as *const T, *len))
     }
 
+    /// Whether the pack has section `name` (a column added after older packs were written).
+    pub fn has(&self, name: &str) -> bool {
+        self.secs.contains_key(name)
+    }
+
     pub fn len(&self) -> u64 {
         self.map.len() as u64
     }

@@ -1,0 +1,110 @@
+#!/usr/bin/env bash
+# VM mode's phase-1 measurements (specs/vm-mode.md §11) on a bench node. Packs under $PACKS (default ~/packs), results
+# under $OUT (default ~/work/vmd).
+#   run-vmd cells Q OUT                    the cell-rule mix: Q's queries (the bench's object-sum mix) of the kinds the
+#                                          site asks, each under a phone's and a desktop's rule (share 2^-15 / 2^-19,
+#                                          halving per level) and a pure share (2^-15, no attenuation, 8 levels)
+#   run-vmd conf CONF T=PACK[:SHARDS]…     a vmd config of those tenants (key env VMD_KEY_BENCH)
+#   run-vmd cold CONF LABEL Q              caches dropped, vmd started: time until every tenant is hot, then Q's first
+#                                          query per tenant (prefault on, as served)
+#   run-vmd bench CONF LABEL Q [REF]       vmd started (warm page cache), Q against every tenant (or $TENANTS): cold +
+#                                          5 warm, RSS
+#   run-vmd pair CONF LABEL Q REF A B      Q against tenants A and B at the same time (two clients), both checked
+set -euo pipefail
+cd "$(dirname "$0")"
+out=${OUT:-$HOME/work/vmd}
+port=${PORT:-7340}
+mkdir -p "$out"
+export VMD_KEY_BENCH=${VMD_KEY_BENCH:-bench-key}
+log() { echo "[$(date +%T)] $*" >&2; }
+drop() { sync; echo 3 | sudo tee /proc/sys/vm/drop_caches > /dev/null; }
+tenants() {
+  if [ -n "${TENANTS:-}" ]; then for t in $TENANTS; do printf -- '-t %s ' "$t"; done; return; fi
+  python3 -c 'import json,sys; print(" ".join("-t " + t["name"] for t in json.load(open(sys.argv[1]))["tenants"]))' "$1"
+}
+start() {
+  ./target/release/vmd -c "$1" 2>> "$out/vmd.log" &
+  echo $! > "$out/vmd.pid"
+  until curl -sf "http://127.0.0.1:$port/healthz" > /dev/null; do sleep 0.05; done
+}
+hot() {
+  python3 - "$1" <<'PY'
+import json, os, sys, time
+sys.path.insert(0, ".")
+from vmd_client import Vmd
+conf = json.load(open(sys.argv[1]))
+key = os.environ["VMD_KEY_BENCH"].encode()
+while True:
+    states = [Vmd("http://127.0.0.1:" + os.environ.get("PORT", "7340"), t["name"], key).get("/v1/status")[1]["state"] for t in conf["tenants"]]
+    if all(s == "hot" for s in states):
+        break
+    time.sleep(0.05)
+PY
+}
+stop() { kill "$(cat "$out/vmd.pid")" 2>/dev/null || true; sleep 1; }
+cmd=$1; shift
+case $cmd in
+  cells)
+    python3 - "$1" > "$2" <<'PY'
+import json, sys
+keep = {"root", "root-month", "bucket0", "bucket3", "d3-0", "d6-0", "diff-day-root", "diff-month-root", "rare0", "common-ckpt",
+        "and", "anchor-exact", "owner-one", "unowned", "class-one", "staged", "search-diff-month"}
+rules = {"phone": {"share_log2": 15, "atten_log2": 1}, "desk": {"share_log2": 19, "atten_log2": 1}, "flat8": {"share_log2": 15, "atten_log2": 0, "depth": 8}}
+for l in open(sys.argv[1]):
+    q = json.loads(l)
+    if q["id"] not in keep:
+        continue
+    for k, c in rules.items():
+        x = {k2: v for k2, v in q.items() if k2 not in ("depth", "min_ppm")}
+        x["id"], x["cell"], x["tags"] = f"{q['id']}@{k}", c, q.get("tags", []) + [k]
+        print(json.dumps(x))
+PY
+    ;;
+  conf)
+    conf=$1; shift
+    python3 - "$@" > "$conf" <<'PY'
+import json, sys
+ts = []
+for a in sys.argv[1:]:
+    name, spec = a.split("=", 1)
+    pack, _, shards = spec.partition(":")
+    ts.append({"name": name, "pack": pack, "shards": int(shards or 1), "key_env": "VMD_KEY_BENCH"})
+print(json.dumps({"listen": "127.0.0.1:7340", "handlers": 4, "tenants": ts}, indent=1))
+PY
+    ;;
+  cold)
+    conf=$1 label=$2 q=$3
+    stop
+    drop
+    t0=$(date +%s.%N)
+    start "$conf"
+    hot "$conf"
+    t1=$(date +%s.%N)
+    log "$label: every tenant hot in $(python3 -c "print(round($t1 - $t0, 2))") s"
+    head -1 "$q" > "$out/first.jsonl"
+    python3 vmd_bench.py -k VMD_KEY_BENCH $(tenants "$conf") -r 0 -p "$(cat "$out/vmd.pid")" -l "$label" -o "$out/cold-$label.jsonl" "$out/first.jsonl" 2>> "$out/bench.log"
+    echo "{\"kind\": \"hot\", \"label\": \"$label\", \"hot_s\": $(python3 -c "print($t1 - $t0)")}" >> "$out/cold-$label.jsonl"
+    stop
+    ;;
+  bench)
+    conf=$1 label=$2 q=$3 ref=${4:-}
+    stop
+    start "$conf"
+    hot "$conf"
+    python3 vmd_bench.py -k VMD_KEY_BENCH $(tenants "$conf") -r "${REPS:-5}" -p "$(cat "$out/vmd.pid")" -l "$label" ${ref:+-A "$ref"} -o "$out/bench-$label.jsonl" -a "$out/answers-$label.jsonl" "$q" 2>> "$out/bench.log"
+    stop
+    ;;
+  pair)
+    conf=$1 label=$2 q=$3 ref=$4 ta=$5 tb=$6
+    stop
+    start "$conf"
+    hot "$conf"
+    pid=$(cat "$out/vmd.pid")
+    python3 vmd_bench.py -k VMD_KEY_BENCH -t "$ta" -r 5 -p "$pid" -l "$label-$ta" -A "$ref" -o "$out/pair-$label-$ta.jsonl" "$q" 2>> "$out/bench.log" &
+    a=$!
+    python3 vmd_bench.py -k VMD_KEY_BENCH -t "$tb" -r 5 -p "$pid" -l "$label-$tb" -A "$ref" -o "$out/pair-$label-$tb.jsonl" "$q" 2>> "$out/bench.log"
+    wait $a
+    stop
+    ;;
+  *) echo "usage: run-vmd cells|conf|cold|bench|pair …" >&2; exit 2 ;;
+esac

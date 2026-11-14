@@ -94,11 +94,12 @@ def ast_of(e: dict) -> dict | None:
 
 
 def body_of(q: dict, pins: dict) -> dict | None:
-    """A bench query as a `/v1/view` body (`flat`: the bench's answer form too), or None when it has none: a
-    directory-total view, a `min_ppm` threshold (the API has only the cell rule), or a search with no `QueryAst` form."""
-    if q.get("dirs") or (q.get("cell") is None and q.get("min_ppm")):
+    """A bench query as a `/v1/view` body (`flat`: the bench's answer form too; `min_ppm` as the cell rule's legacy
+    form), or None when it has none: a directory-total view, or a search with no `QueryAst` form."""
+    if q.get("dirs"):
         return None
-    b = {"pins": pins, "path": q.get("path", ""), "cell": q.get("cell") or {"depth": q["depth"]}, "flat": True}
+    cell = q.get("cell") or {"depth": q["depth"], **({"min_ppm": q["min_ppm"]} if q.get("min_ppm") else {})}
+    b = {"pins": pins, "path": q.get("path", ""), "cell": cell, "flat": True}
     for k in ("scan", "from", "to", "owners", "classes", "staged"):
         if q.get(k) is not None:
             b[k] = q[k]
