@@ -206,8 +206,8 @@ function NavMenuInner({ extra }: { extra?: MenuEntry[] }) {
   // outlives the session that minted it).
   const canShare = useCanStage()
   const m = useMenu('bottom-start')
-  // The subtree's store: its own map (`/meta`), and only the affordances it
-  // has (ownership, staging are the primary's).
+  // The subtree's store: its own map (`/meta`). The site's own pages (users,
+  // staged, dups) are the primary store's, listed from every page.
   const store = useStore()
   // The map is "here" at the store's root only (a drilled path is a place of
   // its own); every other page, on it or under it.
@@ -228,10 +228,10 @@ function NavMenuInner({ extra }: { extra?: MenuEntry[] }) {
           <FloatingFocusManager context={m.context} modal={false}>
             <div className="menu-pop" ref={m.refs.setFloating} style={m.floatingStyles} {...m.getFloatingProps()}>
               {link(store.path, 'Map')}
-              {canAssign && store.owners && link('/users', 'Users')}
-              {canAssign && store.owners && link('/assignments', 'Assignments')}
-              {store.staging && link('/staged', 'Staged')}
-              {DUPS && store === DEFAULT_STORE && link('/dups', 'Duplicates')}
+              {canAssign && DEFAULT_STORE.owners && link('/users', 'Users')}
+              {canAssign && DEFAULT_STORE.owners && link('/assignments', 'Assignments')}
+              {DEFAULT_STORE.staging && link('/staged', 'Staged')}
+              {DUPS && link('/dups', 'Duplicates')}
               {link(scansHref(store), 'Scan runs')}
               {link('/health', 'Health')}
               {DEFAULT_STORE.metaTree && <a role="menuitem" className="mi" href={DEFAULT_STORE.metaTree} target="_blank" rel="noreferrer" onClick={() => m.setOpen(false)}>Meta <span className="dim">(the data bucket)</span> ↗</a>}
