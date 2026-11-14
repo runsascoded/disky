@@ -3,7 +3,7 @@ import type { CSSProperties, ReactNode } from 'react'
 import { candidates, type CellText, fitCandidate, inlineRoom } from './cellText'
 import { CONTAINER_BG, contrastEdge, DEFAULT_PALETTE, slotColor } from './colors'
 import { DustHatch } from './DustHatch'
-import { bandRects, dustInk, stripeBackground } from './cellPaint'
+import { bandRects, stripeBackground } from './cellPaint'
 import type { FoldedNode, LayoutConfig } from './layout'
 import { cellStroke, flattenPlaced, isFolded, layoutCells, layoutChildren } from './layout'
 import { colorResolver } from './cssColor'
@@ -1058,6 +1058,9 @@ export function Treemap<T>({
       builtinEdge = contrastEdge(style.bg, fadeAt(depth))
     }
     const ring = resolveRing(style.ring)
+    // The paint layer's (and the dust hatch's) inset: inside the shared half-stroke, and an inset `ring` (a
+    // box-shadow on the cell box, under the paint: left bare, or it would only show as far as the shared edge).
+    const paintInset = Math.max(shared ? edge : 0, ring?.inset ? ring.width : 0)
 
     const cellKey = folded
       ? `__folded_${depth}_${r.x}_${r.y}`
@@ -1190,26 +1193,14 @@ export function Treemap<T>({
             position: 'absolute',
             // An inset `ring` is a box-shadow on the cell box, under this layer: leave it bare too, or it
             // would only show as far as the shared edge (and not at all in gaps mode).
-            inset: Math.max(shared ? edge : 0, ring?.inset ? ring.width : 0),
+            inset: paintInset,
             background: style.bands?.length ? undefined : style.bg,
             ...((style.hatch || style.stripes) && { backgroundImage: style.hatch ?? stripeBackground(style.stripes) }),
-            // Dashed frame marks the dust tile as not-a-real-cell.
-            ...(foldedNode && dustTexture && Math.min(r.w, r.h) >= 8 && {
-              border: '1px dashed var(--dt-treemap-folded-edge, rgba(150, 150, 165, 0.55))',
-              boxSizing: 'border-box' as const,
-            }),
             opacity: fadeAt(depth) * (style.opacity ?? 1),
             pointerEvents: 'none',
           }}
         >
         {bandRects(style.bands, boxH).map((b, i) => <div key={i} style={{ position: 'absolute', left: 0, right: 0, top: b.top, height: b.height, background: b.color }} />)}
-        {/* Dust hatch: the folded "(other)" tail, drawn as rules that tighten
-            toward the lower-right, density scaled by the folded count — a
-            texture distinct from real cells. Hit-detection (above) maps a
-            hover back to a specific folded item. */}
-        {(foldedNode || style.dustCount !== undefined) && dustTexture && Math.min(r.w, r.h) >= 6 && (
-          <DustHatch w={boxW} h={boxH} count={foldedNode?.count ?? style.dustCount!} color={foldedNode ? undefined : dustInk(style, fadeAt(depth))} />
-        )}
         {/* Makeup stripes: a leaf/fold cell with a mixed composition renders
             proportional inset slices (longer axis) instead of one dominant
             blob. The `bg` frame showing through the inset + the single outer
@@ -1239,6 +1230,27 @@ export function Treemap<T>({
             })
           })()}
         </div>
+        {/* Dust hatch: the folded "(other)" tail (or a consumer's aggregate with `dustCount`), drawn as rules that
+            tighten toward the lower-right, density scaled by the folded count — a texture distinct from real
+            cells. Its own layer over the paint (fill, bands, makeup stripes), outside the depth fade (only the
+            cell's `opacity` dims it), inked black or white against that paint so it reads at any depth.
+            Hit-detection (above) maps a hover back to a specific folded item. */}
+        {(foldedNode || style.dustCount !== undefined) && dustTexture && Math.min(r.w, r.h) >= 6 && (
+          <div
+            className="dt-treemap-dust"
+            style={{ position: 'absolute', inset: paintInset, opacity: style.opacity ?? 1, pointerEvents: 'none' }}
+          >
+            <DustHatch
+              w={Math.max(0, boxW - 2 * paintInset)}
+              h={Math.max(0, boxH - 2 * paintInset)}
+              count={foldedNode?.count ?? style.dustCount!}
+              ground={style.segments && style.segments.length > 1 && kids.length === 0 && !dust && Math.min(r.w, r.h) >= 18 ? style : { ...style, segments: undefined }}
+              alpha={fadeAt(depth) * (style.opacity ?? 1)}
+              frame={!!foldedNode && Math.min(r.w, r.h) >= 8}
+              clearLabels={showLbl}
+            />
+          </div>
+        )}
         {showLbl && (
           <div
             className={'dt-treemap-lbl' + (r.w < 64 ? ' sm' : '')}
