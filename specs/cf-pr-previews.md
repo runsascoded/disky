@@ -40,6 +40,7 @@ What approval now means: an approved head's server code runs with the deployment
 |---|---|---|---|
 | `full` | the PR's full build, as branch `pr-N` of the deployment's own Pages project | the project's preview environment (on Disky: the dev stack's production D1/R2, secrets) | implemented (Pages) |
 | `stack` | the PR's full build | a scratch D1 + R2 created for the PR | specified |
+| `sandbox` | the PR's full build, as branch `pr-N` of a per-deployment `<project>-sandbox` Pages project | a shared sandbox D1 copied from production; production's serving R2, read-only; no outside-effect secrets | proposed (awaiting Ryan) |
 | `pipeline` | a job image built from the PR head, run from GHA | a scratch store prefix (reads of declared inputs) | specified |
 
 ### Selection
@@ -98,6 +99,20 @@ Data: a scratch D1 database and R2 bucket per PR, both named in the reserved nam
 Credentials: the deploy token additionally needs D1 Edit and R2 Edit on the account. Sign-in: to be specified with the auth owner (the scratch D1 holds no sessions or grants).
 
 Ownership and cleanup: a `_cf_preview_owner` row in the D1 and a `.cf-preview-owner` object in the bucket carry the owner marker; retire proves both before deleting, empties the bucket with full pagination, then deletes bucket, database and the deployment. A mode switch (`full` ↔ `stack`) retires the PR's other mode first.
+
+### `sandbox`: the PR's build over a copy of production's data (proposed, awaiting Ryan)
+
+Why: `full` gives a PR production's D1 read-write and every preview secret, so exercising an admin write (staging, grants, the admin list, "Run a scan") on a preview acts on production. `stack`'s fixture store keeps production safe but can't show a change against real data. `sandbox` sits between them: real data, no effect outside the sandbox. Ryan asked (2026-11-12) that a preview can point at dummy data, the public demo, or a copy of production's; `stack` covers the first two, `sandbox` the third.
+
+Why a second Pages project: Pages gives every branch of a project the same preview bindings, so a branch of the deployment's own project can't get different data. One `<project>-sandbox` project per deployment, created by its owner (Pulumi `cf/`), whose preview environment binds:
+
+- **D1:** `<project>-sandbox-db`, a copy of production's (`wrangler d1 export` → import), refreshed on a schedule (laggy by design) and on demand before a preview that needs current rows. Sessions and grants are dropped from the copy; viewers sign in fresh.
+- **R2:** production's serving bucket through a read-only token. Nothing a preview does writes there.
+- **Secrets:** sign-in (the broker's preview client) only. No `GCP_SA_KEY`, Slack, Discord or Batch credentials, so dispatches, digests, sweeps and notices can't reach outside (routes like `/api/admin/history` already 503 without `GCP_SA_KEY`; the pilot audits every route that sends anything without one), and a write lands only in the sandbox D1.
+
+Selection: the default mode for each deployment once built. `full` then needs a maintainer's `preview:full` label (or `/preview full`), after review of the head, for a change that only production's environment can show. Cleanup is `full`'s (owned `pr-N` deployments in the sandbox project); the project and its D1 outlive PRs.
+
+Each deployment's owner session creates its sandbox project and D1, with Ryan's go; gcs, cw and r2 are holding their preview-environment changes for this decision.
 
 ### `pipeline`: the PR's job code over a scratch prefix (specified)
 
