@@ -29,6 +29,7 @@ sources:
   - {uri: s3://marin-us-east-08a, endpoint: https://cwobject.com}
   - {uri: s3://marin-us-west-04a, endpoint: https://cwobject.com}
   - {uri: s3://marin-us-east-01a, endpoint: https://cwobject.com}
+  - {uri: s3://marin-us-east-04a, endpoint: https://cwobject.com}
   - {uri: s3://marinfold-exp368-rno2a, endpoint: https://cwobject.com}
   - {uri: s3://marin-rno2a, endpoint: https://cwobject.com}
 machines:
@@ -61,7 +62,7 @@ env:
   D1_DB_NAME: oa-cw-s3-usage-db
   INDEX_VARIANTS: path                              # no user-sorted tiers here
   SITE_URL: https://cw.oa.dev
-  WARM_PATHS: ",marin-us-east-02a,marin-us-east-02a/marin,marin-us-east-02a/tmp,marin-us-east-02a/iris,hero-checkpoints,hero-checkpoints/tmp,hero-checkpoints/marin,marin-us-east-06a,marin-us-east-06a/marin,rhoarnet-us-east-08a,marin-us-east-08a,marin-us-west-04a,marin-us-east-01a,marinfold-exp368-rno2a,marin-rno2a"
+  WARM_PATHS: ",marin-us-east-02a,marin-us-east-02a/marin,marin-us-east-02a/tmp,marin-us-east-02a/iris,hero-checkpoints,hero-checkpoints/tmp,hero-checkpoints/marin,marin-us-east-06a,marin-us-east-06a/marin,rhoarnet-us-east-08a,marin-us-east-08a,marin-us-west-04a,marin-us-east-01a,marin-us-east-04a,marinfold-exp368-rno2a,marin-rno2a"
   SWEEP_BUCKET: marin-us-east-02a
   SWEEP_S3_ENDPOINT: https://cwobject.com
   # the R2 serving bucket each scan's served subset is published to (`cw-s3` CF stack's `r2_bucket`)

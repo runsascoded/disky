@@ -17,7 +17,7 @@ R2_SECRETS = {
     "R2_SECRET_ACCESS_KEY": "cw-s3-isolated-r2-secret-access-key",
 }
 CW_BUCKETS = ("marin-us-east-02a", "hero-checkpoints", "marin-us-east-06a", "rhoarnet-us-east-08a", "marin-us-east-08a",
-              "marin-us-west-04a", "marin-us-east-01a", "marinfold-exp368-rno2a", "marin-rno2a")
+              "marin-us-west-04a", "marin-us-east-01a", "marin-us-east-04a", "marinfold-exp368-rno2a", "marin-rno2a")
 
 
 @pytest.mark.parametrize("profile, store, sources", [

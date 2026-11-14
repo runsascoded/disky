@@ -51,8 +51,8 @@ reply_lines: true
 # exactly 910 TiB ("1 PB"); US-EAST-08A = 500 TiB (100 until 2026-10-16) shared by
 # hero-checkpoints, rhoarnet-us-east-08a and marin-us-east-08a (`zone: 08a`, one
 # tail clause against the zone's quota); US-EAST-06A and US-WEST-04A = 100 TiB
-# each, one bucket apiece (finelog, 2026-10-17), and US-EAST-01A = 100 TiB, one
-# bucket (finelog, 2026-11-14); RNO2A = 100 TiB shared by
+# each, one bucket apiece (finelog, 2026-10-17), and US-EAST-01A and US-EAST-04A
+# (`e04a`: `04a` is US-WEST's) = 100 TiB, one bucket apiece (finelog, 2026-11-14); RNO2A = 100 TiB shared by
 # marinfold-exp368-rno2a and marin-rno2a (Grafana's CoreWeaveStorageQuotaExceeded,
 # 2026-10-29: writes suspended, while the digest showed rno2a with no quota clause).
 # `shape`: the pool's mark under `quota_marks: runway-hue` (`:runway-<shape>-N:`; a zone's buckets state the same one)
@@ -64,6 +64,7 @@ buckets:
   marin-us-east-08a: {label: 08a, zone: 08a, shape: square, quota: {bytes: 500 TiB, name: 500 TiB, short: 500Ti}}
   marin-us-west-04a: {label: 04a, shape: triangle, quota: {bytes: 100 TiB, name: 100 TiB, short: 100Ti}}
   marin-us-east-01a: {label: 01a, shape: triangle, quota: {bytes: 100 TiB, name: 100 TiB, short: 100Ti}}
+  marin-us-east-04a: {label: e04a, shape: triangle, quota: {bytes: 100 TiB, name: 100 TiB, short: 100Ti}}
   marinfold-exp368-rno2a: {label: marinfold, zone: rno2a, shape: star, quota: {bytes: 100 TiB, name: 100 TiB, short: 100Ti}}
   marin-rno2a: {label: rno2a, zone: rno2a, shape: star, quota: {bytes: 100 TiB, name: 100 TiB, short: 100Ti}}
 prices: {}

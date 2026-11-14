@@ -54,7 +54,7 @@ OG_DEFAULT_COLOR = "t"           # Match CW's frontend default
 # The plan prefix shape (`_lib/plans.ts` prefixShape): CoreWeave's S3-compatible
 # buckets; explicit here so the deployment declares it rather than inheriting a default.
 STORE_SCHEME = "s3://"
-STORE_BUCKETS = "marin-us-east-02a,hero-checkpoints,marin-us-east-06a,rhoarnet-us-east-08a,marin-us-east-08a,marin-us-west-04a,marin-us-east-01a,marinfold-exp368-rno2a,marin-rno2a"
+STORE_BUCKETS = "marin-us-east-02a,hero-checkpoints,marin-us-east-06a,rhoarnet-us-east-08a,marin-us-east-08a,marin-us-west-04a,marin-us-east-01a,marin-us-east-04a,marinfold-exp368-rno2a,marin-rno2a"
 BASE_SCOPE = "cw"
 SNAPSHOTS_SUBDIR = "cw"          # this store's snapshots: snapshots/cw/ (`_lib/shared.ts` snapshotsPrefix)
 # The store seam's read allow-list (`_lib/index.ts` storePrefixes, also honored
@@ -216,7 +216,7 @@ OG_CARDS = "1"
 OG_ANONYMOUS = "full"
 OG_DEFAULT_COLOR = "t"
 STORE_SCHEME = "s3://"
-STORE_BUCKETS = "marin-us-east-02a,hero-checkpoints,marin-us-east-06a,rhoarnet-us-east-08a,marin-us-east-08a,marin-us-west-04a,marin-us-east-01a,marinfold-exp368-rno2a,marin-rno2a"
+STORE_BUCKETS = "marin-us-east-02a,hero-checkpoints,marin-us-east-06a,rhoarnet-us-east-08a,marin-us-east-08a,marin-us-west-04a,marin-us-east-01a,marin-us-east-04a,marinfold-exp368-rno2a,marin-rno2a"
 BASE_SCOPE = "cw"
 SNAPSHOTS_SUBDIR = "cw"
 STORE_PREFIXES = "listing/,snapshots/,sweep/,cw-sweep/,cw-l2/"
