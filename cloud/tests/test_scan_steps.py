@@ -708,6 +708,7 @@ def test_soft_steps_classification():
         "cf-usage": "side converges",
         "gcp-cost": "side",
         "soft-delete": "side",
+        "vm-pack": "side converges",
     }
 
 
@@ -1799,3 +1800,34 @@ def test_access_r2_checkpoint_is_explicit_and_runs_in_task_scratch(tmp_path, env
         'dt-cloud access r2-sync -d 2026-10-16T1200 -o <tmp>/t/dt-scan/2026-10-16T1200/access-r2/agg.parquet -s r2://logs/state.json -c gs://data/access/r2/closed.parquet -w <tmp>/t/dt-scan/2026-10-16T1200/access-r2/checkpoint -M 3GB -p 4 -v',
     ]
     assert (tmp_path / 'data/access/r2/agg.parquet').read_text() == 'agg as of 2026-10-16T1200'
+
+
+def test_vm_pack_builds_beside_the_interval_store(tmp_path, env):
+    """`vm-pack` (listed in `steps`): `dt-cloud vm-pack build` over `options.vm-pack.store`, else the interval store's
+    store, else `R2_ARCHIVE`; skipped (and said so) without a store or an `fsb`; nothing on REPROC."""
+    fsb = {**env, "FSB": "/usr/local/bin/fsb"}
+    opts = {"static-names": {"profile": "sn.json"}, "digest": {"template": "t", "config": "c.yml"}}
+    w = "<tmp>/t/dt-scan/2026-10-16T1200/vm-pack"
+    runs = []
+    for e, o in ((fsb, {"vm-pack": {"store": "gs://packs", "keep": 3}}), (fsb, {"interval-store": {"store": "gs://iv"}}),
+                 ({**fsb, "R2_ARCHIVE": "r2://arch"}, {})):
+        c = ctx(tmp_path, e, steps=["vm-pack"], options={**opts, **o})
+        S.vm_pack(c, None)
+        runs.append((c.sh_impl.calls, c.skipped))
+    assert runs == [
+        ([f"dt-cloud vm-pack build -o gs://packs -w {w} -k 3"], None),
+        ([f"dt-cloud vm-pack build -o gs://iv -w {w} -k 2"], None),
+        ([f"dt-cloud vm-pack build -o r2://arch -w {w} -k 2"], None),
+    ]
+    skips = []
+    for e in (fsb, {**env, "PATH": str(tmp_path / "empty"), "R2_ARCHIVE": "r2://arch"}):
+        c = ctx(tmp_path, e, steps=["vm-pack"], options=opts)
+        S.vm_pack(c, None)
+        skips.append((c.sh_impl.calls, c.skipped))
+    assert skips == [
+        ([], "skipped (unconfigured): no store (options.vm-pack.store, options.interval-store.store or R2_ARCHIVE)"),
+        ([], "skipped (unconfigured): no fsb in this image ($FSB or PATH)"),
+    ]
+    c = ctx(tmp_path, {**fsb, "REPROC": "1", "R2_ARCHIVE": "r2://arch"}, steps=["vm-pack"], options=opts)
+    S.vm_pack(c, None)
+    assert c.sh_impl.calls == []

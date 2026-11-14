@@ -1880,6 +1880,32 @@ def soft_delete(ctx: Ctx, arg: str | None) -> None:
                fatal=False, warn="soft-delete reading failed (the scan's outputs stand; the site keeps the last one, dated)")
 
 
+@step("vm-pack", core=False, soft=True, options={"store": str, "keep": int},
+      requires=primary_only("vm-pack", "a pack is the primary interval store's"),
+      side=True, converges=True, leaves="VM mode's pack not written: the VM serves the previous one until a later run writes it")
+def vm_pack(ctx: Ctx, arg: str | None) -> None:
+    """VM mode's pack (specs/vm-mode.md §6): `dt-cloud vm-pack build` over the interval store's current generation and
+    newest manifest, published beside it under `vm-pack/` (the pack, then `vm-pack/CURRENT.json`). The store is
+    `options.vm-pack.store`, else the interval store's (`options.interval-store.store`, else `R2_ARCHIVE`). Needs `fsb`
+    in the image (`$FSB` or PATH): without it the step is skipped, said in its note. Post stage, after the append;
+    idempotent (a pointer already naming the generation and manifest is a no-op), so a later run catches up. Its loader
+    holds the store's rows in RAM once (gcs: 117 GB peak), so a deployment listing it sizes its `post` machine for that.
+    Not core: a deployment opts in (`steps`)."""
+    if ctx.reproc:
+        err("REPROC: not writing a VM pack")
+        return
+    store = ctx.opt("vm-pack", "store") or ctx.opt("interval-store", "store") or ctx.env.get("R2_ARCHIVE")
+    with ctx.phase("vm-pack"):
+        if not store:
+            ctx.skip("unconfigured", "no store (options.vm-pack.store, options.interval-store.store or R2_ARCHIVE)")
+            return
+        if not (ctx.env.get("FSB") or shutil.which("fsb", path=ctx.env.get("PATH"))):
+            ctx.skip("unconfigured", "no fsb in this image ($FSB or PATH)")
+            return
+        ctx.sh(["dt-cloud", "vm-pack", "build", "-o", store, "-w", str(ctx.work / "vm-pack"), "-k", str(ctx.opt("vm-pack", "keep", 2))],
+               fatal=False, warn=f"VM pack not written for {ctx.scan} (the VM keeps serving the previous pack)")
+
+
 #: Core steps a profile may `skip`.
 SKIPPABLE = tuple(n for n, s in STEPS.items() if s.core and s.skippable)
 
