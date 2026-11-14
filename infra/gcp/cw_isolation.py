@@ -13,6 +13,12 @@ def prepare_isolation(
     labels = {"app": "disky", "deployment": "cw"}
     buckets = []
     resources: list[pulumi.CustomResource] = []
+    # The data bucket's temporary prefixes, by age (days). Never `nf/` whole: `nf/ownership/` is the scan-ownership
+    # ledger. `nf/work/`, `nf/cache/`: every scan is a fresh run, nothing resumes older. `nf/runs/`: its one reader, the
+    # run's `dag.mmd`, is copied into D1 when the run is recorded (older runs keep only the logs link, also 30 d).
+    # `meta-listing/`: `meta-l2/` is the durable layer. `static-names/` (generation GC) and `cw-l2/` (`retire`) are
+    # collected by the scan's own steps.
+    data_expiry = {"nf/work/": 14, "nf/cache/": 14, "nf/runs/": 30, "meta-listing/": 30}
     for component, name, days in (
         ("data", "oa-cw-s3-usage-data", None),
         ("scratch", "oa-cw-s3-usage-scratch", 7),
@@ -28,7 +34,10 @@ def prepare_isolation(
             force_destroy=False,
             labels={**labels, "component": component},
             soft_delete_policy={"retention_duration_seconds": 604800 if days is None else 0},
-            lifecycle_rules=[] if days is None else [{"action": {"type": "Delete"}, "condition": {"age": days}}],
+            lifecycle_rules=(
+                [{"action": {"type": "Delete"}, "condition": {"age": d, "matches_prefixes": [p]}} for p, d in data_expiry.items()]
+                if days is None else [{"action": {"type": "Delete"}, "condition": {"age": days}}]
+            ),
             opts=pulumi.ResourceOptions(protect=True),
         )
         grant = gcp.storage.BucketIAMMember(
