@@ -4,7 +4,11 @@
 enough that every node the Worker drew passes; every node the Worker drew must be in `vmd`'s tree with equal bytes and
 objects (both sides, in a diff), and the totals equal. One JSONL line per request (`-o`); a summary to stdout.
 
-    worker_parity.py -s SITE -T TOKEN_FILE -k KEY_ENV -t TENANT -d SCAN [-m FROM] [-p PATH …] -o OUT
+    worker_parity.py -s SITE -T TOKEN_FILE -k KEY_ENV -t TENANT -d SCAN [-m FROM] [-p PATH …] [-n N [-D]] -o OUT
+
+TOKEN_FILE holds a Bearer token (a personal agent token), or a `?key=` share link, which is exchanged once
+(`POST /api/auth/exchange`) for a session cookie. Neither is ever printed. `-n N`: also the root's N largest children
+(from the Worker's root view), and with `-D` each one's largest child, so no path need be named on the command line.
 """
 import json
 import os
@@ -22,9 +26,34 @@ from vmd_client import Vmd  # noqa: E402
 W = "w=1408&h=896"
 
 
-def site_get(site: str, token: str, route: str, q: str) -> tuple[int, dict | str, float]:
+UA = "disky-vm-parity/1"
+
+
+def auth_headers(site: str, secret: str) -> dict[str, str]:
+    """The headers that authorize a site request: a `?key=` share link exchanged for its session cookie(s), else the
+    secret as a Bearer token. The secret never reaches stdout, stderr or an exception message."""
+    u = urllib.parse.urlparse(secret)
+    key = urllib.parse.parse_qs(u.query).get("key", [None])[0] if u.scheme in ("http", "https") else None
+    if not key:
+        return {"Authorization": f"Bearer {secret}"}
+    rq = urllib.request.Request(f"{site.rstrip('/')}/api/auth/exchange", data=json.dumps({"token": key}).encode(), method="POST",
+                                headers={"content-type": "application/json", "User-Agent": UA})
+    try:
+        with urllib.request.urlopen(rq, timeout=60) as r:
+            cookies = r.headers.get_all("set-cookie") or []
+    except urllib.error.HTTPError as e:
+        raise SystemExit(f"share-link exchange refused: HTTP {e.code} {e.read().decode()[:200]}") from None
+    pairs = [c.split(";", 1)[0].strip() for c in cookies]
+    pairs = [p for p in pairs if "=" in p and p.split("=", 1)[1]]
+    if not pairs:
+        raise SystemExit("share-link exchange: no session cookie in the reply")
+    print(f"share link exchanged: {len(pairs)} cookie(s) ({', '.join(p.split('=', 1)[0] for p in pairs)})", file=sys.stderr)
+    return {"Cookie": "; ".join(pairs)}
+
+
+def site_get(site: str, auth: dict[str, str], route: str, q: str) -> tuple[int, dict | str, float]:
     url = f"{site.rstrip('/')}{route}?{q}"
-    rq = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}", "User-Agent": "disky-vm-parity/1"})
+    rq = urllib.request.Request(url, headers={**auth, "User-Agent": UA})
     for i in range(8):
         t = time.time()
         try:
@@ -77,8 +106,10 @@ def compare(worker: dict[str, tuple], vm: dict[str, tuple]) -> dict:
 def main() -> int:
     ap = ArgumentParser()
     ap.add_argument("-d", "--date", required=True)
+    ap.add_argument("-D", "--drill", action="store_true", help="With -n: each of those children's largest child too")
     ap.add_argument("-k", "--key-env", required=True)
     ap.add_argument("-m", "--month-from", help="A diff's from scan")
+    ap.add_argument("-n", "--top", type=int, default=0, help="Also the root's N largest children (from the Worker's root view)")
     ap.add_argument("-o", "--out", required=True)
     ap.add_argument("-p", "--path", action="append", default=[])
     ap.add_argument("-s", "--site", required=True)
@@ -86,27 +117,33 @@ def main() -> int:
     ap.add_argument("-T", "--token-file", required=True)
     ap.add_argument("-u", "--url", default="http://127.0.0.1:7340")
     a = ap.parse_args()
-    token = Path(a.token_file).read_text().strip()
+    auth = auth_headers(a.site, Path(a.token_file).read_text().strip())
     v = Vmd(a.url, a.tenant, os.environ[a.key_env].encode())
     pins = v.get("/v1/status")[1]["current"]["pins"]
-    paths = [""] + a.path
     scopes = [{}, {"o": "owned"}, {"o": "unowned"}, {"cl": "n"}, {"q": "ckpt"}, {"q": "zarr.json"}]
-    reqs = []
-    for p in paths:
-        for s in scopes:
-            reqs.append(("subtree", p, s))
-        if a.month_from:
-            reqs.append(("diff", p, {}))
+
+    def reqs_for(p: str) -> list[tuple[str, str, dict]]:
+        return [("subtree", p, s) for s in scopes] + ([("diff", p, {})] if a.month_from else [])
+    reqs = [r for p in ["", *a.path] for r in reqs_for(p)]
     tally = {"requests": 0, "worker_errors": 0, "vm_errors": 0, "equal_requests": 0, "nodes_compared": 0, "nodes_equal": 0}
     with open(a.out, "w") as f:
-        for kind, p, s in reqs:
+        while reqs:
+            kind, p, s = reqs.pop(0)
             qs = "&".join(f"{k}={urllib.parse.quote(str(x))}" for k, x in s.items())
             if kind == "subtree":
                 q = f"{W}&date={a.date}&path={urllib.parse.quote(p)}" + (f"&{qs}" if qs else "") + "&full=1"
-                st, wb, ws = site_get(a.site, token, "/api/subtree", q)
+                st, wb, ws = site_get(a.site, auth, "/api/subtree", q)
+                if st == 200 and p == "" and not s and a.top:
+                    # the root's largest children (and each one's largest child): paths found, never named
+                    kids = sorted((c for c in wb["tree"].get("children", []) if c["name"] != "(other)"), key=lambda c: -c["bytes"])[:a.top]
+                    more = [c["name"] for c in kids]
+                    if a.drill:
+                        more += [f"{c['name']}/{g['name']}" for c in kids
+                                 for g in sorted((g for g in c.get("children", []) if g["name"] != "(other)"), key=lambda g: -g["bytes"])[:1]]
+                    reqs += [r for m in more for r in reqs_for(m)]
             else:
                 q = f"{W}&from={a.month_from}&to={a.date}&path={urllib.parse.quote(p)}&dm=delta"
-                st, wb, ws = site_get(a.site, token, "/api/diff", q)
+                st, wb, ws = site_get(a.site, auth, "/api/diff", q)
             line = {"kind": kind, "path": p, "scope": s, "worker_status": st, "worker_s": round(ws, 3)}
             tally["requests"] += 1
             if st != 200:
