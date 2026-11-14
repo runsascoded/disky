@@ -40,16 +40,28 @@ What approval now means: an approved head's server code runs with the deployment
 |---|---|---|---|
 | `full` | the PR's full build, as branch `pr-N` of the deployment's own Pages project | the project's preview environment (on Disky: the dev stack's production D1/R2, secrets) | implemented (Pages) |
 | `stack` | the PR's full build | a scratch D1 + R2 created for the PR | specified |
-| `sandbox` | the PR's full build, as branch `pr-N` of a per-deployment `<project>-sandbox` Pages project | a shared sandbox D1 copied from production; production's serving R2, read-only; no outside-effect secrets | proposed (awaiting Ryan) |
+| `sandbox` | the PR's full build, as branch `pr-N` of a per-deployment `<project>-sandbox` Pages project | a shared sandbox D1 copied from production; production's serving R2, read-only; no outside-effect secrets | approved (Ryan, 2026-11-14), not built |
 | `pipeline` | a job image built from the PR head, run from GHA | a scratch store prefix (reads of declared inputs) | specified |
 
 ### Selection
 
-- A `/preview <mode>` comment (`/preview <mode> <full-head-sha>` for an external head), or the dispatch `mode` input, selects the mode for that run.
-- Otherwise a `preview:<mode>` label on the PR selects it, on every automatic run. Labels are the persistent selector; only triage+ collaborators can set them.
-- Otherwise `full`.
+Ryan, 2026-11-14: the data a preview gets is an option, not a mandate. Each deployment picks its default, a PR can always choose safer data, and only a maintainer can choose riskier.
 
-Two different mode labels, an unknown `preview:*` label (including the retired `preview:ui`) or an unknown comment mode fail the gate instead of guessing. Gate passes the chosen mode to publish as an output, so a label changed between the jobs cannot switch it. `stack` and `pipeline` are refused at the gate until built.
+**Risk order:** `stack` (fixture data) < `sandbox` (a copy of production's D1, production's R2 read-only, no outside-effect secrets) < `full` (production's D1 read-write and the preview secrets). `pipeline` is outside the order: it runs PR code with cloud credentials, so it is never a default and only a writer selects it.
+
+**Per-deployment default:** the target's `default_mode` in `.github/cf-preview.json` (`stack`, `sandbox` or `full`), set by the deployment's owner. A target that doesn't name one gets `sandbox` once built; until then `full`, as today.
+
+**Safer is free:** the PR's author (anyone who can push to it) lowers the mode with a directive, either a `Preview-Mode: <mode>` trailer on the head commit or a `Preview-Mode: <mode>` line in the PR body. A directive is honored only when it is no riskier than what would otherwise run. Anyone can write a commit message, so a directive naming a riskier mode is ignored (the bot comment says so), never an error that blocks the safer preview.
+
+**Riskier needs a maintainer:** a current write collaborator raises it, after reading the head: a `preview:<mode>` label (labels need triage+), a `/preview <mode>` comment (`/preview <mode> <full-head-sha>` for an external head), or the dispatch `mode` input. A writer's selection may also lower.
+
+**Effective mode:** the writer's selection if there is one (comment or dispatch for that run, else the label), else the deployment's default; then lowered by the author's directive if it names a safer mode. Two mode labels, an unknown `preview:*` label (including the retired `preview:ui`) or an unknown comment mode fail the gate rather than guessing. Gate passes the effective mode to publish as an output, so a label changed between the jobs can't switch it. Unbuilt modes are refused at the gate.
+
+**A new push under a raised mode:** the raise belongs to the head a writer reviewed, not to the PR. On a new head:
+- **The author is a current writer:** the raised mode carries over. A writer can push to `dev` anyway, so their own head is no riskier.
+- **Anyone else:** the raised-mode preview isn't updated. It stays at the reviewed head, and the bot comment marks it stale with the command that approves the new head, `/preview <mode> <full-head-sha>`. The label stays as the standing intent, so approving needs only that comment. A preview at or below the deployment's default still runs for the new head, under the usual approval rules for external heads.
+
+A mode change between runs retires the PR's preview in the other mode first (each mode deploys to a different project or store).
 
 ### `full`: the PR's build on the deployment's preview environment
 
@@ -100,7 +112,7 @@ Credentials: the deploy token additionally needs D1 Edit and R2 Edit on the acco
 
 Ownership and cleanup: a `_cf_preview_owner` row in the D1 and a `.cf-preview-owner` object in the bucket carry the owner marker; retire proves both before deleting, empties the bucket with full pagination, then deletes bucket, database and the deployment. A mode switch (`full` ↔ `stack`) retires the PR's other mode first.
 
-### `sandbox`: the PR's build over a copy of production's data (proposed, awaiting Ryan)
+### `sandbox`: the PR's build over a copy of production's data (design approved 2026-11-14, not built)
 
 Why: `full` gives a PR production's D1 read-write and every preview secret, so exercising an admin write (staging, grants, the admin list, "Run a scan") on a preview acts on production. `stack`'s fixture store keeps production safe but can't show a change against real data. `sandbox` sits between them: real data, no effect outside the sandbox. Ryan asked (2026-11-12) that a preview can point at dummy data, the public demo, or a copy of production's; `stack` covers the first two, `sandbox` the third.
 
@@ -110,9 +122,9 @@ Why a second Pages project: Pages gives every branch of a project the same previ
 - **R2:** production's serving bucket through a read-only token. Nothing a preview does writes there.
 - **Secrets:** sign-in (the broker's preview client) only. No `GCP_SA_KEY`, Slack, Discord or Batch credentials, so dispatches, digests, sweeps and notices can't reach outside (routes like `/api/admin/history` already 503 without `GCP_SA_KEY`; the pilot audits every route that sends anything without one), and a write lands only in the sandbox D1.
 
-Selection: the default mode for each deployment once built. `full` then needs a maintainer's `preview:full` label (or `/preview full`), after review of the head, for a change that only production's environment can show. Cleanup is `full`'s (owned `pr-N` deployments in the sandbox project); the project and its D1 outlive PRs.
+Selection: per Selection above; the default for a target that doesn't name one, once built. `full` then needs a writer's `preview:full` label or `/preview full`, for a change only production's environment can show. Cleanup is `full`'s (owned `pr-N` deployments in the sandbox project); the project and its D1 outlive PRs.
 
-Each deployment's owner session creates its sandbox project and D1, with Ryan's go; gcs, cw and r2 are holding their preview-environment changes for this decision.
+Ryan's go (2026-11-14) is on the design. Creating each sandbox Pages project and copied D1 is a `pulumi` / D1 apply in that deployment's owner session, each with its own go from Ryan.
 
 ### `pipeline`: the PR's job code over a scratch prefix (specified)
 
