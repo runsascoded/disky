@@ -13,16 +13,21 @@ const main = ':pool-chip-8-0: [main](https://x.test/main?d=2609231201#over-time)
 const west = ':pool-chip-8-0: [04a](https://x.test/west?d=2609231201#over-time): 0%'
 const east = '[01a](https://x.test/east?d=2609231201#over-time): 0 Ti'
 
-describe('near-zero digest entries', () => {
+describe('low-info digest entries', () => {
   it('retains each entry’s exact text and position of the first quiet entry', () => {
     expect(compactQuietLines([{ text: '04a: 0%', quiet: true }, { text: 'busy: 80%', quiet: false }, { text: '01a: 0 Ti', quiet: true }])).toEqual(['04a: 0% · 01a: 0 Ti', 'busy: 80%'])
   })
   it('matches the Python daily reply without summing unrelated quota pools', () => {
     expect(replies(rows, cfg, rc, 'sender').map(r => r.body)).toEqual([`${main}\n${west} · ${east}`])
   })
-  it('unfolds entries with meaningful usage', () => {
-    const grown = { ...rows, rows: [{ ...rows.rows[0], extra: { west: 0, east: 1 } }] }
-    expect(replies(grown, cfg, rc, 'sender').map(r => r.body)).toEqual([`${main}\n${west}\n[01a](https://x.test/east?d=2609231201#over-time): 1 Ti`])
+  it('shares low-info lines whatever their size', () => {
+    const big = { ...rows, rows: [{ ...rows.rows[0], extra: { west: 0, east: 66 } }] }
+    expect(replies(big, cfg, rc, 'sender').map(r => r.body)).toEqual([`${main}\n${west} · [01a](https://x.test/east?d=2609231201#over-time): 66 Ti`])
+  })
+  it('keeps a headroom clause on its own line', () => {
+    const fuller = { ...rows, rows: [{ ...rows.rows[0], extra: { west: 30, east: .1 } }] }
+    const west30 = ':pool-chip-8-0: [04a](https://x.test/west?d=2609231201#over-time): 30.0% of 100Ti (70.0 Ti free)'
+    expect(replies(fuller, cfg, rc, 'sender').map(r => r.body)).toEqual([`${main}\n${west30}\n${east}`])
   })
   it('shares a line in the monthly OP as well', () => {
     const lines = opText(rows, '2026-09', cfg, { plotUrl: null, prevUrl: null }, { ...DEFAULT_PARAMS, layout: 'pools', quotas: 'off' }).split('\n')
