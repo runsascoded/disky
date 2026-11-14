@@ -1433,6 +1433,20 @@ def test_store_gc_coordinates_static_copies_and_declares_secondary_pins(tmp_path
     ]
 
 
+def test_store_gc_defers_static_cleanup_while_a_builder_holds_the_store(tmp_path, env):
+    """`generation-gc` exit `BUSY` (2026-11-14T0604: that scan's own compaction held the lease): the phase ends done with a
+    note, no failure and no alert; the next scan retries."""
+    c = ctx(tmp_path, env, runner=Runner(tmp_path, codes={"dt-cloud generation-gc -t": 4}), steps=['store-gc'], options={**NL_OPTS, 'store-gc': {
+        'store': 'r2://idx', 'copies': [], 'static_store': 'gs://data', 'static_gens': ['meta'], 'scratch': 'scratch', 'execute': True,
+    }})
+    phases = []
+    c.run.begin = lambda name: phases.append(("begin", name))
+    c.run.end = lambda name, rc=0, **kw: phases.append(("end", name, rc, kw))
+    c.run.alert = lambda level, msg: phases.append(("alert", level, msg))
+    S.store_gc(c, None)
+    assert phases == [("begin", "store-gc"), ("end", "store-gc", 0, {"note": S.STATIC_GC_DEFERRED})]
+
+
 def test_retire_failure_warns_and_needs_its_keep(tmp_path, env):
     c = ctx(tmp_path, env, runner=Runner(tmp_path, fail=("dt-cloud scan retire",)), steps=["retire"],
             options={"list": {"import": True}, "static-names": {"gen": "s1", "store": "r2://idx"}, "digest": {"template": "t", "config": "c.yml"},
