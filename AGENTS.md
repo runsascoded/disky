@@ -192,7 +192,7 @@ dt-cloud vm-pack build -o STORE [-w WORK] [-f FSB] [-k N]  # VM mode's pack (spe
                           # interval-store generation + newest manifest mirrored, `fsb pack-slim`ed (bench/full-scan), published
                           # as `vm-pack/<gen>/<manifest>.fsb`, then `vm-pack/CURRENT.json`; a no-op when the pointer names them;
                           # older packs past `-k` deleted. Scan step `vm-pack` (opt-in, post; needs `fsb` in the image). The
-                          # server is `bench/full-scan`'s `vmd -c CONF` (tenants' packs mapped; `/v1/view`, `/v1/shard`,
+                          # server is `bench/full-scan`'s `vmd -c CONF` (tenants' packs mapped; `/v1/view`, `/v1/shard`, `/v1/merge`,
                           # `/v1/status`, HMAC per tenant); `fsb shard PACK -n N` cuts physical shard packs
 dt-cloud image-sha [-e SHA [-a]] [-j]  # The running image's source revision (`image_sha.py`): `$DISKY_GIT_SHA` /
                           # `$DISKY_GIT_DIRTY`, which the image build stamps (`dt-cloud image build` → `job/Dockerfile`
