@@ -15,7 +15,7 @@ from dt_cloud import digest as DG
 
 CONFIG = Path(__file__).parents[2] / "job" / "digest.yml"
 TIB = 1024**4
-Q100 = DG.Quota(100 * TIB, "100 TiB", "100Ti")  # US-EAST-06A, US-WEST-04A, RNO2A (shared by its buckets)
+Q100 = DG.Quota(100 * TIB, "100 TiB", "100Ti")  # US-EAST-06A, US-WEST-04A, US-EAST-01A, RNO2A (shared by its buckets)
 Q08A = DG.Quota(500 * TIB, "500 TiB", "500Ti")  # US-EAST-08A, shared by its buckets
 CW = DG.DigestConfig(
     template="cw",
@@ -48,7 +48,7 @@ CW = DG.DigestConfig(
         "rhoarnet-us-east-08a": DG.Bucket("rhoarnet", Q08A, "08a", shape="square"),
         "marin-us-east-08a": DG.Bucket("08a", Q08A, "08a", shape="square"),
         "marin-us-west-04a": DG.Bucket("04a", Q100, shape="triangle"),
-        "marin-us-east-01a": DG.Bucket("01a"),
+        "marin-us-east-01a": DG.Bucket("01a", Q100, shape="triangle"),
         "marinfold-exp368-rno2a": DG.Bucket("marinfold", Q100, "rno2a", shape="star"),
         "marin-rno2a": DG.Bucket("rno2a", Q100, "rno2a", shape="star"),
     },
