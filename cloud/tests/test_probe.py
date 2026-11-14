@@ -5,6 +5,7 @@ import random
 import pytest
 from click.testing import CliRunner
 
+from dt_cloud.diff_bench import CV
 from dt_cloud.probe import (
     Resp,
     Result,
@@ -12,10 +13,13 @@ from dt_cloud.probe import (
     cold_min_area,
     compare_requests,
     counts,
+    history,
     record,
+    request_label,
     request_paths,
     resolve_targets,
     run,
+    scan_before,
     scenarios,
     server_total,
     summarize,
@@ -41,47 +45,68 @@ def test_server_total():
 
 
 def test_scenarios():
-    W = "cv=2&w=1408&h=896"
+    W = f"cv={CV}&w=1408&h=896"
     D = "from=2026-09-30&to=2026-10-01"
     assert scenarios(T) == {
         "root": [
             f"/api/subtree?{W}&date=2026-10-01&path=&depth=1",
             f"/api/subtree?{W}&date=2026-10-01&path=",
-            f"/api/diff?{W}&{D}&path=&depth=1",
-            f"/api/diff?{W}&{D}&path=",
-            "/api/series?path=",
+            f"/api/diff?{W}&{D}&path=&dm=delta&depth=1",
+            f"/api/diff?{W}&{D}&path=&dm=delta",
+            "/api/series?path=&split=roots",
         ],
         "bucket": [
             f"/api/subtree?{W}&date=2026-10-01&path=bk-a&depth=1",
             f"/api/subtree?{W}&date=2026-10-01&path=bk-a",
-            f"/api/diff?{W}&{D}&path=bk-a&depth=1",
-            f"/api/diff?{W}&{D}&path=bk-a",
+            f"/api/diff?{W}&{D}&path=bk-a&dm=delta&depth=1",
+            f"/api/diff?{W}&{D}&path=bk-a&dm=delta",
             "/api/series?path=bk-a",
         ],
         "filter-hit": [
             f"/api/subtree?{W}&date=2026-10-01&path=&q=ckpt",
             f"/api/subtree?{W}&date=2026-10-01&path=&q=ckpt&full=1",
-            f"/api/diff?{W}&{D}&path=&q=ckpt",
+            f"/api/diff?{W}&{D}&path=&q=ckpt&dm=delta",
         ],
         "filter-miss": [
             f"/api/subtree?{W}&date=2026-10-01&path=bk-a&q=zz-probe-no-match-zz",
             f"/api/subtree?{W}&date=2026-10-01&path=bk-a&q=zz-probe-no-match-zz&full=1",
-            f"/api/diff?{W}&{D}&path=bk-a&q=zz-probe-no-match-zz",
+            f"/api/diff?{W}&{D}&path=bk-a&q=zz-probe-no-match-zz&dm=delta",
         ],
     }
+
+
+def test_scenarios_long_diffs():
+    W = f"cv={CV}&w=1408&h=896"
+    s = scenarios(Targets("2026-10-31T0701", "2026-10-30T0702", "bk-a", "ckpt", "2026-10-24T0703", "2026-10-01"))
+    assert {k: v for k, v in s.items() if k.startswith("diff-")} == {
+        "diff-7d": [
+            f"/api/diff?{W}&from=2026-10-24T0703&to=2026-10-31T0701&path=&dm=delta&depth=1",
+            f"/api/diff?{W}&from=2026-10-24T0703&to=2026-10-31T0701&path=&dm=delta",
+        ],
+        "diff-30d": [
+            f"/api/diff?{W}&from=2026-10-01&to=2026-10-31T0701&path=&dm=delta&depth=1",
+            f"/api/diff?{W}&from=2026-10-01&to=2026-10-31T0701&path=&dm=delta",
+        ],
+    }
+
+
+def test_scan_before():
+    scans = ["2026-10-31T0701", "2026-10-25T0701", "2026-10-24T1200", "2026-10-24T0703", "2026-10-01", "2026-09-30"]
+    assert [scan_before(scans, scans[0], d) for d in (7, 30, 31, 400)] == ["2026-10-24T1200", "2026-10-01", "2026-09-30", None]
 
 
 def test_scenarios_cold_and_single_scan():
     s = scenarios(Targets("2026-10-01", None, "bk/x", "a b"), cold="12.000042")
     assert s["bucket"] == [
-        "/api/subtree?cv=2&w=1408&h=896&minArea=12.000042&date=2026-10-01&path=bk%2Fx&depth=1",
-        "/api/subtree?cv=2&w=1408&h=896&minArea=12.000042&date=2026-10-01&path=bk%2Fx",
+        f"/api/subtree?cv={CV}&w=1408&h=896&minArea=12.000042&date=2026-10-01&path=bk%2Fx&depth=1",
+        f"/api/subtree?cv={CV}&w=1408&h=896&minArea=12.000042&date=2026-10-01&path=bk%2Fx",
         "/api/series?path=bk%2Fx",
     ]
     assert s["filter-hit"] == [
-        "/api/subtree?cv=2&w=1408&h=896&minArea=12.000042&date=2026-10-01&path=&q=a%20b",
-        "/api/subtree?cv=2&w=1408&h=896&minArea=12.000042&date=2026-10-01&path=&q=a%20b&full=1",
+        f"/api/subtree?cv={CV}&w=1408&h=896&minArea=12.000042&date=2026-10-01&path=&q=a%20b",
+        f"/api/subtree?cv={CV}&w=1408&h=896&minArea=12.000042&date=2026-10-01&path=&q=a%20b&full=1",
     ]
+    assert sorted(s) == ["bucket", "filter-hit", "filter-miss", "root"]
 
 
 def test_cold_min_area():
@@ -100,8 +125,8 @@ def test_resolve_targets():
         seen.append(path)
         return ok(canned[path])
 
-    assert resolve_targets(fetch) == Targets("2026-10-01", "2026-09-30", "bk-big", "ckpt")
-    assert resolve_targets(fetch, hit="given") == Targets("2026-10-01", "2026-09-30", "bk-big", "given")
+    assert resolve_targets(fetch) == Targets("2026-10-01", "2026-09-30", "bk-big", "ckpt", None, None)
+    assert resolve_targets(fetch, hit="given") == Targets("2026-10-01", "2026-09-30", "bk-big", "given", None, None)
     assert seen == [*canned, "/data/scans.json", "/api/subtree?date=2026-10-01&path=&depth=1&w=1408&h=896"]
 
 
@@ -262,7 +287,7 @@ def test_record():
     now = dt.datetime(2026, 10, 2, 1, 2, 3, tzinfo=dt.timezone.utc)
     assert record("https://x.test", T, r, now) == {
         "ts": "2026-10-02T01:02:03Z", "base": "https://x.test",
-        "date": "2026-10-01", "prev": "2026-09-30", "bucket": "bk-a", "hit": "ckpt",
+        "date": "2026-10-01", "prev": "2026-09-30", "bucket": "bk-a", "hit": "ckpt", "week": None, "month": None,
         "results": [{"scenario": "one", "path": "/a", "status": 200, "ms": 5, "bytes": 2, "cache": None, "server_ms": None, "server_timing": None, "error": None, "skip": None, "indexed": None}],
         "summary": {"passed": 1, "skipped": 0, "failed": 0, "lag": 0, "refused_indexed": 0, "line": "1 passed, 0 skipped, 0 failed"},
     }
@@ -327,7 +352,7 @@ def test_exact_request_cli_skips_discovery_and_records_details(monkeypatch):
     rec = json.loads(result.stdout)
     assert dt.datetime.strptime(rec.pop("ts"), "%Y-%m-%dT%H:%M:%SZ").tzinfo is None
     assert rec == {
-        "base": "https://gcs.test", "date": "2026-10-13T1300", "prev": None, "bucket": "", "hit": "", "cold": True,
+        "base": "https://gcs.test", "date": "2026-10-13T1300", "prev": None, "bucket": "", "hit": "", "week": None, "month": None, "cold": True,
         "results": [{"scenario": "requests", "path": path, "status": 200, "ms": 12, "bytes": 2, "cache": "miss", "server_ms": 10, "server_timing": timing, "error": None, "skip": None, "indexed": None} for path in calls],
         "summary": {"passed": 2, "skipped": 0, "failed": 0, "lag": 0, "refused_indexed": 0, "line": "2 passed, 0 skipped, 0 failed"},
     }
@@ -370,3 +395,27 @@ def test_exact_request_cli_refuses_automatic_scenario_options(monkeypatch, optio
         "",
         "Error: exact-request mode cannot combine with query-set or automatic scenario options",
     ]
+
+
+def test_request_label():
+    assert [request_label(s, p) for s, p in [
+        ("root", f"/api/subtree?cv={CV}&w=1408&h=896&minArea=12.1&date=2026-10-01&path=&depth=1"),
+        ("filter-hit", f"/api/subtree?cv={CV}&w=1408&h=896&date=2026-10-01&path=&q=ckpt&full=1"),
+        ("diff-7d", f"/api/diff?cv={CV}&w=1408&h=896&from=a&to=b&path=&dm=delta"),
+        ("root", "/api/series?path=&split=roots"),
+    ]] == ["root subtree d1", "filter-hit subtree full", "diff-7d diff", "root series"]
+
+
+def test_history_lines_up_requests_across_records():
+    def rec(date, *results):
+        return {"date": date, "results": [{"scenario": sc, "path": p, "status": st, "ms": ms, "error": e} for sc, p, st, ms, e in results]}
+    records = [
+        rec("2026-10-01", ("root", "/api/series?path=", 200, 900, None), ("root", "/api/diff?from=x&to=y&path=", 200, 1500, None)),
+        rec("2026-10-02", ("root", "/api/series?path=&split=roots", 200, 700, None), ("root", "/api/diff?from=y&to=z&path=", 500, 30, "boom"),
+            ("diff-7d", "/api/diff?from=w&to=z&path=&dm=delta", 200, 2100, None)),
+    ]
+    assert history(records) == (["2026-10-01", "2026-10-02"], {
+        "root series": [900, 700],
+        "root diff": [1500, None],
+        "diff-7d diff": [None, 2100],
+    })

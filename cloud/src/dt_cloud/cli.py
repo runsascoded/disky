@@ -721,6 +721,56 @@ def probe(against: str | None, budget: float | None, cold: bool, date: str | Non
         raise SystemExit(1)
 
 
+@main.command("probe-report")
+@option("-n", "--last", default=14, type=int, help="The newest N records (default 14)")
+@argument("prefix")
+def probe_report(last: int, prefix: str) -> None:
+    """Cold latency over time from the scan step's probe records (`probe -c -o PREFIX`, e.g.
+    `gs://<data bucket>/probes/`): one row per request (`<scenario> <endpoint>[ d1][ full]`), the newest LAST records'
+    browser ms as columns (a scan's id heads its column; `-` where it didn't run or failed), then the median."""
+    from statistics import median
+
+    import fsspec
+
+    from .probe import history
+
+    fs, root = fsspec.core.url_to_fs(prefix)
+    proto = "" if fs.protocol in ("file", ("file", "local")) else f"{fs.protocol if isinstance(fs.protocol, str) else fs.protocol[0]}://"
+    paths = sorted(fs.glob(f"{root.rstrip('/')}/*.json"))[-last:]
+    if not paths:
+        raise SystemExit(f"probe-report: no records under {prefix}")
+    records = []
+    for p in paths:
+        with fsspec.open(f"{proto}{p}") as fh:
+            records.append(json.load(fh))
+    scans, rows = history(records)
+    width = max(len(k) for k in rows)
+    print(f"{'request':{width}}  " + "  ".join(f"{s[5:15]:>10}" for s in scans) + f"  {'median':>7}")
+    for label, xs in rows.items():
+        got = [x for x in xs if x is not None]
+        print(f"{label:{width}}  " + "  ".join(f"{x if x is not None else '-':>10}" for x in xs) + f"  {int(median(got)) if got else '-':>7}")
+
+
+@main.command("session-latency")
+@option("-c", "--config", default=None, type=Path, help="The site's wrangler config (default: `site/wrangler.toml`)")
+@option("-d", "--d1", "d1", required=True, help="The deployment's D1 (read-only `wrangler d1 execute --remote`, run from site/)")
+@option("-n", "--days", default=7, type=int, help="The window: batches received in the last N days (default 7)")
+@option("-r", "--route", default=None, help="One route (`/api/series`): its numbers per UTC day instead of every route's")
+def session_latency(config: Path | None, d1: str, days: int, route: str | None) -> None:
+    """What people waited for the API: the session log's answered requests (browser wall ms, `@open-athena/auth`'s
+    `api` events), per route (count, p50, p90, max; most requested first) or, with `-r`, that route per day."""
+    from .d1_schema import site_dir
+    from .session_latency import fetch_batches, render, samples, table
+
+    ss = samples(fetch_batches(d1, days, config=config, site=site_dir()))
+    if route:
+        ss = [s for s in ss if s.route == route]
+    if not ss:
+        raise SystemExit(f"session-latency: no answered requests{f' to {route}' if route else ''} in the last {days} days")
+    for line in render(table(ss, by="day" if route else "route"), "day" if route else "route"):
+        print(line)
+
+
 @main.command("bench-truth")
 @option("-a", "--append", is_flag=True, help="Add to (or replace queries in) an existing truth set at `-o` instead of rewriting its summary")
 @option("-c", "--check", multiple=True, help="Also compute these query ids by a full `path` scan and compare (repeatable)")

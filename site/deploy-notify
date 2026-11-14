@@ -3,7 +3,7 @@
 # requires-python = ">=3.11"
 # dependencies = ["click==8.3.0", "thrds @ https://github.com/Open-Athena/thrds/archive/6f207846b32012d6a1550011f95bc561caf8ff1c.tar.gz"]
 # ///
-"""Review a deployment receipt; send only with an explicit flag. Greens are run-length threaded, reds are top-level posts."""
+"""Review a deployment receipt; send only with an explicit flag. Notices are run-length threaded: greens with greens, reds with reds."""
 from getpass import getuser
 from collections.abc import Mapping
 from json import dumps, loads
@@ -116,15 +116,17 @@ HEADLINE = r'\*([A-Z0-9-]+) (?:dev|prod) deployment (succeeded|failed during [a-
 HISTORY = 100
 
 
-def green_thread(
+def run_thread(
     history: list[dict],
     deployment: str,
+    green: bool,
     bot: tuple[str, str | None],
 ) -> str | None:
-    """The thread a green notice joins: the newest top-level notice for this deployment, if it is green.
+    """The thread a notice joins: the newest top-level notice for this deployment, if it has the same color.
 
-    Greens are run-length threaded (the first green after a red, or with none in the last `HISTORY` channel
-    messages, opens a thread; later greens reply in it); every red is its own top-level post, ending the run.
+    Notices are run-length threaded by color (a failure and a cancellation are both red): the first notice after
+    one of the other color, or with none in the last `HISTORY` channel messages, is a top-level post that opens a
+    thread; each later notice of that color replies in it, until the color changes.
     """
     user_id, bot_id = bot
     for message in history:
@@ -132,7 +134,7 @@ def green_thread(
             continue
         match = search(HEADLINE, message.get('text') or '')
         if match and match[1] == deployment.upper():
-            return message['ts'] if match[2] == 'succeeded' else None
+            return message['ts'] if (match[2] == 'succeeded') == green else None
     return None
 
 
@@ -146,7 +148,7 @@ def slack_client(
 
 
 def send(value: dict, env: dict) -> str:
-    """Post the notice; a green one replies in the current green run's thread. Returns the thread it joined, if any."""
+    """Post the notice, replying in the thread of the current run of its color. Returns the thread it joined, if any."""
     require(env.get('DEPLOY_NOTIFICATIONS_ENABLED') == '1', 'Deploy notifications are disabled pending template/transport review')
     token = env.get('SLACK_DEPLOY_BOT_TOKEN', '')
     require(fullmatch(r'xoxb-[A-Za-z0-9-]+', token) is not None, 'SLACK_DEPLOY_BOT_TOKEN must be a Slack bot token')
@@ -155,12 +157,11 @@ def send(value: dict, env: dict) -> str:
     r = receipt(value)
     setdefaulttimeout(15)
     client = slack_client(token, channel)
-    thread = None
-    if r['status'] == 'success':
-        try:
-            thread = green_thread(client.list_channel_history(channel, limit=HISTORY), r['deployment'], client.bot_ids)
-        except (RuntimeError, OSError, KeyError):
-            raise ClickException('Slack history lookup failed; nothing posted') from None
+    try:
+        history = client.list_channel_history(channel, limit=HISTORY)
+        thread = run_thread(history, r['deployment'], r['status'] == 'success', client.bot_ids)
+    except (RuntimeError, OSError, KeyError):
+        raise ClickException('Slack history lookup failed; nothing posted') from None
     try:
         client.post(render(r), thread)
     except (RuntimeError, OSError):
