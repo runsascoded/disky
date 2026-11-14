@@ -188,6 +188,17 @@ dt-cloud interval-store level-sim GEN REQUESTS  # `readLevel`'s two waves priced
 dt-cloud history run -i JOB_ID -r SERVING_STORE -w WORK  # One `/api/admin/history` job (`history_jobs.py`, spec `scan-thinning.md`): a
                           # thinning preview (scores, protections, the removal sequence) or a candidate build (fresh interval + static
                           # generations over the retained scans, verified, an immutable `history/versions/<id>.json`). Never moves a CURRENT
+dt-cloud vm-pack build -o STORE [-w WORK] [-f FSB] [-k N]  # VM mode's pack (specs/vm-mode.md §6): the store's current
+                          # interval-store generation + newest manifest mirrored, `fsb pack-slim`ed (bench/full-scan), published
+                          # as `vm-pack/<gen>/<manifest>.fsb`, then `vm-pack/CURRENT.json`; a no-op when the pointer names them;
+                          # older packs past `-k` deleted; a newer manifest landing meanwhile leaves the pointer alone.
+                          # `vm-pack submit -o STORE …`: that build as its own Batch job (default spot n2-highmem-16, local SSD;
+                          # `-m -S -d -M -i -a -L -P -e -s -X`), one id per pack (`vm-pack-<deployment>-<gen>-<manifest>`, a
+                          # resubmit is a no-op), `component=vm-pack`, not waited on. Scan step `vm-pack` (opt-in): with
+                          # `options.vm-pack.batch` (its keys = submit's options) it submits; without, builds in the task. `fsb`
+                          # in the image: `job/Dockerfile` build arg `FSB=build` (default `none`). The
+                          # server is `bench/full-scan`'s `vmd -c CONF` (tenants' packs mapped; `/v1/view`, `/v1/shard`, `/v1/merge`,
+                          # `/v1/status`, HMAC per tenant); `fsb shard PACK -n N` cuts physical shard packs
 dt-cloud image-sha [-e SHA [-a]] [-j]  # The running image's source revision (`image_sha.py`): `$DISKY_GIT_SHA` /
                           # `$DISKY_GIT_DIRTY`, which the image build stamps (`dt-cloud image build` → `job/Dockerfile`
                           # `ARG`/`ENV` + OCI labels `org.opencontainers.image.revision`, `disky.dirty`). Prints `<sha>`,

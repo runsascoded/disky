@@ -1,0 +1,324 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = ["duckdb>=1.1", "click>=8"]
+# ///
+"""The full-scan bench's oracle: every query answered by plain DuckDB SQL over the same generation's rows, written
+without the scanner's code, and compared with the scanner's answers exactly (same nodes, bytes, counts, remainders).
+
+The semantics are `src/query.rs`'s doc comment. Versions are combined as the reader's `combineLive`: one row per
+`(depth, path, vf)` over the base's and every listed run's `path` sort, the smallest `vt`.
+"""
+import json
+import re
+import sys
+from functools import partial
+from pathlib import Path
+from time import monotonic
+
+import click
+import duckdb
+
+err = partial(print, file=sys.stderr)
+OPEN = 4291747200
+MANIFEST = re.compile(r"^\d{4}-\d{2}-\d{2}(T\d{4})?(\.m\d{3})?\.json$")
+#: A cell rule's `atten_log2` when the request names none: halving per level (`cell.rs`'s `ATTEN_LOG2`).
+ATTEN_LOG2 = 1
+
+
+def generation(gen: Path) -> tuple[list[dict], list[str]]:
+    """`(scans, path sorts)`: `scans.json`'s stamped scans then the newest manifest's run scans, and the base's `path`
+    sort then each listed run's."""
+    scans = [s for s in json.loads((gen / "scans.json").read_text())["scans"] if s.get("ts") is not None]
+    files = [str(gen / "served/path.parquet")]
+    names = sorted(p.name for p in (gen / "manifests").glob("*.json") if MANIFEST.match(p.name)) if (gen / "manifests").is_dir() else []
+    if names:
+        m = json.loads((gen / "manifests" / names[-1]).read_text())
+        have = {s["id"] for s in scans}
+        scans += [{"id": i, "ts": m["stamps"][i]} for i in m["scans"] if i not in have]
+        files += [str(gen / r["key"] / "served/path.parquet") for r in m["runs"]]
+    return scans, files
+
+
+def lit(s: str) -> str:
+    return "'" + s.replace("'", "''") + "'"
+
+
+def anchors(t: str) -> tuple[str, bool, bool]:
+    a = t.startswith("^")
+    t = t[1:] if a else t
+    z = t.endswith("$")
+    return (t[:-1] if z else t), a, z
+
+
+def search_sql(e: dict) -> str:
+    """A file passes when … (over `segs`, its lowercase segments, and `lp`, its lowercase path)."""
+    (k, v), = e.items()
+    if k == "and":
+        return "(" + " AND ".join(search_sql(x) for x in v) + ")"
+    if k == "or":
+        return "(" + " OR ".join(search_sql(x) for x in v) + ")"
+    if k == "not":
+        return f"(NOT {search_sql(v)})"
+    if k == "re":
+        return f"len(list_filter(segs, s -> regexp_matches(s, {lit(v)}))) > 0"
+    body, a, z = anchors(v.lower())
+    if k == "p" and "/" in body:
+        hay = ("'/' || " if a else "") + "lp" + (" || '/'" if z else "")
+        return f"contains({hay}, {lit(('/' if a else '') + body + ('/' if z else ''))})"
+    pred = {(False, False): "contains(s, {})", (True, False): "starts_with(s, {})", (False, True): "ends_with(s, {})", (True, True): "s = {}"}[(a, z)]
+    return f"len(list_filter(segs, s -> {pred.format(lit(body))})) > 0"
+
+
+def owner_cols(sel: dict) -> str:
+    """Per live file: its owner slices (`''` → unnamed; a name → all bytes; JSON `j` → each entry, clamped at 0, plus
+    the unnamed rest when positive): the selected ones' bytes, whether it holds one, and how many it has."""
+    (mode, names), = sel.items()
+    inlist = "[" + ", ".join(lit(n) for n in names) + "]::VARCHAR[]"
+    t = (lambda x: f"list_contains({inlist}, {x})") if mode == "in" else (lambda x: f"NOT list_contains({inlist}, {x})")
+    none = "true" if (("" in names) == (mode == "in")) else "false"
+    rest = "(size - list_sum(list_transform(j, e -> greatest(e[2]::BIGINT, 0))))"
+    return f"""CASE WHEN us = '' THEN CASE WHEN {none} THEN size ELSE 0 END
+                WHEN j IS NULL THEN CASE WHEN {t('us')} THEN size ELSE 0 END
+                ELSE coalesce(list_sum(list_transform(list_filter(j, e -> {t('e[1]')}), e -> greatest(e[2]::BIGINT, 0))), 0)
+                     + CASE WHEN {rest} > 0 AND {none} THEN {rest} ELSE 0 END END::BIGINT AS own_sel,
+           CASE WHEN us = '' THEN {none} WHEN j IS NULL THEN {t('us')}
+                ELSE len(list_filter(j, e -> {t('e[1]')})) > 0 OR ({rest} > 0 AND {none}) END AS own_pass,
+           CASE WHEN j IS NULL THEN 1 ELSE len(j) + ({rest} > 0)::INT END AS n_own"""
+
+
+def class_cols(cls: list[int]) -> str:
+    """Per live file: class slices `c2..c4` where positive, class 1 the rest when positive (neither: class 1, 0 B)."""
+    c1 = "(size - greatest(c2, 0) - greatest(c3, 0) - greatest(c4, 0))"
+    has = {1: f"({c1} > 0 OR (c2 <= 0 AND c3 <= 0 AND c4 <= 0 AND {c1} <= 0))", 2: "(c2 > 0)", 3: "(c3 > 0)", 4: "(c4 > 0)"}
+    byt = {1: f"greatest({c1}, 0)", 2: "greatest(c2, 0)", 3: "greatest(c3, 0)", 4: "greatest(c4, 0)"}
+    sel = " + ".join(f"CASE WHEN {has[k]} THEN {byt[k]} ELSE 0 END" for k in cls) or "0"
+    ok = " OR ".join(has[k] for k in cls) or "false"
+    n = " + ".join(f"{has[k]}::INT" for k in (1, 2, 3, 4))
+    return f"({sel})::BIGINT AS cls_sel, ({ok}) AS cls_pass, ({n}) AS n_cls"
+
+
+def window(q: dict) -> int:
+    """The query's depth window: its `depth`, or its cell rule's (specs/vm-mode.md §2.2: given, else as deep as a node
+    can pass under attenuation, else 8)."""
+    c = q.get("cell")
+    if c is None:
+        return q["depth"]
+    if c.get("depth") is not None:
+        return c["depth"]
+    s, a = c.get("share_log2"), c.get("atten_log2", ATTEN_LOG2)
+    return min(1 + s // a, 64) if s is not None and a > 0 else 8
+
+
+def keep_sql(q: dict, x: str, total: int) -> str:
+    """Whether a node `k` levels below the folder, with bytes `x` (the larger side's), is drawn in a view whose total
+    (the larger side's) is `total`: the cell rule (`share_log2`, `atten_log2`, `floor_bytes`), else `min_ppm`."""
+    c = q.get("cell")
+    if c is None:
+        return f"({x})::HUGEINT * 1000000 >= {q['min_ppm']}::HUGEINT * {total}"
+    a = c.get("atten_log2", ATTEN_LOG2)
+    conds = ["true"]
+    if c.get("share_log2") is not None:
+        conds.append(f"({x})::HUGEINT << {c['share_log2']} >= {total}::HUGEINT << ({a} * (k - 1))")
+    if c.get("floor_bytes"):
+        conds.append(f"({x})::HUGEINT >= {c['floor_bytes']}::HUGEINT << ({a} * (k - 1))")
+    return " AND ".join(conds)
+
+
+def answer(con, q: dict, scans: dict[str, int]) -> dict:
+    p = q.get("path", "")
+    dp = 0 if p == "" else p.count("/") + 1
+    K = window(q)
+    if "scan" in q:
+        ta, tb = scans[q["scan"]], -1
+    else:
+        ta, tb = scans[q["from"]], scans[q["to"]]
+    where = [f"((vf <= {ta} AND {ta} < vt) OR (vf <= {tb} AND {tb} < vt))"]
+    if p:
+        where.append(f"starts_with(path, {lit(p + '/')})")
+    if q.get("staged") is not None:
+        ors = " OR ".join(f"path = {lit(s)} OR starts_with(path, {lit(s + '/')})" for s in q["staged"]) or "false"
+        where.append(f"({ors})")
+    owners, classes = q.get("owners"), q.get("classes")
+    lower = ", string_split(lower(path), '/') AS segs, lower(path) AS lp" if q.get("q") else ""
+    if q.get("owners"):
+        lower += """, CASE WHEN starts_with(us, '[') THEN from_json(us, '[["VARCHAR"]]') END AS j"""
+    ctes = [f"""live AS (
+        SELECT rowid AS key, path, depth, size, c2, c3, c4, us,
+            (vf <= {ta} AND {ta} < vt) AS la, (vf <= {tb} AND {tb} < vt) AS lb{lower}
+        FROM f WHERE {' AND '.join(where)})"""]
+    cls_sql = class_cols(classes) if classes else "size::BIGINT AS cls_sel, true AS cls_pass, 1 AS n_cls"
+    join = ""
+    own_cols = owner_cols(owners) if owners else "size::BIGINT AS own_sel, true AS own_pass, 1 AS n_own"
+    if owners and classes:
+        b = """CASE WHEN n_cls = 1 THEN CASE WHEN cls_pass THEN own_sel ELSE 0 END
+                    WHEN n_own = 1 THEN CASE WHEN own_pass THEN cls_sel ELSE 0 END
+                    ELSE error('several owner and class slices') END"""
+    elif owners:
+        b = "own_sel"
+    elif classes:
+        b = "cls_sel"
+    else:
+        b = "size"
+    srch = search_sql(q["q"]) if q.get("q") else "true"
+    ctes.append(f"""m AS (
+        SELECT path, depth, la, lb, size, {own_cols}, {cls_sql} FROM live {join} WHERE {srch})""")
+    ctes.append(f"""sel AS (SELECT path, depth, la, lb, ({b})::BIGINT AS b FROM m WHERE own_pass AND cls_pass)""")
+    base = "WITH " + ",\n".join(ctes)
+    tot = con.execute(f"""{base}
+        SELECT coalesce(sum(b) FILTER (WHERE la), 0), count(*) FILTER (WHERE la),
+               coalesce(sum(b) FILTER (WHERE lb), 0), count(*) FILTER (WHERE lb) FROM sel""").fetchone()
+    tot = [int(x) for x in tot]
+    rows = con.execute(f"""{base},
+        nodes AS (
+            SELECT array_to_string(string_split(path, '/')[1:{dp} + k], '/') AS node, k, la, lb, b
+            FROM sel, range(1, {K + 1}) t(k) WHERE k <= depth - {dp})
+        SELECT node, k, coalesce(sum(b) FILTER (WHERE la), 0), count(*) FILTER (WHERE la),
+               coalesce(sum(b) FILTER (WHERE lb), 0), count(*) FILTER (WHERE lb)
+        FROM nodes GROUP BY node, k
+        HAVING {keep_sql(q, "greatest(coalesce(sum(b) FILTER (WHERE la), 0), coalesce(sum(b) FILTER (WHERE lb), 0))", max(tot[0], tot[2]))}""").fetchall()
+    return finish(q, tot, {r[0]: (r[1], [int(x) for x in r[2:]]) for r in rows})
+
+
+def finish(q: dict, tot: list[int], kept: dict) -> dict:
+    """The answer from the kept nodes (`{path: (relative depth, [bytes a, files a, bytes b, files b])}`)."""
+    p, K = q.get("path", ""), window(q)
+    nodes = sorted([n, *v[1]] for n, v in kept.items())
+    # Each kept node above the deepest level, and the folder itself: what its kept children leave.
+    kids: dict[str, list[int]] = {}
+    for n, (k, v) in kept.items():
+        par = n.rsplit("/", 1)[0] if k > 1 else p
+        if par != p and par not in kept:
+            continue
+        acc = kids.setdefault(par, [0, 0, 0, 0])
+        for i in range(4):
+            acc[i] += v[i]
+    rest = []
+    for n, (k, v) in [(p, (0, tot)), *kept.items()]:
+        if k < K:
+            c = kids.get(n, [0, 0, 0, 0])
+            r = [v[i] - c[i] for i in range(4)]
+            if any(r):
+                rest.append([n, *r])
+    rest.sort()
+    return {"id": q["id"], "total": tot, "nodes": nodes, "rest": rest}
+
+
+def answer_dirs(con, q: dict, scans: dict[str, int], files: list[str]) -> dict:
+    """An unfiltered view from each path's own row (a directory's rolled-up totals, an object's bytes and 1) at the
+    scan, over the depth window; the folder's total its own row's (the root's: its buckets')."""
+    p = q.get("path", "")
+    dp = 0 if p == "" else p.count("/") + 1
+    K = q["depth"]
+    ta, tb = (scans[q["scan"]], -1) if "scan" in q else (scans[q["from"]], scans[q["to"]])
+    under = f"starts_with(path, {lit(p + '/')})" if p else "true"
+    side = lambda t, col: f"""coalesce(max({col}) FILTER (WHERE vf <= {t} AND {t} < vt AND kind = 'dir'),
+                                      max({col}) FILTER (WHERE vf <= {t} AND {t} < vt AND kind = 'file'), 0)"""
+    nf = "CASE WHEN kind = 'dir' THEN n_files ELSE 1 END"
+    vals = f"{side(ta, 'size')}, {side(ta, nf)}, {side(tb, 'size')}, {side(tb, nf)}"
+    # Only the window's depths are read (the sorts' `depth` statistics prune the rest); a version's rows across the
+    # base and runs are one, with the smallest `vt`.
+    # The depth range alone first, so the sorts' `depth` statistics prune row groups.
+    window = f"depth BETWEEN {dp} AND {dp + K} AND ((depth > {dp} AND {under}) OR (depth = {dp} AND path = {lit(p)}))"
+    src = "[" + ", ".join(lit(f) for f in files) + "]"
+    rows = con.execute(f"""WITH a AS (
+            SELECT depth, path, vf, min(vt) AS vt, any_value(kind) AS kind, any_value(size) AS size, any_value(n_files) AS n_files
+            FROM read_parquet({src}, union_by_name = true) WHERE {window} GROUP BY depth, path, vf)
+        SELECT path, depth, {vals} FROM a
+        WHERE (vf <= {ta} AND {ta} < vt) OR (vf <= {tb} AND {tb} < vt)
+        GROUP BY path, depth""").fetchall()
+    rows = [(r[0], r[1] - dp, [int(x) for x in r[2:]]) for r in rows]
+    if p:
+        own = [v for n, k, v in rows if k == 0]
+        tot = own[0] if own else [0, 0, 0, 0]
+    else:
+        tot = [sum(v[i] for _, k, v in rows if k == 1) for i in range(4)]
+    thr = q["min_ppm"] * max(tot[0], tot[2])
+    kept = {n: (k, v) for n, k, v in rows if k >= 1 and any(v) and max(v[0], v[2]) * 1_000_000 >= thr}
+    return finish(q, tot, kept)
+
+
+@click.command()
+@click.option("-c", "--cache", help="DuckDB database to keep the combined object versions in (built once)")
+@click.option("-i", "--only", help="Comma-separated query ids to check")
+@click.option("-m", "--memory", default="48GB", help="DuckDB memory limit")
+@click.option("-o", "--out", help="Write the oracle's answers here (JSONL)")
+@click.option("-t", "--threads", default=16, type=int, help="DuckDB threads")
+@click.option("-T", "--tmp", default="tmp/duckdb", help="DuckDB spill dir")
+@click.argument("gen")
+@click.argument("queries")
+@click.argument("answers")
+def main(cache, only, memory, out, threads, tmp, gen, queries, answers):
+    """Check the scanner's ANSWERS (JSONL) for QUERIES (JSONL) against SQL over generation GEN; exit 1 on any
+    difference."""
+    gen = Path(gen)
+    scans, files = generation(gen)
+    stamps = {s["id"]: s["ts"] for s in scans}
+    con = duckdb.connect(cache or ":memory:")
+    con.execute(f"SET memory_limit = {lit(memory)}; SET threads = {threads}; SET temp_directory = {lit(tmp)}; SET preserve_insertion_order = false")
+    # The SQL below writes lambdas as `x -> …`, which DuckDB ≥ 1.5 refuses unless asked; older versions have no such
+    # setting (and accept them), so both outcomes are expected.
+    try:
+        con.execute("SET lambda_syntax = 'ENABLE_SINGLE_ARROW'")
+    except duckdb.CatalogException:
+        pass
+    t0 = monotonic()
+    qs = [json.loads(l) for l in Path(queries).read_text().splitlines() if l.strip()]
+    ids = set(only.split(",")) if only else None
+    # Object versions, combined, only when a query sums them (the directory-total view reads the sorts per query).
+    need_f = any(not q.get("dirs") for q in qs if not ids or q["id"] in ids)
+    have = con.execute("SELECT count(*) FROM information_schema.tables WHERE table_name = 'f'").fetchone()[0]
+    if need_f and not have:
+        names = {r[0] for r in con.execute(f"DESCRIBE SELECT * FROM read_parquet({lit(files[0])})").fetchall()}
+        # gcs names storage classes 2–4 by name.
+        cls = {c: c if c in names else a for c, a in (("c2", "nearline_bytes"), ("c3", "coldline_bytes"), ("c4", "archive_bytes"))}
+        cols = f"depth, path, vf, vt, size, {cls['c2']} AS c2, {cls['c3']} AS c3, {cls['c4']} AS c4, us"
+        # A version is one `(depth, path, vf)`: the base holds each once; a run may repeat it (a close record, or a
+        # merged run's copy), so the runs' rows are combined first (smallest `vt`), then joined to the base's.
+        con.execute(f"CREATE TABLE b AS SELECT {cols} FROM read_parquet({lit(files[0])}) WHERE kind = 'file'")
+        runs = "[" + ", ".join(lit(f) for f in files[1:]) + "]"
+        con.execute(f"""CREATE TABLE r AS SELECT depth, path, vf, min(vt) AS vt, any_value(size) AS size, any_value(c2) AS c2,
+                any_value(c3) AS c3, any_value(c4) AS c4, any_value(us) AS us
+            FROM (SELECT {cols} FROM read_parquet({runs}) WHERE kind = 'file') GROUP BY depth, path, vf""" if files[1:] else
+            "CREATE TABLE r AS SELECT * FROM b LIMIT 0")
+        con.execute("""CREATE TABLE f AS
+            SELECT b.path, b.depth, b.vf, least(b.vt, coalesce(r.vt, b.vt)) AS vt, b.size, b.c2, b.c3, b.c4, b.us
+            FROM b LEFT JOIN r USING (depth, path, vf)
+            UNION ALL SELECT r.path, r.depth, r.vf, r.vt, r.size, r.c2, r.c3, r.c4, r.us FROM r ANTI JOIN b USING (depth, path, vf)""")
+        con.execute("DROP TABLE b; DROP TABLE r")
+    if need_f:
+        n = con.execute("SELECT count(*) FROM f").fetchone()[0]
+        err(f"oracle: {n:,} object versions from {len(files)} sorts, {len(scans)} scans ({monotonic() - t0:.1f}s)")
+    got = {a["id"]: a for a in (json.loads(l) for l in Path(answers).read_text().splitlines() if l.strip())}
+    bad = []
+    outf = open(out, "w") if out else None
+    for q in qs:
+        if ids and q["id"] not in ids:
+            continue
+        t1 = monotonic()
+        if q.get("dirs"):
+            want = answer_dirs(con, q, stamps, files)
+        else:
+            want = answer(con, q, stamps)
+        have = got.get(q["id"])
+        ok = have == want
+        if outf:
+            outf.write(json.dumps(want) + "\n")
+        err(f"{'ok  ' if ok else 'DIFF'} {q['id']}: total {want['total']}, {len(want['nodes'])} nodes, {len(want['rest'])} rests ({monotonic() - t1:.1f}s)")
+        if not ok:
+            bad.append(q["id"])
+            if have is None:
+                err("  no scanner answer")
+            else:
+                for k in ("total", "nodes", "rest"):
+                    if have[k] != want[k]:
+                        a = {tuple(x) if isinstance(x, list) else x for x in (have[k] if k != "total" else [tuple(have[k])])}
+                        b = {tuple(x) if isinstance(x, list) else x for x in (want[k] if k != "total" else [tuple(want[k])])}
+                        err(f"  {k}: scanner-only {sorted(a - b)[:5]}, oracle-only {sorted(b - a)[:5]}")
+    checked = len([q for q in qs if not ids or q["id"] in ids])
+    print(json.dumps({"checked": checked, "equal": checked - len(bad), "different": bad}))
+    sys.exit(1 if bad else 0)
+
+
+if __name__ == "__main__":
+    main()

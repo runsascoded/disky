@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# One synthetic scale end to end on a bench node: `fsb synth` → the repo's cut (`oracle/synth_store.py`) → `fsb plan`
+# → `fsb bench` (which plans the queries) (1 and all threads, cold + warm ×5) → the DuckDB oracle over every query. Run from the repo's venv.
+#   run-synth SCALE LABEL [WORK]     (WORK default ~/work)
+set -euo pipefail
+cd "$(dirname "$0")"
+x=$1 label=$2 work=${3:-$HOME/work}
+d=$work/$label
+mkdir -p "$d" results
+log() { echo "[$(date +%T)] $label: $*" >&2; }
+cargo build -q --release
+if [ ! -f "$d/gen/scans.json" ]; then
+  rm -rf "$d/stage" "$d/gen"
+  log synth; /usr/bin/time -f "%e s, %M KB" ./target/release/fsb synth -o "$d/stage" -x "$x" 2>&1 | tee "$d/synth.log" >&2
+  log cut; /usr/bin/time -f "%e s, %M KB" python oracle/synth_store.py -m 80GB "$d/stage" "$d/gen" 2>&1 | tail -4 | tee "$d/cut.log" >&2
+  du -sb "$d/gen/served" "$d/gen/deltas" | tee -a "$d/cut.log" >&2
+fi
+log bench; /usr/bin/time -f "%e s, %M KB" ./target/release/fsb bench "$d/gen" "$d/queries.jsonl" -t "1,$(nproc)" -r 5 -l "$label" \
+  -o "$d/results.jsonl" -a "$d/answers.jsonl" 2> "$d/bench.log"
+tail -1 "$d/bench.log" >&2
+log oracle; python oracle/oracle.py -m 80GB -t "$(nproc)" -T "$d/duck" -c "$d/oracle.duckdb" "$d/gen" "$d/queries.jsonl" "$d/answers.jsonl" \
+  > "$d/oracle.json" 2> "$d/oracle.log" || true
+cat "$d/oracle.json" >&2
+rm -rf "$d/oracle.duckdb" "$d/oracle.duckdb.wal" "$d/duck"

@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Every interval-store fixture: the exhaustive query mix answered by `fsb` (at 1 and 4 threads, answers checked equal),
+# then checked against the DuckDB oracle. Exit 1 on any difference.
+set -euo pipefail
+cd "$(dirname "$0")"
+fx=../../site/functions/_lib/fixtures/iv/interval-store
+out=tmp/fixtures
+mkdir -p "$out"
+cargo build -q --release
+rc=0
+for g in "$fx"/g*; do
+  n=$(basename "$g")
+  ./target/release/fsb plan "$g" -x 1 -o "$out/$n.queries.jsonl" 2>/dev/null
+  ./target/release/fsb bench "$g" "$out/$n.queries.jsonl" -t 1,4 -r 1 -l "$n" -o "$out/$n.results.jsonl" -a "$out/$n.answers.jsonl" 2>/dev/null
+  if r=$(python oracle/oracle.py -m 4GB -t 4 -T "$out/duck" "$g" "$out/$n.queries.jsonl" "$out/$n.answers.jsonl" 2>"$out/$n.oracle.log"); then
+    echo "$n $r"
+  else
+    echo "$n $r (see $out/$n.oracle.log)"; rc=1
+  fi
+done
+exit $rc
