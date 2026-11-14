@@ -1549,6 +1549,11 @@ def retire(ctx: Ctx, arg: str | None) -> None:
                    warn=f"retire failed on {root} (its per-scan files stay; the next run retries)")
 
 
+#: `store-gc`'s note when a builder (this scan's append, or a compaction it started) holds the static-names store: GC
+#: never deletes under one, and the next scan's run retries, so it's no failure and no alert.
+STATIC_GC_DEFERRED = "static cleanup deferred: a builder holds the static-names store's lease (the next scan retries)"
+
+
 @step("store-gc", core=False, soft=True, options={"execute": bool, "grace": int, "store": str, "copies": list, "static_gens": list,
                                               "static_store": str, "static_copies": list, "scratch": str},
       side=True, converges=True, leaves="superseded store generations not collected")
@@ -1573,13 +1578,17 @@ def store_gc(ctx: Ctx, arg: str | None) -> None:
         for root in dict.fromkeys(r for r in [store, *ctx.opt("store-gc", "copies", [archive])] if r):
             ctx.sh(["dt-cloud", "store-gc", *args, "-o", root], fatal=False, warn=f"store-gc failed on {root} (the generations stay)")
         if ctx.opt("store-gc", "static_store"):
+            from .append_runner import BUSY
+
             static = ["dt-cloud", "generation-gc", "-t", "static-names", "-o", ctx.opt("store-gc", "static_store"),
                       *(a for g in ctx.opt("store-gc", "static_gens", []) for a in ("-k", g)),
                       *(a for root in ctx.opt("store-gc", "static_copies", []) for a in ("-c", root)),
                       *(["-s", ctx.opt("store-gc", "scratch")] if ctx.opt("store-gc", "scratch") else []),
                       *(["-G", ctx.opt("store-gc", "grace")] if ctx.opt("store-gc", "grace") is not None else []),
                       *(["-x"] if ctx.opt("store-gc", "execute") else [])]
-            ctx.sh(static, fatal=False, warn="coordinated static generation cleanup failed (the generations stay)")
+            ctx.sh(static, fatal=False, warn="coordinated static generation cleanup failed (the generations stay)", allowed_codes=(BUSY,))
+            if ctx.last is not None and ctx.last.returncode == BUSY:
+                ctx.note = STATIC_GC_DEFERRED
         elif ctx.opt("store-gc", "static_gens") and archive:
             static = ["-t", "static-names", *(a for g in ctx.opt("store-gc", "static_gens") for a in ("-k", g)),
                       *(["-x"] if ctx.opt("store-gc", "execute") else [])]

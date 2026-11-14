@@ -1,8 +1,9 @@
 /**
  * The gate audit's rows (`functions/gates.test.ts`) for the routes only this deployment's branch carries: route file
  * (relative to `functions/`) -> one case per distinct gate branch, in the audit's vocabulary (`public`, `viewer`,
- * `stager`, `admin`, ...; a name it doesn't know fails it). `cloud` carries none. A deployment branch declares its
- * own routes here, so the audit's shared table merges without conflict; a route file declared nowhere fails the audit.
+ * `stager`, `admin`, ..., or one of `DEPLOYMENT_GATES`; a name it doesn't know fails it). `cloud` carries none. A
+ * deployment branch declares its own routes here, so the audit's shared table merges without conflict; a route file
+ * declared nowhere fails the audit.
  */
 export interface DeploymentCase {
   method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE'
@@ -11,7 +12,19 @@ export interface DeploymentCase {
   gate: string
   /** Vars and bindings the route needs to take this branch. */
   env?: Record<string, unknown>
+  /** A same-origin browser request: for a route that refuses a cross-site request before any gate. */
+  sameOrigin?: boolean
 }
+
+/** An outcome (`401`, `403`, `pass`), or the staff cell: refused with `ADMIN_LIST` on, passed with it off. */
+export type DeploymentCell = 401 | 403 | 'pass' | { readonly listOn: 403; readonly listOff: 'pass' }
+
+/**
+ * Gates only this deployment's routes sit behind, beside the audit's shared vocabulary (which they can't redefine):
+ * gate -> its outcome per identity, in the audit's `IDENTITIES` order (anonymous, read-only link, viewer, staff not
+ * listed, listed admin, admin grant, agent token). Each must be some route's. A share link's scopes reach none of them.
+ */
+export const DEPLOYMENT_GATES: Record<string, readonly [DeploymentCell, DeploymentCell, DeploymentCell, DeploymentCell, DeploymentCell, DeploymentCell, DeploymentCell]> = {}
 
 export const DEPLOYMENT_ROUTES: Record<string, DeploymentCase[]> = {}
 

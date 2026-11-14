@@ -143,7 +143,8 @@ def _tail_sep(cfg: DigestConfig) -> str:
 
 
 def _compact_quiet_lines(rows: list[tuple[str, bool]]) -> list[str]:
-    """Share a line, retaining each bucket's link and quota clause as independent text."""
+    """The low-info rows (``True``) share one line, at the first one's position, each keeping its own link and quota
+    clause; a lone one keeps its line."""
     quiet = [text for text, yes in rows if yes]
     if len(quiet) < 2:
         return [text for text, _ in rows]
@@ -180,10 +181,8 @@ def _tail(day: DayRow, cfg: DigestConfig) -> str:
         else:
             mark = _mark(fill, over, cfg)
             text = f"{mark} {c}" if mark else c
-        total = sum(v for _, v in group)
-        change = sum((day.dtb or 0) if name == cfg.primary else (day.dextra.get(name) or 0) for name, _ in group)
-        quiet = (total * cfg.unit.bytes < TIB / 2 and abs(change) * cfg.unit.bytes < TIB / 2
-                 and not over and (fill is None or fill < QUIET_PCT) and (r is None or r.days >= RUNWAY_TEXT_D))
+        # low-info: the line says only a size or a brief `NN%` (no headroom, no runway), whatever the bytes behind it
+        quiet = not over and (fill is None or fill < QUIET_PCT) and not (r and _runway_text(r, cfg))
         lines.append((text, quiet))
     return _tail_sep(cfg).join(_compact_quiet_lines(lines) if cfg.reply_lines else [text for text, _ in lines])
 

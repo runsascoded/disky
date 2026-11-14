@@ -215,7 +215,7 @@ def test_execute_holds_both_builder_leases_and_releases_them(tmp_path, monkeypat
     monkeypatch.setattr(gc.ar, 'compaction_lease', compaction)
     monkeypatch.setattr(gc, 'collect', collect)
     result = CliRunner().invoke(gc.command_cmd, ['-o', str(tmp_path), '-t', P, '-k', 'meta', '-s', 'scratch', '-x'])
-    assert result.exit_code == (1 if busy else 0)
+    assert result.exit_code == (gc.ar.BUSY if busy else 0)
     assert events == [('coordinator', 'scratch', P), ('compaction', ('scratch', f'{P}/compacting.lease.json'), 'generation-gc'),
                       *([] if busy else [('coordinator-check',), ('compaction-check',), ('collect',), ('compaction-release',)]),
                       ('coordinator-release',)]
