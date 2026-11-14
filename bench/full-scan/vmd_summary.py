@@ -56,7 +56,7 @@ def main() -> None:
         hot = [l["hot_s"] for l in ls if l["kind"] == "hot"]
         first = [(l["tenant"], l["cold_ms"]) for l in ls if l["kind"] == "query"]
         end = [l["mem"] for l in ls if l["kind"] == "end"]
-        print(f"\ncold {p.stem}: every tenant hot in {hot[0]:.1f} s; first query " + ", ".join(f"{t} {ms:.0f} ms" for t, ms in first) + (f"; {end[0]}" if end else ""))
+        print(f"\ncold {p.stem}: every tenant hot in " + (f"{hot[0]:.1f} s" if hot else "(not recorded)") + "; first query " + ", ".join(f"{t} {ms:.0f} ms" for t, ms in first) + (f"; {end[0]}" if end else ""))
 
 
 if __name__ == "__main__":

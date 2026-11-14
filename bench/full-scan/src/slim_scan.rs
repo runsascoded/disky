@@ -298,6 +298,8 @@ struct Chunk<'a, const SEARCH: bool, const DIFF: bool, const FILT: bool> {
     /// Per depth below the folder (1..=window), the bytes a node needs against `gtot` (`Cut::min_bytes`), kept as
     /// `gtot` moves: what the pruning bound and the fast object path compare with.
     thr: [u64; 65],
+    /// Whether the `dever` bound applies at all: the pack has it, the rule can drop nodes, `$FSB_NO_PRUNE` unset.
+    pruning: bool,
     /// A physical shard's edges (`slim::Edge`): its first / last object path continues in another shard.
     edge_first: bool,
     edge_last: bool,
@@ -932,7 +934,7 @@ impl<'a, const SEARCH: bool, const DIFF: bool, const FILT: bool> Chunk<'a, SEARC
         }
         // A directory that can't be drawn (`pruned`) is summed flat, unless a search is undecided under it (then
         // `deep` sums its matches, as below the window).
-        if self.pruned(ti) && (!SEARCH || f.dec == YES) {
+        if (!SEARCH || f.dec == YES) && self.pruned(ti) {
             return Some(true);
         }
         None
@@ -943,9 +945,11 @@ impl<'a, const SEARCH: bool, const DIFF: bool, const FILT: bool> Chunk<'a, SEARC
     /// against the running total.
     #[inline]
     fn pruned(&self, ti: usize) -> bool {
-        let dever = self.k.dever;
+        if !self.pruning || ti == 0 {
+            return false;
+        }
         let f = &self.st[ti];
-        ti > 0 && f.depth <= self.ctx.c.maxd && !dever.is_empty() && prune() && dever[f.node as usize] < self.thr[(f.depth - self.ctx.c.dp) as usize]
+        f.depth <= self.ctx.c.maxd && self.k.dever[f.node as usize] < self.thr[(f.depth - self.ctx.c.dp) as usize]
     }
 
     /// `thr` from the running total (after it moves).
@@ -1104,6 +1108,7 @@ impl Ctx<'_> {
                     gtot: 0,
                     hi_at: vec![0; 257],
                     thr: [0; 65],
+                    pruning: !self.ix.dever.is_empty() && self.c.cut.prunes() && prune(),
                     edge_first: self.ix.edge.as_ref().is_some_and(|e| e.first_cont),
                     edge_last: self.ix.edge.as_ref().is_some_and(|e| e.last_cont),
                 }
