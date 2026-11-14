@@ -106,11 +106,11 @@ RUNWAY_MARKS = ("runway", "runway-hue", "arrow-chip")
 
 def _quota_clause(tb: float, q: Quota, u: Units = UNITS["TiB"], brief: bool = False) -> str:
     """`NN.N% of <quota> (<n> Ti free)` (`over` past the quota); ``brief`` (`quota_marks: circles`): under
-    `QUIET_PCT`, just `NN%`."""
+    `QUIET_PCT`, just `NN% of <quota>`."""
     qt = q.bytes / u.bytes
     pct = tb / qt * 100
     if brief and pct < QUIET_PCT:
-        return f"{pct:.0f}%"
+        return f"{pct:.0f}% of {q.short or _qlabel(q.bytes)}"
     room = f"{qt - tb:,.1f} {u.short} free" if tb <= qt else f"{tb - qt:,.1f} {u.short} over"
     return f"{pct:.1f}% of {q.short or _qlabel(q.bytes)} ({room})"
 

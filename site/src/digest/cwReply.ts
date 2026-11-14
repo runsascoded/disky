@@ -109,7 +109,7 @@ function quotaClause(v: number, q: Quota, cfg: DigestCfg, brief = false): string
   const u = cfg.unit
   const qt = q.bytes / u.bytes
   const share = (v / qt) * 100
-  if (brief && share < QUIET_PCT) return `${fixed(share, 0)}%`
+  if (brief && share < QUIET_PCT) return `${fixed(share, 0)}% of ${q.short || qlabel(q.bytes)}`
   const room = v <= qt ? `${grouped(qt - v, 1)} ${u.short} free` : `${grouped(v - qt, 1)} ${u.short} over`
   return `${fixed(share, 1)}% of ${q.short || qlabel(q.bytes)} (${room})`
 }

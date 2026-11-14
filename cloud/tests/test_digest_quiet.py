@@ -9,7 +9,7 @@ CFG = E.DigestConfig(root="unused", state="unused", template="cw", title="T", si
                               "west": E.Bucket("04a", E.Quota(100*TIB, "100 TiB", "100Ti")), "east": E.Bucket("01a")})
 DAY = D.DayRow(date="2026-09-23", scan="2026-09-23T1201", tb=50, dtb=0, hours=24, since=None, extra={"west": 0, "east": .1})
 MAIN = ":pool-chip-8-0: [main](https://x.test/main?d=2609231201#over-time): 50.0% of 100Ti (50.0 Ti free)"
-WEST = ":pool-chip-8-0: [04a](https://x.test/west?d=2609231201#over-time): 0%"
+WEST = ":pool-chip-8-0: [04a](https://x.test/west?d=2609231201#over-time): 0% of 100Ti"
 EAST = "[01a](https://x.test/east?d=2609231201#over-time): 0 Ti"
 
 
