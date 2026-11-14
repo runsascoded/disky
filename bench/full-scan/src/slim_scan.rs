@@ -294,7 +294,10 @@ struct Chunk<'a, const SEARCH: bool, const DIFF: bool, const FILT: bool> {
     /// The largest side's running total as last published: chunks drop whole nodes the cut fails against it.
     gtot: u64,
     /// `deep`'s per-depth row bounds (only a depth it entered is read, so never cleared between calls).
-    hi_at: [usize; 257],
+    hi_at: Vec<usize>,
+    /// Per depth below the folder (1..=window), the bytes a node needs against `gtot` (`Cut::min_bytes`), kept as
+    /// `gtot` moves: what the pruning bound and the fast object path compare with.
+    thr: [u64; 65],
     /// A physical shard's edges (`slim::Edge`): its first / last object path continues in another shard.
     edge_first: bool,
     edge_last: bool,
@@ -444,6 +447,7 @@ impl<'a, const SEARCH: bool, const DIFF: bool, const FILT: bool> Chunk<'a, SEARC
         self.pub_a = self.run_a;
         self.pub_b = self.run_b;
         self.gtot = ta.max(tb);
+        self.set_thr();
     }
 
     /// Rows `[a, b)` summed into frame `t`; `row_search`: each row's own name decides (the rows are direct children of
@@ -586,14 +590,16 @@ impl<'a, const SEARCH: bool, const DIFF: bool, const FILT: bool> Chunk<'a, SEARC
         let t = self.target(ti);
         let d0 = self.st[ti].depth as usize;
         let lut: &[bool] = &c.search.as_ref().unwrap().lut;
+        // The chunk's buffer, held locally for the loop (only a depth entered in this call is read: never cleared).
+        let mut hi_at = std::mem::take(&mut self.hi_at);
         let mut cur = d0;
         let (mut x, mut y) = (Acc::default(), Acc::default());
         let (mut rows, mut dirs, mut passed) = (0u64, 0u64, 0u64);
         loop {
-            while cur > d0 && self.hi_at[cur] <= o {
+            while cur > d0 && hi_at[cur] <= o {
                 cur -= 1;
             }
-            let bound = if cur > d0 { self.hi_at[cur].min(e) } else { e };
+            let bound = if cur > d0 { hi_at[cur].min(e) } else { e };
             let next = if j < nd && (k.dlo[j] as usize) < bound { k.dlo[j] as usize } else { bound };
             // `cur`'s direct objects.
             let dd = cur + 1;
@@ -669,7 +675,7 @@ impl<'a, const SEARCH: bool, const DIFF: bool, const FILT: bool> Chunk<'a, SEARC
                         }
                     }
                     cur = dj;
-                    self.hi_at[dj] = jhi;
+                    hi_at[dj] = jhi;
                     j += 1;
                 }
             }
@@ -687,6 +693,7 @@ impl<'a, const SEARCH: bool, const DIFF: bool, const FILT: bool> Chunk<'a, SEARC
             self.run_b += y.bytes;
         }
         self.publish(rows);
+        self.hi_at = hi_at;
         (o, j)
     }
 
@@ -812,7 +819,7 @@ impl<'a, const SEARCH: bool, const DIFF: bool, const FILT: bool> Chunk<'a, SEARC
             while y < x1 && cont_bit(k.cont, y) {
                 y += 1;
             }
-            let tmin = c.cut.min_bytes(d, self.gtot);
+            let tmin = self.thr[(d - c.dp) as usize];
             let (mut ta, mut tb) = (Acc::default(), Acc::default());
             let mut cnt = 0u64;
             let mut r = x;
@@ -938,7 +945,15 @@ impl<'a, const SEARCH: bool, const DIFF: bool, const FILT: bool> Chunk<'a, SEARC
     fn pruned(&self, ti: usize) -> bool {
         let dever = self.k.dever;
         let f = &self.st[ti];
-        ti > 0 && !dever.is_empty() && prune() && dever[f.node as usize] < self.ctx.c.cut.min_bytes(f.depth, self.gtot)
+        ti > 0 && f.depth <= self.ctx.c.maxd && !dever.is_empty() && prune() && dever[f.node as usize] < self.thr[(f.depth - self.ctx.c.dp) as usize]
+    }
+
+    /// `thr` from the running total (after it moves).
+    fn set_thr(&mut self) {
+        let c = self.ctx.c;
+        for r in 1..=(c.maxd - c.dp) as usize {
+            self.thr[r] = c.cut.min_bytes(c.dp + r as u8, self.gtot);
+        }
     }
 
     /// Whether directory `j`'s rows meet a staged span (always, without a staged scope).
@@ -977,6 +992,7 @@ impl<'a, const SEARCH: bool, const DIFF: bool, const FILT: bool> Chunk<'a, SEARC
         // The threshold's lower bound as other chunks have already published it.
         if c.cut.prunes() {
             self.gtot = self.ctx.ga.load(Ordering::Relaxed).max(self.ctx.gb.load(Ordering::Relaxed));
+            self.set_thr();
         }
         let mut o = lo;
         // The chunk may start inside the deepest open directory's own versions.
@@ -1086,7 +1102,8 @@ impl Ctx<'_> {
                     pub_b: 0,
                     since: 0,
                     gtot: 0,
-                    hi_at: [0; 257],
+                    hi_at: vec![0; 257],
+                    thr: [0; 65],
                     edge_first: self.ix.edge.as_ref().is_some_and(|e| e.first_cont),
                     edge_last: self.ix.edge.as_ref().is_some_and(|e| e.last_cont),
                 }
