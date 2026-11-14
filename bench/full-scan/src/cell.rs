@@ -21,12 +21,21 @@ use crate::util::{err, Result};
 /// The deepest window a request may ask for.
 pub const MAX_DEPTH: u8 = 64;
 
+/// The attenuation a request that names none gets: the share halves per level below the folder's children, as today's
+/// Worker's does (`ATTEN_DEFAULT = 2`). Ryan's decision, 2026-11-14 (specs/vm-mode.md §10 item 1); `0` is the pure share.
+pub const ATTEN_LOG2: u8 = 1;
+
+fn atten_log2_default() -> u8 {
+    ATTEN_LOG2
+}
+
 /// The rule as a request carries it.
-#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct Cell {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub share_log2: Option<u8>,
-    #[serde(default)]
+    /// Absent: `ATTEN_LOG2` (halving per level).
+    #[serde(default = "atten_log2_default")]
     pub atten_log2: u8,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub depth: Option<u8>,
@@ -35,6 +44,12 @@ pub struct Cell {
     /// The bench's legacy form (`x · 10^6 ≥ min_ppm · T`), for checks against its oracle-checked answers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_ppm: Option<u64>,
+}
+
+impl Default for Cell {
+    fn default() -> Self {
+        Cell { share_log2: None, atten_log2: ATTEN_LOG2, depth: None, floor_bytes: None, min_ppm: None }
+    }
 }
 
 /// The rule, resolved for one folder.
@@ -155,6 +170,19 @@ mod tests {
             [(100, 2), (99, 2), (200, 3), (199, 3), (1600, 6), (1600, 7)].map(|(x, d)| c.keep(x, d, 1600)),
             [true, false, true, false, true, false]
         );
+    }
+
+    #[test]
+    fn halving_is_the_default() {
+        // A request naming only the share gets `ATTEN_LOG2` = 1: a phone's 2^-16 draws 17 levels.
+        let c: Cell = serde_json::from_str(r#"{"share_log2": 16}"#).unwrap();
+        assert_eq!(c, Cell { share_log2: Some(16), atten_log2: 1, depth: None, floor_bytes: None, min_ppm: None });
+        assert_eq!(c, Cell { share_log2: Some(16), ..Cell::default() });
+        assert_eq!(c.cut(0).unwrap().depth, 17);
+        assert_eq!(serde_json::to_string(&c).unwrap(), r#"{"share_log2":16,"atten_log2":1}"#);
+        // The pure share is asked for by name.
+        let p: Cell = serde_json::from_str(r#"{"share_log2": 16, "atten_log2": 0}"#).unwrap();
+        assert_eq!((p.atten_log2, p.cut(0).unwrap().depth), (0, 8));
     }
 
     #[test]

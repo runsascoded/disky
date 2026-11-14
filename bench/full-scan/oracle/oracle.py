@@ -22,6 +22,8 @@ import duckdb
 err = partial(print, file=sys.stderr)
 OPEN = 4291747200
 MANIFEST = re.compile(r"^\d{4}-\d{2}-\d{2}(T\d{4})?(\.m\d{3})?\.json$")
+#: A cell rule's `atten_log2` when the request names none: halving per level (`cell.rs`'s `ATTEN_LOG2`).
+ATTEN_LOG2 = 1
 
 
 def generation(gen: Path) -> tuple[list[dict], list[str]]:
@@ -104,7 +106,7 @@ def window(q: dict) -> int:
         return q["depth"]
     if c.get("depth") is not None:
         return c["depth"]
-    s, a = c.get("share_log2"), c.get("atten_log2", 0)
+    s, a = c.get("share_log2"), c.get("atten_log2", ATTEN_LOG2)
     return min(1 + s // a, 64) if s is not None and a > 0 else 8
 
 
@@ -114,7 +116,7 @@ def keep_sql(q: dict, x: str, total: int) -> str:
     c = q.get("cell")
     if c is None:
         return f"({x})::HUGEINT * 1000000 >= {q['min_ppm']}::HUGEINT * {total}"
-    a = c.get("atten_log2", 0)
+    a = c.get("atten_log2", ATTEN_LOG2)
     conds = ["true"]
     if c.get("share_log2") is not None:
         conds.append(f"({x})::HUGEINT << {c['share_log2']} >= {total}::HUGEINT << ({a} * (k - 1))")

@@ -18,6 +18,10 @@ describe('vmRequest', () => {
     expect(vmRequest({ pins, from: 'a', to: 'b', path: '', w: 256, h: 256, minArea: 16, atten: 1, maxDepth: 3 })).toEqual({
       pins, from: 'a', to: 'b', path: '', cell: { share_log2: 12, atten_log2: 0, depth: 3 },
     })
+    // No `atten`: the Worker's own halving (`ATTEN_DEFAULT` = 2), named in the request.
+    expect(vmRequest({ pins, date: 'a', path: '', w: 390, h: 844, minArea: 8 })).toEqual({
+      pins, scan: 'a', path: '', cell: { share_log2: 16, atten_log2: 1 },
+    })
   })
 })
 

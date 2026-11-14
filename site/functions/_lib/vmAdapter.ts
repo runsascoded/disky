@@ -3,7 +3,7 @@
  * it yet: the lane decision and the wiring are the next phase's (specs/serverless-tiers.md §5). */
 import type { QueryAst } from './queryAst.js'
 import type { ClassScope, OwnerScope } from './scope.js'
-import type { DiffRow, ViewNode } from './view.js'
+import { ATTEN_DEFAULT, type DiffRow, type ViewNode } from './view.js'
 
 const { ceil, log2, max, round } = Math
 
@@ -99,13 +99,15 @@ export interface VmViewOpts {
   w: number
   h: number
   minArea: number
-  atten: number
+  /** The per-level attenuation (a power of 2); default the Worker's own, `ATTEN_DEFAULT` (halving: `atten_log2 = 1`,
+   *  Ryan's decision, specs/vm-mode.md §10 item 1). Always sent, so the request names its policy. */
+  atten?: number
   maxDepth?: number
   deadlineMs?: number
 }
 
 export function vmRequest(o: VmViewOpts): VmViewRequest {
-  const cell: VmCell = { share_log2: shareLog2(o.w, o.h, o.minArea), atten_log2: attenLog2(o.atten), ...(o.maxDepth ? { depth: o.maxDepth } : {}) }
+  const cell: VmCell = { share_log2: shareLog2(o.w, o.h, o.minArea), atten_log2: attenLog2(o.atten ?? ATTEN_DEFAULT),...(o.maxDepth ? { depth: o.maxDepth } : {}) }
   const owners = vmOwners(o)
   return {
     pins: o.pins,
@@ -137,7 +139,7 @@ export const vmThreshold = (a: VmAnswer): number => {
 }
 
 /** `/api/subtree`'s body from a view's answer (`rootLabel`: the deployment's `ROOT_LABEL`, the root's name). */
-export function subtreeBody(a: VmAnswer, o: { date: string; w: number; h: number; minArea: number; atten: number; rootLabel: string; q?: string }) {
+export function subtreeBody(a: VmAnswer, o: { date: string; w: number; h: number; minArea: number; atten?: number; rootLabel: string; q?: string }) {
   const tree = viewNode(a.tree)
   if (a.path === '') tree.name = o.rootLabel
   return {
@@ -146,7 +148,7 @@ export function subtreeBody(a: VmAnswer, o: { date: string; w: number; h: number
     w: o.w,
     h: o.h,
     minArea: o.minArea,
-    atten: o.atten,
+    atten: o.atten ?? ATTEN_DEFAULT,
     tier: 'vm',
     index: `vm:${a.pins.gen}/${a.pins.manifest}`,
     threshold: round(vmThreshold(a)),
