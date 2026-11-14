@@ -81,7 +81,7 @@ import { selOf } from './scanSlug'
 import { SizeOverTime } from './SizeOverTime'
 import { useStore, useStoreFetch } from './store'
 import { listingTime } from './listingTime'
-import { knownBucket, storeDefaultColor } from './stores'
+import { DEFAULT_STORE, knownBucket, storeDefaultColor } from './stores'
 import { colorModeCodec as modeCodec, mapColorMode } from './colorMode'
 import { perf } from './perf'
 import { useDocTitle } from './title'
@@ -1182,7 +1182,7 @@ function AppContent() {
         <SiteNav />
         <p className="err">
           404 — <code>/{drillPath}</code> is not a bucket or page here.{' '}
-          <Link to={store.path}>home</Link>{store.staging && <> · <Link to="/staged">staged</Link></>}{store.owners && <> · <Link to="/users">users</Link></>}
+          <Link to={store.path}>home</Link>{DEFAULT_STORE.staging && <> · <Link to="/staged">staged</Link></>}{DEFAULT_STORE.owners && <> · <Link to="/users">users</Link></>}
         </p>
       </main>
     )
