@@ -1,5 +1,5 @@
-import { flattenPlaced, hitTest, fitCandidate, candidates, inlineRoom, isFolded, layoutCells, cellStroke, layoutChildren, categoricalStyle, resolveRing, resolveCellStyle } from './chunk-ZNR7R7MN.js';
-export { NAME_MIN_PX, candidates, cellStroke, fitCandidate, flattenPlaced, foldedOf, hitTest, inlineRoom, isFolded, layoutCells, resolveCellStyle } from './chunk-ZNR7R7MN.js';
+import { dustRules, dustInk, flattenPlaced, hitTest, fitCandidate, candidates, inlineRoom, isFolded, layoutCells, cellStroke, layoutChildren, categoricalStyle, resolveRing, resolveCellStyle } from './chunk-OHLUHXRA.js';
+export { HATCH_DARK, HATCH_LIGHT, NAME_MIN_PX, candidates, cellStroke, dustGround, dustInk, dustLineCount, dustLines, dustOffsets, fitCandidate, flattenPlaced, foldedOf, hatchInk, hitTest, inlineRoom, isFolded, layoutCells, resolveCellStyle } from './chunk-OHLUHXRA.js';
 import { foldSmall, squarifyRemainder, squarify, foldThin } from './chunk-TWK3KLKY.js';
 export { foldSmall, foldThin, squarify, squarifyRemainder } from './chunk-TWK3KLKY.js';
 import { useHoverPin } from './chunk-HMG5G7YN.js';
@@ -13,41 +13,104 @@ export { divergingColor, divergingInk } from './chunk-2DHCBMZJ.js';
 import { useRef, useLayoutEffect, useMemo, useEffect, useState, useCallback } from 'react';
 import { jsx, jsxs, Fragment } from 'react/jsx-runtime';
 
-function dustOffsets(len, n, ratio) {
-  if (n < 1 || len <= 0) return [];
-  const g = ratio === 1 ? len / n : len * (ratio - 1) / (ratio ** n - 1);
-  const out = [];
-  let at = 0;
-  for (let k = 0; k < n; k++) {
-    at += g * ratio ** k;
-    if (at >= len) break;
-    out.push(at);
+// src/cssColor.ts
+function cssColor(el, color) {
+  const m = /^\s*var\(\s*(--[\w-]+)\s*(?:,\s*([^)]*))?\)\s*$/.exec(color);
+  if (!m) return color;
+  const v = getComputedStyle(el).getPropertyValue(m[1]).trim();
+  return v || (m[2] ?? "").trim() || color;
+}
+function colorResolver(el) {
+  const cache = /* @__PURE__ */ new Map();
+  return (color) => {
+    if (!color.includes("var(")) return color;
+    const cached = cache.get(color);
+    if (cached !== void 0) return cached;
+    let resolved = cssColor(el, color);
+    for (let i = 0; i < 8 && resolved.includes("var("); i++) {
+      const next = resolved.replace(/var\(\s*(--[\w-]+)\s*(?:,\s*([^()]*))?\)/g, (_m, name, fallback) => getComputedStyle(el).getPropertyValue(name).trim() || fallback?.trim() || `var(${name})`);
+      if (next === resolved) break;
+      resolved = next;
+    }
+    cache.set(color, resolved);
+    return resolved;
+  };
+}
+var probed = /* @__PURE__ */ new Map();
+var probe = null;
+function browserRgba(c) {
+  const p = parseColor(c) ?? probed.get(c);
+  if (p) return p;
+  if (!c || c.includes("var(") || typeof CSS === "undefined" || !CSS.supports("color", c)) return null;
+  if (!probe) {
+    const canvas = document.createElement("canvas");
+    canvas.width = canvas.height = 1;
+    probe = canvas.getContext("2d", { willReadFrequently: true });
   }
+  if (!probe) return null;
+  probe.clearRect(0, 0, 1, 1);
+  probe.fillStyle = c;
+  probe.fillRect(0, 0, 1, 1);
+  const [r, g, b, a] = probe.getImageData(0, 0, 1, 1).data;
+  const out = [r, g, b, a / 255];
+  probed.set(c, out);
   return out;
 }
-function dustLineCount(len, count, base2) {
-  const byCount = Math.round(base2 * Math.log2(count + 1));
-  return Math.max(2, Math.min(byCount, Math.floor(len / 4)));
-}
-function drawDust(ctx, ox, oy, w, h, count, color = "rgba(150, 150, 165, 0.5)", baseLines = 3, ratio = 1.32) {
-  if (w <= 0 || h <= 0) return;
+function drawDust(ctx, ox, oy, w, h, count, color = dustInk({}), baseLines = 3, ratio = 1.32, notch) {
+  const { v, h: hz } = dustRules(w, h, count, notch, baseLines, ratio);
+  if (!v.length && !hz.length) return;
   ctx.strokeStyle = color;
   ctx.lineWidth = 1;
   ctx.beginPath();
-  for (const d of dustOffsets(w, dustLineCount(w, count, baseLines), ratio)) {
-    const x = Math.round(w - d) + 0.5;
-    ctx.moveTo(ox + x, oy);
+  for (const [x, y0] of v) {
+    ctx.moveTo(ox + x, oy + y0);
     ctx.lineTo(ox + x, oy + h);
   }
-  for (const d of dustOffsets(h, dustLineCount(h, count, baseLines), ratio)) {
-    const y = Math.round(h - d) + 0.5;
-    ctx.moveTo(ox, oy + y);
+  for (const [y, x0] of hz) {
+    ctx.moveTo(ox + x0, oy + y);
     ctx.lineTo(ox + w, oy + y);
   }
   ctx.stroke();
 }
-function DustHatch({ w, h, count, color, baseLines = 3, ratio = 1.32 }) {
+function drawDustFrame(ctx, ox, oy, w, h, color) {
+  if (w <= 1 || h <= 1) return;
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 1;
+  ctx.setLineDash([2, 2]);
+  ctx.strokeRect(ox + 0.5, oy + 0.5, w - 1, h - 1);
+  ctx.setLineDash([]);
+}
+function labelNotch(cv, w) {
+  const labels = cv.closest(".dt-treemap-cell")?.querySelectorAll(":scope > .dt-treemap-lbl, :scope > .dt-treemap-lbl2");
+  if (!labels?.length) return null;
+  const box = cv.getBoundingClientRect();
+  if (!box.width) return null;
+  const k = w / box.width;
+  const range = document.createRange();
+  let right = 0;
+  let bottom = 0;
+  for (const el of labels) {
+    range.selectNodeContents(el);
+    const r = range.getBoundingClientRect();
+    if (!r.width) continue;
+    right = Math.max(right, r.right);
+    bottom = Math.max(bottom, r.bottom);
+  }
+  return right ? { w: (right - box.left) * k + 2, h: (bottom - box.top) * k + 2 } : null;
+}
+function resolvedDustInk(el, ground = {}, alpha = 1) {
+  const resolve = colorResolver(el);
+  const base2 = browserRgba(resolve("var(--dt-treemap-container-bg)"));
+  const style = {
+    bg: ground.bg && resolve(ground.bg),
+    bands: ground.bands?.map((b) => ({ ...b, color: resolve(b.color) })),
+    segments: ground.segments?.map((s) => ({ ...s, color: resolve(s.color) }))
+  };
+  return dustInk(style, alpha, base2 ?? CONTAINER_BG, browserRgba);
+}
+function DustHatch({ w, h, count, color, ground, alpha = 1, frame = false, clearLabels = false, baseLines = 3, ratio = 1.32 }) {
   const ref = useRef(null);
+  const groundKey = ground ? JSON.stringify([ground.bg, ground.bands, ground.segments]) : "";
   useLayoutEffect(() => {
     const cv = ref.current;
     if (!cv || w <= 0 || h <= 0) return;
@@ -58,8 +121,10 @@ function DustHatch({ w, h, count, color, baseLines = 3, ratio = 1.32 }) {
     if (!ctx) return;
     ctx.scale(dpr, dpr);
     ctx.clearRect(0, 0, w, h);
-    drawDust(ctx, 0, 0, w, h, count, color ?? "rgba(150, 150, 165, 0.5)", baseLines, ratio);
-  }, [w, h, count, color, baseLines, ratio]);
+    const ink = color ?? resolvedDustInk(cv, ground, alpha);
+    if (frame) drawDustFrame(ctx, 0, 0, w, h, ink);
+    drawDust(ctx, 0, 0, w, h, count, ink, baseLines, ratio, clearLabels ? labelNotch(cv, w) : null);
+  }, [w, h, count, color, groundKey, alpha, frame, clearLabels, baseLines, ratio]);
   return /* @__PURE__ */ jsx(
     "canvas",
     {
@@ -81,11 +146,6 @@ function bandRects(bands, height) {
     top += h;
     return rect;
   });
-}
-function dustInk(style, fade = 1) {
-  const dominant = style.bands?.reduce((a, b) => !a || b.frac > a.frac ? b : a, void 0);
-  const edge = contrastEdge(dominant?.color ?? style.bg, fade);
-  return edge?.startsWith("rgba(0,") ? "rgba(0, 0, 0, 0.65)" : edge ? "rgba(255, 255, 255, 0.65)" : style.ink;
 }
 function stripeBackground(stripes) {
   return stripes?.map((s) => `repeating-linear-gradient(${s.angle}deg, ${s.color} 0 ${s.width}px, transparent ${s.width}px ${s.period}px)`).join(", ") || void 0;
@@ -112,30 +172,6 @@ function drawStripes(ctx, x, y, w, h, stripes, color) {
   }
   ctx.restore();
 }
-
-// src/cssColor.ts
-function cssColor(el, color) {
-  const m = /^\s*var\(\s*(--[\w-]+)\s*(?:,\s*([^)]*))?\)\s*$/.exec(color);
-  if (!m) return color;
-  const v = getComputedStyle(el).getPropertyValue(m[1]).trim();
-  return v || (m[2] ?? "").trim() || color;
-}
-function colorResolver(el) {
-  const cache = /* @__PURE__ */ new Map();
-  return (color) => {
-    if (!color.includes("var(")) return color;
-    const cached = cache.get(color);
-    if (cached !== void 0) return cached;
-    let resolved = cssColor(el, color);
-    for (let i = 0; i < 8 && resolved.includes("var("); i++) {
-      const next = resolved.replace(/var\(\s*(--[\w-]+)\s*(?:,\s*([^()]*))?\)/g, (_m, name, fallback) => getComputedStyle(el).getPropertyValue(name).trim() || fallback?.trim() || `var(${name})`);
-      if (next === resolved) break;
-      resolved = next;
-    }
-    cache.set(color, resolved);
-    return resolved;
-  };
-}
 var CONTAINER_RGB = `rgb(${CONTAINER_BG[0]}, ${CONTAINER_BG[1]}, ${CONTAINER_BG[2]})`;
 var SYNC_BUDGET_MS = 8;
 var FRAME_BUDGET_MS = 10;
@@ -152,26 +188,8 @@ function readLabelSizes(el) {
   lblFs = px(cs.getPropertyValue("--dt-treemap-lbl-fs"), 13.5);
   lblFsSm = px(cs.getPropertyValue("--dt-treemap-lbl-fs-sm"), 11.5);
 }
-var browserColors = /* @__PURE__ */ new Map();
-var colorProbe = null;
 function rgbaAt(c, alpha) {
-  const resolved = resolveVar(c ?? "");
-  let p = parseColor(resolved) ?? browserColors.get(resolved);
-  if (!p && !resolved.includes("var(") && typeof CSS !== "undefined" && CSS.supports("color", resolved)) {
-    if (!colorProbe) {
-      const canvas = document.createElement("canvas");
-      canvas.width = canvas.height = 1;
-      colorProbe = canvas.getContext("2d", { willReadFrequently: true });
-    }
-    if (colorProbe) {
-      colorProbe.clearRect(0, 0, 1, 1);
-      colorProbe.fillStyle = resolved;
-      colorProbe.fillRect(0, 0, 1, 1);
-      const [r, g, b, a] = colorProbe.getImageData(0, 0, 1, 1).data;
-      p = [r, g, b, a / 255];
-      browserColors.set(resolved, p);
-    }
-  }
+  const p = browserRgba(resolveVar(c ?? ""));
   if (!p) return null;
   return `rgba(${p[0]}, ${p[1]}, ${p[2]}, ${p[3] * alpha})`;
 }
@@ -451,23 +469,6 @@ function paintCell(ctx, cell, o) {
       ctx.strokeRect(x + edge / 2, y + edge / 2, cw - edge, ch - edge);
     }
   }
-  if (folded && dustTexture && Math.min(w, h) >= 6) {
-    if (Math.min(w, h) >= 8) {
-      ctx.strokeStyle = "rgba(150, 150, 165, 0.55)";
-      ctx.lineWidth = 1;
-      ctx.setLineDash([2, 2]);
-      ctx.strokeRect(bx + 0.5, by + 0.5, bw - 1, bh - 1);
-      ctx.setLineDash([]);
-    }
-    drawDust(ctx, bx, by, bw, bh, cell.node.count);
-  }
-  if (!folded && dustTexture && style.dustCount !== void 0 && Math.min(w, h) >= 6) {
-    const gridStyle = { ...style, bg: resolveVar(style.bg ?? ""), bands: style.bands?.map((b) => ({ ...b, color: resolveVar(b.color) })), ink: resolveVar(style.ink ?? "") };
-    ctx.save();
-    ctx.globalAlpha = alpha;
-    drawDust(ctx, bx, by, bw, bh, style.dustCount, dustInk(gridStyle, fade));
-    ctx.restore();
-  }
   const segs = style.segments;
   if (segs && segs.length > 1 && !hasKids && !dust && Math.min(w, h) >= 18) {
     const segInset = shared ? Math.max(1, 2 * edge) : 3;
@@ -491,6 +492,19 @@ function paintCell(ctx, cell, o) {
       }
     }
   }
+  const dustCount = folded ? cell.node.count : style.dustCount;
+  let paintDust = null;
+  if (dustCount !== void 0 && dustTexture && Math.min(w, h) >= 6 && bw > 0 && bh > 0) {
+    const ground = { bg: resolveVar(style.bg ?? ""), bands: style.bands?.map((b) => ({ ...b, color: resolveVar(b.color) })), segments: segs && !hasKids && !dust && Math.min(w, h) >= 18 ? segs.map((s) => ({ ...s, color: resolveVar(s.color) })) : void 0 };
+    const ink = dustInk(ground, alpha, CONTAINER_BG, browserRgba);
+    paintDust = (notch) => {
+      ctx.save();
+      ctx.globalAlpha = style.opacity ?? 1;
+      if (folded && Math.min(w, h) >= 8) drawDustFrame(ctx, bx, by, bw, bh, ink);
+      drawDust(ctx, bx, by, bw, bh, dustCount, ink, 3, 1.32, notch);
+      ctx.restore();
+    };
+  }
   if (showLbl) {
     const ink = rgbaAt(style.ink, 1) ?? "rgba(230, 230, 238, 1)";
     const fs = w < 64 ? lblFsSm : lblFs;
@@ -512,21 +526,32 @@ function paintCell(ctx, cell, o) {
     const szW = inlineSize ? ctx.measureText(szText).width : 0;
     if (inlineSize) nameMax -= szW + gap;
     const name = fit(ctx, label, Math.max(0, nameMax));
+    const nameW = ctx.measureText(name).width;
+    const sx = sizeAlign === "right" ? x + cw - pad - szW : x + pad + nameW + gap;
+    const second = !hasKids && h > 34;
+    ctx.font = `${lblFsSm}px system-ui, -apple-system, sans-serif`;
+    const line2 = second ? fit(ctx, fitCandidate(cands, cw - 2 * pad, (t) => ctx.measureText(t).width), cw - 2 * pad) : "";
+    const line2W = line2 ? ctx.measureText(line2).width : 0;
+    const right = Math.max(x + pad + nameW, inlineSize ? sx + szW : 0, line2 ? x + pad + line2W : 0);
+    const bottom = line2 ? y + 2 + fs + 3 + lblFsSm : y + 2 + fs;
+    paintDust?.({ w: right - bx + 2, h: bottom - by + 2 });
+    paintDust = null;
+    ctx.font = `${fs}px system-ui, -apple-system, sans-serif`;
     ctx.fillText(name, x + pad, y + 2);
     if (inlineSize) {
-      const sx = sizeAlign === "right" ? x + cw - pad - szW : x + pad + ctx.measureText(name).width + gap;
       ctx.globalAlpha = 0.75;
       ctx.fillText(szText, sx, y + 2);
       ctx.globalAlpha = 1;
     }
-    if (!hasKids && h > 34) {
+    if (line2) {
       ctx.globalAlpha = 0.75;
       ctx.font = `${lblFsSm}px system-ui, -apple-system, sans-serif`;
-      ctx.fillText(fit(ctx, fitCandidate(cands, cw - 2 * pad, (t) => ctx.measureText(t).width), cw - 2 * pad), x + pad, y + 2 + fs + 3);
+      ctx.fillText(line2, x + pad, y + 2 + fs + 3);
       ctx.globalAlpha = 1;
     }
     ctx.restore();
   }
+  paintDust?.(null);
   const ring = resolveRing(style.ring);
   if (ring && ring.width > 0) {
     const off = ring.inset ? ring.width / 2 : -ring.width / 2;
@@ -914,10 +939,10 @@ function Treemap({
   const titleProbeRef = useRef(null);
   const [titleMetrics, setTitleMetrics] = useState(null);
   useLayoutEffect(() => {
-    const probe = titleProbeRef.current;
-    if (!reclaimTitleSpace || !probe) return;
-    const css = getComputedStyle(probe);
-    const sizeCss = getComputedStyle(probe.firstElementChild);
+    const probe2 = titleProbeRef.current;
+    if (!reclaimTitleSpace || !probe2) return;
+    const css = getComputedStyle(probe2);
+    const sizeCss = getComputedStyle(probe2.firstElementChild);
     const metrics = {
       font: css.font || `${css.fontWeight} ${css.fontSize} ${css.fontFamily}`,
       sizeFont: sizeCss.font || `${sizeCss.fontWeight} ${sizeCss.fontSize} ${sizeCss.fontFamily}`,
@@ -1274,6 +1299,7 @@ function Treemap({
       builtinEdge = contrastEdge(style.bg, fadeAt(depth));
     }
     const ring = resolveRing(style.ring);
+    const paintInset = Math.max(shared ? edge : 0, ring?.inset ? ring.width : 0);
     const cellKey = folded ? `__folded_${depth}_${r.x}_${r.y}` : idFor(kid, kidPath);
     const foldedNode = folded ? kid : null;
     const dustHits = foldedNode && dustTexture && foldedNode.children.length > 1 && Math.min(r.w, r.h) >= 10 && foldedNode.children.length <= 4e3 ? squarify(foldedNode.children, 0, 0, boxW, boxH, getSize) : null;
@@ -1369,20 +1395,14 @@ function Treemap({
                 position: "absolute",
                 // An inset `ring` is a box-shadow on the cell box, under this layer: leave it bare too, or it
                 // would only show as far as the shared edge (and not at all in gaps mode).
-                inset: Math.max(shared ? edge : 0, ring?.inset ? ring.width : 0),
+                inset: paintInset,
                 background: style.bands?.length ? void 0 : style.bg,
                 ...(style.hatch || style.stripes) && { backgroundImage: style.hatch ?? stripeBackground(style.stripes) },
-                // Dashed frame marks the dust tile as not-a-real-cell.
-                ...foldedNode && dustTexture && Math.min(r.w, r.h) >= 8 && {
-                  border: "1px dashed var(--dt-treemap-folded-edge, rgba(150, 150, 165, 0.55))",
-                  boxSizing: "border-box"
-                },
                 opacity: fadeAt(depth) * (style.opacity ?? 1),
                 pointerEvents: "none"
               },
               children: [
                 bandRects(style.bands, boxH).map((b, i) => /* @__PURE__ */ jsx("div", { style: { position: "absolute", left: 0, right: 0, top: b.top, height: b.height, background: b.color } }, i)),
-                (foldedNode || style.dustCount !== void 0) && dustTexture && Math.min(r.w, r.h) >= 6 && /* @__PURE__ */ jsx(DustHatch, { w: boxW, h: boxH, count: foldedNode?.count ?? style.dustCount, color: foldedNode ? void 0 : dustInk(style, fadeAt(depth)) }),
                 style.segments && style.segments.length > 1 && kids.length === 0 && !dust && Math.min(r.w, r.h) >= 18 && (() => {
                   const inset = shared ? Math.max(1, bw) : 3;
                   const gap = 1;
@@ -1405,6 +1425,25 @@ function Treemap({
                   });
                 })()
               ]
+            }
+          ),
+          (foldedNode || style.dustCount !== void 0) && dustTexture && Math.min(r.w, r.h) >= 6 && /* @__PURE__ */ jsx(
+            "div",
+            {
+              className: "dt-treemap-dust",
+              style: { position: "absolute", inset: paintInset, opacity: style.opacity ?? 1, pointerEvents: "none" },
+              children: /* @__PURE__ */ jsx(
+                DustHatch,
+                {
+                  w: Math.max(0, boxW - 2 * paintInset),
+                  h: Math.max(0, boxH - 2 * paintInset),
+                  count: foldedNode?.count ?? style.dustCount,
+                  ground: style.segments && style.segments.length > 1 && kids.length === 0 && !dust && Math.min(r.w, r.h) >= 18 ? style : { ...style, segments: void 0 },
+                  alpha: fadeAt(depth) * (style.opacity ?? 1),
+                  frame: !!foldedNode && Math.min(r.w, r.h) >= 8,
+                  clearLabels: showLbl
+                }
+              )
             }
           ),
           showLbl && /* @__PURE__ */ jsxs(
@@ -2244,7 +2283,7 @@ function DiffTreemap({
           },
           formatSize,
           colorForCell: (n, _path, _depth, ctx) => {
-            const withEdge = (s, face) => ({ ...s, edge: contrastEdge(face, ctx.fade) ?? void 0 });
+            const withEdge = (s, face) => ({ ...s, edge: contrastEdge(face, ctx.fade) ?? void 0, ...n.status === "fold" && { dustCount: n.nFolded ?? 1 } });
             const hasKids = ctx.hasKids || !!n.children?.length;
             if (areaMode === "max") {
               if (hasKids) {
@@ -2747,6 +2786,6 @@ function DiffTable({
   ] });
 }
 
-export { BorderStepToggle, DiffTable, DiffTreemap, DustHatch, GREW_GREEN, MIN_CELL_PX, NEUTRAL, OutlineOverlay, SHRANK_RED, TOUCHED_HATCH, TitleSpaceToggle, Treemap, TreemapCanvas, UNCHANGED_GREY, UNCHANGED_SWATCH, buildDiffTree, canvasToPngBlob, churn, colorResolver, composeExport, copyPng, cssColor, defaultExportFilename, deltaColor, deltaTextColor, dimUnmatched, downloadPng, drawDust, dustLineCount, dustOffsets, fetchable, filterNodes, groupOutlines, groupRects, mapMinFrac, parseQuery, statusColors, unionOutline };
+export { BorderStepToggle, DiffTable, DiffTreemap, DustHatch, GREW_GREEN, MIN_CELL_PX, NEUTRAL, OutlineOverlay, SHRANK_RED, TOUCHED_HATCH, TitleSpaceToggle, Treemap, TreemapCanvas, UNCHANGED_GREY, UNCHANGED_SWATCH, buildDiffTree, canvasToPngBlob, churn, colorResolver, composeExport, copyPng, cssColor, defaultExportFilename, deltaColor, deltaTextColor, dimUnmatched, downloadPng, drawDust, fetchable, filterNodes, groupOutlines, groupRects, mapMinFrac, parseQuery, resolvedDustInk, statusColors, unionOutline };
 //# sourceMappingURL=index.js.map
 //# sourceMappingURL=index.js.map

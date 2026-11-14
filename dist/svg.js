@@ -1,4 +1,4 @@
-import { layoutCells, isFolded, flattenPlaced, resolveCellStyle, candidates, fitCandidate, inlineRoom, resolveRing } from './chunk-ZNR7R7MN.js';
+import { layoutCells, isFolded, flattenPlaced, resolveCellStyle, candidates, fitCandidate, inlineRoom, dustInk, dustRules, resolveRing } from './chunk-OHLUHXRA.js';
 import { foldThin, squarify, foldSmall } from './chunk-TWK3KLKY.js';
 import { slotColor, DEFAULT_PALETTE, CONTAINER_BG } from './chunk-FUKGMHLM.js';
 import { parseColor } from './chunk-JJOWQXW4.js';
@@ -121,9 +121,8 @@ function treemapSvg(cells, o) {
       const stroke = paint("stroke", style.edge ?? builtinEdge ?? void 0, 1, vars);
       if (stroke) out.push(`<rect x="${r1(x + edge / 2)}" y="${r1(y + edge / 2)}" width="${r1(cw - edge)}" height="${r1(ch - edge)}" fill="none" ${stroke} stroke-width="${r1(edge)}"/>`);
     }
-    if (folded && dustTexture && Math.min(w, h) >= 8) {
-      out.push(`<rect x="${r1(bx + 0.5)}" y="${r1(by + 0.5)}" width="${r1(bw - 1)}" height="${r1(bh - 1)}" fill="none" stroke="rgb(150,150,165)" stroke-opacity="0.55" stroke-dasharray="2 2"/>`);
-    }
+    const lbl = [];
+    let notch = null;
     if (showLbl) {
       const ink = paint("fill", style.ink, 1, vars) ?? 'fill="rgb(230,230,238)"';
       const px = w < 64 ? fsSm : fs;
@@ -137,18 +136,43 @@ function treemapSvg(cells, o) {
       const szW = inlineSize ? o.measure(szText, px) : 0;
       const nameMax = cw - 2 * pad - (inlineSize ? szW + gap : 0);
       const name = fitText(label, Math.max(0, nameMax), px, o.measure);
+      let right = 0;
+      let bottom = 0;
       if (ch >= px + 2 && name) {
-        out.push(text(x + pad, y + 2, name, px, ink));
+        lbl.push(text(x + pad, y + 2, name, px, ink));
+        right = x + pad + o.measure(name, px);
+        bottom = y + 2 + px;
         if (inlineSize) {
           const sx = sizeAlign === "right" ? x + cw - pad - szW : x + pad + o.measure(name, px) + gap;
-          out.push(text(sx, y + 2, szText, px, ink, 0.75));
+          lbl.push(text(sx, y + 2, szText, px, ink, 0.75));
+          right = Math.max(right, sx + szW);
         }
       }
       if (!hasKids && h > 34 && ch >= 2 + px + 3 + fsSm) {
         const second = fitText(fitCandidate(cands, cw - 2 * pad, (t) => o.measure(t, fsSm)), cw - 2 * pad, fsSm, o.measure);
-        if (second) out.push(text(x + pad, y + 2 + px + 3, second, fsSm, ink, 0.75));
+        if (second) {
+          lbl.push(text(x + pad, y + 2 + px + 3, second, fsSm, ink, 0.75));
+          right = Math.max(right, x + pad + o.measure(second, fsSm));
+          bottom = y + 2 + px + 3 + fsSm;
+        }
       }
+      if (right) notch = { w: right - bx + 2, h: bottom - by + 2 };
     }
+    const dustCount = folded ? cell.node.count : style.dustCount;
+    if (dustCount !== void 0 && dustTexture && Math.min(w, h) >= 6 && bw > 0 && bh > 0) {
+      const ink = dustInk({ bg: resolveVars(style.bg ?? "", vars) }, alpha);
+      const stroke = paint("stroke", ink, style.opacity ?? 1, vars);
+      if (folded && Math.min(w, h) >= 8 && bw > 1 && bh > 1) {
+        out.push(`<rect x="${r1(bx + 0.5)}" y="${r1(by + 0.5)}" width="${r1(bw - 1)}" height="${r1(bh - 1)}" fill="none" ${stroke} stroke-dasharray="2 2"/>`);
+      }
+      const rules = dustRules(bw, bh, dustCount, notch);
+      const d = [
+        ...rules.v.map(([lx, y0]) => `M${r1(bx + lx)} ${r1(by + y0)}V${r1(by + bh)}`),
+        ...rules.h.map(([ly, x0]) => `M${r1(bx + x0)} ${r1(by + ly)}H${r1(bx + bw)}`)
+      ].join("");
+      if (d) out.push(`<path d="${d}" fill="none" ${stroke} stroke-width="1"/>`);
+    }
+    out.push(...lbl);
     const ring = resolveRing(style.ring);
     if (ring && ring.width > 0) {
       const off = ring.inset ? ring.width / 2 : -ring.width / 2;

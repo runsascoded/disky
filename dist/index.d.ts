@@ -583,14 +583,53 @@ declare function BorderStepToggle({ checked, onChange }: {
     onChange: (checked: boolean) => void;
 }): react.JSX.Element;
 
+type RGBA = [number, number, number, number];
+/** Line offsets from the dense end (0 = the tightest gap), growing
+ * geometrically, that sum to `len`. Returns `n` interior positions measured as
+ * distance from the dense end. */
+declare function dustOffsets(len: number, n: number, ratio: number): number[];
+/** Target rule count on an axis of length `len`, given how many cells folded
+ * in — grows with `log2(count)`, clamped so a rule is never under ~4px apart. */
+declare function dustLineCount(len: number, count: number, base: number): number;
+/** The hatch's rules in a `w`×`h` box, as pixel-snapped (`n + 0.5`) offsets from
+ * its origin: `xs` vertical rules, dense at the right edge; `ys` horizontal,
+ * dense at the bottom. */
+declare function dustLines(w: number, h: number, count: number, baseLines?: number, ratio?: number): {
+    xs: number[];
+    ys: number[];
+};
+/** A clear pocket at the top-left of a hatch box (its label's extent): no rule crosses it. */
+interface DustNotch {
+    w: number;
+    h: number;
+}
+/** Hatch ink over a light ground. */
+declare const HATCH_DARK = "rgba(0, 0, 0, 0.6)";
+/** Hatch ink over a dark ground. */
+declare const HATCH_LIGHT = "rgba(255, 255, 255, 0.6)";
+/**
+ * The hatch's ink: black or white, whichever stands out more from the ground
+ * it's drawn on. The ground is `fill` painted at `alpha` over the opaque
+ * `base` (the renderers' cell base); a null `fill` (unparseable) leaves the
+ * base. Each ink's contrast is its alpha times its luminance distance from the
+ * ground; the larger wins.
+ */
+declare function hatchInk(fill: RGBA | null, alpha: number, base?: readonly number[]): string;
+/** The color a hatch sits on: the largest band, else the largest makeup segment, else `bg`. */
+declare function dustGround(style: CellStyle): string | undefined;
+/** Hatch ink for a cell `style` painted at `alpha` over `base`. `parse` turns a
+ * (var-resolved) CSS color into RGBA; in a browser, pass one that also handles
+ * what `parseColor` can't (`color-mix()`, named colors). */
+declare function dustInk(style: CellStyle, alpha?: number, base?: readonly number[], parse?: (c: string) => RGBA | null): string;
+
 /**
  * A canvas cross-hatch that stands in for a folded "(other)" tile — the long
  * tail of cells too small to draw as their own rects. Instead of one flat grey
  * blob, it draws horizontal + vertical rules whose spacing *tightens toward the
  * lower-right*, evoking the continued shrink of the dust it represents, and
  * whose count scales with how many real cells were folded in (denser hatch =
- * more hidden items). Styled to read as distinct from real cells: thin rules on
- * a faded ground, not a solid fill with a label.
+ * more hidden items). Inked black or white, whichever contrasts with the
+ * ground it's drawn on.
  *
  * Pure paint — hit-detection over the region lives in the consumer (the
  * treemap maps a cursor position back to a specific folded child).
@@ -602,8 +641,19 @@ interface DustHatchProps {
     h: number;
     /** How many real cells were folded in — drives hatch density. */
     count: number;
-    /** Rule color. Default: a translucent neutral that reads on either ground. */
+    /** Rule color. Default: black or white, whichever contrasts with `ground`
+     *  painted at `alpha` over `--dt-treemap-container-bg` (resolved on the
+     *  canvas, `var()`s and `color-mix()` included). */
     color?: string;
+    /** The cell style the hatch sits on (its largest band / segment, else `bg`). Default: none (the container ground). */
+    ground?: CellStyle;
+    /** Also stroke a dashed frame in the same ink, marking a folded tile as not-a-real-cell. Default: false. */
+    frame?: boolean;
+    /** Keep the rules off the label text of the `.dt-treemap-cell` holding this canvas (`<Treemap>`'s DOM cells),
+     *  measured after layout (`dustRules`' notch), so none strikes through the name. Default: false. */
+    clearLabels?: boolean;
+    /** The opacity `ground` is painted at (the depth fade × the cell's `opacity`). Default: 1. */
+    alpha?: number;
     /**
      * Rules per axis at `count = 1`, before the count scaling. The axis with
      * more room gets proportionally more. Default: 3.
@@ -613,22 +663,18 @@ interface DustHatchProps {
      * corner. >1. Default: 1.32. */
     ratio?: number;
 }
-/** Line offsets from the dense end (0 = the tightest gap), growing
- * geometrically, that sum to `len`. Returns `n` interior positions measured as
- * distance from the dense end. */
-declare function dustOffsets(len: number, n: number, ratio: number): number[];
-/** Target rule count on an axis of length `len`, given how many cells folded
- * in — grows with `log2(count)`, clamped so a rule is never under ~4px apart. */
-declare function dustLineCount(len: number, count: number, base: number): number;
 /**
  * Stroke the dust cross-hatch into an already-configured 2D context, at CSS-px
  * origin `(ox, oy)`. Self-contained (sets stroke style + width, does its own
  * `beginPath`/`stroke`), so both the standalone `<DustHatch>` canvas and the
  * whole-map canvas renderer draw an identical tile. `ctx` is assumed already
- * dpr-scaled by the caller; coordinates are CSS px.
+ * dpr-scaled by the caller; coordinates are CSS px. `color` defaults to the
+ * light ink, for the dark container ground.
  */
-declare function drawDust(ctx: CanvasRenderingContext2D, ox: number, oy: number, w: number, h: number, count: number, color?: string, baseLines?: number, ratio?: number): void;
-declare function DustHatch({ w, h, count, color, baseLines, ratio }: DustHatchProps): react.JSX.Element;
+declare function drawDust(ctx: CanvasRenderingContext2D, ox: number, oy: number, w: number, h: number, count: number, color?: string, baseLines?: number, ratio?: number, notch?: DustNotch | null): void;
+/** `ground`'s hatch ink as painted on `el`: its colors and the container ground resolved there. */
+declare function resolvedDustInk(el: Element, ground?: CellStyle, alpha?: number): string;
+declare function DustHatch({ w, h, count, color, ground, alpha, frame, clearLabels, baseLines, ratio }: DustHatchProps): react.JSX.Element;
 
 /**
  * Whole-map canvas renderer for `<Treemap renderer="canvas">`.
@@ -1171,4 +1217,4 @@ declare const statusColors: {
     };
 };
 
-export { type AgeFadeOpts, BorderStepToggle, CONTAINER_BG, type CanvasHit, type CellCtx, type CellDims, CellStyle, CellText, type ComposeOptions, DEFAULT_PALETTE, type DiffAreaMode, type DiffFlatRow, type DiffIndexInfo, type DiffInput, type DiffKind, type DiffMetric, type DiffNode, type DiffNodeStatus, type DiffRecRow, type DiffRowValues, type DiffStatus, type DiffSubtree, DiffTable, type DiffTableProps, type DiffTableRow, DiffTreemap, type DiffTreemapProps, type DimOpts, DustHatch, type DustHatchProps, type ExportContext, type ExportKind, type ExportOptions, GREW_GREEN, type HoverPin, type HoverPinOpts, MIN_CELL_PX, NEUTRAL, type OutlineGroups, OutlineOverlay, type OutlineOverlayProps, type OutlinePath, type OutlineSeg, PlacedCell, type QueryOpts, SHRANK_RED, StyleOpts, TOUCHED_HATCH, Tiling, type TilingCtx, TitleSpaceToggle, Treemap, TreemapCanvas, type TreemapCanvasProps, type TreemapProps, UNCHANGED_GREY, UNCHANGED_SWATCH, age01, ageDomain, ageFade, buildDiffTree, canvasToPngBlob, churn, colorResolver, composeExport, contrastEdge, copyPng, cssColor, defaultExportFilename, deltaColor, deltaTextColor, dimUnmatched, downloadPng, drawDust, dustLineCount, dustOffsets, fetchable, filterNodes, groupOutlines, groupRects, mapMinFrac, parseQuery, slotColor, statusColors, unionOutline, useHoverPin };
+export { type AgeFadeOpts, BorderStepToggle, CONTAINER_BG, type CanvasHit, type CellCtx, type CellDims, CellStyle, CellText, type ComposeOptions, DEFAULT_PALETTE, type DiffAreaMode, type DiffFlatRow, type DiffIndexInfo, type DiffInput, type DiffKind, type DiffMetric, type DiffNode, type DiffNodeStatus, type DiffRecRow, type DiffRowValues, type DiffStatus, type DiffSubtree, DiffTable, type DiffTableProps, type DiffTableRow, DiffTreemap, type DiffTreemapProps, type DimOpts, DustHatch, type DustHatchProps, type ExportContext, type ExportKind, type ExportOptions, GREW_GREEN, HATCH_DARK, HATCH_LIGHT, type HoverPin, type HoverPinOpts, MIN_CELL_PX, NEUTRAL, type OutlineGroups, OutlineOverlay, type OutlineOverlayProps, type OutlinePath, type OutlineSeg, PlacedCell, type QueryOpts, SHRANK_RED, StyleOpts, TOUCHED_HATCH, Tiling, type TilingCtx, TitleSpaceToggle, Treemap, TreemapCanvas, type TreemapCanvasProps, type TreemapProps, UNCHANGED_GREY, UNCHANGED_SWATCH, age01, ageDomain, ageFade, buildDiffTree, canvasToPngBlob, churn, colorResolver, composeExport, contrastEdge, copyPng, cssColor, defaultExportFilename, deltaColor, deltaTextColor, dimUnmatched, downloadPng, drawDust, dustGround, dustInk, dustLineCount, dustLines, dustOffsets, fetchable, filterNodes, groupOutlines, groupRects, hatchInk, mapMinFrac, parseQuery, resolvedDustInk, slotColor, statusColors, unionOutline, useHoverPin };

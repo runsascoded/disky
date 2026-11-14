@@ -1,4 +1,5 @@
-import { hierColor, contrastEdge } from './chunk-FUKGMHLM.js';
+import { CONTAINER_BG, hierColor, contrastEdge } from './chunk-FUKGMHLM.js';
+import { parseColor } from './chunk-JJOWQXW4.js';
 
 // src/cellText.ts
 var NAME_MIN_PX = 48;
@@ -8,6 +9,58 @@ function fitCandidate(cs, room, measure) {
   return cs[cs.length - 1] ?? "";
 }
 var inlineRoom = (boxW, pad, gap, nameW) => boxW - 2 * pad - gap - Math.min(nameW, NAME_MIN_PX);
+
+// src/dust.ts
+function dustOffsets(len, n, ratio) {
+  if (n < 1 || len <= 0) return [];
+  const g = ratio === 1 ? len / n : len * (ratio - 1) / (ratio ** n - 1);
+  const out = [];
+  let at = 0;
+  for (let k = 0; k < n; k++) {
+    at += g * ratio ** k;
+    if (at >= len) break;
+    out.push(at);
+  }
+  return out;
+}
+function dustLineCount(len, count, base) {
+  const byCount = Math.round(base * Math.log2(count + 1));
+  return Math.max(2, Math.min(byCount, Math.floor(len / 4)));
+}
+function dustLines(w, h, count, baseLines = 3, ratio = 1.32) {
+  if (w <= 0 || h <= 0) return { xs: [], ys: [] };
+  return {
+    xs: dustOffsets(w, dustLineCount(w, count, baseLines), ratio).map((d) => Math.round(w - d) + 0.5),
+    ys: dustOffsets(h, dustLineCount(h, count, baseLines), ratio).map((d) => Math.round(h - d) + 0.5)
+  };
+}
+function dustRules(w, h, count, notch, baseLines = 3, ratio = 1.32) {
+  const { xs, ys } = dustLines(w, h, count, baseLines, ratio);
+  const nw = notch ? Math.max(0, notch.w) : 0;
+  const nh = notch ? Math.max(0, notch.h) : 0;
+  return {
+    v: xs.map((x) => [x, x < nw ? Math.ceil(nh) : 0]).filter(([, y0]) => y0 < h),
+    h: ys.map((y) => [y, y < nh ? Math.ceil(nw) : 0]).filter(([, x0]) => x0 < w)
+  };
+}
+var HATCH_DARK = "rgba(0, 0, 0, 0.6)";
+var HATCH_LIGHT = "rgba(255, 255, 255, 0.6)";
+var DARK_A = 0.6;
+var LIGHT_A = 0.6;
+var lum = (c) => 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+function hatchInk(fill, alpha, base = CONTAINER_BG) {
+  const a = fill ? Math.max(0, Math.min(1, fill[3] * alpha)) : 0;
+  const ground = (fill ? lum(fill) * a : 0) + lum(base) * (1 - a);
+  return ground * DARK_A >= (255 - ground) * LIGHT_A ? HATCH_DARK : HATCH_LIGHT;
+}
+function dustGround(style) {
+  const largest = (xs) => xs?.reduce((a, b) => !a || b.frac > a.frac ? b : a, void 0)?.color;
+  return largest(style.bands) ?? (style.segments && style.segments.length > 1 ? largest(style.segments) : void 0) ?? style.bg;
+}
+function dustInk(style, alpha = 1, base = CONTAINER_BG, parse = parseColor) {
+  const ground = dustGround(style);
+  return hatchInk(ground ? parse(ground) : null, alpha, base);
+}
 
 // src/layout.ts
 function isFolded(n) {
@@ -217,6 +270,6 @@ function foldedOf(cell) {
   return cell.folded ? cell.node : null;
 }
 
-export { NAME_MIN_PX, candidates, categoricalStyle, cellStroke, fitCandidate, flattenPlaced, foldedOf, hitTest, inlineRoom, isFolded, layoutCells, layoutChildren, resolveCellStyle, resolveRing };
-//# sourceMappingURL=chunk-ZNR7R7MN.js.map
-//# sourceMappingURL=chunk-ZNR7R7MN.js.map
+export { HATCH_DARK, HATCH_LIGHT, NAME_MIN_PX, candidates, categoricalStyle, cellStroke, dustGround, dustInk, dustLineCount, dustLines, dustOffsets, dustRules, fitCandidate, flattenPlaced, foldedOf, hatchInk, hitTest, inlineRoom, isFolded, layoutCells, layoutChildren, resolveCellStyle, resolveRing };
+//# sourceMappingURL=chunk-OHLUHXRA.js.map
+//# sourceMappingURL=chunk-OHLUHXRA.js.map
