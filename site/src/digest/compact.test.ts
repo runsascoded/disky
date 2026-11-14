@@ -10,7 +10,7 @@ const cfg: DigestCfg = { template: 'cw', title: 'T', site_url: 'https://x.test',
 const rc: ReplyCfg = { quota_marks: 'arrow-chip', total_headline: true, reply_lines: true, reply_hour: 12, provisional: false, alert_pct: 90, op_sender: {}, avatar_rev: 0, triggers: {} }
 const rows: CwRows = { template: 'cw', closed: false, pre: [], lead: [], rows: [{ scan: '2026-09-23T1201', slug: '2609231201', tb: 50, extra: { west: 0, east: .1 }, classes: null }] }
 const main = ':pool-chip-8-0: [main](https://x.test/main?d=2609231201#over-time): 50.0% of 100Ti (50.0 Ti free)'
-const west = ':pool-chip-8-0: [04a](https://x.test/west?d=2609231201#over-time): 0%'
+const west = ':pool-chip-8-0: [04a](https://x.test/west?d=2609231201#over-time): 0% of 100Ti'
 const east = '[01a](https://x.test/east?d=2609231201#over-time): 0 Ti'
 
 describe('low-info digest entries', () => {
@@ -34,7 +34,7 @@ describe('low-info digest entries', () => {
     const start = lines.indexOf('*Buckets* (Δ month-to-date)') + 1
     expect(lines.slice(start, start+3)).toEqual([
       '[main](https://x.test/main?d=2609231201#over-time) 50 TiB · 50.0% of 100Ti (50.0 Ti free)',
-      '[04a](https://x.test/west?d=2609231201#over-time) 0 TiB · 0% · [01a](https://x.test/east?d=2609231201#over-time) 0 TiB',
+      '[04a](https://x.test/west?d=2609231201#over-time) 0 TiB · 0% of 100Ti · [01a](https://x.test/east?d=2609231201#over-time) 0 TiB',
       '',
     ])
   })

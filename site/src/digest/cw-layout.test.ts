@@ -38,7 +38,7 @@ describe("the OP's per-pool layout", () => {
       '*Buckets* (Δ month-to-date)',
       ':runway-8: [main] 58 TiB (+8.0) · 58.0% of 100Ti (42.0 Ti free)',
       ':runway-star-6: z zone 36 TiB (+5.5): [a] 16, [b] 20 · 35.5% of 100Ti (64.5 Ti free), +2.9 Ti/d, ≈22d to full',
-      ':runway-diamond-8: [still] 5 TiB · 5%',
+      ':runway-diamond-8: [still] 5 TiB · 5% of 100Ti',
       '',
       ...WEEKS,
     ])
@@ -54,7 +54,7 @@ describe("the OP's per-pool layout", () => {
     expect(text('off').slice(4, 7)).toEqual([
       '[main] 58 TiB (+8.0) · 58.0% of 100Ti (42.0 Ti free)',
       'z zone 36 TiB (+5.5): [a] 16, [b] 20 · 35.5% of 100Ti (64.5 Ti free), +2.9 Ti/d, ≈22d to full',
-      '[still] 5 TiB · 5%',
+      '[still] 5 TiB · 5% of 100Ti',
     ])
   })
 })

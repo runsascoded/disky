@@ -160,7 +160,7 @@ export interface PoolRow { p: Pool; v: number; pct: number; mark: string; tail: 
 
 /** Every pool the scan `r` has, marked and with its headroom. `circles`: most full first, marked by share; `runway`:
  *  the replies' order, marked by runway over `seen` (every scan, in order); `runway-hue`: the same, as `:runway-N:`
- *  steps in each pool's shape. `text`: its share (below `QUIET_PCT`, whole percent alone) and runway. */
+ *  steps in each pool's shape. `text`: its share (below `QUIET_PCT`, a whole percent of the quota, no headroom) and runway. */
 export function poolRows(r: CwScan, cfg: DigestCfg, alertAt: number, mode: 'circles' | PoolMark = 'circles', seen: CwScan[] = []): PoolRow[] {
   const u = cfg.unit
   const rows = (mode === 'circles' ? pools(cfg) : ordered(r, cfg)).flatMap(p => {
@@ -180,7 +180,7 @@ export function poolRows(r: CwScan, cfg: DigestCfg, alertAt: number, mode: 'circ
       m = poolMark(mode, rw, pct, v, p.shape)
       tail = runwayText(rw, cfg)
     }
-    if (pct < QUIET_PCT) return { p, v, pct, mark: m, tail, text: `${fixed(pct, 0)}%${tail}` }
+    if (pct < QUIET_PCT) return { p, v, pct, mark: m, tail, text: `${fixed(pct, 0)}% of ${p.quota.short ?? p.quota.name}${tail}` }
     const free = p.quota.bytes / u.bytes - v
     const room = free >= 0 ? `${fixed(free, 1)} ${u.short} free` : `${fixed(-free, 1)} ${u.short} over`
     return { p, v, pct, mark: m, tail, text: `${fixed(pct, 1)}% of ${p.quota.short ?? p.quota.name} (${room})${tail}` }

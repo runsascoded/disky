@@ -31,7 +31,7 @@ describe('quota pressure', () => {
     expect(at({ quotas: 'circles', alertAt: 100 })[1]).toBe('*Quotas:* :large_orange_circle: hot 99.5% of 100Ti (0.5 Ti free) · :large_yellow_circle: main 86.8% of 1P (120.0 Ti free)')
   })
 
-  it('a zone sums its buckets against its quota; an overage reads "over"; a quiet pool is a bare share', async () => {
+  it('a zone sums its buckets against its quota; an overage reads "over"; a quiet pool is its share of its quota, no headroom', async () => {
     const f = await load()
     const rows = f.rows as CwRows
     const last = { ...rows.rows[rows.rows.length - 1], extra: { 'hot-data': 101, 'more-data': 2.4 } }
@@ -46,7 +46,7 @@ describe('quota pressure', () => {
     }
     // z = main 790 + more 2.4 of 910; cold isn't in the scan (no clause)
     expect(quotaLine(last, zoned, 90)).toBe('*Quotas:* :red_circle: hot 101.0% of 100Ti (1.0 Ti over) · :large_orange_circle: z zone 87.1% of 1P (117.6 Ti free)')
-    expect(quotaLine({ ...last, tb: 100 }, zoned, 90)).toBe('*Quotas:* :red_circle: hot 101.0% of 100Ti (1.0 Ti over) · :large_green_circle: z zone 11%')
+    expect(quotaLine({ ...last, tb: 100 }, zoned, 90)).toBe('*Quotas:* :red_circle: hot 101.0% of 100Ti (1.0 Ti over) · :large_green_circle: z zone 11% of 1P')
   })
 
   it('runway: the fastest fill over 1, 3 and 7 days; marks by runway, ≥ 95% never calmer than orange (digest_cw)', async () => {
