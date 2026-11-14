@@ -1802,32 +1802,49 @@ def test_access_r2_checkpoint_is_explicit_and_runs_in_task_scratch(tmp_path, env
     assert (tmp_path / 'data/access/r2/agg.parquet').read_text() == 'agg as of 2026-10-16T1200'
 
 
+class Notes(Ends):
+    """A fake run that also keeps each phase's note and alerts."""
+
+    def end(self, name, rc=0, warn=False, msg=None, note=None, **kw):
+        self.calls.append(("end", name, rc, warn, msg, note))
+        return 0 if warn else rc
+
+    def alert(self, level, message):
+        self.calls.append(("alert", level, message))
+
+
 def test_vm_pack_builds_beside_the_interval_store(tmp_path, env):
     """`vm-pack` (listed in `steps`): `dt-cloud vm-pack build` over `options.vm-pack.store`, else the interval store's
     store, else `R2_ARCHIVE`; skipped (and said so) without a store or an `fsb`; nothing on REPROC."""
     fsb = {**env, "FSB": "/usr/local/bin/fsb"}
-    opts = {"static-names": {"profile": "sn.json"}, "digest": {"template": "t", "config": "c.yml"}}
+    opts = {"list": {"import": True}, "static-names": {"profile": "sn.json"}, "digest": {"template": "t", "config": "c.yml"}}
     w = "<tmp>/t/dt-scan/2026-10-16T1200/vm-pack"
     runs = []
     for e, o in ((fsb, {"vm-pack": {"store": "gs://packs", "keep": 3}}), (fsb, {"interval-store": {"store": "gs://iv"}}),
                  ({**fsb, "R2_ARCHIVE": "r2://arch"}, {})):
         c = ctx(tmp_path, e, steps=["vm-pack"], options={**opts, **o})
+        c.run = Notes()
         S.vm_pack(c, None)
-        runs.append((c.sh_impl.calls, c.skipped))
+        runs.append((c.sh_impl.calls, c.run.calls))
+    done = [("begin", "vm-pack"), ("end", "vm-pack", 0, False, None, None)]
     assert runs == [
-        ([f"dt-cloud vm-pack build -o gs://packs -w {w} -k 3"], None),
-        ([f"dt-cloud vm-pack build -o gs://iv -w {w} -k 2"], None),
-        ([f"dt-cloud vm-pack build -o r2://arch -w {w} -k 2"], None),
+        ([f"dt-cloud vm-pack build -o gs://packs -w {w} -k 3"], done),
+        ([f"dt-cloud vm-pack build -o gs://iv -w {w} -k 2"], done),
+        ([f"dt-cloud vm-pack build -o r2://arch -w {w} -k 2"], done),
     ]
     skips = []
     for e in (fsb, {**env, "PATH": str(tmp_path / "empty"), "R2_ARCHIVE": "r2://arch"}):
         c = ctx(tmp_path, e, steps=["vm-pack"], options=opts)
+        c.run = Notes()
         S.vm_pack(c, None)
-        skips.append((c.sh_impl.calls, c.skipped))
+        skips.append((c.sh_impl.calls, c.run.calls))
+    no_store = "skipped (unconfigured): no store (options.vm-pack.store, options.interval-store.store or R2_ARCHIVE)"
+    no_fsb = "skipped (unconfigured): no fsb in this image ($FSB or PATH)"
     assert skips == [
-        ([], "skipped (unconfigured): no store (options.vm-pack.store, options.interval-store.store or R2_ARCHIVE)"),
-        ([], "skipped (unconfigured): no fsb in this image ($FSB or PATH)"),
+        ([], [("begin", "vm-pack"), ("end", "vm-pack", 0, False, None, no_store), ("alert", "warn", f"vm-pack {no_store}")]),
+        ([], [("begin", "vm-pack"), ("end", "vm-pack", 0, False, None, no_fsb), ("alert", "warn", f"vm-pack {no_fsb}")]),
     ]
     c = ctx(tmp_path, {**fsb, "REPROC": "1", "R2_ARCHIVE": "r2://arch"}, steps=["vm-pack"], options=opts)
+    c.run = Notes()
     S.vm_pack(c, None)
-    assert c.sh_impl.calls == []
+    assert (c.sh_impl.calls, c.run.calls) == ([], [])

@@ -22,5 +22,6 @@
   "digest": {"leaves": "usage digest not posted", "side": true, "converges": true, "checks": false},
   "cf-usage": {"leaves": "Cloudflare usage snapshots not written", "side": true, "converges": true, "checks": false},
   "gcp-cost": {"leaves": "today's cloud cost snapshot not written", "side": true, "converges": false, "checks": false},
-  "soft-delete": {"leaves": "today's soft-delete reading not written: the site keeps the last one, dated", "side": true, "converges": false, "checks": false}
+  "soft-delete": {"leaves": "today's soft-delete reading not written: the site keeps the last one, dated", "side": true, "converges": false, "checks": false},
+  "vm-pack": {"leaves": "VM mode's pack not written: the VM serves the previous one until a later run writes it", "side": true, "converges": true, "checks": false}
 }

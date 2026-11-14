@@ -293,6 +293,8 @@ struct Chunk<'a, const SEARCH: bool, const DIFF: bool, const FILT: bool> {
     since: u64,
     /// The largest side's running total as last published: chunks drop whole nodes the cut fails against it.
     gtot: u64,
+    /// `deep`'s per-depth row bounds (only a depth it entered is read, so never cleared between calls).
+    hi_at: [usize; 257],
     /// A physical shard's edges (`slim::Edge`): its first / last object path continues in another shard.
     edge_first: bool,
     edge_last: bool,
@@ -584,15 +586,14 @@ impl<'a, const SEARCH: bool, const DIFF: bool, const FILT: bool> Chunk<'a, SEARC
         let t = self.target(ti);
         let d0 = self.st[ti].depth as usize;
         let lut: &[bool] = &c.search.as_ref().unwrap().lut;
-        let mut hi_at = [0usize; 257];
         let mut cur = d0;
         let (mut x, mut y) = (Acc::default(), Acc::default());
         let (mut rows, mut dirs, mut passed) = (0u64, 0u64, 0u64);
         loop {
-            while cur > d0 && hi_at[cur] <= o {
+            while cur > d0 && self.hi_at[cur] <= o {
                 cur -= 1;
             }
-            let bound = if cur > d0 { hi_at[cur].min(e) } else { e };
+            let bound = if cur > d0 { self.hi_at[cur].min(e) } else { e };
             let next = if j < nd && (k.dlo[j] as usize) < bound { k.dlo[j] as usize } else { bound };
             // `cur`'s direct objects.
             let dd = cur + 1;
@@ -668,7 +669,7 @@ impl<'a, const SEARCH: bool, const DIFF: bool, const FILT: bool> Chunk<'a, SEARC
                         }
                     }
                     cur = dj;
-                    hi_at[dj] = jhi;
+                    self.hi_at[dj] = jhi;
                     j += 1;
                 }
             }
@@ -1085,6 +1086,7 @@ impl Ctx<'_> {
                     pub_b: 0,
                     since: 0,
                     gtot: 0,
+                    hi_at: [0; 257],
                     edge_first: self.ix.edge.as_ref().is_some_and(|e| e.first_cont),
                     edge_last: self.ix.edge.as_ref().is_some_and(|e| e.last_cont),
                 }
