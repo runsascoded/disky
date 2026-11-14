@@ -5,12 +5,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { sqliteD1 } from './testD1'
 import { gateFor } from './auth'
 import {
-  type ActivityEnv, burstEvents, bump, burstFor, feedClient, listBursts, loadBurst, purgeActivity, readKinds, recordServer,
+  type ActivityEnv, auditWithActivity, burstEvents, bump, burstFor, feedClient, listBursts, loadBurst, purgeActivity, readKinds, recordServer,
   rerender, THROTTLE_MS, type Wait, writeKind,
 } from './activity'
+import { serviceIconPng, sha256Hex } from './publicAvatar'
 import {
   activityEventLine, activityRefreshLine, addTrail, authLine, type Burst, clientKind, DISCORD, emptyTrail, highlights, joins, keptEvents, mergeKinds, pageLines,
-  renderDetails, renderDiscord, renderHeadline, renderLines, renderSummary, senderName, type ServerEvent, serverKind, sessionLinks, SLACK, tallyClient,
+  renderDetails, renderDiscord, renderHeadline, renderLines, renderSummary, senderName, type ServerEvent, serverKind, serviceReasons, sessionLinks, SLACK,
+  tallyClient, uaFamily,
 } from './activityShape'
 import { captureWrite, noteActivity } from './activityHook'
 import { d1SessionLogStore } from '@open-athena/auth/session-log/d1'
@@ -611,5 +613,141 @@ describe('D1 and sinks', () => {
         400, { error: body === '{' ? 'body is not JSON' : 'reason must be a string' }, {}, [],
       ])
     }
+  })
+})
+
+// A service link (`grants.service`): its routine bursts post nothing; a notable one posts red, why first; the next clean
+// one after a red posts green, then quiet again. Matches `@open-athena/auth/activity`'s defaults (`serviceReasons`).
+describe('service links', () => {
+  const conf = mergeKinds([])
+  const act = (id: number) => `<${ORIGIN}/admin/activity?burst=${id}|activity>`
+
+  it('says why a burst is notable: 3+ errors, any refused request (its distinct reasons, up to three), a new client', () => {
+    expect([
+      serviceReasons({ view: 3, error: 2 }, [], 0),
+      serviceReasons({ error: 3 }, [], 0),
+      serviceReasons({ denied: 1 }, ['revoked /scans'], 0),
+      serviceReasons({ denied: 5, error: 7 }, ['expired /a', 'expired /a', 'revoked /b', 'disabled /c', 'bad /d'], 2),
+      serviceReasons({}, [], 1),
+    ]).toEqual([
+      [],
+      ['3 errors'],
+      ['1 refused request (revoked /scans)'],
+      ['7 errors', '5 refused requests (expired /a; revoked /b; disabled /c)', '2 new clients'],
+      ['a new client'],
+    ])
+  })
+
+  it('a client is its user agent without version numbers', () => {
+    expect([
+      uaFamily('Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/131.0.6778.33 Safari/537.36'),
+      uaFamily('curl/8.7.1'),
+    ]).toEqual([
+      'Mozilla/# (X#; Linux x#) AppleWebKit/# (KHTML, like Gecko) HeadlessChrome/# Safari/#',
+      'curl/#',
+    ])
+  })
+
+  it('a notice leads the headline and the Discord summary; the burst says it is a service', () => {
+    const b: Burst = { id: 3, actor: 'grant:gcs-snapshot-job', via: 'service', origin: ORIGIN, first_ts: S, last_ts: S, counts: { view: 1, error: 3 }, pages: {}, trail: emptyTrail(), sids: [] }
+    const red = { color: 'red' as const, reasons: ['3 errors', 'a new client'] }
+    const o = { fmt: SLACK, conf, name: 'gcs-snapshot-job' }
+    expect([
+      renderHeadline(b, { ...o, notice: red }, true),
+      renderHeadline(b, { ...o, notice: { color: 'green', reasons: [] } }, false),
+      renderSummary(b, { ...o, fmt: DISCORD, highlights: {}, notice: red }).split('\n')[0],
+    ]).toEqual([
+      `🔴 3 errors; a new client · service · 1 page load · 3 errors · 2026-10-21 15:00Z · ${act(3)}`,
+      `🟢 clean again · *gcs-snapshot-job* (service) · 1 page load · 3 errors · 2026-10-21 15:00Z · ${act(3)}`,
+      '🔴 3 errors; a new client · **gcs-snapshot-job** (service) · 2026-10-21 15:00Z',
+    ])
+  })
+
+  describe('posting', () => {
+    beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(NOW) })
+    afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals() })
+
+    const CHROME = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/131.0.6778.33 Safari/537.36'
+    const job = { actor: 'grant:gcs-snapshot-job', via: 'grant', origin: ORIGIN }
+    const tab = (sid: string, seq: number, at: number, events: object[]) =>
+      ({ sid, pid: 'p1', seq, build: '', events: events.map((e, i) => ({ ...e, t: at + i })) as SlogEvent[] })
+    async function world() {
+      const calls = stubFetch()
+      const { db, raw } = await sqliteD1()
+      raw.prepare("INSERT INTO grants (id, token_hash, name, scopes, created_at, created_by, service) VALUES ('g-job', 'h-job', 'gcs-snapshot-job', 'gcs:read', ?, 'job-token provisioning', 1)").run(S)
+      const env: ActivityEnv = { DB: db, SLACK_BOT_TOKEN: 'xoxb', SLACK_ADMIN_CHANNEL: 'C1' }
+      /** A tab's batch from the job, as the session-log route stores and feeds it. */
+      const feed = async (batch: ReturnType<typeof tab>, at: number, ua = CHROME) => {
+        vi.setSystemTime(at)
+        await ingest(db, { email: null, via: 'grant', grantId: 'g-job' }, ua, batch, Math.floor(at / 1000))
+        return feedClient(env, job, batch, () => {}, at)
+      }
+      let n = 0
+      /** A run of the job `h` hours in: one tab (its own session), these events. */
+      const run = (h: number, events: object[], ua = CHROME) => {
+        const at = NOW + h * 3600_000
+        return feed(tab(`sid-run-${++n}`, 0, at, events), at, ua)
+      }
+      const parents = () => calls.filter(c => c.url.endsWith('chat.postMessage') && !c.body.thread_ts).map(c => [c.body.username, c.body.icon_url, c.body.text])
+      return { db, raw, env, calls, feed, run, parents }
+    }
+    const view = { k: 'start', u: '/scans' }
+    const fail = { k: 'api', u: '/api/scan-runs', s: 0, ms: 3300, err: 'TypeError: Failed to fetch' }
+
+    it('quiet when routine, red with why, green once clean again, quiet again; a new client is red too', async () => {
+      const w = await world()
+      const icon = `${ORIGIN}/a/${await sha256Hex(serviceIconPng())}.png`
+      const sender = 'gcs-snapshot-job (service)'
+      expect([
+        await w.run(0, [view, view]),
+        await w.run(3, [view, fail, fail, fail]),
+        await w.run(6, [view]),
+        await w.run(9, [view]),
+        await w.run(12, [view], 'curl/8.7.1'),
+      ]).toEqual([1, 2, 3, 4, 5])
+      expect(w.parents()).toEqual([
+        [sender, icon, `🔴 3 errors · service · 1 page load · 3 errors · 2026-10-21 18:00Z · ${act(2)}`],
+        [sender, icon, `🟢 clean again · service · 1 page load · 2026-10-21 21:00Z · ${act(3)}`],
+        [sender, icon, `🔴 a new client · service · 1 page load · 2026-10-22 03:00Z · ${act(5)}`],
+      ])
+      // Every burst is kept for `/admin/activity`, the quiet ones too; the posted ones keep their notice's color.
+      expect([(await listBursts(w.db, {})).map(b => b.id), w.raw.prepare("SELECT burst_id, msg_id FROM activity_posts WHERE part = 'notice' ORDER BY burst_id").all()]).toEqual([
+        [5, 4, 3, 2, 1],
+        [{ burst_id: 2, msg_id: 'red' }, { burst_id: 3, msg_id: 'green' }, { burst_id: 5, msg_id: 'red' }],
+      ])
+    })
+
+    it('a quiet burst that turns notable as it grows is posted then', async () => {
+      const w = await world()
+      const later = NOW + 3 * 3600_000 + 60_000
+      expect([
+        await w.run(0, [view]),
+        await w.run(3, [view]),
+        await w.feed(tab('sid-run-2', 1, later, [fail, fail, fail]), later),
+      ]).toEqual([1, 2, 2])
+      expect(w.parents().map(p => p[2])).toEqual([`🔴 3 errors · service · 1 page load · 3 errors · 2026-10-21 18:00–18:01Z · ${act(2)}`])
+    })
+
+    it('a refused request is notable, with its reason and path (never the query); other grants\' refusals only reach the log', async () => {
+      const w = await world()
+      w.raw.prepare("INSERT INTO grants (id, token_hash, name, scopes, created_at, created_by) VALUES ('g-guest', 'h-guest', 'guest', 'gcs:read', ?, 'ops')").run(S)
+      const logged: string[] = []
+      const audit = auditWithActivity(w.env, { log: async e => { logged.push(`${e.event} ${e.grantId}`) } }, ORIGIN)
+      await audit.log({ ts: S, event: 'deny', grantId: 'g-guest', reason: 'revoked', path: '/scans' })
+      await audit.log({ ts: S, event: 'deny', grantId: 'g-job', reason: 'revoked', path: '/data/rules.json?key=SECRET' })
+      await audit.log({ ts: S + 60, event: 'redeem', grantId: 'g-job', path: '/' })
+      expect([
+        logged,
+        (await listBursts(w.db, {})).map(b => [b.actor, b.counts]),
+        w.calls.filter(c => c.url.endsWith('chat.postMessage')).map(c => [c.body.thread_ts ?? null, String(c.body.text).split('\n')]),
+      ]).toEqual([
+        ['deny g-guest', 'deny g-job', 'redeem g-job'],
+        [['grant:gcs-snapshot-job', { denied: 1 }]],
+        [
+          [null, [`🔴 1 refused request (revoked /data/rules.json) · service · 1 refused request · 2026-10-21 15:00Z · ${act(1)}`]],
+          ['1.000001', ['*1 refused request*', '• 15:00 revoked /data/rules.json']],
+        ],
+      ])
+    })
   })
 })
