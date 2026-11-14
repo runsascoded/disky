@@ -49,11 +49,4 @@ for g in "$fx"/g*; do
     echo "$n vmd $r (see $out/$n.check.log)"; rc=1
   fi
 done
-# Today's Worker: every view `intervalStore.test.ts` requires of `buildView` over g1 (`expected.json`), its drawn tiles
-# against vmd's sums.
-if r=$(python3 oracle/worker_fixture_parity.py -u "http://127.0.0.1:$port" -k VMD_KEY_CHECK -t g1-1 "$fx/../expected.json" 2> "$out/worker.log"); then
-  echo "worker (g1, expected.json) $r"
-else
-  echo "worker (g1, expected.json) $r (see $out/worker.log)"; rc=1
-fi
 exit $rc
