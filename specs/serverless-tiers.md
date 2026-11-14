@@ -83,7 +83,7 @@ Each refusal is a statement about one structure ("rollups carry no owners", "hit
 | Lane | Meaning | Bound (*proposal*) |
 |---|---|---|
 | **now** | The Worker answers in the request | predicted cold time ≤ T_now = 1.5 s, working set ≤ the isolate's budget |
-| **slow** | The Worker answers, with a visible "computing" state; the result is cached under its pins | predicted ≤ T_slow = 15 s and within the Worker's CPU limit (§7 Q4) |
+| **slow** | The Worker answers, with a visible "computing" state; the result is cached under its pins | predicted ≤ T_slow = 15 s and within the Worker's CPU limit (§7 item 4) |
 | **VM** | Forwarded to VM mode; if it's asleep, a deferred answer with an ETA, then the result | predicted VM time ≤ T_vm = 5 s once loaded |
 | **refuse** | Not answerable: outside the language, forbidden, or over every lane's bound | — |
 
@@ -127,7 +127,7 @@ Calibration points:
 
 So, cold, with six GETs in flight:
 - **now:** n ≲ 3 × 10⁵ rows (≈ 40 groups: 6-7 waves, plus ~0.6 s decode).
-- **slow:** n ≲ 5 × 10⁶ rows per isolate (~10 s decode), more if a slow query may fan out over service-bound Workers (§7 Q5).
+- **slow:** n ≲ 5 × 10⁶ rows per isolate (~10 s decode), more if a slow query may fan out over service-bound Workers (§7 item 5).
 
 Memory is O(window nodes + one group), since groups stream and are dropped. Q matches per row on the path string (the inherited coverage needs no stack, because the row carries its full path). U applies slices and overlay regions per row; C uses class columns; L tests rows against plan-item ranges. A diff is the same pass with two liveness tests, and a series one pass with a difference array over scans.
 
@@ -203,7 +203,7 @@ Path-restricted links never reach the VM. Their refusal happens before routing.
 | **hot**: loaded, the pinned generation resident | — | forward |
 | **loading**: a new generation or a cold start | the VM itself after an append; the Worker's wake | 202 + ETA from the load's measured phases |
 | **stopped**: VM off, disk image holds the packed store | the Worker's wake call: Compute `instances.start` through a small waker with a scoped service account, idempotent | 202 + ETA (boot + map the store) |
-| **gone**: preempted, or no capacity | the waker retries; spot falls back to on-demand per policy (§7 Q3) | 202 while retrying; after the wake deadline, "unavailable" with the narrowing that fits the Worker |
+| **gone**: preempted, or no capacity | the waker retries; spot falls back to on-demand per policy (§7 item 3) | 202 while retrying; after the wake deadline, "unavailable" with the narrowing that fits the Worker |
 
 The VM publishes `{state, generation, manifest, loaded_at}` to a small status object, R2 or D1 (read-only for the Worker). It loads each new generation and manifest as the append lands, and serves the old one until the new one is resident. Each request's pins say which it needs. The bench's first cut reloads the whole store; incremental appends are later work in the bench spec.
 
@@ -211,7 +211,7 @@ The VM publishes `{state, generation, manifest, loaded_at}` to a small status ob
 
 - **Per query:** the VM gets min(T_vm, the client's patience); past it the Worker returns "unavailable", not partial.
 - **VM price** (bench, 16 vCPU, gcs): a plain root view 0.45 s, root searches ~1.2 s, owner/class/staged filters 0.55-0.8 s, a depth-3 drill ~0.15 s. The model scales by n(D) / 967M and by filter class. Phase 0 fits it from the bench's jsonl.
-- **Wake deadline** (*proposal*): 10 minutes. Wakes are rate-limited per deployment and logged with who asked (§7 Q3).
+- **Wake deadline** (*proposal*): 10 minutes. Wakes are rate-limited per deployment and logged with who asked (§7 item 3).
 - **Preemption mid-query:** one retry after the VM is back, then "unavailable". Nothing VM-computed is cached unless its echoed pins match.
 
 ### 5.4 Identical answers, checked by an oracle
@@ -224,7 +224,7 @@ The bench already has the oracle: DuckDB SQL over the same store with no shared 
    - the overlay's region semantics;
    - the refinement policy.
 
-   Today they differ in one known place: the Worker keeps cells by pixel area with attenuation, the bench by `min_ppm` share within a depth window. One must be adopted by both before parity means anything (§7 Q1).
+   Today they differ in one known place: the Worker keeps cells by pixel area with attenuation, the bench by `min_ppm` share within a depth window. One must be adopted by both before parity means anything (§7 item 1).
 2. **CI parity on fixtures.** For the repo's interval-store fixtures (`gen.py` generations), every query in a generated grid over (S,E,D,Q,U,C,L,M) is answered by each Worker plan that applies, the Worker scan, the VM scanner and the oracle, and all must be equal. A plan that disagrees fails the build.
 3. **Shadow parity on real data.** On a deployment with a hot VM, a sample of answers is re-asked on the other tier under the same pins and compared: now-lane answers to the VM, VM answers to the Worker scan where n(D) allows. That covers the static index plans against VM, which the fixtures can't size. A mismatch is an alert with both answers stored, and the plan that disagreed with the oracle stops being offered for that region until fixed.
 
@@ -247,18 +247,18 @@ Each phase is its own go.
 4. **VM mode serving.** The box, the waker, the status object, the signed channel, shadow parity. gcs first; cw if phase 0 shows demand.
 5. **Precomputation by measured demand.** Per-class counts; faceted, share-kept drill cells; the series read from versions. The 2D structure only if phase 0 finds a region nothing else serves.
 
-## 7. Open questions for Ryan
+## 7. Decisions (Ryan, 2026-11-13) and what's still open
 
-1. **One refinement policy** for both tiers: the Worker's pixel area with attenuation, or the bench's `min_ppm` share and depth window? Parity needs one.
-2. **Lane bounds:** T_now = 1.5 s, T_slow = 15 s and T_vm = 5 s are my proposals. And what does "slow" look like: hold the request with a spinner, or 202 and poll?
-3. **Waking the VM:** who may (any viewer, staff, admins), a daily wake or cost budget, always-on hours, and spot with an on-demand fallback or spot only?
-4. **Pages Functions' CPU limit** for the slow lane (the Workers Standard usage model's is configurable; Pages may differ). If it's 30 s, T_slow fits; if lower, the slow lane needs a dedicated Worker.
-5. **Fan-out:** may a slow query split D's rows over service-bound Workers (each its own isolate and CPU)? That would move cw's filtered root from VM to slow.
+1. **One refinement policy: a share of the total, with the share taken from the viewport.** The request carries `min_share` = cell area / viewport area (8 px² cells: a 390×844 phone is ~4×10^4 cells, share ~2^-15; a 2560×1440 screen is ~4.6×10^5 cells, ~2^-19). It's rounded down to a power of 2, so a handful of cache keys covers phone to 4K, as the diff cache's width buckets do. The Worker and the VM apply the same rule. Ryan: "A mobile viewport vs a wide screen desktop should draw different numbers of cells".
+2. **Lane bounds:** T_now = 1.5 s, T_slow = 15 s, T_vm = 5 s. Slow holds the request open with a "computing" state; 202-and-poll only if T_slow ever passes ~30 s.
+3. **Waking the VM:** any signed-in viewer, under a monthly cost cap; spot first, on-demand fallback; the Worker keeps serving what it can while the VM wakes.
+4. **CPU limit (looked up, not a preference):** on Workers Paid the CPU limit is 30 s by default, configurable up to 300 s (`limits.cpu_ms` in the Wrangler config, or the dashboard); waiting on I/O doesn't count. T_slow = 15 s fits under the default. Read through the API: the r2 demo's Pages project is on the Standard usage model with no explicit `limits` (so the default applies). The OA account's projects are still to be read by a session holding that account's token.
+5. **Fan-out: yes**, configurable per deployment (width, on/off), with the turnkey implementation on `cloud`. A fan-out over key ranges of the interval store is a partition (no extra storage); the merge sums partial rollups by path, and the cell cut needs the global total, so it's two-phase (as in TPUT, Cao & Wang 2004).
 6. **Overlay time semantics (decided 2026-11-12):** a historical scan or diff applies today's claims and plan items to S's tree. The overlay stays append-only and timestamped, so an as-of-S view remains possible later.
-7. **L as a map axis:** a staged-only view (the map of what's staged under D, at a plan revision) has no route today. Is it wanted as a first-class view, or are rings plus `/staged` enough?
-8. **Language growth:** with lanes, path terms, short anchors and `x/` stop being refusals and become priced queries (a too-common tail goes VM). Un-park them in the language version, or keep [search-future.md]'s order? Regex: VM-only in a later language version, or a non-goal still?
-9. **cw:** VM mode there too, or only fan-out and indexes?
-10. **The K = 256 cap:** lift it by share, so heavy-term rollups spend M, at the drill's build cost (§4)?
+7. **Staged-only map: first-class.** With a complete engine it's one more L filter. Until then it's served from the staged set itself: #staged ≪ #paths, so a staged-only map reads the plan's items (D1 `plan_items`), looks up their current sizes with point reads in the path sort (sorted by `(depth, path)`, so a sorted batch of items reads few row groups), and rolls them up under D. Cost ∝ #staged, never #descendants(D).
+8. **Language growth: un-park** path terms, short anchors and `x/` as priced queries. A scan's cost is #descendants(D) whatever q is; an index plan's cost is ∝ q's matches. The planner takes the cheaper, so only a large D *and* a common q lands on the VM (or fan-out). Regex: VM-only, later.
+9. **VM mode for every deployment**, hot-swappable on and off a shared VM: one multi-tenant process, or a process or container per deployment on a multi-tenant VM.
+10. **The K = 256 cap: lift it by share.** Ryan is fine trading build time for serving. His three costs, in order: (1) queries not answered quickly and completely, (2) long-term index storage (headroom: old-scan excision isn't in use yet), (3) runtime cost. Build cost is minor for now.
 
 [fleet-index-research.md]: fleet-index-research.md
 [interval-store.md]: interval-store.md
