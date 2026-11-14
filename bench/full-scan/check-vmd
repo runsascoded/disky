@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# Every interval-store fixture through `vmd`'s HTTP API (specs/vm-mode.md §8.2): the exhaustive mix plus its cell-rule
+# twins (`fsb plan -c`), asked of four tenants serving the fixture's slim pack (`fsb pack-slim`) whole, as 4 logical
+# shards, and as 3 and 7 physical shard packs (`fsb shard`); every tenant's answer equal, then each answer equal to the
+# DuckDB oracle's. Run on a bench node. Exit 1 on any difference.
+set -euo pipefail
+cd "$(dirname "$0")"
+fx=${FIXTURES:-../../site/functions/_lib/fixtures/iv/interval-store}
+out=${OUT:-tmp/vmd-fixtures}
+port=${PORT:-7391}
+mkdir -p "$out"
+cargo build -q --release
+fsb=./target/release/fsb
+export VMD_KEY_CHECK=check-key
+tenants=()
+conf="{\"listen\": \"127.0.0.1:$port\", \"watch_s\": 1, \"tenants\": ["
+sep=
+for g in "$fx"/g*; do
+  n=$(basename "$g")
+  $fsb plan "$g" -c 1 -o "$out/$n.q.jsonl" 2>/dev/null
+  $fsb pack-slim "$g" -o "$out/$n.slim.fsb" > /dev/null 2>&1
+  for k in 3 7; do
+    rm -rf "$out/$n.shards$k"
+    $fsb shard "$out/$n.slim.fsb" -n $k -o "$out/$n.shards$k" > /dev/null
+  done
+  packs() { ls "$out/$n.shards$1"/*.fsb | sed 's/.*/"&"/' | paste -sd, -; }
+  conf+="$sep{\"name\": \"$n-1\", \"pack\": \"$out/$n.slim.fsb\", \"key_env\": \"VMD_KEY_CHECK\"},"
+  conf+="{\"name\": \"$n-4\", \"pack\": \"$out/$n.slim.fsb\", \"shards\": 4, \"key_env\": \"VMD_KEY_CHECK\"},"
+  conf+="{\"name\": \"$n-p3\", \"packs\": [$(packs 3)], \"key_env\": \"VMD_KEY_CHECK\"},"
+  conf+="{\"name\": \"$n-p7\", \"packs\": [$(packs 7)], \"key_env\": \"VMD_KEY_CHECK\"}"
+  sep=,
+done
+echo "$conf]}" > "$out/vmd.json"
+./target/release/vmd -c "$out/vmd.json" 2> "$out/vmd.log" &
+pid=$!
+trap 'kill $pid 2>/dev/null' EXIT
+until curl -sf "http://127.0.0.1:$port/healthz" > /dev/null; do sleep 0.2; done
+sleep 2
+rc=0
+for g in "$fx"/g*; do
+  n=$(basename "$g")
+  if r=$(python3 oracle/vmd_check.py -u "http://127.0.0.1:$port" -k VMD_KEY_CHECK -t "$n-1" -t "$n-4" -t "$n-p3" -t "$n-p7" \
+      -o "$out/$n.a.jsonl" -Q "$out/$n.qa.jsonl" "$out/$n.q.jsonl" 2> "$out/$n.check.log"); then
+    if o=$(uv run -q --script oracle/oracle.py -m 4GB -t 4 -T "$out/duck" "$g" "$out/$n.qa.jsonl" "$out/$n.a.jsonl" 2> "$out/$n.oracle.log"); then
+      echo "$n vmd $r; oracle $o"
+    else
+      echo "$n vmd $r; oracle $o (see $out/$n.oracle.log)"; rc=1
+    fi
+  else
+    echo "$n vmd $r (see $out/$n.check.log)"; rc=1
+  fi
+done
+exit $rc

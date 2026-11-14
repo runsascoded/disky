@@ -10,16 +10,19 @@
 //!
 //! Same semantics, threshold and answers as the full index's pass (`scan.rs`), which the bench checks.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use rayon::prelude::*;
 use serde::Serialize;
 
+use crate::cell::Cut;
 use crate::index::{CLS_SHIFT, COMPLEX};
+use crate::merge::{merge, Tree};
 use crate::query::{compile_classes, compile_owners, compile_search, Query, Search};
 use crate::scan::{Answer, Timing};
+use crate::shard::{cmp_path, Floor, SNode, ShardAnswer};
 use crate::slim::SlimIndex;
 use crate::util::{err, Result};
 
@@ -57,7 +60,7 @@ pub struct SCompiled {
     pub hi: usize,
     pub path: String,
     pub maxd: u8,
-    pub min_ppm: u64,
+    pub cut: Cut,
     pub search: Option<Search>,
     pub dec: Vec<u8>,
     pub owners: Option<Vec<bool>>,
@@ -100,9 +103,6 @@ pub fn compile(ix: &SlimIndex, q: &Query, parts: usize) -> Result<SCompiled> {
         (None, Some(a), Some(b)) => (scan(a)?, Some(scan(b)?)),
         _ => return err(format!("{}: give `scan`, or `from` and `to`", q.id)),
     };
-    if q.depth == 0 {
-        return err("depth must be ≥ 1");
-    }
     // A path that isn't a directory holding object versions (never one, or an object path) has no rows: an empty
     // view, as on the full index. The slim index can't tell it from a path that doesn't exist.
     let (folder, dp, lo, hi) = match ix.find_dir(&q.path) {
@@ -110,6 +110,11 @@ pub fn compile(ix: &SlimIndex, q: &Query, parts: usize) -> Result<SCompiled> {
         // The folder's own versions (a path also an object) aren't in its view.
         Ok(Some(j)) => (Some(j), ix.ddepth[j], ix.own_end(j), ix.dhi[j] as usize),
         Err(()) => (None, q.path.split('/').count() as u8, 0, 0),
+    };
+    let cut = match &q.cell {
+        Some(cell) => cell.cut(dp)?,
+        None if q.depth == 0 => return err("depth must be ≥ 1"),
+        None => Cut::ppm(dp, q.depth, q.min_ppm),
     };
     let search = q.q.as_ref().map(|e| compile_search(&ix.dict, e, parts)).transpose()?;
     let dec = search.as_ref().map_or(Vec::new(), |s| decided(&s.lut, s.lut.len().trailing_zeros() as usize));
@@ -133,8 +138,8 @@ pub fn compile(ix: &SlimIndex, q: &Query, parts: usize) -> Result<SCompiled> {
         lo,
         hi,
         path: q.path.clone(),
-        maxd: dp.saturating_add(q.depth),
-        min_ppm: q.min_ppm,
+        maxd: cut.maxd(),
+        cut,
         search,
         dec,
         owners: q.owners.as_ref().map(|sel| compile_owners(&ix.owners, sel)),
@@ -152,6 +157,10 @@ struct Frame {
     dend: u32,
     dec: u8,
     partial: bool,
+    /// The node's own path satisfies the search.
+    matched: bool,
+    /// Its nonempty children seen whole in this chunk (a child split across chunks is counted where they're merged).
+    kids: u64,
     a: Acc,
     b: Acc,
 }
@@ -160,6 +169,8 @@ struct Frame {
 struct NodeOut {
     key: u64,
     depth: u8,
+    matched: bool,
+    kids: u64,
     a: Acc,
     b: Acc,
 }
@@ -182,7 +193,7 @@ pub struct Touched {
 }
 
 impl Touched {
-    fn add(&mut self, o: &Touched) {
+    pub fn add(&mut self, o: &Touched) {
         self.rows += o.rows;
         self.named += o.named;
         self.filtered += o.filtered;
@@ -205,6 +216,8 @@ impl Touched {
 struct ChunkOut {
     done: Vec<NodeOut>,
     partial: Vec<NodeOut>,
+    /// The folder's nonempty children seen whole in this chunk.
+    root_kids: u64,
     a: Acc,
     b: Acc,
     errors: u64,
@@ -214,8 +227,9 @@ struct ChunkOut {
 struct Ctx<'a> {
     ix: &'a SlimIndex,
     c: &'a SCompiled,
-    ga: AtomicU64,
-    gb: AtomicU64,
+    /// The running totals every chunk (of every in-process shard) has published: a lower bound on the view's.
+    ga: &'a AtomicU64,
+    gb: &'a AtomicU64,
 }
 
 /// Object row `r`'s `cont` bit.
@@ -275,7 +289,11 @@ struct Chunk<'a, const SEARCH: bool, const DIFF: bool, const FILT: bool> {
     pub_a: u64,
     pub_b: u64,
     since: u64,
-    lb: u128,
+    /// The largest side's running total as last published: chunks drop whole nodes the cut fails against it.
+    gtot: u64,
+    /// A physical shard's edges (`slim::Edge`): its first / last object path continues in another shard.
+    edge_first: bool,
+    edge_last: bool,
 }
 
 #[inline(never)]
@@ -413,7 +431,7 @@ impl<'a, const SEARCH: bool, const DIFF: bool, const FILT: bool> Chunk<'a, SEARC
 
     fn publish(&mut self, rows: u64) {
         self.since += rows;
-        if self.since < 1 << 16 || self.ctx.c.min_ppm == 0 {
+        if self.since < 1 << 16 || !self.ctx.c.cut.prunes() {
             return;
         }
         self.since = 0;
@@ -421,7 +439,7 @@ impl<'a, const SEARCH: bool, const DIFF: bool, const FILT: bool> Chunk<'a, SEARC
         let tb = if DIFF { self.ctx.gb.fetch_add(self.run_b - self.pub_b, Ordering::Relaxed) + self.run_b - self.pub_b } else { 0 };
         self.pub_a = self.run_a;
         self.pub_b = self.run_b;
-        self.lb = self.ctx.c.min_ppm as u128 * ta.max(tb) as u128;
+        self.gtot = ta.max(tb);
     }
 
     /// Rows `[a, b)` summed into frame `t`; `row_search`: each row's own name decides (the rows are direct children of
@@ -693,7 +711,8 @@ impl<'a, const SEARCH: bool, const DIFF: bool, const FILT: bool> Chunk<'a, SEARC
             while e < b && cont_bit(k.cont, e) {
                 e += 1;
             }
-            let continues = e == self.hi && e < k.vf.len() && cont_bit(k.cont, e);
+            let continues = (e == self.hi && e < k.vf.len() && cont_bit(k.cont, e)) || (e == k.vf.len() && self.edge_last);
+            let cut_before = start < self.lo || (start == 0 && self.edge_first);
             let pass = if need_search {
                 self.atom_bits(k.name[r], d);
                 c.search.as_ref().unwrap().lut[self.mask[d] as usize]
@@ -729,13 +748,17 @@ impl<'a, const SEARCH: bool, const DIFF: bool, const FILT: bool> Chunk<'a, SEARC
                 }
             }
             if x.nonzero() || y.nonzero() {
-                let n = NodeOut { key: OBJ | start as u64, depth: d as u8, a: x, b: y };
-                if start < self.lo || continues {
+                let n = NodeOut { key: OBJ | start as u64, depth: d as u8, matched: SEARCH && pass, kids: 0, a: x, b: y };
+                let split = cut_before || continues;
+                if split {
                     self.out.partial.push(n);
-                } else if (x.bytes.max(y.bytes) as u128) * 1_000_000 >= self.lb {
+                } else if c.cut.keep(x.bytes.max(y.bytes), d as u8, self.gtot) {
                     self.out.done.push(n);
                 }
                 let f = &mut self.st[ti];
+                if !split {
+                    f.kids += 1;
+                }
                 f.a.add(x);
                 self.run_a += x.bytes;
                 if DIFF {
@@ -755,16 +778,20 @@ impl<'a, const SEARCH: bool, const DIFF: bool, const FILT: bool> Chunk<'a, SEARC
         if f.depth > self.ctx.c.maxd {
             return;
         }
+        let split = f.partial || f.dhi as usize > self.hi || self.ctx.ix.is_open(f.node as usize);
         let p = self.st.last_mut().unwrap();
         p.a.add(f.a);
         if DIFF {
             p.b.add(f.b);
         }
         if f.a.nonzero() || f.b.nonzero() {
-            let n = NodeOut { key: f.node, depth: f.depth, a: f.a, b: f.b };
-            if f.partial || f.dhi as usize > self.hi {
+            if !split {
+                p.kids += 1;
+            }
+            let n = NodeOut { key: f.node, depth: f.depth, matched: f.matched, kids: f.kids, a: f.a, b: f.b };
+            if split {
                 self.out.partial.push(n);
-            } else if (f.a.bytes.max(f.b.bytes) as u128) * 1_000_000 >= self.lb {
+            } else if self.ctx.c.cut.keep(f.a.bytes.max(f.b.bytes), f.depth, self.gtot) {
                 self.out.done.push(n);
             }
         }
@@ -786,12 +813,14 @@ impl<'a, const SEARCH: bool, const DIFF: bool, const FILT: bool> Chunk<'a, SEARC
         let d = k.ddepth[j];
         let parent_dec = self.st.last().unwrap().dec;
         let mut dec = parent_dec;
+        let mut matched = SEARCH && parent_dec == YES;
         if SEARCH && parent_dec == UNDECIDED {
             self.atom_bits(k.dname[j], d as usize);
             dec = self.ctx.c.dec[self.mask[d as usize] as usize];
+            matched = self.ctx.c.search.as_ref().unwrap().lut[self.mask[d as usize] as usize];
         }
         self.out.t.dirs += 1;
-        self.st.push(Frame { node: j as u64, depth: d, dhi: k.dhi[j], dend: k.dend[j], dec, partial, a: Acc::default(), b: Acc::default() });
+        self.st.push(Frame { node: j as u64, depth: d, dhi: k.dhi[j], dend: k.dend[j], dec, partial, matched, kids: 0, a: Acc::default(), b: Acc::default() });
     }
 
     /// Whether frame `ti` sums its rows flat (`Some(true)`), skips them (`Some(false)`), or is walked (`None`).
@@ -816,7 +845,7 @@ impl<'a, const SEARCH: bool, const DIFF: bool, const FILT: bool> Chunk<'a, SEARC
         let c0 = ix.dlo.partition_point(|&x| (x as usize) < lo);
         let mut j = c.folder.map_or(c0, |f| c0.max(f + 1));
         let chain = ix.chain_before(j, lo);
-        self.st.push(Frame { node: u64::MAX, depth: c.dp, dhi: u32::MAX, dend: u32::MAX, dec: UNDECIDED, partial: true, a: Acc::default(), b: Acc::default() });
+        self.st.push(Frame { node: u64::MAX, depth: c.dp, dhi: u32::MAX, dend: u32::MAX, dec: UNDECIDED, partial: true, matched: false, kids: 0, a: Acc::default(), b: Acc::default() });
         // The folder and its ancestors give the search its first matched atoms; the chain below it is pushed as
         // partial frames, down to the first frame that sums flat or skips.
         if SEARCH {
@@ -832,9 +861,8 @@ impl<'a, const SEARCH: bool, const DIFF: bool, const FILT: bool> Chunk<'a, SEARC
             self.push(g as usize, true);
         }
         // The threshold's lower bound as other chunks have already published it.
-        if c.min_ppm > 0 {
-            let g = self.ctx.ga.load(Ordering::Relaxed).max(self.ctx.gb.load(Ordering::Relaxed));
-            self.lb = c.min_ppm as u128 * g as u128;
+        if c.cut.prunes() {
+            self.gtot = self.ctx.ga.load(Ordering::Relaxed).max(self.ctx.gb.load(Ordering::Relaxed));
         }
         let mut o = lo;
         // The chunk may start inside the deepest open directory's own versions.
@@ -913,6 +941,7 @@ impl<'a, const SEARCH: bool, const DIFF: bool, const FILT: bool> Chunk<'a, SEARC
         }
         self.out.a = self.st[0].a;
         self.out.b = self.st[0].b;
+        self.out.root_kids = self.st[0].kids;
         self.out
     }
 }
@@ -938,7 +967,9 @@ impl Ctx<'_> {
                     pub_a: 0,
                     pub_b: 0,
                     since: 0,
-                    lb: 0,
+                    gtot: 0,
+                    edge_first: self.ix.edge.as_ref().is_some_and(|e| e.first_cont),
+                    edge_last: self.ix.edge.as_ref().is_some_and(|e| e.last_cont),
                 }
                 .run()
             }};
@@ -961,27 +992,19 @@ fn chunk_min() -> usize {
     std::env::var("FSB_CHUNK_MIN").ok().and_then(|v| v.parse().ok()).unwrap_or(1 << 16)
 }
 
-/// Answer `q` on `pool`'s threads; also what it read.
+/// The view's whole answer on one pack (every row one shard, merged): the bench's flat `Answer` (`fsb run` / `bench`).
 pub fn run(ix: &SlimIndex, q: &Query, pool: &rayon::ThreadPool) -> Result<(Answer, Timing, Touched)> {
     let t0 = Instant::now();
     let threads = pool.current_num_threads();
     let c = pool.install(|| compile(ix, q, threads))?;
     let compile_ms = t0.elapsed().as_secs_f64() * 1e3;
     let t1 = Instant::now();
-    let len = c.hi.saturating_sub(c.lo);
-    let step = (len.div_ceil(threads * 8)).max(chunk_min());
-    let spans: Vec<(usize, usize)> = (c.lo..c.hi).step_by(step.max(1)).map(|a| (a, (a + step).min(c.hi))).collect();
-    let ctx = Ctx { ix, c: &c, ga: AtomicU64::new(0), gb: AtomicU64::new(0) };
-    let outs: Vec<ChunkOut> = pool.install(|| spans.par_iter().map(|&(a, b)| ctx.chunk_any(a, b)).collect());
+    let (ga, gb) = (AtomicU64::new(0), AtomicU64::new(0));
+    let (sa, touched, chunks) = shard_pass(ix, &c, (0, ix.n_o()), Floor::Local, pool, &ga, &gb)?;
     let pass_ms = t1.elapsed().as_secs_f64() * 1e3;
     let t2 = Instant::now();
-    let errors: u64 = outs.iter().map(|o| o.errors).sum();
-    if errors > 0 {
-        return err(format!("{}: {errors} files hold several owner and several class slices", q.id));
-    }
-    let mut touched = Touched::default();
-    outs.iter().for_each(|o| touched.add(&o.t));
-    let answer = assemble(ix, &c, q, outs);
+    let tree = merge(vec![sa], &c.cut, &c.path, c.sb.is_some());
+    let answer = tree.answer(&q.id);
     let assemble_ms = t2.elapsed().as_secs_f64() * 1e3;
     let timing = Timing {
         compile_ms,
@@ -990,32 +1013,116 @@ pub fn run(ix: &SlimIndex, q: &Query, pool: &rayon::ThreadPool) -> Result<(Answe
         total_ms: t0.elapsed().as_secs_f64() * 1e3,
         rows: touched.rows,
         bytes: touched.bytes(&c),
-        chunks: spans.len() as u64,
+        chunks,
     };
     Ok((answer, timing, touched))
 }
 
-fn assemble(ix: &SlimIndex, c: &SCompiled, q: &Query, outs: Vec<ChunkOut>) -> Answer {
+/// One shard's partial answer (specs/vm-mode.md §3.1): the pass over the folder's object rows inside the shard's
+/// `range` (all of a physical shard pack's rows), on `pool`'s threads. `ga` / `gb`: running totals shared with the
+/// other shards of this process (a lower bound on the view's), so chunks drop what can't be drawn early.
+pub fn shard_pass(
+    ix: &SlimIndex,
+    c: &SCompiled,
+    range: (usize, usize),
+    floor: Floor,
+    pool: &rayon::ThreadPool,
+    ga: &AtomicU64,
+    gb: &AtomicU64,
+) -> Result<(ShardAnswer, Touched, u64)> {
+    let threads = pool.current_num_threads();
+    let (lo, hi) = (c.lo.max(range.0), c.hi.min(range.1));
+    let len = hi.saturating_sub(lo);
+    let step = (len.div_ceil(threads * 8)).max(chunk_min());
+    let spans: Vec<(usize, usize)> = if len == 0 { Vec::new() } else { (lo..hi).step_by(step.max(1)).map(|a| (a, (a + step).min(hi))).collect() };
+    let ctx = Ctx { ix, c, ga, gb };
+    let outs: Vec<ChunkOut> = pool.install(|| spans.par_iter().map(|&(a, b)| ctx.chunk_any(a, b)).collect());
+    let errors: u64 = outs.iter().map(|o| o.errors).sum();
+    if errors > 0 {
+        return err(format!("{errors} files hold several owner and several class slices"));
+    }
+    let mut touched = Touched::default();
+    outs.iter().for_each(|o| touched.add(&o.t));
+    Ok((shard_answer(ix, c, range, floor, outs), touched, spans.len() as u64))
+}
+
+/// Whether node `key`'s rows reach outside the shard: a pack row range `range`, and a physical shard's open edges.
+fn out_of_shard(ix: &SlimIndex, key: u64, range: (usize, usize)) -> bool {
+    let edge = ix.edge.as_ref();
+    if key & OBJ != 0 {
+        let start = (key & !OBJ) as usize;
+        let (_, e) = ix.obj_rows(start);
+        start < range.0 || e > range.1 || edge.is_some_and(|g| (start == 0 && g.first_cont) || (e == ix.n_o() && g.last_cont))
+    } else {
+        let j = key as usize;
+        (ix.dlo[j] as usize) < range.0 || ix.dhi[j] as usize > range.1 || ix.is_open(j)
+    }
+}
+
+/// The key of node `key`'s parent node, `None` for the folder (a node one level below it).
+fn parent_key(ix: &SlimIndex, key: u64, depth: u8, dp: u8) -> Option<u64> {
+    if depth <= dp + 1 {
+        return None;
+    }
+    let chain = if key & OBJ != 0 { ix.chain_of_row((key & !OBJ) as usize) } else { ix.dir_chain(key as usize) };
+    chain.last().map(|&g| g as u64)
+}
+
+/// The chunks' nodes as one shard's partial answer: pieces of a node split across chunks summed (a piece-split node
+/// whole within the shard counts once toward its parent's children, here); what the shard's `floor` can't draw
+/// dropped, never a node split across the shard's edge; nodes whose parent was dropped dropped too (they can't be
+/// drawn); then each node's path, and all of them in path order.
+fn shard_answer(ix: &SlimIndex, c: &SCompiled, range: (usize, usize), floor: Floor, outs: Vec<ChunkOut>) -> ShardAnswer {
     let (mut ta, mut tb) = (Acc::default(), Acc::default());
+    let mut root_kids = 0u64;
     let mut nodes: Vec<NodeOut> = Vec::new();
-    let mut partial: HashMap<u64, NodeOut> = HashMap::new();
+    let mut pieces: HashMap<u64, NodeOut> = HashMap::new();
     for o in outs {
         ta.add(o.a);
         tb.add(o.b);
+        root_kids += o.root_kids;
         nodes.extend(o.done);
         for p in o.partial {
-            partial
+            pieces
                 .entry(p.key)
                 .and_modify(|x| {
                     x.a.add(p.a);
                     x.b.add(p.b);
+                    x.kids += p.kids;
+                    x.matched |= p.matched;
                 })
                 .or_insert(p);
         }
     }
-    nodes.extend(partial.into_values());
-    let thr = c.min_ppm as u128 * ta.bytes.max(tb.bytes) as u128;
-    nodes.retain(|n| (n.a.nonzero() || n.b.nonzero()) && (n.a.bytes.max(n.b.bytes) as u128) * 1_000_000 >= thr);
+    let mut split: HashSet<u64> = HashSet::new();
+    let mut add_kids: HashMap<Option<u64>, u64> = HashMap::new();
+    for (&k, p) in &pieces {
+        if !(p.a.nonzero() || p.b.nonzero()) {
+            continue;
+        }
+        if out_of_shard(ix, k, range) {
+            split.insert(k);
+        } else {
+            *add_kids.entry(parent_key(ix, k, p.depth, c.dp)).or_default() += 1;
+        }
+    }
+    nodes.extend(pieces.into_values().filter(|n| n.a.nonzero() || n.b.nonzero()));
+    root_kids += add_kids.remove(&None).unwrap_or(0);
+    for n in nodes.iter_mut() {
+        if let Some(k) = add_kids.get(&Some(n.key)) {
+            n.kids += k;
+        }
+    }
+    let total = ta.bytes.max(tb.bytes);
+    nodes.retain(|n| {
+        let x = n.a.bytes.max(n.b.bytes);
+        split.contains(&n.key)
+            || match floor {
+                Floor::All => true,
+                Floor::Local => c.cut.keep(x, n.depth, total),
+                Floor::Total(t) => c.cut.keep(x, n.depth, t),
+            }
+    });
     // Pre-order: a directory at its first object row, before that row; nested directories by id.
     let pos = |k: u64| -> (u64, u8, u64) {
         if k & OBJ != 0 {
@@ -1025,57 +1132,56 @@ fn assemble(ix: &SlimIndex, c: &SCompiled, q: &Query, outs: Vec<ChunkOut>) -> An
         }
     };
     nodes.sort_unstable_by_key(|n| pos(n.key));
-
-    struct Open {
-        depth: u8,
-        /// Object rows below it end before this row.
-        hi: u64,
-        path: String,
-        a: Acc,
-        b: Acc,
-        kids_a: Acc,
-        kids_b: Acc,
-    }
-    let mut out_nodes = Vec::with_capacity(nodes.len());
-    let mut rest = Vec::new();
-    let mut stack: Vec<Open> = vec![Open { depth: c.dp, hi: u64::MAX, path: c.path.clone(), a: ta, b: tb, kids_a: Acc::default(), kids_b: Acc::default() }];
-    let close = |o: Open, rest: &mut Vec<(String, i64, i64, i64, i64)>| {
-        if o.depth < c.maxd {
-            let d = |x: u64, y: u64| x as i64 - y as i64;
-            let (ra, rb) = (d(o.a.bytes, o.kids_a.bytes), d(o.b.bytes, o.kids_b.bytes));
-            let (fa, fb) = (d(o.a.files, o.kids_a.files), d(o.b.files, o.kids_b.files));
-            if ra != 0 || rb != 0 || fa != 0 || fb != 0 {
-                rest.push((o.path, ra, fa, rb, fb));
-            }
-        }
-    };
+    // (depth, rows end, path) of the nodes kept so far that may hold the next one; the folder at the bottom.
+    let mut stack: Vec<(u8, u64, String)> = vec![(c.dp, u64::MAX, c.path.clone())];
+    let mut out = Vec::with_capacity(nodes.len());
     for n in nodes {
         let (p, _, _) = pos(n.key);
-        while stack.len() > 1 && (stack.last().unwrap().depth >= n.depth || stack.last().unwrap().hi <= p) {
-            let o = stack.pop().unwrap();
-            close(o, &mut rest);
+        while stack.len() > 1 && (stack.last().unwrap().0 >= n.depth || stack.last().unwrap().1 <= p) {
+            stack.pop();
         }
-        let (name_id, hi) = if n.key & OBJ != 0 { (ix.name[p as usize], p + 1) } else { (ix.dname[n.key as usize], ix.dhi[n.key as usize] as u64) };
-        let parent = stack.last_mut().unwrap();
-        let path = if parent.depth + 1 == n.depth {
-            parent.kids_a.add(n.a);
-            parent.kids_b.add(n.b);
-            let name = ix.dict.orig(name_id);
-            if parent.path.is_empty() { name.to_string() } else { format!("{}/{}", parent.path, name) }
-        } else if n.key & OBJ != 0 {
-            ix.obj_path(p as usize)
-        } else {
-            ix.dir_path(n.key as usize)
-        };
-        out_nodes.push((path.clone(), n.a.bytes, n.a.files, n.b.bytes, n.b.files));
-        stack.push(Open { depth: n.depth, hi, path, a: n.a, b: n.b, kids_a: Acc::default(), kids_b: Acc::default() });
+        let top = stack.last().unwrap();
+        if top.0 + 1 != n.depth {
+            // Its parent was dropped: it can't be drawn.
+            continue;
+        }
+        let obj = n.key & OBJ != 0;
+        let (name_id, hi) = if obj { (ix.name[p as usize], p + 1) } else { (ix.dname[n.key as usize], ix.dhi[n.key as usize] as u64) };
+        let name = ix.dict.orig(name_id);
+        let path = if top.2.is_empty() { name.to_string() } else { format!("{}/{}", top.2, name) };
+        out.push(SNode {
+            path: path.clone(),
+            depth: n.depth,
+            file: obj,
+            matched: n.matched,
+            partial: split.contains(&n.key),
+            a: [n.a.bytes, n.a.files],
+            b: [n.b.bytes, n.b.files],
+            kids: n.kids,
+        });
+        stack.push((n.depth, hi, path));
     }
-    while let Some(o) = stack.pop() {
-        close(o, &mut rest);
+    out.sort_by(|x, y| cmp_path(&x.path, &y.path));
+    ShardAnswer { total: [ta.bytes, ta.files, tb.bytes, tb.files], root_kids, nodes: out }
+}
+
+/// Answer a view over one pack split into `shards` logical shards (row ranges of equal size), each a partial answer,
+/// merged (`merge`). The shards run one after another on `pool`'s threads, sharing the running totals.
+pub fn run_sharded(ix: &SlimIndex, c: &SCompiled, shards: usize, pool: &rayon::ThreadPool) -> Result<(Tree, Touched, u64)> {
+    let n = ix.n_o();
+    let k = shards.max(1);
+    let (ga, gb) = (AtomicU64::new(0), AtomicU64::new(0));
+    let mut answers = Vec::with_capacity(k);
+    let mut touched = Touched::default();
+    let mut chunks = 0;
+    for i in 0..k {
+        let range = (n * i / k, n * (i + 1) / k);
+        let (a, t, ch) = shard_pass(ix, c, range, Floor::Local, pool, &ga, &gb)?;
+        touched.add(&t);
+        chunks += ch;
+        answers.push(a);
     }
-    out_nodes.sort();
-    rest.sort();
-    Answer { id: q.id.clone(), total: [ta.bytes, ta.files, tb.bytes, tb.files], nodes: out_nodes, rest }
+    Ok((merge(answers, &c.cut, &c.path, c.sb.is_some()), touched, chunks))
 }
 
 #[cfg(test)]

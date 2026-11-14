@@ -61,8 +61,13 @@ pub struct Query {
     pub classes: Option<Vec<u8>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub staged: Option<Vec<String>>,
+    #[serde(default)]
     pub depth: u8,
+    #[serde(default)]
     pub min_ppm: u64,
+    /// The cell rule (specs/vm-mode.md §2.2); when given, `depth` and `min_ppm` are unused.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cell: Option<crate::cell::Cell>,
     /// Answer an unfiltered view from directories' rolled-up rows (each node's own row at the scan) instead of summing
     /// object versions: a walk of the depth window only.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]

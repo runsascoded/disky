@@ -26,6 +26,7 @@ fn q(id: &str, tags: &[&str]) -> Query {
         staged: None,
         depth: DEPTH,
         min_ppm: PPM,
+        cell: None,
         dirs: false,
         tags: tags.iter().map(|s| s.to_string()).collect(),
     }
@@ -304,6 +305,27 @@ pub fn plan(idx: &Index, pool: &rayon::ThreadPool) -> Result<(Vec<Query>, serde_
 
 /// An exhaustive mix for small stores (the fixtures): every scan and consecutive diff, every folder (up to 24), each
 /// filter alone and in combinations, at several depths and thresholds.
+/// The exhaustive mix (`exhaustive`) plus, for every query that sums objects, a twin under one of a rotation of cell
+/// rules (specs/vm-mode.md §2.2): shares with and without attenuation, the default window, an absolute floor.
+pub fn exhaustive_cells(idx: &Index) -> Vec<Query> {
+    use crate::cell::Cell;
+    let base = exhaustive(idx);
+    let mut out = base.clone();
+    for (i, q) in base.iter().filter(|q| !q.dirs).enumerate() {
+        let mut c = q.clone();
+        c.id = format!("c{i:04}");
+        c.cell = Some(match i % 5 {
+            0 => Cell { share_log2: Some(2), atten_log2: 0, depth: Some(1 + (i % 3) as u8), floor_bytes: None },
+            1 => Cell { share_log2: Some(4), atten_log2: 1, depth: None, floor_bytes: None },
+            2 => Cell { share_log2: Some(6), atten_log2: 2, depth: Some(4), floor_bytes: None },
+            3 => Cell { share_log2: None, atten_log2: 1, depth: Some(3), floor_bytes: Some(1 << (i % 12)) },
+            _ => Cell { share_log2: Some(0), atten_log2: 0, depth: Some(2), floor_bytes: None },
+        });
+        out.push(c);
+    }
+    out
+}
+
 pub fn exhaustive(idx: &Index) -> Vec<Query> {
     let mut folders = vec![String::new()];
     let mut r = 0;

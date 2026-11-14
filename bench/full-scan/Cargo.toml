@@ -9,8 +9,16 @@ publish = false
 name = "fsb"
 path = "src/main.rs"
 
+[[bin]]
+name = "vmd"
+path = "src/bin/vmd.rs"
+
 [dependencies]
 arrow-array = "60"
+hex = "0.4"
+hmac = "0.12"
+sha2 = "0.10"
+tiny_http = "0.12"
 arrow-schema = "60"
 parquet = { version = "60", default-features = false, features = ["arrow", "zstd", "lz4", "snap"] }
 rayon = "1.10"

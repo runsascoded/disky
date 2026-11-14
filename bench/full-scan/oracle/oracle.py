@@ -96,10 +96,37 @@ def class_cols(cls: list[int]) -> str:
     return f"({sel})::BIGINT AS cls_sel, ({ok}) AS cls_pass, ({n}) AS n_cls"
 
 
+def window(q: dict) -> int:
+    """The query's depth window: its `depth`, or its cell rule's (specs/vm-mode.md §2.2: given, else as deep as a node
+    can pass under attenuation, else 8)."""
+    c = q.get("cell")
+    if c is None:
+        return q["depth"]
+    if c.get("depth") is not None:
+        return c["depth"]
+    s, a = c.get("share_log2"), c.get("atten_log2", 0)
+    return min(1 + s // a, 64) if s is not None and a > 0 else 8
+
+
+def keep_sql(q: dict, x: str, total: int) -> str:
+    """Whether a node `k` levels below the folder, with bytes `x` (the larger side's), is drawn in a view whose total
+    (the larger side's) is `total`: the cell rule (`share_log2`, `atten_log2`, `floor_bytes`), else `min_ppm`."""
+    c = q.get("cell")
+    if c is None:
+        return f"({x})::HUGEINT * 1000000 >= {q['min_ppm']}::HUGEINT * {total}"
+    a = c.get("atten_log2", 0)
+    conds = ["true"]
+    if c.get("share_log2") is not None:
+        conds.append(f"({x})::HUGEINT << {c['share_log2']} >= {total}::HUGEINT << ({a} * (k - 1))")
+    if c.get("floor_bytes"):
+        conds.append(f"({x})::HUGEINT >= {c['floor_bytes']}::HUGEINT << ({a} * (k - 1))")
+    return " AND ".join(conds)
+
+
 def answer(con, q: dict, scans: dict[str, int]) -> dict:
     p = q.get("path", "")
     dp = 0 if p == "" else p.count("/") + 1
-    K = q["depth"]
+    K = window(q)
     if "scan" in q:
         ta, tb = scans[q["scan"]], -1
     else:
@@ -147,14 +174,13 @@ def answer(con, q: dict, scans: dict[str, int]) -> dict:
         SELECT node, k, coalesce(sum(b) FILTER (WHERE la), 0), count(*) FILTER (WHERE la),
                coalesce(sum(b) FILTER (WHERE lb), 0), count(*) FILTER (WHERE lb)
         FROM nodes GROUP BY node, k
-        HAVING greatest(coalesce(sum(b) FILTER (WHERE la), 0), coalesce(sum(b) FILTER (WHERE lb), 0))::HUGEINT * 1000000
-               >= {q['min_ppm']}::HUGEINT * {max(tot[0], tot[2])}""").fetchall()
+        HAVING {keep_sql(q, "greatest(coalesce(sum(b) FILTER (WHERE la), 0), coalesce(sum(b) FILTER (WHERE lb), 0))", max(tot[0], tot[2]))}""").fetchall()
     return finish(q, tot, {r[0]: (r[1], [int(x) for x in r[2:]]) for r in rows})
 
 
 def finish(q: dict, tot: list[int], kept: dict) -> dict:
     """The answer from the kept nodes (`{path: (relative depth, [bytes a, files a, bytes b, files b])}`)."""
-    p, K = q.get("path", ""), q["depth"]
+    p, K = q.get("path", ""), window(q)
     nodes = sorted([n, *v[1]] for n, v in kept.items())
     # Each kept node above the deepest level, and the folder itself: what its kept children leave.
     kids: dict[str, list[int]] = {}
@@ -228,6 +254,12 @@ def main(cache, only, memory, out, threads, tmp, gen, queries, answers):
     stamps = {s["id"]: s["ts"] for s in scans}
     con = duckdb.connect(cache or ":memory:")
     con.execute(f"SET memory_limit = {lit(memory)}; SET threads = {threads}; SET temp_directory = {lit(tmp)}; SET preserve_insertion_order = false")
+    # The SQL below writes lambdas as `x -> …`, which DuckDB ≥ 1.5 refuses unless asked; older versions have no such
+    # setting (and accept them), so both outcomes are expected.
+    try:
+        con.execute("SET lambda_syntax = 'ENABLE_SINGLE_ARROW'")
+    except duckdb.CatalogException:
+        pass
     t0 = monotonic()
     qs = [json.loads(l) for l in Path(queries).read_text().splitlines() if l.strip()]
     ids = set(only.split(",")) if only else None

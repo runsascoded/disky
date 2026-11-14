@@ -5,9 +5,12 @@
 //!
 //! fsb load GEN                                         load, print stats and bytes per column (JSON)
 //! fsb pack GEN -o FILE                                 load, write the full index as a pack file
+//! fsb pack-slim GEN -o FILE                            load, write the slim index as a pack file (no full pack)
+//! fsb shard PACK -n N -o DIR                           a slim pack cut into N physical shard packs
 //! fsb slim SRC -o FILE                                 the slim index (object versions + directory structure) of
 //!                                                      SRC's full index, written as a pack file
-//! fsb plan GEN -o QUERIES [-t N]                       the bench's query mix for this store
+//! fsb plan GEN -o QUERIES [-t N] [-x 1 | -c 1]         the bench's query mix for this store (`-x`: the fixtures'
+//!                                                      exhaustive mix; `-c`: that plus cell-rule twins)
 //! fsb run GEN QUERIES -o ANSWERS [-t N]                answer each query (JSONL)
 //! fsb bench SRC QUERIES -o RESULTS -a ANSWERS [-t 1,16] [-r 5] [-l LABEL] [-A REF] [-p N]
 //!                                                      cold + warm runs per thread count, answers checked equal
@@ -179,6 +182,44 @@ fn main() -> Result<()> {
             let n = pack::write_index(&idx, &PathBuf::from(a.opts.get("o").ok_or("-o FILE")?))?;
             println!("{}", json!({"bytes": n, "write_s": t.elapsed().as_secs_f64(), "load": idx.stats, "proc": pack::proc()}));
         }
+        "pack-slim" => {
+            // The VM-mode pack writer (specs/vm-mode.md §6.1): the store straight to the slim pack, no full pack. The
+            // pack records its generation and manifest (`stats.pins`), which `vmd` checks requests against.
+            let t0 = Instant::now();
+            let dir = PathBuf::from(&a.pos[1]);
+            let g = store::open(&dir)?;
+            let gen = dir.canonicalize()?.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            let pins = json!({"gen": gen, "manifest": g.manifest.clone().unwrap_or_default()});
+            let idx = load_gen(&a.pos[1])?;
+            let load_s = t0.elapsed().as_secs_f64();
+            let t = Instant::now();
+            let mut ix = SlimIndex::from_index(&idx)?;
+            ix.stats["pins"] = pins;
+            let build_s = t.elapsed().as_secs_f64();
+            let load = serde_json::to_value(&idx.stats)?;
+            drop(idx);
+            let t = Instant::now();
+            let n = ix.write(&PathBuf::from(a.opts.get("o").ok_or("-o FILE")?))?;
+            println!("{}", json!({"bytes": n, "load_s": load_s, "build_s": build_s, "write_s": t.elapsed().as_secs_f64(), "load": load, "stats": ix.stats, "scans": ix.scans.len(), "proc": pack::proc()}));
+        }
+        "shard" => {
+            // Physical shards (specs/vm-mode.md §3.1): a slim pack cut into `-n` row ranges, each a slim pack of its own.
+            let p = Pack::open(&PathBuf::from(&a.pos[1]))?;
+            let ix = SlimIndex::read(&p)?;
+            let k: usize = a.opts.get("n").ok_or("-n N")?.parse()?;
+            let out = PathBuf::from(a.opts.get("o").ok_or("-o DIR")?);
+            std::fs::create_dir_all(&out)?;
+            let n = ix.n_o();
+            for i in 0..k {
+                let mut s = ix.slice(n * i / k, n * (i + 1) / k, i as u64, k as u64)?;
+                if let Some(pins) = ix.stats.get("pins") {
+                    s.stats["pins"] = pins.clone();
+                }
+                let f = out.join(format!("shard-{i}-of-{k}.fsb"));
+                let b = s.write(&f)?;
+                println!("{}", json!({"file": f, "bytes": b, "stats": s.stats}));
+            }
+        }
         "slim" => {
             let (e, _) = open_src(&a.pos[1], None, None)?;
             let Engine::Full(idx) = e else { return err("slim: SRC must be a store or a full pack") };
@@ -194,7 +235,13 @@ fn main() -> Result<()> {
             let (e, _) = open_src(&a.pos[1], None, None)?;
             let Engine::Full(idx) = e else { return err("plan: needs the full index") };
             let p = pool(threads(num_cpus()))?;
-            let (qs, meta) = if a.opts.contains_key("x") { (full_scan::plan::exhaustive(&idx), json!({})) } else { plan(&idx, &p)? };
+            let (qs, meta) = if a.opts.contains_key("c") {
+                (full_scan::plan::exhaustive_cells(&idx), json!({}))
+            } else if a.opts.contains_key("x") {
+                (full_scan::plan::exhaustive(&idx), json!({}))
+            } else {
+                plan(&idx, &p)?
+            };
             let mut f = File::create(a.opts.get("o").ok_or("-o QUERIES")?)?;
             for q in &qs {
                 writeln!(f, "{}", serde_json::to_string(q)?)?;

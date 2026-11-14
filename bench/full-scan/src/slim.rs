@@ -54,6 +54,8 @@ pub struct SlimIndex {
     pub dself: Col<u32>,
     pub stats: Value,
     pub map: Option<std::sync::Arc<crate::pack::Backing>>,
+    /// A physical shard's edges (`slice`); `None` for a whole pack.
+    pub edge: Option<Edge>,
 }
 
 impl SlimIndex {
@@ -353,6 +355,7 @@ impl SlimIndex {
             dself: dself.into(),
             stats,
             map: None,
+            edge: None,
         })
     }
 
@@ -378,7 +381,12 @@ impl SlimIndex {
         add_dict(&mut w, "dict_", &self.dict);
         let cx = ComplexCols::of(&self.complex);
         cx.add(&mut w);
-        w.write(path, "slim", json!({"scans": self.scans, "owners": self.owners, "stats": self.stats}))
+        let mut meta = json!({"scans": self.scans, "owners": self.owners, "stats": self.stats});
+        if let Some(e) = &self.edge {
+            w.add("edge_open", &e.open);
+            meta["edge"] = json!({"shard": e.shard, "of": e.of, "lo": e.lo, "hi": e.hi, "first_cont": e.first_cont, "last_cont": e.last_cont});
+        }
+        w.write(path, "slim", meta)
     }
 
     pub fn read(p: &Pack) -> Result<SlimIndex> {
@@ -408,11 +416,141 @@ impl SlimIndex {
             dck: p.col("dck")?,
             dself: p.col("dself")?,
             map: Some(p.map.clone()),
+            edge: match p.meta.get("edge") {
+                None => None,
+                Some(e) => Some(Edge {
+                    shard: e["shard"].as_u64().unwrap_or(0),
+                    of: e["of"].as_u64().unwrap_or(1),
+                    lo: e["lo"].as_u64().unwrap_or(0),
+                    hi: e["hi"].as_u64().unwrap_or(0),
+                    open: p.col("edge_open")?,
+                    first_cont: e["first_cont"].as_bool().unwrap_or(false),
+                    last_cont: e["last_cont"].as_bool().unwrap_or(false),
+                }),
+            },
         })
     }
 
     pub fn complex_of(&self, r: usize) -> &Complex {
         let i = self.complex_rows.binary_search(&(r as u32)).expect("a COMPLEX row without its slices");
         &self.complex[i]
+    }
+}
+
+/// A physical shard's edges (`SlimIndex::slice`, specs/vm-mode.md §3.1): where its rows sit in the whole pack, and
+/// what continues past them, so its answers mark the nodes other shards hold the rest of.
+pub struct Edge {
+    /// This shard's index and the shard count, and its object rows `[lo, hi)` in the whole pack.
+    pub shard: u64,
+    pub of: u64,
+    pub lo: u64,
+    pub hi: u64,
+    /// Directories (local ids, sorted) whose rows reach past either end.
+    pub open: Col<u32>,
+    /// The first row continues an object path of the previous shard; the last row's path continues in the next.
+    pub first_cont: bool,
+    pub last_cont: bool,
+}
+
+impl SlimIndex {
+    /// Whether directory `j`'s rows reach past this (physical shard) pack's ends.
+    #[inline]
+    pub fn is_open(&self, j: usize) -> bool {
+        self.edge.as_ref().is_some_and(|e| e.open.binary_search(&(j as u32)).is_ok())
+    }
+
+    /// Object rows `[lo, hi)` as a self-contained slim index (shard `shard` of `of`): those rows, the directories they
+    /// sit under (the ancestors of row `lo`, then every directory starting in the range), a dictionary of only the
+    /// names they use, and the edge (`Edge`).
+    pub fn slice(&self, lo: usize, hi: usize, shard: u64, of: u64) -> Result<SlimIndex> {
+        if lo > hi || hi > self.n_o() {
+            return err(format!("slice [{lo}, {hi}) of {} rows", self.n_o()));
+        }
+        let n = hi - lo;
+        // Directories: ancestors of row `lo` that start before it, then those starting in the range.
+        let c0 = self.dlo.partition_point(|&x| (x as usize) < lo);
+        let c1 = self.dlo.partition_point(|&x| (x as usize) < hi);
+        let chain: Vec<u32> = if n == 0 { Vec::new() } else { self.chain_of_row(lo).into_iter().filter(|&g| (self.dlo[g as usize] as usize) < lo).collect() };
+        let dirs: Vec<u32> = chain.iter().copied().chain(c0 as u32..c1 as u32).collect();
+        let local_of = |g: u32| -> u32 {
+            if (g as usize) >= c0 {
+                chain.len() as u32 + g - c0 as u32
+            } else {
+                chain.iter().position(|&x| x == g).expect("an ancestor outside the chain") as u32
+            }
+        };
+        let nd = dirs.len();
+        let (mut ddepth, mut dend, mut dlo, mut dhi) = (Vec::with_capacity(nd), Vec::with_capacity(nd), Vec::with_capacity(nd), Vec::with_capacity(nd));
+        let mut open = Vec::new();
+        for (i, &g) in dirs.iter().enumerate() {
+            let g = g as usize;
+            ddepth.push(self.ddepth[g]);
+            let (a, b) = (self.dlo[g] as usize, self.dhi[g] as usize);
+            dlo.push((a.max(lo) - lo) as u32);
+            dhi.push((b.min(hi) - lo) as u32);
+            let end_g = self.dend[g] as usize;
+            dend.push(if end_g >= c0 && c1 > c0 { local_of(end_g.min(c1 - 1) as u32) } else { (chain.len().max(i + 1) - 1) as u32 });
+            if a < lo || b > hi {
+                open.push(i as u32);
+            }
+        }
+        // Ancestor-chain checkpoints over the local directories (as `from_index` keeps them).
+        let (mut dck_off, mut dck) = (vec![0u64], Vec::new());
+        let mut st: Vec<u32> = Vec::new();
+        for i in 0..nd {
+            while st.last().is_some_and(|&a| (dend[a as usize] as usize) < i) {
+                st.pop();
+            }
+            if i % CKD == 0 {
+                dck.extend_from_slice(&st);
+                dck_off.push(dck.len() as u64);
+            }
+            st.push(i as u32);
+        }
+        // Names: those the rows and directories use, in the dictionary's order (so `find`'s binary search holds).
+        let mut ids: Vec<u32> = self.name[lo..hi].iter().copied().chain(dirs.iter().map(|&g| self.dname[g as usize])).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        let dict = Dict::build_iter(ids.iter().map(|&i| self.dict.orig(i)), ids.len());
+        let remap = |i: u32| ids.binary_search(&i).expect("a name outside the slice's dictionary") as u32;
+        let mut cont = vec![0u64; n.div_ceil(64) + 1];
+        for r in 0..n {
+            if self.is_cont(lo + r) {
+                cont[r >> 6] |= 1 << (r & 63);
+            }
+        }
+        let cx0 = self.complex_rows.partition_point(|&r| (r as usize) < lo);
+        let cx1 = self.complex_rows.partition_point(|&r| (r as usize) < hi);
+        // A directory's own versions lead its rows: it keeps them here when any fall in the range (a cut through them
+        // leaves the rest at row 0, the directory open).
+        let dself: Vec<u32> = dirs.iter().enumerate().filter(|(_, &g)| self.dself.binary_search(&g).is_ok() && self.own_end(g as usize) > lo).map(|(i, _)| i as u32).collect();
+        let first_cont = n > 0 && self.is_cont(lo);
+        let last_cont = hi < self.n_o() && self.is_cont(hi);
+        let stats = json!({"rows": n, "dirs": nd, "shard": shard, "of": of, "lo": lo, "hi": hi, "names": ids.len(), "open_dirs": open.len()});
+        Ok(SlimIndex {
+            scans: self.scans.clone(),
+            owners: self.owners.clone(),
+            dict,
+            vf: self.vf[lo..hi].to_vec().into(),
+            vt: self.vt[lo..hi].to_vec().into(),
+            size: self.size[lo..hi].to_vec().into(),
+            name: self.name[lo..hi].iter().map(|&i| remap(i)).collect::<Vec<_>>().into(),
+            owner: self.owner[lo..hi].to_vec().into(),
+            cls: self.cls[lo..hi].to_vec().into(),
+            cont: cont.into(),
+            complex_rows: self.complex_rows[cx0..cx1].iter().map(|&r| r - lo as u32).collect::<Vec<_>>().into(),
+            complex: self.complex[cx0..cx1].to_vec(),
+            dname: dirs.iter().map(|&g| remap(self.dname[g as usize])).collect::<Vec<_>>().into(),
+            ddepth: ddepth.into(),
+            dend: dend.into(),
+            dlo: dlo.into(),
+            dhi: dhi.into(),
+            dck_off: dck_off.into(),
+            dck: dck.into(),
+            dself: dself.into(),
+            stats,
+            map: None,
+            edge: Some(Edge { shard, of, lo: lo as u64, hi: hi as u64, open: open.into(), first_cont, last_cont }),
+        })
     }
 }
