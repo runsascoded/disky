@@ -31,16 +31,10 @@ def doc(**changes):
     }
 
 
-SUCCESS = f'''✅ **HF dev deployment succeeded**
-
-Source: [hf](https://github.com/Open-Athena/disky/tree/hf) · [{SHA}](https://github.com/Open-Athena/disky/commit/{SHA}) · clean
-
-GitHub actor: `louisa` · attempt `123-1`
-
-Serving verification: passed. CF deployment: abcdef12.
-
-[Site](https://dev.hf.oa.dev) · [CF deployment](https://abcdef12.oa-hf-usage.pages.dev) · [Run logs](https://github.com/Open-Athena/disky/actions/runs/123)
-'''
+REPO = 'https://github.com/Open-Athena/disky'
+SUCCESS = (f'[hf]({REPO}/tree/hf) ([bbbbbbbbb]({REPO}/commit/{SHA})) · :gh: [louisa](https://github.com/louisa)'
+           f' · :cf: [abcdef12](https://abcdef12.oa-hf-usage.pages.dev) · [site](https://dev.hf.oa.dev) · [logs]({REPO}/actions/runs/123)\n')
+SENDER = '✅ HF dev deployment succeeded'
 
 
 def test_render_exact_success_omits_private_controller_fields():
@@ -48,7 +42,7 @@ def test_render_exact_success_omits_private_controller_fields():
 
 
 def test_github_bot_actor_is_rendered_without_rejecting_automated_releases():
-    assert N.render(doc(actor='github-actions[bot]')) == SUCCESS.replace('`louisa`', '`github-actions[bot]`')
+    assert N.render(doc(actor='github-actions[bot]')) == SUCCESS.replace(':gh: [louisa](https://github.com/louisa)', ':gh: `github-actions[bot]`')
 
 
 @pytest.mark.parametrize('site,label', [('gcs', 'GCS'), ('cw', 'CW'), ('hf', 'HF'), ('r2', 'R2')])
@@ -56,40 +50,29 @@ def test_github_bot_actor_is_rendered_without_rejecting_automated_releases():
 def test_each_site_and_environment_uses_its_own_identity(site, label, mode):
     host = f'{"dev." if mode == "dev" else ""}{site}.oa.dev'
     value = doc(deployment=site, source_branch=site, mode=mode, host=host)
-    expected = (SUCCESS.replace('HF dev deployment succeeded', f'{label} {mode} deployment succeeded')
-                .replace('[hf](', f'[{site}](').replace('/tree/hf)', f'/tree/{site})')
-                .replace('https://dev.hf.oa.dev', f'https://{host}'))
-    assert N.render(value) == expected
+    expected = SUCCESS.replace('[hf](', f'[{site}](').replace('/tree/hf)', f'/tree/{site})').replace('https://dev.hf.oa.dev', f'https://{host}')
+    assert (N.headline(value), N.render(value)) == (f'✅ {label} {mode} deployment succeeded', expected)
 
 
 def test_render_build_failure_has_no_fictitious_cf_receipt_or_verification():
-    assert N.render(doc(status='failure', stage='build', verified=False, cloudflare_deployment=None,
-                        cloudflare_url=None, actor=None, actor_source=None, sha=None, source_branch=None)) == '''❌ **HF dev deployment failed during build**
-
-Source: ref not recorded · revision not recorded · clean
-
-Initiator: not recorded · attempt `123-1`
-
-Serving verification: not recorded. CF deployment: not recorded.
-
-[Site](https://dev.hf.oa.dev) · [Run logs](https://github.com/Open-Athena/disky/actions/runs/123)
-'''
+    value = doc(status='failure', stage='build', verified=False, cloudflare_deployment=None,
+                cloudflare_url=None, actor=None, actor_source=None, sha=None, source_branch=None)
+    assert (N.headline(value), N.render(value)) == (
+        '❌ HF dev deployment failed during build',
+        f'source not recorded · [site](https://dev.hf.oa.dev) · [logs]({REPO}/actions/runs/123)\n',
+    )
 
 
 def test_render_unverified_dirty_manual_upload_and_cancellation():
     value = doc(mode='prod', host='hf.oa.dev', verified=False, dirty=True, actor_source='local', run_url=None)
-    expected = f'''✅ **HF prod deployment succeeded**
-
-Source: [hf](https://github.com/Open-Athena/disky/tree/hf) · `{SHA}` (base commit) · tracked changes present
-
-Local user: `louisa` · attempt `123-1`
-
-Serving verification: not recorded. CF deployment: abcdef12.
-
-[Site](https://hf.oa.dev) · [CF deployment](https://abcdef12.oa-hf-usage.pages.dev)
-'''
-    assert N.render(value) == expected
-    assert N.render({**value, 'status': 'cancelled'}) == expected.replace('✅ **HF prod deployment succeeded**', '⏹️ **HF prod deployment cancelled**')
+    expected = (f'[hf]({REPO}/tree/hf) ([bbbbbbbbb]({REPO}/commit/{SHA})) · ⚠️ dirty · ⚠️ unverified · :computer: `louisa`'
+                ' · :cf: [abcdef12](https://abcdef12.oa-hf-usage.pages.dev) · [site](https://hf.oa.dev)\n')
+    assert (N.headline(value), N.render(value)) == ('✅ HF prod deployment succeeded', expected)
+    # a cancellation isn't a success, so it isn't "unverified"; an unrecorded tree says so
+    cancelled = {**value, 'status': 'cancelled', 'dirty': None}
+    assert (N.headline(cancelled), N.render(cancelled)) == (
+        '⏹️ HF prod deployment cancelled', expected.replace(' · ⚠️ dirty · ⚠️ unverified', ' · ⚠️ tree state not recorded'),
+    )
 
 
 @pytest.mark.parametrize('changes,message', [
@@ -109,19 +92,17 @@ def test_invalid_or_injectable_receipt_is_refused(changes, message):
 
 ENV = {'DEPLOY_NOTIFICATIONS_ENABLED': '1', 'SLACK_DEPLOY_BOT_TOKEN': 'xoxb-test-token', 'SLACK_DEPLOY_CHANNEL': 'C0TESTCHAN'}
 BOT = ('U0BOT', 'B0BOT')
-WIRE = f'''✅ *HF dev deployment succeeded*
-
-Source: <https://github.com/Open-Athena/disky/tree/hf|hf> · <https://github.com/Open-Athena/disky/commit/{SHA}|{SHA}> · clean
-
-GitHub actor: `louisa` · attempt `123-1`
-
-Serving verification: passed. CF deployment: abcdef12.
-
-<https://dev.hf.oa.dev|Site> · <https://abcdef12.oa-hf-usage.pages.dev|CF deployment> · <https://github.com/Open-Athena/disky/actions/runs/123|Run logs>
-'''
+WIRE = (f'<{REPO}/tree/hf|hf> (<{REPO}/commit/{SHA}|bbbbbbbbb>) · :gh: <https://github.com/louisa|louisa>'
+        f' · :cf: <https://abcdef12.oa-hf-usage.pages.dev|abcdef12> · <https://dev.hf.oa.dev|site> · <{REPO}/actions/runs/123|logs>\n')
 
 
 def notice(ts: str, headline: str, bot: str = 'B0BOT') -> dict:
+    """A notice as `conversations.history` returns it: the outcome in its sender name."""
+    return {'ts': ts, 'bot_id': bot, 'username': f'❌ {headline}', 'text': '[hf](…) · …'}
+
+
+def legacy(ts: str, headline: str, bot: str = 'B0BOT') -> dict:
+    """A notice from before 2026-11-14: the bot's own name, the outcome the text's bold first line."""
     return {'ts': ts, 'bot_id': bot, 'text': f':x: *{headline}*\n\nSource: …'}
 
 
@@ -134,8 +115,8 @@ class FakeSlack:
         self.calls.append(('history', channel, limit))
         return self.history
 
-    def post(self, content, thread_id=None):
-        self.calls.append(('post', content, thread_id))
+    def post(self, content, thread_id=None, username=None):
+        self.calls.append(('post', username, content, thread_id))
         if self.fail:
             raise self.fail
 
@@ -156,7 +137,7 @@ def test_cli_defaults_to_review_even_with_credentials_and_enabled_delivery(tmp_p
         pytest.fail('review must not open a connection')
     monkeypatch.setattr(N, 'slack_client', unexpected)
     result = CliRunner().invoke(N.main, ['send', str(path)], env=ENV)
-    assert (result.exit_code, result.output) == (0, SUCCESS)
+    assert (result.exit_code, result.output) == (0, f'{SENDER}\n{SUCCESS}')
     result = CliRunner().invoke(N.main, ['send', '-x', str(path)], env={**ENV, 'DEPLOY_NOTIFICATIONS_ENABLED': '0'})
     assert (result.exit_code, result.output) == (1, 'Error: Deploy notifications are disabled pending template/transport review\n')
 
@@ -170,6 +151,9 @@ def test_cli_defaults_to_review_even_with_credentials_and_enabled_delivery(tmp_p
     # Another deployment's notices, another bot's posts and other messages don't count.
     ([notice('9.5', 'GCS prod deployment failed during build'), notice('9.4', 'HF dev deployment failed during build', bot='B0OTHER'),
       {'ts': '9.3', 'bot_id': 'B0BOT', 'text': 'Scan health: all green'}, notice('9.0', 'HF dev deployment succeeded')], '9.0'),
+    # A notice from before the one-line format still counts.
+    ([legacy('9.0', 'HF dev deployment succeeded')], '9.0'),
+    ([legacy('9.0', 'HF dev deployment failed during upload')], None),
     # No notice within the history window: a new thread.
     ([], None),
 ])
@@ -178,7 +162,7 @@ def test_greens_are_run_length_threaded(monkeypatch, history, thread):
     made = fake(monkeypatch, slack)
     assert N.send(doc(), ENV) == thread
     assert made == [('xoxb-test-token', 'C0TESTCHAN')]
-    assert slack.calls == [('history', 'C0TESTCHAN', 100), ('post', SUCCESS, thread)]
+    assert slack.calls == [('history', 'C0TESTCHAN', 100), ('post', SENDER, SUCCESS, thread)]
 
 
 RED = {'status': 'failure', 'stage': 'upload', 'verified': False}
@@ -200,14 +184,14 @@ def test_reds_are_run_length_threaded(monkeypatch, changes, history, thread):
     slack = FakeSlack(history)
     fake(monkeypatch, slack)
     assert N.send(doc(**changes), ENV) == thread
-    assert slack.calls == [('history', 'C0TESTCHAN', 100), ('post', N.render(doc(**changes)), thread)]
+    assert slack.calls == [('history', 'C0TESTCHAN', 100), ('post', N.headline(doc(**changes)), N.render(doc(**changes)), thread)]
 
 
 def test_thrds_renders_the_wire_text():
     from thrds.mrkdwn import to_slack
     assert to_slack(SUCCESS) == WIRE
     # What Slack stores is what the run lookup reads back.
-    assert N.run_thread([{'ts': '1.0', 'bot_id': 'B0BOT', 'text': WIRE}], 'hf', True, BOT) == '1.0'
+    assert N.run_thread([{'ts': '1.0', 'bot_id': 'B0BOT', 'username': SENDER, 'text': WIRE}], 'hf', True, BOT) == '1.0'
 
 
 @pytest.mark.parametrize('env,message', [
