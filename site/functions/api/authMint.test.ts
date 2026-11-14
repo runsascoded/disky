@@ -419,3 +419,37 @@ describe.each([[true], [false]])('a grant\'s terms that aren\'t numbers (the lis
     expect([minted[0], edited[0], cleared[0], row(w.raw, grant.id)]).toEqual([200, 200, 200, { expires_at: null, max_redeems: null, session_ttl: null }])
   })
 })
+
+// A service link (`grants.service`, `site/migrations/grant-flags.sql`): a job's, never a person's. `/admin` mints one with
+// its "Service account" box and toggles the bit on existing rows; the package refuses it beside an email.
+describe('the `service` bit', () => {
+  type W = Awaited<ReturnType<typeof world>>
+  const EMAIL_REFUSED = [400, { error: 'service links cannot have an email' }]
+  const rows = (w: W) => w.raw.prepare('SELECT name, email, service FROM grants ORDER BY name').all()
+  const updates = (w: W) => w.raw.prepare("SELECT grant_id, reason FROM access_log WHERE event = 'update' ORDER BY id").all()
+  const patch = (w: W, id: string, edit: unknown) => w.call(authRoute, `/api/auth/grants/${id}`, LEAD, 'PATCH', edit)
+  const service = (body: Record<string, unknown>) => (body.grant as { service: boolean }).service
+
+  it('mints with it, never beside an email (refused, nothing written); a plain link reads false', async () => {
+    const w = await world()
+    const [status, job] = await w.call(authRoute, '/api/auth/grants', LEAD, 'POST', { name: 'scan job', scopes: ['gcs:read'], service: true })
+    const refused = await w.call(authRoute, '/api/auth/grants', LEAD, 'POST', { name: 'a person', email: GUEST, scopes: ['gcs:read'], service: true })
+    const [, plain] = await w.call(authRoute, '/api/auth/grants', LEAD, 'POST', { name: 'guest link', scopes: ['gcs:read'] })
+    expect([status, service(job), refused, service(plain), rows(w)]).toEqual([200, true, EMAIL_REFUSED, false, [
+      { name: 'guest link', email: null, service: 0 },
+      { name: 'scan job', email: null, service: 1 },
+    ]])
+  })
+
+  it('toggles on an existing link, each change logged; an email-bound link can\'t be flagged', async () => {
+    const w = await world()
+    const { grant } = await w.existing(['gcs:read'])
+    const { grant: person } = await w.gate.mint({ email: GUEST, scopes: ['gcs:read'], name: 'guest', createdBy: LEAD, expiresAt: null, maxRedeems: null })
+    const [on, off, refused] = [await patch(w, grant.id, { service: true }), await patch(w, grant.id, { service: false }), await patch(w, person.id, { service: true })]
+    expect([on[0], service(on[1]), off[0], service(off[1]), refused, rows(w), updates(w)]).toEqual([
+      200, true, 200, false, EMAIL_REFUSED,
+      [{ name: 'guest', email: GUEST, service: 0 }, { name: 'old link', email: null, service: 0 }],
+      [{ grant_id: grant.id, reason: 'service' }, { grant_id: grant.id, reason: 'service' }],
+    ])
+  })
+})
