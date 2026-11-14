@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# The bench VM's queue after the first gcs run's oracle: gcs rerun on the final code (same queries; answers must equal
+# the oracle-checked first run's), the `us`-vs-`slices` check, then the synthetic ladder.
+set -uo pipefail
+cd "$(dirname "$0")"
+gen=$HOME/gcs/2026-10-09b.g3.c001 w=$HOME/work
+log() { echo "[$(date +%T)] $*" >&2; }
+cargo build -q --release
+d=$w/gcs2; mkdir -p "$d"
+log gcs2 bench
+/usr/bin/time -f "%e s, %M KB" ./target/release/fsb bench "$gen" "$w/gcs/queries.jsonl" -t "1,$(nproc)" -r 5 -l gcs \
+  -o "$d/results.jsonl" -a "$d/answers.jsonl" 2> "$d/bench.log"
+tail -1 "$d/bench.log" >&2
+python3 -c 'import json,sys; a=[json.loads(l) for l in open(sys.argv[1])]; b=[json.loads(l) for l in open(sys.argv[2])]; print(json.dumps({"answers": len(a), "equal_to_oracle_checked_run": a == b}))' \
+  "$w/gcs/answers.jsonl" "$d/answers.jsonl" | tee "$d/same.json" >&2
+log slices
+src=gs://oa-gcs-usage-dvx/interval-store/$(basename "$gen")
+gcloud storage cp "$src/served/slices.parquet" "$gen/served/" 2>/dev/null
+for k in $(python3 -c 'import json,glob; m=sorted(glob.glob("'"$gen"'/manifests/*.json"))[-1]; print("\n".join(r["key"] for r in json.load(open(m))["runs"]))'); do
+  gcloud storage cp "$src/$k/served/slices.parquet" "$gen/$k/served/" 2>/dev/null
+done
+python oracle/slices_check.py -m 100GB -T "$w/duck-slices" -s 2026-11-12T0702 -s 2026-10-13T0702 "$gen" > "$d/slices.json" 2> "$d/slices.log"; cat "$d/slices.json" >&2
+rm -f "$gen/served/slices.parquet" "$gen"/deltas/*/served/slices.parquet
+./run-synth 450 x450; ./run-synth 900 x900; ./run-synth 1800 x1800

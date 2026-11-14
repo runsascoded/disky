@@ -1,0 +1,31 @@
+[package]
+name = "full-scan"
+version = "0.1.0"
+edition = "2021"
+description = "Design A of specs/full-scan-serving-bench.md: an interval store held in RAM in depth-first path order, every view one bounded pass"
+publish = false
+
+[[bin]]
+name = "fsb"
+path = "src/main.rs"
+
+[dependencies]
+arrow-array = "60"
+arrow-schema = "60"
+parquet = { version = "60", default-features = false, features = ["arrow", "zstd", "lz4", "snap"] }
+rayon = "1.10"
+libc = "0.2"
+memchr = "2.7"
+memmap2 = "0.9"
+regex = "1.11"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 4
+debug = 1
+
+[workspace]

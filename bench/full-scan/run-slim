@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+# The slim-index measurements (specs/full-scan-serving-bench.md § Slim index, cold start, small RAM) on a bench node.
+#   run-slim pack GEN DIR                 the full pack (`DIR/full.fsb`) from the store, then the slim one (`DIR/slim.fsb`)
+#   run-slim cold DIR LABEL Q             time to the first answer (Q: a one-query file), per pack, from the page cache
+#                                         and with caches dropped (prefaulted, lazily mapped, read into memory)
+#   run-slim threads DIR Q REF            the slim pack at 2, 4, 8, 16 threads, each pinned to that many vCPUs as whole
+#                                         cores (vCPU k and k+8 are one core's hyperthreads), as an n2 of that size has;
+#                                         the full pack at 16; every answer checked against REF
+#   run-slim cap DIR Q REF SIZE…          the slim pack served from the page cache under each memory cap, caches dropped
+# Results under ~/work/slim/.
+set -euo pipefail
+cd "$(dirname "$0")"
+fsb=$PWD/target/release/fsb
+out=${OUT:-$HOME/work/slim}
+mkdir -p "$out"
+log() { echo "[$(date +%T)] $*" >&2; }
+drop() { sync; echo 3 | sudo tee /proc/sys/vm/drop_caches > /dev/null; }
+cmd=$1; shift
+case $cmd in
+  pack)
+    gen=$1 dir=$2
+    mkdir -p "$dir"
+    log pack; /usr/bin/time -f "%e s, %M KB" $fsb pack "$gen" -o "$dir/full.fsb" > "$out/pack.json" 2> "$out/pack.log"
+    tail -1 "$out/pack.log" >&2
+    log slim; /usr/bin/time -f "%e s, %M KB" $fsb slim "$dir/full.fsb" -o "$dir/slim.fsb" > "$out/slim.json" 2> "$out/slim.log"
+    tail -1 "$out/slim.log" >&2
+    ;;
+  cold)
+    dir=$1 label=$2 q=$3
+    for k in full slim; do
+      f=$dir/$k.fsb
+      # Only this pack in the page cache (other files' pages could evict part of it).
+      drop
+      cat "$f" > /dev/null
+      log "$k cache"; $fsb bench "$f" "$q" -p 32 -t 16 -r 1 -l "$label-$k-cache" -o "$out/cold-$label-$k-cache.jsonl" -a /dev/null 2>> "$out/cold.log"
+      drop
+      log "$k dropped, prefault"; $fsb bench "$f" "$q" -p 32 -t 16 -r 1 -l "$label-$k-drop" -o "$out/cold-$label-$k-drop.jsonl" -a /dev/null 2>> "$out/cold.log"
+      drop
+      log "$k dropped, lazy"; $fsb bench "$f" "$q" -t 16 -r 1 -l "$label-$k-lazy" -o "$out/cold-$label-$k-lazy.jsonl" -a /dev/null 2>> "$out/cold.log"
+      drop
+      log "$k dropped, read into memory"; $fsb bench "$f" "$q" -m 32 -t 16 -r 1 -l "$label-$k-mem" -o "$out/cold-$label-$k-mem.jsonl" -a /dev/null 2>> "$out/cold.log"
+    done
+    ;;
+  threads)
+    dir=$1 q=$2 ref=$3
+    for t in 2 4 8 16; do
+      h=$((t / 2))
+      cpus="0-$((h - 1)),8-$((8 + h - 1))"
+      log "slim t=$t on $cpus"; taskset -c "$cpus" $fsb bench "$dir/slim.fsb" "$q" -p 16 -t "$t" -r 5 -A "$ref" -l "slim-t$t" \
+        -o "$out/threads-slim-t$t.jsonl" -a "$out/answers-slim-t$t.jsonl" 2> "$out/threads-slim-t$t.log"
+      tail -1 "$out/threads-slim-t$t.log" >&2
+    done
+    log "full t=16"; $fsb bench "$dir/full.fsb" "$q" -p 16 -t 16 -r 5 -A "$ref" -l full-t16 \
+      -o "$out/threads-full-t16.jsonl" -a "$out/answers-full-t16.jsonl" 2> "$out/threads-full-t16.log"
+    tail -1 "$out/threads-full-t16.log" >&2
+    ;;
+  cap)
+    dir=$1 q=$2 ref=$3; shift 3
+    for m in "$@"; do
+      drop
+      log "cap $m"
+      sudo systemd-run --scope -q -p "MemoryMax=$m" -p MemorySwapMax=0 --uid="$(id -u)" --gid="$(id -g)" -- \
+        $fsb bench "$dir/slim.fsb" "$q" -t 16 -r 3 -A "$ref" -l "cap-$m" -o "$out/cap-$m.jsonl" -a "$out/answers-cap-$m.jsonl" \
+        2> "$out/cap-$m.log" || log "cap $m: exit $?"
+      tail -1 "$out/cap-$m.log" >&2
+    done
+    ;;
+  *) echo "usage: run-slim pack|cold|threads|cap …" >&2; exit 2 ;;
+esac
