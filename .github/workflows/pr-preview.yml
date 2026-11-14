@@ -5,6 +5,8 @@
 # `<base>-preview` environment (its Pages token and `vars.CLOUDFLARE_ACCOUNT_ID`). A PR into any other branch is skipped.
 # Requests: a write+ author's PR events (automatic), `/preview [<mode>] [<full-head-sha>]` by a write+ collaborator
 # (an outside author's head, approved), or a dispatch. Approving a head runs its server code against the dev stack's data.
+# The lifecycle action (`.github/actions/cf-preview`) is `cloud`'s, at the sha `route` resolves and every job checks out
+# (`control/`), so a change to it lands on `cloud` alone (specs/oa-release-workflow.md, "Tooling lives on `cloud`").
 name: PR preview
 on:
   pull_request_target:
@@ -38,6 +40,7 @@ jobs:
       target: ${{ steps.route.outputs.target }}
       base_sha: ${{ steps.route.outputs.base_sha }}
       closed: ${{ steps.route.outputs.closed }}
+      control_sha: ${{ steps.route.outputs.control_sha }}
     steps:
       - id: route
         env:
@@ -54,7 +57,10 @@ jobs:
           if ! jq -e --arg b "$base" 'index($b) != null' <<< "$PREVIEW_BASES" > /dev/null; then
             echo "PR #$PR targets $base, which has no previews"; echo ok=false >> "$GITHUB_OUTPUT"; exit 0
           fi
-          { echo ok=true; echo "target=$base"; echo "base_sha=$base_sha"
+          control=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/cloud" --jq .object.sha)
+          [[ "$control" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::cannot resolve cloud's sha"; exit 1; }
+          echo "Preview tooling: \`cloud\` at \`$control\`" >> "$GITHUB_STEP_SUMMARY"
+          { echo ok=true; echo "target=$base"; echo "base_sha=$base_sha"; echo "control_sha=$control"
             # The event, not the PR's state now: a close is retired even if the PR was reopened since (that reopen publishes after).
             echo "closed=$([ "$GITHUB_EVENT_NAME" = pull_request_target ] && [ "$ACTION" = closed ] && echo true || echo false)"
           } >> "$GITHUB_OUTPUT"
@@ -72,8 +78,13 @@ jobs:
         with:
           ref: ${{ needs.route.outputs.base_sha }}
           persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.route.outputs.control_sha }}
+          path: control
+          persist-credentials: false
       - id: gate
-        uses: Open-Athena/disky/.github/actions/cf-preview@435f099c190f3fee139383e94db5283f7c666130
+        uses: ./control/.github/actions/cf-preview
         with:
           operation: gate
           config: .github/cf-preview.json
@@ -134,8 +145,13 @@ jobs:
         with:
           name: preview-${{ needs.gate.outputs.sha }}
           path: ${{ runner.temp }}/preview-artifact
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.route.outputs.control_sha }}
+          path: control
+          persist-credentials: false
       - id: preview
-        uses: Open-Athena/disky/.github/actions/cf-preview@435f099c190f3fee139383e94db5283f7c666130
+        uses: ./control/.github/actions/cf-preview
         with:
           operation: publish
           config: .github/cf-preview.json
@@ -167,8 +183,13 @@ jobs:
         with:
           ref: ${{ needs.route.outputs.base_sha }}
           persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.route.outputs.control_sha }}
+          path: control
+          persist-credentials: false
       - id: retire
-        uses: Open-Athena/disky/.github/actions/cf-preview@435f099c190f3fee139383e94db5283f7c666130
+        uses: ./control/.github/actions/cf-preview
         with:
           operation: retire
           config: .github/cf-preview.json
