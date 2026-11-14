@@ -306,7 +306,9 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
       if (it.mtime != null && it.mtime > mt) mt = it.mtime
       if (it.last_read != null && it.last_read > ma) ma = it.last_read
     }
-    const folded: TreeNode = { name: `(+${tiny.length})`, bytes, objects }
+    // `folded` (the items it stands in for, an `(other)` among them counting its own) marks it as a fold, which
+    // takes the dust hatch like the server's `(other)`.
+    const folded: TreeNode = { name: `(+${tiny.length})`, bytes, objects, folded: tiny.reduce((s, it) => s + (it.folded ?? 1), 0) }
     const unknown = tiny.reduce((s, it) => s + (it.unknown_owner_bytes ?? 0), 0)
     if (unknown) folded.unknown_owner_bytes = unknown
     if (mt >= 0) folded.mtime = mt
@@ -449,7 +451,8 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
         : bg.includes('gradient')
           ? undefined
           : `color-mix(in oklab, ${bg} ${depth === 1 ? 40 : 62}%, var(--surface))`
-      const dustCount = kid.name === '(other)' ? Math.max(1, kid.folded ?? 1) : undefined
+      // The server's `(other)` and this map's own `(+N)` folds (`mergeSmall`) are aggregates: the dust hatch.
+      const dustCount = kid.name === '(other)' || kid.folded !== undefined ? Math.max(1, kid.folded ?? 1) : undefined
       return { bg, ink, stripes, segments, edge, dustCount, opacity: dim ? 0.22 : undefined }
     },
     [mode, shade, slotOf, userIdx, dateRange, readRange, readThrough, readLogged, readTint, effHl, effBand, lens],

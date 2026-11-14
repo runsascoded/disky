@@ -207,9 +207,10 @@ export function DiffTreemap({
         // encoded by the cell color; exact old/new/Δ lives in the tooltip.
         formatSize={formatSize}
         colorForCell={(n, _path, _depth, ctx) => {
-          // Stroke per cell, from the face it borders (see `contrastEdge`).
+          // Stroke per cell, from the face it borders (see `contrastEdge`); a fold tile (the `(+N)` tail
+          // `mergeSmall` builds) also takes the dust hatch, as the core's own folded tile would.
           const withEdge = (s: { bg: string; ink: string; hatch?: string }, face: string) =>
-            ({ ...s, edge: contrastEdge(face, ctx.fade) ?? undefined })
+            ({ ...s, edge: contrastEdge(face, ctx.fade) ?? undefined, ...(n.status === 'fold' && { dustCount: n.nFolded ?? 1 }) })
           // A branch either renders nested tiles now (`ctx.hasKids`) or
           // holds children the layout was too small to draw — both take the
           // container treatment, not the leaf band. (Lazily-loaded subtrees

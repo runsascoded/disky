@@ -18,7 +18,7 @@ export interface TreeNode {
   /** Non-Standard class → bytes (`"2"` NL, `"3"` CL, `"4"` AR); Standard = `bytes` − their sum. */
   class_bytes?: Record<string, number>
   children?: TreeNode[]
-  /** An `(other)` fold: how many children it stands in for (drives the dust hatch density). */
+  /** An `(other)` fold, or the map's own `(+N)` fold: how many children it stands in for (drives the dust hatch density). */
   folded?: number
   /** The node matches the name filter. */
   matched?: true
