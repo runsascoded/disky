@@ -1,0 +1,4 @@
+{"kind": "start", "label": "two", "mem": {"VmHWM": 64.17823744, "VmRSS": 64.17823744, "RssAnon": 0.0016384, "RssFile": 64.17659904}}
+{"kind": "query", "label": "two", "tenant": "gcs", "id": "root", "tags": ["folder", "root"], "cold_ms": 109.47602300029757, "cold_server_ms": 106.803284, "warm_ms": [], "warm_median_ms": null, "warm_server_median_ms": null, "rows": 720399014, "nodes": 290, "checked": false}
+{"kind": "query", "label": "two", "tenant": "cw-standin", "id": "root", "tags": ["folder", "root"], "cold_ms": 106.49018000003707, "cold_server_ms": 103.986309, "warm_ms": [], "warm_median_ms": null, "warm_server_median_ms": null, "rows": 720399014, "nodes": 290, "checked": false}
+{"kind": "end", "label": "two", "mem": {"VmHWM": 64.180072448, "VmRSS": 64.180072448, "RssAnon": 0.00339968, "RssFile": 64.176672768}, "bad": [["x1800", "root", 400, "no scan 2026-11-12T0702"]]}

@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# Submit the recorded gcs bench as a Batch job (`dt-cloud batch submit -c full-scan-bench`: cost labels from
+# `$DISKY_LABELS`, the region checked against the buckets). Spot, retried on preemption, deleted by Batch's own TTL.
+#   batch/submit -o gs://BUCKET/PREFIX -i INPUT_DIR [-L REGION] [-m MACHINE] [-n]
+# INPUT_DIR holds the VM run's `queries.jsonl` and oracle-checked `answers.jsonl`; they and a `git archive` of this
+# crate go under PREFIX first. `-n`: print the spec and the submit command, upload and submit nothing.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+out= in= region=us-east1 machine=n2-highmem-16 dry=
+store=gs://oa-gcs-usage-dvx/interval-store
+while getopts "i:L:m:no:s:" o; do
+  case $o in
+    i) in=$OPTARG ;; L) region=$OPTARG ;; m) machine=$OPTARG ;; n) dry=1 ;; o) out=${OPTARG%/} ;; s) store=$OPTARG ;;
+    *) exit 2 ;;
+  esac
+done
+[ -n "$out" ] && [ -n "$in" ] || { echo "usage: batch/submit -o gs://BUCKET/PREFIX -i INPUT_DIR [-L REGION] [-m MACHINE] [-n]" >&2; exit 2; }
+sha=$(git rev-parse --short=12 HEAD)
+git diff --quiet HEAD -- . || { echo "batch/submit: uncommitted changes under bench/full-scan" >&2; exit 1; }
+src=$out/src/$sha.tar.gz
+job=full-scan-bench-$(date -u +%Y%m%d-%H%M%S)
+spec=$(python3 - "$out" "$src" "$store" "$machine" <<'PY'
+import json, sys
+out, src, store, machine = sys.argv[1:]
+print(json.dumps({
+    "taskGroups": [{
+        "taskCount": 1,
+        "taskSpec": {
+            "runnables": [{"script": {"text": open("batch/task.sh").read()}}],
+            "environment": {"variables": {"OUT": out, "SRC": src, "STORE": store}},
+            "computeResource": {"cpuMilli": 15000, "memoryMib": 118000},
+            "maxRunDuration": "14400s",
+            "maxRetryCount": 3,
+            "lifecyclePolicies": [{"action": "RETRY_TASK", "actionCondition": {"exitCodes": [50001]}}],
+        },
+    }],
+    "allocationPolicy": {"instances": [{"policy": {
+        "machineType": machine, "provisioningModel": "SPOT", "bootDisk": {"sizeGb": 250, "type": "pd-balanced"}}}]},
+    "logsPolicy": {"destination": "CLOUD_LOGGING"},
+}, indent=1))
+PY
+)
+bucket=${out#gs://}; bucket=${bucket%%/*}
+cmd=(dt-cloud batch submit -c full-scan-bench -L "$region" -b oa-gcs-usage-dvx -b "$bucket" "$job" -)
+if [ -n "$dry" ]; then
+  echo "$spec"
+  echo "would upload: git archive HEAD:bench/full-scan → $src; $in/{queries,answers}.jsonl → $out/inputs/" >&2
+  echo "would run: ${cmd[*]}" >&2
+  exit 0
+fi
+git archive --format=tar.gz HEAD:bench/full-scan | gcloud storage cp - "$src"
+gcloud storage cp "$in/queries.jsonl" "$in/answers.jsonl" "$out/inputs/"
+echo "$spec" | "${cmd[@]}"

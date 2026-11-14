@@ -708,6 +708,7 @@ def test_soft_steps_classification():
         "cf-usage": "side converges",
         "gcp-cost": "side",
         "soft-delete": "side",
+        "vm-pack": "side converges",
     }
 
 
@@ -1813,3 +1814,100 @@ def test_access_r2_checkpoint_is_explicit_and_runs_in_task_scratch(tmp_path, env
         'dt-cloud access r2-sync -d 2026-10-16T1200 -o <tmp>/t/dt-scan/2026-10-16T1200/access-r2/agg.parquet -s r2://logs/state.json -c gs://data/access/r2/closed.parquet -w <tmp>/t/dt-scan/2026-10-16T1200/access-r2/checkpoint -M 3GB -p 4 -v',
     ]
     assert (tmp_path / 'data/access/r2/agg.parquet').read_text() == 'agg as of 2026-10-16T1200'
+
+
+class Notes(Ends):
+    """A fake run that also keeps each phase's note and alerts."""
+
+    def end(self, name, rc=0, warn=False, msg=None, note=None, **kw):
+        self.calls.append(("end", name, rc, warn, msg, note))
+        return 0 if warn else rc
+
+    def alert(self, level, message):
+        self.calls.append(("alert", level, message))
+
+
+def test_vm_pack_builds_beside_the_interval_store(tmp_path, env):
+    """`vm-pack` (listed in `steps`): `dt-cloud vm-pack build` over `options.vm-pack.store`, else the interval store's
+    store, else `R2_ARCHIVE`; skipped (and said so) without a store or an `fsb`; nothing on REPROC."""
+    fsb = {**env, "FSB": "/usr/local/bin/fsb"}
+    opts = {"list": {"import": True}, "static-names": {"profile": "sn.json"}, "digest": {"template": "t", "config": "c.yml"}}
+    w = "<tmp>/t/dt-scan/2026-10-16T1200/vm-pack"
+    runs = []
+    for e, o in ((fsb, {"vm-pack": {"store": "gs://packs", "keep": 3}}), (fsb, {"interval-store": {"store": "gs://iv"}}),
+                 ({**fsb, "R2_ARCHIVE": "r2://arch"}, {})):
+        c = ctx(tmp_path, e, steps=["vm-pack"], options={**opts, **o})
+        c.run = Notes()
+        S.vm_pack(c, None)
+        runs.append((c.sh_impl.calls, c.run.calls))
+    done = [("begin", "vm-pack"), ("end", "vm-pack", 0, False, None, None)]
+    assert runs == [
+        ([f"dt-cloud vm-pack build -o gs://packs -w {w} -k 3"], done),
+        ([f"dt-cloud vm-pack build -o gs://iv -w {w} -k 2"], done),
+        ([f"dt-cloud vm-pack build -o r2://arch -w {w} -k 2"], done),
+    ]
+    skips = []
+    for e in (fsb, {**env, "PATH": str(tmp_path / "empty"), "R2_ARCHIVE": "r2://arch"}):
+        c = ctx(tmp_path, e, steps=["vm-pack"], options=opts)
+        c.run = Notes()
+        S.vm_pack(c, None)
+        skips.append((c.sh_impl.calls, c.run.calls))
+    no_store = "skipped (unconfigured): no store (options.vm-pack.store, options.interval-store.store or R2_ARCHIVE)"
+    no_fsb = "skipped (unconfigured): no fsb in this image ($FSB or PATH)"
+    assert skips == [
+        ([], [("begin", "vm-pack"), ("end", "vm-pack", 0, False, None, no_store), ("alert", "warn", f"vm-pack {no_store}")]),
+        ([], [("begin", "vm-pack"), ("end", "vm-pack", 0, False, None, no_fsb), ("alert", "warn", f"vm-pack {no_fsb}")]),
+    ]
+    c = ctx(tmp_path, {**fsb, "REPROC": "1", "R2_ARCHIVE": "r2://arch"}, steps=["vm-pack"], options=opts)
+    c.run = Notes()
+    S.vm_pack(c, None)
+    assert (c.sh_impl.calls, c.run.calls) == ([], [])
+
+
+def test_vm_pack_submits_its_own_batch_job(tmp_path, env):
+    """`options.vm-pack.batch`: `dt-cloud vm-pack submit` (a Batch job of its own, not waited on) instead of building in
+    this task, its keys as `submit`'s flags. The job's image is this task's (`$JOB_IMAGE`) unless named, so `fsb` must be
+    here unless `batch.image` names another; no image at all is a skip."""
+    opts = {"list": {"import": True}, "static-names": {"profile": "sn.json"}, "digest": {"template": "t", "config": "c.yml"},
+            "interval-store": {"store": "gs://iv"}}
+    img = {**env, "JOB_IMAGE": "r/img@sha256:ab", "FSB": "/usr/local/bin/fsb"}
+    nofsb = {**env, "JOB_IMAGE": "r/img@sha256:ab", "PATH": str(tmp_path / "empty")}
+    runs = []
+    for e, batch in ((img, {}),
+                     (img, {"machine": "n2-highmem-32", "spot": False, "region": "us-east1", "ssd_gb": 750, "cross_region": True,
+                            "env": {"B": "2", "A": "1"}, "secrets": {"AWS_SECRET_ACCESS_KEY": "cw-key"}}),
+                     (nofsb, {"image": "r/other:tag", "service_account": "sa@p.iam", "project": "p", "memory_mib": 60000}),
+                     (nofsb, {}),
+                     (env, {})):
+        c = ctx(tmp_path, e, steps=["vm-pack"], options={**opts, "vm-pack": {"batch": batch, "keep": 3}})
+        c.run = Notes()
+        S.vm_pack(c, None)
+        runs.append((c.sh_impl.calls, c.run.calls[-1]))
+    done = ("end", "vm-pack", 0, False, None, None)
+    sub = "dt-cloud vm-pack submit -o gs://iv -k 3"
+    assert runs == [
+        ([sub], done),
+        ([f"{sub} -L us-east1 -m n2-highmem-32 -d 750 -S -X -e A=1 -e B=2 -s AWS_SECRET_ACCESS_KEY=cw-key"], done),
+        ([f"{sub} -i r/other:tag -a sa@p.iam -P p -M 60000"], done),
+        ([], ("alert", "warn", "vm-pack skipped (unconfigured): no fsb in this image ($FSB or PATH)")),
+        ([], ("alert", "warn", "vm-pack skipped (unconfigured): no image for the vm-pack job (options.vm-pack.batch.image or JOB_IMAGE)")),
+    ]
+
+
+def test_vm_pack_batch_profile_check():
+    """`options.vm-pack.batch`'s keys and types are checked when the profile is read."""
+    from dt_cloud.scan_profile import ProfileError
+
+    def problems(batch) -> str:
+        d = hf_profile()
+        with pytest.raises(ProfileError) as e:
+            parse({"deployment": "fix", "executor": {"kind": "local"}, "work": "/w", "data": "/d",
+                   **d, "steps": ["vm-pack"], "options": {**d["options"], "vm-pack": {"batch": batch}}})
+        return str(e.value)
+    assert [problems(b) for b in ({"machin": "x"}, {"spot": "no", "ssd_gb": True, "env": {"A": 1}}, ["x"])] == [
+        "profile: options.vm-pack.batch.machin: unknown key (known: image, service_account, region, project, machine, spot, "
+        "ssd_gb, memory_mib, env, secrets, cross_region)",
+        "profile:\n  options.vm-pack.batch.spot: true or false\n  options.vm-pack.batch.ssd_gb: an integer\n"
+        "  options.vm-pack.batch.env: a mapping of strings",
+        "profile: options.vm-pack.batch: a mapping",
+    ]

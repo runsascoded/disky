@@ -1,9 +1,10 @@
 import { useLayoutEffect, useMemo, useRef } from 'react'
-import { CONTAINER_BG, parseColor } from './colors'
+import { CONTAINER_BG } from './colors'
 import { candidates, type CellText, fitCandidate, inlineRoom } from './cellText'
-import { colorResolver } from './cssColor'
-import { drawDust } from './DustHatch'
-import { bandRects, drawStripes, dustInk } from './cellPaint'
+import { browserRgba, colorResolver } from './cssColor'
+import { drawDust, drawDustFrame } from './DustHatch'
+import { bandRects, drawStripes } from './cellPaint'
+import { type DustNotch, dustInk } from './dust'
 import { resolveCellStyle, resolveRing, type StyleOpts } from './cellStyle'
 import { flattenPlaced, hitTest, type FoldedNode, type PlacedCell } from './layout'
 import { squarify } from './squarify'
@@ -113,29 +114,8 @@ function readLabelSizes(el: Element): void {
   lblFsSm = px(cs.getPropertyValue('--dt-treemap-lbl-fs-sm'), 11.5)
 }
 
-/** CSS solid colors are resolved once to sRGB, including browser-supported color mixes. */
-const browserColors = new Map<string, [number, number, number, number]>()
-let colorProbe: CanvasRenderingContext2D | null = null
-
 function rgbaAt(c: string | undefined, alpha: number): string | null {
-  const resolved = resolveVar(c ?? '')
-  let p = parseColor(resolved) ?? browserColors.get(resolved)
-  // The browser resolves CSS Color 4 (notably class-shading color-mix) to sRGB once per distinct color.
-  if (!p && !resolved.includes('var(') && typeof CSS !== 'undefined' && CSS.supports('color', resolved)) {
-    if (!colorProbe) {
-      const canvas = document.createElement('canvas')
-      canvas.width = canvas.height = 1
-      colorProbe = canvas.getContext('2d', { willReadFrequently: true })
-    }
-    if (colorProbe) {
-      colorProbe.clearRect(0, 0, 1, 1)
-      colorProbe.fillStyle = resolved
-      colorProbe.fillRect(0, 0, 1, 1)
-      const [r, g, b, a] = colorProbe.getImageData(0, 0, 1, 1).data
-      p = [r, g, b, a / 255]
-      browserColors.set(resolved, p)
-    }
-  }
+  const p = browserRgba(resolveVar(c ?? ''))
   if (!p) return null
   return `rgba(${p[0]}, ${p[1]}, ${p[2]}, ${p[3] * alpha})`
 }
@@ -484,26 +464,6 @@ function paintCell<T>(ctx: CanvasRenderingContext2D, cell: PlacedCell<T>, o: Pai
     }
   }
 
-  // Dust tail: dashed frame + the tightening cross-hatch.
-  if (folded && dustTexture && Math.min(w, h) >= 6) {
-    if (Math.min(w, h) >= 8) {
-      ctx.strokeStyle = 'rgba(150, 150, 165, 0.55)'
-      ctx.lineWidth = 1
-      ctx.setLineDash([2, 2])
-      ctx.strokeRect(bx + 0.5, by + 0.5, bw - 1, bh - 1)
-      ctx.setLineDash([])
-    }
-    drawDust(ctx, bx, by, bw, bh, (cell.node as FoldedNode<T>).count)
-  }
-
-  if (!folded && dustTexture && style.dustCount !== undefined && Math.min(w, h) >= 6) {
-    const gridStyle = { ...style, bg: resolveVar(style.bg ?? ''), bands: style.bands?.map(b => ({ ...b, color: resolveVar(b.color) })), ink: resolveVar(style.ink ?? '') }
-    ctx.save()
-    ctx.globalAlpha = alpha
-    drawDust(ctx, bx, by, bw, bh, style.dustCount, dustInk(gridStyle, fade))
-    ctx.restore()
-  }
-
   // Makeup stripes: a leaf cell with a mixed composition renders proportional
   // inset slices along its longer axis instead of one blob — the `bg` frame
   // showing through the inset + the outer border reads as "one blob split by
@@ -529,6 +489,24 @@ function paintCell<T>(ctx: CanvasRenderingContext2D, cell: PlacedCell<T>, o: Pai
         }
         at += len + gap
       }
+    }
+  }
+
+  // Dust: the folded tail's dashed frame, then the cross-hatch (a folded tile, or a consumer's aggregate with
+  // `dustCount`). Drawn over the fill, bands and makeup segments, outside the depth fade (only a consumer's
+  // `opacity` dims it), in black or white against the ground actually painted, so it reads at any depth. Painted
+  // once the label is laid out (below), so its rules can step around the label's text (`notch`).
+  const dustCount = folded ? (cell.node as FoldedNode<T>).count : style.dustCount
+  let paintDust: ((notch: DustNotch | null) => void) | null = null
+  if (dustCount !== undefined && dustTexture && Math.min(w, h) >= 6 && bw > 0 && bh > 0) {
+    const ground = { bg: resolveVar(style.bg ?? ''), bands: style.bands?.map(b => ({ ...b, color: resolveVar(b.color) })), segments: segs && !hasKids && !dust && Math.min(w, h) >= 18 ? segs.map(s => ({ ...s, color: resolveVar(s.color) })) : undefined }
+    const ink = dustInk(ground, alpha, CONTAINER_BG, browserRgba)
+    paintDust = notch => {
+      ctx.save()
+      ctx.globalAlpha = style.opacity ?? 1
+      if (folded && Math.min(w, h) >= 8) drawDustFrame(ctx, bx, by, bw, bh, ink)
+      drawDust(ctx, bx, by, bw, bh, dustCount, ink, 3, 1.32, notch)
+      ctx.restore()
     }
   }
 
@@ -568,26 +546,38 @@ function paintCell<T>(ctx: CanvasRenderingContext2D, cell: PlacedCell<T>, o: Pai
     const szW = inlineSize ? ctx.measureText(szText).width : 0
     if (inlineSize) nameMax -= szW + gap
     const name = fit(ctx, label, Math.max(0, nameMax))
+    const nameW = ctx.measureText(name).width
+    // `left`: right after the (possibly ellipsized) name; `right`: flush
+    // with the cell's far edge — the DOM's `margin-left: auto`.
+    const sx = sizeAlign === 'right'
+      ? x + cw - pad - szW
+      : x + pad + nameW + gap
+    // Second-line size for a tall leaf (name owns the first line).
+    const second = !hasKids && h > 34
+    ctx.font = `${lblFsSm}px system-ui, -apple-system, sans-serif`
+    const line2 = second ? fit(ctx, fitCandidate(cands, cw - 2 * pad, t => ctx.measureText(t).width), cw - 2 * pad) : ''
+    const line2W = line2 ? ctx.measureText(line2).width : 0
+    // The hatch's notch: the text's extent (+2px), from the paint box's corner.
+    const right = Math.max(x + pad + nameW, inlineSize ? sx + szW : 0, line2 ? x + pad + line2W : 0)
+    const bottom = line2 ? y + 2 + fs + 3 + lblFsSm : y + 2 + fs
+    paintDust?.({ w: right - bx + 2, h: bottom - by + 2 })
+    paintDust = null
+    ctx.font = `${fs}px system-ui, -apple-system, sans-serif`
     ctx.fillText(name, x + pad, y + 2)
     if (inlineSize) {
-      // `left`: right after the (possibly ellipsized) name; `right`: flush
-      // with the cell's far edge — the DOM's `margin-left: auto`.
-      const sx = sizeAlign === 'right'
-        ? x + cw - pad - szW
-        : x + pad + ctx.measureText(name).width + gap
       ctx.globalAlpha = 0.75
       ctx.fillText(szText, sx, y + 2)
       ctx.globalAlpha = 1
     }
-    // Second-line size for a tall leaf (name owns the first line).
-    if (!hasKids && h > 34) {
+    if (line2) {
       ctx.globalAlpha = 0.75
       ctx.font = `${lblFsSm}px system-ui, -apple-system, sans-serif`
-      ctx.fillText(fit(ctx, fitCandidate(cands, cw - 2 * pad, t => ctx.measureText(t).width), cw - 2 * pad), x + pad, y + 2 + fs + 3)
+      ctx.fillText(line2, x + pad, y + 2 + fs + 3)
       ctx.globalAlpha = 1
     }
     ctx.restore()
   }
+  paintDust?.(null)
 
   // Consumer emphasis ring (brush/selection): the canvas counterpart of the DOM
   // cell's `ring` box-shadow. Drawn last so it frames over fill + label, in

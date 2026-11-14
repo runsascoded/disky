@@ -23,11 +23,16 @@ def ci(branch='hf'):
             'event': 'push', 'conclusion': 'success', 'path': '.github/workflows/ci.yml'}
 
 
-def setup_api(monkeypatch, *, tip=SHA, proof=None, states=None, runs=None, comparison='ahead'):
+def setup_api(monkeypatch, *, tip=SHA, proof=None, states=None, runs=None, comparison='ahead', tip_recipes=None):
+    """`tip_recipes`: the `.sql` recipes at the branch's tip; None: no `site/migrations` there."""
     calls = []
 
     def api(path, body=None):
         calls.append((path, body))
+        if path == f'repos/{REPO}/contents/site/migrations?ref={tip}':
+            return [{'name': 'README.md', 'type': 'file'}, *({'name': n, 'type': 'file'} for n in tip_recipes)]
+        if path == f'repos/{REPO}/contents/site?ref={tip}':
+            return [{'name': 'src', 'type': 'dir'}, *([{'name': 'migrations', 'type': 'dir'}] if tip_recipes is not None else [])]
         if '/git/ref/heads/' in path:
             return {'object': {'sha': tip}}
         if '/compare/' in path:
@@ -53,7 +58,7 @@ def test_exact_dev_plan(monkeypatch, branch, project, pages):
     assert release.plan_release({'workflow_run': ci(branch)}, 'workflow_run', REPO) == {
         'protocol': 'disky-pages-v1', 'repository': REPO, 'source_branch': branch, 'sha': SHA,
         'mode': 'dev', 'environment': f'{branch}-dev', 'project': project, 'pages_branch': pages,
-        'host': f'dev.{branch}.oa.dev', 'ci_run': 42, 'dev_deployment': None,
+        'host': f'dev.{branch}.oa.dev', 'ci_run': 42, 'dev_deployment': None, 'tip_recipes': None,
     }
     assert calls == [(f'repos/{REPO}/git/ref/heads/{branch}', None)]
 
@@ -92,12 +97,17 @@ def promote():
 
 
 def test_production_uses_explicit_dev_sha_even_after_branch_advances(monkeypatch):
-    setup_api(monkeypatch, proof=proof(), states=['inactive', 'success'])
+    setup_api(monkeypatch, tip='b' * 40, proof=proof(), states=['inactive', 'success'], tip_recipes=['c-new.sql'])
     assert promote() == {
         'protocol': 'disky-pages-v1', 'repository': REPO, 'source_branch': 'hf', 'sha': SHA,
         'mode': 'prod', 'environment': 'hf-prod', 'project': 'oa-hf-usage', 'pages_branch': 'main',
-        'host': 'hf.oa.dev', 'ci_run': 42, 'dev_deployment': '91',
+        'host': 'hf.oa.dev', 'ci_run': 42, 'dev_deployment': '91', 'tip_recipes': ['c-new.sql'],
     }
+
+
+def test_production_plan_without_recipes_at_the_tip(monkeypatch):
+    setup_api(monkeypatch, proof=proof())
+    assert promote()['tip_recipes'] == []
 
 
 @pytest.mark.parametrize(('change', 'states'), [
@@ -170,6 +180,37 @@ def test_seal_holds_a_release_while_a_d1_recipe_is_pending(tmp_path, monkeypatch
         "Error: Pending D1 recipes: a-index.sql, b-tables.sql. Apply each to this deployment's databases (owner, with Ryan's go), `git rm` it, then release\n",
         False,
     )
+
+
+PENDING_HELD = "Pending D1 recipes: {}. Apply each to this deployment's databases (owner, with Ryan's go), `git rm` it, then release"
+
+
+@pytest.mark.parametrize(('tip_recipes', 'exit_code', 'output'), [
+    # rolling back past both recipes' `git rm`: neither holds
+    (None, 0, "Not held (gone at hf's tip: applied or dropped): a-index.sql, b-tables.sql\n"),
+    # one still pending at the tip holds the rollback; the other was applied since
+    (['b-tables.sql', 'c-new.sql'], 1,
+     "Not held (gone at hf's tip: applied or dropped): a-index.sql\nError: " + PENDING_HELD.format('b-tables.sql') + '\n'),
+    (['a-index.sql', 'b-tables.sql'], 1, 'Error: ' + PENDING_HELD.format('a-index.sql, b-tables.sql') + '\n'),
+])
+def test_production_seal_holds_only_recipes_still_at_the_tip(tmp_path, monkeypatch, tip_recipes, exit_code, output):
+    monkeypatch.setattr(release, 'validate_source', lambda source, sha: None)
+    source = tmp_path / 'source'
+    site = source / 'site'
+    (site / 'dist/assets').mkdir(parents=True)
+    (site / 'dist/_worker.js').mkdir()
+    (site / 'dist/_worker.js/index.js').write_text('export default {};\n')
+    (site / 'dist/index.html').write_text('<script src="/assets/app.js"></script>\n')
+    (site / 'dist/assets/app.js').write_text('const answer=42;\n')
+    (site / 'wrangler.toml').write_text('name="oa-hf-usage"\n[vars]\nPROD_HOST="hf.oa.dev"\n')
+    (site / 'migrations').mkdir()
+    (site / 'migrations/b-tables.sql').write_text('ALTER TABLE t ADD COLUMN c TEXT;\n')
+    (site / 'migrations/a-index.sql').write_text('CREATE INDEX i ON t (c);\n')
+    setup_api(monkeypatch, tip='b' * 40, proof=proof(), tip_recipes=tip_recipes)
+    plan_path, seal_path = tmp_path / 'plan.json', tmp_path / 'seal.json'
+    plan_path.write_text(dumps(promote()))
+    result = CliRunner().invoke(release.main, ['seal', '-p', str(plan_path), '-o', str(seal_path), str(source)])
+    assert (result.exit_code, result.output, seal_path.exists()) == (exit_code, output, exit_code == 0)
 
 
 def test_credential_inventory_never_returns_values_or_folds_source_up_into_next_line(tmp_path):

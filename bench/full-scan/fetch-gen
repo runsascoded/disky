@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# Mirror what `fsb` loads of an interval-store generation (`scans.json`, the newest manifest, the base's and each listed
+# run's served `path` sort, + `-s` the `slices` sorts) from a store URL to a local dir. Only those keys are copied.
+#   fetch-gen [-s] STORE_URL DEST     e.g. fetch-gen gs://oa-gcs-usage-dvx/interval-store ~/gcs
+set -euo pipefail
+slices=
+[ "${1:-}" = -s ] && { slices=1; shift; }
+store=${1%/} dest=$2
+gen=$(gcloud storage cat "$store/CURRENT.json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["gen"])')
+src=$store/$gen out=$dest/$gen
+mkdir -p "$out/served" "$out/manifests"
+gcloud storage cp "$src/scans.json" "$out/"
+m=$(gcloud storage ls "$src/manifests/" | sed 's#.*/##' | grep -E '^[0-9]{4}-[0-9]{2}-[0-9]{2}(T[0-9]{4})?(\.m[0-9]{3})?\.json$' | LC_ALL=C sort | tail -1)
+[ -n "$m" ] && gcloud storage cp "$src/manifests/$m" "$out/manifests/"
+sorts=(path)
+[ -n "$slices" ] && sorts+=(slices)
+for s in "${sorts[@]}"; do
+  gcloud storage cp "$src/served/$s.parquet" "$out/served/"
+done
+if [ -n "$m" ]; then
+  for key in $(python3 -c 'import json,sys; print("\n".join(r["key"] for r in json.load(open(sys.argv[1]))["runs"]))' "$out/manifests/$m"); do
+    mkdir -p "$out/$key/served"
+    for s in "${sorts[@]}"; do
+      gcloud storage cp "$src/$key/served/$s.parquet" "$out/$key/served/"
+    done
+  done
+fi
+echo "$out"

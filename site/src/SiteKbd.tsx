@@ -61,9 +61,10 @@ export function SiteKbd({ extra = [], placeholder }: {
   // Site-wide pages, in nav order — the omnibar's "Pages" group on every
   // route. The map is the subtree's store's (`/meta` on a secondary store);
   // the other configured stores follow as switches (a single-store build has
-  // none).
+  // none). The site's own pages (users, staged, dups) are the primary store's
+  // and listed from every page, a secondary store's map included.
   const store = useStore()
-  placeholder ??= store.owners ? 'Pages, users, actions…' : 'Pages and actions…'
+  placeholder ??= DEFAULT_STORE.owners ? 'Pages, users, actions…' : 'Pages and actions…'
   const canShare = useCanStage()
   const canAssign = useCanAssign()
   const ident = useIdent()
@@ -73,9 +74,9 @@ export function SiteKbd({ extra = [], placeholder }: {
   // The ☰ menu's pages, gated as it gates them.
   const PAGES: [string, string][] = [
     [store.path, 'Map (home)'],
-    ...(canAssign && store.owners ? [['/users', 'Users — storage by owner'], ['/assignments', 'Assignments']] as [string, string][] : []),
-    ...(store.staging ? [['/staged', 'Staged deletions']] as [string, string][] : []),
-    ...(DUPS && store === DEFAULT_STORE ? [['/dups', 'Duplicates — copies across buckets']] as [string, string][] : []),
+    ...(canAssign && DEFAULT_STORE.owners ? [['/users', 'Users — storage by owner'], ['/assignments', 'Assignments']] as [string, string][] : []),
+    ...(DEFAULT_STORE.staging ? [['/staged', 'Staged deletions']] as [string, string][] : []),
+    ...(DUPS ? [['/dups', 'Duplicates — copies across buckets']] as [string, string][] : []),
     ['/scans', 'Scans — job runs'],
     ['/health', 'Health — the stores\' state'],
     ...(isAdmin ? [['/admin', 'Admin'], ['/admin/db', 'Database'], ['/admin/sessions', 'Session logs'], ['/admin/latency', 'Latency — request times from the session log'], ['/admin/activity', 'Activity — who did what'], ['/admin/usage', 'Cloudflare usage — cost and callers'], ['/admin/cost/gcp', 'GCP cost — storage and compute']] as [string, string][] : []),

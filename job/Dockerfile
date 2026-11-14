@@ -9,9 +9,13 @@
 #   UV_SYNC_ARGS   extra `uv sync` args, e.g. `--extra s3 --extra overtime`
 #   ENTRYPOINT     the command the container runs, its args appended (default `dt-cloud`), e.g.
 #                  `dt-cloud scan-run supervise -- bash job/run.sh`
+#   FSB            `build`: compile VM mode's pack writer `fsb` (`bench/full-scan`, `cargo build --release`) into
+#                  `/usr/local/bin/fsb`, for the `vm-pack` scan step and its Batch job (specs/vm-mode.md §6; needs
+#                  `bench/full-scan/Cargo.toml`, `Cargo.lock` and `src` in the context); `none` (default): no `fsb`
 #
-# BuildKit (`DOCKER_BUILDKIT=1`, which the build sets) builds only the `site-$SITE` stage the image uses.
+# BuildKit (`DOCKER_BUILDKIT=1`, which the build sets) builds only the `site-$SITE` and `fsb-$FSB` stages the image uses.
 ARG SITE=none
+ARG FSB=none
 
 # Node from the node:22-slim stage (the same Debian base as python:3.12-slim): Debian's apt nodejs is v20, below
 # wrangler's floor (≥22 as of wrangler 4.116).
@@ -32,6 +36,21 @@ RUN corepack enable && pnpm install --frozen-lockfile
 RUN cd site && pnpm build
 
 FROM site-${SITE} AS site
+
+# `fsb`: one static-ish release binary (glibc only; zstd/lz4/snappy compiled in), built on an older Debian than the
+# final image's so its glibc floor is below the image's. Debug info off (the crate's profile keeps line tables for the
+# bench); only the `fsb` bin (the `vmd` server runs elsewhere).
+FROM node AS fsb-none
+RUN mkdir -p /out
+
+FROM rust:1.91-slim-bookworm AS fsb-build
+WORKDIR /full-scan
+COPY bench/full-scan/Cargo.toml bench/full-scan/Cargo.lock ./
+COPY bench/full-scan/src ./src
+RUN CARGO_PROFILE_RELEASE_DEBUG=0 cargo build --release --locked --bin fsb \
+    && mkdir -p /out && cp target/release/fsb /out/
+
+FROM fsb-${FSB} AS fsb
 
 FROM python:3.12-slim
 COPY --from=node /usr/local/bin/node /usr/local/bin/node
@@ -63,6 +82,8 @@ COPY cloud/src ./cloud/src
 ARG UV_SYNC_ARGS=""
 RUN uv sync --frozen --no-dev --no-editable --package dt-cloud $UV_SYNC_ARGS
 COPY --from=site /repo/site/dist ./dist
+# `FSB=build`: `/usr/local/bin/fsb`; `none`: nothing (an empty dir's contents)
+COPY --from=fsb /out/ /usr/local/bin/
 COPY job ./job
 # The deployment's Pages config: the job reads its D1, its index generations and the `cf-usage` step's resources from
 # it, so the job and the site name the same ones.
