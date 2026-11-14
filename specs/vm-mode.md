@@ -244,11 +244,12 @@ For all nine interval-store fixture generations, the exhaustive query mix with c
 
 ## 10. Open questions (Ryan's)
 
-1. **Attenuation.** Today's Worker halves the share per level below the folder's children (`atten = 2`). Decision 1 names a share of the total only. `vmd` supports both (`atten_log2` 0 or 1); recommendation: keep `atten_log2 = 1`, since without it a phone's 2^-15 draws nodes up to 15 levels deep and a pass's window walks most directories (§ 11 measures both).
+1. **Attenuation.** Today's Worker halves the share per level below the folder's children (`atten = 2`). Decision 1 names a share of the total only. `vmd` supports both (`atten_log2` 0 or 1); recommendation: keep `atten_log2 = 1`. Without it nothing bounds the window but a cap, and the pure share draws more, smaller cells for the same screen: measured at the gcs root, a phone's rule with halving (16 levels) 0.21 s and 1,519 cells, the pure share capped at 8 levels 0.41 s and 12,079 cells (§ 11.3).
 2. **`(other)` visibility.** The Worker hides an `(other)` under its threshold; `vmd` always returns the exact rest (Ryan: "exact `(other)` per parent"). Recommendation: the rule draws it whenever nonzero; the renderer may decline to label a tiny one.
 3. **A read grant for real-data Worker parity.** `worker_parity.py` needs to call `gcs.oa.dev` from the bench VM. Options: let it read the scan job's grant (`gcs-snapshot-site-token`, read-only) from Secret Manager there, or mint a personal agent token (`/api/token`) for it. Recommendation: a dedicated read grant for VM-mode checks (it becomes the shadow-parity job's later).
 4. **The pack writer's memory.** `fsb pack-slim` peaks at 117 GB on gcs (the loader holds every version row once, as the bench's did). gcs's `post` machine (e2-highmem-16, 128 GB) fits it with ~10 GB to spare; cw's would need the same. Recommendation: run `vm-pack` as its own Batch job on an n2-highmem-16 (spot, in the store's region, `component=vm-pack`) rather than inside `post`, until the loader streams levels to disk.
-5. **`fsb` in the job image.** The step needs `fsb`; `job/Dockerfile` would gain a Rust build stage (`cargo build --release --bin fsb` over `bench/full-scan`, ~1 min, +~10 MB). Not done here: it changes every deployment's image build. Recommendation: a build arg that adds it, on for gcs and cw first.
+5. **cw's pack on a GCP box.** cw's store is on CoreWeave object storage; a shared VM in GCP would pull a ~30 GB pack per cw scan across clouds (egress on CoreWeave's side, ingress free), or cw's `vm-pack` writes it there and the VM pulls it. Alternatives: a second, CoreWeave-side `vmd` for cw (same binary, its own tenant config), or a shared box placed where the larger daily transfer is cheaper. Not decided here; the multi-tenant design works either way.
+6. **`fsb` in the job image.** The step needs `fsb`; `job/Dockerfile` would gain a Rust build stage (`cargo build --release --bin fsb` over `bench/full-scan`, ~1 min, +~10 MB). Not done here: it changes every deployment's image build. Recommendation: a build arg that adds it, on for gcs and cw first.
 
 ## 11. As built and measured
 
@@ -257,7 +258,7 @@ For all nine interval-store fixture generations, the exhaustive query mix with c
 The engine and the server are `bench/full-scan/` (the crate graduates to its own directory when the site is wired):
 - `src/cell.rs` the cell rule; `src/shard.rs` / `src/merge.rs` the two layers; `src/slim_scan.rs` the pass (`shard_pass`, `run_sharded`); `src/slim.rs` the slim index (+ `slice`: physical shards; `dever`: § 11.4); `src/serve.rs` + `src/bin/vmd.rs` the server.
 - `fsb pack-slim`, `fsb shard`, `fsb plan -c` (the exhaustive mix plus cell-rule twins).
-- `check-vmd` (+ `oracle/vmd_check.py`, `oracle/worker_fixture_parity.py`), `run-vmd` + `vmd_bench.py` + `vmd_summary.py` (the measurements), `vmd_client.py` (the signed client), `worker_parity.py` (§ 11.3).
+- `check-vmd` (+ `oracle/vmd_check.py`), `run-vmd` + `vmd_bench.py` + `vmd_summary.py` (the measurements), `vmd_client.py` (the signed client), `worker_parity.py` (§ 11.3).
 - `cloud/src/dt_cloud/vm_pack.py` (`dt-cloud vm-pack build|current`), the `vm-pack` step (`scan_steps.py`), tests `cloud/tests/test_vm_pack.py` + `test_scan_steps.py`.
 - `site/functions/_lib/vmAdapter.ts` (+ `.test.ts`).
 
@@ -292,7 +293,7 @@ The engine and the server are `bench/full-scan/` (the crate graduates to its own
 
 **gcs's object-sum mix, both large tenants loaded**, one query at a time (`two-objects-v2`: the bench's 67 answerable queries, `min_ppm` 500, 3 levels; warm median of 5 (cold) ms; every answer equal to the bench's oracle-checked one):
 
-| Query | gcs | stand-in | bench, in-process (2026-11-13, slim, 16 vCPU) | Rows summed | Nodes |
+| Query | gcs | stand-in | bench, in-process (2026-11-13, slim, 16 vCPU, on the NVMe twin) | Rows summed | Nodes |
 |---|---:|---:|---:|---:|---:|
 | `root` | 91.9 (95.8) | 93.6 (106) | 107 | 720,399,014 | 290 |
 | `root-depth6` | 128 (129) | 135 (133) | 404 | 720,399,014 | 939 |
