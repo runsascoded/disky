@@ -1,6 +1,6 @@
 # VM mode, phase 1: an exact in-memory query server beside the Worker
 
-Status: phase 1 built, tested and measured on `w/vm-mode`, 2026-11-14 (§ 11); not wired to any site. Ryan's go: "#28: yes go" (2026-11-13), including a standing VM (one shared n2-highmem-16, ~$230–770/month, 24/7 for a few months, then re-evaluated). Builds on [full-scan-serving-bench.md] (the engine and its measurements) and [serverless-tiers.md] §5 (the hand-off contract), §6 (phasing) and §7 (Ryan's decisions), which bind this work. Nothing here changes a deployment: no live site wiring, no serving VM, no D1, secret or Pulumi apply.
+Status: phase 1 built, tested and measured on `w/vm-mode`, 2026-11-14 (§ 11); Ryan's decisions of 2026-11-14 on § 10 items 1, 2, 4 and 6 implemented (the cell rule's default, `(other)`, the writer's own Batch job, `fsb` behind a build arg); not wired to any site, and no deployment's profile or image config turns the step on yet. Ryan's go: "#28: yes go" (2026-11-13), including a standing VM (one shared n2-highmem-16, ~$230–770/month, 24/7 for a few months, then re-evaluated). Builds on [full-scan-serving-bench.md] (the engine and its measurements) and [serverless-tiers.md] §5 (the hand-off contract), §6 (phasing) and §7 (Ryan's decisions), which bind this work. Nothing here changes a deployment: no live site wiring, no serving VM, no D1, secret or Pulumi apply.
 
 ## 0. Summary
 
@@ -239,6 +239,8 @@ options:
 
 (`context` only when the config narrows it; the default `.` holds them.) The bookworm build stage keeps the binary's glibc floor at 2.36, below the final `python:3.12-slim` image's.
 
+Checked on the bench VM (2026-11-14, Docker 29 + BuildKit, this branch's tree with a placeholder `site/wrangler.toml`): `FSB=build` and the default both build; the default image has no `/usr/local/bin/fsb`, the `FSB=build` one a 14.8 MB `fsb` (glibc, libm, libgcc only; the image's content +5 MB) that writes fixture `g1`'s pack in the image; there, the job's own command (`dt-cloud vm-pack build -o <store>`) published the pack and the pointer, a second run and `vm-pack submit -n` were no-ops (`skipped`), and `submit -n` on the unpublished store gave the id `vm-pack-demo-g1-base` with the expected labels. The crate builds on Rust 1.91 (`--locked`, 50 s on 16 vCPUs).
+
 ## 7. The Worker side (adapter only)
 
 ### 7.1 `site/functions/_lib/vmAdapter.ts`
@@ -301,6 +303,7 @@ The engine and the server are `bench/full-scan/` (the crate graduates to its own
 ### 11.2 Parity
 
 - **Fixtures, through HTTP** (`check-vmd`, the nine interval-store generations): every query of `fsb plan -c` (the exhaustive mix and its cell-rule twins, legacy `min_ppm` included; directory-total views excluded, regexes refused with `422` as the language requires: 864 of them) asked of four tenants serving the same store: one pack, 4 logical shards, 3 and 7 physical shard packs. **14,976 answers, every tenant's equal, and every one equal to the DuckDB oracle's.** Every 5th (2,999) was also answered by the 7 physical shards one by one (`/v1/shard`) and merged by `/v1/merge`, in one round (`floor: local`) and in two (`totals`, then `{total}`): equal to the in-process answer each time.
+- **After the attenuation default** (§ 10 item 1: an absent `atten_log2` is 1 in `vmd` and the oracle), `check-vmd` again: 14,976 answers, every tenant's equal and every one equal to the oracle's (`fsb plan -c` names `atten_log2` on every cell-rule query, so the mix itself is unchanged); `cargo test` 18 / 18 with the new default's test.
 - **The refactored pass** (`check-slim`: the slim pack's answers against the full index's, at 1 and 4 threads and with 1-row chunks): 0 different on every fixture, with the pruning bound and the fast object path on.
 - **gcs, through HTTP:** the bench's 69 object-sum queries (67 answerable; its two regexes refused) on the gcs pack and on its stand-in, against the bench's oracle-checked answers (the bench's final-code rerun, `results/2026-11-12.jsonl`'s queries; the pack holds 138 scans, those answers' scans among them): **134 / 134 equal**; at 8 logical shards 67 / 67; with both tenants queried at once 134 / 134. The synthetic x1800 tenant's 69 answerable queries: equal to its oracle-checked answers.
 - **Pruned against walked:** the cell-rule mix on gcs with the `dever` bound and without (`FSB_NO_PRUNE`): 51 / 51 equal; the deep-window searches against the first build too: 12 / 12.
