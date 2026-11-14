@@ -80,12 +80,24 @@ function hsl(h: number, s: number, l: number): [number, number, number] {
  *  left three columns from the next two, on a light ground. `px` square, a PNG. */
 export function identiconPng(seed: Uint8Array, px = 120): Uint8Array {
   const fg = hsl(((seed[0] << 8) | seed[1]) % 360, 0.6, 0.48)
-  const bg: [number, number, number] = [240, 240, 240]
   const bits = (seed[2] << 8) | seed[3]
-  const on = (col: number, row: number): boolean => {
+  return gridPng((col, row) => {
     const c = col < 3 ? col : 4 - col
     return ((bits >> (c * 5 + row)) & 1) === 1
-  }
+  }, fg, px)
+}
+
+/** The fixed face a service link's posts carry (a job's, not a person's: `grants.service`) where a person's would get
+ *  an identicon: a slate robot head, the same bytes everywhere, so a service reads as one at a glance. */
+export const SERVICE_ICON = ['..#..', '#####', '#.#.#', '#####', '.#.#.']
+
+export function serviceIconPng(px = 120): Uint8Array {
+  return gridPng((col, row) => SERVICE_ICON[row][col] === '#', [71, 85, 105], px)
+}
+
+/** A 5×5 grid of `fg` cells (where `on`) on a light ground, with a margin. `px` square, a PNG. */
+function gridPng(on: (col: number, row: number) => boolean, fg: readonly [number, number, number], px: number): Uint8Array {
+  const bg: [number, number, number] = [240, 240, 240]
   const margin = Math.round(px / 12)
   const cell = (px - 2 * margin) / 5
   const raw = new Uint8Array(px * (1 + px * 3))
