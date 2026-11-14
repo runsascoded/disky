@@ -2,7 +2,7 @@
  * `/api/subtree`'s or `/api/diff`'s body, and the signatures both ways (§4.3). Pure (WebCrypto only); no route calls
  * it yet: the lane decision and the wiring are the next phase's (specs/serverless-tiers.md §5). */
 import type { QueryAst } from './queryAst.js'
-import type { ClassScope, OwnerScope } from './scope.js'
+import type { OwnerScope } from './scope.js'
 import { ATTEN_DEFAULT, type DiffRow, type ViewNode } from './view.js'
 
 const { ceil, log2, max, round } = Math
@@ -94,7 +94,8 @@ export interface VmViewOpts {
   query?: QueryAst
   owner?: OwnerScope
   lens?: string
-  classes?: ClassScope
+  /** Storage-class ids (any deployment's `ClassScope` fits): sent as sorted numbers. */
+  classes?: ReadonlySet<string>
   staged?: string[]
   w: number
   h: number
