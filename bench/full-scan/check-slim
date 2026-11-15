@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# Every interval-store fixture: the exhaustive query mix answered from the store (the full index), then from its pack
+# file (`fsb pack`) and from the slim pack (`fsb slim`), each answer equal to the store's (`bench -A`; the slim index
+# skips the directory-total queries; `slim-tiny`: chunks of any size, so chunk edges fall everywhere). Run on a bench node. Exit 1 on any difference.
+set -euo pipefail
+cd "$(dirname "$0")"
+fx=${FIXTURES:-../../site/functions/_lib/fixtures/iv/interval-store}
+out=tmp/slim-fixtures
+mkdir -p "$out"
+cargo build -q --release
+fsb=./target/release/fsb
+rc=0
+for g in "$fx"/g*; do
+  n=$(basename "$g")
+  $fsb plan "$g" -x 1 -o "$out/$n.q.jsonl" 2>/dev/null
+  $fsb bench "$g" "$out/$n.q.jsonl" -t 1,4 -r 1 -o "$out/$n.full.r.jsonl" -a "$out/$n.full.a.jsonl" 2>/dev/null
+  $fsb pack "$g" -o "$out/$n.full.fsb" > /dev/null 2>&1
+  $fsb slim "$out/$n.full.fsb" -o "$out/$n.slim.fsb" > /dev/null 2>&1
+  for k in full slim slim-tiny; do
+    f=$k; c=65536
+    [ $k = slim-tiny ] && { f=slim; c=1; }
+    if FSB_CHUNK_MIN=$c $fsb bench "$out/$n.$f.fsb" "$out/$n.q.jsonl" -t 1,4 -r 1 -A "$out/$n.full.a.jsonl" -o "$out/$n.$k.pack.r.jsonl" \
+         -a "$out/$n.$k.pack.a.jsonl" 2> "$out/$n.$k.log"; then
+      echo "$n $k: $(grep -o 'reference: .*' "$out/$n.$k.log")"
+    else
+      echo "$n $k: FAILED, $(grep -c 'differs from the reference' "$out/$n.$k.log") differ (e.g. $(grep -m3 'differs from the reference' "$out/$n.$k.log" | cut -d: -f1 | tr '\n' ' ')) $(grep -m1 '^Error' "$out/$n.$k.log")"
+      rc=1
+    fi
+  done
+done
+exit $rc

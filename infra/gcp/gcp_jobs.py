@@ -488,10 +488,11 @@ IDEMPOTENT_RETRY = gcp.cloudscheduler.JobRetryConfigArgs(
 )
 
 
-def checked_spec(submitter: Path, name: str) -> dict:
-    """`submitter_spec(submitter)`, refused (`check_cron_labels`) unless its job and allocation policy carry the stack's
-    cost labels: a cron's job reaches Batch with what the stack rendered, so the check is here, before any resource."""
-    spec = submitter_spec(submitter)
+def checked_spec(submitter: Path | dict, name: str) -> dict:
+    """`submitter_spec(submitter)` (or `submitter` itself, a spec the stack rendered another way), refused
+    (`check_cron_labels`) unless its job and allocation policy carry the stack's cost labels: a cron's job reaches Batch
+    with what the stack rendered, so the check is here, before any resource."""
+    spec = submitter if isinstance(submitter, dict) else submitter_spec(submitter)
     check_cron_labels(spec, parse_labels(os.environ.get(LABELS_ENV, "")), name)
     return spec
 
@@ -727,7 +728,8 @@ class BatchSubmitCron(RunJobCron):
     posting the body to Batch once (`BatchCron`), where a 5xx is a silently missed run and a retried POST a possible
     second job.
 
-    The spec is `checked_spec(submitter)` as `BatchCron`'s (rendered and label-checked at `up`), handed to the job as
+    The spec is `checked_spec(submitter)` as `BatchCron`'s (rendered and label-checked at `up`; `submitter` is a
+    `job/*-submit.sh` or the spec dict a deployment rendered itself, e.g. r2's `job/r2-scan plan`), handed to the job as
     `$BATCH_SPEC` beside `env`; the job runs `script` (a deployment's tracked shell script, its text passed as `bash -c`,
     so the job runs what the stack previewed, whatever the image's checkout). The script owns the submit: an
     idempotent one (`dt-cloud batch submit -t -e -r`: the job named for its period, a 409 counted as submitted, transient
@@ -750,7 +752,7 @@ class BatchSubmitCron(RunJobCron):
         self,
         name: str,
         *,
-        submitter: Path,
+        submitter: Path | dict,
         script: Path,
         env: dict[str, str] | None = None,
         overridable: Sequence[str] = (),

@@ -235,6 +235,17 @@ dt-cloud interval-store level-sim GEN REQUESTS  # `readLevel`'s two waves priced
 dt-cloud history run -i JOB_ID -r SERVING_STORE -w WORK  # One `/api/admin/history` job (`history_jobs.py`, spec `scan-thinning.md`): a
                           # thinning preview (scores, protections, the removal sequence) or a candidate build (fresh interval + static
                           # generations over the retained scans, verified, an immutable `history/versions/<id>.json`). Never moves a CURRENT
+dt-cloud vm-pack build -o STORE [-w WORK] [-f FSB] [-k N]  # VM mode's pack (specs/vm-mode.md §6): the store's current
+                          # interval-store generation + newest manifest mirrored, `fsb pack-slim`ed (bench/full-scan), published
+                          # as `vm-pack/<gen>/<manifest>.fsb`, then `vm-pack/CURRENT.json`; a no-op when the pointer names them;
+                          # older packs past `-k` deleted; a newer manifest landing meanwhile leaves the pointer alone.
+                          # `vm-pack submit -o STORE …`: that build as its own Batch job (default spot n2-highmem-16, local SSD;
+                          # `-m -S -d -M -i -a -L -P -e -s -X`), one id per pack (`vm-pack-<deployment>-<gen>-<manifest>`, a
+                          # resubmit is a no-op), `component=vm-pack`, not waited on. Scan step `vm-pack` (opt-in): with
+                          # `options.vm-pack.batch` (its keys = submit's options) it submits; without, builds in the task. `fsb`
+                          # in the image: `job/Dockerfile` build arg `FSB=build` (default `none`). The
+                          # server is `bench/full-scan`'s `vmd -c CONF` (tenants' packs mapped; `/v1/view`, `/v1/shard`, `/v1/merge`,
+                          # `/v1/status`, HMAC per tenant); `fsb shard PACK -n N` cuts physical shard packs
 dt-cloud image-sha [-e SHA [-a]] [-j]  # The running image's source revision (`image_sha.py`): `$DISKY_GIT_SHA` /
                           # `$DISKY_GIT_DIRTY`, which the image build stamps (`dt-cloud image build` → `job/Dockerfile`
                           # `ARG`/`ENV` + OCI labels `org.opencontainers.image.revision`, `disky.dirty`). Prints `<sha>`,
@@ -379,6 +390,8 @@ One gate (`_lib/auth.ts`, `@open-athena/auth` over D1): `identify` → `Identity
 - `/api/auth/*` — the package's routes: `whoami`, `exchange` (`?key=` share link → grant session), `logout`, request-access, admin grant/request/log console
 - `/api/token` — a session's personal agent token (a non-expiring Bearer grant, the base scope only; grants can't mint one)
 - `POST /api/app-link` → `GET /auth/app-link?token=` — the macOS app's sign-in hand-off ("Open in disky" in the user menu): a session mints a single-use, 60 s grant for its own email + scopes (same-origin POST only); the app's webview redeems it into an ordinary email session and the grant is revoked. Contract: `specs/app-link.md`
+
+**Service links** (`grants.service`, recipe `grant-flags.sql`): a job's grant, never a person's (the package refuses one with an email). `dt-cloud job-token` mints with it set; `/admin` Share links mints one ("Service account") and toggles it on existing rows. Its activity (`_lib/activity.ts`) posts nothing routine to `#<deploy>-admin`: a notable burst posts red, why first (`🔴 3 errors`: ≥ 3 errors, any refused request, a client its earlier sessions didn't use), and the next clean one after a red posts green (`🟢 clean again`), as `<name> (service)` with a fixed service face; every burst is still kept for `/admin/activity`. Its refused requests (expired, revoked, disabled) reach its activity as `denied` events through the gate's audit sink (`auditWithActivity`). These are `@open-athena/auth/activity`'s service defaults, so moving onto that feed changes nothing visible.
 - `/api/admins` — the admins (`/admin`'s "Admins" section): every path to the `admin` scope (the list's rows with who added whom and when, the break-glass addresses, live admin-scope links, the staff domain where it is one), add / remove on the list, each logged to `admin_edits`; the last listed admin can't be removed
 - `/api/admin/history` (+ `/history-adopt`) — admin only: scan-history thinning (`specs/scan-thinning.md`, `/scans#history`). `history` lists the preview/build jobs under `history/jobs/` and POSTs a new one to Batch (`dt-cloud history run`); dispatch needs every `HISTORY_*` job var + `GCP_SA_KEY`, `JOB_SA`, `GCP_PROJECT` (else 503, and GET says `enabled: false`). `history-adopt` CAS-moves this environment's reader pointer (`HISTORY_CURRENT_KEY`; unset: GET `enabled: false`, POST 503) to a verified immutable `history/versions/<id>.json`. With `HISTORY_CURRENT_KEY` unset, readers never read history (`_lib/historyVersion.ts`)
 - `/a/<sha256>.<ext>` — **public, no gate**: an activity post's sender face (`_lib/publicAvatar.ts`), only bytes a Slack / Discord post stored in `public_avatars`, named by their own SHA-256 (a profile's or grant's face, else an identicon seeded by an HMAC of the actor under `SESSION_SECRET`); anything else 404s

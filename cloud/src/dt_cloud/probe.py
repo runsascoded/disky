@@ -48,6 +48,7 @@ from dataclasses import asdict, dataclass
 from typing import Callable
 
 from . import api_names
+from .diff_bench import CV
 
 UA = "dt-cloud-probe/1.0"  # a real UA — CF edge-blocks bot UAs (1010)
 MISS_TERM = "zz-probe-no-match-zz"
@@ -120,6 +121,16 @@ class Targets:
     prev: str | None
     bucket: str
     hit: str  # a name the filter-hit scenario searches for
+    week: str | None = None  # the newest scan at least 7 days before `date` (the 7d diff chip's start)
+    month: str | None = None  # …at least 30 days before (the 30d chip's)
+
+
+def scan_before(scans: list[str], date: str, days: int) -> str | None:
+    """The newest scan in ``scans`` dated at least ``days`` days before ``date``'s day (ids `YYYY-MM-DD[THHMM]`),
+    or None: what a diff chip of that span starts from."""
+    cut = dt.date.fromisoformat(date[:10]) - dt.timedelta(days=days)
+    older = [s for s in scans if dt.date.fromisoformat(s[:10]) <= cut]
+    return max(older) if older else None
 
 
 def resolve_targets(fetch: Fetch, subdir: str = "", hit: str | None = None) -> Targets:
@@ -137,7 +148,7 @@ def resolve_targets(fetch: Fetch, subdir: str = "", hit: str | None = None) -> T
         b = json.loads(fetch(f"/api/subtree?date={date}&path={_q(bucket)}&depth=1&{W}").body)
         named = [n for n in api_names.tree(b).get("children", []) if not n["name"].startswith("(")]
         hit = max(named, key=lambda n: n["bytes"])["name"]
-    return Targets(date, prev, bucket, hit)
+    return Targets(date, prev, bucket, hit, scan_before(scans, date, 7), scan_before(scans, date, 30))
 
 
 def _q(s: str) -> str:
@@ -146,11 +157,12 @@ def _q(s: str) -> str:
 
 def scenarios(t: Targets, cold: str = "") -> dict[str, list[str]]:
     """Each page view's requests, as `site/src/App.tsx` issues them (the
-    depth-1 first paint, the full tree, the diff's first paint and full walk,
-    the size-over-time series), on the browser's default canvas. ``cold`` is
-    a `minArea` (see `cold_min_area`) that keys subtree and diff reads past
-    the edge cache."""
-    W = "cv=2&w=1408&h=896" + (f"&minArea={cold}" if cold else "")
+    depth-1 first paint, the full tree, the diff's first paint and full walk
+    in the default Δ mode, the size-over-time series, split by root at the
+    root), on the browser's default canvas, plus the 7d and 30d diff chips at
+    the root when the scans reach back that far. ``cold`` is a `minArea` (see
+    `cold_min_area`) that keys subtree and diff reads past the edge cache."""
+    W = f"cv={CV}&w=1408&h=896" + (f"&minArea={cold}" if cold else "")
     def page(path: str, scope: str = "") -> list[str]:
         p = _q(path)
         if "q=" in scope:
@@ -161,25 +173,31 @@ def scenarios(t: Targets, cold: str = "") -> dict[str, list[str]]:
                 f"/api/subtree?{W}&date={t.date}&path={p}{scope}&full=1",
             ]
             if t.prev:
-                reqs.append(f"/api/diff?{W}&from={t.prev}&to={t.date}&path={p}{scope}")
+                reqs.append(f"/api/diff?{W}&from={t.prev}&to={t.date}&path={p}{scope}&dm=delta")
             return reqs
         reqs = [
             f"/api/subtree?{W}&date={t.date}&path={p}&depth=1",
             f"/api/subtree?{W}&date={t.date}&path={p}",
         ]
         if t.prev:
-            reqs += [
-                f"/api/diff?{W}&from={t.prev}&to={t.date}&path={p}&depth=1",
-                f"/api/diff?{W}&from={t.prev}&to={t.date}&path={p}",
-            ]
-        reqs.append(f"/api/series?path={p}")
+            reqs += diff(t.prev, p)
+        # The page splits the series by root at the unscoped store root only (the API refuses it anywhere else).
+        reqs.append(f"/api/series?path={p}" + ("&split=roots" if not path else ""))
         return reqs
+
+    def diff(start: str, p: str) -> list[str]:
+        return [
+            f"/api/diff?{W}&from={start}&to={t.date}&path={p}&dm=delta&depth=1",
+            f"/api/diff?{W}&from={start}&to={t.date}&path={p}&dm=delta",
+        ]
 
     return {
         "root": page(""),
         "bucket": page(t.bucket),
         "filter-hit": page("", f"&q={_q(t.hit)}"),
         "filter-miss": page(t.bucket, f"&q={MISS_TERM}"),
+        **({"diff-7d": diff(t.week, "")} if t.week else {}),
+        **({"diff-30d": diff(t.month, "")} if t.month else {}),
     }
 
 
@@ -364,3 +382,25 @@ def record(base: str, t: Targets, results: list[Result], now: dt.datetime | None
     return {"ts": now.strftime("%Y-%m-%dT%H:%M:%SZ"), "base": base, **asdict(t), "results": [asdict(r) for r in results],
             "summary": {"passed": passed, "skipped": skipped, "failed": bad, "lag": sum(map(lagged, results)),
                         "refused_indexed": sum(map(refused_indexed, results)), "line": summary_line(results)}}
+
+
+def request_label(scenario: str, path: str) -> str:
+    """A recorded request as ``<scenario> <endpoint>[ d1][ full]``: stable across runs (no dates, canvas or cache key),
+    so the same request lines up from one record to the next."""
+    url = urllib.parse.urlsplit(path)
+    q = urllib.parse.parse_qs(url.query)
+    return " ".join([scenario, url.path.removeprefix("/api/")] + (["d1"] if q.get("depth") == ["1"] else []) + (["full"] if q.get("full") == ["1"] else []))
+
+
+def history(records: list[dict]) -> tuple[list[str], dict[str, list[int | None]]]:
+    """Probe records (`-o`'s), in the order given → each record's scan and, per request label (first-seen order), its
+    browser ms in each record (None where the record didn't run it, or it failed)."""
+    scans = [str(r.get("date") or r.get("ts")) for r in records]
+    rows: dict[str, list[int | None]] = {}
+    for i, rec in enumerate(records):
+        for res in rec.get("results", []):
+            label = request_label(res["scenario"], res["path"])
+            row = rows.setdefault(label, [None] * len(records))
+            if res.get("status") == 200 and res.get("error") is None:
+                row[i] = res.get("ms")
+    return scans, rows

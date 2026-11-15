@@ -28,6 +28,7 @@ import { type Auth, createGate, DEFAULT_COOKIE_NAME, type Gate, type Grant, type
 import { DEFAULT_ACCOUNT_HINT_COOKIE } from '@open-athena/auth/oidc'
 import { OA_HINT_COOKIE, OA_NONCE_COOKIE, OA_WHO_COOKIE } from '@disk-tree/pages-kit/oa'
 import { d1AuditSink, d1GrantStore, d1ProfileStore, d1RequestStore } from '@open-athena/auth/d1'
+import { auditWithActivity } from './activity.js'
 import type { AnalyticsEngineDataset, D1Database, KVNamespace, R2Bucket } from '@cloudflare/workers-types'
 import { isPreviewHost } from './previewHost.js'
 import { grantCaller, meterOf } from './usage.js'
@@ -543,7 +544,8 @@ export function gateFor(env: Env, request?: Request): Gate | null {
   return createGate({
     store: grantStore(env),
     requests: d1RequestStore(env.DB),
-    audit: d1AuditSink(env.DB),
+    // A service link's refused requests also reach its activity (`denied`), so its notice can say so.
+    audit: auditWithActivity(env, d1AuditSink(env.DB), request ? new URL(request.url).origin : null),
     // The name + face Google verified at sign-in (seeded by default),
     // or a self-set one: what `whoami.subject` carries to the header chip.
     profiles: d1ProfileStore(env.DB),

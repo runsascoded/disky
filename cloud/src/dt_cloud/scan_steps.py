@@ -1551,6 +1551,11 @@ def retire(ctx: Ctx, arg: str | None) -> None:
                    warn=f"retire failed on {root} (its per-scan files stay; the next run retries)")
 
 
+#: `store-gc`'s note when a builder (this scan's append, or a compaction it started) holds the static-names store: GC
+#: never deletes under one, and the next scan's run retries, so it's no failure and no alert.
+STATIC_GC_DEFERRED = "static cleanup deferred: a builder holds the static-names store's lease (the next scan retries)"
+
+
 @step("store-gc", core=False, soft=True, options={"execute": bool, "grace": int, "store": str, "copies": list, "static_gens": list,
                                               "static_store": str, "static_copies": list, "scratch": str},
       side=True, converges=True, leaves="superseded store generations not collected")
@@ -1575,13 +1580,17 @@ def store_gc(ctx: Ctx, arg: str | None) -> None:
         for root in dict.fromkeys(r for r in [store, *ctx.opt("store-gc", "copies", [archive])] if r):
             ctx.sh(["dt-cloud", "store-gc", *args, "-o", root], fatal=False, warn=f"store-gc failed on {root} (the generations stay)")
         if ctx.opt("store-gc", "static_store"):
+            from .append_runner import BUSY
+
             static = ["dt-cloud", "generation-gc", "-t", "static-names", "-o", ctx.opt("store-gc", "static_store"),
                       *(a for g in ctx.opt("store-gc", "static_gens", []) for a in ("-k", g)),
                       *(a for root in ctx.opt("store-gc", "static_copies", []) for a in ("-c", root)),
                       *(["-s", ctx.opt("store-gc", "scratch")] if ctx.opt("store-gc", "scratch") else []),
                       *(["-G", ctx.opt("store-gc", "grace")] if ctx.opt("store-gc", "grace") is not None else []),
                       *(["-x"] if ctx.opt("store-gc", "execute") else [])]
-            ctx.sh(static, fatal=False, warn="coordinated static generation cleanup failed (the generations stay)")
+            ctx.sh(static, fatal=False, warn="coordinated static generation cleanup failed (the generations stay)", allowed_codes=(BUSY,))
+            if ctx.last is not None and ctx.last.returncode == BUSY:
+                ctx.note = STATIC_GC_DEFERRED
         elif ctx.opt("store-gc", "static_gens") and archive:
             static = ["-t", "static-names", *(a for g in ctx.opt("store-gc", "static_gens") for a in ("-k", g)),
                       *(["-x"] if ctx.opt("store-gc", "execute") else [])]
@@ -1880,6 +1889,60 @@ def soft_delete(ctx: Ctx, arg: str | None) -> None:
             outs.append(f"{ctx.env['R2_ARCHIVE']}/{SOFT_DELETE_PREFIX}")
         ctx.sh(["dt-cloud", "soft-delete", *(a for b in buckets for a in ("-b", b)), *(a for e in endpoints for a in ("-E", e)), *(a for o in outs for a in ("-o", o))],
                fatal=False, warn="soft-delete reading failed (the scan's outputs stand; the site keeps the last one, dated)")
+
+
+def _vm_pack_check(p: ScanProfile) -> list[str]:
+    from .vm_pack import batch_problems
+
+    batch = p.opts("vm-pack").get("batch")
+    return primary_only("vm-pack", "a pack is the primary interval store's")(p) + ([] if batch is None else batch_problems(batch))
+
+
+@step("vm-pack", core=False, soft=True, options={"store": str, "keep": int, "batch": dict},
+      requires=_vm_pack_check,
+      side=True, converges=True, leaves="VM mode's pack not written: the VM serves the previous one until a later run writes it")
+def vm_pack(ctx: Ctx, arg: str | None) -> None:
+    """VM mode's pack (specs/vm-mode.md §6): `dt-cloud vm-pack build` over the interval store's current generation and
+    newest manifest, published beside it under `vm-pack/` (the pack, then `vm-pack/CURRENT.json`). The store is
+    `options.vm-pack.store`, else the interval store's (`options.interval-store.store`, else `R2_ARCHIVE`). Post stage,
+    after the append; idempotent (a pointer already naming the generation and manifest is a no-op), so a later run
+    catches up. Not core: a deployment opts in (`steps`).
+
+    `options.vm-pack.batch` (a mapping, possibly empty): the build runs as a Batch job of its own (`vm-pack submit`), not
+    in this task: its loader holds the store's rows in RAM once (gcs: 117 GB), so it gets its own machine (default a spot
+    n2-highmem-16) instead of sizing the scan's. The mapping's keys (`vm_pack.BATCH_KEYS`) are `submit`'s options:
+    `image` (default `$JOB_IMAGE`, this task's), `service_account` (`$JOB_SA`), `region` (`$BATCH_REGION`; the store
+    bucket's region is checked against it), `project`, `machine`, `spot`, `ssd_gb`, `memory_mib`, `env`, `secrets`
+    (`{VAR: secret}`, a non-GCS store's credentials), `cross_region`. Submitted, not waited on: the step's success is
+    the submit's, never the job's (a failed job leaves the previous pack, and the next scan's job writes the newest).
+    Without `batch`, the build runs here (a small deployment's: no Batch, little memory).
+
+    Needs `fsb` in the image that builds (`$FSB` or PATH; `job/Dockerfile` `FSB=build`): this one when building here or
+    when the job runs this task's image; without it the step is skipped, said in its note."""
+    if ctx.reproc:
+        err("REPROC: not writing a VM pack")
+        return
+    store = ctx.opt("vm-pack", "store") or ctx.opt("interval-store", "store") or ctx.env.get("R2_ARCHIVE")
+    batch = ctx.opt("vm-pack", "batch")
+    keep = str(ctx.opt("vm-pack", "keep", 2))
+    with ctx.phase("vm-pack"):
+        if not store:
+            ctx.skip("unconfigured", "no store (options.vm-pack.store, options.interval-store.store or R2_ARCHIVE)")
+            return
+        if batch is not None and not (batch.get("image") or ctx.env.get("JOB_IMAGE")):
+            ctx.skip("unconfigured", "no image for the vm-pack job (options.vm-pack.batch.image or JOB_IMAGE)")
+            return
+        if not (batch or {}).get("image") and not (ctx.env.get("FSB") or shutil.which("fsb", path=ctx.env.get("PATH"))):
+            ctx.skip("unconfigured", "no fsb in this image ($FSB or PATH)")
+            return
+        if batch is not None:
+            from .vm_pack import submit_args
+
+            ctx.sh(["dt-cloud", "vm-pack", "submit", "-o", store, "-k", keep, *submit_args(batch)],
+                   fatal=False, warn=f"VM pack job not submitted for {ctx.scan} (the VM keeps serving the previous pack)")
+            return
+        ctx.sh(["dt-cloud", "vm-pack", "build", "-o", store, "-w", str(ctx.work / "vm-pack"), "-k", keep],
+               fatal=False, warn=f"VM pack not written for {ctx.scan} (the VM keeps serving the previous pack)")
 
 
 #: Core steps a profile may `skip`.

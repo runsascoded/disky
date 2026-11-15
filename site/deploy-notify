@@ -3,7 +3,7 @@
 # requires-python = ">=3.11"
 # dependencies = ["click==8.3.0", "thrds @ https://github.com/Open-Athena/thrds/archive/6f207846b32012d6a1550011f95bc561caf8ff1c.tar.gz"]
 # ///
-"""Review a deployment receipt; send only with an explicit flag. Greens are run-length threaded, reds are top-level posts."""
+"""Review a deployment receipt; send only with an explicit flag. Notices are run-length threaded: greens with greens, reds with reds."""
 from getpass import getuser
 from collections.abc import Mapping
 from json import dumps, loads
@@ -63,7 +63,7 @@ def receipt(value: dict) -> dict:
     dirty = value.get('dirty')
     require(dirty is None or type(dirty) is bool, 'dirty must be a boolean or null')
     actor = value.get('actor')
-    require(actor is None or isinstance(actor, str) and fullmatch(r'[A-Za-z0-9_.@+-]{1,128}', actor) is not None,
+    require(actor is None or isinstance(actor, str) and fullmatch(r'[A-Za-z0-9_.@+-]{1,128}(?:\[bot\])?', actor) is not None,
             'actor must be a plain user identifier or null')
     actor_source = value.get('actor_source')
     require(actor_source in (None, 'local', 'github'), 'actor_source must be local, github or null')
@@ -86,53 +86,70 @@ def receipt(value: dict) -> dict:
     }
 
 
-def render(value: dict) -> str:
+def headline(value: dict) -> str:
+    """The notice's sender name (`chat.postMessage` `username`): its outcome, so a notice is one line under it."""
     r = receipt(value)
     outcome = {'success': 'deployment succeeded', 'failure': f"deployment failed during {r['stage']}",
                'cancelled': 'deployment cancelled'}[r['status']]
     emoji = {'success': '✅', 'failure': '❌', 'cancelled': '⏹️'}[r['status']]
+    return f"{emoji} {r['deployment'].upper()} {r['mode']} {outcome}"
+
+
+def render(value: dict) -> str:
+    """The notice's one line: source, warnings (a dirty or unrecorded tree, an unverified success), who, the CF
+    deployment and links. A clean tree and a passed verification are the norm, so they say nothing."""
+    r = receipt(value)
     repo = f"https://github.com/{r['repository']}"
-    source = f"[{r['source_branch']}]({repo}/tree/{quote(r['source_branch'], safe='/')})" if r['source_branch'] else 'ref not recorded'
-    revision = 'revision not recorded'
+    source = [f"[{r['source_branch']}]({repo}/tree/{quote(r['source_branch'], safe='/')})"] if r['source_branch'] else []
     if r['sha']:
-        revision = f"`{r['sha']}`"
-        if r['dirty'] is False:
-            revision = f"[{r['sha']}]({repo}/commit/{r['sha']})"
-        elif r['dirty']:
-            revision += ' (base commit)'
-    tree = {True: 'tracked changes present', False: 'clean', None: 'tree state not recorded'}[r['dirty']]
-    who = f"{'GitHub actor' if r['actor_source'] == 'github' else 'Local user' if r['actor_source'] == 'local' else 'Initiator'}: `{r['actor']}`" if r['actor'] else 'Initiator: not recorded'
-    links = [f"[Site](https://{r['host']})"]
-    links += [f"[{label}]({r[key]})" for key, label in (('cloudflare_url', 'CF deployment'), ('run_url', 'Run logs')) if r[key]]
-    return (f"{emoji} **{r['deployment'].upper()} {r['mode']} {outcome}**\n\n"
-            f"Source: {source} · {revision} · {tree}\n\n"
-            f"{who} · attempt `{r['attempt']}`\n\n"
-            f"Serving verification: {'passed' if r['verified'] else 'not recorded'}. "
-            f"CF deployment: {r['cloudflare_deployment'] or 'not recorded'}.\n\n" + ' · '.join(links) + '\n')
+        source.append(f"([{r['sha'][:9]}]({repo}/commit/{r['sha']}))")
+    parts = [' '.join(source) or 'source not recorded']
+    if r['dirty'] is None:
+        parts.append('⚠️ tree state not recorded')
+    elif r['dirty']:
+        parts.append('⚠️ dirty')
+    if r['status'] == 'success' and not r['verified']:
+        parts.append('⚠️ unverified')
+    if r['actor']:
+        if r['actor_source'] == 'github' and not r['actor'].endswith('[bot]'):
+            parts.append(f":gh: [{r['actor']}](https://github.com/{r['actor']})")
+        else:
+            parts.append(f"{':gh:' if r['actor_source'] == 'github' else ':computer:'} `{r['actor']}`")
+    if r['cloudflare_deployment']:
+        cf = r['cloudflare_deployment']
+        parts.append(f":cf: [{cf}]({r['cloudflare_url']})" if r['cloudflare_url'] else f':cf: `{cf}`')
+    parts.append(f"[site](https://{r['host']})")
+    if r['run_url']:
+        parts.append(f"[logs]({r['run_url']})")
+    return ' · '.join(parts) + '\n'
 
 
-# A notice's headline as Slack stores it (`render`'s bold line through `to_slack`): its deployment and outcome.
+# A notice's outcome as Slack stores it: its sender name (`headline`), or, before notices were one line (2026-11-14),
+# the bold first line of its text.
+SENDER = r'^\S+ ([A-Z0-9-]+) (?:dev|prod) deployment (succeeded|failed during [a-z]+|cancelled)$'
 HEADLINE = r'\*([A-Z0-9-]+) (?:dev|prod) deployment (succeeded|failed during [a-z]+|cancelled)\*'
 HISTORY = 100
 
 
-def green_thread(
+def run_thread(
     history: list[dict],
     deployment: str,
+    green: bool,
     bot: tuple[str, str | None],
 ) -> str | None:
-    """The thread a green notice joins: the newest top-level notice for this deployment, if it is green.
+    """The thread a notice joins: the newest top-level notice for this deployment, if it has the same color.
 
-    Greens are run-length threaded (the first green after a red, or with none in the last `HISTORY` channel
-    messages, opens a thread; later greens reply in it); every red is its own top-level post, ending the run.
+    Notices are run-length threaded by color (a failure and a cancellation are both red): the first notice after
+    one of the other color, or with none in the last `HISTORY` channel messages, is a top-level post that opens a
+    thread; each later notice of that color replies in it, until the color changes.
     """
     user_id, bot_id = bot
     for message in history:
         if message.get('user') != user_id and (bot_id is None or message.get('bot_id') != bot_id):
             continue
-        match = search(HEADLINE, message.get('text') or '')
+        match = search(SENDER, message.get('username') or '') or search(HEADLINE, message.get('text') or '')
         if match and match[1] == deployment.upper():
-            return message['ts'] if match[2] == 'succeeded' else None
+            return message['ts'] if (match[2] == 'succeeded') == green else None
     return None
 
 
@@ -146,7 +163,7 @@ def slack_client(
 
 
 def send(value: dict, env: dict) -> str:
-    """Post the notice; a green one replies in the current green run's thread. Returns the thread it joined, if any."""
+    """Post the notice, replying in the thread of the current run of its color. Returns the thread it joined, if any."""
     require(env.get('DEPLOY_NOTIFICATIONS_ENABLED') == '1', 'Deploy notifications are disabled pending template/transport review')
     token = env.get('SLACK_DEPLOY_BOT_TOKEN', '')
     require(fullmatch(r'xoxb-[A-Za-z0-9-]+', token) is not None, 'SLACK_DEPLOY_BOT_TOKEN must be a Slack bot token')
@@ -155,14 +172,13 @@ def send(value: dict, env: dict) -> str:
     r = receipt(value)
     setdefaulttimeout(15)
     client = slack_client(token, channel)
-    thread = None
-    if r['status'] == 'success':
-        try:
-            thread = green_thread(client.list_channel_history(channel, limit=HISTORY), r['deployment'], client.bot_ids)
-        except (RuntimeError, OSError, KeyError):
-            raise ClickException('Slack history lookup failed; nothing posted') from None
     try:
-        client.post(render(r), thread)
+        history = client.list_channel_history(channel, limit=HISTORY)
+        thread = run_thread(history, r['deployment'], r['status'] == 'success', client.bot_ids)
+    except (RuntimeError, OSError, KeyError):
+        raise ClickException('Slack history lookup failed; nothing posted') from None
+    try:
+        client.post(render(r), thread, username=headline(r))
     except (RuntimeError, OSError):
         raise ClickException('Slack notification failed; acceptance unknown, not retried') from None
     return thread
@@ -189,7 +205,8 @@ def main() -> None:
 @main.command('render')
 @argument('path', type=ClickPath(exists=True, path_type=Path))
 def render_cmd(path: Path) -> None:
-    print(render(load(path)), end='')
+    value = load(path)
+    print(f'{headline(value)}\n{render(value)}', end='')
 
 
 @main.command('send')
@@ -201,7 +218,7 @@ def send_cmd(execute: bool, path: Path) -> None:
         thread = send(value, dict(environ))
         print(f'Deployment notification posted{f" in thread {thread}" if thread else ""}.')
     else:
-        print(render(value), end='')
+        print(f'{headline(value)}\n{render(value)}', end='')
 
 
 @main.command('record')

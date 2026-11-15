@@ -1,4 +1,4 @@
-/** Put near-zero, quiet entries on one line without combining their quotas or discarding their individual text. */
+/** Put low-info entries on one line without combining their quotas or discarding their individual text. */
 export function compactQuietLines(rows: { text: string; quiet: boolean }[]): string[] {
   const quiet = rows.filter(r => r.quiet)
   if (quiet.length < 2) return rows.map(r => r.text)
@@ -10,6 +10,3 @@ export function compactQuietLines(rows: { text: string; quiet: boolean }[]): str
     return [quiet.map(x => x.text).join(' · ')]
   })
 }
-
-/** A presentation threshold in bytes, independent of the digest's display unit. */
-export const QUIET_BYTES = 0.5 * 1024 ** 4

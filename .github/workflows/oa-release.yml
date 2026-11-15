@@ -1,4 +1,8 @@
-# Install on the OA default branch (`front-door`). Disabled until environments, tokens and pilot review are ready.
+# The OA default branch's (`front-door`) stub: GitHub runs `workflow_run` and dispatches from there, and the
+# environments admit only `front-door`. Every script it runs is `cloud`'s (`control/`: `scripts/oa-release`,
+# `deploy/oa/sites.json`, `site/deploy-notify`), at one sha `plan` resolves and every job checks out. This file must be
+# byte-identical to `cloud`'s copy, whose tests hold its calls to those scripts (`plan` refuses to run otherwise;
+# specs/oa-release-workflow.md, "Tooling lives on `cloud`"). Off unless `OA_SITE_RELEASE_ENABLED` and the target's listed.
 name: OA site release
 on:
   workflow_run:
@@ -30,6 +34,7 @@ jobs:
           (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'))
     runs-on: ubuntu-latest
     outputs:
+      control_sha: ${{ steps.control.outputs.sha }}
       sha: ${{ steps.plan.outputs.sha }}
       source_branch: ${{ steps.plan.outputs.source_branch }}
       environment: ${{ steps.plan.outputs.environment }}
@@ -40,20 +45,37 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.sha }}
+          ref: refs/heads/cloud
+          path: control
           persist-credentials: false
+      - name: Pin the controller to `cloud`'s sha; this stub must be `cloud`'s copy
+        id: control
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WORKFLOW_SHA: ${{ github.workflow_sha || github.sha }}
+        run: |
+          set -euo pipefail
+          sha=$(git -C control rev-parse HEAD)
+          gh api -H 'Accept: application/vnd.github.raw' \
+            "repos/$GITHUB_REPOSITORY/contents/.github/workflows/oa-release.yml?ref=$WORKFLOW_SHA" > "$RUNNER_TEMP/stub.yml"
+          if ! cmp "$RUNNER_TEMP/stub.yml" control/.github/workflows/oa-release.yml; then
+            echo "::error::This workflow ($WORKFLOW_SHA) differs from cloud's copy at $sha: copy cloud's .github/workflows/oa-release.yml here"
+            exit 1
+          fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "Controller: \`cloud\` at \`$sha\`" >> "$GITHUB_STEP_SUMMARY"
       - uses: astral-sh/setup-uv@v6
       - id: plan
         env:
           GH_TOKEN: ${{ github.token }}
-        run: scripts/oa-release plan -e "$GITHUB_EVENT_PATH" -n "$GITHUB_EVENT_NAME" -r "$GITHUB_REPOSITORY" -o plan.json
+        run: control/scripts/oa-release plan -e "$GITHUB_EVENT_PATH" -n "$GITHUB_EVENT_NAME" -r "$GITHUB_REPOSITORY" -o plan.json
   build:
     needs: plan
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ needs.plan.outputs.control_sha }}
           path: control
           persist-credentials: false
       - uses: actions/checkout@v4
@@ -115,7 +137,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ needs.plan.outputs.control_sha }}
           path: control
           persist-credentials: false
       - uses: actions/checkout@v4
@@ -174,7 +196,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: if [ -f receipt.json ]; then control/scripts/oa-release finish -f receipt.json; fi
-      # Slack notice (`site/deploy-notify`: greens threaded per deployment, reds top-level), only where the environment
+      # Slack notice (`site/deploy-notify`: run-length threaded per deployment, greens with greens, reds with reds), only where the environment
       # sets `DEPLOY_NOTIFICATIONS_ENABLED=1` with its bot token and channel. A notice failure never fails the release.
       - name: Deploy notice
         if: always() && vars.DEPLOY_NOTIFICATIONS_ENABLED == '1'

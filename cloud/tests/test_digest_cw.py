@@ -227,7 +227,7 @@ def test_tail_circles_fullest_first():
     u = lambda b: f"{SITE}/{b}?d=2609231201#over-time"  # noqa: E731
     main = f"[main]({u('main-data')}): 90.8% of 1P (84.1 Ti free)"
     zone = f"[hot]({u('hot-data')}) 82 + [side]({u('side-data')}) 3 Ti: 85.0% of 100Ti (15.0 Ti free)"
-    cold = f":large_green_circle: [cold]({u('cold-data')}): 12%"  # under `QUIET_PCT`: the bare share
+    cold = f":large_green_circle: [cold]({u('cold-data')}): 12% of 100Ti"  # under `QUIET_PCT`: the share of its quota, no headroom
     more = f"[more-data]({u('more-data')}): 2 Ti"
     assert D._tail(day, cfg).split(" · ") == [f":red_circle: {main}", f":large_orange_circle: {zone}", cold, more]
     assert D._tail(day, replace(cfg, alert_pct=95)).split(" · ") == [f":large_orange_circle: {main}", f":large_orange_circle: {zone}", cold, more]
@@ -369,23 +369,23 @@ def test_tail_runway_fixed_order():
         f":large_green_circle: {main}",
         f":red_circle: {zone}, +5.6 Ti/d, ≈3d to full",
         more,
-        f":large_orange_circle: [cold]({u('cold-data')}): 12%, +10.0 Ti/d, ≈9d to full",
+        f":large_orange_circle: [cold]({u('cold-data')}): 12% of 100Ti, +10.0 Ti/d, ≈9d to full",
     ]
     over = replace(day, extra={**now, "cold-data": 101.3}, hist=hist[:-1] + (_hist_scan("2026-09-23T1201", 825.9, {**now, "cold-data": 101.3}),))
     assert D._tail(over, cfg).split(" · ")[3] == f":red_circle: [cold]({u('cold-data')}): 101.3% of 100Ti (1.3 Ti over)"
     # no history (a store's first day): nothing is filling, so only the 95% floor and an overage can mark it hot
     assert D._tail(replace(day, hist=()), cfg).split(" · ") == [
-        f":large_green_circle: {main}", f":large_green_circle: {zone}", more, f":large_green_circle: [cold]({u('cold-data')}): 12%"]
+        f":large_green_circle: {main}", f":large_green_circle: {zone}", more, f":large_green_circle: [cold]({u('cold-data')}): 12% of 100Ti"]
     # `runway-hue`: the same order, rate text and runways, each as its `:runway-N:` step
     assert D._tail(day, replace(cfg, quota_marks="runway-hue")).split(" · ") == [
         f":runway-8: {main}",
         f":runway-2: {zone}, +5.6 Ti/d, ≈3d to full",
         more,
-        f":runway-4: [cold]({u('cold-data')}): 12%, +10.0 Ti/d, ≈9d to full",
+        f":runway-4: [cold]({u('cold-data')}): 12% of 100Ti, +10.0 Ti/d, ≈9d to full",
     ]
     # `circles` is unchanged by the history: fullest first, by fill
     assert D._tail(day, replace(cfg, quota_marks="circles")).split(" · ") == [
-        f":red_circle: {main}", f":large_orange_circle: {zone}", f":large_green_circle: [cold]({u('cold-data')}): 12%", more]
+        f":red_circle: {main}", f":large_orange_circle: {zone}", f":large_green_circle: [cold]({u('cold-data')}): 12% of 100Ti", more]
 
 
 def test_day_rows_carry_runway_history():

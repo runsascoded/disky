@@ -5,7 +5,7 @@ import { validateUploadedImage } from '@open-athena/auth'
 import { sqliteD1 } from './testD1'
 import { senderOf } from './activity'
 import { mergeKinds, reported } from './activityShape'
-import { AVATAR_PATH, dataUriImage, identiconPng, identiconSeed, publishAvatar, readAvatar, sha256Hex } from './publicAvatar'
+import { AVATAR_PATH, dataUriImage, identiconPng, identiconSeed, publishAvatar, readAvatar, serviceIconPng, sha256Hex } from './publicAvatar'
 import { onRequest } from '../a/[[path]]'
 
 const ORIGIN = 'https://cw.example.test'
@@ -33,6 +33,16 @@ describe('identicons', () => {
       seed.every((b, i) => b === bare[i]),
       (await identiconSeed('other-secret', 'ann@example.test')).every((b, i) => b === seed[i]),
     ]).toEqual([32, false, false])
+  })
+})
+
+describe('the service face', () => {
+  it('is one valid 120 px PNG, the same every time, unlike any identicon', async () => {
+    const png = serviceIconPng()
+    const v = validateUploadedImage(png)
+    const idents = await Promise.all(['grant:cw-scan-job', 'grant:gcs-snapshot-job'].map(async x => sha256Hex(identiconPng(await identiconSeed(SECRET, x)))))
+    expect([v.type, v.bytes.length === png.length, await sha256Hex(serviceIconPng()) === await sha256Hex(png), idents.includes(await sha256Hex(png))])
+      .toEqual(['image/png', true, true, false])
   })
 })
 
@@ -127,11 +137,14 @@ describe('senders', () => {
     grant('2EjUTg692KMP', null, null)
     grant('8ryPLkfsLwhC', 'loombot-link', { name: 'LoomBot', avatar: dataUri(tiny) })
     grant('Gx0000000001', 'gcs-snapshot-job', null)
+    grant('Gx0000000002', 'cw-scan-job', null)
+    grant('Gx0000000003', 'hf-scan-job', { name: 'HF scan', avatar: dataUri(tiny) })
+    raw.prepare("UPDATE grants SET service = 1 WHERE id IN ('Gx0000000002', 'Gx0000000003')").run()
     return { db, env: { DB: db, SESSION_SECRET: SECRET } }
   }
   const gen = async (actor: string) => `${ORIGIN}/a/${await sha256Hex(identiconPng(await identiconSeed(SECRET, actor)))}.png`
 
-  it('a profile\'s name and face; a grant\'s holder name and face, else its label, else its id prefix; else a generated face', async () => {
+  it('a profile\'s name and face; a grant\'s holder name and face, else its label, else its id prefix; else a generated face; a service says so, with the service face for none', async () => {
     const { env } = await setup()
     const face = `${ORIGIN}/a/${await sha256Hex(tiny)}.png`
     const as = (actor: string, via: string) => senderOf(env, { actor, via, origin: ORIGIN }, NOW)
@@ -142,6 +155,8 @@ describe('senders', () => {
       as('grant:gcs-snapshot-job', 'grant'),
       as('grant:2EjUTg692KMP', 'grant'),
       as('grant', 'grant'),
+      as('grant:cw-scan-job', 'grant'),
+      as('grant:hf-scan-job', 'grant'),
     ])).toEqual([
       { name: 'Ann Lee', icon: face },
       { name: 'bob', icon: await gen('bob@example.test') },
@@ -149,6 +164,8 @@ describe('senders', () => {
       { name: 'gcs-snapshot-job', icon: await gen('grant:gcs-snapshot-job') },
       { name: 'grant 2EjU', icon: await gen('grant:2EjUTg692KMP') },
       { name: 'grant', icon: await gen('grant') },
+      { name: 'cw-scan-job (service)', icon: `${ORIGIN}/a/${await sha256Hex(serviceIconPng())}.png` },
+      { name: 'HF scan (service)', icon: face },
     ])
   })
 
