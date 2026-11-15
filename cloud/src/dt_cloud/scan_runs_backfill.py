@@ -145,14 +145,22 @@ def run_of(profile: Profile, kind: JobKind, job: Mapping, lines: Sequence[tuple[
     status = BATCH_STATES.get(state)
     if not scan or not status:
         return None
-    if status == "succeeded" and profile.nop_marker and any(re.search(profile.nop_marker, x) for _, x in lines):
+    nop_marker = kind.nop_marker or profile.nop_marker
+    if status == "succeeded" and nop_marker and any(re.search(nop_marker, x) for _, x in lines):
         status = "nop"
     run = Run(run_id=job["uid"], scan=scan, kind=kind.kind, status=status, source="backfill", store=profile.store, **jf)
     if parent := _commands(job)[3].get("SCAN_ROOT_UID"):
         run = replace(run, parent=parent)
     if status == "failed":
         run = replace(run, error=failure_of(profile, job, lines))
-    return Record(run, tuple(phases_of(profile, lines, jf["started_ts"])))
+    phases = tuple(phases_of(profile, lines, jf["started_ts"]))
+    if not phases and kind.single_phase:
+        note = "skipped: job reported no work" if status == "nop" else "backfilled from Batch task window; no phase markers retained"
+        phases = (Phase(kind.single_phase, 0, run.started_ts, run.finished_ts,
+                        "running" if status == "running" else "failed" if status == "failed" else "done", note),)
+        if status == "failed":
+            run = replace(run, failed_phase=kind.single_phase)
+    return Record(run, phases)
 
 
 def gens_under(profile: Profile, scan: str, store: ObjectStore) -> list[str]:
