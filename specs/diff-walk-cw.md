@@ -1,6 +1,6 @@
 # Why `cloud`'s diff walk is slower cold on cw (#44)
 
-Status: root-caused 2026-11-15. cw stays on its level-by-level walk (`410f0338e`); `cloud`'s heaviest-first walk is parked on `w/cloud-walk` (`57897f629`). Data: `tmp/difflk/st/` (untracked).
+Status: closed 2026-11-15 at option 1. cw keeps its level-by-level walk (`410f0338e`) and gcs stays at `DIFF_LOOKUP_CAP = "32"`. `cloud`'s heaviest-first walk is parked on `w/cloud-walk` (`57897f629`); none of the three locality attempts below tied cw's walk on cold latency. Data: `tmp/difflk/st/` (untracked).
 
 ## Setup
 
@@ -79,6 +79,41 @@ gcs runs `cloud`'s walk at `DIFF_LOOKUP_CAP = "32"`, and its 2026-11-13 sweep re
 ## D1 handles
 
 The D1 loop has the same per-depth [min, max] and halving shape: each halving is a D1 query, not a footer decode. A single pass doesn't fit D1 as is: each rectangle binds 4 values, and D1 allows 100 bound parameters per query, so about 24 asks per query. That would mean chunked parallel queries. No deployment's diff lookups use D1 handles today.
+
+## Attempts to restore locality (all parked, none adopted)
+
+Each attempt was benched against cw's walk (`st-a`) on the same 10 cases, cold full diff, with `diff-bench -n 2` and the named rows `value.py` reports against `st-a`.
+
+| Attempt | Branch | Cold full median (ms) | Δ med | slower | p | Named rows lost / gained |
+|---|---|---|---|---|---|---|
+| (b) riders, cap 32 | `w/walk-b` `c4c073535` | 784 → 1008 | +170 | 14/20 | 0.12 | Σ321 / Σ7,733 TB |
+| (b) riders, cap 96 | | 734 → 1460 | +661 | 10/10 | 0.002 | Σ59 / Σ8,849 TB |
+| (b) riders, cap 240 | | 732 → 968 | +236 | 13/20 | 0.26 | Σ8 / Σ8,933 TB |
+| (b2) row-group budget 80 | `w/walk-b2` `3e37146d3` | 665 → 1045 | +455 | 16/20 | 0.012 | Σ22 / Σ7,754 TB |
+| (b2) row-group budget 120 | | 628 → 1076 | +387 | 9/10 | 0.021 | Σ9 / Σ8,287 TB |
+| (b3) b2 + footer budget 60 | `w/walk-b3` `c039e0c78` | 684 → 1024 | +476 | 16/20 | 0.012 | Σ22 / Σ7,754 TB |
+
+**(b) Riders.** A round's decoded row groups also answer the pending names whose every row they hold, on every tier: a depth strictly between a multi-depth group's first and last, or a path strictly inside a single-depth group's bounds. Riders take no budget.
+
+They are not free. At cap 32, against `cloud`'s walk without them (`dl-c` → `wb32`): 868 → 890 ms, Δ med +112, 15/20 slower, p 0.041. An answered name settles its children into later rounds. Riders only trade latency for coverage.
+
+**(b2) Row-group budget.** A round plans its candidates' groups without decoding (`planAsks` `whole`, an exact per-ask `pointGroups` on footer tiers, memoised per name), then takes names by weight while the row groups they add fit.
+
+It bounds the groups read, but not the plan: planning every candidate decoded a footer group per scattered name (root 1 w: 90 footer groups, 206 names then skipped).
+
+**(b3) Footer budget first.** Candidates are priced in footer groups from the footer index's own bounds (`footerCover`, no read), and only those that fit 60 are planned. That bounds planning too (root 1 w: 61 footer groups, walk 1.1 s, from 1.85 s), but the round still decodes about 200 row-group reads over 4 rounds, against cw's walk's ~80.
+
+**Conclusion.** cw's level walk is cheap because its lookups are siblings: one depth at a time, a few parents, so a few footer groups and row groups hold them all. Heaviest-first picks names from many parents at many depths; on a `(depth, path)` sort they share neither. Each budget bounds one cost and leaves the walk paying more than the level walk for the deep names it adds, which are its whole point: Σ7.7–8.9 PB gained.
+
+## A separate lever: the docs each diff reads
+
+On both walks, a diff's lookup cost on cw is colo Cache API reads of decoded docs:
+- footer-group docs, about 1 MB of JSON each;
+- row-group docs, about 0.3 MB gzipped and 2 MB of JSON.
+
+cw's walk reads about 50–80 of each on a wide diff. Server-Timing shows the waits: `footer` about 0.5 s and `groups` about 0.5 s median, summed over concurrent reads. It cannot show the JSON parse, because Workers' clock advances only across I/O; `gjson`, the parse step it does time, reads 19 ms median.
+
+A compact or binary encoding, or smaller docs, would shrink each read and parse on every diff, whichever walk. Size it by wall time (`diff-bench`'s cold medians), not Server-Timing, before building it.
 
 ## Options
 
