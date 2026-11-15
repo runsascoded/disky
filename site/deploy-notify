@@ -96,8 +96,8 @@ def headline(value: dict) -> str:
 
 
 def render(value: dict) -> str:
-    """The notice's one line: source, warnings (a dirty or unrecorded tree, an unverified success), who, the CF
-    deployment and links. A clean tree and a passed verification are the norm, so they say nothing."""
+    """The notice's one line: source, warnings (a dirty or unrecorded tree, an unverified success), who, the attempt
+    (its id's first 8 characters: which receipt this is), the CF deployment and links. A clean tree and a passed verification are the norm, so they say nothing."""
     r = receipt(value)
     repo = f"https://github.com/{r['repository']}"
     source = [f"[{r['source_branch']}]({repo}/tree/{quote(r['source_branch'], safe='/')})"] if r['source_branch'] else []
@@ -115,6 +115,7 @@ def render(value: dict) -> str:
             parts.append(f":gh: [{r['actor']}](https://github.com/{r['actor']})")
         else:
             parts.append(f"{':gh:' if r['actor_source'] == 'github' else ':computer:'} `{r['actor']}`")
+    parts.append(f"attempt `{r['attempt'][:8]}`")
     if r['cloudflare_deployment']:
         cf = r['cloudflare_deployment']
         parts.append(f":cf: [{cf}]({r['cloudflare_url']})" if r['cloudflare_url'] else f':cf: `{cf}`')

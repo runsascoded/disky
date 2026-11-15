@@ -25,14 +25,14 @@ def doc(**changes):
     return {
         'notice_version': 1, 'deployment': 'hf', 'mode': 'dev', 'status': 'success', 'stage': 'finish',
         'sha': SHA, 'source_branch': 'hf', 'repository': 'Open-Athena/disky', 'host': 'dev.hf.oa.dev',
-        'verified': True, 'dirty': False, 'actor': 'louisa', 'actor_source': 'github', 'attempt': '123-1',
+        'verified': True, 'dirty': False, 'actor': 'louisa', 'actor_source': 'github', 'attempt': 'df94aa1e-1922-4f93-86ec-5110e231222d',
         'cloudflare_deployment': 'abcdef12', 'cloudflare_url': 'https://abcdef12.oa-hf-usage.pages.dev',
         'run_url': 'https://github.com/Open-Athena/disky/actions/runs/123', **changes,
     }
 
 
 REPO = 'https://github.com/Open-Athena/disky'
-SUCCESS = (f'[hf]({REPO}/tree/hf) ([bbbbbbbbb]({REPO}/commit/{SHA})) · :gh: [louisa](https://github.com/louisa)'
+SUCCESS = (f'[hf]({REPO}/tree/hf) ([bbbbbbbbb]({REPO}/commit/{SHA})) · :gh: [louisa](https://github.com/louisa) · attempt `df94aa1e`'
            f' · :cf: [abcdef12](https://abcdef12.oa-hf-usage.pages.dev) · [site](https://dev.hf.oa.dev) · [logs]({REPO}/actions/runs/123)\n')
 SENDER = '✅ HF dev deployment succeeded'
 
@@ -59,14 +59,14 @@ def test_render_build_failure_has_no_fictitious_cf_receipt_or_verification():
                 cloudflare_url=None, actor=None, actor_source=None, sha=None, source_branch=None)
     assert (N.headline(value), N.render(value)) == (
         '❌ HF dev deployment failed during build',
-        f'source not recorded · [site](https://dev.hf.oa.dev) · [logs]({REPO}/actions/runs/123)\n',
+        f'source not recorded · attempt `df94aa1e` · [site](https://dev.hf.oa.dev) · [logs]({REPO}/actions/runs/123)\n',
     )
 
 
 def test_render_unverified_dirty_manual_upload_and_cancellation():
     value = doc(mode='prod', host='hf.oa.dev', verified=False, dirty=True, actor_source='local', run_url=None)
     expected = (f'[hf]({REPO}/tree/hf) ([bbbbbbbbb]({REPO}/commit/{SHA})) · ⚠️ dirty · ⚠️ unverified · :computer: `louisa`'
-                ' · :cf: [abcdef12](https://abcdef12.oa-hf-usage.pages.dev) · [site](https://hf.oa.dev)\n')
+                ' · attempt `df94aa1e` · :cf: [abcdef12](https://abcdef12.oa-hf-usage.pages.dev) · [site](https://hf.oa.dev)\n')
     assert (N.headline(value), N.render(value)) == ('✅ HF prod deployment succeeded', expected)
     # a cancellation isn't a success, so it isn't "unverified"; an unrecorded tree says so
     cancelled = {**value, 'status': 'cancelled', 'dirty': None}
@@ -92,7 +92,7 @@ def test_invalid_or_injectable_receipt_is_refused(changes, message):
 
 ENV = {'DEPLOY_NOTIFICATIONS_ENABLED': '1', 'SLACK_DEPLOY_BOT_TOKEN': 'xoxb-test-token', 'SLACK_DEPLOY_CHANNEL': 'C0TESTCHAN'}
 BOT = ('U0BOT', 'B0BOT')
-WIRE = (f'<{REPO}/tree/hf|hf> (<{REPO}/commit/{SHA}|bbbbbbbbb>) · :gh: <https://github.com/louisa|louisa>'
+WIRE = (f'<{REPO}/tree/hf|hf> (<{REPO}/commit/{SHA}|bbbbbbbbb>) · :gh: <https://github.com/louisa|louisa> · attempt `df94aa1e`'
         f' · :cf: <https://abcdef12.oa-hf-usage.pages.dev|abcdef12> · <https://dev.hf.oa.dev|site> · <{REPO}/actions/runs/123|logs>\n')
 
 
