@@ -4,6 +4,7 @@ import type { Env } from '../_lib/auth'
 import { sqliteD1 } from '../_lib/testD1'
 import { ownerIdFor, resolveUser } from '../_lib/me'
 import { CACHE_V } from '../_lib/edgeCache'
+import { WALK_V } from '../_lib/view'
 
 // `me` resolution (`_lib/me.ts`) and its cache keys: a `lens=user:me` read
 // must key the shared edge cache on the caller's resolved id — the same key
@@ -128,7 +129,7 @@ describe('D1', () => {
       const alan = await envAs('alan@example.test')
       await diff(at(alan, `${D}&lens=user:me`))
       await diff(at(alan, `${D}&lens=user:alan-turing`))
-      const key = `https://diff.cache/v${CACHE_V}/2026-09-01/2026-10-01/marin-a?w=1280&h=896&a=12&t=2&n=500&l=user:alan-turing&o=&cl=&qs=&q=&head=7&s=0&D=&g=g1&st=`
+      const key = `https://diff.cache/v${CACHE_V}/2026-09-01/2026-10-01/marin-a?w=1280&h=896&a=12&t=2&n=500&l=user:alan-turing&o=&cl=&qs=&q=&head=7&s=0&D=&g=g1&st=&wv=${WALK_V}`
       expect(keys).toEqual([key, key])
     })
     it('/api/series', async () => {

@@ -38,6 +38,7 @@ ROOT_LABEL = "Marin CoreWeave"  # the store root's crumb label (`_lib/view.ts`)
 # Deployment as configuration (the base's `vite.config.ts` reads these from
 # this file at build time; `src/stores.ts` registry key + client whoami source):
 STORE = "cw"                    # the store this build serves (`src/stores.ts`)
+DIFF_LOOKUP_CAP = "32"   # cloud's diff walk with a 32-lookup budget, as gcs (cw sweep 2026-11-14 vs the reverted walk: tmp/difflk)
 MARK = "cw"                     # favicon/badge: the CoreWeave mark (`public/icons/cw*`; the build injects the links)
 PROD_HOST = "cw.oa.dev"         # `g d` toggles with DEV_HOST (src/hosts.ts)
 DEV_HOST = "dev.cw.oa.dev"
@@ -201,6 +202,7 @@ database_name = "oa-cw-s3-usage-db"   # the SAME ledger as prod (marks made on d
 database_id = "7f1e1326-b879-4ecd-8621-846621c24f36"
 
 [env.preview.vars]
+DIFF_LOOKUP_CAP = "32"   # cloud's diff walk with a 32-lookup budget, as gcs (cw sweep 2026-11-14 vs the reverted walk: tmp/difflk)
 PROD_HOST = "cw.oa.dev"
 DEV_HOST = "dev.cw.oa.dev"
 REPO_URL = "https://github.com/Open-Athena/marin-gcs-usage"

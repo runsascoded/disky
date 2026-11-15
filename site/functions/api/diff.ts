@@ -18,7 +18,7 @@ import { DESCENT_V } from '../_lib/diffDescent.js'
 import { DiffUnavailable, intervalsOn, ivRefusal, ivRetry, pathGens, withPathStore, storeReady, type Lens } from '../_lib/index.js'
 import { hasLedger, ledgerHead } from '../_lib/ledger.js'
 import { classKey, parseClasses, parseOwner, queryParam, QueryError } from '../_lib/scope.js'
-import { ATTEN_DEFAULT, buildDiff, type DiffRow, type DiffSides, FILTER_VIEW_V, LensUnavailable, lookupCapOf, MIN_AREA_DEFAULT, NotFound, QUANT, readRootAgg, scopedTag } from '../_lib/view.js'
+import { ATTEN_DEFAULT, buildDiff, type DiffRow, type DiffSides, FILTER_VIEW_V, LensUnavailable, lookupCapOf, MIN_AREA_DEFAULT, NotFound, QUANT, readRootAgg, scopedTag, WALK_V } from '../_lib/view.js'
 import { hexNote, hexQuery, indexedGate, staticTag } from '../_lib/staticFilter.js'
 import { FilterRejected, indexedOnly, pathTerms, rejectBody, rejectQuery, rejectScope } from '../_lib/indexedOnly.js'
 import { cacheEnvTag, cacheKeyFor, cacheMatch, cacheStore, cutReason, isPartial, keepFor, serverTiming, UPGRADE_PHASE2_MS, UPGRADE_SEARCH_LIMITS, UPGRADE_WALK_MS, upgradePartial } from '../_lib/edgeCache.js'
@@ -134,6 +134,8 @@ async function diffGated(
   const keyOf = (head: number, g: string, lensTag: string, descent: boolean) => cacheKeyFor('diff', cacheEnvTag(ctx.env, ctx.request),
     `${from}/${to}/${encodeURIComponent(path)}?w=${w}&h=${h}&a=${minArea}&t=${atten}&n=${top}&l=${lensTag}` +
       `&o=${rawOwner ?? ''}&cl=${classKey(classes)}&qs=${query ? qp.syntax : ''}&q=${encodeURIComponent(query ? qRaw : '')}&head=${head}&s=${summary ? 1 : 0}&D=${depth ?? ''}&g=${g}&st=${staticTag(ctx.env, query)}${query ? `&fv=${FILTER_VIEW_V}` : ''}` +
+      // The walk's answer version (a summary has no walk: its key stays).
+      (summary ? '' : `&wv=${WALK_V}`) +
       // The deployment's lookup budget, where it sets one (absent otherwise, so no other key moves).
       (summary || !ctx.env.DIFF_LOOKUP_CAP?.trim() ? '' : `&lc=${lookupCapOf(ctx.env)}`) +
       // A scoped read's answer version, where the diff is one (absent otherwise, so no other key moves).
