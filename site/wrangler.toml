@@ -68,6 +68,8 @@ STORE_PREFIXES = "listing/,snapshots/,sweep/,cw-sweep/,cw-l2/"
 # allowlist on top of this (`ADMIN_EMAILS` says the table exists here).
 STAFF_DOMAIN = "openathena.ai"
 ADMIN_EMAILS = "1"
+OA_LOGIN_ISSUER = "https://login.oa.dev"   # "Sign in with OA" (specs/oa-login-rp.md): OA's broker
+OA_LOGIN_CLIENT_ID = "disky-cw"            # broker client, callbacks https://{,dev.}cw.oa.dev/auth/oa/callback; inert until the secret OA_LOGIN_CLIENT_SECRET is set
 # Sweep executor config (specs/oa-decoupling.md step 0; today's cwBatch/gcp.ts
 # values, which `cloud` stops defaulting): the plan-sweep job's data bucket,
 # GCP project, image and CoreWeave S3 endpoint.
@@ -222,6 +224,8 @@ SNAPSHOTS_SUBDIR = "cw"
 STORE_PREFIXES = "listing/,snapshots/,sweep/,cw-sweep/,cw-l2/"
 STAFF_DOMAIN = "openathena.ai"
 ADMIN_EMAILS = "1"
+OA_LOGIN_ISSUER = "https://login.oa.dev"   # "Sign in with OA" (specs/oa-login-rp.md): OA's broker
+OA_LOGIN_CLIENT_ID = "disky-cw"            # broker client, callbacks https://{,dev.}cw.oa.dev/auth/oa/callback; inert until the secret OA_LOGIN_CLIENT_SECRET is set
 # Sweep executor config (specs/oa-decoupling.md step 0; today's cwBatch/gcp.ts
 # values, which `cloud` stops defaulting): the plan-sweep job's data bucket,
 # GCP project, image and CoreWeave S3 endpoint.
