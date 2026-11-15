@@ -3,8 +3,10 @@ from importlib.machinery import SourceFileLoader
 from importlib.util import module_from_spec, spec_from_loader
 from json import dumps, loads
 from pathlib import Path
+from re import findall
+from shlex import split
 
-from click import ClickException
+from click import Argument, ClickException, Option
 from click.testing import CliRunner
 import pytest
 
@@ -14,6 +16,9 @@ loader = SourceFileLoader('oa_release', str(ROOT / 'scripts/oa-release'))
 spec = spec_from_loader(loader.name, loader)
 release = module_from_spec(spec)
 loader.exec_module(release)
+notify_loader = SourceFileLoader('deploy_notify', str(ROOT / 'site/deploy-notify'))
+notify = module_from_spec(spec_from_loader(notify_loader.name, notify_loader))
+notify_loader.exec_module(notify)
 SHA = 'a' * 40
 REPO = 'Open-Athena/disky'
 
@@ -337,6 +342,111 @@ def test_workflow_guards_and_secret_boundaries():
     assert [(step['name'], step['if'], step['continue-on-error']) for step in notice] == [
         ('Deploy notice', "always() && vars.DEPLOY_NOTIFICATIONS_ENABLED == '1'", 'true'),
     ]
+
+
+def workflow() -> dict:
+    from yaml import BaseLoader, load
+    return load((ROOT / '.github/workflows/oa-release.yml').read_text(), Loader=BaseLoader)
+
+
+def test_controller_is_cloud_pinned_once_and_source_is_the_release_sha():
+    """The default branch's stub runs `cloud`'s scripts: `plan` checks out `cloud` and outputs its sha, the later jobs
+    check out exactly that sha (never a `cloud` that moved meanwhile), and the source checkout stays the planned sha."""
+    jobs = workflow()['jobs']
+    checkouts = {
+        key: [(step['with'].get('path', '.'), step['with']['ref'], step['with']['persist-credentials'])
+              for step in jobs[key]['steps'] if step.get('uses') == 'actions/checkout@v4']
+        for key in jobs
+    }
+    pinned = ('control', '${{ needs.plan.outputs.control_sha }}', 'false')
+    source = ('source', '${{ needs.plan.outputs.sha }}', 'false')
+    assert checkouts == {
+        'plan': [('control', 'refs/heads/cloud', 'false')],
+        'build': [pinned, source],
+        'release': [pinned, source],
+    }
+    assert jobs['plan']['outputs']['control_sha'] == '${{ steps.control.outputs.sha }}'
+    steps = [(step.get('id'), step.get('uses'), step.get('name')) for step in jobs['plan']['steps']]
+    assert steps == [
+        (None, 'actions/checkout@v4', None),
+        ('control', None, "Pin the controller to `cloud`'s sha; this stub must be `cloud`'s copy"),
+        (None, 'astral-sh/setup-uv@v6', None),
+        ('plan', None, None),
+    ]
+    control = jobs['plan']['steps'][1]['run']
+    assert [line.strip() for line in control.splitlines() if 'cmp ' in line or 'GITHUB_OUTPUT' in line] == [
+        'if ! cmp "$RUNNER_TEMP/stub.yml" control/.github/workflows/oa-release.yml; then',
+        'echo "sha=$sha" >> "$GITHUB_OUTPUT"',
+    ]
+
+
+#: The stub's array expansions, as the flags they can hold (`verified=(-v)`, or none)
+EXPANSIONS = {'${verified[@]}': ['-v']}
+
+
+def invocations(script: str) -> list[list[str]]:
+    """Each `control/<script> …` call in the stub's `run:` blocks, as argv (continuations joined, cut at `;`)."""
+    calls = []
+    for job in workflow()['jobs'].values():
+        for step in job['steps']:
+            for line in step.get('run', '').replace('\\\n', ' ').splitlines():
+                for call in findall(rf'control/{script} ([^;]*)', line):
+                    calls.append([token for raw in split(call) for token in EXPANSIONS.get(raw, [raw])])
+    return calls
+
+
+def parse(cli, argv: list[str]) -> tuple[str, list[str], list[str]]:
+    """ARGV against CLI's own declaration: a known subcommand, known options (each with its value), every required
+    option, and exactly its positional arguments. Returns (subcommand, the options given, the positionals)."""
+    name, *rest = argv
+    command = cli.commands[name]
+    options = {flag: param for param in command.params if isinstance(param, Option) for flag in param.opts}
+    given, positional, tokens = [], [], iter(rest)
+    for token in tokens:
+        if token.startswith('-'):
+            param = options[token]
+            given.append(param.name)
+            if not param.is_flag:
+                next(tokens)
+        else:
+            positional.append(token)
+    required = sorted(param.name for param in command.params if isinstance(param, Option) and param.required)
+    assert sorted(set(given) & set(required)) == required, argv
+    assert len(positional) == len([param for param in command.params if isinstance(param, Argument)]), argv
+    return name, sorted(given), positional
+
+
+def test_stub_calls_parse_against_the_scripts():
+    """The contract between `front-door`'s stub and `cloud`'s scripts: every call the stub makes parses against that
+    script's own CLI, so a script change that breaks one fails here, on `cloud`, before a release can run it."""
+    assert [parse(release.main, argv) for argv in invocations('scripts/oa-release')] == [
+        ('plan', ['event', 'event_name', 'output', 'repository'], []),
+        ('plan', ['event', 'event_name', 'output', 'repository'], []),
+        ('seal', ['output', 'plan_path'], ['source']),
+        ('plan', ['event', 'event_name', 'output', 'repository'], []),
+        ('begin', ['output', 'plan_path', 'seal_path'], ['source']),
+        ('finish', [], ['receipt.json']),
+        ('finish', ['failed'], ['receipt.json']),
+    ]
+    assert [parse(notify.main, argv) for argv in invocations('site/deploy-notify')] == [
+        ('record', ['config_path', 'dirty', 'mode', 'output', 'sha', 'stage', 'status', 'upload_log', 'verified'], []),
+        ('send', ['execute'], ['notice.json']),
+    ]
+
+
+def test_stub_reads_exactly_the_outputs_plan_writes(tmp_path, monkeypatch):
+    """`plan`'s `$GITHUB_OUTPUT` keys are exactly the `steps.plan.outputs.*` the stub reads."""
+    planned = {'sha': SHA, 'source_branch': 'hf', 'mode': 'dev', 'environment': 'hf-dev', 'project': 'oa-hf-usage',
+               'pages_branch': 'dev', 'host': 'dev.hf.oa.dev', 'repository': REPO}
+    monkeypatch.setattr(release, 'plan_release', lambda event, event_name, repository: planned)
+    event, out = tmp_path / 'event.json', tmp_path / 'github_output'
+    event.write_text('{}')
+    monkeypatch.setenv('GITHUB_OUTPUT', str(out))
+    result = CliRunner().invoke(release.main, ['plan', '-e', str(event), '-n', 'workflow_run', '-r', REPO, '-o', str(tmp_path / 'plan.json')])
+    assert result.exit_code == 0, result.output
+    written = sorted(line.split('=', 1)[0] for line in out.read_text().splitlines())
+    read = sorted(set(findall(r'steps\.plan\.outputs\.(\w+)', (ROOT / '.github/workflows/oa-release.yml').read_text())))
+    assert read == written == ['environment', 'host', 'mode', 'pages_branch', 'project', 'sha', 'source_branch']
 
 
 @pytest.mark.parametrize(('head', 'dirty', 'message'), [

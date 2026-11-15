@@ -71,6 +71,43 @@ def test_an_unlabelled_spec_is_refused_before_any_resource(tmp_path, monkeypatch
     assert mocks.resources == {}
 
 
+@pulumi.runtime.test
+def test_a_spec_the_stack_rendered_itself_is_handed_over_as_is(tmp_path, monkeypatch):
+    mocks = Mocks()
+    pulumi.runtime.set_mocks(mocks, project="test", stack="test", preview=False)
+    monkeypatch.setenv("DISKY_LABELS", "app=disky,deployment=gcs")
+    script = tmp_path / "scan-submit.sh"
+    script.write_text(SCRIPT)
+    c = BatchSubmitCron(
+        "daily", project="p", region="us-east1", job="daily-submit", trigger="daily", schedule="0 7 * * *",
+        submitter=LABELLED, script=script, sa_email="job@p", image="img:latest", secret_env={}, adopt=Adopt(False),
+    )
+
+    def check(_):
+        envs = mocks.resources["daily-submit"][1]["template"]["template"]["containers"][0]["envs"]
+        assert envs == [
+            {"name": "BATCH_SPEC", "value": json.dumps(LABELLED, sort_keys=True)},
+            {"name": "DISKY_LABELS", "value": "app=disky,deployment=gcs"},
+        ]
+
+    return c.cron.name.apply(check)
+
+
+def test_an_unlabelled_rendered_spec_is_refused_before_any_resource(tmp_path, monkeypatch):
+    mocks = Mocks()
+    pulumi.runtime.set_mocks(mocks, project="test", stack="test", preview=False)
+    monkeypatch.setenv("DISKY_LABELS", "app=disky,deployment=gcs")
+    script = tmp_path / "scan-submit.sh"
+    script.write_text(SCRIPT)
+    with pytest.raises(ValueError) as e:
+        BatchSubmitCron(
+            "daily", project="p", region="us-east1", job="daily-submit", trigger="daily", schedule="0 7 * * *",
+            submitter=SPEC, script=script, sa_email="job@p", image="img:latest", secret_env={}, adopt=Adopt(False),
+        )
+    assert str(e.value).split(" (")[0] == "cron daily: its Batch job's labels lack app, deployment, component"
+    assert mocks.resources == {}
+
+
 def dispatchable(tmp_path: Path) -> BatchSubmitCron:
     script = tmp_path / "job" / "scan-submit.sh"
     sub = submitter(tmp_path, SPEC, ["job", "allocation"])

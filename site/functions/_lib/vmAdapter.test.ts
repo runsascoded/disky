@@ -12,7 +12,7 @@ describe('vmRequest', () => {
       { not_in: [''] }, { in: [''] }, { not_in: ['', 'a', 'b'] }, { in: ['u1'] }, undefined,
     ])
     const q = { alts: [[{ kind: 'sub' as const, text: 'ckpt' }]], neg: [] }
-    expect(vmRequest({ pins, date: '2026-11-13T1734', path: 'b1/', query: q, owner: 'owned', classes: new Set(['3', '2'] as const), w: 1280, h: 768, minArea: 12, atten: 2, deadlineMs: 5000 })).toEqual({
+    expect(vmRequest({ pins, date: '2026-11-13T1734', path: 'b1/', query: q, owner: 'owned', classes: new Set(['3', '2']), w: 1280, h: 768, minArea: 12, atten: 2, deadlineMs: 5000 })).toEqual({
       pins, scan: '2026-11-13T1734', path: 'b1', q, owners: { not_in: [''] }, classes: [2, 3], cell: { share_log2: 17, atten_log2: 1 }, deadline_ms: 5000,
     })
     expect(vmRequest({ pins, from: 'a', to: 'b', path: '', w: 256, h: 256, minArea: 16, atten: 1, maxDepth: 3 })).toEqual({
