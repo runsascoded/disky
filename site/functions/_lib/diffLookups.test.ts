@@ -2,7 +2,8 @@ import { beforeAll, describe, expect, it, vi } from 'vitest'
 import type { Env } from './auth'
 import { sqliteD1, type Sqlite, withLedger } from './testD1'
 import { type D1Variant, readJson, seedGeneration } from './testStore'
-import { buildDiff, type Diff, type DiffRow, LOOKUP_CAP, lookupCapOf } from './view'
+import type { Span } from './index'
+import { buildDiff, type Diff, type DiffRow, heldBy, LOOKUP_CAP, lookupCapOf } from './view'
 
 vi.mock('@rdub/file-tree/stores/s3', async () => ({ S3Store: (await import('./testStore')).S3Store }))
 
@@ -117,23 +118,15 @@ describe('a diff\'s lookups', () => {
     ])
   })
 
-  it('a budget short of the names is spent on the heaviest, whatever their depth', async () => {
-    // Two lookups: `del` (896 MiB, depth 1) and `deep/d1/big` (400, depth 3) before `shrink` (200) and `new1` (64),
-    // which stay in `bk`'s `(other)` on both scans (201 → 73 MiB with `tiny`).
+  it('a budget short of the names is spent on the heaviest, whatever their depth; their groups answer what they hold', async () => {
+    // Two lookups: `del` (896 MiB, depth 1) and `deep/d1/big` (400, depth 3) before `shrink` (200) and `new1` (64). B's
+    // one group spans depths 1–4 of `bk` (`bk/shrink` is depth 2, strictly inside): read for those two, it holds every
+    // row of `shrink` too, which is answered from it at no lookup (`heldBy`), and then what is under it. `new1` is A's
+    // to read: it stays in `bk`'s `(other)` on both scans (1 → 65 MiB with `tiny`).
     expect(await buildDiff(env, { ...base, from: A, to: B, lookupCap: 2 })).toEqual({
       ...WHOLE,
-      rows: [
-        row('deep', 1, 'dir', 'changed', 600, 200, 2, 1, x),
-        row('del', 1, 'dir', 'removed', 896, 0, 4, 0, x),
-        row('deep/d1', 2, 'dir', 'changed', 600, 200, 2, 1, x),
-        row('del/x', 2, 'dir', 'removed', 768, 0, 3, 0, x),
-        row('del/x/p', 3, 'dir', 'removed', 512, 0, 2, 0, x),
-        row('del/x/q', 3, 'dir', 'removed', 256, 0, 1, 0, x),
-        row('deep/d1/big', 3, 'file', 'removed', 400, 0, 1, 0),
-        ...DEL_BELOW,
-        row('(other)', 1, 'dir', 'changed', 201, 73, 3, 3),
-      ],
-      expansions: 7, lookups: 2, lookups_capped: true,
+      rows: [...WHOLE.rows.filter(r => r.path !== 'new1'), row('(other)', 1, 'dir', 'changed', 1, 65, 1, 2)],
+      lookups: 2, lookups_capped: true,
     })
   })
 
@@ -149,9 +142,11 @@ describe('a diff\'s lookups', () => {
     expect(got).toEqual(`GroupUnread: row group 0 of ${B}'s \`path\` sort has no metadata: its rows were not read`)
   })
 
-  it('a budget of exactly the names read is the whole answer', async () => {
-    // Six: the level-by-level walk spent them on `del`'s subtree (13 names one scan drew) and folded the rest.
-    expect(await buildDiff(env, { ...base, from: A, to: B, lookupCap: 6 })).toEqual(WHOLE)
+  it('a budget of the names read is the whole answer, less what their groups held', async () => {
+    // Six: the level-by-level walk spent them on `del`'s subtree (13 names one scan drew) and folded the rest. Here the
+    // first round reads `del` and `deep/d1/big` (its heaviest that fit with what may still follow), whose group holds
+    // `shrink` (as above): five lookups answer it all.
+    expect(await buildDiff(env, { ...base, from: A, to: B, lookupCap: 6 })).toEqual({ ...WHOLE, lookups: 5 })
     expect(await buildDiff(env, { ...base, from: A, to: B, lookupCap: 1e9 })).toEqual(WHOLE)
   })
 
@@ -175,6 +170,37 @@ describe('a diff\'s lookups', () => {
 // nothing to anyone), so "no row" is her absence at the path, not the path's: what the ledger assigns her under it is
 // still hers. Carol is assigned `keep/` and the object `shrink/a`: her view draws `shrink` and `shrink/a` on A (100
 // MiB), and on B (8 MiB) folds them under the floor.
+describe('`heldBy`: the pending names a round\'s row groups answer', () => {
+  const span = (rg: number, dMin: number, dMax: number, pMin: string, pMax: string, tier?: number): Span =>
+    ({ rg, dMin, dMax, pMin, pMax, bMax: 0, rowStart: 0, rowEnd: 0, ...(tier != null ? { tier } : {}) })
+  const ask = (d: number, cp: string) => ({ d, cp })
+  const names = (xs: { d: number; cp: string }[]) => xs.map(q => `${q.d}:${q.cp}`)
+
+  it('strictly inside a single-depth group\'s paths, or at a depth strictly inside a group over depths; never at a bound', () => {
+    const spans = [span(0, 3, 3, 'a/b/c', 'a/m/z'), span(1, 5, 8, 'a', 'z')]
+    expect(names(heldBy(spans, 1, [
+      ask(3, 'a/b/d'),      // inside the depth-3 group's paths
+      ask(3, 'a/b/c'),      // at its lower bound: the path's versions may begin in the previous group
+      ask(3, 'a/m/z'),      // at its upper bound: they may continue in the next
+      ask(2, 'a/b'),        // a depth no group holds
+      ask(6, 'q/r/s/t/u/v'), // depth 6 of the group over 5–8: every depth-6 row is in it, whatever its path
+      ask(7, 'a/b/c/d/e/f/g'),
+      ask(5, 'a/b/c/d/e'),  // its first depth: rows before its first key are in the previous group
+      ask(8, 'z/y/x/w/v/u/t/s'), // its last depth: rows past its last key are in the next
+    ]))).toEqual(['3:a/b/d', '6:q/r/s/t/u/v', '7:a/b/c/d/e/f/g'])
+  })
+
+  it('held on every tier, or not held: a run whose groups weren\'t read may hold a version of it', () => {
+    const base = span(0, 3, 3, 'a/b/a', 'a/b/z')
+    const run = span(7, 3, 3, 'a/b/c', 'a/b/m', 1)
+    expect([
+      names(heldBy([base], 1, [ask(3, 'a/b/d')])),
+      names(heldBy([base], 2, [ask(3, 'a/b/d')])),
+      names(heldBy([base, run], 2, [ask(3, 'a/b/d'), ask(3, 'a/b/x')])),
+    ]).toEqual([['3:a/b/d'], [], ['3:a/b/d']])
+  })
+})
+
 describe('a lens diff\'s lookups', () => {
   const LA = '2026-10-01T0001'
   const LB = '2026-10-02T0001'

@@ -3946,12 +3946,13 @@ function pointsPre(asks: Ask[]): Pre | undefined {
 
 /** Point lookups: exact `(depth, path)` rows or `(depth, under-prefix)`
  * ranges, many at once (the totals manifest's ~8k prefixes) — `keep` is the
- * caller's exact test over the rows of the candidate groups. */
+ * caller's exact test over the rows of the candidate groups. `onSpans`: the row groups the read will decode, each
+ * tagged with its tier, before it decodes them. */
 export async function readAsks(
   h: IndexHandle,
   asks: Ask[],
   keep: (r: Row) => boolean,
-  { columns, maxGroups = 60, spanCap = 4000, stop, rememberWide, versions = false, pre: pre0, lens }: { columns?: string[]; maxGroups?: number; spanCap?: number; stop?: () => boolean; rememberWide?: boolean; versions?: boolean; pre?: Pre; lens?: Lens } = {},
+  { columns, maxGroups = 60, spanCap = 4000, stop, rememberWide, versions = false, pre: pre0, lens, onSpans }: { columns?: string[]; maxGroups?: number; spanCap?: number; stop?: () => boolean; rememberWide?: boolean; versions?: boolean; pre?: Pre; lens?: Lens; onSpans?: (spans: Span[]) => void } = {},
 ): Promise<{ rows: Row[]; groups: number }> {
   const pre = pre0 ?? pointsPre(asks)
   // `rememberWide`: a lookup this isolate already found too wide (same generation, asks and budget) throws
@@ -4012,6 +4013,7 @@ export async function readAsks(
     }
     throw new Error(`lookup too wide: ${n} (cap ${maxGroups})`)
   }
+  onSpans?.(spans)
   t0 = now()
   if (h.runs?.length) {
     h.trace?.('ngroups', spans.length)
