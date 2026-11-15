@@ -2,6 +2,16 @@
 
 Running record of disk-cleanup passes on this Mac. Newest first. Each entry: what was scanned (free space before/after), what was deleted, and the **measured** bytes freed (`reclaim`/`overcount`, not apparent size).
 
+## Ingest sizing + #42 (2026-11-13 → 11-15): `$DT_MEM`, search index current, grant flags
+
+- **Free space:** 38 G free on 11/14. Nothing deleted this pass.
+- **Static-names OOM:** re-ingest `99fe2aef` SUCCEEDED, but `static-names add` was killed with exit -9 on a carry after `2026-11-03T1626.m001`. Fargate's microVM shows the host's ~31 GiB in `SC_PHYS_PAGES`, so the merge sized DuckDB at 23GB on a 16 GiB task.
+- **Fix:** `dt_cloud/task_size.py` makes `$DT_MEM` / `$DT_NPROC` size every stage (local ba3434241, cloud fc8755c22). The job def sets `DT_MEM=16GiB` and `aws/submit -m` passes its memory (1f35b57df). `pulumi up` on 11/15 built the image from ba1be94c6; the job def is at rev 45.
+- **Search index caught up before the fix shipped:** the scheduled ingests drained the backlog, then compacted it into generation `2026-10-15.c001` (`CURRENT`, 11/14 00:02). The newest manifest is `2026-11-14T1112` (job `890a6ee4`), so the planned catch-up re-submit wasn't needed.
+- **11/14 18:10 capture failed:** shard 3's PUT failed after 10 retries ("error sending request"). The whole walk had run ~15× slower than normal while the Mac crawled for unrelated reasons (memory, disk, thermal all fine; cause not found). It wrote no `_SUCCESS.json`, so no ingest ran.
+- **Merges:** cloud fb6c53318 → local f5cfea3b7 → m3 69969edf7, with fix-ups in ba1be94c6. This brings in service-account links (#42) and `cloud`'s descriptive map-node names. m3 still carries no owner ledger, so `test_owner_carry.py` was dropped.
+- **D1:** `grant-flags.sql` was applied to `disk-tree-m3-db` on 11/14 (the `grants.service` / `anon` columns). The site is not yet deployed on this merge; before deploying, run `pnpm install --frozen-lockfile` until root's f3950d4b3 lands.
+
 ## Ingest recovery (2026-11-11 → 11-12): failing Batch ingests, catch-up run
 
 - **Free space:** 32 G free on 11/11 (13 G on 11/07). Nothing deleted this pass.
