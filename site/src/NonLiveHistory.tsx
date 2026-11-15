@@ -13,6 +13,8 @@ const COLORS: Record<SeriesClass, string> = {
 }
 
 const fmtDay = (x: number) => new Date(x).toISOString().slice(0, 10)
+// the axis's ticks by month, ~3 of them: two years of ISO dates don't fit at phone width
+const fmtMonth = (x: number) => new Date(x).toISOString().slice(0, 7)
 
 /** The store's bytes as the provider bills them, day by day (`/api/non-live`: Cloud Monitoring's bucket totals, the scan
  *  step `non-live` with `source: metric`): live bytes, with each non-live class stacked on top. Folded under a summary;
@@ -50,7 +52,9 @@ export function NonLiveHistory() {
         getX={p => p.x}
         getY={p => p.y}
         getY0={p => p.y0}
-        formatX={fmtDay}
+        formatX={fmtMonth}
+        formatTipX={fmtDay}
+        xTicks={3}
         formatY={fmtBytes}
         yLabel="billed bytes"
         gaps={gaps}
