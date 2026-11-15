@@ -176,6 +176,10 @@ finish_deploy() {
   exit "$rc"
 }
 trap finish_deploy EXIT
+# The installed packages are the lockfile's, whatever this checkout last installed: a long-lived deploy checkout
+# otherwise bundles stale git deps (gcs 2026-11-14: auth dist e28704a shipped for the lockfile's 679de37, so /admin's
+# service toggle wrote nothing). A lockfile out of step with a package.json fails here, before anything is built.
+(cd .. && pnpm install --frozen-lockfile)
 export VITE_BUILD_ENVIRONMENT="$mode"
 if [ "$mode" = dev ]; then CLOUDFLARE_ENV=preview pnpm build; else pnpm build; fi
 # Source edited during the build: refused before anything is published, so there is no deployment to notice.
