@@ -1681,6 +1681,32 @@ function liveOn(h: PqHandle | BlobHandle): (g: { vfMin?: number; vtMax?: number 
   return g => (g.vfMin == null || g.vfMin <= (range?.[1] ?? D)) && (run || g.vtMax == null || (range?.[0] ?? D) < g.vtMax)
 }
 
+/** Whether bounds (a footer group's, from the footer index) may hold `a`'s rows: its depth in range, and on a
+ *  single-depth range its path too (a range over depths records its paths' min and max, not its ends). */
+function boundsMayHold(g: { dMin: number; dMax: number; pMin: string; pMax: string }, a: Ask): boolean {
+  if (g.dMax < a.depth || g.dMin > a.depth) return false
+  if (g.dMin !== g.dMax) return true
+  const r = askRect(a)
+  return !(g.pMax < r.pLo || g.pMin > r.pHi)
+}
+
+/** The footer groups each of `asks` would have decoded to plan it (`tier:n`), from the footer index's own bounds:
+ *  no read, no decode. A blob tier's groups are all in memory (none). Null on a handle with a D1 span table. */
+export function footerCover(h: IndexHandle, asks: Ask[]): string[][] | null {
+  const tiers = tiersOf(h)
+  if (tiers.some(t => t.mode === 'd1')) return null
+  const out = asks.map(() => [] as string[])
+  tiers.forEach((t, i) => {
+    if (t.mode !== 'pq') return
+    const live = liveOn(t)
+    for (const fg of t.footer.groups) {
+      if (fg.bounds && !live(fg.bounds)) continue
+      asks.forEach((a, j) => { if (!fg.bounds || boundsMayHold(fg.bounds, a)) out[j].push(`${i}:${fg.n}`) })
+    }
+  })
+  return out
+}
+
 /** `asks`' row groups on a footer-planned tier, exactly (`planAsks`' `whole`): each footer group's bounds against each
  *  ask, then each footer group's row groups against the asks its bounds hold. O(asks × footer groups + Σ a footer
  *  group's asks × its row groups): only footer groups that may hold an ask are decoded, where a rectangle per depth
@@ -1688,11 +1714,7 @@ function liveOn(h: PqHandle | BlobHandle): (g: { vfMin?: number; vtMax?: number 
  *  them). */
 async function pointGroups(t: PqHandle | BlobHandle, asks: Ask[]): Promise<Span[]> {
   const live = liveOn(t)
-  const holds = (g: { dMin: number; dMax: number; pMin: string; pMax: string }, a: Ask) => {
-    if (g.dMax < a.depth || g.dMin > a.depth || g.dMin !== g.dMax) return g.dMin <= a.depth && a.depth <= g.dMax
-    const r = askRect(a)
-    return !(g.pMax < r.pLo || g.pMin > r.pHi)
-  }
+  const holds = boundsMayHold
   const keep = (gs: BlobGroup[], mine: Ask[]) => gs.filter(g => live(g) && mine.some(a => groupMayHold(g, a)))
   if (t.mode === 'blob') return keep(t.groups, asks)
   const per = t.footer.groups.flatMap(fg => {

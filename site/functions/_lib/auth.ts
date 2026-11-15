@@ -164,6 +164,8 @@ export interface Env {
   DIFF_LOOKUP_CAP?: string
   /** The row groups a diff's lookups decode (`_lib/view.ts` `groupCapOf`): a count, `0` none; unset `GROUP_CAP`. */
   DIFF_GROUP_CAP?: string
+  /** The footer groups a diff's lookups decode to plan (`_lib/view.ts` `footerCapOf`): a count; unset `FOOTER_CAP`. */
+  DIFF_FOOTER_CAP?: string
   /** `1`: a lens, owner or class scoped series reads `SERIES_CHUNK` scans a request, the client filling the rest
    *  (`/api/series`' `chunks`, `readPathHistory`). Off until measured on dev (specs/root-owner-history.md). */
   OWNER_HISTORY_BATCH?: string

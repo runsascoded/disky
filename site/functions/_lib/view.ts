@@ -30,7 +30,7 @@ import { readerMetadata } from './readerWorker.js'
  * `f = n_children(P) − kept` — objects and dirs alike.
  */
 import type { Env } from './auth.js'
-import { asOfScans, coarsenRects, groupMayHold, coarsenSizeRects, folded, type IndexHandle, intervalsOn, isStore, ivHeldDates, ivLastRead, type Lens, openIndex, pathStoreKey, perScan, planRects, slices, planSizeRects, planAsks, readAsks, readFits, readRects, readRows, readPathHistoryRows, readSizeRects, readSlicesByFolded, readSpans, rowsClearFloors, readWhole, type Rect, type Row, sizeVariant, type Span, TooWide, type Trace, withTrace } from './index.js'
+import { asOfScans, coarsenRects, footerCover, groupMayHold, coarsenSizeRects, folded, type IndexHandle, intervalsOn, isStore, ivHeldDates, ivLastRead, type Lens, openIndex, pathStoreKey, perScan, planRects, slices, planSizeRects, planAsks, readAsks, readFits, readRects, readRows, readPathHistoryRows, readSizeRects, readSlicesByFolded, readSpans, rowsClearFloors, readWhole, type Rect, type Row, sizeVariant, type Span, TooWide, type Trace, withTrace } from './index.js'
 import { type FoldedLens, ownerLens, poolLens } from './owners.js'
 import { type ClassScope, classRow, nameFilter, type NamePred, ownerKey, ownerOk, type OwnerScope } from './scope.js'
 import { filterThreshold, looseThreshold, matchRoots, pickTier, rebasedThreshold, rootRects } from './filter.js'
@@ -2930,6 +2930,8 @@ export interface DiffOpts extends Omit<ViewOpts, 'date'> {
   lookupCap?: number
   /** …and its row-group budget, `GROUP_CAP` by default (tests). */
   groupCap?: number
+  /** …and its footer-group budget, `FOOTER_CAP` by default (tests). */
+  footerCap?: number
   walkMs?: number
   /** …by lazy descent over the interval store instead (`buildDiffDescent`): the route sets it with `DIFF_DESCENT`. Its
    *  planner hands a busy, broad P to the as-of walk (`HandOff`). */
@@ -3093,6 +3095,21 @@ export function groupCapOf(env: { DIFF_GROUP_CAP?: string }): number {
   if (!v) return GROUP_CAP
   const n = Number(v)
   if (!Number.isInteger(n) || n < 0) throw new Error(`DIFF_GROUP_CAP = "${v}": not a count`)
+  return n
+}
+/** The footer groups a diff's lookups decode to plan, at most. A footer group (an interval store's ~500 row groups'
+ *  bounds and metadata, ~1 MB decoded) is a decode as dear as a row group, and planning a round's candidates decoded
+ *  one per scattered name before the row-group budget chose among them. So a candidate is first priced from the footer
+ *  index's own bounds (`footerCover`: no read) and taken, heaviest first, while the footer groups it adds fit; only
+ *  those are planned. 60: the level-by-level walk's widest diff on cw's benchmark cases selected 76 (its others 24–64,
+ *  2026-11-15). */
+export const FOOTER_CAP = 60
+/** The deployment's footer-group budget: `DIFF_FOOTER_CAP` (a count ≥ 0), unset `FOOTER_CAP`. Anything else is an error. */
+export function footerCapOf(env: { DIFF_FOOTER_CAP?: string }): number {
+  const v = env.DIFF_FOOTER_CAP?.trim()
+  if (!v) return FOOTER_CAP
+  const n = Number(v)
+  if (!Number.isInteger(n) || n < 0) throw new Error(`DIFF_FOOTER_CAP = "${v}": not a count`)
   return n
 }
 /** The names among `riders` whose every row on each of a handle's `tiers` lies in `spans` (the row groups a read
@@ -3282,6 +3299,7 @@ export async function buildDiff(env0: Env, o: DiffOpts): Promise<Diff> {
   let lookupsOff = false
   const lookupCap = o.lookupCap ?? lookupCapOf(env0)
   const groupCap = o.groupCap ?? groupCapOf(env0)
+  const footerCap = o.footerCap ?? footerCapOf(env0)
   const walkMs = o.walkMs ?? FILTER_WALK_MS
   const walkOver = () => (late ||= !!query && performance.now() - walkStart > walkMs)
   // A side whose view root the query matches read it whole (no forest): that root is its one match, at its total.
@@ -3465,7 +3483,30 @@ export async function buildDiff(env0: Env, o: DiffOpts): Promise<Diff> {
    *  names those groups hold (`heldBy`). Null: a side's plan was too wide, and the round reads by name (`readSide`). */
   /** Each candidate's groups, planned once (`${side}:${cp}`): a name the budget passed over is offered again. */
   const planned = new Map<string, Span[]>()
-  const roundByGroups = async (cands: Ask[]): Promise<{ take: Ask[]; got: Map<string, Agg | null>[] } | null> => {
+  /** Footer groups planned (`${side}:${tier}:${n}`): held by the isolate's footer cache, a name they cover adds none. */
+  const footersDone = new Set<string>()
+  const roundByGroups = async (cands0: Ask[]): Promise<{ take: Ask[]; got: Map<string, Agg | null>[] } | null> => {
+    // The footer groups each unplanned candidate needs, from the footer index's bounds (no read): taken heaviest first
+    // while they fit `footerCap`; a planned one costs none.
+    const covers = new Map<Ask, string[]>()
+    for (const side of [1, 2] as const) {
+      const qs = cands0.filter(q => q.side === side && !planned.has(`${side}:${q.cp}`))
+      if (!qs.length) continue
+      // A handle with a D1 span table plans by query, decoding no footer: no footer cost.
+      const fc = footerCover(await fine(sideOf(side).date), qs.map(askOf1))
+      if (fc) qs.forEach((q, i) => covers.set(q, fc[i].map(k => `${side}:${k}`)))
+    }
+    const cands: Ask[] = []
+    for (const q of [...cands0].sort((x, y) => y.w - x.w || (x.cp < y.cp ? -1 : 1))) {
+      const fs = covers.get(q)
+      if (fs) {
+        const adds = fs.filter(k => !footersDone.has(k))
+        if (footersDone.size + adds.length > footerCap) continue
+        for (const k of adds) footersDone.add(k)
+      }
+      cands.push(q)
+    }
+    if (cands.length < cands0.length) tr?.('fskip', cands0.length - cands.length)
     try {
       await Promise.all(([1, 2] as const).map(async side => {
         const qs = cands.filter(q => q.side === side && !planned.has(`${side}:${q.cp}`))
