@@ -99,3 +99,10 @@ export function stackedBands(s: NonLiveSeries): { bands: Band[]; gaps: number[] 
   })
   return { bands, gaps: gaps.filter(x => x < (bands[0]?.points.at(-1)?.x ?? -Infinity) + DAY_MS) }
 }
+
+/** The x-axis label for a day series spanning `span` ms: months (`YYYY-MM`) once it covers ~3 months or more, else the
+ *  day (`MM-DD`); a short history's few ticks would otherwise all read as the same month. */
+export const axisDay = (span: number) =>
+  span >= 90 * DAY_MS
+    ? (x: number) => new Date(x).toISOString().slice(0, 7)
+    : (x: number) => new Date(x).toISOString().slice(5, 10)

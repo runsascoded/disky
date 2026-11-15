@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { classTotals, type NonLiveRow, type NonLiveSeries, stackedBands } from './nonLiveModel'
+import { axisDay, classTotals, type NonLiveRow, type NonLiveSeries, stackedBands } from './nonLiveModel'
 
 const row = (bucket: string, cls: NonLiveRow['class'], bytes: number, objects: number, expires_max: string | null = null): NonLiveRow =>
   ({ bucket, class: cls, prefix: '', bytes, objects, oldest: null, newest: null, expires_min: null, expires_max })
@@ -44,5 +44,19 @@ describe('stackedBands', () => {
       ],
       gaps: [x('2026-11-12')],
     })
+  })
+})
+
+describe('axisDay', () => {
+  const day = (iso: string) => Date.parse(`${iso}T00:00:00Z`)
+  it('labels months over a long history, days over a short one', () => {
+    const long = axisDay(day('2026-11-14') - day('2024-11-15'))
+    expect([day('2025-02-28'), day('2026-05-01')].map(long)).toEqual(['2025-02', '2026-05'])
+    const short = axisDay(day('2026-11-14') - day('2026-10-20'))
+    expect([day('2026-10-24'), day('2026-11-03'), day('2026-11-13')].map(short)).toEqual(['10-24', '11-03', '11-13'])
+  })
+  it('switches at 90 days', () => {
+    expect(axisDay(89 * 86_400_000)(day('2026-11-03'))).toBe('11-03')
+    expect(axisDay(90 * 86_400_000)(day('2026-11-03'))).toBe('2026-11')
   })
 })

@@ -1,7 +1,7 @@
 import { TimeSeries } from '@disk-tree/react'
 import { useQuery } from '@tanstack/react-query'
 import { useMemo } from 'react'
-import { CLASS_LABELS, type NonLiveSeries, type SeriesClass, stackedBands } from './nonLiveModel'
+import { axisDay, CLASS_LABELS, type NonLiveSeries, type SeriesClass, stackedBands } from './nonLiveModel'
 import { useUnits } from './units'
 
 const COLORS: Record<SeriesClass, string> = {
@@ -13,8 +13,6 @@ const COLORS: Record<SeriesClass, string> = {
 }
 
 const fmtDay = (x: number) => new Date(x).toISOString().slice(0, 10)
-// the axis's ticks by month, ~3 of them: two years of ISO dates don't fit at phone width
-const fmtMonth = (x: number) => new Date(x).toISOString().slice(0, 7)
 
 /** The store's bytes as the provider bills them, day by day (`/api/non-live`: Cloud Monitoring's bucket totals, the scan
  *  step `non-live` with `source: metric`): live bytes, with each non-live class stacked on top. Folded under a summary;
@@ -30,8 +28,11 @@ export function NonLiveHistory() {
     },
   })
   const stacked = useMemo(() => (q.data ? stackedBands(q.data) : null), [q.data])
-  if (!q.data || !stacked?.bands.length) return null
+  if (!q.data || !stacked?.bands[0]?.points.length) return null
   const { bands, gaps } = stacked
+  const xs = bands[0].points
+  // ~3 short labels: whole ISO dates don't fit at phone width
+  const fmtX = axisDay(xs.at(-1)!.x - xs[0].x)
   return (
     <details className="non-live-history">
       <summary className="dim">Billed bytes over time: live + {bands.slice(1).map(b => CLASS_LABELS[b.cls as keyof typeof CLASS_LABELS]).join(' + ') || 'nothing else'} (Cloud Monitoring, as of {q.data.as_of.slice(0, 10)})</summary>
@@ -52,7 +53,7 @@ export function NonLiveHistory() {
         getX={p => p.x}
         getY={p => p.y}
         getY0={p => p.y0}
-        formatX={fmtMonth}
+        formatX={fmtX}
         formatTipX={fmtDay}
         xTicks={3}
         formatY={fmtBytes}
