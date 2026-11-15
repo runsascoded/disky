@@ -6,7 +6,7 @@ import { type CoverItem, type RowMatches, rowMatchesOf } from './filterCover'
 
 // The table's own logic under a filter, with its surroundings stubbed: the selection is preset (`selected`),
 // and the trash controls render what they would send.
-const { selected, staged, acts, planItems, planStats } = vi.hoisted(() => ({ selected: new Set<string>(), staged: [] as string[][], acts: [] as { resolve: () => Promise<unknown> }[], planItems: [] as { prefix: string; kind?: 'prefix' | 'object' }[], planStats: { current: undefined as Record<string, { b: number; o: number }> | undefined } }))
+const { selected, staged, acts, planItems, planStats } = vi.hoisted(() => ({ selected: new Set<string>(), staged: [] as string[][], acts: [] as { resolve: () => Promise<unknown> }[], planItems: [] as { prefix: string; kind?: 'prefix' | 'object' }[], planStats: { current: undefined as Record<string, { bytes: number; objects: number }> | undefined } }))
 vi.mock('./auth', () => ({ useCanStage: () => true }))
 vi.mock('./store', () => ({ useStore: () => ({ staging: true }) }))
 vi.mock('./plans', () => ({
