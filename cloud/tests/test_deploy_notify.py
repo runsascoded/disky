@@ -234,14 +234,15 @@ def executable(path: Path, body: str):
 
 
 @pytest.mark.parametrize('configured_store,expected_deployment', [(None, 'demo-site'), ('hf', 'hf')])
-@pytest.mark.parametrize('build_rc,upload_rc,enabled,expected', [
-    (7, 0, False, (7, 'failure', 'build', None)),
-    (130, 0, False, (130, 'cancelled', 'build', None)),
-    (0, 9, False, (9, 'failure', 'upload', None)),
-    (0, 0, False, (0, 'success', 'finish', 'abcdef12')),
-    (0, 0, True, (0, 'success', 'finish', 'abcdef12')),
+@pytest.mark.parametrize('install_rc,build_rc,upload_rc,enabled,expected', [
+    (1, 0, 0, False, (1, 'failure', 'build', None)),
+    (0, 7, 0, False, (7, 'failure', 'build', None)),
+    (0, 130, 0, False, (130, 'cancelled', 'build', None)),
+    (0, 0, 9, False, (9, 'failure', 'upload', None)),
+    (0, 0, 0, False, (0, 'success', 'finish', 'abcdef12')),
+    (0, 0, 0, True, (0, 'success', 'finish', 'abcdef12')),
 ])
-def test_manual_hook_records_failures_and_preserves_original_exit_status(tmp_path, build_rc, upload_rc, enabled, expected, configured_store, expected_deployment):
+def test_manual_hook_records_failures_and_preserves_original_exit_status(tmp_path, install_rc, build_rc, upload_rc, enabled, expected, configured_store, expected_deployment):
     site = tmp_path / 'site'
     site.mkdir()
     for name in ('deploy', 'toml-check'):
@@ -260,7 +261,9 @@ SOURCE_REF = "hf"
     executable(bins / 'git', f'''import sys
 if sys.argv[1:]==['rev-parse','HEAD']: print('{SHA}')
 ''')
+    # `site/deploy` installs the lockfile's packages first (a frozen install, from the repo root), then builds, then uploads.
     executable(bins / 'pnpm', f'''import sys
+if sys.argv[1:]==['install','--frozen-lockfile']: sys.exit({install_rc})
 if sys.argv[1:]==['build']: sys.exit({build_rc})
 if {upload_rc}:
     print('Upload failed; prior deploy https://oldhash1.demo-site.pages.dev')
