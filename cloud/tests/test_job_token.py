@@ -41,7 +41,7 @@ def test_provision_is_read_only_idempotent_and_never_puts_token_in_argv(monkeypa
     ]
     select = f"SELECT id, name, scopes, revoked_at, disabled_at, expires_at FROM grants WHERE token_hash='{hashed}'"
     assert sql == ([select] if existing else [select,
-        f'INSERT INTO grants (id, token_hash, name, note, subject_json, scopes, redeems, created_at, created_by, expiry_ends_sessions) VALUES (\'{grant_id}\', \'{hashed}\', \'snapshot\', \'Read-only job grant\', \'{{"name": "snapshot"}}\', \'gcs:read\', 0, 123, \'job-token provisioning\', 1)',
+        f'INSERT INTO grants (id, token_hash, name, note, subject_json, scopes, redeems, created_at, created_by, expiry_ends_sessions, service) VALUES (\'{grant_id}\', \'{hashed}\', \'snapshot\', \'Read-only job grant\', \'{{"name": "snapshot"}}\', \'gcs:read\', 0, 123, \'job-token provisioning\', 1, 1)',
         select,
     ])
 
@@ -69,7 +69,7 @@ def test_expiring_grant_is_exact_and_refuses_expiry_changes(monkeypatch):
 
     monkeypatch.setattr(J, "_d1_query", query)
     assert J.provision("p", "s", "monitor", "gcs:session-monitor:read", expires_at=1792540800, note="Monitor only") == grant_id
-    assert sql[1] == f'INSERT INTO grants (id, token_hash, name, note, subject_json, scopes, redeems, created_at, created_by, expiry_ends_sessions, expires_at) VALUES (\'{grant_id}\', \'{hashed}\', \'monitor\', \'Monitor only\', \'{{"name": "monitor"}}\', \'gcs:session-monitor:read\', 0, 123, \'job-token provisioning\', 1, 1792540800)'
+    assert sql[1] == f'INSERT INTO grants (id, token_hash, name, note, subject_json, scopes, redeems, created_at, created_by, expiry_ends_sessions, service, expires_at) VALUES (\'{grant_id}\', \'{hashed}\', \'monitor\', \'Monitor only\', \'{{"name": "monitor"}}\', \'gcs:session-monitor:read\', 0, 123, \'job-token provisioning\', 1, 1, 1792540800)'
     with pytest.raises(ValueError) as exc:
         J.provision("p", "s", "monitor", "gcs:session-monitor:read", expires_at=1792540801)
     assert str(exc.value) == "job-token: stored secret belongs to a different, expired or revoked grant; refusing to widen or reactivate it"
@@ -127,7 +127,7 @@ def test_series_scopes_join_the_grant_and_verify_exactly(monkeypatch):
     identities = []
     monkeypatch.setattr(J, "urlopen", lambda request, timeout: identities.append(1) or BytesIO(dumps({"scopes": ["fleet", "gcs:read"], "admin": False}).encode()))
     assert J.provision("p", "s", "fleet", "gcs:read", "https://site.test", series_scopes=("fleet",)) == grant_id
-    assert sql[1] == f'INSERT INTO grants (id, token_hash, name, note, subject_json, scopes, redeems, created_at, created_by, expiry_ends_sessions) VALUES (\'{grant_id}\', \'{hashed}\', \'fleet\', \'Read-only job grant\', \'{{"name": "fleet"}}\', \'gcs:read fleet\', 0, 123, \'job-token provisioning\', 1)'
+    assert sql[1] == f'INSERT INTO grants (id, token_hash, name, note, subject_json, scopes, redeems, created_at, created_by, expiry_ends_sessions, service) VALUES (\'{grant_id}\', \'{hashed}\', \'fleet\', \'Read-only job grant\', \'{{"name": "fleet"}}\', \'gcs:read fleet\', 0, 123, \'job-token provisioning\', 1, 1)'
     assert identities == [1]
     # a live identity missing the series scope is refused
     monkeypatch.setattr(J, "urlopen", lambda request, timeout: BytesIO(dumps({"scopes": ["gcs:read"], "admin": False}).encode()))

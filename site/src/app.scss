@@ -1748,6 +1748,13 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); opacity: 1; }
       .ua { max-width: 36em; overflow-wrap: anywhere; color: var(--ink-2); }
     }
     .revoked-label { font-size: 12px; }
+    // The `service` toggle, with the package's refusal (an email-bound link) under it.
+    .service-cell {
+      display: flex; flex-direction: column; gap: 4px;
+      label { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; cursor: pointer; }
+      input { margin: 0; }
+      .err { color: var(--del, #c33); font-size: 12px; max-width: 14em; }
+    }
     // Rotate / revoke: side-by-side icon buttons, muted until hovered.
     .row-actions { display: inline-flex; align-items: center; gap: 10px; }
     .icon-btn {

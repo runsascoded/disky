@@ -81,11 +81,12 @@ def provision(
         if rows != [expected]:
             raise ValueError("job-token: stored secret belongs to a different, expired or revoked grant; refusing to widen or reactivate it")
     else:
-        columns = "id, token_hash, name, note, subject_json, scopes, redeems, created_at, created_by, expiry_ends_sessions"
+        # `service`: a job's link, not a person's (`site/migrations/grant-flags.sql`): its activity posts only what's notable.
+        columns = "id, token_hash, name, note, subject_json, scopes, redeems, created_at, created_by, expiry_ends_sessions, service"
         values = [grant_id, hashed, name, note, dumps({"name": name}), scopes]
         extra_column = ", expires_at" if expires_at is not None else ""
         extra_value = f", {expires_at}" if expires_at is not None else ""
-        sql = f"INSERT INTO grants ({columns}{extra_column}) VALUES ({', '.join(_q(v) for v in values)}, 0, {int(time())}, 'job-token provisioning', 1{extra_value})"
+        sql = f"INSERT INTO grants ({columns}{extra_column}) VALUES ({', '.join(_q(v) for v in values)}, 0, {int(time())}, 'job-token provisioning', 1, 1{extra_value})"
         _d1_query(sql, account, api_token)
         rows = _d1_query(f"SELECT id, name, scopes, revoked_at, disabled_at, expires_at FROM grants WHERE token_hash={_q(hashed)}", account, api_token)
         if rows != [expected]:
