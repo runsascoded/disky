@@ -10,6 +10,11 @@ Read-only: list calls only. Each class a deployment asks for (`-c`) is measured 
 | `delete-marker` | S3, CAIOS         | `ListObjectVersions` `DeleteMarkers[]` (0 bytes: counted)        | (lifecycle: phase 2) |
 | `mpu`           | GCS, S3, CAIOS, R2 | `ListMultipartUploads` + `ListParts` (part sizes)               | (lifecycle: phase 2) |
 
+`-s metric` (GCS) reads Cloud Monitoring's `storage/v2/total_bytes` / `total_count` instead: `soft-deleted`, `noncurrent`
+and `mpu`, whole buckets, no clocks or expiries, one query for every bucket, and (`-S`) their daily history (`live` too).
+It also counts what a soft-deleted listing can't reach: GCS refuses that listing once a bucket's policy is off, while it
+still holds and bills what was deleted under the old policy (gcs 2026-11-14: ~900 TB the listing reported as 0 B).
+
 A class the provider can't have is refused, never reported as zero (a deployment asks only for its own). The output is
 one row per `(bucket, class)` (`prefix` = `""` in phase 1): `bytes`, `objects`, the class's own clock (`oldest`,
 `newest`: soft-delete time, noncurrent-since, initiated) and `expires_min`/`expires_max` where the provider says (null:
@@ -18,6 +23,7 @@ no expiry known). A class with nothing in it is a row of zeros, so "measured, no
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -25,7 +31,7 @@ from urllib.parse import urlparse
 
 import pyarrow as pa
 import pyarrow.parquet as pq
-from click import IntRange, argument, command, option
+from click import Choice, IntRange, argument, command, option
 
 from .static_names import err
 
@@ -164,6 +170,134 @@ def measure(uri: str, classes: list[str], endpoint: str | None = None) -> list[T
     return out
 
 
+# --- GCS: Cloud Monitoring's storage metrics (`-s metric`) ---------------------------------------------------------
+
+#: Each bucket's bytes and objects by `type` and `storage_class`, sampled every 5 min; daily means are kept ~2 years.
+#: Unlike a soft-deleted listing (refused once a bucket's policy is off, while GCS still holds and bills what was
+#: deleted under it), the metric counts every class GCS holds. Bucket totals only: no prefixes, clocks or expiries.
+METRIC_BYTES = "storage.googleapis.com/storage/v2/total_bytes"
+METRIC_COUNT = "storage.googleapis.com/storage/v2/total_count"
+#: The metric's `type` → our class; `live` (the listing's own bytes) appears only in the history series.
+METRIC_TYPES = {"live-object": "live", "soft-deleted-object": "soft-deleted", "noncurrent-object": "noncurrent", "multipart-upload": "mpu"}
+#: The classes the metric measures, per provider.
+METRIC_CLASSES = {"gs": ("soft-deleted", "noncurrent", "mpu")}
+#: How far back a newest sample may be and still count as "now" (samples come every 5 min).
+METRIC_FRESH = 3600
+DAY = 86400
+
+
+def clock() -> float:
+    return time.time()
+
+
+def _rfc3339(t: float) -> str:
+    return datetime.fromtimestamp(t, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def bucket_projects(buckets: list[str]) -> dict[str, str]:
+    """Each bucket's project number (`buckets.get`), which its metrics live under."""
+    from .gcp import _get
+
+    return {b: _get(f"https://storage.googleapis.com/storage/v1/b/{b}", fields="projectNumber")["projectNumber"] for b in buckets}
+
+
+def fetch_metric(metric: str, project: str, buckets: list[str], start: float, end: float, daily: bool = False) -> list[dict]:
+    """`metric`'s `timeSeries.list` pages for `buckets` over [start, end]: raw samples, or (`daily`) one mean per day."""
+    from .gcp import pages
+
+    names = ", ".join(json.dumps(b) for b in buckets)
+    params = {"filter": f'metric.type="{metric}" resource.labels.bucket_name=one_of({names})',
+              "interval.startTime": _rfc3339(start), "interval.endTime": _rfc3339(end)}
+    if daily:
+        params |= {"aggregation.alignmentPeriod": f"{DAY}s", "aggregation.perSeriesAligner": "ALIGN_MEAN"}
+    return pages(f"https://monitoring.googleapis.com/v3/projects/{project}/timeSeries", **params)
+
+
+def _series(pages: list[dict]):
+    """`(bucket, class, points)` per series (storage classes not summed yet); points newest first, as the API gives."""
+    for p in pages:
+        for ts in p.get("timeSeries", []):
+            yield ts["resource"]["labels"]["bucket_name"], METRIC_TYPES.get(ts["metric"]["labels"].get("type")), ts.get("points", [])
+
+
+def _value(point: dict) -> float:
+    v = point["value"]
+    return float(v.get("doubleValue", v.get("int64Value", 0)))
+
+
+def latest_totals(bytes_pages: list[dict], count_pages: list[dict], buckets: list[str], classes: list[str]) -> list[Total]:
+    """Each bucket's `classes` now: every series' newest sample, summed over storage classes. A class with no series
+    (GCS reports a type only once a bucket has held some) is a row of zeros: measured, none."""
+    tot = {(b, c): Total(b, c) for b in buckets for c in classes}
+    for pages, field in ((bytes_pages, "bytes"), (count_pages, "objects")):
+        for b, c, pts in _series(pages):
+            if (b, c) in tot and pts:
+                setattr(tot[b, c], field, getattr(tot[b, c], field) + round(_value(pts[0])))
+    return list(tot.values())
+
+
+def daily_series(pages: list[dict], buckets: list[str], start_day: str, end_day: str) -> dict:
+    """The history (`-S`): per bucket and class (`live` too), one byte total per UTC day in [start_day, end_day): each
+    series' daily mean, summed over storage classes. A day the bucket has no `live` point is null in every class (the
+    metric has nothing for it); a non-live class missing that day is 0 (GCS reports a type only while it holds some). A
+    class that is 0 every day is left out."""
+    from datetime import date, timedelta
+
+    d0, d1 = date.fromisoformat(start_day), date.fromisoformat(end_day)
+    dates = [(d0 + timedelta(days=i)).isoformat() for i in range((d1 - d0).days)]
+    idx = {d: i for i, d in enumerate(dates)}
+    acc: dict[str, dict[str, list[float | None]]] = {b: {} for b in buckets}
+    for b, c, pts in _series(pages):
+        if b not in acc or c is None:
+            continue
+        row = acc[b].setdefault(c, [None] * len(dates))
+        for p in pts:
+            # an aligned point's `endTime` closes its day: the day it covers is the one before
+            day = (datetime.fromisoformat(p["interval"]["endTime"].replace("Z", "+00:00")) - timedelta(seconds=1)).date().isoformat()
+            if (i := idx.get(day)) is not None:
+                row[i] = (row[i] or 0) + _value(p)
+    out: dict[str, dict[str, list[int | None]]] = {}
+    for b, cls in acc.items():
+        live = cls.get("live", [None] * len(dates))
+        series = {}
+        for c in ("live", *CLASSES):
+            if c not in cls:
+                continue
+            vals = [None if live[i] is None else round(v or 0) for i, v in enumerate(cls[c])]
+            if c == "live" or any(vals):
+                series[c] = vals
+        out[b] = series
+    return {"metric": METRIC_BYTES, "dates": dates, "buckets": out}
+
+
+def measure_metric(uris: list[str], classes: list[str], project: str | None, now: float, history_days: int | None) -> tuple[list[list[Total]], dict | None]:
+    """`classes` of each `gs://` bucket now, from the metric (per URI, as `measure` gives), and (`history_days`) the
+    daily history series over that many days before today. A prefix or a class the metric lacks is refused."""
+    split = [split_uri(u) for u in uris]
+    if bad := [u for u, (s, _, p) in zip(uris, split) if s not in METRIC_CLASSES or p]:
+        raise SystemExit(f"-s metric: whole GCS buckets only (no prefix): {', '.join(bad)}")
+    if bad := [c for c in classes if c not in METRIC_CLASSES["gs"]]:
+        raise SystemExit(f"-s metric: no {', '.join(bad)} (it has {', '.join(METRIC_CLASSES['gs'])})")
+    buckets = [b for _, b, _ in split]
+    by_project: dict[str, list[str]] = {}
+    for b, pr in ({b: project for b in buckets} if project else bucket_projects(buckets)).items():
+        by_project.setdefault(str(pr), []).append(b)
+    totals: dict[str, Total] = {}
+    history_pages: list[dict] = []
+    midnight = now - now % DAY
+    for pr, bs in by_project.items():
+        bp, cp = (fetch_metric(m, pr, bs, now - METRIC_FRESH, now) for m in (METRIC_BYTES, METRIC_COUNT))
+        totals |= {f"{t.bucket}\0{t.cls}": t for t in latest_totals(bp, cp, bs, classes)}
+        if history_days:
+            history_pages += fetch_metric(METRIC_BYTES, pr, bs, midnight - history_days * DAY, midnight, daily=True)
+    per = [[totals[f"{b}\0{c}"] for c in classes] for b in buckets]
+    series = None
+    if history_days:
+        fmt = lambda t: datetime.fromtimestamp(t, timezone.utc).date().isoformat()  # noqa: E731
+        series = {"as_of": _rfc3339(now), **daily_series(history_pages, buckets, fmt(midnight - history_days * DAY), fmt(midnight))}
+    return per, series
+
+
 def json_row(t: Total) -> dict:
     """A row as the site reads it (`non-live.json`): times as ISO 8601 UTC seconds."""
     return {k: (v.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ") if isinstance(v, datetime) else v) for k, v in t.row().items()}
@@ -185,6 +319,21 @@ def table(totals: list[Total]) -> pa.Table:
     return pa.Table.from_pylist([t.row() for t in totals], schema=SCHEMA)
 
 
+#: `-H`'s default: about the daily history Cloud Monitoring keeps for a bucket (24 months).
+HISTORY_DAYS = 730
+
+
+def write_series(series: dict, dest: str) -> str:
+    """The history JSON at `dest` (a local path or a URL: `blobstore.Store` on its parent), replacing what's there."""
+    from .blobstore import Store
+
+    root, _, name = dest.rstrip("/").rpartition("/")
+    store = Store(root or ".")
+    store.write_text(name, json.dumps(series, separators=(",", ":")) + "\n")
+    err(f"non-live: history ({len(series['dates'])} days, {len(series['buckets'])} buckets) → {store.uri(name)}")
+    return store.uri(name)
+
+
 #: Buckets measured at once (`non-live -P`): each a provider listing, I/O-bound (gcs's soft-deleted listing of ~11M
 #: objects took ~45 min of a scan's `pre` stage bucket by bucket).
 PROCS = 8
@@ -195,12 +344,18 @@ PROCS = 8
 @option("-E", "--endpoint", help="S3 API endpoint (CAIOS, R2; GCS's XML API by default for its multipart uploads)")
 @option("-j", "--json", "json_out", help="Merge the totals into this JSON file (a scan's `non-live.json`: every bucket's rows, these buckets' replaced)")
 @option("-o", "--out", help="Write each bucket's totals here as parquet (a local path; `{bucket}` in it with several URIs); else (and no -j) print them as JSON lines")
+@option("-H", "--history-days", default=HISTORY_DAYS, type=IntRange(min=1), help=f"With -S: days of history before today (default {HISTORY_DAYS}: about what Monitoring keeps)")
+@option("-p", "--project", help="With -s metric: the buckets' project (default: each bucket's own, from `buckets.get`)")
 @option("-P", "--procs", default=PROCS, type=IntRange(min=1), help="Buckets measured at once")
+@option("-s", "--source", type=Choice(["listing", "metric"]), default="listing", help="listing: the provider's list calls (any class; prefixes; clocks and expiries). metric: Cloud Monitoring's storage metrics (GCS: soft-deleted, noncurrent, mpu; whole buckets; also what a soft-deleted listing can't see once a bucket's policy is off)")
+@option("-S", "--series", "series_out", multiple=True, help="With -s metric: write the daily history (every bucket's live and non-live bytes per day) as JSON here (a path or URL; repeatable)")
 @argument("uris", nargs=-1, required=True)
-def non_live_cmd(classes, endpoint, json_out, out, procs, uris) -> None:
+def non_live_cmd(classes, endpoint, json_out, out, history_days, project, procs, source, series_out, uris) -> None:
     """Total the non-live bytes of each bucket (URIS: `gs://`, `s3://`, `r2://`, optionally with a prefix): per class, its
     bytes, objects, oldest/newest and expiry where known (specs/non-live-bytes.md, phase 1), `-P` buckets at once.
-    Read-only. The JSON is merged once, after every bucket."""
+    Read-only. The JSON is merged once, after every bucket. `-s metric` reads the buckets' Cloud Monitoring totals
+    instead of listing (one query for them all; `monitoring.timeSeries.list` on their project), and `-S` writes their
+    daily history beside."""
     from concurrent.futures import ThreadPoolExecutor
 
     want = [c.strip() for c in classes.split(",") if c.strip()]
@@ -208,8 +363,15 @@ def non_live_cmd(classes, endpoint, json_out, out, procs, uris) -> None:
         raise SystemExit(f"-c: unknown class(es) {', '.join(bad)} (classes: {', '.join(CLASSES)})")
     if out and len(uris) > 1 and "{bucket}" not in out:
         raise SystemExit("-o: several URIs need `{bucket}` in the path")
-    with ThreadPoolExecutor(min(procs, len(uris))) as ex:
-        per = list(ex.map(lambda u: measure(u, want, endpoint), uris))
+    if series_out and source != "metric":
+        raise SystemExit("-S: the history comes from the metric (-s metric)")
+    if source == "metric":
+        per, series = measure_metric(list(uris), want, project, clock(), history_days if series_out else None)
+        for dest in series_out:
+            write_series(series, dest)
+    else:
+        with ThreadPoolExecutor(min(procs, len(uris))) as ex:
+            per = list(ex.map(lambda u: measure(u, want, endpoint), uris))
     totals = [t for ts in per for t in ts]
     for t in totals:
         err(f"non-live {t.bucket} {t.cls}: {t.bytes:,} B in {t.objects:,}" + (f", expiring by {t.expires_max:%Y-%m-%d}" if t.expires_max else ""))
