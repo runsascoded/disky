@@ -3,7 +3,7 @@ import type { Env } from './auth'
 import { sqliteD1, type Sqlite, withLedger } from './testD1'
 import { type D1Variant, readJson, seedGeneration } from './testStore'
 import type { Span } from './index'
-import { buildDiff, type Diff, type DiffRow, heldBy, LOOKUP_CAP, lookupCapOf } from './view'
+import { buildDiff, type Diff, type DiffRow, GROUP_CAP, groupCapOf, heldBy, LOOKUP_CAP, lookupCapOf } from './view'
 
 vi.mock('@rdub/file-tree/stores/s3', async () => ({ S3Store: (await import('./testStore')).S3Store }))
 
@@ -170,6 +170,35 @@ describe('a diff\'s lookups', () => {
 // nothing to anyone), so "no row" is her absence at the path, not the path's: what the ledger assigns her under it is
 // still hers. Carol is assigned `keep/` and the object `shrink/a`: her view draws `shrink` and `shrink/a` on A (100
 // MiB), and on B (8 MiB) folds them under the floor.
+describe('a diff\'s row-group budget', () => {
+  it('`0` decodes none: every name one side drew folds, as a lookup budget of `0`', async () => {
+    expect(await buildDiff(env, { ...base, from: A, to: B, groupCap: 0 }))
+      .toEqual(await buildDiff(env, { ...base, from: A, to: B, lookupCap: 0 }))
+  })
+
+  it('names are taken heaviest first while the groups they add fit: one group answers what it holds, past it what needs another folds', async () => {
+    // Each scan is one row group. B's (`del`, `deep/d1/big`, `shrink`, then `shrink/{a,b}`) is the one the budget
+    // fits; `new1` is A's to read, a second group: it stays in `bk`'s `(other)` (1 → 65 MiB with `tiny`).
+    const rounds: number[] = []
+    const d = await buildDiff(env, { ...base, from: A, to: B, groupCap: 1, trace: (n, v) => { if (n === 'rounds') rounds.push(v) } })
+    expect(d).toEqual({
+      ...WHOLE,
+      rows: [...WHOLE.rows.filter(r => r.path !== 'new1'), row('(other)', 1, 'dir', 'changed', 1, 65, 1, 2)],
+      lookups: 5, lookups_capped: true,
+    })
+    // `del`, `deep/d1/big`, `shrink`; then `shrink/{a,b}` (B's group again, adding none); then `new1` alone, which
+    // doesn't fit: the walk stops.
+    expect(rounds).toEqual([1, 1, 1])
+  })
+
+  it('`groupCapOf`: unset or blank is `GROUP_CAP`, a count is itself, anything else throws', () => {
+    expect([groupCapOf({}), groupCapOf({ DIFF_GROUP_CAP: ' ' }), groupCapOf({ DIFF_GROUP_CAP: '0' }), groupCapOf({ DIFF_GROUP_CAP: '120' })]).toEqual([GROUP_CAP, GROUP_CAP, 0, 120])
+    expect(['-1', '1.5', 'x'].map(v => { try { return groupCapOf({ DIFF_GROUP_CAP: v }) } catch (e) { return (e as Error).message } })).toEqual([
+      'DIFF_GROUP_CAP = "-1": not a count', 'DIFF_GROUP_CAP = "1.5": not a count', 'DIFF_GROUP_CAP = "x": not a count',
+    ])
+  })
+})
+
 describe('`heldBy`: the pending names a round\'s row groups answer', () => {
   const span = (rg: number, dMin: number, dMax: number, pMin: string, pMax: string, tier?: number): Span =>
     ({ rg, dMin, dMax, pMin, pMax, bMax: 0, rowStart: 0, rowEnd: 0, ...(tier != null ? { tier } : {}) })

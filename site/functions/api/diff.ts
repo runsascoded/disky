@@ -18,7 +18,7 @@ import { DESCENT_V } from '../_lib/diffDescent.js'
 import { DiffUnavailable, intervalsOn, ivRefusal, ivRetry, pathGens, withPathStore, storeReady, type Lens } from '../_lib/index.js'
 import { hasLedger, ledgerHead } from '../_lib/ledger.js'
 import { classKey, parseClasses, parseOwner, queryParam, QueryError } from '../_lib/scope.js'
-import { ATTEN_DEFAULT, buildDiff, type DiffRow, type DiffSides, FILTER_VIEW_V, LensUnavailable, lookupCapOf, MIN_AREA_DEFAULT, NotFound, QUANT, readRootAgg, scopedTag, WALK_V } from '../_lib/view.js'
+import { ATTEN_DEFAULT, buildDiff, type DiffRow, type DiffSides, FILTER_VIEW_V, groupCapOf, LensUnavailable, lookupCapOf, MIN_AREA_DEFAULT, NotFound, QUANT, readRootAgg, scopedTag, WALK_V } from '../_lib/view.js'
 import { hexNote, hexQuery, indexedGate, staticTag } from '../_lib/staticFilter.js'
 import { FilterRejected, indexedOnly, pathTerms, rejectBody, rejectQuery, rejectScope } from '../_lib/indexedOnly.js'
 import { cacheEnvTag, cacheKeyFor, cacheMatch, cacheStore, cutReason, isPartial, keepFor, serverTiming, UPGRADE_PHASE2_MS, UPGRADE_SEARCH_LIMITS, UPGRADE_WALK_MS, upgradePartial } from '../_lib/edgeCache.js'
@@ -138,6 +138,7 @@ async function diffGated(
       (summary ? '' : `&wv=${WALK_V}`) +
       // The deployment's lookup budget, where it sets one (absent otherwise, so no other key moves).
       (summary || !ctx.env.DIFF_LOOKUP_CAP?.trim() ? '' : `&lc=${lookupCapOf(ctx.env)}`) +
+      (summary || !ctx.env.DIFF_GROUP_CAP?.trim() ? '' : `&gc=${groupCapOf(ctx.env)}`) +
       // A scoped read's answer version, where the diff is one (absent otherwise, so no other key moves).
       scopedTag(ctx.env, { lens, owner, classes, query }) +
       // A union root's member diff: the union's threshold (absent otherwise, so no other key moves).

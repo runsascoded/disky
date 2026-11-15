@@ -1670,14 +1670,42 @@ async function readFooterJson(h: PqHandle, fg: FooterGroup): Promise<Map<number,
  * bounds contain every row's — and `groupMatches` / `groupMatchesSize`
  * applied to the bounds is exactly that relaxation (a depth-spanning range
  * skips the path test, a mixed-user one the keyed rect). */
-async function pqGroups(h: PqHandle, pass0: (g: NonNullable<FooterGroup['bounds']>) => boolean, near?: (g: BlobGroup, prev?: BlobGroup, next?: BlobGroup) => boolean, cap = Infinity): Promise<BlobGroup[]> {
-  // As of a scan (an interval store): a group can answer only if one of its versions is live then.
-  // A run's group can matter once a version in it opened by then, live or not (its close records end versions).
+/** Whether a group (or a footer group's bounds) of `h` can answer as of its scan (an interval store): one of its versions
+ *  is live then. A run's group can matter once a version in it opened by then, live or not (its close records end
+ *  versions). Always, without a scan. */
+function liveOn(h: PqHandle | BlobHandle): (g: { vfMin?: number; vtMax?: number }) => boolean {
   const D = h.asOf
+  if (D == null) return () => true
   const run = !!h.run
   const range = h.historyRange
-  const pass = D == null ? pass0 : (g: { vfMin?: number; vtMax?: number } & NonNullable<FooterGroup['bounds']>) =>
-    (g.vfMin == null || g.vfMin <= (range?.[1] ?? D)) && (run || g.vtMax == null || (range?.[0] ?? D) < g.vtMax) && pass0(g)
+  return g => (g.vfMin == null || g.vfMin <= (range?.[1] ?? D)) && (run || g.vtMax == null || (range?.[0] ?? D) < g.vtMax)
+}
+
+/** `asks`' row groups on a footer-planned tier, exactly (`planAsks`' `whole`): each footer group's bounds against each
+ *  ask, then each footer group's row groups against the asks its bounds hold. O(asks × footer groups + Σ a footer
+ *  group's asks × its row groups): only footer groups that may hold an ask are decoded, where a rectangle per depth
+ *  decodes every one between the depth's first ask and its last (a diff round's names scattered over a depth: most of
+ *  them). */
+async function pointGroups(t: PqHandle | BlobHandle, asks: Ask[]): Promise<Span[]> {
+  const live = liveOn(t)
+  const holds = (g: { dMin: number; dMax: number; pMin: string; pMax: string }, a: Ask) => {
+    if (g.dMax < a.depth || g.dMin > a.depth || g.dMin !== g.dMax) return g.dMin <= a.depth && a.depth <= g.dMax
+    const r = askRect(a)
+    return !(g.pMax < r.pLo || g.pMin > r.pHi)
+  }
+  const keep = (gs: BlobGroup[], mine: Ask[]) => gs.filter(g => live(g) && mine.some(a => groupMayHold(g, a)))
+  if (t.mode === 'blob') return keep(t.groups, asks)
+  const per = t.footer.groups.flatMap(fg => {
+    const mine = fg.bounds ? (live(fg.bounds) ? asks.filter(a => holds(fg.bounds!, a)) : []) : asks
+    return mine.length ? [{ fg, mine }] : []
+  })
+  t.trace?.('fgroups', per.length)
+  return (await mapLimit(per, GROUP_READS, async ({ fg, mine }) => keep(await readFooterGroup(t, fg), mine))).flat()
+}
+
+async function pqGroups(h: PqHandle, pass0: (g: NonNullable<FooterGroup['bounds']>) => boolean, near?: (g: BlobGroup, prev?: BlobGroup, next?: BlobGroup) => boolean, cap = Infinity): Promise<BlobGroup[]> {
+  const live = liveOn(h)
+  const pass = (g: { vfMin?: number; vtMax?: number } & NonNullable<FooterGroup['bounds']>) => live(g) && pass0(g)
   const sel = h.footer.groups.filter(fg => !fg.bounds || pass(fg.bounds))
   h.trace?.('fgroups', sel.length)
   // More footer groups than the caller takes row groups: refused before decoding any (an interval store's footer
@@ -3921,7 +3949,7 @@ const askRect = (a: Ask): Rect =>
     ? { dLo: a.depth, dHi: a.depth, pLo: a.path, pHi: a.path }
     : { dLo: a.depth, dHi: a.depth, pLo: a.under ? a.under + '/' : '', pHi: a.under ? a.under + '0' : '\uffff' } // '0' sorts just past '/'
 
-const groupMayHold = (g: Span & { vfMax?: number; vtMin?: number }, a: Ask): boolean => {
+export const groupMayHold = (g: Span & { vfMax?: number; vtMin?: number }, a: Ask): boolean => {
   if (g.dMax < a.depth || g.dMin > a.depth) return false
   if (a.vtLe != null && g.vtMin != null && g.vtMin > a.vtLe) return false
   if (a.vfGe != null && g.vfMax != null && g.vfMax < a.vfGe) return false
@@ -3944,28 +3972,31 @@ function pointsPre(asks: Ask[]): Pre | undefined {
   return (depth, path) => !!at.get(depth)?.has(path)
 }
 
-/** Point lookups: exact `(depth, path)` rows or `(depth, under-prefix)`
- * ranges, many at once (the totals manifest's ~8k prefixes) — `keep` is the
- * caller's exact test over the rows of the candidate groups. `onSpans`: the row groups the read will decode, each
- * tagged with its tier, before it decodes them. */
-export async function readAsks(
+/** The row groups a lookup of `asks` reads (each tagged with its tier), planned from the span tables or the footer
+ *  and not decoded: one rectangle per depth over its asks' [min, max] path, halved while it selects more groups than
+ *  its asks could need (`4n + 16`): sparse asks across a deep store (gcs's ~1,260 assignment prefixes over 8k-row
+ *  groups) would otherwise select every group between the first ask and the last, past any cap. Exact: each ask stays
+ *  in exactly one rectangle, a single ask over the cap still throws, and `groupMayHold` narrows what is kept. `whole`:
+ *  a depth's rectangle is planned once, to `spanCap`, never halved — for a caller that assigns the groups to its asks
+ *  itself and decodes only some (`groupMayHold`), where the halving's re-plans would be most of its cost. */
+export async function planAsks(
   h: IndexHandle,
   asks: Ask[],
-  keep: (r: Row) => boolean,
-  { columns, maxGroups = 60, spanCap = 4000, stop, rememberWide, versions = false, pre: pre0, lens, onSpans }: { columns?: string[]; maxGroups?: number; spanCap?: number; stop?: () => boolean; rememberWide?: boolean; versions?: boolean; pre?: Pre; lens?: Lens; onSpans?: (spans: Span[]) => void } = {},
-): Promise<{ rows: Row[]; groups: number }> {
-  const pre = pre0 ?? pointsPre(asks)
+  { maxGroups = 60, spanCap = 4000, rememberWide, lens, whole }: { maxGroups?: number; spanCap?: number; rememberWide?: boolean; lens?: Lens; whole?: boolean } = {},
+): Promise<Span[]> {
   // `rememberWide`: a lookup this isolate already found too wide (same generation, asks and budget) throws
   // before any span query — the answer can't change while the generation stands.
   const wideKey = rememberWide ? `${h.mode}\0${h.date}\0${h.variant}\0${'gen' in h ? h.gen : ''}\0${maxGroups}\0${lens?.key ?? ''}\0${asks.map(a => `${a.depth}:${'path' in a ? a.path : `${a.under}/`}`).join('\n')}` : null
   const known = wideKey != null ? tooWide.get(wideKey) : undefined
   if (known) throw new Error(`lookup too wide: ${known} (cap ${maxGroups}, remembered)`)
-  // One rectangle per depth over its asks' [min, max] path, halved while it
-  // selects more groups than its asks could need: sparse asks across a deep
-  // store (gcs's ~1,260 assignment prefixes over 8k-row groups) would otherwise
-  // select every group between the first ask and the last, past any cap.
-  // Exact: each ask stays in exactly one rectangle, a single ask over the cap
-  // still throws, and `groupMayHold` + `keep` narrow what is read.
+  // A footer-planned handle, whole (no D1 span table, no lens): every ask's own groups, exactly (`pointGroups`).
+  if (whole && !lens && tiersOf(h).every(t => t.mode !== 'd1')) {
+    const t0 = now()
+    h.trace?.('askspan', 1)
+    const spans = (await overTiers(h, async t => pointGroups(t as PqHandle | BlobHandle, asks))).sort(bySpan)
+    h.trace?.('spans', now() - t0)
+    return spans
+  }
   const lo = (a: Ask) => askRect(a).pLo
   const hi = (a: Ask) => askRect(a).pHi
   const byDepth = new Map<number, Ask[]>()
@@ -3981,13 +4012,13 @@ export async function readAsks(
   // details over many depths) paid every span query and then threw anyway.
   const over = () => found.size > maxGroups
   let cut = false
-  let t0 = now()
+  const t0 = now()
   while (parts.length && !over()) {
     const next: typeof parts = []
     await mapLimit(parts, SPAN_QUERIES, async ({ depth, asks: part }) => {
       if (over()) { cut = true; return }
       const rect = { dLo: depth, dHi: depth, pLo: lo(part[0]), pHi: part.reduce((m, a) => (hi(a) > m ? hi(a) : m), hi(part[0])) }
-      const cap = part.length > 1 ? Math.min(spanCap, 4 * part.length + 16) : spanCap
+      const cap = part.length > 1 && !whole ? Math.min(spanCap, 4 * part.length + 16) : spanCap
       let cand: Span[]
       h.trace?.('askspan', 1)
       try {
@@ -4013,8 +4044,17 @@ export async function readAsks(
     }
     throw new Error(`lookup too wide: ${n} (cap ${maxGroups})`)
   }
-  onSpans?.(spans)
-  t0 = now()
+  return spans
+}
+
+/** The rows of `spans` (`planAsks`' groups, each read once) that `keep` passes. */
+export async function readSpans(
+  h: IndexHandle,
+  spans: Span[],
+  keep: (r: Row) => boolean,
+  { columns, stop, versions = false, pre }: { columns?: string[]; stop?: () => boolean; versions?: boolean; pre?: Pre } = {},
+): Promise<{ rows: Row[]; groups: number }> {
+  let t0 = now()
   if (h.runs?.length) {
     h.trace?.('ngroups', spans.length)
     const got = await Promise.all(tiersOf(h).map((_, i) => onTier(h, i, async t => {
@@ -4039,6 +4079,21 @@ export async function readAsks(
     : await readGroupsCached(h, withMeta, rows => rows.filter(keep), stop, versions, pre)
   h.trace?.('groups', now() - t0)
   return { rows: perGroup.flat(), groups: spans.length }
+}
+
+/** Point lookups: exact `(depth, path)` rows or `(depth, under-prefix)`
+ * ranges, many at once (the totals manifest's ~8k prefixes) — `keep` is the
+ * caller's exact test over the rows of the candidate groups (`planAsks`, then `readSpans`). `onSpans`: the row groups
+ * the read will decode, each tagged with its tier, before it decodes them. */
+export async function readAsks(
+  h: IndexHandle,
+  asks: Ask[],
+  keep: (r: Row) => boolean,
+  { columns, maxGroups = 60, spanCap = 4000, stop, rememberWide, versions = false, pre, lens, onSpans }: { columns?: string[]; maxGroups?: number; spanCap?: number; stop?: () => boolean; rememberWide?: boolean; versions?: boolean; pre?: Pre; lens?: Lens; onSpans?: (spans: Span[]) => void } = {},
+): Promise<{ rows: Row[]; groups: number }> {
+  const spans = await planAsks(h, asks, { maxGroups, spanCap, rememberWide, lens })
+  onSpans?.(spans)
+  return readSpans(h, spans, keep, { columns, stop, versions, pre: pre ?? pointsPre(asks) })
 }
 
 /** Owner slices of one path (`''`: the fleet's depth-1 rows) across held scans, with close records combined before

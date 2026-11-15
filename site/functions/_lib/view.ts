@@ -30,7 +30,7 @@ import { readerMetadata } from './readerWorker.js'
  * `f = n_children(P) − kept` — objects and dirs alike.
  */
 import type { Env } from './auth.js'
-import { asOfScans, coarsenRects, coarsenSizeRects, folded, type IndexHandle, intervalsOn, isStore, ivHeldDates, ivLastRead, type Lens, openIndex, pathStoreKey, perScan, planRects, slices, planSizeRects, readAsks, readFits, readRects, readRows, readPathHistoryRows, readSizeRects, readSlicesByFolded, rowsClearFloors, readWhole, type Rect, type Row, sizeVariant, type Span, TooWide, type Trace, withTrace } from './index.js'
+import { asOfScans, coarsenRects, groupMayHold, coarsenSizeRects, folded, type IndexHandle, intervalsOn, isStore, ivHeldDates, ivLastRead, type Lens, openIndex, pathStoreKey, perScan, planRects, slices, planSizeRects, planAsks, readAsks, readFits, readRects, readRows, readPathHistoryRows, readSizeRects, readSlicesByFolded, readSpans, rowsClearFloors, readWhole, type Rect, type Row, sizeVariant, type Span, TooWide, type Trace, withTrace } from './index.js'
 import { type FoldedLens, ownerLens, poolLens } from './owners.js'
 import { type ClassScope, classRow, nameFilter, type NamePred, ownerKey, ownerOk, type OwnerScope } from './scope.js'
 import { filterThreshold, looseThreshold, matchRoots, pickTier, rebasedThreshold, rootRects } from './filter.js'
@@ -2928,6 +2928,8 @@ export interface DiffOpts extends Omit<ViewOpts, 'date'> {
   depth?: number
   /** The walk's lookup budgets, `LOOKUP_CAP` and (filtered) `FILTER_WALK_MS` by default (tests). */
   lookupCap?: number
+  /** …and its row-group budget, `GROUP_CAP` by default (tests). */
+  groupCap?: number
   walkMs?: number
   /** …by lazy descent over the interval store instead (`buildDiffDescent`): the route sets it with `DIFF_DESCENT`. Its
    *  planner hands a busy, broad P to the as-of walk (`HandOff`). */
@@ -3079,6 +3081,20 @@ export function lookupCapOf(env: { DIFF_LOOKUP_CAP?: string }): number {
   if (!Number.isInteger(n) || n < 0) throw new Error(`DIFF_LOOKUP_CAP = "${v}": not a count`)
   return n
 }
+/** The row groups a diff's lookups decode, at most: its cold cost past the two views, bounded by construction. A
+ *  round plans its candidates' groups (`planAsks`, no decode) and takes them heaviest first while the groups each adds
+ *  fit (a group the round or an earlier one reads already adds none); a name whose groups don't fit stays folded, and
+ *  a lighter one whose do is read. 80: the level-by-level walk's widest diff on cw's benchmark cases read 83 (root, a
+ *  week to a month; its others 19–73, 2026-11-15), each a group-sized colo read. */
+export const GROUP_CAP = 80
+/** The deployment's row-group budget: `DIFF_GROUP_CAP` (a count ≥ 0), unset `GROUP_CAP`. Anything else is an error. */
+export function groupCapOf(env: { DIFF_GROUP_CAP?: string }): number {
+  const v = env.DIFF_GROUP_CAP?.trim()
+  if (!v) return GROUP_CAP
+  const n = Number(v)
+  if (!Number.isInteger(n) || n < 0) throw new Error(`DIFF_GROUP_CAP = "${v}": not a count`)
+  return n
+}
 /** The names among `riders` whose every row on each of a handle's `tiers` lies in `spans` (the row groups a read
  *  decodes, `readAsks`' `onSpans`). The sort is `(depth, path, …)`, so a path's rows are contiguous, and a group holds
  *  them all when its keys pass the name's on both sides: a group over several depths holds every row of a depth
@@ -3103,8 +3119,9 @@ export function heldBy<T extends { d: number; cp: string }>(spans: Span[], tiers
  *  differently, so a deploy never serves an earlier walk's cached body (`CACHE_V` would move every view's key too).
  *  2 (2026-11-05): no lookups under a path a scan has no row for, and the budget spent heaviest first: before, a
  *  deleted subtree's names spent it level by level, and what else changed stayed in `(other)`. 3 (2026-11-15): a
- *  round's groups also answer the pending names they hold (`heldBy`), outside the budget. */
-export const WALK_V = 3
+ *  round's groups also answer the pending names they hold (`heldBy`), outside the budget. 4 (2026-11-15): a round
+ *  takes its names while the row groups they add fit `groupCap`, not only `lookupCap`. */
+export const WALK_V = 4
 /** A filtered diff's one-sided lookups run this long, at most (each round's are one batched read a side). */
 export const FILTER_WALK_MS = 800
 /** …and its two sides' phase 2 this long (each; they run at once). */
@@ -3264,6 +3281,7 @@ export async function buildDiff(env0: Env, o: DiffOpts): Promise<Diff> {
   let late = false
   let lookupsOff = false
   const lookupCap = o.lookupCap ?? lookupCapOf(env0)
+  const groupCap = o.groupCap ?? groupCapOf(env0)
   const walkMs = o.walkMs ?? FILTER_WALK_MS
   const walkOver = () => (late ||= !!query && performance.now() - walkStart > walkMs)
   // A side whose view root the query matches read it whole (no forest): that root is its one match, at its total.
@@ -3369,10 +3387,30 @@ export async function buildDiff(env0: Env, o: DiffOpts): Promise<Diff> {
   // group stats only hold inside a single-user group, which `readAsks`'s per-depth rectangles don't model. A round
   // too wide for the reader's group cap is read a depth at a time (what a level-by-level walk read), and a depth still
   // too wide per ask, rather than failing the diff. A name left out of the answer went unread (`lookup`'s budgets).
+  /** `qs`' answers on `side` from `rows` (every row of theirs a read decoded) into `out`: a name with none is absent
+   *  there, and so is everything under it (`gone`). */
+  const answer = (side: SideNo, rows: Row[], qs: Ask[], out: Map<string, Agg | null>) => {
+    const { v } = sideOf(side)
+    const byPath = new Map<string, { all: Agg; mine: Agg }>()
+    for (const r of rows) {
+      let e = byPath.get(r.path)
+      if (!e) byPath.set(r.path, (e = { all: newAgg(), mine: newAgg() }))
+      const cr = classRow(r, o.classes)
+      merge(e.all, cr)
+      if (ownerOk(r.usr, owner)) merge(e.mine, cr)
+    }
+    for (const q of qs) {
+      const e = byPath.get(q.cp)
+      if (!e) { gone[side - 1].add(q.cp); out.set(q.cp, null); continue }
+      const a = net(v, q.cp, v.scoped(q.cp, e.all, e.mine))
+      out.set(q.cp, a.b > 0 ? a : null)
+    }
+  }
+  const askOf1 = (q: Ask) => ({ depth: q.d, path: q.cp, ...(q.vtLe != null ? { vtLe: q.vtLe } : {}), ...(q.vfGe != null ? { vfGe: q.vfGe } : {}) })
   /** `items`' lookups on `side`, and `riders`' where the groups read for `items` hold their rows (`heldBy`): answered
    *  from rows already decoded, at no read and no budget. */
   const readSide = async (side: SideNo, items: Ask[], riders: Ask[] = []): Promise<Map<string, Agg | null>> => {
-    const { v, date } = sideOf(side)
+    const { date } = sideOf(side)
     const out = new Map<string, Agg | null>()
     const perAsk = async (qs: Ask[]) => {
       for (let i = 0; i < qs.length; i += PAR) {
@@ -3390,7 +3428,7 @@ export async function buildDiff(env0: Env, o: DiffOpts): Promise<Diff> {
       let got: Row[]
       let spans: Span[] = []
       try {
-        got = (await readAsks(h, part.map(q => ({ depth: q.d, path: q.cp, ...(q.vtLe != null ? { vtLe: q.vtLe } : {}), ...(q.vfGe != null ? { vfGe: q.vfGe } : {}) })), r => want.has(`${r.depth}\0${r.path}`), { maxGroups: 120, stop: () => lookupsOff, pre: (d, p) => want.has(`${d}\0${p}`), onSpans: s => { spans = s } })).rows
+        got = (await readAsks(h, part.map(askOf1), r => want.has(`${r.depth}\0${r.path}`), { maxGroups: 120, stop: () => lookupsOff, pre: (d, p) => want.has(`${d}\0${p}`), onSpans: s => { spans = s } })).rows
       } catch (e) {
         if (!/too wide/.test(String((e as Error).message ?? e))) throw e
         return false
@@ -3398,21 +3436,7 @@ export async function buildDiff(env0: Env, o: DiffOpts): Promise<Diff> {
       lookups += part.length
       const held = rides.length ? heldBy(spans, 1 + (h.runs?.length ?? 0), rides) : []
       if (held.length) tr?.('riders', held.length)
-      const byPath = new Map<string, { all: Agg; mine: Agg }>()
-      for (const r of got) {
-        let e = byPath.get(r.path)
-        if (!e) byPath.set(r.path, (e = { all: newAgg(), mine: newAgg() }))
-        const cr = classRow(r, o.classes)
-        merge(e.all, cr)
-        if (ownerOk(r.usr, owner)) merge(e.mine, cr)
-      }
-      for (const q of [...part, ...held]) {
-        const e = byPath.get(q.cp)
-        // No row: the scan doesn't hold the path, nor anything under it (`gone`).
-        if (!e) { gone[side - 1].add(q.cp); out.set(q.cp, null); continue }
-        const a = net(v, q.cp, v.scoped(q.cp, e.all, e.mine))
-        out.set(q.cp, a.b > 0 ? a : null)
-      }
+      answer(side, got, [...part, ...held], out)
       return true
     }
     if (await batch(items)) return out
@@ -3429,6 +3453,62 @@ export async function buildDiff(env0: Env, o: DiffOpts): Promise<Diff> {
       await perAsk(part)
     }
     return out
+  }
+
+  const gkey = (side: SideNo, s: Span) => `${side}:${s.tier ?? 0}:${s.rg}`
+  /** The row groups earlier rounds decoded (held by the isolate's group cache): a name they hold adds none. */
+  const groupsDone = new Set<string>()
+  let groupsUsed = 0
+  /** A round bounded by the row groups it decodes (`groupCap`): `cands` planned on each side (`planAsks`, no decode)
+   *  and each assigned the groups that may hold it (`groupMayHold`), then taken heaviest first while the groups it
+   *  adds fit; each side's chosen groups are decoded once (`readSpans`), answering the names taken and the pending
+   *  names those groups hold (`heldBy`). Null: a side's plan was too wide, and the round reads by name (`readSide`). */
+  /** Each candidate's groups, planned once (`${side}:${cp}`): a name the budget passed over is offered again. */
+  const planned = new Map<string, Span[]>()
+  const roundByGroups = async (cands: Ask[]): Promise<{ take: Ask[]; got: Map<string, Agg | null>[] } | null> => {
+    try {
+      await Promise.all(([1, 2] as const).map(async side => {
+        const qs = cands.filter(q => q.side === side && !planned.has(`${side}:${q.cp}`))
+        if (!qs.length) return
+        const spans = await planAsks(await fine(sideOf(side).date), qs.map(askOf1), { maxGroups: Infinity, whole: true })
+        for (const q of qs) {
+          const a = askOf1(q)
+          planned.set(`${side}:${q.cp}`, spans.filter(s => groupMayHold(s, a)))
+        }
+      }))
+    } catch (e) {
+      if (!/too wide/.test(String((e as Error).message ?? e))) throw e
+      return null
+    }
+    const chosen = [new Map<string, Span>(), new Map<string, Span>()]
+    const take: Ask[] = []
+    for (const q of [...cands].sort((x, y) => y.w - x.w || (x.cp < y.cp ? -1 : 1))) {
+      const mine = planned.get(`${q.side}:${q.cp}`)!
+      const adds = mine.filter(s => !chosen[q.side - 1].has(gkey(q.side, s)) && !groupsDone.has(gkey(q.side, s))).length
+      if (groupsUsed + adds > groupCap) continue
+      groupsUsed += adds
+      for (const s of mine) chosen[q.side - 1].set(gkey(q.side, s), s)
+      take.push(q)
+    }
+    if (take.length < cands.length) tr?.('gskip', cands.length - take.length)
+    const taken = new Set(take)
+    const got = await Promise.all(([1, 2] as const).map(async side => {
+      const out = new Map<string, Agg | null>()
+      const qs = take.filter(q => q.side === side)
+      if (!qs.length) return out
+      const spans = [...chosen[side - 1].values()].sort((x, y) => (x.tier ?? 0) - (y.tier ?? 0) || x.rg - y.rg)
+      const rides = pending.filter(q => q.side === side && !taken.has(q))
+      const want = new Set([...qs, ...rides].map(q => `${q.d}\0${q.cp}`))
+      const h = await fine(sideOf(side).date)
+      const rows = (await readSpans(h, spans, r => want.has(`${r.depth}\0${r.path}`), { stop: () => lookupsOff, pre: (d, p) => want.has(`${d}\0${p}`) })).rows
+      for (const s of spans) groupsDone.add(gkey(side, s))
+      lookups += qs.length
+      const held = rides.length ? heldBy(spans, 1 + (h.runs?.length ?? 0), rides) : []
+      if (held.length) tr?.('riders', held.length)
+      answer(side, rows, [...qs, ...held], out)
+      return out
+    }))
+    return { take, got }
   }
 
   // The walk, twice over the same plan: `settle` and the rounds below find what each name one scan drew is on the
@@ -3577,29 +3657,37 @@ export async function buildDiff(env0: Env, o: DiffOpts): Promise<Diff> {
   for (let round = 0; pending.length && round < levels; round++) {
     const room = walkOver() ? 0 : lookupCap - lookups
     if (room <= 0) break
-    const take = heaviest(room, levels - round - 1)
-    const taken = new Set(take)
-    pending = pending.filter(q => !taken.has(q))
+    const take0 = heaviest(room, levels - round - 1)
     tr?.('rounds', 1)
-    const sideAsks = (side: SideNo) => take.filter(q => q.side === side)
-    // The names left pending ride along: the round's groups answer those whose rows they hold (`heldBy`), as a level
-    // of a level-by-level walk answered a heavy name's siblings from the groups it read for them all.
-    const riders = (side: SideNo) => pending.filter(q => q.side === side)
-    const reads = Promise.all([
-      sideAsks(1).length ? readSide(1, sideAsks(1), riders(1)) : new Map<string, Agg | null>(),
-      sideAsks(2).length ? readSide(2, sideAsks(2), riders(2)) : new Map<string, Agg | null>(),
-    ])
+    // Lens views read by name (`readSide`'s per-ask path); the rest by groups (`roundByGroups`). The names left pending
+    // ride along either way: the round's groups answer those whose rows they hold (`heldBy`), as a level of a
+    // level-by-level walk answered a heavy name's siblings from the groups it read for them all.
+    const reads = (async (): Promise<{ take: Ask[]; got: Map<string, Agg | null>[] }> => {
+      const byGroups = lens ? null : await roundByGroups(take0)
+      if (byGroups) return byGroups
+      const taken = new Set(take0)
+      const sideAsks = (side: SideNo) => take0.filter(q => q.side === side)
+      const riders = (side: SideNo) => pending.filter(q => q.side === side && !taken.has(q))
+      return { take: take0, got: await Promise.all([
+        sideAsks(1).length ? readSide(1, sideAsks(1), riders(1)) : new Map<string, Agg | null>(),
+        sideAsks(2).length ? readSide(2, sideAsks(2), riders(2)) : new Map<string, Agg | null>(),
+      ]) }
+    })()
     // A filtered diff's round waits for its lookups until `FILTER_WALK_MS` is spent, no longer: the names
     // still unanswered are folded, as past `LOOKUP_CAP` (`lookups_capped`, `lookups_late`).
     const left = query ? walkMs - (performance.now() - walkStart) : Infinity
     let timer: ReturnType<typeof setTimeout> | null = null
-    const none = [new Map<string, Agg | null>(), new Map<string, Agg | null>()] as const
-    const got = left === Infinity ? await reads : await Promise.race([
+    const none = { take: take0, got: [new Map<string, Agg | null>(), new Map<string, Agg | null>()] }
+    const { take, got } = left === Infinity ? await reads : await Promise.race([
       reads,
       new Promise<typeof none>(r => { timer = setTimeout(() => { late = true; capped = true; lookupsOff = true; r(none) }, Math.max(0, left)) }),
     ])
     if (timer != null) clearTimeout(timer)
     reads.catch(() => {})
+    // Nothing fit the group budget: what is pending stays folded.
+    if (!take.length) break
+    const taken = new Set(take)
+    pending = pending.filter(q => !taken.has(q))
     // The riders answered: no longer pending (their answers are no read's, and spend no budget).
     const rode = pending.filter(q => got[q.side - 1].has(q.cp))
     if (rode.length) {
