@@ -1,3 +1,5 @@
+import { parseColor } from './parseColor'
+
 /**
  * Canvas `fillStyle` / `strokeStyle` silently ignore a CSS custom-property
  * reference (`var(--x)` paints black), yet a themed consumer names its colors
@@ -32,4 +34,32 @@ export function colorResolver(el: Element): (color: string) => string {
     cache.set(color, resolved)
     return resolved
   }
+}
+
+const probed = new Map<string, [number, number, number, number]>()
+let probe: CanvasRenderingContext2D | null = null
+
+/**
+ * A resolved (no `var()`) CSS color as `[r, g, b, a]`: `parseColor`'s literals,
+ * else whatever the browser itself understands (CSS Color 4, notably
+ * `color-mix()`), read back off a 1px canvas once per distinct string. Null
+ * for anything unparseable, or outside a browser.
+ */
+export function browserRgba(c: string): [number, number, number, number] | null {
+  const p = parseColor(c) ?? probed.get(c)
+  if (p) return p
+  if (!c || c.includes('var(') || typeof CSS === 'undefined' || !CSS.supports('color', c)) return null
+  if (!probe) {
+    const canvas = document.createElement('canvas')
+    canvas.width = canvas.height = 1
+    probe = canvas.getContext('2d', { willReadFrequently: true })
+  }
+  if (!probe) return null
+  probe.clearRect(0, 0, 1, 1)
+  probe.fillStyle = c
+  probe.fillRect(0, 0, 1, 1)
+  const [r, g, b, a] = probe.getImageData(0, 0, 1, 1).data
+  const out: [number, number, number, number] = [r, g, b, a / 255]
+  probed.set(c, out)
+  return out
 }

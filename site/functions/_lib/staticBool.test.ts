@@ -291,15 +291,15 @@ describe('the budget: a combination past it declines (`too-broad`), never a gues
  *  ones it lists) with their count and totals, excluded paths, total. A view the query matches with nothing to
  *  exclude lists no `matched`: it is its own root. */
 function viewAsBrute(v: View, root: string): unknown {
-  const roots = v.matched ? v.matched.map(m => [m.path, m.b, m.o] as [string, number, number]).sort((x, y) => (x[0] < y[0] ? -1 : 1)) : v.tree.b || v.tree.o ? [[root, v.tree.b, v.tree.o] as [string, number, number]] : []
-  return { roots, count: v.matchCount ?? { n: roots.length, b: v.tree.b, o: v.tree.o }, excluded: v.excluded ?? [], total: [v.tree.b, v.tree.o] }
+  const roots = v.matched ? v.matched.map(m => [m.path, m.bytes, m.objects] as [string, number, number]).sort((x, y) => (x[0] < y[0] ? -1 : 1)) : v.tree.bytes || v.tree.objects ? [[root, v.tree.bytes, v.tree.objects] as [string, number, number]] : []
+  return { roots, count: v.matchCount ?? { count: roots.length, bytes: v.tree.bytes, objects: v.tree.objects }, excluded: v.excluded ?? [], total: [v.tree.bytes, v.tree.objects] }
 }
 /** Brute force as `v` shows it: nothing matched in bytes is an empty view (`readView`'s rule); a capped list keeps
  *  the roots `v` lists. */
 function bruteView(b: Brute, v: View): unknown {
-  if (b.total[0] <= 0) return { roots: [], count: { n: 0, b: 0, o: 0 }, excluded: [], total: [0, 0] }
+  if (b.total[0] <= 0) return { roots: [], count: { count: 0, bytes: 0, objects: 0 }, excluded: [], total: [0, 0] }
   const listed = v.matchesCapped ? new Set(v.matched!.map(m => m.path)) : null
-  return { roots: listed ? b.roots.filter(r => listed.has(r[0])) : b.roots, count: { n: b.roots.length, b: b.total[0], o: b.total[1] }, excluded: b.excluded, total: b.total }
+  return { roots: listed ? b.roots.filter(r => listed.has(r[0])) : b.roots, count: { count: b.roots.length, bytes: b.total[0], objects: b.total[1] }, excluded: b.excluded, total: b.total }
 }
 
 describe('the map\'s view (`buildView`) of a compound query from the static index = brute force', () => {
@@ -334,7 +334,7 @@ describe('the diff (`buildDiff`) of a compound query from the static index: each
       const d = await buildDiff(env, { from: A, to: B, path: root, w: W, h: H, minArea: MIN_AREA, atten: ATTEN, top: 10_000, query: q(t) })
       const [a, b] = SCANS.map(date => brute(objects[date], q(t), root).total)
       const shown = (x: [number, number]) => x[0] <= 0 ? [0, 0] : x
-      got.push([t, root, d.total_a, d.total_b, d.objects_a, d.objects_b, d.partial, d.approximate])
+      got.push([t, root, d.bytes_before, d.bytes_after, d.objects_before, d.objects_after, d.partial, d.approximate])
       want.push([t, root, shown(a)[0], shown(b)[0], shown(a)[1], shown(b)[1], undefined, undefined])
     }
     expect(got).toEqual(want)

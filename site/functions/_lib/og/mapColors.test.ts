@@ -13,14 +13,14 @@ vi.mock('../staticFilter', () => ({ hexQuery: async (_env: unknown, query: unkno
 vi.mock('../view', () => ({ buildView: mocks.tree, ATTEN_DEFAULT: 0.5, MIN_AREA_DEFAULT: 20, NotFound: class extends Error {} }))
 
 const tree: TreeNode = {
-  n: 'root', b: 100, o: 10, us: [['ann', 50]],
-  c: [
-    { n: 'a', b: 60, o: 6, us: [['ann', 50]], c: [
-      { n: 'a1', b: 50, o: 5, d: 10, a: 10, us: [['ann', 50]] },
-      { n: 'a2', b: 10, o: 1, d: 20 },
+  name: 'root', bytes: 100, objects: 10, owners: [['ann', 50]],
+  children: [
+    { name: 'a', bytes: 60, objects: 6, owners: [['ann', 50]], children: [
+      { name: 'a1', bytes: 50, objects: 5, mtime: 10 * 86400, last_read: 10, owners: [['ann', 50]] },
+      { name: 'a2', bytes: 10, objects: 1, mtime: 20 * 86400 },
     ] },
-    { n: 'b', k: 'dir', b: 30, o: 3, d: 30, a: 14 },
-    { n: '(other)', b: 10, o: 1, f: 4 },
+    { name: 'b', kind: 'dir', bytes: 30, objects: 3, mtime: 30 * 86400, last_read: 14 },
+    { name: '(other)', bytes: 10, objects: 1, folded: 4 },
   ],
 }
 const colors = (data: Awaited<ReturnType<typeof mapCard>>) => data.tiles.map(t => ({

@@ -33,6 +33,7 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from http.client import HTTPException
 
+from . import api_names
 from .diff_bench import browser_url, requests_for, uri_component
 
 WIDTHS = (512, 1280, 1536, 1792, 1920)
@@ -59,8 +60,8 @@ def env_paths() -> tuple[str, ...] | None:
 def root_children(subtree: dict) -> tuple[str, ...]:
     """The root + its children's names from an `/api/subtree` response, folds
     (`(other)`) left out: the views everyone opens first."""
-    kids = (subtree.get("tree") or {}).get("c") or []
-    return ("", *(k["n"] for k in kids if not k["n"].startswith("(")))
+    kids = (api_names.tree(subtree) if subtree.get("tree") else {}).get("children") or []
+    return ("", *(k["name"] for k in kids if not k["name"].startswith("(")))
 
 
 def top_paths(base_url: str, headers: dict[str, str], date: str, timeout: float = 120) -> tuple[str, ...]:

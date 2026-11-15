@@ -172,6 +172,19 @@ def command_cmd(
         Store(f'gs://{scratch}').write_text(audit_key, json.dumps(doc, indent=1) + '\n')
         err(f'generation-gc audit: gs://{scratch}/{audit_key}')
 
+    try:
+        records = _collect_leased(stores, kind, pins, grace_s, execute, scratch, audit)
+    except ar.Busy as e:
+        # a builder (an append or a compaction) holds the store: nothing collected; the next run retries
+        err(f'generation-gc {kind}: {e}: nothing collected')
+        raise SystemExit(ar.BUSY)
+    print(json.dumps({'kind': kind, 'execute': execute, 'audit': f'gs://{scratch}/{audit_key}' if execute else None,
+                      'generations': records}, indent=1))
+
+
+def _collect_leased(stores: list[Store], kind: str, pins: tuple[str, ...], grace_s: int, execute: bool, scratch: str | None,
+                    audit: Callable[[dict], None]) -> list[dict]:
+    """`collect`, holding the builders' coordinator and compaction leases when ``execute`` (`ar.Busy` when either is held)."""
     with ExitStack() as stack:
         checks = []
         if execute:
@@ -182,7 +195,5 @@ def command_cmd(
             for check in checks:
                 check()
 
-        records = collect(stores, kind, list(pins), now=time.time(), grace_s=grace_s, execute=execute,
-                          check=check_leases, audit=audit if execute else None)
-    print(json.dumps({'kind': kind, 'execute': execute, 'audit': f'gs://{scratch}/{audit_key}' if execute else None,
-                      'generations': records}, indent=1))
+        return collect(stores, kind, list(pins), now=time.time(), grace_s=grace_s, execute=execute,
+                       check=check_leases, audit=audit if execute else None)

@@ -1,4 +1,4 @@
-import { compactQuietLines, QUIET_BYTES } from './compact'
+import { compactQuietLines } from './compact'
 /** The `cw` digest template's replies (`digest_cw.day_rows` / `reply`, ported byte for byte; goldens:
  * `./replyParity.test.ts`), so `/admin/slack` can show a candidate's replies. The job still renders what it posts in
  * Python. `ArrowMark`s exist only here: a preview of marks with no emoji uploaded. Pure; DOM-free. */
@@ -109,7 +109,7 @@ function quotaClause(v: number, q: Quota, cfg: DigestCfg, brief = false): string
   const u = cfg.unit
   const qt = q.bytes / u.bytes
   const share = (v / qt) * 100
-  if (brief && share < QUIET_PCT) return `${fixed(share, 0)}%`
+  if (brief && share < QUIET_PCT) return `${fixed(share, 0)}% of ${q.short || qlabel(q.bytes)}`
   const room = v <= qt ? `${grouped(qt - v, 1)} ${u.short} free` : `${grouped(v - qt, 1)} ${u.short} over`
   return `${fixed(share, 1)}% of ${q.short || qlabel(q.bytes)} (${room})`
 }
@@ -199,9 +199,8 @@ function tail(day: DayRow, cfg: DigestCfg, rc: ReplyCfg, marks: ReplyMarks, sep:
       text = `${poolMark(marks as PoolMark, rw.r, f, rw.v, cfg.buckets[g[0][0]]?.shape ?? 'circle')}${c}${runwayText(rw.r, cfg)}`
     } else if (marks === 'circles' && f !== null) text = `${mark(f, rc.alert_pct ?? 90)}${c}`
     else if (!RUNWAY_MARKS.includes(marks) && marks !== 'circles' && over) text = `${ALERT_MARK} ${c}`
-    const total = g.reduce((n, [, v]) => n + v, 0)
-    const change = g.reduce((n, [b]) => n + (b === cfg.primary ? day.dtb ?? 0 : day.dextra[b] ?? 0), 0)
-    return { text, quiet: total * cfg.unit.bytes < QUIET_BYTES && Math.abs(change) * cfg.unit.bytes < QUIET_BYTES && !over && (f === null || f < QUIET_PCT) && (!rw || rw.r.days >= 60) }
+    // low-info: the line says only a size or a brief `NN%` (no headroom, no runway), whatever the bytes behind it
+    return { text, quiet: !over && (f === null || f < QUIET_PCT) && !(rw && runwayText(rw.r, cfg)) }
   })
   return (sep === '\n' ? compactQuietLines(lines) : lines.map(x => x.text)).join(sep)
 

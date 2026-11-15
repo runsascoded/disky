@@ -50,7 +50,7 @@ def truth(tmp_path):
 
 
 def body(matches, b, o, **flags):
-    d = {"tree": {"n": "x", "b": b, "o": o}, "tier": "search+path", **({"matches": matches} if matches is not None else {}), **flags}
+    d = {"tree": {"name": "x", "bytes": b, "objects": o}, "tier": "search+path", **({"matches": matches} if matches is not None else {}), **flags}
     return json.dumps(d).encode()
 
 

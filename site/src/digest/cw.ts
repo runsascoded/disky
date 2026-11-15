@@ -1,4 +1,4 @@
-import { compactQuietLines, QUIET_BYTES } from './compact'
+import { compactQuietLines } from './compact'
 /** The `cw` digest template's OP: its text and its plot's `/api/digest-image` request, from the month's scans
  * (the job sends them: `Cw.rows_json`; goldens: `./parity.test.ts`). The replies: `./cwReply.ts`. Pure; DOM-free. */
 import { encodeScan, scanTime } from '../scanSlug'
@@ -119,11 +119,11 @@ function poolsText(m: CwRows, month: number, cfg: DigestCfg, p: DigestParams, li
     ...compactQuietLines([
       ...rows.map(({ p: pl, v, mark, text, pct, tail }) => ({
         text: `${mark}${name(pl)} ${grouped(v, 0)} ${u.name}${change(pl.buckets)}${members(pl)} · ${text}`,
-        quiet: v * u.bytes < QUIET_BYTES && Math.abs(moved(pl.buckets, b0, last, cfg)) * u.bytes < QUIET_BYTES && pct < QUIET_PCT && !tail,
+        quiet: !change(pl.buckets) && pct < QUIET_PCT && !tail,
       })),
       ...Object.keys(last.extra).filter(b => !inPool.has(b)).map(b => ({
         text: `${bucketLink(b, last, mtdSince, cfg)} ${grouped(last.extra[b], 0)} ${u.name}${change([b])}`,
-        quiet: last.extra[b] * u.bytes < QUIET_BYTES && Math.abs(moved([b], b0, last, cfg)) * u.bytes < QUIET_BYTES,
+        quiet: !change([b]),
       })),
     ]),
     '',

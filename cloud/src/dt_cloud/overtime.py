@@ -3,9 +3,11 @@ out so the size-over-time chart reads a whole line in one contiguous range
 instead of one point read per scan generation (specs/done/obs-axis-indexing.md
 Phase 1).
 
-The SCD-2 interval consolidation is **pyrmts' generic multiscan kernel**
-(`pyrmts_engine.multiscan_duckdb.consolidate_parquet_duckdb` — vectorized
-gaps-and-islands over `read_parquet`, out-of-core). cw supplies only the glue:
+The SCD-2 interval consolidation is **pyrmts' gaps-and-islands kernel**
+(`pyrmts.intervals.islands_sql`, the SQL `pyrmts_engine`'s multiscan backend
+runs), copied straight from DuckDB to the parquet, out-of-core: no per-scan
+`scan_digest` (a pure-Python hash, ~3 min a 19M-row shard, that nothing here
+reads) and no Arrow round trip. cw supplies only the glue:
 roll each scan's `path` sort to `(depth, path)` totals of its dir rows (owner
 slices summed away — over-time is `(path)`-granular; object rows, present since
 the path store, are not series) plus a depth-0 fleet-root row, and hand
@@ -28,8 +30,9 @@ from functools import partial
 from pathlib import Path
 
 import duckdb
+from pyrmts import get_monoid
+from pyrmts.intervals import islands_sql
 from pyrmts.types import Dim, Metric, Pyramid
-from pyrmts_engine.multiscan_duckdb import consolidate_parquet_duckdb
 
 from .index import ROW_GROUP_SIZE, duckdb_codec
 
@@ -150,6 +153,20 @@ def group_source(
     return str(out)
 
 
+def _intervals_sql(scan_files: list[tuple[str, str]]) -> str:
+    """The SCD-2 intervals `(depth, path, b, o, __scan_lo, __scan_hi)` over the
+    ordered per-scan shards: `islands_sql` over their `UNION ALL`, each tagged
+    with its index in the list (what `__scan_lo`/`__scan_hi` count)."""
+    pyr = over_time_pyramid()
+    key_cols = [pyr.binCol, *(d.name for d in pyr.dims)]
+    state_cols = [c for m in pyr.metrics for c in get_monoid(m.monoid).state_columns(m.name)]
+    union = "\nUNION ALL\n".join(
+        f"SELECT CAST({j} AS BIGINT) AS __scan, * FROM read_parquet('{path}')"
+        for j, (_, path) in enumerate(scan_files)
+    )
+    return islands_sql(union, key_cols, state_cols, scan_col="__scan")
+
+
 def write_over_time_index(
     scans: list[tuple[str, str | Path]],
     out_dir: str | Path,
@@ -193,13 +210,10 @@ def write_over_time_index(
                 if src == _URL_SRC:
                     con.unregister(_URL_SRC)
             scan_files.append((sid, str(shard)))
-        ms = consolidate_parquet_duckdb(scan_files, over_time_pyramid(), con=con)
-        con.register("ms_over_time", ms.table)
         con.execute(
-            f"COPY (SELECT * FROM ms_over_time ORDER BY depth, path, {SCAN_LO}) "
+            f"COPY (SELECT * FROM ({_intervals_sql(scan_files)}) ORDER BY depth, path, {SCAN_LO}) "
             f"TO '{out_path}' (FORMAT parquet, {duckdb_codec()}, ROW_GROUP_SIZE {ROW_GROUP_SIZE})"
         )
-        con.unregister("ms_over_time")
         rows = con.execute(f"SELECT count(*) FROM read_parquet('{out_path}')").fetchone()[0]
         paths = con.execute(f"SELECT count(DISTINCT (depth, path)) FROM read_parquet('{out_path}')").fetchone()[0]
     finally:

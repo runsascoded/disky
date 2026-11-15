@@ -39,10 +39,11 @@ const devSeriesIndex = {
   },
 }
 
-// The deployment's guide for agents — `API.md` at the repo root, on a branch
-// that carries one (gcs) — ships as `/llms.txt`: a static asset, outside the
-// sign-in gate (`public/_routes.json` keeps it off the Functions). No
-// `API.md` (cw-s3, the r2 demo) → no `/llms.txt`, and the SPA fallback answers.
+// The deployment's guide for agents — `API.md` at the repo root (`cloud`'s is
+// deployment-agnostic; a deployment branch may carry its own) — ships as
+// `/llms.txt`: a static asset, outside the sign-in gate (`public/_routes.json`
+// keeps it off the Functions). No `API.md` → no `/llms.txt`, and the SPA
+// fallback answers.
 const LLMS_SRC = fileURLToPath(new URL('../API.md', import.meta.url))
 const llmsTxt: Plugin = {
   name: 'llms-txt',

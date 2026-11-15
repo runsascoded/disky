@@ -21,7 +21,9 @@ from pathlib import Path
 
 from click import IntRange, argument, command, option
 
-TOTALS = ("total_a", "total_b", "objects_a", "objects_b")
+from . import api_names
+
+TOTALS = ("bytes_before", "bytes_after", "objects_before", "objects_after")
 
 
 def is_other(p: str) -> bool:
@@ -34,32 +36,38 @@ def parent_of(p: str) -> str:
 
 def bad_sums(d: dict) -> list[str]:
     """Expanded rows (and the root) whose drawn children's Δ (bytes or objects) doesn't sum to their own."""
+    d = api_names.diff(d)
     rows = d["rows"]
-    tops = [("", d["total_b"] - d["total_a"], d["objects_b"] - d["objects_a"])]
-    tops += [(r["p"], r["b"] - r["a"], r["ob"] - r["oa"]) for r in rows if r.get("x")]
+    db_ = lambda r: r["bytes_after"] - r["bytes_before"]  # noqa: E731
+    do_ = lambda r: r["objects_after"] - r["objects_before"]  # noqa: E731
+    tops = [("", db_(d), do_(d))]
+    tops += [(r["path"], db_(r), do_(r)) for r in rows if r.get("expanded")]
     out = []
     for p, db, do in tops:
-        kids = [r for r in rows if parent_of(r["p"]) == p and r["p"] != p]
-        if kids and (sum(r["b"] - r["a"] for r in kids), sum(r["ob"] - r["oa"] for r in kids)) != (db, do):
+        kids = [r for r in rows if parent_of(r["path"]) == p and r["path"] != p]
+        if kids and (sum(db_(r) for r in kids), sum(do_(r) for r in kids)) != (db, do):
             out.append(p or "/")
     return out
 
 
 def check(a: dict, b: dict, tier: str | None, atten: float = 2.0) -> dict:
     """The findings for one case: `ok`, and what failed."""
-    key = lambda r: (r["k"], r["s"], r["a"], r["b"], r["oa"], r["ob"])  # noqa: E731
-    changed = lambda r: r["s"] != "unchanged" and not is_other(r["p"])  # noqa: E731
-    ia = {r["p"]: r for r in a["rows"] if changed(r)}
-    ib = {r["p"]: r for r in b["rows"] if changed(r)}
+    a, b = api_names.diff(a), api_names.diff(b)
+    key = lambda r: (r["kind"], r["status"], r["bytes_before"], r["bytes_after"], r["objects_before"], r["objects_after"])  # noqa: E731
+    changed = lambda r: r["status"] != "unchanged" and not is_other(r["path"])  # noqa: E731
+    ia = {r["path"]: r for r in a["rows"] if changed(r)}
+    ib = {r["path"]: r for r in b["rows"] if changed(r)}
     differ = [p for p, r in ib.items() if p in ia and key(ia[p]) != key(r)]
     only_b = [p for p in ib if p not in ia]
-    opened = {""} | {r["p"] for r in b["rows"] if r.get("x")}
+    opened = {""} | {r["path"] for r in b["rows"] if r.get("expanded")}
     floor = b.get("threshold", 0)
     # A row B cut to `top` is in its parent's `(other)` there: excused when B is truncated and that `(other)` covers it
     # (both sides at least the row's).
-    others = {parent_of(r["p"]): r for r in b["rows"] if is_other(r["p"])}
-    folded = lambda r: b.get("truncated") and (o := others.get(parent_of(r["p"]))) is not None and o["a"] >= r["a"] and o["b"] >= r["b"]  # noqa: E731
-    missed = [p for p, r in ia.items() if p not in ib and parent_of(p) in opened and max(r["a"], r["b"]) >= floor * atten ** max(0, r["d"] - 1)
+    others = {parent_of(r["path"]): r for r in b["rows"] if is_other(r["path"])}
+    folded = lambda r: b.get("truncated") and (o := others.get(parent_of(r["path"]))) is not None \
+        and o["bytes_before"] >= r["bytes_before"] and o["bytes_after"] >= r["bytes_after"]  # noqa: E731
+    missed = [p for p, r in ia.items() if p not in ib and parent_of(p) in opened
+              and max(r["bytes_before"], r["bytes_after"]) >= floor * atten ** max(0, r["depth"] - 1)
               and not folded(r)]
     out = {
         "totals": all(a.get(k) == b.get(k) for k in TOTALS),

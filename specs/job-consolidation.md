@@ -86,7 +86,7 @@ On `cloud`: `infra/cf/run`, cw's and hf's byte-identical wrapper (`pulumi -C inf
 ## 5. The scan job image: `job/build.sh`, `job/Dockerfile`, `dt-cloud image`
 
 On `cloud`:
-- `job/Dockerfile`: one image for every deployment. The differences are build args: `SITE` (`build`: the static site into `/app/dist`, gcs and cw; `none`), `APT_PACKAGES`, `UV_SYNC_ARGS` (the `dt-cloud` extras), `ENTRYPOINT` (the container's command, its args appended: run via `bash -c 'exec $DISKY_ENTRYPOINT "$@"'`, so it is PID 1). The stamp (`DISKY_GIT_SHA` / `DISKY_GIT_DIRTY` → OCI labels `org.opencontainers.image.revision`, `disky.dirty` and env) is the build's own; a config can't set it. `DT_NF_DIR=/app/job/nf` everywhere (r2 set it; it is where every image has the pipeline).
+- `job/Dockerfile`: one image for every deployment. The differences are build args: `SITE` (`build`: the static site into `/app/dist`, gcs and cw; `none`), `APT_PACKAGES`, `UV_SYNC_ARGS` (the `dt-cloud` extras), `ENTRYPOINT` (the container's command, its args appended: run via `bash -c 'exec $DISKY_ENTRYPOINT "$@"'`, so it is PID 1). A Batch spec that sets its own `entrypoint` (r2's scheduled heads set `dt-cloud`) bypasses the wrapper; it applies only to submits that don't. The stamp (`DISKY_GIT_SHA` / `DISKY_GIT_DIRTY` → OCI labels `org.opencontainers.image.revision`, `disky.dirty` and env) is the build's own; a config can't set it. `DT_NF_DIR=/app/job/nf` everywhere (r2 set it; it is where every image has the pipeline).
 - `dt-cloud image build` / `dt-cloud image promote` (`cloud/src/dt_cloud/image_build.py`, tests `cloud/tests/test_image_build.py`), configured by the deployment's `job/build.json`. `job/build.sh` is `dt-cloud image build -c job/build.json "$@"` (`job/build.sh promote TAG` for the other). No `cloudbuild.yaml`: the Cloud Build config is generated per build into the staged context.
 
 What a build does:
@@ -259,3 +259,14 @@ r2 already builds candidates and pins digests (`job/r2-scan build TAG`, then `pl
 - Artifact Registry only: digests come from `gcloud artifacts docker images describe`, and promote moves tags with `gcloud artifacts docker tags add` (no image copy, so each mirror needs its own candidate tag, which the build pushes). Every deployment's registry is Artifact Registry today.
 - Cloud Run re-pointing is the only consumer update; other consumers (Batch cron bodies, Nextflow profiles) follow a live tag or pin a digest by their own config.
 - The image's content differs from today's per deployment in small ways: one apt layer for all packages (cache cold once), the `bash -c` entrypoint wrapper, wrangler's `npx` link on hf and r2, an empty `/app/dist` on hf and r2.
+
+## Adoption status (2026-11-13)
+
+| Deployment | Merged `cloud` | Candidate built | Smoke | Live |
+| --- | --- | --- | --- | --- |
+| hf | `0fc42d96` | `0fc42d96db75` | scratch scan, all 7 Batch tasks on the candidate | promoted to `:hf` |
+| r2 | `c5ed8d428` | `c5ed8d42863d` | scratch head, 21 min | daily heads pinned (`1896bfe3e`, `pulumi up -s r2`) |
+| cw | `506747fd9` | rebuilding | manual scan on the candidate digest, then promote | pending |
+| gcs | `76c64dc66` | pending | container-level; a full scan writes a real scan (no scratch profile) | pending |
+
+**A candidate smoke covers the step tasks only when the submitter forwards `DT_SCAN_IMAGE`** on manual submits (hf `a2457745`, gcs `b1e430fcc`; cw's already did). Without it the head runs the candidate and the steps run the live tag. The cron bodies stay byte-identical.

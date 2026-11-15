@@ -2,6 +2,7 @@
   "bucket-check": {"leaves": "a bucket outside the profile's sources may hold storage the site doesn't count", "side": true, "converges": false, "checks": false},
   "access-ingest": {"leaves": "this scan's read recency misses the newest access logs", "side": false, "converges": true, "checks": false},
   "access-r2": {"leaves": "this scan's read recency is as of the previous aggregate", "side": false, "converges": true, "checks": false},
+  "access-r2-receipt": {"leaves": "collector checkpoint receipt behind", "side": true, "converges": true, "checks": false},
   "static-names": {"leaves": "search doesn't cover this scan", "side": false, "converges": true, "checks": false},
   "publish-r2": {"leaves": "the scan's served files aren't all on R2", "side": false, "converges": false, "checks": false},
   "interval-store": {"leaves": "the interval store doesn't hold this scan", "side": false, "converges": true, "checks": false},
@@ -21,5 +22,6 @@
   "digest": {"leaves": "usage digest not posted", "side": true, "converges": true, "checks": false},
   "cf-usage": {"leaves": "Cloudflare usage snapshots not written", "side": true, "converges": true, "checks": false},
   "gcp-cost": {"leaves": "today's cloud cost snapshot not written", "side": true, "converges": false, "checks": false},
-  "soft-delete": {"leaves": "today's soft-delete reading not written: the site keeps the last one, dated", "side": true, "converges": false, "checks": false}
+  "soft-delete": {"leaves": "today's soft-delete reading not written: the site keeps the last one, dated", "side": true, "converges": false, "checks": false},
+  "vm-pack": {"leaves": "VM mode's pack not written: the VM serves the previous one until a later run writes it", "side": true, "converges": true, "checks": false}
 }

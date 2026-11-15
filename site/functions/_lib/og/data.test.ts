@@ -16,16 +16,27 @@ describe('D1', () => {
   describe('tiles and legend', () => {
     const users = [{ u: 'ann', b: 9 }, { u: 'bo', b: 5 }]
     const color = ownerColors(users)
+    it('keeps unavailable ownership separate from known unowned bytes in share cards', () => {
+      const unknown: TreeNode = { name: 'unknown', bytes: 100, objects: 1, owners: [['ann', 30]], unknown_owner_bytes: 50 }
+      expect(legendOf(unknown, color, u => u.toUpperCase())).toEqual([
+        { label: 'owner detail unavailable', color: '#2b2e35', b: 50 },
+        { label: 'ANN', color: '#4269d0', b: 30 },
+        { label: 'unowned', color: UNOWNED_COLOR, b: 20 },
+      ])
+      expect([dominant(unknown), tilesOf({ name: 'root', bytes: 100, objects: 1, children: [unknown] }, color)]).toEqual([
+        null, [{ name: 'unknown', b: 100, color: '#2b2e35' }],
+      ])
+    })
     const tree: TreeNode = {
-      n: 'root', b: 100, o: 10, us: [['ann', 50], ['bo', 20]],
-      c: [
-        { n: 'a', b: 60, o: 6, us: [['ann', 50]], c: [{ n: 'a1', b: 50, o: 5, us: [['ann', 50]] }, { n: 'a2', b: 10, o: 1 }] },
-        { n: 'b', b: 30, o: 3, us: [['bo', 10]] },
-        { n: '(other)', b: 10, o: 1, f: 4 },
+      name: 'root', bytes: 100, objects: 10, owners: [['ann', 50], ['bo', 20]],
+      children: [
+        { name: 'a', bytes: 60, objects: 6, owners: [['ann', 50]], children: [{ name: 'a1', bytes: 50, objects: 5, owners: [['ann', 50]] }, { name: 'a2', bytes: 10, objects: 1 }] },
+        { name: 'b', bytes: 30, objects: 3, owners: [['bo', 10]] },
+        { name: '(other)', bytes: 10, objects: 1, folded: 4 },
       ],
     }
     it('dominant: the top owner unless the unowned remainder outweighs it', () => {
-      expect(tree.c!.map(dominant)).toEqual(['ann', null, null])
+      expect(tree.children!.map(dominant)).toEqual(['ann', null, null])
     })
     it('tiles: owner colours by scan rank, unowned and folds grey', () => {
       expect(tilesOf(tree, color)).toEqual([
@@ -36,13 +47,13 @@ describe('D1', () => {
     })
     it('tiles nest to the view\'s depth: tree mode keys every cell by its depth-1 slot and depth-2 rank', () => {
       const deep: TreeNode = {
-        n: 'root', b: 100, o: 10,
-        c: [
-          { n: 'a', b: 70, o: 7, c: [
-            { n: 'a1', b: 50, o: 5, c: [{ n: 'a1x', b: 30, o: 3, c: [{ n: 'a1x0', b: 30, o: 3 }] }, { n: '(other)', b: 20, o: 2, f: 3 }] },
-            { n: 'a2', b: 20, o: 2 },
+        name: 'root', bytes: 100, objects: 10,
+        children: [
+          { name: 'a', bytes: 70, objects: 7, children: [
+            { name: 'a1', bytes: 50, objects: 5, children: [{ name: 'a1x', bytes: 30, objects: 3, children: [{ name: 'a1x0', bytes: 30, objects: 3 }] }, { name: '(other)', bytes: 20, objects: 2, folded: 3 }] },
+            { name: 'a2', bytes: 20, objects: 2 },
           ] },
-          { n: 'b', b: 30, o: 3 },
+          { name: 'b', bytes: 30, objects: 3 },
         ],
       }
       expect(tilesOf(deep, color, 'tree')).toEqual([
@@ -59,10 +70,10 @@ describe('D1', () => {
     it('tree mode under one top-level dir: its children take the slots, the lone ancestor a neutral frame', () => {
       // hf: the org's one bucket over models / buckets / datasets — keyed at the root, the whole card is one hue.
       const lone: TreeNode = {
-        n: 'root', b: 100, o: 10,
-        c: [{ n: 'org', b: 100, o: 10, c: [
-          { n: 'models', b: 70, o: 7, c: [{ n: 'm1', b: 50, o: 5 }, { n: 'm2', b: 20, o: 2 }] },
-          { n: 'datasets', b: 30, o: 3 },
+        name: 'root', bytes: 100, objects: 10,
+        children: [{ name: 'org', bytes: 100, objects: 10, children: [
+          { name: 'models', bytes: 70, objects: 7, children: [{ name: 'm1', bytes: 50, objects: 5 }, { name: 'm2', bytes: 20, objects: 2 }] },
+          { name: 'datasets', bytes: 30, objects: 3 },
         ] }],
       }
       expect(tilesOf(lone, color, 'tree')).toEqual([
@@ -79,15 +90,15 @@ describe('D1', () => {
     })
     it('read mode: read since its write by the read, written-unread by the write, never; the window runs to `through`', () => {
       const flat: TreeNode = {
-        n: 'root', b: 135, o: 13,
-        c: [
-          { n: 'read', b: 40, o: 4, a: 105, d: 90 },
+        name: 'root', bytes: 135, objects: 13,
+        children: [
+          { name: 'read', bytes: 40, objects: 4, last_read: 105, mtime: 90 * 86400 },
           // a folder with a read older than its newest write: the read's age (it hatches only when nothing in it was read)
-          { n: 'busy', k: 'dir', b: 35, o: 3, a: 102, d: 108 },
+          { name: 'busy', kind: 'dir', bytes: 35, objects: 3, last_read: 102, mtime: 108 * 86400 },
           // an object read before its last write: the write's age
-          { n: 'rewritten', k: 'file', b: 30, o: 1, a: 102, d: 108 },
-          { n: 'fresh', b: 20, o: 2, d: 104 },
-          { n: 'cold', b: 10, o: 1, d: 95 },
+          { name: 'rewritten', kind: 'file', bytes: 30, objects: 1, last_read: 102, mtime: 108 * 86400 },
+          { name: 'fresh', bytes: 20, objects: 2, mtime: 104 * 86400 },
+          { name: 'cold', bytes: 10, objects: 1, mtime: 95 * 86400 },
         ],
       }
       const tiles = (access: Parameters<typeof tilesOf>[3]) => tilesOf(flat, color, 'read', access).map(t => [t.name, t.color])
@@ -101,10 +112,10 @@ describe('D1', () => {
     })
     it('date mode: containers neutral at every depth; the scale spans the drawn leaves', () => {
       const deep: TreeNode = {
-        n: 'root', b: 100, o: 10, d: 5,
-        c: [
-          { n: 'a', b: 70, o: 7, d: 30, c: [{ n: 'a1', b: 50, o: 5, d: 30, c: [{ n: 'a1x', b: 50, o: 5, d: 20 }] }, { n: 'a2', b: 20, o: 2, d: 30 }] },
-          { n: 'b', b: 30, o: 3, d: 10 },
+        name: 'root', bytes: 100, objects: 10, mtime: 5 * 86400,
+        children: [
+          { name: 'a', bytes: 70, objects: 7, mtime: 30 * 86400, children: [{ name: 'a1', bytes: 50, objects: 5, mtime: 30 * 86400, children: [{ name: 'a1x', bytes: 50, objects: 5, mtime: 20 * 86400 }] }, { name: 'a2', bytes: 20, objects: 2, mtime: 30 * 86400 }] },
+          { name: 'b', bytes: 30, objects: 3, mtime: 10 * 86400 },
         ],
       }
       expect(tilesOf(deep, color, 'date')).toEqual([
@@ -170,10 +181,10 @@ describe('D1', () => {
       ]).toEqual([{ value: 'view 2', depth: 2 }, [2], { value: 'view 2', depth: 2 }, [2]])
     })
     it('canDeepen: some depth-2 cell is a real directory', () => {
-      const tree = (c2: TreeNode[]): TreeNode => ({ n: 'r', b: 1, o: 1, c: [{ n: 'a', b: 1, o: 1, c: c2 }, { n: 'f', b: 1, o: 1, k: 'file' }] })
+      const tree = (c2: TreeNode[]): TreeNode => ({ name: 'r', bytes: 1, objects: 1, children: [{ name: 'a', bytes: 1, objects: 1, children: c2 }, { name: 'f', bytes: 1, objects: 1, kind: 'file' }] })
       expect([
-        canDeepen(tree([{ n: 'a1', b: 1, o: 1, k: 'dir' }])),
-        canDeepen(tree([{ n: 'a1', b: 1, o: 1, k: 'file' }, { n: '(other)', b: 1, o: 1, f: 2 }])),
+        canDeepen(tree([{ name: 'a1', bytes: 1, objects: 1, kind: 'dir' }])),
+        canDeepen(tree([{ name: 'a1', bytes: 1, objects: 1, kind: 'file' }, { name: '(other)', bytes: 1, objects: 1, folded: 2 }])),
         canDeepen(tree([])),
       ]).toEqual([true, false, false])
     })

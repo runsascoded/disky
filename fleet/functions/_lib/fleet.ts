@@ -47,7 +47,9 @@ interface RunWire {
   phase_issues: IssueWire[]
 }
 interface RunsWire { configured: boolean; runs: RunWire[] }
-interface SeriesWire { points: { date: string; b: number }[] }
+/** `/api/series`' points: `bytes` (specs/descriptive-field-names.md §3d), or `b` from a deployment whose site predates the
+ *  rename. Drop `b` once every deployment serves `bytes` (the spec's follow-up list). */
+interface SeriesWire { points: { date: string; bytes?: number; b?: number }[] }
 
 // ── the document (its shape: `fleetTypes.ts`) ─────────────────────────────
 
@@ -82,7 +84,7 @@ export const fleetRun = (s: RunWire): FleetRun => ({
 
 /** The meta store's points as the document carries them, relative to `now`. */
 export function fleetMeta(points: SeriesWire['points'], now: number): FleetMeta {
-  const pts = points.flatMap(p => { const t = scanTime(p.date); return t === null ? [] : [{ scan: p.date, t, bytes: p.b }] }).sort((a, b) => a.t - b.t)
+  const pts = points.flatMap(p => { const t = scanTime(p.date); return t === null ? [] : [{ scan: p.date, t, bytes: p.bytes ?? p.b ?? 0 }] }).sort((a, b) => a.t - b.t)
   const at = (cut: number): number | null => { const p = pts.filter(q => q.t <= cut).pop(); return p ? p.bytes : null }
   const byDay = new Map<string, MetaPoint>()
   for (const p of pts) if (p.t >= now - META_DAYS * DAY) byDay.set(new Date(p.t * 1000).toISOString().slice(0, 10), p)

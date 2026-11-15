@@ -19,7 +19,7 @@ vi.mock('../prefixes.js', async orig => ({
     const stats: Record<string, PrefixStat> = {}
     for (const p of prefixes) {
       if (p.includes('/empty/')) continue
-      stats[p] = p.includes('/cw/') ? { b: (p.includes('/big/') ? 3 : 1) * TiB, o: 10 } : { b: TiB, o: 10, us: [['ann-bee', TiB]] }
+      stats[p] = p.includes('/cw/') ? { bytes: (p.includes('/big/') ? 3 : 1) * TiB, objects: 10 } : { bytes: TiB, objects: 10, owners: [['ann-bee', TiB]] }
     }
     return { stats, groups: 1 }
   },

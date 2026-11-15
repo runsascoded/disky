@@ -13,7 +13,7 @@ vi.mock('@rdub/file-tree/stores/s3', async () => ({ S3Store: (await import('../_
 // `interval-store-b2/` (under `b2`), its union `all` the main view. The oracle: the whole store (`interval-store/`),
 // which holds both roots.
 
-type Body = { from: string; to: string; k: number; m: string; levels: Level[]; union?: { view: string; sources: { store: string; from: string | null; to: string | null; change: string }[] } }
+type Body = { from: string; to: string; top_k: number; measure: string; levels: Level[]; union?: { view: string; sources: { store: string; from: string | null; to: string | null; change: string }[] } }
 
 const IV = { PATH_STORE: 'intervals', INTERVAL_STORE_GEN: 'g' }
 /** The index store's readiness (`storeReady`: creds and a bucket); every read goes to `INDEX_R2`. */
@@ -61,7 +61,8 @@ describe('union level diffs', () => {
       const [u, p, b] = await Promise.all([get(union, qs), get(union, `${qs}&store=primary`), get(union, `${qs}&store=b2`)])
       const root = byPath(u)['']
       expect(root).toEqual(mergeLevels('', [byPath(p)[''], byPath(b)['']], 32, 'churn'))
-      expect([root.a, root.b, root.oa, root.ob, root.churn]).toEqual(['a', 'b', 'oa', 'ob', 'churn'].map(f => byPath(p)[''][f as 'a'] + byPath(b)[''][f as 'a']))
+      const SIDES = ['bytes_before', 'bytes_after', 'objects_before', 'objects_after', 'churn'] as const
+      expect(SIDES.map(f => root[f])).toEqual(SIDES.map(f => byPath(p)[''][f] + byPath(b)[''][f]))
       if (root.next) {
         followed++
         expect(byPath(u)[root.next]).toEqual(byPath(await get(whole, qs))[root.next])

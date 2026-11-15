@@ -173,7 +173,7 @@ describe('D1', () => {
   /** The whole-bucket series: one point per scan, an unindexed one's from its meta. */
   async function series(w: World) {
     const r = await w.mods.series.onRequestGet({ request: new Request('http://localhost/api/series?path='), env: w.env })
-    return [r.status, ((await r.json()) as { points: { date: string; b: number }[] }).points.map(p => [p.date, p.b])]
+    return [r.status, ((await r.json()) as { points: { date: string; bytes: number }[] }).points.map(p => [p.date, p.bytes])]
   }
   const SERIES = [200, [[OLD, 777], [A, 37229948], [B, 37229948]]]
   /** What a series read asks the store for: the indexed scans' per-scan `path` sorts (this fixture has
@@ -239,8 +239,8 @@ describe('D1', () => {
       vi.stubGlobal('fetch', async (req: RequestInfo, init?: RequestInit) =>
         (typeof req === 'string' ? req : req.url).includes(dirOf(B)) ? new Response('boom', { status: 403 }) : pass(req, init))
       const r = await w.mods.series.onRequestGet({ request: new Request('http://localhost/api/series?path='), env: w.env })
-      const body = (await r.json()) as { points: { date: string; b: number }[]; failed?: string[] }
-      expect([r.status, r.headers.get('cache-control'), body.points.map(p => [p.date, p.b]), body.failed, puts]).toEqual([
+      const body = (await r.json()) as { points: { date: string; bytes: number }[]; failed?: string[] }
+      expect([r.status, r.headers.get('cache-control'), body.points.map(p => [p.date, p.bytes]), body.failed, puts]).toEqual([
         200, 'no-store', [[OLD, 777], [A, 37229948]], [B], [],
       ])
     })
@@ -272,9 +272,9 @@ describe('D1', () => {
       const w = await world(true)
       const v = await w.mods.view.buildView(w.env, { date: A, path: 'bk/nest', w: 800, h: 600, minArea: 0, atten: 1 })
       const pv: [string, unknown][] = []
-      const walk = (n: { n: string; pv?: unknown; c?: unknown[] }, p: string) => {
-        if (n.pv) pv.push([p, n.pv])
-        for (const c of (n.c ?? []) as { n: string }[]) walk(c as never, `${p}/${c.n}`)
+      const walk = (n: { name: string; provenance?: unknown; children?: unknown[] }, p: string) => {
+        if (n.provenance) pv.push([p, n.provenance])
+        for (const c of (n.children ?? []) as { name: string }[]) walk(c as never, `${p}/${c.name}`)
       }
       walk(v.tree as never, 'bk/nest')
       expect(pv).toEqual(EXPECTED_PV)

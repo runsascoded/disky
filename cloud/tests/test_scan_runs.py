@@ -16,13 +16,26 @@ from dt_cloud.scan_runs import (
     measure_after,
     parse_profile, record, record_sql, recovery_record, write_all,
 )
-from dt_cloud.scan_runs_backfill import classify, failure_of, log_filter, phases_of, reconstruct, task_lines
+from dt_cloud.scan_runs_backfill import classify, failure_of, log_filter, owner_of_gen, phases_of, reconstruct, task_lines
 
 DDL = table_ddl(scan_runs.TABLES)  # the tables as `site/schema.sql` has them
 
 
 def ts(s: str) -> int:
     return int(dt.datetime.fromisoformat(s).replace(tzinfo=dt.timezone.utc).timestamp())
+
+
+@pytest.mark.parametrize("gen", ["20261013T071607Z", "20261013T071607992442Z"])
+def test_generation_stamp_with_optional_microseconds_belongs_to_exact_run(gen: str) -> None:
+    first = Run("first", "2026-10-13T0221", "scan", "succeeded", started_ts=ts("2026-10-13T02:21:00"), finished_ts=ts("2026-10-13T02:33:00"))
+    second = Run("second", "2026-10-13T0716", "scan", "succeeded", started_ts=ts("2026-10-13T07:16:00"), finished_ts=ts("2026-10-13T07:26:00"))
+    assert owner_of_gen(gen, [first, second]) == second
+
+
+@pytest.mark.parametrize("gen", ["20261013T07160Z", "20261013T07160799Z", "20261013T0716079924420Z", "20261013T121607992442Z"])
+def test_invalid_or_unowned_generation_has_no_run(gen: str) -> None:
+    run = Run("second", "2026-10-13T0716", "scan", "succeeded", started_ts=ts("2026-10-13T07:16:00"), finished_ts=ts("2026-10-13T07:26:00"))
+    assert owner_of_gen(gen, [run]) is None
 
 
 def test_fill_static_gen_follows_the_profile_file_and_its_env_override(monkeypatch, tmp_path):
@@ -1045,3 +1058,31 @@ def test_phase_skip_is_an_explicit_skip_clause():
         None,
         None,
     ]
+
+
+@pytest.mark.parametrize(('state', 'held', 'status', 'phase_status'), [
+    ('FAILED', False, 'failed', 'failed'), ('SUCCEEDED', False, 'succeeded', 'done'),
+    ('SUCCEEDED', True, 'nop', 'done'), ('RUNNING', False, 'running', 'running'),
+])
+def test_single_command_job_backfill(state, held, status, phase_status):
+    profile = parse_profile({'jobs': [{
+        'kind': 'poll', 'where': {'commands': 'poll'},
+        'scan': [{'created': '%Y-%m-%dT%H%M'}], 'single_phase': 'poll',
+        'nop_marker': '^lease held by ',
+    }]})
+    end = '2026-11-09T08:52:11Z'
+    events = [(*RUNNING, '2026-11-09T08:21:23Z')]
+    if state != 'RUNNING': events.append(('RUNNING', state, end))
+    j = job('poller', 'poller-uid', '2026-11-09T08:20:23Z', state, events, commands=['poll --once'])
+    logs = [log('poller-uid', end, 'lease held by other — skipping')] if held else []
+    recs = reconstruct(profile, [j], logs, None, ts('2026-11-09T09:00:00Z'))
+    assert len(recs) == 1
+    r = recs[0]
+    assert (r.run.kind, r.run.scan, r.run.parent, r.run.status, r.run.failed_phase) == (
+        'poll', '2026-11-09T0820', None, status, 'poll' if state == 'FAILED' else None,
+    )
+    assert r.phases == (Phase(
+        'poll', 0, ts('2026-11-09T08:21:23Z'), None if state == 'RUNNING' else ts(end), phase_status,
+        'skipped: job reported no work' if held else 'backfilled from Batch task window; no phase markers retained',
+    ),)
+    assert r.outputs == ()

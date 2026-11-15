@@ -45,15 +45,15 @@ const { ChildrenTable } = await import('./ChildrenTable')
 // The fleet root under `?f=tomat`: `marin-eu-west4` holds one match (`tomat`, drawn as a chain), the show
 // folder 3 matching files among others (drawn as its own subtree), `bkt-none` no listed match.
 const node: TreeNode = {
-  n: 'all', k: 'dir', b: 0, o: 0, c: [
-    { n: 'marin-eu-west4', k: 'dir', b: 50, o: 2, c: [{ n: 'tomat', k: 'dir', b: 50, o: 2, c: [{ n: 'a', k: 'file', b: 20, o: 1 }, { n: 'b', k: 'file', b: 30, o: 1 }] }] },
-    { n: 'marin-us-central1', k: 'dir', b: 300, o: 3, c: [{ n: 'show', k: 'dir', b: 300, o: 3, c: [{ n: 'x1.mp3', k: 'file', b: 100, o: 1 }, { n: 'x2.mp3', k: 'file', b: 100, o: 1 }, { n: 'x3.mp3', k: 'file', b: 100, o: 1 }] }] },
-    { n: 'bkt-none', k: 'dir', b: 7, o: 1 },
+  name: 'all', kind: 'dir', bytes: 0, objects: 0, children: [
+    { name: 'marin-eu-west4', kind: 'dir', bytes: 50, objects: 2, children: [{ name: 'tomat', kind: 'dir', bytes: 50, objects: 2, children: [{ name: 'a', kind: 'file', bytes: 20, objects: 1 }, { name: 'b', kind: 'file', bytes: 30, objects: 1 }] }] },
+    { name: 'marin-us-central1', kind: 'dir', bytes: 300, objects: 3, children: [{ name: 'show', kind: 'dir', bytes: 300, objects: 3, children: [{ name: 'x1.mp3', kind: 'file', bytes: 100, objects: 1 }, { name: 'x2.mp3', kind: 'file', bytes: 100, objects: 1 }, { name: 'x3.mp3', kind: 'file', bytes: 100, objects: 1 }] }] },
+    { name: 'bkt-none', kind: 'dir', bytes: 7, objects: 1 },
   ],
 }
 const items: CoverItem[] = [
-  { path: 'marin-eu-west4/tomat', kind: 'dir', b: 50, o: 2, roots: 1 },
-  ...[1, 2, 3].map(i => ({ path: `marin-us-central1/show/x${i}.mp3`, kind: 'file' as const, b: 100, o: 1, roots: 1 })),
+  { path: 'marin-eu-west4/tomat', kind: 'dir', bytes: 50, objects: 2, roots: 1 },
+  ...[1, 2, 3].map(i => ({ path: `marin-us-central1/show/x${i}.mp3`, kind: 'file' as const, bytes: 100, objects: 1, roots: 1 })),
 ]
 /** The filter's row source: `resolve` slices `items` to the row (recording each row asked for). */
 const asked: string[] = []
@@ -140,9 +140,9 @@ describe('the children table under a filter', () => {
     ])
   })
   it('without a filter a file row acts on that exact object (never `key/`), a folder row on its prefix', () => {
-    const show = (node.c![1].c![0])
+    const show = (node.children![1].children![0])
     const html = renderToStaticMarkup(createElement(ChildrenTable, {
-      node: { ...show, c: [...show.c!, { n: 'sub', k: 'dir', b: 1, o: 1 }] }, segs: ['marin-us-central1', 'show'], scheme: 'gs://',
+      node: { ...show, children: [...show.children!, { name: 'sub', kind: 'dir', bytes: 1, objects: 1 }] }, segs: ['marin-us-central1', 'show'], scheme: 'gs://',
       onOpen: () => {}, onOpenObject: () => {},
     }))
     expect(rows(html).map(r => /data-tip="(Stage[^"]*)"/.exec(actionsCell(r))?.[1])).toEqual([
@@ -154,10 +154,10 @@ describe('the children table under a filter', () => {
     ])
   })
   it('rows the open plan holds are marked: staged itself or under a staged folder (a chip in place of the trash), a folder holding staged items counts them', () => {
-    const show = (node.c![1].c![0])
+    const show = (node.children![1].children![0])
     planItems.push({ prefix: 'gs://marin-us-central1/show/x1.mp3', kind: 'object' }, { prefix: 'gs://marin-us-central1/show/sub/' }, { prefix: 'gs://marin-us-central1/show/keep/deep/' })
     const html = renderToStaticMarkup(createElement(ChildrenTable, {
-      node: { ...show, c: [...show.c!, { n: 'sub', k: 'dir', b: 1, o: 1 }, { n: 'keep', k: 'dir', b: 1, o: 1 }] }, segs: ['marin-us-central1', 'show'], scheme: 'gs://',
+      node: { ...show, children: [...show.children!, { name: 'sub', kind: 'dir', bytes: 1, objects: 1 }, { name: 'keep', kind: 'dir', bytes: 1, objects: 1 }] }, segs: ['marin-us-central1', 'show'], scheme: 'gs://',
       onOpen: () => {}, onOpenObject: () => {},
     }))
     expect(rows(html).map(r => [name(r), /<a class="staged-chip"[^>]*>([^<]*)<\/a>/.exec(actionsCell(r))?.[1] ?? (/aria-label="trash"/.test(actionsCell(r)) ? 'trash' : '?')])).toEqual([
@@ -167,11 +167,11 @@ describe('the children table under a filter', () => {
   })
 
   it('an item the newest scan holds nothing under (deleted, as `/staged` settles it) is not marked or counted', () => {
-    const show = (node.c![1].c![0])
+    const show = (node.children![1].children![0])
     planItems.push({ prefix: 'gs://marin-us-central1/show/x1.mp3', kind: 'object' }, { prefix: 'gs://marin-us-central1/show/keep/deep/' })
-    planStats.current = { 'gs://marin-us-central1/show/x1.mp3': { b: 5, o: 1 } }
+    planStats.current = { 'gs://marin-us-central1/show/x1.mp3': { bytes: 5, objects: 1 } }
     const html = renderToStaticMarkup(createElement(ChildrenTable, {
-      node: { ...show, c: [...show.c!, { n: 'keep', k: 'dir', b: 1, o: 1 }] }, segs: ['marin-us-central1', 'show'], scheme: 'gs://',
+      node: { ...show, children: [...show.children!, { name: 'keep', kind: 'dir', bytes: 1, objects: 1 }] }, segs: ['marin-us-central1', 'show'], scheme: 'gs://',
       onOpen: () => {}, onOpenObject: () => {},
     }))
     expect(rows(html).map(r => [name(r), /<a class="staged-chip"[^>]*>([^<]*)<\/a>/.exec(actionsCell(r))?.[1] ?? (/aria-label="trash"/.test(actionsCell(r)) ? 'trash' : '?')])).toEqual([

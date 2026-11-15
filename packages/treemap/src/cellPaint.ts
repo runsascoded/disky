@@ -1,5 +1,4 @@
 import type { CellStyle } from './cellTypes'
-import { contrastEdge } from './colors'
 
 export function bandRects(bands: CellStyle['bands'], height: number) {
   const total = bands?.reduce((sum, b) => sum + Math.max(0, b.frac), 0) ?? 0
@@ -10,14 +9,6 @@ export function bandRects(bands: CellStyle['bands'], height: number) {
     top += h
     return rect
   })
-}
-
-/** Grid ink contrasts with the dominant fill, instead of matching a colored cell's luminance. */
-export function dustInk(style: CellStyle, fade = 1): string | undefined {
-  const dominant = style.bands?.reduce<{ color: string; frac: number } | undefined>((a, b) => !a || b.frac > a.frac ? b : a, undefined)
-  const edge = contrastEdge(dominant?.color ?? style.bg, fade)
-  return edge?.startsWith('rgba(0,') ? 'rgba(0, 0, 0, 0.65)'
-    : edge ? 'rgba(255, 255, 255, 0.65)' : style.ink
 }
 
 export function stripeBackground(stripes: CellStyle['stripes']): string | undefined {

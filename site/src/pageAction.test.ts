@@ -14,6 +14,10 @@ const pages = [
 const actions: ActionRegistry = Object.fromEntries([
   ...Array.from({ length: 30 }, (_, i) => [`scan:${i}`, { label: `Scan 10/${30 - i}`, group: 'Scans', handler: () => {} }]),
   ...pages.map(([path, title]) => [`page:${path}`, { ...pageAction(path, title), handler: () => {} }]),
+  // What a bare "staged" also fuzzy-matches (s…t…a…g…e…d in "storage …").
+  ['lens:class', { label: 'Storage-class lens (hatch colder-class bytes)', group: 'View', handler: () => {} }],
+  ['page:/admin/cost/gcp', { ...pageAction('/admin/cost/gcp', 'GCP cost — storage and compute'), handler: () => {} }],
+  ...['exedev', 'julian', 'runner', 'kevin-li'].map(u => [`userpage:${u}`, { label: `${u} — storage breakdown (/user/${u})`, group: 'User pages', handler: () => {} }]),
 ])
 
 describe('page navigation in the omnibar', () => {

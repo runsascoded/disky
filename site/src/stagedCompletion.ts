@@ -9,7 +9,7 @@ export function stagedState(stat: PrefixStat | undefined, sized: boolean, execut
   if (execution?.kind === 'live-prefix' || execution?.kind === 'live-bucket') return 'running'
   if (execution?.kind === 'recorded' && execution.undone > 0) return 'restored'
   if (!sized) return execution?.kind === 'recorded' ? 'recorded' : 'unknown'
-  if (stat && (stat.b > 0 || stat.o > 0)) return execution?.kind === 'recorded' ? 'recorded' : 'pending'
+  if (stat && (stat.bytes > 0 || stat.objects > 0)) return execution?.kind === 'recorded' ? 'recorded' : 'pending'
   return execution?.kind === 'recorded' ? 'deleted' : 'empty'
 }
 
@@ -34,5 +34,5 @@ export const batchIsCollapsed = (settled: boolean, override: boolean | undefined
 /** Never mount the treemap (or its detail drawer) for a zero-area root. */
 export function stagedMapTree(prefixes: string[], stats: Record<string, PrefixStat>, rootName: string) {
   const tree = stagedTree(prefixes, stats, rootName)
-  return tree.b > 0 ? tree : null
+  return tree.bytes > 0 ? tree : null
 }

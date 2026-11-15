@@ -138,8 +138,8 @@ describe('a class-scoped view over the total-keyed sort', () => {
     // Every byte is Standard, so the scope's bytes are the totals'. 22×11 px at 12 px² a tile: a floor of 1,052,604
     // bytes, between `bk/grow`'s two totals. `ivPlanRows: 0`: the subtree is read from the size sort, as a bucket's is.
     const v = await buildView(store, { date: S2, path: 'bk', w: 22, h: 11, minArea: 12, atten: 1, classes: new Set(['1']), ivPlanRows: 0 })
-    const kids = (v.tree.c ?? []).map(c => [c.n, c.b, c.o])
-    expect({ tier: v.tier, threshold: Math.round(v.threshold), root: [v.tree.b, v.tree.o], kids }).toEqual({
+    const kids = (v.tree.children ?? []).map(c => [c.name, c.bytes, c.objects])
+    expect({ tier: v.tier, threshold: Math.round(v.threshold), root: [v.tree.bytes, v.tree.objects], kids }).toEqual({
       tier: 'bysize',
       threshold: 1052604,
       root: [21227520, 6],

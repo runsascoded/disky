@@ -18,9 +18,9 @@ describe('matchEntries', () => {
   const body: NameMatches = {
     date: 'D', path: '', q: 'grug', total: 3, complete: true,
     items: [
-      { path: 'bk/a/grug', kind: 'dir', b: 900, o: 12 },
-      { path: 'bk/b/grug.txt', kind: 'file', b: 50, o: 1 },
-      { path: 'bk/c/grug', kind: null, b: 7, o: 1 },
+      { path: 'bk/a/grug', kind: 'dir', bytes: 900, objects: 12 },
+      { path: 'bk/b/grug.txt', kind: 'file', bytes: 50, objects: 1 },
+      { path: 'bk/c/grug', kind: null, bytes: 7, objects: 1 },
     ],
   }
   it('one row per match: name and place, kind and size (a folder\'s objects), its path searchable', () => {
@@ -60,14 +60,14 @@ describe('searchScan', () => {
 
 describe('matchEntries scan note', () => {
   it('a result from an older scan than the map\'s says which', () => {
-    const body: NameMatches = { date: '2026-10-21', path: '', q: 'crash', total: 1, complete: true, items: [{ path: 'crashes', kind: 'dir', b: 86, o: 8499 }] }
+    const body: NameMatches = { date: '2026-10-21', path: '', q: 'crash', total: 1, complete: true, items: [{ path: 'crashes', kind: 'dir', bytes: 86, objects: 8499 }] }
     expect(matchEntries(body, { go: () => {}, filter: () => {}, size: b => `${b} B`, scanNote: 'as of scan 2026-10-21' }).map(e => [e.label, e.description]))
       .toEqual([['crashes', 'folder · 86 B · 8,499 objects · as of scan 2026-10-21']])
   })
 })
 
 describe('fetchMatches', () => {
-  const body: NameMatches = { date: '2026-10-21', path: '', q: 'crash', total: 1, complete: true, items: [{ path: 'crashes', kind: 'dir', b: 86, o: 8499 }] }
+  const body: NameMatches = { date: '2026-10-21', path: '', q: 'crash', total: 1, complete: true, items: [{ path: 'crashes', kind: 'dir', bytes: 86, objects: 8499 }] }
   it('calls the fetcher bare (the global fetch throws "Illegal invocation" as a method) with the scan, query and syntax', async () => {
     const urls: string[] = []
     // As the browser's fetch: any `this` but the global (or none) throws.

@@ -56,8 +56,10 @@ function routes(db: D1Database, days: number) {
         const wait = ctx.waitUntil.bind(ctx)
         const id = await requireViewer(ctx)
         if (id instanceof Response) throw new Error('session-log identity changed during storage')
-        // A private activity actor can use its existing grant memo; the public session identity above cannot.
-        const actor = who.email ?? (who.via === 'grant' && id.name ? `grant:${id.name}` : `sid:${batch.sid}`)
+        // A private activity actor can use its existing grant memo; the public session identity above cannot. An unnamed
+        // grant is its id, as `activityHook.actorOf` names it (a service link's bursts and refusals then meet).
+        const grantKey = who.via === 'grant' ? id.name || id.grantId : null
+        const actor = who.email ?? (grantKey ? `grant:${grantKey}` : `sid:${batch.sid}`)
         await feedClient(ctx.env, { actor, via: who.via, origin: new URL(req.url).origin }, batch, wait)
       },
       onSwitch: async ({ prior, row, req }) => {

@@ -38,7 +38,7 @@ export interface ScanDeletion { prefix: string; bytes: number; objects: number; 
  *  A band's `objects` are what the run attempted: on an XML run GCS answers `Deleted` for a generation that was overwritten since
  *  the scan, so such an object is live though counted here. The item still leaves `/staged`'s selection at this scan, which
  *  loses nothing: a run on this scan is held to its generations and can't delete that object either. The next scan lists it. */
-export function withoutDeleted<S extends { b: number; o: number; us?: unknown; cb?: unknown }>(stats: Record<string, S>, bands: readonly ScanDeletion[]): Record<string, S> {
+export function withoutDeleted<S extends { bytes: number; objects: number; owners?: unknown; class_bytes?: unknown }>(stats: Record<string, S>, bands: readonly ScanDeletion[]): Record<string, S> {
   if (!bands.length) return stats
   const byPrefix = new Map<string, ScanDeletion[]>()
   for (const b of bands) byPrefix.set(b.prefix, [...(byPrefix.get(b.prefix) ?? []), b])
@@ -46,11 +46,11 @@ export function withoutDeleted<S extends { b: number; o: number; us?: unknown; c
   for (const [prefix, stat] of Object.entries(stats)) {
     const on = byPrefix.get(prefix)
     if (!on) { out[prefix] = stat; continue }
-    if (on.some(b => (b.objects > 0 || b.gone > 0) && b.objects + b.gone >= stat.o)) continue
+    if (on.some(b => (b.objects > 0 || b.gone > 0) && b.objects + b.gone >= stat.objects)) continue
     const [only] = on
     if (on.length > 1 || only.gone || !only.objects) { out[prefix] = stat; continue }
-    const { us: _us, cb: _cb, ...rest } = stat
-    out[prefix] = { ...rest, b: stat.b - only.bytes, o: stat.o - only.objects } as S
+    const { owners: _owners, class_bytes: _cb, ...rest } = stat
+    out[prefix] = { ...rest, bytes: stat.bytes - only.bytes, objects: stat.objects - only.objects } as S
   }
   return out
 }

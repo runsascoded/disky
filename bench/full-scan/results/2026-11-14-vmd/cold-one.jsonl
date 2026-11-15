@@ -1,0 +1,4 @@
+{"kind": "start", "label": "one", "mem": {"VmHWM": 30.417678336, "VmRSS": 30.417678336, "RssAnon": 0.001486848, "RssFile": 30.416191488}}
+{"kind": "query", "label": "one", "tenant": "gcs", "id": "root", "tags": ["folder", "root"], "cold_ms": 93.68799799995031, "cold_server_ms": 91.09238599999999, "warm_ms": [], "warm_median_ms": null, "warm_server_median_ms": null, "rows": 720399014, "nodes": 290, "checked": false}
+{"kind": "end", "label": "one", "mem": {"VmHWM": 30.418731008, "VmRSS": 30.418731008, "RssAnon": 0.002510848, "RssFile": 30.41622016}, "bad": []}
+{"kind": "hot", "label": "one", "hot_s": 148.24322032928467}

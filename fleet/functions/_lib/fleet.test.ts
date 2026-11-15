@@ -45,12 +45,12 @@ const ANSWERS = {
   'https://a.test/api/series?store=meta': {
     path: '',
     points: [
-      { date: '2026-10-01', b: 1, o: 1 },
-      { date: '2026-10-31', b: 100, o: 1 },
-      { date: '2026-11-06', b: 200, o: 1 },
-      { date: '2026-11-06T1200', b: 250, o: 1 },
-      { date: '2026-11-07', b: 300, o: 1 },
-      { date: 'bogus', b: 9, o: 1 },
+      { date: '2026-10-01', bytes: 1, objects: 1 },
+      { date: '2026-10-31', bytes: 100, objects: 1 },
+      { date: '2026-11-06', bytes: 200, objects: 1 },
+      { date: '2026-11-06T1200', bytes: 250, objects: 1 },
+      { date: '2026-11-07', bytes: 300, objects: 1 },
+      { date: 'bogus', bytes: 9, objects: 1 },
     ],
   },
   'https://c.test/api/health': new Status(500),
@@ -109,6 +109,12 @@ describe('/api/fleet\'s document over stubbed deployments', () => {
 
   it('a meta store with no points has no sizes', () => {
     expect(fleetMeta([], NOW)).toEqual({ now: null, d1: null, d7: null, daily: [] })
+  })
+
+  it('a deployment whose site predates the descriptive names (`b`) reads as one that serves `bytes`', () => {
+    const day = '2026-11-07'
+    const [old, now] = [fleetMeta([{ date: day, b: 300 }], NOW), fleetMeta([{ date: day, bytes: 300 }], NOW)]
+    expect([old.now, old]).toEqual([300, now])
   })
 })
 

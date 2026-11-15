@@ -21,7 +21,6 @@ Per scan `D`, under `static-names/<gen>/deltas/<D>/`:
 from __future__ import annotations
 
 import json
-import os
 import shutil
 from collections import deque
 from collections.abc import Callable, Collection
@@ -411,10 +410,9 @@ def _bounds(inputs: list, n: int) -> list[Key]:
 
 
 def default_jobs() -> int:
-    try:
-        return len(os.sched_getaffinity(0))
-    except AttributeError:
-        return os.cpu_count() or 1
+    from .task_size import task_cpus
+
+    return task_cpus()
 
 
 def merge_shards(run_dirs: list[Path], out: Path, target_rows: int = RUN_SHARD_ROWS, plan: dict | None = None, *,

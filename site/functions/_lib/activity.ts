@@ -8,14 +8,15 @@
 import type { D1Database } from '@cloudflare/workers-types'
 import { BATCH_GAP_S } from './batchGroups.js'
 import { slackApi, type SlackEnv, slackScopes, slackPeople } from './slack.js'
-import { dataUriImage, identiconPng, identiconSeed, publishAvatar } from './publicAvatar.js'
+import { dataUriImage, identiconPng, identiconSeed, publishAvatar, serviceIconPng } from './publicAvatar.js'
 import type { SlogBatch, SlogEvent } from './sessionLogShape.js'
 import {
   activityEventLine, addPages, addTrail, type Burst, DISCORD, emptyTrail, type Fmt, fmtGap, highlights, joins, KIND_DEFS, type KindConf,
-  type KindRow, type KindsConf, actorName, mergeKinds, renderDetails, renderDiscord, renderHeadline, renderLines, renderSummary, reported, senderName,
-  type ServerEvent, sessionUrl,
-  SLACK, tallyClient,
+  type KindRow, type KindsConf, actorName, mergeKinds, type Notice, pathOf, plainName, renderDetails, renderDiscord, renderHeadline, renderLines,
+  renderSummary, reported, senderName, serviceName, serviceReasons, type ServerEvent, sessionUrl,
+  SLACK, tallyClient, uaFamily,
 } from './activityShape.js'
+import type { AccessEvent, AuditSink } from '@open-athena/auth'
 
 export interface ActivityEnv extends SlackEnv {
   DB?: D1Database
@@ -73,7 +74,8 @@ interface BurstRow {
   id: number; actor: string; via: string; origin: string; first_ts: number; last_ts: number
   counts: string; pages: string; trail: string; sids: string; rendered_ms: number | null; dirty: number
 }
-export type StoredBurst = Burst & { rendered_ms: number | null; dirty: boolean }
+import type { StoredBurst } from './activityShape.js'
+export type { StoredBurst }
 
 const parse = (r: BurstRow): StoredBurst => ({
   id: r.id, actor: r.actor, via: r.via, origin: r.origin, first_ts: r.first_ts, last_ts: r.last_ts,
@@ -299,34 +301,46 @@ export async function rerender(env: ActivityEnv, ids: readonly number[], now: nu
 
 export interface Sender { name: string; icon: string | null }
 
+interface ActorGrant { id: string; name: string | null; subject_json: string | null; service: number }
+
+/** The grant a burst's actor names (`grant:<id>`, else `grant:<name>`: the newest live one by that name), or null. */
+export async function actorGrant(db: D1Database, b: Pick<Burst, 'actor' | 'via'>): Promise<ActorGrant | null> {
+  if (b.via !== 'grant' || !b.actor.startsWith('grant:')) return null
+  return db.prepare(
+    'SELECT id, name, subject_json, service FROM grants WHERE id = ?1 OR name = ?1 ORDER BY (id = ?1) DESC, (revoked_at IS NULL) DESC, created_at DESC LIMIT 1',
+  ).bind(b.actor.slice('grant:'.length)).first<ActorGrant>()
+}
+
 /** Who a burst's posts are sent as: a signed-in actor's profile name and face, a grant's holder name (else its label,
  *  else `grant <id prefix>`) and face; without a face, a generated identicon (seeded by `SESSION_SECRET`), never the
- *  bot's own icon. Faces go through `public_avatars` so the sinks can fetch them; a missing table or secret just
- *  leaves the post without one. */
+ *  bot's own icon. A service link (`grants.service`) says so (`<name> (service)`), and its fallback face is the fixed
+ *  service icon. Faces go through `public_avatars` so the sinks can fetch them; a missing table or secret just leaves
+ *  the post without one. */
 export async function senderOf(env: ActivityEnv, b: Pick<Burst, 'actor' | 'via' | 'origin'>, now: number): Promise<Sender> {
   const db = env.DB!
   let name = actorName(b.actor)
   let face: string | null = null
-  if (b.via === 'grant' && b.actor.startsWith('grant:')) {
-    const key = b.actor.slice('grant:'.length)
-    const g = await db.prepare(
-      'SELECT id, name, subject_json FROM grants WHERE id = ?1 OR name = ?1 ORDER BY (id = ?1) DESC, (revoked_at IS NULL) DESC, created_at DESC LIMIT 1',
-    ).bind(key).first<{ id: string; name: string | null; subject_json: string | null }>()
+  let service = false
+  if (b.via === 'grant') {
+    const g = await actorGrant(db, b)
     if (g) {
       let subject: { name?: string; avatar?: string } = {}
       try { subject = g.subject_json ? JSON.parse(g.subject_json) : {} } catch { /* a malformed subject reads as none */ }
       name = subject.name?.trim() || g.name?.trim() || `grant ${g.id.slice(0, 4)}`
       face = subject.avatar ?? null
+      service = !!g.service
     }
   } else if (b.via === 'session') {
     const p = await db.prepare('SELECT name, avatar FROM profiles WHERE email = ?').bind(b.actor).first<{ name: string | null; avatar: string | null }>()
     name = senderName(b.actor, p?.name)
     face = p?.avatar ?? null
   }
+  if (service) name = serviceName(name)
   const nowS = Math.floor(now / 1000)
   try {
     const img = dataUriImage(face)
     if (img) return { name, icon: await publishAvatar(db, b.origin, img, nowS) }
+    if (service) return { name, icon: await publishAvatar(db, b.origin, { type: 'image/png', bytes: serviceIconPng() }, nowS) }
     if (!env.SESSION_SECRET) return { name, icon: null }
     const gen = { type: 'image/png', bytes: identiconPng(await identiconSeed(env.SESSION_SECRET, b.actor)) }
     return { name, icon: await publishAvatar(db, b.origin, gen, nowS) }
@@ -349,30 +363,43 @@ export async function slackSenderOf(env: ActivityEnv, b: Pick<Burst, 'actor' | '
   return fallback
 }
 
+/** A client line (an error, a resumption) is its own text (escaped for the sink), on its page, its time linked to its
+ *  session (an error to the session's errors). */
+const lineEventsOf = (b: Pick<Burst, 'origin'>, es: readonly ServerEvent[], fmt: Fmt) => es.map(e => {
+  const sid = (e.kind === 'error' || e.kind === 'resume') && typeof e.detail?.sid === 'string' ? e.detail.sid : null
+  if (!sid) return { ...e, line: activityEventLine(e, fmt, b.origin) }
+  return { ...e, line: `${fmt.esc(e.line)}${e.route ? ` on ${fmt.code(e.route)}` : ''}`, href: sessionUrl(b.origin, sid, e.kind === 'error' ? 'errors' : undefined) }
+})
+
 async function render(env: ActivityEnv, b: StoredBurst, conf: KindsConf, now: number): Promise<void> {
   const db = env.DB!
   await db.prepare('UPDATE activity_bursts SET rendered_ms = ?, dirty = 0 WHERE id = ?').bind(now, b.id).run()
   const events = await burstEvents(db, b, conf)
+  // A service link's burst posts only when `noticeFor` says so (none: a routine burst, `quiet`), its headline led by
+  // the notice, sent as `<name> (service)`, the burst's `via` saying so.
+  const grant = await actorGrant(db, b)
+  const reasons = grant?.service
+    ? serviceReasons(b.counts, events.filter(e => e.kind === 'denied').map(e => e.line), (await newClients(db, b, grant.id)).length)
+    : null
+  const notices = reasons ? { slack: await noticeFor(db, b, 'slack', reasons), discord: await noticeFor(db, b, 'discord', reasons) } : null
+  const shown: StoredBurst = reasons ? { ...b, via: 'service' } : b
   const h = highlights(events)
   const lineKinds = KIND_DEFS.filter(d => conf[d.kind]?.notify === 'line').map(d => [d.kind, events.filter(e => e.kind === d.kind)] as const).filter(([, es]) => es.length)
-  /** A client line (an error, a resumption) is its own text (escaped for the sink), on its page, its time linked to its
-   *  session (an error to the session's errors). */
-  const lineEvents = (es: readonly ServerEvent[], fmt: Fmt) => es.map(e => {
-    const sid = (e.kind === 'error' || e.kind === 'resume') && typeof e.detail?.sid === 'string' ? e.detail.sid : null
-    if (!sid) return { ...e, line: activityEventLine(e, fmt, b.origin) }
-    return { ...e, line: `${fmt.esc(e.line)}${e.route ? ` on ${fmt.code(e.route)}` : ''}`, href: sessionUrl(b.origin, sid, e.kind === 'error' ? 'errors' : undefined) }
-  })
+  const lineEvents = (es: readonly ServerEvent[], fmt: Fmt) => lineEventsOf(b, es, fmt)
   const s = sinks(env)
   const who = s.slack || s.discord ? await senderOf(env, b, now) : { name: '', icon: null }
-  if (s.slack) {
+  const name = reasons ? plainName(who.name) : who.name
+  if (s.slack && notices?.slack !== null) {
+    const notice = notices?.slack ?? undefined
     const channel = env.SLACK_ADMIN_CHANNEL!
     const asUser = (await slackScopes(env)).has('chat:write.customize')
     const slackWho = asUser ? await slackSenderOf(env, b, who) : who
     const sender = asUser ? { username: slackWho.name, ...(slackWho.icon ? { icon_url: slackWho.icon } : {}) } : {}
-    const text = renderHeadline(b, { fmt: SLACK, conf, name: who.name }, asUser)
+    const text = renderHeadline(shown, { fmt: SLACK, conf, name, notice }, asUser)
     const parent = await ensurePost(db, b.id, 'slack', 'parent', now,
       async () => (await slackApi(env, 'chat.postMessage', { channel, text, ...sender, unfurl_links: false, unfurl_media: false })).ts ?? null,
       ts => slackApi(env, 'chat.update', { channel, ts, text }))
+    if (parent && notice) await keepNotice(db, b.id, 'slack', notice, now)
     if (parent) {
       const details = renderDetails(b, { fmt: SLACK, conf, highlights: h })
       if (details) {
@@ -388,17 +415,18 @@ async function render(env: ActivityEnv, b: StoredBurst, conf: KindsConf, now: nu
       }
     }
   }
-  if (s.discord) {
+  if (s.discord && notices?.discord !== null) {
+    const notice = notices?.discord ?? undefined
     const url = env.DISCORD_ADMIN_WEBHOOK!
     const content = renderDiscord(
-      renderSummary(b, { fmt: DISCORD, conf, highlights: h, name: who.name }),
+      renderSummary(shown, { fmt: DISCORD, conf, highlights: h, name, notice }),
       lineKinds.map(([kind, es]) => renderLines(kind, lineEvents(es, DISCORD), DISCORD)),
       `${b.origin}/admin/activity?burst=${b.id}`,
     )
     const body = JSON.stringify({ content, allowed_mentions: { parse: [] } })
     const created = JSON.stringify({ content, allowed_mentions: { parse: [] }, username: who.name.slice(0, 80), ...(who.icon ? { avatar_url: who.icon } : {}) })
     const headers = { 'content-type': 'application/json' }
-    await ensurePost(db, b.id, 'discord', 'parent', now,
+    const posted = await ensurePost(db, b.id, 'discord', 'parent', now,
       async () => {
         const r = await fetch(`${url}?wait=true`, { method: 'POST', headers, body: created })
         if (!r.ok) { console.log(`activity: discord post ${r.status}`); return null }
@@ -408,6 +436,76 @@ async function render(env: ActivityEnv, b: StoredBurst, conf: KindsConf, now: nu
         const r = await fetch(`${url}/messages/${msg}`, { method: 'PATCH', headers, body })
         if (!r.ok) console.log(`activity: discord edit ${r.status}`)
       })
+    if (posted && notice) await keepNotice(db, b.id, 'discord', notice, now)
+  }
+}
+
+// ---- service links ----
+
+/** The UA families (`uaFamily`) of a burst's sessions that none of the grant's earlier sessions (`session_log.grant_id`,
+ *  started before the burst) used. None while the grant has no earlier session: its first use is the baseline. */
+export async function newClients(db: D1Database, b: Pick<StoredBurst, 'sids' | 'first_ts'>, grantId: string): Promise<string[]> {
+  if (!b.sids.length) return []
+  const sids = JSON.stringify(b.sids)
+  const before = await db.prepare(
+    'SELECT DISTINCT ua FROM session_log WHERE grant_id = ? AND started_ms < ? AND ua IS NOT NULL AND sid NOT IN (SELECT value FROM json_each(?))',
+  ).bind(grantId, b.first_ts * 1000, sids).all<{ ua: string }>()
+  if (!before.results.length) return []
+  const known = new Set(before.results.map(r => uaFamily(r.ua)))
+  const mine = await db.prepare('SELECT DISTINCT ua FROM session_log WHERE sid IN (SELECT value FROM json_each(?)) AND ua IS NOT NULL')
+    .bind(sids).all<{ ua: string }>()
+  return [...new Set(mine.results.map(r => uaFamily(r.ua)))].filter(f => !known.has(f)).sort()
+}
+
+/** Whether the actor's newest notice in `sink` from an earlier burst was red: the next clean burst posts green. Notice
+ *  colors are kept beside a burst's posts (`activity_posts`, `part = 'notice'`, `msg_id` the color). */
+async function priorRed(db: D1Database, b: Pick<StoredBurst, 'id' | 'actor'>, sink: string): Promise<boolean> {
+  const r = await db.prepare(
+    `SELECT p.msg_id FROM activity_posts p JOIN activity_bursts x ON x.id = p.burst_id
+     WHERE x.actor = ? AND p.sink = ? AND p.part = 'notice' AND p.burst_id < ? ORDER BY p.burst_id DESC LIMIT 1`,
+  ).bind(b.actor, sink, b.id).first<{ msg_id: string }>()
+  return r?.msg_id === 'red'
+}
+
+/** A service burst's notice in `sink`, as the package's feed decides it: red when there's a reason; else green when
+ *  this burst is already posted (it keeps its color as it grows) or the last notice was red; else null, a routine
+ *  burst that posts nothing (`quiet`). A quiet burst that turns notable as it grows is posted then. */
+export async function noticeFor(db: D1Database, b: Pick<StoredBurst, 'id' | 'actor'>, sink: string, reasons: string[]): Promise<Notice | null> {
+  if (reasons.length) return { color: 'red', reasons }
+  const posted = await db.prepare("SELECT 1 FROM activity_posts WHERE burst_id = ? AND sink = ? AND part = 'parent'").bind(b.id, sink).first()
+  return posted || (await priorRed(db, b, sink)) ? { color: 'green', reasons: [] } : null
+}
+
+/** Record the color a burst's posted notice has now. */
+async function keepNotice(db: D1Database, burst: number, sink: string, notice: Notice, now: number): Promise<void> {
+  await db.prepare(`INSERT INTO activity_posts (burst_id, sink, part, msg_id, claimed_ms) VALUES (?, ?, 'notice', ?, ?)
+                    ON CONFLICT (burst_id, sink, part) DO UPDATE SET msg_id = excluded.msg_id`)
+    .bind(burst, sink, notice.color, now).run()
+}
+
+/**
+ * The gate's audit sink, also feeding a service link's refused requests (`deny` rows naming it: expired, revoked,
+ * disabled) into its activity as `denied` events (the reason and path, never the query, which can carry the token),
+ * which make its burst notable. Other grants' denials only reach the audit log. Inline, after the row is logged: a
+ * failure is logged, never raised into the refused request; `origin` is the request's (none: the row only).
+ */
+export function auditWithActivity(env: ActivityEnv, sink: AuditSink, origin: string | null): AuditSink {
+  return {
+    async log(event: AccessEvent) {
+      await sink.log(event)
+      if (event.event !== 'deny' || !event.grantId || !origin || !env.DB) return
+      try {
+        const g = await env.DB.prepare('SELECT id, name, service FROM grants WHERE id = ?').bind(event.grantId)
+          .first<{ id: string; name: string | null; service: number }>()
+        if (!g?.service) return
+        const actor = `grant:${g.name || g.id}`
+        const path = event.path ? pathOf(event.path) : ''
+        const line = `${event.reason ?? 'refused'}${path ? ` ${path}` : ''}`
+        await recordServer(env, { actor, via: 'grant', origin }, [{ ts: event.ts, kind: 'denied', actor, via: 'grant', method: '', route: path, line }], () => {})
+      } catch (e) {
+        console.log(`activity: denied record failed: ${(e as Error).message}`)
+      }
+    },
   }
 }
 

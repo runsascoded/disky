@@ -20,6 +20,7 @@ import pyarrow.parquet as pq
 
 from . import interval_read as ir
 from .static_names import V2_OPTIONAL, q, read_json
+from .task_size import task_cpus, task_ram
 
 err = partial(print, file=sys.stderr, flush=True)
 
@@ -299,7 +300,7 @@ def perscan_cost(footers: dict[str, Footer], version: int, path: str, thr: float
 
 
 def compare(got: dict | None, want: dict | None, *, with_f: bool) -> list[str]:
-    """Differences between two trees, flattened: every tile and `(other)`, every field (`f` only where
+    """Differences between two trees, flattened: every tile and `(other)`, every field (`folded` only where
     the scan knows its children: a v1 scan's `(other)` count is whatever its read happened to see)."""
     if got is None or want is None:
         return [] if got is None and want is None else [f"tree: {'missing' if got is None else 'present'} vs reference"]
@@ -311,7 +312,7 @@ def compare(got: dict | None, want: dict | None, *, with_f: bool) -> list[str]:
             continue
         a, b = dict(g[p]), dict(w[p])
         if not with_f:
-            a.pop("f", None); b.pop("f", None)
+            a.pop("folded", None); b.pop("folded", None)
         if a != b:
             out.append(f"{p}: {a} != {b}")
     return out
@@ -512,7 +513,7 @@ def verify_task(sampled: list[str], task: int, tasks: int, served: str, scans: d
     for f in (db, db.with_name(db.name + ".wal")):
         f.unlink(missing_ok=True)
     con = duckdb.connect(str(db))
-    threads, mem = verify_budget(os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") // share, max(1, (os.cpu_count() or 1) // share))
+    threads, mem = verify_budget(task_ram() // share, max(1, task_cpus() // share))
     con.execute(f"SET threads={threads}; SET memory_limit='{mem >> 20}MB'; SET temp_directory={q(str(tmp / 'spill'))}")
     src = Store(store_url(scans["bucket"]))
     prev = None

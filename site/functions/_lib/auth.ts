@@ -28,11 +28,21 @@ import { type Auth, createGate, DEFAULT_COOKIE_NAME, type Gate, type Grant, type
 import { DEFAULT_ACCOUNT_HINT_COOKIE } from '@open-athena/auth/oidc'
 import { OA_HINT_COOKIE, OA_NONCE_COOKIE, OA_WHO_COOKIE } from '@disk-tree/pages-kit/oa'
 import { d1AuditSink, d1GrantStore, d1ProfileStore, d1RequestStore } from '@open-athena/auth/d1'
+import { auditWithActivity } from './activity.js'
 import type { AnalyticsEngineDataset, D1Database, KVNamespace, R2Bucket } from '@cloudflare/workers-types'
 import { isPreviewHost } from './previewHost.js'
 import { grantCaller, meterOf } from './usage.js'
 
 export interface Env {
+  /** Optional immutable reader release, independently CAS-adopted on dev and prod. */
+  HISTORY_CURRENT_KEY?: string
+  HISTORY_VERSION_CACHE?: import('./historyVersion.js').HistoryVersionSnapshot
+  /** Offline history maintenance jobs; unset keeps dispatch disabled. */
+  HISTORY_IMAGE?: string
+  HISTORY_DATA_STORE?: string
+  HISTORY_SERVING_STORE?: string
+  HISTORY_REGION?: string
+  HISTORY_SECRETS?: string
   DB?: D1Database
   SESSION_SECRET?: string
   /** OIDC (our own Google client) — the ZT-free sign-in path. Set as Pages
@@ -150,6 +160,8 @@ export interface Env {
   /** `1`: Δ-mode diffs (`dm=delta`, unscoped) by lazy descent over the interval store (`_lib/diffDescent.ts`; its
    *  planner hands busy, broad paths to the as-of walk). Needs no index beyond the store's. */
   DIFF_DESCENT?: string
+  /** A diff's point-lookup budget (`_lib/view.ts` `lookupCapOf`): a count, `0` none; unset `LOOKUP_CAP`. */
+  DIFF_LOOKUP_CAP?: string
   /** `1`: a lens, owner or class scoped series reads `SERIES_CHUNK` scans a request, the client filling the rest
    *  (`/api/series`' `chunks`, `readPathHistory`). Off until measured on dev (specs/root-owner-history.md). */
   OWNER_HISTORY_BATCH?: string
@@ -192,7 +204,8 @@ export interface Env {
   SNAPSHOTS_SUBDIR?: string
   /** Dedicated SA key (Batch submit + actAs the job SA) for the sweep dispatch bridge. */
   GCP_SA_KEY?: string
-  /** `"0"`: no sweep or undo dispatch from this environment (`_lib/dispatch.ts` `sweepsOff`). */
+  /** `"0"`: no sweep, undo or purge dispatch, sweep stop or digest re-apply from this environment, and its job lists record
+   *  and announce no finished run (`_lib/dispatch.ts` `sweepsOff`). */
   SWEEP_DISPATCH?: string
   /** The service account dispatched Batch jobs run as (a `[vars]` entry). */
   JOB_SA?: string
@@ -531,7 +544,8 @@ export function gateFor(env: Env, request?: Request): Gate | null {
   return createGate({
     store: grantStore(env),
     requests: d1RequestStore(env.DB),
-    audit: d1AuditSink(env.DB),
+    // A service link's refused requests also reach its activity (`denied`), so its notice can say so.
+    audit: auditWithActivity(env, d1AuditSink(env.DB), request ? new URL(request.url).origin : null),
     // The name + face Google verified at sign-in (seeded by default),
     // or a self-set one: what `whoami.subject` carries to the header chip.
     profiles: d1ProfileStore(env.DB),

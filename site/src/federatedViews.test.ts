@@ -14,29 +14,29 @@ const source = (name: string, hours: number[], base: number) => parseSourceCatal
 const catalogs = [source('awair', [8, 10], 100), source('ctbk', [9, 11], 1000)]
 const view = resolveFederation(catalogs, t(10))
 const reads = view.sources.map(s => ({ source: s.source, digest: s.scan!.digest,
-  tree: { n: '.', b: s.scan!.total_bytes, o: s.scan!.total_objects, c: [{ n: 'pyramid', b: s.scan!.total_bytes, o: s.scan!.total_objects }] },
+  tree: { name: '.', bytes: s.scan!.total_bytes, objects: s.scan!.total_objects, children: [{ name: 'pyramid', bytes: s.scan!.total_bytes, objects: s.scan!.total_objects }] },
 }))
 describe('federated source reader adapters', () => {
   it('mounts pinned source roots as ordinary tree nodes, preserving children', () => {
     expect(composeFederatedTrees(view, reads)).toEqual({
-      tree: { n: 'All projects', k: 'dir', b: 1101, o: 1, c: [
-        { n: 'ctbk', b: 1000, o: 0, c: [{ n: 'pyramid', b: 1000, o: 0 }] },
-        { n: 'awair', b: 101, o: 1, c: [{ n: 'pyramid', b: 101, o: 1 }] },
+      tree: { name: 'All projects', kind: 'dir', bytes: 1101, objects: 1, children: [
+        { name: 'ctbk', bytes: 1000, objects: 0, children: [{ name: 'pyramid', bytes: 1000, objects: 0 }] },
+        { name: 'awair', bytes: 101, objects: 1, children: [{ name: 'pyramid', bytes: 101, objects: 1 }] },
       ] }, missing: [],
     })
-    expect(reads.map(r => r.tree.n)).toEqual(['.', '.'])
+    expect(reads.map(r => r.tree.name)).toEqual(['.', '.'])
   })
   it('missing source response produces partial totals, not a zero source node', () => {
     expect(composeFederatedTrees(view, [reads[0]])).toEqual({ tree: {
-      n: 'All projects', k: 'dir', b: 101, o: 1,
-      c: [{ n: 'awair', b: 101, o: 1, c: [{ n: 'pyramid', b: 101, o: 1 }] }],
+      name: 'All projects', kind: 'dir', bytes: 101, objects: 1,
+      children: [{ name: 'awair', bytes: 101, objects: 1, children: [{ name: 'pyramid', bytes: 101, objects: 1 }] }],
     }, missing: ['ctbk'] })
-    expect(composeFederatedTrees(resolveFederation(catalogs, t(7)), [])).toEqual({ tree: { n: 'All projects', k: 'dir', b: 0, o: 0, c: [] }, missing: ['awair', 'ctbk'] })
+    expect(composeFederatedTrees(resolveFederation(catalogs, t(7)), [])).toEqual({ tree: { name: 'All projects', kind: 'dir', bytes: 0, objects: 0, children: [] }, missing: ['awair', 'ctbk'] })
   })
   it('rejects wrong content or totals even when a source response is available', () => {
     expect(() => composeFederatedTrees(view, [{ ...reads[0], digest: 'f'.repeat(64) }])).toThrow('source tree does not match the pinned scan')
-    expect(() => composeFederatedTrees(view, [{ ...reads[0], tree: { ...reads[0].tree, b: 99 } }])).toThrow('source tree does not match the pinned scan')
-    expect(() => composeFederatedTrees(view, [{ ...reads[0], tree: { ...reads[0].tree, o: 99 } }])).toThrow('source tree does not match the pinned scan')
+    expect(() => composeFederatedTrees(view, [{ ...reads[0], tree: { ...reads[0].tree, bytes: 99 } }])).toThrow('source tree does not match the pinned scan')
+    expect(() => composeFederatedTrees(view, [{ ...reads[0], tree: { ...reads[0].tree, objects: 99 } }])).toThrow('source tree does not match the pinned scan')
     expect(() => composeFederatedTrees(view, [reads[0], reads[0]])).toThrow('duplicate source tree response')
   })
   it('age rows retain absolute object dates, owner/access facets, and bin totals', () => {

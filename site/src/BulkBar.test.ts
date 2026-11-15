@@ -20,11 +20,11 @@ vi.mock('./units', () => ({ useUnits: () => ({ fmtBytes: (b: number) => `${b} B`
 // The Adam_Carolla `tomat` shape: every match a file directly in one folder that also holds other files (no
 // collapse), plus a folder elsewhere every file of which matches (collapsed to one prefix).
 const SHOW = 'marin-us-central1/podcast_audio_top1000_60s_clips/Adam_Carolla_Show'
-const clips = Array.from({ length: 3 }, (_, i) => ({ path: `${SHOW}/ACS_Rotten_Tomatoes_chunk00${i}.mp3`, kind: 'file' as const, b: 100, o: 1, roots: 1 }))
+const clips = Array.from({ length: 3 }, (_, i) => ({ path: `${SHOW}/ACS_Rotten_Tomatoes_chunk00${i}.mp3`, kind: 'file' as const, bytes: 100, objects: 1, roots: 1 }))
 const cover = (o: Partial<FilterCover> = {}): FilterCover => ({
   date: '2026-10-09', path: '', q: 'tomat', complete: true, looked: 2, unchecked: 0,
-  roots: { n: 5, b: 300 + 50, o: 5 },
-  items: [{ path: 'marin-eu-west4/tomat', kind: 'dir', b: 50, o: 2, roots: 2 }, ...clips],
+  roots: { count: 5, bytes: 300 + 50, objects: 5 },
+  items: [{ path: 'marin-eu-west4/tomat', kind: 'dir', bytes: 50, objects: 2, roots: 2 }, ...clips],
   ...o,
 })
 const resolve = async () => cover()
@@ -64,7 +64,7 @@ describe('offered at once: idle, prefetching, listed, over the cap', () => {
     expect(render(undefined, { loading: true })).toBe(`<span class="bulkbar" aria-busy="true">${ACTS}<span class="inline-loading" role="status" aria-live="polite"><span class="spin" aria-hidden="true"></span>Listing the matches…</span></span>`)
   })
   it('over the cap (gcs 10-09 `nemotron`): the count, the actions still enabled (the click says why, muted)', () => {
-    const c = cover({ complete: false, items: [], roots: { n: 70_450, b: 718, o: 6_580_000 }, reason: overCapReason(70_390) })
+    const c = cover({ complete: false, items: [], roots: { count: 70_450, bytes: 718, objects: 6_580_000 }, reason: overCapReason(70_390) })
     expect(render(c)).toBe(`<span class="bulkbar">${ACTS}<span class="bb-scope">70,450 matches · 718 B</span></span>`)
   })
   it('only the actions the viewer may take; none: nothing', () => {
@@ -91,7 +91,7 @@ describe('deselect: a folder\'s worth or one item, and what each action then sen
     expect(kept(applyToggle(noOne, [clips[1].path], false))).toEqual(c.items.map(i => i.path))
   })
   it('a folder goes as its prefix, a lone file as that exact object (never `key/`); stage never a bucket', () => {
-    const items = [...c.items, { path: 'tomatoes-bucket', kind: 'dir' as const, b: 9, o: 1, roots: 1 }, { path: 'x/unk', kind: null, b: 1, o: 1, roots: 1 }]
+    const items = [...c.items, { path: 'tomatoes-bucket', kind: 'dir' as const, bytes: 9, objects: 1, roots: 1 }, { path: 'x/unk', kind: null, bytes: 1, objects: 1, roots: 1 }]
     const files = clips.map(i => ({ key: `gs://${i.path}`, kind: 'object' }))
     expect(actionTargets(items, 'gs://', 'assign')).toEqual({
       items: [{ key: 'gs://marin-eu-west4/tomat/', kind: 'prefix' }, ...files, { key: 'gs://tomatoes-bucket/', kind: 'prefix' }],

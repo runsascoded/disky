@@ -14,10 +14,10 @@ describe('relAgo', () => {
 
 describe('sortPrefixRows', () => {
   const rows = [
-    { name: 'gs://b/a/', staged: 3, stat: { b: 10, o: 1 } },
+    { name: 'gs://b/a/', staged: 3, stat: { bytes: 10, objects: 1 } },
     { name: 'gs://b/b/', staged: 1 },
-    { name: 'gs://b/c/', staged: 2, stat: { b: 30, o: 1, d: 5 } },
-    { name: 'gs://b/d/', staged: 2, stat: { b: 10, o: 2 } },
+    { name: 'gs://b/c/', staged: 2, stat: { bytes: 30, objects: 1, mtime: 5 * 86400 } },
+    { name: 'gs://b/d/', staged: 2, stat: { bytes: 10, objects: 2 } },
   ]
   const order = (k: string, asc: boolean) => sortPrefixRows(rows, k, asc, r => r.staged).map(r => r.name.slice(7, 8))
   it('by bytes, created, an extra column; rows without the value last in both directions; ties by name', () => {
@@ -49,11 +49,11 @@ describe('fetchPrefixStats', () => {
       if (fate === 'http') return new Response(JSON.stringify({ error: 'boom' }), { status: 503 })
       // the reader's refusal (`ivRefusal`): its reason as text, and when to ask again
       if (typeof fate === 'number') return new Response(`${REFUSED}\n`, { status: 503, headers: { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store', 'retry-after': String(fate) } })
-      return new Response(JSON.stringify({ stats: Object.fromEntries(prefixes.map(p => [p, { b: keys.indexOf(p), o: 1 }])) }))
+      return new Response(JSON.stringify({ stats: Object.fromEntries(prefixes.map(p => [p, { bytes: keys.indexOf(p), objects: 1 }])) }))
     }) as unknown as typeof fetch
     return { f, calls, peak: () => peak }
   }
-  const want = Object.fromEntries(keys.map((p, i) => [p, { b: i, o: 1 }]))
+  const want = Object.fromEntries(keys.map((p, i) => [p, { bytes: i, objects: 1 }]))
   const REFUSED = 'interval store pointer interval-store/CURRENT.json is unreadable: Network connection lost.; retry in 1s'
   /** `fetchPrefixStats`' waits, recorded and not slept. */
   const clock = () => {

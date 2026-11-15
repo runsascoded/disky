@@ -21,7 +21,7 @@
  *  range per file, every directory and file planned together and read in two waves (`readLevel`). Same answers. */
 import type { Env } from './auth.js'
 import { asOfScans, type ChangedPlan, DiffUnavailable, FooterBudget, type IndexHandle, intervalsOn, ivChurnFrom, ivRefuseHeld, chargeLevel, LEVEL_BUDGET, LEVEL_PATH_ROW_HEAP, LevelBusy, type LevelHandle, type LevelRec, type LevelSpend, releaseLevel, openInterval, openIvLevel, planChanged, readChanged, readFits, readLevel, type Rect, type Row, syncClock, type Trace, withChurn, withTrace } from './index.js'
-import { readRootAgg } from './view.js'
+import { type DiffSides, readRootAgg } from './view.js'
 
 /** The answer's version, in its edge-cache key: bumped with every change to what a level answers. */
 export const LEVEL_V = 2
@@ -39,32 +39,42 @@ export const levelK = (k: number): number => {
  *  or net change |b − a|. */
 export type Measure = 'churn' | 'net'
 
-/** A directory's own change, or a child's. `a`/`b` bytes and `oa`/`ob` objects at D1 / D2, `churn` over the range. */
-export interface Sides { a: number; b: number; oa: number; ob: number; churn: number }
+/** A directory's own change, or a child's: bytes and objects at D1 (`before`) and D2 (`after`), `churn` over the range
+ *  (specs/descriptive-field-names.md §3c). */
+export interface Sides extends DiffSides { churn: number }
+const zeroSides = (): Sides => ({ bytes_before: 0, bytes_after: 0, objects_before: 0, objects_after: 0, churn: 0 })
+const addSides = (t: Sides, c: Sides): Sides => ({
+  bytes_before: t.bytes_before + c.bytes_before, bytes_after: t.bytes_after + c.bytes_after,
+  objects_before: t.objects_before + c.objects_before, objects_after: t.objects_after + c.objects_after, churn: t.churn + c.churn,
+})
 
-export interface LevelRow extends Sides {
+/** A path's change: its sides, what it is and how it changed. */
+export interface Change extends Sides {
+  kind: 'file' | 'dir'
+  /** `changed` also for a path that came and went inside the range (absent at both ends). */
+  status: 'added' | 'removed' | 'changed'
+}
+
+export interface LevelRow extends Change {
   /** The child's name under the directory. */
-  p: string
-  k: 'file' | 'dir'
-  /** `changed` also for a child that came and went inside the range (absent at both ends). */
-  s: 'added' | 'removed' | 'changed'
+  name: string
 }
 
 export interface Level extends Sides {
   path: string
   /** The `k` largest changed children by the measure. */
   rows: LevelRow[]
-  /** The other changed children, summed (`n` of them); null when every changed child is drawn. */
-  other: (Sides & { n: number }) | null
+  /** The other changed children, summed (`count` of them); null when every changed child is drawn. */
+  other: (Sides & { count: number }) | null
   /** The unchanged children, summed: the directory less its changed children. */
-  unchanged: { a: number; b: number; oa: number; ob: number }
+  unchanged: DiffSides
   /** The only changed child, a directory: its own answer rides along (followed in the same request). */
   next?: string
 }
 
 /** A path's change over `(d1, d2]` from its versions there (`readChanged`, sorted by `vf`), or null when one version
  *  spans the range (unchanged) or it has none touching it. */
-export function pathChange(pieces: Row[], d1: number, d2: number): (Sides & { k: 'file' | 'dir'; s: LevelRow['s'] }) | null {
+export function pathChange(pieces: Row[], d1: number, d2: number): Change | null {
   const live = (D: number) => pieces.find(r => r.vf! <= D && D < r.vt!)
   const A = live(d1), B = live(d2)
   if (A && B && A.vf === B.vf) return null
@@ -87,8 +97,11 @@ export function pathChange(pieces: Row[], d1: number, d2: number): (Sides & { k:
     if (!ended.length) return null
     c2 = cum(ended[ended.length - 1], 'churn_end')
   }
-  const k = (B ?? A ?? pieces[0]).kind
-  return { k, s: !A ? (B ? 'added' : 'changed') : !B ? 'removed' : 'changed', a: A?.size ?? 0, b: B?.size ?? 0, oa: A?.n_files ?? 0, ob: B?.n_files ?? 0, churn: c2 - c1 }
+  const kind = (B ?? A ?? pieces[0]).kind
+  return {
+    kind, status: !A ? (B ? 'added' : 'changed') : !B ? 'removed' : 'changed',
+    bytes_before: A?.size ?? 0, bytes_after: B?.size ?? 0, objects_before: A?.n_files ?? 0, objects_after: B?.n_files ?? 0, churn: c2 - c1,
+  }
 }
 
 const name = (dir: string, p: string): string => (dir === '' ? p : p.slice(dir.length + 1))
@@ -96,21 +109,24 @@ const parentOf = (p: string): string => { const i = p.lastIndexOf('/'); return i
 const depthOf = (p: string): number => (p === '' ? 0 : p.split('/').length)
 
 /** `dir`'s answer from its own change and its changed children's (`children`: full paths). */
-export function levelOf(dir: string, own: Sides, children: (Sides & { p: string; k: 'file' | 'dir'; s: LevelRow['s'] })[], k: number, m: Measure): Level {
-  const changed = children.filter(c => c.churn !== 0 || c.a !== c.b || c.oa !== c.ob)
-  const by = (c: Sides) => (m === 'churn' ? c.churn : Math.abs(c.b - c.a))
-  changed.sort((x, y) => by(y) - by(x) || (x.p < y.p ? -1 : x.p > y.p ? 1 : 0))
-  const rows = changed.slice(0, k).map(({ p, k: kind, s, a, b, oa, ob, churn }): LevelRow => ({ p: name(dir, p), k: kind, s, a, b, oa, ob, churn }))
+export function levelOf(dir: string, own: Sides, children: (Change & { path: string })[], k: number, m: Measure): Level {
+  const changed = children.filter(c => c.churn !== 0 || c.bytes_before !== c.bytes_after || c.objects_before !== c.objects_after)
+  const by = (c: Sides) => (m === 'churn' ? c.churn : Math.abs(c.bytes_after - c.bytes_before))
+  changed.sort((x, y) => by(y) - by(x) || (x.path < y.path ? -1 : x.path > y.path ? 1 : 0))
+  const rows = changed.slice(0, k).map(({ path, ...c }): LevelRow => ({ name: name(dir, path), ...c }))
   const rest = changed.slice(k)
-  const sum = (xs: Sides[]) => xs.reduce((t, c) => ({ a: t.a + c.a, b: t.b + c.b, oa: t.oa + c.oa, ob: t.ob + c.ob, churn: t.churn + c.churn }), { a: 0, b: 0, oa: 0, ob: 0, churn: 0 })
+  const sum = (xs: Sides[]) => xs.reduce(addSides, zeroSides())
   const all = sum(changed)
-  const only = changed.length === 1 && changed[0].k === 'dir' ? changed[0].p : undefined
+  const only = changed.length === 1 && changed[0].kind === 'dir' ? changed[0].path : undefined
   return {
     path: dir,
-    a: own.a, b: own.b, oa: own.oa, ob: own.ob, churn: own.churn,
+    bytes_before: own.bytes_before, bytes_after: own.bytes_after, objects_before: own.objects_before, objects_after: own.objects_after, churn: own.churn,
     rows,
-    other: rest.length ? { n: rest.length, ...sum(rest) } : null,
-    unchanged: { a: own.a - all.a, b: own.b - all.b, oa: own.oa - all.oa, ob: own.ob - all.ob },
+    other: rest.length ? { count: rest.length, ...sum(rest) } : null,
+    unchanged: {
+      bytes_before: own.bytes_before - all.bytes_before, bytes_after: own.bytes_after - all.bytes_after,
+      objects_before: own.objects_before - all.objects_before, objects_after: own.objects_after - all.objects_after,
+    },
     ...(only ? { next: only } : {}),
   }
 }
@@ -121,22 +137,21 @@ export function levelOf(dir: string, own: Sides, children: (Sides & { p: string;
  *  after the merge (the rest, and the parts' own `other`s, are `other`). The same answer as `levelOf` over every
  *  part's children at once: a child in the merged top `k` is in its own part's top `k`. */
 export function mergeLevels(dir: string, parts: readonly Level[], k: number, m: Measure): Level {
-  const by = (c: Sides) => (m === 'churn' ? c.churn : Math.abs(c.b - c.a))
-  const rows = parts.flatMap(l => l.rows).sort((x, y) => by(y) - by(x) || (x.p < y.p ? -1 : x.p > y.p ? 1 : 0))
-  type Sum = { a: number; b: number; oa: number; ob: number; churn: number }
-  const zero = (): Sum => ({ a: 0, b: 0, oa: 0, ob: 0, churn: 0 })
-  const add = (t: Sum, c: Sides): Sum => ({ a: t.a + c.a, b: t.b + c.b, oa: t.oa + c.oa, ob: t.ob + c.ob, churn: t.churn + c.churn })
+  const by = (c: Sides) => (m === 'churn' ? c.churn : Math.abs(c.bytes_after - c.bytes_before))
+  const rows = parts.flatMap(l => l.rows).sort((x, y) => by(y) - by(x) || (x.name < y.name ? -1 : x.name > y.name ? 1 : 0))
   const rest = rows.slice(k)
   const others = parts.flatMap(l => (l.other ? [l.other] : []))
-  const n = rest.length + others.reduce((t, o) => t + o.n, 0)
-  const own = parts.reduce(add, zero())
-  const unchanged = parts.reduce((t, l) => ({ a: t.a + l.unchanged.a, b: t.b + l.unchanged.b, oa: t.oa + l.unchanged.oa, ob: t.ob + l.unchanged.ob }), { a: 0, b: 0, oa: 0, ob: 0 })
-  const only = n === 0 && rows.length === 1 && rows[0].k === 'dir' ? (dir === '' ? rows[0].p : `${dir}/${rows[0].p}`) : undefined
+  const count = rest.length + others.reduce((t, o) => t + o.count, 0)
+  const own = parts.map((l): Sides => ({ bytes_before: l.bytes_before, bytes_after: l.bytes_after, objects_before: l.objects_before, objects_after: l.objects_after, churn: l.churn }))
+    .reduce(addSides, zeroSides())
+  const { churn: _churn, ...unchanged } = parts.map(l => ({ ...l.unchanged, churn: 0 })).reduce(addSides, zeroSides())
+  const only = count === 0 && rows.length === 1 && rows[0].kind === 'dir' ? (dir === '' ? rows[0].name : `${dir}/${rows[0].name}`) : undefined
+  const sidesOf = (c: Sides): Sides => ({ bytes_before: c.bytes_before, bytes_after: c.bytes_after, objects_before: c.objects_before, objects_after: c.objects_after, churn: c.churn })
   return {
     path: dir,
     ...own,
     rows: rows.slice(0, k),
-    other: n ? { n, ...[...rest, ...others].reduce(add, zero()) } : null,
+    other: count ? { count, ...[...rest, ...others].map(sidesOf).reduce(addSides, zeroSides()) } : null,
     unchanged,
     ...(only ? { next: only } : {}),
   }
@@ -277,14 +292,15 @@ async function chained(o: LevelOpts, read: (dirs: string[]) => Promise<Level[] |
 
 /** A path's change over the range from its transitions there (`LevelRec`s, by `ts`): its values before the first and
  *  after the last, its churn the last's `churnCum` less the first's `churnPrev`; null without any. */
-export function transitionsChange(ts: LevelRec[]): (Sides & { k: 'file' | 'dir'; s: LevelRow['s'] }) | null {
+export function transitionsChange(ts: LevelRec[]): Change | null {
   if (!ts.length) return null
   const first = ts[0], last = ts[ts.length - 1]
   const A = first.op !== 0, B = last.op !== 2
   const kind = B ? last.kind : A ? first.kindPrev! : first.kind
   return {
-    k: kind === 'file' ? 'file' : 'dir', s: !A ? (B ? 'added' : 'changed') : !B ? 'removed' : 'changed',
-    a: A ? first.sizePrev : 0, b: B ? last.size : 0, oa: A ? first.nFilesPrev : 0, ob: B ? last.nFiles : 0, churn: last.churnCum - first.churnPrev,
+    kind: kind === 'file' ? 'file' : 'dir', status: !A ? (B ? 'added' : 'changed') : !B ? 'removed' : 'changed',
+    bytes_before: A ? first.sizePrev : 0, bytes_after: B ? last.size : 0, objects_before: A ? first.nFilesPrev : 0, objects_after: B ? last.nFiles : 0,
+    churn: last.churnCum - first.churnPrev,
   }
 }
 
@@ -334,7 +350,7 @@ async function levelRound(env: Env, lh: LevelHandle, dirs: string[], o: LevelOpt
     if (l) l.push(r)
     else by.set(k, [r])
   }
-  const kids = new Map<string, (Sides & { p: string; k: 'file' | 'dir'; s: LevelRow['s'] })[]>(dirs.map(p => [p, []]))
+  const kids = new Map<string, (Change & { path: string })[]>(dirs.map(p => [p, []]))
   const own = new Map<string, Sides>()
   for (const [k, ts] of by) {
     ts.sort((x, y) => x.ts - y.ts)
@@ -346,7 +362,7 @@ async function levelRound(env: Env, lh: LevelHandle, dirs: string[], o: LevelOpt
       continue
     }
     const c = transitionsChange(ts)
-    if (c) kids.get(dir)?.push({ p: levelChild(dir, nm), ...c })
+    if (c) kids.get(dir)?.push({ path: levelChild(dir, nm), ...c })
   }
   if (o.lap) {
     await syncClock()
@@ -359,7 +375,7 @@ async function levelRound(env: Env, lh: LevelHandle, dirs: string[], o: LevelOpt
     if (!mine) {
       // The root (no transitions of its own), or a directory with none in the range: its totals as of each scan.
       const [ra, rb] = await Promise.all([readRootAgg(env, { date: o.from, path: p }), readRootAgg(env, { date: o.to, path: p })])
-      mine = { a: ra?.b ?? 0, b: rb?.b ?? 0, oa: ra?.o ?? 0, ob: rb?.o ?? 0, churn: children.reduce((n, c) => n + c.churn, 0) }
+      mine = { bytes_before: ra?.b ?? 0, bytes_after: rb?.b ?? 0, objects_before: ra?.o ?? 0, objects_after: rb?.o ?? 0, churn: children.reduce((n, c) => n + c.churn, 0) }
     }
     return levelOf(p, mine, children, o.k, o.m)
   }))
@@ -392,7 +408,7 @@ async function round(env: Env, h: IndexHandle, dirs: string[], d1: number, d2: n
     if (l) l.push(r)
     else byPath.set(r.path, [r])
   }
-  const kids = new Map<string, (Sides & { p: string; k: 'file' | 'dir'; s: LevelRow['s'] })[]>(dirs.map(p => [p, []]))
+  const kids = new Map<string, (Change & { path: string })[]>(dirs.map(p => [p, []]))
   const own = new Map<string, Sides>()
   for (const [p, pieces] of byPath) {
     pieces.sort((x, y) => x.vf! - y.vf!)
@@ -400,7 +416,7 @@ async function round(env: Env, h: IndexHandle, dirs: string[], d1: number, d2: n
     if (!c) continue
     if (kids.has(p) && p !== '') own.set(p, c)
     const l = kids.get(parentOf(p))
-    if (l) l.push({ p, ...c })
+    if (l) l.push({ path: p, ...c })
   }
   return Promise.all(dirs.map(async p => {
     const children = kids.get(p)!
@@ -409,7 +425,7 @@ async function round(env: Env, h: IndexHandle, dirs: string[], d1: number, d2: n
       // The root (no row of its own: its totals are its depth-1 rows'), or a directory one version spans (unchanged:
       // no child changed either): its totals read as of each scan.
       const [ra, rb] = await Promise.all([readRootAgg(env, { date: o.from, path: p }), readRootAgg(env, { date: o.to, path: p })])
-      mine = { a: ra?.b ?? 0, b: rb?.b ?? 0, oa: ra?.o ?? 0, ob: rb?.o ?? 0, churn: children.reduce((n, c) => n + c.churn, 0) }
+      mine = { bytes_before: ra?.b ?? 0, bytes_after: rb?.b ?? 0, objects_before: ra?.o ?? 0, objects_after: rb?.o ?? 0, churn: children.reduce((n, c) => n + c.churn, 0) }
     }
     return levelOf(p, mine, children, o.k, o.m)
   }))

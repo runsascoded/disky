@@ -9,7 +9,7 @@ import { Link } from 'react-router-dom'
 import { Tooltip } from './Tooltip'
 import { elideMid, copyText } from './CopyName'
 import { useUnits } from './units'
-import { fmtN, type TreeNode } from './types'
+import { fmtN, mtimeDay, type TreeNode } from './types'
 import { dateInk, useDateScale } from './dateScale'
 import { type PrefixSortKey, type PrefixStat, relAgo } from './prefixes'
 import { useStore } from './store'
@@ -70,7 +70,7 @@ export function PrefixTable<R extends PrefixRow>({ rows, sort, onSort, shareOf, 
   const time = listingTime(useStore().scheme)
   // Created ink across the listed rows' range, as the map's table does.
   const [dateScale] = useDateScale()
-  const ink = dateInk(rows.flatMap(r => (r.stat?.d != null ? [[r.stat.d, r.stat.b] as const] : [])), dateScale)
+  const ink = dateInk(rows.flatMap(r => { const d = mtimeDay(r.stat); return d != null ? [[d, r.stat!.bytes] as const] : [] }), dateScale)
   const th = (k: PrefixSortKey, label: string, num = true) => (
     <th key={k} className={(num ? 'num ' : '') + 'sortable' + (sort.k === k ? ' on' : '')} title="sort" onClick={() => onSort(k)}>
       {label}{sort.k === k ? (sort.asc ? ' ▲' : ' ▼') : ''}
@@ -94,6 +94,7 @@ export function PrefixTable<R extends PrefixRow>({ rows, sort, onSort, shareOf, 
       <tbody>
         {rows.map((r, i) => {
           const s = r.stat
+          const day = mtimeDay(s)
           const none = loading ? '…' : <span className="dim">{emptyLabel}</span>
           return (
             <tr key={r.name} {...rowProps?.(r, i)}>
@@ -104,11 +105,11 @@ export function PrefixTable<R extends PrefixRow>({ rows, sort, onSort, shareOf, 
                 </Tooltip>
                 <Tooltip content="Copy full prefix"><button type="button" className="prefix-copy" aria-label={`Copy ${r.name}`} onClick={() => void copyText(r.name)}>⧉</button></Tooltip>
               </span></td>
-              <td className="num">{s ? fmtBytes(s.b) : none}</td>
-              {shareOf != null && <td className="num">{s && shareOf > 0 ? `${((100 * s.b) / shareOf).toFixed(1)}%` : ''}</td>}
-              <td className="num">{s ? fmtN(s.o) : ''}</td>
-              <td className="created"><TimeCell day ts={s?.d != null ? s.d * 86400 : undefined} ink={s?.d != null ? ink(s.d) : undefined} /></td>
-              <td className="read"><TimeCell day ts={s?.a != null ? s.a * 86400 : undefined} /></td>
+              <td className="num">{s ? fmtBytes(s.bytes) : none}</td>
+              {shareOf != null && <td className="num">{s && shareOf > 0 ? `${((100 * s.bytes) / shareOf).toFixed(1)}%` : ''}</td>}
+              <td className="num">{s ? fmtN(s.objects) : ''}</td>
+              <td className="created"><TimeCell day ts={day != null ? day * 86400 : undefined} ink={day != null ? ink(day) : undefined} /></td>
+              <td className="read"><TimeCell day ts={s?.last_read != null ? s.last_read * 86400 : undefined} /></td>
               {extra.map(c => <td key={c.key} className={c.className}>{c.cell(r)}</td>)}
               {trail && <td className="actions">{trail(r, i)}</td>}
             </tr>

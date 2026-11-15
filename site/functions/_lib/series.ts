@@ -6,6 +6,16 @@ export interface Pt { date: string; b: number; o: number }
 export interface RootRow { path: string; b: number; o: number }
 export interface RootTrace { path: string; points: Pt[] }
 
+/** A point as `/api/series` serves it (specs/descriptive-field-names.md §3d): a union root's names the members
+ *  it doesn't cover yet (`missing`). */
+export interface SeriesPoint { date: string; bytes: number; objects: number; missing?: string[] }
+/** A root's trace as `/api/series?split=roots` serves it. */
+export interface SeriesTrace { path: string; points: SeriesPoint[] }
+/** The readers' own `{ date, b, o }` as a response's point. */
+export const wirePoint = (p: Pt & { missing?: string[] }): SeriesPoint =>
+  ({ date: p.date, bytes: p.b, objects: p.o, ...(p.missing ? { missing: p.missing } : {}) })
+export const wireTraces = (ts: readonly RootTrace[]): SeriesTrace[] => ts.map(t => ({ path: t.path, points: t.points.map(wirePoint) }))
+
 /** A meta.json's per-root totals: `buckets` (multi-bucket scans), else the
  * flat total attributed to `soleRoot` when the store is known to have had
  * exactly one root (a single-bucket store's history), else nothing. */

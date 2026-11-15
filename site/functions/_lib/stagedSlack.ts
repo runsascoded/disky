@@ -95,7 +95,7 @@ const who = (email: string, names?: Names): string => names?.[email.toLowerCase(
 
 /** A staged prefix with nothing under it at the scan (no bytes, no objects;
  *  absent from the lookup): `/staged`'s "Empty at scan". Not counted as staged. */
-export const emptyAt = (st: PrefixStat | undefined): boolean => !st || (!st.b && !st.o)
+export const emptyAt = (st: PrefixStat | undefined): boolean => !st || (!st.bytes && !st.objects)
 
 /** The queue's total, as the parent's first line states it: `4,886 prefixes · 51.0 TiB · 179.3M objects* at scan 2026-10-02`
  *  (unsized: the prefixes alone). */
@@ -233,7 +233,7 @@ export function topFolders(prefixes: readonly string[], stats: Record<string, Pr
   for (const p of prefixes) {
     const key = prefixes.length <= n ? p : parentOf(p)
     const g = groups.get(key)
-    const b = stats?.[p]?.b ?? 0
+    const b = stats?.[p]?.bytes ?? 0
     if (g) { g.k++; g.b += b } else groups.set(key, { k: 1, b, only: p })
   }
   const sorted = [...groups].sort(([ka, a], [kb, b]) => (stats ? b.b - a.b : 0) || b.k - a.k || (ka < kb ? -1 : ka > kb ? 1 : 0))
@@ -303,7 +303,7 @@ export function stageReply(v: ReplyView): { text: string; blocks: unknown[] } {
   const held = v.stats ? v.prefixes.filter(p => !emptyAt(v.stats![p])) : v.prefixes
   const empty = n - held.length
   let b = 0, o = 0
-  for (const p of held) { b += v.stats?.[p]?.b ?? 0; o += v.stats?.[p]?.o ?? 0 }
+  for (const p of held) { b += v.stats?.[p]?.bytes ?? 0; o += v.stats?.[p]?.objects ?? 0 }
   const batchesOf = (ps: readonly string[]) => new Set(ps.map(p => v.batchOf[p])).size
   // The batches holding what is shown (the title), and what a reject unstages (the button).
   const shown = batchesOf(held.length ? held : v.prefixes)
@@ -495,8 +495,8 @@ export function sizeOf(at: ScanStats, prefixes: readonly string[], ownerName: (i
   for (const p of prefixes) {
     const st = at.stats[p]
     if (emptyAt(st)) { empty++; continue }
-    b += st.b; o += st.o
-    for (const [u, ub] of st.us ?? []) byOwner.set(u, (byOwner.get(u) ?? 0) + ub)
+    b += st.bytes; o += st.objects
+    for (const [u, ub] of st.owners ?? []) byOwner.set(u, (byOwner.get(u) ?? 0) + ub)
   }
   const owners = [...byOwner].sort((x, y) => y[1] - x[1]).slice(0, topOwners).map(([u, ub]) => ({ label: ownerName(u), b: ub }))
   return { scan: at.scan, b, o, empty, owners }
@@ -743,7 +743,7 @@ export async function notifyPlan(env: NotifyEnv, db: D1Database, planId: number,
     let old: string | null = null
     let ended = ''
     if (ts && ev) {
-      const stats = at ? Object.fromEntries(Object.entries(at.stats).map(([p, s]) => [p, s.b])) : null
+      const stats = at ? Object.fromEntries(Object.entries(at.stats).map(([p, s]) => [p, s.bytes])) : null
       if (stage && queueWasEmpty(v.prefixes, new Set(stage.prefixes), v.deleted, stats)) ended = QUEUE_EMPTIED
       else if (await parentDone(env, channel, ts)) ended = ':white_check_mark: Marked done.'
       if (ended) {

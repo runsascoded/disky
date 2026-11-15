@@ -18,6 +18,8 @@ from dt_cloud.cf_usage import (
     ae_sql,
     build_report,
     cli,
+    generation_sql,
+    generations_cli,
     load_deployment,
     mean_cpu_us,
     render,
@@ -140,6 +142,51 @@ def test_ae_sql():
         "FROM d WHERE timestamp >= toDateTime('2026-10-19 00:00:00') AND timestamp < toDateTime('2026-10-20 00:00:00') "
         "GROUP BY day, route ORDER BY day, route FORMAT JSON"
     )
+
+
+def test_generation_sql():
+    since = dt.datetime(2026, 11, 10, 8, tzinfo=dt.timezone.utc)
+    until = dt.datetime(2026, 11, 10, 20, tzinfo=dt.timezone.utc)
+    expected = (
+        "SELECT blob9 AS selected, blob10 AS reads, blob11 AS build, blob8 AS host, "
+        "MAX(timestamp) AS last_seen, SUM(_sample_interval) AS requests "
+        "FROM disky_usage_test WHERE timestamp >= toDateTime('2026-11-10 08:00:00') "
+        "AND timestamp < toDateTime('2026-11-10 20:00:00') AND blob8 = 'prod' "
+        "AND (blob9 != '' OR blob10 != '') "
+        "GROUP BY selected, reads, build, host ORDER BY last_seen DESC LIMIT 1001 FORMAT JSON"
+    )
+    assert generation_sql('disky_usage_test', since, until) == expected
+    assert generation_sql('disky_usage_test', since, until, 'all') == expected.replace(" AND blob8 = 'prod'", '')
+    with pytest.raises(ValueError, match='^invalid Analytics Engine dataset or host$'):
+        generation_sql('invalid;table', since, until)
+
+
+def test_generation_cli(tmp_path, monkeypatch):
+    from dt_cloud import cf_usage
+
+    config = tmp_path / 'wrangler.toml'
+    config.write_text(WRANGLER)
+    monkeypatch.setattr(cf_usage, 'env_secret', lambda name: 'test-token' if name == cf_usage.TOKEN_ENV else None)
+    calls = []
+    rows = [{'selected': 'primary=g.c002', 'reads': 'g.c002', 'build': 'sha', 'host': 'prod', 'last_seen': '2026-11-10 20:00:00', 'requests': '7'}]
+
+    def fetch(url, token, body, content_type):
+        calls.append((url, token, content_type))
+        return {'data': rows}
+
+    monkeypatch.setattr(cf_usage, 'http_fetch', fetch)
+    result = CliRunner().invoke(generations_cli, ['-c', str(config), '-h', '12'])
+    assert result.exit_code == 0, result.output
+    doc = json.loads(result.output)
+    assert doc == {
+        'since': doc['since'], 'until': doc['until'], 'host': 'prod', 'rows': rows,
+        'coverage': 'instrumented Functions requests only; sampled observations, not proof of zero old readers',
+    }
+    assert dt.datetime.fromisoformat(doc['until']) - dt.datetime.fromisoformat(doc['since']) == dt.timedelta(hours=12)
+    assert calls == [(f'https://api.cloudflare.com/client/v4/accounts/{DEP.account}/analytics_engine/sql', 'test-token', 'text/plain')]
+    rows[:] = rows * 1001
+    result = CliRunner().invoke(generations_cli, ['-c', str(config)])
+    assert (result.exit_code, result.output) == (2, "Usage: cf-generations [OPTIONS]\nTry 'cf-generations --help' for help.\n\nError: more than 1000 generation groups; narrow -h (no partial report emitted)\n")
 
 
 UNITS = list(PRICES)

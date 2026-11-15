@@ -56,7 +56,7 @@ function bruteCover(s: Store, q: string, view: string, minDepth: number): CoverI
     && (depthOf(p) >= floor || inRoot(p)))
   const outer = exact.filter(p => !exact.some(a => a !== p && under(p, a)))
   return outer.sort().map(p => ({
-    path: p, kind: t.get(p)!.kind, b: t.get(p)!.b, o: t.get(p)!.o,
+    path: p, kind: t.get(p)!.kind, bytes: t.get(p)!.b, objects: t.get(p)!.o,
     roots: roots.filter(r => under(r.path, p)).length,
   }))
 }
@@ -83,12 +83,12 @@ describe('coverSet', () => {
   it('collapses fully matched folders, keeps partly matched ones per root, and places one-object roots', async () => {
     const got = await coverSet(matchRoots(FIX, 'tomat', ''), '', lookupOf(FIX), { minDepth: 2 })
     expect(got.items).toEqual([
-      { path: 'b/clips', kind: 'dir', b: 30, o: 2, roots: 2 },
-      { path: 'b/deep', kind: 'dir', b: 8, o: 3, roots: 3 },
-      { path: 'b/mixed/tomato.txt', kind: 'file', b: 5, o: 1, roots: 1 },
-      { path: 'b/zero/tomat.a', kind: 'file', b: 9, o: 1, roots: 1 },
-      { path: 'c/tomat_one', kind: 'dir', b: 6, o: 1, roots: 1 },
-      { path: 'c/tomato', kind: 'dir', b: 3, o: 2, roots: 1 },
+      { path: 'b/clips', kind: 'dir', bytes: 30, objects: 2, roots: 2 },
+      { path: 'b/deep', kind: 'dir', bytes: 8, objects: 3, roots: 3 },
+      { path: 'b/mixed/tomato.txt', kind: 'file', bytes: 5, objects: 1, roots: 1 },
+      { path: 'b/zero/tomat.a', kind: 'file', bytes: 9, objects: 1, roots: 1 },
+      { path: 'c/tomat_one', kind: 'dir', bytes: 6, objects: 1, roots: 1 },
+      { path: 'c/tomato', kind: 'dir', bytes: 3, objects: 2, roots: 1 },
     ])
     // `b/clips`, `b/mixed`, `b/deep`, `b/deep/x`, `b/deep/x/y`, `b/zero` (`c`'s are under the floor).
     expect([got.looked, got.unchecked]).toEqual([6, 0])
@@ -138,7 +138,7 @@ describe('coverSet', () => {
     const s: Store = { 'b/x/tomat1': 1, 'b/x/tomat2': 2 }
     const roots = matchRoots(s, 'tomat', 'b/x')
     expect((await coverSet(roots, 'b/x', lookupOf(s), { minDepth: 1 })).items).toEqual([
-      { path: 'b/x', kind: 'dir', b: 3, o: 2, roots: 2 },
+      { path: 'b/x', kind: 'dir', bytes: 3, objects: 2, roots: 2 },
     ])
     expect((await coverSet(matchRoots(s, 'tomat', ''), '', lookupOf(s), { minDepth: 3 })).items.map(i => i.path)).toEqual(['b/x/tomat1', 'b/x/tomat2'])
   })
@@ -152,26 +152,26 @@ describe('coverSet', () => {
   }
   it('the view folder itself collapses when every object under it matches', async () => {
     expect((await coverSet(matchRoots(SHOWS, 'tomat', 'b/clips/A'), 'b/clips/A', lookupOf(SHOWS), { minDepth: 2 })).items).toEqual([
-      { path: 'b/clips/A', kind: 'dir', b: 30, o: 2, roots: 2 },
+      { path: 'b/clips/A', kind: 'dir', bytes: 30, objects: 2, roots: 2 },
     ])
   })
   it('a fully matching ancestor whose own name doesn\'t match collapses (from the view and from above it)', async () => {
     expect((await coverSet(matchRoots(SHOWS, 'tomat', 'b/clips/B'), 'b/clips/B', lookupOf(SHOWS), { minDepth: 2 })).items).toEqual([
-      { path: 'b/clips/B', kind: 'dir', b: 3, o: 2, roots: 2 },
+      { path: 'b/clips/B', kind: 'dir', bytes: 3, objects: 2, roots: 2 },
     ])
   })
   it('a mixed parent: each fully matching child collapses, the parent doesn\'t', async () => {
     expect((await coverSet(matchRoots(SHOWS, 'tomat', 'b/clips'), 'b/clips', lookupOf(SHOWS), { minDepth: 2 })).items).toEqual([
-      { path: 'b/clips/A', kind: 'dir', b: 30, o: 2, roots: 2 },
-      { path: 'b/clips/B', kind: 'dir', b: 3, o: 2, roots: 2 },
-      { path: 'b/clips/C/tomato_c', kind: 'file', b: 3, o: 1, roots: 1 },
+      { path: 'b/clips/A', kind: 'dir', bytes: 30, objects: 2, roots: 2 },
+      { path: 'b/clips/B', kind: 'dir', bytes: 3, objects: 2, roots: 2 },
+      { path: 'b/clips/C/tomato_c', kind: 'file', bytes: 3, objects: 1, roots: 1 },
     ])
   })
   it('a view folder holding non-matches stays one item per match (the prod `Adam_Carolla_Show` shape)', async () => {
     const s: Store = { 'b/pod/show/ep_Tomatoes_0': 5, 'b/pod/show/ep_Tomatoes_1': 5, 'b/pod/show/ep_other': 9 }
     expect((await coverSet(matchRoots(s, 'tomat', 'b/pod/show'), 'b/pod/show', lookupOf(s), { minDepth: 2 })).items).toEqual([
-      { path: 'b/pod/show/ep_Tomatoes_0', kind: 'file', b: 5, o: 1, roots: 1 },
-      { path: 'b/pod/show/ep_Tomatoes_1', kind: 'file', b: 5, o: 1, roots: 1 },
+      { path: 'b/pod/show/ep_Tomatoes_0', kind: 'file', bytes: 5, objects: 1, roots: 1 },
+      { path: 'b/pod/show/ep_Tomatoes_1', kind: 'file', bytes: 5, objects: 1, roots: 1 },
     ])
   })
 
@@ -208,13 +208,13 @@ describe('coverSet', () => {
     const roots = matchRoots(FIX, 'tomat', '')
     const got = await coverSet(roots, '', lookupOf(FIX, 3), { minDepth: 2 })
     expect(got.items).toEqual([
-      { path: 'b/clips/a_tomato.mp3', kind: null, b: 10, o: 1, roots: 1 },
-      { path: 'b/clips/b_tomato.mp3', kind: null, b: 20, o: 1, roots: 1 },
-      { path: 'b/deep/x', kind: 'dir', b: 8, o: 3, roots: 3 },
-      { path: 'b/mixed/tomato.txt', kind: null, b: 5, o: 1, roots: 1 },
-      { path: 'b/zero/tomat.a', kind: null, b: 9, o: 1, roots: 1 },
-      { path: 'c/tomat_one', kind: null, b: 6, o: 1, roots: 1 },
-      { path: 'c/tomato', kind: 'dir', b: 3, o: 2, roots: 1 },
+      { path: 'b/clips/a_tomato.mp3', kind: null, bytes: 10, objects: 1, roots: 1 },
+      { path: 'b/clips/b_tomato.mp3', kind: null, bytes: 20, objects: 1, roots: 1 },
+      { path: 'b/deep/x', kind: 'dir', bytes: 8, objects: 3, roots: 3 },
+      { path: 'b/mixed/tomato.txt', kind: null, bytes: 5, objects: 1, roots: 1 },
+      { path: 'b/zero/tomat.a', kind: null, bytes: 9, objects: 1, roots: 1 },
+      { path: 'c/tomat_one', kind: null, bytes: 6, objects: 1, roots: 1 },
+      { path: 'c/tomato', kind: 'dir', bytes: 3, objects: 2, roots: 1 },
     ])
     // Depths 4 and 3 fit (`b/deep/x/y`, `b/deep/x`); depth 2's four and the kinds don't.
     expect([got.looked, got.unchecked]).toEqual([2, 4])

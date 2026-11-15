@@ -9,6 +9,7 @@
 import type { D1Database } from "@cloudflare/workers-types"
 import { type Ctx, type Env as AuthEnv, json, requireAdmin } from "../../_lib/auth.js"
 import { batchConfig, type BatchEnv, notConfigured } from "../../_lib/batchConfig.js"
+import { sweepsOff, SWEEPS_OFF } from "../../_lib/dispatch.js"
 import { batchJobsUrl, gcpToken } from "../../_lib/gcp.js"
 import { auditRunControl } from "../../_lib/plans.js"
 
@@ -19,6 +20,7 @@ const JOB_RE = /^cw-sweep-(dry|real)-\d{8}-\d{6}z$/
 export const onRequestPost = async (ctx: Ctx & { env: Env }): Promise<Response> => {
   const gated = await requireAdmin(ctx)
   if (gated instanceof Response) return gated
+  if (sweepsOff(ctx.env)) return json({ error: SWEEPS_OFF }, 403)
   if (!ctx.env.GCP_SA_KEY) return json({ error: "stop not configured (no GCP_SA_KEY)" }, 503)
   const cfg = batchConfig(ctx.env, ["GCP_PROJECT", "BATCH_REGION"])
   if ("missing" in cfg) return json({ error: notConfigured("stop", cfg.missing) }, 503)

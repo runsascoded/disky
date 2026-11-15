@@ -29,12 +29,12 @@ describe('listsObjects', () => {
 
 describe('cellAction', () => {
   const cells: [string, CellNode][] = [
-    ['object', { n: 'part-0.parquet', k: 'file', o: 1 }],
-    ['dir with children', { n: 'ckpt', k: 'dir', o: 40, c: [{}] }],
-    ['childless dir, many objects', { n: 'logs', k: 'dir', o: 12 }],
-    ['childless dir, one object', { n: 'one', k: 'dir', o: 1 }],
-    ['fold', { n: '(other)', k: 'dir', o: 300, c: [] }],
-    ['pre-`k` response', { n: 'old', o: 1 }],
+    ['object', { name: 'part-0.parquet', kind: 'file', objects: 1 }],
+    ['dir with children', { name: 'ckpt', kind: 'dir', objects: 40, children: [{}] }],
+    ['childless dir, many objects', { name: 'logs', kind: 'dir', objects: 12 }],
+    ['childless dir, one object', { name: 'one', kind: 'dir', objects: 1 }],
+    ['fold', { name: '(other)', kind: 'dir', objects: 300, children: [] }],
+    ['pre-`k` response', { name: 'old', objects: 1 }],
   ]
   it('a scan that lists objects: an object opens, every directory drills (childless or not), a fold pins', () => {
     expect(cells.map(([what, n]) => [what, cellAction(n, true)])).toEqual([

@@ -69,6 +69,7 @@ from disk_tree.env import name as env_name
 from .heartbeat import Tail, run_teed, set_stage
 from .index_parts import PART_JSON, Part, part_ids, split_parts
 from .scan_profile import ScanProfile
+from .task_size import NPROC_ENV, task_cpus, task_ram
 
 
 def err(*a: object) -> None:
@@ -185,9 +186,6 @@ class _Printer:
         return []
 
 
-#: The task's CPU count, set by a job definition whose container can't read it (`Ctx.nproc`): Fargate's `cpu.max` reads
-#: `max` (the quota is the microVM's, not the cgroup's) while its affinity lists the host's CPUs.
-NPROC_ENV = "DT_NPROC"
 
 
 def cpu_quota(cgroup: Path) -> int | None:
@@ -211,10 +209,10 @@ def cpu_quota(cgroup: Path) -> int | None:
 MEM_SHARE = 0.6
 
 
-def mem_budget(cgroup: Path, share: float = MEM_SHARE) -> str:
-    """`share` of the task's memory as a DuckDB size (`"38GB"`): the machine's RAM, or the cgroup's limit when lower
-    (v2 `memory.max`, v1 `memory.limit_in_bytes`; v1's unlimited is ≥ 2^60)."""
-    total = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+def mem_budget(cgroup: Path, share: float = MEM_SHARE, env: Mapping[str, str] | None = None) -> str:
+    """`share` of the task's memory as a DuckDB size (`"38GB"`): `$DT_MEM` or the machine's RAM (`task_size.task_ram`),
+    or the cgroup's limit when lower (v2 `memory.max`, v1 `memory.limit_in_bytes`; v1's unlimited is ≥ 2^60)."""
+    total = task_ram(env)
     for f in ("memory.max", "memory/memory.limit_in_bytes"):
         try:
             limit = int((cgroup / f).read_text())
@@ -331,17 +329,21 @@ class Ctx:
     def nproc(self) -> int:
         """The task's CPUs: `$DT_NPROC` when set (`NPROC_ENV`), else the CPUs it may run on, capped by its cgroup's quota
         (`cpu_quota`). What `{nproc}` fills and the steps size their threads by."""
-        if v := (self.env.get(NPROC_ENV) or "").strip():
-            if not v.isdigit() or int(v) < 1:
-                raise StepFailed(2, f"${NPROC_ENV}={v!r}: not a positive integer")
-            return int(v)
+        if (self.env.get(NPROC_ENV) or "").strip():
+            try:
+                return task_cpus(self.env)
+            except ValueError as e:
+                raise StepFailed(2, str(e)) from None
         cpus = len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else os.cpu_count() or 1
         quota = cpu_quota(Path(self.env.get("DT_CGROUP") or "/sys/fs/cgroup"))
         return min(cpus, quota) if quota else cpus
 
     @property
     def mem(self) -> str:
-        return mem_budget(Path(self.env.get("DT_CGROUP") or "/sys/fs/cgroup"))
+        try:
+            return mem_budget(Path(self.env.get("DT_CGROUP") or "/sys/fs/cgroup"), env=self.env)
+        except ValueError as e:
+            raise StepFailed(2, str(e)) from None
 
     def fill_env(self, template: str) -> str:
         """`template` with each `{env:NAME}` filled from the task's env (a step fails on an unset one)."""
@@ -611,6 +613,27 @@ def access_r2(ctx: Ctx, arg: str | None) -> None:
         tmp = key.with_name(key.name + ".tmp")
         shutil.copyfile(local, tmp)
         tmp.replace(key)
+
+
+def _receipt_check(p: ScanProfile) -> list[str]:
+    o = p.opts('access-r2-receipt')
+    return [f'options.access-r2-receipt.{key}: required' for key in ('checkpoint', 'publish') if not o.get(key)]
+
+
+@step('access-r2-receipt', core=False, stage='pre', soft=True, options={'checkpoint': str, 'publish': str, 'endpoint': str},
+      requires=_receipt_check, side=True, converges=True, leaves='collector checkpoint receipt behind')
+def access_r2_receipt(ctx: Ctx, arg: str | None) -> None:
+    """Publish a verified durable checkpoint receipt with this step's own bucket-scoped writer credential.
+    Runs after access-r2; a failed sync can only yield an older durable receipt, never unpublished history."""
+    if ctx.reproc:
+        return
+    work = ctx.work / 'access-r2-receipt'
+    endpoint = ctx.opt('access-r2-receipt', 'endpoint') or ctx.env.get('R2_ENDPOINT')
+    with ctx.phase('access-r2-receipt'):
+        ctx.sh(['dt-cloud', 'access', 'r2-receipt', '-c', ctx.opt('access-r2-receipt', 'checkpoint'),
+                '-o', work / 'receipt.json', '-p', ctx.opt('access-r2-receipt', 'publish'), '-w', work / 'readback'],
+               env={env_name('R2_ENDPOINT_URL'): str(endpoint)} if endpoint else None,
+               fatal=False, warn='checkpoint receipt publication failed (collector keeps its history)')
 
 
 def s3_client(endpoint: str | None):
@@ -1528,6 +1551,11 @@ def retire(ctx: Ctx, arg: str | None) -> None:
                    warn=f"retire failed on {root} (its per-scan files stay; the next run retries)")
 
 
+#: `store-gc`'s note when a builder (this scan's append, or a compaction it started) holds the static-names store: GC
+#: never deletes under one, and the next scan's run retries, so it's no failure and no alert.
+STATIC_GC_DEFERRED = "static cleanup deferred: a builder holds the static-names store's lease (the next scan retries)"
+
+
 @step("store-gc", core=False, soft=True, options={"execute": bool, "grace": int, "store": str, "copies": list, "static_gens": list,
                                               "static_store": str, "static_copies": list, "scratch": str},
       side=True, converges=True, leaves="superseded store generations not collected")
@@ -1552,13 +1580,17 @@ def store_gc(ctx: Ctx, arg: str | None) -> None:
         for root in dict.fromkeys(r for r in [store, *ctx.opt("store-gc", "copies", [archive])] if r):
             ctx.sh(["dt-cloud", "store-gc", *args, "-o", root], fatal=False, warn=f"store-gc failed on {root} (the generations stay)")
         if ctx.opt("store-gc", "static_store"):
+            from .append_runner import BUSY
+
             static = ["dt-cloud", "generation-gc", "-t", "static-names", "-o", ctx.opt("store-gc", "static_store"),
                       *(a for g in ctx.opt("store-gc", "static_gens", []) for a in ("-k", g)),
                       *(a for root in ctx.opt("store-gc", "static_copies", []) for a in ("-c", root)),
                       *(["-s", ctx.opt("store-gc", "scratch")] if ctx.opt("store-gc", "scratch") else []),
                       *(["-G", ctx.opt("store-gc", "grace")] if ctx.opt("store-gc", "grace") is not None else []),
                       *(["-x"] if ctx.opt("store-gc", "execute") else [])]
-            ctx.sh(static, fatal=False, warn="coordinated static generation cleanup failed (the generations stay)")
+            ctx.sh(static, fatal=False, warn="coordinated static generation cleanup failed (the generations stay)", allowed_codes=(BUSY,))
+            if ctx.last is not None and ctx.last.returncode == BUSY:
+                ctx.note = STATIC_GC_DEFERRED
         elif ctx.opt("store-gc", "static_gens") and archive:
             static = ["-t", "static-names", *(a for g in ctx.opt("store-gc", "static_gens") for a in ("-k", g)),
                       *(["-x"] if ctx.opt("store-gc", "execute") else [])]
@@ -1857,6 +1889,60 @@ def soft_delete(ctx: Ctx, arg: str | None) -> None:
             outs.append(f"{ctx.env['R2_ARCHIVE']}/{SOFT_DELETE_PREFIX}")
         ctx.sh(["dt-cloud", "soft-delete", *(a for b in buckets for a in ("-b", b)), *(a for e in endpoints for a in ("-E", e)), *(a for o in outs for a in ("-o", o))],
                fatal=False, warn="soft-delete reading failed (the scan's outputs stand; the site keeps the last one, dated)")
+
+
+def _vm_pack_check(p: ScanProfile) -> list[str]:
+    from .vm_pack import batch_problems
+
+    batch = p.opts("vm-pack").get("batch")
+    return primary_only("vm-pack", "a pack is the primary interval store's")(p) + ([] if batch is None else batch_problems(batch))
+
+
+@step("vm-pack", core=False, soft=True, options={"store": str, "keep": int, "batch": dict},
+      requires=_vm_pack_check,
+      side=True, converges=True, leaves="VM mode's pack not written: the VM serves the previous one until a later run writes it")
+def vm_pack(ctx: Ctx, arg: str | None) -> None:
+    """VM mode's pack (specs/vm-mode.md §6): `dt-cloud vm-pack build` over the interval store's current generation and
+    newest manifest, published beside it under `vm-pack/` (the pack, then `vm-pack/CURRENT.json`). The store is
+    `options.vm-pack.store`, else the interval store's (`options.interval-store.store`, else `R2_ARCHIVE`). Post stage,
+    after the append; idempotent (a pointer already naming the generation and manifest is a no-op), so a later run
+    catches up. Not core: a deployment opts in (`steps`).
+
+    `options.vm-pack.batch` (a mapping, possibly empty): the build runs as a Batch job of its own (`vm-pack submit`), not
+    in this task: its loader holds the store's rows in RAM once (gcs: 117 GB), so it gets its own machine (default a spot
+    n2-highmem-16) instead of sizing the scan's. The mapping's keys (`vm_pack.BATCH_KEYS`) are `submit`'s options:
+    `image` (default `$JOB_IMAGE`, this task's), `service_account` (`$JOB_SA`), `region` (`$BATCH_REGION`; the store
+    bucket's region is checked against it), `project`, `machine`, `spot`, `ssd_gb`, `memory_mib`, `env`, `secrets`
+    (`{VAR: secret}`, a non-GCS store's credentials), `cross_region`. Submitted, not waited on: the step's success is
+    the submit's, never the job's (a failed job leaves the previous pack, and the next scan's job writes the newest).
+    Without `batch`, the build runs here (a small deployment's: no Batch, little memory).
+
+    Needs `fsb` in the image that builds (`$FSB` or PATH; `job/Dockerfile` `FSB=build`): this one when building here or
+    when the job runs this task's image; without it the step is skipped, said in its note."""
+    if ctx.reproc:
+        err("REPROC: not writing a VM pack")
+        return
+    store = ctx.opt("vm-pack", "store") or ctx.opt("interval-store", "store") or ctx.env.get("R2_ARCHIVE")
+    batch = ctx.opt("vm-pack", "batch")
+    keep = str(ctx.opt("vm-pack", "keep", 2))
+    with ctx.phase("vm-pack"):
+        if not store:
+            ctx.skip("unconfigured", "no store (options.vm-pack.store, options.interval-store.store or R2_ARCHIVE)")
+            return
+        if batch is not None and not (batch.get("image") or ctx.env.get("JOB_IMAGE")):
+            ctx.skip("unconfigured", "no image for the vm-pack job (options.vm-pack.batch.image or JOB_IMAGE)")
+            return
+        if not (batch or {}).get("image") and not (ctx.env.get("FSB") or shutil.which("fsb", path=ctx.env.get("PATH"))):
+            ctx.skip("unconfigured", "no fsb in this image ($FSB or PATH)")
+            return
+        if batch is not None:
+            from .vm_pack import submit_args
+
+            ctx.sh(["dt-cloud", "vm-pack", "submit", "-o", store, "-k", keep, *submit_args(batch)],
+                   fatal=False, warn=f"VM pack job not submitted for {ctx.scan} (the VM keeps serving the previous pack)")
+            return
+        ctx.sh(["dt-cloud", "vm-pack", "build", "-o", store, "-w", str(ctx.work / "vm-pack"), "-k", keep],
+               fatal=False, warn=f"VM pack not written for {ctx.scan} (the VM keeps serving the previous pack)")
 
 
 #: Core steps a profile may `skip`.

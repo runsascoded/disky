@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { buildTree, type DiffData } from './diffModel'
 import { deltaColor, diffCellStyle, UNCHANGED_GREY } from './diffStyle'
 
-const data: DiffData = { prev: 'old', curr: 'new', total_a: 0, total_b: 100, objects_a: 0, objects_b: 500, expansions: 0, truncated: false, threshold: 0, lookups: 0, lookups_capped: false, rows: [{ p: '(other)', d: 1, k: 'dir', s: 'added', a: 0, b: 100, oa: 0, ob: 500 }] }
+const data: DiffData = { prev: 'old', curr: 'new', bytes_before: 0, bytes_after: 100, objects_before: 0, objects_after: 500, expansions: 0, truncated: false, threshold: 0, lookups: 0, lookups_capped: false, rows: [{ path: '(other)', depth: 1, kind: 'dir', status: 'added', bytes_before: 0, bytes_after: 100, objects_before: 0, objects_after: 500 }] }
 describe('diff remainder grids', () => {
   it('uses the larger observed object count as a density hint in both area modes', () => {
     const node = buildTree(data, 'delta', false).cells[0]

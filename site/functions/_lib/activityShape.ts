@@ -34,6 +34,7 @@ export const KIND_DEFS: KindDef[] = [
   def('profile', 'server', 'Profile name or avatar', ['profile edit', 'profile edits'], 'count'),
   def('digest', 'server', "The Slack digest job's own syncs (the OP's state, its plot)", ['digest sync', 'digest syncs'], 'off'),
   def('write', 'server', 'Any other change', ['other change', 'other changes'], 'count'),
+  def('denied', 'server', 'Refused requests from a service link: expired, revoked or disabled (its notice says why)', ['refused request', 'refused requests'], 'line'),
   def('view', 'client', 'Page loads', ['page load', 'page loads'], 'count'),
   def('nav', 'client', 'URL changes: routes, drills, query params, the section in view', ['URL change', 'URL changes'], 'count'),
   def('click', 'client', 'Clicks on controls (buttons, links, menus, checkboxes)', ['click', 'clicks'], 'count'),
@@ -193,6 +194,9 @@ export interface Burst {
   trail: Trail
   sids: string[]
 }
+
+/** A burst as stored: when it was last rendered, and whether it changed since. */
+export type StoredBurst = Burst & { rendered_ms: number | null; dirty: boolean }
 
 /** A burst's path trail: `n` stops in all (a repeat of the previous path is the same stop, counted), the latest
  *  `TRAIL_KEEP` kept as `[path, views]`. */
@@ -360,11 +364,13 @@ export interface SummaryOpts {
   highlights: Highlights
   /** `/admin/activity?burst=<id>` etc. are built from the burst's origin. */
   topPages?: number
+  /** A service link's notice (`Notice`), leading the headline / summary. */
+  notice?: Notice
   /** Who the burst is, as resolved for its sender (a profile's or grant's name); default `actorName(actor)`. */
   name?: string
 }
 
-const via = (v: string): string => v === 'grant' ? 'agent token / share link' : v === 'public' ? 'signed out' : 'browser'
+const via = (v: string): string => v === 'grant' ? 'agent token / share link' : v === 'service' ? 'service' : v === 'public' ? 'signed out' : 'browser'
 
 const spanText = (b: Pick<Burst, 'first_ts' | 'last_ts'>): string =>
   `${day(b.first_ts)} ${b.first_ts === b.last_ts ? hm(b.first_ts) : `${hm(b.first_ts)}–${hm(b.last_ts)}`}Z`
@@ -376,17 +382,18 @@ const activityLink = (b: Pick<Burst, 'origin' | 'id'>, fmt: Fmt): string => fmt.
 export function renderSummary(b: Burst, o: SummaryOpts): string {
   const { fmt, conf } = o
   const counts = countsText(b, conf)
-  const lines = [`${fmt.bold(o.name ?? actorName(b.actor))} (${via(b.via)}) · ${spanText(b)}`, ...(counts.length ? [counts.join(' · ')] : [])]
+  const lead = o.notice ? `${noticeText(o.notice, fmt)} · ` : ''
+  const lines = [`${lead}${fmt.bold(o.name ?? actorName(b.actor))} (${via(b.via)}) · ${spanText(b)}`, ...(counts.length ? [counts.join(' · ')] : [])]
   return [...lines, ...detailLines(b, o, [activityLink(b, fmt)])].join('\n')
 }
 
 /** A burst's Slack post, one line: the counts, when, the activity link. Sent as its actor (`asUser`: their name and
  *  face as the sender) the line leaves out who, keeping how for a grant (`agent token / share link`); otherwise it
  *  leads with who and how. */
-export function renderHeadline(b: Burst, o: Pick<SummaryOpts, 'fmt' | 'conf' | 'name'>, asUser: boolean): string {
+export function renderHeadline(b: Burst, o: Pick<SummaryOpts, 'fmt' | 'conf' | 'name' | 'notice'>, asUser: boolean): string {
   const { fmt, conf } = o
   const who = asUser ? (b.via === 'session' ? [] : [via(b.via)]) : [`${fmt.bold(o.name ?? actorName(b.actor))} (${via(b.via)})`]
-  return [...who, ...countsText(b, conf), spanText(b), activityLink(b, fmt)].join(' · ')
+  return [...(o.notice ? [noticeText(o.notice, fmt)] : []), ...who, ...countsText(b, conf), spanText(b), activityLink(b, fmt)].join(' · ')
 }
 
 /** The rest of a burst's Slack post, as its first reply: highlights, pages, session / plan links. */
@@ -456,6 +463,45 @@ export function renderLines(kind: string, events: readonly (Pick<ServerEvent, 't
   if (all.length > max) out.push(`+${fmtN(all.length - max)} more`)
   return out.join('\n')
 }
+
+// ---- service links (`grants.service`) ----
+// The package's service-link activity (`@open-athena/auth/activity`, `serviceReasons`), so disky's posts read the same
+// before it moves onto that feed: routine bursts post nothing; a notable one posts red, why first; the next clean one
+// after a red posts green.
+
+/** A service burst with at least this many errors (failed requests, uncaught or console errors) is notable. */
+export const SERVICE_ERRORS = 3
+
+/** A service burst's notice: red with why, or green once it's clean again. */
+export interface Notice { color: 'red' | 'green'; reasons: string[] }
+
+/** Why a service burst is notable (none: it's routine): at least `SERVICE_ERRORS` errors, any refused request (its
+ *  `denied` lines, up to three of the distinct ones, say which), a client its earlier sessions didn't use. */
+export function serviceReasons(counts: Record<string, number>, deniedLines: readonly string[], newClients: number, threshold = SERVICE_ERRORS): string[] {
+  const reasons: string[] = []
+  const errors = counts.error ?? 0
+  if (errors >= threshold) reasons.push(`${errors} errors`)
+  const denied = counts.denied ?? 0
+  if (denied) {
+    const why = [...new Set(deniedLines.filter(Boolean))].slice(0, 3)
+    reasons.push(`${denied} refused ${denied === 1 ? 'request' : 'requests'}${why.length ? ` (${why.join('; ')})` : ''}`)
+  }
+  if (newClients) reasons.push(newClients === 1 ? 'a new client' : `${newClients} new clients`)
+  return reasons
+}
+
+/** A notice's lead, before the burst's headline. */
+export const noticeText = (n: Notice, fmt: Fmt): string => n.color === 'red' ? `🔴 ${fmt.esc(n.reasons.join('; '))}` : '🟢 clean again'
+
+/** A user agent without its version numbers: the client fingerprint a service's sessions are compared by, so a
+ *  browser or library update is the same client, another tool or platform is not. */
+export const uaFamily = (ua: string): string => ua.replace(/\d+(?:[._]\d+)*/g, '#')
+
+const SERVICE_SUFFIX = ' (service)'
+/** A service link's sender name: what it is, and that it's no person. */
+export const serviceName = (name: string): string => `${name}${SERVICE_SUFFIX}`
+/** The name `serviceName` was given. */
+export const plainName = (name: string): string => name.endsWith(SERVICE_SUFFIX) ? name.slice(0, -SERVICE_SUFFIX.length) : name
 
 /** Discord's message limit. */
 export const DISCORD_MAX = 2000

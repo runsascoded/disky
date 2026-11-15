@@ -16,7 +16,7 @@ from urllib.parse import urlencode
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
-from click import Choice, ClickException, Path as ClickPath, argument, group, option
+from click import Choice, ClickException, Path as ClickPath, argument, echo, group, option
 
 #: The live checks' own agent: Cloudflare's bot rules answer Python's default `Python-urllib/…` with a 403 and no app headers.
 LIVE_HEADERS = {'User-Agent': 'disky-oa-release/1'}
@@ -65,6 +65,15 @@ def require(condition: bool, message: str) -> None:
         raise ClickException(message)
 
 
+def recipes_at(prefix: str, ref: str) -> list[str]:
+    """The D1 recipes (`site/migrations/*.sql`) a revision carries; none once the directory is gone."""
+    site = api(f'{prefix}/contents/site?ref={ref}')
+    if not any(entry['name'] == 'migrations' and entry['type'] == 'dir' for entry in site):
+        return []
+    return sorted(entry['name'] for entry in api(f'{prefix}/contents/site/migrations?ref={ref}')
+                  if entry['type'] == 'file' and entry['name'].endswith('.sql'))
+
+
 def plan_release(event: dict, event_name: str, repository: str) -> dict:
     config = loads(CONFIG.read_text())
     require(repository == config['repository'], 'OA releases run only in the configured repository')
@@ -86,10 +95,14 @@ def plan_release(event: dict, event_name: str, repository: str) -> dict:
     require(target in config['sites'], 'Unknown OA deployment')
     require(bool(fullmatch(r'[0-9a-f]{40}', sha)), 'A full lowercase source SHA is required')
     site = config['sites'][target]
+    tip_recipes = None
     if mode == 'dev':
         tip = api(f'{prefix}/git/ref/heads/{target}')['object']['sha']
         require(tip == sha, 'Obsolete CI completion: source branch has moved')
     else:
+        # A promotion or rollback may name an older sha: `seal` holds only the recipes still pending at the branch's tip
+        tip = api(f'{prefix}/git/ref/heads/{target}')['object']['sha']
+        tip_recipes = recipes_at(prefix, tip)
         comparison = api(f'{prefix}/compare/{sha}...{target}')
         require(comparison['status'] in ('ahead', 'identical'), 'Production SHA is not on the deployment branch')
         proof = api(f'{prefix}/deployments/{dev_id}')
@@ -111,7 +124,7 @@ def plan_release(event: dict, event_name: str, repository: str) -> dict:
         'protocol': PROTOCOL, 'repository': repository, 'source_branch': target, 'sha': sha,
         'mode': mode, 'environment': f'{target}-{mode}', 'project': site['project'],
         'pages_branch': site[f'{mode}_branch'], 'host': site[f'{mode}_host'],
-        'ci_run': ci['id'], 'dev_deployment': dev_id,
+        'ci_run': ci['id'], 'dev_deployment': dev_id, 'tip_recipes': tip_recipes,
     }
 
 
@@ -234,6 +247,13 @@ def seal(output: Path, plan_path: Path, source: Path) -> None:
     value = loads(plan_path.read_text())
     validate_source(source, value['sha'])
     pending = sorted(path.name for path in (source / 'site/migrations').glob('*.sql'))
+    if value['mode'] == 'prod':
+        # A recipe gone at the branch's tip was applied (or dropped) and `git rm`'d after this sha, so it doesn't
+        # hold a rollback to it; one still at the tip does (dev releases the tip, so it holds every recipe)
+        done = [name for name in pending if name not in value['tip_recipes']]
+        if done:
+            echo(f'Not held (gone at {value["source_branch"]}\'s tip: applied or dropped): {", ".join(done)}', err=True)
+        pending = [name for name in pending if name in value['tip_recipes']]
     require(not pending, f'Pending D1 recipes: {", ".join(pending)}. Apply each to this deployment\'s databases (owner, with Ryan\'s go), `git rm` it, then release')
     config = source / 'site/wrangler.toml'
     parsed = toml_loads(config.read_text())

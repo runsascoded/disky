@@ -2,9 +2,10 @@
 // of arbitrary prefixes — `/staged`'s items, the action log — plus the
 // helpers `PrefixTable` renders them with.
 import { useQuery } from '@tanstack/react-query'
+import type { TreeNode } from './types'
 
-/** One prefix's numbers at a scan, in `TreeNode`'s wire names. */
-export interface PrefixStat { b: number; o: number; d?: number; a?: number; us?: [string, number][]; cb?: Record<string, number> }
+/** One prefix's numbers at a scan, a map node's measures (`TreeNode`, no children). */
+export type PrefixStat = Pick<TreeNode, 'bytes' | 'objects' | 'mtime' | 'last_read' | 'owners' | 'class_bytes'>
 
 /** The endpoint's per-request cap (`functions/_lib/prefixes.ts`). */
 export const CHUNK = 1000
@@ -86,8 +87,10 @@ export function relAgo(ts: number, now = Date.now() / 1000): string {
   return `${unit} ago`
 }
 
-/** The columns every prefix table sorts by, and any page-specific extras. */
+/** The columns every prefix table sorts by, and any page-specific extras. The keys are the tables' URL sort
+ *  tokens (kept short: shared links carry them); `STAT_SORT` names the stat each reads. */
 export type PrefixSortKey = 'name' | 'b' | 'o' | 'd' | 'a' | (string & {})
+const STAT_SORT: Record<string, 'bytes' | 'objects' | 'mtime' | 'last_read'> = { b: 'bytes', o: 'objects', d: 'mtime', a: 'last_read' }
 
 /** Rows by `key` (an extra column's via `extra`), missing values last either
  *  way, ties by name. */
@@ -99,7 +102,7 @@ export function sortPrefixRows<T extends { name: string; stat?: PrefixStat }>(
 ): T[] {
   const val = (r: T): number | string | undefined =>
     key === 'name' ? r.name
-    : key === 'b' || key === 'o' || key === 'd' || key === 'a' ? r.stat?.[key as 'b' | 'o' | 'd' | 'a']
+    : key in STAT_SORT ? r.stat?.[STAT_SORT[key]]
     : extra?.(r)
   return [...rows].sort((x, y) => {
     const a = val(x)

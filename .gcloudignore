@@ -21,6 +21,7 @@ cloud/.venv
 ui/node_modules
 packages/react/node_modules
 packages/treemap/node_modules
+packages/pages-kit/node_modules
 cloud/tmp
 thrds
 screenshots

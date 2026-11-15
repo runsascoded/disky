@@ -129,7 +129,7 @@ function OwnershipFact({ tree }: { tree: TreeNode }) {
   useEffect(() => {
     if (location.hash === '#attribution') document.getElementById('attribution')?.scrollIntoView()
   }, [])
-  const pct = tree.b ? ((100 * userBytes(tree)) / tree.b).toFixed(1) : '0.0'
+  const pct = tree.bytes ? ((100 * userBytes(tree)) / tree.bytes).toFixed(1) : '0.0'
   return (
     <span className="fact ownership-fact" id="attribution">
       <span className="lbl">ownership</span>

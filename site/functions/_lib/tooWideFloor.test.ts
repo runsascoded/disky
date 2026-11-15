@@ -94,9 +94,9 @@ describe('a view whose plan is past the read budget', () => {
     expect(view.tier).toBe('bysize')
     const cb = await ivClassBytes(VIEW.date, VIEW.path, VIEW.w)
     expect(view.tree).toEqual({
-      n: 'e', k: 'dir', b: 20, o: 3, a: 6, t: 7, d: 0, cb: cb[''], us: [['alice', 10]],
-      c: [
-        { n: 'd.json', k: 'file', b: 20, o: 1, a: 6, t: 7, d: 0, cb: cb['/d.json'] },
+      name: 'e', kind: 'dir', bytes: 20, objects: 3, last_read: 6, mtime: 7, class_bytes: cb[''], owners: [['alice', 10]],
+      children: [
+        { name: 'd.json', kind: 'file', bytes: 20, objects: 1, last_read: 6, mtime: 7, class_bytes: cb['/d.json'] },
       ],
     })
     // The same answer as asking for that floor outright, on a plan that fits.
@@ -129,7 +129,7 @@ describe('a view whose plan is past the read budget', () => {
     // The heavy group sits a level below the read's top, where `path` holds it to twice the floor: 1.5× is enough there
     // (3× on `bysize`, whose one floor is the top level's), and the sort needing the smaller rise answers.
     expect([view.threshold / plain.threshold, view.tier]).toEqual([expect.closeTo(1.5, 6), 'path'])
-    expect(view.tree.b).toBe(plain.tree.b)
+    expect(view.tree.bytes).toBe(plain.tree.bytes)
     planning.size.clear()
     planning.path.clear()
     // At that floor the sort it would pick unprompted answers the same tree.

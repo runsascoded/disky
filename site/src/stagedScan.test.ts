@@ -61,7 +61,7 @@ describe('sizedAtOldScan: no run is dispatched from sizes at a scan the run does
 
 describe('withoutDeleted: a scan\'s sizes less what a real run on that same scan has since deleted', () => {
   const P = 'gs://b/x/', Q = 'gs://b/y/'
-  const stat = { b: 1000, o: 10, d: 5, us: [['ann', 1000]] as [string, number][], cb: { 2: 100 } }
+  const stat = { bytes: 1000, objects: 10, mtime: 432000, owners: [['ann', 1000]] as [string, number][], class_bytes: { 2: 100 } }
   const band = (over: Partial<ScanDeletion>): ScanDeletion => ({ prefix: P, bytes: 1000, objects: 10, gone: 0, ...over })
 
   it('all of it deleted: nothing left, as if empty at the scan; others untouched', () => {
@@ -74,7 +74,7 @@ describe('withoutDeleted: a scan\'s sizes less what a real run on that same scan
     expect(withoutDeleted({ [P]: stat }, [band({ bytes: 400, objects: 4 }), band({ bytes: 600, objects: 6, gone: 4 })])).toEqual({})
   })
   it('part of it deleted (overwrites kept, a drifted folder skipped): the exact remainder, its owners no longer known', () => {
-    expect(withoutDeleted({ [P]: stat }, [band({ bytes: 700, objects: 7 })])).toEqual({ [P]: { b: 300, o: 3, d: 5 } })
+    expect(withoutDeleted({ [P]: stat }, [band({ bytes: 700, objects: 7 })])).toEqual({ [P]: { bytes: 300, objects: 3, mtime: 432000 } })
   })
   it('part deleted with some gone: gone objects have no recorded bytes, so the remainder can\'t be stated: left whole', () => {
     expect(withoutDeleted({ [P]: stat }, [band({ bytes: 500, objects: 5, gone: 2 })])).toEqual({ [P]: stat })

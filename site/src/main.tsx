@@ -14,9 +14,12 @@ import { bootSessionLog } from './sessionLogBoot'
 import { forwardPs } from './pathStoreParam'
 import { describeUrlParams } from './urlParams'
 import { QUERY_DEFAULTS } from './queryDefaults'
+import { watchApiShape } from './apiShape'
 import 'use-kbd/styles.css'
 import './app.scss'
 
+// A tab left open across a deploy that changed the API's wire shape reloads instead of misreading its bodies.
+watchApiShape()
 const queryClient = new QueryClient({ defaultOptions: QUERY_DEFAULTS })
 // Dev / `?spy=1`: the cache on `window.__qc`, so a console session can watch
 // which queries refetch (the render spy says what re-rendered; this says why).

@@ -27,6 +27,121 @@ EMPTY = "SELECT NULL::VARCHAR bucket, NULL::VARCHAR path, NULL::VARCHAR op, NULL
 LEAF = "bucket, path, hour, op, n_ops, NULL::BIGINT bytes_out, NULL::BIGINT bytes_in, NULL::BIGINT n_requesters, last_ts, sampled"
 
 
+def receipt(checkpoint: str, work: Path) -> dict:
+    """Attest a durable checkpoint read back at one revision, never a task's unpublished candidate."""
+    work.mkdir(parents=True, exist_ok=True)
+    generation = None
+    if checkpoint.startswith(('gs://', 'gcs://')):
+        from google.cloud import storage
+
+        bucket, key = checkpoint.split('://', 1)[1].split('/', 1)
+        blob = storage.Client().bucket(bucket).get_blob(key)
+        if blob is None:
+            raise FileNotFoundError(checkpoint)
+        generation = str(blob.generation)
+        local = work / 'receipt-checkpoint.parquet'
+        blob.download_to_filename(str(local), if_generation_match=int(generation))
+        return receipt_body(checkpoint, local, generation)
+    with checkpoint_file(checkpoint, work) as (local, _):
+        if not local.exists():
+            raise FileNotFoundError(checkpoint)
+        return receipt_body(checkpoint, local, generation)
+
+
+def receipt_body(
+    uri: str,
+    local: Path,
+    generation: str | None,
+) -> dict:
+    from hashlib import file_digest
+    import math
+    import pyarrow.parquet as pq
+
+    meta = json.loads(pq.read_metadata(local).metadata[META])
+    if meta.get('version') != 1 or meta.get('full_history_verified') is not True or not meta.get('account'):
+        raise ValueError('read checkpoint receipt requires a passing full-history bootstrap comparison')
+    cursors = meta.get('cursors')
+    if not isinstance(cursors, dict) or not cursors or any(type(v) not in (int, float) or not math.isfinite(v) or v < 0 for v in cursors.values()):
+        raise ValueError('read checkpoint receipt requires finite closed-history cursors')
+    with local.open('rb') as stream:
+        digest = file_digest(stream, 'sha256').hexdigest()
+    return {'schema_version': 1, 'kind': 'r2-read-checkpoint', 'source': meta['source'], 'account': meta['account'],
+            'checkpoint': {'uri': uri, 'generation': generation, 'sha256': digest}, 'cursors': cursors}
+
+
+def publish_receipt(doc: dict, destination: str) -> None:
+    """One small R2 receipt, with monotonic cursors and an atomic ETag precondition. No credential is broadened."""
+    from urllib.parse import urlparse
+    import boto3
+    from botocore.exceptions import ClientError
+    from disk_tree.blobfs import r2_endpoint
+    from .secrets import env_secret
+
+    url = urlparse(destination)
+    key = url.path.lstrip('/')
+    if (url.scheme != 'r2' or not url.netloc or url.query or url.fragment or not key
+            or any(p in ('', '.', '..') for p in key.split('/'))):
+        raise ValueError('receipt publication requires an exact r2://bucket/key')
+    endpoint = r2_endpoint(url.netloc)
+    if not endpoint:
+        raise ValueError('receipt publication requires the receipt bucket R2 endpoint')
+    generation = doc['checkpoint']['generation']
+    if not isinstance(generation, str) or not generation.isdecimal():
+        raise ValueError('receipt publication requires a durable GCS checkpoint generation')
+    access, secret = env_secret('RECEIPT_ACCESS_KEY_ID'), env_secret('RECEIPT_SECRET_ACCESS_KEY')
+    if not access or not secret:
+        raise ValueError('receipt publication requires its dedicated RECEIPT_ACCESS_KEY_ID and RECEIPT_SECRET_ACCESS_KEY')
+    client = boto3.Session(aws_access_key_id=access, aws_secret_access_key=secret).client('s3', endpoint_url=endpoint, region_name='auto')
+    target = {'Bucket': url.netloc, 'Key': key}
+
+    def body(response: dict) -> bytes:
+        with response['Body'] as stream:
+            value = stream.read(65_537)
+        if len(value) > 65_536:
+            raise ValueError('receipt exceeds 64 KiB')
+        return value
+
+    try:
+        previous = client.get_object(**target)
+    except ClientError as error:
+        if error.response['Error']['Code'] not in ('NoSuchKey', '404'):
+            raise
+        condition = {'IfNoneMatch': '*'}
+    else:
+        old = json.loads(body(previous))
+        if (any(old.get(k) != doc[k] for k in ('schema_version', 'kind', 'source', 'account'))
+                or old['checkpoint']['uri'] != doc['checkpoint']['uri']
+                or int(old['checkpoint']['generation']) > int(generation)
+                or any(v > doc['cursors'].get(b, float('-inf')) for b, v in old['cursors'].items())):
+            raise ValueError('receipt would move backwards or change its source/checkpoint')
+        condition = {'IfMatch': previous['ETag']}
+    data = (json.dumps(doc, sort_keys=True) + '\n').encode()
+    if len(data) > 65_536:
+        raise ValueError('receipt exceeds 64 KiB')
+    result = client.put_object(**target, Body=data, ContentType='application/json', **condition)
+    if body(client.get_object(**target, IfMatch=result['ETag'])) != data:
+        raise ValueError('published receipt readback differs')
+
+
+@command('r2-receipt')
+@option('-c', '--checkpoint', required=True, help='Durable gs:// or local closed-history checkpoint to read back')
+@option('-o', '--out', required=True, type=Path, help='Local receipt for review; no transport or collector change')
+@option('-p', '--publish', help='Opt-in exact r2://bucket/key; uses only the explicitly supplied receipt writer credential')
+@option('-w', '--work', required=True, type=Path, help='Scratch directory for the revision-pinned read')
+def receipt_cmd(
+    checkpoint: str,
+    out: Path,
+    publish: str | None,
+    work: Path,
+) -> None:
+    """Prepare a collector receipt from a verified durable checkpoint. Deletes nothing."""
+    doc = receipt(checkpoint, work)
+    Store(str(out.parent)).write_text(out.name, json.dumps(doc, sort_keys=True) + '\n')
+    if publish:
+        publish_receipt(doc, publish)
+    print(json.dumps({'out': str(out), 'cursors': doc['cursors'], 'generation': doc['checkpoint']['generation']}, sort_keys=True))
+
+
 @contextmanager
 def checkpoint_file(uri: str, work: Path) -> Iterator[tuple[Path, Callable[[Path], None]]]:
     """Stage one checkpoint; its publisher atomically replaces precisely the version read."""
@@ -133,7 +248,9 @@ def sync(
         selected: dict = {}
 
         def select(snapshot: dict) -> list[str]:
-            state_aggs(snapshot, cut)  # validate schema and reject legacy per-day history
+            state_aggs(snapshot, cut, closed_cursors=cursors, checkpoint=checkpoint)
+            if verify and snapshot['schema_version'] == 3:
+                raise ValueError('read checkpoint: full-history verification requires original, uncompacted state')
             if metadata['account'] is not None and metadata['account'] != snapshot['account']:
                 raise ValueError('read checkpoint collector account mismatch')
             frozen, active, next_cursors = [], [], dict(cursors)
@@ -178,7 +295,8 @@ def sync(
             con.execute(f"""CREATE TEMP TABLE closed AS SELECT bucket, path, op, max(hour) AS hour,
                 sum(n_ops)::BIGINT n_ops, max(last_ts) last_ts, min(first_ts) first_ts, bool_or(sampled) sampled
                 FROM ({old} UNION ALL BY NAME SELECT * FROM new_closed) GROUP BY bucket, path, op""")
-            metadata.update(account=selected['account'], cursors=selected['cursors'], windows=metadata['windows'] + len(selected['frozen']))
+            metadata.update(account=selected['account'], cursors=selected['cursors'], windows=metadata['windows'] + len(selected['frozen']),
+                            full_history_verified=bool(metadata.get('full_history_verified') or verify))
             closed = work / 'closed.parquet'
             con.execute(f"""COPY (SELECT * FROM closed ORDER BY bucket, path, op) TO {q(str(closed))}
                 (FORMAT PARQUET, COMPRESSION ZSTD, KV_METADATA {{r2_read_checkpoint: {q(json.dumps(metadata, sort_keys=True))}}})""")

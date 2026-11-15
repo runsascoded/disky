@@ -83,7 +83,7 @@ class BuildConfig:
     mode: str = "candidate"
     #: The mutable tags `promote` moves (e.g. `latest`); empty: nothing to promote, consumers pin digests.
     live_tags: tuple[str, ...] = ()
-    #: The Dockerfile's `ARG`s (`job/Dockerfile`: `SITE`, `APT_PACKAGES`, `UV_SYNC_ARGS`, `ENTRYPOINT`).
+    #: The Dockerfile's `ARG`s (`job/Dockerfile`: `SITE`, `APT_PACKAGES`, `UV_SYNC_ARGS`, `ENTRYPOINT`, `FSB`).
     build_args: Mapping[str, str] = field(default_factory=dict)
     #: Git pathspecs staged as the build context (`:(exclude)…` magic allowed); default the whole tree.
     context: tuple[str, ...] = (".",)

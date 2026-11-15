@@ -73,7 +73,7 @@ describe('a click on the matches → confirm → batches → accepted, against a
     }, () => cur)
     return { ctl, states, sent, db }
   }
-  const dirs = Array.from({ length: 1100 }, (_, i) => ({ path: `${B}/d${String(i).padStart(4, '0')}/tomat`, kind: 'dir' as const, b: 10, o: 1, roots: 1 }))
+  const dirs = Array.from({ length: 1100 }, (_, i) => ({ path: `${B}/d${String(i).padStart(4, '0')}/tomat`, kind: 'dir' as const, bytes: 10, objects: 1, roots: 1 }))
 
   it('stage 1,100 folders: asks, sends 3 POSTs + a merge, lands as one batch; undo takes them back', async () => {
     const h = await harness(dirs)

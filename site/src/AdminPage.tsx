@@ -15,6 +15,7 @@ import { SweepSoftDelete, SweepSoftDeleteUnused } from './SweepSoftDelete'
 import { NO_AUTOFILL } from './noAutofill'
 import { Paginated } from './Pager'
 import { Admins, AdminsRefusal } from './Admins'
+import { useHistoryConfigured } from './HistoryAdmin'
 
 // Share-link console (admins only; the backend enforces the `admin` scope on
 // every /api/auth/grants route — this page just renders the 403 politely).
@@ -57,6 +58,9 @@ interface Grant {
   createdBy: string
   revokedAt: number | null
   lastUsedAt: number | null
+  /** Held by a job, not a person (`grants.service`): never bound to an email; its activity reaches Slack only when
+   *  something is notable (`functions/_lib/activity.ts`). */
+  service: boolean
 }
 
 const fmtTs = (ts: number | null): string => (ts ? new Date(ts * 1000).toLocaleString() : '—')
@@ -229,7 +233,22 @@ const holderName = (g: Grant): string | null => g.subject?.name || g.subject?.em
 /** A body for `PATCH /api/auth/grants/:id`: the memo, or the holder's name and
  *  face (`avatar` absent = keep it, null = clear, a `data:` URI = replace;
  *  copied server-side, as at mint). */
-type GrantEdit = { note?: string | null; subjectName?: string | null; avatar?: string | null; expiresAt?: number | null }
+type GrantEdit = { note?: string | null; subjectName?: string | null; avatar?: string | null; expiresAt?: number | null; service?: boolean }
+
+/** A link's `service` bit, toggled in place (`PATCH … { service }`). A link bound to an email is a person's, so the
+ *  package refuses to flag it (400 `service links cannot have an email`), and the refusal shows under the box. */
+function ServiceCell({ grant, onSave, saving, error }: { grant: Grant; onSave: (service: boolean) => void; saving: boolean; error: string | null }) {
+  if (grant.revokedAt) return <>{grant.service ? 'service' : <em>—</em>}</>
+  return (
+    <div className="service-cell">
+      <label title="A job's link (a scan, a snapshot), not a person's: its routine activity stays out of Slack">
+        <input type="checkbox" aria-label="Service account" checked={grant.service} disabled={saving} onChange={e => onSave(e.target.checked)} />
+        {' '}service
+      </label>
+      {error && <span className="err" role="alert">{error}</span>}
+    </div>
+  )
+}
 
 /** Who a link is for, editable in place: click to rename the holder or change
  *  their face (`<AvatarField>`, the mint form's picker), Save or Cancel. */
@@ -294,6 +313,8 @@ interface Draft {
   days: string
   /** Paths the link hides, one per line (`_lib/restrict.ts`). */
   hide?: string
+  /** A service account's link (no email). */
+  service?: boolean
   /** Pre-`access` drafts. */
   readOnly?: boolean
 }
@@ -308,6 +329,7 @@ const loadDraft = (): Partial<Draft> => {
 export function AdminPage() {
   useDocTitle('Admin')
   const qc = useQueryClient()
+  const historyOn = useHistoryConfigured(true)
   const [searchParams, setSearchParams] = useSearchParams()
   const showRevoked = searchParams.get('revoked') === '1'
   const toggleRevoked = (on: boolean) =>
@@ -326,11 +348,14 @@ export function AdminPage() {
   const [avatar, setAvatar] = useState<string | null>(draft.avatar || null)
   const [days, setDays] = useState(draft.days ?? '30')
   const [hide, setHide] = useState(draft.hide ?? '')
+  // A job's link: no email (the package refuses one), so no account and no admin.
+  const [service, setService] = useState(draft.service ?? false)
   const { scopes: hidden, unresolved: hideUnresolved } = hideScopes(hide, DEFAULT_STORE.key, STORES.slice(1).map(s => s.key), DEFAULT_STORE.home)
   const [access, setAccess] = useState<Access>(draft.access ?? (draft.readOnly === false ? 'view' : 'read'))
   // Admin is an account's, so it needs an email; without one it reads as Viewer.
   // A path-restricted link is never admin: an account's session isn't restricted.
-  const effAccess: Access = access === 'admin' && (!email.trim() || hidden.length) ? 'view' : access
+  const mintEmail = service ? '' : email.trim()
+  const effAccess: Access = access === 'admin' && (!mintEmail || hidden.length) ? 'view' : access
   const [openLog, setOpenLog] = useState<string | null>(null)
   const [minted, setMinted] = useState<{ label: string; url: string; allowed: Allowed | null; admin: AdminResult | null } | null>(null)
 
@@ -338,11 +363,11 @@ export function AdminPage() {
     try {
       // A face is a few-KB `data:` URI; keep it in the draft unless it's oversized.
       const face = avatar && avatar.length <= 32_000 ? avatar : null
-      sessionStorage.setItem(DRAFT_KEY, JSON.stringify({ memo, name, email, avatar: face, access, days, hide }))
+      sessionStorage.setItem(DRAFT_KEY, JSON.stringify({ memo, name, email, avatar: face, access, days, hide, service }))
     } catch {
       // sessionStorage can throw (private mode / disabled) — a lost draft is cosmetic.
     }
-  }, [memo, name, email, avatar, access, days, hide])
+  }, [memo, name, email, avatar, access, days, hide, service])
 
   const grantsQ = useQuery<{ grants: Grant[] }, Error>({
     queryKey: ['auth', 'grants'],
@@ -368,22 +393,24 @@ export function AdminPage() {
         body: JSON.stringify({
           note: memo.trim(),
           subjectName: name.trim() || null,
-          email: email.trim() || null,
+          email: mintEmail || null,
           avatar,
           // An email makes it a person's link: their account is created (or
           // updated) with the link's access, so they can also sign in directly.
           // Not for a path-restricted link: the account's own sign-ins are
           // email sessions, which no `:hide:` scope restricts.
-          allowlist: !!email.trim() && !hidden.length,
+          allowlist: !!mintEmail && !hidden.length,
           // The link itself is never admin: an admin account still has to sign in.
           scopes: [effAccess === 'read' ? `${DEFAULT_STORE.key}:read` : DEFAULT_STORE.key, ...hidden],
           expiresInS,
+          service,
         }),
       })
       if (!r.ok) {
-        // A refused face (`400 { error: 'invalid avatar', detail }`) says why.
+        // A refused face (`400 { error: 'invalid avatar', detail }`) says why; a service link with an email
+        // (`400 { error: 'service links cannot have an email' }`) is refused outright.
         const body = await r.json().catch(() => null) as { error?: string; detail?: string } | null
-        throw new Error(body?.detail ? `${body.error ?? 'create failed'}: ${body.detail}` : `create failed: ${r.status}`)
+        throw new Error(body?.detail ? `${body.error ?? 'create failed'}: ${body.detail}` : body?.error ?? `create failed: ${r.status}`)
       }
       const out = await r.json() as { grant: Grant; token: string; allowed?: Allowed }
       // Admin: the account joins the admin list (`POST /api/admins`; 409 = already
@@ -394,7 +421,7 @@ export function AdminPage() {
           method: 'POST',
           credentials: 'include',
           headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ email: email.trim(), note: memo.trim() ? `with link "${memo.trim()}"` : 'with a share link' }),
+          body: JSON.stringify({ email: mintEmail, note: memo.trim() ? `with link "${memo.trim()}"` : 'with a share link' }),
         })
         admin = a.ok ? 'added' : a.status === 409 ? 'already' : { error: `admin: ${a.status}` }
       }
@@ -407,6 +434,7 @@ export function AdminPage() {
       setEmail('')
       setAvatar(null)
       setAccess('read')
+      setService(false)
       try {
         sessionStorage.removeItem(DRAFT_KEY)
       } catch {
@@ -435,6 +463,23 @@ export function AdminPage() {
       done?.()
       void qc.invalidateQueries({ queryKey: ['auth', 'grants'] })
     },
+  })
+
+  // The `service` toggle has its own mutation, so its refusal shows on its row's box, not in a holder editor.
+  const toggleService = useMutation({
+    mutationFn: async ({ id, service }: { id: string; service: boolean }) => {
+      const r = await fetch(`/api/auth/grants/${id}`, {
+        method: 'PATCH',
+        credentials: 'include',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ service }),
+      })
+      if (!r.ok) {
+        const b = await r.json().catch(() => null) as { error?: string } | null
+        throw new Error(b?.error ?? `update failed: ${r.status}`)
+      }
+    },
+    onSuccess: () => { void qc.invalidateQueries({ queryKey: ['auth', 'grants'] }) },
   })
 
   const revoke = useMutation({
@@ -510,15 +555,22 @@ export function AdminPage() {
         </div>
         <div className="field">
           <label htmlFor="mint-email">Email</label>
-          <input id="mint-email" type="email" value={email} onChange={e => setEmail(e.target.value)} {...NO_AUTOFILL} />
+          <input id="mint-email" type="email" value={email} onChange={e => setEmail(e.target.value)} disabled={service} {...NO_AUTOFILL} />
           <span className="hint">
-            optional — makes it a person's link: binds it to this address, and creates their account so they can also sign in directly (Google or an emailed code).
-            The account doesn't expire or get revoked with the link; remove it from <Link to="/admin/db/allowed_emails">users</Link>
+            {service ? 'none — a service account’s link is never a person’s' : <>
+              optional — makes it a person's link: binds it to this address, and creates their account so they can also sign in directly (Google or an emailed code).
+              The account doesn't expire or get revoked with the link; remove it from <Link to="/admin/db/allowed_emails">users</Link>
+            </>}
           </span>
+        </div>
+        <div className="field">
+          <label htmlFor="mint-service">Service account</label>
+          <input id="mint-service" type="checkbox" checked={service} onChange={e => { setService(e.target.checked); if (e.target.checked) setEmail('') }} />
+          <span className="hint">a job's link (a scan, a snapshot), not a person's: no email, and its routine activity stays out of Slack (only errors and a new client post)</span>
         </div>
         <div className="field avatar">
           <label htmlFor="mint-avatar">Face</label>
-          <AvatarField id="mint-avatar" endpoint="/api/auth/avatar" value={avatar} onChange={setAvatar} email={email.trim() || null} name={name.trim() || null} size={40} />
+          <AvatarField id="mint-avatar" endpoint="/api/auth/avatar" value={avatar} onChange={setAvatar} email={mintEmail || null} name={name.trim() || null} size={40} />
           <span className="hint">optional — paste a GitHub / Bluesky / Mastodon profile or an image address, or upload; with an email and nothing else, their Gravatar. Copied and stored, never hotlinked</span>
         </div>
         <div className="field">
@@ -531,12 +583,12 @@ export function AdminPage() {
           <select id="mint-access" value={effAccess} onChange={e => setAccess(e.target.value as Access)}>
             <option value="read">Read-only</option>
             <option value="view">Viewer — can also stage deletions</option>
-            <option value="admin" disabled={!email.trim()}>Admin{email.trim() ? '' : ' (needs an email)'}</option>
+            <option value="admin" disabled={!mintEmail}>Admin{mintEmail ? '' : ' (needs an email)'}</option>
           </select>
           <span className="hint">
             {effAccess === 'admin'
               ? <><b>Admin applies to their account only</b>: the link itself is a Viewer; signed in as this email, they can dispatch deletes and mint links</>
-              : <>the link's access{email.trim() ? ', and their account’s' : ''}; Read-only is right for most guests</>}
+              : <>the link's access{mintEmail ? ', and their account’s' : ''}; Read-only is right for most guests</>}
           </span>
         </div>
         <div className="field">
@@ -589,7 +641,7 @@ export function AdminPage() {
       <table className="grants">
         <thead>
           <tr>
-            <th>memo</th><th>holder</th><th>scopes</th><th>redeems</th><th>last used</th><th>expires</th><th>created</th><th></th>
+            <th>memo</th><th>holder</th><th>service</th><th>scopes</th><th>redeems</th><th>last used</th><th>expires</th><th>created</th><th></th>
           </tr>
         </thead>
         <tbody>
@@ -603,6 +655,14 @@ export function AdminPage() {
                   onSave={(edit, done) => editGrant.mutate({ id: g.id, edit, done })}
                   saving={editGrant.isPending && editGrant.variables?.id === g.id}
                   error={editGrant.isError && editGrant.variables?.id === g.id ? editGrant.error.message : null}
+                />
+              </td>
+              <td>
+                <ServiceCell
+                  grant={g}
+                  onSave={on => toggleService.mutate({ id: g.id, service: on })}
+                  saving={toggleService.isPending && toggleService.variables?.id === g.id}
+                  error={toggleService.isError && toggleService.variables?.id === g.id ? toggleService.error.message : null}
                 />
               </td>
               <td>{g.scopes.join(' ')}</td>
@@ -626,16 +686,20 @@ export function AdminPage() {
               </td>
             </tr>
             {openLog === g.id && (
-              <tr className="grant-log-row"><td colSpan={8}><GrantLog id={g.id} /></td></tr>
+              <tr className="grant-log-row"><td colSpan={9}><GrantLog id={g.id} /></td></tr>
             )}
             </Fragment>
           ))}
           {!shown.length && !grantsQ.isPending && (
-            <tr><td colSpan={8}><em>{grants.length ? 'no active links (all revoked)' : 'no links created yet'}</em></td></tr>
+            <tr><td colSpan={9}><em>{grants.length ? 'no active links (all revoked)' : 'no links created yet'}</em></td></tr>
           )}
         </tbody>
       </table>
       </div>}</Paginated>
+      {historyOn && <section id="history">
+        <h2>Scan history</h2>
+        <p><Link to="/scans#history">Review scan retention on Scan runs</Link>: compare proposals with the timeline and choose scans to retain.</p>
+      </section>}
       <Admins />
       <PreviewLinks />
       <ActivityKinds />

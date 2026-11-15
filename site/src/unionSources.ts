@@ -85,8 +85,8 @@ export const sourcesBefore = (sources: readonly PickerSource[], before: string):
   sources.map(s => ({ ...s, scans: s.scans.filter(o => o.observed_through < before) }))
 
 /** A union root child's provenance: its store's mark and that store's scan id (null: not a union root's). */
-export function rootSource(node: { src?: string; at?: string }, marks: ReadonlyMap<string, SourceMarkInfo> | null): { mark: SourceMarkInfo; at: string } | null {
-  return node.src && node.at ? { mark: markFor(marks, node.src), at: node.at } : null
+export function rootSource(node: { store?: string; scan?: string }, marks: ReadonlyMap<string, SourceMarkInfo> | null): { mark: SourceMarkInfo; at: string } | null {
+  return node.store && node.scan ? { mark: markFor(marks, node.store), at: node.scan } : null
 }
 
 /** The `union` block a union answer carries (`_lib/union.ts` `vectorOf` / `filteredVector`): each member's
@@ -108,10 +108,10 @@ export function refusedSources(union: UnionVector | undefined, marks: ReadonlyMa
  *  a union root's series and diff refuse `q=` (each member answers only for its own mount: "drill into one
  *  store"), while the lone root's path is one member's mount, which that member answers. `tree`: the filtered
  *  root's answer; `undefined` while it isn't here (wait: asking the root would only be refused). */
-export function scopedPath(path: string, { union, filtered, tree }: { union: boolean; filtered: boolean; tree: { c?: readonly { n: string }[] } | null | undefined }): string | undefined {
+export function scopedPath(path: string, { union, filtered, tree }: { union: boolean; filtered: boolean; tree: { children?: readonly { name: string }[] } | null | undefined }): string | undefined {
   if (!union || !filtered || path !== '') return path
   if (!tree) return undefined
-  return tree.c?.length === 1 ? tree.c[0].n : ''
+  return tree.children?.length === 1 ? tree.children[0].name : ''
 }
 
 /** A union answer's members with no scan at or before its cutoff (`union.sources[].date === null`): left out of the

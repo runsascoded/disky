@@ -17,10 +17,10 @@ const SLOTS = ['--s1', '--s2', '--s3', '--s4', '--s5', '--s6', '--s7', '--s8']
 // its legend is the same slot assignment <Treemap> derives internally.
 const treeLegend = (root: TreeNode): [string, string][] => {
   const bytes = new Map<string, number>()
-  for (const bucket of root.c ?? [])
-    for (const d of bucket.c ?? []) {
-      const k = d.n.startsWith('(') ? '(other)' : d.n
-      bytes.set(k, (bytes.get(k) ?? 0) + d.b)
+  for (const bucket of root.children ?? [])
+    for (const d of bucket.children ?? []) {
+      const k = d.name.startsWith('(') ? '(other)' : d.name
+      bytes.set(k, (bytes.get(k) ?? 0) + d.bytes)
     }
   return [...bytes.entries()]
     .filter(([k]) => k !== '(other)')
@@ -59,7 +59,7 @@ export function OgPage({ store = DEFAULT_STORE }: { store?: Store }) {
   // A store with one bucket opens inside it (as the live map does): the
   // bucket level would otherwise be one full-width box in one hue, while the
   // legend below names the bucket's children.
-  const initialPath = useMemo(() => (tree && tree.c?.length === 1 ? [tree, tree.c[0]] : undefined), [tree])
+  const initialPath = useMemo(() => (tree && tree.children?.length === 1 ? [tree, tree.children[0]] : undefined), [tree])
 
   return (
     <div className="og">
