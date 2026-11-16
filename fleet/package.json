@@ -8,8 +8,8 @@
   "scripts": {
     "dev": "vite",
     "dev:pages": "wrangler pages dev dist --port 3871",
-    "build": "tsc -p . && tsc -p functions && vite build",
-    "typecheck": "tsc -p . && tsc -p functions",
+    "build": "tsc -p . && tsc -p functions && tsc -p cron && vite build",
+    "typecheck": "tsc -p . && tsc -p functions && tsc -p cron",
     "preview": "vite preview",
     "test": "vitest run",
     "clean": "rm -rf node_modules/.vite dist"

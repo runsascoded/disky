@@ -67,7 +67,8 @@ Fixture previews verify formatting and rendering only. Approval of a first real 
   - It posts once, then `chat.update`s that message. The channel + ts are kept in the KV binding `FLEET_KV`, or pinned by the var `SLACK_FLEET_TS` (in `SLACK_FLEET_CHANNEL`, an id).
   - With neither, it refuses to post a new message each run (502, saying so). `?new=1` posts one, to pin. `?dry=1` returns the message without posting.
   - A kept post deleted by hand is posted anew, where KV can keep the new one.
-  - The bot is "Disky Admin Bot" (`DISKY_SLACK_BOT_TOKEN`). A GHA cron on `o/front-door` calls it hourly.
+  - The bot is "Disky Admin Bot" (`DISKY_SLACK_BOT_TOKEN`). A Worker's Cron Trigger calls it hourly (`fleet/cron/`, below); `fleet-update.yml` is its by-hand twin (`mode` `dry` / `new` / `update`).
+- **The clock** (`fleet/cron/`, a Worker; Ryan, 11-16): GitHub's `schedule:` ran late or not at all under load, and is disabled after 60 days without repo activity. Its `SLACK_CRON` POSTs `FLEET_SLACK_URL` with `FLEET_JOB_TOKEN`; its `HEALTH_CRON` dispatches `HEALTH_WORKFLOW` (`owner/repo/file@ref`) with `GH_DISPATCH_TOKEN` (fine-grained, Actions: write on that repo), so the health checks still run on Actions with each deployment's own `dt-cloud`, but start on a reliable clock. A failed job throws, so the Workers dashboard marks the run failed. The deployment's `fleet/cron/wrangler.toml` holds the crons and vars; the deploy workflow installs the secrets.
 
 ## Secrets / config (set in the root session with Ryan's go; never by the builder)
 
