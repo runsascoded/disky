@@ -18,7 +18,7 @@ export interface Env {
   OA_LOGIN_CLIENT_SECRET?: string
   /** The deployments, a JSON list (`fleet.ts` `parseFleet`); each names the secret holding its read token. */
   FLEET_JSON?: string
-  /** How many runs per deployment `/api/fleet` returns (default `DEFAULT_RUNS`). */
+  /** At most this many runs per deployment from the card's window (default `DEFAULT_RUNS`). */
   FLEET_RUNS?: string
   /** The Bearer token `POST /api/fleet/slack` takes (the hourly cron's). */
   FLEET_JOB_TOKEN?: string
