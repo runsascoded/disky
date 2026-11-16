@@ -3,7 +3,7 @@ import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { MemoryRouter } from 'react-router-dom'
 import type { ScanRun } from './scanRunsModel'
-import { fmtRunShort, IssueStanding, OUTCOME_HEAD, fmtRunTime, runDay, scanRunsApi, scansHref, scansStore } from './scanRunsUi'
+import { agoLong, fmtRunShort, IssueStanding, OUTCOME_HEAD, fmtRunTime, runDay, scanRunsApi, scansHref, scansStore } from './scanRunsUi'
 import { resolveStores } from './stores'
 import { TEST_REGISTRY } from './testStores'
 
@@ -66,5 +66,14 @@ describe('IssueStanding', () => {
   })
   it('keeps "Done by" for a linked phase-recovery attempt', () => {
     expect(render(run('phase-recovery'))).toMatch(/^Done by <a href="\/scans\/r1">a later attempt<\/a> at .+\.$/)
+  })
+})
+
+describe('agoLong', () => {
+  it('reads to two units: seconds, minutes, then hours + zero-padded minutes, then days + hours', () => {
+    const now = 1_800_000_000
+    expect([0, 42, 60, 17 * 60 + 59, 3600, 2 * 3600 + 31 * 60 + 5, 86400, 3 * 86400 + 4 * 3600 + 59, -5].map(s => agoLong(now - s, now))).toEqual([
+      '0s', '42s', '1m', '17m', '1h 00m', '2h 31m', '1d 0h', '3d 4h', '0s',
+    ])
   })
 })

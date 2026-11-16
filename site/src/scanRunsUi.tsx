@@ -58,6 +58,15 @@ export function useScanRunOf(store: Store, scan: string | null | undefined): Sca
 /** `fmtDur`, with seconds under a minute (a 3 s publish isn't `0m`). */
 export const fmtDur = (s: number): string => (s < 60 ? `${Math.round(s)}s` : fmtDurM(s))
 
+/** How long ago epoch seconds `ts` was, to two units: `42s`, `17m`, `2h 31m`, `3d 4h`. */
+export const agoLong = (ts: number, now: number = Date.now() / 1000): string => {
+  const s = Math.max(0, Math.floor(now - ts))
+  if (s < 60) return `${s}s`
+  if (s < 3600) return `${Math.floor(s / 60)}m`
+  if (s < 86400) return `${Math.floor(s / 3600)}h ${String(Math.floor(s % 3600 / 60)).padStart(2, '0')}m`
+  return `${Math.floor(s / 86400)}d ${Math.floor(s % 86400 / 3600)}h`
+}
+
 export const fmtRunTime = (ts: number | null, timeZone?: string): string =>
   ts == null ? '—' : fmtTimestamp(new Date(ts * 1000).toISOString(), timeZone)
 
