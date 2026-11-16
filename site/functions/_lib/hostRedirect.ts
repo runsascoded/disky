@@ -1,4 +1,4 @@
-// A deployment's renamed hosts (`HOST_REDIRECTS = "old=new,…"`, specs/done/rename-cw.md): a GET / HEAD to an old host is
+// A deployment's renamed hosts (`HOST_REDIRECTS = "old=new,…"`): a GET / HEAD to an old host is
 // a 301 to the same path and query on its new one, so every link already posted keeps working. Other methods pass
 // through on the old host: a webhook still pointed at it (Slack's `/slack/actions` POST) must not be bounced.
 
