@@ -1288,3 +1288,28 @@ def test_prune_cmd_gcs_builds_the_gcs_run_store(monkeypatch):
         ("prune", "FakeStore", ia.FOLDED_RETAIN, True, " gcs"),
     ]
     assert json.loads(r.output) == {"gen": "G", "store": "gcs", "deleted": 1}
+
+
+def test_a_sub_range_reads_its_keys_within_the_range():
+    """`sub_preds`: the whole range's own predicates for the whole sub-range; else the range and the sub-range
+    intersected, as `key_range_pieces`' conjunctions."""
+    r = {"i": 1, "lo": [2, "b"], "hi": [3, ""]}
+    assert ia.sub_preds(r, None, None) == sn.range_preds(r) == ["\"depth\" = 2 AND \"path\" >= 'b'", "\"depth\" > 2 AND \"depth\" < 3",
+                                                               "\"depth\" = 3 AND \"path\" < ''"]
+    assert ia.sub_preds(r, (1, "z"), (2, "c")) == ["\"depth\" = 2 AND \"path\" >= 'b' AND \"path\" < 'c'"]
+    assert ia.sub_preds(r, (2, "c"), None) == ["\"depth\" = 2 AND \"path\" >= 'c'", "\"depth\" > 2 AND \"depth\" < 3", "\"depth\" = 3 AND \"path\" < ''"]
+    assert ia.sub_preds({"i": 0, "lo": [0, ""], "hi": None}, (2, "c"), None) == ["\"depth\" = 2 AND \"path\" >= 'c'", "\"depth\" > 2"]
+
+
+def test_the_sub_budget_flag():
+    """`-B`: bytes or a size; `0` whole ranges; unset, DuckDB's limit × (1 − RESERVE) / `APPEND_COPIES`."""
+    assert [ia.sub_budget(raw, "8192MiB") for raw in ("0", "1", "2GB", None)] == [None, 1, 2_000_000_000, 8192 * 2**20 * 3 // 4 // ia.APPEND_COPIES]
+
+
+def test_sub_range_counts_sum_key_by_key():
+    """`add_counts`: two sub-ranges' check docs summed, nested, the first's key order, strings kept."""
+    a = {"pvl": {"rows": 2, "store": 2, "missing": 0, "extra": 0}, "generation": {"objects": 1, "equal": 1, "column": "version"}}
+    b = {"pvl": {"rows": 3, "store": 4, "missing": 1, "extra": 2}, "generation": {"objects": 2, "equal": 1, "column": "version"}, "sv": {"rows": 1}}
+    got = ia.add_counts(a, b)
+    assert (got, list(got)) == ({"pvl": {"rows": 5, "store": 6, "missing": 1, "extra": 2}, "generation": {"objects": 3, "equal": 2, "column": "version"},
+                                 "sv": {"rows": 1}}, ["pvl", "generation", "sv"])

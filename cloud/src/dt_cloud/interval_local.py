@@ -186,20 +186,20 @@ def build_gen(scans: dict, mount: str, gen_dir: Path, work: Path, *, gen: str, k
 
 
 def open_state_sql(root: str, runs: list[str], name: str, sliced: bool = True, generation: bool = False, attributed: bool = False,
-                   churn: bool = False) -> dict[str, str]:
+                   churn: bool = False, pieces: list[str] | None = None) -> dict[str, str]:
     """Key range `name`'s open versions after the newest of `runs` (run dirs, the manifest's order), refolded: the base's
     (`interval_append.base_state_sql` over the range files under `root`) and every run's delta rows (opened versions and
     close records, `pvf` carried), one row per version (`IDENT`) with the smallest `vt`, those still open. What the staged
     path reads from `state/<prev>/`, as `STATE_SCHEMA` relations (`interval_append.tables(sliced, attributed)`; the
-    attribution table's from the base and runs holding it)."""
-    base = ia.base_state_sql(root, name, sliced, generation, attributed, churn)
+    attribution table's from the base and runs holding it). `pieces`: only a key sub-range's (`interval_append.read_pieces`)."""
+    base = ia.base_state_sql(root, name, sliced, generation, attributed, churn, pieces)
     out = {}
     for t in ia.tables(sliced, attributed):
         cols = ist.qcols(ia.state_schema(t, generation, churn).names)
         files = [f"{r}/{t}/{name}.parquet" for r in runs]
         if t in ist.ATTRIBUTION_SUBS:
             files = [f for f in files if Path(f).exists()]
-        parts = [f"SELECT {cols} FROM ({base[t]})", *(f"SELECT {cols} FROM read_parquet({q(f)})" for f in files)]
+        parts = [f"SELECT {cols} FROM ({base[t]})", *(f"SELECT {cols} FROM {ia.read_pieces(f, pieces)}" for f in files)]
         if len(parts) == 1:
             out[t] = parts[0]
             continue
@@ -209,13 +209,21 @@ def open_state_sql(root: str, runs: list[str], name: str, sliced: bool = True, g
     return out
 
 
+def open_state_files(root: str, runs: list[str], name: str, sliced: bool = True, attributed: bool = False) -> list[str]:
+    """The files `open_state_sql` reads (the base's range files, the runs' deltas): what a key range's sub-ranges are
+    planned over."""
+    deltas = [f"{r}/{t}/{name}.parquet" for t in ia.tables(sliced, attributed) for r in runs]
+    return [*ia.base_state_files(root, name, sliced, attributed), *(f for f in deltas if Path(f).exists())]
+
+
 def append_scan(con, gen_dir: Path, scan: dict, mount: str, work: Path, *, gen: str, rg_rows: int = ist.SERVED_RG,
-                attributed: bool = False, tree: tm.Budget | None = None) -> dict:
+                attributed: bool = False, tree: tm.Budget | None = None, budget: int | None = None) -> dict:
     """Scan `scan` appended to the generation in `gen_dir` (the base, its runs and manifests) as the run `deltas/<id>/`, and
     published (`manifests/<id>.json`): per key range `append_range` over the refolded open versions (`open_state_sql`),
     the run's served sorts (`cut_run`) and `meta.json`, then `publish_run`. `attributed`: the run carries the attribution
     table (`scan` covered when its entry names an `attribution.parquet`), as the staged chain's `prepare` pins it. `tree`:
-    the process tree's budget the cut is planned under (`cut_run`)."""
+    the process tree's budget the cut is planned under (`cut_run`). `budget`: each range's sub-ranges' estimated bytes
+    (`interval_append.append_range`; None: each range whole)."""
     t0 = monotonic()
     disk = DiskPeak(work)
     d = scan["id"]
@@ -245,9 +253,10 @@ def append_scan(con, gen_dir: Path, scan: dict, mount: str, work: Path, *, gen: 
     with tm.phase("append ranges"):
         for r in ranges["ranges"]:
             name = f"r{r['i']:04d}"
-            doc = ia.append_range(con, open_state_sql(str(gen_dir), roots, name, sliced, gen_col, attributed, churn), scan, r, name, run,
-                                  bucket=base["bucket"], mount=mount, sliced=sliced, generation=gen_col, check=[str(gen_dir), *roots],
-                                  attributed=attributed, churn=churn, count=count)
+            doc = ia.append_range(con, lambda pieces, name=name: open_state_sql(str(gen_dir), roots, name, sliced, gen_col, attributed, churn, pieces),
+                                  scan, r, name, run, bucket=base["bucket"], mount=mount, sliced=sliced, generation=gen_col,
+                                  check=[str(gen_dir), *roots], attributed=attributed, churn=churn, count=count,
+                                  files=open_state_files(str(gen_dir), roots, name, sliced, attributed), budget=budget)
             doc["prev"] = have[-1]
             doc["check"]["runs"] = [x["key"] for x in runs]
             (run / "ranges").mkdir(exist_ok=True)
@@ -335,6 +344,7 @@ def build_cmd(attribution, gen, jobs, k, level, layouts, mem, store_root, thread
 
 @command("add")
 @option("-A", "--attribution", is_flag=True, help="Append each scan's `attribution.parquet` to the store's attribution table, opening it in a generation without one (specs/attr-interval-table.md); a generation that carries it continues it without -A")
+@option("-B", "--sub-budget", help=ia.SUB_BUDGET_HELP)
 @option("-C", "--compact", "--compact-level", "compact", type=ar.PolicyType(), default=str(ar.COMPACT_LEVEL), envvar=["INTERVAL_STORE_COMPACT", "INTERVAL_STORE_COMPACT_LEVEL"],
         show_envvar=True, help=ar.POLICY_HELP)
 @option("-F", "--read-from", help="Read the generation from this copy of the store (a dir or URL, e.g. the R2 copy of a GCS store) instead of -o (refused when it lacks a file -o has); writes still go to -o")
@@ -352,8 +362,8 @@ def build_cmd(attribution, gen, jobs, k, level, layouts, mem, store_root, thread
 @option("-s", "--scans", "scans_root", required=True, help="Where the scans are: a dir or URL, the root of -L's keys")
 @option("-t", "--through", help="Last scan id to append (inclusive; default: the newest)")
 @option("-w", "--work", help="Local work dir (default: a temporary one, removed after); a URL store's generation is mirrored into it")
-def add_cmd(attribution, compact, read_from, gen, grace_s, compact_now, jobs, layouts, mem, prune_dry_run, no_merge, store_root, threads, rg_rows, scans_root,
-            through, work) -> None:
+def add_cmd(attribution, sub_budget, compact, read_from, gen, grace_s, compact_now, jobs, layouts, mem, prune_dry_run, no_merge, store_root, threads,
+            rg_rows, scans_root, through, work) -> None:
     """Append every scan after the generation's newest (base + runs), oldest first, each as a run published by its
     manifest; then the binary counter's due carries. The generation's published files are never rewritten; new ones go
     to the store data first, `meta.json`s next, manifests last. Then the runs a carry folded are deleted from the store
@@ -387,7 +397,9 @@ def add_cmd(attribution, compact, read_from, gen, grace_s, compact_now, jobs, la
         before = {key: n for key, n in before.items() if not (redo and key.startswith(redo))}
         tree = tm.Budget.measure(sn.mem_bytes(mem))
         inputs = [str(f) for t in ia.tables(ist.sliced(base), False) for f in sorted((gen_dir / t).glob("r*.parquet"))]
-        con = sn.connect(threads, ia.append_mem(tree, inputs, f"add {gen}"), w / "duckdb")
+        duck = ia.append_mem(tree, inputs, f"add {gen}")
+        con = sn.connect(threads, duck, w / "duckdb")
+        budget = ia.sub_budget(sub_budget, duck)
         if not ist.sliced(base):
             # No owner axis in the generation: a pending scan naming owners is refused before anything is appended.
             for s in pending:
@@ -399,7 +411,8 @@ def add_cmd(attribution, compact, read_from, gen, grace_s, compact_now, jobs, la
                 err(f"{', '.join(late)}: the sorts carry `{ist.GENERATION}`, generation {gen} doesn't; appended without it "
                     "(`interval-store backfill-generation` folds it into a new generation that does)")
         with tm.phase("append"):
-            added = [append_scan(con, gen_dir, s, scans["mount"], w, gen=gen, rg_rows=rg_rows, attributed=attributed, tree=tree) for s in pending]
+            added = [append_scan(con, gen_dir, s, scans["mount"], w, gen=gen, rg_rows=rg_rows, attributed=attributed, tree=tree, budget=budget)
+                     for s in pending]
         # The append's database idle from here (the carries and the compaction open their own, each budget measured
         # with what this process then holds): its pages back first.
         con.close()

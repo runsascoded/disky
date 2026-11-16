@@ -81,9 +81,10 @@ def test_cut_plan_charges_the_writers_metadata():
 
 
 def test_append_split():
-    """A scan's append: its one writer's 6 range-file groups of the ranges' rows, DuckDB the rest past this process."""
+    """A scan's append: its writers' range-file groups of the ranges' rows (the fed one's 6, the 8 idle ones' 1 apiece:
+    14), DuckDB the rest past this process."""
     b = tm.Budget(total=1 << 30, base=200 * MIB, proc_base=50 * MIB)
-    assert b.append(65536, 100) == (39_321_600, (1 << 30) - 200 * MIB - 39_321_600)
+    assert (tm.APPEND_GROUPS, b.append(65536, 100)) == (14, (91_750_400, (1 << 30) - 200 * MIB - 91_750_400))
 
 
 def test_too_small_names_the_least_budget():

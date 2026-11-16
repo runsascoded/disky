@@ -462,3 +462,50 @@ def test_the_profile_flag(tmp_path, monkeypatch):
     with pytest.raises(SystemExit) as e:
         ia.load_config(str(p))
     assert str(e.value) == "interval store: the profile's `append.attribution` must be true or false, not 'yes'"
+
+
+def no_timings(x):
+    """A range doc without its timings (`s`, at any depth): what must not depend on how the range was folded."""
+    if isinstance(x, dict):
+        return {k: no_timings(v) for k, v in x.items() if k != "s"}
+    return [no_timings(v) for v in x] if isinstance(x, list) else x
+
+
+def range_docs(gen: Path) -> dict[str, dict]:
+    return {p.relative_to(gen).as_posix(): no_timings(json.loads(p.read_text())) for p in sorted(gen.rglob("ranges/r*.json"))}
+
+
+def add_at_budgets(root: Path, tmp: Path, layout: str, budgets: tuple[str, ...], *build_args: str, through: str,
+                   monkeypatch: pytest.MonkeyPatch) -> dict[str, tuple[Path, list[int]]]:
+    """For each `add -B` budget: a fresh generation built through `through` (`build_args`), every later scan added
+    (`-N`: no carries), and how many sub-ranges each range that split was folded in (its log line: `err` is bound to the
+    real stderr, so read through a patch)."""
+    import re
+
+    out = {}
+    for b in budgets:
+        said: list[str] = []
+        args = ["-g", "g", "-L", layout, "-s", str(root), "-o", str(tmp / b), "-r", str(RG), "-p", "2", "-M", "1GB"]
+        res = CliRunner().invoke(il.build_cmd, [*args, "-w", str(tmp / f"w{b}"), "-k", "3", "-t", through, *build_args], catch_exceptions=False)
+        assert res.exit_code == 0, res.output
+        with monkeypatch.context() as m:
+            m.setattr(ia, "err", said.append)
+            res = CliRunner().invoke(il.add_cmd, [*args, "-w", str(tmp / f"a{b}"), "-N", "-B", b], catch_exceptions=False)
+        assert res.exit_code == 0, res.output
+        out[b] = (tmp / b / ist.PREFIX / "g", [int(m[1]) for line in said if (m := re.match(r"append r\d{4}: (\d+) sub-ranges", line))])
+    return out
+
+
+def test_sub_ranges_append_the_same_bytes_at_any_budget(world, tmp_path, monkeypatch):
+    """`add -B`: each key range folded in key sub-ranges of at most B estimated open-state bytes (`append_range`), here 1
+    (a cut at every row-group start of 3-row range files), against whole ranges (`-B 0`): every file and range doc is the
+    same — path versions, owner slices, churn and the attribution table (covered and uncovered scans): deltas, served
+    sorts, checks, counts."""
+    monkeypatch.setattr(ist, "RANGE_RG", 3)
+    got = add_at_budgets(world["root"], tmp_path, LAYOUT, ("0", "1"), "-A", through=DATES[BASE - 1], monkeypatch=monkeypatch)
+    (whole, none), (split, subs) = got["0"], got["1"]
+    added = len(DATES) - BASE
+    assert (none, 0 < len(subs) <= added * 3, min(subs, default=0) > 1) == ([], True, True)
+    assert parquets(split) == parquets(whole)
+    assert len(range_docs(whole)) == added * 3
+    assert range_docs(split) == range_docs(whole)
