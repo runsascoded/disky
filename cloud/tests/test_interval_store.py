@@ -301,6 +301,22 @@ def _scans(built):
     return [(s, Scan(con, str(root / s["src"]), s["version"], s["src"])) for s in scans["scans"]]
 
 
+def test_us_sql_from_raw_names_each_paths_owner_slices():
+    con = duckdb.connect()
+    # a: two owners and unnamed bytes; b: unnamed only; c: one row, named; d: one owner over two rows;
+    # e: owners whose order is by name, not by first row or size.
+    raw = """SELECT * FROM (VALUES (1::UTINYINT, 'a', '', 5::BIGINT), (1, 'a', 'x', 3), (1, 'a', 'y', 4), (1, 'b', '', 1),
+        (1, 'c', 'z', 2), (1, 'd', 'z', 2), (1, 'd', '', 1), (2, 'e', 'q"r', 9), (2, 'e', 'b', 1), (2, 'e', 'b', 1)) t(depth, path, usr, size)"""
+    got = con.execute(f"WITH raw AS ({raw}) SELECT depth, path, us FROM ({ist.us_sql_from_raw()}) ORDER BY depth, path").fetchall()
+    assert got == [
+        (1, "a", '[["x",3],["y",4]]'),
+        (1, "b", ""),
+        (1, "c", "z"),
+        (1, "d", '[["z",2]]'),
+        (2, "e", '[["b",2],["q\\"r",9]]'),
+    ]
+
+
 def test_seg_sql_places_a_version_in_the_smallest_dyadic_block_of_its_scans():
     con = duckdb.connect()
     stamps = [10, 20, 30, 40, 50, 60]
