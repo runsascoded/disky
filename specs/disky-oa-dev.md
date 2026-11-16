@@ -35,8 +35,8 @@ Fixture previews verify formatting and rendering only. Approval of a first real 
 - **Deployed from `o/front-door`:** it merges `cloud` the way a deployment branch does, and adds its `fleet/wrangler.toml` (OA's list, `disky.oa.dev`) beside the README index and `health.yml`. Build from `fleet/` (`pnpm build` there), and deploy from `fleet/` too (`wrangler pages deploy dist`): `pages deploy` bundles the `functions/` of the directory it runs in.
 - **Public:**
   - `/`: the docs index, a Markdown file named at build by `FLEET_DOCS_INDEX` (repo-relative; default `fleet/docs/index.md`, a generic page). The front door points it at its README index.
-  - `/docs/disky`: the project README.
-  - `/docs/<name>`: any other `fleet/docs/*.md` or `docs/**/*.md`.
+  - `/docs/disky`: the project README, unless it is the index (front-door's `FLEET_DOCS_INDEX=README.md`), which `/` already serves.
+  - `/docs/<name>`: any other `fleet/docs/*.md` or `docs/**/*.md` (the fallback `fleet/docs/index.md` only as the index), reached by the docs' links; the nav shows only the index ("disky") and "Fleet".
 
   Relative links resolve to the page that serves their file, else to the file on GitHub (`FLEET_REPO`, `FLEET_REF`, default `runsascoded/disky` at `cloud`).
   - `/og.jpg`: the site's own card (static, `fleet/public/og.jpg`; `fleet/scripts/og.mjs` draws it).

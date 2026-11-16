@@ -6,7 +6,9 @@
  * - `FLEET_REPO`, `FLEET_REF`: where the docs' relative links point (default this repo's `cloud` on GitHub).
  *
  * The docs are read from disk here into the virtual module `virtual:fleet-docs` (`src/docs.ts`): the index, the
- * project README (`/docs/disky`), and every other `fleet/docs/*.md` and `docs/**\/*.md` (`/docs/<name>`). The card
+ * project README (`/docs/disky`, unless it is the index), and every other `fleet/docs/*.md` and `docs/**\/*.md`
+ * (`/docs/<name>`; the fallback `fleet/docs/index.md` only when it is the index). The nav links only the index and
+ * `/fleet`; the other pages are reached by the docs' own links. The card
  * fonts are `site/`'s (`public/_fonts/Inter-{400,600}.ttf`), served and emitted at the same paths.
  */
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
@@ -32,9 +34,13 @@ const mdFiles = (dir: string): string[] =>
 export function docPages(): DocPage[] {
   const index = resolve(REPO, process.env.FLEET_DOCS_INDEX ?? 'fleet/docs/index.md')
   const page = (slug: string, p: string): DocPage => ({ slug, path: relative(REPO, p), md: readFileSync(p, 'utf8') })
-  const rest = [...mdFiles(resolve(HERE, 'docs')), ...mdFiles(resolve(REPO, 'docs'))].filter(p => p !== index)
+  // `fleet/docs/index.md` is only the fallback index: another configured index leaves it unpublished
+  const fallback = resolve(HERE, 'docs/index.md')
+  const rest = [...mdFiles(resolve(HERE, 'docs')), ...mdFiles(resolve(REPO, 'docs'))].filter(p => p !== index && p !== fallback)
   const slugOf = (p: string) => relative(p.startsWith(resolve(HERE, 'docs')) ? resolve(HERE, 'docs') : resolve(REPO, 'docs'), p).replace(/\.md$/, '').toLowerCase()
-  return [page('', index), page('disky', resolve(REPO, 'README.md')), ...rest.map(p => page(slugOf(p), p))]
+  // The project README is `/docs/disky`, unless it is the index itself (front-door's), which `/` already serves
+  const readme = resolve(REPO, 'README.md')
+  return [page('', index), ...(readme === index ? [] : [page('disky', readme)]), ...rest.map(p => page(slugOf(p), p))]
 }
 
 function docs(): Plugin {
