@@ -74,7 +74,24 @@ The exact pass tests every footer group and row group against every ask, O(group
 
 gcs and cw both serve diffs from the interval store (`PATH_STORE = "intervals"`). That handle is always footer-planned (`mode: 'pq'`); D1 span tables back only per-scan sorts hot in D1, for scans outside the interval generation. So gcs plans its lookups exactly as cw does.
 
-gcs runs `cloud`'s walk at `DIFF_LOOKUP_CAP = "32"`, and its 2026-11-13 sweep recorded the same cold time as the reverted walk, not a faster one (`ca439fcd5`). Why gcs's cap 32 is flat where cw's was +601 ms (mechanism 3) needs these traces on gcs: its tree shape (how many heavy names, at how many depths) is the variable. I can't measure gcs without its token.
+gcs runs `cloud`'s walk at `DIFF_LOOKUP_CAP = "32"`, and its 2026-11-13 sweep recorded the same cold time as the reverted walk, not a faster one (`ca439fcd5`).
+
+The gcs session ran these traces on its own deployment (2026-11-16): `83ee66d4f` on gcs-prod `933ff8e84`, aliases `st-g32` and `st-g240` (preview `DIFF_LOOKUP_CAP = "240"`), `probe.py -n 2` over gcs's 11-13 cases (root over 1 d, 1 w, 2 w, 1 mo and 11-04 → 05; four regional buckets over 2 w; one over 1 d), all 80 requests cold misses. Files: `~/c/disky/wt/gcs/tmp/difflk/st-g/` (untracked).
+
+`diff:full` medians, cap 32 → 240:
+
+| | cap 32 | cap 240 |
+|---|---|---|
+| total | 1662 ms | 3790 ms |
+| walk | 835 ms | 2572 ms |
+| rounds | 4 | 6 |
+| row groups (`ngroups`) | 116 | 215 |
+| footer groups | 108 | 492 |
+| fetch (store GETs) | 340 ms | 1004 ms |
+
+- **Cap 32 on gcs is not cheap.** The walk costs about what cw's did at cap 32 (835 vs 940 ms); "flat" meant it matched gcs's earlier walk, not that it was fast. gcs's level-walk traces weren't collected, so whether the level walk would be faster on gcs, as on cw, is unmeasured.
+- **Wide rounds lose locality on gcs too.** At 240 the middle rounds take 30–66 names across 4–7 depths and decode 135–400 footer groups each (0.6–5 s a round). Mechanisms 1 and 2 are not cw-specific; cap 32 is what keeps gcs's rounds narrow.
+- **gcs pays store latency; cw doesn't.** Row-group `fetch` is 340 ms median at cap 32 (up to 7 s on a bucket diff), against ~0 on cw (colo-served). On gcs, fewer row groups (option 2) saves GETs, and smaller docs save less.
 
 ## D1 handles
 
