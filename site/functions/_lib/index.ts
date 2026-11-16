@@ -1,4 +1,5 @@
 import { ReaderStopped, readerExecution, readerServices, type ReaderObjects } from './readerRuntime.js'
+import { decodeBin, encodeBin, type BinDoc } from './groupBin.js'
 import { readerMetadata, readerObjects } from './readerWorker.js'
 /**
  * A scan's index tiers (`<dir>/path-index[-coarse<E>][-by-user].parquet`) as
@@ -1927,13 +1928,17 @@ async function readGroupVersions(h: IndexHandle, rgJson: string, columns?: strin
 // Decoding a row group is the cold read's CPU: ~25 ms on a laptop for an 8K-row group of the interval store, four
 // fifths of it zstd (`fzstd`, pure JS, unless `ZSTD_WASM`: `_lib/zstd.ts`), and several times that on a Worker. An
 // interval store's group serves every scan (`ivGroupKey`) and never changes, so the first isolate in a colo to
-// decode it holds it there as gzipped columnar JSON (~2 MB, ~0.3 MB stored; inflated and parsed natively in a few
-// ms): every later isolate reads that instead of the range and its decode.
+// decode it holds it there as a gzipped binary columnar doc (`groupBin.ts`; ~0.3 MB stored): every later isolate reads
+// that instead of the range and its decode. Its numbers are typed-array views and each string column one UTF-8
+// decode, where the JSON copy it replaced (~2 MB inflated) parsed every value: cold full diffs on cw, binary vs JSON
+// copies (2026-11-16, 50 pairs over both host orders), wall median 1730 → 1468 ms, 37/50 faster.
 
 /** A decoded group as the colo holds it: its columns, each an array over its rows. */
-type GroupDoc = { cols: string[]; v: unknown[][] }
+type GroupDoc = BinDoc
 
-const groupColoKey = (h: IndexHandle, rg: number): Request => coloKey(h.env, h.dataKey!, `rg=${rg}${h.columns?.includes(IV_CHURN_COLS[0]) ? '&c=1' : ''}`)
+/** The colo copy's encoding (`groupBin.ts`), in its key: bumped when it changes, so an older copy is never read. */
+const GROUP_DOC = 2
+const groupColoKey = (h: IndexHandle, rg: number): Request => coloKey(h.env, h.dataKey!, `rg=${rg}${h.columns?.includes(IV_CHURN_COLS[0]) ? '&c=1' : ''}&g=${GROUP_DOC}`)
 
 /** `raw` (a group's decoded columns) as a `GroupDoc`, or null when a value wouldn't survive JSON exactly (an
  *  integer past 2^53, a non-finite float, a byte array): such a group is decoded from parquet every time. */
@@ -2017,7 +2022,7 @@ async function coloGroup(h: IndexHandle, rg: number): Promise<IvGroup | null> {
   const hit = await colo().match(groupColoKey(h, rg))
   if (!hit?.body) return null
   const t0 = now()
-  const d = await new Response(hit.body.pipeThrough(new DecompressionStream('gzip'))).json<GroupDoc>()
+  const d = decodeBin(await new Response(hit.body.pipeThrough(new DecompressionStream('gzip'))).arrayBuffer())
   h.trace?.('gjson', now() - t0, h.variant)
   // A copy put by a reader that projected fewer columns (one from before a column was read): a miss.
   if (h.columns?.some(c => !d.cols.includes(c))) return null
@@ -2026,7 +2031,7 @@ async function coloGroup(h: IndexHandle, rg: number): Promise<IvGroup | null> {
 
 /** Put a group's decoded copy in the colo, best effort and not waited for (a read never waits on the cache). */
 function putColoGroup(h: IndexHandle, rg: number, d: GroupDoc): void {
-  const body = new Response(JSON.stringify(d)).body!.pipeThrough(new CompressionStream('gzip'))
+  const body = new Response(encodeBin(d)).body!.pipeThrough(new CompressionStream('gzip'))
   // Buffered: the Cache API wants a known length.
   const p: Promise<void> = new Response(body).arrayBuffer()
     .then(buf => colo().put(groupColoKey(h, rg), new Response(buf, { headers: { 'content-type': 'application/octet-stream', 'cache-control': `max-age=${BLOB_CACHE_TTL}` } })))
