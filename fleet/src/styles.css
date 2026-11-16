@@ -73,8 +73,9 @@ h1 .muted { font-size: 14px; font-weight: 400; }
 .deployment table { border-collapse: collapse; width: 100%; font-size: 13px; white-space: nowrap; }
 .deployment th { text-align: left; color: var(--ink3); font-weight: 600; border-bottom: 1px solid var(--line); padding: 4px 8px 4px 0; }
 .deployment td { padding: 3px 8px 3px 0; border-bottom: 1px solid var(--line); }
-.num { text-align: right; font-variant-numeric: tabular-nums; }
+.num, .deployment th.num { text-align: right; font-variant-numeric: tabular-nums; }
 td.ok { color: var(--ok); }
 td.warn { color: var(--warn); }
 td.bad { color: var(--bad); }
 td.running { color: var(--accent); }
+.deployment .more { margin: 6px 0 0; font-size: 13px; }

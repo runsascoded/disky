@@ -84,6 +84,12 @@ def test_copy_states_boundary_trigger_mix_and_exact_run_links():
     assert N.reply(CFG, {**manual, 'run': {**manual['run'], 'trigger_by': '<!channel>'}}) == (
         '✅ :bust_in_silhouette: [2026-11-06 08:00 UTC](https://site.test/scans/r5) · 1m 00s'
     )
+    assert N.reply(CFG, {**manual, 'run': {**manual['run'], 'trigger_by': 'ada@example.org', 'trigger_emoji': ':ada:'}}) == (
+        '✅ :ada: [2026-11-06 08:00 UTC](https://site.test/scans/r5) · 1m 00s · ada@example.org'
+    )
+    assert N.reply(CFG, {**manual, 'run': {**manual['run'], 'trigger_by': 'ada@example.org', 'trigger_emoji': '<!channel>'}}) == (
+        '✅ :bust_in_silhouette: [2026-11-06 08:00 UTC](https://site.test/scans/r5) · 1m 00s · ada@example.org'
+    )
     sched = row(6)
     assert N.reply(CFG, {**sched, 'run': {**sched['run'], 'trigger_by': 'ada@example.org'}}) == (
         '✅ :alarm_clock: [2026-11-07 08:00 UTC](https://site.test/scans/r6) · 1m 00s'

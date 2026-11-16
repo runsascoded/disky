@@ -111,8 +111,8 @@ hf is the reference deployment. Readback from its owner session at `o/hf` `babe9
 | Item | hf | gcs | cw | r2 |
 | --- | --- | --- | --- | --- |
 | Release tooling on the integration branch (`scripts/oa-release`, `oa-release.yml`, source/build identity) | yes | yes | yes | yes |
-| `<d>-dev` / `<d>-prod` environments | yes | no | no | yes (11-15) |
-| In `OA_SITE_RELEASE_TARGETS` | yes | no | no | yes (11-15) |
+| `<d>-dev` / `<d>-prod` environments | yes | yes (11-16) | yes (11-16) | yes (11-15) |
+| In `OA_SITE_RELEASE_TARGETS` | yes | yes (11-16) | yes (11-16) | yes (11-15) |
 | Automatic dev release after CI | live (runs 43163896953, 43211681144) | — | — | first one follows CI on `o/r2` `a8ba9169e` |
 | Production promotion rehearsed | once (`0fe8aa25`, run 43164201840) | — | — | — |
 | Rollback rehearsed | no | — | — | — |
@@ -126,6 +126,8 @@ hf is the reference deployment. Readback from its owner session at `o/hf` `babe9
 **r2 (owner readback, 2026-11-12):** Pages maps prod → `r2-prod` and dev → `r2` (`site/deploy.env`, `infra/cf`'s `productionBranch` + `branchAliases`), not `main`/`dev`; r2 keeps it, since moving needs an `infra/cf` apply and re-aliasing `dev.r2.oa.dev` for no functional gain (a separate uniformity decision for Ryan). Pulumi state moved to `gs://oa-pulumi` on 11-11 (OA's ops/pulumi KMS key); deleting the stale local `infra/{cf,gcp}/state/` and the unused passphrase waits for Ryan's go. Blocking the release lane: the `r2-dev`/`r2-prod` environments and their `CF_PAGES_DEPLOY_TOKEN`. Preview: the Pages preview env already has the broker preview client (`oa-r2-usage-preview`) and `PAGES_SUBDOMAIN`, verified signing in on `*.oa-r2-usage.pages.dev`; it still needs an `r2-preview` GitHub environment and a decision that previews read prod's D1/R2, as every dev stack does.
 
 **r2 (owner report, 2026-11-15):** Ryan minted r2's Pages token (account-owned, Pages Edit, OA account), set `CF_PAGES_DEPLOY_TOKEN` on `r2-dev` and `r2-prod` (the environments were already in place), and set `OA_SITE_RELEASE_TARGETS` to `["hf","r2"]`; the plan regenerated against the live values matched the committed `deploy/oa/r2-release-setup.json`. The next plan applied (gcs or cw) must be regenerated against `["hf","r2"]`. r2's `GCP_SA_KEY` is on prod and preview, and "Run a scan" works (`oa-r2-scan-daily-20261115-160937`).
+
+**gcs and cw (2026-11-16):** `OA_SITE_RELEASE_TARGETS` = `["hf","r2","cw","gcs"]`; `gcs-dev`/`gcs-prod` and `cw-dev`/`cw-prod` hold `CF_PAGES_DEPLOY_TOKEN` (Pages Write only). gcs applied its plan (`o/gcs` `2e8627063`) with Ryan's go, and regenerating it afterwards gave the same plan. Their first automatic dev releases follow their next CI on `o/gcs` / `o/cw`.
 
 **hf's environment contents (names only), the template for the others:**
 - `hf-dev` and `hf-prod`: secrets `CF_PAGES_DEPLOY_TOKEN`, `SLACK_DEPLOY_BOT_TOKEN`; vars `CLOUDFLARE_ACCOUNT_ID`, `DEPLOY_NOTIFICATIONS_ENABLED`, `SLACK_DEPLOY_CHANNEL`; branch policy `front-door`; no required reviewers.

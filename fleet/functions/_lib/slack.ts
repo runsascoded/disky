@@ -1,5 +1,5 @@
 /**
- * The fleet's Slack post (specs/disky-oa-dev.md): a line per deployment (its newest scan, how it went, how long, what
+ * The fleet's Slack post (specs/disky-oa-dev.md): a line per deployment (its newest scan, linked to its run, how it went, how long, what
  * it cost, its `/meta` size and the week's change), the card as an `image` block, and when it was read. One message,
  * posted once, then edited in place each run (`chat.update`): its channel + ts are kept in `FLEET_KV`, or pinned by
  * `SLACK_FLEET_TS`.
@@ -37,10 +37,10 @@ export function line(d: FleetDeployment): string {
   const { emoji, word } = status(d)
   const parts: string[] = []
   const r = d.last
-  if (r) parts.push(`\`${r.scan}\``, word)
+  if (r) parts.push(`<${d.url}/scans/${encodeURIComponent(r.run_id)}|${r.scan}>`, word)
   else parts.push(word)
   if (r && r.status !== 'running' && r.secs !== null) parts.push(fmtHours(r.secs))
-  if (r) parts.push(r.cost_usd === null ? 'cost n/a' : fmtUsd(r.cost_usd))
+  if (r && r.status !== 'running') parts.push(r.cost_usd === null ? 'cost n/a' : fmtUsd(r.cost_usd))
   const m = d.meta
   if (m && m.now !== null) parts.push(`/meta ${fmtSI(m.now)}${m.d7 !== null ? ` (${delta(m.now - m.d7)} 7d)` : ''}`)
   else parts.push('/meta n/a')
@@ -75,6 +75,11 @@ async function slackApi(token: string, method: string, body: Record<string, unkn
   return r.json() as Promise<SlackResult>
 }
 
+/** No link previews: each deployment's link would unfurl into its own OG card (and the page's into the anonymous
+ *  fleet card), five large images under the one the post means to show. Sent on the edit too, since Slack unfurls an
+ *  edited message's links again. */
+const NO_UNFURL = { unfurl_links: false, unfurl_media: false }
+
 /** Where the post is kept between runs. */
 export const KV_KEY = 'slack-fleet-post'
 
@@ -90,12 +95,12 @@ export async function publish(env: Env, msg: SlackMessage, fresh = false, f: typ
   const kept = env.FLEET_KV ? await env.FLEET_KV.get<{ channel: string; ts: string }>(KV_KEY, 'json') : null
   const at = fresh ? null : kept ?? (env.SLACK_FLEET_TS ? { channel: env.SLACK_FLEET_CHANNEL!, ts: env.SLACK_FLEET_TS } : null)
   if (at) {
-    const r = await slackApi(token, 'chat.update', { channel: at.channel, ts: at.ts, ...msg }, f)
+    const r = await slackApi(token, 'chat.update', { channel: at.channel, ts: at.ts, ...msg, ...NO_UNFURL }, f)
     if (r.ok) return { action: 'updated', channel: at.channel, ts: at.ts }
     if (r.error !== 'message_not_found') throw new Error(`chat.update: ${r.error}`)
   }
   if (!env.FLEET_KV && !fresh) throw new Error(NO_POST)
-  const r = await slackApi(token, 'chat.postMessage', { channel: env.SLACK_FLEET_CHANNEL, ...msg }, f)
+  const r = await slackApi(token, 'chat.postMessage', { channel: env.SLACK_FLEET_CHANNEL, ...msg, ...NO_UNFURL }, f)
   if (!r.ok || !r.ts || !r.channel) throw new Error(`chat.postMessage: ${r.error ?? 'no ts'}`)
   if (env.FLEET_KV) await env.FLEET_KV.put(KV_KEY, JSON.stringify({ channel: r.channel, ts: r.ts }))
   return { action: 'posted', channel: r.channel, ts: r.ts }

@@ -27,6 +27,34 @@ export async function loadScanRuns(db: D1Database, store: string): Promise<ScanR
   }
 }
 
+/** A Slack emoji name as the broker answers it: nothing else is passed on. */
+const SLACK_EMOJI_RE = /^:[a-z0-9_+'-]{1,100}:$/
+
+/** Each manual run's starter's Slack emoji (`trigger_emoji`), asked of the broker now (`slackEmojiClient.getMany`: one
+ *  request for every starter, answers cached per isolate), never stored. A failed lookup leaves the rows as they are
+ *  (the thread shows 👤; a later post can be edited). */
+export async function withStarterEmoji(
+  rows: ScanRunRows | null,
+  getMany: (emails: readonly string[]) => Promise<Record<string, string | null>>,
+): Promise<ScanRunRows | null> {
+  const starters = [...new Set((rows?.runs ?? []).filter(r => r.trigger === 'manual' && r.trigger_by?.includes('@')).map(r => r.trigger_by!.toLowerCase()))]
+  if (!rows || !starters.length) return rows
+  let found: Record<string, string | null>
+  try {
+    found = await getMany(starters)
+  } catch (e) {
+    console.warn('scan runs: starter emoji lookup failed', String((e as Error)?.message ?? e))
+    return rows
+  }
+  return {
+    ...rows,
+    runs: rows.runs.map(r => {
+      const e = r.trigger === 'manual' && r.trigger_by ? found[r.trigger_by.toLowerCase()] : null
+      return e && SLACK_EMOJI_RE.test(e) ? { ...r, trigger_emoji: e } : r
+    }),
+  }
+}
+
 /** The rows a viewer may see: a public (anonymous) viewer gets no run's starter (`trigger_by`, an address). */
 export function withoutStarters(rows: ScanRunRows | null, id: { via: 'session' | 'grant' | 'public' }): ScanRunRows | null {
   if (!rows || id.via !== 'public') return rows
