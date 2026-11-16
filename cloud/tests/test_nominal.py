@@ -70,15 +70,15 @@ def test_copy_states_boundary_trigger_mix_and_exact_run_links():
     assert N.parent(CFG, good, boundary) == (
         '✅ **Test scans: 2 consecutive clean runs**\n\n'
         'Since 2026-11-02 08:00 UTC after [2026-11-01T0800](https://site.test/scans/r0).\n\n'
-        'Latest completed: [2026-11-03 08:00 UTC](https://site.test/scans/r2). No phase issues.\n\n'
+        'Latest completed: [2026-11-03 08:00 UTC](https://site.test/scans/r2).\n\n'
         'Latest 2 runs: 1 scheduled / 1 manual. Each reply links its scan record. [All scans](https://site.test/scans).'
     )
     assert [N.reply(CFG, r) for r in reversed(good)] == [
-        '✅ [2026-11-02 08:00 UTC](https://site.test/scans/r1) · scheduled · 1m 00s · no phase issues',
-        '✅ [2026-11-03 08:00 UTC](https://site.test/scans/r2) · manual · 1m 00s · no phase issues',
+        '✅ :alarm_clock: [2026-11-02 08:00 UTC](https://site.test/scans/r1) · 1m 00s',
+        '✅ :bust_in_silhouette: [2026-11-03 08:00 UTC](https://site.test/scans/r2) · 1m 00s',
     ]
     assert N.reply(CFG, {**row(3, trigger=None), 'secs': None}) == (
-        '✅ [2026-11-04 08:00 UTC](https://site.test/scans/r3) · trigger unknown · duration unknown · no phase issues'
+        '✅ :grey_question: [2026-11-04 08:00 UTC](https://site.test/scans/r3) · duration unknown'
     )
 
 
