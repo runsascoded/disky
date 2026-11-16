@@ -94,8 +94,8 @@ rules:
     reason: "generic repo tool on gcs only -> pick to cloud `scripts/`"
   - paths: [cloud/src/dt_cloud/interval_store.py]
     lanes: [gcs]
-    class: mixed
-    reason: "`CLASS_COLS` named for GCS classes is intrinsic (standalone); `_cut`'s per-sort worker split is shared perf code -> pick that hunk"
+    class: intrinsic
+    reason: "`CLASS_COLS` named for GCS classes (standalone); the `_cut` hunk was a dead merge leftover (each sort's `plan_cut` overwrote it), dropped in gcs 840d27234"
   - paths: [cloud/src/dt_cloud/cli.py]
     lanes: [gcs]
     class: accidental
