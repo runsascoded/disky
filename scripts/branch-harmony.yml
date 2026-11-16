@@ -149,8 +149,8 @@ rules:
     reason: "shared CF stack program edited with r2/OA specifics (OA source-bucket list, `oa-r2-usage` token names, icons project) -> move into r2's own `infra/cf/r2_stack.py` (as cw_stack.py / hf_stack.py), generic parts (RO tokens, D1 publisher, icons) to cloud's program behind config"
   - paths: [.github/workflows/ci.yml]
     lanes: [r2]
-    class: mixed
-    reason: "`r2-collector` tests cloud's r2-access worker -> pick to cloud; the `job` tests job (r2's `job/tests`) stays"
+    class: intrinsic
+    reason: "r2's `job` tests job (`job/tests`); `r2-collector` is already on cloud"
 
   # ---- accidental: local / m3 ----
   - paths: [site/functions/_lib/staticFilter.test.ts]
