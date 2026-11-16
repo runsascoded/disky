@@ -367,3 +367,153 @@ def test_slack_recovery_paginates_checks_ownership_and_attaches_metadata():
     assert slack.post('body', 'root', 'op') == 'new'
     assert sent == [('body', 'root', {'body': {'event_type': 'disky_nominal', 'event_payload': {'operation': 'op'}}})]
     assert client._metadata_by_content is None
+
+
+def bodies(slack):
+    return [(c[0], c[1], c[-1]) for c in slack.calls]
+
+
+def test_a_single_clean_run_reads_singular():
+    good, boundary = N.streak([row(1), row(0, 'failed')])
+    assert N.parent(CFG, good, boundary).split('\n\n')[0] == '✅ **Test scans: 1 consecutive clean run**'
+    assert N.parent(CFG, good, boundary).split('\n\n')[3] == (
+        'Latest 1 run: 1 scheduled / 0 manual. Each reply links its scan record. [All scans](https://site.test/scans).'
+    )
+
+
+def test_unknown_group_is_refused():
+    from dataclasses import replace
+
+    with pytest.raises(ValueError, match='nominal.group: one of clean, color, signature'):
+        replace(CFG, group='phase')
+
+
+def test_failed_reply_names_phase_and_error_without_markup():
+    bad = row(4, 'failed', failed_phase='interval-store', error='OOM <!channel> `x` *y*\nexit 137')
+    assert N.reply(CFG, bad) == (
+        "❌ :alarm_clock: [2026-11-05 08:00 UTC](https://site.test/scans/r4) · 1m 00s · "
+        "failed in interval-store: OOM ‹!channel› 'x' *y* exit 137"
+    )
+    long = row(4, 'failed', error='e' * 200)
+    assert N.reply(CFG, long) == "❌ :alarm_clock: [2026-11-05 08:00 UTC](https://site.test/scans/r4) · 1m 00s · failed: " + 'e' * 159 + '…'
+    partial = row(4, issues=[{'phase': 'probe'}, {'phase': 'healthcheck'}, {'phase': 'probe'}])
+    assert N.reply(CFG, partial) == (
+        '❌ :alarm_clock: [2026-11-05 08:00 UTC](https://site.test/scans/r4) · 1m 00s · phase issues: healthcheck, probe'
+    )
+
+
+def test_color_threads_consecutive_failures_and_each_change_of_color_closes_the_last():
+    from dataclasses import replace
+
+    w = Writer(replace(CFG, group='color'))
+    w.run(history(2))
+    w.slack.calls.clear()
+    f3 = row(3, 'failed', failed_phase='index', error='boom')
+    f4 = row(4, 'failed', failed_phase='probe')
+    w.run([f4, f3, *history(2)])
+    assert bodies(w.slack) == [
+        ('edit', '1.0', '**Test scans: clean-run sequence ended**\n\n'
+                        '[2026-11-04 08:00 UTC](https://site.test/scans/r3): failed. [All scans](https://site.test/scans).'),
+        ('post', '4.0', '❌ **Test scans: 2 consecutive failed runs**\n\n'
+                        'Since 2026-11-04 08:00 UTC after [2026-11-03T0800](https://site.test/scans/r2) (clean).\n\n'
+                        'Latest: [2026-11-05 08:00 UTC](https://site.test/scans/r4): failed in probe.\n\n'
+                        'Each reply links its scan record. [All scans](https://site.test/scans).'),
+        ('post', '5.0', '❌ :alarm_clock: [2026-11-04 08:00 UTC](https://site.test/scans/r3) · 1m 00s · failed in index: boom'),
+        ('post', '6.0', '❌ :alarm_clock: [2026-11-05 08:00 UTC](https://site.test/scans/r4) · 1m 00s · failed in probe'),
+    ]
+    assert (w.saved['key'], w.saved['parent'], w.saved['posted']) == ('fail', '4.0', {'r3': '5.0', 'r4': '6.0'})
+    w.slack.calls.clear()
+    w.run([f4, f3, *history(2)])
+    assert w.slack.calls == []
+    w.run([row(5), f4, f3, *history(2)])
+    assert bodies(w.slack) == [
+        ('edit', '4.0', '**Test scans: failure sequence ended**\n\n'
+                        '[2026-11-06 08:00 UTC](https://site.test/scans/r5): clean. [All scans](https://site.test/scans).'),
+        ('post', '7.0', '✅ **Test scans: 1 consecutive clean run**\n\n'
+                        'Since 2026-11-06 08:00 UTC after [2026-11-05T0800](https://site.test/scans/r4).\n\n'
+                        'Latest completed: [2026-11-06 08:00 UTC](https://site.test/scans/r5).\n\n'
+                        'Latest 1 run: 1 scheduled / 0 manual. Each reply links its scan record. [All scans](https://site.test/scans).'),
+        ('post', '8.0', '✅ :alarm_clock: [2026-11-06 08:00 UTC](https://site.test/scans/r5) · 1m 00s'),
+    ]
+    assert ('key' in w.saved, w.saved['posted']) == (False, {'r5': '8.0'})
+
+
+def test_signature_threads_a_failure_while_it_repeats_and_a_different_one_opens_its_own():
+    from dataclasses import replace
+
+    w = Writer(replace(CFG, group='signature'))
+    a3, a4 = row(3, 'failed', failed_phase='interval-store', error='OOM'), row(4, 'failed', failed_phase='interval-store', error='OOM again')
+    w.run([a4, a3, *history(1)])
+    assert [(c[0], c[1]) for c in w.slack.calls] == [('post', '1.0'), ('post', '2.0'), ('post', '3.0')]
+    assert w.slack.calls[0][-1].split('\n\n')[:2] == [
+        '❌ **Test scans: 2 consecutive failed runs in interval-store**',
+        'Since 2026-11-04 08:00 UTC after [2026-11-02T0800](https://site.test/scans/r1) (clean).',
+    ]
+    assert (w.saved['key'], w.saved['boundary']) == ('fail:failed:interval-store', 'r1')
+    w.slack.calls.clear()
+    b5 = row(5, issues=[{'phase': 'probe'}])
+    w.run([b5, a4, a3, *history(1)])
+    assert bodies(w.slack) == [
+        ('edit', '1.0', '**Test scans: failure sequence ended**\n\n'
+                        '[2026-11-06 08:00 UTC](https://site.test/scans/r5): phase issues: probe. [All scans](https://site.test/scans).'),
+        ('post', '4.0', '❌ **Test scans: 1 consecutive failed run with phase issues**\n\n'
+                        'Since 2026-11-06 08:00 UTC after [2026-11-05T0800](https://site.test/scans/r4) (failed in interval-store: OOM again).\n\n'
+                        'Latest: [2026-11-06 08:00 UTC](https://site.test/scans/r5): phase issues: probe.\n\n'
+                        'Each reply links its scan record. [All scans](https://site.test/scans).'),
+        ('post', '5.0', '❌ :alarm_clock: [2026-11-06 08:00 UTC](https://site.test/scans/r5) · 1m 00s · phase issues: probe'),
+    ]
+    assert (w.saved['key'], w.saved['boundary'], w.saved['posted']) == ('fail:issues:probe', 'r4', {'r5': '5.0'})
+
+
+def test_clean_grouping_never_threads_failures():
+    w = Writer()
+    w.run([row(2, 'failed'), row(1, 'failed'), *history(1)])
+    assert w.slack.calls == []
+    assert w.saved == {'namespace': CFG.namespace}
+
+
+def deferring_job(tmp_path, group, monkeypatch, env=None):
+    from dataclasses import asdict, replace
+
+    from dt_cloud import scan_runs as S
+
+    monkeypatch.setenv('TMPDIR', str(tmp_path))
+    posted = []
+    profile = SimpleNamespace(nominal=asdict(replace(CFG, group=group)), project='p', store='primary', alerts={})
+    job = S.JobRun.__new__(S.JobRun)
+    job.profile, job.recording, job.dry_run, job.env, job.run_id = profile, True, False, env or {}, 'r9'
+    job.key, job.dir = 'k', tmp_path / 'dt-scan-run'
+    job.redact = lambda s: s
+    job.post_alert = lambda level, message: posted.append((level, message))
+    return job, posted
+
+
+@pytest.mark.parametrize('threaded, expected', [(True, []), (False, [('fail', 'run failed (exit 1) in index')])])
+def test_a_failure_thread_takes_the_alert_and_an_unthreaded_failure_still_posts_it(tmp_path, monkeypatch, threaded, expected):
+    job, posted = deferring_job(tmp_path, 'signature', monkeypatch)
+    job.alert('fail', 'run failed (exit 1) in index')
+    assert (posted, job.state()['deferred_alerts']) == ([], ['run failed (exit 1) in index'])
+    def fake_run(*args, final, **kwargs):
+        final.append({'key': 'fail:failed:index', 'posted': {'r9': '2.0'} if threaded else {}})
+        return 'nominal: ok'
+    monkeypatch.setattr(N, 'run', fake_run)
+    N.report_job(job)
+    assert posted == expected
+
+
+def test_a_failing_report_posts_the_deferred_alert(tmp_path, monkeypatch):
+    job, posted = deferring_job(tmp_path, 'color', monkeypatch)
+    job.alert('fail', 'run failed (exit 1)')
+    def broken(*args, **kwargs):
+        raise ValueError('ledger HTTP 500')
+    monkeypatch.setattr(N, 'run', broken)
+    N.report_job(job)
+    assert posted == [('fail', 'run failed (exit 1)')]
+
+
+@pytest.mark.parametrize('group, env', [('clean', {}), ('color', {'DT_ALERTS': 'stderr'})])
+def test_alerts_post_at_once_without_failure_grouping_or_with_reports_off(tmp_path, monkeypatch, group, env):
+    job, posted = deferring_job(tmp_path, group, monkeypatch, env)
+    job.alert('fail', 'run failed (exit 1)')
+    job.alert('warn', 'probe slow')
+    assert (posted, job.state().get('deferred_alerts')) == ([('fail', 'run failed (exit 1)'), ('warn', 'probe slow')], None)
