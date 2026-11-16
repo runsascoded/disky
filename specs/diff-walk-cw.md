@@ -138,8 +138,19 @@ cw's walk reads about 50–80 of each on a wide diff. Server-Timing shows the wa
 
 A compact or binary encoding, or smaller docs, would shrink each read and parse on every diff, whichever walk. Size it by wall time (`diff-bench`'s cold medians), not Server-Timing, before building it.
 
+**Row-group docs, done (2026-11-16, `96df30bad` `[cloud]`):** the colo copy is a gzipped binary columnar doc (`groupBin.ts`, key `&g=2`): numbers as float64 typed-array views, each string column one UTF-8 decode, JSON only for booleans, mixed columns and lone surrogates. Benched as `enc-a` (binary) against `enc-c` (`11811e868`, JSON) with an experiment-only `CACHE_V` (both aliases otherwise share the dev stack's response cache), a warm-up pass, then `diff-bench -n 2` in both host orders: 50 cold pairs a kind, answers agreeing.
+
+| kind | JSON → binary (ms) | Δ med | binary slower | p |
+|---|---|---|---|---|
+| full diff, wall | 1730 → 1468 | −309 | 13/50 | 0.001 |
+| full diff, Server-Timing | 992 → 767 | −206 | 9/50 | 6e-6 |
+| depth 1, wall | 544 → 449 | −55 | 16/50 | 0.015 |
+
+Footer-group docs (~1 MB of JSON each) are the next candidate, benched the same way before building.
+
 ## Options
 
 1. **Keep cw's walk (current).**
 2. **Restore locality in `cloud`'s walk.** Tried as (c), sibling runs (2026-11-16): +747–804 ms cold median against cw's walk. The runs are too short to restore locality, so this option is closed.
-3. **The sorted-key `readAsks` pass, as `[cloud]`.** Worth up to ~85 ms on `cloud`'s walk; it must not regress cw's walk.
+3. **Smaller per-diff docs.** Row-group docs done (above); footer-group docs next.
+4. **The sorted-key `readAsks` pass, as `[cloud]`.** Worth up to ~85 ms on `cloud`'s walk; it must not regress cw's walk.
