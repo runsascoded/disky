@@ -27,10 +27,36 @@ export async function loadScanRuns(db: D1Database, store: string): Promise<ScanR
   }
 }
 
-/** The rows a viewer may see: a public (anonymous) viewer gets no run's starter (`trigger_by`, an address). */
+/** A Slack emoji name as the broker normalizes it (`@open-athena/auth`'s `oa_slack_emoji`): nothing else is passed on. */
+const SLACK_EMOJI_RE = /^:[a-z0-9_+'-]{1,100}:$/
+
+/** Each manual run's starter's Slack emoji (`trigger_emoji`), from their profile (`profiles.slack_emoji`: the
+ *  broker's `oa_slack_emoji` claim, copied at sign-in, or its lookup). Rows unchanged where no run names a starter, or
+ *  the database has no such column (auth's migration 0007 unapplied). */
+export async function withStarterEmoji(db: D1Database, rows: ScanRunRows | null): Promise<ScanRunRows | null> {
+  if (!rows || !rows.runs.some(r => r.trigger === 'manual' && r.trigger_by)) return rows
+  let found: { email: string; slack_emoji: string }[]
+  try {
+    found = (await db.prepare('SELECT email, slack_emoji FROM profiles WHERE slack_emoji IS NOT NULL').all<{ email: string; slack_emoji: string }>()).results
+  } catch (e) {
+    if (/no such (column|table)/i.test(String((e as Error).message ?? e))) return rows
+    throw e
+  }
+  const emoji = new Map(found.filter(p => SLACK_EMOJI_RE.test(p.slack_emoji)).map(p => [p.email.toLowerCase(), p.slack_emoji]))
+  return {
+    ...rows,
+    runs: rows.runs.map(r => {
+      const e = r.trigger === 'manual' && r.trigger_by ? emoji.get(r.trigger_by.toLowerCase()) : undefined
+      return e ? { ...r, trigger_emoji: e } : r
+    }),
+  }
+}
+
+/** The rows a viewer may see: a public (anonymous) viewer gets no run's starter (`trigger_by`, an address, nor their
+ *  `trigger_emoji`). */
 export function withoutStarters(rows: ScanRunRows | null, id: { via: 'session' | 'grant' | 'public' }): ScanRunRows | null {
   if (!rows || id.via !== 'public') return rows
-  return { ...rows, runs: rows.runs.map(({ trigger_by: _, ...r }) => r) }
+  return { ...rows, runs: rows.runs.map(({ trigger_by: _, trigger_emoji: __, ...r }) => r) }
 }
 
 /** The run's pipeline DAG (the engine-neutral graph its head stored), or null: a one-VM run, or no `scan_run_dags`. */

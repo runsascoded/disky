@@ -319,7 +319,7 @@ CREATE TABLE profiles (
 
   avatar_src  TEXT,
   updated_at  INTEGER NOT NULL
-, name TEXT);
+, name TEXT, slack_emoji TEXT);
 
 CREATE TABLE public_avatars (
   sha256      TEXT PRIMARY KEY,
