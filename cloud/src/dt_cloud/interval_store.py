@@ -321,13 +321,25 @@ def us_sql_from_raw() -> str:
     string — `''` with no named owner; the owner's name when the path is exactly one row and it is
     named (its bytes are the path's); else JSON `[["usr", bytes], …]` by `usr`, every named owner
     (zero bytes included: the reader's per-user map holds them). Unnamed bytes are the path's minus
-    the named ones."""
-    return """SELECT depth, path,
-        CASE WHEN sum(nr) FILTER (WHERE usr <> '') IS NULL THEN ''
-             WHEN sum(nr) = 1 THEN any_value(usr) FILTER (WHERE usr <> '')
-             ELSE '[' || string_agg(CASE WHEN usr <> '' THEN '[' || to_json(usr)::VARCHAR || ',' || b::VARCHAR || ']' END, ',' ORDER BY usr) || ']' END AS us
-        FROM (SELECT depth, path, usr, sum(size)::BIGINT AS b, count(*) AS nr FROM raw GROUP BY depth, path, usr)
-        GROUP BY depth, path"""
+    the named ones.
+
+    Every path's group takes fixed-size aggregates only, which DuckDB spills; the sorted list is built just for
+    the paths with two or more named owners, so memory past the limit is that list state alone. (An ordered
+    `string_agg` over every path held each group's rows unspillable: cw's range append, with no owners at all,
+    ran out at 9.3 GiB, 2026-11-16.)"""
+    return """WITH s AS (SELECT depth, path, usr, sum(size)::BIGINT AS b, count(*) AS nr FROM raw GROUP BY depth, path, usr),
+        p AS (SELECT depth, path, count(*) FILTER (WHERE usr <> '') AS ns, sum(nr) AS nr,
+                any_value(usr) FILTER (WHERE usr <> '') AS u, any_value(b) FILTER (WHERE usr <> '') AS b
+            FROM s GROUP BY depth, path),
+        m AS (SELECT depth, path, array_to_string(list_transform(list_sort(list({'usr': usr, 'b': b})),
+                x -> '[' || to_json(x.usr)::VARCHAR || ',' || x.b::VARCHAR || ']'), ',') AS l
+            FROM s SEMI JOIN (SELECT depth, path FROM p WHERE ns > 1) k USING (depth, path)
+            WHERE usr <> '' GROUP BY depth, path)
+        SELECT depth, path,
+            CASE WHEN ns = 0 THEN '' WHEN nr = 1 THEN u
+                 WHEN ns = 1 THEN '[[' || to_json(u)::VARCHAR || ',' || b::VARCHAR || ']]'
+                 ELSE '[' || l || ']' END AS us
+        FROM p LEFT JOIN m USING (depth, path)"""
 
 
 def slice_rows_sql(con, src: str, preds: list[str], version: int | None = None) -> str:
