@@ -317,6 +317,28 @@ def test_us_sql_from_raw_names_each_paths_owner_slices():
     ]
 
 
+def test_path_rows_into_is_the_same_rows_however_many_passes_build_the_owner_lists(monkeypatch):
+    # 700 raw rows: paths of 7 rows at one depth, every third row named among 5 owners (0–5 named slices a path).
+    cls = ", ".join(f"(i % 3)::BIGINT AS {c}" for c in ist.CLS)
+    raw = f"""SELECT ((i // 7) % 4)::UTINYINT AS depth, 'p/' || (i // 7)::VARCHAR AS path,
+        CASE WHEN i % 3 = 0 THEN 'u' || (i % 5)::VARCHAR ELSE '' END AS usr, i % 2 = 0 AS is_file, i::BIGINT AS size,
+        1::BIGINT AS n_files, -1::BIGINT AS n_children, -1::BIGINT AS n_desc, i::BIGINT AS mtime, i::BIGINT AS mw,
+        (2.0 * i)::DOUBLE AS wt, (i % 9)::INTEGER AS last_read, {cls} FROM range(700) t(i)"""
+    monkeypatch.setattr(ist, "_raw_sql", lambda *a, **k: raw)
+    con = duckdb.connect()
+    got = {}
+    for part in (1, 7, 10**6):
+        ist.path_rows_into(con, "np", "src", ["true"], part_slices=part)
+        got[part] = con.execute("SELECT * FROM np ORDER BY depth, path").fetchall()
+    con.execute(f"CREATE TABLE ref AS WITH raw AS ({raw}) SELECT * FROM ({ist.us_sql_from_raw()})")
+    ref = con.execute("SELECT depth, path, us FROM ref ORDER BY depth, path").fetchall()
+    cols = [d[0] for d in con.execute("SELECT * FROM np LIMIT 0").description]
+    us = cols.index("us")
+    assert got[1] == got[7] == got[10**6]
+    assert [(r[0], r[1], r[us]) for r in got[1]] == ref
+    assert len(ref) == 100 and sum(1 for r in ref if r[2].startswith("[[")) > 0
+
+
 def test_seg_sql_places_a_version_in_the_smallest_dyadic_block_of_its_scans():
     con = duckdb.connect()
     stamps = [10, 20, 30, 40, 50, 60]

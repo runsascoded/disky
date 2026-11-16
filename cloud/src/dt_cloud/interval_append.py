@@ -281,7 +281,7 @@ def _append_range(con, prev: dict[str, str], scan: dict, r: dict, name: str, out
     v = scan.get("version")
     todo = tables(sliced)
     with tm.phase("range load"):
-        con.execute(f"CREATE OR REPLACE TABLE np AS {ist.path_rows_sql(con, src, preds, v, generation)}")
+        ist.path_rows_into(con, "np", src, preds, v, generation)
         if not sliced and con.execute("SELECT count(*) FROM np WHERE us <> ''").fetchone()[0]:
             raise SystemExit(ist.owners_refused(scan["id"]))
         if sliced:
@@ -548,7 +548,7 @@ def check_scan(con, scan: dict, r: dict, name: str, roots: list[str], *, bucket:
     `roots`. A re-check, outside `append_range`."""
     src = sn._src(bucket, scan["src"], mount)
     preds = sn.range_preds(r)
-    con.execute(f"CREATE OR REPLACE TABLE np AS {ist.path_rows_sql(con, src, preds, scan.get('version'), generation)}")
+    ist.path_rows_into(con, "np", src, preds, scan.get("version"), generation)
     if sliced:
         con.execute(f"CREATE OR REPLACE TABLE ns AS {ist.slice_rows_sql(con, src, preds, scan.get('version'))}")
     covered = attributed and bool(scan.get(ist.ATTRIBUTION_SRC))

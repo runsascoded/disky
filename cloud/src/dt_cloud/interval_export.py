@@ -20,7 +20,7 @@ Written in the scan's own source format (`scans.json` `version`):
   `(depth, path, usr)`: `path-index.parquet` only (a v1 index had coarse tiers, not `bysize`).
 
 Exact in the store's terms: the export's rows, read back as the store reads a scan (`interval_store.slice_rows_sql` /
-`path_rows_sql`), have the original sort's count and Σ hash (`test_interval_export.py`, every fixture scan) — what
+`path_rows_into`), have the original sort's count and Σ hash (`test_interval_export.py`, every fixture scan) — what
 every append already checks per range. A v2 row's mean stamp weighs its whole size or nothing (`wb` ∈ {0, size});
 a version that says otherwise can't be written as v2 and fails the export.
 """
