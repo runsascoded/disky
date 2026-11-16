@@ -31,7 +31,7 @@ import {
   type ScanRunPhase, type PhaseIssue, type PhaseRecovery, BEHIND, issueLeaves, issueState, issueWhat, overlappingFailures, phaseFill, phaseOutcome, runOutcome, runOutcomeLine, runTasks,
   type RunTask, STATUS_FILTERS, statusMatches, taskLogsHref,
 } from './scanRunsModel'
-import { colorer, fmtDur, fmtRunTime, getJson, IssueStanding, type Links, PhaseBar, QUIET_TIP, runDay, RunWhen, scanRunsApi, scansHref, scansStore, Status, useScanRuns } from './scanRunsUi'
+import { agoLong, colorer, fmtDur, fmtRunTime, getJson, IssueStanding, type Links, PhaseBar, QUIET_TIP, runDay, RunWhen, scanRunsApi, scansHref, scansStore, Status, useScanRuns } from './scanRunsUi'
 import { brushRole, dagNodes, processOf, type DagNode, type Hl, type RunDagRow } from './runDag'
 import { DEFAULT_SIZES, pageParam, Pager, usePaged } from './Pager'
 import { durationAxis, durationSegments } from './durationAxis'
@@ -860,6 +860,8 @@ export function ScanRunPage() {
     return peers.find(s => s.run.status === 'succeeded') ?? peers[0]
   }
   const prev = scanRun(d?.prev_scan ?? null), next = scanRun(d?.next_scan ?? null)
+  // The newest run of its kind: nothing after it, once the run list has loaded (unknown till then: no badge)
+  const latest = !!d && !!list.data && !d.next_scan && !next
   const r = d?.run
   const kinds = new Set(list.data?.runs.map(s => s.run.kind))
   const map = r && r.status === 'succeeded' && isScanProducer(r.kind) ? mapHref(r.scan, store.path, slug) : null
@@ -877,7 +879,11 @@ export function ScanRunPage() {
         {r.kind === 'access-ingest' && <p className="sub">An independent hourly access-log ingest. It updates the aggregates used by future scans; it does not publish a snapshot or change an existing scan’s recorded read data.</p>}
         {isMaintenance(r.kind) && <p className="sub">{r.kind === 'compact' ? 'A compaction' : r.kind === 'race' ? 'A race of a compaction (built beside it; published only if a compaction adopts it)' : 'A merge of deferred carries'} of <code>{r.gen ?? '?'}</code>, its own Batch job; <code>{r.scan}</code> is the newest scan it {r.kind === 'merge' ? 'carries' : 'folds'}{d.siblings.length > 0 && <> (<Link to={scanHref(d.siblings[d.siblings.length - 1].run_id)}>its scan run</Link>)</>}.</p>}
         <p className="sub">
-          <Status run={r} failedAt={d.failed_at} issues={d.phase_issues} lost={liveDetail?.lost} runHref={scanHref} />{liveDetail && <Live live={liveDetail} inline />} · {fmtRunTime(r.started_ts)} → {r.finished_ts ? fmtRunTime(r.finished_ts) : '…'}
+          <Status run={r} failedAt={d.failed_at} issues={d.phase_issues} lost={liveDetail?.lost} runHref={scanHref} />{liveDetail && <Live live={liveDetail} inline />}
+          {latest && <> <Tooltip content={`The newest ${isScanProducer(r.kind) ? 'scan' : r.kind} run recorded here.`}><span className="sr-latest">latest</span></Tooltip></>}
+          {' · '}<Tooltip content={<><div>started {fmtRunTime(r.started_ts)}</div><div>{r.finished_ts ? <>finished {fmtRunTime(r.finished_ts)}</> : 'still running'}</div></>}>
+            <span className="sr-when">{r.finished_ts ? `${agoLong(r.finished_ts)} ago` : r.started_ts != null ? `started ${agoLong(r.started_ts)} ago` : 'start unknown'}</span>
+          </Tooltip>
           {d.secs != null && <> · {fmtDur(d.secs)}</>}
           {tasks.length
             ? <> · <Tooltip content="A Nextflow run: a head job on this machine runs the pipeline, and each step runs as its own Batch job on a machine sized for it (Tasks below)."><span>Nextflow · {tasks.length} tasks{r.machine && <span className="dim"> + {r.machine} head</span>}</span></Tooltip></>
