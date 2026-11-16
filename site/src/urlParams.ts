@@ -286,6 +286,11 @@ export const URL_PARAMS: Record<string, UrlParamDoc> = {
     description: 'Narrows the map to one owner pool or person: bare `o` is unowned bytes, `o=*` owned bytes, `o=me` your own, `o=<key>` one person\'s, and `o=!<key>,<key>` bytes owned by anyone other than those people. The older spellings `unowned`, `owned`, `unclaimed` and `claimed` are rewritten. It applies only on deployments with ownership, and when absent, everything is shown.',
     examples: ['', '*', 'me', '!rw'],
   },
+  obj: {
+    label: 'Objects over time',
+    description: 'When present, the size-over-time chart plots object counts instead of stored bytes. The values (`ym`) and range (`xr`) apply to it the same way. When absent, it plots bytes.',
+    examples: [''],
+  },
   og: {
     label: 'Preview token',
     description: 'A per-view token that lets link unfurlers show a detailed preview card. It grants no access, and is removed from the address bar on load so a re-share doesn\'t carry it.',
