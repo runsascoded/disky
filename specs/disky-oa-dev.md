@@ -45,7 +45,7 @@ Fixture previews verify formatting and rendering only. Approval of a first real 
   - **No D1.** `@open-athena/auth`'s gate needs a grant store, but only share links and Bearer tokens read it. Here it's an empty one (`NO_GRANTS`: every lookup misses, every write refused). A session is a signed cookie under `SESSION_SECRET`, judged by its signature. The policy admits `STAFF_DOMAIN` (comma-separated), a var the spec didn't list.
   - A Bearer token or `?key=` link is refused, never looked up.
   - Locally, `DEV_EMAIL` (`.dev.vars` only) makes a localhost request that address.
-- **`/api/fleet`** fetches each deployment's `/api/health`, `/api/scan-runs` and `/api/series?store=meta` (the `/meta` store's bytes per scan), with that deployment's token. `/api/scan-runs` takes no `limit`, so the fleet keeps the newest `FLEET_RUNS` (default 14), maintenance runs (`compact`, `race`, `merge`) and no-op (`nop`) runs left out.
+- **`/api/fleet`** fetches each deployment's `/api/health`, `/api/scan-runs` and `/api/series?store=meta` (the `/meta` store's bytes per scan), with that deployment's token. `/api/scan-runs` takes no `limit`, so the fleet keeps the runs started in the card's window (`WINDOW_DAYS`, 7) whatever a deployment's scan rate, plus its newest even when older, capped at `FLEET_RUNS` (default 200); maintenance runs (`compact`, `race`, `merge`) and no-op (`nop`) runs left out.
   - It returns one JSON (`functions/_lib/fleetTypes.ts`), per deployment:
     - `health`: newest scan, its age, gaps summed.
     - `last` and `runs`: id, scan, start, duration, status, `failed_at`, open step issues, cost.
@@ -58,7 +58,7 @@ Fixture previews verify formatting and rendering only. Approval of a first real 
 - **The card** (`/og/fleet.png?[theme=light&]v=…&sig=…`): stacked panels over the last 7 UTC days, one trace per deployment in its color, each labelled at its latest point in a right gutter, as in the layout mock:
   - `/meta` size, log y
   - scan duration, with filled = ok and hollow = a step issue still open, or the run failed
-  - cost per scan
+  - cost per UTC day (the day's runs summed, so a deployment scanning 4× a day is comparable with a daily one; complete days only, today being partial)
 
   Each panel's note names the deployments it has no data for. The card is designed 480 px wide (phone width) and rasterized at 2.5× (1200 px). It sits on its own opaque, bordered background, so it reads the same in Slack's light and dark themes. `theme=light` is for the page. Lines get a halo (the panel color on dark, the line color darkened on light, so hf's yellow holds on white), and labels are the color nudged toward the ink.
 

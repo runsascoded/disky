@@ -104,7 +104,7 @@ describe('/api/fleet\'s document over stubbed deployments', () => {
   it('keeps the newest `FLEET_RUNS` runs', async () => {
     const doc = await readFleet(env({ FLEET_RUNS: '1' }), NOW, stubFetch(ANSWERS))
     expect(doc.deployments[0].runs.map(r => r.run_id)).toEqual(['r1'])
-    expect([runsOf(env()), runsOf(env({ FLEET_RUNS: '0' })), runsOf(env({ FLEET_RUNS: 'x' })), runsOf(env({ FLEET_RUNS: '30' }))]).toEqual([14, 14, 14, 30])
+    expect([runsOf(env()), runsOf(env({ FLEET_RUNS: '0' })), runsOf(env({ FLEET_RUNS: 'x' })), runsOf(env({ FLEET_RUNS: '30' }))]).toEqual([200, 200, 200, 30])
   })
 
   it('a meta store with no points has no sizes', () => {

@@ -74,6 +74,23 @@ const runPts = (runs: FleetRun[], from: number, v: (r: FleetRun) => number | nul
     .map(r => ({ t: r.started!, v: v(r)!, hollow: r.open_issues.length > 0 || r.status === 'failed' }))
     .sort((a, b) => a.t - b.t)
 
+/** Each complete UTC day's summed run cost (a deployment scanning 4× a day costs 4 runs' worth), at the day's middle;
+ *  hollow when any of its runs failed or left a step issue open. Today is partial, so it's left out. */
+const dayCost = (runs: FleetRun[], from: number, now: number): Pt[] => {
+  const today = Math.floor(now / DAY) * DAY
+  const days = new Map<number, Pt>()
+  for (const r of runs) {
+    if (r.started === null || r.started < from || r.status === 'running' || r.cost_usd === null) continue
+    const d = Math.floor(r.started / DAY) * DAY
+    if (d >= today) continue
+    const p = days.get(d) ?? { t: d + DAY / 2, v: 0, hollow: false }
+    p.v += r.cost_usd
+    p.hollow = p.hollow || r.open_issues.length > 0 || r.status === 'failed'
+    days.set(d, p)
+  }
+  return [...days.values()].sort((a, b) => a.t - b.t)
+}
+
 const missing = (names: string[], what: string): string => (names.length ? `${names.join(', ')}: ${what}` : '')
 
 /** The panels' contents for a full card. */
@@ -92,21 +109,21 @@ function panels(doc: FleetDoc, from: number): PanelSpec[] {
     const du = runPts(d.runs, from, r => (r.secs === null ? null : r.secs / 3600))
     if (du.length) dur.push({ name: d.name, color: d.color, pts: du, label: `${d.name} ${du[du.length - 1].v.toFixed(1)}h` })
     else noDur.push(d.name)
-    const c = runPts(d.runs, from, r => r.cost_usd)
-    if (c.length) cost.push({ name: d.name, color: d.color, pts: c, label: `${d.name} ${fmtUsd(c[c.length - 1].v)}` })
+    const c = dayCost(d.runs, from, doc.now)
+    if (c.length) cost.push({ name: d.name, color: d.color, pts: c, label: `${d.name} ${fmtUsd(c[c.length - 1].v)}/d` })
     else noCost.push(d.name)
   }
   return [
     { title: '/meta store size', note: missing(noMeta, 'n/a'), h: 118, log: true, traces: meta },
     { title: 'scan duration (h)', note: missing(noDur, 'no scans'), h: 118, log: false, traces: dur },
-    { title: 'cost per scan ($)', note: missing(noCost, 'not recorded'), h: 100, log: false, traces: cost },
+    { title: 'cost per day ($, complete UTC days)', note: missing(noCost, 'not recorded'), h: 100, log: false, traces: cost },
   ]
 }
 
 const ANON_PANELS: Omit<PanelSpec, 'traces' | 'note'>[] = [
   { title: '/meta store size', h: 118, log: true },
   { title: 'scan duration (h)', h: 118, log: false },
-  { title: 'cost per scan ($)', h: 100, log: false },
+  { title: 'cost per day ($, complete UTC days)', h: 100, log: false },
 ]
 
 /** A panel's y scale: its ticks (value, label) and value → y. */
