@@ -175,6 +175,9 @@ jobs:
     if: github.event_name != 'workflow_dispatch'
     name: dt-cloud tests (${{ matrix.python-version }}, ${{ matrix.shard.name }})
     runs-on: ubuntu-latest
+    # The slowest shard takes ~26 min; a hung test (r2 run 43906785571: `test_tree_mem.py::test_a_cut_worker_holds_its_estimate`)
+    # otherwise holds the job for GitHub's 6 h default.
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
