@@ -40,7 +40,7 @@ export function line(d: FleetDeployment): string {
   if (r) parts.push(`<${d.url}/scans/${encodeURIComponent(r.run_id)}|${r.scan}>`, word)
   else parts.push(word)
   if (r && r.status !== 'running' && r.secs !== null) parts.push(fmtHours(r.secs))
-  if (r) parts.push(r.cost_usd === null ? 'cost n/a' : fmtUsd(r.cost_usd))
+  if (r && r.status !== 'running') parts.push(r.cost_usd === null ? 'cost n/a' : fmtUsd(r.cost_usd))
   const m = d.meta
   if (m && m.now !== null) parts.push(`/meta ${fmtSI(m.now)}${m.d7 !== null ? ` (${delta(m.now - m.d7)} 7d)` : ''}`)
   else parts.push('/meta n/a')

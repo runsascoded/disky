@@ -38,7 +38,7 @@ describe('the fleet\'s Slack post', () => {
               ':grey_question: *<https://b.test|b>*  unreachable (HTTP 503) · /meta n/a',
               ':x: *<https://c.test|c>*  <https://c.test/scans/r|2026-11-06> · failed at index · 1.0h · cost n/a · /meta 884 MB · newest scan 2d old',
               ':white_check_mark: *<https://d.test|d>*  <https://d.test/scans/r|2026-11-07> · ok · 30m · $0.13 · /meta 1.50 TB (−100 GB 7d)',
-              ':hourglass_flowing_sand: *<https://e.test|e>*  <https://e.test/scans/r|2026-11-07> · running · cost n/a · /meta n/a',
+              ':hourglass_flowing_sand: *<https://e.test|e>*  <https://e.test/scans/r|2026-11-07> · running · /meta n/a',
               ':white_circle: *<https://f.test|f>*  no scans · /meta n/a',
             ].join('\n'),
           },
