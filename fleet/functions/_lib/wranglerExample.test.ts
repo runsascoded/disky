@@ -14,7 +14,7 @@ describe('wrangler.example.toml', () => {
     expect(fields.filter(k => !new RegExp(`\\b${k}\\b`).test(toml))).toEqual([])
     expect(fields).toEqual([
       'SESSION_SECRET', 'STAFF_DOMAIN', 'OA_LOGIN_ISSUER', 'OA_LOGIN_CLIENT_ID', 'OA_LOGIN_CLIENT_SECRET', 'FLEET_JSON', 'FLEET_RUNS',
-      'FLEET_JOB_TOKEN', 'DISKY_SLACK_BOT_TOKEN', 'SLACK_FLEET_CHANNEL', 'SLACK_FLEET_TS', 'FLEET_KV',
+      'FLEET_CARD_PUBLIC', 'FLEET_JOB_TOKEN', 'DISKY_SLACK_BOT_TOKEN', 'SLACK_FLEET_CHANNEL', 'SLACK_FLEET_TS', 'FLEET_KV',
     ])
   })
 })
