@@ -103,6 +103,7 @@ STAGING = "1"
 # buttons may dispatch (plan-sweep). Secrets: SLACK_BOT_TOKEN, SLACK_SIGNING_SECRET.
 SLACK_ADMIN_CHANNEL = "C0C53CPM886"
 EXECUTOR = "plan-sweep"
+STAGED_CARD_GRANT = "2EjUTg692KMP"   # the job's grant (`cw-s3-job-grant`, its SITE_TOKEN): the scan's `staged-card` step re-renders the open plan's Slack card at the new scan (`/api/plans/staged/card`); prod only, dev names none
 # The Batch job account the sweep console dispatches as (`infra/gcp`: `cw-s3-job`;
 # `GCP_SA_KEY` is the `cw-s3-dispatch` key that may act as it).
 JOB_SA = "cw-s3-job@oa-internal-450019.iam.gserviceaccount.com"

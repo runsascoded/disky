@@ -91,7 +91,7 @@ pass: [DT_RECORD, DT_ALERTS]
 # since the reviewed one-off by hand (2026-10-18: 167 scans, ~874 GB over GCS + R2)
 # `gcp-cost`: the day's GCP cost snapshot (`/admin/cost/gcp`), `cf-usage` the Cloudflare one (`/admin/usage`), `soft-delete`
 # what each bucket retains (`/admin`); all never fatal
-steps: [retire, gcp-cost, cf-usage, soft-delete, store-gc]
+steps: [retire, gcp-cost, cf-usage, soft-delete, store-gc, staged-card]
 labels: {deployment: cw}
 queue_size: 20
 options:
