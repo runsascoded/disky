@@ -34,6 +34,8 @@ export interface ScanRun {
   /** Who started a manual run (`$DT_TRIGGER_BY`: the site dispatcher's address, or what a hand submit names). Absent
    * before migration `scan-run-trigger-by` and for public viewers; null when unknown or not manual. */
   trigger_by?: string | null
+  /** The starter's Slack emoji (`:name:`), asked of the broker when the list is read with `emoji=1`; absent when none. */
+  trigger_emoji?: string
 }
 
 export interface ScanRunPhase {

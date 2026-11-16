@@ -3,6 +3,10 @@
 //   GET /api/scan-runs[?store=<key>]          { configured, runs: RunSummary[], project, meta, dispatch }     viewer
 //   GET /api/scan-runs/:run_id[?store=<key>]  { ...ScanRunDetail, dag, project, meta }               viewer
 //
+// `emoji=1` (the scan-health thread's read, `dt_cloud.nominal`): each manual run's starter's Slack emoji
+// (`trigger_emoji`), asked of OA's broker (`OA_LOGIN_*`, the deployment's own client) and never stored; nothing for a
+// public viewer, or without the broker's client. Off by default: the page never asks, and the broker rate-limits.
+//
 // A manual run's starter (`trigger_by`: an address) reaches signed-in viewers and grants only, never a public one.
 //
 // Rows come from D1 (`dt-cloud scan-run record | backfill`), scoped to the
@@ -16,8 +20,20 @@
 import type { D1Database } from '@cloudflare/workers-types'
 import { type Env as AuthEnv, json, requireViewer } from '../../_lib/auth.js'
 import { dispatchState, missingTable, STORE, submitJob } from '../../_lib/scanDispatch.js'
-import { loadDag, loadScanRuns, scanRunDetail, scanRunsList, withoutStarters } from '../../_lib/scanRuns.js'
+import { slackEmojiClient } from '@open-athena/auth/oidc'
+import { loadDag, loadScanRuns, scanRunDetail, scanRunsList, withoutStarters, withStarterEmoji } from '../../_lib/scanRuns.js'
 import { storeKey, withStore } from '../../_lib/stores.js'
+
+/** One broker emoji client per isolate (it caches answers 10 min), per issuer + client. */
+const emojiClients = new Map<string, ReturnType<typeof slackEmojiClient>>()
+const emojiClient = (env: AuthEnv): ReturnType<typeof slackEmojiClient> | null => {
+  const { OA_LOGIN_ISSUER: issuer, OA_LOGIN_CLIENT_ID: clientId, OA_LOGIN_CLIENT_SECRET: clientSecret } = env
+  if (!issuer || !clientId || !clientSecret) return null
+  const key = `${issuer}|${clientId}`
+  let c = emojiClients.get(key)
+  if (!c) emojiClients.set(key, c = slackEmojiClient({ issuer, clientId, clientSecret }))
+  return c
+}
 
 type Env = AuthEnv & { DB?: D1Database; GCP_PROJECT?: string; META_TREE_URL?: string; GCP_SA_KEY?: string; SCAN_SUBMIT_JOB?: string }
 
@@ -33,7 +49,9 @@ export const onRequestGet = async (ctx0: { request: Request; env: Env; params?: 
   if (!db) return json({ error: 'no D1 bound' }, 503)
   const p = ctx.params?.path
   const id = decodeURIComponent((Array.isArray(p) ? p.join('/') : p) ?? '')
-  const rows = withoutStarters(await loadScanRuns(db, storeKey(ctx.env)), gated)
+  const loaded = withoutStarters(await loadScanRuns(db, storeKey(ctx.env)), gated)
+  const emoji = gated.via !== 'public' && new URL(ctx.request.url).searchParams.get('emoji') === '1' ? emojiClient(ctx.env) : null
+  const rows = emoji ? await withStarterEmoji(loaded, emoji.getMany) : loaded
   const now = Math.floor(Date.now() / 1000)
   const links = { project: ctx.env.GCP_PROJECT ?? null, meta: ctx.env.META_TREE_URL ?? null }
   const headers = { 'cache-control': 'private, max-age=15' }
