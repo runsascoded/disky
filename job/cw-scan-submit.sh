@@ -8,10 +8,11 @@
 # Transient failures (429, 5xx, connection) are retried for `$SUBMIT_RETRY_S` (default 30 min). If the submit still
 # fails, this posts to #cw-s3-admin (`$SLACK_ALERT_CHANNEL`, with `$SLACK_BOT_TOKEN`) and exits nonzero.
 #
-# A manual scan (`DT_TRIGGER=manual`: the site's "Run a scan", `/api/scan-runs/dispatch`, runs this job with that one
-# override, the only variable the job lets a run change) is the same spec with `DT_TRIGGER=manual` in its env, named for
-# the second (`cw-usage-snapshot-YYYYMMDD-HHMMSS`, as hand submits are), so it never meets the slot's job; its alert
-# says it was manual. Unset (the cron), nothing here differs.
+# A manual scan (`DT_TRIGGER=manual`: the site's "Run a scan", `/api/scan-runs/dispatch`, runs this job with that
+# override and `DT_TRIGGER_BY`, the admin who started it: the only variables the job lets a run change) is the same spec
+# with `DT_TRIGGER=manual` and `DT_TRIGGER_BY` (`scan_runs.trigger_by`; only an address or handle, `TRIGGER_BY_RE`, else
+# unrecorded and the scan still starts) in its env, named for the second (`cw-usage-snapshot-YYYYMMDD-HHMMSS`, as hand
+# submits are), so it never meets the slot's job; its alert says it was manual. Unset (the cron), nothing here differs.
 set -uo pipefail
 
 PROJECT=oa-internal-450019
@@ -34,14 +35,21 @@ case "$trigger" in
     slot_job=$(date -u +cw-usage-snapshot-%Y%m%d-%H%M%S)
     # the cron's spec, its run recorded as manual (`scan_runs.trigger`); refused unless it carries the cron's trigger
     python3 - "$spec" <<'PY' || { rm -f "$spec" "$log"; exit 2; }
-import json, sys
+import json, os, sys
+from dt_cloud.scan_runs import TRIGGER_BY_RE
 path = sys.argv[1]
+who = (os.environ.get("DT_TRIGGER_BY") or "").strip()
+if who and not TRIGGER_BY_RE.fullmatch(who):
+    print("note: DT_TRIGGER_BY is not an address or handle; the run's starter goes unrecorded", file=sys.stderr)
+    who = ""
 spec = json.load(open(path))
 envs = [g["taskSpec"]["environment"]["variables"] for g in spec["taskGroups"]]
 if not envs or any(v.get("DT_TRIGGER") != "schedule" for v in envs):
     sys.exit("BATCH_SPEC: want DT_TRIGGER=schedule in every task group's env, to make it manual")
 for v in envs:
     v["DT_TRIGGER"] = "manual"
+    if who:
+        v["DT_TRIGGER_BY"] = who
 json.dump(spec, open(path, "w"))
 PY
     dt-cloud batch submit -c scan -p "$PROJECT" -L "$REGION" -e -r "${SUBMIT_RETRY_S:-1800}" "$slot_job" "$spec" 2>&1 | tee "$log"
