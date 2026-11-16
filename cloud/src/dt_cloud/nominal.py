@@ -23,6 +23,9 @@ if TYPE_CHECKING:
     from .scan_runs import JobRun
 
 
+GROUPS = ('clean', 'color', 'signature')
+
+
 @dataclass(frozen=True)
 class Config:
     state: str
@@ -33,6 +36,12 @@ class Config:
     kind: str = "scan"
     adopt_parent: str | None = None
     site_token_secret: str | None = None
+    #: How runs group into threads (`GROUPS`): `clean` threads only clean runs, a failure closing the thread (its alert
+    #: posts top-level); `color` also threads consecutive failed runs; `signature` threads consecutive failed runs only
+    #: while they fail the same way (`signature`: the failed phase, or the phases with issues). Under `color` and
+    #: `signature` the thread is the failure's report: a run's `fail` alerts defer to it (`defers_failures`), and post
+    #: top-level only if the run isn't a reply in a failure thread once the report has run.
+    group: str = "clean"
 
     def __post_init__(self) -> None:
         if not self.site.startswith("https://") or urlparse(self.site).query or urlparse(self.site).fragment:
@@ -43,6 +52,8 @@ class Config:
             raise ValueError("nominal.state: a GCS URL or local directory (generation lease required)")
         if not self.state or not self.title or not self.store or not self.kind:
             raise ValueError("nominal: state, title, store and kind must be nonempty")
+        if self.group not in GROUPS:
+            raise ValueError(f"nominal.group: one of {', '.join(GROUPS)}")
 
     @property
     def namespace(self) -> str:
@@ -88,6 +99,57 @@ def streak(rows: list[dict]) -> tuple[list[dict], dict | None]:
     return result, None
 
 
+def signature(row: dict) -> str:
+    """How a non-clean run failed, for `signature` grouping: the phase it failed in (`failed:<phase>`), else the phases
+    its issues name (`issues:<a>,<b>`), else its status. Error text is left out: it carries times, ids and sizes that
+    differ between runs failing the same way."""
+    run = row['run']
+    if run['status'] == 'failed':
+        return f"failed:{run.get('failed_phase') or ''}"
+    if row['phase_issues']:
+        return 'issues:' + ','.join(sorted({str(i.get('phase')) for i in row['phase_issues']}))
+    return run['status']
+
+
+def key(cfg: Config, row: dict) -> str | None:
+    """A run's thread key: `clean`, the failure thread it joins, or None (no thread: `clean` grouping's failures)."""
+    if clean(row):
+        return 'clean'
+    return None if cfg.group == 'clean' else 'fail' if cfg.group == 'color' else 'fail:' + signature(row)
+
+
+def segment(cfg: Config, rows: list[dict]) -> tuple[str | None, list[dict], dict | None]:
+    """The newest runs sharing the head's thread key, and the run before them (None: the history's start)."""
+    head = key(cfg, rows[0]) if rows else None
+    if head is None:
+        return None, [], rows[0] if rows else None
+    out: list[dict] = []
+    for row in rows:
+        if key(cfg, row) != head:
+            return head, out, row
+        out.append(row)
+    return head, out, None
+
+
+#: An error in a reply: one line, clipped, with nothing Slack reads as a link, mention or code span
+_MARKUP = str.maketrans({'<': '‹', '>': '›', '`': "'", '\n': ' ', '\r': ' '})
+
+
+def describe(row: dict) -> str:
+    run = row['run']
+    if run['status'] == 'failed':
+        error = ' '.join(str(run.get('error') or '').translate(_MARKUP).split())
+        error = error if len(error) <= 160 else error[:159] + '…'
+        return 'failed' + (f" in {run['failed_phase']}" if run.get('failed_phase') else '') + (f": {error}" if error else '')
+    if row['phase_issues']:
+        return 'phase issues: ' + ', '.join(sorted({str(i.get('phase')) for i in row['phase_issues']}))
+    return str(run['status'])
+
+
+def plural(n: int, word: str) -> str:
+    return f"{n} {word}" + ('' if n == 1 else 's')
+
+
 def stamp(row: dict) -> str:
     return datetime.fromtimestamp(row['run']['started_ts'], timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
 
@@ -101,26 +163,50 @@ TRIGGER_EMOJI = {'schedule': ':alarm_clock:', 'manual': ':bust_in_silhouette:', 
 
 
 def reply(cfg: Config, row: dict) -> str:
+    """A run's line in its thread: ✅ or ❌, the trigger, its time linked to its record, the duration, who started it
+    (a manual run that recorded it), and a failed run's reason."""
     seconds = row.get('secs')
     duration = 'duration unknown' if seconds is None else f"{int(seconds) // 60}m {int(seconds) % 60:02d}s"
     by = row['run'].get('trigger_by') if row['run']['trigger'] == 'manual' else None
     by = by if by and TRIGGER_BY_RE.fullmatch(by) else None  # never markup into mrkdwn, whatever a row holds
     face = row['run'].get('trigger_emoji') if by else None
     emoji = face if face and SLACK_EMOJI_RE.fullmatch(face) else TRIGGER_EMOJI[row['run']['trigger']]
-    return f"✅ {emoji} [{stamp(row)}]({cfg.link(row['run'])}) · {duration}" + (f" · {by}" if by else "")
+    ok = clean(row)
+    return (f"{'✅' if ok else '❌'} {emoji} [{stamp(row)}]({cfg.link(row['run'])}) · {duration}" + (f" · {by}" if by else "")
+            + ('' if ok else f" · {describe(row)}"))
 
 
 def parent(cfg: Config, good: list[dict], boundary: dict | None) -> str:
+    """The thread's head: a clean thread's streak, or a failure thread's (`failed`)."""
+    if good and not clean(good[0]):
+        return failed(cfg, good, boundary)
     window = good[:10]
     counts = {k: sum(r['run']['trigger'] == k for r in window) for k in ('schedule', 'manual', None)}
     mix = f"{counts['schedule']} scheduled / {counts['manual']} manual" + (f" / {counts[None]} unknown" if counts[None] else '')
     since = stamp(good[-1])
     qualifier = '' if boundary else 'at least '
     after = f" after [{boundary['run']['scan']}]({cfg.link(boundary['run'])})" if boundary else ' (available run history)'
-    return (f"✅ **{cfg.title}: {qualifier}{len(good)} consecutive clean runs**\n\n"
+    return (f"✅ **{cfg.title}: {qualifier}{len(good)} consecutive clean run{'' if len(good) == 1 else 's'}**\n\n"
             f"Since {since}{after}.\n\n"
             f"Latest completed: [{stamp(good[0])}]({cfg.link(good[0]['run'])}).\n\n"
-            f"Latest {len(window)} runs: {mix}. Each reply links its scan record. [All scans]({cfg.scans}).")
+            f"Latest {plural(len(window), 'run')}: {mix}. Each reply links its scan record. [All scans]({cfg.scans}).")
+
+
+def failed(cfg: Config, bad: list[dict], boundary: dict | None) -> str:
+    """A failure thread's head: how many runs in a row failed (under `signature`, failed the same way), since when and
+    after which run (the last clean one, or the last that failed differently), and the newest failure's reason."""
+    qualifier = '' if boundary else 'at least '
+    how = ''
+    if cfg.group == 'signature':
+        run = bad[0]['run']
+        how = (f" in {run['failed_phase']}" if run['status'] == 'failed' and run.get('failed_phase') else
+               ' with phase issues' if run['status'] != 'failed' and bad[0]['phase_issues'] else '')
+    after = (f" after [{boundary['run']['scan']}]({cfg.link(boundary['run'])})" + (' (clean)' if clean(boundary) else f" ({describe(boundary)})")
+             if boundary else ' (available run history)')
+    return (f"❌ **{cfg.title}: {qualifier}{len(bad)} consecutive failed run{'' if len(bad) == 1 else 's'}{how}**\n\n"
+            f"Since {stamp(bad[-1])}{after}.\n\n"
+            f"Latest: [{stamp(bad[0])}]({cfg.link(bad[0]['run'])}): {describe(bad[0])}.\n\n"
+            f"Each reply links its scan record. [All scans]({cfg.scans}).")
 
 
 def missing(good: list[dict], posted: dict) -> list[dict]:
@@ -258,15 +344,22 @@ def converge(
             raise RuntimeError(f"nominal: send remains ambiguous ({pending['operation']}); inspect Slack and the persisted intent; no resend attempted")
     if not rows or rows[0]['run']['status'] == 'running' or rows[0]['run']['finished_ts'] is None:
         return state
-    good, boundary = streak(rows)
+    head, good, boundary = segment(cfg, rows)
     boundary_id = boundary['run']['run_id'] if boundary else None
+    was = state.get('key', 'clean')
     if good and boundary is None and state.get('parent') and state.get('boundary') is not None:
         raise ValueError('nominal: run history no longer covers the recorded streak boundary')
-    if state.get('parent') and (not good or state.get('boundary') != boundary_id):
+    if state.get('parent') and (not good or was != head or state.get('boundary') != boundary_id):
         if not state.get('closed'):
-            stop = boundary or rows[0]
-            reason = stop['run']['status'] if not stop['phase_issues'] else 'phase issues'
-            body = f"**{cfg.title}: clean-run sequence ended**\n\n[{stamp(stop)}]({cfg.link(stop['run'])}): {reason}. [All scans]({cfg.scans})."
+            # What ended the thread: the run after its newest reply (else, as before replies existed, the boundary)
+            newest = next((i for i, r in enumerate(rows) if r['run']['run_id'] in state.get('posted', {})), None)
+            stop = rows[newest - 1] if newest else boundary or rows[0]
+            if was == 'clean':
+                reason = stop['run']['status'] if not stop['phase_issues'] else 'phase issues'
+                body = f"**{cfg.title}: clean-run sequence ended**\n\n[{stamp(stop)}]({cfg.link(stop['run'])}): {reason}. [All scans]({cfg.scans})."
+            else:
+                reason = 'clean' if clean(stop) else describe(stop)
+                body = f"**{cfg.title}: failure sequence ended**\n\n[{stamp(stop)}]({cfg.link(stop['run'])}): {reason}. [All scans]({cfg.scans})."
             check()
             slack.edit(state['parent'], body)
             state['closed'] = True
@@ -274,13 +367,21 @@ def converge(
         if good:
             state.clear()
             state.update(namespace=cfg.namespace, boundary=boundary_id, posted={})
+            if head != 'clean':
+                state['key'] = head
             persist()
     if not good:
         return state
     state['boundary'] = boundary_id
+    if head == 'clean':
+        state.pop('key', None)
+    else:
+        state['key'] = head
+    # A clean thread keeps the operation ids it always had; a failure thread's name its key too
+    scope = boundary_id if head == 'clean' else f'{head}|{boundary_id}'
 
     def send(key: str, body: str, root: str | None) -> None:
-        operation = str(uuid5(NAMESPACE_URL, f'{cfg.namespace}|{boundary_id}|{key}'))
+        operation = str(uuid5(NAMESPACE_URL, f'{cfg.namespace}|{scope}|{key}'))
         pending = {'key': key, 'body': body, 'parent': root, 'operation': operation, 'since': now() - 1}
         state['pending'] = pending
         persist()
@@ -313,6 +414,7 @@ def run(
     run_id: str | None = None,
     execute: bool = False,
     adopt_check: bool = False,
+    final: list[dict] | None = None,
 ) -> str:
     from .append_runner import GcsLeaseFile, LocalLeaseFile, coordinator_lease
     from .blobstore import Store
@@ -347,7 +449,7 @@ def run(
         rows = read_rows()
         if not rows or rows[0]['run']['status'] == 'running' or rows[0]['run']['finished_ts'] is None:
             return 'nominal: waiting for a terminal run'
-        good, boundary = streak(rows)
+        head, good, boundary = segment(cfg, rows)
         if not good:
             return 'nominal: no clean streak'
         pending_rows = good[:10]
@@ -360,7 +462,8 @@ def run(
                 raise ValueError('nominal: state belongs to another site/store/channel')
             if state.get('pending'):
                 raise RuntimeError('nominal: pending send needs reconciliation before a publish plan can be rendered')
-            pending_rows = missing(good, state.get('posted', {})) if state.get('boundary') == (boundary['run']['run_id'] if boundary else None) else good[:10]
+            same = state.get('boundary') == (boundary['run']['run_id'] if boundary else None) and state.get('key', 'clean') == head
+            pending_rows = missing(good, state.get('posted', {})) if same else good[:10]
         return '\n\n+++\n\n'.join([parent(cfg, good, boundary), *(reply(cfg, r) for r in reversed(pending_rows))])
     bot = (env.get('SLACK_BOT_TOKEN') or '').strip()
     if not bot:
@@ -376,22 +479,43 @@ def run(
         check()
         save(state)
         state = converge(cfg, rows, state, slack, save, check)
+    if final is not None:
+        final.append(state)
     return f"nominal: parent {state.get('parent', 'none')}; {len(state.get('posted', {}))} run replies"
 
 
+def defers_failures(job: JobRun) -> bool:
+    """Whether this run's `fail` alerts wait for its thread: a failure-grouping thread (`color`, `signature`) reports
+    this deployment's top-level runs of its kind and store, and nothing suppresses the report."""
+    if not job.profile.nominal or not job.recording or job.dry_run or (job.env.get('DT_ALERTS') or '').strip() in ('stderr', 'off', '0'):
+        return False
+    cfg = config(job.profile.nominal)
+    facts = job.state()
+    return (cfg.group != 'clean' and not facts.get('parent') and facts.get('kind', 'scan') == cfg.kind
+            and facts.get('store', job.profile.store) == cfg.store)
+
+
 def report_job(job: JobRun) -> None:
-    """Opt-in finalizer: failure is logged/redacted, never substituted for the scan's exit status."""
+    """Opt-in finalizer: failure is logged/redacted, never substituted for the scan's exit status. A run's deferred
+    `fail` alerts post top-level unless the run is now a reply in a failure thread."""
     if not job.profile.nominal or not job.recording or job.dry_run or (job.env.get('DT_ALERTS') or '').strip() in ('stderr', 'off', '0'):
         return
-    try:
-        from .scan_runs import err
+    from .scan_runs import err
 
+    deferred = list(job.state().get('deferred_alerts') or [])
+    threaded = False
+    try:
         facts = job.state()
         cfg = config(job.profile.nominal)
         if facts.get('parent') or facts.get('kind', 'scan') != cfg.kind or facts.get('store', job.profile.store) != cfg.store:
             return
-        err(run(job.profile.nominal, job.env, job.profile.project, job.run_id, execute=True))
+        final: list[dict] = []
+        err(run(job.profile.nominal, job.env, job.profile.project, job.run_id, execute=True, final=final))
+        state = final[0] if final else {}
+        threaded = state.get('key', 'clean') != 'clean' and job.run_id in state.get('posted', {})
     except Exception as exc:  # Reporting must not fail the job; its failure remains visible in the head log.
-        from .scan_runs import err
-
         err(job.redact(f'nominal report failed: {type(exc).__name__}: {exc}'))
+    finally:
+        if deferred and not threaded:
+            for message in deferred:
+                job.post_alert('fail', message)

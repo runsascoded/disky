@@ -1575,7 +1575,22 @@ class JobRun:
 
     def alert(self, level: str, message: str) -> None:
         """Post a `fail` / `warn` alert through `disk-tree notify`'s channels (or print it, under `DT_ALERTS=stderr`).
-        Never raises: alerting must never mask the failure it reports."""
+        A `fail` waits for the run's scan-health thread when it groups failures (`nominal.defers_failures`): the report
+        posts it then, unless the run became a reply in a failure thread. Never raises: alerting must never mask the
+        failure it reports."""
+        try:
+            from .nominal import defers_failures
+
+            if level == "fail" and defers_failures(self):
+                self.save(deferred_alerts=[*(self.state().get("deferred_alerts") or []), message])
+                err(self.redact(f"alert deferred to the scan-health thread: {message}"))
+                return
+        except Exception as e:  # noqa: BLE001 — a broken nominal config posts the alert now
+            err(self.redact(f"alert deferral failed (posting now): {type(e).__name__}: {e}"))
+        self.post_alert(level, message)
+
+    def post_alert(self, level: str, message: str) -> None:
+        """`alert`'s post, now."""
         try:
             from disk_tree.notify import push
 
