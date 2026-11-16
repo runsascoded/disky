@@ -24,6 +24,7 @@ import { SeriesMissingNote } from './UnionNotes'
 import { defaultNoteAt, noteMarkers, notesHere, type ChartAnnotation, type NoteMarker } from './chartNotes'
 import { NoteForm, NoteTip, useChartNotes, useNoteWrite } from './NoteWidgets'
 import { manualScans } from './scanRunsModel'
+import { fmtCount } from './usageModel'
 import { useScanRuns } from './scanRunsUi'
 import { useActions } from 'use-kbd'
 import { brushDomain, fitToWindow, fmtXr, inXDomain, parseXr, resolveXDomain, spanDomain, type XDomain } from './xDomain'
@@ -115,8 +116,8 @@ function YFromToggle({ v, set, stacked }: { v: YFrom; set: (y: YFrom) => void; s
 // absolute stack answers only for the biggest bucket.
 function ValuesToggle({ v, set }: { v: Values; set: (m: Values) => void }) {
   const opts: [Values, string, string][] = [
-    ['abs', 'abs', 'Stored bytes'],
-    ['delta', 'Δ', 'Bytes gained (or lost) since each trace’s first shown scan — every trace starts at 0, so buckets of any size compare'],
+    ['abs', 'abs', 'The values themselves'],
+    ['delta', 'Δ', 'Gained (or lost) since each trace’s first shown scan — every trace starts at 0, so buckets of any size compare'],
     ['pct', '%', 'Growth since each trace’s first shown scan, as a percentage of its size then'],
   ]
   return (
@@ -129,6 +130,33 @@ function ValuesToggle({ v, set }: { v: Values; set: (m: Values) => void }) {
       ))}
     </span>
   )
+}
+
+// What the chart counts (`?obj` = objects; bytes the default): a store's object count drives its scans' listing and
+// indexing time (and per-request costs) as its bytes drive storage cost, and the series answers both per point.
+type Metric = 'bytes' | 'objects'
+function MetricToggle({ v, set }: { v: Metric; set: (m: Metric) => void }) {
+  const opts: [Metric, string, string][] = [
+    ['bytes', 'bytes', 'Stored bytes per scan'],
+    ['objects', 'objects', 'Objects per scan: what listing and indexing time grow with'],
+  ]
+  return (
+    <span className="gran" role="radiogroup" aria-label="What the chart counts">
+      {opts.map(([m, label, text]) => (
+        <Explain key={m} text={text}>
+          <button role="radio" aria-checked={v === m} className={v === m ? 'on' : ''} onClick={() => set(m)}>{label}</button>
+        </Explain>
+      ))}
+    </span>
+  )
+}
+/** A count on an axis whose ticks are `step` apart: `fmtCount`'s K / M / G, with the decimals that tell the ticks apart. */
+export const fmtCountStep = (y: number, step: number): string => {
+  const a = Math.abs(y)
+  const [div, suf] = a >= 1e9 ? [1e9, 'G'] : a >= 1e6 ? [1e6, 'M'] : a >= 1e3 ? [1e3, 'K'] : [1, '']
+  if (!(step > 0)) return fmtCount(y)
+  const decimals = Math.min(3, Math.max(0, Math.ceil(-Math.log10(step / div))))
+  return `${(y / div).toFixed(decimals)}${suf}`
 }
 
 // Points sit at UTC midnight of each scan's calendar date, so labels format
@@ -217,6 +245,11 @@ export function SizeOverTime({ scans, times, fmt = fmtScan, prefix, user, pool, 
   const values: Values = ymP === 'd' ? 'delta' : ymP === 'p' ? 'pct' : 'abs'
   const setValues = (m: Values) => setYmP(m === 'delta' ? 'd' : m === 'pct' ? 'p' : undefined)
   const relative = values !== 'abs'
+  const [objP, setObjP] = useUrlState('obj', boolParam)
+  const metric: Metric = objP ? 'objects' : 'bytes'
+  const setMetric = (m: Metric) => setObjP(m === 'objects')
+  const val = (p: { bytes: number; objects: number }) => (metric === 'objects' ? p.objects : p.bytes)
+  const noun = metric === 'objects' ? 'objects' : 'bytes'
   // Local-peak/dip callouts (specs/done/obs-axis-indexing.md): on by default, radius
   // is the prominence-suppression distance in days (`?ex=0` off; `?exr=<days>`),
   // floor the least prominence that earns a label, as % of the trace's range
@@ -281,12 +314,12 @@ export function SizeOverTime({ scans, times, fmt = fmtScan, prefix, user, pool, 
   // Every scan's point (the overview strip draws them all), and the displayed range over them (`resolveXDomain`:
   // null = all). The cut applies to every trace, so the stack, the total, the y-fit, the callouts and the notes
   // all follow the visible window.
-  const fullTotal = useMemo(() => (seriesQ.data?.points ?? []).map(p => ({ x: xOfScan(p.date, times), y: p.bytes })).sort((a, b) => a.x - b.x), [seriesQ.data, times])
+  const fullTotal = useMemo(() => (seriesQ.data?.points ?? []).map(p => ({ x: xOfScan(p.date, times), y: val(p) })).sort((a, b) => a.x - b.x), [seriesQ.data, times, metric])
   const xRange = useMemo(() => resolveXDomain(xDomain, fullTotal.map(p => p.x), id => xOfScan(id, times)), [xDomain, fullTotal, times])
   // The diff window in x (shaded on the chart and the strip; callouts mark its ends).
   const winX = useMemo(() => (win ? [xOfScan(win[0], times), xOfScan(win[1], times)] as [number, number] : undefined), [win, times])
-  const toPts = (points: { date: string; bytes: number }[]): Pt[] => points.map(p => ({ x: xOfScan(p.date, times), y: p.bytes })).filter(p => inXDomain(xRange, p.x)).sort((a, b) => a.x - b.x)
-  const total = useMemo(() => toPts(seriesQ.data?.points ?? []), [seriesQ.data, xRange, times])
+  const toPts = (points: { date: string; bytes: number; objects: number }[]): Pt[] => points.map(p => ({ x: xOfScan(p.date, times), y: val(p) })).filter(p => inXDomain(xRange, p.x)).sort((a, b) => a.x - b.x)
+  const total = useMemo(() => toPts(seriesQ.data?.points ?? []), [seriesQ.data, xRange, times, metric])
   // Scans the answer doesn't cover (a filter's static index): gaps in the line, with a muted note — never zeros.
   const gaps = useMemo(
     () => seriesGaps(seriesQ.data?.unindexed?.filter(d => inXDomain(xRange, xOfScan(d, times))), total.map(p => p.x), d => xOfScan(d, times), -Infinity, fmtX),
@@ -312,11 +345,11 @@ export function SizeOverTime({ scans, times, fmt = fmtScan, prefix, user, pool, 
     const rs = seriesQ.data?.roots ?? []
     if (rs.length < 2) return []
     const end = rs.reduce((m, r) => { const d = r.points[r.points.length - 1]?.date; return d && d > m ? d : m }, '')
-    const latest = (r: { points: { date: string; bytes: number }[] }) => { const p = r.points[r.points.length - 1]; return p?.date === end ? p.bytes : -1 }
+    const latest = (r: { points: { date: string; bytes: number; objects: number }[] }) => { const p = r.points[r.points.length - 1]; return p?.date === end ? val(p) : -1 }
     const bySize = [...rs].sort((a, b) => latest(b) - latest(a))
     const slot = new Map(bySize.map((r, i) => [r.path, i]))
     return rs.map(r => ({ key: r.path, color: slotColor(slot.get(r.path)!), points: toPts(r.points) }))
-  }, [seriesQ.data, xRange, times])
+  }, [seriesQ.data, xRange, times, metric])
   // The x before which the total lacks a root — the total is dashed there.
   const genesis = useMemo(() => youngestGenesis(roots), [roots])
   // The relative modes' traces: each root, and the total, against its own
@@ -361,13 +394,14 @@ export function SizeOverTime({ scans, times, fmt = fmtScan, prefix, user, pool, 
     const min = relative ? Math.min(0, ...ys) : yFrom === 'data' ? Math.min(...ys) : 0
     // Fit mode pads 5% each side (TimeSeries), so tick that slightly wider range.
     const pad = yFrom === 'data' ? (max - min) * 0.05 : 0
-    return unitTicks(relative ? min - pad : Math.max(0, min - pad), max + pad, units === 'iec' ? 1024 : 1000)
-  }, [series, units, yFrom, values, relative])
+    return unitTicks(relative ? min - pad : Math.max(0, min - pad), max + pad, units === 'iec' && metric === 'bytes' ? 1024 : 1000)
+  }, [series, units, yFrom, values, relative, metric])
   // A fitted axis can span a sliver of a large total: its labels (ticks,
   // tooltip, callouts) carry enough decimals to tell the ticks apart.
   const tickStep = yTickValues && yTickValues.length > 1 ? yTickValues[1] - yTickValues[0] : 0
-  const fmtFit = (y: number) => fmtBytesStep(y, tickStep, units, suffixB)
-  const fmtY = values === 'pct' ? fmtPct : relative ? (y: number) => signed(y, fmtBytes(Math.abs(y))) : yFrom === 'data' ? fmtFit : fmtBytes
+  const fmtVal = metric === 'objects' ? fmtCount : fmtBytes
+  const fmtFit = (y: number) => (metric === 'objects' ? fmtCountStep(y, tickStep) : fmtBytesStep(y, tickStep, units, suffixB))
+  const fmtY = values === 'pct' ? fmtPct : relative ? (y: number) => signed(y, fmtVal(Math.abs(y))) : yFrom === 'data' ? fmtFit : fmtVal
   const annotations = useMemo((): Annotation[] => {
     const radius = extrema ? radiusDays * DAY : undefined
     const floor = floorPct / 100
@@ -385,11 +419,11 @@ export function SizeOverTime({ scans, times, fmt = fmtScan, prefix, user, pool, 
       for (const s of series) if (s.key !== 'total') for (const b of s.points as Band[]) top.set(b.x, Math.max(top.get(b.x) ?? -Infinity, b.y))
       for (const s of series) {
         if (s.key === 'total') continue
-        for (const c of bandCallouts(s.points as Band[], radius, floor, top)) out.push({ x: c.x, y: c.y, y0: c.y0, label: fmtBytes(c.h) })
+        for (const c of bandCallouts(s.points as Band[], radius, floor, top)) out.push({ x: c.x, y: c.y, y0: c.y0, label: fmtVal(c.h) })
       }
     }
     return out
-  }, [series, relTotal, roots, stacked, relative, winX, extrema, radiusDays, floorPct, fmtY, fmtBytes])
+  }, [series, relTotal, roots, stacked, relative, winX, extrema, radiusDays, floorPct, fmtY, fmtVal])
 
 
   // Hand-written notes pinned to dates (spec `chart-annotations.md`): drawn inside the plotted span only, so a
@@ -444,19 +478,19 @@ export function SizeOverTime({ scans, times, fmt = fmtScan, prefix, user, pool, 
         <SectionAnchor id="over-time">Size over time</SectionAnchor>
         <Tooltip content={<>
           {user
-            ? <><b>{shortName(user)}</b>’s bytes{prefix ? <> under <code>{prefix}</code></> : ''} per scan.</>
+            ? <><b>{shortName(user)}</b>’s {noun}{prefix ? <> under <code>{prefix}</code></> : ''} per scan.</>
             : pool === 'unowned'
               ? <>Bytes no person owns{prefix ? <> under <code>{prefix}</code></> : ''}, per scan.</>
               : pool === 'owned'
                 ? <>Bytes owned by a person{prefix ? <> under <code>{prefix}</code></> : ''}, per scan.</>
                 : paths?.length
-                  ? <>Stored bytes under “{filterLabel}” ({paths.length} {paths.length === 1 ? 'prefix' : 'prefixes'}) per scan.</>
+                  ? <>{metric === 'objects' ? 'Objects' : 'Stored bytes'} under “{filterLabel}” ({paths.length} {paths.length === 1 ? 'prefix' : 'prefixes'}) per scan.</>
                 : prefix
-                  ? <>Stored bytes under <code>{prefix}</code> per scan.</>
+                  ? <>{metric === 'objects' ? 'Objects' : 'Stored bytes'} under <code>{prefix}</code> per scan.</>
                   : roots.length
-                    ? <>Stored bytes per scan, one {stacked ? 'band' : 'line'} per bucket{genesis != null && <> — the total is dashed before every bucket was in the scan</>}.</>
-                    : <>Total stored bytes per scan ({scopeLabel}).</>}
-          {relative && <> Shown as {values === 'pct' ? 'growth' : 'bytes gained'} since each trace’s first shown scan.</>}
+                    ? <>{metric === 'objects' ? 'Objects' : 'Stored bytes'} per scan, one {stacked ? 'band' : 'line'} per bucket{genesis != null && <> — the total is dashed before every bucket was in the scan</>}.</>
+                    : <>Total {metric === 'objects' ? 'objects' : 'stored bytes'} per scan ({scopeLabel}).</>}
+          {relative && <> Shown as {values === 'pct' ? 'growth' : `${noun} gained`} since each trace’s first shown scan.</>}
           {' '}Each point is that scan’s own index row — exact, at any depth. Click a point to view that scan; drag to set the diff window. Drag across the strip under the chart to zoom (double-click it for every scan).
         </>}>
           <span className="info" aria-label="about this chart" tabIndex={0}>ⓘ</span>
@@ -465,6 +499,7 @@ export function SizeOverTime({ scans, times, fmt = fmtScan, prefix, user, pool, 
           onClick: fitWin, label: 'zoom to the diff window',
           description: 'Zoom to the diff window (with a scan of context each side); the strip under the chart shows where it sits',
         } : undefined} />
+        <MetricToggle v={metric} set={setMetric} />
         <ValuesToggle v={values} set={setValues} />
         {!relative && <YFromToggle v={yFrom} set={setYFrom} stacked={stacked} />}
         {roots.length > 0 && !relative && <LayoutToggle v={layout} set={setLayout} />}
@@ -546,7 +581,7 @@ export function SizeOverTime({ scans, times, fmt = fmtScan, prefix, user, pool, 
           tickXs={manualMark === 'tick' ? manualXs : undefined}
           yTickValues={yTickValues}
           yFrom={relative ? 'zero' : yFrom}
-          yLabel={values === 'pct' ? 'growth' : relative ? 'bytes since start' : 'stored bytes'}
+          yLabel={values === 'pct' ? 'growth' : relative ? `${noun} since start` : metric === 'objects' ? 'objects' : 'stored bytes'}
           height={220}
           annotations={annotations}
           onPickX={onPickDate || canNote ? pickX : undefined}
