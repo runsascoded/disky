@@ -68,6 +68,13 @@ export interface ParentView {
   /** What is still queued: the items no real run has deleted (the title and
    *  "staged by"). */
   queued?: { items: number; batches: number; stagers: string[] }
+  /** What real runs deleted since this thread's parent was posted (`threadDeleted`). Absent: nothing yet, or a parent
+   *  about to be posted (a new thread starts with no history). Present, the counts split into staged (deleted + left),
+   *  deleted and left, so the parent keeps what happened in its thread. */
+  done?: Deleted
+  /** With `done`: who staged in this thread, those whose items are all deleted included (`queued.stagers` names only
+   *  the queued items'). */
+  stagedBy?: string[]
   /** Unix seconds: whether a real run is still undoable (default: now). */
   now?: number
   /** What the last real run's run dir says of its totals (`lastRunOutcome`); absent or null: nothing to add. */
@@ -91,6 +98,15 @@ export interface Sized {
   owners: { label: string; b: number }[]
 }
 
+/** What a thread's real runs deleted (`threadDeleted`): distinct prefixes, and their bands' totals. */
+export interface Deleted {
+  prefixes: number
+  b: number
+  o: number
+  runs: number
+  actors: string[]
+}
+
 const who = (email: string, names?: Names): string => names?.[email.toLowerCase()] ?? email.replace(/@.*$/, '')
 
 /** A staged prefix with nothing under it at the scan (no bytes, no objects;
@@ -102,6 +118,19 @@ export const emptyAt = (st: PrefixStat | undefined): boolean => !st || (!st.byte
 export const totalLine = (items: number, z?: Sized): string => {
   const prefixes = plural(items, 'prefix', 'prefixes')
   return z ? `*${prefixes} · ${fmtBytes(z.b)} · ${fmtCount(z.o)} objects* at scan ${z.scan}` : `*${prefixes}*`
+}
+
+/** The parent's counts. Nothing deleted in its thread: the queue's total (`totalLine`). Once a real run deleted some of
+ *  it: what the thread staged (deleted + left; sized when the queue is), what was deleted and by whom, and what is left. */
+export function tallyLines(items: number, z: Sized | undefined, done: Deleted | undefined, names?: Names): string[] {
+  if (!done) return [totalLine(items, z)]
+  const n = (k: number): string => plural(k, 'prefix', 'prefixes')
+  const runs = `${plural(done.runs, 'real run')}: ${done.actors.map(e => who(e, names)).join(', ')}`
+  return [
+    `staged in this thread: ${n(done.prefixes + items)}${z ? ` · ${fmtBytes(done.b + z.b)} · ${fmtCount(done.o + z.o)} objects` : ''}`,
+    `deleted: ${n(done.prefixes)} · ${fmtBytes(done.b)} · ${fmtCount(done.o)} objects (${runs})`,
+    `left: ${totalLine(items, z)}`,
+  ]
 }
 
 /** The lines under the total: the largest owners only when they hold most of it (a few names beside a mostly unowned
@@ -137,12 +166,20 @@ const undoClause = (r: RunRow, deadline: number, v: Pick<ParentView, 'undoUnavai
     : `${since ? '; the rest' : ','} undoable until ${utc(deadline)}${v.undoUnseen ? ' if the buckets\' soft delete is still on (this site can\'t see it)' : ''}`)
 }
 
+const byLine = (stagers: readonly string[], names?: Names): string => stagers.length ? `staged by ${stagers.map(e => who(e, names)).join(', ')}` : 'nothing staged'
+
+/** The title, with the total beside it (nothing deleted yet) or the staged / deleted / left lines under it, then the
+ *  size notes. */
+function titled(title: string, items: number, v: Pick<ParentView, 'size' | 'done' | 'names'>): string[] {
+  const [first, ...rest] = tallyLines(items, v.size, v.done, v.names)
+  return [...(v.done ? [title, first] : [`${title}: ${first}`]), ...rest, ...(v.size ? sizeNotes(v.size) : [])]
+}
+
 /** The thread's parent message: `{ text, blocks }` for chat.postMessage / chat.update. */
 export function renderParent(v: ParentView): { text: string; blocks: unknown[] } {
   const q = v.queued ?? { items: v.items, batches: v.batches, stagers: v.stagers }
   const title = v.closed ? `*Staged plan #${v.planId}* (closed)` : `*Staged for deletion* · plan #${v.planId}`
-  const by = q.stagers.length ? `staged by ${q.stagers.map(e => who(e, v.names)).join(', ')}` : 'nothing staged'
-  const head = [`${title}: ${totalLine(q.items, v.size)}`, ...(v.size ? sizeNotes(v.size) : []), by]
+  const head = [...titled(title, q.items, v), byLine(v.done && v.stagedBy ? v.stagedBy : q.stagers, v.names)]
   const now = v.now ?? Math.floor(Date.now() / 1000)
   // Only what bears on the current set: a dry-run of a set since changed, or a real run past its undo window, is history (the thread and www keep it).
   const latestDry = [...v.runs].filter(r => r.mode === 'dry').sort((a, b) => b.started_ts - a.started_ts)[0]
@@ -196,16 +233,22 @@ export async function sendParent(env: SlackEnv, channel: string, ts: string | nu
   return bare
 }
 
-/** The old parent once its plan moved to a new thread (`link`: the new parent). */
-export function closedParent(planId: number, siteUrl: string, link: string | null): { text: string; blocks: unknown[] } {
+/** The old parent once its plan moved to a new thread (`link`: the new parent), keeping what the thread staged, deleted
+ *  and left when it ended (`summary`: `closedSummary`'s lines). */
+export function closedParent(planId: number, siteUrl: string, link: string | null, summary: readonly string[] = []): { text: string; blocks: unknown[] } {
   const to = link ? `<${link}|a new thread>` : 'a new thread'
   return {
     text: `Staged plan #${planId}: continued in a new thread`,
     blocks: [
-      { type: 'section', text: { type: 'mrkdwn', text: `*Staged plan #${planId}* · this thread is done; continued in ${to}.` } },
+      { type: 'section', text: { type: 'mrkdwn', text: [`*Staged plan #${planId}* · this thread is done; continued in ${to}.`, ...summary].join('\n') } },
       { type: 'actions', elements: [{ type: 'button', action_id: 'staged_open', text: { type: 'plain_text', text: 'Open in www' }, url: `${siteUrl}/staged` }] },
     ],
   }
+}
+
+/** A closing thread's counts as it ended (`closedParent`): what `renderParent` would show without its title. */
+export function closedSummary(items: number, stagers: readonly string[], v: Pick<ParentView, 'size' | 'done' | 'names'>): string[] {
+  return [...tallyLines(items, v.size, v.done, v.names), ...(v.size ? sizeNotes(v.size) : []), byLine(stagers, v.names)]
 }
 
 const unscheme = (p: string): string => p.replace(/^[a-z0-9]+:\/\//, '')
@@ -531,7 +574,15 @@ async function loadView(db: D1Database, planId: number, siteUrl: string, actions
   const runs = await planRuns(db, planId)
   const deleted = await deletedItems(db, planId)
   const live = items.filter(i => !deleted.has(i.prefix))
+  // The thread's history starts at its parent's post (a Slack ts is its Unix time).
+  const since = plan.slack_ts ? Math.floor(Number(plan.slack_ts)) : null
+  const done = since == null ? undefined : await threadDeleted(db, planId, since) ?? undefined
+  const stagedBy = since == null ? undefined : [...new Set([
+    ...(await db.prepare('SELECT DISTINCT created_by FROM stage_batches WHERE plan_id = ? AND created_ts >= ?').bind(planId, since).all<{ created_by: string }>()).results.map(r => r.created_by),
+    ...live.map(i => i.added_by),
+  ])].sort()
   return {
+    done, stagedBy,
     queued: queuedOf(live),
     live,
     deleted,
@@ -545,6 +596,19 @@ async function loadView(db: D1Database, planId: number, siteUrl: string, actions
     slack_ts: plan.slack_ts,
     slack_channel: plan.slack_channel,
   }
+}
+
+/** What the plan's real runs started since `since` deleted (`ParentView.done`): the bands `deletedItems` counts (a finished
+ *  run, nothing undone), so staged = deleted + left. Null when none deleted anything. */
+export async function threadDeleted(db: D1Database, planId: number, since: number): Promise<Deleted | null> {
+  const row = await db.prepare(`
+    SELECT count(DISTINCT b.prefix) AS prefixes, coalesce(sum(b.bytes), 0) AS b, coalesce(sum(b.objects), 0) AS o,
+      count(DISTINCT r.run_id) AS runs, group_concat(DISTINCT r.actor) AS actors
+    FROM deletion_runs r JOIN deletion_bands b ON b.run_id = r.run_id
+    WHERE r.plan_id = ? AND r.mode = 'real' AND r.finished_ts IS NOT NULL AND r.started_ts >= ?
+      AND b.undone_objects = 0 AND (b.bytes > 0 OR b.objects > 0)
+  `).bind(planId, since).first<{ prefixes: number; b: number; o: number; runs: number; actors: string | null }>()
+  return row?.prefixes ? { prefixes: row.prefixes, b: row.b, o: row.o, runs: row.runs, actors: (row.actors ?? '').split(',').filter(Boolean).sort() } : null
 }
 
 /** Items a real run of the plan deleted since they were staged (not undone). */
@@ -718,15 +782,16 @@ export async function notifyPlan(env: NotifyEnv, db: D1Database, planId: number,
         if (r) people[k] = r
       }
       const names: Names = Object.fromEntries(Object.entries(people).flatMap(([e, p]) => p.name ? [[e, p.name]] : []))
-      const size = at ? sizeOf(at, queued, u => reg[u]?.name ?? u) : undefined
+      const ownerName = (u: string): string => reg[u]?.name ?? u
+      const size = at ? sizeOf(at, queued, ownerName) : undefined
       // Sized, prefixes empty at the scan leave the title's counts (the size line names them apart).
       const last = lastRealRun(v.runs)
       const lastOutcome = last?.finished_ts ? await lastRunOutcome(full)?.(last) : null
       const undo = last?.finished_ts ? await runUndoNow(full, db, last, now) : null
-      const parent = renderParent({ ...v, lastOutcome, undoUnavailable: undo?.unavailable, undoUnseen: !!undo?.unseen, now, queued: queuedOf(countedItems(v.live, v.deleted, at?.stats ?? null)), names, size, image: await stagedCardUrl(env, db, siteUrl, v.digest) ?? undefined })
-      return { at, people, names, parent }
+      const view: ParentView = { ...v, lastOutcome, undoUnavailable: undo?.unavailable, undoUnseen: !!undo?.unseen, now, queued: queuedOf(countedItems(v.live, v.deleted, at?.stats ?? null)), names, size, image: await stagedCardUrl(env, db, siteUrl, v.digest) ?? undefined }
+      return { at, people, names, view, ownerName, parent: renderParent(view) }
     }
-    const { at, people, names, parent } = await render(v)
+    const { at, people, names, view, ownerName, parent } = await render(v)
     // A run's own end: what it measured stands, unless the reading already shows soft delete off where it deleted.
     const runUndo = runEv && runEv.phase !== 'dispatched' && runEv.run.mode === 'real' ? await runUndoNow(full, db, runEv.run, now) : null
     const event: Event | undefined = runEv
@@ -751,8 +816,21 @@ export async function notifyPlan(env: NotifyEnv, db: D1Database, planId: number,
         if (d.won) { old = ts; ts = null } else ts = d.channel === channel ? d.ts : null
       }
     }
+    // The old thread's counts as it ended, less the stage that ends it (it opens the new thread).
+    let summary: string[] = []
+    if (old) {
+      const fresh = new Set(stage?.prefixes ?? [])
+      const left = countedItems(v.live.filter(i => !fresh.has(i.prefix)), v.deleted, at?.stats ?? null)
+      const stagers = (await db.prepare('SELECT DISTINCT created_by FROM stage_batches WHERE plan_id = ? AND created_ts >= ? AND id IS NOT ?')
+        .bind(planId, Math.floor(Number(old)), stage?.batchId ?? null).all<{ created_by: string }>()).results.map(r => r.created_by)
+      const leftPrefixes = v.prefixes.filter(p => !v.deleted.has(p) && !fresh.has(p))
+      summary = closedSummary(left.length, [...new Set([...stagers, ...left.map(i => i.added_by)])].sort(), { size: at ? sizeOf(at, leftPrefixes, ownerName) : undefined, done: view.done, names })
+    }
+    // `view`'s history is since `v.slack_ts`; any other parent (a new one, or one another notify just posted) starts its
+    // thread and has none yet.
+    const first = renderParent({ ...view, done: undefined, stagedBy: undefined })
     if (!ts) {
-      const p = await sendParent(env, channel, null, parent)
+      const p = await sendParent(env, channel, null, first)
       if (!p.ok || !p.ts) return
       // Two concurrent first events would each post a parent: the claim is
       // the tiebreak, and the loser deletes its own.
@@ -763,16 +841,16 @@ export async function notifyPlan(env: NotifyEnv, db: D1Database, planId: number,
         const row = await db.prepare('SELECT slack_channel, slack_ts FROM plans WHERE id = ?').bind(planId).first<{ slack_channel: string; slack_ts: string }>()
         if (!row?.slack_ts || row.slack_channel !== channel) return
         ts = row.slack_ts
-        await sendParent(env, channel, ts, parent)
+        await sendParent(env, channel, ts, first)
       }
     } else {
-      await sendParent(env, channel, ts, parent)
+      await sendParent(env, channel, ts, ts === v.slack_ts ? parent : first)
     }
     if (old) {
       const pl = await slackApi(env, 'chat.getPermalink', { channel, message_ts: ts })
       const link = pl.ok && typeof pl.permalink === 'string' ? pl.permalink : null
       await slackApi(env, 'chat.postMessage', { channel, thread_ts: old, text: `${ended} Continued in ${link ? `<${link}|a new thread>` : 'a new thread'}.`, ...PLAN_SENDER, unfurl_links: false })
-      await slackApi(env, 'chat.update', { channel, ts: old, ...closedParent(planId, siteUrl, link) })
+      await slackApi(env, 'chat.update', { channel, ts: old, ...closedParent(planId, siteUrl, link, summary) })
     }
     const ctx: ReplyCtx = { planId, siteUrl, names, stats: at?.stats ?? null }
     if (stage) {
