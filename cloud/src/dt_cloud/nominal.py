@@ -90,15 +90,17 @@ def stamp(row: dict) -> str:
     return datetime.fromtimestamp(row['run']['started_ts'], timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
 
 
-#: A reply's trigger, beside its ✅: the deployment's cron, a hand submit (the site's "Run a scan" or a CLI execute; who
-#: isn't recorded), or a deployment that doesn't state its triggers. The parent's run mix spells them out.
+#: A reply's trigger, beside its ✅: the deployment's cron, a hand submit (the site's "Run a scan" or a CLI execute; who,
+#: named after the duration when recorded: `scan_runs.trigger_by`), or a deployment that doesn't state its triggers. The
+#: parent's run mix spells them out.
 TRIGGER_EMOJI = {'schedule': ':alarm_clock:', 'manual': ':bust_in_silhouette:', None: ':grey_question:'}
 
 
 def reply(cfg: Config, row: dict) -> str:
     seconds = row.get('secs')
     duration = 'duration unknown' if seconds is None else f"{int(seconds) // 60}m {int(seconds) % 60:02d}s"
-    return f"✅ {TRIGGER_EMOJI[row['run']['trigger']]} [{stamp(row)}]({cfg.link(row['run'])}) · {duration}"
+    by = row['run'].get('trigger_by') if row['run']['trigger'] == 'manual' else None
+    return f"✅ {TRIGGER_EMOJI[row['run']['trigger']]} [{stamp(row)}]({cfg.link(row['run'])}) · {duration}" + (f" · {by}" if by else "")
 
 
 def parent(cfg: Config, good: list[dict], boundary: dict | None) -> str:

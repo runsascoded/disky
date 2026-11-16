@@ -77,6 +77,14 @@ def test_copy_states_boundary_trigger_mix_and_exact_run_links():
         '✅ :alarm_clock: [2026-11-02 08:00 UTC](https://site.test/scans/r1) · 1m 00s',
         '✅ :bust_in_silhouette: [2026-11-03 08:00 UTC](https://site.test/scans/r2) · 1m 00s',
     ]
+    manual = row(5, trigger='manual')
+    assert N.reply(CFG, {**manual, 'run': {**manual['run'], 'trigger_by': 'ada@example.org'}}) == (
+        '✅ :bust_in_silhouette: [2026-11-06 08:00 UTC](https://site.test/scans/r5) · 1m 00s · ada@example.org'
+    )
+    sched = row(6)
+    assert N.reply(CFG, {**sched, 'run': {**sched['run'], 'trigger_by': 'ada@example.org'}}) == (
+        '✅ :alarm_clock: [2026-11-07 08:00 UTC](https://site.test/scans/r6) · 1m 00s'
+    )
     assert N.reply(CFG, {**row(3, trigger=None), 'secs': None}) == (
         '✅ :grey_question: [2026-11-04 08:00 UTC](https://site.test/scans/r3) · duration unknown'
     )

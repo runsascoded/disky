@@ -31,6 +31,9 @@ export interface ScanRun {
   /** What started it: the deployment's cron, or a hand submit / resume. Absent before migration `scan-run-trigger`;
    * null for runs recorded before it, and backfills. */
   trigger?: 'schedule' | 'manual' | null
+  /** Who started a manual run (`$DT_TRIGGER_BY`: the site dispatcher's address, or what a hand submit names). Absent
+   * before migration `scan-run-trigger-by` and for public viewers; null when unknown or not manual. */
+  trigger_by?: string | null
 }
 
 export interface ScanRunPhase {
