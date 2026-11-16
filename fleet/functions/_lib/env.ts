@@ -60,6 +60,8 @@ export const NO_GRANTS: GrantStore = {
   setDisabled: async () => false,
   update: async () => null,
   rotate: async () => null,
+  keptToken: async () => null,
+  keepToken: async () => false,
   list: async () => [],
 }
 
