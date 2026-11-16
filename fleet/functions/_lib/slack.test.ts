@@ -46,7 +46,7 @@ describe('the fleet\'s Slack post', () => {
         {
           type: 'image',
           image_url: 'https://fleet.test/og/fleet.png?v=1&sig=AAAAAAAAAAAA',
-          alt_text: 'disky fleet: /meta store size, scan duration and cost per scan, per deployment, over the last week',
+          alt_text: 'disky fleet: /meta store size, scan duration and cost per day, per deployment, over the last week',
         },
         { type: 'context', elements: [{ type: 'mrkdwn', text: 'read 2026-11-07 14:00 UTC · updated in place hourly' }] },
       ],

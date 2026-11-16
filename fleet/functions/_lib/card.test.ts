@@ -27,7 +27,7 @@ describe('the fleet card', () => {
       'disky fleet', 'sign in for the numbers', 'gcs', 'cw', 'hf', 'r2',
       '/meta store size', '11/1', '11/2', '11/3', '11/4', '11/5', '11/6', '11/7',
       'scan duration (h)', '11/1', '11/2', '11/3', '11/4', '11/5', '11/6', '11/7', 'sign in to see the fleet',
-      'cost per scan ($)', '11/1', '11/2', '11/3', '11/4', '11/5', '11/6', '11/7',
+      'cost per day ($, complete UTC days)', '11/1', '11/2', '11/3', '11/4', '11/5', '11/6', '11/7',
     ])
   })
   it('round byte ticks and colour mixing', () => {

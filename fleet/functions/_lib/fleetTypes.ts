@@ -46,7 +46,7 @@ export interface FleetDeployment {
   health: FleetHealth | null
   /** The newest scan run (maintenance runs aside). */
   last: FleetRun | null
-  /** The newest `FLEET_RUNS` scan runs, newest first. */
+  /** The scan runs started in the card's window (`WINDOW_DAYS`; the newest always), at most `FLEET_RUNS`, newest first. */
   runs: FleetRun[]
   meta: FleetMeta | null
   /** Why a part is missing: `health`, `runs`, `meta`. */
