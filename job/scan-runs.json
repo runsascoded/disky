@@ -11,6 +11,7 @@
   ],
   "error_marker": ["^\\+\\+ scan_err (?P<rc>\\d+) (?P<line>\\d+) (?P<cmd>.*)", "^\\+\\+ on_err (?P<rc>\\d+) (?P<line>\\d+) (?P<cmd>.*)"],
   "alerts": {"label": "CoreWeave scan", "logs_url": "https://console.cloud.google.com/logs/query;query=labels.job_uid%3D%22{job_uid}%22?project={project}"},
+  "nominal": {"state": "gs://oa-cw-s3-usage-data/notifications/nominal", "site": "https://cw.oa.dev", "channel": "C0C53CPM886", "title": "CoreWeave scans", "site_token_secret": "cw-s3-job-grant", "group": "signature"},
   "secrets": ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "CLOUDFLARE_API_TOKEN", "SITE_TOKEN", "SLACK_BOT_TOKEN", "R2_ENDPOINT", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "CF_ACCESS_CLIENT_ID", "CF_ACCESS_CLIENT_SECRET"],
   "outputs": [
     {"key": "layer-2", "uri": "gs://oa-cw-s3-usage-data/cw-l2/{scan}/", "exclude": ["index/"], "split": "stem", "after": "layer-2"},
