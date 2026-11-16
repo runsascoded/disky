@@ -21,3 +21,12 @@ it('URL roundtrip preserves pinned versus floating modes', () => {
       { span: 7 * DAY },
     ])
 })
+
+it('a brush pins its start, from a duration too; a pick keeps the duration', () => {
+  const L = '2026-10-13T1201'
+  expect([
+    encodeSel(pickScanSelection(decodeSel('-7d'), L, L, 12 * DAY, '2026-10-01T1200')),
+    encodeSel(pickScanSelection(decodeSel('-7d'), '2026-10-10T1200', L, 9 * DAY, '2026-10-01T1200')),
+    encodeSel(pickScanSelection(decodeSel('-7d'), '2026-10-10T1200', L, 7 * DAY)),
+  ]).toEqual(['-2610011200', '2610101200-2610011200', '2610101200-7d'])
+})
