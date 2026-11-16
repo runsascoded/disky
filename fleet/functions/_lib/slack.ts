@@ -1,5 +1,5 @@
 /**
- * The fleet's Slack post (specs/disky-oa-dev.md): a line per deployment (its newest scan, how it went, how long, what
+ * The fleet's Slack post (specs/disky-oa-dev.md): a line per deployment (its newest scan, linked to its run, how it went, how long, what
  * it cost, its `/meta` size and the week's change), the card as an `image` block, and when it was read. One message,
  * posted once, then edited in place each run (`chat.update`): its channel + ts are kept in `FLEET_KV`, or pinned by
  * `SLACK_FLEET_TS`.
@@ -37,7 +37,7 @@ export function line(d: FleetDeployment): string {
   const { emoji, word } = status(d)
   const parts: string[] = []
   const r = d.last
-  if (r) parts.push(`\`${r.scan}\``, word)
+  if (r) parts.push(`<${d.url}/scans/${encodeURIComponent(r.run_id)}|${r.scan}>`, word)
   else parts.push(word)
   if (r && r.status !== 'running' && r.secs !== null) parts.push(fmtHours(r.secs))
   if (r) parts.push(r.cost_usd === null ? 'cost n/a' : fmtUsd(r.cost_usd))

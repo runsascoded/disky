@@ -54,7 +54,7 @@ Fixture previews verify formatting and rendering only. Approval of a first real 
   - An open step issue is a `phase_issues` entry with neither `recovery` nor `passing` (so "search behind" counts).
   - The response also carries the full card's signed URLs (`card.dark`, `card.light`).
   - The document is held 5 min per colo (`FLEET_TTL`; `?fresh` reads anew), and browsers get `private, no-store`.
-- **`/fleet`:** the same data: the card on top (light or dark by the viewer's scheme), then a section per deployment with its summary and a runs table.
+- **`/fleet`:** the same data: the card on top (light or dark by the viewer's scheme), then a section per deployment with its summary, its 5 newest runs (each linked to its run page) and a link to its own `/scans`.
 - **The card** (`/og/fleet.png?[theme=light&]v=…&sig=…`): stacked panels over the last 7 UTC days, one trace per deployment in its color, each labelled at its latest point in a right gutter, as in the layout mock:
   - `/meta` size, log y
   - scan duration, with filled = ok and hollow = a step issue still open, or the run failed
@@ -63,7 +63,7 @@ Fixture previews verify formatting and rendering only. Approval of a first real 
   Each panel's note names the deployments it has no data for. The card is designed 480 px wide (phone width) and rasterized at 2.5× (1200 px). It sits on its own opaque, bordered background, so it reads the same in Slack's light and dark themes. `theme=light` is for the page. Lines get a halo (the panel color on dark, the line color darkened on light, so hf's yellow holds on white), and labels are the color nudged toward the ink.
 
   A full card needs a valid `sig` (HMAC under `SESSION_SECRET`, 7-day expiry, `IMAGE_TTL_DAYS`). Without one, or with a bad or expired one, it's the anonymous card: the frame, the deployments' names and colors, and no numbers. It is never an error (`x-og-tier` says which, and why).
-- **Slack:** `POST /api/fleet/slack` (Bearer `FLEET_JOB_TOKEN`) reads the fleet anew and builds the post: a one-line status per deployment (`:white_check_mark:` / `:warning:` / `:x:` / `:hourglass_flowing_sand:` / `:grey_question:`, scan, status, duration, cost, `/meta` size and its 7 d change, a stale-scan note past 36 h), an `image` block with a freshly signed card URL (`v=` the read's time, so Slack refetches), and a context line.
+- **Slack:** `POST /api/fleet/slack` (Bearer `FLEET_JOB_TOKEN`) reads the fleet anew and builds the post: a one-line status per deployment (`:white_check_mark:` / `:warning:` / `:x:` / `:hourglass_flowing_sand:` / `:grey_question:`, scan linked to its run, status, duration, cost, `/meta` size and its 7 d change, a stale-scan note past 36 h), an `image` block with a freshly signed card URL (`v=` the read's time, so Slack refetches), and a context line.
   - It posts once, then `chat.update`s that message. The channel + ts are kept in the KV binding `FLEET_KV`, or pinned by the var `SLACK_FLEET_TS` (in `SLACK_FLEET_CHANNEL`, an id).
   - With neither, it refuses to post a new message each run (502, saying so). `?new=1` posts one, to pin. `?dry=1` returns the message without posting.
   - A kept post deleted by hand is posted anew, where KV can keep the new one.

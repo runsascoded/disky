@@ -6,6 +6,9 @@ import { useWhoami } from './App'
 
 class Unauthenticated extends Error {}
 
+/** Newest runs shown per deployment; the rest are a click away on its own `/scans`. */
+const RUNS_SHOWN = 5
+
 const when = (t: number | null) => (t === null ? '—' : new Date(t * 1000).toISOString().slice(5, 16).replace('T', ' '))
 const age = (s: number | null) => (s === null ? '—' : s < 3600 ? `${Math.round(s / 60)}m` : s < 172800 ? `${Math.round(s / 3600)}h` : `${Math.round(s / 86400)}d`)
 const bytes = (b: number | null | undefined) => (b == null ? '—' : fmtSI(b))
@@ -35,7 +38,7 @@ function Deployment({ d }: { d: FleetDeployment }) {
           <table>
             <thead><tr><th>scan</th><th>status</th><th>started (UTC)</th><th className="num">duration</th><th className="num">cost</th></tr></thead>
             <tbody>
-              {d.runs.map(r => {
+              {d.runs.slice(0, RUNS_SHOWN).map(r => {
                 const s = runState(r)
                 return (
                   <tr key={r.run_id}>
@@ -49,6 +52,7 @@ function Deployment({ d }: { d: FleetDeployment }) {
               })}
             </tbody>
           </table>
+          <p className="more"><a href={`${d.url}/scans`}>All scans on {new URL(d.url).host} →</a></p>
         </div>
       )}
     </section>
