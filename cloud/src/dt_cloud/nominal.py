@@ -95,6 +95,8 @@ def stamp(row: dict) -> str:
 #: A reply's trigger, beside its ✅: the deployment's cron, a hand submit (the site's "Run a scan" or a CLI execute; who,
 #: named after the duration when recorded: `scan_runs.trigger_by`), or a deployment that doesn't state its triggers. The
 #: parent's run mix spells them out.
+#: A manual run's starter's own Slack emoji (`trigger_emoji`: `/api/scan-runs?emoji=1` asks OA's broker) replaces 👤
+SLACK_EMOJI_RE = re.compile(r":[a-z0-9_+'-]{1,100}:")
 TRIGGER_EMOJI = {'schedule': ':alarm_clock:', 'manual': ':bust_in_silhouette:', None: ':grey_question:'}
 
 
@@ -103,7 +105,9 @@ def reply(cfg: Config, row: dict) -> str:
     duration = 'duration unknown' if seconds is None else f"{int(seconds) // 60}m {int(seconds) % 60:02d}s"
     by = row['run'].get('trigger_by') if row['run']['trigger'] == 'manual' else None
     by = by if by and TRIGGER_BY_RE.fullmatch(by) else None  # never markup into mrkdwn, whatever a row holds
-    return f"✅ {TRIGGER_EMOJI[row['run']['trigger']]} [{stamp(row)}]({cfg.link(row['run'])}) · {duration}" + (f" · {by}" if by else "")
+    face = row['run'].get('trigger_emoji') if by else None
+    emoji = face if face and SLACK_EMOJI_RE.fullmatch(face) else TRIGGER_EMOJI[row['run']['trigger']]
+    return f"✅ {emoji} [{stamp(row)}]({cfg.link(row['run'])}) · {duration}" + (f" · {by}" if by else "")
 
 
 def parent(cfg: Config, good: list[dict], boundary: dict | None) -> str:
@@ -331,7 +335,7 @@ def run(
     lease = GcsLeaseFile(url.netloc, f"{url.path.strip('/')}/{prefix}/coordinator.lease.json".lstrip('/')) if url.scheme else LocalLeaseFile(Path(cfg.state) / prefix / 'lease.json')
 
     def read_rows() -> list[dict]:
-        response = http_fetch(cfg.site, token)('/api/scan-runs?' + urlencode({'store': cfg.store}))
+        response = http_fetch(cfg.site, token)('/api/scan-runs?' + urlencode({'store': cfg.store, 'emoji': '1'}))
         if response.status != 200:
             raise ValueError(f'nominal: run ledger HTTP {response.status}')
         rows = ordered(json.loads(response.body), cfg)
