@@ -8,7 +8,7 @@ import { expect, test } from '@playwright/test'
 // We mock `/api/auth/whoami` with a grant-shaped payload (what the real route
 // returns: `json(gate.whoami(auth))`, read verbatim by `useWhoami`) so the test
 // is deterministic and needs no token or fixture grant. The full mint→redeem
-// path against a seeded local DB is the Tier-2 follow-up (specs/local-db-dev-mode.md).
+// path against a seeded local DB is the Tier-2 follow-up (specs/done/local-db-dev-mode.md).
 
 // A 1×1 transparent PNG: a data URL always loads, so the <img> never falls back
 // to the initial — the assertion is on the rendered src, not on the network.
