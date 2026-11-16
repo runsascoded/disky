@@ -16,7 +16,7 @@
   },
   "dependencies": {
     "@disk-tree/pages-kit": "workspace:*",
-    "@open-athena/auth": "github:Open-Athena/auth#5b64199ac27ee42a2a49ba613cb6be45122884be",
+    "@open-athena/auth": "github:Open-Athena/auth#4ae207935a50cbe93fe3b27b252a2d059cf601f4",
     "@resvg/resvg-wasm": "^2.6.2",
     "@tanstack/react-query": "^5.101.4",
     "marked": "^15.0.12",
