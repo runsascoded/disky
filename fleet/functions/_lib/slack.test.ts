@@ -8,7 +8,7 @@ const H = 3600
 const run = (o: Partial<FleetRun>): FleetRun =>
   ({ run_id: 'r', scan: '2026-11-07', status: 'succeeded', started: NOW - 7 * H, secs: 1800, cost_usd: 0.13, failed_at: null, open_issues: [], ...o })
 const dep = (name: string, o: Partial<FleetDeployment>): FleetDeployment =>
-  ({ name, url: `https://${name}.test`, color: '#000000', health: { newest_scan: '2026-11-07', newest_scan_age: 7 * H, gaps: 0 }, last: null, runs: [], meta: null, errors: {}, ...o })
+  ({ name, url: `https://${name}.test`, color: '#000000', health: { newest_scan: '2026-11-07', newest_scan_age: 7 * H, gaps: 0 }, last: null, runs: [], meta: null, objects: null, errors: {}, ...o })
 const meta = (now: number, d7: number | null) => ({ now, d1: null, d7, daily: [] })
 
 const doc: FleetDoc = {

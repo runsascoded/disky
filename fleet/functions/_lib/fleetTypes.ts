@@ -22,6 +22,13 @@ export interface MetaPoint {
   bytes: number
 }
 
+/** A primary-store scan's object count (`/api/series`'s root `objects`). */
+export interface ObjPoint {
+  scan: string
+  t: number
+  objects: number
+}
+
 export interface FleetMeta {
   /** The newest scan's bytes, and the newest at or before a day and a week before the document's `now`. */
   now: number | null
@@ -49,8 +56,10 @@ export interface FleetDeployment {
   /** The scan runs started in the card's window (`WINDOW_DAYS`; the newest always), at most `FLEET_RUNS`, newest first. */
   runs: FleetRun[]
   meta: FleetMeta | null
-  /** Why a part is missing: `health`, `runs`, `meta`. */
-  errors: Partial<Record<'health' | 'runs' | 'meta', string>>
+  /** The primary store's object count: the newest scan per UTC day over `META_DAYS`, oldest first. */
+  objects: ObjPoint[] | null
+  /** Why a part is missing: `health`, `runs`, `meta`, `objects`. */
+  errors: Partial<Record<'health' | 'runs' | 'meta' | 'objects', string>>
 }
 
 export interface FleetDoc {
