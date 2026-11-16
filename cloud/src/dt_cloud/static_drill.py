@@ -74,15 +74,10 @@ COUNT_THREADS = 16
 
 
 def write_jobs() -> int:
-    """`WRITE_JOBS`, or every core this process may run on."""
-    import os
+    """`WRITE_JOBS`, or the task's CPUs (`task_size.task_cpus`)."""
+    from .task_size import task_cpus
 
-    if WRITE_JOBS is not None:
-        return WRITE_JOBS
-    try:
-        return len(os.sched_getaffinity(0))
-    except AttributeError:
-        return os.cpu_count() or 1
+    return WRITE_JOBS if WRITE_JOBS is not None else task_cpus()
 
 
 def _writer_init() -> None:
@@ -147,9 +142,9 @@ def insert_rows(con, table: str, rows: list[tuple]) -> None:
 
 
 def ram_bytes() -> int:
-    import os
+    from .task_size import task_ram
 
-    return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+    return task_ram()
 
 
 class ByteCache:

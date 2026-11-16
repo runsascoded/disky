@@ -69,6 +69,7 @@ from disk_tree.env import name as env_name
 from .heartbeat import Tail, run_teed, set_stage
 from .index_parts import PART_JSON, Part, part_ids, split_parts
 from .scan_profile import ScanProfile
+from .task_size import NPROC_ENV, task_cpus, task_ram
 
 
 def err(*a: object) -> None:
@@ -185,9 +186,6 @@ class _Printer:
         return []
 
 
-#: The task's CPU count, set by a job definition whose container can't read it (`Ctx.nproc`): Fargate's `cpu.max` reads
-#: `max` (the quota is the microVM's, not the cgroup's) while its affinity lists the host's CPUs.
-NPROC_ENV = "DT_NPROC"
 
 
 def cpu_quota(cgroup: Path) -> int | None:
@@ -211,10 +209,10 @@ def cpu_quota(cgroup: Path) -> int | None:
 MEM_SHARE = 0.6
 
 
-def mem_budget(cgroup: Path, share: float = MEM_SHARE) -> str:
-    """`share` of the task's memory as a DuckDB size (`"38GB"`): the machine's RAM, or the cgroup's limit when lower
-    (v2 `memory.max`, v1 `memory.limit_in_bytes`; v1's unlimited is ≥ 2^60)."""
-    total = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+def mem_budget(cgroup: Path, share: float = MEM_SHARE, env: Mapping[str, str] | None = None) -> str:
+    """`share` of the task's memory as a DuckDB size (`"38GB"`): `$DT_MEM` or the machine's RAM (`task_size.task_ram`),
+    or the cgroup's limit when lower (v2 `memory.max`, v1 `memory.limit_in_bytes`; v1's unlimited is ≥ 2^60)."""
+    total = task_ram(env)
     for f in ("memory.max", "memory/memory.limit_in_bytes"):
         try:
             limit = int((cgroup / f).read_text())
@@ -331,17 +329,21 @@ class Ctx:
     def nproc(self) -> int:
         """The task's CPUs: `$DT_NPROC` when set (`NPROC_ENV`), else the CPUs it may run on, capped by its cgroup's quota
         (`cpu_quota`). What `{nproc}` fills and the steps size their threads by."""
-        if v := (self.env.get(NPROC_ENV) or "").strip():
-            if not v.isdigit() or int(v) < 1:
-                raise StepFailed(2, f"${NPROC_ENV}={v!r}: not a positive integer")
-            return int(v)
+        if (self.env.get(NPROC_ENV) or "").strip():
+            try:
+                return task_cpus(self.env)
+            except ValueError as e:
+                raise StepFailed(2, str(e)) from None
         cpus = len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else os.cpu_count() or 1
         quota = cpu_quota(Path(self.env.get("DT_CGROUP") or "/sys/fs/cgroup"))
         return min(cpus, quota) if quota else cpus
 
     @property
     def mem(self) -> str:
-        return mem_budget(Path(self.env.get("DT_CGROUP") or "/sys/fs/cgroup"))
+        try:
+            return mem_budget(Path(self.env.get("DT_CGROUP") or "/sys/fs/cgroup"), env=self.env)
+        except ValueError as e:
+            raise StepFailed(2, str(e)) from None
 
     def fill_env(self, template: str) -> str:
         """`template` with each `{env:NAME}` filled from the task's env (a step fails on an unset one)."""
@@ -1605,7 +1607,12 @@ def _snap_root(ctx: Ctx) -> str:
     return f"{ctx.env.get('R2_ARCHIVE') or ctx.data_uri}/{ctx.snapshots}"
 
 
-@step("non-live", core=False, stage="side", soft=True, options={"classes": list},
+#: Where `non-live`'s metric history goes (`options.non-live.source: metric`): one file, rewritten whole each scan
+#: (`non-live` is never a scan id).
+NON_LIVE_SERIES = "snapshots/non-live/series.json"
+
+
+@step("non-live", core=False, stage="side", soft=True, options={"classes": list, "source": str, "history": int},
       side=True, leaves="non-live bytes not measured for this scan: its map's non-live line is short or absent")
 def non_live(ctx: Ctx, arg: str | None) -> None:
     """Each source's non-live bytes (`dt-cloud non-live`, specs/non-live-bytes.md phase 1): per class of
@@ -1616,12 +1623,37 @@ def non_live(ctx: Ctx, arg: str | None) -> None:
     scan's start, beside `list` and `index`, which never wait on it (gcs's soft-deleted listings take ~18 min); only
     `publish-r2` (its snapshot dir reaches R2 with the scan's others) and the post steps do. Read-only; off unless the
     profile lists it in `steps`. Never fatal: a failure warns, the scan's other outputs stand (`side=True`: the map's
-    one line reads `non-live.json` as optional, and nothing else reads it)."""
+    one line reads `non-live.json` as optional, and nothing else reads it).
+
+    `options.non-live.source: metric` (GCS): the classes from Cloud Monitoring's storage metrics instead of listings
+    (`dt-cloud non-live -s metric`: whole buckets, every `gs://` source in one query; it also sees what a soft-deleted
+    listing can't once a bucket's policy is off), plus their daily history (`history` days, default the CLI's) as
+    `<data>/snapshots/non-live/series.json` (+ the R2 archive's copy, which `/api/non-live` reads). Needs
+    `monitoring.timeSeries.list` on the buckets' project."""
     classes = ctx.opt("non-live", "classes", [])
     if not classes:
         err("non-live: no options.non-live.classes: nothing measured")
         return
-    from .non_live import PROVIDER_CLASSES, split_uri
+    from .non_live import METRIC_CLASSES, PROVIDER_CLASSES, split_uri
+
+    snap = ctx.data_root / ctx.snapshots / ctx.scan / "non-live.json"
+    out = ctx.data_root / ctx.layer2 / "non-live" / "{bucket}.parquet"
+    if (source := ctx.opt("non-live", "source", "listing")) == "metric":
+        uris = [s.uri for s in ctx.profile.sources if s.kind == "gcs"]
+        if not uris:
+            err("non-live: source metric needs gs:// sources: nothing measured")
+            return
+        if bad := [c for c in classes if c not in METRIC_CLASSES["gs"]]:
+            raise ValueError(f"non-live: source metric has no {', '.join(bad)} (it has {', '.join(METRIC_CLASSES['gs'])})")
+        series = [f"{ctx.data_uri}/{NON_LIVE_SERIES}", *([f"{ctx.env['R2_ARCHIVE']}/{NON_LIVE_SERIES}"] if ctx.env.get("R2_ARCHIVE") else [])]
+        history = ctx.opt("non-live", "history", None)
+        with ctx.phase("non-live"):
+            ctx.sh(["dt-cloud", "non-live", "-s", "metric", "-c", ",".join(classes), *(["-H", str(history)] if history else []),
+                    "-j", snap, "-o", out, *(a for d in series for a in ("-S", d)), *uris],
+                   fatal=False, warn=f"non-live (metric) failed on {', '.join(uris)} (the scan's other outputs stand)")
+        return
+    if source != "listing":
+        raise ValueError(f"non-live: source {source!r}: listing or metric")
 
     with ctx.phase("non-live"):
         # each source measures the classes its provider has (an hf:// source none: the Hub's held bytes are in its
@@ -1636,8 +1668,7 @@ def non_live(ctx: Ctx, arg: str | None) -> None:
             groups.setdefault((tuple(has), endpoint), []).append(src.uri)
         for (has, endpoint), uris in groups.items():
             ctx.sh(["dt-cloud", "non-live", "-c", ",".join(has), *(["-E", endpoint] if endpoint else []),
-                    "-j", ctx.data_root / ctx.snapshots / ctx.scan / "non-live.json",
-                    "-o", ctx.data_root / ctx.layer2 / "non-live" / "{bucket}.parquet", *uris],
+                    "-j", snap, "-o", out, *uris],
                    fatal=False, warn=f"non-live failed on {', '.join(uris)} (the scan's other outputs stand)")
 
 

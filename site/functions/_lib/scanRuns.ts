@@ -27,6 +27,12 @@ export async function loadScanRuns(db: D1Database, store: string): Promise<ScanR
   }
 }
 
+/** The rows a viewer may see: a public (anonymous) viewer gets no run's starter (`trigger_by`, an address). */
+export function withoutStarters(rows: ScanRunRows | null, id: { via: 'session' | 'grant' | 'public' }): ScanRunRows | null {
+  if (!rows || id.via !== 'public') return rows
+  return { ...rows, runs: rows.runs.map(({ trigger_by: _, ...r }) => r) }
+}
+
 /** The run's pipeline DAG (the engine-neutral graph its head stored), or null: a one-VM run, or no `scan_run_dags`. */
 export async function loadDag(db: D1Database, runId: string): Promise<RunDagRow | null> {
   try {

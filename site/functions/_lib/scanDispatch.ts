@@ -32,6 +32,8 @@ export const STORE = PRIMARY_STORE
 export const PENDING_S = 3600
 /** The variable the submitter reads (`job/scan-submit.sh`): its run's trigger. */
 export const TRIGGER_ENV = 'DT_TRIGGER'
+/** …and who started it (`scan_runs.trigger_by`): the dispatching admin. A submitter that doesn't forward it records none. */
+export const TRIGGER_BY_ENV = 'DT_TRIGGER_BY'
 
 export interface Pending { id: string; ts: number; who: string; execution: string | null }
 export type Running = Pick<ScanRun, 'run_id' | 'scan' | 'started_ts'>
@@ -85,10 +87,10 @@ export const settle = (db: D1Database, id: string, now: number, o: Outcome) =>
       id,
     ).run()
 
-/** The Cloud Run Admin API call that runs `job` as a manual scan. */
-export const runRequest = (job: string): { url: string; body: unknown } => ({
+/** The Cloud Run Admin API call that runs `job` as a manual scan started by `who`. */
+export const runRequest = (job: string, who: string): { url: string; body: unknown } => ({
   url: `https://run.googleapis.com/v2/${job}:run`,
-  body: { overrides: { containerOverrides: [{ env: [{ name: TRIGGER_ENV, value: 'manual' }] }] } },
+  body: { overrides: { containerOverrides: [{ env: [{ name: TRIGGER_ENV, value: 'manual' }, { name: TRIGGER_BY_ENV, value: who }] }] } },
 })
 
 /** The execution a `jobs:run` started: its long-running operation's metadata (an Execution), else null. */

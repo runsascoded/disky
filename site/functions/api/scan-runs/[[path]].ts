@@ -3,6 +3,8 @@
 //   GET /api/scan-runs[?store=<key>]          { configured, runs: RunSummary[], project, meta, dispatch }     viewer
 //   GET /api/scan-runs/:run_id[?store=<key>]  { ...ScanRunDetail, dag, project, meta }               viewer
 //
+// A manual run's starter (`trigger_by`: an address) reaches signed-in viewers and grants only, never a public one.
+//
 // Rows come from D1 (`dt-cloud scan-run record | backfill`), scoped to the
 // request's store (`withStore`: no `store=` = the primary; a secondary store's
 // runs need its scope too). `project` (`GCP_PROJECT`) builds the Batch / Logging
@@ -14,7 +16,7 @@
 import type { D1Database } from '@cloudflare/workers-types'
 import { type Env as AuthEnv, json, requireViewer } from '../../_lib/auth.js'
 import { dispatchState, missingTable, STORE, submitJob } from '../../_lib/scanDispatch.js'
-import { loadDag, loadScanRuns, scanRunDetail, scanRunsList } from '../../_lib/scanRuns.js'
+import { loadDag, loadScanRuns, scanRunDetail, scanRunsList, withoutStarters } from '../../_lib/scanRuns.js'
 import { storeKey, withStore } from '../../_lib/stores.js'
 
 type Env = AuthEnv & { DB?: D1Database; GCP_PROJECT?: string; META_TREE_URL?: string; GCP_SA_KEY?: string; SCAN_SUBMIT_JOB?: string }
@@ -31,7 +33,7 @@ export const onRequestGet = async (ctx0: { request: Request; env: Env; params?: 
   if (!db) return json({ error: 'no D1 bound' }, 503)
   const p = ctx.params?.path
   const id = decodeURIComponent((Array.isArray(p) ? p.join('/') : p) ?? '')
-  const rows = await loadScanRuns(db, storeKey(ctx.env))
+  const rows = withoutStarters(await loadScanRuns(db, storeKey(ctx.env)), gated)
   const now = Math.floor(Date.now() / 1000)
   const links = { project: ctx.env.GCP_PROJECT ?? null, meta: ctx.env.META_TREE_URL ?? null }
   const headers = { 'cache-control': 'private, max-age=15' }

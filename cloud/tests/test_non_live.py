@@ -144,3 +144,87 @@ def test_cli_measures_several_buckets_into_one_json_and_a_parquet_each(monkeypat
     assert [(r["bucket"], r["bytes"], r["objects"]) for r in json.loads(snap.read_text())["rows"]] == [("a", 40, 5), ("b", 7, 1), ("c", 0, 0)]
     res = CliRunner().invoke(nl.non_live_cmd, ["-c", "soft-deleted", "-o", str(tmp_path / "x.parquet"), "gs://a", "gs://b"])
     assert (res.exit_code, res.output.strip().splitlines()[-1]) == (1, "-o: several URIs need `{bucket}` in the path")
+
+
+# --- `-s metric`: Cloud Monitoring's storage metrics -----------------------------------------------------------------
+
+def ts(bucket: str, typ: str, cls: str, points: list[tuple[str, float]]) -> dict:
+    """One `timeSeries` as the API gives it: points (`endTime`, value) newest first."""
+    return {"resource": {"labels": {"bucket_name": bucket}}, "metric": {"labels": {"type": typ, "storage_class": cls}},
+            "points": [{"interval": {"endTime": e}, "value": {"doubleValue": v}} for e, v in points]}
+
+
+#: 2026-11-15T08:00:00Z
+NOW = 1794729600.0
+
+
+def fake_metric(monkeypatch, latest: dict[str, list[dict]], daily: list[dict] | None = None):
+    """`fetch_metric` answering from `latest` (by metric) and `daily`; the calls it got."""
+    calls = []
+
+    def fetch(metric, project, buckets, start, end, daily_=False, **kw):
+        daily_ = kw.get("daily", daily_)
+        calls.append((metric.rsplit("/", 1)[1], project, buckets, nl._rfc3339(start), nl._rfc3339(end), daily_))
+        return [{"timeSeries": daily or []}] if daily_ else [{"timeSeries": latest.get(metric, [])}]
+    monkeypatch.setattr(nl, "fetch_metric", fetch)
+    monkeypatch.setattr(nl, "bucket_projects", lambda buckets: {b: "748" for b in buckets})
+    monkeypatch.setattr(nl, "clock", lambda: NOW)
+    return calls
+
+
+def test_metric_totals_sum_storage_classes_newest_sample(monkeypatch, tmp_path):
+    """Each bucket's classes now: every series' newest sample (bytes from `total_bytes`, objects from `total_count`),
+    summed over storage classes; a class with no series is zeros. One query per metric for all the buckets of a
+    project, over the last hour; no history without -S."""
+    latest = {
+        nl.METRIC_BYTES: [ts("a", "soft-deleted-object", "REGIONAL", [("t2", 30), ("t1", 99)]),
+                          ts("a", "soft-deleted-object", "COLDLINE", [("t2", 12)]),
+                          ts("a", "live-object", "REGIONAL", [("t2", 1000)]),
+                          ts("b", "multipart-upload", "REGIONAL", [("t2", 7)])],
+        nl.METRIC_COUNT: [ts("a", "soft-deleted-object", "REGIONAL", [("t2", 3)]),
+                          ts("a", "soft-deleted-object", "COLDLINE", [("t2", 1)]),
+                          ts("b", "multipart-upload", "REGIONAL", [("t2", 2)])],
+    }
+    calls = fake_metric(monkeypatch, latest)
+    snap = tmp_path / "non-live.json"
+    res = CliRunner().invoke(nl.non_live_cmd, ["-s", "metric", "-c", "soft-deleted,mpu", "-j", str(snap), "gs://a", "gs://b"], catch_exceptions=False)
+    assert res.exit_code == 0, res.output
+    assert calls == [("total_bytes", "748", ["a", "b"], "2026-11-15T07:00:00Z", "2026-11-15T08:00:00Z", False),
+                     ("total_count", "748", ["a", "b"], "2026-11-15T07:00:00Z", "2026-11-15T08:00:00Z", False)]
+    assert [(r["bucket"], r["class"], r["bytes"], r["objects"], r["expires_max"]) for r in json.loads(snap.read_text())["rows"]] == [
+        ("a", "soft-deleted", 42, 4, None), ("a", "mpu", 0, 0, None),
+        ("b", "soft-deleted", 0, 0, None), ("b", "mpu", 7, 2, None),
+    ]
+
+
+@pytest.mark.parametrize("args, msg", [
+    (["-s", "metric", "-c", "delete-marker", "gs://a"], "-s metric: no delete-marker (it has soft-deleted, noncurrent, mpu)"),
+    (["-s", "metric", "-c", "mpu", "gs://a/p"], "-s metric: whole GCS buckets only (no prefix): gs://a/p"),
+    (["-s", "metric", "-c", "mpu", "s3://a"], "-s metric: whole GCS buckets only (no prefix): s3://a"),
+    (["-c", "mpu", "-S", "x.json", "gs://a"], "-S: the history comes from the metric (-s metric)"),
+])
+def test_metric_refuses_what_it_cant_measure(monkeypatch, args, msg):
+    fake_metric(monkeypatch, {})
+    res = CliRunner().invoke(nl.non_live_cmd, args)
+    assert (res.exit_code, res.output.strip().splitlines()[-1]) == (1, msg)
+
+
+def test_metric_history_is_one_total_per_day_and_class(monkeypatch, tmp_path):
+    """-S: daily means over `-H` days before today, summed over storage classes, labelled by the day each aligned
+    point closes; a day with no `live` point is null in every class, a non-live class missing that day is 0, and a class
+    0 every day is left out."""
+    daily = [
+        ts("a", "live-object", "REGIONAL", [("2026-11-15T00:00:00Z", 100), ("2026-11-14T00:00:00Z", 90)]),
+        ts("a", "live-object", "COLDLINE", [("2026-11-15T00:00:00Z", 10)]),
+        ts("a", "soft-deleted-object", "REGIONAL", [("2026-11-15T00:00:00Z", 5.6)]),
+        ts("a", "noncurrent-object", "REGIONAL", [("2026-11-15T00:00:00Z", 0)]),
+    ]
+    calls = fake_metric(monkeypatch, {}, daily)
+    out = tmp_path / "series.json"
+    res = CliRunner().invoke(nl.non_live_cmd, ["-s", "metric", "-c", "soft-deleted", "-H", "3", "-S", str(out), "gs://a"], catch_exceptions=False)
+    assert res.exit_code == 0, res.output
+    assert calls[-1] == ("total_bytes", "748", ["a"], "2026-11-12T00:00:00Z", "2026-11-15T00:00:00Z", True)
+    assert json.loads(out.read_text()) == {
+        "as_of": "2026-11-15T08:00:00Z", "metric": nl.METRIC_BYTES, "dates": ["2026-11-12", "2026-11-13", "2026-11-14"],
+        "buckets": {"a": {"live": [None, 90, 110], "soft-deleted": [None, 0, 6]}},
+    }

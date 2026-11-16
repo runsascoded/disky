@@ -53,12 +53,12 @@ const run = (raw: Sqlite, id: string, kind: string, status: string, started: num
     .run(id, kind, parent, status, started, updated, store)
 
 describe('POST /api/scan-runs/dispatch', () => {
-  it('runs the submitter job with DT_TRIGGER=manual, logs the dispatch and returns the execution', async () => {
+  it('runs the submitter job with DT_TRIGGER=manual and the dispatcher as DT_TRIGGER_BY, logs the dispatch and returns the execution', async () => {
     const w = await world()
     expect(await w.post()).toEqual([200, { execution: EXEC, operation: OP.name }])
     expect(w.calls).toEqual([{
       url: `https://run.googleapis.com/v2/${JOB}:run`, method: 'POST', auth: 'Bearer tok',
-      body: { overrides: { containerOverrides: [{ env: [{ name: 'DT_TRIGGER', value: 'manual' }] }] } },
+      body: { overrides: { containerOverrides: [{ env: [{ name: 'DT_TRIGGER', value: 'manual' }, { name: 'DT_TRIGGER_BY', value: ADMIN }] }] } },
     }])
     expect(log(w.raw)).toEqual([
       { id: 'ID', ts: NOW, who: ADMIN, job: JOB, state: 'dispatched', execution: EXEC, operation: OP.name, error: null, updated_ts: NOW },

@@ -25,14 +25,14 @@ def doc(**changes):
     return {
         'notice_version': 1, 'deployment': 'hf', 'mode': 'dev', 'status': 'success', 'stage': 'finish',
         'sha': SHA, 'source_branch': 'hf', 'repository': 'Open-Athena/disky', 'host': 'dev.hf.oa.dev',
-        'verified': True, 'dirty': False, 'actor': 'louisa', 'actor_source': 'github', 'attempt': '123-1',
+        'verified': True, 'dirty': False, 'actor': 'louisa', 'actor_source': 'github', 'attempt': 'df94aa1e-1922-4f93-86ec-5110e231222d',
         'cloudflare_deployment': 'abcdef12', 'cloudflare_url': 'https://abcdef12.oa-hf-usage.pages.dev',
         'run_url': 'https://github.com/Open-Athena/disky/actions/runs/123', **changes,
     }
 
 
 REPO = 'https://github.com/Open-Athena/disky'
-SUCCESS = (f'[hf]({REPO}/tree/hf) ([bbbbbbbbb]({REPO}/commit/{SHA})) · :gh: [louisa](https://github.com/louisa)'
+SUCCESS = (f'[hf]({REPO}/tree/hf) ([bbbbbbbbb]({REPO}/commit/{SHA})) · :gh: [louisa](https://github.com/louisa) · attempt `df94aa1e`'
            f' · :cf: [abcdef12](https://abcdef12.oa-hf-usage.pages.dev) · [site](https://dev.hf.oa.dev) · [logs]({REPO}/actions/runs/123)\n')
 SENDER = '✅ HF dev deployment succeeded'
 
@@ -59,14 +59,14 @@ def test_render_build_failure_has_no_fictitious_cf_receipt_or_verification():
                 cloudflare_url=None, actor=None, actor_source=None, sha=None, source_branch=None)
     assert (N.headline(value), N.render(value)) == (
         '❌ HF dev deployment failed during build',
-        f'source not recorded · [site](https://dev.hf.oa.dev) · [logs]({REPO}/actions/runs/123)\n',
+        f'source not recorded · attempt `df94aa1e` · [site](https://dev.hf.oa.dev) · [logs]({REPO}/actions/runs/123)\n',
     )
 
 
 def test_render_unverified_dirty_manual_upload_and_cancellation():
     value = doc(mode='prod', host='hf.oa.dev', verified=False, dirty=True, actor_source='local', run_url=None)
     expected = (f'[hf]({REPO}/tree/hf) ([bbbbbbbbb]({REPO}/commit/{SHA})) · ⚠️ dirty · ⚠️ unverified · :computer: `louisa`'
-                ' · :cf: [abcdef12](https://abcdef12.oa-hf-usage.pages.dev) · [site](https://hf.oa.dev)\n')
+                ' · attempt `df94aa1e` · :cf: [abcdef12](https://abcdef12.oa-hf-usage.pages.dev) · [site](https://hf.oa.dev)\n')
     assert (N.headline(value), N.render(value)) == ('✅ HF prod deployment succeeded', expected)
     # a cancellation isn't a success, so it isn't "unverified"; an unrecorded tree says so
     cancelled = {**value, 'status': 'cancelled', 'dirty': None}
@@ -92,7 +92,7 @@ def test_invalid_or_injectable_receipt_is_refused(changes, message):
 
 ENV = {'DEPLOY_NOTIFICATIONS_ENABLED': '1', 'SLACK_DEPLOY_BOT_TOKEN': 'xoxb-test-token', 'SLACK_DEPLOY_CHANNEL': 'C0TESTCHAN'}
 BOT = ('U0BOT', 'B0BOT')
-WIRE = (f'<{REPO}/tree/hf|hf> (<{REPO}/commit/{SHA}|bbbbbbbbb>) · :gh: <https://github.com/louisa|louisa>'
+WIRE = (f'<{REPO}/tree/hf|hf> (<{REPO}/commit/{SHA}|bbbbbbbbb>) · :gh: <https://github.com/louisa|louisa> · attempt `df94aa1e`'
         f' · :cf: <https://abcdef12.oa-hf-usage.pages.dev|abcdef12> · <https://dev.hf.oa.dev|site> · <{REPO}/actions/runs/123|logs>\n')
 
 
@@ -234,14 +234,15 @@ def executable(path: Path, body: str):
 
 
 @pytest.mark.parametrize('configured_store,expected_deployment', [(None, 'demo-site'), ('hf', 'hf')])
-@pytest.mark.parametrize('build_rc,upload_rc,enabled,expected', [
-    (7, 0, False, (7, 'failure', 'build', None)),
-    (130, 0, False, (130, 'cancelled', 'build', None)),
-    (0, 9, False, (9, 'failure', 'upload', None)),
-    (0, 0, False, (0, 'success', 'finish', 'abcdef12')),
-    (0, 0, True, (0, 'success', 'finish', 'abcdef12')),
+@pytest.mark.parametrize('install_rc,build_rc,upload_rc,enabled,expected', [
+    (1, 0, 0, False, (1, 'failure', 'build', None)),
+    (0, 7, 0, False, (7, 'failure', 'build', None)),
+    (0, 130, 0, False, (130, 'cancelled', 'build', None)),
+    (0, 0, 9, False, (9, 'failure', 'upload', None)),
+    (0, 0, 0, False, (0, 'success', 'finish', 'abcdef12')),
+    (0, 0, 0, True, (0, 'success', 'finish', 'abcdef12')),
 ])
-def test_manual_hook_records_failures_and_preserves_original_exit_status(tmp_path, build_rc, upload_rc, enabled, expected, configured_store, expected_deployment):
+def test_manual_hook_records_failures_and_preserves_original_exit_status(tmp_path, install_rc, build_rc, upload_rc, enabled, expected, configured_store, expected_deployment):
     site = tmp_path / 'site'
     site.mkdir()
     for name in ('deploy', 'toml-check'):
@@ -260,7 +261,9 @@ SOURCE_REF = "hf"
     executable(bins / 'git', f'''import sys
 if sys.argv[1:]==['rev-parse','HEAD']: print('{SHA}')
 ''')
+    # `site/deploy` installs the lockfile's packages first (a frozen install, from the repo root), then builds, then uploads.
     executable(bins / 'pnpm', f'''import sys
+if sys.argv[1:]==['install','--frozen-lockfile']: sys.exit({install_rc})
 if sys.argv[1:]==['build']: sys.exit({build_rc})
 if {upload_rc}:
     print('Upload failed; prior deploy https://oldhash1.demo-site.pages.dev')

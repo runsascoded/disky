@@ -208,6 +208,7 @@ const SHARED_ROUTES: Record<string, Case[]> = {
   'api/name-summary-registry.ts': [get('/api/name-summary-registry', 'viewer'), post('/api/name-summary-registry', 'viewer')],
   'api/name-summary.ts': [get('/api/name-summary', 'viewer'), post('/api/name-summary', 'viewer')],
   'api/og/[[path]].ts': [post('/api/og/mint', 'stager'), del('/api/og/tokens/none', 'stager'), get('/api/og/tokens', 'admin')],
+  'api/non-live.ts': [get('/api/non-live', 'viewer')],
   'api/owner-prices.ts': [post('/api/owner-prices', 'admin')],
   'api/owners.ts': [get(`/api/owners?${AT}`, 'viewer')],
   'api/path-index.ts': [get(`/api/path-index?${AT}`, 'viewer')],
@@ -382,6 +383,8 @@ const SHARED_RESTRICTED: Record<string, Restricted> = {
   'POST /api/name-summary-registry': 'blocked',
   'GET /api/name-summary': 'blocked',
   'POST /api/name-summary': 'blocked',
+  // Whole-bucket sums: they count whatever a restriction hides.
+  'GET /api/non-live': 'blocked',
   'POST /api/og/mint': 'blocked',
   'DELETE /api/og/tokens/none': 'blocked',
   'GET /api/owners': 'blocked',

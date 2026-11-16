@@ -43,6 +43,13 @@ STATUSES = ("running", "succeeded", "failed", "nop")
 #: unset, nothing is recorded, and the digest goes by the clock. A scan's trigger is its first run's (`digest_cw.scan_triggers`).
 TRIGGER_ENV = "DT_TRIGGER"
 TRIGGERS = ("schedule", "manual")
+#: Who started a manual run: the signed-in address the site's "Run a scan" dispatches as, or what a hand submit names
+#: (`--update-env-vars DT_TRIGGER=manual,DT_TRIGGER_BY=<who>`). Recorded only on a manual run, with migration
+#: `scan-run-trigger-by`; unset, the run's starter is unknown.
+TRIGGER_BY_ENV = "DT_TRIGGER_BY"
+#: An address or a handle (`ada@example.org`, `claude (disky-r2)`): nothing Slack's mrkdwn reads as markup (`<!channel>`,
+#: `<@U…>`, `<url|text>`), since the scan-health thread renders it
+TRIGGER_BY_RE = re.compile(r"[\w.+@:'() -]{1,200}")
 
 
 def trigger_of(env: Mapping[str, str]) -> str | None:
@@ -51,6 +58,17 @@ def trigger_of(env: Mapping[str, str]) -> str | None:
     if t is not None and t not in TRIGGERS:
         raise ValueError(f"${TRIGGER_ENV}={t!r}: not one of {TRIGGERS}")
     return t
+
+
+def trigger_by_of(env: Mapping[str, str], trigger: str | None) -> str | None:
+    """`$DT_TRIGGER_BY` on a manual run (`TRIGGER_BY_RE`); None when unset or the run
+    isn't manual (a cron's run has no starter)."""
+    who = (env.get(TRIGGER_BY_ENV) or "").strip() or None
+    if who is None or trigger != "manual":
+        return None
+    if not TRIGGER_BY_RE.fullmatch(who):
+        raise ValueError(f"${TRIGGER_BY_ENV}: want an address or handle (letters, digits, `.+@:'()-`, spaces; at most 200)")
+    return who
 
 
 # ── The record ──────────────────────────────────────────────────────────────
@@ -79,6 +97,8 @@ class Run:
     gen: str | None = None
     #: `TRIGGERS`; None: unknown (a backfilled run, or a write that doesn't state it)
     trigger: str | None = None
+    #: Who started a manual run (`TRIGGER_BY_ENV`); None: unknown, or not manual
+    trigger_by: str | None = None
 
 
 @dataclass(frozen=True)
@@ -145,7 +165,7 @@ def lit(v: object) -> str:
 
 # Columns an upsert never clears: a later partial write (a phase, the exit trap) leaves what it doesn't name alone.
 _KEEP = ("parent", "failed_phase", "error", "started_ts", "finished_ts", "job_name", "region", "machine", "spot", "tasks",
-         "image", "cost_usd", "gen", "trigger")
+         "image", "cost_usd", "gen", "trigger", "trigger_by")
 
 
 def run_sql(run: Run, now: int) -> str:
@@ -154,8 +174,10 @@ def run_sql(run: Run, now: int) -> str:
     writer's (a backfill completing a job-written run stays `job`)."""
     if run.status not in STATUSES:
         raise ValueError(f"scan run {run.run_id}: status {run.status!r} not one of {STATUSES}")
-    # `trigger` only when known, so a database without the column (migration `scan-run-trigger`) still takes the run
-    cols = [f.name for f in fields(Run) if f.name != "trigger" or run.trigger is not None] + ["updated_ts"]
+    # `trigger` / `trigger_by` only when known, so a database without the column (migrations `scan-run-trigger`,
+    # `scan-run-trigger-by`) still takes the run
+    optional = {"trigger": run.trigger, "trigger_by": run.trigger_by}
+    cols = [f.name for f in fields(Run) if f.name not in optional or optional[f.name] is not None] + ["updated_ts"]
     vals = [getattr(run, c) for c in cols[:-1]] + [now]
     sets = ["scan = excluded.scan", "kind = excluded.kind", "status = excluded.status", "store = excluded.store",
             "updated_ts = excluded.updated_ts"]
@@ -730,6 +752,7 @@ def record(
     task: Mapping[str, str] | None = None,
     dag: tuple[str, str] | None = None,
     trigger: str | None = None,
+    trigger_by: str | None = None,
 ) -> Record:
     """One incremental write of run `run_id` (scan `scan`): start it, start/close a phase (measuring completed outputs tied to
     it), measure named outputs, finish it (`exit_code`, or `nop`). The run row is upserted every time, so any call
@@ -740,7 +763,7 @@ def record(
     plus `extra_cost` (the jobs it ran apart from its own: `labelled_cost`).
 
     `task`: where phase `phase` ran: its Batch job when not the run's own (`job_name`, `machine`) and its pipeline node
-    (`task`; `JobRun.task`). `dag`: the run's pipeline DAG, (engine, graph JSON). `trigger`: what started it (`TRIGGERS`)."""
+    (`task`; `JobRun.task`). `dag`: the run's pipeline DAG, (engine, graph JSON). `trigger`: what started it (`TRIGGERS`), `trigger_by`: who (a manual run's)."""
     check_scan_id(scan)
     if phase_start and not phase:
         raise ValueError("scan-run: a phase start needs a phase name")
@@ -754,7 +777,8 @@ def record(
     elif start or (phase and not phase_start):
         status = "running" if status != "nop" else status
     run = Run(run_id=run_id, scan=scan, kind=kind, status=status, store=profile.store, parent=parent,
-              started_ts=now if start and not started else None, gen=gen, source="job", trigger=trigger)
+              started_ts=now if start and not started else None, gen=gen, source="job", trigger=trigger,
+              trigger_by=trigger_by)
     if exit_code is not None or nop:
         run = replace(run, finished_ts=now)
         if exit_code:
@@ -1846,6 +1870,11 @@ def start_cmd(from_batch, gen, image, job_name, batch_job_name, kind, store_key,
     except ValueError as e:
         report_failure(e)
         trigger = None
+    try:
+        trigger_by = trigger_by_of(j.env, trigger)
+    except ValueError as e:
+        report_failure(e)
+        trigger_by = None
     scan = scan or j.env.get("SCAN_ID")
     j.clear()
     j.save(fresh=True, scan=scan, kind=kind, parent=parent, gen=gen, store=store_key, region=region, job_name=job_name)
@@ -1857,7 +1886,7 @@ def start_cmd(from_batch, gen, image, job_name, batch_job_name, kind, store_key,
             report_failure(e)
     facts = dict(job_name=job_name, region=None if (batch_job_name or from_batch) else region, machine=machine, spot=spot,
                  tasks=tasks, image=image)
-    rec = j.write(at, start=True, job=job, facts=facts, trigger=trigger)
+    rec = j.write(at, start=True, job=job, facts=facts, trigger=trigger, trigger_by=trigger_by)
     if rec is not None:
         j.save(region=rec.run.region, job_name=rec.run.job_name)
         if project := j.profile.project:

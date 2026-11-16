@@ -31,12 +31,12 @@ export const isPathScope = (scope: string): boolean => /^[a-z0-9-]+:hide:/.test(
  *  bucket bytes, D1-held path lists, and answers naming paths that no route
  *  filters (name search summaries and covers, the static-index bench, the
  *  append stores' health, scan-run outputs, the digest's image: a drawn diff
- *  of whatever path its caller names). */
+ *  of whatever path its caller names; whole-bucket non-live sums). */
 export const RESTRICTED_BLOCKED = [
   '/api/path-index', '/v1', '/api/plans', '/api/actions', '/api/db', '/api/owners',
   '/api/estate', '/api/assignments', '/api/sweep', '/api/plan-sweep', '/api/og',
   '/api/name-summary', '/api/name-summary-registry', '/api/static-bench', '/api/filter-cover', '/api/name-matches', '/api/health', '/api/scan-runs',
-  '/api/digest-image',
+  '/api/digest-image', '/api/non-live',
 ]
 
 export const blockedForRestricted = (pathname: string): boolean =>

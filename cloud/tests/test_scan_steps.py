@@ -1327,6 +1327,33 @@ def test_non_live_measures_a_providers_buckets_in_one_call(tmp_path, env):
     ]
 
 
+def test_non_live_metric_source_measures_every_gcs_bucket_in_one_call(tmp_path, env):
+    """`source: metric`: every `gs://` source in one `dt-cloud non-live -s metric` call (other sources aren't the
+    metric's), the history to `snapshots/non-live/series.json` in the data store and the R2 archive (`history` days when
+    set); a class the metric lacks is refused at the step; an unknown source too."""
+    env["R2_ARCHIVE"] = "r2://idx"
+    sources = ["gcs://a", "gcs://b", "r2://c"]
+    c = ctx(tmp_path, env, steps=["non-live"], sources=sources,
+            options={"non-live": {"classes": ["soft-deleted", "mpu"], "source": "metric", "history": 400}, **NL_OPTS})
+    S.non_live(c, None)
+    out = "<tmp>/data/l2/2026-10-16T1200/non-live"
+    snap = "<tmp>/data/snapshots/sub/2026-10-16T1200/non-live.json"
+    assert c.sh_impl.calls == [
+        f"dt-cloud non-live -s metric -c soft-deleted,mpu -H 400 -j {snap} -o {out}/{{bucket}}.parquet "
+        "-S <tmp>/data/snapshots/non-live/series.json -S r2://idx/snapshots/non-live/series.json gcs://a gcs://b",
+    ]
+    bad = ctx(tmp_path, env, steps=["non-live"], sources=sources,
+              options={"non-live": {"classes": ["delete-marker"], "source": "metric"}, **NL_OPTS})
+    with pytest.raises(ValueError) as e:
+        S.non_live(bad, None)
+    assert str(e.value) == "non-live: source metric has no delete-marker (it has soft-deleted, noncurrent, mpu)"
+    odd = ctx(tmp_path, env, steps=["non-live"], sources=sources,
+              options={"non-live": {"classes": ["mpu"], "source": "api"}, **NL_OPTS})
+    with pytest.raises(ValueError) as e:
+        S.non_live(odd, None)
+    assert str(e.value) == "non-live: source 'api': listing or metric"
+
+
 def test_dups_reads_the_size_sort_and_writes_beside_the_index(tmp_path, env):
     """`dups` (listed in `steps`): `dt-cloud dups` over the scan's `bysize` sort (else its `path` sort) with the
     profile's options, both files copied beside the index (`dups.json` the skip mark); a second run skips."""
@@ -1793,6 +1820,23 @@ def test_mem_budget(tmp_path, monkeypatch, files, want):
         (tmp_path / name).parent.mkdir(parents=True, exist_ok=True)
         (tmp_path / name).write_text(text)
     assert S.mem_budget(tmp_path) == want
+
+
+def test_mem_budget_follows_dt_mem(tmp_path, monkeypatch):
+    """`$DT_MEM` stands in for the machine's RAM (Fargate's microVM reports more than the task has), still capped by a
+    lower cgroup limit; a bad value is the step's failure."""
+    monkeypatch.setattr(os, "sysconf", lambda k: {"SC_PAGE_SIZE": 4096, "SC_PHYS_PAGES": 64 * 2**30 // 4096}[k])
+    (tmp_path / "memory.max").write_text("max\n")
+
+    def ctx_with(**env: str) -> S.Ctx:
+        c = S.Ctx.__new__(S.Ctx)
+        c.env = {"DT_CGROUP": str(tmp_path), **env}
+        return c
+
+    assert [ctx_with().mem, ctx_with(DT_MEM="16GiB").mem, S.mem_budget(tmp_path, env={"DT_MEM": "14GiB"})] == ["38GB", "9GB", "8GB"]
+    with pytest.raises(S.StepFailed) as e:
+        ctx_with(DT_MEM="lots").mem
+    assert (e.value.rc, str(e.value)) == (2, "$DT_MEM='lots': not a memory size (e.g. 16GiB)")
 
 
 def test_import_args_mem(tmp_path, env, monkeypatch):

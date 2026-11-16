@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { classTotals, type NonLiveRow } from './nonLiveModel'
+import { axisDay, classTotals, type NonLiveRow, type NonLiveSeries, stackedBands } from './nonLiveModel'
 
 const row = (bucket: string, cls: NonLiveRow['class'], bytes: number, objects: number, expires_max: string | null = null): NonLiveRow =>
   ({ bucket, class: cls, prefix: '', bytes, objects, oldest: null, newest: null, expires_min: null, expires_max })
@@ -22,5 +22,41 @@ describe('classTotals', () => {
 
   it('is empty when nothing is held', () => {
     expect(classTotals([row('a', 'soft-deleted', 0, 0)])).toEqual([])
+  })
+})
+
+describe('stackedBands', () => {
+  const x = (d: string) => Date.parse(`${d}T00:00:00Z`)
+  it('sums buckets per day and stacks live under each non-live class, dropping leading empty days and marking later ones gaps', () => {
+    const s: NonLiveSeries = {
+      as_of: '2026-11-15T08:00:00Z', metric: 'm',
+      dates: ['2026-11-10', '2026-11-11', '2026-11-12', '2026-11-13'],
+      buckets: {
+        a: { live: [null, 100, null, 90], 'soft-deleted': [null, 5, null, 0], mpu: [null, 0, null, 2] },
+        b: { live: [null, null, null, 10], noncurrent: [null, null, null, 0] },
+      },
+    }
+    expect(stackedBands(s)).toEqual({
+      bands: [
+        { cls: 'live', points: [{ x: x('2026-11-11'), y0: 0, y: 100 }, { x: x('2026-11-13'), y0: 0, y: 100 }] },
+        { cls: 'soft-deleted', points: [{ x: x('2026-11-11'), y0: 100, y: 105 }, { x: x('2026-11-13'), y0: 100, y: 100 }] },
+        { cls: 'mpu', points: [{ x: x('2026-11-11'), y0: 105, y: 105 }, { x: x('2026-11-13'), y0: 100, y: 102 }] },
+      ],
+      gaps: [x('2026-11-12')],
+    })
+  })
+})
+
+describe('axisDay', () => {
+  const day = (iso: string) => Date.parse(`${iso}T00:00:00Z`)
+  it('labels months over a long history, days over a short one', () => {
+    const long = axisDay(day('2026-11-14') - day('2024-11-15'))
+    expect([day('2025-02-28'), day('2026-05-01')].map(long)).toEqual(['2025-02', '2026-05'])
+    const short = axisDay(day('2026-11-14') - day('2026-10-20'))
+    expect([day('2026-10-24'), day('2026-11-03'), day('2026-11-13')].map(short)).toEqual(['10-24', '11-03', '11-13'])
+  })
+  it('switches at 90 days', () => {
+    expect(axisDay(89 * 86_400_000)(day('2026-11-03'))).toBe('11-03')
+    expect(axisDay(90 * 86_400_000)(day('2026-11-03'))).toBe('2026-11')
   })
 })

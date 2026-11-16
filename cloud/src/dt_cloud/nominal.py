@@ -17,6 +17,8 @@ from typing import TYPE_CHECKING, Protocol
 from urllib.parse import quote, unquote, urlencode, urlparse
 from uuid import NAMESPACE_URL, uuid5
 
+from .scan_runs import TRIGGER_BY_RE
+
 if TYPE_CHECKING:
     from .scan_runs import JobRun
 
@@ -90,11 +92,18 @@ def stamp(row: dict) -> str:
     return datetime.fromtimestamp(row['run']['started_ts'], timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
 
 
+#: A reply's trigger, beside its ✅: the deployment's cron, a hand submit (the site's "Run a scan" or a CLI execute; who,
+#: named after the duration when recorded: `scan_runs.trigger_by`), or a deployment that doesn't state its triggers. The
+#: parent's run mix spells them out.
+TRIGGER_EMOJI = {'schedule': ':alarm_clock:', 'manual': ':bust_in_silhouette:', None: ':grey_question:'}
+
+
 def reply(cfg: Config, row: dict) -> str:
-    trigger = {'schedule': 'scheduled', 'manual': 'manual', None: 'trigger unknown'}[row['run']['trigger']]
     seconds = row.get('secs')
     duration = 'duration unknown' if seconds is None else f"{int(seconds) // 60}m {int(seconds) % 60:02d}s"
-    return f"✅ [{stamp(row)}]({cfg.link(row['run'])}) · {trigger} · {duration} · no phase issues"
+    by = row['run'].get('trigger_by') if row['run']['trigger'] == 'manual' else None
+    by = by if by and TRIGGER_BY_RE.fullmatch(by) else None  # never markup into mrkdwn, whatever a row holds
+    return f"✅ {TRIGGER_EMOJI[row['run']['trigger']]} [{stamp(row)}]({cfg.link(row['run'])}) · {duration}" + (f" · {by}" if by else "")
 
 
 def parent(cfg: Config, good: list[dict], boundary: dict | None) -> str:
@@ -106,7 +115,7 @@ def parent(cfg: Config, good: list[dict], boundary: dict | None) -> str:
     after = f" after [{boundary['run']['scan']}]({cfg.link(boundary['run'])})" if boundary else ' (available run history)'
     return (f"✅ **{cfg.title}: {qualifier}{len(good)} consecutive clean runs**\n\n"
             f"Since {since}{after}.\n\n"
-            f"Latest completed: [{stamp(good[0])}]({cfg.link(good[0]['run'])}). No phase issues.\n\n"
+            f"Latest completed: [{stamp(good[0])}]({cfg.link(good[0]['run'])}).\n\n"
             f"Latest {len(window)} runs: {mix}. Each reply links its scan record. [All scans]({cfg.scans}).")
 
 

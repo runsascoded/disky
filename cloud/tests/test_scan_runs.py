@@ -294,6 +294,31 @@ def test_trigger_of():
         scan_runs.trigger_of({"DT_TRIGGER": "cron"})
 
 
+def test_record_trigger_by():
+    """Who started a manual run: set at start, kept by the later writes; a write without one never names the column."""
+    s = sink()
+    record(s, PROFILE, "2026-10-08", "uid-1", 100, start=True, trigger="manual", trigger_by="ada@example.org")
+    record(s, PROFILE, "2026-10-08", "uid-1", 300, exit_code=0)
+    record(s, PROFILE, "2026-10-08", "uid-2", 400, start=True, trigger="manual")
+    assert rows(s, "SELECT run_id, status, trigger, trigger_by FROM scan_runs ORDER BY run_id") == [
+        ("uid-1", "succeeded", "manual", "ada@example.org"),
+        ("uid-2", "running", "manual", None),
+    ]
+    sql = scan_runs.run_sql(scan_runs.Run("uid-3", "2026-10-08", "scan", "running", trigger="manual"), 500)
+    assert sql.split(" VALUES ")[0].endswith(", gen, trigger, updated_ts)")
+
+
+def test_trigger_by_of():
+    by = {"DT_TRIGGER_BY": " ada@example.org "}
+    assert [scan_runs.trigger_by_of(e, t) for e, t in ((by, "manual"), (by, "schedule"), (by, None), ({}, "manual"),
+                                                      ({"DT_TRIGGER_BY": " "}, "manual"))] == [
+        "ada@example.org", None, None, None, None]
+    assert scan_runs.trigger_by_of({"DT_TRIGGER_BY": "claude (disky-r2)"}, "manual") == "claude (disky-r2)"
+    for bad in ("x" * 201, "ada\nbob", "<!channel>", "<@U123>", "<https://x.test|ada>", "a&b"):
+        with pytest.raises(ValueError, match=r"^\$DT_TRIGGER_BY: want an address or handle"):
+            scan_runs.trigger_by_of({"DT_TRIGGER_BY": bad}, "manual")
+
+
 def test_record_failure_keeps_phases_and_names_the_error():
     s = sink()
     record(s, PROFILE, "2026-10-08", "uid-2", 100, start=True)

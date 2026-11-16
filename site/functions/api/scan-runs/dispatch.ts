@@ -43,7 +43,7 @@ export const onRequestPost = async (ctx: Ctx): Promise<Response> => {
     const later = await dispatchState(db, now)
     return json({ error: refusal(later, now) ?? 'another dispatch just claimed the scan', pending: later.pending }, 409, NO_STORE)
   }
-  const { url, body } = runRequest(job)
+  const { url, body } = runRequest(job, who)
   let r: Response
   try {
     const token = await gcpToken(env.GCP_SA_KEY)

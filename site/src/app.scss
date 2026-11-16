@@ -3298,3 +3298,7 @@ a.sec-anchor {
 .diff-tm .dt-treemap-tip.dock:has(.diff-remainder) { height: auto; min-height: var(--dt-dock-h); }
 
 .diff-tm .dt-treemap-cell { cursor: pointer !important; }
+.non-live-history {
+  > summary { font-size: 12px; cursor: pointer; }
+  &[open] > summary { margin-bottom: 4px; }
+}

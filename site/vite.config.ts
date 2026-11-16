@@ -36,6 +36,12 @@ const devSeriesIndex = {
       if (existsSync(p)) { res.setHeader('content-type', 'application/json'); res.end(readFileSync(p)) }
       else next()
     })
+    // likewise `tmp/non-live-series.json` (`dt-cloud non-live -s metric -S …`) as `/api/non-live`'s answer
+    server.middlewares.use('/api/non-live', (_req, res, next) => {
+      const p = 'tmp/non-live-series.json'
+      if (existsSync(p)) { res.setHeader('content-type', 'application/json'); res.end(Buffer.from(`{"series":${readFileSync(p, 'utf8')}}`)) }
+      else next()
+    })
   },
 }
 

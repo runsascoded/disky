@@ -72,13 +72,15 @@ def test_site_refuses_edits_during_build_before_publication(repo: Path):
     fake_bin = repo / 'scratch'
     fake_bin.mkdir()
     pnpm = fake_bin / 'pnpm'
-    pnpm.write_text('#!/usr/bin/env bash\nset -eu\necho "$*" >> ../scratch/calls\necho edited > ../source.txt\n')
+    # `site/deploy` installs from the repo root first (a no-op here), then builds from `site/`; the build edits source
+    pnpm.write_text(f'#!/usr/bin/env bash\nset -eu\necho "$*" >> {fake_bin}/calls\n'
+                    f'[ "$1" = install ] && exit 0\necho edited > {repo}/source.txt\n')
     pnpm.chmod(0o755)
     result = invoke(repo, 'site/deploy', '-P', env={
         'PATH': str(fake_bin) + os.pathsep + os.environ['PATH'],
         'CLOUDFLARE_ACCOUNT_ID': 'test-account',
     })
     assert (result.returncode, result.stdout, result.stderr) == (1, '', REFUSAL + ' M source.txt\n')
-    assert (fake_bin / 'calls').read_text() == 'build\n'
+    assert (fake_bin / 'calls').read_text() == 'install --frozen-lockfile\nbuild\n'
     assert git(repo, 'branch', '--list', 'release-test-prod') == ''
 
