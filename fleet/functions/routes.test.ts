@@ -162,6 +162,11 @@ describe('/og/fleet.png', () => {
       [200, 'image/png', 'full', 'private, no-store', 'PNG'],
     ])
   })
+  it('with `FLEET_CARD_PUBLIC`: the full card for anyone, signed or not, held 5 min', async () => {
+    const r = await og(ctx(req('/og/fleet.png'), envOf({ FLEET_CARD_PUBLIC: '1' })))
+    expect([r.status, r.headers.get('content-type'), r.headers.get('x-og-tier'), r.headers.get('cache-control')])
+      .toEqual([200, 'image/png', 'full (public)', 'public, max-age=300'])
+  })
   it('any other card is not found', async () => {
     expect((await og(ctx(req('/og/map.png'), envOf()))).status).toBe(404)
   })
