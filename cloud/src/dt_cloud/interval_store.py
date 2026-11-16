@@ -297,23 +297,58 @@ def _raw_sql(con, src: str, preds: list[str], version: int | None, generation: I
     return " UNION ALL ".join(f"SELECT {sel} FROM read_parquet({q(src)}) WHERE {p}" for p in preds)
 
 
-def path_rows_sql(con, src: str, preds: list[str], version: int | None = None, generation: Identity = False) -> str:
-    """One scan's rows in the range, one per `(depth, path)`: the sums and maxima the reader's `merge`
+def path_rows_into(con, table: str, src: str, preds: list[str], version: int | None = None, generation: Identity = False,
+                   *, part_slices: int | None = None) -> None:
+    """Table `table`: one scan's rows in the range, one per `(depth, path)`: the sums and maxima the reader's `merge`
     takes over a path's rows (owner slices, a v1 index's duplicate rows), `kind` = `dir` if any row is,
-    `us` = the owner slices, `dr` = the mean stamp to the second; with `generation`, an object's `GENERATION`
-    last (NULL on a dir, a key that is also a folder's prefix included)."""
+    `us` = the owner slices (`us_sql_from_raw`), `dr` = the mean stamp to the second; with `generation`, an object's
+    `GENERATION` last (NULL on a dir, a key that is also a folder's prefix included).
+
+    Built in steps so memory is bounded by construction: every statement but the multi-owner lists takes only
+    fixed-size aggregates (which DuckDB spills), and those lists are built `part_slices` (`US_PART_SLICES`) named
+    slices at a time, over hash partitions of `(depth, path)`."""
     raw = _raw_sql(con, src, preds, version, generation)
     identity = identity_column(generation)
     gen = f", CASE WHEN bool_and(is_file) THEN max({identity}) END AS {identity}" if generation else ""
+    con.execute(f"CREATE OR REPLACE TEMP TABLE _us_s AS {US_SLICES.format(raw=f'({raw})')}")
+    con.execute(f"CREATE OR REPLACE TEMP TABLE _us_p AS {US_PATHS.format(s='_us_s')}")
+    multi = "SELECT * FROM _us_s SEMI JOIN (SELECT depth, path FROM _us_p WHERE ns > 1) k USING (depth, path) WHERE usr <> ''"
+    n = con.execute(f"SELECT count(*) FROM ({multi})").fetchone()[0]
+    k = max(1, -(-n // (part_slices or US_PART_SLICES)))
+    con.execute("CREATE OR REPLACE TEMP TABLE _us_m (depth UTINYINT, path VARCHAR, l VARCHAR)")
+    for i in range(k):
+        part = f"({multi}{f' AND hash(depth, path) % {k} = {i}' if k > 1 else ''})"
+        con.execute(f"INSERT INTO _us_m {US_LISTS.format(m=part)}")
     one = f"""SELECT depth, path, CASE WHEN bool_and(is_file) THEN 'file' ELSE 'dir' END AS kind, sum(size)::BIGINT AS size,
         sum(n_files)::BIGINT AS n_files, max(n_children) AS n_children, max(n_desc) AS n_desc, max(mtime) AS mtime,
         sum(wt)::DOUBLE AS wts, sum(mw)::BIGINT AS wb, max(last_read) AS last_read,
         {CLS_SUMS}{gen}
-        FROM raw GROUP BY depth, path"""
-    return f"""WITH raw AS ({raw}), one AS ({one}), sl AS ({us_sql_from_raw()})
+        FROM ({raw}) GROUP BY depth, path"""
+    con.execute(f"""CREATE OR REPLACE TABLE {table} AS WITH one AS ({one}), sl AS ({US_JOIN.format(p='_us_p', m='_us_m')})
         SELECT one.depth, one.path, kind, size, n_files, n_children, n_desc, mtime,
             CASE WHEN wb > 0 THEN round(wts / wb, 0) ELSE 0 END::DOUBLE AS dr, wb, {', '.join(CLS)}, sl.us, wts, last_read{f', {identity}' if generation else ''}
-        FROM one JOIN sl USING (depth, path)"""
+        FROM one JOIN sl USING (depth, path)""")
+    for t in ("_us_s", "_us_p", "_us_m"):
+        con.execute(f"DROP TABLE {t}")
+
+
+#: Named owner slices a pass of `path_rows_into`'s multi-owner lists builds (each a `{usr, b}` in a per-path list).
+US_PART_SLICES = 1_000_000
+#: The owner-slice steps over a source `{raw}` of raw rows: slices per `(depth, path, usr)`; per path the named slices'
+#: count, the rows, and one named owner with its bytes (fixed-size aggregates, all spillable); the sorted JSON list for
+#: the paths with ≥2 named owners, over named slices `{m}`; and `us` per path from those.
+US_SLICES = "SELECT depth, path, usr, sum(size)::BIGINT AS b, count(*) AS nr FROM {raw} GROUP BY depth, path, usr"
+US_PATHS = """SELECT depth, path, count(*) FILTER (WHERE usr <> '') AS ns, sum(nr) AS nr,
+        any_value(usr) FILTER (WHERE usr <> '') AS u, any_value(b) FILTER (WHERE usr <> '') AS b
+    FROM {s} GROUP BY depth, path"""
+US_LISTS = """SELECT depth, path, array_to_string(list_transform(list_sort(list({{'usr': usr, 'b': b}})),
+        x -> '[' || to_json(x.usr)::VARCHAR || ',' || x.b::VARCHAR || ']'), ',') AS l
+    FROM {m} GROUP BY depth, path"""
+US_JOIN = """SELECT depth, path,
+        CASE WHEN ns = 0 THEN '' WHEN nr = 1 THEN u
+             WHEN ns = 1 THEN '[[' || to_json(u)::VARCHAR || ',' || b::VARCHAR || ']]'
+             ELSE '[' || l || ']' END AS us
+    FROM {p} LEFT JOIN {m} USING (depth, path)"""
 
 
 def us_sql_from_raw() -> str:
@@ -321,30 +356,15 @@ def us_sql_from_raw() -> str:
     string — `''` with no named owner; the owner's name when the path is exactly one row and it is
     named (its bytes are the path's); else JSON `[["usr", bytes], …]` by `usr`, every named owner
     (zero bytes included: the reader's per-user map holds them). Unnamed bytes are the path's minus
-    the named ones.
-
-    Every path's group takes fixed-size aggregates only, which DuckDB spills; the sorted list is built just for
-    the paths with two or more named owners, so memory past the limit is that list state alone. (An ordered
-    `string_agg` over every path held each group's rows unspillable: cw's range append, with no owners at all,
-    ran out at 9.3 GiB, 2026-11-16.)"""
-    return """WITH s AS (SELECT depth, path, usr, sum(size)::BIGINT AS b, count(*) AS nr FROM raw GROUP BY depth, path, usr),
-        p AS (SELECT depth, path, count(*) FILTER (WHERE usr <> '') AS ns, sum(nr) AS nr,
-                any_value(usr) FILTER (WHERE usr <> '') AS u, any_value(b) FILTER (WHERE usr <> '') AS b
-            FROM s GROUP BY depth, path),
-        m AS (SELECT depth, path, array_to_string(list_transform(list_sort(list({'usr': usr, 'b': b})),
-                x -> '[' || to_json(x.usr)::VARCHAR || ',' || x.b::VARCHAR || ']'), ',') AS l
-            FROM s SEMI JOIN (SELECT depth, path FROM p WHERE ns > 1) k USING (depth, path)
-            WHERE usr <> '' GROUP BY depth, path)
-        SELECT depth, path,
-            CASE WHEN ns = 0 THEN '' WHEN nr = 1 THEN u
-                 WHEN ns = 1 THEN '[[' || to_json(u)::VARCHAR || ',' || b::VARCHAR || ']]'
-                 ELSE '[' || l || ']' END AS us
-        FROM p LEFT JOIN m USING (depth, path)"""
+    the named ones. One statement (`path_rows_into` runs the same steps with bounded memory)."""
+    multi = "(SELECT * FROM s SEMI JOIN (SELECT depth, path FROM p WHERE ns > 1) k USING (depth, path) WHERE usr <> '')"
+    return f"""WITH s AS ({US_SLICES.format(raw='raw')}), p AS ({US_PATHS.format(s='s')}), m AS ({US_LISTS.format(m=multi)})
+        {US_JOIN.format(p='p', m='m')}"""
 
 
 def slice_rows_sql(con, src: str, preds: list[str], version: int | None = None) -> str:
     """One scan's owner slices in the range, one row per `(depth, path, usr)` (`usr` '' where none is
-    named): `path_rows_sql`'s sums and maxima per slice instead of per path."""
+    named): `path_rows_into`'s sums and maxima per slice instead of per path."""
     raw = _raw_sql(con, src, preds, version, False)
     return f"""WITH raw AS ({raw})
         SELECT depth, path, usr, CASE WHEN bool_and(is_file) THEN 'file' ELSE 'dir' END AS kind, sum(size)::BIGINT AS size,
@@ -398,8 +418,10 @@ def build_range(scans: dict, ranges: dict, i: int, out: Path, con, *, mount: str
     # One scan at a time: a single 71-way `UNION ALL` runs every scan's per-path aggregation at once and
     # ran out of memory on the widest ranges (`failed to pin block`, 59.6 GiB of 60).
     for j, (p, _, v) in enumerate(srcs):
-        sql = f"SELECT {j}::BIGINT AS __scan, * FROM ({path_rows_sql(con, p, preds, v, gen)})"
+        path_rows_into(con, "_np", p, preds, v, gen)
+        sql = f"SELECT {j}::BIGINT AS __scan, * FROM _np"
         con.execute(f"CREATE TABLE lng AS {sql}" if j == 0 else f"INSERT INTO lng {sql}")
+    con.execute("DROP TABLE IF EXISTS _np")
     t_long = monotonic() - t0
     src_dig = {j: [n, int(s) % U64] for j, n, s in con.execute(f"SELECT __scan, count(*), sum({ROW_HASH}::HUGEINT) FROM lng GROUP BY __scan").fetchall()}
     rd_src = {j: [n, int(s) % U64] for j, n, s in con.execute(f"SELECT __scan, count(*), sum({RD_HASH}::HUGEINT) FROM lng WHERE last_read >= 0 GROUP BY __scan").fetchall()}
