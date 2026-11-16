@@ -423,7 +423,8 @@ describe('D1', () => {
         `post parent: ${PARENT_TEXT(4, '4.0 TiB', '40')}`,
         `permalink ${NEW}`,
         `post in ${PARENT}: :white_check_mark: Marked done. Continued in ${link}.`,
-        `update ${PARENT}: *Staged plan #1* · this thread is done; continued in ${link}.`,
+        // The old parent keeps its thread's counts as it ended: the seed and batch 1, not batch 2 (it opened the new thread).
+        `update ${PARENT}: *Staged plan #1* · this thread is done; continued in ${link}.\n*3 prefixes · 3.0 TiB · 30 objects* at scan ${SCAN}\nowners: Ann Bee 3.0 TiB\nstaged by Ann Bee`,
         `post in ${NEW}: :wastebasket: *Ann Bee* staged 1 path · *1.0 TiB* · 10 objects\n\`b/ckpt/run-2/step-0/\` 1.0 TiB`,
         `reactions? ${NEW}`,
         `update ${NEW}: ${PARENT_TEXT(5, '5.0 TiB', '50')}`,
