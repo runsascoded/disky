@@ -146,11 +146,11 @@ A compact or binary encoding, or smaller docs, would shrink each read and parse 
 | full diff, Server-Timing | 992 → 767 | −206 | 9/50 | 6e-6 |
 | depth 1, wall | 544 → 449 | −55 | 16/50 | 0.015 |
 
-Footer-group docs (~1 MB of JSON each) are the next candidate, benched the same way before building.
+**Footer-group docs, not adopted (2026-11-16):** the same encoding (`groupBin.ts` fit `FooterDoc` unchanged), `fenc-a` vs `fenc-c`, a warm-up pass then both host orders twice, 80 cold pairs a kind, answers agreeing: full diff wall 1344 → 1308 ms, Δ med +18, 43/80 slower, p 0.58 (Server-Timing −34, p 0.31). The ~1 MB per doc isn't what bounds a diff's wall time. Parked on `w/footer-enc` (`c68a43d51`).
 
 ## Options
 
 1. **Keep cw's walk (current).**
 2. **Restore locality in `cloud`'s walk.** Tried as (c), sibling runs (2026-11-16): +747–804 ms cold median against cw's walk. The runs are too short to restore locality, so this option is closed.
-3. **Smaller per-diff docs.** Row-group docs done (above); footer-group docs next.
+3. **Smaller per-diff docs.** Row-group docs done; footer-group docs measured, no gain (above).
 4. **The sorted-key `readAsks` pass, as `[cloud]`.** Worth up to ~85 ms on `cloud`'s walk; it must not regress cw's walk.
