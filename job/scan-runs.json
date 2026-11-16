@@ -19,7 +19,7 @@
     {"key": "static", "uri": "gs://oa-cw-s3-usage-data/static-names/{static_gen:static-names.json}/manifests/{scan}.json", "manifest": true},
     {"key": "nf-dag", "uri": "gs://oa-cw-s3-usage-data/nf/runs/{scan}/dag.mmd"}
   ],
-  "prices": {"n2-standard-8": 0.3885, "n2-standard-16": 0.777, "n2-highmem-16": 1.0481, "e2-standard-2": 0.067, "e2-standard-4": 0.134, "e2-highmem-4": 0.1807},
+  "prices": {"n2-standard-8": 0.3885, "n2-standard-16": 0.777, "n2-highmem-8": 0.5240, "n2-highmem-16": 1.0481, "e2-standard-2": 0.067, "e2-standard-4": 0.134, "e2-highmem-4": 0.1807},
   "spot_factor": 0.3,
   "log_days": 30
 }

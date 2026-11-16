@@ -38,6 +38,9 @@ machines:
   # index-write (DuckDB, 16 GB) and the interval store's append (16 GiB RSS, ~25 GiB disk at a compaction), staged on a
   # local SSD (an untyped disk only grows the pd boot disk: the 02a import took 8.1 min there vs 5.5–6.8 on NVMe)
   big: {type: n2-standard-8, disk: {request: 375, type: local-ssd}, fallback: [n2d-standard-8], queue_timeout: 10}
+  # the interval store's append alone: its open state outgrew 12 GB of DuckDB on 32 GB (OOM at range r0002, the 2026-11-15T0602
+  # scan, three runs in a row)
+  interval: {type: n2-highmem-8, disk: {request: 375, type: local-ssd}, fallback: [n2d-highmem-8], queue_timeout: 10}
   list: {type: e2-standard-4, disk: 100}
   # over-time caps DuckDB at 16 GB, all of an e2-standard-4
   post: e2-highmem-4
@@ -108,7 +111,7 @@ options:
   # interval-store append and static-names both read them from the data bucket, in this region.
   publish-r2: {args: [-S], barrier: true, require: ["{snapshots}/{scan}/meta.json"]}
   # A failed append (3 of 106 scans in the 3 weeks to 2026-11-06) still lists the scan, and this site reads only R2.
-  interval-store: {timeout: 90m, mem: 12GB, source: data, publish_on_failure: true}
+  interval-store: {timeout: 90m, mem: 40GB, source: data, publish_on_failure: true}
   over-time: {mem: 16GB}
   digest: {template: cw, config: /app/job/digest.yml}
   # cw's own GCS buckets (the CoreWeave buckets and R2 bill elsewhere); compute: every Batch job `$DISKY_LABELS` selects
