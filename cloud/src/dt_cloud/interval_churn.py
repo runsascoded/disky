@@ -198,18 +198,35 @@ def scan_churn(con, pvl: str, D: int, roots: list[str], name: str, out: Path, co
     <name>.parquet`: `depth, path, prior`) with their cumulative churn when they went away — the last earlier piece's
     `churn_end`, over the store's `roots` (the base's range files, the runs' deltas: one row per piece, the
     smallest `vt`). Both sorted by their whole key, so a range's files are the same bytes however its rows were computed.
-    `count` false (the scan where objects are first listed, `counts_at`): no events. Returns counts."""
+    `count` false (the scan where objects are first listed, `counts_at`): no events. Returns counts. `churn_collect` once
+    per key sub-range, then `churn_write`, writes the same files."""
+    churn_collect(con, pvl, D, count, first=True)
+    return churn_write(con, D, roots, name, out)
+
+
+def churn_collect(con, pvl: str, D: int, count: bool = True, *, first: bool) -> None:
+    """`scan_churn`'s per-key rows from table `pvl` (a key range's, or a sub-range's, folded path versions after `D`'s
+    append) added to temp tables `__ev` (the files' events at D) and `__back` (the paths opened at D that weren't open
+    before); `first` starts them. Both are per `(depth, path)`, so a range's are its sub-ranges' together."""
     events = f"""SELECT coalesce(n.depth, o.depth) AS depth, coalesce(n.path, o.path) AS path, {D}::BIGINT AS t,
             abs(coalesce(n.size, 0) - coalesce(o.size, 0))::BIGINT AS c
         FROM (SELECT depth, path, size FROM {pvl} WHERE vt = {D} AND kind = 'file') o
         FULL JOIN (SELECT depth, path, size FROM {pvl} WHERE vf = {D} AND kind = 'file') n ON n.depth = o.depth AND n.path = o.path"""
     ev = f"SELECT * FROM ({events}) WHERE c > 0 AND {str(count).lower()}"
+    back = f"""SELECT depth, path FROM (SELECT depth, path FROM {pvl} WHERE vf = {D}) n
+        ANTI JOIN (SELECT depth, path FROM {pvl} WHERE vt = {D}) c USING (depth, path)"""
+    for table, sql in (("__ev", ev), ("__back", back)):
+        con.execute(f"CREATE OR REPLACE TEMP TABLE {table} AS {sql}" if first else f"INSERT INTO {table} {sql}")
+
+
+def churn_write(con, D: int, roots: list[str], name: str, out: Path) -> dict:
+    """`scan_churn`'s files from `churn_collect`'s tables (dropped): the events with their ancestors' sums, and the
+    reappearing paths' prior churn over `roots`. Returns counts."""
+    ev = "SELECT * FROM __ev"
     for sub in (SCAN_CHURN, PRIOR):
         (out / sub).mkdir(parents=True, exist_ok=True)
     churn_f, prior_f = out / SCAN_CHURN / f"{name}.parquet", out / PRIOR / f"{name}.parquet"
     con.execute(f"COPY (SELECT * FROM ({ev}) UNION ALL {ancestors_sql(ev)} ORDER BY depth, path, t, c) TO {q(str(churn_f))} (FORMAT parquet)")
-    con.execute(f"""CREATE OR REPLACE TEMP TABLE __back AS SELECT depth, path FROM (SELECT depth, path FROM {pvl} WHERE vf = {D}) n
-        ANTI JOIN (SELECT depth, path FROM {pvl} WHERE vt = {D}) c USING (depth, path)""")
     files = [f"{r}/pvl/{name}.parquet" for r in roots if Path(f"{r}/pvl/{name}.parquet").exists()]
     hist = " UNION ALL ".join(f"SELECT depth, path, vf, vt, {CHURN_END} FROM read_parquet({q(f)}) SEMI JOIN __back USING (depth, path)" for f in files)
     prior = (f"""SELECT depth, path, arg_max({CHURN_END}, vf)::BIGINT AS prior FROM (
@@ -217,7 +234,7 @@ def scan_churn(con, pvl: str, D: int, roots: list[str], name: str, out: Path, co
         WHERE vt <= {D} GROUP BY depth, path ORDER BY depth, path""" if files else "SELECT NULL::UTINYINT AS depth, NULL::VARCHAR AS path, NULL::BIGINT AS prior LIMIT 0")
     con.execute(f"COPY ({prior}) TO {q(str(prior_f))} (FORMAT parquet)")
     n_back = con.execute("SELECT count(*) FROM __back").fetchone()[0]
-    con.execute("DROP TABLE __back")
+    con.execute("DROP TABLE __back; DROP TABLE __ev")
     return {"rows": con.execute(f"SELECT count(*) FROM read_parquet({q(str(churn_f))})").fetchone()[0], "opened": n_back,
             "prior": con.execute(f"SELECT count(*) FROM read_parquet({q(str(prior_f))})").fetchone()[0]}
 
