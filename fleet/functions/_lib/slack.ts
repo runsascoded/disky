@@ -75,6 +75,11 @@ async function slackApi(token: string, method: string, body: Record<string, unkn
   return r.json() as Promise<SlackResult>
 }
 
+/** No link previews: each deployment's link would unfurl into its own OG card (and the page's into the anonymous
+ *  fleet card), five large images under the one the post means to show. Sent on the edit too, since Slack unfurls an
+ *  edited message's links again. */
+const NO_UNFURL = { unfurl_links: false, unfurl_media: false }
+
 /** Where the post is kept between runs. */
 export const KV_KEY = 'slack-fleet-post'
 
@@ -90,12 +95,12 @@ export async function publish(env: Env, msg: SlackMessage, fresh = false, f: typ
   const kept = env.FLEET_KV ? await env.FLEET_KV.get<{ channel: string; ts: string }>(KV_KEY, 'json') : null
   const at = fresh ? null : kept ?? (env.SLACK_FLEET_TS ? { channel: env.SLACK_FLEET_CHANNEL!, ts: env.SLACK_FLEET_TS } : null)
   if (at) {
-    const r = await slackApi(token, 'chat.update', { channel: at.channel, ts: at.ts, ...msg }, f)
+    const r = await slackApi(token, 'chat.update', { channel: at.channel, ts: at.ts, ...msg, ...NO_UNFURL }, f)
     if (r.ok) return { action: 'updated', channel: at.channel, ts: at.ts }
     if (r.error !== 'message_not_found') throw new Error(`chat.update: ${r.error}`)
   }
   if (!env.FLEET_KV && !fresh) throw new Error(NO_POST)
-  const r = await slackApi(token, 'chat.postMessage', { channel: env.SLACK_FLEET_CHANNEL, ...msg }, f)
+  const r = await slackApi(token, 'chat.postMessage', { channel: env.SLACK_FLEET_CHANNEL, ...msg, ...NO_UNFURL }, f)
   if (!r.ok || !r.ts || !r.channel) throw new Error(`chat.postMessage: ${r.error ?? 'no ts'}`)
   if (env.FLEET_KV) await env.FLEET_KV.put(KV_KEY, JSON.stringify({ channel: r.channel, ts: r.ts }))
   return { action: 'posted', channel: r.channel, ts: r.ts }
