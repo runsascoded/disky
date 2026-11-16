@@ -17,6 +17,8 @@ from typing import TYPE_CHECKING, Protocol
 from urllib.parse import quote, unquote, urlencode, urlparse
 from uuid import NAMESPACE_URL, uuid5
 
+from .scan_runs import TRIGGER_BY_RE
+
 if TYPE_CHECKING:
     from .scan_runs import JobRun
 
@@ -100,6 +102,7 @@ def reply(cfg: Config, row: dict) -> str:
     seconds = row.get('secs')
     duration = 'duration unknown' if seconds is None else f"{int(seconds) // 60}m {int(seconds) % 60:02d}s"
     by = row['run'].get('trigger_by') if row['run']['trigger'] == 'manual' else None
+    by = by if by and TRIGGER_BY_RE.fullmatch(by) else None  # never markup into mrkdwn, whatever a row holds
     return f"✅ {TRIGGER_EMOJI[row['run']['trigger']]} [{stamp(row)}]({cfg.link(row['run'])}) · {duration}" + (f" · {by}" if by else "")
 
 

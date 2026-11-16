@@ -313,8 +313,9 @@ def test_trigger_by_of():
     assert [scan_runs.trigger_by_of(e, t) for e, t in ((by, "manual"), (by, "schedule"), (by, None), ({}, "manual"),
                                                       ({"DT_TRIGGER_BY": " "}, "manual"))] == [
         "ada@example.org", None, None, None, None]
-    for bad in ("x" * 201, "ada\nbob"):
-        with pytest.raises(ValueError, match=r"^\$DT_TRIGGER_BY: want printable text of at most 200 characters$"):
+    assert scan_runs.trigger_by_of({"DT_TRIGGER_BY": "claude (disky-r2)"}, "manual") == "claude (disky-r2)"
+    for bad in ("x" * 201, "ada\nbob", "<!channel>", "<@U123>", "<https://x.test|ada>", "a&b"):
+        with pytest.raises(ValueError, match=r"^\$DT_TRIGGER_BY: want an address or handle"):
             scan_runs.trigger_by_of({"DT_TRIGGER_BY": bad}, "manual")
 
 

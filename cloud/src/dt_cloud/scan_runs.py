@@ -47,7 +47,9 @@ TRIGGERS = ("schedule", "manual")
 #: (`--update-env-vars DT_TRIGGER=manual,DT_TRIGGER_BY=<who>`). Recorded only on a manual run, with migration
 #: `scan-run-trigger-by`; unset, the run's starter is unknown.
 TRIGGER_BY_ENV = "DT_TRIGGER_BY"
-TRIGGER_BY_MAX = 200
+#: An address or a handle (`ada@example.org`, `claude (disky-r2)`): nothing Slack's mrkdwn reads as markup (`<!channel>`,
+#: `<@U…>`, `<url|text>`), since the scan-health thread renders it
+TRIGGER_BY_RE = re.compile(r"[\w.+@:'() -]{1,200}")
 
 
 def trigger_of(env: Mapping[str, str]) -> str | None:
@@ -59,13 +61,13 @@ def trigger_of(env: Mapping[str, str]) -> str | None:
 
 
 def trigger_by_of(env: Mapping[str, str], trigger: str | None) -> str | None:
-    """`$DT_TRIGGER_BY` on a manual run (printable, at most `TRIGGER_BY_MAX` characters); None when unset or the run
+    """`$DT_TRIGGER_BY` on a manual run (`TRIGGER_BY_RE`); None when unset or the run
     isn't manual (a cron's run has no starter)."""
     who = (env.get(TRIGGER_BY_ENV) or "").strip() or None
     if who is None or trigger != "manual":
         return None
-    if len(who) > TRIGGER_BY_MAX or not who.isprintable():
-        raise ValueError(f"${TRIGGER_BY_ENV}: want printable text of at most {TRIGGER_BY_MAX} characters")
+    if not TRIGGER_BY_RE.fullmatch(who):
+        raise ValueError(f"${TRIGGER_BY_ENV}: want an address or handle (letters, digits, `.+@:'()-`, spaces; at most 200)")
     return who
 
 
