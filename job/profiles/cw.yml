@@ -26,7 +26,10 @@ sources:
   - {uri: s3://hero-checkpoints, endpoint: https://cwobject.com}
   - {uri: s3://marin-us-east-06a, endpoint: https://cwobject.com}
   - {uri: s3://rhoarnet-us-east-08a, endpoint: https://cwobject.com}
-  - {uri: s3://marin-us-east-08a, endpoint: https://cwobject.com}
+  # 50M objects (2026-11-16) and growing: 66 min CPU-bound (~390% of an e2-standard-4) + 12 min import, the scan's critical
+  # path (02a's list + import is ~36 min), so it lists as 02a does
+  - {uri: s3://marin-us-east-08a, endpoint: https://cwobject.com, machine: n2-standard-16, disk: {request: 375, type: local-ssd},
+     fallback: [n2d-standard-16], queue_timeout: 10}
   - {uri: s3://marin-us-west-04a, endpoint: https://cwobject.com}
   - {uri: s3://marin-us-east-01a, endpoint: https://cwobject.com}
   - {uri: s3://marin-us-east-04a, endpoint: https://cwobject.com}
