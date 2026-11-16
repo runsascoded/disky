@@ -3,7 +3,7 @@
 # `class`: `intrinsic` (keep: config, migrations, deployment glue, store-intrinsic code), `accidental` (should not
 # differ: the reason names the move and its owner), or `mixed` (one file holding both; the reason says which part
 # moves). A file the parent already has byte-identical is `lag` whatever the rules say: the next merge clears it.
-# Reviewed 2026-11-12 (diff-lookups, picked-history and gcs `IV_CLASS_COLS` rows 2026-11-14) against: gcs o/gcs 072530ad5, cw o/cw ea07bac73, hf o/hf babe96ddc, r2 o/r2 738a5c6e4,
+# Reviewed 2026-11-12 (picked-history and gcs `IV_CLASS_COLS` rows 2026-11-14, cw diff-walk rows 2026-11-16) against: gcs o/gcs 072530ad5, cw o/cw ea07bac73, hf o/hf babe96ddc, r2 o/r2 738a5c6e4,
 # local r/local 8b9ee4d5f, m3 r/m3 32d10e93b, app tauri-native-app 76f1f572f, cloud d3c0c4afb.
 rules:
   # ---- accidental: shared across siblings (duplicates, holds, identical edits) ----
@@ -12,12 +12,12 @@ rules:
     reason: "dup: byte-identical on gcs/cw/hf/r2, absent from cloud, edited 4x for one change (4e24e505f/45f8a6f25/c62d0efb2/6e9cb1738) -> config: a `PEERS_JSON` var each wrangler.toml sets, read by cloud's `peers`"
   - paths: [site/functions/_lib/diffLookups.test.ts, site/functions/api/diff.ts, site/functions/api/me.test.ts, site/functions/api/scopedKey.test.ts]
     lanes: [cw]
-    class: accidental
-    reason: "hold: cw 410f0338e reverts cloud's diff lookups; decided 11-13 (harmonize): cloud's walk with `DIFF_LOOKUP_CAP` as gcs did (ca439fcd5, a12a3bd02 retired) -> cw drops the revert, sets the cap var"
+    class: intrinsic
+    reason: "cw's level-by-level diff walk (410f0338e): #44 closed 11-15 at option 1 (cw `specs/diff-walk-cw.md`, 2b96e3fa8): cloud's heaviest-first walk is slower cold on cw's store and none of three locality fixes tied; gcs stays on cloud's walk at `DIFF_LOOKUP_CAP`"
   - paths: [site/functions/_lib/pathStore.test.ts, site/functions/_lib/staticDrill.test.ts]
     lanes: [cw]
-    class: accidental
-    reason: "hold: cw 410f0338e's diff-lookups revert -> as the revert"
+    class: intrinsic
+    reason: "cw's diff walk (410f0338e, #44 option 1) -> as its walk"
   - paths: [job/gen-delta-arrows.py, job/gen-arrow-avatars.py, job/icons/_headers, job/rerg]
     lanes: [gcs, cw]
     class: accidental
@@ -116,8 +116,8 @@ rules:
     reason: "picked to cloud 11-13 (401df03bd, 277795669, 8d0f70aa8 from cw's b4338a37a/50ce9fcec) -> clears on cw's next cloud merge"
   - paths: [site/functions/_lib/view.ts]
     lanes: [cw]
-    class: accidental
-    reason: "hold: 410f0338e's diff-lookups revert (as gcs)"
+    class: intrinsic
+    reason: "cw's diff walk (410f0338e, #44 option 1) -> as its walk"
   - paths: [prompt.txt]
     lanes: [cw]
     class: accidental
