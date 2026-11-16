@@ -7,6 +7,7 @@
  * The wire types below are the fields read from each route's answer (`site/functions/api/health.ts`,
  * `api/scan-runs/[[path]].ts`, `api/series.ts`), nothing more.
  */
+import { WINDOW_DAYS } from './card.js'
 import type { Env } from './env.js'
 import type { FleetDeployment, FleetDoc, FleetMeta, FleetRun, MetaPoint } from './fleetTypes.js'
 
@@ -53,7 +54,9 @@ interface SeriesWire { points: { date: string; bytes?: number; b?: number }[] }
 
 // ── the document (its shape: `fleetTypes.ts`) ─────────────────────────────
 
-export const DEFAULT_RUNS = 14
+/** A cap on runs per deployment (`FLEET_RUNS`); the runs kept are the card's window's (`WINDOW_DAYS`), whatever the
+ *  deployment's scan rate, plus its newest even when older. */
+export const DEFAULT_RUNS = 200
 /** How far back `FleetMeta.daily` reaches. */
 export const META_DAYS = 30
 /** The scan job's own runs (`kind = 'scan'`, `dt-cloud scan-run`'s default). A deployment's other runs are listed beside them
@@ -116,7 +119,9 @@ export async function readDeployment(d: Deployment, env: Env, now: number, nRuns
     }, e => { out.errors.health = why(e) }),
     getJson<RunsWire>(f, `${d.url}/api/scan-runs`, token).then(r => {
       if (!r.configured) { out.errors.runs = 'scan runs are not set up'; return }
-      out.runs = r.runs.filter(s => s.run.kind === SCAN_KIND && s.run.status !== 'nop').slice(0, nRuns).map(fleetRun)
+      const since = now - WINDOW_DAYS * DAY
+      out.runs = r.runs.filter(s => s.run.kind === SCAN_KIND && s.run.status !== 'nop')
+        .filter((s, i) => i === 0 || (s.run.started_ts ?? 0) >= since).slice(0, nRuns).map(fleetRun)
       out.last = out.runs[0] ?? null
     }, e => { out.errors.runs = why(e) }),
     getJson<SeriesWire>(f, `${d.url}/api/series?store=meta`, token).then(s => {
