@@ -1,6 +1,6 @@
 # Why `cloud`'s diff walk is slower cold on cw (#44)
 
-Status: closed 2026-11-15 at option 1. cw keeps its level-by-level walk (`410f0338e`) and gcs stays at `DIFF_LOOKUP_CAP = "32"`. `cloud`'s heaviest-first walk is parked on `w/cloud-walk` (`57897f629`); none of the three locality attempts below tied cw's walk on cold latency. Data: `tmp/difflk/st/` (untracked).
+Status: closed 2026-11-15 at option 1. cw keeps its level-by-level walk (`410f0338e`) and gcs stays at `DIFF_LOOKUP_CAP = "32"`. `cloud`'s heaviest-first walk is parked on `w/cloud-walk` (`57897f629`); none of the four locality attempts below tied cw's walk on cold latency. Data: `tmp/difflk/st/` (untracked).
 
 ## Setup
 
@@ -109,6 +109,8 @@ Each attempt was benched against cw's walk (`st-a`) on the same 10 cases, cold f
 | (b2) row-group budget 80 | `w/walk-b2` `3e37146d3` | 665 → 1045 | +455 | 16/20 | 0.012 | Σ22 / Σ7,754 TB |
 | (b2) row-group budget 120 | | 628 → 1076 | +387 | 9/10 | 0.021 | Σ9 / Σ8,287 TB |
 | (b3) b2 + footer budget 60 | `w/walk-b3` `c039e0c78` | 684 → 1024 | +476 | 16/20 | 0.012 | Σ22 / Σ7,754 TB |
+| (c) sibling runs, cap 32 runs | `w/walk-sib` `ee36713c8` | 877 → 1964 | +804 | 16/20 | 0.012 | Σ177 / Σ7,994 TB |
+| (c) sibling runs, cap 240 runs | | 898 → 1772 | +747 | 16/20 | 0.012 | Σ22 / Σ7,754 TB |
 
 **(b) Riders.** A round's decoded row groups also answer the pending names whose every row they hold, on every tier: a depth strictly between a multi-depth group's first and last, or a path strictly inside a single-depth group's bounds. Riders take no budget.
 
@@ -119,6 +121,10 @@ They are not free. At cap 32, against `cloud`'s walk without them (`dl-c` → `w
 It bounds the groups read, but not the plan: planning every candidate decoded a footer group per scattered name (root 1 w: 90 footer groups, 206 names then skipped).
 
 **(b3) Footer budget first.** Candidates are priced in footer groups from the footer index's own bounds (`footerCover`, no read), and only those that fit 60 are planned. That bounds planning too (root 1 w: 61 footer groups, walk 1.1 s, from 1.85 s), but the round still decodes about 200 row-group reads over 4 rounds, against cw's walk's ~80.
+
+**(c) Sibling runs (option 2).** On b3, a round takes its heaviest names, then each one's whole sibling run: the pending names under the same parent on the same side. Runs are admitted whole, heaviest run first, while their groups fit, and `LOOKUP_CAP` counts runs, not names (`WALK_V` 5).
+
+The runs are short. On root over 1 w, they added 35 names at cap 32 and 11 at 240: a heavy name's parent seldom has other pending children, because its siblings were drawn on both scans or answered already. So rounds still decode about 180–230 row groups (cap 32: 229 over 7 rounds; cap 240: 177 over 4), against cw's walk's ~80. Charging per run let cap 32 run more rounds, which made it slower still.
 
 **Conclusion.** cw's level walk is cheap because its lookups are siblings: one depth at a time, a few parents, so a few footer groups and row groups hold them all. Heaviest-first picks names from many parents at many depths; on a `(depth, path)` sort they share neither. Each budget bounds one cost and leaves the walk paying more than the level walk for the deep names it adds, which are its whole point: Σ7.7–8.9 PB gained.
 
@@ -135,5 +141,5 @@ A compact or binary encoding, or smaller docs, would shrink each read and parse 
 ## Options
 
 1. **Keep cw's walk (current).**
-2. **Restore locality in `cloud`'s walk.** Take a heavy name's siblings with it, so a round reads whole sibling runs under the heaviest parents. Measure the gained rows and the cold time against cw's walk on these cases.
+2. **Restore locality in `cloud`'s walk.** Tried as (c), sibling runs (2026-11-16): +747–804 ms cold median against cw's walk. The runs are too short to restore locality, so this option is closed.
 3. **The sorted-key `readAsks` pass, as `[cloud]`.** Worth up to ~85 ms on `cloud`'s walk; it must not regress cw's walk.
