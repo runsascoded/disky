@@ -88,6 +88,12 @@ export const fleetMark = ({ bleed = false } = {}) => {
   return svg(`<rect width="512" height="512" rx="${bleed ? 0 : 112}" fill="#0D1117"/>${tiles}${pulse}`)
 }
 
+// A chat avatar (the Slack bots' app icons): the mark scaled until its tiles' outer edges meet the frame, so the ground
+// shows only in the gaps. Slack rounds and shrinks an avatar itself; a margin of ground inside that made the tiles and
+// glyph ~28% smaller than the frame (Ryan, 2026-11-17). The tiles span 71–441 of the 512 square in `mark` and `fleetMark`.
+const FILL_K = 512 / 370
+export const avatar = markSvg => svg(`<g transform="translate(${(-71 * FILL_K).toFixed(2)} ${(-71 * FILL_K).toFixed(2)}) scale(${FILL_K.toFixed(4)})">${inner(markSvg)}</g>`)
+
 // The fallback for a deployment with no mark: its label's first one or two characters on disky's dark square.
 export function labelMark(label) {
   const text = [...(label || 'd').trim()].slice(0, 2).join('')

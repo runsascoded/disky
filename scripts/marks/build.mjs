@@ -11,7 +11,7 @@
 import { execFileSync } from 'node:child_process'
 import { mkdirSync, writeFileSync, rmSync } from 'node:fs'
 import { join, resolve } from 'node:path'
-import { STORES, banner, fleetMark, mark } from './marks.mjs'
+import { STORES, avatar, banner, fleetMark, mark } from './marks.mjs'
 
 const out = resolve(process.argv[2] ?? new URL('../../site/public/icons', import.meta.url).pathname)
 mkdirSync(out, { recursive: true })
@@ -29,22 +29,19 @@ for (const key of Object.keys(STORES)) {
   for (const p of [bleed, ...icoParts]) rmSync(p)
   console.log(key)
 }
-// The deployments' Slack usage-bot app icons, `deploy/slack/icons/<key>.png`: the store's mark full-bleed (Slack rounds
-// the corners itself) at 1024 px (Slack takes a 512–2000 px square). Uploaded by hand: the API can't set an app icon.
+// The deployments' Slack usage-bot app icons, `deploy/slack/icons/<key>.png`, and the fleet bot's (`disky`): the mark's
+// tiles filling the frame (`avatar`; Slack rounds the corners itself) at 1024 px (Slack takes a 512–2000 px square).
+// Uploaded by hand: the API can't set an app icon.
 const bots = resolve(new URL('../../deploy/slack/icons', import.meta.url).pathname)
 mkdirSync(bots, { recursive: true })
-for (const key of ['gcs', 'cw', 'hf']) {
-  const bleed = join(bots, `${key}.bleed.tmp.svg`)
-  writeFileSync(bleed, mark(key, { bleed: true }))
-  png(bleed, 1024, join(bots, `${key}.png`))
-  rmSync(bleed)
+const icons = { ...Object.fromEntries(['gcs', 'cw', 'hf', 'r2'].map(key => [key, mark(key, { bleed: true })])), disky: fleetMark({ bleed: true }) }
+for (const [key, markSvg] of Object.entries(icons)) {
+  const tmp = join(bots, `${key}.avatar.tmp.svg`)
+  writeFileSync(tmp, avatar(markSvg))
+  png(tmp, 1024, join(bots, `${key}.png`))
+  rmSync(tmp)
   console.log(`slack ${key}`)
 }
-const fleetBleed = join(bots, 'disky.bleed.tmp.svg')
-writeFileSync(fleetBleed, fleetMark({ bleed: true }))
-png(fleetBleed, 1024, join(bots, 'disky.png'))
-rmSync(fleetBleed)
-console.log('slack disky')
 for (const theme of ['light', 'dark']) {
   const base = join(out, `banner-${theme}`)
   writeFileSync(`${base}.svg`, banner(theme === 'dark') + '\n')
