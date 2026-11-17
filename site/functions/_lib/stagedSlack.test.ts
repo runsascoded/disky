@@ -27,6 +27,14 @@ describe('renderParent', () => {
     ])('%s', (_, runs) => expect(buttons(runs)).toEqual([OPEN, DRY, LINK]))
   })
 
+  it('offers no Dry-run or Delete while a run (dry or real) is underway', () => {
+    expect([
+      ids(renderParent({ ...base, runs: [run({ finished_ts: null })] }).blocks),
+      ids(renderParent({ ...base, runs: [run({}), run({ mode: 'real', run_id: 'r', finished_ts: null })] }).blocks),
+      ids(renderParent({ ...base, runs: [run({}), run({ mode: 'real', run_id: 'r' })] }).blocks),
+    ]).toEqual([['staged_open'], ['staged_open'], ['staged_open', 'staged_dry', 'staged_delete_link']])
+  })
+
   it('shows only the www link when dispatch is not wired, the plan is closed, or empty', () => {
     expect(ids(renderParent({ ...base, runs: [run({})], actions: false }).blocks)).toEqual(['staged_open'])
     expect(ids(renderParent({ ...base, runs: [run({})], closed: true }).blocks)).toEqual(['staged_open'])
@@ -328,6 +336,13 @@ describe('stage replies: compact, phone-width', () => {
       'Ann Bee staged 2 paths · 4.0 TiB',
       [':wastebasket: *Ann Bee* staged 2 paths · *4.0 TiB* · 40 objects', '`b/y/` 3.0 TiB, `b/x/` 1.0 TiB', '> old runs'],
       [['staged_reject', '1:r3', 'Reject batch'], ['staged_open', null, 'View in www']],
+    ])
+  })
+  it('while a run is underway, no Reject: only the www link', () => {
+    const ps = ['gs://b/x/']
+    expect([buttons(reply({ prefixes: ps, running: true })), buttons(reply({ prefixes: ps, stats: stats({ 'gs://b/x/': 0 }), running: true }))]).toEqual([
+      [['staged_open', null, 'View in www']],
+      [['staged_open', null, 'View in www']],
     ])
   })
   it('many: grouped by parent folder, the top 3 and how many more; unsized, by count', () => {

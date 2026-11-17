@@ -122,7 +122,7 @@ describe('D1', () => {
     })
   })
 
-  describe('a finished real run re-renders the stage replies it emptied', () => {
+  describe('a finished real run re-renders the stage replies', () => {
     /** Three replies (7–9, one batch each: a+b, c+d, e), a real run deleting a, b and c (1 TiB, 10 objects each), then
      *  each re-rendered reply's first `lines` lines and buttons. `audited`: the batches' stage audit rows exist, as
      *  `stageBatch` writes them, so each reply can tell what of it was deleted. */
@@ -146,13 +146,14 @@ describe('D1', () => {
       return calls.filter(c => c.method === 'chat.update' && String(c.body.ts).startsWith('300.')).map(c => [c.body.ts, sectionText(c.body.blocks).split('\n').slice(0, lines), buttons(c)])
     }
 
-    it('each keeps what it staged: staged (deleted + left) / deleted / left; one with nothing left drops Reject; others untouched', async () => {
+    it('each keeps what it staged: staged (deleted + left) / deleted / left; one with nothing left drops Reject; each once', async () => {
       expect(await finish(true, 2)).toEqual([
         ['300.000001', [':white_check_mark: *Ann Bee* staged 2 paths · 2.0 TiB · 20 objects · *all deleted*'], ['staged_open: View in www']],
         ['300.000002', [
           ':wastebasket: *Ann Bee* staged 2 paths · 2.0 TiB · 20 objects',
           'deleted 1 · 1.0 TiB · 10 objects · *left 1 · 1.0 TiB · 10 objects*',
         ], ['staged_reject: Reject batch', 'staged_open: View in www']],
+        ['300.000003', [':wastebasket: *Ann Bee* staged 1 path · *1.0 TiB* · 10 objects', '`b/e/` 1.0 TiB'], ['staged_reject: Reject batch', 'staged_open: View in www']],
       ])
     })
 
@@ -160,6 +161,7 @@ describe('D1', () => {
       expect(await finish(false, 1)).toEqual([
         ['300.000001', [':wastebasket: *Ann Bee* staged 1 batch · nothing left staged'], ['staged_open: View in www']],
         ['300.000002', [':wastebasket: *Ann Bee* staged 1 path · *1.0 TiB* · 10 objects'], ['staged_reject: Reject batch', 'staged_open: View in www']],
+        ['300.000003', [':wastebasket: *Ann Bee* staged 1 path · *1.0 TiB* · 10 objects'], ['staged_reject: Reject batch', 'staged_open: View in www']],
       ])
     })
   })
@@ -535,6 +537,8 @@ describe('D1', () => {
         [
           `post in ${PARENT}: :wastebasket: *Ann Bee* staged 2 paths · *2.0 TiB* · 20 objects\nin \`b/ckpt/run-1/\`: \`step-0/\` 1.0 TiB, \`step-1/\` 1.0 TiB`,
           `post in ${PARENT}: :test_tube: Dry-run dispatched by Ann Bee via www on scan ${SCAN} (<${SITE}/staged?run=dry-1|dry-1>)`,
+          // The run event re-renders the replies (no Reject while it runs), then the refresh does again.
+          `update 200.000001: :wastebasket: *Ann Bee* staged 2 paths · *2.0 TiB* · 20 objects\nin \`b/ckpt/run-1/\`: \`step-0/\` 1.0 TiB, \`step-1/\` 1.0 TiB`,
           `update 200.000001: :wastebasket: *Ann Bee* staged 2 paths · *2.0 TiB* · 20 objects\nin \`b/ckpt/run-1/\`: \`step-0/\` 1.0 TiB, \`step-1/\` 1.0 TiB`,
           `post in ${PARENT}: :no_entry_sign: Ann Bee rejected 1 batch (2 paths unstaged)`,
           'update 200.000001: :wastebasket: *Ann Bee* staged 1 batch · nothing left staged',
