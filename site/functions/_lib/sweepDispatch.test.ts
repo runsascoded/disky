@@ -103,7 +103,7 @@ describe('sweepScript — the Batch container\'s bash', () => {
 
 describe('sweepJobSpec — the Batch spec every gcs executor job shares (a run, an undo)', () => {
   it('the image runs the script as the job account, beside its buckets, per-job env first', () => {
-    const cfg = { project: 'my-project', image: 'img:1', cfAccountId: 'acct', dataBucket: 'my-data', d1DbId: 'd1-id', d1DbName: 'my-db' }
+    const cfg = { project: 'my-project', image: 'img:1', siteTokenSecret: 'site-token', cfAccountId: 'acct', dataBucket: 'my-data', d1DbId: 'd1-id', d1DbName: 'my-db' }
     expect(sweepJobSpec({
       cfg, jobSa: 'job@my-project.iam.gserviceaccount.com', region: 'us-east1', script: 'echo hi',
       actor: 'ann', siteUrl: 'https://site.example', env: { OP: 'undo', TARGET_RUN: '2026-09-28-p1/20260928T120000Z' },
@@ -121,7 +121,7 @@ describe('sweepJobSpec — the Batch spec every gcs executor job shares (a run, 
               USER: 'ann', CLOUDFLARE_ACCOUNT_ID: 'acct', DATA_BUCKET: 'my-data', D1_DB_ID: 'd1-id', D1_DB_NAME: 'my-db', SITE_URL: 'https://site.example',
             },
             secretVariables: {
-              SITE_TOKEN: 'projects/my-project/secrets/gcs-sheet-sync-token/versions/latest',
+              SITE_TOKEN: 'projects/my-project/secrets/site-token/versions/latest',
               CLOUDFLARE_API_TOKEN: 'projects/my-project/secrets/cf-pages-token/versions/latest',
             },
           },
@@ -149,7 +149,7 @@ describe('a dispatched run\'s hold store (`sweep manifest -i`)', () => {
     USER: 'ann', CLOUDFLARE_ACCOUNT_ID: 'acct', DATA_BUCKET: 'my-data', D1_DB_ID: 'd1-id', D1_DB_NAME: 'my-db', SITE_URL: 'https://site.test',
   }
   const SHARED_SECRETS = {
-    SITE_TOKEN: 'projects/my-project/secrets/gcs-sheet-sync-token/versions/latest',
+    SITE_TOKEN: 'projects/my-project/secrets/site-token/versions/latest',
     CLOUDFLARE_API_TOKEN: 'projects/my-project/secrets/cf-pages-token/versions/latest',
   }
   type Labels = Record<string, string>
@@ -186,7 +186,7 @@ describe('a dispatched run\'s hold store (`sweep manifest -i`)', () => {
       return new Response('{}')
     })
     const env = {
-      DB: db, GCP_SA_KEY: await saKey(), JOB_SA: 'job@my-project.iam.gserviceaccount.com', GCP_PROJECT: 'my-project', BATCH_REGION: 'my-region', DATA_BUCKET: 'my-data', SWEEP_IMAGE: 'img:1',
+      DB: db, GCP_SA_KEY: await saKey(), JOB_SA: 'job@my-project.iam.gserviceaccount.com', GCP_PROJECT: 'my-project', BATCH_REGION: 'my-region', DATA_BUCKET: 'my-data', SWEEP_IMAGE: 'img:1', SWEEP_SITE_TOKEN_SECRET: 'site-token',
       CF_ACCOUNT_ID: 'acct', D1_DB_ID: 'd1-id', D1_DB_NAME: 'my-db', STORE_SCHEME: 'gs', STORE_BUCKETS: B1, ...extra,
     } as ExecEnv
     return { prepared: await sweep.prepare(env, db, { planId: 1, mode: 'dry', actor: 'ann', siteUrl: 'https://site.test' }), submitted }

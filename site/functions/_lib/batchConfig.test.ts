@@ -12,22 +12,23 @@ import { onRequestGet as sJobs } from '../api/sweep/jobs'
 import { onRequestPost as sStop } from '../api/sweep/stop'
 import { batchConfig } from './batchConfig'
 import { batchRegionFor, batchRegions } from './gcp'
+import { undoSweepRun } from './sweepUndo'
 import { sqliteD1 } from './testD1'
 
 describe('D1', () => {
   describe('batchConfig', () => {
     it('reads every key; the project falls back to the SA key\'s, the region to nothing', () => {
       expect(batchConfig({
-        GCP_SA_KEY: JSON.stringify({ project_id: 'key-project' }), DATA_BUCKET: 'my-data', SWEEP_IMAGE: 'img:1',
+        GCP_SA_KEY: JSON.stringify({ project_id: 'key-project' }), DATA_BUCKET: 'my-data', SWEEP_IMAGE: 'img:1', SWEEP_SITE_TOKEN_SECRET: 'site-token',
         CF_ACCOUNT_ID: 'acct', SWEEP_S3_ENDPOINT: 'https://s3.example.com', BUCKET_REGIONS: '{"b1":"us-east1","b2":"europe-west4"}',
         D1_DB_ID: 'd1-id', D1_DB_NAME: 'my-db', DISKY_LABELS: 'app=disky,deployment=d',
       }, ['GCP_PROJECT', 'DATA_BUCKET'])).toEqual({
         project: 'key-project', region: '', bucketRegions: { b1: 'us-east1', b2: 'europe-west4' },
-        dataBucket: 'my-data', image: 'img:1', cfAccountId: 'acct', s3Endpoint: 'https://s3.example.com',
+        dataBucket: 'my-data', image: 'img:1', siteTokenSecret: 'site-token', cfAccountId: 'acct', s3Endpoint: 'https://s3.example.com',
         d1DbId: 'd1-id', d1DbName: 'my-db', labels: { app: 'disky', deployment: 'd' },
       })
       expect(batchConfig({ GCP_PROJECT: 'p', BATCH_REGION: 'us-east5' }, []))
-        .toEqual({ project: 'p', region: 'us-east5', bucketRegions: {}, dataBucket: '', image: '', cfAccountId: '', s3Endpoint: '', d1DbId: '', d1DbName: '', labels: {} })
+        .toEqual({ project: 'p', region: 'us-east5', bucketRegions: {}, dataBucket: '', image: '', siteTokenSecret: '', cfAccountId: '', s3Endpoint: '', d1DbId: '', d1DbName: '', labels: {} })
     })
     it('names the first needed key that is unset', () => {
       expect(batchConfig({}, ['GCP_PROJECT'])).toEqual({ missing: 'GCP_PROJECT' })
@@ -57,7 +58,7 @@ describe('D1', () => {
   // Every key a route needs, set; each case drops one.
   const FULL = {
     GCP_SA_KEY: '{}', JOB_SA: 'job@my-project.iam.gserviceaccount.com', GCP_PROJECT: 'my-project', BATCH_REGION: 'my-region', DATA_BUCKET: 'my-data',
-    SWEEP_IMAGE: 'img:1', CF_ACCOUNT_ID: 'acct', SWEEP_S3_ENDPOINT: 'https://s3.example.com',
+    SWEEP_IMAGE: 'img:1', SWEEP_SITE_TOKEN_SECRET: 'site-token', CF_ACCOUNT_ID: 'acct', SWEEP_S3_ENDPOINT: 'https://s3.example.com',
     D1_DB_ID: 'd1-id', D1_DB_NAME: 'my-db',
     STORE_SCHEME: 's3://', STORE_BUCKETS: 'b1,b2',
   }
@@ -106,12 +107,17 @@ describe('D1', () => {
       expect(await Promise.all([
         sDispatch({ request: post('/api/sweep/dispatch', dispatch), env: await without('CF_ACCOUNT_ID') } as never).then(answer),
         sDispatch({ request: post('/api/sweep/dispatch', dispatch), env: await without('SWEEP_IMAGE') } as never).then(answer),
+        // its jobs' $SITE_TOKEN: unset, nothing runs without one
+        sDispatch({ request: post('/api/sweep/dispatch', dispatch), env: await without('SWEEP_SITE_TOKEN_SECRET') } as never).then(answer),
+        undoSweepRun(await without('SWEEP_SITE_TOKEN_SECRET'), 'x', 'ann', 'https://site.test').then(r => [(r as { status: number }).status, (r as { error: string }).error]),
         sDispatch({ request: post('/api/sweep/dispatch', dispatch), env: await without('STORE_BUCKETS') } as never).then(answer),
         sStop({ request: post('/api/sweep/stop', { job_id: 'x' }), env: await without('DATA_BUCKET') } as never).then(answer),
         sJobs({ request: new Request('http://localhost/api/sweep/jobs'), env: await without('GCP_PROJECT') } as never).then(answer),
       ])).toEqual([
         [503, 'dispatch not configured (CF_ACCOUNT_ID unset)'],
         [503, 'dispatch not configured (SWEEP_IMAGE unset)'],
+        [503, 'dispatch not configured (SWEEP_SITE_TOKEN_SECRET unset)'],
+        [503, 'undo not configured (SWEEP_SITE_TOKEN_SECRET unset)'],
         [503, 'dispatch not configured (STORE_BUCKETS unset)'],
         [503, 'stop not configured (DATA_BUCKET unset)'],
         [503, 'jobs not configured (GCP_PROJECT unset)'],

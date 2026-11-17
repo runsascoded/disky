@@ -122,7 +122,7 @@ export const undoScript = ({ bulk = false }: { bulk?: boolean } = {}): string =>
 ].join('\n')
 
 export interface SweepJobSpec {
-  cfg: Pick<BatchConfig, 'project' | 'image' | 'cfAccountId' | 'dataBucket' | 'd1DbId' | 'd1DbName' | 'labels'>
+  cfg: Pick<BatchConfig, 'project' | 'image' | 'siteTokenSecret' | 'cfAccountId' | 'dataBucket' | 'd1DbId' | 'd1DbName' | 'labels'>
   /** The service account the job runs as (`JOB_SA`). */
   jobSa: string
   region: string
@@ -170,7 +170,7 @@ export const sweepJobSpec = ({ cfg, jobSa, region, script, actor, siteUrl, env, 
           },
           secretVariables: {
             ...secrets,
-            SITE_TOKEN: SECRET('gcs-sheet-sync-token'),
+            SITE_TOKEN: SECRET(cfg.siteTokenSecret),
             CLOUDFLARE_API_TOKEN: SECRET('cf-pages-token'),
           },
         },
@@ -210,7 +210,7 @@ async function prepare(env: ExecEnv, db: D1Database, req: DispatchReq): Promise<
   const jobSa = env.JOB_SA
   const pacing = env.SWEEP_PACING ?? 'guided'
   if (pacing !== 'guided' && pacing !== 'adaptive') return refuse(503, 'dispatch not configured (SWEEP_PACING must be guided or adaptive)')
-  const cfg = batchConfig(env, ['GCP_PROJECT', 'DATA_BUCKET', 'SWEEP_IMAGE', 'CF_ACCOUNT_ID', 'D1_DB_ID'])
+  const cfg = batchConfig(env, ['GCP_PROJECT', 'DATA_BUCKET', 'SWEEP_IMAGE', 'SWEEP_SITE_TOKEN_SECRET', 'CF_ACCOUNT_ID', 'D1_DB_ID'])
   if ('missing' in cfg) return refuse(503, notConfigured('dispatch', cfg.missing))
   const review = reviewConfig(env, cfg)
   const shape = prefixShape(env)

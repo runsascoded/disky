@@ -298,7 +298,7 @@ export function historyConfig(env: HistoryEnv): HistoryConfig | { reason: string
   }
   if (!['R2_ENDPOINT', 'R2_ACCESS_KEY_ID', 'R2_SECRET_ACCESS_KEY'].every(key => secrets[key])) return { reason: 'HISTORY_SECRETS must provide R2_ENDPOINT, R2_ACCESS_KEY_ID and R2_SECRET_ACCESS_KEY' }
   return {
-    batch: { project: env.GCP_PROJECT!, region: env.HISTORY_REGION!, image: env.HISTORY_IMAGE!, dataBucket: new URL(dataStore).hostname,
+    batch: { project: env.GCP_PROJECT!, region: env.HISTORY_REGION!, image: env.HISTORY_IMAGE!, dataBucket: new URL(dataStore).hostname, siteTokenSecret: '',
       bucketRegions: {}, cfAccountId: env.CF_ACCOUNT_ID ?? '', s3Endpoint: '', d1DbId: env.D1_DB_ID ?? '', d1DbName: env.D1_DB_NAME ?? '', labels: parseLabels(env.DISKY_LABELS) },
     serviceAccount: env.JOB_SA!, dataStore, servingStore, secrets,
   }

@@ -37,7 +37,7 @@ beforeEach(async () => {
     VALUES (?, 1, 'm', 'scan', 0, 0, 'actor', 'real', 100, 200, 'logs', 300, 'pending')`).run(CW_RUN)
   env = {
     DB: db, SESSION_SECRET: 's'.repeat(32), BASE_SCOPE: 'cw', GCP_SA_KEY: 'key', JOB_SA: 'job@example.test', GCP_PROJECT: 'p', BATCH_REGION: 'r', DATA_BUCKET: 'data',
-    SWEEP_IMAGE: 'image', SWEEP_S3_ENDPOINT: 'https://s3.example.test', STORE_SCHEME: 's3://', STORE_BUCKETS: 'b', DIGEST_REAPPLY, STATIC_GEN: 'g',
+    SWEEP_IMAGE: 'image', SWEEP_SITE_TOKEN_SECRET: 'site-token', SWEEP_S3_ENDPOINT: 'https://s3.example.test', STORE_SCHEME: 's3://', STORE_BUCKETS: 'b', DIGEST_REAPPLY, STATIC_GEN: 'g',
   }
   token = (await gateFor(env as never)!.mint({ email: 'ops@example.test', scopes: ['cw', 'admin'], name: 'ops', createdBy: 'test', expiresAt: null, maxRedeems: null })).token
 })

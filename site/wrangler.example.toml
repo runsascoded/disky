@@ -133,6 +133,7 @@ ROOT_LABEL = "my buckets"                   # the store root's crumb label
 # BUCKET_REGIONS = '{"my-bucket": "us-east1"}'  # a one-region bucket cut runs its job there, beside the data; unset = BATCH_REGION
 # DATA_BUCKET = "my-data"                      # the bucket a run's plan.json, manifest and logs land in (dispatch requires it)
 # SWEEP_IMAGE = "<region>-docker.pkg.dev/<project>/<repo>/<image>:<tag>"  # the executor's image (dispatch requires it)
+# SWEEP_SITE_TOKEN_SECRET = "site-token"         # Secret Manager secret (in GCP_PROJECT) holding a read-only site token: the `sweep` executor's jobs get it as $SITE_TOKEN (dispatch and undo require it)
 # History retention is opt-in: jobs build immutable candidates; adoption is a separate environment CAS.
 # HISTORY_CURRENT_KEY = "history/environments/dev/CURRENT.json"  # unset: follow the scan pipeline's writer generations
 # HISTORY_IMAGE = "<region>-docker.pkg.dev/<project>/<repo>/<image>@sha256:<digest>"  # pinned history worker image

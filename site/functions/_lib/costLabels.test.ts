@@ -28,7 +28,7 @@ describe('cost labels: DISKY_LABELS + a component, on the job and its VMs', () =
     })
   })
   it('batchConfig parses DISKY_LABELS; both executors carry them', () => {
-    const cfg = batchConfig({ GCP_PROJECT: 'p', DATA_BUCKET: 'd', SWEEP_IMAGE: 'i', DISKY_LABELS: 'app=disky,deployment=gcs' }, [])
+    const cfg = batchConfig({ GCP_PROJECT: 'p', DATA_BUCKET: 'd', SWEEP_IMAGE: 'i', SWEEP_SITE_TOKEN_SECRET: 'site-token', DISKY_LABELS: 'app=disky,deployment=gcs' }, [])
     if ('missing' in cfg) throw new Error(cfg.missing)
     expect(cfg.labels).toEqual(DEPLOY)
     const base = { cfg, jobSa: 'sa', region: 'us-east1', script: 'true', actor: 'a', siteUrl: 'https://s', env: {} }

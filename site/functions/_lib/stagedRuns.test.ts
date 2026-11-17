@@ -106,7 +106,7 @@ describe('D1', () => {
     const post = (body: unknown) => new Request('http://localhost/api/sweep/undo', { method: 'POST', body: JSON.stringify(body) })
     const env = async (db: unknown) => ({
       DB: db, GCP_SA_KEY: await saKey(), JOB_SA: 'job@my-project.iam.gserviceaccount.com', GCP_PROJECT: 'my-project',
-      DATA_BUCKET: 'my-data', SWEEP_IMAGE: 'img:1', CF_ACCOUNT_ID: 'acct', D1_DB_ID: 'd1-id', D1_DB_NAME: 'my-db', BUCKET_REGIONS: JSON.stringify({ [B1]: 'us-east1', [B2]: 'europe-west4' }),
+      DATA_BUCKET: 'my-data', SWEEP_IMAGE: 'img:1', SWEEP_SITE_TOKEN_SECRET: 'site-token', CF_ACCOUNT_ID: 'acct', D1_DB_ID: 'd1-id', D1_DB_NAME: 'my-db', BUCKET_REGIONS: JSON.stringify({ [B1]: 'us-east1', [B2]: 'europe-west4' }),
     })
     const answer = async (r: Response) => [r.status, await r.json()]
 
@@ -228,7 +228,7 @@ describe('D1', () => {
                   OP: 'undo', TARGET_RUN: RUN, USER: 'dev@example.test', CLOUDFLARE_ACCOUNT_ID: 'acct', DATA_BUCKET: 'my-data', D1_DB_ID: 'd1-id', D1_DB_NAME: 'my-db', SITE_URL: 'http://localhost',
                 },
                 secretVariables: {
-                  SITE_TOKEN: 'projects/my-project/secrets/gcs-sheet-sync-token/versions/latest',
+                  SITE_TOKEN: 'projects/my-project/secrets/site-token/versions/latest',
                   CLOUDFLARE_API_TOKEN: 'projects/my-project/secrets/cf-pages-token/versions/latest',
                 },
               },

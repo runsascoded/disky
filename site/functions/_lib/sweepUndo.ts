@@ -66,7 +66,7 @@ export async function undoSweepRun(
   if (sweepsOff(env)) return refuse(403, SWEEPS_OFF)
   if (!env.GCP_SA_KEY) return refuse(503, 'undo not configured (GCP_SA_KEY secret missing)')
   if (!env.JOB_SA) return refuse(503, 'undo not configured (JOB_SA var missing)')
-  const cfg = batchConfig(env, ['GCP_PROJECT', 'DATA_BUCKET', 'SWEEP_IMAGE', 'CF_ACCOUNT_ID', 'D1_DB_ID'])
+  const cfg = batchConfig(env, ['GCP_PROJECT', 'DATA_BUCKET', 'SWEEP_IMAGE', 'SWEEP_SITE_TOKEN_SECRET', 'CF_ACCOUNT_ID', 'D1_DB_ID'])
   if ('missing' in cfg) return refuse(503, notConfigured('undo', cfg.missing))
   if (!RUN_ID_RE.test(runId)) return refuse(400, 'bad run_id')
   const db = env.DB

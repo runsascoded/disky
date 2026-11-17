@@ -29,6 +29,9 @@ export interface BatchEnv {
   D1_DB_NAME?: string
   /** The executor's container image. */
   SWEEP_IMAGE?: string
+  /** The Secret Manager secret (a name in `GCP_PROJECT`) holding a read-only site token: the `sweep`
+   *  executor's jobs get it as `$SITE_TOKEN`. */
+  SWEEP_SITE_TOKEN_SECRET?: string
   /** Historical review source after per-scan files retire, and its Secret Manager ENV-to-name bindings. */
   SWEEP_REVIEW_STORE?: string
   SWEEP_REVIEW_SECRETS?: string
@@ -48,6 +51,8 @@ export interface BatchConfig {
   bucketRegions: Record<string, string>
   dataBucket: string
   image: string
+  /** `SWEEP_SITE_TOKEN_SECRET`. */
+  siteTokenSecret: string
   cfAccountId: string
   s3Endpoint: string
   /** The deployment's D1 (`sweep execute`/`undo` record their runs there). */
@@ -57,7 +62,7 @@ export interface BatchConfig {
   labels?: Labels
 }
 
-export type BatchKey = 'GCP_PROJECT' | 'BATCH_REGION' | 'DATA_BUCKET' | 'SWEEP_IMAGE' | 'CF_ACCOUNT_ID' | 'SWEEP_S3_ENDPOINT' | 'D1_DB_ID'
+export type BatchKey = 'GCP_PROJECT' | 'BATCH_REGION' | 'DATA_BUCKET' | 'SWEEP_IMAGE' | 'SWEEP_SITE_TOKEN_SECRET' | 'CF_ACCOUNT_ID' | 'SWEEP_S3_ENDPOINT' | 'D1_DB_ID'
 
 const projectOfKey = (saKey?: string): string => {
   if (!saKey) return ''
@@ -73,6 +78,7 @@ export function batchConfig(env: BatchEnv, need: readonly BatchKey[]): BatchConf
     bucketRegions: env.BUCKET_REGIONS ? JSON.parse(env.BUCKET_REGIONS) as Record<string, string> : {},
     dataBucket: env.DATA_BUCKET ?? '',
     image: env.SWEEP_IMAGE ?? '',
+    siteTokenSecret: env.SWEEP_SITE_TOKEN_SECRET ?? '',
     cfAccountId: env.CF_ACCOUNT_ID ?? '',
     s3Endpoint: env.SWEEP_S3_ENDPOINT ?? '',
     d1DbId: env.D1_DB_ID ?? '',
@@ -80,7 +86,7 @@ export function batchConfig(env: BatchEnv, need: readonly BatchKey[]): BatchConf
     labels: parseLabels(env.DISKY_LABELS),
   }
   const field: Record<BatchKey, keyof BatchConfig> = {
-    GCP_PROJECT: 'project', BATCH_REGION: 'region', DATA_BUCKET: 'dataBucket', SWEEP_IMAGE: 'image', CF_ACCOUNT_ID: 'cfAccountId', SWEEP_S3_ENDPOINT: 's3Endpoint', D1_DB_ID: 'd1DbId',
+    GCP_PROJECT: 'project', BATCH_REGION: 'region', DATA_BUCKET: 'dataBucket', SWEEP_IMAGE: 'image', SWEEP_SITE_TOKEN_SECRET: 'siteTokenSecret', CF_ACCOUNT_ID: 'cfAccountId', SWEEP_S3_ENDPOINT: 's3Endpoint', D1_DB_ID: 'd1DbId',
   }
   const missing = need.find(k => !cfg[field[k]])
   return missing ? { missing } : cfg
