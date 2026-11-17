@@ -76,25 +76,29 @@ export const RUNWAY_YELLOW_D = 30
 export const RUNWAY_TEXT_D = 60
 export const RUNWAY_FULL_PCT = 95
 
-/** Days to full at `growth` (unit/day; null: no earlier scan in reach): Infinity when not growing, 0 at or over quota. */
-export interface Runway { days: number; growth: number | null }
+/** Days to full at `growth` (unit/day; null: no earlier scan in reach): Infinity when not growing, 0 at or over quota.
+ *  `windowD`: the look-back (`RUNWAY_WINDOWS_D`, days) `growth` came from; null (or absent) with no growth. */
+export interface Runway { days: number; growth: number | null; windowD?: number | null }
 
 /** The fastest net fill per day reaching `v` at `t` (ms) over `RUNWAY_WINDOWS_D`, from `hist` ([ms, value], in
- *  order); null when no window has a point. */
-export function growth(hist: [number, number][], t: number, v: number): number | null {
-  const rates: number[] = []
+ *  order), and the window (days) it came from; null when no window has a point. A tie names the longest window
+ *  (`digest_cw._growth`): a shorter one that found no scan of its own falls back to the same older point. */
+export function growth(hist: [number, number][], t: number, v: number): [number, number] | null {
+  let best: [number, number] | null = null
   for (const w of RUNWAY_WINDOWS_D) {
     const then = hist.filter(([x]) => x <= t - w * 86400_000)
     if (!then.length) continue
     const [t0, v0] = then[then.length - 1]
-    rates.push((v - v0) / ((t - t0) / 86400_000))
+    const rate = (v - v0) / ((t - t0) / 86400_000)
+    if (!best || rate >= best[0]) best = [rate, w]
   }
-  return rates.length ? Math.max(...rates) : null
+  return best
 }
 
-export function runway(free: number, g: number | null): Runway {
-  if (free <= 0) return { days: 0, growth: g }
-  return { days: g != null && g > 0 ? free / g : Infinity, growth: g }
+export function runway(free: number, g: [number, number] | null): Runway {
+  const [rate, windowD] = g ?? [null, null]
+  if (free <= 0) return { days: 0, growth: rate, windowD }
+  return { days: rate != null && rate > 0 ? free / rate : Infinity, growth: rate, windowD }
 }
 
 export function runwayMark(r: Runway, pct: number): string {
@@ -142,7 +146,8 @@ export function poolMark(mode: PoolMark, r: Runway, pct: number, v: number, shap
 export function runwayText(r: Runway, cfg: DigestCfg): string {
   if (!(r.days > 0 && r.days < RUNWAY_TEXT_D) || r.growth == null) return ''
   const days = r.days < 1 ? '<1d' : `${fixed(r.days, 0)}d`
-  return `, +${fixed(r.growth, 1)} ${cfg.unit.short}/d, ≈${days} to full`
+  const over = r.windowD != null ? ` over ${r.windowD}d` : ''
+  return `, +${fixed(r.growth, 1)} ${cfg.unit.short}/d${over}, ≈${days} to full`
 }
 
 /** The pools in the reply order (`digest_cw._groups`): the primary's, then each other bucket's in the scan's meta

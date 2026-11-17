@@ -221,28 +221,32 @@ RUNWAY_FULL_PCT = 95
 class Runway:
     """A quota group's runway at a scan: ``days`` to full at ``growth`` (its unit per day; None: no earlier scan in
     reach), ``math.inf`` when not growing, 0 when at or over quota. ``used``: what its quota counts now, set by a
-    group's reading (`_group_runway`)."""
+    group's reading (`_group_runway`). ``window_d``: the look-back (`RUNWAY_WINDOWS_D`, days) ``growth`` came from."""
     days: float
     growth: float | None
     used: float = 0.0
+    window_d: int | None = None
 
 
-def _growth(hist: list[tuple[dt.datetime, float]], t: dt.datetime, v: float) -> float | None:
-    """The fastest net fill per day reaching ``v`` at ``t`` over `RUNWAY_WINDOWS_D`: each window from the latest
-    ``hist`` point at or before ``t`` minus it; None when no window has one."""
+def _growth(hist: list[tuple[dt.datetime, float]], t: dt.datetime, v: float) -> tuple[float, int] | None:
+    """The fastest net fill per day reaching ``v`` at ``t`` over `RUNWAY_WINDOWS_D`, and the window (days) it came
+    from: each window from the latest ``hist`` point at or before ``t`` minus it; None when no window has one. A tie
+    names the longest window: a shorter one whose look-back found no scan of its own falls back to the same older
+    point, so the longer names the span the rate was measured over."""
     rates = []
     for w in RUNWAY_WINDOWS_D:
         then = [(ts, x) for ts, x in hist if ts <= t - dt.timedelta(days=w)]
         if then:
             ts0, v0 = then[-1]
-            rates.append((v - v0) / ((t - ts0).total_seconds() / 86400))
+            rates.append(((v - v0) / ((t - ts0).total_seconds() / 86400), w))
     return max(rates) if rates else None
 
 
-def _runway(free: float, growth: float | None) -> Runway:
+def _runway(free: float, growth: tuple[float, int] | None) -> Runway:
+    rate, w = growth if growth is not None else (None, None)
     if free <= 0:
-        return Runway(0.0, growth)
-    return Runway(free / growth if growth is not None and growth > 0 else math.inf, growth)
+        return Runway(0.0, rate, window_d=w)
+    return Runway(free / rate if rate is not None and rate > 0 else math.inf, rate, window_d=w)
 
 
 def _runway_mark(r: Runway, fill: float) -> str:
@@ -290,12 +294,14 @@ def _pool_mark(r: Runway, fill: float, shape: str, cfg: DigestConfig) -> str:
 
 
 def _runway_text(r: Runway, cfg: DigestConfig) -> str:
-    """`, +4.1 Ti/d, ≈8d to full` for a pool filling within `RUNWAY_TEXT_D` days (commas: ` · ` separates the pools);
-    `''` otherwise (flat, shrinking, far off, or already over: its clause says so)."""
+    """`, +4.1 Ti/d over 3d, ≈8d to full` for a pool filling within `RUNWAY_TEXT_D` days: its rate, the look-back
+    window that rate came from (`Runway.window_d`), and its runway (commas: ` · ` separates the pools); `''`
+    otherwise (flat, shrinking, far off, or already over: its clause says so)."""
     if not 0 < r.days < RUNWAY_TEXT_D or r.growth is None:
         return ""
     days = "<1d" if r.days < 1 else f"{r.days:.0f}d"
-    return f", +{r.growth:.1f} {cfg.unit.short}/d, ≈{days} to full"
+    over = f" over {r.window_d}d" if r.window_d is not None else ""
+    return f", +{r.growth:.1f} {cfg.unit.short}/d{over}, ≈{days} to full"
 
 
 def _group_used(g: list[str], s: Scan | DayRow, q: Quota, cfg: DigestConfig) -> float:
@@ -345,35 +351,37 @@ def _fill(g: list[tuple[str, float]], day: DayRow, cfg: DigestConfig) -> float |
     return max((_scoped(tb, classes, q) / (q.bytes / cfg.unit.bytes) * 100 for q in b.quotas), default=None) if b else None
 
 
-def _clauses(day: DayRow, cfg: DigestConfig) -> list[tuple[str, float | None, bool, Runway | None, str]]:
+def _clauses(day: DayRow, cfg: DigestConfig, runway: bool = False) -> list[tuple[str, float | None, bool, Runway | None, str]]:
     """Each group's clause (`_bucket_clause` / `_zone_clause`), its fill (`_fill`), whether that is at or over
-    ``cfg.alert_pct``, its runway (`quota_marks: runway`; else None), and its shape (`Bucket.shape`: a zone's members
+    ``cfg.alert_pct``, its runway (`quota_marks: runway`, or ``runway``: the alert's, under any marks; else None), and its shape (`Bucket.shape`: a zone's members
     all state the same one; a bucket the config doesn't name has no quota, so no mark, and reads as a circle)."""
     out = []
     for g in _groups(day, cfg):
         clause = (_bucket_clause(*g[0], day.scan, day.since, cfg, day.slug, day.classes if g[0][0] == cfg.primary else None)
                   if len(g) == 1 else _zone_clause(g, day.scan, day.since, cfg, day.slug))
         fill = _fill(g, day, cfg)
-        r = _group_runway([b for b, _ in g], day, cfg) if cfg.quota_marks in RUNWAY_MARKS else None
+        r = _group_runway([b for b, _ in g], day, cfg) if runway or cfg.quota_marks in RUNWAY_MARKS else None
         b = cfg.buckets.get(g[0][0])
         out.append((clause, fill, cfg.alert_pct is not None and fill is not None and fill >= cfg.alert_pct, r, b.shape if b else "circle"))
     return out
 
 
 def alert_body(month: Month, cfg: DigestConfig) -> str | None:
-    """The quota alert reply's body: every group at or over ``cfg.alert_pct`` as of the month's latest scan, else
-    None (no threshold, none over, or a closed month: the next month's thread carries it)."""
+    """The quota alert reply's body: every group at or over ``cfg.alert_pct`` as of the month's latest scan, each with
+    its runway as the replies show it (`_runway_text`: rate, look-back window, days to full; none when flat, far off or
+    already over, which its clause says), else None (no threshold, none over, or a closed month: the next month's
+    thread carries it)."""
     if cfg.alert_pct is None or month.closed:
         return None
     last = month.rows[-1]
-    over = [(c, f) for c, f, o, _, _ in _clauses(_row(last.date, last, None), cfg) if o]
+    day = _row(last.date, last, None, seen=month.pre + month.lead + month.rows)
+    over = [(c + (_runway_text(r, cfg) if r else ""), f) for c, f, o, r, _ in _clauses(day, cfg, runway=True) if o]
     if cfg.quota_marks == "circles":
         over.sort(key=lambda c: -c[1])
     over = [c for c, _ in over]
     if not over:
         return None
-    return (f"{ALERT_MARK} **Quota alert**: {' · '.join(over)} · _as of {_md(last.date)} {scan_ts(last.scan):%H:%M}Z_ "
-            f"(≥ {cfg.alert_pct:g}% of a quota; removed once every quota is back under)")
+    return f"{ALERT_MARK} **Quota alert**: {' · '.join(over)} · _as of {_md(last.date)} {scan_ts(last.scan):%H:%M}Z_"
 
 
 @dataclass(frozen=True)

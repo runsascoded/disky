@@ -458,7 +458,7 @@
    "key": "2026-11-05",
    "scan": "2026-11-05T0601",
    "username": "11/5 · so far",
-   "body": ":arrow_deg50: **778 TiB (+7.5, 1.0%)** · [as of 06:01Z](https://cw.example.org/?d=26110506-18h#over-time) · :runway-5: [main](https://cw.example.org/main-data?d=26110506-18h#over-time): 85.4% of 1P (132.5 Ti free), +10.0 Ti/d, ≈13d to full · :runway-square-1: [hot](https://cw.example.org/hot-data?d=26110506-18h#over-time): 99.6% of 100Ti (0.4 Ti free), +0.4 Ti/d, ≈1d to full · :runway-star-4: [za](https://cw.example.org/z-a?d=26110506-18h#over-time) 0 + [zb](https://cw.example.org/z-b?d=26110506-18h#over-time) 50 Ti: 49.5% of 100Ti (50.5 Ti free), +6.0 Ti/d, ≈8d to full · [new-data](https://cw.example.org/new-data?d=26110506-18h#over-time): 4 Ti",
+   "body": ":arrow_deg50: **778 TiB (+7.5, 1.0%)** · [as of 06:01Z](https://cw.example.org/?d=26110506-18h#over-time) · :runway-5: [main](https://cw.example.org/main-data?d=26110506-18h#over-time): 85.4% of 1P (132.5 Ti free), +10.0 Ti/d over 1d, ≈13d to full · :runway-square-1: [hot](https://cw.example.org/hot-data?d=26110506-18h#over-time): 99.6% of 100Ti (0.4 Ti free), +0.4 Ti/d over 1d, ≈1d to full · :runway-star-4: [za](https://cw.example.org/z-a?d=26110506-18h#over-time) 0 + [zb](https://cw.example.org/z-b?d=26110506-18h#over-time) 50 Ti: 49.5% of 100Ti (50.5 Ti free), +6.0 Ti/d over 1d, ≈8d to full · [new-data](https://cw.example.org/new-data?d=26110506-18h#over-time): 4 Ti",
    "icon_url": null,
    "icon_emoji": ":hourglass_flowing_sand:"
   },
@@ -466,7 +466,7 @@
    "key": "2026-11-04",
    "scan": "2026-11-04T1201",
    "username": "11/4 — 770 TiB (+7.5, 1.0%)",
-   "body": ":runway-5: [main](https://cw.example.org/main-data?d=26110412-1d6h#over-time): 84.6% of 1P (140.0 Ti free), +9.3 Ti/d, ≈15d to full · :runway-square-3: [hot](https://cw.example.org/hot-data?d=26110412-1d6h#over-time): 99.3% of 100Ti (0.7 Ti free), +0.0 Ti/d, ≈21d to full · :runway-star-8: [za](https://cw.example.org/z-a?d=26110412-1d6h#over-time) 0 + [zb](https://cw.example.org/z-b?d=26110412-1d6h#over-time) 45 Ti: 45.0% of 100Ti (55.0 Ti free) · [new-data](https://cw.example.org/new-data?d=26110412-1d6h#over-time): 4 Ti",
+   "body": ":runway-5: [main](https://cw.example.org/main-data?d=26110412-1d6h#over-time): 84.6% of 1P (140.0 Ti free), +9.3 Ti/d over 7d, ≈15d to full · :runway-square-3: [hot](https://cw.example.org/hot-data?d=26110412-1d6h#over-time): 99.3% of 100Ti (0.7 Ti free), +0.0 Ti/d over 3d, ≈21d to full · :runway-star-8: [za](https://cw.example.org/z-a?d=26110412-1d6h#over-time) 0 + [zb](https://cw.example.org/z-b?d=26110412-1d6h#over-time) 45 Ti: 45.0% of 100Ti (55.0 Ti free) · [new-data](https://cw.example.org/new-data?d=26110412-1d6h#over-time): 4 Ti",
    "icon_url": "https://icons.example.org/arrows/av_deg40.png?v=4",
    "icon_emoji": null
   },
@@ -474,7 +474,7 @@
    "key": "2026-11-03",
    "scan": "2026-11-03T0601",
    "username": "11/3 — 762 TiB (+5.0, 0.7%)",
-   "body": ":runway-5: [main](https://cw.example.org/main-data?d=26110306-12h#over-time): 83.8% of 1P (147.5 Ti free), +10.0 Ti/d, ≈15d to full · :runway-square-1: [hot](https://cw.example.org/hot-data?d=26110306-12h#over-time): 99.9% of 100Ti (0.1 Ti free), +0.4 Ti/d, ≈<1d to full · :runway-star-8: [za](https://cw.example.org/z-a?d=26110306-12h#over-time) 4 + [zb](https://cw.example.org/z-b?d=26110306-12h#over-time) 40 Ti: 44.3% of 100Ti (55.7 Ti free)",
+   "body": ":runway-5: [main](https://cw.example.org/main-data?d=26110306-12h#over-time): 83.8% of 1P (147.5 Ti free), +10.0 Ti/d over 3d, ≈15d to full · :runway-square-1: [hot](https://cw.example.org/hot-data?d=26110306-12h#over-time): 99.9% of 100Ti (0.1 Ti free), +0.4 Ti/d over 1d, ≈<1d to full · :runway-star-8: [za](https://cw.example.org/z-a?d=26110306-12h#over-time) 4 + [zb](https://cw.example.org/z-b?d=26110306-12h#over-time) 40 Ti: 44.3% of 100Ti (55.7 Ti free)",
    "icon_url": "https://icons.example.org/arrows/av_deg50.png?v=4",
    "icon_emoji": null
   },
@@ -482,7 +482,7 @@
    "key": "2026-11-02",
    "scan": "2026-11-02T1801",
    "username": "11/2 — 758 TiB (+12.5, 1.7%)",
-   "body": ":runway-5: [main](https://cw.example.org/main-data?d=26110218-1d6h#over-time): 83.2% of 1P (152.5 Ti free), +10.0 Ti/d, ≈15d to full · :runway-square-1: [hot](https://cw.example.org/hot-data?d=26110218-1d6h#over-time): 99.7% of 100Ti (0.3 Ti free), +0.4 Ti/d, ≈<1d to full · :runway-star-8: [za](https://cw.example.org/z-a?d=26110218-1d6h#over-time) 8 + [zb](https://cw.example.org/z-b?d=26110218-1d6h#over-time) 38 Ti: 45.7% of 100Ti (54.3 Ti free)",
+   "body": ":runway-5: [main](https://cw.example.org/main-data?d=26110218-1d6h#over-time): 83.2% of 1P (152.5 Ti free), +10.0 Ti/d over 3d, ≈15d to full · :runway-square-1: [hot](https://cw.example.org/hot-data?d=26110218-1d6h#over-time): 99.7% of 100Ti (0.3 Ti free), +0.4 Ti/d over 1d, ≈<1d to full · :runway-star-8: [za](https://cw.example.org/z-a?d=26110218-1d6h#over-time) 8 + [zb](https://cw.example.org/z-b?d=26110218-1d6h#over-time) 38 Ti: 45.7% of 100Ti (54.3 Ti free)",
    "icon_url": "https://icons.example.org/arrows/av_deg50.png?v=4",
    "icon_emoji": null
   },
@@ -490,7 +490,7 @@
    "key": "2026-11-01",
    "scan": "2026-11-01T1201",
    "username": "11/1 — 745 TiB (+10.0, 1.4%)",
-   "body": ":runway-5: [main](https://cw.example.org/main-data?d=26110112-1d#over-time): 81.9% of 1P (165.0 Ti free), +10.0 Ti/d, ≈16d to full · :runway-square-3: [hot](https://cw.example.org/hot-data?d=26110112-1d#over-time): 99.2% of 100Ti (0.8 Ti free) · :runway-star-8: [za](https://cw.example.org/z-a?d=26110112-1d#over-time) 20 + [zb](https://cw.example.org/z-b?d=26110112-1d#over-time) 30 Ti: 49.5% of 100Ti (50.5 Ti free)",
+   "body": ":runway-5: [main](https://cw.example.org/main-data?d=26110112-1d#over-time): 81.9% of 1P (165.0 Ti free), +10.0 Ti/d over 3d, ≈16d to full · :runway-square-3: [hot](https://cw.example.org/hot-data?d=26110112-1d#over-time): 99.2% of 100Ti (0.8 Ti free) · :runway-star-8: [za](https://cw.example.org/z-a?d=26110112-1d#over-time) 20 + [zb](https://cw.example.org/z-b?d=26110112-1d#over-time) 30 Ti: 49.5% of 100Ti (50.5 Ti free)",
    "icon_url": "https://icons.example.org/arrows/av_deg50.png?v=4",
    "icon_emoji": null
   }

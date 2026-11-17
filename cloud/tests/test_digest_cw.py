@@ -248,19 +248,25 @@ def test_runway_rules():
     the rate text only under 60 days. The site's `digest/pools.ts` mirrors these (its own spec, same numbers)."""
     t = dt.datetime(2026, 9, 23, 12, tzinfo=UTC)
     flat_then_jump = [(t - dt.timedelta(days=d), 80.0) for d in (7, 3, 1)]
-    assert D._growth(flat_then_jump, t, 90.0) == 10.0
-    assert D._growth([(t - dt.timedelta(days=7), 46.0), (t - dt.timedelta(days=3), 77.0), (t - dt.timedelta(days=1), 83.0)], t, 85.0) == 39 / 7
+    # the rate with the window (days) it came from; a tie names the longest
+    assert D._growth(flat_then_jump, t, 90.0) == (10.0, 1)
+    assert D._growth([(t - dt.timedelta(days=7), 46.0), (t - dt.timedelta(days=3), 77.0), (t - dt.timedelta(days=1), 83.0)], t, 85.0) == (39 / 7, 7)
+    assert D._growth([(t - dt.timedelta(days=d), 90.0 - 2 * d) for d in (7, 3, 1)], t, 90.0) == (2.0, 7)
     assert D._growth([(t - dt.timedelta(hours=12), 80.0)], t, 90.0) is None  # nothing a whole day back
-    assert [D._runway(15.0, 5.0), D._runway(15.0, 0.0), D._runway(15.0, -2.0), D._runway(15.0, None), D._runway(-1.3, 4.0)] == [
-        D.Runway(3.0, 5.0), D.Runway(D.math.inf, 0.0), D.Runway(D.math.inf, -2.0), D.Runway(D.math.inf, None), D.Runway(0.0, 4.0)]
+    assert [D._runway(15.0, (5.0, 3)), D._runway(15.0, (0.0, 1)), D._runway(15.0, (-2.0, 7)), D._runway(15.0, None),
+            D._runway(-1.3, (4.0, 1))] == [
+        D.Runway(3.0, 5.0, window_d=3), D.Runway(D.math.inf, 0.0, window_d=1), D.Runway(D.math.inf, -2.0, window_d=7),
+        D.Runway(D.math.inf, None), D.Runway(0.0, 4.0, window_d=1)]
     R, O, Y, G = D.RED_MARK, D.ORANGE_MARK, D.YELLOW_MARK, D.GREEN_MARK
     marks = [D._runway_mark(D.Runway(d, 1.0), fill) for d, fill in [
         (0.0, 101.0), (2.9, 50.0), (3.0, 50.0), (13.9, 50.0), (14.0, 50.0), (14.0, 95.0), (29.9, 50.0), (30.0, 50.0),
         (D.math.inf, 88.5), (D.math.inf, 96.0)]]
     assert marks == [R, R, O, O, Y, O, Y, G, G, O]
-    texts = [D._runway_text(r, CFG) for r in [D.Runway(8.2, 4.1), D.Runway(0.5, 30.0), D.Runway(59.9, 1.0), D.Runway(60.0, 1.0),
-                                               D.Runway(D.math.inf, 0.0), D.Runway(0.0, 4.0)]]
-    assert texts == [", +4.1 Ti/d, ≈8d to full", ", +30.0 Ti/d, ≈<1d to full", ", +1.0 Ti/d, ≈60d to full", "", "", ""]
+    texts = [D._runway_text(r, CFG) for r in [
+        D.Runway(8.2, 4.1, window_d=3), D.Runway(0.5, 30.0, window_d=1), D.Runway(59.9, 1.0, window_d=7),
+        D.Runway(8.2, 4.1), D.Runway(60.0, 1.0, window_d=7), D.Runway(D.math.inf, 0.0, window_d=1), D.Runway(0.0, 4.0, window_d=1)]]
+    assert texts == [", +4.1 Ti/d over 3d, ≈8d to full", ", +30.0 Ti/d over 1d, ≈<1d to full", ", +1.0 Ti/d over 7d, ≈60d to full",
+                     ", +4.1 Ti/d, ≈8d to full", "", "", ""]
 
 
 def test_runway_hue_steps():
@@ -367,9 +373,9 @@ def test_tail_runway_fixed_order():
     more = f"[more-data]({u('more-data')}): 2 Ti"
     assert D._tail(day, cfg).split(" · ") == [
         f":large_green_circle: {main}",
-        f":red_circle: {zone}, +5.6 Ti/d, ≈3d to full",
+        f":red_circle: {zone}, +5.6 Ti/d over 7d, ≈3d to full",
         more,
-        f":large_orange_circle: [cold]({u('cold-data')}): 12% of 100Ti, +10.0 Ti/d, ≈9d to full",
+        f":large_orange_circle: [cold]({u('cold-data')}): 12% of 100Ti, +10.0 Ti/d over 1d, ≈9d to full",
     ]
     over = replace(day, extra={**now, "cold-data": 101.3}, hist=hist[:-1] + (_hist_scan("2026-09-23T1201", 825.9, {**now, "cold-data": 101.3}),))
     assert D._tail(over, cfg).split(" · ")[3] == f":red_circle: [cold]({u('cold-data')}): 101.3% of 100Ti (1.3 Ti over)"
@@ -379,9 +385,9 @@ def test_tail_runway_fixed_order():
     # `runway-hue`: the same order, rate text and runways, each as its `:runway-N:` step
     assert D._tail(day, replace(cfg, quota_marks="runway-hue")).split(" · ") == [
         f":runway-8: {main}",
-        f":runway-2: {zone}, +5.6 Ti/d, ≈3d to full",
+        f":runway-2: {zone}, +5.6 Ti/d over 7d, ≈3d to full",
         more,
-        f":runway-4: [cold]({u('cold-data')}): 12% of 100Ti, +10.0 Ti/d, ≈9d to full",
+        f":runway-4: [cold]({u('cold-data')}): 12% of 100Ti, +10.0 Ti/d over 1d, ≈9d to full",
     ]
     # `circles` is unchanged by the history: fullest first, by fill
     assert D._tail(day, replace(cfg, quota_marks="circles")).split(" · ") == [
@@ -408,7 +414,7 @@ def test_runway_reaches_before_the_month():
     links = lambda t: re.sub(r"\]\([^)]*\)", "](…)", t)  # noqa: E731
     day2 = D.day_rows(month, "sender", 12)[1]
     assert day2.date == "2026-11-02"
-    assert links(D._tail(day2, cfg).split(" · ")[1]) == ":red_circle: [hot](…) 82 + [side](…) 3 Ti: 85.0% of 100Ti (15.0 Ti free), +5.7 Ti/d, ≈3d to full"
+    assert links(D._tail(day2, cfg).split(" · ")[1]) == ":red_circle: [hot](…) 82 + [side](…) 3 Ti: 85.0% of 100Ti (15.0 Ti free), +5.7 Ti/d over 7d, ≈3d to full"
     alone = D.day_rows(replace(month, pre=[]), "sender", 12)[1]
     assert links(D._tail(alone, cfg).split(" · ")[1]) == ":large_green_circle: [hot](…) 82 + [side](…) 3 Ti: 85.0% of 100Ti (15.0 Ti free)"
 
@@ -987,8 +993,7 @@ def test_quota_alert_is_broadcast_while_over_and_deleted_once_under(tmp_path: Pa
     sender = ("S3 usage: quota alert", None, ":warning:", "broadcast")
 
     def alert(slug: str, clause: str, at: str) -> str:
-        return (f":warning: **Quota alert**: [main]({u(slug)}): {clause} · _as of {at}Z_ "
-                "(≥ 78.3% of a quota; removed once every quota is back under)")
+        return f":warning: **Quota alert**: [main]({u(slug)}): {clause} · _as of {at}Z_"
 
     fake = _FakeSlack()
 
@@ -1001,7 +1006,9 @@ def test_quota_alert_is_broadcast_while_over_and_deleted_once_under(tmp_path: Pa
     assert ([c[0] for c in calls], "alert" in state) == (["post"], False)
 
     state, calls = step(SEPT[1:2])
-    over = alert("26090112", "78.4% of 1P (197.0 Ti free)", "9/1 12:00")
+    # the alert carries each pool's runway as the replies show it (here under `warning` marks, whose replies don't);
+    # one filling too slowly to reach full within `RUNWAY_TEXT_D` days (9/2's) has none
+    over = alert("26090112", "78.4% of 1P (197.0 Ti free), +8.0 Ti/d over 1d, ≈25d to full", "9/1 12:00")
     assert calls[1:] == [("post", f":warning: [main]({u('26090112-1d')}): 78.4% of 1P (197.0 Ti free)", "m1", "9/1 — 713 TiB (+8.0, 1.1%)",
                           f"{AV}50.png?v=4", None),
                          ("post", over, "m1", *sender)]
@@ -1033,8 +1040,7 @@ def test_a_month_ending_over_quota_moves_its_alert_to_the_next_months_thread(tmp
     _publish(root, [("2026-10-01T1200", _meta(716))])  # 78.7% of 1P: still over
     fake.calls.clear()
     oct_ = E.converge_slack_now(tpl, str(root), date(2026, 10, 1), fake, "C1", "sender")
-    body = (f":warning: **Quota alert**: [main]({SITE}/main-data?d=261001#over-time): 78.7% of 1P (194.0 Ti free) · _as of 10/1 12:00Z_ "
-            "(≥ 78.3% of a quota; removed once every quota is back under)")
+    body = f":warning: **Quota alert**: [main]({SITE}/main-data?d=261001#over-time): 78.7% of 1P (194.0 Ti free) · _as of 10/1 12:00Z_"
     # the alert calls alone: September's deleted, October's posted under October's OP (m5; its reply is m6)
     assert [c for c in fake.calls if c[0] == "delete" or c[-1] == "broadcast"] == [
         ("delete", "m4"), ("post", body, "m5", "S3 usage: quota alert", None, ":warning:", "broadcast")]
