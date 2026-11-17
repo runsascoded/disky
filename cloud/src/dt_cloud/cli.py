@@ -2916,6 +2916,33 @@ def access_status(buckets: tuple[str, ...], data_bucket: str, log_bucket: str | 
         )
 
 
+@access.command("requesters")
+@option("-D", "--depth", type=int, default=2, show_default=True, help="Path segments kept as each row's prefix")
+@option("-d", "--data-bucket", envvar="DATA_BUCKET", default=None, help="The access store's bucket (`gs://<it>/access`); default $DATA_BUCKET")
+@option("-M", "--mem", default=None, help="DuckDB memory limit (e.g. 48GB)")
+@option("-o", "--out", default=None, help="Output dir or URL (default: `<root>/requesters`); one `<day>.parquet` per day")
+@option("-p", "--threads", type=int, default=None, help="DuckDB threads")
+@option("-r", "--root", default=None, help="The access store (a dir or `gs://` URL holding `raw/`); default `gs://$DATA_BUCKET/access`")
+@argument("days", nargs=-1, required=True)
+def access_requesters(depth: int, data_bucket: str | None, mem: str | None, out: str | None, threads: int | None, root: str | None, days: tuple[str, ...]) -> None:
+    """Who made each day's requests: layer-1a rolled up per day × bucket × operation × client × requester × path prefix
+    (`access_requesters.py`), one `<day>.parquet` per DAY (YYYY-MM-DD, UTC) under `-o`. Prints each day's row count."""
+    import datetime as dt
+
+    from .access_requesters import rollup_day
+
+    if not root:
+        if not data_bucket:
+            raise SystemExit("access requesters: -r or -d/$DATA_BUCKET")
+        root = f"gs://{data_bucket}/access"
+    out = (out or f"{root.rstrip('/')}/requesters").rstrip("/")
+    if not out.startswith("gs://"):
+        Path(out).mkdir(parents=True, exist_ok=True)
+    for d in days:
+        day = dt.date.fromisoformat(d)
+        print(f"{day}\t{rollup_day(root, day, f'{out}/{day.isoformat()}.parquet', depth, mem, threads)}")
+
+
 @main.group()
 def job() -> None:
     """Read-only ops for the daily snapshot Batch job (status/logs/watch/metrics), in `$BATCH_REGION`."""
