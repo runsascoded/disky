@@ -337,12 +337,13 @@ export interface EmptiedBatch extends StageBatchRow {
   deletion?: BatchDeletion
 }
 
-interface CompletionBand { run_id: string; prefix: string; bytes: number; objects: number }
+export interface CompletionBand { run_id: string; prefix: string; bytes: number; objects: number }
 
-/** The plan's emptied stage batches, by replaying its `plan_items` audit trail
- * (pure): who held each prefix, and which gesture took it away. */
-export function emptiedBatches(batches: readonly StageBatchRow[], items: readonly PlanItemRow[], edits: readonly PlanEdit[], bands: readonly CompletionBand[] = []): EmptiedBatch[] {
-  const live = new Set(items.map(i => i.batch_id))
+interface Fate { prefixes: Set<string>; staged: number; covered: number; absorbed: Map<number, number>; unstaged: number; deleted: number; deletion?: BatchDeletion }
+
+/** Every stage batch's fate so far, by replaying the plan's `plan_items` audit trail (pure): who held each prefix, and
+ *  which gesture took it away. */
+function batchFates(edits: readonly PlanEdit[], bands: readonly CompletionBand[]): Map<number, Fate> {
   const completionBands = new Map<string, Map<string, CompletionBand>>()
   for (const band of bands) {
     if (!completionBands.has(band.run_id)) completionBands.set(band.run_id, new Map())
@@ -351,7 +352,7 @@ export function emptiedBatches(batches: readonly StageBatchRow[], items: readonl
   const parse = (s: string | null): Record<string, unknown> => { try { return (s ? JSON.parse(s) : {}) as Record<string, unknown> } catch { return {} } }
   const strs = (v: unknown): string[] => Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : []
   const owner = new Map<string, number | null>()
-  const fate = new Map<number, { prefixes: Set<string>; staged: number; covered: number; absorbed: Map<number, number>; unstaged: number; deleted: number; deletion?: BatchDeletion }>()
+  const fate = new Map<number, Fate>()
   const of = (b: number) => { let f = fate.get(b); if (!f) fate.set(b, f = { prefixes: new Set(), staged: 0, covered: 0, absorbed: new Map(), unstaged: 0, deleted: 0 }); return f }
   for (const e of edits) {
     const o = parse(e.old_json)
@@ -410,8 +411,24 @@ export function emptiedBatches(batches: readonly StageBatchRow[], items: readonl
       }
     }
   }
+  return fate
+}
+
+/** What real runs have deleted of each stage batch so far (`unstageDeleted`'s audit rows), live or emptied: the batches
+ *  with a deletion only. `deleted` counts its paths taken out; `deletion` sums their bands (absent: none had one). */
+export function batchDeletions(edits: readonly PlanEdit[], bands: readonly CompletionBand[]): Map<number, { deleted: number; deletion?: BatchDeletion }> {
+  const out = new Map<number, { deleted: number; deletion?: BatchDeletion }>()
+  for (const [b, f] of batchFates(edits, bands)) if (f.deleted) out.set(b, { deleted: f.deleted, ...(f.deletion ? { deletion: f.deletion } : {}) })
+  return out
+}
+
+/** The plan's emptied stage batches, and what became of what each staged (`batchFates`). */
+export function emptiedBatches(batches: readonly StageBatchRow[], items: readonly PlanItemRow[], edits: readonly PlanEdit[], bands: readonly CompletionBand[] = []): EmptiedBatch[] {
+  const live = new Set(items.map(i => i.batch_id))
+  const fate = batchFates(edits, bands)
+  const empty: Fate = { prefixes: new Set(), staged: 0, covered: 0, absorbed: new Map(), unstaged: 0, deleted: 0 }
   return batches.filter(b => !live.has(b.id)).map(b => {
-    const f = of(b.id)
+    const f = fate.get(b.id) ?? empty
     return { ...b, prefixes: [...f.prefixes].sort(), staged: f.staged, covered: f.covered, absorbed: [...f.absorbed].map(([into, n]) => ({ into, n })).sort((x, y) => x.into - y.into), unstaged: f.unstaged, deleted: f.deleted, ...(f.deletion ? { deletion: f.deletion } : {}) }
   })
 }
@@ -436,16 +453,20 @@ export async function planDetail(db: D1Database, id: number, staging: boolean): 
   // Every run, not just this plan's: plans are bookkeeping, and /staged's runs
   // table is the deployment's run history.
   const runsQ = db.prepare('SELECT * FROM deletion_runs ORDER BY started_ts DESC LIMIT 500').all<Record<string, unknown>>()
-  const editsQ = staging
-    ? db.prepare("SELECT action, old_json, new_json FROM admin_edits WHERE tbl = 'plan_items' AND pk = ? ORDER BY id").bind(String(id)).all<PlanEdit>()
-    : Promise.resolve({ results: [] as PlanEdit[] })
-  const bandsQ = staging
-    ? db.prepare(`SELECT b.run_id, b.prefix, b.bytes, b.objects FROM deletion_bands b
-        JOIN deletion_runs r ON r.run_id = b.run_id
-        WHERE r.plan_id = ? AND r.mode = 'real' AND r.finished_ts IS NOT NULL`).bind(id).all<CompletionBand>()
-    : Promise.resolve({ results: [] as CompletionBand[] })
-  const [items, batches, runs, edits, bands] = await Promise.all([itemsQ, batchesQ, runsQ, editsQ, bandsQ])
-  return { plan, items: items.results, batches: batches.results, emptied: emptiedBatches(batches.results, items.results, edits.results, bands.results), runs: runs.results }
+  const historyQ = staging ? planHistory(db, id) : Promise.resolve({ edits: [], bands: [] })
+  const [items, batches, runs, { edits, bands }] = await Promise.all([itemsQ, batchesQ, runsQ, historyQ])
+  return { plan, items: items.results, batches: batches.results, emptied: emptiedBatches(batches.results, items.results, edits, bands), runs: runs.results }
+}
+
+/** What `batchFates` replays: the plan's `plan_items` audit trail and its finished real runs' bands. */
+export async function planHistory(db: D1Database, planId: number): Promise<{ edits: PlanEdit[]; bands: CompletionBand[] }> {
+  const [edits, bands] = await Promise.all([
+    db.prepare("SELECT action, old_json, new_json FROM admin_edits WHERE tbl = 'plan_items' AND pk = ? ORDER BY id").bind(String(planId)).all<PlanEdit>(),
+    db.prepare(`SELECT b.run_id, b.prefix, b.bytes, b.objects FROM deletion_bands b
+      JOIN deletion_runs r ON r.run_id = b.run_id
+      WHERE r.plan_id = ? AND r.mode = 'real' AND r.finished_ts IS NOT NULL`).bind(planId).all<CompletionBand>(),
+  ])
+  return { edits: edits.results, bands: bands.results }
 }
 
 /** One run's D1 record and its per-band rows (largest first) — the run detail

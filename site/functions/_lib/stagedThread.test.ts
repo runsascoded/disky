@@ -123,14 +123,19 @@ describe('D1', () => {
   })
 
   describe('a finished real run re-renders the stage replies it emptied', () => {
-    it('a reply left with nothing loses its Reject button; one with paths left keeps it, counted down; others untouched', async () => {
+    /** Three replies (7–9, one batch each: a+b, c+d, e), a real run deleting a, b and c (1 TiB, 10 objects each), then
+     *  each re-rendered reply's first `lines` lines and buttons. `audited`: the batches' stage audit rows exist, as
+     *  `stageBatch` writes them, so each reply can tell what of it was deleted. */
+    async function finish(audited: boolean, lines: number) {
       const calls = fakeSlack()
       const { db, raw } = await planDb()
       const reply = (id: number, ts: string) => raw.prepare("INSERT INTO stage_replies (id, plan_id, stager, channel, thread_ts, slack_ts, created_ts, updated_ts) VALUES (?, 1, ?, ?, ?, ?, 1, 1)").run(id, ANN, CH, PARENT, ts)
       reply(7, '300.000001'); reply(8, '300.000002'); reply(9, '300.000003')
-      await stage(db, 1, ['gs://b/a/', 'gs://b/b/'], { ts: 5 })
-      await stage(db, 2, ['gs://b/c/', 'gs://b/d/'], { ts: 5 })
-      await stage(db, 3, ['gs://b/e/'], { ts: 5 })
+      const batches: [number, string[]][] = [[1, ['gs://b/a/', 'gs://b/b/']], [2, ['gs://b/c/', 'gs://b/d/']], [3, ['gs://b/e/']]]
+      for (const [id, ps] of batches) {
+        await stage(db, id, ps, { ts: 5 })
+        if (audited) raw.prepare("INSERT INTO admin_edits (tbl, pk, action, who, ts, old_json, new_json) VALUES ('plan_items', '1', 'insert', ?, 5, NULL, ?)").run(ANN, JSON.stringify({ staged: ps, covered: [], batch_id: id }))
+      }
       raw.prepare('UPDATE stage_batches SET reply_id = id + 6 WHERE id IN (1, 2, 3)').run()
       raw.prepare(`INSERT INTO deletion_runs (run_id, ${RUN_DIR}, scan, head, exec_head, actor, mode, started_ts, finished_ts, plan_digest, log_dir, plan_id)
         VALUES ('r1', 'p', ?, 0, 0, ?, 'real', 10, 20, 'D', 'd', 1)`).run(SCAN, ANN)
@@ -138,9 +143,23 @@ describe('D1', () => {
       await announceFinished(env as Parameters<typeof announceFinished>[0], db, [{ run_id: 'r1', ok: true }], SITE)
       const buttons = (c: Call) => (c.body.blocks as { type: string; elements?: { action_id: string; text: { text: string } }[] }[])
         .flatMap(b => b.type === 'actions' ? b.elements!.map(e => `${e.action_id}: ${e.text.text}`) : [])
-      expect(calls.filter(c => c.method === 'chat.update' && String(c.body.ts).startsWith('300.')).map(c => [c.body.ts, sectionText(c.body.blocks).split('\n')[0], buttons(c)])).toEqual([
-        ['300.000001', ':wastebasket: *Ann Bee* staged 1 batch · nothing left staged', ['staged_open: View in www']],
-        ['300.000002', ':wastebasket: *Ann Bee* staged 1 path · *1.0 TiB* · 10 objects', ['staged_reject: Reject batch', 'staged_open: View in www']],
+      return calls.filter(c => c.method === 'chat.update' && String(c.body.ts).startsWith('300.')).map(c => [c.body.ts, sectionText(c.body.blocks).split('\n').slice(0, lines), buttons(c)])
+    }
+
+    it('each keeps what it staged: staged (deleted + left) / deleted / left; one with nothing left drops Reject; others untouched', async () => {
+      expect(await finish(true, 2)).toEqual([
+        ['300.000001', [':white_check_mark: *Ann Bee* staged 2 paths · 2.0 TiB · 20 objects · *all deleted*'], ['staged_open: View in www']],
+        ['300.000002', [
+          ':wastebasket: *Ann Bee* staged 2 paths · 2.0 TiB · 20 objects',
+          'deleted 1 · 1.0 TiB · 10 objects · *left 1 · 1.0 TiB · 10 objects*',
+        ], ['staged_reject: Reject batch', 'staged_open: View in www']],
+      ])
+    })
+
+    it('a batch whose staging the audit trail lacks (before it recorded batches) shows only what is left', async () => {
+      expect(await finish(false, 1)).toEqual([
+        ['300.000001', [':wastebasket: *Ann Bee* staged 1 batch · nothing left staged'], ['staged_open: View in www']],
+        ['300.000002', [':wastebasket: *Ann Bee* staged 1 path · *1.0 TiB* · 10 objects'], ['staged_reject: Reject batch', 'staged_open: View in www']],
       ])
     })
   })
