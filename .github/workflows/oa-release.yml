@@ -3,7 +3,7 @@
 # `deploy/oa/sites.json`, `site/deploy-notify`), at one sha `plan` resolves and every job checks out. This file must be
 # byte-identical to `cloud`'s copy, whose tests hold its calls to those scripts (`plan` refuses to run otherwise;
 # specs/oa-release-workflow.md, "Tooling lives on `cloud`"). Off unless `OA_SITE_RELEASE_ENABLED` and the target's listed.
-name: OA site release
+name: Site release
 # The runs list names each run by deployment and environment (GitHub files them all under `front-door`): a CI completion
 # releases to dev (the commit's subject), a dispatch promotes to prod (the sha). A push to `<d>-prod` is a dispatch:
 # `oa-prod-push.yml` on that commit hands it here (specs/branch-push-releases.md).
