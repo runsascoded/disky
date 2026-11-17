@@ -955,8 +955,14 @@ export async function announceFinished(env: NotifyEnv, db: D1Database, runs: rea
   for (const { run_id, ok, reason, outcome } of runs) {
     const r = await db.prepare('SELECT * FROM deletion_runs WHERE run_id = ?').bind(run_id).first<RunRow & { plan_id: number | null }>()
     if (r?.plan_id == null) continue
-    // What the run deleted leaves the queue before the thread re-renders.
-    if (ok) await unstageDeleted(db, r.plan_id, [run_id])
+    // What the run deleted leaves the queue before the thread re-renders; each stage reply that showed a deleted path
+    // is re-rendered after (`chat.update`), so its counts drop and a reply left with nothing loses its Reject button.
+    const shownBy = ok ? new Map((await db.prepare(
+      'SELECT i.prefix, b.reply_id FROM plan_items i JOIN stage_batches b ON b.id = i.batch_id WHERE i.plan_id = ? AND b.reply_id IS NOT NULL',
+    ).bind(r.plan_id).all<{ prefix: string; reply_id: number }>()).results.map(x => [x.prefix, x.reply_id])) : new Map<string, number>()
+    const gone = ok ? await unstageDeleted(db, r.plan_id, [run_id]) : []
     await notifyPlan(env, db, r.plan_id, siteUrl, { run: r, phase: ok ? 'finished' : 'failed', reason, outcome })
+    const replyIds = [...new Set(gone.flatMap(p => shownBy.has(p) ? [shownBy.get(p)!] : []))].sort((a, b) => a - b)
+    if (replyIds.length) await updateReplies(env, db, r.plan_id, siteUrl, { replyIds })
   }
 }
