@@ -133,8 +133,10 @@ dt-cloud interval-store build -g GEN -L LAYOUT -s SCANS -o STORE  # The interval
                           # `<STORE>/interval-store/GEN/` (a dir or `gs://`/`r2://`/`s3://` URL; `scans.json` last;
                           # never over a generation). The staged per-range Batch stage is `interval-store build-ranges`
 dt-cloud interval-store add [-g GEN] -L LAYOUT -s SCANS -o STORE  # Append every scan after GEN's newest as a run (per-range
-                          # append over the open versions refolded from base + runs, run cut, `manifests/<id>.json`),
-                          # then the due carries; a URL store mirrors into `-w`, uploads data → `meta.json`s → manifests.
+                          # append over the open versions refolded from base + runs, each range in key sub-ranges of ≤ `-B`
+                          # estimated bytes, default from DuckDB's limit, `0` whole: the same bytes at any `-B`; run cut,
+                          # `manifests/<id>.json`), then the due carries; a URL store mirrors into `-w`, uploads data →
+                          # `meta.json`s → manifests.
                           # Reports peak work-disk/RSS per stage and scan. Every interval-store key goes through
                           # `blobstore.Store` (a profile's bare bucket name = `gs://`); `r2`/`r2-copy` are no-ops when the
                           # store is the serving R2 bucket. Every 2^L scans (`-C L`, default 5; `none`: never) it compacts

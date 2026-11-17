@@ -201,12 +201,22 @@ def scan_entry(read_json: Callable[[str], dict], base: dict, sid: str) -> dict:
     return got if got is not None else read_json(f"{run_key(sid, sid)}/scans.json")["scans"][0]
 
 
+def read_pieces(path: str, pieces: list[str] | None = None) -> str:
+    """A `(depth, path)`-sorted parquet as a relation: whole (`pieces` None), or only a key sub-range's rows (`pieces`,
+    `pyrmts.intervals.key_range_pieces`' conjunctions: one filtered read each, `UNION ALL`ed, so each prunes by the
+    row-group statistics)."""
+    if pieces is None:
+        return f"read_parquet({q(path)})"
+    return "(" + " UNION ALL ".join(f"SELECT * FROM read_parquet({q(path)}) WHERE {p}" for p in pieces) + ")"
+
+
 def base_state_sql(root: str, name: str, sliced: bool = True, generation: ist.Identity = False, attributed: bool = False,
-                   churn: bool = False) -> dict[str, str]:
+                   churn: bool = False, pieces: list[str] | None = None) -> dict[str, str]:
     """A key range's open versions from a base generation's range files under `root` (`pvl/`, `pv/`, `sv/`, `svt/`,
     `attribution/` `<name>.parquet`): `state_schema` relations (`tables(sliced, attributed)`). `pvf` is the open path
-    version's `vf` (`pv/`). A base without the attribution table opens it empty."""
-    rd = lambda sub: f"read_parquet({q(f'{root}/{sub}/{name}.parquet')})"  # noqa: E731
+    version's `vf` (`pv/`). A base without the attribution table opens it empty. `pieces`: only a key sub-range's
+    (`read_pieces`)."""
+    rd = lambda sub: read_pieces(f"{root}/{sub}/{name}.parquet", pieces)  # noqa: E731
     pv = f"(SELECT depth, path, vf AS pvf FROM {rd('pv')} WHERE vt = {OPEN})"
     pvl_cols = ", ".join(f"l.{c}" for c in ist.with_generation(with_churn(ist.PVL_SCHEMA, churn), generation).names)
     svt_cols = ", ".join("coalesce(s.usr, '') AS usr" if c == "usr" else f"s.{c}" for c in ist.SVT_SCHEMA.names)
@@ -221,15 +231,28 @@ def base_state_sql(root: str, name: str, sliced: bool = True, generation: ist.Id
     return {t: out[t] for t in tables(sliced, attributed)}
 
 
-def run_state_sql(root: str, name: str, sliced: bool = True, attributed: bool = False) -> dict[str, str]:
+def run_state_sql(root: str, name: str, sliced: bool = True, attributed: bool = False, pieces: list[str] | None = None) -> dict[str, str]:
     """A key range's open versions after a scan, from its `state/<D>/` dir `root`; `pvl`'s with the churn apply's opened
-    versions (`interval_churn.apply_run`'s `pvl-fix/`, when the generation carries churn) in place of their paths'."""
-    out = {t: f"SELECT * FROM read_parquet({q(f'{root}/{t}/{name}.parquet')})" for t in tables(sliced, attributed)}
+    versions (`interval_churn.apply_run`'s `pvl-fix/`, when the generation carries churn) in place of their paths'.
+    `pieces`: only a key sub-range's (`read_pieces`)."""
+    out = {t: f"SELECT * FROM {read_pieces(f'{root}/{t}/{name}.parquet', pieces)}" for t in tables(sliced, attributed)}
     fix = f"{root}/{FIX}/{name}.parquet"
     if Path(fix).exists():
-        out["pvl"] = f"""SELECT * FROM ({out['pvl']}) ANTI JOIN read_parquet({q(fix)}) f USING (depth, path)
-            UNION ALL BY NAME SELECT * FROM read_parquet({q(fix)})"""
+        rf = read_pieces(fix, pieces)
+        out["pvl"] = f"""SELECT * FROM ({out['pvl']}) ANTI JOIN {rf} f USING (depth, path)
+            UNION ALL BY NAME SELECT * FROM {rf}"""
     return out
+
+
+def base_state_files(root: str, name: str, sliced: bool = True, attributed: bool = False) -> list[str]:
+    """The range files `base_state_sql` reads (`pv/` beside the tables'): what a key range's sub-ranges are planned over."""
+    subs = ["pvl", "pv", *(t for t in tables(sliced, attributed) if t != "pvl")]
+    return [f for f in (f"{root}/{t}/{name}.parquet" for t in subs) if Path(f).exists()]
+
+
+def run_state_files(root: str, name: str, sliced: bool = True, attributed: bool = False) -> list[str]:
+    """The files `run_state_sql` reads: what a key range's sub-ranges are planned over."""
+    return [f for f in (f"{root}/{t}/{name}.parquet" for t in (*tables(sliced, attributed), FIX)) if Path(f).exists()]
 
 
 def _reconstructs(con, table: str, new: str, kind: str) -> tuple[list[int], list[int]]:
@@ -244,55 +267,116 @@ def _reconstructs(con, table: str, new: str, kind: str) -> tuple[list[int], list
     return dig(f"SELECT * REPLACE ({DR} AS dr) FROM {table} WHERE vt = {OPEN}"), dig(new)
 
 
-def append_range(con, prev: dict[str, str], scan: dict, r: dict, name: str, out: Path, *, bucket: str, mount: str | None,
+#: The open state `append_range` folds: SQL relations per table (`base_state_sql`, `run_state_sql`, `interval_local
+#: .open_state_sql`), or a function giving them for a key sub-range (`pieces`; None: the whole range).
+OpenState = dict[str, str] | Callable[[list[str] | None], dict[str, str]]
+#: Copies of a sub-range's estimated open-state bytes (`interval_compact.group_spans` over the state's files) live at once
+#: in an append: the scan's rows about match them (the state is the previous scan's), and at the heaviest statement each
+#: table's open versions, the scan's rows, their join (`npf`) and the intervals' output (≈ both) are held.
+APPEND_COPIES = 8
+
+
+#: `-B/--sub-budget`'s help: a sub-range's estimated bytes, or `0` for whole ranges.
+SUB_BUDGET_HELP = (f"A key range's sub-ranges' estimated open-state bytes apiece (e.g. 2GB; 0: each range whole), folded one at a time; default "
+                   f"DuckDB's limit × (1 − RESERVE) / {APPEND_COPIES}. The output's bytes don't depend on it")
+
+
+def sub_budget(raw: str | None, duck: str) -> int | None:
+    """`-B/--sub-budget` (None: `append_budget(duck)`; `0`: None, whole ranges) as bytes."""
+    if raw is None:
+        return append_budget(duck)
+    n = int(raw) if raw.strip().isdigit() else sn.mem_bytes(raw)
+    return n or None
+
+
+def append_budget(duck: str | int) -> int:
+    """A key sub-range's estimated open-state bytes (`interval_compact.sub_ranges`) under DuckDB's memory limit `duck`:
+    `duck × (1 − RESERVE) / APPEND_COPIES`, so a sub-range's relations fit the limit whatever the range's size."""
+    from .interval_compact import RESERVE
+
+    m = sn.mem_bytes(duck) if isinstance(duck, str) else duck
+    return int(m * (1 - RESERVE) / APPEND_COPIES)
+
+
+def sub_preds(r: dict, lo: tuple | None, hi: tuple | None) -> list[str]:
+    """Key range `r`'s rows in sub-range `[lo, hi)` (None: unbounded) as `static_names.range_preds`' conjunctions: the
+    range's own when the sub-range is the whole range."""
+    if lo is None and hi is None:
+        return sn.range_preds(r)
+    from pyrmts.intervals import key_range_pieces
+
+    rlo, rhi = (tuple(r["lo"]) if r["lo"] is not None else None), (tuple(r["hi"]) if r.get("hi") is not None else None)
+    a = lo if rlo is None or (lo is not None and lo > rlo) else rlo
+    b = hi if rhi is None or (hi is not None and hi < rhi) else rhi
+    return key_range_pieces(sn.RANGE_COLS, list(a) if a is not None else None, list(b) if b is not None else None)
+
+
+def add_counts(a: dict, b: dict) -> dict:
+    """Two sub-ranges' count docs summed key by key (nested dicts too; `a`'s key order first), strings kept."""
+    out = dict(a)
+    for k, v in b.items():
+        if k not in out:
+            out[k] = v
+        elif isinstance(v, dict):
+            out[k] = add_counts(out[k], v)
+        elif isinstance(v, (int, float)) and not isinstance(v, bool):
+            out[k] = out[k] + v
+    return out
+
+
+def append_range(con, prev: OpenState, scan: dict, r: dict, name: str, out: Path, *, bucket: str, mount: str | None,
                  sliced: bool = True, generation: ist.Identity = False, check: list[str] | None = None, attributed: bool = False,
-                 churn: bool = False, count: bool = True) -> dict:
+                 churn: bool = False, count: bool = True, files: list[str] | None = None, budget: int | None = None) -> dict:
     """`_append_range`, its peaks under a running `tree_mem.TreeWatch` labelled with the range, DuckDB's and Arrow's own
     totals read with each sample."""
     with tm.at(name), tm.gauges(DuckDB=tm.duck_bytes(con), Arrow=pa.total_allocated_bytes):
         return _append_range(con, prev, scan, r, name, out, bucket=bucket, mount=mount, sliced=sliced, generation=generation, check=check,
-                             attributed=attributed, churn=churn, count=count)
+                             attributed=attributed, churn=churn, count=count, files=files, budget=budget)
 
 
-def _append_range(con, prev: dict[str, str], scan: dict, r: dict, name: str, out: Path, *, bucket: str, mount: str | None,
-                  sliced: bool, generation: ist.Identity, check: list[str] | None, attributed: bool, churn: bool, count: bool) -> dict:
+def _append_range(con, prev: OpenState, scan: dict, r: dict, name: str, out: Path, *, bucket: str, mount: str | None,
+                  sliced: bool, generation: ist.Identity, check: list[str] | None, attributed: bool, churn: bool, count: bool,
+                  files: list[str] | None, budget: int | None) -> dict:
     """Append `scan` to one key range's open versions (`prev`: `state_schema` relations per table, `tables(sliced,
-    attributed)`; `attributed`: the lineage carries the attribution table, `append_attribution`).
+    attributed)`, or a function of a key sub-range's predicates giving them; `attributed`: the lineage carries the
+    attribution table, `append_attribution`).
     Writes under `out` each table's delta `<t>/<name>.parquet` (`delta_schema`, sorted by identity then `op`) and next
     open state `state/<t>/<name>.parquet`. Raises unless the next open state is the scan's rows exactly; refuses
     (`SystemExit`) a scan naming owners in a generation without the owner axis (`sliced` false). With `generation` (the
     generation's `"generation": true`), a version opened at the scan takes its object's `GENERATION` (NULL where the
     scan's sort has none); a continuing version keeps its own (`build`'s carry from the version's first scan).
 
+    The range is folded in key sub-ranges, in key order, into one writer per file (`sn.SortedWriter`): each sub-range of
+    at most `budget` estimated bytes of the open state's `files` (`interval_compact.sub_ranges`, cut at their row-group
+    starts: a path's versions and slices are never split), its open versions and the scan's rows loaded alone. Every
+    table, check and count is per `(depth, path)`, so the files and the doc are the same at any budget; `budget` None,
+    `files` None or `prev` a plain dict: the whole range at once.
+
     `check`: the published roots the store answers the range from (the base's range-file dir, then each run its newest
     earlier manifest lists): the range's answer at the scan over them and this run's deltas is compared with the scan's
-    rows, row for row (`check_tables`), as `doc["check"]` (the scan's parity marker sums them: `append_marker`).
+    rows, row for row (`check_tables`, sub-range by sub-range, summed), as `doc["check"]` (the scan's parity marker sums
+    them: `append_marker`).
 
     `churn` (the generation carries `churn_cum`): continuing versions keep theirs; those opened at the scan have none
     until `interval_churn.apply_run` sums the scan's churn across ranges. For it, this writes the range's churn at the
     scan (`state/churn/`: its files' |Δ|, rolled up to their ancestors) and the cumulative churn its reappearing paths
     had (`state/prior/`, from `check`'s roots); `count` false where objects are first listed (`interval_churn.counts_at`)."""
+    from contextlib import ExitStack
+
+    import pyarrow.parquet as pq
+
     from pyrmts.intervals import append_intervals
+
+    from .interval_compact import sub_ranges
 
     t0 = monotonic()
     D = int(scan["ts"])
     src = sn._src(bucket, scan["src"], mount)
-    preds = sn.range_preds(r)
     v = scan.get("version")
     todo = tables(sliced)
-    with tm.phase("range load"):
-        ist.path_rows_into(con, "np", src, preds, v, generation)
-        if not sliced and con.execute("SELECT count(*) FROM np WHERE us <> ''").fetchone()[0]:
-            raise SystemExit(ist.owners_refused(scan["id"]))
-        if sliced:
-            con.execute(f"CREATE OR REPLACE TABLE ns AS {ist.slice_rows_sql(con, src, preds, v)}")
-        for t in todo:
-            con.execute(f"CREATE OR REPLACE TABLE p_{t} AS SELECT *, {DR} AS dr FROM ({prev[t]})")
-        # Each path's version start after D: its open one's while the change columns hold, else D.
-        same = " AND ".join(f"o.{c} IS NOT DISTINCT FROM n.{c}" for c in ist.change_cols(generation))
-        con.execute(f"""CREATE OR REPLACE TABLE npf AS SELECT n.*, CASE WHEN o.path IS NOT NULL AND {same} THEN o.pvf ELSE {D} END::BIGINT AS pvf
-            FROM np n LEFT JOIN p_pvl o ON o.depth = n.depth AND o.path = n.path""")
-    doc: dict = {"range": name, "scan": scan["id"]}
+    state_of = prev if callable(prev) else None
+    subs = sub_ranges(files, budget) if state_of is not None and files and budget is not None else [(None, None, 0)]
+    covered = attributed and bool(scan.get(ist.ATTRIBUTION_SRC))
     key2 = ["depth", "path"]
     key3 = ["depth", "path", "usr"]
     gcol = [ist.identity_column(generation)] if generation else []
@@ -307,51 +391,117 @@ def _append_range(con, prev: dict[str, str], scan: dict, r: dict, name: str, out
         "sv": (sv_new, key3, SV_STATE, ist.CARRIED),
         "svt": (svt_new, key3, SVT_STATE, ist.CARRIED),
     }
-    for t, (new, key, state, carried) in ((t, plan[t]) for t in todo):
-        with tm.phase(f"range intervals {t}"):
-            n_open, n_close = append_intervals(con, f"SELECT * FROM p_{t}", new, key, state, D, OPEN, carried=carried, out=f"o_{t}")
-            on = " AND ".join(f"o_{t}.{c} = c.{c}" for c in key)
-            if t == "pvl":
-                # A version opened by its read day alone continues its path version: `fold` gives it that version's `wts`
-                # (and `GENERATION`).
-                sets = ", ".join(f"{c} = c.{c}" for c in ["wts", *gcol])
-                con.execute(f"""UPDATE o_pvl SET {sets} FROM (SELECT depth, path, {', '.join(['wts', *gcol])} FROM o_pvl WHERE vt = {D}) c
-                    WHERE o_pvl.vf = {D} AND o_pvl.pvf < {D} AND {on}""")
-            elif t == "svt":
-                # A piece opened by its path's change alone continues its slice version: `fold -S` gives it that one's `wts`.
-                eq = " AND ".join(f"o_svt.{c} IS NOT DISTINCT FROM c.{c}" for c in ist.SV_CHANGE)
-                con.execute(f"""UPDATE o_svt SET wts = c.wts FROM (SELECT * FROM o_svt WHERE vt = {D}) c
-                    WHERE o_svt.vf = {D} AND {on} AND {eq}""")
-        schema = delta_schema(t, generation, churn and t == "pvl")
-        cols = ", ".join(schema.names[:-1])
-        order = ", ".join([*IDENT[t], "op"])
-        dict_cols = [c for c in ("kind", "us", "usr") if c in schema.names]
-        with tm.phase(f"range delta {t}"):
-            n_delta = write_sorted(sn._batches(con, f"""SELECT {cols}, 1::TINYINT AS op FROM o_{t} WHERE vf = {D}
-                    UNION ALL SELECT {cols}, -1::TINYINT AS op FROM o_{t} WHERE vt = {D} ORDER BY {order}"""),
-                                   out / t / f"{name}.parquet", schema, ist.RANGE_RG, dictionary=dict_cols)
-        with tm.phase(f"range state {t}"):
-            n_state = write_sorted(sn._batches(con, f"SELECT {cols} FROM o_{t} WHERE vt = {OPEN} ORDER BY {', '.join(IDENT[t])}"),
-                                   out / "state" / t / f"{name}.parquet", state_schema(t, generation, churn and t == "pvl"), ist.RANGE_RG, dictionary=dict_cols)
-        with tm.phase(f"range reconstructs {t}"):
-            got, want = _reconstructs(con, f"o_{t}", SCAN_ROWS[t], t)
+    schemas = {t: delta_schema(t, generation, churn and t == "pvl") for t in todo}
+    tot: dict[str, dict] = {t: {"opened": 0, "closed": 0, "got": [0, 0], "want": [0, 0]} for t in todo}
+    at: dict = {"opened": 0, "closed": 0, "got": [0, 0], "want": [0, 0]}
+    checked: dict | None = None
+    check_s = 0.0
+    with ExitStack() as stack:
+        dict_cols = {t: [c for c in ("kind", "us", "usr") if c in schemas[t].names] for t in todo}
+        w_delta = {t: stack.enter_context(sn.SortedWriter(out / t / f"{name}.parquet", schemas[t], ist.RANGE_RG, dictionary=dict_cols[t]))
+                   for t in todo}
+        w_state = {t: stack.enter_context(sn.SortedWriter(out / "state" / t / f"{name}.parquet", state_schema(t, generation, churn and t == "pvl"),
+                                                          ist.RANGE_RG, dictionary=dict_cols[t])) for t in todo}
+        if attributed:
+            w_at = {"state": stack.enter_context(sn.SortedWriter(out / "state" / AT / f"{name}.parquet", ist.AT_SCHEMA, ist.RANGE_RG,
+                                                                 dictionary=["user", "source"]))}
+            if covered:
+                w_at["delta"] = stack.enter_context(sn.SortedWriter(out / AT / f"{name}.parquet", delta_schema(AT), ist.RANGE_RG,
+                                                                    dictionary=["user", "source"]))
+        # A sub-range's deltas, whole, for its check (the range's files are open until the last): then copied on to them.
+        # Each sub-range writes its own dir: DuckDB caches a parquet's metadata by path, so a rewrite of one path can be
+        # read through the previous sub-range's footer (its check then misses this one's deltas).
+        part = out / ".sub"
+        for j, (lo, hi, _) in enumerate(subs):
+            pj = part / str(j)
+            whole = lo is None and hi is None
+            preds = sub_preds(r, lo, hi)
+            rel = state_of(None if whole else preds) if state_of is not None else prev
+            with tm.phase("range load"):
+                ist.path_rows_into(con, "np", src, preds, v, generation)
+                if not sliced and con.execute("SELECT count(*) FROM np WHERE us <> ''").fetchone()[0]:
+                    raise SystemExit(ist.owners_refused(scan["id"]))
+                if sliced:
+                    con.execute(f"CREATE OR REPLACE TABLE ns AS {ist.slice_rows_sql(con, src, preds, v)}")
+                for t in todo:
+                    con.execute(f"CREATE OR REPLACE TABLE p_{t} AS SELECT *, {DR} AS dr FROM ({rel[t]})")
+                # Each path's version start after D: its open one's while the change columns hold, else D.
+                same = " AND ".join(f"o.{c} IS NOT DISTINCT FROM n.{c}" for c in ist.change_cols(generation))
+                con.execute(f"""CREATE OR REPLACE TABLE npf AS SELECT n.*, CASE WHEN o.path IS NOT NULL AND {same} THEN o.pvf ELSE {D} END::BIGINT AS pvf
+                    FROM np n LEFT JOIN p_pvl o ON o.depth = n.depth AND o.path = n.path""")
+            for t in todo:
+                new, key, state, carried = plan[t]
+                with tm.phase(f"range intervals {t}"):
+                    n_open, n_close = append_intervals(con, f"SELECT * FROM p_{t}", new, key, state, D, OPEN, carried=carried, out=f"o_{t}")
+                    on = " AND ".join(f"o_{t}.{c} = c.{c}" for c in key)
+                    if t == "pvl":
+                        # A version opened by its read day alone continues its path version: `fold` gives it that version's `wts`
+                        # (and `GENERATION`).
+                        sets = ", ".join(f"{c} = c.{c}" for c in ["wts", *gcol])
+                        con.execute(f"""UPDATE o_pvl SET {sets} FROM (SELECT depth, path, {', '.join(['wts', *gcol])} FROM o_pvl WHERE vt = {D}) c
+                            WHERE o_pvl.vf = {D} AND o_pvl.pvf < {D} AND {on}""")
+                    elif t == "svt":
+                        # A piece opened by its path's change alone continues its slice version: `fold -S` gives it that one's `wts`.
+                        eq = " AND ".join(f"o_svt.{c} IS NOT DISTINCT FROM c.{c}" for c in ist.SV_CHANGE)
+                        con.execute(f"""UPDATE o_svt SET wts = c.wts FROM (SELECT * FROM o_svt WHERE vt = {D}) c
+                            WHERE o_svt.vf = {D} AND {on} AND {eq}""")
+                cols = ", ".join(schemas[t].names[:-1])
+                order = ", ".join([*IDENT[t], "op"])
+                with tm.phase(f"range delta {t}"):
+                    write_sorted(sn._batches(con, f"""SELECT {cols}, 1::TINYINT AS op FROM o_{t} WHERE vf = {D}
+                            UNION ALL SELECT {cols}, -1::TINYINT AS op FROM o_{t} WHERE vt = {D} ORDER BY {order}"""),
+                                 pj / t / f"{name}.parquet", schemas[t], ist.RANGE_RG, dictionary=dict_cols[t])
+                with tm.phase(f"range state {t}"):
+                    # Batches of one range-file group: what a writer left idle pins (`tree_mem.APPEND_GROUPS`)
+                    w_state[t].write(sn._batches(con, f"SELECT {cols} FROM o_{t} WHERE vt = {OPEN} ORDER BY {', '.join(IDENT[t])}", ist.RANGE_RG))
+                with tm.phase(f"range reconstructs {t}"):
+                    got, want = _reconstructs(con, f"o_{t}", SCAN_ROWS[t], t)
+                tot[t] = {"opened": tot[t]["opened"] + n_open, "closed": tot[t]["closed"] + n_close,
+                          "got": [tot[t]["got"][0] + got[0], tot[t]["got"][1] + got[1]], "want": [tot[t]["want"][0] + want[0], tot[t]["want"][1] + want[1]]}
+                if t == "pvl" and churn:
+                    with tm.phase("range churn"):
+                        ich.churn_collect(con, "o_pvl", D, count, first=j == 0)
+                con.execute(f"DROP TABLE o_{t}; DROP TABLE p_{t}")
+            if attributed:
+                with tm.phase("range attribution"):
+                    got_at = append_attribution(con, rel[AT], scan, preds, D, w_at["state"], pj / AT / f"{name}.parquet", bucket=bucket, mount=mount)
+                    if got_at:
+                        at = {"opened": at["opened"] + got_at["opened"], "closed": at["closed"] + got_at["closed"],
+                              "got": [a + b for a, b in zip(at["got"], got_at["got"])], "want": [a + b for a, b in zip(at["want"], got_at["want"])]}
+            if check is not None:
+                t1 = monotonic()
+                with tm.phase("range check"):
+                    sub = check_tables(con, [*check, str(pj)], name, D, sliced=sliced, generation=generation, attribution=covered,
+                                       pieces=None if whole else preds)
+                    checked = sub if checked is None else add_counts(checked, sub)
+                check_s += monotonic() - t1
+            con.execute("DROP TABLE np; DROP TABLE IF EXISTS ns; DROP TABLE npf; DROP TABLE IF EXISTS na")
+            for t, w in [*w_delta.items(), *([(AT, w_at["delta"])] if covered else [])]:
+                w.write(pq.ParquetFile(pj / t / f"{name}.parquet").iter_batches(batch_size=ist.RANGE_RG))
+            shutil.rmtree(pj, ignore_errors=True)
+    shutil.rmtree(part, ignore_errors=True)
+    doc: dict = {"range": name, "scan": scan["id"]}
+    for t in todo:
+        got, want = [tot[t]["got"][0], tot[t]["got"][1] % U64], [tot[t]["want"][0], tot[t]["want"][1] % U64]
         if got != want:
             raise RuntimeError(f"append {name} {scan['id']} {t}: the open versions ({got[0]:,} rows) are not the scan's ({want[0]:,})")
-        doc[t] = {"opened": n_open, "closed": n_close, "delta": n_delta, "open": n_state}
+        doc[t] = {"opened": tot[t]["opened"], "closed": tot[t]["closed"], "delta": w_delta[t].rows, "open": w_state[t].rows}
         if t == "pvl" and churn:
             with tm.phase("range churn"):
-                doc["churn"] = ich.scan_churn(con, "o_pvl", D, check or [], name, out / "state", count)
-        con.execute(f"DROP TABLE o_{t}; DROP TABLE p_{t}")
+                doc["churn"] = ich.churn_write(con, D, check or [], name, out / "state")
     if attributed:
-        with tm.phase("range attribution"):
-            doc[AT] = append_attribution(con, prev[AT], scan, preds, name, out, D, bucket=bucket, mount=mount)
-    if check is not None:
-        t1 = monotonic()
-        with tm.phase("range check"):
-            doc["check"] = {**check_tables(con, [*check, str(out)], name, D, sliced=sliced, generation=generation,
-                                           attribution=attributed and doc[AT]["covered"]), "s": round(monotonic() - t1, 1)}
-    con.execute("DROP TABLE np; DROP TABLE IF EXISTS ns; DROP TABLE npf; DROP TABLE IF EXISTS na")
+        if covered:
+            got, want = [at["got"][0], at["got"][1] % U64], [at["want"][0], at["want"][1] % U64]
+            if got != want:
+                raise RuntimeError(f"append {scan['id']} {name} {AT}: the open versions ({got[0]:,} rows) are not the scan's ({want[0]:,})")
+            doc[AT] = {"covered": True, "opened": at["opened"], "closed": at["closed"], "delta": w_at["delta"].rows, "open": w_at["state"].rows}
+        else:
+            doc[AT] = {"covered": False, "open": w_at["state"].rows}
+    if checked is not None:
+        doc["check"] = {**checked, "s": round(check_s, 1)}
     doc["s"] = round(monotonic() - t0, 1)
+    if len(subs) > 1:
+        err(f"append {name}: {len(subs)} sub-ranges of ≤ {budget / tm.MIB:,.0f} MiB estimated (largest {max(e for *_, e in subs) / tm.MIB:,.0f})")
     err(f"append {name} {scan['id']}: " + ", ".join(f"{t} +{doc[t]['opened']:,} −{doc[t]['closed']:,}" for t in todo)
         + (f", {AT} " + (f"+{doc[AT]['opened']:,} −{doc[AT]['closed']:,}" if doc[AT]["covered"] else "uncovered") if attributed else "") + f" in {doc['s']}s")
     return doc
@@ -368,41 +518,37 @@ def append_mem(tree: tm.Budget, files: list[str], what: str) -> str:
     return f"{duck // tm.MIB}MiB"
 
 
-def append_attribution(con, prev: str, scan: dict, preds: list[str], name: str, out: Path, D: int, *, bucket: str, mount: str | None) -> dict:
-    """The attribution table's append for one key range: `prev` its open versions. A covered scan (its entry names an
-    `attribution.parquet`, `interval_store.ATTRIBUTION_SRC`) is appended as the path versions are (`append_intervals`,
-    change columns `user`, `source`, `evidence`): its delta `attribution/<name>.parquet`, its next open state, checked to
-    be the scan's prefixes exactly; its rows stay in table `na` for the parity check. An uncovered scan adds no input: the
-    open versions carry over unchanged (the state rewritten as it was), no delta, as `build` skips it."""
+def append_attribution(con, prev: str, scan: dict, preds: list[str], D: int, state: sn.SortedWriter, delta: Path, *, bucket: str,
+                       mount: str | None) -> dict:
+    """The attribution table's append for one key (sub-)range (`preds`): `prev` its open versions, `state` its open state's
+    writer, `delta` where its delta rows go (a whole file). A covered scan (its entry names an `attribution.parquet`,
+    `interval_store.ATTRIBUTION_SRC`) is appended as the path versions are (`append_intervals`, change columns `user`,
+    `source`, `evidence`): its delta rows, its next open state; its rows stay in table `na` for the parity check. Returns
+    the counts and both reconstruct digests (`got`, `want`: `[rows, Σ hash]`, summed over sub-ranges, the caller checks
+    them). An uncovered scan adds no input: the open versions carry over unchanged (the state rewritten as it was), no
+    delta, as `build` skips it."""
     from pyrmts.intervals import append_intervals
 
     cols = ist.qcols(ist.AT_SCHEMA.names)
-    schema = delta_schema(AT)
     con.execute(f"CREATE OR REPLACE TABLE p_at AS SELECT {cols} FROM ({prev})")
-    state = out / "state" / AT / f"{name}.parquet"
-    key = f"{scan['id']} {name} {AT}"
     if not scan.get(ist.ATTRIBUTION_SRC):
-        n_state = write_sorted(sn._batches(con, f"SELECT {cols} FROM p_at ORDER BY depth, path, vf"), state, ist.AT_SCHEMA, ist.RANGE_RG,
-                               dictionary=["user", "source"])
+        state.write(sn._batches(con, f"SELECT {cols} FROM p_at ORDER BY depth, path, vf", ist.RANGE_RG))
         con.execute("DROP TABLE p_at")
-        return {"covered": False, "open": n_state}
+        return {}
     con.execute(f"CREATE OR REPLACE TABLE na AS {ist.attribution_rows_sql(sn._src(bucket, scan[ist.ATTRIBUTION_SRC], mount), preds)}")
     n_open, n_close = append_intervals(con, "SELECT * FROM p_at", "SELECT * FROM na", ist.KEY_COLS, ist.ATTRIBUTION_CHANGE, D, OPEN, out="o_at")
-    n_delta = write_sorted(sn._batches(con, f"""SELECT {cols}, 1::TINYINT AS op FROM o_at WHERE vf = {D}
+    write_sorted(sn._batches(con, f"""SELECT {cols}, 1::TINYINT AS op FROM o_at WHERE vf = {D}
             UNION ALL SELECT {cols}, -1::TINYINT AS op FROM o_at WHERE vt = {D} ORDER BY depth, path, vf, op"""),
-                           out / AT / f"{name}.parquet", schema, ist.RANGE_RG, dictionary=["user", "source"])
-    n_state = write_sorted(sn._batches(con, f"SELECT {cols} FROM o_at WHERE vt = {OPEN} ORDER BY depth, path, vf"), state, ist.AT_SCHEMA,
-                           ist.RANGE_RG, dictionary=["user", "source"])
+                 delta, delta_schema(AT), ist.RANGE_RG, dictionary=["user", "source"])
+    state.write(sn._batches(con, f"SELECT {cols} FROM o_at WHERE vt = {OPEN} ORDER BY depth, path, vf", ist.RANGE_RG))
 
     def dig(rel: str) -> list[int]:
         n, s = con.execute(f"SELECT count(*), coalesce(sum({ist.AT_HASH}::HUGEINT), 0) FROM ({rel})").fetchone()
         return [int(n), int(s) % U64]
 
     got, want = dig(f"SELECT * FROM o_at WHERE vt = {OPEN}"), dig("SELECT * FROM na")
-    if got != want:
-        raise RuntimeError(f"append {key}: the open versions ({got[0]:,} rows) are not the scan's ({want[0]:,})")
     con.execute("DROP TABLE o_at; DROP TABLE p_at")
-    return {"covered": True, "opened": n_open, "closed": n_close, "delta": n_delta, "open": n_state}
+    return {"opened": n_open, "closed": n_close, "got": got, "want": want}
 
 
 # ── A run's served sorts, and merges ───────────────────────────────────────
@@ -492,11 +638,11 @@ def merge_range(inputs: list[str], name: str, out: Path, sliced: bool = True, ge
 # ── The append's parity check (`scan retire`'s gate; specs/scan-cs3.md item 4) ──
 
 
-def live_sql(roots: list[str], t: str, name: str, D: int, generation: ist.Identity = False) -> str:
+def live_sql(roots: list[str], t: str, name: str, D: int, generation: ist.Identity = False, pieces: list[str] | None = None) -> str:
     """Key range `name`'s versions of table `t` live at `D`, as the reader combines them (`interval_read.combine`): every
     root's `<t>/<name>.parquet` (a base's range files, runs' deltas), one row per version (`IDENT`) with the smallest
     `vt`, those with `vf ≤ D < vt`; in `CHECK_COLS[t]` (`usr` '' where no owner is named), `pvl` with `GENERATION` last
-    when the generation carries it."""
+    when the generation carries it. `pieces`: only a key sub-range's (`read_pieces`)."""
     gcol = [ist.identity_column(generation)] if generation and t == "pvl" else []
     key = [c for c in CHECK_COLS[t] if c in IDENT[t]]
     cols = [*key, "vf", "vt", *(c for c in CHECK_COLS[t] if c not in (*key, "dr")), *CARRIED_COLS[t], *gcol]
@@ -505,7 +651,7 @@ def live_sql(roots: list[str], t: str, name: str, D: int, generation: ist.Identi
     if t in ist.ATTRIBUTION_SUBS:
         # The table's tiers: a base or run from before it opened holds none of it.
         files = [f for f in files if Path(f).exists()]
-    parts = " UNION ALL ".join(f"SELECT {sel} FROM read_parquet({q(f)})" for f in files) or ist.empty_sql(ist.AT_SCHEMA)
+    parts = " UNION ALL ".join(f"SELECT {sel} FROM {read_pieces(f, pieces)}" for f in files) or ist.empty_sql(ist.AT_SCHEMA)
     out = ", ".join(f"{DR} AS dr" if c == "dr" else ist.ident(c) for c in [*CHECK_COLS[t], *gcol])
     return f"""SELECT {out} FROM (SELECT * FROM ({parts}) WHERE vf <= {D}
         QUALIFY row_number() OVER (PARTITION BY {', '.join(IDENT[t])} ORDER BY vt) = 1) WHERE vt > {D}"""
@@ -517,18 +663,19 @@ def _differ(con, a: str, b: str, cols: str) -> int:
 
 
 def check_tables(con, roots: list[str], name: str, D: int, *, sliced: bool = True, generation: ist.Identity = False,
-                 attribution: bool = False) -> dict:
+                 attribution: bool = False, pieces: list[str] | None = None) -> dict:
     """The scan's rows in key range `name` (`np`, `ns`, and with `attribution` — a covered scan of an attributed lineage —
     `na`: `append_range`'s tables) against the store's answer at `D` over
     `roots` (`live_sql`), row for row, per table: `rows` (the scan's), `store` (the store's), `missing` (scan rows the
     store doesn't give, as a multiset), `extra` (store rows the scan doesn't have). With `generation`, also `generation`:
     the scan's objects that carry one, and how many the store's live version gives the same (`interval_verify
-    .generation_parity`'s count)."""
+    .generation_parity`'s count). `pieces`: the store's answer in a key sub-range only (the scan's tables then hold that
+    sub-range's rows); every count is a sum over keys, so a range's is its sub-ranges' summed (`add_counts`)."""
     out: dict = {}
     for t in tables(sliced, attribution):
         gcol = [ist.identity_column(generation)] if generation and t == "pvl" else []
         cols = ist.qcols(CHECK_COLS[t])
-        con.execute(f"CREATE OR REPLACE TEMP TABLE c_store AS {live_sql(roots, t, name, D, generation)}")
+        con.execute(f"CREATE OR REPLACE TEMP TABLE c_store AS {live_sql(roots, t, name, D, generation, pieces)}")
         con.execute(f"CREATE OR REPLACE TEMP TABLE c_scan AS SELECT {ist.qcols([*CHECK_COLS[t], *gcol])} FROM ({SCAN_ROWS[t]})")
         n_scan, n_store = (int(con.execute(f"SELECT count(*) FROM {x}").fetchone()[0]) for x in ("c_scan", "c_store"))
         out[t] = {"rows": n_scan, "store": n_store, "missing": _differ(con, "c_scan", "c_store", cols), "extra": _differ(con, "c_store", "c_scan", cols)}
@@ -1145,18 +1292,19 @@ def stage_options(f):
 @option("-n", "--per-task", default=1, type=IntRange(min=1), help="Ranges per task")
 @option("-o", "--out", default="/stage/out", help="Local output dir")
 @option("-p", "--threads", default=16, type=int, help="DuckDB threads")
+@option("-B", "--sub-budget", help=SUB_BUDGET_HELP)
 @option("-T", "--tmp", default="/stage/tmp", help="DuckDB spill dir")
-def ranges_cmd(bucket, gen, ranges_gen, scratch, scan, force, index, mount, mem, per_task, out, threads, tmp) -> None:
+def ranges_cmd(bucket, gen, ranges_gen, scratch, scan, force, index, mount, mem, per_task, out, threads, sub_budget, tmp) -> None:
     """Append the scan to key ranges' open versions: `deltas/<D>/{pvl,sv,svt}/r####.parquet` and `ranges/r####.json`
     (data bucket; the marker last), `state/<D>/{pvl,sv,svt}/r####.parquet` (scratch). The open versions come from the
     previous scan's state, else (the first run) the base's range files. Each range's answer at D over the published
     store (the base's range files, the newest earlier manifest's runs, D's deltas) is checked against D's rows, row for
     row (`append_range`'s `check`), in its `ranges/r####.json`."""
     with tm.watch(mem, f"ranges {scan}"):
-        _ranges(bucket, gen, ranges_gen, scratch, scan, force, index, mount, mem, per_task, out, threads, tmp)
+        _ranges(bucket, gen, ranges_gen, scratch, scan, force, index, mount, mem, per_task, out, threads, tmp, sub_budget)
 
 
-def _ranges(bucket, gen, ranges_gen, scratch, scan, force, index, mount, mem, per_task, out, threads, tmp) -> None:
+def _ranges(bucket, gen, ranges_gen, scratch, scan, force, index, mount, mem, per_task, out, threads, tmp, budget_arg=None) -> None:
     prefix = f"{PREFIX}/{gen}"
     run = f"{prefix}/{run_key(scan, scan)}"
     store, sstore = Store(store_url(bucket)), Store(store_url(scratch))
@@ -1179,7 +1327,9 @@ def _ranges(bucket, gen, ranges_gen, scratch, scan, force, index, mount, mem, pe
     err(f"ranges task {t}: {len(todo)} ranges" + (f", {sum(counts[i] for i in todo):,} open rows at {prev} (max task "
                                                   f"{max(sum(counts[i] for i in p) for p in plan):,})" if counts else ", interleaved"))
     inputs = [f"{mount}/{PREFIX}/{ranges_gen}/{tb}/r{i:04d}.parquet" for tb in tables(sl, False) for i in todo]
-    con = sn.connect(threads, append_mem(tm.Budget.measure(sn.mem_bytes(mem)), inputs, f"ranges {scan}"), tmp)
+    duck = append_mem(tm.Budget.measure(sn.mem_bytes(mem)), inputs, f"ranges {scan}")
+    con = sn.connect(threads, duck, tmp)
+    budget = sub_budget(budget_arg, duck)
     # What the store answers each range from once D's run is published beside them: the base's range files and the runs
     # the newest earlier manifest lists (`append_range`'s check).
     check = [f"{mount}/{PREFIX}/{ranges_gen}", *(f"{mount}/{prefix}/{r['key']}" for r in runs)]
@@ -1194,15 +1344,22 @@ def _ranges(bucket, gen, ranges_gen, scratch, scan, force, index, mount, mem, pe
         if not force and store.exists(f"{run}/ranges/{name}.json"):
             err(f"ranges {name}: done")
             continue
-        state = (run_state_sql(f"{smount}/{prefix}/state/{prev}", name, sl) if runs
-                 else base_state_sql(f"{mount}/{PREFIX}/{ranges_gen}", name, sl, ist.has_generation(base), churn=churn))
-        if at:
-            state[AT] = (run_state_sql(f"{smount}/{prefix}/state/{prev}", name, sl, True)[AT] if prev_at
-                         else base_state_sql(f"{mount}/{PREFIX}/{ranges_gen}", name, sl, ist.has_generation(base), True)[AT])
+        sroot, broot, g = f"{smount}/{prefix}/state/{prev}", f"{mount}/{PREFIX}/{ranges_gen}", ist.has_generation(base)
+
+        def state(pieces: list[str] | None, name: str = name) -> dict[str, str]:
+            out = (run_state_sql(sroot, name, sl, pieces=pieces) if runs else base_state_sql(broot, name, sl, g, churn=churn, pieces=pieces))
+            if at:
+                out[AT] = (run_state_sql(sroot, name, sl, True, pieces=pieces)[AT] if prev_at
+                           else base_state_sql(broot, name, sl, g, True, pieces=pieces)[AT])
+            return out
+
+        files = run_state_files(sroot, name, sl, prev_at) if runs else base_state_files(broot, name, sl, at)
+        if at and runs and not prev_at:
+            files += base_state_files(broot, name, sl, True)[-1:]
         outp = Path(out) / name
         shutil.rmtree(outp, ignore_errors=True)
         doc = append_range(con, state, s, ranges["ranges"][i], name, outp, bucket=doc_scan["bucket"], mount=mount, sliced=sl,
-                           generation=ist.has_generation(base), check=check, attributed=at, churn=churn, count=count)
+                           generation=g, check=check, attributed=at, churn=churn, count=count, files=files, budget=budget)
         doc["prev"] = prev
         doc["check"]["runs"] = [r["key"] for r in runs]
         sstore.put_tree(outp / "state", f"{prefix}/state/{scan}")

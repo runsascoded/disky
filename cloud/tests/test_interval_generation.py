@@ -182,6 +182,22 @@ def test_versions_carry_generation_through_build_append_and_carries(world, on, t
     assert _columns(gen / "pv" / "r0000.parquet") == [*ist.PV_SCHEMA.names, "generation"]
 
 
+@pytest.mark.parametrize("layout", [ON, OFF])
+def test_sub_ranges_append_the_same_bytes_at_any_budget(world, tmp_path, monkeypatch, layout):
+    """`add -B 1` (a key sub-range per row-group start of 3-row range files) against `-B 0` (whole ranges), over sorts
+    that carry `generation` and over sorts that don't: every file and range doc the same."""
+    from test_interval_attribution import add_at_budgets, range_docs
+
+    monkeypatch.setattr(ist, "RANGE_RG", 3)
+    got = add_at_budgets(world, tmp_path, layout, ("0", "1"), through=SCANS[2], monkeypatch=monkeypatch)
+    (whole, none), (split, subs) = got["0"], got["1"]
+    assert (none, len(subs) > 0, min(subs, default=0) > 1) == ([], True, True)
+    assert json.loads((whole / "scans.json").read_text()).get("generation", False) is (layout == ON)
+    assert _parquets(split) == _parquets(whole)
+    assert len(range_docs(whole)) > 0
+    assert range_docs(split) == range_docs(whole)
+
+
 def test_compaction_keeps_generation(on, tmp_path):
     out = tmp_path / "g.c001"
     shutil.copytree(on["gen"], tmp_path / "g")

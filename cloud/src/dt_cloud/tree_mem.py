@@ -65,9 +65,13 @@ WRITER_ACTIVE = 4
 FOLD_GROUPS = WRITER_ACTIVE + (FOLD_WRITERS - 1) * WRITER_IDLE
 
 # ── A scan's append (`interval_append.append_range`, one range at a time) ──
-#: Range-file groups' worth of rows its one open writer holds: pending slices pinning ≤ 2 fetched batches (2 groups each:
-#: `static_names._batches`' default), the group's combined copy, and its encoding.
-APPEND_GROUPS = 6
+#: Writers it keeps open across a range's key sub-ranges: each table's (`pvl`, `sv`, `svt`, attribution) delta and next
+#: open state, and the sub-range's own delta file (its check reads it whole before it joins the range's).
+APPEND_WRITERS = 9
+#: Range-file groups' worth of rows its writers hold: the one fed, pending slices pinning ≤ 2 fetched batches (2 groups
+#: each: `static_names._batches`' default), the group's combined copy, and its encoding; each idle one, `WRITER_IDLE`
+#: (the open states are fed batches of one group; the deltas, read back from the sub-range's file a group at a time).
+APPEND_GROUPS = 6 + (APPEND_WRITERS - 1) * WRITER_IDLE
 
 # ── The served sorts' cut (`interval_store.write_served`) ──────────────────
 #: Batches a run's or a piece's sort holds in this process (`_sort_run`): the fetched batch, and the spool writer's
@@ -241,8 +245,8 @@ class Budget:
         return a, self.duck(a, 0, f"{jobs} fold jobs")
 
     def append(self, rg_rows: int, rb: int) -> tuple[int, int]:
-        """A scan's append's `(arrow, duck)`: `APPEND_GROUPS` groups of `rg_rows` rows of `rb` bytes (the delta or state
-        file being written), DuckDB the rest (no workers; each run's cut re-splits it, `interval_store.plan_cut`)."""
+        """A scan's append's `(arrow, duck)`: `APPEND_GROUPS` groups of `rg_rows` rows of `rb` bytes (its open delta and
+        state writers), DuckDB the rest (no workers; each run's cut re-splits it, `interval_store.plan_cut`)."""
         a = APPEND_GROUPS * rg_rows * rb
         return a, self.duck(a, 0, "the append")
 
