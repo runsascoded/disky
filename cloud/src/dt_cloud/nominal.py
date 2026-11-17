@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -736,6 +737,14 @@ def run(
     with coordinator_lease(lease) as check:
         rows = read_rows()  # Re-read after acquiring the lease, so a waiting writer cannot publish stale state.
         slack = Slack(bot, cfg.channel)
+        if cfg.pin or cfg.canvas:
+            # Those need the bot in the channel (`channels:join`); joining first also lets the thread's reads (history,
+            # a run's alert) work where the bot only ever posted by `chat:write.public`. Best effort: an app not yet
+            # reinstalled with the scope still posts its thread; `pin_head` / `write_canvas` join again and fail there.
+            try:
+                slack.join()
+            except RuntimeError as e:
+                print(f'nominal: channel join failed ({e}); posting the thread anyway', file=sys.stderr)
         state = store.read_json(key) if store.exists(key) else adopt(cfg, rows, slack) if cfg.adopt_parent else {'namespace': cfg.namespace}
         if state.get('namespace') != cfg.namespace:
             raise ValueError('nominal: state belongs to another site/store/channel')
