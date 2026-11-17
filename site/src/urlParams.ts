@@ -339,6 +339,12 @@ export const URL_PARAMS: Record<string, UrlParamDoc> = {
     description: '`1` at load shows the time-to-render panel. The timing marks themselves are always recorded.',
     examples: ['1'],
   },
+  ph: {
+    label: 'Phase filter',
+    description: 'On /scans, draws and lists only the phases whose name, or family (`list`, `import`: the per-bucket phases), contains this text, case-insensitively: the duration chart\'s bars, the table\'s phase bars and the legend. Every run stays listed. When absent, every phase.',
+    examples: ['list', 'static', 'interval-store'],
+    pages: ['/scans'],
+  },
   ps: {
     label: 'Path store',
     description: 'Picks which path store the page\'s data comes from: it is read once at load and forwarded on every same-origin `/api/` request. `iv` reads the interval store on a deployment where that is opt-in, and `scan` reads the per-scan sorts on one that serves the interval store (the parity check). It has no effect on requests to a secondary store. When absent, the deployment\'s default store is used.',
