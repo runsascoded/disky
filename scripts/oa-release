@@ -316,8 +316,10 @@ def begin(output: Path, plan_path: Path, seal_path: Path, source: Path) -> None:
     status(receipt, 'in_progress')
 
 
-#: An entry asset's GET: a 5xx or a dropped connection is retried this many times, `LIVE_RETRY_S` apart (a fresh
-#: deployment's edge answered one asset 500 for under a minute: cw's dev release, 2026-11-17); a 4xx is an answer
+#: An entry asset's GET: a 404, a 5xx or a dropped connection is retried this many times, `LIVE_RETRY_S` apart. A fresh
+#: deployment's edge answered an asset 500 for under a minute, and a new asset path 404 for 17 s after the build header
+#: already matched (cw's dev releases, 2026-11-17): entry assets are content-hashed, so a new one can't be a stale path.
+#: Any other 4xx (a 403 from bot rules, a 401) is an answer
 LIVE_RETRIES = 6
 LIVE_RETRY_S = 10
 
@@ -328,7 +330,7 @@ def live_get(url: str) -> bytes:
             with urlopen(Request(url, headers=LIVE_HEADERS), timeout=30) as response:
                 return response.read()
         except HTTPError as error:
-            if error.code < 500 or attempt == LIVE_RETRIES:
+            if (error.code != 404 and error.code < 500) or attempt == LIVE_RETRIES:
                 raise
         except URLError:
             if attempt == LIVE_RETRIES:

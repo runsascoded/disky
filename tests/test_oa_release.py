@@ -530,10 +530,10 @@ def test_setup_plan_is_scoped_and_disabled_without_extra_approval_clicks(tmp_pat
     assert loads(result.output) == loads(output.read_text()) == expected
 
 
-def test_live_get_retries_a_transient_5xx_but_not_a_4xx(monkeypatch):
+def test_live_get_retries_a_transient_404_or_5xx_but_not_another_4xx(monkeypatch):
     from io import BytesIO
     from urllib.error import HTTPError
-    answers = {'https://h/a.js': [500, 502, b'42'], 'https://h/b.js': [404, b'never']}
+    answers = {'https://h/a.js': [404, 500, 502, b'42'], 'https://h/b.js': [403, b'never']}
     asked = []
 
     def urlopen(request, timeout):
@@ -548,4 +548,4 @@ def test_live_get_retries_a_transient_5xx_but_not_a_4xx(monkeypatch):
     assert release.live_get('https://h/a.js') == b'42'
     with pytest.raises(HTTPError) as error:
         release.live_get('https://h/b.js')
-    assert (error.value.code, asked) == (404, ['https://h/a.js'] * 3 + ['https://h/b.js'])
+    assert (error.value.code, asked) == (403, ['https://h/a.js'] * 4 + ['https://h/b.js'])
