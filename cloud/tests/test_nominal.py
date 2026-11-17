@@ -51,6 +51,14 @@ class Slack:
         self.calls.append(('edit', ts, body))
         self.messages_by_id[ts]['text'] = body
 
+    alerts = {}
+
+    def alert(self, link, since):
+        return self.alerts.get(link)
+
+    def permalink(self, ts):
+        return f'https://slack.test/p{ts}'
+
 
 class Writer:
     def __init__(self, cfg=CFG):
@@ -192,10 +200,79 @@ def test_every_nonclean_boundary_closes_once_then_recovery_gets_new_parent(bad):
 
 
 def test_running_or_unfinalized_head_does_not_announce_success():
-    w = Writer()
-    for unfinished in [row(2, 'running', finished_ts=None), row(2, finished_ts=None)]:
-        w.run([unfinished, *history(1)])
+    for unfinished in [row(3, 'running', finished_ts=None), row(3, finished_ts=None)]:
+        w = Writer()
+        w.run(history(2))
+        w.slack.calls.clear()
+        w.run([unfinished, *history(2)])
+        assert bodies(w.slack) == [
+            ('post', '4.0', '⏳ :alarm_clock: [2026-11-04 08:00 UTC](https://site.test/scans/r3) · running'),
+            ('edit', '1.0', RUNNING_PARENT),
+        ]
+        assert (w.saved['posted'], w.saved['running']) == ({'r1': '2.0', 'r2': '3.0'}, {'r3': {'ts': '4.0', 'parent': '1.0'}})
+
+
+#: history(2)'s thread head while r3 runs
+RUNNING_PARENT = (
+    '✅ **Test scans: 2 consecutive clean runs**\n\n'
+    'Since 2026-11-02 08:00 UTC after [2026-11-01T0800](https://site.test/scans/r0).\n\n'
+    'Latest completed: [2026-11-03 08:00 UTC](https://site.test/scans/r2).\n\n'
+    'Running now: [2026-11-04 08:00 UTC](https://site.test/scans/r3).\n\n'
+    'Latest 2 runs: 2 scheduled / 0 manual. Each reply links its scan record. [All scans](https://site.test/scans).'
+)
+ADA = dict(trigger='manual', trigger_by='ada@example.org', trigger_emoji=':ada:')
+
+
+def running_writer(cfg=CFG):
+    """history(2)'s thread, with r3 (Ada's) running: its ⏳ reply 4.0, the head 1.0 naming it."""
+    w = Writer(cfg)
+    w.run(history(2))
+    w.run([row(3, 'running', finished_ts=None, **ADA), *history(2)])
+    assert w.slack.calls[-2:] == [
+        ('post', '4.0', '1.0', '⏳ :ada: [2026-11-04 08:00 UTC](https://site.test/scans/r3) · running'),
+        ('edit', '1.0', RUNNING_PARENT),
+    ]
+    w.slack.calls.clear()
+    w.run([row(3, 'running', finished_ts=None, **ADA), *history(2)])
     assert w.slack.calls == []
+    return w
+
+
+def test_a_running_reply_becomes_its_runs_reply_in_place():
+    w = running_writer()
+    w.run([row(3, **ADA), *history(2)])
+    assert bodies(w.slack) == [
+        ('edit', '4.0', '✅ :ada: [2026-11-04 08:00 UTC](https://site.test/scans/r3) · 1m 00s'),
+        ('edit', '1.0', '✅ **Test scans: 3 consecutive clean runs**\n\n'
+                        'Since 2026-11-02 08:00 UTC after [2026-11-01T0800](https://site.test/scans/r0).\n\n'
+                        'Latest completed: [2026-11-04 08:00 UTC](https://site.test/scans/r3).\n\n'
+                        'Latest 3 runs: 2 scheduled / 1 manual. Each reply links its scan record. [All scans](https://site.test/scans).'),
+    ]
+    assert (w.saved['posted'], 'running' in w.saved) == ({'r1': '2.0', 'r2': '3.0', 'r3': '4.0'}, False)
+
+
+@pytest.mark.parametrize('alert, suffix', [('99.0', ' · [alert](https://slack.test/p99.0)'), (None, '')])
+def test_a_clean_threads_running_reply_that_fails_closes_it_and_links_the_alert(alert, suffix):
+    w = running_writer()
+    w.slack.alerts = {'https://site.test/scans/r3': alert} if alert else {}
+    w.run([row(3, 'failed', failed_phase='index', error='boom', **ADA), *history(2)])
+    assert bodies(w.slack) == [
+        ('edit', '1.0', '**Test scans: clean-run sequence ended**\n\n'
+                        '[2026-11-04 08:00 UTC](https://site.test/scans/r3): failed. [All scans](https://site.test/scans).'),
+        ('edit', '4.0', '❌ :ada: [2026-11-04 08:00 UTC](https://site.test/scans/r3) · 1m 00s · failed in index: boom' + suffix),
+    ]
+    assert (w.saved['closed'], 'running' in w.saved) == (True, False)
+
+
+def test_a_running_reply_whose_run_opens_a_failure_thread_links_it():
+    from dataclasses import replace
+
+    w = running_writer(replace(CFG, group='color'))
+    w.run([row(3, 'failed', failed_phase='index', error='boom', **ADA), *history(2)])
+    failed = '❌ :ada: [2026-11-04 08:00 UTC](https://site.test/scans/r3) · 1m 00s · failed in index: boom'
+    assert [(c[0], c[1]) for c in w.slack.calls] == [('edit', '1.0'), ('post', '5.0'), ('post', '6.0'), ('edit', '4.0')]
+    assert bodies(w.slack)[2:] == [('post', '6.0', failed), ('edit', '4.0', failed + ' · [thread](https://slack.test/p5.0)')]
+    assert (w.saved['parent'], w.saved['posted'], 'running' in w.saved) == ('5.0', {'r3': '6.0'}, False)
 
 
 def test_lost_history_boundary_does_not_announce_a_false_recovery_or_reset():
@@ -257,6 +334,34 @@ def test_reporting_failure_keeps_job_result_and_redacts_error(monkeypatch):
                           dry_run=False, env={}, run_id='r1', state=lambda: {}, redact=lambda s: s.replace('secret-123', '<SECRET>'))
     assert N.report_job(job) is None
     assert said == ['nominal report failed: ValueError: <SECRET> refused']
+
+    def exit_(*args, **kwargs):
+        raise SystemExit(2)
+    monkeypatch.setattr(N, 'run', exit_)
+    said.clear()
+    assert N.report_job(job) is None
+    assert said == ['nominal report failed: SystemExit: 2']
+
+
+@pytest.mark.parametrize('facts, ran', [({}, [None]), ({'parent': 'p0'}, []), ({'kind': 'reproc'}, [])])
+def test_start_report_reads_the_live_ledger_for_top_level_runs_and_never_fails_the_job(monkeypatch, facts, ran):
+    from dt_cloud import scan_runs
+
+    said, calls = [], []
+    monkeypatch.setattr(scan_runs, 'err', said.append)
+    monkeypatch.setattr(N, 'run', lambda raw, env, project, run_id=None, execute=False: calls.append(run_id) or 'nominal: ok')
+    job = SimpleNamespace(profile=SimpleNamespace(nominal=vars(CFG), project='p', store='primary'), recording=True,
+                          dry_run=False, env={}, run_id='r1', state=lambda: facts, redact=lambda s: s)
+    N.report_start(job)
+    assert (calls, said) == (ran, ['nominal: ok'] if ran else [])
+
+    for exc in (ValueError('lease busy'), SystemExit(2)):
+        def fail(*args, exc=exc, **kwargs):
+            raise exc
+        monkeypatch.setattr(N, 'run', fail)
+        said.clear()
+        N.report_start(job)
+        assert said == ([f'nominal start report failed: {type(exc).__name__}: {exc}'] if ran else [])
 
 
 @pytest.mark.parametrize('env', [{'DT_ALERTS': 'stderr'}, {'DT_ALERTS': 'off'}, {'DT_ALERTS': '0'}])

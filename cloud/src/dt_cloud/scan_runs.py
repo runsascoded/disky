@@ -1878,7 +1878,8 @@ def start_cmd(from_batch, gen, image, job_name, batch_job_name, kind, store_key,
               tasks, profile_path, d1, dry_run, run_id, sqlite, scan) -> None:
     """Start the job's run of SCAN (default $SCAN_ID): record it running (`record -S`) with what started it, and keep
     its scan, kind, parent and job facts for the phases and `finish`; then `reconcile` the store's earlier runs Batch
-    ended without recording it (a profile naming a project). Never fails the job."""
+    ended without recording it (a profile naming a project), and post its ⏳ reply in the scan-health thread
+    (`nominal.report_start`, with a `nominal` profile). Never fails the job."""
     j = JobRun(profile_path, d1, dry_run, run_id, sqlite)
     try:
         trigger = trigger or trigger_of(j.env)
@@ -1911,6 +1912,9 @@ def start_cmd(from_batch, gen, image, job_name, batch_job_name, kind, store_key,
                 reconcile(sink_for(j.dry_run, j.sqlite, j.d1), profile, _now(), partial(batch_lookup, project), skip=j.run_id)
             except (Exception, SystemExit) as e:  # noqa: BLE001
                 err(f"scan-run reconcile failed (the run continues): {type(e).__name__}: {e}")
+        from .nominal import report_start
+
+        report_start(j)
     j.point_supervisor(profile_path, d1, dry_run, sqlite)
 
 

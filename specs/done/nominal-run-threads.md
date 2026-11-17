@@ -52,3 +52,14 @@ Requested by Ryan, 2026-11-16: failing runs repeat more often than they differ, 
 A reason is the failed phase and the recorded (already redacted) error, on one line, clipped to 160 characters, with `<`, `>` and backticks replaced so an error can't become a link, mention or code span.
 
 Under `color` and `signature` the failure thread is the failure's report: a top-level run's `fail` alerts are deferred (`nominal.defers_failures`, kept in the job's state file) and posted top-level by the finalizer only if the run did not become a reply in a failure thread (the report failed, was suppressed, or the thread didn't take the run). So the first failure of a run of them is the one top-level post, its thread's parent, and a repeat is a reply. `warn` alerts, child runs and other kinds/stores post at once, as before.
+
+## Running replies (2026-11-17)
+
+Requested by Ryan, 2026-11-17: a run should show in its thread while it runs, not only once it ends. `scan-run start`, after recording the run, reports to the thread (`nominal.report_start`): in the open thread, a live run (recorded running, or not yet finalized) gets a reply "⏳ <trigger> [<start time>](<record>) · running", and the head gains "Running now: <its start time, linked>". The thread's grouping is still decided by finished runs only, so a live run never counts toward a streak.
+
+When the run ends, the next report (its finish, or any later run's) edits that reply in place:
+
+- It ended in the thread it was posted in: the reply becomes the run's usual line (✅ or ❌), with no second reply.
+- It ended elsewhere (option A, Ryan's pick): under `clean` grouping a failure closes the thread as before, and the ⏳ reply becomes the ❌ line followed by "· [alert](<permalink>)", the run's top-level `fail` alert when it went to this channel (the bot's own top-level post linking the run's record since it started; no link when there is none). Under `color` / `signature` the line links the thread that took the run instead ("· [thread](<permalink>)").
+
+The ⏳ reply's message and thread are kept in the state file's `running` map (cleared as runs end); its send goes through the same persisted intent and recovery as every other reply. A run that never finishes is resolved when the reaper records it failed and the next report runs.

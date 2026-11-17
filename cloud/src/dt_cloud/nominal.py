@@ -1,4 +1,5 @@
-"""Nominal scan threads, after the authoritative run has finished (specs/done/nominal-run-threads.md).
+"""Nominal scan threads (specs/done/nominal-run-threads.md): each run's reply, posted ⏳ when it starts and edited to
+its outcome once the authoritative run record has finished.
 
 The site's run summaries are the outcome oracle. A renewed object-generation lease serializes writers; a
 persisted send intent and owned Slack message metadata recover a post whose response/state write was lost.
@@ -85,6 +86,11 @@ def ordered(doc: dict, cfg: Config) -> list[dict]:
     return sorted(rows, key=lambda r: (r['run']['started_ts'], r['run']['run_id']), reverse=True)
 
 
+def live(row: dict) -> bool:
+    """A run still going: recorded running, or not yet finalized. Its outcome isn't known, so it never counts."""
+    return row['run']['status'] == 'running' or row['run']['finished_ts'] is None
+
+
 def clean(row: dict) -> bool:
     # A later recovery does not rewrite a historically partial run into a clean run.
     return row['run']['status'] == 'succeeded' and row['run']['finished_ts'] is not None and not row['phase_issues']
@@ -162,26 +168,44 @@ SLACK_EMOJI_RE = re.compile(r":[a-z0-9_+'-]{1,100}:")
 TRIGGER_EMOJI = {'schedule': ':alarm_clock:', 'manual': ':bust_in_silhouette:', None: ':grey_question:'}
 
 
-def reply(cfg: Config, row: dict) -> str:
-    """A run's line in its thread: ✅ or ❌, the trigger (a manual run's starter's own emoji when known), its time linked
-    to its record, the duration, who started it (a manual run that recorded it and has no emoji), and a failed run's
-    reason."""
-    seconds = row.get('secs')
-    duration = 'duration unknown' if seconds is None else f"{int(seconds) // 60}m {int(seconds) % 60:02d}s"
+def starter(row: dict) -> tuple[str, str | None]:
+    """A run's trigger emoji (a manual run's starter's own when known), and who started it when that is recorded and
+    their emoji isn't shown."""
     by = row['run'].get('trigger_by') if row['run']['trigger'] == 'manual' else None
     by = by if by and TRIGGER_BY_RE.fullmatch(by) else None  # never markup into mrkdwn, whatever a row holds
     face = row['run'].get('trigger_emoji') if by else None
     face = face if face and SLACK_EMOJI_RE.fullmatch(face) else None
-    emoji = face or TRIGGER_EMOJI[row['run']['trigger']]
+    return face or TRIGGER_EMOJI[row['run']['trigger']], None if face else by
+
+
+def reply(cfg: Config, row: dict) -> str:
+    """A run's line in its thread: ✅ or ❌, the trigger (`starter`), its time linked to its record, the duration, who
+    started it, and a failed run's reason."""
+    seconds = row.get('secs')
+    duration = 'duration unknown' if seconds is None else f"{int(seconds) // 60}m {int(seconds) % 60:02d}s"
+    emoji, by = starter(row)
     ok = clean(row)
-    return (f"{'✅' if ok else '❌'} {emoji} [{stamp(row)}]({cfg.link(row['run'])}) · {duration}" + (f" · {by}" if by and not face else "")
+    return (f"{'✅' if ok else '❌'} {emoji} [{stamp(row)}]({cfg.link(row['run'])}) · {duration}" + (f" · {by}" if by else "")
             + ('' if ok else f" · {describe(row)}"))
 
 
-def parent(cfg: Config, good: list[dict], boundary: dict | None) -> str:
-    """The thread's head: a clean thread's streak, or a failure thread's (`failed`)."""
+def running(cfg: Config, row: dict) -> str:
+    """A live run's reply, posted when it starts and edited to its `reply` when it ends."""
+    emoji, by = starter(row)
+    return f"⏳ {emoji} [{stamp(row)}]({cfg.link(row['run'])}) · running" + (f" · {by}" if by else "")
+
+
+def running_now(cfg: Config, live_rows: list[dict]) -> str:
+    """A thread head's line for the runs going now (oldest first), or nothing."""
+    if not live_rows:
+        return ''
+    return 'Running now: ' + ', '.join(f"[{stamp(r)}]({cfg.link(r['run'])})" for r in reversed(live_rows)) + '.\n\n'
+
+
+def parent(cfg: Config, good: list[dict], boundary: dict | None, live_rows: list[dict] | None = None) -> str:
+    """The thread's head: a clean thread's streak, or a failure thread's (`failed`), naming the runs going now."""
     if good and not clean(good[0]):
-        return failed(cfg, good, boundary)
+        return failed(cfg, good, boundary, live_rows)
     window = good[:10]
     counts = {k: sum(r['run']['trigger'] == k for r in window) for k in ('schedule', 'manual', None)}
     mix = f"{counts['schedule']} scheduled / {counts['manual']} manual" + (f" / {counts[None]} unknown" if counts[None] else '')
@@ -191,10 +215,11 @@ def parent(cfg: Config, good: list[dict], boundary: dict | None) -> str:
     return (f"✅ **{cfg.title}: {qualifier}{len(good)} consecutive clean run{'' if len(good) == 1 else 's'}**\n\n"
             f"Since {since}{after}.\n\n"
             f"Latest completed: [{stamp(good[0])}]({cfg.link(good[0]['run'])}).\n\n"
+            f"{running_now(cfg, live_rows)}"
             f"Latest {plural(len(window), 'run')}: {mix}. Each reply links its scan record. [All scans]({cfg.scans}).")
 
 
-def failed(cfg: Config, bad: list[dict], boundary: dict | None) -> str:
+def failed(cfg: Config, bad: list[dict], boundary: dict | None, live_rows: list[dict] | None = None) -> str:
     """A failure thread's head: how many runs in a row failed (under `signature`, failed the same way), since when and
     after which run (the last clean one, or the last that failed differently), and the newest failure's reason."""
     qualifier = '' if boundary else 'at least '
@@ -208,6 +233,7 @@ def failed(cfg: Config, bad: list[dict], boundary: dict | None) -> str:
     return (f"❌ **{cfg.title}: {qualifier}{len(bad)} consecutive failed run{'' if len(bad) == 1 else 's'}{how}**\n\n"
             f"Since {stamp(bad[-1])}{after}.\n\n"
             f"Latest: [{stamp(bad[0])}]({cfg.link(bad[0]['run'])}): {describe(bad[0])}.\n\n"
+            f"{running_now(cfg, live_rows)}"
             f"Each reply links its scan record. [All scans]({cfg.scans}).")
 
 
@@ -222,6 +248,8 @@ class Transport(Protocol):
     def find(self, operation: str, parent: str | None, since: float) -> str | None: ...
     def post(self, body: str, parent: str | None, operation: str) -> str: ...
     def edit(self, ts: str, body: str) -> None: ...
+    def alert(self, link: str, since: float) -> str | None: ...
+    def permalink(self, ts: str) -> str: ...
 
 
 class Slack:
@@ -272,6 +300,15 @@ class Slack:
     def edit(self, ts: str, body: str) -> None:
         self.client.edit(ts, body)
 
+    def alert(self, link: str, since: float) -> str | None:
+        """The first top-level message of ours since `since` linking `link`: a run's `fail` alert, when it went to this
+        channel."""
+        hits = [m['ts'] for m in self._read(None, since) if self.owns(m) and m.get('thread_ts', m['ts']) == m['ts'] and link in m.get('text', '')]
+        return min(hits, key=float) if hits else None
+
+    def permalink(self, ts: str) -> str:
+        return self.client._request('chat.getPermalink', {'channel': self.client.channel, 'message_ts': ts}, method='GET')['permalink']
+
 
 def adopt(cfg: Config, rows: list[dict], slack: Transport) -> dict:
     if not cfg.adopt_parent:
@@ -321,6 +358,8 @@ def converge(
     def received(pending: dict, ts: str) -> None:
         if pending['key'] == 'parent':
             state.update(parent=ts, parent_body=pending['body'])
+        elif pending['key'].startswith('running:'):
+            state.setdefault('running', {})[pending['key'].removeprefix('running:')] = {'ts': ts, 'parent': pending['parent']}
         else:
             state.setdefault('posted', {})[pending['key']] = ts
         state.pop('pending', None)
@@ -344,7 +383,12 @@ def converge(
             state['operator_required'] = pending['operation']
             persist()
             raise RuntimeError(f"nominal: send remains ambiguous ({pending['operation']}); inspect Slack and the persisted intent; no resend attempted")
-    if not rows or rows[0]['run']['status'] == 'running' or rows[0]['run']['finished_ts'] is None:
+    # The thread is decided by finished runs only; a live run gets a ⏳ reply in the open thread (`running`), which
+    # becomes its reply there when it ends in that thread, else is edited where it stands, linking where it was reported.
+    live_rows = [r for r in rows if live(r)]
+    rows = [r for r in rows if not live(r)]
+    waiting: dict = dict(state.get('running') or {})
+    if not rows:
         return state
     head, good, boundary = segment(cfg, rows)
     boundary_id = boundary['run']['run_id'] if boundary else None
@@ -372,39 +416,72 @@ def converge(
             if head != 'clean':
                 state['key'] = head
             persist()
-    if not good:
-        return state
-    state['boundary'] = boundary_id
-    if head == 'clean':
-        state.pop('key', None)
-    else:
-        state['key'] = head
-    # A clean thread keeps the operation ids it always had; a failure thread's name its key too
-    scope = boundary_id if head == 'clean' else f'{head}|{boundary_id}'
+    ended = {r['run']['run_id']: r for r in rows if r['run']['run_id'] in waiting}
+    good_ids = {r['run']['run_id'] for r in good}
+    here = {rid for rid in ended if rid in good_ids and not state.get('closed') and state.get('parent') == waiting[rid]['parent']}
+    if good:
+        state['boundary'] = boundary_id
+        if head == 'clean':
+            state.pop('key', None)
+        else:
+            state['key'] = head
+        # A clean thread keeps the operation ids it always had; a failure thread's name its key too
+        scope = boundary_id if head == 'clean' else f'{head}|{boundary_id}'
 
-    def send(key: str, body: str, root: str | None) -> None:
-        operation = str(uuid5(NAMESPACE_URL, f'{cfg.namespace}|{scope}|{key}'))
-        pending = {'key': key, 'body': body, 'parent': root, 'operation': operation, 'since': now() - 1}
-        state['pending'] = pending
-        persist()
-        check()
-        received(pending, slack.post(body, root, operation))
+        def send(key: str, body: str, root: str | None) -> None:
+            operation = str(uuid5(NAMESPACE_URL, f'{cfg.namespace}|{scope}|{key}'))
+            pending = {'key': key, 'body': body, 'parent': root, 'operation': operation, 'since': now() - 1}
+            state['pending'] = pending
+            persist()
+            check()
+            received(pending, slack.post(body, root, operation))
 
-    body = parent(cfg, good, boundary)
-    if not state.get('parent'):
-        send('parent', body, None)
-    # New threads bootstrap ten; established threads append every missing run after the newest known one.
-    posted = state.setdefault('posted', {})
-    for row in reversed(missing(good, posted)):
-        send(row['run']['run_id'], reply(cfg, row), state['parent'])
-    if state.get('parent_body') != body:
+        body = parent(cfg, good, boundary, live_rows)
+        if not state.get('parent'):
+            send('parent', body, None)
+        # New threads bootstrap ten; established threads append every missing run after the newest known one.
+        posted = state.setdefault('posted', {})
+        todo = missing(good, posted)
+        for rid in sorted(here, key=lambda rid: ended[rid]['run']['started_ts']):
+            check()
+            slack.edit(waiting[rid]['ts'], reply(cfg, ended[rid]))
+            posted[rid] = waiting.pop(rid)['ts']
+            state.get('running', {}).pop(rid, None)
+            persist()
+        for row in reversed(todo):
+            if row['run']['run_id'] not in posted:
+                send(row['run']['run_id'], reply(cfg, row), state['parent'])
+        for row in reversed(live_rows):
+            if row['run']['run_id'] not in state.get('running', {}):
+                send('running:' + row['run']['run_id'], running(cfg, row), state['parent'])
+        if state.get('parent_body') != body:
+            check()
+            slack.edit(state['parent'], body)
+            state['parent_body'] = body
+            persist()
+        recent = {r['run']['run_id']: posted[r['run']['run_id']] for r in reversed(good[:10]) if r['run']['run_id'] in posted}
+        if recent != posted:
+            state['posted'] = recent
+            persist()
+    # A ⏳ reply whose run ended outside its thread: its outcome where it stands, linking the thread that took the run,
+    # else the run's top-level alert in this channel (a `clean` thread's failure), when there is one.
+    for rid, row in sorted(ended.items(), key=lambda kv: kv[1]['run']['started_ts']):
+        if rid not in waiting:
+            continue
+        if rid in state.get('posted', {}) and state.get('parent'):
+            label, ts = 'thread', state['parent']
+        else:
+            label, ts = 'alert', slack.alert(cfg.link(row['run']), row['run']['started_ts'])
+        suffix = f" · [{label}]({slack.permalink(ts)})" if ts else ''
         check()
-        slack.edit(state['parent'], body)
-        state['parent_body'] = body
+        slack.edit(waiting.pop(rid)['ts'], reply(cfg, row) + suffix)
+    live_ids = {r['run']['run_id'] for r in live_rows}
+    keep = {rid: v for rid, v in {**waiting, **(state.get('running') or {})}.items() if rid in live_ids}
+    if keep and state.get('running') != keep:
+        state['running'] = keep
         persist()
-    recent = {r['run']['run_id']: posted[r['run']['run_id']] for r in reversed(good[:10]) if r['run']['run_id'] in posted}
-    if recent != posted:
-        state['posted'] = recent
+    elif not keep and 'running' in state:
+        del state['running']
         persist()
     return state
 
@@ -449,7 +526,9 @@ def run(
 
     if not execute:
         rows = read_rows()
-        if not rows or rows[0]['run']['status'] == 'running' or rows[0]['run']['finished_ts'] is None:
+        live_rows = [r for r in rows if live(r)]
+        rows = [r for r in rows if not live(r)]
+        if not rows:
             return 'nominal: waiting for a terminal run'
         head, good, boundary = segment(cfg, rows)
         if not good:
@@ -466,7 +545,8 @@ def run(
                 raise RuntimeError('nominal: pending send needs reconciliation before a publish plan can be rendered')
             same = state.get('boundary') == (boundary['run']['run_id'] if boundary else None) and state.get('key', 'clean') == head
             pending_rows = missing(good, state.get('posted', {})) if same else good[:10]
-        return '\n\n+++\n\n'.join([parent(cfg, good, boundary), *(reply(cfg, r) for r in reversed(pending_rows))])
+        return '\n\n+++\n\n'.join([parent(cfg, good, boundary, live_rows), *(reply(cfg, r) for r in reversed(pending_rows)),
+                                    *(running(cfg, r) for r in reversed(live_rows))])
     bot = (env.get('SLACK_BOT_TOKEN') or '').strip()
     if not bot:
         raise ValueError('nominal: need SLACK_BOT_TOKEN')
@@ -497,6 +577,23 @@ def defers_failures(job: JobRun) -> bool:
             and facts.get('store', job.profile.store) == cfg.store)
 
 
+def report_start(job: JobRun) -> None:
+    """Opt-in, after `start` records the run: its ⏳ reply in the open thread, and the head's "Running now". A failure is
+    logged, never the job's; the run's finish reports it whatever happened here."""
+    if not job.profile.nominal or not job.recording or job.dry_run or (job.env.get('DT_ALERTS') or '').strip() in ('stderr', 'off', '0'):
+        return
+    from .scan_runs import err
+
+    try:
+        facts = job.state()
+        cfg = config(job.profile.nominal)
+        if facts.get('parent') or facts.get('kind', 'scan') != cfg.kind or facts.get('store', job.profile.store) != cfg.store:
+            return
+        err(run(job.profile.nominal, job.env, job.profile.project, execute=True))
+    except (Exception, SystemExit) as exc:  # noqa: BLE001 — reporting must not fail (or end) the job
+        err(job.redact(f'nominal start report failed: {type(exc).__name__}: {exc}'))
+
+
 def report_job(job: JobRun) -> None:
     """Opt-in finalizer: failure is logged/redacted, never substituted for the scan's exit status. A run's deferred
     `fail` alerts post top-level unless the run is now a reply in a failure thread."""
@@ -515,7 +612,7 @@ def report_job(job: JobRun) -> None:
         err(run(job.profile.nominal, job.env, job.profile.project, job.run_id, execute=True, final=final))
         state = final[0] if final else {}
         threaded = state.get('key', 'clean') != 'clean' and job.run_id in state.get('posted', {})
-    except Exception as exc:  # Reporting must not fail the job; its failure remains visible in the head log.
+    except (Exception, SystemExit) as exc:  # Reporting must not fail (or end) the job; its failure remains visible in the head log.
         err(job.redact(f'nominal report failed: {type(exc).__name__}: {exc}'))
     finally:
         if deferred and not threaded:
