@@ -409,8 +409,11 @@ def _append_range(con, prev: OpenState, scan: dict, r: dict, name: str, out: Pat
                 w_at["delta"] = stack.enter_context(sn.SortedWriter(out / AT / f"{name}.parquet", delta_schema(AT), ist.RANGE_RG,
                                                                     dictionary=["user", "source"]))
         # A sub-range's deltas, whole, for its check (the range's files are open until the last): then copied on to them.
+        # Each sub-range writes its own dir: DuckDB caches a parquet's metadata by path, so a rewrite of one path can be
+        # read through the previous sub-range's footer (its check then misses this one's deltas).
         part = out / ".sub"
         for j, (lo, hi, _) in enumerate(subs):
+            pj = part / str(j)
             whole = lo is None and hi is None
             preds = sub_preds(r, lo, hi)
             rel = state_of(None if whole else preds) if state_of is not None else prev
@@ -447,7 +450,7 @@ def _append_range(con, prev: OpenState, scan: dict, r: dict, name: str, out: Pat
                 with tm.phase(f"range delta {t}"):
                     write_sorted(sn._batches(con, f"""SELECT {cols}, 1::TINYINT AS op FROM o_{t} WHERE vf = {D}
                             UNION ALL SELECT {cols}, -1::TINYINT AS op FROM o_{t} WHERE vt = {D} ORDER BY {order}"""),
-                                 part / t / f"{name}.parquet", schemas[t], ist.RANGE_RG, dictionary=dict_cols[t])
+                                 pj / t / f"{name}.parquet", schemas[t], ist.RANGE_RG, dictionary=dict_cols[t])
                 with tm.phase(f"range state {t}"):
                     # Batches of one range-file group: what a writer left idle pins (`tree_mem.APPEND_GROUPS`)
                     w_state[t].write(sn._batches(con, f"SELECT {cols} FROM o_{t} WHERE vt = {OPEN} ORDER BY {', '.join(IDENT[t])}", ist.RANGE_RG))
@@ -461,20 +464,21 @@ def _append_range(con, prev: OpenState, scan: dict, r: dict, name: str, out: Pat
                 con.execute(f"DROP TABLE o_{t}; DROP TABLE p_{t}")
             if attributed:
                 with tm.phase("range attribution"):
-                    got_at = append_attribution(con, rel[AT], scan, preds, D, w_at["state"], part / AT / f"{name}.parquet", bucket=bucket, mount=mount)
+                    got_at = append_attribution(con, rel[AT], scan, preds, D, w_at["state"], pj / AT / f"{name}.parquet", bucket=bucket, mount=mount)
                     if got_at:
                         at = {"opened": at["opened"] + got_at["opened"], "closed": at["closed"] + got_at["closed"],
                               "got": [a + b for a, b in zip(at["got"], got_at["got"])], "want": [a + b for a, b in zip(at["want"], got_at["want"])]}
             if check is not None:
                 t1 = monotonic()
                 with tm.phase("range check"):
-                    sub = check_tables(con, [*check, str(part)], name, D, sliced=sliced, generation=generation, attribution=covered,
+                    sub = check_tables(con, [*check, str(pj)], name, D, sliced=sliced, generation=generation, attribution=covered,
                                        pieces=None if whole else preds)
                     checked = sub if checked is None else add_counts(checked, sub)
                 check_s += monotonic() - t1
             con.execute("DROP TABLE np; DROP TABLE IF EXISTS ns; DROP TABLE npf; DROP TABLE IF EXISTS na")
             for t, w in [*w_delta.items(), *([(AT, w_at["delta"])] if covered else [])]:
-                w.write(pq.ParquetFile(part / t / f"{name}.parquet").iter_batches(batch_size=ist.RANGE_RG))
+                w.write(pq.ParquetFile(pj / t / f"{name}.parquet").iter_batches(batch_size=ist.RANGE_RG))
+            shutil.rmtree(pj, ignore_errors=True)
     shutil.rmtree(part, ignore_errors=True)
     doc: dict = {"range": name, "scan": scan["id"]}
     for t in todo:
