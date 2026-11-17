@@ -719,8 +719,7 @@ def test_canvas_names_the_status_stores_latest_run_and_its_longest_phases_and_re
               'spans': [dict(phase='list a', start=0, end=562), dict(phase='index', start=600, end=624),
                         dict(phase='static-names', start=700, end=1176), dict(phase='open', start=1200, end=None)]}
     rows = [row(3, 'running', finished_ts=None), latest, row(1, 'failed', failed_phase='index', error='boom')]
-    head = N.parent(cfg, [latest], rows[2])
-    text = N.canvas_text(cfg, rows, head, 'https://slack.test/p1.0', {'meta': 503}, N.series_ts('2026-11-03T0900'))
+    text = N.canvas_text(cfg, rows, 'https://slack.test/p1.0', {'meta': 503}, N.series_ts('2026-11-03T0900'))
     assert text.split('\n\n') == [
         '# Test scans',
         '✅ Test scans: 1 consecutive clean run · [thread](https://slack.test/p1.0)',
@@ -735,4 +734,15 @@ def test_canvas_names_the_status_stores_latest_run_and_its_longest_phases_and_re
         '- ❌ :alarm_clock: [2026-11-02 08:00 UTC](https://site.test/scans/r1) · 1m 00s · failed in index: boom',
         '## Pages',
         '[All scans](https://site.test/scans) · [Health](https://site.test/health) · [Meta](https://site.test/meta)\n',
+    ]
+
+
+def test_canvas_status_is_the_open_streak_else_the_newest_failure():
+    failed = row(3, 'failed', failed_phase='list', error='throttled')
+    issues = row(3, issues=[dict(phase='probe', outcome='failed', recovery=None)])
+    assert [N.status(CFG, rows) for rows in (history(2), [failed, *history(2)], [issues, *history(2)], [])] == [
+        '✅ Test scans: 2 consecutive clean runs',
+        '❌ Test scans: latest run failed in list: throttled',
+        '❌ Test scans: latest run phase issues: probe',
+        'Test scans: no finished runs yet',
     ]

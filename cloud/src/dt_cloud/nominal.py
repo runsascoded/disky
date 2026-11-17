@@ -450,11 +450,19 @@ def phases(row: dict, n: int = 5) -> str:
     return ' · '.join(f"{s['phase']} {int(s['end'] - s['start']) // 60}m {int(s['end'] - s['start']) % 60:02d}s" for s in spans)
 
 
-def canvas_text(cfg: Config, rows: list[dict], head: str, thread: str | None, series: Mapping[str, dict | int], now: float) -> str:
-    """The channel canvas: the thread head's first line, each store, the latest finished run's outcome and longest
-    phases, the last ten finished runs, and the site's pages. `rows` newest first; `thread` the head's permalink."""
+def status(cfg: Config, done: list[dict]) -> str:
+    """The deployment's state in a line: an open thread's headline (its streak), else the newest run's failure."""
+    _, good, boundary = segment(cfg, done)
+    if good:
+        return parent(cfg, good, boundary).split('\n', 1)[0].replace('**', '')
+    return f"❌ {cfg.title}: latest run {describe(done[0])}" if done else f"{cfg.title}: no finished runs yet"
+
+
+def canvas_text(cfg: Config, rows: list[dict], thread: str | None, series: Mapping[str, dict | int], now: float) -> str:
+    """The channel canvas: the deployment's `status`, each store, the latest finished run's outcome and longest phases,
+    the last ten finished runs, and the site's pages. `rows` newest first; `thread` the open thread head's permalink."""
     done = [r for r in rows if not live(r)]
-    title = head.split('\n', 1)[0].replace('**', '')
+    title = status(cfg, done)
     at = datetime.fromtimestamp(now, timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
     out = [f"# {cfg.title}", f"{title}" + (f" · [thread]({thread})" if thread else '') + f"\n\nUpdated {at}."]
     if cfg.stores:
@@ -576,7 +584,7 @@ def converge(
             newest = next((i for i, r in enumerate(rows) if r['run']['run_id'] in state.get('posted', {})), None)
             stop = rows[newest - 1] if newest else boundary or rows[0]
             if was == 'clean':
-                reason = stop['run']['status'] if not stop['phase_issues'] else 'phase issues'
+                reason = 'phase issues' if stop['run']['status'] == 'succeeded' and stop['phase_issues'] else stop['run']['status']
                 body = f"**{cfg.title}: clean-run sequence ended**\n\n[{stamp(stop)}]({cfg.link(stop['run'])}): {reason}. [All scans]({cfg.scans})."
             else:
                 reason = 'clean' if clean(stop) else describe(stop)
@@ -757,9 +765,10 @@ def run(
         if cfg.pin:
             check()
             pin_head(state, slack, save)
-        if cfg.canvas and state.get('parent_body'):
+        if cfg.canvas:
             check()
-            write_canvas(state, slack, canvas_text(cfg, rows, state['parent_body'], slack.permalink(state['parent']), series, time.time()), save)
+            thread = slack.permalink(state['parent']) if state.get('parent') and not state.get('closed') else None
+            write_canvas(state, slack, canvas_text(cfg, rows, thread, series, time.time()), save)
     if final is not None:
         final.append(state)
     return f"nominal: parent {state.get('parent', 'none')}; {len(state.get('posted', {}))} run replies"
