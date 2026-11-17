@@ -4,12 +4,15 @@ and a compaction under a small one stays within it, measured over the tree."""
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import tracemalloc
 import warnings
+from multiprocessing import get_context
 from pathlib import Path
 from threading import Event, Thread
+from time import monotonic
 
 import numpy as np
 import pyarrow as pa
@@ -212,36 +215,54 @@ def _spool(path: Path, n: int) -> None:
             w.write_table(pa.table(cols, schema=w.schema), row_group_size=ist.CUT_SPOOL_RG)
 
 
-def _held() -> int:
-    """This process's bytes for `_measured_part`: its proportional resident bytes (`tree_pss`, Linux), else its resident
-    bytes (an upper bound there)."""
-    return tm.tree_pss() if tm.has_procfs() else tm.own_bytes()
+#: Seconds a cut worker's task may take (a few, here): past them the worker prints every thread's stack to stderr and
+#: exits, and the test fails, where a run would hang.
+WORKER_TIMEOUT = 300
+
+
+def _worker_init() -> None:
+    """`tree_mem.worker_init`, and a watchdog: every thread's stack on stderr, then an exit, `WORKER_TIMEOUT` s on."""
+    import faulthandler
+
+    tm.worker_init()
+    faulthandler.dump_traceback_later(WORKER_TIMEOUT, exit=True)
+
+
+def _imported() -> tuple[int, int]:
+    """In the worker, once the cut's modules (and this one) are imported: its pid and own resident bytes."""
+    return os.getpid(), tm.own_bytes()
+
+
+def _cut(spool: str, n: int, rg: int, page: int | None, out: str) -> int:
+    """In the worker: a part of `n` rows of `spool` (`cut_part`) in `rg`-row groups of `page`-row pages; its peak
+    resident bytes (`ru_maxrss`)."""
+    schema = ist.served_schema("path", False, True)
+    ist.cut_part([(spool, 0, n)], [(0, o, min(rg, n - o)) for o in range(0, n, rg)], out, schema, "size", {"k": "v"}, page, rg)
+    return tm.peak_bytes()
 
 
 def _measured_part(spool: str, n: int, rg: int, page: int | None, out: str) -> tuple[int, int]:
-    """In a spawned cut worker: what it holds once imported, and its peak while writing a part of `n` rows of `spool`
-    (`cut_part`) in `rg`-row groups of `page`-row pages, sampled every 2 ms (and its `ru_maxrss` without procfs)."""
-    import resource
-
-    schema = ist.served_schema("path", False, True)
-    base = _held()
-    peak = [base]
-    stop = Event()
-
-    def sample():
-        while not stop.wait(0.002):
-            peak[0] = max(peak[0], _held())
-
-    th = Thread(target=sample, daemon=True)
-    th.start()
-    try:
-        ist.cut_part([(spool, 0, n)], [(0, o, min(rg, n - o)) for o in range(0, n, rg)], out, schema, "size", {"k": "v"}, page, rg)
-    finally:
-        stop.set()
-        th.join()
-    if not tm.has_procfs():
-        peak[0] = max(peak[0], tm.peak_bytes())
-    return base, max(peak[0], _held())
+    """A spawned cut worker (`worker_init`'d, as `write_served`'s pool) writing a part (`_cut`): what it holds once
+    imported, and its peak while writing. With procfs, its proportional resident bytes (`tree_pss`), sampled from here
+    every 2 ms, so the worker runs the cut and nothing else; without, its resident bytes (an upper bound). Bounded: past
+    `WORKER_TIMEOUT` the test fails and the pool's exit kills the worker."""
+    procfs = tm.has_procfs()
+    with get_context("spawn").Pool(1, initializer=_worker_init) as pool:
+        pid, own = pool.apply_async(_imported).get(WORKER_TIMEOUT)
+        base = tm.tree_pss(pid) if procfs else own
+        peak = base
+        res = pool.apply_async(_cut, (spool, n, rg, page, out))
+        deadline = monotonic() + WORKER_TIMEOUT + 30
+        while not res.ready():
+            if monotonic() > deadline:
+                pytest.fail(f"cut worker {pid} still writing after {WORKER_TIMEOUT} s; its threads' stacks are on stderr")
+            if procfs:
+                peak = max(peak, tm.tree_pss(pid))
+            res.wait(0.002)
+        rss = res.get()
+        if procfs:
+            return base, max(peak, tm.tree_pss(pid))
+        return base, max(peak, rss)
 
 
 @pytest.mark.parametrize("rg, page", [(256, 8), (1024, 1024), (256, None), (1024, None)])
@@ -251,14 +272,10 @@ def test_a_cut_worker_holds_its_estimate(tmp_path, rg, page):
     plan's inputs — `rb` and the writer's metadata a group (`interval_store.writer_meta`) from the spool's footer — and
     that estimate is within `WORKER_SLACK` × it. Many small groups (32 pages each) make the writer's metadata the most
     of it; one-page groups, the spool's batches; a sort without pages keeps nothing a page (`writer_meta` with None)."""
-    from concurrent.futures import ProcessPoolExecutor
-    from multiprocessing import get_context
-
     n = 400_000
     spool = tmp_path / "spool.parquet"
     _spool(spool, n)
-    with ProcessPoolExecutor(1, mp_context=get_context("spawn"), initializer=tm.worker_init) as ex:
-        base, peak = ex.submit(_measured_part, str(spool), n, rg, page, str(tmp_path / "part.parquet")).result()
+    base, peak = _measured_part(str(spool), n, rg, page, str(tmp_path / "part.parquet"))
     measured = peak - base
     rb = ic.row_bytes([str(spool)]) + ist.SPOOL_EXTRA
     est = tm.worker_bytes(ist.CUT_SPOOL_RG, rg, rb, -(-n // rg), ist.writer_meta([str(spool)], rg, page))
