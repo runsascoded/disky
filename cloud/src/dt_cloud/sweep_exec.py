@@ -299,7 +299,8 @@ def execute_plan(
         plan = json.load(fh)
     if for_real and plan.get("diagnostic"):
         raise ValueError("diagnostic manifests cannot be used for real deletion")
-    client = client or storage.Client()
+    from disk_tree.find.gcs_client import storage_client
+    client = client or storage_client("sweep")
     approved = tuple(plan.get("approved") or ())
     approved_objects = tuple(plan.get("approved_objects") or ())
     band_of = band_namer(approved, approved_objects)
@@ -960,8 +961,8 @@ def undo_run(
         logged_buckets = list(dsum["buckets"])
     approved = tuple(plan.get("approved") or ())
     if client is None:
-        from google.cloud import storage
-        client = storage.Client()
+        from disk_tree.find.gcs_client import storage_client
+        client = storage_client("sweep")
     from google.api_core.exceptions import NotFound, PreconditionFailed
 
     buckets = [b for b in logged_buckets if not only_buckets or b in only_buckets]

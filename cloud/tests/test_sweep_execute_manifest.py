@@ -401,7 +401,7 @@ def test_a_refused_run_leaves_its_reason_in_the_run_dir(source, tmp_path, monkey
     directory, plan = source
     rewrite(directory, NULLS)
     client = FakeClient(blobs={})
-    monkeypatch.setattr("google.cloud.storage.Client", lambda: client)
+    monkeypatch.setattr("google.cloud.storage.Client", lambda **_: client)
     run = tmp_path / "run"
     executed = CliRunner().invoke(cli.main, [
         "sweep", "execute-manifest", "-e", "xml", "-p", str(plan), "-o", str(run), "-w", str(tmp_path / "work"), "--for-real", str(directory),
@@ -699,7 +699,7 @@ def test_manifest_then_execute_closes_the_run_with_its_totals(tmp_path, monkeypa
     client._credentials = None
     monkeypatch.setattr(cli, "_hard_exit", lambda: None)
     monkeypatch.setattr(sweep_reviewed, "XmlDeleter", lambda **_: acknowledge(calls))
-    monkeypatch.setattr("google.cloud.storage.Client", lambda: client)
+    monkeypatch.setattr("google.cloud.storage.Client", lambda **_: client)
     monkeypatch.setenv("USER", "ann")
     root = _as_of_root(tmp_path, AS_OF_ROWS)
     run = tmp_path / "gcs-sweep-real-20261103-162200z"
@@ -756,7 +756,7 @@ def generation_run(command: str, directory: Path, plan: Path, tmp_path: Path, mo
     client._credentials = None
     monkeypatch.setattr(cli, "_hard_exit", lambda: None)
     monkeypatch.setattr(sweep_reviewed, "XmlDeleter", lambda **_: acknowledge(calls))
-    monkeypatch.setattr("google.cloud.storage.Client", lambda: client)
+    monkeypatch.setattr("google.cloud.storage.Client", lambda **_: client)
     run = tmp_path / "gcs-sweep-real-20261104-120000z"
     return calls, run, ["sweep", command, "-e", "xml", "-p", str(plan), "-o", str(run), "-w", str(tmp_path / "work"), "--for-real", str(directory)]
 

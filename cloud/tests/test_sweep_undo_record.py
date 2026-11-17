@@ -74,7 +74,7 @@ def undo(tmp_path, monkeypatch):
 
     def run(handle: _UndoHandle, *flags: str, state: str = "none", off: tuple[str, ...] = ()):
         db.execute("UPDATE deletion_runs SET undo_state = ?", (state,))
-        monkeypatch.setattr("google.cloud.storage.Client", lambda: _UndoClient(handle, off=off))
+        monkeypatch.setattr("google.cloud.storage.Client", lambda **_: _UndoClient(handle, off=off))
         result = CliRunner().invoke(cli.main, ["sweep", "undo", "-w", "1", *flags, RUN])
         row = (db.execute("SELECT undo_state FROM deletion_runs").fetchone()[0], dict(db.execute("SELECT prefix, undone_objects FROM deletion_bands ORDER BY prefix").fetchall()))
         return result, handle.calls, row

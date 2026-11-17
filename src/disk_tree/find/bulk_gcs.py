@@ -15,6 +15,7 @@ from functools import partial
 from typing import TYPE_CHECKING, Iterable, Optional
 
 from disk_tree.find.bulk import BlobRow, crc32c_int, generic_discover
+from disk_tree.find.gcs_client import storage_client
 
 if TYPE_CHECKING:
     import fsspec  # noqa: F401
@@ -63,7 +64,6 @@ class GcsBulkLister:
         start: Optional[str],
         end: Optional[str],
     ) -> Iterable[BlobRow]:
-        from google.cloud import storage
 
         # Cache one client per thread to avoid the ~50ms auth handshake on
         # every prefix.
@@ -74,7 +74,7 @@ class GcsBulkLister:
             object.__setattr__(self, "_local", local)
         client = getattr(local, "client", None)
         if client is None:
-            client = local.client = storage.Client()
+            client = local.client = storage_client("list")
         for blob in client.list_blobs(
             bucket, prefix=prefix, fields=self.fields,
             start_offset=start, end_offset=end,
@@ -95,7 +95,6 @@ class GcsBulkLister:
         client-side, so passing the take-time end here is purely an
         optimization. ``start_offset`` is inclusive — no compensation needed.
         """
-        from google.cloud import storage
 
         local = getattr(self, "_local", None)
         if local is None:
@@ -103,7 +102,7 @@ class GcsBulkLister:
             object.__setattr__(self, "_local", local)
         client = getattr(local, "client", None)
         if client is None:
-            client = local.client = storage.Client()
+            client = local.client = storage_client("list")
         it = client.list_blobs(
             bucket, prefix=prefix or None, fields=self.fields,
             start_offset=start, end_offset=end_hint,
@@ -129,9 +128,8 @@ class GcsBulkLister:
         be counted explicitly (marin's central2 alone had 5 — e.g. an object
         literally named ``tmp/``).
         """
-        from google.cloud import storage
 
-        bkt = storage.Client().bucket(bucket)
+        bkt = storage_client("list").bucket(bucket)
         rows: "list[tuple]" = []
         for d in self_dirs:
             blob = bkt.get_blob(d)

@@ -144,7 +144,7 @@ class TestRecord:
         summary = json.loads((plan_dir / "plan-summary.json").read_text())
         (plan_dir / "plan-summary.json").write_text(json.dumps({**summary, "plan_id": 1, "plan_name": "p", "date": "2026-01-01"}))
         monkeypatch.setattr(cli, "_hard_exit", lambda: None)
-        monkeypatch.setattr("google.cloud.storage.Client", lambda: client_at(0))
+        monkeypatch.setattr("google.cloud.storage.Client", lambda **_: client_at(0))
         monkeypatch.setattr("dt_cloud.sweep_progress.write_samples", lambda *_: None)
         result = CliRunner().invoke(cli.main, ["sweep", "execute", "-s", "0", str(plan_dir)])
         assert (result.exit_code, result.exception) == (0, None)
