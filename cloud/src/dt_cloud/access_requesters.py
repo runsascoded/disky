@@ -97,3 +97,42 @@ def rollup_day(root: str, day: dt.date, out: str, depth: int = 2, mem: str | Non
         con.sql(f"COPY r TO '{out}' (FORMAT parquet, COMPRESSION zstd)")
     err(f"requesters {day}: {n:,} rows → {out}")
     return n
+
+
+#: List prices per million requests (GCS Standard, regional/autoclass): Class A writes and listings, Class B reads.
+PRICE_PER_M = {"A": 5.0, "B": 0.40}
+
+#: A request's operation class: listings and writes are A, object reads and metadata B, deletes free.
+OP_CLASS_SQL = """CASE
+  WHEN op = 'DELETE' OR op_raw IN ('DELETE_Object', 'storage.objects.delete', 'POST_Nested_Delete_Multi_Objects') THEN 'free'
+  WHEN op = 'LIST' OR op_raw IN ('GET_Bucket', 'storage.objects.list') OR (op = 'GET' AND prefix = '') THEN 'A'
+  WHEN op IN ('GET', 'HEAD') THEN 'B'
+  ELSE 'A' END"""
+
+
+def readers(files: list[str], by: tuple[str, ...] = ("client", "bucket", "prefix"), top: int = 15) -> dict:
+    """Who made the requests over the rollups `files` (`<day>.parquet`s): per `by` group, requests per day and each
+    class's share, priced at `PRICE_PER_M`; the top `top` groups by estimated cost, then the rest as one row."""
+    import duckdb
+
+    if not files:
+        return {"days": 0, "rows": [], "total": {}}
+    con = duckdb.connect()
+    con.sql(f"CREATE VIEW r AS SELECT *, {OP_CLASS_SQL} AS cls FROM read_parquet({files!r})")
+    days = con.sql("SELECT count(DISTINCT day) FROM r").fetchone()[0]
+    keys = ", ".join(f"coalesce(CAST({k} AS VARCHAR), '') AS {k}" for k in by)
+    groups = con.sql(f"""
+        SELECT {keys}, sum(n) FILTER (cls = 'A') AS a, sum(n) FILTER (cls = 'B') AS b, sum(n) AS n
+        FROM r GROUP BY ALL""").fetchall()
+    rows = []
+    for g in groups:
+        a, b, n = (g[len(by)] or 0), (g[len(by) + 1] or 0), g[len(by) + 2]
+        usd = (a * PRICE_PER_M["A"] + b * PRICE_PER_M["B"]) / 1e6 / days
+        rows.append({**dict(zip(by, g[:len(by)])), "a_per_day": a / days, "b_per_day": b / days, "per_day": n / days, "usd_per_day": usd})
+    rows.sort(key=lambda r: -r["usd_per_day"])
+    head, rest = rows[:top], rows[top:]
+    if rest:
+        head.append({**{k: f"({len(rest)} others)" for k in by[:1]}, **{k: "" for k in by[1:]},
+                     **{f: sum(r[f] for r in rest) for f in ("a_per_day", "b_per_day", "per_day", "usd_per_day")}})
+    total = {f: sum(r[f] for r in rows) for f in ("a_per_day", "b_per_day", "per_day", "usd_per_day")}
+    return {"days": days, "by": list(by), "rows": head, "total": total}

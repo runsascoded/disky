@@ -74,3 +74,34 @@ def test_cli_writes_each_day_and_skip_existing_leaves_written_ones(tmp_path):
     assert (first.exit_code, first.stdout, again.exit_code, again.stdout, sorted(p.name for p in out.iterdir())) == (
         0, "2026-11-14\t1\n2026-11-15\t0\n", 0, "", ["2026-11-14.parquet"],
     )
+
+
+def test_readers_prices_each_group_by_operation_class(tmp_path):
+    """`readers`: per group, Class A (listings: a bucket-root GET; writes) and Class B (object reads) requests per day,
+    priced at list prices; deletes free; groups past `top` folded into one row."""
+    from dt_cloud.access_requesters import readers
+
+    def day(name, rows):
+        con = duckdb.connect()
+        con.sql("CREATE TABLE r (day DATE, bucket VARCHAR, op VARCHAR, op_raw VARCHAR, client VARCHAR, user_agent VARCHAR, requester VARCHAR, prefix VARCHAR, n BIGINT, bytes_out BIGINT, bytes_in BIGINT)")
+        for r in rows:
+            con.execute("INSERT INTO r VALUES (?, 'b', ?, ?, ?, NULL, NULL, ?, ?, 0, 0)", r)
+        con.sql(f"COPY r TO '{tmp_path / name}' (FORMAT parquet)")
+        return str(tmp_path / name)
+
+    files = [
+        day("2026-11-14.parquet", [
+            ("2026-11-14", "GET", "storage.objects.get", "tensorstore", "cache", 3_000_000),
+            ("2026-11-14", "GET", "GET", "python-gcsfs", "", 200_000),
+            ("2026-11-14", "DELETE", "DELETE_Object", "python-gcsfs", "tmp", 50),
+            ("2026-11-14", "GET", "storage.objects.get", "polars", "tmp", 1_000_000),
+        ]),
+        day("2026-11-15.parquet", [("2026-11-15", "GET", "storage.objects.get", "tensorstore", "cache", 1_000_000)]),
+    ]
+    out = readers(files, ("client", "prefix"), top=2)
+    rnd = lambda r: {k: round(v, 2) if isinstance(v, float) else v for k, v in r.items()}
+    assert (out["days"], [rnd(r) for r in out["rows"]], rnd(out["total"])) == (2, [
+        {"client": "tensorstore", "prefix": "cache", "a_per_day": 0.0, "b_per_day": 2_000_000.0, "per_day": 2_000_000.0, "usd_per_day": 0.8},
+        {"client": "python-gcsfs", "prefix": "", "a_per_day": 100_000.0, "b_per_day": 0.0, "per_day": 100_000.0, "usd_per_day": 0.5},
+        {"client": "(2 others)", "prefix": "", "a_per_day": 0.0, "b_per_day": 500_000.0, "per_day": 500_025.0, "usd_per_day": 0.2},
+    ], {"a_per_day": 100_000.0, "b_per_day": 2_500_000.0, "per_day": 2_600_025.0, "usd_per_day": 1.5})

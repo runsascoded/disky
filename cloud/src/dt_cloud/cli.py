@@ -2948,6 +2948,50 @@ def access_requesters(depth: int, data_bucket: str | None, mem: str | None, out:
         print(f"{day}\t{rollup_day(root, day, dest, depth, mem, threads)}")
 
 
+@access.command("readers")
+@option("-b", "--by", default="client,bucket,prefix", show_default=True, help="Group by these rollup columns (comma-separated)")
+@option("-d", "--data-bucket", envvar="DATA_BUCKET", default=None, help="The access store's bucket; default $DATA_BUCKET")
+@option("-f", "--from", "from_", default=None, help="First day (YYYY-MM-DD; default: the newest rollup's day)")
+@option("-j", "--json", "as_json", is_flag=True, help="JSON instead of a table")
+@option("-n", "--top", type=int, default=15, show_default=True, help="Groups shown; the rest as one row")
+@option("-r", "--root", default=None, help="The rollups' dir or `gs://` URL (default `gs://$DATA_BUCKET/access/requesters`)")
+@option("-t", "--to", default=None, help="Last day (default: the newest rollup's day)")
+def access_readers(by: str, data_bucket: str | None, from_: str | None, as_json: bool, top: int, root: str | None, to: str | None) -> None:
+    """Who made the requests over a range of `access requesters` rollups: requests per day by Class A (listings,
+    writes) and Class B (reads), and an estimated cost at list prices (`PRICE_PER_M`), top groups first."""
+    import json as _json
+
+    from .access_requesters import PRICE_PER_M, readers
+
+    if not root:
+        if not data_bucket:
+            raise SystemExit("access readers: -r or -d/$DATA_BUCKET")
+        root = f"gs://{data_bucket}/access/requesters"
+    root = root.rstrip("/")
+    if root.startswith("gs://"):
+        import gcsfs
+
+        names = sorted(f"gs://{p}" for p in gcsfs.GCSFileSystem().glob(f"{root.removeprefix('gs://')}/*.parquet"))
+    else:
+        names = sorted(str(p) for p in Path(root).glob("*.parquet"))
+    day_of = {n: n.rsplit("/", 1)[-1].removesuffix(".parquet") for n in names}
+    if not names:
+        raise SystemExit(f"access readers: no rollups under {root}")
+    last = max(day_of.values())
+    lo, hi = from_ or (to or last), to or last
+    files = [n for n in names if lo <= day_of[n] <= hi]
+    out = readers(files, tuple(b.strip() for b in by.split(",") if b.strip()), top)
+    if as_json:
+        print(_json.dumps({**out, "from": lo, "to": hi, "prices_per_m": PRICE_PER_M}, default=str))
+        return
+    print(f"{lo} … {hi} ({out['days']} days with rollups); per day; $ at list prices (A ${PRICE_PER_M['A']}/M, B ${PRICE_PER_M['B']}/M)")
+    cols = out["by"]
+    w = [max(len(c), *(len(str(r[c])[:60]) for r in out["rows"])) for c in cols]
+    print("  ".join(f"{c:{n}}" for c, n in zip(cols, w)) + f"  {'A M/d':>8}  {'B M/d':>8}  {'$/d':>7}")
+    for r in [*out["rows"], {**{c: "" for c in cols[1:]}, cols[0]: "total", **out["total"]}]:
+        print("  ".join(f"{str(r[c])[:60]:{n}}" for c, n in zip(cols, w)) + f"  {r['a_per_day'] / 1e6:8.2f}  {r['b_per_day'] / 1e6:8.1f}  {r['usd_per_day']:7.0f}")
+
+
 def _exists(path: str) -> bool:
     if path.startswith("gs://"):
         import gcsfs
