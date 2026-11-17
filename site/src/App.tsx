@@ -19,7 +19,7 @@ import { NonLiveHistory } from './NonLiveHistory'
 import { DiskSpace } from './DiskSpace'
 import { ExtLink } from './ExtLink'
 import { DiskSpaceDiff, diskDiffScan } from './DiskSpaceDiff'
-import { diffLoadingLabel, type DiffData } from './diffModel'
+import { diffLoadingLabel, diffMiss, type DiffData } from './diffModel'
 import { ScanCombobox } from './ScanCombobox'
 import { ago, buildUserIndex, epochDaysToDate } from './colors'
 import { ChildrenTable } from './ChildrenTable'
@@ -946,6 +946,7 @@ function AppContent() {
   })
   const diff: DiffData | null = diffQ.data ?? null
   const diffErr = diffQ.error
+  const diffMissed = diffErr ? diffMiss(diffErr.message) : null
   // The shown diff is the previous pair's (placeholder) or the pair is still
   // aligning: its numbers describe another pair, so the subtitle says
   // "aligning" instead, and the drawn treemap dims under a marker.
@@ -1695,7 +1696,11 @@ function AppContent() {
             {diff && !diffStale ? null : diffErr && !diffStale && /^(404|409)/.test(diffErr.message) ? (
               <span className="tab-note">
                 {' '}· {diffErr.message.startsWith('404')
-                  ? <><code>{graftPath || '/'}</code> is in neither scan’s index — pick other scans or drill up.</>
+                  ? diffMissed && 'scan' in diffMissed
+                    // An end the server doesn't serve: a scan whose index is still publishing (the list can name it
+                    // first), not a path missing from both.
+                    ? <>{fmtS(diffMissed.scan)} isn’t served yet — its index is still publishing; pick {diffMissed.end === 'to' ? 'an earlier end' : 'another start'}, or retry in a few minutes.</>
+                    : <><code>{graftPath || '/'}</code> is in neither scan’s index — pick other scans or drill up.</>
                   : <>no per-user index for one of these scans — pick newer scans, or clear the user.</>}
               </span>
             ) : diffErr && !diffStale ? (

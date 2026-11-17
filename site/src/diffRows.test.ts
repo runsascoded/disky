@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { buildTree, diffLoadingLabel } from './diffModel'
+import { buildTree, diffLoadingLabel, diffMiss } from './diffModel'
 import type { DiffData, DiffRow } from './diffModel'
 import { deltaPct, diffCellAction, diffTableRows, fmtPct, sortDiffRows } from './diffRows'
 import type { DiffTableRow } from './diffRows'
@@ -149,5 +149,15 @@ describe('deltaPct / fmtPct', () => {
 describe('diffLoadingLabel: the diff header while the full walk aligns', () => {
   it('names the pair until its first paint (`depth=1`) is on the map, then says the rows are what\'s left', () => {
     expect([diffLoadingLabel(false, '11/4 → 11/5'), diffLoadingLabel(true, '11/4 → 11/5')]).toEqual(['Aligning 11/4 → 11/5…', 'Aligning the rows…'])
+  })
+})
+
+describe('diffMiss: which miss a diff 404 is', () => {
+  it('names an end the server doesn\'t serve, else the path', () => {
+    expect([
+      diffMiss('404: {"error":"no scan matches to=2026-11-17T1202"}'),
+      diffMiss('404: {"error":"no scan matches from=2026-10-08"}'),
+      diffMiss('404: path not found in either scan'),
+    ]).toEqual([{ scan: '2026-11-17T1202', end: 'to' }, { scan: '2026-10-08', end: 'from' }, { path: true }])
   })
 })

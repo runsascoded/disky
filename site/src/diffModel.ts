@@ -53,6 +53,14 @@ export interface DiffData {
  *  paint (`firstPaint`: this pair's `depth=1` diff, which carries the totals), then the rows that are still to come. */
 export const diffLoadingLabel = (firstPaint: boolean, pair: string): string => firstPaint ? 'Aligning the rows…' : `Aligning ${pair}…`
 
+/** Which miss a diff's 404 is: an end the server doesn't serve (`scanArg`'s `no scan matches from|to=<id>`: a scan
+ *  not indexed yet, or not at all), else the path missing from both scans. */
+export type DiffMiss = { scan: string; end: 'from' | 'to' } | { path: true }
+export function diffMiss(message: string): DiffMiss {
+  const m = /no scan matches (from|to)=([0-9T-]+)/.exec(message)
+  return m ? { scan: m[2], end: m[1] as 'from' | 'to' } : { path: true }
+}
+
 export type AreaMode = 'max' | 'delta'
 
 export interface DiffNode {
