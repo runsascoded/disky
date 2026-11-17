@@ -26,7 +26,10 @@
         "groups:read",
         "users:read",
         "users:read.email",
-        "emoji:read"
+        "emoji:read",
+        "channels:join",
+        "pins:write",
+        "canvases:write"
       ]
     }
   },

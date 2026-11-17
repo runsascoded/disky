@@ -78,7 +78,7 @@ def test_copy_states_boundary_trigger_mix_and_exact_run_links():
     assert N.parent(CFG, good, boundary) == (
         '✅ **Test scans: 2 consecutive clean runs**\n\n'
         'Since 2026-11-02 08:00 UTC after [2026-11-01T0800](https://site.test/scans/r0).\n\n'
-        'Latest completed: [2026-11-03 08:00 UTC](https://site.test/scans/r2).\n\n'
+        'Latest completed: [2026-11-03 08:00 UTC](https://site.test/scans/r2) · 1m 00s.\n\n'
         'Latest 2 runs: 1 scheduled / 1 manual. Each reply links its scan record. [All scans](https://site.test/scans).'
     )
     assert [N.reply(CFG, r) for r in reversed(good)] == [
@@ -216,7 +216,7 @@ def test_running_or_unfinalized_head_does_not_announce_success():
 RUNNING_PARENT = (
     '✅ **Test scans: 2 consecutive clean runs**\n\n'
     'Since 2026-11-02 08:00 UTC after [2026-11-01T0800](https://site.test/scans/r0).\n\n'
-    'Latest completed: [2026-11-03 08:00 UTC](https://site.test/scans/r2).\n\n'
+    'Latest completed: [2026-11-03 08:00 UTC](https://site.test/scans/r2) · 1m 00s.\n\n'
     'Running now: [2026-11-04 08:00 UTC](https://site.test/scans/r3).\n\n'
     'Latest 2 runs: 2 scheduled / 0 manual. Each reply links its scan record. [All scans](https://site.test/scans).'
 )
@@ -245,7 +245,7 @@ def test_a_running_reply_becomes_its_runs_reply_in_place():
         ('edit', '4.0', '✅ :ada: [2026-11-04 08:00 UTC](https://site.test/scans/r3) · 1m 00s'),
         ('edit', '1.0', '✅ **Test scans: 3 consecutive clean runs**\n\n'
                         'Since 2026-11-02 08:00 UTC after [2026-11-01T0800](https://site.test/scans/r0).\n\n'
-                        'Latest completed: [2026-11-04 08:00 UTC](https://site.test/scans/r3).\n\n'
+                        'Latest completed: [2026-11-04 08:00 UTC](https://site.test/scans/r3) · 1m 00s.\n\n'
                         'Latest 3 runs: 2 scheduled / 1 manual. Each reply links its scan record. [All scans](https://site.test/scans).'),
     ]
     assert (w.saved['posted'], 'running' in w.saved) == ({'r1': '2.0', 'r2': '3.0', 'r3': '4.0'}, False)
@@ -536,7 +536,7 @@ def test_color_threads_consecutive_failures_and_each_change_of_color_closes_the_
                         '[2026-11-06 08:00 UTC](https://site.test/scans/r5): clean. [All scans](https://site.test/scans).'),
         ('post', '7.0', '✅ **Test scans: 1 consecutive clean run**\n\n'
                         'Since 2026-11-06 08:00 UTC after [2026-11-05T0800](https://site.test/scans/r4).\n\n'
-                        'Latest completed: [2026-11-06 08:00 UTC](https://site.test/scans/r5).\n\n'
+                        'Latest completed: [2026-11-06 08:00 UTC](https://site.test/scans/r5) · 1m 00s.\n\n'
                         'Latest 1 run: 1 scheduled / 0 manual. Each reply links its scan record. [All scans](https://site.test/scans).'),
         ('post', '8.0', '✅ :alarm_clock: [2026-11-06 08:00 UTC](https://site.test/scans/r5) · 1m 00s'),
     ]
@@ -622,3 +622,30 @@ def test_alerts_post_at_once_without_failure_grouping_or_with_reports_off(tmp_pa
     job.alert('fail', 'run failed (exit 1)')
     job.alert('warn', 'probe slow')
     assert (posted, job.state().get('deferred_alerts')) == ([('fail', 'run failed (exit 1)'), ('warn', 'probe slow')], None)
+
+
+def test_head_carries_the_latest_runs_outcome_and_each_configured_stores_size_and_week():
+    cfg = N.config(dict(state='unused', site='https://site.test', channel='C123', title='Test scans',
+                        stores={'Data': 'primary', 'Metadata': 'meta'}))
+    assert cfg.stores == (('Data', 'primary'), ('Metadata', 'meta'))
+    latest = {**row(2), 'secs': 2343, 'cost_usd': 0.1607, 'out_bytes': 439_552_060, 'delta_bytes': -818_040}
+    week = [dict(date='2026-11-02T0800', bytes=288_000_000_000_000, objects=3_700_000),
+            dict(date='2026-11-03T0800', bytes=289_890_807_590_998, objects=3_719_843),
+            dict(date='2026-11-09T0800', bytes=289_500_000_000_000, objects=3_710_000),
+            dict(date='2026-11-10T0900', bytes=288_966_905_203_791, objects=3_703_266)]
+    stores = N.stores_text(cfg, {'primary': {'path': '', 'points': week}, 'meta': 503})
+    assert N.parent(cfg, [latest, row(1)], row(0, 'failed'), stores=stores).split('\n\n') == [
+        '✅ **Test scans: 2 consecutive clean runs**',
+        'Since 2026-11-02 08:00 UTC after [2026-11-01T0800](https://site.test/scans/r0).',
+        'Latest completed: [2026-11-03 08:00 UTC](https://site.test/scans/r2) · 39m 03s · $0.16 · output 440 M (−818 K).',
+        '[Data](https://site.test/): 289 T · 3,703,266 objects · −924 G over 7d.',
+        '[Metadata](https://site.test/meta): size unavailable (HTTP 503).',
+        'Latest 2 runs: 2 scheduled / 0 manual. Each reply links its scan record. [All scans](https://site.test/scans).',
+    ]
+    assert [N.store_line(cfg, 'Meta', 'meta', s) for s in ({'points': []}, {'points': week[:1]})] == [
+        '[Meta](https://site.test/meta): no scans yet.',
+        '[Meta](https://site.test/meta): 288 T · 3,700,000 objects.',
+    ]
+    assert [N.si(v) for v in (0, 999, 46_844_611_976, 7_176_822_198, 288_966_905_203_791, 1.2e15)] == [
+        '0 B', '999 B', '46.8 G', '7.18 G', '289 T', '1.20 P']
+    assert N.outcome({**row(1), 'secs': None}) == ''

@@ -43,6 +43,9 @@ class Config:
     #: `signature` the thread is the failure's report: a run's `fail` alerts defer to it (`defers_failures`), and post
     #: top-level only if the run isn't a reply in a failure thread once the report has run.
     group: str = "clean"
+    #: The stores the head summarizes (`stores_text`), as `{label: store}`: each one's size, object count and change over
+    #: the last week, linked to its page. Empty: no store lines.
+    stores: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self) -> None:
         if not self.site.startswith("https://") or urlparse(self.site).query or urlparse(self.site).fragment:
@@ -55,6 +58,8 @@ class Config:
             raise ValueError("nominal: state, title, store and kind must be nonempty")
         if self.group not in GROUPS:
             raise ValueError(f"nominal.group: one of {', '.join(GROUPS)}")
+        if any(not label or not store for label, store in self.stores):
+            raise ValueError("nominal.stores: nonempty labels and store names")
 
     @property
     def namespace(self) -> str:
@@ -67,9 +72,15 @@ class Config:
     def link(self, run: dict) -> str:
         return f"{self.scans}/{quote(run['run_id'], safe='')}"
 
+    def page(self, store: str) -> str:
+        return self.site.rstrip('/') + ('/' if store == 'primary' else f"/{quote(store, safe='')}")
+
 
 def config(raw: Mapping) -> Config:
-    return Config(**dict(raw))
+    raw = dict(raw)
+    if isinstance(raw.get('stores'), Mapping):
+        raw['stores'] = tuple(raw['stores'].items())
+    return Config(**raw)
 
 
 def ordered(doc: dict, cfg: Config) -> list[dict]:
@@ -189,6 +200,60 @@ def reply(cfg: Config, row: dict) -> str:
             + ('' if ok else f" · {describe(row)}"))
 
 
+def si(n: float, sign: bool = False) -> str:
+    """Bytes at three significant figures in the site's SI units (`289 T`, `46.8 G`, `440 M`); `sign`: `+`/`−` first."""
+    head = ('+' if n >= 0 else '−') if sign else ('-' if n < 0 else '')
+    n = abs(n)
+    for div, unit in ((1e15, 'P'), (1e12, 'T'), (1e9, 'G'), (1e6, 'M'), (1e3, 'K')):
+        if n >= div:
+            v = n / div
+            return f"{head}{v:.{0 if v >= 100 else 1 if v >= 10 else 2}f} {unit}"
+    return f"{head}{int(n)} B"
+
+
+def outcome(row: dict) -> str:
+    """A finished run's duration, cost and output (its generated files' size and change), as far as recorded."""
+    seconds = row.get('secs')
+    parts = [] if seconds is None else [f"{int(seconds) // 60}m {int(seconds) % 60:02d}s"]
+    if row.get('cost_usd') is not None:
+        parts.append(f"${row['cost_usd']:.2f}")
+    if row.get('out_bytes') is not None:
+        delta = row.get('delta_bytes')
+        parts.append(f"output {si(row['out_bytes'])}" + ('' if delta is None else f" ({si(delta, sign=True)})"))
+    return ' · '.join(parts)
+
+
+WEEK = 7 * 86400
+
+
+def series_ts(date: str) -> float:
+    return datetime.strptime(date, '%Y-%m-%dT%H%M').replace(tzinfo=timezone.utc).timestamp()
+
+
+def store_line(cfg: Config, label: str, store: str, series: dict | int) -> str:
+    """One store's line: its size and objects at its newest scan and the change since the newest scan at least a week
+    before (`over Nd`, N the span); `series` is its `/api/series` body, or the HTTP status that failed to read it."""
+    head = f"[{label}]({cfg.page(store)})"
+    if isinstance(series, int):
+        return f"{head}: size unavailable (HTTP {series})."
+    points = series.get('points') or []
+    if not points:
+        return f"{head}: no scans yet."
+    last = points[-1]
+    text = f"{head}: {si(last['bytes'])} · {last['objects']:,} objects"
+    end = series_ts(last['date'])
+    before = [p for p in points if series_ts(p['date']) <= end - WEEK]
+    if before:
+        days = round((end - series_ts(before[-1]['date'])) / 86400)
+        text += f" · {si(last['bytes'] - before[-1]['bytes'], sign=True)} over {days}d"
+    return text + '.'
+
+
+def stores_text(cfg: Config, series: Mapping[str, dict | int]) -> str:
+    """The head's store lines (`Config.stores`), each its own paragraph, or nothing."""
+    return ''.join(store_line(cfg, label, store, series[store]) + '\n\n' for label, store in cfg.stores)
+
+
 def running(cfg: Config, row: dict) -> str:
     """A live run's reply, posted when it starts and edited to its `reply` when it ends."""
     emoji, by = starter(row)
@@ -202,10 +267,11 @@ def running_now(cfg: Config, live_rows: list[dict]) -> str:
     return 'Running now: ' + ', '.join(f"[{stamp(r)}]({cfg.link(r['run'])})" for r in reversed(live_rows)) + '.\n\n'
 
 
-def parent(cfg: Config, good: list[dict], boundary: dict | None, live_rows: list[dict] | None = None) -> str:
-    """The thread's head: a clean thread's streak, or a failure thread's (`failed`), naming the runs going now."""
+def parent(cfg: Config, good: list[dict], boundary: dict | None, live_rows: list[dict] | None = None, stores: str = '') -> str:
+    """The thread's head: a clean thread's streak, or a failure thread's (`failed`), naming the runs going now, with
+    the latest run's outcome and the deployment's store lines (`stores_text`)."""
     if good and not clean(good[0]):
-        return failed(cfg, good, boundary, live_rows)
+        return failed(cfg, good, boundary, live_rows, stores)
     window = good[:10]
     counts = {k: sum(r['run']['trigger'] == k for r in window) for k in ('schedule', 'manual', None)}
     mix = f"{counts['schedule']} scheduled / {counts['manual']} manual" + (f" / {counts[None]} unknown" if counts[None] else '')
@@ -214,12 +280,13 @@ def parent(cfg: Config, good: list[dict], boundary: dict | None, live_rows: list
     after = f" after [{boundary['run']['scan']}]({cfg.link(boundary['run'])})" if boundary else ' (available run history)'
     return (f"✅ **{cfg.title}: {qualifier}{len(good)} consecutive clean run{'' if len(good) == 1 else 's'}**\n\n"
             f"Since {since}{after}.\n\n"
-            f"Latest completed: [{stamp(good[0])}]({cfg.link(good[0]['run'])}).\n\n"
+            f"Latest completed: [{stamp(good[0])}]({cfg.link(good[0]['run'])})" + (f" · {done}" if (done := outcome(good[0])) else '') + ".\n\n"
+            f"{stores}"
             f"{running_now(cfg, live_rows)}"
             f"Latest {plural(len(window), 'run')}: {mix}. Each reply links its scan record. [All scans]({cfg.scans}).")
 
 
-def failed(cfg: Config, bad: list[dict], boundary: dict | None, live_rows: list[dict] | None = None) -> str:
+def failed(cfg: Config, bad: list[dict], boundary: dict | None, live_rows: list[dict] | None = None, stores: str = '') -> str:
     """A failure thread's head: how many runs in a row failed (under `signature`, failed the same way), since when and
     after which run (the last clean one, or the last that failed differently), and the newest failure's reason."""
     qualifier = '' if boundary else 'at least '
@@ -233,6 +300,7 @@ def failed(cfg: Config, bad: list[dict], boundary: dict | None, live_rows: list[
     return (f"❌ **{cfg.title}: {qualifier}{len(bad)} consecutive failed run{'' if len(bad) == 1 else 's'}{how}**\n\n"
             f"Since {stamp(bad[-1])}{after}.\n\n"
             f"Latest: [{stamp(bad[0])}]({cfg.link(bad[0]['run'])}): {describe(bad[0])}.\n\n"
+            f"{stores}"
             f"{running_now(cfg, live_rows)}"
             f"Each reply links its scan record. [All scans]({cfg.scans}).")
 
@@ -346,6 +414,7 @@ def converge(
     save: Callable[[dict], None],
     check: Callable[[], None],
     now: Callable[[], float] = time.time,
+    stores: str = '',
 ) -> dict:
     """Caller holds the generation lease. Persist every send intent and returned/recovered message ID."""
     if state.get('namespace') != cfg.namespace:
@@ -436,7 +505,7 @@ def converge(
             check()
             received(pending, slack.post(body, root, operation))
 
-        body = parent(cfg, good, boundary, live_rows)
+        body = parent(cfg, good, boundary, live_rows, stores)
         if not state.get('parent'):
             send('parent', body, None)
         # New threads bootstrap ten; established threads append every missing run after the newest known one.
@@ -524,6 +593,14 @@ def run(
             raise ValueError('nominal: authoritative terminal run record is not visible')
         return rows
 
+    def read_stores() -> str:
+        series: dict[str, dict | int] = {}
+        for _, name in cfg.stores:
+            response = http_fetch(cfg.site, token)('/api/series?' + urlencode({'store': name}))
+            # A store that can't be read is named as such in the head; the thread's run outcomes still post.
+            series[name] = json.loads(response.body) if response.status == 200 else response.status
+        return stores_text(cfg, series)
+
     if not execute:
         rows = read_rows()
         live_rows = [r for r in rows if live(r)]
@@ -545,7 +622,7 @@ def run(
                 raise RuntimeError('nominal: pending send needs reconciliation before a publish plan can be rendered')
             same = state.get('boundary') == (boundary['run']['run_id'] if boundary else None) and state.get('key', 'clean') == head
             pending_rows = missing(good, state.get('posted', {})) if same else good[:10]
-        return '\n\n+++\n\n'.join([parent(cfg, good, boundary, live_rows), *(reply(cfg, r) for r in reversed(pending_rows)),
+        return '\n\n+++\n\n'.join([parent(cfg, good, boundary, live_rows, read_stores()), *(reply(cfg, r) for r in reversed(pending_rows)),
                                     *(running(cfg, r) for r in reversed(live_rows))])
     bot = (env.get('SLACK_BOT_TOKEN') or '').strip()
     if not bot:
@@ -560,7 +637,7 @@ def run(
             store.write_text(key, json.dumps(value, indent=2) + '\n')
         check()
         save(state)
-        state = converge(cfg, rows, state, slack, save, check)
+        state = converge(cfg, rows, state, slack, save, check, stores=read_stores())
     if final is not None:
         final.append(state)
     return f"nominal: parent {state.get('parent', 'none')}; {len(state.get('posted', {}))} run replies"
