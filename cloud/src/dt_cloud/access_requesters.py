@@ -11,11 +11,26 @@ segments. Requests are counted, not deduplicated: a retried read is two reads, a
 from __future__ import annotations
 
 import datetime as dt
+import os
 import re
 import sys
 from functools import partial
 
+# gcsfs ≥ 2026.8.1's adaptive prefetcher leaves a read handle that blocks interpreter exit (blobfs.py's note): a
+# rollup that wrote its day never exits. Off before gcsfs is imported.
+os.environ.setdefault("USE_EXPERIMENTAL_ADAPTIVE_PREFETCHING", "false")
+
 err = partial(print, file=sys.stderr)
+
+
+def exists(path: str) -> bool:
+    if path.startswith("gs://"):
+        import gcsfs
+
+        return bool(gcsfs.GCSFileSystem().exists(path))
+    from pathlib import Path
+
+    return Path(path).exists()
 
 PART = re.compile(r"part-(\d{4})_(\d\d)_(\d\d)_(\d\d)_\d\d_\d\d--(\d{4})_(\d\d)_(\d\d)_(\d\d)_\d\d_\d\d\.parquet$")
 

@@ -2930,7 +2930,7 @@ def access_requesters(depth: int, data_bucket: str | None, mem: str | None, out:
     (`access_requesters.py`), one `<day>.parquet` per DAY (YYYY-MM-DD, UTC) under `-o`. Prints each day's row count."""
     import datetime as dt
 
-    from .access_requesters import rollup_day
+    from .access_requesters import exists, rollup_day
 
     if not root:
         if not data_bucket:
@@ -2942,7 +2942,7 @@ def access_requesters(depth: int, data_bucket: str | None, mem: str | None, out:
     for d in days:
         day = dt.date.fromisoformat(d)
         dest = f"{out}/{day.isoformat()}.parquet"
-        if skip_existing and _exists(dest):
+        if skip_existing and exists(dest):
             err(f"requesters {day}: {dest} already written")
             continue
         print(f"{day}\t{rollup_day(root, day, dest, depth, mem, threads)}")
@@ -2991,13 +2991,6 @@ def access_readers(by: str, data_bucket: str | None, from_: str | None, as_json:
     for r in [*out["rows"], {**{c: "" for c in cols[1:]}, cols[0]: "total", **out["total"]}]:
         print("  ".join(f"{str(r[c])[:60]:{n}}" for c, n in zip(cols, w)) + f"  {r['a_per_day'] / 1e6:8.2f}  {r['b_per_day'] / 1e6:8.1f}  {r['usd_per_day']:7.0f}")
 
-
-def _exists(path: str) -> bool:
-    if path.startswith("gs://"):
-        import gcsfs
-
-        return bool(gcsfs.GCSFileSystem().exists(path))
-    return Path(path).exists()
 
 
 @main.group()
