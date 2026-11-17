@@ -801,6 +801,9 @@ function AppContent() {
     enabled: !!asof,
     staleTime: Infinity,
   })
+  // A scan still indexing has no age rows yet (its age tiers are listed by the run's last step, `index-sync`): the
+  // section says so rather than vanishing.
+  const ageWaiting = !ageQ.isPending && !ageQ.isError && !(ageQ.data?.records.length) && !!asof && indexing.has(asof)
   const age: AgeRow[] = useMemo(
     () => (ageQ.data?.records ?? []).map(r => ({ d: Math.floor(r.dt / 86400_000), b: r.b, o: r.o })),
     [ageQ.data],
@@ -1750,7 +1753,7 @@ function AppContent() {
           their place naming them. */}
       {(() => {
         const present: BlindPanel[] = [
-          ...(!lensScoped && (ageQ.isPending || age.length > 0) ? ['age' as const] : []),
+          ...(!lensScoped && (ageQ.isPending || age.length > 0 || ageWaiting) ? ['age' as const] : []),
           ...(store.lifecycle ? ['lifecycle' as const] : []),
           ...(meta && store.prices ? ['classes' as const] : []),
           ...(hasAttr && mapTree ? ['ownership' as const] : []),
@@ -1761,7 +1764,7 @@ function AppContent() {
 
       {/* Hidden when there's no age index for this deploy (e.g. r2 has no
           age-pyramid tier yet): show while loading or once rows arrive. */}
-      {blindShown(!!fq) && !lensScoped && (ageQ.isPending || age.length > 0) && (
+      {blindShown(!!fq) && !lensScoped && (ageQ.isPending || age.length > 0 || ageWaiting) && (
       <section id="mtime">
         {/* Granularity is auto-picked (and user-switchable) inside AgeChart, so
             the heading stays unit-free rather than lying about "month". */}
@@ -1774,6 +1777,12 @@ function AppContent() {
           </>}><span className="info" tabIndex={0} aria-label="about this chart">ⓘ</span></Tooltip>
         </h2>
         {ageQ.isPending && !!asof && <Skeleton height={220} label="loading ages…" />}
+        {ageWaiting && (
+          <p className="hint">
+            This scan’s ages appear once its indexing finishes
+            {newestHref && newestSearchable ? <>; <a href={newestHref}>{fmtS(newestSearchable)}</a> has them</> : null}.
+          </p>
+        )}
         {age.length > 0 && (
           <AgeChart rows={age} baseRows={diffPrev ? ageBase : undefined} diffLabels={diffPrev && asof ? { from: fmtS(diffPrev), to: fmtS(asof) } : undefined} catOrder={catOrder} mode={ageMode} mapMode={effMode} picked={ageModeP === ageMode} dateAxis={dateRange} onMode={m => setAgeModeP(m)} modes={ageModes} userIdx={userIdx} readRange={ageReadRange} readThrough={ageReadRange ? readThru : null} readTint={readTint} readUnlogged={readUnlogged} scheme={store.scheme} band={band} onBand={setBand} />
         )}
