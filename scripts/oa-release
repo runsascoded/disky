@@ -60,6 +60,11 @@ def paginated(path: str) -> list:
     raise ClickException('GitHub pagination exceeded 100 pages; narrow the release query')
 
 
+class Superseded(ClickException):
+    """A release a newer push has overtaken (the branch or the prod pointer moved on): skipped, not failed, so the
+    newer push's run is the one that releases and a red run means a release itself failed."""
+
+
 def require(condition: bool, message: str) -> None:
     if not condition:
         raise ClickException(message)
@@ -132,12 +137,14 @@ def plan_release(event: dict, event_name: str, repository: str) -> dict:
     tip_recipes = dev_id = previous = None
     if mode == 'dev':
         tip = api(f'{prefix}/git/ref/heads/{target}')['object']['sha']
-        require(tip == sha, 'Obsolete CI completion: source branch has moved')
+        if tip != sha:
+            raise Superseded('Obsolete CI completion: source branch has moved')
     else:
         # Production releases what `<d>-prod` points at: a dispatch for a sha the pointer has since moved off is stale
         pointer = api(f'{prefix}/git/ref/heads/{target}-prod')['object']['sha']
-        require(pointer == sha, f'{target}-prod points at {pointer[:12]}, not {sha[:12]}: production releases the pointer '
-                f'(git push o <sha>:{target}-prod)')
+        if pointer != sha:
+            raise Superseded(f'{target}-prod points at {pointer[:12]}, not {sha[:12]}: production releases the pointer '
+                             f'(git push o <sha>:{target}-prod)')
         # A promotion or rollback may name an older sha: `seal` holds only the recipes still pending at the branch's tip
         tip = api(f'{prefix}/git/ref/heads/{target}')['object']['sha']
         tip_recipes = recipes_at(prefix, tip)
@@ -242,11 +249,24 @@ def setup(live_enabled: str, live_targets: str, output: Path, targets: tuple[str
 @option('-o', '--output', type=ClickPath(path_type=Path), required=True)
 @option('-r', '--repository', required=True)
 def plan(event: Path, event_name: str, output: Path, repository: str) -> None:
-    value = plan_release(loads(event.read_text()), event_name, repository)
-    output.write_text(dumps(value, indent=2) + '\n')
     github_output = environ.get('GITHUB_OUTPUT')
+    try:
+        value = plan_release(loads(event.read_text()), event_name, repository)
+    except Superseded as skip:
+        # Exit 0 with `ok=false`: the stub skips build and release, and the run reads as skipped rather than failed
+        echo(f'::notice::{skip.message}')
+        if github_output:
+            with open(github_output, 'a') as file:
+                file.write('ok=false\n')
+        summary = environ.get('GITHUB_STEP_SUMMARY')
+        if summary:
+            with open(summary, 'a') as file:
+                file.write(f'Skipped: {skip.message}\n')
+        return
+    output.write_text(dumps(value, indent=2) + '\n')
     if github_output:
         with open(github_output, 'a') as file:
+            file.write('ok=true\n')
             for key in ['sha', 'source_branch', 'mode', 'environment', 'project', 'pages_branch', 'host']:
                 file.write(f'{key}={value[key]}\n')
     summary = environ.get('GITHUB_STEP_SUMMARY')

@@ -38,6 +38,7 @@ jobs:
           (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'))
     runs-on: ubuntu-latest
     outputs:
+      ok: ${{ steps.plan.outputs.ok }}
       control_sha: ${{ steps.control.outputs.sha }}
       sha: ${{ steps.plan.outputs.sha }}
       source_branch: ${{ steps.plan.outputs.source_branch }}
@@ -75,6 +76,8 @@ jobs:
         run: control/scripts/oa-release plan -e "$GITHUB_EVENT_PATH" -n "$GITHUB_EVENT_NAME" -r "$GITHUB_REPOSITORY" -o plan.json
   build:
     needs: plan
+    # `plan` sets `ok=false` (exit 0, a notice) for a release a newer push overtook: skipped, so a red run is a real failure
+    if: needs.plan.outputs.ok == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

@@ -518,7 +518,34 @@ def test_stub_reads_exactly_the_outputs_plan_writes(tmp_path, monkeypatch):
     assert result.exit_code == 0, result.output
     written = sorted(line.split('=', 1)[0] for line in out.read_text().splitlines())
     read = sorted(set(findall(r'steps\.plan\.outputs\.(\w+)', (ROOT / '.github/workflows/oa-release.yml').read_text())))
-    assert read == written == ['environment', 'host', 'mode', 'pages_branch', 'project', 'sha', 'source_branch']
+    assert read == written == ['environment', 'host', 'mode', 'ok', 'pages_branch', 'project', 'sha', 'source_branch']
+
+
+@pytest.mark.parametrize(('event_name', 'event', 'message'), [
+    ('workflow_run', {'workflow_run': ci()}, 'Obsolete CI completion: source branch has moved'),
+    ('workflow_dispatch', {'inputs': {'deployment': 'hf', 'sha': SHA}},
+     f'hf-prod points at {"b" * 12}, not {SHA[:12]}: production releases the pointer (git push o <sha>:hf-prod)'),
+])
+def test_a_superseded_release_is_skipped_not_failed(tmp_path, monkeypatch, event_name, event, message):
+    """A newer push overtook it (the branch, or the prod pointer, moved): `plan` exits 0 with a notice and `ok=false`, so
+    the stub skips build and release and the run isn't red; nothing is planned."""
+    setup_api(monkeypatch, tip='b' * 40, pointer='b' * 40)
+    paths = {name: tmp_path / name for name in ('event.json', 'github_output', 'summary', 'plan.json')}
+    paths['event.json'].write_text(dumps(event))
+    monkeypatch.setenv('GITHUB_OUTPUT', str(paths['github_output']))
+    monkeypatch.setenv('GITHUB_STEP_SUMMARY', str(paths['summary']))
+    result = CliRunner().invoke(release.main, ['plan', '-e', str(paths['event.json']), '-n', event_name, '-r', REPO, '-o', str(paths['plan.json'])])
+    assert (result.exit_code, result.output) == (0, f'::notice::{message}\n')
+    assert (paths['github_output'].read_text(), paths['summary'].read_text()) == ('ok=false\n', f'Skipped: {message}\n')
+    assert not paths['plan.json'].exists()
+
+
+def test_build_and_so_release_run_only_on_a_plan_that_is_ok():
+    from yaml import BaseLoader, load
+    jobs = load((ROOT / '.github/workflows/oa-release.yml').read_text(), Loader=BaseLoader)['jobs']
+    assert jobs['plan']['outputs']['ok'] == '${{ steps.plan.outputs.ok }}'
+    assert (jobs['build']['needs'], jobs['build']['if']) == ('plan', "needs.plan.outputs.ok == 'true'")
+    assert (jobs['release']['needs'], 'if' in jobs['release']) == (['plan', 'build'], False)
 
 
 @pytest.mark.parametrize(('head', 'dirty', 'message'), [
