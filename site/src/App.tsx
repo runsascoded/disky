@@ -801,9 +801,22 @@ function AppContent() {
     enabled: !!asof,
     staleTime: Infinity,
   })
-  // A scan still indexing has no age rows yet (its age tiers are listed by the run's last step, `index-sync`): the
-  // section says so rather than vanishing.
-  const ageWaiting = !ageQ.isPending && !ageQ.isError && !(ageQ.data?.records.length) && !!asof && indexing.has(asof)
+  // A scan whose run hasn't finished has no age rows yet (its age tiers are listed by the run's last step,
+  // `index-sync`, after search indexing). When the scan before it has rows here, the section says so and links it,
+  // rather than vanishing; a deployment with no age index at all (both empty) still shows nothing.
+  const ageEmpty = !ageQ.isPending && !ageQ.isError && !(ageQ.data?.records.length) && !!asof
+  const agePrevQ = useQuery({
+    queryKey: ['age', store.key, prevScan, drillPath, ageBudget],
+    queryFn: async () => {
+      const r = await sfetch(`/api/age-pyramid?date=${prevScan}&path=${encodeURIComponent(drillPath)}&bin_budget=${ageBudget}`, { credentials: 'include', cache: 'no-cache' })
+      if (!r.ok) throw new Error(`age ${r.status}`)
+      return await r.json() as { records: { dt: number; b: number; o: number }[] }
+    },
+    enabled: ageEmpty && !!prevScan,
+    staleTime: Infinity,
+  })
+  const ageWaiting = ageEmpty && !!agePrevQ.data?.records.length
+  const agePrevHref = ageWaiting && prevScan ? hrefWithScan(pathname, search, selOf(new URLSearchParams(search)), prevScan, true, times, scans) : null
   const age: AgeRow[] = useMemo(
     () => (ageQ.data?.records ?? []).map(r => ({ d: Math.floor(r.dt / 86400_000), b: r.b, o: r.o })),
     [ageQ.data],
@@ -1779,8 +1792,8 @@ function AppContent() {
         {ageQ.isPending && !!asof && <Skeleton height={220} label="loading ages…" />}
         {ageWaiting && (
           <p className="hint">
-            This scan’s ages appear once its indexing finishes
-            {newestHref && newestSearchable ? <>; <a href={newestHref}>{fmtS(newestSearchable)}</a> has them</> : null}.
+            This scan’s ages appear once its run finishes publishing
+            {agePrevHref && prevScan ? <>; <a href={agePrevHref}>{fmtS(prevScan)}</a> has them</> : null}.
           </p>
         )}
         {age.length > 0 && (
