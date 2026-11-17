@@ -177,3 +177,27 @@ def test_per_call_secrets(tmp_path):
                                    "over-time", "warm-cache", "probe", "digest")),
         "index-gc | -s AWS_ACCESS_KEY_ID=base-key -s CLOUDFLARE_API_TOKEN=gc-cf",
     ])
+
+
+def test_a_failed_listing_reruns_once_then_the_run_fails(tmp_path):
+    marks = tmp_path / "marks"
+    r = head(tmp_path, marks, DT_SCAN_STEP_FAIL_ONCE="list s3://b")
+    assert r.returncode == 0, r.stderr
+    # s3://b's first attempt failed before its marker; its rerun listed it, and everything else ran once
+    assert sorted(marks.read_text().splitlines()) == sorted(ALL)
+    log = (tmp_path / "nf/.nextflow.log") if (tmp_path / "nf/.nextflow.log").exists() else next(tmp_path.rglob(".nextflow.log"))
+    assert [line.split("scan head: ", 1)[1] for line in log.read_text().splitlines() if "scan head: " in line] == [
+        "list_source (s3://b) failed (exit 1); rerunning it (1/1)",
+    ]
+
+    marks.unlink()
+    shutil.rmtree(tmp_path / "nf")
+    r = head(tmp_path, marks, DT_SCAN_STEP_FAIL="list")
+    assert r.returncode != 0
+    with next((tmp_path / "nf/runs").rglob("trace.tsv")).open() as f:
+        import csv
+        rows = sorted((row["name"], row["status"], row["exit"]) for row in csv.DictReader(f, delimiter="\t"))
+    # each source's listing ran twice (the rerun), both failed; nothing after the listings started
+    assert [x for x in rows if x[0].startswith("list_source")] == [
+        (f"list_source ({u})", "FAILED", "1") for u in ("s3://a", "s3://a", "s3://b", "s3://b", "s3://c", "s3://c")]
+    assert [x for x in rows if not x[0].startswith("list_source")] == []

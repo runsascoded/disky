@@ -29,7 +29,8 @@ params.job_start = null
 params.run_id = ''
 params.sources = []        // [[uri:, machine:, disk: [request:, type:], secrets: [ENV=SECRET, …] (only a source's own),
                            //   machines: [primary, fallback…], queue_timeout: '<N>m' (with `fallback`)]]
-params.list_retries = 0    // the most fallback types any source has (`list_source`'s `maxRetries`)
+params.list_retries = 0    // the most fallback types any source has (`list_source`'s submit-timeout retries)
+params.list_failure_retries = 1  // reruns of a listing that failed (a store's throttling outlasting the lister's own retries)
 params.list_default = [:]  // the profile's `machines.list`: [machine:, disk:]
 params.steps = []          // every enabled step (core minus `skip`, plus the profile's `steps`)
 params.pre = []            // enabled extra steps beside `list`, before `index` (soft: index runs without them)
@@ -117,16 +118,24 @@ process side {
 }
 
 // A source with `fallback` types (spec §7) runs submit attempt k on `src.machines[k-1]`, each but the last with a queue
-// timeout; only Nextflow's submit timeout is retried (as `scan_head.fallback_block`'s labels), any real failure finishes.
+// timeout; a submit timeout retries on the next type (as `scan_head.fallback_block`'s labels). A real failure reruns on
+// the same type up to `list_failure_retries` times (a listing is idempotent: `bulk-list -x clear`), then finishes.
+// `task.attempt` counts every attempt and `task.submitAttempt` only the submit-timeout ones, so their difference is the
+// failures retried so far.
 process list_source {
     tag "${src.uri}"
     label 'list'
     machineType { src.machines ? src.machines[task.submitAttempt - 1] : (src.machine ?: params.list_default.machine) }
     disk { diskOf(src.disk ?: params.list_default.disk) }
     maxSubmitAwait { src.machines && task.submitAttempt < src.machines.size() ? src.queue_timeout : null }
-    maxRetries params.list_retries
+    maxRetries params.list_retries + params.list_failure_retries
     errorStrategy {
-        if( !(task.previousException?.cause instanceof nextflow.exception.ProcessSubmitTimeoutException) ) return 'finish'
+        if( !(task.previousException?.cause instanceof nextflow.exception.ProcessSubmitTimeoutException) ) {
+            if( task.attempt - task.submitAttempt >= params.list_failure_retries ) return 'finish'
+            log.warn "scan head: ${task.process} (${src.uri}) failed (exit ${task.exitStatus}); rerunning it " +
+                     "(${task.attempt - task.submitAttempt + 1}/${params.list_failure_retries})"
+            return 'retry'
+        }
         log.warn "scan head: ${task.process} queued ${src.queue_timeout} on ${task.machineType}; retrying on " +
                  "${src.machines[task.submitAttempt]}${task.submitAttempt + 1 < src.machines.size() ? '' : ' (the last: no queue timeout)'}"
         return 'retry'

@@ -48,7 +48,8 @@ Adding a step (gcs's access-ingest, rules, healthcheck, … are steps like any o
   (`ctx.need(path)`), and `scan head -F` reruns every task with the cache off (each then skips what's done).
 
 Tests and DAG checks: `DT_SCAN_STEP_FAKE=<file>` makes every step append `<name> <arg>` to the file and return;
-`DT_SCAN_STEP_FAIL=<name>` makes that step exit 1 (its marker unwritten).
+`DT_SCAN_STEP_FAIL=<name>` makes that step exit 1 (its marker unwritten); `DT_SCAN_STEP_FAIL_ONCE=<name> <arg>` (a marker
+line) makes only its first run exit 1 (a `<fake file>.failed` sentinel), so a retry succeeds.
 """
 from __future__ import annotations
 
@@ -80,6 +81,7 @@ PROFILE_PATH_ENV = "DT_SCAN_PROFILE"
 DATA_MOUNT_ENV = "DT_DATA_MOUNT"
 FAKE_ENV = "DT_SCAN_STEP_FAKE"
 FAIL_ENV = "DT_SCAN_STEP_FAIL"
+FAIL_ONCE_ENV = "DT_SCAN_STEP_FAIL_ONCE"
 IDENTITY = ("SNAP_ID", "GEN", "DT_JOB_START")
 #: Credentials whose absence turns a serving step into a logged skip (the gate; the values never reach argv or logs).
 CF = ("CLOUDFLARE_API_TOKEN", "CLOUDFLARE_ACCOUNT_ID")
@@ -2083,6 +2085,11 @@ def run_step(name: str, arg: str | None, env: dict[str, str] | None = None, prof
         return 2
     if env.get(FAIL_ENV) == name:
         err(f"scan step {name}: failing ({FAIL_ENV})")
+        return 1
+    once = Path(f"{env.get(FAKE_ENV)}.failed")
+    if env.get(FAKE_ENV) and env.get(FAIL_ONCE_ENV) == f"{name} {arg or ''}".rstrip() and not once.exists():
+        once.write_text(f"{name} {arg or ''}".rstrip() + "\n")
+        err(f"scan step {name}: failing once ({FAIL_ONCE_ENV})")
         return 1
     if env.get(FAKE_ENV):
         with open(env[FAKE_ENV], "a") as f:
