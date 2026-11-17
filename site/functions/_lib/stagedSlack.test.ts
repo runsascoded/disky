@@ -397,14 +397,23 @@ describe('stage replies: compact, phone-width', () => {
 })
 
 describe('senders', () => {
-  it('an event posts as the person (their Slack avatar), else their local part with a generic icon', () => {
+  it('an event posts as the person (their Slack avatar), else their local part with a generic icon; each carries the face to badge with what they did', () => {
+    const ANN = { name: 'Ann Bee', image: 'https://img/a.png' }
     expect([
-      personSender('a.b@example.org', { name: 'Ann Bee', image: 'https://img/a.png' }, 'staged'),
+      personSender('a.b@example.org', ANN, 'staged'),
       personSender('c.d@example.org', undefined, 'staged'),
+      personSender('a.b@example.org', ANN, 'dispatched', 'dry'),
+      personSender('a.b@example.org', ANN, 'finished', 'real'),
+      personSender('a.b@example.org', ANN, 'rejected'),
+      personSender('a.b@example.org', ANN, 'noted'),
       PLAN_SENDER,
     ]).toEqual([
-      { username: 'Ann Bee · staged', icon_url: 'https://img/a.png' },
-      { username: 'c.d · staged', icon_emoji: ':bust_in_silhouette:' },
+      { username: 'Ann Bee · staged', icon_url: 'https://img/a.png', face: { email: 'a.b@example.org', image: 'https://img/a.png', badge: 'staged' } },
+      { username: 'c.d · staged', icon_emoji: ':bust_in_silhouette:', face: { email: 'c.d@example.org', image: null, badge: 'staged' } },
+      { username: 'Ann Bee · dry run', icon_url: 'https://img/a.png', face: { email: 'a.b@example.org', image: 'https://img/a.png', badge: 'dry' } },
+      { username: 'Ann Bee · finished', icon_url: 'https://img/a.png', face: { email: 'a.b@example.org', image: 'https://img/a.png', badge: 'finished' } },
+      { username: 'Ann Bee · rejected', icon_url: 'https://img/a.png', face: { email: 'a.b@example.org', image: 'https://img/a.png', badge: 'undone' } },
+      { username: 'Ann Bee · noted', icon_url: 'https://img/a.png' },
       { username: 'Staged deletions', icon_emoji: ':wastebasket:' },
     ])
   })

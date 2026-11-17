@@ -16,6 +16,7 @@ import type { RunOutcome } from '../../src/runs.js'
 import { batchDeletions, type FinishedRun, openPlanId, planDigest, planHistory, planItemLines, planRuns, type RunRow, scanDeletions, unstageDeleted } from './plans.js'
 import { withoutDeleted } from '../../src/stagedScan.js'
 import { slackApi, slackPeople, type SlackPerson, slackReady, type SlackEnv, type SlackResult } from './slack.js'
+import { badgedAvatarUrl, badgeOf, type Badge } from './badgedAvatar.js'
 import type { Env } from './auth.js'
 import { runHasNoUndo, runPromisedNothing, undoneText, type UndoUnavailable, undoUnavailableText } from '../../src/softDelete.js'
 import { runUndoNow } from './softDeleteNow.js'
@@ -552,7 +553,13 @@ export async function slackNames(env: SlackEnv, emails: readonly string[]): Prom
  *  the plan itself; an event posts as the person who did it. */
 export { slackPeople, type SlackPerson }
 
-export interface Sender { username: string; icon_url?: string; icon_emoji?: string }
+export interface Sender {
+  username: string
+  icon_url?: string
+  icon_emoji?: string
+  /** A person's face to badge with what they did (`badgedAvatar.ts`); resolved to `icon_url` when the post is sent. */
+  face?: { email: string; image: string | null; badge: Badge }
+}
 /** `email` as the deployment's registry knows them (the site's own name and GitHub avatar), for someone the Slack
  *  workspace doesn't (a sign-in email outside it). */
 export function registryPerson(reg: Registry, email: string): SlackPerson | undefined {
@@ -560,9 +567,22 @@ export function registryPerson(reg: Registry, email: string): SlackPerson | unde
   return rec ? { name: rec.name, image: rec.github ? `https://avatars.githubusercontent.com/${rec.github}?s=192` : null } : undefined
 }
 export const PLAN_SENDER: Sender = { username: 'Staged deletions', icon_emoji: ':wastebasket:' }
-export function personSender(email: string, person: SlackPerson | undefined, verb: string): Sender {
+export function personSender(email: string, person: SlackPerson | undefined, verb: string, mode?: string | null): Sender {
   const name = person?.name ?? email.replace(/@.*$/, '')
-  return { username: `${name} · ${verb}`, ...(person?.image ? { icon_url: person.image } : { icon_emoji: ':bust_in_silhouette:' }) }
+  const badge = badgeOf(verb, mode)
+  return {
+    username: `${name} · ${verb === 'dispatched' && mode && mode !== 'real' ? 'dry run' : verb}`,
+    ...(person?.image ? { icon_url: person.image } : { icon_emoji: ':bust_in_silhouette:' }),
+    ...(badge ? { face: { email, image: person?.image ?? null, badge } } : {}),
+  }
+}
+
+/** `sender` as Slack takes it: a badged face (`face`) made into its `icon_url`, else the plain one. */
+export async function senderFields(env: SlackEnv & { SESSION_SECRET?: string }, db: D1Database, siteUrl: string, sender: Sender): Promise<Omit<Sender, 'face'>> {
+  const { face, ...plain } = sender
+  if (!face) return plain
+  const url = await badgedAvatarUrl(env, db, siteUrl, face, face.badge)
+  return url ? { username: plain.username, icon_url: url } : plain
 }
 
 /** Prefixes with their numbers at one scan. */
@@ -800,7 +820,7 @@ async function announceStage(env: SlackEnv, db: D1Database, o: { channel: string
   }
   if (claimed) {
     const m = await renderReply(db, o.ctx, ref)
-    const p = m ? await slackApi(env, 'chat.postMessage', { channel: o.channel, thread_ts: o.thread, ...m, ...o.sender, unfurl_links: false }) : null
+    const p = m ? await slackApi(env, 'chat.postMessage', { channel: o.channel, thread_ts: o.thread, ...m, ...await senderFields(env, db, o.ctx.siteUrl, o.sender), unfurl_links: false }) : null
     if (!m || !p?.ok || !p.ts) {
       // Nothing to show (a sweep raced the batch's own notify) or the post
       // failed: close the claim, so the next announce claims anew (after a
@@ -834,7 +854,7 @@ export async function notifyPlan(env: NotifyEnv, db: D1Database, planId: number,
     const stage = ev && 'stage' in ev ? ev.stage : null
     const runEv = ev && 'run' in ev ? ev : null
     const said = ev && !('stage' in ev) && !('run' in ev) ? ev as Event : null
-    const by = stage?.by ?? (runEv?.phase === 'dispatched' ? runEv.run.actor : said?.by?.email ?? null)
+    const by = stage?.by ?? (runEv ? runEv.run.actor : said?.by?.email ?? null)
     const render = async (v: NonNullable<Awaited<ReturnType<typeof loadView>>>) => {
       const queued = v.prefixes.filter(p => !v.deleted.has(p))
       const [at, reg, people] = await Promise.all([
@@ -862,7 +882,7 @@ export async function notifyPlan(env: NotifyEnv, db: D1Database, planId: number,
     // A run's own end: what it measured stands, unless the reading already shows soft delete off where it deleted.
     const runUndo = runEv && runEv.phase !== 'dispatched' && runEv.run.mode === 'real' ? await runUndoNow(full, db, runEv.run, now) : null
     const event: Event | undefined = runEv
-      ? { text: runEvent(runEv.run, runEv.phase, { via: runEv.via, names, siteUrl, reason: runEv.reason, outcome: runEv.outcome, expected: runEv.expected, undoUnavailable: runUndo?.unavailable }), ...(by ? { sender: personSender(by, people[by.toLowerCase()], 'dispatched') } : {}) }
+      ? { text: runEvent(runEv.run, runEv.phase, { via: runEv.via, names, siteUrl, reason: runEv.reason, outcome: runEv.outcome, expected: runEv.expected, undoUnavailable: runUndo?.unavailable }), ...(by ? { sender: personSender(by, people[by.toLowerCase()], runEv.phase, runEv.run.mode) } : {}) }
       : said ? { ...said, text: typeof said.text === 'function' ? said.text(who(said.by?.email ?? '', names)) : said.text, ...(said.by ? { sender: personSender(said.by.email, people[said.by.email.toLowerCase()], said.by.verb) } : {}) }
       : undefined
     const channel = env.SLACK_ADMIN_CHANNEL!
@@ -929,7 +949,7 @@ export async function notifyPlan(env: NotifyEnv, db: D1Database, planId: number,
         sender: personSender(stage.by, people[stage.by.toLowerCase()], 'staged'),
       })
     } else if (event) {
-      await slackApi(env, 'chat.postMessage', { channel, thread_ts: ts, text: event.text as string, ...(event.blocks ? { blocks: event.blocks } : {}), ...(event.sender ?? PLAN_SENDER), unfurl_links: false })
+      await slackApi(env, 'chat.postMessage', { channel, thread_ts: ts, text: event.text as string, ...(event.blocks ? { blocks: event.blocks } : {}), ...(event.sender ? await senderFields(env, db, siteUrl, event.sender) : PLAN_SENDER), unfurl_links: false })
     }
     // A run starting or ending shows or hides each stage reply's Reject.
     if (runEv) await updateReplies(env, db, planId, siteUrl).catch(e => console.log(`staged slack replies refresh failed for plan ${planId}: ${(e as Error).message}`))

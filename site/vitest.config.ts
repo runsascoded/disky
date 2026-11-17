@@ -11,9 +11,9 @@ writeBuildId()
 export default defineConfig({
   // A Function's statically imported wasm is a compiled module on Workers (wrangler's bundling): the same under test.
   plugins: [{
-    name: 'zstd-wasm-module',
+    name: 'vendor-wasm-module',
     enforce: 'pre',
-    load: id => id.endsWith('/vendor/zstd.wasm') ? `import { readFileSync } from 'node:fs'\nexport default new WebAssembly.Module(readFileSync(${JSON.stringify(id)}))\n` : null,
+    load: id => /\/vendor\/(zstd|resvg)\.wasm$/.test(id) ? `import { readFileSync } from 'node:fs'\nexport default new WebAssembly.Module(readFileSync(${JSON.stringify(id)}))\n` : null,
   }],
   test: { include: ['functions/**/*.test.ts', 'src/**/*.test.ts', 'bench/**/*.test.ts', 'executor/**/*.test.ts'], testTimeout: 30_000 },
 })

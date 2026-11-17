@@ -82,7 +82,7 @@ async function handle(env: Env, p: BlockActions, siteUrl: string): Promise<void>
     }
     if (!n) return tell(p.response_url, `${what} ${replyId != null ? 'have' : 'has'} nothing left staged.`)
     const name = (await slackNames(env, [email]))[email] ?? email.replace(/@.*$/, '')
-    await notifyPlan(env, db, planId, siteUrl, { text: `:no_entry_sign: ${name} rejected ${k} ${k === 1 ? 'batch' : 'batches'} (${n.toLocaleString('en-US')} ${n === 1 ? 'path' : 'paths'} unstaged)` })
+    await notifyPlan(env, db, planId, siteUrl, { text: `:no_entry_sign: ${name} rejected ${k} ${k === 1 ? 'batch' : 'batches'} (${n.toLocaleString('en-US')} ${n === 1 ? 'path' : 'paths'} unstaged)`, by: { email, verb: 'rejected' } })
     const rid = replyId ?? batches[0].reply_id
     if (rid != null) await updateReplies(env, db, planId, siteUrl, { replyIds: [rid] })
     return

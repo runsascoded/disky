@@ -53,6 +53,8 @@ function fakeSlack({ reactions = {} as Record<string, string[]>, delayMs = 0, on
   const json = (o: unknown) => new Response(JSON.stringify(o))
   vi.stubGlobal('fetch', vi.fn(async (input: string, init?: RequestInit) => {
     const url = new URL(input)
+    // Anything but Slack's API (a sender's face, fetched to badge it) isn't there: the post keeps the plain face.
+    if (url.host !== 'slack.com') return new Response('', { status: 404 })
     const method = url.pathname.replace('/api/', '')
     const body = (init?.body ? JSON.parse(String(init.body)) : Object.fromEntries(url.searchParams)) as Record<string, string>
     if (method !== 'users.lookupByEmail' && method !== 'users.info') calls.push({ method, body })
@@ -163,6 +165,21 @@ describe('D1', () => {
         ['300.000002', [':wastebasket: *Ann Bee* staged 1 path · *1.0 TiB* · 10 objects'], ['staged_reject: Reject batch', 'staged_open: View in www']],
         ['300.000003', [':wastebasket: *Ann Bee* staged 1 path · *1.0 TiB* · 10 objects'], ['staged_reject: Reject batch', 'staged_open: View in www']],
       ])
+    })
+  })
+
+  describe('a run\'s end posts as whoever dispatched it', () => {
+    it('"<name> · finished", their face (badged when it can be fetched; this fake Slack serves no faces)', async () => {
+      const calls = fakeSlack()
+      const { db, raw } = await planDb({ seed: false })
+      raw.prepare("INSERT INTO stage_replies (id, plan_id, stager, channel, thread_ts, slack_ts, created_ts, updated_ts) VALUES (7, 1, ?, ?, ?, '300.000001', 1, 1)").run(ANN, CH, PARENT)
+      await stage(db, 1, ['gs://b/a/', 'gs://b/b/'], { ts: 5 })
+      raw.prepare('UPDATE stage_batches SET reply_id = 7 WHERE id = 1').run()
+      raw.prepare(`INSERT INTO deletion_runs (run_id, ${RUN_DIR}, scan, head, exec_head, actor, mode, started_ts, finished_ts, plan_digest, log_dir, plan_id)
+        VALUES ('r1', 'p', ?, 0, 0, ?, 'real', 10, 20, 'D', 'd', 1)`).run(SCAN, ANN)
+      raw.prepare("INSERT INTO deletion_bands (run_id, prefix, bytes, objects, undone_objects) VALUES ('r1', 'gs://b/a/', ?, 10, 0)").run(TiB)
+      await announceFinished(env as Parameters<typeof announceFinished>[0], db, [{ run_id: 'r1', ok: true }], SITE)
+      expect(calls.filter(c => c.method === 'chat.postMessage').map(c => [c.body.username, c.body.icon_url])).toEqual([['Ann Bee · finished', 'https://img/ann.png']])
     })
   })
 
