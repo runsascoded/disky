@@ -450,10 +450,10 @@ export async function pathScans(env: Env, order: boolean): Promise<{ results: { 
  *  store with its own (its vars' `PATH_STORE`, `INTERVAL_STORE_PREFIX`), under `PATH_STORE=intervals`, at its pinned
  *  or current generation (`ivGen`). None under `opt-in` (a default request reads per-scan stores), or with no
  *  generation yet. */
-export async function storeHeldScans(env: Env): Promise<string[]> {
+export async function storeHeldScans(env: Env, fresh = false): Promise<string[]> {
   if (env.PATH_STORE !== 'intervals') return []
   const gen = await ivGen(env)
-  return gen ? [...(await ivScans({ ...env, INTERVAL_STORE_GEN: gen })).keys()] : []
+  return gen ? [...(await ivState({ ...env, INTERVAL_STORE_GEN: gen }, fresh)).scans.keys()] : []
 }
 
 /** The env's store's date-only scans whose start is known: each `path`
@@ -926,10 +926,10 @@ interface IvStateDoc { scans: { id: string; ts: number }[]; slices: boolean; man
 /** `IvStateDoc` through the colo cache for `IV_STATE_TTL`: a new isolate's first read starts from it instead of
  *  three R2 operations in series (`scans.json`, the manifests' `list`, the newest's `get`). A new scan's run
  *  shows up within the colo's TTL plus the isolate's. */
-async function ivStateDoc(env: Env): Promise<IvStateDoc> {
+async function ivStateDoc(env: Env, fresh = false): Promise<IvStateDoc> {
   const gen = env.INTERVAL_STORE_GEN!
   const ck = coloKey(env, ivKey(env, `${ivPrefix(env)}/${gen}/scans.json`), 'state=4')
-  const hit = await colo().match(ck)
+  const hit = fresh ? undefined : await colo().match(ck)
   if (hit) return hit.json<IvStateDoc>()
   const [o, manifest] = await Promise.all([readerObjects(env)!.get(`${ivPrefix(env)}/${gen}/scans.json`), ivManifest(env)])
   if (!o) throw new Error(`interval store ${gen}: no scans.json`)
@@ -954,8 +954,8 @@ export async function ivChurnFrom(env: Env): Promise<number | null> {
   return intervalsOn(env) ? (await ivState(env)).churn : null
 }
 
-async function loadIvState(env: Env): Promise<IvState> {
-  const doc = await ivStateDoc(env)
+async function loadIvState(env: Env, fresh = false): Promise<IvState> {
+  const doc = await ivStateDoc(env, fresh)
   const scans = new Map(doc.scans.map(x => [x.id, x.ts]))
   const base = new Set(scans.keys())
   const m = doc.manifest
@@ -980,13 +980,21 @@ async function loadIvState(env: Env): Promise<IvState> {
   return { scans, base, runs, cut: cutAt != null, refused, slices: doc.slices !== false, atBase: !!doc.attribution?.base, attribution, churn: doc.churn ?? null }
 }
 
+/** How old a held state must be before a miss may re-read it past both caches (`ivState`'s `fresh`): at most one
+ *  such read per isolate and generation in this window, so a stream of unknown scan ids costs no more. */
+export const IV_MISS_REREAD = 5_000
+
 /** The store's state, re-read once it is `IV_STATE_TTL` old (`IV_BROKEN_TTL` when cut); a failed re-read keeps
- *  serving the last good one, and a failed read with none held is an `IvStoreUnavailable`. */
-async function ivState(env: Env): Promise<IvState> {
+ *  serving the last good one, and a failed read with none held is an `IvStoreUnavailable`. `fresh` (a scan id the
+ *  held state doesn't list, `scanArg`): re-read past the isolate's and the colo's copies once the held one is
+ *  `IV_MISS_REREAD` old. Each copy lives `IV_STATE_TTL`, so without it a scan whose run was just published 404'd on
+ *  an isolate still holding the state before it for up to two TTLs, while another isolate (the one that listed the
+ *  scan) served it: dev.cw.oa.dev, 2026-11-17T1202. */
+async function ivState(env: Env, fresh = false): Promise<IvState> {
   const k = ivGenKey(env)
   const cur = ivStates.get(k)
   const age = cur ? Date.now() - cur.at : Infinity
-  if (cur && age < (cur.ok?.cut ? IV_BROKEN_TTL : IV_STATE_TTL)) {
+  if (cur && age < (cur.ok?.cut ? IV_BROKEN_TTL : IV_STATE_TTL) && !(fresh && age >= IV_MISS_REREAD)) {
     if (cur.ok) return cur.ok
     // A load another request started: joined (`IV_JOIN`), else read afresh here.
     const got = await join(cur.p, ivJoin(env, 'state'))
@@ -997,7 +1005,7 @@ async function ivState(env: Env): Promise<IvState> {
   }
   const last = cur?.ok
   const entry: { at: number; p: Promise<IvState>; ok?: IvState } = { at: Date.now(), p: Promise.resolve(null as unknown as IvState) }
-  entry.p = loadIvState(env).then(
+  entry.p = loadIvState(env, fresh).then(
     st => { entry.ok = st; return st },
     e => {
       if (ivStates.get(k) === entry) ivStates.delete(k)

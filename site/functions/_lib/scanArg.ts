@@ -34,12 +34,17 @@ export async function indexedScan(env: Env, prefix: string, exact: boolean): Pro
     const held = await storeHeldScans(env).catch(() => null)
     if (held?.includes(prefix)) return prefix
     const r = await env.DB.prepare(`SELECT MAX(date) AS d FROM index_schema WHERE ${where} AND date = ?`).bind(...scope, prefix).first<{ d: string | null }>()
-    return r?.d ?? (held ? null : (await storeHeldScans(env)).includes(prefix) ? prefix : null)
+    // A miss re-reads the store's state past its caches (`storeHeldScans`' `fresh`): the scan list a page picked this
+    // id from may have come from an isolate holding a newer state than this one's.
+    return r?.d ?? ((await storeHeldScans(env, true)).includes(prefix) ? prefix : null)
   }
   const r = await env.DB.prepare(`SELECT DISTINCT date FROM index_schema WHERE ${where} AND date LIKE ?`).bind(...scope, `${prefix.slice(0, 10)}%`).all<{ date: string }>()
-  const held = (await storeHeldScans(env)).filter(d => d.startsWith(prefix.slice(0, 10)))
-  const day = [...new Set([...r.results.map(x => x.date), ...held])]
-  return latestScan(prefix, day, await scanTimes(env, day))
+  const resolve = async (fresh: boolean): Promise<string | null> => {
+    const held = (await storeHeldScans(env, fresh)).filter(d => d.startsWith(prefix.slice(0, 10)))
+    const day = [...new Set([...r.results.map(x => x.date), ...held])]
+    return latestScan(prefix, day, await scanTimes(env, day))
+  }
+  return (await resolve(false)) ?? (env.PATH_STORE === 'intervals' ? resolve(true) : null)
 }
 
 /** The 404 a miss answers: `{error: "no scan matches <key>=<value>"}`. */
