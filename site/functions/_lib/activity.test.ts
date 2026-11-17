@@ -245,6 +245,10 @@ describe('rendering', () => {
       `<${ORIGIN}/admin/sessions/sid-aaaaaaaaaa|session sid-aaaa>`,
     ])
     expect(renderDetails({ ...burst, pages: {}, trail: emptyTrail(), sids: [] }, { ...o, highlights: {} })).toBe('')
+    const deletion = [{ ts: S, kind: 'deletion', line: 'real deletion of plan #2 dispatched (cw-sweep-real-x)', detail: { plan: 2, job: 'cw-sweep-real-x', mode: 'real', thread: { channel: 'C01', ts: '1794900000.123456' } } }]
+    expect(highlights(deletion)).toEqual({ plans: [2], threads: { 2: { channel: 'C01', ts: '1794900000.123456' } } })
+    expect(renderDetails({ ...burst, pages: {}, trail: emptyTrail(), sids: [] }, { ...o, highlights: highlights(deletion) })).toBe(
+      `<${ORIGIN}/staged?plan=2|plan 2> (<https://slack.com/archives/C01/p1794900000123456|thread>)`)
     expect([senderName('ann@example.test', 'Ann Lee'), senderName('ann@example.test', ' '), senderName('ann@example.test', null)]).toEqual(['Ann Lee', 'ann', 'ann'])
   })
 

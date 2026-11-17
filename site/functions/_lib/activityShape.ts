@@ -334,14 +334,20 @@ export interface Highlights {
   largest?: { pattern: string; bytes: number; owner: string | null }
   /** Owners assigned to (null = cleared), in first-seen order. */
   owners?: (string | null)[]
-  /** The staged plans touched. */
+  /** The staged plans touched (staging edits, deletion runs). */
   plans?: number[]
+  /** A plan's Slack thread, where a deletion event recorded it (`detail.thread`). */
+  threads?: Record<number, { channel: string; ts: string }>
 }
+
+/** A Slack message's link (`chat.getPermalink`'s shape without the workspace: slack.com redirects to it). */
+export const slackPermalink = (channel: string, ts: string): string => `https://slack.com/archives/${channel}/p${ts.replace('.', '')}`
 
 export function highlights(events: readonly Pick<ServerEvent, 'kind' | 'detail'>[]): Highlights {
   const out: Highlights = {}
   const owners: (string | null)[] = []
   const plans: number[] = []
+  const threads: Record<number, { channel: string; ts: string }> = {}
   for (const e of events) {
     const d = e.detail ?? {}
     if (e.kind === 'assign') {
@@ -351,10 +357,15 @@ export function highlights(events: readonly Pick<ServerEvent, 'kind' | 'detail'>
         out.largest = { pattern: d.pattern, bytes: d.bytes, owner }
       }
     }
-    if (e.kind === 'stage' && typeof d.plan === 'number' && !plans.includes(d.plan)) plans.push(d.plan)
+    if ((e.kind === 'stage' || e.kind === 'deletion') && typeof d.plan === 'number') {
+      if (!plans.includes(d.plan)) plans.push(d.plan)
+      const t = d.thread as { channel?: unknown; ts?: unknown } | undefined
+      if (typeof t?.channel === 'string' && typeof t.ts === 'string') threads[d.plan] = { channel: t.channel, ts: t.ts }
+    }
   }
   if (owners.length) out.owners = owners
   if (plans.length) out.plans = plans
+  if (Object.keys(threads).length) out.threads = threads
   return out
 }
 
@@ -407,7 +418,10 @@ function detailLines(b: Burst, o: SummaryOpts, lead: string[]): string[] {
   if (h.owners && (h.owners.length > 1 || !h.largest)) lines.push(`Owners: ${h.owners.map(x => x ?? 'cleared').join(', ')}`)
   if (conf.view?.notify !== 'off') lines.push(...pageLines(b, fmt, o.topPages ?? 5))
   const links = [...lead, ...sessionLinks(b, fmt)]
-  for (const p of h.plans ?? []) links.push(fmt.link(`${b.origin}/staged?plan=${p}`, `plan ${p}`))
+  for (const p of h.plans ?? []) {
+    const t = h.threads?.[p]
+    links.push(fmt.link(`${b.origin}/staged?plan=${p}`, `plan ${p}`) + (t ? ` (${fmt.link(slackPermalink(t.channel, t.ts), 'thread')})` : ''))
+  }
   if (links.length) lines.push(links.join(' · '))
   return lines
 }

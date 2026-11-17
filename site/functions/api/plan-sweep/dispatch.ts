@@ -9,6 +9,7 @@ import { MAX_MIN_SOFT_DELETE_DAYS } from "../../../src/softDelete.js"
 import { parseExpected } from "../../_lib/dispatch.js"
 import { withPathStore } from "../../_lib/index.js"
 import { type Ctx, type Env as AuthEnv, json, requireAdmin } from "../../_lib/auth.js"
+import { noteActivity } from "../../_lib/activityHook.js"
 import { dispatchBody, dispatchPlan, type ExecEnv, notifyDispatched, planFirstKind } from "../../_lib/executor.js"
 
 type Env = AuthEnv & ExecEnv
@@ -29,6 +30,15 @@ export const onRequestPost = async (ctx: Ctx & { env: Env; waitUntil?: (p: Promi
   const actor = gated.email ?? gated.name ?? "admin"
   const r = await dispatchPlan(ctx.env, { planId: planId!, mode, date: body?.date, ...(items ? { items } : {}), ...(shown !== undefined ? { shownMinSoftDeleteDays: shown } : {}), actor, siteUrl, expected: parseExpected(body?.expected) }, planFirstKind(ctx.env))
   if (r.ok) {
+    // The activity feed's line names the plan and links its Slack thread (`highlights`), not just the route.
+    const thread = ctx.env.DB
+      ? await ctx.env.DB.prepare("SELECT slack_channel, slack_ts FROM plans WHERE id = ?").bind(r.plan_id).first<{ slack_channel: string | null; slack_ts: string | null }>().catch(() => null)
+      : null
+    noteActivity(ctx, {
+      line: `${r.mode === "real" ? "real deletion" : "dry run"} of plan #${r.plan_id} dispatched (${r.job_id})`,
+      plan: r.plan_id, job: r.job_id, mode: r.mode,
+      ...(thread?.slack_channel && thread.slack_ts ? { thread: { channel: thread.slack_channel, ts: thread.slack_ts } } : {}),
+    })
     // Sized from the interval store for the dates it holds (`withPathStore`), as the plans routes size them.
     // The job has launched: an announcement sized from the raw env beats none, and the response still says it's running.
     const p = withPathStore(ctx).catch(e => { console.log(`dispatch: withPathStore failed: ${(e as Error).message}`); return ctx }).then(c => notifyDispatched(c.env, r, "www", siteUrl))
