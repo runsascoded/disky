@@ -1922,6 +1922,31 @@ def soft_delete(ctx: Ctx, arg: str | None) -> None:
                fatal=False, warn="soft-delete reading failed (the scan's outputs stand; the site keeps the last one, dated)")
 
 
+@step("access-requesters", core=False, soft=True, options={"days": int, "depth": int, "mem": str, "threads": int},
+      requires=primary_only("access-requesters", "the rollup is the deployment's, written once by its primary"),
+      side=True, leaves="the previous days' requester rollups not written: `dt-cloud access requesters -s` backfills them")
+def access_requesters(ctx: Ctx, arg: str | None) -> None:
+    """Who made the scanned buckets' requests (`dt-cloud access requesters`): the access logs' raw rows for each of the
+    `options.access-requesters.days` (default 2) UTC days before the scan's, rolled up per bucket × operation ×
+    client × requester × path prefix into `<data>/access/requesters/<day>.parquet`. A day already written is left (`-s`),
+    so a day the access ingest hadn't finished is written by a later scan only if it was never written: `days: 2`
+    gives each day a second chance. Needs `access/raw/` (the access ingest's). Skipped on REPROC; never fatal."""
+    if ctx.reproc:
+        err("REPROC: skipping the requester rollup")
+        return
+    import datetime as dt
+
+    scan_day = dt.date.fromisoformat(ctx.date)
+    days = [(scan_day - dt.timedelta(days=k)).isoformat() for k in range(int(ctx.opt("access-requesters", "days", 2)), 0, -1)]
+    args = [f"-D{ctx.opt('access-requesters', 'depth', 2)}"]
+    for flag, key in (("-M", "mem"), ("-p", "threads")):
+        if ctx.opt("access-requesters", key):
+            args += [flag, str(ctx.opt("access-requesters", key))]
+    with ctx.phase("access-requesters"):
+        ctx.sh(["dt-cloud", "access", "requesters", "-s", "-r", f"{ctx.data_uri}/access", *args, *days],
+               fatal=False, warn="requester rollup failed (the scan's outputs stand; `dt-cloud access requesters -s` backfills)")
+
+
 def _vm_pack_check(p: ScanProfile) -> list[str]:
     from .vm_pack import batch_problems
 

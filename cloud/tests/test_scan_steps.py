@@ -708,6 +708,7 @@ def test_soft_steps_classification():
         "cf-usage": "side converges",
         "gcp-cost": "side",
         "soft-delete": "side",
+        "access-requesters": "side",
         "vm-pack": "side converges",
     }
 
@@ -1751,6 +1752,21 @@ def test_soft_delete_reads_each_gcs_source_to_the_data_store_and_r2(tmp_path, en
     for none in (ctx(tmp_path, env, steps=["soft-delete"], sources=[{"uri": "r2://r", "endpoint": "https://r2.example.org"}]), ctx(tmp_path, {**env, "REPROC": "1"}, steps=["soft-delete"], sources=sources)):
         S.soft_delete(none, None)
         assert none.sh_impl.calls == []
+
+
+def test_access_requesters_rolls_up_the_days_before_the_scan(tmp_path, env):
+    """`access-requesters` (listed in `steps`): `dt-cloud access requesters -s` over the data store's access logs, for
+    the `days` (default 2) UTC days before the scan's, oldest first, with the depth and DuckDB limits it's given;
+    REPROC: nothing run."""
+    c = ctx(tmp_path, env, steps=["access-requesters"])
+    S.access_requesters(c, None)
+    assert c.sh_impl.calls == ["dt-cloud access requesters -s -r <tmp>/data/access -D2 2026-10-14 2026-10-15"]
+    c = ctx(tmp_path, env, steps=["access-requesters"], options={**NL_OPTS, "access-requesters": {"days": 1, "depth": 3, "mem": "48GB", "threads": 8}})
+    S.access_requesters(c, None)
+    assert c.sh_impl.calls == ["dt-cloud access requesters -s -r <tmp>/data/access -D3 -M 48GB -p 8 2026-10-15"]
+    none = ctx(tmp_path, {**env, "REPROC": "1"}, steps=["access-requesters"])
+    S.access_requesters(none, None)
+    assert none.sh_impl.calls == []
 
 
 def test_soft_delete_failure_fails_its_phase_not_the_run(tmp_path, env):

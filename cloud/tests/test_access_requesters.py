@@ -56,3 +56,21 @@ def test_rollup_day(tmp_path):
         ("2026-11-14", "b2", "LIST", "GET_Bucket", "gcloud-python", "gcloud-python/3.4.0 gl-python/3.13", "34.1.2.3", "ckpt/run-1", 1, 1),
     ]
     assert rollup_day(str(root), dt.date(2026, 11, 20), str(tmp_path / "none.parquet")) == 0
+
+
+def test_cli_writes_each_day_and_skip_existing_leaves_written_ones(tmp_path):
+    from click.testing import CliRunner
+
+    from dt_cloud.cli import main
+
+    root = tmp_path / "access"
+    _raw(root / "raw/b1/part-2026_11_14_00_00_00--2026_11_14_00_00_00.parquet", [
+        ("2026-11-14T00:10:00Z", "b1", "data/tok/a.bin", "GET", "storage.objects.get", 10, "10.0.0.1", "python-gcsfs/2026.1.0"),
+    ])
+    out = tmp_path / "req"
+    run = lambda *a: CliRunner().invoke(main, ["access", "requesters", "-r", str(root), "-o", str(out), *a])
+    first = run("2026-11-14", "2026-11-15")
+    again = run("-s", "2026-11-14")
+    assert (first.exit_code, first.stdout, again.exit_code, again.stdout, sorted(p.name for p in out.iterdir())) == (
+        0, "2026-11-14\t1\n2026-11-15\t0\n", 0, "", ["2026-11-14.parquet"],
+    )
