@@ -157,22 +157,24 @@ def stamp(row: dict) -> str:
 #: A reply's trigger, beside its ✅: the deployment's cron, a hand submit (the site's "Run a scan" or a CLI execute; who,
 #: named after the duration when recorded: `scan_runs.trigger_by`), or a deployment that doesn't state its triggers. The
 #: parent's run mix spells them out.
-#: A manual run's starter's own Slack emoji (`trigger_emoji`: `/api/scan-runs?emoji=1` asks OA's broker) replaces 👤
+#: A manual run's starter's own Slack emoji (`trigger_emoji`: `/api/scan-runs?emoji=1` asks OA's broker) replaces 👤 and their address
 SLACK_EMOJI_RE = re.compile(r":[a-z0-9_+'-]{1,100}:")
 TRIGGER_EMOJI = {'schedule': ':alarm_clock:', 'manual': ':bust_in_silhouette:', None: ':grey_question:'}
 
 
 def reply(cfg: Config, row: dict) -> str:
-    """A run's line in its thread: ✅ or ❌, the trigger, its time linked to its record, the duration, who started it
-    (a manual run that recorded it), and a failed run's reason."""
+    """A run's line in its thread: ✅ or ❌, the trigger (a manual run's starter's own emoji when known), its time linked
+    to its record, the duration, who started it (a manual run that recorded it and has no emoji), and a failed run's
+    reason."""
     seconds = row.get('secs')
     duration = 'duration unknown' if seconds is None else f"{int(seconds) // 60}m {int(seconds) % 60:02d}s"
     by = row['run'].get('trigger_by') if row['run']['trigger'] == 'manual' else None
     by = by if by and TRIGGER_BY_RE.fullmatch(by) else None  # never markup into mrkdwn, whatever a row holds
     face = row['run'].get('trigger_emoji') if by else None
-    emoji = face if face and SLACK_EMOJI_RE.fullmatch(face) else TRIGGER_EMOJI[row['run']['trigger']]
+    face = face if face and SLACK_EMOJI_RE.fullmatch(face) else None
+    emoji = face or TRIGGER_EMOJI[row['run']['trigger']]
     ok = clean(row)
-    return (f"{'✅' if ok else '❌'} {emoji} [{stamp(row)}]({cfg.link(row['run'])}) · {duration}" + (f" · {by}" if by else "")
+    return (f"{'✅' if ok else '❌'} {emoji} [{stamp(row)}]({cfg.link(row['run'])}) · {duration}" + (f" · {by}" if by and not face else "")
             + ('' if ok else f" · {describe(row)}"))
 
 
