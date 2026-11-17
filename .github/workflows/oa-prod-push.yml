@@ -1,0 +1,26 @@
+# A push to an OA deployment's prod pointer (`<d>-prod`) releases that sha to production (specs/branch-push-releases.md):
+# `git push o <sha>:<d>-prod`. GitHub runs a `push` workflow from the pushed commit's own copy, and the release
+# environments admit only `front-door`, so this only hands off: it dispatches `front-door`'s `oa-release.yml` with the
+# deployment and sha, whose `plan` checks the pointer still names that sha, finds that sha's successful dev release and
+# says whether it is a rollback. A pointer moved to a commit older than this file starts nothing: dispatch the same by
+# hand (`gh workflow run oa-release.yml -R Open-Athena/disky --ref front-door -f deployment=<d> -f sha=<sha>`).
+name: OA prod push
+on:
+  push:
+    branches: [gcs-prod, cw-prod, hf-prod, r2-prod]
+permissions:
+  actions: write
+jobs:
+  dispatch:
+    if: github.repository == 'Open-Athena/disky' && !github.event.deleted
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          deployment=${BRANCH%-prod}
+          gh workflow run oa-release.yml -R "$GITHUB_REPOSITORY" --ref front-door -f deployment="$deployment" -f sha="$SHA"
+          echo "Dispatched \`front-door\`'s OA site release: \`$deployment\` prod at \`${SHA:0:12}\`" >> "$GITHUB_STEP_SUMMARY"

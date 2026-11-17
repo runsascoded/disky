@@ -28,9 +28,16 @@ def ci(branch='hf'):
             'event': 'push', 'conclusion': 'success', 'path': '.github/workflows/ci.yml'}
 
 
-def setup_api(monkeypatch, *, tip=SHA, proof=None, states=None, runs=None, comparison='ahead', tip_recipes=None):
-    """`tip_recipes`: the `.sql` recipes at the branch's tip; None: no `site/migrations` there."""
+PREV = 'c' * 40
+
+
+def setup_api(monkeypatch, *, tip=SHA, pointer=SHA, dev=None, states=None, runs=None, comparison='ahead', tip_recipes=None,
+              prod=None, back='ahead'):
+    """`tip_recipes`: the `.sql` recipes at the branch's tip; None: no `site/migrations` there. `dev` / `prod`: the
+    GitHub deployments listed for `hf-dev` at the sha / for `hf-prod` (newest first); `states`: each one's statuses by id
+    (default `success`). `comparison`: the sha against the branch; `back`: the sha against the previous prod release."""
     calls = []
+    states = states or {}
 
     def api(path, body=None):
         calls.append((path, body))
@@ -38,14 +45,20 @@ def setup_api(monkeypatch, *, tip=SHA, proof=None, states=None, runs=None, compa
             return [{'name': 'README.md', 'type': 'file'}, *({'name': n, 'type': 'file'} for n in tip_recipes)]
         if path == f'repos/{REPO}/contents/site?ref={tip}':
             return [{'name': 'src', 'type': 'dir'}, *([{'name': 'migrations', 'type': 'dir'}] if tip_recipes is not None else [])]
+        if path.endswith('/git/ref/heads/hf-prod'):
+            return {'object': {'sha': pointer}}
         if '/git/ref/heads/' in path:
             return {'object': {'sha': tip}}
+        if path.startswith(f'repos/{REPO}/compare/{SHA}...{PREV}'):
+            return {'status': back}
         if '/compare/' in path:
             return {'status': comparison}
-        if path.endswith('/deployments/91'):
-            return proof
+        if '/deployments?environment=hf-dev' in path:
+            return [proof()] if dev is None else dev
+        if '/deployments?environment=hf-prod' in path:
+            return prod or []
         if '/statuses?' in path:
-            return [{'state': s} for s in (states or ['success'])]
+            return [{'state': s} for s in states.get(int(path.split('/deployments/')[1].split('/')[0]), ['success'])]
         if '/actions/workflows/' in path:
             return {'workflow_runs': [ci()] if runs is None else runs}
         raise AssertionError((path, body))
@@ -64,6 +77,7 @@ def test_exact_dev_plan(monkeypatch, branch, project, pages):
         'protocol': 'disky-pages-v1', 'repository': REPO, 'source_branch': branch, 'sha': SHA,
         'mode': 'dev', 'environment': f'{branch}-dev', 'project': project, 'pages_branch': pages,
         'host': f'dev.{branch}.oa.dev', 'ci_run': 42, 'dev_deployment': None, 'tip_recipes': None,
+        'previous': None, 'rollback': False,
     }
     assert calls == [(f'repos/{REPO}/git/ref/heads/{branch}', None)]
 
@@ -92,48 +106,83 @@ def test_stale_ci_cannot_overwrite_newer_dev(monkeypatch):
     assert str(error.value) == 'Obsolete CI completion: source branch has moved'
 
 
-def proof():
-    return {'sha': SHA, 'environment': 'hf-dev', 'creator': {'login': 'github-actions[bot]'},
-            'payload': {'protocol': 'disky-pages-v1', 'source_branch': 'hf'}}
+def proof(id=91, **change):
+    return {'id': id, 'sha': SHA, 'environment': 'hf-dev', 'creator': {'login': 'github-actions[bot]'},
+            'payload': {'protocol': 'disky-pages-v1', 'source_branch': 'hf'}, **change}
+
+
+def live(id, sha=PREV):
+    """A production release this controller recorded."""
+    return {**proof(id), 'sha': sha, 'environment': 'hf-prod'}
 
 
 def promote():
-    return release.plan_release({'inputs': {'deployment': 'hf', 'sha': SHA, 'dev_deployment': '91'}}, 'workflow_dispatch', REPO)
+    """A push to `hf-prod` at `SHA`, as `oa-prod-push.yml` dispatches it."""
+    return release.plan_release({'inputs': {'deployment': 'hf', 'sha': SHA}}, 'workflow_dispatch', REPO)
 
 
-def test_production_uses_explicit_dev_sha_even_after_branch_advances(monkeypatch):
-    setup_api(monkeypatch, tip='b' * 40, proof=proof(), states=['inactive', 'success'], tip_recipes=['c-new.sql'])
+def test_production_finds_its_dev_proof_even_after_branch_advances(monkeypatch):
+    setup_api(monkeypatch, tip='b' * 40, states={91: ['inactive', 'success']}, tip_recipes=['c-new.sql'], prod=[live(95)], back='behind')
     assert promote() == {
         'protocol': 'disky-pages-v1', 'repository': REPO, 'source_branch': 'hf', 'sha': SHA,
         'mode': 'prod', 'environment': 'hf-prod', 'project': 'oa-hf-usage', 'pages_branch': 'main',
         'host': 'hf.oa.dev', 'ci_run': 42, 'dev_deployment': '91', 'tip_recipes': ['c-new.sql'],
+        'previous': PREV, 'rollback': False,
     }
 
 
 def test_production_plan_without_recipes_at_the_tip(monkeypatch):
-    setup_api(monkeypatch, proof=proof())
+    setup_api(monkeypatch)
     assert promote()['tip_recipes'] == []
 
 
-@pytest.mark.parametrize(('change', 'states', 'message'), [
-    ({'sha': 'b' * 40}, ['success'], f'Dev deployment 91 released {"b" * 12}, not {SHA[:12]}'),
-    ({'environment': 'cw-dev'}, ['success'], 'Dev deployment 91 is in cw-dev, not hf-dev'),
-    ({'creator': {'login': 'some-user'}}, ['success'], 'Dev deployment 91 was not recorded by this release controller'),
-    ({'payload': {}}, ['success'], 'Dev deployment 91 was not recorded by this release controller'),
-    ({}, ['failure'], f'Dev deployment 91 did not succeed (latest status: failure): release {SHA[:12]} to dev again, then promote that deployment'),
-    ({}, ['in_progress'], f'Dev deployment 91 did not succeed (latest status: in_progress): release {SHA[:12]} to dev again, then promote that deployment'),
-    ({}, ['inactive', 'failure'], f'Dev deployment 91 did not succeed (latest status: inactive): release {SHA[:12]} to dev again, then promote that deployment'),
+@pytest.mark.parametrize(('back', 'rollback'), [('ahead', True), ('behind', False), ('diverged', False)])
+def test_a_push_behind_what_prod_served_is_a_rollback(monkeypatch, back, rollback):
+    """`back`: the previous prod release's sha against this one (`ahead`: this sha is its ancestor)."""
+    setup_api(monkeypatch, prod=[live(97, 'd' * 40), live(96)], states={97: ['failure']}, back=back)
+    assert (promote()['previous'], promote()['rollback']) == (PREV, rollback)
+
+
+def test_production_with_no_earlier_release(monkeypatch):
+    setup_api(monkeypatch)
+    assert (promote()['previous'], promote()['rollback']) == (None, False)
+
+
+def test_production_skips_failed_and_foreign_dev_releases_for_the_newest_success(monkeypatch):
+    dev = [proof(94), proof(93, creator={'login': 'some-user'}), proof(92, payload={}), proof(91)]
+    setup_api(monkeypatch, dev=dev, states={94: ['failure']})
+    assert promote()['dev_deployment'] == '91'
+
+
+@pytest.mark.parametrize(('dev', 'states', 'message'), [
+    ([], {}, f'{SHA[:12]} has no successful dev release: push it to hf first'),
+    ([proof(91, sha='b' * 40)], {}, f'{SHA[:12]} has no successful dev release: push it to hf first'),
+    ([proof(91, environment='cw-dev')], {}, f'{SHA[:12]} has no successful dev release: push it to hf first'),
+    ([proof(91, creator={'login': 'some-user'})], {}, f'{SHA[:12]} has no successful dev release: push it to hf first'),
+    ([proof(91, payload={})], {}, f'{SHA[:12]} has no successful dev release: push it to hf first'),
+    ([proof(91)], {91: ['failure']}, f'{SHA[:12]} has no successful dev release (its newest: failure): push it to hf first'),
+    ([proof(91)], {91: ['in_progress']}, f'{SHA[:12]} has no successful dev release (its newest: in_progress): push it to hf first'),
+    ([proof(92), proof(91)], {92: ['inactive', 'failure'], 91: ['error']},
+     f'{SHA[:12]} has no successful dev release (its newest: inactive): push it to hf first'),
 ])
-def test_production_rejects_false_dev_proof(monkeypatch, change, states, message):
-    setup_api(monkeypatch, proof={**proof(), **change}, states=states)
+def test_production_refuses_without_a_successful_dev_release(monkeypatch, dev, states, message):
+    setup_api(monkeypatch, dev=dev, states=states)
     with pytest.raises(ClickException) as error:
         promote()
     assert str(error.value) == message
 
 
+def test_production_releases_only_what_the_pointer_names(monkeypatch):
+    calls = setup_api(monkeypatch, pointer='e' * 40)
+    with pytest.raises(ClickException) as error:
+        promote()
+    assert str(error.value) == f'hf-prod points at {"e" * 12}, not {SHA[:12]}: production releases the pointer (git push o <sha>:hf-prod)'
+    assert calls == [(f'repos/{REPO}/git/ref/heads/hf-prod', None)]
+
+
 @pytest.mark.parametrize('runs', [[], [{**ci(), 'conclusion': 'failure'}]])
 def test_production_requires_current_ci_receipt(monkeypatch, runs):
-    setup_api(monkeypatch, proof=proof(), runs=runs)
+    setup_api(monkeypatch, runs=runs)
     with pytest.raises(ClickException) as error:
         promote()
     assert str(error.value) == ('No CI receipt for this source SHA' if not runs else 'The latest CI attempt for this revision must succeed')
@@ -215,7 +264,7 @@ def test_production_seal_holds_only_recipes_still_at_the_tip(tmp_path, monkeypat
     (site / 'migrations').mkdir()
     (site / 'migrations/b-tables.sql').write_text('ALTER TABLE t ADD COLUMN c TEXT;\n')
     (site / 'migrations/a-index.sql').write_text('CREATE INDEX i ON t (c);\n')
-    setup_api(monkeypatch, tip='b' * 40, proof=proof(), tip_recipes=tip_recipes)
+    setup_api(monkeypatch, tip='b' * 40, tip_recipes=tip_recipes)
     plan_path, seal_path = tmp_path / 'plan.json', tmp_path / 'seal.json'
     plan_path.write_text(dumps(promote()))
     result = CliRunner().invoke(release.main, ['seal', '-p', str(plan_path), '-o', str(seal_path), str(source)])
@@ -351,6 +400,25 @@ def test_workflow_guards_and_secret_boundaries():
 def workflow() -> dict:
     from yaml import BaseLoader, load
     return load((ROOT / '.github/workflows/oa-release.yml').read_text(), Loader=BaseLoader)
+
+
+def test_a_prod_pointer_push_only_dispatches_front_doors_release():
+    """`oa-prod-push.yml`: every OA site's `<d>-prod` and nothing else, in OA's repo only, not on a pointer's deletion,
+    with no permission but dispatching; the release itself (and its gate) is `front-door`'s `oa-release.yml`."""
+    from yaml import BaseLoader, load
+    workflow = load((ROOT / '.github/workflows/oa-prod-push.yml').read_text(), Loader=BaseLoader)
+    sites = sorted(loads((ROOT / 'deploy/oa/sites.json').read_text())['sites'])
+    assert sorted(workflow['on']['push']['branches']) == [f'{site}-prod' for site in sites]
+    assert workflow['permissions'] == {'actions': 'write'}
+    job = workflow['jobs']['dispatch']
+    assert job['if'] == "github.repository == 'Open-Athena/disky' && !github.event.deleted"
+    release_inputs = load((ROOT / '.github/workflows/oa-release.yml').read_text(), Loader=BaseLoader)['on']['workflow_dispatch']['inputs']
+    assert sorted(release_inputs) == ['deployment', 'sha']
+    assert sorted(release_inputs['deployment']['options']) == sites
+    [step] = job['steps']
+    assert [line for line in step['run'].splitlines() if line.startswith('gh ')] == [
+        'gh workflow run oa-release.yml -R "$GITHUB_REPOSITORY" --ref front-door -f deployment="$deployment" -f sha="$SHA"',
+    ]
 
 
 def test_controller_is_cloud_pinned_once_and_source_is_the_release_sha():

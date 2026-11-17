@@ -74,6 +74,41 @@ def recipes_at(prefix: str, ref: str) -> list[str]:
                   if entry['type'] == 'file' and entry['name'].endswith('.sql'))
 
 
+def ours(deployment: dict, environment: str, target: str) -> bool:
+    """A GitHub deployment this release controller recorded, of `target` into `environment`."""
+    payload = deployment.get('payload') or {}
+    return (deployment['environment'] == environment and deployment['creator']['login'] == 'github-actions[bot]'
+            and payload.get('protocol') == PROTOCOL and payload.get('source_branch') == target)
+
+
+def succeeded(statuses: list[dict]) -> bool:
+    """A deployment that went live: its newest status `success`, or `inactive` (replaced since) after a `success`."""
+    return bool(statuses) and statuses[0]['state'] in ('success', 'inactive') and any(s['state'] == 'success' for s in statuses)
+
+
+def dev_release(prefix: str, target: str, sha: str) -> str:
+    """The newest successful dev release of `sha` this controller recorded: a production release's proof, found rather
+    than named (a push to `<d>-prod` carries only the sha)."""
+    newest = None
+    for deployment in paginated(f'{prefix}/deployments?{urlencode({"environment": f"{target}-dev", "sha": sha})}'):
+        if deployment['sha'] != sha or not ours(deployment, f'{target}-dev', target):
+            continue
+        statuses = paginated(f'{prefix}/deployments/{deployment["id"]}/statuses')
+        if succeeded(statuses):
+            return str(deployment['id'])
+        newest = newest or (statuses[0]['state'] if statuses else 'none')
+    raise ClickException(f'{sha[:12]} has no successful dev release'
+                         + (f' (its newest: {newest})' if newest else '') + f': push it to {target} first')
+
+
+def released(prefix: str, environment: str, target: str) -> str | None:
+    """The sha of the newest release into `environment` that went live (what it served before this one), if any."""
+    for deployment in paginated(f'{prefix}/deployments?{urlencode({"environment": environment})}'):
+        if ours(deployment, environment, target) and succeeded(paginated(f'{prefix}/deployments/{deployment["id"]}/statuses')):
+            return deployment['sha']
+    return None
+
+
 def plan_release(event: dict, event_name: str, repository: str) -> dict:
     config = loads(CONFIG.read_text())
     require(repository == config['repository'], 'OA releases run only in the configured repository')
@@ -86,39 +121,30 @@ def plan_release(event: dict, event_name: str, repository: str) -> dict:
                 'Only successful in-repository integration push CI can deploy dev')
         dev_id = None
     elif event_name == 'workflow_dispatch':
+        # A push to `<d>-prod` (`oa-prod-push.yml` dispatches it), or a hand retry of what the pointer names
         inputs = event['inputs']
         target, sha, mode = inputs['deployment'], inputs['sha'], 'prod'
-        dev_id = inputs['dev_deployment']
-        require(bool(fullmatch(r'[1-9][0-9]*', dev_id)), 'Name the successful dev deployment ID')
     else:
         raise ClickException('Unsupported release event')
     require(target in config['sites'], 'Unknown OA deployment')
     require(bool(fullmatch(r'[0-9a-f]{40}', sha)), 'A full lowercase source SHA is required')
     site = config['sites'][target]
-    tip_recipes = None
+    tip_recipes = dev_id = previous = None
     if mode == 'dev':
         tip = api(f'{prefix}/git/ref/heads/{target}')['object']['sha']
         require(tip == sha, 'Obsolete CI completion: source branch has moved')
     else:
+        # Production releases what `<d>-prod` points at: a dispatch for a sha the pointer has since moved off is stale
+        pointer = api(f'{prefix}/git/ref/heads/{target}-prod')['object']['sha']
+        require(pointer == sha, f'{target}-prod points at {pointer[:12]}, not {sha[:12]}: production releases the pointer '
+                f'(git push o <sha>:{target}-prod)')
         # A promotion or rollback may name an older sha: `seal` holds only the recipes still pending at the branch's tip
         tip = api(f'{prefix}/git/ref/heads/{target}')['object']['sha']
         tip_recipes = recipes_at(prefix, tip)
         comparison = api(f'{prefix}/compare/{sha}...{target}')
         require(comparison['status'] in ('ahead', 'identical'), 'Production SHA is not on the deployment branch')
-        proof = api(f'{prefix}/deployments/{dev_id}')
-        payload = proof.get('payload') or {}
-        statuses = paginated(f'{prefix}/deployments/{dev_id}/statuses')
-        # Each refusal names the condition that failed: one message for all of them sent a failed dev release's
-        # owner looking at the controller (cw, 2026-11-17)
-        require(proof['environment'] == f'{target}-dev',
-                f"Dev deployment {dev_id} is in {proof['environment']}, not {target}-dev")
-        require(proof['sha'] == sha, f"Dev deployment {dev_id} released {proof['sha'][:12]}, not {sha[:12]}")
-        require(proof['creator']['login'] == 'github-actions[bot]'
-                and payload.get('protocol') == PROTOCOL and payload.get('source_branch') == target,
-                f'Dev deployment {dev_id} was not recorded by this release controller')
-        latest = statuses[0]['state'] if statuses else 'none'
-        require(latest in ('success', 'inactive') and any(s['state'] == 'success' for s in statuses),
-                f'Dev deployment {dev_id} did not succeed (latest status: {latest}): release {sha[:12]} to dev again, then promote that deployment')
+        dev_id = dev_release(prefix, target, sha)
+        previous = released(prefix, f'{target}-prod', target)
         runs = paginated(f'{prefix}/actions/workflows/ci.yml/runs?{urlencode({"head_sha": sha, "event": "push", "branch": target})}')
         require(bool(runs), 'No CI receipt for this source SHA')
         ci = runs[0]
@@ -129,7 +155,8 @@ def plan_release(event: dict, event_name: str, repository: str) -> dict:
         'protocol': PROTOCOL, 'repository': repository, 'source_branch': target, 'sha': sha,
         'mode': mode, 'environment': f'{target}-{mode}', 'project': site['project'],
         'pages_branch': site[f'{mode}_branch'], 'host': site[f'{mode}_host'],
-        'ci_run': ci['id'], 'dev_deployment': dev_id, 'tip_recipes': tip_recipes,
+        'ci_run': ci['id'], 'dev_deployment': dev_id, 'tip_recipes': tip_recipes, 'previous': previous,
+        'rollback': bool(previous and previous != sha and api(f'{prefix}/compare/{sha}...{previous}')['status'] == 'ahead'),
     }
 
 
@@ -222,6 +249,13 @@ def plan(event: Path, event_name: str, output: Path, repository: str) -> None:
         with open(github_output, 'a') as file:
             for key in ['sha', 'source_branch', 'mode', 'environment', 'project', 'pages_branch', 'host']:
                 file.write(f'{key}={value[key]}\n')
+    summary = environ.get('GITHUB_STEP_SUMMARY')
+    if summary and value['mode'] == 'prod':
+        before = value['previous']
+        how = ('first release' if not before else 'the build it already serves' if before == value['sha']
+               else f'rollback from `{before[:12]}`' if value['rollback'] else f'replacing `{before[:12]}`')
+        with open(summary, 'a') as file:
+            file.write(f"Production: `{value['source_branch']}` at `{value['sha'][:12]}` ({how}); dev release {value['dev_deployment']}\n")
     print(dumps(value, indent=2))
 
 

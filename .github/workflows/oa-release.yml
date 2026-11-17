@@ -5,7 +5,8 @@
 # specs/oa-release-workflow.md, "Tooling lives on `cloud`"). Off unless `OA_SITE_RELEASE_ENABLED` and the target's listed.
 name: OA site release
 # The runs list names each run by deployment and environment (GitHub files them all under `front-door`): a CI completion
-# releases to dev (the commit's subject), a dispatch promotes to prod (the sha).
+# releases to dev (the commit's subject), a dispatch promotes to prod (the sha). A push to `<d>-prod` is a dispatch:
+# `oa-prod-push.yml` on that commit hands it here (specs/branch-push-releases.md).
 run-name: >-
   ${{ github.event_name == 'workflow_dispatch'
     && format('{0} prod · {1}', inputs.deployment, inputs.sha)
@@ -22,10 +23,7 @@ on:
         options: [gcs, cw, hf, r2]
         required: true
       sha:
-        description: Full source SHA already verified on dev
-        required: true
-      dev_deployment:
-        description: Successful GitHub dev deployment ID for that SHA
+        description: Full source SHA `<deployment>-prod` points at (released to dev first)
         required: true
 permissions:
   contents: read
