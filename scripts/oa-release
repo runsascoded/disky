@@ -13,7 +13,7 @@ from subprocess import run
 from time import sleep
 from tomllib import loads as toml_loads
 from urllib.parse import urlencode
-from urllib.error import HTTPError, URLError
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 from click import Choice, ClickException, Path as ClickPath, argument, echo, group, option
@@ -319,7 +319,8 @@ def begin(output: Path, plan_path: Path, seal_path: Path, source: Path) -> None:
 #: An entry asset's GET: a 404, a 5xx or a dropped connection is retried this many times, `LIVE_RETRY_S` apart. A fresh
 #: deployment's edge answered an asset 500 for under a minute, and a new asset path 404 for 17 s after the build header
 #: already matched (cw's dev releases, 2026-11-17): entry assets are content-hashed, so a new one can't be a stale path.
-#: Any other 4xx (a 403 from bot rules, a 401) is an answer
+#: Any other 4xx (a 403 from bot rules, a 401) is an answer. "A dropped connection" is any `OSError`: a reset can come
+#: during `read()`, after `urlopen` returned, as a bare `ConnectionResetError` (cw's prod release 44141535596)
 LIVE_RETRIES = 6
 LIVE_RETRY_S = 10
 
@@ -332,7 +333,7 @@ def live_get(url: str) -> bytes:
         except HTTPError as error:
             if (error.code != 404 and error.code < 500) or attempt == LIVE_RETRIES:
                 raise
-        except URLError:
+        except OSError:  # `URLError`, and a reset or timeout mid-read
             if attempt == LIVE_RETRIES:
                 raise
         sleep(LIVE_RETRY_S)
@@ -359,12 +360,19 @@ def finish(failed: bool, receipt_path: Path) -> None:
             and deployment['latest_stage']['status'] == 'success', 'Cloudflare is not serving the clean requested revision')
     for attempt in range(12):
         req = Request(f'https://{receipt["host"]}/api/health?release-check={environ["GITHUB_RUN_ID"]}-{attempt}', headers=LIVE_HEADERS)
+        # A 5xx or a dropped connection is a host not answering yet: the next attempt, as a stale build is
         try:
             response = urlopen(req, timeout=20)
         except HTTPError as error:
+            if error.code >= 500:
+                sleep(5)
+                continue
             if error.code not in (401, 403):
                 raise
             response = error
+        except OSError:
+            sleep(5)
+            continue
         with response:
             build = response.headers.get('x-disky-build', '').split(' ', 1)[0]
         if build == receipt['sha']:

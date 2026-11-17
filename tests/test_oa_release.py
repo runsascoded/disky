@@ -530,10 +530,10 @@ def test_setup_plan_is_scoped_and_disabled_without_extra_approval_clicks(tmp_pat
     assert loads(result.output) == loads(output.read_text()) == expected
 
 
-def test_live_get_retries_a_transient_404_or_5xx_but_not_another_4xx(monkeypatch):
+def test_live_get_retries_a_transient_404_5xx_or_reset_but_not_another_4xx(monkeypatch):
     from io import BytesIO
     from urllib.error import HTTPError
-    answers = {'https://h/a.js': [404, 500, 502, b'42'], 'https://h/b.js': [403, b'never']}
+    answers = {'https://h/a.js': [404, 500, 'reset', 502, b'42'], 'https://h/b.js': [403, b'never']}
     asked = []
 
     def urlopen(request, timeout):
@@ -541,6 +541,11 @@ def test_live_get_retries_a_transient_404_or_5xx_but_not_another_4xx(monkeypatch
         answer = answers[request.full_url].pop(0)
         if isinstance(answer, int):
             raise HTTPError(request.full_url, answer, 'status', {}, None)
+        if answer == 'reset':  # mid-read, after `urlopen` returned: a bare `ConnectionResetError`
+            class Reset(BytesIO):
+                def read(self, *a):
+                    raise ConnectionResetError(104, 'Connection reset by peer')
+            return Reset(b'')
         return BytesIO(answer)
 
     monkeypatch.setattr(release, 'urlopen', urlopen)
@@ -548,4 +553,38 @@ def test_live_get_retries_a_transient_404_or_5xx_but_not_another_4xx(monkeypatch
     assert release.live_get('https://h/a.js') == b'42'
     with pytest.raises(HTTPError) as error:
         release.live_get('https://h/b.js')
-    assert (error.value.code, asked) == (403, ['https://h/a.js'] * 4 + ['https://h/b.js'])
+    assert (error.value.code, asked) == (403, ['https://h/a.js'] * 5 + ['https://h/b.js'])
+
+
+def test_build_header_poll_waits_out_a_5xx_and_a_reset(tmp_path, monkeypatch):
+    from io import BytesIO
+    from urllib.error import HTTPError
+    receipt = {'repository': REPO, 'id': 73, 'run_url': f'https://github.com/{REPO}/actions/runs/123',
+               'mode': 'prod', 'sha': SHA, 'project': 'oa-hf-usage', 'host': 'hf.oa.dev',
+               'entry_assets': {'assets/app.js': release.sha256(b'42').hexdigest()}}
+    path = tmp_path / 'receipt.json'
+    path.write_text(dumps(receipt))
+    monkeypatch.setattr(release, 'pages', lambda path: {'canonical_deployment': {
+        'id': 'cf73', 'url': 'https://cf73.oa-hf-usage.pages.dev', 'latest_stage': {'status': 'success'},
+        'deployment_trigger': {'metadata': {'commit_hash': SHA, 'commit_dirty': False}},
+    }})
+    monkeypatch.setattr(release, 'api', lambda path, body=None: None)
+    monkeypatch.setattr(release, 'sleep', lambda s: None)
+    health = [503, 'reset']
+    asked = []
+
+    def urlopen(request, timeout):
+        url = request.full_url.split('?')[0]
+        asked.append(url)
+        if url.endswith('/api/health') and health:
+            answer = health.pop(0)
+            if answer == 'reset':
+                raise ConnectionResetError(104, 'Connection reset by peer')
+            raise HTTPError(request.full_url, answer, 'status', {}, None)
+        response = BytesIO(b'42')
+        response.headers = {'x-disky-build': f'{SHA} 2026-11-10T12:34:56Z'}
+        return response
+
+    monkeypatch.setattr(release, 'urlopen', urlopen)
+    result = CliRunner().invoke(release.main, ['finish', str(path)], env={'GITHUB_RUN_ID': '123'})
+    assert (result.exit_code, asked) == (0, ['https://hf.oa.dev/api/health'] * 3 + ['https://hf.oa.dev/assets/app.js'])
