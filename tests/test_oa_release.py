@@ -115,16 +115,20 @@ def test_production_plan_without_recipes_at_the_tip(monkeypatch):
     assert promote()['tip_recipes'] == []
 
 
-@pytest.mark.parametrize(('change', 'states'), [
-    ({'sha': 'b' * 40}, ['success']), ({'environment': 'cw-dev'}, ['success']),
-    ({'creator': {'login': 'some-user'}}, ['success']), ({'payload': {}}, ['success']),
-    ({}, ['failure']), ({}, ['in_progress']),
+@pytest.mark.parametrize(('change', 'states', 'message'), [
+    ({'sha': 'b' * 40}, ['success'], f'Dev deployment 91 released {"b" * 12}, not {SHA[:12]}'),
+    ({'environment': 'cw-dev'}, ['success'], 'Dev deployment 91 is in cw-dev, not hf-dev'),
+    ({'creator': {'login': 'some-user'}}, ['success'], 'Dev deployment 91 was not recorded by this release controller'),
+    ({'payload': {}}, ['success'], 'Dev deployment 91 was not recorded by this release controller'),
+    ({}, ['failure'], f'Dev deployment 91 did not succeed (latest status: failure): release {SHA[:12]} to dev again, then promote that deployment'),
+    ({}, ['in_progress'], f'Dev deployment 91 did not succeed (latest status: in_progress): release {SHA[:12]} to dev again, then promote that deployment'),
+    ({}, ['inactive', 'failure'], f'Dev deployment 91 did not succeed (latest status: inactive): release {SHA[:12]} to dev again, then promote that deployment'),
 ])
-def test_production_rejects_false_dev_proof(monkeypatch, change, states):
+def test_production_rejects_false_dev_proof(monkeypatch, change, states, message):
     setup_api(monkeypatch, proof={**proof(), **change}, states=states)
     with pytest.raises(ClickException) as error:
         promote()
-    assert str(error.value) == 'Production requires a successful exact-SHA dev release from this controller'
+    assert str(error.value) == message
 
 
 @pytest.mark.parametrize('runs', [[], [{**ci(), 'conclusion': 'failure'}]])
@@ -524,3 +528,24 @@ def test_setup_plan_is_scoped_and_disabled_without_extra_approval_clicks(tmp_pat
         'preview_data_policy': 'Unchanged; per-PR preview activation is separate',
     }
     assert loads(result.output) == loads(output.read_text()) == expected
+
+
+def test_live_get_retries_a_transient_5xx_but_not_a_4xx(monkeypatch):
+    from io import BytesIO
+    from urllib.error import HTTPError
+    answers = {'https://h/a.js': [500, 502, b'42'], 'https://h/b.js': [404, b'never']}
+    asked = []
+
+    def urlopen(request, timeout):
+        asked.append(request.full_url)
+        answer = answers[request.full_url].pop(0)
+        if isinstance(answer, int):
+            raise HTTPError(request.full_url, answer, 'status', {}, None)
+        return BytesIO(answer)
+
+    monkeypatch.setattr(release, 'urlopen', urlopen)
+    monkeypatch.setattr(release, 'sleep', lambda s: None)
+    assert release.live_get('https://h/a.js') == b'42'
+    with pytest.raises(HTTPError) as error:
+        release.live_get('https://h/b.js')
+    assert (error.value.code, asked) == (404, ['https://h/a.js'] * 3 + ['https://h/b.js'])

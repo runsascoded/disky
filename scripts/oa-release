@@ -13,7 +13,7 @@ from subprocess import run
 from time import sleep
 from tomllib import loads as toml_loads
 from urllib.parse import urlencode
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from click import Choice, ClickException, Path as ClickPath, argument, echo, group, option
@@ -108,12 +108,17 @@ def plan_release(event: dict, event_name: str, repository: str) -> dict:
         proof = api(f'{prefix}/deployments/{dev_id}')
         payload = proof.get('payload') or {}
         statuses = paginated(f'{prefix}/deployments/{dev_id}/statuses')
-        require(proof['sha'] == sha and proof['environment'] == f'{target}-dev'
-                and proof['creator']['login'] == 'github-actions[bot]'
-                and payload.get('protocol') == PROTOCOL and payload.get('source_branch') == target
-                and statuses and statuses[0]['state'] in ('success', 'inactive')
-                and any(s['state'] == 'success' for s in statuses),
-                'Production requires a successful exact-SHA dev release from this controller')
+        # Each refusal names the condition that failed: one message for all of them sent a failed dev release's
+        # owner looking at the controller (cw, 2026-11-17)
+        require(proof['environment'] == f'{target}-dev',
+                f"Dev deployment {dev_id} is in {proof['environment']}, not {target}-dev")
+        require(proof['sha'] == sha, f"Dev deployment {dev_id} released {proof['sha'][:12]}, not {sha[:12]}")
+        require(proof['creator']['login'] == 'github-actions[bot]'
+                and payload.get('protocol') == PROTOCOL and payload.get('source_branch') == target,
+                f'Dev deployment {dev_id} was not recorded by this release controller')
+        latest = statuses[0]['state'] if statuses else 'none'
+        require(latest in ('success', 'inactive') and any(s['state'] == 'success' for s in statuses),
+                f'Dev deployment {dev_id} did not succeed (latest status: {latest}): release {sha[:12]} to dev again, then promote that deployment')
         runs = paginated(f'{prefix}/actions/workflows/ci.yml/runs?{urlencode({"head_sha": sha, "event": "push", "branch": target})}')
         require(bool(runs), 'No CI receipt for this source SHA')
         ci = runs[0]
@@ -311,6 +316,27 @@ def begin(output: Path, plan_path: Path, seal_path: Path, source: Path) -> None:
     status(receipt, 'in_progress')
 
 
+#: An entry asset's GET: a 5xx or a dropped connection is retried this many times, `LIVE_RETRY_S` apart (a fresh
+#: deployment's edge answered one asset 500 for under a minute: cw's dev release, 2026-11-17); a 4xx is an answer
+LIVE_RETRIES = 6
+LIVE_RETRY_S = 10
+
+
+def live_get(url: str) -> bytes:
+    for attempt in range(LIVE_RETRIES + 1):
+        try:
+            with urlopen(Request(url, headers=LIVE_HEADERS), timeout=30) as response:
+                return response.read()
+        except HTTPError as error:
+            if error.code < 500 or attempt == LIVE_RETRIES:
+                raise
+        except URLError:
+            if attempt == LIVE_RETRIES:
+                raise
+        sleep(LIVE_RETRY_S)
+    raise AssertionError('unreachable')
+
+
 @main.command('finish')
 @option('-f', '--failed', is_flag=True)
 @argument('receipt_path', type=ClickPath(path_type=Path))
@@ -345,8 +371,8 @@ def finish(failed: bool, receipt_path: Path) -> None:
     else:
         raise ClickException('Live host did not return the requested build header')
     for asset, digest in receipt['entry_assets'].items():
-        with urlopen(Request(f'https://{receipt["host"]}/{asset}', headers=LIVE_HEADERS), timeout=30) as response:
-            require(sha256(response.read()).hexdigest() == digest, f'Live entry asset differs: {asset}')
+        body = live_get(f'https://{receipt["host"]}/{asset}')
+        require(sha256(body).hexdigest() == digest, f'Live entry asset differs: {asset}')
     receipt['cloudflare_deployment'] = deployment['id']
     receipt['cloudflare_url'] = deployment['url']
     receipt_path.write_text(dumps(receipt, indent=2) + '\n')
