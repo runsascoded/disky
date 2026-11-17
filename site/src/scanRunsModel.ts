@@ -199,6 +199,71 @@ export function phaseOutcome(p: Pick<ScanRunPhase, 'status' | 'note'>): string {
 export const phaseFill = (p: Pick<PhaseSpan, 'phase' | 'status' | 'note'>, color: (phase: string) => string): string =>
   phaseStatus(p) === 'failed' ? 'var(--danger)' : color(p.phase)
 
+/** A phase's family: the per-source phases a scan runs in parallel (`list <bucket>`, `import <bucket>`) are one family,
+ *  named for the step; any other phase is its own. One legend item and one hue per family. */
+export const phaseFamily = (phase: string): string => /^(list|import) \S/.exec(phase)?.[1] ?? phase
+
+/** `order`'s phases by family, families in the order of their first member, members in `order`'s. */
+export function phaseFamilies(order: readonly string[]): { family: string; members: string[] }[] {
+  const by = new Map<string, string[]>()
+  for (const p of order) {
+    const f = phaseFamily(p)
+    by.set(f, [...(by.get(f) ?? []), p])
+  }
+  return [...by].map(([family, members]) => ({ family, members }))
+}
+
+/** Whether a phase passes the page's phase filter (`?ph=`): a case-insensitive substring of its name or its family's;
+ *  an empty filter passes every phase. */
+export const phaseMatches = (filter: string | null | undefined, phase: string): boolean => {
+  const f = filter?.trim().toLowerCase()
+  return !f || phase.toLowerCase().includes(f) || phaseFamily(phase).toLowerCase().includes(f)
+}
+
+/** Whether a phase is a legend key's (a family's member, or the phase itself). */
+export const phaseOf = (key: string, phase: string): boolean => phase === key || phaseFamily(phase) === key
+
+/** A compact chart's spans (the duration strip's bars, the table's phase bars): the main lane, and where no main-lane
+ *  phase covers a stretch, the overlapped phase that does (the lowest lane first), cut to that stretch (`filled`). So
+ *  time spent only in an overlapped phase (static-names running on after the main sequence finished) draws as that
+ *  phase, not as unrecorded work. */
+export function compactSpans(spans: readonly PhaseSpan[]): (PhaseSpan & { filled?: true })[] {
+  const covered: [number, number][] = spans.filter(s => s.lane === 0).map(s => [s.start, s.end])
+  const out: (PhaseSpan & { filled?: true })[] = spans.filter(s => s.lane === 0)
+  for (const s of [...spans].filter(s => s.lane !== 0).sort((a, b) => a.lane - b.lane || a.start - b.start)) {
+    for (const [a, b] of uncovered(s.start, s.end, covered)) {
+      out.push({ ...s, start: a, end: b, filled: true })
+      covered.push([a, b])
+    }
+  }
+  return out.sort((a, b) => a.start - b.start)
+}
+
+/** The pieces of `[start, end)` none of `covered` overlaps. */
+function uncovered(start: number, end: number, covered: readonly [number, number][]): [number, number][] {
+  const out: [number, number][] = []
+  let at = start
+  for (const [a, b] of [...covered].sort((x, y) => x[0] - y[0])) {
+    if (b <= at || a >= end) continue
+    if (a > at) out.push([at, a])
+    at = Math.max(at, b)
+    if (at >= end) break
+  }
+  if (at < end) out.push([at, end])
+  return out
+}
+
+/** The wall time `spans` cover (overlaps counted once). */
+export function coveredSecs(spans: readonly Pick<PhaseSpan, 'start' | 'end'>[]): number {
+  let t = 0, at = -Infinity
+  for (const s of [...spans].sort((a, b) => a.start - b.start)) {
+    if (s.end <= at) continue
+    t += s.end - Math.max(s.start, at)
+    at = s.end
+  }
+  return t
+}
+
 /** Compact charts show the main lane, plus a failure stripe for otherwise hidden overlapping attempts. */
 export const overlappingFailures = (spans: readonly PhaseSpan[]): PhaseSpan[] =>
   spans.filter(s => s.lane !== 0 && phaseStatus(s) === 'failed')

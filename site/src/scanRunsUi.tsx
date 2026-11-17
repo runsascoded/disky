@@ -6,7 +6,7 @@ import { ago } from './colors'
 import { Tooltip } from './Tooltip'
 import { fmtDur as fmtDurM } from './runs'
 import {
-  BEHIND, issueLeaves, issueNext, issueState, issueWhat, outcomeParts, overlappingFailures, PASSING, phaseFill, phaseOutcome, runOutcome, scanRunOf,
+  BEHIND, compactSpans, issueLeaves, issueNext, issueState, issueWhat, outcomeParts, overlappingFailures, PASSING, phaseFamilies, phaseFamily, phaseFill, phaseOutcome, runOutcome, scanRunOf,
   type PhaseIssue, type PhaseSpan, type RunSummary, type ScanRun,
 } from './scanRunsModel'
 import { fmtTimestamp } from './scan'
@@ -93,8 +93,28 @@ export function RunWhen({ ts, scan, href }: { ts: number | null; scan: string; h
 export const runDay = (ts: number, timeZone?: string): string =>
   new Date(ts * 1000).toLocaleDateString('en-CA', { year: 'numeric', month: '2-digit', day: '2-digit', timeZone })
 const PALETTE = ['--s1', '--s2', '--s4', '--s7', '--s5', '--s6', '--s3', '--s8']
-/** A stable color per phase name: its position in the usual phase order. */
-export const colorer = (order: string[]) => (phase: string) => `var(${PALETTE[Math.max(0, order.indexOf(phase)) % PALETTE.length]})`
+/** A stable color per phase name: its family's hue (`phaseFamily`; the family's position in the usual phase order),
+ *  and within a family of several (`list <bucket>`, …) a shade of it per member, darker to lighter in that order. A
+ *  family's own key (a legend item) takes its plain hue. */
+export function colorer(order: string[]): (phase: string) => string {
+  const fams = phaseFamilies(order)
+  const at = new Map<string, string>()
+  fams.forEach(({ family, members }, i) => {
+    const hue = `var(${PALETTE[i % PALETTE.length]})`
+    at.set(family, hue)
+    if (members.length > 1) members.forEach((m, j) => at.set(m, familyShade(hue, j, members.length)))
+    else at.set(members[0], hue)
+  })
+  return phase => at.get(phase) ?? at.get(phaseFamily(phase)) ?? `var(${PALETTE[0]})`
+}
+
+/** Member `j` of `n`'s shade of `hue`: mixed toward black (the first) through the plain hue to white (the last), at
+ *  most 35% either way, so the family reads as one color. */
+export function familyShade(hue: string, j: number, n: number): string {
+  const t = n > 1 ? j / (n - 1) : 0.5
+  const pct = Math.round(Math.abs(t - 0.5) * 70)
+  return pct === 0 ? hue : `color-mix(in oklab, ${hue}, ${t < 0.5 ? 'black' : 'white'} ${pct}%)`
+}
 
 /** The tip on a quiet run's warning (and a lost run's status). */
 export const QUIET_TIP = "The run hasn't written its record (phases, its once-a-minute heartbeat) for this long: its job may have stalled or died. Check its Batch job."
@@ -161,16 +181,20 @@ export function Status({ run, failedAt, issues = [], cell, lost, runHref }: { ru
   return <Tooltip cell={cell} content={<>{failedAt && <div>Failed {failedAt.startsWith('after') ? failedAt : `in ${failedAt}`}</div>}{run.error && <div className="sr-err">{run.error}</div>}</>}>{tag}</Tooltip>
 }
 
-/** A run's main-lane bar, failure stripes for overlapping attempts, and all phases in its tip. */
-export function PhaseBar({ spans, secs, color, width = 160, cell }: { spans: PhaseSpan[]; secs: number | null; color: (p: string) => string; width?: number; cell?: boolean }) {
+/** A run's main-lane bar (an overlapped phase where the main lane has none: `compactSpans`), failure stripes for
+ *  overlapping attempts, and all phases in its tip. `isolate`: a legend item hovered or pinned, whose spans (every
+ *  lane's) stay lit over the rest dimmed. `spans` arrive filtered by the page's phase filter. */
+export function PhaseBar({ spans, secs, color, width = 160, cell, isolate }: { spans: PhaseSpan[]; secs: number | null; color: (p: string) => string; width?: number; cell?: boolean; isolate?: ((phase: string) => boolean) | null }) {
   if (!secs) return <span className="dim">—</span>
   const x = (t: number) => (t / secs) * width
-  const main = spans.filter(s => s.lane === 0)
+  const main = compactSpans(spans)
+  const lit = isolate ? spans.filter(s => isolate(s.phase)) : []
   return (
-    <Tooltip cell={cell} content={spans.length ? <table className="sr-tip"><tbody>{spans.map(s => <tr key={s.phase}><td><i className="sw" style={{ background: phaseFill(s, color) }} />{s.phase}{s.lane ? ' (beside)' : ''}{s.status !== 'done' ? ` · ${phaseOutcome(s)}` : ''}</td><td className="num">{fmtDur(s.end - s.start)}</td></tr>)}</tbody></table> : 'No phase markers recorded for this run'}>
-      <svg className="sr-bar" width={width} height={10} viewBox={`0 0 ${width} 10`} role="img" aria-label={`${fmtDur(secs)} in ${main.length} phases`}>
+    <Tooltip cell={cell} content={spans.length ? <table className="sr-tip"><tbody>{spans.map((s, i) => <tr key={`${s.phase}-${i}`}><td><i className="sw" style={{ background: phaseFill(s, color) }} />{s.phase}{s.lane ? ' (beside)' : ''}{s.status !== 'done' ? ` · ${phaseOutcome(s)}` : ''}</td><td className="num">{fmtDur(s.end - s.start)}</td></tr>)}</tbody></table> : 'No phase markers recorded for this run'}>
+      <svg className={`sr-bar${isolate ? ' isolating' : ''}`} width={width} height={10} viewBox={`0 0 ${width} 10`} role="img" aria-label={`${fmtDur(secs)} in ${main.length} phases`}>
         <rect className="sr-bar-bg" x={0} y={0} width={width} height={10} rx={2} />
-        {main.map(s => <rect key={s.phase} x={x(s.start)} y={0} width={Math.max(1, x(s.end) - x(s.start))} height={10} style={{ fill: phaseFill(s, color) }} />)}
+        {main.map((s, i) => <rect key={`${s.phase}-${i}`} className={isolate ? 'dim' : undefined} x={x(s.start)} y={0} width={Math.max(1, x(s.end) - x(s.start))} height={10} style={{ fill: phaseFill(s, color) }} />)}
+        {lit.map((s, i) => <rect key={`lit-${s.phase}-${i}`} x={x(s.start)} y={0} width={Math.max(1, x(s.end) - x(s.start))} height={10} style={{ fill: phaseFill(s, color) }} />)}
         {overlappingFailures(spans).map(s => <rect key={`failed-${s.phase}`} x={x(s.start)} y={0} width={Math.max(1, x(s.end) - x(s.start))} height={3} style={{ fill: 'var(--danger)' }} />)}
         {spans.filter(s => s.status === 'running').map(s => <rect key={`active-${s.phase}`} x={x(s.start)} y={7} width={Math.max(1, x(s.end) - x(s.start))} height={2} style={{ fill: color(s.phase) }} />)}
       </svg>

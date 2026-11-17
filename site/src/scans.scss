@@ -96,7 +96,17 @@
     .dur { margin-left: auto; padding-left: 8px; font-variant-numeric: tabular-nums; color: var(--ink); white-space: nowrap; }
     // each phase's share of the run fills its cell from the left, in its own color
     &.readout { .sr-phases-grid > span:not(.absent) { background: linear-gradient(to right, color-mix(in srgb, var(--fill, transparent) 40%, transparent) var(--pct, 0%), color-mix(in srgb, var(--ink) 6%, transparent) var(--pct, 0%)); }
-      .absent { opacity: 0.35; } .failed .dur { color: var(--danger); } } }
+      .absent { opacity: 0.35; } .failed .dur { color: var(--danger); } }
+    // a legend item isolates its phases on hover (`.isolated`), and stays isolating when clicked (`.pinned`)
+    .sr-iso-item { cursor: pointer; outline-offset: -1px;
+      &.isolated { outline: 1px solid var(--ink-3, var(--ink-2)); }
+      &.pinned { outline: 1.5px solid var(--ink); } }
+    .sw-fam { width: 18px; }
+    .sr-fam-toggle { font: inherit; font-size: 11px; color: var(--ink-2); background: none; border: 0; padding: 0 2px; cursor: pointer; }
+    .sr-fam-member { padding-left: 14px; } }
+  // the bars outside an isolated phase, on the duration strip and the table's phase bars
+  .sr-iso-dim, .sr-bar.isolating rect.dim { opacity: 0.18; }
+  .sr-phase-filter { font: inherit; width: 12em; }
   .sr-chart { margin-top: 8px; }
   .sr-chart-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; padding-top: 10px;
     h3 { margin: 0; padding: 0; }

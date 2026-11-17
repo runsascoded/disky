@@ -29,7 +29,7 @@ import { useMinSlug } from './scan'
 import {
   batchHref, isLost, isMaintenance, isScanProducer, liveness, logsHref, maintStore, mapHref, metaHref, type OutputDelta, phaseOrder, processingSecs, type PhaseSpan, type RunSummary, type ScanRun,
   type ScanRunPhase, type PhaseIssue, type PhaseRecovery, BEHIND, issueLeaves, issueState, issueWhat, overlappingFailures, phaseFill, phaseOutcome, runOutcome, runOutcomeLine, runTasks,
-  type RunTask, STATUS_FILTERS, statusMatches, taskLogsHref,
+  type RunTask, STATUS_FILTERS, statusMatches, taskLogsHref, compactSpans, coveredSecs, phaseFamilies, phaseMatches, phaseOf,
 } from './scanRunsModel'
 import { agoLong, colorer, fmtDur, fmtRunTime, getJson, IssueStanding, type Links, PhaseBar, QUIET_TIP, runDay, RunWhen, scanRunsApi, scansHref, scansStore, Status, useScanRuns } from './scanRunsUi'
 import { brushRole, dagNodes, processOf, type DagNode, type Hl, type RunDagRow } from './runDag'
@@ -140,6 +140,15 @@ function useHoverRun() {
 }
 type HoverRun = ReturnType<typeof useHoverRun>
 
+/** The legend item isolating its phases on the chart and the table's bars: the hovered one, else the pinned one
+ *  (clicked; a second click unpins). `key`: a phase, or a family (`phaseFamily`) for all its members. */
+interface Isolation { key: string | null; pinned: string | null; hover: (key: string | null) => void; pin: (key: string) => void }
+function useIsolation(): Isolation {
+  const [hovered, setHovered] = useState<string | null>(null)
+  const [pinned, setPinned] = useState<string | null>(null)
+  return { key: hovered ?? pinned, pinned, hover: setHovered, pin: key => setPinned(p => (p === key ? null : key)) }
+}
+
 /** Below this many px a press is a click (opens the run), not a drag. */
 const DRAG_PX = 4
 
@@ -159,13 +168,15 @@ interface DurationProps {
   runs: RunSummary[]; color: (p: string) => string; onPick: (id: string) => void
   win: RunSpan | null; onWin: (w: RunSpan | null) => void; hover: HoverRun
   retention?: RetentionBrush
+  /** A legend item hovered or pinned: its phases' spans (every lane's) stay lit, the rest dim. */
+  isolate?: ((phase: string) => boolean) | null
 }
 
 // Match the minute precision of the shared range URL, including retries of the same capture.
 const runX = (ts: number) => Math.floor(ts / 60) * 60
 const rangeId = (x: number) => new Date(x).toISOString().slice(0, 16).replace(':', '')
 
-function DurationStrip({ runs, color, onPick, win, onWin, hover, retention, range, autoBreak }: DurationProps & {
+function DurationStrip({ runs, color, onPick, win, onWin, hover, retention, range, autoBreak, isolate }: DurationProps & {
   range: readonly [number, number] | null; autoBreak: boolean
 }) {
   const [ref, W] = useWidth<HTMLDivElement>()
@@ -242,7 +253,8 @@ function DurationStrip({ runs, color, onPick, win, onWin, hover, retention, rang
         {pts.map(p => {
           const { cx, w: bw, lo, hi } = cols.get(p.run.run_id)!
           const failed = p.run.status === 'failed', lost = isLost(p.run, now)
-          const main = p.spans.filter(s => s.lane === 0)
+          const main = compactSpans(p.spans)
+          const lit = isolate ? p.spans.filter(s => isolate(s.phase)) : []
           const id = p.run.run_id
           const out = !drag && !inSpan(win, p.run.started_ts)
           const decision = retention && p.run.kind === 'scan' && !p.run.parent ? retention.scans.get(p.run.scan) : undefined
@@ -269,8 +281,11 @@ function DurationStrip({ runs, color, onPick, win, onWin, hover, retention, rang
               onPointerLeave={() => { hover.leave(); retention?.hover(null) }}>
               <rect className="sr-col-hit" x={lo} y={T} width={Math.max(0, hi - lo)} height={H - T - B} />
               {durationSegments(0, p.secs! / 3600, cut).map(([a, b], i) => <rect key={`total-${i}`} className="sr-col-total" x={cx} y={y(b)} width={bw} height={Math.max(1, y(a) - y(b))} />)}
-              {!failed && main.flatMap(s => durationSegments(s.start / 3600, s.end / 3600, cut).map(([a, b], i) => (
-                <rect key={`${s.phase}-${i}`} x={cx} y={y(b)} width={bw} height={Math.max(0.5, y(a) - y(b))} style={{ fill: phaseFill(s, color) }} />
+              {!failed && main.flatMap((s, j) => durationSegments(s.start / 3600, s.end / 3600, cut).map(([a, b], i) => (
+                <rect key={`${s.phase}-${j}-${i}`} className={isolate ? 'sr-iso-dim' : undefined} x={cx} y={y(b)} width={bw} height={Math.max(0.5, y(a) - y(b))} style={{ fill: phaseFill(s, color) }} />
+              )))}
+              {lit.flatMap((s, j) => durationSegments(s.start / 3600, s.end / 3600, cut).map(([a, b], i) => (
+                <rect key={`lit-${s.phase}-${j}-${i}`} x={cx} y={y(b)} width={bw} height={Math.max(0.5, y(a) - y(b))} style={{ fill: phaseFill(s, color) }} />
               )))}
               {!failed && overlappingFailures(p.spans).flatMap(s => durationSegments(s.start / 3600, s.end / 3600, cut).map(([a, b], i) => <rect key={`failed-${s.phase}-${i}`} x={cx + bw * 0.6} y={y(b)} width={Math.max(1, bw * 0.4)} height={Math.max(0.5, y(a) - y(b))} style={{ fill: 'var(--danger)' }} />))}
               {cut && p.secs! / 3600 >= cut[1] && <path className="sr-break-mark" d={`M${cx - 1},${gapY + 5} l${bw + 2},-4 M${cx - 1},${gapY - 1} l${bw + 2},-4`} />}
@@ -321,35 +336,49 @@ export function ScanDurationChart(props: DurationProps) {
 /** The phase legend, and the hovered run's readout (a bar's or a table row's): each phase's time in it, beside its
  * swatch (the phases it didn't run fade), with the run's summary on the line above. The grid's cells are fixed, so a
  * hover never reflows the page. */
-function Legend({ order, color, run }: { order: string[]; color: (p: string) => string; run?: RunSummary }) {
+function Legend({ order, color, run, iso, filter }: { order: string[]; color: (p: string) => string; run?: RunSummary; iso: Isolation; filter: string }) {
+  const [open, setOpen] = useState<ReadonlySet<string>>(new Set())
   if (!order.length) return null
-  const by = new Map<string, { secs: number; beside: boolean; failed: boolean }>()
-  for (const s of run?.spans ?? []) {
-    const e = by.get(s.phase) ?? { secs: 0, beside: false, failed: false }
-    e.secs += s.end - s.start
-    if (s.lane) e.beside = true
-    if (s.status === 'failed') e.failed = true
-    by.set(s.phase, e)
+  const spans = (run?.spans ?? []).filter(s => phaseMatches(filter, s.phase))
+  // a legend key's time in the run: its phases' wall time (a family's parallel members counted once)
+  const time = (key: string): { secs: number; beside: boolean; failed: boolean } | undefined => {
+    const of = spans.filter(s => phaseOf(key, s.phase))
+    return of.length ? { secs: coveredSecs(of), beside: of.some(s => s.lane !== 0), failed: of.some(s => s.status === 'failed') } : undefined
   }
-  // the run's time no main-lane phase accounts for
-  const other = run?.secs == null ? null : run.secs - run.spans.filter(s => !s.lane).reduce((t, s) => t + s.end - s.start, 0)
+  // the run's time no phase a compact bar draws accounts for
+  const other = run?.secs == null ? null : run.secs - compactSpans(spans).reduce((t, s) => t + s.end - s.start, 0)
   const where = run?.failed_at ? ` · failed ${run.failed_at.startsWith('after') ? run.failed_at : `in ${run.failed_at}`}` : ''
   // a cell's fill: its phase's share of the run's duration
   const fill = (fill: string, secs: number | null | undefined) =>
     run?.secs && secs ? { '--fill': fill, '--pct': `${Math.min(100, (100 * secs) / run.secs).toFixed(1)}%` } as CSSProperties : undefined
-  const cell = (key: string, sw: ReactNode, label: string, dur: ReactNode, cls = '', style?: CSSProperties) =>
+  const cell = (key: string, sw: ReactNode, label: ReactNode, dur: ReactNode, cls = '', style?: CSSProperties) =>
     <span key={key} className={cls || undefined} style={style}>{sw}<span className="lbl">{label}</span><span className="dur">{dur}</span></span>
+  // A phase or family item: hovering isolates it on the chart and the table's bars, a click pins it (again: unpins).
+  const item = (key: string, label: ReactNode, sw: ReactNode, extra = '') => {
+    const e = time(key)
+    const on = iso.key === key
+    return <span key={key} role="button" tabIndex={0} aria-pressed={iso.pinned === key}
+      className={[run ? (e ? (e.failed ? 'failed' : '') : 'absent') : '', 'sr-iso-item', on && 'isolated', iso.pinned === key && 'pinned', extra].filter(Boolean).join(' ') || undefined}
+      style={fill(color(key), e?.secs)}
+      onPointerEnter={() => iso.hover(key)} onPointerLeave={() => iso.hover(null)} onFocus={() => iso.hover(key)} onBlur={() => iso.hover(null)}
+      onClick={() => iso.pin(key)} onKeyDown={ev => { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); iso.pin(key) } }}>
+      {sw}<span className="lbl">{label}</span><span className="dur">{e && <>{e.beside && '∥ '}{fmtDur(e.secs)}</>}</span>
+    </span>
+  }
+  const toggle = (f: string) => setOpen(o => { const n = new Set(o); if (n.has(f)) n.delete(f); else n.add(f); return n })
   return <div className={`sr-phases${run ? ' readout' : ''}`}>
     <div className="sr-phases-head">{run
-      ? <><b>{fmtRunTime(run.run.started_ts!)}</b> · {run.run.kind} · {runOutcomeLine(run.run, run.phase_issues)}{run.secs != null && <> · {fmtDur(run.secs)}</>}{where}{[...by.values()].some(e => e.beside) && <span className="dim"> · ∥ beside the main sequence</span>}</>
-      : <span className="dim">Hover a bar or a row for its phases.</span>}</div>
+      ? <><b>{fmtRunTime(run.run.started_ts!)}</b> · {run.run.kind} · {runOutcomeLine(run.run, run.phase_issues)}{run.secs != null && <> · {fmtDur(run.secs)}</>}{where}{spans.some(s => s.lane !== 0) && <span className="dim"> · ∥ beside the main sequence</span>}</>
+      : <span className="dim">Hover a bar or a row for its phases; hover a phase to isolate it, click to pin.</span>}</div>
     <div className="sr-phases-grid">
-      {order.map(p => {
-        const e = by.get(p)
-        return cell(p, <i className="sw" style={{ background: color(p) }} />, p,
-          e && <>{e.beside && '∥ '}{fmtDur(e.secs)}</>,
-          run ? (e ? (e.failed ? 'failed' : '') : 'absent') : '', fill(color(p), e?.secs))
-      })}
+      {phaseFamilies(order).flatMap(({ family, members }) => members.length === 1 && members[0] === family
+        ? [item(family, family, <i className="sw" style={{ background: color(family) }} />)]
+        : [
+          item(family, <>{family} <button type="button" className="sr-fam-toggle" aria-expanded={open.has(family)} aria-label={`${open.has(family) ? 'Collapse' : 'Expand'} ${family}'s ${members.length} phases`}
+            onClick={ev => { ev.stopPropagation(); toggle(family) }}>{open.has(family) ? '▾' : '▸'} {members.length}</button></>,
+            <i className="sw sw-fam" style={{ background: `linear-gradient(to right, ${members.map(m => color(m)).join(', ')})` }} />),
+          ...(open.has(family) ? members.map(m => item(m, m, <i className="sw" style={{ background: color(m) }} />, 'sr-fam-member')) : []),
+        ])}
       {cell('other', <i className="sw" style={{ background: 'var(--other)' }} />, 'unrecorded work (not necessarily idle)', other != null && other >= 1 && fmtDur(other), run && !(other != null && other >= 1) ? 'absent' : '', fill('var(--other)', other))}
       {cell('failed', <i className="sw failed" />, 'failed', null, run && run.run.status !== 'failed' ? 'absent' : '')}
     </div>
@@ -394,6 +423,10 @@ export function ScansPage() {
   const [status, setStatusP] = useUrlState('st', runStatusParam, true)
   const [span, setSpanP] = useUrlState('w', runSpanParam, true)
   const [page, setPage] = useUrlState('pg', pageParam)
+  // `?ph=`: only the phases matching it drawn and listed (`phaseMatches`); typing replaces the entry.
+  const [phaseFilter, setPhaseFilter] = useUrlState('ph', stringParam())
+  const iso = useIsolation()
+  const isolate = useMemo(() => (iso.key ? (p: string) => phaseOf(iso.key!, p) : null), [iso.key])
   const first = useCallback(<T,>(set: (v: T) => void) => (v: T) => { set(v); if (page) setPage(0) }, [page, setPage])
   const setKind = first(setKindP), setStatus = first(setStatusP)
   const setSpan = useMemo(() => first(setSpanP), [first, setSpanP])
@@ -441,6 +474,7 @@ export function ScansPage() {
     ])),
   })
   const filtered = runs.filter(r => runKindMatches(kind, r.run.kind) && statusMatches(status, runOutcome(r.run, r.phase_issues)))
+    .map(r => (phaseFilter ? { ...r, spans: r.spans.filter(s => phaseMatches(phaseFilter, s.phase)) } : r))
   const visiblePhases = new Set(filtered.flatMap(r => r.spans.map(s => s.phase)))
   const shown = filtered.filter(r => inSpan(span, r.run.started_ts))
   const spanScans = retentionReady ? retentionSpanScans(filtered, span, retention) : []
@@ -470,15 +504,16 @@ export function ScansPage() {
             </span>)}
           </fieldset>
           <select aria-label="Filter by status" value={status} onChange={e => setStatus(e.target.value)}><option value="">all statuses</option>{STATUS_FILTERS.map(f => <option key={f.key} value={f.key}>{f.label}</option>)}</select>
+          <Tooltip content="Draw and list only the phases whose name (or family: list, import) contains this text."><input type="search" className="sr-phase-filter" aria-label="Filter phases" placeholder="phases…" value={phaseFilter ?? ''} onChange={e => setPhaseFilter(e.target.value || undefined)} /></Tooltip>
           <span className="dim">{shown.length} / {runs.length} runs</span>
           {span
             ? <Tooltip content="The runs that started in the window dragged on the chart. Esc clears it."><button type="button" className="sr-span" onClick={() => setSpan(null)}>{fmtRunTime(span[0])} → {fmtRunTime(span[1])} ✕</button></Tooltip>
             : <span className="dim hide-md">Drag across the chart to pick a window.</span>}
         </div>
         <section className="sr-chart" id="sr-retention-chart">
-          <ScanDurationChart runs={filtered} color={color} onPick={id => nav(scanHref(id))} win={span} onWin={setSpan} hover={hover}
+          <ScanDurationChart runs={filtered} color={color} onPick={id => nav(scanHref(id))} win={span} onWin={setSpan} hover={hover} isolate={isolate}
             retention={retentionOn ? { scans: retention, selected: selectedScans, hoverScan: activeScan, manual: selectionMode, ready: retentionReady, toggle: toggleScan, hover: setHoverScan } : undefined} />
-          <Legend order={order.filter(p => visiblePhases.has(p))} color={color} run={hover.id ? runs.find(r => r.run.run_id === hover.id) : undefined} />
+          <Legend order={order.filter(p => visiblePhases.has(p))} color={color} run={hover.id ? runs.find(r => r.run.run_id === hover.id) : undefined} iso={iso} filter={phaseFilter ?? ''} />
           {retentionOn && <div className="sr-retention-legend" aria-live="polite">
             <span><i className="sr-retention-key remove">×</i> proposed removal</span><span><i className="sr-retention-key retain" /> retained</span><span><i className="sr-retention-key selected" /> manual selection ({manualScans.length})</span>
             <span>{availableCount} {reviewedPlan ? 'reviewed' : sourceRoster ? 'current source' : 'published in loaded history'} scans · {protectedCount} protected</span>
@@ -527,7 +562,7 @@ export function ScansPage() {
                       <span>{fmtDur(processing)} processing</span>
                       <div className="sr-kind dim">{fmtDur(s.secs)} incl. wait</div>
                     </>}</td>
-                    <td className="hide-md"><PhaseBar cell spans={s.spans} secs={s.secs} color={color} width={130} /></td>
+                    <td className="hide-md"><PhaseBar cell spans={s.spans} secs={s.secs} color={color} width={130} isolate={isolate} /></td>
                     <td className="num nb">{s.out_bytes == null ? '—' : <Link className="sr-output-link" to={scanHref(r.run_id)}>{bytes(s.out_bytes)}</Link>}</td>
                     <td className={`num nb ${deltaClass(s.delta_bytes)}`}>{delta(s.delta_bytes)}</td>
                     <td className="num nb">{s.cost_usd == null ? <span className="dim">—</span> : usd(s.cost_usd)}</td>
