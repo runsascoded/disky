@@ -7,8 +7,9 @@
  * The wire types below are the fields read from each route's answer (`site/functions/api/health.ts`,
  * `api/scan-runs/[[path]].ts`, `api/series.ts`), nothing more.
  */
+import { WINDOW_DAYS } from './card.js'
 import type { Env } from './env.js'
-import type { FleetDeployment, FleetDoc, FleetMeta, FleetRun, MetaPoint } from './fleetTypes.js'
+import type { FleetDeployment, FleetDoc, FleetMeta, FleetRun, MetaPoint, ObjPoint } from './fleetTypes.js'
 
 export type { FleetDeployment, FleetDoc, FleetHealth, FleetMeta, FleetRun, MetaPoint } from './fleetTypes.js'
 
@@ -49,11 +50,13 @@ interface RunWire {
 interface RunsWire { configured: boolean; runs: RunWire[] }
 /** `/api/series`' points: `bytes` (specs/descriptive-field-names.md §3d), or `b` from a deployment whose site predates the
  *  rename. Drop `b` once every deployment serves `bytes` (the spec's follow-up list). */
-interface SeriesWire { points: { date: string; bytes?: number; b?: number }[] }
+interface SeriesWire { points: { date: string; bytes?: number; b?: number; objects?: number; o?: number }[] }
 
 // ── the document (its shape: `fleetTypes.ts`) ─────────────────────────────
 
-export const DEFAULT_RUNS = 14
+/** A cap on runs per deployment (`FLEET_RUNS`); the runs kept are the card's window's (`WINDOW_DAYS`), whatever the
+ *  deployment's scan rate, plus its newest even when older. */
+export const DEFAULT_RUNS = 200
 /** How far back `FleetMeta.daily` reaches. */
 export const META_DAYS = 30
 /** The scan job's own runs (`kind = 'scan'`, `dt-cloud scan-run`'s default). A deployment's other runs are listed beside them
@@ -91,6 +94,20 @@ export function fleetMeta(points: SeriesWire['points'], now: number): FleetMeta 
   return { now: pts.length ? pts[pts.length - 1].bytes : null, d1: at(now - DAY), d7: at(now - 7 * DAY), daily: [...byDay.values()] }
 }
 
+/** The primary store's object counts, the newest scan per UTC day over `META_DAYS` (what drives scan time). */
+export function fleetObjects(points: SeriesWire['points'], now: number): ObjPoint[] {
+  const byDay = new Map<string, ObjPoint>()
+  for (const p of points) {
+    const t = scanTime(p.date)
+    const objects = p.objects ?? p.o
+    if (t === null || objects == null || t < now - META_DAYS * DAY) continue
+    const day = new Date(t * 1000).toISOString().slice(0, 10)
+    const was = byDay.get(day)
+    if (!was || was.t <= t) byDay.set(day, { scan: p.date, t, objects })
+  }
+  return [...byDay.values()].sort((a, b) => a.t - b.t)
+}
+
 type Fetcher = typeof fetch
 
 async function getJson<T>(f: Fetcher, url: string, token: string): Promise<T> {
@@ -103,11 +120,11 @@ const why = (e: unknown): string => (e instanceof Error ? e.message : String(e))
 
 /** One deployment's part of the document. */
 export async function readDeployment(d: Deployment, env: Env, now: number, nRuns: number, f: Fetcher = fetch): Promise<FleetDeployment> {
-  const out: FleetDeployment = { name: d.name, url: d.url, color: d.color, health: null, last: null, runs: [], meta: null, errors: {} }
+  const out: FleetDeployment = { name: d.name, url: d.url, color: d.color, health: null, last: null, runs: [], meta: null, objects: null, errors: {} }
   const token = env[d.token]
   if (typeof token !== 'string' || !token) {
     const e = `no token (${d.token} unset)`
-    out.errors = { health: e, runs: e, meta: e }
+    out.errors = { health: e, runs: e, meta: e, objects: e }
     return out
   }
   await Promise.all([
@@ -116,12 +133,17 @@ export async function readDeployment(d: Deployment, env: Env, now: number, nRuns
     }, e => { out.errors.health = why(e) }),
     getJson<RunsWire>(f, `${d.url}/api/scan-runs`, token).then(r => {
       if (!r.configured) { out.errors.runs = 'scan runs are not set up'; return }
-      out.runs = r.runs.filter(s => s.run.kind === SCAN_KIND && s.run.status !== 'nop').slice(0, nRuns).map(fleetRun)
+      const since = now - WINDOW_DAYS * DAY
+      out.runs = r.runs.filter(s => s.run.kind === SCAN_KIND && s.run.status !== 'nop')
+        .filter((s, i) => i === 0 || (s.run.started_ts ?? 0) >= since).slice(0, nRuns).map(fleetRun)
       out.last = out.runs[0] ?? null
     }, e => { out.errors.runs = why(e) }),
     getJson<SeriesWire>(f, `${d.url}/api/series?store=meta`, token).then(s => {
       out.meta = fleetMeta(s.points, now)
     }, e => { out.errors.meta = why(e) }),
+    getJson<SeriesWire>(f, `${d.url}/api/series`, token).then(s => {
+      out.objects = fleetObjects(s.points, now)
+    }, e => { out.errors.objects = why(e) }),
   ])
   return out
 }

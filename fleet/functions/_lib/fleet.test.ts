@@ -53,9 +53,20 @@ const ANSWERS = {
       { date: 'bogus', bytes: 9, objects: 1 },
     ],
   },
+  'https://a.test/api/series': {
+    path: '',
+    points: [
+      { date: '2026-10-01', bytes: 1, objects: 5 },
+      { date: '2026-11-06', bytes: 1, objects: 10 },
+      { date: '2026-11-06T1200', bytes: 1, objects: 12 },
+      { date: '2026-11-07', bytes: 1, objects: 15 },
+      { date: 'bogus', bytes: 1, objects: 99 },
+    ],
+  },
   'https://c.test/api/health': new Status(500),
   'https://c.test/api/scan-runs': { configured: false, runs: [] },
   'https://c.test/api/series?store=meta': null,
+  'https://c.test/api/series': null,
 }
 
 describe('/api/fleet\'s document over stubbed deployments', () => {
@@ -66,9 +77,11 @@ describe('/api/fleet\'s document over stubbed deployments', () => {
       { url: 'https://a.test/api/health', authorization: 'Bearer tok-a' },
       { url: 'https://a.test/api/scan-runs', authorization: 'Bearer tok-a' },
       { url: 'https://a.test/api/series?store=meta', authorization: 'Bearer tok-a' },
+      { url: 'https://a.test/api/series', authorization: 'Bearer tok-a' },
       { url: 'https://c.test/api/health', authorization: 'Bearer tok-c' },
       { url: 'https://c.test/api/scan-runs', authorization: 'Bearer tok-c' },
       { url: 'https://c.test/api/series?store=meta', authorization: 'Bearer tok-c' },
+      { url: 'https://c.test/api/series', authorization: 'Bearer tok-c' },
     ])
   })
 
@@ -92,10 +105,14 @@ describe('/api/fleet\'s document over stubbed deployments', () => {
               { scan: '2026-11-07', t: t('2026-11-07T00:00Z'), bytes: 300 },
             ],
           },
+          objects: [
+            { scan: '2026-11-06T1200', t: t('2026-11-06T12:00Z'), objects: 12 },
+            { scan: '2026-11-07', t: t('2026-11-07T00:00Z'), objects: 15 },
+          ],
           errors: {},
         },
-        { name: 'b', url: 'https://b.test', color: '#222222', health: null, last: null, runs: [], meta: null, errors: { health: noToken, runs: noToken, meta: noToken } },
-        { name: 'c', url: 'https://c.test', color: '#333333', health: null, last: null, runs: [], meta: null, errors: { health: 'HTTP 500', runs: 'scan runs are not set up', meta: 'HTTP 403' } },
+        { name: 'b', url: 'https://b.test', color: '#222222', health: null, last: null, runs: [], meta: null, objects: null, errors: { health: noToken, runs: noToken, meta: noToken, objects: noToken } },
+        { name: 'c', url: 'https://c.test', color: '#333333', health: null, last: null, runs: [], meta: null, objects: null, errors: { health: 'HTTP 500', runs: 'scan runs are not set up', meta: 'HTTP 403', objects: 'HTTP 403' } },
       ],
     }
     expect(await readFleet(env(), NOW, stubFetch(ANSWERS))).toEqual(expected)
@@ -104,7 +121,7 @@ describe('/api/fleet\'s document over stubbed deployments', () => {
   it('keeps the newest `FLEET_RUNS` runs', async () => {
     const doc = await readFleet(env({ FLEET_RUNS: '1' }), NOW, stubFetch(ANSWERS))
     expect(doc.deployments[0].runs.map(r => r.run_id)).toEqual(['r1'])
-    expect([runsOf(env()), runsOf(env({ FLEET_RUNS: '0' })), runsOf(env({ FLEET_RUNS: 'x' })), runsOf(env({ FLEET_RUNS: '30' }))]).toEqual([14, 14, 14, 30])
+    expect([runsOf(env()), runsOf(env({ FLEET_RUNS: '0' })), runsOf(env({ FLEET_RUNS: 'x' })), runsOf(env({ FLEET_RUNS: '30' }))]).toEqual([200, 200, 200, 30])
   })
 
   it('a meta store with no points has no sizes', () => {

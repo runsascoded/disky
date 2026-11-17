@@ -57,7 +57,7 @@ export function fleetMessage(doc: FleetDoc, image: string, page: string): SlackM
     text: `disky fleet: ${doc.deployments.map(d => `${d.name} ${status(d).word}`).join(', ')}`,
     blocks: [
       { type: 'section', text: { type: 'mrkdwn', text: [`*disky fleet* · <${page}|details>`, ...lines].join('\n') } },
-      { type: 'image', image_url: image, alt_text: 'disky fleet: /meta store size, scan duration and cost per scan, per deployment, over the last week' },
+      { type: 'image', image_url: image, alt_text: 'disky fleet: /meta store size, scan duration and cost per day, per deployment, over the last week' },
       { type: 'context', elements: [{ type: 'mrkdwn', text: `read ${stamp(doc.now)} · updated in place hourly` }] },
     ],
   }

@@ -400,13 +400,14 @@ function AppContent() {
       : Math.max(3600_000, Math.round((scanInstant(to, times) - scanInstant(from, times)) / 3600_000) * 3600_000)
   // A brush on the size chart hands back the scan ids its ends sit on (else a
   // prefix, which resolves to the latest scan matching it — never a date-only
-  // id read as its whole day), and the pair becomes the page's `?d=` (after + span).
+  // id read as its whole day), and the pair becomes the page's `?d=`: the end, and the start pinned to its scan
+  // (`pickScanSelection`), never a span a later scan would re-resolve to its neighbour.
   const brushScan = (v: string) => (scans.includes(v) ? v : latestScan(v, scans, times))
   const brushRange = (from: string, to: string) => {
     const toScan = brushScan(to)
     const fromScan = brushScan(from)
     if (!toScan || !fromScan || scanCmp(toScan, fromScan, times) <= 0) return
-    setRange(toScan, spanTo(toScan, fromScan), fromScan)
+    setRange(toScan, undefined, fromScan)
   }
   const diffWindow: [string, string] | undefined = diffPrev && asof ? [diffPrev, asof] : undefined
   /** One diff edge's neighbouring scan (`scans` runs newest first): `older` steps back in time; null past the

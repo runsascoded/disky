@@ -18,8 +18,11 @@ export interface Env {
   OA_LOGIN_CLIENT_SECRET?: string
   /** The deployments, a JSON list (`fleet.ts` `parseFleet`); each names the secret holding its read token. */
   FLEET_JSON?: string
-  /** How many runs per deployment `/api/fleet` returns (default `DEFAULT_RUNS`). */
+  /** At most this many runs per deployment from the card's window (default `DEFAULT_RUNS`). */
   FLEET_RUNS?: string
+  /** "1": the card is public, the full card without a `sig` (nothing on it is sensitive for this deployment list). Unset:
+   *  only a signed URL draws the numbers; anyone else gets the anonymous frame. */
+  FLEET_CARD_PUBLIC?: string
   /** The Bearer token `POST /api/fleet/slack` takes (the hourly cron's). */
   FLEET_JOB_TOKEN?: string
   /** "Disky Admin Bot"'s token, and the channel (an id) its fleet post lives in. */

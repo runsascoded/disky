@@ -69,6 +69,17 @@ const META: Record<string, unknown> = {
   r2: series(18.4e9, 1.072),
 }
 
+/** Each primary store's root series: its object count (what scan time tracks) growing scan over scan. */
+const objSeries = (start: number, growth: number) =>
+  ({ points: [9, 8, 7, 6, 5, 4, 3, 2, 1, 0].map(k => ({ date: scanId(day0 - k * DAY), bytes: 1, objects: Math.round(start * growth ** (9 - k)) })) })
+
+const PRIMARY: Record<string, unknown> = {
+  gcs: objSeries(148e6, 1.004),
+  cw: objSeries(120e6, 1.03),
+  hf: objSeries(271e3, 1.003),
+  r2: objSeries(3.5e6, 1.006),
+}
+
 const health = (newest: string, age: number, gaps: Record<string, number>) => ({ now: NOW, freshness: { newest_scan: newest, newest_scan_age: age }, gaps, scans: [], stores: [] })
 
 const HEALTH: Record<string, unknown> = {
@@ -83,6 +94,7 @@ export const ANSWERS: Record<string, unknown> = Object.fromEntries(FLEET.flatMap
   [`${d.url}/api/health`, HEALTH[d.name]],
   [`${d.url}/api/scan-runs`, { configured: true, runs: RUNS[d.name] }],
   [`${d.url}/api/series?store=meta`, META[d.name] ?? null],
+  [`${d.url}/api/series`, PRIMARY[d.name] ?? null],
 ]))
 
 export interface Seen { url: string; authorization: string | null }

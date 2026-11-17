@@ -19,7 +19,8 @@ compatibility_date = "2026-06-01"
 # The deployments: each `token` names the secret holding that deployment's read token (a grant on the deployment that
 # reaches `/api/health`, `/api/scan-runs` and `/api/series?store=meta`); `color` is its trace on the card.
 FLEET_JSON = '[{"name":"gcs","url":"https://gcs.example.com","token":"FLEET_TOKEN_GCS","color":"#EA4335"},{"name":"cw","url":"https://cw.example.com","token":"FLEET_TOKEN_CW","color":"#4C5FF0"},{"name":"hf","url":"https://hf.example.com","token":"FLEET_TOKEN_HF","color":"#FFD21E"},{"name":"r2","url":"https://r2.example.com","token":"FLEET_TOKEN_R2","color":"#F38020"}]'
-# FLEET_RUNS = "14"                         # runs per deployment `/api/fleet` returns
+# FLEET_RUNS = "200"                        # cap on runs per deployment (the card's 7 days are kept)
+# FLEET_CARD_PUBLIC = "1"                   # the full card without a signed URL (link previews, the page's og:image)
 
 # Who may sign in to `/fleet`: addresses at these domains (comma-separated).
 STAFF_DOMAIN = "example.com"

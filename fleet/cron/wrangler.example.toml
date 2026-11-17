@@ -1,0 +1,16 @@
+# The fleet's clock (fleet/cron/index.ts): copy to wrangler.toml beside it, set the deployment's values, `wrangler deploy`.
+name = "disky-fleet-cron"
+main = "index.ts"
+compatibility_date = "2026-11-01"
+# account_id = "…"                          # the account the fleet site's Pages project lives on
+
+[triggers]
+crons = ["43 * * * *", "17 * * * *"]        # each must equal SLACK_CRON or HEALTH_CRON
+
+[vars]
+FLEET_SLACK_URL = "https://fleet.example.org/api/fleet/slack"
+SLACK_CRON = "43 * * * *"                   # refresh the fleet post
+HEALTH_CRON = "17 * * * *"                  # dispatch the health checks (off while HEALTH_WORKFLOW or the token is unset)
+HEALTH_WORKFLOW = "owner/repo/health.yml@main"
+
+# Secrets (`wrangler secret put`): FLEET_JOB_TOKEN (the fleet site's), GH_DISPATCH_TOKEN (Actions: write on that repo)

@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { RunOutcome } from '../../src/runs.js'
-import { closedParent, countedItems, PLAN_SENDER, QUEUE_EMPTIED, queueWasEmpty, queuedOf, fmtBytes, personSender, renderParent, runEvent, runUrl, sendParent, shortPath, sizeOf, stageReply, stagedCardUrl, topFolders, type RunRow } from './stagedSlack.js'
-import { sqliteD1 } from './testD1.js'
+import { closedParent, closedSummary, countedItems, PLAN_SENDER, QUEUE_EMPTIED, queueWasEmpty, queuedOf, fmtBytes, personSender, renderParent, runEvent, runUrl, sendParent, shortPath, sizeOf, stageReply, stagedCardUrl, threadDeleted, topFolders, type RunRow } from './stagedSlack.js'
+import { RUN_DIR, sqliteD1 } from './testD1.js'
 
 const run = (o: Partial<RunRow>): RunRow => ({
   run_id: 'cw-sweep-dry-1', mode: 'dry', scan: '2026-09-28T1201', actor: 'ann@staff.example.test', started_ts: 100,
@@ -252,6 +252,47 @@ describe('names and sizes (plain text, never a mention)', () => {
       ],
     ])
   })
+  it('once a real run in the thread deleted some of it: staged (deleted + left), deleted (its runs, by whom), left; every stager of the thread', () => {
+    const v = { ...base, stagers: ['c.d@example.org'], names: { 'a.b@example.org': 'Ann Bee' }, queued: { items: 3, batches: 1, stagers: ['c.d@example.org'] } }
+    const done = { prefixes: 26, b: 61 * 2 ** 40, o: 235715, runs: 1, actors: ['a.b@example.org'] }
+    const lines = (o: Partial<Parameters<typeof renderParent>[0]>) => (renderParent({ ...v, ...o }).blocks[0] as { text: { text: string } }).text.text.split('\n')
+    expect([lines({ size, done, stagedBy: ['a.b@example.org', 'c.d@example.org'] }), lines({ done, stagedBy: ['a.b@example.org'] }), lines({ size, stagedBy: ['a.b@example.org'] })]).toEqual([
+      [
+        '*Staged for deletion* · plan #7',
+        'staged in this thread: 29 prefixes · 112.0 TiB · 179.6M objects',
+        'deleted: 26 prefixes · 61.0 TiB · 235,715 objects (1 real run: Ann Bee)',
+        'left: *3 prefixes · 51.0 TiB · 179.3M objects* at scan 2026-10-02',
+        '+5 staged prefixes empty at scan, not counted',
+        'staged by Ann Bee, c.d',
+      ],
+      [
+        '*Staged for deletion* · plan #7',
+        'staged in this thread: 29 prefixes',
+        'deleted: 26 prefixes · 61.0 TiB · 235,715 objects (1 real run: Ann Bee)',
+        'left: *3 prefixes*',
+        'staged by Ann Bee',
+      ],
+      // Nothing deleted: the total beside the title, and the queue's stagers.
+      [
+        '*Staged for deletion* · plan #7: *3 prefixes · 51.0 TiB · 179.3M objects* at scan 2026-10-02',
+        '+5 staged prefixes empty at scan, not counted',
+        'staged by c.d',
+      ],
+    ])
+  })
+  it('closedSummary: a closing thread\'s counts, as its parent showed them without the title', () => {
+    const done = { prefixes: 2, b: 2 * 2 ** 40, o: 10, runs: 2, actors: ['a.b@example.org', 'c.d@example.org'] }
+    expect([closedSummary(0, ['a.b@example.org'], { done, size: { ...size, b: 0, o: 0, empty: 1, owners: [] }, names: { 'a.b@example.org': 'Ann Bee' } }), closedSummary(1, [], {})]).toEqual([
+      [
+        'staged in this thread: 2 prefixes · 2.0 TiB · 10 objects',
+        'deleted: 2 prefixes · 2.0 TiB · 10 objects (2 real runs: Ann Bee, c.d)',
+        'left: *0 prefixes · 0 B · 0 objects* at scan 2026-10-02',
+        '+1 staged prefix empty at scan, not counted',
+        'staged by Ann Bee',
+      ],
+      ['*1 prefix*', 'nothing staged'],
+    ])
+  })
   it('sizeOf: totals over every prefix, absent or no bytes and no objects = empty (zero-byte objects are not), owners by attributed bytes', () => {
     const at = { scan: 'S', stats: { 'gs://b/a/': { bytes: 5, objects: 2, owners: [['u1', 3], ['u2', 2]] as [string, number][] }, 'gs://b/c/': { bytes: 4, objects: 1, owners: [['u2', 4]] as [string, number][] }, 'gs://b/z/': { bytes: 0, objects: 0 }, 'gs://b/zb/': { bytes: 0, objects: 3 } } }
     expect(sizeOf(at, ['gs://b/a/', 'gs://b/c/', 'gs://b/z/', 'gs://b/zb/', 'gs://b/gone/'], u => u.toUpperCase(), 1)).toEqual({ scan: 'S', b: 9, o: 6, empty: 2, owners: [{ label: 'U2', b: 6 }] })
@@ -329,9 +370,14 @@ describe('stage replies: compact, phone-width', () => {
       ['Ann Bee staged 2 batches: nothing left staged', [':wastebasket: *Ann Bee* staged 2 batches · nothing left staged'], [['staged_open', null, 'View in www']]],
     ])
   })
-  it('the old parent, once the plan moved on', () => {
+  it('the old parent, once the plan moved on, keeps what its thread staged, deleted and left', () => {
     const m = closedParent(4, 'https://s', 'https://ws.slack.com/archives/C/p1')
-    expect([m.text, lines(m)]).toEqual(['Staged plan #4: continued in a new thread', ['*Staged plan #4* · this thread is done; continued in <https://ws.slack.com/archives/C/p1|a new thread>.']])
+    const kept = closedParent(4, 'https://s', null, ['deleted: 2 prefixes · 2.0 TiB · 10 objects (1 real run: ann)', 'staged by ann'])
+    expect([m.text, lines(m), lines(kept)]).toEqual([
+      'Staged plan #4: continued in a new thread',
+      ['*Staged plan #4* · this thread is done; continued in <https://ws.slack.com/archives/C/p1|a new thread>.'],
+      ['*Staged plan #4* · this thread is done; continued in a new thread.', 'deleted: 2 prefixes · 2.0 TiB · 10 objects (1 real run: ann)', 'staged by ann'],
+    ])
   })
 })
 
@@ -512,4 +558,22 @@ it('explains an empty completed review without claiming soft delete is off', () 
   expect(runEvent(run({ run_id: 'empty', mode: 'real', deleted_bytes: 0, deleted_objects: 0, undo_deadline: null, soft_delete_days: 0 }), 'finished', {
     outcome: { attempted: true, skipped: null, notSwept: [], preserved: { bytes: 12, objects: 3 } },
   })).toBe(':warning: Real deletion `empty` finished: attempted *0 B* / 0 objects; nothing to undo (no objects processed). Preserved since staging: *12 B* / 3 newer or changed objects.')
+})
+
+describe('threadDeleted', () => {
+  it('sums the bands of real runs started in the thread and finished, none undone or empty; prefixes once; null when none', async () => {
+    const { db, raw } = await sqliteD1()
+    raw.exec("INSERT INTO plans (id, name, state, created_by, created_ts) VALUES (1, 'Staged', 'open', 'ann', 1)")
+    const run = raw.prepare(`INSERT INTO deletion_runs (run_id, ${RUN_DIR}, scan, head, exec_head, actor, mode, started_ts, finished_ts, plan_digest, log_dir, plan_id) VALUES (?, 'p', 'S', 0, 0, ?, ?, ?, ?, 'D', 'd', 1)`)
+    const band = raw.prepare('INSERT INTO deletion_bands (run_id, prefix, bytes, objects, undone_objects) VALUES (?, ?, ?, ?, ?)')
+    run.run('before', 'cy', 'real', 50, 60); band.run('before', 'gs://b/old/', 7, 1, 0)
+    run.run('r1', 'bo', 'real', 100, 200); band.run('r1', 'gs://b/a/', 50, 5, 0); band.run('r1', 'gs://b/u/', 9, 3, 1); band.run('r1', 'gs://b/z/', 0, 0, 0)
+    run.run('r2', 'ann', 'real', 300, 400); band.run('r2', 'gs://b/a/', 20, 2, 0); band.run('r2', 'gs://b/c/', 30, 3, 0)
+    run.run('dry', 'cy', 'dry', 300, 400); band.run('dry', 'gs://b/d/', 99, 9, 0)
+    run.run('running', 'cy', 'real', 500, null); band.run('running', 'gs://b/e/', 99, 9, 0)
+    expect([await threadDeleted(db, 1, 100), await threadDeleted(db, 1, 1000)]).toEqual([
+      { prefixes: 2, b: 100, o: 10, runs: 2, actors: ['ann', 'bo'] },
+      null,
+    ])
+  })
 })

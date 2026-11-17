@@ -91,7 +91,7 @@ export function Fleet() {
       {doc.card && (
         <picture className="card">
           <source media="(prefers-color-scheme: light)" srcSet={doc.card.light} />
-          <img src={doc.card.dark} alt="The fleet card: /meta store size, scan duration and cost per scan, per deployment, over the last week" />
+          <img src={doc.card.dark} alt="The fleet card: /meta store size, scan duration and cost per day, per deployment, over the last week" />
         </picture>
       )}
       {doc.deployments.map(d => <Deployment key={d.name} d={d} />)}

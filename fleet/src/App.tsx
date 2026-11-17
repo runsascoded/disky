@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query'
 import { pages, ref, repo } from 'virtual:fleet-docs'
-import { pageHref, pageTitle, renderPage } from './docs'
+import { renderPage } from './docs'
 import { Fleet } from './Fleet'
 
 export interface Whoami { email: string | null; signIn: boolean }
@@ -26,7 +26,6 @@ function Header({ path }: { path: string }) {
     <header>
       <nav>
         {link('/', 'disky')}
-        {pages.slice(1).map(p => <span key={p.slug}>{link(pageHref(p), pageTitle(p))}</span>)}
         {link('/fleet', 'Fleet')}
       </nav>
       {who?.email && <span className="who">{who.email} · <button className="link" onClick={signOut}>sign out</button></span>}

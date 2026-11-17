@@ -35,8 +35,8 @@ Fixture previews verify formatting and rendering only. Approval of a first real 
 - **Deployed from `o/front-door`:** it merges `cloud` the way a deployment branch does, and adds its `fleet/wrangler.toml` (OA's list, `disky.oa.dev`) beside the README index and `health.yml`. Build from `fleet/` (`pnpm build` there), and deploy from `fleet/` too (`wrangler pages deploy dist`): `pages deploy` bundles the `functions/` of the directory it runs in.
 - **Public:**
   - `/`: the docs index, a Markdown file named at build by `FLEET_DOCS_INDEX` (repo-relative; default `fleet/docs/index.md`, a generic page). The front door points it at its README index.
-  - `/docs/disky`: the project README.
-  - `/docs/<name>`: any other `fleet/docs/*.md` or `docs/**/*.md`.
+  - `/docs/disky`: the project README, unless it is the index (front-door's `FLEET_DOCS_INDEX=README.md`), which `/` already serves.
+  - `/docs/<name>`: any other `fleet/docs/*.md` or `docs/**/*.md` (the fallback `fleet/docs/index.md` only as the index), reached by the docs' links; the nav shows only the index ("disky") and "Fleet".
 
   Relative links resolve to the page that serves their file, else to the file on GitHub (`FLEET_REPO`, `FLEET_REF`, default `runsascoded/disky` at `cloud`).
   - `/og.jpg`: the site's own card (static, `fleet/public/og.jpg`; `fleet/scripts/og.mjs` draws it).
@@ -45,7 +45,7 @@ Fixture previews verify formatting and rendering only. Approval of a first real 
   - **No D1.** `@open-athena/auth`'s gate needs a grant store, but only share links and Bearer tokens read it. Here it's an empty one (`NO_GRANTS`: every lookup misses, every write refused). A session is a signed cookie under `SESSION_SECRET`, judged by its signature. The policy admits `STAFF_DOMAIN` (comma-separated), a var the spec didn't list.
   - A Bearer token or `?key=` link is refused, never looked up.
   - Locally, `DEV_EMAIL` (`.dev.vars` only) makes a localhost request that address.
-- **`/api/fleet`** fetches each deployment's `/api/health`, `/api/scan-runs` and `/api/series?store=meta` (the `/meta` store's bytes per scan), with that deployment's token. `/api/scan-runs` takes no `limit`, so the fleet keeps the newest `FLEET_RUNS` (default 14), maintenance runs (`compact`, `race`, `merge`) and no-op (`nop`) runs left out.
+- **`/api/fleet`** fetches each deployment's `/api/health`, `/api/scan-runs`, `/api/series?store=meta` (the `/meta` store's bytes per scan) and `/api/series` (the primary store's root: its `objects` per scan, which scan time tracks; the token's viewer scope reads it, no `series_scope`), with that deployment's token. `/api/scan-runs` takes no `limit`, so the fleet keeps the runs started in the card's window (`WINDOW_DAYS`, 7) whatever a deployment's scan rate, plus its newest even when older, capped at `FLEET_RUNS` (default 200); maintenance runs (`compact`, `race`, `merge`) and no-op (`nop`) runs left out.
   - It returns one JSON (`functions/_lib/fleetTypes.ts`), per deployment:
     - `health`: newest scan, its age, gaps summed.
     - `last` and `runs`: id, scan, start, duration, status, `failed_at`, open step issues, cost.
@@ -57,17 +57,19 @@ Fixture previews verify formatting and rendering only. Approval of a first real 
 - **`/fleet`:** the same data: the card on top (light or dark by the viewer's scheme), then a section per deployment with its summary, its 5 newest runs (each linked to its run page) and a link to its own `/scans`.
 - **The card** (`/og/fleet.png?[theme=light&]v=…&sig=…`): stacked panels over the last 7 UTC days, one trace per deployment in its color, each labelled at its latest point in a right gutter, as in the layout mock:
   - `/meta` size, log y
+  - objects in the primary store, log y (Ryan, 11-16: object counts now drive scan time)
   - scan duration, with filled = ok and hollow = a step issue still open, or the run failed
-  - cost per scan
+  - cost per UTC day (the day's runs summed, so a deployment scanning 4× a day is comparable with a daily one; complete days only, today being partial)
 
   Each panel's note names the deployments it has no data for. The card is designed 480 px wide (phone width) and rasterized at 2.5× (1200 px). It sits on its own opaque, bordered background, so it reads the same in Slack's light and dark themes. `theme=light` is for the page. Lines get a halo (the panel color on dark, the line color darkened on light, so hf's yellow holds on white), and labels are the color nudged toward the ink.
 
-  A full card needs a valid `sig` (HMAC under `SESSION_SECRET`, 7-day expiry, `IMAGE_TTL_DAYS`). Without one, or with a bad or expired one, it's the anonymous card: the frame, the deployments' names and colors, and no numbers. It is never an error (`x-og-tier` says which, and why).
+  A full card needs a valid `sig` (HMAC under `SESSION_SECRET`, 7-day expiry, `IMAGE_TTL_DAYS`). Without one, or with a bad or expired one, it's the anonymous card: the frame, the deployments' names and colors, and no numbers. It is never an error (`x-og-tier` says which, and why). With `FLEET_CARD_PUBLIC = "1"` every request gets the full card (`x-og-tier: full (public)`, held 5 min): disky.oa.dev sets it (Ryan, 11-16: nothing on the card is sensitive, gcs's cost per scan included; the fleet's estimated storage bill is, and the card doesn't show it).
 - **Slack:** `POST /api/fleet/slack` (Bearer `FLEET_JOB_TOKEN`) reads the fleet anew and builds the post: a one-line status per deployment (`:white_check_mark:` / `:warning:` / `:x:` / `:hourglass_flowing_sand:` / `:grey_question:`, scan linked to its run, status, duration, cost, `/meta` size and its 7 d change, a stale-scan note past 36 h), an `image` block with a freshly signed card URL (`v=` the read's time, so Slack refetches), and a context line.
   - It posts once, then `chat.update`s that message. The channel + ts are kept in the KV binding `FLEET_KV`, or pinned by the var `SLACK_FLEET_TS` (in `SLACK_FLEET_CHANNEL`, an id).
   - With neither, it refuses to post a new message each run (502, saying so). `?new=1` posts one, to pin. `?dry=1` returns the message without posting.
   - A kept post deleted by hand is posted anew, where KV can keep the new one.
-  - The bot is "Disky Admin Bot" (`DISKY_SLACK_BOT_TOKEN`). A GHA cron on `o/front-door` calls it hourly.
+  - The bot is "Disky Admin Bot" (`DISKY_SLACK_BOT_TOKEN`). A Worker's Cron Trigger calls it hourly (`fleet/cron/`, below); `fleet-update.yml` is its by-hand twin (`mode` `dry` / `new` / `update`).
+- **The clock** (`fleet/cron/`, a Worker; Ryan, 11-16): GitHub's `schedule:` ran late or not at all under load, and is disabled after 60 days without repo activity. Its `SLACK_CRON` POSTs `FLEET_SLACK_URL` with `FLEET_JOB_TOKEN`; its `HEALTH_CRON` dispatches `HEALTH_WORKFLOW` (`owner/repo/file@ref`) with `GH_DISPATCH_TOKEN` (fine-grained, Actions: write on that repo), so the health checks still run on Actions with each deployment's own `dt-cloud`, but start on a reliable clock. A failed job throws, so the Workers dashboard marks the run failed. The deployment's `fleet/cron/wrangler.toml` holds the crons and vars; the deploy workflow installs the secrets.
 
 ## Secrets / config (set in the root session with Ryan's go; never by the builder)
 

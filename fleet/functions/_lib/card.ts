@@ -48,6 +48,9 @@ function text(x: number, y: number, s: string, px: number, o: TextOpts): string 
 
 /** A round byte tick: `1 GB`, `500 MB`. */
 export const fmtTick = (b: number): string => fmtSI(b).replace(/\.0+ /, ' ')
+
+/** An object count, compact: `278K`, `153M`, `1.2B`. */
+export const fmtCount = (n: number): string => new Intl.NumberFormat('en-US', { notation: 'compact', maximumSignificantDigits: 3 }).format(n)
 /** Hours, to a tenth: `2.1h`; under an hour, minutes: `47m`. */
 export const fmtHours = (secs: number): string => (secs < 3600 ? `${Math.round(secs / 60)}m` : `${(secs / 3600).toFixed(1)}h`)
 export const fmtUsd = (usd: number): string => `$${usd < 10 ? usd.toFixed(2) : usd.toFixed(0)}`
@@ -56,7 +59,7 @@ const stamp = (t: number) => new Date(t * 1000).toISOString().slice(0, 16).repla
 
 interface Pt { t: number; v: number; hollow?: boolean }
 interface Trace { name: string; color: string; pts: Pt[]; label: string }
-interface PanelSpec { title: string; note: string; h: number; log: boolean; traces: Trace[] }
+interface PanelSpec { title: string; note: string; h: number; log: boolean; count?: boolean; traces: Trace[] }
 
 export interface CardInput {
   tier: 'anon' | 'full'
@@ -74,6 +77,23 @@ const runPts = (runs: FleetRun[], from: number, v: (r: FleetRun) => number | nul
     .map(r => ({ t: r.started!, v: v(r)!, hollow: r.open_issues.length > 0 || r.status === 'failed' }))
     .sort((a, b) => a.t - b.t)
 
+/** Each complete UTC day's summed run cost (a deployment scanning 4× a day costs 4 runs' worth), at the day's middle;
+ *  hollow when any of its runs failed or left a step issue open. Today is partial, so it's left out. */
+const dayCost = (runs: FleetRun[], from: number, now: number): Pt[] => {
+  const today = Math.floor(now / DAY) * DAY
+  const days = new Map<number, Pt>()
+  for (const r of runs) {
+    if (r.started === null || r.started < from || r.status === 'running' || r.cost_usd === null) continue
+    const d = Math.floor(r.started / DAY) * DAY
+    if (d >= today) continue
+    const p = days.get(d) ?? { t: d + DAY / 2, v: 0, hollow: false }
+    p.v += r.cost_usd
+    p.hollow = p.hollow || r.open_issues.length > 0 || r.status === 'failed'
+    days.set(d, p)
+  }
+  return [...days.values()].sort((a, b) => a.t - b.t)
+}
+
 const missing = (names: string[], what: string): string => (names.length ? `${names.join(', ')}: ${what}` : '')
 
 /** The panels' contents for a full card. */
@@ -82,6 +102,8 @@ function panels(doc: FleetDoc, from: number): PanelSpec[] {
   const meta: Trace[] = []
   const dur: Trace[] = []
   const cost: Trace[] = []
+  const objs: Trace[] = []
+  const noObjs: string[] = []
   const noMeta: string[] = []
   const noDur: string[] = []
   const noCost: string[] = []
@@ -89,35 +111,40 @@ function panels(doc: FleetDoc, from: number): PanelSpec[] {
     const m = (d.meta?.daily ?? []).filter(p => p.t >= from && p.bytes > 0).map(p => ({ t: p.t, v: p.bytes }))
     if (m.length) meta.push({ name: d.name, color: d.color, pts: m, label: `${d.name} ${fmtSI(m[m.length - 1].v)}` })
     else noMeta.push(d.name)
+    const o = (d.objects ?? []).filter(p => p.t >= from && p.objects > 0).map(p => ({ t: p.t, v: p.objects }))
+    if (o.length) objs.push({ name: d.name, color: d.color, pts: o, label: `${d.name} ${fmtCount(o[o.length - 1].v)}` })
+    else noObjs.push(d.name)
     const du = runPts(d.runs, from, r => (r.secs === null ? null : r.secs / 3600))
     if (du.length) dur.push({ name: d.name, color: d.color, pts: du, label: `${d.name} ${du[du.length - 1].v.toFixed(1)}h` })
     else noDur.push(d.name)
-    const c = runPts(d.runs, from, r => r.cost_usd)
-    if (c.length) cost.push({ name: d.name, color: d.color, pts: c, label: `${d.name} ${fmtUsd(c[c.length - 1].v)}` })
+    const c = dayCost(d.runs, from, doc.now)
+    if (c.length) cost.push({ name: d.name, color: d.color, pts: c, label: `${d.name} ${fmtUsd(c[c.length - 1].v)}/d` })
     else noCost.push(d.name)
   }
   return [
     { title: '/meta store size', note: missing(noMeta, 'n/a'), h: 118, log: true, traces: meta },
+    { title: 'objects (primary store)', note: missing(noObjs, 'n/a'), h: 100, log: true, count: true, traces: objs },
     { title: 'scan duration (h)', note: missing(noDur, 'no scans'), h: 118, log: false, traces: dur },
-    { title: 'cost per scan ($)', note: missing(noCost, 'not recorded'), h: 100, log: false, traces: cost },
+    { title: 'cost per day ($, complete UTC days)', note: missing(noCost, 'not recorded'), h: 100, log: false, traces: cost },
   ]
 }
 
 const ANON_PANELS: Omit<PanelSpec, 'traces' | 'note'>[] = [
   { title: '/meta store size', h: 118, log: true },
+  { title: 'objects (primary store)', h: 100, log: true, count: true },
   { title: 'scan duration (h)', h: 118, log: false },
-  { title: 'cost per scan ($)', h: 100, log: false },
+  { title: 'cost per day ($, complete UTC days)', h: 100, log: false },
 ]
 
 /** A panel's y scale: its ticks (value, label) and value → y. */
-function yScale(traces: Trace[], log: boolean, y0: number, h: number): { ticks: [number, string][]; Y: (v: number) => number } {
+function yScale(traces: Trace[], log: boolean, y0: number, h: number, count = false): { ticks: [number, string][]; Y: (v: number) => number } {
   const vals = traces.flatMap(t => t.pts.map(p => p.v))
   if (log) {
     const d0 = Math.floor(Math.log10(Math.min(...vals)))
     const d1 = Math.max(d0 + 1, Math.ceil(Math.log10(Math.max(...vals))))
     const ticks: [number, string][] = []
     for (let d = d0; d <= d1; d++) {
-      for (const m of d1 - d0 === 1 ? [1, 2, 5] : [1]) if (d < d1 || m === 1) ticks.push([m * 10 ** d, fmtTick(m * 10 ** d)])
+      for (const m of d1 - d0 === 1 ? [1, 2, 5] : [1]) if (d < d1 || m === 1) ticks.push([m * 10 ** d, (count ? fmtCount : fmtTick)(m * 10 ** d)])
     }
     return { ticks, Y: v => y0 + h - ((Math.log10(v) - d0) / (d1 - d0)) * h }
   }
@@ -171,7 +198,7 @@ export function fleetSvg(c: CardInput): string {
     for (let t = from; t <= to; t += DAY) out.push(`<line x1="${r1(X(t))}" x2="${r1(X(t))}" y1="${r1(y0)}" y2="${r1(y0 + h)}" stroke="${P.grid}"/>`)
     for (let t = from; t < to; t += DAY) out.push(text(X(t + DAY / 2), y0 + h + 13, md(t), 10, { fill: P.ink3, anchor: 'middle' }))
     if (s.traces.length) {
-      const { ticks, Y } = yScale(s.traces, s.log, y0, h)
+      const { ticks, Y } = yScale(s.traces, s.log, y0, h, s.count)
       for (const [v, label] of ticks) {
         const ty = Y(v)
         if (ty < y0 - 0.5 || ty > y0 + h + 0.5) continue
