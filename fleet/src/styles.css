@@ -78,4 +78,5 @@ td.ok { color: var(--ok); }
 td.warn { color: var(--warn); }
 td.bad { color: var(--bad); }
 td.running { color: var(--accent); }
+.deployment .trigger { display: inline-block; width: 1.4em; }
 .deployment .more { margin: 6px 0 0; font-size: 13px; }

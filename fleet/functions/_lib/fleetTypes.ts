@@ -5,6 +5,9 @@ export interface FleetRun {
   run_id: string
   scan: string
   status: string
+  /** What started it: `schedule` (the deployment's cron), `manual` (a hand submit), null when the deployment doesn't
+   *  record triggers. */
+  trigger: 'schedule' | 'manual' | null
   /** Epoch s the job started. */
   started: number | null
   secs: number | null

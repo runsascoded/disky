@@ -41,7 +41,7 @@ export function parseFleet(raw: string | undefined): Deployment[] {
 interface HealthWire { freshness: { newest_scan: string | null; newest_scan_age: number | null }; gaps: Record<string, number> }
 interface IssueWire { phase: string; recovery: unknown; passing?: unknown }
 interface RunWire {
-  run: { run_id: string; scan: string; kind: string; status: string; started_ts: number | null }
+  run: { run_id: string; scan: string; kind: string; status: string; started_ts: number | null; trigger?: string | null }
   secs: number | null
   cost_usd: number | null
   failed_at: string | null
@@ -78,6 +78,7 @@ export const fleetRun = (s: RunWire): FleetRun => ({
   run_id: s.run.run_id,
   scan: s.run.scan,
   status: s.run.status,
+  trigger: s.run.trigger === 'schedule' || s.run.trigger === 'manual' ? s.run.trigger : null,
   started: s.run.started_ts,
   secs: s.secs,
   cost_usd: s.cost_usd,

@@ -57,7 +57,8 @@ export const fmtUsd = (usd: number): string => `$${usd < 10 ? usd.toFixed(2) : u
 const md = (t: number) => { const d = new Date(t * 1000); return `${d.getUTCMonth() + 1}/${d.getUTCDate()}` }
 const stamp = (t: number) => new Date(t * 1000).toISOString().slice(0, 16).replace('T', ' ')
 
-interface Pt { t: number; v: number; hollow?: boolean }
+/** A point; `top` (cost only) is the day's total with its manual runs, drawn as a bar above `v`. */
+interface Pt { t: number; v: number; top?: number; hollow?: boolean }
 interface Trace { name: string; color: string; pts: Pt[]; label: string }
 interface PanelSpec { title: string; note: string; h: number; log: boolean; count?: boolean; traces: Trace[] }
 
@@ -77,8 +78,9 @@ const runPts = (runs: FleetRun[], from: number, v: (r: FleetRun) => number | nul
     .map(r => ({ t: r.started!, v: v(r)!, hollow: r.open_issues.length > 0 || r.status === 'failed' }))
     .sort((a, b) => a.t - b.t)
 
-/** Each complete UTC day's summed run cost (a deployment scanning 4× a day costs 4 runs' worth), at the day's middle;
- *  hollow when any of its runs failed or left a step issue open. Today is partial, so it's left out. */
+/** Each complete UTC day's summed run cost (a deployment scanning 4× a day costs 4 runs' worth), at the day's middle:
+ *  `v` the scheduled runs' (and those of a deployment that doesn't record triggers), `top` the total when hand-started
+ *  runs added to it; hollow when any of its runs failed or left a step issue open. Today is partial, so it's left out. */
 const dayCost = (runs: FleetRun[], from: number, now: number): Pt[] => {
   const today = Math.floor(now / DAY) * DAY
   const days = new Map<number, Pt>()
@@ -87,7 +89,8 @@ const dayCost = (runs: FleetRun[], from: number, now: number): Pt[] => {
     const d = Math.floor(r.started / DAY) * DAY
     if (d >= today) continue
     const p = days.get(d) ?? { t: d + DAY / 2, v: 0, hollow: false }
-    p.v += r.cost_usd
+    if (r.trigger === 'manual') p.top = (p.top ?? p.v) + r.cost_usd
+    else { p.v += r.cost_usd; if (p.top !== undefined) p.top += r.cost_usd }
     p.hollow = p.hollow || r.open_issues.length > 0 || r.status === 'failed'
     days.set(d, p)
   }
@@ -138,7 +141,7 @@ const ANON_PANELS: Omit<PanelSpec, 'traces' | 'note'>[] = [
 
 /** A panel's y scale: its ticks (value, label) and value → y. */
 function yScale(traces: Trace[], log: boolean, y0: number, h: number, count = false): { ticks: [number, string][]; Y: (v: number) => number } {
-  const vals = traces.flatMap(t => t.pts.map(p => p.v))
+  const vals = traces.flatMap(t => t.pts.flatMap(p => (p.top === undefined ? [p.v] : [p.v, p.top])))
   if (log) {
     const d0 = Math.floor(Math.log10(Math.min(...vals)))
     const d1 = Math.max(d0 + 1, Math.ceil(Math.log10(Math.max(...vals))))
@@ -191,6 +194,11 @@ export function fleetSvg(c: CardInput): string {
   for (const s of specs) {
     out.push(text(PAD, y + 12, s.title, 12.5, { fill: P.ink2, weight: 600 }))
     if (s.note) out.push(text(PAD + interWidth(s.title, 12.5, 600) + 10, y + 12, s.note, 11, { fill: P.ink3 }))
+    if (s.traces.some(t => t.pts.some(p => p.top !== undefined && p.top > p.v))) {
+      const kx = CARD_W - PAD - interWidth('manual runs', 11)
+      out.push(`<rect x="${r1(kx - 11)}" y="${r1(y + 3)}" width="6" height="10" rx="1.5" fill="${P.ink2}" fill-opacity="0.45"/>`)
+      out.push(text(kx, y + 12, 'manual runs', 11, { fill: P.ink3 }))
+    }
     const y0 = y + 20
     const h = s.h
     out.push(`<rect x="${r1(left)}" y="${r1(y0)}" width="${r1(right - left)}" height="${h}" fill="${P.panel}"/>`)
@@ -205,6 +213,13 @@ export function fleetSvg(c: CardInput): string {
         out.push(`<line x1="${r1(left)}" x2="${r1(right)}" y1="${r1(ty)}" y2="${r1(ty)}" stroke="${P.grid}"/>`)
         out.push(text(left - 5, ty + 3.5, label, 10, { fill: P.ink3, anchor: 'end' }))
       }
+      // a day's hand-started runs: a translucent bar from its scheduled cost up to its total, under the lines
+      for (const t of s.traces) {
+        for (const p of t.pts) {
+          if (p.top === undefined || p.top <= p.v) continue
+          out.push(`<rect x="${r1(X(p.t) - 3.5)}" y="${r1(Y(p.top))}" width="7" height="${r1(Y(p.v) - Y(p.top))}" rx="2" fill="${t.color}" fill-opacity="0.35"/>`)
+        }
+      }
       for (const t of s.traces) {
         const line = t.pts.map(p => `${r1(X(p.t))},${r1(Y(p.v))}`).join(' ')
         if (t.pts.length > 1) {
@@ -217,13 +232,14 @@ export function fleetSvg(c: CardInput): string {
             : `<circle cx="${r1(X(p.t))}" cy="${r1(Y(p.v))}" r="3.4" fill="${t.color}" stroke="${halo(t.color, c.theme)}" stroke-width="1"/>`)
         }
       }
-      // each trace's label in the gutter, at its latest point's height (pushed apart, a leader when moved)
+      // each trace's label in the gutter, at its latest point's height (pushed apart; a dotted leader when it's moved or
+      // the point is short of the gutter)
       const ends = s.traces.map(t => { const p = t.pts[t.pts.length - 1]; return { t, x: X(p.t), y: Y(p.v) } })
       const ys = spread(ends.map(e => e.y + 4), 13, y0 + 9, y0 + h + 4)
       const gx = right + 8
       ends.forEach((e, k) => {
         if (Math.abs(ys[k] - 4 - e.y) > 2 || gx - e.x > 10) {
-          out.push(`<polyline points="${r1(e.x + 5)},${r1(e.y)} ${r1(gx - 6)},${r1(e.y)} ${r1(gx - 2)},${r1(ys[k] - 4)}" fill="none" stroke="${e.t.color}" stroke-opacity="0.55"/>`)
+          out.push(`<line x1="${r1(e.x + 6)}" y1="${r1(e.y)}" x2="${r1(gx - 3)}" y2="${r1(ys[k] - 4)}" stroke="${e.t.color}" stroke-opacity="0.7" stroke-dasharray="0.1 3" stroke-linecap="round" stroke-width="1.3"/>`)
         }
         out.push(text(gx, ys[k], e.t.label, 11, { fill: labelColor(e.t.color, c.theme), weight: 600 }))
       })

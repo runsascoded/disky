@@ -15,6 +15,12 @@ const bytes = (b: number | null | undefined) => (b == null ? '—' : fmtSI(b))
 const delta = (now: number | null | undefined, then: number | null | undefined) =>
   now == null || then == null ? '' : ` (${now >= then ? '+' : '−'}${fmtSI(Math.abs(now - then))})`
 
+/** What started a run, as the deployment's scan-health thread shows it. */
+const TRIGGER: Record<string, { emoji: string; label: string }> = {
+  schedule: { emoji: '⏰', label: 'scheduled' },
+  manual: { emoji: '👤', label: 'started by hand' },
+}
+
 function runState(r: FleetRun): { label: string; cls: string } {
   if (r.status === 'running') return { label: 'running', cls: 'running' }
   if (r.status === 'failed') return { label: r.failed_at ? `failed at ${r.failed_at}` : 'failed', cls: 'bad' }
@@ -42,7 +48,10 @@ function Deployment({ d }: { d: FleetDeployment }) {
                 const s = runState(r)
                 return (
                   <tr key={r.run_id}>
-                    <td><a href={`${d.url}/scans/${encodeURIComponent(r.run_id)}`}>{r.scan}</a></td>
+                    <td>
+                      {r.trigger && <span className="trigger" role="img" aria-label={TRIGGER[r.trigger].label}>{TRIGGER[r.trigger].emoji}</span>}
+                      <a href={`${d.url}/scans/${encodeURIComponent(r.run_id)}`}>{r.scan}</a>
+                    </td>
                     <td className={s.cls}>{s.label}</td>
                     <td>{when(r.started)}</td>
                     <td className="num">{r.secs === null ? '—' : fmtHours(r.secs)}</td>

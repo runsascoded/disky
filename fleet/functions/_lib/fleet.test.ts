@@ -20,8 +20,8 @@ const env = (extra: Partial<Env> = {}): Env => ({
   ...extra,
 })
 
-const runWire = (run_id: string, scan: string, kind: string, status: string, started: number, secs: number, cost: number | null, failed_at: string | null, issues: object[]) =>
-  ({ run: { run_id, scan, kind, status, started_ts: started, store: 'x', parent: null }, secs, cost_usd: cost, failed_at, phase_issues: issues, spans: [], downstream: 0 })
+const runWire = (run_id: string, scan: string, kind: string, status: string, started: number, secs: number, cost: number | null, failed_at: string | null, issues: object[], trigger?: string) =>
+  ({ run: { run_id, scan, kind, status, started_ts: started, store: 'x', parent: null, ...(trigger ? { trigger } : {}) }, secs, cost_usd: cost, failed_at, phase_issues: issues, spans: [], downstream: 0 })
 
 const ANSWERS = {
   'https://a.test/api/health': { now: NOW, freshness: { newest_scan: '2026-11-07', newest_scan_age: 7 * H, stores: [] }, gaps: { path: 1, search: 2 }, scans: [] },
@@ -38,7 +38,7 @@ const ANSWERS = {
         { phase: 'dups', outcome: 'failed', recovery: null, passing: null },
         { phase: 'probe', outcome: 'failed', recovery: { run_id: 'r0' }, passing: null },
         { phase: 'check', outcome: 'failed', recovery: null, passing: { run_id: 'r9' } },
-      ]),
+      ], 'manual'),
       runWire('r2', '2026-11-06', 'scan', 'failed', NOW - 31 * H, 3600, null, 'index', []),
     ],
   },
@@ -86,8 +86,8 @@ describe('/api/fleet\'s document over stubbed deployments', () => {
   })
 
   it('folds the answers: maintenance and no-op runs skipped, open issues only, /meta now / 1 d / 7 d and the newest scan per day; each failure named', async () => {
-    const r1 = { run_id: 'r1', scan: '2026-11-07', status: 'succeeded', started: NOW - 7 * H, secs: 7668, cost_usd: 0.5, failed_at: null, open_issues: ['dups'] }
-    const r2 = { run_id: 'r2', scan: '2026-11-06', status: 'failed', started: NOW - 31 * H, secs: 3600, cost_usd: null, failed_at: 'index', open_issues: [] }
+    const r1 = { run_id: 'r1', scan: '2026-11-07', status: 'succeeded', trigger: 'manual' as const, started: NOW - 7 * H, secs: 7668, cost_usd: 0.5, failed_at: null, open_issues: ['dups'] }
+    const r2 = { run_id: 'r2', scan: '2026-11-06', status: 'failed', trigger: null, started: NOW - 31 * H, secs: 3600, cost_usd: null, failed_at: 'index', open_issues: [] }
     const noToken = 'no token (FLEET_TOKEN_B unset)'
     const expected: FleetDoc = {
       now: NOW,

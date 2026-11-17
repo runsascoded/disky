@@ -32,12 +32,15 @@ const delta = (b: number): string => `${b < 0 ? '−' : '+'}${fmtSI(Math.abs(b))
 /** Seconds as a short age: `40m`, `9h`, `3d`. */
 export const fmtAge = (s: number): string => (s < 3600 ? `${Math.round(s / 60)}m` : s < 2 * 86400 ? `${Math.round(s / 3600)}h` : `${Math.round(s / 86400)}d`)
 
+/** What started a run, as the scan-health thread shows it (nothing for a deployment that doesn't record it). */
+const TRIGGER: Record<string, string> = { schedule: ':alarm_clock: ', manual: ':bust_in_silhouette: ' }
+
 /** One deployment's line. */
 export function line(d: FleetDeployment): string {
   const { emoji, word } = status(d)
   const parts: string[] = []
   const r = d.last
-  if (r) parts.push(`<${d.url}/scans/${encodeURIComponent(r.run_id)}|${r.scan}>`, word)
+  if (r) parts.push(`${r.trigger ? TRIGGER[r.trigger] : ''}<${d.url}/scans/${encodeURIComponent(r.run_id)}|${r.scan}>`, word)
   else parts.push(word)
   if (r && r.status !== 'running' && r.secs !== null) parts.push(fmtHours(r.secs))
   if (r && r.status !== 'running') parts.push(r.cost_usd === null ? 'cost n/a' : fmtUsd(r.cost_usd))

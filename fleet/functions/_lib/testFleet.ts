@@ -1,6 +1,7 @@
 /** A four-deployment fleet as the deployments' own routes would answer, for the specs and the card goldens
  *  (`scripts/golden.ts`): a week of daily scans each, some with a step issue still open, one failed; `/meta` usage on
- *  two, refused (403) on the others, as gcs and cw answer a read grant today. Deterministic. */
+ *  two, refused (403) on the others, as gcs and cw answer a read grant today; two hand-started cw runs on one day.
+ *  Deterministic. */
 import type { Env } from './env.js'
 
 /** 2026-11-07 14:00 UTC. */
@@ -28,11 +29,11 @@ export const fleetEnv = (extra: Partial<Env> = {}): Env => ({
 const day0 = Math.floor(NOW / DAY) * DAY
 const scanId = (t: number) => new Date(t * 1000).toISOString().slice(0, 10)
 
-interface RunSpec { day: number; hour: number; hours: number; cost: number | null; open?: string[]; status?: string }
+interface RunSpec { day: number; hour: number; hours: number; cost: number | null; open?: string[]; status?: string; manual?: boolean }
 const run = (name: string, r: RunSpec) => {
   const started = day0 - r.day * DAY + r.hour * HOUR
   return {
-    run: { run_id: `${scanId(started)}-${name}`, scan: scanId(started), kind: 'scan', status: r.status ?? 'succeeded', started_ts: started },
+    run: { run_id: `${scanId(started)}${r.manual ? `T${String(r.hour).padStart(2, '0')}00` : ''}-${name}`, scan: scanId(started), kind: 'scan', status: r.status ?? 'succeeded', started_ts: started, trigger: r.manual ? 'manual' : 'schedule' },
     secs: Math.round(r.hours * HOUR),
     cost_usd: r.cost,
     failed_at: r.status === 'failed' ? 'index' : null,
@@ -53,6 +54,8 @@ const RUNS: Record<string, unknown[]> = {
     { run: { run_id: 'compact-1', scan: scanId(day0), kind: 'compact', status: 'succeeded', started_ts: day0 + 12 * HOUR }, secs: 600, cost_usd: 0.05, failed_at: null, phase_issues: [] },
     run('cw', { day: 0, hour: 1, hours: 1.53, cost: 0.9, open: ['warm-cache'] }),
     run('cw', { day: 1, hour: 1, hours: 1.63, cost: 0.97, open: ['warm-cache'] }),
+    run('cw', { day: 2, hour: 15, hours: 1.7, cost: 1.05, manual: true }),
+    run('cw', { day: 2, hour: 9, hours: 1.72, cost: 1.02, manual: true }),
     run('cw', { day: 2, hour: 1, hours: 1.75, cost: 0.99 }),
     run('cw', { day: 3, hour: 1, hours: 1.78, cost: 1.01, status: 'failed' }),
     run('cw', { day: 4, hour: 1, hours: 1.58, cost: 0.1 }),
