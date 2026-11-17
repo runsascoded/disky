@@ -649,3 +649,90 @@ def test_head_carries_the_latest_runs_outcome_and_each_configured_stores_size_an
     assert [N.si(v) for v in (0, 999, 46_844_611_976, 7_176_822_198, 288_966_905_203_791, 1.2e15)] == [
         '0 B', '999 B', '46.8 G', '7.18 G', '289 T', '1.20 P']
     assert N.outcome({**row(1), 'secs': None}) == ''
+
+
+class Pins(Slack):
+    """The fake Slack with the channel's pins and canvas."""
+
+    def __init__(self):
+        super().__init__()
+        self.pinned, self.canvases = [], {}
+
+    def join(self):
+        self.calls.append(('join',))
+
+    def pin(self, ts):
+        self.calls.append(('pin', ts))
+        if ts not in self.pinned:
+            self.pinned.append(ts)
+
+    def unpin(self, ts):
+        self.calls.append(('unpin', ts))
+        self.pinned = [p for p in self.pinned if p != ts]
+
+    def canvas_create(self, body):
+        canvas = f'F{len(self.canvases) + 1}'
+        self.canvases[canvas] = body
+        self.calls.append(('canvas_create', canvas))
+        return canvas
+
+    def canvas_edit(self, canvas, body):
+        self.calls.append(('canvas_edit', canvas))
+        if self.canvases.get(canvas) is None:
+            return False
+        self.canvases[canvas] = body
+        return True
+
+
+def test_the_open_heads_pin_moves_when_a_new_thread_starts_and_the_canvas_is_written_only_on_change():
+    w = Writer()
+    w.slack = Pins()
+    w.run(history(2))
+    N.pin_head(w.saved, w.slack, w.save)
+    N.pin_head(w.saved, w.slack, w.save)
+    assert (w.slack.pinned, w.saved['pinned']) == (['1.0'], '1.0')
+    # a failure closes the thread; the recovery's head takes the pin, kept across the thread's reset
+    w.run([row(4), row(3, 'failed'), *history(2)])
+    assert (w.saved['parent'], w.saved['pinned']) == ('4.0', '1.0')
+    N.pin_head(w.saved, w.slack, w.save)
+    assert (w.slack.pinned, w.saved['pinned']) == (['4.0'], '4.0')
+
+    w.slack.calls.clear()
+    N.write_canvas(w.saved, w.slack, 'a\n', w.save)
+    N.write_canvas(w.saved, w.slack, 'a\n', w.save)
+    N.write_canvas(w.saved, w.slack, 'b\n', w.save)
+    assert w.slack.calls == [('join',), ('canvas_create', 'F1'), ('join',), ('canvas_edit', 'F1')]
+    w.run([row(6, 'failed'), row(5), row(4), row(3, 'failed'), *history(2)])
+    w.run([row(7), row(6, 'failed'), row(5), row(4), row(3, 'failed'), *history(2)])
+    assert {k: w.saved[k] for k in N.KEPT} == {'pinned': '4.0', 'canvas': 'F1', 'canvas_body': 'b\n'}
+    # deleted by hand: the next write creates it again
+    w.slack.canvases['F1'] = None
+    w.slack.calls.clear()
+    N.write_canvas(w.saved, w.slack, 'c\n', w.save)
+    assert (w.slack.calls, w.saved['canvas'], w.slack.canvases['F2']) == (
+        [('join',), ('canvas_edit', 'F1'), ('canvas_create', 'F2')], 'F2', 'c\n')
+
+
+def test_canvas_names_the_status_stores_latest_run_and_its_longest_phases_and_recent_runs():
+    cfg = N.config(dict(state='unused', site='https://site.test', channel='C123', title='Test scans', stores={'Meta': 'meta'}))
+    latest = {**row(2, **ADA), 'cost_usd': 0.1607, 'out_bytes': 439_552_060, 'delta_bytes': -818_040,
+              'spans': [dict(phase='list a', start=0, end=562), dict(phase='index', start=600, end=624),
+                        dict(phase='static-names', start=700, end=1176), dict(phase='open', start=1200, end=None)]}
+    rows = [row(3, 'running', finished_ts=None), latest, row(1, 'failed', failed_phase='index', error='boom')]
+    head = N.parent(cfg, [latest], rows[2])
+    text = N.canvas_text(cfg, rows, head, 'https://slack.test/p1.0', {'meta': 503}, N.series_ts('2026-11-03T0900'))
+    assert text.split('\n\n') == [
+        '# Test scans',
+        '✅ Test scans: 1 consecutive clean run · [thread](https://slack.test/p1.0)',
+        'Updated 2026-11-03 09:00 UTC.',
+        '## Stores',
+        '- [Meta](https://site.test/meta): size unavailable (HTTP 503).',
+        '## Latest run',
+        '✅ :ada: [2026-11-03 08:00 UTC](https://site.test/scans/r2) · 1m 00s · $0.16 · output 440 M (−818 K)',
+        'Longest phases: list a 9m 22s · static-names 7m 56s · index 0m 24s',
+        '## Recent runs',
+        '- ✅ :ada: [2026-11-03 08:00 UTC](https://site.test/scans/r2) · 1m 00s · $0.16\n'
+        '- ❌ :alarm_clock: [2026-11-02 08:00 UTC](https://site.test/scans/r1) · 1m 00s · failed in index: boom',
+        '## Pages',
+        '[All scans](https://site.test/scans) · [Health](https://site.test/health) · [Meta](https://site.test/meta)\n',
+    ]
