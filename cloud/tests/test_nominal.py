@@ -695,9 +695,13 @@ def test_the_open_heads_pin_moves_when_a_new_thread_starts_and_the_canvas_is_wri
     N.pin_head(w.saved, w.slack, w.save)
     N.pin_head(w.saved, w.slack, w.save)
     assert (w.slack.pinned, w.saved['pinned']) == (['1.0'], '1.0')
-    # a failure closes the thread; the recovery's head takes the pin, kept across the thread's reset
+    # a failure closes the thread and unpins its head at once; the recovery's head takes the pin
+    w.run([row(3, 'failed'), *history(2)])
+    N.pin_head(w.saved, w.slack, w.save)
+    N.pin_head(w.saved, w.slack, w.save)
+    assert (w.slack.pinned, w.saved['closed'], 'pinned' in w.saved) == ([], True, False)
     w.run([row(4), row(3, 'failed'), *history(2)])
-    assert (w.saved['parent'], w.saved['pinned']) == ('4.0', '1.0')
+    assert w.saved['parent'] == '4.0'
     N.pin_head(w.saved, w.slack, w.save)
     assert (w.slack.pinned, w.saved['pinned']) == (['4.0'], '4.0')
 

@@ -452,9 +452,17 @@ KEPT = ('pinned', 'canvas', 'canvas_body')
 
 
 def pin_head(state: dict, slack: Transport, save: Callable[[dict], None]) -> None:
-    """Pin the open thread's head, then unpin the head it replaced. Idempotent: a head already pinned, or one no longer
+    """Pin the open thread's head, then unpin the head it replaced; a closed thread's head is unpinned at once (the
+    channel then pins nothing until the next thread opens). Idempotent: a head already pinned, or one no longer
     pinned (unpinned by hand, or deleted), is not an error."""
     head, was = state.get('parent'), state.get('pinned')
+    if state.get('closed'):
+        if was:
+            slack.join()
+            slack.unpin(was)
+            del state['pinned']
+            save(state)
+        return
     if not head or head == was:
         return
     slack.join()
