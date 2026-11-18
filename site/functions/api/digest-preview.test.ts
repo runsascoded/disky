@@ -31,6 +31,8 @@ function fakeR2(files: Record<string, string>) {
 }
 
 const bundle = (month: string, version = 1) => JSON.stringify({ version, month, op: `OP ${month}` })
+/** A bundle the job wrote before the templates' rename: `cw` on its config and rows. */
+const OLD = { version: 1, month: '2026-10', op: 'OP 2026-10', cfg: { template: 'cw', title: 'T' }, rows: { template: 'cw', rows: [] } }
 let env: Record<string, unknown>
 let admin: string
 let viewer: string
@@ -43,6 +45,7 @@ beforeAll(async () => {
       'digest/preview/C1/sender/2026-10.json': bundle('2026-10'),
       'digest/preview/C1/sender/2026-11.json': bundle('2026-11'),
       'digest/preview/C1/body/2026-11.json': bundle('2026-11'),
+      'digest/preview/C1/body/2026-10.json': JSON.stringify(OLD),
       'digest/preview/C1/sender/2026-09.json': bundle('2026-09', 2),
       'digest/preview/C1/sender/notes.txt': 'x',
       'digest/C1/sender/2026-11.json': '{}',
@@ -65,6 +68,7 @@ describe('/api/digest-preview', () => {
     expect(await get('', admin)).toEqual([200, { bundles: [
       { key: 'digest/preview/C1/body/2026-11.json', channel: 'C1', variant: 'body', month: '2026-11' },
       { key: 'digest/preview/C1/sender/2026-11.json', channel: 'C1', variant: 'sender', month: '2026-11' },
+      { key: 'digest/preview/C1/body/2026-10.json', channel: 'C1', variant: 'body', month: '2026-10' },
       { key: 'digest/preview/C1/sender/2026-10.json', channel: 'C1', variant: 'sender', month: '2026-10' },
       { key: 'digest/preview/C1/sender/2026-09.json', channel: 'C1', variant: 'sender', month: '2026-09' },
     ] }])
@@ -74,6 +78,9 @@ describe('/api/digest-preview', () => {
     expect(await get('?b=digest/preview/C1/sender/2026-09.json', admin)).toEqual([404, { error: 'no preview bundle digest/preview/C1/sender/2026-09.json' }])
     expect(await get('?b=digest/preview/C1/sender/2026-08.json', admin)).toEqual([404, { error: 'no preview bundle digest/preview/C1/sender/2026-08.json' }])
     expect(await get('?b=digest/C1/sender/2026-11.json', admin)).toEqual([400, { error: 'b: digest/preview/<channel>/<variant>/<YYYY-MM>.json' }])
+  })
+  it("serves a bundle written under a template's old name under its name", async () => {
+    expect(await get('?b=digest/preview/C1/body/2026-10.json', admin)).toEqual([200, { ...OLD, cfg: { template: 'quota', title: 'T' }, rows: { template: 'quota', rows: [] } }])
   })
   it("serves a bundle to a signed-in browser (a session cookie, not a token): its query never reads as a share link", async () => {
     // the gate takes a `?key=` as a presented grant token, which would 401 the session (hf.oa.dev, 2026-11-02)

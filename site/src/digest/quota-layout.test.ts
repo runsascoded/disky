@@ -1,12 +1,12 @@
 /** `layout: 'pools'`: the OP's headline and weeks over every bucket, a line per pool. */
 import { describe, expect, it } from 'vitest'
 import { DEFAULT_PARAMS, type DigestCfg, opText } from './index'
-import type { CwRows, CwScan } from './cw'
+import type { QuotaRows, QuotaScan } from './quota'
 
 const TIB = 1024 ** 4
 const quotas = [{ bytes: 100 * TIB, name: '100 TiB', short: '100Ti', classes: [] }]
 const cfg: DigestCfg = {
-  template: 'cw', title: 'T', site_url: 'https://x.test', host: 'x.test', unit: { name: 'TiB', bytes: TIB, short: 'Ti' }, primary: 'main', prices: {}, icons_base: '',
+  template: 'quota', title: 'T', site_url: 'https://x.test', host: 'x.test', unit: { name: 'TiB', bytes: TIB, short: 'Ti' }, primary: 'main', prices: {}, icons_base: '',
   buckets: {
     main: { label: 'main', path: null, zone: null, quotas },
     a: { label: 'a', path: null, zone: 'z', quotas, shape: 'star' },
@@ -14,9 +14,9 @@ const cfg: DigestCfg = {
     still: { label: 'still', path: null, zone: null, quotas, shape: 'diamond' },
   },
 }
-const scan = (s: string, tb: number, extra: Record<string, number>): CwScan => ({ scan: s, slug: s.slice(5, 10).replace('-', ''), tb, extra, classes: null })
-const rows: CwRows = {
-  template: 'cw', closed: false, pre: [],
+const scan = (s: string, tb: number, extra: Record<string, number>): QuotaScan => ({ scan: s, slug: s.slice(5, 10).replace('-', ''), tb, extra, classes: null })
+const rows: QuotaRows = {
+  template: 'quota', closed: false, pre: [],
   lead: [scan('2026-08-31T1200', 50, { a: 10, still: 5 })],
   rows: [scan('2026-09-07T1200', 60, { a: 15, still: 5 }), scan('2026-09-14T1200', 58, { a: 15.5, b: 20, still: 5 })],
 }

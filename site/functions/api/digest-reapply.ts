@@ -20,16 +20,19 @@ import { jobStamp, secretRef, submitBatch, sweepBatchSpec } from '../_lib/cwBatc
 import { sweepsOff, SWEEPS_OFF } from '../_lib/dispatch.js'
 import { batchJobsUrl, gcpToken } from '../_lib/gcp.js'
 import { parseParams } from '../../src/digest/codec.js'
+import { canonicalTemplate } from '../../src/digest/templates.js'
 import { QUOTA_MARKS } from './digest-settings.js'
 
 const MONTH_RE = /^\d{4}-(0[1-9]|1[0-2])$/
 const DAY_RE = /^(\d{4}-\d{2})-(\d{2})$/
 const CHANNEL_RE = /^[CDG][A-Z0-9]{8,12}$/
+/** A run's job id, `<template>-digest-<stamp>z`: runs from before the templates' rename carry their old name (`cw-…`). */
 const JOB_RE = /^[a-z0-9-]+-digest-\d{8}-\d{6}z$/
 const NAME_RE = /^[\w./{}$-]+$/
 
-/** `DIGEST_REAPPLY`: the digest CLI's `template`, `config` and `root` (under the data bucket), the `env_script` the task sources
- *  for the scan steps' environment, the R2 bucket its preview bundle goes to, and env var -> Secret Manager name. */
+/** `DIGEST_REAPPLY`: the digest CLI's `template` (an old name, `cw` / `gcs`, read as its name), `config` and `root` (under
+ *  the data bucket), the `env_script` the task sources for the scan steps' environment, the R2 bucket its preview bundle
+ *  goes to, and env var -> Secret Manager name. */
 export interface ReapplyConfig { template: string; config: string; root: string; env_script: string; r2_bucket: string; secrets: Record<string, string> }
 
 /** The deployment's config, or why there is none. */
@@ -45,9 +48,11 @@ export function reapplyConfig(raw: string | undefined): ReapplyConfig | string {
     const v = c[k]
     if (typeof v !== 'string' || !NAME_RE.test(v)) return `DIGEST_REAPPLY.${k}`
   }
+  const template = canonicalTemplate(c.template)
+  if (!template) return 'DIGEST_REAPPLY.template'
   const secrets = c.secrets
   if (typeof secrets !== 'object' || secrets === null || Object.entries(secrets).some(([k, v]) => !/^[A-Z][A-Z0-9_]*$/.test(k) || typeof v !== 'string' || !/^[\w-]+$/.test(v))) return 'DIGEST_REAPPLY.secrets'
-  return c as ReapplyConfig
+  return { ...c, template } as ReapplyConfig
 }
 
 export interface ReapplyReq { month: string; channel: string; target: string; dry_run: boolean; params: string | null; quota_marks: string | null }

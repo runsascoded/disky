@@ -1,12 +1,12 @@
 import { compactQuietLines } from './compact'
-/** The `cw` digest template's OP: its text and its plot's `/api/digest-image` request, from the month's scans
- * (the job sends them: `Cw.rows_json`; goldens: `./parity.test.ts`). The replies: `./cwReply.ts`. Pure; DOM-free. */
+/** The `quota` digest template's OP: its text and its plot's `/api/digest-image` request, from the month's scans
+ * (the job sends them: `QuotaTemplate.rows_json`; goldens: `./parity.test.ts`). The replies: `./quotaReply.ts`. Pure; DOM-free. */
 import { encodeScan, scanTime } from '../scanSlug'
 import { type BucketCfg, deg, type DigestCfg, type DigestParams, type OpLinks, prevMonthLink, type Quota, span, tb, weekOf, windowLabel, windowStart } from './common'
 import { type Pool, poolRows, pools, quotaLine, QUIET_PCT, used } from './pools'
 import { addDays, dayOf, fixed, grouped, hhmm, iso, md, mon3, monthYear, pyRound } from './pyfmt'
 
-export interface CwScan {
+export interface QuotaScan {
   scan: string
   /** Its canonical `?d=` slug; null: its minute. */
   slug: string | null
@@ -19,11 +19,11 @@ export interface CwScan {
 }
 
 /** A month's scans: the OP window's before the lead-in day (`pre`), the lead-in day's (`lead`), the month's (`rows`). */
-export interface CwRows { template: 'cw'; closed: boolean; pre: CwScan[]; lead: CwScan[]; rows: CwScan[] }
+export interface QuotaRows { template: 'quota'; closed: boolean; pre: QuotaScan[]; lead: QuotaScan[]; rows: QuotaScan[] }
 
-const date = (r: CwScan): string => r.scan.slice(0, 10)
-const ts = (r: CwScan): number => scanTime(r.scan)
-export const dlink = (r: CwScan): string => r.slug ?? encodeScan(r.scan)!
+const date = (r: QuotaScan): string => r.scan.slice(0, 10)
+const ts = (r: QuotaScan): number => scanTime(r.scan)
+export const dlink = (r: QuotaScan): string => r.slug ?? encodeScan(r.scan)!
 
 /** What quota `q` counts of a scan (`_scoped`): its classes' sum, or the total for a quota over every class. */
 export function scoped(total: number, classes: Record<string, number> | null, q: Quota): number {
@@ -42,36 +42,36 @@ export function diffUrl(scan: string, slug: string, since: number | null, site: 
   return `${site}/${bucket}?d=${slug}${s}#over-time`
 }
 
-export function bucketLink(bucket: string, r: CwScan, since: number | null, cfg: DigestCfg): string {
+export function bucketLink(bucket: string, r: QuotaScan, since: number | null, cfg: DigestCfg): string {
   const b: BucketCfg | undefined = cfg.buckets[bucket]
   const path = b === undefined || b.path === null ? bucket : b.path
   return `[${b?.label || bucket}](${diffUrl(r.scan, dlink(r), since, cfg.site_url, path)})`
 }
 
-export function dextra(cur: CwScan, prev: CwScan | null): Record<string, number | null> {
+export function dextra(cur: QuotaScan, prev: QuotaScan | null): Record<string, number | null> {
   return Object.fromEntries(Object.entries(cur.extra).map(([b, t]) => [b, prev && b in prev.extra ? pyRound(t - prev.extra[b], 1) : null]))
 }
 
-function extras(r: CwScan, d: Record<string, number | null>, since: number | null, cfg: DigestCfg): string {
+function extras(r: QuotaScan, d: Record<string, number | null>, since: number | null, cfg: DigestCfg): string {
   return Object.entries(r.extra).map(([b, t]) => ` · ${bucketLink(b, r, since, cfg)} ${grouped(t, 0)} ${cfg.unit.name}` + (d[b] != null ? ` (${tb(d[b]!)})` : '')).join('')
 }
 
 /** The month's window: its first day, every scan held, its baseline (`Month.window` / `Month.back`). */
-function window(m: CwRows, month: number, p: DigestParams): { start: number; seen: CwScan[]; back: CwScan } {
+function window(m: QuotaRows, month: number, p: DigestParams): { start: number; seen: QuotaScan[]; back: QuotaScan } {
   const start = windowStart(month, dayOf(date(m.rows[m.rows.length - 1])), p.windowDays)
   const seen = [...m.pre, ...m.lead, ...m.rows]
   const before = seen.filter(r => date(r) < iso(start))
   return { start, seen, back: before.length ? before[before.length - 1] : seen[0] }
 }
 
-const base = (m: CwRows): CwScan => (m.lead.length ? m.lead[m.lead.length - 1] : m.rows[0])
+const base = (m: QuotaRows): QuotaScan => (m.lead.length ? m.lead[m.lead.length - 1] : m.rows[0])
 const primaryQuotas = (cfg: DigestCfg): Quota[] => (cfg.primary ? cfg.buckets[cfg.primary]?.quotas ?? [] : [])
 
 /** A bucket's size at a scan; undefined when the scan doesn't have it. */
-const sizeOf = (b: string, r: CwScan, cfg: DigestCfg): number | undefined => (b === cfg.primary ? r.tb : r.extra[b])
+const sizeOf = (b: string, r: QuotaScan, cfg: DigestCfg): number | undefined => (b === cfg.primary ? r.tb : r.extra[b])
 
 /** The change in `buckets` from `a` to `b`, over those both scans have: a bucket's first scan isn't growth. */
-function moved(buckets: string[], a: CwScan, b: CwScan, cfg: DigestCfg): number {
+function moved(buckets: string[], a: QuotaScan, b: QuotaScan, cfg: DigestCfg): number {
   let d = 0
   for (const x of buckets) {
     const [v0, v1] = [sizeOf(x, a, cfg), sizeOf(x, b, cfg)]
@@ -80,11 +80,11 @@ function moved(buckets: string[], a: CwScan, b: CwScan, cfg: DigestCfg): number 
   return d
 }
 
-const allBuckets = (r: CwScan, cfg: DigestCfg): string[] => [...(cfg.primary ? [cfg.primary] : []), ...Object.keys(r.extra)]
-const sum = (buckets: string[], r: CwScan, cfg: DigestCfg): number => buckets.reduce((t, b) => t + (sizeOf(b, r, cfg) ?? 0), 0)
+const allBuckets = (r: QuotaScan, cfg: DigestCfg): string[] => [...(cfg.primary ? [cfg.primary] : []), ...Object.keys(r.extra)]
+const sum = (buckets: string[], r: QuotaScan, cfg: DigestCfg): number => buckets.reduce((t, b) => t + (sizeOf(b, r, cfg) ?? 0), 0)
 
 /** `layout: 'pools'`'s OP: the headline and weeks over every bucket, and a line per pool, its mark leading. */
-function poolsText(m: CwRows, month: number, cfg: DigestCfg, p: DigestParams, links: OpLinks): string {
+function poolsText(m: QuotaRows, month: number, cfg: DigestCfg, p: DigestParams, links: OpLinks): string {
   const site = cfg.site_url
   const u = cfg.unit
   const last = m.rows[m.rows.length - 1]
@@ -131,7 +131,7 @@ function poolsText(m: CwRows, month: number, cfg: DigestCfg, p: DigestParams, li
   ]
   const mon0 = iso(weekOf(p.weeks === 'month' ? month : start))
   const older = seen.filter(r => date(r) < mon0)
-  const weeks = new Map<number, CwScan>()
+  const weeks = new Map<number, QuotaScan>()
   for (const r of seen) if (date(r) >= mon0) weeks.set(weekOf(dayOf(date(r))), r)
   const lastMon = [...weeks.keys()].pop()
   let prevEnd = older.length ? older[older.length - 1] : seen[0]
@@ -156,14 +156,14 @@ function poolsText(m: CwRows, month: number, cfg: DigestCfg, p: DigestParams, li
   return lines.join('\n')
 }
 
-/** What `arrow-chip`'s two channels say (`digest_cw._pool_chip`). */
+/** What `arrow-chip`'s two channels say (`digest_quota._pool_chip`). */
 const CHIP_KEY = '_Color: days until full. Arrow: growth rate, the fastest of the last 1, 3 and 7 days._'
 
 /** A week's line names the pools that moved at least this much, in the config's unit. */
 export const WEEK_MOVER = 1
 
-/** The OP's markdown (`digest_cw.op_body`). */
-export function opText(m: CwRows, month: number, cfg: DigestCfg, p: DigestParams, links: OpLinks): string {
+/** The OP's markdown (`digest_quota.op_body`). */
+export function opText(m: QuotaRows, month: number, cfg: DigestCfg, p: DigestParams, links: OpLinks): string {
   if (p.layout === 'pools') return poolsText(m, month, cfg, p, links)
   const site = cfg.site_url
   const u = cfg.unit
@@ -194,7 +194,7 @@ export function opText(m: CwRows, month: number, cfg: DigestCfg, p: DigestParams
   ]
   const mon0 = iso(weekOf(p.weeks === 'month' ? month : start))
   const older = seen.filter(r => date(r) < mon0)
-  const weeks = new Map<number, CwScan[]>()
+  const weeks = new Map<number, QuotaScan[]>()
   for (const r of seen) {
     if (date(r) < mon0) continue
     const k = weekOf(dayOf(date(r)))
@@ -221,8 +221,8 @@ export function opText(m: CwRows, month: number, cfg: DigestCfg, p: DigestParams
   return lines.join('\n')
 }
 
-/** The plot's `/api/digest-image` request (`digest_cw.image_body`). */
-export function imageRequest(m: CwRows, month: number, cfg: DigestCfg, p: DigestParams): Record<string, unknown> {
+/** The plot's `/api/digest-image` request (`digest_quota.image_body`). */
+export function imageRequest(m: QuotaRows, month: number, cfg: DigestCfg, p: DigestParams): Record<string, unknown> {
   const u = cfg.unit
   const last = m.rows[m.rows.length - 1]
   const { start, seen, back } = window(m, month, p)

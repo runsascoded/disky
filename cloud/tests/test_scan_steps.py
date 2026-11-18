@@ -482,7 +482,7 @@ def gcs_ctx(tmp_path, env, monkeypatch, **opts):
                            "index": {"mode": "path-index", "attribution": ["attr/a.parquet"], "access": "access/agg/*/*.parquet",
                                      "args": ["-u", "bysize"], "lifecycle": True, "rules": True},
                            "static-names": {"profile": "sn.json"},
-                           "digest": {"template": "gcs", "config": "d.yml", "platforms": ["slack", "discord"]}, **opts}})
+                           "digest": {"template": "cost", "config": "d.yml", "platforms": ["slack", "discord"]}, **opts}})
     c = S.make_ctx(p, {**env, "DT_DATA_MOUNT": str(tmp_path / "mnt")})
     c.sh_impl = Runner(tmp_path)
     return c
@@ -577,7 +577,7 @@ def test_gcs_extra_steps(tmp_path, env, monkeypatch):
         f"dt-cloud index-sync -p -d <tmp>/mnt/dvx/{k} -g G1 -k {k} -M <tmp>/mnt/dvx/snapshots 2026-10-16T1200",
         "dt-cloud index-gc -r 30 2026-10-16T1200",
         "dt-cloud healthcheck -d 2026-10-16T1200",
-        "dt-cloud digest -T gcs -C d.yml -P slack -r gs://dvx/snapshots",
+        "dt-cloud digest -T cost -C d.yml -P slack -r gs://dvx/snapshots",
     ]
 
 
@@ -849,7 +849,7 @@ def hf_profile(**kw):
                          "index": {"webdata": ["dt-cloud", "path-index", "-d", "{scan}", "-l", "{data}/raw/{scan}/ns/*.parquet", "-o", "{web}"],
                                    "args": ["-T", "{work}/duckdb-tmp"]},
                          "static-names": {"gen": "2026-10-15hf", "mem": "8GB", "build_args": ["-x", "16,8"]},
-                         "digest": {"template": "cw", "config": "d.yml"}}, **kw)
+                         "digest": {"template": "quota", "config": "d.yml"}}, **kw)
 
 
 def test_hf_list_then_index(tmp_path, env, monkeypatch):
@@ -934,8 +934,8 @@ def test_digest_uploads_with_the_pages_token(tmp_path, env):
     del env["CF_PAGES_TOKEN"]
     S.digest(c, None)
     assert [(cmd, e["CLOUDFLARE_API_TOKEN"]) for cmd, e in zip(c.sh_impl.calls, c.sh_impl.envs)] == [
-        ("dt-cloud digest -T cw -C d.yml -P slack -r <tmp>/data/snapshots/hf", "pages"),
-        ("dt-cloud digest -T cw -C d.yml -P slack -r <tmp>/data/snapshots/hf", "d1"),
+        ("dt-cloud digest -T quota -C d.yml -P slack -r <tmp>/data/snapshots/hf", "pages"),
+        ("dt-cloud digest -T quota -C d.yml -P slack -r <tmp>/data/snapshots/hf", "d1"),
     ]
 
 
@@ -946,7 +946,7 @@ def test_digest_root_from_the_profile(tmp_path, env):
     hf = hf_profile()
     c = ctx(tmp_path, env, **{**hf, "options": {**hf["options"], "digest": {**hf["options"]["digest"], "root": "r2://idx/{snapshots}"}}})
     S.digest(c, None)
-    assert c.sh_impl.calls == ["dt-cloud digest -T cw -C d.yml -P slack -r r2://idx/snapshots/hf"]
+    assert c.sh_impl.calls == ["dt-cloud digest -T quota -C d.yml -P slack -r r2://idx/snapshots/hf"]
 
 
 class Ends:
@@ -1086,8 +1086,8 @@ def test_digest_failure_fails_its_phase(tmp_path, env):
         ("begin", "digest"), ("end", "digest", 1, True, "slack usage-digest step failed"),
         ("begin", "digest"), ("end", "digest", 0, False, None),
     ], [
-        "dt-cloud digest -T cw -C d.yml -P slack -r <tmp>/data/snapshots/hf",
-        "dt-cloud digest -T cw -C d.yml -P discord -r <tmp>/data/snapshots/hf",
+        "dt-cloud digest -T quota -C d.yml -P slack -r <tmp>/data/snapshots/hf",
+        "dt-cloud digest -T quota -C d.yml -P discord -r <tmp>/data/snapshots/hf",
     ], None)
 
 

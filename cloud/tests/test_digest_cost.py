@@ -1,4 +1,4 @@
-"""Specs for the `gcs` digest template's content functions (`dt_cloud.digest_gcs`)
+"""Specs for the `cost` digest template's content functions (`dt_cloud.digest_cost`)
 and the engine pieces it exercises (`dt_cloud.digest`: arrows, emoji, state
 paths, the Discord converge).
 
@@ -13,7 +13,7 @@ import pytest
 from thrds import DiscordClient, DiscordWebhookClient, Image
 
 from dt_cloud import digest as E
-from dt_cloud import digest_gcs as D
+from dt_cloud import digest_cost as D
 
 from conftest import thrds_fake
 from digest_examples import GCS_EXAMPLE
@@ -158,7 +158,7 @@ def test_render_plot_posts_to_site(monkeypatch, tmp_path):
     monkeypatch.setattr(site, "post_json", lambda url, token, path, body, timeout=120: calls.append((url, token, path, body)) or b"\x89PNG")
     TPL.render_plot(D.Month(ROWS), AUG, tmp_path / "op.png")
     # the request is the site's (`POST /api/digest-op`'s `image`; conftest's stand-in here)
-    assert calls == [("https://site.example.org", "tok", "/api/digest-image", {"site_image": "gcs", "month": "2026-08", "to": "2026-08-04"})]
+    assert calls == [("https://site.example.org", "tok", "/api/digest-image", {"site_image": "cost", "month": "2026-08", "to": "2026-08-04"})]
     assert (tmp_path / "op.png").read_bytes() == b"\x89PNG"
 
 
@@ -242,8 +242,8 @@ class _FakeBot:
 
 
 # The OP after one scan in (8/3), then both (8/4): the site's render (conftest's stand-in), posted as Discordified
-OP_ONE_SCAN = "<site OP: gcs 2026-08, 1 scans to 2026-08-03, params ->"
-OP_TWO_SCANS = "<site OP: gcs 2026-08, 2 scans to 2026-08-04, params ->"
+OP_ONE_SCAN = "<site OP: cost 2026-08, 1 scans to 2026-08-03, params ->"
+OP_TWO_SCANS = "<site OP: cost 2026-08, 2 scans to 2026-08-04, params ->"
 CAL = "https://icons.example.org/calendar.png?v=2"
 AV = "https://icons.example.org/arrows/av_deg"
 

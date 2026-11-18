@@ -4,7 +4,7 @@ import { describe, expect, it } from 'vitest'
 import { parseReapply, reapplyArgs, reapplyConfig, type ReapplyConfig, reapplyScript } from './digest-reapply'
 
 const base = { month: '2026-11', target: 'op', dry_run: true }
-const CONFIG: ReapplyConfig = { template: 'demo', config: 'job/digest.yml', root: 'snapshots/demo', env_script: 'job/demo-env.sh', r2_bucket: 'demo-index', secrets: { SITE_TOKEN: 'demo-grant' } }
+const CONFIG: ReapplyConfig = { template: 'quota', config: 'job/digest.yml', root: 'snapshots/demo', env_script: 'job/demo-env.sh', r2_bucket: 'demo-index', secrets: { SITE_TOKEN: 'demo-grant' } }
 
 describe('/api/digest-reapply', () => {
   it('reads a target of the month, a channel (default the deployment’s) and candidate settings', () => {
@@ -45,11 +45,14 @@ describe('/api/digest-reapply', () => {
       reapplyConfig(JSON.stringify(CONFIG)),
       reapplyConfig(undefined),
       reapplyConfig('nope'),
+      reapplyConfig(JSON.stringify({ ...CONFIG, template: 'cw' })),
+      reapplyConfig(JSON.stringify({ ...CONFIG, template: 'gcs' })),
       reapplyConfig(JSON.stringify({ ...CONFIG, template: 'a b' })),
+      reapplyConfig(JSON.stringify({ ...CONFIG, template: 'demo' })),
       reapplyConfig(JSON.stringify({ ...CONFIG, env_script: "x'; rm -rf /" })),
       reapplyConfig(JSON.stringify({ ...CONFIG, secrets: { lower: 'x' } })),
       reapplyConfig(JSON.stringify({ ...CONFIG, secrets: undefined })),
-    ]).toEqual([CONFIG, 'DIGEST_REAPPLY', 'DIGEST_REAPPLY: not JSON', 'DIGEST_REAPPLY.template', 'DIGEST_REAPPLY.env_script', 'DIGEST_REAPPLY.secrets', 'DIGEST_REAPPLY.secrets'])
+    ]).toEqual([CONFIG, 'DIGEST_REAPPLY', 'DIGEST_REAPPLY: not JSON', CONFIG, { ...CONFIG, template: 'cost' }, 'DIGEST_REAPPLY.template', 'DIGEST_REAPPLY.template', 'DIGEST_REAPPLY.env_script', 'DIGEST_REAPPLY.secrets', 'DIGEST_REAPPLY.secrets'])
   })
 
   it('becomes the digest CLI’s selectors', () => {
@@ -75,7 +78,7 @@ describe('/api/digest-reapply', () => {
       '{ set +x; } 2>/dev/null',
       "OUT='/gcs/data/digest/reapply/demo-digest-20261103-120000z.txt'",
       'mkdir -p "$(dirname "$OUT")"',
-      `dt-cloud digest -T 'demo' -C 'job/digest.yml' -r "gs://$DATA_BUCKET/"'snapshots/demo' '-m' '2026-11' '-c' 'C1' '-o' '-p' '' 2>&1 | tee "$OUT"`,
+      `dt-cloud digest -T 'quota' -C 'job/digest.yml' -r "gs://$DATA_BUCKET/"'snapshots/demo' '-m' '2026-11' '-c' 'C1' '-o' '-p' '' 2>&1 | tee "$OUT"`,
     ])
   })
 })

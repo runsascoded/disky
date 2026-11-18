@@ -1,6 +1,6 @@
 {
  "cfg": {
-  "template": "cw",
+  "template": "quota",
   "title": "HF usage",
   "site_url": "https://cw.example.org",
   "host": "cw.example.org",
@@ -42,7 +42,7 @@
  "plot_url": "<plot-url>",
  "prev_url": "<prev-thread>",
  "rows": {
-  "template": "cw",
+  "template": "quota",
   "closed": false,
   "pre": [
    {

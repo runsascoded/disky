@@ -1,7 +1,7 @@
-"""The `gcs` digest template: a reply per day, cost by storage class.
+"""The `cost` digest template: a reply per day, cost by storage class.
 
 A day's reply is over its sender scan (`senders`): its first scan not started by hand (`Scan.trigger`, the site's
-`digest_cw.site_triggers`); a manual scan stands in only for a day without one, once a later day has a scan (or the
+`digest_quota.site_triggers`); a manual scan stands in only for a day without one, once a later day has a scan (or the
 month is over). Deltas run sender to sender.
 
 Each reply's SENDER is the scan's size headline (date · TiB · Δ), its BODY the
@@ -178,8 +178,8 @@ def load_month(root: str, month: dt.date, prices: dict[str, float], triggers: Ma
     return Month(rows=rows[n_before:], pre=rows[1:n_before])
 
 
-class Gcs:
-    """The `gcs` template over a :class:`DigestConfig` (see `digest.Template`)."""
+class CostTemplate:
+    """The `cost` template over a :class:`DigestConfig` (see `digest.Template`)."""
 
     variants = ("sender",)
     edited_variants = ()
@@ -189,9 +189,9 @@ class Gcs:
         self.cfg = cfg
 
     def load(self, root: str, month: dt.date) -> Month | None:
-        from . import digest_cw
+        from . import digest_quota
 
-        return load_month(root, month, self.cfg.prices, digest_cw.site_triggers(self.cfg))
+        return load_month(root, month, self.cfg.prices, digest_quota.site_triggers(self.cfg))
 
     def n_scans(self, data: Month) -> int:
         return len(data.rows)
@@ -207,12 +207,12 @@ class Gcs:
         return None
 
     def rows_json(self, data: Month) -> dict:
-        """The month's rows as the site's renderer reads them (`src/digest/gcs.ts` `GcsRows`)."""
+        """The month's rows as the site's renderer reads them (`src/digest/cost.ts` `CostRows`)."""
         def row(r: Scan) -> dict:
             return {"date": r.date, "slug": r.slug, "tb": r.tb, "cost": r.cost, "dtb": r.dtb, "dcost": r.dcost,
                     "std": r.std, "near": r.near, "cold": r.cold, "arch": r.arch, "prev": r.prev}
 
-        return {"template": "gcs", "pre": [row(r) for r in data.pre], "rows": [row(r) for r in data.rows]}
+        return {"template": "cost", "pre": [row(r) for r in data.pre], "rows": [row(r) for r in data.rows]}
 
     def units(self, data: Month, variant: str, platform: str = "slack") -> list[Unit]:
         return [Unit(r.date[:10], r.date, reply(r, self.cfg, platform)) for r in data.rows]

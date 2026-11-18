@@ -1,4 +1,4 @@
-<site OP: gcs 2026-08, 10 scans to 2026-08-11, params ->
+<site OP: cost 2026-08, 10 scans to 2026-08-11, params ->
 
 [← July](<prev-thread>)
 

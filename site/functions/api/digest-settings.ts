@@ -2,18 +2,19 @@
  * `digest-settings`): what `/admin/slack` picks, and what the job renders under over its config file's values
  * (`digest.live_settings`).
  *
- *   GET /api/digest-settings?template=cw → {settings: {template, params, quota_marks, updated_by, updated_at} | null}
+ *   GET /api/digest-settings?template=quota → {settings: {template, params, quota_marks, updated_by, updated_at} | null}
  *   PUT /api/digest-settings {template, params, quota_marks} → {settings}                                        admin
  *
  * GET is viewer-gated (the job reads it with its grant; settings hold no secrets). `params` is the OP's
  * `src/digest/codec` string, read strictly (`parseParams`); `quota_marks` the replies' marks. Each PUT logs its old
- * and new row to `admin_edits`. A D1 without the table reads as no row (the job keeps its file's values). */
+ * and new row to `admin_edits`. A D1 without the table reads as no row (the job keeps its file's values). A template's
+ * old name (`cw`, `gcs`: `TEMPLATE_ALIASES`) reads and writes its name's row. */
 import type { D1Database } from '@cloudflare/workers-types'
 import { type Ctx, json, requireAdmin, requireViewer } from '../_lib/auth.js'
 import { parseParams } from '../../src/digest/codec.js'
+import { canonicalTemplate, TEMPLATE_ALIASES, TEMPLATES } from '../../src/digest/templates.js'
 
 export const TABLE = 'digest_settings'
-export const TEMPLATES = ['cw', 'gcs']
 /** `digest.QUOTA_MARKS`: keep identical. */
 export const QUOTA_MARKS = ['warning', 'circles', 'runway', 'runway-hue', 'arrow-chip']
 
@@ -21,10 +22,18 @@ export interface DigestSettings { template: string; params: string; quota_marks:
 
 const missingTable = (e: unknown): boolean => /no such table/.test(String((e as Error)?.message))
 
+/** The template's old name, whose row a database the `digest-template-rename` recipe hasn't reached still holds. */
+const aliasOf = (template: string): string => Object.keys(TEMPLATE_ALIASES).find(a => TEMPLATE_ALIASES[a] === template) ?? template
+
+/** `template`'s row (a canonical name). The transition read: a row under its old name stands in until the recipe
+ *  `digest-template-rename` re-keys it, the newer of the two where both are (as the recipe keeps); drop the alias
+ *  half once every deployment's D1 has the recipe. */
 export async function getSettings(db: D1Database, template: string): Promise<DigestSettings | null> {
   try {
-    return await db.prepare(`SELECT template, params, quota_marks, updated_by, updated_at FROM ${TABLE} WHERE template = ?`)
-      .bind(template).first<DigestSettings>()
+    const row = await db.prepare(`SELECT template, params, quota_marks, updated_by, updated_at FROM ${TABLE} WHERE template IN (?, ?)
+                                  ORDER BY updated_at DESC, template = ? DESC LIMIT 1`)
+      .bind(template, aliasOf(template), template).first<DigestSettings>()
+    return row && { ...row, template }
   } catch (e) {
     if (missingTable(e)) return null
     throw e
@@ -34,8 +43,9 @@ export async function getSettings(db: D1Database, template: string): Promise<Dig
 /** The PUT body, or why it's refused. */
 export function parseSettings(b: unknown): { template: string; params: string; quota_marks: string } | string {
   if (typeof b !== 'object' || b === null || Array.isArray(b)) return 'body: a JSON object'
-  const { template, params, quota_marks } = b as Record<string, unknown>
-  if (typeof template !== 'string' || !TEMPLATES.includes(template)) return `template: ${TEMPLATES.join(' | ')}`
+  const { params, quota_marks } = b as Record<string, unknown>
+  const template = canonicalTemplate((b as Record<string, unknown>).template)
+  if (!template) return `template: ${TEMPLATES.join(' | ')}`
   if (typeof quota_marks !== 'string' || !QUOTA_MARKS.includes(quota_marks)) return `quota_marks: ${QUOTA_MARKS.join(' | ')}`
   if (typeof params !== 'string') return 'params: a string'
   try {
@@ -50,6 +60,8 @@ export async function putSettings(db: D1Database, s: { template: string; params:
   const old = await getSettings(db, s.template)
   const row: DigestSettings = { ...s, updated_by: who, updated_at: ts }
   await db.batch([
+    // the transition write: the row lands under the name, and its old name's row (read in its place until now) goes
+    db.prepare(`DELETE FROM ${TABLE} WHERE template = ? AND template != ?`).bind(aliasOf(row.template), row.template),
     db.prepare(`INSERT INTO ${TABLE} (template, params, quota_marks, updated_by, updated_at) VALUES (?, ?, ?, ?, ?)
                 ON CONFLICT (template) DO UPDATE SET params = excluded.params, quota_marks = excluded.quota_marks,
                   updated_by = excluded.updated_by, updated_at = excluded.updated_at`)
@@ -63,8 +75,8 @@ export async function putSettings(db: D1Database, s: { template: string; params:
 export const onRequestGet = async (ctx: Ctx): Promise<Response> => {
   const gated = await requireViewer(ctx)
   if (gated instanceof Response) return gated
-  const template = new URL(ctx.request.url).searchParams.get('template') ?? ''
-  if (!TEMPLATES.includes(template)) return json({ error: `template: ${TEMPLATES.join(' | ')}` }, 400)
+  const template = canonicalTemplate(new URL(ctx.request.url).searchParams.get('template'))
+  if (!template) return json({ error: `template: ${TEMPLATES.join(' | ')}` }, 400)
   if (!ctx.env.DB) return json({ settings: null }, 200, { 'cache-control': 'no-store' })
   return json({ settings: await getSettings(ctx.env.DB, template) }, 200, { 'cache-control': 'no-store' })
 }

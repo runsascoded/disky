@@ -1,4 +1,4 @@
-/** Python's number and date formatting, exactly, for the digest renderer (`./cw.ts`, `./gcs.ts`), whose text must
+/** Python's number and date formatting, exactly, for the digest renderer (`./quota.ts`, `./cost.ts`), whose text must
  * match the job's byte for byte (specs/slack-preview-page.md). JS `toFixed` rounds an exact tie away from zero;
  * Python's `format` and `round` round it to even (`f"{712.5:.0f}"` is `712`). Pure; DOM-free. */
 

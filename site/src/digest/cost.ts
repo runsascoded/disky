@@ -1,11 +1,11 @@
-/** The `gcs` digest template's OP: its text and its storage-class plot's `/api/digest-image` request, from the
- * month's per-day rows (the job sends them: `Gcs.rows_json`; goldens: `./parity.test.ts`). Pure; DOM-free. */
+/** The `cost` digest template's OP: its text and its storage-class plot's `/api/digest-image` request, from the
+ * month's per-day rows (the job sends them: `CostTemplate.rows_json`; goldens: `./parity.test.ts`). Pure; DOM-free. */
 import { encodeScan, scanTime } from '../scanSlug'
 import { deg, type DigestCfg, type DigestParams, type OpLinks, pct, prevMonthLink, span, tb, usd, weekOf, windowLabel, windowStart } from './common'
 import { addDays, dayOf, grouped, iso, md, mon3, monthYear, pyRound } from './pyfmt'
 
 /** One day's sender scan: TiB total and per class, $/mo, deltas vs the previous day's (null: none). */
-export interface GcsRow {
+export interface CostRow {
   /** The scan id (`YYYY-MM-DD[THHMM]`). */
   date: string
   slug: string | null
@@ -22,17 +22,17 @@ export interface GcsRow {
 }
 
 /** A month's rows (`rows`, each a reply) and the OP window's days before it (`pre`). */
-export interface GcsRows { template: 'gcs'; pre: GcsRow[]; rows: GcsRow[] }
+export interface CostRows { template: 'cost'; pre: CostRow[]; rows: CostRow[] }
 
 const TIB = 1024 ** 4
 // the image's tiers, bottom → top (cold → hot)
 const TIERS = [['arch', 'Archive'], ['cold', 'Coldline'], ['near', 'Nearline'], ['std', 'Standard']] as const
 
-const day = (r: GcsRow): number => dayOf(r.date)
-const dlink = (r: GcsRow): string => r.slug ?? encodeScan(r.date)!
+const day = (r: CostRow): number => dayOf(r.date)
+const dlink = (r: CostRow): string => r.slug ?? encodeScan(r.date)!
 
 /** The month's window: its first day, every row held, its baseline `[TiB, scan id]` (`Month.window` / `Month.back`). */
-function window(m: GcsRows, month: number, p: DigestParams): { start: number; seen: GcsRow[]; back: [number, string] } {
+function window(m: CostRows, month: number, p: DigestParams): { start: number; seen: CostRow[]; back: [number, string] } {
   const start = windowStart(month, day(m.rows[m.rows.length - 1]), p.windowDays)
   const seen = [...m.pre, ...m.rows]
   const before = seen.filter(r => day(r) < start)
@@ -42,8 +42,8 @@ function window(m: GcsRows, month: number, p: DigestParams): { start: number; se
   return { start, seen, back }
 }
 
-/** The OP's markdown (`digest_gcs.op_body`). */
-export function opText(m: GcsRows, month: number, cfg: DigestCfg, p: DigestParams, links: OpLinks): string {
+/** The OP's markdown (`digest_cost.op_body`). */
+export function opText(m: CostRows, month: number, cfg: DigestCfg, p: DigestParams, links: OpLinks): string {
   const site = cfg.site_url
   const rows = m.rows
   const baseTb = rows[0].tb - (rows[0].dtb ?? 0)
@@ -59,7 +59,7 @@ export function opText(m: GcsRows, month: number, cfg: DigestCfg, p: DigestParam
   }
   const lines = [`:arrow_deg${deg(mweekly)}: ${p.headline.map(f => figures[f]).join('')}[dashboard](${site}/)`, '', '*Weekly summaries*']
   const mon0 = weekOf(p.weeks === 'month' ? month : start)
-  const weeks = new Map<number, GcsRow[]>()
+  const weeks = new Map<number, CostRow[]>()
   for (const r of seen) {
     if (day(r) < mon0) continue
     const k = weekOf(day(r))
@@ -70,7 +70,7 @@ export function opText(m: GcsRows, month: number, cfg: DigestCfg, p: DigestParam
   // the first week's baseline: its first row's delta baseline; absent one, a day before that row
   const base0 = first.prev ? scanTime(first.prev) : addDays(scanTime(first.date), -1)
   const [wTb, wCost] = [first.tb - (first.dtb ?? 0), first.cost - (first.dcost ?? 0)]
-  let prevEnd: GcsRow | null = null
+  let prevEnd: CostRow | null = null
   for (const [mon, ws] of weeks) {
     const end = ws[ws.length - 1]
     if (end === first && first.dtb === null) continue
@@ -91,12 +91,12 @@ export function opText(m: GcsRows, month: number, cfg: DigestCfg, p: DigestParam
   return lines.join('\n')
 }
 
-/** The plot's `/api/digest-image` request (`digest_gcs.image_body`, `kind: tiers`). */
-export function imageRequest(m: GcsRows, month: number, cfg: DigestCfg, p: DigestParams): Record<string, unknown> {
+/** The plot's `/api/digest-image` request (`digest_cost.image_body`, `kind: tiers`). */
+export function imageRequest(m: CostRows, month: number, cfg: DigestCfg, p: DigestParams): Record<string, unknown> {
   const rows = m.rows
   const { start, seen, back } = window(m, month, p)
   const before = seen.filter(r => day(r) < start)
-  const byDay = new Map<string, GcsRow>()
+  const byDay = new Map<string, CostRow>()
   for (const r of [...before.slice(-1), ...seen.filter(r => day(r) >= start)]) byDay.set(r.date.slice(0, 10), r)
   const body: Record<string, unknown> = {
     kind: 'tiers',

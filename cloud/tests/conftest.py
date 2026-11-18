@@ -96,9 +96,9 @@ def _deployment_env(monkeypatch):
     for v in ("LAYER2_PREFIX", "STATIC_NAMES_PROFILE", "STATIC_NAMES_GEN", "SCAN_RUN_ID", "SCAN_ID", "BATCH_CROSS_REGION", "LISTING_REGIONS"):
         monkeypatch.delenv(v, raising=False)
     # the cw digest's scan triggers come from the site (`/api/scan-runs`): none recorded, unless a test says otherwise
-    from dt_cloud import digest_cw
+    from dt_cloud import digest_quota
 
-    monkeypatch.setattr(digest_cw, "site_triggers", lambda cfg: {})
+    monkeypatch.setattr(digest_quota, "site_triggers", lambda cfg: {})
     # …and its live settings (`/api/digest-settings`): none, so the config file's stand
     from dt_cloud import digest
 
@@ -124,9 +124,9 @@ def _site_render(request, monkeypatch):
     """The OP is the site's to render: tests get `fake_site_render`, unless marked `real_site_render`."""
     if request.node.get_closest_marker("real_site_render"):
         return
-    from dt_cloud import digest, digest_cw, digest_gcs
+    from dt_cloud import digest, digest_quota, digest_cost
 
-    for m in (digest, digest_cw, digest_gcs):
+    for m in (digest, digest_quota, digest_cost):
         monkeypatch.setattr(m, "site_render", fake_site_render)
 
 

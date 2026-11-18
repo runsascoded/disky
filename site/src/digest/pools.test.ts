@@ -2,7 +2,7 @@
  * 790 of 910 TiB, `hot` (hot-data) 99.5 of 100 TiB at the month's last scan; `more-data` has no quota. */
 import { describe, expect, it } from 'vitest'
 import { DEFAULT_PARAMS, type DigestCfg, type DigestParams, type DigestRows, imageRequest, opText } from './index'
-import type { CwRows, CwScan } from './cw'
+import type { QuotaRows, QuotaScan } from './quota'
 import { growth, mark, quotaLine, runway, runwayHue, runwayMark, runwayText } from './pools'
 
 interface Fs { readFile(p: string, enc: 'utf8'): Promise<string> }
@@ -33,7 +33,7 @@ describe('quota pressure', () => {
 
   it('a zone sums its buckets against its quota; an overage reads "over"; a quiet pool is its share of its quota, no headroom', async () => {
     const f = await load()
-    const rows = f.rows as CwRows
+    const rows = f.rows as QuotaRows
     const last = { ...rows.rows[rows.rows.length - 1], extra: { 'hot-data': 101, 'more-data': 2.4 } }
     const zoned: DigestCfg = {
       ...f.cfg,
@@ -49,7 +49,7 @@ describe('quota pressure', () => {
     expect(quotaLine({ ...last, tb: 100 }, zoned, 90)).toBe('*Quotas:* :red_circle: hot 101.0% of 100Ti (1.0 Ti over) · :large_green_circle: z zone 11% of 1P')
   })
 
-  it('runway: the fastest fill over 1, 3 and 7 days; marks by runway, ≥ 95% never calmer than orange (digest_cw)', async () => {
+  it('runway: the fastest fill over 1, 3 and 7 days; marks by runway, ≥ 95% never calmer than orange (digest_quota)', async () => {
     const f = await load()
     const D = 86400_000
     const t = Date.UTC(2026, 8, 23, 12)
@@ -72,14 +72,14 @@ describe('quota pressure', () => {
       ', +1.0 Ti/d over 7d, ≈60d to full', ', +4.1 Ti/d, ≈8d to full', '', '', ''])
   })
 
-  it('runway-hue: :runway-N: one more than the cut points reached; ≥ 95% never calmer than 3 (digest_cw._runway_hue)', () => {
+  it('runway-hue: :runway-N: one more than the cut points reached; ≥ 95% never calmer than 3 (digest_quota._runway_hue)', () => {
     const days = [0, 1.79, 1.8, 2.9, 3, 5.9, 6, 9.9, 10, 18.9, 19, 32.9, 33, 59.9, 60, Infinity]
     expect(days.map(d => runwayHue({ days: d, growth: 1 }, 50))).toEqual([1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8].map(n => `:runway-${n}: `))
     expect(([[Infinity, 94.9], [Infinity, 95], [2, 99], [0, 101]] as [number, number][]).map(([d, pct]) => runwayHue({ days: d, growth: 1 }, pct)))
       .toEqual([':runway-8: ', ':runway-3: ', ':runway-2: ', ':runway-1: '])
   })
 
-  it('runway-hue: a shape names its own emoji at each step; a circle or no shape is the plain mark (digest_cw._runway_hue)', () => {
+  it('runway-hue: a shape names its own emoji at each step; a circle or no shape is the plain mark (digest_quota._runway_hue)', () => {
     const days = [0, 1.8, 3, 6, 10, 19, 33, 60]
     for (const s of ['square', 'diamond', 'triangle', 'star'] as const) {
       expect(days.map(d => runwayHue({ days: d, growth: 1 }, 50, s))).toEqual([1, 2, 3, 4, 5, 6, 7, 8].map(n => `:runway-${s}-${n}: `))
@@ -90,7 +90,7 @@ describe('quota pressure', () => {
 
   it('a pool takes its bucket’s shape, a zone its members’; absent is a circle; only runway-hue draws it', async () => {
     const f = await load()
-    const rows = f.rows as CwRows
+    const rows = f.rows as QuotaRows
     const last = rows.rows[rows.rows.length - 1]
     const q = f.cfg.buckets['main-data'].quotas
     const cfg: DigestCfg = { ...f.cfg, buckets: {
@@ -105,9 +105,9 @@ describe('quota pressure', () => {
 
   it('the runway quota line looks back into the previous month: day 2 of November sees October’s 7-day fill', async () => {
     const f = await load()
-    const s = (scan: string, hot: number): CwScan => ({ scan, slug: null, tb: 790, extra: { 'hot-data': hot }, classes: null })
-    const m: CwRows = { template: 'cw', closed: false, pre: [s('2026-10-26T1201', 42)], lead: [s('2026-10-31T1201', 81.8)], rows: [s('2026-11-01T1201', 81.9), s('2026-11-02T1201', 82)] }
-    const line = (rows: CwRows) => opText(rows, '2026-11' as typeof f.month, f.cfg, links, { ...DEFAULT_PARAMS, quotas: 'runway' }).split('\n')[1]
+    const s = (scan: string, hot: number): QuotaScan => ({ scan, slug: null, tb: 790, extra: { 'hot-data': hot }, classes: null })
+    const m: QuotaRows = { template: 'quota', closed: false, pre: [s('2026-10-26T1201', 42)], lead: [s('2026-10-31T1201', 81.8)], rows: [s('2026-11-01T1201', 81.9), s('2026-11-02T1201', 82)] }
+    const line = (rows: QuotaRows) => opText(rows, '2026-11' as typeof f.month, f.cfg, links, { ...DEFAULT_PARAMS, quotas: 'runway' }).split('\n')[1]
     // +0.1 Ti/d within November, but 42 → 82 over the week before: orange by the 7-day rate, 18 Ti free ≈ 3 days
     expect(line(m)).toBe('*Quotas:* :large_green_circle: main 86.8% of 1P (120.0 Ti free) · :large_orange_circle: hot 82.0% of 100Ti (18.0 Ti free), +5.7 Ti/d over 7d, ≈3d to full')
     // without the previous month's scans it would read calm
@@ -116,7 +116,7 @@ describe('quota pressure', () => {
 
   it('the runway quota line: the replies’ order, a flat full pool green, a filling one red with its rate', async () => {
     const f = await load()
-    const s = (scan: string, hot: number): CwScan => ({ scan, slug: null, tb: 790, extra: { 'hot-data': hot }, classes: null })
+    const s = (scan: string, hot: number): QuotaScan => ({ scan, slug: null, tb: 790, extra: { 'hot-data': hot }, classes: null })
     const seen = [s('2026-09-01T0001', 50), s('2026-09-05T0001', 80), s('2026-09-07T0001', 90), s('2026-09-08T0001', 99.5)]
     const last = seen[seen.length - 1]
     // main flat at 86.8%: never filling, green; hot +9.5 Ti over the last day with 0.5 Ti free: red, under a day

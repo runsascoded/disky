@@ -3444,7 +3444,7 @@ def _icons_dir(rel: str = "job/icons", config: Path | None = None) -> Path:
 
 
 def _digest_options(template_default: str):
-    """`digest`'s options; `cw-digest` is the same command defaulting to `-T cw`."""
+    """`digest`'s options; `cw-digest` is the same command defaulting to `-T quota`."""
     opts = [
         option("-b", "--bot-token", help="Discord bot token: opens the month's thread + resolves app emoji (default $DISCORD_BOT_TOKEN; with -P discord)"),
         option("-c", "--channel", help="Slack channel id (default $SLACK_CHANNEL)"),
@@ -3453,7 +3453,7 @@ def _digest_options(template_default: str):
         option("-D", "--reply-delay", "reply_delay", default=0.0, type=float, help="Seconds to sleep between replies (e.g. 305 for a spaced Slack backfill so per-reply sender chrome survives; Discord needs none)"),
         option("-E", "--edit-replies", is_flag=True, help="Re-edit every already-posted reply to its current body (backfill after a format change; a Slack sender-variant reply keeps its name + avatar)"),
         option("-F", "--for-real", is_flag=True, help="With --redo-replies: actually post the new replies and delete the old ones (default: print the plan)"),
-        option("-H", "--reply-hour", type=int, default=None, help="cw template: UTC hour the sender variant's daily reply is taken from — the day's first scan at/after it (default 12 → the 12:01Z morning scan, 8:01 am ET; the day's other scans still feed the OP + plot, and with the config's `provisional: true` its earlier ones post a provisional reply)"),
+        option("-H", "--reply-hour", type=int, default=None, help="quota template: UTC hour the sender variant's daily reply is taken from — the day's first scan at/after it (default 12 → the 12:01Z morning scan, 8:01 am ET; the day's other scans still feed the OP + plot, and with the config's `provisional: true` its earlier ones post a provisional reply)"),
         option("-i", "--icons-dir", type=Path, default=None, help="Where the plot PNG is written + deployed from (default the config's `icons_dir`: job/icons, job/icons-cw)"),
         option("-L", "--file-settings", is_flag=True, help="Use the config file's `params` / `quota_marks`, not the site's live settings (`/api/digest-settings`, edited on /admin/slack; the default when the site has a row)"),
         option("-m", "--month", help="Month YYYY-MM (default: current UTC month)"),
@@ -3466,9 +3466,9 @@ def _digest_options(template_default: str):
         option("-R", "--redo-replies", is_flag=True, help="Re-post the month's replies under the current day rule, then delete the old ones (Slack, or Discord with -P discord; dry-run unless --for-real)"),
         option("-s", "--since", help="With --redo-replies: redo only the days from this one (YYYY-MM-DD) on; earlier days keep their replies, re-keyed to the current rule (a day's extra replies stay in the thread)"),
         option("-t", "--token", help="Slack bot token (default $SLACK_BOT_TOKEN)"),
-        option("-T", "--template", type=Choice(["gcs", "cw"]), default=template_default, help=f"Post style + preset config (default {template_default}): gcs = a reply per day, $/mo by storage class, class mosaic; cw = a reply per day, % of quota per bucket, quota sparkline + diff treemap"),
+        option("-T", "--template", type=Choice(["cost", "quota", "gcs", "cw"]), default=template_default, help=f"Post style + preset config (default {template_default}): cost = a reply per day, $/mo by storage class, class mosaic; quota = a reply per day, % of quota per bucket, quota sparkline + diff treemap (old names: gcs = cost, cw = quota)"),
         option("-u", "--url", "site_url", default=None, help="Site base for links (default the config's `site_url`, else $SITE_URL)"),
-        option("-V", "--variant", type=Choice(["sender", "body"]), default=None, help="Reply style (cw template): headline as the sender name, posted once from the day's morning scan (sender, default) or bold in the body, edited as the day's scans land (body)"),
+        option("-V", "--variant", type=Choice(["sender", "body"]), default=None, help="Reply style (quota template): headline as the sender name, posted once from the day's morning scan (sender, default) or bold in the body, edited as the day's scans land (body)"),
         option("-y", "--replies", "reply_range", help="Re-apply only the already-posted replies of this inclusive day range (`A..B`, YYYY-MM-DD) to their current rendering, as -d/--reply"),
         option("-w", "--webhook", help="Discord webhook URL in the digest channel (default $<config discord_webhook_env>: gcs $DISCORD_GCS_USAGE_WEBHOOK, cw none; with -P discord)"),
         option("-W", "--preview-only", "preview_key", help="Write only the month's preview bundle under this channel key (a lowercase slug, listed in /admin/slack's thread selector): no Slack client, no plot hosted, nothing posted or edited"),
@@ -3618,21 +3618,21 @@ def _print_redo_plan(plan: dict, where: str, since: dt.date | None) -> None:
 
 
 @main.command()
-@_digest_options("gcs")
+@_digest_options("cost")
 def digest(**kw) -> None:
     """Converge the monthly digest thread: an OP (month-to-date headline,
     per-week bullets, plot) edited in place + one reply per UTC day, in Slack (default) or its Discord twin (`-P discord`:
     webhook OP with the plot attached, bot-opened thread, webhook replies).
     State beside the snapshots, per the config's `state`/`discord_state`
-    (gcs: digest/<YYYY-MM>.json; cw: digest/cw/<channel>/<variant>/<YYYY-MM>.json).
+    (cost: digest/<YYYY-MM>.json; quota: digest/<channel>/<variant>/<YYYY-MM>.json).
     See specs/done/digest-unification.md."""
     _digest(**kw)
 
 
 @main.command("cw-digest")
-@_digest_options("cw")
+@_digest_options("quota")
 def cw_digest(**kw) -> None:
-    """`digest -T cw` (kept so the cw job's invocation is unchanged)."""
+    """`digest -T quota` (kept so the cw job's invocation is unchanged)."""
     _digest(**kw)
 
 

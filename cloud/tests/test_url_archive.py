@@ -219,9 +219,9 @@ def test_digest_reads_scans_and_keeps_state_under_the_root(archive):
     from datetime import date
 
     from dt_cloud import digest as E
-    from dt_cloud import digest_cw as D
+    from dt_cloud import digest_quota as D
 
-    from test_digest_cw import LEAD, P, SEPT, _meta
+    from test_digest_quota import LEAD, P, SEPT, _meta
 
     root, local = archive
     snaps = f"{root}/snapshots/cw"

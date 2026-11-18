@@ -4,7 +4,7 @@
  * `a<pct>` (the red mark's share), `l<r|p>` (layout: primary | pools); the page's alone, which `parseParams` refuses: `q<a|b|s|d>`
  * (the `ArrowMark`s), `m<w|c|r|h|a|b|s|d>` (reply marks), `r<t|p>` (reply headline: total | primary), `ul` (a reply's pools on their own lines), `sc` (a reply's avatar: a collage of its pools). A field left out is the default's; an unreadable one is dropped. */
 import { DEFAULT_PARAMS, type DigestParams } from './common'
-import type { ReplyMarks } from './cwReply'
+import type { ReplyMarks } from './quotaReply'
 import { ARROW_MARKS } from './pools'
 
 export function encodeParams(p: DigestParams): string {

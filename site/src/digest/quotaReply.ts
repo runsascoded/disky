@@ -1,16 +1,16 @@
 import { compactQuietLines } from './compact'
-/** The `cw` digest template's replies (`digest_cw.day_rows` / `reply`, ported byte for byte; goldens:
+/** The `quota` digest template's replies (`digest_quota.day_rows` / `reply`, ported byte for byte; goldens:
  * `./replyParity.test.ts`), so `/admin/slack` can show a candidate's replies. The job still renders what it posts in
  * Python. `ArrowMark`s exist only here: a preview of marks with no emoji uploaded. Pure; DOM-free. */
 import { scanTime } from '../scanSlug'
 import { type DigestCfg, deg, pct, tb as signed, type Quota } from './common'
-import { bucketLink, type CwRows, type CwScan, dextra, diffUrl, dlink, scoped } from './cw'
+import { bucketLink, type QuotaRows, type QuotaScan, dextra, diffUrl, dlink, scoped } from './quota'
 import { growth, hueStep, mark, poolMark, type PoolMark, QUIET_PCT, runway, type Runway, RUNWAY_WINDOWS_D, runwayText, weeklyDeg } from './pools'
 import { dayOf, fixed, grouped, hhmm, md, pyRound } from './pyfmt'
 
 export type ReplyMarks = 'warning' | 'circles' | PoolMark
 
-/** What the job renders replies under, beyond the OP's config (`Cw.reply_json`). */
+/** What the job renders replies under, beyond the OP's config (`QuotaTemplate.reply_json`). */
 export interface ReplyCfg {
   quota_marks: ReplyMarks
   total_headline: boolean
@@ -53,18 +53,18 @@ const BRIEF_MARKS: ReplyMarks[] = ['circles', ...RUNWAY_MARKS]
 
 interface DayRow {
   date: string
-  s: CwScan
+  s: QuotaScan
   dtb: number | null
   hours: number | null
   since: number | null
   dextra: Record<string, number | null>
   provisional: boolean
-  hist: CwScan[]
+  hist: QuotaScan[]
 }
 
-const dateOf = (r: CwScan): string => r.scan.slice(0, 10)
+const dateOf = (r: QuotaScan): string => r.scan.slice(0, 10)
 
-function row(date: string, s: CwScan, prev: CwScan | null, seen: CwScan[], provisional = false): DayRow {
+function row(date: string, s: QuotaScan, prev: QuotaScan | null, seen: QuotaScan[], provisional = false): DayRow {
   const t = scanTime(s.scan)
   const reach = t - (Math.max(...RUNWAY_WINDOWS_D) + 1) * DAY_MS
   return {
@@ -78,16 +78,16 @@ function row(date: string, s: CwScan, prev: CwScan | null, seen: CwScan[], provi
 }
 
 /** One row per in-month UTC day that has its reply scan (`day_rows`). */
-function dayRows(m: CwRows, variant: string, rc: ReplyCfg, provisional = false): DayRow[] {
+function dayRows(m: QuotaRows, variant: string, rc: ReplyCfg, provisional = false): DayRow[] {
   const seen = [...m.pre, ...m.lead, ...m.rows]
-  const days = new Map<string, CwScan[]>()
+  const days = new Map<string, QuotaScan[]>()
   for (const r of [...m.lead, ...m.rows]) days.set(dateOf(r), [...(days.get(dateOf(r)) ?? []), r])
-  const replyable = (r: CwScan) => new Date(scanTime(r.scan)).getUTCHours() >= rc.reply_hour && rc.triggers[r.scan] !== 'manual'
+  const replyable = (r: QuotaScan) => new Date(scanTime(r.scan)).getUTCHours() >= rc.reply_hour && rc.triggers[r.scan] !== 'manual'
   const first = dateOf(m.rows[0])
   const out: DayRow[] = []
-  let prev: CwScan | null = null
+  let prev: QuotaScan | null = null
   ;[...days.entries()].forEach(([date, rs], i) => {
-    let s: CwScan | undefined
+    let s: QuotaScan | undefined
     if (variant === 'body') s = rs[rs.length - 1]
     else {
       const later = i + 1 < days.size || m.closed
@@ -140,7 +140,7 @@ function fill(g: Member[], day: DayRow, cfg: DigestCfg): number | null {
   return Math.max(...b.quotas.map(q => (scoped(v, classes, q) / (q.bytes / u)) * 100))
 }
 
-function groupUsed(g: string[], s: CwScan, q: Quota, cfg: DigestCfg): number {
+function groupUsed(g: string[], s: QuotaScan, q: Quota, cfg: DigestCfg): number {
   const size = (b: string) => (b === cfg.primary ? s.tb : s.extra[b] ?? 0)
   if (g.length > 1) return g.reduce((a, b) => a + size(b), 0)
   return g[0] === cfg.primary ? scoped(s.tb, s.classes, q) : size(g[0])
@@ -241,7 +241,7 @@ function reply(day: DayRow, variant: string, cfg: DigestCfg, rc: ReplyCfg, marks
 }
 
 /** The month's replies as the converge posts them, newest first (`digest.replies_json`). */
-export function replies(rows: CwRows, cfg: DigestCfg, rc: ReplyCfg, variant: string, over: ReplyOverrides = {}): RenderedReply[] {
+export function replies(rows: QuotaRows, cfg: DigestCfg, rc: ReplyCfg, variant: string, over: ReplyOverrides = {}): RenderedReply[] {
   const marks = over.marks ?? rc.quota_marks
   const total = over.total ?? rc.total_headline
   const days = dayRows(rows, variant, rc)

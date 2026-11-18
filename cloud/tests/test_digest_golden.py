@@ -302,7 +302,7 @@ def test_gcs_dry_run(monkeypatch, tmp_path: Path, site_image: list):
     root = gcs_root(tmp_path)
     golden("gcs-dry-run.txt", _dry_run(monkeypatch, tmp_path, ["digest", "-C", str(config_file(GCS_EXAMPLE, tmp_path / "digest.yml")), "-n", "-r", str(root), "-m", "2026-08"]))
     # the image is drawn by the site, from the request its OP render answered (conftest's stand-in), to the last scan
-    assert [(path, body) for _, _, path, body in site_image] == [("/api/digest-image", {"site_image": "gcs", "month": "2026-08", "to": "2026-08-11"})]
+    assert [(path, body) for _, _, path, body in site_image] == [("/api/digest-image", {"site_image": "cost", "month": "2026-08", "to": "2026-08-11"})]
 
 
 @pytest.mark.parametrize("variant", ["sender", "body"])
@@ -326,7 +326,7 @@ def test_cw_dry_run_provisional(monkeypatch, tmp_path: Path, variant: str, site_
     # `provisional: true` adds the open day's (9/8: only its 00:01Z scan so far) provisional reply to `sender`; `body` is unchanged
     root = cw_root(tmp_path)
     config_file(replace(CW_EXAMPLE, provisional=True), tmp_path / "digest.yml")
-    out = _dry_run(monkeypatch, tmp_path, ["digest", "-T", "cw", "-C", str(tmp_path / "digest.yml"), "-n", "-r", str(root), "-m", "2026-09", "-V", variant])
+    out = _dry_run(monkeypatch, tmp_path, ["digest", "-T", "quota", "-C", str(tmp_path / "digest.yml"), "-n", "-r", str(root), "-m", "2026-09", "-V", variant])
     if variant == "body":
         assert out == (GOLDEN / "cw-dry-run-body.txt").read_text()
     else:

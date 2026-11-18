@@ -1,7 +1,7 @@
-/** Quota pools for the `cw` template's quota-pressure variants (specs/digest-quota-pressure.md): each quota's used
- * share per scan, buckets sharing a `zone` summed against the zone's quota (as `digest_cw._groups`), sorted by
+/** Quota pools for the `quota` template's quota-pressure variants (specs/digest-quota-pressure.md): each quota's used
+ * share per scan, buckets sharing a `zone` summed against the zone's quota (as `digest_quota._groups`), sorted by
  * pressure; and the OP's quota line. Pure; DOM-free. */
-import type { CwScan } from './cw'
+import type { QuotaScan } from './quota'
 import { deg, type DigestCfg, type Quota, type Shape } from './common'
 import { scanTime } from '../scanSlug'
 import { fixed } from './pyfmt'
@@ -31,7 +31,7 @@ export function pools(cfg: DigestCfg): Pool[] {
 
 /** A pool's used size at a scan, in the config's unit: the primary's size under the quota's classes, the others'
  *  sizes as listed (a bucket the scan lacks counts 0); null when the scan has none of its buckets. */
-export function used(p: Pool, r: CwScan, cfg: DigestCfg): number | null {
+export function used(p: Pool, r: QuotaScan, cfg: DigestCfg): number | null {
   let s = 0
   let any = false
   for (const b of p.buckets) {
@@ -51,7 +51,7 @@ export function used(p: Pool, r: CwScan, cfg: DigestCfg): number | null {
 export const pctOf = (p: Pool, v: number, cfg: DigestCfg): number => (v / (p.quota.bytes / cfg.unit.bytes)) * 100
 
 /** The pressure mark for a share, every pool one: red at or over `alertAt` (or the quota), orange within
- *  `ORANGE_PTS` below it, yellow within `YELLOW_PTS`, green under that (`digest_cw._mark`'s scale). */
+ *  `ORANGE_PTS` below it, yellow within `YELLOW_PTS`, green under that (`digest_quota._mark`'s scale). */
 export const ORANGE_PTS = 10
 export const YELLOW_PTS = 40
 export function mark(pct: number, alertAt: number): string {
@@ -64,7 +64,7 @@ export function mark(pct: number, alertAt: number): string {
 /** Below this share, a pool's clause is just its name and whole percent. */
 export const QUIET_PCT = 25
 
-/** `quotas: 'runway'` (specs/digest-runway-marks.md §2; `digest_cw.RUNWAY_*` / `_runway_mark` / `_runway_text`, the
+/** `quotas: 'runway'` (specs/digest-runway-marks.md §2; `digest_quota.RUNWAY_*` / `_runway_mark` / `_runway_text`, the
  *  replies' rule — keep both identical): growth is the fastest net fill per day over these look-backs (days), each from
  *  the latest scan at or before it. */
 export const RUNWAY_WINDOWS_D = [1, 3, 7]
@@ -82,7 +82,7 @@ export interface Runway { days: number; growth: number | null; windowD?: number 
 
 /** The fastest net fill per day reaching `v` at `t` (ms) over `RUNWAY_WINDOWS_D`, from `hist` ([ms, value], in
  *  order), and the window (days) it came from; null when no window has a point. A tie names the longest window
- *  (`digest_cw._growth`): a shorter one that found no scan of its own falls back to the same older point. */
+ *  (`digest_quota._growth`): a shorter one that found no scan of its own falls back to the same older point. */
 export function growth(hist: [number, number][], t: number, v: number): [number, number] | null {
   let best: [number, number] | null = null
   for (const w of RUNWAY_WINDOWS_D) {
@@ -107,7 +107,7 @@ export function runwayMark(r: Runway, pct: number): string {
   return r.days < RUNWAY_YELLOW_D ? ':large_yellow_circle: ' : ':large_green_circle: '
 }
 
-/** `quotas: 'runway-hue'` (specs/digest-runway-marks.md §3; `digest_cw.RUNWAY_HUE_*` / `_runway_hue`): the workspace
+/** `quotas: 'runway-hue'` (specs/digest-runway-marks.md §3; `digest_quota.RUNWAY_HUE_*` / `_runway_hue`): the workspace
  *  emoji `:runway-1:` (red) … `:runway-8:` (green), one more than the cut points (days to full) the runway reaches;
  *  a pool ≥ `RUNWAY_FULL_PCT` full is never calmer than `RUNWAY_HUE_FULL_N`. A pool with a shape gets
  *  `:runway-<shape>-N:`, the same step in the same color; a circle keeps the plain `:runway-N:`. */
@@ -150,9 +150,9 @@ export function runwayText(r: Runway, cfg: DigestCfg): string {
   return `, +${fixed(r.growth, 1)} ${cfg.unit.short}/d${over}, ≈${days} to full`
 }
 
-/** The pools in the reply order (`digest_cw._groups`): the primary's, then each other bucket's in the scan's meta
+/** The pools in the reply order (`digest_quota._groups`): the primary's, then each other bucket's in the scan's meta
  *  order, a zone at its first member's position. */
-function ordered(r: CwScan, cfg: DigestCfg): Pool[] {
+function ordered(r: QuotaScan, cfg: DigestCfg): Pool[] {
   const all = pools(cfg)
   const out: Pool[] = []
   for (const b of [...(cfg.primary ? [cfg.primary] : []), ...Object.keys(r.extra)]) {
@@ -166,7 +166,7 @@ export interface PoolRow { p: Pool; v: number; pct: number; mark: string; tail: 
 /** Every pool the scan `r` has, marked and with its headroom. `circles`: most full first, marked by share; `runway`:
  *  the replies' order, marked by runway over `seen` (every scan, in order); `runway-hue`: the same, as `:runway-N:`
  *  steps in each pool's shape. `text`: its share (below `QUIET_PCT`, a whole percent of the quota, no headroom) and runway. */
-export function poolRows(r: CwScan, cfg: DigestCfg, alertAt: number, mode: 'circles' | PoolMark = 'circles', seen: CwScan[] = []): PoolRow[] {
+export function poolRows(r: QuotaScan, cfg: DigestCfg, alertAt: number, mode: 'circles' | PoolMark = 'circles', seen: QuotaScan[] = []): PoolRow[] {
   const u = cfg.unit
   const rows = (mode === 'circles' ? pools(cfg) : ordered(r, cfg)).flatMap(p => {
     const v = used(p, r, cfg)
@@ -193,7 +193,7 @@ export function poolRows(r: CwScan, cfg: DigestCfg, alertAt: number, mode: 'circ
 }
 
 /** The OP's quota line at scan `r`: `poolRows`, one clause each. */
-export function quotaLine(r: CwScan, cfg: DigestCfg, alertAt: number, mode: 'circles' | PoolMark = 'circles', seen: CwScan[] = []): string {
+export function quotaLine(r: QuotaScan, cfg: DigestCfg, alertAt: number, mode: 'circles' | PoolMark = 'circles', seen: QuotaScan[] = []): string {
   const clauses = poolRows(r, cfg, alertAt, mode, seen).map(({ p, mark: m, text }) => `${m}${p.name} ${text}`)
   return clauses.length ? `*Quotas:* ${clauses.join(' · ')}` : ''
 }

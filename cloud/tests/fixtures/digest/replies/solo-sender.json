@@ -1,6 +1,6 @@
 {
  "cfg": {
-  "template": "cw",
+  "template": "quota",
   "title": "S3 usage",
   "site_url": "https://cw.example.org",
   "host": "cw.example.org",
@@ -29,7 +29,7 @@
   "icons_base": "https://icons.example.org"
  },
  "rows": {
-  "template": "cw",
+  "template": "quota",
   "closed": false,
   "pre": [
    {

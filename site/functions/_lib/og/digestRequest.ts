@@ -2,14 +2,14 @@
  *
  *   {kind?: 'usage', title, note, month: 'YYYY-MM', from?: 'YYYY-MM-DD', today_at?: [p0, p1], points: [{scan, bytes}],
  *    quota?: {bytes, name}, diff?: {from, to, path, title}, units?: 'TiB' | 'TB'}
- *     → `digestSvg`: the usage line against its quota, over the headline interval's diff map (the cw template)
+ *     → `digestSvg`: the usage line against its quota, over the headline interval's diff map (the quota template)
  *   {kind: 'pools', title, note, month, from?, today_at?, alert_pct?, pools: [{name, quota, points: [{scan, bytes}]}],
  *    diff?, units?}
  *     → `poolsSvg`: every quota pool's share of its quota (one line each, the quota a rule at 100%), over the diff map
- *       (the cw template's quota-pressure plot, specs/digest-quota-pressure.md)
+ *       (the quota template's quota-pressure plot, specs/digest-quota-pressure.md)
  *   {kind: 'tiers', title, note, month, from?, tiers: [name, …] (bottom → top), points: [{scan, bytes: [per tier]}],
  *    diff?: {from, to, path, title}, units?: 'TiB' | 'TB'}
- *     → `tiersSvg`: the total line over the stacked storage classes, over the headline interval's diff map (the gcs
+ *     → `tiersSvg`: the total line over the stacked storage classes, over the headline interval's diff map (the cost
  *       template)
  *
  * A body without `kind` is `usage` (the cw job's request predates the field). `from`: the OP window's first day

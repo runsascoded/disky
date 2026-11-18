@@ -1,4 +1,4 @@
-"""Specs for the `cw` digest template (`dt_cloud.digest_cw`, over the engine
+"""Specs for the `quota` digest template (`dt_cloud.digest_quota`, over the engine
 `dt_cloud.digest`): the pure helpers, the
 framing-A content (OP + both reply variants, exact strings), the daily keying
 rule, and the monthly-thread converge against a fake Slack client over a local
@@ -18,7 +18,7 @@ import pytest
 from thrds.slack import SlackClient
 
 from dt_cloud import digest as E
-from dt_cloud import digest_cw as D
+from dt_cloud import digest_quota as D
 
 from conftest import thrds_fake
 from digest_examples import CW_EXAMPLE, config_file
@@ -110,7 +110,7 @@ def test_qlabel_and_bucket_clause():
 def test_bucket_path_site_root():
     # a single-bucket store whose site serves the bucket at its root (hf.oa.dev: `open-athena` is `/`): `path: ""`
     # links the bucket's clause to the root, not `/<bucket>`; `path` unset keeps `/<bucket>`
-    cfg = E.config_from_dict({"template": "cw", "site_url": SITE, "icons_base": "x", "primary": "org", "buckets": {
+    cfg = E.config_from_dict({"template": "quota", "site_url": SITE, "icons_base": "x", "primary": "org", "buckets": {
         "org": {"label": "org", "path": "", "quota": {"bytes": "253 TB", "name": "253 TB", "short": "253T"}},
     }})
     assert cfg.buckets["org"] == E.Bucket("org", E.Quota(253 * 10**12, "253 TB", "253T"), path="")
@@ -118,7 +118,7 @@ def test_bucket_path_site_root():
         f"[org]({SITE}/?d=2610160800#over-time): 6.2% of 253T (215.8 Ti free)"
     )
     with pytest.raises(ValueError) as e:
-        E.config_from_dict({"template": "cw", "buckets": {"b": {"path": 1}}})
+        E.config_from_dict({"template": "quota", "buckets": {"b": {"path": 1}}})
     assert str(e.value) == "digest config buckets.b.path: expected a string, got 1"
 
 
@@ -126,7 +126,7 @@ def test_units_tb():
     # `units: TB` (a store billed in decimal TB, as Hugging Face): every size the job renders is TB (10**12) —
     # the rows, the reply and its tail (`T free`); the OP's are the site's (the `cw-tb` parity fixture)
     TB = 10**12
-    cfg = E.config_from_dict({"template": "cw", "title": "HF usage", "site_url": SITE, "icons_base": "https://icons.example.org",
+    cfg = E.config_from_dict({"template": "quota", "title": "HF usage", "site_url": SITE, "icons_base": "https://icons.example.org",
                               "primary": "org", "units": "TB", "buckets": {
         "org": {"label": "org", "path": "", "quota": {"bytes": "253 TB", "name": "253 TB public", "short": "253T"}},
     }})
@@ -140,7 +140,7 @@ def test_units_tb():
         E.Reply("10/2 — 15 TB (−0.1, 0.6%)", f"6.1% of 253T (237.6 T free) [↗︎]({SITE}/?d=261002-1d#over-time)", icon_url="https://icons.example.org/arrows/av_deg-40.png?v=4"),
     ]
     with pytest.raises(ValueError) as e:
-        E.config_from_dict({"template": "cw", "units": "Ti"})
+        E.config_from_dict({"template": "quota", "units": "Ti"})
     assert str(e.value) == "digest config units: 'Ti' is not one of ('TiB', 'TB')"
 
 
@@ -149,7 +149,7 @@ def test_class_scoped_quotas():
     # neither): `quota` as a list, each `classes`-scoped, over the meta's `class_bytes` (JSON keys are strings). The
     # deltas stay the total; each `% of` clause counts its own classes
     TB = 10**12
-    cfg = E.config_from_dict({"template": "cw", "title": "HF usage", "site_url": SITE, "icons_base": "https://icons.example.org",
+    cfg = E.config_from_dict({"template": "quota", "title": "HF usage", "site_url": SITE, "icons_base": "https://icons.example.org",
                               "primary": "org", "units": "TB", "buckets": {"org": {"label": "org", "path": "", "quota": [
         {"bytes": "253 TB", "name": "253 TB public", "short": "253T public", "classes": [1]},
         {"bytes": "5.1 TB", "name": "5.1 TB private", "short": "5.1T private", "classes": [5]},
@@ -323,7 +323,7 @@ def test_tail_runway_hue_shapes():
 
 
 def test_shape_config():
-    b = E.config_from_dict({"template": "cw", "buckets": {
+    b = E.config_from_dict({"template": "quota", "buckets": {
         "a": {"label": "a"},
         "b": {"shape": "circle"},
         "c": {"shape": "star", "quota": {"bytes": "1 PB", "name": "1 PB"}},
@@ -421,7 +421,7 @@ def test_runway_reaches_before_the_month():
 
 def test_quota_marks_must_be_known():
     with pytest.raises(ValueError) as e:
-        E.config_from_dict({"template": "cw", "quota_marks": "squares"})
+        E.config_from_dict({"template": "quota", "quota_marks": "squares"})
     assert str(e.value) == "digest config quota_marks: 'squares' is not one of ('warning', 'circles', 'runway', 'runway-hue', 'arrow-chip')"
 
 
@@ -582,15 +582,15 @@ def test_provisional_reply():
 
     half = D.Month(lead=MONTH.lead, rows=MONTH.rows[:3])
     # a fixed neutral sender + icon (both outlive edits); the numbers so far + their scan's time in the body
-    assert D.Cw(CFG).provisional(half, "sender") == E.Unit("2026-09-02", "2026-09-02T0000", E.Reply(
+    assert D.QuotaTemplate(CFG).provisional(half, "sender") == E.Unit("2026-09-02", "2026-09-02T0000", E.Reply(
         "9/2 · so far",
         f":arrow_deg-30: **712 TiB (−1.0, 0.1%)** · [as of 00:00Z]({SITE}/?d=26090200-12h#over-time) · "
         f"[main]({SITE}/main-data?d=26090200-12h#over-time): 78.2% of 1P (198.0 Ti free)",
         icon_emoji=":hourglass_flowing_sand:",
     ))
-    assert (D.Cw(CFG).provisional(MONTH, "sender"), D.Cw(CFG).provisional(half, "body")) == (None, None)
+    assert (D.QuotaTemplate(CFG).provisional(MONTH, "sender"), D.QuotaTemplate(CFG).provisional(half, "body")) == (None, None)
     # `reply_hour=0`: every day's first scan is its reply scan, so never a provisional
-    assert D.Cw(replace(CFG, reply_hour=0)).provisional(half, "sender") is None
+    assert D.QuotaTemplate(replace(CFG, reply_hour=0)).provisional(half, "sender") is None
 
 
 def test_parse_bytes():
@@ -603,7 +603,7 @@ def test_config_file(tmp_path: Path):
     # a deployment's YAML overlays its template's preset; quotas are optional
     f = tmp_path / "digest.yml"
     f.write_text("""
-template: cw
+template: quota
 title: Lab usage
 site_url: https://lab.example
 primary: lab-main
@@ -611,12 +611,12 @@ buckets:
   lab-main: {label: main, quota: {bytes: 2 PB, name: 2 PB, short: 2P}}
   lab-scratch: {label: scratch}
 """)
-    cfg = E.load_config("cw", f)
-    assert (cfg.template, cfg.title, cfg.site_url, cfg.primary, cfg.state) == ("cw", "Lab usage", "https://lab.example", "lab-main", E.PRESETS["cw"].state)
+    cfg = E.load_config("quota", f)
+    assert (cfg.template, cfg.title, cfg.site_url, cfg.primary, cfg.state) == ("quota", "Lab usage", "https://lab.example", "lab-main", E.PRESETS["quota"].state)
     assert cfg.buckets == {"lab-main": E.Bucket("main", E.Quota(2 * 10**15, "2 PB", "2P")), "lab-scratch": E.Bucket("scratch")}
-    assert E.load_config("gcs") is E.PRESETS["gcs"]
+    assert E.load_config("cost") is E.PRESETS["cost"]
     with pytest.raises(ValueError, match="unknown digest config keys: \\['colour'\\]"):
-        E.config_from_dict({"template": "cw", "colour": "red"})
+        E.config_from_dict({"template": "quota", "colour": "red"})
 
 
 @pytest.mark.parametrize("d, msg", [
@@ -646,25 +646,52 @@ buckets:
     ({"reply_hour": 24}, "digest config reply_hour: 24 is not a UTC hour (0–23)"),
     ({"primary": 7}, "digest config primary: expected str or null, got 7"),
     ({"provisional": "yes"}, "digest config provisional: expected bool, got 'yes'"),
-    ({"template": "s3"}, "digest config template: 's3' is not one of ('gcs', 'cw')"),
+    ({"template": "s3"}, "digest config template: 's3' is not one of ('cost', 'quota')"),
 ])
 def test_config_invalid(d: dict, msg: str):
     with pytest.raises(ValueError) as e:
-        E.config_from_dict({"template": "cw", **d})
+        E.config_from_dict({"template": "quota", **d})
     assert str(e.value) == msg
 
 
 def test_config_file_invalid(tmp_path: Path):
     f = tmp_path / "digest.yml"
-    f.write_text("- template: cw\n")
+    f.write_text("- template: quota\n")
     with pytest.raises(ValueError) as e:
-        E.load_config("cw", f)
+        E.load_config("quota", f)
     assert str(e.value) == f"digest config {f}: expected a mapping, got list"
     # nulls clear optional fields; an empty file is the preset
     f.write_text("primary: null\ndiscord_webhook_env: null\n")
-    assert E.load_config("cw", f) == replace(E.PRESETS["cw"], primary=None)
+    assert E.load_config("quota", f) == replace(E.PRESETS["quota"], primary=None)
     f.write_text("")
-    assert E.load_config("cw", f) == E.PRESETS["cw"]
+    assert E.load_config("quota", f) == E.PRESETS["quota"]
+
+
+def test_template_aliases(tmp_path: Path):
+    """The templates' old names (a deployment's `-T cw` / `-T gcs`, a config file's `template: cw`) read as their
+    names, and nothing past the input sees an alias."""
+    f = tmp_path / "digest.yml"
+    f.write_text("template: cw\n")
+    assert [E.canonical_template(t) for t in ("cw", "gcs", "quota", "cost")] == ["quota", "cost", "quota", "cost"]
+    assert (E.config_from_dict({"template": "cw"}), E.config_from_dict({"template": "gcs"})) == (E.PRESETS["quota"], E.PRESETS["cost"])
+    assert (E.load_config("cw"), E.load_config("gcs"), E.load_config("cost", f)) == (E.PRESETS["quota"], E.PRESETS["cost"], E.PRESETS["quota"])
+    with pytest.raises(ValueError) as e:
+        E.canonical_template("s3")
+    assert str(e.value) == "digest template 's3' is not one of ('cost', 'quota')"
+
+
+@pytest.mark.parametrize("alias, name", [("cw", "quota"), ("gcs", "cost")])
+def test_cli_template_alias(alias: str, name: str, tmp_path: Path, monkeypatch):
+    """`digest -T cw` converges the `quota` template (`-T gcs`: `cost`), its config's template the name."""
+    from click.testing import CliRunner
+
+    from dt_cloud import cli
+
+    calls: list[tuple] = []
+    monkeypatch.setattr(E, "converge_slack", lambda *a, **k: calls.append((a, k)) or {})
+    res = CliRunner().invoke(cli.main, ["digest", "-T", alias, "-c", "C1", "-t", "xoxb", "-r", str(tmp_path / "snapshots"), "-m", "2026-09", "-u", SITE])
+    assert res.exit_code == 0, (res.output, res.exception)
+    assert [(type(a[0]).__name__, a[0].cfg) for a, _ in calls] == [({"quota": "QuotaTemplate", "cost": "CostTemplate"}[name], replace(E.PRESETS[name], site_url=SITE))]
 
 
 def test_no_quota():
@@ -838,7 +865,7 @@ def test_post_digest_sender_variant(tmp_path: Path):
     assert [_post(c) for c in fake.calls] == [("post", None, "S3 usage — September 2026", None, ":calendar:")]
     head, _, plot_line = fake.calls[0][1].split("\n")
     assert (head, re.sub(r"\?v=\d+", "?v=<ts>", plot_line)) == (
-        "<site OP: cw 2026-09, 1 scans to 2026-09-01T0000, params ->", f"![S3 usage — September 2026](https://cw.icons.example.org/{plot}?v=<ts>)",
+        "<site OP: quota 2026-09, 1 scans to 2026-09-01T0000, params ->", f"![S3 usage — September 2026](https://cw.icons.example.org/{plot}?v=<ts>)",
     )
     assert state == {"plot_name": plot, "variant": "sender", "op_ts": "m1", "posted": {}}
 
@@ -935,7 +962,7 @@ def test_digest_cli_reply_selector_dry_run(tmp_path: Path, monkeypatch):
     fake = _FakeSlack()
     monkeypatch.setattr(thrds.slack, "SlackClient", lambda token, channel: fake)
     cfg = config_file(replace(CFG, root=str(root)), tmp_path / "digest.yml")
-    r = CliRunner().invoke(cli.main, ["digest", "-T", "cw", "-C", str(cfg), "-r", str(root), "-m", "2026-09", "-c", "C1", "-t", "xoxb",
+    r = CliRunner().invoke(cli.main, ["digest", "-T", "quota", "-C", str(cfg), "-r", str(root), "-m", "2026-09", "-c", "C1", "-t", "xoxb",
                                       "-y", "2026-09-01..2026-09-02", "-n"])
     assert r.exit_code == 0, r.output
     u = lambda d: f"{SITE}/main-data?d={d}#over-time"  # noqa: E731
@@ -948,19 +975,19 @@ def test_digest_cli_reply_selector_dry_run(tmp_path: Path, monkeypatch):
         "",
     ]
     assert fake.calls == []
-    bad = CliRunner().invoke(cli.main, ["digest", "-T", "cw", "-C", str(cfg), "-r", str(root), "-m", "2026-09", "-c", "C1", "-t", "xoxb", "-d", "2026-09-01", "-E"])
+    bad = CliRunner().invoke(cli.main, ["digest", "-T", "quota", "-C", str(cfg), "-r", str(root), "-m", "2026-09", "-c", "C1", "-t", "xoxb", "-d", "2026-09-01", "-E"])
     assert (bad.exit_code, bad.output.strip().split("\n")[-1]) == (
         2, "Error: -o/--op, -d/--reply and -y/--replies re-apply Slack messages on their own (not with -E, -R or -P discord)")
 
 
 def test_live_settings_override_the_file(monkeypatch):
-    """The site's live settings (`GET /api/digest-settings?template=cw`, edited on /admin/slack) replace the file's
+    """The site's live settings (`GET /api/digest-settings?template=quota`, edited on /admin/slack) replace the file's
     `params` and `quota_marks`; no row, no token or an unreachable site leave the file's; a bad value raises."""
     from dt_cloud import site
     from dt_cloud.digest import with_settings
 
     calls: list = []
-    rows = {"cw": {"params": "qh,pp", "quota_marks": "runway-hue", "updated_by": "admin", "updated_at": 1}}
+    rows = {"quota": {"params": "qh,pp", "quota_marks": "runway-hue", "updated_by": "admin", "updated_at": 1}}
 
     def get_json(url, token, path, params=None, timeout=30):
         calls.append((url, token, path, params))
@@ -972,7 +999,7 @@ def test_live_settings_override_the_file(monkeypatch):
     cfg = replace(CFG, params="qr,pp", quota_marks="runway")
     monkeypatch.setenv("SITE_TOKEN", "tok")
     got = with_settings(cfg, LIVE_SETTINGS(cfg))
-    assert (got.params, got.quota_marks, calls) == ("qh,pp", "runway-hue", [(SITE, "tok", "/api/digest-settings", {"template": "cw"})])
+    assert (got.params, got.quota_marks, calls) == ("qh,pp", "runway-hue", [(SITE, "tok", "/api/digest-settings", {"template": "quota"})])
     rows.clear()
     assert with_settings(cfg, LIVE_SETTINGS(cfg)) == cfg
     assert LIVE_SETTINGS(replace(cfg, site_url="https://down.example.org")) is None
@@ -1051,7 +1078,7 @@ def test_a_month_ending_over_quota_moves_its_alert_to_the_next_months_thread(tmp
 @pytest.mark.parametrize("pct", [0, 101, -5])
 def test_alert_pct_must_be_a_percent(pct):
     with pytest.raises(ValueError) as e:
-        E.config_from_dict({"template": "cw", "alert_pct": pct})
+        E.config_from_dict({"template": "quota", "alert_pct": pct})
     assert str(e.value) == f"digest config alert_pct: {pct} is not a percent (0–100]"
 
 
@@ -1208,7 +1235,7 @@ def test_redo_replies_delete_failure_continues(tmp_path: Path):
 
 
 def test_cli_cw_digest_binds_cw_template(tmp_path: Path, monkeypatch):
-    """The `cw-digest` CLI must converge with the `cw` template + its config (the
+    """The `cw-digest` CLI must converge with the `quota` template + its config (the
     variant, the morning reply hour, cw's icons dir). A wrong binding once
     raised `TypeError: post_digest() got multiple values for argument
     'site_url'` and silently killed the in-job digest (a best-effort step, so
@@ -1229,7 +1256,7 @@ def test_cli_cw_digest_binds_cw_template(tmp_path: Path, monkeypatch):
     assert res.exit_code == 0, (res.output, res.exception)
     assert len(calls) == 1
     (tpl, root_, m, _client, channel, variant), kw = calls[0]
-    assert (type(tpl).__name__, tpl.cfg, root_, m, channel, variant) == ("Cw", CFG, str(root), date(2026, 9, 1), "C1", "sender")
+    assert (type(tpl).__name__, tpl.cfg, root_, m, channel, variant) == ("QuotaTemplate", CFG, str(root), date(2026, 9, 1), "C1", "sender")
     assert (kw["icons_dir"], kw["reply_delay"]) == (icons, 0.0)
     assert callable(kw["deploy_plot"])
 
@@ -1242,15 +1269,15 @@ def test_render_plot_posts_to_site(monkeypatch, tmp_path: Path):
     calls = []
     monkeypatch.setenv("SITE_TOKEN", "tok")
     monkeypatch.setattr(site, "post_json", lambda url, token, path, body, timeout=120: calls.append((url, token, path, body)) or b"\x89PNG")
-    D.Cw(CFG).render_plot(MONTH, SEP, tmp_path / "op.png")
+    D.QuotaTemplate(CFG).render_plot(MONTH, SEP, tmp_path / "op.png")
     # the request is the site's (`POST /api/digest-op`'s `image`; conftest's stand-in here)
-    assert calls == [(SITE, "tok", "/api/digest-image", {"site_image": "cw", "month": "2026-09", "to": "2026-09-02T1200"})]
+    assert calls == [(SITE, "tok", "/api/digest-image", {"site_image": "quota", "month": "2026-09", "to": "2026-09-02T1200"})]
     assert (tmp_path / "op.png").read_bytes() == b"\x89PNG"
 
 
 def test_op_sender():
     """The OP's sender icon: `op_icon` as a URL, or a file under `icons_base` (the deployment's mark); unset, 📆."""
-    base = {"template": "cw", "title": "t", "site_url": SITE, "icons_base": "https://icons.example.org"}
+    base = {"template": "quota", "title": "t", "site_url": SITE, "icons_base": "https://icons.example.org"}
     assert [E.config_from_dict({**base, **extra}).op_sender() for extra in ({}, {"op_icon": "mark.png"}, {"op_icon": "https://x.example/m.png"})] == [
         {"icon_emoji": ":calendar:"}, {"icon_url": "https://icons.example.org/mark.png"}, {"icon_url": "https://x.example/m.png"},
     ]

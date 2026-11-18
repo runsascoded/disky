@@ -2,26 +2,27 @@
  * and its plot's `/api/digest-image` request, for either template: the only OP renderer (the job posts the rows to
  * `/api/digest-op`; goldens: `./parity.test.ts`). Pure; DOM-free. */
 import { DEFAULT_PARAMS, type DigestCfg, type DigestParams, monthOf, type OpLinks } from './common'
-import * as cw from './cw'
-import type { ReplyCfg } from './cwReply'
-import * as gcs from './gcs'
+import * as quota from './quota'
+import type { ReplyCfg } from './quotaReply'
+import * as cost from './cost'
 
 export * from './common'
-export type { CwRows, CwScan } from './cw'
-export { replies } from './cwReply'
-export type { RenderedReply, ReplyCell, ReplyCfg, ReplyMarks } from './cwReply'
-export type { GcsRow, GcsRows } from './gcs'
+export * from './templates'
+export type { QuotaRows, QuotaScan } from './quota'
+export { replies } from './quotaReply'
+export type { RenderedReply, ReplyCell, ReplyCfg, ReplyMarks } from './quotaReply'
+export type { CostRow, CostRows } from './cost'
 
-export type DigestRows = cw.CwRows | gcs.GcsRows
+export type DigestRows = quota.QuotaRows | cost.CostRows
 
 /** The month's OP text. */
 export function opText(rows: DigestRows, month: string, cfg: DigestCfg, links: OpLinks, p: DigestParams = DEFAULT_PARAMS): string {
-  return rows.template === 'cw' ? cw.opText(rows, monthOf(month), cfg, p, links) : gcs.opText(rows, monthOf(month), cfg, p, links)
+  return rows.template === 'quota' ? quota.opText(rows, monthOf(month), cfg, p, links) : cost.opText(rows, monthOf(month), cfg, p, links)
 }
 
 /** The month's plot request; `today_at` only when it differs from the default (the card's own). */
 export function imageRequest(rows: DigestRows, month: string, cfg: DigestCfg, p: DigestParams = DEFAULT_PARAMS): Record<string, unknown> {
-  const body = rows.template === 'cw' ? cw.imageRequest(rows, monthOf(month), cfg, p) : gcs.imageRequest(rows, monthOf(month), cfg, p)
+  const body = rows.template === 'quota' ? quota.imageRequest(rows, monthOf(month), cfg, p) : cost.imageRequest(rows, monthOf(month), cfg, p)
   const [p0, p1] = p.todayAt
   if (p0 !== DEFAULT_PARAMS.todayAt[0] || p1 !== DEFAULT_PARAMS.todayAt[1]) body.today_at = p.todayAt
   return body
@@ -46,7 +47,7 @@ export interface PreviewBundle {
   params?: string
   /** The month's replies as posted, newest first (absent in bundles before 2026-11-02). */
   replies?: PreviewReply[]
-  /** cw: what the replies were rendered under; absent: a bundle the page can't re-render replies from. */
+  /** quota: what the replies were rendered under; absent: a bundle the page can't re-render replies from. */
   reply?: ReplyCfg | null
 }
 

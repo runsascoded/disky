@@ -10,7 +10,7 @@ An admin page that shows a deployment's monthly digest OP (the text and the plot
 
 ## The problem: two renderers
 
-The job renders the OP **text** in Python (`digest_cw.op_body`, `digest_gcs.op_body`) and asks the site for the **plot** (`POST /api/digest-image`). A site page can draw the plot the same way, but "the text exactly as the job would" needs the job's renderer. Porting it to TS and keeping both would drift.
+The job renders the OP **text** in Python (`digest_quota.op_body`, `digest_cost.op_body`) and asks the site for the **plot** (`POST /api/digest-image`). A site page can draw the plot the same way, but "the text exactly as the job would" needs the job's renderer. Porting it to TS and keeping both would drift.
 
 **Decision:** one renderer, the site's.
 - The OP text moves to TS (`site/src/digest/`: `opText`, `imageRequest`, one module per template, `cw` and `gcs`; pure and DOM-free, so the page and the Functions both import it).
@@ -78,7 +78,7 @@ New endpoints:
 ## Template variants (cw's quota pressure)
 
 `specs/digest-quota-pressure.md` (cw) builds on this renderer: quota pools sorted most-full first with 🔴/🟠 marks keyed to `alert_pct`, an OP plot of % of quota (one line per pool, a 100% rule), optionally a generated gauge-emoji set. Its seams here:
-- **Pool series:** derived from the cw rows and config: each scan's primary `tb`/`classes` and `extra` (the other buckets), and each bucket's `quotas` and `zone` (`DigestCfg.buckets`; buckets sharing a zone summed into one pool, as `digest_cw._groups` does). cw adds a `pools(rows, cfg)` helper beside `cw.ts`, with no new job output.
+- **Pool series:** derived from the cw rows and config: each scan's primary `tb`/`classes` and `extra` (the other buckets), and each bucket's `quotas` and `zone` (`DigestCfg.buckets`; buckets sharing a zone summed into one pool, as `digest_quota._groups` does). cw adds a `pools(rows, cfg)` helper beside `cw.ts`, with no new job output.
 - **Variant params:** new `DigestParams` fields (e.g. `marks: 'none' | 'circles' | 'gauges'`, `plot: 'usage' | 'pct' | 'pct+bars'`), each with a codec letter. Their defaults stay what the job posts until cw switches the job, so parity holds. The page's candidate columns show any field `Controls` lists.
 - **Glyphs:** the clause renderer takes the mark per clause from the params (a `mark(fill, cfg)` hook); the page's `mrkdwn` renders `:emoji:` names it doesn't know as their text, so a gauge set needs its names mapped to images there.
 

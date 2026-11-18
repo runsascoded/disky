@@ -1,6 +1,6 @@
 # Digest month threads: a rolling window, never an empty month
 
-**Status:** proposal, 2026-11-01, approved by Ryan (implement on hf first, review previews before any deployment's live thread changes). Shared (`[cloud]`: `cloud/src/dt_cloud/digest.py`, the `digest_gcs.py` / `digest_cw.py` templates).
+**Status:** proposal, 2026-11-01, approved by Ryan (implement on hf first, review previews before any deployment's live thread changes). Shared (`[cloud]`: `cloud/src/dt_cloud/digest.py`, the `digest_cost.py` / `digest_quota.py` templates).
 
 ## Problem
 

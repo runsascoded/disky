@@ -48,6 +48,15 @@ describe('/api/digest-op', () => {
     }
   })
 
+  it("reads a template's old name as its name: `cw` is `quota`, `gcs` is `cost`", async () => {
+    const cases: [string, string][] = [['cw-sep.json', 'cw'], ['gcs-aug.json', 'gcs']]
+    for (const [n, alias] of cases) {
+      const f = await fixture(n)
+      const old = { ...request(f), cfg: { ...f.cfg, template: alias }, rows: { ...f.rows, template: alias } }
+      expect([n, ...(await post(old))]).toEqual([n, 200, { text: f.op, image: f.image }])
+    }
+  })
+
   it('applies a variant: the quota line under the headline, the pools plot', async () => {
     const f = await fixture('cw-sep.json')
     const [status, body] = await post(request(f, 'qc,pp'))
@@ -64,9 +73,10 @@ describe('/api/digest-op', () => {
     const cases: [unknown, string][] = [
       [[], 'body: a JSON object'],
       [{ ...request(f), month: '2026-13' }, 'month: YYYY-MM'],
-      [{ ...request(f), cfg: { ...f.cfg, template: 'hf' } }, "cfg.template: 'cw' | 'gcs'"],
-      [{ ...request(f), rows: { ...f.rows, template: 'gcs' } }, "rows: the cw template's rows, at least one scan"],
-      [{ ...request(f), rows: { ...f.rows, rows: [] } }, "rows: the cw template's rows, at least one scan"],
+      [{ ...request(f), cfg: { ...f.cfg, template: 'hf' } }, "cfg.template: 'quota' | 'cost'"],
+      [{ ...request(f), rows: { ...f.rows, template: 'cost' } }, "rows: the quota template's rows, at least one scan"],
+      [{ ...request(f), rows: { ...f.rows, template: 'gcs' } }, "rows: the quota template's rows, at least one scan"],
+      [{ ...request(f), rows: { ...f.rows, rows: [] } }, "rows: the quota template's rows, at least one scan"],
       [{ ...request(f), plot_url: 3 }, 'params, plot_url, prev_url: strings'],
     ]
     for (const [body, error] of cases) expect(await post(body)).toEqual([400, { error }])

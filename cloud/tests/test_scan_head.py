@@ -406,7 +406,7 @@ def test_head_records_into_the_profiles_database_and_store(tmp_path, monkeypatch
     assert H.head(prof, tmp_path / "nf-dir", tmp_path / "launch") == 0
     assert (runs_written[0], runs_written[-1][:2], set(dbs)) == (
         ("2026-10-16T1200", "meta", "running", "schedule"), ("2026-10-16T1200", "meta"), {"db-from-profile"})
-    # a resume by hand: its run is manual (the scan stays the cron's: its first run's, `digest_cw.scan_triggers`)
+    # a resume by hand: its run is manual (the scan stays the cron's: its first run's, `digest_quota.scan_triggers`)
     monkeypatch.setenv("DT_TRIGGER", "manual")
     monkeypatch.setenv("DT_RUN_ID", "run-2")
     runs_written.clear()

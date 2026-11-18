@@ -1,4 +1,4 @@
-"""The `cw` digest template: a reply per UTC day, quota headroom per bucket.
+"""The `quota` digest template: a reply per UTC day, quota headroom per bucket.
 
 The scan covers every bucket of a store (specs/done/cw-multi-bucket.md); the
 headline, deltas and quota line are the PRIMARY bucket's (``cfg.primary``,
@@ -667,8 +667,8 @@ def load_tree(root: str, scan: str, primary: str) -> dict:
 
 
 
-class Cw:
-    """The `cw` template over a :class:`DigestConfig` (see `digest.Template`)."""
+class QuotaTemplate:
+    """The `quota` template over a :class:`DigestConfig` (see `digest.Template`)."""
 
     variants = VARIANTS
     edited_variants = ("body",)
@@ -690,15 +690,15 @@ class Cw:
         return site_render(self.cfg, self.rows_json(month), m)["image"]
 
     def rows_json(self, month: Month) -> dict:
-        """The month's scans as the site's renderer reads them (`src/digest/cw.ts` `CwRows`)."""
+        """The month's scans as the site's renderer reads them (`src/digest/quota.ts` `QuotaRows`)."""
         def scan(r: Scan) -> dict:
             return {"scan": r.scan, "slug": r.slug, "tb": r.tb, "extra": r.extra, "classes": None if r.classes is None else {str(c): v for c, v in r.classes.items()}}
 
-        return {"template": "cw", "closed": month.closed, "pre": [scan(r) for r in month.pre],
+        return {"template": "quota", "closed": month.closed, "pre": [scan(r) for r in month.pre],
                 "lead": [scan(r) for r in month.lead], "rows": [scan(r) for r in month.rows]}
 
     def reply_json(self, month: Month) -> dict:
-        """What the replies render under, beyond `cfg_json` and `rows_json` (`src/digest/cwReply.ts` `ReplyCfg`)."""
+        """What the replies render under, beyond `cfg_json` and `rows_json` (`src/digest/quotaReply.ts` `ReplyCfg`)."""
         c = self.cfg
         triggers = {r.scan: r.trigger for r in month.pre + month.lead + month.rows if r.trigger}
         return {"quota_marks": c.quota_marks, "total_headline": c.total_headline, **({"reply_lines": True} if c.reply_lines else {}), "reply_hour": c.reply_hour, "provisional": c.provisional,

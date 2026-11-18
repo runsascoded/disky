@@ -1,7 +1,7 @@
 /** The replies' goldens: each `cloud/tests/fixtures/digest/replies/*.json` holds what the job's preview bundle carries
  * and the replies the job renders from it (pinned by `cloud/tests/test_digest_reply_parity.py`). */
 import { describe, expect, it } from 'vitest'
-import { type CwRows, type DigestCfg, type RenderedReply, type ReplyCfg, replies } from './index'
+import { type QuotaRows, type DigestCfg, type RenderedReply, type ReplyCfg, replies } from './index'
 import { tokenize } from './mrkdwn'
 import { ARROW_MARKS } from './pools'
 
@@ -9,7 +9,7 @@ interface Fs { readdir(p: string): Promise<string[]>; readFile(p: string, enc: '
 const fsp = () => import(/* @vite-ignore */ 'node:fs/promises' as string) as Promise<Fs>
 const DIR = new URL('../../../cloud/tests/fixtures/digest/replies/', import.meta.url).pathname
 
-interface Fixture { cfg: DigestCfg; rows: CwRows; reply: ReplyCfg; variant: string; replies: RenderedReply[] }
+interface Fixture { cfg: DigestCfg; rows: QuotaRows; reply: ReplyCfg; variant: string; replies: RenderedReply[] }
 
 const fixtures = async (): Promise<[string, Fixture][]> => {
   const fs = await fsp()

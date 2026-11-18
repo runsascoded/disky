@@ -1,7 +1,7 @@
 /** The digest's image, drawn by the site: the job posts the month's points (and the headline interval, whose map is
- * the in-app diff's) and gets the PNG back to host beside the Slack thread. The request's kinds (`usage`: cw's line +
- * quota + diff map; `tiers`: gcs's total line over stacked storage classes + diff map; `pools`: cw's quota pools as
- * % of quota + diff map) are
+ * the in-app diff's) and gets the PNG back to host beside the Slack thread. The request's kinds (`usage`: the quota template's line
+ * + quota + diff map; `tiers`: the cost template's total line over stacked storage classes + diff map; `pools`: the
+ * quota template's quota pools as % of quota + diff map) are
  * `_lib/og/digestRequest.ts`'s; the cards are `_lib/og/digestCard.ts`'s.
  *
  *   POST /api/digest-image {kind?: 'usage' | 'tiers' | 'pools', title, note, month: 'YYYY-MM', points, …}

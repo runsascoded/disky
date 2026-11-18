@@ -1,6 +1,6 @@
 # Digest: quota pressure at a glance
 
-**Status:** proposal, 2026-11-02, direction approved by Ryan ("circles sg"); drafted by the cw session. Shared (`[cloud]`: `cloud/src/dt_cloud/digest.py`, `digest_cw.py`; the other templates where they have quotas). Builds on `digest-rolling-window.md`: same previews-before-posts rollout.
+**Status:** proposal, 2026-11-02, direction approved by Ryan ("circles sg"); drafted by the cw session. Shared (`[cloud]`: `cloud/src/dt_cloud/digest.py`, `digest_quota.py`; the other templates where they have quotas). Builds on `digest-rolling-window.md`: same previews-before-posts rollout.
 
 ## Problem
 
@@ -45,5 +45,5 @@ The previews belong in the Slack control panel under construction (`/admin/slack
 ## Status
 
 - Phase 1 (previews): the site's TS renderer has the quota line (`?dc=qc`) and the pools plot (`?dc=pp`) as `/admin/slack` options, default off (`site/src/digest/pools.ts`, `digestCard.ts` `poolsSvg`).
-- Daily replies (Python, `digest_cw._tail`): config `quota_marks: circles` sorts the clauses fullest first, marks 🔴 at or over `mark_pct` (`alert_pct`, else 90; always past a quota) and 🟠 within 10 points below, shrinks a pool under 25% to `NN%`, and reads `(N Ti over)` past a quota (in either mode). The default `warning` keeps config order with `:warning:` at `alert_pct`. cw sets `circles`.
+- Daily replies (Python, `digest_quota._tail`): config `quota_marks: circles` sorts the clauses fullest first, marks 🔴 at or over `mark_pct` (`alert_pct`, else 90; always past a quota) and 🟠 within 10 points below, shrinks a pool under 25% to `NN%`, and reads `(N Ti over)` past a quota (in either mode). The default `warning` keeps config order with `:warning:` at `alert_pct`. cw sets `circles`.
 - Open: the OP's quota line and plot reach Slack with phase 2 of `slack-preview-page.md` (the job renders through the site); `alert_pct: 90` on cw waits on thrds' `post(broadcast=True)` (`~/c/thrds/specs/slack-reply-broadcast.md`); the gauge-emoji sweep (§2) is unstarted.

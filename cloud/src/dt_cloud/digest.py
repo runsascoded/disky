@@ -9,11 +9,12 @@ What a deployment chooses is DATA, a :class:`DigestConfig` (a preset in
 :data:`PRESETS`, overlaid by ``--config FILE``): its template, title, site,
 snapshot root, state layout, plot host, bucket labels and quotas, prices.
 What differs in the posts lives in two TEMPLATES — opinionated styles,
-neither intrinsic to one store:
+neither intrinsic to one store (their old names, ``gcs`` and ``cw``, are accepted as
+aliases: :data:`TEMPLATE_ALIASES`):
 
-- ``gcs`` (`digest_gcs`): a reply per day (its first scheduled scan), the headline as the sender name,
+- ``cost`` (`digest_cost`): a reply per day (its first scheduled scan), the headline as the sender name,
   $/mo by storage class in the body, the site's storage-class image.
-- ``cw`` (`digest_cw`): a reply per UTC day in two variants (``sender``: the
+- ``quota`` (`digest_quota`): a reply per UTC day in two variants (``sender``: the
   headline as the sender name, posted once from the morning scan — optionally
   preceded by a ``provisional`` reply the earlier scans edit; ``body``: bold
   in the body, edited as the day's scans land), multi-bucket `% of quota
@@ -76,7 +77,7 @@ UNITS = {"TiB": Units("TiB", TIB, "Ti"), "TB": Units("TB", 10**12, "T")}
 class Quota:
     """A bucket's quota: ``bytes``, its long ``name`` (the OP + plot: `1 PB`)
     and an optional ``short`` label (the reply tail: `1P`; None → SI from
-    ``bytes``, see `digest_cw._qlabel`). ``classes``: the storage-class ids it
+    ``bytes``, see `digest_quota._qlabel`). ``classes``: the storage-class ids it
     counts (`meta.json` `class_bytes`; Hugging Face's public allowance counts
     class 1, its private one class 5); empty: every byte."""
 
@@ -126,24 +127,24 @@ class DigestConfig:
     rendered and `wrangler pages deploy`ed from (relative: the cwd's or the
     repo checkout's); it lands on ``plot_project``'s ``plot_branch``, served at
     ``plot_base`` unless wrangler names its deployment URL. ``primary`` +
-    ``buckets`` (cw template) pick the headline bucket and label/quota each;
-    ``prices`` (gcs template) are $/GiB-month by storage-class id.
-    ``op_icon``: the month OP's sender icon (and the cw day line's), a URL or a
+    ``buckets`` (quota template) pick the headline bucket and label/quota each;
+    ``prices`` (cost template) are $/GiB-month by storage-class id.
+    ``op_icon``: the month OP's sender icon (and the quota template's day line), a URL or a
     file under ``icons_base`` (the deployment's mark, e.g. ``mark.png``); unset, 📆.
-    ``units`` (cw template): `TiB` (default) or `TB`, every size the digest
-    renders (text and plot). ``provisional`` (cw ``sender``): post a day's early scans as one
+    ``units`` (quota template): `TiB` (default) or `TB`, every size the digest
+    renders (text and plot). ``provisional`` (quota ``sender``): post a day's early scans as one
     provisional reply, edited in place, replaced by the final reply when the
-    day's reply scan lands (see `digest_cw`). ``alert_pct`` (cw): a quota at
+    day's reply scan lands (see `digest_quota`). ``alert_pct`` (quota): a quota at
     or over this percent gets a `:warning:` in the daily replies, and the
     month's thread one alert reply also sent to the channel (Slack
     `reply_broadcast`), edited as its numbers move and deleted once every quota
-    is back under; None: neither. ``quota_marks`` (cw replies): `warning` (the default) keeps the
+    is back under; None: neither. ``quota_marks`` (quota replies): `warning` (the default) keeps the
     clauses in config order, `:warning:` on those at or over ``alert_pct``; `circles` sorts them fullest first and
     marks each `:red_circle:` at or over ``mark_pct`` (``alert_pct``, else 90), `:large_orange_circle:` within 10
     points below, `:large_yellow_circle:` within 40, `:large_green_circle:` under that (specs/digest-quota-pressure.md);
-    `runway` keeps config order and marks each by how soon it fills at its fastest recent growth (`digest_cw._runway_mark`,
+    `runway` keeps config order and marks each by how soon it fills at its fastest recent growth (`digest_quota._runway_mark`,
     specs/digest-runway-marks.md); `runway-hue` the same with `:runway-1:` (red) … `:runway-8:` (green)
-    workspace emoji, `:runway-<shape>-N:` for a bucket with a ``shape`` (`digest_cw._runway_hue`). The OP's text and plot request are the site's (`POST /api/digest-op`,
+    workspace emoji, `:runway-<shape>-N:` for a bucket with a ``shape`` (`digest_quota._runway_hue`). The OP's text and plot request are the site's (`POST /api/digest-op`,
     the renderer `/admin/slack` previews with; specs/slack-preview-page.md), under ``params`` (the site's
     `src/digest/codec` string, `''`: the defaults). ``preview``: where each Slack converge writes the month's preview bundle
     (`preview_bundle`, for the site's `/admin/slack-preview`), a dir or URL template (``{channel}``,
@@ -166,9 +167,9 @@ class DigestConfig:
     reply_hour: int = 12
     provisional: bool = False
     primary: str | None = None
-    # cw: a reply's headline totals every bucket the scan has, not the primary's alone
+    # quota: a reply's headline totals every bucket the scan has, not the primary's alone
     total_headline: bool = False
-    # cw: a reply's pools each on their own line, not ` · `-joined
+    # quota: a reply's pools each on their own line, not ` · `-joined
     reply_lines: bool = False
     buckets: dict[str, Bucket] = field(default_factory=dict)
     prices: dict[str, float] = field(default_factory=dict)
@@ -197,7 +198,7 @@ class DigestConfig:
         return v
 
     def op_sender(self) -> dict[str, str]:
-        """The month's OP (and the cw template's day line) sender icon: ``op_icon`` (a URL, or a file under ``icons_base``, e.g.
+        """The month's OP (and the quota template's day line) sender icon: ``op_icon`` (a URL, or a file under ``icons_base``, e.g.
         the deployment's mark) as ``icon_url``, else the 📆 emoji."""
         if not self.op_icon:
             return {"icon_emoji": ":calendar:"}
@@ -231,8 +232,8 @@ class DigestConfig:
 PRESETS: dict[str, DigestConfig] = {
     # Template shape only: a deployment's site, hosts, buckets and quotas come
     # from its config file (``-C``); an empty ``site_url`` reads ``$SITE_URL``.
-    "gcs": DigestConfig(
-        template="gcs",
+    "cost": DigestConfig(
+        template="cost",
         title="Storage usage",
         site_url="",
         root="gs://{DATA_BUCKET}/snapshots",
@@ -240,8 +241,8 @@ PRESETS: dict[str, DigestConfig] = {
         # US list $/GiB-mo by GCS storage class id (1 Standard / 2 Nearline / 3 Coldline / 4 Archive)
         prices={"1": 0.02, "2": 0.01, "3": 0.004, "4": 0.0012},
     ),
-    "cw": DigestConfig(
-        template="cw",
+    "quota": DigestConfig(
+        template="quota",
         title="Storage usage",
         site_url="",
         root="gs://{DATA_BUCKET}/snapshots",
@@ -264,7 +265,21 @@ def parse_bytes(v: int | str) -> int:
     return round(float(m.group(1)) * _UNITS[(m.group(2) or "").upper()])
 
 
-TEMPLATES = ("gcs", "cw")
+TEMPLATES = ("cost", "quota")
+#: Each template's old name → its name (deployments' configs and scan profiles still pass them); every input
+#: (`-T`, a config file's ``template``, `config_from_dict`) goes through `canonical_template`, so nothing past it
+#: sees an alias.
+TEMPLATE_ALIASES = {"gcs": "cost", "cw": "quota"}
+
+
+def canonical_template(name: str) -> str:
+    """``name``, or the template its old name stands for; anything else raises ``ValueError``."""
+    name = TEMPLATE_ALIASES.get(name, name)
+    if name not in TEMPLATES:
+        raise ValueError(f"digest template {name!r} is not one of {TEMPLATES}")
+    return name
+
+
 QUOTA_MARKS = ("warning", "circles", "runway", "runway-hue", "arrow-chip")
 #: A bucket's `runway-hue` mark (`Bucket.shape`); the site's `digest/mrkdwn.ts` draws each.
 QUOTA_SHAPES = ("circle", "square", "diamond", "triangle", "star")
@@ -349,8 +364,10 @@ def config_from_dict(d: dict, base: DigestConfig | None = None) -> DigestConfig:
             raise ValueError(f"digest config {k}: expected {want}, got {d[k]!r}")
     if base is None and "template" not in d:
         raise ValueError(f"digest config: no template (one of {TEMPLATES}): a deployment names its own")
-    if "template" in d and d["template"] not in TEMPLATES:
-        raise ValueError(f"digest config template: {d['template']!r} is not one of {TEMPLATES}")
+    if "template" in d:
+        if (name := TEMPLATE_ALIASES.get(d["template"], d["template"])) not in TEMPLATES:
+            raise ValueError(f"digest config template: {d['template']!r} is not one of {TEMPLATES}")
+        d["template"] = name
     if "units" in d and d["units"] not in UNITS:
         raise ValueError(f"digest config units: {d['units']!r} is not one of {tuple(UNITS)}")
     if d.get("alert_pct") is not None and not 0 < d["alert_pct"] <= 100:
@@ -373,6 +390,7 @@ def config_from_dict(d: dict, base: DigestConfig | None = None) -> DigestConfig:
 
 def load_config(template: str, path: str | Path | None = None) -> DigestConfig:
     """The ``template`` preset, overlaid by the YAML/JSON file at ``path``."""
+    template = canonical_template(template)
     if path is None:
         return PRESETS[template]
     import yaml
@@ -566,7 +584,7 @@ class Template(Protocol):
     ``variants`` are its reply styles (the first is the default);
     ``edited_variants`` re-edit a day's reply when a later scan of it lands;
     ``track_scan`` stores each posted reply as ``{ts, scan}`` (else the bare
-    ts — the gcs template's existing state format). ``provisional`` is the
+    ts — the cost template's existing state format). ``provisional`` is the
     still-open unit's stand-in reply (``cfg.provisional``), or None."""
 
     cfg: DigestConfig
@@ -591,15 +609,15 @@ def template(cfg: DigestConfig) -> Template:
         from .deploy import site_url
 
         cfg = replace(cfg, site_url=site_url())
-    if cfg.template == "gcs":
-        from .digest_gcs import Gcs
+    if cfg.template == "cost":
+        from .digest_cost import CostTemplate
 
-        return Gcs(cfg)
-    if cfg.template == "cw":
-        from .digest_cw import Cw
+        return CostTemplate(cfg)
+    if cfg.template == "quota":
+        from .digest_quota import QuotaTemplate
 
-        return Cw(cfg)
-    raise ValueError(f"unknown digest template {cfg.template!r} (gcs | cw)")
+        return QuotaTemplate(cfg)
+    raise ValueError(f"unknown digest template {cfg.template!r} (cost | quota)")
 
 
 # ---- IO (side-effecting) --------------------------------------------------------

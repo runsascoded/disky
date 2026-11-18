@@ -172,7 +172,7 @@ Defined: server `site/functions/_lib/view.ts` (`ViewNode`, `nodeOf`, `display`, 
 
 | key | meaning | proposed | readers beyond the definitions |
 |---|---|---|---|
-| `n` | node name (last path segment; the root's label) | `name` | 22 `site/src` files using `TreeNode` (`App.tsx`, `Treemap.tsx`, `spine.ts`, `ChildrenTable.tsx`, `PrefixTable.tsx`, `filterTree.ts`, `ledgerOverlay.ts`, `stagedTree.ts`, `UserPage.tsx`, `OgPage.tsx`, …); `_lib/og/*`, `_lib/union.ts`; py `probe.py`, `digest_cw.py`, `interval_read.py`/`interval_verify.py` |
+| `n` | node name (last path segment; the root's label) | `name` | 22 `site/src` files using `TreeNode` (`App.tsx`, `Treemap.tsx`, `spine.ts`, `ChildrenTable.tsx`, `PrefixTable.tsx`, `filterTree.ts`, `ledgerOverlay.ts`, `stagedTree.ts`, `UserPage.tsx`, `OgPage.tsx`, …); `_lib/og/*`, `_lib/union.ts`; py `probe.py`, `digest_quota.py`, `interval_read.py`/`interval_verify.py` |
 | `k` | `file` \| `dir` | `kind` | same set as `n` |
 | `b` | bytes at or under the node | `bytes` (alt `size`) | same set; py `probe.py`, `bench/score.py`, `sheet_mirror.py`, `diff_bench.py`, `interval_read.py` |
 | `o` | objects at or under the node | `objects` (alt `n_files`) | same set; py `bench/score.py`, `interval_read.py` |
@@ -182,7 +182,7 @@ Defined: server `site/functions/_lib/view.ts` (`ViewNode`, `nodeOf`, `display`, 
 | `us` | `[owner, bytes][]`, desc | `owners` (the root's pick: the UI, `/api/owners` and the filters all say owner) | `ChildrenTable.tsx`, `PrefixTable.tsx`, `OwnerBar.tsx`, `filterTree.ts`, `ledgerOverlay.ts`, `stagedTree.ts`, `StagedPage.tsx`, `Treemap.tsx`, `types.ts` (`userBytes`); server `_lib/owners.ts`, `ownerBands.ts`, `ownerHist.ts`, `prefixes.ts`, `stagedSlack.ts`, `og/data.ts`, `og/pages.ts`; `interval_read.py` |
 | `cb` | non-Standard class → bytes (`"2"` NL, `"3"` CL, `"4"` AR) | `class_bytes` (as `meta.json`'s) | `DupsPage.tsx`, `stagedTree.ts`, `OwnerControls.tsx`, `Treemap.tsx`, `types.ts` (`classMix`); `interval_read.py`/`interval_verify.py` |
 | `ou` (gcs, picked 2026-11-13) | bytes whose ownership was never read (a static drill without owner slices, an unread union member) | `unknown_owner_bytes` | `staticDrill.ts`, `union.ts`, `og/data.ts`, `OwnerBar.tsx` |
-| `c` | children | `children` | everything walking the tree; py `probe.py`, `digest_cw.py` |
+| `c` | children | `children` | everything walking the tree; py `probe.py`, `digest_quota.py` |
 | `f` | an `(other)` fold: how many children it stands in for | `folded` | `Treemap.tsx` (dust density); `interval_verify.py` (`with_f`) |
 | `m` | `1`: the node matches the name filter | `matched` (boolean) | `filterTree.ts`, `Treemap.tsx` |
 | `pv` | `[source, evidence, prefix]` provenance of the top owner | `provenance` | `ChildrenTable.tsx`, `spine.ts`, `OwnerControls.tsx` |
@@ -227,7 +227,7 @@ Top level: `total_a total_b objects_a objects_b` → `bytes_before bytes_after o
 | owner pages (`UserPage.tsx` `OwnerCell`) | client-built from `/api/subtree` | `n b c` | follows 3a |
 | fleet `/api/fleet` (`fleet/functions/_lib/fleetTypes.ts`) | `fleet/src/Fleet.tsx` | `MetaPoint.t`, `FleetMeta.d1`/`d7` | `time`, `day_ago`/`week_ago` |
 
-**Deploy skew.** The site and the API's Python readers ship separately: `probe`, `warm`, `digest_cw`, `bench/score`, `diff_check`/`diff_bench` run from job images, `sheet_mirror` is its own deployed image, `interval_verify` compares against a live site. So the Python readers accept both spellings (new first) in the rename commit, and the old spelling is dropped once every deployment's site and images carry it. The browser: `API_CV` (client) + `CACHE_V` (edge) move together; an open tab on the old bundle gets new bodies until it reloads.
+**Deploy skew.** The site and the API's Python readers ship separately: `probe`, `warm`, `digest_quota`, `bench/score`, `diff_check`/`diff_bench` run from job images, `sheet_mirror` is its own deployed image, `interval_verify` compares against a live site. So the Python readers accept both spellings (new first) in the rename commit, and the old spelling is dropped once every deployment's site and images carry it. The browser: `API_CV` (client) + `CACHE_V` (edge) move together; an open tab on the old bundle gets new bodies until it reloads.
 
 Bodies that are D1 rows passed through (admin, runs, plans, staged, grants, activity, session-log, usage) carry D1's column names: they change only with §2's renames.
 

@@ -9,7 +9,7 @@ from dt_cloud import digest as E
 TIB = 1024**4
 
 GCS_EXAMPLE = E.DigestConfig(
-    template="gcs",
+    template="cost",
     title="GCS usage",
     site_url="https://site.example.org",
     root="gs://{DATA_BUCKET}/snapshots",
@@ -22,7 +22,7 @@ GCS_EXAMPLE = E.DigestConfig(
 )
 
 CW_EXAMPLE = E.DigestConfig(
-    template="cw",
+    template="quota",
     title="S3 usage",
     site_url="https://cw.example.org",
     root="gs://{DATA_BUCKET}/snapshots/cw",

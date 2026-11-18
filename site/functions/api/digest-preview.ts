@@ -6,10 +6,12 @@
  * with the rows and config it was rendered from (`digest.preview_bundle`), to the served store under
  * `digest/preview/` (the job's `preview` config). `/admin/slack` shows one and re-renders its rows under other
  * params (`src/digest`). Read through the served seam (`servedStore`), as `/api/usage` reads its snapshots. Asking
- * for a bundle of another version is a 404.
+ * for a bundle of another version is a 404. A bundle written under a template's old name (`cw`, `gcs`) is served
+ * under its name (`canonicalTemplates`).
  */
 import { type Ctx, json, requireAdmin } from '../_lib/auth.js'
 import { servedStore } from '../_lib/index.js'
+import { canonicalTemplates } from '../../src/digest/templates.js'
 
 export const PREVIEW_PREFIX = 'digest/preview/'
 /** The bundle's query parameter: not `key`, which the auth gate reads as a presented grant token (a share link),
@@ -33,7 +35,7 @@ export const onRequestGet = async (ctx: Ctx): Promise<Response> => {
       doc = null
     }
     if (!doc || doc.version !== 1) return json({ error: `no preview bundle ${key}` }, 404)
-    return json(doc, 200, { 'cache-control': 'private, max-age=60' })
+    return json(canonicalTemplates(doc), 200, { 'cache-control': 'private, max-age=60' })
   }
   const bundles: { key: string; month: string; channel: string; variant: string }[] = []
   // the store lists one level (`/`-delimited): walk `<channel>/<variant>/` down to the bundles

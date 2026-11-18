@@ -116,8 +116,8 @@ def test_cold_path_bucket_names_are_gcs_by_shape_not_by_prefix(base, want):
 def test_digest_config_needs_a_template():
     with pytest.raises(ValueError) as e:
         D.config_from_dict({"reply_hour": 3})
-    assert str(e.value) == "digest config: no template (one of ('gcs', 'cw')): a deployment names its own"
-    assert D.config_from_dict({"template": "cw"}) == D.PRESETS["cw"]
+    assert str(e.value) == "digest config: no template (one of ('cost', 'quota')): a deployment names its own"
+    assert D.config_from_dict({"template": "quota"}) == D.PRESETS["quota"]
 
 
 def test_examples_carry_no_live_generation():

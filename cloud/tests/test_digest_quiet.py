@@ -1,10 +1,10 @@
 from dataclasses import replace
 
 from dt_cloud import digest as E
-from dt_cloud import digest_cw as D
+from dt_cloud import digest_quota as D
 
 TIB = 1024 ** 4
-CFG = E.DigestConfig(root="unused", state="unused", template="cw", title="T", site_url="https://x.test", primary="main", quota_marks="arrow-chip", reply_lines=True,
+CFG = E.DigestConfig(root="unused", state="unused", template="quota", title="T", site_url="https://x.test", primary="main", quota_marks="arrow-chip", reply_lines=True,
                      buckets={"main": E.Bucket("main", E.Quota(100*TIB, "100 TiB", "100Ti")),
                               "west": E.Bucket("04a", E.Quota(100*TIB, "100 TiB", "100Ti")), "east": E.Bucket("01a")})
 DAY = D.DayRow(date="2026-09-23", scan="2026-09-23T1201", tb=50, dtb=0, hours=24, since=None, extra={"west": 0, "east": .1})

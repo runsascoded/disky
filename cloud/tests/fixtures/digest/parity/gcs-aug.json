@@ -1,6 +1,6 @@
 {
  "cfg": {
-  "template": "gcs",
+  "template": "cost",
   "title": "GCS usage",
   "site_url": "https://site.example.org",
   "host": "site.example.org",
@@ -23,7 +23,7 @@
  "plot_url": "<plot-url>",
  "prev_url": "<prev-thread>",
  "rows": {
-  "template": "gcs",
+  "template": "cost",
   "pre": [],
   "rows": [
    {

@@ -1,7 +1,8 @@
 /** The digest renderer's shared pieces: config and params, arrow degrees, the `?d=` link tokens and the OP window
  * (`cloud/src/dt_cloud/digest.py`'s, ported byte for byte: `./parity.test.ts`). Pure; DOM-free. */
-import type { ReplyMarks } from './cwReply'
+import type { ReplyMarks } from './quotaReply'
 import type { ArrowMark } from './pools'
+import type { TemplateName } from './templates'
 import { addDays, dayOf, fixed, grouped, md, MONTHS, pyRound } from './pyfmt'
 
 export const MINUS = '−'
@@ -14,7 +15,7 @@ export interface BucketCfg { label: string | null; path: string | null; zone: st
 
 /** The digest config's display fields, as the job writes them (`digest.cfg_json`). */
 export interface DigestCfg {
-  template: 'cw' | 'gcs'
+  template: TemplateName
   title: string
   site_url: string
   host: string
@@ -37,24 +38,24 @@ export interface DigestParams {
   headline: ('mtd' | 'window')[]
   /** Which weeks the summaries list: every one overlapping the window, or the month's. */
   weeks: 'window' | 'month'
-  /** cw: a quota line under the headline: every pool most full first, marked by pressure
+  /** quota: a quota line under the headline: every pool most full first, marked by pressure
    *  (specs/digest-quota-pressure.md); every pool in the replies' order, marked by runway (specs/digest-runway-marks.md);
    *  or none. */
   quotas: 'off' | 'circles' | 'runway' | 'runway-hue' | ArrowMark
-  /** cw: the plot's chart: the primary's usage against its quota, or every pool's % of its quota. */
+  /** quota: the plot's chart: the primary's usage against its quota, or every pool's % of its quota. */
   plot: 'usage' | 'pools'
   /** The share (%) a pool is marked red at; orange from 10 points below. */
   alertAt: number
-  /** cw: the primary's figures with the others alongside, or every bucket's: the headline and weeks over all of them, a
+  /** quota: the primary's figures with the others alongside, or every bucket's: the headline and weeks over all of them, a
    *  line per pool. */
   layout: 'primary' | 'pools'
-  /** cw, the page only (the job's are `quota_marks` / `total_headline`): the candidate's reply marks; absent: as rendered. */
+  /** quota, the page only (the job's are `quota_marks` / `total_headline`): the candidate's reply marks; absent: as rendered. */
   replyMarks?: ReplyMarks
-  /** cw, the page only: its replies' headline over every bucket, or the primary; absent: as rendered. */
+  /** quota, the page only: its replies' headline over every bucket, or the primary; absent: as rendered. */
   replyTotal?: boolean
-  /** cw, the page only: each pool on its own line in a reply. */
+  /** quota, the page only: each pool on its own line in a reply. */
   replyLines?: boolean
-  /** cw, the page only: a reply's sender avatar is one tile per pool. */
+  /** quota, the page only: a reply's sender avatar is one tile per pool. */
   replyCollage?: boolean
 }
 
@@ -86,7 +87,7 @@ export function pct(dtb: number, total: number): string {
   return fixed(prev ? Math.abs((dtb / prev) * 100) : 0, 1)
 }
 
-/** `$` + an integer, comma-grouped, signed (`digest_gcs._usd`). */
+/** `$` + an integer, comma-grouped, signed (`digest_cost._usd`). */
 export const usd = (v: number): string => (v >= 0 ? '+$' : `${MINUS}$`) + grouped(Math.abs(v), 0)
 
 /** The `?d=` look-back token for a → b (epoch ms): `1d12h`, `7d`, `12h` (`digest._span`). */

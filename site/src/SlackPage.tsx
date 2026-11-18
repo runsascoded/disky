@@ -4,7 +4,7 @@ import { Link } from 'react-router-dom'
 import { stringParam, useUrlState } from 'use-prms'
 import { SiteNav } from './SiteNav'
 import { useDocTitle } from './title'
-import { DEFAULT_PARAMS, type DigestParams, imageRequest, opText, type CwRows, type PreviewBundle, type PreviewReply, type RenderedReply, type ReplyCell, replies as renderReplies } from './digest'
+import { DEFAULT_PARAMS, type DigestParams, imageRequest, opText, type QuotaRows, type PreviewBundle, type PreviewReply, type RenderedReply, type ReplyCell, replies as renderReplies } from './digest'
 import { decodeParams, encodeParams, jobParams, previewMarks } from './digest/codec'
 import { RUNWAY_HUE, type Tok, tokenize } from './digest/mrkdwn'
 import './slack.scss'
@@ -336,8 +336,8 @@ function Bundle({ b, cands, setCands }: { b: PreviewBundle; cands: string[]; set
   const matches = rerender.split('\n').map(norm).join('\n') === b.op.split('\n').map(norm).join('\n')
   const live = b.op.split('\n').map(norm)
   const [form, setForm] = useState({ params: posted, quota_marks: 'runway' })
-  const replyCfg = b.rows.template === 'cw' ? b.reply : null
-  const candReplies = (p: DigestParams) => replyCfg ? renderReplies(b.rows as CwRows, b.cfg, replyCfg, b.variant, { marks: p.replyMarks, total: p.replyTotal, lines: p.replyLines, collage: p.replyCollage }) : null
+  const replyCfg = b.rows.template === 'quota' ? b.reply : null
+  const candReplies = (p: DigestParams) => replyCfg ? renderReplies(b.rows as QuotaRows, b.cfg, replyCfg, b.variant, { marks: p.replyMarks, total: p.replyTotal, lines: p.replyLines, collage: p.replyCollage }) : null
   const rendered = candReplies(DEFAULT_PARAMS)
   const repliesMatch = !!rendered && JSON.stringify(rendered) === JSON.stringify(b.replies)
   return <>
@@ -363,7 +363,7 @@ function Bundle({ b, cands, setCands }: { b: PreviewBundle; cands: string[]; set
             <Controls p={p} set={set} />
             <Op text={opText(b.rows, b.month, b.cfg, links, p)} plotReq={imageRequest(b.rows, b.month, b.cfg, p)} live={live} />
             {replyCfg ? <Replies replies={candReplies(p)!} live={b.replies} />
-              : b.rows.template === 'cw' && <p className="dim">This bundle predates re-rendered replies; the next scan's will have them.</p>}
+              : b.rows.template === 'quota' && <p className="dim">This bundle predates re-rendered replies; the next scan's will have them.</p>}
           </section>
         )
       })}

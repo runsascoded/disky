@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 
 from dt_cloud import digest as E
-from dt_cloud import digest_cw as DC
+from dt_cloud import digest_quota as DC
 
 from digest_examples import CW_EXAMPLE, GCS_EXAMPLE, config_file
 from test_digest_golden import CW6_SCANS, cw_root, gcs_root
@@ -130,7 +130,7 @@ def test_preview_bundle_is_the_parity_shape():
                          op_ts="m1", permalink="https://slack.example.org/p1")
     assert sorted(b) == ["cfg", "channel", "image", "month", "op", "op_ts", "params", "permalink", "plot_url", "posted_at",
                          "prev_url", "replies", "reply", "rows", "variant", "version"]
-    assert (b["version"], b["month"], b["rows"]["template"], b["image"]["month"], b["params"]) == (1, "2026-09", "cw", "2026-09", "")
+    assert (b["version"], b["month"], b["rows"]["template"], b["image"]["month"], b["params"]) == (1, "2026-09", "quota", "2026-09", "")
 
 
 def test_converge_writes_the_preview_bundle(tmp_path: Path):
@@ -145,7 +145,7 @@ def test_converge_writes_the_preview_bundle(tmp_path: Path):
     b = json.loads((tmp_path / "served" / "digest" / "preview" / "C1" / "sender" / "2026-09.json").read_text())
     op = next(c for c in log if c["op"] == "post" and c["thread_id"] is None)
     assert (b["op"], b["op_ts"], b["permalink"], b["channel"], b["variant"], b["rows"]["template"]) == (
-        op["content"], "m1", "https://slack.example.org/archives/C1/pm1", "C1", "sender", "cw",
+        op["content"], "m1", "https://slack.example.org/archives/C1/pm1", "C1", "sender", "quota",
     )
     # the replies as posted (the thread's, oldest first), newest first
     posted = [(c["username"], c["content"], c["icon_url"], c["icon_emoji"]) for c in log if c["op"] == "post" and c["thread_id"] == "m1"]
@@ -178,7 +178,7 @@ def test_preview_only_writes_the_bundle_and_nothing_else(tmp_path: Path, monkeyp
     d["preview"] = f"{served}/{{channel}}/{{variant}}"
     d["buckets"]["hot-data"]["shape"] = "star"
     config.write_text(yaml.safe_dump(d))
-    res = CliRunner().invoke(main, ["digest", "-T", "cw", "-C", str(config), "-L", "-r", str(root), "-m", "2026-09", "-W", "shapes-preview", "-q", "runway-hue"], catch_exceptions=False)
+    res = CliRunner().invoke(main, ["digest", "-T", "quota", "-C", str(config), "-L", "-r", str(root), "-m", "2026-09", "-W", "shapes-preview", "-q", "runway-hue"], catch_exceptions=False)
     assert res.exit_code == 0
     assert sorted(str(p.relative_to(served)) for p in served.rglob("*.json")) == ["shapes-preview/sender/2026-09.json"]
     assert sorted(p for p in root.parent.rglob("*")) == before
@@ -232,8 +232,8 @@ def test_site_renderer_posts_the_rows_and_uses_the_answer(name: str, tmp_path: P
 
 
 def test_params_config():
-    assert (E.config_from_dict({"template": "cw"}).params, E.config_from_dict({"template": "cw", "params": "qc,pp"}).params) == ("", "qc,pp")
+    assert (E.config_from_dict({"template": "quota"}).params, E.config_from_dict({"template": "quota", "params": "qc,pp"}).params) == ("", "qc,pp")
     # `renderer` is gone (the site is the only one): a config still naming it is refused, as any unknown key
     with pytest.raises(ValueError) as e:
-        E.config_from_dict({"template": "cw", "renderer": "site"})
+        E.config_from_dict({"template": "quota", "renderer": "site"})
     assert str(e.value) == "unknown digest config keys: ['renderer']"

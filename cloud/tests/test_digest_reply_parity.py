@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 from dt_cloud import digest as E
-from dt_cloud import digest_cw as DC
+from dt_cloud import digest_quota as DC
 
 from digest_examples import CW_EXAMPLE
 
