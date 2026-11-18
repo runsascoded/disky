@@ -12,13 +12,13 @@ Owner: the root session (`oa-release.yml`, `scripts/oa-release`, `deploy/oa/site
 
 ## Status
 
-Built on `cloud` (root, 2026-11-17), not live until `front-door`'s `oa-release.yml` matches `cloud`'s again (the push needs Ryan's go; the stub check refuses every release while the two differ, so they go together):
+Live since 2026-11-17: `front-door`'s `oa-release.yml` matches `cloud`'s, and a push to `<d>-prod` releases prod (on 11-18: hf ×4, gcs, r2, each a `workflow_dispatch` from `oa-prod-push.yml`). Built on `cloud` (root, 2026-11-17):
 - **Handoff (1):** `.github/workflows/oa-prod-push.yml`, on every deploy branch through `cloud`, runs on a push to `gcs-prod`, `cw-prod`, `hf-prod` or `r2-prod` and dispatches `front-door`'s `oa-release.yml` (`--ref front-door`, inputs `deployment` + `sha`); `GITHUB_TOKEN` may start a `workflow_dispatch`, and the environments still admit only `front-door`. A pointer moved to a commit older than that file starts nothing: dispatch by hand, `gh workflow run oa-release.yml -R Open-Athena/disky --ref front-door -f deployment=<d> -f sha=<sha>`.
 - **Gate (2):** `plan` refuses a sha `<d>-prod` doesn't point at (`<d>-prod points at X, not Y`), finds the sha's newest successful dev release this controller recorded (`<sha> has no successful dev release (its newest: failure): push it to <d> first`), and keeps the CI receipt and on-branch checks. The `dev_deployment` input is gone.
 - **History (3):** `previous` (the newest live prod release's sha) and `rollback` (the new sha is its ancestor) are in the plan and the run summary (`rollback from …`, `replacing …`, `the build it already serves`). The seal's recipe rule is unchanged.
 - **Concurrency (4):** the release job's `concurrency` group (one per environment, `cancel-in-progress: false`) already runs one at a time with only the newest queued.
 - **`site/deploy` (5):** nothing to change: its `<short>-prod` pointer was always local, never pushed.
-- **Pointer truth (6):** realigning a pointer to the build prod serves releases that build again (not skipped). The pointers on `o` today: `cw-prod` 41ccadf45, `gcs-prod` 072530ad5, `hf-prod` fac886b6f, `r2-prod` 9a2314c5c.
+- **Pointer truth (6):** realigning a pointer to the build prod serves releases that build again (not skipped). Each owner realigned its pointer at cutover; since then each tracks what its prod serves (on `o`, 2026-11-18: `cw-prod` a8e0d1db5, `gcs-prod` e03721920, `hf-prod` b9d2dc3e8, `r2-prod` c781c9bfc).
 
 ## Why `<d>-prod`, not `<d>` = prod
 
