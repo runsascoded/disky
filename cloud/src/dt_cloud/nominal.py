@@ -323,12 +323,12 @@ def closed_runs(rows: list[dict], stop: dict, boundary_id: str | None) -> tuple[
 def closed_head(cfg: Config, was: str, old: tuple[list[dict], dict | None], stop: dict, reason: str) -> str:
     """A closed thread's head: how many runs it held, since when, its newest, and the run that ended it."""
     runs, boundary = old
-    kind = 'clean-run' if was == 'clean' else 'failure'
+    kind, mark, adj = ('clean-run', '✅', 'clean') if was == 'clean' else ('failure', '❌', 'failed')
     if not runs:
-        return f"**{cfg.title}: {kind} sequence ended**\n\n[{stamp(stop)}]({cfg.link(stop['run'])}): {reason}. [All scans]({cfg.scans})."
+        return f"{mark} **{cfg.title}: {kind} sequence ended**\n\n[{stamp(stop)}]({cfg.link(stop['run'])}): {reason}. [All scans]({cfg.scans})."
     qualifier = '' if boundary else 'at least '
     after = f" after [{boundary['run']['scan']}]({cfg.link(boundary['run'])})" if boundary else ' (available run history)'
-    return (f"**{cfg.title}: {kind} sequence ended after {qualifier}{plural(len(runs), 'run')}**\n\n"
+    return (f"{mark} **{cfg.title}: {qualifier}{len(runs)} consecutive {adj} run{'' if len(runs) == 1 else 's'} (ended)**\n\n"
             f"Since {stamp(runs[-1])}{after}; last [{stamp(runs[0])}]({cfg.link(runs[0]['run'])}).\n\n"
             f"Ended by [{stamp(stop)}]({cfg.link(stop['run'])}): {reason}. [All scans]({cfg.scans}).")
 
