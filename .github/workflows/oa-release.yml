@@ -47,6 +47,7 @@ jobs:
       host: ${{ steps.plan.outputs.host }}
       project: ${{ steps.plan.outputs.project }}
       pages_branch: ${{ steps.plan.outputs.pages_branch }}
+      admin_channel: ${{ steps.plan.outputs.admin_channel }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -203,15 +204,16 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: if [ -f receipt.json ]; then control/scripts/oa-release finish -f receipt.json; fi
-      # Slack notice (`site/deploy-notify`: run-length threaded per deployment, greens with greens, reds with reds), only where the environment
-      # sets `DEPLOY_NOTIFICATIONS_ENABLED=1` with its bot token and channel. A notice failure never fails the release.
+      # Slack notice (`site/deploy-notify`: run-length threaded per deployment, greens with greens, reds with reds) to the deployment's
+      # `#<d>-admin` (`admin_channel` in `deploy/oa/sites.json`), posted by its own bot: the environment's `SLACK_DEPLOY_BOT_TOKEN`.
+      # An environment without one skips with a notice. A notice failure never fails the release.
       - name: Deploy notice
-        if: always() && vars.DEPLOY_NOTIFICATIONS_ENABLED == '1'
+        if: always() && needs.plan.outputs.admin_channel != ''
         continue-on-error: true
         env:
-          DEPLOY_NOTIFICATIONS_ENABLED: ${{ vars.DEPLOY_NOTIFICATIONS_ENABLED }}
+          DEPLOY_NOTIFICATIONS_ENABLED: '1'
           SLACK_DEPLOY_BOT_TOKEN: ${{ secrets.SLACK_DEPLOY_BOT_TOKEN }}
-          SLACK_DEPLOY_CHANNEL: ${{ vars.SLACK_DEPLOY_CHANNEL }}
+          SLACK_DEPLOY_CHANNEL: ${{ needs.plan.outputs.admin_channel }}
           VITE_SOURCE_REF: ${{ needs.plan.outputs.source_branch }}
           MODE: ${{ needs.plan.outputs.mode }}
           SOURCE_SHA: ${{ needs.plan.outputs.sha }}
@@ -219,6 +221,7 @@ jobs:
           UPLOAD: ${{ steps.upload.outcome }}
           VERIFY: ${{ steps.verify.outcome }}
         run: |
+          if [ -z "$SLACK_DEPLOY_BOT_TOKEN" ]; then echo "::notice::No SLACK_DEPLOY_BOT_TOKEN in this environment: no Slack notice"; exit 0; fi
           case "$JOB_STATUS" in success) status=success ;; cancelled) status=cancelled ;; *) status=failure ;; esac
           if [ "$UPLOAD" != success ]; then stage=upload; elif [ "$VERIFY" != success ]; then stage=verify; else stage=finish; fi
           verified=(); [ "$VERIFY" = success ] && verified=(-v)

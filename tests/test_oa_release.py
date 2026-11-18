@@ -67,16 +67,16 @@ def setup_api(monkeypatch, *, tip=SHA, pointer=SHA, dev=None, states=None, runs=
     return calls
 
 
-@pytest.mark.parametrize(('branch', 'project', 'pages'), [
-    ('gcs', 'oa-gcs-usage', 'dev'), ('cw', 'oa-cw-s3-usage', 'dev'),
-    ('hf', 'oa-hf-usage', 'dev'), ('r2', 'oa-r2-usage', 'r2'),
+@pytest.mark.parametrize(('branch', 'project', 'pages', 'channel'), [
+    ('gcs', 'oa-gcs-usage', 'dev', 'C0C579HNRFB'), ('cw', 'oa-cw-s3-usage', 'dev', 'C0C53CPM886'),
+    ('hf', 'oa-hf-usage', 'dev', 'C0C9J9VDPV5'), ('r2', 'oa-r2-usage', 'r2', 'C0C9U47KTM2'),
 ])
-def test_exact_dev_plan(monkeypatch, branch, project, pages):
+def test_exact_dev_plan(monkeypatch, branch, project, pages, channel):
     calls = setup_api(monkeypatch)
     assert release.plan_release({'workflow_run': ci(branch)}, 'workflow_run', REPO) == {
         'protocol': 'disky-pages-v1', 'repository': REPO, 'source_branch': branch, 'sha': SHA,
         'mode': 'dev', 'environment': f'{branch}-dev', 'project': project, 'pages_branch': pages,
-        'host': f'dev.{branch}.oa.dev', 'ci_run': 42, 'dev_deployment': None, 'tip_recipes': None,
+        'host': f'dev.{branch}.oa.dev', 'admin_channel': channel, 'ci_run': 42, 'dev_deployment': None, 'tip_recipes': None,
         'previous': None, 'rollback': False,
     }
     assert calls == [(f'repos/{REPO}/git/ref/heads/{branch}', None)]
@@ -126,7 +126,7 @@ def test_production_finds_its_dev_proof_even_after_branch_advances(monkeypatch):
     assert promote() == {
         'protocol': 'disky-pages-v1', 'repository': REPO, 'source_branch': 'hf', 'sha': SHA,
         'mode': 'prod', 'environment': 'hf-prod', 'project': 'oa-hf-usage', 'pages_branch': 'main',
-        'host': 'hf.oa.dev', 'ci_run': 42, 'dev_deployment': '91', 'tip_recipes': ['c-new.sql'],
+        'host': 'hf.oa.dev', 'admin_channel': 'C0C9J9VDPV5', 'ci_run': 42, 'dev_deployment': '91', 'tip_recipes': ['c-new.sql'],
         'previous': PREV, 'rollback': False,
     }
 
@@ -393,7 +393,7 @@ def test_workflow_guards_and_secret_boundaries():
     ]
     notice = [step for key in jobs for step in jobs[key]['steps'] if 'SLACK_DEPLOY_BOT_TOKEN' in str(step)]
     assert [(step['name'], step['if'], step['continue-on-error']) for step in notice] == [
-        ('Deploy notice', "always() && vars.DEPLOY_NOTIFICATIONS_ENABLED == '1'", 'true'),
+        ('Deploy notice', "always() && needs.plan.outputs.admin_channel != ''", 'true'),
     ]
 
 
@@ -509,7 +509,7 @@ def test_stub_calls_parse_against_the_scripts():
 def test_stub_reads_exactly_the_outputs_plan_writes(tmp_path, monkeypatch):
     """`plan`'s `$GITHUB_OUTPUT` keys are exactly the `steps.plan.outputs.*` the stub reads."""
     planned = {'sha': SHA, 'source_branch': 'hf', 'mode': 'dev', 'environment': 'hf-dev', 'project': 'oa-hf-usage',
-               'pages_branch': 'dev', 'host': 'dev.hf.oa.dev', 'repository': REPO}
+               'pages_branch': 'dev', 'host': 'dev.hf.oa.dev', 'admin_channel': 'C0C9J9VDPV5', 'repository': REPO}
     monkeypatch.setattr(release, 'plan_release', lambda event, event_name, repository: planned)
     event, out = tmp_path / 'event.json', tmp_path / 'github_output'
     event.write_text('{}')
@@ -518,7 +518,7 @@ def test_stub_reads_exactly_the_outputs_plan_writes(tmp_path, monkeypatch):
     assert result.exit_code == 0, result.output
     written = sorted(line.split('=', 1)[0] for line in out.read_text().splitlines())
     read = sorted(set(findall(r'steps\.plan\.outputs\.(\w+)', (ROOT / '.github/workflows/oa-release.yml').read_text())))
-    assert read == written == ['environment', 'host', 'mode', 'ok', 'pages_branch', 'project', 'sha', 'source_branch']
+    assert read == written == ['admin_channel', 'environment', 'host', 'mode', 'ok', 'pages_branch', 'project', 'sha', 'source_branch']
 
 
 @pytest.mark.parametrize(('event_name', 'event', 'message'), [

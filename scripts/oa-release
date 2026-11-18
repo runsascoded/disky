@@ -161,7 +161,7 @@ def plan_release(event: dict, event_name: str, repository: str) -> dict:
     return {
         'protocol': PROTOCOL, 'repository': repository, 'source_branch': target, 'sha': sha,
         'mode': mode, 'environment': f'{target}-{mode}', 'project': site['project'],
-        'pages_branch': site[f'{mode}_branch'], 'host': site[f'{mode}_host'],
+        'pages_branch': site[f'{mode}_branch'], 'host': site[f'{mode}_host'], 'admin_channel': site['admin_channel'],
         'ci_run': ci['id'], 'dev_deployment': dev_id, 'tip_recipes': tip_recipes, 'previous': previous,
         'rollback': bool(previous and previous != sha and api(f'{prefix}/compare/{sha}...{previous}')['status'] == 'ahead'),
     }
@@ -267,7 +267,7 @@ def plan(event: Path, event_name: str, output: Path, repository: str) -> None:
     if github_output:
         with open(github_output, 'a') as file:
             file.write('ok=true\n')
-            for key in ['sha', 'source_branch', 'mode', 'environment', 'project', 'pages_branch', 'host']:
+            for key in ['sha', 'source_branch', 'mode', 'environment', 'project', 'pages_branch', 'host', 'admin_channel']:
                 file.write(f'{key}={value[key]}\n')
     summary = environ.get('GITHUB_STEP_SUMMARY')
     if summary and value['mode'] == 'prod':

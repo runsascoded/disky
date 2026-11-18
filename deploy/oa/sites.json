@@ -3,9 +3,9 @@
   "account_id": "74981a43be0de7712369306c7b19133d",
   "controller_branch": "front-door",
   "sites": {
-    "gcs": {"project": "oa-gcs-usage", "prod_branch": "main", "dev_branch": "dev", "prod_host": "gcs.oa.dev", "dev_host": "dev.gcs.oa.dev"},
-    "cw": {"project": "oa-cw-s3-usage", "prod_branch": "main", "dev_branch": "dev", "prod_host": "cw.oa.dev", "dev_host": "dev.cw.oa.dev"},
-    "hf": {"project": "oa-hf-usage", "prod_branch": "main", "dev_branch": "dev", "prod_host": "hf.oa.dev", "dev_host": "dev.hf.oa.dev"},
-    "r2": {"project": "oa-r2-usage", "prod_branch": "r2-prod", "dev_branch": "r2", "prod_host": "r2.oa.dev", "dev_host": "dev.r2.oa.dev"}
+    "gcs": {"project": "oa-gcs-usage", "prod_branch": "main", "dev_branch": "dev", "prod_host": "gcs.oa.dev", "dev_host": "dev.gcs.oa.dev", "admin_channel": "C0C579HNRFB"},
+    "cw": {"project": "oa-cw-s3-usage", "prod_branch": "main", "dev_branch": "dev", "prod_host": "cw.oa.dev", "dev_host": "dev.cw.oa.dev", "admin_channel": "C0C53CPM886"},
+    "hf": {"project": "oa-hf-usage", "prod_branch": "main", "dev_branch": "dev", "prod_host": "hf.oa.dev", "dev_host": "dev.hf.oa.dev", "admin_channel": "C0C9J9VDPV5"},
+    "r2": {"project": "oa-r2-usage", "prod_branch": "r2-prod", "dev_branch": "r2", "prod_host": "r2.oa.dev", "dev_host": "dev.r2.oa.dev", "admin_channel": "C0C9U47KTM2"}
   }
 }
