@@ -78,14 +78,15 @@ def test_cli_writes_each_day_and_skip_existing_leaves_written_ones(tmp_path):
 
 def test_readers_prices_each_group_by_operation_class(tmp_path):
     """`readers`: per group, Class A (listings: a bucket-root GET; writes) and Class B (object reads) requests per day,
-    priced at list prices; deletes free; groups past `top` folded into one row."""
+    priced at list prices; deletes and the bucket's lifecycle engine (Autoclass moves) free; groups past `top` folded
+    into one row."""
     from dt_cloud.access_requesters import readers
 
     def day(name, rows):
         con = duckdb.connect()
         con.sql("CREATE TABLE r (day DATE, bucket VARCHAR, op VARCHAR, op_raw VARCHAR, client VARCHAR, user_agent VARCHAR, requester VARCHAR, prefix VARCHAR, n BIGINT, bytes_out BIGINT, bytes_in BIGINT)")
         for r in rows:
-            con.execute("INSERT INTO r VALUES (?, 'b', ?, ?, ?, NULL, NULL, ?, ?, 0, 0)", r)
+            con.execute("INSERT INTO r VALUES (?, 'b', ?, ?, ?, ?, NULL, ?, ?, 0, 0)", (*r[:4], r[6] if len(r) > 6 else None, *r[4:6]))
         con.sql(f"COPY r TO '{tmp_path / name}' (FORMAT parquet)")
         return str(tmp_path / name)
 
@@ -95,6 +96,7 @@ def test_readers_prices_each_group_by_operation_class(tmp_path):
             ("2026-11-14", "GET", "GET", "python-gcsfs", "", 200_000),
             ("2026-11-14", "DELETE", "DELETE_Object", "python-gcsfs", "tmp", 50),
             ("2026-11-14", "GET", "storage.objects.get", "polars", "tmp", 1_000_000),
+            ("2026-11-14", "PUT", "PUT_Object", "GCS", "docs", 5_000_000, "GCS Lifecycle Management"),
         ]),
         day("2026-11-15.parquet", [("2026-11-15", "GET", "storage.objects.get", "tensorstore", "cache", 1_000_000)]),
     ]
@@ -103,5 +105,5 @@ def test_readers_prices_each_group_by_operation_class(tmp_path):
     assert (out["days"], [rnd(r) for r in out["rows"]], rnd(out["total"])) == (2, [
         {"client": "tensorstore", "prefix": "cache", "a_per_day": 0.0, "b_per_day": 2_000_000.0, "per_day": 2_000_000.0, "usd_per_day": 0.8},
         {"client": "python-gcsfs", "prefix": "", "a_per_day": 100_000.0, "b_per_day": 0.0, "per_day": 100_000.0, "usd_per_day": 0.5},
-        {"client": "(2 others)", "prefix": "", "a_per_day": 0.0, "b_per_day": 500_000.0, "per_day": 500_025.0, "usd_per_day": 0.2},
-    ], {"a_per_day": 100_000.0, "b_per_day": 2_500_000.0, "per_day": 2_600_025.0, "usd_per_day": 1.5})
+        {"client": "(3 others)", "prefix": "", "a_per_day": 0.0, "b_per_day": 500_000.0, "per_day": 3_000_025.0, "usd_per_day": 0.2},
+    ], {"a_per_day": 100_000.0, "b_per_day": 2_500_000.0, "per_day": 5_100_025.0, "usd_per_day": 1.5})

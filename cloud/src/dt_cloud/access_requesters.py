@@ -117,8 +117,12 @@ def rollup_day(root: str, day: dt.date, out: str, depth: int = 2, mem: str | Non
 #: List prices per million requests (GCS Standard, regional/autoclass): Class A writes and listings, Class B reads.
 PRICE_PER_M = {"A": 5.0, "B": 0.40}
 
-#: A request's operation class: listings and writes are A, object reads and metadata B, deletes free.
+#: A request's operation class: listings and writes are A, object reads and metadata B, deletes free, and so is the
+#: bucket's own lifecycle engine (`GCS Lifecycle Management`: TTL deletes, and Autoclass's moves to a colder class,
+#: which its management fee covers). Autoclass's moves back to a warmer class are Class A but aren't told apart in the
+#: logs; `autoclass/transition_operation_count` (Cloud Monitoring) counts them by direction.
 OP_CLASS_SQL = """CASE
+  WHEN user_agent = 'GCS Lifecycle Management' THEN 'free'
   WHEN op = 'DELETE' OR op_raw IN ('DELETE_Object', 'storage.objects.delete', 'POST_Nested_Delete_Multi_Objects') THEN 'free'
   WHEN op = 'LIST' OR op_raw IN ('GET_Bucket', 'storage.objects.list') OR (op = 'GET' AND prefix = '') THEN 'A'
   WHEN op IN ('GET', 'HEAD') THEN 'B'
@@ -133,6 +137,10 @@ def readers(files: list[str], by: tuple[str, ...] = ("client", "bucket", "prefix
     if not files:
         return {"days": 0, "rows": [], "total": {}}
     con = duckdb.connect()
+    if any(f.startswith("gs://") for f in files):
+        import gcsfs
+
+        con.register_filesystem(gcsfs.GCSFileSystem())
     con.sql(f"CREATE VIEW r AS SELECT *, {OP_CLASS_SQL} AS cls FROM read_parquet({files!r})")
     days = con.sql("SELECT count(DISTINCT day) FROM r").fetchone()[0]
     keys = ", ".join(f"coalesce(CAST({k} AS VARCHAR), '') AS {k}" for k in by)
