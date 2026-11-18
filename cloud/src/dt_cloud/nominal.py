@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Protocol
 from urllib.parse import quote, unquote, urlencode, urlparse
 from uuid import NAMESPACE_URL, uuid5
 
+from .scan_id import scan_time
 from .scan_runs import TRIGGER_BY_RE
 
 if TYPE_CHECKING:
@@ -235,7 +236,8 @@ WEEK = 7 * 86400
 
 
 def series_ts(date: str) -> float:
-    return datetime.strptime(date, '%Y-%m-%dT%H%M').replace(tzinfo=timezone.utc).timestamp()
+    """A series point's scan id as a timestamp; a date-only id (a deployment's first scans) is its midnight."""
+    return scan_time(date).timestamp()
 
 
 def store_line(cfg: Config, label: str, store: str, series: dict | int) -> str:

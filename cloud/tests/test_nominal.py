@@ -667,6 +667,14 @@ def test_head_carries_the_latest_runs_outcome_and_each_configured_stores_size_an
     assert N.outcome({**row(1), 'secs': None}) == ''
 
 
+def test_a_date_only_scan_id_in_a_stores_series_reads_as_its_midnight():
+    """A deployment's first scans may be ids of a bare date (hf's `2026-10-15`): a series point is any scan id."""
+    cfg = N.config(dict(state='unused', site='https://site.test', channel='C123', title='Test scans'))
+    points = [dict(date='2026-10-15', bytes=1_000_000, objects=10),
+              dict(date='2026-10-22T0800', bytes=1_500_000, objects=12)]
+    assert N.store_line(cfg, 'Data', 'primary', {'points': points}) == '[Data](https://site.test/): 1.50 M · 12 objects · +500 K over 7d.'
+
+
 class Pins(Slack):
     """The fake Slack with the channel's pins and canvas."""
 
