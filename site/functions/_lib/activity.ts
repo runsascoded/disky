@@ -11,14 +11,14 @@ import { slackApi, type SlackEnv, slackScopes, slackPeople } from './slack.js'
 import { dataUriImage, identiconPng, identiconSeed, publishAvatar, serviceIconPng } from './publicAvatar.js'
 import type { SlogBatch, SlogEvent } from './sessionLogShape.js'
 import {
-  activityEventLine, addPages, addTrail, type Burst, DISCORD, emptyTrail, type Fmt, fmtGap, highlights, joins, KIND_DEFS, type KindConf,
+  activityEventLine, addPages, addTrail, type Burst, DISCORD, emptyTrail, type Fmt, fmtGap, highlights, hostTag, type HostTagEnv, joins, KIND_DEFS, type KindConf,
   type KindRow, type KindsConf, actorName, mergeKinds, type Notice, pathOf, plainName, renderDetails, renderDiscord, renderHeadline, renderLines,
   renderSummary, reported, senderName, serviceName, serviceReasons, type ServerEvent, sessionUrl,
   SLACK, tallyClient, uaFamily,
 } from './activityShape.js'
 import type { AccessEvent, AuditSink } from '@open-athena/auth'
 
-export interface ActivityEnv extends SlackEnv {
+export interface ActivityEnv extends SlackEnv, HostTagEnv {
   DB?: D1Database
   /** A Discord channel webhook URL (a secret). Unset = no Discord. */
   DISCORD_ADMIN_WEBHOOK?: string
@@ -395,7 +395,7 @@ async function render(env: ActivityEnv, b: StoredBurst, conf: KindsConf, now: nu
     const asUser = (await slackScopes(env)).has('chat:write.customize')
     const slackWho = asUser ? await slackSenderOf(env, b, who) : who
     const sender = asUser ? { username: slackWho.name, ...(slackWho.icon ? { icon_url: slackWho.icon } : {}) } : {}
-    const text = renderHeadline(shown, { fmt: SLACK, conf, name, notice }, asUser)
+    const text = renderHeadline(shown, { fmt: SLACK, conf, name, notice, tag: hostTag(b.origin, env, SLACK, env.SLACK_PR_EMOJI) }, asUser)
     const parent = await ensurePost(db, b.id, 'slack', 'parent', now,
       async () => (await slackApi(env, 'chat.postMessage', { channel, text, ...sender, unfurl_links: false, unfurl_media: false })).ts ?? null,
       ts => slackApi(env, 'chat.update', { channel, ts, text }))
@@ -419,7 +419,7 @@ async function render(env: ActivityEnv, b: StoredBurst, conf: KindsConf, now: nu
     const notice = notices?.discord ?? undefined
     const url = env.DISCORD_ADMIN_WEBHOOK!
     const content = renderDiscord(
-      renderSummary(shown, { fmt: DISCORD, conf, highlights: h, name, notice }),
+      renderSummary(shown, { fmt: DISCORD, conf, highlights: h, name, notice, tag: hostTag(b.origin, env, DISCORD) }),
       lineKinds.map(([kind, es]) => renderLines(kind, lineEvents(es, DISCORD), DISCORD)),
       `${b.origin}/admin/activity?burst=${b.id}`,
     )

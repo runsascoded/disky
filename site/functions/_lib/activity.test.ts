@@ -11,7 +11,7 @@ import {
 import { serviceIconPng, sha256Hex } from './publicAvatar'
 import {
   activityEventLine, activityRefreshLine, addTrail, authLine, type Burst, clientKind, DISCORD, emptyTrail, highlights, joins, keptEvents, mergeKinds, pageLines,
-  renderDetails, renderDiscord, renderHeadline, renderLines, renderSummary, senderName, type ServerEvent, serverKind, serviceReasons, sessionLinks, SLACK,
+  hostTag, renderDetails, renderDiscord, renderHeadline, renderLines, renderSummary, senderName, type ServerEvent, serverKind, serviceReasons, sessionLinks, SLACK,
   tallyClient, uaFamily,
 } from './activityShape'
 import { captureWrite, noteActivity } from './activityHook'
@@ -218,6 +218,26 @@ describe('rendering', () => {
       'Owners: bob, cleared',
       `Pages: <${ORIGIN}/|/> ×3 → <${ORIGIN}/users|/users>`,
       `<${ORIGIN}/admin/activity?burst=7|activity> · <${ORIGIN}/admin/sessions/sid-aaaaaaaaaa|session sid-aaaa>`,
+    ])
+  })
+
+  it("an admin post says which server it came from: nothing for prod, 🚧 dev for the dev stack, [#N] (the PR) for a PR's preview", () => {
+    const env = { DEV_HOST: 'dev.x.test', PAGES_SUBDOMAIN: 'oa-x.pages.dev', REPO_URL: 'https://github.com/o/r/' }
+    const pr = 'https://github.com/o/r/pull/8'
+    expect([
+      'https://x.test', 'https://dev.x.test', 'https://dev.oa-x.pages.dev', 'https://pr-8.oa-x.pages.dev', 'https://1a2b3c4d.oa-x.pages.dev',
+      'https://oa-x.pages.dev', 'https://a.b.oa-x.pages.dev', 'https://pr-8.other.pages.dev', '',
+    ].map(o => hostTag(o, env, SLACK))).toEqual(['', '🚧 dev', '🚧 dev', `[<${pr}|#8>]`, '[1a2b3c4d]', '', '', '', ''])
+    expect([
+      hostTag('https://pr-8.oa-x.pages.dev', env, SLACK, ':github-pr:'),
+      hostTag('https://pr-8.oa-x.pages.dev', env, DISCORD),
+      hostTag('https://pr-8.oa-x.pages.dev', { PAGES_SUBDOMAIN: 'oa-x.pages.dev' }, SLACK, ':gh:'),
+      hostTag('https://dev.x.test', {}, SLACK),
+    ]).toEqual([`:github-pr: [<${pr}|#8>]`, `[[#8](<${pr}>)]`, ':gh: [#8]', ''])
+    const o = { fmt: SLACK, conf, highlights: highlights(events), tag: '🚧 dev' }
+    expect([renderHeadline(burst, o, true), renderSummary(burst, { ...o, fmt: DISCORD }).split('\n')[0]]).toEqual([
+      `🚧 dev · 3 assignments · 4 page loads · 9 URL changes · 2026-10-21 14:20–15:00Z · <${ORIGIN}/admin/activity?burst=7|activity>`,
+      '🚧 dev · **ann** (browser) · 2026-10-21 14:20–15:00Z',
     ])
   })
 
