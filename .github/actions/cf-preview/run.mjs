@@ -42,15 +42,42 @@ export function eventRequest(event, eventName, actor) {
 
 const MODE_SUMMARY = { full: 'this PR’s full build on the deployment’s preview environment, the dev stack’s data and sign-in' }
 
-async function record(github, plan, receipt, state, runUrl) {
-  const env = `preview/${plan.target}/pr-${plan.pr}`
+/** The GitHub environment a target's preview deployments are recorded under: one per target, never one per PR. GitHub
+ *  creates an environment for each name a deployment uses, and deleting one takes administration rights `GITHUB_TOKEN`
+ *  can't have, so a per-PR name left one behind for every PR. */
+export const recordEnvironment = plan => `preview/${plan.target}`
+
+/** The recorded deployments a new record for `plan`'s PR ends: that PR's on this target, other than `keep` (the new one).
+ *  Other PRs' previews share the environment and stay live. */
+export function supersededRecords(deployments, plan, keep) {
+  return deployments.filter(d => d.id !== keep && d.environment === recordEnvironment(plan)
+    && d.payload?.protocol === PROTOCOL && d.payload?.target === plan.target && d.payload?.pr === plan.pr)
+}
+
+/** Records the run as a GitHub deployment (`state`: `success` for a publish, `inactive` for a retire), then ends the PR's
+ *  earlier records still showing `success`. GitHub's `auto_inactive` would end every other PR's preview on the shared
+ *  environment, so it is off. Looks through the target's newest `RECORD_PAGES` × 100 records; each run ends the one
+ *  before it, so only the newest can still be live. */
+const RECORD_PAGES = 5
+export async function record(github, plan, receipt, state, runUrl) {
+  const environment = recordEnvironment(plan)
   const deployment = await github('POST', `/repos/${plan.repository}/deployments`, {
-    ref: plan.sha, auto_merge: false, required_contexts: [], production_environment: false, transient_environment: true,
-    environment: env, payload: { ...receipt, protocol: PROTOCOL, run_url: runUrl },
+    ref: plan.sha, auto_merge: false, required_contexts: [], production_environment: false, transient_environment: false,
+    environment, payload: { ...receipt, protocol: PROTOCOL, run_url: runUrl },
   })
   await github('POST', `/repos/${plan.repository}/deployments/${deployment.id}/statuses`, {
-    state, log_url: runUrl, environment_url: receipt.url || '', auto_inactive: state === 'success',
+    state, log_url: runUrl, environment_url: receipt.url || '', auto_inactive: false,
   })
+  const listed = []
+  for (let page = 1; page <= RECORD_PAGES; page++) {
+    const batch = await github('GET', `/repos/${plan.repository}/deployments?environment=${encodeURIComponent(environment)}&per_page=100&page=${page}`)
+    listed.push(...batch)
+    if (batch.length < 100) break
+  }
+  for (const old of supersededRecords(listed, plan, deployment.id)) {
+    const [latest] = await github('GET', `/repos/${plan.repository}/deployments/${old.id}/statuses?per_page=1`)
+    if (latest?.state === 'success') await github('POST', `/repos/${plan.repository}/deployments/${old.id}/statuses`, { state: 'inactive', log_url: runUrl })
+  }
   return deployment.id
 }
 

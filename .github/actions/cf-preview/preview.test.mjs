@@ -2,7 +2,7 @@ import { test } from 'node:test'
 import { deepStrictEqual as equal, rejects, throws } from 'node:assert'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { resolve } from 'node:path'
-import { apiClient, eventRequest, revisionProbe, verifyRevision } from './run.mjs'
+import { apiClient, eventRequest, record, revisionProbe, verifyRevision } from './run.mjs'
 import {
   accountFor, authorize, cfList, HELD_FUNCTIONS, withoutFunctions, fullCwdCheck, modePlan, ownedPagesDeployments, previewPlan, publishFull, publishWorker, requireImplemented,
   retireFull, retireWorker, selectMode, validateArtifact, workerConfig, wranglerUpload,
@@ -235,6 +235,39 @@ test('full retire deletes only pr-N’s owned deployments, never production or d
   live = false
   equal(await retireFull({ cf, plan }), { ...plan, retired: true, removed_deployments: [] })
   equal(deleted.length, 2)
+})
+
+test('a preview is recorded under its target’s one environment; it ends only this PR’s live earlier record, never other PRs’', async () => {
+  const runUrl = 'https://github.com/org/repo/actions/runs/9'
+  const calls = []
+  const existing = [
+    { id: 41, environment: 'preview/main', payload: { protocol: plan.protocol, target: 'main', pr: 12 } },
+    { id: 40, environment: 'preview/main', payload: { protocol: plan.protocol, target: 'main', pr: 12 } },
+    { id: 39, environment: 'preview/main', payload: { protocol: plan.protocol, target: 'main', pr: 13 } },
+    { id: 38, environment: 'preview/main', payload: { protocol: 'other', target: 'main', pr: 12 } },
+  ]
+  const github = async (method, path, body) => {
+    calls.push(body === undefined ? [method, path] : [method, path, body])
+    if (method === 'POST' && path === '/repos/org/repo/deployments') return { id: 42 }
+    if (path.startsWith('/repos/org/repo/deployments?')) return [{ id: 42, environment: 'preview/main', payload: { protocol: plan.protocol, target: 'main', pr: 12 } }, ...existing]
+    if (path === '/repos/org/repo/deployments/41/statuses?per_page=1') return [{ state: 'success' }]
+    if (path === '/repos/org/repo/deployments/40/statuses?per_page=1') return [{ state: 'inactive' }]
+    if (method === 'POST') return {}
+    throw new Error(path)
+  }
+  const receipt = { ...plan, url: 'https://pr-12.site.pages.dev' }
+  equal(await record(github, plan, receipt, 'success', runUrl), 42)
+  equal(calls, [
+    ['POST', '/repos/org/repo/deployments', {
+      ref: sha, auto_merge: false, required_contexts: [], production_environment: false, transient_environment: false,
+      environment: 'preview/main', payload: { ...receipt, protocol: plan.protocol, run_url: runUrl },
+    }],
+    ['POST', '/repos/org/repo/deployments/42/statuses', { state: 'success', log_url: runUrl, environment_url: 'https://pr-12.site.pages.dev', auto_inactive: false }],
+    ['GET', '/repos/org/repo/deployments?environment=preview%2Fmain&per_page=100&page=1'],
+    ['GET', '/repos/org/repo/deployments/41/statuses?per_page=1'],
+    ['POST', '/repos/org/repo/deployments/41/statuses', { state: 'inactive', log_url: runUrl }],
+    ['GET', '/repos/org/repo/deployments/40/statuses?per_page=1'],
+  ])
 })
 
 test('full retire refuses, before any delete, anything it does not own or that is production or dev', async () => {
