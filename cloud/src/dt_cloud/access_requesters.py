@@ -23,15 +23,6 @@ os.environ.setdefault("USE_EXPERIMENTAL_ADAPTIVE_PREFETCHING", "false")
 err = partial(print, file=sys.stderr)
 
 
-def exists(path: str) -> bool:
-    if path.startswith("gs://"):
-        import gcsfs
-
-        return bool(gcsfs.GCSFileSystem().exists(path))
-    from pathlib import Path
-
-    return Path(path).exists()
-
 PART = re.compile(r"part-(\d{4})_(\d\d)_(\d\d)_(\d\d)_\d\d_\d\d--(\d{4})_(\d\d)_(\d\d)_(\d\d)_\d\d_\d\d\.parquet$")
 
 
@@ -74,9 +65,59 @@ def rollup_sql(files: list[str], day: dt.date, depth: int) -> str:
     """
 
 
-def rollup_day(root: str, day: dt.date, out: str, depth: int = 2, mem: str | None = None, threads: int | None = None) -> int:
-    """Write `day`'s rollup of `<root>/raw/*/part-*.parquet` (a dir or `gs://` URL) to `out` (a path or `gs://` URL);
-    returns its row count. No part meets the day: nothing is written, 0."""
+#: A rollup's parquet key-value metadata: the raw parts it was cut from (`part_key`s, sorted, JSON), so a later run
+#: can tell a day the access ingest has since added to (its parts changed) from one already complete.
+PARTS_KEY = "disky.parts"
+
+
+def part_key(name: str) -> str:
+    """A raw part's name relative to `raw/`: `<bucket>/part-….parquet`."""
+    return "/".join(name.rstrip("/").split("/")[-2:])
+
+
+def raw_parts(root: str) -> list[str]:
+    """Every raw part under `<root>/raw/*/` (a dir or `gs://` URL), as paths DuckDB reads."""
+    if root.startswith("gs://"):
+        import gcsfs
+
+        return sorted(f"gs://{p}" for p in gcsfs.GCSFileSystem().glob(f"{root.removeprefix('gs://').rstrip('/')}/raw/*/part-*.parquet"))
+    from pathlib import Path
+
+    return [str(p) for p in sorted(Path(root, "raw").glob("*/part-*.parquet"))]
+
+
+def written_parts(path: str) -> list[str] | None:
+    """The raw parts a written rollup was cut from (`PARTS_KEY`); None for a rollup that doesn't record them (written
+    before it did) or no rollup at all."""
+    import json
+
+    import pyarrow.parquet as pq
+
+    if path.startswith("gs://"):
+        import gcsfs
+
+        fs = gcsfs.GCSFileSystem()
+        if not fs.exists(path):
+            return None
+        with fs.open(path, "rb") as f:
+            md = pq.read_metadata(f).metadata or {}
+    else:
+        from pathlib import Path
+
+        if not Path(path).exists():
+            return None
+        md = pq.read_metadata(path).metadata or {}
+    raw = md.get(PARTS_KEY.encode())
+    return None if raw is None else json.loads(raw)
+
+
+def rollup_day(root: str, day: dt.date, out: str, depth: int = 2, mem: str | None = None, threads: int | None = None,
+               names: list[str] | None = None) -> int:
+    """Write `day`'s rollup of `<root>/raw/*/part-*.parquet` (a dir or `gs://` URL; `names`: that listing, when the
+    caller has it) to `out` (a path or `gs://` URL), recording its parts (`PARTS_KEY`); returns its row count. No part
+    meets the day: nothing is written, 0."""
+    import json
+
     import duckdb
 
     con = duckdb.connect()
@@ -89,27 +130,24 @@ def rollup_day(root: str, day: dt.date, out: str, depth: int = 2, mem: str | Non
 
         fs = gcsfs.GCSFileSystem()
         con.register_filesystem(fs)
-        names = [f"gs://{p}" for p in fs.glob(f"{root.removeprefix('gs://').rstrip('/')}/raw/*/part-*.parquet")]
-    else:
-        from pathlib import Path
-
-        names = [str(p) for p in sorted(Path(root, "raw").glob("*/part-*.parquet"))]
-    files = day_parts(names, day)
+    files = day_parts(raw_parts(root) if names is None else names, day)
     if not files:
         err(f"requesters {day}: no raw parts")
         return 0
     err(f"requesters {day}: {len(files)} raw parts")
     con.sql(f"CREATE TABLE r AS {rollup_sql(files, day, depth)}")
     n = con.sql("SELECT count(*) FROM r").fetchone()[0]
+    parts = json.dumps(sorted(part_key(f) for f in files)).replace("'", "''")
+    copy = f"(FORMAT parquet, COMPRESSION zstd, KV_METADATA {{'{PARTS_KEY}': '{parts}'}})"
     if out.startswith("gs://"):
         import tempfile
 
         with tempfile.TemporaryDirectory() as tmp:
             local = f"{tmp}/{day.isoformat()}.parquet"
-            con.sql(f"COPY r TO '{local}' (FORMAT parquet, COMPRESSION zstd)")
+            con.sql(f"COPY r TO '{local}' {copy}")
             fs.put(local, out)
     else:
-        con.sql(f"COPY r TO '{out}' (FORMAT parquet, COMPRESSION zstd)")
+        con.sql(f"COPY r TO '{out}' {copy}")
     err(f"requesters {day}: {n:,} rows → {out}")
     return n
 

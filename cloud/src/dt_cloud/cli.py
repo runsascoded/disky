@@ -2924,14 +2924,14 @@ def access_status(buckets: tuple[str, ...], data_bucket: str, log_bucket: str | 
 @option("-o", "--out", default=None, help="Output dir or URL (default: `<root>/requesters`); one `<day>.parquet` per day")
 @option("-p", "--threads", type=int, default=None, help="DuckDB threads")
 @option("-r", "--root", default=None, help="The access store (a dir or `gs://` URL holding `raw/`); default `gs://$DATA_BUCKET/access`")
-@option("-s", "--skip-existing", is_flag=True, help="Leave a day whose `<day>.parquet` is already written")
+@option("-s", "--skip-existing", is_flag=True, help="Leave a day whose `<day>.parquet` was written from the raw parts there now (one the access ingest has added to since is rolled again)")
 @argument("days", nargs=-1, required=True)
 def access_requesters(depth: int, data_bucket: str | None, mem: str | None, out: str | None, threads: int | None, root: str | None, skip_existing: bool, days: tuple[str, ...]) -> None:
     """Who made each day's requests: layer-1a rolled up per day × bucket × operation × client × requester × path prefix
     (`access_requesters.py`), one `<day>.parquet` per DAY (YYYY-MM-DD, UTC) under `-o`. Prints each day's row count."""
     import datetime as dt
 
-    from .access_requesters import exists, rollup_day
+    from .access_requesters import day_parts, part_key, raw_parts, rollup_day, written_parts
 
     if not root:
         if not data_bucket:
@@ -2940,13 +2940,14 @@ def access_requesters(depth: int, data_bucket: str | None, mem: str | None, out:
     out = (out or f"{root.rstrip('/')}/requesters").rstrip("/")
     if not out.startswith("gs://"):
         Path(out).mkdir(parents=True, exist_ok=True)
+    names = raw_parts(root)
     for d in days:
         day = dt.date.fromisoformat(d)
         dest = f"{out}/{day.isoformat()}.parquet"
-        if skip_existing and exists(dest):
-            err(f"requesters {day}: {dest} already written")
+        if skip_existing and written_parts(dest) == sorted(part_key(f) for f in day_parts(names, day)):
+            err(f"requesters {day}: {dest} already written from these raw parts")
             continue
-        print(f"{day}\t{rollup_day(root, day, dest, depth, mem, threads)}")
+        print(f"{day}\t{rollup_day(root, day, dest, depth, mem, threads, names)}")
 
 
 @access.command("readers")

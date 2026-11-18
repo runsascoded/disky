@@ -58,22 +58,46 @@ def test_rollup_day(tmp_path):
     assert rollup_day(str(root), dt.date(2026, 11, 20), str(tmp_path / "none.parquet")) == 0
 
 
-def test_cli_writes_each_day_and_skip_existing_leaves_written_ones(tmp_path):
+def test_cli_writes_each_day_and_skip_existing_rolls_again_once_the_ingest_adds_parts(tmp_path):
+    """`-s` leaves a day written from the raw parts there now, and rolls it again once the access ingest has added a part
+    (gcs 2026-11-17: the next morning's rollup ran before the day's last ten hours were ingested, and `-s` kept it)."""
     from click.testing import CliRunner
 
+    from dt_cloud.access_requesters import written_parts
     from dt_cloud.cli import main
 
     root = tmp_path / "access"
+    ua = "python-gcsfs/2026.1.0"
     _raw(root / "raw/b1/part-2026_11_14_00_00_00--2026_11_14_00_00_00.parquet", [
-        ("2026-11-14T00:10:00Z", "b1", "data/tok/a.bin", "GET", "storage.objects.get", 10, "10.0.0.1", "python-gcsfs/2026.1.0"),
+        ("2026-11-14T00:10:00Z", "b1", "data/tok/a.bin", "GET", "storage.objects.get", 10, "10.0.0.1", ua),
     ])
     out = tmp_path / "req"
     run = lambda *a: CliRunner().invoke(main, ["access", "requesters", "-r", str(root), "-o", str(out), *a])
     first = run("2026-11-14", "2026-11-15")
     again = run("-s", "2026-11-14")
-    assert (first.exit_code, first.stdout, again.exit_code, again.stdout, sorted(p.name for p in out.iterdir())) == (
-        0, "2026-11-14\t1\n2026-11-15\t0\n", 0, "", ["2026-11-14.parquet"],
+    _raw(root / "raw/b1/part-2026_11_14_20_00_00--2026_11_15_01_00_00.parquet", [
+        ("2026-11-14T23:10:00Z", "b1", "data/tok/b.bin", "GET", "storage.objects.get", 10, "10.0.0.1", ua),
+        ("2026-11-15T00:10:00Z", "b1", "data/tok/c.bin", "GET", "storage.objects.get", 10, "10.0.0.1", ua),
+    ])
+    caught_up = run("-s", "2026-11-14")
+    reads = duckdb.sql(f"SELECT sum(n)::INT FROM '{out}/2026-11-14.parquet'").fetchone()[0]
+    assert (
+        first.exit_code, first.stdout, again.exit_code, again.stdout, caught_up.exit_code, caught_up.stdout, reads,
+        sorted(p.name for p in out.iterdir()), written_parts(str(out / "2026-11-14.parquet")),
+    ) == (
+        0, "2026-11-14\t1\n2026-11-15\t0\n", 0, "", 0, "2026-11-14\t1\n", 2,
+        ["2026-11-14.parquet"],
+        ["b1/part-2026_11_14_00_00_00--2026_11_14_00_00_00.parquet", "b1/part-2026_11_14_20_00_00--2026_11_15_01_00_00.parquet"],
     )
+
+
+def test_written_parts_of_a_rollup_without_them_is_none(tmp_path):
+    """A rollup written before rollups recorded their parts (or none at all) reads as None, so `-s` rolls it again."""
+    from dt_cloud.access_requesters import written_parts
+
+    old = tmp_path / "old.parquet"
+    duckdb.sql(f"COPY (SELECT 1 AS n) TO '{old}' (FORMAT parquet)")
+    assert (written_parts(str(old)), written_parts(str(tmp_path / "missing.parquet"))) == (None, None)
 
 
 def test_readers_prices_each_group_by_operation_class(tmp_path):

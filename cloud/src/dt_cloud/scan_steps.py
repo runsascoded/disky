@@ -1945,9 +1945,11 @@ def soft_delete(ctx: Ctx, arg: str | None) -> None:
 def access_requesters(ctx: Ctx, arg: str | None) -> None:
     """Who made the scanned buckets' requests (`dt-cloud access requesters`): the access logs' raw rows for each of the
     `options.access-requesters.days` (default 2) UTC days before the scan's, rolled up per bucket × operation ×
-    client × requester × path prefix into `<data>/access/requesters/<day>.parquet`. A day already written is left (`-s`),
-    so a day the access ingest hadn't finished is written by a later scan only if it was never written: `days: 2`
-    gives each day a second chance. Needs `access/raw/` (the access ingest's). Skipped on REPROC; never fatal."""
+    client × requester × path prefix into `<data>/access/requesters/<day>.parquet`. A day already written from the raw
+    parts there now is left (`-s`); one the access ingest has added to since is rolled again, so `days: 2` gives each
+    day a second pass after its logs have landed (gcs's ingest lags its logs by up to ~14 h, so the first pass, the
+    next morning, misses the day's last hours). Needs `access/raw/` (the access ingest's). Skipped on REPROC; never
+    fatal."""
     if ctx.reproc:
         err("REPROC: skipping the requester rollup")
         return
