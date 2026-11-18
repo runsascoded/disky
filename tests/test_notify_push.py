@@ -144,3 +144,79 @@ def test_additional_links_are_rendered_for_discord_and_pushover():
         'content': '**t**\nm\n[scan](<https://site.test/scans/r>) · [all scans](<https://site.test/scans>)',
         'username': 'disky', 'allowed_mentions': {'parse': []}, 'flags': 4,
     }
+
+
+class SlackGroups:
+    """A `Post` seam over one Slack channel: `chat.postMessage` (ts 1.0, 2.0, …), `chat.update` and
+    `conversations.history` (newest first, with metadata), recording each call's method."""
+
+    def __init__(self, fail_history: bool = False, refuse_metadata: bool = False):
+        self.messages: list[dict] = []
+        self.methods: list[str] = []
+        self.fail_history = fail_history
+        self.refuse_metadata = refuse_metadata
+
+    def __call__(self, url: str, body: bytes, headers: dict[str, str]) -> tuple[int, str]:
+        method = url.rsplit('/', 1)[1]
+        self.methods.append(method)
+        if method == 'conversations.history':
+            assert parse_qs(body.decode())['include_all_metadata'] == ['true']
+            if self.fail_history:
+                return 200, '{"ok":false,"error":"missing_scope"}'
+            return 200, json.dumps({'ok': True, 'messages': list(reversed(self.messages))})
+        p = json.loads(body)
+        if self.refuse_metadata and 'metadata' in p:
+            return 200, '{"ok":false,"error":"invalid_metadata_format"}'
+        if method == 'chat.postMessage':
+            self.messages.append({'ts': f'{len(self.messages) + 1}.0', 'text': p['text'], **({'metadata': p['metadata']} if 'metadata' in p else {})})
+        else:
+            m = next(m for m in self.messages if m['ts'] == p['ts'])
+            m.update(text=p['text'], metadata=p['metadata'])
+        return 200, '{"ok":true}'
+
+
+SCAN_LINKS = (('scan', 'https://site.test/scans/r1'), ('all scans', 'https://site.test/scans'))
+
+
+def step(title: str, message: str, uid: str, priority: int = 0, group: str | None = 'r1') -> Notice:
+    return Notice(title, message, f'https://logs.test/q?uid={uid}', 'task logs', priority, SCAN_LINKS, group)
+
+
+def test_a_runs_step_alerts_are_one_slack_message_and_its_failure_retitles_it():
+    """r2 2026-11-18: static-names, then probe (which failed because static-names had), posted as two top-level
+    alerts for one run. A run's alerts are one message: a line per alert, each with its task logs, the scan links once."""
+    ch = SlackGroups()
+    for n in (step('⚠️ OA R2 scan 2026-11-18T0716', 'static-names failed (exit 1)', 'u1'),
+              step('⚠️ OA R2 scan 2026-11-18T0716', 'probe failed (exit 1)', 'u2'),
+              step('❌ OA R2 scan 2026-11-18T0716', 'run failed (exit 1) in probe', 'u3', priority=1),
+              step('⚠️ OA R2 scan 2026-11-19T0716', 'probe failed (exit 1)', 'u4', group='r2')):
+        assert send(n, ['slack'], env=SLACK, post=ch) == [('slack', None)]
+    assert ch.methods == ['conversations.history', 'chat.postMessage'] + ['conversations.history', 'chat.update'] * 2 + [
+        'conversations.history', 'chat.postMessage']
+    assert [(m['ts'], m['text']) for m in ch.messages] == [
+        ('1.0', '*❌ OA R2 scan 2026-11-18T0716*\n'
+                'static-names failed (exit 1) · <https://logs.test/q?uid=u1|task logs>\n'
+                'probe failed (exit 1) · <https://logs.test/q?uid=u2|task logs>\n'
+                'run failed (exit 1) in probe · <https://logs.test/q?uid=u3|task logs>\n'
+                '<https://site.test/scans/r1|scan> · <https://site.test/scans|all scans>'),
+        ('2.0', '*⚠️ OA R2 scan 2026-11-19T0716*\n'
+                'probe failed (exit 1) · <https://logs.test/q?uid=u4|task logs>\n'
+                '<https://site.test/scans/r1|scan> · <https://site.test/scans|all scans>'),
+    ]
+
+
+def test_a_grouped_alert_whose_message_cant_be_looked_up_posts_its_own():
+    ch = SlackGroups(fail_history=True)
+    for uid in ('u1', 'u2'):
+        assert send(step('⚠️ t', 'm', uid), ['slack'], env=SLACK, post=ch) == [('slack', None)]
+    assert ch.methods == ['conversations.history', 'chat.postMessage'] * 2
+    assert [m['ts'] for m in ch.messages] == ['1.0', '2.0']
+
+
+def test_a_grouped_alert_slack_refuses_posts_plain():
+    ch = SlackGroups(refuse_metadata=True)
+    assert send(step('⚠️ t', 'm', 'u1'), ['slack'], env=SLACK, post=ch) == [('slack', None)]
+    assert ch.methods == ['conversations.history', 'chat.postMessage', 'chat.postMessage']
+    assert [m['text'] for m in ch.messages] == [
+        '*⚠️ t*\nm\n<https://logs.test/q?uid=u1|task logs> · <https://site.test/scans/r1|scan> · <https://site.test/scans|all scans>',
+    ]

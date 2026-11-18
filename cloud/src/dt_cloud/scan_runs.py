@@ -1606,7 +1606,7 @@ class JobRun:
                 return
             url = self.logs_url()
             links = scan_alert_links(self.env.get("SITE_URL"), self.run_id, self.facts().get("store", "primary"))
-            notice = push.Notice(title, message, url, "task logs" if url else None, 1 if level == "fail" else 0, links)
+            notice = push.Notice(title, message, url, "task logs" if url else None, 1 if level == "fail" else 0, links, group=self.run_id)
             for c, e in push.send(notice, chans, env=self.env, post=push.http_post):
                 err(self.redact(f"alert: {c}: {e or 'sent'}"))
         except Exception as e:  # noqa: BLE001

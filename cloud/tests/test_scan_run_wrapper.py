@@ -36,17 +36,27 @@ NOTIFY_ENV = ("PUSHOVER_TOKEN", "PUSHOVER_USER", "DISCORD_NOTIFY_WEBHOOK", "SLAC
 
 
 class Transport:
-    """The `post` seam `disk-tree notify` sends through: records each Slack request, answers `ok`."""
+    """The `post` seam `disk-tree notify` sends through: one Slack channel (`chat.postMessage`, `chat.update`,
+    `conversations.history` over its messages, metadata included); `calls` records each write's URL, headers, body."""
 
     def __init__(self):
         self.calls: list[tuple[str, dict, dict]] = []
+        self.messages: list[dict] = []
 
     def __call__(self, url: str, body: bytes, headers: dict[str, str]) -> tuple[int, str]:
-        self.calls.append((url, headers, json.loads(body)))
+        if url == push.SLACK_HISTORY_URL:
+            return 200, json.dumps({"ok": True, "messages": list(reversed(self.messages))})
+        p = json.loads(body)
+        self.calls.append((url, headers, p))
+        if url == push.SLACK_URL:
+            self.messages.append({"ts": f"{len(self.messages) + 1}.0", **{k: p[k] for k in ("text", "metadata") if k in p}})
+        else:
+            next(m for m in self.messages if m["ts"] == p["ts"]).update(text=p["text"], metadata=p["metadata"])
         return 200, '{"ok":true}'
 
     def texts(self) -> list[str]:
-        return [b["text"] for _, _, b in self.calls]
+        """The channel's messages as they read now, oldest first."""
+        return [m["text"] for m in self.messages]
 
 
 class Job:
@@ -203,13 +213,13 @@ def test_missing_job_start_refuses_and_runs_nothing(job):
 
 
 def test_alert_payloads_warn_fail_and_finish(job, slack):
+    """A run's alerts are one Slack message (`push.Notice.group`, its run id): a line per alert with its task logs,
+    the scan links once, ❌ once any is a failure."""
     job.mp.setenv("SITE_URL", "https://site.test/")
-    url = "https://logs.test/q;uid=u1?project=proj-1&job=job-9"
-    footer = f"<{url}|task logs> · <https://site.test/scans/u1|scan> · <https://site.test/scans|all scans>"
-
-    def payload(text: str) -> tuple[str, dict, dict]:
-        return (push.SLACK_URL, {"Content-Type": "application/json; charset=utf-8", "Authorization": "Bearer xoxb-test"},
-                {"channel": "C0ALERTS", "text": text, "unfurl_links": False, "unfurl_media": False})
+    url = "https://logs.test/q;uid={uid}?project=proj-1&job=job-9"
+    logs = lambda uid: f" · <{url.format(uid=uid)}|task logs>"  # noqa: E731
+    scans = lambda uid: f"<https://site.test/scans/{uid}|scan> · <https://site.test/scans|all scans>"  # noqa: E731
+    auth = {"Content-Type": "application/json; charset=utf-8", "Authorization": "Bearer xoxb-test"}
 
     assert job("start", "-j", "job-9", SCAN, at=T0) == 0
     resume = f"dt-cloud static-names runs add -c {SCAN}"
@@ -218,13 +228,16 @@ def test_alert_payloads_warn_fail_and_finish(job, slack):
     assert job("phase-end", "-M", "-x", "1", "publish", at=T0 + 60) == 1
     assert job("finish", "-x", "1", at=T0 + 61) == 0
     # a second run: no phase alerted, so `finish` does, with the ERR trap's text
+    job.mp.setenv("JOB_ID", "u2")
     assert job("start", "-j", "job-9", SCAN, at=T0 + 100) == 0
     assert job("finish", "-x", "2", "-e", "exit 2: cp a b (run.sh:40)", at=T0 + 101) == 0
-    assert slack.calls == [
-        payload(f"*⚠️ cw-s3 {SCAN}*\nstatic-names failed (exit 1): the scan publishes; search says not available\n"
-                f"Resume: `{resume}`\n{footer}"),
-        payload(f"*❌ cw-s3 {SCAN}*\npublish failed (exit 1)\n{footer}"),
-        payload(f"*❌ cw-s3 {SCAN}*\nrun failed (exit 2): exit 2: cp a b (run.sh:40)\n{footer}"),
+    assert [(u, h, b.get("ts"), b["channel"]) for u, h, b in slack.calls] == [
+        (push.SLACK_URL, auth, None, "C0ALERTS"), (push.SLACK_UPDATE_URL, auth, "1.0", "C0ALERTS"), (push.SLACK_URL, auth, None, "C0ALERTS"),
+    ]
+    assert slack.texts() == [
+        f"*❌ cw-s3 {SCAN}*\nstatic-names failed (exit 1): the scan publishes; search says not available\n"
+        f"Resume: `{resume}`{logs('u1')}\npublish failed (exit 1){logs('u1')}\n{scans('u1')}",
+        f"*❌ cw-s3 {SCAN}*\nrun failed (exit 2): exit 2: cp a b (run.sh:40){logs('u2')}\n{scans('u2')}",
     ]
     assert [ln for ln in job.take() if ln.startswith("alert")] == ["alert: slack: sent"] * 3
 
@@ -294,9 +307,10 @@ def test_redaction_of_a_seeded_secret(job, slack):
                "-R", f"SITE_TOKEN={SECRET} dt-cloud index-sync -p {SCAN}", "index-sync", at=T0 + 10) == 0
     assert job("finish", "-x", "1", "-e", f"exit 1: curl -H 'Authorization: Bearer {SECRET}' (run.sh:9)", at=T0 + 11) == 0
     assert slack.texts() == [
-        f"*⚠️ cw-s3 {SCAN}*\nindex-sync failed (exit 1): rejected <SITE_TOKEN>\nResume: `SITE_TOKEN=<SITE_TOKEN> dt-cloud index-sync -p {SCAN}`",
-        f"*❌ cw-s3 {SCAN}*\nrun failed (exit 1): exit 1: curl -H 'Authorization: Bearer <SITE_TOKEN>' (run.sh:9)",
+        f"*❌ cw-s3 {SCAN}*\nindex-sync failed (exit 1): rejected <SITE_TOKEN>\nResume: `SITE_TOKEN=<SITE_TOKEN> dt-cloud index-sync -p {SCAN}`\n"
+        f"run failed (exit 1): exit 1: curl -H 'Authorization: Bearer <SITE_TOKEN>' (run.sh:9)",
     ]
+    assert SECRET not in json.dumps([m["metadata"] for m in slack.messages])
     assert job.rows("SELECT error FROM scan_runs") == [("exit 1: curl -H 'Authorization: Bearer <SITE_TOKEN>' (run.sh:9)",)]
     assert job.rows("SELECT phase, note FROM scan_run_phases") == [("index-sync", "failed (exit 1), token <SITE_TOKEN>")]
     said = job.take()
