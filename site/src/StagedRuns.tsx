@@ -38,6 +38,7 @@ import {
 import { RecoveryUnavailable, RecoveryUnseen, UndoBy, UndoControl, UndoLine } from './RunUndo'
 import { runHasNoUndo, runNoUndoText, runUndoUnavailable, runUndoUnseen, UNDO_UNSEEN_WHO, undoUnseenText } from './softDelete'
 import { useSoftDeleteNow } from './SweepSoftDelete'
+import { StickyTable } from './stickyHead'
 
 const utc = (ts: number): string => new Date(ts * 1000).toISOString().slice(0, 16).replace('T', ' ')
 const BUCKET_PREFIX = commonBucketPrefix(DEFAULT_STORE.buckets)
@@ -171,7 +172,7 @@ export function RunsSection({ runs, jobs, configured, jobsError, admin, busy, ac
       </div>
       {runP && target < 0 && <p className="dim">The linked run is hidden by these filters or has not been recorded yet.</p>}
       <div className="runs-wrap">
-        <table className="runs">
+        <StickyTable className="runs">
           <thead>
             <tr>
               <th /><th>{sortButton('started', 'run')}</th><th>{sortButton('by', 'by')}</th><th>{sortButton('mode', 'mode')}</th>
@@ -304,7 +305,7 @@ export function RunsSection({ runs, jobs, configured, jobsError, admin, busy, ac
               )
             })}
           </tbody>
-        </table>
+        </StickyTable>
       </div>
       {filtered.length > PAGE_SIZES[0] && (
         <div className="pg runs-pg">
@@ -419,7 +420,7 @@ export function RunDetail({ run, live, progress, dir, planned, fmtBytes, now }: 
           {dir && <RunArtifacts dir={`${dir}${logSubdir(run.mode)}/`} buckets={Object.keys(planned?.buckets ?? {})} />}
           {log && logged ? (
             <div className="runs-wrap">
-              <table className="runs rd-log">
+              <StickyTable className="runs rd-log">
                 <thead><tr><th>bucket</th>{decisionKeys.map(k => <th key={k} className="num">{k === 'delete' ? runOutcomeLabel(run.mode) : k.replace(/_/g, ' ')}</th>)}<th className="num">bytes</th><th className="num">drifted dirs</th><th className="num">failed dirs</th><th>notes</th></tr></thead>
                 <tbody>
                   {Object.entries(log.buckets).map(([b, s]) => (
@@ -441,7 +442,7 @@ export function RunDetail({ run, live, progress, dir, planned, fmtBytes, now }: 
                     <tr className="total"><td>all</td>{decisionKeys.map(k => <td key={k} className="num">{fmtN(logged.decisions[k] ?? 0)}</td>)}<td className="num">{fmtBytes(logged.bytes)}</td><td className="num">{fmtN(logged.driftDirs)}</td><td className="num">{fmtN(logged.failedDirs)}</td><td /></tr>
                   )}
                 </tbody>
-              </table>
+              </StickyTable>
             </div>
           ) : <p className="dim">{run.finished_ts ? 'no decision summary in the run dir' : 'Final summary is written when the run ends; decision parts appear as each bucket executes.'}</p>}
         </div>

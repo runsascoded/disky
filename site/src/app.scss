@@ -135,6 +135,18 @@ header .hrow {
   th:first-child { text-align: left; }
   p { margin: 6px 0 0; }
 }
+// A table's pinned header (`stickyHead.ts`): a copy of its `thead`, fixed just under
+// the top bar while the real one is scrolled past, clipped to the table's sideways-
+// scrolling box. Positioned by transform from the script; opaque, with a rule under
+// it, so rows scrolling beneath never show through.
+.sticky-head {
+  position: fixed; top: 0; left: 0;
+  z-index: var(--z-sticky);
+  overflow: hidden;
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.08);
+}
 // ---- The top bar (SiteNav): ☰ nav menu · page scope/controls · avatar menu.
 // Sticky, full-bleed across the page container (negative margins undo its
 // padding), the same chrome parked at the top and stuck mid-scroll.
@@ -1607,7 +1619,10 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); opacity: 1; }
 .admin-page {
   max-width: 980px;
   margin: 0 auto;
-  padding: 24px 16px;
+  // The top bar's full-bleed margins undo exactly this padding (it reads `--pad-*`).
+  --pad-t: 24px;
+  --pad-x: 16px;
+  padding: var(--pad-t) var(--pad-x);
 
   h1 { margin-bottom: 8px; }
 
@@ -1744,7 +1759,7 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); opacity: 1; }
     .grant-log {
       border-collapse: collapse; font-size: 12px;
       th, td { padding: 2px 10px 2px 0; border-bottom: 0; }
-      th { position: static; color: var(--ink-2); font-weight: normal; }
+      th { color: var(--ink-2); font-weight: normal; }
       .ua { max-width: 36em; overflow-wrap: anywhere; color: var(--ink-2); }
     }
     .revoked-label { font-size: 12px; }
@@ -1766,15 +1781,10 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); opacity: 1; }
       &.danger:hover { color: #d33; border-color: #d33; }
       &:disabled { opacity: 0.4; cursor: default; border-color: transparent; }
     }
-
-    // Long ledger: the table scrolls inside its own box (sideways on a phone,
-    // and vertically past ~70vh) and the header row stays pinned to the box top.
-    thead th {
-      position: sticky; top: 0; z-index: var(--z-raised);
-      background: var(--surface);
-    }
   }
-  .table-scroll { overflow: auto; max-height: 70vh; max-width: 100%; }
+  // A wide table scrolls sideways inside its own box; vertically it scrolls with the
+  // page, its header pinned under the top bar (`StickyTable`).
+  .table-scroll { overflow-x: auto; max-width: 100%; }
 
   .grants-toolbar {
     display: inline-flex; align-items: center; gap: 6px;
@@ -3255,6 +3265,8 @@ kbd { font: inherit; font-size: 11px; padding: 0 4px; border: 1px solid var(--li
     tr.focused td { outline: 2px solid var(--s1); outline-offset: -2px; }
     tr.hot td { background: color-mix(in srgb, var(--s1) 14%, transparent); }
     td.ev { overflow-wrap: anywhere; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+    // A phone: tighter gutters, so a five-column ledger fits the screen instead of clipping its last column.
+    @media (max-width: 640px) { th, td { padding: 4px 4px; } }
   }
   .lane-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; vertical-align: middle; background: var(--lane); }
   .lane-nav { --lane: var(--s1); }

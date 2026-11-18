@@ -10,6 +10,7 @@ import { Tooltip } from './Tooltip'
 import { useDocTitle } from './title'
 import { useUnits } from './units'
 import { fmtCount, fmtDollars } from './usageModel'
+import { StickyTable } from './stickyHead'
 import './usage.scss'
 
 // /admin/cost/<cloud>, admin only: a cloud's cost now, projected, and over the snapshot window, from the daily
@@ -114,7 +115,7 @@ function Now({ s }: { s: GcpCostSnapshot }) {
       </div>
       <h2>$/month by component</h2>
       <div className="table-scroll">
-        <table className="usage-table">
+        <StickyTable className="usage-table">
           <thead><tr><th>component</th><th>$/mo</th><th>jobs</th><th>VM-h</th></tr></thead>
           <tbody>
             {cs.map(x => {
@@ -129,7 +130,7 @@ function Now({ s }: { s: GcpCostSnapshot }) {
               )
             })}
           </tbody>
-        </table>
+        </StickyTable>
       </div>
       {c && (
         <p className="dim">
@@ -155,7 +156,7 @@ function Buckets({ s }: { s: GcpCostSnapshot }) {
     <section>
       <h2>Storage by bucket</h2>
       <div className="table-scroll">
-        <table className="usage-table">
+        <StickyTable className="usage-table">
           <thead><tr>
             <th>bucket</th><th>live</th><th>soft-deleted</th><th>live/day</th><th>$/mo</th>
             {hs.map(h => <th key={h}>in {h}</th>)}
@@ -181,7 +182,7 @@ function Buckets({ s }: { s: GcpCostSnapshot }) {
               </tr>
             ))}
           </tbody>
-        </table>
+        </StickyTable>
       </div>
       <p className="dim">Live bytes grow at the median of their daily deltas (held flat under a whole-bucket lifecycle
         Delete); soft-deleted bytes are held, or drain where soft delete is off. Dimmed: a short window, provisional.</p>

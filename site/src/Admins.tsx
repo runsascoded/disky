@@ -3,6 +3,7 @@ import { useState } from 'react'
 import { Link } from 'react-router-dom'
 import { Tooltip } from './Tooltip'
 import { NO_AUTOFILL } from './noAutofill'
+import { StickyTable } from './stickyHead'
 
 /** `GET /api/admins` (`functions/api/admins.ts`): every path to the `admin` scope on this deployment. */
 export interface AdminsData {
@@ -150,7 +151,7 @@ export function Admins() {
       </p>
       {notice && <p className="admins-notice" role="alert">{notice}</p>}
       <div className="table-scroll">
-        <table className="grants admins-table">
+        <StickyTable className="grants admins-table">
           <thead><tr><th>admin</th><th><Tooltip content="Their GitHub handle, where known: what this list is compared with a GitHub org’s owners by (dt-cloud admins check). Click a listed admin’s to edit it."><span className="admin-via">GitHub</span></Tooltip></th><th>by</th><th>note</th><th>added by</th><th>when</th><th /></tr></thead>
           <tbody>
             {paths.map(p => (
@@ -175,7 +176,7 @@ export function Admins() {
             ))}
             {!paths.length && <tr><td colSpan={7}><em>nobody is an admin</em></td></tr>}
           </tbody>
-        </table>
+        </StickyTable>
       </div>
       {(remove.error ?? setHandle.error) && <p className="err">{(remove.error ?? setHandle.error)!.message}</p>}
       {editable && (

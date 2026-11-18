@@ -6,6 +6,7 @@ import { percentOf } from './runChart'
 import { fmtN } from './types'
 import { Tooltip } from './Tooltip'
 import type { LogSummaryFile, PlanSummaryFile, ProgressFile } from './runs'
+import { StickyTable } from './stickyHead'
 
 interface BucketNode { name: string; prefix?: string; bytes: number; objects: number; deletedBytes: number; deletedObjects: number; known: boolean; state: string; updated?: string | null; children?: BucketNode[] }
 
@@ -76,6 +77,6 @@ export function RunBucketProgress({ planned, dir, live, log, fmtBytes, dry, band
         tipMode="dock" renderTooltip={details} renderTipDefault={details}
       />
     </div>
-    <div className="runs-wrap"><table className="runs"><thead><tr><th>bucket</th><th>state</th><th className="num">objects</th><th className="num">bytes</th></tr></thead><tbody>{nodes.map(n => <tr key={n.name}><td>{n.name}</td><td><Tooltip cell content={n.updated ? `Latest progress: ${n.updated}` : 'No progress file for this bucket yet.'}><span>{n.state}</span></Tooltip></td><td className="num">{n.known ? `${fmtN(n.deletedObjects)} / ${fmtN(n.objects)} · ${percentOf(n.deletedObjects, n.objects)}` : `— / ${fmtN(n.objects)}`}</td><td className="num">{n.known ? `${fmtBytes(n.deletedBytes)} / ${fmtBytes(n.bytes)} · ${percentOf(n.deletedBytes, n.bytes)}` : `— / ${fmtBytes(n.bytes)}`}</td></tr>)}</tbody></table></div>
+    <div className="runs-wrap"><StickyTable className="runs"><thead><tr><th>bucket</th><th>state</th><th className="num">objects</th><th className="num">bytes</th></tr></thead><tbody>{nodes.map(n => <tr key={n.name}><td>{n.name}</td><td><Tooltip cell content={n.updated ? `Latest progress: ${n.updated}` : 'No progress file for this bucket yet.'}><span>{n.state}</span></Tooltip></td><td className="num">{n.known ? `${fmtN(n.deletedObjects)} / ${fmtN(n.objects)} · ${percentOf(n.deletedObjects, n.objects)}` : `— / ${fmtN(n.objects)}`}</td><td className="num">{n.known ? `${fmtBytes(n.deletedBytes)} / ${fmtBytes(n.bytes)} · ${percentOf(n.deletedBytes, n.bytes)}` : `— / ${fmtBytes(n.bytes)}`}</td></tr>)}</tbody></StickyTable></div>
   </section>
 }

@@ -6,6 +6,7 @@ import { useRegistry } from './identities'
 import { useUserEmails } from './owners'
 import { viewerOf } from './sessionsModel'
 import { SiteNav } from './SiteNav'
+import { useStickyHeads } from './stickyHead'
 import { UserChip } from './UserChip'
 import { useDocTitle } from './title'
 
@@ -24,6 +25,8 @@ export function SessionsPage() {
   const { sid } = useParams()
   const [search, setSearch] = useSearchParams()
   useDocTitle(sid ? `session ${sid.slice(0, 8)}` : 'Sessions', 'Admin')
+  // The package's tables take no ref; the list's header pins under the top bar like every other table.
+  const tables = useStickyHeads()
   const params: SessionListParams = {
     email: search.get('u') ?? '', since: search.get('since') ?? '', errors: search.get('err') === '1',
     after: search.get('after'), before: search.get('before'),
@@ -36,7 +39,7 @@ export function SessionsPage() {
     }
     return query
   }, { replace })
-  return <div className="admin-page sessions-page">
+  return <div className="admin-page sessions-page" ref={tables}>
     <SiteNav />
     <p className="crumbs"><Link to="/admin">admin</Link>{sid && <> · <Link to="/admin/sessions">sessions</Link></>}</p>
     {sid ? <SessionView sid={sid} renderViewer={renderViewer} /> : <SessionList

@@ -7,6 +7,7 @@ import { useTable, useTableMutations } from './db'
 import { Skeleton } from './Busy'
 import { NO_AUTOFILL } from './noAutofill'
 import { Pager, usePaged } from './Pager'
+import { StickyTable } from './stickyHead'
 
 // Generic editable table over one /api/db table: TanStack Table for the
 // grid (sorting now; filtering/pagination are config away), TSQ mutations
@@ -131,36 +132,38 @@ export function DbTable({ name }: { name: string }) {
         </form>
       )}
       {err && <p className="err">{err.message}</p>}
-      <table>
-        <thead>
-          {table.getHeaderGroups().map(hg => (
-            <tr key={hg.id}>
-              {hg.headers.map(h => (
-                <th
-                  key={h.id}
-                  className={h.column.getCanSort() ? 'sortable' : ''}
-                  onClick={h.column.getToggleSortingHandler()}
-                >
-                  {flexRender(h.column.columnDef.header, h.getContext())}
-                  {{ asc: ' ▲', desc: ' ▼' }[h.column.getIsSorted() as string] ?? ''}
-                </th>
-              ))}
-            </tr>
-          ))}
-        </thead>
-        <tbody>
-          {paged.rows.map(r => (
-            <tr key={r.id}>
-              {r.getVisibleCells().map(c => (
-                <td key={c.id}>{flexRender(c.column.columnDef.cell, c.getContext())}</td>
-              ))}
-            </tr>
-          ))}
-          {!table.getRowModel().rows.length && (
-            <tr><td colSpan={columns.length}><em>empty</em></td></tr>
-          )}
-        </tbody>
-      </table>
+      <div className="tbl-scroll">
+        <StickyTable>
+          <thead>
+            {table.getHeaderGroups().map(hg => (
+              <tr key={hg.id}>
+                {hg.headers.map(h => (
+                  <th
+                    key={h.id}
+                    className={h.column.getCanSort() ? 'sortable' : ''}
+                    onClick={h.column.getToggleSortingHandler()}
+                  >
+                    {flexRender(h.column.columnDef.header, h.getContext())}
+                    {{ asc: ' ▲', desc: ' ▼' }[h.column.getIsSorted() as string] ?? ''}
+                  </th>
+                ))}
+              </tr>
+            ))}
+          </thead>
+          <tbody>
+            {paged.rows.map(r => (
+              <tr key={r.id}>
+                {r.getVisibleCells().map(c => (
+                  <td key={c.id}>{flexRender(c.column.columnDef.cell, c.getContext())}</td>
+                ))}
+              </tr>
+            ))}
+            {!table.getRowModel().rows.length && (
+              <tr><td colSpan={columns.length}><em>empty</em></td></tr>
+            )}
+          </tbody>
+        </StickyTable>
+      </div>
       <Pager paged={paged} label="Table rows" />
       <p className="row-count">{data.rows.length} row{data.rows.length === 1 ? '' : 's'}{spec.canWrite ? '' : ' (read-only)'}</p>
     </div>

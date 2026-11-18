@@ -14,6 +14,7 @@ import { useUnits } from './units'
 import { useDocTitle } from './title'
 import { Busy, Skeleton } from './Busy'
 import { ActionLog } from './ActionLog'
+import { StickyTable } from './stickyHead'
 
 interface Cell { by: string; to: string; bytes: number; prefixes: string[] }
 
@@ -75,7 +76,7 @@ export function AssignmentsPage() {
       {!!q.data?.cells.length && (
         <div className="table-scroll busy-host">
           {q.isFetching && <Busy corner label="refreshing…" />}
-          <table className="heatmap">
+          <StickyTable className="heatmap">
             <thead>
               <tr>
                 <th className="corner"><span className="dim">assigner ↓ / assignee →</span></th>
@@ -105,7 +106,7 @@ export function AssignmentsPage() {
                 </tr>
               ))}
             </tbody>
-          </table>
+          </StickyTable>
         </div>
       )}
       <ActionLog />

@@ -3,6 +3,7 @@ import { useState } from 'react'
 import { Link } from 'react-router-dom'
 import { copyText } from './CopyName'
 import { Paginated } from './Pager'
+import { StickyTable } from './stickyHead'
 
 interface TokenRow {
   id: number
@@ -73,7 +74,7 @@ export function PreviewLinks() {
         Plain links follow this site's anonymous preview policy and carry no detailed-preview token. Copy a live one to share it again; revoke to send a view back to the anonymous card.
       </p>
       <Paginated rows={rows} label="Preview links">{page => <div className="table-scroll">
-        <table className="grants">
+        <StickyTable className="grants">
           <thead><tr><th>page</th><th>minted by</th><th>when</th><th>until</th><th /></tr></thead>
           <tbody>
             {page.map(r => (
@@ -94,7 +95,7 @@ export function PreviewLinks() {
             ))}
             {!rows.length && !q.isPending && <tr><td colSpan={5}><em>none minted yet</em></td></tr>}
           </tbody>
-        </table>
+        </StickyTable>
       </div>}</Paginated>
     </section>
   )

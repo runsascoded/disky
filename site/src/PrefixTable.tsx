@@ -18,6 +18,7 @@ import type { UserIndexEntry } from './colors'
 import { type PrefixSortKey, type PrefixStat, relAgo } from './prefixes'
 import { useStore } from './store'
 import { listingTime } from './listingTime'
+import { StickyTable } from './stickyHead'
 
 export interface PrefixRow {
   /** The prefix itself (`gs://bucket/path/`) — the row's key and name. */
@@ -84,7 +85,7 @@ export function PrefixTable<R extends PrefixRow>({ rows, sort, onSort, shareOf, 
     </th>
   )
   return (
-    <table className="prefix-table">
+    <StickyTable className="prefix-table">
       <thead>
         <tr>
           {lead && <th className="col-lead">{lead.header}</th>}
@@ -133,6 +134,6 @@ export function PrefixTable<R extends PrefixRow>({ rows, sort, onSort, shareOf, 
           )
         })}
       </tbody>
-    </table>
+    </StickyTable>
   )
 }

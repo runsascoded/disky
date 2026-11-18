@@ -5,6 +5,7 @@ import type { HistoryAction, HistoryData, HistoryJob, HistoryMeasuredStorage, Hi
 import { Busy, Loading } from './Busy'
 import { isScanId } from './scanSlug'
 import { useUnits } from './units'
+import { StickyTable } from './stickyHead'
 import './HistoryAdmin.css'
 
 const ENDPOINT = '/api/admin/history'
@@ -77,23 +78,23 @@ export function HistoryPlanPreview({ plan, onHoverScan }: { plan: HistoryPlan; o
         <p className="hint">This covers only the interval store’s folded canonical tables. It excludes search indexes, served sorts, sidecars, churn splits, mirrors, old generations and metadata. Changed payload bytes are a separate metric.</p>
         <p className="hint">A candidate adds storage. Source generations remain until an explicit writer-lineage change and garbage collection; pinning a reader version does not reclaim them.</p>
       </div>}
-      {plan.steps?.length ? <div className="history-table-scroll"><table className="history-removals">
+      {plan.steps?.length ? <div className="history-table-scroll"><StickyTable className="history-removals">
         <thead><tr><th>Removed scan</th><th>Previous retained</th><th>Next retained</th><th>Changes before</th><th>Changes after</th><th>Score (max)</th><th>New delta</th></tr></thead>
         <tbody>{plan.steps.map(step => <tr key={step.scan} tabIndex={0} {...hover(step.scan)}>
           <td><code>{step.scan}</code></td><td><code>{step.before}</code></td><td><code>{step.after}</code></td>
           <td>{num(step.left.count)}</td><td>{num(step.right.count)}</td><td>{num(step.score)}</td><td>{num(step.merged.count)}</td>
         </tr>)}</tbody>
-      </table></div> : null}
-      <details><summary>Scan selection</summary><div className="history-table-scroll"><table>
+      </StickyTable></div> : null}
+      <details><summary>Scan selection</summary><div className="history-table-scroll"><StickyTable>
         <thead><tr><th>Scan</th><th>Decision</th></tr></thead>
         <tbody>{plan.scans.map(scan => <tr key={scan} tabIndex={0} {...hover(scan)}><td><code>{scan}</code></td><td>{kept.has(scan) ? pinned.has(scan) ? 'Retained · pinned' : 'Retained' : 'Remove'}</td></tr>)}</tbody>
-      </table></div></details>
-      {!!plan.candidates?.length && <details><summary>Adjacent change scores for all scans</summary><div className="history-table-scroll"><table>
+      </StickyTable></div></details>
+      {!!plan.candidates?.length && <details><summary>Adjacent change scores for all scans</summary><div className="history-table-scroll"><StickyTable>
         <thead><tr><th>Scan</th><th>Changes before</th><th>Changes after</th><th>Score (max)</th><th>Protection</th></tr></thead>
         <tbody>{plan.candidates.map(candidate => <tr key={candidate.scan} tabIndex={0} {...hover(candidate.scan)}>
           <td><code>{candidate.scan}</code></td><td>{candidate.left ? num(candidate.left.count) : '—'}</td><td>{candidate.right ? num(candidate.right.count) : '—'}</td><td>{candidate.score === null ? '—' : num(candidate.score)}</td><td>{candidate.reasons.join(', ') || 'Eligible'}</td>
         </tr>)}</tbody>
-      </table></div></details>}
+      </StickyTable></div></details>}
       <details><summary>Source generations and plan fingerprint</summary><pre>{JSON.stringify({ digest: plan.digest, source: plan.source }, null, 2)}</pre></details>
     </div>
   )

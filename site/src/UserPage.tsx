@@ -25,6 +25,7 @@ import {
   ratePerByte, fmtN, fmtUsd,
   type Meta, type TreeNode, type UserInfo,
 } from './types'
+import { StickyTable } from './stickyHead'
 
 // Per-user estate pages: `/users` ranks everyone by owned bytes; `/user/:id`
 // answers "what do I own, and what was assigned to me?".
@@ -307,7 +308,7 @@ export function UsersPage() {
         </>
       )}
       {users.length > 0 && (
-        <table className="worklist">
+        <StickyTable className="worklist">
           <thead>
             <tr>
               <th>User</th>
@@ -346,7 +347,7 @@ export function UsersPage() {
               </td>
             </tr>
           </tfoot>
-        </table>
+        </StickyTable>
       )}
       <SiteKbd />
     </main>
@@ -363,7 +364,7 @@ function AssignmentsTable({ rows }: { rows: Estate['assignments'] }) {
   const slice = rows.slice(p * PAGE, p * PAGE + PAGE)
   return (
     <>
-      <table className="worklist assignments">
+      <StickyTable className="worklist assignments">
         <thead>
           <tr><th>Prefix</th><th className="num">bytes</th><th className="num">objects</th><th>Assigned</th></tr>
         </thead>
@@ -380,7 +381,7 @@ function AssignmentsTable({ rows }: { rows: Estate['assignments'] }) {
             </tr>
           ))}
         </tbody>
-      </table>
+      </StickyTable>
       {pages > 1 && (
         <div className="pager">
           <button type="button" disabled={p === 0} onClick={() => setPage(p - 1)}>← prev</button>

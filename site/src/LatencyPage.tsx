@@ -3,6 +3,7 @@ import { Link, useSearchParams } from 'react-router-dom'
 import type { LatencySummary, Stat } from '../functions/_lib/sessionLatencyShape'
 import { SiteNav } from './SiteNav'
 import { useDocTitle } from './title'
+import { StickyTable } from './stickyHead'
 
 // /admin/latency — request latency from the session log (`/api/session-log/latency`): what viewers' tabs measured for
 // each request (route, status, duration, the response's cache tier), per route and tier, per user, and the slowest.
@@ -74,21 +75,21 @@ export function LatencyPage() {
           </p>
           <h2>By route and cache tier</h2>
           <div className="table-scroll">
-            <table className="sessions">
+            <StickyTable className="sessions">
               <thead><tr><th>route</th><th>cache</th>{STAT_HEAD}</tr></thead>
               <tbody>{d.routes.map(r => <tr key={`${r.route}|${r.cache}`}><td><code>{r.route}</code></td><td>{r.cache}</td><StatCells s={r} /></tr>)}</tbody>
-            </table>
+            </StickyTable>
           </div>
           <h2>By user</h2>
           <div className="table-scroll">
-            <table className="sessions">
+            <StickyTable className="sessions">
               <thead><tr><th>user</th>{STAT_HEAD}</tr></thead>
               <tbody>{d.users.map(u => <tr key={u.email}><td><a href={`?${new URLSearchParams({ ...Object.fromEntries(params), email: u.email })}`} onClick={e => { e.preventDefault(); set('email', u.email) }}>{u.email}</a></td><StatCells s={u} /></tr>)}</tbody>
-            </table>
+            </StickyTable>
           </div>
           <h2>Slowest requests</h2>
           <div className="table-scroll">
-            <table className="sessions">
+            <StickyTable className="sessions">
               <thead><tr><th>when</th><th>user</th><th>request</th><th className="num">status</th><th>cache</th><th className="num">time</th></tr></thead>
               <tbody>{d.slowest.map((r, i) => (
                 <tr key={i}>
@@ -100,7 +101,7 @@ export function LatencyPage() {
                   <td className="num">{fmtMs(r.ms)}</td>
                 </tr>
               ))}</tbody>
-            </table>
+            </StickyTable>
           </div>
         </>
       )}

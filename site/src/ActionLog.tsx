@@ -6,6 +6,7 @@ import { Tooltip } from './Tooltip'
 import { UserChip } from './UserChip'
 import { Skeleton } from './Busy'
 import type { ActionLogRow, ActionStatus } from '../functions/_lib/actionLogShape'
+import { StickyTable } from './stickyHead'
 
 const PAGE = 50
 
@@ -54,7 +55,7 @@ export function ActionLog() {
       {q.error && <p className="err">{(q.error as Error).message}</p>}
       {q.data && (
         <div className="table-scroll">
-          <table className="log">
+          <StickyTable className="log">
             <thead>
               <tr><th>when</th><th>by</th><th>prefix</th><th>owner</th><th>status</th><th>note</th></tr>
             </thead>
@@ -79,7 +80,7 @@ export function ActionLog() {
                 </tr>
               ))}
             </tbody>
-          </table>
+          </StickyTable>
         </div>
       )}
     </section>

@@ -28,6 +28,7 @@ import { rowLabel, type RowMatches, rowsCover } from './filterCover'
 import { ActStatus, RowActs, type RowSource, useActDeps, useKeepFocus, useMatchAct } from './MatchActions'
 import { RootSourceTag } from './UnionNotes'
 import { flatRows, LARGEST_MAX, LARGEST_STEP, useLargest } from './largest'
+import { StickyTable } from './stickyHead'
 
 // Sortable, paged listing of the treemap's current node's children — the
 // tabular twin of the map above it: every named row is a link, a directory
@@ -325,7 +326,7 @@ export function ChildrenTable({ node, segs, scheme, bucketSchemes, scan, flatOk 
   return (
     <section className="children-tbl" onClick={clearOnDeadClick}>
       <div className="pager top">{modes}{pager}</div>
-      {flatNote || <table className="worklist selectable">
+      {flatNote || <StickyTable className="worklist selectable">
         <thead>
           <tr>
             {showSel && <th className="col-sel" onClick={e => { e.stopPropagation(); if (!(e.target as HTMLElement).closest('input')) sel.togglePage() }}><input type="checkbox" aria-label="select / deselect this page" title="select / deselect this page (⇧x)" checked={sel.pageAll} onChange={sel.togglePage} /></th>}
@@ -484,7 +485,7 @@ export function ChildrenTable({ node, segs, scheme, bucketSchemes, scan, flatOk 
             <td colSpan={(hasYr ? 3 : 2) + (hasRead ? 1 : 0) + (hasOwners ? 1 : 0) + (showSel ? 1 : 0)} />
           </tr>
         </tfoot>
-      </table>}
+      </StickyTable>}
       {pager && <div className="pager">{pager}</div>}
       {/* The selection bar docks BELOW the table (sticky), so making a
           selection never shifts the rows you're clicking. The dock is ALWAYS

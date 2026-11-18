@@ -22,6 +22,7 @@ import {
   type DupCopy, type DupGroup, type DupsResponse, type DupsSort, groupIdle, idleDays, pairMatrix, SORTS, sortGroups, stageBlock,
   stageItems, suggested, type Tier, today,
 } from './dupsModel'
+import { StickyTable } from './stickyHead'
 import './scans.scss'
 import './dups.scss'
 
@@ -100,7 +101,7 @@ function Header({ data, tier, setBuckets }: { data: DupsResponse; tier: Tier; se
       </p>
       {m.buckets.length > 0 && (
         <div className="dp-matrix-wrap">
-          <table className="dp-matrix">
+          <StickyTable className="dp-matrix">
             <caption>{tier} copies by bucket pair <span className="dim">(click to filter)</span></caption>
             <thead><tr><th />{m.buckets.map(b => <th key={b}>{b}</th>)}</tr></thead>
             <tbody>
@@ -122,7 +123,7 @@ function Header({ data, tier, setBuckets }: { data: DupsResponse; tier: Tier; se
                 </tr>
               ))}
             </tbody>
-          </table>
+          </StickyTable>
         </div>
       )}
     </section>
@@ -250,7 +251,7 @@ export function DupsPage() {
           </div>
         )}
         <div className="runs-wrap">
-          <table className="runs dp-groups">
+          <StickyTable className="runs dp-groups">
             <thead>
               <tr><th /><th>shared path</th><th>tier</th><th className="num">size</th><th className="num">copies</th><th className="num">reclaimable</th><th className="num">idle</th>{admin && <th className="num">to stage</th>}</tr>
             </thead>
@@ -278,7 +279,7 @@ export function DupsPage() {
                 )
               })}
             </tbody>
-          </table>
+          </StickyTable>
         </div>
         <Pager paged={paged} label="Duplicate groups" />
         {!groups.length && <p className="dim">No groups match.</p>}

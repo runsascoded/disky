@@ -8,6 +8,7 @@ import type { DiffTableRow, SortKey } from './diffRows'
 import { Tooltip } from './Tooltip'
 import { usePerfCommit } from './perf'
 import { pathText } from './pathCrumbs'
+import { StickyTable } from './stickyHead'
 
 // The diff map's tabular twin (like ChildrenTable under the main map): one
 // row per cell of the drilled node — before / after / Δ bytes and objects,
@@ -88,7 +89,7 @@ export function DiffTable({ model, scheme, segs, onDrill, onOpen }: {
   return (
     <section className="children-tbl diff-tbl" id="dtbl">
       {pager && <div className="pager top">{pager}</div>}
-      <table className="worklist">
+      <StickyTable className="worklist">
         <thead>
           <tr>
             {th('name', 'name', false)}
@@ -146,7 +147,7 @@ export function DiffTable({ model, scheme, segs, onDrill, onOpen }: {
             <td className={deltaCls({ delta: root.n_desc_delta, status: 'changed' }, root.n_desc_delta)}>{root.n_desc_delta === 0 ? '0' : fmtNDelta(root.n_desc_delta)}</td>
           </tr>
         </tfoot>
-      </table>
+      </StickyTable>
       {pager && <div className="pager">{pager}</div>}
       {/* The map draws only what moved (Δ mode): say what the table is
           leaving out, so the rows and the totals agree. */}

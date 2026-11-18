@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import { countText, KIND_DEFS, NOTIFY, type Notify } from '../functions/_lib/activityShape'
+import { StickyTable } from './stickyHead'
 
 // `/admin`'s "Activity" table (specs/done/activity-feed.md), and the helpers `/admin/activity` shares with it.
 
@@ -48,7 +49,7 @@ export function ActivityKinds() {
       {set.error && <p className="err">{set.error.message}</p>}
       {q.data && (
         <div className="table-scroll">
-          <table className="activity-kinds-table">
+          <StickyTable className="activity-kinds-table">
             <thead><tr><th>kind</th><th>covers</th><th>record</th><th>admin channel</th></tr></thead>
             <tbody>
               {q.data.kinds.map(k => {
@@ -67,7 +68,7 @@ export function ActivityKinds() {
                 )
               })}
             </tbody>
-          </table>
+          </StickyTable>
         </div>
       )}
     </section>

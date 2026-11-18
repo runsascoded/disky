@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { HOT_DATES, changeHotDraft, exactInteger, hotDraft, hotDraftParams, type HotDraft, type HotResult } from './hotModel'
 import { NO_AUTOFILL } from './noAutofill'
+import { StickyTable } from './stickyHead'
 
 export function HotSearchFields({ draft, onChange, dates }: { draft: HotDraft; onChange: (field: keyof HotDraft, value: string) => void; dates?: readonly string[] }) {
   const { date, name, from } = draft
@@ -32,7 +33,7 @@ export function HotTotals({ result }: { result: HotResult }) {
     ...after.buckets.map((row, i) => ({ path: row.path, after: row, before: before?.buckets[i],
       delta: before ? { b: row.b - before.buckets[i].b, o: row.o - before.buckets[i].o } : undefined }))]
   return <div className="hot-table-scroll" tabIndex={0} aria-label="Exact fleet and bucket totals">
-    <table><caption>Matching coverage for “{after.pattern}”{before ? ` from ${before.date} to ${after.date}` : ` on ${after.date}`}</caption>
+    <StickyTable><caption>Matching coverage for “{after.pattern}”{before ? ` from ${before.date} to ${after.date}` : ` on ${after.date}`}</caption>
       <thead>{before ? <>
         <tr><th rowSpan={2} scope="col">Scope</th><th colSpan={2} scope="colgroup">{before.date}</th><th colSpan={2} scope="colgroup">{after.date}</th><th colSpan={2} scope="colgroup">Change</th></tr>
         <tr>{['before', 'after', 'change'].flatMap(key => [<th key={key + 'b'} scope="col">Bytes</th>, <th key={key + 'o'} scope="col">Objects</th>])}</tr>
@@ -43,6 +44,6 @@ export function HotTotals({ result }: { result: HotResult }) {
         <td>{exactInteger(row.after.b)}</td><td>{exactInteger(row.after.o)}</td>
         {before && <><td>{exactInteger(row.delta!.b, true)}</td><td>{exactInteger(row.delta!.o, true)}</td></>}
       </tr>)}</tbody>
-    </table>
+    </StickyTable>
   </div>
 }

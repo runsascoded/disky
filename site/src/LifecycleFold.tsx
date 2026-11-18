@@ -5,6 +5,7 @@ import type { BucketLifecycleRow, LifecycleSnapshot } from './lifecycle'
 import { storeUrl, type Store } from './stores'
 import { Tooltip } from './Tooltip'
 import { Loading } from './Busy'
+import { StickyTable } from './stickyHead'
 
 // Each bucket's lifecycle rules as the scan job snapshotted them
 // (`<store.base>/<scan>/lifecycle.json`), diffed per bucket against the
@@ -92,7 +93,7 @@ export function LifecycleFold({ store, asof, prevScan, note }: {
       </summary>
       {rules ? (
         <div className="tbl-scroll">
-        <table className="worklist lifecycle-tbl">
+        <StickyTable className="worklist lifecycle-tbl">
           <thead>
             <tr>
               {multi && !grouped && <th>bucket</th>}
@@ -122,7 +123,7 @@ export function LifecycleFold({ store, asof, prevScan, note }: {
                 )
               })}
           </tbody>
-        </table>
+        </StickyTable>
         </div>
       ) : (
         <p className="tab-note">{loading ? <Loading label="Loading lifecycle rules…" /> : <>no snapshot for this scan{store.lifecycle?.recordedFrom && <> (recorded from {store.lifecycle.recordedFrom} on)</>}</>}</p>

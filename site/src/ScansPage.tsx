@@ -38,6 +38,7 @@ import { durationAxis, durationSegments } from './durationAxis'
 import { XRangeControls } from './XRangeControls'
 import { brushDomain, fitToWindow, fmtXr, inXDomain, parseXr, resolveXDomain, spanDomain, type XDomain } from './xDomain'
 import { scanTime } from './scanSlug'
+import { StickyTable } from './stickyHead'
 import './scans.scss'
 
 type DetailResponse = Links & {
@@ -524,7 +525,7 @@ export function ScansPage() {
           </div>}
         </section>
         <div className="runs-wrap">
-          <table className="runs sr-runs">
+          <StickyTable className="runs sr-runs">
             <thead><tr>
               {retentionOn && <><th className="sr-retention-cell">History</th><th className="sr-retention-loss"><Tooltip content="Maximum object-state changes in either neighboring interval: a heuristic for information loss. Read and owner metadata changes are excluded.">Change score</Tooltip></th></>}
               <th><Tooltip content="When the run started, in your time zone; hover for its id.">run</Tooltip></th><th>job type</th><th>status</th>
@@ -571,7 +572,7 @@ export function ScansPage() {
                 )
               })}
             </tbody>
-          </table>
+          </StickyTable>
         </div>
         <Pager paged={paged} label="Scan runs" />
       </>)}
@@ -729,7 +730,7 @@ function StepDrawer({ node, run, project, onClose }: { node: DagNode; run: ScanR
         <button type="button" className="sr-drawer-close" onClick={onClose} aria-label="Close the step's tasks">close</button>
       </div>
       <div className="runs-wrap">
-        <table className="runs sr-tasks">
+        <StickyTable className="runs sr-tasks">
           <thead><tr>
             {node.tasks.some(t => t.tag) && <th>task</th>}<th>phases</th><th>machine</th><th className="num">start</th><th className="num">duration</th><th>logs</th>
           </tr></thead>
@@ -746,7 +747,7 @@ function StepDrawer({ node, run, project, onClose }: { node: DagNode; run: ScanR
               </tr>
             )
           })}</tbody>
-        </table>
+        </StickyTable>
       </div>
       <Pager paged={paged} label="Step tasks" />
     </div>
@@ -759,7 +760,7 @@ function TasksTable({ tasks, run, project }: { tasks: RunTask[]; run: ScanRun; p
   const t0 = run.started_ts
   return (<>
     <div className="runs-wrap">
-      <table className="runs sr-tasks">
+      <StickyTable className="runs sr-tasks">
         <thead><tr>
           <th>phases</th><th>machine</th><th className="num">start</th><th className="num">duration</th>
           <th><Tooltip content="Nextflow deletes a task's Batch job when it finishes (its logs stay), so the job links only while it runs.">Batch job</Tooltip></th><th>logs</th>
@@ -778,7 +779,7 @@ function TasksTable({ tasks, run, project }: { tasks: RunTask[]; run: ScanRun; p
             </tr>
           )
         })}</tbody>
-      </table>
+      </StickyTable>
     </div>
     <Pager paged={paged} label="Tasks" />
   </>)
@@ -813,7 +814,7 @@ function OutputsTable({ outputs, meta }: { outputs: OutputDelta[]; meta: string 
   }
   return (
     <div className="runs-wrap">
-      <table className="runs sr-outputs">
+      <StickyTable className="runs sr-outputs">
         <thead><tr>
           <th>structure</th><th className="num">bytes</th>
           <th className="num"><Tooltip content={`Against the previous scan${tops[0]?.prev_scan ? ` (${tops[0].prev_scan})` : ''}: the same structure's bytes.`}>Δ prev</Tooltip></th>
@@ -821,7 +822,7 @@ function OutputsTable({ outputs, meta }: { outputs: OutputDelta[]; meta: string 
           <th><Tooltip content="The output's directory in the /meta tree (the deployments' own data bucket, scanned periodically: a just-written output appears after its next meta scan).">tree</Tooltip></th>
         </tr></thead>
         <tbody>{tops.flatMap(o => [row(o, false), ...(open.has(o.key) ? kids(o.key).map(k => row(k, true)) : [])])}</tbody>
-      </table>
+      </StickyTable>
     </div>
   )
 }
@@ -831,7 +832,7 @@ function RunList({ runs, links, title, scanHref }: { runs: ScanRun[]; links: Lin
   return <>
     <h3>{title}</h3>
     <div className="runs-wrap">
-      <table className="runs">
+      <StickyTable className="runs">
         <thead><tr><th>run</th><th>kind</th><th>Batch status</th><th>started</th><th className="num">duration</th><th>machine</th><th className="num">cost</th><th>links</th></tr></thead>
         <tbody>{runs.map(r => (
           <tr key={r.run_id} className={r.status === 'failed' ? 'failed' : undefined}>
@@ -843,7 +844,7 @@ function RunList({ runs, links, title, scanHref }: { runs: ScanRun[]; links: Lin
             <td className="nb"><Links run={r} links={links} /></td>
           </tr>
         ))}</tbody>
-      </table>
+      </StickyTable>
     </div>
   </>
 }
@@ -868,14 +869,14 @@ function Live({ live, inline }: { live: NonNullable<ReturnType<typeof liveness>>
 /** Each phase's note (rows, bytes, seconds, peaks), in timeline order. */
 function PhaseNotes({ spans, color }: { spans: PhaseSpan[]; color: (p: string) => string }) {
   return <div className="runs-wrap">
-    <table className="runs sr-notes">
+    <StickyTable className="runs sr-notes">
       <thead><tr><th>phase</th><th className="num">duration</th><th>note</th></tr></thead>
       <tbody>{spans.map(p => <tr key={p.phase} className={p.status === 'failed' ? 'failed' : undefined}>
         <td className="nb"><i className="sw" style={{ background: phaseFill(p, color) }} />{p.phase}{p.status === 'running' && <span className="dim"> · running</span>}</td>
         <td className="num nb">{fmtDur(p.end - p.start)}</td>
         <td>{p.note ?? <span className="dim">—</span>}</td>
       </tr>)}</tbody>
-    </table>
+    </StickyTable>
   </div>
 }
 

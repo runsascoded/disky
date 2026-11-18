@@ -19,6 +19,7 @@ import { phaseOrder } from './scanRunsModel'
 import { scanTime } from './scanSlug'
 import { colorer, fmtDur, fmtRunTime, getJson, PhaseBar, runDay, Status, useScanRuns } from './scanRunsUi'
 import { Pager, usePaged } from './Pager'
+import { StickyTable } from './stickyHead'
 import './scans.scss'
 import './health.scss'
 
@@ -254,7 +255,7 @@ export function HealthPage() {
           )}
           {gapRows.length > 0 && (
             <div className="runs-wrap">
-              <table className="runs hl-cov">
+              <StickyTable className="runs hl-cov">
                 <thead><tr><th>scan</th>{cols.map(c => <th key={c} className="hl-c"><Tooltip content={COLUMN_TIPS[c]}><span>{COLUMN_LABELS[c]}</span></Tooltip></th>)}</tr></thead>
                 <tbody>
                   {paged.rows.map(r => (
@@ -264,7 +265,7 @@ export function HealthPage() {
                     </tr>
                   ))}
                 </tbody>
-              </table>
+              </StickyTable>
             </div>
           )}
           <Pager paged={paged} label="Scans" />

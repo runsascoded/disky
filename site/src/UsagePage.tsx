@@ -8,6 +8,7 @@ import {
   type AttrKey, type AttrRow, attribution, coverage, fmtCount, fmtDollars, lastDays, PRODUCTS, productCosts,
   type UsageSnapshot, type UsageSums, windowTotals,
 } from './usageModel'
+import { StickyTable } from './stickyHead'
 import './usage.scss'
 
 // /admin/usage (specs/usage-metrics.md), admin only: the deployment's Cloudflare bill and who drives it, from the
@@ -93,7 +94,7 @@ function Totals({ snaps }: { snaps: UsageSnapshot[] }) {
         )}
       </div>
       <div className="table-scroll">
-        <table className="usage-table">
+        <StickyTable className="usage-table">
           <thead><tr><th>unit</th><th>used</th><th>included</th><th>over</th><th>over $</th><th>list $</th></tr></thead>
           <tbody>
             {shown.map(x => {
@@ -116,7 +117,7 @@ function Totals({ snaps }: { snaps: UsageSnapshot[] }) {
               )
             })}
           </tbody>
-        </table>
+        </StickyTable>
       </div>
       <p className="dim">The Workers Paid base fee is not included. Functions CPU is an estimate (the analytics carry
         CPU-time quantiles, not a sum).</p>
@@ -191,7 +192,7 @@ function Attribution({ snaps, attr, setAttr, rank, setRank }: {
       </p>
       {rows.length === 0 ? <p>No usage points in this window.</p> : (
         <div className="table-scroll">
-          <table className="usage-table">
+          <StickyTable className="usage-table">
             <thead><tr>
               <th>{attr}</th>{attr === 'caller' && <th>via</th>}<th>requests</th><th>R2 reads</th><th>R2 bytes</th>
               <th>D1 queries</th><th>D1 rows read</th><th>D1 rows written</th><th>KV reads</th><th>ms/req</th>
@@ -211,7 +212,7 @@ function Attribution({ snaps, attr, setAttr, rank, setRank }: {
                 </tr>
               ))}
             </tbody>
-          </table>
+          </StickyTable>
         </div>
       )}
     </section>

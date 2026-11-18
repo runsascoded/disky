@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
-import { Fragment } from 'react'
+import { Fragment, type ReactNode } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
 import { KIND_DEFS, MAX_SESSION_LINKS, type ServerEvent, type StoredBurst } from '../functions/_lib/activityShape'
 import { countsText, getJson, Line } from './ActivityKinds'
@@ -8,6 +8,7 @@ import { relAgo } from './prefixes'
 import { SiteNav } from './SiteNav'
 import { useDocTitle } from './title'
 import { Paginated } from './Pager'
+import { StickyTable } from './stickyHead'
 
 // /admin/activity — the activity feed (specs/done/activity-feed.md), admin only: each person's bursts of activity
 // (server actions and, while the session log is on, their page loads, URL changes and clicks), newest first; a
@@ -50,13 +51,13 @@ export function ActivityPage() {
       </div>
       {q.error && <p className="err">{q.error.message}</p>}
       <div className="table-scroll">
-        <table className="sessions">
+        <StickyTable className="sessions">
           <thead><tr><th>who</th><th>last active</th><th>started</th><th>via</th><th>activity</th></tr></thead>
           <tbody>
             {(q.data?.bursts ?? []).map(b => (
               <Fragment key={b.id}>
                 <tr className={open === b.id ? 'focused' : ''}>
-                  <td>{b.actor}</td>
+                  <td>{breakAtSign(b.actor)}</td>
                   <td><Link className="when" to={`?${withBurst(sp, open === b.id ? null : b.id)}`} replace>{relAgo(b.last_ts)}</Link></td>
                   <td>{fmtTime(b.first_ts)}</td>
                   <td>{via(b.via)}</td>
@@ -68,10 +69,16 @@ export function ActivityPage() {
             {q.data && !q.data.bursts.length && <tr><td colSpan={5}><em>no activity matches</em></td></tr>}
             {q.isPending && <tr><td colSpan={5}><em>loading…</em></td></tr>}
           </tbody>
-        </table>
+        </StickyTable>
       </div>
     </div>
   )
+}
+
+/** An address may wrap before its `@`, so the column fits a phone without breaking a word. */
+const breakAtSign = (actor: string): ReactNode => {
+  const at = actor.indexOf('@')
+  return at > 0 ? <>{actor.slice(0, at)}<wbr />{actor.slice(at)}</> : actor
 }
 
 const withBurst = (sp: URLSearchParams, id: number | null): string => {
@@ -108,7 +115,7 @@ function BurstDetail({ id }: { id: number }) {
         : pages.length > 0 && <p className="session-meta">pages: {pages.slice(0, 8).map(([p, n]) => <Fragment key={p}><code>{p}</code>{n > 1 ? ` ×${n}` : ''} </Fragment>)}</p>}
       {events.length
         ? (
-          <Paginated rows={events} sizes={BURST_SIZES} label="Burst events">{(page, from) => <table className="sessions timeline">
+          <Paginated rows={events} sizes={BURST_SIZES} label="Burst events">{(page, from) => <StickyTable className="sessions timeline">
             <thead><tr><th className="num">time</th><th>kind</th><th>what</th></tr></thead>
             <tbody>
               {page.map((e, i) => (
@@ -121,7 +128,7 @@ function BurstDetail({ id }: { id: number }) {
                 </tr>
               ))}
             </tbody>
-          </table>}</Paginated>
+          </StickyTable>}</Paginated>
         )
         : <p className="dim">No changes: only browsing.</p>}
     </div>

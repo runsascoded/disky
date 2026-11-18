@@ -16,6 +16,7 @@ import { NO_AUTOFILL } from './noAutofill'
 import { Paginated } from './Pager'
 import { Admins, AdminsRefusal } from './Admins'
 import { useHistoryConfigured } from './HistoryAdmin'
+import { StickyTable } from './stickyHead'
 
 // Share-link console (admins only; the backend enforces the `admin` scope on
 // every /api/auth/grants route — this page just renders the 403 politely).
@@ -638,7 +639,7 @@ export function AdminPage() {
       )}
       {rotate.error && <p className="err" role="alert">{rotate.error.message}</p>}
       <Paginated rows={shown} label="Share links">{page => <div className="table-scroll">
-      <table className="grants">
+      <StickyTable className="grants">
         <thead>
           <tr>
             <th>memo</th><th>holder</th><th>service</th><th>scopes</th><th>redeems</th><th>last used</th><th>expires</th><th>created</th><th></th>
@@ -694,7 +695,7 @@ export function AdminPage() {
             <tr><td colSpan={9}><em>{grants.length ? 'no active links (all revoked)' : 'no links created yet'}</em></td></tr>
           )}
         </tbody>
-      </table>
+      </StickyTable>
       </div>}</Paginated>
       {historyOn && <section id="history">
         <h2>Scan history</h2>
