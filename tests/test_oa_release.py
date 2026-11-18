@@ -397,6 +397,18 @@ def test_workflow_guards_and_secret_boundaries():
     ]
 
 
+def test_deploy_notice_without_a_bot_token_skips_and_succeeds(tmp_path):
+    """An environment with `admin_channel` but no `SLACK_DEPLOY_BOT_TOKEN` (gcs/cw/r2 until their owners set it): the step's
+    script exits 0 with a notice before touching `deploy-notify`, so the release isn't marked red (`continue-on-error` aside)."""
+    from subprocess import run
+    [step] = [step for step in workflow()['jobs']['release']['steps'] if step.get('name') == 'Deploy notice']
+    env = {'PATH': '/usr/bin:/bin', 'SLACK_DEPLOY_BOT_TOKEN': '', 'SLACK_DEPLOY_CHANNEL': 'C0C579HNRFB', 'JOB_STATUS': 'success'}
+    result = run(['bash', '-e', '-c', step['run']], cwd=tmp_path, env=env, capture_output=True, text=True)
+    assert (result.returncode, result.stdout, result.stderr) == (
+        0, '::notice::No SLACK_DEPLOY_BOT_TOKEN in this environment: no Slack notice\n', '',
+    )
+
+
 def workflow() -> dict:
     from yaml import BaseLoader, load
     return load((ROOT / '.github/workflows/oa-release.yml').read_text(), Loader=BaseLoader)
