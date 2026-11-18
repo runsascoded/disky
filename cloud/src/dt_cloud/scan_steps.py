@@ -1285,6 +1285,8 @@ def interval_store(ctx: Ctx, arg: str | None) -> None:
             return
         ctx.run.end("interval-store", ran.rc, warn=True, msg="the scan reads per-scan until a later run appends it",
                     timed_out=timeout if ran.timed_out else None, terminated=ran.signal if ran.rc else None)
+        if not ran.rc:
+            warm_series(ctx)
         return
     store = ctx.opt("interval-store", "store") or ctx.env.get("R2_ARCHIVE")
     if not store:
@@ -1310,8 +1312,23 @@ def interval_store(ctx: Ctx, arg: str | None) -> None:
         ran = run_grouped(cmd, duration(timeout) if timeout else None, 30.0, env=ctx.env, tail=tail)
     ctx.run.end("interval-store", ran.rc, warn=True, msg="the scan reads per-scan until a later run appends it",
                 timed_out=timeout if ran.timed_out else None, terminated=ran.signal if ran.rc else None)
+    if not ran.rc:
+        warm_series(ctx)
     if ran.rc and ctx.opt("interval-store", "publish_on_failure", False):
         ctx.sh(["dt-cloud", "publish-r2", "-a", ctx.scan], fatal=False, warn=f"publish-r2 of {ctx.scan}'s sorts failed: the site can't read it until a later run appends it")
+
+
+def warm_series(ctx: Ctx) -> None:
+    """Warm the size-over-time series (`warm-cache -S`) the moment an append lands: the new run changes every series'
+    cache key, and `warm-cache` itself runs only at the run's end (after `static-names`: 03:48Z on cw's 2026-11-18T0002,
+    80 min after its append), so a root `split=roots` series asked in between computed cold, and under the page's other
+    requests answered 503 after 64 s. Two at a time, as cold series under more concurrency 503 (`warm.SERVER_RETRIES`).
+    Only where `warm-cache` runs (its gate: the primary store, a site token, not REPROC); never fatal."""
+    if ("warm-cache" not in ctx.profile.enabled() or not ctx.profile.primary or ctx.reproc
+            or not (ctx.has("SITE_TOKEN") or ctx.has("CF_ACCESS_CLIENT_ID", "CF_ACCESS_CLIENT_SECRET"))):
+        return
+    ctx.sh(["dt-cloud", "warm-cache", "-S", "-j", "2", "-d", ctx.scan, "-r", _snap_root(ctx)], fatal=False,
+           warn=f"series warm-up after {ctx.scan}'s append failed: its first size-over-time views load cold")
 
 
 #: Why a scan's staged interval-store step was skipped (`append` exit `BUSY`): its phase note.

@@ -1647,10 +1647,11 @@ def index_extras(attributions: tuple[str, ...], identities_path: str, out_dir: P
 @option("-j", "--jobs", default=4, type=int, help="Concurrent requests (default 4)")
 @option("-n", "--dry-run", is_flag=True, help="Print the request paths; fetch nothing")
 @option("-r", "--root", help="Snapshots root: a dir or URL (`r2://<bucket>/snapshots`, `gs://…`); default gs://$DATA_BUCKET/snapshots[/$SNAPSHOTS_SUBDIR]")
+@option("-S", "--series-only", is_flag=True, help="Only each path's size-over-time series (`/api/series`): what a new interval-store run makes cold, warmed as it lands")
 @option("-t", "--token", help="Site read token (default $SITE_TOKEN)")
 @option("-u", "--url", "site_url", default=None, help="Site base (default $SITE_URL)")
 @option("-W", "--widths", default="512,1280,1536,1792,1920", help="Canvas widths to warm (the client sends ceil(innerWidth/128)*128; default = phone + common laptops)")
-def warm_cache(date: str | None, jobs: int, dry_run: bool, root: str | None, token: str | None, site_url: str | None, widths: str) -> None:
+def warm_cache(date: str | None, jobs: int, dry_run: bool, root: str | None, series_only: bool, token: str | None, site_url: str | None, widths: str) -> None:
     """Warm the site's subtree + diff caches for a scan: replay the home
     page's default requests (the subtree, the diff span chips 1d/3d/7d/14d/30d
     and the previous-scan pair: each one's first paint, `depth=1`, and its full
@@ -1687,7 +1688,7 @@ def warm_cache(date: str | None, jobs: int, dry_run: bool, root: str | None, tok
         # No `WARM_PATHS`: the root + its top level, as the site lists them.
         headers = auth()
         targets = wm.top_paths(site_url, headers, date)
-    paths = wm.plan(date, dates, targets, tuple(int(w) for w in widths.split(",")))
+    paths = [wm.series_url(t) for t in targets] if series_only else wm.plan(date, dates, targets, tuple(int(w) for w in widths.split(",")))
     if dry_run:
         for p in paths:
             print(p)

@@ -803,6 +803,23 @@ def test_interval_store_failure_publishes_the_scans_sorts_when_asked(tmp_path, e
     assert [x for x in c.sh_impl.calls if x.startswith("dt-cloud publish-r2")] == published
 
 
+@pytest.mark.parametrize(("rc", "token", "warmed"), [(0, True, True), (1, True, False), (0, False, False)])
+def test_interval_store_warms_the_series_once_its_append_lands(tmp_path, env, monkeypatch, rc, token, warmed):
+    """A landed append changes every size-over-time series' cache key: the step warms them then (`warm-cache -S`, two at a
+    time), not hours later at `warm-cache`; only with the site's token, never after a failed append."""
+    from dt_cloud import scan_runs
+
+    monkeypatch.setattr(scan_runs, "run_grouped", lambda cmd, timeout, grace, **kw: scan_runs.Ran(rc, False, None))
+    env["R2_ARCHIVE"] = "r2://idx"
+    if token:
+        env.update(SITE_TOKEN="st", SITE_URL="https://site.example.org")
+    c = gcs_ctx(tmp_path, dict(env), monkeypatch)
+    c.sh_impl = Runner(tmp_path, stdout={"dt-cloud interval-store current": "g1\n"})
+    S.interval_store(c, None)
+    warm = [x for x in c.sh_impl.calls if x.startswith("dt-cloud warm-cache")]
+    assert warm == ([f"dt-cloud warm-cache -S -j 2 -d 2026-10-16T1200 -r {S._snap_root(c)}"] if warmed else [])
+
+
 def test_interval_store_adds_from_the_store_or_the_data_store(tmp_path, env, monkeypatch):
     """The one-machine `add` reads the scans' sorts from the store by default, and from the data store with
     `source: data` (so `publish-r2 -S` needn't copy them; specs/lean-scans.md §1.1); `compact` passes the policy (`-C`);
