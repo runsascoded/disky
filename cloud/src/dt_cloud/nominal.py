@@ -38,12 +38,14 @@ class Config:
     kind: str = "scan"
     adopt_parent: str | None = None
     site_token_secret: str | None = None
-    #: How runs group into threads (`GROUPS`): `clean` threads only clean runs, a failure closing the thread (its alert
-    #: posts top-level); `color` also threads consecutive failed runs; `signature` threads consecutive failed runs only
-    #: while they fail the same way (`signature`: the failed phase, or the phases with issues). Under `color` and
-    #: `signature` the thread is the failure's report: a run's `fail` alerts defer to it (`defers_failures`), and post
-    #: top-level only if the run isn't a reply in a failure thread once the report has run.
-    group: str = "clean"
+    #: How runs group into threads (`GROUPS`): `color` (the default) threads consecutive clean runs and consecutive
+    #: failed runs, each run of a color its own thread; `clean` threads only clean runs, a failure closing the thread
+    #: (its alert posts top-level); `signature` threads consecutive failed runs only while they fail the same way (the
+    #: failed phase, or the phases with issues). Under `color` and `signature` the thread is the failure's report: a
+    #: run's `fail` alerts defer to it (`defers_failures`), and post top-level only if the run isn't a reply in a
+    #: failure thread once the report has run; the alerts its steps posted while it ran are folded into its reply
+    #: (`fold`), each left as a one-line pointer to it.
+    group: str = "color"
     #: The stores the head summarizes (`stores_text`), as `{label: store}`: each one's size, object count and change over
     #: the last week, linked to its page. Empty: no store lines.
     stores: tuple[tuple[str, str], ...] = ()
@@ -333,6 +335,38 @@ def closed_head(cfg: Config, was: str, old: tuple[list[dict], dict | None], stop
             f"Ended by [{stamp(stop)}]({cfg.link(stop['run'])}): {reason}. [All scans]({cfg.scans}).")
 
 
+#: A folded alert's text starts with this; it is never folded again.
+FOLDED = '↪'
+
+
+def alert_lines(alert: dict) -> tuple[str, list[str]]:
+    """A run's top-level alert as its title and its lines (each step's message, with its task logs), in the thread's
+    markdown: from its `disky_alert` metadata (`push.Notice.group`), else parsed from an ungrouped alert's text."""
+    payload = alert.get('metadata', {}).get('event_payload') or {}
+    if alert.get('metadata', {}).get('event_type') == 'disky_alert' and payload.get('lines'):
+        return payload['title'], [line['message'] + (f" · [{line.get('url_title') or 'logs'}]({line['url']})" if line.get('url') else '')
+                                  for line in payload['lines']]
+    head, *rest = alert['text'].split('\n')
+    logs = ''
+    if rest and rest[-1].startswith('<'):
+        hit = re.search(r'<([^|>]+)\|task logs>', rest.pop())
+        logs = f" · [task logs]({hit.group(1)})" if hit else ''
+    return head.strip('*'), [' '.join(rest) + logs] if rest else []
+
+
+def fold(cfg: Config, slack: Transport, row: dict) -> tuple[list[dict], str]:
+    """A run's unfolded top-level alerts, and the lines they add to its reply in a failure thread."""
+    found = [a for a in slack.alert_messages(cfg.link(row['run']), row['run']['started_ts']) if not a['text'].startswith(FOLDED)]
+    return found, ''.join(f"\n{line}" for a in found for line in alert_lines(a)[1])
+
+
+def folded(slack: Transport, alerts: list[dict], reply_ts: str) -> None:
+    """Each folded alert left as a pointer to the reply that now carries its lines."""
+    link = slack.permalink(reply_ts)
+    for a in alerts:
+        slack.edit(a['ts'], f"{FOLDED} {alert_lines(a)[0]}: in the [failure thread]({link})")
+
+
 def missing(good: list[dict], posted: dict) -> list[dict]:
     known = next((i for i, row in enumerate(good) if row['run']['run_id'] in posted), None)
     return good[:known] if known is not None else good[:10]
@@ -345,6 +379,7 @@ class Transport(Protocol):
     def post(self, body: str, parent: str | None, operation: str) -> str: ...
     def edit(self, ts: str, body: str) -> None: ...
     def alert(self, link: str, since: float) -> str | None: ...
+    def alert_messages(self, link: str, since: float) -> list[dict]: ...
     def permalink(self, ts: str) -> str: ...
     def join(self) -> None: ...
     def pin(self, ts: str) -> None: ...
@@ -401,11 +436,18 @@ class Slack:
     def edit(self, ts: str, body: str) -> None:
         self.client.edit(ts, body)
 
+    def alert_messages(self, link: str, since: float) -> list[dict]:
+        """Our top-level messages since `since` linking `link` (a run's alerts, when they went to this channel), oldest
+        first, each `{ts, text, metadata}`; never a thread's own head (`disky_nominal` metadata), which links runs too."""
+        hits = [m for m in self._read(None, since) if self.owns(m) and m.get('thread_ts', m['ts']) == m['ts'] and link in m.get('text', '')
+                and (m.get('metadata') or {}).get('event_type') != 'disky_nominal']
+        return [{'ts': m['ts'], 'text': m.get('text', ''), 'metadata': m.get('metadata') or {}} for m in sorted(hits, key=lambda m: float(m['ts']))]
+
     def alert(self, link: str, since: float) -> str | None:
         """The first top-level message of ours since `since` linking `link`: a run's `fail` alert, when it went to this
         channel."""
-        hits = [m['ts'] for m in self._read(None, since) if self.owns(m) and m.get('thread_ts', m['ts']) == m['ts'] and link in m.get('text', '')]
-        return min(hits, key=float) if hits else None
+        hits = self.alert_messages(link, since)
+        return hits[0]['ts'] if hits else None
 
     def permalink(self, ts: str) -> str:
         return self.client._request('chat.getPermalink', {'channel': self.client.channel, 'message_ts': ts}, method='GET')['permalink']
@@ -655,15 +697,21 @@ def converge(
         # New threads bootstrap ten; established threads append every missing run after the newest known one.
         posted = state.setdefault('posted', {})
         todo = missing(good, posted)
+        # In a failure thread a run's reply takes the lines its steps' top-level alerts posted (`fold`)
+        folding = head != 'clean'
         for rid in sorted(here, key=lambda rid: ended[rid]['run']['started_ts']):
+            alerts, extra = fold(cfg, slack, ended[rid]) if folding and not clean(ended[rid]) else ([], '')
             check()
-            slack.edit(waiting[rid]['ts'], reply(cfg, ended[rid]))
+            slack.edit(waiting[rid]['ts'], reply(cfg, ended[rid]) + extra)
             posted[rid] = waiting.pop(rid)['ts']
             state.get('running', {}).pop(rid, None)
             persist()
+            folded(slack, alerts, posted[rid])
         for row in reversed(todo):
             if row['run']['run_id'] not in posted:
-                send(row['run']['run_id'], reply(cfg, row), state['parent'])
+                alerts, extra = fold(cfg, slack, row) if folding and not clean(row) else ([], '')
+                send(row['run']['run_id'], reply(cfg, row) + extra, state['parent'])
+                folded(slack, alerts, posted[row['run']['run_id']])
         for row in reversed(live_rows):
             if row['run']['run_id'] not in state.get('running', {}):
                 send('running:' + row['run']['run_id'], running(cfg, row), state['parent'])

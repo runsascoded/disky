@@ -9,7 +9,8 @@ from dt_cloud import nominal as N
 from dt_cloud.append_runner import Busy, LocalLeaseFile, coordinator_lease
 
 T0 = int(datetime(2026, 11, 1, 8, tzinfo=timezone.utc).timestamp())
-CFG = N.Config(state='unused', site='https://site.test', channel='C123', title='Test scans')
+#: `clean` grouping: most tests below pin its copy; `color` (the default) is tested with `replace(CFG, group='color')`.
+CFG = N.Config(state='unused', site='https://site.test', channel='C123', title='Test scans', group='clean')
 
 
 def row(i, status='succeeded', issues=None, **fields):
@@ -55,6 +56,17 @@ class Slack:
 
     def alert(self, link, since):
         return self.alerts.get(link)
+
+    def top_alert(self, link, text, metadata=None):
+        """A run's top-level alert in the channel, as its steps post it (`alerts` finds it by the run's link)."""
+        ts = f'{len(self.messages_by_id) + 1}.0'
+        self.messages_by_id[ts] = dict(ts=ts, parent=None, operation=None, text=text, bot_id='B1', link=link, metadata=metadata or {})
+        return ts
+
+    def alert_messages(self, link, since):
+        """As Slack's: top-level messages linking `link`, but none of the threads' own (their `operation` metadata)."""
+        return [{'ts': m['ts'], 'text': m['text'], 'metadata': m.get('metadata', {})}
+                for m in self.messages_by_id.values() if m['parent'] is None and link in m['text'] and m['operation'] is None]
 
     def permalink(self, ts):
         return f'https://slack.test/p{ts}'
@@ -754,3 +766,56 @@ def test_canvas_status_is_the_open_streak_else_the_newest_failure():
         '❌ Test scans: latest run phase issues: probe',
         'Test scans: no finished runs yet',
     ]
+
+
+def test_color_is_the_default_grouping():
+    assert N.Config(state='unused', site='https://site.test', channel='C123', title='Test scans').group == 'color'
+
+
+def test_a_failure_threads_reply_folds_its_runs_top_level_alerts_and_leaves_each_a_pointer():
+    """r2 2026-11-18: a run's static-names and probe warnings posted top-level (the second before alerts grouped). In a
+    failure thread the run's reply carries their lines, and each alert becomes a one-line pointer to that reply."""
+    from dataclasses import replace
+
+    w = Writer(replace(CFG, group='color'))
+    w.run(history(2))
+    link = 'https://site.test/scans/r3'
+    grouped = w.slack.top_alert(link, f'*⚠️ Test scans 2026-11-04T0800*\nstatic-names failed (exit 1) · <https://logs.test/u1|task logs>\n<{link}|scan>', {
+        'event_type': 'disky_alert', 'event_payload': {'group': 'r3', 'title': '⚠️ Test scans 2026-11-04T0800', 'priority': 0, 'links': [], 'lines': [
+            {'message': 'static-names failed (exit 1)', 'url': 'https://logs.test/u1', 'url_title': 'task logs'}]}})
+    plain = w.slack.top_alert(link, f'*⚠️ Test scans 2026-11-04T0800*\nprobe failed (exit 1): 4 failed\n<https://logs.test/u2|task logs> · <{link}|scan>')
+    w.slack.calls.clear()
+    r3 = row(3, issues=[{'phase': 'static-names'}, {'phase': 'probe'}])
+    w.run([r3, *history(2)])
+    assert bodies(w.slack)[1:] == [
+        ('post', '6.0', '❌ **Test scans: 1 consecutive failed run**\n\n'
+                        'Since 2026-11-04 08:00 UTC after [2026-11-03T0800](https://site.test/scans/r2) (clean).\n\n'
+                        'Latest: [2026-11-04 08:00 UTC](https://site.test/scans/r3): phase issues: probe, static-names.\n\n'
+                        'Each reply links its scan record. [All scans](https://site.test/scans).'),
+        ('post', '7.0', '❌ :alarm_clock: [2026-11-04 08:00 UTC](https://site.test/scans/r3) · 1m 00s · phase issues: probe, static-names\n'
+                        'static-names failed (exit 1) · [task logs](https://logs.test/u1)\n'
+                        'probe failed (exit 1): 4 failed · [task logs](https://logs.test/u2)'),
+        ('edit', grouped, '↪ ⚠️ Test scans 2026-11-04T0800: in the [failure thread](https://slack.test/p7.0)'),
+        ('edit', plain, '↪ ⚠️ Test scans 2026-11-04T0800: in the [failure thread](https://slack.test/p7.0)'),
+    ]
+    w.slack.calls.clear()
+    w.run([r3, *history(2)])
+    assert w.slack.calls == []
+
+
+def test_alert_messages_never_returns_a_threads_own_head():
+    """r2 2026-11-18: a failure thread's head links its newest run, so the run's fold took the head for one of its alerts
+    and edited it into a pointer. A thread's messages carry `disky_nominal` metadata; alerts don't."""
+    slack = object.__new__(N.Slack)
+    link = 'https://site.test/scans/r3'
+    history = [
+        {'ts': '3.0', 'bot_id': 'B1', 'text': f'❌ *Test scans: 1 consecutive failed run* … <{link}|…>',
+         'metadata': {'event_type': 'disky_nominal', 'event_payload': {'operation': 'op'}}},
+        {'ts': '2.0', 'bot_id': 'B1', 'text': f'*⚠️ scan* probe failed <{link}|scan>', 'metadata': {'event_type': 'disky_alert', 'event_payload': {}}},
+        {'ts': '1.0', 'bot_id': 'B1', 'text': f'*⚠️ scan* static-names failed <{link}|scan>'},
+        {'ts': '0.5', 'bot_id': 'B1', 'text': 'another run <https://site.test/scans/r2|scan>'},
+        {'ts': '0.4', 'user': 'U9', 'text': f'a person quoting <{link}|it>'},
+    ]
+    slack.client = SimpleNamespace(channel='C123', bot_ids=(None, 'B1'), _request=lambda api, args, **kw: {'messages': history})
+    assert [m['ts'] for m in slack.alert_messages(link, 0)] == ['1.0', '2.0']
+    assert slack.alert(link, 0) == '1.0'
