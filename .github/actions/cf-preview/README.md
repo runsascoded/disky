@@ -57,7 +57,7 @@ The site side then needs, on a `pages.dev` branch host: its broker `redirectUri`
 
 ## Credentials
 
-- Gate: repository read token only. Publish: PR comment + Deployments Write for the job's `GITHUB_TOKEN`, and a Pages deployment token (`CF_PREVIEW_DEPLOY_TOKEN`) for the account. Retire: the same. No DNS or Zero Trust token.
+- Gate: repository read token only. Publish: PR comment + Deployments Write for the job's `GITHUB_TOKEN`, and a Pages deployment token (`CF_PAGES_DEPLOY_TOKEN`) for the account. Retire: the same. No DNS or Zero Trust token.
 - Secrets belong only in the publish/retire job's protected environment, not in the build. Secret values never appear in action argv, receipts or comments.
 
 ## Publish and retire
