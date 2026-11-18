@@ -257,8 +257,9 @@ def test_a_clean_threads_running_reply_that_fails_closes_it_and_links_the_alert(
     w.slack.alerts = {'https://site.test/scans/r3': alert} if alert else {}
     w.run([row(3, 'failed', failed_phase='index', error='boom', **ADA), *history(2)])
     assert bodies(w.slack) == [
-        ('edit', '1.0', '**Test scans: clean-run sequence ended**\n\n'
-                        '[2026-11-04 08:00 UTC](https://site.test/scans/r3): failed. [All scans](https://site.test/scans).'),
+        ('edit', '1.0', '**Test scans: clean-run sequence ended after 2 runs**\n\n'
+                        'Since 2026-11-02 08:00 UTC after [2026-11-01T0800](https://site.test/scans/r0); last [2026-11-03 08:00 UTC](https://site.test/scans/r2).\n\n'
+                        'Ended by [2026-11-04 08:00 UTC](https://site.test/scans/r3): failed. [All scans](https://site.test/scans).'),
         ('edit', '4.0', '❌ :ada: [2026-11-04 08:00 UTC](https://site.test/scans/r3) · 1m 00s · failed in index: boom' + suffix),
     ]
     assert (w.saved['closed'], 'running' in w.saved) == (True, False)
@@ -517,8 +518,9 @@ def test_color_threads_consecutive_failures_and_each_change_of_color_closes_the_
     f4 = row(4, 'failed', failed_phase='probe')
     w.run([f4, f3, *history(2)])
     assert bodies(w.slack) == [
-        ('edit', '1.0', '**Test scans: clean-run sequence ended**\n\n'
-                        '[2026-11-04 08:00 UTC](https://site.test/scans/r3): failed. [All scans](https://site.test/scans).'),
+        ('edit', '1.0', '**Test scans: clean-run sequence ended after 2 runs**\n\n'
+                        'Since 2026-11-02 08:00 UTC after [2026-11-01T0800](https://site.test/scans/r0); last [2026-11-03 08:00 UTC](https://site.test/scans/r2).\n\n'
+                        'Ended by [2026-11-04 08:00 UTC](https://site.test/scans/r3): failed. [All scans](https://site.test/scans).'),
         ('post', '4.0', '❌ **Test scans: 2 consecutive failed runs**\n\n'
                         'Since 2026-11-04 08:00 UTC after [2026-11-03T0800](https://site.test/scans/r2) (clean).\n\n'
                         'Latest: [2026-11-05 08:00 UTC](https://site.test/scans/r4): failed in probe.\n\n'
@@ -532,8 +534,9 @@ def test_color_threads_consecutive_failures_and_each_change_of_color_closes_the_
     assert w.slack.calls == []
     w.run([row(5), f4, f3, *history(2)])
     assert bodies(w.slack) == [
-        ('edit', '4.0', '**Test scans: failure sequence ended**\n\n'
-                        '[2026-11-06 08:00 UTC](https://site.test/scans/r5): clean. [All scans](https://site.test/scans).'),
+        ('edit', '4.0', '**Test scans: failure sequence ended after 2 runs**\n\n'
+                        'Since 2026-11-04 08:00 UTC after [2026-11-03T0800](https://site.test/scans/r2); last [2026-11-05 08:00 UTC](https://site.test/scans/r4).\n\n'
+                        'Ended by [2026-11-06 08:00 UTC](https://site.test/scans/r5): clean. [All scans](https://site.test/scans).'),
         ('post', '7.0', '✅ **Test scans: 1 consecutive clean run**\n\n'
                         'Since 2026-11-06 08:00 UTC after [2026-11-05T0800](https://site.test/scans/r4).\n\n'
                         'Latest completed: [2026-11-06 08:00 UTC](https://site.test/scans/r5) · 1m 00s.\n\n'
@@ -559,8 +562,9 @@ def test_signature_threads_a_failure_while_it_repeats_and_a_different_one_opens_
     b5 = row(5, issues=[{'phase': 'probe'}])
     w.run([b5, a4, a3, *history(1)])
     assert bodies(w.slack) == [
-        ('edit', '1.0', '**Test scans: failure sequence ended**\n\n'
-                        '[2026-11-06 08:00 UTC](https://site.test/scans/r5): phase issues: probe. [All scans](https://site.test/scans).'),
+        ('edit', '1.0', '**Test scans: failure sequence ended after 2 runs**\n\n'
+                        'Since 2026-11-04 08:00 UTC after [2026-11-02T0800](https://site.test/scans/r1); last [2026-11-05 08:00 UTC](https://site.test/scans/r4).\n\n'
+                        'Ended by [2026-11-06 08:00 UTC](https://site.test/scans/r5): phase issues: probe. [All scans](https://site.test/scans).'),
         ('post', '4.0', '❌ **Test scans: 1 consecutive failed run with phase issues**\n\n'
                         'Since 2026-11-06 08:00 UTC after [2026-11-05T0800](https://site.test/scans/r4) (failed in interval-store: OOM again).\n\n'
                         'Latest: [2026-11-06 08:00 UTC](https://site.test/scans/r5): phase issues: probe.\n\n'

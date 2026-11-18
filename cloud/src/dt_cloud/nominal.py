@@ -311,6 +311,28 @@ def failed(cfg: Config, bad: list[dict], boundary: dict | None, live_rows: list[
             f"Each reply links its scan record. [All scans]({cfg.scans}).")
 
 
+def closed_runs(rows: list[dict], stop: dict, boundary_id: str | None) -> tuple[list[dict], dict | None]:
+    """A closing thread's runs (newest first: those older than `stop`, back to its recorded boundary) and that
+    boundary's row (None when run history no longer reaches it)."""
+    ids = [r['run']['run_id'] for r in rows]
+    start = ids.index(stop['run']['run_id']) + 1 if stop['run']['run_id'] in ids else 0
+    end = ids.index(boundary_id) if boundary_id in ids else len(rows)
+    return rows[start:end], (rows[end] if end < len(rows) else None)
+
+
+def closed_head(cfg: Config, was: str, old: tuple[list[dict], dict | None], stop: dict, reason: str) -> str:
+    """A closed thread's head: how many runs it held, since when, its newest, and the run that ended it."""
+    runs, boundary = old
+    kind = 'clean-run' if was == 'clean' else 'failure'
+    if not runs:
+        return f"**{cfg.title}: {kind} sequence ended**\n\n[{stamp(stop)}]({cfg.link(stop['run'])}): {reason}. [All scans]({cfg.scans})."
+    qualifier = '' if boundary else 'at least '
+    after = f" after [{boundary['run']['scan']}]({cfg.link(boundary['run'])})" if boundary else ' (available run history)'
+    return (f"**{cfg.title}: {kind} sequence ended after {qualifier}{plural(len(runs), 'run')}**\n\n"
+            f"Since {stamp(runs[-1])}{after}; last [{stamp(runs[0])}]({cfg.link(runs[0]['run'])}).\n\n"
+            f"Ended by [{stamp(stop)}]({cfg.link(stop['run'])}): {reason}. [All scans]({cfg.scans}).")
+
+
 def missing(good: list[dict], posted: dict) -> list[dict]:
     known = next((i for i, row in enumerate(good) if row['run']['run_id'] in posted), None)
     return good[:known] if known is not None else good[:10]
@@ -585,10 +607,9 @@ def converge(
             stop = rows[newest - 1] if newest else boundary or rows[0]
             if was == 'clean':
                 reason = 'phase issues' if stop['run']['status'] == 'succeeded' and stop['phase_issues'] else stop['run']['status']
-                body = f"**{cfg.title}: clean-run sequence ended**\n\n[{stamp(stop)}]({cfg.link(stop['run'])}): {reason}. [All scans]({cfg.scans})."
             else:
                 reason = 'clean' if clean(stop) else describe(stop)
-                body = f"**{cfg.title}: failure sequence ended**\n\n[{stamp(stop)}]({cfg.link(stop['run'])}): {reason}. [All scans]({cfg.scans})."
+            body = closed_head(cfg, was, closed_runs(rows, stop, state.get('boundary')), stop, reason)
             check()
             slack.edit(state['parent'], body)
             state['closed'] = True
