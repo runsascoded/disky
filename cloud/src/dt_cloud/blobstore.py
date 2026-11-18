@@ -271,8 +271,13 @@ def mirror(store: Store, prefix: str, local: Path, keep: Callable[[str], bool] =
     not copied), `stage_files`' parallel copies, every one or it raises; returns the whole listing."""
     listing = store.listing(prefix)
     todo = {k: n for k, n in listing.items() if keep(rel := k[len(prefix) + 1:]) and not ((dst := local / rel).is_file() and dst.stat().st_size == n)}
-    got = stage_files(store.uri(prefix), {k[len(prefix) + 1:]: n for k, n in todo.items()}, local, label=f"mirror {prefix}",
-                      log=lambda m: print(m, file=sys.stderr, flush=True))
+    log = lambda m: print(m, file=sys.stderr, flush=True)  # noqa: E731
+    keys = {k[len(prefix) + 1:]: n for k, n in todo.items()}
+    got = stage_files(store.uri(prefix), keys, local, label=f"mirror {prefix}", log=log)
+    if got["failed"]:
+        # A file that timed out under the parallel pass's contention (32 copies sharing the link: r2's 43 MiB
+        # `census-end.parquet` failed every retry at 11 MB/s in all, 2026-11-18) gets the link to itself, one at a time.
+        got = stage_files(store.uri(prefix), {k: keys[k] for k in got["failed"]}, local, workers=1, label=f"mirror {prefix} (retry)", log=log)
     if got["failed"]:
         raise OSError(f"mirror {prefix}: {len(got['failed'])} files not copied, e.g. {got['failed'][0]}")
     return listing

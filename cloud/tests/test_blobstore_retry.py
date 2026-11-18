@@ -93,3 +93,36 @@ def test_a_missing_key_or_refused_credential_is_not_retried(store: Store, tmp_pa
     with pytest.raises(type(e)):
         store.get("k", tmp_path / "k")
     assert len(store.fs.calls) == 1
+
+
+def test_mirror_recopies_a_file_the_parallel_pass_left_out_on_its_own(monkeypatch, tmp_path: Path):
+    """r2 2026-11-18: one 43 MiB file timed out on every retry while 32 copies shared the link; `mirror` raised and the
+    day's static-names add failed. A file the parallel pass leaves out is copied again one at a time."""
+    src = tmp_path / "src"
+    for rel, body in {"gen/a.parquet": b"aa", "gen/deltas/b.parquet": b"bbb"}.items():
+        (src / rel).parent.mkdir(parents=True, exist_ok=True)
+        (src / rel).write_bytes(body)
+    monkeypatch.setattr(blobstore, "RETRY_BASE_S", 0)
+    passes: list[tuple[list[str], int]] = []
+    stage = blobstore.stage_files
+
+    def spy(root, keys, dst, *, workers=blobstore.STAGE_WORKERS, **kw):
+        passes.append((sorted(keys), workers))
+        return stage(root, keys, dst, workers=workers, **kw)
+
+    get = Store.get
+
+    def contended(self, key, dst):
+        if key == "deltas/b.parquet" and passes[-1][1] > 1:
+            raise FSTimeoutError()
+        get(self, key, dst)
+
+    monkeypatch.setattr(blobstore, "stage_files", spy)
+    monkeypatch.setattr(Store, "get", contended)
+    local = tmp_path / "local"
+    listing = blobstore.mirror(Store(str(src)), "gen", local)
+    assert passes == [(["a.parquet", "deltas/b.parquet"], blobstore.STAGE_WORKERS), (["deltas/b.parquet"], 1)]
+    assert sorted(listing) == ["gen/a.parquet", "gen/deltas/b.parquet"]
+    assert {p.relative_to(local).as_posix(): p.read_bytes() for p in local.rglob("*") if p.is_file()} == {
+        "a.parquet": b"aa", "deltas/b.parquet": b"bbb",
+    }
