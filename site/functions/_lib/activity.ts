@@ -91,14 +91,14 @@ export async function loadBurst(db: D1Database, id: number): Promise<StoredBurst
 /** How far back a tab's session resumes its own earlier burst (`burstFor`'s `sid`). */
 export const RESUME_S = 7 * 86400
 
-/** The actor's burst for an event at `ts`: their latest, if within `BATCH_GAP_S`; else, given the event's session `sid`,
- *  the newest burst (within `RESUME_S`) that session was already in, so one tab keeps one thread (`resumed` is the gap,
- *  in seconds); else a new one. */
+/** The actor's burst for an event at `ts` on `origin` (a burst is one server's, so its post says which): their latest
+ *  there, if within `BATCH_GAP_S`; else, given the event's session `sid`, the newest burst (within `RESUME_S`) that session
+ *  was already in, so one tab keeps one thread (`resumed` is the gap, in seconds); else a new one. */
 export async function burstFor(
   db: D1Database, actor: string, via: string, origin: string, ts: number, gapS: number = BATCH_GAP_S, sid?: string,
 ): Promise<{ id: number; resumed?: number }> {
-  const latest = await db.prepare('SELECT id, last_ts FROM activity_bursts WHERE actor = ? ORDER BY last_ts DESC LIMIT 1')
-    .bind(actor).first<{ id: number; last_ts: number }>()
+  const latest = await db.prepare('SELECT id, last_ts FROM activity_bursts WHERE actor = ? AND origin = ? ORDER BY last_ts DESC LIMIT 1')
+    .bind(actor, origin).first<{ id: number; last_ts: number }>()
   const extend = (id: number) => db.prepare('UPDATE activity_bursts SET first_ts = MIN(first_ts, ?1), last_ts = MAX(last_ts, ?1), via = ?2 WHERE id = ?3')
     .bind(ts, via, id).run()
   if (latest && joins(latest, ts, gapS)) {
@@ -107,9 +107,9 @@ export async function burstFor(
   }
   if (sid) {
     const prior = await db.prepare(
-      `SELECT id, last_ts FROM activity_bursts WHERE actor = ? AND last_ts >= ? AND last_ts <= ?
+      `SELECT id, last_ts FROM activity_bursts WHERE actor = ? AND origin = ? AND last_ts >= ? AND last_ts <= ?
        AND EXISTS (SELECT 1 FROM json_each(sids) WHERE value = ?) ORDER BY last_ts DESC LIMIT 1`,
-    ).bind(actor, ts - RESUME_S, ts, sid).first<{ id: number; last_ts: number }>()
+    ).bind(actor, origin, ts - RESUME_S, ts, sid).first<{ id: number; last_ts: number }>()
     if (prior) {
       await extend(prior.id)
       const gap = ts - prior.last_ts

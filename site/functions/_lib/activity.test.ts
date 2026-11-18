@@ -373,6 +373,16 @@ describe('D1 and sinks', () => {
     expect((await eventsOf(db, 1)).map(e => e.line)).toEqual(['`gs://b/x/` → bob', '`gs://b/y/` → bob', '`gs://b/z/` → bob'])
   })
 
+  it('a burst is one server\'s: the same person on another origin within the gap opens its own', async () => {
+    const { db, env, wait } = await setup()
+    const dev = { ...who, origin: 'https://dev.example.test' }
+    const a = await recordServer(env, who, [assign(S, 'gs://b/x/')], wait, NOW)
+    const b = await recordServer(env, dev, [assign(S + 60, 'gs://b/y/')], wait, NOW + 60_000)
+    const c = await recordServer(env, who, [assign(S + 120, 'gs://b/z/')], wait, NOW + 120_000)
+    expect([a, b, c]).toEqual([1, 2, 1])
+    expect([(await loadBurst(db, 1))!.origin, (await loadBurst(db, 2))!.origin]).toEqual([ORIGIN, 'https://dev.example.test'])
+  })
+
   it('feeds client batches into the same burst; unrecorded kinds are not counted', async () => {
     const { db, env, wait } = await setup()
     await writeKind(db, 'click', { log: false, notify: 'off' }, 'ops@example.test', S)
