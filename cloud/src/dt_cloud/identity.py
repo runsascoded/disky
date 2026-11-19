@@ -1,11 +1,14 @@
 """Canonical identity map for storage attribution.
 
-Loads a deployment's ``identities.yaml`` and resolves raw username spellings (Iris job
-owners, provenance ``built_by``, ``users/<seg>/`` path segments) to canonical
-user ids. The canonical spelling is
-:func:`dt_cloud.usernames.sanitize_username` output, so a raw spelling that
-sanitizes directly to a canonical id needs no alias entry; aliases cover
-everything else.
+Loads a deployment's ``identities.yaml`` and resolves raw username spellings (a scheduler's job
+owners, a provenance field, a home dir's path segment) to canonical user ids. The canonical
+spelling is :func:`dt_cloud.usernames.sanitize_username` output, so a raw spelling that
+sanitizes directly to a canonical id needs no alias entry; aliases cover everything else.
+
+The roster's keys: ``users`` (canonical ids, each with ``aliases``), ``prefix_owners`` (manual
+rules, ``gs://bucket/dir/`` → user, or nobody), and ``user_dirs``: the deployment's home-dir
+layouts, each a dir pattern whose last segment is ``*`` (``users/*/``: every ``users/<seg>/``
+in a listing is owned by ``<seg>``'s user). A deployment without such a layout lists none.
 
 Ownership has one axis: a person. There is no group/team facet (excised
 2026-09-06 — it let most of the fleet sit under a "communal" label with nobody
@@ -52,6 +55,8 @@ class IdentityMap:
     users: frozenset[str]
     alias_to_user: dict[str, str]
     prefix_owners: tuple[PrefixOwner, ...]
+    #: Home-dir patterns (`users/*/`), the user's segment last; see the module doc.
+    user_dirs: tuple[str, ...] = ()
 
     def resolve(self, raw: str) -> str:
         """Canonical user id for a raw spelling.
@@ -91,8 +96,24 @@ def load_identities(src: str | Path) -> IdentityMap:
         if "prefix" not in row:
             raise ValueError(f"prefix_owner row without a prefix: {row!r}")
         prefix_owners.append(PrefixOwner(prefix=row["prefix"], user=row.get("user")))
+    user_dirs = tuple(doc.get("user_dirs") or ())
+    for pattern in user_dirs:
+        user_dir_lead(pattern)
     return IdentityMap(
         users=frozenset(users),
         alias_to_user=alias_to_user,
         prefix_owners=tuple(prefix_owners),
+        user_dirs=user_dirs,
     )
+
+
+def user_dir_lead(pattern: str) -> str:
+    """The literal dirs before a ``user_dirs`` pattern's ``*`` (``users/*/`` → ``users/``, a
+    bucket-root ``*/`` → ``""``); raises ``ValueError`` unless the pattern is relative, ends in
+    ``*/`` and has no other ``*``."""
+    if not isinstance(pattern, str) or pattern.startswith("/") or not pattern.endswith("*/") or pattern.count("*") != 1:
+        raise ValueError(f"user_dirs pattern {pattern!r}: want a relative dir whose last segment is `*` (`users/*/`)")
+    lead = pattern[: -len("*/")]
+    if lead and not lead.endswith("/"):
+        raise ValueError(f"user_dirs pattern {pattern!r}: `*` must be a whole segment")
+    return lead

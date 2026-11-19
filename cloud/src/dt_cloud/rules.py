@@ -36,6 +36,9 @@ def parse_notes(text: str) -> tuple[dict[str, str], dict[str, str]]:
         if re.match(r"^prefix_owners:", line):
             section = "prefix"
             continue
+        if re.match(r"^\S", line):  # another top-level key (`user_dirs`)
+            section = None
+            continue
         if section == "users":
             if m := re.match(r"^  ([a-z0-9_-]+):", line):
                 cur_user = m.group(1)

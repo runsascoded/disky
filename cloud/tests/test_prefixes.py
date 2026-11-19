@@ -20,6 +20,7 @@ prefix_owners:
     user: data-team
   - prefix: gs://b1/scratch/rw/
     user: ryan-williams
+user_dirs: [users/*/]
 """
 
 
@@ -151,7 +152,7 @@ def test_write_labels_one_table_per_bucket_prefixes_relative(tmp_path: Path, ide
 
 
 def test_user_prefix_rows_derive_from_the_scanned_listing(tmp_path: Path, identities, attribution: str):
-    """A `users/<seg>/` first written after the attribution parquet was built
+    """A home dir (the roster's `user_dirs`, here `users/*/`) first written after the attribution parquet was built
     still gets its `user-prefix` owner: the rows come from the listing being
     attributed, not only from the (frozen) parquet. An aliased segment
     resolves to its canonical user, an unaliased one to itself. Both listing
@@ -186,3 +187,19 @@ def test_user_prefix_rows_derive_from_the_scanned_listing(tmp_path: Path, identi
     ).to_parquet(dirs)
     con.execute(f"CREATE TEMP VIEW listing_dirs AS SELECT * FROM read_parquet('{dirs}')")
     assert load_prefix_map(con, (attribution,), identities, "listing_dirs") == expected
+
+    # A roster with no `user_dirs` derives no home-dir rows: only the parquet's and the manual ones.
+    bare = load_identities_text(tmp_path, IDENTITIES_YAML.replace("user_dirs: [users/*/]\n", ""))
+    assert load_prefix_map(con, (attribution,), bare, "listing_dirs") == {
+        "gs://b1/users/rw/": ("ryan-williams", "user-prefix"),
+        "gs://b1/datasets/finelog/": (None, "manual"),
+        "gs://b1/datasets/": ("data-team", "manual"),
+        "gs://b2/datasets/": ("data-team", "manual"),
+        "gs://b1/scratch/rw/": ("ryan-williams", "manual"),
+    }
+
+
+def load_identities_text(tmp_path: Path, text: str):
+    path = tmp_path / "bare-identities.yaml"
+    path.write_text(text)
+    return load_identities(path)

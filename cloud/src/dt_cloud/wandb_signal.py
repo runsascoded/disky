@@ -2,7 +2,7 @@
 
 Two sub-signals, both consuming the ``wandb-mine`` parquet:
 
-1. **Run-name join**: ``checkpoints/<dir>`` and ``grug/<dir>`` names match W&B
+1. **Run-name join**: dirs under the run roots (``-p``, e.g. ``checkpoints/<dir>``) match W&B
    run names (exactly, or after stripping ``-<hex>`` artifact-hash and
    ``_resume<N>`` suffixes, or by long prefix-stem overlap). The matched run's
    user owns the dir.
@@ -99,59 +99,6 @@ def run_name_rows(
         )
     if ambiguous:
         err(f"run-name join: {ambiguous} dirs matched runs from >1 user; skipped")
-    return rows
-
-
-def executor_rows(
-    runs: pd.DataFrame,
-    executor_df: pd.DataFrame,  # executor-mine output: path, name, output_path
-    identities: IdentityMap,
-    asof: dt.date,
-) -> list[AttributionRow]:
-    """Attribute legacy `.executor_info` dirs whose step name matches a W&B run.
-
-    The prefix attributed is the sidecar's own directory (the executor output
-    dir); ``output_path`` is preferred when present and consistent.
-    """
-    index = RunNameIndex(runs)
-    rows: list[AttributionRow] = []
-    ambiguous = 0
-    seen_prefixes: set[str] = set()
-    for path, name, output_path in zip(
-        executor_df["path"], executor_df["name"], executor_df["output_path"]
-    ):
-        candidates = []
-        if isinstance(name, str) and name:
-            candidates.append(name.rsplit("/", 1)[-1])
-        base_dir = path.rsplit("/", 1)[0]
-        candidates.append(base_dir.rsplit("/", 1)[-1])
-        users = None
-        for cand in candidates:
-            users = index.match(cand)
-            if users:
-                break
-        if not users:
-            continue
-        if len(users) > 1:
-            ambiguous += 1
-            continue
-        prefix = (output_path.rstrip("/") if isinstance(output_path, str) and output_path.startswith("gs://") else base_dir) + "/"
-        if prefix in seen_prefixes:
-            continue
-        seen_prefixes.add(prefix)
-        raw = next(iter(users))
-        user = identities.resolve(raw)
-        rows.append(
-            AttributionRow(
-                prefix=prefix,
-                user=user,
-                source="executor-wandb",
-                evidence=f"executor_name~{candidates[0]}",
-                asof=asof,
-            )
-        )
-    if ambiguous:
-        err(f"executor join: {ambiguous} sidecars matched runs from >1 user; skipped")
     return rows
 
 

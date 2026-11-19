@@ -1,7 +1,7 @@
 [project]
 name = "dt-cloud"
 version = "0.1.0"
-description = "Per-user attribution and reporting for Marin GCS storage"
+description = "Cloud storage usage: scans, indexes, attribution and reporting over a deployment's buckets"
 requires-python = ">=3.12"
 dependencies = [
     "click>=8.1",

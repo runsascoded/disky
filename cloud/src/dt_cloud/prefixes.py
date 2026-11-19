@@ -3,7 +3,7 @@
 Used by ``report``/``gaps`` (cli) and ``path-index`` (viz). Attribution parquets
 store raw users as of build time; loading re-resolves them against the
 *current* identities.yaml, derives ``user-prefix`` rows from the listing
-itself (every ``users/<seg>/`` in it, however new), and folds in
+itself (every home dir its ``user_dirs`` patterns match, however new), and folds in
 ``prefix_owners`` manual rows (a ``*`` in the bucket position fans out over the
 listing's buckets), so curation takes effect without rebuilding any parquet.
 """
@@ -16,7 +16,8 @@ from fnmatch import fnmatch
 from functools import partial
 from typing import TYPE_CHECKING, Callable
 
-from .signals import user_prefix_rows
+from .identity import user_dir_lead
+from .signals import user_dir_rows
 
 if TYPE_CHECKING:
     import duckdb
@@ -41,13 +42,20 @@ def load_prefix_map(
             user = identities.resolve(user) if user else user
             by_prefix.setdefault(prefix, (user, source))
     # `user-prefix` rows from the listing being attributed: a parquet built on
-    # an earlier day can't own a `users/<seg>/` first written after it. `name`
+    # an earlier day can't own a home dir first written after it. `name`
     # may be an object path or a bare dir path (viz's `listing_dirs`).
-    users_df = con.execute(
-        "SELECT DISTINCT bucket, 'users/' || regexp_extract(name, '^users/([^/]+)(/|$)', 1) || '/' AS name"
-        f" FROM {listing_src} WHERE regexp_matches(name, '^users/[^/]+')"
-    ).df()
-    for row in user_prefix_rows(users_df, identities, dt.date.today()):
+    dirs = []
+    for pattern in identities.user_dirs:
+        lead = user_dir_lead(pattern)
+        dirs += [
+            (bucket, lead, segment)
+            for bucket, segment in con.execute(
+                "SELECT DISTINCT bucket, regexp_extract(substr(name, length(?) + 1), '^([^/]+)(/|$)', 1) AS seg"
+                f" FROM {listing_src} WHERE starts_with(name, ?) AND seg != ''",
+                [lead, lead],
+            ).fetchall()
+        ]
+    for row in user_dir_rows(dirs, identities, dt.date.today()):
         by_prefix.setdefault(row.prefix, (row.user, row.source))
     buckets = [b for (b,) in con.execute(f"SELECT DISTINCT bucket FROM {listing_src}").fetchall()]
     n_glob = 0

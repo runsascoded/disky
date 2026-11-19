@@ -34,7 +34,7 @@ def test_job_id_is_one_per_set_of_days_per_hour():
 
 def test_job_spec_runs_the_image_entrypoint_with_root_and_days():
     spec = job_spec("gs://b/access/jobs", ["2026-11-18", "2026-11-17"], image="r/img:latest", service_account="sa@p",
-                    region="us-central1", project="p", env={"MARIN_MIRROR_BUDGET_GB": "5"}, secrets={"T": "tok"},
+                    region="us-central1", project="p", env={"SOURCE_BUDGET_GB": "5"}, secrets={"T": "tok"},
                     environ=ENV)
     task = spec["taskGroups"][0]["taskSpec"]
     assert (task["runnables"], task["environment"]["secretVariables"], task["computeResource"], task["maxRetryCount"]) == (
@@ -43,7 +43,7 @@ def test_job_spec_runs_the_image_entrypoint_with_root_and_days():
         {"cpuMilli": 4000, "memoryMib": 14800},
         2,
     )
-    assert task["environment"]["variables"]["MARIN_MIRROR_BUDGET_GB"] == "5"
+    assert task["environment"]["variables"]["SOURCE_BUDGET_GB"] == "5"
     policy = spec["allocationPolicy"]
     assert (policy["instances"], policy["serviceAccount"], policy["location"], policy["labels"]["component"]) == (
         [{"policy": {"machineType": "e2-standard-4", "provisioningModel": "SPOT"}}], {"email": "sa@p"},

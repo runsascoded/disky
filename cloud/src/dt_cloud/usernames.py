@@ -1,10 +1,9 @@
-"""Canonical username spelling.
+"""Canonical username spelling: a path-safe segment.
 
-Mirror of ``rigging.provenance`` in marin-community/marin: the sanitize rules
-here MUST match ``username_segment()`` there, because that function generates
-the ``users/<seg>/`` GCS prefixes this repo attributes. Mirrored (rather than
-imported) to keep this repo free of the marin dependency tree; once marin
-exposes ``sanitize_username(raw)`` upstream, switch to importing it.
+Every spelling of a person (a login, an email, a home dir's name) reduces to it, so a home dir
+named by the same rule resolves to its user with no alias entry. A deployment whose tooling names
+home dirs by its own rule keeps that rule in step with this one or covers the difference with
+aliases (gcs: Marin's `username_segment`, the same rule).
 """
 
 from __future__ import annotations

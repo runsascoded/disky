@@ -1,10 +1,5 @@
-"""``dt-cloud`` CLI.
-
-``build`` derives the sparse dir -> user attribution table from a marin
-``scan_gcs`` objects listing (parquet). The listing never loads fully into
-pandas: DuckDB pre-filters it down to the two small row sets the signals
-need (distinct ``users/<seg>/`` prefixes and record-file rows).
-"""
+"""``dt-cloud`` CLI: the cloud overlay's commands (scans, the path store and its indexes, the site's
+data, attribution, sweeps, the digest)."""
 
 from __future__ import annotations
 
@@ -30,9 +25,7 @@ from .deploy import data_bucket, layer2_prefix as resolve_layer2, site_token, si
 from .secrets import env_secret, secret
 from .index_footer import INDEX_VARIANTS
 from .prefixes import load_prefix_map
-from .records import mine_record_rows
 from .scan_id import scan_id_option, snapshot_scans
-from .signals import RECORD_BASENAME, manual_rows, record_file_paths, user_prefix_rows
 
 err = partial(print, file=sys.stderr)
 
@@ -51,7 +44,7 @@ def _connect() -> "duckdb.DuckDBPyConnection":
 
 @group()
 def main() -> None:
-    """Per-user attribution and reporting for Marin GCS storage."""
+    """Cloud storage usage: scans, indexes, attribution and reporting over a deployment's buckets."""
 
 
 def _hard_exit() -> None:
@@ -70,97 +63,21 @@ err = partial(print, file=sys.stderr)
 err = partial(print, file=sys.stderr)
 
 
-@main.command()
-@option("-i", "--identities", "identities_path", envvar=IDENTITIES_ENV, required=True, help=f"identities.yaml path or URL (${IDENTITIES_ENV}): the deployment's roster, kept outside the repo")
-@option("-l", "--listing", "listings", required=True, multiple=True, help="Listing parquet glob(s): scan_gcs or SII inventory schema; repeatable — earlier sources win per bucket")
-@option("-o", "--out", required=True, type=Path, help="Output parquet path for the attribution table")
-@option("-R", "--no-records", is_flag=True, help="Skip artifact-record mining (no GETs; path signals only)")
-@option("-w", "--workers", default=16, help="Concurrent record reads")
-def build(
-    identities_path: str,
-    listings: tuple[str, ...],
-    out: Path,
-    no_records: bool,
-    workers: int,
-) -> None:
-    """Build the attribution table from a listing parquet."""
-    identities = load_identities(identities_path)
-    asof = dt.date.today()
-    con = _connect()
-    from disk_tree.listing import prepare_listing
-
-    src = prepare_listing(con, listings)
-
-    users_df = con.execute(
-        "SELECT DISTINCT bucket, regexp_extract(name, '^users/[^/]+/') AS name"
-        f" FROM {src} WHERE name LIKE 'users/%'"
-    ).df()
-    records_df = con.execute(
-        f"SELECT DISTINCT bucket, name FROM {src}"
-        " WHERE regexp_extract(name, '[^/]+$') = ?",
-        [RECORD_BASENAME],
-    ).df()
-
-    rows = user_prefix_rows(users_df, identities, asof) + manual_rows(identities, asof)
-    if not no_records:
-        paths = record_file_paths(records_df)
-        err(f"record files to mine: {len(paths)}")
-        record_rows, failed = mine_record_rows(paths, identities, asof, max_workers=workers)
-        rows += record_rows
-        if failed:
-            err(f"unreadable record files ({len(failed)}):")
-            for path in failed:
-                err(f"  {path}")
-
-    table = pd.DataFrame([asdict(row) for row in rows])
-    out.parent.mkdir(parents=True, exist_ok=True)
-    table.to_parquet(out, index=False)
-
-    by_source = Counter(row.source for row in rows)
-    err(f"wrote {len(rows)} attribution rows to {out}: {dict(by_source)}")
-    unknown_users = sorted({row.user for row in rows if row.user is not None and not identities.known(row.user)})
-    if unknown_users:
-        err(f"users not in {identities_path} (add name/github/aliases): {unknown_users}")
-
-
-@main.command("executor-mine")
-@option("-l", "--listing", "listings", required=True, multiple=True, help="Listing parquet glob(s): scan_gcs or SII inventory schema; repeatable — earlier sources win per bucket")
-@option("-o", "--out", "out_path", type=Path, default=Path("tmp/executor-infos.parquet"), help="Output parquet")
-@option("-w", "--workers", default=64, help="Concurrent GETs")
-def executor_mine(listings: tuple[str, ...], out_path: Path, workers: int) -> None:
-    """Targeted-GET mine of legacy `.executor_info` sidecars (name/output_path/config gs paths)."""
-    from .executor_info import mine_executor_infos
-
-    con = _connect()
-    from disk_tree.listing import prepare_listing
-
-    src = prepare_listing(con, listings)
-    paths = [
-        f"gs://{b}/{n}"
-        for b, n in con.execute(
-            f"SELECT DISTINCT bucket, name FROM {src} WHERE name LIKE '%.executor_info'"
-        ).fetchall()
-    ]
-    mine_executor_infos(paths, out_path, max_workers=workers)
-
-
 @main.command("wandb-attr")
 @option("-i", "--identities", "identities_path", envvar=IDENTITIES_ENV, required=True, help=f"identities.yaml path or URL (${IDENTITIES_ENV}): the deployment's roster, kept outside the repo")
 @option("-l", "--listing", "listings", required=True, multiple=True, help="Listing parquet glob(s): scan_gcs or SII inventory schema; repeatable — earlier sources win per bucket")
 @option("-o", "--out", required=True, type=Path, help="Output parquet path for wandb attribution rows")
 @option("-p", "--run-root", "run_roots", multiple=True, default=("checkpoints",), help="Top-level dir holding run-named dirs (repeatable; default `checkpoints`)")
 @option("-r", "--runs", "runs_path", required=True, type=Path, help="wandb-mine output parquet")
-@option("-x", "--executor-infos", "executor_path", type=Path, default=None, help="executor-mine output parquet (adds executor-wandb rows)")
 def wandb_attr(
     identities_path: str,
     listings: tuple[str, ...],
     out: Path,
     run_roots: tuple[str, ...],
     runs_path: Path,
-    executor_path: Path | None,
 ) -> None:
     """Attribution rows from W&B runs: run-name ↔ dirs under the run roots (`-p`) + writer-path configs."""
-    from .wandb_signal import executor_rows, run_name_rows, writer_path_rows
+    from .wandb_signal import run_name_rows, writer_path_rows
 
     identities = load_identities(identities_path)
     asof = dt.date.today()
@@ -194,10 +111,6 @@ def wandb_attr(
     ).df()
     err(f"{len(run_dirs)} level-2/3/4 dirs under {', '.join(run_roots)}")
     rows = run_name_rows(runs, run_dirs, identities, asof) + writer_path_rows(runs, identities, asof)
-    if executor_path is not None:
-        executor_df = pd.read_parquet(executor_path)
-        err(f"{len(executor_df)} executor sidecars")
-        rows += executor_rows(runs, executor_df, identities, asof)
     table = pd.DataFrame([asdict(row) for row in rows])
     out.parent.mkdir(parents=True, exist_ok=True)
     table.to_parquet(out, index=False)
