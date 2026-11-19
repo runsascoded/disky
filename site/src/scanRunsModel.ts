@@ -36,6 +36,9 @@ export interface ScanRun {
   trigger_by?: string | null
   /** The starter's Slack emoji (`:name:`), asked of the broker when the list is read with `emoji=1`; absent when none. */
   trigger_emoji?: string
+  /** Its reply in the deployment's run thread (`#<deploy>-admin`), a Slack permalink the thread's reporter writes. Absent
+   * before migration `scan-run-thread-url` and for public viewers; null when not reported in a thread. */
+  thread_url?: string | null
 }
 
 export interface ScanRunPhase {

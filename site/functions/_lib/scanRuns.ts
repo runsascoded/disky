@@ -55,10 +55,11 @@ export async function withStarterEmoji(
   }
 }
 
-/** The rows a viewer may see: a public (anonymous) viewer gets no run's starter (`trigger_by`, an address). */
+/** The rows a viewer may see: a public (anonymous) viewer gets no run's starter (`trigger_by`, an address) and no link to
+ * where it was reported (`thread_url`, the deployment's internal Slack). */
 export function withoutStarters(rows: ScanRunRows | null, id: { via: 'session' | 'grant' | 'public' }): ScanRunRows | null {
   if (!rows || id.via !== 'public') return rows
-  return { ...rows, runs: rows.runs.map(({ trigger_by: _, ...r }) => r) }
+  return { ...rows, runs: rows.runs.map(({ trigger_by: _, thread_url: __, ...r }) => r) }
 }
 
 /** The run's pipeline DAG (the engine-neutral graph its head stored), or null: a one-VM run, or no `scan_run_dags`. */

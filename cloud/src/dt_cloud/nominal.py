@@ -24,7 +24,7 @@ from .scan_id import scan_time
 from .scan_runs import TRIGGER_BY_RE
 
 if TYPE_CHECKING:
-    from .scan_runs import JobRun
+    from .scan_runs import JobRun, Sink
 
 
 GROUPS = ('clean', 'color', 'signature')
@@ -570,6 +570,21 @@ def write_canvas(state: dict, slack: Transport, body: str, title: str, save: Cal
     save(state)
 
 
+def link_threads(state: dict, slack: Transport, write: Callable[[list[tuple[str, str]]], None], save: Callable[[dict], None]) -> None:
+    """Each run's reply in the open thread (its outcome reply, else its ⏳ one) as `(run_id, permalink)`, given to `write`
+    (`scan_runs.thread_url`) once per reply: `linked` remembers the reply each run was last written with, so a report
+    asks Slack only for replies new since the last. A failed write leaves `linked` alone, to be retried next report."""
+    replies = {rid: r['ts'] for rid, r in (state.get('running') or {}).items()}
+    replies.update(state.get('posted') or {})
+    linked = state.get('linked') or {}
+    todo = {rid: ts for rid, ts in replies.items() if linked.get(rid) != ts}
+    if not todo:
+        return
+    write([(rid, slack.permalink(ts)) for rid, ts in todo.items()])
+    state['linked'] = {**{rid: ts for rid, ts in linked.items() if rid in replies}, **todo}
+    save(state)
+
+
 def adopt(cfg: Config, rows: list[dict], slack: Transport) -> dict:
     if not cfg.adopt_parent:
         raise ValueError('nominal: no parent configured for adoption')
@@ -761,7 +776,10 @@ def run(
     execute: bool = False,
     adopt_check: bool = False,
     final: list[dict] | None = None,
+    sink: Sink | None = None,
 ) -> str:
+    """Render the thread (`execute` off), or converge it in Slack; with `sink`, also record each run's reply link there
+    (`link_threads`; best effort: a database without the column, migration `scan-run-thread-url`, only logs)."""
     from .append_runner import GcsLeaseFile, LocalLeaseFile, coordinator_lease
     from .blobstore import Store
     from .probe import http_fetch
@@ -852,6 +870,14 @@ def run(
             check()
             thread = slack.permalink(state['parent']) if state.get('parent') and not state.get('closed') else None
             write_canvas(state, slack, canvas_text(cfg, rows, thread, series, time.time()), cfg.title, save)
+        if sink is not None:
+            from .scan_runs import thread_url_sql
+
+            check()
+            try:
+                link_threads(state, slack, lambda links: sink.execute([thread_url_sql(rid, url) for rid, url in links]), save)
+            except Exception as e:  # noqa: BLE001 — the thread is posted; its links on /scans are a convenience
+                print(f'nominal: thread links not recorded ({type(e).__name__}: {e})', file=sys.stderr)
     if final is not None:
         final.append(state)
     return f"nominal: parent {state.get('parent', 'none')}; {len(state.get('posted', {}))} run replies"
@@ -868,6 +894,18 @@ def defers_failures(job: JobRun) -> bool:
             and facts.get('store', job.profile.store) == cfg.store)
 
 
+def job_sink(job: JobRun) -> Sink | None:
+    """The run's database, for its reply links (`run`'s `sink`); None when it can't be opened (logged): the thread
+    still posts."""
+    from .scan_runs import err
+
+    try:
+        return job.sink()
+    except (Exception, SystemExit) as exc:  # noqa: BLE001 — a missing database must not cost the report
+        err(job.redact(f'nominal: no database for thread links: {type(exc).__name__}: {exc}'))
+        return None
+
+
 def report_start(job: JobRun) -> None:
     """Opt-in, after `start` records the run: its ⏳ reply in the open thread, and the head's "Running now". A failure is
     logged, never the job's; the run's finish reports it whatever happened here."""
@@ -880,7 +918,7 @@ def report_start(job: JobRun) -> None:
         cfg = config(job.profile.nominal)
         if facts.get('parent') or facts.get('kind', 'scan') != cfg.kind or facts.get('store', job.profile.store) != cfg.store:
             return
-        err(run(job.profile.nominal, job.env, job.profile.project, execute=True))
+        err(run(job.profile.nominal, job.env, job.profile.project, execute=True, sink=job_sink(job)))
     except (Exception, SystemExit) as exc:  # noqa: BLE001 — reporting must not fail (or end) the job
         err(job.redact(f'nominal start report failed: {type(exc).__name__}: {exc}'))
 
@@ -900,7 +938,7 @@ def report_job(job: JobRun) -> None:
         if facts.get('parent') or facts.get('kind', 'scan') != cfg.kind or facts.get('store', job.profile.store) != cfg.store:
             return
         final: list[dict] = []
-        err(run(job.profile.nominal, job.env, job.profile.project, job.run_id, execute=True, final=final))
+        err(run(job.profile.nominal, job.env, job.profile.project, job.run_id, execute=True, final=final, sink=job_sink(job)))
         state = final[0] if final else {}
         threaded = state.get('key', 'clean') != 'clean' and job.run_id in state.get('posted', {})
     except (Exception, SystemExit) as exc:  # Reporting must not fail (or end) the job; its failure remains visible in the head log.

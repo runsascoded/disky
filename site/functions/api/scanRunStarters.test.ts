@@ -2,16 +2,20 @@ import { describe, expect, it } from 'vitest'
 import { withoutStarters, withStarterEmoji, type ScanRunRows } from '../_lib/scanRuns.js'
 import type { ScanRun } from '../../src/scanRunsModel.js'
 
-const run = (run_id: string, trigger: 'schedule' | 'manual', trigger_by: string | null) =>
-  ({ run_id, scan: '2026-11-16T1055', kind: 'scan', status: 'succeeded', trigger, trigger_by }) as unknown as ScanRun
-const rows: ScanRunRows = { runs: [run('a', 'manual', 'ada@example.org'), run('b', 'schedule', null)], phases: [], outputs: [] }
+const run = (run_id: string, trigger: 'schedule' | 'manual', trigger_by: string | null, thread_url: string | null = null) =>
+  ({ run_id, scan: '2026-11-16T1055', kind: 'scan', status: 'succeeded', trigger, trigger_by, thread_url }) as unknown as ScanRun
+const rows: ScanRunRows = {
+  runs: [run('a', 'manual', 'ada@example.org', 'https://example.slack.com/archives/C1/p1'), run('b', 'schedule', null)],
+  phases: [],
+  outputs: [],
+}
 
 describe('withoutStarters', () => {
   it('keeps a manual run’s starter for a signed-in viewer and a grant', () => {
     expect(withoutStarters(rows, { via: 'session' })).toBe(rows)
     expect(withoutStarters(rows, { via: 'grant' })).toBe(rows)
   })
-  it('drops every run’s starter for a public viewer, and nothing else', () => {
+  it('drops every run’s starter and thread link for a public viewer, and nothing else', () => {
     expect(withoutStarters(rows, { via: 'public' })).toEqual({
       runs: [
         { run_id: 'a', scan: '2026-11-16T1055', kind: 'scan', status: 'succeeded', trigger: 'manual' },

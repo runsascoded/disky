@@ -186,6 +186,12 @@ def run_sql(run: Run, now: int) -> str:
             f"ON CONFLICT(run_id) DO UPDATE SET {', '.join(sets)}")
 
 
+def thread_url_sql(run_id: str, url: str) -> str:
+    """Where the run's reply in its deployment's run thread is (`nominal.link_threads`: the reply's Slack permalink);
+    migration `scan-run-thread-url`. A run reported again in a later thread moves to that reply."""
+    return f"UPDATE scan_runs SET thread_url = {lit(url)} WHERE run_id = {lit(run_id)}"
+
+
 def heartbeat_sql(run_id: str, now: int) -> str:
     """A running run's liveness: `updated_ts` alone, and only while the row is `running` (a beat racing the job's
     finishing write never moves its status back, nor stamps a finished row)."""
@@ -2113,7 +2119,9 @@ def nominal_cmd(adopt_check: bool, profile_path: str | None, out: str | None, ru
     p = load_profile(profile_path)
     if not p.nominal:
         raise ValueError('scan-run nominal: profile has no nominal configuration')
-    text = run(p.nominal, os.environ, p.project, run_id, execute, adopt_check)
+    # An executed report records each reply's link on its run (`scan_runs.thread_url`) where the profile names a D1
+    db = (os.environ.get("D1_DB_ID") or "").strip() if execute else ""
+    text = run(p.nominal, os.environ, p.project, run_id, execute, adopt_check, sink=D1Sink(db) if db else None)
     if out:
         Path(out).write_text(text.rstrip() + '\n')
     else:

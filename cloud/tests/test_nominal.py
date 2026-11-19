@@ -344,7 +344,7 @@ def test_reporting_failure_keeps_job_result_and_redacts_error(monkeypatch):
         raise ValueError('secret-123 refused')
     monkeypatch.setattr(N, 'run', fail)
     job = SimpleNamespace(profile=SimpleNamespace(nominal=vars(CFG), project='p', store='primary'), recording=True,
-                          dry_run=False, env={}, run_id='r1', state=lambda: {}, redact=lambda s: s.replace('secret-123', '<SECRET>'))
+                          dry_run=False, env={}, run_id='r1', state=lambda: {}, redact=lambda s: s.replace('secret-123', '<SECRET>'), sink=lambda: None)
     assert N.report_job(job) is None
     assert said == ['nominal report failed: ValueError: <SECRET> refused']
 
@@ -362,9 +362,9 @@ def test_start_report_reads_the_live_ledger_for_top_level_runs_and_never_fails_t
 
     said, calls = [], []
     monkeypatch.setattr(scan_runs, 'err', said.append)
-    monkeypatch.setattr(N, 'run', lambda raw, env, project, run_id=None, execute=False: calls.append(run_id) or 'nominal: ok')
+    monkeypatch.setattr(N, 'run', lambda raw, env, project, run_id=None, execute=False, sink=None: calls.append(run_id) or 'nominal: ok')
     job = SimpleNamespace(profile=SimpleNamespace(nominal=vars(CFG), project='p', store='primary'), recording=True,
-                          dry_run=False, env={}, run_id='r1', state=lambda: facts, redact=lambda s: s)
+                          dry_run=False, env={}, run_id='r1', state=lambda: facts, redact=lambda s: s, sink=lambda: None)
     N.report_start(job)
     assert (calls, said) == (ran, ['nominal: ok'] if ran else [])
 
@@ -403,13 +403,41 @@ def test_preview_never_calls_slack_or_writes_state_and_execute_is_idempotent(tmp
     assert sorted(tmp_path.iterdir()) == []
     assert slack.calls == []
     env = {'SITE_TOKEN': 'viewer', 'SLACK_BOT_TOKEN': 'bot'}
-    assert N.run(asdict(cfg), env, 'project', 'r2', execute=True) == 'nominal: parent 1.0; 2 run replies'
+    sink = SimpleNamespace(statements=[])
+    sink.execute = sink.statements.extend
+    assert N.run(asdict(cfg), env, 'project', 'r2', execute=True, sink=sink) == 'nominal: parent 1.0; 2 run replies'
+    assert sink.statements == [
+        "UPDATE scan_runs SET thread_url = 'https://slack.test/p2.0' WHERE run_id = 'r1'",
+        "UPDATE scan_runs SET thread_url = 'https://slack.test/p3.0' WHERE run_id = 'r2'",
+    ]
     slack.calls.clear()
-    assert N.run(asdict(cfg), env, 'project', 'r2', execute=True) == 'nominal: parent 1.0; 2 run replies'
+    assert N.run(asdict(cfg), env, 'project', 'r2', execute=True, sink=sink) == 'nominal: parent 1.0; 2 run replies'
     assert slack.calls == []
+    assert len(sink.statements) == 2
     with pytest.raises(ValueError, match='terminal run record is not visible'):
         N.run(asdict(cfg), env, 'project', 'not-recorded', execute=True)
     assert slack.calls == []
+
+
+def test_each_runs_reply_link_is_written_once_retried_after_a_failed_write_and_moves_with_its_reply():
+    w = Writer()
+    w.run(history(2))
+    state, writes = deepcopy(w.saved), []
+    N.link_threads(state, w.slack, writes.append, w.save)
+    assert writes == [[('r1', 'https://slack.test/p2.0'), ('r2', 'https://slack.test/p3.0')]]
+    N.link_threads(state, w.slack, writes.append, w.save)
+    assert len(writes) == 1
+    w.run(history(3))
+    state = deepcopy(w.saved)
+
+    def refused(links):
+        raise RuntimeError('no such column: thread_url')
+    with pytest.raises(RuntimeError, match='no such column'):
+        N.link_threads(state, w.slack, refused, w.save)
+    assert w.saved['linked'] == {'r1': '2.0', 'r2': '3.0'}
+    N.link_threads(state, w.slack, writes.append, w.save)
+    assert writes[1:] == [[('r3', 'https://slack.test/p4.0')]]
+    assert w.saved['linked'] == {'r1': '2.0', 'r2': '3.0', 'r3': '4.0'}
 
 
 def test_supervisor_reports_after_signal_overrides_early_success(tmp_path, monkeypatch):

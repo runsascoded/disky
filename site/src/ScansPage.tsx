@@ -943,6 +943,7 @@ export function ScanRunPage() {
           {r.gen && <div><dt>{isMaintenance(r.kind) ? 'store generation' : 'index generation'}</dt><dd><code>{r.gen}</code></dd></div>}
           {r.image && <div><dt>image</dt><dd><code>{r.image}</code></dd></div>}
           {r.trigger && <div><dt>started by</dt><dd>{r.trigger === 'schedule' ? 'the schedule (cron)' : r.trigger_by ?? 'hand (a submit or a resume)'}</dd></div>}
+          {r.thread_url && <div><dt>reported in</dt><dd><a href={r.thread_url} target="_blank" rel="noreferrer">its run thread (Slack)</a></dd></div>}
           <div><dt>recorded by</dt><dd>{r.source === 'job' ? 'the job' : 'backfill (Batch, logs, the bucket)'}</dd></div>
         </dl>
         {d.dag && <>
