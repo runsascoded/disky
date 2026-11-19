@@ -1,5 +1,7 @@
 """`dt-cloud access jobs`: the deployment's job-table image submitted for the days not yet written."""
 
+import datetime as dt
+
 from dt_cloud.access_jobs import batch_problems, job_id, job_spec, plan, submit, submit_args
 
 ENV = {"DISKY_LABELS": "app=disky,deployment=d"}
@@ -19,10 +21,15 @@ def test_plan_counts_a_day_written_only_with_both_tables(tmp_path):
     assert plan(str(tmp_path), ["2026-11-18"]) == (["2026-11-18"], [])
 
 
-def test_job_id_is_one_per_set_of_days():
-    a = job_id("gcs", ["2026-11-17", "2026-11-18"])
-    assert (a[:-8], a == job_id("gcs", ["2026-11-18", "2026-11-17"]), a == job_id("gcs", ["2026-11-18"])) == (
-        "access-jobs-gcs-2026-11-18-", True, False)
+def test_job_id_is_one_per_set_of_days_per_hour():
+    at = dt.datetime(2026, 11, 19, 7, 12, tzinfo=dt.timezone.utc)
+    a = job_id("gcs", ["2026-11-17", "2026-11-18"], at)
+    assert (a[:27], a[-7:], len(a)) == ("access-jobs-gcs-2026-11-18-", "-111907", 42)
+    assert [a == job_id(*args) for args in (
+        ("gcs", ["2026-11-18", "2026-11-17"], at.replace(minute=59)),  # a retried step: the same job
+        ("gcs", ["2026-11-18"], at),  # another set of days
+        ("gcs", ["2026-11-17", "2026-11-18"], at.replace(hour=8)),  # a later run, after that job failed
+    )] == [True, False, False]
 
 
 def test_job_spec_runs_the_image_entrypoint_with_root_and_days():
@@ -53,9 +60,9 @@ def test_submit_names_no_job_when_every_day_is_written(tmp_path):
 def test_submit_dry_run_names_the_missing_days_job(tmp_path):
     write_day(tmp_path, "2026-11-17", "workers.parquet", "tasks.parquet")
     out = submit(str(tmp_path), ["2026-11-17", "2026-11-18"], image="i", service_account="sa", region="r", project="p",
-                 dry_run=True, environ=ENV)
-    assert (out["missing"], out["overdue"], out["job"], out["spec"]["taskGroups"][0]["taskSpec"]["runnables"][0]["container"]["commands"]) == (
-        ["2026-11-18"], [], job_id("d", ["2026-11-18"]), ["-o", str(tmp_path), "2026-11-18"])
+                 dry_run=True, environ=ENV, now=dt.datetime(2026, 11, 19, 7, tzinfo=dt.timezone.utc))
+    assert (out["missing"], out["overdue"], out["job"][-7:], out["spec"]["taskGroups"][0]["taskSpec"]["runnables"][0]["container"]["commands"]) == (
+        ["2026-11-18"], [], "-111907", ["-o", str(tmp_path), "2026-11-18"])
 
 
 def test_submit_args_and_problems():

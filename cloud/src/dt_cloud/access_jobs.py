@@ -9,6 +9,7 @@ leaves a day its source doesn't cover yet for a later run."""
 
 from __future__ import annotations
 
+import datetime as dt
 import hashlib
 import os
 import sys
@@ -45,13 +46,14 @@ def plan(root: str, days: Sequence[str]) -> tuple[list[str], list[str]]:
     return missing, [d for d in missing if d != newest]
 
 
-def job_id(deployment: str, days: Sequence[str]) -> str:
-    """`access-jobs-<deployment>-<newest day>-<8 hex of the days>`: one job per set of days, so a resubmit (a retried
-    step) meets the job already there (409: counted as submitted)."""
+def job_id(deployment: str, days: Sequence[str], at: dt.datetime) -> str:
+    """`access-jobs-<deployment>-<newest day>-<8 hex of the days>-<MMDDHH of at>`: one job per set of days per UTC
+    hour, so a resubmit within the hour (a retried step) meets the job already there (409: counted as submitted), and
+    a later run's, after that job failed, is a new job."""
     from .batch import check_job_id
 
     h = hashlib.sha256(",".join(sorted(days)).encode()).hexdigest()[:8]
-    return check_job_id(f"{COMPONENT}-{deployment}-{max(days)}-{h}".lower())
+    return check_job_id(f"{COMPONENT}-{deployment}-{max(days)}-{h}-{at.astimezone(dt.timezone.utc):%m%d%H}".lower())
 
 
 def job_spec(root: str, days: Sequence[str], *, image: str, service_account: str, region: str, project: str,
@@ -91,7 +93,7 @@ def job_spec(root: str, days: Sequence[str], *, image: str, service_account: str
 def submit(root: str, days: Sequence[str], *, image: str, service_account: str, region: str, project: str,
            machine: str = MACHINE, spot: bool = True, env: Mapping[str, str] | None = None,
            secrets: Mapping[str, str] | None = None, cross_region: bool = False, dry_run: bool = False,
-           environ: Mapping[str, str] | None = None) -> dict:
+           environ: Mapping[str, str] | None = None, now: dt.datetime | None = None) -> dict:
     """Submit the job for `days`' missing ones (`plan`); none missing: no job. Through `batch.submit_job` (cost labels;
     a `gs://` root's bucket region checked against the job's unless `cross_region`; a job of that id already there
     counts as submitted). Not waited on. Returns `{missing, overdue, job?, submitted?, spec? (dry_run)}`."""
@@ -103,7 +105,7 @@ def submit(root: str, days: Sequence[str], *, image: str, service_account: str, 
     from .cost_labels import deployment_labels
 
     environ = dict(os.environ if environ is None else environ)
-    jid = job_id(deployment_labels(environ)["deployment"], missing)
+    jid = job_id(deployment_labels(environ)["deployment"], missing, now or dt.datetime.now(dt.timezone.utc))
     spec = job_spec(root, missing, image=image, service_account=service_account, region=region, project=project,
                     machine=machine, spot=spot, env=env, secrets=secrets, environ=environ)
     out["job"] = jid
