@@ -60,6 +60,10 @@ export function line(d: FleetDeployment): string {
   if (m && m.now !== null) parts.push(`/meta ${fmtSI(m.now)}${m.d7 !== null ? ` (${delta(m.now - m.d7)} 7d)` : ''}`)
   else parts.push('/meta n/a')
   if (d.health?.newest_scan_age != null && d.health.newest_scan_age > 36 * 3600) parts.push(`newest scan ${fmtAge(d.health.newest_scan_age)} old`)
+  // Where to read more: its `/scans`, and the run thread in `#<deployment>-admin` (its newest run reported there)
+  parts.push(`<${d.url}/scans|scans>`)
+  const thread = [d.last, ...d.runs].find(x => x?.thread_url)?.thread_url
+  if (thread) parts.push(`<${thread}|thread>`)
   const runs = strip(d)
   return `${emoji} *<${d.url}|${d.name}>*  ${runs ? `${runs}  ` : ''}${parts.join(' · ')}`
 }
