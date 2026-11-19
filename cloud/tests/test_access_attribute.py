@@ -74,3 +74,19 @@ def test_attribute_day_redoes_a_day_only_when_its_inputs_change(tmp_path):
     (tmp_path / f"jobs/{DAY}/tasks.parquet").unlink()  # jobs not yet written: requests stop at their VM
     assert attribute_day(str(tmp_path), DAY, skip_unchanged=True)["share"] == {"ip": 0.0566, "vm": 0.9434}
     assert attribute_day(str(tmp_path), dt.date(2026, 11, 20)) == {"day": "2026-11-20", "status": "no-rollup"}
+
+
+def test_attribute_day_without_host_snapshots_stops_every_request_at_its_ip(tmp_path):
+    # days before hourly host snapshots began (gcs: before 2026-11-19) have job tables but no hosts: the empty hosts
+    # table's columns must still join the jobs' string addresses
+    fixture(tmp_path)
+    (tmp_path / f"hosts/{DAY}/10.parquet").unlink()
+    assert attribute_day(str(tmp_path), DAY) == {"day": str(DAY), "status": "written", "rows": 4, "share": {"ip": 1.0}}
+    rows = duckdb.sql(f"""SELECT hour(timezone('UTC', hour)), requester, vm, owner, via, n
+        FROM '{tmp_path}/attributed/{DAY}.parquet' ORDER BY hour, requester""").fetchall()
+    assert rows == [
+        (10, "1.1.1.1", None, None, "ip", 400.0),
+        (10, "2.2.2.2", None, None, "ip", 50.0),
+        (10, "9.9.9.9", None, None, "ip", 7.0),
+        (11, "3.3.3.3", None, None, "ip", 20.0),
+    ]

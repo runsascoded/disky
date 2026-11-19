@@ -27,6 +27,10 @@ from .index_footer import INDEX_VARIANTS
 from .prefixes import load_prefix_map
 from .scan_id import scan_id_option, snapshot_scans
 
+# gcsfs ≥ 2026.8.1's adaptive prefetcher hangs a process at exit when a read handle outlives fsspec's loop (see
+# `disk_tree.blobfs`, which opts out the same way); `access attribute` failing on 2026-11-19 then hung its scan step 7 h
+os.environ.setdefault("USE_EXPERIMENTAL_ADAPTIVE_PREFETCHING", "false")
+
 err = partial(print, file=sys.stderr)
 
 

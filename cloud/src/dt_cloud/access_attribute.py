@@ -86,7 +86,7 @@ def attribute_sql(req: str, hosts: list[str], workers: str | None, tasks: str | 
         f"CREATE TABLE req AS SELECT * FROM read_parquet('{req}')",
         "CREATE TABLE hosts AS SELECT ts, external_ip, internal_ip, name AS vm, try_cast(created AS TIMESTAMPTZ) AS created "
         + (f"FROM read_parquet({hosts!r}) WHERE external_ip IS NOT NULL" if hosts else
-           "FROM (SELECT NULL::TIMESTAMPTZ AS ts, NULL AS external_ip, NULL AS internal_ip, NULL AS name, NULL AS created) WHERE false"),
+           "FROM (SELECT NULL::TIMESTAMPTZ AS ts, NULL::VARCHAR AS external_ip, NULL::VARCHAR AS internal_ip, NULL::VARCHAR AS name, NULL::VARCHAR AS created) WHERE false"),
         # each (requester, hour): the host holding that IP in the snapshot nearest the hour's middle, within the slack,
         # not created after the hour ended
         f"""CREATE TABLE ipmap AS SELECT k.requester, k.hour, h.internal_ip, h.vm FROM (SELECT DISTINCT requester, hour FROM req
@@ -104,7 +104,7 @@ def attribute_sql(req: str, hosts: list[str], workers: str | None, tasks: str | 
             JOIN (SELECT hour::TIMESTAMPTZ AS hour, worker_id, owner, job, sum(n_samples) AS n_samples
                   FROM read_parquet('{tasks}') GROUP BY ALL) t ON t.hour = w.hour AND t.worker_id = w.worker_id""")
     else:
-        stmts.append("CREATE TABLE shares AS SELECT NULL::TIMESTAMPTZ AS hour, NULL AS internal_ip, NULL AS owner, NULL AS job, NULL::DOUBLE AS share WHERE false")
+        stmts.append("CREATE TABLE shares AS SELECT NULL::TIMESTAMPTZ AS hour, NULL::VARCHAR AS internal_ip, NULL::VARCHAR AS owner, NULL::VARCHAR AS job, NULL::DOUBLE AS share WHERE false")
     stmts.append("""CREATE TABLE att AS SELECT r.* EXCLUDE (n, bytes_out, bytes_in), m.vm, s.owner, s.job,
           CASE WHEN s.share IS NOT NULL THEN 'task' WHEN m.vm IS NOT NULL THEN 'vm' ELSE 'ip' END AS via,
           r.n * coalesce(s.share, 1) AS n, r.bytes_out * coalesce(s.share, 1) AS bytes_out, r.bytes_in * coalesce(s.share, 1) AS bytes_in
