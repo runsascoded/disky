@@ -7,24 +7,33 @@
 import { fmtSI } from '@disk-tree/pages-kit/og/text'
 import { fmtHours, fmtUsd } from './card.js'
 import type { Env } from './env.js'
-import type { FleetDeployment, FleetDoc } from './fleet.js'
+import type { FleetDeployment, FleetDoc, FleetRun } from './fleet.js'
 
 export type Block = Record<string, unknown>
 export interface SlackMessage { text: string; blocks: Block[] }
 
-/** A deployment's state, in a few words, and its emoji. */
-export function status(d: FleetDeployment): { emoji: string; word: string } {
-  const r = d.last
-  if (!r) {
-    if (d.errors.runs) return { emoji: ':grey_question:', word: `unreachable (${d.errors.runs})` }
-    return { emoji: ':white_circle:', word: 'no scans' }
-  }
+/** A run's outcome, in a few words, and its emoji. */
+function runStatus(r: FleetRun): { emoji: string; word: string } {
   if (r.status === 'running') return { emoji: ':hourglass_flowing_sand:', word: 'running' }
   if (r.status === 'failed') return { emoji: ':x:', word: r.failed_at ? `failed at ${r.failed_at}` : 'failed' }
   const n = r.open_issues.length
   if (n) return { emoji: ':warning:', word: `${n} step issue${n > 1 ? 's' : ''} open (${r.open_issues.join(', ')})` }
   return { emoji: ':white_check_mark:', word: 'ok' }
 }
+
+/** A deployment's state (its newest run's, else why it has none), in a few words, and its emoji. */
+export function status(d: FleetDeployment): { emoji: string; word: string } {
+  if (d.last) return runStatus(d.last)
+  if (d.errors.runs) return { emoji: ':grey_question:', word: `unreachable (${d.errors.runs})` }
+  return { emoji: ':white_circle:', word: 'no scans' }
+}
+
+/** How many of a deployment's newest runs its line shows as a strip. */
+export const STRIP_RUNS = 10
+
+/** The newest `STRIP_RUNS` runs' emoji, oldest first, each linked to its record; empty when it has none. */
+const strip = (d: FleetDeployment): string =>
+  d.runs.slice(0, STRIP_RUNS).reverse().map(r => `<${d.url}/scans/${encodeURIComponent(r.run_id)}|${runStatus(r).emoji}>`).join('')
 
 /** A signed byte change: `+1.2 GB`, `−300 MB`. */
 const delta = (b: number): string => `${b < 0 ? '−' : '+'}${fmtSI(Math.abs(b))}`
@@ -48,7 +57,8 @@ export function line(d: FleetDeployment): string {
   if (m && m.now !== null) parts.push(`/meta ${fmtSI(m.now)}${m.d7 !== null ? ` (${delta(m.now - m.d7)} 7d)` : ''}`)
   else parts.push('/meta n/a')
   if (d.health?.newest_scan_age != null && d.health.newest_scan_age > 36 * 3600) parts.push(`newest scan ${fmtAge(d.health.newest_scan_age)} old`)
-  return `${emoji} *<${d.url}|${d.name}>*  ${parts.join(' · ')}`
+  const runs = strip(d)
+  return `${emoji} *<${d.url}|${d.name}>*  ${runs ? `${runs}  ` : ''}${parts.join(' · ')}`
 }
 
 const stamp = (t: number) => `${new Date(t * 1000).toISOString().slice(0, 16).replace('T', ' ')} UTC`
@@ -61,7 +71,7 @@ export function fleetMessage(doc: FleetDoc, image: string, page: string): SlackM
     blocks: [
       { type: 'section', text: { type: 'mrkdwn', text: [`*disky fleet* · <${page}|details>`, ...lines].join('\n') } },
       { type: 'image', image_url: image, alt_text: 'disky fleet: /meta store size, scan duration and cost per day, per deployment, over the last week' },
-      { type: 'context', elements: [{ type: 'mrkdwn', text: `read ${stamp(doc.now)} · updated in place hourly` }] },
+      { type: 'context', elements: [{ type: 'mrkdwn', text: `read ${stamp(doc.now)} · updated in place hourly · <${image}|PNG>` }] },
     ],
   }
 }
