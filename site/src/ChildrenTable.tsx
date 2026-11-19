@@ -412,9 +412,9 @@ export function ChildrenTable({ node, segs, scheme, bucketSchemes, scan, flatOk 
                       ? <Tooltip content={<code className="elide-full">{pathText(schemeOf(fullSegs), fullSegs)}</code>} placement="right">{name}</Tooltip>
                       : name
                     const inside = mark?.as === 'inside' && <Tooltip content={`${mark.n.toLocaleString('en-US')} staged ${mark.n === 1 ? 'item' : 'items'} inside: review them at /staged`}><a className="row-n staged-n" href="/staged"> · {mark.n.toLocaleString('en-US')} staged</a></Tooltip>
-                    // A union root's row: its store's mark, that store's scan in its tip (`store`/`scan`).
+                    // A union root's row: its store's mark before its name (so names stay aligned), that store's scan in its tip (`store`/`scan`).
                     const src = <RootSourceTag node={k} />
-                    return count ? <>{cell}{src}<span className="row-n"> · {count.toLocaleString('en-US')}{atLeast ? '+' : ''} {count === 1 && !atLeast ? 'match' : 'matches'}</span>{inside}</> : <>{cell}{src}{inside}</>
+                    return count ? <>{src}{cell}<span className="row-n"> · {count.toLocaleString('en-US')}{atLeast ? '+' : ''} {count === 1 && !atLeast ? 'match' : 'matches'}</span>{inside}</> : <>{src}{cell}{inside}</>
                   })()}
                 </td>
                 <td className="num">{fmtBytes(k.bytes)}</td>
