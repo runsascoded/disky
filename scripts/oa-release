@@ -394,6 +394,27 @@ def live_get(url: str) -> bytes:
     raise AssertionError('unreachable')
 
 
+#: `finish`'s Cloudflare readback (`serving`) is retried this many times, `READBACK_RETRY_S` apart: the deployments list
+#: can lag the upload (gcs's dev release 44431263157 failed this at 00:45:41Z on build f97740935, made 00:44:28Z, which
+#: dev.gcs.oa.dev served right after), as the live checks below already allow for.
+READBACK_RETRIES = 12
+READBACK_RETRY_S = 5
+
+
+def serving(receipt: dict) -> dict | None:
+    """The Cloudflare deployment serving `receipt`'s environment (prod: the project's canonical one; dev: the newest
+    preview deployment of its Pages branch), if it is the clean requested revision and finished; else None."""
+    deployment = pages(receipt['project'])['canonical_deployment'] if receipt['mode'] == 'prod' else next((
+        d for d in pages(f'{receipt["project"]}/deployments?env=preview')
+        if d['deployment_trigger']['metadata']['branch'] == receipt['pages_branch']
+    ), None)
+    if not deployment:
+        return None
+    metadata = deployment['deployment_trigger']['metadata']
+    ok = metadata['commit_hash'] == receipt['sha'] and not metadata.get('commit_dirty') and deployment['latest_stage']['status'] == 'success'
+    return deployment if ok else None
+
+
 @main.command('finish')
 @option('-f', '--failed', is_flag=True)
 @argument('receipt_path', type=ClickPath(path_type=Path))
@@ -403,15 +424,14 @@ def finish(failed: bool, receipt_path: Path) -> None:
     if failed:
         status(receipt, 'failure')
         return
-    project = pages(receipt['project'])
-    deployment = project['canonical_deployment'] if receipt['mode'] == 'prod' else next((
-        d for d in pages(f'{receipt["project"]}/deployments?env=preview')
-        if d['deployment_trigger']['metadata']['branch'] == receipt['pages_branch']
-    ), None)
-    require(bool(deployment), 'No matching Cloudflare deployment')
-    metadata = deployment['deployment_trigger']['metadata']
-    require(metadata['commit_hash'] == receipt['sha'] and not metadata.get('commit_dirty')
-            and deployment['latest_stage']['status'] == 'success', 'Cloudflare is not serving the clean requested revision')
+    deployment = None
+    for attempt in range(READBACK_RETRIES + 1):
+        deployment = serving(receipt)
+        if deployment:
+            break
+        if attempt < READBACK_RETRIES:
+            sleep(READBACK_RETRY_S)
+    require(bool(deployment), 'Cloudflare is not serving the clean requested revision')
     for attempt in range(12):
         req = Request(f'https://{receipt["host"]}/api/health?release-check={environ["GITHUB_RUN_ID"]}-{attempt}', headers=LIVE_HEADERS)
         # A 5xx or a dropped connection is a host not answering yet: the next attempt, as a stale build is

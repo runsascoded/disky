@@ -327,6 +327,49 @@ def test_begin_records_source_sha_and_exact_artifact_not_controller_sha(tmp_path
     ]
 
 
+def test_finish_rereads_cloudflare_until_it_serves_the_requested_revision(tmp_path, monkeypatch):
+    """The deployments list can lag the upload (gcs's dev release 44431263157): `finish` reads it again, 5 s apart,
+    until the dev branch's newest deployment is the clean requested one, and fails only after 12 retries."""
+    from io import BytesIO
+    receipt = {'repository': REPO, 'id': 73, 'run_url': f'https://github.com/{REPO}/actions/runs/123', 'mode': 'dev',
+               'sha': SHA, 'project': 'oa-hf-usage', 'pages_branch': 'dev', 'host': 'dev.hf.oa.dev', 'entry_assets': {}}
+    path = tmp_path / 'receipt.json'
+    path.write_text(dumps(receipt))
+    old = {'id': 'cf72', 'url': 'https://cf72.oa-hf-usage.pages.dev', 'latest_stage': {'status': 'success'},
+           'deployment_trigger': {'metadata': {'branch': 'dev', 'commit_hash': 'b' * 40, 'commit_dirty': False}}}
+    building = {'id': 'cf73', 'url': 'https://cf73.oa-hf-usage.pages.dev', 'latest_stage': {'status': 'active'},
+                'deployment_trigger': {'metadata': {'branch': 'dev', 'commit_hash': SHA, 'commit_dirty': False}}}
+    done = {**building, 'latest_stage': {'status': 'success'}}
+    lists = [[old], [building, old], [done, old]]
+    read = []
+
+    def pages(path):
+        read.append(path)
+        return lists.pop(0)
+
+    slept = []
+    monkeypatch.setattr(release, 'pages', pages)
+    monkeypatch.setattr(release, 'sleep', slept.append)
+    monkeypatch.setattr(release, 'api', lambda path, body=None: None)
+
+    def urlopen(request, timeout):
+        response = BytesIO(b'')
+        response.headers = {'x-disky-build': f'{SHA} 2026-11-19T00:44:28Z'}
+        return response
+
+    monkeypatch.setattr(release, 'urlopen', urlopen)
+    result = CliRunner().invoke(release.main, ['finish', str(path)], env={'GITHUB_RUN_ID': '123'})
+    assert (result.exit_code, read, slept) == (0, ['oa-hf-usage/deployments?env=preview'] * 3, [5, 5])
+    assert loads(path.read_text())['cloudflare_deployment'] == 'cf73'
+
+    lists, read[:], slept[:] = [[old]] * 13, [], []
+    path.write_text(dumps(receipt))
+    result = CliRunner().invoke(release.main, ['finish', str(path)], env={'GITHUB_RUN_ID': '123'})
+    assert (result.exit_code, result.output, len(read), slept) == (
+        1, 'Error: Cloudflare is not serving the clean requested revision\n', 13, [5] * 12,
+    )
+
+
 @pytest.mark.parametrize('wrong_asset', [False, True])
 def test_success_requires_live_build_and_exact_entry_asset(tmp_path, monkeypatch, wrong_asset):
     from io import BytesIO
