@@ -34,6 +34,8 @@ uv sync --all-packages --all-extras         # + dt-cloud, every extra
 
 `site/` is a Vite + React app with Cloudflare Pages Functions over a path index of each scan (in R2 / GCS, with D1 for the index footers): treemaps you can drill into, filter, diff between scans, and an age lens. Zero-dependency DIY-SVG/canvas ([`@open-athena/treemap`](packages/treemap)), no chart lib. Try it on the [live `r2://ctbk` demo](https://r2.rbw.sh/r2/ctbk).
 
+A deployment posts to Slack through a bot of its own (the usage digest, scan threads and alerts, site activity, release notices): [`deploy/slack/README.md`](deploy/slack/README.md) has the setup steps, the scopes and what each is for, and a sample manifest ([`usage-bot.manifest.json`](deploy/slack/usage-bot.manifest.json)).
+
 ## CLI
 
 ```bash
