@@ -299,13 +299,16 @@ interface TreemapProps<T> {
      */
     onCellClick?: (n: T, path: T[], event: React.MouseEvent) => boolean | void;
     /**
-     * Make leaf-rendered cells real anchors (`<a href>`): native cursor,
-     * middle/cmd-click, link hints (Vimium), crawlability. Return `undefined`
-     * for cells that shouldn't be links. Cells that render nested tiles stay
-     * `<div>`s (anchors can't nest), so this suits shallow maps best. Plain
-     * clicks are `preventDefault`ed and flow through `onCellClick`/drill/pin
-     * as usual — an SPA router intercepts while the href keeps its native
-     * affordances.
+     * Each cell's link: where opening it in a new tab should go. Return
+     * `undefined` for cells that shouldn't be links. DOM renderer: leaf-rendered
+     * cells are real anchors (`<a href>`: native cursor, middle/⌘-click, context
+     * menu, link hints (Vimium), crawlability); a cell that renders nested tiles
+     * stays a `<div>` (anchors can't nest) and its title strip is the anchor.
+     * Anywhere else a link can't be an element (a branch's body, every canvas
+     * cell), ⌘/Ctrl-click and middle-click open it in a new tab and ⇧-click in a
+     * new window, as a link would. Plain clicks (and ⌥-click, which pins) are
+     * `preventDefault`ed and flow through `onCellClick`/drill/pin as usual — an
+     * SPA router intercepts while the href keeps its native affordances.
      */
     cellHref?: (n: T, path: T[]) => string | undefined;
     /** Called whenever the drill path changes (drill in, drill back). */
@@ -508,7 +511,8 @@ interface TreemapProps<T> {
      * hit-tests the retained layout, routing hits into the *same* drill/tooltip
      * handlers. Every surrounding affordance (crumbs, fold slider, drill, pinned
      * tips, lazy-load) is shared. Canvas parity is still filling in: segments
-     * (makeup stripes), chain-label text, `cellHref` anchors, and the in-map
+     * (makeup stripes), chain-label text, `cellHref` anchors (its modified and
+     * middle clicks still open the link: `cellHref`), and the in-map
      * loading/error overlay are DOM-only for now (the overlay still renders atop
      * the canvas). Default: `'dom'`.
      */
@@ -729,7 +733,8 @@ interface TreemapCanvasProps<T> {
     idFor: (n: T, p: T[]) => string;
     expandable: (n: T, p: T[]) => boolean;
     dustTexture: boolean;
-    /** Per-cell link href for the a11y overlay (mirrors the DOM `cellHref`). */
+    /** Per-cell link href (the DOM `cellHref`): the a11y overlay's anchors, and a
+     *  modified or middle click on the canvas opens it as a link would. */
     cellHref?: (n: T, path: T[]) => string | undefined;
     /** Build the focusable a11y overlay (see `TreemapProps.a11yLinks`). */
     a11yLinks: boolean;

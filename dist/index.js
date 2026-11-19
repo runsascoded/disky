@@ -172,6 +172,27 @@ function drawStripes(ctx, x, y, w, h, stripes, color) {
   }
   ctx.restore();
 }
+
+// src/link.ts
+var isNewTabClick = (e) => e.metaKey || e.ctrlKey || e.shiftKey || e.button === 1;
+function openLikeLink(href, e) {
+  const a = document.createElement("a");
+  a.href = href;
+  a.rel = "noopener";
+  a.hidden = true;
+  document.body.appendChild(a);
+  const tab = e.metaKey || e.ctrlKey || e.button === 1;
+  try {
+    a.dispatchEvent(new MouseEvent("click", {
+      cancelable: true,
+      metaKey: tab,
+      ctrlKey: tab,
+      shiftKey: e.shiftKey
+    }));
+  } finally {
+    a.remove();
+  }
+}
 var CONTAINER_RGB = `rgb(${CONTAINER_BG[0]}, ${CONTAINER_BG[1]}, ${CONTAINER_BG[2]})`;
 var SYNC_BUDGET_MS = 8;
 var FRAME_BUDGET_MS = 10;
@@ -302,6 +323,16 @@ function TreemapCanvas({
     const box = e.currentTarget.getBoundingClientRect();
     return { lx: e.clientX - box.left, ly: e.clientY - box.top };
   };
+  const hitAt = (e) => {
+    const { lx, ly } = localXY(e);
+    const cell = hitTest(cells, lx, ly);
+    return cell ? toHit(cell, lx, ly) : null;
+  };
+  const linkAt = (e) => {
+    if (!cellHref) return void 0;
+    const hit = hitAt(e);
+    return hit && !hit.foldChild ? cellHref(hit.node, hit.path) : void 0;
+  };
   const overlayCells = useMemo(() => {
     if (!a11yLinks) return [];
     const out = [];
@@ -346,11 +377,26 @@ function TreemapCanvas({
         },
         onMouseLeave: onLeave,
         onClick: (e) => {
-          const { lx, ly } = localXY(e);
-          const cell = hitTest(cells, lx, ly);
-          if (!cell) return;
-          const hit = toHit(cell, lx, ly);
-          if (hit) onClick(hit, e);
+          const hit = hitAt(e);
+          if (!hit) return;
+          const href = isNewTabClick(e) && !hit.foldChild ? cellHref?.(hit.node, hit.path) : void 0;
+          if (href) {
+            e.preventDefault();
+            openLikeLink(href, e);
+            return;
+          }
+          onClick(hit, e);
+        },
+        onAuxClick: (e) => {
+          if (e.button !== 1) return;
+          const href = linkAt(e);
+          if (href) {
+            e.preventDefault();
+            openLikeLink(href, e);
+          }
+        },
+        onMouseDown: (e) => {
+          if (e.button === 1 && linkAt(e)) e.preventDefault();
         }
       }
     ),
@@ -401,7 +447,7 @@ function TreemapCanvas({
       };
       const activate = (e) => {
         const me = e;
-        if (!(href && (me.metaKey || me.ctrlKey || me.shiftKey || me.altKey || me.button === 1))) {
+        if (!(href && isNewTabClick(me))) {
           e.preventDefault();
           onClick(hit, me);
         }
@@ -1324,7 +1370,10 @@ function Treemap({
       }
       activateHover(kid, kidPath, cellKey, b.left, b.top);
     };
-    const href = cellHref && !folded && kids.length === 0 ? cellHref(kid, kidPath) : void 0;
+    const link = cellHref && !folded ? cellHref(kid, kidPath) : void 0;
+    const href = kids.length === 0 ? link : void 0;
+    const headerHref = kids.length > 0 ? link : void 0;
+    const onAnchor = (e) => !!e.target.closest?.("a");
     const onClick = (e) => {
       e.stopPropagation();
       if (folded) {
@@ -1333,14 +1382,28 @@ function Treemap({
         activatePin(hit.it, hit.path, hit.key, e.clientX, e.clientY);
         return;
       }
-      if (href) {
-        if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button === 1) return;
+      if (link && isNewTabClick(e)) {
+        if (onAnchor(e)) return;
         e.preventDefault();
+        openLikeLink(link, e);
+        return;
       }
+      if (link) e.preventDefault();
       activateClick(kid, kidPath, cellKey, kidDrillable, e.clientX, e.clientY, e);
     };
+    const onAuxClick = link ? (e) => {
+      if (e.button !== 1) return;
+      e.stopPropagation();
+      if (onAnchor(e)) return;
+      e.preventDefault();
+      openLikeLink(link, e);
+    } : void 0;
+    const onMouseDown = link ? (e) => {
+      if (e.button === 1 && !onAnchor(e)) e.preventDefault();
+    } : void 0;
     const chromeOk = Math.min(r.w, r.h) >= 28;
     const CellTag = href ? "a" : "div";
+    const LabelTag = headerHref ? "a" : "div";
     return /* @__PURE__ */ jsxs(
       CellTag,
       {
@@ -1385,6 +1448,8 @@ function Treemap({
         tabIndex: folded ? -1 : 0,
         onMouseMove: kids.length > 0 ? void 0 : showTip,
         onClick,
+        onAuxClick,
+        onMouseDown,
         onKeyDown: (e) => e.key === "Enter" && onClick(e),
         children: [
           /* @__PURE__ */ jsxs(
@@ -1446,11 +1511,15 @@ function Treemap({
               )
             }
           ),
-          showLbl && /* @__PURE__ */ jsxs(
-            "div",
+          showLbl && // A branch's title strip is its link (`headerHref`): a sibling of the nested tiles, never around them.
+          // Out of the tab order: the cell itself is the focus stop.
+          /* @__PURE__ */ jsxs(
+            LabelTag,
             {
               className: "dt-treemap-lbl" + (r.w < 64 ? " sm" : ""),
+              ...headerHref && { href: headerHref, tabIndex: -1 },
               style: {
+                ...headerHref && { color: "inherit", textDecoration: "none", cursor: "pointer" },
                 position: "relative",
                 width: titleWidth ?? void 0,
                 boxSizing: "border-box",
