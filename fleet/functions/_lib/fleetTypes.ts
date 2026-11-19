@@ -16,6 +16,9 @@ export interface FleetRun {
   failed_at: string | null
   /** The phases whose issue is still open: no later attempt or run did its work, and no later run's same check passed. */
   open_issues: string[]
+  /** The Slack permalink of the run's reply in `#<deployment>-admin`; absent or null when it has none (or the deployment's
+   *  `/api/scan-runs` predates it). */
+  thread_url?: string | null
 }
 
 export interface MetaPoint {
@@ -37,7 +40,7 @@ export interface FleetMeta {
   now: number | null
   d1: number | null
   d7: number | null
-  /** The newest scan per UTC day, oldest first, over `META_DAYS`. */
+  /** The newest scan per UTC day, oldest first, over `HISTORY_DAYS`. */
   daily: MetaPoint[]
 }
 
@@ -56,10 +59,10 @@ export interface FleetDeployment {
   health: FleetHealth | null
   /** The newest scan run (maintenance runs aside). */
   last: FleetRun | null
-  /** The scan runs started in the card's window (`WINDOW_DAYS`; the newest always), at most `FLEET_RUNS`, newest first. */
+  /** The scan runs started in the last `HISTORY_DAYS` (the newest always), at most `FLEET_RUNS`, newest first. */
   runs: FleetRun[]
   meta: FleetMeta | null
-  /** The primary store's object count: the newest scan per UTC day over `META_DAYS`, oldest first. */
+  /** The primary store's object count: the newest scan per UTC day over `HISTORY_DAYS`, oldest first. */
   objects: ObjPoint[] | null
   /** Why a part is missing: `health`, `runs`, `meta`, `objects`. */
   errors: Partial<Record<'health' | 'runs' | 'meta' | 'objects', string>>
@@ -68,6 +71,8 @@ export interface FleetDeployment {
 export interface FleetDoc {
   /** Epoch s the document was read at. */
   now: number
+  /** How many days back each deployment's runs and series reach (`HISTORY_DAYS`): the page's longest chart range. */
+  days: number
   deployments: FleetDeployment[]
 }
 

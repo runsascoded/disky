@@ -7,7 +7,6 @@
  * The wire types below are the fields read from each route's answer (`site/functions/api/health.ts`,
  * `api/scan-runs/[[path]].ts`, `api/series.ts`), nothing more.
  */
-import { WINDOW_DAYS } from './card.js'
 import type { Env } from './env.js'
 import type { FleetDeployment, FleetDoc, FleetMeta, FleetRun, MetaPoint, ObjPoint } from './fleetTypes.js'
 
@@ -41,7 +40,12 @@ export function parseFleet(raw: string | undefined): Deployment[] {
 interface HealthWire { freshness: { newest_scan: string | null; newest_scan_age: number | null }; gaps: Record<string, number> }
 interface IssueWire { phase: string; recovery: unknown; passing?: unknown }
 interface RunWire {
-  run: { run_id: string; scan: string; kind: string; status: string; started_ts: number | null; trigger?: string | null }
+  run: {
+    run_id: string; scan: string; kind: string; status: string; started_ts: number | null; trigger?: string | null
+    /** The run's reply in `#<deployment>-admin` (a Slack permalink, `scan_runs.thread_url`); absent from a site or D1
+     *  that predates it (migration `scan-run-thread-url`). */
+    thread_url?: string | null
+  }
   secs: number | null
   cost_usd: number | null
   failed_at: string | null
@@ -54,11 +58,12 @@ interface SeriesWire { points: { date: string; bytes?: number; b?: number; objec
 
 // ── the document (its shape: `fleetTypes.ts`) ─────────────────────────────
 
-/** A cap on runs per deployment (`FLEET_RUNS`); the runs kept are the card's window's (`WINDOW_DAYS`), whatever the
+/** A cap on runs per deployment (`FLEET_RUNS`); the runs kept are those started in the last `HISTORY_DAYS`, whatever the
  *  deployment's scan rate, plus its newest even when older. */
 export const DEFAULT_RUNS = 200
-/** How far back `FleetMeta.daily` reaches. */
-export const META_DAYS = 30
+/** How far back the runs, `FleetMeta.daily` and `objects` reach: the page's 30-day charts (the card draws the last
+ *  `WINDOW_DAYS` of it). */
+export const HISTORY_DAYS = 30
 /** The scan job's own runs (`kind = 'scan'`, `dt-cloud scan-run`'s default). A deployment's other runs are listed beside them
  *  on its `/scans` but aren't new scans here: maintenance (`compact`, `race`, `merge`), the access-log ingest, re-runs over an
  *  existing scan's outputs (`reproc`) and phase recoveries. */
@@ -84,6 +89,7 @@ export const fleetRun = (s: RunWire): FleetRun => ({
   cost_usd: s.cost_usd,
   failed_at: s.failed_at,
   open_issues: s.phase_issues.filter(i => !i.recovery && !i.passing).map(i => i.phase),
+  ...(s.run.thread_url !== undefined ? { thread_url: s.run.thread_url } : {}),
 })
 
 /** The meta store's points as the document carries them, relative to `now`. */
@@ -91,17 +97,17 @@ export function fleetMeta(points: SeriesWire['points'], now: number): FleetMeta 
   const pts = points.flatMap(p => { const t = scanTime(p.date); return t === null ? [] : [{ scan: p.date, t, bytes: p.bytes ?? p.b ?? 0 }] }).sort((a, b) => a.t - b.t)
   const at = (cut: number): number | null => { const p = pts.filter(q => q.t <= cut).pop(); return p ? p.bytes : null }
   const byDay = new Map<string, MetaPoint>()
-  for (const p of pts) if (p.t >= now - META_DAYS * DAY) byDay.set(new Date(p.t * 1000).toISOString().slice(0, 10), p)
+  for (const p of pts) if (p.t >= now - HISTORY_DAYS * DAY) byDay.set(new Date(p.t * 1000).toISOString().slice(0, 10), p)
   return { now: pts.length ? pts[pts.length - 1].bytes : null, d1: at(now - DAY), d7: at(now - 7 * DAY), daily: [...byDay.values()] }
 }
 
-/** The primary store's object counts, the newest scan per UTC day over `META_DAYS` (what drives scan time). */
+/** The primary store's object counts, the newest scan per UTC day over `HISTORY_DAYS` (what drives scan time). */
 export function fleetObjects(points: SeriesWire['points'], now: number): ObjPoint[] {
   const byDay = new Map<string, ObjPoint>()
   for (const p of points) {
     const t = scanTime(p.date)
     const objects = p.objects ?? p.o
-    if (t === null || objects == null || t < now - META_DAYS * DAY) continue
+    if (t === null || objects == null || t < now - HISTORY_DAYS * DAY) continue
     const day = new Date(t * 1000).toISOString().slice(0, 10)
     const was = byDay.get(day)
     if (!was || was.t <= t) byDay.set(day, { scan: p.date, t, objects })
@@ -134,7 +140,7 @@ export async function readDeployment(d: Deployment, env: Env, now: number, nRuns
     }, e => { out.errors.health = why(e) }),
     getJson<RunsWire>(f, `${d.url}/api/scan-runs`, token).then(r => {
       if (!r.configured) { out.errors.runs = 'scan runs are not set up'; return }
-      const since = now - WINDOW_DAYS * DAY
+      const since = now - HISTORY_DAYS * DAY
       out.runs = r.runs.filter(s => s.run.kind === SCAN_KIND && s.run.status !== 'nop')
         .filter((s, i) => i === 0 || (s.run.started_ts ?? 0) >= since).slice(0, nRuns).map(fleetRun)
       out.last = out.runs[0] ?? null
@@ -157,7 +163,7 @@ export const runsOf = (env: Env): number => {
 /** The whole document, read now. */
 export async function readFleet(env: Env, now: number, f: Fetcher = fetch): Promise<FleetDoc> {
   const deployments = parseFleet(env.FLEET_JSON)
-  return { now, deployments: await Promise.all(deployments.map(d => readDeployment(d, env, now, runsOf(env), f))) }
+  return { now, days: HISTORY_DAYS, deployments: await Promise.all(deployments.map(d => readDeployment(d, env, now, runsOf(env), f))) }
 }
 
 /** How long a read document stands at the edge (s). */
@@ -169,7 +175,7 @@ const colo = (): Cache | null => (typeof caches === 'undefined' ? null : (caches
  *  by the deployment list and run count, so a config change reads anew. */
 export async function fleetDoc(env: Env, opts: { fresh?: boolean; waitUntil?: (p: Promise<unknown>) => void } = {}, f: Fetcher = fetch): Promise<FleetDoc> {
   const cache = colo()
-  const key = new Request(`https://fleet.cache/v1/${encodeURIComponent(env.FLEET_JSON ?? '')}/${runsOf(env)}`)
+  const key = new Request(`https://fleet.cache/v2/${encodeURIComponent(env.FLEET_JSON ?? '')}/${runsOf(env)}`)
   if (cache && !opts.fresh) {
     const hit = await cache.match(key)
     if (hit) return hit.json() as Promise<FleetDoc>

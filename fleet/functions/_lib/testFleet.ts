@@ -1,7 +1,7 @@
 /** A four-deployment fleet as the deployments' own routes would answer, for the specs and the card goldens
- *  (`scripts/golden.ts`): a week of daily scans each, some with a step issue still open, one failed; `/meta` usage on
- *  two, refused (403) on the others, as gcs and cw answer a read grant today; two hand-started cw runs on one day.
- *  Deterministic. */
+ *  (`scripts/golden.mjs`) and the page's local mock (`FLEET_MOCK=1 pnpm dev`): 30 days of daily scans each, some with a
+ *  step issue still open, a few failed; `/meta` usage on two, refused (403) on the others, as gcs and cw answer a read
+ *  grant today; two hand-started cw runs on one day this week, one earlier. Deterministic. */
 import type { Env } from './env.js'
 
 /** 2026-11-07 14:00 UTC. */
@@ -29,11 +29,14 @@ export const fleetEnv = (extra: Partial<Env> = {}): Env => ({
 const day0 = Math.floor(NOW / DAY) * DAY
 const scanId = (t: number) => new Date(t * 1000).toISOString().slice(0, 10)
 
-interface RunSpec { day: number; hour: number; hours: number; cost: number | null; open?: string[]; status?: string; manual?: boolean }
+interface RunSpec { day: number; hour: number; hours: number; cost: number | null; open?: string[]; status?: string; manual?: boolean; thread?: boolean }
 const run = (name: string, r: RunSpec) => {
   const started = day0 - r.day * DAY + r.hour * HOUR
   return {
-    run: { run_id: `${scanId(started)}${r.manual ? `T${String(r.hour).padStart(2, '0')}00` : ''}-${name}`, scan: scanId(started), kind: 'scan', status: r.status ?? 'succeeded', started_ts: started, trigger: r.manual ? 'manual' : 'schedule' },
+    run: {
+      run_id: `${scanId(started)}${r.manual ? `T${String(r.hour).padStart(2, '0')}00` : ''}-${name}`, scan: scanId(started), kind: 'scan', status: r.status ?? 'succeeded', started_ts: started, trigger: r.manual ? 'manual' : 'schedule',
+      ...(r.thread ? { thread_url: `https://slack.example.test/archives/C0${name.toUpperCase()}ADMIN/p${started}000100` } : {}),
+    },
     secs: Math.round(r.hours * HOUR),
     cost_usd: r.cost,
     failed_at: r.status === 'failed' ? 'index' : null,
@@ -41,7 +44,12 @@ const run = (name: string, r: RunSpec) => {
   }
 }
 
-/** Newest first, as `/api/scan-runs` lists them; a compaction (maintenance) run among them, which the fleet skips. */
+/** Days of history the fixture carries (the fleet's `HISTORY_DAYS`); the card draws only the newest week of it. */
+const DAYS = 30
+const days = (from: number) => Array.from({ length: DAYS - from }, (_, k) => from + k)
+
+/** Newest first, as `/api/scan-runs` lists them; a compaction (maintenance) run among them, which the fleet skips. gcs
+ *  records no cost and posts no run threads; the others' runs each have a thread. */
 const RUNS: Record<string, unknown[]> = {
   gcs: [
     run('gcs', { day: 0, hour: 7, hours: 2.13, cost: null }),
@@ -49,23 +57,29 @@ const RUNS: Record<string, unknown[]> = {
     run('gcs', { day: 2, hour: 7, hours: 2.76, cost: null, open: ['dups', 'probe'] }),
     run('gcs', { day: 3, hour: 7, hours: 2.18, cost: null }),
     run('gcs', { day: 4, hour: 7, hours: 2.21, cost: null }),
+    ...days(7).map(day => run('gcs', { day, hour: 7, hours: 2.05 + (day % 5) * 0.04, cost: null, status: day === 16 ? 'failed' : undefined })),
   ],
   cw: [
     { run: { run_id: 'compact-1', scan: scanId(day0), kind: 'compact', status: 'succeeded', started_ts: day0 + 12 * HOUR }, secs: 600, cost_usd: 0.05, failed_at: null, phase_issues: [] },
-    run('cw', { day: 0, hour: 1, hours: 1.53, cost: 0.9, open: ['warm-cache'] }),
-    run('cw', { day: 1, hour: 1, hours: 1.63, cost: 0.97, open: ['warm-cache'] }),
-    run('cw', { day: 2, hour: 15, hours: 1.7, cost: 1.05, manual: true }),
-    run('cw', { day: 2, hour: 9, hours: 1.72, cost: 1.02, manual: true }),
-    run('cw', { day: 2, hour: 1, hours: 1.75, cost: 0.99 }),
-    run('cw', { day: 3, hour: 1, hours: 1.78, cost: 1.01, status: 'failed' }),
-    run('cw', { day: 4, hour: 1, hours: 1.58, cost: 0.1 }),
+    run('cw', { day: 0, hour: 1, hours: 1.53, cost: 0.9, open: ['warm-cache'], thread: true }),
+    run('cw', { day: 1, hour: 1, hours: 1.63, cost: 0.97, open: ['warm-cache'], thread: true }),
+    run('cw', { day: 2, hour: 15, hours: 1.7, cost: 1.05, manual: true, thread: true }),
+    run('cw', { day: 2, hour: 9, hours: 1.72, cost: 1.02, manual: true, thread: true }),
+    run('cw', { day: 2, hour: 1, hours: 1.75, cost: 0.99, thread: true }),
+    run('cw', { day: 3, hour: 1, hours: 1.78, cost: 1.01, status: 'failed', thread: true }),
+    run('cw', { day: 4, hour: 1, hours: 1.58, cost: 0.1, thread: true }),
+    ...days(7).flatMap(day => [
+      ...(day === 11 ? [run('cw', { day, hour: 13, hours: 1.66, cost: 0.98, manual: true, thread: true })] : []),
+      run('cw', { day, hour: 1, hours: 1.5 + (day % 4) * 0.06, cost: 0.92 + (day % 3) * 0.03, open: day === 9 ? ['probe'] : undefined, thread: true }),
+    ]),
   ],
-  hf: [0, 1, 2, 3, 4, 5, 6].map(day => run('hf', { day, hour: 5, hours: 0.6 + (day % 3) * 0.02, cost: 0.08 - (day % 2) * 0.004 })),
-  r2: [0, 1, 2, 3, 4, 5, 6].map(day => run('r2', { day, hour: 5, hours: 0.5 + (day % 4) * 0.05, cost: 0.13 + (day % 3) * 0.01 })),
+  hf: days(0).map(day => run('hf', { day, hour: 5, hours: 0.6 + (day % 3) * 0.02, cost: 0.08 - (day % 2) * 0.004, thread: true })),
+  r2: days(0).map(day => run('r2', { day, hour: 5, hours: 0.5 + (day % 4) * 0.05, cost: 0.13 + (day % 3) * 0.01, thread: true })),
 }
 
+/** A store's points, one a day over `DAYS`, oldest first: `start` 9 days back, growing by `growth` a day. */
 const series = (start: number, growth: number) =>
-  ({ points: [9, 8, 7, 6, 5, 4, 3, 2, 1, 0].map(k => ({ date: scanId(day0 - k * DAY), bytes: Math.round(start * growth ** (9 - k)), objects: 1000 + k })) })
+  ({ points: days(0).reverse().map(k => ({ date: scanId(day0 - k * DAY), bytes: Math.round(start * growth ** (9 - k)), objects: 1000 + k })) })
 
 const META: Record<string, unknown> = {
   hf: series(450e6, 1.078),
@@ -74,7 +88,7 @@ const META: Record<string, unknown> = {
 
 /** Each primary store's root series: its object count (what scan time tracks) growing scan over scan. */
 const objSeries = (start: number, growth: number) =>
-  ({ points: [9, 8, 7, 6, 5, 4, 3, 2, 1, 0].map(k => ({ date: scanId(day0 - k * DAY), bytes: 1, objects: Math.round(start * growth ** (9 - k)) })) })
+  ({ points: days(0).reverse().map(k => ({ date: scanId(day0 - k * DAY), bytes: 1, objects: Math.round(start * growth ** (9 - k)) })) })
 
 const PRIMARY: Record<string, unknown> = {
   gcs: objSeries(148e6, 1.004),

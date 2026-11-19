@@ -20,8 +20,9 @@ const env = (extra: Partial<Env> = {}): Env => ({
   ...extra,
 })
 
-const runWire = (run_id: string, scan: string, kind: string, status: string, started: number, secs: number, cost: number | null, failed_at: string | null, issues: object[], trigger?: string) =>
-  ({ run: { run_id, scan, kind, status, started_ts: started, store: 'x', parent: null, ...(trigger ? { trigger } : {}) }, secs, cost_usd: cost, failed_at, phase_issues: issues, spans: [], downstream: 0 })
+const runWire = (run_id: string, scan: string, kind: string, status: string, started: number, secs: number, cost: number | null, failed_at: string | null, issues: object[], trigger?: string, run: object = {}) =>
+  ({ run: { run_id, scan, kind, status, started_ts: started, store: 'x', parent: null, ...(trigger ? { trigger } : {}), ...run }, secs, cost_usd: cost, failed_at, phase_issues: issues, spans: [], downstream: 0 })
+const THREAD = 'https://slack.test/archives/C0ADMIN/p1762498800000100'
 
 const ANSWERS = {
   'https://a.test/api/health': { now: NOW, freshness: { newest_scan: '2026-11-07', newest_scan_age: 7 * H, stores: [] }, gaps: { path: 1, search: 2 }, scans: [] },
@@ -38,8 +39,10 @@ const ANSWERS = {
         { phase: 'dups', outcome: 'failed', recovery: null, passing: null },
         { phase: 'probe', outcome: 'failed', recovery: { run_id: 'r0' }, passing: null },
         { phase: 'check', outcome: 'failed', recovery: null, passing: { run_id: 'r9' } },
-      ], 'manual'),
+      ], 'manual', { thread_url: THREAD }),
       runWire('r2', '2026-11-06', 'scan', 'failed', NOW - 31 * H, 3600, null, 'index', []),
+      runWire('r3', '2026-10-18', 'scan', 'succeeded', NOW - 20 * 24 * H, 3000, 0.4, null, [], 'schedule', { thread_url: null }),
+      runWire('r4', '2026-10-08', 'scan', 'succeeded', NOW - 30 * 24 * H - H, 3000, 0.4, null, [], 'schedule'),
     ],
   },
   'https://a.test/api/series?store=meta': {
@@ -85,18 +88,20 @@ describe('/api/fleet\'s document over stubbed deployments', () => {
     ])
   })
 
-  it('folds the answers: maintenance and no-op runs skipped, open issues only, /meta now / 1 d / 7 d and the newest scan per day; each failure named', async () => {
-    const r1 = { run_id: 'r1', scan: '2026-11-07', status: 'succeeded', trigger: 'manual' as const, started: NOW - 7 * H, secs: 7668, cost_usd: 0.5, failed_at: null, open_issues: ['dups'] }
+  it('folds the answers: maintenance and no-op runs skipped, runs over the last 30 days, open issues only, each run\'s thread as its site says it (none from a site that predates it), /meta now / 1 d / 7 d and the newest scan per day; each failure named', async () => {
+    const r1 = { run_id: 'r1', scan: '2026-11-07', status: 'succeeded', trigger: 'manual' as const, started: NOW - 7 * H, secs: 7668, cost_usd: 0.5, failed_at: null, open_issues: ['dups'], thread_url: THREAD }
     const r2 = { run_id: 'r2', scan: '2026-11-06', status: 'failed', trigger: null, started: NOW - 31 * H, secs: 3600, cost_usd: null, failed_at: 'index', open_issues: [] }
+    const r3 = { run_id: 'r3', scan: '2026-10-18', status: 'succeeded', trigger: 'schedule' as const, started: NOW - 20 * 24 * H, secs: 3000, cost_usd: 0.4, failed_at: null, open_issues: [], thread_url: null }
     const noToken = 'no token (FLEET_TOKEN_B unset)'
     const expected: FleetDoc = {
       now: NOW,
+      days: 30,
       deployments: [
         {
           name: 'a', url: 'https://a.test', color: '#111111',
           health: { newest_scan: '2026-11-07', newest_scan_age: 7 * H, gaps: 3 },
           last: r1,
-          runs: [r1, r2],
+          runs: [r1, r2, r3],
           meta: {
             now: 300, d1: 250, d7: 100,
             daily: [

@@ -13,6 +13,7 @@ const meta = (now: number, d7: number | null) => ({ now, d1: null, d7, daily: []
 
 const doc: FleetDoc = {
   now: NOW,
+  days: 30,
   deployments: [
     dep('a', { last: run({ trigger: 'manual', secs: 7668, cost_usd: 0.5, open_issues: ['dups'] }), meta: meta(34.4e9, 30.2e9) }),
     dep('b', { health: null, errors: { health: 'HTTP 503', runs: 'HTTP 503', meta: 'HTTP 503' } }),

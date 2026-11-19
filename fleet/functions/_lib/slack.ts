@@ -8,17 +8,20 @@ import { fmtSI } from '@disk-tree/pages-kit/og/text'
 import { fmtHours, fmtUsd } from './card.js'
 import type { Env } from './env.js'
 import type { FleetDeployment, FleetDoc, FleetRun } from './fleet.js'
+import { runOutcome } from './runOutcome.js'
 
 export type Block = Record<string, unknown>
 export interface SlackMessage { text: string; blocks: Block[] }
 
-/** A run's outcome, in a few words, and its emoji. */
+/** A run's outcome (`runOutcome`), in a few words, and its emoji. */
 function runStatus(r: FleetRun): { emoji: string; word: string } {
-  if (r.status === 'running') return { emoji: ':hourglass_flowing_sand:', word: 'running' }
-  if (r.status === 'failed') return { emoji: ':x:', word: r.failed_at ? `failed at ${r.failed_at}` : 'failed' }
   const n = r.open_issues.length
-  if (n) return { emoji: ':warning:', word: `${n} step issue${n > 1 ? 's' : ''} open (${r.open_issues.join(', ')})` }
-  return { emoji: ':white_check_mark:', word: 'ok' }
+  switch (runOutcome(r)) {
+    case 'running': return { emoji: ':hourglass_flowing_sand:', word: 'running' }
+    case 'failed': return { emoji: ':x:', word: r.failed_at ? `failed at ${r.failed_at}` : 'failed' }
+    case 'issues': return { emoji: ':warning:', word: `${n} step issue${n > 1 ? 's' : ''} open (${r.open_issues.join(', ')})` }
+    case 'ok': return { emoji: ':white_check_mark:', word: 'ok' }
+  }
 }
 
 /** A deployment's state (its newest run's, else why it has none), in a few words, and its emoji. */
