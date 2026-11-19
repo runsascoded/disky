@@ -3556,11 +3556,8 @@ def _digest(
     variant = variant or cfg.variant
     if variant not in tpl.variants:
         raise SystemExit(f"digest: the {cfg.template} template has no {variant!r} variant ({' | '.join(tpl.variants)})")
-    m = (
-        dt.datetime.strptime(month, "%Y-%m").date()
-        if month
-        else dt.datetime.now(dt.timezone.utc).date().replace(day=1)
-    )
+    this_month = dt.datetime.now(dt.timezone.utc).date().replace(day=1)
+    m = dt.datetime.strptime(month, "%Y-%m").date() if month else this_month
     root = root or cfg.resolve_root()
 
     since_d = dt.date.fromisoformat(since) if since else None
@@ -3624,9 +3621,14 @@ def _digest(
             return
         _print_redo_plan(plan, f"{m:%Y-%m} in {channel} ({variant})", since_d)
         return
-    # the scheduled run (no -m) also closes the previous month's thread if its last day's provisional reply is still up
-    converge = dg.converge_slack if month else dg.converge_slack_now
-    converge(tpl, root, m, client, channel, variant, icons_dir=icons, deploy_plot=deploy, reply_delay=reply_delay, edit_replies=edit_replies)
+    # the scheduled run (no -m) also closes the previous month's thread if its last day's provisional reply is still up,
+    # and pins this month's OP; an explicit -m pins only when it names the current month
+    if month:
+        dg.converge_slack(tpl, root, m, client, channel, variant, icons_dir=icons, deploy_plot=deploy, reply_delay=reply_delay,
+                          edit_replies=edit_replies, current=m == this_month)
+    else:
+        dg.converge_slack_now(tpl, root, m, client, channel, variant, icons_dir=icons, deploy_plot=deploy, reply_delay=reply_delay,
+                              edit_replies=edit_replies)
     err(f"digest: converged {m:%Y-%m} ({cfg.template}, {variant})")
 
 

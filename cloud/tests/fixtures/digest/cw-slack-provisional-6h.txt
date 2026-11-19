@@ -1,5 +1,6 @@
 {"op": "-- lands", "scan": "2026-09-29T1201"}
 {"op": "post", "content": "<site OP: quota 2026-09, 1 scans to 2026-09-29T1201, params ->\n\n![S3 usage — September 2026](https://cw.icons.example.org/plot-<id>.png?v=<ts>)", "thread_id": null, "username": "S3 usage — September 2026", "icon_url": null, "icon_emoji": ":calendar:"}
+{"op": "pins.add", "channel": "C1", "timestamp": "m1"}
 {"op": "post", "content": "[main](https://cw.example.org/main-data?d=260929#over-time): 87.9% of 1P (110.0 Ti free) · [hot](https://cw.example.org/hot-data?d=260929#over-time): 40.0% of 100Ti (60.0 Ti free)", "thread_id": "m1", "username": "9/29 — 800 TiB (+0.0, 0.0%)", "icon_url": "https://icons.example.org/arrows/av_deg0.png?v=4", "icon_emoji": null}
 {"op": "-- lands", "scan": "2026-09-29T1801"}
 {"op": "edit", "ts": "m1", "content": "<site OP: quota 2026-09, 2 scans to 2026-09-29T1801, params ->\n\n![S3 usage — September 2026](https://cw.icons.example.org/plot-<id>.png?v=<ts>)"}
@@ -14,6 +15,8 @@
 {"op": "post", "content": "[main](https://cw.example.org/main-data?d=26093006-18h#over-time): 88.5% of 1P (105.0 Ti free) · [hot](https://cw.example.org/hot-data?d=26093006-18h#over-time): 41.0% of 100Ti (59.0 Ti free)", "thread_id": "m1", "username": "9/30 — 805 TiB (+5.0, 0.6%)", "icon_url": "https://icons.example.org/arrows/av_deg40.png?v=4", "icon_emoji": null}
 {"op": "delete", "ts": "m3", "orphans_ok": true}
 {"op": "post", "content": "<site OP: quota 2026-10, 1 scans to 2026-10-01T0001, params ->\n\n[← September](https://slack.example.org/archives/C1/pm1)\n\n![S3 usage — October 2026](https://cw.icons.example.org/plot-<id>.png?v=<ts>)", "thread_id": null, "username": "S3 usage — October 2026", "icon_url": null, "icon_emoji": ":calendar:"}
+{"op": "pins.add", "channel": "C1", "timestamp": "m5"}
+{"op": "pins.remove", "channel": "C1", "timestamp": "m1"}
 {"op": "post", "content": ":arrow_deg-60: **790 TiB (−15.0, 1.9%)** · [as of 00:01Z](https://cw.example.org/?d=261001-18h#over-time) · [main](https://cw.example.org/main-data?d=261001-18h#over-time): 86.8% of 1P (120.0 Ti free) · [hot](https://cw.example.org/hot-data?d=261001-18h#over-time): 41.0% of 100Ti (59.0 Ti free)", "thread_id": "m5", "username": "10/1 · so far", "icon_url": null, "icon_emoji": ":hourglass_flowing_sand:"}
 {"op": "-- lands", "scan": "2026-10-01T0601"}
 {"op": "edit", "ts": "m5", "content": "<site OP: quota 2026-10, 2 scans to 2026-10-01T0601, params ->\n\n[← September](https://slack.example.org/archives/C1/pm1)\n\n![S3 usage — October 2026](https://cw.icons.example.org/plot-<id>.png?v=<ts>)"}
@@ -40,6 +43,7 @@
 {
  "2026-09": {
   "op_ts": "m1",
+  "pinned": "m1",
   "plot_name": "plot-<id>.png",
   "posted": {
    "2026-09-29": {
@@ -55,6 +59,7 @@
  },
  "2026-10": {
   "op_ts": "m5",
+  "pinned": "m5",
   "plot_name": "plot-<id>.png",
   "posted": {
    "2026-10-01": {

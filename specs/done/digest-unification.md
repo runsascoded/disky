@@ -58,6 +58,7 @@ The two styles are opinionated but not store-specific: `gcs` = per-scan cost/cla
 | `primary` | — | `$CW_BUCKET` or `marin-us-east-02a` |
 | `buckets` | — | `marin-us-east-02a: {label: 02a, quota: {bytes: 910 TiB, name: 1 PB, short: 1P}}`, `hero-checkpoints: {label: hero, quota: {bytes: 100 TiB, name: 100 TiB, short: 100Ti}}` |
 | `prices` | `{1: 0.02, 2: 0.01, 3: 0.004, 4: 0.0012}` | — |
+| `pin` | `true` | `true` (added 2026-11-18: the scheduled run pins the current month's OP in the channel and unpins last month's, recorded as `state["pinned"]`; a missing `pins:write` / `channels:join` scope only warns and retries next run; `false`: neither) |
 
 Quotas are optional: a bucket without one shows raw TiB in the reply tail; a primary without one drops the OP's `· NN% of …` clauses and the plot's quota line/headroom band (y fit to the data). Secrets stay env-only (`SLACK_BOT_TOKEN`, `SLACK_CHANNEL`, `DISCORD_BOT_TOKEN`, the webhook env named by config); the config names env vars, never values.
 

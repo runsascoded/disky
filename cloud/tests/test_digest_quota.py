@@ -803,11 +803,12 @@ class _Msg:
 class _FakeSlack:
     """Records `post`/`edit` calls as tuples; message ids are sequential."""
 
-    def __init__(self, fail_post_at: int | None = None, fail_delete: set[str] = frozenset()):
+    def __init__(self, fail_post_at: int | None = None, fail_delete: set[str] = frozenset(), api_errors: dict[str, list[str]] | None = None):
         self.calls: list[tuple] = []
         self.n = 0
         self.fail_post_at = fail_post_at  # the n-th post raises
         self.fail_delete = fail_delete
+        self.api_errors = api_errors or {}  # per Web API method, the Slack errors its next calls raise, in order
 
     def post(self, content, thread_id=None, *, username=None, icon_url=None, icon_emoji=None, broadcast=False):
         self.n += 1
@@ -827,6 +828,14 @@ class _FakeSlack:
         self.calls.append(("delete", message_id))
         if message_id in self.fail_delete:
             raise RuntimeError("cant_delete_message")
+
+    def _request(self, method, args, **kw):
+        """A Web API call thrds doesn't wrap (`pins.add`, `pins.remove`, `conversations.join`), recorded; raises as
+        thrds does when ``api_errors`` queues an error for ``method``."""
+        self.calls.append(("api", method, dict(args)))
+        if errors := self.api_errors.get(method):
+            raise RuntimeError(f"Slack API error: {errors.pop(0)}")
+        return {"ok": True}
 
 
 def _publish(root: Path, dated_meta) -> None:
@@ -1073,6 +1082,123 @@ def test_a_month_ending_over_quota_moves_its_alert_to_the_next_months_thread(tmp
         ("delete", "m4"), ("post", body, "m5", "S3 usage: quota alert", None, ":warning:", "broadcast")]
     assert ("alert" in E.load_state(E.state_path(str(root), SEP, CFG.state.format(channel="C1", variant="sender"))), oct_["alert"]) == (
         False, {"ts": "m7", "body": body})
+
+
+OCT = date(2026, 10, 1)
+
+
+def _api(calls: list[tuple]) -> list[tuple]:
+    """The pin calls (`pins.add` / `pins.remove` / `conversations.join`) among a fake's calls."""
+    return [c for c in calls if c[0] == "api"]
+
+
+def _pin_log(stderr: str) -> list[str]:
+    return [line for line in stderr.splitlines() if line.startswith(("digest: pinned", "digest: WARN could not pin"))]
+
+
+def test_the_current_months_op_takes_the_pin(tmp_path: Path, capsys):
+    """The scheduled converge pins the current month's OP and unpins last month's, once; a converge of a month the
+    caller doesn't call current (a backfill, `-m` of an older month) pins nothing, and a re-run makes no pin call."""
+    root = tmp_path / "snapshots" / "cw"
+    _publish(root, LEAD + SEPT)
+    fake = _FakeSlack()
+    sept = E.converge_slack(_tpl(), str(root), SEP, fake, "C1", "sender")
+    assert (_api(fake.calls), "pinned" in sept) == ([], False)
+
+    _publish(root, [("2026-10-01T1200", _meta(716))])
+    fake.calls.clear()
+    capsys.readouterr()
+    oct_ = E.converge_slack_now(_tpl(), str(root), OCT, fake, "C1", "sender")
+    # October's OP is m4 (September's: m1, its replies m2 + m3)
+    assert _api(fake.calls) == [
+        ("api", "pins.add", {"channel": "C1", "timestamp": "m4"}),
+        ("api", "pins.remove", {"channel": "C1", "timestamp": "m1"}),
+    ]
+    assert (oct_["op_ts"], oct_["pinned"]) == ("m4", "m4")
+    assert E.load_state(E.state_path(str(root), OCT, CFG.state.format(channel="C1", variant="sender"))) == oct_
+    assert _pin_log(capsys.readouterr().err) == ["digest: pinned the OP m4, unpinned m1"]
+
+    fake.calls.clear()
+    assert E.converge_slack_now(_tpl(), str(root), OCT, fake, "C1", "sender")["pinned"] == "m4"
+    assert _api(fake.calls) == []
+
+
+def test_closing_last_months_thread_leaves_the_pin_alone(tmp_path: Path):
+    """The scheduled run re-converges last month's thread first when it still holds an alert: that converge moves
+    no pin; only the current month's OP is pinned."""
+    tpl = E.template(replace(CFG, alert_pct=78.3))
+    root = tmp_path / "snapshots" / "cw"
+    _publish(root, LEAD + SEPT)
+    fake = _FakeSlack()
+    sept = E.converge_slack_now(tpl, str(root), SEP, fake, "C1", "sender")
+    assert (_api(fake.calls), sept["pinned"]) == ([("api", "pins.add", {"channel": "C1", "timestamp": "m1"})], "m1")
+
+    _publish(root, [("2026-10-01T1200", _meta(716))])  # still over quota: September's alert is closed by October's run
+    fake.calls.clear()
+    oct_ = E.converge_slack_now(tpl, str(root), OCT, fake, "C1", "sender")
+    assert [c for c in fake.calls if c[0] in ("api", "delete")] == [
+        ("delete", "m4"),
+        ("api", "pins.add", {"channel": "C1", "timestamp": "m5"}),
+        ("api", "pins.remove", {"channel": "C1", "timestamp": "m1"}),
+    ]
+    assert oct_["pinned"] == "m5"
+
+
+def test_a_pin_failure_warns_and_retries_next_run(tmp_path: Path, capsys):
+    """A bot without `pins:write` (`missing_scope`) still converges the thread: one warning, no `pinned` recorded,
+    and the next run pins."""
+    root = tmp_path / "snapshots" / "cw"
+    _publish(root, LEAD + SEPT)
+    fake = _FakeSlack(api_errors={"pins.add": ["missing_scope"]})
+    state = E.converge_slack_now(_tpl(), str(root), SEP, fake, "C1", "sender")
+    assert _api(fake.calls) == [("api", "pins.add", {"channel": "C1", "timestamp": "m1"})]
+    assert ("pinned" in state, state["posted"]) == (
+        False, {"2026-09-01": {"ts": "m2", "scan": "2026-09-01T1200"}, "2026-09-02": {"ts": "m3", "scan": "2026-09-02T1200"}})
+    assert _pin_log(capsys.readouterr().err) == ["digest: WARN could not pin the OP m1: missing_scope (retried next run)"]
+
+    fake.calls.clear()
+    assert E.converge_slack_now(_tpl(), str(root), SEP, fake, "C1", "sender")["pinned"] == "m1"
+    assert _api(fake.calls) == [("api", "pins.add", {"channel": "C1", "timestamp": "m1"})]
+    assert _pin_log(capsys.readouterr().err) == ["digest: pinned the OP m1"]
+
+
+def test_not_in_channel_joins_then_pins(tmp_path: Path):
+    root = tmp_path / "snapshots" / "cw"
+    _publish(root, LEAD + SEPT)
+    fake = _FakeSlack(api_errors={"pins.add": ["not_in_channel"]})
+    assert E.converge_slack_now(_tpl(), str(root), SEP, fake, "C1", "sender")["pinned"] == "m1"
+    assert _api(fake.calls) == [
+        ("api", "pins.add", {"channel": "C1", "timestamp": "m1"}),
+        ("api", "conversations.join", {"channel": "C1"}),
+        ("api", "pins.add", {"channel": "C1", "timestamp": "m1"}),
+    ]
+
+
+def test_pin_off(tmp_path: Path):
+    """`pin: false` in a deployment's digest config: the current month's converge pins nothing."""
+    cfg = E.config_from_dict({"pin": False}, base=CFG)
+    root = tmp_path / "snapshots" / "cw"
+    _publish(root, LEAD + SEPT)
+    fake = _FakeSlack()
+    state = E.converge_slack_now(E.template(cfg), str(root), SEP, fake, "C1", "sender")
+    assert (cfg.pin, CFG.pin, _api(fake.calls), "pinned" in state) == (False, True, [], False)
+    with pytest.raises(ValueError) as e:
+        E.config_from_dict({"template": "quota", "pin": "no"})
+    assert str(e.value) == "digest config pin: expected bool, got 'no'"
+
+
+def test_cli_pins_only_the_current_month(tmp_path: Path, monkeypatch):
+    """`digest -m` names its month: only the current UTC month's converge is `current` (pins)."""
+    from click.testing import CliRunner
+
+    from dt_cloud import cli
+
+    calls: list[bool] = []
+    monkeypatch.setattr(E, "converge_slack", lambda *a, **k: calls.append(k["current"]) or {})
+    for m in ["2026-09", dt.datetime.now(UTC).strftime("%Y-%m")]:
+        res = CliRunner().invoke(cli.main, ["digest", "-T", "quota", "-c", "C1", "-t", "xoxb", "-r", str(tmp_path / "snapshots"), "-m", m, "-u", SITE])
+        assert res.exit_code == 0, (res.output, res.exception)
+    assert calls == [False, True]
 
 
 @pytest.mark.parametrize("pct", [0, 101, -5])

@@ -192,6 +192,11 @@ class FakeSlack:
     def delete(self, message_id, orphans_ok=False):
         self.log.append({"op": "delete", "ts": message_id, "orphans_ok": orphans_ok})
 
+    def _request(self, method, args, **kw):
+        """The Web API calls thrds doesn't wrap (the OP's pin: `pins.add`, `pins.remove`)."""
+        self.log.append({"op": method, **args})
+        return {"ok": True}
+
 
 @thrds_fake(DiscordWebhookClient)
 class FakeHook:

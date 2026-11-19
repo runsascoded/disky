@@ -3,7 +3,8 @@ its Discord twin) per calendar month — an OP edited in place as scans land
 (month-to-date headline, per-ISO-week bullets, a hosted plot) plus one reply
 per scan or per day, each reply's arrow colour-coding its trend. Posts through
 `thrds`; converge state is a per-month JSON beside the snapshots, so every run
-is idempotent and an interrupted backfill resumes.
+is idempotent and an interrupted backfill resumes. The current month's OP is
+pinned in the channel, taking the pin from last month's (`pin_op`).
 
 What a deployment chooses is DATA, a :class:`DigestConfig` (a preset in
 :data:`PRESETS`, overlaid by ``--config FILE``): its template, title, site,
@@ -148,7 +149,9 @@ class DigestConfig:
     the renderer `/admin/slack` previews with; specs/slack-preview-page.md), under ``params`` (the site's
     `src/digest/codec` string, `''`: the defaults). ``preview``: where each Slack converge writes the month's preview bundle
     (`preview_bundle`, for the site's `/admin/slack-preview`), a dir or URL template (``{channel}``,
-    ``{variant}``) in the deployment's served store; None: none written."""
+    ``{variant}``) in the deployment's served store; None: none written. ``pin``: the current month's OP is pinned in
+    the channel and the previous month's unpinned (`pin_op`; the bot needs ``pins:write``, and ``channels:join`` when
+    it isn't a member); False: neither."""
 
     template: str
     title: str
@@ -178,6 +181,7 @@ class DigestConfig:
     quota_marks: str = "warning"
     params: str = ""
     preview: str | None = None
+    pin: bool = True
 
     @property
     def unit(self) -> Units:
@@ -290,7 +294,7 @@ _SCALAR_TYPES: dict[str, tuple[type, ...]] = {
     "icons_dir": (str,), "op_icon": (str,), "plot_project": (str,), "plot_branch": (str,), "plot_base": (str,),
     "variant": (str,), "reply_hour": (int,), "provisional": (bool,), "primary": (str, type(None)),
     "units": (str,), "alert_pct": (int, float, type(None)), "quota_marks": (str,), "params": (str,),
-    "preview": (str, type(None)),
+    "preview": (str, type(None)), "pin": (bool,),
 }
 
 
@@ -863,13 +867,46 @@ def _op_render(tpl: Template, data, root: str, month: dt.date, state: dict, clie
     # with `invalid_blocks`. Poll until the URL is live (or give up + warn).
     if icons_dir is not None and deploy_plot is not None:
         _wait_reachable(plot_url)
-    # the previous month's thread, linked from the OP (its converge state, same channel and variant)
-    prev_op = load_state(state_path(root, prior_month(month), cfg.state.format(channel=channel, variant=variant))).get("op_ts")
+    # the previous month's thread, linked from the OP
+    prev_op = _prev_op(cfg, root, month, channel, variant)
     prev_url = client.permalink(prev_op) if prev_op else None
     return tpl.op_body(data, month, plot_url, prev_url), plot_url, prev_url
 
 
-def converge_slack(tpl: Template, root: str, month: dt.date, client, channel: str, variant: str | None = None, *, icons_dir=None, deploy_plot=None, reply_delay: float = 0.0, edit_replies: bool = False) -> dict:
+def _prev_op(cfg: DigestConfig, root: str, month: dt.date, channel: str, variant: str) -> str | None:
+    """The previous month's OP ts in ``channel`` (its converge state, same variant), or None: never posted."""
+    return load_state(state_path(root, prior_month(month), cfg.state.format(channel=channel, variant=variant))).get("op_ts")
+
+
+def pin_op(client, channel: str, state: dict, op_ts: str, prev_op: str | None) -> bool:
+    """Pin the month's OP (``op_ts``) in ``channel`` and unpin the previous month's (``prev_op``), then record
+    ``state["pinned"]``; True when that changed the state. A no-op once ``op_ts`` is recorded. ``not_in_channel``
+    joins the channel once and pins again. Any failure (a missing ``pins:write`` / ``channels:join`` scope, a private
+    channel the bot isn't in, Slack down) never fails the digest: one warning naming Slack's error, nothing recorded,
+    and the next run retries (a pin already in place, or an unpin of a message no longer pinned, is not an error)."""
+    from . import slack_api
+
+    if state.get("pinned") == op_ts:
+        return False
+    try:
+        try:
+            slack_api.pin(client, channel, op_ts)
+        except RuntimeError as e:
+            if slack_api.error_code(e) != "not_in_channel":
+                raise
+            slack_api.join(client, channel)
+            slack_api.pin(client, channel, op_ts)
+        if prev_op:
+            slack_api.unpin(client, channel, prev_op)
+    except Exception as e:  # noqa: BLE001 — a pin is a convenience: the thread is converged either way
+        _err(f"digest: WARN could not pin the OP {op_ts}: {slack_api.error_code(e) or e} (retried next run)")
+        return False
+    state["pinned"] = op_ts
+    _err(f"digest: pinned the OP {op_ts}" + (f", unpinned {prev_op}" if prev_op else ""))
+    return True
+
+
+def converge_slack(tpl: Template, root: str, month: dt.date, client, channel: str, variant: str | None = None, *, icons_dir=None, deploy_plot=None, reply_delay: float = 0.0, edit_replies: bool = False, current: bool = False) -> dict:
     """Converge the month's Slack thread: render+host the plot, post/edit the
     OP, then per reply unit post it if none exists — or, on an edited variant,
     edit it when a later scan has landed. Then the provisional reply
@@ -886,7 +923,11 @@ def converge_slack(tpl: Template, root: str, month: dt.date, client, channel: st
     Slack doesn't collapse same-sender chrome). ``edit_replies`` re-edits every
     already-posted reply to its current body (a format change's backfill; the
     sender variant's name and avatar are fixed at post time, so only its body
-    changes). ``client`` is a thrds ``SlackClient`` (or a fake)."""
+    changes). ``current``: ``month`` is the current UTC month, whose OP takes
+    the channel's pin from the previous month's (`pin_op`, unless ``cfg.pin``
+    is off); the caller says so, so a backfill or a closing re-converge of an
+    older month never moves the pin. ``client`` is a thrds ``SlackClient`` (or
+    a fake)."""
     import time
 
     cfg = tpl.cfg
@@ -909,6 +950,8 @@ def converge_slack(tpl: Template, root: str, month: dt.date, client, channel: st
         op_ts = client.post(body, username=f"{cfg.title} — {month:%B %Y}", **cfg.op_sender()).id
         state["op_ts"] = op_ts
         _err(f"digest: posted OP {op_ts}")
+    if current and cfg.pin and pin_op(client, channel, state, op_ts, _prev_op(cfg, root, month, channel, variant)):
+        save_state(path, state)
     if cfg.preview:
         _write_preview(cfg, preview_bundle(tpl, data, month, op=body, plot_url=plot_url, prev_url=prev_url, channel=channel,
                                            variant=variant, op_ts=op_ts, permalink=client.permalink(op_ts)))
@@ -1047,19 +1090,20 @@ def day_range(spec: str) -> list[str]:
     return [(lo + dt.timedelta(days=i)).isoformat() for i in range((hi - lo).days + 1)]
 
 def converge_slack_now(tpl: Template, root: str, month: dt.date, client, channel: str, variant: str | None = None, **kw) -> dict:
-    """The scheduled run's converge: ``month``'s thread (the current one),
-    after first re-converging the PREVIOUS month's if its state still holds a
-    provisional reply. That happens when a month's last day never got its
-    reply scan: only a scan after the month (this month's first) lets the
-    stand-in rule give that day a final reply, and only then can the
-    provisional go. Idempotent like `converge_slack`; ``kw`` passes through."""
+    """The scheduled run's converge: ``month``'s thread (the current one,
+    whose OP it pins: ``current``), after first re-converging the PREVIOUS
+    month's if its state still holds a provisional reply. That happens when a
+    month's last day never got its reply scan: only a scan after the month
+    (this month's first) lets the stand-in rule give that day a final reply,
+    and only then can the provisional go. Idempotent like `converge_slack`;
+    ``kw`` passes through."""
     variant = variant or tpl.variants[0]
     prev = (month - dt.timedelta(days=1)).replace(day=1)
     prev_state = load_state(state_path(root, prev, tpl.cfg.state.format(channel=channel, variant=variant)))
     if prev_state.get("provisional") or prev_state.get("alert"):
         _err(f"digest: {prev:%Y-%m} still has a {'provisional reply' if prev_state.get('provisional') else 'quota alert'} — closing it first")
         converge_slack(tpl, root, prev, client, channel, variant, **kw)
-    return converge_slack(tpl, root, month, client, channel, variant, **kw)
+    return converge_slack(tpl, root, month, client, channel, variant, current=True, **kw)
 
 
 def redo_replies(tpl: Template, root: str, month: dt.date, client, channel: str, variant: str | None = None, *, since: dt.date | None = None, icons_dir=None, deploy_plot=None, reply_delay: float = 0.0, for_real: bool = False) -> dict:

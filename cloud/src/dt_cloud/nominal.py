@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Protocol
 from urllib.parse import quote, unquote, urlencode, urlparse
 from uuid import NAMESPACE_URL, uuid5
 
+from . import slack_api
 from .scan_id import scan_time
 from .scan_runs import TRIGGER_BY_RE
 
@@ -456,21 +457,16 @@ class Slack:
 
     def _ok(self, method: str, args: dict, *benign: str) -> dict:
         """A call whose listed errors mean the change is already in place."""
-        try:
-            return self.client._request(method, args)
-        except RuntimeError as e:
-            if any(str(e) == f'Slack API error: {code}' for code in benign):
-                return {}
-            raise
+        return slack_api.call_ok(self.client, method, args, *benign)
 
     def join(self) -> None:
-        self._ok('conversations.join', {'channel': self.client.channel}, 'method_not_supported_for_channel_type')
+        slack_api.join(self.client, self.client.channel)
 
     def pin(self, ts: str) -> None:
-        self._ok('pins.add', {'channel': self.client.channel, 'timestamp': ts}, 'already_pinned')
+        slack_api.pin(self.client, self.client.channel, ts)
 
     def unpin(self, ts: str) -> None:
-        self._ok('pins.remove', {'channel': self.client.channel, 'timestamp': ts}, 'no_pin', 'message_not_found')
+        slack_api.unpin(self.client, self.client.channel, ts)
 
     def canvas_create(self, body: str) -> str:
         content = {'type': 'markdown', 'markdown': body}
