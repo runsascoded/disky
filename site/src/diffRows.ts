@@ -4,7 +4,7 @@
 // numbers the map's tooltip shows, plus the column sorts. Pure, so the
 // derivation and every sort order are unit-tested (`diffRows.test.ts`).
 import { isSynthetic, type DiffNode } from './diffModel'
-import type { CellAction } from './objects'
+import type { CellAction, CellHrefs } from './objects'
 
 export { isSynthetic } from './diffModel'
 
@@ -68,6 +68,16 @@ export function followDiffCell(
   if (!go) return false
   go(parent ?? n.key.split('/'))
   return true
+}
+
+/** A diff cell's link: where a plain click on it goes (`followDiffCell`), as an href. The root, and a remainder
+ *  at the scope itself (it shows the folder listing, not a page), have none. */
+export function diffCellHref(n: Pick<DiffNode, 'key' | 'k' | 'status' | 'label'>, hrefs: CellHrefs): string | undefined {
+  const action = diffCellAction(n)
+  if (action === 'pin') return undefined
+  const parent = action === 'remainder' ? diffRemainderParent(n)! : null
+  if (parent?.length === 0) return undefined
+  return (action === 'open' ? hrefs.open : hrefs.drill)(parent ?? n.key.split('/'))
 }
 
 export function diffTableRows(cells: DiffNode[]): DiffTableRow[] {

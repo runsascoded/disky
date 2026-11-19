@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { buildTree, diffLoadingLabel, diffMiss } from './diffModel'
 import type { DiffData, DiffRow } from './diffModel'
-import { deltaPct, diffCellAction, diffTableRows, fmtPct, sortDiffRows } from './diffRows'
+import { deltaPct, diffCellAction, diffCellHref, diffTableRows, fmtPct, sortDiffRows } from './diffRows'
 import type { DiffTableRow } from './diffRows'
 
 const row = (path: string, status: DiffRow['status'], bytes_before: number, bytes_after: number, objects_before: number, objects_after: number, expanded?: true, kind: DiffRow['kind'] = 'dir'): DiffRow =>
@@ -100,6 +100,27 @@ describe('diffCellAction', () => {
       ['ckpt/__unchanged__', 'remainder', 'pin'],
     ])
     expect(diffCellAction({ k: 'dir', status: 'root', label: 'ctbk' })).toBe('pin')
+  })
+})
+
+describe('diffCellHref', () => {
+  it('links where a plain click goes: objects open, directories drill, a remainder its parent; the root and a scope-level remainder have none', () => {
+    const { cells } = buildTree(data([
+      row('ckpt', 'changed', 10_000_000, 13_000_000, 10, 11, true),
+      row('ckpt/model.safetensors', 'added', 0, 3_000_000, 0, 1, undefined, 'file'),
+      row('logs', 'changed', 800, 200, 80, 20),
+      row('(other)', 'changed', 90, 100, 900, 950),
+    ]), 'max', false)
+    const all = [...cells, ...cells.flatMap(c => c.children ?? [])]
+    const hrefs = { drill: (segs: string[]) => `/d/${segs.join('/')}`, open: (segs: string[]) => `/o/${segs.join('/')}` }
+    expect(all.map(n => [n.key, diffCellHref(n, hrefs)])).toEqual([
+      ['ckpt', '/d/ckpt'],
+      ['(other)', undefined],
+      ['logs', '/d/logs'],
+      ['ckpt/model.safetensors', '/o/ckpt/model.safetensors'],
+      ['ckpt/__unchanged__', '/d/ckpt'],
+    ])
+    expect(diffCellHref({ key: '', k: 'dir', status: 'root', label: 'ctbk' }, hrefs)).toBe(undefined)
   })
 })
 

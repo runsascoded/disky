@@ -16,6 +16,7 @@ import { canvasToPngBlob, composeExport, copyPng, defaultExportFilename, downloa
 import type { ExportKind, ExportOptions } from './exportImage'
 import { CheckIcon, CopyIcon, DownloadIcon, FullscreenIcon } from './chromeIcons'
 import { useHoverPin } from './useHoverPin'
+import { isNewTabClick, openLikeLink } from './link'
 import type { CellStyle, Tiling } from './cellTypes'
 
 export type { CellStyle, Tiling } from './cellTypes'
@@ -182,13 +183,16 @@ export interface TreemapProps<T> {
    */
   onCellClick?: (n: T, path: T[], event: React.MouseEvent) => boolean | void
   /**
-   * Make leaf-rendered cells real anchors (`<a href>`): native cursor,
-   * middle/cmd-click, link hints (Vimium), crawlability. Return `undefined`
-   * for cells that shouldn't be links. Cells that render nested tiles stay
-   * `<div>`s (anchors can't nest), so this suits shallow maps best. Plain
-   * clicks are `preventDefault`ed and flow through `onCellClick`/drill/pin
-   * as usual — an SPA router intercepts while the href keeps its native
-   * affordances.
+   * Each cell's link: where opening it in a new tab should go. Return
+   * `undefined` for cells that shouldn't be links. DOM renderer: leaf-rendered
+   * cells are real anchors (`<a href>`: native cursor, middle/⌘-click, context
+   * menu, link hints (Vimium), crawlability); a cell that renders nested tiles
+   * stays a `<div>` (anchors can't nest) and its title strip is the anchor.
+   * Anywhere else a link can't be an element (a branch's body, every canvas
+   * cell), ⌘/Ctrl-click and middle-click open it in a new tab and ⇧-click in a
+   * new window, as a link would. Plain clicks (and ⌥-click, which pins) are
+   * `preventDefault`ed and flow through `onCellClick`/drill/pin as usual — an
+   * SPA router intercepts while the href keeps its native affordances.
    */
   cellHref?: (n: T, path: T[]) => string | undefined
   /** Called whenever the drill path changes (drill in, drill back). */
@@ -389,7 +393,8 @@ export interface TreemapProps<T> {
    * hit-tests the retained layout, routing hits into the *same* drill/tooltip
    * handlers. Every surrounding affordance (crumbs, fold slider, drill, pinned
    * tips, lazy-load) is shared. Canvas parity is still filling in: segments
-   * (makeup stripes), chain-label text, `cellHref` anchors, and the in-map
+   * (makeup stripes), chain-label text, `cellHref` anchors (its modified and
+   * middle clicks still open the link: `cellHref`), and the in-map
    * loading/error overlay are DOM-only for now (the overlay still renders atop
    * the canvas). Default: `'dom'`.
    */
@@ -1102,11 +1107,18 @@ export function Treemap<T>({
       }
       activateHover(kid as T, kidPath, cellKey, b.left, b.top)
     }
-    // Real-anchor cells (`cellHref`): only leaf-rendered ones — a cell with
-    // nested tiles would nest <a>s, which HTML forbids. Modified/middle
-    // clicks keep native behavior (new tab); plain clicks preventDefault and
-    // flow through the normal handler so SPA routers can intercept.
-    const href = cellHref && !folded && kids.length === 0 ? cellHref(kid as T, kidPath) : undefined
+    // `cellHref` links. A leaf-rendered cell is a real <a>; a cell with nested
+    // tiles can't be one (HTML forbids nested <a>s), so its title strip is the
+    // anchor instead, and the rest of its body fakes one: a ⌘/Ctrl/⇧ or middle
+    // click opens the link as a real anchor would (`openLikeLink`). On a real
+    // anchor those clicks stay native; plain clicks (and ⌥, which pins) are
+    // preventDefault'ed and flow through the normal handler, so an SPA router
+    // intercepts while the href keeps its native affordances.
+    const link = cellHref && !folded ? cellHref(kid as T, kidPath) : undefined
+    const href = kids.length === 0 ? link : undefined
+    const headerHref = kids.length > 0 ? link : undefined
+    /** The click landed on a real anchor (this leaf cell, or this branch's title strip): the browser handles it. */
+    const onAnchor = (e: React.MouseEvent) => !!(e.target as Element).closest?.('a')
     const onClick = (e: React.MouseEvent) => {
       e.stopPropagation()
       if (folded) {
@@ -1115,12 +1127,27 @@ export function Treemap<T>({
         activatePin(hit.it, hit.path, hit.key, e.clientX, e.clientY)
         return
       }
-      if (href) {
-        if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button === 1) return
+      if (link && isNewTabClick(e)) {
+        if (onAnchor(e)) return
         e.preventDefault()
+        openLikeLink(link, e)
+        return
       }
+      if (link) e.preventDefault()
       activateClick(kid as T, kidPath, cellKey, kidDrillable, e.clientX, e.clientY, e)
     }
+    // Middle clicks fire `auxclick`, not `click`.
+    const onAuxClick = link ? (e: React.MouseEvent) => {
+      if (e.button !== 1) return
+      e.stopPropagation()
+      if (onAnchor(e)) return
+      e.preventDefault()
+      openLikeLink(link, e)
+    } : undefined
+    // A middle press off an anchor would start autoscroll (Windows, Linux).
+    const onMouseDown = link ? (e: React.MouseEvent) => {
+      if (e.button === 1 && !onAnchor(e)) e.preventDefault()
+    } : undefined
     // `branch` / `chain` chrome (consumers hang inset rings / doubled edges
     // off these) only when the cell is big enough for that treatment to read
     // — a dense field of small drillable or chain-collapsed tiles must not
@@ -1129,6 +1156,7 @@ export function Treemap<T>({
     const chromeOk = Math.min(r.w, r.h) >= 28
 
     const CellTag: 'a' | 'div' = href ? 'a' : 'div'
+    const LabelTag: 'a' | 'div' = headerHref ? 'a' : 'div'
     return (
       <CellTag
         key={cellKey}
@@ -1181,6 +1209,8 @@ export function Treemap<T>({
         // blinking off).
         onMouseMove={kids.length > 0 ? undefined : showTip}
         onClick={onClick}
+        onAuxClick={onAuxClick}
+        onMouseDown={onMouseDown}
         onKeyDown={e => e.key === 'Enter' && onClick(e as unknown as React.MouseEvent)}
       >
         {/* All paint (bg, hatch, makeup stripes) lives on this layer so the
@@ -1252,9 +1282,13 @@ export function Treemap<T>({
           </div>
         )}
         {showLbl && (
-          <div
+          // A branch's title strip is its link (`headerHref`): a sibling of the nested tiles, never around them.
+          // Out of the tab order: the cell itself is the focus stop.
+          <LabelTag
             className={'dt-treemap-lbl' + (r.w < 64 ? ' sm' : '')}
+            {...(headerHref && { href: headerHref, tabIndex: -1 })}
             style={{
+              ...(headerHref && { color: 'inherit', textDecoration: 'none', cursor: 'pointer' }),
               position: 'relative',
               width: titleWidth ?? undefined,
               boxSizing: 'border-box',
@@ -1288,7 +1322,7 @@ export function Treemap<T>({
                 )}
               </span>
             )}
-          </div>
+          </LabelTag>
         )}
         {/* Size on a second line for any leaf tall enough to hold one — the
             first line then belongs entirely to the (possibly long) name. */}

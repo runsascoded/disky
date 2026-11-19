@@ -10,7 +10,7 @@ import { FaRegCopy } from 'react-icons/fa6'
 import { pathCopy, pathCrumbs, pathLead, pathText } from './pathCrumbs'
 import { PrefixStageAction, tableCoverItem, useStagedIndex } from './StageAction'
 import { useCanStage } from './auth'
-import { cellAction } from './objects'
+import { cellAction, type CellHrefs } from './objects'
 import { canonId, UserChip, ghHandle, shortName } from './UserChip'
 import { newestLabel, shareOfTotal } from './viewNums'
 import { dateColor, dateGradientCss, epochDaysToDate, epochDaysToMonth, inkFor, slotColor, userColor } from './colors'
@@ -179,7 +179,7 @@ const scaleMix = (mix: Record<string, number>, b: number): Record<string, number
   return tot ? Object.fromEntries(Object.entries(mix).map(([c, x]) => [c, (x * b) / tot])) : mix
 }
 
-export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRange, readThrough, readLogged = allLogged, readUnlogged = [], hl, onPickUser, onPickUnowned, onClearHl, pricing, lens, ownerLensed, scheme = 'gs://', redact, ownerIdx, initialPath, path, onPathChange, objects = false, onOpen, brush, onBrush, band, onBand, stageHere = false, mapOverlay, stagedRings = true }: {
+export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRange, readThrough, readLogged = allLogged, readUnlogged = [], hl, onPickUser, onPickUnowned, onClearHl, pricing, lens, ownerLensed, scheme = 'gs://', redact, ownerIdx, initialPath, path, onPathChange, objects = false, onOpen, hrefs, brush, onBrush, band, onBand, stageHere = false, mapOverlay, stagedRings = true }: {
   /** Ring the open plan's staged items (off where every cell is one: /staged). */
   stagedRings?: boolean
   /** Offer the drilled folder's own trash in the owner panel: an unfiltered view (under a filter the bulk bar
@@ -233,6 +233,9 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
   objects?: boolean
   /** An object cell was clicked: its path from the root (the leaf viewer opens it). */
   onOpen?: (p: TreeNode[]) => void
+  /** Each cell's link, where its click goes (`cellAction`): ⌘/middle-click opens it in a new tab, and the DOM
+   *  renderer's leaves and title strips are real anchors. */
+  hrefs?: CellHrefs
   /** Brushing with the children table: the view's child (by name) to ring, and
    *  the child under the pointer (any depth inside it), `null` on leave. */
   brush?: string | null
@@ -761,6 +764,11 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
         if (act === 'drill' && onPathChange) { onPathChange(p); return true }
         return false
       }}
+      cellHref={hrefs && !redact ? (n, p) => {
+        const act = cellAction(n, objects)
+        const segs = p.slice(1).map(x => x.name)
+        return act === 'open' && onOpen ? hrefs.open(segs) : act === 'drill' && onPathChange ? hrefs.drill(segs) : undefined
+      } : undefined}
       getSize={n => n.bytes}
       getChildren={n => n.children}
       getLabel={n => bucketLabels?.get(n) ?? n.name}

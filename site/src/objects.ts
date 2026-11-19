@@ -76,6 +76,16 @@ export function openHref(store: Pick<Store, 'path' | 'root'>, segs: string[], se
   return { pathname: treeHref(store, segs.slice(0, -1)), search: `?${q}` }
 }
 
+/** A router location as an `href`. */
+export const hrefOf = ({ pathname, search }: { pathname: string; search: string }): string => pathname + search
+
+/** A map cell's link, by what a click on it does (`cellAction`): drill a directory or open an object, `segs`
+ * its path from the store root (or, on the diff map, from the diff's scope). */
+export interface CellHrefs {
+  drill: (segs: string[]) => string
+  open: (segs: string[]) => string
+}
+
 /** The deployment's scan-store proxy (one bucket, a prefix allow-list). */
 export const FILES_API = '/v1/files'
 /** The scanned-bucket object proxy: `/v1/objects/<bucket>`. */

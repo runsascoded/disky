@@ -26,7 +26,7 @@ import { ChildrenTable } from './ChildrenTable'
 import { FitSelect } from './FitSelect'
 import { PathPopover } from './PathPopover'
 import { fromUrlPath, mountedSegs, pathCopy, pathText, urlSegsOf } from './pathCrumbs'
-import { listsObjects, openHref, treeHref } from './objects'
+import { hrefOf, listsObjects, openHref, treeHref, type CellHrefs } from './objects'
 import { useFolderSearch } from './folderSearch'
 import { Busy, Loading, Skeleton } from './Busy'
 import { useRules } from './rules'
@@ -845,17 +845,23 @@ function AppContent() {
   // (`useSectionSpy`). Never copy the router's section into a navigation — the spy
   // rewrites the URL's behind the router's back, so it's whatever section was
   // last *linked*, not the one in view (a crumb click warped to it).
-  const drillTo = (segs: string[]) => {
+  const drillLoc = (segs: string[]) => {
     const q = new URLSearchParams(withoutSection(search))
     q.delete('open')
-    navigate({ pathname: treeHref(store, segs), search: q.size ? `?${q}` : '' })
+    return { pathname: treeHref(store, segs), search: q.size ? `?${q}` : '' }
   }
+  const drillTo = (segs: string[]) => navigate(drillLoc(segs))
   // `?open=<name>`: an object under the drilled directory, shown in the leaf
   // viewer below the map (objects.ts `openHref`). Opening pushes history, so
   // Back closes it.
   const [openP, setOpenP] = useUrlState('open', stringParam(), true)
   // Without the router's section: the spy names the one in view on the reader's next scroll.
   const openObject = (segs: string[]) => navigate(openHref(store, segs, withoutSection(search)))
+  // The same two navigations as hrefs: a map cell's link (⌘-click / middle-click opens it in a new tab).
+  const cellHrefs: CellHrefs = {
+    drill: segs => hrefOf(drillLoc(segs)),
+    open: segs => hrefOf(openHref(store, segs, withoutSection(search))),
+  }
   // ⌘K: the folders and files named for the query, largest first, at this scan; a pick drills there (`folderSearch.ts`).
   useFolderSearch({ fetcher: sfetch, date: asof ?? null, indexed: indexedOnly0 ? covered : null, at: endAt, qs: syntax.id, drill: drillTo, open: openObject, filter: q => setFq(q), size: fmtBytes })
   // Read-recency lens domain: the access-log observation window (meta), not
@@ -1503,6 +1509,7 @@ function AppContent() {
             onPathChange={onMapPath}
             objects={objects}
             onOpen={p => openObject(p.slice(1).map(n => n.name))}
+            hrefs={cellHrefs}
             brush={brush}
             onBrush={setBrush}
             band={band}
@@ -1743,7 +1750,7 @@ function AppContent() {
                   the chart follow, and the diff itself re-reads at the new
                   prefix (its rows are relative to the drilled path). The diff
                   stays where it was on screen (`holdDiff`). */}
-              <DiffTreemap model={diffModel} onDrill={rel => { holdDiff(); drillTo([...diffSegs, ...rel]) }} onOpen={rel => openObject([...diffSegs, ...rel])} />
+              <DiffTreemap model={diffModel} onDrill={rel => { holdDiff(); drillTo([...diffSegs, ...rel]) }} onOpen={rel => openObject([...diffSegs, ...rel])} hrefs={{ drill: rel => cellHrefs.drill([...diffSegs, ...rel]), open: rel => cellHrefs.open([...diffSegs, ...rel]) }} />
               {/* The map's tabular twin: the same cells as rows, sortable; a
                   row's name drills like its cell. */}
               <DiffTable model={diffModel} scheme={store.scheme} segs={diffSegs} onDrill={rel => { holdDiff(); openPath([...diffSegs, ...rel]) }} onOpen={rel => openObject([...diffSegs, ...rel])} />
