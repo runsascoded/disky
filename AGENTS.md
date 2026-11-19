@@ -42,7 +42,7 @@ disk-tree bulk-list URI    # Shard URI's object listing (gcs:// | s3:// | r2:// 
                           # (current tree; LFS deduped by oid) + `<repo>/@history/@unlisted` (what
                           # `usedStorage` bills beyond it), so non-`git` bytes sum to the billing page;
                           # `storage_class_id` public 1 / private 5 / unbilled git 6 (`import -s hf -p
-                          # storage_class_id`). `-L` per-object history via `lfs-files` (write token), `-D`
+                          # storage_class_id`). `-L` old LFS versions via `lfs-files` under `<repo>/@history/<branch>/<filename>` (the ref each was pushed to; `/<oid>` when one ref pushed several), on a write-scoped token (`HF_LFS_TOKEN`, else `HF_TOKEN`), `-D`
                           # repo-level dates (50→1000 entries/page); `-w` = requests in flight (429s at 8)
 disk-tree import -l GLOB…  # Aggregate listing(s) into a canonical layer-2 per bucket (`-b`; default every
                           # bucket in the listings): `-e pandas|duckdb|stream`, `-p` pivot sums, `-m`
