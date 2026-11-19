@@ -401,18 +401,21 @@ READBACK_RETRIES = 12
 READBACK_RETRY_S = 5
 
 
-def serving(receipt: dict) -> dict | None:
+def serving(receipt: dict) -> tuple[dict | None, str]:
     """The Cloudflare deployment serving `receipt`'s environment (prod: the project's canonical one; dev: the newest
-    preview deployment of its Pages branch), if it is the clean requested revision and finished; else None."""
+    preview deployment of its Pages branch), if it is the clean requested revision and finished, else None; and what
+    the readback named (`<sha12>[ dirty], stage <status>`, or `no deployment for the branch`), for a refusal."""
     deployment = pages(receipt['project'])['canonical_deployment'] if receipt['mode'] == 'prod' else next((
         d for d in pages(f'{receipt["project"]}/deployments?env=preview')
         if d['deployment_trigger']['metadata']['branch'] == receipt['pages_branch']
     ), None)
     if not deployment:
-        return None
+        return None, 'no deployment for the branch'
     metadata = deployment['deployment_trigger']['metadata']
-    ok = metadata['commit_hash'] == receipt['sha'] and not metadata.get('commit_dirty') and deployment['latest_stage']['status'] == 'success'
-    return deployment if ok else None
+    stage = deployment['latest_stage']['status']
+    read = f'{metadata["commit_hash"][:12]}{" dirty" if metadata.get("commit_dirty") else ""}, stage {stage}'
+    ok = metadata['commit_hash'] == receipt['sha'] and not metadata.get('commit_dirty') and stage == 'success'
+    return (deployment if ok else None), read
 
 
 @main.command('finish')
@@ -426,12 +429,12 @@ def finish(failed: bool, receipt_path: Path) -> None:
         return
     deployment = None
     for attempt in range(READBACK_RETRIES + 1):
-        deployment = serving(receipt)
+        deployment, read = serving(receipt)
         if deployment:
             break
         if attempt < READBACK_RETRIES:
             sleep(READBACK_RETRY_S)
-    require(bool(deployment), 'Cloudflare is not serving the clean requested revision')
+    require(bool(deployment), f'Cloudflare is not serving the clean requested revision {receipt["sha"][:12]} (read: {read})')
     for attempt in range(12):
         req = Request(f'https://{receipt["host"]}/api/health?release-check={environ["GITHUB_RUN_ID"]}-{attempt}', headers=LIVE_HEADERS)
         # A 5xx or a dropped connection is a host not answering yet: the next attempt, as a stale build is

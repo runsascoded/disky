@@ -366,8 +366,27 @@ def test_finish_rereads_cloudflare_until_it_serves_the_requested_revision(tmp_pa
     path.write_text(dumps(receipt))
     result = CliRunner().invoke(release.main, ['finish', str(path)], env={'GITHUB_RUN_ID': '123'})
     assert (result.exit_code, result.output, len(read), slept) == (
-        1, 'Error: Cloudflare is not serving the clean requested revision\n', 13, [5] * 12,
+        1, f'Error: Cloudflare is not serving the clean requested revision {SHA[:12]} (read: {"b" * 12}, stage success)\n', 13, [5] * 12,
     )
+
+
+def readback(sha, stage='success', dirty=False, branch='dev'):
+    return {'id': 'cf73', 'url': 'https://cf73.oa-hf-usage.pages.dev', 'latest_stage': {'status': stage},
+            'deployment_trigger': {'metadata': {'branch': branch, 'commit_hash': sha, 'commit_dirty': dirty}}}
+
+
+@pytest.mark.parametrize('listed, expected', [
+    ([readback(SHA)], (readback(SHA), f'{SHA[:12]}, stage success')),
+    ([readback(SHA, branch='main'), readback('b' * 40)], (None, 'bbbbbbbbbbbb, stage success')),
+    ([readback(SHA, stage='active')], (None, f'{SHA[:12]}, stage active')),
+    ([readback(SHA, dirty=True)], (None, f'{SHA[:12]} dirty, stage success')),
+    ([readback(SHA, branch='main')], (None, 'no deployment for the branch')),
+])
+def test_serving_says_what_the_readback_named(monkeypatch, listed, expected):
+    """A refusal names what Cloudflare served instead: the sha (and dirty), its stage, or no deployment at all."""
+    monkeypatch.setattr(release, 'pages', lambda path: listed)
+    receipt = {'mode': 'dev', 'sha': SHA, 'project': 'oa-hf-usage', 'pages_branch': 'dev'}
+    assert release.serving(receipt) == expected
 
 
 @pytest.mark.parametrize('wrong_asset', [False, True])
