@@ -2951,6 +2951,35 @@ def access_requesters(depth: int, data_bucket: str | None, hourly: bool, mem: st
         print(f"{day}\t{rollup_day(root, day, dest, depth, mem, threads, names, hourly)}")
 
 
+@access.command("hosts")
+@option("-d", "--data-bucket", envvar="DATA_BUCKET", default=None, help="The access store's bucket; default $DATA_BUCKET")
+@option("-n", "--dry-run", is_flag=True, help="Print the snapshot's row counts; write nothing")
+@option("-o", "--out", default=None, help="Output root (default `gs://$DATA_BUCKET/access/hosts`); the snapshot lands at `<out>/<day>/<HH>.parquet`")
+@option("-p", "--project", "projects", multiple=True, envvar="ACCESS_HOSTS_PROJECTS", help="A project whose VMs read the buckets (repeatable; default $ACCESS_HOSTS_PROJECTS, space-separated)")
+def access_hosts(data_bucket: str | None, dry_run: bool, out: str | None, projects: tuple[str, ...]) -> None:
+    """Snapshot the VMs behind the buckets' requests (`access_hosts.py`): each project's TPU nodes and Compute instances
+    with their internal and external IPs, which only the live APIs report, so a requester IP can later be joined to the
+    VM it was at the time (`specs/access-job-attribution.md`). Prints the path and rows by kind."""
+    from collections import Counter
+
+    from .access_hosts import snapshot, write
+
+    projects = tuple(p for ps in projects for p in ps.split())
+    if not projects:
+        raise SystemExit("access hosts: -p or $ACCESS_HOSTS_PROJECTS")
+    table = snapshot(list(projects))
+    kinds = Counter(table.column("kind").to_pylist())
+    summary = " ".join(f"{k}={n}" for k, n in sorted(kinds.items()))
+    if dry_run:
+        print(f"(dry run) {table.num_rows} rows: {summary}")
+        return
+    if not out:
+        if not data_bucket:
+            raise SystemExit("access hosts: -o or -d/$DATA_BUCKET")
+        out = f"gs://{data_bucket}/access/hosts"
+    print(f"{write(table, out)}\t{table.num_rows} rows: {summary}")
+
+
 @access.command("readers")
 @option("-b", "--by", default="client,bucket,prefix", show_default=True, help="Group by these rollup columns (comma-separated)")
 @option("-d", "--data-bucket", envvar="DATA_BUCKET", default=None, help="The access store's bucket; default $DATA_BUCKET")
