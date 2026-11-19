@@ -6,9 +6,10 @@ import { stringParam, useUrlState } from 'use-prms'
 import { useRenderer, useTiling } from './prefs'
 import { useUnits } from './units'
 import { deltaColor, diffBorderWidth, diffCellStyle, diffRoot, FIRST_SCANNED, UNCHANGED_GREY } from './diffStyle'
-import { followDiffCell } from './diffRows'
+import { diffCellHref, followDiffCell } from './diffRows'
 import { DiffRemainder, showDiffFolderListing } from './DiffRemainder'
 import type { AreaMode, DiffData, DiffNode } from './diffModel'
+import type { CellHrefs } from './objects'
 import { usePerfCommit } from './perf'
 
 const { abs, min } = Math
@@ -182,7 +183,7 @@ function DiffModes({ model }: { model: DiffModel }) {
   )
 }
 
-export function DiffTreemap({ model, onDrill, onOpen }: {
+export function DiffTreemap({ model, onDrill, onOpen, hrefs }: {
   model: DiffModel
   /** A directory cell was drilled: its path segments relative to the diff's
    *  scope. The page drills there (and this diff re-reads at that prefix), so
@@ -191,6 +192,9 @@ export function DiffTreemap({ model, onDrill, onOpen }: {
   /** An object cell was clicked: its segments relative to the diff's scope
    *  (the page opens it in the leaf viewer). */
   onOpen?: (segs: string[]) => void
+  /** Each cell's link, where its click goes (`followDiffCell`), segments relative to the diff's scope:
+   *  ⌘/middle-click opens it in a new tab. */
+  hrefs?: CellHrefs
 }) {
   usePerfCommit('dtm')
   const { data, root, areaMode, label, fmtBytes, fmtDelta, fmtN, fmtNDelta } = model
@@ -206,6 +210,7 @@ export function DiffTreemap({ model, onDrill, onOpen }: {
         // Drills belong to the page; remainder cells target their real parent, never the display label.
         path={[root]}
         onCellClick={(n, _p, e) => followDiffCell(n, e.altKey, { open: onOpen, drill: onDrill, listing: showDiffFolderListing })}
+        cellHref={hrefs ? n => diffCellHref(n, hrefs) : undefined}
         getSize={n => n.weight}
         getChildren={n => n.children}
         getLabel={n => (n.first ? `${n.label} (first scanned)` : n.label)}

@@ -647,6 +647,146 @@ describe('<Treemap>', () => {
     })
   })
 
+  describe('cellHref link clicks', () => {
+    const href = (n: Node) => `/n/${n.n}`
+    const middle = (el: Element, at: { clientX?: number; clientY?: number } = {}) =>
+      fireEvent(el, new MouseEvent('auxclick', { bubbles: true, cancelable: true, button: 1, ...at }))
+    /** Links the map opened as a link would (`openLikeLink`'s detached anchor, a child of `<body>`), with the
+     *  modifiers its synthetic click carried; cancelled, so jsdom never navigates. */
+    function clicks() {
+      const opened: { href: string; meta: boolean; ctrl: boolean; shift: boolean }[] = []
+      const synthetic = (e: MouseEvent) => {
+        const a = e.target
+        if (!(a instanceof HTMLAnchorElement) || a.parentElement !== document.body) return
+        opened.push({ href: a.getAttribute('href')!, meta: e.metaKey, ctrl: e.ctrlKey, shift: e.shiftKey })
+        e.preventDefault()
+      }
+      document.addEventListener('click', synthetic, true)
+      return { opened, stop: () => document.removeEventListener('click', synthetic, true) }
+    }
+    const tab = { href: '/n/foo', meta: true, ctrl: true, shift: false }
+
+    it('a branch\'s title strip is its anchor, beside (never around) its nested anchors', () => {
+      const restore = withLayout()
+      try {
+        const { container } = render(<Treemap root={tree} {...accessors} minCellArea={null} cellHref={href} />)
+        expect([...container.querySelectorAll('.dt-treemap-map a')].map(a => [a.classList[0], a.getAttribute('href'), a.getAttribute('tabindex')])).toEqual([
+          ['dt-treemap-lbl', '/n/foo', '-1'],
+          ['dt-treemap-cell', '/n/a.txt', '0'],
+          ['dt-treemap-cell', '/n/b.txt', '0'],
+          ['dt-treemap-cell', '/n/bar', '0'],
+        ])
+        expect(container.querySelectorAll('a a').length).toBe(0)
+        // No link, no anchor: the title strip stays a div.
+        const { container: plain } = render(<Treemap root={tree} {...accessors} minCellArea={null} />)
+        expect(plain.querySelector('.dt-treemap-map > .dt-treemap-cell.branch > .dt-treemap-lbl')!.tagName).toBe('DIV')
+      } finally {
+        restore()
+      }
+    })
+
+    it('DOM: ⌘/Ctrl, ⇧ and middle clicks on a branch\'s body open its link; a plain click drills', () => {
+      const restore = withLayout()
+      const c = clicks()
+      try {
+        const onPathChange = vi.fn((_p: Node[]) => {})
+        const { container } = render(<Treemap root={tree} {...accessors} minCellArea={null} cellHref={href} onPathChange={onPathChange} />)
+        const foo = container.querySelector('.dt-treemap-map > .dt-treemap-cell.branch')!
+        expect(fireEvent.click(foo, { metaKey: true })).toBe(false)
+        expect(fireEvent.click(foo, { ctrlKey: true })).toBe(false)
+        expect(fireEvent.click(foo, { shiftKey: true })).toBe(false)
+        expect(fireEvent.mouseDown(foo, { button: 1 })).toBe(false)   // no autoscroll
+        expect(middle(foo)).toBe(false)
+        expect(c.opened).toEqual([tab, tab, { href: '/n/foo', meta: false, ctrl: false, shift: true }, tab])
+        expect(onPathChange.mock.calls.map(([p]) => p.map(n => n.n))).toEqual([['root']])
+        fireEvent.click(foo)
+        expect(c.opened.length).toBe(4)
+        expect(onPathChange.mock.calls.map(([p]) => p.map(n => n.n))).toEqual([['root'], ['root', 'foo']])
+      } finally {
+        c.stop()
+        restore()
+      }
+    })
+
+    it('DOM: on a real anchor (title strip, leaf), modified and middle clicks stay native; plain and ⌥ clicks are the map\'s', () => {
+      const restore = withLayout()
+      const c = clicks()
+      try {
+        const onPathChange = vi.fn((_p: Node[]) => {})
+        const { container } = render(<Treemap root={tree} {...accessors} minCellArea={null} cellHref={href} onPathChange={onPathChange} />)
+        const title = container.querySelector('.dt-treemap-map > .dt-treemap-cell.branch > a.dt-treemap-lbl')!
+        const bar = container.querySelector('.dt-treemap-map > a.dt-treemap-cell')!
+        // `true`: not prevented, the browser's own (new tab, context menu, …).
+        expect(fireEvent.click(title, { metaKey: true })).toBe(true)
+        expect(fireEvent.click(bar, { shiftKey: true })).toBe(true)
+        expect(middle(title)).toBe(true)
+        expect(middle(bar)).toBe(true)
+        expect(fireEvent.mouseDown(bar, { button: 1 })).toBe(true)
+        expect(c.opened).toEqual([])
+        expect(onPathChange.mock.calls.map(([p]) => p.map(n => n.n))).toEqual([['root']])
+        expect(fireEvent.click(bar, { altKey: true })).toBe(false) // pins, never a download
+        expect(bar.classList.contains('pinned')).toBe(true)
+        expect(fireEvent.click(title)).toBe(false)                // drills
+        expect(c.opened).toEqual([])
+        expect(onPathChange.mock.calls.map(([p]) => p.map(n => n.n))).toEqual([['root'], ['root', 'foo']])
+      } finally {
+        c.stop()
+        restore()
+      }
+    })
+
+    it('canvas: ⌘/Ctrl, ⇧ and middle clicks open the hit cell\'s link; a plain click is the map\'s', () => {
+      const restore = withLayout()
+      const c = clicks()
+      try {
+        const onCellClick = vi.fn((_n: Node) => true)
+        const { container } = render(
+          <Treemap root={tree} {...accessors} minCellArea={null} renderer="canvas" a11yLinks={false} cellHref={href} onCellClick={onCellClick} />,
+        )
+        const canvas = container.querySelector('.dt-treemap-map canvas')!
+        // 400×300, foo:bar = 2:1 → bar spans x 266.67–400.
+        const atBar = { clientX: 350, clientY: 150 }
+        expect(fireEvent.click(canvas, { ...atBar, metaKey: true })).toBe(false)
+        expect(fireEvent.click(canvas, { ...atBar, shiftKey: true })).toBe(false)
+        expect(fireEvent.mouseDown(canvas, { ...atBar, button: 1 })).toBe(false)
+        expect(middle(canvas, atBar)).toBe(false)
+        expect(c.opened).toEqual([
+          { href: '/n/bar', meta: true, ctrl: true, shift: false },
+          { href: '/n/bar', meta: false, ctrl: false, shift: true },
+          { href: '/n/bar', meta: true, ctrl: true, shift: false },
+        ])
+        expect(onCellClick).toHaveBeenCalledTimes(0)
+        fireEvent.click(canvas, atBar)
+        fireEvent.click(canvas, { ...atBar, altKey: true })
+        expect(c.opened.length).toBe(3)
+        expect(onCellClick.mock.calls.map(([n]) => n.n)).toEqual(['bar', 'bar'])
+      } finally {
+        c.stop()
+        restore()
+      }
+    })
+
+    it('canvas: without a link, modified clicks are the map\'s', () => {
+      const restore = withLayout()
+      const c = clicks()
+      try {
+        const onCellClick = vi.fn((_n: Node) => true)
+        const { container } = render(
+          <Treemap root={tree} {...accessors} minCellArea={null} renderer="canvas" a11yLinks={false} cellHref={n => (n.n === 'bar' ? undefined : href(n))} onCellClick={onCellClick} />,
+        )
+        const canvas = container.querySelector('.dt-treemap-map canvas')!
+        const atBar = { clientX: 350, clientY: 150 }
+        expect(fireEvent.click(canvas, { ...atBar, metaKey: true })).toBe(true)
+        expect(middle(canvas, atBar)).toBe(true)
+        expect(c.opened).toEqual([])
+        expect(onCellClick.mock.calls.map(([n]) => n.n)).toEqual(['bar'])
+      } finally {
+        c.stop()
+        restore()
+      }
+    })
+  })
+
   it('clicking a leaf marks that DOM cell .pinned (accent ring); re-click clears it', () => {
     // The `.pinned` class carries the same accent ring the canvas renderer and
     // the pinned tooltip use — committed on click (mouseup), not on the focus

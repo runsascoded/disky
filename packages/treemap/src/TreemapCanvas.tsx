@@ -8,6 +8,7 @@ import { type DustNotch, dustInk } from './dust'
 import { resolveCellStyle, resolveRing, type StyleOpts } from './cellStyle'
 import { flattenPlaced, hitTest, type FoldedNode, type PlacedCell } from './layout'
 import { squarify } from './squarify'
+import { isNewTabClick, openLikeLink } from './link'
 
 /**
  * Whole-map canvas renderer for `<Treemap renderer="canvas">`.
@@ -58,7 +59,8 @@ export interface TreemapCanvasProps<T> {
   idFor: (n: T, p: T[]) => string
   expandable: (n: T, p: T[]) => boolean
   dustTexture: boolean
-  /** Per-cell link href for the a11y overlay (mirrors the DOM `cellHref`). */
+  /** Per-cell link href (the DOM `cellHref`): the a11y overlay's anchors, and a
+   *  modified or middle click on the canvas opens it as a link would. */
   cellHref?: (n: T, path: T[]) => string | undefined
   /** Build the focusable a11y overlay (see `TreemapProps.a11yLinks`). */
   a11yLinks: boolean
@@ -255,6 +257,19 @@ export function TreemapCanvas<T>({
     return { lx: e.clientX - box.left, ly: e.clientY - box.top }
   }
 
+  /** The cell under a pointer event, as a hit. */
+  const hitAt = (e: React.MouseEvent): CanvasHit<T> | null => {
+    const { lx, ly } = localXY(e)
+    const cell = hitTest(cells, lx, ly)
+    return cell ? toHit(cell, lx, ly) : null
+  }
+  /** The link of the cell under a pointer event (a fold's dust child has none). */
+  const linkAt = (e: React.MouseEvent): string | undefined => {
+    if (!cellHref) return undefined
+    const hit = hitAt(e)
+    return hit && !hit.foldChild ? cellHref(hit.node, hit.path) : undefined
+  }
+
   // A11y overlay set: the largest labeled/container cells (flat is area-sorted),
   // above the min-side floor, capped — a bounded DOM mirror of the canvas for
   // keyboard focus, screen readers, Vimium, `cellHref` links, and crawlers.
@@ -305,12 +320,21 @@ export function TreemapCanvas<T>({
         }}
         onMouseLeave={onLeave}
         onClick={e => {
-          const { lx, ly } = localXY(e)
-          const cell = hitTest(cells, lx, ly)
-          if (!cell) return
-          const hit = toHit(cell, lx, ly)
-          if (hit) onClick(hit, e)
+          const hit = hitAt(e)
+          if (!hit) return
+          // A canvas cell can't be an <a>: a ⌘/Ctrl/⇧ click on a linked cell opens its link as one would.
+          const href = isNewTabClick(e) && !hit.foldChild ? cellHref?.(hit.node, hit.path) : undefined
+          if (href) { e.preventDefault(); openLikeLink(href, e); return }
+          onClick(hit, e)
         }}
+        // Middle clicks fire `auxclick`, not `click`.
+        onAuxClick={e => {
+          if (e.button !== 1) return
+          const href = linkAt(e)
+          if (href) { e.preventDefault(); openLikeLink(href, e) }
+        }}
+        // A middle press would start autoscroll (Windows, Linux) instead.
+        onMouseDown={e => { if (e.button === 1 && linkAt(e)) e.preventDefault() }}
       />
       {/* Pinned-cell ring — the visible counterpart of the pinned tooltip's ×,
           so it's clear which cell is pinned (and why hover is suppressed). */}
@@ -359,9 +383,9 @@ export function TreemapCanvas<T>({
             }
             const activate = (e: React.SyntheticEvent) => {
               const me = e as unknown as React.MouseEvent
-              // Anchors: let modified/middle clicks do native new-tab; otherwise
+              // Anchors: let modified/middle clicks do native new-tab; otherwise (⌥, which pins, too)
               // suppress navigation and route through the SPA drill/click path.
-              if (!(href && (me.metaKey || me.ctrlKey || me.shiftKey || me.altKey || me.button === 1))) {
+              if (!(href && isNewTabClick(me))) {
                 e.preventDefault()
                 onClick(hit, me)
               }
