@@ -39,7 +39,7 @@ def _bucket(host: str | None, uri: str) -> str:
 @option('-D', '--no-commit-dates', is_flag=True, help="hf:// only: date repo files by the repo's `lastModified` instead of each file's last commit (tree pages of 1000 entries instead of 50)")
 @option('-E', '--endpoint-url', default=None, help='S3-compatible endpoint URL (required for r2://; also usable for MinIO / non-AWS S3)')
 @option('-f', '--profile', default=None, help='AWS credential profile to authenticate with (for a cross-account source/target); default: ambient credentials')
-@option('-L', '--lfs-files', is_flag=True, help='hf:// only: list old versions per LFS object (`@history/<file>/<oid>`) via `lfs-files`, which needs a token with write access; default: one `@history/@unlisted` row per repo for the bytes `usedStorage` bills beyond the current tree')
+@option('-L', '--lfs-files', is_flag=True, help='hf:// only: list old versions per LFS object (`@history/<ref>/<file>`, by the ref each was pushed to) via `lfs-files`, which needs a token with write access (`HF_LFS_TOKEN`, else `HF_TOKEN`); default: one `@history/@unlisted` row per repo for the bytes `usedStorage` bills beyond the current tree')
 @option('-o', '--out', 'out_dir', required=True, help='Output dir for listing shards (local path or fsspec URL such as `gs://...`)')
 @option('-p', '--prefix', default=None, help='Restrict listing to this bucket-relative prefix')
 @option('-P', '--procs', default=None, type=int, help='Worker processes (default: os.cpu_count()). LIST throughput is GIL-bound, not endpoint-bound: a single process saturates at ~8K keys/s no matter how many threads it runs, while processes scale ~linearly (measured on CoreWeave: 1/2/4/8/16 procs -> 8.3K/17.1K/34.5K/68.1K/89.8K keys/s). Scale this with cores, not -w.')

@@ -12,8 +12,10 @@ exactly the listing prefix it covers.
     buckets/<bucket>/<path>                    every file in a Storage Bucket
     models/<repo>/<path>                       the default branch's current tree
     datasets/<repo>/<path>                     (likewise; spaces/ too)
-    <kind>/<repo>/@history/<filename>/<oid>    an LFS object the current tree no
-                                               longer references (`lfs_files` mode)
+    <kind>/<repo>/@history/<ref>/<filename>    an LFS object the current tree no
+                                               longer references, under the ref it was
+                                               pushed to (`lfs_files` mode; + `/<oid>`
+                                               when that ref pushed several versions)
     <kind>/<repo>/@history/@unlisted           the rest of the repo's billed bytes
 
 **Totals match billing.** HF bills a repo's ``usedStorage``: every LFS/Xet
@@ -24,9 +26,14 @@ deduplicated by oid: a second path pointing at an already-listed object
 lists at size 0), plus old versions:
 
 - ``lfs_files=True``: ``GET /api/<kind>/<id>/lfs-files`` lists every stored
-  LFS object, unreferenced ones included, with its pushed-at time; those the
-  current tree doesn't reference land under ``@history/<filename>/<oid>``.
-  The endpoint needs **write** access to the repo (a read token gets 403).
+  LFS object, unreferenced ones included, with its pushed-at time and the ref
+  it was pushed to; those the current tree doesn't reference land under
+  ``@history/<ref>/<filename>`` (a branch by its name, ``refs/heads/`` dropped;
+  any other ref whole, e.g. ``refs/pr/3``; none: ``@no-ref``), so a repo that
+  keeps a branch per checkpoint shows one folder per checkpoint. A ref that
+  pushed several versions of one filename lists each as
+  ``<filename>/<oid>``. The endpoint needs **write** access to the repo (a
+  read token gets 403); ``HF_LFS_TOKEN``, when set, is used for it alone.
 - Always: whatever ``usedStorage`` still exceeds the listed LFS bytes by
   (other branches, PR refs, old versions without ``lfs_files``) is one
   ``@history/@unlisted`` row, so the repo's LFS rows sum to ``usedStorage``
@@ -55,7 +62,7 @@ honoring ``Retry-After``, and a reset / dropped / timed-out connection like a
 5xx. A 1000-request / 300 s quota bounds throughput at ~3.3 req/s.
 
 Auth: ``HF_TOKEN`` (a read token sees private repos and buckets; none lists
-public ones only). ``HF_ENDPOINT`` overrides ``https://huggingface.co``.
+public ones only); ``HF_LFS_TOKEN`` (optional) for ``lfs-files`` only. ``HF_ENDPOINT`` overrides ``https://huggingface.co``.
 No request writes to the Hub.
 """
 
@@ -70,6 +77,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Callable, Iterator, Optional
@@ -161,6 +169,7 @@ class HfClient:
     recorded responses without a network or real waits.
     """
     token: Optional[str] = None
+    lfs_token: Optional[str] = None  # `lfs-files`' (write-scoped) token, when it isn't `token`
     endpoint: str = DEFAULT_ENDPOINT
     concurrency: int = 4
     max_retries: int = 8
@@ -200,8 +209,9 @@ class HfClient:
             self.waited += delay
             self.sleep(delay)
 
-    def get(self, url: str) -> Response:
-        headers = {"Authorization": f"Bearer {self.token}"} if self.token else {}
+    def get(self, url: str, token: Optional[str] = None) -> Response:
+        token = token or self.token
+        headers = {"Authorization": f"Bearer {token}"} if token else {}
         for attempt in range(self.max_retries + 1):
             self._wait_turn()
             try:
@@ -244,11 +254,16 @@ class HfClient:
     def get_json(self, path: str, params: "Optional[list[tuple[str, str]]]" = None):
         return json.loads(self.get(self._url(path, params)).body)
 
-    def paginate(self, path: str, params: "Optional[list[tuple[str, str]]]" = None) -> Iterator[dict]:
+    def paginate(
+        self,
+        path: str,
+        params: "Optional[list[tuple[str, str]]]" = None,
+        token: Optional[str] = None,
+    ) -> Iterator[dict]:
         """Every item of a ``Link: <…>; rel="next"``-paginated JSON array."""
         url: Optional[str] = self._url(path, params)
         while url is not None:
-            r = self.get(url)
+            r = self.get(url, token)
             yield from json.loads(r.body)
             m = _LINK_NEXT.search(r.headers.get("link", ""))
             url = m.group(1) if m else None
@@ -268,6 +283,16 @@ def _lfs_sha256(o: dict) -> str:
         if isinstance(v, str) and _SHA256.fullmatch(v):
             return v
     raise ValueError(f"lfs-files item without a SHA-256 oid: {o}")
+
+
+NO_REF = "@no-ref"
+
+
+def _ref_dir(ref: Optional[str]) -> str:
+    """An ``lfs-files`` item's ref as its ``@history`` folder: a branch by its name, any other ref whole."""
+    if not ref:
+        return NO_REF
+    return ref.removeprefix("refs/heads/")
 
 
 def _visibility(private: Optional[bool]) -> str:
@@ -342,11 +367,12 @@ def list_repo(
     history = 0
     if lfs_files:
         try:
-            objects = list(client.paginate(f"{base}/lfs-files"))
+            objects = list(client.paginate(f"{base}/lfs-files", token=client.lfs_token))
         except HfError as e:
             if e.status == 403:
                 raise HfError(403, f"{base}/lfs-files (needs a token with write access to {repo_id})", b"") from e
             raise
+        old = []
         for o in objects:
             oid = _lfs_sha256(o)
             if oid in oids:
@@ -354,7 +380,10 @@ def list_repo(
             oids.add(oid)
             history += int(o["size"])
             filename = (o.get("filename") or "").strip("/") or "?"
-            rows.append((f"{unit}/{HISTORY_DIR}/{filename}/{oid}", int(o["size"]), o.get("pushedAt"), cls, None))
+            old.append((f"{unit}/{HISTORY_DIR}/{_ref_dir(o.get('ref'))}/{filename}", oid, int(o["size"]), o.get("pushedAt")))
+        versions = Counter(path for path, *_ in old)
+        for path, oid, size, pushed in old:
+            rows.append((f"{path}/{oid}" if versions[path] > 1 else path, size, pushed, cls, None))
     used = int(info.get("usedStorage") or 0)
     residual = used - lfs_bytes - history
     if residual > 0:
@@ -462,7 +491,7 @@ def list_hf_to_parquet(
         token = os.environ.get("HF_TOKEN")
         if not token:
             err("WARN: no HF_TOKEN; listing public buckets/repos only")
-        client = HfClient(token=token, endpoint=os.environ.get("HF_ENDPOINT", DEFAULT_ENDPOINT), concurrency=threads)
+        client = HfClient(token=token, lfs_token=os.environ.get("HF_LFS_TOKEN") or None, endpoint=os.environ.get("HF_ENDPOINT", DEFAULT_ENDPOINT), concurrency=threads)
     started = utc_now()
     t0 = time.monotonic()
 

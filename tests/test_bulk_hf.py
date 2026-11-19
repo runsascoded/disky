@@ -194,9 +194,44 @@ def test_list_repo_lfs_files_attributes_history():
     c, _ = client(_lfs_files_fixture())
     rows, totals = bulk_hf.list_repo(c, "datasets", "open-athena", BFCL.split("/")[1], lfs_files=True)
     assert rows == EXPECTED_ROWS[3:5] + [
-        (f"{BFCL}/@history/artifacts.tar.gz/{OLD}", 2140, "2026-10-11T09:00:00.000Z", "public", None),
+        (f"{BFCL}/@history/main/artifacts.tar.gz", 2140, "2026-10-11T09:00:00.000Z", "public", None),
     ]
     assert totals == UnitTotals(BFCL, expected=86939762, listed=86939762, git_bytes=2562, history=2140)
+
+
+def test_list_repo_lfs_files_by_ref():
+    """Old versions land under the ref they were pushed to (a branch by its name, other refs whole, none `@no-ref`);
+    a ref that pushed several versions of one filename lists each under `<filename>/<oid>`. `lfs_token`, when set,
+    authorizes `lfs-files` alone."""
+    fx = _lfs_files_fixture()
+    [path] = fx
+    [cur, _] = fx[path]["body"]
+    sha = lambda c: c * 64
+    fx[path] = ok([
+        cur,
+        {"fileOid": sha("3"), "filename": "w.bin", "pushedAt": "2026-10-01T00:00:00.000Z", "ref": "refs/heads/step-100", "size": 30},
+        {"fileOid": sha("4"), "filename": "w.bin", "pushedAt": "2026-10-02T00:00:00.000Z", "ref": "refs/heads/backup/pre", "size": 40},
+        {"fileOid": sha("5"), "filename": "w.bin", "pushedAt": "2026-10-03T00:00:00.000Z", "ref": "refs/heads/step-200", "size": 50},
+        {"fileOid": sha("6"), "filename": "w.bin", "pushedAt": "2026-10-04T00:00:00.000Z", "ref": "refs/heads/step-200", "size": 60},
+        {"fileOid": sha("7"), "filename": "w.bin", "pushedAt": "2026-10-05T00:00:00.000Z", "ref": "refs/pr/3", "size": 70},
+        {"fileOid": sha("8"), "filename": "w.bin", "pushedAt": "2026-10-06T00:00:00.000Z", "size": 80},
+        {"fileOid": sha("3"), "filename": "w.bin", "pushedAt": "2026-10-07T00:00:00.000Z", "ref": "refs/heads/step-300", "size": 30},
+    ])
+    c, replay = client(fx, lfs_token="w1")
+    rows, totals = bulk_hf.list_repo(c, "datasets", "open-athena", BFCL.split("/")[1], lfs_files=True)
+    h = f"{BFCL}/@history"
+    assert rows == EXPECTED_ROWS[3:5] + [
+        (f"{h}/step-100/w.bin", 30, "2026-10-01T00:00:00.000Z", "public", None),
+        (f"{h}/backup/pre/w.bin", 40, "2026-10-02T00:00:00.000Z", "public", None),
+        (f"{h}/step-200/w.bin/{sha('5')}", 50, "2026-10-03T00:00:00.000Z", "public", None),
+        (f"{h}/step-200/w.bin/{sha('6')}", 60, "2026-10-04T00:00:00.000Z", "public", None),
+        (f"{h}/refs/pr/3/w.bin", 70, "2026-10-05T00:00:00.000Z", "public", None),
+        (f"{h}/@no-ref/w.bin", 80, "2026-10-06T00:00:00.000Z", "public", None),
+        (f"{h}/@unlisted", 1810, "2026-10-12T19:31:09.000Z", "public", None),
+    ]
+    assert totals.history == 330
+    auth = {(u.split("?")[0].endswith("/lfs-files"), hd["Authorization"]) for u, hd in replay.calls}
+    assert auth == {(False, "Bearer t0k"), (True, "Bearer w1")}
 
 
 def test_list_repo_lfs_files_forbidden():
