@@ -2,7 +2,7 @@
 // labelled with the scan and the deployment, found over all locations; the run marked failed; what refuses it.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { type Env, gateFor } from '../_lib/auth'
-import { jobsFilter } from '../_lib/scanCancel'
+import { CANCELLED_ERROR, jobsFilter } from '../_lib/scanCancel'
 import { type Sqlite, sqliteD1, withAdminEmails } from '../_lib/testD1'
 import { onRequestPost as cancel } from './scan-runs/cancel'
 
@@ -76,13 +76,27 @@ describe('POST /api/scan-runs/cancel', () => {
       { method: 'POST', url: `https://batch.googleapis.com/v1/${P}/us-east1/jobs/iv-merge:cancel`, body: REASON },
     ])
     expect(jobsFilter('demo', '2026-11-19T1241')).toBe('labels.deployment="demo" AND labels.scan_id="2026-11-19t1241"')
-    expect(row(w.raw, 'r1')).toEqual([{ status: 'failed', error: `cancelled by ${ADMIN}`, finished_ts: NOW, updated_ts: NOW }])
+    expect(row(w.raw, 'r1')).toEqual([{ status: 'failed', error: CANCELLED_ERROR, finished_ts: NOW, updated_ts: NOW }])
   })
 
   it('reports a head already cancelling, or gone, and still cancels its tasks', async () => {
     const w = await world((u, m) => (m === 'GET' ? Response.json({ jobs: JOBS.slice(1, 2) }) : u.includes('snapshot') ? new Response('busy', { status: 409 }) : Response.json({})))
     run(w.raw, 'r1')
     expect(await w.post({ run_id: 'r1' })).toEqual([200, { head: 'already', tasks: { [`${P}/us-east1/jobs/nf-post`]: 'cancelled' }, recorded: true }])
+  })
+
+  it('leaves the row running when the head’s cancel fails, still cancelling the tasks', async () => {
+    const w = await world((u, m) => (m === 'GET' ? Response.json({ jobs: JOBS.slice(1, 2) }) : u.includes('snapshot') ? new Response('denied', { status: 403 }) : Response.json({})))
+    run(w.raw, 'r1')
+    expect(await w.post({ run_id: 'r1' })).toEqual([200, { head: { error: 'Batch 403: denied' }, tasks: { [`${P}/us-east1/jobs/nf-post`]: 'cancelled' }, recorded: false }])
+    expect(row(w.raw, 'r1')).toEqual([{ status: 'running', error: null, finished_ts: null, updated_ts: NOW - 60 }])
+  })
+
+  it('records a stopped head even when the listing of its tasks fails, and says so', async () => {
+    const w = await world((u, m) => (m === 'GET' ? new Response('boom', { status: 503 }) : Response.json({})))
+    run(w.raw, 'r1')
+    expect(await w.post({ run_id: 'r1' })).toEqual([200, { head: 'cancelled', tasks: {}, tasks_error: 'Batch list 503: boom', recorded: true }])
+    expect(row(w.raw, 'r1')).toEqual([{ status: 'failed', error: CANCELLED_ERROR, finished_ts: NOW, updated_ts: NOW }])
   })
 
   it('refuses a run that isn’t a running scan, and leaves its row alone', async () => {

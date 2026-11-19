@@ -1,13 +1,15 @@
 // POST /api/scan-runs/cancel — "Cancel" on a running scan's /scans page: cancel its head Batch job and every Batch job
 // its pipeline submitted, in every region, then mark the run failed (`_lib/scanCancel.ts`).
 //
-//   POST /api/scan-runs/cancel { run_id } → 200 { head, tasks: { <job>: outcome }, recorded }                   admin
+//   POST /api/scan-runs/cancel { run_id } → 200 { head, tasks: { <job>: outcome }, tasks_error?, recorded }      admin
 //     400: no run_id;  404: no such run;  409 { error }: not running, or not a scan run
-//     500 { error }: the Batch listing failed (the head's cancel, if sent, stands)
+//     500 { error }: no token (nothing was cancelled)
 //     503: not configured (`GCP_SA_KEY`, `GCP_PROJECT`, `DISKY_LABELS` with a `deployment`, `DB`)
 //
 // Each outcome is `cancelled`, `already` (a cancel was in progress, or the job had ended), `gone`, or `{ error }`.
-// `recorded`: the run's row was still `running` and is now `failed`, `cancelled by <who>`.
+// `tasks_error`: the listing of the scan's jobs failed, so no task was tried (the head's outcome stands). `recorded`:
+// the head stopped and the run's row, still `running`, is now `failed`, `cancelled from /scans`; a head whose cancel
+// failed leaves the row running.
 import type { D1Database } from '@cloudflare/workers-types'
 import { type Ctx, json, requireAdmin } from '../../_lib/auth.js'
 import { parseLabels } from '../../_lib/costLabels.js'

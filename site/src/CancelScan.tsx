@@ -7,7 +7,7 @@ import { useIsAdmin } from './auth'
 import type { ScanRun } from './scanRunsModel'
 
 type Outcome = 'cancelled' | 'already' | 'gone' | { error: string }
-interface Cancelled { head: Outcome; tasks: Record<string, Outcome>; recorded: boolean }
+interface Cancelled { head: Outcome; tasks: Record<string, Outcome>; tasks_error?: string; recorded: boolean }
 
 async function cancelScan(runId: string): Promise<Cancelled> {
   const r = await fetch('/api/scan-runs/cancel', {
@@ -19,7 +19,13 @@ async function cancelScan(runId: string): Promise<Cancelled> {
 }
 
 const failures = (c: Cancelled): string[] =>
-  [['head', c.head] as const, ...Object.entries(c.tasks)].flatMap(([n, o]) => (typeof o === 'object' ? [`${n.split('/').pop()}: ${o.error}`] : []))
+  Object.entries(c.tasks).flatMap(([n, o]) => (typeof o === 'object' ? [`${n.split('/').pop()}: ${o.error}`] : []))
+
+/** What the cancel did to the head, as a sentence. */
+function headSays(c: Cancelled): string {
+  if (typeof c.head === 'object') return `The head job’s cancel failed (${c.head.error}); it is still running, and so is the run.`
+  return `Cancelled the head job${c.head === 'already' ? ' (its cancel was already under way)' : c.head === 'gone' ? ' (already gone)' : ''}.${c.recorded ? ' The run is marked failed.' : ''}`
+}
 
 /** The button, for an admin on a running scan run (not a compaction, merge, race, access ingest or recovery). */
 export function CancelScanButton({ run, invalidate }: { run: ScanRun; invalidate: readonly (readonly unknown[])[] }) {
@@ -55,7 +61,9 @@ function CancelScanDialog({ run, invalidate, onClose }: { run: ScanRun; invalida
           <button type="button" className="token-x" onClick={onClose} disabled={go.isPending} aria-label="Close">✕</button>
         </div>
         {go.isSuccess ? <>
-          <p>Cancelled the head job{go.data.head === 'already' ? ' (its cancel was already under way)' : go.data.head === 'gone' ? ' (already gone)' : ''} and {n} running task{n === 1 ? '' : 's'}.{go.data.recorded ? ' The run is marked failed.' : ''}</p>
+          <p>{headSays(go.data)} {go.data.tasks_error ? '' : `Cancelled ${n} running task${n === 1 ? '' : 's'}.`}</p>
+          {typeof go.data.head === 'object' && <p className="token-err">Try again, or cancel <code>{run.job_name}</code> in the Batch console.</p>}
+          {go.data.tasks_error && <p className="token-err">Couldn’t list the scan’s tasks, so none was cancelled: {go.data.tasks_error}</p>}
           {bad.length > 0 && <p className="token-err">Not cancelled: {bad.join('; ')}</p>}
           <div className="token-actions"><button type="button" onClick={onClose} autoFocus>Close</button></div>
         </> : <>

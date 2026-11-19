@@ -8,8 +8,10 @@
 //
 // `scan_id` alone isn't unique: two deployments in one project can scan at the same minute, so the deployment label
 // (`DISKY_LABELS`) is required. Only a top-level scan run is cancelled here (not a compaction, merge, race or access
-// ingest, whose jobs share the scan's `scan_id`). The row is then marked failed, `cancelled by <who>`, unless the
-// head recorded its own end first.
+// ingest, whose jobs share the scan's `scan_id`). Once the head is stopped (cancelled, already cancelling, or gone),
+// the row is marked failed, `cancelled from /scans`, unless the head recorded its own end first; a head whose cancel
+// failed leaves the row running. `error` reaches every viewer, public ones too, so who cancelled stays out of it: it
+// goes in Batch's cancel reason (admins' console).
 import type { D1Database } from '@cloudflare/workers-types'
 import { MAINT_KINDS, type ScanRun } from '../../src/scanRunsModel.js'
 
@@ -54,8 +56,15 @@ export const headName = (project: string, run: Run): string => `projects/${proje
  *  else an error. */
 export type CancelOutcome = 'cancelled' | 'already' | 'gone' | { error: string }
 
-/** What a cancel did: the head's outcome, and each task's by name. */
-export interface Cancelled { head: CancelOutcome; tasks: Record<string, CancelOutcome>; recorded: boolean }
+/** What a cancel did: the head's outcome, each task's by name (`tasks_error`: the listing failed, so none was tried),
+ *  and whether the run's row was marked failed. */
+export interface Cancelled { head: CancelOutcome; tasks: Record<string, CancelOutcome>; tasks_error?: string; recorded: boolean }
+
+/** The row's `error` after a cancel. No address: every viewer reads it. */
+export const CANCELLED_ERROR = 'cancelled from /scans'
+
+/** The head is stopped (or stopping): the run can be recorded as ended. */
+export const headStopped = (o: CancelOutcome): boolean => typeof o === 'string'
 
 type Fetch = (url: string, init: RequestInit) => Promise<Response>
 
@@ -90,7 +99,8 @@ async function listJobs(fetch: Fetch, token: string, project: string, deployment
   throw new Error('Batch list: more than 20 pages')
 }
 
-/** Cancel `run` (which `refusal` passed): its head, then every live job of its scan; then mark the row failed. */
+/** Cancel `run` (which `refusal` passed): its head, then every live job of its scan; then, if the head stopped, mark the
+ *  row failed. */
 export async function cancelScan(
   { db, fetch, token, project, deployment, run, who, now }:
   { db: D1Database; fetch: Fetch; token: string; project: string; deployment: string; run: Run; who: string; now: () => number },
@@ -98,11 +108,19 @@ export async function cancelScan(
   const reason = `cancelled by ${who} from /scans`
   const head = headName(project, run)
   const headOut = await cancelJob(fetch, token, head, reason)
-  const names = liveJobs(await listJobs(fetch, token, project, deployment, run.scan), head)
   const tasks: Record<string, CancelOutcome> = {}
-  for (const n of names) tasks[n] = await cancelJob(fetch, token, n, reason)
-  const t = now()
-  const r = await db.prepare(`UPDATE scan_runs SET status = 'failed', error = ?, finished_ts = COALESCE(finished_ts, ?), updated_ts = ?
-      WHERE run_id = ? AND status = 'running'`).bind(`cancelled by ${who}`, t, t, run.run_id).run()
-  return { head: headOut, tasks, recorded: (r.meta.changes ?? 0) > 0 }
+  let tasksError: string | undefined
+  try {
+    for (const n of liveJobs(await listJobs(fetch, token, project, deployment, run.scan), head)) tasks[n] = await cancelJob(fetch, token, n, reason)
+  } catch (e) {
+    tasksError = (e as Error).message ?? String(e)
+  }
+  let recorded = false
+  if (headStopped(headOut)) {
+    const t = now()
+    const r = await db.prepare(`UPDATE scan_runs SET status = 'failed', error = ?, finished_ts = COALESCE(finished_ts, ?), updated_ts = ?
+        WHERE run_id = ? AND status = 'running'`).bind(CANCELLED_ERROR, t, t, run.run_id).run()
+    recorded = (r.meta.changes ?? 0) > 0
+  }
+  return { head: headOut, tasks, ...(tasksError ? { tasks_error: tasksError } : {}), recorded }
 }
