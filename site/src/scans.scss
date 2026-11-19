@@ -208,6 +208,11 @@
     &:hover:not(:disabled) { border-color: var(--ink-3); }
     &:disabled { opacity: 0.5; cursor: default; }
   }
+  .sr-cancel-scan {
+    font: inherit; font-size: 12px; color: var(--danger); background: var(--surface); border: 1px solid var(--line); border-radius: 6px;
+    padding: 1px 10px; margin-left: 4px; cursor: pointer; vertical-align: 1px;
+    &:hover { border-color: var(--danger); }
+  }
   .sr-kind { font-size: 12px; color: var(--ink-3); }
   .sr-live { display: block; font-size: 12px; color: var(--ink-2); white-space: nowrap; .sr-quiet { color: var(--danger); }
     &.inline { display: inline; font-size: inherit; } }
@@ -224,3 +229,4 @@
 }
 // "Run a scan"'s confirm (`RunScan.tsx`; a portal-less fixed modal, outside `.scans-page`'s rules for buttons)
 .run-scan-modal .token-actions .run-scan-go { border-color: var(--s1); font-weight: 600; }
+.run-scan-modal .token-actions .sr-cancel-go { border-color: var(--danger); color: var(--danger); }

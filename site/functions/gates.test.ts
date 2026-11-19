@@ -244,6 +244,8 @@ const SHARED_ROUTES: Record<string, Case[]> = {
   'api/plans/progress.ts': [get('/api/plans/progress', 'viewer')],
   'api/plans/scan-deletions.ts': [get('/api/plans/scan-deletions', 'viewer')],
   'api/prefixes.ts': [post('/api/prefixes', 'viewer')],
+  // "Cancel" on a running scan: an admin cancels its head and every job of its scan (`_lib/scanCancel.ts`).
+  'api/scan-runs/cancel.ts': [post('/api/scan-runs/cancel', 'admin')],
   'api/scan-runs/[[path]].ts': [get('/api/scan-runs', 'viewer')],
   // "Run a scan": an admin starts the deployment's scan submitter (`_lib/scanDispatch.ts`).
   'api/scan-runs/dispatch.ts': [post('/api/scan-runs/dispatch', 'admin')],
