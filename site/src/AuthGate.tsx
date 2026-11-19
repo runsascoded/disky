@@ -1,7 +1,8 @@
 import type { ReactNode } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { useLocation, useNavigate } from 'react-router-dom'
-import { AuthGate as Gate, deniedEmail, RequestAccessForm, SignInPanel, useForgetWhoami } from '@open-athena/auth/react'
+import { AuthGate as Gate, deniedEmail, OaSignInButton, RequestAccessForm, SignInPanel, useForgetWhoami } from '@open-athena/auth/react'
+import '@open-athena/auth/react/ui.css'
 import { AUTH_MODE, devIdentity, WHOAMI_SOURCE } from './auth'
 import { signInError } from './signInError'
 import { signInNext } from './signInNext'
@@ -128,9 +129,7 @@ function LoginWall({ next, error }: { next?: string; error?: string }) {
         <p className="restrict">{wall.restrict}</p>
         {error && <p className="signin-error" role="alert">{error}</p>}
         {oaOn && (
-          <a className={account ? 'signin signin-oa signin-oa-account' : 'signin signin-oa'} href={oaUrl}>
-            {account ? <OaContinueAs account={account} /> : <><OaMark /><span>Sign in with OA</span></>}
-          </a>
+          <OaSignInButton className="signin-oa" href={oaUrl} account={account} />
         )}
         {googleRedundant && clientId && (
           <a className="signin-switch signin-other" href={`/auth/google?account=choose&next=${back}`}>Use a different account</a>
@@ -167,31 +166,6 @@ function LoginWall({ next, error }: { next?: string; error?: string }) {
         </details>
       </div>
     </div>
-  )
-}
-
-/** OA's mark on the broker's button: a monogram, as Google's button carries Google's. */
-function OaMark() {
-  return <span className="oa-mark" aria-hidden="true">OA</span>
-}
-
-/** The broker's button for a returning visitor, laid out as Google's own "Continue as": their face (or initial),
- *  "Continue as <first name>" over the address, OA's mark. A hint, never an identity: the click still signs in at the
- *  broker, as whoever it holds. */
-function OaContinueAs({ account }: { account: OaAccount }) {
-  const { email, name, avatar } = account
-  const first = name?.trim().split(/\s+/)[0]
-  return (
-    <span className="oa-account">
-      {avatar
-        ? <img className="oa-avatar" src={avatar} alt="" referrerPolicy="no-referrer" />
-        : <span className="oa-avatar" aria-hidden="true">{(name ?? email).charAt(0).toUpperCase()}</span>}
-      <span className="oa-who">
-        <span className="oa-name">Continue as {first ?? email}</span>
-        {first && <span className="oa-email">{email}</span>}
-      </span>
-      <OaMark />
-    </span>
   )
 }
 

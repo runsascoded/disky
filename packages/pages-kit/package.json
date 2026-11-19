@@ -14,7 +14,7 @@
     "typecheck": "tsc -p ."
   },
   "dependencies": {
-    "@open-athena/auth": "github:Open-Athena/auth#39a80bc39e692d1969cf3efd269b8c0ff5f40595",
+    "@open-athena/auth": "github:Open-Athena/auth#0b9c44c9e8c9599677122fede9645df5d4c57f79",
     "@resvg/resvg-wasm": "^2.6.2"
   },
   "devDependencies": {
