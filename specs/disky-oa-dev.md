@@ -45,16 +45,20 @@ Fixture previews verify formatting and rendering only. Approval of a first real 
   - **No D1.** `@open-athena/auth`'s gate needs a grant store, but only share links and Bearer tokens read it. Here it's an empty one (`NO_GRANTS`: every lookup misses, every write refused). A session is a signed cookie under `SESSION_SECRET`, judged by its signature. The policy admits `STAFF_DOMAIN` (comma-separated), a var the spec didn't list.
   - A Bearer token or `?key=` link is refused, never looked up.
   - Locally, `DEV_EMAIL` (`.dev.vars` only) makes a localhost request that address.
-- **`/api/fleet`** fetches each deployment's `/api/health`, `/api/scan-runs`, `/api/series?store=meta` (the `/meta` store's bytes per scan) and `/api/series` (the primary store's root: its `objects` per scan, which scan time tracks; the token's viewer scope reads it, no `series_scope`), with that deployment's token. `/api/scan-runs` takes no `limit`, so the fleet keeps the runs started in the card's window (`WINDOW_DAYS`, 7) whatever a deployment's scan rate, plus its newest even when older, capped at `FLEET_RUNS` (default 200); maintenance runs (`compact`, `race`, `merge`) and no-op (`nop`) runs left out.
-  - It returns one JSON (`functions/_lib/fleetTypes.ts`), per deployment:
+- **`/api/fleet`** fetches each deployment's `/api/health`, `/api/scan-runs`, `/api/series?store=meta` (the `/meta` store's bytes per scan) and `/api/series` (the primary store's root: its `objects` per scan, which scan time tracks; the token's viewer scope reads it, no `series_scope`), with that deployment's token. `/api/scan-runs` takes no `limit`, so the fleet keeps the runs started in the last `HISTORY_DAYS` (30: the page's longest chart range; the card draws its last `WINDOW_DAYS`, 7) whatever a deployment's scan rate, plus its newest even when older, capped at `FLEET_RUNS` (default 200); maintenance runs (`compact`, `race`, `merge`) and no-op (`nop`) runs left out.
+  - It returns one JSON (`functions/_lib/fleetTypes.ts`): `days` (`HISTORY_DAYS`), and per deployment:
     - `health`: newest scan, its age, gaps summed.
-    - `last` and `runs`: id, scan, start, duration, status, `failed_at`, open step issues, cost.
+    - `last` and `runs`: id, scan, trigger, start, duration, status, `failed_at`, open step issues, cost, and `thread_url` (the run's reply in `#<d>-admin`) when the deployment's `/api/scan-runs` carries it.
     - `meta`: bytes now / 1 d / 7 d before the read, plus the newest scan per UTC day over 30 days.
     - `errors`: which part couldn't be read, and why (`HTTP 403`, `no token (FLEET_TOKEN_GCS unset)`, `scan runs are not set up`). A deployment that fails never fails the document.
   - An open step issue is a `phase_issues` entry with neither `recovery` nor `passing` (so "search behind" counts).
   - The response also carries the full card's signed URLs (`card.dark`, `card.light`).
   - The document is held 5 min per colo (`FLEET_TTL`; `?fresh` reads anew), and browsers get `private, no-store`.
-- **`/fleet`:** the same data: the card on top (light or dark by the viewer's scheme), then a section per deployment with its summary, its 5 newest runs (each linked to its run page) and a link to its own `/scans`.
+- **`/fleet`:** the same data, laid out for the web rather than as the card (Ryan, 2026-11-19):
+  - A summary row per deployment: its newest 10 runs as ✅ / ⚠️ / ❌ / ⏳ marks (the Slack strip's rule, `_lib/runOutcome.ts`), each linked to `/scans/<run>` with a tooltip (outcome, failed step or open issues, trigger, start, duration, cost); the newest scan (age, called out past 36 h; duration; cost); the last 7 days' cost; the `/meta` size and its 7-day change (green grew, red shrank); links to its `/scans`, its Map and the newest run's thread (when it has one). Under 720 px each row folds onto three lines.
+  - History: the card's four panels as interactive SVG (`src/charts.tsx`, no chart library) over 7 or 30 days (`?range=30d`; 30 only when the document carries `days >= 30`): `/meta` size and primary objects (log y, the newest scan per day), scan duration per run (hollow: an open issue or a failure), and cost per scan as a row per deployment on its own scale, a bar per UTC day stacked from its runs, scheduled under hand-started. Hover (a tap on touch) reads a point out; a click (a second tap) opens its run.
+  - Each deployment's runs below, collapsed: health, then its newest 30 runs with their threads, and a link to its own `/scans`.
+  - Tooltips are `@floating-ui/react`. `FLEET_MOCK=1 pnpm dev` serves the page's API from the test fleet, to look at it with no Functions or tokens.
 - **The card** (`/og/fleet.png?[theme=light&]v=…&sig=…`): stacked panels over the last 7 UTC days, one trace per deployment in its color, each labelled at its latest point in a right gutter, as in the layout mock:
   - `/meta` size, log y
   - objects in the primary store, log y (Ryan, 11-16: object counts now drive scan time)

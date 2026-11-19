@@ -75,12 +75,34 @@ function fonts(): Plugin {
   }
 }
 
+/** `FLEET_MOCK=1 pnpm dev`: `/api/fleet` answers with the test fleet (`functions/_lib/testFleet.ts`, read through
+ *  `readFleet` as the route reads the deployments; no card) and `/api/whoami` with a signed-in staff address, so the page
+ *  can be looked at with no Functions, tokens or deployments. Dev server only. */
+function mock(): Plugin {
+  return {
+    name: 'fleet-mock',
+    apply: 'serve',
+    configureServer(server) {
+      if (!process.env.FLEET_MOCK) return
+      server.middlewares.use(async (req, res, next) => {
+        const path = req.url?.split('?')[0]
+        if (path !== '/api/fleet' && path !== '/api/whoami') return next()
+        res.setHeader('content-type', 'application/json')
+        if (path === '/api/whoami') return res.end(JSON.stringify({ email: 'staff@example.test', signIn: true }))
+        const fx = await server.ssrLoadModule('/functions/_lib/testFleet.ts')
+        const { readFleet } = await server.ssrLoadModule('/functions/_lib/fleet.ts')
+        res.end(JSON.stringify({ ...await readFleet(fx.fleetEnv(), fx.NOW, fx.stubFetch(fx.ANSWERS)), card: null }))
+      })
+    },
+  }
+}
+
 function origin(): Plugin {
   return { name: 'fleet-origin', transformIndexHtml: html => html.replaceAll('%ORIGIN%', (process.env.FLEET_ORIGIN ?? '').replace(/\/+$/, '')) }
 }
 
 export default defineConfig({
-  plugins: [react(), docs(), fonts(), origin()],
+  plugins: [react(), docs(), fonts(), mock(), origin()],
   build: { rollupOptions: { input: { index: resolve(HERE, 'index.html'), fleet: resolve(HERE, 'fleet.html') } } },
   server: {
     port: 3870,

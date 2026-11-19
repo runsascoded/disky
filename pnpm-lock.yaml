@@ -13,6 +13,9 @@ importers:
       '@disk-tree/pages-kit':
         specifier: workspace:*
         version: link:../packages/pages-kit
+      '@floating-ui/react':
+        specifier: ^0.27.20
+        version: 0.27.20(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
       '@open-athena/auth':
         specifier: github:Open-Athena/auth#4ae207935a50cbe93fe3b27b252a2d059cf601f4
         version: https://codeload.github.com/Open-Athena/auth/tar.gz/4ae207935a50cbe93fe3b27b252a2d059cf601f4(@cloudflare/workers-types@5.20261014.1)(@floating-ui/react@0.27.20(react-dom@19.2.8(react@19.2.8))(react@19.2.8))(@tanstack/react-query@5.101.4(react@19.2.8))(react-dom@19.2.8(react@19.2.8))(react@19.2.8)(vue@3.5.44(typescript@5.9.3))
