@@ -91,6 +91,26 @@ def test_cli_writes_each_day_and_skip_existing_rolls_again_once_the_ingest_adds_
     )
 
 
+def test_rollup_day_hourly_groups_each_utc_hour(tmp_path):
+    """`hourly`: an `hour` column (the UTC hour, whatever the host's zone), what joins a requester to the host and job
+    behind it at the time; `depth` 3 keeps the store a training job reads (`datakit/store/<store>`)."""
+    root = tmp_path / "access"
+    ua = "tensorstore/0.1.84"
+    _raw(root / "raw/b1/part-2026_11_14_00_00_00--2026_11_14_03_00_00.parquet", [
+        ("2026-11-14T00:10:00Z", "b1", "datakit/store/s1/x/0", "GET", "storage.objects.get", 5, "35.1.2.3", ua),
+        ("2026-11-14T00:50:00Z", "b1", "datakit/store/s1/x/1", "GET", "storage.objects.get", 5, "35.1.2.3", ua),
+        ("2026-11-14T03:10:00Z", "b1", "datakit/store/s2/y/0", "GET", "storage.objects.get", 5, "35.1.2.3", ua),
+    ])
+    out = tmp_path / "hourly.parquet"
+    assert rollup_day(str(root), dt.date(2026, 11, 14), str(out), 3, hourly=True) == 2
+    con = duckdb.connect()
+    con.sql("SET TimeZone = 'UTC'")
+    assert con.sql(f"SELECT strftime(hour, '%Y-%m-%dT%H'), requester, prefix, n FROM '{out}' ORDER BY hour").fetchall() == [
+        ("2026-11-14T00", "35.1.2.3", "datakit/store/s1", 2),
+        ("2026-11-14T03", "35.1.2.3", "datakit/store/s2", 1),
+    ]
+
+
 def test_written_parts_of_a_rollup_without_them_is_none(tmp_path):
     """A rollup written before rollups recorded their parts (or none at all) reads as None, so `-s` rolls it again."""
     from dt_cloud.access_requesters import written_parts

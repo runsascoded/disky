@@ -48,11 +48,13 @@ def day_parts(names: list[str], day: dt.date) -> list[str]:
     return sorted(out)
 
 
-def rollup_sql(files: list[str], day: dt.date, depth: int) -> str:
+def rollup_sql(files: list[str], day: dt.date, depth: int, hourly: bool = False) -> str:
+    """`day`'s rows grouped per bucket × op × client × requester × prefix (`depth` segments); `hourly`: per UTC hour
+    too (an `hour` column), for joining requesters to what ran on each host at the time."""
     lo = dt.datetime.combine(day, dt.time(), dt.timezone.utc)
     hi = lo + dt.timedelta(days=1)
     return f"""
-        SELECT DATE '{day.isoformat()}' AS day, bucket, op, op_raw,
+        SELECT DATE '{day.isoformat()}' AS day, {"date_trunc('hour', ts) AS hour, " if hourly else ''}bucket, op, op_raw,
                nullif(regexp_extract(coalesce(user_agent, ''), '^([^/ ,;()]+)', 1), '') AS client,
                nullif(regexp_replace(coalesce(user_agent, ''), ',gzip\\(gfe\\)$', ''), '') AS user_agent,
                nullif(requester, '') AS requester,
@@ -112,15 +114,16 @@ def written_parts(path: str) -> list[str] | None:
 
 
 def rollup_day(root: str, day: dt.date, out: str, depth: int = 2, mem: str | None = None, threads: int | None = None,
-               names: list[str] | None = None) -> int:
+               names: list[str] | None = None, hourly: bool = False) -> int:
     """Write `day`'s rollup of `<root>/raw/*/part-*.parquet` (a dir or `gs://` URL; `names`: that listing, when the
     caller has it) to `out` (a path or `gs://` URL), recording its parts (`PARTS_KEY`); returns its row count. No part
-    meets the day: nothing is written, 0."""
+    meets the day: nothing is written, 0. `hourly`: per UTC hour too (`rollup_sql`)."""
     import json
 
     import duckdb
 
     con = duckdb.connect()
+    con.sql("SET TimeZone = 'UTC'")  # an `hour` is a UTC hour, whatever the host's zone
     if mem:
         con.sql(f"SET memory_limit = '{mem}'")
     if threads:
@@ -135,7 +138,7 @@ def rollup_day(root: str, day: dt.date, out: str, depth: int = 2, mem: str | Non
         err(f"requesters {day}: no raw parts")
         return 0
     err(f"requesters {day}: {len(files)} raw parts")
-    con.sql(f"CREATE TABLE r AS {rollup_sql(files, day, depth)}")
+    con.sql(f"CREATE TABLE r AS {rollup_sql(files, day, depth, hourly)}")
     n = con.sql("SELECT count(*) FROM r").fetchone()[0]
     parts = json.dumps(sorted(part_key(f) for f in files)).replace("'", "''")
     copy = f"(FORMAT parquet, COMPRESSION zstd, KV_METADATA {{'{PARTS_KEY}': '{parts}'}})"
