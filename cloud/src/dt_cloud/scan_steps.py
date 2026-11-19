@@ -1966,6 +1966,37 @@ def access_requesters(ctx: Ctx, arg: str | None) -> None:
                fatal=False, warn="requester rollup failed (the scan's outputs stand; `dt-cloud access requesters -s` backfills)")
 
 
+def _access_jobs_check(p: ScanProfile) -> list[str]:
+    from .access_jobs import batch_problems
+
+    return primary_only("access-jobs", "the job tables are the deployment's, written once by its primary")(p) + batch_problems(p.opts("access-jobs").get("batch") or {})
+
+
+@step("access-jobs", core=False, soft=True, options={"days": int, "batch": dict},
+      requires=_access_jobs_check,
+      side=True, converges=True, leaves="the previous days' job tables not written: a later run's job writes every missing day in its window")
+def access_jobs(ctx: Ctx, arg: str | None) -> None:
+    """Which jobs ran on which VMs (`dt-cloud access jobs`, specs/access-job-attribution.md phase 2): for each of the
+    `options.access-jobs.days` (default 2) UTC days before the scan's not yet under `<data>/access/jobs/<day>/`, the
+    deployment's own job-table image (`options.access-jobs.batch.image`: its scheduler's client, kept out of this
+    image) runs as a Batch job of its own. Submitted, not waited on. A day before the newest still missing means an
+    earlier run's job failed: it is resubmitted and the phase warns. `batch`'s keys (`access_jobs.BATCH_KEYS`) are
+    `access jobs`'s options: `image` (required), `service_account` (`$JOB_SA`), `region` (`$BATCH_REGION`), `project`,
+    `machine`, `spot`, `env`, `secrets`, `cross_region`. Not core: a deployment opts in (`steps`)."""
+    if ctx.reproc:
+        err("REPROC: not submitting job tables")
+        return
+    import datetime as dt
+
+    from .access_jobs import submit_args
+
+    scan_day = dt.date.fromisoformat(ctx.date)
+    days = [(scan_day - dt.timedelta(days=k)).isoformat() for k in range(int(ctx.opt("access-jobs", "days", 2)), 0, -1)]
+    with ctx.phase("access-jobs"):
+        ctx.sh(["dt-cloud", "access", "jobs", "-r", f"{ctx.data_uri}/access/jobs", *submit_args(ctx.opt("access-jobs", "batch") or {}), *days],
+               fatal=False, warn="job tables missing or their job not submitted (a later run resubmits every missing day in its window)")
+
+
 def _vm_pack_check(p: ScanProfile) -> list[str]:
     from .vm_pack import batch_problems
 

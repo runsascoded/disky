@@ -709,6 +709,7 @@ def test_soft_steps_classification():
         "gcp-cost": "side",
         "soft-delete": "side",
         "access-requesters": "side",
+        "access-jobs": "side converges",
         "vm-pack": "side converges",
     }
 
@@ -1783,6 +1784,19 @@ def test_access_requesters_rolls_up_the_days_before_the_scan(tmp_path, env):
     assert c.sh_impl.calls == ["dt-cloud access requesters -s -r <tmp>/data/access -D3 -M 48GB -p 8 2026-10-15"]
     none = ctx(tmp_path, {**env, "REPROC": "1"}, steps=["access-requesters"])
     S.access_requesters(none, None)
+    assert none.sh_impl.calls == []
+
+
+def test_access_jobs_submits_the_deployments_image_for_the_days_before_the_scan(tmp_path, env):
+    """`access-jobs` (listed in `steps`): `dt-cloud access jobs` under the data store's `access/jobs`, for the `days`
+    (default 2) UTC days before the scan's, with `batch`'s options as its flags; REPROC: nothing run."""
+    batch = {"image": "r/finelog:latest", "region": "us-central1", "cross_region": True, "env": {"MARIN_MIRROR_BUDGET_GB": "5"}}
+    c = ctx(tmp_path, env, steps=["access-jobs"], options={**NL_OPTS, "access-jobs": {"batch": batch}})
+    S.access_jobs(c, None)
+    assert c.sh_impl.calls == ["dt-cloud access jobs -r <tmp>/data/access/jobs -i r/finelog:latest -L us-central1 -X "
+                               "-e MARIN_MIRROR_BUDGET_GB=5 2026-10-14 2026-10-15"]
+    none = ctx(tmp_path, {**env, "REPROC": "1"}, steps=["access-jobs"], options={**NL_OPTS, "access-jobs": {"batch": batch}})
+    S.access_jobs(none, None)
     assert none.sh_impl.calls == []
 
 

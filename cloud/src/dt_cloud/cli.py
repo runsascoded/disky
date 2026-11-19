@@ -2980,6 +2980,50 @@ def access_hosts(data_bucket: str | None, dry_run: bool, out: str | None, projec
     print(f"{write(table, out)}\t{table.num_rows} rows: {summary}")
 
 
+@access.command("jobs")
+@option("-a", "--service-account", envvar="JOB_SA", default=None, help="The job's service account (default $JOB_SA)")
+@option("-d", "--data-bucket", envvar="DATA_BUCKET", default=None, help="The access store's bucket; default $DATA_BUCKET")
+@option("-e", "--env", "env_items", multiple=True, help="K=V into the job's environment (repeatable)")
+@option("-i", "--image", required=True, help="The deployment's job-table image (entrypoint takes `-o ROOT DAY…`)")
+@option("-L", "--region", envvar="BATCH_REGION", default=None, help="The job's region (default $BATCH_REGION)")
+@option("-m", "--machine", default=None, help="Machine type (default `access_jobs.MACHINE`)")
+@option("-n", "--dry-run", is_flag=True, help="Print the missing days, the job id and its spec; submit nothing")
+@option("-P", "--project", envvar="GCP_PROJECT", default=None, help="The job's project (default $GCP_PROJECT)")
+@option("-r", "--root", default=None, help="Output root (default `gs://$DATA_BUCKET/access/jobs`): `<root>/<day>/{workers,tasks}.parquet`")
+@option("-s", "--secret", "secret_items", multiple=True, help="VAR=SECRET (a Secret Manager secret in the project) into the job (repeatable)")
+@option("-S", "--no-spot", is_flag=True, help="A standard VM, not spot")
+@option("-X", "--cross-region", is_flag=True, help="Allow the root's bucket outside the job's region")
+@argument("days", nargs=-1, required=True)
+def access_jobs_cmd(service_account: str | None, data_bucket: str | None, env_items: tuple[str, ...], image: str,
+                    region: str | None, machine: str | None, dry_run: bool, project: str | None, root: str | None,
+                    secret_items: tuple[str, ...], no_spot: bool, cross_region: bool, days: tuple[str, ...]) -> None:
+    """Submit the deployment's job-table image (`access_jobs.py`) as its own Batch job for those of DAYS (YYYY-MM-DD)
+    not yet written: each day's hourly workers (internal address) and tasks, the VM → job leg of attributing requests
+    (`specs/access-job-attribution.md`). Not waited on; none missing, no job. Exit 3 when a day other than the newest is
+    still missing: an earlier run's job failed or left it (it is resubmitted here)."""
+    import datetime as dt
+
+    from .access_jobs import MACHINE, submit
+    from .vm_pack import pairs
+
+    for d in days:
+        dt.date.fromisoformat(d)
+    if not root:
+        if not data_bucket:
+            raise SystemExit("access jobs: -r or -d/$DATA_BUCKET")
+        root = f"gs://{data_bucket}/access/jobs"
+    missing = [k for k, v in (("-a/$JOB_SA", service_account), ("-L/$BATCH_REGION", region), ("-P/$GCP_PROJECT", project)) if not v]
+    if missing and not dry_run:
+        raise SystemExit(f"access jobs: need {', '.join(missing)}")
+    out = submit(root, days, image=image, service_account=service_account or "", region=region or "", project=project or "",
+                 machine=machine or MACHINE, spot=not no_spot, env=pairs(env_items, "-e"), secrets=pairs(secret_items, "-s"),
+                 cross_region=cross_region, dry_run=dry_run)
+    print(json.dumps(out, indent=2 if dry_run else None))
+    if out["overdue"]:
+        err(f"access jobs: {', '.join(out['overdue'])} still missing (an earlier job failed or left them uncovered)")
+        sys.exit(3)
+
+
 @access.command("readers")
 @option("-b", "--by", default="client,bucket,prefix", show_default=True, help="Group by these rollup columns (comma-separated)")
 @option("-d", "--data-bucket", envvar="DATA_BUCKET", default=None, help="The access store's bucket; default $DATA_BUCKET")

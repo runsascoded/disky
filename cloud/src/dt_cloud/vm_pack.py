@@ -295,21 +295,21 @@ def submit_args(batch: Mapping[str, object]) -> list[str]:
     return args
 
 
-def batch_problems(batch: object) -> list[str]:
-    """What's wrong with a step's `options.vm-pack.batch` (the profile check): unknown keys, wrong types. Not a mapping
-    at all is the profile's own option check's to say."""
+def batch_problems(batch: object, keys: Mapping[str, type] = BATCH_KEYS, what: str = "options.vm-pack.batch") -> list[str]:
+    """What's wrong with a step's Batch option (`what`, default `options.vm-pack.batch`; the profile check): unknown
+    keys (not in `keys`), wrong types. Not a mapping at all is the profile's own option check's to say."""
     if not isinstance(batch, Mapping):
         return []
     names = {str: "a string", int: "an integer", bool: "true or false", dict: "a mapping of strings"}
-    out = [f"options.vm-pack.batch.{k}: unknown key (known: {', '.join(BATCH_KEYS)})" for k in sorted(set(batch) - set(BATCH_KEYS))]
-    for k, t in BATCH_KEYS.items():
+    out = [f"{what}.{k}: unknown key (known: {', '.join(keys)})" for k in sorted(set(batch) - set(keys))]
+    for k, t in keys.items():
         v = batch.get(k)
         if v is None:
             continue
         ok = (isinstance(v, t) and not (t is int and isinstance(v, bool))
               and (t is not dict or all(isinstance(a, str) and isinstance(b, str) for a, b in v.items())))
         if not ok:
-            out.append(f"options.vm-pack.batch.{k}: {names[t]}")
+            out.append(f"{what}.{k}: {names[t]}")
     return out
 
 
