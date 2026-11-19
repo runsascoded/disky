@@ -2980,6 +2980,28 @@ def access_hosts(data_bucket: str | None, dry_run: bool, out: str | None, projec
     print(f"{write(table, out)}\t{table.num_rows} rows: {summary}")
 
 
+@access.command("attribute")
+@option("-d", "--data-bucket", envvar="DATA_BUCKET", default=None, help="The access store's bucket; default $DATA_BUCKET")
+@option("-r", "--root", default=None, help="The access store's root (default `gs://$DATA_BUCKET/access`)")
+@option("-s", "--skip-unchanged", is_flag=True, help="Leave a day already attributed from the same inputs")
+@argument("days", nargs=-1, required=True)
+def access_attribute_cmd(data_bucket: str | None, root: str | None, skip_unchanged: bool, days: tuple[str, ...]) -> None:
+    """Attribute each of DAYS' (YYYY-MM-DD) requests to the jobs that made them (`access_attribute.py`): the hourly
+    rollup ⋈ host snapshots (requester IP → VM) ⋈ job tables (VM → tasks, split by samples), into
+    `<root>/attributed/<day>.parquet`; `access readers -r <root>/attributed -b owner,job` reads it. One JSON line per
+    day (`status`: written | unchanged | no-rollup, and each `via`'s share of the requests)."""
+    import datetime as dt
+
+    from .access_attribute import attribute_day
+
+    if not root:
+        if not data_bucket:
+            raise SystemExit("access attribute: -r or -d/$DATA_BUCKET")
+        root = f"gs://{data_bucket}/access"
+    for d in days:
+        print(json.dumps(attribute_day(root, dt.date.fromisoformat(d), skip_unchanged=skip_unchanged)), flush=True)
+
+
 @access.command("jobs")
 @option("-a", "--service-account", envvar="JOB_SA", default=None, help="The job's service account (default $JOB_SA)")
 @option("-d", "--data-bucket", envvar="DATA_BUCKET", default=None, help="The access store's bucket; default $DATA_BUCKET")

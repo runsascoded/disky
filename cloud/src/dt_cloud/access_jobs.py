@@ -1,7 +1,8 @@
 """The VM → job leg of attributing bucket requests (specs/access-job-attribution.md phase 2): a deployment's own image
 writes each UTC day's hourly scheduler tables under `<root>/<day>/{workers,tasks}.parquet` (`workers`: `hour,
-worker_id, …, address`, a worker's internal address that hour; `tasks`: `hour, task_id, attempt_id, worker_id,
-n_samples`). The scheduler and its client are the deployment's (gcs: Marin's Iris, read from Finelog by
+worker_id, …, address`, a worker's internal address that hour; `tasks`: `hour, task_id, owner, job, attempt_id,
+worker_id, n_samples`: who and which top-level job, and the task's share of the worker that hour), what
+`access_attribute` joins. The scheduler and its client are the deployment's (gcs: Marin's Iris, read from Finelog by
 `job/finelog/`), so they live in that image, not here: this submits it as its own Batch job, for the days not yet
 written. The image's contract: its entrypoint takes `-o ROOT DAY…`, writes `workers` then `tasks` for each day, and
 leaves a day its source doesn't cover yet for a later run."""

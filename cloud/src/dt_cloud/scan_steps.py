@@ -1939,7 +1939,8 @@ def soft_delete(ctx: Ctx, arg: str | None) -> None:
                fatal=False, warn="soft-delete reading failed (the scan's outputs stand; the site keeps the last one, dated)")
 
 
-@step("access-requesters", core=False, soft=True, options={"days": int, "depth": int, "mem": str, "threads": int},
+@step("access-requesters", core=False, soft=True, options={"days": int, "depth": int, "mem": str, "threads": int, "hourly": int,
+                                                         "attribute": bool},
       requires=primary_only("access-requesters", "the rollup is the deployment's, written once by its primary"),
       side=True, leaves="the previous days' requester rollups not written: `dt-cloud access requesters -s` backfills them")
 def access_requesters(ctx: Ctx, arg: str | None) -> None:
@@ -1949,7 +1950,12 @@ def access_requesters(ctx: Ctx, arg: str | None) -> None:
     parts there now is left (`-s`); one the access ingest has added to since is rolled again, so `days: 2` gives each
     day a second pass after its logs have landed (gcs's ingest lags its logs by up to ~14 h, so the first pass, the
     next morning, misses the day's last hours). Needs `access/raw/` (the access ingest's). Skipped on REPROC; never
-    fatal."""
+    fatal.
+
+    `hourly: N` also rolls the days up per UTC hour, keeping N path segments (`requesters-hourly/`, `-H -D N`: 3 keeps
+    the store a training job reads); `attribute: true` then joins those to the hourly host snapshots and the job tables
+    (`access hosts`, `access-jobs`) into `attributed/<day>.parquet` (`dt-cloud access attribute -s`: a day is redone
+    when its inputs changed, so the job tables that land after this run reach it on the next)."""
     if ctx.reproc:
         err("REPROC: skipping the requester rollup")
         return
@@ -1964,6 +1970,12 @@ def access_requesters(ctx: Ctx, arg: str | None) -> None:
     with ctx.phase("access-requesters"):
         ctx.sh(["dt-cloud", "access", "requesters", "-s", "-r", f"{ctx.data_uri}/access", *args, *days],
                fatal=False, warn="requester rollup failed (the scan's outputs stand; `dt-cloud access requesters -s` backfills)")
+        if hourly := ctx.opt("access-requesters", "hourly"):
+            ok = ctx.sh(["dt-cloud", "access", "requesters", "-s", "-H", "-r", f"{ctx.data_uri}/access", f"-D{hourly}", *args[1:], *days],
+                        fatal=False, warn="hourly requester rollup failed (`dt-cloud access requesters -s -H` backfills)")
+            if ok is not None and ctx.opt("access-requesters", "attribute"):
+                ctx.sh(["dt-cloud", "access", "attribute", "-s", "-r", f"{ctx.data_uri}/access", *days],
+                       fatal=False, warn="request attribution failed (`dt-cloud access attribute -s` backfills)")
 
 
 def _access_jobs_check(p: ScanProfile) -> list[str]:
