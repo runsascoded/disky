@@ -101,6 +101,17 @@ export async function assignmentsCard(env: Env, site: Site, title: string, param
   }
 }
 
+/** The leading dirs (`a/b/`, or `''`) every path in `paths` sits under, never a path's own last segment: each keeps a
+ * name after it's cut. */
+function sharedDirs(paths: string[]): string {
+  const dirs = paths.map(p => p.replace(/\/$/, '').split('/').slice(0, -1))
+  let n = Math.min(...dirs.map(d => d.length))
+  for (let i = 0; i < n; i++) {
+    if (dirs.some(d => d[i] !== dirs[0][i])) { n = i; break }
+  }
+  return dirs.length && n > 0 ? `${dirs[0].slice(0, n).join('/')}/` : ''
+}
+
 /** One staged item at the scan: its stats and effective owner. */
 interface Item { prefix: string; addedBy: string; stat?: PrefixStat; owner: string | null }
 
@@ -147,11 +158,13 @@ export async function stagedCard(env: Env, site: Site, title: string, params: Re
     byBucket.set(bucket, [...(byBucket.get(bucket) ?? []), it])
   }
   const tiles: CardTile[] = [...byBucket].map(([bucket, its]) => {
-    // each item named within its bucket (the tile names the bucket)
-    const kids = its.map(i => ({ name: i.prefix.replace(/^[a-z0-9]+:\/\//, '').slice(bucket.length).replace(/^\//, ''), b: i.stat?.bytes ?? 0, color: color(i) }))
+    // each item named within its bucket, less the dirs every item shares, which the tile names after the bucket
+    const rel = its.map(i => i.prefix.replace(/^[a-z0-9]+:\/\//, '').slice(bucket.length).replace(/^\//, ''))
+    const shared = sharedDirs(rel)
+    const kids = its.map((i, k) => ({ name: rel[k].slice(shared.length), b: i.stat?.bytes ?? 0, color: color(i) }))
     const b = kids.reduce((s, k) => s + k.b, 0)
     const top = [...its].sort((x, y) => (y.stat?.bytes ?? 0) - (x.stat?.bytes ?? 0))[0]
-    return { name: bucket, b, color: anyOwner ? owners(top?.owner ?? null) : UNOWNED_COLOR, kids }
+    return { name: shared ? `${bucket}/${shared.replace(/\/$/, '')}` : bucket, b, color: anyOwner ? owners(top?.owner ?? null) : UNOWNED_COLOR, kids }
   })
   const b = items.reduce((s, i) => s + (i.stat?.bytes ?? 0), 0)
   const o = items.reduce((s, i) => s + (i.stat?.objects ?? 0), 0)

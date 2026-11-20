@@ -52,7 +52,21 @@ describe('stagedCard', () => {
     ])
   })
 
-  it('unowned items (no attribution): each its own colour and label inside its bucket, and no owner legend', async () => {
+  it('a lone item keeps its own name: only dirs above it join the bucket\'s label', async () => {
+    const { db } = await sqliteD1()
+    await db.prepare("INSERT INTO plans (id, name, state, created_by, created_ts) VALUES (1, 'Staged', 'open', 'ann', 1)").run()
+    for (const p of ['gs://b/x/y/z/', 'gs://c/k/', 'gs://c/k/m/', 'gs://d/top.bin']) {
+      await db.prepare("INSERT INTO plan_items (plan_id, prefix, added_by, added_ts) VALUES (1, ?, 'ann', 1)").bind(p).run()
+    }
+    const card = await stagedCard({ DB: db } as never, { name: 'gcs', scheme: 'gs' }, 'Staged', {}, 'full')
+    expect(card.tiles.map(t => [t.name, t.kids?.map(k => k.name)])).toEqual([
+      ['b/x/y', ['z/']],
+      ['c', ['k/', 'k/m/']],
+      ['d', ['top.bin']],
+    ])
+  })
+
+  it('unowned items (no attribution): each its own colour and label inside its bucket, and no owner legend; their shared dirs join the bucket\'s label', async () => {
     const { db } = await sqliteD1()
     await db.prepare("INSERT INTO plans (id, name, state, created_by, created_ts) VALUES (1, 'Staged', 'open', 'ann', 1)").run()
     for (const p of ['s3://b/cw/big/', 's3://b/cw/small/']) {
@@ -60,9 +74,9 @@ describe('stagedCard', () => {
     }
     const card = await stagedCard({ DB: db } as never, { name: 'cw', scheme: 's3' }, 'Staged', {}, 'full')
     expect([card.tiles.map(t => [t.name, t.color, t.kids?.map(k => [k.name, k.color])]), card.legend]).toEqual([
-      [['b', UNOWNED_COLOR, [['cw/big/', HI_CONTRAST[0]], ['cw/small/', HI_CONTRAST[1]]]]],
+      [['b/cw', UNOWNED_COLOR, [['big/', HI_CONTRAST[0]], ['small/', HI_CONTRAST[1]]]]],
       [],
     ])
-    expect(textNodes(cardSvg(card))).toEqual(['cw', 'Staged', `plan #1 · scan ${SCAN}`, 'cw/big/ 3.00 TiB', 'cw/small/ 1.00 TiB', 'b 4.00 TiB', '2 prefixes · 4.00 TiB · 20 objects'])
+    expect(textNodes(cardSvg(card))).toEqual(['cw', 'Staged', `plan #1 · scan ${SCAN}`, 'big/ 3.00 TiB', 'small/ 1.00 TiB', 'b/cw 4.00 TiB', '2 prefixes · 4.00 TiB · 20 objects'])
   })
 })
