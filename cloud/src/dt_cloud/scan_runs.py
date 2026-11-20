@@ -951,7 +951,8 @@ def batch_lookup(project: str, name: str, region: str) -> Mapping | None:
 
 def lost_reason(job: Mapping | None) -> tuple[str, int | None] | None:
     """Why a `running` row's run is over, and when it ended, from its Batch job (None: not found); None while the job
-    still runs. The reason names the state and the job's last status event, on one line."""
+    still runs. The reason names the state and the job's last status event, on one line; a cancelled job is just
+    `cancelled` (someone stopped it on purpose; Batch's event adds only its own wording)."""
     if job is None:
         return "lost: Batch job not found (deleted)", None
     st = job.get("status", {})
@@ -960,6 +961,9 @@ def lost_reason(job: Mapping | None) -> tuple[str, int | None] | None:
         return None
     events = st.get("statusEvents") or ()
     last = " ".join((events[-1].get("description") or "").split()) if events else ""
+    if state == "CANCELLED":
+        return "cancelled", next((_epoch(ev["eventTime"]) for ev in reversed(events)
+                                  if " to CANCELLED" in ev.get("description", "") and ev.get("eventTime")), None)
     what = f"Batch job {state}" + (", but the run never recorded its end" if state == "SUCCEEDED" else "")
     ended = next((_epoch(ev["eventTime"]) for ev in reversed(events)
                   if re.search(r" to (SUCCEEDED|FAILED|CANCELLED)", ev.get("description", "")) and ev.get("eventTime")), None)
