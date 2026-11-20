@@ -21,6 +21,12 @@ from click import Choice, ClickException, Path as ClickPath, argument, group, op
 
 RESULTS = ('success', 'failure', 'cancelled')
 STAGES = ('build', 'upload', 'verify', 'finish')
+#: A notice's lead emoji by outcome. Not ✅/❌, which `#<d>-admin`'s scan-run threads use (Ryan, 2026-11-20). A
+#: deployment overrides any of them with `deploy_emoji` (`{"success": "✅", …}`: characters, since the sender name shows
+#: no `:name:` codes) on its entry in
+#: the release config, `deploy/oa/sites.json` (`record -S`; default: the one in this script's checkout).
+DEFAULT_EMOJI = {'success': '🚀', 'failure': '💥', 'cancelled': '⏹️'}
+SITES = Path(__file__).resolve().parents[1] / 'deploy/oa/sites.json'
 
 
 def require(condition: bool, message: str) -> None:
@@ -73,6 +79,10 @@ def receipt(value: dict) -> dict:
     cf_id = value.get('cloudflare_deployment')
     require(cf_id is None or isinstance(cf_id, str) and fullmatch(r'[A-Za-z0-9-]{1,64}', cf_id) is not None,
             'cloudflare_deployment must be an ID or null')
+    emoji = value.get('emoji')
+    require(emoji is None or isinstance(emoji, dict) and set(emoji) <= set(RESULTS)
+            and all(isinstance(e, str) and fullmatch(r'[^\x00-\x7f]{1,8}', e) is not None for e in emoji.values()),
+            'emoji must map success/failure/cancelled to an emoji character (the sender name shows no :name: codes)')
     urls = {}
     for key in ('cloudflare_url', 'run_url'):
         url = value.get(key)
@@ -82,7 +92,7 @@ def receipt(value: dict) -> dict:
         'notice_version': 1, 'deployment': deployment, 'mode': value['mode'], 'status': value['status'],
         'stage': value['stage'], 'sha': sha, 'source_branch': ref, 'repository': repo, 'host': host,
         'verified': verified, 'dirty': dirty, 'actor': actor, 'actor_source': actor_source,
-        'attempt': attempt, 'cloudflare_deployment': cf_id, **urls,
+        'attempt': attempt, 'cloudflare_deployment': cf_id, **urls, **({'emoji': emoji} if emoji else {}),
     }
 
 
@@ -91,7 +101,7 @@ def headline(value: dict) -> str:
     r = receipt(value)
     outcome = {'success': 'deployment succeeded', 'failure': f"deployment failed during {r['stage']}",
                'cancelled': 'deployment cancelled'}[r['status']]
-    emoji = {'success': '✅', 'failure': '❌', 'cancelled': '⏹️'}[r['status']]
+    emoji = {**DEFAULT_EMOJI, **r.get('emoji', {})}[r['status']]
     return f"{emoji} {r['deployment'].upper()} {r['mode']} {outcome}"
 
 
@@ -229,6 +239,7 @@ def send_cmd(execute: bool, path: Path) -> None:
 @option('-g', '--sha', required=True)
 @option('-l', '--upload-log', type=ClickPath(path_type=Path), required=True)
 @option('-o', '--output', type=ClickPath(path_type=Path), required=True)
+@option('-S', '--sites', 'sites_path', type=ClickPath(path_type=Path), default=SITES, help="The release config: the deployment's `deploy_emoji` (absent: the defaults)")
 @option('-s', '--status', type=Choice(RESULTS), required=True)
 @option('-t', '--stage', type=Choice(STAGES), required=True)
 @option('-u', '--dirty', type=Choice(['true', 'false']), required=True)
@@ -240,6 +251,7 @@ def record_cmd(
     sha: str,
     upload_log: Path,
     output: Path,
+    sites_path: Path,
     status: str,
     stage: str,
     dirty: str,
@@ -256,13 +268,15 @@ def record_cmd(
     urls = findall(r'Deployment complete![^\n]*(https://[a-z0-9]{8,32}\.[a-z0-9-]+\.pages\.dev)', upload_log.read_text()) if upload_log.exists() else []
     cf_url = next((url for url in reversed(urls) if urlsplit(url).hostname.endswith('.' + parsed['name'] + '.pages.dev')), None)
     actor = environ.get('GITHUB_ACTOR') or getuser()
+    deployment = deployment or var.get('STORE') or parsed['name']
+    sites = loads(sites_path.read_text()).get('sites', {}) if sites_path.exists() else {}
     r = receipt({
-        'notice_version': 1, 'deployment': deployment or var.get('STORE') or parsed['name'], 'mode': mode, 'status': status, 'stage': stage,
+        'notice_version': 1, 'deployment': deployment, 'mode': mode, 'status': status, 'stage': stage,
         'sha': sha, 'source_branch': ref, 'repository': urlsplit(repo_url).path.strip('/'),
         'host': var.get(f'{mode.upper()}_HOST', parsed['name'] + '.pages.dev'), 'verified': verified,
         'dirty': dirty == 'true', 'actor': actor, 'actor_source': 'github' if environ.get('GITHUB_ACTOR') else 'local',
         'attempt': str(uuid4()), 'cloudflare_deployment': urlsplit(cf_url).hostname.split('.')[0] if cf_url else None,
-        'cloudflare_url': cf_url, 'run_url': run_url(environ),
+        'cloudflare_url': cf_url, 'run_url': run_url(environ), 'emoji': sites.get(deployment, {}).get('deploy_emoji'),
     })
     output.write_text(dumps(r, indent=2) + '\n')
 

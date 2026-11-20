@@ -34,7 +34,7 @@ def doc(**changes):
 REPO = 'https://github.com/Open-Athena/disky'
 SUCCESS = (f'[hf]({REPO}/tree/hf) ([bbbbbbbbb]({REPO}/commit/{SHA})) · :gh: [louisa](https://github.com/louisa) · attempt `df94aa1e`'
            f' · :cf: [abcdef12](https://abcdef12.oa-hf-usage.pages.dev) · [site](https://dev.hf.oa.dev) · [logs]({REPO}/actions/runs/123)\n')
-SENDER = '✅ HF dev deployment succeeded'
+SENDER = '🚀 HF dev deployment succeeded'
 
 
 def test_render_exact_success_omits_private_controller_fields():
@@ -51,14 +51,14 @@ def test_each_site_and_environment_uses_its_own_identity(site, label, mode):
     host = f'{"dev." if mode == "dev" else ""}{site}.oa.dev'
     value = doc(deployment=site, source_branch=site, mode=mode, host=host)
     expected = SUCCESS.replace('[hf](', f'[{site}](').replace('/tree/hf)', f'/tree/{site})').replace('https://dev.hf.oa.dev', f'https://{host}')
-    assert (N.headline(value), N.render(value)) == (f'✅ {label} {mode} deployment succeeded', expected)
+    assert (N.headline(value), N.render(value)) == (f'🚀 {label} {mode} deployment succeeded', expected)
 
 
 def test_render_build_failure_has_no_fictitious_cf_receipt_or_verification():
     value = doc(status='failure', stage='build', verified=False, cloudflare_deployment=None,
                 cloudflare_url=None, actor=None, actor_source=None, sha=None, source_branch=None)
     assert (N.headline(value), N.render(value)) == (
-        '❌ HF dev deployment failed during build',
+        '💥 HF dev deployment failed during build',
         f'source not recorded · attempt `df94aa1e` · [site](https://dev.hf.oa.dev) · [logs]({REPO}/actions/runs/123)\n',
     )
 
@@ -67,7 +67,7 @@ def test_render_unverified_dirty_manual_upload_and_cancellation():
     value = doc(mode='prod', host='hf.oa.dev', verified=False, dirty=True, actor_source='local', run_url=None)
     expected = (f'[hf]({REPO}/tree/hf) ([bbbbbbbbb]({REPO}/commit/{SHA})) · ⚠️ dirty · ⚠️ unverified · :computer: `louisa`'
                 ' · attempt `df94aa1e` · :cf: [abcdef12](https://abcdef12.oa-hf-usage.pages.dev) · [site](https://hf.oa.dev)\n')
-    assert (N.headline(value), N.render(value)) == ('✅ HF prod deployment succeeded', expected)
+    assert (N.headline(value), N.render(value)) == ('🚀 HF prod deployment succeeded', expected)
     # a cancellation isn't a success, so it isn't "unverified"; an unrecorded tree says so
     cancelled = {**value, 'status': 'cancelled', 'dirty': None}
     assert (N.headline(cancelled), N.render(cancelled)) == (
@@ -83,11 +83,42 @@ def test_render_unverified_dirty_manual_upload_and_cancellation():
     ({'actor': '<@USER>'}, 'actor must be a plain user identifier or null'),
     ({'run_url': 'https://secret@github.com/example'}, 'run_url: expected an HTTPS URL without credentials, port, query or fragment'),
     ({'status': 'failure'}, 'verified must be a boolean and requires success'),
+    ({'emoji': {'success': ':tada:'}}, 'emoji must map success/failure/cancelled to an emoji character (the sender name shows no :name: codes)'),
+    ({'emoji': {'merged': '🎉'}}, 'emoji must map success/failure/cancelled to an emoji character (the sender name shows no :name: codes)'),
 ])
 def test_invalid_or_injectable_receipt_is_refused(changes, message):
     with pytest.raises(ClickException) as error:
         N.render(doc(**changes))
     assert str(error.value) == message
+
+
+def test_a_deployment_overrides_the_default_emoji_per_outcome():
+    """`deploy_emoji` on a site (`sites.json`, carried in the receipt by `record`) replaces only the outcomes it names."""
+    value = doc(emoji={'success': '✅'})
+    assert [N.headline({**value, **c}) for c in ({}, {'status': 'failure', 'verified': False}, {'status': 'cancelled', 'verified': False})] == [
+        '✅ HF dev deployment succeeded', '💥 HF dev deployment failed during finish', '⏹️ HF dev deployment cancelled',
+    ]
+
+
+def test_record_carries_the_sites_deploy_emoji_and_omits_it_when_unset(tmp_path):
+    (tmp_path / 'wrangler.toml').write_text('''name = "oa-hf-usage"
+[vars]
+STORE = "hf"
+PROD_HOST = "hf.oa.dev"
+REPO_URL = "https://github.com/Open-Athena/disky"
+SOURCE_REF = "hf"
+''')
+    sites = tmp_path / 'sites.json'
+    out = tmp_path / 'notice.json'
+    args = ['record', '-c', str(tmp_path / 'wrangler.toml'), '-e', 'prod', '-g', SHA, '-l', str(tmp_path / 'none.log'),
+            '-o', str(out), '-S', str(sites), '-s', 'success', '-t', 'finish', '-u', 'false', '-v']
+    emojis = []
+    for config in ({'sites': {'hf': {'deploy_emoji': {'success': '🛳️'}}}}, {'sites': {'hf': {}}}):
+        sites.write_text(dumps(config))
+        result = CliRunner().invoke(N.main, args, env={'GITHUB_ACTOR': ''})
+        assert result.exit_code == 0, result.output
+        emojis.append((loads(out.read_text()).get('emoji'), N.headline(loads(out.read_text()))))
+    assert emojis == [({'success': '🛳️'}, '🛳️ HF prod deployment succeeded'), (None, '🚀 HF prod deployment succeeded')]
 
 
 ENV = {'DEPLOY_NOTIFICATIONS_ENABLED': '1', 'SLACK_DEPLOY_BOT_TOKEN': 'xoxb-test-token', 'SLACK_DEPLOY_CHANNEL': 'C0TESTCHAN'}
@@ -153,6 +184,10 @@ def test_cli_defaults_to_review_even_with_credentials_and_enabled_delivery(tmp_p
       {'ts': '9.3', 'bot_id': 'B0BOT', 'text': 'Scan health: all green'}, notice('9.0', 'HF dev deployment succeeded')], '9.0'),
     # A notice from before the one-line format still counts.
     ([legacy('9.0', 'HF dev deployment succeeded')], '9.0'),
+    # The lead emoji doesn't matter: notices from before 🚀/💥 (✅/❌) and after both count.
+    ([{**notice('9.0', 'HF dev deployment succeeded'), 'username': '🚀 HF dev deployment succeeded'}], '9.0'),
+    ([{**notice('9.0', 'HF dev deployment succeeded'), 'username': '✅ HF dev deployment succeeded'}], '9.0'),
+    ([{**notice('9.0', 'HF dev deployment failed during build'), 'username': '💥 HF dev deployment failed during build'}], None),
     ([legacy('9.0', 'HF dev deployment failed during upload')], None),
     # No notice within the history window: a new thread.
     ([], None),
