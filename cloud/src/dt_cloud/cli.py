@@ -4061,6 +4061,10 @@ from .monitoring_relay import cli as _monitoring_relay  # noqa: E402
 
 main.add_command(_monitoring_relay)
 
+from .batch_events import cli as _batch_events  # noqa: E402
+
+main.add_command(_batch_events)
+
 from .eligibility_census import eligibility_census_cmd as _eligibility_census  # noqa: E402
 
 main.add_command(_eligibility_census)
