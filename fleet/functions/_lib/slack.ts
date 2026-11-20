@@ -37,9 +37,10 @@ export function status(d: FleetDeployment): { emoji: string; word: string } {
 /** How many of a deployment's newest runs its line shows as a strip. */
 export const STRIP_RUNS = 10
 
-/** The newest `STRIP_RUNS` runs' emoji, oldest first, each linked to its record; empty when it has none. */
+/** The newest `STRIP_RUNS` runs' emoji, oldest first; empty when it has none. Not linked: Slack's phone apps print a
+ *  link whose label is an emoji as its bare URL, then the emoji (Ryan, 2026-11-20). Each run is a link on `/fleet`. */
 const strip = (d: FleetDeployment): string =>
-  d.runs.slice(0, STRIP_RUNS).reverse().map(r => `<${d.url}/scans/${encodeURIComponent(r.run_id)}|${runStatus(r).emoji}>`).join('')
+  d.runs.slice(0, STRIP_RUNS).reverse().map(r => runStatus(r).emoji).join('')
 
 /** A signed byte change: `+1.2 GB`, `−300 MB`. */
 const delta = (b: number): string => `${b < 0 ? '−' : '+'}${fmtSI(Math.abs(b))}`

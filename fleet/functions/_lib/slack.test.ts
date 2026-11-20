@@ -37,7 +37,7 @@ const doc: FleetDoc = {
 }
 
 describe('the fleet\'s Slack post', () => {
-  it('a line per deployment (its newest 10 runs as linked emoji, oldest first; the trigger of its newest run, as the thread shows it), its `/scans` and its newest reported run\'s thread, the signed card as an image block, and when it was read with a link to the card', () => {
+  it('a line per deployment (its newest 10 runs as emoji, oldest first, not linked (a phone prints an emoji-labelled link as its URL); the trigger of its newest run, as the thread shows it), its `/scans` and its newest reported run\'s thread, the signed card as an image block, and when it was read with a link to the card', () => {
     expect(fleetMessage(doc, 'https://fleet.test/fleet')).toEqual({
       text: 'disky fleet: a 1 step issue open (dups), b unreachable (HTTP 503), c failed at index, d ok, e running, f no scans',
       blocks: [
@@ -45,7 +45,7 @@ describe('the fleet\'s Slack post', () => {
         { type: 'section', text: { type: 'mrkdwn', text: ':warning: *<https://a.test|a>*  :bust_in_silhouette: <https://a.test/scans/r|2026-11-07> · 1 step issue open (dups) · 2.1h · $0.50 · <https://a.test/meta|/meta> 34.4 GB (+4.20 GB 7d) · <https://a.test/scans|scans> · <https://slack.test/archives/CA/p1|thread>' } },
         { type: 'section', text: { type: 'mrkdwn', text: ':grey_question: *<https://b.test|b>*  unreachable (HTTP 503) · <https://b.test/meta|/meta> n/a · <https://b.test/scans|scans>' } },
         { type: 'section', text: { type: 'mrkdwn', text: ':x: *<https://c.test|c>*  <https://c.test/scans/r|2026-11-06> · failed at index · 1.0h · cost n/a · <https://c.test/meta|/meta> 884 MB · newest scan 2d old · <https://c.test/scans|scans>' } },
-        { type: 'section', text: { type: 'mrkdwn', text: ':white_check_mark: *<https://d.test|d>*  <https://d.test/scans/r-10|:white_check_mark:><https://d.test/scans/r-9|:white_check_mark:><https://d.test/scans/r-8|:white_check_mark:><https://d.test/scans/r-7|:white_check_mark:><https://d.test/scans/r-6|:white_check_mark:><https://d.test/scans/r-5|:white_check_mark:><https://d.test/scans/r-4|:white_check_mark:><https://d.test/scans/r-3|:x:><https://d.test/scans/r-2|:warning:><https://d.test/scans/r|:white_check_mark:>  :alarm_clock: <https://d.test/scans/r|2026-11-07> · ok · 30m · $0.13 · <https://d.test/meta|/meta> 1.50 TB (−100 GB 7d) · <https://d.test/scans|scans> · <https://slack.test/archives/CD/p2|thread> · <#C0CDADMIN>' } },
+        { type: 'section', text: { type: 'mrkdwn', text: ':white_check_mark: *<https://d.test|d>*  :white_check_mark::white_check_mark::white_check_mark::white_check_mark::white_check_mark::white_check_mark::white_check_mark::x::warning::white_check_mark:  :alarm_clock: <https://d.test/scans/r|2026-11-07> · ok · 30m · $0.13 · <https://d.test/meta|/meta> 1.50 TB (−100 GB 7d) · <https://d.test/scans|scans> · <https://slack.test/archives/CD/p2|thread> · <#C0CDADMIN>' } },
         { type: 'section', text: { type: 'mrkdwn', text: ':hourglass_flowing_sand: *<https://e.test|e>*  :alarm_clock: <https://e.test/scans/r|2026-11-07> · running · <https://e.test/meta|/meta> n/a · <https://e.test/scans|scans>' } },
         { type: 'section', text: { type: 'mrkdwn', text: ':white_circle: *<https://f.test|f>*  no scans · <https://f.test/meta|/meta> n/a · <https://f.test/scans|scans>' } },
         { type: 'context', elements: [{ type: 'mrkdwn', text: 'read 2026-11-07 14:00 UTC · updated in place hourly' }] },
