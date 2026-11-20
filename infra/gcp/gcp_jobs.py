@@ -723,6 +723,14 @@ def env_guard(env: dict[str, str], overridable: Sequence[str]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def with_notifications(spec: dict, topics: Sequence[str]) -> dict:
+    """`spec` publishing its job's state changes (`JOB_STATE_CHANGED`) to each of `topics` (full `projects/…/topics/…`
+    names; `BatchEvents.topic_path`); `spec` itself when there are none."""
+    if not topics:
+        return spec
+    return {**spec, "notifications": [{"pubsubTopic": t, "message": {"type": "JOB_STATE_CHANGED"}} for t in topics]}
+
+
 class BatchSubmitCron(RunJobCron):
     """A cron that submits a Batch job through a Cloud Run job, which retries and alerts, instead of Cloud Scheduler
     posting the body to Batch once (`BatchCron`), where a 5xx is a silently missed run and a retried POST a possible
@@ -760,9 +768,10 @@ class BatchSubmitCron(RunJobCron):
         memory: str = "1Gi",
         timeout: str = "2400s",
         retry: gcp.cloudscheduler.JobRetryConfigArgs = IDEMPOTENT_RETRY,
+        notify: Sequence[str] = (),
         **kw,
     ):
-        self.spec = checked_spec(submitter, name)
+        self.spec = with_notifications(checked_spec(submitter, name), notify)
         labels_env = {LABELS_ENV: os.environ[LABELS_ENV]} if LABELS_ENV in os.environ else {}
         job_env = {SPEC_ENV: json.dumps(self.spec, sort_keys=True), **labels_env, **(env or {})}
         guard = env_guard(job_env, overridable) if overridable or dispatchers else ""
@@ -1031,3 +1040,144 @@ class MonitoringRelay(ComponentResource):
         self.channel: pulumi.Output[str] = self.notification_channel.name
         self.register_outputs({"channel": self.channel, "topic": self.topic.id, "service": self.service.uri})
 
+
+#: Batch's service agent, which publishes a job's `notifications` (it needs `pubsub.publisher` on each topic).
+BATCH_AGENT = "service-{number}@gcp-sa-cloudbatch.iam.gserviceaccount.com"
+
+
+class BatchEvents(ComponentResource):
+    """Batch job state changes, as they happen, to a Cloud Run service: a topic that jobs name in their spec's
+    `notifications` (`with_notifications(spec, [events.topic_path])`, or `BatchSubmitCron(notify=…)`), published to by
+    Batch's service agent, and a push subscription delivering each change to a service running `command` from `image`
+    as `run_as` (an account that already holds what `command` needs, e.g. the job's own: nothing is granted to it
+    here), with `env` and `secret_env` (`{VAR: secret id}`; `run_as` must be able to read them). The push authenticates
+    as its own account (`account_id`: `run.invoker` on the service and nothing else), whose OIDC tokens the Pub/Sub
+    service agent mints. Undelivered (a 5xx), a message is retried, 10 s backing off to 10 min, for a day.
+
+    disky's use: a scan head's terminal state → `dt-cloud batch-events serve` (its run record and Slack thread when the
+    head couldn't write them itself). As `MonitoringRelay`, the service pins the digest `image` meant when its revision
+    was made; a rebuilt image reaches it by a new revision (`job/build.sh promote` re-points the config's services)."""
+
+    TYPE = "disky:gcp:BatchEvents"
+
+    def __init__(
+        self,
+        name: str,
+        *,
+        project: str,
+        region: str,
+        image: pulumi.Input[str],
+        command: Sequence[str],
+        run_as: pulumi.Input[str],
+        account_id: str,
+        env: dict[str, str] | None = None,
+        secret_env: dict[str, str] | None = None,
+        memory: str = "2Gi",
+        labels: dict[str, str] | None = None,
+        opts: ResourceOptions | None = None,
+    ):
+        super().__init__(self.TYPE, name, None, opts)
+        child = ResourceOptions(parent=self)
+        labels = {"component": "batch-events", **(labels or {})}
+        api = gcp.projects.Service(
+            f"{name}-pubsub-api",
+            project=project,
+            service="pubsub.googleapis.com",
+            disable_on_destroy=False,
+            deletion_policy="ABANDON",
+            opts=child,
+        )
+        pubsub_agent = gcp.projects.ServiceIdentity(
+            f"{name}-pubsub-agent",
+            project=project,
+            service="pubsub.googleapis.com",
+            opts=ResourceOptions(parent=self, depends_on=[api]),
+        )
+        #: The topic's full name, as a job spec's `notifications[].pubsubTopic` names it (known before `up`).
+        self.topic_path = f"projects/{project}/topics/{name}"
+        self.topic = gcp.pubsub.Topic(name, project=project, name=name, labels=labels, opts=ResourceOptions(parent=self, depends_on=[api]))
+        number = gcp.organizations.get_project_output(project_id=project).number
+        gcp.pubsub.TopicIAMMember(
+            f"{name}-batch-publisher",
+            project=project,
+            topic=self.topic.name,
+            role="roles/pubsub.publisher",
+            member=number.apply(lambda n: "serviceAccount:" + BATCH_AGENT.format(number=n)),
+            opts=child,
+        )
+        self.account = gcp.serviceaccount.Account(
+            f"{name}-sa",
+            project=project,
+            account_id=account_id,
+            display_name=f"{name}: Pub/Sub push to the Batch-events service",
+            opts=child,
+        )
+        self.service = gcp.cloudrunv2.Service(
+            name,
+            project=project,
+            location=region,
+            name=name,
+            deletion_protection=False,
+            ingress="INGRESS_TRAFFIC_ALL",
+            labels=labels,
+            template=gcp.cloudrunv2.ServiceTemplateArgs(
+                service_account=run_as,
+                timeout="300s",
+                max_instance_request_concurrency=1,
+                scaling=gcp.cloudrunv2.ServiceTemplateScalingArgs(min_instance_count=0, max_instance_count=1),
+                containers=[gcp.cloudrunv2.ServiceTemplateContainerArgs(
+                    image=image,
+                    commands=list(command),
+                    resources=gcp.cloudrunv2.ServiceTemplateContainerResourcesArgs(
+                        limits={"cpu": "1000m", "memory": memory}, cpu_idle=True, startup_cpu_boost=True,
+                    ),
+                    envs=[
+                        gcp.cloudrunv2.ServiceTemplateContainerEnvArgs(name=var, value=value)
+                        for var, value in (env or {}).items()
+                    ] + [
+                        gcp.cloudrunv2.ServiceTemplateContainerEnvArgs(
+                            name=var,
+                            value_source=gcp.cloudrunv2.ServiceTemplateContainerEnvValueSourceArgs(
+                                secret_key_ref=gcp.cloudrunv2.ServiceTemplateContainerEnvValueSourceSecretKeyRefArgs(secret=sid, version="latest"),
+                            ),
+                        )
+                        for var, sid in (secret_env or {}).items()
+                    ],
+                )],
+            ),
+            opts=ResourceOptions(parent=self, ignore_changes=["client", "clientVersion"]),
+        )
+        member = sa_member(self.account.email)
+        invoker = gcp.cloudrunv2.ServiceIamMember(
+            f"{name}-invoker",
+            project=project,
+            location=region,
+            name=self.service.name,
+            role="roles/run.invoker",
+            member=member,
+            opts=child,
+        )
+        token = gcp.serviceaccount.IAMMember(
+            f"{name}-pubsub-token",
+            service_account_id=self.account.name,
+            role="roles/iam.serviceAccountTokenCreator",
+            member=pubsub_agent.member,
+            opts=child,
+        )
+        self.subscription = gcp.pubsub.Subscription(
+            name,
+            project=project,
+            name=name,
+            topic=self.topic.id,
+            labels=labels,
+            ack_deadline_seconds=300,
+            message_retention_duration="86400s",
+            retry_policy=gcp.pubsub.SubscriptionRetryPolicyArgs(minimum_backoff="10s", maximum_backoff="600s"),
+            expiration_policy=gcp.pubsub.SubscriptionExpirationPolicyArgs(ttl=""),
+            push_config=gcp.pubsub.SubscriptionPushConfigArgs(
+                push_endpoint=self.service.uri,
+                oidc_token=gcp.pubsub.SubscriptionPushConfigOidcTokenArgs(service_account_email=self.account.email, audience=self.service.uri),
+            ),
+            opts=ResourceOptions(parent=self, depends_on=[invoker, token]),
+        )
+        self.register_outputs({"topic": self.topic.id, "service": self.service.uri})
