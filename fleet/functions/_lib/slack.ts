@@ -57,8 +57,9 @@ export function line(d: FleetDeployment): string {
   if (r && r.status !== 'running' && r.secs !== null) parts.push(fmtHours(r.secs))
   if (r && r.status !== 'running') parts.push(r.cost_usd === null ? 'cost n/a' : fmtUsd(r.cost_usd))
   const m = d.meta
-  if (m && m.now !== null) parts.push(`/meta ${fmtSI(m.now)}${m.d7 !== null ? ` (${delta(m.now - m.d7)} 7d)` : ''}`)
-  else parts.push('/meta n/a')
+  const meta = `<${d.url}/meta|/meta>`
+  if (m && m.now !== null) parts.push(`${meta} ${fmtSI(m.now)}${m.d7 !== null ? ` (${delta(m.now - m.d7)} 7d)` : ''}`)
+  else parts.push(`${meta} n/a`)
   if (d.health?.newest_scan_age != null && d.health.newest_scan_age > 36 * 3600) parts.push(`newest scan ${fmtAge(d.health.newest_scan_age)} old`)
   // Where to read more: its `/scans`, and the run thread in `#<deployment>-admin` (its newest run reported there)
   parts.push(`<${d.url}/scans|scans>`)
@@ -70,13 +71,20 @@ export function line(d: FleetDeployment): string {
 
 const stamp = (t: number) => `${new Date(t * 1000).toISOString().slice(0, 16).replace('T', ' ')} UTC`
 
-/** The post: its fallback text and blocks. `image` is the signed card URL, `page` the fleet page. */
+/** Slack refuses a section whose text is longer than this (`invalid_blocks`): every edit failed while the four lines
+ *  shared one section once each carried its 10 run links (2026-11-20, 00:30–02:00 UTC). */
+export const SECTION_MAX = 3000
+
+const section = (text: string) => ({ type: 'section', text: { type: 'mrkdwn', text } })
+
+/** The post: its fallback text and blocks, a section per deployment (each well under `SECTION_MAX`). `image` is the
+ *  signed card URL, `page` the fleet page. */
 export function fleetMessage(doc: FleetDoc, image: string, page: string): SlackMessage {
-  const lines = doc.deployments.map(line)
   return {
     text: `disky fleet: ${doc.deployments.map(d => `${d.name} ${status(d).word}`).join(', ')}`,
     blocks: [
-      { type: 'section', text: { type: 'mrkdwn', text: [`*disky fleet* · <${page}|details>`, ...lines].join('\n') } },
+      section(`*disky fleet* · <${page}|details>`),
+      ...doc.deployments.map(d => section(line(d))),
       { type: 'image', image_url: image, alt_text: 'disky fleet: /meta store size, scan duration and cost per day, per deployment, over the last week' },
       { type: 'context', elements: [{ type: 'mrkdwn', text: `read ${stamp(doc.now)} · updated in place hourly · <${image}|PNG>` }] },
     ],

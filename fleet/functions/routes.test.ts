@@ -203,7 +203,7 @@ describe('POST /api/fleet/slack', () => {
       { action: 'posted', channel: 'C0FLEET', ts: '1762524000.000100', image: image(NOW) },
       { action: 'updated', channel: 'C0FLEET', ts: '1762524000.000100', image: image(NOW + 3600) },
     ])
-    expect(slackCalls.map(c => [c.method, c.body.channel, c.body.ts ?? null, sigless((c.body.blocks as { image_url?: string }[])[1].image_url!), c.body.unfurl_links, c.body.unfurl_media])).toEqual([
+    expect(slackCalls.map(c => [c.method, c.body.channel, c.body.ts ?? null, sigless((c.body.blocks as { image_url?: string }[]).find(b => b.image_url)!.image_url!), c.body.unfurl_links, c.body.unfurl_media])).toEqual([
       ['chat.postMessage', 'C0FLEET', null, image(NOW), false, false],
       ['chat.update', 'C0FLEET', '1762524000.000100', image(NOW + 3600), false, false],
     ])
