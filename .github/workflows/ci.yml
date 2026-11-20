@@ -242,7 +242,7 @@ jobs:
         # `--timeout`: a hung test fails after 10 min with every thread's stack, instead of holding the job to its
         # 60 (`test_tree_mem.py`'s process-tree tests hung on r2 43906785571, cloud 44309715157 and hf 44335651865);
         # the slowest phase (a `test_static_compact` fixture's setup) takes ~2 min
-        run: cd cloud && uv run --no-sync pytest ${{ matrix.shard.args }} -v -n auto --dist loadgroup --durations=30 --timeout=600
+        run: cd cloud && uv run --no-sync pytest ${{ matrix.shard.args }} -v -n auto --dist loadgroup --durations=30 --timeout=600 --timeout-method=thread
 
       - name: Record pass
         if: steps.passed.outputs.cache-hit != 'true'
