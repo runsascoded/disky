@@ -19,16 +19,22 @@ export interface Deployment {
   /** The secret (an env name) holding its read token. */
   token: string
   color: string
+  /** Its admin channel (a Slack id, e.g. `#<deployment>-admin`'s): the post links it. */
+  channel?: string
 }
 
-/** `FLEET_JSON`'s deployments. Throws on anything but a list of `{name, url, token, color}` with distinct names. */
+/** `FLEET_JSON`'s deployments. Throws on anything but a list of `{name, url, token, color[, channel]}` with distinct names. */
 export function parseFleet(raw: string | undefined): Deployment[] {
   if (!raw) return []
   const list: unknown = JSON.parse(raw)
   if (!Array.isArray(list)) throw new Error('FLEET_JSON: not a list')
   const out = list.map((d: Record<string, unknown>, i) => {
     for (const k of ['name', 'url', 'token', 'color']) if (typeof d?.[k] !== 'string' || !d[k]) throw new Error(`FLEET_JSON[${i}]: no ${k}`)
-    return { name: d.name as string, url: (d.url as string).replace(/\/+$/, ''), token: d.token as string, color: d.color as string }
+    if (d.channel !== undefined && (typeof d.channel !== 'string' || !/^[CG][A-Z0-9]{6,}$/.test(d.channel))) throw new Error(`FLEET_JSON[${i}]: channel must be a Slack channel id`)
+    return {
+      name: d.name as string, url: (d.url as string).replace(/\/+$/, ''), token: d.token as string, color: d.color as string,
+      ...(d.channel ? { channel: d.channel as string } : {}),
+    }
   })
   const names = out.map(d => d.name)
   if (new Set(names).size !== names.length) throw new Error('FLEET_JSON: duplicate names')
@@ -127,7 +133,7 @@ const why = (e: unknown): string => (e instanceof Error ? e.message : String(e))
 
 /** One deployment's part of the document. */
 export async function readDeployment(d: Deployment, env: Env, now: number, nRuns: number, f: Fetcher = fetch): Promise<FleetDeployment> {
-  const out: FleetDeployment = { name: d.name, url: d.url, color: d.color, health: null, last: null, runs: [], meta: null, objects: null, errors: {} }
+  const out: FleetDeployment = { name: d.name, url: d.url, color: d.color, ...(d.channel ? { channel: d.channel } : {}), health: null, last: null, runs: [], meta: null, objects: null, errors: {} }
   const token = env[d.token]
   if (typeof token !== 'string' || !token) {
     const e = `no token (${d.token} unset)`

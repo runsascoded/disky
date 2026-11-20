@@ -1,10 +1,13 @@
 /**
  * The fleet's Slack post (specs/disky-oa-dev.md): a line per deployment (its newest scan, linked to its run, how it went, how long, what
- * it cost, its `/meta` size and the week's change), the card as an `image` block, and when it was read. One message,
- * posted once, then edited in place each run (`chat.update`): its channel + ts are kept in `FLEET_KV`, or pinned by
- * `SLACK_FLEET_TS`.
+ * it cost, its `/meta` size and the week's change), when it was read, and the card as an attached PNG. One message,
+ * posted once, then edited in place each run: its channel, ts and card file are kept in `FLEET_KV`, or the post pinned
+ * by `SLACK_FLEET_TS`. The card is an attached file, not an `image` block, because Slack's phone apps offer Download
+ * only on a file (Ryan, 2026-11-20); each run uploads the new card, attaches it in the same edit, then deletes the
+ * previous one (`@open-athena/thrds` `replaceFile`: no orphaned uploads).
  */
 import { fmtSI } from '@disk-tree/pages-kit/og/text'
+import { FilesNotAttachedError, FileSwapError, SlackApiError, SlackClient } from '@open-athena/thrds'
 import { fmtHours, fmtUsd } from './card.js'
 import type { Env } from './env.js'
 import type { FleetDeployment, FleetDoc, FleetRun } from './fleet.js'
@@ -65,6 +68,7 @@ export function line(d: FleetDeployment): string {
   parts.push(`<${d.url}/scans|scans>`)
   const thread = [d.last, ...d.runs].find(x => x?.thread_url)?.thread_url
   if (thread) parts.push(`<${thread}|thread>`)
+  if (d.channel) parts.push(`<#${d.channel}>`)
   const runs = strip(d)
   return `${emoji} *<${d.url}|${d.name}>*  ${runs ? `${runs}  ` : ''}${parts.join(' · ')}`
 }
@@ -77,59 +81,80 @@ export const SECTION_MAX = 3000
 
 const section = (text: string) => ({ type: 'section', text: { type: 'mrkdwn', text } })
 
-/** The post: its fallback text and blocks, a section per deployment (each well under `SECTION_MAX`). `image` is the
- *  signed card URL, `page` the fleet page. */
-export function fleetMessage(doc: FleetDoc, image: string, page: string): SlackMessage {
+/** The post: its fallback text and blocks, a section per deployment (each well under `SECTION_MAX`); `page` is the fleet
+ *  page. The card goes with it as an attached file (`publish`). */
+export function fleetMessage(doc: FleetDoc, page: string): SlackMessage {
   return {
     text: `disky fleet: ${doc.deployments.map(d => `${d.name} ${status(d).word}`).join(', ')}`,
     blocks: [
       section(`*disky fleet* · <${page}|details>`),
       ...doc.deployments.map(d => section(line(d))),
-      { type: 'image', image_url: image, alt_text: 'disky fleet: /meta store size, scan duration and cost per day, per deployment, over the last week' },
-      { type: 'context', elements: [{ type: 'mrkdwn', text: `read ${stamp(doc.now)} · updated in place hourly · <${image}|PNG>` }] },
+      { type: 'context', elements: [{ type: 'mrkdwn', text: `read ${stamp(doc.now)} · updated in place hourly` }] },
     ],
   }
 }
 
-interface SlackResult { ok: boolean; error?: string; ts?: string; channel?: string }
-
-async function slackApi(token: string, method: string, body: Record<string, unknown>, f: typeof fetch): Promise<SlackResult> {
-  const r = await f(`https://slack.com/api/${method}`, {
-    method: 'POST',
-    headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json; charset=utf-8' },
-    body: JSON.stringify(body),
-  })
-  if (!r.ok) return { ok: false, error: `HTTP ${r.status}` }
-  return r.json() as Promise<SlackResult>
-}
-
-/** No link previews: each deployment's link would unfurl into its own OG card (and the page's into the anonymous
- *  fleet card), five large images under the one the post means to show. Sent on the edit too, since Slack unfurls an
- *  edited message's links again. */
-const NO_UNFURL = { unfurl_links: false, unfurl_media: false }
-
 /** Where the post is kept between runs. */
 export const KV_KEY = 'slack-fleet-post'
 
-export interface Posted { action: 'posted' | 'updated'; channel: string; ts: string }
+/** The post's card: its file name (what Download saves) and alt text. */
+export const CARD_NAME = 'disky-fleet.png'
+export const CARD_ALT = 'disky fleet: /meta store size, objects, scan duration and cost per day, per deployment, over the last week'
+
+/** What's kept between runs: the post, and the card file attached to it (so the next run deletes it after its swap). */
+interface Kept { channel: string; ts: string; file?: string }
+
+export interface Posted {
+  action: 'posted' | 'updated'
+  channel: string
+  ts: string
+  /** The card file now attached. */
+  file: string
+  /** Earlier cards whose delete failed (other than already gone): delete them by hand. */
+  undeleted: string[]
+}
 
 export const NO_POST = 'no post to update: bind FLEET_KV, or post one with `?new=1` and set SLACK_FLEET_TS to its ts'
 
-/** Post `msg`, or edit the post already there (`FLEET_KV`'s, else `SLACK_FLEET_TS` in `SLACK_FLEET_CHANNEL`). A new post
- *  (none yet, or the kept one deleted by hand) needs somewhere to keep its ts (`FLEET_KV`) or `fresh`, the explicit ask
- *  for one: without either, an hourly run would post a new message every hour. */
-export async function publish(env: Env, msg: SlackMessage, fresh = false, f: typeof fetch = fetch): Promise<Posted> {
-  const token = env.DISKY_SLACK_BOT_TOKEN!
-  const kept = env.FLEET_KV ? await env.FLEET_KV.get<{ channel: string; ts: string }>(KV_KEY, 'json') : null
-  const at = fresh ? null : kept ?? (env.SLACK_FLEET_TS ? { channel: env.SLACK_FLEET_CHANNEL!, ts: env.SLACK_FLEET_TS } : null)
+const missing = (e: unknown) => e instanceof FileSwapError && e.cause instanceof SlackApiError && e.cause.code === 'message_not_found'
+
+/** Post `msg` with `card` attached, or edit the post already there (`FLEET_KV`'s, else `SLACK_FLEET_TS` in
+ *  `SLACK_FLEET_CHANNEL`), swapping its card. A new post (none yet, or the kept one deleted by hand) needs somewhere to
+ *  keep its ts (`FLEET_KV`) or `fresh`, the explicit ask for one: without either, an hourly run would post a new message
+ *  every hour. `client` makes the channel's Slack client (tests pass a fake). */
+export async function publish(
+  env: Env,
+  msg: SlackMessage,
+  card: Uint8Array,
+  fresh = false,
+  client: (channel: string) => SlackClient = channel => new SlackClient({ token: env.DISKY_SLACK_BOT_TOKEN!, channel }),
+): Promise<Posted> {
+  const keep = async (k: Kept) => { if (env.FLEET_KV) await env.FLEET_KV.put(KV_KEY, JSON.stringify(k)) }
+  const kept = env.FLEET_KV ? await env.FLEET_KV.get<Kept>(KV_KEY, 'json') : null
+  const at: Kept | null = fresh ? null : kept ?? (env.SLACK_FLEET_TS ? { channel: env.SLACK_FLEET_CHANNEL!, ts: env.SLACK_FLEET_TS } : null)
+  const file = { name: CARD_NAME, data: card, altText: CARD_ALT }
   if (at) {
-    const r = await slackApi(token, 'chat.update', { channel: at.channel, ts: at.ts, ...msg, ...NO_UNFURL }, f)
-    if (r.ok) return { action: 'updated', channel: at.channel, ts: at.ts }
-    if (r.error !== 'message_not_found') throw new Error(`chat.update: ${r.error}`)
+    try {
+      // the kept card is the one to delete; without a record of it, the swap reads the message's own files
+      const swap = await client(at.channel).replaceFile(at.ts, file, msg, at.file ? { previous: [at.file] } : {})
+      await keep({ channel: at.channel, ts: at.ts, file: swap.fileId })
+      return { action: 'updated', channel: at.channel, ts: at.ts, file: swap.fileId, undeleted: swap.undeleted.map(u => u.id) }
+    } catch (e) {
+      if (!missing(e)) throw e
+    }
   }
   if (!env.FLEET_KV && !fresh) throw new Error(NO_POST)
-  const r = await slackApi(token, 'chat.postMessage', { channel: env.SLACK_FLEET_CHANNEL, ...msg, ...NO_UNFURL }, f)
-  if (!r.ok || !r.ts || !r.channel) throw new Error(`chat.postMessage: ${r.error ?? 'no ts'}`)
-  if (env.FLEET_KV) await env.FLEET_KV.put(KV_KEY, JSON.stringify({ channel: r.channel, ts: r.ts }))
-  return { action: 'posted', channel: r.channel, ts: r.ts }
+  const channel = env.SLACK_FLEET_CHANNEL!
+  const slack = client(channel)
+  const id = await slack.upload(file.name, file.data, { altText: file.altText })
+  try {
+    const posted = await slack.post({ ...msg, files: [id] })
+    await keep({ channel, ts: posted.id, file: id })
+    return { action: 'posted', channel, ts: posted.id, file: id, undeleted: [] }
+  } catch (e) {
+    // posted, but the card didn't attach: keep the post (no second one next hour) and let the next run's swap attach a card
+    if (e instanceof FilesNotAttachedError) await keep({ channel, ts: e.ts })
+    else await slack.deleteFile(id)
+    throw e
+  }
 }

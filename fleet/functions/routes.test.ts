@@ -190,41 +190,17 @@ describe('POST /api/fleet/slack', () => {
     expect(slackCalls).toEqual([])
   })
 
-  it('posts once, keeping the post in FLEET_KV, then edits it in place; each run with a newly signed card', async () => {
-    const kv = new Map<string, string>()
-    const FLEET_KV = { get: async (k: string) => (kv.has(k) ? JSON.parse(kv.get(k)!) : null), put: async (k: string, v: string) => { kv.set(k, v) } } as unknown as KVNamespace
-    const env = envOf({ ...SLACK, FLEET_KV })
-    slackAnswers = [{ ok: true, channel: 'C0FLEET', ts: '1762524000.000100' }, { ok: true, channel: 'C0FLEET', ts: '1762524000.000100' }]
-    const first = await (await post(env)).json() as Record<string, string>
-    vi.setSystemTime((NOW + 3600) * 1000)
-    const second = await (await post(env)).json() as Record<string, string>
-    const image = (now: number) => `${ORIGIN}/og/fleet.png?v=${now}&sig=<sig>`
-    expect([{ ...first, image: sigless(first.image) }, { ...second, image: sigless(second.image) }]).toEqual([
-      { action: 'posted', channel: 'C0FLEET', ts: '1762524000.000100', image: image(NOW) },
-      { action: 'updated', channel: 'C0FLEET', ts: '1762524000.000100', image: image(NOW + 3600) },
-    ])
-    expect(slackCalls.map(c => [c.method, c.body.channel, c.body.ts ?? null, sigless((c.body.blocks as { image_url?: string }[]).find(b => b.image_url)!.image_url!), c.body.unfurl_links, c.body.unfurl_media])).toEqual([
-      ['chat.postMessage', 'C0FLEET', null, image(NOW), false, false],
-      ['chat.update', 'C0FLEET', '1762524000.000100', image(NOW + 3600), false, false],
-    ])
-    expect([...kv]).toEqual([['slack-fleet-post', '{"channel":"C0FLEET","ts":"1762524000.000100"}']])
-  })
-
-  it('with nowhere to keep the post, refuses to post a new one each run; `?new=1` posts one; `?dry=1` posts nothing', async () => {
-    slackAnswers = [{ ok: true, channel: 'C0FLEET', ts: '1.2' }]
+  it('with nowhere to keep the post, refuses to post a new one each run; `?dry=1` answers the message and its card, posting nothing', async () => {
     const refused = await post(envOf(SLACK))
-    const fresh = await post(envOf(SLACK), '?new=1')
-    const dry = await (await post(envOf(SLACK), '?dry=1')).json() as { action: string; text: string }
+    const dry = await (await post(envOf(SLACK), '?dry=1')).json() as { action: string; text: string; card_bytes: number; blocks: { type: string }[] }
     expect([
       [refused.status, await refused.json()],
-      [fresh.status, ((await fresh.json()) as { action: string }).action],
-      [dry.action, dry.text],
-      slackCalls.map(c => c.method),
+      [dry.action, dry.text, dry.card_bytes > 10_000, dry.blocks.map(b => b.type)],
+      slackCalls,
     ]).toEqual([
       [502, { error: 'no post to update: bind FLEET_KV, or post one with `?new=1` and set SLACK_FLEET_TS to its ts' }],
-      [200, 'posted'],
-      ['dry', 'disky fleet: gcs ok, cw 1 step issue open (warm-cache), hf ok, r2 ok'],
-      ['chat.postMessage'],
+      ['dry', 'disky fleet: gcs ok, cw 1 step issue open (warm-cache), hf ok, r2 ok', true, ['section', 'section', 'section', 'section', 'section', 'context']],
+      [],
     ])
   })
 })
