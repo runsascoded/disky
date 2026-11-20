@@ -154,6 +154,27 @@ describe('join', () => {
     expect([await pb, b.waited, m1.size, m2.size, a.dead]).toEqual([5, 50, 1, 0, true])
   })
 
+  it('an entry rejected as its ended request\'s (the runtime\'s cross-request error) is a stall: its owner convicted, the joiner computes', async () => {
+    const m1 = new Map<string, Promise<number>>(), m2 = new Map<string, Promise<number>>()
+    const a = new Req(), b = new Req()
+    const ended = new Error('This promise was created by a request that has since ended, so it can never settle.')
+    const p = Promise.reject(ended)
+    p.catch(() => {})
+    m1.set('k', p)
+    track(p, { name: 'm', req: a }, () => { if (m1.get('k') === p) m1.delete('k') })
+    hold(m2, 'k', a)
+    const pb = shared(m1, 'k', async () => 9, 10_000, { name: 'm', req: b })
+    expect([await pb, a.dead, m2.size]).toEqual([9, true, 0])
+    // Untracked, the same rejection is a stall too
+    const m3 = new Map<string, Promise<number>>([['k', p]])
+    expect(await inFlight(m3, 'k', async () => 4, { name: 'm' })).toBe(4)
+    // Any other rejection still fails its joiners
+    const boom = Promise.reject(new Error('boom'))
+    boom.catch(() => {})
+    const m4 = new Map<string, Promise<number>>([['k', boom]])
+    await expect(inFlight(m4, 'k', async () => 4, { name: 'm' })).rejects.toThrow('boom')
+  })
+
   it('a request already cancelled shares nothing', async () => {
     const map = new Map<string, Promise<number>>()
     const ctl = new AbortController()

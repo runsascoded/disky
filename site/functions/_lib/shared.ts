@@ -391,12 +391,23 @@ const sleep = (ms: number): { p: Promise<typeof STALLED>; clear: () => void } =>
   return { p: new Promise(r => { timer = setTimeout(() => r(STALLED), ms) }), clear: () => clearTimeout(timer!) }
 }
 
-/** `p`'s value, or `STALLED` if it hasn't settled within `ms` (nothing is cancelled; a rejection propagates). The
- *  pending timer is progress to the Workers runtime, so a wait on another request's frozen promise ends here. */
+/** The Workers runtime's rejection of a wait on a promise whose request has ended ("This promise was created by a
+ *  request that has since ended, so it can never settle"): that request's work, not the awaited value, failed. A
+ *  joiner takes it as a stall (computes afresh), never as the read's failure (cw, 2026-11-20: taken for a broken
+ *  interval-store run, each cut every later scan out of its isolate for 30 s). */
+export const endedRequest = (e: unknown): boolean =>
+  e instanceof Error && e.message.includes('created by a request that has since ended')
+
+/** `p`'s value, or `STALLED` if it hasn't settled within `ms` (nothing is cancelled; a rejection propagates, except an
+ *  ended request's, `endedRequest`). The pending timer is progress to the Workers runtime, so a wait on another
+ *  request's frozen promise ends here. */
 export async function within<T>(p: Promise<T>, ms: number): Promise<T | typeof STALLED> {
   const t = sleep(ms)
   try {
     return await Promise.race([p, t.p])
+  } catch (err) {
+    if (endedRequest(err)) return STALLED
+    throw err
   } finally {
     t.clear()
   }
@@ -409,7 +420,20 @@ export async function within<T>(p: Promise<T>, ms: number): Promise<T | typeof S
 export async function join<T>(p: Promise<T>, j: Join): Promise<T | typeof STALLED> {
   const e = entries.get(p)
   if (!e) return within(p, joinBound(j.name))
-  if (e.done || (e.owner && e.owner === j.req)) return p
+  if (e.owner && e.owner === j.req) return p
+  if (e.done) {
+    try {
+      return await p
+    } catch (err) {
+      if (!endedRequest(err)) throw err
+      // A scope convicts no one (its gate hasn't passed): it computes afresh in its overlay.
+      if (!scopeOf()) {
+        if (e.owner) e.owner.kill()
+        else e.drop()
+      }
+      return STALLED
+    }
+  }
   if (e.gone || e.owner?.dead) {
     // A scope evicts nothing (`Scope`): it computes afresh in its overlay.
     if (!scopeOf()) e.drop()
@@ -423,9 +447,14 @@ export async function join<T>(p: Promise<T>, j: Join): Promise<T | typeof STALLE
   const convicts = toBound <= left
   const t = sleep(Math.max(0, Math.min(toBound, left)))
   let got: T | typeof STALLED
+  let ended = false
   j.req?.enter()
   try {
     got = await Promise.race([p, e.dropped, t.p])
+  } catch (err) {
+    if (!endedRequest(err)) throw err
+    got = STALLED
+    ended = true
   } finally {
     t.clear()
     j.req?.leave()
@@ -434,7 +463,8 @@ export async function join<T>(p: Promise<T>, j: Join): Promise<T | typeof STALLE
   if (got !== STALLED || e.gone) return got
   // A scope convicts no one (its gate hasn't passed): it computes afresh in its overlay.
   if (scopeOf()) return STALLED
-  if (convicts) {
+  // Its owner's request ended (`endedRequest`): every entry it owns is as dead.
+  if (convicts || ended) {
     j.req?.trace?.('join-evict', 1, j.name)
     if (e.owner) e.owner.kill()
     else e.drop()

@@ -41,7 +41,7 @@ import type { Env } from './auth.js'
 import { assertHistoryScan, historyVersion, withHistoryVersion } from './historyVersion.js'
 import { FILL_MAX_ROWS, type FooterRow, noteAccess, probe, queueFill, trusted, wantsFill } from './footerCache.js'
 import { newestManifest } from './manifests.js'
-import { colo, inFlight, IsoMap, IsoSet, join, JOIN, type Join, Memo, registerIsolate, reqOf, scopeOf, shared, STALLED, track } from './shared.js'
+import { colo, endedRequest, inFlight, IsoMap, IsoSet, join, JOIN, type Join, Memo, registerIsolate, reqOf, scopeOf, shared, STALLED, track } from './shared.js'
 import { d1Variant, isPrimary, PRIMARY_STORE, storeKey } from './stores.js'
 import { compressors } from './zstd.js'
 import { currentMeter } from './usage.js'
@@ -871,7 +871,8 @@ export async function ivHolder(env: Env, date: string): Promise<string | null> {
 
 /** Cut run `key` out of the env's store for `IV_BROKEN_TTL` (logged once per window), and drop the held state. */
 export function ivMarkBroken(env: Env, key: string, error: unknown): IvTierBroken {
-  if (error instanceof ReaderStopped) throw error
+  // Another request's work failed (it ended), not the run's files: this request fails alone, nothing is cut.
+  if (error instanceof ReaderStopped || endedRequest(error)) throw error
   const e = error instanceof IvTierBroken ? error : new IvTierBroken(key, error)
   const k = `${ivGenKey(env)}|${key}`
   const was = ivBroken.get(k)
