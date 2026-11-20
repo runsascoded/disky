@@ -19,6 +19,9 @@ importers:
       '@open-athena/auth':
         specifier: github:Open-Athena/auth#4ae207935a50cbe93fe3b27b252a2d059cf601f4
         version: https://codeload.github.com/Open-Athena/auth/tar.gz/4ae207935a50cbe93fe3b27b252a2d059cf601f4(@cloudflare/workers-types@5.20261014.1)(@floating-ui/react@0.27.20(react-dom@19.2.8(react@19.2.8))(react@19.2.8))(@tanstack/react-query@5.101.4(react@19.2.8))(react-dom@19.2.8(react@19.2.8))(react@19.2.8)(vue@3.5.44(typescript@5.9.3))
+      '@open-athena/thrds':
+        specifier: github:Open-Athena/thrds#bc10600
+        version: https://codeload.github.com/Open-Athena/thrds/tar.gz/bc10600
       '@resvg/resvg-wasm':
         specifier: ^2.6.2
         version: 2.6.2
@@ -1508,6 +1511,11 @@ packages:
         optional: true
       vue:
         optional: true
+
+  '@open-athena/thrds@https://codeload.github.com/Open-Athena/thrds/tar.gz/bc10600':
+    resolution: {tarball: https://codeload.github.com/Open-Athena/thrds/tar.gz/bc10600}
+    version: 0.2.0-dist.a5e7c03
+    engines: {node: '>=18'}
 
   '@open-athena/thrds@https://codeload.github.com/Open-Athena/thrds/tar.gz/e880960':
     resolution: {tarball: https://codeload.github.com/Open-Athena/thrds/tar.gz/e880960}
@@ -4549,6 +4557,8 @@ snapshots:
       react: 19.2.8
       react-dom: 19.2.8(react@19.2.8)
       vue: 3.5.44(typescript@5.9.3)
+
+  '@open-athena/thrds@https://codeload.github.com/Open-Athena/thrds/tar.gz/bc10600': {}
 
   '@open-athena/thrds@https://codeload.github.com/Open-Athena/thrds/tar.gz/e880960': {}
 

@@ -35,13 +35,12 @@ try {
   }
   if (!Number.isFinite(doc.now) || !Array.isArray(doc.deployments)) throw new Error('expected a fleet document with now and deployments')
   // This deliberately invalid signature is a visible placeholder. Never mint a private card credential offline.
-  const image = `${origin}/og/fleet.png?v=${doc.now}&sig=PREVIEW_ONLY`
-  const msg = fleetMessage(doc, image, `${origin}/fleet`)
+  const msg = fleetMessage(doc, `${origin}/fleet`)
   mkdirSync(out, { recursive: true })
   writeFileSync(join(out, 'slack-message.json'), JSON.stringify(msg, null, 2) + '\n')
   writeFileSync(join(out, 'slack-message.txt'), msg.blocks[0].text.text + '\n\n' + msg.blocks[2].elements[0].text + '\n')
   writeFileSync(join(out, 'fleet.json'), JSON.stringify(doc, null, 2) + '\n')
-  writeFileSync(join(out, 'preview.json'), JSON.stringify({ source: values.fixture ? 'fixture' : resolve(values.doc), now: doc.now, image_url: 'invalid preview placeholder; use the deployed ?dry=1 response for a signed URL', posted: false }, null, 2) + '\n')
+  writeFileSync(join(out, 'preview.json'), JSON.stringify({ source: values.fixture ? 'fixture' : resolve(values.doc), now: doc.now, card: 'attached as a file when posted; the card*.png files here are it', posted: false }, null, 2) + '\n')
   await ensureWasm(readFileSync(join(ROOT, 'node_modules/@resvg/resvg-wasm/index_bg.wasm')))
   const fonts = ['Inter-400.ttf', 'Inter-600.ttf'].map(f => new Uint8Array(readFileSync(join(ROOT, '../site/public/_fonts', f))))
   const deployments = doc.deployments.map(({ name, color }) => ({ name, color }))

@@ -56,6 +56,8 @@ export interface FleetDeployment {
   name: string
   url: string
   color: string
+  /** Its admin channel's Slack id (`FLEET_JSON`), when named. */
+  channel?: string
   health: FleetHealth | null
   /** The newest scan run (maintenance runs aside). */
   last: FleetRun | null
