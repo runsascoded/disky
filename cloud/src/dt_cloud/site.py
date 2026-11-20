@@ -52,21 +52,24 @@ def get_json(url: str, token: str, endpoint_path: str, params: dict | None = Non
     return json.loads(_fetch(req, endpoint, timeout).decode())
 
 
-def post_json(url: str, token: str, endpoint_path: str, body: dict, timeout: int = 120) -> bytes:
-    """POST ``body`` as JSON to ``<url><endpoint_path>``, authenticated; the response's raw bytes (e.g. a PNG)."""
+def post_json(url: str, token: str, endpoint_path: str, body: dict, timeout: int = 120, headers: dict | None = None) -> bytes:
+    """POST ``body`` as JSON to ``<url><endpoint_path>``, authenticated; the response's raw bytes (e.g. a PNG).
+    ``headers``: filled with the response's headers (lower-cased names)."""
     endpoint = f"{url.rstrip('/')}{endpoint_path}"
     req = Request(endpoint, data=json.dumps(body).encode(), method="POST", headers={
         "Authorization": f"Bearer {token}", "Content-Type": "application/json", "User-Agent": UA,
     })
-    return _fetch(req, endpoint, timeout)
+    return _fetch(req, endpoint, timeout, headers)
 
 
-def _fetch(req: Request, endpoint: str, timeout: int) -> bytes:
-    """``req``'s response body; a non-2xx raises `SiteError` with the server's own error string. A truncated body is
-    fetched again, up to `TRUNCATED_RETRIES` times."""
+def _fetch(req: Request, endpoint: str, timeout: int, headers: dict | None = None) -> bytes:
+    """``req``'s response body (its headers into ``headers``, names lower-cased); a non-2xx raises `SiteError` with the
+    server's own error string. A truncated body is fetched again, up to `TRUNCATED_RETRIES` times."""
     for attempt in range(TRUNCATED_RETRIES + 1):
         try:
             with urlopen(req, timeout=timeout) as resp:
+                if headers is not None:
+                    headers.update({k.lower(): v for k, v in resp.headers.items()})
                 return resp.read()
         except IncompleteRead as e:
             got, short = len(e.partial), e.expected

@@ -7,11 +7,15 @@
  *   POST /api/digest-image {kind?: 'usage' | 'tiers' | 'pools', title, note, month: 'YYYY-MM', points, …}
  *     → image/png (1.5× the 900px-wide layout)
  *
+ * `part: 'chart' | 'map'` draws one of the card's two halves (`whole`, the default, both), so a post can attach them
+ * as two images; the answer names the part it drew in `X-Digest-Part` (a site before `part` sends none, and the job
+ * then attaches the whole card).
+ *
  * Viewer-gated (the job's grant); nothing cached — one render a run. */
 import { type Env, requireViewer } from '../_lib/auth.js'
 import { ivRefusal, ivRetry, storeReady, withPathStore } from '../_lib/index.js'
 import { ATTEN_DEFAULT, buildDiff, MIN_AREA_DEFAULT } from '../_lib/view.js'
-import { digestSvg, DIGEST_W, poolsSvg, tiersSvg } from '../_lib/og/digestCard.js'
+import { digestSvg, DIGEST_W, mapSvg, poolsSvg, tiersSvg } from '../_lib/og/digestCard.js'
 import { parseDigestRequest } from '../_lib/og/digestRequest.js'
 import { ensureWasm, svgToPng } from '../_lib/og/render.js'
 import { fonts, type OgEnv } from '../_lib/og/serve.js'
@@ -29,7 +33,7 @@ export const onRequestPost = async (ctx0: { request: Request; env: OgEnv }): Pro
   const req = parseDigestRequest(await ctx.request.json().catch(() => null))
   if (typeof req === 'string') return new Response(req, { status: 400 })
   let diff = null
-  if (req.diff) {
+  if (req.diff && req.part !== 'chart') {
     const { from: f, to: t, path, title } = req.diff
     if (!storeReady(ctx.env)) return new Response('diff not configured (missing index store creds)', { status: 503 })
     let data
@@ -44,8 +48,12 @@ export const onRequestPost = async (ctx0: { request: Request; env: OgEnv }): Pro
     const built = diffRoot({ ...data, prev: f, curr: t }, 'delta', true, !path, path || 'all')
     diff = built ? { root: built.root, title } : null
   }
-  const svg = req.kind === 'tiers' ? tiersSvg({ ...req, diff }) : req.kind === 'pools' ? poolsSvg({ ...req, diff }) : digestSvg({ ...req, diff })
+  const svg = req.part === 'map'
+    ? (diff ? mapSvg({ ...req, diff }) : null)
+    : req.kind === 'tiers' ? tiersSvg({ ...req, diff }) : req.kind === 'pools' ? poolsSvg({ ...req, diff }) : digestSvg({ ...req, diff })
+  // the map part of an interval with nothing to draw: no image (the job attaches the chart alone)
+  if (svg === null) return new Response('no diff map for this interval', { status: 404 })
   await ensureWasm(RESVG)
   const png = svgToPng(svg, await fonts(ctx.env, new URL(ctx.request.url).origin), ZOOM)
-  return new Response(png, { headers: { 'content-type': 'image/png', 'cache-control': 'no-store' } })
+  return new Response(png, { headers: { 'content-type': 'image/png', 'cache-control': 'no-store', 'x-digest-part': req.part } })
 }

@@ -12,6 +12,9 @@
  *     → `tiersSvg`: the total line over the stacked storage classes, over the headline interval's diff map (the cost
  *       template)
  *
+ * Any kind takes `part`: `whole` (the default: the chart over the map), `chart` (the chart alone; no diff is read) or
+ * `map` (the map alone under the card's header; needs `diff`), so a post can attach them as two images.
+ *
  * A body without `kind` is `usage` (the cw job's request predates the field). `from`: the OP window's first day
  * (specs/digest-rolling-window.md), before the month on all but its last days: the axis starts there (or at the
  * baseline scan before it), the latest scan sits at `todayAt` of the width, and the card shades the month. Without
@@ -39,7 +42,13 @@ interface Common {
   /** The month's first instant, epoch ms (the shaded current month starts there). */
   month: number
   units: DigestUnits
+  /** Which of the card to draw: both (`whole`), the chart alone or the map alone. */
+  part: DigestPart
 }
+
+/** A digest card's parts: the chart over the map (`whole`), or either alone. */
+export const DIGEST_PARTS = ['whole', 'chart', 'map'] as const
+export type DigestPart = (typeof DIGEST_PARTS)[number]
 
 export type DigestRequest =
   | Common & {
@@ -110,7 +119,10 @@ export function parseDigestRequest(b: unknown): DigestRequest | string {
   }
   const diff = parseDiff(b.diff)
   if (typeof diff === 'string') return diff
-  const common = { title: b.title, note: b.note, units }
+  const part = b.part ?? 'whole'
+  if (!(DIGEST_PARTS as readonly unknown[]).includes(part)) return `part: ${DIGEST_PARTS.map(x => `'${x}'`).join(' | ')}`
+  if (part === 'map' && !diff) return 'part: map needs a diff'
+  const common = { title: b.title, note: b.note, units, part: part as DigestPart }
   if (kind === 'tiers') {
     const names = b.tiers
     if (!Array.isArray(names) || !names.length || names.length > MAX_TIERS || !names.every(n => typeof n === 'string')) {

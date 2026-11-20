@@ -166,6 +166,8 @@ class DigestConfig:
     plot_project: str = ""
     plot_branch: str = "main"
     plot_base: str = ""
+    # the OP's plot attached as two images, its chart and its diff map (`_plot_parts`), not one; false: the one
+    plot_parts: bool = True
     variant: str = "sender"
     reply_hour: int = 12
     provisional: bool = False
@@ -844,8 +846,8 @@ def _ts(rec: str | dict) -> str:
 
 
 def _op_render(tpl: Template, data, root: str, month: dt.date, state: dict, client, channel: str, variant: str, icons_dir,
-               deploy_plot) -> tuple[str, str, str | None, Path | None]:
-    """The OP's body, plot URL, previous-month link and the plot's local PNG: renders + hosts the plot (``icons_dir``;
+               deploy_plot) -> tuple[str, str, str | None, list[Path] | None]:
+    """The OP's body, plot URL, previous-month link and the images it attaches (`_plot_parts`): renders + hosts the plot (``icons_dir``;
     ``deploy_plot(local, basename)`` publishes it and returns the host serving it, None → ``cfg.plot_base``), recording
     its name in ``state["plot_name"]``. Without ``icons_dir`` nothing is rendered (the PNG is None): the URL names the
     state's plot on ``plot_base``."""
@@ -872,65 +874,113 @@ def _op_render(tpl: Template, data, root: str, month: dt.date, state: dict, clie
     # the previous month's thread, linked from the OP
     prev_op = _prev_op(cfg, root, month, channel, variant)
     prev_url = client.permalink(prev_op) if prev_op else None
-    return tpl.op_body(data, month, plot_url, prev_url), plot_url, prev_url, local
+    return tpl.op_body(data, month, plot_url, prev_url), plot_url, prev_url, None if local is None else _plot_parts(tpl, data, month, local)
 
 
-def _post_op(tpl: Template, data, month: dt.date, client, state: dict, body: str, plot: Path | None, prev_url: str | None) -> str:
-    """Post or edit the month's OP (``state["op_ts"]``), returning its ts. With a rendered ``plot`` the PNG is attached
-    as a Slack file below a body without the image line (``state["plot_file"]``): unlike an image block, an attached
-    file offers Download on Slack's phone apps. Each edit uploads the new plot (thrds waits until Slack has processed
-    it), swaps it in, and only then deletes the one it replaced. A bot Slack won't let upload (no ``files:write`` /
-    ``files:read``) keeps the image block (``body``), with a warning. Without a newly rendered plot, an OP whose plot is
-    already attached keeps that file under the plain body; otherwise ``body`` as is."""
-    from thrds.slack import FilesNotAttachedError, FileSwapError
+#: The OP's plot parts (`/api/digest-image` ``part``), in the order they're attached, and each one's alt-text suffix.
+PLOT_PARTS = {"chart": "chart", "map": "what changed"}
+
+
+def _plot_parts(tpl: Template, data, month: dt.date, whole: Path) -> list[Path]:
+    """The images the OP attaches: the plot's chart and its diff map as two files beside ``whole``
+    (``<stem>-chart.png``, ``<stem>-map.png``; ``cfg.plot_parts``), each drawn by the site (`/api/digest-image`
+    ``part``), so a phone shows each at its own size, with its own Download; else ``whole``. ``whole`` is attached
+    instead when the plot has no map (its request no ``diff``), when the site predates ``part`` (its answer names no
+    ``X-Digest-Part``), or when drawing a part fails (a warning): the OP keeps a plot either way."""
+    if not tpl.cfg.plot_parts:
+        return [whole]
+    from .deploy import site_token
+    from .site import post_json
+
+    try:
+        req = tpl.image_request(data, month)
+        if not req.get("diff"):
+            return [whole]
+        out = []
+        for part in PLOT_PARTS:
+            got: dict = {}
+            png = post_json(tpl.cfg.site_url, site_token(), "/api/digest-image", {**req, "part": part}, headers=got)
+            if got.get("x-digest-part") != part:
+                _err("digest: the site draws no plot parts (no `part` support yet); attaching the whole plot")
+                return [whole]
+            path = whole.with_name(f"{whole.stem}-{part}.png")
+            path.write_bytes(png)
+            out.append(path)
+        return out
+    except Exception as e:  # noqa: BLE001 — the whole plot is already drawn: a failed part costs only the split
+        _err(f"digest: WARN could not draw the plot's parts ({type(e).__name__}: {e}); attaching the whole plot")
+        return [whole]
+
+
+def _plot_alt(cfg: DigestConfig, month: dt.date, plot: Path) -> str:
+    """A plot file's alt text: the OP's title, and which part it is (`PLOT_PARTS`)."""
+    part = PLOT_PARTS.get(plot.stem.rsplit("-", 1)[-1])
+    return f"{cfg.title} — {month:%B %Y}" + (f" ({part})" if part else "")
+
+
+def _post_op(tpl: Template, data, month: dt.date, client, state: dict, body: str, plots: list[Path] | None, prev_url: str | None) -> str:
+    """Post or edit the month's OP (``state["op_ts"]``), returning its ts. Rendered ``plots`` (`_plot_parts`) are
+    attached as Slack files, in order, below a body without the image line (``state["plot_files"]``): unlike an image
+    block, an attached file offers Download on Slack's phone apps. Each edit swaps in the new files (thrds
+    `replace_files`: each uploaded and processed, then attached, and only then the replaced ones deleted). A bot Slack
+    won't let upload (no ``files:write`` / ``files:read``) keeps the image block (``body``), with a warning. Without
+    newly rendered plots, an OP whose plot is already attached keeps its files under the plain body; otherwise ``body``
+    as is. ``state["plot_file"]`` (one file, before the parts) counts as the attached files."""
+    from thrds.slack import FilesNotAttachedError, FileSpec, FileSwapError
 
     cfg = tpl.cfg
     op_ts = state.get("op_ts")
-    old = state.get("plot_file")
-    if plot is None:
+    old = state.get("plot_files") or ([state["plot_file"]] if state.get("plot_file") else [])
+    if not plots:
         if op_ts:
-            # an OP already carrying its plot as a file keeps it (`files` unset), under the body without the image line
+            # an OP already carrying its plot as files keeps them (`files` unset), under the body without the image line
             client.edit(op_ts, tpl.op_body(data, month, None, prev_url) if old else body)
             return op_ts
         return client.post(body, username=f"{cfg.title} — {month:%B %Y}", **cfg.op_sender()).id
     plain = tpl.op_body(data, month, None, prev_url)
-    name, alt = plot.name, f"{cfg.title} — {month:%B %Y}"
+    specs = [FileSpec(p.name, p.read_bytes(), alt_text=_plot_alt(cfg, month, p)) for p in plots]
+    file_ids: list[str] = []
     try:
         if op_ts:
-            swap = client.replace_file(op_ts, name, plot.read_bytes(), plain, previous=[old] if old else [], alt_text=alt)
+            swap = client.replace_files(op_ts, specs, plain, previous=[(f, None) for f in old])
             for fid, e in swap.undeleted:
                 _err(f"digest: WARN could not delete the replaced plot {fid}: {e}")
-            state["plot_file"] = swap.file_id
+            state["plot_files"] = swap.file_ids
+            state.pop("plot_file", None)
             return op_ts
-        file_id = client.upload(name, plot.read_bytes(), alt_text=alt)
+        for spec in specs:
+            file_ids.append(client.upload(spec.name, spec.data, alt_text=spec.alt_text))
     except FileSwapError:
         raise
     except Exception as e:  # noqa: BLE001 — a bot without the file scopes still gets its plot, as an image block
         _err(f"digest: WARN could not upload the plot ({type(e).__name__}: {e}); it stays an image block")
+        _delete_files(client, file_ids)
         if op_ts:
             client.edit(op_ts, body)
             return op_ts
         return client.post(body, username=f"{cfg.title} — {month:%B %Y}", **cfg.op_sender()).id
     try:
-        ts = client.post(plain, username=f"{cfg.title} — {month:%B %Y}", files=[file_id], **cfg.op_sender()).id
+        ts = client.post(plain, username=f"{cfg.title} — {month:%B %Y}", files=file_ids, **cfg.op_sender()).id
     except FilesNotAttachedError as e:
-        # the OP landed without its plot: keep the OP (the next run's edit attaches a fresh one), drop this upload
+        # the OP landed without its plot: keep the OP (the next run's edit attaches fresh ones), drop these uploads
         _err(f"digest: WARN posted the OP {e.ts} but attaching its plot failed ({e.__cause__}); the next run attaches it")
-        _delete_file(client, file_id)
+        _delete_files(client, file_ids)
         return e.ts
     except Exception:
-        _delete_file(client, file_id)
+        _delete_files(client, file_ids)
         raise
-    state["plot_file"] = file_id
+    state["plot_files"] = file_ids
+    state.pop("plot_file", None)
     return ts
 
 
-def _delete_file(client, file_id: str) -> None:
-    """Delete an upload no message carries; a failure only warns (the caller's own failure, if any, is the one raised)."""
-    try:
-        client.delete_file(file_id)
-    except Exception as e:  # noqa: BLE001
-        _err(f"digest: WARN could not delete the unattached plot {file_id}: {e}")
+def _delete_files(client, file_ids: list[str]) -> None:
+    """Delete uploads no message carries; a failure only warns (the caller's own failure, if any, is the one raised)."""
+    for file_id in file_ids:
+        try:
+            client.delete_file(file_id)
+        except Exception as e:  # noqa: BLE001
+            _err(f"digest: WARN could not delete the unattached plot {file_id}: {e}")
 
 
 def _prev_op(cfg: DigestConfig, root: str, month: dt.date, channel: str, variant: str) -> str | None:
@@ -999,11 +1049,11 @@ def converge_slack(tpl: Template, root: str, month: dt.date, client, channel: st
     path = state_path(root, month, cfg.state.format(channel=channel, variant=variant))
     state = load_state(path)
 
-    body, plot_url, prev_url, plot = _op_render(tpl, data, root, month, state, client, channel, variant, icons_dir, deploy_plot)
+    body, plot_url, prev_url, plots = _op_render(tpl, data, root, month, state, client, channel, variant, icons_dir, deploy_plot)
     if len(tpl.variants) > 1:
         state["variant"] = variant
     edited = bool(state.get("op_ts"))
-    op_ts = _post_op(tpl, data, month, client, state, body, plot, prev_url)
+    op_ts = _post_op(tpl, data, month, client, state, body, plots, prev_url)
     if edited:
         save_state(path, state)
         _err(f"digest: edited OP {op_ts} ({tpl.n_scans(data)} scans)")
@@ -1118,7 +1168,7 @@ def apply_slack(tpl: Template, root: str, month: dt.date, client, channel: str, 
     if op:
         if not state.get("op_ts"):
             raise SystemExit(f"digest: {month:%Y-%m} has no OP in {channel} yet (converge posts it)")
-        body, _, prev_url, plot = _op_render(tpl, data, root, month, state, client, channel, variant,
+        body, _, prev_url, plots = _op_render(tpl, data, root, month, state, client, channel, variant,
                                              None if dry_run else icons_dir, None if dry_run else deploy_plot)
         out.append(Change("op", state["op_ts"], body))
     want = set(days)
@@ -1134,7 +1184,7 @@ def apply_slack(tpl: Template, root: str, month: dt.date, client, channel: str, 
         return out
     for c in out:
         if c.what == "op":
-            _post_op(tpl, data, month, client, state, c.body, plot, prev_url)
+            _post_op(tpl, data, month, client, state, c.body, plots, prev_url)
         else:
             client.edit(c.ts, c.body)
         if c.what != "op" and isinstance(posted[c.what], dict):

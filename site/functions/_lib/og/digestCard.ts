@@ -219,6 +219,13 @@ function diffSection({ root, title }: { root: DiffNode; title: string }, fmt: (b
   return y + MAP_H
 }
 
+/** The headline interval's diff map alone, under the card's header: the map part of a card a post attaches as two
+ *  images (`part: 'map'`). */
+export function mapSvg(d: { title: string; note: string; units?: DigestUnits; diff: { root: DiffNode; title: string } }): string {
+  const out = [header(d.title, d.note)]
+  return page(diffSection(d.diff, UNITS[d.units ?? 'TiB'].fmt, PAD + 20, out), out)
+}
+
 /** The card's `<svg>`: `DIGEST_W` wide, its content ending at `y` (+ the bottom pad), on the theme's background. */
 function page(y: number, out: string[]): string {
   const H = Math.ceil(y + PAD)

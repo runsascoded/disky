@@ -20,7 +20,7 @@ const tiers = {
 describe('parseDigestRequest: tiers', () => {
   it('parses the tiers (default colours, bottom → top) and the points (time-sorted) over the month frame', () => {
     expect(parseDigestRequest(tiers)).toEqual({
-      kind: 'tiers', title: 'marin GCS — October 2026', note: 'gcs.oa.dev · TiB', units: 'TiB',
+      kind: 'tiers', title: 'marin GCS — October 2026', note: 'gcs.oa.dev · TiB', units: 'TiB', part: 'whole',
       from: OCT - 16 * H, to: NOV - 8 * H, month: OCT,
       tiers: [
         { name: 'Archive', color: TIER_COLORS[0] }, { name: 'Coldline', color: TIER_COLORS[1] },
@@ -64,7 +64,7 @@ describe('parseDigestRequest: usage', () => {
   }
   it('is the kind when none is given (the cw job sends none); its frame widens to the lead-in scan', () => {
     expect(parseDigestRequest(usage)).toEqual({
-      kind: 'usage', title: 'Usage — October 2026', note: 'example.org · TB', units: 'TB',
+      kind: 'usage', title: 'Usage — October 2026', note: 'example.org · TB', units: 'TB', part: 'whole',
       from: Date.UTC(2026, 8, 30, 8), to: NOV - 8 * H, month: OCT,
       points: [{ t: Date.UTC(2026, 8, 30, 8), bytes: 14e12 }, { t: Date.UTC(2026, 9, 1, 8), bytes: 15e12 }],
       quota: { bytes: 253e12, name: '253 TB public' },
@@ -74,7 +74,7 @@ describe('parseDigestRequest: usage', () => {
   })
   it('drops a malformed quota, and takes no diff', () => {
     expect(parseDigestRequest({ ...usage, quota: { bytes: '1' }, diff: null, units: undefined })).toEqual({
-      kind: 'usage', title: 'Usage — October 2026', note: 'example.org · TB', units: 'TiB',
+      kind: 'usage', title: 'Usage — October 2026', note: 'example.org · TB', units: 'TiB', part: 'whole',
       from: Date.UTC(2026, 8, 30, 8), to: NOV - 8 * H, month: OCT,
       points: [{ t: Date.UTC(2026, 8, 30, 8), bytes: 14e12 }, { t: Date.UTC(2026, 9, 1, 8), bytes: 15e12 }],
       quota: null, diff: null,
@@ -157,7 +157,7 @@ describe('parseDigestRequest: pools', () => {
   }
   it('parses each pool (points time-sorted) and the alert share, over the frame of every pool’s scans', () => {
     expect(parseDigestRequest(pools)).toEqual({
-      kind: 'pools', title: 'CoreWeave usage — October 2026', note: 'cw.oa.dev · TiB', units: 'TiB',
+      kind: 'pools', title: 'CoreWeave usage — October 2026', note: 'cw.oa.dev · TiB', units: 'TiB', part: 'whole',
       from: OCT - 16 * H, to: NOV - 8 * H, month: OCT, alertPct: 85,
       pools: [
         { name: '02a', quota: 910 * T, points: [{ t: Date.UTC(2026, 9, 1, 12, 36), bytes: 690 * T }, { t: Date.UTC(2026, 9, 2), bytes: 700 * T }] },
@@ -176,5 +176,16 @@ describe('parseDigestRequest: pools', () => {
       parseDigestRequest({ ...pools, alert_pct: 0 }),
       parseDigestRequest({ ...pools, pools: pools.pools.map(pl => ({ ...pl, points: [] })) }),
     ]).toEqual(['pools: 1–8 [{name, quota, points: [{scan, bytes}]}]', bad, bad, 'alert_pct: (0, 100]', 'pools: at least one point'])
+  })
+})
+
+describe('parseDigestRequest: part', () => {
+  it('`part`: the chart alone, or the map alone (which needs a diff)', () => {
+    const diff = { from: '2026-10-01T0800', to: '2026-10-02T0800', path: '', title: 'Oct 1 → Oct 2' }
+    const part = (b: unknown) => { const r = parseDigestRequest(b); return typeof r === 'string' ? r : r.part }
+    expect([
+      part(tiers), part({ ...tiers, part: 'chart' }), part({ ...tiers, part: 'map', diff }),
+      part({ ...tiers, part: 'map', diff: null }), part({ ...tiers, part: 'both' }),
+    ]).toEqual(['whole', 'chart', 'map', 'part: map needs a diff', "part: 'whole' | 'chart' | 'map'"])
   })
 })
