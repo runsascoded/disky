@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest'
 import type { FleetDeployment, FleetDoc, FleetRun } from './fleetTypes'
 import { fakeChannel } from '@open-athena/thrds/testing'
 import type { Env } from './env'
-import { CARD_NAME, fleetMessage, KV_KEY, publish, SECTION_MAX } from './slack'
+import { CARD_NAME, fleetMessage, KV_KEY, publish, publishSplit, SECTION_MAX, SPLIT_KV_KEY, SPLIT_TEXT, splitName } from './slack'
 import { NOW } from './testFleet'
 
 const H = 3600
@@ -103,6 +103,33 @@ describe('publish: the card as an attached file, swapped each run', () => {
       'no post to update: bind FLEET_KV, or post one with `?new=1` and set SLACK_FLEET_TS to its ts',
       [['101.000000', ['F102']]],
       { channel: 'C0FLEET', ts: '101.000000', file: 'F102' },
+    ])
+  })
+})
+
+describe('publishSplit: the card as an image per panel, in a reply under the post', () => {
+  const kvOf = () => {
+    const kv = new Map<string, string>()
+    return { kv, FLEET_KV: { get: async (k: string) => (kv.has(k) ? JSON.parse(kv.get(k)!) : null), put: async (k: string, v: string) => { kv.set(k, v) } } as unknown as KVNamespace }
+  }
+  const msg = { text: 'disky fleet: …', blocks: [{ type: 'section', text: { type: 'mrkdwn', text: '*disky fleet*' } }] }
+  const names = ['meta', 'objects', 'duration', 'cost']
+  const panels = (n: number) => names.map((panel, i) => ({ panel, png: new Uint8Array([137, 80, 78, 71, n, i]) }))
+
+  it('posts the reply once with its 4 files, then swaps them in place each run (the old ones deleted)', async () => {
+    const fc = fakeChannel({ processedAfter: 1 })
+    const { kv, FLEET_KV } = kvOf()
+    const env = { DISKY_SLACK_BOT_TOKEN: 'xoxb-test', SLACK_FLEET_CHANNEL: 'C0FLEET', FLEET_KV } as unknown as Env
+    const op = await publish(env, msg, new Uint8Array([137, 80, 78, 71]), false, () => fc.client)
+    const first = await publishSplit(env, op, panels(1), () => fc.client)
+    const second = await publishSplit(env, op, panels(2), () => fc.client)
+    const view = () => fc.messages.map(m => [m.ts, m.thread_ts ?? null, m.text, (m.files ?? []).map(f => f.id)])
+    expect([first, second, view(), [...fc.files.values()].map(f => f.name), JSON.parse(kv.get(SPLIT_KV_KEY)!)]).toEqual([
+      { action: 'posted', ts: '102.000000', files: ['F102', 'F103', 'F104', 'F105'], undeleted: [] },
+      { action: 'updated', ts: '102.000000', files: ['F106', 'F107', 'F108', 'F109'], undeleted: [] },
+      [['101.000000', null, 'disky fleet: …', ['F101']], ['102.000000', '101.000000', SPLIT_TEXT, ['F106', 'F107', 'F108', 'F109']]],
+      [CARD_NAME, ...names.map(splitName)],
+      { channel: 'C0FLEET', thread: '101.000000', ts: '102.000000', files: ['F106', 'F107', 'F108', 'F109'] },
     ])
   })
 })

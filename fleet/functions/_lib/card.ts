@@ -71,6 +71,8 @@ export interface CardInput {
   doc?: FleetDoc
   /** The window's end (epoch s): the document's `now`, or the request's for an anonymous card. */
   now: number
+  /** Draw only this panel (an index into the card's `PANELS`), under the full header: one image of a split card. */
+  only?: number
 }
 
 const runPts = (runs: FleetRun[], from: number, v: (r: FleetRun) => number | null): Pt[] =>
@@ -132,6 +134,12 @@ function panels(doc: FleetDoc, from: number): PanelSpec[] {
   ]
 }
 
+/** How much taller a split card's panel is than its slot in the stacked card. */
+const SPLIT_H = 1.7
+
+/** The card's panels, top to bottom: what a split card (`only`) posts one image of each. */
+export const PANELS = ['meta', 'objects', 'duration', 'cost'] as const
+
 const ANON_PANELS: Omit<PanelSpec, 'traces' | 'note'>[] = [
   { title: '/meta store size', h: 118, log: true },
   { title: 'objects (primary store)', h: 100, log: true, count: true },
@@ -163,8 +171,10 @@ export function fleetSvg(c: CardInput): string {
   const to = (Math.floor(c.now / DAY) + 1) * DAY
   const from = to - WINDOW_DAYS * DAY
   const full = c.tier === 'full' && c.doc
-  const specs: PanelSpec[] = full ? panels(c.doc!, from) : ANON_PANELS.map(p => ({ ...p, note: '', traces: [] }))
-  const labels = specs.flatMap(s => s.traces.map(t => interWidth(t.label, 11, 600)))
+  const all: PanelSpec[] = full ? panels(c.doc!, from) : ANON_PANELS.map(p => ({ ...p, note: '', traces: [] }))
+  const specs = c.only === undefined ? all : [all[c.only]]
+  // the gutter fits every panel's labels, so a split card's images share their x axis
+  const labels = all.flatMap(s => s.traces.map(t => interWidth(t.label, 11, 600)))
   const gutter = Math.max(40, ...labels) + 12
   const left = PAD + AXIS
   const right = CARD_W - PAD - gutter
@@ -200,7 +210,8 @@ export function fleetSvg(c: CardInput): string {
       out.push(text(kx, y + 12, 'manual runs', 11, { fill: P.ink3 }))
     }
     const y0 = y + 20
-    const h = s.h
+    // a split card's panel is an image of its own, swiped through on a phone: taller than its slot in the stack
+    const h = c.only === undefined ? s.h : Math.round(s.h * SPLIT_H)
     out.push(`<rect x="${r1(left)}" y="${r1(y0)}" width="${r1(right - left)}" height="${h}" fill="${P.panel}"/>`)
     // the days: a rule at each midnight, the date under its column
     for (let t = from; t <= to; t += DAY) out.push(`<line x1="${r1(X(t))}" x2="${r1(X(t))}" y1="${r1(y0)}" y2="${r1(y0 + h)}" stroke="${P.grid}"/>`)
@@ -244,7 +255,7 @@ export function fleetSvg(c: CardInput): string {
         out.push(text(gx, ys[k], e.t.label, 11, { fill: labelColor(e.t.color, c.theme), weight: 600 }))
       })
     } else if (!full) {
-      if (s === specs[1]) {
+      if (s === all[1] || specs.length === 1) {
         const msg = 'sign in to see the fleet'
         const w = interWidth(msg, 12) + 20
         out.push(`<rect x="${r1((left + right - w) / 2)}" y="${r1(y0 + h / 2 - 12)}" width="${r1(w)}" height="24" rx="4" fill="${P.bg}"/>`)

@@ -1,7 +1,7 @@
 /** The fleet card's SVG, byte for byte, against its goldens (`tests/golden/`; regenerate with `node scripts/golden.mjs`
  *  after a deliberate change, and look at `--png`'s output before committing them). */
 import { describe, expect, it } from 'vitest'
-import { fleetSvg, fmtTick, mix } from './card'
+import { fleetSvg, fmtTick, mix, PANELS } from './card'
 import { readFleet } from './fleet'
 import { ANSWERS, FLEET, fleetEnv, NOW, stubFetch } from './testFleet'
 
@@ -29,6 +29,21 @@ describe('the fleet card', () => {
       'objects (primary store)', '11/1', '11/2', '11/3', '11/4', '11/5', '11/6', '11/7', 'sign in to see the fleet',
       'scan duration (h)', '11/1', '11/2', '11/3', '11/4', '11/5', '11/6', '11/7',
       'cost per day ($, complete UTC days)', '11/1', '11/2', '11/3', '11/4', '11/5', '11/6', '11/7',
+    ])
+  })
+  it('split: an image per panel under the full header, taller than its slot, all on the stacked card\'s x axis', async () => {
+    const doc = await readFleet(fleetEnv(), NOW, stubFetch(ANSWERS))
+    const input = { tier: 'full', theme: 'dark', deployments, doc, now: doc.now } as const
+    // a panel's title (12.5 px, bold) and its plot area (the panel colour's rect: x, width, height)
+    const titles = (svg: string) => [...svg.matchAll(/font-size="12\.5" font-weight="600"[^>]*>([^<]*)</g)].map(m => m[1])
+    const areas = (svg: string) => [...svg.matchAll(/<rect x="([\d.]+)" y="[\d.]+" width="([\d.]+)" height="(\d+)" fill="#232322"\/>/g)].map(m => m.slice(1).join(' '))
+    const whole = fleetSvg(input)
+    const split = PANELS.map((_, only) => fleetSvg({ ...input, only }))
+    const x = areas(whole)[0].split(' ').slice(0, 2).join(' ')
+    expect([areas(whole), split.map(titles), split.map(areas)]).toEqual([
+      [`${x} 118`, `${x} 100`, `${x} 118`, `${x} 100`],
+      [['/meta store size'], ['objects (primary store)'], ['scan duration (h)'], ['cost per day ($, complete UTC days)']],
+      [[`${x} 201`], [`${x} 170`], [`${x} 201`], [`${x} 170`]],
     ])
   })
   it('round byte ticks and colour mixing', () => {

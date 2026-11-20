@@ -136,7 +136,7 @@ export async function publish(
   if (at) {
     try {
       // the kept card is the one to delete; without a record of it, the swap reads the message's own files
-      const swap = await client(at.channel).replaceFile(at.ts, file, msg, at.file ? { previous: [at.file] } : {})
+      const swap = await client(at.channel).replaceFile(at.ts, file, msg, at.file ? { previous: [{ id: at.file }] } : {})
       await keep({ channel: at.channel, ts: at.ts, file: swap.fileId })
       return { action: 'updated', channel: at.channel, ts: at.ts, file: swap.fileId, undeleted: swap.undeleted.map(u => u.id) }
     } catch (e) {
@@ -155,6 +155,63 @@ export async function publish(
     // posted, but the card didn't attach: keep the post (no second one next hour) and let the next run's swap attach a card
     if (e instanceof FilesNotAttachedError) await keep({ channel, ts: e.ts })
     else await slack.deleteFile(id)
+    throw e
+  }
+}
+
+/** Where the split card's reply is kept between runs. */
+export const SPLIT_KV_KEY = 'slack-fleet-split'
+
+/** The split card: each panel's file name and alt text (`card.ts` `PANELS`). */
+export const splitName = (panel: string) => `disky-fleet-${panel}.png`
+const SPLIT_ALT: Record<string, string> = {
+  meta: 'disky fleet: /meta store size per deployment, over the last week',
+  objects: 'disky fleet: objects in each deployment\'s primary store, over the last week',
+  duration: 'disky fleet: scan duration per run, per deployment, over the last week',
+  cost: 'disky fleet: scan cost per complete UTC day, per deployment, over the last week',
+}
+
+/** The split card's reply text: what it is, beside the post's single card. */
+export const SPLIT_TEXT = 'The card split into an image per panel (swipe), to compare with the single card above; edited in place hourly.'
+
+/** What's kept of the split card's reply: the post it replies to, its ts and its files, in panel order. */
+interface SplitKept { channel: string; thread: string; ts: string; files: string[] }
+
+export interface SplitPosted { action: 'posted' | 'updated'; ts: string; files: string[]; undeleted: string[] }
+
+/** Keep a reply under the post (`op`) carrying the card as one attached image per panel (`panels`, in `PANELS` order):
+ *  posted once per post, then its files swapped in place each run, as `publish` swaps the post's single card. A
+ *  comparison beside the single card (Ryan, 2026-11-20); a reply kept for an earlier post is left where it is. */
+export async function publishSplit(
+  env: Env,
+  op: { channel: string; ts: string },
+  panels: { panel: string; png: Uint8Array }[],
+  client: (channel: string) => SlackClient = channel => new SlackClient({ token: env.DISKY_SLACK_BOT_TOKEN!, channel }),
+): Promise<SplitPosted> {
+  if (!env.FLEET_KV) throw new Error('the split card needs FLEET_KV, to keep its reply')
+  const slack = client(op.channel)
+  const files = panels.map(({ panel, png }) => ({ name: splitName(panel), data: png, altText: SPLIT_ALT[panel] ?? panel }))
+  const msg = { text: SPLIT_TEXT }
+  const kept = await env.FLEET_KV.get<SplitKept>(SPLIT_KV_KEY, 'json')
+  if (kept && kept.channel === op.channel && kept.thread === op.ts) {
+    try {
+      const swap = await slack.replaceFiles(kept.ts, files, msg, { previous: kept.files.map(id => ({ id })) })
+      await env.FLEET_KV.put(SPLIT_KV_KEY, JSON.stringify({ ...kept, files: swap.fileIds }))
+      return { action: 'updated', ts: kept.ts, files: swap.fileIds, undeleted: swap.undeleted.map(u => u.id) }
+    } catch (e) {
+      if (!missing(e)) throw e
+    }
+  }
+  const ids: string[] = []
+  try {
+    for (const f of files) ids.push(await slack.upload(f.name, f.data, { altText: f.altText }))
+    const posted = await slack.post({ ...msg, files: ids }, op.ts)
+    await env.FLEET_KV.put(SPLIT_KV_KEY, JSON.stringify({ channel: op.channel, thread: op.ts, ts: posted.id, files: ids }))
+    return { action: 'posted', ts: posted.id, files: ids, undeleted: [] }
+  } catch (e) {
+    // posted without its files: keep the reply (no second one next hour), and let the next run's swap attach them
+    if (e instanceof FilesNotAttachedError) await env.FLEET_KV.put(SPLIT_KV_KEY, JSON.stringify({ channel: op.channel, thread: op.ts, ts: e.ts, files: [] }))
+    else for (const id of ids) await slack.deleteFile(id).catch(() => {})
     throw e
   }
 }

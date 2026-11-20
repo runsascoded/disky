@@ -2,13 +2,15 @@
  * `POST /api/fleet/slack[?dry=1][&new=1]` (Bearer `FLEET_JOB_TOKEN`, the hourly cron's): read the fleet anew, build the
  * post (`_lib/slack.ts`), draw its card (`_lib/card.ts`, as `/og/fleet.png` draws the full one), and post it once with
  * the card attached, then edit it in place, swapping the card. `dry` answers the message and the card's size without
- * posting; `new` posts a new message in place of the kept one. Answers `{ action, channel, ts, file, undeleted }`.
+ * posting; `new` posts a new message in place of the kept one. Answers `{ action, channel, ts, file, undeleted }`, and
+ * `split`: the reply under the post carrying the card as an image per panel (`publishSplit`, a comparison), or
+ * `split_error` when that failed (the post stands either way).
  */
-import { fleetSvg } from '../../_lib/card.js'
+import { fleetSvg, PANELS } from '../../_lib/card.js'
 import { type Ctx, json, same } from '../../_lib/env.js'
 import { fleetDoc } from '../../_lib/fleet.js'
 import { renderPng } from '../../_lib/png.js'
-import { fleetMessage, publish } from '../../_lib/slack.js'
+import { fleetMessage, publish, publishSplit } from '../../_lib/slack.js'
 
 export const onRequestPost = async (ctx: Ctx): Promise<Response> => {
   const { env } = ctx
@@ -23,11 +25,21 @@ export const onRequestPost = async (ctx: Ctx): Promise<Response> => {
   const doc = await fleetDoc(env, { fresh: true, waitUntil: ctx.waitUntil })
   const msg = fleetMessage(doc, `${url.origin}/fleet`)
   const deployments = doc.deployments.map(({ name, color }) => ({ name, color }))
-  const card = await renderPng(env, url.origin, fleetSvg({ tier: 'full', theme: 'dark', deployments, doc, now: doc.now }))
-  if (dry) return json({ action: 'dry', card_bytes: card.byteLength, ...msg })
+  const input = { tier: 'full', theme: 'dark', deployments, doc, now: doc.now } as const
+  const card = await renderPng(env, url.origin, fleetSvg(input))
+  const panels = await Promise.all(PANELS.map(async (panel, only) => ({ panel, png: await renderPng(env, url.origin, fleetSvg({ ...input, only })) })))
+  if (dry) return json({ action: 'dry', card_bytes: card.byteLength, panel_bytes: panels.map(p => p.png.byteLength), ...msg })
+  let posted
   try {
-    return json(await publish(env, msg, card, url.searchParams.has('new')))
+    posted = await publish(env, msg, card, url.searchParams.has('new'))
   } catch (e) {
-    return json({ error: e instanceof Error ? e.message : String(e) }, 502)
+    return json({ error: errText(e) }, 502)
+  }
+  try {
+    return json({ ...posted, split: await publishSplit(env, posted, panels) })
+  } catch (e) {
+    return json({ ...posted, split_error: errText(e) })
   }
 }
+
+const errText = (e: unknown): string => (e instanceof Error ? e.message : String(e))
