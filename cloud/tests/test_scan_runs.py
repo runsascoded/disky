@@ -959,7 +959,7 @@ def test_lost_reason_leaves_a_live_job(state):
 
 def test_lost_reason_cancelled_and_deleting():
     assert scan_runs.lost_reason(batch_job_doc("CANCELLED", RUN_EV, ("2026-10-18T08:00:00Z", "Job state is set from RUNNING to CANCELLED."))) == (
-        "lost: Batch job CANCELLED; last event: Job state is set from RUNNING to CANCELLED.", ts("2026-10-18T08:00:00"))
+        "cancelled", ts("2026-10-18T08:00:00"))
     assert scan_runs.lost_reason(batch_job_doc("DELETION_IN_PROGRESS", RUN_EV)) == (
         f"lost: Batch job DELETION_IN_PROGRESS; last event: {RUN_EV[1]}", None)
 
