@@ -178,16 +178,30 @@ class FakeSlack:
     def __init__(self, log: list):
         self.log = log
 
-    def post(self, content, thread_id=None, *, username=None, icon_url=None, icon_emoji=None):
-        self.log.append({"op": "post", "content": content, "thread_id": thread_id, "username": username, "icon_url": icon_url, "icon_emoji": icon_emoji})
+    def post(self, content, thread_id=None, *, username=None, icon_url=None, icon_emoji=None, files=()):
+        self.log.append({"op": "post", "content": content, "thread_id": thread_id, "username": username, "icon_url": icon_url, "icon_emoji": icon_emoji,
+                         **({"files": list(files)} if files else {})})
         return _Msg(f"m{sum(c['op'] == 'post' for c in self.log)}")
 
     def permalink(self, ts):
         return f"https://slack.example.org/archives/C1/p{ts}"
 
-    def edit(self, ts, content):
-        self.log.append({"op": "edit", "ts": ts, "content": content})
+    def edit(self, ts, content, *, files=None):
+        self.log.append({"op": "edit", "ts": ts, "content": content, **({"files": list(files)} if files is not None else {})})
         return _Msg(ts)
+
+    def upload(self, name, data, *, alt_text=None):
+        self.log.append({"op": "upload", "name": name, "data": data.decode("latin-1"), "alt_text": alt_text})
+        return f"F{sum(c['op'] in ('upload', 'replace_file') for c in self.log)}"
+
+    def replace_file(self, ts, name, data, content, *, previous=None, alt_text=None):
+        from thrds.slack import FileSwap
+
+        self.log.append({"op": "replace_file", "ts": ts, "name": name, "data": data.decode("latin-1"), "content": content, "previous": previous, "alt_text": alt_text})
+        return FileSwap(file_id=f"F{sum(c['op'] in ('upload', 'replace_file') for c in self.log)}", deleted=list(previous or []))
+
+    def delete_file(self, file_id):
+        self.log.append({"op": "delete_file", "file_id": file_id})
 
     def delete(self, message_id, orphans_ok=False):
         self.log.append({"op": "delete", "ts": message_id, "orphans_ok": orphans_ok})
@@ -448,3 +462,64 @@ def test_cw_provisional_delete_retried(monkeypatch, tmp_path: Path):
     state = run("2026-09-30T1201")
     assert [(c["op"], c.get("ts")) for c in log[n:]] == [("edit", "m1"), ("delete", "m3")]
     assert sorted(state) == ["op_ts", "plot_name", "posted", "variant"]
+
+
+# ---- the OP's plot as an attached file ----------------------------------------
+
+
+def _op_calls(log: list, state: dict) -> list[dict]:
+    """The log's OP-level calls (not the replies'), with the plot's random name and the OP bodies' plot-URL timestamps
+    normalized."""
+    keep = [c for c in log if c["op"] in ("upload", "replace_file", "delete_file")
+            or (c["op"] == "post" and c["thread_id"] is None) or (c["op"] == "edit" and c["ts"] == state["op_ts"])]
+    out = json.dumps(keep, ensure_ascii=False).replace(state["plot_name"], "<plot>")
+    return json.loads(re.sub(r"\?v=\d+", "?v=<t>", out))
+
+
+def test_cw_plot_attached(slack, tmp_path: Path, site_image: list):
+    # a rendered plot rides below the OP as an attached file (Download on phones); each converge swaps in the new one,
+    # deleting the old only after the edit
+    root = cw_root(tmp_path)
+    (tmp_path / "icons").mkdir()
+    data = CW.load(str(root), SEP)
+    plain = CW.op_body(data, SEP, None, None)
+    title = f"{CW.cfg.title} — September 2026"
+    first = DG.converge_slack(CW, str(root), SEP, _client(), "C1", "sender", icons_dir=tmp_path / "icons")
+    second = DG.converge_slack(CW, str(root), SEP, _client(), "C1", "sender", icons_dir=tmp_path / "icons")
+    assert (first["plot_file"], second["plot_file"]) == ("F1", "F2")
+    assert _op_calls(slack, second) == [
+        {"op": "upload", "name": "<plot>", "data": "\x89PNG", "alt_text": title},
+        {"op": "post", "content": plain, "thread_id": None, "username": title, "icon_url": None, "icon_emoji": None, **CW.cfg.op_sender(), "files": ["F1"]},
+        {"op": "replace_file", "ts": "m1", "name": "<plot>", "data": "\x89PNG", "content": plain, "previous": ["F1"], "alt_text": title},
+    ]
+
+
+@thrds_fake(SlackClient)
+class NoFileScopes(FakeSlack):
+    def upload(self, name, data, *, alt_text=None):
+        from thrds.slack import SlackApiError
+
+        raise SlackApiError("files.getUploadURLExternal", "missing_scope")
+
+    def replace_file(self, ts, name, data, content, *, previous=None, alt_text=None):
+        return self.upload(name, data, alt_text=alt_text)
+
+
+def test_cw_plot_without_file_scopes(monkeypatch, tmp_path: Path, site_image: list):
+    # a bot Slack won't let upload keeps its plot as an image block, posting and editing as before
+    import thrds.slack
+
+    log: list = []
+    monkeypatch.setattr(thrds.slack, "SlackClient", lambda token, channel: NoFileScopes(log))
+    root = cw_root(tmp_path)
+    (tmp_path / "icons").mkdir()
+    data = CW.load(str(root), SEP)
+    DG.converge_slack(CW, str(root), SEP, _client(), "C1", "sender", icons_dir=tmp_path / "icons")
+    state = DG.converge_slack(CW, str(root), SEP, _client(), "C1", "sender", icons_dir=tmp_path / "icons")
+    body = re.sub(r"\?v=\d+", "?v=<t>", CW.op_body(data, SEP, f"{CW.cfg.plot_base}/<plot>?v=0", None))
+    title = f"{CW.cfg.title} — September 2026"
+    assert state.get("plot_file") is None
+    assert _op_calls(log, state) == [
+        {"op": "post", "content": body, "thread_id": None, "username": title, "icon_url": None, "icon_emoji": None, **CW.cfg.op_sender()},
+        {"op": "edit", "ts": "m1", "content": body},
+    ]
