@@ -30,8 +30,14 @@ export interface Env {
   SLACK_FLEET_CHANNEL?: string
   /** The post's ts, when it's pinned by hand rather than kept in `FLEET_KV`. */
   SLACK_FLEET_TS?: string
-  /** Where the post's channel + ts are kept between runs. */
+  /** Where the post's channel + ts are kept between runs (and its replies'). */
   FLEET_KV?: KVNamespace
+  /** The post's run-state emoji over the defaults: a JSON object, keys `ok`, `warn`, `failed`, `running`, `cancelled`,
+   *  each a `:shortcode:` (`slack.ts` `parseEmoji`). */
+  FLEET_EMOJI?: string
+  /** Which image replies the post keeps (`replies.ts`): comma-separated `month`, `timeline`, `cost`, `deployments`;
+   *  unset: all, empty: none. */
+  FLEET_REPLIES?: string
   /** Local dev only (`.dev.vars`, never a Pages secret): a localhost request is this signed-in address. */
   DEV_EMAIL?: string
   /** The deployments' tokens, under the names `FLEET_JSON` gives. */

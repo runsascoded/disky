@@ -8,9 +8,9 @@
  * `api/scan-runs/[[path]].ts`, `api/series.ts`), nothing more.
  */
 import type { Env } from './env.js'
-import type { FleetDeployment, FleetDoc, FleetMeta, FleetRun, MetaPoint, ObjPoint } from './fleetTypes.js'
+import type { CostDay, FleetDeployment, FleetDoc, FleetMeta, FleetRun, MetaPoint, ObjPoint } from './fleetTypes.js'
 
-export type { FleetDeployment, FleetDoc, FleetHealth, FleetMeta, FleetRun, MetaPoint } from './fleetTypes.js'
+export type { CostDay, FleetDeployment, FleetDoc, FleetHealth, FleetMeta, FleetRun, MetaPoint } from './fleetTypes.js'
 
 export interface Deployment {
   name: string
@@ -45,7 +45,7 @@ export function parseFleet(raw: string | undefined): Deployment[] {
 
 interface HealthWire { freshness: { newest_scan: string | null; newest_scan_age: number | null }; gaps: Record<string, number> }
 interface IssueWire { phase: string; recovery: unknown; passing?: unknown }
-interface RunWire {
+export interface RunWire {
   run: {
     run_id: string; scan: string; kind: string; status: string; started_ts: number | null; trigger?: string | null
     /** The run's reply in `#<deployment>-admin` (a Slack permalink, `scan_runs.thread_url`); absent from a site or D1
@@ -104,6 +104,26 @@ export const fleetRun = (s: RunWire): FleetRun => ({
   ...(s.run.trigger === 'manual' && s.run.trigger_emoji && SLACK_EMOJI.test(s.run.trigger_emoji) ? { trigger_emoji: s.run.trigger_emoji } : {}),
 })
 
+/** 00:00 UTC of the first day of the month before `now`'s (epoch s). */
+export function prevMonthStart(now: number): number {
+  const d = new Date(now * 1000)
+  return Date.UTC(d.getUTCFullYear(), d.getUTCMonth() - 1, 1) / 1000
+}
+
+/** Each UTC day's summed cost of `runs` (scan runs, finished, with a cost) since the start of the previous month, oldest
+ *  first: the cost reply compares this month's running total with last month's. */
+export function costDaily(runs: RunWire[], now: number): CostDay[] {
+  const from = prevMonthStart(now)
+  const days = new Map<number, number>()
+  for (const s of runs) {
+    const t = s.run.started_ts
+    if (s.run.kind !== SCAN_KIND || s.run.status === 'nop' || s.run.status === 'running' || s.cost_usd === null || t === null || t < from) continue
+    const day = Math.floor(t / DAY) * DAY
+    days.set(day, (days.get(day) ?? 0) + s.cost_usd)
+  }
+  return [...days].sort(([a], [b]) => a - b).map(([t, usd]) => ({ t, usd }))
+}
+
 /** The meta store's points as the document carries them, relative to `now`. */
 export function fleetMeta(points: SeriesWire['points'], now: number): FleetMeta {
   const pts = points.flatMap(p => { const t = scanTime(p.date); return t === null ? [] : [{ scan: p.date, t, bytes: p.bytes ?? p.b ?? 0 }] }).sort((a, b) => a.t - b.t)
@@ -157,6 +177,7 @@ export async function readDeployment(d: Deployment, env: Env, now: number, nRuns
       out.runs = r.runs.filter(s => s.run.kind === SCAN_KIND && s.run.status !== 'nop')
         .filter((s, i) => i === 0 || (s.run.started_ts ?? 0) >= since).slice(0, nRuns).map(fleetRun)
       out.last = out.runs[0] ?? null
+      out.cost_daily = costDaily(r.runs, now)
     }, e => { out.errors.runs = why(e) }),
     getJson<SeriesWire>(f, `${d.url}/api/series?store=meta`, token).then(s => {
       out.meta = fleetMeta(s.points, now)
@@ -188,7 +209,7 @@ const colo = (): Cache | null => (typeof caches === 'undefined' ? null : (caches
  *  by the deployment list and run count, so a config change reads anew. */
 export async function fleetDoc(env: Env, opts: { fresh?: boolean; waitUntil?: (p: Promise<unknown>) => void } = {}, f: Fetcher = fetch): Promise<FleetDoc> {
   const cache = colo()
-  const key = new Request(`https://fleet.cache/v2/${encodeURIComponent(env.FLEET_JSON ?? '')}/${runsOf(env)}`)
+  const key = new Request(`https://fleet.cache/v3/${encodeURIComponent(env.FLEET_JSON ?? '')}/${runsOf(env)}`)
   if (cache && !opts.fresh) {
     const hit = await cache.match(key)
     if (hit) return hit.json() as Promise<FleetDoc>

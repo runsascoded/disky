@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest'
 import type { FleetDeployment, FleetDoc, FleetRun } from './fleetTypes'
 import { fakeChannel } from '@open-athena/thrds/testing'
 import type { Env } from './env'
-import { CARD_NAME, fleetMessage, KV_KEY, publish, publishSplit, SECTION_MAX, SPLIT_KV_KEY, SPLIT_TEXT, splitName } from './slack'
+import { CARD_NAME, DEFAULT_EMOJI, fleetMessage, KV_KEY, parseEmoji, publish, publishSplit, SECTION_MAX, SPLIT_KV_KEY, SPLIT_TEXT, splitName } from './slack'
 import { NOW } from './testFleet'
 
 const H = 3600
@@ -63,6 +63,41 @@ describe('a manual run\'s starter', () => {
     expect(lines([dep('g', { last: by, runs: [by, run({ run_id: 'r-2', status: 'failed', failed_at: 'index' })] }), dep('h', { last: anon, runs: [anon] })])).toEqual([
       '*<https://g.test|g>*  :ryan::white_check_mark::x:',
       '*<https://h.test|h>*  :bust_in_silhouette::white_check_mark:',
+    ])
+  })
+})
+
+describe('a cancelled run', () => {
+  const lines = (ds: FleetDeployment[], emoji = DEFAULT_EMOJI) => (fleetMessage({ ...doc, deployments: ds }, 'https://fleet.test/fleet', emoji).blocks as { type: string; text?: { text: string } }[])
+    .slice(1, -1).map(b => b.text!.text)
+  const cancelled = run({ status: 'cancelled', secs: 900, cost_usd: 0.05 })
+  const k = dep('k', { last: cancelled, runs: [cancelled, run({ run_id: 'r-2', status: 'failed', failed_at: 'index' })] })
+
+  it('is its own state, 🚫 not ❌: the line says cancelled, not failed', () => {
+    expect([lines([k]), fleetMessage({ ...doc, deployments: [k] }, 'https://fleet.test/fleet').text]).toEqual([
+      ['*<https://k.test|k>*  :alarm_clock::no_entry_sign::x:  <https://k.test/scans/r|2026-11-07> · cancelled · 15m · $0.05 · <https://k.test/meta|/meta> n/a · <https://k.test/scans|scans>'],
+      'disky fleet: k cancelled',
+    ])
+  })
+
+  it('FLEET_EMOJI overrides any state\'s emoji (`warn`: an open step issue); unset is the defaults; anything else raises', () => {
+    const custom = parseEmoji('{"cancelled": ":stop_sign:", "warn": ":large_orange_diamond:"}')
+    const errs = ['[]', '{"cancel": ":x:"}', '{"ok": "yes"}', 'nope'].map(raw => { try { parseEmoji(raw); return null } catch (e) { return (e as Error).message } })
+    expect([
+      parseEmoji(undefined), parseEmoji(''), custom,
+      lines([k, dep('w', { last: run({ open_issues: ['dups'] }), runs: [run({ open_issues: ['dups'] })] })], custom).map(l => l.split('  ').slice(0, 2).join('  ')),
+      errs.slice(0, 3),
+      errs[3] === null,
+    ]).toEqual([
+      DEFAULT_EMOJI, DEFAULT_EMOJI,
+      { ...DEFAULT_EMOJI, cancelled: ':stop_sign:', issues: ':large_orange_diamond:' },
+      ['*<https://k.test|k>*  :alarm_clock::stop_sign::x:', '*<https://w.test|w>*  :alarm_clock::large_orange_diamond:'],
+      [
+        'FLEET_EMOJI: not a JSON object',
+        'FLEET_EMOJI: unknown key "cancel" (keys: ok, warn, failed, running, cancelled)',
+        'FLEET_EMOJI.ok: not a :shortcode: ("yes")',
+      ],
+      false,
     ])
   })
 })

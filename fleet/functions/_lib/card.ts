@@ -17,15 +17,15 @@ import type { FleetDoc, FleetRun } from './fleetTypes.js'
 export const CARD_W = 480
 /** The PNG's scale: 1200 px wide. */
 export const ZOOM = 2.5
-const PAD = 14
-const AXIS = 38
-const DAY = 86400
+export const PAD = 14
+export const AXIS = 38
+export const DAY = 86400
 /** Days the panels span, today included. */
 export const WINDOW_DAYS = 7
 
 export type Theme = 'dark' | 'light'
-interface Palette { bg: string; panel: string; ink: string; ink2: string; ink3: string; grid: string; border: string }
-const THEMES: Record<Theme, Palette> = {
+export interface Palette { bg: string; panel: string; ink: string; ink2: string; ink3: string; grid: string; border: string }
+export const THEMES: Record<Theme, Palette> = {
   dark: { bg: '#1a1a19', panel: '#232322', ink: '#f4f4f5', ink2: '#c3c2b7', ink3: '#9a988d', grid: '#33332f', border: '#3a3a36' },
   light: { bg: '#ffffff', panel: '#f6f6f3', ink: '#1a1a19', ink2: '#45443e', ink3: '#6b6a62', grid: '#e2e1da', border: '#d9d8d0' },
 }
@@ -36,13 +36,13 @@ export function mix(color: string, toward: string, f: number): string {
   return `#${[0, 1, 2].map(i => Math.round(p(color, i) + (p(toward, i) - p(color, i)) * f).toString(16).padStart(2, '0')).join('')}`
 }
 
-const halo = (color: string, t: Theme): string => (t === 'dark' ? THEMES.dark.panel : mix(color, '#000000', 0.35))
-const labelColor = (color: string, t: Theme): string => (t === 'dark' ? mix(color, '#ffffff', 0.2) : mix(color, '#000000', 0.4))
+export const halo = (color: string, t: Theme): string => (t === 'dark' ? THEMES.dark.panel : mix(color, '#000000', 0.35))
+export const labelColor = (color: string, t: Theme): string => (t === 'dark' ? mix(color, '#ffffff', 0.2) : mix(color, '#000000', 0.4))
 
-const r1 = (n: number) => Math.round(n * 10) / 10
+export const r1 = (n: number) => Math.round(n * 10) / 10
 
 interface TextOpts { fill: string; weight?: 400 | 600; anchor?: 'start' | 'middle' | 'end' }
-function text(x: number, y: number, s: string, px: number, o: TextOpts): string {
+export function text(x: number, y: number, s: string, px: number, o: TextOpts): string {
   return `<text x="${r1(x)}" y="${r1(y)}" font-size="${px}" font-weight="${o.weight ?? 400}" fill="${o.fill}"${o.anchor && o.anchor !== 'start' ? ` text-anchor="${o.anchor}"` : ''}>${esc(s)}</text>`
 }
 
@@ -54,8 +54,8 @@ export const fmtCount = (n: number): string => new Intl.NumberFormat('en-US', { 
 /** Hours, to a tenth: `2.1h`; under an hour, minutes: `47m`. */
 export const fmtHours = (secs: number): string => (secs < 3600 ? `${Math.round(secs / 60)}m` : `${(secs / 3600).toFixed(1)}h`)
 export const fmtUsd = (usd: number): string => `$${usd < 10 ? usd.toFixed(2) : usd.toFixed(0)}`
-const md = (t: number) => { const d = new Date(t * 1000); return `${d.getUTCMonth() + 1}/${d.getUTCDate()}` }
-const stamp = (t: number) => new Date(t * 1000).toISOString().slice(0, 16).replace('T', ' ')
+export const md = (t: number) => { const d = new Date(t * 1000); return `${d.getUTCMonth() + 1}/${d.getUTCDate()}` }
+export const stamp = (t: number) => new Date(t * 1000).toISOString().slice(0, 16).replace('T', ' ')
 
 /** A point; `top` (cost only) is the day's total with its manual runs, drawn as a bar above `v`. */
 interface Pt { t: number; v: number; top?: number; hollow?: boolean }
@@ -73,6 +73,10 @@ export interface CardInput {
   now: number
   /** Draw only this panel (an index into the card's `PANELS`), under the full header: one image of a split card. */
   only?: number
+  /** Days the panels span, today included (default `WINDOW_DAYS`): the 30-day card is the page's whole window. */
+  days?: number
+  /** The header's title (default `disky fleet`): a one-deployment card names its deployment. */
+  title?: string
 }
 
 const runPts = (runs: FleetRun[], from: number, v: (r: FleetRun) => number | null): Pt[] =>
@@ -169,7 +173,11 @@ function yScale(traces: Trace[], log: boolean, y0: number, h: number, count = fa
 export function fleetSvg(c: CardInput): string {
   const P = THEMES[c.theme]
   const to = (Math.floor(c.now / DAY) + 1) * DAY
-  const from = to - WINDOW_DAYS * DAY
+  const days = c.days ?? WINDOW_DAYS
+  const from = to - days * DAY
+  // a long window labels every `step`th day, counted back from today, so today's column is always labelled
+  const step = days > 10 ? Math.ceil(days / 6) : 1
+  const labelled = (t: number) => Math.round((to - DAY - t) / DAY) % step === 0
   const full = c.tier === 'full' && c.doc
   const all: PanelSpec[] = full ? panels(c.doc!, from) : ANON_PANELS.map(p => ({ ...p, note: '', traces: [] }))
   const specs = c.only === undefined ? all : [all[c.only]]
@@ -182,7 +190,7 @@ export function fleetSvg(c: CardInput): string {
   const out: string[] = []
 
   // header: the title, the time, then the deployments as a legend
-  out.push(text(PAD, PAD + 15, 'disky fleet', 17, { fill: P.ink, weight: 600 }))
+  out.push(text(PAD, PAD + 15, c.title ?? 'disky fleet', 17, { fill: P.ink, weight: 600 }))
   out.push(text(CARD_W - PAD, PAD + 15, full ? `${stamp(c.doc!.now)} UTC` : 'sign in for the numbers', 11, { fill: P.ink3, anchor: 'end' }))
   let lx = PAD
   for (const d of c.deployments) {
@@ -215,7 +223,7 @@ export function fleetSvg(c: CardInput): string {
     out.push(`<rect x="${r1(left)}" y="${r1(y0)}" width="${r1(right - left)}" height="${h}" fill="${P.panel}"/>`)
     // the days: a rule at each midnight, the date under its column
     for (let t = from; t <= to; t += DAY) out.push(`<line x1="${r1(X(t))}" x2="${r1(X(t))}" y1="${r1(y0)}" y2="${r1(y0 + h)}" stroke="${P.grid}"/>`)
-    for (let t = from; t < to; t += DAY) out.push(text(X(t + DAY / 2), y0 + h + 13, md(t), 10, { fill: P.ink3, anchor: 'middle' }))
+    for (let t = from; t < to; t += DAY) if (labelled(t)) out.push(text(X(t + DAY / 2), y0 + h + 13, md(t), 10, { fill: P.ink3, anchor: 'middle' }))
     if (s.traces.length) {
       const { ticks, Y } = yScale(s.traces, s.log, y0, h, s.count)
       for (const [v, label] of ticks) {
@@ -262,7 +270,7 @@ export function fleetSvg(c: CardInput): string {
         out.push(text((left + right) / 2, y0 + h / 2 + 4, msg, 12, { fill: P.ink2, anchor: 'middle' }))
       }
     } else {
-      out.push(text((left + right) / 2, y0 + h / 2 + 4, 'no data this week', 12, { fill: P.ink3, anchor: 'middle' }))
+      out.push(text((left + right) / 2, y0 + h / 2 + 4, days === WINDOW_DAYS ? 'no data this week' : `no data in ${days} days`, 12, { fill: P.ink3, anchor: 'middle' }))
     }
     y = y0 + h + 24
   }

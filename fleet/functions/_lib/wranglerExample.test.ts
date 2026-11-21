@@ -15,6 +15,7 @@ describe('wrangler.example.toml', () => {
     expect(fields).toEqual([
       'SESSION_SECRET', 'STAFF_DOMAIN', 'OA_LOGIN_ISSUER', 'OA_LOGIN_CLIENT_ID', 'OA_LOGIN_CLIENT_SECRET', 'FLEET_JSON', 'FLEET_RUNS',
       'FLEET_CARD_PUBLIC', 'FLEET_JOB_TOKEN', 'DISKY_SLACK_BOT_TOKEN', 'SLACK_FLEET_CHANNEL', 'SLACK_FLEET_TS', 'FLEET_KV',
+      'FLEET_EMOJI', 'FLEET_REPLIES',
     ])
   })
 })

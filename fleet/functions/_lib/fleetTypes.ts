@@ -47,6 +47,12 @@ export interface FleetMeta {
   daily: MetaPoint[]
 }
 
+/** A UTC day (its 00:00, epoch s) and its scan runs' summed cost. */
+export interface CostDay {
+  t: number
+  usd: number
+}
+
 export interface FleetHealth {
   newest_scan: string | null
   /** Seconds. */
@@ -69,6 +75,10 @@ export interface FleetDeployment {
   meta: FleetMeta | null
   /** The primary store's object count: the newest scan per UTC day over `HISTORY_DAYS`, oldest first. */
   objects: ObjPoint[] | null
+  /** Each UTC day's summed cost of the scan runs that recorded one, oldest first, from the start of the previous UTC month
+   *  (the month-over-month cost reply's data). From every run the deployment lists, so it reaches past `runs`'
+   *  `HISTORY_DAYS`; absent when its runs couldn't be read. */
+  cost_daily?: CostDay[]
   /** Why a part is missing: `health`, `runs`, `meta`, `objects`. */
   errors: Partial<Record<'health' | 'runs' | 'meta' | 'objects', string>>
 }
