@@ -925,11 +925,18 @@ def _post_op(tpl: Template, data, month: dt.date, client, state: dict, body: str
     `replace_files`: each uploaded and processed, then attached, and only then the replaced ones deleted). A bot Slack
     won't let upload (no ``files:write`` / ``files:read``) keeps the image block (``body``), with a warning. Without
     newly rendered plots, an OP whose plot is already attached keeps its files under the plain body; otherwise ``body``
-    as is. ``state["plot_file"]`` (one file, before the parts) counts as the attached files."""
+    as is. ``state["plot_file"]`` (one file, before the parts) counts as the attached files.
+
+    Each attach is read back (`_files_shown`): Slack can accept an edit's ``file_ids`` and record the share while the
+    message shows none of them (cw's OP, a username-override ``bot_message``, 2026-11-20). Then the OP is edited back
+    to ``body`` (the image block), the uploads deleted, and ``state["files_unrendered"]`` names the OP, whose later
+    runs keep the image block without uploading."""
     from thrds.slack import FilesNotAttachedError, FileSpec, FileSwapError
 
     cfg = tpl.cfg
     op_ts = state.get("op_ts")
+    if op_ts and state.get("files_unrendered") == op_ts:
+        plots = None
     old = state.get("plot_files") or ([state["plot_file"]] if state.get("plot_file") else [])
     if not plots:
         if op_ts:
@@ -947,6 +954,8 @@ def _post_op(tpl: Template, data, month: dt.date, client, state: dict, body: str
                 _err(f"digest: WARN could not delete the replaced plot {fid}: {e}")
             state["plot_files"] = swap.file_ids
             state.pop("plot_file", None)
+            if not _files_shown(client, op_ts, swap.file_ids):
+                _files_unrendered(client, state, op_ts, body)
             return op_ts
         for spec in specs:
             file_ids.append(client.upload(spec.name, spec.data, alt_text=spec.alt_text))
@@ -971,7 +980,30 @@ def _post_op(tpl: Template, data, month: dt.date, client, state: dict, body: str
         raise
     state["plot_files"] = file_ids
     state.pop("plot_file", None)
+    if not _files_shown(client, ts, file_ids):
+        _files_unrendered(client, state, ts, body)
     return ts
+
+
+def _files_shown(client, ts: str, file_ids: list[str]) -> bool:
+    """Whether message ``ts`` shows any of ``file_ids`` (`attached_files`, read back after the edit that attached them).
+    A failed read warns and counts as shown: only Slack saying the message has none of them reverts it."""
+    try:
+        shown = {fid for fid, _ in client.attached_files(ts)}
+    except Exception as e:  # noqa: BLE001 — unverifiable is not unrendered
+        _err(f"digest: WARN could not read back the OP {ts}'s files ({type(e).__name__}: {e}); assuming they show")
+        return True
+    return bool(shown & set(file_ids))
+
+
+def _files_unrendered(client, state: dict, ts: str, body: str) -> None:
+    """The OP ``ts`` took its plot files without showing them (`_files_shown`): edit it back to ``body`` (the image
+    block, detaching them), delete them, and record the OP in ``state["files_unrendered"]``."""
+    file_ids = state.pop("plot_files", None) or []
+    _err(f"digest: WARN Slack attached the plot files {file_ids} to the OP {ts} but it shows none; reverting to the image block")
+    client.edit(ts, body, files=[])
+    _delete_files(client, file_ids)
+    state["files_unrendered"] = ts
 
 
 def _delete_files(client, file_ids: list[str]) -> None:

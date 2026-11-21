@@ -177,17 +177,25 @@ class FakeSlack:
 
     def __init__(self, log: list):
         self.log = log
+        self.attached: dict[str, list[str]] = {}  # each message's files, as `attached_files` reads them back (unlogged)
 
     def post(self, content, thread_id=None, *, username=None, icon_url=None, icon_emoji=None, files=()):
         self.log.append({"op": "post", "content": content, "thread_id": thread_id, "username": username, "icon_url": icon_url, "icon_emoji": icon_emoji,
                          **({"files": list(files)} if files else {})})
-        return _Msg(f"m{sum(c['op'] == 'post' for c in self.log)}")
+        ts = f"m{sum(c['op'] == 'post' for c in self.log)}"
+        self.attached[ts] = list(files)
+        return _Msg(ts)
+
+    def attached_files(self, ts):
+        return [(fid, None) for fid in self.attached.get(ts, [])]
 
     def permalink(self, ts):
         return f"https://slack.example.org/archives/C1/p{ts}"
 
     def edit(self, ts, content, *, files=None):
         self.log.append({"op": "edit", "ts": ts, "content": content, **({"files": list(files)} if files is not None else {})})
+        if files is not None:
+            self.attached[ts] = list(files)
         return _Msg(ts)
 
     def _issued(self) -> int:
@@ -206,6 +214,7 @@ class FakeSlack:
         self.log.append({"op": "replace_files", "ts": ts, "files": [[f.name, f.data.decode("latin-1"), f.alt_text] for f in files], "content": content,
                          "previous": [list(x) for x in previous or []]})
         ids = [f"F{n + k + 1}" for k in range(len(files))]
+        self.attached[ts] = ids
         return FilesSwap(file_ids=ids, uploaded=ids, deleted=[i for i, _ in previous or []])
 
     def delete_file(self, file_id):
@@ -577,3 +586,44 @@ def test_cw_plot_without_file_scopes(monkeypatch, tmp_path: Path, site_image: li
         {"op": "post", "content": body, "thread_id": None, "username": title, "icon_url": None, "icon_emoji": None, **CW.cfg.op_sender()},
         {"op": "edit", "ts": "m1", "content": body},
     ]
+
+
+@thrds_fake(SlackClient)
+class FilesNotShown(FakeSlack):
+    """Slack accepts the files' attach, but the message reads back without them (a username-override `bot_message`)."""
+
+    def attached_files(self, ts):
+        return []
+
+
+@pytest.mark.parametrize("before", ["new", "attached"])
+def test_cw_plot_files_not_shown(monkeypatch, tmp_path: Path, site_image: list, before: str):
+    # an OP that reads back without the files it was just given goes back to the image block, its uploads deleted, and
+    # later runs on it keep the image block without uploading. `attached`: an OP whose state says its plot is attached
+    # (cw's 11/20 OP) is reverted on its next run
+    import thrds.slack
+
+    log: list = []
+    monkeypatch.setattr(thrds.slack, "SlackClient", lambda token, channel: FilesNotShown(log))
+    root = cw_root(tmp_path)
+    (tmp_path / "icons").mkdir()
+    data = CW.load(str(root), SEP)
+    body = re.sub(r"\?v=\d+", "?v=<t>", CW.op_body(data, SEP, f"{CW.cfg.plot_base}/<plot>.png?v=0", None))
+    plain = CW.op_body(data, SEP, None, None)
+    title = f"{CW.cfg.title} — September 2026"
+    post = {"op": "post", "content": plain, "thread_id": None, "username": title, "icon_url": None, "icon_emoji": None, **CW.cfg.op_sender()}
+    upload = {"op": "upload", "name": "<plot>.png", "data": "\x89PNG", "alt_text": title}
+    if before == "attached":
+        monkeypatch.setattr(FilesNotShown, "attached_files", FakeSlack.attached_files)
+        DG.converge_slack(CW, str(root), SEP, _client(), "C1", "sender", icons_dir=tmp_path / "icons")
+        monkeypatch.setattr(FilesNotShown, "attached_files", lambda self, ts: [])
+    first = DG.converge_slack(CW, str(root), SEP, _client(), "C1", "sender", icons_dir=tmp_path / "icons")
+    second = DG.converge_slack(CW, str(root), SEP, _client(), "C1", "sender", icons_dir=tmp_path / "icons")
+    assert (first.get("plot_files"), first["files_unrendered"], second.get("plot_files"), second["files_unrendered"]) == (None, "m1", None, "m1")
+    attach = (
+        [upload, {**post, "files": ["F1"]}] if before == "new" else
+        [upload, {**post, "files": ["F1"]},
+         {"op": "replace_files", "ts": "m1", "files": [["<plot>.png", "\x89PNG", title]], "content": plain, "previous": [["F1", None]]}]
+    )
+    revert = [{"op": "edit", "ts": "m1", "content": body, "files": []}, {"op": "delete_file", "file_id": "F1" if before == "new" else "F2"}]
+    assert _op_calls(log, second) == [*attach, *revert, {"op": "edit", "ts": "m1", "content": body}]
