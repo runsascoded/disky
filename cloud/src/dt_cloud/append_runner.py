@@ -1676,6 +1676,11 @@ class Runner:
     now: Callable[[], datetime] = lambda: datetime.now(timezone.utc)
     merge: bool = True
     merge_wait: float | None = 0
+    #: How long the compaction stage waits on its last job (`compact_stage`): 0 submits it and goes, None waits to its
+    #: end. Apart from `merge_wait`: a merge is minutes, a fold hours (gcs's 2026-11-21: 2 h 30 min), and a scan's step
+    #: waiting on one only runs into its own timeout (that day's `interval-store` phase, killed at 60 min while the fold
+    #: went on to publish). The compaction is its own job, with its own `/scans` record and alerts.
+    compact_wait: float | None = 0
     timings: dict = field(default_factory=dict)
     #: The manifests this run's R2 jobs copied (stems): the merge stage doesn't copy one again.
     copied: set = field(default_factory=set)
@@ -1943,7 +1948,7 @@ class Runner:
 
     def compact_stage(self, scan: str) -> None:
         """The compaction stage (`compaction` says why): its Batch jobs (`compact_jobs`), the last waited on up to
-        `merge_wait` s; they publish the new generation on GCS, then R2 (its pointer last), so the next run appends to it
+        `compact_wait` s (default 0: submitted, not waited on); they publish the new generation on GCS, then R2 (its pointer last), so the next run appends to it
         (`follow`). Non-fatal, as the merge stage: a rerun resumes (the job follows a finished compaction's successor).
 
         Before submitting, the compaction lease (`compacting`) is written for the `compact` job (its `holder`, which the
@@ -1963,7 +1968,7 @@ class Runner:
                     return
         try:
             for i, (name, spec) in enumerate(jobs):
-                wait = self.merge_wait if i == len(jobs) - 1 else None
+                wait = self.compact_wait if i == len(jobs) - 1 else None
 
                 def one(name: str = name, spec: dict = spec, wait: float | None = wait) -> None:
                     self.run_job(name, spec, wait=wait)

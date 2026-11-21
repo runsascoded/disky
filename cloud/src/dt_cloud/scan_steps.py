@@ -1255,7 +1255,8 @@ def interval_store(ctx: Ctx, arg: str | None) -> None:
     `options.interval-store.publish_on_failure`: a failed append copies the scan's whole served set to R2, for a site that
     reads only R2 under `publish-r2 -S`: it will list this scan, and read its per-scan sorts until a later run appends it.
     `options.interval-store.profile`: the staged path instead (`interval-store append -c`, its per-range stages Batch
-    jobs of their own, in this task's image; `merge_wait` seconds on the merge job), for a store too big for one task. It
+    jobs of their own, in this task's image; `merge_wait` seconds on the merge job; a due compaction is submitted, never
+    waited on: its job publishes the new generation and has its own `/scans` record), for a store too big for one task. It
     never reads `options.interval-store.compact`: its policy is the profile's `append.compact` / `append.compact_level`."""
     if ctx.reproc:
         err(f"interval-store: not appending {ctx.scan} (REPROC)")

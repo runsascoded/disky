@@ -644,6 +644,7 @@ def merge_cmd(gen: str | None, dry_run: bool, wait: float | None) -> None:
     fails (the store stays as it was: servable)."""
     cfg = ready(profile(), gen)
     runner = gcs_runner(cfg, dry_run=dry_run, merge_wait=wait)
+    runner.compact_wait = wait
 
     def merge() -> None:
         if runner.backfill():

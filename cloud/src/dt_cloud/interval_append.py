@@ -1654,8 +1654,10 @@ def ready(profile: str | None) -> Config:
 @option("-N", "--candidate", is_flag=True, help="The compaction (due, or -K) writes a candidate: published, nothing pointed at it, appends not held off (`interval_append promote` points prod at it)")
 @option("-P", "--profile", help="Deployment profile JSON (default $INTERVAL_STORE_PROFILE)")
 @option("-w", "--merge-wait", default=0, type=float, help="Seconds to wait on the merge job (default 0: submit it and go; it publishes on GCS when done)")
+@option("-W", "--compact-wait", default=0, type=float, help="Seconds to wait on a compaction's job (default 0: submit it and go; it publishes the new generation when done, and appends wait for it meanwhile)")
 @argument("scan_id")
-def append_cmd(catch_up: bool, compact_now: bool, no_merge: bool, dry_run: bool, candidate: bool, profile: str | None, merge_wait: float, scan_id: str) -> None:
+def append_cmd(catch_up: bool, compact_now: bool, no_merge: bool, dry_run: bool, candidate: bool, profile: str | None, merge_wait: float, compact_wait: float,
+               scan_id: str) -> None:
     """Append SCAN_ID to the interval store: prepare → ranges → publish → R2 → prune, each stage skipped when its output
     exists; then the merge stage (the due carries, non-fatal), and when the compaction policy fires (or `-K`) the
     compaction stage (`compact`: GCS, then R2 with its pointer last). A generation compacted since the profile named it
@@ -1664,6 +1666,7 @@ def append_cmd(catch_up: bool, compact_now: bool, no_merge: bool, dry_run: bool,
     cfg = ready(profile)
     runner = store_runner(cfg, dry_run=dry_run, merge=not no_merge, merge_wait=merge_wait)
     runner.compact_now = compact_now
+    runner.compact_wait = compact_wait
     runner.candidate = candidate
     t0 = monotonic()
     done = exit_on(f"interval-store append {scan_id}", lambda: runner.run(scan_id, catch_up=catch_up), lambda m: err(m))
@@ -1681,6 +1684,7 @@ def merge_cmd(dry_run: bool, profile: str | None, wait: float | None) -> None:
     it was)."""
     cfg = ready(profile)
     runner = store_runner(cfg, dry_run=dry_run, merge_wait=wait)
+    runner.compact_wait = wait
     exit_on("interval-store merge", lambda: runner.carries(fatal=True), lambda m: err(m))
     print(json.dumps({"gen": cfg.p.gen, "manifest": (runner.manifests() or [None])[-1], "dry_run": dry_run}))
 

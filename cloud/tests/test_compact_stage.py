@@ -44,6 +44,28 @@ def test_interval_compact_now():
     assert (f.calls(), r.compaction) == ([("compact", f"compact -C level:1 -K -r -j 1 -M 90GB -p 16 {COMMON} -m /gcs/data")], "forced (-K)")
 
 
+def test_compaction_submitted_not_waited_on():
+    """A due compaction's job is submitted and not waited on (`compact_wait` 0, the default), however long the merge job
+    is waited on: a scan's step never sits out an hours-long fold. `compact_wait` None waits to its end (`merge`'s)."""
+    waits: list[tuple[str, float | None]] = []
+
+    def run(f: IvFake, **kw) -> None:
+        job = f.run_job
+
+        def spy(name: str, spec: dict, wait: float | None = None) -> None:
+            waits.append((spec["labels"]["stage"], wait))
+            job(name, spec, wait)
+        f.run_job = spy
+        _two_l0(f)
+        r = f.runner(merge_wait=1800, **kw)
+        r.compact_now = True
+        r.carries()
+
+    run(IvFake(["2026-08-03"], compact_level=1))
+    run(IvFake(["2026-08-03"], compact_level=1), compact_wait=None)
+    assert waits == [("compact", 0), ("compact", None)]
+
+
 def test_compact_jobs_run_long_on_standard_vms():
     """Both stores' `compact` job: STANDARD even on a spot profile (a reclaimed fold restarts from zero), no retries, and
     `LONG_RUN_S` rather than `MAX_RUN_S`; the interval store's folds `compact_jobs` sorts at a time (`-j`); `compact-r2` and
