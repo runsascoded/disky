@@ -73,6 +73,7 @@ main.fleet h1 { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 
 .o-issues { color: var(--warn); }
 .o-failed { color: var(--bad); }
 .o-running { color: var(--accent); }
+.o-cancelled { color: var(--ink3); }
 .scroll { overflow-x: auto; }
 
 /* tooltips (`Tip.tsx`) */

@@ -88,7 +88,7 @@ describe('/api/fleet\'s document over stubbed deployments', () => {
     ])
   })
 
-  it('folds the answers: maintenance and no-op runs skipped, runs over the last 30 days, open issues only, each run\'s thread as its site says it (none from a site that predates it), /meta now / 1 d / 7 d and the newest scan per day; each failure named', async () => {
+  it('folds the answers: maintenance and no-op runs skipped, runs over the last 30 days, each day\'s scan cost since last month began, open issues only, each run\'s thread as its site says it (none from a site that predates it), /meta now / 1 d / 7 d and the newest scan per day; each failure named', async () => {
     const r1 = { run_id: 'r1', scan: '2026-11-07', status: 'succeeded', trigger: 'manual' as const, started: NOW - 7 * H, secs: 7668, cost_usd: 0.5, failed_at: null, open_issues: ['dups'], thread_url: THREAD, trigger_emoji: ':ryan:' }
     const r2 = { run_id: 'r2', scan: '2026-11-06', status: 'failed', trigger: null, started: NOW - 31 * H, secs: 3600, cost_usd: null, failed_at: 'index', open_issues: [] }
     const r3 = { run_id: 'r3', scan: '2026-10-18', status: 'succeeded', trigger: 'schedule' as const, started: NOW - 20 * 24 * H, secs: 3000, cost_usd: 0.4, failed_at: null, open_issues: [], thread_url: null }
@@ -113,6 +113,12 @@ describe('/api/fleet\'s document over stubbed deployments', () => {
           objects: [
             { scan: '2026-11-06T1200', t: t('2026-11-06T12:00Z'), objects: 12 },
             { scan: '2026-11-07', t: t('2026-11-07T00:00Z'), objects: 15 },
+          ],
+          // from Oct 1 (the month before NOW's), reaching past `runs`' 30 days (r4); unpriced (r2) and no-op runs left out
+          cost_daily: [
+            { t: t('2026-10-08T00:00Z'), usd: 0.4 },
+            { t: t('2026-10-18T00:00Z'), usd: 0.4 },
+            { t: t('2026-11-07T00:00Z'), usd: 0.5 },
           ],
           errors: {},
         },

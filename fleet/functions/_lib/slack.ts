@@ -11,25 +11,55 @@ import { FilesNotAttachedError, FileSwapError, SlackApiError, SlackClient } from
 import { fmtHours, fmtUsd } from './card.js'
 import type { Env } from './env.js'
 import type { FleetDeployment, FleetDoc, FleetRun } from './fleet.js'
-import { runOutcome } from './runOutcome.js'
+import { type Outcome, runOutcome } from './runOutcome.js'
 
 export type Block = Record<string, unknown>
 export interface SlackMessage { text: string; blocks: Block[] }
 
+/** Each run outcome's emoji in the post: `FLEET_EMOJI` (`parseEmoji`) overrides any of them. */
+export type Emoji = Record<Outcome, string>
+export const DEFAULT_EMOJI: Emoji = {
+  running: ':hourglass_flowing_sand:', cancelled: ':no_entry_sign:', failed: ':x:', issues: ':warning:', ok: ':white_check_mark:',
+}
+
+/** `FLEET_EMOJI`'s keys, each the outcome it names (`warn`: a step issue still open). */
+export const EMOJI_KEYS: Record<string, Outcome> = { ok: 'ok', warn: 'issues', failed: 'failed', running: 'running', cancelled: 'cancelled' }
+
+/** A Slack emoji shortcode, `:name:`. */
+const SHORTCODE = /^:[a-z0-9_+'-]{1,100}:$/
+
+/** `FLEET_EMOJI` (a JSON object: `EMOJI_KEYS` → `:shortcode:`) over `DEFAULT_EMOJI`; unset is the defaults. Anything else
+ *  raises: a typo'd key or a bare word would silently print in every line. */
+export function parseEmoji(raw: string | undefined): Emoji {
+  if (raw === undefined || raw.trim() === '') return DEFAULT_EMOJI
+  const o: unknown = JSON.parse(raw)
+  if (!o || typeof o !== 'object' || Array.isArray(o)) throw new Error('FLEET_EMOJI: not a JSON object')
+  const out = { ...DEFAULT_EMOJI }
+  for (const [k, v] of Object.entries(o)) {
+    const outcome = EMOJI_KEYS[k]
+    if (!outcome) throw new Error(`FLEET_EMOJI: unknown key ${JSON.stringify(k)} (keys: ${Object.keys(EMOJI_KEYS).join(', ')})`)
+    if (typeof v !== 'string' || !SHORTCODE.test(v)) throw new Error(`FLEET_EMOJI.${k}: not a :shortcode: (${JSON.stringify(v)})`)
+    out[outcome] = v
+  }
+  return out
+}
+
 /** A run's outcome (`runOutcome`), in a few words, and its emoji. */
-function runStatus(r: FleetRun): { emoji: string; word: string } {
+function runStatus(r: FleetRun, emoji: Emoji = DEFAULT_EMOJI): { emoji: string; word: string } {
   const n = r.open_issues.length
-  switch (runOutcome(r)) {
-    case 'running': return { emoji: ':hourglass_flowing_sand:', word: 'running' }
-    case 'failed': return { emoji: ':x:', word: r.failed_at ? `failed at ${r.failed_at}` : 'failed' }
-    case 'issues': return { emoji: ':warning:', word: `${n} step issue${n > 1 ? 's' : ''} open (${r.open_issues.join(', ')})` }
-    case 'ok': return { emoji: ':white_check_mark:', word: 'ok' }
+  const o = runOutcome(r)
+  switch (o) {
+    case 'running': return { emoji: emoji[o], word: 'running' }
+    case 'cancelled': return { emoji: emoji[o], word: 'cancelled' }
+    case 'failed': return { emoji: emoji[o], word: r.failed_at ? `failed at ${r.failed_at}` : 'failed' }
+    case 'issues': return { emoji: emoji[o], word: `${n} step issue${n > 1 ? 's' : ''} open (${r.open_issues.join(', ')})` }
+    case 'ok': return { emoji: emoji[o], word: 'ok' }
   }
 }
 
 /** A deployment's state (its newest run's, else why it has none), in a few words, and its emoji. */
-export function status(d: FleetDeployment): { emoji: string; word: string } {
-  if (d.last) return runStatus(d.last)
+export function status(d: FleetDeployment, emoji: Emoji = DEFAULT_EMOJI): { emoji: string; word: string } {
+  if (d.last) return runStatus(d.last, emoji)
   if (d.errors.runs) return { emoji: ':grey_question:', word: `unreachable (${d.errors.runs})` }
   return { emoji: ':white_circle:', word: 'no scans' }
 }
@@ -40,9 +70,9 @@ export const STRIP_RUNS = 10
 /** The newest `STRIP_RUNS` runs' emoji, newest first (the newest is the deployment's state, so the line shows it once);
  *  its newest run alone when it lists none, else its state's emoji. Not linked: Slack's phone apps print a link whose
  *  label is an emoji as its bare URL, then the emoji (Ryan, 2026-11-20). Each run is a link on `/fleet`. */
-const strip = (d: FleetDeployment): string => {
+const strip = (d: FleetDeployment, emoji: Emoji): string => {
   const runs = d.runs.length ? d.runs.slice(0, STRIP_RUNS) : d.last ? [d.last] : []
-  return runs.length ? runs.map(r => runStatus(r).emoji).join('') : status(d).emoji
+  return runs.length ? runs.map(r => runStatus(r, emoji).emoji).join('') : status(d, emoji).emoji
 }
 
 /** A signed byte change: `+1.2 GB`, `−300 MB`. */
@@ -58,8 +88,8 @@ const trigger = (r: FleetRun | null): string => (!r?.trigger ? '' : (r.trigger =
 
 /** One deployment's line: its name (a link), then its icons together (what started its newest run, then its run strip,
  *  newest first: Ryan, 2026-11-21), then its newest run and the rest. */
-export function line(d: FleetDeployment): string {
-  const { word } = status(d)
+export function line(d: FleetDeployment, emoji: Emoji = DEFAULT_EMOJI): string {
+  const { word } = status(d, emoji)
   const parts: string[] = []
   const r = d.last
   if (r) parts.push(`<${d.url}/scans/${encodeURIComponent(r.run_id)}|${r.scan}>`, word)
@@ -76,7 +106,7 @@ export function line(d: FleetDeployment): string {
   const thread = [d.last, ...d.runs].find(x => x?.thread_url)?.thread_url
   if (thread) parts.push(`<${thread}|thread>`)
   if (d.channel) parts.push(`<#${d.channel}>`)
-  return `*<${d.url}|${d.name}>*  ${trigger(r)}${strip(d)}  ${parts.join(' · ')}`
+  return `*<${d.url}|${d.name}>*  ${trigger(r)}${strip(d, emoji)}  ${parts.join(' · ')}`
 }
 
 const stamp = (t: number) => `${new Date(t * 1000).toISOString().slice(0, 16).replace('T', ' ')} UTC`
@@ -89,12 +119,12 @@ const section = (text: string) => ({ type: 'section', text: { type: 'mrkdwn', te
 
 /** The post: its fallback text and blocks, a section per deployment (each well under `SECTION_MAX`); `page` is the fleet
  *  page. The card goes with it as an attached file (`publish`). */
-export function fleetMessage(doc: FleetDoc, page: string): SlackMessage {
+export function fleetMessage(doc: FleetDoc, page: string, emoji: Emoji = DEFAULT_EMOJI): SlackMessage {
   return {
     text: `disky fleet: ${doc.deployments.map(d => `${d.name} ${status(d).word}`).join(', ')}`,
     blocks: [
       section(`*disky fleet* · <${page}|details>`),
-      ...doc.deployments.map(d => section(line(d))),
+      ...doc.deployments.map(d => section(line(d, emoji))),
       { type: 'context', elements: [{ type: 'mrkdwn', text: `read ${stamp(doc.now)} · updated in place hourly` }] },
     ],
   }

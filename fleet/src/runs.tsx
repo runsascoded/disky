@@ -9,7 +9,7 @@ import { type Outcome, runOutcome } from '../functions/_lib/runOutcome'
 export const DAY = 86400
 
 /** Each outcome's mark: the Slack post's emoji, as text. */
-export const MARK: Record<Outcome, string> = { running: '⏳', failed: '❌', issues: '⚠️', ok: '✅' }
+export const MARK: Record<Outcome, string> = { running: '⏳', cancelled: '🚫', failed: '❌', issues: '⚠️', ok: '✅' }
 
 /** What started a run, as the deployment's scan-health thread shows it. */
 export const TRIGGER: Record<'schedule' | 'manual', { emoji: string; label: string }> = {
@@ -21,6 +21,7 @@ export const TRIGGER: Record<'schedule' | 'manual', { emoji: string; label: stri
 export function runWords(r: FleetRun): string {
   switch (runOutcome(r)) {
     case 'running': return 'running'
+    case 'cancelled': return 'cancelled'
     case 'failed': return r.failed_at ? `failed at ${r.failed_at}` : 'failed'
     case 'issues': return `open: ${r.open_issues.join(', ')}`
     case 'ok': return 'ok'
