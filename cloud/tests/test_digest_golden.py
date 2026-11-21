@@ -448,3 +448,76 @@ def test_cw_provisional_delete_retried(monkeypatch, tmp_path: Path):
     state = run("2026-09-30T1201")
     assert [(c["op"], c.get("ts")) for c in log[n:]] == [("edit", "m1"), ("delete", "m3")]
     assert sorted(state) == ["op_ts", "plot_name", "posted", "variant"]
+
+
+DIFF = {"from": "2026-09-01T0800", "to": "2026-09-02T0800", "path": "", "title": "what changed"}
+
+
+@pytest.fixture
+def site_parts(monkeypatch) -> list:
+    """A site that draws the plot's parts (`/api/digest-image` ``part``, named back in ``X-Digest-Part``): records each
+    request's ``part`` (None for the whole plot) and answers a PNG naming it."""
+    from dt_cloud import site
+
+    parts: list = []
+    monkeypatch.setenv("SITE_TOKEN", "tok")
+
+    def post_json(url, token, path, body, timeout=120, headers=None):
+        parts.append(body.get("part"))
+        if headers is not None and "part" in body:
+            headers["x-digest-part"] = body["part"]
+        return b"\x89PNG " + body.get("part", "whole").encode()
+
+    monkeypatch.setattr(site, "post_json", post_json)
+    return parts
+
+
+def _split_tpl(monkeypatch, diff: dict | None = DIFF, **kw):
+    cw = DG.template(replace(CW_EXAMPLE, **kw))
+    monkeypatch.setattr(cw, "image_request", lambda data, month: {"site_image": "quota", **({"diff": diff} if diff else {})})
+    return cw
+
+
+def _split_calls(log: list) -> list[dict]:
+    """The split reply's posts and edits, each URL's `?v=` (the run's time) normalized."""
+    return [{k: re.sub(r"\?v=\d+", "?v=<v>", v) if isinstance(v, str) else v for k, v in c.items()}
+            for c in log if c.get("content", "").startswith(DG.SPLIT_TEXT)]
+
+
+def test_cw_split_reply(slack, monkeypatch, tmp_path: Path, site_parts: list):
+    # the plot's chart and map, drawn by the site and hosted beside it, go in one reply under the OP (as its sender),
+    # posted once and then edited; it isn't a unit, so `posted` never names it
+    cw = _split_tpl(monkeypatch)
+    root = cw_root(tmp_path)
+    icons = tmp_path / "icons"
+    icons.mkdir()
+    first = DG.converge_slack(cw, str(root), SEP, _client(), "C1", "sender", icons_dir=icons)
+    second = DG.converge_slack(cw, str(root), SEP, _client(), "C1", "sender", icons_dir=icons)
+    stem = first["plot_name"].removesuffix(".png")
+    title = f"{cw.cfg.title} — September 2026"
+    body = (f"{DG.SPLIT_TEXT}\n\n![{title} (chart)](https://cw.icons.example.org/{stem}-chart.png?v=<v>)\n\n"
+            f"![{title} (what changed)](https://cw.icons.example.org/{stem}-map.png?v=<v>)")
+    assert _split_calls(slack) == [
+        {"op": "post", "content": body, "thread_id": "m1", "username": title, "icon_url": None, "icon_emoji": None, **cw.cfg.op_sender()},
+        {"op": "edit", "ts": "m2", "content": body},
+    ]
+    assert (first["split_reply"], second["split_reply"], site_parts) == ("m2", "m2", [None, "chart", "map"] * 2)
+    assert sorted(DG._ts(r) for r in second["posted"].values()) == sorted(DG._ts(r) for r in first["posted"].values())
+    assert "m2" not in [DG._ts(r) for r in second["posted"].values()]
+    assert sorted(p.name for p in icons.iterdir()) == sorted([first["plot_name"], f"{stem}-chart.png", f"{stem}-map.png"])
+    assert ((icons / f"{stem}-chart.png").read_bytes(), (icons / f"{stem}-map.png").read_bytes()) == (b"\x89PNG chart", b"\x89PNG map")
+
+
+@pytest.mark.parametrize("case", ["no-map", "old-site", "off"])
+def test_cw_split_reply_skipped(slack, monkeypatch, tmp_path: Path, site_parts: list, case: str):
+    # no split reply when the plot has no map, when the site predates `part` (answers without naming one), or when
+    # `split_reply: false`; the OP's own plot is drawn either way
+    from dt_cloud import site
+
+    cw = _split_tpl(monkeypatch, diff=None if case == "no-map" else DIFF, split_reply=case != "off")
+    if case == "old-site":
+        monkeypatch.setattr(site, "post_json", lambda url, token, path, body, timeout=120, headers=None: site_parts.append(body.get("part")) or b"\x89PNG")
+    (tmp_path / "icons").mkdir()
+    state = DG.converge_slack(cw, str(cw_root(tmp_path)), SEP, _client(), "C1", "sender", icons_dir=tmp_path / "icons")
+    expected_parts = {"no-map": [None], "old-site": [None, "chart"], "off": [None]}[case]
+    assert (_split_calls(slack), state.get("split_reply"), site_parts) == ([], None, expected_parts)

@@ -182,6 +182,9 @@ class DigestConfig:
     params: str = ""
     preview: str | None = None
     pin: bool = True
+    # one reply under the OP carrying its plot split in two image blocks, the chart then the diff map
+    # (`/api/digest-image` ``part``), to compare with the OP's single image (`_plot_parts`)
+    split_reply: bool = True
 
     @property
     def unit(self) -> Units:
@@ -294,7 +297,7 @@ _SCALAR_TYPES: dict[str, tuple[type, ...]] = {
     "icons_dir": (str,), "op_icon": (str,), "plot_project": (str,), "plot_branch": (str,), "plot_base": (str,),
     "variant": (str,), "reply_hour": (int,), "provisional": (bool,), "primary": (str, type(None)),
     "units": (str,), "alert_pct": (int, float, type(None)), "quota_marks": (str,), "params": (str,),
-    "preview": (str, type(None)), "pin": (bool,),
+    "preview": (str, type(None)), "pin": (bool,), "split_reply": (bool,),
 }
 
 
@@ -844,33 +847,101 @@ def _ts(rec: str | dict) -> str:
 
 
 def _op_render(tpl: Template, data, root: str, month: dt.date, state: dict, client, channel: str, variant: str, icons_dir,
-               deploy_plot) -> tuple[str, str, str | None]:
-    """The OP's body, plot URL and previous-month link: renders + hosts the plot (``icons_dir``; ``deploy_plot(local,
-    basename)`` publishes it and returns the host serving it, None → ``cfg.plot_base``), recording its name in
-    ``state["plot_name"]``. Without ``icons_dir`` nothing is rendered: the URL names the state's plot on ``plot_base``."""
+               deploy_plot) -> tuple[str, str, str | None, list[tuple[str, str]] | None]:
+    """The OP's body, plot URL, previous-month link and the split reply's images (`_plot_parts`: ``(alt, url)`` for the
+    chart and the map, else None): renders + hosts the plot (``icons_dir``; ``deploy_plot(local, basename)`` publishes
+    the directory and returns the host serving it, None → ``cfg.plot_base``), recording its name in
+    ``state["plot_name"]``. Without ``icons_dir`` nothing is rendered: the URL names the state's plot on ``plot_base``,
+    and there are no parts."""
     cfg = tpl.cfg
     plot_name = state.get("plot_name") or f"plot-{secrets.token_hex(16)}.png"
     base = cfg.need("plot_base")
+    parts: list[Path] | None = None
     if icons_dir is not None:
         local = Path(icons_dir) / plot_name
         tpl.render_plot(data, month, local, root)
+        if cfg.split_reply:
+            parts = _plot_parts(tpl, data, month, local)
         if deploy_plot is not None:
             # the deployment-specific host serves the just-uploaded plot
             # immediately (no alias propagation race → no invalid_blocks)
             dep = deploy_plot(local, plot_name)
             if dep:
                 base = dep
-    plot_url = f"{base}/{plot_name}?v={int(dt.datetime.now(dt.timezone.utc).timestamp())}"
+    v = int(dt.datetime.now(dt.timezone.utc).timestamp())
+    plot_url = f"{base}/{plot_name}?v={v}"
     state["plot_name"] = plot_name
+    split = None if parts is None else [(_plot_alt(cfg, month, p), f"{base}/{p.name}?v={v}") for p in parts]
     # A just-deployed Pages asset isn't instantly served at an alias; if we post
     # before it propagates, Slack's image-block validation 500s the whole message
     # with `invalid_blocks`. Poll until the URL is live (or give up + warn).
     if icons_dir is not None and deploy_plot is not None:
-        _wait_reachable(plot_url)
+        for url in [plot_url, *(u for _, u in split or [])]:
+            _wait_reachable(url)
     # the previous month's thread, linked from the OP
     prev_op = _prev_op(cfg, root, month, channel, variant)
     prev_url = client.permalink(prev_op) if prev_op else None
-    return tpl.op_body(data, month, plot_url, prev_url), plot_url, prev_url
+    return tpl.op_body(data, month, plot_url, prev_url), plot_url, prev_url, split
+
+
+#: The plot's parts (`/api/digest-image` ``part``), in the split reply's order, and each one's alt-text suffix.
+PLOT_PARTS = {"chart": "chart", "map": "what changed"}
+
+#: The split reply's text, above its two images.
+SPLIT_TEXT = "Same plot as two images: chart, then what changed"
+
+
+def _plot_parts(tpl: Template, data, month: dt.date, whole: Path) -> list[Path] | None:
+    """The plot's chart and its diff map as two files beside ``whole`` (``<stem>-chart.png``, ``<stem>-map.png``), each
+    drawn by the site (`/api/digest-image` ``part``), for the split reply (``cfg.split_reply``). None, and no reply, when
+    the plot has no map (its request no ``diff``); with a warning when the site predates ``part`` (its answer names no
+    ``X-Digest-Part``) or drawing a part fails: the OP's own plot is drawn either way."""
+    from .deploy import site_token
+    from .site import post_json
+
+    try:
+        req = tpl.image_request(data, month)
+        if not req.get("diff"):
+            return None
+        out = []
+        for part in PLOT_PARTS:
+            got: dict = {}
+            png = post_json(tpl.cfg.site_url, site_token(), "/api/digest-image", {**req, "part": part}, headers=got)
+            if got.get("x-digest-part") != part:
+                _err("digest: WARN the site draws no plot parts (no `part` support yet); no split reply")
+                return None
+            path = whole.with_name(f"{whole.stem}-{part}.png")
+            path.write_bytes(png)
+            out.append(path)
+        return out
+    except Exception as e:  # noqa: BLE001 — the split reply is a comparison: the OP's own plot is already drawn
+        _err(f"digest: WARN could not draw the plot's parts ({type(e).__name__}: {e}); no split reply")
+        return None
+
+
+def _plot_alt(cfg: DigestConfig, month: dt.date, part: Path) -> str:
+    """A part's alt text: the OP's title, and which part it is (`PLOT_PARTS`)."""
+    return f"{cfg.title} — {month:%B %Y} ({PLOT_PARTS[part.stem.rsplit('-', 1)[-1]]})"
+
+
+def split_body(images: list[tuple[str, str]]) -> str:
+    """The split reply: `SPLIT_TEXT`, then each ``(alt, url)`` as a trailing image line (thrds lifts each into a Block
+    Kit ``image`` block, in order)."""
+    return "\n\n".join([SPLIT_TEXT, *(f"![{alt}]({url})" for alt, url in images)])
+
+
+def _split_reply(cfg: DigestConfig, month: dt.date, client, state: dict, op_ts: str, split: list[tuple[str, str]]) -> bool:
+    """Post the split reply under the OP once (as the OP's sender), recording its ts in ``state["split_reply"]``, or edit
+    it to ``split``'s fresh URLs; True when it was posted. Not a unit: never in ``posted``, never redone or deleted."""
+    body = split_body(split)
+    have = state.get("split_reply")
+    if have:
+        client.edit(have, body)
+        _err(f"digest: edited split reply {have}")
+        return False
+    state["split_reply"] = client.post(body, thread_id=op_ts, username=f"{cfg.title} — {month:%B %Y}", **cfg.op_sender()).id
+    _err(f"digest: posted split reply {state['split_reply']}")
+    return True
 
 
 def _prev_op(cfg: DigestConfig, root: str, month: dt.date, channel: str, variant: str) -> str | None:
@@ -939,7 +1010,7 @@ def converge_slack(tpl: Template, root: str, month: dt.date, client, channel: st
     path = state_path(root, month, cfg.state.format(channel=channel, variant=variant))
     state = load_state(path)
 
-    body, plot_url, prev_url = _op_render(tpl, data, root, month, state, client, channel, variant, icons_dir, deploy_plot)
+    body, plot_url, prev_url, split = _op_render(tpl, data, root, month, state, client, channel, variant, icons_dir, deploy_plot)
     if len(tpl.variants) > 1:
         state["variant"] = variant
     op_ts = state.get("op_ts")
@@ -951,6 +1022,8 @@ def converge_slack(tpl: Template, root: str, month: dt.date, client, channel: st
         state["op_ts"] = op_ts
         _err(f"digest: posted OP {op_ts}")
     if current and cfg.pin and pin_op(client, channel, state, op_ts, _prev_op(cfg, root, month, channel, variant)):
+        save_state(path, state)
+    if split and _split_reply(cfg, month, client, state, op_ts, split):
         save_state(path, state)
     if cfg.preview:
         _write_preview(cfg, preview_bundle(tpl, data, month, op=body, plot_url=plot_url, prev_url=prev_url, channel=channel,
@@ -1057,8 +1130,8 @@ def apply_slack(tpl: Template, root: str, month: dt.date, client, channel: str, 
     if op:
         if not state.get("op_ts"):
             raise SystemExit(f"digest: {month:%Y-%m} has no OP in {channel} yet (converge posts it)")
-        body, _, _ = _op_render(tpl, data, root, month, state, client, channel, variant,
-                                None if dry_run else icons_dir, None if dry_run else deploy_plot)
+        body, _, _, _ = _op_render(tpl, data, root, month, state, client, channel, variant,
+                                   None if dry_run else icons_dir, None if dry_run else deploy_plot)
         out.append(Change("op", state["op_ts"], body))
     want = set(days)
     posted = state.get("posted", {})
