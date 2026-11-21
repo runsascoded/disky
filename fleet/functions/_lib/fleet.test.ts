@@ -26,7 +26,7 @@ const THREAD = 'https://slack.test/archives/C0ADMIN/p1762498800000100'
 
 const ANSWERS = {
   'https://a.test/api/health': { now: NOW, freshness: { newest_scan: '2026-11-07', newest_scan_age: 7 * H, stores: [] }, gaps: { path: 1, search: 2 }, scans: [] },
-  'https://a.test/api/scan-runs': {
+  'https://a.test/api/scan-runs?emoji=1': {
     configured: true,
     project: null,
     runs: [
@@ -39,9 +39,9 @@ const ANSWERS = {
         { phase: 'dups', outcome: 'failed', recovery: null, passing: null },
         { phase: 'probe', outcome: 'failed', recovery: { run_id: 'r0' }, passing: null },
         { phase: 'check', outcome: 'failed', recovery: null, passing: { run_id: 'r9' } },
-      ], 'manual', { thread_url: THREAD }),
+      ], 'manual', { thread_url: THREAD, trigger_emoji: ':ryan:' }),
       runWire('r2', '2026-11-06', 'scan', 'failed', NOW - 31 * H, 3600, null, 'index', []),
-      runWire('r3', '2026-10-18', 'scan', 'succeeded', NOW - 20 * 24 * H, 3000, 0.4, null, [], 'schedule', { thread_url: null }),
+      runWire('r3', '2026-10-18', 'scan', 'succeeded', NOW - 20 * 24 * H, 3000, 0.4, null, [], 'schedule', { thread_url: null, trigger_emoji: ':ryan:' }),
       runWire('r4', '2026-10-08', 'scan', 'succeeded', NOW - 30 * 24 * H - H, 3000, 0.4, null, [], 'schedule'),
     ],
   },
@@ -67,7 +67,7 @@ const ANSWERS = {
     ],
   },
   'https://c.test/api/health': new Status(500),
-  'https://c.test/api/scan-runs': { configured: false, runs: [] },
+  'https://c.test/api/scan-runs?emoji=1': { configured: false, runs: [] },
   'https://c.test/api/series?store=meta': null,
   'https://c.test/api/series': null,
 }
@@ -78,18 +78,18 @@ describe('/api/fleet\'s document over stubbed deployments', () => {
     await readFleet(env(), NOW, stubFetch(ANSWERS, seen))
     expect(seen).toEqual([
       { url: 'https://a.test/api/health', authorization: 'Bearer tok-a' },
-      { url: 'https://a.test/api/scan-runs', authorization: 'Bearer tok-a' },
+      { url: 'https://a.test/api/scan-runs?emoji=1', authorization: 'Bearer tok-a' },
       { url: 'https://a.test/api/series?store=meta', authorization: 'Bearer tok-a' },
       { url: 'https://a.test/api/series', authorization: 'Bearer tok-a' },
       { url: 'https://c.test/api/health', authorization: 'Bearer tok-c' },
-      { url: 'https://c.test/api/scan-runs', authorization: 'Bearer tok-c' },
+      { url: 'https://c.test/api/scan-runs?emoji=1', authorization: 'Bearer tok-c' },
       { url: 'https://c.test/api/series?store=meta', authorization: 'Bearer tok-c' },
       { url: 'https://c.test/api/series', authorization: 'Bearer tok-c' },
     ])
   })
 
   it('folds the answers: maintenance and no-op runs skipped, runs over the last 30 days, open issues only, each run\'s thread as its site says it (none from a site that predates it), /meta now / 1 d / 7 d and the newest scan per day; each failure named', async () => {
-    const r1 = { run_id: 'r1', scan: '2026-11-07', status: 'succeeded', trigger: 'manual' as const, started: NOW - 7 * H, secs: 7668, cost_usd: 0.5, failed_at: null, open_issues: ['dups'], thread_url: THREAD }
+    const r1 = { run_id: 'r1', scan: '2026-11-07', status: 'succeeded', trigger: 'manual' as const, started: NOW - 7 * H, secs: 7668, cost_usd: 0.5, failed_at: null, open_issues: ['dups'], thread_url: THREAD, trigger_emoji: ':ryan:' }
     const r2 = { run_id: 'r2', scan: '2026-11-06', status: 'failed', trigger: null, started: NOW - 31 * H, secs: 3600, cost_usd: null, failed_at: 'index', open_issues: [] }
     const r3 = { run_id: 'r3', scan: '2026-10-18', status: 'succeeded', trigger: 'schedule' as const, started: NOW - 20 * 24 * H, secs: 3000, cost_usd: 0.4, failed_at: null, open_issues: [], thread_url: null }
     const noToken = 'no token (FLEET_TOKEN_B unset)'

@@ -51,6 +51,8 @@ interface RunWire {
     /** The run's reply in `#<deployment>-admin` (a Slack permalink, `scan_runs.thread_url`); absent from a site or D1
      *  that predates it (migration `scan-run-thread-url`). */
     thread_url?: string | null
+    /** A manual run's starter's Slack emoji (`emoji=1`): `:name:`. */
+    trigger_emoji?: string | null
   }
   secs: number | null
   cost_usd: number | null
@@ -85,6 +87,9 @@ export function scanTime(id: string): number | null {
   return m ? Date.UTC(+m[1], +m[2] - 1, +m[3], +(m[4] ?? 0), +(m[5] ?? 0)) / 1000 : null
 }
 
+/** A Slack emoji as `/api/scan-runs?emoji=1` answers it; nothing else is passed on into the post. */
+const SLACK_EMOJI = /^:[a-z0-9_+'-]{1,100}:$/
+
 export const fleetRun = (s: RunWire): FleetRun => ({
   run_id: s.run.run_id,
   scan: s.run.scan,
@@ -96,6 +101,7 @@ export const fleetRun = (s: RunWire): FleetRun => ({
   failed_at: s.failed_at,
   open_issues: s.phase_issues.filter(i => !i.recovery && !i.passing).map(i => i.phase),
   ...(s.run.thread_url !== undefined ? { thread_url: s.run.thread_url } : {}),
+  ...(s.run.trigger === 'manual' && s.run.trigger_emoji && SLACK_EMOJI.test(s.run.trigger_emoji) ? { trigger_emoji: s.run.trigger_emoji } : {}),
 })
 
 /** The meta store's points as the document carries them, relative to `now`. */
@@ -144,7 +150,8 @@ export async function readDeployment(d: Deployment, env: Env, now: number, nRuns
     getJson<HealthWire>(f, `${d.url}/api/health`, token).then(h => {
       out.health = { newest_scan: h.freshness.newest_scan, newest_scan_age: h.freshness.newest_scan_age, gaps: Object.values(h.gaps).reduce((s, n) => s + n, 0) }
     }, e => { out.errors.health = why(e) }),
-    getJson<RunsWire>(f, `${d.url}/api/scan-runs`, token).then(r => {
+    // `emoji=1`: each manual run's starter's Slack emoji, which the post shows in place of 👤
+    getJson<RunsWire>(f, `${d.url}/api/scan-runs?emoji=1`, token).then(r => {
       if (!r.configured) { out.errors.runs = 'scan runs are not set up'; return }
       const since = now - HISTORY_DAYS * DAY
       out.runs = r.runs.filter(s => s.run.kind === SCAN_KIND && s.run.status !== 'nop')

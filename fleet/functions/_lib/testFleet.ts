@@ -109,7 +109,7 @@ const HEALTH: Record<string, unknown> = {
 /** Each request the fleet makes, by URL: what the deployment answers, or `null` for a 403. */
 export const ANSWERS: Record<string, unknown> = Object.fromEntries(FLEET.flatMap(d => [
   [`${d.url}/api/health`, HEALTH[d.name]],
-  [`${d.url}/api/scan-runs`, { configured: true, runs: RUNS[d.name] }],
+  [`${d.url}/api/scan-runs?emoji=1`, { configured: true, runs: RUNS[d.name] }],
   [`${d.url}/api/series?store=meta`, META[d.name] ?? null],
   [`${d.url}/api/series`, PRIMARY[d.name] ?? null],
 ]))

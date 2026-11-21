@@ -37,10 +37,13 @@ export function status(d: FleetDeployment): { emoji: string; word: string } {
 /** How many of a deployment's newest runs its line shows as a strip. */
 export const STRIP_RUNS = 10
 
-/** The newest `STRIP_RUNS` runs' emoji, oldest first; empty when it has none. Not linked: Slack's phone apps print a
- *  link whose label is an emoji as its bare URL, then the emoji (Ryan, 2026-11-20). Each run is a link on `/fleet`. */
-const strip = (d: FleetDeployment): string =>
-  d.runs.slice(0, STRIP_RUNS).reverse().map(r => runStatus(r).emoji).join('')
+/** The newest `STRIP_RUNS` runs' emoji, newest first (the newest is the deployment's state, so the line shows it once);
+ *  its newest run alone when it lists none, else its state's emoji. Not linked: Slack's phone apps print a link whose
+ *  label is an emoji as its bare URL, then the emoji (Ryan, 2026-11-20). Each run is a link on `/fleet`. */
+const strip = (d: FleetDeployment): string => {
+  const runs = d.runs.length ? d.runs.slice(0, STRIP_RUNS) : d.last ? [d.last] : []
+  return runs.length ? runs.map(r => runStatus(r).emoji).join('') : status(d).emoji
+}
 
 /** A signed byte change: `+1.2 GB`, `−300 MB`. */
 const delta = (b: number): string => `${b < 0 ? '−' : '+'}${fmtSI(Math.abs(b))}`
@@ -48,15 +51,18 @@ const delta = (b: number): string => `${b < 0 ? '−' : '+'}${fmtSI(Math.abs(b))
 /** Seconds as a short age: `40m`, `9h`, `3d`. */
 export const fmtAge = (s: number): string => (s < 3600 ? `${Math.round(s / 60)}m` : s < 2 * 86400 ? `${Math.round(s / 3600)}h` : `${Math.round(s / 86400)}d`)
 
-/** What started a run, as the scan-health thread shows it (nothing for a deployment that doesn't record it). */
-const TRIGGER: Record<string, string> = { schedule: ':alarm_clock: ', manual: ':bust_in_silhouette: ' }
+/** What started a run, as the scan-health thread shows it: a manual run's starter's own emoji (`trigger_emoji`), else 👤;
+ *  nothing for a deployment that doesn't record it. */
+const TRIGGER: Record<string, string> = { schedule: ':alarm_clock:', manual: ':bust_in_silhouette:' }
+const trigger = (r: FleetRun | null): string => (!r?.trigger ? '' : (r.trigger === 'manual' && r.trigger_emoji) || TRIGGER[r.trigger])
 
-/** One deployment's line. */
+/** One deployment's line: its name (a link), then its icons together (what started its newest run, then its run strip,
+ *  newest first: Ryan, 2026-11-21), then its newest run and the rest. */
 export function line(d: FleetDeployment): string {
-  const { emoji, word } = status(d)
+  const { word } = status(d)
   const parts: string[] = []
   const r = d.last
-  if (r) parts.push(`${r.trigger ? TRIGGER[r.trigger] : ''}<${d.url}/scans/${encodeURIComponent(r.run_id)}|${r.scan}>`, word)
+  if (r) parts.push(`<${d.url}/scans/${encodeURIComponent(r.run_id)}|${r.scan}>`, word)
   else parts.push(word)
   if (r && r.status !== 'running' && r.secs !== null) parts.push(fmtHours(r.secs))
   if (r && r.status !== 'running') parts.push(r.cost_usd === null ? 'cost n/a' : fmtUsd(r.cost_usd))
@@ -70,8 +76,7 @@ export function line(d: FleetDeployment): string {
   const thread = [d.last, ...d.runs].find(x => x?.thread_url)?.thread_url
   if (thread) parts.push(`<${thread}|thread>`)
   if (d.channel) parts.push(`<#${d.channel}>`)
-  const runs = strip(d)
-  return `${emoji} *<${d.url}|${d.name}>*  ${runs ? `${runs}  ` : ''}${parts.join(' · ')}`
+  return `*<${d.url}|${d.name}>*  ${trigger(r)}${strip(d)}  ${parts.join(' · ')}`
 }
 
 const stamp = (t: number) => `${new Date(t * 1000).toISOString().slice(0, 16).replace('T', ' ')} UTC`

@@ -19,6 +19,9 @@ export interface FleetRun {
   /** The Slack permalink of the run's reply in `#<deployment>-admin`; absent or null when it has none (or the deployment's
    *  `/api/scan-runs` predates it). */
   thread_url?: string | null
+  /** A manual run's starter's own Slack emoji (`:name:`), as the deployment's `/api/scan-runs?emoji=1` answers it (asked
+   *  of OA's broker); absent when it has none, or for any other run. */
+  trigger_emoji?: string
 }
 
 export interface MetaPoint {
