@@ -25,7 +25,9 @@
         "channels:read",
         "groups:read",
         "users:read",
-        "emoji:read"
+        "emoji:read",
+        "files:write",
+        "im:write"
       ]
     }
   },
