@@ -34,7 +34,7 @@ def doc(**changes):
 REPO = 'https://github.com/Open-Athena/disky'
 SUCCESS = (f'[hf]({REPO}/tree/hf) ([bbbbbbbbb]({REPO}/commit/{SHA})) · :gh: [louisa](https://github.com/louisa) · attempt `df94aa1e`'
            f' · :cf: [abcdef12](https://abcdef12.oa-hf-usage.pages.dev) · [site](https://dev.hf.oa.dev) · [logs]({REPO}/actions/runs/123)\n')
-SENDER = '🚀 HF dev deployment succeeded'
+SENDER = '🧪 HF dev deployment succeeded'
 
 
 def test_render_exact_success_omits_private_controller_fields():
@@ -51,7 +51,7 @@ def test_each_site_and_environment_uses_its_own_identity(site, label, mode):
     host = f'{"dev." if mode == "dev" else ""}{site}.oa.dev'
     value = doc(deployment=site, source_branch=site, mode=mode, host=host)
     expected = SUCCESS.replace('[hf](', f'[{site}](').replace('/tree/hf)', f'/tree/{site})').replace('https://dev.hf.oa.dev', f'https://{host}')
-    assert (N.headline(value), N.render(value)) == (f'🚀 {label} {mode} deployment succeeded', expected)
+    assert (N.headline(value), N.render(value)) == (f'{"🧪" if mode == "dev" else "🚀"} {label} {mode} deployment succeeded', expected)
 
 
 def test_render_build_failure_has_no_fictitious_cf_receipt_or_verification():
@@ -85,6 +85,8 @@ def test_render_unverified_dirty_manual_upload_and_cancellation():
     ({'status': 'failure'}, 'verified must be a boolean and requires success'),
     ({'emoji': {'success': ':tada:'}}, 'emoji must map success/failure/cancelled to an emoji character (the sender name shows no :name: codes)'),
     ({'emoji': {'merged': '🎉'}}, 'emoji must map success/failure/cancelled to an emoji character (the sender name shows no :name: codes)'),
+    ({'threads': 'mode'}, 'threads must be env or shared'),
+    ({'quiet': 'yes'}, 'quiet must be a boolean'),
 ])
 def test_invalid_or_injectable_receipt_is_refused(changes, message):
     with pytest.raises(ClickException) as error:
@@ -100,6 +102,32 @@ def test_a_deployment_overrides_the_default_emoji_per_outcome():
     ]
 
 
+def test_prod_and_dev_lead_with_their_own_emoji():
+    outcomes = ({}, {'status': 'failure', 'verified': False}, {'status': 'cancelled', 'verified': False})
+    assert [[N.headline(doc(mode=mode, **c)).split(' ', 1)[0] for c in outcomes] for mode in ('prod', 'dev')] == [
+        ['🚀', '💥', '⏹️'], ['🧪', '💥', '⏹️'],
+    ]
+
+
+@pytest.mark.parametrize('config,emoji', [
+    # today's flat form: both environments
+    ({'success': '✅'}, ({'success': '✅'}, {'success': '✅'})),
+    # keyed by environment; the environment's own entry wins over a flat one
+    ({'dev': {'success': '🧫'}}, (None, {'success': '🧫'})),
+    ({'success': '✅', 'failure': '🔥', 'prod': {'success': '🛳️'}}, ({'success': '🛳️', 'failure': '🔥'}, {'success': '✅', 'failure': '🔥'})),
+    (None, (None, None)),
+])
+def test_site_emoji_resolves_per_environment(config, emoji):
+    assert (N.site_emoji(config, 'prod'), N.site_emoji(config, 'dev')) == emoji
+
+
+@pytest.mark.parametrize('config', [{'merged': '🎉'}, {'dev': '🧫'}, {'prod': {'merged': '🎉'}}, ['🚀']])
+def test_site_emoji_refuses_unknown_keys(config):
+    with pytest.raises(ClickException) as error:
+        N.site_emoji(config, 'dev')
+    assert str(error.value) == 'deploy_emoji must map success/failure/cancelled (each, or under dev/prod) to an emoji character'
+
+
 def test_record_carries_the_sites_deploy_emoji_and_omits_it_when_unset(tmp_path):
     (tmp_path / 'wrangler.toml').write_text('''name = "oa-hf-usage"
 [vars]
@@ -113,12 +141,19 @@ SOURCE_REF = "hf"
     args = ['record', '-c', str(tmp_path / 'wrangler.toml'), '-e', 'prod', '-g', SHA, '-l', str(tmp_path / 'none.log'),
             '-o', str(out), '-S', str(sites), '-s', 'success', '-t', 'finish', '-u', 'false', '-v']
     emojis = []
-    for config in ({'sites': {'hf': {'deploy_emoji': {'success': '🛳️'}}}}, {'sites': {'hf': {}}}):
+    for config in ({'sites': {'hf': {'deploy_emoji': {'success': '🛳️'}, 'deploy_threads': 'shared', 'deploy_quiet': False}}},
+                   {'sites': {'hf': {'deploy_emoji': {'dev': {'success': '🧫'}, 'prod': {'success': '🛸'}}}}},
+                   {'sites': {'hf': {}}}):
         sites.write_text(dumps(config))
         result = CliRunner().invoke(N.main, args, env={'GITHUB_ACTOR': ''})
         assert result.exit_code == 0, result.output
-        emojis.append((loads(out.read_text()).get('emoji'), N.headline(loads(out.read_text()))))
-    assert emojis == [({'success': '🛳️'}, '🛳️ HF prod deployment succeeded'), (None, '🚀 HF prod deployment succeeded')]
+        r = loads(out.read_text())
+        emojis.append((r.get('emoji'), r['threads'], r['quiet'], N.headline(r)))
+    assert emojis == [
+        ({'success': '🛳️'}, 'shared', False, '🛳️ HF prod deployment succeeded'),
+        ({'success': '🛸'}, 'env', True, '🛸 HF prod deployment succeeded'),
+        (None, 'env', True, '🚀 HF prod deployment succeeded'),
+    ]
 
 
 ENV = {'DEPLOY_NOTIFICATIONS_ENABLED': '1', 'SLACK_DEPLOY_BOT_TOKEN': 'xoxb-test-token', 'SLACK_DEPLOY_CHANNEL': 'C0TESTCHAN'}
@@ -151,6 +186,11 @@ class FakeSlack:
         if self.fail:
             raise self.fail
 
+    def edit(self, message_id, content, raw=None):
+        self.calls.append(('edit', message_id, content, raw))
+        if self.fail:
+            raise self.fail
+
 
 def fake(monkeypatch, slack):
     made = []
@@ -173,31 +213,77 @@ def test_cli_defaults_to_review_even_with_credentials_and_enabled_delivery(tmp_p
     assert (result.exit_code, result.output) == (1, 'Error: Deploy notifications are disabled pending template/transport review\n')
 
 
-@pytest.mark.parametrize('history,thread', [
-    # The newest notice for this deployment is green: the run continues in its thread, across dev and prod.
-    ([notice('9.0', 'HF prod deployment succeeded'), notice('8.0', 'HF dev deployment failed during build')], '9.0'),
+@pytest.mark.parametrize('history,threads,thread', [
+    # Each environment runs on its own: the newest dev notice is red, so this dev green opens a thread, whatever prod did.
+    ([notice('9.0', 'HF prod deployment succeeded'), notice('8.0', 'HF dev deployment failed during build')], 'env', None),
+    ([notice('9.0', 'HF prod deployment failed during build'), notice('8.0', 'HF dev deployment succeeded')], 'env', '8.0'),
+    # `deploy_threads: shared`: one run across dev and prod, as before 2026-11-21.
+    ([notice('9.0', 'HF prod deployment succeeded'), notice('8.0', 'HF dev deployment failed during build')], 'shared', '9.0'),
+    ([notice('9.0', 'HF prod deployment failed during build'), notice('8.0', 'HF dev deployment succeeded')], 'shared', None),
     # A red ended the run (failure or cancellation): the next green opens a new one.
-    ([notice('9.0', 'HF dev deployment failed during upload'), notice('8.0', 'HF dev deployment succeeded')], None),
-    ([notice('9.0', 'HF prod deployment cancelled'), notice('8.0', 'HF dev deployment succeeded')], None),
+    ([notice('9.0', 'HF dev deployment failed during upload'), notice('8.0', 'HF dev deployment succeeded')], 'env', None),
+    ([notice('9.0', 'HF dev deployment cancelled'), notice('8.0', 'HF dev deployment succeeded')], 'env', None),
     # Another deployment's notices, another bot's posts and other messages don't count.
-    ([notice('9.5', 'GCS prod deployment failed during build'), notice('9.4', 'HF dev deployment failed during build', bot='B0OTHER'),
-      {'ts': '9.3', 'bot_id': 'B0BOT', 'text': 'Scan health: all green'}, notice('9.0', 'HF dev deployment succeeded')], '9.0'),
+    ([notice('9.5', 'GCS dev deployment failed during build'), notice('9.4', 'HF dev deployment failed during build', bot='B0OTHER'),
+      {'ts': '9.3', 'bot_id': 'B0BOT', 'text': 'Scan health: all green'}, notice('9.0', 'HF dev deployment succeeded')], 'env', '9.0'),
     # A notice from before the one-line format still counts.
-    ([legacy('9.0', 'HF dev deployment succeeded')], '9.0'),
+    ([legacy('9.0', 'HF dev deployment succeeded')], 'env', '9.0'),
+    ([legacy('9.0', 'HF prod deployment succeeded')], 'env', None),
     # The lead emoji doesn't matter: notices from before 🚀/💥 (✅/❌) and after both count.
-    ([{**notice('9.0', 'HF dev deployment succeeded'), 'username': '🚀 HF dev deployment succeeded'}], '9.0'),
-    ([{**notice('9.0', 'HF dev deployment succeeded'), 'username': '✅ HF dev deployment succeeded'}], '9.0'),
-    ([{**notice('9.0', 'HF dev deployment failed during build'), 'username': '💥 HF dev deployment failed during build'}], None),
-    ([legacy('9.0', 'HF dev deployment failed during upload')], None),
+    ([{**notice('9.0', 'HF dev deployment succeeded'), 'username': '🚀 HF dev deployment succeeded'}], 'env', '9.0'),
+    ([{**notice('9.0', 'HF dev deployment succeeded'), 'username': '✅ HF dev deployment succeeded'}], 'env', '9.0'),
+    ([{**notice('9.0', 'HF dev deployment failed during build'), 'username': '💥 HF dev deployment failed during build'}], 'env', None),
+    ([legacy('9.0', 'HF dev deployment failed during upload')], 'env', None),
     # No notice within the history window: a new thread.
-    ([], None),
+    ([], 'env', None),
 ])
-def test_greens_are_run_length_threaded(monkeypatch, history, thread):
+def test_greens_are_run_length_threaded_per_environment(monkeypatch, history, threads, thread):
+    """With `quiet` off, a green joining a green thread replies in it, as reds do."""
     slack = FakeSlack(history)
     made = fake(monkeypatch, slack)
-    assert N.send(doc(), ENV) == thread
+    assert N.send(doc(threads=threads, quiet=False), ENV) == (thread, False)
     assert made == [('xoxb-test-token', 'C0TESTCHAN')]
     assert slack.calls == [('history', 'C0TESTCHAN', 100), ('post', SENDER, SUCCESS, thread)]
+
+
+#: 2026-11-21 14:05 UTC, a quiet fold's time
+NOW = 1795269900
+#: `SUCCESS`'s wire line, as the fold line carries it
+LATEST = WIRE.rstrip('\n')
+
+
+@pytest.mark.parametrize('head,threads,text', [
+    # The thread's head as first posted: its own line stays, a line counting the run (2: it and this one) follows.
+    ({'text': WIRE}, 'env', f'{LATEST}\n2 successful dev deploys in a row · latest 2026-11-21 14:05 UTC: {LATEST}'),
+    # A thread from before quiet greens: its replies count.
+    ({'text': WIRE, 'reply_count': 3}, 'env', f'{LATEST}\n5 successful dev deploys in a row · latest 2026-11-21 14:05 UTC: {LATEST}'),
+    # An earlier fold's line is replaced, its count carried on.
+    ({'text': f'{LATEST}\n4 successful dev deploys in a row · latest 2026-11-20 09:00 UTC: <https://dev.hf.oa.dev|site>'}, 'env',
+     f'{LATEST}\n5 successful dev deploys in a row · latest 2026-11-21 14:05 UTC: {LATEST}'),
+    # `deploy_threads: shared`: the run spans both environments, so the newest says which.
+    ({'text': WIRE}, 'shared', f'{LATEST}\n2 successful deploys in a row · latest 2026-11-21 14:05 UTC (dev): {LATEST}'),
+])
+def test_a_quiet_green_in_a_green_thread_edits_its_head_and_posts_nothing(monkeypatch, head, threads, text):
+    """Ryan, 2026-11-21: a reply notifies the thread's followers and leaves an unread; an edit does neither."""
+    slack = FakeSlack([{**notice('9.0', 'HF dev deployment succeeded'), **head}])
+    fake(monkeypatch, slack)
+    assert N.send(doc(threads=threads), ENV, now=NOW) == ('9.0', True)
+    assert slack.calls == [('history', 'C0TESTCHAN', 100), ('edit', '9.0', text, True)]
+
+
+@pytest.mark.parametrize('history,changes,thread', [
+    # A green after a red, or with no notice in the window, still opens a thread: recovery is news.
+    ([notice('9.0', 'HF dev deployment failed during upload')], {}, None),
+    ([], {}, None),
+    # A red still posts: a new thread after a green, a reply after a red.
+    ([notice('9.0', 'HF dev deployment succeeded')], {'status': 'failure', 'stage': 'upload', 'verified': False}, None),
+    ([notice('9.0', 'HF dev deployment failed during build')], {'status': 'failure', 'stage': 'upload', 'verified': False}, '9.0'),
+])
+def test_quiet_greens_never_silence_a_red_or_a_recovery(monkeypatch, history, changes, thread):
+    slack = FakeSlack(history)
+    fake(monkeypatch, slack)
+    assert N.send(doc(**changes), ENV, now=NOW) == (thread, False)
+    assert slack.calls == [('history', 'C0TESTCHAN', 100), ('post', N.headline(doc(**changes)), N.render(doc(**changes)), thread)]
 
 
 RED = {'status': 'failure', 'stage': 'upload', 'verified': False}
@@ -207,7 +293,9 @@ RED = {'status': 'failure', 'stage': 'upload', 'verified': False}
 @pytest.mark.parametrize('history,thread', [
     # The newest notice for this deployment is red (a failure or a cancellation): the red run continues in its thread.
     ([notice('9.0', 'HF dev deployment failed during upload'), notice('8.0', 'HF dev deployment succeeded')], '9.0'),
-    ([notice('9.0', 'HF prod deployment cancelled'), notice('8.0', 'HF dev deployment succeeded')], '9.0'),
+    ([notice('9.0', 'HF dev deployment cancelled'), notice('8.0', 'HF dev deployment succeeded')], '9.0'),
+    # Prod's red run is its own: this dev red opens a new one.
+    ([notice('9.0', 'HF prod deployment cancelled'), notice('8.0', 'HF dev deployment succeeded')], None),
     # A green ended the red run: this red opens a new one.
     ([notice('9.0', 'HF dev deployment succeeded'), notice('8.0', 'HF dev deployment failed during upload')], None),
     # Another deployment's red doesn't count.
@@ -218,7 +306,7 @@ RED = {'status': 'failure', 'stage': 'upload', 'verified': False}
 def test_reds_are_run_length_threaded(monkeypatch, changes, history, thread):
     slack = FakeSlack(history)
     fake(monkeypatch, slack)
-    assert N.send(doc(**changes), ENV) == thread
+    assert N.send(doc(**changes), ENV) == (thread, False)
     assert slack.calls == [('history', 'C0TESTCHAN', 100), ('post', N.headline(doc(**changes)), N.render(doc(**changes)), thread)]
 
 
@@ -226,7 +314,8 @@ def test_thrds_renders_the_wire_text():
     from thrds.mrkdwn import to_slack
     assert to_slack(SUCCESS) == WIRE
     # What Slack stores is what the run lookup reads back.
-    assert N.run_thread([{'ts': '1.0', 'bot_id': 'B0BOT', 'username': SENDER, 'text': WIRE}], 'hf', True, BOT) == '1.0'
+    head = {'ts': '1.0', 'bot_id': 'B0BOT', 'username': SENDER, 'text': WIRE}
+    assert N.run_head([head], 'hf', 'dev', True, BOT) == head
 
 
 @pytest.mark.parametrize('env,message', [
@@ -325,6 +414,7 @@ if len(sys.argv) == 1: print('{SHA}')
         'verified': False, 'dirty': False, 'actor': 'tester', 'actor_source': 'local',
         'cloudflare_deployment': expected[3],
         'cloudflare_url': 'https://abcdef12.demo-site.pages.dev' if expected[3] else None, 'run_url': None,
+        'threads': 'env', 'quiet': True,
     }
     assert result.stderr == ('Error: SLACK_DEPLOY_BOT_TOKEN must be a Slack bot token\n'
                              'WARN: deploy notification failed; original deployment exit status preserved\n' if enabled else '')

@@ -3,15 +3,18 @@
 # requires-python = ">=3.11"
 # dependencies = ["click==8.3.0", "thrds @ https://github.com/Open-Athena/thrds/archive/6f207846b32012d6a1550011f95bc561caf8ff1c.tar.gz"]
 # ///
-"""Review a deployment receipt; send only with an explicit flag. Notices are run-length threaded: greens with greens, reds with reds."""
+"""Review a deployment receipt; send only with an explicit flag. Notices are run-length threaded per deployment and
+environment: greens with greens, reds with reds. A green that would reply in a green thread edits its head instead."""
 from getpass import getuser
 from collections.abc import Mapping
+from datetime import datetime, timezone
 from json import dumps, loads
 from os import environ
 from pathlib import Path
 from re import findall, fullmatch, search
 from socket import setdefaulttimeout
 from subprocess import check_output
+from time import time
 from tomllib import loads as toml_loads
 from urllib.parse import quote, urlsplit
 from uuid import uuid4
@@ -21,11 +24,19 @@ from click import Choice, ClickException, Path as ClickPath, argument, group, op
 
 RESULTS = ('success', 'failure', 'cancelled')
 STAGES = ('build', 'upload', 'verify', 'finish')
-#: A notice's lead emoji by outcome. Not ✅/❌, which `#<d>-admin`'s scan-run threads use (Ryan, 2026-11-20). A
-#: deployment overrides any of them with `deploy_emoji` (`{"success": "✅", …}`: characters, since the sender name shows
-#: no `:name:` codes) on its entry in
-#: the release config, `deploy/oa/sites.json` (`record -S`; default: the one in this script's checkout).
-DEFAULT_EMOJI = {'success': '🚀', 'failure': '💥', 'cancelled': '⏹️'}
+MODES = ('dev', 'prod')
+#: A notice's lead emoji by environment and outcome: a prod success 🚀, a dev one 🧪; a failure 💥 and a cancellation ⏹️
+#: in both. Not ✅/❌, which `#<d>-admin`'s scan-run threads use (Ryan, 2026-11-20). A deployment overrides any of them
+#: with `deploy_emoji` on its entry in the release config, `deploy/oa/sites.json` (`record -S`; default: the one in this
+#: script's checkout): `{"success": "✅"}` for both environments, `{"dev": {"success": "🧫"}}` for one, or both forms
+#: together (the environment's own wins). Characters, since the sender name shows no `:name:` codes.
+DEFAULT_EMOJI = {
+    'prod': {'success': '🚀', 'failure': '💥', 'cancelled': '⏹️'},
+    'dev': {'success': '🧪', 'failure': '💥', 'cancelled': '⏹️'},
+}
+#: How a deployment's notices thread (`deploy_threads` on its entry in the release config): `env` (the default), prod and
+#: dev each in their own run-length threads; `shared`, one run per deployment across both environments.
+THREADS = ('env', 'shared')
 SITES = Path(__file__).resolve().parents[1] / 'deploy/oa/sites.json'
 
 
@@ -83,6 +94,10 @@ def receipt(value: dict) -> dict:
     require(emoji is None or isinstance(emoji, dict) and set(emoji) <= set(RESULTS)
             and all(isinstance(e, str) and fullmatch(r'[^\x00-\x7f]{1,8}', e) is not None for e in emoji.values()),
             'emoji must map success/failure/cancelled to an emoji character (the sender name shows no :name: codes)')
+    threads = value.get('threads', 'env')
+    require(threads in THREADS, 'threads must be env or shared')
+    quiet = value.get('quiet', True)
+    require(type(quiet) is bool, 'quiet must be a boolean')
     urls = {}
     for key in ('cloudflare_url', 'run_url'):
         url = value.get(key)
@@ -93,7 +108,21 @@ def receipt(value: dict) -> dict:
         'stage': value['stage'], 'sha': sha, 'source_branch': ref, 'repository': repo, 'host': host,
         'verified': verified, 'dirty': dirty, 'actor': actor, 'actor_source': actor_source,
         'attempt': attempt, 'cloudflare_deployment': cf_id, **urls, **({'emoji': emoji} if emoji else {}),
+        'threads': threads, 'quiet': quiet,
     }
+
+
+def site_emoji(value: object, mode: str) -> dict | None:
+    """A deployment's `deploy_emoji` resolved for one environment: its flat `{outcome: emoji}` entries, overridden by its
+    `dev` / `prod` map's (`DEFAULT_EMOJI` fills the rest, in `headline`). None when it sets nothing for `mode`."""
+    if value is None:
+        return None
+    message = 'deploy_emoji must map success/failure/cancelled (each, or under dev/prod) to an emoji character'
+    require(isinstance(value, dict) and set(value) <= {*RESULTS, *MODES}, message)
+    own = value.get(mode, {})
+    require(all(isinstance(value.get(m, {}), dict) and set(value.get(m, {})) <= set(RESULTS) for m in MODES), message)
+    resolved = {**{k: v for k, v in value.items() if k in RESULTS}, **own}
+    return resolved or None
 
 
 def headline(value: dict) -> str:
@@ -101,7 +130,7 @@ def headline(value: dict) -> str:
     r = receipt(value)
     outcome = {'success': 'deployment succeeded', 'failure': f"deployment failed during {r['stage']}",
                'cancelled': 'deployment cancelled'}[r['status']]
-    emoji = {**DEFAULT_EMOJI, **r.get('emoji', {})}[r['status']]
+    emoji = {**DEFAULT_EMOJI[r['mode']], **r.get('emoji', {})}[r['status']]
     return f"{emoji} {r['deployment'].upper()} {r['mode']} {outcome}"
 
 
@@ -136,32 +165,56 @@ def render(value: dict) -> str:
 
 
 # A notice's outcome as Slack stores it: its sender name (`headline`), or, before notices were one line (2026-11-14),
-# the bold first line of its text.
-SENDER = r'^\S+ ([A-Z0-9-]+) (?:dev|prod) deployment (succeeded|failed during [a-z]+|cancelled)$'
-HEADLINE = r'\*([A-Z0-9-]+) (?:dev|prod) deployment (succeeded|failed during [a-z]+|cancelled)\*'
+# the bold first line of its text. Groups: deployment, environment, outcome.
+SENDER = r'^\S+ ([A-Z0-9-]+) (dev|prod) deployment (succeeded|failed during [a-z]+|cancelled)$'
+HEADLINE = r'\*([A-Z0-9-]+) (dev|prod) deployment (succeeded|failed during [a-z]+|cancelled)\*'
+#: A quiet green thread's head ends with this line (`folded`): how many greens the run holds, and the newest one's
+SUMMARY = r'^(\d+) successful (?:(?:dev|prod) )?deploys in a row · latest '
 HISTORY = 100
 
 
-def run_thread(
+def run_head(
     history: list[dict],
     deployment: str,
+    mode: str,
     green: bool,
     bot: tuple[str, str | None],
-) -> str | None:
-    """The thread a notice joins: the newest top-level notice for this deployment, if it has the same color.
+    split: bool = True,
+) -> dict | None:
+    """The head of the thread a notice joins: the newest top-level notice for this deployment (and, `split`, this
+    environment), if it has the same color.
 
     Notices are run-length threaded by color (a failure and a cancellation are both red): the first notice after
     one of the other color, or with none in the last `HISTORY` channel messages, is a top-level post that opens a
-    thread; each later notice of that color replies in it, until the color changes.
+    thread; each later notice of that color joins it (a red replies; a quiet green edits its head, `folded`), until
+    the color changes.
     """
     user_id, bot_id = bot
     for message in history:
         if message.get('user') != user_id and (bot_id is None or message.get('bot_id') != bot_id):
             continue
         match = search(SENDER, message.get('username') or '') or search(HEADLINE, message.get('text') or '')
-        if match and match[1] == deployment.upper():
-            return message['ts'] if (match[2] == 'succeeded') == green else None
+        if match and match[1] == deployment.upper() and (not split or match[2] == mode):
+            return message if (match[3] == 'succeeded') == green else None
     return None
+
+
+def folded(head: dict, value: dict, now: float) -> str:
+    """A green thread's head (as Slack stores it, wire mrkdwn) once a green notice is folded into it: its own text, then
+    one line counting the run's greens (`SUMMARY`; before any, the head and its replies) and rendering the newest, which
+    replaces the line an earlier fold left. Sent as is (raw): the head's text is already wire."""
+    from thrds.mrkdwn import to_slack
+
+    r = receipt(value)
+    lines = (head.get('text') or '').rstrip('\n').split('\n')
+    match = search(SUMMARY, lines[-1])
+    if match:
+        lines.pop()
+    count = (int(match[1]) if match else 1 + int(head.get('reply_count') or 0)) + 1
+    when = datetime.fromtimestamp(now, timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
+    label, env = (f"{r['mode']} ", '') if r['threads'] == 'env' else ('', f" ({r['mode']})")
+    line = f"{count} successful {label}deploys in a row · latest {when}{env}: {render(r).rstrip()}"
+    return '\n'.join([*lines, to_slack(line)])
 
 
 def slack_client(
@@ -173,8 +226,10 @@ def slack_client(
     return SlackClient(token, channel)
 
 
-def send(value: dict, env: dict) -> str:
-    """Post the notice, replying in the thread of the current run of its color. Returns the thread it joined, if any."""
+def send(value: dict, env: dict, now: float | None = None) -> tuple[str | None, bool]:
+    """Post the notice, replying in the thread of the current run of its color; a quiet green (the receipt's `quiet`, the
+    default) joining a green thread edits that thread's head instead (`folded`), so it notifies nobody. Returns the
+    thread it joined, if any, and whether it was folded into the head."""
     require(env.get('DEPLOY_NOTIFICATIONS_ENABLED') == '1', 'Deploy notifications are disabled pending template/transport review')
     token = env.get('SLACK_DEPLOY_BOT_TOKEN', '')
     require(fullmatch(r'xoxb-[A-Za-z0-9-]+', token) is not None, 'SLACK_DEPLOY_BOT_TOKEN must be a Slack bot token')
@@ -185,14 +240,19 @@ def send(value: dict, env: dict) -> str:
     client = slack_client(token, channel)
     try:
         history = client.list_channel_history(channel, limit=HISTORY)
-        thread = run_thread(history, r['deployment'], r['status'] == 'success', client.bot_ids)
+        green = r['status'] == 'success'
+        head = run_head(history, r['deployment'], r['mode'], green, client.bot_ids, split=r['threads'] == 'env')
     except (RuntimeError, OSError, KeyError):
         raise ClickException('Slack history lookup failed; nothing posted') from None
+    thread = head['ts'] if head else None
     try:
+        if green and r['quiet'] and head:
+            client.edit(thread, folded(head, r, time() if now is None else now), raw=True)
+            return thread, True
         client.post(render(r), thread, username=headline(r))
     except (RuntimeError, OSError):
         raise ClickException('Slack notification failed; acceptance unknown, not retried') from None
-    return thread
+    return thread, False
 
 
 def load(path: Path) -> dict:
@@ -226,8 +286,9 @@ def render_cmd(path: Path) -> None:
 def send_cmd(execute: bool, path: Path) -> None:
     value = load(path)
     if execute:
-        thread = send(value, dict(environ))
-        print(f'Deployment notification posted{f" in thread {thread}" if thread else ""}.')
+        thread, edited = send(value, dict(environ))
+        print(f'Deployment notification folded into the head of thread {thread} (edited, nothing posted).' if edited
+              else f'Deployment notification posted{f" in thread {thread}" if thread else ""}.')
     else:
         print(f'{headline(value)}\n{render(value)}', end='')
 
@@ -239,7 +300,7 @@ def send_cmd(execute: bool, path: Path) -> None:
 @option('-g', '--sha', required=True)
 @option('-l', '--upload-log', type=ClickPath(path_type=Path), required=True)
 @option('-o', '--output', type=ClickPath(path_type=Path), required=True)
-@option('-S', '--sites', 'sites_path', type=ClickPath(path_type=Path), default=SITES, help="The release config: the deployment's `deploy_emoji` (absent: the defaults)")
+@option('-S', '--sites', 'sites_path', type=ClickPath(path_type=Path), default=SITES, help="The release config: the deployment's `deploy_emoji`, `deploy_threads`, `deploy_quiet` (absent: the defaults)")
 @option('-s', '--status', type=Choice(RESULTS), required=True)
 @option('-t', '--stage', type=Choice(STAGES), required=True)
 @option('-u', '--dirty', type=Choice(['true', 'false']), required=True)
@@ -270,13 +331,15 @@ def record_cmd(
     actor = environ.get('GITHUB_ACTOR') or getuser()
     deployment = deployment or var.get('STORE') or parsed['name']
     sites = loads(sites_path.read_text()).get('sites', {}) if sites_path.exists() else {}
+    site = sites.get(deployment, {})
     r = receipt({
         'notice_version': 1, 'deployment': deployment, 'mode': mode, 'status': status, 'stage': stage,
         'sha': sha, 'source_branch': ref, 'repository': urlsplit(repo_url).path.strip('/'),
         'host': var.get(f'{mode.upper()}_HOST', parsed['name'] + '.pages.dev'), 'verified': verified,
         'dirty': dirty == 'true', 'actor': actor, 'actor_source': 'github' if environ.get('GITHUB_ACTOR') else 'local',
         'attempt': str(uuid4()), 'cloudflare_deployment': urlsplit(cf_url).hostname.split('.')[0] if cf_url else None,
-        'cloudflare_url': cf_url, 'run_url': run_url(environ), 'emoji': sites.get(deployment, {}).get('deploy_emoji'),
+        'cloudflare_url': cf_url, 'run_url': run_url(environ), 'emoji': site_emoji(site.get('deploy_emoji'), mode),
+        'threads': site.get('deploy_threads', 'env'), 'quiet': site.get('deploy_quiet', True),
     })
     output.write_text(dumps(r, indent=2) + '\n')
 

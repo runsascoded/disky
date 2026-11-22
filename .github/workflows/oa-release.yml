@@ -204,7 +204,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: if [ -f receipt.json ]; then control/scripts/oa-release finish -f receipt.json; fi
-      # Slack notice (`site/deploy-notify`: run-length threaded per deployment, greens with greens, reds with reds) to the deployment's
+      # Slack notice (`site/deploy-notify`: run-length threaded per deployment and environment, greens with greens, reds with reds;
+      # a green in a green thread edits its head rather than posting) to the deployment's
       # `#<d>-admin` (`admin_channel` in `deploy/oa/sites.json`), posted by its own bot: the environment's `SLACK_DEPLOY_BOT_TOKEN`.
       # An environment without one skips with a notice. A notice failure never fails the release.
       - name: Deploy notice
