@@ -43,10 +43,11 @@ def test_append_refuses_while_its_generation_is_compacted(tmp_path):
     lease = tmp_path / "compacting.lease.json"
     f = IvFake(["2026-08-04"])
     _write(lease, "iv-compact-x", "g1", NOW - timedelta(seconds=ar.COORD_TTL_S - 1))
-    with pytest.raises(ar.Busy) as e:
+    with pytest.raises(ar.Compacting) as e:
         f.runner(compacting=lambda: ar.LocalLeaseFile(lease)).run("2026-08-04")
-    assert (str(e.value), f.calls()) == (
-        "generation g1 is being compacted by iv-compact-x (since 2026-08-05T00:47:04+00:00): the append waits for its successor", [])
+    assert (str(e.value), (e.value.gen, e.value.holder, e.value.since), f.calls()) == (
+        "generation g1 is being compacted by iv-compact-x (since 2026-08-05T00:47:04+00:00): the append waits for its successor",
+        ("g1", "iv-compact-x", "2026-08-05T00:47:04+00:00"), [])
     _write(lease, "iv-compact-x", "g0", NOW)
     assert f.runner(compacting=lambda: ar.LocalLeaseFile(lease), merge=False).run("2026-08-04") == ["2026-08-04"]
 

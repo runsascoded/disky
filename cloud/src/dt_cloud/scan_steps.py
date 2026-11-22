@@ -1267,7 +1267,7 @@ def interval_store(ctx: Ctx, arg: str | None) -> None:
 
     timeout = ctx.opt("interval-store", "timeout")
     if ctx.opt("interval-store", "profile"):
-        from .append_runner import BUSY, NOT_NEXT
+        from .append_runner import BUSY, COMPACTING, NOT_NEXT
 
         cmd = ["dt-cloud", "interval-store", "append", "-c", "-w", str(ctx.opt("interval-store", "merge_wait", 0)), ctx.scan]
         env = {"INTERVAL_STORE_PROFILE": str(ctx.opt("interval-store", "profile"))}
@@ -1281,6 +1281,11 @@ def interval_store(ctx: Ctx, arg: str | None) -> None:
             # this run appended nothing: an explicit skip (`scan_runs.phase_skip`), so /scans reads the scan short until
             # an append holds it, and never takes this step for one that did an earlier run's work
             ctx.run.end("interval-store", 0, note=INTERVAL_STORE_BUSY)
+            return
+        if ran.rc == COMPACTING:
+            # a live compaction holds the generation: deferred, not failed (`scanRunsModel.phaseDeferred`); the next run's append takes
+            # this scan. Alerts once when an earlier run's scan is still out (`deferral`)
+            ctx.run.end("interval-store", 0, note=deferred_note(interval_deferral(ctx, env)))
             return
         if ran.rc == NOT_NEXT:
             ctx.run.end("interval-store", ran.rc, warn=True, msg="the scan reads per-scan: the store's append passed it over", note=PASSED_OVER,
@@ -1337,6 +1342,36 @@ def warm_series(ctx: Ctx) -> None:
 #: Why a scan's staged interval-store step was skipped (`append` exit `BUSY`): its phase note.
 INTERVAL_STORE_BUSY = ("skipped (busy): another coordinator holds the interval store's lease; this scan comes with its "
                        "append or the next run")
+
+
+def interval_deferral(ctx: Ctx, env: Mapping[str, str]) -> dict | None:
+    """A deferred append's state (`interval-store deferral`: the compaction holding the generation, the pending and stuck
+    scans, the alert episode), and its alert: once per episode (`episode: start`), when scans an earlier run deferred are
+    still out behind a compaction, the scans themselves the trigger (no clock). None when it can't be read (the note then
+    names no compaction; no alert)."""
+    out = ctx.sh(["dt-cloud", "interval-store", "deferral", ctx.scan], env=env, fatal=False, capture=True,
+                 warn=f"interval-store deferral failed for {ctx.scan}")
+    if out is None:
+        ctx.failure = None  # the append was deferred, not failed: a missed read leaves only the note's detail out
+        return None
+    d = json.loads(out)
+    if d["episode"] == "start" and d["compacting"]:
+        stuck = d["stuck"]
+        ctx.run.alert("warn", f"interval store: {len(stuck)} earlier scan{'s' * (len(stuck) != 1)} ({stuck[0]}"
+                              f"{f' … {stuck[-1]}' if len(stuck) > 1 else ''}) still not appended: generation {d['gen']}'s compaction "
+                              f"({d['compacting']['holder']}, since {d['compacting']['since']}) has held appends across a scan; the "
+                              "first append after it publishes catches them up. A compaction job that ended without publishing "
+                              "leaves its lease to lapse (~15 min), after which the next append catches up on the old generation")
+    return d
+
+
+def deferred_note(d: dict | None) -> str:
+    """The interval-store phase's note for a deferred append: a `deferred: …` clause, which /scans reads as `deferred`
+    (`scanRunsModel.phaseDeferred`), neither a skip (`scan_runs.phase_skip`) nor a failure."""
+    held = (d or {}).get("compacting")
+    who = (f"generation {d['gen']} is being compacted by {held['holder']} (since {held['since']})" if d and held
+           else "a compaction holds the interval store's generation")
+    return f"deferred: {who}; the next run's append, after it publishes, catches this scan up"
 
 
 def _sync_args(ctx: Ctx) -> list[str]:

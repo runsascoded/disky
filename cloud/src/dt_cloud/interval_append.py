@@ -1662,16 +1662,53 @@ def append_cmd(catch_up: bool, compact_now: bool, no_merge: bool, dry_run: bool,
     exists; then the merge stage (the due carries, non-fatal), and when the compaction policy fires (or `-K`) the
     compaction stage (`compact`: GCS, then R2 with its pointer last). A generation compacted since the profile named it
     is followed to its successor. Exit 3 when SCAN_ID is not published yet, or an earlier published scan is pending
-    (without -c); exit 4 when another `append` holds the coordinator lease."""
+    (without -c); exit 4 when another `append` holds the coordinator lease; exit 6 (`COMPACTING`) when a live compaction
+    holds the generation: the append is deferred to the next run's (`deferral` says how far behind the store is)."""
     cfg = ready(profile)
     runner = store_runner(cfg, dry_run=dry_run, merge=not no_merge, merge_wait=merge_wait)
     runner.compact_now = compact_now
     runner.compact_wait = compact_wait
     runner.candidate = candidate
     t0 = monotonic()
-    done = exit_on(f"interval-store append {scan_id}", lambda: runner.run(scan_id, catch_up=catch_up), lambda m: err(m))
+    done = exit_on(f"interval-store append {scan_id}", lambda: runner.run(scan_id, catch_up=catch_up), lambda m: err(m), compacting=True)
     print(json.dumps({"gen": runner.p.gen, "scan": scan_id, "appended": done, "dry_run": dry_run, "s": round(monotonic() - t0, 1),
                       "stages": runner.timings, "compaction": runner.compaction}))
+
+
+#: The deferral episode's marker in the scratch bucket (`deferral`): `{"stuck": <the oldest stuck scan the alert named>}`.
+#: Not under a generation: a compaction moves the store to its successor mid-episode.
+DEFER_MARKER = f"{PREFIX}/defer-alert.json"
+
+
+@command("deferral")
+@option("-P", "--profile", help="Deployment profile JSON (default $INTERVAL_STORE_PROFILE)")
+@argument("scan_id")
+def deferral_cmd(profile: str | None, scan_id: str) -> None:
+    """After `append SCAN_ID` exited 6 (`COMPACTING`): the generation (followed to a successor already published), the
+    compaction holding it (`compacting`: `{holder, since}`, null once it let go), and `append_runner.deferral` (`newest`,
+    `pending`, `stuck`: published scans before SCAN_ID that an earlier run's append didn't land). `episode` (one alert per
+    episode, `deferral_episode`): `start` the first time scans are stuck behind a compaction (the marker
+    `interval-store/defer-alert.json` in the scratch bucket is then written: the caller alerts once), `end` once none is
+    (the marker removed), else null. Read-only but for the marker. Driven by the scans themselves, no clock."""
+    from google.cloud import storage
+
+    cfg = ready(profile)
+    runner = store_runner(cfg, dry_run=True)
+    runner.follow()
+    have, layouts = runner.have()
+    doc = ar.deferral(have, runner.published(layouts, have[-1]), scan_id)
+    scratch = gs_bucket(cfg.p.scratch)
+    client = storage.Client(project=cfg.p.project)
+    held = ar.compaction_holds(ar.gcs_compaction_lease_file(scratch, PREFIX, client), runner.p.gen, runner.now()) if scratch else None
+    blob = client.bucket(scratch).blob(DEFER_MARKER) if scratch else None
+    marked = json.loads(blob.download_as_bytes()).get("stuck") if blob is not None and blob.exists() else None
+    episode = ar.deferral_episode(doc["stuck"] if held else [], marked)
+    if blob is not None and episode == "start":
+        blob.upload_from_string(json.dumps({"scan": scan_id, "stuck": doc["stuck"][0], "gen": runner.p.gen, "holder": held["holder"]}) + "\n")
+    elif blob is not None and episode == "end":
+        blob.delete()
+    print(json.dumps({"gen": runner.p.gen, "scan": scan_id, "compacting": {"holder": held["holder"], "since": held["at"]} if held else None,
+                      **doc, "episode": episode}))
 
 
 @command("merge")

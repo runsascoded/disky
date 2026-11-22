@@ -219,9 +219,26 @@ def counted(row: dict) -> bool:
     return not live(row) and not cancelled(row)
 
 
+#: Phase issues that leave a run clean: a `deferred` append (a compaction held the interval store; a later run's append
+#: takes the scan, and its step alerts once per episode when one doesn't: `scan_steps.interval_store`). The site's
+#: `scanRunsModel` `DEFERRED`.
+TOLERATED = ('deferred',)
+
+
+def issues(row: dict) -> list[dict]:
+    """A run's phase issues that count against it (not `TOLERATED`)."""
+    return [i for i in row['phase_issues'] if i.get('outcome') not in TOLERATED]
+
+
+def deferred(row: dict) -> str:
+    """A clean run's `TOLERATED` issues, as ` · deferred: <phases>` (else nothing), for its reply and its sender."""
+    phases = sorted({str(i.get('phase')) for i in row['phase_issues'] if i.get('outcome') in TOLERATED})
+    return f" · deferred: {', '.join(phases)}" if phases else ''
+
+
 def clean(row: dict) -> bool:
-    # A later recovery does not rewrite a historically partial run into a clean run.
-    return row['run']['status'] == 'succeeded' and row['run']['finished_ts'] is not None and not row['phase_issues']
+    # A later recovery does not rewrite a historically partial run into a clean run; a deferred append was never a failure.
+    return row['run']['status'] == 'succeeded' and row['run']['finished_ts'] is not None and not issues(row)
 
 
 def grade(row: dict) -> str:
@@ -232,7 +249,7 @@ def grade(row: dict) -> str:
     if cancelled(row):
         return 'cancelled'
     run = row['run']
-    return 'issues' if run['status'] == 'succeeded' and run['finished_ts'] is not None and row['phase_issues'] else 'failed'
+    return 'issues' if run['status'] == 'succeeded' and run['finished_ts'] is not None and issues(row) else 'failed'
 
 
 def streak(rows: list[dict]) -> tuple[list[dict], dict | None]:
@@ -251,8 +268,8 @@ def signature(row: dict) -> str:
     run = row['run']
     if run['status'] == 'failed':
         return f"failed:{run.get('failed_phase') or ''}"
-    if row['phase_issues']:
-        return 'issues:' + ','.join(sorted({str(i.get('phase')) for i in row['phase_issues']}))
+    if issues(row):
+        return 'issues:' + ','.join(sorted({str(i.get('phase')) for i in issues(row)}))
     return run['status']
 
 
@@ -288,8 +305,8 @@ def short(row: dict) -> str:
         return 'failed' + (f" in {run['failed_phase']}" if run.get('failed_phase') else '')
     if run['status'] == 'cancelled':
         return 'cancelled'
-    if row['phase_issues']:
-        return 'phase issues: ' + ', '.join(sorted({str(i.get('phase')) for i in row['phase_issues']}))
+    if issues(row):
+        return 'phase issues: ' + ', '.join(sorted({str(i.get('phase')) for i in issues(row)}))
     return str(run['status'])
 
 
@@ -345,7 +362,7 @@ def reply(cfg: Config, row: dict) -> str:
     emoji, by = starter(row)
     ok = clean(row)
     return (f"{cfg.mark(grade(row))} {emoji} [{stamp(row)}]({cfg.link(row['run'])}) · {duration}" + (f" · {by}" if by else "")
-            + ('' if ok else f" · {describe(row)}"))
+            + (deferred(row) if ok else f" · {describe(row)}"))
 
 
 def si(n: float, sign: bool = False) -> str:
@@ -416,7 +433,7 @@ def run_sender(cfg: Config, row: dict, live: bool = False) -> dict[str, str]:
     trigger as a corner badge where `badges` names images, else the outcome's icon alone (`avatar`)."""
     outcome = 'running' if live else grade(row)
     head = f"{stamp(row)} · " + ('' if live else f"{took(row)} · ")
-    what = 'running' if live else 'clean' if outcome == 'clean' else short(row)
+    what = 'running' if live else 'clean' + deferred(row) if outcome == 'clean' else short(row)
     if len(head + what) > USERNAME_MAX:
         what = what[:USERNAME_MAX - len(head) - 1] + '…'
     icon = ({'icon_url': cfg.badges.format(outcome=outcome, trigger=TRIGGERS[row['run']['trigger']])} if cfg.badges
@@ -983,7 +1000,7 @@ def converge(
             newest = next((i for i, r in enumerate(rows) if r['run']['run_id'] in state.get('posted', {})), None)
             stop = rows[newest - 1] if newest else boundary or rows[0]
             if was == 'clean':
-                reason = 'phase issues' if stop['run']['status'] == 'succeeded' and stop['phase_issues'] else stop['run']['status']
+                reason = 'phase issues' if stop['run']['status'] == 'succeeded' and issues(stop) else stop['run']['status']
             else:
                 reason = 'clean' if clean(stop) else describe(stop)
             old = closed_runs(rows, stop, state.get('boundary'))

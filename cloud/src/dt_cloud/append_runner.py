@@ -112,6 +112,9 @@ NOT_NEXT = 3
 BUSY = 4
 #: Exit status: the newest manifest lists more unmerged runs than the binary counter leaves (`runs lag`).
 UNMERGED = 5
+#: Exit status, where a CLI asks for it (`exit_on(compacting=True)`): a live compaction holds the generation
+#: (`Compacting`), so the append is deferred to the compaction's catch-up or the next run's; elsewhere it exits `BUSY`.
+COMPACTING = 6
 #: Revision suffix width: `<id>.m001.json` … `<id>.m999.json` sort in revision order.
 REV_DIGITS = 3
 MANIFEST = re.compile(rf"(?P<scan>[^/]+?)(?:\.m(?P<rev>\d{{{REV_DIGITS}}}))?\.json")
@@ -149,6 +152,15 @@ class Busy(Exception):
     """Another coordinator holds the store's coordinator lease: exit 4."""
 
 
+class Compacting(Busy):
+    """A live compaction holds the generation (`Runner.wait_compaction`): the append is deferred, not refused for good.
+    `gen` the generation being compacted, `holder` the compaction's job, `since` when it took the lease."""
+
+    def __init__(self, gen: str, holder: str, since: str):
+        super().__init__(f"generation {gen} is being compacted by {holder} (since {since}): the append waits for its successor")
+        self.gen, self.holder, self.since = gen, holder, since
+
+
 class LeaseLost(RuntimeError):
     """The coordinator lease was taken over (or couldn't be renewed) mid-run: the run stops at the next stage."""
 
@@ -184,6 +196,26 @@ def pending_scans(have: list[str], published: list[str], scan_id: str, catch_up:
     if todo[0] != scan_id and not catch_up:
         raise NotNext(f"{len(todo) - 1} earlier published scan(s) pending: {', '.join(todo[:-1])} (append them first, or -c)")
     return todo
+
+
+def deferral(have: list[str], published: list[str], scan_id: str) -> dict:
+    """Where a deferred append (`Compacting`) leaves the store, for `scan_id`'s run: the generation's newest scan
+    (`newest`), the published scans after it through `scan_id` (`pending`), and of those the ones before `scan_id`
+    (`stuck`): an earlier run's append didn't land them, and this run's catch-up can't either. A compaction outlasting
+    a scan, or a stuck one, is what leaves `stuck` non-empty: no clock is involved."""
+    pending = sorted(s for s in published if have[-1] < s <= scan_id)
+    return {"newest": have[-1], "pending": pending, "stuck": [s for s in pending if s < scan_id]}
+
+
+def deferral_episode(stuck: list[str], marked: str | None) -> str | None:
+    """One alert per deferral episode: `start` when scans are stuck and the marker (the oldest stuck scan the last alert
+    named) isn't this episode's oldest (alert, then mark it), `end` when none is stuck and a marker is left (unmark),
+    else None. Appends go in scan-id order, so an episode's oldest stuck scan names it."""
+    if stuck and marked != stuck[0]:
+        return "start"
+    if marked is not None and not stuck:
+        return "end"
+    return None
 
 
 # ── Runs and manifests ─────────────────────────────────────────────────────
@@ -1779,7 +1811,7 @@ class Runner:
         """`Busy` while a live compaction holds the generation (`compaction_holds`): a scan appended to it would supersede
         the compaction; once it wrote its successor, the next run appends there (`follow`)."""
         if self.compacting is not None and (held := compaction_holds(self.compacting(), self.p.gen, self.now())):
-            raise Busy(f"generation {self.p.gen} is being compacted by {held['holder']} (since {held['at']}): the append waits for its successor")
+            raise Compacting(self.p.gen, held["holder"], held["at"])
 
     def one(self, d: str) -> None:
         raise NotImplementedError
@@ -2039,14 +2071,17 @@ class Runner:
             self.log(f"merge: failed, not fatal (every listed run is whole; the next run plans again): {e}")
 
 
-def exit_on(label_: str, fn: Callable[[], Any], log: Callable[[str], None]) -> Any:
-    """`fn()`, a CLI's run: `NotNext` exits `NOT_NEXT`, `Busy` `BUSY`, a failed stage (`RuntimeError`, `LeaseLost`) exits 1, each logged as
-    `<label>: <why>`."""
+def exit_on(label_: str, fn: Callable[[], Any], log: Callable[[str], None], compacting: bool = False) -> Any:
+    """`fn()`, a CLI's run: `NotNext` exits `NOT_NEXT`, `Busy` `BUSY` (with `compacting`, a `Compacting` one `COMPACTING`), a
+    failed stage (`RuntimeError`, `LeaseLost`) exits 1, each logged as `<label>: <why>`."""
     try:
         return fn()
     except NotNext as e:
         log(f"{label_}: {e}")
         sys.exit(NOT_NEXT)
+    except Compacting as e:
+        log(f"{label_}: {e}")
+        sys.exit(COMPACTING if compacting else BUSY)
     except Busy as e:
         log(f"{label_}: {e}")
         sys.exit(BUSY)

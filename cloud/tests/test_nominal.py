@@ -1332,3 +1332,18 @@ def test_a_preview_shows_each_posts_sender(tmp_path, monkeypatch):
         '[:white_check_mark: 11/02 08:00Z · 1m 00s · clean]\n:alarm_clock: [record](https://site.test/scans/r1)',
         '[:white_check_mark: 11/03 08:00Z · 1m 00s · clean]\n:alarm_clock: [record](https://site.test/scans/r2)',
     ]
+
+
+def test_a_deferred_append_leaves_a_run_clean_and_says_so():
+    """#82: a compaction holding the interval store defers the scan's append (a later run's takes it); the run stays in
+    its clean thread, its reply (and its sender) naming what was deferred. Any other issue beside it still counts."""
+    cfg = replace(CFG, group='color')
+    d = {'phase': 'interval-store', 'outcome': 'deferred', 'recovery': None}
+    other = {'phase': 'warm-cache', 'outcome': 'failed', 'recovery': None}
+    assert [N.grade(r) for r in [row(1, issues=[d]), row(1, issues=[d, other]), row(1, 'failed', issues=[d])]] == ['clean', 'issues', 'failed']
+    assert N.segment(cfg, [row(3), row(2, issues=[d]), row(1)]) == ('clean', [row(3), row(2, issues=[d]), row(1)], None)
+    assert N.reply(cfg, row(2, issues=[d])) == '✅ :alarm_clock: [11/03 08:00Z](https://site.test/scans/r2) · 1m 00s · deferred: interval-store'
+    assert N.reply(cfg, row(2, issues=[d, other])) == '⚠️ :alarm_clock: [11/03 08:00Z](https://site.test/scans/r2) · 1m 00s · phase issues: warm-cache'
+    assert N.signature(row(2, issues=[d, other])) == 'issues:warm-cache'
+    assert N.run_sender(SENT, row(2, issues=[d])) == {
+        'username': '11/03 08:00Z · 1m 00s · clean · deferred: interval-store', 'icon_emoji': ':white_check_mark:'}

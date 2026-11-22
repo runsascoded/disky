@@ -6,7 +6,7 @@ import { ago } from './colors'
 import { Tooltip } from './Tooltip'
 import { fmtDur as fmtDurM } from './runs'
 import {
-  BEHIND, compactSpans, issueLeaves, issueNext, issueState, issueWhat, outcomeParts, overlappingFailures, PASSING, phaseFamilies, phaseFamily, phaseFill, phaseOutcome, runOutcome, scanRunOf,
+  BEHIND, compactSpans, DEFERRED, issueLeaves, issueNext, issueState, issueWhat, outcomeParts, overlappingFailures, PASSING, phaseFamilies, phaseFamily, phaseFill, phaseOutcome, runOutcome, scanRunOf,
   type PhaseIssue, type PhaseSpan, type RunSummary, type ScanRun,
 } from './scanRunsModel'
 import { fmtTimestamp } from './scan'
@@ -138,7 +138,7 @@ export function IssueStanding({ issue: i, runHref }: { issue: PhaseIssue; runHre
  * leaves short while nothing has done its work nor passed its check since (its step's `leaves`), and where it stands. */
 export function IssueList({ issues, runHref }: { issues: readonly PhaseIssue[]; runHref?: (id: string) => string }) {
   return <div className="sr-issues">{issues.map(i => {
-    const more = i.outcome === BEHIND ? i.reason : i.detail
+    const more = i.outcome === BEHIND || i.outcome === DEFERRED ? i.reason : i.detail
     return <div key={i.phase} className={issueState(i)}>
       <div><b>{i.phase}</b> {issueWhat(i)}</div>
       {issueLeaves(i) && <div>{issueLeaves(i)}</div>}
@@ -152,6 +152,7 @@ export function IssueList({ issues, runHref }: { issues: readonly PhaseIssue[]; 
 export const OUTCOME_HEAD: Record<string, string> = {
   incomplete: "Published, but the scan's data or serving is short.",
   [BEHIND]: "Data published. Search doesn't cover this scan yet.",
+  [DEFERRED]: "Data published. A compaction held the interval store's append; a later run's append takes this scan.",
   [PASSING]: "A check failed on this run. The same check has passed in a later run: the site passes since, which doesn't show this scan did.",
   partial: "The scan's data and serving are complete; a side step failed.",
   recovered: 'Recovered: see below.',
@@ -159,7 +160,7 @@ export const OUTCOME_HEAD: Record<string, string> = {
 /** A cancelled run's tip: what it means. */
 export const CANCELLED_TIP = 'Cancelled: stopped on purpose, not a failure.'
 
-const OUTCOME_CLASS: Record<string, string> = { incomplete: 'warn', [BEHIND]: 'behind', [PASSING]: 'passing', partial: 'partial', recovered: 'succeeded' }
+const OUTCOME_CLASS: Record<string, string> = { incomplete: 'warn', [BEHIND]: 'behind', [DEFERRED]: 'behind', [PASSING]: 'passing', partial: 'partial', recovered: 'succeeded' }
 
 /** `cell`: rendered as a table cell's content (`Tooltip`'s `cell`: the cell is the hover target, the tip to its right).
  * `lost`: a running run quiet past `LOST_S` (`liveness`), shown `lost?` until `scan-run reconcile` settles it.

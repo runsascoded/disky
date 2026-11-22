@@ -305,25 +305,27 @@ export const stepFailure = (phase: string): StepFailure | undefined =>
 
 /** Where an issue stands: `recovered` (a later attempt or run did its work), `passing` (a check failed, and the same
  * check has passed in a later run: the site passes since, which doesn't show this scan did), `behind` (only search lags
- * the scan), `side` (a side step failed and stays failed: the scan's data and serving are whole), or `incomplete` (the
- * scan's data or serving is short; a failed check no later run has passed). */
-export type IssueState = 'recovered' | 'passing' | 'behind' | 'side' | 'incomplete'
+ * the scan), `deferred` (a compaction held the store append; a later run's takes the scan), `side` (a side step failed
+ * and stays failed: the scan's data and serving are whole), or `incomplete` (the scan's data or serving is short; a
+ * failed check no later run has passed). */
+export type IssueState = 'recovered' | 'passing' | 'behind' | 'deferred' | 'side' | 'incomplete'
 export function issueState(i: Pick<PhaseIssue, 'phase' | 'outcome' | 'recovery' | 'passing'>): IssueState {
-  return i.recovery ? 'recovered' : i.passing ? 'passing' : i.outcome === BEHIND ? 'behind' : stepFailure(i.phase)?.side ? 'side' : 'incomplete'
+  return i.recovery ? 'recovered' : i.passing ? 'passing' : i.outcome === BEHIND ? 'behind' : i.outcome === DEFERRED ? 'deferred'
+    : stepFailure(i.phase)?.side ? 'side' : 'incomplete'
 }
 
 /** What happened to an issue's phase, in a few words: `failed`, `failed 2x`, `timed out`, `skipped: <reason>` (the
- * recorded reason, without its `skipped (kind):` head), `search behind`. */
+ * recorded reason, without its `skipped (kind):` head), `search behind`, `deferred`. */
 export function issueWhat(i: Pick<PhaseIssue, 'outcome' | 'reason' | 'attempts'>): string {
-  if (i.outcome === BEHIND) return BEHIND
+  if (i.outcome === BEHIND || i.outcome === DEFERRED) return i.outcome
   if (i.reason) return `skipped: ${i.reason.replace(/^skipped(?: \([^)]*\))?: /, '')}`
   return (i.attempts ?? 1) > 1 ? `${i.outcome} ${i.attempts}x` : i.outcome
 }
 
 /** What an open issue leaves short, as its step declares it; undefined once its work is done or its check has passed
- * since, for search behind (its reason says it) and for a phase no soft step names. */
+ * since, for search behind and a deferred append (their reasons say it) and for a phase no soft step names. */
 export function issueLeaves(i: Pick<PhaseIssue, 'phase' | 'outcome' | 'recovery' | 'passing'>): string | undefined {
-  return i.recovery || i.passing || i.outcome === BEHIND ? undefined : stepFailure(i.phase)?.leaves
+  return i.recovery || i.passing || i.outcome === BEHIND || i.outcome === DEFERRED ? undefined : stepFailure(i.phase)?.leaves
 }
 
 /** Where an open issue goes from here: search catches up with the index; a converging step's work comes with a later
@@ -331,6 +333,7 @@ export function issueLeaves(i: Pick<PhaseIssue, 'phase' | 'outcome' | 'recovery'
  * `passing since` once a later run's passes; any other is not retried. */
 export function issueNext(i: Pick<PhaseIssue, 'phase' | 'outcome' | 'detail'>): string {
   if (i.outcome === BEHIND) return 'Search catches up when the static name index appends this scan.'
+  if (i.outcome === DEFERRED) return `A later run's ${i.phase} step appends this scan once the compaction has published.`
   if (PASSED_OVER.test(i.detail ?? '')) return 'Not retried: the store appends in scan order and is past this scan. A rebuild or backfill of the store adds it.'
   const step = stepFailure(i.phase)
   if (step?.converges) return `A later run's ${i.phase} step does this run's work too; none has yet.`
@@ -351,17 +354,26 @@ export function phaseBehind(p: Pick<ScanRunPhase, 'status' | 'note'>): string | 
 }
 
 export const BEHIND = 'search behind'
+
+/** A done phase's `deferred: …` clause (`dt_cloud.scan_steps.deferred_note`: a live compaction held the interval store's
+ * generation, so the append waits for a later run's), else null. Neither a skip nor a failure: the scan is published,
+ * its store append comes later, and a later run's append marks it recovered (`convergedBy`). */
+export function phaseDeferred(p: Pick<ScanRunPhase, 'status' | 'note'>): string | null {
+  return p.status === 'done' ? /^deferred: (.+)$/.exec(p.note ?? '')?.[1] ?? null : null
+}
+
+export const DEFERRED = 'deferred'
 /** A run's outcome when its worst issue is a failed check that has passed since (`issueState`'s `passing`). */
 export const PASSING = 'passing since'
 
 /** What a run came to. A succeeded run with issues reads as its worst open one (`issueState`): `incomplete` (the scan's
  * data or serving is short, or a check failed and hasn't passed since: the one to look at), else `search behind`, else
- * `passing since` (a check failed; the same check has passed in a later run), else `partial` (only side steps failed),
+ * `deferred` (a compaction held its store append), else `passing since` (a check failed; the same check has passed in a later run), else `partial` (only side steps failed),
  * else `recovered` (every issue's work was done since). Otherwise its status (`nop` as `no-op`). */
 export function runOutcome(run: Pick<ScanRun, 'status'>, issues: readonly PhaseIssue[] = []): string {
   if (run.status === 'succeeded' && issues.length) {
     const states = new Set(issues.map(issueState))
-    return states.has('incomplete') ? 'incomplete' : states.has('behind') ? BEHIND : states.has('passing') ? PASSING : states.has('side') ? 'partial' : 'recovered'
+    return states.has('incomplete') ? 'incomplete' : states.has('behind') ? BEHIND : states.has('deferred') ? DEFERRED : states.has('passing') ? PASSING : states.has('side') ? 'partial' : 'recovered'
   }
   return run.status === 'nop' ? 'no-op' : run.status
 }
@@ -408,7 +420,7 @@ export function partialReasons(issues: readonly PhaseIssue[]): string[] {
 export function runOutcomeLine(run: Pick<ScanRun, 'status'>, issues: readonly PhaseIssue[] = []): string {
   const outcome = runOutcome(run, issues)
   if (outcome === PASSING) return runOutcomeLabel(run, issues)
-  return outcome === 'partial' || outcome === 'incomplete' || outcome === BEHIND ? `${outcome}: ${partialReasons(issues).join('; ')}` : outcome
+  return outcome === 'partial' || outcome === 'incomplete' || outcome === BEHIND || outcome === DEFERRED ? `${outcome}: ${partialReasons(issues).join('; ')}` : outcome
 }
 
 /** /scans' status filter (`?st=<key>`): each choice's label and the outcomes it keeps. `attention` is the runs to look
@@ -421,6 +433,7 @@ export const STATUS_FILTERS: readonly { key: string; label: string; outcomes: re
   { key: 'passing', label: 'passing since (a check failed, and has passed since)', outcomes: [PASSING] },
   { key: 'incomplete', label: 'incomplete', outcomes: ['incomplete'] },
   { key: 'behind', label: BEHIND, outcomes: [BEHIND] },
+  { key: 'deferred', label: 'deferred (a compaction held the append)', outcomes: [DEFERRED] },
   { key: 'recovered', label: 'recovered', outcomes: ['recovered'] },
   { key: 'failed', label: 'failed', outcomes: ['failed'] },
   { key: 'running', label: 'running', outcomes: ['running'] },
@@ -444,9 +457,9 @@ function failureDetail(note: string | null): string | undefined {
   return rest || undefined
 }
 
-/** A phase that did its work: closed, not failed, skipped or behind. */
+/** A phase that did its work: closed, not failed, skipped, behind or deferred. */
 const phaseDid = (p: ScanRunPhase): boolean =>
-  p.finished_ts != null && phaseStatus(p) === 'done' && phaseSkip(p) == null && phaseBehind(p) == null
+  p.finished_ts != null && phaseStatus(p) === 'done' && phaseSkip(p) == null && phaseBehind(p) == null && phaseDeferred(p) == null
 
 /** A check that passed in full: it did its work, and its verdict (`n passed, n skipped (reason), n failed`: the
  * probe's) skipped nothing. A pass that skipped requests (the search's, beside a skipped static-names) is no pass of
@@ -477,7 +490,7 @@ const passingBy = (run: ScanRun, p: ScanRunPhase, runs: readonly ScanRun[], phas
 
 /** The run's issues, one per phase (its last attempt's; `attempts` counts a phase's failed ones). */
 export function phaseIssues(run: ScanRun, runs: readonly ScanRun[], phases: readonly ScanRunPhase[]): PhaseIssue[] {
-  const own = phases.filter(p => p.run_id === run.run_id && (phaseStatus(p) === 'failed' || phaseSkip(p) != null || phaseBehind(p) != null))
+  const own = phases.filter(p => p.run_id === run.run_id && (phaseStatus(p) === 'failed' || phaseSkip(p) != null || phaseBehind(p) != null || phaseDeferred(p) != null))
   const last = new Map<string, ScanRunPhase>()
   for (const p of own) last.set(p.phase, p)
   return [...last.values()].map(p => {
@@ -486,8 +499,10 @@ export function phaseIssues(run: ScanRun, runs: readonly ScanRun[], phases: read
     const recovery = retries.at(-1)?.run ?? convergedBy(run, p, runs, phases)
     const passing = passingBy(run, p, runs, phases, recovery)
     if (phaseStatus(p) !== 'failed') {
-      const skip = phaseSkip(p)
-      return skip != null ? { phase: p.phase, outcome: 'skipped', recovery, ...passing, reason: skip } : { phase: p.phase, outcome: BEHIND, recovery, ...passing, reason: phaseBehind(p)! }
+      const skip = phaseSkip(p), deferred = phaseDeferred(p)
+      return skip != null ? { phase: p.phase, outcome: 'skipped', recovery, ...passing, reason: skip }
+        : deferred != null ? { phase: p.phase, outcome: DEFERRED, recovery, ...passing, reason: deferred }
+          : { phase: p.phase, outcome: BEHIND, recovery, ...passing, reason: phaseBehind(p)! }
     }
     const attempts = own.filter(a => a.phase === p.phase && phaseStatus(a) === 'failed').length
     const detail = failureDetail(p.note)

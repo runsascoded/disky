@@ -52,7 +52,8 @@
     // passed in a later run (the same quiet ink: nothing to look at). The steps (or `passing since <scan>`) beside any
     // outcome are lighter, and wrap under it as one piece in a narrow column (never mid-name).
     .sr-steps { font-weight: 400; display: inline-block; white-space: nowrap; }
-    // search behind: the data is published, only the static name index lags it (neither a failure nor a warning)
+    // search behind: the data is published, only the static name index lags it (neither a failure nor a warning); a
+    // deferred store append (a compaction held it; a later run's takes the scan) reads the same
     &.behind { color: var(--ink-2); background: var(--panel); outline: 1px dashed var(--ink-3, currentColor); outline-offset: -1px; }
     &.lost { color: var(--danger); background: var(--surface); outline: 1px dashed color-mix(in srgb, var(--danger) 60%, transparent); outline-offset: -1px; }
   }
@@ -183,7 +184,7 @@
   .sr-bar { vertical-align: middle; .sr-bar-bg { fill: var(--other); } }
   .sr-runs .links, .runs .links { color: var(--ink-3); }
   .sr-failure { margin: 10px 0; padding: 8px 12px; border-left: 3px solid var(--danger); background: color-mix(in srgb, var(--danger) 6%, var(--surface)); font-size: 13.5px;
-    &.recovered, &.behind { border-color: var(--grew); background: color-mix(in srgb, var(--grew) 6%, var(--surface)); }
+    &.recovered, &.behind, &.deferred { border-color: var(--grew); background: color-mix(in srgb, var(--grew) 6%, var(--surface)); }
     // a side step that failed and stays failed (the scan is whole), and a failed check that has passed since
     &.side, &.passing, &.cancelled { border-color: var(--ink-3); background: var(--panel); }
     code { white-space: pre-wrap; word-break: break-word; } }

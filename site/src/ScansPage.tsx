@@ -29,7 +29,7 @@ import { useStore } from './store'
 import { useMinSlug } from './scan'
 import {
   batchHref, isLost, isMaintenance, isScanProducer, liveness, logsHref, maintStore, mapHref, metaHref, type OutputDelta, phaseOrder, processingSecs, type PhaseSpan, type RunSummary, type ScanRun,
-  type ScanRunPhase, type PhaseIssue, type PhaseRecovery, BEHIND, issueLeaves, issueState, issueWhat, overlappingFailures, phaseFill, phaseOutcome, runOutcome, runOutcomeLine, runTasks,
+  type ScanRunPhase, type PhaseIssue, type PhaseRecovery, BEHIND, DEFERRED, issueLeaves, issueState, issueWhat, overlappingFailures, phaseFill, phaseOutcome, runOutcome, runOutcomeLine, runTasks,
   type RunTask, STATUS_FILTERS, statusMatches, taskLogsHref, compactSpans, coveredSecs, phaseFamilies, phaseMatches, phaseOf,
 } from './scanRunsModel'
 import { agoLong, colorer, fmtDur, fmtRunTime, getJson, IssueStanding, type Links, PhaseBar, QUIET_TIP, runDay, RunWhen, scanRunsApi, scansHref, scansStore, Status, useScanRuns } from './scanRunsUi'
@@ -936,7 +936,9 @@ export function ScanRunPage() {
         {d.phase_issues?.map(i => <div className={`sr-failure ${issueState(i)}`} key={i.phase}>
           {i.outcome === BEHIND
             ? <><b>{i.phase}: search doesn't cover this scan yet.</b> {sentence(i.reason ?? '')} The data is published.</>
-            : <><b>{i.phase}</b> {stop(issueWhat(i))}{i.detail && <> {sentence(i.detail)}</>}{r.kind !== 'access-ingest' && issueLeaves(i) && <> {sentence(issueLeaves(i)!)}</>}</>}
+            : i.outcome === DEFERRED
+              ? <><b>{i.phase}: deferred.</b> {sentence(i.reason ?? '')} The data is published.</>
+              : <><b>{i.phase}</b> {stop(issueWhat(i))}{i.detail && <> {sentence(i.detail)}</>}{r.kind !== 'access-ingest' && issueLeaves(i) && <> {sentence(issueLeaves(i)!)}</>}</>}
           {' '}<IssueStanding issue={i} runHref={scanHref} />
         </div>)}
         {r.kind === 'phase-recovery' && r.parent && <p className="sub">Phase recovery for <Link to={scanHref(r.parent)}>the original scan run</Link>. This attempt has its own clock; it does not replace the original timings.</p>}

@@ -127,22 +127,52 @@ def test_batch_runner_polls_at_most_every_30s(monkeypatch):
     assert sleeps == [10, 20, 30, 30, 30]
 
 
-@pytest.mark.parametrize("raise_, code, logged", [
-    (ar.NotNext("not yet"), ar.NOT_NEXT, ["x: not yet"]),
-    (RuntimeError("Batch job j: FAILED"), 1, ["x: Batch job j: FAILED"]),
-    (ar.Busy("the coordinator lease is held by j"), ar.BUSY, ["x: the coordinator lease is held by j"]),
-    (ar.LeaseLost("lost the coordinator lease: it was deleted"), 1, ["x: lost the coordinator lease: it was deleted"]),
+COMPACTING_MSG = "x: generation g1 is being compacted by iv-compact-x (since 2026-11-21T04:36:00+00:00): the append waits for its successor"
+
+
+@pytest.mark.parametrize("raise_, compacting, code, logged", [
+    (ar.NotNext("not yet"), False, ar.NOT_NEXT, ["x: not yet"]),
+    (RuntimeError("Batch job j: FAILED"), False, 1, ["x: Batch job j: FAILED"]),
+    (ar.Busy("the coordinator lease is held by j"), False, ar.BUSY, ["x: the coordinator lease is held by j"]),
+    (ar.Busy("the coordinator lease is held by j"), True, ar.BUSY, ["x: the coordinator lease is held by j"]),
+    # a compaction's hold is `BUSY` to a CLI that doesn't ask (static-names' `runs add`), `COMPACTING` to one that does
+    (ar.Compacting("g1", "iv-compact-x", "2026-11-21T04:36:00+00:00"), False, ar.BUSY, [COMPACTING_MSG]),
+    (ar.Compacting("g1", "iv-compact-x", "2026-11-21T04:36:00+00:00"), True, ar.COMPACTING, [COMPACTING_MSG]),
+    (ar.LeaseLost("lost the coordinator lease: it was deleted"), False, 1, ["x: lost the coordinator lease: it was deleted"]),
 ])
-def test_exit_on(raise_, code, logged):
+def test_exit_on(raise_, compacting, code, logged):
     logs = []
 
     def fn():
         raise raise_
 
     with pytest.raises(SystemExit) as e:
-        ar.exit_on("x", fn, logs.append)
+        ar.exit_on("x", fn, logs.append, compacting=compacting)
     assert (e.value.code, logs) == (code, logged)
     assert ar.exit_on("x", lambda: [1], logs.append) == [1]
+
+
+@pytest.mark.parametrize("have, published, scan, want", [
+    # the run's own scan only: deferred, nothing stuck
+    (["d1", "d2"], ["d1", "d2", "d3"], "d3", {"newest": "d2", "pending": ["d3"], "stuck": []}),
+    # an earlier run's deferred scan is still out: stuck; a scan published after this run's isn't counted
+    (["d1", "d2"], ["d1", "d2", "d3", "d4", "d5"], "d4", {"newest": "d2", "pending": ["d3", "d4"], "stuck": ["d3"]}),
+    # this run's scan isn't published (its append refused it before reading): earlier pending ones are still stuck
+    (["d1"], ["d1", "d2"], "d3", {"newest": "d1", "pending": ["d2"], "stuck": ["d2"]}),
+])
+def test_deferral(have, published, scan, want):
+    assert ar.deferral(have, published, scan) == want
+
+
+@pytest.mark.parametrize("stuck, marked, want", [
+    ([], None, None),
+    (["d3"], None, "start"),
+    (["d3", "d4"], "d3", None),  # the same episode, a scan later: alerted already
+    (["d5"], "d3", "start"),  # d3 went in, then d5 got stuck: a new episode
+    ([], "d3", "end"),
+])
+def test_deferral_episode(stuck, marked, want):
+    assert ar.deferral_episode(stuck, marked) == want
 
 
 class S3:

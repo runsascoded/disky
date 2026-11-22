@@ -774,6 +774,63 @@ def test_interval_store_busy_is_a_skip(tmp_path, env, monkeypatch):
     assert scan_runs.phase_skip(note) == note
 
 
+DEFERRED_NOTE = ("deferred: generation g3.c001 is being compacted by iv-compact-x (since 2026-11-21T04:36:00+00:00); the next "
+                 "run's append, after it publishes, catches this scan up")
+
+
+@pytest.mark.parametrize(("episode", "stuck", "compacting", "note", "alerts"), [
+    # the run's own scan only: deferred, no alert
+    (None, [], True, DEFERRED_NOTE, []),
+    # an earlier run's scan is still out: one alert, at the episode's start
+    ("start", ["2026-10-15T1200"], True, DEFERRED_NOTE, [("warn",
+     "interval store: 1 earlier scan (2026-10-15T1200) still not appended: generation g3.c001's compaction (iv-compact-x, "
+     "since 2026-11-21T04:36:00+00:00) has held appends across a scan; the first append after it publishes catches them up. "
+     "A compaction job that ended without publishing leaves its lease to lapse (~15 min), after which the next append "
+     "catches up on the old generation")]),
+    # the same episode a scan later: alerted already
+    (None, ["2026-10-14T1200", "2026-10-15T1200"], True, DEFERRED_NOTE, []),
+    # the compaction let go between the append's refusal and the read: no compaction to name, no alert
+    ("start", ["2026-10-15T1200"], False,
+     "deferred: a compaction holds the interval store's generation; the next run's append, after it publishes, catches this scan up", []),
+])
+def test_interval_store_compacting_is_deferred(tmp_path, env, monkeypatch, episode, stuck, compacting, note, alerts):
+    """Exit 6 (`COMPACTING`): a live compaction holds the generation. Not a skip nor a failure: the phase is done with a
+    `deferred:` clause naming the compaction (`interval-store deferral`), and an earlier run's scan still out behind it
+    is one warn alert per episode, the scans themselves the trigger."""
+    from dt_cloud import scan_runs
+
+    monkeypatch.setattr(scan_runs, "run_grouped", lambda cmd, timeout, grace, **kw: scan_runs.Ran(6, False, None))
+    c = gcs_ctx(tmp_path, env, monkeypatch, **{"interval-store": {"profile": "/app/job/interval-store.json"}})
+    d = {"gen": "g3.c001", "scan": "2026-10-16T1200",
+         "compacting": {"holder": "iv-compact-x", "since": "2026-11-21T04:36:00+00:00"} if compacting else None,
+         "newest": "2026-10-13T1200", "pending": [*stuck, "2026-10-16T1200"], "stuck": stuck, "episode": episode}
+    c.sh_impl = Runner(tmp_path, stdout={"dt-cloud interval-store deferral": json.dumps(d)})
+    phases, posted = [], []
+    c.run.begin = lambda name: phases.append(("begin", name))
+    c.run.end = lambda name, rc=0, **kw: phases.append(("end", name, rc, kw))
+    c.run.alert = lambda level, msg: posted.append((level, msg))
+    S.interval_store(c, None)
+    assert (c.sh_impl.calls, phases, posted) == (
+        ["dt-cloud interval-store deferral 2026-10-16T1200"],
+        [("begin", "interval-store"), ("end", "interval-store", 0, {"note": note})], alerts)
+    assert (scan_runs.phase_skip(note), scan_runs.phase_status(note)) == (None, "done")
+
+
+def test_interval_store_deferral_unread_is_still_deferred(tmp_path, env, monkeypatch):
+    """`deferral` failing leaves only the note's detail out: the phase is still done and deferred, never failed."""
+    from dt_cloud import scan_runs
+
+    monkeypatch.setattr(scan_runs, "run_grouped", lambda cmd, timeout, grace, **kw: scan_runs.Ran(6, False, None))
+    c = gcs_ctx(tmp_path, env, monkeypatch, **{"interval-store": {"profile": "/app/job/interval-store.json"}})
+    c.sh_impl = Runner(tmp_path, codes={"dt-cloud interval-store deferral": 1})
+    phases = []
+    c.run.begin = lambda name: phases.append(("begin", name))
+    c.run.end = lambda name, rc=0, **kw: phases.append(("end", name, rc, kw))
+    S.interval_store(c, None)
+    assert (phases, c.failure) == ([("begin", "interval-store"), ("end", "interval-store", 0, {
+        "note": "deferred: a compaction holds the interval store's generation; the next run's append, after it publishes, catches this scan up"})], None)
+
+
 def test_interval_store_not_next_is_passed_over(tmp_path, env, monkeypatch):
     """Exit 3: the staged append refused the scan, as static-names' does: failed, with the `passed over:` clause."""
     from dt_cloud import scan_runs
