@@ -11,12 +11,15 @@ import { batchJobsUrl } from "./gcp.js"
 export const secretRef = (cfg: BatchConfig, name: string): string =>
   `projects/${cfg.project}/secrets/${name}/versions/latest`
 
-/** The standard plan-sweep Batch job spec: the image running `bash -c <script>`
- * as `jobSa`, the data bucket FUSE-mounted at /gcs/<bucket>, and the S3 creds
- * from Secret Manager. `bucket` is the bucket the executor acts on
- * (`SWEEP_BUCKET`); `env` merges in per-job variables, `secrets` per-job Secret
- * Manager refs; `component` the jobs' cost-attribution label (with `cfg.labels`). */
-export function sweepBatchSpec(cfg: BatchConfig, jobSa: string, script: string, bucket: string, env: Record<string, string> = {}, secrets: Record<string, string> = {}, component = "sweep"): unknown {
+/** The `GCP_PROJECT` … `SWEEP_S3_ENDPOINT` a plan-sweep dispatch (`planDispatch`, `plan-sweep/undo`, `plan-sweep/purge`)
+ *  needs before it submits: a deployment that leaves any unset has no plan-sweep executor. */
+export const PLAN_SWEEP_NEEDS = ['GCP_PROJECT', 'BATCH_REGION', 'DATA_BUCKET', 'SWEEP_IMAGE', 'SWEEP_S3_ENDPOINT'] as const
+
+/** A Batch job running `bash -c <script>` on `image` as `jobSa`, in the deployment's Batch region, the data bucket
+ *  FUSE-mounted at /gcs/<bucket>, with `DATA_BUCKET` and exactly the `env` and Secret Manager refs (`secrets`) given: no
+ *  store credentials of its own, so a job that reads a store names its keys. `component` is its cost-attribution label
+ *  (with `cfg.labels`). */
+export function batchTaskSpec(cfg: BatchConfig, jobSa: string, image: string, script: string, env: Record<string, string>, secrets: Record<string, string>, component: string): unknown {
   const DATA_BUCKET = cfg.dataBucket
   return labelBatchSpec({
     taskGroups: [{
@@ -24,7 +27,7 @@ export function sweepBatchSpec(cfg: BatchConfig, jobSa: string, script: string, 
       taskSpec: {
         runnables: [{
           container: {
-            imageUri: cfg.image,
+            imageUri: image,
             entrypoint: "/bin/bash",
             commands: ["-c", script],
             volumes: [`/mnt/disks/gcs/${DATA_BUCKET}:/gcs/${DATA_BUCKET}:rw`],
@@ -39,18 +42,8 @@ export function sweepBatchSpec(cfg: BatchConfig, jobSa: string, script: string, 
           mountOptions: ["--implicit-dirs"],
         }],
         environment: {
-          variables: {
-            DATA_BUCKET, SWEEP_BUCKET: bucket, SWEEP_S3_ENDPOINT: cfg.s3Endpoint,
-            AWS_DEFAULT_REGION: "us-east-1",
-            AWS_EC2_METADATA_DISABLED: "true",
-            DT_S3_ADDRESSING_STYLE: "virtual",
-            ...env,
-          },
-          secretVariables: {
-            AWS_ACCESS_KEY_ID: secretRef(cfg, "cw-s3-access-key-id"),
-            AWS_SECRET_ACCESS_KEY: secretRef(cfg, "cw-s3-secret-access-key"),
-            ...secrets,
-          },
+          variables: { DATA_BUCKET, ...env },
+          secretVariables: { ...secrets },
         },
       },
     }],
@@ -61,6 +54,23 @@ export function sweepBatchSpec(cfg: BatchConfig, jobSa: string, script: string, 
     },
     logsPolicy: { destination: "CLOUD_LOGGING" },
   }, cfg.labels, component)
+}
+
+/** The plan-sweep executor's job (cw-s3's bridge): `batchTaskSpec` on `SWEEP_IMAGE`, with the executor's S3 env and
+ *  cw-s3's source keys. `bucket` is the bucket the executor acts on (`SWEEP_BUCKET`); `env` merges in per-job
+ *  variables, `secrets` per-job Secret Manager refs; `component` the jobs' cost-attribution label. */
+export function sweepBatchSpec(cfg: BatchConfig, jobSa: string, script: string, bucket: string, env: Record<string, string> = {}, secrets: Record<string, string> = {}, component = "sweep"): unknown {
+  return batchTaskSpec(cfg, jobSa, cfg.image, script, {
+    SWEEP_BUCKET: bucket, SWEEP_S3_ENDPOINT: cfg.s3Endpoint,
+    AWS_DEFAULT_REGION: "us-east-1",
+    AWS_EC2_METADATA_DISABLED: "true",
+    DT_S3_ADDRESSING_STYLE: "virtual",
+    ...env,
+  }, {
+    AWS_ACCESS_KEY_ID: secretRef(cfg, "cw-s3-access-key-id"),
+    AWS_SECRET_ACCESS_KEY: secretRef(cfg, "cw-s3-secret-access-key"),
+    ...secrets,
+  }, component)
 }
 
 /** Submit a Batch job; returns { ok, status, text } (caller maps errors). */

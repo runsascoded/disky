@@ -13,7 +13,7 @@
  */
 import type { D1Database } from '@cloudflare/workers-types'
 import { batchConfig, notConfigured } from './batchConfig.js'
-import { jobStamp, runGsPath, runMountPath, secretRef, submitBatch, sweepBatchSpec } from './cwBatch.js'
+import { jobStamp, PLAN_SWEEP_NEEDS, runGsPath, runMountPath, secretRef, submitBatch, sweepBatchSpec } from './cwBatch.js'
 import { type DispatchReq, type ExecEnv, type Executor, expectedVars, type Prepared, refuse } from './dispatch.js'
 import { gcpToken } from './gcp.js'
 import { NO_SHAPE, PlanSpansBuckets, planItemLines, prefixShape, snapshotPlan } from './plans.js'
@@ -43,7 +43,7 @@ async function prepare(env: ExecEnv, db: D1Database, req: DispatchReq): Promise<
   if (!env.GCP_SA_KEY) return refuse(503, 'dispatch not configured (GCP_SA_KEY secret missing)')
   if (!env.JOB_SA) return refuse(503, 'dispatch not configured (JOB_SA var missing)')
   const jobSa = env.JOB_SA
-  const cfg = batchConfig(env, ['GCP_PROJECT', 'BATCH_REGION', 'DATA_BUCKET', 'SWEEP_IMAGE', 'SWEEP_S3_ENDPOINT'])
+  const cfg = batchConfig(env, PLAN_SWEEP_NEEDS)
   if ('missing' in cfg) return refuse(503, notConfigured('dispatch', cfg.missing))
   const review = reviewConfig(env, cfg)
   const shape = prefixShape(env)

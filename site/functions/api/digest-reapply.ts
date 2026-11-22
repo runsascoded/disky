@@ -13,12 +13,14 @@
  * `target`: `thread` | `op` | `YYYY-MM-DD` | `YYYY-MM-DD..YYYY-MM-DD` (days of `month`). `channel` defaults to
  * `DIGEST_CHANNEL` (the deployment's digest channel); another (a DM, to try a format first) is any Slack channel id.
  *
- * `DIGEST_REAPPLY` (JSON, `ReapplyConfig`) names what's the deployment's: unset, a POST answers 503. Where `SWEEP_DISPATCH`
- * is `"0"` a POST answers 403 (`sweepsOff`): the job edits the real digest; the GETs only read. */
+ * `DIGEST_REAPPLY` (JSON, `ReapplyConfig`) names what's the deployment's: unset, a POST answers 503. The job is its own
+ * (`reapplySpec`): its image, the batch config's `REAPPLY_NEEDS` and exactly its secrets, so a deployment can run it
+ * with no plan-sweep executor configured. Where `SWEEP_DISPATCH` is `"0"` a POST answers 403 (`sweepsOff`): the job
+ * edits the real digest; the GETs only read. */
 import type { D1Database } from '@cloudflare/workers-types'
 import { type Ctx, json, requireAdmin } from '../_lib/auth.js'
-import { batchConfig, type BatchEnv, notConfigured } from '../_lib/batchConfig.js'
-import { jobStamp, secretRef, submitBatch, sweepBatchSpec } from '../_lib/cwBatch.js'
+import { batchConfig, type BatchConfig, type BatchEnv, notConfigured } from '../_lib/batchConfig.js'
+import { batchTaskSpec, jobStamp, secretRef, submitBatch } from '../_lib/cwBatch.js'
 import { sweepsOff, SWEEPS_OFF } from '../_lib/dispatch.js'
 import { batchJobsUrl, gcpToken } from '../_lib/gcp.js'
 import { parseParams } from '../../src/digest/codec.js'
@@ -33,11 +35,18 @@ export const JOB_RE = /^[a-z0-9-]+-digest-\d{8}-\d{6}z$/
 const NAME_RE = /^[\w./{}$-]+$/
 /** A `root` that names its store: used as given (an R2 deployment's thread state and snapshots aren't on the data bucket). */
 const ROOT_URL_RE = /^(gs|r2|s3):\/\/[\w./{}$-]+$/
+/** An image reference: `<registry>/<path>` by tag or digest. */
+const IMAGE_RE = /^[a-z0-9.-]+(:\d+)?\/[\w./-]+(:[\w.-]+|@sha256:[0-9a-f]{64})$/
+
+/** What a re-apply job needs of the batch config. Not `SWEEP_IMAGE` / `SWEEP_S3_ENDPOINT`: enabling re-apply never
+ *  configures plan-sweep dispatch (`PLAN_SWEEP_NEEDS`). */
+export const REAPPLY_NEEDS = ['GCP_PROJECT', 'BATCH_REGION', 'DATA_BUCKET'] as const
 
 /** `DIGEST_REAPPLY`: the digest CLI's `template` (an old name, `cw` / `gcs`, read as its name), `config` and `root` (a
- *  `gs://` / `r2://` / `s3://` URL as given, else a path under the data bucket), the `env_script` the task sources for the scan steps' environment, the R2 bucket its preview bundle
+ *  `gs://` / `r2://` / `s3://` URL as given, else a path under the data bucket), the job's `image` (optional: else
+ *  `SWEEP_IMAGE`, where the sweep executor runs the scan image), the `env_script` the task sources for the scan steps' environment, the R2 bucket its preview bundle
  *  goes to, and env var -> Secret Manager name. */
-export interface ReapplyConfig { template: string; config: string; root: string; env_script: string; r2_bucket: string; secrets: Record<string, string> }
+export interface ReapplyConfig { template: string; config: string; root: string; env_script: string; r2_bucket: string; image?: string; secrets: Record<string, string> }
 
 /** The deployment's config, or why there is none. */
 export function reapplyConfig(raw: string | undefined): ReapplyConfig | string {
@@ -52,6 +61,7 @@ export function reapplyConfig(raw: string | undefined): ReapplyConfig | string {
     const v = c[k]
     if (typeof v !== 'string' || !(NAME_RE.test(v) || (k === 'root' && ROOT_URL_RE.test(v)))) return `DIGEST_REAPPLY.${k}`
   }
+  if (c.image !== undefined && (typeof c.image !== 'string' || !IMAGE_RE.test(c.image))) return 'DIGEST_REAPPLY.image'
   const template = canonicalTemplate(c.template)
   if (!template) return 'DIGEST_REAPPLY.template'
   const secrets = c.secrets
@@ -124,6 +134,16 @@ export const reapplyScript = (args: string[], outMnt: string, c: ReapplyConfig):
   `dt-cloud digest -T ${sq(c.template)} -C ${sq(c.config)} -r ${ROOT_URL_RE.test(c.root) ? '' : '"gs://$DATA_BUCKET/"'}${sq(c.root)} ${args.map(sq).join(' ')} 2>&1 | tee "$OUT"`,
 ].join('\n')
 
+/** A run's Batch job (`batchTaskSpec`): `script` on `image` as `jobSa`, with the run's identity, the R2 bucket its
+ *  preview bundle goes to (`R2_BUCKET`: the env script sets up R2 only with it) and exactly `DIGEST_REAPPLY.secrets`, no
+ *  other store credentials. */
+export function reapplySpec(cfg: BatchConfig, jobSa: string, image: string, script: string, jobId: string, siteUrl: string, c: ReapplyConfig): unknown {
+  return batchTaskSpec(cfg, jobSa, image, script, {
+    JOB_ID: jobId, SITE_URL: siteUrl, R2_BUCKET: c.r2_bucket,
+    ...(cfg.cfAccountId ? { CLOUDFLARE_ACCOUNT_ID: cfg.cfAccountId } : {}),
+  }, Object.fromEntries(Object.entries(c.secrets).map(([k, v]) => [k, secretRef(cfg, v)])), 'digest')
+}
+
 type Env = BatchEnv & { DB?: D1Database; JOB_SA?: string; DIGEST_CHANNEL?: string; DIGEST_REAPPLY?: string }
 
 const COLS = 'job_id, month, channel, target, dry_run, params, quota_marks, actor, ts, out'
@@ -136,10 +156,12 @@ export const onRequestPost = async (ctx: Ctx): Promise<Response> => {
   const env = ctx.env as unknown as Env
   if (!env.DB) return json({ error: 'not configured (no D1 binding)' }, 503)
   if (!env.GCP_SA_KEY || !env.JOB_SA) return json({ error: 'not configured (GCP_SA_KEY / JOB_SA)' }, 503)
-  const cfg = batchConfig(env, ['GCP_PROJECT', 'DATA_BUCKET', 'SWEEP_IMAGE', 'SWEEP_S3_ENDPOINT'])
+  const cfg = batchConfig(env, REAPPLY_NEEDS)
   if ('missing' in cfg) return json({ error: notConfigured('digest re-apply', cfg.missing) }, 503)
   const c = reapplyConfig(env.DIGEST_REAPPLY)
   if (typeof c === 'string') return json({ error: notConfigured('digest re-apply', c) }, 503)
+  const image = c.image ?? env.SWEEP_IMAGE
+  if (!image) return json({ error: notConfigured('digest re-apply', 'DIGEST_REAPPLY.image') }, 503)
   const req = parseReapply(await ctx.request.json().catch(() => null), env.DIGEST_CHANNEL)
   if (typeof req === 'string') return json({ error: req }, 400)
 
@@ -147,11 +169,7 @@ export const onRequestPost = async (ctx: Ctx): Promise<Response> => {
   const out = `gs://${cfg.dataBucket}/${runKey(jobId, 'txt')}`
   const mnt = (ext: 'txt' | 'plan.json') => `/gcs/${cfg.dataBucket}/${runKey(jobId, ext)}`
   const script = reapplyScript(reapplyArgs(req, mnt('plan.json')), mnt('txt'), c)
-  const spec = sweepBatchSpec(cfg, env.JOB_SA, script, "", {
-    // `R2_BUCKET`: the env script sets up R2 only with it; the digest writes its preview bundle there.
-    JOB_ID: jobId, SITE_URL: new URL(ctx.request.url).origin, R2_BUCKET: c.r2_bucket,
-    ...(cfg.cfAccountId ? { CLOUDFLARE_ACCOUNT_ID: cfg.cfAccountId } : {}),
-  }, Object.fromEntries(Object.entries(c.secrets).map(([k, v]) => [k, secretRef(cfg, v)])), 'digest')
+  const spec = reapplySpec(cfg, env.JOB_SA, image, script, jobId, new URL(ctx.request.url).origin, c)
   const token = await gcpToken(env.GCP_SA_KEY)
   const sub = await submitBatch(cfg, token, jobId, spec)
   if (!sub.ok) return json({ error: `batch submit failed (${sub.status})`, detail: sub.text.slice(0, 1000) }, 500)
