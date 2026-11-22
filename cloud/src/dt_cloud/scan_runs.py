@@ -2181,8 +2181,9 @@ def supervised_finish(ptr: Path, ran: Ran, grace: float) -> None:
 @option('-c', '--profile', 'profile_path', default=None, help=f'The deployment scan-run profile (default ${PROFILE_ENV}); reads its nominal configuration')
 @option('-o', '--out', default=None, help='Write the rendered review copy or execution summary to this file')
 @option('-r', '--run-id', default=None, help='Require this authoritative terminal run record to be visible')
+@option('-R', '--reform', is_flag=True, help='With -x: a quiet clean thread from before quiet mode moves its runs\' links to the rolling reply and deletes their own replies')
 @option('-x', '--execute', is_flag=True, help='Update Slack and persist state (default: render only; no Slack calls or state writes)')
-def nominal_cmd(adopt_check: bool, profile_path: str | None, out: str | None, run_id: str | None, execute: bool) -> None:
+def nominal_cmd(adopt_check: bool, profile_path: str | None, out: str | None, run_id: str | None, reform: bool, execute: bool) -> None:
     """Render or converge the deployment's nominal run thread (specs/done/nominal-run-threads.md)."""
     from click import echo
 
@@ -2193,7 +2194,9 @@ def nominal_cmd(adopt_check: bool, profile_path: str | None, out: str | None, ru
         raise ValueError('scan-run nominal: profile has no nominal configuration')
     # An executed report records each reply's link on its run (`scan_runs.thread_url`) where the profile names a D1
     db = (os.environ.get("D1_DB_ID") or "").strip() if execute else ""
-    text = run(p.nominal, os.environ, p.project, run_id, execute, adopt_check, sink=D1Sink(db) if db else None)
+    if reform and not execute:
+        raise ValueError('scan-run nominal: -R needs -x')
+    text = run(p.nominal, os.environ, p.project, run_id, execute, adopt_check, sink=D1Sink(db) if db else None, reform=reform)
     if out:
         Path(out).write_text(text.rstrip() + '\n')
     else:
