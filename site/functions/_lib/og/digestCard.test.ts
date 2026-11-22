@@ -118,9 +118,12 @@ describe('poolsSvg', () => {
       '0%', '25%', '50%', '75%', '100%',
       'quota (each pool’s own)',
       '10/5', '10/12', '10/19', '10/26',
-      '02a 75%', '(678 T / 910 T)', '06a 89%', '(88.5 T / 100 T)', 'rno2a zone 68%', '(68 T / 100 T)',
+      '02a 75%', '(678 Ti / 910 Ti)', '06a 89%', '(88.5 Ti / 100 Ti)', 'rno2a zone 68%', '(68 Ti / 100 Ti)',
       'also: 04a 0%',
     ])
+  })
+  it('a TB card labels its sizes in T', () => {
+    expect(texts(poolsSvg({ ...poolsInput(), units: 'TB' })).filter(s => s.startsWith('('))).toEqual(['(745 T / 1,001 T)', '(97.3 T / 110 T)', '(74.8 T / 110 T)'])
   })
 })
 

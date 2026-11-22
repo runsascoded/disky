@@ -29,7 +29,7 @@ const DANGER = '#f2635a'
 const GREW = '#4ade80'
 const VARS = { '--s1': S1, '--panel': PANEL, '--ink': INK, '--dt-treemap-ink': '#d0d0d8', '--dt-treemap-container-bg': PANEL }
 /** The image's size unit: bytes per unit and the byte formatter (labels, call-out, map cells). */
-const UNITS = { TiB: { bytes: 1024 ** 4, fmt: fmtB }, TB: { bytes: 1e12, fmt: fmtSI } } as const
+const UNITS = { TiB: { bytes: 1024 ** 4, fmt: fmtB, short: 'Ti' }, TB: { bytes: 1e12, fmt: fmtSI, short: 'T' } } as const
 export type DigestUnits = keyof typeof UNITS
 
 export interface DigestPoint {
@@ -349,7 +349,6 @@ export function tiersSvg(d: TiersCardInput): string {
 
 // ---- the quota-pools card ---------------------------------------------------------------------------------------
 
-/** One quota pool's series: its name, quota (bytes) and used bytes per scan. */
 /** The gap between a pool label's % and its sizes (px). */
 const SIZE_GAP = 4
 
@@ -358,6 +357,7 @@ const SIZE_GAP = 4
 export const fmtT = (v: number): string =>
   v >= 100 ? String(Math.round(v)).replace(/\B(?=(\d{3})+(?!\d))/g, ',') : String(Number(v.toPrecision(3)))
 
+/** One quota pool's series: its name, quota (bytes) and used bytes per scan. */
 export interface PoolSeries { name: string; quota: number; points: DigestPoint[] }
 
 /** The pools' line colours, in request order. */
@@ -400,9 +400,11 @@ export function poolsSvg(d: PoolsCardInput): string {
   // plot's right edge)
   const loud = series.filter(s => !s.faint && s.points.length)
   const labelOf = (s: (typeof series)[number]) => `${s.name} ${Math.round(s.pcts[s.pcts.length - 1])}%`
-  // each label's latest size and quota in the card's unit, lighter, after its %: `(1,367 T / 1,480 T)`
+  // each label's latest size and quota in the card's unit (its short form, as the digest's text: `Ti`, `T`), lighter,
+  // after its %: `(1,367 Ti / 1,480 Ti)`
   const unit = UNITS[d.units ?? 'TiB']
-  const sizeOf = (s: (typeof series)[number]) => `(${fmtT(s.points[s.points.length - 1].bytes / unit.bytes)} T / ${fmtT(s.quota / unit.bytes)} T)`
+  const sizeOf = (s: (typeof series)[number]) =>
+    `(${fmtT(s.points[s.points.length - 1].bytes / unit.bytes)} ${unit.short} / ${fmtT(s.quota / unit.bytes)} ${unit.short})`
   const labelW = (s: (typeof series)[number]) => interWidth(labelOf(s), 12, 600) + SIZE_GAP + interWidth(sizeOf(s), 11)
   const gutter = loud.length ? Math.max(...loud.map(labelW)) + 14 : 0
   const f = frame(d, PAD, w - gutter)
