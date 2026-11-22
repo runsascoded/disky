@@ -581,7 +581,7 @@ describe('a cancelled run\'s stopped step', () => {
       ['bucket-check', 'done', 0, 5],
       ['list open-athena', 'cancelled', 5, 900],
     ])
-    expect(runTasks(open, r).map(t => [t.job_name, t.status])).toEqual([['nf-bc', 'done'], ['nf-l', 'cancelled']])
+    expect(runTasks(open, r).map(t => [t.job_name, t.status, t.end])).toEqual([['nf-bc', 'done', 5], ['nf-l', 'cancelled', 900]])
     expect(phaseIssues(r, [r], open)).toEqual([])
     expect(phaseSpans({ ...r, status: 'running' }, open, 600).map(s => [s.status, s.end])).toEqual([['done', 5], ['running', 600]])
   })

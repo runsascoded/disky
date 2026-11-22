@@ -1,7 +1,7 @@
 // A scan run's pipeline DAG (specs/pipelines-everywhere.md "Run reports"): the engine-neutral graph its head stored
 // (`scan_run_dags`, reduced by the writer from its engine's own format), laid out in columns, and each node joined to
 // the phases its tasks recorded (`scan_run_phases.task` = `<id> (<tag>)`; Nextflow: `$NF_PROCESS` / `$NF_TAG`).
-import { phaseStatus, type PhaseState, type ScanRun, type ScanRunPhase } from './scanRunsModel'
+import { phaseEnd, phaseStatus, type PhaseState, type ScanRun, type ScanRunPhase } from './scanRunsModel'
 
 /** The engine-neutral graph the run's writer stored (`dt_cloud.run_dag`): the steps, and the edges between them. A
  * node's `id` is what the run's phases name as their `task`'s process. */
@@ -45,7 +45,7 @@ function worst(ss: readonly PhaseState[]): PhaseState {
 /** The DAG's nodes with their tasks' phases and a status: no phases yet is `pending` while the run runs, else
  * `unrecorded` (a task that recorded nothing, or a run before phases named their task). A cancelled run's stopped
  * steps are `cancelled` (`phaseStatus`). */
-export function dagNodes(dag: Dag, phases: readonly ScanRunPhase[], run: Pick<ScanRun, 'status'>): DagNode[] {
+export function dagNodes(dag: Dag, phases: readonly ScanRunPhase[], run: Pick<ScanRun, 'status'> & Partial<Pick<ScanRun, 'finished_ts'>>): DagNode[] {
   const layers = dagLayers(dag)
   const rows = new Map<number, number>()
   return dag.nodes.map(({ id, label }) => {
@@ -56,7 +56,8 @@ export function dagNodes(dag: Dag, phases: readonly ScanRunPhase[], run: Pick<Sc
       t.phases.push(p.phase)
       t.status = worst([t.status, phaseStatus(p, run)])
       if (p.started_ts != null) t.start = t.start == null ? p.started_ts : Math.min(t.start, p.started_ts)
-      if (p.finished_ts != null) t.end = t.end == null ? p.finished_ts : Math.max(t.end, p.finished_ts)
+      const end = phaseEnd(p, run)
+      if (end != null) t.end = t.end == null ? end : Math.max(t.end, end)
       by.set(p.task, t)
     }
     const tasks = [...by.values()]

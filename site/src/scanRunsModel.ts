@@ -207,6 +207,10 @@ export function phaseStatus(p: { status: PhaseState; note: string | null }, run?
   return failed ? (run?.status === 'cancelled' ? 'cancelled' : 'failed') : p.status
 }
 
+/** When a phase ended: its own `finished_ts`, or, still open in a cancelled run, the cancel (the run's end). */
+export const phaseEnd = (p: Pick<ScanRunPhase, 'status' | 'finished_ts'>, run?: Partial<Pick<ScanRun, 'status' | 'finished_ts'>>): number | null =>
+  p.finished_ts ?? (p.status === 'running' && run?.status === 'cancelled' ? run.finished_ts ?? null : null)
+
 export function phaseOutcome(p: { status: PhaseState; note: string | null }): string {
   return phaseStatus(p) === 'failed' && /\bexit\s+124\b|\btimed?\s*out\b/i.test(p.note ?? '') ? 'timed out' : phaseStatus(p)
 }
@@ -528,7 +532,7 @@ export function phaseIssues(run: ScanRun, runs: readonly ScanRun[], phases: read
 /** A run's step tasks (its phases' own Batch jobs, a Nextflow run's): one per job, in start order. */
 export interface RunTask { job_name: string; machine: string | null; phases: string[]; start: number | null; end: number | null; status: PhaseState }
 
-export function runTasks(phases: readonly ScanRunPhase[], run?: Pick<ScanRun, 'status'>): RunTask[] {
+export function runTasks(phases: readonly ScanRunPhase[], run?: Pick<ScanRun, 'status'> & Partial<Pick<ScanRun, 'finished_ts'>>): RunTask[] {
   const by = new Map<string, RunTask>()
   for (const p of [...phases].sort((a, b) => (a.started_ts ?? Infinity) - (b.started_ts ?? Infinity) || a.seq - b.seq)) {
     if (!p.job_name) continue
@@ -536,7 +540,8 @@ export function runTasks(phases: readonly ScanRunPhase[], run?: Pick<ScanRun, 's
     t.machine ??= p.machine ?? null
     t.phases.push(p.phase)
     if (p.started_ts != null) t.start = t.start == null ? p.started_ts : Math.min(t.start, p.started_ts)
-    if (p.finished_ts != null) t.end = t.end == null ? p.finished_ts : Math.max(t.end, p.finished_ts)
+    const end = phaseEnd(p, run)
+    if (end != null) t.end = t.end == null ? end : Math.max(t.end, end)
     const st = phaseStatus(p, run)
     if (st === 'failed' || (st === 'running' && t.status !== 'failed') || (st === 'cancelled' && t.status === 'done')) t.status = st
     by.set(p.job_name, t)
