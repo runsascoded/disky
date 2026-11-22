@@ -183,8 +183,8 @@ class DigestConfig:
     preview: str | None = None
     pin: bool = True
     # one reply under the OP carrying its plot split in two image blocks, the chart then the diff map
-    # (`/api/digest-image` ``part``), to compare with the OP's single image (`_plot_parts`)
-    split_reply: bool = True
+    # (`/api/digest-image` ``part``), to compare with the OP's single image (`_plot_parts`); off deletes a posted one
+    split_reply: bool = False
 
     @property
     def unit(self) -> Units:
@@ -932,7 +932,8 @@ def split_body(images: list[tuple[str, str]]) -> str:
 
 def _split_reply(cfg: DigestConfig, month: dt.date, client, state: dict, op_ts: str, split: list[tuple[str, str]]) -> bool:
     """Post the split reply under the OP once (as the OP's sender), recording its ts in ``state["split_reply"]``, or edit
-    it to ``split``'s fresh URLs; True when it was posted. Not a unit: never in ``posted``, never redone or deleted."""
+    it to ``split``'s fresh URLs; True when it was posted. Not a unit: never in ``posted`` or redone; `_drop_split_reply`
+    deletes it once ``split_reply`` is off."""
     body = split_body(split)
     have = state.get("split_reply")
     if have:
@@ -941,6 +942,24 @@ def _split_reply(cfg: DigestConfig, month: dt.date, client, state: dict, op_ts: 
         return False
     state["split_reply"] = client.post(body, thread_id=op_ts, username=f"{cfg.title} — {month:%B %Y}", **cfg.op_sender()).id
     _err(f"digest: posted split reply {state['split_reply']}")
+    return True
+
+
+def _drop_split_reply(client, state: dict) -> bool:
+    """Delete the split reply an earlier run posted (``split_reply`` since turned off) and forget it, also when it's
+    already gone (Slack's ``message_not_found``); True when one was recorded."""
+    have = state.pop("split_reply", None)
+    if not have:
+        return False
+    try:
+        client.delete(have, orphans_ok=True)
+    except RuntimeError as e:
+        # someone already deleted it by hand (r2 and hf did, 11-21): the state this function converges to
+        if "message_not_found" not in str(e):
+            raise
+        _err(f"digest: split reply {have} already deleted")
+        return True
+    _err(f"digest: deleted split reply {have} (split_reply off)")
     return True
 
 
@@ -1024,6 +1043,8 @@ def converge_slack(tpl: Template, root: str, month: dt.date, client, channel: st
     if current and cfg.pin and pin_op(client, channel, state, op_ts, _prev_op(cfg, root, month, channel, variant)):
         save_state(path, state)
     if split and _split_reply(cfg, month, client, state, op_ts, split):
+        save_state(path, state)
+    if not cfg.split_reply and _drop_split_reply(client, state):
         save_state(path, state)
     if cfg.preview:
         _write_preview(cfg, preview_bundle(tpl, data, month, op=body, plot_url=plot_url, prev_url=prev_url, channel=channel,

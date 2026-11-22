@@ -487,7 +487,7 @@ def _split_calls(log: list) -> list[dict]:
 def test_cw_split_reply(slack, monkeypatch, tmp_path: Path, site_parts: list):
     # the plot's chart and map, drawn by the site and hosted beside it, go in one reply under the OP (as its sender),
     # posted once and then edited; it isn't a unit, so `posted` never names it
-    cw = _split_tpl(monkeypatch)
+    cw = _split_tpl(monkeypatch, split_reply=True)
     root = cw_root(tmp_path)
     icons = tmp_path / "icons"
     icons.mkdir()
@@ -521,3 +521,24 @@ def test_cw_split_reply_skipped(slack, monkeypatch, tmp_path: Path, site_parts: 
     state = DG.converge_slack(cw, str(cw_root(tmp_path)), SEP, _client(), "C1", "sender", icons_dir=tmp_path / "icons")
     expected_parts = {"no-map": [None], "old-site": [None, "chart"], "off": [None]}[case]
     assert (_split_calls(slack), state.get("split_reply"), site_parts) == ([], None, expected_parts)
+
+
+@pytest.mark.parametrize("gone", [False, True])
+def test_cw_split_reply_off_deletes(slack, monkeypatch, tmp_path: Path, site_parts: list, gone: bool):
+    # turning `split_reply` off deletes the reply an earlier run posted, once, and forgets it; the OP is only edited.
+    # `gone`: someone deleted it by hand first, so Slack answers `message_not_found`; the state converges the same
+    root = str(cw_root(tmp_path))
+    (tmp_path / "icons").mkdir()
+    on = _split_tpl(monkeypatch, split_reply=True)
+    DG.converge_slack(on, root, SEP, _client(), "C1", "sender", icons_dir=tmp_path / "icons")
+    off = _split_tpl(monkeypatch)
+    n = len(slack)
+    if gone:
+        def delete(self, message_id, orphans_ok=False):
+            self.log.append({"op": "delete", "ts": message_id, "orphans_ok": orphans_ok})
+            raise RuntimeError("Slack API error: message_not_found")
+        monkeypatch.setattr(FakeSlack, "delete", delete)
+    state = DG.converge_slack(off, root, SEP, _client(), "C1", "sender", icons_dir=tmp_path / "icons")
+    again = DG.converge_slack(off, root, SEP, _client(), "C1", "sender", icons_dir=tmp_path / "icons")
+    ops = [(c["op"], c.get("ts")) for c in slack[n:] if c["op"] in ("post", "delete")]
+    assert (ops, state.get("split_reply"), again.get("split_reply")) == ([("delete", "m2")], None, None)
