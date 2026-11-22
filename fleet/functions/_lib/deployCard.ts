@@ -133,9 +133,11 @@ export function fmtDur(secs: number): string {
 /** A change, signed: `+0.6%`, `-12%`, `±0%`. */
 export function fmtDelta(cur: number, was: number): string | null {
   if (!(was > 0)) return null
-  const pct = (cur / was - 1) * 100
-  if (Math.abs(pct) < 0.05) return '±0%'
-  return `${pct > 0 ? '+' : '-'}${Math.abs(pct) < 10 ? Math.abs(pct).toFixed(1) : Math.abs(pct).toFixed(0)}%`
+  // to a tenth first, so a float's 9.999… reads as 10, not 10.0
+  const pct = Math.round((cur / was - 1) * 1000) / 10
+  if (pct === 0) return '±0%'
+  const a = Math.abs(pct)
+  return `${pct > 0 ? '+' : '-'}${a < 10 ? a.toFixed(1) : a.toFixed(0)}%`
 }
 
 const median = (xs: number[]): number | null => {
