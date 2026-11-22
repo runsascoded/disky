@@ -455,12 +455,14 @@ def parent(
     stores: str = '',
     quiet: bool = False,
     bare: bool = False,
+    prev: str | None = None,
 ) -> str:
     """The thread's head: a clean thread's streak, or a failure thread's (`failed`), naming the runs going now, with
-    the latest run's outcome and the deployment's store lines (`stores_text`). `quiet`: its runs are listed in one
-    rolling reply (`trail`), not a reply each. `bare`: no leading emoji and title, which its sender says (`lead`)."""
+    the latest run's outcome, the deployment's store lines (`stores_text`) and the thread before it (`prev`, a
+    permalink: `previous`). `quiet`: its runs are listed in one rolling reply (`trail`), not a reply each. `bare`: no
+    leading emoji and title, which its sender says (`lead`)."""
     if good and not clean(good[0]):
-        return failed(cfg, good, boundary, live_rows, stores, bare)
+        return failed(cfg, good, boundary, live_rows, stores, bare, prev)
     window = good[:10]
     counts = {k: sum(r['run']['trigger'] == k for r in window) for k in ('schedule', 'manual', None)}
     mix = f"{counts['schedule']} scheduled / {counts['manual']} manual" + (f" / {counts[None]} unknown" if counts[None] else '')
@@ -468,7 +470,7 @@ def parent(
     qualifier = '' if boundary else 'at least '
     after = f" after [{boundary['run']['scan']}]({cfg.link(boundary['run'])})" if boundary else ' (available run history)'
     return (f"{lead(cfg, cfg.mark('clean'), bare)}{qualifier}{len(good)} consecutive clean run{'' if len(good) == 1 else 's'}**\n\n"
-            f"Since {since}{after}.\n\n"
+            f"Since {since}{after}{previous(prev)}.\n\n"
             f"Latest completed: [{stamp(good[0])}]({cfg.link(good[0]['run'])})" + (f" · {done}" if (done := outcome(good[0])) else '') + ".\n\n"
             f"{stores}"
             f"{running_now(cfg, live_rows)}"
@@ -494,6 +496,11 @@ def unclean(cfg: Config, runs: list[dict], qualifier: str = '') -> tuple[str, st
     return cfg.mark('failed'), f"{qualifier}{n} consecutive " + (f"run{s} failed or with phase issues" if 'issues' in grades else f"failed run{s}")
 
 
+def previous(prev: str | None) -> str:
+    """A head's link to the thread before it, after its "Since …"."""
+    return f" · [previous thread]({prev})" if prev else ''
+
+
 def lead(cfg: Config, mark: str, bare: bool) -> str:
     """A head's first line up to its words: its emoji and the title, or (`bare`: posted with a sender, which says them)
     only the bold's start."""
@@ -507,6 +514,7 @@ def failed(
     live_rows: list[dict] | None = None,
     stores: str = '',
     bare: bool = False,
+    prev: str | None = None,
 ) -> str:
     """A failure thread's head (`unclean`): how many runs in a row failed or had phase issues (under `signature`, the
     same way), since when and after which run (the last clean one, or the last that failed differently), and the newest
@@ -520,7 +528,7 @@ def failed(
     after = (f" after [{boundary['run']['scan']}]({cfg.link(boundary['run'])})" + (' (clean)' if clean(boundary) else f" ({describe(boundary)})")
              if boundary else ' (available run history)')
     return (f"{lead(cfg, mark, bare)}{words}{how}**\n\n"
-            f"Since {stamp(bad[-1])}{after}.\n\n"
+            f"Since {stamp(bad[-1])}{after}{previous(prev)}.\n\n"
             f"Latest: [{stamp(bad[0])}]({cfg.link(bad[0]['run'])}): {describe(bad[0])}.\n\n"
             f"{stores}"
             f"{running_now(cfg, live_rows)}"
@@ -557,6 +565,14 @@ def closed_head(
     return (f"{lead(cfg, mark, bare)}{words} (ended)**\n\n"
             f"Since {stamp(runs[-1])}{after}; last [{stamp(runs[0])}]({cfg.link(runs[0]['run'])}).\n\n"
             f"Ended by [{stamp(stop)}]({cfg.link(stop['run'])}): {reason}. [All scans]({cfg.scans}).")
+
+
+def next_thread(cfg: Config, body: str, url: str) -> str:
+    """A closed head (`closed_head`) whose "Ended by …" line links the thread after it (`url`, a permalink)."""
+    tail = f". [All scans]({cfg.scans})."
+    if not body.endswith(tail):
+        raise ValueError("nominal: a closed head without its All scans link")
+    return body[:-len(tail)] + f" · [next thread]({url})" + tail
 
 
 #: A folded alert's text starts with this; it is never folded again.
@@ -974,7 +990,7 @@ def converge(
             body = closed_head(cfg, was, old, stop, reason, bare=bool(state.get('head_sender')))
             check()
             slack.edit(state['parent'], body)
-            state['closed'] = True
+            state.update(closed=True, closed_body=body)
             persist()
             if state.get('rolling'):
                 # A quiet thread's rolling reply ends as its runs and the one that ended it, with no runs going
@@ -986,8 +1002,12 @@ def converge(
                     persist()
         if good:
             kept = {k: state[k] for k in KEPT if k in state}
+            # The new head links the closed one (`previous_url`); once it is posted, the closed head's "Ended by" line
+            # links it back (`previous_body`: the closed head as last written, dropped once relinked)
+            prev = {'previous': state['parent'], 'previous_url': slack.permalink(state['parent']),
+                    **({'previous_body': state['closed_body']} if state.get('closed_body') else {})}
             state.clear()
-            state.update(namespace=cfg.namespace, boundary=boundary_id, posted={}, **kept)
+            state.update(namespace=cfg.namespace, boundary=boundary_id, posted={}, **kept, **prev)
             if head != 'clean':
                 state['key'] = head
             if cfg.senders:
@@ -1008,10 +1028,15 @@ def converge(
         quiet = cfg.quiet and head == 'clean'
         # A head posted with a sender drops what the sender says; one posted without (before senders) keeps it
         bare = bool(state.get('head_sender')) if state.get('parent') else cfg.senders
-        body = parent(cfg, good, boundary, live_rows, stores, quiet=quiet, bare=bare)
+        body = parent(cfg, good, boundary, live_rows, stores, quiet=quiet, bare=bare, prev=state.get('previous_url'))
         if not state.get('parent'):
             kind = 'clean' if head == 'clean' else 'issues' if grade(good[-1]) == 'issues' else 'failed'
             send('parent', body, None, scope, cfg.sender(kind))
+        if state.get('previous_body'):
+            check()
+            slack.edit(state['previous'], next_thread(cfg, state['previous_body'], slack.permalink(state['parent'])))
+            del state['previous_body']
+            persist()
         # New threads bootstrap ten; established threads append every missing run after the newest known one. A quiet
         # thread posts none: its runs are lines of one rolling reply, which each run's link (`link_threads`) names.
         posted = state.setdefault('posted', {})

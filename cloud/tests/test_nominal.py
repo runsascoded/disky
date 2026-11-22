@@ -218,7 +218,7 @@ def test_every_nonclean_boundary_closes_once_then_recovery_gets_new_parent(bad):
     w.run([bad, *history(2)])
     assert w.slack.calls == []
     w.run([row(4), bad, *history(2)])
-    assert [(c[0], c[1]) for c in w.slack.calls] == [('post', '4.0'), ('post', '5.0')]
+    assert [(c[0], c[1]) for c in w.slack.calls] == [('post', '4.0'), ('edit', '1.0'), ('post', '5.0')]
     assert w.saved['parent'] == '4.0'
     assert w.saved['posted'] == {'r4': '5.0'}
 
@@ -295,8 +295,8 @@ def test_a_running_reply_whose_run_opens_a_failure_thread_links_it():
     w = running_writer(replace(CFG, group='color'))
     w.run([row(3, 'failed', failed_phase='index', error='boom', **ADA), *history(2)])
     failed = '❌ :ada: [11/04 08:00Z](https://site.test/scans/r3) · 1m 00s · failed in index: boom'
-    assert [(c[0], c[1]) for c in w.slack.calls] == [('edit', '1.0'), ('post', '5.0'), ('post', '6.0'), ('edit', '4.0')]
-    assert bodies(w.slack)[2:] == [('post', '6.0', failed), ('edit', '4.0', failed + ' · [thread](https://slack.test/p5.0)')]
+    assert [(c[0], c[1]) for c in w.slack.calls] == [('edit', '1.0'), ('post', '5.0'), ('edit', '1.0'), ('post', '6.0'), ('edit', '4.0')]
+    assert bodies(w.slack)[3:] == [('post', '6.0', failed), ('edit', '4.0', failed + ' · [thread](https://slack.test/p5.0)')]
     assert (w.saved['parent'], w.saved['posted'], 'running' in w.saved) == ('5.0', {'r3': '6.0'}, False)
 
 
@@ -574,9 +574,12 @@ def test_color_threads_consecutive_failures_and_each_change_of_color_closes_the_
                         'Since 11/02 08:00Z after [2026-11-01T0800](https://site.test/scans/r0); last [11/03 08:00Z](https://site.test/scans/r2).\n\n'
                         'Ended by [11/04 08:00Z](https://site.test/scans/r3): failed. [All scans](https://site.test/scans).'),
         ('post', '4.0', '❌ **Test scans: 2 consecutive failed runs**\n\n'
-                        'Since 11/04 08:00Z after [2026-11-03T0800](https://site.test/scans/r2) (clean).\n\n'
+                        'Since 11/04 08:00Z after [2026-11-03T0800](https://site.test/scans/r2) (clean) · [previous thread](https://slack.test/p1.0).\n\n'
                         'Latest: [11/05 08:00Z](https://site.test/scans/r4): failed in probe.\n\n'
                         'Each reply links its scan record. [All scans](https://site.test/scans).'),
+        ('edit', '1.0', '✅ **Test scans: 2 consecutive clean runs (ended)**\n\n'
+                        'Since 11/02 08:00Z after [2026-11-01T0800](https://site.test/scans/r0); last [11/03 08:00Z](https://site.test/scans/r2).\n\n'
+                        'Ended by [11/04 08:00Z](https://site.test/scans/r3): failed · [next thread](https://slack.test/p4.0). [All scans](https://site.test/scans).'),
         ('post', '5.0', '❌ :alarm_clock: [11/04 08:00Z](https://site.test/scans/r3) · 1m 00s · failed in index: boom'),
         ('post', '6.0', '❌ :alarm_clock: [11/05 08:00Z](https://site.test/scans/r4) · 1m 00s · failed in probe'),
     ]
@@ -590,9 +593,12 @@ def test_color_threads_consecutive_failures_and_each_change_of_color_closes_the_
                         'Since 11/04 08:00Z after [2026-11-03T0800](https://site.test/scans/r2); last [11/05 08:00Z](https://site.test/scans/r4).\n\n'
                         'Ended by [11/06 08:00Z](https://site.test/scans/r5): clean. [All scans](https://site.test/scans).'),
         ('post', '7.0', '✅ **Test scans: 1 consecutive clean run**\n\n'
-                        'Since 11/06 08:00Z after [2026-11-05T0800](https://site.test/scans/r4).\n\n'
+                        'Since 11/06 08:00Z after [2026-11-05T0800](https://site.test/scans/r4) · [previous thread](https://slack.test/p4.0).\n\n'
                         'Latest completed: [11/06 08:00Z](https://site.test/scans/r5) · 1m 00s.\n\n'
                         'Latest 1 run: 1 scheduled / 0 manual. Each reply links its scan record. [All scans](https://site.test/scans).'),
+        ('edit', '4.0', '❌ **Test scans: 2 consecutive failed runs (ended)**\n\n'
+                        'Since 11/04 08:00Z after [2026-11-03T0800](https://site.test/scans/r2); last [11/05 08:00Z](https://site.test/scans/r4).\n\n'
+                        'Ended by [11/06 08:00Z](https://site.test/scans/r5): clean · [next thread](https://slack.test/p7.0). [All scans](https://site.test/scans).'),
         ('post', '8.0', '✅ :alarm_clock: [11/06 08:00Z](https://site.test/scans/r5) · 1m 00s'),
     ]
     assert ('key' in w.saved, w.saved['posted']) == (False, {'r5': '8.0'})
@@ -618,9 +624,12 @@ def test_signature_threads_a_failure_while_it_repeats_and_a_different_one_opens_
                         'Since 11/04 08:00Z after [2026-11-02T0800](https://site.test/scans/r1); last [11/05 08:00Z](https://site.test/scans/r4).\n\n'
                         'Ended by [11/06 08:00Z](https://site.test/scans/r5): phase issues: probe. [All scans](https://site.test/scans).'),
         ('post', '4.0', '⚠️ **Test scans: 1 consecutive run with phase issues**\n\n'
-                        'Since 11/06 08:00Z after [2026-11-05T0800](https://site.test/scans/r4) (failed in interval-store: OOM again).\n\n'
+                        'Since 11/06 08:00Z after [2026-11-05T0800](https://site.test/scans/r4) (failed in interval-store: OOM again) · [previous thread](https://slack.test/p1.0).\n\n'
                         'Latest: [11/06 08:00Z](https://site.test/scans/r5): phase issues: probe.\n\n'
                         'Each reply links its scan record. [All scans](https://site.test/scans).'),
+        ('edit', '1.0', '❌ **Test scans: 2 consecutive failed runs (ended)**\n\n'
+                        'Since 11/04 08:00Z after [2026-11-02T0800](https://site.test/scans/r1); last [11/05 08:00Z](https://site.test/scans/r4).\n\n'
+                        'Ended by [11/06 08:00Z](https://site.test/scans/r5): phase issues: probe · [next thread](https://slack.test/p4.0). [All scans](https://site.test/scans).'),
         ('post', '5.0', '⚠️ :alarm_clock: [11/06 08:00Z](https://site.test/scans/r5) · 1m 00s · phase issues: probe'),
     ]
     assert (w.saved['key'], w.saved['boundary'], w.saved['posted']) == ('fail:issues:probe', 'r4', {'r5': '5.0'})
@@ -639,7 +648,7 @@ def test_color_heads_name_runs_with_phase_issues_apart_from_failures():
     w.run([i3, i2, *history(1)])
     assert bodies(w.slack)[1] == (
         'post', '3.0', '⚠️ **Test scans: 2 consecutive runs with phase issues**\n\n'
-                       'Since 11/03 08:00Z after [2026-11-02T0800](https://site.test/scans/r1) (clean).\n\n'
+                       'Since 11/03 08:00Z after [2026-11-02T0800](https://site.test/scans/r1) (clean) · [previous thread](https://slack.test/p1.0).\n\n'
                        'Latest: [11/04 08:00Z](https://site.test/scans/r3): phase issues: static-names.\n\n'
                        'Each reply links its scan record. [All scans](https://site.test/scans).')
     w.slack.calls.clear()
@@ -648,7 +657,7 @@ def test_color_heads_name_runs_with_phase_issues_apart_from_failures():
     assert bodies(w.slack) == [
         ('post', '6.0', '❌ :alarm_clock: [11/05 08:00Z](https://site.test/scans/r4) · 1m 00s · failed in index'),
         ('edit', '3.0', '❌ **Test scans: 3 consecutive runs failed or with phase issues**\n\n'
-                        'Since 11/03 08:00Z after [2026-11-02T0800](https://site.test/scans/r1) (clean).\n\n'
+                        'Since 11/03 08:00Z after [2026-11-02T0800](https://site.test/scans/r1) (clean) · [previous thread](https://slack.test/p1.0).\n\n'
                         'Latest: [11/05 08:00Z](https://site.test/scans/r4): failed in index.\n\n'
                         'Each reply links its scan record. [All scans](https://site.test/scans).'),
     ]
@@ -923,9 +932,12 @@ def test_a_failure_threads_reply_folds_its_runs_top_level_alerts_and_leaves_each
     w.run([r3, *history(2)])
     assert bodies(w.slack)[1:] == [
         ('post', '6.0', '⚠️ **Test scans: 1 consecutive run with phase issues**\n\n'
-                        'Since 11/04 08:00Z after [2026-11-03T0800](https://site.test/scans/r2) (clean).\n\n'
+                        'Since 11/04 08:00Z after [2026-11-03T0800](https://site.test/scans/r2) (clean) · [previous thread](https://slack.test/p1.0).\n\n'
                         'Latest: [11/04 08:00Z](https://site.test/scans/r3): phase issues: probe, static-names.\n\n'
                         'Each reply links its scan record. [All scans](https://site.test/scans).'),
+        ('edit', '1.0', '✅ **Test scans: 2 consecutive clean runs (ended)**\n\n'
+                        'Since 11/02 08:00Z after [2026-11-01T0800](https://site.test/scans/r0); last [11/03 08:00Z](https://site.test/scans/r2).\n\n'
+                        'Ended by [11/04 08:00Z](https://site.test/scans/r3): phase issues · [next thread](https://slack.test/p6.0). [All scans](https://site.test/scans).'),
         ('post', '7.0', '⚠️ :alarm_clock: [11/04 08:00Z](https://site.test/scans/r3) · 1m 00s · phase issues: probe, static-names\n'
                         'static-names failed (exit 1) · [task logs](https://logs.test/u1)\n'
                         'probe failed (exit 1): 4 failed · [task logs](https://logs.test/u2)'),
@@ -1028,9 +1040,12 @@ def test_a_failure_in_a_quiet_thread_posts_and_closes_it_and_a_recovery_opens_a_
                         'Ended by [11/04 08:00Z](https://site.test/scans/r3): failed. [All scans](https://site.test/scans).'),
         ('edit', '2.0', f'{TRAIL}\n{failed}'),
         ('post', '3.0', '❌ **Test scans: 1 consecutive failed run**\n\n'
-                        'Since 11/04 08:00Z after [2026-11-03T0800](https://site.test/scans/r2) (clean).\n\n'
+                        'Since 11/04 08:00Z after [2026-11-03T0800](https://site.test/scans/r2) (clean) · [previous thread](https://slack.test/p1.0).\n\n'
                         'Latest: [11/04 08:00Z](https://site.test/scans/r3): failed in index: boom.\n\n'
                         'Each reply links its scan record. [All scans](https://site.test/scans).'),
+        ('edit', '1.0', '✅ **Test scans: 2 consecutive clean runs (ended)**\n\n'
+                        'Since 11/02 08:00Z after [2026-11-01T0800](https://site.test/scans/r0); last [11/03 08:00Z](https://site.test/scans/r2).\n\n'
+                        'Ended by [11/04 08:00Z](https://site.test/scans/r3): failed · [next thread](https://slack.test/p3.0). [All scans](https://site.test/scans).'),
         ('post', '4.0', failed),
     ]
     assert (w.saved['key'], w.saved['parent'], w.saved['posted'], 'rolling' in w.saved) == ('fail', '3.0', {'r3': '4.0'}, False)
@@ -1045,9 +1060,12 @@ def test_a_failure_in_a_quiet_thread_posts_and_closes_it_and_a_recovery_opens_a_
                         'Since 11/04 08:00Z after [2026-11-03T0800](https://site.test/scans/r2); last [11/04 08:00Z](https://site.test/scans/r3).\n\n'
                         'Ended by [11/05 08:00Z](https://site.test/scans/r4): clean. [All scans](https://site.test/scans).'),
         ('post', '6.0', '✅ **Test scans: 1 consecutive clean run**\n\n'
-                        'Since 11/05 08:00Z after [2026-11-04T0800](https://site.test/scans/r3).\n\n'
+                        'Since 11/05 08:00Z after [2026-11-04T0800](https://site.test/scans/r3) · [previous thread](https://slack.test/p3.0).\n\n'
                         'Latest completed: [11/05 08:00Z](https://site.test/scans/r4) · 1m 00s.\n\n'
                         'Latest 1 run: 1 scheduled / 0 manual. One reply lists the runs, each linking its scan record. [All scans](https://site.test/scans).'),
+        ('edit', '3.0', '❌ **Test scans: 1 consecutive failed run (ended)**\n\n'
+                        'Since 11/04 08:00Z after [2026-11-03T0800](https://site.test/scans/r2); last [11/04 08:00Z](https://site.test/scans/r3).\n\n'
+                        'Ended by [11/05 08:00Z](https://site.test/scans/r4): clean · [next thread](https://slack.test/p6.0). [All scans](https://site.test/scans).'),
         ('post', '7.0', '✅ :alarm_clock: [11/05 08:00Z](https://site.test/scans/r4) · 1m 00s'),
         ('edit', '5.0', '✅ :alarm_clock: [11/05 08:00Z](https://site.test/scans/r4) · 1m 00s · [thread](https://slack.test/p6.0)'),
     ]
@@ -1093,7 +1111,7 @@ SENT_HEAD = QUIET_HEAD.replace('✅ **Test scans: ', '**')
 F3 = row(3, 'failed', failed_phase='index', error='boom', **ADA)
 #: The failure thread F3 opens after history(2)'s quiet thread (its head 3.0)
 RED_HEAD = ('**1 consecutive failed run**\n\n'
-            'Since 11/04 08:00Z after [2026-11-03T0800](https://site.test/scans/r2) (clean).\n\n'
+            'Since 11/04 08:00Z after [2026-11-03T0800](https://site.test/scans/r2) (clean) · [previous thread](https://slack.test/p1.0).\n\n'
             'Latest: [11/04 08:00Z](https://site.test/scans/r3): failed in index: boom.\n\n'
             'Each reply links its scan record. [All scans](https://site.test/scans).')
 
@@ -1183,6 +1201,9 @@ def red_writer():
                               'Ended by [11/04 08:00Z](https://site.test/scans/r3): failed. [All scans](https://site.test/scans).'),
         ('edit', '2.0', None, f'{TRAIL}\n❌ :ada: [11/04 08:00Z](https://site.test/scans/r3) · 1m 00s · failed in index: boom'),
         ('post', '3.0', FAILING, RED_HEAD),
+        ('edit', '1.0', None, '**2 consecutive clean runs (ended)**\n\n'
+                              'Since 11/02 08:00Z after [2026-11-01T0800](https://site.test/scans/r0); last [11/03 08:00Z](https://site.test/scans/r2).\n\n'
+                              'Ended by [11/04 08:00Z](https://site.test/scans/r3): failed · [next thread](https://slack.test/p3.0). [All scans](https://site.test/scans).'),
         ('post', '4.0', {'username': '11/04 08:00Z · 1m 00s · failed in index', 'icon_emoji': ':x:'}, ':ada: [record](https://site.test/scans/r3) · boom'),
     ]
     assert (w.saved['parent'], w.saved['posted'], w.saved['opener'], w.saved['head_sender']) == ('3.0', {'r3': '4.0'}, 'r3', 'Test scans · failing')
@@ -1202,7 +1223,7 @@ def test_a_red_threads_run_posts_its_hourglass_reply_then_deletes_it_and_posts_i
         ('post', '6.0', {'username': '11/05 08:00Z · 1m 00s · phase issues: probe', 'icon_emoji': ':warning:'},
          ':alarm_clock: [record](https://site.test/scans/r4)'),
         ('edit', '3.0', None, '**2 consecutive runs failed or with phase issues**\n\n'
-                              'Since 11/04 08:00Z after [2026-11-03T0800](https://site.test/scans/r2) (clean).\n\n'
+                              'Since 11/04 08:00Z after [2026-11-03T0800](https://site.test/scans/r2) (clean) · [previous thread](https://slack.test/p1.0).\n\n'
                               'Latest: [11/05 08:00Z](https://site.test/scans/r4): phase issues: probe.\n\n'
                               'Each reply links its scan record. [All scans](https://site.test/scans).'),
     ]
@@ -1252,9 +1273,12 @@ def test_a_red_threads_run_that_ends_clean_leaves_nothing_there_and_heads_the_ne
                               'Since 11/04 08:00Z after [2026-11-03T0800](https://site.test/scans/r2); last [11/04 08:00Z](https://site.test/scans/r3).\n\n'
                               'Ended by [11/05 08:00Z](https://site.test/scans/r4): clean. [All scans](https://site.test/scans).'),
         ('post', '6.0', GREEN, '**1 consecutive clean run**\n\n'
-                               'Since 11/05 08:00Z after [2026-11-04T0800](https://site.test/scans/r3).\n\n'
+                               'Since 11/05 08:00Z after [2026-11-04T0800](https://site.test/scans/r3) · [previous thread](https://slack.test/p3.0).\n\n'
                                'Latest completed: [11/05 08:00Z](https://site.test/scans/r4) · 1m 00s.\n\n'
                                'Latest 1 run: 1 scheduled / 0 manual. One reply lists the runs, each linking its scan record. [All scans](https://site.test/scans).'),
+        ('edit', '3.0', None, '**1 consecutive failed run (ended)**\n\n'
+                              'Since 11/04 08:00Z after [2026-11-03T0800](https://site.test/scans/r2); last [11/04 08:00Z](https://site.test/scans/r3).\n\n'
+                              'Ended by [11/05 08:00Z](https://site.test/scans/r4): clean · [next thread](https://slack.test/p6.0). [All scans](https://site.test/scans).'),
         ('post', '7.0', RUNS, '✅ :alarm_clock: [11/05 08:00Z](https://site.test/scans/r4) · 1m 00s'),
         ('delete', '5.0', None, None),
     ]
