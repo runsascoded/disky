@@ -1,4 +1,5 @@
 import json
+from dataclasses import replace
 from urllib.parse import parse_qs
 
 import pytest
@@ -147,11 +148,12 @@ def test_additional_links_are_rendered_for_discord_and_pushover():
 
 
 class SlackGroups:
-    """A `Post` seam over one Slack channel: `chat.postMessage` (ts 1.0, 2.0, …), `chat.update` and
+    """A `Post` seam over one Slack channel: `chat.postMessage` (ts 1.0, 2.0, …), `chat.update`, `chat.delete` and
     `conversations.history` (newest first, with metadata), recording each call's method."""
 
     def __init__(self, fail_history: bool = False, refuse_metadata: bool = False):
         self.messages: list[dict] = []
+        self.posts = 0
         self.methods: list[str] = []
         self.fail_history = fail_history
         self.refuse_metadata = refuse_metadata
@@ -168,7 +170,10 @@ class SlackGroups:
         if self.refuse_metadata and 'metadata' in p:
             return 200, '{"ok":false,"error":"invalid_metadata_format"}'
         if method == 'chat.postMessage':
-            self.messages.append({'ts': f'{len(self.messages) + 1}.0', 'text': p['text'], **({'metadata': p['metadata']} if 'metadata' in p else {})})
+            self.posts += 1
+            self.messages.append({'ts': f'{self.posts}.0', 'text': p['text'], **{k: p[k] for k in ('metadata', 'icon_emoji') if k in p}})
+        elif method == 'chat.delete':
+            self.messages = [m for m in self.messages if m['ts'] != p['ts']]
         else:
             m = next(m for m in self.messages if m['ts'] == p['ts'])
             m.update(text=p['text'], metadata=p['metadata'])
@@ -202,6 +207,25 @@ def test_a_runs_step_alerts_are_one_slack_message_and_its_failure_retitles_it():
         ('2.0', '*⚠️ OA R2 scan 2026-11-19T0716*\n'
                 'probe failed (exit 1) · <https://logs.test/q?uid=u4|task logs>\n'
                 '<https://site.test/scans/r1|scan> · <https://site.test/scans|all scans>'),
+    ]
+
+
+def test_an_alerts_icon_is_its_kind_and_a_failure_joining_a_warning_posts_the_group_again():
+    """An icon is fixed once posted (Slack's `chat.update` can't change it): a group whose priority rises posts again
+    under the higher notice's icon, then deletes its earlier message; a lower one joining is an edit, as without icons."""
+    ch = SlackGroups()
+    for n in (replace(step('⚠️ s', 'static-names failed (exit 1)', 'u1'), icon=':warning:'),
+              replace(step('❌ s', 'run failed (exit 1)', 'u2', priority=1), icon=':x:'),
+              replace(step('⚠️ s', 'probe failed (exit 1)', 'u3'), icon=':warning:')):
+        assert send(n, ['slack'], env=SLACK, post=ch) == [('slack', None)]
+    assert ch.methods == ['conversations.history', 'chat.postMessage', 'conversations.history', 'chat.postMessage', 'chat.delete',
+                          'conversations.history', 'chat.update']
+    assert [(m['ts'], m['icon_emoji'], m['text']) for m in ch.messages] == [
+        ('2.0', ':x:', '*❌ s*\n'
+                       'static-names failed (exit 1) · <https://logs.test/q?uid=u1|task logs>\n'
+                       'run failed (exit 1) · <https://logs.test/q?uid=u2|task logs>\n'
+                       'probe failed (exit 1) · <https://logs.test/q?uid=u3|task logs>\n'
+                       '<https://site.test/scans/r1|scan> · <https://site.test/scans|all scans>'),
     ]
 
 

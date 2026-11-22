@@ -37,11 +37,13 @@ NOTIFY_ENV = ("PUSHOVER_TOKEN", "PUSHOVER_USER", "DISCORD_NOTIFY_WEBHOOK", "SLAC
 
 class Transport:
     """The `post` seam `disk-tree notify` sends through: one Slack channel (`chat.postMessage`, `chat.update`,
-    `conversations.history` over its messages, metadata included); `calls` records each write's URL, headers, body."""
+    `chat.delete`, `conversations.history` over its messages, metadata included); `calls` records each write's URL,
+    headers, body."""
 
     def __init__(self):
         self.calls: list[tuple[str, dict, dict]] = []
         self.messages: list[dict] = []
+        self.posts = 0
 
     def __call__(self, url: str, body: bytes, headers: dict[str, str]) -> tuple[int, str]:
         if url == push.SLACK_HISTORY_URL:
@@ -49,7 +51,10 @@ class Transport:
         p = json.loads(body)
         self.calls.append((url, headers, p))
         if url == push.SLACK_URL:
-            self.messages.append({"ts": f"{len(self.messages) + 1}.0", **{k: p[k] for k in ("text", "metadata") if k in p}})
+            self.posts += 1
+            self.messages.append({"ts": f"{self.posts}.0", **{k: p[k] for k in ("text", "metadata") if k in p}})
+        elif url == push.SLACK_DELETE_URL:
+            self.messages = [m for m in self.messages if m["ts"] != p["ts"]]
         else:
             next(m for m in self.messages if m["ts"] == p["ts"]).update(text=p["text"], metadata=p["metadata"])
         return 200, '{"ok":true}'
@@ -214,7 +219,8 @@ def test_missing_job_start_refuses_and_runs_nothing(job):
 
 def test_alert_payloads_warn_fail_and_finish(job, slack):
     """A run's alerts are one Slack message (`push.Notice.group`, its run id): a line per alert with its task logs,
-    the scan links once, ❌ once any is a failure."""
+    the scan links once, ❌ once any is a failure. Its icon says its kind, and can't change once posted: a failure joining
+    a warning's message posts the group again under ❌ and deletes the ⚠️ one."""
     job.mp.setenv("SITE_URL", "https://site.test/")
     url = "https://logs.test/q;uid={uid}?project=proj-1&job=job-9"
     logs = lambda uid: f" · <{url.format(uid=uid)}|task logs>"  # noqa: E731
@@ -231,8 +237,9 @@ def test_alert_payloads_warn_fail_and_finish(job, slack):
     job.mp.setenv("JOB_ID", "u2")
     assert job("start", "-j", "job-9", SCAN, at=T0 + 100) == 0
     assert job("finish", "-x", "2", "-e", "exit 2: cp a b (run.sh:40)", at=T0 + 101) == 0
-    assert [(u, h, b.get("ts"), b["channel"]) for u, h, b in slack.calls] == [
-        (push.SLACK_URL, auth, None, "C0ALERTS"), (push.SLACK_UPDATE_URL, auth, "1.0", "C0ALERTS"), (push.SLACK_URL, auth, None, "C0ALERTS"),
+    assert [(u, h, b.get("ts"), b["channel"], b.get("icon_emoji")) for u, h, b in slack.calls] == [
+        (push.SLACK_URL, auth, None, "C0ALERTS", ":warning:"), (push.SLACK_URL, auth, None, "C0ALERTS", ":x:"),
+        (push.SLACK_DELETE_URL, auth, "1.0", "C0ALERTS", None), (push.SLACK_URL, auth, None, "C0ALERTS", ":x:"),
     ]
     assert slack.texts() == [
         f"*❌ cw-s3 {SCAN}*\nstatic-names failed (exit 1): the scan publishes; search says not available\n"

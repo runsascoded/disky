@@ -32,6 +32,7 @@ PUSHOVER_URL = 'https://api.pushover.net/1/messages.json'
 SLACK_URL = 'https://slack.com/api/chat.postMessage'
 SLACK_UPDATE_URL = 'https://slack.com/api/chat.update'
 SLACK_HISTORY_URL = 'https://slack.com/api/conversations.history'
+SLACK_DELETE_URL = 'https://slack.com/api/chat.delete'
 #: Message metadata naming a grouped alert (`Notice.group`), and how far back its message is looked for.
 SLACK_GROUP_EVENT = 'disky_alert'
 SLACK_GROUP_WINDOW_S = 2 * 86400
@@ -53,6 +54,9 @@ class Notice:
     #: Slack only: notices sharing a group (a scan run's id) are one message, each notice a line in it (with its own
     #: `url`), the highest priority's title on top and the shared `links` below; other channels post each notice.
     group: Optional[str] = None
+    #: Slack only: the post's icon, a ``:name:`` emoji code (the bot's ``chat:write.customize``), fixed once posted:
+    #: a grouped message whose priority rises is posted again under the new notice's icon, and the old one deleted.
+    icon: Optional[str] = None
 
 
 # `post(url, body, headers) -> (status, response body)`; the seam tests replace.
@@ -162,8 +166,9 @@ def slack(n: Notice, env: Mapping[str, str], post: Post, now: Optional[float] = 
     import time
 
     channel = secret(env, 'SLACK_ALERT_CHANNEL')
+    icon = {'icon_emoji': n.icon} if n.icon else {}
     if not n.group:
-        _slack_call(SLACK_URL, {'channel': channel, 'text': slack_text(n), 'unfurl_links': False, 'unfurl_media': False}, env, post)
+        _slack_call(SLACK_URL, {'channel': channel, 'text': slack_text(n), 'unfurl_links': False, 'unfurl_media': False, **icon}, env, post)
         return
     line = {k: v for k, v in (('message', n.message), ('url', n.url), ('url_title', n.url_title)) if v}
     found = None
@@ -180,15 +185,24 @@ def slack(n: Notice, env: Mapping[str, str], post: Post, now: Optional[float] = 
             top = n.priority > was.get('priority', 0)
             group = {**was, 'title': n.title if top else was['title'], 'priority': max(n.priority, was.get('priority', 0)),
                      'lines': [*was['lines'], line], 'links': [list(x) for x in n.links] or was['links']}
+            if top and icon:
+                # Its icon can't change: the group posts again under the higher notice's, then the old message goes
+                _slack_call(SLACK_URL, {'channel': channel, 'text': slack_group_text(group), 'unfurl_links': False, 'unfurl_media': False,
+                                        'metadata': {'event_type': SLACK_GROUP_EVENT, 'event_payload': group}, **icon}, env, post)
+                try:
+                    _slack_call(SLACK_DELETE_URL, {'channel': channel, 'ts': found['ts']}, env, post)
+                except (RuntimeError, URLError, OSError):
+                    pass  # the alert is posted; its earlier message stays beside it
+                return
             _slack_call(SLACK_UPDATE_URL, {'channel': channel, 'ts': found['ts'], 'text': slack_group_text(group),
                                            'metadata': {'event_type': SLACK_GROUP_EVENT, 'event_payload': group}}, env, post)
             return
         group = {'group': n.group, 'title': n.title, 'priority': n.priority, 'lines': [line], 'links': [list(x) for x in n.links]}
         _slack_call(SLACK_URL, {'channel': channel, 'text': slack_group_text(group), 'unfurl_links': False, 'unfurl_media': False,
-                                'metadata': {'event_type': SLACK_GROUP_EVENT, 'event_payload': group}}, env, post)
+                                'metadata': {'event_type': SLACK_GROUP_EVENT, 'event_payload': group}, **icon}, env, post)
     except RuntimeError:
         # The grouped write refused (its metadata, or the message gone): the alert posts on its own, as ungrouped.
-        _slack_call(SLACK_URL, {'channel': channel, 'text': slack_text(n), 'unfurl_links': False, 'unfurl_media': False}, env, post)
+        _slack_call(SLACK_URL, {'channel': channel, 'text': slack_text(n), 'unfurl_links': False, 'unfurl_media': False, **icon}, env, post)
 
 
 SENDERS: dict[str, Callable[[Notice, Mapping[str, str], Post], None]] = {'pushover': pushover, 'discord': discord, 'slack': slack}

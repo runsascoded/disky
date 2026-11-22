@@ -32,7 +32,7 @@ The manifest has no comments because Slack rejects unknown top-level keys, so he
 | Scope | Used for |
 |---|---|
 | `chat:write` | posting and editing every message above (`chat.postMessage`, `chat.update`, `chat.delete`, `chat.getPermalink`) |
-| `chat:write.customize` | each message's own sender name and face (digest replies, activity posts) |
+| `chat:write.customize` | each message's own sender name and face (digest replies, activity posts, the scan thread's status senders, alert icons, deploy notices) |
 | `chat:write.public` | posting to a public channel the bot hasn't joined |
 | `channels:history`, `groups:history` | reading threads back: the digest converging its replies, a run's alerts found again and grouped into one message, the run thread (`conversations.history`, `conversations.replies`) |
 | `channels:read`, `groups:read` | channel lookups (`conversations.info`, `conversations.list`), the channel's canvas id |

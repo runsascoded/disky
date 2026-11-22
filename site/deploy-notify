@@ -29,10 +29,17 @@ MODES = ('dev', 'prod')
 #: in both. Not ✅/❌, which `#<d>-admin`'s scan-run threads use (Ryan, 2026-11-20). A deployment overrides any of them
 #: with `deploy_emoji` on its entry in the release config, `deploy/oa/sites.json` (`record -S`; default: the one in this
 #: script's checkout): `{"success": "✅"}` for both environments, `{"dev": {"success": "🧫"}}` for one, or both forms
-#: together (the environment's own wins). Characters, since the sender name shows no `:name:` codes.
+#: together (the environment's own wins). Characters: the notice's sender icon is the character's Slack code (`ICON_CODES`),
+#: and a character without one leads the sender name instead, as before icons (specs/done/scan-thread-senders.md).
 DEFAULT_EMOJI = {
     'prod': {'success': '🚀', 'failure': '💥', 'cancelled': '⏹️'},
     'dev': {'success': '🧪', 'failure': '💥', 'cancelled': '⏹️'},
+}
+#: The emoji a notice may lead with that have a Slack code, for its sender icon (`icon_emoji` takes only codes; a
+#: variation selector is dropped before the lookup)
+ICON_CODES = {
+    '🚀': ':rocket:', '🧪': ':test_tube:', '💥': ':boom:', '⏹': ':black_square_for_stop:', '✅': ':white_check_mark:',
+    '❌': ':x:', '🧫': ':petri_dish:', '🔥': ':fire:', '🛳': ':passenger_ship:', '🎉': ':tada:', '⚠': ':warning:',
 }
 #: How a deployment's notices thread (`deploy_threads` on its entry in the release config): `env` (the default), prod and
 #: dev each in their own run-length threads; `shared`, one run per deployment across both environments.
@@ -125,13 +132,36 @@ def site_emoji(value: object, mode: str) -> dict | None:
     return resolved or None
 
 
+def emoji(value: dict) -> str:
+    """The notice's emoji: its environment's and outcome's (`DEFAULT_EMOJI`, the deployment's `deploy_emoji` over it)."""
+    r = receipt(value)
+    return {**DEFAULT_EMOJI[r['mode']], **r.get('emoji', {})}[r['status']]
+
+
+def icon(value: dict) -> str | None:
+    """The notice's sender icon (`icon_emoji`): its emoji's Slack code (`ICON_CODES`), None for a character without one."""
+    return ICON_CODES.get(emoji(value).replace('\ufe0f', ''))
+
+
 def headline(value: dict) -> str:
-    """The notice's sender name (`chat.postMessage` `username`): its outcome, so a notice is one line under it."""
+    """The notice's sender name (`chat.postMessage` `username`): its outcome, so a notice is one line under it. Its emoji
+    is the sender's icon (`icon`), or, for one without a Slack code, leads the name."""
     r = receipt(value)
     outcome = {'success': 'deployment succeeded', 'failure': f"deployment failed during {r['stage']}",
                'cancelled': 'deployment cancelled'}[r['status']]
-    emoji = {**DEFAULT_EMOJI[r['mode']], **r.get('emoji', {})}[r['status']]
-    return f"{emoji} {r['deployment'].upper()} {r['mode']} {outcome}"
+    name = f"{r['deployment'].upper()} {r['mode']} {outcome}"
+    return name if icon(r) else f"{emoji(r)} {name}"
+
+
+def sender(value: dict) -> dict[str, str]:
+    """The notice's `chat.postMessage` sender: `headline` as its name, `icon` its icon."""
+    return {'username': headline(value), **({'icon_emoji': code} if (code := icon(value)) else {})}
+
+
+def display(value: dict) -> str:
+    """The sender as a review shows it: the emoji, then the name."""
+    name = headline(value)
+    return name if not icon(value) else f"{emoji(value)} {name}"
 
 
 def render(value: dict) -> str:
@@ -164,9 +194,10 @@ def render(value: dict) -> str:
     return ' · '.join(parts) + '\n'
 
 
-# A notice's outcome as Slack stores it: its sender name (`headline`), or, before notices were one line (2026-11-14),
-# the bold first line of its text. Groups: deployment, environment, outcome.
-SENDER = r'^\S+ ([A-Z0-9-]+) (dev|prod) deployment (succeeded|failed during [a-z]+|cancelled)$'
+# A notice's outcome as Slack stores it: its sender name (`headline`: the emoji in the icon since 2026-11-22, leading the
+# name before, and still for an emoji without a Slack code), or, before notices were one line (2026-11-14), the bold first
+# line of its text. Groups: deployment, environment, outcome.
+SENDER = r'^(?:\S+ )?([A-Z0-9-]+) (dev|prod) deployment (succeeded|failed during [a-z]+|cancelled)$'
 HEADLINE = r'\*([A-Z0-9-]+) (dev|prod) deployment (succeeded|failed during [a-z]+|cancelled)\*'
 #: A quiet green thread's head ends with this line (`folded`): how many greens the run holds, and the newest one's
 SUMMARY = r'^(\d+) successful (?:(?:dev|prod) )?deploys in a row · latest '
@@ -249,7 +280,7 @@ def send(value: dict, env: dict, now: float | None = None) -> tuple[str | None, 
         if green and r['quiet'] and head:
             client.edit(thread, folded(head, r, time() if now is None else now), raw=True)
             return thread, True
-        client.post(render(r), thread, username=headline(r))
+        client.post(render(r), thread, **sender(r))
     except (RuntimeError, OSError):
         raise ClickException('Slack notification failed; acceptance unknown, not retried') from None
     return thread, False
@@ -277,7 +308,7 @@ def main() -> None:
 @argument('path', type=ClickPath(exists=True, path_type=Path))
 def render_cmd(path: Path) -> None:
     value = load(path)
-    print(f'{headline(value)}\n{render(value)}', end='')
+    print(f'{display(value)}\n{render(value)}', end='')
 
 
 @main.command('send')
@@ -290,7 +321,7 @@ def send_cmd(execute: bool, path: Path) -> None:
         print(f'Deployment notification folded into the head of thread {thread} (edited, nothing posted).' if edited
               else f'Deployment notification posted{f" in thread {thread}" if thread else ""}.')
     else:
-        print(f'{headline(value)}\n{render(value)}', end='')
+        print(f'{display(value)}\n{render(value)}', end='')
 
 
 @main.command('record')

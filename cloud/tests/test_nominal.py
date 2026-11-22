@@ -10,9 +10,10 @@ from dt_cloud import nominal as N
 from dt_cloud.append_runner import Busy, LocalLeaseFile, coordinator_lease
 
 T0 = int(datetime(2026, 11, 1, 8, tzinfo=timezone.utc).timestamp())
-#: `clean` grouping with a reply per run: most tests below pin its copy; `color` (the default) is tested with
-#: `replace(CFG, group='color')`, quiet clean threads (the default) with `QUIET`.
-CFG = N.Config(state='unused', site='https://site.test', channel='C123', title='Test scans', group='clean', quiet=False)
+#: `clean` grouping with a reply per run, each post the app's: most tests below pin its copy; `color` (the default) is
+#: tested with `replace(CFG, group='color')`, quiet clean threads (the default) with `QUIET`, and every default (status
+#: as the sender too) with `SENT`.
+CFG = N.Config(state='unused', site='https://site.test', channel='C123', title='Test scans', group='clean', quiet=False, senders=False)
 
 
 def row(i, status='succeeded', issues=None, **fields):
@@ -31,6 +32,8 @@ class Slack:
         self.messages_by_id = {}
         self.calls = []
         self.timeout = False
+        self.deleted = 0
+        self.senders = {}
 
     def owns(self, message):
         return message.get('bot_id') == 'B1'
@@ -41,9 +44,10 @@ class Slack:
     def find(self, operation, parent, since):
         return next((m['ts'] for m in self.messages_by_id.values() if m['operation'] == operation and m['parent'] == parent), None)
 
-    def post(self, body, parent, operation):
-        ts = f'{len(self.messages_by_id) + 1}.0'
-        self.messages_by_id[ts] = dict(ts=ts, parent=parent, operation=operation, text=body, bot_id='B1')
+    def post(self, body, parent, operation, sender=None):
+        ts = f'{len(self.messages_by_id) + self.deleted + 1}.0'
+        self.messages_by_id[ts] = dict(ts=ts, parent=parent, operation=operation, text=body, bot_id='B1', sender=sender)
+        self.senders[ts] = sender
         self.calls.append(('post', ts, parent, body))
         if self.timeout:
             self.timeout = False
@@ -54,6 +58,12 @@ class Slack:
         self.calls.append(('edit', ts, body))
         self.messages_by_id[ts]['text'] = body
 
+    def delete(self, ts):
+        """As Slack's: a message already gone is not an error."""
+        self.calls.append(('delete', ts, None))
+        if self.messages_by_id.pop(ts, None):
+            self.deleted += 1
+
     alerts = {}
 
     def alert(self, link, since):
@@ -61,7 +71,7 @@ class Slack:
 
     def top_alert(self, link, text, metadata=None):
         """A run's top-level alert in the channel, as its steps post it (`alerts` finds it by the run's link)."""
-        ts = f'{len(self.messages_by_id) + 1}.0'
+        ts = f'{len(self.messages_by_id) + self.deleted + 1}.0'
         self.messages_by_id[ts] = dict(ts=ts, parent=None, operation=None, text=text, bot_id='B1', link=link, metadata=metadata or {})
         return ts
 
@@ -842,7 +852,7 @@ def test_the_open_heads_pin_moves_when_a_new_thread_starts_and_the_canvas_is_wri
     assert (w.slack.calls, w.slack.titles) == ([('join',), ('canvas_create', 'F1'), ('join',), ('canvas_edit', 'F1')], {'F1': 'T'})
     w.run([row(6, 'failed'), row(5), row(4), row(3, 'failed'), *history(2)])
     w.run([row(7), row(6, 'failed'), row(5), row(4), row(3, 'failed'), *history(2)])
-    assert {k: w.saved[k] for k in N.KEPT} == {'pinned': '4.0', 'canvas': 'F1', 'canvas_body': 'b\n', 'canvas_title': 'T'}
+    assert {k: w.saved[k] for k in N.KEPT if k in w.saved} == {'pinned': '4.0', 'canvas': 'F1', 'canvas_body': 'b\n', 'canvas_title': 'T'}
     # a canvas made before titles (state without one) is renamed once, its body unchanged
     del w.saved['canvas_title']
     w.slack.calls.clear()
@@ -1071,3 +1081,230 @@ def test_a_quiet_preview_renders_the_head_and_the_rolling_reply(tmp_path, monkey
     monkeypatch.setattr(N, 'Slack', transport)
     assert N.run(asdict(cfg), {'SITE_TOKEN': 'viewer'}, 'project') == f'{QUIET_HEAD}\n\n+++\n\n{TRAIL}'
     assert sorted(tmp_path.iterdir()) == []
+
+
+#: Every default: `color` grouping, quiet clean threads, and status as the sender (specs/done/scan-thread-senders.md)
+SENT = N.Config(state='unused', site='https://site.test', channel='C123', title='Test scans')
+GREEN = {'username': 'Test scans · clean', 'icon_emoji': ':white_check_mark:'}
+RUNS = {'username': 'Test scans · runs', 'icon_emoji': ':receipt:'}
+FAILING = {'username': 'Test scans · failing', 'icon_emoji': ':x:'}
+#: history(2)'s quiet thread head under its sender: no leading ✅ and title
+SENT_HEAD = QUIET_HEAD.replace('✅ **Test scans: ', '**')
+F3 = row(3, 'failed', failed_phase='index', error='boom', **ADA)
+#: The failure thread F3 opens after history(2)'s quiet thread (its head 3.0)
+RED_HEAD = ('**1 consecutive failed run**\n\n'
+            'Since 11/04 08:00Z after [2026-11-03T0800](https://site.test/scans/r2) (clean).\n\n'
+            'Latest: [11/04 08:00Z](https://site.test/scans/r3): failed in index: boom.\n\n'
+            'Each reply links its scan record. [All scans](https://site.test/scans).')
+
+
+def sent(slack):
+    """Each call since the last, with a post's sender; then forgets them."""
+    out = [(c[0], c[1], slack.senders.get(c[1]) if c[0] == 'post' else None, c[-1]) for c in slack.calls]
+    slack.calls.clear()
+    return out
+
+
+def test_status_as_the_sender_is_the_default_and_its_names_and_icons_are_fixed_per_kind():
+    assert SENT.senders is True
+    assert [SENT.sender(k) for k in ('clean', 'issues', 'failed', 'runs')] == [
+        GREEN, {'username': 'Test scans · phase issues', 'icon_emoji': ':warning:'}, FAILING, RUNS,
+    ]
+    assert CFG.sender('clean') is None
+    cfg = N.config(dict(state='unused', site='https://site.test', channel='C123', title='Test scans',
+                        emoji={'clean': '🟢', 'failed': ':rotating_light:', 'issues': '🦆'}, icons={'runs': 'https://icons.test/runs.png'}))
+    # an override that is a code, or a character with one, is the icon; any other character keeps the stock icon
+    assert [cfg.sender(k) for k in ('clean', 'issues', 'failed', 'runs')] == [
+        {'username': 'Test scans · clean', 'icon_emoji': ':large_green_circle:'},
+        {'username': 'Test scans · phase issues', 'icon_emoji': ':warning:'},
+        {'username': 'Test scans · failing', 'icon_emoji': ':rotating_light:'},
+        {'username': 'Test scans · runs', 'icon_url': 'https://icons.test/runs.png'},
+    ]
+    long = replace(SENT, title='T' * 90).sender('failed')
+    assert (long, len(long['username'])) == ({'username': 'T' * 69 + '… · failing', 'icon_emoji': ':x:'}, 80)
+
+
+@pytest.mark.parametrize('raw,message', [
+    ({'senders': 'yes'}, 'nominal.senders: true or false'),
+    ({'icons': {'nope': 'https://icons.test/a.png'}}, 'nominal.icons: keys among clean, issues, failed, running, cancelled, runs'),
+    ({'icons': {'runs': 'http://icons.test/a.png'}}, 'nominal.icons: public HTTPS image URLs'),
+    ({'badges': 'https://icons.test/{nope}.png'}, r'nominal.badges: an HTTPS URL template over \{outcome\} and \{trigger\}'),
+    ({'badges': 'https://icons.test/a.png'}, r'nominal.badges: an HTTPS URL template over \{outcome\} and \{trigger\}'),
+])
+def test_sender_options_are_checked(raw, message):
+    with pytest.raises(ValueError, match=message):
+        N.config(dict(state='unused', site='https://site.test', channel='C123', title='Test scans', **raw))
+
+
+def test_a_run_replys_sender_is_its_line_and_its_text_the_record_link():
+    """Ryan, 2026-11-22: a run reply's first line is its sender, `<stamp> · <duration> · <outcome>` (≤ 80 characters,
+    the outcome clipped), the outcome its icon; the text keeps what a name can't: the record's link, who, the error."""
+    runs = [row(1), F3, row(4, issues=[{'phase': 'static-names'}]), row(5, 'cancelled', trigger=None),
+            row(6, 'running', finished_ts=None), row(7, 'failed', failed_phase='p' * 90)]
+    assert [N.run_post(SENT, r) for r in runs] == [
+        (':alarm_clock: [record](https://site.test/scans/r1)', {'username': '11/02 08:00Z · 1m 00s · clean', 'icon_emoji': ':white_check_mark:'}),
+        (':ada: [record](https://site.test/scans/r3) · boom', {'username': '11/04 08:00Z · 1m 00s · failed in index', 'icon_emoji': ':x:'}),
+        (':alarm_clock: [record](https://site.test/scans/r4)',
+         {'username': '11/05 08:00Z · 1m 00s · phase issues: static-names', 'icon_emoji': ':warning:'}),
+        (':grey_question: [record](https://site.test/scans/r5)', {'username': '11/06 08:00Z · 1m 00s · cancelled', 'icon_emoji': ':no_entry_sign:'}),
+        (':alarm_clock: [record](https://site.test/scans/r6)', {'username': '11/07 08:00Z · running', 'icon_emoji': ':hourglass_flowing_sand:'}),
+        (':alarm_clock: [record](https://site.test/scans/r7)', {'username': '11/08 08:00Z · 1m 00s · failed in ' + 'p' * 45 + '…', 'icon_emoji': ':x:'}),
+    ]
+    assert len(N.run_post(SENT, runs[-1])[1]['username']) == 80
+    badged = replace(SENT, badges='https://icons.test/run-{outcome}-{trigger}.png')
+    assert [N.run_post(badged, r)[1]['icon_url'] for r in runs[:5]] == [
+        'https://icons.test/run-clean-schedule.png', 'https://icons.test/run-failed-manual.png', 'https://icons.test/run-issues-schedule.png',
+        'https://icons.test/run-cancelled-unknown.png', 'https://icons.test/run-running-schedule.png',
+    ]
+    assert N.run_post(CFG, runs[1]) == (N.reply(CFG, runs[1]), None)
+
+
+def test_a_quiet_green_thread_posts_its_head_and_rolling_reply_under_fixed_senders_then_only_edits_them():
+    w = Writer(SENT)
+    w.run(history(2))
+    assert sent(w.slack) == [('post', '1.0', GREEN, SENT_HEAD), ('post', '2.0', RUNS, TRAIL)]
+    assert w.saved['head_sender'] == 'Test scans · clean'
+    w.run([row(3, 'running', finished_ts=None, **ADA), *history(2)])
+    assert sent(w.slack) == [
+        ('edit', '2.0', None, f'{TRAIL}\n⏳ :ada: [11/04 08:00Z](https://site.test/scans/r3) · running'),
+        ('edit', '1.0', None, SENT_HEAD.replace('Latest 2 runs', 'Running now: [11/04 08:00Z](https://site.test/scans/r3).\n\nLatest 2 runs')),
+    ]
+
+
+def red_writer():
+    """history(2)'s quiet thread, closed by F3, whose failure thread (3.0) holds its reply (4.0)."""
+    w = Writer(SENT)
+    w.run(history(2))
+    w.slack.calls.clear()
+    w.run([F3, *history(2)])
+    assert sent(w.slack) == [
+        ('edit', '1.0', None, '**2 consecutive clean runs (ended)**\n\n'
+                              'Since 11/02 08:00Z after [2026-11-01T0800](https://site.test/scans/r0); last [11/03 08:00Z](https://site.test/scans/r2).\n\n'
+                              'Ended by [11/04 08:00Z](https://site.test/scans/r3): failed. [All scans](https://site.test/scans).'),
+        ('edit', '2.0', None, f'{TRAIL}\n❌ :ada: [11/04 08:00Z](https://site.test/scans/r3) · 1m 00s · failed in index: boom'),
+        ('post', '3.0', FAILING, RED_HEAD),
+        ('post', '4.0', {'username': '11/04 08:00Z · 1m 00s · failed in index', 'icon_emoji': ':x:'}, ':ada: [record](https://site.test/scans/r3) · boom'),
+    ]
+    assert (w.saved['parent'], w.saved['posted'], w.saved['opener'], w.saved['head_sender']) == ('3.0', {'r3': '4.0'}, 'r3', 'Test scans · failing')
+    return w
+
+
+def test_a_red_threads_run_posts_its_hourglass_reply_then_deletes_it_and_posts_its_outcome():
+    w = red_writer()
+    w.run([row(4, 'running', finished_ts=None), F3, *history(2)])
+    assert sent(w.slack) == [
+        ('post', '5.0', {'username': '11/05 08:00Z · running', 'icon_emoji': ':hourglass_flowing_sand:'}, ':alarm_clock: [record](https://site.test/scans/r4)'),
+        ('edit', '3.0', None, RED_HEAD.replace('Each reply', 'Running now: [11/05 08:00Z](https://site.test/scans/r4).\n\nEach reply')),
+    ]
+    w.run([row(4, issues=[{'phase': 'probe'}]), F3, *history(2)])
+    assert sent(w.slack) == [
+        ('delete', '5.0', None, None),
+        ('post', '6.0', {'username': '11/05 08:00Z · 1m 00s · phase issues: probe', 'icon_emoji': ':warning:'},
+         ':alarm_clock: [record](https://site.test/scans/r4)'),
+        ('edit', '3.0', None, '**2 consecutive runs failed or with phase issues**\n\n'
+                              'Since 11/04 08:00Z after [2026-11-03T0800](https://site.test/scans/r2) (clean).\n\n'
+                              'Latest: [11/05 08:00Z](https://site.test/scans/r4): phase issues: probe.\n\n'
+                              'Each reply links its scan record. [All scans](https://site.test/scans).'),
+    ]
+    assert ('running' in w.saved, w.saved['posted']) == (False, {'r3': '4.0', 'r4': '6.0'})
+    # the run that opened the thread links its head; the others their replies
+    state, writes = deepcopy(w.saved), []
+    N.link_threads(state, w.slack, writes.append, w.save)
+    assert writes == [[('r3', 'https://slack.test/p3.0'), ('r4', 'https://slack.test/p6.0')]]
+
+
+def test_an_interrupted_repost_posts_the_outcome_once():
+    w = red_writer()
+    w.run([row(4, 'running', finished_ts=None), F3, *history(2)])
+    w.slack.calls.clear()
+    w.slack.timeout = True
+    with pytest.raises(TimeoutError, match='response lost after Slack accepted the post'):
+        w.run([row(4, 'failed'), F3, *history(2)])
+    w.run([row(4, 'failed'), F3, *history(2)])
+    assert [(c[0], c[1]) for c in w.slack.calls] == [('delete', '5.0'), ('post', '6.0'), ('edit', '3.0')]
+    assert (w.saved['posted'], 'pending' in w.saved, 'running' in w.saved) == ({'r3': '4.0', 'r4': '6.0'}, False, False)
+
+
+def test_a_cancelled_runs_hourglass_reply_in_a_red_thread_is_posted_again_as_cancelled():
+    w = red_writer()
+    w.run([row(4, 'running', finished_ts=None), F3, *history(2)])
+    w.slack.calls.clear()
+    w.run([row(4, 'cancelled'), F3, *history(2)])
+    assert sent(w.slack) == [
+        ('delete', '5.0', None, None),
+        ('post', '6.0', {'username': '11/05 08:00Z · 1m 00s · cancelled', 'icon_emoji': ':no_entry_sign:'}, ':alarm_clock: [record](https://site.test/scans/r4)'),
+        ('edit', '3.0', None, RED_HEAD),
+    ]
+    assert (w.saved['relink'], 'running' in w.saved) == ({'r4': '6.0'}, False)
+    state, writes = deepcopy(w.saved), []
+    N.link_threads(state, w.slack, writes.append, w.save)
+    assert writes == [[('r3', 'https://slack.test/p3.0'), ('r4', 'https://slack.test/p6.0')]]
+    assert w.saved.get('relink') is None
+
+
+def test_a_red_threads_run_that_ends_clean_leaves_nothing_there_and_heads_the_new_green_thread():
+    w = red_writer()
+    w.run([row(4, 'running', finished_ts=None), F3, *history(2)])
+    w.slack.calls.clear()
+    w.run([row(4), F3, *history(2)])
+    assert sent(w.slack) == [
+        ('edit', '3.0', None, '**1 consecutive failed run (ended)**\n\n'
+                              'Since 11/04 08:00Z after [2026-11-03T0800](https://site.test/scans/r2); last [11/04 08:00Z](https://site.test/scans/r3).\n\n'
+                              'Ended by [11/05 08:00Z](https://site.test/scans/r4): clean. [All scans](https://site.test/scans).'),
+        ('post', '6.0', GREEN, '**1 consecutive clean run**\n\n'
+                               'Since 11/05 08:00Z after [2026-11-04T0800](https://site.test/scans/r3).\n\n'
+                               'Latest completed: [11/05 08:00Z](https://site.test/scans/r4) · 1m 00s.\n\n'
+                               'Latest 1 run: 1 scheduled / 0 manual. One reply lists the runs, each linking its scan record. [All scans](https://site.test/scans).'),
+        ('post', '7.0', RUNS, '✅ :alarm_clock: [11/05 08:00Z](https://site.test/scans/r4) · 1m 00s'),
+        ('delete', '5.0', None, None),
+    ]
+    state, writes = deepcopy(w.saved), []
+    N.link_threads(state, w.slack, writes.append, w.save)
+    assert writes == [[('r4', 'https://slack.test/p6.0')]]
+
+
+def test_a_clean_groupings_failure_deletes_its_hourglass_reply_and_links_its_alert(monkeypatch):
+    w = Writer(replace(SENT, group='clean', quiet=False))
+    w.run([row(3, 'running', finished_ts=None), *history(2)])
+    w.slack.calls.clear()
+    monkeypatch.setattr(w.slack, 'alerts', {'https://site.test/scans/r3': '9.0'})
+    w.run([row(3, 'failed'), *history(2)])
+    assert sent(w.slack) == [
+        ('edit', '1.0', None, '**2 consecutive clean runs (ended)**\n\n'
+                              'Since 11/02 08:00Z after [2026-11-01T0800](https://site.test/scans/r0); last [11/03 08:00Z](https://site.test/scans/r2).\n\n'
+                              'Ended by [11/04 08:00Z](https://site.test/scans/r3): failed. [All scans](https://site.test/scans).'),
+        ('delete', '4.0', None, None),
+    ]
+    state, writes = deepcopy(w.saved), []
+    N.link_threads(state, w.slack, writes.append, w.save)
+    assert writes == [[('r1', 'https://slack.test/p2.0'), ('r2', 'https://slack.test/p3.0'), ('r3', 'https://slack.test/p9.0')]]
+
+
+def test_a_head_posted_before_senders_keeps_its_full_text():
+    """A thread opened as the app (state with no `head_sender`) is edited in its own words: its head says the title."""
+    w = Writer(QUIET)
+    w.run(history(2))
+    w.cfg = SENT
+    w.slack.calls.clear()
+    w.run([row(3), *history(2)])
+    assert sent(w.slack) == [
+        ('edit', '2.0', None, f'{TRAIL}\n✅ :alarm_clock: [11/04 08:00Z](https://site.test/scans/r3) · 1m 00s'),
+        ('edit', '1.0', None, '✅ **Test scans: 3 consecutive clean runs**\n\n'
+                              'Since 11/02 08:00Z after [2026-11-01T0800](https://site.test/scans/r0).\n\n'
+                              'Latest completed: [11/04 08:00Z](https://site.test/scans/r3) · 1m 00s.\n\n'
+                              'Latest 3 runs: 3 scheduled / 0 manual. One reply lists the runs, each linking its scan record. [All scans](https://site.test/scans).'),
+    ]
+
+
+def test_a_preview_shows_each_posts_sender(tmp_path, monkeypatch):
+    import json
+
+    from dt_cloud import probe
+
+    cfg = replace(SENT, state=str(tmp_path / 'state'), quiet=False)
+    monkeypatch.setattr(probe, 'http_fetch', lambda *args: lambda path: SimpleNamespace(status=200, body=json.dumps(dict(configured=True, runs=history(2)))))
+    assert N.run(asdict(cfg), {'SITE_TOKEN': 'viewer'}, 'project').split('\n\n+++\n\n') == [
+        '[:white_check_mark: Test scans · clean]\n' + SENT_HEAD.replace('One reply lists the runs, each linking', 'Each reply links'),
+        '[:white_check_mark: 11/02 08:00Z · 1m 00s · clean]\n:alarm_clock: [record](https://site.test/scans/r1)',
+        '[:white_check_mark: 11/03 08:00Z · 1m 00s · clean]\n:alarm_clock: [record](https://site.test/scans/r2)',
+    ]
