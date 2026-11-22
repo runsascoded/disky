@@ -77,7 +77,7 @@ describe('the cost by month', () => {
 
 describe('a deployment\'s week, in words', () => {
   it('its runs, the ones not ok by outcome, time scanning and cost (a running run counts in neither)', () => {
-    expect(weekLine(mini.deployments[0], NOW)).toBe('5 runs · 1 open issue · 1 failed · 1 running · 1 cancelled · 5.2h scanning · $0.85')
+    expect(weekLine(mini.deployments[0], NOW)).toBe('5 runs · 1 with issues · 1 failed · 1 running · 1 cancelled · 5.2h scanning · $0.85')
   })
 })
 

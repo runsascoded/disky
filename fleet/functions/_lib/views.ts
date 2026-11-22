@@ -188,7 +188,7 @@ export function weekLine(d: FleetDeployment, now: number): string {
   const secs = done.reduce((s, r) => s + (r.secs ?? 0), 0)
   const cost = done.reduce((s, r) => s + (r.cost_usd ?? 0), 0)
   const parts = [`${week.length} run${week.length === 1 ? '' : 's'}`]
-  for (const [o, label] of OUTCOME_LABEL) if (o !== 'ok' && by(o)) parts.push(`${by(o)} ${label}`)
+  for (const [o, label] of OUTCOME_LABEL) if (o !== 'ok' && by(o)) parts.push(`${by(o)} ${o === 'issues' ? 'with issues' : label}`)
   if (done.length) parts.push(`${fmtHours(secs)} scanning`, done.some(r => r.cost_usd !== null) ? fmtUsd(cost) : 'cost n/a')
   if (d.meta?.now != null) parts.push(`/meta ${fmtSI(d.meta.now)}`)
   return parts.join(' · ')
