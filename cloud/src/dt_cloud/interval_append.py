@@ -49,6 +49,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
@@ -61,7 +62,7 @@ from time import monotonic
 from typing import Any
 
 import pyarrow as pa
-from click import Choice, IntRange, argument, command, group, option
+from click import Choice, IntRange, UsageError, argument, command, group, option
 
 from . import append_runner as ar
 from . import interval_churn as ich
@@ -961,7 +962,7 @@ class Config:
 #: Env overrides of an interval profile's `append` fields (a staged source tree, a job image, the R2 endpoint).
 ENV = {"src": "INTERVAL_STORE_SRC", "image": "INTERVAL_STORE_IMAGE", "r2_endpoint": "R2_ENDPOINT", "project": "GCP_PROJECT",
        "gen": "INTERVAL_STORE_GEN", "machine": "INTERVAL_STORE_MACHINE", "compact_level": "INTERVAL_STORE_COMPACT_LEVEL",
-       "compact": "INTERVAL_STORE_COMPACT", "read_from": "INTERVAL_STORE_READ_FROM"}
+       "compact": "INTERVAL_STORE_COMPACT", "read_from": "INTERVAL_STORE_READ_FROM", "events_topic": "INTERVAL_STORE_EVENTS_TOPIC"}
 
 
 def load_config(profile: str | None, environ: dict[str, str] | None = None) -> Config:
@@ -1019,6 +1020,9 @@ class Runner(ar.Runner):
     per scan, then the merge stage."""
     store_prefix = PREFIX
     job_prefix = "iv"
+    #: The profile the run was given (`-P`, else `$INTERVAL_STORE_PROFILE`): the compaction jobs carry it
+    #: (`with_events`) for the catch-up append their success submits.
+    profile_ref: str | None = None
 
     @property
     def p(self) -> Profile:
@@ -1044,6 +1048,10 @@ class Runner(ar.Runner):
                                                               *duckdb_args(self.p.machine_for("compact"))], r2=r2)]
         if not r2:
             out.append(self.job("compact-r2", scan, 1, "interval_append", ["compact-r2", *(["-N"] if self.candidate else [])], r2=True, mount=False))
+        if self.p.events_topic and not self.candidate:
+            # the last job publishes the new generation's pointer: its success is the catch-up's cue
+            out = [(n, with_events(s, self.p.events_topic, ar.CATCH_UP if i == len(out) - 1 else ar.ALERT, self.profile_ref))
+                   for i, (n, s) in enumerate(out)]
         return out
 
     def with_gen(self, gen: str) -> Config:
@@ -1115,6 +1123,27 @@ class Runner(ar.Runner):
         spec = self.spec(name, 1, [cmd], stage="r2", r2=True, machine="n2-highmem-4", ssd_gb=375)
         spec = ar.label_batch_spec(spec, COMPONENT, scan_id=d)
         self.stage(f"{d} r2" + (f" (manifests/{stem}.json)" if manifest else ""), lambda: self.run_job(name, spec))
+
+
+#: The profile a submitter appends with: a compaction job carries it (`with_events`) for its catch-up.
+PROFILE_ENV = "INTERVAL_STORE_PROFILE"
+TOPIC_RE = re.compile(r"projects/[^/]+/topics/[^/]+")
+
+
+def with_events(spec: dict, topic: str, event: str, profile: str | None) -> dict:
+    """A compaction job's `spec` publishing its state changes to `topic` (Batch `notifications`, `JOB_STATE_CHANGED`: the
+    shape infra's `with_notifications` gives a scan head), labelled with what its end asks of `batch-events serve`
+    (`append_runner.EVENTS_LABEL`: `catch-up` or `alert`), and the profile (`$INTERVAL_STORE_PROFILE`) the catch-up
+    appends with, when known."""
+    if not TOPIC_RE.fullmatch(topic):
+        raise SystemExit(f"interval store: events_topic {topic!r} isn't projects/<project>/topics/<topic>")
+    out = deepcopy(spec)
+    out["notifications"] = [{"pubsubTopic": topic, "message": {"type": "JOB_STATE_CHANGED"}}]
+    out["labels"] = {**out.get("labels", {}), ar.EVENTS_LABEL: event}
+    if profile:
+        for g in out["taskGroups"]:
+            g["taskSpec"].setdefault("environment", {}).setdefault("variables", {})[PROFILE_ENV] = profile
+    return out
 
 
 def store_runner(cfg: Config, *, dry_run: bool = False, merge: bool = True, merge_wait: float | None = 0) -> Runner:
@@ -1649,23 +1678,37 @@ def ready(profile: str | None) -> Config:
 @command("append")
 @option("-c", "--catch-up", is_flag=True, help="Append every earlier published scan still pending first, in scan-id order")
 @option("-K", "--compact-now", is_flag=True, help="After the merge stage, compact into a new generation whatever the policy says (when the generation has runs)")
+@option("-l", "--latest", is_flag=True, help="Append the newest published scan (with -c: every pending one) in place of SCAN_ID; nothing to do when none is pending")
 @option("-M", "--no-merge", is_flag=True, help="Skip the merge stage (the due carries wait for a later run, or `interval-store merge`)")
 @option("-n", "--dry-run", is_flag=True, help="Report each stage's state and what would run; submit and write nothing")
 @option("-N", "--candidate", is_flag=True, help="The compaction (due, or -K) writes a candidate: published, nothing pointed at it, appends not held off (`interval_append promote` points prod at it)")
 @option("-P", "--profile", help="Deployment profile JSON (default $INTERVAL_STORE_PROFILE)")
 @option("-w", "--merge-wait", default=0, type=float, help="Seconds to wait on the merge job (default 0: submit it and go; it publishes on GCS when done)")
 @option("-W", "--compact-wait", default=0, type=float, help="Seconds to wait on a compaction's job (default 0: submit it and go; it publishes the new generation when done, and appends wait for it meanwhile)")
-@argument("scan_id")
-def append_cmd(catch_up: bool, compact_now: bool, no_merge: bool, dry_run: bool, candidate: bool, profile: str | None, merge_wait: float, compact_wait: float,
-               scan_id: str) -> None:
+@argument("scan_id", required=False)
+def append_cmd(catch_up: bool, compact_now: bool, latest: bool, no_merge: bool, dry_run: bool, candidate: bool, profile: str | None, merge_wait: float,
+               compact_wait: float, scan_id: str | None) -> None:
     """Append SCAN_ID to the interval store: prepare → ranges → publish → R2 → prune, each stage skipped when its output
     exists; then the merge stage (the due carries, non-fatal), and when the compaction policy fires (or `-K`) the
     compaction stage (`compact`: GCS, then R2 with its pointer last). A generation compacted since the profile named it
     is followed to its successor. Exit 3 when SCAN_ID is not published yet, or an earlier published scan is pending
     (without -c); exit 4 when another `append` holds the coordinator lease; exit 6 (`COMPACTING`) when a live compaction
-    holds the generation: the append is deferred to the next run's (`deferral` says how far behind the store is)."""
+    holds the generation: the append is deferred to the next run's (`deferral` says how far behind the store is).
+    `-l` (what a compaction's success submits, `batch_events.compaction`): the newest published scan, the store followed
+    past the compaction to its new generation; with nothing pending it prints `scan: null` and exits 0."""
+    if latest == bool(scan_id):
+        raise UsageError("give SCAN_ID or -l, one of them")
     cfg = ready(profile)
     runner = store_runner(cfg, dry_run=dry_run, merge=not no_merge, merge_wait=merge_wait)
+    runner.profile_ref = profile or os.environ.get(PROFILE_ENV) or None
+    if latest:
+        runner.follow()
+        have, layouts = runner.have()
+        scan_id = ar.latest_pending(have, runner.published(layouts, have[-1]))
+        if scan_id is None:
+            err(f"interval-store append -l: nothing published after {have[-1]} ({runner.p.gen})")
+            print(json.dumps({"gen": runner.p.gen, "scan": None, "appended": [], "dry_run": dry_run}))
+            return
     runner.compact_now = compact_now
     runner.compact_wait = compact_wait
     runner.candidate = candidate

@@ -85,6 +85,23 @@ def test_compact_jobs_run_long_on_standard_vms():
         f"compact -C level:1 -r -j 4 -M 90GB -p 16 {COMMON} -m /gcs/data")
 
 
+def test_compact_jobs_publish_their_ends_when_the_profile_names_a_topic():
+    """#82 (2): with `events_topic`, the compaction's jobs name it in `notifications`, the last (the pointer's) labelled
+    `events: catch-up`, and carry the run's profile for the catch-up; a candidate's (`-N`) and a topicless profile's don't."""
+    topic = "projects/p/topics/d-scan-events"
+
+    def ends(r):
+        return [(s["labels"]["stage"], s["labels"].get("events"), s.get("notifications"),
+                 s["taskGroups"][0]["taskSpec"]["environment"]["variables"].get("INTERVAL_STORE_PROFILE")) for _, s in r.compact_jobs("2026-08-04")]
+
+    r = IvFake(["2026-08-03"], compact_level=1, events_topic=topic).runner(merge_wait=None)
+    r.profile_ref = "/app/job/interval-store.json"
+    assert ends(r) == [("compact", "catch-up", [{"pubsubTopic": topic, "message": {"type": "JOB_STATE_CHANGED"}}], "/app/job/interval-store.json")]
+    r.candidate = True
+    assert ends(r) == [("compact", None, None, None)]
+    assert ends(IvFake(["2026-08-03"], compact_level=1).runner(merge_wait=None)) == [("compact", None, None, None)]
+
+
 def test_interval_follows_the_successor():
     """A generation compacted since the profile named it: the next run appends to its successor (its own ranges)."""
     f = IvFake(["2026-08-03", "2026-08-06"])

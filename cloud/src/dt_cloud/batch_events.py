@@ -11,7 +11,15 @@ service running `serve` (infra `BatchEvents`), and on a terminal state it
 2. converges the scan thread (`nominal.run`): the reply, the thread head, its pin and the canvas.
 
 Both are idempotent and the thread's writers serialize on its lease, so the delivery after a head that did finish
-(the job already wrote both) changes nothing, and a redelivery is harmless. The service runs as the scan job's own
+(the job already wrote both) changes nothing, and a redelivery is harmless.
+
+An interval-store compaction's jobs publish to the same topic when the profile names it (`events_topic`,
+`interval_append.with_events`), labelled `events` (`append_runner.EVENTS_LABEL`); their ends go to `compaction`
+instead: the job that publishes the new generation's pointer (`catch-up`), on success, submits the catch-up append as
+its own Batch job (`catch_up_spec`: the compaction's image, account, machine and env, running `interval-store append
+-c -l`; its id the compaction's + `-catch-up`, so a redelivery meets it, 409, and starts no second); any compaction job
+failing or cancelled posts an alert (`disk-tree notify`'s channels). No clock: the scans deferred meanwhile go in when
+the compaction is done, not at the next scan. The service runs as the scan job's own
 account (D1, the site token, the thread's state bucket, Batch reads), with the job's env (`SCAN_RUNS_PROFILE`,
 `D1_DB_ID`, the Cloudflare and Slack tokens).
 
@@ -24,9 +32,11 @@ import base64
 import binascii
 import json
 import os
+import re
 import sys
 import time
 from collections.abc import Callable, Mapping
+from copy import deepcopy
 from functools import partial
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -75,13 +85,114 @@ def handle(body: bytes, act: Act) -> int:
     return 204
 
 
+#: A notification's `JobName`: `projects/<project>/locations/<region>/jobs/<id>`.
+JOB_NAME_RE = re.compile(r"projects/(?P<project>[^/]+)/locations/(?P<region>[^/]+)/jobs/(?P<id>[^/]+)")
+#: The catch-up's command (`interval_append.append_cmd`): every published scan the store doesn't hold yet, in order.
+CATCH_UP_CMD = "dt-cloud interval-store append -c -l"
+CATCH_UP_SUFFIX = "-catch-up"
+
+
+def job_ref(attrs: Mapping[str, str]) -> tuple[str, str, str] | None:
+    """A notification's job as (project, region, id), from its `JobName`; None when it doesn't name one."""
+    m = JOB_NAME_RE.fullmatch(attrs.get("JobName") or "")
+    return (m["project"], m["region"], m["id"]) if m else None
+
+
+def catch_up_id(job_id: str) -> str:
+    """The catch-up's Batch id for compaction job `job_id`: one per compaction, at most 63 characters."""
+    return job_id[:63 - len(CATCH_UP_SUFFIX)].rstrip("-") + CATCH_UP_SUFFIX
+
+
+def catch_up_spec(job: Mapping) -> dict | None:
+    """The catch-up append's Batch job, from the compaction job `job` (Batch's own record of it): its image (also the
+    stages', `$INTERVAL_STORE_IMAGE`), account, machine, mounts and env (secrets included; its own run facts, `DT_JOB_*`,
+    dropped), one task, no retry, running `CATCH_UP_CMD`; labelled as it was (cost labels included) but `stage`
+    `catch-up` and no `events` (its end asks nothing), and no `notifications`. None when the job names no
+    `$INTERVAL_STORE_PROFILE` to append with."""
+    from .append_runner import EVENTS_LABEL
+    from .interval_append import ENV, PROFILE_ENV
+    from .maint_runs import FACT_ENV
+
+    ts = deepcopy(job["taskGroups"][0]["taskSpec"])
+    c = ts["runnables"][0]["container"]
+    env = ts.get("environment") or {}
+    variables = {k: v for k, v in (env.get("variables") or {}).items() if k not in FACT_ENV.values()}
+    if not variables.get(PROFILE_ENV):
+        return None
+    variables[ENV["image"]] = c["imageUri"]
+    ts["runnables"] = [{"container": {"imageUri": c["imageUri"], "entrypoint": "bash", "commands": ["-c", CATCH_UP_CMD],
+                                      "volumes": list(c.get("volumes") or [])}}]
+    ts["environment"] = {**env, "variables": variables}
+    ts["maxRetryCount"] = 0
+    labels = {k: v for k, v in (job.get("labels") or {}).items() if k != EVENTS_LABEL} | {"stage": "catch-up"}
+    return {"taskGroups": [{"taskCount": 1, "parallelism": 1, "taskSpec": ts}], "allocationPolicy": deepcopy(job["allocationPolicy"]),
+            "labels": labels, "logsPolicy": deepcopy(job.get("logsPolicy") or {"destination": "CLOUD_LOGGING"})}
+
+
+def compaction(attrs: Mapping[str, str], job: Mapping | None, submit: Callable[[dict, str, str, str], str],
+               alert: Callable[[str, str], None]) -> str | None:
+    """A terminal change of an interval-store compaction job (labels `component` `interval-store`, `events`
+    `catch-up` / `alert`): what it did (see the module doc), or None for any other job (a scan head's: `converge`).
+    `submit(spec, id, region, project)` creates a Batch job (a 409 counts as created); `alert(level, message)` posts."""
+    from .append_runner import ALERT, CATCH_UP, EVENTS_LABEL
+    from .interval_append import COMPONENT
+
+    labels = (job or {}).get("labels") or {}
+    event = labels.get(EVENTS_LABEL)
+    ref = job_ref(attrs)
+    if job is None or ref is None or labels.get("component") != COMPONENT or event not in (CATCH_UP, ALERT):
+        return None
+    project, region, jid = ref
+    state = attrs.get("NewJobState")
+    gen = labels.get("gen") or "?"
+    if state != "SUCCEEDED":
+        alert("fail", f"interval-store compaction job {jid} (generation {gen}) ended {state}: the generation isn't compacted. "
+                      "Appends wait on the compaction lease until it lapses; while the compaction is due, the next append submits it again.")
+        return f"compaction {jid} {state}: alerted"
+    if event == ALERT:
+        return f"compaction {jid} SUCCEEDED: a step before the pointer's, nothing to do"
+    spec = catch_up_spec(job)
+    if spec is None:
+        alert("warn", f"interval-store compaction {jid} (generation {gen}) published, but its job names no $INTERVAL_STORE_PROFILE: "
+                      "no catch-up submitted; the scans it deferred go in with the next scan's append")
+        return f"compaction {jid} SUCCEEDED: no profile, alerted"
+    name = submit(spec, catch_up_id(jid), region, project)
+    return f"compaction {jid} SUCCEEDED: catch-up {name} submitted"
+
+
+def post(env: Mapping[str, str], level: str, message: str) -> None:
+    """`message` through `disk-tree notify`'s channels in `env` (`fail`: high priority), or stderr without one."""
+    from disk_tree.notify import push
+
+    title = f"{'❌' if level == 'fail' else '⚠️'} interval store"
+    chans = push.configured(env)
+    if not chans:
+        err(f"batch-events: alert (no channel configured): {title}: {message}")
+        return
+    for c, e in push.send(push.Notice(title, message, priority=1 if level == "fail" else 0), chans, env=env, post=push.http_post):
+        err(f"batch-events: alert: {c}: {e or 'sent'}")
+
+
+def submit(spec: dict, job_id: str, region: str, project: str) -> str:
+    """`batch.submit_job`, a 409 counting as submitted (a redelivery meets the job it already created)."""
+    from .batch import submit_job
+
+    return submit_job(spec, job_id, region=region, project=project, exists_ok=True)
+
+
 def converge(env: Mapping[str, str]) -> Act:
-    """The terminal-state action: reconcile the profile store's runs, then converge its scan thread (if it has one)."""
+    """The terminal-state action: an interval-store compaction's (`compaction`), else reconcile the profile store's runs,
+    then converge its scan thread (if it has one)."""
 
     def act(attrs: Mapping[str, str]) -> None:
         from .nominal import run
         from .scan_runs import batch_lookup, load_profile, reconcile, sink_for
 
+        if (ref := job_ref(attrs)) is not None:
+            did = compaction(attrs, batch_lookup(ref[0], ref[2], ref[1]), submit, partial(post, env))
+            if did is not None:
+                err(f"batch-events: {did}")
+                return
         profile = load_profile(None)
         if not profile.project:
             raise ValueError("the profile names no project")

@@ -116,6 +116,10 @@ class Profile:
     #: The interval store: a compaction carries the priced owner rows to its new generation (`owner_carry`; `compact -O`),
     #: which needs `record_secrets` and the submitter's D1 env. Off: nothing changes.
     owner_carry: bool = False
+    #: The interval store: a Pub/Sub topic (`projects/<p>/topics/<t>`) its compaction jobs publish their Batch state
+    #: changes to (`notifications`, `JOB_STATE_CHANGED`), for `dt-cloud batch-events serve`: the last job's success
+    #: submits the catch-up append, any job's failure or cancel alerts (`batch_events.compaction`). Unset: none.
+    events_topic: str | None = None
 
     def __post_init__(self):
         if self.read_from not in ("gcs", "r2"):
@@ -180,7 +184,7 @@ ENV = {
     "append_tasks": "STATIC_NAMES_APPEND_TASKS", "pipeline_depth": "STATIC_NAMES_PIPELINE_DEPTH", "measure_tasks": "STATIC_NAMES_MEASURE_TASKS", "anchor_tasks": "STATIC_NAMES_ANCHOR_TASKS", "fold_tasks": "STATIC_NAMES_FOLD_TASKS", "keep": "STATIC_NAMES_KEEP", "drill": "STATIC_NAMES_DRILL", "drill_checkpoint": "STATIC_NAMES_DRILL_CHECKPOINT", "anchors": "STATIC_NAMES_ANCHORS", "src": "STATIC_NAMES_SRC",
     "hex_runs": "STATIC_NAMES_HEX_RUNS", "compact_level": "STATIC_NAMES_COMPACT_LEVEL", "compact": "STATIC_NAMES_COMPACT", "read_from": "STATIC_NAMES_READ_FROM",
     "compact_jobs": "STATIC_NAMES_COMPACT_JOBS", "fold_jobs": "STATIC_NAMES_FOLD_JOBS", "record_secrets": "STATIC_NAMES_RECORD_SECRETS",
-    "owner_carry": "STATIC_NAMES_OWNER_CARRY",
+    "owner_carry": "STATIC_NAMES_OWNER_CARRY", "events_topic": "STATIC_NAMES_EVENTS_TOPIC",
 }
 
 

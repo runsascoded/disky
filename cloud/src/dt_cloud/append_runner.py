@@ -207,6 +207,18 @@ def deferral(have: list[str], published: list[str], scan_id: str) -> dict:
     return {"newest": have[-1], "pending": pending, "stuck": [s for s in pending if s < scan_id]}
 
 
+#: A compaction job's label naming what its terminal Batch state asks of `batch-events serve` (`batch_events.compaction`;
+#: `interval_append.with_events` sets it): `catch-up` (the job that publishes the new generation's pointer: on success,
+#: submit the catch-up append) or `alert` (an earlier job of the compaction: only its failure or cancel matters).
+EVENTS_LABEL = "events"
+CATCH_UP, ALERT = "catch-up", "alert"
+
+
+def latest_pending(have: list[str], published: list[str]) -> str | None:
+    """The newest published scan the generation doesn't hold yet (`have`: its scans, oldest first), else None."""
+    return max((s for s in published if s > have[-1]), default=None)
+
+
 def deferral_episode(stuck: list[str], marked: str | None) -> str | None:
     """One alert per deferral episode: `start` when scans are stuck and the marker (the oldest stuck scan the last alert
     named) isn't this episode's oldest (alert, then mark it), `end` when none is stuck and a marker is left (unmark),
