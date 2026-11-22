@@ -175,6 +175,85 @@ class JobAccount(ComponentResource):
         self.register_outputs({"email": self.email})
 
 
+#: The data-bucket prefix under which `/admin/slack`'s digest re-apply job writes each run's output and rewrite plan
+#: (`digest/reapply/<job>.{txt,plan.json}`, `site/functions/api/digest-reapply.ts`).
+REAPPLY_PREFIX = "digest/reapply/"
+
+
+class SiteDispatcher(ComponentResource):
+    """What a deployment's site account (the Pages secret `GCP_SA_KEY`) may start on GCP: one flag per capability, each
+    granting exactly what that capability's routes call. The account is the caller's (`JobAccount(roles=[],
+    acts_as_self=False)`); `job` is the job account whatever the site submits runs as; `data_bucket` the deployment's
+    data bucket. No flag set: no grants.
+
+    - "Run a scan" (`/api/scan-runs/dispatch`) is not here: `BatchSubmitCron(dispatchers={name: account.member})`
+      grants `run.jobsExecutorWithOverrides` on the submitter job, whose env guard limits the overrides.
+    - `reapply`: `/admin/slack`'s digest re-apply (`/api/digest-reapply`): submits, reads and cancels its Batch job as
+      `job` (`batch.jobsEditor`: Batch has no per-job IAM; `serviceAccountUser` on `job`), and reads the run's output
+      and rewrite plan, only under `REAPPLY_PREFIX` (`objectViewer`, conditioned). The job writes them, as `job`.
+    - `sweeps`: the sweep console (`_lib/sweepDispatch.ts`): the same Batch submit and act-as, and each run's
+      `plan.json` dropped into the bucket before the submit (`objectCreator`: create-only, no read, overwrite or
+      delete). `sweep_reads` adds an unconditioned `objectViewer` on the bucket (a console that reads its runs'
+      results there).
+
+    `aliases` (keyed `jobs`, `act`, `reapply`, `sweep-create`, `sweep-read`) let a stack that granted these by hand
+    adopt them without replacement.
+    """
+
+    def __init__(
+        self,
+        name: str,
+        *,
+        project: str,
+        account: JobAccount,
+        job: JobAccount,
+        data_bucket: pulumi.Input[str],
+        reapply: bool = False,
+        sweeps: bool = False,
+        sweep_reads: bool = False,
+        aliases: dict[str, Sequence[pulumi.Input[str] | pulumi.Alias]] | None = None,
+        opts: ResourceOptions | None = None,
+    ):
+        super().__init__("disky:gcp:SiteDispatcher", name, None, opts)
+        if sweep_reads and not sweeps:
+            raise ValueError("sweep_reads needs sweeps")
+        aliases = aliases or {}
+        if unknown := set(aliases) - {"jobs", "act", "reapply", "sweep-create", "sweep-read"}:
+            raise ValueError(f"unknown SiteDispatcher alias keys: {sorted(unknown)}")
+
+        def child(key: str) -> ResourceOptions:
+            return ResourceOptions(parent=self, aliases=list(aliases.get(key, [])))
+
+        self.grants: dict[str, pulumi.CustomResource] = {}
+        if reapply or sweeps:
+            self.grants["jobs"] = gcp.projects.IAMMember(
+                f"{name}-batch-jobsEditor", project=project, role="roles/batch.jobsEditor", member=account.member, opts=child("jobs"))
+            self.grants["act"] = gcp.serviceaccount.IAMMember(
+                f"{name}-act-{job.email_literal.split('@')[0]}", service_account_id=job.account.name,
+                role="roles/iam.serviceAccountUser", member=f"serviceAccount:{account.email_literal}", opts=child("act"))
+        if reapply:
+            self.grants["reapply"] = gcp.storage.BucketIAMMember(
+                f"{name}-reapply-reader",
+                bucket=data_bucket,
+                role="roles/storage.objectViewer",
+                member=account.member,
+                condition={
+                    "title": "digest-reapply-runs",
+                    "description": "Only /admin/slack's digest re-apply output and rewrite plans",
+                    "expression": pulumi.Output.from_input(data_bucket).apply(
+                        lambda b: f'resource.name.startsWith("projects/_/buckets/{b}/objects/{REAPPLY_PREFIX}")'),
+                },
+                opts=child("reapply"),
+            )
+        if sweeps:
+            self.grants["sweep-create"] = gcp.storage.BucketIAMMember(
+                f"{name}-sweep-creator", bucket=data_bucket, role="roles/storage.objectCreator", member=account.member, opts=child("sweep-create"))
+        if sweep_reads:
+            self.grants["sweep-read"] = gcp.storage.BucketIAMMember(
+                f"{name}-sweep-reader", bucket=data_bucket, role="roles/storage.objectViewer", member=account.member, opts=child("sweep-read"))
+        self.register_outputs({})
+
+
 #: An image repo's cleanup (`DeploymentImages`): the deployment's tag kept, the newest builds kept, the rest deleted past
 #: this age (probe and test tags `<purpose>-<sha>` included).
 IMAGE_KEEP_TAGS = ("latest",)
