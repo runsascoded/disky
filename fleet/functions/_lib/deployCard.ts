@@ -428,6 +428,8 @@ export function deployCardSvg(c: DeployCardInput): string {
   // the times in the family key are the newest finished run's
   if (mode === 'family') key('', 'key times: newest run')
   for (const [draw, label] of keys) {
+    // wrap to a second line rather than run off the card
+    if (kx > PAD && kx + (draw ? 13 : 0) + interWidth(label, 9.5) > right) { kx = PAD; y += 14 }
     const ky = y + 1
     if (draw) out.push(draw === '{person}' ? person(kx + 4.5, ky, P.ink3) : draw.replace('{x}', String(r1(kx))).replace('{y}', String(r1(ky))))
     const lx = draw ? kx + 13 : kx
