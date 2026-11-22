@@ -3,7 +3,9 @@
 import base64
 import json
 
-from dt_cloud.batch_events import catch_up_id, catch_up_spec, compaction, handle, job_ref
+from dt_cloud import scan_runs
+from dt_cloud.batch_events import catch_up_id, catch_up_spec, compaction, handle, job_ref, scan_ended
+from dt_cloud.d1_schema import table_ddl
 
 
 def push(attrs: dict | None, data: bytes = b"", mid: str = "m1") -> bytes:
@@ -134,3 +136,56 @@ def test_any_other_job_is_left_to_the_scan_path():
     unlabelled = compact_job()
     del unlabelled["labels"]["events"]
     assert [ended("SUCCEEDED", j) for j in (head, unlabelled, None)] == [(None, []), (None, []), (None, [])]
+
+
+# ── a scan head's end: its run reconciled, a cancel recorded `cancelled` ──
+
+
+def head_cancelled(job: str) -> dict:
+    return {**changed("CANCELLED", job), "JobName": f"projects/p/locations/r1/jobs/{job}"}
+
+
+def test_a_cancelled_heads_trapped_run_is_cancelled_unless_a_step_had_failed_first():
+    # the head's exit trap recorded the cancel's SIGTERM (its running phase closed at the trap's write); in `early`, a
+    # step had failed on its own 10 minutes before
+    s = scan_runs.SqliteSink(":memory:", ddl=table_ddl(scan_runs.TABLES))
+    profile = scan_runs.parse_profile({"name": "test", "project": "p"})
+    t0, end = 1_800_000_000, 1_800_003_600
+    for rid in ("pure", "early"):
+        s.execute([scan_runs.run_sql(scan_runs.Run(rid, "2026-11-21T0700", "scan", "failed", started_ts=t0, finished_ts=end, job_name=f"j-{rid}",
+                                                   region="r1", failed_phase="index", error="head terminated (signal; session s1)"), end),
+                   scan_runs.phase_sql(rid, scan_runs.Phase("index", 1, t0 + 600, end, "failed", "failed (exit 143)"))])
+    s.execute([scan_runs.phase_sql("early", scan_runs.Phase("listing", 0, t0, end - 600, "failed", "failed (exit 1)"))])
+
+    def lookup(name: str, region: str):
+        raise AssertionError(f"no running row to look up: {name} {region}")
+
+    for job in ("j-pure", "j-early"):
+        scan_ended(head_cancelled(job), s, profile, lookup, end + 60)
+    assert [tuple(r.values()) for r in s.query("SELECT run_id, status, error, finished_ts, updated_ts FROM scan_runs ORDER BY run_id")] == [
+        ("early", "failed", "head terminated (signal; session s1)", end, end),
+        ("pure", "cancelled", "cancelled", end, end + 60),
+    ]
+
+
+def test_a_cancelled_heads_running_run_is_reconciled_cancelled_unless_a_step_had_failed_first():
+    # no trap ran: the rows are still `running`, and Batch says the job was CANCELLED at `end`
+    s = scan_runs.SqliteSink(":memory:", ddl=table_ddl(scan_runs.TABLES))
+    profile = scan_runs.parse_profile({"name": "test", "project": "p"})
+    t0, end = 1_800_000_000, 1_800_003_600
+    for rid in ("pure", "early"):
+        s.execute([scan_runs.run_sql(scan_runs.Run(rid, "2026-11-21T0700", "scan", "running", started_ts=t0, job_name=f"j-{rid}", region="r1"), end - 60),
+                   scan_runs.phase_sql(rid, scan_runs.Phase("index", 1, t0 + 600, None, "running"))])
+    s.execute([scan_runs.phase_sql("early", scan_runs.Phase("listing", 0, t0, end - 600, "failed", "failed (exit 1)"))])
+    cancelled = {"status": {"state": "CANCELLED", "statusEvents": [
+        {"eventTime": "2027-01-15T09:00:00Z", "description": "Job state is set from RUNNING to CANCELLED."}]}}  # `end`
+    scan_ended(head_cancelled("j-pure"), s, profile, lambda name, region: cancelled, end + 60)
+    assert [tuple(r.values()) for r in s.query("SELECT run_id, status, error, failed_phase, finished_ts, updated_ts FROM scan_runs ORDER BY run_id")] == [
+        ("early", "failed", "cancelled", "index", end, end + 60),
+        ("pure", "cancelled", "cancelled", "index", end, end + 60),
+    ]
+    assert [tuple(r.values()) for r in s.query("SELECT run_id, phase, status, note, finished_ts FROM scan_run_phases ORDER BY run_id, seq")] == [
+        ("early", "listing", "failed", "failed (exit 1)", end - 600),
+        ("early", "index", "failed", "cancelled", end),
+        ("pure", "index", "failed", "cancelled", end),
+    ]

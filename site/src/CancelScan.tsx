@@ -1,5 +1,5 @@
 // "Cancel" on a running scan's page (admins): a confirm, then `POST /api/scan-runs/cancel`, which cancels the scan's
-// head Batch job and every job its pipeline submitted, in every region, and marks the run failed (`_lib/scanCancel.ts`).
+// head Batch job and every job its pipeline submitted, in every region, and marks the run cancelled (`_lib/scanCancel.ts`).
 import { useEffect, useState } from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { Tooltip } from './Tooltip'
@@ -7,7 +7,7 @@ import { useIsAdmin } from './auth'
 import type { ScanRun } from './scanRunsModel'
 
 type Outcome = 'cancelled' | 'already' | 'gone' | { error: string }
-interface Cancelled { head: Outcome; tasks: Record<string, Outcome>; tasks_error?: string; recorded: boolean }
+interface Cancelled { head: Outcome; tasks: Record<string, Outcome>; tasks_error?: string; recorded: 'cancelled' | 'failed' | null }
 
 async function cancelScan(runId: string): Promise<Cancelled> {
   const r = await fetch('/api/scan-runs/cancel', {
@@ -24,7 +24,9 @@ const failures = (c: Cancelled): string[] =>
 /** What the cancel did to the head, as a sentence. */
 function headSays(c: Cancelled): string {
   if (typeof c.head === 'object') return `The head job’s cancel failed (${c.head.error}); it is still running, and so is the run.`
-  return `Cancelled the head job${c.head === 'already' ? ' (its cancel was already under way)' : c.head === 'gone' ? ' (already gone)' : ''}.${c.recorded ? ' The run is marked failed.' : ''}`
+  const marked = c.recorded === 'cancelled' ? ' The run is marked cancelled.'
+    : c.recorded === 'failed' ? ' The run stays failed: a step had already failed before the cancel.' : ''
+  return `Cancelled the head job${c.head === 'already' ? ' (its cancel was already under way)' : c.head === 'gone' ? ' (already gone)' : ''}.${marked}`
 }
 
 /** The button, for an admin on a running scan run (not a compaction, merge, race, access ingest or recovery). */
@@ -67,7 +69,7 @@ function CancelScanDialog({ run, invalidate, onClose }: { run: ScanRun; invalida
           {bad.length > 0 && <p className="token-err">Not cancelled: {bad.join('; ')}</p>}
           <div className="token-actions"><button type="button" onClick={onClose} autoFocus>Close</button></div>
         </> : <>
-          <p>Stops this scan now: its head job (<code>{run.job_name}</code>) and every task it started, in every region. The run is marked failed.</p>
+          <p>Stops this scan now: its head job (<code>{run.job_name}</code>) and every task it started, in every region. The run is marked cancelled (not a failure), unless a step had already failed.</p>
           <p className="token-muted token-small">Steps that already finished keep their outputs. Whatever a cancelled step was writing is left as it stood; the next scan starts from what was published.</p>
           {go.isError && <p className="token-err">{go.error.message}</p>}
           <div className="token-actions">

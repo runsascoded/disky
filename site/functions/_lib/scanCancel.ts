@@ -9,8 +9,9 @@
 // `scan_id` alone isn't unique: two deployments in one project can scan at the same minute, so the deployment label
 // (`DISKY_LABELS`) is required. Only a top-level scan run is cancelled here (not a compaction, merge, race or access
 // ingest, whose jobs share the scan's `scan_id`). Once the head is stopped (cancelled, already cancelling, or gone),
-// the row is marked failed, `cancelled from /scans`, unless the head recorded its own end first; a head whose cancel
-// failed leaves the row running. `error` reaches every viewer, public ones too, so who cancelled stays out of it: it
+// the row is marked `cancelled` (`cancelled from /scans`; never a failure), unless the head recorded its own end first; a
+// run one of whose steps had already failed on its own before the cancel (`FAILED_BEFORE`) stays `failed`, with the same
+// error. A head whose cancel failed leaves the row running. `error` reaches every viewer, public ones too, so who cancelled stays out of it: it
 // goes in Batch's cancel reason (admins' console).
 import type { D1Database } from '@cloudflare/workers-types'
 import { MAINT_KINDS, type ScanRun } from '../../src/scanRunsModel.js'
@@ -57,11 +58,19 @@ export const headName = (project: string, run: Run): string => `projects/${proje
 export type CancelOutcome = 'cancelled' | 'already' | 'gone' | { error: string }
 
 /** What a cancel did: the head's outcome, each task's by name (`tasks_error`: the listing failed, so none was tried),
- *  and whether the run's row was marked failed. */
-export interface Cancelled { head: CancelOutcome; tasks: Record<string, CancelOutcome>; tasks_error?: string; recorded: boolean }
+ *  and what the run's row was marked (`recorded`: `cancelled`, `failed` for a run a step of which had already failed, or
+ *  null: the head didn't stop, or it recorded its own end first). */
+export interface Cancelled { head: CancelOutcome; tasks: Record<string, CancelOutcome>; tasks_error?: string; recorded: 'cancelled' | 'failed' | null }
 
 /** The row's `error` after a cancel. No address: every viewer reads it. */
 export const CANCELLED_ERROR = 'cancelled from /scans'
+
+/** SQL: the run (`scan_runs`' row) has a step that failed on its own before `?`, the cancel: a failed phase whose note
+ *  isn't one a cancel's stop leaves (`reconcile`'s `failed (lost)` / `cancelled`), ended earlier. Its failure is real,
+ *  and a cancel leaves it `failed` (`failed_phase` can't say so: a cancel records the step it stopped there). The rule
+ *  of `scan_runs.failed_before` and `scan-run-cancelled`'s backfill. */
+export const FAILED_BEFORE = `EXISTS (SELECT 1 FROM scan_run_phases p WHERE p.run_id = scan_runs.run_id AND p.status = 'failed'
+  AND COALESCE(p.note, '') NOT IN ('failed (lost)', 'cancelled') AND p.finished_ts < ?)`
 
 /** The head is stopped (or stopping): the run can be recorded as ended. */
 export const headStopped = (o: CancelOutcome): boolean => typeof o === 'string'
@@ -100,12 +109,13 @@ async function listJobs(fetch: Fetch, token: string, project: string, deployment
 }
 
 /** Cancel `run` (which `refusal` passed): its head, then every live job of its scan; then, if the head stopped, mark the
- *  row failed. */
+ *  row cancelled (`failed` when a step had failed on its own before the cancel began). */
 export async function cancelScan(
   { db, fetch, token, project, deployment, run, who, now }:
   { db: D1Database; fetch: Fetch; token: string; project: string; deployment: string; run: Run; who: string; now: () => number },
 ): Promise<Cancelled> {
   const reason = `cancelled by ${who} from /scans`
+  const asked = now()  // the cancel's start: a step it stops writes its own failure after this; one that failed on its own, before
   const head = headName(project, run)
   const headOut = await cancelJob(fetch, token, head, reason)
   const tasks: Record<string, CancelOutcome> = {}
@@ -115,12 +125,13 @@ export async function cancelScan(
   } catch (e) {
     tasksError = (e as Error).message ?? String(e)
   }
-  let recorded = false
+  let recorded: Cancelled['recorded'] = null
   if (headStopped(headOut)) {
     const t = now()
-    const r = await db.prepare(`UPDATE scan_runs SET status = 'failed', error = ?, finished_ts = COALESCE(finished_ts, ?), updated_ts = ?
-        WHERE run_id = ? AND status = 'running'`).bind(CANCELLED_ERROR, t, t, run.run_id).run()
-    recorded = (r.meta.changes ?? 0) > 0
+    const r = await db.prepare(`UPDATE scan_runs SET status = CASE WHEN ${FAILED_BEFORE} THEN 'failed' ELSE 'cancelled' END, error = ?,
+        finished_ts = COALESCE(finished_ts, ?), updated_ts = ? WHERE run_id = ? AND status = 'running' RETURNING status`)
+      .bind(asked, CANCELLED_ERROR, t, t, run.run_id).first<{ status: 'cancelled' | 'failed' }>()
+    recorded = r?.status ?? null
   }
   return { head: headOut, tasks, ...(tasksError ? { tasks_error: tasksError } : {}), recorded }
 }

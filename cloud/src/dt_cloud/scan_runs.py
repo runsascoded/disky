@@ -932,14 +932,35 @@ RECONCILE_AFTER_S = 1800
 BATCH_ENDED = ("SUCCEEDED", "FAILED", "CANCELLED", "DELETION_IN_PROGRESS")
 
 
+#: A cancelled job's `error` (`lost_reason`, `batch_cancelled`): someone stopped it on purpose.
+CANCELLED = "cancelled"
+#: The start of the head's exit trap's error when a signal stopped it (`scan_head`): a cancel's SIGTERM, or a lost VM's.
+SIGNAL_ERROR = "head terminated (signal"
+#: The notes of a phase a cancel stopped, not one that failed on its own: `reconcile` closes a lost job's running phases
+#: `failed (lost)`, a cancelled job's `cancelled`.
+STOPPED_NOTES = ("failed (lost)", CANCELLED)
+
+
+def failed_before(run_id: str, before: str) -> str:
+    """SQL: run `run_id` has a step that failed on its own before `before` (both SQL expressions): a failed phase with a
+    note other than `STOPPED_NOTES`, ended earlier. A cancel of such a run leaves it `failed`: its failure is real, and
+    `failed_phase` can't say so (a cancel records the step it stopped there). The rule `scan-run-cancelled`'s backfill
+    applied; `site/functions/_lib/scanCancel.ts` writes it again for /scans' Cancel."""
+    notes = ", ".join(lit(n) for n in STOPPED_NOTES)
+    return (f"EXISTS (SELECT 1 FROM scan_run_phases p WHERE p.run_id = {run_id} AND p.status = 'failed' "
+            f"AND COALESCE(p.note, '') NOT IN ({notes}) AND p.finished_ts < {before})")
+
+
 @dataclass(frozen=True)
 class Lost:
-    """One `running` row reconciled failed: why (`error`), and when its job ended (`finished_ts`)."""
+    """One `running` row reconciled: why (`error`), when its job ended (`finished_ts`), and what it is now (`status`:
+    `failed`, or `cancelled` for a cancelled job whose steps hadn't failed on their own before it, `failed_before`)."""
     run_id: str
     scan: str
     error: str
     finished_ts: int | None
     failed_phase: str | None = None
+    status: str = "failed"
 
 
 def batch_lookup(project: str, name: str, region: str) -> Mapping | None:
@@ -969,7 +990,7 @@ def lost_reason(job: Mapping | None) -> tuple[str, int | None] | None:
     events = st.get("statusEvents") or ()
     last = " ".join((events[-1].get("description") or "").split()) if events else ""
     if state == "CANCELLED":
-        return "cancelled", next((_epoch(ev["eventTime"]) for ev in reversed(events)
+        return CANCELLED, next((_epoch(ev["eventTime"]) for ev in reversed(events)
                                   if " to CANCELLED" in ev.get("description", "") and ev.get("eventTime")), None)
     what = f"Batch job {state}" + (", but the run never recorded its end" if state == "SUCCEEDED" else "")
     ended = next((_epoch(ev["eventTime"]) for ev in reversed(events)
@@ -988,12 +1009,14 @@ def reconcile(
     log: Callable[[str], None] | None = None,
 ) -> list[Lost]:
     """Mark failed the profile store's `running` rows quiet for over `after_s` whose Batch job (`lookup(job_name,
-    region)`) has ended: FAILED / CANCELLED, deleted or not found, and SUCCEEDED too (its own trap never recorded the
-    success). `finished_ts` is the job's end when Batch has one, else the row's last write; its running phases close
-    failed then. A job still running, or a row naming no job, is left alone; a failed lookup is logged and skipped.
+    region)`) has ended: FAILED, deleted or not found, and SUCCEEDED too (its own trap never recorded the success); a
+    CANCELLED job's row is marked `cancelled` (never a failure), unless a step had already failed on its own before the
+    cancel (`failed_before`): that run stays `failed`, error `cancelled`. `finished_ts` is the job's end when Batch has
+    one, else the row's last write; its running phases close failed then (`cancelled` in their note for a cancel). A job
+    still running, or a row naming no job, is left alone; a failed lookup is logged and skipped.
     Writes go to `out` (default `sink`; `PrintSink` for a dry run); `skip` is the caller's own run. Never alerts."""
     out, log = out or sink, log or err
-    rows = sink.query(f"SELECT run_id, scan, job_name, region, updated_ts FROM scan_runs WHERE store = {lit(profile.store)} "
+    rows = sink.query(f"SELECT run_id, scan, job_name, region, finished_ts, updated_ts FROM scan_runs WHERE store = {lit(profile.store)} "
                       f"AND status = 'running' AND updated_ts < {now - after_s} ORDER BY updated_ts")
     lost: list[Lost] = []
     for row in rows:
@@ -1012,19 +1035,54 @@ def reconcile(
             continue
         error, ended = why
         ended = ended if ended is not None else row["updated_ts"]
+        status, note, kept = "failed", "failed (lost)", False
+        if error == CANCELLED:
+            cancel = row["finished_ts"] if row["finished_ts"] is not None else ended
+            kept = bool(sink.query(f"SELECT {failed_before(lit(rid), lit(cancel))} AS kept")[0]["kept"])
+            status, note = ("failed" if kept else "cancelled"), CANCELLED
         phases = sink.query(f"SELECT phase FROM scan_run_phases WHERE run_id = {lit(rid)} AND status = 'running' "
                             "AND finished_ts IS NULL ORDER BY seq")
         failed_phase = phases[-1]["phase"] if phases else None
         out.execute([
-            f"UPDATE scan_run_phases SET status = 'failed', finished_ts = {lit(ended)}, note = 'failed (lost)' "
+            f"UPDATE scan_run_phases SET status = 'failed', finished_ts = {lit(ended)}, note = {lit(note)} "
             f"WHERE run_id = {lit(rid)} AND status = 'running' AND finished_ts IS NULL",
-            f"UPDATE scan_runs SET status = 'failed', error = {lit(error)}, finished_ts = COALESCE(finished_ts, {lit(ended)}), "
+            f"UPDATE scan_runs SET status = {lit(status)}, error = {lit(error)}, finished_ts = COALESCE(finished_ts, {lit(ended)}), "
             f"failed_phase = COALESCE(failed_phase, {lit(failed_phase)}), updated_ts = {now} "
             f"WHERE run_id = {lit(rid)} AND status = 'running'",
         ])
-        lost.append(Lost(rid, row["scan"], error, ended, failed_phase))
-        log(f"scan-run reconcile: {rid} ({row['scan']}) → failed: {error}")
+        lost.append(Lost(rid, row["scan"], error, ended, failed_phase, status))
+        log(f"scan-run reconcile: {rid} ({row['scan']}) → {status}: {error}" + (" (a step had failed before it)" if kept else ""))
     return lost
+
+
+def batch_cancelled(
+    sink: Sink,
+    profile: Profile,
+    job: str,
+    region: str,
+    now: int,
+    out: Sink | None = None,
+    log: Callable[[str], None] | None = None,
+) -> list[str]:
+    """Batch says job `job` (in `region`) was CANCELLED (`batch-events`): the profile store's run of that job whose head's
+    exit trap already recorded it failed by a signal (`SIGNAL_ERROR`: the cancel's SIGTERM, from the console or `gcloud`)
+    becomes `cancelled`, as `reconcile` records a cancelled job's run it finds still running, unless a step had already
+    failed on its own before the trap's write (`failed_before`): that run's failure is real, and it is left as the trap
+    wrote it. A run failed any other way stays failed. Returns the run ids it marked."""
+    out, log = out or sink, log or err
+    rows = sink.query(f"SELECT run_id, scan, {failed_before('scan_runs.run_id', 'scan_runs.finished_ts')} AS kept FROM scan_runs "
+                      f"WHERE store = {lit(profile.store)} AND job_name = {lit(job)} AND COALESCE(region, {lit(region)}) = {lit(region)} "
+                      f"AND status = 'failed' AND error LIKE {lit(SIGNAL_ERROR + '%')}")
+    marked: list[str] = []
+    for row in rows:
+        if row["kept"]:
+            log(f"scan-run: {row['run_id']} ({row['scan']}) stays failed: its Batch job {job} was cancelled after a step had failed")
+            continue
+        out.execute([f"UPDATE scan_runs SET status = 'cancelled', error = {lit(CANCELLED)}, updated_ts = {now} "
+                     f"WHERE run_id = {lit(row['run_id'])} AND status = 'failed'"])
+        log(f"scan-run: {row['run_id']} ({row['scan']}) → cancelled: its Batch job {job} was cancelled")
+        marked.append(row["run_id"])
+    return marked
 
 
 def _epoch(ts: str) -> int:
@@ -1205,7 +1263,8 @@ def recovery_cmd(
 @option("-s", "--sqlite", default=None, help="Use a local scan-run SQLite database instead of D1")
 def reconcile_cmd(after, profile_path, d1, store_key, dry_run, sqlite) -> None:
     """Mark failed the `running` runs whose Batch job ended without recording it (maxRunDuration, a lost VM, a delete):
-    the error names the job's state and last status event. Runs whose job still runs are left alone; no alerts."""
+    the error names the job's state and last status event; a cancelled job's run is marked cancelled, unless a step had
+    failed on its own before the cancel. Runs whose job still runs are left alone; no alerts."""
     profile = load_profile(profile_path)
     if store_key:
         profile = replace(profile, store=store_key)

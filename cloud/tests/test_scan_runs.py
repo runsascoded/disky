@@ -966,6 +966,79 @@ def test_reconcile_threshold_skip_and_dry_run(capsys):
     ]
 
 
+CANCEL_EV = ("2026-10-18T08:00:00Z", "Job state is set from RUNNING to CANCELLED.")
+
+
+def test_reconcile_marks_a_cancelled_jobs_run_cancelled_not_failed():
+    # runs whose head never recorded its end, their Batch jobs CANCELLED at 08:00: stopped on purpose, never a failure
+    # (`stopped`; `at-cancel`, whose listing step wrote its own failure as the cancel stopped it), unless a step had
+    # already failed on its own before the cancel (`failed-first`): that failure is real, and the run stays failed
+    s, now = reconcile_fixture()
+    t0, end = ts("2026-10-18T07:01:00"), ts("2026-10-18T08:00:00")
+    for rid, listing in [("stopped", None), ("failed-first", Phase("listing", 0, t0, t0 + 600, "failed", "failed (exit 1)")),
+                         ("at-cancel", Phase("listing", 0, t0, end, "failed", "failed (exit 143)"))]:
+        s.execute([scan_runs.run_sql(Run(rid, "2026-10-18T0701", "scan", "running", started_ts=t0, job_name=f"j-{rid}", region="r1"), now - 7200),
+                   scan_runs.phase_sql(rid, Phase("index", 1, t0 + 600, None, "running"))]
+                  + ([scan_runs.phase_sql(rid, listing)] if listing else []))
+    jobs = {f"j-{rid}": batch_job_doc("CANCELLED", RUN_EV, CANCEL_EV) for rid in ("stopped", "failed-first", "at-cancel")}
+    said: list[str] = []
+    lost = scan_runs.reconcile(s, PROFILE, now, lambda name, region: jobs.get(name, batch_job_doc("RUNNING", RUN_EV)), log=said.append)
+    assert lost == [
+        scan_runs.Lost("stopped", "2026-10-18T0701", "cancelled", end, "index", "cancelled"),
+        scan_runs.Lost("failed-first", "2026-10-18T0701", "cancelled", end, "index", "failed"),
+        scan_runs.Lost("at-cancel", "2026-10-18T0701", "cancelled", end, "index", "cancelled"),
+    ]
+    assert said == [
+        "scan-run reconcile: nojob (2026-10-18T0701): no Batch job recorded; left running",
+        "scan-run reconcile: stopped (2026-10-18T0701) → cancelled: cancelled",
+        "scan-run reconcile: failed-first (2026-10-18T0701) → failed: cancelled (a step had failed before it)",
+        "scan-run reconcile: at-cancel (2026-10-18T0701) → cancelled: cancelled",
+    ]
+    assert rows(s, "SELECT run_id, status, error, failed_phase, finished_ts FROM scan_runs "
+                   "WHERE run_id IN ('stopped', 'failed-first', 'at-cancel') ORDER BY run_id") == [
+        ("at-cancel", "cancelled", "cancelled", "index", end),
+        ("failed-first", "failed", "cancelled", "index", end),
+        ("stopped", "cancelled", "cancelled", "index", end),
+    ]
+    assert rows(s, "SELECT run_id, phase, status, note, finished_ts FROM scan_run_phases "
+                   "WHERE run_id IN ('stopped', 'failed-first', 'at-cancel') ORDER BY run_id, seq") == [
+        ("at-cancel", "listing", "failed", "failed (exit 143)", end),
+        ("at-cancel", "index", "failed", "cancelled", end),
+        ("failed-first", "listing", "failed", "failed (exit 1)", t0 + 600),
+        ("failed-first", "index", "failed", "cancelled", end),
+        ("stopped", "index", "failed", "cancelled", end),
+    ]
+
+
+def test_batch_cancelled_relabels_only_a_signal_failure_of_that_job():
+    # Batch says the job was cancelled: the head's exit trap had recorded the cancel's SIGTERM as a failure, closing its
+    # running step at its own write; `failed-first`'s listing step had failed on its own before, so its failure stands
+    s = sink()
+    t0 = ts("2026-10-18T07:01:00")
+    for rid, job, region, error in [("trapped", "j1", "r1", "head terminated (signal; session s1)"), ("crashed", "j1", "r1", "exit 1"),
+                                    ("elsewhere", "j1", "r2", "head terminated (signal; session s2)"),
+                                    ("other", "j2", "r1", "head terminated (signal; session s3)"),
+                                    ("failed-first", "j1", "r1", "head terminated (signal; session s4)")]:
+        s.execute([scan_runs.run_sql(Run(rid, "2026-10-18T0701", "scan", "failed", started_ts=t0, finished_ts=t0 + 60, job_name=job,
+                                         region=region, error=error), t0 + 60),
+                   scan_runs.phase_sql(rid, Phase("index", 1, t0 + 30, t0 + 60, "failed", "failed (exit 143)"))])
+    s.execute([scan_runs.phase_sql("failed-first", Phase("listing", 0, t0, t0 + 30, "failed", "failed (exit 1)"))])
+    said: list[str] = []
+    assert scan_runs.batch_cancelled(s, PROFILE, "j1", "r1", t0 + 120, log=said.append) == ["trapped"]
+    assert rows(s, "SELECT run_id, status, error, updated_ts FROM scan_runs ORDER BY run_id") == [
+        ("crashed", "failed", "exit 1", t0 + 60),
+        ("elsewhere", "failed", "head terminated (signal; session s2)", t0 + 60),
+        ("failed-first", "failed", "head terminated (signal; session s4)", t0 + 60),
+        ("other", "failed", "head terminated (signal; session s3)", t0 + 60),
+        ("trapped", "cancelled", "cancelled", t0 + 120),
+    ]
+    assert sorted(said) == [
+        "scan-run: failed-first (2026-10-18T0701) stays failed: its Batch job j1 was cancelled after a step had failed",
+        "scan-run: trapped (2026-10-18T0701) → cancelled: its Batch job j1 was cancelled",
+    ]
+    assert scan_runs.batch_cancelled(s, PROFILE, "j1", "r1", t0 + 180, log=lambda m: None) == []
+
+
 @pytest.mark.parametrize("state", ["QUEUED", "SCHEDULED", "RUNNING", "CANCELLATION_IN_PROGRESS"])
 def test_lost_reason_leaves_a_live_job(state):
     assert scan_runs.lost_reason(batch_job_doc(state, RUN_EV)) is None

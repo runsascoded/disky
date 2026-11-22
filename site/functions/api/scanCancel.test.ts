@@ -1,5 +1,5 @@
 // `POST /api/scan-runs/cancel` ("Cancel" on a running scan, `_lib/scanCancel.ts`): the head first, then every live job
-// labelled with the scan and the deployment, found over all locations; the run marked failed; what refuses it.
+// labelled with the scan and the deployment, found over all locations; the run marked cancelled; what refuses it.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { type Env, gateFor } from '../_lib/auth'
 import { CANCELLED_ERROR, jobsFilter } from '../_lib/scanCancel'
@@ -60,13 +60,13 @@ const row = (raw: Sqlite, id: string) => raw.prepare('SELECT status, error, fini
 const REASON = { reason: `cancelled by ${ADMIN} from /scans` }
 
 describe('POST /api/scan-runs/cancel', () => {
-  it('cancels the head, then every live job of the scan in any region, and marks the run failed', async () => {
+  it('cancels the head, then every live job of the scan in any region, and marks the run cancelled', async () => {
     const w = await world()
     run(w.raw, 'r1')
     expect(await w.post({ run_id: 'r1' })).toEqual([200, {
       head: 'cancelled',
       tasks: { [`${P}/us-east1/jobs/nf-post`]: 'cancelled', [`${P}/us-east1/jobs/iv-merge`]: 'cancelled' },
-      recorded: true,
+      recorded: 'cancelled',
     }])
     const filter = new URLSearchParams({ filter: jobsFilter('demo', '2026-11-19T1241'), pageSize: '200' })
     expect(w.calls).toEqual([
@@ -76,27 +76,46 @@ describe('POST /api/scan-runs/cancel', () => {
       { method: 'POST', url: `https://batch.googleapis.com/v1/${P}/us-east1/jobs/iv-merge:cancel`, body: REASON },
     ])
     expect(jobsFilter('demo', '2026-11-19T1241')).toBe('labels.deployment="demo" AND labels.scan_id="2026-11-19t1241"')
-    expect(row(w.raw, 'r1')).toEqual([{ status: 'failed', error: CANCELLED_ERROR, finished_ts: NOW, updated_ts: NOW }])
+    expect(row(w.raw, 'r1')).toEqual([{ status: 'cancelled', error: CANCELLED_ERROR, finished_ts: NOW, updated_ts: NOW }])
   })
 
   it('reports a head already cancelling, or gone, and still cancels its tasks', async () => {
     const w = await world((u, m) => (m === 'GET' ? Response.json({ jobs: JOBS.slice(1, 2) }) : u.includes('snapshot') ? new Response('busy', { status: 409 }) : Response.json({})))
     run(w.raw, 'r1')
-    expect(await w.post({ run_id: 'r1' })).toEqual([200, { head: 'already', tasks: { [`${P}/us-east1/jobs/nf-post`]: 'cancelled' }, recorded: true }])
+    expect(await w.post({ run_id: 'r1' })).toEqual([200, { head: 'already', tasks: { [`${P}/us-east1/jobs/nf-post`]: 'cancelled' }, recorded: 'cancelled' }])
   })
 
   it('leaves the row running when the head’s cancel fails, still cancelling the tasks', async () => {
     const w = await world((u, m) => (m === 'GET' ? Response.json({ jobs: JOBS.slice(1, 2) }) : u.includes('snapshot') ? new Response('denied', { status: 403 }) : Response.json({})))
     run(w.raw, 'r1')
-    expect(await w.post({ run_id: 'r1' })).toEqual([200, { head: { error: 'Batch 403: denied' }, tasks: { [`${P}/us-east1/jobs/nf-post`]: 'cancelled' }, recorded: false }])
+    expect(await w.post({ run_id: 'r1' })).toEqual([200, { head: { error: 'Batch 403: denied' }, tasks: { [`${P}/us-east1/jobs/nf-post`]: 'cancelled' }, recorded: null }])
     expect(row(w.raw, 'r1')).toEqual([{ status: 'running', error: null, finished_ts: null, updated_ts: NOW - 60 }])
   })
 
   it('records a stopped head even when the listing of its tasks fails, and says so', async () => {
     const w = await world((u, m) => (m === 'GET' ? new Response('boom', { status: 503 }) : Response.json({})))
     run(w.raw, 'r1')
-    expect(await w.post({ run_id: 'r1' })).toEqual([200, { head: 'cancelled', tasks: {}, tasks_error: 'Batch list 503: boom', recorded: true }])
-    expect(row(w.raw, 'r1')).toEqual([{ status: 'failed', error: CANCELLED_ERROR, finished_ts: NOW, updated_ts: NOW }])
+    expect(await w.post({ run_id: 'r1' })).toEqual([200, { head: 'cancelled', tasks: {}, tasks_error: 'Batch list 503: boom', recorded: 'cancelled' }])
+    expect(row(w.raw, 'r1')).toEqual([{ status: 'cancelled', error: CANCELLED_ERROR, finished_ts: NOW, updated_ts: NOW }])
+  })
+
+  it('leaves failed a run a step of which had failed on its own before the cancel; one the cancel stopped is cancelled', async () => {
+    const w = await world()
+    const phase = (id: string, ph: string, seq: number, end: number | null, status: string, note: string | null) =>
+      w.raw.prepare('INSERT INTO scan_run_phases (run_id, phase, seq, started_ts, finished_ts, status, note) VALUES (?, ?, ?, ?, ?, ?, ?)')
+        .run(id, ph, seq, NOW - 3600, end, status, note)
+    run(w.raw, 'early')  // its listing failed 10 minutes before the cancel, its index still running
+    phase('early', 'listing', 0, NOW - 600, 'failed', 'failed (exit 1)')
+    phase('early', 'index', 1, null, 'running', null)
+    run(w.raw, 'stopped')  // its listing wrote its own failure as the cancel stopped it
+    phase('stopped', 'listing', 0, NOW, 'failed', 'failed (exit 143)')
+    const tasks = { [`${P}/us-east1/jobs/nf-post`]: 'cancelled', [`${P}/us-east1/jobs/iv-merge`]: 'cancelled' }
+    expect(await w.post({ run_id: 'early' })).toEqual([200, { head: 'cancelled', tasks, recorded: 'failed' }])
+    expect(await w.post({ run_id: 'stopped' })).toEqual([200, { head: 'cancelled', tasks, recorded: 'cancelled' }])
+    expect([...row(w.raw, 'early'), ...row(w.raw, 'stopped')]).toEqual([
+      { status: 'failed', error: CANCELLED_ERROR, finished_ts: NOW, updated_ts: NOW },
+      { status: 'cancelled', error: CANCELLED_ERROR, finished_ts: NOW, updated_ts: NOW },
+    ])
   })
 
   it('refuses a run that isn’t a running scan, and leaves its row alone', async () => {

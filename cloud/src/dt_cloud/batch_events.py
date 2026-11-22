@@ -8,6 +8,9 @@ service running `serve` (infra `BatchEvents`), and on a terminal state it
 
 1. reconciles the profile store's `running` rows against Batch (`scan_runs.reconcile`, no quiet period: the event says
    the job is over), which records a head that ended without recording its end as failed (`cancelled` when cancelled),
+   and on CANCELLED marks the job's run `cancelled` when its head's exit trap already recorded the cancel's SIGTERM
+   as a failure (`scan_runs.batch_cancelled`); a run one of whose steps had failed on its own before the cancel stays
+   `failed` either way (`scan_runs.failed_before`),
 2. converges the scan thread (`nominal.run`): the reply, the thread head, its pin and the canvas.
 
 Both are idempotent and the thread's writers serialize on its lease, so the delivery after a head that did finish
@@ -39,8 +42,12 @@ from collections.abc import Callable, Mapping
 from copy import deepcopy
 from functools import partial
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import TYPE_CHECKING
 
 from click import group, option
+
+if TYPE_CHECKING:
+    from .scan_runs import Profile, Sink
 
 err = partial(print, file=sys.stderr, flush=True)
 
@@ -180,13 +187,26 @@ def submit(spec: dict, job_id: str, region: str, project: str) -> str:
     return submit_job(spec, job_id, region=region, project=project, exists_ok=True)
 
 
+def scan_ended(attrs: Mapping[str, str], sink: Sink, profile: Profile, lookup: Callable[[str, str], Mapping | None], now: int) -> None:
+    """A terminal change of any job but a compaction's (a scan head's): the profile store's `running` rows reconciled
+    against Batch (`lookup(job, region)`; no quiet period, the event says the job is over), then, on CANCELLED, the job's
+    run its head's exit trap recorded failed by the cancel's SIGTERM marked `cancelled` (`scan_runs.batch_cancelled`).
+    Either leaves `failed` a run one of whose steps had already failed on its own (`scan_runs.failed_before`)."""
+    from .scan_runs import batch_cancelled, reconcile
+
+    for r in reconcile(sink, profile, now, lookup, 0):
+        err(f"batch-events: {attrs.get('JobUID')}: recorded {r.run_id} ({r.scan}) {r.status}: {r.error}")
+    if attrs.get("NewJobState") == "CANCELLED" and (ref := job_ref(attrs)) is not None:
+        batch_cancelled(sink, profile, ref[2], ref[1], now)
+
+
 def converge(env: Mapping[str, str]) -> Act:
-    """The terminal-state action: an interval-store compaction's (`compaction`), else reconcile the profile store's runs,
+    """The terminal-state action: an interval-store compaction's (`compaction`), else a scan head's (`scan_ended`),
     then converge its scan thread (if it has one)."""
 
     def act(attrs: Mapping[str, str]) -> None:
         from .nominal import run
-        from .scan_runs import batch_lookup, load_profile, reconcile, sink_for
+        from .scan_runs import batch_lookup, load_profile, sink_for
 
         if (ref := job_ref(attrs)) is not None:
             did = compaction(attrs, batch_lookup(ref[0], ref[2], ref[1]), submit, partial(post, env))
@@ -197,9 +217,7 @@ def converge(env: Mapping[str, str]) -> Act:
         if not profile.project:
             raise ValueError("the profile names no project")
         sink = sink_for(False, None, None)
-        lost = reconcile(sink, profile, int(time.time()), partial(batch_lookup, profile.project), 0)
-        for r in lost:
-            err(f"batch-events: {attrs.get('JobUID')}: recorded {r.run_id} ({r.scan}) failed: {r.error}")
+        scan_ended(attrs, sink, profile, partial(batch_lookup, profile.project), int(time.time()))
         if profile.nominal:
             err(run(profile.nominal, env, profile.project, execute=True, sink=sink))  # and each reply's link (`thread_url`)
 
