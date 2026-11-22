@@ -34,6 +34,7 @@ import re
 import sys
 import time
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+from multiprocessing import get_context
 from dataclasses import dataclass, field
 from functools import partial
 from math import ceil
@@ -512,7 +513,7 @@ def layout_sim_cmd(bands, cache, cost, files, run_gap, procs, level, out, pages,
     if procs == 1:
         got = [sim.simulate(q) for q in uniq]
     else:
-        with ProcessPoolExecutor(procs, initializer=_init, initargs=(sim,)) as ex:
+        with ProcessPoolExecutor(procs, mp_context=get_context("spawn"), initializer=_init, initargs=(sim,)) as ex:
             got = list(ex.map(_simulate, uniq, chunksize=4))
     err(f"simulated {len(uniq)} in {time.monotonic() - t0:.0f}s")
     by_key = {(r["path"], r["from"], r["to"]): r for r in got}
