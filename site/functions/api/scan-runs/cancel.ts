@@ -35,11 +35,10 @@ export const onRequestPost = async (ctx: Ctx): Promise<Response> => {
   if (!run) return json({ error: `no run ${runId}` }, 404)
   const why = refusal(run)
   if (why) return json({ error: why }, 409, NO_STORE)
-  const who = id.email ?? id.name ?? 'admin'
   try {
     const out = await cancelScan({
       db: env.DB!, fetch: (u, i) => fetch(u, i), token: await gcpToken(env.GCP_SA_KEY!), project: env.GCP_PROJECT!,
-      deployment: deployment!, run, who, now: () => Math.floor(Date.now() / 1000),
+      deployment: deployment!, run, now: () => Math.floor(Date.now() / 1000),
     })
     return json(out, 200, NO_STORE)
   } catch (e) {

@@ -2,7 +2,7 @@
 // labelled with the scan and the deployment, found over all locations; the run marked cancelled; what refuses it.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { type Env, gateFor } from '../_lib/auth'
-import { CANCELLED_ERROR, jobsFilter } from '../_lib/scanCancel'
+import { CANCELLED_ERROR, jobsFilter, LIST_PAGE_SIZE } from '../_lib/scanCancel'
 import { type Sqlite, sqliteD1, withAdminEmails } from '../_lib/testD1'
 import { onRequestPost as cancel } from './scan-runs/cancel'
 
@@ -57,7 +57,7 @@ const run = (raw: Sqlite, id: string, { kind = 'scan', status = 'running', paren
 
 const row = (raw: Sqlite, id: string) => raw.prepare('SELECT status, error, finished_ts, updated_ts FROM scan_runs WHERE run_id = ?').all(id)
 
-const REASON = { reason: `cancelled by ${ADMIN} from /scans` }
+const NO_BODY = {}
 
 describe('POST /api/scan-runs/cancel', () => {
   it('cancels the head, then every live job of the scan in any region, and marks the run cancelled', async () => {
@@ -68,12 +68,12 @@ describe('POST /api/scan-runs/cancel', () => {
       tasks: { [`${P}/us-east1/jobs/nf-post`]: 'cancelled', [`${P}/us-east1/jobs/iv-merge`]: 'cancelled' },
       recorded: 'cancelled',
     }])
-    const filter = new URLSearchParams({ filter: jobsFilter('demo', '2026-11-19T1241'), pageSize: '200' })
+    const filter = new URLSearchParams({ filter: jobsFilter('demo', '2026-11-19T1241'), pageSize: String(LIST_PAGE_SIZE) })
     expect(w.calls).toEqual([
-      { method: 'POST', url: `https://batch.googleapis.com/v1/${HEAD}:cancel`, body: REASON },
+      { method: 'POST', url: `https://batch.googleapis.com/v1/${HEAD}:cancel`, body: NO_BODY },
       { method: 'GET', url: `${LIST}?${filter}`, body: null },
-      { method: 'POST', url: `https://batch.googleapis.com/v1/${P}/us-east1/jobs/nf-post:cancel`, body: REASON },
-      { method: 'POST', url: `https://batch.googleapis.com/v1/${P}/us-east1/jobs/iv-merge:cancel`, body: REASON },
+      { method: 'POST', url: `https://batch.googleapis.com/v1/${P}/us-east1/jobs/nf-post:cancel`, body: NO_BODY },
+      { method: 'POST', url: `https://batch.googleapis.com/v1/${P}/us-east1/jobs/iv-merge:cancel`, body: NO_BODY },
     ])
     expect(jobsFilter('demo', '2026-11-19T1241')).toBe('labels.deployment="demo" AND labels.scan_id="2026-11-19t1241"')
     expect(row(w.raw, 'r1')).toEqual([{ status: 'cancelled', error: CANCELLED_ERROR, finished_ts: NOW, updated_ts: NOW }])
