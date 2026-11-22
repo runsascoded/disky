@@ -467,7 +467,7 @@ def run_post(cfg: Config, row: dict) -> tuple[str, dict[str, str] | None]:
     return (running if live(row) else reply)(cfg, row), None
 
 
-def running_now(cfg: Config, live_rows: list[dict]) -> str:
+def running_now(cfg: Config, live_rows: list[dict] | None) -> str:
     """A thread head's line for the runs going now (oldest first), or nothing."""
     if not live_rows:
         return ''
@@ -640,8 +640,10 @@ def missing(good: list[dict], posted: dict) -> list[dict]:
 
 
 class Transport(Protocol):
-    #: The workspace's custom emoji names (None: unknown), for `faces`
-    have: set[str] | None
+    @property
+    def have(self) -> set[str] | None:
+        """The workspace's custom emoji names (None: unknown), for `faces`; read-only (`Slack` reads them once)."""
+        ...
 
     def messages(self, parent: str) -> list[dict]: ...
     def owns(self, message: dict) -> bool: ...
