@@ -1086,6 +1086,23 @@ def test_a_quiet_threads_runs_each_link_its_rolling_reply():
     assert writes == [[('r1', 'https://slack.test/p2.0'), ('r2', 'https://slack.test/p2.0')]]
 
 
+@pytest.mark.parametrize('reform', [False, True])
+def test_a_thread_from_before_quiet_mode_keeps_its_replies_unless_reformed(reform):
+    """A clean thread opened with a reply per run gains the rolling reply once quiet; its runs keep their own replies,
+    unless `reform` (Ryan, 2026-11-22): then each run links the rolling reply, and the old replies are deleted after that
+    is saved."""
+    w = Writer(replace(CFG, quiet=False))
+    w.run(history(2))
+    assert w.saved['posted'] == {'r1': '2.0', 'r2': '3.0'}
+    w.cfg, w.slack.calls = replace(CFG, quiet=True), []
+    N.converge(w.cfg, history(2), deepcopy(w.saved), w.slack, w.save, lambda: None, now=lambda: 1000, reform=reform)
+    assert [(c[0], c[1]) for c in w.slack.calls if c[0] in ('post', 'delete')] == (
+        [('post', '4.0'), ('delete', '2.0'), ('delete', '3.0')] if reform else [('post', '4.0')]
+    )
+    assert w.saved['posted'] == ({'r1': '4.0', 'r2': '4.0'} if reform else {'r1': '2.0', 'r2': '3.0'})
+    assert sorted(w.slack.messages_by_id) == (['1.0', '4.0'] if reform else ['1.0', '2.0', '3.0', '4.0'])
+
+
 def test_a_quiet_preview_renders_the_head_and_the_rolling_reply(tmp_path, monkeypatch):
     import json
 

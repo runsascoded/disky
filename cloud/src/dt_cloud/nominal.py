@@ -902,8 +902,11 @@ def converge(
     check: Callable[[], None],
     now: Callable[[], float] = time.time,
     stores: str = '',
+    reform: bool = False,
 ) -> dict:
-    """Caller holds the generation lease. Persist every send intent and returned/recovered message ID."""
+    """Caller holds the generation lease. Persist every send intent and returned/recovered message ID. `reform`: a quiet
+    clean thread opened before quiet mode gives up its per-run replies: each run's link moves to the rolling reply
+    (persisted first), then those replies are deleted."""
     if state.get('namespace') != cfg.namespace:
         raise ValueError('nominal: state belongs to another site/store/channel')
 
@@ -1070,8 +1073,15 @@ def converge(
             before = dict(posted)
             for row in reversed(good[:10]):
                 posted.setdefault(row['run']['run_id'], state['rolling'])
+            stale = sorted({ts for ts in posted.values() if ts not in (state['rolling'], state['parent'])}) if reform else []
+            for rid, ts in posted.items():
+                if ts in stale:
+                    posted[rid] = state['rolling']
             if posted != before:
                 persist()
+            for ts in stale:
+                check()
+                slack.delete(ts)
         # In a failure thread a run's reply takes the lines its steps' top-level alerts posted (`fold`)
         folding = head != 'clean'
         for rid in sorted(here, key=lambda rid: ended[rid]['run']['started_ts']):
@@ -1159,6 +1169,7 @@ def run(
     adopt_check: bool = False,
     final: list[dict] | None = None,
     sink: Sink | None = None,
+    reform: bool = False,
 ) -> str:
     """Render the thread (`execute` off), or converge it in Slack; with `sink`, also record each run's reply link there
     (`link_threads`; best effort: a database without the column, migration `scan-run-thread-url`, only logs)."""
@@ -1250,7 +1261,7 @@ def run(
         check()
         save(state)
         series = read_series()
-        state = converge(cfg, rows, state, slack, save, check, stores=stores_text(cfg, series))
+        state = converge(cfg, rows, state, slack, save, check, stores=stores_text(cfg, series), reform=reform)
         if cfg.pin:
             check()
             pin_head(state, slack, save)
