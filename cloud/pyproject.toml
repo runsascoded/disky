@@ -13,10 +13,10 @@ dependencies = [
     "pyarrow>=16.0",
     "pyyaml>=6.0",
     # `dt-cloud digest` drives Slack via thrds; pinned to the `py` branch (has
-    # editable image blocks, per-message sender, `reply_broadcast` for the quota alert, attached-file plots: `upload`, `replace_files`).
+    # editable image blocks, per-message sender, `reply_broadcast` for the quota alert, attached-file plots: `upload`, `replace_files`; bulk rewrite: `thrds.rewrite`, the digest re-apply's `--plan`).
     # GitHub tarball (not git+…) so `pip install ./marin` works in the git-less
     # python:slim image. Bump the SHA to update.
-    "thrds @ https://github.com/Open-Athena/thrds/archive/c0bccc5363bbfb2c7d0a23e96d6332d7d6927d82.tar.gz",
+    "thrds @ https://github.com/Open-Athena/thrds/archive/d15a889372b081248212596b1af0d37ecfc0f28a.tar.gz",
     # The shared engine: `dt_cloud` builds on `disk_tree` (listing normalization,
     # aggregation, backends). Workspace member of the parent repo (one lockfile;
     # specs/done/union-of-roots.md). The `gcs` + `s3` extras are what the overlay's
