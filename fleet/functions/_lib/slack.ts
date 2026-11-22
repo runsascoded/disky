@@ -70,11 +70,19 @@ export function status(d: FleetDeployment, emoji: Emoji = DEFAULT_EMOJI): { emoj
 export const STRIP_RUNS = 10
 
 /** The newest `STRIP_RUNS` runs' emoji, newest first (the newest is the deployment's state, so the line shows it once);
- *  its newest run alone when it lists none, else its state's emoji. Not linked: Slack's phone apps print a link whose
- *  label is an emoji as its bare URL, then the emoji (Ryan, 2026-11-20). Each run is a link on `/fleet`. */
-const strip = (d: FleetDeployment, emoji: Emoji): string => {
+ *  its newest run alone when it lists none, else its state's emoji. A scheduled run (or one with no recorded trigger) is
+ *  its status alone; a manual run is a delimited pair, its status then who started it in parentheses (`starter`), set
+ *  off by spaces: `⏳⚠️⚠️ (:ryan:) ✅✅` (Ryan, 2026-11-22: the exception marked, each face plainly its run's). Not
+ *  linked: Slack's phone apps print a link whose label is an emoji as its bare URL, then the emoji (Ryan, 2026-11-20).
+ *  Each run is a link on `/fleet`. */
+const strip = (d: FleetDeployment, emoji: Emoji, have: Have): string => {
   const runs = d.runs.length ? d.runs.slice(0, STRIP_RUNS) : d.last ? [d.last] : []
-  return runs.length ? runs.map(r => runStatus(r, emoji).emoji).join('') : status(d, emoji).emoji
+  if (!runs.length) return status(d, emoji).emoji
+  const pieces = runs.map(r => {
+    const s = runStatus(r, emoji).emoji
+    return r.trigger === 'manual' ? { text: `${s} (${starter(r, have)})`, pair: true } : { text: s, pair: false }
+  })
+  return pieces.map((p, i) => (i && (p.pair || pieces[i - 1].pair) ? ' ' : '') + p.text).join('')
 }
 
 /** A signed byte change: `+1.2 GB`, `−300 MB`. */
@@ -83,14 +91,13 @@ const delta = (b: number): string => `${b < 0 ? '−' : '+'}${fmtSI(Math.abs(b))
 /** Seconds as a short age: `40m`, `9h`, `3d`. */
 export const fmtAge = (s: number): string => (s < 3600 ? `${Math.round(s / 60)}m` : s < 2 * 86400 ? `${Math.round(s / 3600)}h` : `${Math.round(s / 86400)}d`)
 
-/** What started a run, as the scan-health thread shows it: a manual run's starter's own emoji (`trigger_emoji`) where the
- *  workspace has it (`have`), else 👤; nothing for a deployment that doesn't record it. */
-const TRIGGER: Record<string, string> = { schedule: code('trigger.schedule'), manual: code('trigger.manual') }
-const trigger = (r: FleetRun | null, have: Have): string =>
-  (!r?.trigger ? '' : (r.trigger === 'manual' && r.trigger_emoji && renders(r.trigger_emoji, have) && r.trigger_emoji) || TRIGGER[r.trigger])
+/** Who started a manual run, as the scan-health thread shows it: their own emoji (`trigger_emoji`) where the workspace
+ *  has it (`have`), else 👤. */
+const starter = (r: FleetRun, have: Have): string =>
+  (r.trigger_emoji && renders(r.trigger_emoji, have) && r.trigger_emoji) || code('trigger.manual')
 
-/** One deployment's line: its name (a link), then its icons together (what started its newest run, then its run strip,
- *  newest first: Ryan, 2026-11-21), then its newest run and the rest. `have`: the workspace's custom emoji (null: unknown). */
+/** One deployment's line: its name (a link), then its run strip (`strip`, newest first), then its newest run and the
+ *  rest. `have`: the workspace's custom emoji (null: unknown). */
 export function line(d: FleetDeployment, emoji: Emoji = DEFAULT_EMOJI, have: Have = null): string {
   const { word } = status(d, emoji)
   const parts: string[] = []
@@ -109,7 +116,7 @@ export function line(d: FleetDeployment, emoji: Emoji = DEFAULT_EMOJI, have: Hav
   const thread = [d.last, ...d.runs].find(x => x?.thread_url)?.thread_url
   if (thread) parts.push(`<${thread}|thread>`)
   if (d.channel) parts.push(`<#${d.channel}>`)
-  return `*<${d.url}|${d.name}>*  ${trigger(r, have)}${strip(d, emoji)}  ${parts.join(' · ')}`
+  return `*<${d.url}|${d.name}>*  ${strip(d, emoji, have)}  ${parts.join(' · ')}`
 }
 
 const stamp = (t: number) => `${new Date(t * 1000).toISOString().slice(0, 16).replace('T', ' ')} UTC`

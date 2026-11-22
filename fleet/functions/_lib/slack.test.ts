@@ -37,16 +37,16 @@ const doc: FleetDoc = {
 }
 
 describe('the fleet\'s Slack post', () => {
-  it('a line per deployment: its name, then its icons together (what started its newest run, then its newest 10 runs as emoji, newest first, not linked: a phone prints an emoji-labelled link as its URL; its state alone when it lists no runs), its `/scans` and its newest reported run\'s thread, the signed card as an image block, and when it was read with a link to the card', () => {
+  it('a line per deployment: its name, then its newest 10 runs as emoji, newest first (a manual one `status (starter)`, set off by spaces; not linked: a phone prints an emoji-labelled link as its URL; its state alone when it lists no runs), its `/scans` and its newest reported run\'s thread, the signed card as an image block, and when it was read with a link to the card', () => {
     expect(fleetMessage(doc, 'https://fleet.test/fleet')).toEqual({
       text: 'disky fleet: a 1 step issue open (dups), b unreachable (HTTP 503), c failed at index, d ok, e running, f no scans',
       blocks: [
         { type: 'section', text: { type: 'mrkdwn', text: '*disky fleet* · <https://fleet.test/fleet|details>' } },
-        { type: 'section', text: { type: 'mrkdwn', text: '*<https://a.test|a>*  :bust_in_silhouette::warning:  <https://a.test/scans/r|2026-11-07> · 1 step issue open (dups) · 2.1h · $0.50 · <https://a.test/meta|/meta> 34.4 GB (+4.20 GB 7d) · <https://a.test/scans|scans> · <https://slack.test/archives/CA/p1|thread>' } },
+        { type: 'section', text: { type: 'mrkdwn', text: '*<https://a.test|a>*  :warning: (:bust_in_silhouette:)  <https://a.test/scans/r|2026-11-07> · 1 step issue open (dups) · 2.1h · $0.50 · <https://a.test/meta|/meta> 34.4 GB (+4.20 GB 7d) · <https://a.test/scans|scans> · <https://slack.test/archives/CA/p1|thread>' } },
         { type: 'section', text: { type: 'mrkdwn', text: '*<https://b.test|b>*  :grey_question:  unreachable (HTTP 503) · <https://b.test/meta|/meta> n/a · <https://b.test/scans|scans>' } },
         { type: 'section', text: { type: 'mrkdwn', text: '*<https://c.test|c>*  :x:  <https://c.test/scans/r|2026-11-06> · failed at index · 1.0h · cost n/a · <https://c.test/meta|/meta> 884 MB · newest scan 2d old · <https://c.test/scans|scans>' } },
-        { type: 'section', text: { type: 'mrkdwn', text: '*<https://d.test|d>*  :alarm_clock::white_check_mark::warning::x::white_check_mark::white_check_mark::white_check_mark::white_check_mark::white_check_mark::white_check_mark::white_check_mark:  <https://d.test/scans/r|2026-11-07> · ok · 30m · $0.13 · <https://d.test/meta|/meta> 1.50 TB (−100 GB 7d) · <https://d.test/scans|scans> · <https://slack.test/archives/CD/p2|thread> · <#C0CDADMIN>' } },
-        { type: 'section', text: { type: 'mrkdwn', text: '*<https://e.test|e>*  :alarm_clock::hourglass_flowing_sand:  <https://e.test/scans/r|2026-11-07> · running · <https://e.test/meta|/meta> n/a · <https://e.test/scans|scans>' } },
+        { type: 'section', text: { type: 'mrkdwn', text: '*<https://d.test|d>*  :white_check_mark::warning::x::white_check_mark::white_check_mark::white_check_mark::white_check_mark::white_check_mark::white_check_mark::white_check_mark:  <https://d.test/scans/r|2026-11-07> · ok · 30m · $0.13 · <https://d.test/meta|/meta> 1.50 TB (−100 GB 7d) · <https://d.test/scans|scans> · <https://slack.test/archives/CD/p2|thread> · <#C0CDADMIN>' } },
+        { type: 'section', text: { type: 'mrkdwn', text: '*<https://e.test|e>*  :hourglass_flowing_sand:  <https://e.test/scans/r|2026-11-07> · running · <https://e.test/meta|/meta> n/a · <https://e.test/scans|scans>' } },
         { type: 'section', text: { type: 'mrkdwn', text: '*<https://f.test|f>*  :white_circle:  no scans · <https://f.test/meta|/meta> n/a · <https://f.test/scans|scans>' } },
         { type: 'context', elements: [{ type: 'mrkdwn', text: 'read 2026-11-07 14:00 UTC · updated in place hourly' }] },
       ],
@@ -55,14 +55,19 @@ describe('the fleet\'s Slack post', () => {
 })
 
 describe('a manual run\'s starter', () => {
-  it('shows as their own Slack emoji where the deployment answers one, else 👤', () => {
+  it('shows after its run\'s status, in parentheses, as their own Slack emoji where the deployment answers one, else 👤', () => {
     const lines = (ds: FleetDeployment[]) => (fleetMessage({ ...doc, deployments: ds }, 'https://fleet.test/fleet').blocks as { type: string; text?: { text: string } }[])
       .slice(1, -1).map(b => b.text!.text.split('  ').slice(0, 2).join('  '))
     const by = run({ trigger: 'manual', trigger_emoji: ':ryan:' })
     const anon = run({ trigger: 'manual' })
-    expect(lines([dep('g', { last: by, runs: [by, run({ run_id: 'r-2', status: 'failed', failed_at: 'index' })] }), dep('h', { last: anon, runs: [anon] })])).toEqual([
-      '*<https://g.test|g>*  :ryan::white_check_mark::x:',
-      '*<https://h.test|h>*  :bust_in_silhouette::white_check_mark:',
+    const failed = run({ run_id: 'r-2', status: 'failed', failed_at: 'index' })
+    expect(lines([
+      dep('g', { last: by, runs: [by, failed] }), dep('h', { last: anon, runs: [anon] }),
+      dep('i', { last: failed, runs: [failed, failed, by, anon, failed] }),
+    ])).toEqual([
+      '*<https://g.test|g>*  :white_check_mark: (:ryan:) :x:',
+      '*<https://h.test|h>*  :white_check_mark: (:bust_in_silhouette:)',
+      '*<https://i.test|i>*  :x::x: :white_check_mark: (:ryan:) :white_check_mark: (:bust_in_silhouette:) :x:',
     ])
   })
 
@@ -71,8 +76,8 @@ describe('a manual run\'s starter', () => {
     const lines = (have: Set<string>) => (fleetMessage({ ...doc, deployments: [dep('g', { last: by, runs: [by] })] }, 'https://fleet.test/fleet', DEFAULT_EMOJI, have).blocks as { type: string; text?: { text: string } }[])
       .slice(1, -1).map(b => b.text!.text.split('  ').slice(0, 2).join('  '))
     expect([lines(new Set(['ryan'])), lines(new Set(['someone-else']))]).toEqual([
-      ['*<https://g.test|g>*  :ryan::white_check_mark:'],
-      ['*<https://g.test|g>*  :bust_in_silhouette::white_check_mark:'],
+      ['*<https://g.test|g>*  :white_check_mark: (:ryan:)'],
+      ['*<https://g.test|g>*  :white_check_mark: (:bust_in_silhouette:)'],
     ])
   })
 })
@@ -85,7 +90,7 @@ describe('a cancelled run', () => {
 
   it('is its own state, 🚫 not ❌: the line says cancelled, not failed', () => {
     expect([lines([k]), fleetMessage({ ...doc, deployments: [k] }, 'https://fleet.test/fleet').text]).toEqual([
-      ['*<https://k.test|k>*  :alarm_clock::no_entry_sign::x:  <https://k.test/scans/r|2026-11-07> · cancelled · 15m · $0.05 · <https://k.test/meta|/meta> n/a · <https://k.test/scans|scans>'],
+      ['*<https://k.test|k>*  :no_entry_sign::x:  <https://k.test/scans/r|2026-11-07> · cancelled · 15m · $0.05 · <https://k.test/meta|/meta> n/a · <https://k.test/scans|scans>'],
       'disky fleet: k cancelled',
     ])
   })
@@ -101,7 +106,7 @@ describe('a cancelled run', () => {
     ]).toEqual([
       DEFAULT_EMOJI, DEFAULT_EMOJI,
       { ...DEFAULT_EMOJI, cancelled: ':stop_sign:', issues: ':large_orange_diamond:' },
-      ['*<https://k.test|k>*  :alarm_clock::stop_sign::x:', '*<https://w.test|w>*  :alarm_clock::large_orange_diamond:'],
+      ['*<https://k.test|k>*  :stop_sign::x:', '*<https://w.test|w>*  :large_orange_diamond:'],
       [
         'FLEET_EMOJI: not a JSON object',
         'FLEET_EMOJI: unknown key "cancel" (keys: ok, warn, failed, running, cancelled)',
