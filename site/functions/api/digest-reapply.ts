@@ -31,9 +31,11 @@ const CHANNEL_RE = /^[CDG][A-Z0-9]{8,12}$/
 /** A run's job id, `<template>-digest-<stamp>z`: runs from before the templates' rename carry their old name (`cw-…`). */
 export const JOB_RE = /^[a-z0-9-]+-digest-\d{8}-\d{6}z$/
 const NAME_RE = /^[\w./{}$-]+$/
+/** A `root` that names its store: used as given (an R2 deployment's thread state and snapshots aren't on the data bucket). */
+const ROOT_URL_RE = /^(gs|r2|s3):\/\/[\w./{}$-]+$/
 
-/** `DIGEST_REAPPLY`: the digest CLI's `template` (an old name, `cw` / `gcs`, read as its name), `config` and `root` (under
- *  the data bucket), the `env_script` the task sources for the scan steps' environment, the R2 bucket its preview bundle
+/** `DIGEST_REAPPLY`: the digest CLI's `template` (an old name, `cw` / `gcs`, read as its name), `config` and `root` (a
+ *  `gs://` / `r2://` / `s3://` URL as given, else a path under the data bucket), the `env_script` the task sources for the scan steps' environment, the R2 bucket its preview bundle
  *  goes to, and env var -> Secret Manager name. */
 export interface ReapplyConfig { template: string; config: string; root: string; env_script: string; r2_bucket: string; secrets: Record<string, string> }
 
@@ -48,7 +50,7 @@ export function reapplyConfig(raw: string | undefined): ReapplyConfig | string {
   }
   for (const k of ['template', 'config', 'root', 'env_script', 'r2_bucket'] as const) {
     const v = c[k]
-    if (typeof v !== 'string' || !NAME_RE.test(v)) return `DIGEST_REAPPLY.${k}`
+    if (typeof v !== 'string' || !(NAME_RE.test(v) || (k === 'root' && ROOT_URL_RE.test(v)))) return `DIGEST_REAPPLY.${k}`
   }
   const template = canonicalTemplate(c.template)
   if (!template) return 'DIGEST_REAPPLY.template'
@@ -110,8 +112,8 @@ export function reapplyArgs(r: ReapplyReq, plan?: string): string[] {
 
 const sq = (s: string): string => `'${s.replace(/'/g, `'\\''`)}'`
 
-/** The Batch task's script: the scan steps' environment (`env_script`), then the digest CLI, its output teed to the run's
- *  file on the data bucket's mount. */
+/** The Batch task's script: the scan steps' environment (`env_script`), then the digest CLI over `root` (a URL as given,
+ *  else under the data bucket), its output teed to the run's file on the data bucket's mount. */
 export const reapplyScript = (args: string[], outMnt: string, c: ReapplyConfig): string => [
   'set -euo pipefail',
   'cd "${APP_DIR:-/app}"',
@@ -119,7 +121,7 @@ export const reapplyScript = (args: string[], outMnt: string, c: ReapplyConfig):
   '{ set +x; } 2>/dev/null',
   `OUT=${sq(outMnt)}`,
   'mkdir -p "$(dirname "$OUT")"',
-  `dt-cloud digest -T ${sq(c.template)} -C ${sq(c.config)} -r "gs://$DATA_BUCKET/"${sq(c.root)} ${args.map(sq).join(' ')} 2>&1 | tee "$OUT"`,
+  `dt-cloud digest -T ${sq(c.template)} -C ${sq(c.config)} -r ${ROOT_URL_RE.test(c.root) ? '' : '"gs://$DATA_BUCKET/"'}${sq(c.root)} ${args.map(sq).join(' ')} 2>&1 | tee "$OUT"`,
 ].join('\n')
 
 type Env = BatchEnv & { DB?: D1Database; JOB_SA?: string; DIGEST_CHANNEL?: string; DIGEST_REAPPLY?: string }

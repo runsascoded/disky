@@ -86,4 +86,25 @@ describe('/api/digest-reapply', () => {
       `dt-cloud digest -T 'quota' -C 'job/digest.yml' -r "gs://$DATA_BUCKET/"'snapshots/demo' '-m' '2026-11' '-c' 'C1' '-o' '-p' '' 2>&1 | tee "$OUT"`,
     ])
   })
+
+  it('reads a root URL as given: the digest state on R2, the run’s file still on the data bucket', () => {
+    const r2: ReapplyConfig = { ...CONFIG, root: 'r2://demo-index/snapshots/demo' }
+    expect(reapplyConfig(JSON.stringify(r2))).toEqual(r2)
+    expect(reapplyScript(['-m', '2026-11', '-c', 'C1', '-o', '-n'], '/gcs/data/digest/reapply/demo-digest-20261103-120000z.txt', r2).split('\n')).toEqual([
+      'set -euo pipefail',
+      'cd "${APP_DIR:-/app}"',
+      ". 'job/demo-env.sh'",
+      '{ set +x; } 2>/dev/null',
+      "OUT='/gcs/data/digest/reapply/demo-digest-20261103-120000z.txt'",
+      'mkdir -p "$(dirname "$OUT")"',
+      `dt-cloud digest -T 'quota' -C 'job/digest.yml' -r 'r2://demo-index/snapshots/demo' '-m' '2026-11' '-c' 'C1' '-o' '-n' 2>&1 | tee "$OUT"`,
+    ])
+  })
+
+  it('takes only gs://, r2:// and s3:// as a root URL', () => {
+    expect(['https://x/snapshots', 'file:///snapshots', 'r2://demo-index/a b', "r2://demo-index/'x"].map(root => reapplyConfig(JSON.stringify({ ...CONFIG, root })))).toEqual([
+      'DIGEST_REAPPLY.root', 'DIGEST_REAPPLY.root', 'DIGEST_REAPPLY.root', 'DIGEST_REAPPLY.root',
+    ])
+    expect(['gs://b/s', 's3://b/s'].map(root => (reapplyConfig(JSON.stringify({ ...CONFIG, root })) as ReapplyConfig).root)).toEqual(['gs://b/s', 's3://b/s'])
+  })
 })
