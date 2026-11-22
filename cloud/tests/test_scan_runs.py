@@ -282,9 +282,11 @@ def test_record_trigger():
     assert sql.split(" VALUES ")[0] == ("INSERT INTO scan_runs (run_id, scan, kind, status, source, store, parent, failed_phase, "
                                         "error, started_ts, finished_ts, job_name, region, machine, spot, tasks, image, cost_usd, "
                                         "gen, updated_ts)")
-    assert sql.endswith(", gen = COALESCE(excluded.gen, scan_runs.gen)")
+    assert sql.endswith(", gen = COALESCE(excluded.gen, scan_runs.gen), error = CASE WHEN scan_runs.status = 'cancelled' "
+                        "THEN scan_runs.error ELSE COALESCE(excluded.error, scan_runs.error) END")
     assert scan_runs.run_sql(scan_runs.Run("uid-3", "2026-10-08", "scan", "running", trigger="manual"), 500).endswith(
-        ", gen = COALESCE(excluded.gen, scan_runs.gen), trigger = COALESCE(excluded.trigger, scan_runs.trigger)")
+        ", gen = COALESCE(excluded.gen, scan_runs.gen), trigger = COALESCE(excluded.trigger, scan_runs.trigger), error = CASE "
+        "WHEN scan_runs.status = 'cancelled' THEN scan_runs.error ELSE COALESCE(excluded.error, scan_runs.error) END")
 
 
 def test_trigger_of():
@@ -369,15 +371,17 @@ def test_record_dry_run_prints_the_sql(capsys):
         "INSERT INTO scan_runs (run_id, scan, kind, status, source, store, parent, failed_phase, error, started_ts, "
         "finished_ts, job_name, region, machine, spot, tasks, image, cost_usd, gen, updated_ts) VALUES ('uid-4', "
         "'2026-10-08', 'scan', 'running', 'job', 'primary', NULL, NULL, NULL, 7, NULL, NULL, NULL, NULL, NULL, NULL, "
-        "NULL, NULL, NULL, 7) ON CONFLICT(run_id) DO UPDATE SET scan = excluded.scan, kind = excluded.kind, status = "
-        "excluded.status, store = excluded.store, updated_ts = excluded.updated_ts, parent = COALESCE(excluded.parent, "
-        "scan_runs.parent), failed_phase = COALESCE(excluded.failed_phase, scan_runs.failed_phase), error = "
-        "COALESCE(excluded.error, scan_runs.error), started_ts = COALESCE(excluded.started_ts, scan_runs.started_ts), "
-        "finished_ts = COALESCE(excluded.finished_ts, scan_runs.finished_ts), job_name = COALESCE(excluded.job_name, "
-        "scan_runs.job_name), region = COALESCE(excluded.region, scan_runs.region), machine = "
-        "COALESCE(excluded.machine, scan_runs.machine), spot = COALESCE(excluded.spot, scan_runs.spot), tasks = "
-        "COALESCE(excluded.tasks, scan_runs.tasks), image = COALESCE(excluded.image, scan_runs.image), cost_usd = "
-        "COALESCE(excluded.cost_usd, scan_runs.cost_usd), gen = COALESCE(excluded.gen, scan_runs.gen);",
+        "NULL, NULL, NULL, 7) ON CONFLICT(run_id) DO UPDATE SET scan = excluded.scan, kind = excluded.kind, store = "
+        "excluded.store, updated_ts = excluded.updated_ts, status = CASE WHEN scan_runs.status = 'cancelled' THEN "
+        "'cancelled' ELSE excluded.status END, parent = COALESCE(excluded.parent, scan_runs.parent), failed_phase = "
+        "COALESCE(excluded.failed_phase, scan_runs.failed_phase), started_ts = COALESCE(excluded.started_ts, "
+        "scan_runs.started_ts), finished_ts = COALESCE(excluded.finished_ts, scan_runs.finished_ts), job_name = "
+        "COALESCE(excluded.job_name, scan_runs.job_name), region = COALESCE(excluded.region, scan_runs.region), "
+        "machine = COALESCE(excluded.machine, scan_runs.machine), spot = COALESCE(excluded.spot, scan_runs.spot), "
+        "tasks = COALESCE(excluded.tasks, scan_runs.tasks), image = COALESCE(excluded.image, scan_runs.image), "
+        "cost_usd = COALESCE(excluded.cost_usd, scan_runs.cost_usd), gen = COALESCE(excluded.gen, scan_runs.gen), "
+        "error = CASE WHEN scan_runs.status = 'cancelled' THEN scan_runs.error ELSE COALESCE(excluded.error, "
+        "scan_runs.error) END;",
     ]
 
 
