@@ -18,6 +18,13 @@ export interface QuotaScan {
   classes: Record<string, number> | null
 }
 
+/** A pool's label on the plot: a zone's bare name (`08a`, not the text line's `08a zone`: the card has no per-bucket lines
+ *  for it to be told from), unless another pool already goes by it. */
+export function plotName(pl: Pool, all: Pool[], cfg: DigestCfg): string {
+  const zone = pl.buckets.length > 1 ? cfg.buckets[pl.buckets[0]].zone : null
+  return zone && !all.some(o => o !== pl && o.name === zone) ? zone : pl.name
+}
+
 /** A month's scans: the OP window's before the lead-in day (`pre`), the lead-in day's (`lead`), the month's (`rows`). */
 export interface QuotaRows { template: 'quota'; closed: boolean; pre: QuotaScan[]; lead: QuotaScan[]; rows: QuotaScan[] }
 
@@ -243,8 +250,9 @@ export function imageRequest(m: QuotaRows, month: number, cfg: DigestCfg, p: Dig
     // every pool's share of its quota over the same scans (a scan without the pool's buckets: no point)
     body.kind = 'pools'
     body.alert_pct = p.alertAt
-    body.pools = pools(cfg).map(pl => ({
-      name: pl.name,
+    const all = pools(cfg)
+    body.pools = all.map(pl => ({
+      name: plotName(pl, all, cfg),
       quota: pl.quota.bytes,
       points: scans.flatMap(r => {
         const v = used(pl, r, cfg)

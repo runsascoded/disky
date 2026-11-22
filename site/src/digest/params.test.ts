@@ -36,6 +36,16 @@ describe('digest params', () => {
   it("the per-pool layout's map is every bucket's, not the primary's", async () => {
     expect((await at({ diff: 'mtd', layout: 'pools' })).image.diff).toEqual({ from: '2026-08-31T0800', to: '2026-09-01T0800', path: '', title: 'What changed — 8/31 → 9/1' })
   })
+  it("the pools plot names a zone by its bare name, unless a bucket's pool goes by it", async () => {
+    const f = await load('cw-first')
+    const q = { ...DEFAULT_PARAMS, plot: 'pools' as const }
+    const quotas = f.cfg.buckets['main-data'].quotas
+    const names = (zone: string) => (imageRequest(f.rows, f.month, {
+      ...f.cfg, buckets: { ...f.cfg.buckets, 'main-data': { ...f.cfg.buckets['main-data'], zone }, 'x-data': { label: 'x', path: null, zone, quotas } },
+    }, q).pools as { name: string }[]).map(p => p.name).sort()
+    // the fixture's scans have no `hot-data` sizes, so its pool draws nothing, but it still claims its name
+    expect([names('08a'), names('hot')]).toEqual([['08a'], ['hot zone']])
+  })
   it("today's position: sent only when not the card's default", async () => {
     expect([(await at({})).image.today_at, (await at({ todayAt: [0.8, 1] })).image.today_at]).toEqual([undefined, [0.8, 1]])
   })
