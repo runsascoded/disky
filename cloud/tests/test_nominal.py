@@ -544,7 +544,7 @@ def test_failed_reply_names_phase_and_error_without_markup():
     assert N.reply(CFG, long) == "❌ :alarm_clock: [2026-11-05 08:00 UTC](https://site.test/scans/r4) · 1m 00s · failed: " + 'e' * 159 + '…'
     partial = row(4, issues=[{'phase': 'probe'}, {'phase': 'healthcheck'}, {'phase': 'probe'}])
     assert N.reply(CFG, partial) == (
-        '❌ :alarm_clock: [2026-11-05 08:00 UTC](https://site.test/scans/r4) · 1m 00s · phase issues: healthcheck, probe'
+        '⚠️ :alarm_clock: [2026-11-05 08:00 UTC](https://site.test/scans/r4) · 1m 00s · phase issues: healthcheck, probe'
     )
 
 
@@ -605,13 +605,53 @@ def test_signature_threads_a_failure_while_it_repeats_and_a_different_one_opens_
         ('edit', '1.0', '❌ **Test scans: 2 consecutive failed runs (ended)**\n\n'
                         'Since 2026-11-04 08:00 UTC after [2026-11-02T0800](https://site.test/scans/r1); last [2026-11-05 08:00 UTC](https://site.test/scans/r4).\n\n'
                         'Ended by [2026-11-06 08:00 UTC](https://site.test/scans/r5): phase issues: probe. [All scans](https://site.test/scans).'),
-        ('post', '4.0', '❌ **Test scans: 1 consecutive failed run with phase issues**\n\n'
+        ('post', '4.0', '⚠️ **Test scans: 1 consecutive run with phase issues**\n\n'
                         'Since 2026-11-06 08:00 UTC after [2026-11-05T0800](https://site.test/scans/r4) (failed in interval-store: OOM again).\n\n'
                         'Latest: [2026-11-06 08:00 UTC](https://site.test/scans/r5): phase issues: probe.\n\n'
                         'Each reply links its scan record. [All scans](https://site.test/scans).'),
-        ('post', '5.0', '❌ :alarm_clock: [2026-11-06 08:00 UTC](https://site.test/scans/r5) · 1m 00s · phase issues: probe'),
+        ('post', '5.0', '⚠️ :alarm_clock: [2026-11-06 08:00 UTC](https://site.test/scans/r5) · 1m 00s · phase issues: probe'),
     ]
     assert (w.saved['key'], w.saved['boundary'], w.saved['posted']) == ('fail:issues:probe', 'r4', {'r5': '5.0'})
+
+
+def test_color_heads_name_runs_with_phase_issues_apart_from_failures():
+    """cw 2026-11-21: an overlapping manual scan's static-names skipped (busy) and the scan it overlapped probed search
+    behind. Both succeeded; the thread says ⚠️ runs with phase issues, and ❌ once a failure joins them."""
+    from dataclasses import replace
+
+    w = Writer(replace(CFG, group='color'))
+    w.run(history(1))
+    w.slack.calls.clear()
+    i2 = row(2, issues=[{'phase': 'probe'}])
+    i3 = row(3, issues=[{'phase': 'static-names'}])
+    w.run([i3, i2, *history(1)])
+    assert bodies(w.slack)[1] == (
+        'post', '3.0', '⚠️ **Test scans: 2 consecutive runs with phase issues**\n\n'
+                       'Since 2026-11-03 08:00 UTC after [2026-11-02T0800](https://site.test/scans/r1) (clean).\n\n'
+                       'Latest: [2026-11-04 08:00 UTC](https://site.test/scans/r3): phase issues: static-names.\n\n'
+                       'Each reply links its scan record. [All scans](https://site.test/scans).')
+    w.slack.calls.clear()
+    f4 = row(4, 'failed', failed_phase='index')
+    w.run([f4, i3, i2, *history(1)])
+    assert bodies(w.slack) == [
+        ('post', '6.0', '❌ :alarm_clock: [2026-11-05 08:00 UTC](https://site.test/scans/r4) · 1m 00s · failed in index'),
+        ('edit', '3.0', '❌ **Test scans: 3 consecutive runs failed or with phase issues**\n\n'
+                        'Since 2026-11-03 08:00 UTC after [2026-11-02T0800](https://site.test/scans/r1) (clean).\n\n'
+                        'Latest: [2026-11-05 08:00 UTC](https://site.test/scans/r4): failed in index.\n\n'
+                        'Each reply links its scan record. [All scans](https://site.test/scans).'),
+    ]
+
+
+def test_outcome_emoji_are_configurable():
+    cfg = N.config(dict(state='unused', site='https://site.test', channel='C123', title='Test scans', group='clean',
+                        emoji={'issues': ':large_yellow_circle:', 'failed': '🔴'}))
+    assert [N.reply(cfg, r).split(' ', 1)[0] for r in (row(1), row(2, issues=[{'phase': 'probe'}]), row(3, 'failed'))] == [
+        '✅', ':large_yellow_circle:', '🔴']
+    assert N.running(cfg, row(4, 'running', finished_ts=None)).split(' ', 1)[0] == '⏳'
+    with pytest.raises(ValueError, match='nominal.emoji: keys among clean, issues, failed, running'):
+        N.config(dict(state='unused', site='https://site.test', channel='C123', title='Test scans', emoji={'warn': '⚠️'}))
+    with pytest.raises(ValueError, match='nominal.emoji: a Slack :name: code or emoji characters'):
+        N.config(dict(state='unused', site='https://site.test', channel='C123', title='Test scans', emoji={'failed': '<!channel>'}))
 
 
 def test_clean_grouping_never_threads_failures():
@@ -813,7 +853,7 @@ def test_canvas_status_is_the_open_streak_else_the_newest_failure():
     assert [N.status(CFG, rows) for rows in (history(2), [failed, *history(2)], [issues, *history(2)], [])] == [
         '✅ Test scans: 2 consecutive clean runs',
         '❌ Test scans: latest run failed in list: throttled',
-        '❌ Test scans: latest run phase issues: probe',
+        '⚠️ Test scans: latest run phase issues: probe',
         'Test scans: no finished runs yet',
     ]
 
@@ -838,11 +878,11 @@ def test_a_failure_threads_reply_folds_its_runs_top_level_alerts_and_leaves_each
     r3 = row(3, issues=[{'phase': 'static-names'}, {'phase': 'probe'}])
     w.run([r3, *history(2)])
     assert bodies(w.slack)[1:] == [
-        ('post', '6.0', '❌ **Test scans: 1 consecutive failed run**\n\n'
+        ('post', '6.0', '⚠️ **Test scans: 1 consecutive run with phase issues**\n\n'
                         'Since 2026-11-04 08:00 UTC after [2026-11-03T0800](https://site.test/scans/r2) (clean).\n\n'
                         'Latest: [2026-11-04 08:00 UTC](https://site.test/scans/r3): phase issues: probe, static-names.\n\n'
                         'Each reply links its scan record. [All scans](https://site.test/scans).'),
-        ('post', '7.0', '❌ :alarm_clock: [2026-11-04 08:00 UTC](https://site.test/scans/r3) · 1m 00s · phase issues: probe, static-names\n'
+        ('post', '7.0', '⚠️ :alarm_clock: [2026-11-04 08:00 UTC](https://site.test/scans/r3) · 1m 00s · phase issues: probe, static-names\n'
                         'static-names failed (exit 1) · [task logs](https://logs.test/u1)\n'
                         'probe failed (exit 1): 4 failed · [task logs](https://logs.test/u2)'),
         ('edit', grouped, '↪ ⚠️ Test scans 2026-11-04T0800: in the [failure thread](https://slack.test/p7.0)'),

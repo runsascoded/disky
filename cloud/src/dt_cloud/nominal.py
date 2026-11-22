@@ -29,6 +29,13 @@ if TYPE_CHECKING:
 
 GROUPS = ('clean', 'color', 'signature')
 
+#: Each run outcome's emoji (`Config.emoji` overrides any): `clean`; `issues`, a run that succeeded with phase issues
+#: (a step failed, skipped or behind, the scan published: the fleet strip's ⚠️); `failed`, any other finished run that
+#: isn't clean; `running`, a live run's reply
+EMOJI = {'clean': '✅', 'issues': '⚠️', 'failed': '❌', 'running': '⏳'}
+#: An `emoji` override: a Slack `:name:` code, or emoji characters (nothing Slack reads as markup)
+EMOJI_RE = re.compile(r":[a-z0-9_+'-]{1,100}:|[^\x00-\x7f]{1,16}")
+
 
 @dataclass(frozen=True)
 class Config:
@@ -56,6 +63,8 @@ class Config:
     pin: bool = False
     #: Keep the channel's canvas as the deployment's status page (`canvas_text`; the bot's `canvases:write`).
     canvas: bool = False
+    #: Outcome emoji overrides, as `{outcome: emoji}` over `EMOJI` (`mark`)
+    emoji: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self) -> None:
         if not self.site.startswith("https://") or urlparse(self.site).query or urlparse(self.site).fragment:
@@ -70,6 +79,14 @@ class Config:
             raise ValueError(f"nominal.group: one of {', '.join(GROUPS)}")
         if any(not label or not store for label, store in self.stores):
             raise ValueError("nominal.stores: nonempty labels and store names")
+        if any(k not in EMOJI for k, _ in self.emoji):
+            raise ValueError(f"nominal.emoji: keys among {', '.join(EMOJI)}")
+        if any(not isinstance(v, str) or not EMOJI_RE.fullmatch(v) for _, v in self.emoji):
+            raise ValueError("nominal.emoji: a Slack :name: code or emoji characters")
+
+    def mark(self, outcome: str) -> str:
+        """An outcome's emoji (`EMOJI`, overridden by `emoji`)."""
+        return dict(self.emoji).get(outcome) or EMOJI[outcome]
 
     @property
     def namespace(self) -> str:
@@ -88,8 +105,9 @@ class Config:
 
 def config(raw: Mapping) -> Config:
     raw = dict(raw)
-    if isinstance(raw.get('stores'), Mapping):
-        raw['stores'] = tuple(raw['stores'].items())
+    for k in ('stores', 'emoji'):
+        if isinstance(raw.get(k), Mapping):
+            raw[k] = tuple(raw[k].items())
     return Config(**raw)
 
 
@@ -115,6 +133,14 @@ def live(row: dict) -> bool:
 def clean(row: dict) -> bool:
     # A later recovery does not rewrite a historically partial run into a clean run.
     return row['run']['status'] == 'succeeded' and row['run']['finished_ts'] is not None and not row['phase_issues']
+
+
+def grade(row: dict) -> str:
+    """A finished run's outcome (`EMOJI`'s keys): `clean`, `issues` (it succeeded, with phase issues), else `failed`."""
+    if clean(row):
+        return 'clean'
+    run = row['run']
+    return 'issues' if run['status'] == 'succeeded' and run['finished_ts'] is not None and row['phase_issues'] else 'failed'
 
 
 def streak(rows: list[dict]) -> tuple[list[dict], dict | None]:
@@ -200,13 +226,13 @@ def starter(row: dict) -> tuple[str, str | None]:
 
 
 def reply(cfg: Config, row: dict) -> str:
-    """A run's line in its thread: ✅ or ❌, the trigger (`starter`), its time linked to its record, the duration, who
-    started it, and a failed run's reason."""
+    """A run's line in its thread: its outcome's emoji (`grade`: ✅, ⚠️ or ❌), the trigger (`starter`), its time linked to
+    its record, the duration, who started it, and an unclean run's reason."""
     seconds = row.get('secs')
     duration = 'duration unknown' if seconds is None else f"{int(seconds) // 60}m {int(seconds) % 60:02d}s"
     emoji, by = starter(row)
     ok = clean(row)
-    return (f"{'✅' if ok else '❌'} {emoji} [{stamp(row)}]({cfg.link(row['run'])}) · {duration}" + (f" · {by}" if by else "")
+    return (f"{cfg.mark(grade(row))} {emoji} [{stamp(row)}]({cfg.link(row['run'])}) · {duration}" + (f" · {by}" if by else "")
             + ('' if ok else f" · {describe(row)}"))
 
 
@@ -268,7 +294,7 @@ def stores_text(cfg: Config, series: Mapping[str, dict | int]) -> str:
 def running(cfg: Config, row: dict) -> str:
     """A live run's reply, posted when it starts and edited to its `reply` when it ends."""
     emoji, by = starter(row)
-    return f"⏳ {emoji} [{stamp(row)}]({cfg.link(row['run'])}) · running" + (f" · {by}" if by else "")
+    return f"{cfg.mark('running')} {emoji} [{stamp(row)}]({cfg.link(row['run'])}) · running" + (f" · {by}" if by else "")
 
 
 def running_now(cfg: Config, live_rows: list[dict]) -> str:
@@ -289,7 +315,7 @@ def parent(cfg: Config, good: list[dict], boundary: dict | None, live_rows: list
     since = stamp(good[-1])
     qualifier = '' if boundary else 'at least '
     after = f" after [{boundary['run']['scan']}]({cfg.link(boundary['run'])})" if boundary else ' (available run history)'
-    return (f"✅ **{cfg.title}: {qualifier}{len(good)} consecutive clean run{'' if len(good) == 1 else 's'}**\n\n"
+    return (f"{cfg.mark('clean')} **{cfg.title}: {qualifier}{len(good)} consecutive clean run{'' if len(good) == 1 else 's'}**\n\n"
             f"Since {since}{after}.\n\n"
             f"Latest completed: [{stamp(good[0])}]({cfg.link(good[0]['run'])})" + (f" · {done}" if (done := outcome(good[0])) else '') + ".\n\n"
             f"{stores}"
@@ -297,18 +323,29 @@ def parent(cfg: Config, good: list[dict], boundary: dict | None, live_rows: list
             f"Latest {plural(len(window), 'run')}: {mix}. Each reply links its scan record. [All scans]({cfg.scans}).")
 
 
+def unclean(cfg: Config, runs: list[dict], qualifier: str = '') -> tuple[str, str]:
+    """A run of unclean runs' emoji and words: ⚠️ `N consecutive runs with phase issues` when every one succeeded with
+    issues, else ❌ `N consecutive failed runs` (`runs failed or with phase issues` when they mix)."""
+    grades = {grade(r) for r in runs}
+    n, s = len(runs), '' if len(runs) == 1 else 's'
+    if grades == {'issues'}:
+        return cfg.mark('issues'), f"{qualifier}{n} consecutive run{s} with phase issues"
+    return cfg.mark('failed'), f"{qualifier}{n} consecutive " + (f"run{s} failed or with phase issues" if 'issues' in grades else f"failed run{s}")
+
+
 def failed(cfg: Config, bad: list[dict], boundary: dict | None, live_rows: list[dict] | None = None, stores: str = '') -> str:
-    """A failure thread's head: how many runs in a row failed (under `signature`, failed the same way), since when and
-    after which run (the last clean one, or the last that failed differently), and the newest failure's reason."""
+    """A failure thread's head (`unclean`): how many runs in a row failed or had phase issues (under `signature`, the
+    same way), since when and after which run (the last clean one, or the last that failed differently), and the newest
+    one's reason."""
     qualifier = '' if boundary else 'at least '
     how = ''
     if cfg.group == 'signature':
         run = bad[0]['run']
-        how = (f" in {run['failed_phase']}" if run['status'] == 'failed' and run.get('failed_phase') else
-               ' with phase issues' if run['status'] != 'failed' and bad[0]['phase_issues'] else '')
+        how = f" in {run['failed_phase']}" if run['status'] == 'failed' and run.get('failed_phase') else ''
+    mark, words = unclean(cfg, bad, qualifier)
     after = (f" after [{boundary['run']['scan']}]({cfg.link(boundary['run'])})" + (' (clean)' if clean(boundary) else f" ({describe(boundary)})")
              if boundary else ' (available run history)')
-    return (f"❌ **{cfg.title}: {qualifier}{len(bad)} consecutive failed run{'' if len(bad) == 1 else 's'}{how}**\n\n"
+    return (f"{mark} **{cfg.title}: {words}{how}**\n\n"
             f"Since {stamp(bad[-1])}{after}.\n\n"
             f"Latest: [{stamp(bad[0])}]({cfg.link(bad[0]['run'])}): {describe(bad[0])}.\n\n"
             f"{stores}"
@@ -328,12 +365,14 @@ def closed_runs(rows: list[dict], stop: dict, boundary_id: str | None) -> tuple[
 def closed_head(cfg: Config, was: str, old: tuple[list[dict], dict | None], stop: dict, reason: str) -> str:
     """A closed thread's head: how many runs it held, since when, its newest, and the run that ended it."""
     runs, boundary = old
-    kind, mark, adj = ('clean-run', '✅', 'clean') if was == 'clean' else ('failure', '❌', 'failed')
     if not runs:
+        kind, mark = ('clean-run', cfg.mark('clean')) if was == 'clean' else ('failure', cfg.mark('failed'))
         return f"{mark} **{cfg.title}: {kind} sequence ended**\n\n[{stamp(stop)}]({cfg.link(stop['run'])}): {reason}. [All scans]({cfg.scans})."
     qualifier = '' if boundary else 'at least '
     after = f" after [{boundary['run']['scan']}]({cfg.link(boundary['run'])})" if boundary else ' (available run history)'
-    return (f"{mark} **{cfg.title}: {qualifier}{len(runs)} consecutive {adj} run{'' if len(runs) == 1 else 's'} (ended)**\n\n"
+    mark, words = ((cfg.mark('clean'), f"{qualifier}{len(runs)} consecutive clean run{'' if len(runs) == 1 else 's'}") if was == 'clean'
+                   else unclean(cfg, runs, qualifier))
+    return (f"{mark} **{cfg.title}: {words} (ended)**\n\n"
             f"Since {stamp(runs[-1])}{after}; last [{stamp(runs[0])}]({cfg.link(runs[0]['run'])}).\n\n"
             f"Ended by [{stamp(stop)}]({cfg.link(stop['run'])}): {reason}. [All scans]({cfg.scans}).")
 
@@ -532,7 +571,7 @@ def status(cfg: Config, done: list[dict]) -> str:
     _, good, boundary = segment(cfg, done)
     if good:
         return parent(cfg, good, boundary).split('\n', 1)[0].replace('**', '')
-    return f"❌ {cfg.title}: latest run {describe(done[0])}" if done else f"{cfg.title}: no finished runs yet"
+    return f"{cfg.mark(grade(done[0]))} {cfg.title}: latest run {describe(done[0])}" if done else f"{cfg.title}: no finished runs yet"
 
 
 def canvas_text(cfg: Config, rows: list[dict], thread: str | None, series: Mapping[str, dict | int], now: float) -> str:
