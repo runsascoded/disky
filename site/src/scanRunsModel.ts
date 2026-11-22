@@ -198,9 +198,11 @@ export function processingSecs(total: number | null, spans: readonly PhaseSpan[]
  * its recorded `done`. A running phase stays running: its note is a heartbeat's live output line, whatever it says.
  * In a `cancelled` run (`run`) a failed phase is `cancelled`: the run is recorded cancelled only when none of its steps
  * had failed on its own before the cancel (migration `scan-run-cancelled`'s rule), so its failed steps are the ones
- * the cancel stopped (`failed (lost)` once `reconcile` closes them). */
+ * the cancel stopped (`failed (lost)` once `reconcile` closes them); one still `running` (the cancel marks the run, not
+ * its steps, and `reconcile` hasn't closed them yet: gcs's 2026-11-22T1959) is `cancelled` too. */
 export function phaseStatus(p: { status: PhaseState; note: string | null }, run?: Partial<Pick<ScanRun, 'status'>>): PhaseState {
-  if (p.status === 'running' || p.status === 'cancelled') return p.status
+  if (p.status === 'running') return run?.status === 'cancelled' ? 'cancelled' : 'running'
+  if (p.status === 'cancelled') return p.status
   const failed = p.status === 'failed' || /(?:^|,\s*)failed\b/i.test(p.note ?? '')
   return failed ? (run?.status === 'cancelled' ? 'cancelled' : 'failed') : p.status
 }
@@ -542,12 +544,14 @@ export function runTasks(phases: readonly ScanRunPhase[], run?: Pick<ScanRun, 's
   return [...by.values()]
 }
 
-export function phaseSpans(run: Pick<ScanRun, 'started_ts'> & Partial<Pick<ScanRun, 'status'>>, phases: readonly ScanRunPhase[], now?: number): PhaseSpan[] {
+export function phaseSpans(run: Pick<ScanRun, 'started_ts'> & Partial<Pick<ScanRun, 'status' | 'finished_ts'>>, phases: readonly ScanRunPhase[], now?: number): PhaseSpan[] {
   const t0 = run.started_ts
   if (t0 == null) return []
   const laneEnds: number[] = []
   return [...phases].sort((a, b) => a.seq - b.seq).flatMap(p => {
-    const until = p.finished_ts ?? (p.status === 'running' && run.status === 'running' ? now : undefined)
+    // A step still open in a cancelled run ran until the cancel (the run's end); in a running run, until now
+    const until = p.finished_ts ?? (p.status !== 'running' ? undefined : run.status === 'running' ? now
+      : run.status === 'cancelled' ? run.finished_ts ?? undefined : undefined)
     if (p.started_ts == null || until == null) return []
     const start = Math.max(0, p.started_ts - t0), end = Math.max(start, until - t0)
     let lane = laneEnds.findIndex(e => e <= start)

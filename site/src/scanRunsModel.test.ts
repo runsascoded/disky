@@ -575,6 +575,16 @@ describe('a cancelled run\'s stopped step', () => {
     expect(runTasks(ps, r).map(t => [t.job_name, t.status])).toEqual([['nf-bc', 'done'], ['nf-l', 'cancelled']])
     expect(phaseIssues(r, [r], ps)).toEqual([])
   })
+  it('reads cancelled while still open, its span ending at the cancel (gcs\'s 2026-11-22T1959, before `reconcile`)', () => {
+    const open: ScanRunPhase[] = [ps[0], { ...phase('x', 'list open-athena', 1, 5, 0), finished_ts: null, status: 'running', note: '1m · listing', job_name: 'nf-l' }]
+    expect(phaseSpans(r, open).map(s => [s.phase, s.status, s.start, s.end])).toEqual([
+      ['bucket-check', 'done', 0, 5],
+      ['list open-athena', 'cancelled', 5, 900],
+    ])
+    expect(runTasks(open, r).map(t => [t.job_name, t.status])).toEqual([['nf-bc', 'done'], ['nf-l', 'cancelled']])
+    expect(phaseIssues(r, [r], open)).toEqual([])
+    expect(phaseSpans({ ...r, status: 'running' }, open, 600).map(s => [s.status, s.end])).toEqual([['done', 5], ['running', 600]])
+  })
   it('stays failed in a failed run', () => {
     const f = { ...r, status: 'failed' as const }
     expect(phaseSpans(f, ps).map(s => s.status)).toEqual(['done', 'failed'])
