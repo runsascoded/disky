@@ -1,3 +1,5 @@
+import { postRewrite, type RewriteOutcome, type RewritePlan } from '@open-athena/thrds'
+import { PlanView } from '@open-athena/thrds/plan-view'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { type ReactNode, useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
@@ -14,7 +16,9 @@ import './slack.scss'
 // renderer ported byte for byte) with their plots drawn by `/api/digest-image`. Candidates live in the URL
 // (`?dc=<params>;<params>…`, `digest/codec`), so a comparison is a link. Two panels act (specs/digest-runway-marks.md
 // §4): the live settings the job renders under (`/api/digest-settings`, D1), and re-applying the digest to chosen
-// messages of the thread (`/api/digest-reapply`: a Batch job running the CLI's selectors, a dry run first).
+// messages of the thread (`/api/digest-reapply`: a Batch job running the CLI's selectors, a dry run first). A dry run
+// of the OP or of days writes a thrds rewrite plan, reviewed here in thrds' `PlanView` and applied message by message
+// (`/api/digest-reapply/<job>/{plan,check,apply}`, specs/done/digest-rewrite-review.md).
 
 interface Listing { bundles: { key: string; month: string; channel: string; variant: string }[] }
 
@@ -270,7 +274,40 @@ function LiveSettings({ b, cands, form, setForm }: { b: PreviewBundle; cands: st
   )
 }
 
-/** Re-apply the digest to chosen messages of the thread: a dry run lists what would change; apply edits exactly those. */
+/** A dry run's rewrite plan (`/api/digest-reapply/<job>/plan`) in thrds' review: each message before and after, and the
+ *  selected edits checked (re-read, nothing written) or applied in place, 10 to a request. */
+export function Review({ job, permalink }: { job: string; permalink: string | null }) {
+  const plan = useQuery({
+    queryKey: ['digest-reapply', job, 'plan'], staleTime: Infinity, retry: false,
+    queryFn: () => getJson<{ path: string; plan: RewritePlan }>(`/api/digest-reapply/${job}/plan`),
+  })
+  const [outcomes, setOutcomes] = useState<Record<string, RewriteOutcome>>({})
+  const [error, setError] = useState<string | null>(null)
+  const record = (os: RewriteOutcome[]) => setOutcomes(cur => ({ ...cur, ...Object.fromEntries(os.map(o => [o.ts, o])) }))
+  const run = (op: 'check' | 'apply') => async (sel: { ts: string }[]) => {
+    setError(null)
+    try {
+      await postRewrite(`/api/digest-reapply/${job}/${op}`, sel.map(a => a.ts), { onOutcomes: record })
+    } catch (e) {
+      setError((e as Error).message)
+    }
+  }
+  // the workspace's permalinks: `https://<workspace>.slack.com/archives/<channel>/p<ts without the dot>`
+  const workspace = permalink?.replace(/\/archives\/.*$/, '')
+  if (plan.error) return <p className="err">{plan.error.message}</p>
+  if (!plan.data) return <p className="loading">Loading the plan…</p>
+  return (
+    <div className="slack-review">
+      <p className="dim">Review: {plan.data.path}. Check re-reads the selected messages and writes nothing; apply edits them in place, refusing any that changed since this preview.</p>
+      {error && <p className="err">{error}</p>}
+      <PlanView plan={plan.data.plan} outcomes={outcomes} onCheck={run('check')} onApply={run('apply')}
+        messageHref={a => workspace ? `${workspace}/archives/${a.channel}/p${a.ts.replace('.', '')}${a.thread_ts ? `?thread_ts=${a.thread_ts}&cid=${a.channel}` : ''}` : undefined} />
+    </div>
+  )
+}
+
+/** Re-apply the digest to chosen messages of the thread: a dry run lists what would change; the OP's or days' is reviewed
+ *  and applied here message by message, a whole-thread run converges as the cron does. */
 function Reapply({ b, form }: { b: PreviewBundle; form: { params: string; quota_marks: string } }) {
   const qc = useQueryClient()
   const [channel, setChannel] = useState(b.channel)
@@ -296,7 +333,7 @@ function Reapply({ b, form }: { b: PreviewBundle; form: { params: string; quota_
   return (
     <section className="slack-act">
       <h2>Re-apply</h2>
-      <p className="dim">Re-renders exactly the chosen messages of {b.month}'s thread and edits them in place (no new replies, no alert); a whole-thread run converges as the cron does. Runs as a Batch job (~2 min). Preview first.</p>
+      <p className="dim">Re-renders exactly the chosen messages of {b.month}'s thread (no new replies, no alert) as a Batch job (~2 min), then lists them for review below: pick the edits to apply, each re-checked against the message first. A whole-thread run converges as the cron does.</p>
       <div className="slack-controls">
         <label>channel <input className="wide" value={channel} onChange={e => setChannel(e.target.value.trim())} /></label>
         <label>what <select value={kind} onChange={e => setKind(e.target.value as typeof kind)}>
@@ -307,7 +344,7 @@ function Reapply({ b, form }: { b: PreviewBundle; form: { params: string; quota_
         </>}
         <label><input type="checkbox" checked={underForm} onChange={e => setUnderForm(e.target.checked)} /> under the form's settings above (else the live ones)</label>
         <button disabled={go.isPending} onClick={() => go.mutate(true)}>preview (dry run)</button>
-        <Confirm label="apply" confirm={`edit ${target} in ${channel}?`} disabled={go.isPending} onClick={() => go.mutate(false)} />
+        {kind === 'thread' && <Confirm label="converge" confirm={`converge the whole thread in ${channel}?`} disabled={go.isPending} onClick={() => go.mutate(false)} />}
       </div>
       {go.error && <p className="err">{go.error.message}</p>}
       {runs.data && runs.data.runs.length > 0 && (
@@ -321,7 +358,10 @@ function Reapply({ b, form }: { b: PreviewBundle; form: { params: string; quota_
       )}
       {job && detail.data && <div className="slack-run">
         <p className="dim"><code>{job}</code>: {detail.data.status ?? 'status unknown'}{!DONE.includes(detail.data.status ?? '') && ' …'}</p>
-        <pre>{detail.data.output ?? '(no output yet)'}</pre>
+        {detail.data.status === 'SUCCEEDED' && detail.data.run.dry_run && detail.data.run.target !== 'thread' ? <>
+          <Review job={job} permalink={b.permalink} />
+          <details><summary>The job's output</summary><pre>{detail.data.output ?? '(none)'}</pre></details>
+        </> : <pre>{detail.data.output ?? '(no output yet)'}</pre>}
       </div>}
       {detail.error && <p className="err">{detail.error.message}</p>}
     </section>

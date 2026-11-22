@@ -193,6 +193,12 @@ const SHARED_ROUTES: Record<string, Case[]> = {
   'api/digest-op.ts': [post('/api/digest-op', 'viewer')],
   'api/digest-preview.ts': [get('/api/digest-preview', 'admin')],
   'api/digest-reapply.ts': [post('/api/digest-reapply', 'admin'), get('/api/digest-reapply', 'admin')],
+  // A dry run's rewrite plan, and checking or applying a selection of it (the gate first; `rewriteHandler`'s same-origin check is past it).
+  'api/digest-reapply/[job]/[op].ts': [
+    get('/api/digest-reapply/quota-digest-20261122-120000z/plan', 'admin'),
+    post('/api/digest-reapply/quota-digest-20261122-120000z/check', 'admin'),
+    post('/api/digest-reapply/quota-digest-20261122-120000z/apply', 'admin'),
+  ],
   'api/digest-settings.ts': [get('/api/digest-settings', 'viewer'), put('/api/digest-settings', 'admin')],
   'api/dups.ts': [get(`/api/dups?${AT}`, 'viewer', { DUPS: '1' }), get(`/api/dups?${AT}`, 'unconfigured')],
   'api/estate.ts': [get(`/api/estate?${AT}`, 'viewer')],

@@ -2,7 +2,9 @@
  * §4; D1 `digest_reapply`, migration `digest-settings`). Each run is a Batch job on the scan image running the digest
  * CLI with its selectors — `-o` (the OP), `-y A..B` (those days' posted replies), or no selector (the whole thread, as
  * the cron) — dry (`-n`: what it would edit, nothing posted) or for real, optionally under candidate settings (`-p`,
- * `-q`) instead of the live ones. The CLI's output lands at `gs://<data>/digest/reapply/<job>.txt`.
+ * `-q`) instead of the live ones. The CLI's output lands at `gs://<data>/digest/reapply/<job>.txt`; a dry run of the OP
+ * or of days also writes its edits as a thrds bulk-rewrite plan (`-j`) beside it, `<job>.plan.json`, which `/admin/slack`
+ * reviews and applies a selection of (`digest-reapply/[job]/[op].ts`; specs/done/digest-rewrite-review.md).
  *
  *   POST /api/digest-reapply {month, channel?, target, dry_run, params?, quota_marks?} → {run}             admin
  *   GET  /api/digest-reapply → {runs: [run…]} (newest first, 20)                                              admin
@@ -27,7 +29,7 @@ const MONTH_RE = /^\d{4}-(0[1-9]|1[0-2])$/
 const DAY_RE = /^(\d{4}-\d{2})-(\d{2})$/
 const CHANNEL_RE = /^[CDG][A-Z0-9]{8,12}$/
 /** A run's job id, `<template>-digest-<stamp>z`: runs from before the templates' rename carry their old name (`cw-…`). */
-const JOB_RE = /^[a-z0-9-]+-digest-\d{8}-\d{6}z$/
+export const JOB_RE = /^[a-z0-9-]+-digest-\d{8}-\d{6}z$/
 const NAME_RE = /^[\w./{}$-]+$/
 
 /** `DIGEST_REAPPLY`: the digest CLI's `template` (an old name, `cw` / `gcs`, read as its name), `config` and `root` (under
@@ -92,10 +94,17 @@ export function parseReapply(b: unknown, defaultChannel: string | undefined): Re
   return { month, channel: ch, target, dry_run, params: (params as string | null | undefined) ?? null, quota_marks: (quota_marks as string | null | undefined) ?? null }
 }
 
-/** The digest CLI's arguments for a request (after `reapplyScript`'s `dt-cloud digest -T … -C … -r …`). */
-export function reapplyArgs(r: ReapplyReq): string[] {
+/** A run's object key under the data bucket: its CLI output (`txt`), or its rewrite plan (`plan.json`). */
+export const runKey = (job: string, ext: 'txt' | 'plan.json'): string => `digest/reapply/${job}.${ext}`
+
+/** Whether a run writes a rewrite plan: a dry run with a selector (a whole-thread run converges, which also posts). */
+export const plans = (r: Pick<ReapplyReq, 'target' | 'dry_run'>): boolean => r.dry_run && r.target !== 'thread'
+
+/** The digest CLI's arguments for a request (after `reapplyScript`'s `dt-cloud digest -T … -C … -r …`); `plan`: where a
+ *  run that `plans` writes its plan. */
+export function reapplyArgs(r: ReapplyReq, plan?: string): string[] {
   const sel = r.target === 'thread' ? [] : r.target === 'op' ? ['-o'] : ['-y', r.target.includes('..') ? r.target : `${r.target}..${r.target}`]
-  return ['-m', r.month, '-c', r.channel, ...sel, ...(r.dry_run ? ['-n'] : []),
+  return ['-m', r.month, '-c', r.channel, ...sel, ...(r.dry_run ? ['-n'] : []), ...(plan !== undefined && plans(r) ? ['-j', plan] : []),
     ...(r.params !== null ? ['-p', r.params] : []), ...(r.quota_marks !== null ? ['-q', r.quota_marks] : [])]
 }
 
@@ -133,8 +142,9 @@ export const onRequestPost = async (ctx: Ctx): Promise<Response> => {
   if (typeof req === 'string') return json({ error: req }, 400)
 
   const jobId = `${c.template}-digest-${jobStamp()}z`
-  const out = `gs://${cfg.dataBucket}/digest/reapply/${jobId}.txt`
-  const script = reapplyScript(reapplyArgs(req), `/gcs/${cfg.dataBucket}/digest/reapply/${jobId}.txt`, c)
+  const out = `gs://${cfg.dataBucket}/${runKey(jobId, 'txt')}`
+  const mnt = (ext: 'txt' | 'plan.json') => `/gcs/${cfg.dataBucket}/${runKey(jobId, ext)}`
+  const script = reapplyScript(reapplyArgs(req, mnt('plan.json')), mnt('txt'), c)
   const spec = sweepBatchSpec(cfg, env.JOB_SA, script, "", {
     // `R2_BUCKET`: the env script sets up R2 only with it; the digest writes its preview bundle there.
     JOB_ID: jobId, SITE_URL: new URL(ctx.request.url).origin, R2_BUCKET: c.r2_bucket,
@@ -168,7 +178,7 @@ export const onRequestGet = async (ctx: Ctx): Promise<Response> => {
   const auth = { authorization: `Bearer ${token}` }
   const [jr, or] = await Promise.all([
     fetch(`${batchJobsUrl(cfg, cfg.region)}/${job}`, { headers: auth }),
-    fetch(`https://storage.googleapis.com/storage/v1/b/${cfg.dataBucket}/o/${encodeURIComponent(`digest/reapply/${job}.txt`)}?alt=media`, { headers: auth }),
+    fetch(`https://storage.googleapis.com/storage/v1/b/${cfg.dataBucket}/o/${encodeURIComponent(runKey(job, 'txt'))}?alt=media`, { headers: auth }),
   ])
   const status = jr.ok ? ((await jr.json()) as { status?: { state?: string } }).status?.state ?? null : null
   return json({ run: row(r), status, output: or.ok ? await or.text() : null }, 200, { 'cache-control': 'no-store' })

@@ -478,6 +478,16 @@ CREATE TABLE sweep_settings (
   updated_at           INTEGER NOT NULL
 );
 
+CREATE TABLE thrds_rewrite_receipts (
+  plan TEXT NOT NULL,
+  ts TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  status TEXT NOT NULL,
+  new_ts TEXT,
+  error TEXT,
+  at INTEGER NOT NULL
+);
+
 CREATE UNIQUE INDEX access_log_dedupe ON access_log (event, session_sub, sid, path, bucket) WHERE bucket IS NOT NULL;
 
 CREATE INDEX access_log_grant ON access_log (grant_id, ts DESC);
@@ -549,3 +559,5 @@ CREATE INDEX idx_session_log_batches_burst ON session_log_batches (burst_id);
 CREATE INDEX idx_session_log_batches_received ON session_log_batches (received_ts);
 
 CREATE UNIQUE INDEX stage_replies_open ON stage_replies (plan_id, stager) WHERE open = 1;
+
+CREATE INDEX thrds_rewrite_receipts_plan ON thrds_rewrite_receipts (plan, status);

@@ -205,7 +205,7 @@ ROOT_LABEL = "my buckets"                   # the store root's crumb label
 # secret GCS_HMAC_KEY_ID                    GCS stores only (STORE_ENDPOINT unset): an HMAC key pair
 # secret GCS_HMAC_SECRET
 # secret GCP_SA_KEY                         a service-account key that submits Batch jobs and acts as JOB_SA
-# secret SLACK_BOT_TOKEN                    staged-plan threads (with SLACK_ADMIN_CHANNEL)
+# secret SLACK_BOT_TOKEN                    staged-plan threads (with SLACK_ADMIN_CHANNEL); `/admin/slack`'s re-apply review checks and applies with it (the digest's bot: the same token the job posts with)
 # secret SLACK_SIGNING_SECRET               Slack's interactive buttons (`/slack/actions`)
 #
 # Not set here:
