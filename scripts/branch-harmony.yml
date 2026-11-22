@@ -18,7 +18,11 @@ rules:
     lanes: [cw]
     class: intrinsic
     reason: "cw's diff walk (410f0338e, #44 option 1) -> as its walk"
-  - paths: [job/gen-delta-arrows.py, job/gen-arrow-avatars.py, job/icons/_headers, job/rerg]
+  - paths: [job/gen-delta-arrows.py]
+    lanes: [gcs, cw]
+    class: accidental
+    reason: "folded into cloud's `dt-cloud emoji build` (097bd8a66, `emoji_draw.py`: the same arrows, pixel-identical) -> gcs and cw drop theirs"
+  - paths: [job/gen-arrow-avatars.py, job/icons/_headers, job/rerg]
     lanes: [gcs, cw]
     class: accidental
     reason: "dup: same file on gcs and cw (rerg: 4 lines apart), absent from cloud, flagged 10-10 and 10-17 -> pick to cloud `job/` (rerg's account/region as args), both drop theirs"
