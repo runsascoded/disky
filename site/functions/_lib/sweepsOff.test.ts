@@ -9,6 +9,7 @@ import { onRequestPost as purge } from '../api/plan-sweep/purge'
 import { onRequestPost as planSweepStop } from '../api/plan-sweep/stop'
 import { onRequestPost as sweepStop } from '../api/sweep/stop'
 import { onRequestPost as digestReapply } from '../api/digest-reapply'
+import { onRequest as digestRewrite } from '../api/digest-reapply/[job]/[op]'
 import { onRequestGet as planSweepJobs } from '../api/plan-sweep/jobs'
 import { onRequestGet as sweepJobs } from '../api/sweep/jobs'
 import { announceFinished } from './stagedSlack'
@@ -19,6 +20,7 @@ vi.mock('./stagedSlack.js', async original => ({ ...await original<typeof import
 
 const CW_RUN = 'cw-sweep-real-20261106-000000z'
 const GCS_RUN = 'gcs-sweep-real-20261106-000000z'
+const DIGEST_RUN = 'quota-digest-20261122-120000z'
 const DIGEST_REAPPLY = JSON.stringify({ template: 'quota', config: 'job/digest.yml', root: 'snapshots/s', env_script: 'job/env.sh', r2_bucket: 'r2b', secrets: { SITE_TOKEN: 'site-token' } })
 
 let env: Record<string, unknown>
@@ -63,6 +65,7 @@ const ROUTES: [string, Route, string, unknown][] = [
   ['plan-sweep stop', planSweepStop as Route, '/api/plan-sweep/stop', { job_id: CW_RUN }],
   ['sweep stop', sweepStop as Route, '/api/sweep/stop', { job_id: GCS_RUN }],
   ['digest re-apply', digestReapply as Route, '/api/digest-reapply', { month: '2026-11', channel: 'C01234567', target: 'thread', dry_run: true }],
+  ['digest re-apply review: apply', digestRewrite as Route, `/api/digest-reapply/${DIGEST_RUN}/apply`, { ids: ['1795000000.000100'] }],
 ]
 
 describe('`SWEEP_DISPATCH = "0"`', () => {
@@ -89,6 +92,15 @@ describe('`SWEEP_DISPATCH` unset: past the guard, to the GCP call', () => {
     expect(await post(sweepStop as Route, '/api/sweep/stop', { job_id: GCS_RUN })).toEqual([
       500, { error: 'STOP write failed', status: 500, detail: '{}' },
       ['https://storage.googleapis.com/upload/storage/v1/b/data/o?uploadType=media&name=sweep%2Fruns%2Fgcs-sweep-real-<stamp>z%2FSTOP'],
+    ])
+  })
+  it('digest re-apply review: an apply reads the run’s plan', async () => {
+    raw.prepare(`INSERT INTO digest_reapply (job_id, month, channel, target, dry_run, actor, ts, out)
+      VALUES (?, '2026-11', 'C01234567', 'op', 1, 'actor', 1, 'gs://data/digest/reapply/x.txt')`).run(DIGEST_RUN)
+    env.SLACK_BOT_TOKEN = 'xoxb-test'
+    expect(await post(digestRewrite as Route, `/api/digest-reapply/${DIGEST_RUN}/apply`, { ids: ['1795000000.000100'] })).toEqual([
+      502, { error: 'plan read failed (500)' },
+      [`https://storage.googleapis.com/storage/v1/b/data/o/${encodeURIComponent('digest/reapply/quota-digest-')}<stamp>z.plan.json?alt=media`],
     ])
   })
   it('digest re-apply submits its Batch job', async () => {

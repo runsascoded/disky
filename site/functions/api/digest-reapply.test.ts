@@ -55,18 +55,23 @@ describe('/api/digest-reapply', () => {
     ]).toEqual([CONFIG, 'DIGEST_REAPPLY', 'DIGEST_REAPPLY: not JSON', CONFIG, { ...CONFIG, template: 'cost' }, 'DIGEST_REAPPLY.template', 'DIGEST_REAPPLY.template', 'DIGEST_REAPPLY.env_script', 'DIGEST_REAPPLY.secrets', 'DIGEST_REAPPLY.secrets'])
   })
 
-  it('becomes the digest CLI’s selectors', () => {
-    const r = (o: object) => reapplyArgs({ month: '2026-11', channel: 'C1', target: 'op', dry_run: false, params: null, quota_marks: null, ...o })
+  it('becomes the digest CLI’s selectors; a dry run of the OP or of days also writes its rewrite plan', () => {
+    const PLAN = '/gcs/data/digest/reapply/demo-digest-20261103-120000z.plan.json'
+    const r = (o: object) => reapplyArgs({ month: '2026-11', channel: 'C1', target: 'op', dry_run: false, params: null, quota_marks: null, ...o }, PLAN)
     expect([
       r({}),
+      r({ dry_run: true }),
       r({ target: '2026-11-02', dry_run: true }),
       r({ target: '2026-11-01..2026-11-02', params: '', quota_marks: 'runway-hue' }),
       r({ target: 'thread', dry_run: true, params: 'qh,pp' }),
+      reapplyArgs({ month: '2026-11', channel: 'C1', target: 'op', dry_run: true, params: null, quota_marks: null }),
     ]).toEqual([
       ['-m', '2026-11', '-c', 'C1', '-o'],
-      ['-m', '2026-11', '-c', 'C1', '-y', '2026-11-02..2026-11-02', '-n'],
+      ['-m', '2026-11', '-c', 'C1', '-o', '-n', '-j', PLAN],
+      ['-m', '2026-11', '-c', 'C1', '-y', '2026-11-02..2026-11-02', '-n', '-j', PLAN],
       ['-m', '2026-11', '-c', 'C1', '-y', '2026-11-01..2026-11-02', '-p', '', '-q', 'runway-hue'],
       ['-m', '2026-11', '-c', 'C1', '-n', '-p', 'qh,pp'],
+      ['-m', '2026-11', '-c', 'C1', '-o', '-n'],
     ])
   })
 

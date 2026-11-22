@@ -277,7 +277,7 @@ from two workspace packages:
 - **`@disk-tree/react`** (`packages/react/`) — `<TimeSeries>`/`<BytesOverTime>` built on the core
   (which it re-exports for back-compat).
 
-Digest and publish knobs: `dt-cloud digest -W KEY` writes only a month's preview bundle (`/admin/slack`), posting nothing. `/api/digest-reapply` re-applies the digest to chosen messages from `/admin/slack`, as a Batch job named by the `DIGEST_REAPPLY` var (unset: 503). `options.interval-store.publish_on_failure`: a failed append copies the scan's whole served set to R2, for a site that reads only R2 under `publish-r2 -S`.
+Digest and publish knobs: `dt-cloud digest -W KEY` writes only a month's preview bundle (`/admin/slack`), posting nothing. `/api/digest-reapply` re-applies the digest to chosen messages from `/admin/slack`, as a Batch job named by the `DIGEST_REAPPLY` var (unset: 503); a dry run of the OP or of days also writes a thrds rewrite plan (`digest -n -j`), which the page reviews and applies message by message (`/api/digest-reapply/<job>/{plan,check,apply}`, receipts in D1 `thrds_rewrite_receipts`; specs/done/digest-rewrite-review.md). `options.interval-store.publish_on_failure`: a failed append copies the scan's whole served set to R2, for a site that reads only R2 under `publish-r2 -S`.
 
 ### D1 schema (`site/schema.sql`)
 
