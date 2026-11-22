@@ -420,11 +420,19 @@ def stores_text(cfg: Config, series: Mapping[str, dict | int]) -> str:
     return ''.join(store_line(cfg, label, store, series[store]) + '\n\n' for label, store in cfg.stores)
 
 
-def running(cfg: Config, row: dict) -> str:
+def started_ago(row: dict) -> str:
+    """When a live run started, relative to whoever reads it (Slack's `{ago}` date token, rendered by each client when
+    shown: "started 31 minutes ago"), its stamp the fallback. Where nothing else says it: the quiet thread's rolling
+    reply has no post of the run's own, so no message time (Ryan, 2026-11-22), and the head's "Running now"."""
+    return f"<!date^{int(row['run']['started_ts'])}^started {{ago}}|started {stamp(row)}>"
+
+
+def running(cfg: Config, row: dict, ago: bool = False) -> str:
     """A live run's reply, posted when it starts, and edited to its `reply` when it ends (with `Config.senders`, deleted
-    and posted again: `run_post`)."""
+    and posted again: `run_post`); `ago`: its line in a rolling reply (`trail`), saying when it started (`started_ago`)."""
     emoji, by = starter(row)
-    return f"{cfg.mark('running')} {emoji} [{stamp(row)}]({cfg.link(row['run'])}) · running" + (f" · {by}" if by else "")
+    return (f"{cfg.mark('running')} {emoji} [{stamp(row)}]({cfg.link(row['run'])}) · running" + (f" · {by}" if by else "")
+            + (f" · {started_ago(row)}" if ago else ""))
 
 
 def run_sender(cfg: Config, row: dict, live: bool = False) -> dict[str, str]:
@@ -461,7 +469,7 @@ def running_now(cfg: Config, live_rows: list[dict]) -> str:
     """A thread head's line for the runs going now (oldest first), or nothing."""
     if not live_rows:
         return ''
-    return 'Running now: ' + ', '.join(f"[{stamp(r)}]({cfg.link(r['run'])})" for r in reversed(live_rows)) + '.\n\n'
+    return 'Running now: ' + ', '.join(f"[{stamp(r)}]({cfg.link(r['run'])}) ({started_ago(r)})" for r in reversed(live_rows)) + '.\n\n'
 
 
 def parent(
@@ -499,7 +507,7 @@ def parent(
 def trail(cfg: Config, runs: list[dict], live_rows: list[dict] | None = None) -> str:
     """A quiet clean thread's one rolling reply: its newest ten runs' lines (`reply`), oldest first, then the runs going
     now (`running`); edited in place as runs start and end. `runs` newest first."""
-    lines = [reply(cfg, r) for r in reversed(runs[:10])] + [running(cfg, r) for r in reversed(live_rows or [])]
+    lines = [reply(cfg, r) for r in reversed(runs[:10])] + [running(cfg, r, ago=True) for r in reversed(live_rows or [])]
     return '\n'.join(lines)
 
 
