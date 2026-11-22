@@ -8,7 +8,8 @@
     "./og/render": "./src/og/render.ts",
     "./og/sign": "./src/og/sign.ts",
     "./og/text": "./src/og/text.ts",
-    "./oa": "./src/oa.ts"
+    "./oa": "./src/oa.ts",
+    "./emoji": "./src/emoji.ts"
   },
   "scripts": {
     "typecheck": "tsc -p ."

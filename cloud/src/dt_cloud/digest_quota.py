@@ -48,6 +48,8 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
+from . import emoji_vocab as V
+
 from .digest import (
     AVATAR_REV, HOURS_PER_WEEK, LINK_ARROW, TIB, UNITS, DigestConfig, PlotUnavailable, Quota, Reply, Unit, Units,
     _dlink, _err, _md, _pct, _pct_val, _span, _tb, deg, list_scans, load_window, read_metas, site_render,
@@ -192,7 +194,8 @@ def _tail(day: DayRow, cfg: DigestConfig) -> str:
 ALERT_MARK = ":warning:"
 #: `quota_marks: circles`, every pool one: red at or over `mark_pct`, orange within `ORANGE_PTS` below it, yellow
 #: within `YELLOW_PTS`, green under that (the site's `digest/pools.ts` `mark`).
-RED_MARK, ORANGE_MARK, YELLOW_MARK, GREEN_MARK = ":red_circle:", ":large_orange_circle:", ":large_yellow_circle:", ":large_green_circle:"
+#: The vocabulary's stock runway circles (`emoji_vocab`: steps 1, 3, 5 and 8 are red, orange, yellow and green).
+RED_MARK, ORANGE_MARK, YELLOW_MARK, GREEN_MARK = (V.key(f"runway.{n}").code for n in (1, 3, 5, 8))
 ORANGE_PTS, YELLOW_PTS = 10, 40
 
 
@@ -270,7 +273,7 @@ RUNWAY_HUE_FULL_N = 3
 
 def _runway_hue(r: Runway, fill: float, shape: str = "circle") -> str:
     """A pool's `:runway-N:` / `:runway-<shape>-N:` by its runway (`RUNWAY_HUE_*`) and shape."""
-    return f":runway-{'' if shape == 'circle' else f'{shape}-'}{_hue_step(r, fill)}:"
+    return V.runway(_hue_step(r, fill), shape)
 
 
 def _hue_step(r: Runway, fill: float) -> int:
@@ -283,7 +286,7 @@ def _pool_chip(r: Runway, fill: float) -> str:
     """`quota_marks: arrow-chip`: the workspace emoji `:pool-chip-N-D:`, a white arrow at the pool's weekly growth rate (as the
     trend arrows' scale reads a percent) on a rounded square in its runway color."""
     d = deg(r.growth / r.used * 100 if r.growth is not None and r.used > 0 else 0, 7)
-    return f":pool-chip-{_hue_step(r, fill)}-{d}:"
+    return V.pool_chip(_hue_step(r, fill), d)
 
 
 def _pool_mark(r: Runway, fill: float, shape: str, cfg: DigestConfig) -> str:
@@ -605,12 +608,12 @@ def reply(day: DayRow, variant: str, cfg: DigestConfig) -> Reply:
     tail = _tail(day, cfg)
     if day.provisional:
         url = _diff_url(day.scan, day.since, cfg.site_url, slug=day.slug)
-        return Reply(f"{_md(day.date)} · so far", f":arrow_deg{d}: **{size}** · [as of {scan_ts(day.scan):%H:%M}Z]({url}){_tail_sep(cfg)}{tail}", icon_emoji=PROVISIONAL_ICON)
+        return Reply(f"{_md(day.date)} · so far", f"{V.trend(d)} **{size}** · [as of {scan_ts(day.scan):%H:%M}Z]({url}){_tail_sep(cfg)}{tail}", icon_emoji=PROVISIONAL_ICON)
     if variant == "sender":
         return Reply(f"{_md(day.date)} — {size}", tail, icon_url=f"{cfg.need('icons_base')}/arrows/av_deg{d}.png?v={AVATAR_REV}")
     if variant == "body":
         url = _diff_url(day.scan, day.since, cfg.site_url, slug=day.slug)
-        return Reply(cfg.title, f":arrow_deg{d}: [{_md(day.date)}]({url}) — **{size}**{_tail_sep(cfg)}{tail}", **cfg.op_sender())
+        return Reply(cfg.title, f"{V.trend(d)} [{_md(day.date)}]({url}) — **{size}**{_tail_sep(cfg)}{tail}", **cfg.op_sender())
     raise ValueError(f"variant must be one of {VARIANTS}, not {variant!r}")
 
 

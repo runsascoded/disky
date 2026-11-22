@@ -198,11 +198,9 @@ def test_discordify():
     )
 
 
-def test_discordify_missing_emoji_raises():
-    import pytest
-
-    with pytest.raises(ValueError, match="'arrow_deg30' missing"):
-        E.discordify(":arrow_deg30:", EMOJI)
+def test_discordify_missing_emoji_is_stock():
+    """An arrow the app hasn't uploaded is posted as its stock emoji (specs/emoji-vocabulary.md §3), not the raw code."""
+    assert E.discordify(":arrow_deg30: up, :arrow_deg-80: down, :runway-1: full", EMOJI) == "↗️ up, ⬇️ down, 🔴 full"
 
 
 class _Msg:

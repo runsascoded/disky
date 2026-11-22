@@ -7,6 +7,8 @@
  * `publishSplit`) and `replies` (the image replies, `_lib/replies.ts`, each `{ action, ts }` or `{ error }`), or
  * `split_error` / `replies_error` when one failed as a whole. The post stands either way.
  */
+import { workspaceCustom } from '@disk-tree/pages-kit/emoji'
+import { SlackClient } from '@open-athena/thrds'
 import { fleetSvg, PANELS } from '../../_lib/card.js'
 import { imageUrl } from '../../_lib/cardUrl.js'
 import { type Ctx, json, same } from '../../_lib/env.js'
@@ -32,7 +34,12 @@ export const onRequestPost = async (ctx: Ctx): Promise<Response> => {
     return json({ error: errText(e) }, 503)
   }
   const doc = await fleetDoc(env, { fresh: true, waitUntil: ctx.waitUntil })
-  const msg = fleetMessage(doc, `${url.origin}/fleet`, emoji)
+  // the workspace's custom emoji, read once by a run that posts: a starter's own emoji it lacks shows as 👤 (a dry run
+  // reads nothing: unknown, so it answers the message as written)
+  const have = !dry && env.DISKY_SLACK_BOT_TOKEN
+    ? await workspaceCustom(new SlackClient({ token: env.DISKY_SLACK_BOT_TOKEN, channel: env.SLACK_FLEET_CHANNEL ?? '' }), 'fleet slack')
+    : null
+  const msg = fleetMessage(doc, `${url.origin}/fleet`, emoji, have)
   const deployments = doc.deployments.map(({ name, color }) => ({ name, color }))
   const input = { tier: 'full', theme: 'dark', deployments, doc, now: doc.now } as const
   const card = await renderPng(env, url.origin, fleetSvg(input))
