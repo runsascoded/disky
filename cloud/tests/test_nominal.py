@@ -10,11 +10,6 @@ from dt_cloud import nominal as N
 from dt_cloud.append_runner import Busy, LocalLeaseFile, coordinator_lease
 
 T0 = int(datetime(2026, 11, 1, 8, tzinfo=timezone.utc).timestamp())
-
-
-def ago(i):
-    """`row(i)`'s start as Slack's relative date token (`N.started_ago`)."""
-    return f'<!date^{T0 + 86400 * i}^started {{ago}}|started 11/{i + 1:02d} 08:00Z>'
 #: `clean` grouping with a reply per run, each post the app's: most tests below pin its copy; `color` (the default) is
 #: tested with `replace(CFG, group='color')`, quiet clean threads (the default) with `QUIET`, and every default (status
 #: as the sender too) with `SENT`.
@@ -249,7 +244,7 @@ RUNNING_PARENT = (
     '✅ **Test scans: 2 consecutive clean runs**\n\n'
     'Since 11/02 08:00Z after [2026-11-01T0800](https://site.test/scans/r0).\n\n'
     'Latest completed: [11/03 08:00Z](https://site.test/scans/r2) · 1m 00s.\n\n'
-    f'Running now: [11/04 08:00Z](https://site.test/scans/r3) ({ago(3)}).\n\n'
+    'Running now: [11/04 08:00Z](https://site.test/scans/r3).\n\n'
     'Latest 2 runs: 2 scheduled / 0 manual. Each reply links its scan record. [All scans](https://site.test/scans).'
 )
 ADA = dict(trigger='manual', trigger_by='ada@example.org', trigger_emoji=':ada:')
@@ -985,7 +980,7 @@ QUIET_HEAD = (
 )
 TRAIL = ('✅ :alarm_clock: [11/02 08:00Z](https://site.test/scans/r1) · 1m 00s\n'
          '✅ :alarm_clock: [11/03 08:00Z](https://site.test/scans/r2) · 1m 00s')
-R3_RUNNING = f'⏳ :ada: [11/04 08:00Z](https://site.test/scans/r3) · running · {ago(3)}'
+R3_RUNNING = '⏳ :ada: [11/04 08:00Z](https://site.test/scans/r3) · running'
 
 
 def quiet_running_writer():
@@ -998,7 +993,7 @@ def quiet_running_writer():
     w.run([row(3, 'running', finished_ts=None, **ADA), *history(2)])
     assert bodies(w.slack) == [
         ('edit', '2.0', f'{TRAIL}\n{R3_RUNNING}'),
-        ('edit', '1.0', QUIET_HEAD.replace('Latest 2 runs', f'Running now: [11/04 08:00Z](https://site.test/scans/r3) ({ago(3)}).\n\nLatest 2 runs')),
+        ('edit', '1.0', QUIET_HEAD.replace('Latest 2 runs', 'Running now: [11/04 08:00Z](https://site.test/scans/r3).\n\nLatest 2 runs')),
     ]
     assert ('running' in w.saved) is False
     w.slack.calls.clear()
@@ -1205,8 +1200,8 @@ def test_a_quiet_green_thread_posts_its_head_and_rolling_reply_under_fixed_sende
     assert w.saved['head_sender'] == 'Test scans · clean'
     w.run([row(3, 'running', finished_ts=None, **ADA), *history(2)])
     assert sent(w.slack) == [
-        ('edit', '2.0', None, f'{TRAIL}\n{R3_RUNNING}'),
-        ('edit', '1.0', None, SENT_HEAD.replace('Latest 2 runs', f'Running now: [11/04 08:00Z](https://site.test/scans/r3) ({ago(3)}).\n\nLatest 2 runs')),
+        ('edit', '2.0', None, f'{TRAIL}\n⏳ :ada: [11/04 08:00Z](https://site.test/scans/r3) · running'),
+        ('edit', '1.0', None, SENT_HEAD.replace('Latest 2 runs', 'Running now: [11/04 08:00Z](https://site.test/scans/r3).\n\nLatest 2 runs')),
     ]
 
 
@@ -1236,7 +1231,7 @@ def test_a_red_threads_run_posts_its_hourglass_reply_then_deletes_it_and_posts_i
     w.run([row(4, 'running', finished_ts=None), F3, *history(2)])
     assert sent(w.slack) == [
         ('post', '5.0', {'username': '11/05 08:00Z · running', 'icon_emoji': ':hourglass_flowing_sand:'}, ':alarm_clock: [record](https://site.test/scans/r4)'),
-        ('edit', '3.0', None, RED_HEAD.replace('Each reply', f'Running now: [11/05 08:00Z](https://site.test/scans/r4) ({ago(4)}).\n\nEach reply')),
+        ('edit', '3.0', None, RED_HEAD.replace('Each reply', 'Running now: [11/05 08:00Z](https://site.test/scans/r4).\n\nEach reply')),
     ]
     w.run([row(4, issues=[{'phase': 'probe'}]), F3, *history(2)])
     assert sent(w.slack) == [
