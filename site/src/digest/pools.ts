@@ -5,6 +5,7 @@ import type { QuotaScan } from './quota'
 import { deg, type DigestCfg, type Quota, type Shape } from './common'
 import { scanTime } from '../scanSlug'
 import { fixed } from './pyfmt'
+import { code } from '@disk-tree/pages-kit/emoji'
 
 export interface Pool {
   /** The bucket's label, or the zone's name for buckets sharing one. */
@@ -120,7 +121,7 @@ export function hueStep(r: Runway, pct: number): number {
 }
 
 export function runwayHue(r: Runway, pct: number, shape: Shape = 'circle'): string {
-  return `:runway-${shape === 'circle' ? '' : `${shape}-`}${hueStep(r, pct)}: `
+  return `${code(shape === 'circle' ? `runway.${hueStep(r, pct)}` : `runway.${shape}.${hueStep(r, pct)}`)} `
 }
 
 /** Arrow marks, previewed on `/admin/slack`; only `arrow-chip` has its emoji uploaded and is one the job renders: the angle
@@ -139,8 +140,9 @@ export function poolMark(mode: PoolMark, r: Runway, pct: number, v: number, shap
   if (mode === 'runway') return runwayMark(r, pct)
   if (mode === 'runway-hue') return runwayHue(r, pct, shape)
   const [d, n] = [weeklyDeg(r, v), hueStep(r, pct)]
-  if (mode === 'arrow-circle') return `:arrow_deg${d}: :runway-${n}: `
-  return `:pool-${mode === 'arrow' ? 'bare' : mode === 'arrow-disc' ? 'disc' : 'chip'}-${n}-${d}: `
+  if (mode === 'arrow-circle') return `${code(`trend.${d}`)} ${code(`runway.${n}`)} `
+  if (mode === 'arrow-chip') return `${code(`pool.${n}.${d}`)} `
+  return `:pool-${mode === 'arrow' ? 'bare' : 'disc'}-${n}-${d}: `
 }
 
 export function runwayText(r: Runway, cfg: DigestCfg): string {

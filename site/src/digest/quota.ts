@@ -5,6 +5,7 @@ import { encodeScan, scanTime } from '../scanSlug'
 import { type BucketCfg, deg, type DigestCfg, type DigestParams, type OpLinks, prevMonthLink, type Quota, span, tb, weekOf, windowLabel, windowStart } from './common'
 import { type Pool, poolRows, pools, quotaLine, QUIET_PCT, used } from './pools'
 import { addDays, dayOf, fixed, grouped, hhmm, iso, md, mon3, monthYear, pyRound } from './pyfmt'
+import { code } from '@disk-tree/pages-kit/emoji'
 
 export interface QuotaScan {
   scan: string
@@ -118,7 +119,7 @@ function poolsText(m: QuotaRows, month: number, cfg: DigestCfg, p: DigestParams,
     return Math.abs(d) < 0.05 ? '' : ` (${tb(d)})`
   }
   const lines = [
-    `:arrow_deg${deg(held ? (((mdtb / held) * 100) * 7) / days : 0)}: ${p.headline.map(f => figures[f]).join('')}${grouped(sum(all, last, cfg), 0)} ${u.name} total · [dashboard](${site}/)`,
+    `${code(`trend.${deg(held ? (((mdtb / held) * 100) * 7) / days : 0)}`)} ${p.headline.map(f => figures[f]).join('')}${grouped(sum(all, last, cfg), 0)} ${u.name} total · [dashboard](${site}/)`,
     `_as of ${md(dayOf(date(last)))} ${hhmm(ts(last))}Z_`,
     '',
     '*Buckets* (Δ month-to-date)',
@@ -155,7 +156,7 @@ function poolsText(m: QuotaRows, month: number, cfg: DigestCfg, p: DigestParams,
     })
     const first = all.filter(b => (sizeOf(b, end, cfg) ?? 0) >= WEEK_MOVER && sizeOf(b, prevEnd, cfg) === undefined)
       .map(b => `new: ${cfg.buckets[b]?.label || b} ${grouped(sizeOf(b, end, cfg)!, 0)}`)
-    lines.push(`:arrow_deg${deg(wheld ? (wdtb / wheld) * 100 : 0)}: [wk of ${md(mon)}](${link})${earlier}${partial}: ${[`**${tb(wdtb)} ${u.name}**`, ...movers, ...first].join(' · ')}`)
+    lines.push(`${code(`trend.${deg(wheld ? (wdtb / wheld) * 100 : 0)}`)} [wk of ${md(mon)}](${link})${earlier}${partial}: ${[`**${tb(wdtb)} ${u.name}**`, ...movers, ...first].join(' · ')}`)
     prevEnd = end
   }
   if (links.prevUrl) lines.push('', ...prevMonthLink(month, links.prevUrl))
@@ -192,7 +193,7 @@ export function opText(m: QuotaRows, month: number, cfg: DigestCfg, p: DigestPar
     window: back !== b0 ? `**${tb(last.tb - back.tb)} ${u.name}** [${windowLabel(start, back.scan, p.windowDays)}](${backUrl}) · ` : '',
   }
   const lines = [
-    `:arrow_deg${deg(mweekly)}: ${p.headline.map(f => figures[f]).join('')}${primary}${grouped(last.tb, 0)} ${u.name}${quotas(last.tb, last.classes, qs, cfg)}` +
+    `${code(`trend.${deg(mweekly)}`)} ${p.headline.map(f => figures[f]).join('')}${primary}${grouped(last.tb, 0)} ${u.name}${quotas(last.tb, last.classes, qs, cfg)}` +
       `${extras(last, dextra(last, b0 !== last ? b0 : null), mtdSince, cfg)} · [dashboard](${site}/)`,
     ...(p.quotas === 'off' ? [] : [quotaLine(last, cfg, p.alertAt, p.quotas, seen)].filter(Boolean)),
     `_as of ${md(dayOf(date(last)))} ${hhmm(ts(last))}Z_`,
@@ -218,7 +219,7 @@ export function opText(m: QuotaRows, month: number, cfg: DigestCfg, p: DigestPar
     const earlier = addDays(mon, 6) < month ? ` (${mon3(dayOf(date(end)))})` : ''
     const link = diffUrl(end.scan, dlink(end), prevEnd !== end ? ts(prevEnd) : null, site)
     lines.push(
-      `:arrow_deg${deg(wpct)}: [wk of ${md(mon)}](${link})${earlier}${partial}: ` +
+      `${code(`trend.${deg(wpct)}`)} [wk of ${md(mon)}](${link})${earlier}${partial}: ` +
         `**${tb(wdtb)} ${u.name}** → ${grouped(end.tb, 0)} ${u.name}${quotas(end.tb, end.classes, qs, cfg)}`,
     )
     prevEnd = end

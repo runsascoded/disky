@@ -3576,7 +3576,10 @@ def _digest(
         raise SystemExit("digest: need SLACK_BOT_TOKEN + SLACK_CHANNEL (or -t/-c)")
     from thrds.slack import SlackClient
 
-    client = SlackClient(token, channel)
+    from .emoji_vocab import with_fallback
+
+    # the workspace's custom emoji are read once, at the first write: a disky emoji it lacks is posted as its stock one
+    client = with_fallback(SlackClient(token, channel), "digest")
     icons = icons_dir or _icons_dir(cfg.icons_dir, config_path)
 
     def deploy(local: Path, name: str) -> str | None:
@@ -3653,6 +3656,21 @@ def cw_digest(**kw) -> None:
     _digest(**kw)
 
 
+
+
+@main.group("emoji")
+def _emoji() -> None:
+    """disky's emoji vocabulary (`emoji_vocab`, specs/emoji-vocabulary.md): its TS table, the `disky` pack's images,
+    and which of them a Slack workspace lacks."""
+
+
+@_emoji.command("vocab")
+def _emoji_vocab() -> None:
+    """Print the vocabulary as JSON for the TS side: `packages/pages-kit/src/emoji/vocab.json` is this output
+    (`dt-cloud emoji vocab > packages/pages-kit/src/emoji/vocab.json` after changing a key; a test compares them)."""
+    from .emoji_vocab import vocab_json
+
+    sys.stdout.write(vocab_json())
 
 
 @main.command("discord-emoji")

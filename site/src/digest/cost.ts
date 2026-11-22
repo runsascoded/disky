@@ -3,6 +3,7 @@
 import { encodeScan, scanTime } from '../scanSlug'
 import { deg, type DigestCfg, type DigestParams, type OpLinks, pct, prevMonthLink, span, tb, usd, weekOf, windowLabel, windowStart } from './common'
 import { addDays, dayOf, grouped, iso, md, mon3, monthYear, pyRound } from './pyfmt'
+import { code } from '@disk-tree/pages-kit/emoji'
 
 /** One day's sender scan: TiB total and per class, $/mo, deltas vs the previous day's (null: none). */
 export interface CostRow {
@@ -57,7 +58,7 @@ export function opText(m: CostRows, month: number, cfg: DigestCfg, p: DigestPara
     // (none when it starts where month-to-date does: a store whose first scan is this month's)
     window: backAt !== (rows[0].prev ?? rows[0].date) ? `**${tb(last.tb - backTb)} TiB** [${windowLabel(start, backAt, p.windowDays)}](${backUrl}) · ` : '',
   }
-  const lines = [`:arrow_deg${deg(mweekly)}: ${p.headline.map(f => figures[f]).join('')}[dashboard](${site}/)`, '', '*Weekly summaries*']
+  const lines = [`${code(`trend.${deg(mweekly)}`)} ${p.headline.map(f => figures[f]).join('')}[dashboard](${site}/)`, '', '*Weekly summaries*']
   const mon0 = weekOf(p.weeks === 'month' ? month : start)
   const weeks = new Map<number, CostRow[]>()
   for (const r of seen) {
@@ -81,7 +82,7 @@ export function opText(m: CostRows, month: number, cfg: DigestCfg, p: DigestPara
     const partial = new Set(ws.map(day)).size < 7 && mon === lastMon ? ' _(partial)_' : ''
     const earlier = addDays(mon, 6) < month ? ` (${mon3(day(end))})` : ''
     lines.push(
-      `:arrow_deg${deg(wpct)}: [wk of ${md(mon)}](${site}/?d=${dlink(end)}-${span(bAt, scanTime(end.date))}#over-time)${earlier}${partial} — ` +
+      `${code(`trend.${deg(wpct)}`)} [wk of ${md(mon)}](${site}/?d=${dlink(end)}-${span(bAt, scanTime(end.date))}#over-time)${earlier}${partial} — ` +
         `**${grouped(end.tb, 0)} TiB** (${tb(wdtb)}, ${pct(wdtb, end.tb)}%) · $${grouped(end.cost, 0)}/mo (${usd(end.cost - bCost)})`,
     )
     prevEnd = end

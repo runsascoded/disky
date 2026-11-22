@@ -200,7 +200,8 @@ describe('POST /api/fleet/slack', () => {
     ]).toEqual([
       [502, { error: 'no post to update: bind FLEET_KV, or post one with `?new=1` and set SLACK_FLEET_TS to its ts' }],
       ['dry', 'disky fleet: gcs ok, cw 1 step issue open (warm-cache), hf ok, r2 ok', true, ['section', 'section', 'section', 'section', 'section', 'context']],
-      [],
+      // the refused run read the workspace's custom emoji (answered with an error: written as they are); the dry run, nothing
+      [{ method: 'emoji.list', body: {} }],
     ])
   })
 })

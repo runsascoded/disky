@@ -33,6 +33,9 @@ def history(n):
 
 
 class Slack:
+    #: The workspace's custom emoji (`Transport.have`): unknown, so every starter's own emoji is kept
+    have = None
+
     def __init__(self):
         self.messages_by_id = {}
         self.calls = []

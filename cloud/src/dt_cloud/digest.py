@@ -41,6 +41,7 @@ from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
 from typing import Any, Protocol
 
+from . import emoji_vocab
 from .scan_id import META_PATH, min_slug, scan_slug, scan_time, start_key, times_needed
 
 TIB = 1024**4
@@ -554,27 +555,21 @@ class Unit:
     reply: Reply
 
 
-_EMOJI_RE = re.compile(r":arrow_deg(-?\d+):")
-
-
 def emoji_name(d: int) -> str:
-    """Discord application-emoji name for a signed arrow degree. Discord emoji
-    names are ``[A-Za-z0-9_]`` only (no ``-``), so a negative reads
-    ``arrow_degm30`` where the Slack custom emoji is ``arrow_deg-30``."""
-    return f"arrow_deg{d}" if d >= 0 else f"arrow_degm{-d}"
+    """Discord application-emoji name for a signed arrow degree (`emoji_vocab`'s ``trend.<d>``). Discord emoji names
+    are ``[A-Za-z0-9_]`` only (no ``-``), so a negative reads ``arrow_degm30`` where the Slack custom emoji is
+    ``arrow_deg-30``."""
+    discord = emoji_vocab.key(f"trend.{d}").discord
+    assert discord is not None
+    return discord
 
 
 def discordify(text: str, emoji: dict[str, str]) -> str:
-    """Rewrite the Slack ``:arrow_degN:`` shortcodes in ``text`` to Discord's
-    ``<:name:id>`` form via ``emoji`` (app-emoji name -> id; uploaded by
-    `dt-cloud discord-emoji`). The rest of the markdown (bold, italics, masked
-    links) renders the same on both platforms."""
-    def sub(m: re.Match) -> str:
-        name = emoji_name(int(m.group(1)))
-        if name not in emoji:
-            raise ValueError(f"discord app emoji {name!r} missing — run `dt-cloud discord-emoji` to upload the arrow set")
-        return f"<:{name}:{emoji[name]}>"
-    return _EMOJI_RE.sub(sub, text)
+    """Rewrite the vocabulary's Slack custom shortcodes in ``text`` (``:arrow_degN:``, ``:runway-N:``,
+    ``:pool-chip-N-D:``) to Discord's ``<:name:id>`` form via ``emoji`` (app-emoji name -> id; uploaded by
+    `dt-cloud discord-emoji`), or to the key's stock emoji where the app lacks one (`emoji_vocab.discordify`). The
+    rest of the markdown (bold, italics, masked links) renders the same on both platforms."""
+    return emoji_vocab.discordify(text, emoji)
 
 
 # ---- templates ------------------------------------------------------------------

@@ -65,6 +65,16 @@ describe('a manual run\'s starter', () => {
       '*<https://h.test|h>*  :bust_in_silhouette::white_check_mark:',
     ])
   })
+
+  it('shows as 👤 where the posting workspace lacks their emoji (specs/emoji-vocabulary.md §3)', () => {
+    const by = run({ trigger: 'manual', trigger_emoji: ':ryan:' })
+    const lines = (have: Set<string>) => (fleetMessage({ ...doc, deployments: [dep('g', { last: by, runs: [by] })] }, 'https://fleet.test/fleet', DEFAULT_EMOJI, have).blocks as { type: string; text?: { text: string } }[])
+      .slice(1, -1).map(b => b.text!.text.split('  ').slice(0, 2).join('  '))
+    expect([lines(new Set(['ryan'])), lines(new Set(['someone-else']))]).toEqual([
+      ['*<https://g.test|g>*  :ryan::white_check_mark:'],
+      ['*<https://g.test|g>*  :bust_in_silhouette::white_check_mark:'],
+    ])
+  })
 })
 
 describe('a cancelled run', () => {

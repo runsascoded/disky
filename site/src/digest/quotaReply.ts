@@ -7,6 +7,7 @@ import { type DigestCfg, deg, pct, tb as signed, type Quota } from './common'
 import { bucketLink, type QuotaRows, type QuotaScan, dextra, diffUrl, dlink, scoped } from './quota'
 import { growth, hueStep, mark, poolMark, type PoolMark, QUIET_PCT, runway, type Runway, RUNWAY_WINDOWS_D, runwayText, weeklyDeg } from './pools'
 import { dayOf, fixed, grouped, hhmm, md, pyRound } from './pyfmt'
+import { code } from '@disk-tree/pages-kit/emoji'
 
 export type ReplyMarks = 'warning' | 'circles' | PoolMark
 
@@ -231,13 +232,13 @@ function reply(day: DayRow, variant: string, cfg: DigestCfg, rc: ReplyCfg, marks
   const url = diffUrl(day.s.scan, dlink(day.s), day.since, cfg.site_url)
   const base = { key: day.date, scan: day.s.scan }
   if (day.provisional) {
-    return { ...base, username: `${when} · so far`, body: `:arrow_deg${d}: **${size}** · [as of ${hhmm(scanTime(day.s.scan))}Z](${url})${sep}${t}`, icon_url: null, icon_emoji: PROVISIONAL_ICON }
+    return { ...base, username: `${when} · so far`, body: `${code(`trend.${d}`)} **${size}** · [as of ${hhmm(scanTime(day.s.scan))}Z](${url})${sep}${t}`, icon_url: null, icon_emoji: PROVISIONAL_ICON }
   }
   if (variant === 'sender') {
     const sender = { ...base, username: `${when} — ${size}`, body: t, icon_url: `${cfg.icons_base}/arrows/av_deg${d}.png?v=${rc.avatar_rev}`, icon_emoji: null }
     return collage ? { ...sender, icon_url: null, icon_cells: cells(day, cfg) } : sender
   }
-  return { ...base, username: cfg.title, body: `:arrow_deg${d}: [${when}](${url}) — **${size}**${sep}${t}`, icon_url: rc.op_sender.icon_url ?? null, icon_emoji: rc.op_sender.icon_emoji ?? null }
+  return { ...base, username: cfg.title, body: `${code(`trend.${d}`)} [${when}](${url}) — **${size}**${sep}${t}`, icon_url: rc.op_sender.icon_url ?? null, icon_emoji: rc.op_sender.icon_emoji ?? null }
 }
 
 /** The month's replies as the converge posts them, newest first (`digest.replies_json`). */
