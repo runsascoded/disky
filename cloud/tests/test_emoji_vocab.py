@@ -1,13 +1,15 @@
 """The emoji vocabulary (specs/emoji-vocabulary.md §1, §3, §4): keys, the custom → stock fallback, Discord rendering,
-the TS table."""
+the TS table, `dt-cloud emoji build` / `check`."""
 from importlib.machinery import SourceFileLoader
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
 import pytest
+from click.testing import CliRunner
 
 from dt_cloud import emoji_vocab as V
 from dt_cloud import nominal as N
+from dt_cloud.cli import main
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -126,3 +128,61 @@ def test_nominal_and_deploy_notify_stock_match_the_vocabulary():
     notify.__file__ = str(ROOT / "site/deploy-notify")
     SourceFileLoader(notify.__name__, notify.__file__).exec_module(notify)
     assert notify.DEFAULT_EMOJI == {env: {r: V.stock(f"deploy.{env}.{r}") for r in V.DEPLOY_RESULTS} for env in ("prod", "dev")}
+
+
+class FakeWorkspace:
+    """`thrds.slack.SlackClient` for `emoji check`: `auth.test` and `emoji.list` only."""
+
+    def __init__(self, token=None, channel=None, emoji=None, fail=False):
+        self.emoji, self.fail = emoji or {}, fail
+
+    def _request(self, endpoint, data=None, method="POST"):
+        assert endpoint == "auth.test"
+        return {"ok": True, "team": "Test Co", "url": "https://test-co.slack.com/"}
+
+    def fetch_workspace_emoji(self):
+        if self.fail:
+            raise RuntimeError("missing_scope")
+        return self.emoji
+
+
+def _check(monkeypatch, args, **kw):
+    import thrds.slack
+
+    monkeypatch.setattr(thrds.slack, "SlackClient", lambda token, channel: FakeWorkspace(**kw))
+    monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-test")
+    return CliRunner().invoke(main, ["emoji", "check", *args])
+
+
+def test_emoji_check_lists_the_missing_and_exits_1(monkeypatch):
+    have = {f"runway-{n}": "https://e.test/x.png" for n in range(1, 8)}
+    r = _check(monkeypatch, ["-k", "runway.8", "-k", "runway.1", "-k", "runway.7", "-k", "trend.0"], emoji=have)
+    assert (r.exit_code, r.stdout.split("\n"), r.stderr.split("\n")) == (
+        1,
+        ["trend.0\t:arrow_deg0:", "runway.8\t:runway-8:", ""],
+        ["emoji check: Test Co (https://test-co.slack.com/): 2 of 4 disky emoji missing", ""],
+    )
+    r = _check(monkeypatch, ["-k", "runway.1"], emoji=have)
+    assert (r.exit_code, r.stdout) == (0, "")
+    r = _check(monkeypatch, [], fail=True)
+    assert (r.exit_code, r.stdout, r.stderr) == (3, "", "emoji check: can't read the workspace's emoji (RuntimeError: missing_scope)\n")
+
+
+def test_emoji_build_draws_the_pack(tmp_path):
+    """The trend arrows are the committed `job/icons/arrows` ones, pixel for pixel; every image is 128 px square, within
+    Slack's 128 KB, named for its emoji; `-K -` takes `emoji check`'s lines; the contact sheet goes outside `-o`."""
+    Image = pytest.importorskip("PIL.Image")
+    out = tmp_path / "pack"
+    r = CliRunner().invoke(main, ["emoji", "build", "-o", str(out), "-K", "-", "-s", str(tmp_path / "sheet.png")],
+                           input="".join(f"trend.{d}\t:arrow_deg{d}:\n" for d in V.TREND_DEGS) + "runway.star\npool.8.-50\n")
+    assert r.exit_code == 0, r.output
+    names = sorted(p.name for p in out.iterdir())
+    assert names == sorted([*(f"arrow_deg{d}.png" for d in V.TREND_DEGS), *(f"runway-star-{n}.png" for n in range(1, 9)), "pool-chip-8--50.png"])
+    assert (tmp_path / "sheet.png").exists()
+    for p in out.iterdir():
+        im = Image.open(p)
+        assert (im.size, im.mode, p.stat().st_size <= 128 * 1024) == ((128, 128), "RGBA", True)
+    for d in V.TREND_DEGS:
+        built = Image.open(out / f"arrow_deg{d}.png").convert("RGBA")
+        committed = Image.open(ROOT / f"job/icons/arrows/arrow_deg{d}.png").convert("RGBA")
+        assert built.tobytes() == committed.tobytes(), d

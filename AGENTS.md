@@ -96,6 +96,11 @@ dt-cloud dups -o OUT INDEX  # A scan's duplicate-candidate groups (specs/dups.md
                           # crc32c (`exact`; a differing `moved` copy dropped), `-g N` crc32c spot checks on GCS (groups `-l` left
                           # unsettled) → `dups.parquet` + `dups.json`
                           # (the `dups` scan step writes them beside the index; `/api/dups` + `/dups` read them, `DUPS=1`)
+dt-cloud emoji check [-k KEY]…  # The emoji vocabulary (`emoji_vocab.py`, specs/emoji-vocabulary.md): which `disky` pack
+                          # emoji ($SLACK_BOT_TOKEN's workspace) lacks, `<key>\t:<name>:` a line; exit 1 when any (posts
+                          # write those as their stock emoji: each Slack writer reads `emoji.list` once a run), 3 unreadable.
+                          # `emoji build -o DIR [-K -]` draws them (Pillow, the `emoji` extra) for the upload
+                          # (`.claude/skills/slack-emoji-install`); `emoji vocab` is the TS table (pages-kit `emoji/vocab.json`)
 dt-cloud admins check -d DB -o ORG [-c CONFIG] [-j] [-x HANDLE]…  # A deployment's admin list (`admin_emails.github`: the handles recorded
                           # on `/admin`) against a GitHub org's owners (`gh api orgs/ORG/members?role=admin`; run as an org
                           # member): who is an owner but not an admin, and the reverse; rows without a handle are counted.
