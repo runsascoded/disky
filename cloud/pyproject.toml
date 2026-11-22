@@ -44,6 +44,11 @@ overtime = [
 wandb = ["wandb>=0.19"]
 s3 = ["boto3>=1.34"]  # CoreWeave S3 (CAIOS) mark & sweep executor; `publish-r2` (R2 S3 API)
 sheets = ["gspread>=6.0"]  # `sheet-push` → Google Sheets (ADC auth)
+# `scan_backend_fray`: the scan DAG over a fray `Client` (fray's `LocalClient` here; Marin's Iris needs fray's `iris`
+# extra, whose `marin-finestore` wants pyarrow >= 23, past pyrmts' `<23`). Marin's packages declare `<3.14`, so the
+# marker keeps the lock resolvable for the workspace's later Pythons. Upstream publishes a `0.2.N.devM` per merge to
+# main, each pinning `marin-rigging` to itself: bump deliberately.
+fray = ["marin-fray==0.2.329.dev44910398524; python_version < '3.14'"]
 
 [project.scripts]
 dt-cloud = "dt_cloud.cli:main"
