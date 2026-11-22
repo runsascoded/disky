@@ -11,8 +11,9 @@ from dataclasses import dataclass, replace
 from io import StringIO
 from pathlib import Path
 
-#: Engines with a reader here, by name (`scan_run_dags.engine`).
-ENGINES = ("nextflow",)
+#: Engines with a reader here, by name (`scan_run_dags.engine`). `fray` (`scan_backend_fray`) writes this module's own
+#: JSON (`Dag.to_json`).
+ENGINES = ("nextflow", "fray")
 
 # Nextflow's `-with-dag dag.mmd`: `v2(["list_source"])` is a process; `v0["channel.fromList"]`, `v3(( ))` (an operator)
 # and `v15[" "]` (an output) are not.
@@ -75,8 +76,16 @@ def from_nextflow(mermaid: str) -> Dag:
     return Dag(tuple(proc.values()), tuple(edges))
 
 
+def from_json(text: str) -> Dag:
+    """`Dag.to_json`'s output, read back."""
+    d = json.loads(text)
+    return Dag(tuple(n["id"] for n in d["nodes"]), tuple((a, b) for a, b in d["edges"]), tuple(d.get("cached_tasks", ())))
+
+
 def read(engine: str, text: str) -> Dag:
     """`text` in `engine`'s own DAG format, reduced."""
     if engine == "nextflow":
         return from_nextflow(text)
+    if engine == "fray":
+        return from_json(text)
     raise ValueError(f"no DAG reader for engine {engine!r} (have: {', '.join(ENGINES)})")

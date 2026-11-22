@@ -1,6 +1,6 @@
 # Orchestrator abstraction: one scan DAG, Nextflow or Marin's executor (Iris) underneath
 
-Status: proposed 2026-11-21. Ryan approved "do 1–3, prep 4, then re-evaluate". §1–3 implemented on `orch` (below, "As built"); §4 next.
+Status: proposed 2026-11-21. Ryan approved "do 1–3, prep 4, then re-evaluate". §1–3 implemented on `orch` (below, "As built"); §4 prepped (`FrayBackend`, not wired), awaiting the re-evaluation.
 
 ## Why
 
@@ -49,6 +49,14 @@ Acceptance: a scan run under the rendered `scan.nf` is identical to today's: sam
 - **The Iris backend**: it submits each step as an Iris job through fray's `iris_backend`. Test it with fray's `LocalClient` first. The first CoreWeave submission waits for Ryan's go, after Marin's ok (Russell for `infra`, Isaac for grant capacity).
 - **Iris's namespace isn't a blocker** for this route. Iris runs its task pods in its own namespace `iris`, and we'd be submitting Iris jobs, not creating pods. A namespace of our own was needed only for Nextflow's own Kubernetes executor. The real ask is permission to use Iris and its capacity.
 - **Data locality**: gcs's data is in GCS us-east1, so gcs scans on CoreWeave would read across clouds (egress). Iris fits cw first (CAIOS); gcs stays on Batch. So the abstraction serves two backends at once.
+
+### Prep as built (§4): `FrayBackend`, without `marin.execution`
+
+Reading fray (`lib/fray`): its `Client` (`submit(JobRequest) → JobHandle`, `status`, `terminate`, `logs`) is all a backend needs, and `marin-fray` depends only on cloudpickle, humanfriendly and `marin-rigging` (+ `marin-iris` for its `iris` extra). Since the DAG is already data and resume is already per-task done markers, the head can schedule the DAG itself over a fray `Client`; `StepRunner`'s own machinery (hash-addressed output paths, artifact records, locks) doesn't map onto our steps, which write fixed data-store paths and skip what's done themselves. So **the Iris backend doesn't need the `marin.execution` split**; the split is only worth doing if we want `StepRunner` for its own sake. Re-evaluation point.
+
+- **`scan_backend_fray.FrayBackend(client)`** (engine `fray`): a task is submitted once its deps' tasks all succeeded (≤ `limit` in flight); a failure finishes the running tasks and starts none (`errorStrategy 'finish'`); a node's `retries` → `max_retries_failure`. Each success writes `<work>/fray/<session>/<node>/<tag>.done`; a later head for the scan skips those (`cached_tasks` in the run's DAG), `fresh` ignores them. A task is `bash -c` over its env (identity, `NF_PROCESS`/`NF_TAG`/`NF_MACHINE`, profile env, run id, profile JSON) and its calls through `dt-cloud secrets exec`, as `stepScript` writes them (`LocalClient` runs the command as is, so the env rides in the script). Resources: `scan_dag.resources` → `ResourceConfig(cpu, ram, disk, image)`, a GCE type read as its shape (`machine_shape`). `interrupt`/`cancel` terminate the running jobs. Its DAG file is `run_dag`'s JSON (`run_dag.ENGINES` gains `fray`; `scan-run finish -E`).
+- **Tested** with a scripted fake client (waves, failure-finish, resume, `fresh`, interrupt, the task script, shapes); `test_local_client` runs it through fray's real `LocalClient` where fray is installed (passed on `mgu` with `uv run --with marin-fray==0.2.329.dev44910398524`, Python 3.13; CI skips it).
+- **Not wired**: `backend_for` still picks Nextflow for every profile. Selecting it (`executor.kind: iris`, a client from `fray.iris_backend` over Iris's config) and adding `marin-fray` as an optional dependency wait for Ryan's go. No fork is needed: upstream publishes `marin-fray` to PyPI on every merge to main (`0.2.N.devM`, each pinning `marin-rigging` / `marin-iris` to the same version), so the pin is one exact version. The dependency needs `python_version < '3.14'`: Marin's packages declare `>=3.12,<3.14`, and the workspace lock resolves `cloud`'s `>=3.12` for every later Python too (disky itself runs 3.12 in the image, 3.12/3.13 in CI). Base `marin-fray` brings 75 packages over `rigging`; the `iris` extra adds grpcio, sqlalchemy, uvicorn, google-cloud-tpu and a native wheel, so it belongs in an extra only an Iris deployment's image installs. The `marin.execution` split (`~/c/oa/marin`, `wt/execution-pkg`, no commits) is recommended dropped. Secrets on Iris: `secrets exec` reads GCP Secret Manager; on CoreWeave either the job carries GCP credentials or the bindings move to fray's `EnvironmentConfig.secrets`.
 
 ## Sessions
 

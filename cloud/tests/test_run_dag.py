@@ -63,7 +63,7 @@ def test_labelled_edges_and_the_json():
 def test_unknown_engine_refused():
     with pytest.raises(ValueError) as e:
         read("airflow", "")
-    assert str(e.value) == "no DAG reader for engine 'airflow' (have: nextflow)"
+    assert str(e.value) == "no DAG reader for engine 'airflow' (have: nextflow, fray)"
 
 
 def test_live_trace_cache_hits_are_explicit_and_deduplicated():
