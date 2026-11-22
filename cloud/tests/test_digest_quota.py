@@ -951,6 +951,79 @@ def test_apply_slack_reapplies_only_the_selected_messages(tmp_path: Path):
     assert json.loads((tmp_path / "digest" / "cw" / "C1" / "sender" / "2026-09.json").read_text())["posted"] == state["posted"]
 
 
+def test_apply_slack_dry_run_hosts_the_plot_only_for_a_plan(tmp_path: Path, monkeypatch):
+    """`host` (`digest -n -j`): a dry run still renders and hosts the OP's plot, so a plan's OP edit names a served
+    image; a plain dry run hosts nothing. Either way nothing is edited."""
+    root = tmp_path / "snapshots" / "cw"
+    _publish(root, LEAD + SEPT)
+    fake = _FakeSlack()
+    post_digest(str(root), SEP, "xoxb", "C1", "sender", client=fake)
+    seen: list[tuple] = []
+    real = E._op_render
+
+    def op_render(tpl, data, root, month, state, client, channel, variant, icons_dir, deploy_plot):
+        seen.append((icons_dir, deploy_plot))
+        return real(tpl, data, root, month, state, client, channel, variant, None, None)
+
+    monkeypatch.setattr(E, "_op_render", op_render)
+    icons = tmp_path / "icons"
+
+    def deploy(local, name):
+        return "https://abc123.plots.pages.dev"
+
+    fake.calls.clear()
+    E.apply_slack(_tpl(), str(root), SEP, fake, "C1", "sender", op=True, icons_dir=icons, deploy_plot=deploy, dry_run=True)
+    E.apply_slack(_tpl(), str(root), SEP, fake, "C1", "sender", op=True, icons_dir=icons, deploy_plot=deploy, dry_run=True, host=True)
+    assert (seen, fake.calls) == ([(None, None), (icons, deploy)], [])
+
+
+def test_edit_desired_is_what_edit_sends():
+    """`edit_desired`: a body as `SlackClient.edit` sends it, as a rewrite `Desired`: the markdown converted to
+    mrkdwn; trailing image lines lifted to image blocks under a section of that text; the sender unset (kept)."""
+    from thrds.rewrite import Desired
+
+    assert E.edit_desired("[main](https://x.test/d): 78.4% of 1P") == Desired("<https://x.test/d|main>: 78.4% of 1P")
+    assert E.edit_desired("**Sep 2026**: 713 TiB\n\n![plot](https://abc123.plots.pages.dev/plot-1.png?v=3)") == Desired(
+        "*Sep 2026*: 713 TiB",
+        blocks=[
+            {"type": "section", "text": {"type": "mrkdwn", "text": "*Sep 2026*: 713 TiB"}},
+            {"type": "image", "image_url": "https://abc123.plots.pages.dev/plot-1.png?v=3", "alt_text": "plot"},
+        ],
+    )
+    with pytest.raises(ValueError) as e:
+        E.edit_desired("![plot](https://abc123.plots.pages.dev/plot-1.png?v=3)")
+    assert str(e.value) == "digest: a body with image blocks needs 1–3000 chars of text, not 0"
+
+
+def test_rewrite_plan_edits_each_change_keeping_its_sender():
+    """`rewrite_plan`: each change's message is an `edit` to its new body (a sender-variant reply keeps its name and
+    avatar: never a `repost`); a body it already shows is a `noop`; a found message without a change is skipped."""
+    from thrds.rewrite import Content, Found, Sender
+
+    s1 = Sender(username="9/1 — 713 TiB (+8.0, 1.1%)", icon_url=f"{AV}50.png?v=4")
+    s2 = Sender(username="9/2 — 715 TiB (+2.0, 0.3%)", icon_url=f"{AV}30.png?v=4")
+
+    def found(ts: str, text: str, sender: Sender = Sender(), thread_ts: str | None = "m1", blocks=None) -> Found:
+        return Found(channel="C1", ts=ts, thread_ts=thread_ts, content=Content(text, blocks=blocks, sender=sender), ours=True,
+                     last=False, subtype="bot_message" if sender.is_override else None)
+
+    plot = "https://abc123.plots.pages.dev/plot-1.png?v=3"
+    op_blocks = [{"type": "section", "text": {"type": "mrkdwn", "text": "*Sep 2026*: 713 TiB"}},
+                 {"type": "image", "image_url": plot, "alt_text": "plot"}]
+    p = E.rewrite_plan(
+        [found("m1", "*Sep 2026*: 710 TiB", thread_ts=None), found("m2", "<https://x.test/1|main>: 78.0%", s1),
+         found("m3", "<https://x.test/2|main>: 78.6%", s2), found("m4", "unrelated")],
+        [E.Change("op", "m1", f"**Sep 2026**: 713 TiB\n\n![plot]({plot})"), E.Change("2026-09-01", "m2", "[main](https://x.test/1): 78.4%"),
+         E.Change("2026-09-02", "m3", "[main](https://x.test/2): 78.6%")],
+    )
+    assert [(a.kind.value, a.ts, a.new, a.reason) for a in p.actions] == [
+        ("edit", "m1", Content("*Sep 2026*: 713 TiB", blocks=op_blocks), None),
+        ("edit", "m2", Content("<https://x.test/1|main>: 78.4%", sender=s1), None),
+        ("noop", "m3", Content("<https://x.test/2|main>: 78.6%", sender=s2), None),
+        ("skip", "m4", None, "not selected"),
+    ]
+
+
 def test_day_range():
     assert [E.day_range("2026-11-01"), E.day_range("2026-10-31..2026-11-02")] == [["2026-11-01"], ["2026-10-31", "2026-11-01", "2026-11-02"]]
     with pytest.raises(ValueError) as e:
@@ -987,6 +1060,44 @@ def test_digest_cli_reply_selector_dry_run(tmp_path: Path, monkeypatch):
     bad = CliRunner().invoke(cli.main, ["digest", "-T", "quota", "-C", str(cfg), "-r", str(root), "-m", "2026-09", "-c", "C1", "-t", "xoxb", "-d", "2026-09-01", "-E"])
     assert (bad.exit_code, bad.output.strip().split("\n")[-1]) == (
         2, "Error: -o/--op, -d/--reply and -y/--replies re-apply Slack messages on their own (not with -E, -R or -P discord)")
+
+
+def test_digest_cli_plan(tmp_path: Path, monkeypatch):
+    """`digest -y A..B -n -j PATH`: the dry run's edits also land at PATH as a thrds rewrite plan, over the messages
+    as read (`find_ids`), for `/admin/slack` to review and apply; `-j` without `-n` and a selector is refused."""
+    import thrds.rewrite
+    import thrds.slack
+    from click.testing import CliRunner
+    from thrds.rewrite import Content, Found, Plan
+
+    from dt_cloud import cli
+
+    root = tmp_path / "snapshots" / "cw"
+    _publish(root, LEAD + SEPT)
+    post_digest(str(root), SEP, "xoxb", "C1", "sender", client=_FakeSlack())
+    fake = _FakeSlack()
+    monkeypatch.setattr(thrds.slack, "SlackClient", lambda token, channel: fake)
+    read: list = []
+
+    def find_ids(client, tss, channel=None):
+        read.append((client, tss))
+        return [Found(channel="C1", ts=ts, thread_ts="m1", content=Content("old"), ours=True, last=False) for ts in tss]
+
+    monkeypatch.setattr(thrds.rewrite, "find_ids", find_ids)
+    cfg = config_file(replace(CFG, root=str(root)), tmp_path / "digest.yml")
+    base = ["digest", "-T", "quota", "-C", str(cfg), "-r", str(root), "-m", "2026-09", "-c", "C1", "-t", "xoxb", "-y", "2026-09-01..2026-09-02"]
+    out = tmp_path / "reapply" / "job.plan.json"
+    r = CliRunner().invoke(cli.main, [*base, "-n", "-j", str(out)])
+    assert r.exit_code == 0, r.output
+    assert r.stdout.split("\n")[-2:] == [f"plan: 2 edit -> {out}", ""]
+    assert (read, fake.calls) == ([(fake, ["m2", "m3"])], [])
+    u = lambda d: f"{SITE}/main-data?d={d}#over-time"  # noqa: E731
+    assert [(a.kind.value, a.ts, a.new.text) for a in Plan.load(out).actions] == [
+        ("edit", "m2", f"<{u('26090112-1d')}|main>: 78.4% of 1P (197.0 Ti free)"),
+        ("edit", "m3", f"<{u('26090212-1d')}|main>: 78.6% of 1P (195.0 Ti free)"),
+    ]
+    bad = CliRunner().invoke(cli.main, [*base, "-j", str(out)])
+    assert (bad.exit_code, bad.output.strip().split("\n")[-1]) == (2, "Error: -j/--plan writes a dry run's edits (-n with -o, -d or -y)")
 
 
 def test_live_settings_override_the_file(monkeypatch):

@@ -3470,6 +3470,7 @@ def _digest_options(template_default: str):
         option("-F", "--for-real", is_flag=True, help="With --redo-replies: actually post the new replies and delete the old ones (default: print the plan)"),
         option("-H", "--reply-hour", type=int, default=None, help="quota template: UTC hour the sender variant's daily reply is taken from — the day's first scan at/after it (default 12 → the 12:01Z morning scan, 8:01 am ET; the day's other scans still feed the OP + plot, and with the config's `provisional: true` its earlier ones post a provisional reply)"),
         option("-i", "--icons-dir", type=Path, default=None, help="Where the plot PNG is written + deployed from (default the config's `icons_dir`: job/icons, job/icons-cw)"),
+        option("-j", "--plan", "plan_path", help="With -n and -o/-d/-y: also write the selected edits as a thrds bulk-rewrite plan (JSON) to this path or URL, for review and apply on /admin/slack; the OP's plot is hosted, so its planned edit names a served image"),
         option("-L", "--file-settings", is_flag=True, help="Use the config file's `params` / `quota_marks`, not the site's live settings (`/api/digest-settings`, edited on /admin/slack; the default when the site has a row)"),
         option("-m", "--month", help="Month YYYY-MM (default: current UTC month)"),
         option("-n", "--dry-run", is_flag=True, help="Render the plot + print OP/replies; post & host nothing"),
@@ -3506,6 +3507,7 @@ def _digest(
     for_real: bool,
     reply_hour: int | None,
     icons_dir: Path | None,
+    plan_path: str | None,
     file_settings: bool,
     month: str | None,
     dry_run: bool,
@@ -3550,6 +3552,8 @@ def _digest(
     selected = op_only or bool(days)
     if selected and (edit_replies or redo_replies or platform != "slack"):
         raise UsageError("-o/--op, -d/--reply and -y/--replies re-apply Slack messages on their own (not with -E, -R or -P discord)")
+    if plan_path and not (selected and dry_run):
+        raise UsageError("-j/--plan writes a dry run's edits (-n with -o, -d or -y)")
     if preview_key:
         if selected or dry_run or edit_replies or redo_replies or platform != "slack":
             raise UsageError("-W/--preview-only writes only the bundle (not with -n, -o, -d, -y, -E, -R or -P discord)")
@@ -3590,12 +3594,18 @@ def _digest(
 
     if selected:
         changes = dg.apply_slack(tpl, root, m, client, channel, variant, op=op_only, days=days, icons_dir=icons, deploy_plot=deploy,
-                                 dry_run=dry_run)
+                                 dry_run=dry_run, host=bool(plan_path))
         if dry_run:
             print(f"digest {m:%Y-%m} in {channel} ({variant}): {len(changes)} to edit; dry-run, nothing edited")
             for c in changes:
                 print(f"  {'OP' if c.what == 'op' else c.what}  ts={c.ts}")
                 print("\n".join(f"    {line}" for line in c.body.split("\n")))
+            if plan_path:
+                from thrds.rewrite import find_ids
+
+                rp = dg.rewrite_plan(find_ids(client, [c.ts for c in changes]), changes)
+                dg.write_plan(plan_path, rp)
+                print(f"plan: {rp.summary() or 'nothing found'} -> {plan_path}")
         else:
             err(f"digest: re-applied {len(changes)} message(s) in {m:%Y-%m}'s thread ({variant})")
         return
