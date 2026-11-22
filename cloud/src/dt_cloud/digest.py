@@ -1196,14 +1196,18 @@ def edit_desired(body: str):
     return Desired(wire, blocks=[{"type": "section", "text": {"type": "mrkdwn", "text": wire}}, *(to_block(r, token) for r in refs)])
 
 
-def rewrite_plan(found: Iterable[Any], changes: Iterable[Change]):
+def rewrite_plan(found: Iterable[Any], changes: Iterable[Change], have: Collection[str] | None = None):
     """The thrds bulk-rewrite plan (`thrds.rewrite.Plan`) of an `apply_slack` dry run's ``changes``: each change's
     message, as read from Slack (``found``: `thrds.rewrite.find_ids` over the changes' ts), planned to its new body
-    (`edit_desired`); a found message without a change is skipped. The site's `/admin/slack` reviews it and applies
-    a selection (`/api/digest-reapply/<job>/apply`)."""
+    (`edit_desired`) after the emoji fallback the live client applies (`emoji_vocab.fallback` over the workspace's custom
+    emoji, ``have``; None: unknown, as written), so an applied plan posts what a converge would; a found message
+    without a change is skipped. The site's `/admin/slack` reviews it and applies a selection
+    (`/api/digest-reapply/<job>/apply`)."""
     from thrds.rewrite import Skip, plan
 
-    want = {c.ts: edit_desired(c.body) for c in changes}
+    from .emoji_vocab import fallback
+
+    want = {c.ts: edit_desired(fallback(c.body, have)) for c in changes}
     return plan(found, lambda f: want.get(f.ts, Skip("not selected")))
 
 

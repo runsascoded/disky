@@ -1024,6 +1024,24 @@ def test_rewrite_plan_edits_each_change_keeping_its_sender():
     ]
 
 
+
+def test_rewrite_plan_applies_the_emoji_fallback():
+    """`rewrite_plan(..., have=)`: a body's vocabulary custom emoji the workspace lacks plans as its stock one, as the
+    live `FallbackClient` posts it; one it has stays; ``have=None`` (unknown) plans the body as written."""
+    from thrds.rewrite import Content, Found
+
+    f = Found(channel="C1", ts="m2", thread_ts="m1", content=Content("old"), ours=True, last=False, subtype=None)
+    body = "[main](https://x.test/1): 78.4% :arrow_deg10:"
+
+    def new(have):
+        return [a.new.text for a in E.rewrite_plan([f], [E.Change("2026-09-01", "m2", body)], have=have).actions]
+
+    assert [new(set()), new({"arrow_deg10"}), new(None)] == [
+        ["<https://x.test/1|main>: 78.4% :arrow_upper_right:"],
+        ["<https://x.test/1|main>: 78.4% :arrow_deg10:"],
+        ["<https://x.test/1|main>: 78.4% :arrow_deg10:"],
+    ]
+
 def test_day_range():
     assert [E.day_range("2026-11-01"), E.day_range("2026-10-31..2026-11-02")] == [["2026-11-01"], ["2026-10-31", "2026-11-01", "2026-11-02"]]
     with pytest.raises(ValueError) as e:
@@ -1090,7 +1108,8 @@ def test_digest_cli_plan(tmp_path: Path, monkeypatch):
     r = CliRunner().invoke(cli.main, [*base, "-n", "-j", str(out)])
     assert r.exit_code == 0, r.output
     assert r.stdout.split("\n")[-2:] == [f"plan: 2 edit -> {out}", ""]
-    assert (read, fake.calls) == ([(fake, ["m2", "m3"])], [])
+    # the CLI reads through its emoji-fallback wrapper (`emoji_vocab.FallbackClient`) around the client
+    assert ([(c._client, tss) for c, tss in read], fake.calls) == ([(fake, ["m2", "m3"])], [])
     u = lambda d: f"{SITE}/main-data?d={d}#over-time"  # noqa: E731
     assert [(a.kind.value, a.ts, a.new.text) for a in Plan.load(out).actions] == [
         ("edit", "m2", f"<{u('26090112-1d')}|main>: 78.4% of 1P (197.0 Ti free)"),

@@ -3603,7 +3603,7 @@ def _digest(
             if plan_path:
                 from thrds.rewrite import find_ids
 
-                rp = dg.rewrite_plan(find_ids(client, [c.ts for c in changes]), changes)
+                rp = dg.rewrite_plan(find_ids(client, [c.ts for c in changes]), changes, have=client.have)
                 dg.write_plan(plan_path, rp)
                 print(f"plan: {rp.summary() or 'nothing found'} -> {plan_path}")
         else:
