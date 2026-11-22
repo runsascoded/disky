@@ -97,8 +97,10 @@ def workflow(dag: ScanDag) -> str:
         elif n.fanout == "parts":
             args.append("Channel.fromList([" + ", ".join(_str(t.tag) for t in n.tasks) + "])")
         if n.deps:
+            # a dep's every task emits once, so a short list means one failed: `gathered` emits nothing for it
             first, *rest = map(_var, n.deps)
-            args.append(f"gathered({first}.mix({', '.join(rest)}))" if rest else f"gathered({first})")
+            count = sum(len(dag[d].tasks) for d in n.deps)
+            args.append(f"gathered({first}.mix({', '.join(rest)}), {count})" if rest else f"gathered({first}, {count})")
         lines.append(f"    def {_var(n.name)} = {n.name}({', '.join(args)})")
     lines.append("}")
     return "\n".join(lines) + "\n"

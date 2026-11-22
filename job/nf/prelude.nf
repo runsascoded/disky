@@ -52,9 +52,10 @@ def stepScript(task, List steps) {
     ([stepEnv(task)] + calls + [done]).join('\n') + '\n'
 }
 
-// Every item of `ch` as one sorted list of strings (`[]` for none): a task's input must not depend on the order its
-// upstream tasks finished in, or `-resume` misses its cache.
-def gathered(ch) { ch.toList().map { l -> l.collect { it.toString() }.sort() } }
+// Every item of `ch` as one sorted list of strings: a task's input must not depend on the order its upstream tasks
+// finished in, or `-resume` misses its cache. Only once all `n` arrived: a failed upstream task emits nothing, yet its
+// channel still closes, and under `errorStrategy 'finish'` a task its short list made ready could start anyway.
+def gathered(ch, int n) { ch.toList().filter { it.size() == n }.map { l -> l.collect { it.toString() }.sort() } }
 
 def diskOf(d) {
     if (!d) return null

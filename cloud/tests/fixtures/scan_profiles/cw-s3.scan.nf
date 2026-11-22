@@ -74,11 +74,11 @@ process over_time {
 workflow {
     if (!params.scan || !params.gen || !params.job_start) error "--scan, --gen and --job_start are required (`dt-cloud scan head` sets them)"
     def list_source_done = list_source(Channel.fromList(params.sources))
-    def index_done = index(gathered(list_source_done))
-    def index_rows_done = index_rows(gathered(index_done))
-    def publish_r2_done = publish_r2(gathered(index_rows_done))
-    def static_names_done = static_names(gathered(index_done))
-    def interval_store_done = interval_store(gathered(publish_r2_done))
-    def post_done = post(gathered(index_rows_done.mix(static_names_done, interval_store_done)))
-    def over_time_done = over_time(gathered(index_rows_done.mix(static_names_done, interval_store_done)))
+    def index_done = index(gathered(list_source_done, 3))
+    def index_rows_done = index_rows(gathered(index_done, 1))
+    def publish_r2_done = publish_r2(gathered(index_rows_done, 1))
+    def static_names_done = static_names(gathered(index_done, 1))
+    def interval_store_done = interval_store(gathered(publish_r2_done, 1))
+    def post_done = post(gathered(index_rows_done.mix(static_names_done, interval_store_done), 3))
+    def over_time_done = over_time(gathered(index_rows_done.mix(static_names_done, interval_store_done), 3))
 }
