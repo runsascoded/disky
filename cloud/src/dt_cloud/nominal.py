@@ -228,7 +228,7 @@ def plural(n: int, word: str) -> str:
 
 
 def stamp(row: dict) -> str:
-    return datetime.fromtimestamp(row['run']['started_ts'], timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
+    return datetime.fromtimestamp(row['run']['started_ts'], timezone.utc).strftime('%m/%d %H:%MZ')
 
 
 #: A reply's trigger, beside its ✅: the deployment's cron, a hand submit (the site's "Run a scan" or a CLI execute; who,
