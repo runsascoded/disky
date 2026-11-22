@@ -648,10 +648,42 @@ def test_outcome_emoji_are_configurable():
     assert [N.reply(cfg, r).split(' ', 1)[0] for r in (row(1), row(2, issues=[{'phase': 'probe'}]), row(3, 'failed'))] == [
         '✅', ':large_yellow_circle:', '🔴']
     assert N.running(cfg, row(4, 'running', finished_ts=None)).split(' ', 1)[0] == '⏳'
-    with pytest.raises(ValueError, match='nominal.emoji: keys among clean, issues, failed, running'):
+    with pytest.raises(ValueError, match='nominal.emoji: keys among clean, issues, failed, running, cancelled'):
         N.config(dict(state='unused', site='https://site.test', channel='C123', title='Test scans', emoji={'warn': '⚠️'}))
     with pytest.raises(ValueError, match='nominal.emoji: a Slack :name: code or emoji characters'):
         N.config(dict(state='unused', site='https://site.test', channel='C123', title='Test scans', emoji={'failed': '<!channel>'}))
+
+
+def test_a_cancelled_run_is_no_outcome_its_running_reply_reads_cancelled_and_the_streak_holds():
+    # a run stopped on purpose (🚫) neither ends the clean thread nor counts in it; its ⏳ reply is edited where it stands
+    w = running_writer()
+    cancelled = row(3, 'cancelled', error='cancelled from /scans', **ADA)
+    w.run([cancelled, *history(2)])
+    assert bodies(w.slack) == [
+        ('edit', '4.0', '🚫 :ada: [2026-11-04 08:00 UTC](https://site.test/scans/r3) · 1m 00s · cancelled'),
+        ('edit', '1.0', '✅ **Test scans: 2 consecutive clean runs**\n\n'
+                        'Since 2026-11-02 08:00 UTC after [2026-11-01T0800](https://site.test/scans/r0).\n\n'
+                        'Latest completed: [2026-11-03 08:00 UTC](https://site.test/scans/r2) · 1m 00s.\n\n'
+                        'Latest 2 runs: 2 scheduled / 0 manual. Each reply links its scan record. [All scans](https://site.test/scans).'),
+    ]
+    assert (w.saved['posted'], 'running' in w.saved, 'closed' in w.saved) == ({'r1': '2.0', 'r2': '3.0'}, False, False)
+    w.slack.calls.clear()
+    w.run([row(4), cancelled, *history(2)])
+    assert bodies(w.slack) == [
+        ('post', '5.0', '✅ :alarm_clock: [2026-11-05 08:00 UTC](https://site.test/scans/r4) · 1m 00s'),
+        ('edit', '1.0', '✅ **Test scans: 3 consecutive clean runs**\n\n'
+                        'Since 2026-11-02 08:00 UTC after [2026-11-01T0800](https://site.test/scans/r0).\n\n'
+                        'Latest completed: [2026-11-05 08:00 UTC](https://site.test/scans/r4) · 1m 00s.\n\n'
+                        'Latest 3 runs: 3 scheduled / 0 manual. Each reply links its scan record. [All scans](https://site.test/scans).'),
+    ]
+
+
+def test_a_cancelled_runs_grade_emoji_and_the_canvas_status_skipping_it():
+    cfg = N.config(dict(state='unused', site='https://site.test', channel='C123', title='Test scans', group='clean',
+                        emoji={'cancelled': ':no_entry_sign:'}))
+    cancelled = row(3, 'cancelled', error='cancelled')
+    assert (N.grade(cancelled), N.describe(cancelled), N.reply(cfg, cancelled).split(' ', 1)[0]) == ('cancelled', 'cancelled', ':no_entry_sign:')
+    assert N.status(CFG, [cancelled, *history(2)]) == '✅ Test scans: 2 consecutive clean runs'
 
 
 def test_clean_grouping_never_threads_failures():

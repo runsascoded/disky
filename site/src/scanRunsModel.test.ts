@@ -474,11 +474,16 @@ describe('a succeeded run\'s issues, by what their steps declare (`scanSteps.jso
       ['attention', 'needs attention (failed, incomplete)'], ['succeeded', 'succeeded'], ['partial', 'partial (a side step failed)'],
       ['passing', 'passing since (a check failed, and has passed since)'],
       ['incomplete', 'incomplete'], ['behind', 'search behind'], ['recovered', 'recovered'], ['failed', 'failed'], ['running', 'running'], ['nop', 'no-op'],
+      ['cancelled', 'cancelled'],
     ])
-    const outcomes = ['succeeded', 'partial', 'passing since', 'incomplete', 'search behind', 'recovered', 'failed', 'running', 'no-op']
-    expect(['', 'attention', 'partial', 'passing', 'behind', 'nop', 'bogus'].map(k => outcomes.filter(o => statusMatches(k, o)))).toEqual([
-      outcomes, ['incomplete', 'failed'], ['partial'], ['passing since'], ['search behind'], ['no-op'], [],
+    const outcomes = ['succeeded', 'partial', 'passing since', 'incomplete', 'search behind', 'recovered', 'failed', 'running', 'no-op', 'cancelled']
+    expect(['', 'attention', 'partial', 'passing', 'behind', 'nop', 'cancelled', 'bogus'].map(k => outcomes.filter(o => statusMatches(k, o)))).toEqual([
+      outcomes, ['incomplete', 'failed'], ['partial'], ['passing since'], ['search behind'], ['no-op'], ['cancelled'], [],
     ])
+  })
+  it('a cancelled run (stopped on purpose) is its own outcome, never a failure: no failed step, not one to look at', () => {
+    const r = run({ run_id: 'c1', scan: '2026-10-08', status: 'cancelled', error: 'cancelled from /scans' })
+    expect([runOutcome(r), runOutcomeLabel(r), failedAt(r, []), statusMatches('attention', runOutcome(r))]).toEqual(['cancelled', 'cancelled', null, false])
   })
 })
 

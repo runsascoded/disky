@@ -16,7 +16,7 @@ from .site import SiteError, get_json
 #: The run kinds that aren't scans (`site/src/scanRunsModel.ts` `MAINT_KINDS`): what a row's recent runs leave out.
 MAINTENANCE = ('compact', 'race', 'merge')
 #: One character per run, newest first.
-MARKS = {"ok": "✓", "short": "~", "failed": "✗", "running": "…"}
+MARKS = {"ok": "✓", "short": "~", "failed": "✗", "running": "…", "cancelled": "⊘"}
 
 
 @dataclass(frozen=True)
@@ -47,12 +47,12 @@ def parse_site(value: str) -> Site:
 
 
 def outcome(summary: dict) -> str | None:
-    """A run's mark (`MARKS`): `short` when it succeeded with a step's issue still open (no later run recovered it or passed since). None: it did nothing (`nop`)."""
+    """A run's mark (`MARKS`): `short` when it succeeded with a step's issue still open (no later run recovered it or passed since); `cancelled` when stopped on purpose (no failure). None: it did nothing (`nop`)."""
     status = summary["run"]["status"]
     if status == "nop":
         return None
-    if status == "failed":
-        return "failed"
+    if status in ("failed", "cancelled"):
+        return status
     if status == "running":
         return "running"
     return "short" if any(not (i.get("recovery") or i.get("passing")) for i in summary.get("phase_issues", [])) else "ok"

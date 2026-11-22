@@ -360,7 +360,7 @@ CREATE TABLE scan_runs (
   scan         TEXT NOT NULL,
   kind         TEXT NOT NULL,
   parent       TEXT,
-  status       TEXT NOT NULL CHECK (status IN ('running', 'succeeded', 'failed', 'nop')),
+  status       TEXT NOT NULL CHECK (status IN ('running', 'succeeded', 'failed', 'nop', 'cancelled')),
   failed_phase TEXT,
   error        TEXT,
   started_ts   INTEGER,
@@ -374,8 +374,11 @@ CREATE TABLE scan_runs (
   cost_usd     REAL,
   gen          TEXT,
   source       TEXT NOT NULL CHECK (source IN ('job', 'backfill')),
-  updated_ts   INTEGER NOT NULL
-, trigger TEXT CHECK (trigger IN ('schedule', 'manual')), trigger_by TEXT, thread_url TEXT);
+  updated_ts   INTEGER NOT NULL,
+  trigger      TEXT CHECK (trigger IN ('schedule', 'manual')),
+  trigger_by   TEXT,
+  thread_url   TEXT
+);
 
 CREATE TABLE scan_run_dags (
   run_id  TEXT PRIMARY KEY REFERENCES scan_runs(run_id),

@@ -5,7 +5,8 @@
 import { exactSlug, isScanId, scanTime } from './scanSlug'
 import STEP_FAILURES from './scanSteps.json'
 
-export type ScanRunStatus = 'running' | 'succeeded' | 'failed' | 'nop'
+/** `cancelled`: stopped on purpose (/scans' Cancel, a Batch cancel): terminal, never a failure (migration `scan-run-cancelled`). */
+export type ScanRunStatus = 'running' | 'succeeded' | 'failed' | 'nop' | 'cancelled'
 
 export interface ScanRun {
   run_id: string
@@ -412,7 +413,7 @@ export function runOutcomeLine(run: Pick<ScanRun, 'status'>, issues: readonly Ph
 
 /** /scans' status filter (`?st=<key>`): each choice's label and the outcomes it keeps. `attention` is the runs to look
  * at (failed, or published short), apart from a `partial` run, whose scan is whole, and a `passing since` one, whose
- * failed check has passed in a later run. */
+ * failed check has passed in a later run; a `cancelled` run (stopped on purpose) is never one to look at. */
 export const STATUS_FILTERS: readonly { key: string; label: string; outcomes: readonly string[] }[] = [
   { key: 'attention', label: 'needs attention (failed, incomplete)', outcomes: ['failed', 'incomplete'] },
   { key: 'succeeded', label: 'succeeded', outcomes: ['succeeded'] },
@@ -424,6 +425,7 @@ export const STATUS_FILTERS: readonly { key: string; label: string; outcomes: re
   { key: 'failed', label: 'failed', outcomes: ['failed'] },
   { key: 'running', label: 'running', outcomes: ['running'] },
   { key: 'nop', label: 'no-op', outcomes: ['no-op'] },
+  { key: 'cancelled', label: 'cancelled', outcomes: ['cancelled'] },
 ]
 
 /** Whether a run of `outcome` passes the status filter `key` (`''`: every run; an unknown key: none). */

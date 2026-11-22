@@ -75,8 +75,8 @@ export const genericMeta = (env: PolicyEnv, url: URL, kind?: string, name?: stri
 }
 
 /** What a `/scans/<id>` preview reads of its `scan_runs` row. */
-export interface ScanRunRow { status: 'running' | 'succeeded' | 'failed' | 'nop'; started_ts: number | null; finished_ts: number | null }
-const RUN_STATUS: Record<ScanRunRow['status'], string> = { running: 'Running', succeeded: 'Succeeded', failed: 'Failed', nop: 'No-op' }
+export interface ScanRunRow { status: 'running' | 'succeeded' | 'failed' | 'nop' | 'cancelled'; started_ts: number | null; finished_ts: number | null }
+const RUN_STATUS: Record<ScanRunRow['status'], string> = { running: 'Running', succeeded: 'Succeeded', failed: 'Failed', nop: 'No-op', cancelled: 'Cancelled' }
 
 /** A scan run's description: its state and time, nothing the job produced. */
 export const scanRunDesc = (r: ScanRunRow): string => [

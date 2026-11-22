@@ -37,7 +37,9 @@ err = partial(print, file=sys.stderr)
 
 PROFILE_ENV = "SCAN_RUNS_PROFILE"
 TABLES = ("scan_runs", "scan_run_phases", "scan_run_outputs", "scan_run_dags")
-STATUSES = ("running", "succeeded", "failed", "nop")
+#: `cancelled`: stopped on purpose (/scans' Cancel, a Batch cancel), terminal and never a failure; migration
+#: `scan-run-cancelled`. Final: a later write (the head's exit trap) never turns it back (`run_sql`, `record`).
+STATUSES = ("running", "succeeded", "failed", "nop", "cancelled")
 #: What started the run, as GitHub Actions' `event_name`: the deployment's cron (its job body sets `DT_TRIGGER=schedule`)
 #: or a hand submit / resume (its submitter sets `manual`). Opt-in per deployment, with migration `scan-run-trigger`:
 #: unset, nothing is recorded, and the digest goes by the clock. A scan's trigger is its first run's (`digest_quota.scan_triggers`).
@@ -171,7 +173,7 @@ _KEEP = ("parent", "failed_phase", "error", "started_ts", "finished_ts", "job_na
 def run_sql(run: Run, now: int) -> str:
     """Upsert a run row. Never `INSERT OR REPLACE` (it deletes the row, which the children's FKs refuse): on conflict
     the status, kind and scan move to this write's, a NULL field keeps the stored value, and `source` keeps the first
-    writer's (a backfill completing a job-written run stays `job`)."""
+    writer's (a backfill completing a job-written run stays `job`). A `cancelled` row keeps its status and error."""
     if run.status not in STATUSES:
         raise ValueError(f"scan run {run.run_id}: status {run.status!r} not one of {STATUSES}")
     # `trigger` / `trigger_by` only when known, so a database without the column (migrations `scan-run-trigger`,
@@ -179,9 +181,12 @@ def run_sql(run: Run, now: int) -> str:
     optional = {"trigger": run.trigger, "trigger_by": run.trigger_by}
     cols = [f.name for f in fields(Run) if f.name not in optional or optional[f.name] is not None] + ["updated_ts"]
     vals = [getattr(run, c) for c in cols[:-1]] + [now]
-    sets = ["scan = excluded.scan", "kind = excluded.kind", "status = excluded.status", "store = excluded.store",
-            "updated_ts = excluded.updated_ts"]
-    sets += [f"{c} = COALESCE(excluded.{c}, scan_runs.{c})" for c in _KEEP if c in cols]
+    sets = ["scan = excluded.scan", "kind = excluded.kind", "store = excluded.store", "updated_ts = excluded.updated_ts",
+            "status = CASE WHEN scan_runs.status = 'cancelled' THEN 'cancelled' ELSE excluded.status END"]
+    sets += [f"{c} = COALESCE(excluded.{c}, scan_runs.{c})" for c in _KEEP if c in cols and c != "error"]
+    if "error" in cols:
+        # a cancelled run keeps its cancel's reason: the exit trap's (`head terminated …`) is the cancel's effect
+        sets.append("error = CASE WHEN scan_runs.status = 'cancelled' THEN scan_runs.error ELSE COALESCE(excluded.error, scan_runs.error) END")
     return (f"INSERT INTO scan_runs ({', '.join(cols)}) VALUES ({', '.join(lit(v) for v in vals)}) "
             f"ON CONFLICT(run_id) DO UPDATE SET {', '.join(sets)}")
 
@@ -775,8 +780,10 @@ def record(
         raise ValueError("scan-run: a phase start needs a phase name")
     row, phases = stored(sink, run_id)
     started = row.get("started_ts") if row else None
-    status = row["status"] if row and row["status"] in ("nop", "failed", "succeeded") else "running"
-    if nop:
+    status = row["status"] if row and row["status"] in ("nop", "failed", "succeeded", "cancelled") else "running"
+    if status == "cancelled":
+        pass  # a cancel is final: the head's exit trap after it reports no failure (`run_sql` keeps it too)
+    elif nop:
         status = "nop"
     elif exit_code is not None and not (exit_code == 0 and status == "nop"):  # the exit trap after a NOP keeps it
         status = "succeeded" if exit_code == 0 else "failed"

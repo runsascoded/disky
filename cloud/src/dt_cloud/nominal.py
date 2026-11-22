@@ -31,8 +31,8 @@ GROUPS = ('clean', 'color', 'signature')
 
 #: Each run outcome's emoji (`Config.emoji` overrides any): `clean`; `issues`, a run that succeeded with phase issues
 #: (a step failed, skipped or behind, the scan published: the fleet strip's ⚠️); `failed`, any other finished run that
-#: isn't clean; `running`, a live run's reply
-EMOJI = {'clean': '✅', 'issues': '⚠️', 'failed': '❌', 'running': '⏳'}
+#: isn't clean; `running`, a live run's reply; `cancelled`, a run stopped on purpose (`counted`: in no streak)
+EMOJI = {'clean': '✅', 'issues': '⚠️', 'failed': '❌', 'running': '⏳', 'cancelled': '🚫'}
 #: An `emoji` override: a Slack `:name:` code, or emoji characters (nothing Slack reads as markup)
 EMOJI_RE = re.compile(r":[a-z0-9_+'-]{1,100}:|[^\x00-\x7f]{1,16}")
 
@@ -130,15 +130,29 @@ def live(row: dict) -> bool:
     return row['run']['status'] == 'running' or row['run']['finished_ts'] is None
 
 
+def cancelled(row: dict) -> bool:
+    """A run stopped on purpose (`scan_runs.STATUSES`): no outcome of the deployment's, so it neither extends a clean
+    streak nor breaks one, nor joins a failure thread. Its ⏳ reply, if it had one, is edited to say so (🚫)."""
+    return row['run']['status'] == 'cancelled'
+
+
+def counted(row: dict) -> bool:
+    """A run the threads are decided by: finished (not `live`) and not `cancelled`."""
+    return not live(row) and not cancelled(row)
+
+
 def clean(row: dict) -> bool:
     # A later recovery does not rewrite a historically partial run into a clean run.
     return row['run']['status'] == 'succeeded' and row['run']['finished_ts'] is not None and not row['phase_issues']
 
 
 def grade(row: dict) -> str:
-    """A finished run's outcome (`EMOJI`'s keys): `clean`, `issues` (it succeeded, with phase issues), else `failed`."""
+    """A finished run's outcome (`EMOJI`'s keys): `clean`, `issues` (it succeeded, with phase issues), `cancelled`, else
+    `failed`."""
     if clean(row):
         return 'clean'
+    if cancelled(row):
+        return 'cancelled'
     run = row['run']
     return 'issues' if run['status'] == 'succeeded' and run['finished_ts'] is not None and row['phase_issues'] else 'failed'
 
@@ -194,6 +208,8 @@ def describe(row: dict) -> str:
         error = ' '.join(str(run.get('error') or '').translate(_MARKUP).split())
         error = error if len(error) <= 160 else error[:159] + '…'
         return 'failed' + (f" in {run['failed_phase']}" if run.get('failed_phase') else '') + (f": {error}" if error else '')
+    if run['status'] == 'cancelled':
+        return 'cancelled'
     if row['phase_issues']:
         return 'phase issues: ' + ', '.join(sorted({str(i.get('phase')) for i in row['phase_issues']}))
     return str(run['status'])
@@ -567,7 +583,9 @@ def phases(row: dict, n: int = 5) -> str:
 
 
 def status(cfg: Config, done: list[dict]) -> str:
-    """The deployment's state in a line: an open thread's headline (its streak), else the newest run's failure."""
+    """The deployment's state in a line: an open thread's headline (its streak), else the newest counted run's failure
+    (`counted`: a cancelled run is no state of the deployment's)."""
+    done = [r for r in done if counted(r)]
     _, good, boundary = segment(cfg, done)
     if good:
         return parent(cfg, good, boundary).split('\n', 1)[0].replace('**', '')
@@ -698,11 +716,20 @@ def converge(
             state['operator_required'] = pending['operation']
             persist()
             raise RuntimeError(f"nominal: send remains ambiguous ({pending['operation']}); inspect Slack and the persisted intent; no resend attempted")
-    # The thread is decided by finished runs only; a live run gets a ⏳ reply in the open thread (`running`), which
-    # becomes its reply there when it ends in that thread, else is edited where it stands, linking where it was reported.
+    # The thread is decided by counted runs only (`counted`); a live run gets a ⏳ reply in the open thread (`running`),
+    # which becomes its reply there when it ends in that thread, else is edited where it stands, linking where it was
+    # reported. A cancelled run's ⏳ reply becomes its 🚫 reply where it stands; it joins no thread.
     live_rows = [r for r in rows if live(r)]
-    rows = [r for r in rows if not live(r)]
+    stopped = [r for r in rows if not live(r) and cancelled(r)]
+    rows = [r for r in rows if counted(r)]
     waiting: dict = dict(state.get('running') or {})
+    for row in sorted(stopped, key=lambda r: r['run']['started_ts']):
+        rid = row['run']['run_id']
+        if rid in waiting:
+            check()
+            slack.edit(waiting.pop(rid)['ts'], reply(cfg, row))
+            state.get('running', {}).pop(rid, None)
+            persist()
     if not rows:
         return state
     head, good, boundary = segment(cfg, rows)
@@ -859,7 +886,7 @@ def run(
     if not execute:
         rows = read_rows()
         live_rows = [r for r in rows if live(r)]
-        rows = [r for r in rows if not live(r)]
+        rows = [r for r in rows if counted(r)]
         if not rows:
             return 'nominal: waiting for a terminal run'
         head, good, boundary = segment(cfg, rows)

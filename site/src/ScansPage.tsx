@@ -931,6 +931,7 @@ export function ScanRunPage() {
           {isScanProducer(r.kind) && <>{' '}<CancelScanButton run={r} invalidate={[['scan-run', store.key, id], ['scan-runs', store.key]]} /></>}
         </p>
         {r.status === 'succeeded' && isScanProducer(r.kind) && kinds.has('access-ingest') && <ScanAccessInput scan={r.scan} store={store} />}
+        {r.status === 'cancelled' && <div className="sr-failure cancelled"><b>Cancelled</b> (stopped on purpose, not a failure){r.error && <div><code>{r.error}</code></div>}</div>}
         {r.status === 'failed' && <div className="sr-failure"><b>Failed {d.failed_at ? (d.failed_at.startsWith('after') ? d.failed_at : `in ${d.failed_at}`) : ''}</b>{r.error && <div><code>{r.error}</code></div>}</div>}
         {d.phase_issues?.map(i => <div className={`sr-failure ${issueState(i)}`} key={i.phase}>
           {i.outcome === BEHIND

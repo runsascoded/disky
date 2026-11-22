@@ -11,6 +11,12 @@ from dt_cloud.cli import main
 from dt_cloud.site import SiteError
 
 
+def test_a_cancelled_run_is_its_own_mark_not_a_failure():
+    runs = [{"run": {"status": s}, "phase_issues": []} for s in ("cancelled", "failed", "succeeded", "nop")]
+    assert [fleet_status.outcome(r) for r in runs] == ["cancelled", "failed", "ok", None]
+    assert [fleet_status.MARKS[o] for o in ("cancelled", "failed")] == ["⊘", "✗"]
+
+
 def run(status: str, kind: str = "scan", issues: list | None = None) -> dict:
     return {"run": {"status": status, "kind": kind}, "phase_issues": issues or []}
 

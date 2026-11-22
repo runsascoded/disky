@@ -44,6 +44,8 @@
     &.succeeded { color: var(--grew); background: color-mix(in srgb, var(--grew) 10%, var(--surface)); }
     &.failed { color: var(--danger); background: color-mix(in srgb, var(--danger) 10%, var(--surface)); }
     &.running { color: var(--s1); background: color-mix(in srgb, var(--s1) 10%, var(--surface)); }
+    // cancelled: stopped on purpose, not a failure (the chip's own quiet ink)
+    &.cancelled { color: var(--ink-3); background: var(--panel); }
     // incomplete: published, but the scan's data or serving is short (the one to look at)
     &.warn { color: color-mix(in srgb, var(--s4) 75%, var(--ink)); background: color-mix(in srgb, var(--s4) 14%, var(--surface)); }
     // partial: only a side step failed, the scan is whole (the chip's own quiet ink); passing: a check failed and has
@@ -183,7 +185,7 @@
   .sr-failure { margin: 10px 0; padding: 8px 12px; border-left: 3px solid var(--danger); background: color-mix(in srgb, var(--danger) 6%, var(--surface)); font-size: 13.5px;
     &.recovered, &.behind { border-color: var(--grew); background: color-mix(in srgb, var(--grew) 6%, var(--surface)); }
     // a side step that failed and stays failed (the scan is whole), and a failed check that has passed since
-    &.side, &.passing { border-color: var(--ink-3); background: var(--panel); }
+    &.side, &.passing, &.cancelled { border-color: var(--ink-3); background: var(--panel); }
     code { white-space: pre-wrap; word-break: break-word; } }
   .sr-recovery { margin: 8px 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: 4px; font-size: 13px; p { margin: 6px 0 0; } }
   .sr-facts { display: flex; flex-wrap: wrap; gap: 4px 22px; margin: 10px 0 0; font-size: 13px;

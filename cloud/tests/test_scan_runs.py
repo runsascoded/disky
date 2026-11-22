@@ -654,6 +654,16 @@ def test_batch_failure_reasons():
     )] == ["Batch: task failed (exit 137)", "Batch: over the maximum runtime (exit 50005)", "Batch: cancelled"]
 
 
+def test_exit_trap_after_a_cancel_keeps_it():
+    # a cancel is final: the head's exit trap after it (the SIGTERM a cancel sends) records no failure, nor its reason
+    s = sink()
+    record(s, PROFILE, "2026-10-08", "uid-7", 10, start=True)
+    s.execute(["UPDATE scan_runs SET status = 'cancelled', error = 'cancelled from /scans', finished_ts = 20 WHERE run_id = 'uid-7'"])
+    run = record(s, PROFILE, "2026-10-08", "uid-7", 21, exit_code=143, error="head terminated (signal; session s1)").run
+    assert (run.status, rows(s, "SELECT status, error, finished_ts FROM scan_runs")) == (
+        "cancelled", [("cancelled", "cancelled from /scans", 21)])
+
+
 def test_exit_trap_after_a_nop_keeps_it():
     s = sink()
     record(s, PROFILE, "2026-10-08", "uid-6", 10, start=True)

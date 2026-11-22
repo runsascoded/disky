@@ -156,6 +156,9 @@ export const OUTCOME_HEAD: Record<string, string> = {
   partial: "The scan's data and serving are complete; a side step failed.",
   recovered: 'Recovered: see below.',
 }
+/** A cancelled run's tip: what it means. */
+export const CANCELLED_TIP = 'Cancelled: stopped on purpose, not a failure.'
+
 const OUTCOME_CLASS: Record<string, string> = { incomplete: 'warn', [BEHIND]: 'behind', [PASSING]: 'passing', partial: 'partial', recovered: 'succeeded' }
 
 /** `cell`: rendered as a table cell's content (`Tooltip`'s `cell`: the cell is the hover target, the tip to its right).
@@ -177,6 +180,7 @@ export function Status({ run, failedAt, issues = [], cell, lost, runHref }: { ru
     </Tooltip>
   }
   const tag = <span className={`sr-status ${run.status}`}>{run.status === 'nop' ? 'no-op' : run.status}</span>
+  if (run.status === 'cancelled') return <Tooltip cell={cell} content={<><div>{CANCELLED_TIP}</div>{run.error && <div className="sr-err">{run.error}</div>}</>}>{tag}</Tooltip>
   if (run.status !== 'failed') return tag
   return <Tooltip cell={cell} content={<>{failedAt && <div>Failed {failedAt.startsWith('after') ? failedAt : `in ${failedAt}`}</div>}{run.error && <div className="sr-err">{run.error}</div>}</>}>{tag}</Tooltip>
 }
