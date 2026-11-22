@@ -85,7 +85,7 @@ dt-cloud path-index -p BUCKET [-K LO:HI] -P DIR/path-index.parquet …  # One pa
 dt-cloud path-index-merge -o SNAP -P DIR/path-index.parquet [-S] PART_DIR…  # The parts k-way merged by each
                           # sort's key into exactly the one pass's bytes (same 8K groups, a split bucket's root rebuilt),
                           # + sidecars, `attr.tsv`, `age.json`/`meta.json`. Scan step: `options.index.parts`
-                          # (`{bucket: [bounds]}`; `{}` = per bucket) → scan.nf's `index_part` fan-out, then `index` merges
+                          # (`{bucket: [bounds]}`; `{}` = per bucket) → the scan DAG's `index_part` fan-out, then `index` merges
 dt-cloud index-recut SRC OUT  # Re-cut a published generation's `bysize` from its `path` sort into a NEW
                           # generation dir (never over one): `-c` checks root + depth-1 views against per-path
                           # sums over `path` (`bysize_check`); then `index-sync -v bysize -g <gen>` points at it

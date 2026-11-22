@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import os
+import signal
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -12,9 +14,14 @@ from click.testing import CliRunner
 
 from dt_cloud import scan_head as H
 from dt_cloud.cli import main
+from dt_cloud.scan_backend import Backend
+from dt_cloud.scan_dag import build
+from dt_cloud.scan_dag_nf import render
 from dt_cloud.scan_profile import load
 
 FIX = Path(__file__).parent / "fixtures" / "scan_profiles"
+#: The head's `nf_dir` (`job/nf`): `base.config` and the prelude each run's `scan.nf` starts with.
+NF = Path(__file__).resolve().parents[2] / "job" / "nf"
 NOW = dt.datetime(2026, 10, 16, 12, 0, 1, tzinfo=dt.timezone.utc)
 #: A head's required cost labels (`$DISKY_LABELS`: `app`, `deployment`), as `conftest` sets them for every test.
 LABELS = {"DISKY_LABELS": "app=disky,deployment=test"}
@@ -121,21 +128,19 @@ def test_params_golden():
     assert got == json.loads((FIX / "cw-s3.params.json").read_text())
 
 
-def test_static_names_can_have_its_own_machine():
+def test_a_static_machine_gets_its_label():
     from dataclasses import replace
 
     from dt_cloud.scan_profile import Machine
 
     default = load(FIX / "cw-s3.yml")
     sized = replace(default, machines={**default.machines, "static": Machine(type="e2-standard-4", cpus=4, memory="14 GB")})
-    args = ("{}", "2026-10-20T0716", "G", "1", "run-1", "session", LABELS)
-    assert [H.params(p, *args).get("static_label") for p in (default, sized)] == ["small", "static"]
     assert [line for line in H.executor_config(sized).splitlines() if line.startswith("    withLabel: static ")] == [
         "    withLabel: static { machineType = 'e2-standard-4'; cpus = 4; memory = '14 GB' }",
     ]
 
 
-def test_params_reproc_fresh_and_extras():
+def test_params_reproc_and_fresh():
     from dt_cloud.scan_profile import parse
 
     p = parse({"deployment": "fix", "executor": {"kind": "local"}, "work": "/w", "data": "/d",
@@ -143,56 +148,13 @@ def test_params_reproc_fresh_and_extras():
                "steps": ["access-ingest", "healthcheck"], "skip": ["digest", "static-names"],
                "options": {"list": {"import": True}}})
     got = H.params(p, "{}", "2026-10-16", "G", "1", "", "S", LABELS, reproc=True, fresh=True)
-    assert {k: got[k] for k in ("steps", "pre", "pre_label", "post", "over_time", "over_time_label", "skip_list", "cache", "env",
-                                "work_bucket", "secrets_project")} == {
-        "steps": ["bucket-check", "access-ingest", "list", "index", "publish-r2", "interval-store", "index-rows", "index-sync",
-                  "over-time", "index-gc", "healthcheck", "warm-cache", "probe"],
-        "pre": ["access-ingest"],
-        "pre_label": "small",
-        "post": ["index-gc", "healthcheck", "warm-cache", "probe"],
-        "over_time": True,
-        "over_time_label": "post",
-        "skip_list": True,
+    assert {k: got[k] for k in ("sources", "cache", "env", "work_bucket", "secrets_project")} == {
+        "sources": [],
         "cache": False,
         "env": {"REPROC": "1", **LABELS},
         "work_bucket": "",
         "secrets_project": "",
     }
-
-
-def test_params_put_side_steps_in_their_own_task():
-    """`non-live` (stage `side`) runs as its own task beside `list` and `index` (`params.side`), never in `pre`, which
-    `index` waits on; `machines.side` sizes it."""
-    from dt_cloud.scan_profile import parse
-
-    base = {"deployment": "fix", "executor": {"kind": "local"}, "work": "/w", "data": "/d",
-            "layout": {"layer2": "l2/{scan}/", "snapshots": ""}, "sources": ["gs://a"],
-            "steps": ["access-ingest", "non-live"], "skip": ["digest", "static-names"],
-            "options": {"list": {"import": True}, "non-live": {"classes": ["soft-deleted"]}}}
-    got = H.params(parse(base), "{}", "2026-10-16", "G", "1", "", "S", LABELS)
-    assert {k: got[k] for k in ("pre", "side", "side_label")} == {"pre": ["access-ingest"], "side": ["non-live"], "side_label": "small"}
-    sized = H.params(parse({**base, "machines": {"side": {"type": "e2-standard-4"}}}), "{}", "2026-10-16", "G", "1", "", "S", LABELS)
-    assert sized["side_label"] == "side"
-
-
-@pytest.mark.parametrize("poller, steps, pre", [
-    (False, ["bucket-check", "access-ingest", "list", "index", "index-rows", "index-sync"], ["access-ingest"]),
-    (True, ["bucket-check", "list", "index", "index-rows", "index-sync"], []),
-])
-def test_access_ingest_poller_leaves_the_scan(poller: bool, steps: list[str], pre: list[str]):
-    """`options.access-ingest.poller` (specs/access-log-freshness.md, Order 2): the deployment's hourly poller runs the
-    ingest, so the scan has no `pre` task and `index` waits on the lists only, reading `options.index.access` as it
-    stands. Off (the default), the step runs in `pre` as before."""
-    from dt_cloud.scan_profile import parse
-
-    p = parse({"deployment": "fix", "executor": {"kind": "local"}, "work": "/w", "data": "gs://d",
-               "layout": {"layer2": "l2/{scan}/", "snapshots": "", "listing": "l2/{scan}/"}, "sources": ["gs://a"],
-               "steps": ["access-ingest"],
-               "skip": ["static-names", "publish-r2", "interval-store", "over-time", "index-gc", "warm-cache", "probe", "digest"],
-               "options": {"access-ingest": {"args": ["-P", "4"], "poller": poller},
-                           "index": {"mode": "path-index", "access": "access/agg/*/*.parquet"}}})
-    got = H.params(p, "{}", "2026-10-18T0700", "G", "1", "", "S", LABELS)
-    assert (got["steps"], got["pre"], p.opts("index")["access"]) == (steps, pre, "access/agg/*/*.parquet")
 
 
 def test_local_executor_config():
@@ -306,10 +268,11 @@ def test_dry_run_writes_the_launch_files(tmp_path, monkeypatch):
     monkeypatch.setenv("GEN", "G1")
     monkeypatch.setenv("DT_JOB_START", "100")
     launch = tmp_path / "launch"
-    r = CliRunner().invoke(main, ["scan", "head", "-n", "-N", str(tmp_path / "nf"), "-w", str(launch), str(FIX / "cw-s3.yml")])
+    r = CliRunner().invoke(main, ["scan", "head", "-n", "-N", str(NF), "-w", str(launch), str(FIX / "cw-s3.yml")])
     assert r.exit_code == 0, r.output
     session = H.session_id("cw-s3", "2026-10-16T1200")
-    assert sorted(p.name for p in launch.iterdir()) == [".nextflow", "executor.config", "params.json", "run.config"]
+    assert sorted(p.name for p in launch.iterdir()) == [".nextflow", "executor.config", "params.json", "run.config", "scan.nf"]
+    assert (launch / "scan.nf").read_text() == render(build(load(FIX / "cw-s3.yml")), (NF / "prelude.nf").read_text(), "cw-s3")
     assert (launch / "executor.config").read_text() == (FIX / "cw-s3.executor.config").read_text()
     params = json.loads((launch / "params.json").read_text())
     assert (params["scan"], params["gen"], params["job_start"], params["session"]) == ("2026-10-16T1200", "G1", "100", session)
@@ -318,7 +281,7 @@ def test_dry_run_writes_the_launch_files(tmp_path, monkeypatch):
     line = (launch / ".nextflow" / "history").read_text().split("\t")
     assert line[1:] == ["-", "scan_2026_10_16T1200", "OK", "-", session, "nextflow run scan.nf\n"]
     assert r.stderr.rstrip().split("\n")[-1] == (
-        f"+ nextflow run {tmp_path}/nf/scan.nf -c {tmp_path}/nf/base.config -c {launch}/executor.config -c {launch}/run.config "
+        f"+ nextflow run {launch}/scan.nf -c {NF}/base.config -c {launch}/executor.config -c {launch}/run.config "
         f"-params-file {launch}/params.json -resume {session} -with-trace {launch}/trace.tsv "
         f"-with-dag {launch}/dag.mmd -with-timeline {launch}/timeline.html -with-report {launch}/report.html"
     )
@@ -333,7 +296,7 @@ def test_head_refuses_without_cost_labels(tmp_path, labels, missing):
     env = {"SNAP_ID": "2026-10-16T1200", "GEN": "G1", "DT_JOB_START": "100", **({"DISKY_LABELS": labels} if labels else {})}
     launch = tmp_path / "launch"
     with pytest.raises(MissingCostLabels) as e:
-        H.head(FIX / "cw-s3.yml", tmp_path / "nf", launch, dry_run=True, env=env)
+        H.head(FIX / "cw-s3.yml", NF, launch, dry_run=True, env=env)
     assert (e.value.missing, launch.exists()) == (missing, False)
 
 
@@ -347,7 +310,7 @@ def test_head_takes_cost_labels_from_the_profiles_env(tmp_path):
                     "options: {list: {import: true}}\nenv: {DISKY_LABELS: 'app=disky,deployment=fix'}\n")
     launch = tmp_path / "launch"
     env = {"SNAP_ID": "2026-10-16T1200", "GEN": "G1", "DT_JOB_START": "100", "DT_RECORD": "off"}
-    assert H.head(prof, tmp_path / "nf", launch, dry_run=True, env=env) == 0
+    assert H.head(prof, NF, launch, dry_run=True, env=env) == 0
     params = json.loads((launch / "params.json").read_text())
     assert (params["labels"], params["env"]["DISKY_LABELS"]) == (
         {"app": "disky", "deployment": "fix", "component": "scan", "scan_id": "2026-10-16t1200"}, "app=disky,deployment=fix")
@@ -403,21 +366,21 @@ def test_head_records_into_the_profiles_database_and_store(tmp_path, monkeypatch
 
     monkeypatch.setattr(scan_runs, "record_sql", spy)
     monkeypatch.setattr(H.subprocess, "Popen", lambda argv, **kw: SimpleNamespace(pid=0, wait=lambda timeout=None: 0))
-    assert H.head(prof, tmp_path / "nf-dir", tmp_path / "launch") == 0
+    assert H.head(prof, NF, tmp_path / "launch") == 0
     assert (runs_written[0], runs_written[-1][:2], set(dbs)) == (
         ("2026-10-16T1200", "meta", "running", "schedule"), ("2026-10-16T1200", "meta"), {"db-from-profile"})
     # a resume by hand: its run is manual (the scan stays the cron's: its first run's, `digest_quota.scan_triggers`)
     monkeypatch.setenv("DT_TRIGGER", "manual")
     monkeypatch.setenv("DT_RUN_ID", "run-2")
     runs_written.clear()
-    assert H.head(prof, tmp_path / "nf-dir", tmp_path / "launch") == 0
+    assert H.head(prof, NF, tmp_path / "launch") == 0
     assert runs_written[0] == ("2026-10-16T1200", "meta", "running", "manual")
     # a deployment that doesn't state its triggers: none recorded (the digest goes by the clock)
     monkeypatch.delenv("DT_TRIGGER")
     monkeypatch.setenv("DT_RUN_ID", "run-3")
     monkeypatch.setenv("SNAP_ID", "2026-10-16T1300")
     runs_written.clear()
-    assert H.head(prof, tmp_path / "nf-dir", tmp_path / "launch") == 0
+    assert H.head(prof, NF, tmp_path / "launch") == 0
     assert runs_written[0] == ("2026-10-16T1300", "meta", "running", None)
 
 
@@ -446,7 +409,7 @@ def test_head_stores_the_dag_before_the_run(tmp_path, monkeypatch):
     events: list[str] = []
     monkeypatch.setattr(index_footer, "_d1_query",
                         lambda sql, acct, tok, db: events.extend(s.split(" (")[0] for s in ([sql] if isinstance(sql, str) else sql)) or [])
-    launch, nf_dir = tmp_path / "launch", tmp_path / "nf-dir"
+    launch, nf_dir = tmp_path / "launch", NF
     previews: list[list[str]] = []
 
     def preview(argv, **kw):
@@ -509,7 +472,7 @@ def test_head_publishes_cache_hits_while_nextflow_is_running(tmp_path, monkeypat
     monkeypatch.setattr(H, 'publish_reports', lambda *args: [])
     monkeypatch.setattr(H, 'echo_task_logs', lambda *args: 0)
     monkeypatch.setattr(H.subprocess, 'Popen', popen)
-    assert H.head(profile, tmp_path / 'nf-dir', launch) == 0
+    assert H.head(profile, NF, launch) == 0
     assert writes == [('run-cache', ('index',))]
 
 
@@ -547,7 +510,7 @@ def test_head_publishes_independent_failed_and_resumed_ownership_receipts(tmp_pa
                         "layout: {layer2: 'l2/{scan}/', snapshots: ''}\nsources: [s3://a]\n"
                         'skip: [static-names, digest, interval-store, warm-cache, probe]\noptions: {list: {import: true}}\n')
         env = {**LABELS, 'DT_RUN_ID': run, 'SNAP_ID': '2026-11-09T1200', 'GEN': 'g1', 'DT_RECORD': 'off'}
-        assert H.head(prof, tmp_path / 'nf-dir', launch, env=env) == (1 if (store, run) == ('primary', 'run-1') else 0)
+        assert H.head(prof, NF, launch, env=env) == (1 if (store, run) == ('primary', 'run-1') else 0)
     receipts = [json.loads(p.read_text()) for p in sorted((work / 'ownership').rglob('receipt.json'))]
     assert [(d['identity']['store'], d['identity']['run_id'], d['identity']['head_attempt'], d['outcome']['status'],
              d['trace']['state'], d['trace']['tasks'][0]['cached']) for d in receipts] == [
@@ -637,25 +600,81 @@ def test_reproc_still_fetches_an_adopted_listing():
 
     adopted = prof([{"uri": "r2://disk-tree", "listing": "{env:DT_CAPTURE}"}, "r2://other"])
     listed = prof(["r2://disk-tree"])
-    got = [{k: H.params(p, "{}", "2026-10-16", "G", "1", "", "S", LABELS, reproc=r)[k] for k in ("sources", "skip_list")}
+    got = [H.params(p, "{}", "2026-10-16", "G", "1", "", "S", LABELS, reproc=r)["sources"]
            for p, r in ((adopted, True), (adopted, False), (listed, True))]
     assert got == [
-        {"sources": [{"uri": "r2://disk-tree", "machine": None, "disk": None}], "skip_list": False},
-        {"sources": [{"uri": "r2://disk-tree", "machine": None, "disk": None}, {"uri": "r2://other", "machine": None, "disk": None}],
-         "skip_list": False},
-        {"sources": [], "skip_list": True},
+        [{"uri": "r2://disk-tree", "machine": None, "disk": None}],
+        [{"uri": "r2://disk-tree", "machine": None, "disk": None}, {"uri": "r2://other", "machine": None, "disk": None}],
+        [],
     ]
 
 
-def test_a_local_data_dir_orders_static_names_after_publish():
-    """On a local data dir `static-names` reads earlier scans from the serving store, so `scan.nf` runs it after this
-    scan's publish (`static_after_publish`); on a GCS one it overlaps publish as before."""
-    from dt_cloud.scan_profile import parse
+class FakeBackend(Backend):
+    """A backend that runs nothing: it logs each call the head makes; `wait` ends the run on its second call with `rc`,
+    or (`term`) sends the head a TERM on its first."""
+    engine = "fake"
 
-    def prof(data, skip):
-        return parse({"deployment": "fix", "executor": {"kind": "local"}, "work": "/w", "data": data,
-                      "layout": {"layer2": "l2/{scan}/", "snapshots": "", "listing": "cap/{scan}/"}, "sources": ["r2://b"],
-                      "skip": ["digest", *skip], "options": {"static-names": {"gen": "g"}}})
-    got = [H.params(prof(d, skip), "{}", "2026-10-16", "G", "1", "", "S", LABELS)["static_after_publish"]
-           for d, skip in (("/d", []), ("gs://dvx", []), ("/d", ["publish-r2"]))]
-    assert got == [True, False, False]
+    def __init__(self, rc: int, term: bool = False):
+        self.rc, self.term, self.calls, self.waits = rc, term, [], 0
+
+    def prepare(self, run):
+        self.calls.append(("prepare", run.scan, run.session, run.dag.names[0]))
+        return ["fake", "run"]
+
+    def store_preview(self, run):
+        self.calls.append(("store_preview",))
+
+    def start(self, run):
+        self.calls.append(("start",))
+
+    def wait(self, timeout):
+        self.waits += 1
+        if self.term and self.waits == 1:
+            os.kill(os.getpid(), signal.SIGTERM)
+        return None if self.waits < 2 else 0 if self.term else self.rc
+
+    def progress(self, run):
+        return None
+
+    def interrupt(self):
+        self.calls.append(("interrupt",))
+
+    def cancel(self, run):
+        self.calls.append(("cancel",))
+
+    def error(self, run, rc):
+        return f"fake exit {rc}"
+
+    def finish(self, run, rc, signal):
+        self.calls.append(("finish", rc, signal))
+
+    def cost(self, run):
+        return ["-l", "fake=1"]
+
+    def dag_file(self, run):
+        return run.launch / "fake.dag"
+
+
+@pytest.mark.parametrize("rc, term, calls, finish", [
+    (0, False, [("finish", 0, None)], ["-r", "run-1", "-x", "0", "-l", "fake=1"]),
+    (3, False, [("finish", 3, None)], ["-r", "run-1", "-x", "3", "-e", "fake exit 3", "-l", "fake=1"]),
+    (0, True, [("interrupt",), ("cancel",), ("finish", 143, signal.SIGTERM)],
+     ["-r", "run-1", "-x", "143", "-e", f"head terminated (signal; session {H.session_id('fix', '2026-10-16T1200')})", "-l", "fake=1"]),
+], ids=["ok", "failed", "terminated"])
+def test_head_drives_its_backend(tmp_path, monkeypatch, rc, term, calls, finish):
+    """specs/orchestrator-abstraction.md §3: the head prepares, stores the preview, starts and waits on its backend; a
+    TERM interrupts the run, then cancels what it left; the backend's error, cost and DAG file go on the finish record."""
+    prof = tmp_path / "p.yml"
+    prof.write_text(f"deployment: fix\nexecutor: {{kind: local}}\nwork: {tmp_path}/nf\ndata: {tmp_path}/data\n"
+                    "layout: {layer2: 'l2/{scan}/', snapshots: ''}\nsources: [s3://a]\noptions: {list: {import: true}}\n"
+                    "skip: [static-names, digest, interval-store, warm-cache, probe]\n")
+    fake = FakeBackend(rc, term)
+    monkeypatch.setattr(H, "backend_for", lambda profile, nf_dir: fake)
+    records: list[tuple[str, list[str]]] = []
+    monkeypatch.setattr(H, "_record", lambda cmd, args: records.append((cmd.name, args)))
+    env = {**LABELS, "DT_RUN_ID": "run-1", "SNAP_ID": "2026-10-16T1200", "GEN": "G1", "DT_JOB_START": "1",
+           "SCAN_RUNS_PROFILE": str(tmp_path / "scan-runs.json"), "DT_SUPERVISE": "1"}
+    assert H.head(prof, NF, tmp_path / "launch", env=env) == (143 if term else rc)
+    session = H.session_id("fix", "2026-10-16T1200")
+    assert fake.calls == [("prepare", "2026-10-16T1200", session, "list_source"), ("store_preview",), ("start",), *calls]
+    assert [(n, a) for n, a in records if n != "start"] == [("finish", finish)]

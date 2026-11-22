@@ -113,6 +113,33 @@ def test_preview_dag_is_the_runs(tmp_path):
     assert preview.to_json() == real.to_json()
 
 
+@pytest.mark.parametrize("args, extra, options", [
+    ((), "", OPTIONS),
+    ((), "fold: []\n", OPTIONS),
+    (("-R",), "", OPTIONS),
+    ((), "steps: [access-ingest, non-live]\n",
+     "{list: {import: true}, non-live: {classes: [soft-deleted]}, static-names: {profile: sn.json}, digest: {template: t, config: c.yml}}"),
+    ((), "", "{index: {mode: path-index, parts: {c: [m, t]}}, static-names: {profile: sn.json}, digest: {template: t, config: c.yml}}"),
+], ids=["folded", "unfolded", "reproc", "pre-and-side", "sharded"])
+def test_rendered_scan_nf_is_the_dag(tmp_path, args: tuple[str, ...], extra: str, options: str):
+    """specs/orchestrator-abstraction.md §2: the head's rendered `scan.nf`, as Nextflow builds it (`-preview`, nothing
+    run), reduces to exactly the DAG it was rendered from (`scan_dag.build(...).graph()`)."""
+    from dt_cloud import run_dag, scan_dag, scan_profile
+    from dt_cloud.scan_head import preview_argv
+
+    marks = tmp_path / "marks"
+    r = head(tmp_path, marks, "-n", *args, extra=extra, options=options,
+             layout="{layer2: 'l2/{scan}/', snapshots: '', listing: 'listing/{scan}/'}")
+    assert r.returncode == 0, r.stderr
+    launch = tmp_path / "nf"
+    env = {**os.environ, "NXF_OFFLINE": "true", "NXF_ANSI_LOG": "false", "DT_SCAN_STEP_FAKE": str(marks)}
+    p = subprocess.run(preview_argv(REPO / "job/nf", launch), cwd=launch, env=env, capture_output=True, text=True, timeout=600)
+    assert p.returncode == 0, p.stderr
+    assert marks.exists() is False
+    dag = scan_dag.build(scan_profile.load(tmp_path / "fixture.yml"), reproc="-R" in args)
+    assert run_dag.read("nextflow", (launch / "dag-preview.mmd").read_text()) == dag.graph()
+
+
 def test_reproc_unfolded(tmp_path):
     """`-R` runs from `index` (no list tasks, no bucket-check); `fold: []` gives index-sync its own task."""
     marks = tmp_path / "marks"

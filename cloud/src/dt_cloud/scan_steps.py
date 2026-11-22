@@ -1,5 +1,6 @@
 """A scan's steps (specs/pipelines-everywhere.md §2.1): `dt-cloud scan step <name> [arg]`, one idempotent function per
-step, each run as its own task by `job/nf/scan.nf` (or by hand on a machine holding the data store's mount).
+step, each run in a task of the scan's DAG (`scan_dag`; Nextflow runs it as the head's rendered `scan.nf`), or by hand
+on a machine holding the data store's mount.
 
 Every step reads two things:
 - the deployment's profile (`scan_profile.ScanProfile`, from `$DT_SCAN_PROFILE_JSON`, which the head sets, or
@@ -21,8 +22,9 @@ Adding a step (gcs's access-ingest, rules, healthcheck, … are steps like any o
 
 - `core`: on for every deployment unless the profile `skip`s it (`skippable`); a non-core step runs only where the
   profile's `steps` lists it.
-- `stage`: where `scan.nf` runs it. `pre` (beside `list`, before `index`), `post` (after `index-sync`, in the post
-  task, in registry order). The core's own stages (`list`, `index`, `serve`, `sync`) are wired in `scan.nf` itself.
+- `stage`: where the DAG runs it (`scan_dag.build`). `pre` (beside `list`, before `index`), `side` (its own task from
+  the start), `post` (after `index-sync`, in the post task, in registry order). The core's own stages (`list`, `index`,
+  `serve`, `sync`) are wired in `scan_dag.build` itself.
 - `soft`: the step never fails the run (an unexpected error is a warning, exit 0), so a dependent step always runs:
   the DAG's "soft dependency" (index waits for access-ingest, but runs without its output).
 - `leaves`, `side`, `converges`, `checks`: a soft step's failure, as /scans reads it (the run succeeded, so its
@@ -803,7 +805,7 @@ def index(ctx: Ctx, arg: str | None) -> None:
     `options.index.mem`: DuckDB's memory limit (index-write's; under path-index, the age pyramids' and the check's).
 
     `options.index.parts` (path-index mode; `{bucket: [split bounds]}`, `{}` for one part per bucket): the index
-    sharded (`index_parts`). `scan step index <part id>` (scan.nf's `index_part` fan-out, one task per part) writes
+    sharded (`index_parts`). `scan step index <part id>` (the DAG's `index_part` fan-out, one task per part) writes
     one part to `<layer2>/index-parts/<gen>/<id>/`; `scan step index` then merges them into exactly the one pass's
     outputs and carries on as it does."""
     if ctx.opt("index", "mode", "layer2") == "path-index":

@@ -1,4 +1,6 @@
-"""`dt-cloud scan head` (specs/pipelines-everywhere.md §2.3): one scan as a Nextflow run of `job/nf/scan.nf`.
+"""`dt-cloud scan head` (specs/pipelines-everywhere.md §2.3): one scan's DAG (`scan_dag.build` over the profile) run
+by a backend (`scan_backend`; specs/orchestrator-abstraction.md §3). The only one is `NextflowBackend`: the DAG
+rendered as `scan.nf` in the launch dir (`scan_dag_nf.render`: `job/nf/prelude.nf` + the processes and workflow).
 
 It stamps the scan's identity once (`SNAP_ID`, `GEN`, `DT_JOB_START`), starts its scan-run record (in the profile's
 `store`), derives the Nextflow session from the scan (uuid5 of `disky/<deployment>/scan/<scan>`, or
@@ -33,14 +35,20 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from urllib.parse import urlparse
 
+from . import scan_dag
 from .cost_labels import ENV as LABELS_ENV, check_label, deployment_labels
+from .scan_backend import Backend, Run
+from .scan_dag import ScanDag
+from .scan_dag_nf import render
 from .scan_profile import PRIMARY_STORE, Disk, Machine, ScanProfile
-from .scan_steps import DATA_MOUNT_ENV, PROFILE_JSON_ENV, STEPS, index_parts, profile_env_value
+from .scan_steps import DATA_MOUNT_ENV, PROFILE_JSON_ENV, profile_env_value
 
 
 def err(*a: object) -> None:
     print(*a, file=sys.stderr)
 
+#: The fixed part of each run's `scan.nf`, in the head's `nf_dir` (`job/nf`): the rest is rendered from the scan's DAG.
+PRELUDE = "prelude.nf"
 NF_GOOGLE = "nf-google@1.29.1"
 NF_CLOUDCACHE = "nf-cloudcache@0.6.2"
 #: Where a google-batch task sees its work dir's bucket (and so the data store): Batch mounts it at `/mnt/disks/<b>`.
@@ -71,7 +79,7 @@ def history_line(now: dt.datetime, scan: str, session: str) -> str:
 def labels(profile: ScanProfile, env: Mapping[str, str], scan: str) -> dict[str, str]:
     """The tasks' Batch labels: the profile's, the stack's (`$DISKY_LABELS`, `k=v,…`, refused without `app` and
     `deployment`: `cost_labels.deployment_labels`), `component: scan`, `scan_id` (lowercased, as `cost_labels` writes
-    it); scan.nf adds `nf-session` and each task's `step`, so a billing export groups a scan's spend by scan and step."""
+    it); `base.config` adds `nf-session` and each task's `step`, so a billing export groups a scan's spend by scan and step."""
     out = {**profile.labels, **deployment_labels(dict(env))}
     out["component"] = "scan"
     out["scan_id"] = scan.lower()
@@ -94,10 +102,11 @@ def step_secrets(profile: ScanProfile) -> dict[str, list[str]]:
 
 
 def params(profile: ScanProfile, profile_json: str, scan: str, gen: str, job_start: str, run_id: str, session: str,
-           env: Mapping[str, str], *, reproc: bool = False, fresh: bool = False) -> dict:
-    """`scan.nf`'s params file."""
+           env: Mapping[str, str], *, reproc: bool = False, fresh: bool = False, dag: ScanDag | None = None) -> dict:
+    """`scan.nf`'s params file: the run's facts, the list tasks' sources, secrets and env. Which processes run, and on
+    which labels, is the DAG's (`scan_dag.build`), rendered into `scan.nf` itself."""
+    dag = dag or scan_dag.build(profile, reproc=reproc)
     task_labels = labels(profile, env, scan)
-    enabled = profile.enabled()
     step_env = dict(profile.env)
     step_env.update({k: env[k] for k in profile.passthrough if k in env})
     # every step's Batch helpers (static names, the interval store, …) label themselves from it (`label_batch_spec`)
@@ -107,35 +116,19 @@ def params(profile: ScanProfile, profile_json: str, scan: str, gen: str, job_sta
     if profile.executor.kind == "google-batch":
         step_env[DATA_MOUNT_ENV] = BATCH_MOUNT
     lst = profile.machines.get("list")
+    listed = [t.tag for t in dag["list_source"].tasks] if "list_source" in dag.names else []
     return {
         "scan": scan, "gen": gen, "job_start": job_start, "run_id": run_id, "session": session,
-        # a source's `secrets`: its list call's whole binding list (else the list step's), when it has its own
-        # REPROC runs from `index`, but an adopted listing (`sources[].listing`) is still fetched: its shards have no
-        # other copy on a local data dir
-        # a source's `fallback` (spec §7): its list task's machine by submit attempt (`machines`) and queue timeout (a duration)
+        # the list tasks' sources (REPROC: only those adopting a listing, `sources[].listing`: its shards have no other
+        # copy on a local data dir); a source's `secrets`: its list call's whole binding list, when it has its own;
+        # a source's `fallback` (spec §7): its list task's machine by submit attempt (`machines`) and queue timeout
         "sources": [{"uri": s.uri, "machine": s.machine, "disk": _disk(s.disk),
                      **({"machines": list(s.types), "queue_timeout": f"{s.queue_timeout}m"} if s.fallback else {}),
                      **({"secrets": _bindings(profile.secrets_for("list", s.uri))} if s.secrets else {})}
-                    for s in profile.sources if not reproc or s.listing],
+                    for s in map(profile.source, listed)],
         # bounds the list tasks' submit retries: only a fallback source's queue timeouts are retried (`list_source`)
         "list_retries": max((len(s.fallback) for s in profile.sources), default=0),
         "list_default": {"machine": lst.type if lst else None, "disk": _disk(lst.disk) if lst else None},
-        "steps": list(enabled),
-        "pre": [n for n in enabled if STEPS[n].stage == "pre" and n != "bucket-check"],
-        "pre_label": "pre" if "pre" in profile.machines else "small",
-        "static_label": "static" if "static" in profile.machines else "small",
-        # `side` steps (`non-live`): their own task from the start, which only publish-r2 and the post steps wait on
-        "side": [n for n in enabled if STEPS[n].stage == "side"],
-        "side_label": "side" if "side" in profile.machines else "small",
-        "interval_label": "interval" if "interval" in profile.machines else "big",
-        # the sharded index's parts (`options.index.parts`): one `index_part` task each, before the merging `index`
-        "index_parts": [pid for pid, _ in index_parts(profile)],
-        "index_part_label": "index_part" if "index_part" in profile.machines else "big",
-        "post": [n for n in enabled if STEPS[n].stage == "post" and n != "over-time"],
-        "over_time": "over-time" in enabled,
-        "over_time_label": "over_time" if "over_time" in profile.machines else "post",
-        "fold": list(profile.fold),
-        "skip_list": reproc and not any(s.listing for s in profile.sources),
         "secrets": _bindings(profile.secrets),
         "step_secrets": step_secrets(profile),
         "secrets_project": profile.executor.project or "",
@@ -143,7 +136,6 @@ def params(profile: ScanProfile, profile_json: str, scan: str, gen: str, job_sta
         "profile_json": profile_json,
         "labels": task_labels,
         "cache": not fresh,
-        "static_after_publish": not urlparse(profile.data).scheme and "publish-r2" in enabled,
         "queue_size": profile.queue_size,
         "work_bucket": urlparse(profile.work).netloc if profile.executor.kind == "google-batch" else "",
     }
@@ -387,11 +379,11 @@ def local_run_id(profile: ScanProfile, scan: str) -> str:
     return "-".join([profile.deployment, *([] if profile.primary else [profile.store]), "nf", scan]).lower()
 
 
-def finish_args(rc: int, error: str | None, cost: list[str], dag: Path, run_id: str = "") -> list[str]:
+def finish_args(rc: int, error: str | None, cost: list[str], dag: Path, run_id: str = "", engine: str = "nextflow") -> list[str]:
     """`scan-run finish`'s arguments: the exit status, the error, the cost labels, and the run's DAG (`-D`, stored with
-    the run for the site's pipeline view) when Nextflow wrote one."""
+    the run for the site's pipeline view, in `engine`'s format: `-E` unless Nextflow's) when the backend wrote one."""
     return [*(["-r", run_id] if run_id else []), "-x", str(rc), *(["-e", error] if error else []), *cost,
-            *(["-D", str(dag)] if dag.is_file() else [])]
+            *(["-D", str(dag), *([] if engine == "nextflow" else ["-E", engine])] if dag.is_file() else [])]
 
 
 def _groovy(s: str) -> str:
@@ -408,9 +400,9 @@ def run_config(run_id: str, profile_json: str) -> str:
 
 
 def nextflow_argv(nf_dir: Path, launch: Path, session: str) -> list[str]:
-    """The Nextflow command the head runs in `launch` (after writing its params, executor and run configs and history
-    line)."""
-    return ["nextflow", "run", str(nf_dir / "scan.nf"), "-c", str(nf_dir / "base.config"), "-c", str(launch / "executor.config"),
+    """The Nextflow command the head runs in `launch` (after writing its `scan.nf`, its params, executor and run configs
+    and history line)."""
+    return ["nextflow", "run", str(launch / "scan.nf"), "-c", str(nf_dir / "base.config"), "-c", str(launch / "executor.config"),
             "-c", str(launch / "run.config"),
             "-params-file", str(launch / "params.json"), "-resume", session, "-with-trace", str(launch / "trace.tsv"),
             "-with-dag", str(launch / "dag.mmd"), "-with-timeline", str(launch / "timeline.html"), "-with-report", str(launch / "report.html")]
@@ -424,7 +416,7 @@ PREVIEW_DAG = "dag-preview.mmd"
 def preview_argv(nf_dir: Path, launch: Path) -> list[str]:
     """The run's own Nextflow command with `-preview` (the workflow built, no process run: seconds) writing just its DAG,
     `PREVIEW_DAG`: the same graph the real run's `-with-dag` reduces to."""
-    return ["nextflow", "run", str(nf_dir / "scan.nf"), "-c", str(nf_dir / "base.config"), "-c", str(launch / "executor.config"),
+    return ["nextflow", "run", str(launch / "scan.nf"), "-c", str(nf_dir / "base.config"), "-c", str(launch / "executor.config"),
             "-c", str(launch / "run.config"), "-params-file", str(launch / "params.json"), "-preview", "-with-dag", str(launch / PREVIEW_DAG)]
 
 
@@ -444,10 +436,130 @@ def store_preview_dag(nf_dir: Path, launch: Path, nf_env: dict[str, str], run_id
         err(f"scan head: DAG preview failed: {type(e).__name__}: {e}")
 
 
+class NextflowBackend(Backend):
+    """The scan's DAG as a Nextflow run: `scan.nf` rendered into the launch dir (`scan_dag_nf`), the session's
+    `.nextflow/history` line (Nextflow finds a session only there; its cache is in the work store,
+    `NXF_CLOUDCACHE_PATH`), the params and the executor config from the profile, then `nextflow run -resume <session>`
+    in its own process group. A cancel waits `NF_SWEEP_DELAY` (30 s: a submit in flight lands after Nextflow exits),
+    then cancels whatever Batch job still carries the session's `nf-session` label. Its reports go beside the run, with
+    an ownership receipt over its trace."""
+    engine = "nextflow"
+
+    def __init__(self, nf_dir: Path):
+        self.nf_dir = nf_dir
+        self.proc: subprocess.Popen | None = None
+        self.seen_cached: tuple[str, ...] = ()
+
+    def _cloud(self, run: Run) -> bool:
+        return run.profile.executor.kind != "local"
+
+    def prepare(self, run: Run) -> list[str]:
+        launch, profile = run.launch, run.profile
+        (launch / ".nextflow").mkdir(parents=True, exist_ok=True)
+        (launch / ".nextflow" / "history").write_text(history_line(run.now, run.scan, run.session))
+        (launch / "scan.nf").write_text(render(run.dag, (self.nf_dir / PRELUDE).read_text(), profile.deployment))
+        (launch / "params.json").write_text(json.dumps(
+            params(profile, run.profile_json, run.scan, run.gen, run.job_start, run.run_id, run.session, run.env,
+                   reproc=run.reproc, fresh=run.fresh, dag=run.dag), indent=1) + "\n")
+        (launch / "executor.config").write_text(executor_config(profile, run.image))
+        (launch / "run.config").write_text(run_config(run.run_id, run.profile_json))
+        for name in (*REPORTS, PREVIEW_DAG):
+            (launch / name).unlink(missing_ok=True)
+        self.argv = nextflow_argv(self.nf_dir, launch, run.session)
+        self.nf_env = {**run.env, "NXF_ANSI_LOG": "false"}
+        if self._cloud(run):
+            self.nf_env["NXF_CLOUDCACHE_PATH"] = profile.work.rstrip("/") + "/cache"
+        return self.argv
+
+    def store_preview(self, run: Run) -> None:
+        store_preview_dag(self.nf_dir, run.launch, self.nf_env, run.run_id)
+
+    def start(self, run: Run) -> None:
+        from . import scan_ownership
+
+        self.ownership = scan_ownership.context(
+            run.profile, run.profile_json, run.scan, run.gen, run.session,
+            None if run.run_id_source == "unrecorded" else run.run_id, run.run_id_source, run.run_id, str(uuid.uuid4()),
+            run.now.isoformat(), run.env, task_work_root(run.profile))
+        self.proc = subprocess.Popen(self.argv, cwd=run.launch, env=self.nf_env, start_new_session=True)
+
+    def wait(self, timeout: float) -> int | None:
+        try:
+            return self.proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            return None
+
+    def progress(self, run: Run) -> Path | None:
+        from .run_dag import cached_tasks
+
+        trace = run.launch / "trace.tsv"
+        if not trace.exists():
+            return None
+        cached = cached_tasks(trace.read_text())
+        dag = run.launch / "dag.mmd"
+        if not dag.exists():
+            dag = run.launch / PREVIEW_DAG
+        if cached == self.seen_cached or not dag.exists():
+            return None
+        self.seen_cached = cached
+        return dag
+
+    def interrupt(self) -> None:
+        try:
+            os.killpg(self.proc.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+
+    def cancel(self, run: Run) -> None:
+        if run.profile.executor.kind != "google-batch":
+            return
+        time.sleep(float(run.env.get("NF_SWEEP_DELAY", "30")))
+        try:
+            from .batch import cancel_labelled
+
+            cancel_labelled({"nf-session": run.session}, region=run.profile.executor.region, log=err)
+        except Exception as e:  # noqa: BLE001 — the record must still finish
+            err(f"scan head: batch-cancel failed: {type(e).__name__}: {e}")
+
+    def error(self, run: Run, rc: int) -> str:
+        f = first_failed(run.launch / "trace.tsv")
+        return f"nextflow exit {rc}" + (f": {f} failed" if f else "") + f" (session {run.session})"
+
+    def finish(self, run: Run, rc: int, signal: int | None) -> None:
+        from . import scan_ownership
+        from .blobstore import Store
+
+        trace = run.launch / "trace.tsv"
+        if not self._cloud(run):
+            echo_task_logs(trace, Path(run.profile.work.rstrip("/")) / "work")
+        reports = publish_reports(run.profile, run.scan, run.launch)
+        try:
+            with TemporaryDirectory(dir=run.launch, prefix='.ownership-') as snapshot_dir:
+                snapshot = scan_ownership.snapshot_trace(trace, Path(snapshot_dir) / 'trace.tsv')
+                doc = scan_ownership.receipt(self.ownership, snapshot, dt.datetime.now(dt.timezone.utc).isoformat(), rc,
+                                             signal, reports)
+                store = Store(run.profile.work)
+                key = scan_ownership.publish(store, doc, snapshot)
+            err(f"scan head: ownership receipt → {store.uri(key)} (trace {doc['trace']['state']}; observed tasks only)")
+        except Exception as e:  # noqa: BLE001 — failed evidence publication cannot prevent the original run's finish
+            err(f"scan head: ownership receipt unavailable: {type(e).__name__}: {e}")
+
+    def cost(self, run: Run) -> list[str]:
+        return ["-l", f"nf-session={run.session}"] if run.profile.executor.kind == "google-batch" else []
+
+    def dag_file(self, run: Run) -> Path:
+        return run.launch / "dag.mmd"
+
+
+def backend_for(profile: ScanProfile, nf_dir: Path) -> Backend:
+    """The profile's engine: every executor kind (`google-batch`, `awsbatch`, `local`) runs under Nextflow."""
+    return NextflowBackend(nf_dir)
+
+
 def head(profile_path: Path, nf_dir: Path, launch: Path | None, *, reproc: bool = False, fresh: bool = False,
          dry_run: bool = False, env: dict[str, str] | None = None) -> int:
     from . import scan_profile
-    from .scan_runs import PROFILE_ENV, TRIGGER_ENV, finish_cmd, phase_begin_cmd, phase_end_cmd, start_cmd, trigger_of
+    from .scan_runs import PROFILE_ENV, TRIGGER_ENV, dag_cmd, finish_cmd, phase_begin_cmd, phase_end_cmd, start_cmd, trigger_of
 
     env = os.environ if env is None else env
     profile = scan_profile.load(profile_path)
@@ -455,7 +567,6 @@ def head(profile_path: Path, nf_dir: Path, launch: Path | None, *, reproc: bool 
     now = dt.datetime.now(dt.timezone.utc)
     scan, gen, job_start = identity(env, now)
     trigger = trigger_of(env)
-    actual_run_id = env.get("DT_RUN_ID") or env.get("BATCH_JOB_UID") or None
     run_id_source = "DT_RUN_ID" if env.get("DT_RUN_ID") else "BATCH_JOB_UID" if env.get("BATCH_JOB_UID") else "unrecorded"
     run_id = env.get("DT_RUN_ID") or env.get("BATCH_JOB_UID") or ""
     env.update(SNAP_ID=scan, SCAN_ID=scan, GEN=gen, DT_JOB_START=job_start, DT_RUN_ID=run_id)
@@ -471,111 +582,58 @@ def head(profile_path: Path, nf_dir: Path, launch: Path | None, *, reproc: bool 
         run_id = env["DT_RUN_ID"] = local_run_id(profile, scan)
         err(f"scan head: not a Batch job; recording as run {run_id}")
     session = session_id(profile.deployment, scan, profile.store)
-    cloud = profile.executor.kind != "local"
     if launch is None:
-        launch = Path(profile.work) if not cloud else Path(env.get("TMPDIR") or "/tmp") / f"nf-{scan}"
+        launch = Path(profile.work) if profile.executor.kind == "local" else Path(env.get("TMPDIR") or "/tmp") / f"nf-{scan}"
     launch = launch.absolute()
-    (launch / ".nextflow").mkdir(parents=True, exist_ok=True)
-    (launch / ".nextflow" / "history").write_text(history_line(now, scan, session))
-    (launch / "params.json").write_text(json.dumps(
-        params(profile, profile_json, scan, gen, job_start, run_id, session, env, reproc=reproc, fresh=fresh), indent=1) + "\n")
     image = env.get("DT_SCAN_IMAGE") or None
-    (launch / "executor.config").write_text(executor_config(profile, image))
-    (launch / "run.config").write_text(run_config(run_id, profile_json))
-    trace = launch / "trace.tsv"
-    for name in (*REPORTS, PREVIEW_DAG):
-        (launch / name).unlink(missing_ok=True)
-    argv = nextflow_argv(nf_dir, launch, session)
-    nf_env = {**env, "NXF_ANSI_LOG": "false"}
-    if cloud:
-        nf_env["NXF_CLOUDCACHE_PATH"] = profile.work.rstrip("/") + "/cache"
+    backend = backend_for(profile, nf_dir)
+    run = Run(profile, profile_json, scan_dag.build(profile, reproc=reproc), scan, gen, job_start, run_id, session, launch,
+              dict(env), now, reproc=reproc, fresh=fresh, image=image, run_id_source=run_id_source)
+    argv = backend.prepare(run)
     err(f"scan head: {profile.deployment}{'' if profile.primary else f' [{profile.store}]'} scan {scan} gen {gen} session {session} "
         f"({trigger or f'${TRIGGER_ENV} unset'}) in {launch}")
     err("+ " + " ".join(argv))
     if dry_run:
         return 0
-    from . import scan_ownership
-
-    ownership = scan_ownership.context(profile, profile_json, scan, gen, session, actual_run_id, run_id_source, run_id,
-                                       str(uuid.uuid4()), now.isoformat(), env, task_work_root(profile))
     recording = bool(env.get(PROFILE_ENV))
-    cost = ["-l", f"nf-session={session}"] if profile.executor.kind == "google-batch" else []
     if recording:
         _record(start_cmd, start_args(profile, gen, scan, run_id, batch, image, env))
         for began, ended in pre_phases(env):
             _record(phase_begin_cmd, began)
             _record(phase_end_cmd, ended)
         if run_id:
-            store_preview_dag(nf_dir, launch, nf_env, run_id)
+            backend.store_preview(run)
 
-    proc = subprocess.Popen(argv, cwd=launch, env=nf_env, start_new_session=True)
     stopped: list[int] = []
+    backend.start(run)
 
     def stop(sig: int, frame) -> None:  # noqa: ANN001
         if not stopped:
-            stopped.append(128 + sig)
-            try:
-                os.killpg(proc.pid, signal.SIGTERM)
-            except ProcessLookupError:
-                pass
+            stopped.append(sig)
+            backend.interrupt()
 
     prev = {s: signal.signal(s, stop) for s in (signal.SIGTERM, signal.SIGINT)}
     try:
-        from .run_dag import cached_tasks
-        from .scan_runs import dag_cmd
-
-        seen_cached: tuple[str, ...] = ()
         beat = head_beat(env, run_id) if recording and run_id else None
         while True:
             if beat is not None:
                 beat()
-            if recording and trace.exists():
-                cached = cached_tasks(trace.read_text())
-                dag = launch / 'dag.mmd'
-                if not dag.exists():
-                    dag = launch / PREVIEW_DAG
-                if cached != seen_cached and dag.exists():
-                    _record(dag_cmd, [run_id, str(dag)])
-                    seen_cached = cached
-            try:
-                rc = proc.wait(timeout=10)
+            if recording and (dag := backend.progress(run)) is not None:
+                _record(dag_cmd, [run_id, str(dag)])
+            if (rc := backend.wait(10)) is not None:
                 break
-            except subprocess.TimeoutExpired:
-                pass
     finally:
         for s, h in prev.items():
             signal.signal(s, h)
     if stopped:
-        rc = stopped[0]
-        if profile.executor.kind == "google-batch":
-            time.sleep(float(env.get("NF_SWEEP_DELAY", "30")))
-            try:
-                from .batch import cancel_labelled
-
-                cancel_labelled({"nf-session": session}, region=profile.executor.region, log=err)
-            except Exception as e:  # noqa: BLE001 — the record must still finish
-                err(f"scan head: batch-cancel failed: {type(e).__name__}: {e}")
+        rc = 128 + stopped[0]
+        backend.cancel(run)
         error = f"head terminated (signal; session {session})"
     else:
-        f = first_failed(trace) if rc else None
-        error = f"nextflow exit {rc}" + (f": {f} failed" if f else "") + f" (session {session})" if rc else None
-    if not cloud:
-        echo_task_logs(trace, Path(profile.work.rstrip("/")) / "work")
-    reports = publish_reports(profile, scan, launch)
-    try:
-        from .blobstore import Store
-
-        with TemporaryDirectory(dir=launch, prefix='.ownership-') as snapshot_dir:
-            snapshot = scan_ownership.snapshot_trace(trace, Path(snapshot_dir) / 'trace.tsv')
-            doc = scan_ownership.receipt(ownership, snapshot, dt.datetime.now(dt.timezone.utc).isoformat(), rc,
-                                         stopped[0] - 128 if stopped else None, reports)
-            store = Store(profile.work)
-            key = scan_ownership.publish(store, doc, snapshot)
-        err(f"scan head: ownership receipt → {store.uri(key)} (trace {doc['trace']['state']}; observed tasks only)")
-    except Exception as e:  # noqa: BLE001 — failed evidence publication cannot prevent the original run's finish
-        err(f"scan head: ownership receipt unavailable: {type(e).__name__}: {e}")
+        error = backend.error(run, rc) if rc else None
+    backend.finish(run, rc, stopped[0] if stopped else None)
     if recording:
-        _record(finish_cmd, finish_args(rc, error, cost, launch / "dag.mmd", run_id))
+        _record(finish_cmd, finish_args(rc, error, backend.cost(run), backend.dag_file(run), run_id, backend.engine))
     if rc == 0:
         print(f"SCAN-JOB-DONE {scan} -> {profile.data.rstrip('/')}/{profile.layout.snapshots_dir()}/{scan}")
     return rc

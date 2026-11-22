@@ -32,41 +32,6 @@
    "type": null
   }
  },
- "steps": [
-  "bucket-check",
-  "list",
-  "index",
-  "static-names",
-  "publish-r2",
-  "interval-store",
-  "index-rows",
-  "index-sync",
-  "over-time",
-  "index-gc",
-  "warm-cache",
-  "probe",
-  "digest"
- ],
- "pre": [],
- "pre_label": "small",
- "side": [],
- "side_label": "small",
- "interval_label": "big",
- "index_parts": [],
- "index_part_label": "big",
- "post": [
-  "index-gc",
-  "warm-cache",
-  "probe",
-  "digest"
- ],
- "over_time": true,
- "over_time_label": "post",
- "fold": [
-  "bucket-check",
-  "index-sync"
- ],
- "skip_list": false,
  "secrets": [
   "AWS_ACCESS_KEY_ID=example-access-key-id",
   "AWS_SECRET_ACCESS_KEY=example-secret-access-key",
@@ -94,8 +59,6 @@
   "scan_id": "2026-10-16t1200"
  },
  "cache": true,
- "static_after_publish": false,
  "queue_size": 20,
- "work_bucket": "example-data",
- "static_label": "small"
+ "work_bucket": "example-data"
 }

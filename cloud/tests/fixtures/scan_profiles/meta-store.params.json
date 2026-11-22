@@ -28,32 +28,6 @@
   "machine": "e2-standard-4",
   "disk": null
  },
- "steps": [
-  "list",
-  "index",
-  "static-names",
-  "publish-r2",
-  "index-rows",
-  "index-sync",
-  "index-gc"
- ],
- "pre": [],
- "pre_label": "small",
- "side": [],
- "side_label": "small",
- "interval_label": "big",
- "index_parts": [],
- "index_part_label": "big",
- "post": [
-  "index-gc"
- ],
- "over_time": false,
- "over_time_label": "post",
- "fold": [
-  "bucket-check",
-  "index-sync"
- ],
- "skip_list": false,
  "secrets": [
   "CLOUDFLARE_API_TOKEN=example-cf-token",
   "R2_ACCESS_KEY_ID=example-serving-key-id",
@@ -83,8 +57,6 @@
   "scan_id": "2026-10-16t1200"
  },
  "cache": true,
- "static_after_publish": false,
  "queue_size": 20,
- "work_bucket": "example-data",
- "static_label": "small"
+ "work_bucket": "example-data"
 }
