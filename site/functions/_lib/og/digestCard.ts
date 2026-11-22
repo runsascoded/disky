@@ -350,6 +350,14 @@ export function tiersSvg(d: TiersCardInput): string {
 // ---- the quota-pools card ---------------------------------------------------------------------------------------
 
 /** One quota pool's series: its name, quota (bytes) and used bytes per scan. */
+/** The gap between a pool label's % and its sizes (px). */
+const SIZE_GAP = 4
+
+/** An amount in the card's unit, short: whole above 100 with thousands commas (`1,367`), else three significant figures
+ *  (`88.5`, `68`, `0.2`). */
+export const fmtT = (v: number): string =>
+  v >= 100 ? String(Math.round(v)).replace(/\B(?=(\d{3})+(?!\d))/g, ',') : String(Number(v.toPrecision(3)))
+
 export interface PoolSeries { name: string; quota: number; points: DigestPoint[] }
 
 /** The pools' line colours, in request order. */
@@ -392,7 +400,11 @@ export function poolsSvg(d: PoolsCardInput): string {
   // plot's right edge)
   const loud = series.filter(s => !s.faint && s.points.length)
   const labelOf = (s: (typeof series)[number]) => `${s.name} ${Math.round(s.pcts[s.pcts.length - 1])}%`
-  const gutter = loud.length ? Math.max(...loud.map(s => interWidth(labelOf(s), 12, 600))) + 14 : 0
+  // each label's latest size and quota in the card's unit, lighter, after its %: `(1,367 T / 1,480 T)`
+  const unit = UNITS[d.units ?? 'TiB']
+  const sizeOf = (s: (typeof series)[number]) => `(${fmtT(s.points[s.points.length - 1].bytes / unit.bytes)} T / ${fmtT(s.quota / unit.bytes)} T)`
+  const labelW = (s: (typeof series)[number]) => interWidth(labelOf(s), 12, 600) + SIZE_GAP + interWidth(sizeOf(s), 11)
+  const gutter = loud.length ? Math.max(...loud.map(labelW)) + 14 : 0
   const f = frame(d, PAD, w - gutter)
   const { left, pw, X } = f
   const Y = (v: number) => y0 + h - (v / hi) * h
@@ -420,7 +432,7 @@ export function poolsSvg(d: PoolsCardInput): string {
   // each loud pool's latest point, its label in the gutter (pushed apart vertically, a leader when moved off its line)
   const labels = loud.map(s => {
     const i = s.points.length - 1
-    return { s, x: X(s.points[i].t), y: Y(s.pcts[i]), label: labelOf(s) }
+    return { s, x: X(s.points[i].t), y: Y(s.pcts[i]), label: labelOf(s), size: sizeOf(s) }
   })
   const ys = spread(labels.map(l => l.y + 4), 15, y0 + 12, y0 + h - 2)
   const gx = left + pw + 8
@@ -430,6 +442,7 @@ export function poolsSvg(d: PoolsCardInput): string {
       out.push(`<polyline points="${r1(l.x + 4)},${r1(l.y)} ${r1(gx - 6)},${r1(l.y)} ${r1(gx - 2)},${r1(ys[k] - 4)}" fill="none" stroke="${l.s.color}" stroke-opacity="0.6"/>`)
     }
     out.push(text(gx, ys[k], l.label, 12, { fill: l.s.color, weight: 600 }))
+    out.push(text(gx + interWidth(l.label, 12, 600) + SIZE_GAP, ys[k], l.size, 11, { fill: INK3 }))
   })
   let y = y0 + h + 30
   const quiet = series.filter(s => s.faint && s.points.length)
