@@ -239,9 +239,11 @@ jobs:
         if: steps.passed.outputs.cache-hit != 'true'
         # one xdist worker per core, `slow` included; `loadgroup`: the conftest keeps the tests sharing a
         # module-scoped fixture together in chunks (one build per chunk), the rest go out one by one.
-        # `--timeout`: a hung test fails after 10 min with every thread's stack, instead of holding the job to its
-        # 60 (`test_tree_mem.py`'s process-tree tests hung on r2 43906785571, cloud 44309715157 and hf 44335651865);
-        # the slowest phase (a `test_static_compact` fixture's setup) takes ~2 min
+        # `--timeout`: meant to fail a hung test after 10 min with every thread's stack, instead of holding the job
+        # to its 60; it didn't fire on the one hang since. The hangs: a worker silent in `test_index_parts.py` (cloud
+        # 44309715157, hf 44335651865, gcs 45008585103; its merge pool forked from a threaded process, spawns since
+        # ebbee51a3) and one in `test_static_compact.py` (r2 43906785571, cause unknown). The slowest phase (a
+        # `test_static_compact` fixture's setup) takes ~2 min
         run: cd cloud && uv run --no-sync pytest ${{ matrix.shard.args }} -v -n auto --dist loadgroup --durations=30 --timeout=600 --timeout-method=thread
 
       - name: Record pass
