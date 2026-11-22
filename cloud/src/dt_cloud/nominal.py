@@ -1,5 +1,6 @@
 """Nominal scan threads (specs/done/nominal-run-threads.md): each run's reply, posted ⏳ when it starts and edited to
-its outcome once the authoritative run record has finished.
+its outcome once the authoritative run record has finished; in a quiet clean thread (`Config.quiet`), no per-run
+replies, only the head and one rolling reply edited in place.
 
 The site's run summaries are the outcome oracle. A renewed object-generation lease serializes writers; a
 persisted send intent and owned Slack message metadata recover a post whose response/state write was lost.
@@ -65,6 +66,11 @@ class Config:
     canvas: bool = False
     #: Outcome emoji overrides, as `{outcome: emoji}` over `EMOJI` (`mark`)
     emoji: tuple[tuple[str, str], ...] = ()
+    #: Quiet clean threads (Ryan, 2026-11-21: Slack notifies only when something is wrong): while the open thread is a
+    #: clean streak, a run posts no reply and no ⏳ reply; the head and one rolling reply (`trail`: the thread's latest
+    #: runs, and the ones going now) are edited in place, which notifies nobody. A run that isn't clean posts as ever,
+    #: opening or continuing its failure thread. Off: a reply per run, as before.
+    quiet: bool = True
 
     def __post_init__(self) -> None:
         if not self.site.startswith("https://") or urlparse(self.site).query or urlparse(self.site).fragment:
@@ -83,6 +89,8 @@ class Config:
             raise ValueError(f"nominal.emoji: keys among {', '.join(EMOJI)}")
         if any(not isinstance(v, str) or not EMOJI_RE.fullmatch(v) for _, v in self.emoji):
             raise ValueError("nominal.emoji: a Slack :name: code or emoji characters")
+        if type(self.quiet) is not bool:
+            raise ValueError("nominal.quiet: true or false")
 
     def mark(self, outcome: str) -> str:
         """An outcome's emoji (`EMOJI`, overridden by `emoji`)."""
@@ -320,9 +328,17 @@ def running_now(cfg: Config, live_rows: list[dict]) -> str:
     return 'Running now: ' + ', '.join(f"[{stamp(r)}]({cfg.link(r['run'])})" for r in reversed(live_rows)) + '.\n\n'
 
 
-def parent(cfg: Config, good: list[dict], boundary: dict | None, live_rows: list[dict] | None = None, stores: str = '') -> str:
+def parent(
+    cfg: Config,
+    good: list[dict],
+    boundary: dict | None,
+    live_rows: list[dict] | None = None,
+    stores: str = '',
+    quiet: bool = False,
+) -> str:
     """The thread's head: a clean thread's streak, or a failure thread's (`failed`), naming the runs going now, with
-    the latest run's outcome and the deployment's store lines (`stores_text`)."""
+    the latest run's outcome and the deployment's store lines (`stores_text`). `quiet`: its runs are listed in one
+    rolling reply (`trail`), not a reply each."""
     if good and not clean(good[0]):
         return failed(cfg, good, boundary, live_rows, stores)
     window = good[:10]
@@ -336,7 +352,16 @@ def parent(cfg: Config, good: list[dict], boundary: dict | None, live_rows: list
             f"Latest completed: [{stamp(good[0])}]({cfg.link(good[0]['run'])})" + (f" · {done}" if (done := outcome(good[0])) else '') + ".\n\n"
             f"{stores}"
             f"{running_now(cfg, live_rows)}"
-            f"Latest {plural(len(window), 'run')}: {mix}. Each reply links its scan record. [All scans]({cfg.scans}).")
+            f"Latest {plural(len(window), 'run')}: {mix}. "
+            + ("One reply lists the runs, each linking its scan record." if quiet else "Each reply links its scan record.")
+            + f" [All scans]({cfg.scans}).")
+
+
+def trail(cfg: Config, runs: list[dict], live_rows: list[dict] | None = None) -> str:
+    """A quiet clean thread's one rolling reply: its newest ten runs' lines (`reply`), oldest first, then the runs going
+    now (`running`); edited in place as runs start and end. `runs` newest first."""
+    lines = [reply(cfg, r) for r in reversed(runs[:10])] + [running(cfg, r) for r in reversed(live_rows or [])]
+    return '\n'.join(lines)
 
 
 def unclean(cfg: Config, runs: list[dict], qualifier: str = '') -> tuple[str, str]:
@@ -637,7 +662,9 @@ def link_threads(state: dict, slack: Transport, write: Callable[[list[tuple[str,
     todo = {rid: ts for rid, ts in replies.items() if linked.get(rid) != ts}
     if not todo:
         return
-    write([(rid, slack.permalink(ts)) for rid, ts in todo.items()])
+    # A quiet thread's runs share its rolling reply: one permalink each reply
+    urls = {ts: slack.permalink(ts) for ts in dict.fromkeys(todo.values())}
+    write([(rid, urls[ts]) for rid, ts in todo.items()])
     state['linked'] = {**{rid: ts for rid, ts in linked.items() if rid in replies}, **todo}
     save(state)
 
@@ -691,6 +718,8 @@ def converge(
     def received(pending: dict, ts: str) -> None:
         if pending['key'] == 'parent':
             state.update(parent=ts, parent_body=pending['body'])
+        elif pending['key'] == 'rolling':
+            state.update(rolling=ts, rolling_body=pending['body'])
         elif pending['key'].startswith('running:'):
             state.setdefault('running', {})[pending['key'].removeprefix('running:')] = {'ts': ts, 'parent': pending['parent']}
         else:
@@ -746,11 +775,20 @@ def converge(
                 reason = 'phase issues' if stop['run']['status'] == 'succeeded' and stop['phase_issues'] else stop['run']['status']
             else:
                 reason = 'clean' if clean(stop) else describe(stop)
-            body = closed_head(cfg, was, closed_runs(rows, stop, state.get('boundary')), stop, reason)
+            old = closed_runs(rows, stop, state.get('boundary'))
+            body = closed_head(cfg, was, old, stop, reason)
             check()
             slack.edit(state['parent'], body)
             state['closed'] = True
             persist()
+            if state.get('rolling'):
+                # A quiet thread's rolling reply ends as its runs and the one that ended it, with no runs going
+                final = trail(cfg, [stop, *old[0]][:10])
+                if state.get('rolling_body') != final:
+                    check()
+                    slack.edit(state['rolling'], final)
+                    state['rolling_body'] = final
+                    persist()
         if good:
             kept = {k: state[k] for k in KEPT if k in state}
             state.clear()
@@ -778,12 +816,28 @@ def converge(
             check()
             received(pending, slack.post(body, root, operation))
 
-        body = parent(cfg, good, boundary, live_rows, stores)
+        quiet = cfg.quiet and head == 'clean'
+        body = parent(cfg, good, boundary, live_rows, stores, quiet=quiet)
         if not state.get('parent'):
             send('parent', body, None)
-        # New threads bootstrap ten; established threads append every missing run after the newest known one.
+        # New threads bootstrap ten; established threads append every missing run after the newest known one. A quiet
+        # thread posts none: its runs are lines of one rolling reply, which each run's link (`link_threads`) names.
         posted = state.setdefault('posted', {})
-        todo = missing(good, posted)
+        todo = [] if quiet else missing(good, posted)
+        if quiet:
+            lines = trail(cfg, good, live_rows)
+            if not state.get('rolling'):
+                send('rolling', lines, state['parent'])
+            elif state.get('rolling_body') != lines:
+                check()
+                slack.edit(state['rolling'], lines)
+                state['rolling_body'] = lines
+                persist()
+            before = dict(posted)
+            for row in reversed(good[:10]):
+                posted.setdefault(row['run']['run_id'], state['rolling'])
+            if posted != before:
+                persist()
         # In a failure thread a run's reply takes the lines its steps' top-level alerts posted (`fold`)
         folding = head != 'clean'
         for rid in sorted(here, key=lambda rid: ended[rid]['run']['started_ts']):
@@ -799,7 +853,7 @@ def converge(
                 alerts, extra = fold(cfg, slack, row) if folding and not clean(row) else ([], '')
                 send(row['run']['run_id'], reply(cfg, row) + extra, state['parent'])
                 folded(slack, alerts, posted[row['run']['run_id']])
-        for row in reversed(live_rows):
+        for row in reversed([] if quiet else live_rows):
             if row['run']['run_id'] not in state.get('running', {}):
                 send('running:' + row['run']['run_id'], running(cfg, row), state['parent'])
         if state.get('parent_body') != body:
@@ -904,7 +958,11 @@ def run(
                 raise RuntimeError('nominal: pending send needs reconciliation before a publish plan can be rendered')
             same = state.get('boundary') == (boundary['run']['run_id'] if boundary else None) and state.get('key', 'clean') == head
             pending_rows = missing(good, state.get('posted', {})) if same else good[:10]
-        return '\n\n+++\n\n'.join([parent(cfg, good, boundary, live_rows, stores_text(cfg, read_series())), *(reply(cfg, r) for r in reversed(pending_rows)),
+        quiet = cfg.quiet and head == 'clean'
+        head_body = parent(cfg, good, boundary, live_rows, stores_text(cfg, read_series()), quiet=quiet)
+        if quiet:
+            return '\n\n+++\n\n'.join([head_body, trail(cfg, good, live_rows)])
+        return '\n\n+++\n\n'.join([head_body, *(reply(cfg, r) for r in reversed(pending_rows)),
                                     *(running(cfg, r) for r in reversed(live_rows))])
     bot = (env.get('SLACK_BOT_TOKEN') or '').strip()
     if not bot:

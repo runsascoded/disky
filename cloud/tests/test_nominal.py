@@ -1,5 +1,6 @@
 """Exact nominal-thread copy, authoritative outcomes, adoption and interrupted/concurrent writer behavior."""
 from copy import deepcopy
+from dataclasses import asdict, replace
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -9,8 +10,9 @@ from dt_cloud import nominal as N
 from dt_cloud.append_runner import Busy, LocalLeaseFile, coordinator_lease
 
 T0 = int(datetime(2026, 11, 1, 8, tzinfo=timezone.utc).timestamp())
-#: `clean` grouping: most tests below pin its copy; `color` (the default) is tested with `replace(CFG, group='color')`.
-CFG = N.Config(state='unused', site='https://site.test', channel='C123', title='Test scans', group='clean')
+#: `clean` grouping with a reply per run: most tests below pin its copy; `color` (the default) is tested with
+#: `replace(CFG, group='color')`, quiet clean threads (the default) with `QUIET`.
+CFG = N.Config(state='unused', site='https://site.test', channel='C123', title='Test scans', group='clean', quiet=False)
 
 
 def row(i, status='succeeded', issues=None, **fields):
@@ -941,3 +943,131 @@ def test_alert_messages_never_returns_a_threads_own_head():
     slack.client = SimpleNamespace(channel='C123', bot_ids=(None, 'B1'), _request=lambda api, args, **kw: {'messages': history})
     assert [m['ts'] for m in slack.alert_messages(link, 0)] == ['1.0', '2.0']
     assert slack.alert(link, 0) == '1.0'
+
+
+QUIET = replace(CFG, group='color', quiet=True)
+#: history(2)'s quiet thread head (1.0) and its rolling reply (2.0)
+QUIET_HEAD = (
+    '✅ **Test scans: 2 consecutive clean runs**\n\n'
+    'Since 2026-11-02 08:00 UTC after [2026-11-01T0800](https://site.test/scans/r0).\n\n'
+    'Latest completed: [2026-11-03 08:00 UTC](https://site.test/scans/r2) · 1m 00s.\n\n'
+    'Latest 2 runs: 2 scheduled / 0 manual. One reply lists the runs, each linking its scan record. [All scans](https://site.test/scans).'
+)
+TRAIL = ('✅ :alarm_clock: [2026-11-02 08:00 UTC](https://site.test/scans/r1) · 1m 00s\n'
+         '✅ :alarm_clock: [2026-11-03 08:00 UTC](https://site.test/scans/r2) · 1m 00s')
+R3_RUNNING = '⏳ :ada: [2026-11-04 08:00 UTC](https://site.test/scans/r3) · running'
+
+
+def quiet_running_writer():
+    """history(2)'s quiet thread, then r3 (Ada's) starting: the head and the rolling reply edited, nothing posted."""
+    w = Writer(QUIET)
+    w.run(history(2))
+    assert bodies(w.slack) == [('post', '1.0', QUIET_HEAD), ('post', '2.0', TRAIL)]
+    assert (w.saved['parent'], w.saved['rolling'], w.saved['posted']) == ('1.0', '2.0', {'r1': '2.0', 'r2': '2.0'})
+    w.slack.calls.clear()
+    w.run([row(3, 'running', finished_ts=None, **ADA), *history(2)])
+    assert bodies(w.slack) == [
+        ('edit', '2.0', f'{TRAIL}\n{R3_RUNNING}'),
+        ('edit', '1.0', QUIET_HEAD.replace('Latest 2 runs', 'Running now: [2026-11-04 08:00 UTC](https://site.test/scans/r3).\n\nLatest 2 runs')),
+    ]
+    assert ('running' in w.saved) is False
+    w.slack.calls.clear()
+    return w
+
+
+def test_quiet_is_the_default_and_must_be_a_boolean():
+    assert N.Config(state='unused', site='https://site.test', channel='C123', title='Test scans').quiet is True
+    with pytest.raises(ValueError, match='nominal.quiet: true or false'):
+        N.config(dict(state='unused', site='https://site.test', channel='C123', title='Test scans', quiet='yes'))
+
+
+def test_a_quiet_clean_thread_posts_its_head_and_one_rolling_reply_then_only_edits_them():
+    """Ryan, 2026-11-21: a clean run is no news. Its thread posts once (the head, and the rolling reply under it); each
+    later run, starting and ending, edits both, which notifies nobody."""
+    w = quiet_running_writer()
+    w.run([row(3, **ADA), *history(2)])
+    assert bodies(w.slack) == [
+        ('edit', '2.0', f'{TRAIL}\n✅ :ada: [2026-11-04 08:00 UTC](https://site.test/scans/r3) · 1m 00s'),
+        ('edit', '1.0', '✅ **Test scans: 3 consecutive clean runs**\n\n'
+                        'Since 2026-11-02 08:00 UTC after [2026-11-01T0800](https://site.test/scans/r0).\n\n'
+                        'Latest completed: [2026-11-04 08:00 UTC](https://site.test/scans/r3) · 1m 00s.\n\n'
+                        'Latest 3 runs: 2 scheduled / 1 manual. One reply lists the runs, each linking its scan record. [All scans](https://site.test/scans).'),
+    ]
+    assert w.saved['posted'] == {'r1': '2.0', 'r2': '2.0', 'r3': '2.0'}
+    w.slack.calls.clear()
+    w.run([row(3, **ADA), *history(2)])
+    assert w.slack.calls == []
+
+
+def test_a_quiet_threads_rolling_reply_keeps_the_newest_ten_runs():
+    w = Writer(QUIET)
+    w.run(history(12))
+    assert [(c[0], c[1]) for c in w.slack.calls] == [('post', '1.0'), ('post', '2.0')]
+    assert w.slack.calls[1][-1] == '\n'.join(N.reply(QUIET, row(i)) for i in range(3, 13))
+    assert list(w.saved['posted']) == [f'r{i}' for i in range(3, 13)]
+
+
+def test_a_failure_in_a_quiet_thread_posts_and_closes_it_and_a_recovery_opens_a_quiet_one():
+    w = quiet_running_writer()
+    f3 = row(3, 'failed', failed_phase='index', error='boom', **ADA)
+    w.run([f3, *history(2)])
+    failed = '❌ :ada: [2026-11-04 08:00 UTC](https://site.test/scans/r3) · 1m 00s · failed in index: boom'
+    assert bodies(w.slack) == [
+        ('edit', '1.0', '✅ **Test scans: 2 consecutive clean runs (ended)**\n\n'
+                        'Since 2026-11-02 08:00 UTC after [2026-11-01T0800](https://site.test/scans/r0); last [2026-11-03 08:00 UTC](https://site.test/scans/r2).\n\n'
+                        'Ended by [2026-11-04 08:00 UTC](https://site.test/scans/r3): failed. [All scans](https://site.test/scans).'),
+        ('edit', '2.0', f'{TRAIL}\n{failed}'),
+        ('post', '3.0', '❌ **Test scans: 1 consecutive failed run**\n\n'
+                        'Since 2026-11-04 08:00 UTC after [2026-11-03T0800](https://site.test/scans/r2) (clean).\n\n'
+                        'Latest: [2026-11-04 08:00 UTC](https://site.test/scans/r3): failed in index: boom.\n\n'
+                        'Each reply links its scan record. [All scans](https://site.test/scans).'),
+        ('post', '4.0', failed),
+    ]
+    assert (w.saved['key'], w.saved['parent'], w.saved['posted'], 'rolling' in w.saved) == ('fail', '3.0', {'r3': '4.0'}, False)
+    w.slack.calls.clear()
+    # a failure thread isn't quiet: a run starting in it posts its ⏳ reply, as ever
+    w.run([row(4, 'running', finished_ts=None), f3, *history(2)])
+    assert [(c[0], c[1]) for c in w.slack.calls] == [('post', '5.0'), ('edit', '3.0')]
+    w.slack.calls.clear()
+    w.run([row(4), f3, *history(2)])
+    assert bodies(w.slack) == [
+        ('edit', '3.0', '❌ **Test scans: 1 consecutive failed run (ended)**\n\n'
+                        'Since 2026-11-04 08:00 UTC after [2026-11-03T0800](https://site.test/scans/r2); last [2026-11-04 08:00 UTC](https://site.test/scans/r3).\n\n'
+                        'Ended by [2026-11-05 08:00 UTC](https://site.test/scans/r4): clean. [All scans](https://site.test/scans).'),
+        ('post', '6.0', '✅ **Test scans: 1 consecutive clean run**\n\n'
+                        'Since 2026-11-05 08:00 UTC after [2026-11-04T0800](https://site.test/scans/r3).\n\n'
+                        'Latest completed: [2026-11-05 08:00 UTC](https://site.test/scans/r4) · 1m 00s.\n\n'
+                        'Latest 1 run: 1 scheduled / 0 manual. One reply lists the runs, each linking its scan record. [All scans](https://site.test/scans).'),
+        ('post', '7.0', '✅ :alarm_clock: [2026-11-05 08:00 UTC](https://site.test/scans/r4) · 1m 00s'),
+        ('edit', '5.0', '✅ :alarm_clock: [2026-11-05 08:00 UTC](https://site.test/scans/r4) · 1m 00s · [thread](https://slack.test/p6.0)'),
+    ]
+    assert (w.saved['parent'], w.saved['rolling'], w.saved['posted'], 'running' in w.saved) == ('6.0', '7.0', {'r4': '7.0'}, False)
+
+
+def test_a_cancelled_run_in_a_quiet_thread_posts_nothing():
+    w = quiet_running_writer()
+    w.run([row(3, 'cancelled', error='cancelled from /scans', **ADA), *history(2)])
+    assert bodies(w.slack) == [('edit', '2.0', TRAIL), ('edit', '1.0', QUIET_HEAD)]
+
+
+def test_a_quiet_threads_runs_each_link_its_rolling_reply():
+    w = Writer(QUIET)
+    w.run(history(2))
+    state, writes = deepcopy(w.saved), []
+    N.link_threads(state, w.slack, writes.append, w.save)
+    assert writes == [[('r1', 'https://slack.test/p2.0'), ('r2', 'https://slack.test/p2.0')]]
+
+
+def test_a_quiet_preview_renders_the_head_and_the_rolling_reply(tmp_path, monkeypatch):
+    import json
+
+    from dt_cloud import probe
+
+    cfg = replace(QUIET, state=str(tmp_path / 'state'))
+    monkeypatch.setattr(probe, 'http_fetch', lambda *args: lambda path: SimpleNamespace(status=200, body=json.dumps(dict(configured=True, runs=history(2)))))
+
+    def transport(*args):
+        pytest.fail('a preview must not reach Slack')
+    monkeypatch.setattr(N, 'Slack', transport)
+    assert N.run(asdict(cfg), {'SITE_TOKEN': 'viewer'}, 'project') == f'{QUIET_HEAD}\n\n+++\n\n{TRAIL}'
+    assert sorted(tmp_path.iterdir()) == []
