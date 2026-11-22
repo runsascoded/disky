@@ -652,7 +652,7 @@ function PhaseTimeline({ spans, secs, color, brush }: { spans: PhaseSpan[]; secs
             <rect className="sr-row-hit" x={0} y={i * rowH} width={W} height={rowH} />
             <text className={`lbl${s.status === 'failed' ? ' failed-label' : ''}`} x={L - 8} y={i * rowH + 16} textAnchor="end">{s.phase.length > cut ? `${s.phase.slice(0, cut - 1)}…` : s.phase}</text>
             <rect x={x(s.start)} y={i * rowH + 5} width={Math.max(2, x(s.end) - x(s.start))} height={rowH - 10} rx={2} style={{ fill: s.tail ? 'var(--other)' : phaseFill(s, color), stroke: s.status === 'running' ? color(s.phase) : undefined }} className={s.status === 'failed' ? 'failed' : undefined} />
-            <text className="dur" x={x(s.end) + 5} y={i * rowH + 16}>{s.status === 'failed' ? `${phaseOutcome(s)} · ` : s.status === 'running' ? 'running · ' : ''}{fmtDur(s.end - s.start)}</text>
+            <text className="dur" x={x(s.end) + 5} y={i * rowH + 16}>{s.status === 'failed' || s.status === 'cancelled' ? `${phaseOutcome(s)} · ` : s.status === 'running' ? 'running · ' : ''}{fmtDur(s.end - s.start)}</text>
           </g>
         ))}
       </svg>
@@ -666,7 +666,7 @@ function nodeSub(n: DagNode, now: number): string {
   if (n.status === 'cached') return n.cachedTasks.length > 1 ? `${n.cachedTasks.length} tasks · reused` : 'reused from cache'
   if (n.status === 'pending' || n.status === 'unrecorded') return n.status === 'pending' ? 'waiting' : 'no phases recorded'
   const k = n.tasks.length > 1 ? `${n.tasks.length} tasks · ` : ''
-  return `${k}${n.start != null ? fmtDur((n.end ?? now) - n.start) : ''}${n.status === 'running' ? ' · running' : n.status === 'failed' ? ' · failed' : ''}`
+  return `${k}${n.start != null ? fmtDur((n.end ?? now) - n.start) : ''}${n.status === 'running' ? ' · running' : n.status === 'failed' || n.status === 'cancelled' ? ` · ${n.status}` : ''}`
 }
 
 /** The run's pipeline DAG: its processes in dependency columns, each coloured by its tasks' phases. Hovering a step
@@ -740,7 +740,7 @@ function StepDrawer({ node, run, project, onClose }: { node: DagNode; run: ScanR
             return (
               <tr key={t.task}>
                 {node.tasks.some(t => t.tag) && <td className="nb"><code>{t.tag}</code></td>}
-                <td className={t.status === 'failed' ? 'failed-label' : undefined}>{t.phases.join(', ')}{t.status === 'running' && <span className="dim"> · running</span>}</td>
+                <td className={t.status === 'failed' ? 'failed-label' : undefined}>{t.phases.join(', ')}{(t.status === 'running' || t.status === 'cancelled') && <span className="dim"> · {t.status}</span>}</td>
                 <td className="nb">{t.machine ?? <span className="dim">—</span>}</td>
                 <td className="num nb">{t.start != null && t0 != null ? `+${fmtDur(t.start - t0)}` : '—'}</td>
                 <td className="num nb">{t.start != null && end != null ? fmtDur(end - t.start) : '—'}</td>
@@ -771,7 +771,7 @@ function TasksTable({ tasks, run, project }: { tasks: RunTask[]; run: ScanRun; p
           const end = t.end ?? (t.status === 'running' ? Math.floor(Date.now() / 1000) : null)
           return (
             <tr key={t.job_name}>
-              <td className={t.status === 'failed' ? 'failed-label' : undefined}>{t.phases.join(', ')}{t.status === 'running' && <span className="dim"> · running</span>}</td>
+              <td className={t.status === 'failed' ? 'failed-label' : undefined}>{t.phases.join(', ')}{(t.status === 'running' || t.status === 'cancelled') && <span className="dim"> · {t.status}</span>}</td>
               <td className="nb">{t.machine ?? <span className="dim">—</span>}</td>
               <td className="num nb">{t.start != null && t0 != null ? `+${fmtDur(t.start - t0)}` : '—'}</td>
               <td className="num nb">{t.start != null && end != null ? fmtDur(end - t.start) : '—'}</td>
@@ -873,7 +873,7 @@ function PhaseNotes({ spans, color }: { spans: PhaseSpan[]; color: (p: string) =
     <StickyTable className="runs sr-notes">
       <thead><tr><th>phase</th><th className="num">duration</th><th>note</th></tr></thead>
       <tbody>{spans.map(p => <tr key={p.phase} className={p.status === 'failed' ? 'failed' : undefined}>
-        <td className="nb"><i className="sw" style={{ background: phaseFill(p, color) }} />{p.phase}{p.status === 'running' && <span className="dim"> · running</span>}</td>
+        <td className="nb"><i className="sw" style={{ background: phaseFill(p, color) }} />{p.phase}{(p.status === 'running' || p.status === 'cancelled') && <span className="dim"> · {p.status}</span>}</td>
         <td className="num nb">{fmtDur(p.end - p.start)}</td>
         <td>{p.note ?? <span className="dim">—</span>}</td>
       </tr>)}</tbody>
@@ -903,9 +903,9 @@ export function ScanRunPage() {
   const kinds = new Set(list.data?.runs.map(s => s.run.kind))
   const map = r && r.status === 'succeeded' && isScanProducer(r.kind) ? mapHref(r.scan, store.path, slug) : null
   const liveDetail = d && r ? liveness(r, d.spans, Math.floor(Date.now() / 1000)) : null
-  const tasks = useMemo(() => runTasks(d?.phases ?? []), [d])
+  const tasks = useMemo(() => runTasks(d?.phases ?? [], d?.run), [d])
   const brush = useBrush()
-  const nodes = useMemo(() => (d?.dag ? dagNodes(d.dag.dag, d.phases, d.run.status === 'running') : []), [d])
+  const nodes = useMemo(() => (d?.dag ? dagNodes(d.dag.dag, d.phases, d.run) : []), [d])
   const pinnedNode = nodes.find(n => n.id === brush.pinned)
   return (
     <main className="staged-page scans-page">

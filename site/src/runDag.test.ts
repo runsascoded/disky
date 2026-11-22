@@ -41,7 +41,7 @@ describe('dagNodes', () => {
     ph('legacy', 7, '', 0, 10),
   ]
   it('joins each node to its tasks\' phases', () => {
-    const nodes = dagNodes(DAG, phases, true)
+    const nodes = dagNodes(DAG, phases, { status: 'running' })
     expect(nodes.map(n => [n.id, n.layer, n.row, n.status, n.start, n.end, n.tasks.map(t => [t.tag, t.job_name, t.phases, t.status])])).toEqual([
       ['list_source', 0, 0, 'done', 100, 500, [['s3://b1', 'nf-1', ['list b1', 'import b1'], 'done'], ['s3://b2', 'nf-2', ['bucket-check', 'list b2'], 'done']]],
       ['index', 1, 0, 'done', 600, 900, [['', null, ['layer-2', 'index-write'], 'done']]],
@@ -54,7 +54,7 @@ describe('dagNodes', () => {
   })
   it('calls a finished run\'s phaseless node unrecorded, and a failed task fails its node', () => {
     const failed = [...phases.slice(0, 6), ph('static-names', 6, 'static_names', 950, 990, { status: 'failed' })]
-    expect(dagNodes(DAG, failed, false).map(n => [n.id, n.status])).toEqual([
+    expect(dagNodes(DAG, failed, { status: 'failed' }).map(n => [n.id, n.status])).toEqual([
       ['list_source', 'done'], ['index', 'done'], ['static_names', 'failed'], ['publish_r2', 'unrecorded'],
       ['interval_store', 'unrecorded'], ['index_rows', 'unrecorded'], ['post', 'unrecorded'],
     ])
@@ -62,7 +62,7 @@ describe('dagNodes', () => {
   it('shows reported cache hits separately from running, waiting and unrecorded nodes', () => {
     const dag = { ...DAG, cached_tasks: ['list_source (s3://b1)', 'list_source (s3://b2)', 'index', 'publish_r2', 'interval_store', 'index_rows'] }
     const active = [ph('static-names', 0, 'static_names', 950, null)]
-    expect(dagNodes(dag, active, true).map(n => [n.id, n.status, n.cachedTasks, n.start, n.end])).toEqual([
+    expect(dagNodes(dag, active, { status: 'running' }).map(n => [n.id, n.status, n.cachedTasks, n.start, n.end])).toEqual([
       ['list_source', 'cached', ['list_source (s3://b1)', 'list_source (s3://b2)'], null, null],
       ['index', 'cached', ['index'], null, null],
       ['static_names', 'running', [], 950, null],
@@ -71,13 +71,21 @@ describe('dagNodes', () => {
       ['index_rows', 'cached', ['index_rows'], null, null],
       ['post', 'pending', [], null, null],
     ])
-    expect(dagNodes(dag, [ph('list b3', 0, 'list_source (s3://b3)', 950, null)], true)[0]).toMatchObject({
+    expect(dagNodes(dag, [ph('list b3', 0, 'list_source (s3://b3)', 950, null)], { status: 'running' })[0]).toMatchObject({
       status: 'running', cachedTasks: ['list_source (s3://b1)', 'list_source (s3://b2)'], start: 950, end: null,
     })
-    expect(dagNodes(dag, [], false).map(n => [n.id, n.status])).toEqual([
+    expect(dagNodes(dag, [], { status: 'succeeded' }).map(n => [n.id, n.status])).toEqual([
       ['list_source', 'cached'], ['index', 'cached'], ['static_names', 'unrecorded'], ['publish_r2', 'cached'],
       ['interval_store', 'cached'], ['index_rows', 'cached'], ['post', 'unrecorded'],
     ])
+  })
+  it('calls the step a cancel stopped cancelled, not failed', () => {
+    const stopped = [...phases.slice(0, 2), ph('list b2', 3, 'list_source (s3://b2)', 115, 835, { status: 'failed', note: 'failed (lost)' })]
+    expect(dagNodes(DAG, stopped, { status: 'cancelled' }).map(n => [n.id, n.status, n.tasks.map(t => t.status)])).toEqual([
+      ['list_source', 'cancelled', ['done', 'cancelled']], ['index', 'unrecorded', []], ['static_names', 'unrecorded', []],
+      ['publish_r2', 'unrecorded', []], ['interval_store', 'unrecorded', []], ['index_rows', 'unrecorded', []], ['post', 'unrecorded', []],
+    ])
+    expect(dagNodes(DAG, stopped, { status: 'failed' })[0].status).toEqual('failed')
   })
 })
 

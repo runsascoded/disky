@@ -182,7 +182,11 @@ export function withDeltas(run: ScanRun, outputs: readonly ScanRunOutput[], inde
 }
 
 /** A phase on the run's clock: seconds from the run's start. */
-export interface PhaseSpan { phase: string; start: number; end: number; status: ScanRunPhase['status']; note: string | null; lane: number; machine?: string | null; task?: string | null }
+/** A phase's shown state: its recorded status (a closed one's note can make it `failed`), or `cancelled` for a step a
+ * cancel stopped (`phaseStatus`). */
+export type PhaseState = ScanRunPhase['status'] | 'cancelled'
+
+export interface PhaseSpan { phase: string; start: number; end: number; status: PhaseState; note: string | null; lane: number; machine?: string | null; task?: string | null }
 
 /** Processing starts after a completed queue phase. A retry may wait days after capture before its job starts. */
 export function processingSecs(total: number | null, spans: readonly PhaseSpan[]): number | null {
@@ -191,17 +195,23 @@ export function processingSecs(total: number | null, spans: readonly PhaseSpan[]
 }
 
 /** A phase's status, a closed one's note naming a nonfatal failure (`failed (exit N)`, legacy `wall, failed …`) over
- * its recorded `done`. A running phase stays running: its note is a heartbeat's live output line, whatever it says. */
-export function phaseStatus(p: Pick<ScanRunPhase, 'status' | 'note'>): ScanRunPhase['status'] {
-  return p.status !== 'running' && /(?:^|,\s*)failed\b/i.test(p.note ?? '') ? 'failed' : p.status
+ * its recorded `done`. A running phase stays running: its note is a heartbeat's live output line, whatever it says.
+ * In a `cancelled` run (`run`) a failed phase is `cancelled`: the run is recorded cancelled only when none of its steps
+ * had failed on its own before the cancel (migration `scan-run-cancelled`'s rule), so its failed steps are the ones
+ * the cancel stopped (`failed (lost)` once `reconcile` closes them). */
+export function phaseStatus(p: { status: PhaseState; note: string | null }, run?: Partial<Pick<ScanRun, 'status'>>): PhaseState {
+  if (p.status === 'running' || p.status === 'cancelled') return p.status
+  const failed = p.status === 'failed' || /(?:^|,\s*)failed\b/i.test(p.note ?? '')
+  return failed ? (run?.status === 'cancelled' ? 'cancelled' : 'failed') : p.status
 }
 
-export function phaseOutcome(p: Pick<ScanRunPhase, 'status' | 'note'>): string {
+export function phaseOutcome(p: { status: PhaseState; note: string | null }): string {
   return phaseStatus(p) === 'failed' && /\bexit\s+124\b|\btimed?\s*out\b/i.test(p.note ?? '') ? 'timed out' : phaseStatus(p)
 }
 
+/** A phase's bar: its family's hue, red when failed, grey when a cancel stopped it. */
 export const phaseFill = (p: Pick<PhaseSpan, 'phase' | 'status' | 'note'>, color: (phase: string) => string): string =>
-  phaseStatus(p) === 'failed' ? 'var(--danger)' : color(p.phase)
+  phaseStatus(p) === 'failed' ? 'var(--danger)' : phaseStatus(p) === 'cancelled' ? 'var(--ink-3)' : color(p.phase)
 
 /** A phase's family: the per-source phases a scan runs in parallel (`list <bucket>`, `import <bucket>`) are one family,
  *  named for the step; any other phase is its own. One legend item and one hue per family. */
@@ -490,7 +500,7 @@ const passingBy = (run: ScanRun, p: ScanRunPhase, runs: readonly ScanRun[], phas
 
 /** The run's issues, one per phase (its last attempt's; `attempts` counts a phase's failed ones). */
 export function phaseIssues(run: ScanRun, runs: readonly ScanRun[], phases: readonly ScanRunPhase[]): PhaseIssue[] {
-  const own = phases.filter(p => p.run_id === run.run_id && (phaseStatus(p) === 'failed' || phaseSkip(p) != null || phaseBehind(p) != null || phaseDeferred(p) != null))
+  const own = phases.filter(p => p.run_id === run.run_id && (phaseStatus(p, run) === 'failed' || phaseSkip(p) != null || phaseBehind(p) != null || phaseDeferred(p) != null))
   const last = new Map<string, ScanRunPhase>()
   for (const p of own) last.set(p.phase, p)
   return [...last.values()].map(p => {
@@ -514,19 +524,19 @@ export function phaseIssues(run: ScanRun, runs: readonly ScanRun[], phases: read
  * one before it (an overlapped phase, `access-ingest` beside the listing)
  * takes the next free lane. */
 /** A run's step tasks (its phases' own Batch jobs, a Nextflow run's): one per job, in start order. */
-export interface RunTask { job_name: string; machine: string | null; phases: string[]; start: number | null; end: number | null; status: ScanRunPhase['status'] }
+export interface RunTask { job_name: string; machine: string | null; phases: string[]; start: number | null; end: number | null; status: PhaseState }
 
-export function runTasks(phases: readonly ScanRunPhase[]): RunTask[] {
+export function runTasks(phases: readonly ScanRunPhase[], run?: Pick<ScanRun, 'status'>): RunTask[] {
   const by = new Map<string, RunTask>()
   for (const p of [...phases].sort((a, b) => (a.started_ts ?? Infinity) - (b.started_ts ?? Infinity) || a.seq - b.seq)) {
     if (!p.job_name) continue
-    const t = by.get(p.job_name) ?? { job_name: p.job_name, machine: null, phases: [], start: null, end: null, status: 'done' as const }
+    const t: RunTask = by.get(p.job_name) ?? { job_name: p.job_name, machine: null, phases: [], start: null, end: null, status: 'done' }
     t.machine ??= p.machine ?? null
     t.phases.push(p.phase)
     if (p.started_ts != null) t.start = t.start == null ? p.started_ts : Math.min(t.start, p.started_ts)
     if (p.finished_ts != null) t.end = t.end == null ? p.finished_ts : Math.max(t.end, p.finished_ts)
-    const st = phaseStatus(p)
-    if (st === 'failed' || (st === 'running' && t.status === 'done')) t.status = st
+    const st = phaseStatus(p, run)
+    if (st === 'failed' || (st === 'running' && t.status !== 'failed') || (st === 'cancelled' && t.status === 'done')) t.status = st
     by.set(p.job_name, t)
   }
   return [...by.values()]
@@ -542,7 +552,7 @@ export function phaseSpans(run: Pick<ScanRun, 'started_ts'> & Partial<Pick<ScanR
     const start = Math.max(0, p.started_ts - t0), end = Math.max(start, until - t0)
     let lane = laneEnds.findIndex(e => e <= start)
     if (lane < 0) { lane = laneEnds.length; laneEnds.push(end) } else laneEnds[lane] = end
-    return [{ phase: p.phase, start, end, status: phaseStatus(p), note: p.note, lane, ...(p.machine ? { machine: p.machine } : {}), ...(p.task ? { task: p.task } : {}) }]
+    return [{ phase: p.phase, start, end, status: phaseStatus(p, run), note: p.note, lane, ...(p.machine ? { machine: p.machine } : {}), ...(p.task ? { task: p.task } : {}) }]
   })
 }
 

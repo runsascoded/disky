@@ -1,7 +1,7 @@
 // A scan run's pipeline DAG (specs/pipelines-everywhere.md "Run reports"): the engine-neutral graph its head stored
 // (`scan_run_dags`, reduced by the writer from its engine's own format), laid out in columns, and each node joined to
 // the phases its tasks recorded (`scan_run_phases.task` = `<id> (<tag>)`; Nextflow: `$NF_PROCESS` / `$NF_TAG`).
-import { phaseStatus, type ScanRunPhase } from './scanRunsModel'
+import { phaseStatus, type PhaseState, type ScanRun, type ScanRunPhase } from './scanRunsModel'
 
 /** The engine-neutral graph the run's writer stored (`dt_cloud.run_dag`): the steps, and the edges between them. A
  * node's `id` is what the run's phases name as their `task`'s process. */
@@ -27,10 +27,10 @@ export function dagLayers(dag: Dag): Map<string, number> {
   return layer
 }
 
-export type NodeStatus = ScanRunPhase['status'] | 'cached' | 'pending' | 'unrecorded'
+export type NodeStatus = PhaseState | 'cached' | 'pending' | 'unrecorded'
 
 /** One task of a process (a fan-out's member, or the process's only task) and the phases it recorded. */
-export interface DagTask { task: string; tag: string; job_name: string | null; machine: string | null; phases: string[]; status: ScanRunPhase['status']; start: number | null; end: number | null }
+export interface DagTask { task: string; tag: string; job_name: string | null; machine: string | null; phases: string[]; status: PhaseState; start: number | null; end: number | null }
 
 export interface DagNode { id: string; label: string; layer: number; row: number; status: NodeStatus; tasks: DagTask[]; cachedTasks: string[]; start: number | null; end: number | null }
 
@@ -38,22 +38,23 @@ export interface DagNode { id: string; label: string; layer: number; row: number
 export const processOf = (task: string): string => task.replace(/ \(.*\)$/, '')
 const tagOf = (task: string): string => /\((.*)\)$/.exec(task)?.[1] ?? ''
 
-function worst(ss: readonly ScanRunPhase['status'][]): ScanRunPhase['status'] {
-  return ss.includes('failed') ? 'failed' : ss.includes('running') ? 'running' : 'done'
+function worst(ss: readonly PhaseState[]): PhaseState {
+  return ss.includes('failed') ? 'failed' : ss.includes('running') ? 'running' : ss.includes('cancelled') ? 'cancelled' : 'done'
 }
 
 /** The DAG's nodes with their tasks' phases and a status: no phases yet is `pending` while the run runs, else
- * `unrecorded` (a task that recorded nothing, or a run before phases named their task). */
-export function dagNodes(dag: Dag, phases: readonly ScanRunPhase[], running: boolean): DagNode[] {
+ * `unrecorded` (a task that recorded nothing, or a run before phases named their task). A cancelled run's stopped
+ * steps are `cancelled` (`phaseStatus`). */
+export function dagNodes(dag: Dag, phases: readonly ScanRunPhase[], run: Pick<ScanRun, 'status'>): DagNode[] {
   const layers = dagLayers(dag)
   const rows = new Map<number, number>()
   return dag.nodes.map(({ id, label }) => {
     const by = new Map<string, DagTask>()
     for (const p of [...phases].sort((a, b) => (a.started_ts ?? Infinity) - (b.started_ts ?? Infinity) || a.seq - b.seq)) {
       if (!p.task || processOf(p.task) !== id) continue
-      const t = by.get(p.task) ?? { task: p.task, tag: tagOf(p.task), job_name: p.job_name ?? null, machine: p.machine ?? null, phases: [], status: 'done' as const, start: null, end: null }
+      const t: DagTask = by.get(p.task) ?? { task: p.task, tag: tagOf(p.task), job_name: p.job_name ?? null, machine: p.machine ?? null, phases: [], status: 'done', start: null, end: null }
       t.phases.push(p.phase)
-      t.status = worst([t.status, phaseStatus(p)])
+      t.status = worst([t.status, phaseStatus(p, run)])
       if (p.started_ts != null) t.start = t.start == null ? p.started_ts : Math.min(t.start, p.started_ts)
       if (p.finished_ts != null) t.end = t.end == null ? p.finished_ts : Math.max(t.end, p.finished_ts)
       by.set(p.task, t)
@@ -66,7 +67,7 @@ export function dagNodes(dag: Dag, phases: readonly ScanRunPhase[], running: boo
     const starts = tasks.flatMap(t => t.start ?? []), ends = tasks.flatMap(t => t.end ?? [])
     return {
       id, label, layer, row, tasks, cachedTasks,
-      status: tasks.length ? worst(tasks.map(t => t.status)) : cachedTasks.length ? 'cached' : running ? 'pending' : 'unrecorded',
+      status: tasks.length ? worst(tasks.map(t => t.status)) : cachedTasks.length ? 'cached' : run.status === 'running' ? 'pending' : 'unrecorded',
       start: starts.length ? Math.min(...starts) : null,
       end: ends.length && !tasks.some(t => t.status === 'running') ? Math.max(...ends) : null,
     }

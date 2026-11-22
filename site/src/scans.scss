@@ -166,6 +166,7 @@
       &.running rect { stroke: var(--ink); stroke-dasharray: 4 3; fill: color-mix(in srgb, var(--ink) 6%, var(--surface)); }
       &.failed rect { stroke: var(--danger); fill: color-mix(in srgb, var(--danger) 10%, var(--surface)); }
       &.failed .sub { fill: var(--danger); }
+      &.cancelled rect { stroke: var(--ink-3); stroke-dasharray: 4 3; }
       &.pending .name, &.unrecorded .name { fill: var(--ink-3); } }
     .node.brushed rect { stroke-width: 3; } .node.to rect { stroke-dasharray: 5 3; } .node.dimmed { opacity: 0.3; }
     .node.pinned rect { stroke: var(--ink); } }

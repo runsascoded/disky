@@ -1,7 +1,7 @@
 // specs/done/scan-runs-ui.md: the derivations /scans shows from the D1 rows.
 import { describe, expect, it } from 'vitest'
 import {
-  batchHref, failedAt, logsHref, mapHref, metaHref, outputIndex, phaseIssues, phaseOutcome, phaseOrder, phaseSpans, runTime, type ScanRun, type ScanRunOutput,
+  batchHref, failedAt, logsHref, mapHref, metaHref, outputIndex, phaseFill, phaseIssues, phaseOutcome, phaseOrder, phaseSpans, runTime, type ScanRun, type ScanRunOutput,
   type ScanRunPhase, manualScans, scanRunOf, structureOf, summarize, withDeltas, runOutcome, runOutcomeLine, phaseDeferred, phaseSkip, overlappingFailures, runTasks, taskLogsHref,
   isMaintenance, liveness, LOST_S, maintStore, phaseStatus, processingSecs, QUIET_S, issueLeaves, issueNext, issueState, issueWhat, outcomeParts, outcomeSteps, passingSince, runOutcomeLabel, statusMatches,
   stepFailure, STATUS_FILTERS, typicalScanSecs, aboutDur,
@@ -555,6 +555,31 @@ describe('runTasks', () => {
   })
   it('is empty for a one-VM run', () => {
     expect(runTasks([phase('u1', 'listing', 0, 0, 10)])).toEqual([])
+  })
+})
+
+describe('a cancelled run\'s stopped step', () => {
+  // hf's a4287bea: the cancel killed `list_source`'s task; `reconcile` closed its phase `failed (lost)`
+  const r = run({ run_id: 'x', scan: '2026-11-21T0251', status: 'cancelled', error: 'cancelled from /scans', started_ts: 0, finished_ts: 900 })
+  const ps: ScanRunPhase[] = [
+    { ...phase('x', 'bucket-check', 0, 0, 5), job_name: 'nf-bc' },
+    { ...phase('x', 'list open-athena', 1, 5, 725), status: 'failed', note: 'failed (lost)', job_name: 'nf-l' },
+  ]
+  const color = () => 'var(--hue)'
+  it('reads cancelled in spans, tasks and fills, and is no issue', () => {
+    const spans = phaseSpans(r, ps)
+    expect(spans.map(s => [s.phase, s.status, phaseOutcome(s), phaseFill(s, color)])).toEqual([
+      ['bucket-check', 'done', 'done', 'var(--hue)'],
+      ['list open-athena', 'cancelled', 'cancelled', 'var(--ink-3)'],
+    ])
+    expect(runTasks(ps, r).map(t => [t.job_name, t.status])).toEqual([['nf-bc', 'done'], ['nf-l', 'cancelled']])
+    expect(phaseIssues(r, [r], ps)).toEqual([])
+  })
+  it('stays failed in a failed run', () => {
+    const f = { ...r, status: 'failed' as const }
+    expect(phaseSpans(f, ps).map(s => s.status)).toEqual(['done', 'failed'])
+    expect(runTasks(ps).map(t => t.status)).toEqual(['done', 'failed'])
+    expect(phaseIssues(f, [f], ps)).toEqual([{ phase: 'list open-athena', outcome: 'failed', recovery: null }])
   })
 })
 
