@@ -20,7 +20,8 @@ export function fonts(env: Env, origin: string): Promise<Uint8Array[]> {
   return fontsP
 }
 
-export async function renderPng(env: Env, origin: string, svg: string): Promise<Uint8Array> {
+/** `svg` as a PNG at `zoom` (default the fleet card's `ZOOM`). */
+export async function renderPng(env: Env, origin: string, svg: string, zoom = ZOOM): Promise<Uint8Array> {
   await ensureWasm(RESVG)
-  return svgToPng(svg, await fonts(env, origin), ZOOM)
+  return svgToPng(svg, await fonts(env, origin), zoom)
 }

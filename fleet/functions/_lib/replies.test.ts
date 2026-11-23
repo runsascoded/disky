@@ -6,9 +6,11 @@ import { fleetSvg } from './card'
 import type { Env } from './env'
 import { readFleet } from './fleet'
 import type { FleetDeployment, FleetDoc, FleetRun } from './fleetTypes'
-import { enabledReplies, publishReplies, REPLIES_KV_KEY, replyImages, replyMessage, viewSvg } from './replies'
+import { DEPLOY_ZOOM } from './deployCard'
+import { enabledReplies, packLines, publishReplies, REPLIES_KV_KEY, replyImages, replyMessage, viewSvg, viewZoom } from './replies'
 import { ANSWERS, FLEET, fleetEnv, NOW, stubFetch } from './testFleet'
-import { costSvg, timelineSvg, weekLine } from './views'
+import { costSvg, timelineSvg } from './views'
+import { ZOOM } from './card'
 
 const H = 3600
 const DAY = 86400
@@ -75,29 +77,25 @@ describe('the cost by month', () => {
   })
 })
 
-describe('a deployment\'s week, in words', () => {
-  it('its runs, the ones not ok by outcome, time scanning and cost (a running run counts in neither)', () => {
-    expect(weekLine(mini.deployments[0], NOW)).toBe('5 runs · 1 with issues · 1 failed · 1 running · 1 cancelled · 5.2h scanning · $0.85')
-  })
-})
-
 describe('the views /og/fleet.png draws', () => {
-  it('the card (no view), over 30 days (labelled every 5th day back from today), one deployment\'s alone; an unknown view or deployment is null', async () => {
+  it('the card (no view), over 30 days (labelled every 5th day back from today), a deployment\'s status card (at its own zoom); an unknown view or deployment is null', async () => {
     const doc = await readFleet(fleetEnv(), NOW, stubFetch(ANSWERS))
     const c = { theme: 'dark' as const, doc, deployments: FLEET.map(({ name, color }) => ({ name, color })) }
     const dates = (svg: string) => texts(svg).filter(s => /^\d+\/\d+$/.test(s))
     const month = viewSvg('month', null, c)!
-    const one = viewSvg('dep', 'cw', c)!
+    const one = viewSvg('deploy', 'cw', c)!
     expect([
       viewSvg(null, null, c) === fleetSvg({ tier: 'full', theme: 'dark', deployments: c.deployments, doc, now: doc.now }),
       texts(month)[0], dates(month).slice(0, 6), dates(month).length,
       texts(one).slice(0, 3),
-      viewSvg('dep', 'nope', c), viewSvg('pie', null, c),
+      viewSvg('deploy', 'nope', c), viewSvg('dep', 'cw', c), viewSvg('pie', null, c),
+      [viewZoom('deploy'), viewZoom('month'), viewZoom(null)],
     ]).toEqual([
       true,
       'disky fleet · 30 days', ['10/13', '10/18', '10/23', '10/28', '11/2', '11/7'], 24,
-      ['disky · cw', '2026-11-07 14:00 UTC', 'cw'],
-      null, null,
+      ['cw', 'last 30 scan runs', '2026-11-07 14:00 UTC'],
+      null, null, null,
+      [DEPLOY_ZOOM, ZOOM, ZOOM],
     ])
   })
 })
@@ -113,8 +111,45 @@ describe('which replies', () => {
   it('one reply per kind, a deployment\'s card one each, with its image\'s view', () => {
     expect(replyImages(mini, enabledReplies(undefined)).map(r => [r.key, r.params])).toEqual([
       ['month', { view: 'month' }], ['timeline', { view: 'timeline' }], ['cost', { view: 'cost' }],
-      ['dep:a', { view: 'dep', d: 'a' }], ['dep:b', { view: 'dep', d: 'b' }],
+      ['dep:a', { view: 'deploy', d: 'a' }], ['dep:b', { view: 'deploy', d: 'b' }],
     ])
+  })
+
+  it('a deployment\'s reply: its newest 10 runs as its quiet run thread lists them, oldest first, then its card; a deployment whose runs couldn\'t be read says why', () => {
+    const [a, b] = replyImages(mini, ['deployments'])
+    expect([a, b]).toEqual([
+      {
+        key: 'dep:a', params: { view: 'deploy', d: 'a' },
+        alt: 'a: its last 30 scan runs\' durations, stacked by step, and its data, objects, cost per run and run time over 30 days',
+        text: '*<https://a.test|a>*: its last 6 runs, oldest first. <https://a.test/scans|All scans>. Edited in place hourly.',
+        lines: [
+          ':white_check_mark: :alarm_clock: <https://a.test/scans/r0|10/28 14:00Z> · 60m 00s',
+          ':x: :alarm_clock: <https://a.test/scans/r3|11/04 14:00Z> · 60m 00s · failed in index',
+          ':white_check_mark: :alarm_clock: <https://a.test/scans/r1|11/06 08:00Z> · 120m 00s',
+          ':warning: :bust_in_silhouette: <https://a.test/scans/r2|11/06 09:00Z> · 120m 00s · phase issues: dups',
+          ':no_entry_sign: :alarm_clock: <https://a.test/scans/r5|11/07 02:00Z> · 10m 00s · cancelled',
+          ':hourglass_flowing_sand: :alarm_clock: <https://a.test/scans/r4|11/07 12:00Z> · running',
+        ],
+      },
+      {
+        key: 'dep:b', params: { view: 'deploy', d: 'b' }, lines: [],
+        alt: 'b: its last 30 scan runs\' durations, stacked by step, and its data, objects, cost per run and run time over 30 days',
+        text: '*<https://b.test|b>*: runs n/a (HTTP 500). <https://b.test/scans|All scans>. Edited in place hourly.',
+      },
+    ])
+    expect(replyMessage(a, 'https://fleet.test/og/fleet.png?view=deploy&d=a&v=1')).toEqual({
+      text: '<https://a.test|a>: its last 6 runs, oldest first. <https://a.test/scans|All scans>. Edited in place hourly.',
+      blocks: [
+        { type: 'section', text: { type: 'mrkdwn', text: a.text } },
+        { type: 'section', text: { type: 'mrkdwn', text: a.lines!.join('\n') } },
+        { type: 'image', image_url: 'https://fleet.test/og/fleet.png?view=deploy&d=a&v=1', alt_text: a.alt },
+      ],
+    })
+  })
+
+  it('lines go in as few sections as fit Slack\'s limit, in order', () => {
+    expect(packLines(['aaaa', 'bb', 'ccc', 'd'], 7)).toEqual(['aaaa\nbb', 'ccc\nd'])
+    expect(packLines([], 7)).toEqual([])
   })
 })
 

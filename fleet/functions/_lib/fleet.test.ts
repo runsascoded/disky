@@ -2,7 +2,7 @@
  *  whole, including each way a deployment can fail to answer. */
 import { describe, expect, it } from 'vitest'
 import type { Env } from './env'
-import { type FleetDoc, fleetMeta, parseFleet, readFleet, runsOf } from './fleet'
+import { ERROR_MAX, type FleetDoc, fleetMeta, oneLine, parseFleet, readFleet, runsOf } from './fleet'
 import { NOW, type Seen, Status, stubFetch } from './testFleet'
 
 const t = (iso: string) => Date.parse(iso) / 1000
@@ -20,8 +20,9 @@ const env = (extra: Partial<Env> = {}): Env => ({
   ...extra,
 })
 
-const runWire = (run_id: string, scan: string, kind: string, status: string, started: number, secs: number, cost: number | null, failed_at: string | null, issues: object[], trigger?: string, run: object = {}) =>
-  ({ run: { run_id, scan, kind, status, started_ts: started, store: 'x', parent: null, ...(trigger ? { trigger } : {}), ...run }, secs, cost_usd: cost, failed_at, phase_issues: issues, spans: [], downstream: 0 })
+const runWire = (run_id: string, scan: string, kind: string, status: string, started: number, secs: number, cost: number | null, failed_at: string | null, issues: object[], trigger?: string, run: object = {}, spans: object[] = []) =>
+  ({ run: { run_id, scan, kind, status, started_ts: started, store: 'x', parent: null, ...(trigger ? { trigger } : {}), ...run }, secs, cost_usd: cost, failed_at, phase_issues: issues, spans, downstream: 0 })
+const span = (phase: string, start: number, end: number, status = 'done', note: string | null = null) => ({ phase, start, end, status, note, lane: 0 })
 const THREAD = 'https://slack.test/archives/C0ADMIN/p1762498800000100'
 
 const ANSWERS = {
@@ -39,8 +40,10 @@ const ANSWERS = {
         { phase: 'dups', outcome: 'failed', recovery: null, passing: null },
         { phase: 'probe', outcome: 'failed', recovery: { run_id: 'r0' }, passing: null },
         { phase: 'check', outcome: 'failed', recovery: null, passing: { run_id: 'r9' } },
-      ], 'manual', { thread_url: THREAD, trigger_emoji: ':ryan:' }),
-      runWire('r2', '2026-11-06', 'scan', 'failed', NOW - 31 * H, 3600, null, 'index', []),
+      ], 'manual', { thread_url: THREAD, trigger_emoji: ':ryan:' }, [
+        span('queue', 0, 300), span('list b1', 300, 4000), span('list b2', 350, 5000), span('dups', 5000, 7600, 'done', 'failed (exit 1)'),
+      ]),
+      runWire('r2', '2026-11-06', 'scan', 'failed', NOW - 31 * H, 3600, null, 'index', [], undefined, { error: 'boom <x>\n  `y`' }, [span('index', 100, 3600, 'failed')]),
       runWire('r3', '2026-10-18', 'scan', 'succeeded', NOW - 20 * 24 * H, 3000, 0.4, null, [], 'schedule', { thread_url: null, trigger_emoji: ':ryan:' }),
       runWire('r4', '2026-10-08', 'scan', 'succeeded', NOW - 30 * 24 * H - H, 3000, 0.4, null, [], 'schedule'),
     ],
@@ -88,9 +91,16 @@ describe('/api/fleet\'s document over stubbed deployments', () => {
     ])
   })
 
-  it('folds the answers: maintenance and no-op runs skipped, runs over the last 30 days, each day\'s scan cost since last month began, open issues only, each run\'s thread as its site says it (none from a site that predates it), /meta now / 1 d / 7 d and the newest scan per day; each failure named', async () => {
-    const r1 = { run_id: 'r1', scan: '2026-11-07', status: 'succeeded', trigger: 'manual' as const, started: NOW - 7 * H, secs: 7668, cost_usd: 0.5, failed_at: null, open_issues: ['dups'], thread_url: THREAD, trigger_emoji: ':ryan:' }
-    const r2 = { run_id: 'r2', scan: '2026-11-06', status: 'failed', trigger: null, started: NOW - 31 * H, secs: 3600, cost_usd: null, failed_at: 'index', open_issues: [] }
+  it('folds the answers: maintenance and no-op runs skipped, runs over the last 30 days, each day\'s scan cost since last month began, open issues only, each run\'s thread as its site says it (none from a site that predates it), a failed run\'s error on one line, each run\'s seconds per step family (from its phases, when listed), /meta now / 1 d / 7 d and the newest scan per day; each failure named', async () => {
+    // r1's clock: queue 0–300, list 300–5000 (two buckets, one family), dups 5000–7600 (failed), no step 7600–7668
+    const r1 = {
+      run_id: 'r1', scan: '2026-11-07', status: 'succeeded', trigger: 'manual' as const, started: NOW - 7 * H, secs: 7668, cost_usd: 0.5, failed_at: null, open_issues: ['dups'], thread_url: THREAD, trigger_emoji: ':ryan:',
+      families: [['queue', 300], ['list', 4700], ['dups', 2600], ['', 68]] as [string, number][], bad: [['dups', 'failed']] as [string, 'failed'][],
+    }
+    const r2 = {
+      run_id: 'r2', scan: '2026-11-06', status: 'failed', trigger: null, started: NOW - 31 * H, secs: 3600, cost_usd: null, failed_at: 'index', open_issues: [], error: "boom ‹x› 'y'",
+      families: [['', 100], ['index', 3500]] as [string, number][], bad: [['index', 'failed']] as [string, 'failed'][],
+    }
     const r3 = { run_id: 'r3', scan: '2026-10-18', status: 'succeeded', trigger: 'schedule' as const, started: NOW - 20 * 24 * H, secs: 3000, cost_usd: 0.4, failed_at: null, open_issues: [], thread_url: null }
     const noToken = 'no token (FLEET_TOKEN_B unset)'
     const expected: FleetDoc = {
@@ -111,8 +121,8 @@ describe('/api/fleet\'s document over stubbed deployments', () => {
             ],
           },
           objects: [
-            { scan: '2026-11-06T1200', t: t('2026-11-06T12:00Z'), objects: 12 },
-            { scan: '2026-11-07', t: t('2026-11-07T00:00Z'), objects: 15 },
+            { scan: '2026-11-06T1200', t: t('2026-11-06T12:00Z'), objects: 12, bytes: 1 },
+            { scan: '2026-11-07', t: t('2026-11-07T00:00Z'), objects: 15, bytes: 1 },
           ],
           // from Oct 1 (the month before NOW's), reaching past `runs`' 30 days (r4); unpriced (r2) and no-op runs left out
           cost_daily: [
@@ -133,6 +143,19 @@ describe('/api/fleet\'s document over stubbed deployments', () => {
     const doc = await readFleet(env({ FLEET_RUNS: '1' }), NOW, stubFetch(ANSWERS))
     expect(doc.deployments[0].runs.map(r => r.run_id)).toEqual(['r1'])
     expect([runsOf(env()), runsOf(env({ FLEET_RUNS: '0' })), runsOf(env({ FLEET_RUNS: 'x' })), runsOf(env({ FLEET_RUNS: '30' }))]).toEqual([200, 200, 200, 30])
+  })
+
+  it('splits only the newest 30 runs by step family (what the card draws)', async () => {
+    const many = Array.from({ length: 32 }, (_, i) => runWire(`s${i}`, '2026-11-07', 'scan', 'succeeded', NOW - (i + 1) * H, 100, null, null, [], 'schedule', {}, [span('list b', 0, 100)]))
+    const doc = await readFleet(env(), NOW, stubFetch({ ...ANSWERS, 'https://a.test/api/scan-runs?emoji=1': { configured: true, runs: many } }))
+    expect(doc.deployments[0].runs.map(r => [r.run_id, r.families ?? null])).toEqual(
+      many.map((_, i) => [`s${i}`, i < 30 ? [['list', 100]] : null]),
+    )
+  })
+
+  it('an error on one line: whitespace collapsed, Slack markup made inert, clipped', () => {
+    const long = 'x'.repeat(ERROR_MAX + 5)
+    expect([oneLine(' a\n\tb  <c> `d` & e '), oneLine(long)]).toEqual(["a b ‹c› 'd' & e", `${'x'.repeat(ERROR_MAX - 1)}…`])
   })
 
   it('a meta store with no points has no sizes', () => {

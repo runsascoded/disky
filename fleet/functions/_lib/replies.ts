@@ -7,18 +7,21 @@
  * - `month`: the card's 4 panels over the page's whole window (`HISTORY_DAYS`);
  * - `timeline`: each deployment's runs over the week as start→end bars by outcome (`views.ts` `timelineSvg`);
  * - `cost`: each deployment's scan cost this month, cumulative, against last month's (`costSvg`);
- * - `deployments`: a card per deployment, its week alone: one reply each.
+ * - `deployments`: one reply per deployment, its newest runs listed as its quiet run thread lists them (`slack.ts`
+ *   `trailLines`) over its status card (`deployCard.ts`: its last runs stacked by step, and a strip of 4 sparklines).
  *
  * `FLEET_REPLIES` (comma-separated kinds; unset: all, empty: none) drops a kind without a code change. A dropped kind's
  * reply stays in the thread, as it last was; delete it by hand.
  */
+import type { Have } from '@disk-tree/pages-kit/emoji'
 import { SlackApiError, SlackClient } from '@open-athena/thrds'
-import { fleetSvg, type Theme } from './card.js'
+import { fleetSvg, type Theme, ZOOM } from './card.js'
+import { CARD_RUNS, DEPLOY_ZOOM, deployCardInput, deployCardSvg, STRIP_DAYS } from './deployCard.js'
 import type { Env } from './env.js'
 import { HISTORY_DAYS } from './fleet.js'
 import type { FleetDoc } from './fleetTypes.js'
-import type { Block, SlackMessage } from './slack.js'
-import { costSvg, timelineSvg, weekLine } from './views.js'
+import { type Block, DEFAULT_EMOJI, type Emoji, SECTION_MAX, type SlackMessage, trailLines } from './slack.js'
+import { costSvg, timelineSvg } from './views.js'
 
 export const REPLY_KINDS = ['month', 'timeline', 'cost', 'deployments'] as const
 export type ReplyKind = (typeof REPLY_KINDS)[number]
@@ -33,16 +36,19 @@ export function enabledReplies(raw: string | undefined): ReplyKind[] {
   return REPLY_KINDS.filter(k => kinds.includes(k))
 }
 
-/** One reply: its key (where its ts is kept), its text, its image's alt text and the image's view params. */
+/** One reply: its key (where its ts is kept), its text (and lines under it), its image's alt text and the image's view
+ *  params. */
 export interface ReplyImage {
   key: string
   text: string
+  lines?: string[]
   alt: string
   params: Record<string, string>
 }
 
-/** The enabled replies, in posting order (a deployment's card in the post's order). */
-export function replyImages(doc: FleetDoc, kinds: ReplyKind[]): ReplyImage[] {
+/** The enabled replies, in posting order (a deployment's card in the post's order); `emoji` and `have` as the post's
+ *  (`slack.ts` `fleetMessage`), for the deployments' run lines. */
+export function replyImages(doc: FleetDoc, kinds: ReplyKind[], emoji: Emoji = DEFAULT_EMOJI, have: Have = null): ReplyImage[] {
   const out: ReplyImage[] = []
   for (const kind of kinds) {
     if (kind === 'month') {
@@ -56,8 +62,13 @@ export function replyImages(doc: FleetDoc, kinds: ReplyKind[]): ReplyImage[] {
         text: '*Scan cost by month*: each deployment\'s running total this month (solid) against last month (dashed). Edited in place hourly.' })
     } else {
       for (const d of doc.deployments) {
-        out.push({ key: `dep:${d.name}`, params: { view: 'dep', d: d.name }, alt: `${d.name}: /meta store size, objects, scan duration and cost per day, over the last week`,
-          text: `*${d.name}'s week*: ${weekLine(d, doc.now)}. <${d.url}/scans|scans>. Edited in place hourly.` })
+        const lines = trailLines(d, emoji, have)
+        const what = lines.length ? `its last ${lines.length === 1 ? 'run' : `${lines.length} runs`}, oldest first` : d.errors.runs ? `runs n/a (${d.errors.runs})` : 'no runs'
+        out.push({
+          key: `dep:${d.name}`, params: { view: 'deploy', d: d.name }, lines,
+          alt: `${d.name}: its last ${CARD_RUNS} scan runs' durations, stacked by step, and its data, objects, cost per run and run time over ${STRIP_DAYS} days`,
+          text: `*<${d.url}|${d.name}>*: ${what}. <${d.url}/scans|All scans>. Edited in place hourly.`,
+        })
       }
     }
   }
@@ -65,7 +76,7 @@ export function replyImages(doc: FleetDoc, kinds: ReplyKind[]): ReplyImage[] {
 }
 
 /** The SVG `/og/fleet.png` draws for a full-tier `view` (`d`: a deployment's name), or null for no such view. Without a
- *  view, the card. */
+ *  view, the card; `deploy`, a deployment's status card (`deployCard.ts`). */
 export function viewSvg(view: string | null, dep: string | null, c: { theme: Theme; doc: FleetDoc; deployments: { name: string; color: string }[] }): string | null {
   const base = { tier: 'full', theme: c.theme, deployments: c.deployments, doc: c.doc, now: c.doc.now } as const
   switch (view ?? 'card') {
@@ -73,19 +84,33 @@ export function viewSvg(view: string | null, dep: string | null, c: { theme: The
     case 'month': return fleetSvg({ ...base, days: HISTORY_DAYS, title: `disky fleet · ${HISTORY_DAYS} days` })
     case 'timeline': return timelineSvg(c.doc, c.theme)
     case 'cost': return costSvg(c.doc, c.theme)
-    case 'dep': {
+    case 'deploy': {
       const d = c.doc.deployments.find(x => x.name === dep)
-      if (!d) return null
-      return fleetSvg({ ...base, title: `disky · ${d.name}`, deployments: [{ name: d.name, color: d.color }], doc: { ...c.doc, deployments: [d] } })
+      return d ? deployCardSvg(deployCardInput(d, c.doc.now, c.theme)) : null
     }
     default: return null
   }
 }
 
-/** A reply's message: its text, then its image. */
+/** The scale a view's PNG is rasterized at: the deployment card is drawn narrower (`DEPLOY_W`), so at more. */
+export const viewZoom = (view: string | null): number => (view === 'deploy' ? DEPLOY_ZOOM : ZOOM)
+
+/** Lines joined into as few texts as fit a section (`SECTION_MAX`), in order. */
+export function packLines(lines: string[], max = SECTION_MAX): string[] {
+  const out: string[] = []
+  for (const l of lines) {
+    if (out.length && out[out.length - 1].length + 1 + l.length <= max) out[out.length - 1] += `\n${l}`
+    else out.push(l)
+  }
+  return out
+}
+
+const section = (text: string): Block => ({ type: 'section', text: { type: 'mrkdwn', text } })
+
+/** A reply's message: its text, its lines (a section each `SECTION_MAX`), then its image. */
 export const replyMessage = (r: ReplyImage, url: string): SlackMessage => ({
   text: r.text.replace(/\*/g, ''),
-  blocks: [{ type: 'section', text: { type: 'mrkdwn', text: r.text } }, { type: 'image', image_url: url, alt_text: r.alt }] as Block[],
+  blocks: [section(r.text), ...packLines(r.lines ?? []).map(section), { type: 'image', image_url: url, alt_text: r.alt }],
 })
 
 /** Where the replies' ts are kept between runs. */
