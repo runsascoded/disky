@@ -103,6 +103,13 @@ class Config:
     #: `{trigger}` (`TRIGGERS`), the outcome with the trigger as a corner badge (`…/run-{outcome}-{trigger}.png`: ❌ + ⏰
     #: for a failed scheduled run). Public, as `icons`. Unset: the outcome's icon alone (`icons`, else its emoji).
     badges: str | None = None
+    #: The deployment's status card (open question #87, `specs/disky-oa-dev.md`) as an image under an open thread's head
+    #: (`with_card`): the site draws it (`GET /api/scan-runs/card-url` signs a `/og/deploy.png` URL for a week), the
+    #: same card the fleet posts under its own post. A site without the route, or any failure to get a URL, posts the
+    #: head without it. Off: never asked.
+    card: bool = True
+    #: The card's dot (`#rrggbb`): the deployment's colour in the fleet's `FLEET_JSON`; unset, the site's grey.
+    color: str | None = None
 
     def __post_init__(self) -> None:
         if not self.site.startswith("https://") or urlparse(self.site).query or urlparse(self.site).fragment:
@@ -137,6 +144,10 @@ class Config:
                 ok = False
             if not ok:
                 raise ValueError("nominal.badges: an HTTPS URL template over {outcome} and {trigger}")
+        if type(self.card) is not bool:
+            raise ValueError("nominal.card: true or false")
+        if self.color is not None and not (isinstance(self.color, str) and re.fullmatch(r'#[0-9a-fA-F]{6}', self.color)):
+            raise ValueError("nominal.color: #rrggbb")
 
     def mark(self, outcome: str) -> str:
         """An outcome's emoji (`EMOJI`, overridden by `emoji`)."""
@@ -594,6 +605,48 @@ def closed_head(
             f"Ended by [{stamp(stop)}]({cfg.link(stop['run'])}): {reason}. [All scans]({cfg.scans}).")
 
 
+#: Slack's longest `section` text beside an image block (thrds lifts a trailing `![alt](url)` line into one and refuses a
+#: longer body): a head past it posts without its card. Less a margin for markdown → mrkdwn and emoji fallbacks.
+CARD_BODY_MAX = 3000 - 100
+#: A signed card URL as `/api/scan-runs/card-url` answers it: the site's own `/og/deploy.png`, nothing an image line or
+#: Slack would read as markup.
+CARD_URL_RE = r'/og/deploy\.png\?[A-Za-z0-9._~%=&+-]+'
+
+
+def card_query(cfg: Config) -> dict[str, str]:
+    """`/api/scan-runs/card-url`'s params: the thread's store and the card's colour."""
+    return {'store': cfg.store, **({'color': cfg.color.lstrip('#')} if cfg.color else {})}
+
+
+def card_url(cfg: Config, status: int, body: bytes) -> str | None:
+    """The card's signed URL from `/api/scan-runs/card-url`'s answer (`status`, `body`), or None when there is none to
+    post: the route missing (a site before it: 404), unconfigured (503), failing, or answering anything but one of the
+    site's `/og/deploy.png` URLs. Why is logged; the head posts without its card."""
+    if status != 200:
+        print(f'nominal: no status card (card-url HTTP {status})', file=sys.stderr)
+        return None
+    try:
+        url = json.loads(body)['url']
+    except (ValueError, KeyError, TypeError) as e:
+        print(f'nominal: no status card (card-url answered {type(e).__name__})', file=sys.stderr)
+        return None
+    if not isinstance(url, str) or not re.fullmatch(re.escape(cfg.site.rstrip('/')) + CARD_URL_RE, url):
+        print('nominal: no status card (card-url answered another URL)', file=sys.stderr)
+        return None
+    return url
+
+
+def with_card(cfg: Config, body: str, url: str | None, row: dict) -> str:
+    """An open thread's head with the status card under it (`url`, `card_url`'s; None: as it is), as a trailing image
+    line, which thrds posts as a Slack `image` block, its alt text naming the deployment and the head's latest run
+    (`row`). A closed head (`closed_head`) carries none: its URL would expire under it. A body too long to sit beside an
+    image (`CARD_BODY_MAX`) posts without it."""
+    if not url or len(body) > CARD_BODY_MAX:
+        return body
+    alt = re.sub(r'[\[\]\n]', '', f"{cfg.title} status card: its latest scan runs by step and 30 days of size, cost and run time, as of the {stamp(row)} run")
+    return f"{body}\n\n![{alt}]({url})"
+
+
 def next_thread(cfg: Config, body: str, url: str) -> str:
     """A closed head (`closed_head`) whose "Ended by …" line links the thread after it (`url`, a permalink)."""
     tail = f". [All scans]({cfg.scans})."
@@ -928,8 +981,10 @@ def converge(
     check: Callable[[], None],
     now: Callable[[], float] = time.time,
     stores: str = '',
+    card: str | None = None,
 ) -> dict:
-    """Caller holds the generation lease. Persist every send intent and returned/recovered message ID."""
+    """Caller holds the generation lease. Persist every send intent and returned/recovered message ID. `card`: the status
+    card's URL (`card_url`), under an open head (`with_card`)."""
     if state.get('namespace') != cfg.namespace:
         raise ValueError('nominal: state belongs to another site/store/channel')
 
@@ -1071,7 +1126,7 @@ def converge(
         quiet = cfg.quiet and head == 'clean'
         # A head posted with a sender drops what the sender says; one posted without (before senders) keeps it
         bare = bool(state.get('head_sender')) if state.get('parent') else cfg.senders
-        body = parent(cfg, good, boundary, live_rows, stores, quiet=quiet, bare=bare, prev=state.get('previous_url'))
+        body = with_card(cfg, parent(cfg, good, boundary, live_rows, stores, quiet=quiet, bare=bare, prev=state.get('previous_url')), card, good[0])
         if not state.get('parent'):
             kind = 'clean' if head == 'clean' else 'issues' if grade(good[-1]) == 'issues' else 'failed'
             send('parent', body, None, scope, cfg.sender(kind))
@@ -1226,6 +1281,13 @@ def run(
             raise ValueError('nominal: authoritative terminal run record is not visible')
         return rows
 
+    def read_card() -> str | None:
+        """The status card's URL (`card_url`), or None (off, or none to post: the head goes without it)."""
+        if not cfg.card:
+            return None
+        response = http_fetch(cfg.site, token)('/api/scan-runs/card-url?' + urlencode(card_query(cfg)))
+        return card_url(cfg, response.status, response.body)
+
     def read_series() -> dict[str, dict | int]:
         series: dict[str, dict | int] = {}
         for _, name in cfg.stores:
@@ -1259,7 +1321,7 @@ def run(
         quiet = cfg.quiet and head == 'clean'
         bare = bool(state.get('head_sender')) if state.get('parent') else cfg.senders
         kind = 'clean' if head == 'clean' else 'issues' if grade(good[-1]) == 'issues' else 'failed'
-        head_body = shown(cfg.sender(kind), parent(cfg, good, boundary, live_rows, stores_text(cfg, read_series()), quiet=quiet, bare=bare))
+        head_body = shown(cfg.sender(kind), with_card(cfg, parent(cfg, good, boundary, live_rows, stores_text(cfg, read_series()), quiet=quiet, bare=bare), read_card(), good[0]))
         if quiet:
             return '\n\n+++\n\n'.join([head_body, shown(cfg.sender('runs'), trail(cfg, good, live_rows))])
         return '\n\n+++\n\n'.join([head_body, *(shown(run_post(cfg, r)[1], run_post(cfg, r)[0]) for r in [*reversed(pending_rows), *reversed(live_rows)])])
@@ -1286,7 +1348,7 @@ def run(
         check()
         save(state)
         series = read_series()
-        state = converge(cfg, rows, state, slack, save, check, stores=stores_text(cfg, series))
+        state = converge(cfg, rows, state, slack, save, check, stores=stores_text(cfg, series), card=read_card())
         if cfg.pin:
             check()
             pin_head(state, slack, save)

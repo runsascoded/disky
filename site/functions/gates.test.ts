@@ -253,6 +253,9 @@ const SHARED_ROUTES: Record<string, Case[]> = {
   // "Cancel" on a running scan: an admin cancels its head and every job of its scan (`_lib/scanCancel.ts`).
   'api/scan-runs/cancel.ts': [post('/api/scan-runs/cancel', 'admin')],
   'api/scan-runs/[[path]].ts': [get('/api/scan-runs', 'viewer')],
+  // The status card's signed URL, for the run thread head (`dt_cloud.nominal`): the runs and sizes `/api/scan-runs` and
+  // `/api/series` serve, as an image.
+  'api/scan-runs/card-url.ts': [get('/api/scan-runs/card-url', 'viewer')],
   // "Run a scan": an admin starts the deployment's scan submitter (`_lib/scanDispatch.ts`).
   'api/scan-runs/dispatch.ts': [post('/api/scan-runs/dispatch', 'admin')],
   'api/series.ts': [get('/api/series', 'viewer')],
@@ -307,7 +310,8 @@ const SHARED_ROUTES: Record<string, Case[]> = {
   'data/[[path]].ts': [get('/data/scans.json', 'viewer'), get('/data/2026-10-01/meta.json', 'viewer')],
   // A card: its signature picks its tier (unsigned: the anonymous card), nothing signs in.
   // `/og/run.png` is a deletion run's count-only card, for a signed-in viewer only (`_lib/og/run.ts`).
-  'og/[[path]].ts': [get('/og/map.png', 'public'), get('/og/run.png?id=plan-1/20261104T125245Z', 'viewer')],
+  // `/og/deploy.png` is the deployment's status card: its signature draws it, else the generic card.
+  'og/[[path]].ts': [get('/og/map.png', 'public'), get('/og/run.png?id=plan-1/20261104T125245Z', 'viewer'), get('/og/deploy.png', 'public')],
   'og/index.ts': [get('/og', 'public')],
   // A deletion run's unfurl: the shell is public, but its stamp is the run's (state and object counts, no prefixes,
   // sizes or names) only to a signed-in viewer; anyone else gets one fixed stamp, whether the id exists or not.
@@ -415,6 +419,7 @@ const SHARED_RESTRICTED: Record<string, Restricted> = {
   // By the route: it sizes whatever prefixes the request names.
   'POST /api/prefixes': 'blocked',
   'GET /api/scan-runs': 'blocked',
+  'GET /api/scan-runs/card-url': 'blocked',
   // A hidden path is a 404; a name filter is refused (its points count hidden hits).
   'GET /api/series': 'filtered',
   // Whether logging is on; the caller's own batch.
@@ -450,6 +455,8 @@ const SHARED_RESTRICTED: Record<string, Restricted> = {
   'GET /data/2026-10-01/meta.json': 'filtered',
   // A restricted link's `key=` never earns the full card (`og/tokens.ts`).
   'GET /og/map.png': 'anonymous',
+  // Unsigned (or with a sig a restricted link can't mint: its card-url is blocked), the generic card.
+  'GET /og/deploy.png': 'anonymous',
   'GET /og': 'anonymous',
   // A deletion run's unfurl and card: its state and counts, for a link's viewer; no prefixes, sizes or names.
   'GET /runs/plan-1/20261104T125245Z': 'pathless',
