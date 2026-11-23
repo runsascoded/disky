@@ -36,6 +36,7 @@ import json
 import re
 import secrets
 import sys
+import time
 from collections.abc import Collection, Iterable
 from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
@@ -809,6 +810,10 @@ def _wait_reachable(url: str, timeout: float = 90, interval: float = 3) -> None:
     _err(f"digest: WARN {url} not reachable after {timeout:.0f}s — posting anyway")
 
 
+#: Seconds before each retry of a failed `wrangler pages deploy` (three attempts in all).
+PAGES_DEPLOY_WAITS = (10, 30)
+
+
 def pages_deploy(icons_dir: Path, project: str, branch: str) -> str | None:
     """`wrangler pages deploy` ``icons_dir`` (the CORS `_headers` + the fresh
     plot) to ``project``'s ``branch``; needs CLOUDFLARE_* + wrangler. Returns
@@ -824,10 +829,17 @@ def pages_deploy(icons_dir: Path, project: str, branch: str) -> str | None:
     wrangler = [shutil.which("wrangler")] if shutil.which("wrangler") else ["npx", "wrangler"] if shutil.which("npx") else None
     if wrangler is None:
         raise SystemExit("digest: neither `wrangler` nor `npx` on PATH — can't publish the plot")
-    r = subprocess.run(
-        [*wrangler, "pages", "deploy", str(icons_dir), "--project-name", project, "--branch", branch, "--commit-dirty=true"],
-        check=True, capture_output=True, text=True,
-    )
+    cmd = [*wrangler, "pages", "deploy", str(icons_dir), "--project-name", project, "--branch", branch, "--commit-dirty=true"]
+    # A deploy is a fresh preview deployment each time, so a retry is safe. Each failure's wrangler
+    # output goes to the log: captured and dropped, a failed deploy left no cause to read.
+    for attempt, wait in enumerate((*PAGES_DEPLOY_WAITS, None), 1):
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        if r.returncode == 0:
+            break
+        _err(f"digest: wrangler pages deploy exited {r.returncode} (attempt {attempt})\n{r.stdout}{r.stderr}")
+        if wait is None:
+            raise subprocess.CalledProcessError(r.returncode, cmd, r.stdout, r.stderr)
+        time.sleep(wait)
     _err(r.stdout)
     m = re.search(rf"https://[a-z0-9]+\.{re.escape(project)}\.pages\.dev", r.stdout + r.stderr)
     return m.group(0) if m else None
