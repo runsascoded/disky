@@ -1363,3 +1363,118 @@ def test_a_deferred_append_leaves_a_run_clean_and_says_so():
     assert N.signature(row(2, issues=[d, other])) == 'issues:warm-cache'
     assert N.run_sender(SENT, row(2, issues=[d])) == {
         'username': '11/03 08:00Z · 1m 00s · clean · deferred: interval-store', 'icon_emoji': ':white_check_mark:'}
+
+
+#: Two status card URLs as the site's `/api/scan-runs/card-url` signs them (`/og/deploy.png`, open question #87)
+CARD1 = 'https://site.test/og/deploy.png?v=0123456789ab&sig=AB0123456789'
+CARD2 = 'https://site.test/og/deploy.png?v=ba9876543210&sig=AB0123456789'
+
+
+def card_line(url, at):
+    """A head's status card: its trailing image line (thrds posts it as an `image` block), as of the run at `at`."""
+    return f'\n\n![Test scans status card: its latest scan runs by step and 30 days of size, cost and run time, as of the {at} run]({url})'
+
+
+def test_the_card_url_is_taken_only_as_the_sites_signed_status_card(capsys):
+    answers = [
+        (200, f'{{"url": "{CARD1}", "v": "0123456789ab", "expires": 1796083200}}'.encode()),
+        (404, b'{"error": "no scan run card-url"}'),
+        (503, b'{"error": "card URLs not configured (SESSION_SECRET unset)"}'),
+        (0, b''),
+        (200, b'{"configured": true, "runs": []}'),
+        (200, b'<html>'),
+        (200, b'{"url": "https://other.test/og/deploy.png?v=1&sig=2"}'),
+        (200, f'{{"url": "{CARD1})"}}'.encode()),
+        (200, b'{"url": "https://site.test/og/map.png?sig=2"}'),
+    ]
+    assert [N.card_url(QUIET, status, body) for status, body in answers] == [CARD1, *[None] * 8]
+    assert capsys.readouterr().err.split('\n') == [
+        'nominal: no status card (card-url HTTP 404)',
+        'nominal: no status card (card-url HTTP 503)',
+        'nominal: no status card (card-url HTTP 0)',
+        'nominal: no status card (card-url answered KeyError)',
+        'nominal: no status card (card-url answered JSONDecodeError)',
+        'nominal: no status card (card-url answered another URL)',
+        'nominal: no status card (card-url answered another URL)',
+        'nominal: no status card (card-url answered another URL)',
+        '',
+    ]
+
+
+def test_the_card_is_asked_for_the_threads_store_in_its_colour_and_can_be_turned_off():
+    assert N.card_query(QUIET) == {'store': 'primary'}
+    assert N.card_query(replace(QUIET, store='meta', color='#EA4335')) == {'store': 'meta', 'color': 'EA4335'}
+    assert (QUIET.card, QUIET.color) == (True, None)
+    with pytest.raises(ValueError, match='nominal.color: #rrggbb'):
+        replace(QUIET, color='red')
+    with pytest.raises(ValueError, match='nominal.card: true or false'):
+        N.config({**asdict(QUIET), 'card': 'yes'})
+
+
+def test_a_head_takes_the_card_as_its_trailing_image_unless_too_long_to_sit_beside_one():
+    r2 = row(2)
+    assert N.with_card(QUIET, QUIET_HEAD, CARD1, r2) == QUIET_HEAD + card_line(CARD1, '11/03 08:00Z')
+    assert N.with_card(QUIET, QUIET_HEAD, None, r2) == QUIET_HEAD
+    long = 'x' * (N.CARD_BODY_MAX + 1)
+    assert N.with_card(QUIET, long, CARD1, r2) == long
+    # nothing in the alt text ends the image line early
+    assert N.with_card(replace(QUIET, title='[Test] scans'), 'head', CARD1, r2) == (
+        f'head\n\n![Test scans status card: its latest scan runs by step and 30 days of size, cost and run time, as of the 11/03 08:00Z run]({CARD1})')
+
+
+def test_an_open_head_carries_the_status_card_and_a_closed_one_drops_it():
+    """#87 phase 2: the open thread's head shows the deployment's status card (the site's signed `/og/deploy.png`), edited
+    in when the card's URL changes (a new run: a new `v`); the head a thread closes with carries none, since its URL
+    expires after a week."""
+    w = Writer(QUIET)
+
+    def report(rows, card):
+        return N.converge(w.cfg, rows, deepcopy(w.saved), w.slack, w.save, lambda: None, now=lambda: 1000, card=card)
+
+    report(history(2), CARD1)
+    assert bodies(w.slack) == [('post', '1.0', QUIET_HEAD + card_line(CARD1, '11/03 08:00Z')), ('post', '2.0', TRAIL)]
+    w.slack.calls.clear()
+    # nothing new: the same URL, nothing edited
+    report(history(2), CARD1)
+    assert w.slack.calls == []
+    # a new card URL alone: the head edited to it
+    report(history(2), CARD2)
+    assert bodies(w.slack) == [('edit', '1.0', QUIET_HEAD + card_line(CARD2, '11/03 08:00Z'))]
+    w.slack.calls.clear()
+    f3 = row(3, 'failed', failed_phase='index', error='boom', **ADA)
+    report([f3, *history(2)], CARD1)
+    failed = '❌ :ada: [11/04 08:00Z](https://site.test/scans/r3) · 1m 00s · failed in index: boom'
+    closed = ('✅ **Test scans: 2 consecutive clean runs (ended)**\n\n'
+              'Since 11/02 08:00Z after [2026-11-01T0800](https://site.test/scans/r0); last [11/03 08:00Z](https://site.test/scans/r2).\n\n'
+              'Ended by [11/04 08:00Z](https://site.test/scans/r3): failed')
+    assert bodies(w.slack) == [
+        ('edit', '1.0', f'{closed}. [All scans](https://site.test/scans).'),
+        ('edit', '2.0', f'{TRAIL}\n{failed}'),
+        ('post', '3.0', '❌ **Test scans: 1 consecutive failed run**\n\n'
+                        'Since 11/04 08:00Z after [2026-11-03T0800](https://site.test/scans/r2) (clean) · [previous thread](https://slack.test/p1.0).\n\n'
+                        'Latest: [11/04 08:00Z](https://site.test/scans/r3): failed in index: boom.\n\n'
+                        'Each reply links its scan record. [All scans](https://site.test/scans).' + card_line(CARD1, '11/04 08:00Z')),
+        ('edit', '1.0', f'{closed} · [next thread](https://slack.test/p3.0). [All scans](https://site.test/scans).'),
+        ('post', '4.0', failed),
+    ]
+
+
+def test_a_preview_shows_the_heads_card_and_asks_the_site_for_it(tmp_path, monkeypatch):
+    import json
+
+    from dt_cloud import probe
+
+    asked = []
+
+    def fetch(path):
+        asked.append(path)
+        if path.startswith('/api/scan-runs/card-url?'):
+            return SimpleNamespace(status=200, body=json.dumps({'url': CARD1}).encode())
+        return SimpleNamespace(status=200, body=json.dumps(dict(configured=True, runs=history(2))))
+    monkeypatch.setattr(probe, 'http_fetch', lambda *args: fetch)
+    cfg = replace(QUIET, state=str(tmp_path / 'state'), color='#4C5FF0')
+    assert N.run(asdict(cfg), {'SITE_TOKEN': 'viewer'}, 'project') == f'{QUIET_HEAD}{card_line(CARD1, "11/03 08:00Z")}\n\n+++\n\n{TRAIL}'
+    assert asked == ['/api/scan-runs?store=primary&emoji=1', '/api/scan-runs/card-url?store=primary&color=4C5FF0']
+    asked.clear()
+    assert N.run(asdict(replace(cfg, card=False)), {'SITE_TOKEN': 'viewer'}, 'project') == f'{QUIET_HEAD}\n\n+++\n\n{TRAIL}'
+    assert asked == ['/api/scan-runs?store=primary&emoji=1']
