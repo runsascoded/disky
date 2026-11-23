@@ -21,7 +21,7 @@ From the r2 session, 2026-11-21: Ryan's design for `#<deploy>-admin`'s scan thre
 
 #85 came after this design: a clean thread posts its head and one rolling reply (`trail`), then runs only edit them (`nominal.quiet`, default on); a red notice or unclean run posts as before. The two compose:
 
-- **Senders everywhere they post:** a green head (✅ icon, `… · clean`), a red head (❌, `… · failing`), the rolling reply (a fixed "runs" sender, e.g. 🧾 / `… · runs`: its text changes, its sender can't), alerts (⚠️ / ❌), deploy notices (emoji in the icon).
+- **Senders everywhere they post:** a green head (✅ icon, `… · clean`), a red head (❌, `… · failing`), the rolling reply (a fixed "runs" sender, the app's icon / `… · runs`: its text changes, its sender can't), alerts (⚠️ / ❌), deploy notices (emoji in the icon).
 - **Green threads under `quiet` (the default):** no ⏳ reply and no per-run re-post (§2–3 above); a run edits the head and the rolling reply only. A run that flips the kind posts the new red head (§3, "kind flipped").
 - **Red threads, and green ones with `quiet: false`:** §2–3 as written: a ⏳ reply, deleted and re-posted as the finished reply with the outcome as its icon.
 - **Deploy notices under `deploy_quiet`:** the green head is edited (its sender stays 🚀 / 🧪); reds post with their own sender.
@@ -42,7 +42,7 @@ From the r2 session, 2026-11-21: Ryan's design for `#<deploy>-admin`'s scan thre
 | --- | --- | --- |
 | a clean thread's head | `<title> · clean` | ✅ `:white_check_mark:` |
 | a failure thread's head | `<title> · failing` (opened by a failed run), `<title> · phase issues` (opened by a run with phase issues) | ❌ `:x:` / ⚠️ `:warning:` |
-| a quiet clean thread's rolling reply | `<title> · runs` | 🧾 `:receipt:` |
+| a quiet clean thread's rolling reply | `<title> · runs` | the app's |
 | a run's reply (red threads; `quiet: false`) | `<stamp> · <duration> · <outcome>`, e.g. `11/21 19:31Z · 115m 54s · phase issues: static-names` | the outcome's: ✅ ⚠️ ❌ 🚫 |
 | a run's ⏳ reply | `<stamp> · running` | ⏳ `:hourglass_flowing_sand:` |
 | a step alert (`push.Notice.icon`) | the app's | ⚠️ `:warning:` / ❌ `:x:` |

@@ -38,9 +38,9 @@ GROUPS = ('clean', 'color', 'signature')
 EMOJI = {o: V.stock(f'run.{o}') for o in V.OUTCOMES}
 #: An `emoji` override: a Slack `:name:` code, or emoji characters (nothing Slack reads as markup)
 EMOJI_RE = re.compile(r":[a-z0-9_+'-]{1,100}:|[^\x00-\x7f]{1,16}")
-#: Each sender's stock icon (`icon_emoji`, which takes only `:name:` codes): the outcomes' (`EMOJI`), and the quiet
-#: clean thread's rolling reply (`runs`)
-ICON = {**{o: V.key(f'run.{o}').code for o in V.OUTCOMES}, 'runs': ':receipt:'}
+#: Each sender's stock icon (`icon_emoji`, which takes only `:name:` codes): the outcomes' (`EMOJI`). The quiet clean
+#: thread's rolling reply (`runs`) has none: it posts under the app's own icon
+ICON: dict[str, str | None] = {**{o: V.key(f'run.{o}').code for o in V.OUTCOMES}, 'runs': None}
 #: The emoji characters an `emoji` override may be that have an icon: their Slack codes (variation selectors dropped).
 #: Any other character keeps its kind's stock icon; give the override as a `:name:` code to move it into the icon.
 CODES = {'✅': ':white_check_mark:', '✔': ':heavy_check_mark:', '☑': ':ballot_box_with_check:', '🟢': ':large_green_circle:',
@@ -91,7 +91,7 @@ class Config:
     quiet: bool = True
     #: Status as the sender (specs/done/scan-thread-senders.md): each post carries a name and icon saying what it is,
     #: which `chat.update` can't change: a thread's head its kind (`sender`: `<title> · clean` ✅, `· failing` ❌), the
-    #: rolling reply `<title> · runs` 🧾, a run's reply its own line (`run_sender`: `<stamp> · <duration> · <outcome>`,
+    #: rolling reply `<title> · runs` (the app's icon), a run's reply its own line (`run_sender`: `<stamp> · <duration> · <outcome>`,
     #: the outcome's icon) over its record link (`record`). So a head's text drops its leading status emoji and title; a
     #: run's ⏳ reply, when the run ends, is deleted and posted again under its outcome. Off: every post the app's, each
     #: saying its status in its text.
@@ -153,17 +153,20 @@ class Config:
         """An outcome's emoji (`EMOJI`, overridden by `emoji`)."""
         return dict(self.emoji).get(outcome) or EMOJI[outcome]
 
-    def icon(self, kind: str) -> str:
-        """A sender's `icon_emoji`: its `emoji` override as a Slack code (`CODES`), else its stock one (`ICON`)."""
+    def icon(self, kind: str) -> str | None:
+        """A sender's `icon_emoji`: its `emoji` override as a Slack code (`CODES`), else its stock one (`ICON`; None:
+        the app's icon)."""
         mark = dict(self.emoji).get(kind)
         if mark and mark.startswith(':'):
             return mark
         return (CODES.get(mark.replace('\ufe0f', '')) if mark else None) or ICON[kind]
 
     def avatar(self, kind: str) -> dict[str, str]:
-        """A sender's icon: its `icons` image, else its emoji (`icon`)."""
-        url = dict(self.icons).get(kind)
-        return {'icon_url': url} if url else {'icon_emoji': self.icon(kind)}
+        """A sender's icon: its `icons` image, else its emoji (`icon`), else none (the app's icon)."""
+        if url := dict(self.icons).get(kind):
+            return {'icon_url': url}
+        code = self.icon(kind)
+        return {'icon_emoji': code} if code else {}
 
     def sender(self, kind: str) -> dict[str, str] | None:
         """A fixed sender (`senders`; None when off), for a post whose text changes and whose kind doesn't: a thread's
@@ -1237,7 +1240,10 @@ def converge(
 
 def shown(sender: Mapping[str, str] | None, body: str) -> str:
     """A post as a preview shows it: its sender (`Config.sender`: icon and name) on a line of its own, then its body."""
-    return f"[{sender.get('icon_emoji') or sender['icon_url']} {sender['username']}]\n{body}" if sender else body
+    if not sender:
+        return body
+    icon = sender.get('icon_emoji') or sender.get('icon_url')
+    return f"[{f'{icon} ' if icon else ''}{sender['username']}]\n{body}"
 
 
 def run(

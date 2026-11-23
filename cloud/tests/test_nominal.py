@@ -1120,7 +1120,7 @@ def test_a_quiet_preview_renders_the_head_and_the_rolling_reply(tmp_path, monkey
 #: Every default: `color` grouping, quiet clean threads, and status as the sender (specs/done/scan-thread-senders.md)
 SENT = N.Config(state='unused', site='https://site.test', channel='C123', title='Test scans')
 GREEN = {'username': 'Test scans · clean', 'icon_emoji': ':white_check_mark:'}
-RUNS = {'username': 'Test scans · runs', 'icon_emoji': ':receipt:'}
+RUNS = {'username': 'Test scans · runs'}
 FAILING = {'username': 'Test scans · failing', 'icon_emoji': ':x:'}
 #: history(2)'s quiet thread head under its sender: no leading ✅ and title
 SENT_HEAD = QUIET_HEAD.replace('✅ **Test scans: ', '**')
