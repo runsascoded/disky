@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Regenerate the fleet card's goldens (`tests/golden/*.svg`, what `functions/_lib/card.test.ts` compares against) from
 // the test fleet (`functions/_lib/testFleet.ts`); `--png DIR` also rasterizes each as the route would (2.5×, Inter), to
-// look at, with the post's reply images (`replies.ts` `viewSvg`). Run from `fleet/`: `node scripts/golden.mjs [--png ../tmp]`.
+// look at, with the post's reply images (`replies.ts` `viewSvg`, each at its `viewZoom`). Run from `fleet/`: `node scripts/golden.mjs [--png ../tmp]`.
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -32,11 +32,12 @@ try {
     const fonts = ['Inter-400.ttf', 'Inter-600.ttf'].map(f => new Uint8Array(readFileSync(join(ROOT, '../site/public/_fonts', f))))
     mkdirSync(pngDir, { recursive: true })
     for (const [name, svg] of Object.entries(cards)) writeFileSync(join(pngDir, `fleet-${name}.png`), svgToPng(svg, fonts, ZOOM))
-    const { viewSvg } = await server.ssrLoadModule('/functions/_lib/replies.ts')
+    const { viewSvg, viewZoom } = await server.ssrLoadModule('/functions/_lib/replies.ts')
     const c = { theme: 'dark', doc, deployments }
-    const views = { month: viewSvg('month', null, c), timeline: viewSvg('timeline', null, c), cost: viewSvg('cost', null, c) }
-    for (const d of deployments) views[`dep-${d.name}`] = viewSvg('dep', d.name, c)
-    for (const [name, svg] of Object.entries(views)) writeFileSync(join(pngDir, `fleet-reply-${name}.png`), svgToPng(svg, fonts, ZOOM))
+    const views = [['month', null], ['timeline', null], ['cost', null], ...deployments.map(d => ['deploy', d.name])]
+    for (const [view, d] of views) {
+      writeFileSync(join(pngDir, `fleet-reply-${d ? `${view}-${d}` : view}.png`), svgToPng(viewSvg(view, d, c), fonts, viewZoom(view)))
+    }
     console.error(`wrote PNGs to ${pngDir}`)
   }
 } finally {

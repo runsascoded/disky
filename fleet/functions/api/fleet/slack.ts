@@ -46,7 +46,7 @@ export const onRequestPost = async (ctx: Ctx): Promise<Response> => {
   const panels = await Promise.all(PANELS.map(async (panel, only) => ({ panel, png: await renderPng(env, url.origin, fleetSvg({ ...input, only })) })))
   const replies = async () => {
     const out = []
-    for (const r of replyImages(doc, enabledReplies(env.FLEET_REPLIES))) {
+    for (const r of replyImages(doc, enabledReplies(env.FLEET_REPLIES), emoji, have)) {
       const at = await imageUrl(env, url.origin, doc.now, { ...r.params, v: String(doc.now) })
       if (!at) throw new Error('the image replies need SESSION_SECRET (to sign their URLs) or FLEET_CARD_PUBLIC=1')
       out.push({ key: r.key, msg: replyMessage(r, at) })

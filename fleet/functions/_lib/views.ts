@@ -4,8 +4,8 @@
  * outcome (overlaps, long runs and gaps show); `costSvg`, each deployment's scan cost this month, cumulative, against
  * last month's. The card's frame, fonts and palette (`card.ts`), `CARD_W` wide; pure and DOM-free.
  */
-import { fmtSI, interWidth } from '@disk-tree/pages-kit/og/text'
-import { CARD_W, DAY, fmtHours, fmtUsd, labelColor, md, PAD, r1, stamp, text, type Theme, THEMES, WINDOW_DAYS } from './card.js'
+import { interWidth } from '@disk-tree/pages-kit/og/text'
+import { CARD_W, DAY, fmtUsd, labelColor, md, PAD, r1, stamp, text, type Theme, THEMES, WINDOW_DAYS } from './card.js'
 import type { FleetDeployment, FleetDoc, FleetRun } from './fleetTypes.js'
 import { type Outcome, runOutcome } from './runOutcome.js'
 
@@ -179,17 +179,3 @@ export function costSvg(doc: FleetDoc, theme: Theme): string {
 }
 
 const ordinal = (n: number): string => (n % 100 >= 11 && n % 100 <= 13 ? 'th' : ['th', 'st', 'nd', 'rd'][n % 10] ?? 'th')
-
-/** A one-line summary of a deployment's week, for its card's reply text: runs, how they went, time and cost. */
-export function weekLine(d: FleetDeployment, now: number): string {
-  const week = d.runs.filter(r => r.started !== null && r.started >= now - WINDOW_DAYS * DAY)
-  const by = (o: Outcome) => week.filter(r => runOutcome(r) === o).length
-  const done = week.filter(r => runOutcome(r) !== 'running')
-  const secs = done.reduce((s, r) => s + (r.secs ?? 0), 0)
-  const cost = done.reduce((s, r) => s + (r.cost_usd ?? 0), 0)
-  const parts = [`${week.length} run${week.length === 1 ? '' : 's'}`]
-  for (const [o, label] of OUTCOME_LABEL) if (o !== 'ok' && by(o)) parts.push(`${by(o)} ${o === 'issues' ? 'with issues' : label}`)
-  if (done.length) parts.push(`${fmtHours(secs)} scanning`, done.some(r => r.cost_usd !== null) ? fmtUsd(cost) : 'cost n/a')
-  if (d.meta?.now != null) parts.push(`/meta ${fmtSI(d.meta.now)}`)
-  return parts.join(' · ')
-}

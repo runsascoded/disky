@@ -101,6 +101,52 @@ export const fmtAge = (s: number): string => (s < 3600 ? `${Math.round(s / 60)}m
 const starter = (r: FleetRun, have: Have): string =>
   (r.trigger_emoji && renders(r.trigger_emoji, have) && r.trigger_emoji) || code('trigger.manual')
 
+/** How many runs a deployment's reply under the post lists: as many as its quiet run thread's rolling reply
+ *  (`dt_cloud.nominal` `trail`). */
+export const TRAIL_RUNS = 10
+
+const two = (n: number) => String(n).padStart(2, '0')
+
+/** A run's start as the run threads stamp it: `11/22 07:00Z`. */
+export function runStamp(t: number): string {
+  const d = new Date(t * 1000)
+  return `${two(d.getUTCMonth() + 1)}/${two(d.getUTCDate())} ${two(d.getUTCHours())}:${two(d.getUTCMinutes())}Z`
+}
+
+/** A run's duration as the run threads give it: `115m 54s`, or `duration unknown`. */
+export const took = (secs: number | null): string =>
+  (secs === null ? 'duration unknown' : `${Math.floor(secs / 60)}m ${two(Math.floor(secs) % 60)}s`)
+
+/** A finished run that isn't ok, in a few words and why (`nominal`'s `describe`): `failed in <step>: <error>`,
+ *  `cancelled`, `phase issues: <steps>`; null for an ok run. */
+function why(r: FleetRun): string | null {
+  switch (runOutcome(r)) {
+    case 'failed': {
+      const where = !r.failed_at ? '' : r.failed_at.startsWith('after ') ? ` ${r.failed_at}` : ` in ${r.failed_at}`
+      return `failed${where}${r.error ? `: ${r.error.replace(/&/g, '&amp;')}` : ''}`
+    }
+    case 'cancelled': return 'cancelled'
+    case 'issues': return `phase issues: ${[...new Set(r.open_issues)].sort().join(', ')}`
+    default: return null
+  }
+}
+
+/** A run's line in its deployment's reply, as its quiet run thread's rolling reply lists it (`dt_cloud.nominal`
+ *  `reply` / `running`): its outcome's emoji, its trigger (a manual run's starter, `starter`), its start linked to its
+ *  record, then `running`, or its duration and, when it isn't ok, why. */
+export function runLine(d: Pick<FleetDeployment, 'url'>, r: FleetRun, emoji: Emoji = DEFAULT_EMOJI, have: Have = null): string {
+  const o = runOutcome(r)
+  const trigger = r.trigger === 'manual' ? starter(r, have) : code(r.trigger === 'schedule' ? 'trigger.schedule' : 'trigger.unknown')
+  const head = `${emoji[o]} ${trigger} <${d.url}/scans/${encodeURIComponent(r.run_id)}|${r.started === null ? r.scan : runStamp(r.started)}>`
+  if (o === 'running') return `${head} · running`
+  const w = why(r)
+  return `${head} · ${took(r.secs)}${w ? ` · ${w}` : ''}`
+}
+
+/** A deployment's newest `TRAIL_RUNS` runs' lines (`runLine`), oldest first, so the runs going now come last. */
+export const trailLines = (d: FleetDeployment, emoji: Emoji = DEFAULT_EMOJI, have: Have = null): string[] =>
+  d.runs.slice(0, TRAIL_RUNS).reverse().map(r => runLine(d, r, emoji, have))
+
 /** One deployment's line: its name (a link), then its run strip (`strip`, newest first), then its newest run and the
  *  rest. `have`: the workspace's custom emoji (null: unknown). */
 export function line(d: FleetDeployment, emoji: Emoji = DEFAULT_EMOJI, have: Have = null): string {

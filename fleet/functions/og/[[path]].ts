@@ -4,12 +4,12 @@
  * from the cached fleet document; without one, or with a bad or expired one, the anonymous card (names and colours,
  * no numbers), never an error; with `FLEET_CARD_PUBLIC = "1"` every request gets the full card, cached briefly. `v` is
  * only a cache-buster (the Slack post's, a new one each run). `view` (signed with the rest) draws one of the post's
- * reply images instead (`_lib/replies.ts` `viewSvg`: `month`, `timeline`, `cost`, `dep` with `d=<deployment>`); an
+ * reply images instead (`_lib/replies.ts` `viewSvg`: `month`, `timeline`, `cost`, `deploy` with `d=<deployment>`); an
  * unknown view or deployment is a 404, and an anonymous request for any view gets the anonymous card.
  */
 import { ogKey, resolveImage } from '@disk-tree/pages-kit/og/sign'
 import { fleetSvg } from '../_lib/card.js'
-import { viewSvg } from '../_lib/replies.js'
+import { viewSvg, viewZoom } from '../_lib/replies.js'
 import type { Ctx } from '../_lib/env.js'
 import { type Deployment, fleetDoc, parseFleet } from '../_lib/fleet.js'
 import { renderPng } from '../_lib/png.js'
@@ -36,7 +36,7 @@ export const onRequestGet = async (ctx: Ctx): Promise<Response> => {
   const theme = r.params.theme === 'light' ? 'light' : 'dark'
   const svg = doc ? viewSvg(r.params.view ?? null, r.params.d ?? null, { theme, doc, deployments }) : fleetSvg({ tier, theme, deployments, now })
   if (svg === null) return new Response('no such view\n', { status: 404 })
-  const png = await renderPng(ctx.env, url.origin, svg)
+  const png = await renderPng(ctx.env, url.origin, svg, doc ? viewZoom(r.params.view ?? null) : undefined)
   return new Response(png, {
     headers: {
       'content-type': 'image/png',

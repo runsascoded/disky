@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest'
 import type { FleetDeployment, FleetDoc, FleetRun } from './fleetTypes'
 import { fakeChannel } from '@open-athena/thrds/testing'
 import type { Env } from './env'
-import { CARD_NAME, DEFAULT_EMOJI, fleetMessage, KV_KEY, parseEmoji, publish, publishSplit, SECTION_MAX, SPLIT_KV_KEY, SPLIT_TEXT, splitName } from './slack'
+import { CARD_NAME, DEFAULT_EMOJI, fleetMessage, KV_KEY, parseEmoji, publish, publishSplit, runLine, SECTION_MAX, SPLIT_KV_KEY, SPLIT_TEXT, splitName, trailLines } from './slack'
 import { NOW } from './testFleet'
 
 const H = 3600
@@ -196,5 +196,39 @@ describe('publishSplit: the card as an image per panel, in a reply under the pos
       [CARD_NAME, ...names.map(splitName)],
       { channel: 'C0FLEET', thread: '101.000000', ts: '102.000000', files: ['F106', 'F107', 'F108', 'F109'] },
     ])
+  })
+})
+
+describe('a deployment\'s runs, as its quiet run thread lists them', () => {
+  const d = { url: 'https://d.test' }
+  it('each run: its outcome, its trigger, its start linked to its record, then running, or its duration and why it isn\'t ok', () => {
+    const face = run({ run_id: 'm 1', trigger: 'manual', trigger_emoji: ':ryan:', secs: 7668.4 })
+    expect([
+      runLine(d, run({})),
+      runLine(d, run({ status: 'failed', failed_at: 'index', error: 'exit 1 & more' })),
+      runLine(d, run({ status: 'failed', failed_at: 'after list', trigger: null })),
+      runLine(d, run({ status: 'failed', failed_at: null, secs: null })),
+      runLine(d, run({ open_issues: ['probe', 'dups', 'probe'] })),
+      runLine(d, run({ status: 'cancelled', secs: 61 })),
+      runLine(d, run({ status: 'running', started: null })),
+      runLine(d, face),
+      runLine(d, face, DEFAULT_EMOJI, new Set(['someone-else'])),
+      runLine(d, run({}), parseEmoji('{"ok": ":large_green_circle:"}')),
+    ]).toEqual([
+      ':white_check_mark: :alarm_clock: <https://d.test/scans/r|11/07 07:00Z> · 30m 00s',
+      ':x: :alarm_clock: <https://d.test/scans/r|11/07 07:00Z> · 30m 00s · failed in index: exit 1 &amp; more',
+      ':x: :grey_question: <https://d.test/scans/r|11/07 07:00Z> · 30m 00s · failed after list',
+      ':x: :alarm_clock: <https://d.test/scans/r|11/07 07:00Z> · duration unknown · failed',
+      ':warning: :alarm_clock: <https://d.test/scans/r|11/07 07:00Z> · 30m 00s · phase issues: dups, probe',
+      ':no_entry_sign: :alarm_clock: <https://d.test/scans/r|11/07 07:00Z> · 1m 01s · cancelled',
+      ':hourglass_flowing_sand: :alarm_clock: <https://d.test/scans/r|2026-11-07> · running',
+      ':white_check_mark: :ryan: <https://d.test/scans/m%201|11/07 07:00Z> · 127m 48s',
+      ':white_check_mark: :bust_in_silhouette: <https://d.test/scans/m%201|11/07 07:00Z> · 127m 48s',
+      ':large_green_circle: :alarm_clock: <https://d.test/scans/r|11/07 07:00Z> · 30m 00s',
+    ])
+  })
+  it('the newest 10, oldest first', () => {
+    const runs = Array.from({ length: 12 }, (_, i) => run({ run_id: `r${i}`, started: NOW - (i + 1) * H }))
+    expect(trailLines(dep('d', { runs })).map(l => /scans\/(r\d+)\|/.exec(l)![1])).toEqual(['r9', 'r8', 'r7', 'r6', 'r5', 'r4', 'r3', 'r2', 'r1', 'r0'])
   })
 })

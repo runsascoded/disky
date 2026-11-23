@@ -7,6 +7,7 @@
  * The wire types below are the fields read from each route's answer (`site/functions/api/health.ts`,
  * `api/scan-runs/[[path]].ts`, `api/series.ts`), nothing more.
  */
+import { CARD_RUNS, familySeconds, type SpanIn } from './deployCard.js'
 import type { Env } from './env.js'
 import type { CostDay, FleetDeployment, FleetDoc, FleetMeta, FleetRun, MetaPoint, ObjPoint } from './fleetTypes.js'
 
@@ -53,11 +54,15 @@ export interface RunWire {
     thread_url?: string | null
     /** A manual run's starter's Slack emoji (`emoji=1`): `:name:`. */
     trigger_emoji?: string | null
+    /** A failed run's recorded error. */
+    error?: string | null
   }
   secs: number | null
   cost_usd: number | null
   failed_at: string | null
   phase_issues: IssueWire[]
+  /** Its phases' spans (`PhaseSpan`: seconds from the run's start), what the deployment card's bars split by. */
+  spans?: SpanIn[]
 }
 interface RunsWire { configured: boolean; runs: RunWire[] }
 /** `/api/series`' points: `bytes` (specs/descriptive-field-names.md §3d), or `b` from a deployment whose site predates the
@@ -90,7 +95,20 @@ export function scanTime(id: string): number | null {
 /** A Slack emoji as `/api/scan-runs?emoji=1` answers it; nothing else is passed on into the post. */
 const SLACK_EMOJI = /^:[a-z0-9_+'-]{1,100}:$/
 
-export const fleetRun = (s: RunWire): FleetRun => ({
+/** What Slack would read as markup in an error, made inert (`dt_cloud.nominal`'s `_MARKUP`). */
+const MARKUP: Record<string, string> = { '<': '‹', '>': '›', '`': "'" }
+/** Longest error kept (`dt_cloud.nominal` `detail`'s). */
+export const ERROR_MAX = 160
+
+/** Text as one line: whitespace collapsed, markup made inert, clipped to `ERROR_MAX` (…). */
+export function oneLine(raw: string): string {
+  const s = raw.replace(/[<>`]/g, c => MARKUP[c]).split(/\s+/).filter(Boolean).join(' ')
+  return s.length <= ERROR_MAX ? s : `${s.slice(0, ERROR_MAX - 1)}…`
+}
+
+/** A run as the document keeps it; `split`: with its `familySeconds` (the newest `CARD_RUNS` runs' only, which the card
+ *  draws), when its site listed its phases. */
+export const fleetRun = (s: RunWire, split = false): FleetRun => ({
   run_id: s.run.run_id,
   scan: s.run.scan,
   status: s.run.status,
@@ -102,6 +120,8 @@ export const fleetRun = (s: RunWire): FleetRun => ({
   open_issues: s.phase_issues.filter(i => !i.recovery && !i.passing).map(i => i.phase),
   ...(s.run.thread_url !== undefined ? { thread_url: s.run.thread_url } : {}),
   ...(s.run.trigger === 'manual' && s.run.trigger_emoji && SLACK_EMOJI.test(s.run.trigger_emoji) ? { trigger_emoji: s.run.trigger_emoji } : {}),
+  ...(s.run.status === 'failed' && s.run.error && oneLine(s.run.error) ? { error: oneLine(s.run.error) } : {}),
+  ...(split && s.spans?.length ? familySeconds(s.spans, s.secs, s.run.status) : {}),
 })
 
 /** 00:00 UTC of the first day of the month before `now`'s (epoch s). */
@@ -133,7 +153,7 @@ export function fleetMeta(points: SeriesWire['points'], now: number): FleetMeta 
   return { now: pts.length ? pts[pts.length - 1].bytes : null, d1: at(now - DAY), d7: at(now - 7 * DAY), daily: [...byDay.values()] }
 }
 
-/** The primary store's object counts, the newest scan per UTC day over `HISTORY_DAYS` (what drives scan time). */
+/** The primary store's object counts (what drives scan time) and bytes, the newest scan per UTC day over `HISTORY_DAYS`. */
 export function fleetObjects(points: SeriesWire['points'], now: number): ObjPoint[] {
   const byDay = new Map<string, ObjPoint>()
   for (const p of points) {
@@ -142,7 +162,7 @@ export function fleetObjects(points: SeriesWire['points'], now: number): ObjPoin
     if (t === null || objects == null || t < now - HISTORY_DAYS * DAY) continue
     const day = new Date(t * 1000).toISOString().slice(0, 10)
     const was = byDay.get(day)
-    if (!was || was.t <= t) byDay.set(day, { scan: p.date, t, objects })
+    if (!was || was.t <= t) byDay.set(day, { scan: p.date, t, objects, bytes: p.bytes ?? p.b ?? null })
   }
   return [...byDay.values()].sort((a, b) => a.t - b.t)
 }
@@ -175,7 +195,7 @@ export async function readDeployment(d: Deployment, env: Env, now: number, nRuns
       if (!r.configured) { out.errors.runs = 'scan runs are not set up'; return }
       const since = now - HISTORY_DAYS * DAY
       out.runs = r.runs.filter(s => s.run.kind === SCAN_KIND && s.run.status !== 'nop')
-        .filter((s, i) => i === 0 || (s.run.started_ts ?? 0) >= since).slice(0, nRuns).map(fleetRun)
+        .filter((s, i) => i === 0 || (s.run.started_ts ?? 0) >= since).slice(0, nRuns).map((s, i) => fleetRun(s, i < CARD_RUNS))
       out.last = out.runs[0] ?? null
       out.cost_daily = costDaily(r.runs, now)
     }, e => { out.errors.runs = why(e) }),
@@ -209,7 +229,7 @@ const colo = (): Cache | null => (typeof caches === 'undefined' ? null : (caches
  *  by the deployment list and run count, so a config change reads anew. */
 export async function fleetDoc(env: Env, opts: { fresh?: boolean; waitUntil?: (p: Promise<unknown>) => void } = {}, f: Fetcher = fetch): Promise<FleetDoc> {
   const cache = colo()
-  const key = new Request(`https://fleet.cache/v3/${encodeURIComponent(env.FLEET_JSON ?? '')}/${runsOf(env)}`)
+  const key = new Request(`https://fleet.cache/v4/${encodeURIComponent(env.FLEET_JSON ?? '')}/${runsOf(env)}`)
   if (cache && !opts.fresh) {
     const hit = await cache.match(key)
     if (hit) return hit.json() as Promise<FleetDoc>

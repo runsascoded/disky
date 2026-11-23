@@ -1,6 +1,7 @@
 /** A deployment's status card (`deployCard.ts`): its reductions as specs, and the card's text over a small fixture. */
 import { describe, expect, it } from 'vitest'
-import { type CardRun, barModel, deployCardSvg, familySeconds, fmtDelta, fmtDur, fmtTick, hiOf, IDLE, OTHER, stripModel } from './deployCard'
+import { type CardRun, barModel, deployCardInput, deployCardSvg, familySeconds, fmtDelta, fmtDur, fmtTick, hiOf, IDLE, OTHER, stripModel } from './deployCard'
+import type { FleetDeployment } from './fleetTypes'
 
 const DAY = 86400
 /** 1970-01-31 12:00 UTC. */
@@ -109,5 +110,23 @@ describe('the card', () => {
     const svg = deployCardSvg({ name: 'gcs', color: '#EA4335', theme: 'light', now: NOW, runs: RUNS, points: POINTS, mode: 'outcome' })
     const key = [...svg.matchAll(/<text[^>]*font-size="10\.5"[^>]*>([^<]*)<\/text>/g)].map(m => m[1])
     expect(key).toEqual(['clean', 'open issue', 'running'])
+  })
+})
+
+describe('a fleet deployment\'s card', () => {
+  const dep: FleetDeployment = {
+    name: 'gcs', url: 'https://gcs.test', color: '#EA4335', health: null, last: null, meta: null, errors: {},
+    runs: [{ run_id: 'b', scan: 'b', status: 'succeeded', trigger: 'manual', started: NOW - DAY, secs: 120, cost_usd: 3, failed_at: null, open_issues: [], families: [[IDLE, 10], ['list', 110]], bad: [] }],
+    objects: [{ scan: 's1', t: NOW - 8 * DAY, objects: 1000, bytes: 2e12 }, { scan: 's2', t: NOW - DAY, objects: 1100, bytes: null }],
+  }
+  it('its runs as the document keeps them, its primary store\'s daily sizes as points', () => {
+    expect(deployCardInput(dep, NOW, 'dark')).toEqual({
+      name: 'gcs', color: '#EA4335', theme: 'dark', now: NOW, runs: dep.runs,
+      points: [{ t: NOW - 8 * DAY, bytes: 2e12, objects: 1000 }, { t: NOW - DAY, bytes: null, objects: 1100 }],
+    })
+  })
+  it('runs that couldn\'t be read: the header says so', () => {
+    const svg = deployCardSvg(deployCardInput({ ...dep, runs: [], objects: null, errors: { runs: 'HTTP 500', objects: 'HTTP 500' } }, NOW, 'light'))
+    expect([...svg.matchAll(/<text[^>]*>([^<]*)<\/text>/g)].map(m => m[1]).slice(0, 3)).toEqual(['gcs', 'scan runs n/a', '1970-01-31 12:00 UTC'])
   })
 })

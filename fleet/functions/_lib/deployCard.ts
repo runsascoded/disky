@@ -15,6 +15,7 @@
  */
 import { fmtSI, interWidth } from '@disk-tree/pages-kit/og/text'
 import { DAY, fmtCount, fmtUsd, md, mix, r1, stamp, text, type Theme, THEMES } from './card.js'
+import type { FleetDeployment, StepState } from './fleetTypes.js'
 import { type Outcome, runOutcome } from './runOutcome.js'
 import { OUTCOME_COLOR } from './views.js'
 
@@ -25,6 +26,8 @@ const PAD = 12
 const AXIS = 28
 /** The sparklines' span, today included. */
 export const STRIP_DAYS = 30
+/** The runs the bars show (the default window); the fleet keeps `familySeconds` for this many of a deployment's newest. */
+export const CARD_RUNS = 30
 
 /** A phase's family: the per-source phases a scan runs in parallel (`list <bucket>`, `import <bucket>`) are one family;
  *  any other phase is its own (`site/src/scanRunsModel.ts`'s `phaseFamily`, which the fleet can't import). */
@@ -33,7 +36,6 @@ export const phaseFamily = (phase: string): string => /^(list|import) \S/.exec(p
 /** The family a run's clock is in when no step is (its job's boot and queue, the gaps between steps). */
 export const IDLE = ''
 
-export type StepState = 'running' | 'cancelled' | 'failed'
 type SpanState = 'done' | StepState
 const RANK: Record<SpanState, number> = { done: 0, running: 1, cancelled: 2, failed: 3 }
 
@@ -119,9 +121,23 @@ export interface DeployCardInput {
   points: CardPoint[]
   /** Bars stacked by step family (default), or one fill in the run's outcome colour. */
   mode?: BarMode
-  /** The last N runs (default 30), or every run started in the last N days. */
+  /** The last N runs (default `CARD_RUNS`), or every run started in the last N days. */
   window?: BarWindow
+  /** Why the runs couldn't be read: the header says so in place of the count. */
+  runsError?: string
 }
+
+/** A fleet deployment's card (`/og/fleet.png?view=deploy&d=…`): its runs (the newest `CARD_RUNS` carry their
+ *  `familySeconds`) and its primary store's daily sizes, as the fleet document keeps them. */
+export const deployCardInput = (d: FleetDeployment, now: number, theme: Theme): DeployCardInput => ({
+  name: d.name,
+  color: d.color,
+  theme,
+  now,
+  runs: d.runs,
+  points: (d.objects ?? []).map(p => ({ t: p.t, bytes: p.bytes, objects: p.objects })),
+  ...(d.errors.runs ? { runsError: d.errors.runs } : {}),
+})
 
 /** A duration, short: `42s`, `47m`, `2.1h`. */
 export function fmtDur(secs: number): string {
@@ -179,7 +195,7 @@ export interface Legend { family: string; color: string; last: number | null; me
 
 /** The window's runs, oldest first (the newest on the right), and the families given hues. */
 export function barModel(c: Pick<DeployCardInput, 'runs' | 'now' | 'window'>): { bars: Bar[]; hued: string[] } {
-  const win = c.window ?? { runs: 30 }
+  const win = c.window ?? { runs: CARD_RUNS }
   const started = c.runs.filter(r => r.started !== null).sort((a, b) => a.started! - b.started!)
   const shown = 'runs' in win ? started.slice(-win.runs)
     : started.filter(r => r.started! >= (Math.floor(c.now / DAY) - win.days + 1) * DAY)
@@ -301,7 +317,7 @@ export function deployCardSvg(c: DeployCardInput): string {
   const P = THEMES[c.theme]
   const O = OUTCOME_COLOR[c.theme]
   const mode = c.mode ?? 'family'
-  const win = c.window ?? { runs: 30 }
+  const win = c.window ?? { runs: CARD_RUNS }
   const { bars, hued } = barModel(c)
   const out: string[] = []
   const W = DEPLOY_W
@@ -311,7 +327,7 @@ export function deployCardSvg(c: DeployCardInput): string {
   // header: the deployment, what the bars are, when
   out.push(`<circle cx="${PAD + 5}" cy="${PAD + 10}" r="5" fill="${c.color}"/>`)
   out.push(text(PAD + 15, PAD + 15, c.name, 16, { fill: P.ink, weight: 600 }))
-  const what = 'runs' in win ? `last ${bars.length} scan runs` : `scan runs, last ${win.days} days`
+  const what = c.runsError ? 'scan runs n/a' : 'runs' in win ? `last ${bars.length} scan runs` : `scan runs, last ${win.days} days`
   out.push(text(PAD + 15 + interWidth(c.name, 16, 600) + 8, PAD + 15, what, 11, { fill: P.ink3 }))
   out.push(text(right, PAD + 15, `${stamp(c.now)} UTC`, 10, { fill: P.ink3, anchor: 'end' }))
 

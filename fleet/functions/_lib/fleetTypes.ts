@@ -22,7 +22,19 @@ export interface FleetRun {
   /** A manual run's starter's own Slack emoji (`:name:`), as the deployment's `/api/scan-runs?emoji=1` answers it (asked
    *  of OA's broker); absent when it has none, or for any other run. */
   trigger_emoji?: string
+  /** A failed run's recorded error: one line, clipped, nothing Slack reads as markup (`fleet.ts` `oneLine`); absent when
+   *  none was recorded, or for any other run. */
+  error?: string
+  /** The run's seconds per step family (`deployCard.ts` `familySeconds`, from the phases its site lists), summing to its
+   *  duration; `''` is the time no step ran. Only on the newest `CARD_RUNS` runs (what the deployment card draws), and
+   *  absent from a run whose site listed no phases. */
+  families?: [string, number][]
+  /** The families with a step that didn't finish clean, and how (beside `families`). */
+  bad?: [string, StepState][]
 }
+
+/** How a step family's worst phase ended, when not clean. */
+export type StepState = 'running' | 'cancelled' | 'failed'
 
 export interface MetaPoint {
   /** The scan id, and its time (epoch s). */
@@ -31,11 +43,13 @@ export interface MetaPoint {
   bytes: number
 }
 
-/** A primary-store scan's object count (`/api/series`'s root `objects`). */
+/** A primary-store scan's object count and bytes (`/api/series`' root `objects`, `bytes`). */
 export interface ObjPoint {
   scan: string
   t: number
   objects: number
+  /** Null from a series that carried none. */
+  bytes: number | null
 }
 
 export interface FleetMeta {
@@ -73,7 +87,7 @@ export interface FleetDeployment {
   /** The scan runs started in the last `HISTORY_DAYS` (the newest always), at most `FLEET_RUNS`, newest first. */
   runs: FleetRun[]
   meta: FleetMeta | null
-  /** The primary store's object count: the newest scan per UTC day over `HISTORY_DAYS`, oldest first. */
+  /** The primary store's object count and bytes: the newest scan per UTC day over `HISTORY_DAYS`, oldest first. */
   objects: ObjPoint[] | null
   /** Each UTC day's summed cost of the scan runs that recorded one, oldest first, from the start of the previous UTC month
    *  (the month-over-month cost reply's data). From every run the deployment lists, so it reaches past `runs`'
