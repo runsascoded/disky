@@ -1146,9 +1146,10 @@ def converge(
         if quiet:
             lines = trail(cfg, good, live_rows)
             runs = cfg.sender('runs')
-            if state.get('rolling') and state.get('rolling_sender') != runs:
-                # Posted under another sender (an `emoji` / `icons` change, a stock icon's, or before `rolling_sender`
-                # was kept), which an edit can't change: posted again under this one, its runs moved to the new reply
+            if state.get('rolling') and ('rolling_sender' not in state or face(state['rolling_sender']) != face(runs)):
+                # Posted under another icon (an `emoji` / `icons` change, a stock icon's, or unknown: before
+                # `rolling_sender` was kept), which an edit can't change (a name alone isn't worth a repost: a reply
+                # posted as the app keeps standing once senders are on): posted again, its runs moved to the new reply
                 # (`stale`, saved first), then it goes. `rolling_retired` holds it until deleted, so an interrupted
                 # report deletes it next time; the repost's intent is its own (`scope`), never the old reply's.
                 state['rolling_retired'] = state.pop('rolling')
@@ -1250,6 +1251,11 @@ def converge(
         del state['running']
         persist()
     return state
+
+
+def face(sender: Mapping[str, str] | None) -> str | None:
+    """A sender's icon (`icon_emoji` or `icon_url`; None: the app's)."""
+    return (sender.get('icon_emoji') or sender.get('icon_url')) if sender else None
 
 
 def shown(sender: Mapping[str, str] | None, body: str) -> str:

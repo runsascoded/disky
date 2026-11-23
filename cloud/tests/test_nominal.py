@@ -1284,13 +1284,23 @@ def test_a_closed_threads_rolling_reply_is_only_edited_whatever_its_sender():
     assert [(c[0], c[1]) for c in calls[1]] == [('edit', '1.0'), ('edit', '2.0'), ('post', '3.0'), ('edit', '1.0'), ('post', '4.0')]
 
 
-def test_a_rolling_reply_without_a_sender_is_kept_when_senders_are_off():
+def test_a_rolling_reply_posted_as_the_app_stands_once_senders_are_on_and_one_of_unknown_icon_is_posted_again_once():
+    """Only the icon counts (a name alone isn't worth a repost); a reply from before `rolling_sender` was kept could
+    carry any icon, so it is posted again once, whatever the configuration."""
     w = Writer(QUIET)
     w.run(history(2))
-    del w.saved['rolling_sender']
+    assert w.saved['rolling_sender'] is None
     w.slack.calls.clear()
+    w.cfg = SENT
     w.run(history(2))
-    assert w.slack.calls == []
+    assert sent(w.slack) == []
+    w.cfg = QUIET
+    del w.saved['rolling_sender']
+    w.run(history(2))
+    assert sent(w.slack) == [('post', '3.0', None, TRAIL), ('delete', '2.0', None, None)]
+    assert rolling_state(w) == {'rolling': '3.0', 'rolling_sender': None, 'rolling_retired': None, 'posted': {'r1': '3.0', 'r2': '3.0'}}
+    w.run(history(2))
+    assert sent(w.slack) == []
 
 
 def red_writer():
