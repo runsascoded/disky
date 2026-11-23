@@ -70,19 +70,24 @@ export function status(d: FleetDeployment, emoji: Emoji = DEFAULT_EMOJI): { emoj
 export const STRIP_RUNS = 10
 
 /** The newest `STRIP_RUNS` runs' emoji, newest first (the newest is the deployment's state, so the line shows it once);
- *  its newest run alone when it lists none, else its state's emoji. A scheduled run (or one with no recorded trigger) is
- *  its status alone; a manual run is a delimited pair, its status then who started it in parentheses (`starter`), set
- *  off by spaces: `⏳⚠️⚠️ (:ryan:) ✅✅` (Ryan, 2026-11-22: the exception marked, each face plainly its run's). Not
- *  linked: Slack's phone apps print a link whose label is an emoji as its bare URL, then the emoji (Ryan, 2026-11-20).
- *  Each run is a link on `/fleet`. */
+ *  its newest run alone when it lists none, else its state's emoji. Consecutive runs started the same way form a group,
+ *  their statuses run together, and groups are set off by spaces. A scheduled group (or one with no recorded trigger) is
+ *  its statuses alone; a manual group ends in who started it (`starter`), with no space or parentheses, so the face
+ *  reads as its group's: `⏳✅✅ ✅⚠️:ryan: ✅` (Ryan, 2026-11-23: a face after every manual run repeated it, and the
+ *  space inside `✅ (:ryan:)` matched the space between runs). Not linked: Slack's phone apps print a link whose label is
+ *  an emoji as its bare URL, then the emoji (Ryan, 2026-11-20). Each run is a link on `/fleet`. */
 const strip = (d: FleetDeployment, emoji: Emoji, have: Have): string => {
   const runs = d.runs.length ? d.runs.slice(0, STRIP_RUNS) : d.last ? [d.last] : []
   if (!runs.length) return status(d, emoji).emoji
-  const pieces = runs.map(r => {
+  const groups: { who: string; statuses: string }[] = []
+  for (const r of runs) {
+    const who = r.trigger === 'manual' ? starter(r, have) : ''
     const s = runStatus(r, emoji).emoji
-    return r.trigger === 'manual' ? { text: `${s} (${starter(r, have)})`, pair: true } : { text: s, pair: false }
-  })
-  return pieces.map((p, i) => (i && (p.pair || pieces[i - 1].pair) ? ' ' : '') + p.text).join('')
+    const last = groups[groups.length - 1]
+    if (last && last.who === who) last.statuses += s
+    else groups.push({ who, statuses: s })
+  }
+  return groups.map(g => g.statuses + g.who).join(' ')
 }
 
 /** A signed byte change: `+1.2 GB`, `−300 MB`. */
