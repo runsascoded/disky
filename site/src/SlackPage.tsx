@@ -281,6 +281,12 @@ export function Review({ job, permalink }: { job: string; permalink: string | nu
     queryKey: ['digest-reapply', job, 'plan'], staleTime: Infinity, retry: false,
     queryFn: () => getJson<{ path: string; plan: RewritePlan }>(`/api/digest-reapply/${job}/plan`),
   })
+  // the workspace's custom emoji (`/api/slack-emoji`: name → image URL), so `:runway-3:` shows as Slack draws it; until
+  // it answers (or when it can't read them), each shows as its name
+  const emoji = useQuery({
+    queryKey: ['slack-emoji'], staleTime: 5 * 60_000, retry: false,
+    queryFn: () => getJson<{ emoji: Record<string, string> }>('/api/slack-emoji'),
+  })
   const [outcomes, setOutcomes] = useState<Record<string, RewriteOutcome>>({})
   const [error, setError] = useState<string | null>(null)
   const record = (os: RewriteOutcome[]) => setOutcomes(cur => ({ ...cur, ...Object.fromEntries(os.map(o => [o.ts, o])) }))
@@ -300,7 +306,7 @@ export function Review({ job, permalink }: { job: string; permalink: string | nu
     <div className="slack-review">
       <p className="dim">Review: {plan.data.path}. Check re-reads the selected messages and writes nothing; apply edits them in place, refusing any that changed since this preview.</p>
       {error && <p className="err">{error}</p>}
-      <PlanView plan={plan.data.plan} outcomes={outcomes} onCheck={run('check')} onApply={run('apply')}
+      <PlanView plan={plan.data.plan} outcomes={outcomes} onCheck={run('check')} onApply={run('apply')} emoji={emoji.data?.emoji}
         messageHref={a => workspace ? `${workspace}/archives/${a.channel}/p${a.ts.replace('.', '')}${a.thread_ts ? `?thread_ts=${a.thread_ts}&cid=${a.channel}` : ''}` : undefined} />
     </div>
   )

@@ -267,6 +267,8 @@ const SHARED_ROUTES: Record<string, Case[]> = {
     get('/api/session-log/sessions/none', 'admin'),
     get('/api/session-log/latency', 'admin'),
   ],
+  // The workspace's custom emoji, for `/admin/slack`'s review (the gate first; no token answers `{emoji: {}}` past it).
+  'api/slack-emoji.ts': [get('/api/slack-emoji', 'admin')],
   'api/static-bench.ts': [get('/api/static-bench', 'viewer'), post('/api/static-bench', 'viewer')],
   'api/store.ts': [get('/api/store', 'viewer')],
   'api/subtree.ts': [get(`/api/subtree?${AT}`, 'viewer')],
