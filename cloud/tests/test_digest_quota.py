@@ -1042,6 +1042,22 @@ def test_rewrite_plan_applies_the_emoji_fallback():
         ["<https://x.test/1|main>: 78.4% :arrow_deg10:"],
     ]
 
+
+def test_keep_live_images_reuses_the_hosted_url_of_an_unchanged_image():
+    """An image block naming the same file as the live message (its content hash is in its name) keeps the live URL, so
+    a re-render's new Pages deployment and cache-buster don't plan an edit; a new file keeps its new URL; no live
+    blocks: as desired."""
+    from thrds.rewrite import Desired
+
+    sec = {"type": "section", "text": {"type": "mrkdwn", "text": "*Nov 2026*"}}
+    old = "https://c5fbca09.icons.pages.dev/plot-44e8.png?v=1795392244"
+    want = Desired("*Nov 2026*", blocks=[sec, {"type": "image", "image_url": "https://78c8fa4d.icons.pages.dev/plot-44e8.png?v=1795394377", "alt_text": "plot"},
+                                         {"type": "image", "image_url": "https://78c8fa4d.icons.pages.dev/map-9a1f.png?v=1795394377", "alt_text": "map"}])
+    live = [sec, {"type": "image", "image_url": old, "alt_text": "plot", "image_width": 1200, "block_id": "x"}]
+    kept = E.keep_live_images(want, live)
+    assert [b.get("image_url") for b in kept.blocks] == [None, old, "https://78c8fa4d.icons.pages.dev/map-9a1f.png?v=1795394377"]
+    assert (kept.text, kept.sender, E.keep_live_images(want, None)) == ("*Nov 2026*", None, want)
+
 def test_day_range():
     assert [E.day_range("2026-11-01"), E.day_range("2026-10-31..2026-11-02")] == [["2026-11-01"], ["2026-10-31", "2026-11-01", "2026-11-02"]]
     with pytest.raises(ValueError) as e:

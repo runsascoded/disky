@@ -1208,7 +1208,25 @@ def rewrite_plan(found: Iterable[Any], changes: Iterable[Change], have: Collecti
     from .emoji_vocab import fallback
 
     want = {c.ts: edit_desired(fallback(c.body, have)) for c in changes}
-    return plan(found, lambda f: want.get(f.ts, Skip("not selected")))
+    return plan(found, lambda f: keep_live_images(want[f.ts], f.content.blocks) if f.ts in want else Skip("not selected"))
+
+
+def keep_live_images(desired: Any, live_blocks: list[dict] | None):
+    """``desired`` with each image block's URL replaced by the live message's for the same file: the digest's images are
+    named by their content (the plot's hash is in its name), but each render hosts them on a new Pages deployment with
+    a fresh cache-buster, so an unchanged image would otherwise plan as an edit. Matched by the URL path's last segment;
+    an image the live message doesn't carry keeps its new URL."""
+    from urllib.parse import urlsplit
+
+    from thrds.rewrite import Desired
+
+    if not desired.blocks or not live_blocks:
+        return desired
+    name = lambda url: urlsplit(url).path.rsplit("/", 1)[-1]  # noqa: E731
+    live = {name(b["image_url"]): b["image_url"] for b in live_blocks if b.get("type") == "image" and b.get("image_url")}
+    blocks = [{**b, "image_url": live[name(b["image_url"])]} if b.get("type") == "image" and b.get("image_url") and name(b["image_url"]) in live else b
+              for b in desired.blocks]
+    return Desired(desired.text, blocks=blocks, sender=desired.sender)
 
 
 def write_plan(path: str, p: Any) -> None:
