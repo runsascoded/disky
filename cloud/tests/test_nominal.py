@@ -1205,6 +1205,94 @@ def test_a_quiet_green_thread_posts_its_head_and_rolling_reply_under_fixed_sende
     ]
 
 
+R3_EDITS = [
+    ('edit', '3.0', None, f'{TRAIL}\n⏳ :ada: [11/04 08:00Z](https://site.test/scans/r3) · running'),
+    ('edit', '1.0', None, SENT_HEAD.replace('Latest 2 runs', 'Running now: [11/04 08:00Z](https://site.test/scans/r3).\n\nLatest 2 runs')),
+]
+
+
+def rolling_state(w):
+    return {k: w.saved.get(k) for k in ('rolling', 'rolling_sender', 'rolling_retired', 'posted')}
+
+
+def test_a_rolling_reply_kept_from_before_its_sender_was_recorded_is_posted_again_once_then_edited_in_place():
+    """Ryan, 2026-11-23: the runs reply under the app's icon, not 🧾. An edit can't change a post's icon, so a reply whose
+    sender isn't recorded (posted before `rolling_sender`) is posted again under today's, then deleted; once."""
+    w = Writer(SENT)
+    w.run(history(2))
+    assert sent(w.slack) == [('post', '1.0', GREEN, SENT_HEAD), ('post', '2.0', RUNS, TRAIL)]
+    assert rolling_state(w) == {'rolling': '2.0', 'rolling_sender': RUNS, 'rolling_retired': None, 'posted': {'r1': '2.0', 'r2': '2.0'}}
+    del w.saved['rolling_sender']
+    w.run(history(2))
+    assert sent(w.slack) == [('post', '3.0', RUNS, TRAIL), ('delete', '2.0', None, None)]
+    assert rolling_state(w) == {'rolling': '3.0', 'rolling_sender': RUNS, 'rolling_retired': None, 'posted': {'r1': '3.0', 'r2': '3.0'}}
+    assert sorted(w.slack.messages_by_id) == ['1.0', '3.0']
+    w.run(history(2))
+    assert sent(w.slack) == []
+    w.run([row(3, 'running', finished_ts=None, **ADA), *history(2)])
+    assert sent(w.slack) == R3_EDITS
+
+
+def test_a_changed_runs_icon_posts_the_rolling_reply_again_and_its_runs_link_the_new_one():
+    w = Writer(SENT)
+    w.run(history(2))
+    state, writes = deepcopy(w.saved), []
+    N.link_threads(state, w.slack, writes.append, w.save)
+    assert writes == [[('r1', 'https://slack.test/p2.0'), ('r2', 'https://slack.test/p2.0')]]
+    w.slack.calls.clear()
+    icon = {'username': 'Test scans · runs', 'icon_url': 'https://icons.test/runs.png'}
+    w.cfg = replace(SENT, icons=(('runs', 'https://icons.test/runs.png'),))
+    w.run(history(2))
+    assert sent(w.slack) == [('post', '3.0', icon, TRAIL), ('delete', '2.0', None, None)]
+    assert rolling_state(w) == {'rolling': '3.0', 'rolling_sender': icon, 'rolling_retired': None, 'posted': {'r1': '3.0', 'r2': '3.0'}}
+    state, writes = deepcopy(w.saved), []
+    N.link_threads(state, w.slack, writes.append, w.save)
+    assert writes == [[('r1', 'https://slack.test/p3.0'), ('r2', 'https://slack.test/p3.0')]]
+    w.run(history(2))
+    assert sent(w.slack) == []
+
+
+def test_an_interrupted_rolling_repost_is_recovered_not_posted_twice_and_the_old_reply_still_goes():
+    """The repost's intent is its own (never the old reply's, which recovery would otherwise find), and the old reply
+    is held (`rolling_retired`) until it is deleted."""
+    w = Writer(SENT)
+    w.run(history(2))
+    del w.saved['rolling_sender']
+    w.slack.calls.clear()
+    w.slack.timeout = True
+    with pytest.raises(TimeoutError, match='response lost after Slack accepted the post'):
+        w.run(history(2))
+    assert (w.saved['rolling_retired'], 'rolling' in w.saved, w.saved['pending']['key']) == ('2.0', False, 'rolling')
+    w.run(history(2))
+    assert sent(w.slack) == [('post', '3.0', RUNS, TRAIL), ('delete', '2.0', None, None)]
+    assert rolling_state(w) == {'rolling': '3.0', 'rolling_sender': RUNS, 'rolling_retired': None, 'posted': {'r1': '3.0', 'r2': '3.0'}}
+    assert sorted(w.slack.messages_by_id) == ['1.0', '3.0']
+
+
+def test_a_closed_threads_rolling_reply_is_only_edited_whatever_its_sender():
+    """A thread that closes keeps its rolling reply where it stands: its final trail is an edit, never a repost."""
+    calls = []
+    for legacy in (False, True):
+        w = Writer(SENT)
+        w.run(history(2))
+        if legacy:
+            del w.saved['rolling_sender']
+        w.slack.calls.clear()
+        w.run([F3, *history(2)])
+        calls.append(sent(w.slack))
+    assert calls[1] == calls[0]
+    assert [(c[0], c[1]) for c in calls[1]] == [('edit', '1.0'), ('edit', '2.0'), ('post', '3.0'), ('edit', '1.0'), ('post', '4.0')]
+
+
+def test_a_rolling_reply_without_a_sender_is_kept_when_senders_are_off():
+    w = Writer(QUIET)
+    w.run(history(2))
+    del w.saved['rolling_sender']
+    w.slack.calls.clear()
+    w.run(history(2))
+    assert w.slack.calls == []
+
+
 def red_writer():
     """history(2)'s quiet thread, closed by F3, whose failure thread (3.0) holds its reply (4.0)."""
     w = Writer(SENT)

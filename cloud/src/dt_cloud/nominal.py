@@ -1009,7 +1009,8 @@ def converge(
                 # Its sender names the thread, so its text is `bare`; a head posted without one keeps its full text
                 state['head_sender'] = pending['sender']['username']
         elif pending['key'] == 'rolling':
-            state.update(rolling=ts, rolling_body=pending['body'])
+            # The sender it was posted under (None: the app's), which `chat.update` can't change: see `rolling_retired`
+            state.update(rolling=ts, rolling_body=pending['body'], rolling_sender=pending.get('sender'))
         elif pending['key'].startswith('running:'):
             state.setdefault('running', {})[pending['key'].removeprefix('running:')] = {'ts': ts, 'parent': pending['parent']}
         elif pending['key'].startswith('cancelled:'):
@@ -1144,8 +1145,17 @@ def converge(
         todo = [] if quiet else missing(good, posted)
         if quiet:
             lines = trail(cfg, good, live_rows)
+            runs = cfg.sender('runs')
+            if state.get('rolling') and state.get('rolling_sender') != runs:
+                # Posted under another sender (an `emoji` / `icons` change, a stock icon's, or before `rolling_sender`
+                # was kept), which an edit can't change: posted again under this one, its runs moved to the new reply
+                # (`stale`, saved first), then it goes. `rolling_retired` holds it until deleted, so an interrupted
+                # report deletes it next time; the repost's intent is its own (`scope`), never the old reply's.
+                state['rolling_retired'] = state.pop('rolling')
+                state.pop('rolling_body', None)
+            retired = state.get('rolling_retired')
             if not state.get('rolling'):
-                send('rolling', lines, state['parent'], scope, cfg.sender('runs'))
+                send('rolling', lines, state['parent'], f'{scope}|{retired}' if retired else scope, runs)
             elif state.get('rolling_body') != lines:
                 check()
                 slack.edit(state['rolling'], lines)
@@ -1156,7 +1166,8 @@ def converge(
                 posted.setdefault(row['run']['run_id'], state['rolling'])
             # Per-run replies from before the thread was quiet: their runs link the rolling reply (saved first), then
             # they go, so a quiet thread converges to its head and the one reply whatever posted it before
-            stale = sorted({ts for ts in posted.values() if ts not in (state['rolling'], state['parent'])})
+            gone = {ts for ts in posted.values() if ts not in (state['rolling'], state['parent'])}
+            stale = sorted(gone | {retired} if retired else gone)
             for rid, ts in posted.items():
                 if ts in stale:
                     posted[rid] = state['rolling']
@@ -1165,6 +1176,9 @@ def converge(
             for ts in stale:
                 check()
                 slack.delete(ts)
+            if retired:
+                del state['rolling_retired']
+                persist()
         # In a failure thread a run's reply takes the lines its steps' top-level alerts posted (`fold`)
         folding = head != 'clean'
         for rid in sorted(here, key=lambda rid: ended[rid]['run']['started_ts']):
