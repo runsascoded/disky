@@ -39,6 +39,7 @@ from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
 from time import monotonic
+from uuid import uuid4
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -439,7 +440,9 @@ def rollup_cells(con, roots: str, heads: str, K: int, into: str, closed: bool = 
     con.execute("""CREATE OR REPLACE TABLE rcell AS SELECT h, kind, child, t, sum(db) AS db, sum(dn) AS dn FROM rev2
         GROUP BY ALL HAVING sum(db) <> 0 OR sum(dn) <> 0""")
     lap("rcell", "rcell")
-    tmp = Path(con.execute("SELECT current_setting('temp_directory')").fetchone()[0] or ".") / f"rcell-{id(con):x}.parquet"
+    # A name no other writer can share: `id(con)` (the old name) repeats across processes and builds sharing a temp
+    # directory, and two cells writing one file read back corrupt (CI, 2026-11-22: "Snappy decompression failure")
+    tmp = Path(con.execute("SELECT current_setting('temp_directory')").fetchone()[0] or ".") / f"rcell-{uuid4().hex}.parquet"
     tmp.parent.mkdir(parents=True, exist_ok=True)
     schema = pa.schema([("h", pa.int64()), ("kind", pa.int8()), ("child", pa.string()), ("t", pa.int64()), ("b", pa.int64()), ("o", pa.int64())])
     with pq.ParquetWriter(tmp, schema) as w:
