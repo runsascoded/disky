@@ -53,6 +53,7 @@ This replaces the blind "for real" re-apply. That path stays as is for the cron 
 ### 2. Review (`/admin/slack`)
 
 - A dry run of the OP or of days, once its job `SUCCEEDED`, shows `Review` in place of the raw output (still under "The job's output"): `PlanView` over `GET /api/digest-reapply/<job>/plan`, with `postRewrite` to `…/check` and `…/apply`, the outcomes recorded per ts, and `messageHref` built from the bundle's permalink workspace. No `renderContent`: thrds' Slack rendering (mrkdwn, the OP's section + image blocks, sender names and avatars) shows the digest faithfully enough; the site's own renderer draws the OP from rows, not from a message's content.
+- Custom emoji (`:arrow_deg80:`, `:runway-3:`, `:pool-chip-…:`) draw as their images: `Review` passes `PlanView` its `emoji` map from `GET /api/slack-emoji` (`functions/api/slack-emoji.ts`, admin): `emoji.list` through thrds' `SlackClient` with the site's `SLACK_BOT_TOKEN`, each `alias:` resolved to its target's URL (`customEmojiUrls`, `@disk-tree/pages-kit/emoji`, which fleet's `workspaceCustom` shares), cached per isolate for 5 minutes. No token, or no `emoji:read`: `{emoji: {}}`, logged once, and each shows as its `:name:`. Tests: `functions/api/slackEmoji.test.ts`.
 - The page's blind "apply" (a for-real Batch job) is now offered only for the whole thread ("converge"); the OP and days are applied from the review. `POST /api/digest-reapply` still accepts `dry_run: false` for any target, and the CLI is unchanged.
 
 ### 3. Apply (`functions/api/digest-reapply/[job]/[op].ts`)

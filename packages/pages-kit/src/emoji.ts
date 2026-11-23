@@ -63,19 +63,27 @@ export const renders = (shortcode: string, have: Have): boolean => have === null
 /** Anything that calls a Slack Web API method (thrds' `SlackClient.api`). */
 export interface SlackApi { api(method: string, body?: Record<string, unknown>): Promise<unknown> }
 
+/** `emoji.list`'s `emoji` as name → image URL: an `alias:` takes its target's URL (followed through further aliases);
+ *  an alias of a stock emoji, a dangling or circular one, and anything else not a URL are dropped. */
+export function customEmojiUrls(raw: Record<string, unknown>): Record<string, string> {
+  const resolve = (name: string, seen: ReadonlySet<string> = new Set()): string | null => {
+    const v = Object.hasOwn(raw, name) ? raw[name] : undefined
+    if (typeof v !== 'string' || seen.has(name)) return null
+    if (v.startsWith('alias:')) return resolve(v.slice(6), new Set([...seen, name]))
+    return v.startsWith('http') ? v : null
+  }
+  return Object.fromEntries(Object.keys(raw).flatMap(n => {
+    const url = resolve(n)
+    return url ? [[n, url]] : []
+  }))
+}
+
 /** The workspace's custom emoji names (`emoji.list`: aliases followed, deleted ones dropped), read once; null, logged,
  *  when that fails (no `emoji:read`, network), so the post goes out as it always has. */
 export async function workspaceCustom(slack: SlackApi, label: string): Promise<Have> {
   try {
-    const r = await slack.api('emoji.list') as { emoji?: Record<string, string> }
-    const raw = r.emoji ?? {}
-    const resolve = (name: string, seen = new Set<string>()): boolean => {
-      const v = raw[name]
-      if (typeof v !== 'string' || seen.has(name)) return false
-      if (v.startsWith('alias:')) return resolve(v.slice(6), new Set([...seen, name]))
-      return v.startsWith('http')
-    }
-    return new Set(Object.keys(raw).filter(n => resolve(n)))
+    const r = await slack.api('emoji.list') as { emoji?: Record<string, unknown> }
+    return new Set(Object.keys(customEmojiUrls(r.emoji ?? {})))
   } catch (e) {
     console.warn(`${label}: workspace emoji unread (${e instanceof Error ? e.message : String(e)}); custom emoji written as they are`)
     return null
