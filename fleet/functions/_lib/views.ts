@@ -4,16 +4,14 @@
  * outcome (overlaps, long runs and gaps show); `costSvg`, each deployment's scan cost this month, cumulative, against
  * last month's. The card's frame, fonts and palette (`card.ts`), `CARD_W` wide; pure and DOM-free.
  */
+import { OUTCOME_COLOR } from '@disk-tree/pages-kit/og/frame'
 import { interWidth } from '@disk-tree/pages-kit/og/text'
 import { CARD_W, DAY, fmtUsd, labelColor, md, PAD, r1, stamp, text, type Theme, THEMES, WINDOW_DAYS } from './card.js'
 import type { FleetDeployment, FleetDoc, FleetRun } from './fleetTypes.js'
 import { type Outcome, runOutcome } from './runOutcome.js'
 
-/** Each outcome's colour, per theme: the page's `--ok` / `--warn` / `--bad` / `--accent`, and a grey for a cancel. */
-export const OUTCOME_COLOR: Record<Theme, Record<Outcome, string>> = {
-  dark: { ok: '#4ade80', issues: '#e3b341', failed: '#f26b6b', running: '#6ea2f5', cancelled: '#8b8a80' },
-  light: { ok: '#1f8a4c', issues: '#a86200', failed: '#c62828', running: '#2f6fd6', cancelled: '#8b8a80' },
-}
+/** Each outcome's colour, per theme (`@disk-tree/pages-kit/og/frame`, shared with the deployment status card). */
+export { OUTCOME_COLOR }
 const OUTCOME_LABEL: [Outcome, string][] = [['ok', 'ok'], ['issues', 'open issue'], ['failed', 'failed'], ['running', 'running'], ['cancelled', 'cancelled']]
 
 const frame = (theme: Theme, h: number, body: string[]): string => {
