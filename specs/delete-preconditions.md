@@ -21,7 +21,7 @@ gcs has this today as `generation` (listing → `path-index -G` → IS → `ifGe
 |---|---|---|---|---|
 | GCS | `generation` | int64 | `ifGenerationMatch` (per object; batch: per sub-request) | yes |
 | S3 | ETag | string | `If-Match` on `DeleteObject`; per object `ETag` in `DeleteObjects` (AWS since [2025-09-16][s3-cond-del]) | not guaranteed; content, part layout and encryption affect the validator ([Object API][s3-object]) |
-| CAIOS | ETag | string | conditional-delete SDK support verified; provider enforcement still needs a controlled canary | not a unique rewrite identity |
+| CAIOS | ETag | string | enforced on both `DeleteObject(If-Match)` and `DeleteObjects` per-item `ETag` (a stale ETag: `PreconditionFailed`, object kept), by the owned canary on 2026-11-24 (`plan-sweep canary`, marin-us-west-04a); CoreWeave's docs list conditionals for reads and writes only | not a unique rewrite identity |
 | R2 | ETag | string | unverified: does R2's `DeleteObject` honor `If-Match`? | as S3 |
 | HF | file `oid` (git blob sha, or LFS sha256) | string | repo-level: `create_commit(parent_commit=…)` (§4) | no (content hash) |
 
@@ -75,13 +75,13 @@ Step 4 is not the retry §2 forbids. It re-checks every staged file. A commit re
 2. Carry ETags through IS build, append, merge, compaction, served identity lookups, and parity verification. Retain the size/mtime checks: an ETag is not a unique rewrite identity.
 3. Take a fresh ETag-capable scan. Existing CW shards contain no ETags, so there is no equivalent historical raw-listing backfill available. Historical identities remain NULL; do not label them with today's HEAD/LIST ETags. Build a new generation preserving those unknowns, verify it, then coordinate the live pointer cutover.
 4. Implemented locally: CW manifests retain `version`; older-scan staging compares size, mtime and token. Execution refuses the whole manifest before any deletion if an identity is NULL, empty or wildcard, including old manifests without the column. Take a fresh scan and re-stage such items. A matching LIST is followed by `DeleteObject(IfMatch=<reviewed ETag>)`, with bounded workers. A 412 is `skipped_overwritten`; other provider delete failures are `delete_failed` and make the CLI fail. Decision logs exclude both from undo/purge. The reviewed token is never replaced or retried with a fresh token.
-5. The implementation selects the single-object API accepted by the SDK. Actual CAIOS enforcement still requires validation before deployment; no source-object write/delete probe was performed during this implementation. A future batch optimization must verify per-object preconditions before use; it must never fall back to unconditional deletion.
+5. The implementation selects the single-object API accepted by the SDK. CAIOS enforcement of both forms was verified on 2026-11-24 by `dt-cloud plan-sweep canary` (`job/cw-sweep-canary-submit.sh`), on its own keys only: a stale ETag is refused per object on `DeleteObject` and per item on `DeleteObjects`. A batch optimization may use `DeleteObjects` with per-item `ETag`s; it must never fall back to unconditional deletion.
 
 Steps 1–2 are implemented locally and covered by listing/import, IS build/append/merge/compaction, migration/export and conditional-delete regressions. Step 3 and production rollout are pending. The reviewed-staging lifecycle and run analytics in §3 are implemented locally; shared adoption is described in `staged-review-loading.md`.
 
 ## 6. Open
 
-- CAIOS and R2: verify actual `If-Match` enforcement with an owned canary before deploying conditional execution. The installed S3 SDK accepting the field and fake-client tests do not prove provider enforcement; no canary object has been created or deleted in this work. Never probe a wrong validator against a real staged object that must survive.
+- R2: verify actual `If-Match` enforcement with an owned canary (`plan-sweep canary` against R2's endpoint) before deploying conditional execution. CAIOS: done 2026-11-24, both forms enforced. Never probe a wrong validator against a real staged object that must survive.
 - HF purge flow (§4): squash vs per-`oid` purge, and the reference check.
 - Whether the IS should also keep `mtime` per version for the §3 flag (it keeps `mtime` already as the version's `wts`/`d`; confirm it's the store's `updated`, not `created`).
 
