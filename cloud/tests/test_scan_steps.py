@@ -62,12 +62,16 @@ class Runner:
         return subprocess.CompletedProcess(argv, self.codes.get(key, 1 if key in self.fail else 0), self.stdout.get(key, ""), None)
 
 
+#: A step with R2 credentials runs as a Batch task, the only place `r2_profile` writes the job's registry. Only those
+#: tests set it: in `os.environ` it also turns on `log_job_stamp` (once per process), which a stderr assertion would see.
+BATCH = {"BATCH_TASK_INDEX": "0"}
+
+
 @pytest.fixture
 def env(tmp_path, monkeypatch):
     monkeypatch.delenv("SCAN_RUNS_PROFILE", raising=False)
-    # a step runs as a Batch task, where `r2_profile` writes the job's registry
     return {"SNAP_ID": "2026-10-16T1200", "GEN": "G1", "DT_JOB_START": "1", "TMPDIR": str(tmp_path / "t"),
-            "HOME": str(tmp_path / "home"), "BATCH_TASK_INDEX": "0"}
+            "HOME": str(tmp_path / "home")}
 
 
 def ctx(tmp_path, env, runner=None, **kw) -> S.Ctx:
@@ -150,7 +154,7 @@ def test_serving_steps_gate_on_credentials(tmp_path, env):
 
 
 def test_serving_steps_commands(tmp_path, env):
-    env.update(CLOUDFLARE_API_TOKEN=" tok\n", CLOUDFLARE_ACCOUNT_ID="acct", R2_ENDPOINT="https://r2.example.org",
+    env.update(**BATCH, CLOUDFLARE_API_TOKEN=" tok\n", CLOUDFLARE_ACCOUNT_ID="acct", R2_ENDPOINT="https://r2.example.org",
                R2_BUCKET="r2b", R2_ACCESS_KEY_ID="k", R2_SECRET_ACCESS_KEY="s", SITE_TOKEN="st", SITE_URL="https://site.example.org",
                SLACK_BOT_TOKEN="x", SLACK_CHANNEL="C1")
     c = ctx(tmp_path, env, secrets={"CLOUDFLARE_API_TOKEN": "cf-token"})
@@ -988,7 +992,7 @@ def test_static_names_one_machine(tmp_path, env, monkeypatch, has_gen, has_succe
     monkeypatch.setattr(S.Ctx, "nproc", property(lambda self: 4))
     asked = []
     monkeypatch.setattr(S.Ctx, "store_has", lambda self, root, key: asked.append((root, key)) or (has_gen if key.endswith("scans.json") else has_successor))
-    env.update(R2_ENDPOINT="https://r2.example.org", R2_BUCKET="r2b", R2_ACCESS_KEY_ID="k", R2_SECRET_ACCESS_KEY="s")
+    env.update(**BATCH, R2_ENDPOINT="https://r2.example.org", R2_BUCKET="r2b", R2_ACCESS_KEY_ID="k", R2_SECRET_ACCESS_KEY="s")
     profile = hf_profile()
     if pointer:
         profile["options"]["static-names"]["current_key"] = pointer
@@ -1199,7 +1203,7 @@ def meta_ctx(tmp_path, env, **opts):
 def test_store_passes_through(tmp_path, env):
     """`store: meta`: every command that files rows per store gets `-s meta` (both index-sync halves, the per-scan and
     the files index-gc, the over-time groups); `index-sync.variants` reach both halves; `index-gc.dry` lists only."""
-    env.update(CLOUDFLARE_API_TOKEN="tok", CLOUDFLARE_ACCOUNT_ID="acct", R2_ENDPOINT="https://r2.example.org", R2_BUCKET="r2b",
+    env.update(**BATCH, CLOUDFLARE_API_TOKEN="tok", CLOUDFLARE_ACCOUNT_ID="acct", R2_ENDPOINT="https://r2.example.org", R2_BUCKET="r2b",
                R2_ACCESS_KEY_ID="k", R2_SECRET_ACCESS_KEY="s")
     c = meta_ctx(tmp_path, env, **{"index-sync": {"variants": ["path", "age-pyramid-1h"], "retain": 7}, "index-gc": {"dry": True, "grace": "36h"}})
     for f in (S.index_rows, S.index_sync, S.over_time, S.index_gc):
@@ -1810,7 +1814,7 @@ def test_cf_usage_snapshots_to_the_data_store_and_r2(tmp_path, env):
     c = ctx(tmp_path, env)
     S.cf_usage(c, None)
     assert c.sh_impl.calls == []  # no token: skipped
-    env.update(CF_ANALYTICS_TOKEN="t", R2_ENDPOINT="https://r2.example.org", R2_BUCKET="r2b", R2_ACCESS_KEY_ID="k", R2_SECRET_ACCESS_KEY="s")
+    env.update(**BATCH, CF_ANALYTICS_TOKEN="t", R2_ENDPOINT="https://r2.example.org", R2_BUCKET="r2b", R2_ACCESS_KEY_ID="k", R2_SECRET_ACCESS_KEY="s")
     c = ctx(tmp_path, env, options={"cf-usage": {"days": 14, "config": "/app/site/wrangler.toml"},
                                      "list": {"import": True}, "static-names": {"profile": "sn.json"}, "digest": {"template": "t", "config": "c.yml"}})
     S.cf_usage(c, None)
@@ -1841,7 +1845,7 @@ def test_soft_delete_reads_each_gcs_source_to_the_data_store_and_r2(tmp_path, en
     c = ctx(tmp_path, env, steps=["soft-delete"], sources=sources)
     S.soft_delete(c, None)
     assert c.sh_impl.calls == ["dt-cloud soft-delete -b g1 -b g2 -b s3://a -E https://s3.example.org -o <tmp>/data/snapshots/soft-delete"]
-    r2 = {**env, "R2_ENDPOINT": "https://r2.example.org", "R2_BUCKET": "r2b", "R2_ACCESS_KEY_ID": "k", "R2_SECRET_ACCESS_KEY": "s"}
+    r2 = {**env, **BATCH, "R2_ENDPOINT": "https://r2.example.org", "R2_BUCKET": "r2b", "R2_ACCESS_KEY_ID": "k", "R2_SECRET_ACCESS_KEY": "s"}
     c = ctx(tmp_path, r2, steps=["soft-delete"], sources=sources, options={
         "soft-delete": {"buckets": ["x", "y"]},
         "list": {"import": True}, "static-names": {"profile": "sn.json"}, "digest": {"template": "t", "config": "c.yml"},
@@ -1917,7 +1921,7 @@ def test_gcp_cost_snapshot_to_the_data_store_and_r2(tmp_path, env):
     assert c.sh_impl.calls == [
         "dt-cloud cost -n fix -w 30d -H 1y,2y -J app=disky,deployment=fix -o <tmp>/data/snapshots/cost/gcp",
     ]
-    env.update(R2_ENDPOINT="https://r2.example.org", R2_BUCKET="r2b", R2_ACCESS_KEY_ID="k", R2_SECRET_ACCESS_KEY="s")
+    env.update(**BATCH, R2_ENDPOINT="https://r2.example.org", R2_BUCKET="r2b", R2_ACCESS_KEY_ID="k", R2_SECRET_ACCESS_KEY="s")
     c = ctx(tmp_path, env, options={
         "gcp-cost": {"buckets": ["b1", "b2"], "bucket-labels": "deployment=fix", "job-labels": "app=disky,deployment=fix|old",
                      "locations": ["us-central1"], "project": "proj", "window": "14d", "horizons": "6m,1y", "prices": "/app/prices.yml"},
