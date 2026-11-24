@@ -845,6 +845,38 @@ def _publish(root: Path, dated_meta) -> None:
         (d / "meta.json").write_text(json.dumps(m))
 
 
+def test_scans_as_of():
+    scans = ["2026-08-31T1200", "2026-09-01T0000", "2026-09-02", "2026-09-02T1200", "2026-09-03T0000"]
+    assert (E.scans_as_of(scans, date(2026, 9, 2)), E.scans_as_of(scans, date(2026, 8, 1)), E.scans_as_of(scans, None)) == (
+        ["2026-08-31T1200", "2026-09-01T0000", "2026-09-02", "2026-09-02T1200"], [], scans,
+    )
+
+
+def test_load_month_as_of(tmp_path: Path):
+    """`digest -A`: the month as it stood at the end of a day, its later scans (this month's and the next's) unseen, so
+    the month isn't closed yet."""
+    root = tmp_path / "snapshots" / "cw"
+    _publish(root, LEAD + SEPT + [("2026-10-01T1200", _meta(716))])
+    month = D.load_month(str(root), SEP, P, as_of=date(2026, 9, 1))
+    assert ([r.scan for r in month.lead], [r.scan for r in month.rows], month.closed) == (
+        ["2026-08-31T0000", "2026-08-31T1200"], ["2026-09-01T0000", "2026-09-01T1200"], False,
+    )
+    # the template loads the same, through `digest.template(cfg, as_of)`
+    assert [r.scan for r in E.template(CFG, date(2026, 9, 1)).load(str(root), SEP).rows] == ["2026-09-01T0000", "2026-09-01T1200"]
+    # a month after the day has no scans then
+    assert D.load_month(str(root), OCT, P, as_of=date(2026, 9, 30)) is None
+    assert D.load_month(str(root), SEP, P).closed is True
+
+
+def test_as_of_previews_only(tmp_path: Path):
+    from click.testing import CliRunner
+
+    from dt_cloud import cli
+
+    r = CliRunner().invoke(cli.main, ["cw-digest", "-C", str(config_file(CFG, tmp_path / "digest.yml")), "-A", "2026-09-01", "-r", str(tmp_path / "snapshots" / "cw"), "-c", "C1", "-t", "xoxb"])
+    assert (r.exit_code, r.output.splitlines()[-1]) == (2, "Error: -A/--as-of previews (with -n or -W), never posts or edits (not with -o, -d or -y)")
+
+
 def test_load_month(tmp_path: Path):
     root = tmp_path / "snapshots" / "cw"
     _publish(root, [("2026-08-30T1200", _meta(690))] + LEAD + SEPT)

@@ -25,7 +25,7 @@ from pathlib import Path
 
 from .digest import (
     AVATAR_REV, GIB, LINK_ARROW, MINUS, TIB, DigestConfig, PlotUnavailable, Reply, Unit, _dlink, _pct, _pct_val, _tb, deg,
-    list_scans, load_window, read_metas, scan_slugs, scan_ts, site_render, window_scans,
+    list_scans, load_window, read_metas, scan_slugs, scan_ts, scans_as_of, site_render, window_scans,
     window_start,
 )
 
@@ -160,12 +160,13 @@ def reply(r: Scan, cfg: DigestConfig, platform: str = "slack") -> Reply:
     return Reply(sender, body, icon_url=avatar)
 
 
-def load_month(root: str, month: dt.date, prices: dict[str, float], triggers: Mapping[str, str] | None = None) -> Month | None:
+def load_month(root: str, month: dt.date, prices: dict[str, float], triggers: Mapping[str, str] | None = None,
+               as_of: dt.date | None = None) -> Month | None:
     """Per-day ``Scan`` rows for ``month`` (UTC), over each day's sender (`senders`, by ``triggers``), from ``root``'s
     snapshots (``gs://<bucket>/snapshots``: one ``<id>/meta.json`` per scan), each delta vs. the day before's sender,
     and the OP window's days before it (``pre``, `window_scans`); the earliest day's seeds the first delta and is
-    sliced off. None if the month has no scans."""
-    scans = list_scans(root)
+    sliced off; ``as_of``: only the scans through that day (`scans_as_of`). None if the month has no scans."""
+    scans = scans_as_of(list_scans(root), as_of)
     w = load_window(root, month, scans)
     if w is None:
         return None
@@ -185,13 +186,14 @@ class CostTemplate:
     edited_variants = ()
     track_scan = False
 
-    def __init__(self, cfg: DigestConfig):
+    def __init__(self, cfg: DigestConfig, as_of: dt.date | None = None):
         self.cfg = cfg
+        self.as_of = as_of
 
     def load(self, root: str, month: dt.date) -> Month | None:
         from . import digest_quota
 
-        return load_month(root, month, self.cfg.prices, digest_quota.site_triggers(self.cfg))
+        return load_month(root, month, self.cfg.prices, digest_quota.site_triggers(self.cfg), self.as_of)
 
     def n_scans(self, data: Month) -> int:
         return len(data.rows)

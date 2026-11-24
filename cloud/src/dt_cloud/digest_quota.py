@@ -53,7 +53,7 @@ from . import emoji_vocab as V
 from .digest import (
     AVATAR_REV, HOURS_PER_WEEK, LINK_ARROW, TIB, UNITS, DigestConfig, PlotUnavailable, Quota, Reply, Unit, Units,
     _dlink, _err, _md, _pct, _pct_val, _span, _tb, deg, list_scans, load_window, read_metas, site_render,
-    scan_slugs, scan_ts, window_scans, window_start,
+    scan_slugs, scan_ts, scans_as_of, window_scans, window_start,
 )
 
 VARIANTS = ("sender", "body")
@@ -640,11 +640,13 @@ def site_triggers(cfg: DigestConfig) -> dict[str, str]:
     return scan_triggers(s["run"] for s in res["runs"]) if res.get("configured") else {}
 
 
-def load_month(root: str, month: dt.date, primary: str, unit: int = TIB, triggers: Mapping[str, str] | None = None) -> Month | None:
+def load_month(root: str, month: dt.date, primary: str, unit: int = TIB, triggers: Mapping[str, str] | None = None,
+               as_of: dt.date | None = None) -> Month | None:
     """The month's scans from ``root`` (``gs://<bucket>/snapshots/cw``), sizes in ``unit`` bytes, each with its trigger
     (``triggers``), with ``lead`` = every scan of the last calendar day before it, ``pre`` = the OP window's scans
-    before that (`window_scans`), ``closed`` once a later month's scan exists. None if the month has no scans."""
-    scans = list_scans(root)
+    before that (`window_scans`), ``closed`` once a later month's scan exists; ``as_of``: only the scans through that
+    day (`scans_as_of`). None if the month has no scans."""
+    scans = scans_as_of(list_scans(root), as_of)
     w = load_window(root, month, scans)
     if w is None:
         return None
@@ -677,11 +679,12 @@ class QuotaTemplate:
     edited_variants = ("body",)
     track_scan = True
 
-    def __init__(self, cfg: DigestConfig):
+    def __init__(self, cfg: DigestConfig, as_of: dt.date | None = None):
         self.cfg = cfg
+        self.as_of = as_of
 
     def load(self, root: str, month: dt.date) -> Month | None:
-        return load_month(root, month, self.cfg.primary, self.cfg.unit.bytes, site_triggers(self.cfg))
+        return load_month(root, month, self.cfg.primary, self.cfg.unit.bytes, site_triggers(self.cfg), self.as_of)
 
     def n_scans(self, month: Month) -> int:
         return len(month.rows)
