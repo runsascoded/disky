@@ -3461,6 +3461,7 @@ def _icons_dir(rel: str = "job/icons", config: Path | None = None) -> Path:
 def _digest_options(template_default: str):
     """`digest`'s options; `cw-digest` is the same command defaulting to `-T quota`."""
     opts = [
+        option("-A", "--as-of", "as_of", help="With -n or -W: render as if the latest scan were the last one on or before this day (YYYY-MM-DD; the month: its month, unless -m), e.g. a new month's first OP before it's posted"),
         option("-b", "--bot-token", help="Discord bot token: opens the month's thread + resolves app emoji (default $DISCORD_BOT_TOKEN; with -P discord)"),
         option("-c", "--channel", help="Slack channel id (default $SLACK_CHANNEL)"),
         option("-C", "--config", "config_path", type=Path, help="YAML/JSON DigestConfig overlaid on the template's preset (title, site, root, state, plot host, buckets/quotas, prices…; see specs/done/digest-unification.md)"),
@@ -3498,6 +3499,7 @@ def _digest_options(template_default: str):
 
 
 def _digest(
+    as_of: str | None,
     bot_token: str | None,
     channel: str | None,
     config_path: Path | None,
@@ -3537,12 +3539,13 @@ def _digest(
     cfg = dg.with_settings(cfg, {"params": cfg.params if params_override is None else params_override,
                                  "quota_marks": marks_override or cfg.quota_marks})
     err(f"digest: quota_marks {cfg.quota_marks}, params {cfg.params!r}")
-    tpl = dg.template(cfg)
+    as_of_d = dt.date.fromisoformat(as_of) if as_of else None
+    tpl = dg.template(cfg, as_of_d)
     variant = variant or cfg.variant
     if variant not in tpl.variants:
         raise SystemExit(f"digest: the {cfg.template} template has no {variant!r} variant ({' | '.join(tpl.variants)})")
     this_month = dt.datetime.now(dt.timezone.utc).date().replace(day=1)
-    m = dt.datetime.strptime(month, "%Y-%m").date() if month else this_month
+    m = dt.datetime.strptime(month, "%Y-%m").date() if month else as_of_d.replace(day=1) if as_of_d else this_month
     root = root or cfg.resolve_root()
 
     since_d = dt.date.fromisoformat(since) if since else None
@@ -3550,6 +3553,8 @@ def _digest(
         raise UsageError("-s/--since applies to -R/--redo-replies")
     days = [d for spec in reply_days for d in dg.day_range(spec)] + (dg.day_range(reply_range) if reply_range else [])
     selected = op_only or bool(days)
+    if as_of_d and (selected or not (dry_run or preview_key)):
+        raise UsageError("-A/--as-of previews (with -n or -W), never posts or edits (not with -o, -d or -y)")
     if selected and (edit_replies or redo_replies or platform != "slack"):
         raise UsageError("-o/--op, -d/--reply and -y/--replies re-apply Slack messages on their own (not with -E, -R or -P discord)")
     if plan_path and not (selected and dry_run):

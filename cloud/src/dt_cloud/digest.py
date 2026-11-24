@@ -606,6 +606,8 @@ class Template(Protocol):
     variants: tuple[str, ...]
     edited_variants: tuple[str, ...]
     track_scan: bool
+    #: The last day whose scans `load` sees (`scans_as_of`); None: every scan.
+    as_of: dt.date | None
 
     def load(self, root: str, month: dt.date) -> Any | None: ...
     def n_scans(self, data: Any) -> int: ...
@@ -619,7 +621,8 @@ class Template(Protocol):
     def render_plot(self, data: Any, month: dt.date, out: Path, root: str | None = None) -> None: ...
 
 
-def template(cfg: DigestConfig) -> Template:
+def template(cfg: DigestConfig, as_of: dt.date | None = None) -> Template:
+    """``cfg``'s template; ``as_of``: it loads only the scans through that day (`scans_as_of`, a preview)."""
     if not cfg.site_url:
         from .deploy import site_url
 
@@ -627,11 +630,11 @@ def template(cfg: DigestConfig) -> Template:
     if cfg.template == "cost":
         from .digest_cost import CostTemplate
 
-        return CostTemplate(cfg)
+        return CostTemplate(cfg, as_of)
     if cfg.template == "quota":
         from .digest_quota import QuotaTemplate
 
-        return QuotaTemplate(cfg)
+        return QuotaTemplate(cfg, as_of)
     raise ValueError(f"unknown digest template {cfg.template!r} (cost | quota)")
 
 
@@ -653,6 +656,12 @@ def list_scans(root: str) -> list[str]:
         for p in blobfs.glob(blobfs.join(root.rstrip("/"), "*/meta.json"))
         if (m := META_PATH.search(p))
     )
+
+
+def scans_as_of(scans: list[str], as_of: dt.date | None) -> list[str]:
+    """``scans`` (sorted ids) as they stood at the end of ``as_of`` (UTC): those on or before it; all when None. A
+    digest rendered over them reads as it would have then (`digest -A`)."""
+    return scans if as_of is None else [s for s in scans if s[:10] <= as_of.isoformat()]
 
 
 def load_window(root: str, month: dt.date, scans: list[str] | None = None) -> tuple[list[tuple[str, dict]], list[tuple[str, dict]]] | None:
