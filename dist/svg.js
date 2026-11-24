@@ -1,4 +1,4 @@
-import { layoutCells, isFolded, flattenPlaced, resolveCellStyle, candidates, fitCandidate, inlineRoom, dustInk, dustRules, resolveRing } from './chunk-OHLUHXRA.js';
+import { layoutCells, isFolded, flattenPlaced, resolveCellStyle, candidates, fitCandidate, inlineRoom, cellDustCount, dustInk, dustRules, resolveRing } from './chunk-5XQ7KXFP.js';
 import { foldThin, squarify, foldSmall } from './chunk-TWK3KLKY.js';
 import { slotColor, DEFAULT_PALETTE, CONTAINER_BG } from './chunk-FUKGMHLM.js';
 import { parseColor } from './chunk-JJOWQXW4.js';
@@ -158,7 +158,7 @@ function treemapSvg(cells, o) {
       }
       if (right) notch = { w: right - bx + 2, h: bottom - by + 2 };
     }
-    const dustCount = folded ? cell.node.count : style.dustCount;
+    const dustCount = cellDustCount(folded ? cell.node.count : void 0, style.dustCount, cell.onlyChild);
     if (dustCount !== void 0 && dustTexture && Math.min(w, h) >= 6 && bw > 0 && bh > 0) {
       const ink = dustInk({ bg: resolveVars(style.bg ?? "", vars) }, alpha);
       const stroke = paint("stroke", ink, style.opacity ?? 1, vars);

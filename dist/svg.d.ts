@@ -1,4 +1,4 @@
-import { T as Tiling, C as CellText, S as StyleOpts, P as PlacedCell } from './cellStyle-BK7SUL-l.js';
+import { T as Tiling, C as CellText, S as StyleOpts, P as PlacedCell } from './cellStyle-By45w1uO.js';
 import './squarify.js';
 
 interface StaticLayoutOpts<T> {

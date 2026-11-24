@@ -1,7 +1,7 @@
 import * as react from 'react';
 import { ReactNode, CSSProperties, RefObject } from 'react';
-import { P as PlacedCell, C as CellText, a as CellStyle, T as Tiling, S as StyleOpts } from './cellStyle-BK7SUL-l.js';
-export { F as FoldedNode, L as LayoutConfig, N as NAME_MIN_PX, R as ResolvedStyle, c as candidates, b as cellStroke, f as fitCandidate, d as flattenPlaced, e as foldedOf, h as hitTest, i as inlineRoom, g as isFolded, l as layoutCells, r as resolveCellStyle } from './cellStyle-BK7SUL-l.js';
+import { P as PlacedCell, C as CellText, a as CellStyle, T as Tiling, S as StyleOpts } from './cellStyle-By45w1uO.js';
+export { F as FoldedNode, L as LayoutConfig, N as NAME_MIN_PX, R as ResolvedStyle, c as candidates, b as cellStroke, f as fitCandidate, d as flattenPlaced, e as foldedOf, h as hitTest, i as inlineRoom, g as isFolded, l as layoutCells, r as resolveCellStyle } from './cellStyle-By45w1uO.js';
 export { Rect, foldSmall, foldThin, squarify, squarifyRemainder } from './squarify.js';
 export { divergingColor, divergingInk } from './divergingColor.js';
 export { parseColor } from './parseColor.js';
@@ -592,6 +592,11 @@ type RGBA = [number, number, number, number];
  * geometrically, that sum to `len`. Returns `n` interior positions measured as
  * distance from the dense end. */
 declare function dustOffsets(len: number, n: number, ratio: number): number[];
+/** The hatch's count for a cell, or undefined when it draws none: a fold's own `foldedCount`, else the consumer's
+ *  `dustCount`. An aggregate is dust only beside real tiles: as all its parent shows (`onlyChild`: the parent's only
+ *  drawn child, or the end of a collapsed chain), it is the parent's whole content, not a remainder, and draws
+ *  plain (its fill, no hatch). One rule for every renderer (DOM, canvas, SVG). */
+declare function cellDustCount(foldedCount: number | undefined, dustCount: number | undefined, onlyChild: boolean): number | undefined;
 /** Target rule count on an axis of length `len`, given how many cells folded
  * in — grows with `log2(count)`, clamped so a rule is never under ~4px apart. */
 declare function dustLineCount(len: number, count: number, base: number): number;
@@ -1222,4 +1227,4 @@ declare const statusColors: {
     };
 };
 
-export { type AgeFadeOpts, BorderStepToggle, CONTAINER_BG, type CanvasHit, type CellCtx, type CellDims, CellStyle, CellText, type ComposeOptions, DEFAULT_PALETTE, type DiffAreaMode, type DiffFlatRow, type DiffIndexInfo, type DiffInput, type DiffKind, type DiffMetric, type DiffNode, type DiffNodeStatus, type DiffRecRow, type DiffRowValues, type DiffStatus, type DiffSubtree, DiffTable, type DiffTableProps, type DiffTableRow, DiffTreemap, type DiffTreemapProps, type DimOpts, DustHatch, type DustHatchProps, type ExportContext, type ExportKind, type ExportOptions, GREW_GREEN, HATCH_DARK, HATCH_LIGHT, type HoverPin, type HoverPinOpts, MIN_CELL_PX, NEUTRAL, type OutlineGroups, OutlineOverlay, type OutlineOverlayProps, type OutlinePath, type OutlineSeg, PlacedCell, type QueryOpts, SHRANK_RED, StyleOpts, TOUCHED_HATCH, Tiling, type TilingCtx, TitleSpaceToggle, Treemap, TreemapCanvas, type TreemapCanvasProps, type TreemapProps, UNCHANGED_GREY, UNCHANGED_SWATCH, age01, ageDomain, ageFade, buildDiffTree, canvasToPngBlob, churn, colorResolver, composeExport, contrastEdge, copyPng, cssColor, defaultExportFilename, deltaColor, deltaTextColor, dimUnmatched, downloadPng, drawDust, dustGround, dustInk, dustLineCount, dustLines, dustOffsets, fetchable, filterNodes, groupOutlines, groupRects, hatchInk, mapMinFrac, parseQuery, resolvedDustInk, slotColor, statusColors, unionOutline, useHoverPin };
+export { type AgeFadeOpts, BorderStepToggle, CONTAINER_BG, type CanvasHit, type CellCtx, type CellDims, CellStyle, CellText, type ComposeOptions, DEFAULT_PALETTE, type DiffAreaMode, type DiffFlatRow, type DiffIndexInfo, type DiffInput, type DiffKind, type DiffMetric, type DiffNode, type DiffNodeStatus, type DiffRecRow, type DiffRowValues, type DiffStatus, type DiffSubtree, DiffTable, type DiffTableProps, type DiffTableRow, DiffTreemap, type DiffTreemapProps, type DimOpts, DustHatch, type DustHatchProps, type ExportContext, type ExportKind, type ExportOptions, GREW_GREEN, HATCH_DARK, HATCH_LIGHT, type HoverPin, type HoverPinOpts, MIN_CELL_PX, NEUTRAL, type OutlineGroups, OutlineOverlay, type OutlineOverlayProps, type OutlinePath, type OutlineSeg, PlacedCell, type QueryOpts, SHRANK_RED, StyleOpts, TOUCHED_HATCH, Tiling, type TilingCtx, TitleSpaceToggle, Treemap, TreemapCanvas, type TreemapCanvasProps, type TreemapProps, UNCHANGED_GREY, UNCHANGED_SWATCH, age01, ageDomain, ageFade, buildDiffTree, canvasToPngBlob, cellDustCount, churn, colorResolver, composeExport, contrastEdge, copyPng, cssColor, defaultExportFilename, deltaColor, deltaTextColor, dimUnmatched, downloadPng, drawDust, dustGround, dustInk, dustLineCount, dustLines, dustOffsets, fetchable, filterNodes, groupOutlines, groupRects, hatchInk, mapMinFrac, parseQuery, resolvedDustInk, slotColor, statusColors, unionOutline, useHoverPin };

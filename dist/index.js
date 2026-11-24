@@ -1,5 +1,5 @@
-import { dustRules, dustInk, flattenPlaced, hitTest, fitCandidate, candidates, inlineRoom, isFolded, layoutCells, cellStroke, layoutChildren, categoricalStyle, resolveRing, resolveCellStyle } from './chunk-OHLUHXRA.js';
-export { HATCH_DARK, HATCH_LIGHT, NAME_MIN_PX, candidates, cellStroke, dustGround, dustInk, dustLineCount, dustLines, dustOffsets, fitCandidate, flattenPlaced, foldedOf, hatchInk, hitTest, inlineRoom, isFolded, layoutCells, resolveCellStyle } from './chunk-OHLUHXRA.js';
+import { dustRules, dustInk, flattenPlaced, hitTest, fitCandidate, candidates, inlineRoom, isFolded, layoutCells, cellStroke, layoutChildren, categoricalStyle, resolveRing, cellDustCount, resolveCellStyle } from './chunk-5XQ7KXFP.js';
+export { HATCH_DARK, HATCH_LIGHT, NAME_MIN_PX, candidates, cellDustCount, cellStroke, dustGround, dustInk, dustLineCount, dustLines, dustOffsets, fitCandidate, flattenPlaced, foldedOf, hatchInk, hitTest, inlineRoom, isFolded, layoutCells, resolveCellStyle } from './chunk-5XQ7KXFP.js';
 import { foldSmall, squarifyRemainder, squarify, foldThin } from './chunk-TWK3KLKY.js';
 export { foldSmall, foldThin, squarify, squarifyRemainder } from './chunk-TWK3KLKY.js';
 import { useHoverPin } from './chunk-HMG5G7YN.js';
@@ -538,7 +538,7 @@ function paintCell(ctx, cell, o) {
       }
     }
   }
-  const dustCount = folded ? cell.node.count : style.dustCount;
+  const dustCount = cellDustCount(folded ? cell.node.count : void 0, style.dustCount, cell.onlyChild);
   let paintDust = null;
   if (dustCount !== void 0 && dustTexture && Math.min(w, h) >= 6 && bw > 0 && bh > 0) {
     const ground = { bg: resolveVar(style.bg ?? ""), bands: style.bands?.map((b) => ({ ...b, color: resolveVar(b.color) })), segments: segs && !hasKids && !dust && Math.min(w, h) >= 18 ? segs.map((s) => ({ ...s, color: resolveVar(s.color) })) : void 0 };
@@ -1274,7 +1274,7 @@ function Treemap({
       go(path2);
     } else activatePin(node2, path2, key, x, y);
   };
-  const cell = (kid0, kidPath0, r, depth, mode, parentBw) => {
+  const cell = (kid0, kidPath0, r, depth, mode, parentBw, alone) => {
     const folded = isFolded(kid0);
     const chained = collapseChains && !folded ? (() => {
       let cur = kid0;
@@ -1348,6 +1348,7 @@ function Treemap({
     const paintInset = Math.max(shared ? edge : 0, ring?.inset ? ring.width : 0);
     const cellKey = folded ? `__folded_${depth}_${r.x}_${r.y}` : idFor(kid, kidPath);
     const foldedNode = folded ? kid : null;
+    const dustCount = cellDustCount(foldedNode?.count, style.dustCount, alone || chainLabels !== null);
     const dustHits = foldedNode && dustTexture && foldedNode.children.length > 1 && Math.min(r.w, r.h) >= 10 && foldedNode.children.length <= 4e3 ? squarify(foldedNode.children, 0, 0, boxW, boxH, getSize) : null;
     const dustHitAt = (e) => {
       if (!dustHits) return null;
@@ -1492,7 +1493,7 @@ function Treemap({
               ]
             }
           ),
-          (foldedNode || style.dustCount !== void 0) && dustTexture && Math.min(r.w, r.h) >= 6 && /* @__PURE__ */ jsx(
+          dustCount !== void 0 && dustTexture && Math.min(r.w, r.h) >= 6 && /* @__PURE__ */ jsx(
             "div",
             {
               className: "dt-treemap-dust",
@@ -1502,7 +1503,7 @@ function Treemap({
                 {
                   w: Math.max(0, boxW - 2 * paintInset),
                   h: Math.max(0, boxH - 2 * paintInset),
-                  count: foldedNode?.count ?? style.dustCount,
+                  count: dustCount,
                   ground: style.segments && style.segments.length > 1 && kids.length === 0 && !dust && Math.min(r.w, r.h) >= 18 ? style : { ...style, segments: void 0 },
                   alpha: fadeAt(depth) * (style.opacity ?? 1),
                   frame: !!foldedNode && Math.min(r.w, r.h) >= 8,
@@ -1578,7 +1579,7 @@ function Treemap({
                 position: "absolute",
                 inset: kidsMode === "shared" ? `${showLbl ? 20 : edge}px ${edge}px ${edge}px ${edge}px` : `${showLbl ? 20 : 3}px 3px 3px 3px`
               },
-              children: kids.filter((s) => s.w >= 3 && s.h >= 3).map((s) => cell(s.it, isFolded(s.it) ? kidPath : [...kidPath, s.it], s, depth + 1, kidsMode, shared ? bw : Infinity))
+              children: kids.filter((s) => s.w >= 3 && s.h >= 3).map((s, _i, drawn) => cell(s.it, isFolded(s.it) ? kidPath : [...kidPath, s.it], s, depth + 1, kidsMode, shared ? bw : Infinity, drawn.length === 1))
             }
           )
         ]
@@ -1896,7 +1897,7 @@ function Treemap({
                     }, 180);
                   }
                 }
-              ) : rects.filter((r) => r.w >= 3 && r.h >= 3).map((r) => cell(r.it, isFolded(r.it) ? path : [...path, r.it], r, 0, rootMode, Infinity)),
+              ) : rects.filter((r) => r.w >= 3 && r.h >= 3).map((r, _i, drawn) => cell(r.it, isFolded(r.it) ? path : [...path, r.it], r, 0, rootMode, Infinity, drawn.length === 1)),
               outlineGroups && size.w > 0 && size.h > 0 && /* @__PURE__ */ jsx(OutlineOverlay, { cells: placedCells, width: size.w, height: size.h, groups: outlineGroups }),
               branchOutline && /* @__PURE__ */ jsx("svg", { className: "dt-treemap-branch-frames", width: size.w, height: size.h, "aria-hidden": true, style: { position: "absolute", inset: 0, pointerEvents: "none", zIndex: 1 }, children: flattenPlaced(placedCells).filter((c) => c.hasKids).map((c, i) => /* @__PURE__ */ jsx("rect", { x: c.x + 0.5, y: c.y + 0.5, width: Math.max(0, c.boxW - 1), height: Math.max(0, c.boxH - 1), fill: "none", stroke: branchOutline, strokeWidth: 1 }, i)) }),
               failed?.key === viewKey ? /* @__PURE__ */ jsx("div", { className: "dt-treemap-status error", style: STATUS_STYLE, children: renderLoadError ? renderLoadError(node, path, failed.error, retry) : /* @__PURE__ */ jsxs(Fragment, { children: [

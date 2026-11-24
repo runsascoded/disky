@@ -23,6 +23,9 @@ function dustOffsets(len, n, ratio) {
   }
   return out;
 }
+function cellDustCount(foldedCount, dustCount, onlyChild) {
+  return onlyChild ? void 0 : foldedCount ?? dustCount;
+}
 function dustLineCount(len, count, base) {
   const byCount = Math.round(base * Math.log2(count + 1));
   return Math.max(2, Math.min(byCount, Math.floor(len / 4)));
@@ -121,7 +124,7 @@ function layoutChildren(node, path, chainLabels, raw, dims, cfg) {
   }
   return { rects, mode, titleWidth };
 }
-function place(node0, path0, r, depth, mode, cfg, parentBw) {
+function place(node0, path0, r, depth, mode, cfg, parentBw, alone) {
   const { getLabel, childrenOf, showLabels, collapseChains } = cfg;
   const folded = isFolded(node0);
   let node = node0;
@@ -162,7 +165,8 @@ function place(node0, path0, r, depth, mode, cfg, parentBw) {
   );
   const innerLeft = kidsMode === "shared" ? edge : 3;
   const innerTop = kidsMode === "shared" ? showLbl ? 20 : edge : showLbl ? 20 : 3;
-  const children = kids.filter((s) => s.w >= 3 && s.h >= 3).map(
+  const drawn = kids.filter((s) => s.w >= 3 && s.h >= 3);
+  const children = drawn.map(
     (s) => place(
       s.it,
       isFolded(s.it) ? path : [...path, s.it],
@@ -170,7 +174,8 @@ function place(node0, path0, r, depth, mode, cfg, parentBw) {
       depth + 1,
       kidsMode,
       cfg,
-      shared ? bw : Infinity
+      shared ? bw : Infinity,
+      drawn.length === 1
     )
   );
   return {
@@ -186,6 +191,7 @@ function place(node0, path0, r, depth, mode, cfg, parentBw) {
     mode,
     edge,
     dust,
+    onlyChild: alone || chainLabels !== null,
     boxW,
     boxH,
     showLbl,
@@ -195,7 +201,8 @@ function place(node0, path0, r, depth, mode, cfg, parentBw) {
   };
 }
 function layoutCells(topRects, basePath, rootMode, cfg) {
-  return topRects.filter((r) => r.w >= 3 && r.h >= 3).map(
+  const drawn = topRects.filter((r) => r.w >= 3 && r.h >= 3);
+  return drawn.map(
     (r) => place(
       r.it,
       isFolded(r.it) ? basePath : [...basePath, r.it],
@@ -203,7 +210,8 @@ function layoutCells(topRects, basePath, rootMode, cfg) {
       0,
       rootMode,
       cfg,
-      Infinity
+      Infinity,
+      drawn.length === 1
     )
   );
 }
@@ -270,6 +278,6 @@ function foldedOf(cell) {
   return cell.folded ? cell.node : null;
 }
 
-export { HATCH_DARK, HATCH_LIGHT, NAME_MIN_PX, candidates, categoricalStyle, cellStroke, dustGround, dustInk, dustLineCount, dustLines, dustOffsets, dustRules, fitCandidate, flattenPlaced, foldedOf, hatchInk, hitTest, inlineRoom, isFolded, layoutCells, layoutChildren, resolveCellStyle, resolveRing };
-//# sourceMappingURL=chunk-OHLUHXRA.js.map
-//# sourceMappingURL=chunk-OHLUHXRA.js.map
+export { HATCH_DARK, HATCH_LIGHT, NAME_MIN_PX, candidates, categoricalStyle, cellDustCount, cellStroke, dustGround, dustInk, dustLineCount, dustLines, dustOffsets, dustRules, fitCandidate, flattenPlaced, foldedOf, hatchInk, hitTest, inlineRoom, isFolded, layoutCells, layoutChildren, resolveCellStyle, resolveRing };
+//# sourceMappingURL=chunk-5XQ7KXFP.js.map
+//# sourceMappingURL=chunk-5XQ7KXFP.js.map

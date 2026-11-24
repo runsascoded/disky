@@ -24,7 +24,8 @@ interface CellStyle {
     ink?: string;
     /** repeating-gradient overlay (e.g. the class-lens hatch marin uses) */
     hatch?: string;
-    /** Density hint for an aggregated cell supplied by the consumer. Draws the dust grid in both renderers. */
+    /** Density hint for an aggregated cell supplied by the consumer. Draws the dust grid in every renderer, beside
+     *  real sibling tiles only: an aggregate that is all its parent shows draws plain (`cellDustCount`). */
     dustCount?: number;
     /** Horizontal fill bands, in top-to-bottom order. Shared by DOM, canvas and image export. */
     bands?: {
@@ -121,6 +122,9 @@ interface PlacedCell<T> {
     edge: number;
     /** Rendered small enough (< 14px short side) to be a "dust" cell. */
     dust: boolean;
+    /** All its parent shows: the parent's only drawn child, or a collapsed chain (whose deepest node is an only
+     *  child). An aggregate here is the parent's whole content, so it draws no dust hatch (`cellDustCount`). */
+    onlyChild: boolean;
     /** Cell box after the gaps gutter / shared inset — the region children fill. */
     boxW: number;
     boxH: number;
