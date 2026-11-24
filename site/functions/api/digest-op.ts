@@ -2,7 +2,7 @@
  * digest config's display fields (`digest.cfg_json`) with the params it posts under, and gets back the OP's text and
  * its plot's `/api/digest-image` request, from the same renderer `/admin/slack` previews with (`src/digest`).
  *
- *   POST /api/digest-op {month: 'YYYY-MM', rows, cfg, params?: '<codec>', plot_url?, prev_url?}
+ *   POST /api/digest-op {month: 'YYYY-MM', rows, cfg, params?: '<codec>', plot_url?, prev_url?, next_url?}
  *     → {text, image}
  *
  * `params` is `src/digest/codec`'s string (`''` or absent: the defaults), read strictly: a field the page's lenient
@@ -21,20 +21,20 @@ const optStr = (v: unknown): v is string | null | undefined => v === undefined |
 /** The request, or why it's refused. */
 export function parseOpRequest(b: unknown) {
   if (!isObj(b)) return 'body: a JSON object'
-  const { month, rows, cfg, params, plot_url, prev_url } = canonicalTemplates(b)
+  const { month, rows, cfg, params, plot_url, prev_url, next_url } = canonicalTemplates(b)
   if (typeof month !== 'string' || !MONTH_RE.test(month)) return 'month: YYYY-MM'
   if (!isObj(cfg) || !(TEMPLATES as readonly unknown[]).includes(cfg.template)) return `cfg.template: ${TEMPLATES.map(t => `'${t}'`).join(' | ')}`
   if (!isObj(rows) || rows.template !== cfg.template || !Array.isArray(rows.rows) || !rows.rows.length) {
     return `rows: the ${cfg.template} template's rows, at least one scan`
   }
-  if (!optStr(params) || !optStr(plot_url) || !optStr(prev_url)) return 'params, plot_url, prev_url: strings'
+  if (!optStr(params) || !optStr(plot_url) || !optStr(prev_url) || !optStr(next_url)) return 'params, plot_url, prev_url, next_url: strings'
   let p
   try {
     p = parseParams(params ?? '')
   } catch (e) {
     return `params: ${(e as Error).message}`
   }
-  return { month, rows: rows as unknown as DigestRows, cfg: cfg as unknown as DigestCfg, params: p, links: { plotUrl: plot_url ?? null, prevUrl: prev_url ?? null } }
+  return { month, rows: rows as unknown as DigestRows, cfg: cfg as unknown as DigestCfg, params: p, links: { plotUrl: plot_url ?? null, prevUrl: prev_url ?? null, nextUrl: next_url ?? null } }
 }
 
 export const onRequestPost = async (ctx: Ctx): Promise<Response> => {

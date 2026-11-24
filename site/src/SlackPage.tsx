@@ -375,10 +375,10 @@ function Reapply({ b, form }: { b: PreviewBundle; form: { params: string; quota_
 }
 
 function Bundle({ b, cands, setCands }: { b: PreviewBundle; cands: string[]; setCands: (c: string[]) => void }) {
-  const links = { plotUrl: PLOT, prevUrl: b.prev_url }
+  const links = { plotUrl: PLOT, prevUrl: b.prev_url, nextUrl: b.next_url ?? null }
   // the bundle's params (absent or '' = the defaults) are what the OP was rendered under
   const posted = b.params ?? ''
-  const rerender = opText(b.rows, b.month, b.cfg, { plotUrl: b.plot_url === null ? null : PLOT, prevUrl: b.prev_url }, decodeParams(posted))
+  const rerender = opText(b.rows, b.month, b.cfg, { ...links, plotUrl: b.plot_url === null ? null : PLOT }, decodeParams(posted))
   const matches = rerender.split('\n').map(norm).join('\n') === b.op.split('\n').map(norm).join('\n')
   const live = b.op.split('\n').map(norm)
   const [form, setForm] = useState({ params: posted, quota_marks: 'runway' })

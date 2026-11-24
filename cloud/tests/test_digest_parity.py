@@ -128,7 +128,7 @@ def test_preview_bundle_is_the_parity_shape():
     data = DC.Month(lead=[], rows=rows)
     b = E.preview_bundle(tpl, data, date(2026, 9, 1), op="op", plot_url=PLOT, prev_url=None, channel="C1", variant="sender",
                          op_ts="m1", permalink="https://slack.example.org/p1")
-    assert sorted(b) == ["cfg", "channel", "image", "month", "op", "op_ts", "params", "permalink", "plot_url", "posted_at",
+    assert sorted(b) == ["cfg", "channel", "image", "month", "next_url", "op", "op_ts", "params", "permalink", "plot_url", "posted_at",
                          "prev_url", "replies", "reply", "rows", "variant", "version"]
     assert (b["version"], b["month"], b["rows"]["template"], b["image"]["month"], b["params"]) == (1, "2026-09", "quota", "2026-09", "")
 
@@ -222,8 +222,8 @@ def test_site_renderer_posts_the_rows_and_uses_the_answer(name: str, tmp_path: P
     assert (tpl.op_body(data, month, plot_url, prev_url), tpl.image_request(data, month)) == (fx["op"], fx["image"])
     req = {"month": fx["month"], "rows": fx["rows"], "cfg": fx["cfg"], "params": "qc"}
     assert [(u, t, p, json.loads(json.dumps(b))) for u, t, p, b in calls] == [
-        (cfg.site_url, "tok", "/api/digest-op", {**req, "plot_url": plot_url, "prev_url": prev_url}),
-        (cfg.site_url, "tok", "/api/digest-op", {**req, "plot_url": None, "prev_url": None}),
+        (cfg.site_url, "tok", "/api/digest-op", {**req, "plot_url": plot_url, "prev_url": prev_url, "next_url": None}),
+        (cfg.site_url, "tok", "/api/digest-op", {**req, "plot_url": None, "prev_url": None, "next_url": None}),
     ]
     monkeypatch.delenv("SITE_TOKEN")
     with pytest.raises(SystemExit) as e:

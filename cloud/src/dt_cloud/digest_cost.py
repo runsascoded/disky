@@ -196,8 +196,8 @@ class CostTemplate:
     def n_scans(self, data: Month) -> int:
         return len(data.rows)
 
-    def op_body(self, data: Month, month: dt.date, plot_url: str | None, prev_url: str | None = None) -> str:
-        return site_render(self.cfg, self.rows_json(data), month, plot_url, prev_url)["text"]
+    def op_body(self, data: Month, month: dt.date, plot_url: str | None, prev_url: str | None = None, next_url: str | None = None) -> str:
+        return site_render(self.cfg, self.rows_json(data), month, plot_url, prev_url, next_url)["text"]
 
     def image_request(self, data: Month, month: dt.date) -> dict:
         return site_render(self.cfg, self.rows_json(data), month)["image"]

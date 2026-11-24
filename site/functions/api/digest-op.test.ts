@@ -68,6 +68,16 @@ describe('/api/digest-op', () => {
     expect(lines[1]).toBe('*Quotas:* :red_circle: hot 99.5% of 100Ti (0.5 Ti free) · :large_orange_circle: main 86.8% of 1P (120.0 Ti free)')
   })
 
+  it("links the next month's thread beside the previous one's, or alone", async () => {
+    const both = await fixture('gcs-aug.json')
+    const [s1, b1] = await post({ ...request(both), next_url: '<next-thread>' })
+    expect([s1, (b1 as { text: string }).text]).toEqual([200, both.op.replace('[← July](<prev-thread>)', '[← July](<prev-thread>) · [September →](<next-thread>)')])
+    expect(both.op.split('\n').slice(-3)).toEqual(['[← July](<prev-thread>)', '', '![GCS usage — August 2026](<plot-url>)'])
+    const alone = await fixture('cw-two-weeks.json')
+    const [s2, b2] = await post({ ...request(alone), next_url: '<next-thread>' })
+    expect([s2, (b2 as { text: string }).text]).toEqual([200, `${alone.op}\n\n[October →](<next-thread>)`])
+  })
+
   it('refuses a malformed request', async () => {
     const f = await fixture('cw-sep.json')
     const cases: [unknown, string][] = [
@@ -77,7 +87,8 @@ describe('/api/digest-op', () => {
       [{ ...request(f), rows: { ...f.rows, template: 'cost' } }, "rows: the quota template's rows, at least one scan"],
       [{ ...request(f), rows: { ...f.rows, template: 'gcs' } }, "rows: the quota template's rows, at least one scan"],
       [{ ...request(f), rows: { ...f.rows, rows: [] } }, "rows: the quota template's rows, at least one scan"],
-      [{ ...request(f), plot_url: 3 }, 'params, plot_url, prev_url: strings'],
+      [{ ...request(f), plot_url: 3 }, 'params, plot_url, prev_url, next_url: strings'],
+      [{ ...request(f), next_url: 3 }, 'params, plot_url, prev_url, next_url: strings'],
     ]
     for (const [body, error] of cases) expect(await post(body)).toEqual([400, { error }])
     expect(await post(request(f, 'w30,zz'))).toEqual([400, { error: 'params: digest params: unreadable field "zz" in "w30,zz"' }])
