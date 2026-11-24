@@ -1,6 +1,7 @@
 /** The digest renderer's shared pieces: config and params, arrow degrees, the `?d=` link tokens and the OP window
  * (`cloud/src/dt_cloud/digest.py`'s, ported byte for byte: `./parity.test.ts`). Pure; DOM-free. */
 import type { ReplyMarks } from './quotaReply'
+import { scanTime } from '../scanSlug'
 import type { ArrowMark } from './pools'
 import type { TemplateName } from './templates'
 import { addDays, dayOf, fixed, grouped, md, MONTHS, pyRound } from './pyfmt'
@@ -95,6 +96,13 @@ export function span(a: number, b: number): string {
   const h = pyRound((b - a) / 3600_000)
   const [days, hours] = [Math.floor(h / 24), h % 24]
   return (days ? `${days}d` : '') + (hours ? `${hours}h` : '') || '0h'
+}
+
+/** A diff link: the map at `scan` (its `?d=` slug) looking back to `since` (epoch ms; null: no look-back), under
+ *  `bucket`'s path (`''`: the root). */
+export function diffUrl(scan: string, slug: string, since: number | null, site: string, bucket = ''): string {
+  const s = since !== null ? `-${span(since, scanTime(scan))}` : ''
+  return `${site}/${bucket}?d=${slug}${s}#over-time`
 }
 
 /** The window's first day (epoch ms): the longer of `days` days to `today`, inclusive, and the month to date

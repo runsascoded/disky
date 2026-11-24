@@ -3,8 +3,8 @@ import { compactQuietLines } from './compact'
  * `./replyParity.test.ts`), so `/admin/slack` can show a candidate's replies. The job still renders what it posts in
  * Python. `ArrowMark`s exist only here: a preview of marks with no emoji uploaded. Pure; DOM-free. */
 import { scanTime } from '../scanSlug'
-import { type DigestCfg, deg, pct, tb as signed, type Quota } from './common'
-import { bucketLink, type QuotaRows, type QuotaScan, dextra, diffUrl, dlink, scoped } from './quota'
+import { type DigestCfg, deg, diffUrl, pct, tb as signed, type Quota } from './common'
+import { bucketLink, type QuotaRows, type QuotaScan, dextra, dlink, scoped } from './quota'
 import { growth, hueStep, mark, poolMark, type PoolMark, QUIET_PCT, runway, type Runway, RUNWAY_WINDOWS_D, runwayText, weeklyDeg } from './pools'
 import { dayOf, fixed, grouped, hhmm, md, pyRound } from './pyfmt'
 import { code } from '@disk-tree/pages-kit/emoji'
