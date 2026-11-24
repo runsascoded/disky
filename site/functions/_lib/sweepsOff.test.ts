@@ -115,6 +115,7 @@ const LIST = 'https://batch.googleapis.com/v1/projects/p/locations/r/jobs?pageSi
 const CW_DRY = 'cw-sweep-dry-20261106-000000z'
 const GCS_DRY = 'gcs-sweep-dry-20261106-000000z'
 const CW_SUMMARY = `https://storage.googleapis.com/storage/v1/b/data/o/${encodeURIComponent(`sweep/cw/runs/${CW_DRY}/would-delete-summary.json`)}?alt=media`
+const CW_PROGRESS = `https://storage.googleapis.com/storage/v1/b/data/o/${encodeURIComponent(`sweep/cw/runs/${CW_DRY}/progress/b.json`)}?alt=media`
 
 /** A dry run still open in D1 whose Batch job has failed: what a jobs read records (closes it) and announces. */
 function openRun(runId: string, logDir: string): void {
@@ -161,7 +162,7 @@ describe('the job lists', () => {
     ])
   })
   it('unset: the run is closed in D1 and announced', async () => {
-    expect(await planSweep()).toEqual([200, [[CW_DRY, 'FAILED']], [LIST, CW_SUMMARY], [[1, '']], [[{ run_id: CW_DRY, ok: false }]]])
+    expect(await planSweep()).toEqual([200, [[CW_DRY, 'FAILED']], [LIST, CW_PROGRESS, CW_SUMMARY], [[1, '']], [[{ run_id: CW_DRY, ok: false }]]])
   })
   it('unset (gcs): the run is closed in D1 and announced', async () => {
     expect(await sweep()).toEqual([200, [[GCS_DRY, 'FAILED']], [LIST], [[1, '']], [[{ run_id: GCS_DRY, ok: false }]]])
