@@ -15,6 +15,13 @@ on:
         required: true
         type: string
 
+# A land pushes one tested sha to `rw/land-*`, then `cloud` and `dev`: three runs of it, and a queue of lands stacks
+# them. On `cloud` and `dev` only the newest sha matters (each was gated on its `rw/land-*` run, and `deploy-r2.yml`
+# deploys the newest green one), so a newer push cancels the run in progress there. Other branches keep every run.
+concurrency:
+  group: ci-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: ${{ github.event_name == 'push' && (github.ref == 'refs/heads/cloud' || github.ref == 'refs/heads/dev') }}
+
 jobs:
   r2-collector:
     if: github.event_name != 'workflow_dispatch'
