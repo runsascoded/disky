@@ -317,7 +317,7 @@ async function groupSubtree(ctx0: SubtreeCtx, name: string): Promise<Response> {
     const atten = Number(sp.get('atten')) || ATTEN_DEFAULT
     const depth = Number(sp.get('depth')) || undefined
     const q = (sp.get('q') ?? '').trim() ? sp.get('q')! : ''
-    const scoped = !!(q || sp.get('lens') || sp.get('o') || sp.get('cl'))
+    const scoped = !!(q || sp.get('lens') || parseOwner(sp.get('o')) || parseClasses(sp.get('cl')))
     const ask = (bucket: string, set: Record<string, string>, drop: string[], threshold?: number) =>
       subtree({ ...ctx0, request: memberRequestOf(ctx0.request, bucket, { date, ...set }, ['d', ...drop]) }, true, { id, ...(threshold === undefined ? {} : { threshold }) })
     /** Each member's answer (null: the scan doesn't hold it); a failure is the group's. */
