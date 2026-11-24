@@ -100,10 +100,10 @@ export function span(a: number, b: number): string {
 }
 
 /** A diff link: the map at `scan` (its `?d=` slug) looking back to `since` (epoch ms; null: no look-back), under
- *  `bucket`'s path (`''`: the root). */
-export function diffUrl(scan: string, slug: string, since: number | null, site: string, bucket = ''): string {
+ *  `bucket`'s path (`''`: the root), showing only the named bucket group `g` (`?g=`) when given. */
+export function diffUrl(scan: string, slug: string, since: number | null, site: string, bucket = '', g?: string): string {
   const s = since !== null ? `-${span(since, scanTime(scan))}` : ''
-  return `${site}/${bucket}?d=${slug}${s}#over-time`
+  return `${site}/${bucket}?d=${slug}${s}${g ? `&g=${encodeURIComponent(g)}` : ''}#over-time`
 }
 
 /** The window's first day (epoch ms): the longer of `days` days to `today`, inclusive, and the month to date
