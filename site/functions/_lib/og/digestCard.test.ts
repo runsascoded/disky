@@ -1,7 +1,7 @@
 /** The digest image: its chart and map texts, and the PNG it rasterizes to
  * (written to `tmp/digest-sample.png` for a look). */
 import { beforeAll, describe, expect, it } from 'vitest'
-import { digestSvg, fmtIn, fmtT, niceTicks, poolsSvg, spread, TIER_COLORS, tiersSvg, yRange, type DigestCardInput, type PoolsCardInput, type TiersCardInput } from './digestCard'
+import { digestSvg, fmtIn, fmtT, mapSvg, niceTicks, poolsSvg, spread, TIER_COLORS, tiersSvg, yRange, type DigestCardInput, type PoolsCardInput, type TiersCardInput } from './digestCard'
 import { ensureWasm, svgToPng } from './render'
 import { diffRoot } from '../../../src/diffStyle'
 import type { DiffData } from '../../../src/diffModel'
@@ -94,6 +94,25 @@ describe('digestSvg', () => {
       'What changed in bucket — 9/30 → 10/14', 'grew +60.0 TiB · shrank −30.0 TiB · area = |Δ|',
       'checkpoints/run-a', '+60.0 TiB',
       'scratch', '−30.0 TiB',
+    ])
+  })
+  it("hatches a folder's `(other)` only beside a real sibling: one that is all its folder holds draws plain", () => {
+    // `a`'s only child is its `(other)` (collapsed into one `a/(other)` cell); `b` shows `c` beside its `(other)`.
+    const row = (path: string, depth: number, before: number, after: number, ob: number, oa: number) =>
+      ({ path, depth, kind: 'dir' as const, status: 'changed' as const, bytes_before: before * T, bytes_after: after * T, objects_before: ob, objects_after: oa })
+    const rest: DiffData = {
+      ...data, bytes_before: 300 * T, bytes_after: 290 * T, objects_before: 30, objects_after: 30,
+      rows: [
+        row('a', 1, 100, 140, 10, 12), row('a/(other)', 2, 100, 140, 10, 12),
+        row('b', 1, 200, 150, 20, 18), row('b/c', 2, 150, 120, 12, 11), row('b/(other)', 2, 50, 30, 8, 7),
+      ],
+    }
+    const title = 'What changed in bucket — 9/30 → 10/14'
+    const svg = mapSvg({ title: 'Usage — October 2026', note: 'example.org · bucket · TiB', diff: { root: diffRoot(rest, 'delta', true, false, 'bucket')!.root, title } })
+    expect(texts(svg).slice(2)).toEqual([title, 'grew +40.0 TiB · shrank −50.0 TiB · area = |Δ|', 'b', '−50.0 TiB', 'a/(other)', '+40.0 TiB', 'c', '−30.0 TiB', '(other)', '−20.0 TiB'])
+    // The map's only paths are dust hatches: one, over `b`'s `(other)` (its left column, under `b`'s title).
+    expect([...svg.matchAll(/<path [^>]*\/>/g)].map(m => m[0])).toEqual([
+      '<path d="M185 21V437.5M180 21V437.5M173 21V437.5M164 21V437.5M152 21V437.5M136 21V437.5M115 21V437.5M88 21V437.5M51 48V437.5M2.5 429.5H188.63M2.5 417.5H188.63M2.5 402.5H188.63M2.5 381.5H188.63M2.5 354.5H188.63M2.5 319.5H188.63M2.5 272.5H188.63M2.5 210.5H188.63M2.5 129.5H188.63M52.5 21.5H188.63" fill="none" stroke="rgb(255,255,255)" stroke-opacity="0.6" stroke-width="1"/>',
     ])
   })
 })

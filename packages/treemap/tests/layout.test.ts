@@ -184,6 +184,42 @@ describe('layoutCells', () => {
     // Children start at the parent top + the title-bar inset, never overlapping it.
     expect(Math.min(...foo.children.map(k => k.y))).toBeGreaterThanOrEqual(foo.y + 20)
   })
+
+  it('marks a cell that is all its parent shows: the only drawn child, or a collapsed chain', () => {
+    // `solo` holds one `(other)`; `mixed` holds `c.txt` beside its `(other)`; `chain` → `(other)` collapses when
+    // `collapseChains` is on (the cell is the `(other)` node itself, its parent's only child).
+    const root: N = {
+      n: 'root',
+      size: 600,
+      children: [
+        { n: 'solo', size: 200, children: [{ n: '(other)', size: 200 }] },
+        { n: 'mixed', size: 200, children: [{ n: 'c.txt', size: 120 }, { n: '(other)', size: 80 }] },
+        { n: 'chain', size: 200, children: [{ n: '(other)', size: 200 }] },
+      ],
+    }
+    const flags = (collapseChains: boolean) =>
+      flattenPlaced(layoutCells(squarify(root.children!, 0, 0, 600, 300, getSize), [root], 'gaps', { ...cfg, collapseChains }))
+        .map(c => [c.path.map(getLabel).join('/'), c.onlyChild])
+    expect(flags(false)).toEqual([
+      ['root/solo', false],
+      ['root/solo/(other)', true],
+      ['root/mixed', false],
+      ['root/mixed/c.txt', false],
+      ['root/mixed/(other)', false],
+      ['root/chain', false],
+      ['root/chain/(other)', true],
+    ])
+    expect(flags(true)).toEqual([
+      ['root/solo/(other)', true],
+      ['root/mixed', false],
+      ['root/mixed/c.txt', false],
+      ['root/mixed/(other)', false],
+      ['root/chain/(other)', true],
+    ])
+    // The view's only top-level tile is all the view shows.
+    const lone = layoutCells(squarify([root.children![1]], 0, 0, 600, 300, getSize), [root], 'gaps', cfg)
+    expect(lone.map(c => [label(c), c.onlyChild])).toEqual([['mixed', true]])
+  })
 })
 
 describe('flattenPlaced', () => {
