@@ -529,6 +529,18 @@ def prior_month(month: dt.date) -> dt.date:
     return (month.replace(day=1) - dt.timedelta(days=1)).replace(day=1)
 
 
+def next_month(month: dt.date) -> dt.date:
+    """The 1st of the month after ``month``'s."""
+    return (month.replace(day=28) + dt.timedelta(days=4)).replace(day=1)
+
+
+def month_links(month: dt.date, prev_url: str | None, next_url: str | None) -> str:
+    """The OP's line linking the previous and next months' threads (the site's `monthLinks`): ``[← October](…) ·
+    [December →](…)``, either alone, or ``""``."""
+    return " · ".join([*([f"[← {prior_month(month):%B}]({prev_url})"] if prev_url else []),
+                       *([f"[{next_month(month):%B} →]({next_url})"] if next_url else [])])
+
+
 
 
 #: The quota alert reply's sender icon (`converge_slack`).
@@ -597,7 +609,7 @@ class Template(Protocol):
 
     def load(self, root: str, month: dt.date) -> Any | None: ...
     def n_scans(self, data: Any) -> int: ...
-    def op_body(self, data: Any, month: dt.date, plot_url: str | None, prev_url: str | None = None) -> str: ...
+    def op_body(self, data: Any, month: dt.date, plot_url: str | None, prev_url: str | None = None, next_url: str | None = None) -> str: ...
     def image_request(self, data: Any, month: dt.date) -> dict: ...
     def rows_json(self, data: Any) -> dict: ...
     def reply_json(self, data: Any) -> dict | None: ...
@@ -700,10 +712,11 @@ def cfg_json(cfg: DigestConfig) -> dict:
     }
 
 
-def site_render(cfg: DigestConfig, rows: dict, month: dt.date, plot_url: str | None = None, prev_url: str | None = None) -> dict:
+def site_render(cfg: DigestConfig, rows: dict, month: dt.date, plot_url: str | None = None, prev_url: str | None = None,
+                next_url: str | None = None) -> dict:
     """`POST /api/digest-op`: the month's OP ``text`` and plot ``image`` request, rendered by the site from ``rows``
-    (`Template.rows_json`) under ``cfg.params``, as the job (`$SITE_TOKEN`; required: the site is the OP's only
-    renderer)."""
+    (`Template.rows_json`) under ``cfg.params``, with the previous and next months' threads linked (`month_links`), as
+    the job (`$SITE_TOKEN`; required: the site is the OP's only renderer)."""
     from .deploy import site_token
     from .site import post_json
 
@@ -711,19 +724,20 @@ def site_render(cfg: DigestConfig, rows: dict, month: dt.date, plot_url: str | N
     if not token:
         raise SystemExit("digest: the OP is rendered by the site, which needs the site token ($SITE_TOKEN)")
     body = {"month": f"{month:%Y-%m}", "rows": rows, "cfg": cfg_json(cfg), "params": cfg.params,
-            "plot_url": plot_url, "prev_url": prev_url}
+            "plot_url": plot_url, "prev_url": prev_url, "next_url": next_url}
     return json.loads(post_json(cfg.site_url, token, "/api/digest-op", body))
 
 
 def preview_bundle(tpl: Template, data: Any, month: dt.date, *, op: str, plot_url: str | None, prev_url: str | None,
-                   channel: str, variant: str, op_ts: str | None = None, permalink: str | None = None) -> dict:
+                   channel: str, variant: str, op_ts: str | None = None, permalink: str | None = None,
+                   next_url: str | None = None) -> dict:
     """The month's OP as posted, with what it was rendered from (specs/slack-preview-page.md): the config's display
     fields, the window's rows (`Template.rows_json`), the OP text and the plot's `/api/digest-image` request, the
     replies (`replies_json`) and what they were rendered under (`Template.reply_json`), and the thread. The site re-renders the rows under other params beside it."""
     return {
         "version": PREVIEW_VERSION, "month": f"{month:%Y-%m}", "channel": channel, "variant": variant,
         "posted_at": dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "op_ts": op_ts, "permalink": permalink, "plot_url": plot_url, "prev_url": prev_url,
+        "op_ts": op_ts, "permalink": permalink, "plot_url": plot_url, "prev_url": prev_url, "next_url": next_url,
         "cfg": cfg_json(tpl.cfg), "rows": tpl.rows_json(data), "params": tpl.cfg.params, "op": op,
         "image": tpl.image_request(data, month), "replies": replies_json(tpl, data, variant), "reply": tpl.reply_json(data),
     }
@@ -856,7 +870,7 @@ def _ts(rec: str | dict) -> str:
 def _op_render(tpl: Template, data, root: str, month: dt.date, state: dict, client, channel: str, variant: str, icons_dir,
                deploy_plot) -> tuple[str, str, str | None, list[tuple[str, str]] | None]:
     """The OP's body, plot URL, previous-month link and the split reply's images (`_plot_parts`: ``(alt, url)`` for the
-    chart and the map, else None): renders + hosts the plot (``icons_dir``; ``deploy_plot(local, basename)`` publishes
+    chart and the map, else None), the next month's thread linked once the state records it (``next_url``, `relink`): renders + hosts the plot (``icons_dir``; ``deploy_plot(local, basename)`` publishes
     the directory and returns the host serving it, None → ``cfg.plot_base``), recording its name in
     ``state["plot_name"]``. Without ``icons_dir`` nothing is rendered: the URL names the state's plot on ``plot_base``,
     and there are no parts."""
@@ -888,7 +902,7 @@ def _op_render(tpl: Template, data, root: str, month: dt.date, state: dict, clie
     # the previous month's thread, linked from the OP
     prev_op = _prev_op(cfg, root, month, channel, variant)
     prev_url = client.permalink(prev_op) if prev_op else None
-    return tpl.op_body(data, month, plot_url, prev_url), plot_url, prev_url, split
+    return tpl.op_body(data, month, plot_url, prev_url, state.get("next_url")), plot_url, prev_url, split
 
 
 #: The plot's parts (`/api/digest-image` ``part``), in the split reply's order, and each one's alt-text suffix.
@@ -1055,7 +1069,8 @@ def converge_slack(tpl: Template, root: str, month: dt.date, client, channel: st
         save_state(path, state)
     if cfg.preview:
         _write_preview(cfg, preview_bundle(tpl, data, month, op=body, plot_url=plot_url, prev_url=prev_url, channel=channel,
-                                           variant=variant, op_ts=op_ts, permalink=client.permalink(op_ts)))
+                                           variant=variant, op_ts=op_ts, permalink=client.permalink(op_ts),
+                                           next_url=state.get("next_url")))
 
     posted = state.setdefault("posted", {})
     new = 0

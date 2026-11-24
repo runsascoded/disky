@@ -39,6 +39,8 @@ export interface PreviewBundle {
   permalink: string | null
   plot_url: string | null
   prev_url: string | null
+  /** The next month's thread, once its OP was posted (absent in bundles before 2026-11-24). */
+  next_url?: string | null
   cfg: DigestCfg
   rows: DigestRows
   op: string

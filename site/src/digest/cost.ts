@@ -1,7 +1,7 @@
 /** The `cost` digest template's OP: its text and its storage-class plot's `/api/digest-image` request, from the
  * month's per-day rows (the job sends them: `CostTemplate.rows_json`; goldens: `./parity.test.ts`). Pure; DOM-free. */
 import { encodeScan, scanTime } from '../scanSlug'
-import { deg, diffUrl, type DigestCfg, type DigestParams, type OpLinks, pct, prevMonthLink, span, tb, usd, weekOf, windowLabel, windowStart } from './common'
+import { deg, diffUrl, type DigestCfg, type DigestParams, type OpLinks, monthLinks, pct, span, tb, usd, weekOf, windowLabel, windowStart } from './common'
 import { addDays, dayOf, grouped, iso, md, mon3, monthYear, pyRound } from './pyfmt'
 import { code } from '@disk-tree/pages-kit/emoji'
 
@@ -89,7 +89,7 @@ export function opText(m: CostRows, month: number, cfg: DigestCfg, p: DigestPara
     )
     prevEnd = end
   }
-  if (links.prevUrl) lines.push('', ...prevMonthLink(month, links.prevUrl))
+  lines.push(...monthLinks(month, links))
   if (links.plotUrl !== null) lines.push('', `![${cfg.title} — ${monthYear(month)}](${links.plotUrl})`)
   return lines.join('\n')
 }

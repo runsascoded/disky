@@ -686,8 +686,8 @@ class QuotaTemplate:
     def n_scans(self, month: Month) -> int:
         return len(month.rows)
 
-    def op_body(self, month: Month, m: dt.date, plot_url: str | None, prev_url: str | None = None) -> str:
-        return site_render(self.cfg, self.rows_json(month), m, plot_url, prev_url)["text"]
+    def op_body(self, month: Month, m: dt.date, plot_url: str | None, prev_url: str | None = None, next_url: str | None = None) -> str:
+        return site_render(self.cfg, self.rows_json(month), m, plot_url, prev_url, next_url)["text"]
 
     def image_request(self, month: Month, m: dt.date) -> dict:
         return site_render(self.cfg, self.rows_json(month), m)["image"]

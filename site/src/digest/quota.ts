@@ -2,7 +2,7 @@ import { compactQuietLines } from './compact'
 /** The `quota` digest template's OP: its text and its plot's `/api/digest-image` request, from the month's scans
  * (the job sends them: `QuotaTemplate.rows_json`; goldens: `./parity.test.ts`). The replies: `./quotaReply.ts`. Pure; DOM-free. */
 import { encodeScan, scanTime } from '../scanSlug'
-import { type BucketCfg, deg, diffUrl, type DigestCfg, type DigestParams, type OpLinks, prevMonthLink, type Quota, tb, weekOf, windowLabel, windowStart } from './common'
+import { type BucketCfg, deg, diffUrl, type DigestCfg, type DigestParams, monthLinks, type OpLinks, type Quota, tb, weekOf, windowLabel, windowStart } from './common'
 import { type Pool, poolRows, pools, quotaLine, QUIET_PCT, used } from './pools'
 import { addDays, dayOf, fixed, grouped, hhmm, iso, md, mon3, monthYear, pyRound } from './pyfmt'
 import { code } from '@disk-tree/pages-kit/emoji'
@@ -157,7 +157,7 @@ function poolsText(m: QuotaRows, month: number, cfg: DigestCfg, p: DigestParams,
     lines.push(`${code(`trend.${deg(wheld ? (wdtb / wheld) * 100 : 0)}`)} [wk of ${md(mon)}](${link})${earlier}${partial}: ${[`**${tb(wdtb)} ${u.name}**`, ...movers, ...first].join(' · ')}`)
     prevEnd = end
   }
-  if (links.prevUrl) lines.push('', ...prevMonthLink(month, links.prevUrl))
+  lines.push(...monthLinks(month, links))
   if (links.plotUrl !== null) lines.push('', `![${cfg.title} — ${monthYear(month)}](${links.plotUrl})`)
   return lines.join('\n')
 }
@@ -222,7 +222,7 @@ export function opText(m: QuotaRows, month: number, cfg: DigestCfg, p: DigestPar
     )
     prevEnd = end
   }
-  if (links.prevUrl) lines.push('', ...prevMonthLink(month, links.prevUrl))
+  lines.push(...monthLinks(month, links))
   if (links.plotUrl !== null) lines.push('', `![${cfg.title} — ${monthYear(month)}](${links.plotUrl})`)
   return lines.join('\n')
 }
