@@ -3,7 +3,7 @@ import { MdBrightnessAuto, MdDarkMode, MdHelpOutline, MdLightMode, MdLink } from
 import { useSyncExternalStore } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { queryStrategy } from 'use-prms'
-import { Omnibar, ShortcutsModal, SpeedDial, useActions, type SpeedDialAction } from 'use-kbd'
+import { LookupModal, Omnibar, SequenceModal, ShortcutsModal, SpeedDial, useActions, type SpeedDialAction } from 'use-kbd'
 import { SpeedDialTip } from './Tooltip'
 import { useRegistry } from './identities'
 import { hostPair, otherHostUrl, peerUrl, urlLabel, type Peer } from './hosts'
@@ -187,6 +187,10 @@ export function SiteKbd({ extra = [], placeholder }: {
       ]} />
       <Omnibar placeholder={placeholder} maxResults={15} />
       <ShortcutsModal />
+      {/* Key lookup (⌘⇧K, and "Key lookup" in the omnibar): find an action by the keys it's bound to */}
+      <LookupModal />
+      {/* A pending sequence (`g u`, a count before `j`/`k`): the keys so far and what can follow */}
+      <SequenceModal />
     </>
   )
 }
