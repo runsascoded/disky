@@ -1,4 +1,4 @@
-// A staged-deletion sender's badged face: which badge each verb carries, the SVG drawn (fold or ring), and the PNG
+// A sender's badged face (a staged-deletion post's, an activity post's): which badge each verb carries, the SVG drawn (fold or ring), and the PNG
 // published as a public avatar (rendered by the vendored resvg, as on Workers), or the plain face when it can't be made.
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { badgedAvatarUrl, badgedSvg, badgeOf, resetBadgedAvatars } from './badgedAvatar'
@@ -23,6 +23,15 @@ describe('badgedSvg', () => {
       '<image href="data:image/png;base64,AA" width="100" height="100" preserveAspectRatio="xMidYMid slice"/>' +
       '<path d="M100 44V100H44z" fill="#2e9e62"/><path d="M100 44L44 100" stroke="#000" stroke-opacity="0.18" stroke-width="2"/>' +
       '<g transform="translate(70 70) scale(1)"><path d="M5 12.5l4.5 4.5L19 7" fill="none" stroke="#fff" stroke-width="2.7" stroke-linecap="round" stroke-linejoin="round"/></g></svg>',
+    )
+  })
+  it('activity: a person\'s activity post, an eye on a slate fold', () => {
+    expect(badgedSvg('data:image/png;base64,AA', 'activity')).toBe(
+      '<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 100 100">' +
+      '<image href="data:image/png;base64,AA" width="100" height="100" preserveAspectRatio="xMidYMid slice"/>' +
+      '<path d="M100 44V100H44z" fill="#475569"/><path d="M100 44L44 100" stroke="#000" stroke-opacity="0.18" stroke-width="2"/>' +
+      '<g transform="translate(70 70) scale(1)"><path d="M2 12s3.6-6.5 10-6.5S22 12 22 12s-3.6 6.5-10 6.5S2 12 2 12zM12 9.25a2.75 2.75 0 1 0 0 5.5 2.75 2.75 0 1 0 0-5.5z" ' +
+      'fill="none" stroke="#fff" stroke-width="2.7" stroke-linecap="round" stroke-linejoin="round"/></g></svg>',
     )
   })
   it('ring: the face framed in the badge\'s color, a filled glyph on a corner chip', () => {
