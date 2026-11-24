@@ -279,6 +279,10 @@ function AppContent() {
   // `?cl=` ⊆ snca — the storage-class axis (server-side): the view's bytes
   // are cut to the allowed classes. All four = no scope.
   const [clP, setClP] = useUrlState('cl', stringParam(), true)
+  // `?g=<name>`: one of the store's bucket groups as the map's root (specs/bucket-groups.md): the server restricts every
+  // root-level read to its buckets (`functions/_lib/groups.ts`); below the root it is ignored, and the crumbs keep it
+  // (root › group › bucket). Picking one pushes history, like a drill.
+  const [gP] = useUrlState('g', stringParam(), true)
   const classSet = useMemo((): ReadonlySet<ClassAxis> | null => {
     const on = new Set(CLASS_AXES.filter(c => (clP ?? '').includes(c)))
     return on.size > 0 && on.size < CLASS_AXES.length ? on : null
@@ -311,10 +315,11 @@ function AppContent() {
   // …and under an owner pool (the static index's hits are owner slices), not a person or a class scope (refused there too).
   const fScopeRefused = indexedOnly && !!fqRaw && fParse.ok && (!!activeLens || !!classSet) ? REJECT_MESSAGES['unsupported-scope'] : undefined
   const fq = fParse.ok && !fScopeRefused ? fqRaw : undefined
-  const scopeQs =
+  const axesQs =
     owner.qs +
     (classSet ? `&cl=${CLASS_AXES.filter(c => classSet.has(c)).join('')}` : '') +
     (fq ? `&q=${encodeURIComponent(fq)}&qs=${syntax.id}` : '')
+  const scopeQs = axesQs + (gP ? `&g=${encodeURIComponent(gP)}` : '')
   // A user lens or an owner pool folds the live ledger server-side, so those
   // views' queries carry its revision: an assignment (or its undo) refetches
   // them; everything else ignores the ledger. The ledger's first load is not a
@@ -851,6 +856,25 @@ function AppContent() {
     return { pathname: treeHref(store, segs), search: q.size ? `?${q}` : '' }
   }
   const drillTo = (segs: string[]) => navigate(drillLoc(segs))
+  /** The store root with bucket group `g` (`?g=`; none: every bucket). */
+  const groupLoc = (g: string | undefined) => {
+    const q = new URLSearchParams(withoutSection(search))
+    q.delete('open')
+    if (g) q.set('g', g)
+    else q.delete('g')
+    return { pathname: treeHref(store, store.root ?? []), search: q.size ? `?${q}` : '' }
+  }
+  // The store's bucket groups (`/api/groups`): the root's picker lists them beside its buckets.
+  const groupsQ = useQuery({
+    queryKey: ['groups', store.key],
+    staleTime: Infinity,
+    queryFn: async () => {
+      const r = await sfetch('/api/groups', { credentials: 'include' })
+      if (!r.ok) throw apiError(r.status, await r.text())
+      return (await r.json() as { groups: { name: string; label: string; buckets: string[] }[] }).groups
+    },
+  })
+  const groups = groupsQ.data ?? []
   // `?open=<name>`: an object under the drilled directory, shown in the leaf
   // viewer below the map (objects.ts `openHref`). Opening pushes history, so
   // Back closes it.
@@ -1294,10 +1318,34 @@ function AppContent() {
   // The deepest crumb's page at the provider (`Store.externalLink`), as an icon right after its name.
   const atRoot = segs.length <= storeRoot.length
   const ext = <ExtLink link={store.externalLink?.(segs, here?.kind !== 'file')} />
-  const rootCrumb = <RootCrumb treeName={mapTree?.name} rootLabel={rootLabel} rootTitle={rootTitle} scopeWord={store.rootLabel} here={atRoot} onClick={() => drillTo(storeRoot)} />
+  // A bucket group (`?g=`) sits between the root and its buckets: the root crumb leaves the group (its label the
+  // deployment's, not the group root's), the group's crumb is the group's root. Its label: the group root's own name
+  // (the view's tree), else the groups list's, else its key.
+  const group = gP ? groups.find(x => x.name === gP) : undefined
+  const groupLabel = gP ? (mapTree?.name ?? group?.label ?? gP) : undefined
+  const rootCrumb = <RootCrumb treeName={gP ? undefined : mapTree?.name} rootLabel={rootLabel} rootTitle={rootTitle} scopeWord={store.rootLabel} here={atRoot && !gP} onClick={() => navigate(groupLoc(undefined))} />
+  // The store's groups beside its buckets: a pick shows that group's root; "all" the store's.
+  const groupPicker = groups.length > 0 && (
+    <FitSelect className="tb-select tb-group" value={gP ?? ''} ariaLabel="Bucket group" onChange={e => navigate(groupLoc(e.target.value || undefined))}>
+      <option value="">{gP ? 'all buckets' : 'groups…'}</option>
+      {groups.map(x => <option key={x.name} value={x.name}>{x.label}</option>)}
+      {gP && !group && <option value={gP}>{groupLabel}</option>}
+    </FitSelect>
+  )
+  const groupCrumb = gP && (
+    <span>
+      <span className="sep">›</span>
+      <Tooltip content={group ? <>{group.buckets.length} buckets: {group.buckets.join(', ')}</> : <>bucket group <code>{gP}</code></>}>
+        <button type="button" className={atRoot ? 'here' : ''} onClick={() => drillTo(storeRoot)}>{groupLabel}</button>
+      </Tooltip>
+    </span>
+  )
   const crumbs = (
     <span className="tb-path" aria-label="Drilled path">
-      {atRoot ? <span>{rootCrumb}{ext}</span> : rootCrumb}
+      {atRoot && !gP ? <span>{rootCrumb}{ext}</span> : rootCrumb}
+      {groupCrumb}
+      {atRoot && gP && ext}
+      {atRoot && groupPicker}
       {segs.map((sg, i) => i < storeRoot.length ? null : (
         <span key={i}>
           <span className="sep">/</span>
@@ -1562,7 +1610,7 @@ function AppContent() {
               scheme={store.scheme}
               bucketSchemes={store.bucketSchemes}
               scan={asof}
-              flatOk={objects && !scopeQs}
+              flatOk={objects && !axesQs}
               ownerIdx={ownersMode ? ownerIdx : undefined}
               userIdx={userIdx}
               onPickUser={u => pickUser(u, false)}
@@ -1631,6 +1679,7 @@ function AppContent() {
         filterQs={fq ? `&q=${encodeURIComponent(fq)}&qs=${syntax.id}` : undefined}
         scans={scans} times={times} fmt={fmtS} prefix={seriesPath ?? drillPath}
         user={ownerUser}
+        group={gP}
         pool={ownerMode === 'unowned' ? 'unowned' : ownerMode === 'owned' ? 'owned' : null}
         ledgerRev={ledger}
         scopeReady={scopeReady && seriesPath !== undefined}
