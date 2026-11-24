@@ -12,5 +12,5 @@ export function ArmedButton({ label, confirm, onClick, disabled, className }: {
   const [armed, setArmed] = useState(false)
   useEffect(() => { if (armed) { const t = setTimeout(() => setArmed(false), 15000); return () => clearTimeout(t) } }, [armed])
   const cls = [className, armed && 'armed'].filter(Boolean).join(' ') || undefined
-  return <button type="button" disabled={disabled} className={cls} onClick={() => (armed ? (setArmed(false), onClick()) : setArmed(true))}>{armed ? confirm : label}</button>
+  return <button type="button" className={cls} disabled={disabled} onClick={() => (armed ? (setArmed(false), onClick()) : setArmed(true))}>{armed ? confirm : label}</button>
 }
